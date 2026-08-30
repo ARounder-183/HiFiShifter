@@ -43,7 +43,7 @@ function matchesKeybindingAllowingFineModifier(
         return true;
     }
 
-    if (!fineAdjustKb || !isModifierActive(fineAdjustKb, event as any)) {
+    if (!fineAdjustKb || !isModifierActive(fineAdjustKb, event)) {
         return false;
     }
 

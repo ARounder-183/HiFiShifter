@@ -10,3 +10,11 @@ export function gainToDb(gain: number): number {
 export function dbToGain(db: number): number {
     return Math.pow(10, db / 20);
 }
+
+export function formatGainDbValue(db: number): string {
+    const rounded = Math.round(db * 10) / 10;
+    if (Math.abs(rounded) < 0.05) return "0";
+    const sign = rounded > 0 ? "+" : "";
+    const value = Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+    return `${sign}${value}`;
+}

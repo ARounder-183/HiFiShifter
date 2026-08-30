@@ -201,6 +201,100 @@ pub(crate) fn hifigan_tension_active_for_clip(
     )
 }
 
+/// 解析 clip 级覆盖优先、轨道级兜底的 extra_curve。
+pub(crate) fn extra_curve_for_clip<'a>(
+    entry: &'a crate::state::TrackParamsState,
+    clip: &'a crate::state::Clip,
+    param_id: &str,
+) -> Option<&'a [f32]> {
+    clip.extra_curves
+        .as_ref()
+        .and_then(|curves| curves.get(param_id))
+        .or_else(|| entry.extra_curves.get(param_id))
+        .map(|v| v.as_slice())
+}
+
+/// 共通音量曲线（新 key `volume`，兼容旧 `hifigan_volume`）。
+pub(crate) fn common_volume_curve_for_clip<'a>(
+    entry: &'a crate::state::TrackParamsState,
+    clip: &'a crate::state::Clip,
+) -> Option<&'a [f32]> {
+    extra_curve_for_clip(entry, clip, "volume")
+        .or_else(|| extra_curve_for_clip(entry, clip, "hifigan_volume"))
+}
+
+/// 共通声像曲线。
+pub(crate) fn common_pan_curve_for_clip<'a>(
+    entry: &'a crate::state::TrackParamsState,
+    clip: &'a crate::state::Clip,
+) -> Option<&'a [f32]> {
+    extra_curve_for_clip(entry, clip, "pan")
+}
+
+/// 该合成链路是否在 processor 内部消费 volume/pan（如 vslib 控制点）。
+///
+/// 返回 true 时，音频引擎 mix 阶段不得再次应用这两个曲线，
+/// 否则会出现二次增益/声像；未开启 Compose 时按该算法约定不生效。
+pub(crate) fn processor_bakes_common_mix_curves(kind: SynthPipelineKind) -> bool {
+    #[cfg(feature = "vslib")]
+    {
+        return matches!(kind, SynthPipelineKind::VocalShifterVslib);
+    }
+    #[cfg(not(feature = "vslib"))]
+    {
+        let _ = kind;
+        false
+    }
+}
+
+#[cfg(feature = "vslib")]
+fn vslib_curve_active_for_clip(
+    entry: &crate::state::TrackParamsState,
+    clip: &crate::state::Clip,
+    clip_start_sec: f64,
+) -> bool {
+    // (key, default)：volume/pan 现在与其它算法共用，但在 vslib 路径由
+    // processor 消费，因此任何非默认段都必须触发 vslib 预渲染。
+    let defaults: &[(&str, f32)] = &[
+        ("volume", 1.0),
+        ("pan", 0.0),
+        ("formant_shift_cents", 0.0),
+        ("breathiness", 0.0),
+        ("dyn_edit", 1.0),
+        ("dyn_orig", 1.0),
+    ];
+    defaults.iter().any(|&(key, default)| {
+        let curve = extra_curve_for_clip(entry, clip, key);
+        curve_differs_from_default_in_range(
+            curve,
+            entry.frame_period_ms.max(0.1),
+            clip_start_sec,
+            clip_start_sec + clip.length_sec.max(0.0),
+            default,
+        )
+    })
+}
+
+fn track_requests_extra_processing(
+    algo: PitchEditAlgorithm,
+    entry: &crate::state::TrackParamsState,
+    clip: &crate::state::Clip,
+    // 仅 vslib 分支消费；无 vslib 构建下保留参数以维持统一调用面。
+    _clip_start_sec: f64,
+) -> bool {
+    match algo {
+        PitchEditAlgorithm::NsfHifiganOnnx => {
+            let extra_params = clip.extra_params.as_ref().unwrap_or(&entry.extra_params);
+            extra_param_enabled(extra_params, "breath_enabled")
+        }
+        #[cfg(feature = "vslib")]
+        PitchEditAlgorithm::VocalShifterVslib => {
+            vslib_curve_active_for_clip(entry, clip, _clip_start_sec)
+        }
+        _ => false,
+    }
+}
+
 pub(crate) fn hifigan_formant_shift_curve_for_clip<'a>(
     entry: &'a crate::state::TrackParamsState,
     clip: &'a crate::state::Clip,
@@ -226,16 +320,6 @@ pub(crate) fn hifigan_formant_shift_active_for_clip(
         0.0,
         0.5,
     )
-}
-
-fn track_requests_extra_processing(
-    algo: PitchEditAlgorithm,
-    entry: &crate::state::TrackParamsState,
-    clip: &crate::state::Clip,
-) -> bool {
-    let extra_params = clip.extra_params.as_ref().unwrap_or(&entry.extra_params);
-    matches!(algo, PitchEditAlgorithm::NsfHifiganOnnx)
-        && extra_param_enabled(extra_params, "breath_enabled")
 }
 
 impl PitchEditAlgorithm {
@@ -281,13 +365,24 @@ pub fn selected_pitch_edit_algorithm(timeline: &TimelineState) -> PitchEditAlgor
 
 #[cfg(test)]
 mod tests {
-    use super::hifigan_formant_shift_active_for_clip;
-    use crate::state::{Clip, TrackParamsState};
+    #[cfg(feature = "vslib")]
+    use super::processor_bakes_common_mix_curves;
+    use super::{
+        active_child_formant_offset_config, build_clip_effective_formant_shift_curve,
+        child_formant_offset_curve_key, common_pan_curve_for_clip, common_volume_curve_for_clip,
+        extra_curve_for_clip, hifigan_formant_shift_active_for_clip,
+    };
+    #[cfg(feature = "vslib")]
+    use crate::state::SynthPipelineKind;
+    use crate::state::{Clip, TimelineState, TrackParamsState};
     use std::collections::HashMap;
 
     fn make_clip() -> Clip {
         Clip {
             id: "clip-a".to_string(),
+            takes: vec![],
+            active_take_id: None,
+            clip_playback_rate: 1.0,
             track_id: "track-a".to_string(),
             name: "Clip".to_string(),
             start_sec: 0.0,
@@ -309,10 +404,18 @@ mod tests {
             source_end_sec: 2.0,
             playback_rate: 1.0,
             reversed: false,
+            loop_enabled: false,
+            snap_offset_sec: 0.0,
             fade_in_sec: 0.0,
             fade_out_sec: 0.0,
             fade_in_curve: "sine".to_string(),
             fade_out_curve: "sine".to_string(),
+            fade_in_shape: 0.0,
+            fade_out_shape: 0.0,
+            fade_in_dir: 0.0,
+            fade_out_dir: 0.0,
+            auto_fade_in_sec: 0.0,
+            auto_fade_out_sec: 0.0,
             extra_curves: None,
             extra_params: None,
             formant_morph: None,
@@ -323,6 +426,49 @@ mod tests {
     }
 
     #[test]
+    fn child_formant_offset_accumulates_along_child_track() {
+        let mut timeline = TimelineState::default();
+        let root = timeline.add_track(Some("root".to_string()), None, None);
+        let child = timeline.add_track(Some("child".to_string()), Some(root.clone()), None);
+
+        let mut entry = TrackParamsState {
+            frame_period_ms: 5.0,
+            ..Default::default()
+        };
+        entry.extra_curves = HashMap::from([
+            (
+                child_formant_offset_curve_key(&child),
+                vec![100.0, 250.0, -50.0],
+            ),
+            ("formant_shift_cents".to_string(), vec![50.0, 0.0, 0.0]),
+        ]);
+        timeline.params_by_root_track.insert(root, entry);
+
+        let mut clip = make_clip();
+        clip.track_id = child;
+
+        let cfg = active_child_formant_offset_config(&timeline, &clip.track_id)
+            .expect("child formant offset must be active");
+        assert_eq!(cfg.layers.len(), 1);
+
+        let effective = build_clip_effective_formant_shift_curve(
+            &timeline,
+            &clip,
+            timeline
+                .params_by_root_track
+                .get(&clip_track_root(&timeline, &clip).unwrap())
+                .unwrap(),
+            3,
+        )
+        .expect("effective formant curve");
+        assert_eq!(effective, vec![150.0, 250.0, -50.0]);
+    }
+
+    fn clip_track_root(timeline: &TimelineState, clip: &Clip) -> Option<String> {
+        timeline.resolve_root_track_id(&clip.track_id)
+    }
+
+    #[test]
     fn hifigan_formant_shift_ignores_near_zero_residual_values() {
         let mut entry = TrackParamsState {
             frame_period_ms: 5.0,
@@ -330,7 +476,11 @@ mod tests {
         };
         entry.extra_curves = HashMap::from([("formant_shift_cents".to_string(), vec![0.1; 500])]);
 
-        assert!(!hifigan_formant_shift_active_for_clip(&entry, &make_clip(), 0.0));
+        assert!(!hifigan_formant_shift_active_for_clip(
+            &entry,
+            &make_clip(),
+            0.0
+        ));
     }
 
     #[test]
@@ -341,7 +491,62 @@ mod tests {
         };
         entry.extra_curves = HashMap::from([("formant_shift_cents".to_string(), vec![1.0; 500])]);
 
-        assert!(hifigan_formant_shift_active_for_clip(&entry, &make_clip(), 0.0));
+        assert!(hifigan_formant_shift_active_for_clip(
+            &entry,
+            &make_clip(),
+            0.0
+        ));
+    }
+
+    #[test]
+    fn common_volume_curve_reads_legacy_hifigan_volume_key() {
+        let mut entry = TrackParamsState::default();
+        entry.extra_curves = HashMap::from([("hifigan_volume".to_string(), vec![0.5, 0.75, 1.0])]);
+        let clip = make_clip();
+        assert_eq!(
+            common_volume_curve_for_clip(&entry, &clip).map(|v| v.to_vec()),
+            Some(vec![0.5, 0.75, 1.0])
+        );
+        assert_eq!(common_pan_curve_for_clip(&entry, &clip), None);
+    }
+
+    #[test]
+    fn clip_level_common_curves_take_precedence_over_track_curves() {
+        let mut entry = TrackParamsState::default();
+        entry.extra_curves = HashMap::from([
+            ("volume".to_string(), vec![1.0, 1.0]),
+            ("pan".to_string(), vec![0.0, 0.0]),
+        ]);
+        let mut clip = make_clip();
+        clip.extra_curves = Some(HashMap::from([("pan".to_string(), vec![0.5, -0.5])]));
+
+        // clip 覆盖 pan；clip 没有覆盖 volume，回退到 track 级曲线。
+        assert_eq!(
+            extra_curve_for_clip(&entry, &clip, "pan").map(|v| v.to_vec()),
+            Some(vec![0.5, -0.5])
+        );
+        assert_eq!(
+            common_volume_curve_for_clip(&entry, &clip).map(|v| v.to_vec()),
+            Some(vec![1.0, 1.0])
+        );
+        assert_eq!(
+            common_pan_curve_for_clip(&entry, &clip).map(|v| v.to_vec()),
+            Some(vec![0.5, -0.5])
+        );
+    }
+
+    #[cfg(feature = "vslib")]
+    #[test]
+    fn only_vslib_bakes_common_mix_curves_into_processor_output() {
+        assert!(processor_bakes_common_mix_curves(
+            SynthPipelineKind::VocalShifterVslib
+        ));
+        assert!(!processor_bakes_common_mix_curves(
+            SynthPipelineKind::NsfHifiganOnnx
+        ));
+        assert!(!processor_bakes_common_mix_curves(
+            SynthPipelineKind::WorldVocoder
+        ));
     }
 }
 
@@ -431,7 +636,11 @@ pub(crate) fn scale_degree_to_midi(abs_degree: f64, offsets: &[i32]) -> f64 {
     lower + (upper - lower) * frac
 }
 
-pub(crate) fn transpose_midi_by_scale_steps(midi: f64, degree_steps: f64, scale_notes: &[u8]) -> f64 {
+pub(crate) fn transpose_midi_by_scale_steps(
+    midi: f64,
+    degree_steps: f64,
+    scale_notes: &[u8],
+) -> f64 {
     if !midi.is_finite() || degree_steps.abs() <= 1e-9 {
         return midi;
     }
@@ -520,18 +729,22 @@ fn active_child_pitch_offset_config<'a>(
     let mut layers: Vec<ChildPitchOffsetLayer<'a>> = Vec::with_capacity(lineage_child_ids.len());
 
     for track_id in lineage_child_ids {
-        let cents_curve = entry.and_then(|state| {
-            state.extra_curves.get(&child_pitch_offset_curve_key(
-                ChildPitchOffsetParamMode::Cents,
-                track_id,
-            ))
-        }).map(|v| v.as_slice());
-        let degree_steps_curve = entry.and_then(|state| {
-            state.extra_curves.get(&child_pitch_offset_curve_key(
-                ChildPitchOffsetParamMode::Degrees,
-                track_id,
-            ))
-        }).map(|v| v.as_slice());
+        let cents_curve = entry
+            .and_then(|state| {
+                state.extra_curves.get(&child_pitch_offset_curve_key(
+                    ChildPitchOffsetParamMode::Cents,
+                    track_id,
+                ))
+            })
+            .map(|v| v.as_slice());
+        let degree_steps_curve = entry
+            .and_then(|state| {
+                state.extra_curves.get(&child_pitch_offset_curve_key(
+                    ChildPitchOffsetParamMode::Degrees,
+                    track_id,
+                ))
+            })
+            .map(|v| v.as_slice());
 
         let static_cents = CHILD_PITCH_OFFSET_CENTS_DEFAULT;
         let static_degree_steps = CHILD_PITCH_OFFSET_DEGREES_DEFAULT;
@@ -565,6 +778,153 @@ fn active_child_pitch_offset_config<'a>(
     }
 
     Some(ChildPitchOffsetConfig { layers })
+}
+
+const CHILD_FORMANT_OFFSET_CENTS_PREFIX: &str = "child_formant_offset_cents@";
+const CHILD_FORMANT_OFFSET_CENTS_DEFAULT: f32 = 0.0;
+const CHILD_FORMANT_OFFSET_CENTS_RANGE: (f32, f32) = (-2400.0, 2400.0);
+
+#[derive(Debug, Clone, Copy)]
+struct ChildFormantOffsetLayer<'a> {
+    curve: Option<&'a [f32]>,
+}
+
+#[derive(Debug, Clone)]
+struct ChildFormantOffsetConfig<'a> {
+    layers: Vec<ChildFormantOffsetLayer<'a>>,
+}
+
+fn child_formant_offset_curve_key(track_id: &str) -> String {
+    format!("{CHILD_FORMANT_OFFSET_CENTS_PREFIX}{track_id}")
+}
+
+fn active_child_formant_offset_config<'a>(
+    timeline: &'a TimelineState,
+    clip_track_id: &str,
+) -> Option<ChildFormantOffsetConfig<'a>> {
+    let track = timeline
+        .tracks
+        .iter()
+        .find(|track| track.id == clip_track_id)?;
+    if track.parent_id.is_none() {
+        return None;
+    }
+
+    let root_track_id = timeline.resolve_root_track_id(clip_track_id)?;
+    // 只有支持逐帧 formant_shift_cents 的声码器链路才消费子轨共振峰差。
+    let root_kind = timeline
+        .tracks
+        .iter()
+        .find(|track| track.id == root_track_id)
+        .map(|track| SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo))
+        .unwrap_or(SynthPipelineKind::WorldVocoder);
+    let supports_formant = matches!(root_kind, SynthPipelineKind::NsfHifiganOnnx) || {
+        #[cfg(feature = "vslib")]
+        {
+            matches!(root_kind, SynthPipelineKind::VocalShifterVslib)
+        }
+        #[cfg(not(feature = "vslib"))]
+        {
+            false
+        }
+    };
+    if !supports_formant {
+        return None;
+    }
+
+    let entry = timeline.params_by_root_track.get(&root_track_id);
+
+    // 从当前子轨向上收集父轨层级（应用顺序与音分差/度数差一致：根 → 父 → 子）。
+    let mut lineage_child_ids: Vec<&str> = Vec::new();
+    let mut cursor = Some(clip_track_id);
+    let mut safety = 0usize;
+    while let Some(track_id) = cursor {
+        let Some(node) = timeline.tracks.iter().find(|track| track.id == track_id) else {
+            break;
+        };
+        if node.parent_id.is_none() {
+            break;
+        }
+        lineage_child_ids.push(track_id);
+        cursor = node.parent_id.as_deref();
+        safety += 1;
+        if safety > timeline.tracks.len() + 2 {
+            break;
+        }
+    }
+    if lineage_child_ids.is_empty() {
+        return None;
+    }
+    lineage_child_ids.reverse();
+
+    let frame_period_ms = entry.map(|state| state.frame_period_ms).unwrap_or(5.0);
+    let mut has_effective = false;
+    let mut layers: Vec<ChildFormantOffsetLayer<'a>> = Vec::with_capacity(lineage_child_ids.len());
+
+    for track_id in lineage_child_ids {
+        let curve = entry
+            .and_then(|state| {
+                state
+                    .extra_curves
+                    .get(&child_formant_offset_curve_key(track_id))
+            })
+            .map(|v| v.as_slice());
+
+        has_effective = has_effective
+            || curve_differs_from_default_in_range_with_tolerance(
+                curve,
+                frame_period_ms,
+                0.0,
+                f64::MAX,
+                CHILD_FORMANT_OFFSET_CENTS_DEFAULT,
+                0.5,
+            );
+        layers.push(ChildFormantOffsetLayer { curve });
+    }
+
+    if !has_effective {
+        return None;
+    }
+    Some(ChildFormantOffsetConfig { layers })
+}
+
+fn sample_child_formant_offset_cents(layer: &ChildFormantOffsetLayer<'_>, frame_idx: usize) -> f32 {
+    layer
+        .curve
+        .and_then(|curve| curve.get(frame_idx).copied())
+        .filter(|value| value.is_finite())
+        .unwrap_or(CHILD_FORMANT_OFFSET_CENTS_DEFAULT)
+}
+
+/// 构建 clip 实际生效的共振峰偏移曲线：
+/// 根轨 / clip 覆盖的 `formant_shift_cents` + 该子轨沿父轨层级累加的
+/// `child_formant_offset_cents@...`。无子轨共振峰差时返回 None，调用方继续
+/// 使用原始 `extra_curves`，避免任何额外分配。
+pub(crate) fn build_clip_effective_formant_shift_curve(
+    timeline: &TimelineState,
+    clip: &crate::state::Clip,
+    entry: &crate::state::TrackParamsState,
+    frame_count: usize,
+) -> Option<Vec<f32>> {
+    let cfg = active_child_formant_offset_config(timeline, &clip.track_id)?;
+    let base_curve = extra_curve_for_clip(entry, clip, "formant_shift_cents");
+    let mut out = vec![0.0f32; frame_count.max(1)];
+
+    for (frame_idx, value) in out.iter_mut().enumerate() {
+        let base = base_curve
+            .and_then(|curve| curve.get(frame_idx).copied())
+            .filter(|v| v.is_finite())
+            .unwrap_or(0.0);
+        let mut total = base as f64;
+        for layer in &cfg.layers {
+            total += sample_child_formant_offset_cents(layer, frame_idx) as f64;
+        }
+        *value = total.clamp(
+            CHILD_FORMANT_OFFSET_CENTS_RANGE.0 as f64,
+            CHILD_FORMANT_OFFSET_CENTS_RANGE.1 as f64,
+        ) as f32;
+    }
+    Some(out)
 }
 
 fn sample_child_offset_cents(layer: &ChildPitchOffsetLayer<'_>, frame_idx: usize) -> f64 {
@@ -636,14 +996,29 @@ pub(crate) fn build_clip_input_pitch_curve(
             frame_period_ms,
         )?;
 
-        let tm = crate::pitch_clip::trim_and_resample_midi(
+        // 非 Loop 倒放：传入真实消费窗口 [se−len·r, se]。
+        let (trim_src_start, trim_src_end) = crate::state::clip_pitch_trim_window_sec(clip);
+        let mut tm = crate::pitch_clip::trim_and_resample_midi(
             &clip_pitch.midi,
             frame_period_ms,
-            clip.source_start_sec,
-            clip.source_end_sec,
+            trim_src_start,
+            trim_src_end,
             clip_playback_rate,
             clip.length_sec.max(0.0),
+            clip.loop_enabled,
+            // Loop 模式的回绕周期 = 完整媒体时长；倒放从 source_end 向下环绕，
+            // 与 build_loop_tiled_segment 生成的 PCM 顺序逐帧对齐。
+            crate::state::clip_source_media_duration_sec(clip),
+            clip.reversed && clip.loop_enabled,
         );
+        // 非 Loop 倒放：trim_and_resample_midi 按升序窗口映射（文档契约
+        // "调用方在输出后整体翻转"）。本曲线的下游全部按**时间线帧**消费
+        // （pitch_edit 覆盖、子轨偏移、处理器输入），必须先翻转 —— 否则
+        // 倒放 Clip 的输入音高相对音频整体镜像（与 midi_export / schedule
+        // 的 rate≈1 分支一致）。
+        if clip.reversed && !clip.loop_enabled {
+            tm.reverse();
+        }
         if tm.is_empty() {
             return None;
         }
@@ -653,17 +1028,17 @@ pub(crate) fn build_clip_input_pitch_curve(
     let timeline_midi = if let Some(ref cfg) = child_offset_cfg {
         let fp = frame_period_ms.max(0.1);
         let start_idx = ((clip_start_sec.max(0.0) * 1000.0) / fp).floor().max(0.0) as usize;
+        // Tempo Map 感知：按帧时刻解析生效音阶（帧时间单调递增，使用游标）。
+        let scale_segments = timeline.scale_segments();
+        let mut cursor = ScaleSegmentsCursor::new(&scale_segments);
         timeline_midi_raw
             .iter()
             .enumerate()
             .map(|(local_idx, &midi)| {
                 let frame_idx = start_idx.saturating_add(local_idx);
-                apply_child_pitch_offset_to_midi(
-                    midi as f64,
-                    cfg,
-                    frame_idx,
-                    &timeline.project_scale_notes,
-                ) as f32
+                let sec = (frame_idx as f64) * fp / 1000.0;
+                let scale_notes = cursor.notes_at(sec);
+                apply_child_pitch_offset_to_midi(midi as f64, cfg, frame_idx, scale_notes) as f32
             })
             .collect()
     } else {
@@ -671,6 +1046,29 @@ pub(crate) fn build_clip_input_pitch_curve(
     };
 
     Some(timeline_midi)
+}
+
+/// 单调帧时间的音阶段游标（scale_segments 按时间升序）。
+pub(crate) struct ScaleSegmentsCursor<'a> {
+    segments: &'a [(f64, Vec<u8>)],
+    index: usize,
+}
+
+impl<'a> ScaleSegmentsCursor<'a> {
+    pub(crate) fn new(segments: &'a [(f64, Vec<u8>)]) -> Self {
+        Self { segments, index: 0 }
+    }
+
+    pub(crate) fn notes_at(&mut self, sec: f64) -> &'a [u8] {
+        while self.index + 1 < self.segments.len() && self.segments[self.index + 1].0 <= sec + 1e-9
+        {
+            self.index += 1;
+        }
+        self.segments
+            .get(self.index)
+            .map(|(_, notes)| notes.as_slice())
+            .unwrap_or(&[])
+    }
 }
 
 fn root_pitch_edit_state<'a>(
@@ -943,6 +1341,8 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
     };
     let child_offset_cfg = active_child_pitch_offset_config(timeline, &clip.track_id);
     let has_child_pitch_offset = child_offset_cfg.is_some();
+    let child_formant_cfg = active_child_formant_offset_config(timeline, &clip.track_id);
+    let has_child_formant_offset = child_formant_cfg.is_some();
     if !track.compose_enabled && !entry.has_pitch_adjustment_active {
         return Ok(false);
     }
@@ -952,7 +1352,7 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
         return Ok(false);
     }
 
-    let extra_processing = track_requests_extra_processing(algo, entry, clip);
+    let extra_processing = track_requests_extra_processing(algo, entry, clip, clip_start_sec);
     let tension_processing = matches!(algo, PitchEditAlgorithm::NsfHifiganOnnx)
         && hifigan_tension_active_for_clip(entry, clip, clip_start_sec);
     let formant_processing = matches!(algo, PitchEditAlgorithm::NsfHifiganOnnx)
@@ -962,8 +1362,7 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
     // 即使用户没有编辑音高/张力/共振峰，也需要触发处理器渲染以执行其内部拉伸。
     let needs_processor_stretch = {
         let kind = SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo);
-        let compose_or_pitch_adjust =
-            track.compose_enabled || entry.has_pitch_adjustment_active;
+        let compose_or_pitch_adjust = track.compose_enabled || entry.has_pitch_adjustment_active;
         let handles =
             crate::renderer::processor_handles_time_stretch(kind, compose_or_pitch_adjust);
         let rate = (clip.playback_rate as f64).max(1e-6);
@@ -981,6 +1380,7 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
         && !tension_processing
         && !formant_processing
         && !has_child_pitch_offset
+        && !has_child_formant_offset
         && !needs_processor_stretch
     {
         return Ok(false);
@@ -1016,6 +1416,7 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
         && !tension_processing
         && !formant_processing
         && !has_child_pitch_offset
+        && !has_child_formant_offset
         && !needs_processor_stretch
     {
         return Ok(false);
@@ -1074,14 +1475,16 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
 
     let mut effective_pitch_edit: Vec<f32> = pitch_edit.to_vec();
     if let Some(ref cfg) = child_offset_cfg {
+        // Tempo Map 感知：按帧时刻解析生效音阶（帧时间单调递增，使用游标）。
+        let scale_segments = timeline.scale_segments();
+        let mut cursor = ScaleSegmentsCursor::new(&scale_segments);
         for (frame_idx, value) in effective_pitch_edit.iter_mut().enumerate() {
             if *value > 0.0 {
-                *value = apply_child_pitch_offset_to_midi(
-                    *value as f64,
-                    cfg,
-                    frame_idx,
-                    &timeline.project_scale_notes,
-                ) as f32;
+                let sec = (frame_idx as f64) * frame_period_ms / 1000.0;
+                let scale_notes = cursor.notes_at(sec);
+                *value =
+                    apply_child_pitch_offset_to_midi(*value as f64, cfg, frame_idx, scale_notes)
+                        as f32;
             }
         }
 
@@ -1131,6 +1534,31 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
         let extra_params: &std::collections::HashMap<String, f64> =
             clip.extra_params.as_ref().unwrap_or(extra_params);
 
+        // 子轨共振峰差：把沿父轨层级累加后的生效曲线注入处理器。
+        // 仅存在 child_formant_offset 时克隆 HashMap，避免普通路径额外分配。
+        let child_formant_curve = if has_child_formant_offset {
+            build_clip_effective_formant_shift_curve(
+                timeline,
+                clip,
+                entry,
+                entry.pitch_edit.len().max(1),
+            )
+        } else {
+            None
+        };
+        let effective_extra_curves_storage;
+        let extra_curves_for_ctx: &std::collections::HashMap<String, Vec<f32>> =
+            if let Some(curve) = child_formant_curve {
+                effective_extra_curves_storage = {
+                    let mut cloned = extra_curves.clone();
+                    cloned.insert("formant_shift_cents".to_string(), curve);
+                    cloned
+                };
+                &effective_extra_curves_storage
+            } else {
+                extra_curves
+            };
+
         // 若处理器自己处理时间拉伸（如 vslib 使用 Timing 控制点），传递实际 playback_rate；
         // 否则 PCM 已由外部时间拉伸预处理，rate=1.0。
         let ctx_playback_rate = if processor_handles_stretch { clip_playback_rate } else { 1.0 };
@@ -1147,7 +1575,7 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
             playback_rate: ctx_playback_rate,
             out_frames: expected_out_frames,
             clip_id: &clip.id,
-            extra_curves,
+            extra_curves: extra_curves_for_ctx,
             extra_params,
         };
         if is_vslib {
@@ -1287,6 +1715,8 @@ pub fn does_clip_need_processor_render(
 ) -> bool {
     let has_child_pitch_offset =
         active_child_pitch_offset_config(timeline, &clip.track_id).is_some();
+    let has_child_formant_offset =
+        active_child_formant_offset_config(timeline, &clip.track_id).is_some();
     let Some(clip_root) = timeline.resolve_root_track_id(&clip.track_id) else {
         return false;
     };
@@ -1297,7 +1727,10 @@ pub fn does_clip_need_processor_render(
     // 当存在非静音的音高参考块时，即使 compose_enabled 为 false，
     // 也需要触发处理器预渲染，确保音高参考块的 MIDI 数据能应用到同组的音频块。
     // 同样，用户手动绘制了 pitch 曲线时也必须触发渲染。
-    if !track.compose_enabled && !entry.has_pitch_adjustment_active && !entry.pitch_edit_user_modified {
+    if !track.compose_enabled
+        && !entry.has_pitch_adjustment_active
+        && !entry.pitch_edit_user_modified
+    {
         return false;
     }
     if !pitch_edit_backend_available_for_track(track) && !entry.pitch_edit_user_modified {
@@ -1309,7 +1742,7 @@ pub fn does_clip_need_processor_render(
         return false;
     }
 
-    let extra_processing = track_requests_extra_processing(algo, entry, clip);
+    let extra_processing = track_requests_extra_processing(algo, entry, clip, clip_start_sec);
     let tension_processing = matches!(algo, PitchEditAlgorithm::NsfHifiganOnnx)
         && hifigan_tension_active_for_clip(entry, clip, clip_start_sec);
     let formant_processing = matches!(algo, PitchEditAlgorithm::NsfHifiganOnnx)
@@ -1319,8 +1752,7 @@ pub fn does_clip_need_processor_render(
     // 即使用户没有编辑音高，也需要触发处理器预渲染以执行其内部拉伸。
     let needs_processor_stretch = {
         let kind = crate::state::SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo);
-        let compose_or_pitch_adjust =
-            track.compose_enabled || entry.has_pitch_adjustment_active;
+        let compose_or_pitch_adjust = track.compose_enabled || entry.has_pitch_adjustment_active;
         let handles =
             crate::renderer::processor_handles_time_stretch(kind, compose_or_pitch_adjust);
         let rate = (clip.playback_rate as f64).max(1e-6);
@@ -1333,15 +1765,17 @@ pub fn does_clip_need_processor_render(
     // 例外：needs_processor_stretch 时必须触发预渲染以执行其内部拉伸。
     // 例外：has_pitch_adjustment_active 时，音高参考块提供的 MIDI 音高数据已写入 pitch_edit，
     //       即使 pitch_edit_user_modified 为 false 也应触发渲染。
-    eprintln!("[pitch_edit] does_clip_need_processor_render: clip={} user_modified={} has_adj={} extra={} tension={} formant={} child_off={} stretch={}",
+    eprintln!("[pitch_edit] does_clip_need_processor_render: clip={} user_modified={} has_adj={} extra={} tension={} formant={} child_off={} child_formant={} stretch={}",
         clip.id, entry.pitch_edit_user_modified, entry.has_pitch_adjustment_active,
-        extra_processing, tension_processing, formant_processing, has_child_pitch_offset, needs_processor_stretch);
+        extra_processing, tension_processing, formant_processing, has_child_pitch_offset,
+        has_child_formant_offset, needs_processor_stretch);
     if !entry.pitch_edit_user_modified
         && !entry.has_pitch_adjustment_active
         && !extra_processing
         && !tension_processing
         && !formant_processing
         && !has_child_pitch_offset
+        && !has_child_formant_offset
         && !needs_processor_stretch
     {
         return false;
@@ -1351,6 +1785,7 @@ pub fn does_clip_need_processor_render(
         || tension_processing
         || formant_processing
         || has_child_pitch_offset
+        || has_child_formant_offset
         || needs_processor_stretch
     {
         return true;

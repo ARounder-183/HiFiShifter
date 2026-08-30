@@ -9,6 +9,7 @@
 //!
 //! 预设链构造：[`world_chain()`]、[`hifigan_chain()`]
 
+use super::common_params::{COMMON_MIX_PARAMS, PAN_PARAM, VOLUME_PARAM};
 use super::traits::{
     ClipProcessContext, ClipProcessor, ParamDescriptor, ProcessorCapabilities, RenderContext,
     Renderer,
@@ -16,7 +17,7 @@ use super::traits::{
 
 static HIFIGAN_BREATH_OPTIONS: [(&str, i32); 2] = [("Off", 0), ("On", 1)];
 
-static HIFIGAN_PARAM_DESCRIPTORS: [ParamDescriptor; 5] = [
+static HIFIGAN_PARAM_DESCRIPTORS: [ParamDescriptor; 6] = [
     ParamDescriptor {
         id: "breath_enabled",
         display_name: "Breath",
@@ -59,17 +60,8 @@ static HIFIGAN_PARAM_DESCRIPTORS: [ParamDescriptor; 5] = [
             max_value: 500.0,
         },
     },
-    ParamDescriptor {
-        id: "hifigan_volume",
-        display_name: "Volume",
-        group: "NSF-HiFiGAN",
-        kind: super::traits::ParamKind::AutomationCurve {
-            unit: "x",
-            default_value: 1.0,
-            min_value: 0.0,
-            max_value: 2.0,
-        },
-    },
+    VOLUME_PARAM,
+    PAN_PARAM,
 ];
 
 // ─── StageContext ──────────────────────────────────────────────────────────────
@@ -161,6 +153,10 @@ impl ProcessingStage for WorldVocoderStage {
         "WORLD 声码器"
     }
 
+    fn param_descriptors(&self) -> &'static [ParamDescriptor] {
+        &COMMON_MIX_PARAMS
+    }
+
     fn process(&self, input_pcm: Vec<f32>, ctx: &StageContext<'_>) -> Result<Vec<f32>, String> {
         let cc = ctx.clip_ctx;
         if !crate::world_vocoder::is_available() {
@@ -203,11 +199,51 @@ fn sample_curve_at_abs_sec(
         return default_value;
     }
     let i0 = idx_f.floor().max(0.0) as usize;
+    // 越界（超出曲线末点）直接返回默认值：i1 会被钳制到最后一个元素，
+    // 若继续插值会得到 default 与末值之间的错误衰减/振荡值（与
+    // hifigan / vslib 的末点越界修复保持一致）。
+    if i0 >= curve.len() {
+        return default_value;
+    }
     let i1 = (i0 + 1).min(curve.len().saturating_sub(1));
     let frac = (idx_f - i0 as f64).clamp(0.0, 1.0) as f32;
     let a = curve.get(i0).copied().unwrap_or(default_value);
     let b = curve.get(i1).copied().unwrap_or(a);
     a + (b - a) * frac
+}
+
+/// 把噪声 stem 线性重采样到目标长度（按样本数，而非采样率比）。
+///
+/// 时间拉伸只作用在谐波分支上：`render_mel_stretch_with_formant` 在 mel 域把
+/// 谐波拉伸到**时间轴**长度，而 HNSEP 分离出的噪声 stem 仍是**源速率**长度。
+/// 若直接按 `min(harmonic, noise)` 混合：
+/// - `playback_rate < 1`（拉长）时谐波比噪声长，输出被截断到噪声长度，
+///   clip 拉伸出来的尾巴整段丢失（听感上就是"下一段音频被截断"）；
+/// - `playback_rate > 1`（缩短）时噪声比谐波长，噪声尾部被丢掉。
+///
+/// 噪声是随机信号，线性重采样即可保持其统计特性，代价远低于再跑一次分离。
+pub(crate) fn resample_noise_to_len(noise: &[f32], target_len: usize) -> Vec<f32> {
+    if target_len == 0 || noise.is_empty() {
+        return Vec::new();
+    }
+    if noise.len() == target_len {
+        return noise.to_vec();
+    }
+    if noise.len() == 1 {
+        return vec![noise[0]; target_len];
+    }
+
+    let src_last = noise.len() - 1;
+    let scale = src_last as f64 / (target_len.saturating_sub(1)).max(1) as f64;
+    let mut out = Vec::with_capacity(target_len);
+    for idx in 0..target_len {
+        let src = idx as f64 * scale;
+        let i0 = (src as usize).min(src_last.saturating_sub(1));
+        let i1 = (i0 + 1).min(src_last);
+        let frac = (src - i0 as f64) as f32;
+        out.push(noise[i0] + (noise[i1] - noise[i0]) * frac);
+    }
+    out
 }
 
 impl ProcessingStage for HiFiGanStage {
@@ -231,7 +267,10 @@ impl ProcessingStage for HiFiGanStage {
 
         let breath_enabled =
             crate::pitch_editing::extra_param_enabled(cc.extra_params, "breath_enabled");
-        let formant_curve = cc.extra_curves.get("formant_shift_cents").map(|v| v.as_slice());
+        let formant_curve = cc
+            .extra_curves
+            .get("formant_shift_cents")
+            .map(|v| v.as_slice());
         if !breath_enabled {
             // ── 非 Breath 路径 ──────────────────────────────────────────────
             let render_ctx = RenderContext {
@@ -303,7 +342,10 @@ impl ProcessingStage for HiFiGanStage {
             return Ok(processed_harmonic);
         }
 
-        let out_len = processed_harmonic.len().min(noise.len());
+        // 噪声 stem 与谐波对齐到同一（时间轴）长度后再混合。
+        // 不能用 `min(harmonic, noise)`：那会在拉伸后把谐波尾巴裁掉。
+        let noise_aligned = resample_noise_to_len(&noise, processed_harmonic.len());
+        let out_len = processed_harmonic.len();
 
         let has_varying_curve = breath_curve.map_or(false, |c| {
             if c.len() <= 1 {
@@ -317,7 +359,7 @@ impl ProcessingStage for HiFiGanStage {
             let inv_sample_rate = 1.0 / cc.sample_rate.max(1) as f64;
             processed_harmonic
                 .iter()
-                .zip(noise.iter())
+                .zip(noise_aligned.iter())
                 .take(out_len)
                 .enumerate()
                 .map(|(index, (&h, &n))| {
@@ -334,14 +376,14 @@ impl ProcessingStage for HiFiGanStage {
                 // gain == 1.0: simple addition, most common case for unity_breath
                 processed_harmonic
                     .iter()
-                    .zip(noise.iter())
+                    .zip(noise_aligned.iter())
                     .take(out_len)
                     .map(|(&h, &n)| h + n)
                     .collect()
             } else {
                 processed_harmonic
                     .iter()
-                    .zip(noise.iter())
+                    .zip(noise_aligned.iter())
                     .take(out_len)
                     .map(|(&h, &n)| h + n * gain)
                     .collect()
@@ -380,5 +422,79 @@ mod tests {
     fn hifigan_chain_no_longer_handles_time_stretch() {
         let chain = super::hifigan_chain();
         assert!(!chain.handles_time_stretch);
+    }
+
+    #[test]
+    fn resample_noise_to_len_keeps_identity_length() {
+        let noise = vec![0.1f32, 0.2, 0.3, 0.4];
+        assert_eq!(super::resample_noise_to_len(&noise, 4), noise);
+    }
+
+    #[test]
+    fn resample_noise_to_len_stretches_without_truncating() {
+        // 拉伸场景（playback_rate < 1）：谐波比噪声长，噪声必须被拉长，
+        // 否则 min() 会把谐波（进而整个 clip）的尾巴裁掉。
+        let noise = vec![1.0f32, 2.0, 3.0, 4.0];
+        let out = super::resample_noise_to_len(&noise, 8);
+        assert_eq!(out.len(), 8);
+        // 端点应贴合原始端点
+        assert!((out[0] - 1.0).abs() < 1e-6);
+        assert!((out[7] - 4.0).abs() < 1e-6);
+        // 中间值必须来自原始信号，而不是补零
+        assert!(out.iter().all(|v| *v >= 1.0 - 1e-6 && *v <= 4.0 + 1e-6));
+    }
+
+    #[test]
+    fn resample_noise_to_len_shrinks_for_speedup() {
+        let noise = vec![0.0f32, 1.0, 2.0, 3.0];
+        let out = super::resample_noise_to_len(&noise, 2);
+        assert_eq!(out.len(), 2);
+        assert!((out[0] - 0.0).abs() < 1e-6);
+        assert!((out[1] - 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn resample_noise_to_len_handles_degenerate_inputs() {
+        assert!(super::resample_noise_to_len(&[], 8).is_empty());
+        assert!(super::resample_noise_to_len(&[0.5], 0).is_empty());
+        // 单样本输入：按常数填充，不得 panic
+        assert_eq!(super::resample_noise_to_len(&[0.5], 3), vec![0.5, 0.5, 0.5]);
+    }
+
+    #[test]
+    fn sample_curve_beyond_end_returns_default() {
+        // 回归：末点之后必须回退 default，而不是与末值插值出 0..末值 的振荡。
+        // 复现场景 = 共振峰偏移点 359.15 画在曲线末点（fp=5ms，idx 6470），
+        // 之后任意采样都应得到默认值 0。
+        let curve = vec![0.0f32, 0.0, 0.0, 359.15]; // 末点 359.15 @ idx 3
+        let fp = 5.0;
+        // idx 3.0（末点本身）→ 359.15
+        let at_last = super::sample_curve_at_abs_sec(Some(&curve), 3.0 * fp / 1000.0, fp, 0.0);
+        assert!((at_last - 359.15).abs() < 1e-4);
+        // idx ∈ [3.0, 4.0)：最后一个元素的保持区间（i0=3 在界内，
+        // i1 钳到自身）→ 仍为末值，与 pitch 采样语义一致
+        let hold = super::sample_curve_at_abs_sec(Some(&curve), 3.5 * fp / 1000.0, fp, 0.0);
+        assert!((hold - 359.15).abs() < 1e-4);
+        // idx >= 4.0（超出数组末尾）→ default 0.0（修复前为 0..末值 的振荡）
+        let frac_beyond = super::sample_curve_at_abs_sec(Some(&curve), 4.5 * fp / 1000.0, fp, 0.0);
+        assert_eq!(frac_beyond, 0.0);
+        // 大越界同样归零（修复前 frac 小数部分导致任意非零值）
+        let far = super::sample_curve_at_abs_sec(Some(&curve), 100.0, fp, 0.0);
+        assert_eq!(far, 0.0);
+        // 空曲线 / None → default
+        assert_eq!(super::sample_curve_at_abs_sec(Some(&[]), 1.0, fp, 0.0), 0.0);
+        assert_eq!(super::sample_curve_at_abs_sec(None, 1.0, fp, 0.0), 0.0);
+    }
+
+    #[test]
+    fn sample_curve_interpolates_within_range() {
+        let curve = vec![0.0f32, 100.0, 200.0];
+        let fp = 5.0;
+        // idx 0.5 → 50
+        let mid = super::sample_curve_at_abs_sec(Some(&curve), 0.5 * fp / 1000.0, fp, 0.0);
+        assert!((mid - 50.0).abs() < 1e-4);
+        // 负时间 → idx 0 → 第一个元素
+        let neg = super::sample_curve_at_abs_sec(Some(&curve), -2.0, fp, 0.0);
+        assert_eq!(neg, 0.0);
     }
 }

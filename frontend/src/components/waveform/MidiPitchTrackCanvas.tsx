@@ -20,6 +20,12 @@ import React from "react";
 import type { ClipInfo } from "../../features/session/sessionTypes";
 import { useAppSelector } from "../../app/hooks";
 import { timelineViewportBus } from "../../utils/timelineViewportBus";
+import {
+    drawLoopMarkers,
+    modEuclid,
+    resolveClipContentDurationSec,
+    resolveSourceEndSec,
+} from "../../utils/loopRender";
 
 // ========================================
 // 常量
@@ -44,9 +50,69 @@ function strokeColorForClip(clip: { color: string }): string {
 }
 
 /**
+ * Loop（循环源）回绕描述 —— 与后端 clip_loop_cycle_span_sec /
+ * place_note_occurrence_frames 的锚点数学逐帧一致。
+ */
+interface LoopCycleDescriptor {
+    /** 回绕周期 D（源域秒）：音频 clip = 整个媒体文件时长；纯 MIDI clip = 窗口跨度。 */
+    cycleSec: number;
+    /** 正放锚点（原始 sourceStartSec，可为负，floor_mod 环绕）。 */
+    fwdAnchorSec: number;
+    /**
+     * 倒放锚点末端：周期来自媒体时长时 clamp 到 D；周期退化为窗口跨度时
+     * 保持原始 sourceEndSec（与后端 place_note_occurrence_in_loop 一致 ——
+     * 否则 slip 窗口 [2,7] 的跨度 clamp 会把倒放相位错误平移 ss=2s）。
+     */
+    revAnchorEndSec: number;
+    /**
+     * 周期是否来自真实媒体时长：
+     * - true：坐标是**文件域**，首个回绕点在 headDur = 进入段耗尽处；
+     * - false（纯 MIDI 窗口跨度）：坐标是**窗口相对域**，入口即窗口起点，
+     *   首个回绕点在一个完整窗口周期之后。
+     */
+    cycleFromMedia: boolean;
+}
+
+/**
+ * 解析 Loop 回绕描述。
+ *
+ * 关键语义：所有可发声内容（带源媒体的 clip、以及纯音高参考块）的实际
+ * 声音/音高按**整个内容** floor_mod 回绕（与 WaveformTrackCanvas / 后端
+ * 引擎一致），音高曲线与回绕标记必须使用同一周期，否则相位错位；
+ * contentDurationSec 为 null（连音符内容都无法确定）时退化为窗口跨度。
+ */
+function resolveLoopCycleDescriptor(args: {
+    loopEnabled: boolean;
+    /** 内容时长（秒）：resolveClipContentDurationSec 的结果；null = 退化。 */
+    contentDurationSec: number | null;
+    sourceStartSec: number;
+    sourceEndSec: number;
+}): LoopCycleDescriptor | null {
+    if (!args.loopEnabled) return null;
+    const mediaDur = args.contentDurationSec ?? 0;
+    const windowSpan = Math.abs(Number(args.sourceEndSec ?? 0) - Number(args.sourceStartSec ?? 0));
+    const cycleSec = mediaDur > 1e-9 ? mediaDur : windowSpan;
+    if (!Number.isFinite(cycleSec) || cycleSec <= 1e-9) return null;
+    const srcStart = Number(args.sourceStartSec ?? 0);
+    const srcEnd = Number(args.sourceEndSec ?? 0);
+    return {
+        cycleSec,
+        fwdAnchorSec: srcStart,
+        // 与后端 place_note_occurrence_in_loop / trim_and_resample_midi 同约定：
+        // 倒放锚点只 clamp 到媒体时长上界、**不做 max(0)** —— 负 source_end
+        // （slip/左延伸可达）由消费端的 modEuclid（floor_mod）统一环绕；
+        // 此处若钳到 0 会让曲线/标记与音频出现恒定相位差。
+        revAnchorEndSec: mediaDur > 1e-9 ? Math.min(srcEnd, mediaDur) : srcEnd,
+        cycleFromMedia: mediaDur > 1e-9,
+    };
+}
+
+/**
  * 从 MIDI note data 即时生成音高曲线。
  * 逻辑与后端 emit_clip_pitch_data_for_clip 的 MIDI 分支一致，
- * 支持 source range trim、playbackRate 拉伸、reversed 倒放。
+ * 支持 source range trim、playbackRate 拉伸、reversed 倒放，
+ * 以及 Loop（循环源）：按媒体时长的锚点回绕重复铺满
+ * （`loopCycle` 为 null 时走非循环路径）。
  */
 function generateMidiCurveFromNotes(
     notes: Array<{ startSec: number; endSec: number; note: number }>,
@@ -56,6 +122,7 @@ function generateMidiCurveFromNotes(
     playbackRate: number,
     reversed: boolean,
     fillGaps: boolean,
+    loopCycle: LoopCycleDescriptor | null,
 ): number[] {
     const fp = Math.max(FRAME_PERIOD_MS, 0.1);
     const targetFrames = Math.max(1, Math.round((clipLengthSec * 1000) / fp));
@@ -65,6 +132,34 @@ function generateMidiCurveFromNotes(
     const srcTotalLen = sourceEndSec - sourceStartSec;
 
     for (const note of notes) {
+        // Loop（循环源）：按媒体时长 D 的锚点回绕放置（与音频渲染的
+        // floor_mod 映射一致）。不能用窗口比较过滤可见性 —— split 产生的
+        // "环绕窗口"（start > end）会把所有音符误判为越界而全部丢弃。
+        if (loopCycle && note.endSec - note.startSec > 1e-9) {
+            const { cycleSec, fwdAnchorSec, revAnchorEndSec } = loopCycle;
+            const u0 = reversed
+                ? modEuclid(revAnchorEndSec - note.endSec, cycleSec)
+                : modEuclid(note.startSec - fwdAnchorSec, cycleSec);
+            const firstStartFrame = Math.round(((u0 / pr) * 1000) / fp);
+            const lenFrames = Math.max(
+                1,
+                Math.round((((note.endSec - note.startSec) / pr) * 1000) / fp),
+            );
+            const cycleFrames = Math.max(1, Math.round(((cycleSec / pr) * 1000) / fp));
+            const noteValue = note.note;
+            for (let cycleOffset = 0; cycleOffset < targetFrames; cycleOffset += cycleFrames) {
+                const writeStart = cycleOffset + firstStartFrame;
+                const writeEnd = Math.min(cycleOffset + firstStartFrame + lenFrames, targetFrames);
+                if (writeStart >= writeEnd) break;
+                for (let frame = writeStart; frame < writeEnd; frame++) {
+                    if (noteValue > curve[frame] || curve[frame] <= 0) {
+                        curve[frame] = noteValue;
+                    }
+                }
+            }
+            continue;
+        }
+
         if (note.endSec <= sourceStartSec || note.startSec >= sourceEndSec) continue;
         const relStart = Math.max(0, note.startSec - sourceStartSec);
         const relEnd = Math.min(srcTotalLen, note.endSec - sourceStartSec);
@@ -77,13 +172,13 @@ function generateMidiCurveFromNotes(
 
         const noteStartFrame = Math.round(((effStart / pr) * 1000) / fp);
         const noteEndFrame = Math.round(((effEnd / pr) * 1000) / fp);
+        const noteValue = note.note;
+
+        // 非 Loop：单次写入（Loop 已在上方 placement 分支处理）。
         const writeEnd = Math.min(noteEndFrame, targetFrames);
-        if (noteStartFrame < writeEnd) {
-            const noteValue = note.note;
-            for (let frame = noteStartFrame; frame < writeEnd; frame++) {
-                if (noteValue > curve[frame] || curve[frame] <= 0) {
-                    curve[frame] = noteValue;
-                }
+        for (let frame = noteStartFrame; frame < writeEnd; frame++) {
+            if (noteValue > curve[frame] || curve[frame] <= 0) {
+                curve[frame] = noteValue;
             }
         }
     }
@@ -116,6 +211,63 @@ function generateMidiCurveFromNotes(
         }
     }
 
+    return curve;
+}
+
+/**
+ * 曲线生成缓存（F6 性能修复）：
+ * generateMidiCurveFromNotes 在每个绘制帧对每个可见 MIDI clip 全量重算 ——
+ * 分配 lengthSec×200 的数组（10000s clip ⇒ 2M 元素），且 Loop 分支按重复
+ * 周期放大写入量。绘制帧之间同一 clip 的（notes 引用, 几何参数）几乎总是
+ * 不变，直接复用上次结果即可。
+ *
+ * 缓存键：notes 数组**引用**（WeakMap 随 clip 释放，无泄漏）+ 几何参数串。
+ * 每个 notes 引用最多保留 4 份几何变体（拖拽编辑时的中间态）。
+ */
+const midiCurveCache = new WeakMap<
+    Array<{ startSec: number; endSec: number; note: number }>,
+    Map<string, number[]>
+>();
+const MIDI_CURVE_CACHE_MAX_PER_NOTES = 4;
+
+function getCachedMidiCurve(
+    notes: Array<{ startSec: number; endSec: number; note: number }>,
+    clipLengthSec: number,
+    sourceStartSec: number,
+    sourceEndSec: number,
+    playbackRate: number,
+    reversed: boolean,
+    fillGaps: boolean,
+    loopCycle: LoopCycleDescriptor | null,
+): number[] {
+    let inner = midiCurveCache.get(notes);
+    if (!inner) {
+        inner = new Map();
+        midiCurveCache.set(notes, inner);
+    }
+    const key =
+        `${clipLengthSec}|${sourceStartSec}|${sourceEndSec}|${playbackRate}|` +
+        `${reversed ? 1 : 0}|${fillGaps ? 1 : 0}|` +
+        (loopCycle
+            ? `${loopCycle.cycleSec}|${loopCycle.fwdAnchorSec}|${loopCycle.revAnchorEndSec}|${loopCycle.cycleFromMedia ? 1 : 0}`
+            : "null");
+    const hit = inner.get(key);
+    if (hit) return hit;
+    const curve = generateMidiCurveFromNotes(
+        notes,
+        clipLengthSec,
+        sourceStartSec,
+        sourceEndSec,
+        playbackRate,
+        reversed,
+        fillGaps,
+        loopCycle,
+    );
+    if (inner.size >= MIDI_CURVE_CACHE_MAX_PER_NOTES) {
+        const oldest = inner.keys().next().value;
+        if (oldest !== undefined) inner.delete(oldest);
+    }
+    inner.set(key, curve);
     return curve;
 }
 
@@ -168,14 +320,23 @@ export const MidiPitchTrackCanvas = React.memo(
         const clipPitchCurvesRef = React.useRef(clipPitchCurves);
         const clipPitchRangesRef = React.useRef(clipPitchRanges);
 
+        // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
         pxPerSecRef.current = props.pxPerSec;
+        // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
         viewportStartSecRef.current = props.viewportStartSec;
+        // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
         viewportEndSecRef.current = props.viewportEndSec;
+        // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
         clipsRef.current = clips;
+        // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
         waveformHeightRef.current = waveformHeight;
+        // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
         strokeWidthRef.current = strokeWidth;
+        // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
         viewportWidthPxRef.current = viewportWidthPx;
+        // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
         clipPitchCurvesRef.current = clipPitchCurves;
+        // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
         clipPitchRangesRef.current = clipPitchRanges;
 
         // ========================================
@@ -194,6 +355,7 @@ export const MidiPitchTrackCanvas = React.memo(
         // ========================================
         // 核心绘制函数
         // ========================================
+        // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
         drawRef.current = () => {
             const canvas = canvasRef.current;
             if (!canvas) return;
@@ -254,19 +416,57 @@ export const MidiPitchTrackCanvas = React.memo(
                 let curveStartSec: number;
                 let framePeriodMs: number;
 
+                // 内容时长（循环周期 D）：有源媒体 → 媒体总时长；
+                // 纯音高参考块 → 音符内容最大结束时间 —— 与普通媒体
+                // Clip 完全一致（回绕整个内容，窗口之外为静音）。
+                // 每 clip 只计算一次（曲线与回绕标记共用；无元数据时
+                // 该调用会遍历全部音符，逐帧重复计算纯属浪费）。
+                const contentDurSec = resolveClipContentDurationSec({
+                    sourcePath: clip.sourcePath,
+                    midiNoteData: clip.midiNoteData ?? null,
+                    durationFrames: clip.durationFrames,
+                    sourceSampleRate: clip.sourceSampleRate,
+                    durationSec: clip.durationSec,
+                });
+
                 if (clip.midiNoteData && clip.midiNoteData.length > 0) {
-                    const srcEnd =
-                        clip.sourceEndSec > 0
-                            ? clip.sourceEndSec
-                            : clip.midiNoteData.reduce((max, n) => Math.max(max, n.endSec), 0);
-                    midiCurve = generateMidiCurveFromNotes(
+                    // 曲线消费窗口：非 Loop 正放 = 起点+长度×速率（派生），
+                    // 倒放 = [se−len·r, se]（锚定 se，sourceStart 不参与）；
+                    // 与音频渲染的窗口模型一致 —— 否则延伸过的倒放 Clip 曲线
+                    // 整体错位（该有声处显示为空）。
+                    // se 仅在**缺失/非法**时回退音符范围估计 —— 合法的 0/负值
+                    // （倒放静音段锚点）不得被改写，否则派生链整体错位。
+                    const seRaw = Number.isFinite(clip.sourceEndSec)
+                        ? clip.sourceEndSec
+                        : clip.midiNoteData.reduce((max, n) => Math.max(max, n.endSec), 0);
+                    const srcEnd = resolveSourceEndSec({
+                        loopEnabled: Boolean(clip.loopEnabled),
+                        reversed: Boolean(clip.reversed),
+                        sourceStartSec: Number(clip.sourceStartSec) || 0,
+                        playbackRate: Math.abs(Number(clip.playbackRate) || 1),
+                        lengthSec: clip.lengthSec,
+                        sourceEndSec: seRaw,
+                    });
+                    const curveWinStart =
+                        !clip.loopEnabled && clip.reversed
+                            ? srcEnd -
+                              Math.max(0, clip.lengthSec) * Math.abs(Number(clip.playbackRate) || 1)
+                            : Number(clip.sourceStartSec) || 0;
+                    const loopCycle = resolveLoopCycleDescriptor({
+                        loopEnabled: Boolean(clip.loopEnabled),
+                        contentDurationSec: contentDurSec,
+                        sourceStartSec: clip.sourceStartSec,
+                        sourceEndSec: srcEnd,
+                    });
+                    midiCurve = getCachedMidiCurve(
                         clip.midiNoteData,
                         clip.lengthSec,
-                        clip.sourceStartSec,
+                        curveWinStart,
                         srcEnd,
                         clip.playbackRate,
                         clip.reversed,
                         clip.midiFillGaps ?? false,
+                        loopCycle,
                     );
                     curveStartSec = clipStartSec;
                     framePeriodMs = FRAME_PERIOD_MS;
@@ -349,6 +549,95 @@ export const MidiPitchTrackCanvas = React.memo(
 
                 ctx.stroke();
                 ctx.restore();
+
+                // ── 循环节点倒三角标记 ──
+                // 周期与曲线平铺一致：内容时长 D（复用上方已计算的
+                // contentDurSec，避免每帧重复遍历音符）。
+                const markerCycle = resolveLoopCycleDescriptor({
+                    loopEnabled: Boolean(clip.loopEnabled),
+                    contentDurationSec: contentDurSec,
+                    sourceStartSec: clip.sourceStartSec,
+                    sourceEndSec: Number(clip.sourceEndSec) || 0,
+                });
+                const markerRate =
+                    Math.abs(Number(clip.playbackRate ?? 1) || 1) < 1e-6
+                        ? 1
+                        : Math.abs(Number(clip.playbackRate ?? 1) || 1);
+                const markerBodyDur = markerCycle ? markerCycle.cycleSec / markerRate : 0;
+                if (markerBodyDur > 0 && clip.lengthSec > markerBodyDur + 1e-6) {
+                    // 标记必须锚定在**实际回绕点**：与 WaveformTrackCanvas 的
+                    // 分段边界一致 ——
+                    // - 周期来自媒体：头部进入段耗尽处（headDur）及此后每个
+                    //   整文件周期边界；
+                    // - 纯 MIDI 窗口跨度（窗口相对域）：入口即窗口起点，
+                    //   首个回绕点在一个完整周期之后。
+                    // 不能一律用 k·周期：窗口不从文件原点进入时（trim/split），
+                    // 标记会与音频/曲线相位错开。
+                    const desc = markerCycle;
+                    const headDur = !desc
+                        ? 0
+                        : desc.cycleFromMedia
+                          ? (clip.reversed
+                                ? desc.revAnchorEndSec
+                                : desc.cycleSec - modEuclid(desc.fwdAnchorSec, desc.cycleSec)) /
+                            markerRate
+                          : markerBodyDur;
+                    const markers: number[] = [];
+                    {
+                        // 直接跳到可视范围内的第一个回绕点：既避免从 clip 入口
+                        // 逐周期空转数千次，也修复"深入长循环 clip 后标记消失"
+                        //（旧实现受 guard<8192 限制，波形分段是直接寻址的）。
+                        const visLocalStart =
+                            viewportStartPx / Math.max(1e-9, currentPxPerSec) - clipStartSec;
+                        const k0 = Math.max(
+                            0,
+                            Math.ceil((visLocalStart - headDur - 1e-6) / markerBodyDur),
+                        );
+                        for (
+                            let markerT = headDur + k0 * markerBodyDur;
+                            markerT < clip.lengthSec - 1e-6 && markers.length < 4096;
+                            markerT += markerBodyDur
+                        ) {
+                            const mx = (clipStartSec + markerT) * currentPxPerSec - viewportStartPx;
+                            if (mx > displayW + 8) break;
+                            // 恰好在 clip 起点/终点的回绕点不绘制（loopRender 约定；
+                            // 倒放整文件 Loop 的 revAnchor=D 时 headDur=0 会命中）。
+                            if (markerT <= 1e-6) continue;
+                            if (mx < -8) continue;
+                            markers.push(Math.round(mx * 2) / 2);
+                        }
+                    }
+                    if (markers.length > 0) {
+                        drawLoopMarkers(ctx, markers, displayH, clipColor);
+                    }
+                } else if (contentDurSec != null) {
+                    // ── 非 Loop：媒体/内容边界标记 ──
+                    // 循环节 = 源媒体（或音符内容）在该 Clip 内的真实起始/
+                    // 终止位置（音频与静音的分界线），落在 Clip 内部时绘制。
+                    // 投影按**消费方向**：正放 t=(b−ss)/r；倒放 t=(se−b)/r
+                    // （倒放锚定窗口终点，与 WaveformTrackCanvas 一致）。
+                    const mediaDur = contentDurSec;
+                    {
+                        const rate =
+                            Math.abs(Number(clip.playbackRate ?? 1) || 1) < 1e-6
+                                ? 1
+                                : Math.abs(Number(clip.playbackRate ?? 1) || 1);
+                        const srcEndResolved = Number(clip.sourceEndSec) || 0;
+                        const markers: number[] = [];
+                        for (const b of [0, mediaDur]) {
+                            const tLocal = clip.reversed
+                                ? (srcEndResolved - b) / rate
+                                : (b - (Number(clip.sourceStartSec) || 0)) / rate;
+                            if (tLocal <= 1e-6 || tLocal >= clip.lengthSec - 1e-6) continue;
+                            const mx = (clipStartSec + tLocal) * currentPxPerSec - viewportStartPx;
+                            if (mx < -8 || mx > displayW + 8) continue;
+                            markers.push(Math.round(mx * 2) / 2);
+                        }
+                        if (markers.length > 0) {
+                            drawLoopMarkers(ctx, markers, displayH, clipColor);
+                        }
+                    }
+                }
             }
 
             if (ctx.globalAlpha !== 1) {
@@ -384,10 +673,11 @@ export const MidiPitchTrackCanvas = React.memo(
                 if (canvasRef.current) {
                     canvasRef.current.style.transform = `translate3d(${scrollLeft}px,0,0)`;
                 }
-                invalidate();
+                // 同步绘制：与原生滚动的 DOM 内容层同帧提交位移（见 timelineViewportBus 头注释）。
+                drawRef.current();
             });
             return unsub;
-        }, [invalidate]);
+        }, []);
 
         // 组件卸载时取消待执行的 rAF
         React.useEffect(() => {

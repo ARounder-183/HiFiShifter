@@ -53,6 +53,7 @@ export function CustomScaleDialog({ open, onOpenChange }: Props) {
             s.project.useCustomScale && s.project.customScale ? s.project.customScale : null;
         if (current) {
             const normalized = sanitizeCustomScalePreset(current);
+            // eslint-disable-next-line react-hooks/set-state-in-effect -- 对话框打开时用 props 初始化局部 state（既有模式；重构会改变打开时序）
             setName(normalized.name);
             setNotes(normalized.notes);
             setEditingPresetId(normalized.id);

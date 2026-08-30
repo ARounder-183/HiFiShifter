@@ -27,6 +27,7 @@ export function PitchSnapSettingsDialog({ open, onOpenChange }: Props) {
 
     useEffect(() => {
         if (open) {
+            // eslint-disable-next-line react-hooks/set-state-in-effect -- 对话框打开时用 props 初始化局部 state（既有模式；重构会改变打开时序）
             setToleranceInput(String(pitchSnapToleranceCents));
         }
     }, [open, pitchSnapToleranceCents]);

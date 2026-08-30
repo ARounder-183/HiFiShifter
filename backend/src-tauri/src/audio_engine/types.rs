@@ -57,6 +57,13 @@ pub(crate) struct ResampledStereo {
     pub(crate) pcm: Arc<Vec<f32>>,
 }
 
+impl ResampledStereo {
+    /// Approximate heap footprint of the interleaved PCM buffer.
+    pub(crate) fn pcm_bytes(&self) -> u64 {
+        self.pcm.len() as u64 * std::mem::size_of::<f32>() as u64
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct EngineClip {
     pub(crate) clip_id: String,
@@ -83,8 +90,24 @@ pub(crate) struct EngineClip {
 
     pub(crate) repeat: bool,
 
+    /// Loop（循环源）模式：对**整个 src 缓冲**（完整媒体文件）做模运算回绕。
+    ///
+    /// `Some(anchor)` 时，消费帧数 `src_frame` 的采样位置为
+    /// `floor_mod(anchor ± src_frame, src.frames)`（正放 +、倒放 −）。
+    /// 锚点是 Clip 进入媒体的起点：正放 = `source_start_sec`，
+    /// 倒放 = `source_end_sec`（与既有非 Loop 倒放"从末端向下播放"的约定一致，
+    /// 使启用 Loop 的瞬间可见内容保持连续）。此时
+    /// `src_start_frame / src_end_frame` 不参与回绕数学。
+    ///
+    /// `None` 保持旧语义：越界静音（`repeat` 仅作为兼容开关保留）。
+    pub(crate) loop_anchor_frame: Option<i64>,
+
     pub(crate) fade_in_frames: u64,
     pub(crate) fade_out_frames: u64,
+    /// 形状化淡化的增益查表（含两端点，FADE_LUT_SIZE+1 项）。
+    /// None 时退化为旧线性渐变（长度为 0 的淡化不会进入混音分支）。
+    pub(crate) fade_in_lut: Option<Arc<Vec<f32>>>,
+    pub(crate) fade_out_lut: Option<Arc<Vec<f32>>>,
     pub(crate) gain: f32,
 
     /// 预渲染后的 stereo interleaved PCM（优先级最高）。
@@ -100,6 +123,10 @@ pub(crate) struct EngineClip {
     /// 可选的 volume 曲线；存在时在 audio callback / mixdown 中逐帧乘到最终输出上。
     pub(crate) volume_curve: Option<Arc<Vec<f32>>>,
     pub(crate) volume_curve_frame_period_ms: f64,
+
+    /// 可选的 pan 曲线；存在时在 audio callback / mixdown 中逐帧应用到左右声道。
+    pub(crate) pan_curve: Option<Arc<Vec<f32>>>,
+    pub(crate) pan_curve_frame_period_ms: f64,
 
     /// 该 clip 是否需要 pitch 合成。
     /// - true：需要合成；若 rendered_pcm 为 None，则静音等待渲染完成。

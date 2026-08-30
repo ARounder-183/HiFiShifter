@@ -34,6 +34,7 @@ export function useLiveParamEditing(args: {
         if (liveEditOverrideRef.current?.key !== paramView.key) {
             liveEditOverrideRef.current = null;
         }
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅按 key 变化重置 live 覆盖；paramView 对象引用随编辑更新而变，全量依赖会无效重跑
     }, [paramView?.key]);
 
     const ensureLiveEditBase = useCallback((pv: ParamViewSegment) => {

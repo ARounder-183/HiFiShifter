@@ -1,7 +1,7 @@
 /**
  * Inference Device Benchmark Dialog
  *
- * Runs the backend run_vocoder_benchmark command which tests CPU, GPU (OpenCL),
+ * Runs the backend run_vocoder_benchmark command which tests CPU, GPU (WebGPU),
  * and GPU (DirectML) inference latency (median over 1024 frames / ~12 s of audio)
  * and displays the results so the user can pick the fastest provider for their system.
  */
@@ -44,17 +44,17 @@ function buildRows(result: BenchmarkResult): EpRow[] {
         },
     ];
 
-    // GPU (OpenCL)
+    // GPU (WebGPU)
     if (result.gpuMedianMs != null && result.gpuRtFactor != null) {
         rows.push({
-            label: "GPU (OpenCL)",
+            label: result.gpuBackendName ? `GPU (${result.gpuBackendName})` : "GPU (WebGPU)",
             medianMs: result.gpuMedianMs,
             rtf: result.gpuRtFactor,
             available: true,
         });
     } else if (result.gpuAvailable) {
         rows.push({
-            label: "GPU (OpenCL)",
+            label: result.gpuBackendName ? `GPU (${result.gpuBackendName})` : "GPU (WebGPU)",
             medianMs: -1,
             rtf: -1,
             available: false,
@@ -90,6 +90,7 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
 
     useEffect(() => {
         if (!open) return;
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- 对话框打开时用 props 初始化局部 state（既有模式；重构会改变打开时序）
         setPhase("idle");
         setResult(null);
         setErrorText("");
@@ -214,7 +215,9 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                                                     <td style={{ padding: "6px 12px" }}>
                                                         <Flex align="center" gap="1">
                                                             {isFastest && (
-                                                                <span title="Fastest">⚡</span>
+                                                                <span data-tooltip="Fastest">
+                                                                    ⚡
+                                                                </span>
                                                             )}
                                                             <span
                                                                 style={{
@@ -266,7 +269,7 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                                 </Text>
                             )}
 
-                            {/* GPU (OpenCL) available but benchmark failed */}
+                            {/* GPU (WebGPU) available but benchmark failed */}
                             {gpuFailed && (
                                 <Flex
                                     direction="column"
@@ -288,6 +291,19 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                                     <Text size="1" style={{ color: "var(--red-9)" }}>
                                         {t("benchmark_gpu_failed_desc")}
                                     </Text>
+                                    {result.gpuError && (
+                                        <Text
+                                            size="1"
+                                            style={{
+                                                color: "var(--red-9)",
+                                                fontFamily: "monospace",
+                                                whiteSpace: "pre-wrap",
+                                                wordBreak: "break-word",
+                                            }}
+                                        >
+                                            {result.gpuError}
+                                        </Text>
+                                    )}
                                 </Flex>
                             )}
 
@@ -322,8 +338,7 @@ export function BenchmarkDialog({ open, onOpenChange }: BenchmarkDialogProps) {
                                 {result.availableProviders.join(", ") || "unknown"}
                             </Text>
                             <Text size="1" style={{ color: "var(--gray-9)" }}>
-                                {t("benchmark_ort_info_label")}{" "}
-                                {result.ortBuildInfo || "unknown"}
+                                {t("benchmark_ort_info_label")} {result.ortBuildInfo || "unknown"}
                             </Text>
 
                             {/* GPU enumeration */}

@@ -1,25 +1,300 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { registerDragAbort } from "./gestureFocusGuard";
 import { Flex, Box, Text, IconButton, Select } from "@radix-ui/themes";
 import { Cross2Icon, PlusIcon } from "@radix-ui/react-icons";
+import { shallowEqual } from "react-redux";
 import type { TrackInfo, TrackMeterInfo } from "../../../features/session/sessionTypes";
-import { isNoneBinding, isModifierActive } from "../../../features/keybindings/keybindingsSlice";
+import {
+    isNoneBinding,
+    isModifierActive,
+    selectKeybinding,
+    formatKeybinding,
+} from "../../../features/keybindings/keybindingsSlice";
 import type { Keybinding } from "../../../features/keybindings/types";
 import type { MessageKey } from "../../../i18n/messages";
+import { useAppSelector } from "../../../app/hooks";
+import { useVisualPlayhead } from "../../../hooks/useVisualPlayhead";
+import { formatCursorTime } from "./timeFormat";
+import type { TimeFormatContext } from "./timeFormat";
 import { MAX_ROW_HEIGHT, MIN_ROW_HEIGHT, TRACK_ADD_ROW_HEIGHT } from "./constants";
+import { advanceFineAxisDrag, type FineAxisDragState } from "./fineAxisDrag";
+import { AppTooltipBubble } from "../../AppTooltip";
+import { TempoMapCornerButton } from "./TempoMapCornerButton";
+import { formatGainDbValue } from "./math";
 import { computeVisibleTrackWindow } from "./runtime/timelineWindowing";
+import { normalizedTrackColorCss } from "./runtime/timelineCanvasStyle";
+import { useAppTheme } from "../../../theme/AppThemeProvider";
 
-/** Color palette options shown when creating a new track. */
+/** Color palette options shown when creating a new track.
+ * 色值选取与归一化带（s 0.30-0.46、感知亮度 0.50-0.60）对齐：暖色系
+ * （橙/黄/红）取更亮的原色，避免亮度归一化把它们抬成"洗白"的粉调；
+ * 灰色为默认轨道色。 */
 const TRACK_COLOR_PALETTE_KEYS: { value: string; key: MessageKey }[] = [
-    { value: "#6f8fa9", key: "color_blue" },
-    { value: "#8c7fa3", key: "color_purple" },
-    { value: "#6f9581", key: "color_green" },
-    { value: "#aa7f67", key: "color_orange" },
-    { value: "#9a6f82", key: "color_pink" },
-    { value: "#6e95a0", key: "color_sky_blue" },
-    { value: "#a39061", key: "color_yellow" },
-    { value: "#996d68", key: "color_red" },
+    { value: "#74787e", key: "color_gray" },
+    { value: "#4a8fd1", key: "color_blue" },
+    { value: "#7b6bc4", key: "color_purple" },
+    { value: "#43a875", key: "color_green" },
+    { value: "#d68a52", key: "color_orange" },
+    { value: "#d982a8", key: "color_pink" },
+    { value: "#bb5fae", key: "color_magenta" },
+    { value: "#d4bc55", key: "color_yellow" },
+    { value: "#cf5252", key: "color_red" },
 ];
 const PITCH_ANALYSIS_ALGO_OPTIONS = ["world_dll", "nsf_hifigan_onnx", "vslib", "none"] as const;
+
+function splitDigitRuns(text: string): Array<{ text: string; digits: boolean }> {
+    const parts: Array<{ text: string; digits: boolean }> = [];
+    let current = "";
+    let currentDigits = false;
+    const flush = () => {
+        if (current.length > 0) {
+            parts.push({ text: current, digits: currentDigits });
+            current = "";
+        }
+    };
+    for (const ch of text) {
+        const isDigit = ch >= "0" && ch <= "9";
+        if (isDigit !== currentDigits) {
+            flush();
+            currentDigits = isDigit;
+        }
+        current += ch;
+    }
+    flush();
+    return parts;
+}
+
+/**
+ * 将时间文本中的每个数字放入固定宽度的槽位（宽度按当前字体测量），
+ * 非数字字符保持自然宽度。这样即使使用不等宽字体，数字变化时文本也不会左右晃动。
+ */
+const SlotTimeText = React.memo(function SlotTimeText({
+    text,
+    digitWidthPx,
+    className,
+    style,
+    tooltip,
+    selectable = false,
+}: {
+    text: string;
+    digitWidthPx: number | null;
+    className?: string;
+    style?: React.CSSProperties;
+    tooltip?: string;
+    /** 允许用户选择这段文本（显式覆盖全局 DAW 禁用文本选择的策略） */
+    selectable?: boolean;
+}) {
+    const parts = React.useMemo(() => splitDigitRuns(text), [text]);
+    return (
+        <Text
+            size="2"
+            weight="medium"
+            className={selectable ? `${className ?? ""} cursor-text` : className}
+            style={
+                selectable
+                    ? {
+                          ...style,
+                          userSelect: "text",
+                          WebkitUserSelect: "text",
+                      }
+                    : style
+            }
+            data-tooltip={tooltip}
+            data-hs-selectable={selectable ? "true" : undefined}
+            onDoubleClick={
+                selectable
+                    ? (event) => {
+                          // 文本被拆成了多个数字槽位 span，原生双击只会选中一个词；
+                          // 这里显式选中整个时间字符串，保证"双击全选"在 WebView 中稳定工作。
+                          event.preventDefault();
+                          event.stopPropagation();
+                          const selection = window.getSelection();
+                          if (!selection) return;
+                          const range = document.createRange();
+                          range.selectNodeContents(event.currentTarget);
+                          selection.removeAllRanges();
+                          selection.addRange(range);
+                      }
+                    : undefined
+            }
+        >
+            {parts.map((part, index) =>
+                part.digits && digitWidthPx != null && digitWidthPx > 0 ? (
+                    <React.Fragment key={index}>
+                        {part.text.split("").map((ch, chIndex) => (
+                            <span
+                                key={chIndex}
+                                style={{
+                                    display: "inline-block",
+                                    width: digitWidthPx,
+                                    textAlign: "center",
+                                }}
+                            >
+                                {ch}
+                            </span>
+                        ))}
+                    </React.Fragment>
+                ) : (
+                    <span key={index}>{part.text}</span>
+                ),
+            )}
+        </Text>
+    );
+});
+
+const TrackHeaderPlayheadTime = React.memo(function TrackHeaderPlayheadTime() {
+    const selector = useAppSelector(
+        (state) => ({
+            playheadSec: state.session.playheadSec,
+            isPlaying: state.session.runtime.isPlaying,
+            playbackPositionSec: state.session.runtime.playbackPositionSec,
+            primaryTimeUnit: state.session.primaryTimeUnit,
+            secondaryTimeUnit: state.session.secondaryTimeUnit,
+            bpm: state.session.bpm,
+            beats: state.session.beats,
+            grid: state.session.grid,
+            projectSec: state.session.projectSec,
+            show: state.session.showPlayheadTimeInTrackHeader,
+            tempoMap: state.session.tempoMap,
+        }),
+        shallowEqual,
+    );
+    const [visualSec, setVisualSec] = useState(selector.playheadSec);
+    const isTransportAdvancing = selector.isPlaying && selector.playbackPositionSec > 1e-4;
+    useVisualPlayhead({
+        syncedPlayheadSec: selector.playheadSec,
+        isTransportAdvancing,
+        onFrame: React.useCallback((sec: number) => setVisualSec(sec), []),
+    });
+    const timeContext = React.useMemo<TimeFormatContext>(
+        () => ({
+            bpm: selector.bpm,
+            beatsPerBar: Math.max(1, Math.round(selector.beats || 4)),
+            grid: selector.grid,
+            tempoMap: selector.tempoMap,
+        }),
+        [selector.bpm, selector.beats, selector.grid, selector.tempoMap],
+    );
+    const formatted = React.useMemo(
+        () =>
+            formatCursorTime(
+                selector.primaryTimeUnit,
+                selector.secondaryTimeUnit,
+                visualSec,
+                timeContext,
+            ),
+        [selector.primaryTimeUnit, selector.secondaryTimeUnit, visualSec, timeContext],
+    );
+    // 为光标时间文本预留固定宽度，并把每个数字放进等宽槽位：
+    // 宽度按“当前时间单位下的最长可能文本”用真实字体度量，字体仍完全跟随用户自定义字体。
+    const maxLabelSpanRef = useRef<HTMLSpanElement | null>(null);
+    const digitProbeRef = useRef<HTMLSpanElement | null>(null);
+    const [boxWidth, setBoxWidth] = useState<number | null>(null);
+    const [digitWidth, setDigitWidth] = useState<number | null>(null);
+    const maxLabel = React.useMemo(() => {
+        const maxSec = Math.max(1, selector.projectSec, selector.playheadSec);
+        return formatCursorTime(
+            selector.primaryTimeUnit,
+            selector.secondaryTimeUnit,
+            maxSec,
+            timeContext,
+        ).combined;
+    }, [
+        selector.primaryTimeUnit,
+        selector.secondaryTimeUnit,
+        selector.projectSec,
+        selector.playheadSec,
+        timeContext,
+    ]);
+
+    const updateDigitWidth = React.useCallback(() => {
+        const probe = digitProbeRef.current;
+        if (!probe) return;
+        const font = window.getComputedStyle(probe).font;
+        const probeWidth = probe.getBoundingClientRect().width;
+        const canvas = document.createElement("canvas");
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+            setDigitWidth(probeWidth);
+            return;
+        }
+        ctx.font = font;
+        let max = 0;
+        for (const digit of "0123456789") {
+            max = Math.max(max, ctx.measureText(digit).width);
+        }
+        // 槽位宽度至少不能小于页面中“0”的真实渲染宽度，避免个别字体下墨迹溢出。
+        const slotWidth = Math.max(max, probeWidth);
+        setDigitWidth((prev) =>
+            prev != null && Math.abs(prev - slotWidth) < 0.01 ? prev : slotWidth,
+        );
+    }, []);
+
+    useLayoutEffect(() => {
+        const el = maxLabelSpanRef.current;
+        if (!el) return;
+        const update = () => {
+            const width = el.getBoundingClientRect().width;
+            // 预留缓冲：既避免亚像素/墨迹溢出被裁掉，也让时间文本两侧不显得拥挤。
+            const paddedWidth = Math.ceil(width) + 12;
+            setBoxWidth((prev) =>
+                prev != null && Math.abs(prev - paddedWidth) < 0.01 ? prev : paddedWidth,
+            );
+        };
+        update();
+        if (typeof ResizeObserver !== "undefined") {
+            const observer = new ResizeObserver(update);
+            observer.observe(el);
+            return () => observer.disconnect();
+        }
+    }, [maxLabel]);
+
+    useLayoutEffect(() => {
+        const probe = digitProbeRef.current;
+        if (!probe) return;
+        updateDigitWidth();
+        if (typeof ResizeObserver !== "undefined") {
+            const observer = new ResizeObserver(updateDigitWidth);
+            observer.observe(probe);
+            return () => observer.disconnect();
+        }
+        if (document.fonts?.ready) {
+            void document.fonts.ready.then(updateDigitWidth);
+        }
+    }, [updateDigitWidth]);
+
+    if (!selector.show) return null;
+    return (
+        <div className="min-w-0 flex-1 flex justify-end" data-playhead-sec={visualSec.toFixed(6)}>
+            <span
+                ref={maxLabelSpanRef}
+                aria-hidden
+                className="absolute invisible whitespace-nowrap"
+            >
+                <SlotTimeText text={maxLabel} digitWidthPx={digitWidth} className="tabular-nums" />
+            </span>
+            <Text
+                ref={digitProbeRef}
+                size="2"
+                weight="medium"
+                aria-hidden
+                className="absolute invisible whitespace-nowrap tabular-nums"
+            >
+                0
+            </Text>
+            <SlotTimeText
+                text={formatted.combined}
+                digitWidthPx={digitWidth}
+                selectable
+                className="tabular-nums text-qt-text text-right leading-none whitespace-nowrap shrink-0"
+                style={
+                    boxWidth != null ? { minWidth: boxWidth, display: "inline-block" } : undefined
+                }
+                tooltip={formatted.combined}
+            />
+        </div>
+    );
+});
 
 const TRACK_METER_MIN_DB = -48;
 const TRACK_METER_MAX_DB = 3;
@@ -29,31 +304,6 @@ const TRACK_GAIN_WHEEL_STEP_DB = 0.5;
 const TRACK_GAIN_WHEEL_FINE_STEP_DB = 0.1;
 const TRACK_GAIN_WHEEL_COMMIT_DEBOUNCE_MS = 120;
 const TRACK_GAIN_DRAG_DB_PER_PX = 0.2;
-const TRACK_GAIN_DRAG_FINE_SCALE = 0.2;
-const TRACK_GAIN_DRAG_FINE_PULLBACK_RATIO = 0.35;
-
-type FineAxisDragState = {
-    raw: number;
-    adjusted: number;
-    fineActive: boolean;
-};
-
-function advanceFineAxisDrag(
-    state: FineAxisDragState,
-    nextRaw: number,
-    fineActive: boolean,
-): number {
-    const delta = nextRaw - state.raw;
-    if (fineActive && !state.fineActive) {
-        state.adjusted += delta * (1 - TRACK_GAIN_DRAG_FINE_PULLBACK_RATIO);
-    } else {
-        const scale = fineActive ? TRACK_GAIN_DRAG_FINE_SCALE : 1;
-        state.adjusted += delta * scale;
-    }
-    state.raw = nextRaw;
-    state.fineActive = fineActive;
-    return state.adjusted;
-}
 
 function gainToDb(gain: number): number {
     if (!Number.isFinite(gain) || gain <= 1e-4) return TRACK_GAIN_MIN_DB;
@@ -127,6 +377,13 @@ type TrackListProps = {
         targetIndex: number;
         parentTrackId: string | null;
     }) => void;
+    /** “复制拖动”修饰键：按住时拖拽轨道头 = 在放置位置克隆轨道。 */
+    copyDragKb?: Keybinding;
+    onDuplicateTrackTo?: (payload: {
+        trackId: string;
+        targetIndex: number;
+        parentTrackId: string | null;
+    }) => void;
     onToggleMute: (trackId: string, nextMuted: boolean) => void;
     onToggleSolo: (trackId: string, nextSolo: boolean) => void;
     onToggleCompose: (trackId: string, nextComposeEnabled: boolean) => void;
@@ -139,8 +396,14 @@ type TrackListProps = {
     onTrackNameChange?: (trackId: string, name: string) => void;
     onDuplicateTrack?: (trackId: string) => void;
     onScrollTopChange?: (scrollTop: number) => void;
-    /** 外部持有该滚动容器的 ref，用于同步右侧轨道区的竖向滚�?*/
+    /** 外部持有该滚动容器的 ref，用于同步右侧轨道区的竖向滚动。 */
     listScrollRef?: React.MutableRefObject<HTMLDivElement | null>;
+    /** 顶部角落高度（与右侧时间标尺对齐；Tempo Map 行可见时增高）。 */
+    headerHeight?: number;
+    /** 底部占位条高度（= 右侧时间轴水平滚动条的占用高度，由 TimelinePanel
+     * 实测传入）。轨道头列表底部留出同高空间后，两侧竖直滚动范围一致，
+     * 滚动到底时轨道行与时间轴区域严格对齐。 */
+    bottomGutterHeightPx?: number;
 };
 
 const TrackListInner: React.FC<TrackListProps> = ({
@@ -156,6 +419,8 @@ const TrackListInner: React.FC<TrackListProps> = ({
     onSelectTrack,
     onRemoveTrack,
     onMoveTrack,
+    copyDragKb,
+    onDuplicateTrackTo,
     onToggleMute,
     onToggleSolo,
     onToggleCompose,
@@ -169,8 +434,13 @@ const TrackListInner: React.FC<TrackListProps> = ({
     onDuplicateTrack,
     onScrollTopChange,
     listScrollRef,
+    headerHeight = 48,
+    bottomGutterHeightPx = 0,
 }) => {
     const listRef = useRef<HTMLDivElement | null>(null);
+    // 轨道头色条/取色预览需要和时间线画布同一套主题化轨道色。
+    const { mode } = useAppTheme();
+    const darkMode = mode === "dark";
     const rowHeightRef = useRef(rowHeight);
     const pendingVerticalZoomRef = useRef<{
         nextRowHeight: number;
@@ -198,6 +468,12 @@ const TrackListInner: React.FC<TrackListProps> = ({
         indicatorY: number | null;
     } | null>(null);
     const volumeCommitTimersRef = useRef<Record<string, number>>({});
+    const [volumeHoveredTrackId, setVolumeHoveredTrackId] = useState<string | null>(null);
+    const [volumeTooltipPos, setVolumeTooltipPos] = useState<{ x: number; y: number } | null>(null);
+    const [volumeDrag, setVolumeDrag] = useState<{ trackId: string; baseDb: number } | null>(null);
+    const [editingGainTrackId, setEditingGainTrackId] = useState<string | null>(null);
+    const [editingGainValue, setEditingGainValue] = useState("");
+    const editingGainInputRef = useRef<HTMLInputElement | null>(null);
 
     // 轨道颜色选择器弹出状�?
     const [colorPickerTrackId, setColorPickerTrackId] = useState<string | null>(null);
@@ -216,6 +492,17 @@ const TrackListInner: React.FC<TrackListProps> = ({
     const trackCtxMenuRef = useRef<HTMLDivElement | null>(null);
     const [listScrollTop, setListScrollTop] = useState(0);
     const [listViewportHeight, setListViewportHeight] = useState(0);
+
+    // 轨道右键菜单的快捷键提示（随用户在快捷键设置中的自定义绑定实时变化）。
+    const trackAddShortcut = useAppSelector((s) =>
+        formatKeybinding(selectKeybinding(s, "track.add"), ""),
+    );
+    const trackCloneShortcut = useAppSelector((s) =>
+        formatKeybinding(selectKeybinding(s, "track.clone"), ""),
+    );
+    const trackDeleteShortcut = useAppSelector((s) =>
+        formatKeybinding(selectKeybinding(s, "track.delete"), ""),
+    );
 
     // 自动修正菜单溢出屏幕
     useLayoutEffect(() => {
@@ -252,6 +539,25 @@ const TrackListInner: React.FC<TrackListProps> = ({
         }
         setEditingTrackId(null);
     }
+
+    // 名称编辑中：点击输入框以外的任意位置都视为确认并退出编辑。
+    // 时间轴画布等区域会在自身的 pointerdown 处理里 preventDefault，
+    // 导致输入框收不到 blur 事件；因此这里用 window 捕获阶段的全局
+    // 监听兜底，保证点击界面任何其他位置都能确认并退出编辑框。
+    const commitTrackNameRef = useRef(commitTrackName);
+    useEffect(() => {
+        commitTrackNameRef.current = commitTrackName;
+    });
+    useEffect(() => {
+        if (!editingTrackId) return;
+        const handler = (e: PointerEvent) => {
+            const target = e.target as Node | null;
+            if (target && nameInputRef.current?.contains(target)) return;
+            commitTrackNameRef.current();
+        };
+        window.addEventListener("pointerdown", handler, true);
+        return () => window.removeEventListener("pointerdown", handler, true);
+    }, [editingTrackId]);
 
     // 点击其他区域关闭颜色选择�?
     useEffect(() => {
@@ -426,6 +732,30 @@ const TrackListInner: React.FC<TrackListProps> = ({
         volumeCommitTimersRef.current[trackId] = timerId;
     }
 
+    function beginTrackGainEdit(trackId: string, volume: number) {
+        const db = clampGainDb(gainToDb(volume));
+        setEditingGainTrackId(trackId);
+        setEditingGainValue(db.toFixed(1));
+    }
+
+    function commitTrackGainEdit() {
+        if (!editingGainTrackId) return;
+        const trackId = editingGainTrackId;
+        const parsed = parseFloat(editingGainValue);
+        if (!isNaN(parsed)) {
+            const nextDb = clampGainDb(parsed);
+            const nextVolume = dbToGain(nextDb);
+            clearPendingVolumeCommit(trackId);
+            onVolumeUiChange(trackId, nextVolume);
+            onVolumeCommit(trackId, nextVolume);
+        }
+        setEditingGainTrackId(null);
+    }
+
+    function cancelTrackGainEdit() {
+        setEditingGainTrackId(null);
+    }
+
     useEffect(() => {
         rowHeightRef.current = rowHeight;
     }, [rowHeight]);
@@ -510,7 +840,9 @@ const TrackListInner: React.FC<TrackListProps> = ({
 
         try {
             (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-        } catch {}
+        } catch {
+            // Pointer capture can fail in some WebView/edge cases; panning still works.
+        }
 
         function onMove(ev: PointerEvent) {
             const pan = panRef.current;
@@ -521,17 +853,28 @@ const TrackListInner: React.FC<TrackListProps> = ({
             onScrollTopChange?.(cur.scrollTop);
         }
 
-        function end(ev: PointerEvent) {
+        function finish() {
             const pan = panRef.current;
             if (!pan) return;
-            if (pan.pointerId != null && ev.pointerId !== pan.pointerId) return;
             panRef.current = null;
+            unregisterAbort(); // 收尾第一步注销失焦守卫（幂等防双触发）
             document.body.style.cursor = prevCursor;
             document.body.style.userSelect = prevSelect;
             window.removeEventListener("pointermove", onMove);
             window.removeEventListener("pointerup", end);
             window.removeEventListener("pointercancel", end);
         }
+
+        function end(ev: PointerEvent) {
+            const pan = panRef.current;
+            if (!pan) return;
+            if (pan.pointerId != null && ev.pointerId !== pan.pointerId) return;
+            finish();
+        }
+
+        // 失焦取消：切屏期间 pointerup/pointercancel 不送达本窗口，blur 时
+        // 走与 end 相同的收尾 —— 关键：复位 body 的 grabbing 光标与 userSelect。
+        const unregisterAbort = registerDragAbort(finish);
 
         window.addEventListener("pointermove", onMove);
         window.addEventListener("pointerup", end);
@@ -633,6 +976,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
         return () => {
             el.removeEventListener("wheel", handler);
         };
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- scheduleVolumeCommit 为渲染期新建的普通函数，加入依赖会让 wheel 监听每次渲染重建（既有模式）
     }, [
         currentTrackVolumeById,
         onScrollTopChange,
@@ -689,8 +1033,12 @@ const TrackListInner: React.FC<TrackListProps> = ({
         e.stopPropagation();
         clearPendingVolumeCommit(trackId);
 
+        const knobEl = e.currentTarget;
         const startY = e.clientY;
         const startDb = clampGainDb(gainToDb(volume));
+        setVolumeDrag({ trackId, baseDb: startDb });
+        setVolumeHoveredTrackId(trackId);
+        setVolumeTooltipPos({ x: e.clientX, y: e.clientY });
         let lastDb = startDb;
         const fineAxisState: FineAxisDragState = {
             raw: startY,
@@ -699,6 +1047,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
         };
 
         const onMove = (ev: PointerEvent) => {
+            setVolumeTooltipPos({ x: ev.clientX, y: ev.clientY });
             const adjustedY = advanceFineAxisDrag(
                 fineAxisState,
                 ev.clientY,
@@ -711,12 +1060,37 @@ const TrackListInner: React.FC<TrackListProps> = ({
             onVolumeUiChange(trackId, dbToGain(nextDb));
         };
 
-        const onEnd = () => {
+        // 失焦取消：切屏期间 pointerup/pointercancel 不送达本窗口，blur 时以
+        // 最后一次音量值收尾提交（与 pointerup 语义一致），并复位悬停/拖拽态。
+        let finished = false;
+        const tearDown = () => {
+            unregisterAbort();
             window.removeEventListener("pointermove", onMove);
             window.removeEventListener("pointerup", onEnd);
             window.removeEventListener("pointercancel", onEnd);
+            setVolumeDrag(null);
             onVolumeCommit(trackId, dbToGain(lastDb));
         };
+        const finish = () => {
+            if (finished) return;
+            finished = true;
+            // 失去焦点时指针必然离开旋钮，按"不在旋钮上"处理。
+            setVolumeHoveredTrackId(null);
+            tearDown();
+        };
+        const onEnd = (ev: PointerEvent) => {
+            if (finished) return;
+            finished = true;
+            const knobRect = knobEl.getBoundingClientRect();
+            const stillOverKnob =
+                ev.clientX >= knobRect.left &&
+                ev.clientX <= knobRect.right &&
+                ev.clientY >= knobRect.top &&
+                ev.clientY <= knobRect.bottom;
+            setVolumeHoveredTrackId(stillOverKnob ? trackId : null);
+            tearDown();
+        };
+        const unregisterAbort = registerDragAbort(finish);
 
         window.addEventListener("pointermove", onMove);
         window.addEventListener("pointerup", onEnd);
@@ -727,6 +1101,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
         draggingTrackId: string,
         clientX: number,
         clientY: number,
+        copyMode = false,
     ): {
         parentTrackId: string | null;
         targetIndex: number;
@@ -734,6 +1109,10 @@ const TrackListInner: React.FC<TrackListProps> = ({
     } {
         const el = listRef.current;
         const bounds = el?.getBoundingClientRect();
+
+        // 复制模式下源轨道原地不动、仍在列表中，因此同级列表不做剔除，
+        // 插入索引直接对应可见行缝；后端“先克隆（紧贴源）再移动到
+        // target_index”的组合会把它映射到完全相同的位置。
 
         // 当鼠标在列表容器上方时，直接插入到顶层第一个位�?
         if (bounds && clientY < bounds.top && tracks.length > 0) {
@@ -748,7 +1127,9 @@ const TrackListInner: React.FC<TrackListProps> = ({
 
         // Dropping outside -> append as root.
         if (!over) {
-            const roots = siblingsOf(null).filter((id) => id !== draggingTrackId);
+            const roots = copyMode
+                ? siblingsOf(null)
+                : siblingsOf(null).filter((id) => id !== draggingTrackId);
             return {
                 parentTrackId: null,
                 targetIndex: roots.length,
@@ -762,7 +1143,8 @@ const TrackListInner: React.FC<TrackListProps> = ({
 
         if (nest) {
             const parentTrackId = over.id;
-            if (wouldCreateCycle(draggingTrackId, parentTrackId)) {
+            // 复制模式不存在自嵌套环（克隆尚未入树），无需环检测。
+            if (!copyMode && wouldCreateCycle(draggingTrackId, parentTrackId)) {
                 const roots = siblingsOf(null).filter((id) => id !== draggingTrackId);
                 return {
                     parentTrackId: null,
@@ -770,7 +1152,9 @@ const TrackListInner: React.FC<TrackListProps> = ({
                     mode: "reorder",
                 };
             }
-            const children = siblingsOf(parentTrackId).filter((id) => id !== draggingTrackId);
+            const children = copyMode
+                ? siblingsOf(parentTrackId)
+                : siblingsOf(parentTrackId).filter((id) => id !== draggingTrackId);
             return {
                 parentTrackId,
                 targetIndex: children.length,
@@ -779,22 +1163,35 @@ const TrackListInner: React.FC<TrackListProps> = ({
         }
 
         let parentTrackId = over.parentId ?? null;
-        if (wouldCreateCycle(draggingTrackId, parentTrackId)) {
+        if (!copyMode && wouldCreateCycle(draggingTrackId, parentTrackId)) {
             parentTrackId = null;
         }
 
-        if (over.id === draggingTrackId) {
+        if (over.id === draggingTrackId && !copyMode) {
             const siblingsIncl = siblingsOf(parentTrackId);
             const indexSelf = Math.max(0, siblingsIncl.indexOf(draggingTrackId));
             return { parentTrackId, targetIndex: indexSelf, mode: "reorder" };
         }
 
-        const siblings = siblingsOf(parentTrackId).filter((id) => id !== draggingTrackId);
+        const siblings = copyMode
+            ? siblingsOf(parentTrackId)
+            : siblingsOf(parentTrackId).filter((id) => id !== draggingTrackId);
         const baseIndex = Math.max(0, siblings.indexOf(over.id));
         // 使用 35% 边缘区域：上 35% 插入到上方，�?35% 插入到下方，中间 30% 保持不动
         const edgeZone = rowHeight * 0.35;
         const insertAfter = yInRow > rowHeight - edgeZone;
         const insertBefore = yInRow < edgeZone;
+
+        if (copyMode) {
+            // 复制模式：每次放置都产生一个克隆。落在目标行上缘 → 插到它前面；
+            // 中间与下缘 → 插到它后面（含源轨道自身行，即“复制到源下方”）。
+            return {
+                parentTrackId,
+                targetIndex: Math.min(siblings.length, baseIndex + (insertBefore ? 0 : 1)),
+                mode: "reorder",
+            };
+        }
+
         // 如果鼠标在中间区域，保持原位不触发重�?
         if (!insertAfter && !insertBefore) {
             const siblingsIncl = siblingsOf(parentTrackId);
@@ -823,12 +1220,41 @@ const TrackListInner: React.FC<TrackListProps> = ({
         [tracks, visibleTrackWindow.endIndex, visibleTrackWindow.startIndex],
     );
 
+    const buildVolumeTooltip = (trackId: string, volume: number): string => {
+        const db = clampGainDb(gainToDb(volume));
+        if (volumeDrag && volumeDrag.trackId === trackId) {
+            return t("gain_value_tooltip_drag")
+                .replace("{gain}", formatGainDbValue(db))
+                .replace("{delta}", formatGainDbValue(db - volumeDrag.baseDb));
+        }
+        return t("gain_value_tooltip").replace("{gain}", formatGainDbValue(db));
+    };
+
+    const volumeTooltipTrackId = volumeDrag?.trackId ?? volumeHoveredTrackId;
+    const volumeTooltipTrack = volumeTooltipTrackId
+        ? tracks.find((tr) => tr.id === volumeTooltipTrackId)
+        : null;
+    const volumeTooltipText =
+        volumeTooltipTrackId && volumeTooltipTrack
+            ? buildVolumeTooltip(
+                  volumeTooltipTrackId,
+                  currentTrackVolumeById[volumeTooltipTrackId] ?? 1,
+              )
+            : "";
+    const showVolumeTooltip = volumeTooltipTrackId != null && volumeTooltipPos != null;
+
     return (
         <Flex direction="column" className="w-64 border-r border-qt-border bg-qt-window shrink-0">
-            <Box className="h-6 border-b border-qt-border px-2 flex items-center bg-qt-window shadow-sm z-10">
-                <Text size="1" weight="bold" color="gray">
+            <Box
+                className="border-b border-qt-border px-2 flex items-center justify-between gap-2 bg-qt-window shadow-sm z-10 relative"
+                style={{ height: headerHeight }}
+            >
+                <Text size="2" weight="bold" color="gray" className="shrink-0">
                     {t("tracks")}
                 </Text>
+                <TrackHeaderPlayheadTime />
+                {/* 速度映射小按钮（右下角）：显示/创建 或 清空/隐藏。 */}
+                <TempoMapCornerButton />
             </Box>
             <div
                 ref={(el) => {
@@ -910,6 +1336,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                 volumeDb >= 0
                                     ? (volumeDb / TRACK_GAIN_MAX_DB) * 135
                                     : (volumeDb / Math.abs(TRACK_GAIN_MIN_DB)) * 135;
+                            const volumeTooltip = buildVolumeTooltip(track.id, volume);
 
                             const guideLines = depth > 0 ? Array.from({ length: depth }) : [];
 
@@ -966,9 +1393,15 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                         const prevCursor = document.body.style.cursor;
                                         const prevSelect = document.body.style.userSelect;
 
+                                        let lastClientX = e.clientX;
+                                        let lastClientY = e.clientY;
+
                                         function onMove(ev: PointerEvent) {
                                             const drag = dragRef.current;
                                             if (!drag || drag.pointerId !== e.pointerId) return;
+
+                                            lastClientX = ev.clientX;
+                                            lastClientY = ev.clientY;
 
                                             if (!drag.hasMoved) {
                                                 const dx = ev.clientX - drag.startClientX;
@@ -981,10 +1414,18 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                 document.body.style.userSelect = "none";
                                             }
 
+                                            // 复制拖动修饰键按住时：预览与放置都按
+                                            // “源轨道不剔除”的复制索引计算。
+                                            const copyMode = Boolean(
+                                                copyDragKb &&
+                                                isModifierActive(copyDragKb, ev) &&
+                                                onDuplicateTrackTo,
+                                            );
                                             const spec = computeDropSpec(
                                                 drag.trackId,
                                                 ev.clientX,
                                                 ev.clientY,
+                                                copyMode,
                                             );
                                             const overInfo = trackAtClientY(ev.clientY);
                                             const over = overInfo.track;
@@ -1029,11 +1470,11 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                             });
                                         }
 
-                                        function end(ev: PointerEvent) {
+                                        function finish() {
                                             const drag = dragRef.current;
-                                            if (!drag || drag.pointerId !== e.pointerId) return;
+                                            if (!drag) return;
                                             dragRef.current = null;
-
+                                            unregisterAbort(); // 收尾第一步注销失焦守卫
                                             window.removeEventListener("pointermove", onMove);
                                             window.removeEventListener("pointerup", end);
                                             window.removeEventListener("pointercancel", end);
@@ -1048,11 +1489,29 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                 return;
                                             }
 
+                                            // 与预览一致：按复制/移动语义计算放置位置
+                                            // （blur 收尾用最后一次已知指针位置；修饰键
+                                            // 以按下瞬间的状态为准 —— 失焦时没有可信的实时按键）。
+                                            const copyActive = Boolean(
+                                                copyDragKb && isModifierActive(copyDragKb, e),
+                                            );
                                             const spec = computeDropSpec(
                                                 drag.trackId,
-                                                ev.clientX,
-                                                ev.clientY,
+                                                lastClientX,
+                                                lastClientY,
+                                                copyActive && onDuplicateTrackTo != null,
                                             );
+
+                                            // “复制拖动”修饰键按住时：在放置位置克隆轨道
+                                            // （克隆子树移动到拖放位置），源轨道保持原位。
+                                            if (copyActive && onDuplicateTrackTo) {
+                                                onDuplicateTrackTo({
+                                                    trackId: drag.trackId,
+                                                    targetIndex: spec.targetIndex,
+                                                    parentTrackId: spec.parentTrackId,
+                                                });
+                                                return;
+                                            }
 
                                             if (
                                                 spec.parentTrackId === drag.originalParentId &&
@@ -1068,16 +1527,33 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                             });
                                         }
 
+                                        function end(ev: PointerEvent) {
+                                            const drag = dragRef.current;
+                                            if (!drag || drag.pointerId !== e.pointerId) return;
+                                            lastClientX = ev.clientX;
+                                            lastClientY = ev.clientY;
+                                            finish();
+                                        }
+
+                                        // 失焦取消：切屏期间 pointerup/pointercancel 不送达
+                                        // 本窗口，blur 时走与 end 相同的收尾（含光标复位）。
+                                        const unregisterAbort = registerDragAbort(finish);
+
                                         window.addEventListener("pointermove", onMove);
                                         window.addEventListener("pointerup", end);
                                         window.addEventListener("pointercancel", end);
                                     }}
                                 >
-                                    {/* Always-visible left accent bar (pinned to list edge) */}
+                                    {/* Always-visible left accent bar (pinned to list edge).
+                                        显示归一化轨道色：与时间线 Clip 色块同源，
+                                        挑的颜色与实际出现的颜色严格一致。 */}
                                     <div
                                         className={`absolute left-0 top-0 bottom-0 w-1 transition-opacity ${selected ? "opacity-100" : "opacity-80 group-hover:opacity-90"}`}
                                         style={{
-                                            backgroundColor: track.color || "var(--qt-highlight)",
+                                            backgroundColor:
+                                                track.color != null
+                                                    ? normalizedTrackColorCss(track.color, darkMode)
+                                                    : normalizedTrackColorCss(undefined, darkMode),
                                         }}
                                     />
 
@@ -1115,7 +1591,15 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                             className={`absolute left-0 top-0 bottom-0 w-1 transition-opacity ${selected ? "opacity-100" : "opacity-10 group-hover:opacity-30"}`}
                                             style={{
                                                 backgroundColor:
-                                                    track.color || "var(--qt-highlight)",
+                                                    track.color != null
+                                                        ? normalizedTrackColorCss(
+                                                              track.color,
+                                                              darkMode,
+                                                          )
+                                                        : normalizedTrackColorCss(
+                                                              undefined,
+                                                              darkMode,
+                                                          ),
                                             }}
                                         />
 
@@ -1155,7 +1639,9 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                                     backgroundColor:
                                                                         track.color || "#4f8ef7",
                                                                 }}
-                                                                title={t("track_change_color")}
+                                                                data-tooltip={t(
+                                                                    "track_change_color",
+                                                                )}
                                                                 onPointerDown={(e) =>
                                                                     e.stopPropagation()
                                                                 }
@@ -1181,7 +1667,9 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                                         (opt) => (
                                                                             <button
                                                                                 key={opt.value}
-                                                                                title={t(opt.key)}
+                                                                                data-tooltip={t(
+                                                                                    opt.key,
+                                                                                )}
                                                                                 className={`w-4 h-4 rounded-full transition-transform hover:scale-125 ${
                                                                                     (track.color ||
                                                                                         "#4f8ef7") ===
@@ -1326,6 +1814,18 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                     onClick={(e) => e.stopPropagation()}
                                                     onDoubleClick={(e) => {
                                                         e.stopPropagation();
+                                                        const target =
+                                                            e.target instanceof HTMLElement
+                                                                ? e.target
+                                                                : null;
+                                                        if (
+                                                            target?.closest?.(
+                                                                "[data-track-gain-value]",
+                                                            )
+                                                        ) {
+                                                            beginTrackGainEdit(track.id, volume);
+                                                            return;
+                                                        }
                                                         clearPendingVolumeCommit(track.id);
                                                         onVolumeUiChange(track.id, 1);
                                                         onVolumeCommit(track.id, 1);
@@ -1335,9 +1835,27 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                         <button
                                                             type="button"
                                                             className="relative w-8 h-8 rounded-full border border-qt-border bg-qt-window hover:bg-qt-surface transition-colors shrink-0"
-                                                            title={formatGainLabel(volume)}
+                                                            aria-label={volumeTooltip}
                                                             data-track-volume-knob
                                                             data-track-id={track.id}
+                                                            onPointerEnter={(e) => {
+                                                                setVolumeHoveredTrackId(track.id);
+                                                                setVolumeTooltipPos({
+                                                                    x: e.clientX,
+                                                                    y: e.clientY,
+                                                                });
+                                                            }}
+                                                            onPointerMove={(e) => {
+                                                                setVolumeTooltipPos({
+                                                                    x: e.clientX,
+                                                                    y: e.clientY,
+                                                                });
+                                                            }}
+                                                            onPointerLeave={() => {
+                                                                setVolumeHoveredTrackId((prev) =>
+                                                                    prev === track.id ? null : prev,
+                                                                );
+                                                            }}
                                                             onPointerDown={(e) =>
                                                                 beginVolumeKnobDrag(
                                                                     e,
@@ -1354,17 +1872,61 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                                 }}
                                                             />
                                                         </button>
-                                                        <Text
-                                                            size="1"
-                                                            color={
-                                                                Math.abs(gainToDb(volume)) < 0.05
-                                                                    ? "blue"
-                                                                    : "gray"
-                                                            }
-                                                            className="leading-none tabular-nums select-none"
-                                                        >
-                                                            {formatGainLabel(volume)}
-                                                        </Text>
+                                                        {editingGainTrackId === track.id ? (
+                                                            <input
+                                                                ref={editingGainInputRef}
+                                                                className="w-14 text-xs rounded px-1 outline-none text-left tabular-nums bg-qt-base text-qt-text border border-qt-border"
+                                                                value={editingGainValue}
+                                                                onChange={(e) =>
+                                                                    setEditingGainValue(
+                                                                        e.target.value,
+                                                                    )
+                                                                }
+                                                                autoFocus
+                                                                onFocus={(e) =>
+                                                                    e.currentTarget.select()
+                                                                }
+                                                                onKeyDown={(e) => {
+                                                                    e.stopPropagation();
+                                                                    if (e.key === "Enter") {
+                                                                        commitTrackGainEdit();
+                                                                    }
+                                                                    if (e.key === "Escape") {
+                                                                        cancelTrackGainEdit();
+                                                                    }
+                                                                }}
+                                                                onBlur={commitTrackGainEdit}
+                                                                onPointerDown={(e) =>
+                                                                    e.stopPropagation()
+                                                                }
+                                                                onDoubleClick={(e) =>
+                                                                    e.stopPropagation()
+                                                                }
+                                                            />
+                                                        ) : (
+                                                            <Text
+                                                                size="1"
+                                                                color={
+                                                                    Math.abs(gainToDb(volume)) <
+                                                                    0.05
+                                                                        ? "iris"
+                                                                        : "gray"
+                                                                }
+                                                                /* 0.0 dB 用强调色标记"默认增益"，
+                                                                   highContrast 保证小字在面板底色上可读 */
+                                                                highContrast={
+                                                                    Math.abs(gainToDb(volume)) <
+                                                                    0.05
+                                                                }
+                                                                className="leading-none tabular-nums select-none"
+                                                                data-track-gain-value
+                                                                onPointerDown={(e) =>
+                                                                    e.stopPropagation()
+                                                                }
+                                                            >
+                                                                {formatGainLabel(volume)}
+                                                            </Text>
+                                                        )}
                                                     </Flex>
                                                 </div>
                                             </Flex>
@@ -1379,9 +1941,11 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                 {isRoot ? (
                                                     <IconButton
                                                         size="1"
-                                                        variant={composeEnabled ? "solid" : "ghost"}
-                                                        color={composeEnabled ? "blue" : "gray"}
-                                                        title={t("compose")}
+                                                        variant={
+                                                            composeEnabled ? "solid" : "surface"
+                                                        }
+                                                        color={composeEnabled ? "iris" : "gray"}
+                                                        data-tooltip={t("compose")}
                                                         onPointerDown={(e) => e.stopPropagation()}
                                                         onClick={(e) => {
                                                             e.stopPropagation();
@@ -1404,9 +1968,9 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                 )}
                                                 <IconButton
                                                     size="1"
-                                                    variant={muted ? "solid" : "ghost"}
+                                                    variant={muted ? "solid" : "surface"}
                                                     color={muted ? "red" : "gray"}
-                                                    title={
+                                                    data-tooltip={
                                                         muted ? t("clip_unmute") : t("clip_mute")
                                                     }
                                                     onPointerDown={(e) => e.stopPropagation()}
@@ -1425,9 +1989,9 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                 </IconButton>
                                                 <IconButton
                                                     size="1"
-                                                    variant={solo ? "solid" : "ghost"}
+                                                    variant={solo ? "solid" : "surface"}
                                                     color={solo ? "amber" : "gray"}
-                                                    title={t("solo")}
+                                                    data-tooltip={t("solo")}
                                                     onPointerDown={(e) => e.stopPropagation()}
                                                     onClick={(e) => {
                                                         e.stopPropagation();
@@ -1501,6 +2065,17 @@ const TrackListInner: React.FC<TrackListProps> = ({
                 </Flex>
             </div>
 
+            {/* 底部占位条：高度 = 右侧时间轴水平滚动条的占用高度（TimelinePanel
+                实测传入）。轨道头列表可视高度因此与时间轴区域一致，竖直滚动
+                范围相同——滚动到底时轨道行与时间轴严格对齐。 */}
+            {bottomGutterHeightPx > 0 ? (
+                <div
+                    aria-hidden
+                    className="shrink-0 border-t border-qt-border bg-qt-window pointer-events-none"
+                    style={{ height: bottomGutterHeightPx }}
+                />
+            ) : null}
+
             {/* 轨道右键菜单 */}
             {trackCtxMenu && (
                 <div
@@ -1512,35 +2087,54 @@ const TrackListInner: React.FC<TrackListProps> = ({
                     onPointerDown={(e) => e.stopPropagation()}
                 >
                     <button
-                        className="w-full text-left px-3 py-1.5 text-sm hover:bg-qt-button-hover transition-colors"
+                        className="w-full text-left px-3 py-1.5 text-sm hover:bg-qt-button-hover transition-colors flex items-center justify-between gap-3"
                         onClick={() => {
                             onCreateTrackBelow?.(trackCtxMenu.trackId);
                             setTrackCtxMenu(null);
                         }}
                     >
-                        {t("track_add")}
+                        <span>{t("track_add")}</span>
+                        {trackAddShortcut && (
+                            <span className="text-[10px] opacity-50 shrink-0">
+                                {trackAddShortcut}
+                            </span>
+                        )}
                     </button>
                     <button
-                        className="w-full text-left px-3 py-1.5 text-sm hover:bg-qt-button-hover transition-colors"
+                        className="w-full text-left px-3 py-1.5 text-sm hover:bg-qt-button-hover transition-colors flex items-center justify-between gap-3"
                         onClick={() => {
                             onDuplicateTrack?.(trackCtxMenu.trackId);
                             setTrackCtxMenu(null);
                         }}
                     >
-                        {t("track_clone")}
+                        <span>{t("track_clone")}</span>
+                        {trackCloneShortcut && (
+                            <span className="text-[10px] opacity-50 shrink-0">
+                                {trackCloneShortcut}
+                            </span>
+                        )}
                     </button>
                     <button
-                        className="w-full text-left px-3 py-1.5 text-sm hover:bg-qt-button-hover transition-colors text-red-400 hover:text-red-300"
+                        className="w-full text-left px-3 py-1.5 text-sm hover:bg-qt-button-hover transition-colors text-red-400 hover:text-red-300 flex items-center justify-between gap-3"
                         disabled={isLastRootTrack(trackCtxMenu.trackId)}
                         onClick={() => {
                             onRemoveTrack(trackCtxMenu.trackId);
                             setTrackCtxMenu(null);
                         }}
                     >
-                        {t("ctx_delete")}
+                        <span>{t("ctx_delete")}</span>
+                        {trackDeleteShortcut && (
+                            <span className="text-[10px] opacity-50 shrink-0">
+                                {trackDeleteShortcut}
+                            </span>
+                        )}
                     </button>
                 </div>
             )}
+            <AppTooltipBubble
+                text={volumeTooltipText}
+                position={showVolumeTooltip ? volumeTooltipPos : null}
+            />
         </Flex>
     );
 };

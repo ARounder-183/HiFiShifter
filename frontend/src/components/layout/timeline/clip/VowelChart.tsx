@@ -1,4 +1,6 @@
+/* eslint-disable react-refresh/only-export-components -- 文件同时导出组件与 Hook/常量（刷新边界按文件粒度接受） */
 import React from "react";
+import { registerDragAbort } from "../gestureFocusGuard";
 import { VOWEL_GUIDE_LINES, VOWEL_POINTS } from "./vowelChartLayout";
 import { formantChartPointerDownShouldPreventDefault } from "./clipFormantInteractionGuards";
 
@@ -97,11 +99,16 @@ export const VowelChart: React.FC<{
         };
         const onEnd = () => {
             draggingRef.current = false;
+            unregisterAbort();
         };
+        // 失焦取消：切屏期间 pointerup/pointercancel 不送达本窗口，blur 时
+        // 复位拖拽布尔（否则切回后任何鼠标移动都会持续改写共振峰）。
+        const unregisterAbort = registerDragAbort(onEnd);
         window.addEventListener("pointermove", onMove, true);
         window.addEventListener("pointerup", onEnd, true);
         window.addEventListener("pointercancel", onEnd, true);
         return () => {
+            unregisterAbort();
             window.removeEventListener("pointermove", onMove, true);
             window.removeEventListener("pointerup", onEnd, true);
             window.removeEventListener("pointercancel", onEnd, true);

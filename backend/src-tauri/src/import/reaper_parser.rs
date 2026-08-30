@@ -62,6 +62,11 @@ pub struct ReaperItem {
     pub snap_offs: f64,
     pub length: f64,
     pub is_loop: bool,
+    /// ITEM 块是否显式写出 `LOOP n` 行。
+    ///
+    /// REAPER 保存的 ITEM 几乎总是携带 LOOP 行；缺失时（极老版本/第三方生成器）
+    /// 导入方应以"为新的音频块启用循环"设置作为默认值，而不是硬编码 false。
+    pub has_loop_token: bool,
     pub all_takes: bool,
     pub fade_in: Vec<f64>,
     pub fade_out: Vec<f64>,
@@ -82,6 +87,7 @@ impl Default for ReaperItem {
             snap_offs: 0.0,
             length: 0.0,
             is_loop: false,
+            has_loop_token: false,
             all_takes: false,
             fade_in: vec![0.0; 7],
             fade_out: vec![0.0; 7],
@@ -293,8 +299,73 @@ impl Default for ReaperEnvelope {
 }
 
 #[derive(Debug, Clone)]
+pub struct ReaperTempoEnvelopePoint {
+    /// 位置（秒，时间锚定）。
+    pub position_sec: f64,
+    /// BPM。
+    pub bpm: f64,
+    /// 变化形状：1 = 阶梯（square），0 = 线性渐变到下一个点。
+    pub shape: i32,
+    /// 拍号分子（有拍号信息时为 Some）。
+    pub numerator: Option<u32>,
+    /// 拍号分母（有拍号信息时为 Some）。
+    pub denominator: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
 pub struct ReaperTempoEnvelope {
-    pub points: Vec<Vec<f64>>,
+    pub points: Vec<ReaperTempoEnvelopePoint>,
+}
+
+/// 解析 TEMPOENVEX `PT` 行第 4 个值（slowcurv）中打包的拍号。
+///
+/// REAPER 将拍号编码为 `denom_base * 1000 + (num_base + num - 1)`：
+/// - 分母基值：65 = 全音符(1)，131 = 2 分音符(2)，262 = 4 分音符(4)，
+///   524 = 8 分音符(8)，1048 = 16 分音符(16)，2097 = 32 分音符(32)，
+///   4194 = 64 分音符(64)，8388 = 128 分音符(128)；
+/// - 分子基值按分母依次为 537 / 73 / 145 / 289 / 577 / 153 / 305 / 609。
+/// 参见 https://wiki.cockos.com/wiki/index.php/RPR_GetSetEnvelopeState
+fn parse_tempo_env_time_signature(slow_curv: f64) -> Option<(u32, u32)> {
+    let value = slow_curv.round() as i64;
+    if value <= 0 {
+        return None;
+    }
+    const DENOM_BASES: &[(i64, u32)] = &[
+        (8388, 128),
+        (4194, 64),
+        (2097, 32),
+        (1048, 16),
+        (524, 8),
+        (262, 4),
+        (131, 2),
+        (65, 1),
+    ];
+    const NUM_BASES: &[(i64, i64)] = &[
+        (8388, 609),
+        (4194, 305),
+        (2097, 153),
+        (1048, 577),
+        (524, 289),
+        (262, 145),
+        (131, 73),
+        (65, 537),
+    ];
+    for &(denom_base, denominator) in DENOM_BASES {
+        if value >= denom_base * 1000 && value < (denom_base + 1) * 1000 {
+            let num_part = value - denom_base * 1000;
+            let num_base = NUM_BASES
+                .iter()
+                .find(|(base, _)| *base == denom_base)
+                .map(|(_, nb)| *nb)
+                .unwrap_or(0);
+            let numerator = (num_part - num_base + 1).clamp(1, 32) as u32;
+            // 仅接受 HiFiShifter 支持的分母集合。
+            if matches!(denominator, 1 | 2 | 4 | 8 | 16 | 32) {
+                return Some((numerator, denominator));
+            }
+        }
+    }
+    None
 }
 
 // ─── 块解析器 ───
@@ -460,7 +531,13 @@ fn split_tokens(line: &str) -> Vec<&str> {
 }
 
 fn parse_double(s: &str) -> f64 {
-    s.parse::<f64>().unwrap_or(0.0)
+    s.parse::<f64>()
+        .ok()
+        // 拒绝非有限值（"inf"/"NaN"/"-inf"）：畸形 RPP 里的 POSITION/LENGTH/
+        // SOFFS 若携带 inf/NaN 会静默污染下游几何运算（缓存 key、环绕数学、
+        // 序列化往返），统一回退 0.0。
+        .filter(|v| v.is_finite())
+        .unwrap_or(0.0)
 }
 
 fn parse_int(s: &str) -> i32 {
@@ -483,25 +560,102 @@ fn parse_hex_byte(s: &str) -> u8 {
     u8::from_str_radix(s, 16).unwrap_or(0)
 }
 
-/// 解析 FADEIN/FADEOUT 参数，并将有效淡入淡出长度标准化到索引 1。
+/// 解析 FADEIN/FADEOUT 参数（不做任何长度归一化）。
 ///
-/// Reaper 规则：倒数第 3 个参数为 1 时，长度取第 3 个参数；否则取第 2 个参数。
+/// REAPER 的 fade 数组中同时携带「手动淡化长度」与「自动交叉淡化长度」：
+/// - 索引 1：手动淡化的长度（始终存在，是用户手动设置/持久保存的值）；
+/// - 索引 2：自动交叉淡化的长度（仅在自动标记开启时有意义，通常等于与相邻
+///   item 的重叠量）；
+/// - 倒数第 3 个参数（0 基索引 len-3）为 1 时表示「自动交叉淡化」生效
+///   （见 reaper_fade_is_auto）。
+///
+/// ⚠️ 本函数不再把“有效长度”覆写到索引 1（旧实现会据此丢失手动长度）。
+/// 要取手动 / 自动 / 有效长度，请分别使用：
+/// reaper_fade_manual_length_sec / reaper_fade_auto_length_sec /
+/// reaper_fade_effective_length_sec。
 fn parse_fade_array(tokens: &[&str]) -> Vec<f64> {
-    let mut values = parse_double_array(tokens);
-    if values.len() < 2 {
-        return values;
+    parse_double_array(tokens)
+}
+
+/// 判断某条 FADEIN/FADEOUT 是否被 REAPER 标记为「自动（交叉淡化）淡化」。
+///
+/// REAPER 在 fade 数组“倒数第 3 个参数”（0 基索引 len-3，与 parse_fade_array
+/// 使用同一 selector）写入标记：为 1 时该淡化由 REAPER 自动生成并跟踪与相邻
+/// item 的重叠量（如拖动重叠形成的自动交叉淡化），其真实长度位于第 3 个参数
+/// （索引 2）；为 0 时是普通手动淡化（长度位于第 2 个参数，索引 1）。
+///
+/// 真实 .rpp 示例（karate killo.rpp）：
+/// - 手动 FADEOUT：`FADEIN 1 0.01 0 1 0 0 0` → 长度 0.01（索引 1），非自动；
+/// - 自动交叉淡化：`FADEOUT 1.1 0.01 0.022018 1 1 0 0` → 长度 0.022018（索引 2，
+///   恰等于两 item 的重叠量），selector（索引 4）为 1 → 自动。
+pub fn reaper_fade_is_auto(values: &[f64]) -> bool {
+    if values.len() < 4 {
+        return false;
     }
-
     let selector_idx = values.len().saturating_sub(3);
-    let selector = values.get(selector_idx).copied().unwrap_or(0.0).round() as i32;
-    let effective = if selector == 1 {
-        values.get(2).copied().unwrap_or(values[1])
-    } else {
-        values[1]
-    };
+    values.get(selector_idx).copied().unwrap_or(0.0).round() as i32 == 1
+}
 
-    values[1] = effective;
-    values
+/// 读取 fade 数组中的“手动淡化长度”（索引 1）。
+///
+/// REAPER 的 fade 数组中索引 1 始终保存用户手动设置/持久保存的淡化长度；
+/// 即使当前有自动交叉淡化生效，这个手动值也会被保留，供自动淡化移除后恢复。
+pub fn reaper_fade_manual_length_sec(values: &[f64]) -> f64 {
+    if values.len() >= 2 {
+        values[1]
+    } else {
+        values.first().copied().unwrap_or(0.0)
+    }
+    .max(0.0)
+}
+
+/// 读取 fade 数组中的“自动交叉淡化长度”（索引 2；仅自动标记开启时有意义）。
+///
+/// 非自动淡化返回 0；自动淡化时索引 2 通常是该 item 与相邻 item 的重叠量。
+pub fn reaper_fade_auto_length_sec(values: &[f64]) -> f64 {
+    if reaper_fade_is_auto(values) {
+        values.get(2).copied().unwrap_or(0.0).max(0.0)
+    } else {
+        0.0
+    }
+}
+
+/// 计算 fade 数组的“有效淡化长度”。
+///
+/// 与应用模型一致：自动交叉淡化生效（>0）时取自动长度，否则取手动长度。
+/// 用于淡化的存在性判断（take vs item 优先级、音量包络兜底等）。
+pub fn reaper_fade_effective_length_sec(values: &[f64]) -> f64 {
+    let auto = reaper_fade_auto_length_sec(values);
+    if auto > 1e-9 {
+        auto
+    } else {
+        reaper_fade_manual_length_sec(values)
+    }
+}
+
+/// 读取 fade 数组的 REAPER 浮点形状 id 与曲率（D_FADEINDIR，[-1,1]）。
+///
+/// - 索引 0：形状（浮点；整数 0..6 为标准七预设，小数变体如 1.1/5.1
+///   是官方开发者帖确认的扩展编码 —— 1.1→内部形状 7（等功率）、
+///   5.1→内部形状 6（锐利 S 曲线）），原样透传；
+/// - 索引 1：手动淡化长度；索引 2：自动交叉淡化长度（见上方辅助函数）；
+/// - 索引 3：形状镜像值（与索引 0 同步写出，如 `FADEIN 5.1 … 0 5.1 …`），
+///   解析时仅作索引 0 缺失时的回退；
+/// - 倒数第 3 位：自动交叉淡化 selector（见 reaper_fade_is_auto）；
+/// - 索引 5：曲率 D_FADEINDIR ∈ [-1, 1]（用户示例工程里淡入 0.25 /
+///   淡出 0.35 落在此槽）；
+/// - 索引 6：第二曲率参数 D_FADEINDIR2（语义未公开，暂不消费）。
+pub fn reaper_fade_shape_dir(values: &[f64]) -> (f64, f64) {
+    let mut shape = values.first().copied().unwrap_or(0.0);
+    if values.len() >= 4 && (shape == 0.0 || !shape.is_finite()) {
+        // 索引 0 缺失或异常时回退到镜像槽。
+        shape = values[3];
+    }
+    if !shape.is_finite() {
+        shape = 0.0;
+    }
+    let dir = values.get(5).copied().unwrap_or(0.0);
+    (shape, dir.clamp(-1.0, 1.0))
 }
 
 /// 解析可能带引号的路径字符串
@@ -602,6 +756,7 @@ fn update_source_paths(data: &mut ReaperData, folder: &Path) {
 fn parse_data_block(block: &Block) -> ReaperData {
     let mut data = ReaperData::default();
     let mut current_track: Option<ReaperTrack> = None;
+    let mut current_track_has_content = false;
     let mut cumulative_track_offset: usize = 0;
     let mut pending_offset: usize = 0;
 
@@ -625,8 +780,10 @@ fn parse_data_block(block: &Block) -> ReaperData {
 
         if block_type.as_deref() == Some("TRACK") {
             if let Some(t) = current_track.take() {
-                data.track_offsets.push(pending_offset);
-                data.tracks.push(t);
+                if current_track_has_content {
+                    data.track_offsets.push(pending_offset);
+                    data.tracks.push(t);
+                }
             }
             let track = parse_track_block(child);
             data.is_track_data = true;
@@ -634,6 +791,7 @@ fn parse_data_block(block: &Block) -> ReaperData {
             data.tracks.push(track);
             cumulative_track_offset += 1;
             current_track = None;
+            current_track_has_content = false;
             continue;
         }
 
@@ -644,6 +802,7 @@ fn parse_data_block(block: &Block) -> ReaperData {
                 current_track = Some(ReaperTrack::default());
             }
             current_track.as_mut().unwrap().items.push(item);
+            current_track_has_content = true;
             continue;
         }
 
@@ -660,6 +819,7 @@ fn parse_data_block(block: &Block) -> ReaperData {
                     current_track = Some(ReaperTrack::default());
                 }
                 current_track.as_mut().unwrap().envelopes.push(env);
+                current_track_has_content = true;
                 continue;
             }
         }
@@ -672,8 +832,10 @@ fn parse_data_block(block: &Block) -> ReaperData {
             .unwrap_or(false)
         {
             if let Some(t) = current_track.take() {
-                data.track_offsets.push(pending_offset);
-                data.tracks.push(t);
+                if current_track_has_content {
+                    data.track_offsets.push(pending_offset);
+                    data.tracks.push(t);
+                }
             }
             // 解析跳过的轨道数（TRACKSKIP N ...）
             let skip_n = child
@@ -685,12 +847,15 @@ fn parse_data_block(block: &Block) -> ReaperData {
             cumulative_track_offset += skip_n;
             pending_offset = cumulative_track_offset;
             current_track = Some(ReaperTrack::default());
+            current_track_has_content = false;
         }
     }
 
     if let Some(t) = current_track {
-        data.track_offsets.push(pending_offset);
-        data.tracks.push(t);
+        if current_track_has_content {
+            data.track_offsets.push(pending_offset);
+            data.tracks.push(t);
+        }
     }
 
     // 如果顶层没有 track/item，尝试递归查找
@@ -757,7 +922,10 @@ fn parse_item_block(block: &Block) -> ReaperItem {
             "POSITION" if tokens.len() >= 2 => item.position = parse_double(&tokens[1]),
             "SNAPOFFS" if tokens.len() >= 2 => item.snap_offs = parse_double(&tokens[1]),
             "LENGTH" if tokens.len() >= 2 => item.length = parse_double(&tokens[1]),
-            "LOOP" if tokens.len() >= 2 => item.is_loop = parse_bool(&tokens[1]),
+            "LOOP" if tokens.len() >= 2 => {
+                item.is_loop = parse_bool(&tokens[1]);
+                item.has_loop_token = true;
+            }
             "ALLTAKES" if tokens.len() >= 2 => item.all_takes = parse_bool(&tokens[1]),
             "FADEIN" => item.fade_in = parse_fade_array(&tokens),
             "FADEOUT" => item.fade_out = parse_fade_array(&tokens),
@@ -1052,9 +1220,28 @@ fn parse_tempo_envelope_block(block: &Block) -> ReaperTempoEnvelope {
         if tokens.is_empty() {
             continue;
         }
-        if tokens[0].to_uppercase() == "PT" {
-            env.points.push(parse_double_array(&tokens));
+        if tokens[0].to_uppercase() != "PT" || tokens.len() < 4 {
+            continue;
         }
+        let position_sec = parse_double(&tokens[1]).max(0.0);
+        let bpm = parse_double(&tokens[2]);
+        let shape = parse_int(&tokens[3]);
+        // 拍号打包在第 4 个值（slowcurv）中；无第 4 个值时继承前一点的拍号。
+        let (numerator, denominator) = if tokens.len() >= 5 {
+            match parse_tempo_env_time_signature(parse_double(&tokens[4])) {
+                Some(ts) => (Some(ts.0), Some(ts.1)),
+                None => (None, None),
+            }
+        } else {
+            (None, None)
+        };
+        env.points.push(ReaperTempoEnvelopePoint {
+            position_sec,
+            bpm,
+            shape,
+            numerator,
+            denominator,
+        });
     }
 
     env
@@ -1062,4 +1249,460 @@ fn parse_tempo_envelope_block(block: &Block) -> ReaperTempoEnvelope {
 
 fn is_envelope_type(s: &str) -> bool {
     ENVELOPE_TYPES.iter().any(|&e| e.eq_ignore_ascii_case(s))
+}
+
+// ---------------------------------------------------------------------------
+// REAPER clipboard serialization
+// ---------------------------------------------------------------------------
+
+fn format_reaper_f64(value: f64) -> String {
+    if !value.is_finite() {
+        return "0".to_string();
+    }
+    if value == 0.0 {
+        return "0".to_string();
+    }
+    let mut text = format!("{:.12}", value);
+    while text.contains('.') && text.ends_with('0') {
+        text.pop();
+    }
+    if text.ends_with('.') {
+        text.pop();
+    }
+    text
+}
+
+fn quote_reaper_string(value: &str) -> String {
+    // Double quotes inside a path are sanitized because REAPERMedia has no
+    // reliable escape sequence for them. Backslashes are preserved.
+    let escaped = value.replace('"', "'");
+    format!("\"{}\"", escaped)
+}
+
+fn push_reaper_token(out: &mut Vec<u8>, token: String) {
+    out.extend_from_slice(token.as_bytes());
+    out.push(0);
+}
+
+fn push_reaper_array(out: &mut Vec<u8>, key: &str, values: &[f64]) {
+    if values.is_empty() {
+        return;
+    }
+    let text = values
+        .iter()
+        .map(|value| format_reaper_f64(*value))
+        .collect::<Vec<_>>()
+        .join(" ");
+    push_reaper_token(out, format!("{key} {text}"));
+}
+
+fn push_reaper_int_array(out: &mut Vec<u8>, key: &str, values: &[i32]) {
+    if values.is_empty() {
+        return;
+    }
+    let text = values
+        .iter()
+        .map(i32::to_string)
+        .collect::<Vec<_>>()
+        .join(" ");
+    push_reaper_token(out, format!("{key} {text}"));
+}
+
+fn push_reaper_source(out: &mut Vec<u8>, source: &ReaperSource) {
+    let source_type = source.source_type.to_uppercase();
+
+    if source_type == "SECTION" {
+        push_reaper_token(out, "<SOURCE SECTION".to_string());
+        if let Some(length) = source.section_length_sec {
+            push_reaper_token(out, format!("LENGTH {}", format_reaper_f64(length)));
+        }
+        push_reaper_token(out, format!("MODE {}", source.section_mode));
+        if let Some(start) = source.section_start_sec {
+            push_reaper_token(out, format!("STARTPOS {}", format_reaper_f64(start)));
+        }
+        push_reaper_token(out, "OVERLAP 0.01".to_string());
+
+        let mut inner = source.clone();
+        inner.source_type = "WAVE".to_string();
+        inner.section_mode = 0;
+        inner.section_start_sec = None;
+        inner.section_length_sec = None;
+        inner.midi_source = None;
+        push_reaper_source(out, &inner);
+        push_reaper_token(out, ">".to_string());
+        return;
+    }
+
+    if source_type == "MIDI" {
+        push_reaper_token(out, "<SOURCE MIDI".to_string());
+        let ppq = source
+            .midi_source
+            .as_ref()
+            .map(|midi| midi.ticks_per_qn.max(1))
+            .unwrap_or(960);
+        push_reaper_token(out, format!("HASDATA 1 {ppq} QN"));
+        push_reaper_token(out, "CCINTERP 32".to_string());
+        if let Some(igntempo) = source
+            .midi_source
+            .as_ref()
+            .and_then(|midi| midi.igntempo.as_ref())
+        {
+            push_reaper_token(
+                out,
+                format!(
+                    "IGNTEMPO {} {} {} {}",
+                    if igntempo.ignore_project { 1 } else { 0 },
+                    format_reaper_f64(igntempo.tempo),
+                    igntempo.beats,
+                    igntempo.beat_note,
+                ),
+            );
+        } else {
+            push_reaper_token(out, "IGNTEMPO 0 120 4 4".to_string());
+        }
+        if let Some(midi) = source.midi_source.as_ref() {
+            for event in &midi.events {
+                push_reaper_token(
+                    out,
+                    format!(
+                        "E {} {:02X} {:02X} {:02X}",
+                        event.tick_offset, event.status, event.data1, event.data2
+                    ),
+                );
+            }
+        }
+        push_reaper_token(out, ">".to_string());
+        return;
+    }
+
+    push_reaper_token(
+        out,
+        format!(
+            "<SOURCE {}",
+            if source_type.is_empty() {
+                "WAVE"
+            } else {
+                &source_type
+            }
+        ),
+    );
+    push_reaper_token(
+        out,
+        format!("FILE {}", quote_reaper_string(&source.file_path)),
+    );
+    push_reaper_token(out, ">".to_string());
+}
+
+fn push_reaper_take(out: &mut Vec<u8>, take: &ReaperTake, is_item_default: bool) {
+    if !is_item_default {
+        push_reaper_token(
+            out,
+            if take.selected {
+                "TAKE SEL".to_string()
+            } else {
+                "TAKE".to_string()
+            },
+        );
+    }
+    push_reaper_token(out, format!("NAME {}", quote_reaper_string(&take.name)));
+    push_reaper_array(
+        out,
+        if is_item_default {
+            "VOLPAN"
+        } else {
+            "TAKEVOLPAN"
+        },
+        &take.vol_pan,
+    );
+    if !is_item_default {
+        push_reaper_array(out, "FADEIN", &take.fade_in);
+        push_reaper_array(out, "FADEOUT", &take.fade_out);
+    }
+    push_reaper_token(out, format!("SOFFS {}", format_reaper_f64(take.s_offs)));
+    push_reaper_array(out, "PLAYRATE", &take.play_rate);
+    push_reaper_token(out, format!("CHANMODE {}", take.chan_mode));
+    if let Some(source) = take.source.as_ref() {
+        push_reaper_source(out, source);
+    }
+}
+
+fn push_reaper_item(out: &mut Vec<u8>, item: &ReaperItem) {
+    push_reaper_token(out, "<ITEM".to_string());
+    push_reaper_token(
+        out,
+        format!("POSITION {}", format_reaper_f64(item.position)),
+    );
+    push_reaper_token(
+        out,
+        format!("SNAPOFFS {}", format_reaper_f64(item.snap_offs)),
+    );
+    push_reaper_token(out, format!("LENGTH {}", format_reaper_f64(item.length)));
+    push_reaper_token(out, format!("LOOP {}", if item.is_loop { 1 } else { 0 }));
+    push_reaper_token(
+        out,
+        format!("ALLTAKES {}", if item.all_takes { 1 } else { 0 }),
+    );
+    push_reaper_array(out, "FADEIN", &item.fade_in);
+    push_reaper_array(out, "FADEOUT", &item.fade_out);
+    push_reaper_int_array(out, "MUTE", &item.mute);
+    push_reaper_token(out, format!("SEL {}", if item.selected { 1 } else { 0 }));
+    push_reaper_take(out, &item.default_take, true);
+    for take in &item.takes {
+        push_reaper_take(out, take, false);
+    }
+    for envelope in &item.envelopes {
+        push_reaper_token(out, format!("<{}", envelope.env_type));
+        if let Some(range) = envelope.seg_range.as_ref() {
+            push_reaper_array(out, "SEG_RANGE", range);
+        }
+        for point in &envelope.points {
+            push_reaper_array(out, "PT", point);
+        }
+        push_reaper_token(out, ">".to_string());
+    }
+    push_reaper_token(out, ">".to_string());
+}
+
+/// Serialize parsed REAPER data into the REAPERMedia clipboard byte format.
+/// `as_track_data = false` writes ITEM + TRACKSKIP blocks; `true` writes
+/// `<TRACK ...>` wrapped track data.
+pub fn serialize_reaper_clipboard(data: &ReaperData, as_track_data: bool) -> Vec<u8> {
+    let mut out = Vec::with_capacity(4096);
+
+    let offsets = if data.track_offsets.len() == data.tracks.len() {
+        data.track_offsets.clone()
+    } else {
+        (0..data.tracks.len()).collect::<Vec<_>>()
+    };
+
+    for (index, track) in data.tracks.iter().enumerate() {
+        if as_track_data {
+            push_reaper_token(&mut out, "<TRACK".to_string());
+            push_reaper_token(
+                &mut out,
+                format!("NAME {}", quote_reaper_string(&track.name)),
+            );
+            push_reaper_array(&mut out, "VOLPAN", &track.vol_pan);
+            push_reaper_int_array(&mut out, "MUTESOLO", &track.mute_solo);
+            push_reaper_token(
+                &mut out,
+                format!("IPHASE {}", if track.iphase { 1 } else { 0 }),
+            );
+        }
+
+        for item in &track.items {
+            push_reaper_item(&mut out, item);
+        }
+        for envelope in &track.envelopes {
+            push_reaper_token(&mut out, format!("<{}", envelope.env_type));
+            for point in &envelope.points {
+                push_reaper_array(&mut out, "PT", point);
+            }
+            push_reaper_token(&mut out, ">".to_string());
+        }
+
+        if as_track_data {
+            push_reaper_token(&mut out, ">".to_string());
+        } else {
+            let current = offsets.get(index).copied().unwrap_or(0);
+            let next = offsets
+                .get(index + 1)
+                .copied()
+                .unwrap_or(current.saturating_add(1));
+            let skip = next.saturating_sub(current).max(1);
+            push_reaper_token(&mut out, format!("TRACKSKIP {skip} 1"));
+        }
+    }
+
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decodes_tempo_env_time_signature() {
+        // 4/4 → 262 * 1000 + (145 + 4 - 1) = 262148
+        assert_eq!(parse_tempo_env_time_signature(262148.0), Some((4, 4)));
+        // 3/4 → 262 * 1000 + (145 + 3 - 1) = 262147
+        assert_eq!(parse_tempo_env_time_signature(262147.0), Some((3, 4)));
+        // 6/8 → 524 * 1000 + (289 + 6 - 1) = 524294
+        assert_eq!(parse_tempo_env_time_signature(524294.0), Some((6, 8)));
+        // 非法值
+        assert_eq!(parse_tempo_env_time_signature(1.0), None);
+    }
+
+    #[test]
+    fn parses_tempo_envelope_from_example_rpp() {
+        // 来自 C:\Users\z\Desktop\Reaper_Example.rpp 的 TEMPOENVEX 块（节选）。
+        let block_text = "<TEMPOENVEX\n\
+EGUID {2A001931-7D16-4259-A7F4-7ED6A60C53C6}\n\
+ACT 1 -1\n\
+VIS 1 0 1\n\
+LANEHEIGHT 0 0\n\
+ARM 1\n\
+DEFSHAPE 1 -1 -1\n\
+PT 0.000000000000 169.6000000000 1 262148 0 1 0 \"\" 0 169 0 ABBB\n\
+PT 0.353773584906 184.0000000000 1\n\
+PT 0.679860541427 198.4000000000 1\n\
+PT 4.904195314949 145.6000000000 1 262147 0 1 0 \"\" 0 41 0 ABB\n\
+>";
+        let lines: Vec<String> = block_text.lines().map(|s| s.to_string()).collect();
+        let root = parse_blocks(&lines);
+        // parse_blocks 返回根块；TEMPOENVEX 是其子块。
+        let tempo_block = root
+            .children
+            .first()
+            .expect("TEMPOENVEX should parse as a child block");
+        assert_eq!(tempo_block.block_type().as_deref(), Some("TEMPOENVEX"));
+        let envelope = parse_tempo_envelope_block(tempo_block);
+
+        assert_eq!(envelope.points.len(), 4);
+        // 首点：169.6 BPM、4/4。
+        let first = &envelope.points[0];
+        assert!((first.position_sec - 0.0).abs() < 1e-12);
+        assert!((first.bpm - 169.6).abs() < 1e-9);
+        assert_eq!(first.shape, 1);
+        assert_eq!(first.numerator, Some(4));
+        assert_eq!(first.denominator, Some(4));
+        // 普通点：无拍号信息（继承前一点）。
+        let second = &envelope.points[1];
+        assert!((second.bpm - 184.0).abs() < 1e-9);
+        assert_eq!(second.numerator, None);
+        // 末点：145.6 BPM、3/4（ABB 拍型）。
+        let last = &envelope.points[3];
+        assert!((last.position_sec - 4.904195314949).abs() < 1e-12);
+        assert!((last.bpm - 145.6).abs() < 1e-9);
+        assert_eq!(last.numerator, Some(3));
+        assert_eq!(last.denominator, Some(4));
+    }
+
+    #[test]
+    fn distinguishes_auto_crossfade_fades_from_manual_fades() {
+        // 真实 .rpp（karate killo.rpp / ces.rpp / fade_test.rpp）中的实际 FADEIN/FADEOUT 行。
+        // - 手动淡化：selector（索引 4）为 0，长度在手动的索引 1、自动为 0。
+        let manual_in = parse_fade_array(&["FADEIN", "1", "0.01", "0", "1", "0", "0", "0"]);
+        assert!(!reaper_fade_is_auto(&manual_in));
+        assert!((reaper_fade_manual_length_sec(&manual_in) - 0.01).abs() < 1e-12);
+        assert!(reaper_fade_auto_length_sec(&manual_in) == 0.0);
+
+        let manual_long =
+            parse_fade_array(&["FADEIN", "1", "0.674609629036", "0", "1", "0", "0", "0"]);
+        assert!(!reaper_fade_is_auto(&manual_long));
+        assert!((reaper_fade_manual_length_sec(&manual_long) - 0.674609629036).abs() < 1e-12);
+        assert_eq!(
+            reaper_fade_effective_length_sec(&manual_long),
+            reaper_fade_manual_length_sec(&manual_long),
+        );
+
+        // - 自动交叉淡化：selector（索引 4）为 1；索引 1 = 手动长度（保留），
+        //   索引 2 = 自动长度（= 重叠量）。有效长度取自动。
+        let auto_out =
+            parse_fade_array(&["FADEOUT", "1.1", "0.01", "0.022018", "1", "1", "0", "0"]);
+        assert!(reaper_fade_is_auto(&auto_out));
+        assert_eq!(auto_out[1], 0.01); // 手动长度不被自动值覆盖
+        assert!((reaper_fade_manual_length_sec(&auto_out) - 0.01).abs() < 1e-12);
+        assert!((reaper_fade_auto_length_sec(&auto_out) - 0.022018).abs() < 1e-12);
+        assert!((reaper_fade_effective_length_sec(&auto_out) - 0.022018).abs() < 1e-12);
+
+        let auto_in = parse_fade_array(&["FADEIN", "1.1", "0.01", "0.022018", "1", "1", "0", "0"]);
+        assert!(reaper_fade_is_auto(&auto_in));
+        assert!(reaper_fade_manual_length_sec(&auto_in) == 0.01);
+        assert!((reaper_fade_auto_length_sec(&auto_in) - 0.022018).abs() < 1e-12);
+
+        // fade_test.rpp 场景：Item A 手动淡出 0.6711s → 重叠后自动交叉淡化 0.176286s
+        // （自动 = 重叠量），手动淡化被保留在索引 1。
+        let a_fadeout = parse_fade_array(&[
+            "FADEOUT",
+            "1.1",
+            "0.67114827520773",
+            "0.17628573810208",
+            "1",
+            "1",
+            "0",
+            "0",
+        ]);
+        assert!(reaper_fade_is_auto(&a_fadeout));
+        assert!((reaper_fade_manual_length_sec(&a_fadeout) - 0.67114827520773).abs() < 1e-12);
+        assert!((reaper_fade_auto_length_sec(&a_fadeout) - 0.17628573810208).abs() < 1e-12);
+        assert!((reaper_fade_effective_length_sec(&a_fadeout) - 0.17628573810208).abs() < 1e-12);
+
+        let b_fadein =
+            parse_fade_array(&["FADEIN", "1.1", "0", "0.17628573810208", "1", "1", "0", "0"]);
+        assert!(reaper_fade_is_auto(&b_fadein));
+        assert!(reaper_fade_manual_length_sec(&b_fadein) == 0.0);
+        assert!((reaper_fade_auto_length_sec(&b_fadein) - 0.17628573810208).abs() < 1e-12);
+
+        // 过短数组（<4 个值）不能把 shape 误当 selector / 自动标记。
+        assert!(!reaper_fade_is_auto(&[1.0, 0.1]));
+        assert!(!reaper_fade_is_auto(&[1.0, 0.1, 0.0]));
+    }
+
+    #[test]
+    fn decodes_reaper7_shape_and_curvature_fields() {
+        // fade_in_out_test.rpp（REAPER 7.78 / win64 实测导出）：
+        // 淡入曲率 0.25、淡出曲率 0.35，形状槽为整数 0。
+        let fade_in = parse_fade_array(&[
+            "FADEIN", "0", "0.89154277826174", "0", "0", "0", "0.25", "0",
+        ]);
+        let fade_out = parse_fade_array(&[
+            "FADEOUT", "0", "0.61492516492441", "0", "0", "0", "0.35", "0",
+        ]);
+        assert_eq!(fade_in.len(), 7);
+        assert!(!reaper_fade_is_auto(&fade_in));
+        assert!((reaper_fade_manual_length_sec(&fade_in) - 0.89154277826174).abs() < 1e-12);
+        let (in_shape, in_dir) = reaper_fade_shape_dir(&fade_in);
+        assert_eq!(in_shape, 0.0);
+        assert!((in_dir - 0.25).abs() < 1e-12);
+        let (out_shape, out_dir) = reaper_fade_shape_dir(&fade_out);
+        assert_eq!(out_shape, 0.0);
+        assert!((out_dir - 0.35).abs() < 1e-12);
+
+        // 开发者帖实测样本：小数变体形状 `5.1` 在索引 0 与镜像槽同步出现；
+        // 镜像槽（索引 3）存的是取整后的基础形状（官方自动淡化样本中
+        // 形状 1.1 对应镜像槽写 1），仅在索引 0 缺失时作为回退。
+        let fractional = parse_fade_array(&[
+            "FADEIN", "5.1", "0.40101698468005", "0", "5.1", "0", "0", "0",
+        ]);
+        let (shape, dir) = reaper_fade_shape_dir(&fractional);
+        assert!((shape - 5.1).abs() < 1e-12, "fractional shape passthrough");
+        assert_eq!(dir, 0.0);
+
+        let auto = parse_fade_array(&["FADEOUT", "1.1", "0.01", "0.022018", "1", "1", "0", "0"]);
+        let (auto_shape, auto_dir) = reaper_fade_shape_dir(&auto);
+        assert!((auto_shape - 1.1).abs() < 1e-12);
+        assert_eq!(auto_dir, 0.0);
+
+        // 索引 5 的曲率越界时夹紧到 [-1, 1]；短数组的曲率回退 0。
+        let clamped = reaper_fade_shape_dir(&parse_fade_array(&[
+            "FADEIN", "2", "0.01", "0", "2", "0", "3.7", "0",
+        ]));
+        assert_eq!(clamped.1, 1.0);
+        let (short_shape, short_dir) =
+            reaper_fade_shape_dir(&parse_fade_array(&["FADEIN", "4", "0.02"]));
+        assert_eq!(short_shape, 4.0);
+        assert_eq!(short_dir, 0.0);
+    }
+
+    #[test]
+    fn exported_fade_values_are_understood_by_reaper_layout() {
+        // 导出 → 解析往返：shape/dir/手动与自动长度各归其位。
+        let values = super::super::reaper_export::fade_values(3.0, 0.42, 0.1, 0.25);
+        assert_eq!(values.len(), 7);
+        assert!(reaper_fade_is_auto(&values));
+        assert!((reaper_fade_manual_length_sec(&values) - 0.1).abs() < 1e-12);
+        assert!((reaper_fade_auto_length_sec(&values) - 0.25).abs() < 1e-12);
+        let (shape, dir) = reaper_fade_shape_dir(&values);
+        assert_eq!(shape, 3.0);
+        assert!((dir - 0.42).abs() < 1e-12);
+
+        // 手动淡化的 selector 为 0，形状小数变体原样写出、镜像槽取整。
+        let manual = super::super::reaper_export::fade_values(5.1, -0.75, 0.33, 0.0);
+        assert!(!reaper_fade_is_auto(&manual));
+        assert_eq!(manual[3], 5.0, "mirror slot stores truncated base shape");
+        let (shape, dir) = reaper_fade_shape_dir(&manual);
+        assert!((shape - 5.1).abs() < 1e-12);
+        assert!((dir - (-0.75)).abs() < 1e-12);
+    }
 }

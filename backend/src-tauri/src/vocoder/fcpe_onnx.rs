@@ -46,7 +46,14 @@ static LOGGED_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
 
 fn ensure_ort_init() -> Result<(), String> {
     match ORT_INIT.get_or_init(|| {
+        // commit() returns false if the global ORT environment was already
+        // committed by another module — that's fine, the active environment
+        // remains valid. We still need to ensure the OrtEnv is created.
         ort::init().with_name("hifishifter").commit();
+
+        if let Err(e) = ort::environment::Environment::current() {
+            return Err(format!("failed to create ORT environment: {e}"));
+        }
         Ok(())
     }) {
         Ok(()) => Ok(()),
@@ -97,6 +104,10 @@ fn default_model_guess() -> Option<PathBuf> {
 }
 
 fn resolve_model_path() -> Result<PathBuf, String> {
+    if let Some(onnx) = env_path("HIFISHIFTER_FCPE_ONNX") {
+        return Ok(onnx);
+    }
+
     if let Some(onnx) = crate::fcpe_onnx_path().map(|p| p.to_path_buf()) {
         return Ok(onnx);
     }
@@ -115,13 +126,18 @@ fn resolve_model_path() -> Result<PathBuf, String> {
 }
 
 fn build_session_with_ep(onnx_path: &Path) -> Result<Session, String> {
-    let (session, _ep) = crate::vocoder_ort_session::build_ort_session(onnx_path, crate::vocoder_ort_session::OrtSessionRole::PitchDetector)?;
+    let (session, _ep) = crate::vocoder_ort_session::build_ort_session(
+        onnx_path,
+        crate::vocoder_ort_session::OrtSessionRole::PitchDetector,
+    )?;
     Ok(session)
 }
 
 fn get_or_init_shared_session() -> Result<Arc<Mutex<Session>>, String> {
     let mutex = SHARED_SESSION.get_or_init(|| Mutex::new(None));
-    let mut guard = mutex.lock().map_err(|e| format!("SHARED_SESSION lock poisoned: {e}"))?;
+    let mut guard = mutex
+        .lock()
+        .map_err(|e| format!("SHARED_SESSION lock poisoned: {e}"))?;
     if let Some(ref session) = *guard {
         return Ok(Arc::clone(session));
     }
@@ -136,14 +152,20 @@ fn get_or_init_shared_session() -> Result<Arc<Mutex<Session>>, String> {
 /// Drop the shared session to release GPU/CPU memory. Called on app exit.
 pub fn drop_shared_session() {
     if let Some(mutex) = SHARED_SESSION.get() {
-        if let Ok(mut guard) = mutex.lock() {
-            *guard = None;
+        for _ in 0..10 {
+            if let Ok(mut guard) = mutex.try_lock() {
+                *guard = None;
+                eprintln!("[fcpe] shared session dropped");
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
+        eprintln!("[fcpe] WARNING: could not acquire SHARED_SESSION lock at shutdown — giving up");
     }
 }
 
 /// Reset the shared session so the next inference rebuilds it with the
-/// current EP choice (e.g. after user switches from OpenCL to DirectML).
+/// current EP choice (e.g. after user switches from WebGPU to DirectML).
 pub fn update_ort_ep(_choice: &str, _device_id: Option<i32>) {
     crate::vocoder_ort_session::set_runtime_ep_override(Some(_choice.to_string()));
     crate::vocoder_ort_session::set_runtime_dml_device_id(_device_id);
@@ -407,11 +429,7 @@ fn decode_model_output_to_f0_hz(
             let mut best_v = f32::NEG_INFINITY;
 
             for k in 0..c {
-                let idx = if btc_layout {
-                    ti * c + k
-                } else {
-                    k * t + ti
-                };
+                let idx = if btc_layout { ti * c + k } else { k * t + ti };
                 let v = data[idx];
                 if v > best_v {
                     best_v = v;
@@ -433,11 +451,7 @@ fn decode_model_output_to_f0_hz(
             let mut weight_sum = 0.0f64;
 
             for k in local_start..=local_end {
-                let idx = if btc_layout {
-                    ti * c + k
-                } else {
-                    k * t + ti
-                };
+                let idx = if btc_layout { ti * c + k } else { k * t + ti };
                 let v = data[idx] as f64;
                 weighted_sum += cent_table[k] * v;
                 weight_sum += v;

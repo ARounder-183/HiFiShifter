@@ -1,5 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
-
 // 注意：该文件作为“门面层（Facade）”保留历史接口 `webApi`，
 // 以兼容现有调用方（例如 sessionSlice / 各类面板组件）。
 //
@@ -19,7 +17,7 @@ import type {
     WaveformPeaksSegmentPayload,
 } from "../types/api";
 
-import { coreApi, paramsApi, projectApi, timelineApi, waveformApi } from "./api";
+import { coreApi, paramsApi, projectApi, recordingApi, timelineApi, waveformApi } from "./api";
 
 export const webApi = {
     // Core
@@ -28,6 +26,7 @@ export const webApi = {
     getPlaybackState: coreApi.getPlaybackState,
     openAudioDialog: coreApi.openAudioDialog,
     openAudioDialogMultiple: coreApi.openAudioDialogMultiple,
+    openAudioDialogForSource: coreApi.openAudioDialogForSource,
     openMidiDialog: coreApi.openMidiDialog,
     pickOutputPath: coreApi.pickOutputPath,
     closeWindow: coreApi.closeWindow,
@@ -61,16 +60,27 @@ export const webApi = {
     openProject: projectApi.openProject,
     saveProject: projectApi.saveProject,
     saveProjectAs: projectApi.saveProjectAs,
+    saveProjectToPath: projectApi.saveProjectToPath,
     setProjectBaseScale: projectApi.setProjectBaseScale,
     setProjectCustomScale: projectApi.setProjectCustomScale,
     setProjectStretchSettings: projectApi.setProjectStretchSettings,
     setProjectTimelineSettings: projectApi.setProjectTimelineSettings,
+
+    getRecordingSettings: recordingApi.getSettings,
+    saveRecordingSettings: recordingApi.saveSettings,
+    getRecordingDevices: recordingApi.getDevices,
+    getRecordingApps: recordingApi.getApps,
+    startRecording: recordingApi.startRecording,
+    stopRecording: recordingApi.stopRecording,
+    getRecordingState: recordingApi.getState,
 
     openVocalShifterDialog: projectApi.openVocalShifterDialog,
     importVocalShifterProject: projectApi.importVocalShifterProject,
 
     openReaperDialog: projectApi.openReaperDialog,
     importReaperProject: projectApi.importReaperProject,
+    importProjectDialog: projectApi.importProjectDialog,
+    importProject: projectApi.importProject,
 
     // Waveform peaks (Mix)
     getRootMixWaveformPeaksSegment: waveformApi.getRootMixWaveformPeaksSegment,
@@ -80,6 +90,7 @@ export const webApi = {
     getParamFrames: paramsApi.getParamFrames,
     setParamFrames: paramsApi.setParamFrames,
     restoreParamFrames: paramsApi.restoreParamFrames,
+    stretchTrackLinkedParams: paramsApi.stretchTrackLinkedParams,
     pasteVocalShifterClipboard: paramsApi.pasteVocalShifterClipboard,
     pasteReaperClipboard: paramsApi.pasteReaperClipboard,
 
@@ -111,8 +122,19 @@ export const webApi = {
     applyClipLinkedParams: timelineApi.applyClipLinkedParams,
     setClipState: timelineApi.setClipState,
     setClipsStateBulk: timelineApi.setClipsStateBulk,
+    setClipActiveTake: timelineApi.setClipActiveTake,
+    cycleClipTakes: timelineApi.cycleClipTakes,
+    packClipsIntoTakes: timelineApi.packClipsIntoTakes,
+    explodeClipTakes: timelineApi.explodeClipTakes,
+    duplicateClipTake: timelineApi.duplicateClipTake,
+    removeClipTake: timelineApi.removeClipTake,
+    renameClipTake: timelineApi.renameClipTake,
+    setClipTakeReversed: timelineApi.setClipTakeReversed,
+    addClipTakeFromMedia: timelineApi.addClipTakeFromMedia,
+    importMediaFilesAsTakes: timelineApi.importMediaFilesAsTakes,
     duplicateClipsBulk: timelineApi.duplicateClipsBulk,
     replaceClipSource: timelineApi.replaceClipSource,
+    searchSourceFileReplacements: timelineApi.searchSourceFileReplacements,
     splitClip: timelineApi.splitClip,
     splitClipsAt: timelineApi.splitClipsAt,
     glueClips: timelineApi.glueClips,
@@ -122,8 +144,13 @@ export const webApi = {
     convertClipsToPitchReference: timelineApi.convertClipsToPitchReference,
     updatePitchReference: timelineApi.updatePitchReference,
     selectClip: timelineApi.selectClip,
+    copyTimelineClips: timelineApi.copyTimelineClips,
+    copyTimelineTracks: timelineApi.copyTimelineTracks,
+    pasteTimelineClipboard: timelineApi.pasteTimelineClipboard,
+    hasTimelineClipboard: timelineApi.hasTimelineClipboard,
+    hasReaperClipboard: timelineApi.hasReaperClipboard,
 
-    // 检查已导入音频源文件是否被外部修改或删除
+    // 检查已导入媒体源文件是否被外部修改或删除
     checkSourceFilesChanged: timelineApi.checkSourceFilesChanged,
 
     setTransport: timelineApi.setTransport,
@@ -131,7 +158,6 @@ export const webApi = {
 };
 
 // 保留旧类型导入的“锚点”，以降低大范围改动时的冲突概率（不影响运行时）。
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 const __webApiTypeAnchors = {
     ModelConfigResult: null as unknown as ModelConfigResult,
     PlaybackStateResult: null as unknown as PlaybackStateResult,

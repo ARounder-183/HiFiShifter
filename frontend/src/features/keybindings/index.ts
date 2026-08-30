@@ -21,3 +21,9 @@ export {
     matchesKeybinding,
     normalizeEventKey,
 } from "./useKeybindings";
+export {
+    beginHoldRepeat,
+    stopHoldRepeat,
+    consumeHoldRepeatKeyDown,
+    isHoldRepeatActive,
+} from "./holdRepeat";

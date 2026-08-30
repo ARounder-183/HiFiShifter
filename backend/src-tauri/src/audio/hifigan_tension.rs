@@ -34,11 +34,14 @@ fn sample_curve_at_abs_sec(
         return default_value;
     }
 
-    let i0 = idx_f as usize; // 向下取整
-    let i1 = (i0 + 1).min(curve.len().saturating_sub(1));
-    let frac = (idx_f - i0 as f64) as f32; // fraction 必定在 [0, 1) 区间
-    let a = curve.get(i0).copied().unwrap_or(default_value);
-    let b = curve.get(i1).copied().unwrap_or(a);
+    // 越界端点钳制（与 mix.rs 的 sample_automation_curve 一致）：
+    // 超出曲线末端的帧保持末值，而不是与 default 混出错误的衰减值。
+    let last = curve.len().saturating_sub(1);
+    let i0 = (idx_f.floor().max(0.0) as usize).min(last);
+    let i1 = (i0 + 1).min(last);
+    let frac = (idx_f - i0 as f64).clamp(0.0, 1.0) as f32;
+    let a = curve[i0];
+    let b = curve[i1];
     a + (b - a) * frac
 }
 

@@ -1,5 +1,6 @@
 use std::path::Path;
 
+/// Decode any media file (WAV fast-path, everything else via Symphonia).
 pub fn decode_audio_f32_interleaved(path: &Path) -> Result<(u32, u16, Vec<f32>), String> {
     if path.as_os_str().is_empty() {
         return Err("empty path".to_string());
@@ -17,7 +18,7 @@ pub fn decode_audio_f32_interleaved(path: &Path) -> Result<(u32, u16, Vec<f32>),
         }
     }
 
-    decode_audio_f32_interleaved_symphonia(path)
+    crate::media::decode_media_audio_f32_interleaved(path, None)
 }
 
 fn decode_wav_f32_interleaved_hound(path: &Path) -> Result<(u32, u16, Vec<f32>), String> {
@@ -66,88 +67,6 @@ fn decode_wav_f32_interleaved_hound(path: &Path) -> Result<(u32, u16, Vec<f32>),
     Ok((sample_rate, channels, out))
 }
 
-fn decode_audio_f32_interleaved_symphonia(path: &Path) -> Result<(u32, u16, Vec<f32>), String> {
-    use symphonia::core::codecs::DecoderOptions;
-    use symphonia::core::errors::Error;
-    use symphonia::core::formats::FormatOptions;
-    use symphonia::core::io::MediaSourceStream;
-    use symphonia::core::meta::MetadataOptions;
-    use symphonia::core::probe::Hint;
-
-    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
-
-    let mut hint = Hint::new();
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        hint.with_extension(ext);
-    }
-
-    let probed = symphonia::default::get_probe()
-        .format(
-            &hint,
-            mss,
-            &FormatOptions::default(),
-            &MetadataOptions::default(),
-        )
-        .map_err(|e| e.to_string())?;
-    let mut format = probed.format;
-    let track = format
-        .default_track()
-        .ok_or_else(|| "no default track".to_string())?;
-
-    let mut sample_rate = track.codec_params.sample_rate.unwrap_or(0);
-    let channels = track
-        .codec_params
-        .channels
-        .map(|c| c.count())
-        .unwrap_or(1)
-        .max(1);
-
-    let mut decoder = symphonia::default::get_codecs()
-        .make(&track.codec_params, &DecoderOptions::default())
-        .map_err(|e| e.to_string())?;
-
-    // 预分配内存，避免 Vec 动态扩容
-    let estimated_frames = track.codec_params.n_frames.unwrap_or(0) as usize;
-    let mut out: Vec<f32> = Vec::with_capacity(estimated_frames * channels);
-    let mut sbuf_opt: Option<symphonia::core::audio::SampleBuffer<f32>> = None;
-
-    loop {
-        let packet = match format.next_packet() {
-            Ok(p) => p,
-            Err(Error::IoError(_)) => break,
-            Err(e) => return Err(e.to_string()),
-        };
-        let decoded = match decoder.decode(&packet) {
-            Ok(d) => d,
-            Err(Error::DecodeError(_)) => continue,
-            Err(Error::IoError(_)) => break,
-            Err(e) => return Err(e.to_string()),
-        };
-
-        if sample_rate == 0 {
-            sample_rate = decoded.spec().rate;
-        }
-
-        // 复用缓冲区，正确比较总样本数 (Samples = Frames * Channels)
-        let required_samples = decoded.capacity() * decoded.spec().channels.count();
-        if sbuf_opt.is_none() || sbuf_opt.as_ref().unwrap().capacity() < required_samples {
-            sbuf_opt = Some(symphonia::core::audio::SampleBuffer::<f32>::new(
-                decoded.capacity() as u64,
-                *decoded.spec(),
-            ));
-        }
-        let sbuf = sbuf_opt.as_mut().unwrap();
-        sbuf.copy_interleaved_ref(decoded);
-        out.extend_from_slice(sbuf.samples());
-    }
-    Ok((
-        if sample_rate == 0 { 44100 } else { sample_rate },
-        channels as u16,
-        out,
-    ))
-}
-
 pub struct WavInfo {
     pub sample_rate: u32,
     pub total_frames: u64, // 精确的frame总数
@@ -168,15 +87,15 @@ pub fn try_read_wav_info(path: &Path, preview_points: usize) -> Option<WavInfo> 
         }
     }
 
-    // Fall back to Symphonia for non-WAV (or WAV variants hound can't decode).
-    try_read_audio_info_symphonia(path, preview_points)
+    crate::media::probe_media(path, preview_points, None).map(|probe| WavInfo {
+        sample_rate: probe.sample_rate,
+        total_frames: probe.total_frames,
+        duration_sec: probe.duration_sec,
+        waveform_preview: probe.waveform_preview,
+    })
 }
 
 /// 快速只读 sample_rate / total_frames / duration_sec，不生成 waveform_preview。
-///
-/// - WAV：hound 单次文件打开，读 header 后直接返回，无样本扫描。
-/// - 非 WAV：优先从 codec params 的 n_frames 字段获取帧数（O(1)，无需解码），
-///           若容器未提供则回退到 symphonia 全量计帧（跳过 preview 生成）。
 pub fn try_read_audio_header_only(path: &Path) -> Option<WavInfo> {
     if path
         .extension()
@@ -188,45 +107,13 @@ pub fn try_read_audio_header_only(path: &Path) -> Option<WavInfo> {
             return Some(info);
         }
     }
-    try_read_duration_symphonia(path)
-}
 
-fn try_read_duration_symphonia(path: &Path) -> Option<WavInfo> {
-    use symphonia::core::formats::FormatOptions;
-    use symphonia::core::io::MediaSourceStream;
-    use symphonia::core::meta::MetadataOptions;
-    use symphonia::core::probe::Hint;
-
-    let file = std::fs::File::open(path).ok()?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
-    let mut hint = Hint::new();
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        hint.with_extension(ext);
-    }
-    let probed = symphonia::default::get_probe()
-        .format(
-            &hint,
-            mss,
-            &FormatOptions::default(),
-            &MetadataOptions::default(),
-        )
-        .ok()?;
-    let format = probed.format;
-    let track = format.default_track()?;
-    let sample_rate = track.codec_params.sample_rate.unwrap_or(44100);
-
-    if let Some(n_frames) = track.codec_params.n_frames {
-        // 容器直接提供帧数，O(1)，无需任何解码。
-        return Some(WavInfo {
-            sample_rate,
-            total_frames: n_frames,
-            duration_sec: n_frames as f64 / sample_rate as f64,
-            waveform_preview: vec![],
-        });
-    }
-
-    // n_frames 不可用（如 CBR MP3）：回退到解码计帧，但跳过 preview 生成。
-    try_read_audio_info_symphonia(path, 0)
+    crate::media::probe_media(path, 0, None).map(|probe| WavInfo {
+        sample_rate: probe.sample_rate,
+        total_frames: probe.total_frames,
+        duration_sec: probe.duration_sec,
+        waveform_preview: vec![],
+    })
 }
 
 fn try_read_wav_info_hound(path: &Path, preview_points: usize) -> Option<WavInfo> {
@@ -320,161 +207,6 @@ fn try_read_wav_info_hound(path: &Path, preview_points: usize) -> Option<WavInfo
 
     Some(WavInfo {
         sample_rate: spec.sample_rate,
-        total_frames,
-        duration_sec,
-        waveform_preview: preview,
-    })
-}
-
-fn try_read_audio_info_symphonia(path: &Path, preview_points: usize) -> Option<WavInfo> {
-    use symphonia::core::codecs::DecoderOptions;
-    use symphonia::core::errors::Error;
-    use symphonia::core::formats::FormatOptions;
-    use symphonia::core::io::MediaSourceStream;
-    use symphonia::core::meta::MetadataOptions;
-    use symphonia::core::probe::Hint;
-
-    type SymphoniaOpen = (
-        Box<dyn symphonia::core::formats::FormatReader>,
-        Box<dyn symphonia::core::codecs::Decoder>,
-        u32,
-        usize,
-    );
-
-    fn open(path: &Path) -> Option<SymphoniaOpen> {
-        let file = std::fs::File::open(path).ok()?;
-        let mss = MediaSourceStream::new(Box::new(file), Default::default());
-
-        let mut hint = Hint::new();
-        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-            hint.with_extension(ext);
-        }
-
-        let probed = symphonia::default::get_probe()
-            .format(
-                &hint,
-                mss,
-                &FormatOptions::default(),
-                &MetadataOptions::default(),
-            )
-            .ok()?;
-        let format = probed.format;
-        let track = format.default_track()?;
-        let decoder = symphonia::default::get_codecs()
-            .make(&track.codec_params, &DecoderOptions::default())
-            .ok()?;
-
-        let sr = track
-            .codec_params
-            .sample_rate
-            .or(track.codec_params.sample_rate)
-            .unwrap_or(44100);
-        let ch = track
-            .codec_params
-            .channels
-            .map(|c| c.count())
-            .unwrap_or(1)
-            .max(1);
-
-        Some((format, decoder, sr, ch))
-    }
-
-    let (mut format1, _decoder1, sample_rate, channels) = open(path)?;
-
-    // Pass 1: count total frames
-    let mut total_frames: u64 = 0;
-    loop {
-        let packet = match format1.next_packet() {
-            Ok(p) => p,
-            Err(Error::IoError(_)) => break,
-            Err(_) => return None,
-        };
-        total_frames = total_frames.saturating_add(packet.dur);
-    }
-
-    let duration_sec = if sample_rate > 0 {
-        total_frames as f64 / sample_rate as f64
-    } else {
-        0.0
-    };
-
-    if preview_points == 0 || total_frames == 0 {
-        return Some(WavInfo {
-            sample_rate,
-            total_frames,
-            duration_sec,
-            waveform_preview: vec![],
-        });
-    }
-
-    // Pass 2: build preview.
-    let (mut format2, mut decoder2, _sr2, _ch2) = open(path)?;
-    let preview_len = preview_points.max(2);
-    let mut preview = vec![0.0f32; preview_len];
-    let step_frames = (total_frames / preview_len as u64).max(1);
-
-    let mut idx = 0usize;
-    let mut current_max = 0.0f32;
-    let mut count_frames: u64 = 0;
-    let mut sbuf_opt: Option<symphonia::core::audio::SampleBuffer<f32>> = None;
-
-    loop {
-        let packet = match format2.next_packet() {
-            Ok(p) => p,
-            Err(Error::IoError(_)) => break,
-            Err(_) => break,
-        };
-        let decoded = match decoder2.decode(&packet) {
-            Ok(d) => d,
-            Err(Error::DecodeError(_)) => continue,
-            Err(Error::IoError(_)) => break,
-            Err(_) => break,
-        };
-
-        // 复用缓冲区，正确比较总样本数 (Samples = Frames * Channels)
-        let required_samples = decoded.capacity() * decoded.spec().channels.count();
-        if sbuf_opt.is_none() || sbuf_opt.as_ref().unwrap().capacity() < required_samples {
-            sbuf_opt = Some(symphonia::core::audio::SampleBuffer::<f32>::new(
-                decoded.capacity() as u64,
-                *decoded.spec(),
-            ));
-        }
-        let sbuf = sbuf_opt.as_mut().unwrap();
-        sbuf.copy_interleaved_ref(decoded);
-        let samples = sbuf.samples();
-
-        let frames = samples.len() / channels;
-        for f in 0..frames {
-            let mut frame_max = 0.0f32;
-            let base = f * channels;
-            for ch in 0..channels {
-                let a = samples.get(base + ch).copied().unwrap_or(0.0).abs();
-                if a > frame_max {
-                    frame_max = a;
-                }
-            }
-            if frame_max > current_max {
-                current_max = frame_max;
-            }
-            count_frames += 1;
-            if count_frames >= step_frames {
-                preview[idx] = current_max;
-                idx += 1;
-                if idx >= preview_len {
-                    break;
-                }
-                current_max = 0.0;
-                count_frames = 0;
-            }
-        }
-
-        if idx >= preview_len {
-            break;
-        }
-    }
-
-    Some(WavInfo {
-        sample_rate,
         total_frames,
         duration_sec,
         waveform_preview: preview,

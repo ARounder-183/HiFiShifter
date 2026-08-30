@@ -61,7 +61,11 @@ fn paste_clb_pitch_data(
 
     state.checkpoint_timeline(&tl);
 
-    let param_name = active_param.unwrap_or("pitch");
+    let param_name = match active_param.unwrap_or("pitch") {
+        // 旧版 NSF-HiFiGAN 专有参数名：按共通音量参数处理。
+        "hifigan_volume" => "volume",
+        other => other,
+    };
 
     // 非 pitch 参数：委托给 vslib 参数粘贴逻辑
     if param_name != "pitch" {
@@ -196,7 +200,8 @@ fn paste_clb_pitch_data(
 }
 
 /// 粘贴 .clb 非 pitch 参数到当前选中轨道的 extra_curves。
-/// 当轨道算法为 VocalShifterVslib 或 NsfHifiganOnnx（且参数为 `formant_shift_cents`）时生效。
+/// volume / pan 是所有算法共通的混音参数，因此任何可用算法都支持；
+/// formant_shift_cents 支持 vslib 与 nsf-hifigan；其余曲线仅 vslib 支持。
 fn paste_clb_vslib_param(
     state: &AppState,
     tl: &mut crate::state::TimelineState,
@@ -209,7 +214,6 @@ fn paste_clb_vslib_param(
 ) -> serde_json::Value {
     use crate::state::PitchAnalysisAlgo;
 
-    // 检查轨道算法：vslib 支持所有参数，nsf-hifigan 仅支持 formant_shift_cents
     let track_algo = tl
         .tracks
         .iter()
@@ -217,6 +221,8 @@ fn paste_clb_vslib_param(
         .map(|t| &t.pitch_analysis_algo);
 
     let is_supported = match param_name {
+        // 共通音量/声像在 mix 阶段应用，任何算法（包括 None 的原始音频轨道）都支持。
+        "volume" | "pan" => true,
         "formant_shift_cents" => matches!(
             track_algo,
             Some(PitchAnalysisAlgo::VocalShifterVslib) | Some(PitchAnalysisAlgo::NsfHifiganOnnx)

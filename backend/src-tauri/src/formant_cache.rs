@@ -17,6 +17,15 @@ pub struct FormantCacheKey {
     pub source_start_q: i64,
     pub source_end_q: i64,
     pub reversed: bool,
+    /// 缓冲域判别：`false` = 实时域（完整文件自然顺序 / 非 Loop 窗口切片，
+    /// 方向可由 `reversed` 预反转）；`true` = 离线回绕平铺域（mixdown /
+    /// render_single_clip 先按整文件 floor_mod 平铺再处理的 segment）。
+    ///
+    /// 两个域对同一 clip 的输入内容不同（实时 [0,D] 自然顺序 vs 离线
+    /// 锚点起回绕、长度为 clip 消费量的平铺内容），绝不能共享缓存条目 ——
+    /// 否则先计算的一方会毒化另一方（离线导出拿到未回绕的整文件音频、
+    /// 或实时把平铺内容当作整文件换入），产生错误输出。
+    pub tiled_wrap: bool,
     pub enabled: bool,
     pub target_f1_q: u32,
     pub target_f2_q: u32,
@@ -90,11 +99,7 @@ pub fn formant_debug_log(message: impl AsRef<str>) {
     let line = format!("[formant] {}", message.as_ref());
     eprintln!("{line}");
     let log_path = std::env::temp_dir().join("hifishifter-formant-debug.log");
-    if let Ok(mut file) = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path)
-    {
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) {
         let _ = writeln!(file, "{line}");
     }
 }
@@ -111,6 +116,7 @@ fn quantize_u32(value: f64, scale: f64) -> u32 {
     (value * scale).round().clamp(0.0, u32::MAX as f64) as u32
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn make_formant_cache_key(
     clip_id: &str,
     source_path: &Path,
@@ -118,6 +124,7 @@ pub fn make_formant_cache_key(
     source_start_sec: f64,
     source_end_sec: f64,
     reversed: bool,
+    tiled_wrap: bool,
     params: &ClipFormantMorph,
 ) -> FormantCacheKey {
     FormantCacheKey {
@@ -127,6 +134,7 @@ pub fn make_formant_cache_key(
         source_start_q: quantize_i64(source_start_sec, 1000.0),
         source_end_q: quantize_i64(source_end_sec, 1000.0),
         reversed,
+        tiled_wrap,
         enabled: params.enabled,
         target_f1_q: quantize_u32(params.target_f1_hz, 10.0),
         target_f2_q: quantize_u32(params.target_f2_hz, 10.0),
@@ -210,19 +218,36 @@ pub fn compute_formant_cache_entry_for_clip(
         return Err("source_audio_too_short".to_string());
     }
 
-    let source_start_sec = clip.source_start_sec.max(0.0);
     let total_sec = crate::mixdown::clip_duration_sec_from_wav(in_rate, in_channels, &pcm)
         .ok_or_else(|| "cannot_determine_clip_duration".to_string())?;
-    let source_end_sec = clip.source_end_sec.min(total_sec).max(source_start_sec);
-    if source_end_sec - source_start_sec <= 1e-9 {
-        return Err("trimmed_clip_too_short".to_string());
-    }
+    // 消费窗口模型（与 build_snapshot 实时分支及离线渲染完全一致）：
+    //   正放 win = [ss, ss+len·r)；倒放 win = [se−len·r, se)。
+    // 切片 clamp 到媒体内；缓存键使用**未 clamp** 的窗口值，与 snapshot
+    // 的查找键逐字节成对（此前预计算键尾取原始 se、快照键尾取派生值，
+    // 陈旧窗口的正放 clip 两键永不匹配 → 预计算白算且状态闪烁）。
+    let (raw_win_start_sec, raw_win_end_sec) = crate::state::clip_playback_window_sec(clip);
+    let source_start_sec = raw_win_start_sec.max(0.0);
+    let source_end_sec = raw_win_end_sec.min(total_sec).max(source_start_sec);
 
-    let src_i0 = (source_start_sec * in_rate as f64).floor().max(0.0) as usize;
-    let src_i1 = ((source_end_sec * in_rate as f64)
-        .ceil()
-        .max(src_i0 as f64) as usize)
-        .min(in_frames);
+    // Loop（循环源）：与 build_snapshot 的实时 Formant 分支保持一致 ——
+    // 处理对象是**完整文件的自然顺序** PCM（方向由 mix 阶段的锚点回绕体现，
+    // 不预反转），缓存键取 [0, 文件时长]。非 Loop 保持窗口切片 + 预反转。
+    // 此前本函数不感知 Loop：对 Loop clip 仍按窗口切片并整体反转，产出的
+    // 键 ([start,end], reversed) 永远不会被快照查找键 ([0,D], false) 命中，
+    // 既白白消耗一次全量 formant 计算，还会向前端误报 rebuilding/failed 状态。
+    let loop_mode = clip.loop_enabled;
+    let (slice_start_sec, slice_end_sec) = if loop_mode {
+        (0.0f64, total_sec)
+    } else {
+        if source_end_sec - source_start_sec <= 1e-9 {
+            return Err("trimmed_clip_too_short".to_string());
+        }
+        (source_start_sec, source_end_sec)
+    };
+
+    let src_i0 = (slice_start_sec * in_rate as f64).floor().max(0.0) as usize;
+    let src_i1 =
+        ((slice_end_sec * in_rate as f64).ceil().max(src_i0 as f64) as usize).min(in_frames);
     if src_i1 <= src_i0 + 1 {
         return Err("source_slice_too_short".to_string());
     }
@@ -231,7 +256,8 @@ pub fn compute_formant_cache_entry_for_clip(
     let mut segment =
         crate::mixdown::linear_resample_interleaved(segment, in_channels_usize, in_rate, out_rate);
 
-    if clip.reversed {
+    if clip.reversed && !loop_mode {
+        // 注意：此处尚未转为立体声，通道数仍是源文件的实际通道数。
         crate::mixdown::reverse_interleaved_frames(&mut segment, in_channels_usize);
     }
 
@@ -255,9 +281,21 @@ pub fn compute_formant_cache_entry_for_clip(
         &clip.id,
         Path::new(source_path),
         out_rate,
-        clip.source_start_sec.max(0.0),
-        clip.source_end_sec,
-        clip.reversed,
+        if loop_mode {
+            0.0
+        } else {
+            raw_win_start_sec.max(0.0)
+        },
+        if loop_mode {
+            // 与 snapshot 的查找键使用同一来源（优先 clip 元数据）——
+            // 避免 wav 头时长与解码帧时长在 1ms 量化边界处错开键值。
+            crate::state::clip_source_media_duration_sec(clip).unwrap_or(total_sec)
+        } else {
+            // 未 clamp 的消费窗口终点 —— 与 snapshot 查找键成对。
+            raw_win_end_sec
+        },
+        clip.reversed && !loop_mode,
+        false,
         params,
     );
     let processed =
@@ -299,16 +337,31 @@ pub fn get_or_compute_formant_audio(
             .lock()
             .unwrap_or_else(|err| err.into_inner());
         if let Some(entry) = cache.get(&key) {
+            // 防御：命中条目的帧数必须与当前输入一致 —— 不一致说明键未覆盖
+            // 某个内容维度（历史遗留条目或域泄漏），按未命中重新计算，
+            // 绝不把错误长度的音频返回给调用方（会被静音截断/混入）。
+            if entry.frames == input_stereo.len() / 2 && entry.sample_rate == sample_rate {
+                formant_debug_log(format!(
+                    "cache hit clip_id={} frames={} sr={}",
+                    key.clip_id, entry.frames, entry.sample_rate
+                ));
+                return Ok(entry.clone());
+            }
             formant_debug_log(format!(
-                "cache hit clip_id={} frames={} sr={}",
-                key.clip_id, entry.frames, entry.sample_rate
+                "cache shape-mismatch clip_id={} cached_frames={} input_frames={} → recompute",
+                key.clip_id,
+                entry.frames,
+                input_stereo.len() / 2,
             ));
-            return Ok(entry.clone());
         }
     }
 
-    let processed =
-        crate::formant_morph::apply_formant_morph_interleaved(input_stereo, sample_rate, 2, params)?;
+    let processed = crate::formant_morph::apply_formant_morph_interleaved(
+        input_stereo,
+        sample_rate,
+        2,
+        params,
+    )?;
     formant_debug_log(format!(
         "cache miss compute clip_id={} enabled={} f1={:.1} f2={:.1} strength={:.3} frames={} diff={:.8}",
         key.clip_id,
@@ -357,6 +410,7 @@ mod tests {
             0.0,
             1.0,
             false,
+            false,
             &ClipFormantMorph {
                 enabled: true,
                 target_f1_hz: 700.0,
@@ -371,6 +425,7 @@ mod tests {
             0.0,
             1.0,
             false,
+            false,
             &ClipFormantMorph {
                 enabled: true,
                 target_f1_hz: 750.0,
@@ -379,5 +434,42 @@ mod tests {
             },
         );
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn formant_cache_key_separates_tiled_wrap_domain() {
+        // 实时域（完整文件自然顺序）与离线回绕平铺域的其余键参数完全一致，
+        // 仅靠 tiled_wrap 区分 —— 否则先计算的一方会毒化另一方。
+        let realtime = make_formant_cache_key(
+            "clip-1",
+            Path::new("demo.wav"),
+            44_100,
+            0.0,
+            10.0,
+            false,
+            false,
+            &ClipFormantMorph {
+                enabled: true,
+                target_f1_hz: 700.0,
+                target_f2_hz: 1700.0,
+                strength: 0.5,
+            },
+        );
+        let offline_tiled = make_formant_cache_key(
+            "clip-1",
+            Path::new("demo.wav"),
+            44_100,
+            0.0,
+            10.0,
+            false,
+            true,
+            &ClipFormantMorph {
+                enabled: true,
+                target_f1_hz: 700.0,
+                target_f2_hz: 1700.0,
+                strength: 0.5,
+            },
+        );
+        assert_ne!(realtime, offline_tiled);
     }
 }

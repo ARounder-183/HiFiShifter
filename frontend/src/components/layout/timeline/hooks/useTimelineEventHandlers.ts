@@ -7,11 +7,14 @@
  * - hifi:zoomTimelineFocus（聚焦缩放）
  * - context menu dismiss（pointerdown 外部关闭）
  * - auto-scroll（播放时保持播放头可见）
- * - hifi:focusCursor（滚动到播放头中心）
+ * - hifi:focusCursor（滚动到播放头中心；粘贴后的聚焦由
+ *   pendingPlayheadRevealSec + TimelinePanel useLayoutEffect 驱动）
  * - useKeyboardShortcuts 桥接
  */
 import { useEffect } from "react";
+import { flushSync } from "react-dom";
 import type { AppDispatch, RootState } from "../../../../app/store";
+import { useAppStore } from "../../../../app/hooks";
 import {
     seekPlayhead,
     selectTrackRemote,
@@ -19,13 +22,14 @@ import {
     setSelectedClip,
     setSelectedClipPreservingTrack,
 } from "../../../../features/session/sessionSlice";
-import { computeAnchoredHorizontalZoom } from "../../../../utils/horizontalZoom";
+import { resolveHorizontalWheelZoom } from "../runtime/timelineScrollRange";
+import { applyNativeScrollLeft } from "../runtime/nativeScrollApply";
 import { useKeyboardShortcuts } from "./useKeyboardShortcuts";
 import { gridStepBeats, MIN_PX_PER_SEC, MAX_PX_PER_SEC } from "../";
-import type { ClipTemplate } from "../../../../features/session/sessionTypes";
-import { computeAutoFollowScrollLeft } from "../../../../utils/autoFollowScroll";
+import { computeFocusCursorScrollLeft } from "../../../../utils/autoFollowScroll";
 import { resolveTimelineMinPxPerSec } from "../runtime/timelineZoomBounds";
 import { shouldRouteClipPasteToParamEditor } from "../clipboardFocusRouting";
+import { expandClipIdsWithGroups } from "./useGroupExpansion";
 
 // ── Args 类型 ─────────────────────────────────────────────────
 export interface UseTimelineEventHandlersArgs {
@@ -43,23 +47,19 @@ export interface UseTimelineEventHandlersArgs {
     // state values
     pxPerSec: number;
     setPxPerSec: React.Dispatch<React.SetStateAction<number>>;
+    /** 缩放时与 pxPerSec 同帧提交的 scrollLeft state。 */
+    commitScrollLeftState: React.Dispatch<React.SetStateAction<number>>;
     rowHeight: number;
 
     // multi-select
-    multiSelectedClipIds: string[];
     setMultiSelectedClipIds: (ids: string[] | ((prev: string[]) => string[])) => void;
 
     // clipboard
-    clipClipboardRef: React.MutableRefObject<{
-        templates: ClipTemplate[];
-        groupIds: string[];
-    } | null>;
-    buildClipClipboardTemplates: (
-        ids: string[],
-    ) => Promise<{ templates: ClipTemplate[]; groupIds: string[] }>;
+    copyClips: (ids: string[]) => Promise<boolean>;
+    cutClips: (ids: string[]) => void;
 
     // clip actions
-    pasteClipsAtPlayhead: () => void;
+    pasteClipsAtPlayhead: (mode?: "selected" | "new_tracks") => void;
     splitSelectedAtPlayhead: () => void;
     normalizeClips: (ids: string[]) => void;
     groupClips: (ids: string[]) => void;
@@ -112,11 +112,11 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
         keyboardZoomPendingRef,
         pxPerSec,
         setPxPerSec,
+        commitScrollLeftState,
         rowHeight,
-        multiSelectedClipIds,
         setMultiSelectedClipIds,
-        clipClipboardRef,
-        buildClipClipboardTemplates,
+        copyClips,
+        cutClips,
         pasteClipsAtPlayhead,
         splitSelectedAtPlayhead,
         normalizeClips,
@@ -131,14 +131,15 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
         dynamicProjectSec,
     } = args;
 
+    // 实时 store（事件监听器内同步读取，避免闭包捕获过期选区/状态）
+    const store = useAppStore();
+
     // ── useKeyboardShortcuts 桥接 ────────────────────────────
     useKeyboardShortcuts({
-        sessionRef,
         dispatch,
-        multiSelectedClipIds,
         setMultiSelectedClipIds,
-        clipClipboardRef,
-        buildClipClipboardTemplates,
+        copyClips,
+        cutClips,
         isEditableTarget,
         onNormalize: normalizeClips,
         onPaste: pasteClipsAtPlayhead,
@@ -193,6 +194,11 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
 
             if (op === "paste") {
                 pasteClipsAtPlayhead();
+                return;
+            }
+            if (op === "pasteTracks") {
+                pasteClipsAtPlayhead("new_tracks");
+                return;
             }
             if (op === "split") {
                 splitSelectedAtPlayhead();
@@ -200,7 +206,53 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
         }
         window.addEventListener("hifi:editOp", onEditOp as EventListener);
         return () => window.removeEventListener("hifi:editOp", onEditOp as EventListener);
-    }, [pasteClipsAtPlayhead, splitSelectedAtPlayhead]);
+    }, [
+        dispatch,
+        pasteClipsAtPlayhead,
+        sessionRef,
+        setMultiSelectedClipIds,
+        splitSelectedAtPlayhead,
+    ]);
+
+    // ── hifi:timelineEditOp (menu routing when timeline has focus) ─
+    useEffect(() => {
+        function onTimelineEditOp(e: Event) {
+            const op = (e as CustomEvent<{ op?: string }>).detail?.op;
+            // 实时读取 store（同步、权威）：菜单打开的时机与鼠标点击选择之间可能
+            // 隔着未提交的渲染，闭包里的 multiSelectedClipIds 是旧选区，会
+            // 让复制/剪切作用到过期 Clip 上而静默失败。
+            const session = store.getState().session;
+            const rawSelectedIds =
+                session.multiSelectedClipIds.length > 0
+                    ? [...session.multiSelectedClipIds]
+                    : session.selectedClipId
+                      ? [session.selectedClipId]
+                      : [];
+            const selectedIds = rawSelectedIds.filter((id) =>
+                session.clips.some((clip) => clip.id === id),
+            );
+            if (op === "copy" || op === "cut") {
+                if (selectedIds.length === 0) return;
+                const expandedIds = expandClipIdsWithGroups(
+                    selectedIds,
+                    session.clips,
+                    session.ignoreGrouping,
+                    session.disabledGroupIds,
+                );
+                if (op === "copy") void copyClips(expandedIds);
+                else cutClips(expandedIds);
+                return;
+            }
+            if (op === "paste") {
+                pasteClipsAtPlayhead();
+            } else if (op === "pasteTracks") {
+                pasteClipsAtPlayhead("new_tracks");
+            }
+        }
+        window.addEventListener("hifi:timelineEditOp", onTimelineEditOp as EventListener);
+        return () =>
+            window.removeEventListener("hifi:timelineEditOp", onTimelineEditOp as EventListener);
+    }, [store, copyClips, cutClips, pasteClipsAtPlayhead]);
 
     // ── hifi:selectAdjacentTrack ────────────────────────────
     useEffect(() => {
@@ -276,7 +328,7 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
                 "hifi:selectAdjacentTrack",
                 onSelectAdjacentTrack as EventListener,
             );
-    }, [dispatch, rowHeight]);
+    }, [dispatch, rowHeight, scrollRef, sessionRef, trackListScrollRef]);
 
     // ── hifi:nudgePlayhead ───────────────────────────────────
     useEffect(() => {
@@ -295,7 +347,7 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
 
         window.addEventListener("hifi:nudgePlayhead", onNudge as EventListener);
         return () => window.removeEventListener("hifi:nudgePlayhead", onNudge as EventListener);
-    }, [dispatch]);
+    }, [dispatch, sessionRef]);
 
     // ── hifi:zoomTimelineFocus ───────────────────────────────
     useEffect(() => {
@@ -313,33 +365,51 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
             const scroller = scrollRef.current;
             if (!scroller) return;
 
-            const zoom = computeAnchoredHorizontalZoom({
-                currentScale: pxPerSecRef.current,
+            const zoom = resolveHorizontalWheelZoom({
                 factor,
-                minScale: resolveTimelineMinPxPerSec({
+                basePxPerSec: pxPerSecRef.current,
+                baseScrollLeft: scroller.scrollLeft,
+                totalSec: dynamicProjectSec,
+                viewportWidth: scroller.clientWidth,
+                playheadZoomEnabled: true,
+                playheadSec: Number(sessionRef.current.playheadSec ?? 0) || 0,
+                anchorScreenX: 0,
+                minPxPerSec: resolveTimelineMinPxPerSec({
                     baseMinPxPerSec: MIN_PX_PER_SEC,
                     projectSec: dynamicProjectSec,
                     viewportWidthPx: scroller.clientWidth,
                 }),
-                maxScale: MAX_PX_PER_SEC,
-                scrollLeft: scroller.scrollLeft,
-                viewportWidth: scroller.clientWidth,
-                anchorSec: Number(sessionRef.current.playheadSec ?? 0) || 0,
-                contentSec: dynamicProjectSec,
+                maxPxPerSec: MAX_PX_PER_SEC,
             });
             if (!zoom) return;
 
             keyboardZoomPendingRef.current = {
-                nextScale: zoom.nextScale,
+                nextScale: zoom.nextPxPerSec,
                 nextScrollLeft: zoom.nextScrollLeft,
             };
-            setPxPerSec(zoom.nextScale);
+            pxPerSecRef.current = zoom.nextPxPerSec;
+            // 原子缩放：flushSync 保证 DOM 按新缩放重排后，layout effect 在
+            // 同一绘制帧内写原生 scrollLeft 并同步重绘标尺与画布（与滚轮
+            // 缩放的 TimelineScrollArea 路径一致，避免画布先行的抽动）。
+            // 同帧提交 scrollLeft state，防止窗口化把屏内 Clip 裁掉。
+            flushSync(() => {
+                setPxPerSec(zoom.nextPxPerSec);
+                commitScrollLeftState(zoom.nextScrollLeft);
+            });
         }
 
         window.addEventListener("hifi:zoomTimelineFocus", onZoomFocused as EventListener);
         return () =>
             window.removeEventListener("hifi:zoomTimelineFocus", onZoomFocused as EventListener);
-    }, []);
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- dynamicProjectSec 随工程变化，加入依赖会让监听在工程变化时重建（既有模式）
+    }, [
+        commitScrollLeftState,
+        keyboardZoomPendingRef,
+        pxPerSecRef,
+        scrollRef,
+        sessionRef,
+        setPxPerSec,
+    ]);
 
     // ── Context menu dismiss ─────────────────────────────────
     useEffect(() => {
@@ -352,23 +422,30 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
         }
         window.addEventListener("pointerdown", onAnyPointerDown, true);
         return () => window.removeEventListener("pointerdown", onAnyPointerDown, true);
-    }, [contextMenu, trackAreaMenu]);
+    }, [contextMenu, setContextMenu, setTrackAreaMenu, trackAreaMenu]);
 
-    // ── hifi:focusCursor ─────────────────────────────────────
+    // ── hifi:focusCursor（快捷键"聚焦播放光标"）──────────────
+    // 粘贴后的视图聚焦不再走事件：由 reducer 记录的 pendingPlayheadRevealSec
+    // 驱动，在 TimelinePanel 的 useLayoutEffect 中于状态与 DOM 均提交后执行。
+    // （旧的事件方案会在工程全长扩充前触发，滚动被旧上限钳制导致聚焦失败。）
     useEffect(() => {
+        // 无条件把当前播放光标滚到视口内固定偏移处。滚动上限使用“新滚动
+        // 模型”（= 工程宽度）：光标接近工程末尾时也必须能正确进入画面，
+        // 而不是被“工程宽 − 视口宽”的旧上限卡在画面右缘。
         function handler() {
             const scroller = scrollRef.current;
             if (!scroller) return;
-            const next = computeAutoFollowScrollLeft({
+            const next = computeFocusCursorScrollLeft({
                 playheadSec: Number(sessionRef.current.playheadSec ?? 0) || 0,
                 pxPerSec,
-                viewportWidth: scroller.clientWidth,
-                contentWidth: scroller.scrollWidth,
+                contentWidth: dynamicProjectSec * pxPerSec,
             });
-            scroller.scrollLeft = next;
-            syncScrollLeft(next);
+            // 写后回读浏览器实际接受的偏移再广播：请求值可能被钳制/量化/锚定
+            // 修正，sticky 画布层必须与原生 DOM 层使用同一偏移。
+            const applied = applyNativeScrollLeft(scroller, next);
+            syncScrollLeft(applied);
         }
         window.addEventListener("hifi:focusCursor", handler);
         return () => window.removeEventListener("hifi:focusCursor", handler);
-    }, [pxPerSec, sessionRef, syncScrollLeft]);
+    }, [pxPerSec, sessionRef, syncScrollLeft, dynamicProjectSec, scrollRef]);
 }

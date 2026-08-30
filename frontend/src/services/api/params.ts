@@ -6,14 +6,28 @@ import type {
 } from "../../types/api";
 
 import { invoke } from "../invoke";
+import {
+    decodeParamFramesFromBase64,
+    paramFramesBinaryToArrays,
+} from "../../components/layout/pianoRoll/paramFramesBinaryCodec";
 
 export const paramsApi = {
+    /**
+     * 取参数曲线段。
+     *
+     * `binary=true` 时后端把 orig/edit 编码成 Base64 二进制（见
+     * `pianoRoll/paramFramesBinaryCodec.ts`），返回体里 `orig`/`edit` 为空数组、
+     * `binary` 为编码串。相比 JSON number[] 体积约缩小 4 倍，解析不再阻塞主线程。
+     *
+     * 默认开启二进制：调用方拿到的 payload 已带解码后的 `orig`/`edit`。
+     */
     getParamFrames: (
         trackId: string,
         param: string,
         startFrame: number,
         frameCount: number,
         stride?: number,
+        binary = true,
     ) =>
         invoke<ParamFramesPayload>(
             "get_param_frames",
@@ -22,7 +36,17 @@ export const paramsApi = {
             startFrame,
             frameCount,
             stride,
-        ),
+            binary,
+        ).then((res) => {
+            // 在 API 层统一解码：调用方拿到的 payload 与二进制模式开启前结构一致，
+            // 六处取数点无需感知传输格式。
+            const encoded = res?.binary;
+            if (!res || !encoded) return res;
+            const decoded = decodeParamFramesFromBase64(encoded);
+            if (!decoded) return res; // 解码失败 → 回退空数组，调用方按 not-ok 处理
+            const { orig, edit } = paramFramesBinaryToArrays(decoded);
+            return { ...res, orig, edit, binary: undefined };
+        }),
 
     setParamFrames: (
         trackId: string,
@@ -48,6 +72,24 @@ export const paramsApi = {
             frameCount,
             checkpoint,
         ),
+
+    /**
+     * "锁定参数线"：剪辑拉伸后把旧范围内的参数曲线时域映射到新范围。
+     *
+     * 由后端一次性完成 pitch（用户编辑过时）/ tension / 所有已存在的自动化
+     * 曲线的批量映射与旧范围恢复——曲线清单只能由后端枚举，前端旧实现只
+     * 覆盖 pitch+tension，导致其余参数线在拉伸后遗留在旧位置。
+     */
+    stretchTrackLinkedParams: (
+        trackId: string,
+        mappings: Array<{
+            oldStartSec: number;
+            oldLengthSec: number;
+            newStartSec: number;
+            newLengthSec: number;
+        }>,
+        checkpoint?: boolean,
+    ) => invoke<{ ok: boolean }>("stretch_track_linked_params", trackId, mappings, checkpoint),
 
     getStaticParam: (trackId: string, param: string) =>
         invoke<StaticParamValuePayload>("get_static_param", trackId, param),
@@ -92,6 +134,11 @@ export const paramsApi = {
             }>;
             initial_bpm?: number;
             has_bpm?: boolean;
+            has_time_signature?: boolean;
+            has_key_signature?: boolean;
+            tempo_point_count?: number;
+            time_signature_count?: number;
+            key_signature_count?: number;
         }>("get_midi_tracks", midiPath, clipboardGuid ?? null),
 
     readMidiClipboardToMemory: () =>
@@ -108,6 +155,11 @@ export const paramsApi = {
             }>;
             initial_bpm?: number;
             has_bpm?: boolean;
+            has_time_signature?: boolean;
+            has_key_signature?: boolean;
+            tempo_point_count?: number;
+            time_signature_count?: number;
+            key_signature_count?: number;
         }>("read_midi_clipboard_to_memory"),
 
     importMidiToPitch: (
@@ -153,6 +205,10 @@ export const paramsApi = {
         importMidiBpmAsProject?: boolean,
         clipboardGuid?: string,
         closeLeadingGap?: boolean,
+        importMidiAsTempoMap?: boolean,
+        importMidiTempo?: boolean,
+        importMidiTimeSignature?: boolean,
+        importMidiKeySignature?: boolean,
     ) =>
         invoke<TimelineResult & { ok: boolean; error?: string }>(
             "import_midi_as_clip",
@@ -167,6 +223,10 @@ export const paramsApi = {
             importMidiBpmAsProject,
             clipboardGuid ?? null,
             closeLeadingGap,
+            importMidiAsTempoMap,
+            importMidiTempo,
+            importMidiTimeSignature,
+            importMidiKeySignature,
         ),
 
     replaceMidiClipData: (

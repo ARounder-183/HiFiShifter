@@ -13,8 +13,18 @@
 import type { ParamMorphOverlay, ParamName, ParamViewSegment, ValueViewport } from "./types";
 import type { ClipPeaksEntry } from "./useClipsPeaksForPianoRoll";
 import { clamp } from "../timeline";
+import { clearCanvasPhysical, rasterize } from "../timeline/runtime/canvasRaster";
+import {
+    durationToWidthPx,
+    secToContentPx,
+    secToSpanPx,
+    secToViewportPx,
+    viewportEndSec,
+    viewportStartSec,
+    type TimelineAxis,
+} from "../timeline/runtime/timelineAxis";
 import { AXIS_W, PITCH_MAX_MIDI, PITCH_MIN_MIDI } from "./constants";
-import { framesToTime, timeToPixel } from "./utils";
+import { framesToTime } from "./utils";
 import { resolveSecondaryOverlayValues } from "./secondaryOverlaySelection";
 import {
     applyGainsToPeaks,
@@ -23,13 +33,19 @@ import {
     type WaveformRenderParams,
 } from "../../../utils/waveformRenderer";
 import { waveformMipmapStore } from "../../../utils/waveformMipmapStore";
+import { modEuclid, resolvePlaybackWindowSec } from "../../../utils/loopRender";
 import { resolveScaleNotes } from "../../../utils/musicalScales";
 import type { ScaleLike } from "../../../utils/musicalScales";
 import {
     childPitchOffsetValueToDisplay,
     isChildPitchOffsetCentsParam,
     isChildPitchOffsetDegreesParam,
+    isChildFormantOffsetCentsParam,
 } from "./childPitchOffsetParams";
+
+function isLegacyWaveformRendererEnabled(): boolean {
+    return false;
+}
 
 /**
  * 返回视觉上固定像素长度的虚线参数，避免随 dpr/缩放产生样式漂移。
@@ -73,6 +89,16 @@ function midiToLabel(midi: number): string {
     return `${name}${octave}`;
 }
 
+/**
+ * 绘制一条参数曲线。
+ *
+ * 流程：按帧周期把帧号还原成工程时间 → 用统一投影换成视口 x → 逐点连线。
+ *
+ * 特殊规则：x 坐标**只允许**经 `secToViewportPx(axis, tSec)` 得到。此前这里走
+ * 「先除后乘」的 `timeToPixel(t, scrollLeft/p, w/p, w)`，与其余图层的「先乘后减」
+ * 在 IEEE754 下不等价，是曲线与网格/播放头错位的来源。二者的等价性由
+ * `renderProjection.test.ts` 的 2 万组随机比对守护（相对误差 < 1e-9）。
+ */
 function drawCurveTimed(args: {
     ctx: CanvasRenderingContext2D;
     values: number[];
@@ -82,27 +108,18 @@ function drawCurveTimed(args: {
     startFrame: number;
     stride: number;
     framePeriodMs: number;
-    visibleStartSec: number;
-    visibleDurSec: number;
+    /** 统一投影：曲线与其它图层的唯一坐标来源。 */
+    axis: TimelineAxis;
     valueToY: (param: ParamName, v: number, h: number) => number;
 }) {
-    const {
-        ctx,
-        values,
-        param,
-        w,
-        h,
-        startFrame,
-        stride,
-        framePeriodMs,
-        visibleStartSec,
-        visibleDurSec,
-        valueToY,
-    } = args;
+    const { ctx, values, param, w, h, startFrame, stride, framePeriodMs, axis, valueToY } = args;
 
     if (values.length < 2) return;
     const fp = Math.max(1e-6, framePeriodMs);
     const step = Math.max(1, Math.floor(stride));
+    // 可见区间只用于裁剪；必须由 axis 提供，禁止用 scrollLeft / pxPerSec 还原。
+    const visibleStartSec = viewportStartSec(axis);
+    const visibleDurSec = viewportEndSec(axis) - visibleStartSec;
 
     // Check debug flag
     const debugEnabled =
@@ -148,7 +165,7 @@ function drawCurveTimed(args: {
             started = false;
             continue;
         }
-        const x = timeToPixel(tSec, visibleStartSec, visibleDurSec, w);
+        const x = secToViewportPx(axis, tSec);
 
         // Track first and last points for debugging
         if (!firstPoint && started === false) {
@@ -178,7 +195,7 @@ function drawCurveTimed(args: {
                 x: firstPoint.x,
                 // Verify conversion
                 verifyTime: framesToTime(firstPoint.frame, fp),
-                verifyPixel: timeToPixel(firstPoint.tSec, visibleStartSec, visibleDurSec, w),
+                verifyPixel: secToViewportPx(axis, firstPoint.tSec),
             },
             lastPoint: {
                 frame: lastPoint.frame,
@@ -186,7 +203,7 @@ function drawCurveTimed(args: {
                 x: lastPoint.x,
                 // Verify conversion
                 verifyTime: framesToTime(lastPoint.frame, fp),
-                verifyPixel: timeToPixel(lastPoint.tSec, visibleStartSec, visibleDurSec, w),
+                verifyPixel: secToViewportPx(axis, lastPoint.tSec),
             },
             pixelSpan: lastPoint.x - firstPoint.x,
             timeSpan: lastPoint.tSec - firstPoint.tSec,
@@ -202,35 +219,24 @@ function drawParamMorphOverlay(args: {
     overlay: ParamMorphOverlay;
     editParam: ParamName;
     framePeriodMs: number;
-    visibleStartSec: number;
-    visibleDurSec: number;
-    w: number;
+    /** 统一投影：与曲线、网格、播放头同源。 */
+    axis: TimelineAxis;
     h: number;
     valueToY: (param: ParamName, v: number, h: number) => number;
     isDark: boolean;
 }) {
-    const {
-        ctx,
-        overlay,
-        editParam,
-        framePeriodMs,
-        visibleStartSec,
-        visibleDurSec,
-        w,
-        h,
-        valueToY,
-        isDark,
-    } = args;
+    const { ctx, overlay, editParam, framePeriodMs, axis, h, valueToY, isDark } = args;
     const fp = Math.max(1e-6, framePeriodMs);
     const points = overlay.points.slice().sort((a, b) => a.frame - b.frame);
     if (points.length !== 4) return;
 
-    const lineColor = isDark ? "rgba(255, 210, 95, 0.9)" : "rgba(160, 90, 10, 0.9)";
-    const fillColor = isDark ? "rgba(255, 210, 95, 0.22)" : "rgba(160, 90, 10, 0.18)";
+    // 变形预览与参数线同向：深=浅色、浅=深色（虚线+半透明填充区分本体）。
+    const lineColor = isDark ? "rgba(255, 255, 255, 0.9)" : "rgba(28, 32, 40, 0.9)";
+    const fillColor = isDark ? "rgba(255, 255, 255, 0.20)" : "rgba(28, 32, 40, 0.16)";
 
     const toCanvasX = (frame: number) => {
         const sec = framesToTime(frame, fp);
-        return timeToPixel(sec, visibleStartSec, visibleDurSec, w);
+        return secToViewportPx(axis, sec);
     };
 
     ctx.save();
@@ -302,8 +308,12 @@ export function drawPianoRoll(args: {
     overlayText?: string | null;
     liveEditOverride: { key: string; edit: number[] } | null;
     selection: { aBeat: number; bBeat: number } | null;
-    pxPerSec: number;
-    scrollLeft: number;
+    /**
+     * 统一投影：本函数内**所有**时间↔像素换算的唯一来源。
+     * 不再单独接收 pxPerSec / scrollLeft，避免图层各自执行 `t*p - s`。
+     */
+    axis: TimelineAxis;
+    /** 每拍秒数。仅用于 beat↔sec 换算（选区数据以 beat 为单位），不参与投影。 */
     secPerBeat: number;
     playheadSec: number; // 播放头位置（秒）
     pitchAnalysisPending?: boolean;
@@ -322,6 +332,12 @@ export function drawPianoRoll(args: {
     // pitch snap visual helpers
     pitchSnapUnit?: "semitone" | "scale";
     projectScale?: ScaleLike | null;
+    /** Tempo Map 音阶高亮分段（null = 无 Tempo Map 音阶数据，使用单音阶路径）。 */
+    scaleSegments?: Array<{
+        startSec: number;
+        endSec: number;
+        scale: ScaleLike | null;
+    }> | null;
     toolMode?: string;
     snapToggleHeld?: boolean;
     scaleHighlightMode?: import("../../../features/session/sessionTypes").ScaleHighlightMode;
@@ -345,8 +361,7 @@ export function drawPianoRoll(args: {
         overlayText,
         liveEditOverride,
         selection,
-        pxPerSec,
-        scrollLeft,
+        axis,
         secPerBeat,
         playheadSec,
         pitchAnalysisPending,
@@ -367,13 +382,13 @@ export function drawPianoRoll(args: {
     // 主题颜色查找表
     const colors = isDark
         ? {
-              // 琴键区
+              // 琴键区（白键降亮一档、黑键提亮一档：在深色画布上既不刺眼也不淹没）
               axisBorder: "rgba(255,255,255,0.08)",
-              whiteKey: "#e8e8e8",
-              blackKey: "#1a1a1a",
+              whiteKey: "#d7dade",
+              blackKey: "#2e3136",
               blackKeyGradient: "rgba(0,0,0,0.35)",
               cLabel: "#3b82f6",
-              whiteKeyLabel: "rgba(80,80,80,0.70)",
+              whiteKeyLabel: "rgba(60,63,70,0.75)",
               blackKeyLabel: "rgba(220,220,220,0.80)",
               cSeparator: "rgba(100,100,100,0.45)",
               keySeparator: "rgba(160,160,160,0.20)",
@@ -384,10 +399,11 @@ export function drawPianoRoll(args: {
               pitchGridOther: "rgba(255,255,255,0.05)",
               // 曲线
               origCurve: "rgba(200,200,200,0.55)",
-              editCurve: "rgba(255,255,255,0.90)",
+              editCurve: "rgba(255,255,255,0.92)",
               selectionCurve: "rgba(100,200,255,0.95)",
-              // 叠加文字 & 播放头
-              overlayTextColor: "rgba(255,255,255,0.35)",
+              // 叠加文字 & 播放头（画布中央的操作提示文字，需保持可读：
+              // 旧值 35% 不透明度在两套主题下都只剩 1.5-1.8:1）
+              overlayTextColor: "rgba(235,240,248,0.45)",
               playheadLine: "rgba(255,255,255,0.25)",
           }
         : {
@@ -407,13 +423,20 @@ export function drawPianoRoll(args: {
               pitchGridC: "rgba(0,0,0,0.12)",
               pitchGridOther: "rgba(0,0,0,0.06)",
               // 曲线
-              origCurve: "rgba(132,104,26,0.72)",
-              editCurve: "rgba(224,154,0,1)",
-              selectionCurve: "rgba(255,186,0,1)",
-              // 叠加文字 & 播放头
-              overlayTextColor: "rgba(0,0,0,0.35)",
+              origCurve: "rgba(132,104,26,0.80)",
+              editCurve: "rgba(178,108,0,1)",
+              selectionCurve: "rgba(0,116,200,1)",
+              // 叠加文字 & 播放头（画布中央的操作提示文字，需保持可读）
+              overlayTextColor: "rgba(30,36,48,0.60)",
               playheadLine: "rgba(0,0,0,0.20)",
           };
+
+    // 网格线设备像素对齐：分数 DPR（125%/150%）下 1px CSS 线覆盖 1~2 物理像素，
+    // 随落点相位粗细不一。hairline = 1 物理像素、strong = 2 物理像素。
+    const dpr = window.devicePixelRatio || 1;
+    const hairlineY = (cssY: number): number => (Math.round(cssY * dpr) + 0.5) / dpr;
+    const hairlineW = 1 / dpr;
+    const strongW = 2 / dpr;
 
     // Draw axis (left labels)
     if (axisCanvas) {
@@ -421,17 +444,11 @@ export function drawPianoRoll(args: {
         if (ctx) {
             const h = viewSize.h;
             const w = AXIS_W;
-            const dpr = Math.max(1, window.devicePixelRatio || 1);
-            const cw = Math.max(1, Math.floor(w * dpr));
-            const ch = Math.max(1, Math.floor(h * dpr));
-            if (axisCanvas.width !== cw || axisCanvas.height !== ch) {
-                axisCanvas.width = cw;
-                axisCanvas.height = ch;
-                axisCanvas.style.width = `${w}px`;
-                axisCanvas.style.height = `${h}px`;
-            }
-            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-            ctx.clearRect(0, 0, w, h);
+            // 统一光栅化契约：与时间线画布、波形面共用同一套取整规则。
+            const target = rasterize(axisCanvas, w, h, window.devicePixelRatio || 1);
+            ctx.setTransform(target.dpr, 0, 0, target.dpr, 0, 0);
+            // 全物理清屏：round 向上取整时 CSS 尺寸清屏会在底部遗留残影。
+            clearCanvasPhysical(ctx, target);
 
             ctx.strokeStyle = colors.axisBorder;
             ctx.beginPath();
@@ -560,6 +577,30 @@ export function drawPianoRoll(args: {
                         ctx.lineTo(w, y + 0.5);
                         ctx.stroke();
                     }
+                } else if (isChildFormantOffsetCentsParam(editParam)) {
+                    // 共振峰差使用 cents 单位，强线每 600 cents。
+                    const range = vMax - vMin;
+                    const candidates = [1200, 600, 300, 200, 100, 50, 25, 10, 5, 1];
+                    let chosen = candidates[candidates.length - 1];
+                    for (const c of candidates) {
+                        const count = Math.ceil(range / c) + 1;
+                        if (count >= 5 && count <= 12) {
+                            chosen = c;
+                            break;
+                        }
+                    }
+                    const firstMark = Math.ceil(vMin / chosen) * chosen;
+                    for (let m = firstMark; m <= vMax + chosen * 0.01; m += chosen) {
+                        const y = valueToY(editParam, m, h);
+                        const isStrong = Math.round(m) % 600 === 0;
+                        ctx.fillText(formatAxisMark(m, editParam), 6, y);
+                        ctx.strokeStyle = colors.tensionLine;
+                        ctx.lineWidth = isStrong ? 1.25 : 1;
+                        ctx.beginPath();
+                        ctx.moveTo(0, y + 0.5);
+                        ctx.lineTo(w, y + 0.5);
+                        ctx.stroke();
+                    }
                 } else if (isChildPitchOffsetDegreesParam(editParam)) {
                     // 度数使用内部 degree-step 单位，强线每 7 个单位
                     const candidates = [14, 7, 3, 1];
@@ -611,24 +652,22 @@ export function drawPianoRoll(args: {
     if (!ctx) return;
 
     const { w, h } = viewSize;
-    const dpr = Math.max(1, window.devicePixelRatio || 1);
-    const cw = Math.max(1, Math.floor(w * dpr));
-    const ch = Math.max(1, Math.floor(h * dpr));
-    if (canvas.width !== cw || canvas.height !== ch) {
-        canvas.width = cw;
-        canvas.height = ch;
-        canvas.style.width = `${w}px`;
-        canvas.style.height = `${h}px`;
-    }
+    // 统一光栅化契约：此前这里用 Math.floor，而波形面用 Math.round，两者在
+    // 半像素 DPR 下会差一整个物理像素；现在全部收敛到 rasterize()。
+    const target = rasterize(canvas, w, h, window.devicePixelRatio || 1);
+    ctx.setTransform(target.dpr, 0, 0, target.dpr, 0, 0);
+    // 全物理清屏：round 向上取整时 CSS 尺寸清屏会在底部遗留残影
+    // （贴底曲线/网格/选区带/播放头的颜色永久残留在画布最底边）。
+    clearCanvasPhysical(ctx, target);
 
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, w, h);
-
-    // 统一用 sec 坐标系：所有 x 坐标 = timeSec * pxPerSec - scrollLeft
-    const visibleStartSec = scrollLeft / Math.max(1e-9, pxPerSec);
-    const visibleDurSec = w / Math.max(1e-9, pxPerSec);
-    // beat 坐标系辅助（仅用于 selection 等仍以 beat 为单位的数据）
-    const pxPerBeat = pxPerSec * secPerBeat;
+    // 所有 x 坐标 = axis.secToViewportPx(sec)，与时间线侧同一实现。
+    // 可见区间仅用于裁剪，且只能由 axis 提供：此前这里写作
+    // `scrollLeft / pxPerSec`（先除后乘），与其余图层不等价，是错位根源之一。
+    const visibleStartSec = viewportStartSec(axis);
+    const visibleDurSec = viewportEndSec(axis) - visibleStartSec;
+    // beat → sec 的换算系数（选区/剪贴板预览数据仍以 beat 为单位）。
+    // 注意：不构造 pxPerBeat —— 像素投影一律走 axis，beat 先转 sec 再投影。
+    const beatToSec = Math.max(1e-9, secPerBeat);
 
     // Horizontal grid lines
     if (editParam === "pitch") {
@@ -647,23 +686,50 @@ export function drawPianoRoll(args: {
             return mode === "always";
         })();
         const projectScaleNotes = args.projectScale ? resolveScaleNotes(args.projectScale) : [];
+        const scaleSegments = args.scaleSegments ?? null;
 
         for (let midi = startMidi; midi <= endMidi; midi += 1) {
-            const y = valueToY("pitch", midi + 0.5, h);
+            const y = hairlineY(valueToY("pitch", midi + 0.5, h));
             const pc = ((midi % 12) + 12) % 12;
             const isScaleNote = highlightActive ? projectScaleNotes.includes(pc) : false;
+
+            const normalColor = pc === 0 ? colors.pitchGridC : colors.pitchGridOther;
+            ctx.strokeStyle = normalColor;
+            ctx.lineWidth = hairlineW;
+            ctx.beginPath();
+            ctx.moveTo(0, y);
+            ctx.lineTo(w, y);
+            ctx.stroke();
+
+            if (!highlightActive) continue;
+
+            if (scaleSegments && scaleSegments.length > 0) {
+                // Tempo Map 路径：按时间段绘制高亮段。
+                ctx.strokeStyle = isDark ? "rgba(255,200,80,0.22)" : "rgba(200,120,20,0.22)";
+                ctx.lineWidth = 2;
+                for (const segment of scaleSegments) {
+                    if (!segment.scale) continue;
+                    const segmentNotes = resolveScaleNotes(segment.scale);
+                    if (!segmentNotes.includes(pc)) continue;
+                    const x0 = secToViewportPx(axis, segment.startSec);
+                    const x1 = secToViewportPx(axis, segment.endSec);
+                    if (x1 < 0 || x0 > w) continue;
+                    ctx.beginPath();
+                    ctx.moveTo(Math.max(0, x0), y);
+                    ctx.lineTo(Math.min(w, x1), y);
+                    ctx.stroke();
+                }
+                continue;
+            }
 
             if (isScaleNote) {
                 ctx.strokeStyle = isDark ? "rgba(255,200,80,0.22)" : "rgba(200,120,20,0.22)";
                 ctx.lineWidth = 2;
-            } else {
-                ctx.strokeStyle = pc === 0 ? colors.pitchGridC : colors.pitchGridOther;
-                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(0, y);
+                ctx.lineTo(w, y);
+                ctx.stroke();
             }
-            ctx.beginPath();
-            ctx.moveTo(0, y + 0.5);
-            ctx.lineTo(w, y + 0.5);
-            ctx.stroke();
         }
     } else if (isChildPitchOffsetCentsParam(editParam)) {
         const view = paramViews[editParam] ?? { center: 0, span: 1 };
@@ -674,8 +740,10 @@ export function drawPianoRoll(args: {
         const start = Math.ceil(vMin / step) * step;
 
         for (let v = start; v <= vMax + step * 0.01; v += step) {
-            const y = valueToY(editParam, v, h);
             const isStrong = Math.round(v) % 1200 === 0;
+            const y = isStrong
+                ? Math.round(valueToY(editParam, v, h) * dpr) / dpr
+                : hairlineY(valueToY(editParam, v, h));
             ctx.strokeStyle = isStrong
                 ? isDark
                     ? "rgba(255,255,255,0.14)"
@@ -683,10 +751,10 @@ export function drawPianoRoll(args: {
                 : isDark
                   ? "rgba(255,255,255,0.07)"
                   : "rgba(0,0,0,0.08)";
-            ctx.lineWidth = isStrong ? 1.25 : 1;
+            ctx.lineWidth = isStrong ? strongW : hairlineW;
             ctx.beginPath();
-            ctx.moveTo(0, y + 0.5);
-            ctx.lineTo(w, y + 0.5);
+            ctx.moveTo(0, y);
+            ctx.lineTo(w, y);
             ctx.stroke();
         }
     } else if (isChildPitchOffsetDegreesParam(editParam)) {
@@ -698,9 +766,11 @@ export function drawPianoRoll(args: {
         const start = Math.ceil(vMin / step) * step;
 
         for (let v = start; v <= vMax + step * 0.01; v += step) {
-            const y = valueToY(editParam, v, h);
             const rounded = Math.round(v);
             const isStrong = rounded % 7 === 0;
+            const y = isStrong
+                ? Math.round(valueToY(editParam, v, h) * dpr) / dpr
+                : hairlineY(valueToY(editParam, v, h));
             ctx.strokeStyle = isStrong
                 ? isDark
                     ? "rgba(255,255,255,0.14)"
@@ -708,140 +778,393 @@ export function drawPianoRoll(args: {
                 : isDark
                   ? "rgba(255,255,255,0.07)"
                   : "rgba(0,0,0,0.08)";
-            ctx.lineWidth = isStrong ? 1.25 : 1;
+            ctx.lineWidth = isStrong ? strongW : hairlineW;
             ctx.beginPath();
-            ctx.moveTo(0, y + 0.5);
-            ctx.lineTo(w, y + 0.5);
+            ctx.moveTo(0, y);
+            ctx.lineTo(w, y);
+            ctx.stroke();
+        }
+    } else if (isChildFormantOffsetCentsParam(editParam)) {
+        const view = paramViews[editParam] ?? { center: 0, span: 1 };
+        const span = Math.max(1e-6, view.span);
+        const vMin = view.center - span / 2;
+        const vMax = view.center + span / 2;
+        const step = 50;
+        const start = Math.ceil(vMin / step) * step;
+
+        for (let v = start; v <= vMax + step * 0.01; v += step) {
+            const rounded = Math.round(v);
+            const isStrong = rounded % 600 === 0;
+            const y = isStrong
+                ? Math.round(valueToY(editParam, v, h) * dpr) / dpr
+                : hairlineY(valueToY(editParam, v, h));
+            ctx.strokeStyle = isStrong
+                ? isDark
+                    ? "rgba(255,255,255,0.14)"
+                    : "rgba(0,0,0,0.16)"
+                : isDark
+                  ? "rgba(255,255,255,0.07)"
+                  : "rgba(0,0,0,0.08)";
+            ctx.lineWidth = isStrong ? strongW : hairlineW;
+            ctx.beginPath();
+            ctx.moveTo(0, y);
+            ctx.lineTo(w, y);
             ctx.stroke();
         }
     }
 
-    // ========================================
-    // 废弃离屏 Canvas，保留 mipmap 级数状态即可
-    // ========================================
-    const drawPianoRollRef = drawPianoRoll as unknown as {
-        _lastLevelByClip?: Record<string, 0 | 1 | 2>;
-    };
-    if (!drawPianoRollRef._lastLevelByClip) {
-        drawPianoRollRef._lastLevelByClip = {};
-    }
-    const lastLevelByClip = drawPianoRollRef._lastLevelByClip;
-
-    // Background waveform: per-clip 叠加绘制
-    // 与 WaveformTrackCanvas 保持一致的数据路径：
-    // waveformMipmapStore.getInterleavedSlice() → applyGainsToPeaks → renderWaveform
-    for (const entry of clipPeaks) {
-        if (!entry.sourcePath) continue;
-        if (entry.muted) continue;
-
-        const pr = entry.playbackRate > 0 ? entry.playbackRate : 1;
-        const sourceStartSec = entry.sourceStartSec ?? 0;
-        const sourceDurSec = entry.sourceDurationSec;
-        if (sourceDurSec <= 0) continue;
-
-        const clipStartSec = entry.startSec;
-        const clipEndSec = clipStartSec + entry.lengthSec;
-        const clipWidthPx = entry.lengthSec * pxPerSec;
-        if (clipWidthPx <= 0) continue;
-
-        // 只渲染当前视口内的片段
-        const visStartSec = Math.max(clipStartSec, visibleStartSec);
-        const visEndSec = Math.min(clipEndSec, visibleStartSec + visibleDurSec);
-        if (visEndSec <= visStartSec) continue;
-
-        const viewportStartPx = Math.round(scrollLeft);
-        const clipStartPx = Math.round(clipStartSec * pxPerSec);
-        const clipEndPx = Math.round(clipEndSec * pxPerSec);
-        const clipVisLeft = Math.max(0, clipStartPx - viewportStartPx);
-        const clipVisRight = Math.min(w, clipEndPx - viewportStartPx);
-        const visibleClipWidthPx = Math.max(1, clipVisRight - clipVisLeft);
-
-        const clipSourceEndSec = Number(entry.sourceEndSec ?? sourceDurSec) || sourceDurSec;
-        const clipSourceSpanSec = Math.max(
-            0,
-            Math.min(entry.lengthSec * pr, clipSourceEndSec - sourceStartSec),
-        );
-        const sourceTimeStart = sourceStartSec;
-        const sourceDuration = Math.max(0.001, clipSourceSpanSec);
-
-        // 选择 mipmap 级别（与 WaveformTrackCanvas 一致，使用 previousLevel 实现滞后防抖）
-        const sampleRate = entry.sourceSampleRate || 44100;
-        const spp = Math.max(1, Math.round(sampleRate / pxPerSec));
-        const levelKey = `${entry.sourcePath}::${entry.clipId}`;
-        const previousLevel = lastLevelByClip[levelKey];
-        const stableLevel = waveformMipmapStore.selectLevelStable(spp, previousLevel);
-        lastLevelByClip[levelKey] = stableLevel;
-
-        // 从 mipmap 缓存获取 interleaved 数据
-        const result = waveformMipmapStore.getInterleavedSlice(
-            entry.sourcePath,
-            stableLevel,
-            sourceTimeStart,
-            sourceDuration,
-        );
-        if (!result || result.interleaved.length < 4) {
-            continue;
-        }
-        // clip 内的像素偏移（整像素稳定路径）
-        const clipPixelOffset = viewportStartPx + clipVisLeft - clipStartPx;
-
-        // 构建渲染参数
-        const params: WaveformRenderParams = {
-            canvasWidth: visibleClipWidthPx,
-            canvasHeight: h, // 直接使用主画布高度
-            centerY: h / 2,
-            zeroDbHalfHeight: h / 2,
-            sourceStartSec,
-            clipDuration: entry.lengthSec,
-            playbackRate: pr,
-            sourceDurationSec: sourceDurSec,
-            volumeGain: Number(entry.gain ?? 1) || 1,
-            fadeInSec: Number(entry.fadeInSec ?? 0) || 0,
-            fadeOutSec: Number(entry.fadeOutSec ?? 0) || 0,
-            fadeInCurve: entry.fadeInCurve ?? "linear",
-            fadeOutCurve: entry.fadeOutCurve ?? "linear",
-            dataStartSec: result.dataStartSec,
-            dataDurationSec: result.dataDurationSec,
-            clipPixelOffset,
-            clipTotalWidthPx: Math.max(1, clipWidthPx),
+    // Shared WaveformSurface now owns background waveform rendering. Keep this
+    // legacy block unreachable until its remaining helper imports are removed.
+    if (isLegacyWaveformRendererEnabled()) {
+        // ========================================
+        // 废弃离屏 Canvas，保留 mipmap 级数状态即可
+        // ========================================
+        const drawPianoRollRef = drawPianoRoll as unknown as {
+            _lastLevelByClip?: Record<string, 0 | 1 | 2>;
         };
+        if (!drawPianoRollRef._lastLevelByClip) {
+            drawPianoRollRef._lastLevelByClip = {};
+        }
+        const lastLevelByClip = drawPianoRollRef._lastLevelByClip;
 
-        // 应用增益（音量 + 淡入淡出）
-        const withGains = applyGainsToPeaks(result.interleaved, params);
-        ctx.save();
-
-        // 严格裁剪在 clip 实际可见范围内，防止溢出
-        ctx.beginPath();
-        if (clipVisRight <= clipVisLeft) {
-            waveformMipmapStore.releaseInterleaved(result.interleaved);
-            if (withGains !== result.interleaved) {
-                releaseGainBuffer(withGains);
+        // 级别提示键清理：该 map 挂在模块级函数属性上（跨卸载存活），
+        // 已删除/不可见 clip 的 `${path}::${clipId}` 键若不清理会无限累积。
+        {
+            const liveKeys = new Set<string>();
+            for (const entry of clipPeaks) {
+                if (entry.sourcePath) liveKeys.add(`${entry.sourcePath}::${entry.clipId}`);
             }
-            ctx.restore();
-            continue;
+            for (const key of Object.keys(lastLevelByClip)) {
+                if (!liveKeys.has(key)) delete lastLevelByClip[key];
+            }
         }
-        ctx.rect(clipVisLeft, 0, clipVisRight - clipVisLeft, h);
-        ctx.clip();
 
-        // 静音 clip 半透明
-        ctx.globalAlpha = entry.muted ? 0.3 : 0.86;
-        // 因为 renderWaveform 内部是从 x=0 开始画的，所以我们把画布的原点平移到 Clip 的可视起始点
-        ctx.translate(clipVisLeft, 0);
-        renderWaveform(ctx, withGains, params, waveformColors.stroke, 0.5, "line");
+        // Background waveform: per-clip 叠加绘制
+        // 与 WaveformTrackCanvas 保持一致的数据路径：
+        // waveformMipmapStore.getInterleavedSlice() → applyGainsToPeaks → renderWaveform
+        for (const entry of clipPeaks) {
+            if (!entry.sourcePath) continue;
+            if (entry.muted) continue;
 
-        ctx.restore();
-        if (withGains !== result.interleaved) {
-            releaseGainBuffer(withGains);
+            const pr = entry.playbackRate > 0 ? entry.playbackRate : 1;
+            const sourceStartSec = entry.sourceStartSec ?? 0;
+            const sourceDurSec = entry.sourceDurationSec;
+            if (sourceDurSec <= 0) continue;
+
+            const clipStartSec = entry.startSec;
+            const clipEndSec = clipStartSec + entry.lengthSec;
+            const clipWidthPx = secToSpanPx(axis, entry.lengthSec);
+            if (clipWidthPx <= 0) continue;
+
+            // 只渲染当前视口内的片段
+            const visStartSec = Math.max(clipStartSec, visibleStartSec);
+            const visEndSec = Math.min(clipEndSec, visibleStartSec + visibleDurSec);
+            if (visEndSec <= visStartSec) continue;
+
+            const viewportStartPx = Math.round(axis.scrollLeftPx);
+            const clipStartPx = Math.round(secToContentPx(axis, clipStartSec));
+
+            const isLoop = Boolean(entry.loopEnabled);
+            const mediaDurPiano = Math.max(0, Number(entry.sourceDurationSec) || 0);
+            const storedSourceEndSec = Number(entry.sourceEndSec ?? sourceDurSec) || sourceDurSec;
+            // 消费窗口模型（与后端 clip_playback_window_sec / WaveformTrackCanvas
+            // 一致）：正放 win=[ss, ss+len·r)、倒放 win=[se−len·r, se)。倒放的
+            // sourceStartSec 不参与取窗 —— 否则延伸/trim 写入的域外锚点会让波形
+            // 与音频错位。
+            const { winStartSec, winEndSec } = resolvePlaybackWindowSec({
+                loopEnabled: isLoop,
+                reversed: Boolean(entry.reversed),
+                sourceStartSec,
+                playbackRate: pr,
+                lengthSec: entry.lengthSec,
+                sourceEndSec: storedSourceEndSec,
+            });
+            const effSrcEndPiano = Math.min(winEndSec, mediaDurPiano || winEndSec);
+            let clipSourceSpanSec: number;
+            if (!isLoop) {
+                // 非 Loop：窗口宽度恒为 len·r（域外为静音，无数据 → 空白）。
+                clipSourceSpanSec = Math.max(0, winEndSec - winStartSec);
+            } else if (mediaDurPiano > 1e-6) {
+                // Loop（循环源）：回绕发生在整个媒体文件上，音频只由锚点与媒体
+                // 时长决定 —— split 等编辑会产生 sourceStart > sourceEnd 的"环绕
+                // 窗口"，可用性只取决于媒体时长本身（否则波形会整体消失）。
+                clipSourceSpanSec = mediaDurPiano;
+            } else {
+                // 无有效媒体时长：退化为窗口跨度
+                clipSourceSpanSec = Math.max(
+                    0,
+                    Math.min(winEndSec, sourceDurSec || winEndSec) - winStartSec,
+                );
+            }
+            if (clipSourceSpanSec <= 0) continue;
+
+            // ── 循环分段（Loop = 循环原始音频文件，与 WaveformTrackCanvas 一致）──
+            // 语义：正放 src(t)=mod(sourceStart+t·pr, D)、倒放 src(t)=mod(sourceEnd−t·pr, D)，
+            // D = 完整媒体时长。分段 = 头部进入段 + 整文件重复段；
+            // 每段携带自己的源窗口，clipDuration === 源跨度/pr（倒放镜像成立），
+            // 超出 clip 长度的部分仅通过绘制矩形裁掉。
+            // 淡入淡出按 clip 局部时间求值（每段携带完整淡化参数）。
+            interface PianoRollTile {
+                localStartSec: number;
+                durationSec: number;
+                srcWinStart: number;
+                srcWinEnd: number;
+            }
+            const tiles: PianoRollTile[] = [];
+            if (!isLoop) {
+                tiles.push({
+                    localStartSec: 0,
+                    durationSec: entry.lengthSec,
+                    srcWinStart: winStartSec,
+                    srcWinEnd: winEndSec,
+                });
+            } else if (!(mediaDurPiano > 1e-6)) {
+                // 无有效媒体时长：退化为单片近似
+                tiles.push({
+                    localStartSec: 0,
+                    durationSec: entry.lengthSec,
+                    srcWinStart: winStartSec,
+                    srcWinEnd: winEndSec,
+                });
+            } else {
+                // 锚点用 floor_mod 归一化（与引擎 mod(anchor ± t·pr, D) 一致，
+                // 与 WaveformTrackCanvas 相同）—— 负 / 超界存储锚点正确环绕。
+                const anchorFwd = modEuclid(sourceStartSec, mediaDurPiano);
+                const anchorRev = modEuclid(effSrcEndPiano, mediaDurPiano);
+                const headDur = (entry.reversed ? anchorRev : mediaDurPiano - anchorFwd) / pr;
+                const bodyDur = mediaDurPiano / pr;
+                const visLocalStart = Math.max(0, visStartSec - clipStartSec);
+                const visLocalEnd = Math.min(entry.lengthSec, visEndSec - clipStartSec);
+                // 分段数按【可见区间】估算（与 WaveformTrackCanvas 一致）——
+                // 长循环 clip 不会落入"单片拉伸近似"。
+                // 首个重复段取**包含视口左缘**的那一段（floor），避免左缘空隙。
+                const firstBodyIndex = Math.max(
+                    0,
+                    Math.floor((visLocalStart - headDur - 1e-9) / bodyDur),
+                );
+                const approxCount =
+                    2 + Math.ceil((visLocalEnd - Math.max(headDur, visLocalStart)) / bodyDur);
+                if (visLocalEnd > visLocalStart && approxCount <= 4096) {
+                    if (headDur > 1e-9 && visLocalStart < headDur) {
+                        tiles.push({
+                            localStartSec: 0,
+                            durationSec: headDur,
+                            srcWinStart: entry.reversed ? 0 : anchorFwd,
+                            srcWinEnd: entry.reversed ? anchorRev : mediaDurPiano,
+                        });
+                    }
+                    let segOffset = headDur + firstBodyIndex * bodyDur;
+                    for (
+                        let guard = 0;
+                        segOffset < visLocalEnd - 1e-9 && guard < 4096;
+                        guard += 1
+                    ) {
+                        tiles.push({
+                            localStartSec: segOffset,
+                            durationSec: bodyDur,
+                            srcWinStart: 0,
+                            srcWinEnd: mediaDurPiano,
+                        });
+                        segOffset += bodyDur;
+                    }
+                } else {
+                    // 退化保护：单片近似。
+                    // 用"进入段"窗口（锚点 → 媒体末端/起点）近似，
+                    // 避免按 [start, start+span] 取到越界源区间。
+                    tiles.push({
+                        localStartSec: 0,
+                        durationSec: entry.lengthSec,
+                        srcWinStart: entry.reversed ? 0 : anchorFwd,
+                        srcWinEnd: entry.reversed ? anchorRev : mediaDurPiano,
+                    });
+                }
+                if (tiles.length === 0) continue;
+            }
+
+            // ── 同窗口切片缓存 ─────────────────────────────────────────────
+            // 单条目切片缓存：窗口参数相同的相邻瓦片（或重绘间未变化的窗口）
+            // 直接复用上一次切片，缓存持有 store buffer 直到换窗或本 clip
+            // 结束（与 WaveformTrackCanvas 保持一致）。
+            let fetchCacheKey: string | null = null;
+            let fetchCacheResult: {
+                interleaved: Float32Array;
+                dataStartSec: number;
+                dataDurationSec: number;
+            } | null = null;
+            const releaseFetchCache = () => {
+                if (fetchCacheResult) {
+                    waveformMipmapStore.releaseInterleaved(fetchCacheResult.interleaved);
+                    fetchCacheResult = null;
+                }
+                fetchCacheKey = null;
+            };
+
+            // 选择 mipmap 级别（与 WaveformTrackCanvas 一致，使用 previousLevel
+            // 实现滞后防抖）。级别只依赖 pxPerSec 与采样率，对本 clip 的所有
+            // 瓦片都相同 —— 移到循环外，避免每瓦片重复计算与写回。
+            const sampleRate = entry.sourceSampleRate || 44100;
+            // 采样密度（每像素采样数）依赖缩放，但**不是**坐标投影：
+            // 它不产生任何 x 坐标，只是挑选 mipmap 等级，因此直接读 axis 的
+            // 缩放标量是安全的（坐标一律走 secToViewportPx / secToContentPx）。
+            const spp = Math.max(1, Math.round(sampleRate / axis.pxPerSec));
+            const levelKey = `${entry.sourcePath}::${entry.clipId}`;
+            const previousLevel = lastLevelByClip[levelKey];
+            const stableLevel = waveformMipmapStore.selectLevelStable(spp, previousLevel);
+            lastLevelByClip[levelKey] = stableLevel;
+
+            // 边缘外扩（与 WaveformTrackCanvas 相同的公式）：保证像素列插值
+            // 在瓦片可见边界处不缺数据。
+            const sourcePadSecPiano = Math.max(0.005, (2 / Math.max(1, axis.pxPerSec)) * pr);
+
+            for (const tile of tiles) {
+                const tileLocalEndSec = tile.localStartSec + tile.durationSec;
+                const visLocalStart = Math.max(tile.localStartSec, visStartSec - clipStartSec);
+                const visLocalEnd = Math.min(tileLocalEndSec, visEndSec - clipStartSec);
+                if (visLocalEnd <= visLocalStart) continue;
+
+                // 该分段自己的源窗口（头部进入段 / 整文件重复段）。
+                // 只请求当前可见部分对应的源数据 —— 此前整窗取数（正放/倒放重复
+                // 段即整个媒体 [0, D]），长媒体的每个循环瓦片都要对全量 peaks 跑
+                // applyGains/renderWaveform 的索引换算，开销随媒体时长线性放大；
+                // 与 WaveformTrackCanvas 一致地取"瓦片 ∩ 视口"后，成本只与
+                // 可见像素相关。renderWaveform 依据 dataStartSec/dataDurationSec
+                // 把部分数据映射回正确的屏幕位置，绘制结果不变。
+                const tileSpanStartSec = tile.srcWinStart;
+                const tileSpanEndSec = tile.srcWinEnd;
+                const sourceVisStartSec = entry.reversed
+                    ? tileSpanEndSec - (visLocalEnd - tile.localStartSec) * pr
+                    : tileSpanStartSec + (visLocalStart - tile.localStartSec) * pr;
+                const sourceVisEndSec = entry.reversed
+                    ? tileSpanEndSec - (visLocalStart - tile.localStartSec) * pr
+                    : tileSpanStartSec + (visLocalEnd - tile.localStartSec) * pr;
+                // 取数范围 clamp 到媒体 [0, mediaDurPiano]：消费窗口（尤其倒放
+                // 延伸后的 [se−len·r, se]）可越出媒体域，缺失区间无数据、自然
+                // 渲染为空白 —— 与音频的静音表达一致。
+                const sourceTimeStart = Math.max(
+                    0,
+                    tileSpanStartSec,
+                    Math.min(sourceVisStartSec, sourceVisEndSec) - sourcePadSecPiano,
+                );
+                const sourceTimeEnd = Math.min(
+                    mediaDurPiano,
+                    tileSpanEndSec,
+                    Math.max(sourceVisStartSec, sourceVisEndSec) + sourcePadSecPiano,
+                );
+                // 可见区与媒体域无交集（纯静音段）：跳过取数与绘制，防止退化
+                // 请求把媒体开头的 1ms 数据错误映射进静音区。
+                if (!(sourceTimeEnd > sourceTimeStart + 1e-9)) {
+                    releaseFetchCache();
+                    continue;
+                }
+                const sourceDuration = Math.max(0.001, sourceTimeEnd - sourceTimeStart);
+
+                // 从 mipmap 缓存获取 interleaved 数据（相同源窗口的瓦片复用同一切片）
+                const fetchKey = `${sourceTimeStart}|${sourceDuration}`;
+                if (!fetchCacheResult || fetchKey !== fetchCacheKey) {
+                    releaseFetchCache();
+                    fetchCacheKey = fetchKey;
+                    fetchCacheResult = waveformMipmapStore.getInterleavedSlice(
+                        entry.sourcePath,
+                        stableLevel,
+                        sourceTimeStart,
+                        sourceDuration,
+                    );
+                }
+                const result = fetchCacheResult;
+                if (!result || result.interleaved.length < 4) {
+                    releaseFetchCache();
+                    continue;
+                }
+
+                // 瓦片在画布上的可见像素范围
+                const tileVisLeft =
+                    Math.round(secToContentPx(axis, clipStartSec + visLocalStart)) -
+                    viewportStartPx;
+                const tileVisRight =
+                    Math.round(secToContentPx(axis, clipStartSec + visLocalEnd)) - viewportStartPx;
+                if (tileVisRight <= tileVisLeft) {
+                    continue;
+                }
+
+                // clipPixelOffset = canvas 左边缘对应的瓦片局部像素：
+                // renderWaveform 内部 screenX = globalTilePx − clipPixelOffset。
+                // 与 WaveformTrackCanvas 一致量化到半像素，消除大浮点数相减的
+                // 子像素漂移。
+                const tileStartTimelinePx = clipStartPx + secToSpanPx(axis, tile.localStartSec);
+                const clipPixelOffset = Math.round((viewportStartPx - tileStartTimelinePx) * 2) / 2;
+
+                const effectiveFadeInPiano =
+                    Number(entry.autoFadeInSec ?? 0) > 0
+                        ? Number(entry.autoFadeInSec) || 0
+                        : Number(entry.fadeInSec ?? 0) || 0;
+                const effectiveFadeOutPiano =
+                    Number(entry.autoFadeOutSec ?? 0) > 0
+                        ? Number(entry.autoFadeOutSec) || 0
+                        : Number(entry.fadeOutSec ?? 0) || 0;
+
+                // 构建渲染参数（以单个循环分段为坐标系；
+                // sourceStart + clipDuration·rate === 该段源窗口终点，倒放镜像成立）
+                const params: WaveformRenderParams = {
+                    canvasWidth: w,
+                    canvasHeight: h,
+                    centerY: h / 2,
+                    zeroDbHalfHeight: h / 2,
+                    sourceStartSec: tile.srcWinStart,
+                    clipDuration: tile.durationSec,
+                    playbackRate: pr,
+                    reversed: entry.reversed,
+                    sourceDurationSec: sourceDurSec,
+                    volumeGain: Number(entry.gain ?? 1) || 1,
+                    // 每个分段都携带完整淡化参数（增益按 clip 局部时间求值），
+                    // 长于一个周期的淡化横跨多段时包络保持连续。
+                    fadeInSec: effectiveFadeInPiano,
+                    fadeOutSec: effectiveFadeOutPiano,
+                    fadeInShape: Number.isFinite(entry.fadeInShape) ? entry.fadeInShape : 0,
+                    fadeInDir: entry.fadeInDir ?? 0,
+                    fadeOutShape: Number.isFinite(entry.fadeOutShape) ? entry.fadeOutShape : 0,
+                    fadeOutDir: entry.fadeOutDir ?? 0,
+                    dataStartSec: result.dataStartSec,
+                    dataDurationSec: result.dataDurationSec,
+                    clipTimeOffsetSec: isLoop ? tile.localStartSec : 0,
+                    clipTotalDurationSec: entry.lengthSec,
+                    clipPixelOffset,
+                    // 与 clip 体画布共用同一宽度下限（durationToWidthPx），
+                    // 否则极小瓦片处波形与 clip 体宽度会分叉。
+                    clipTotalWidthPx: durationToWidthPx(axis, tile.durationSec),
+                };
+
+                // 应用增益（音量 + 淡入淡出）
+                const withGains = applyGainsToPeaks(result.interleaved, params);
+
+                ctx.save();
+                // beginPath 必须先于 rect：canvas 路径不受 save/restore 管理，
+                // 缺失会让 rect 永久累积（clip 区域 = 历史所有矩形并集，
+                // 跨瓦片/跨 clip 渗透，且每帧路径增长造成渐进卡顿）。
+                ctx.beginPath();
+                ctx.rect(tileVisLeft, 0, tileVisRight - tileVisLeft, h);
+                ctx.clip();
+
+                // 静音 clip 半透明
+                ctx.globalAlpha = entry.muted ? 0.3 : 0.86;
+                renderWaveform(ctx, withGains, params, waveformColors.stroke, 0.5, "line");
+
+                ctx.restore();
+                if (withGains !== result.interleaved) {
+                    releaseGainBuffer(withGains);
+                }
+                // store 复用池 buffer 由 fetchCache 统一持有/归还。
+            }
+            releaseFetchCache();
         }
-        waveformMipmapStore.releaseInterleaved(result.interleaved);
     }
 
     // Selection (time band)
     if (selection) {
         const a = Math.min(selection.aBeat, selection.bBeat);
         const b = Math.max(selection.aBeat, selection.bBeat);
-        const x0 = a * pxPerBeat - scrollLeft;
-        const x1 = b * pxPerBeat - scrollLeft;
+        // 选区数据是 beat 单位：先转 sec 再统一投影，不构造 pxPerBeat。
+        const x0 = secToViewportPx(axis, a * beatToSec);
+        const x1 = secToViewportPx(axis, b * beatToSec);
         ctx.fillStyle = "rgba(100, 200, 255, 0.08)";
         ctx.fillRect(x0, 0, x1 - x0, h);
         ctx.strokeStyle = "rgba(100, 200, 255, 0.30)";
@@ -873,8 +1196,7 @@ export function drawPianoRoll(args: {
                 startFrame: overlay.paramView.startFrame,
                 stride: overlay.paramView.stride,
                 framePeriodMs: overlay.paramView.framePeriodMs,
-                visibleStartSec,
-                visibleDurSec,
+                axis,
                 valueToY,
             });
             ctx.restore();
@@ -885,12 +1207,22 @@ export function drawPianoRoll(args: {
     // 渲染在用户编辑曲线下方，不干扰主曲线的视觉层次�?
     if (editParam === "pitch" && detectedPitchCurves && detectedPitchCurves.length > 0) {
         // �?clip 时循环颜色，增强区分�?
-        const DETECTED_COLORS = [
-            "rgba(80, 220, 180, 0.56)", // 青绿
-            "rgba(255, 180, 60, 0.56)", // 橙黄
-            "rgba(180, 120, 255, 0.56)", // 紫色
-            "rgba(60, 180, 255, 0.56)", // 天蓝
-        ];
+        // 候选曲线色板：按主题给两套 —— 浅色主题提高不透明度并加深，
+        // 否则在白底上几乎隐形（旧版青绿在白底仅 ~1.4:1）。
+        // 橙黄一员改为玫红：琥珀色现在是编辑包络线的专属色相，避免混淆。
+        const DETECTED_COLORS = isDark
+            ? [
+                  "rgba(80, 220, 180, 0.56)", // 青绿
+                  "rgba(255, 110, 197, 0.60)", // 玫红
+                  "rgba(180, 120, 255, 0.56)", // 紫色
+                  "rgba(60, 180, 255, 0.56)", // 天蓝
+              ]
+            : [
+                  "rgba(0, 150, 118, 0.80)", // 青绿
+                  "rgba(214, 44, 140, 0.75)", // 玫红
+                  "rgba(124, 58, 237, 0.70)", // 紫色
+                  "rgba(2, 132, 199, 0.80)", // 天蓝
+              ];
 
         for (let ci = 0; ci < detectedPitchCurves.length; ci++) {
             const curve = detectedPitchCurves[ci];
@@ -915,7 +1247,7 @@ export function drawPianoRoll(args: {
 
                 // 计算当前帧的时间（秒），统一用 sec 坐标系
                 const frameSec = curveStartSec + (i * fp) / 1000;
-                const x = frameSec * pxPerSec - scrollLeft;
+                const x = secToViewportPx(axis, frameSec);
 
                 if (x > w + 10) break;
 
@@ -945,12 +1277,21 @@ export function drawPianoRoll(args: {
     // Curves
     // 副参数曲线（半透明、细线，绘制在主参数曲线下方�?
     if (showSecondaryParam && secondaryParamIds.length > 0) {
-        const secondaryPalette = [
-            "rgba(100, 200, 255, 0.62)",
-            "rgba(255, 180, 60, 0.62)",
-            "rgba(160, 120, 255, 0.62)",
-            "rgba(90, 220, 160, 0.62)",
-        ];
+        // 副参数曲线调色板：按主题给两套（浅色主题加深加浓，否则在白底上发飘）；
+        // 琥珀成员换成玫红 —— 琥珀是编辑包络线的专属色相，避免撞色。
+        const secondaryPalette = isDark
+            ? [
+                  "rgba(100, 200, 255, 0.62)",
+                  "rgba(255, 110, 197, 0.62)",
+                  "rgba(160, 120, 255, 0.62)",
+                  "rgba(90, 220, 160, 0.62)",
+              ]
+            : [
+                  "rgba(2, 132, 199, 0.75)",
+                  "rgba(214, 44, 140, 0.72)",
+                  "rgba(124, 58, 237, 0.72)",
+                  "rgba(22, 163, 116, 0.75)",
+              ];
         secondaryParamIds.forEach((paramId, index) => {
             const secondaryParamView = secondaryParamViews[paramId];
             if (
@@ -980,8 +1321,7 @@ export function drawPianoRoll(args: {
                 startFrame: secondaryParamView.startFrame,
                 stride: secondaryParamView.stride,
                 framePeriodMs: secondaryParamView.framePeriodMs,
-                visibleStartSec,
-                visibleDurSec,
+                axis,
                 valueToY,
             });
             ctx.restore();
@@ -1009,8 +1349,7 @@ export function drawPianoRoll(args: {
                 startFrame: paramView.startFrame,
                 stride: paramView.stride,
                 framePeriodMs: paramView.framePeriodMs,
-                visibleStartSec,
-                visibleDurSec,
+                axis,
                 valueToY,
             });
             ctx.restore();
@@ -1031,8 +1370,7 @@ export function drawPianoRoll(args: {
                 startFrame: paramView.startFrame,
                 stride: paramView.stride,
                 framePeriodMs: paramView.framePeriodMs,
-                visibleStartSec,
-                visibleDurSec,
+                axis,
                 valueToY,
             });
             ctx.restore();
@@ -1042,8 +1380,8 @@ export function drawPianoRoll(args: {
         if (selection && editValues.length >= 2) {
             const selMinBeat = Math.min(selection.aBeat, selection.bBeat);
             const selMaxBeat = Math.max(selection.aBeat, selection.bBeat);
-            const selX0 = selMinBeat * pxPerBeat - scrollLeft;
-            const selX1 = selMaxBeat * pxPerBeat - scrollLeft;
+            const selX0 = secToViewportPx(axis, selMinBeat * beatToSec);
+            const selX1 = secToViewportPx(axis, selMaxBeat * beatToSec);
 
             ctx.save();
             // 裁剪到选区范围
@@ -1063,8 +1401,7 @@ export function drawPianoRoll(args: {
                 startFrame: paramView.startFrame,
                 stride: paramView.stride,
                 framePeriodMs: paramView.framePeriodMs,
-                visibleStartSec,
-                visibleDurSec,
+                axis,
                 valueToY,
             });
             ctx.restore();
@@ -1080,13 +1417,13 @@ export function drawPianoRoll(args: {
         ) {
             const selMinBeat = Math.min(selection.aBeat, selection.bBeat);
             const selMaxBeat = Math.max(selection.aBeat, selection.bBeat);
-            const selStartSec = selMinBeat * secPerBeat;
-            const selEndSec = selMaxBeat * secPerBeat;
+            const selStartSec = selMinBeat * beatToSec;
+            const selEndSec = selMaxBeat * beatToSec;
 
             const cbFp = Math.max(1e-6, clipboardPreview.framePeriodMs);
 
-            const selX0 = selMinBeat * pxPerBeat - scrollLeft;
-            const selX1 = selMaxBeat * pxPerBeat - scrollLeft;
+            const selX0 = secToViewportPx(axis, selStartSec);
+            const selX1 = secToViewportPx(axis, selEndSec);
 
             ctx.save();
             // 裁剪到选区范围
@@ -1094,7 +1431,9 @@ export function drawPianoRoll(args: {
             ctx.rect(selX0, 0, selX1 - selX0, h);
             ctx.clip();
 
-            ctx.strokeStyle = isDark ? "rgba(255, 180, 60, 0.65)" : "rgba(220, 140, 20, 0.65)";
+            // 剪贴板预览与选区高亮同用青蓝色相（虚线+降不透明度区分），
+            // 不再占用琥珀色相 —— 琥珀属于编辑包络线本体。
+            ctx.strokeStyle = isDark ? "rgba(100, 200, 255, 0.55)" : "rgba(0, 116, 200, 0.60)";
             ctx.lineWidth = 2;
             ctx.setLineDash(getFixedDashPattern(4, 4));
             ctx.beginPath();
@@ -1105,7 +1444,7 @@ export function drawPianoRoll(args: {
                 const tSec = selStartSec + (i * cbFp) / 1000;
                 // 超出选区结束点则停止
                 if (tSec > selEndSec) break;
-                const x = timeToPixel(tSec, visibleStartSec, visibleDurSec, w);
+                const x = secToViewportPx(axis, tSec);
                 const rawValue = clipboardPreview.values[i] ?? 0;
                 const mappedValue = editParam === "pitch" ? rawValue + 0.5 : rawValue;
                 const y = valueToY(editParam, mappedValue, h);
@@ -1126,9 +1465,7 @@ export function drawPianoRoll(args: {
                 overlay: paramMorphOverlay,
                 editParam,
                 framePeriodMs: paramView.framePeriodMs,
-                visibleStartSec,
-                visibleDurSec,
-                w,
+                axis,
                 h,
                 valueToY,
                 isDark,
@@ -1147,7 +1484,7 @@ export function drawPianoRoll(args: {
     }
 
     // Playhead（统一用 sec 坐标系）
-    const phx = playheadSec * pxPerSec - scrollLeft;
+    const phx = secToViewportPx(axis, playheadSec);
     ctx.strokeStyle = colors.playheadLine;
     ctx.lineWidth = 1;
     ctx.beginPath();

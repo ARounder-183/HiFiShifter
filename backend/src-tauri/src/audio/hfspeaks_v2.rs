@@ -30,6 +30,7 @@
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 
+
 // ============== 常量定义 ==============
 
 /// 文件魔数
@@ -37,6 +38,11 @@ pub const MAGIC: &[u8; 4] = b"HFSP";
 
 /// 当前格式版本
 pub const VERSION: u16 = 2;
+
+/// Number of min/max peak pairs in one frontend waveform tile.
+pub const WAVEFORM_TILE_PEAKS: usize = 4096;
+pub const WAVEFORM_TILE_MAGIC: &[u8; 4] = b"WFTL";
+pub const WAVEFORM_TILE_VERSION: u16 = 1;
 
 /// 最大 mipmap 级别数
 pub const MAX_MIPMAP_LEVELS: usize = 3;
@@ -396,6 +402,112 @@ impl HfsPeakFile {
         }
     }
 
+    /// Estimated in-memory byte cost of all mipmap vectors.
+    pub fn estimated_byte_size(&self) -> u64 {
+        let pairs = self
+            .mipmap_data
+            .iter()
+            .map(|data| data.min.len().saturating_mul(2))
+            .sum::<usize>();
+        (pairs.saturating_mul(4)) as u64
+    }
+
+    /// Stable source revision for tile requests.
+    pub fn source_revision(source_path: &Path) -> String {
+        let canonical = source_path
+            .canonicalize()
+            .unwrap_or_else(|_| source_path.to_path_buf());
+        let (len, mtime_ns) = get_metadata_fingerprint(&canonical);
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(canonical.to_string_lossy().as_bytes());
+        hasher.update(b"\n");
+        hasher.update(&len.to_le_bytes());
+        hasher.update(&mtime_ns.to_le_bytes());
+        hasher.update(&VERSION.to_le_bytes());
+        hasher.finalize().to_hex().to_string()
+    }
+
+    /// Serialize only requested tile ranges.
+    ///
+    /// Out-of-range or invalid requests contribute no tile record. Envelope:
+    /// magic[4], version u16, tile_count u16, followed by tile records.
+    pub fn to_tile_binary(&self, requests: &[WaveformTileRequest]) -> Vec<u8> {
+        let mut records = Vec::new();
+        for request in requests.iter().take(u16::MAX as usize) {
+            let Some(level) = self.mipmap_data.get(request.level) else {
+                continue;
+            };
+            let Some(header) = self.mipmap_headers.get(request.level) else {
+                continue;
+            };
+            let peak_count = level.len();
+            let start = request
+                .tile_index
+                .checked_mul(WAVEFORM_TILE_PEAKS as u32)
+                .and_then(|v| usize::try_from(v).ok())
+                .unwrap_or(usize::MAX);
+            if start >= peak_count {
+                continue;
+            }
+            let end = (start + WAVEFORM_TILE_PEAKS).min(peak_count);
+            let count = end - start;
+
+            let mut record = Vec::with_capacity(24 + count * 2 * 4);
+            record.extend_from_slice(&(request.level as u32).to_le_bytes());
+            record.extend_from_slice(&request.tile_index.to_le_bytes());
+            record.extend_from_slice(&(start as u32).to_le_bytes());
+            record.extend_from_slice(&(count as u32).to_le_bytes());
+            record.extend_from_slice(&header.division_factor.to_le_bytes());
+            record.extend_from_slice(&self.header.sample_rate.to_le_bytes());
+            for &v in &level.min[start..end] {
+                record.extend_from_slice(&v.to_le_bytes());
+            }
+            for &v in &level.max[start..end] {
+                record.extend_from_slice(&v.to_le_bytes());
+            }
+            records.push(record);
+        }
+
+        let mut buf = Vec::with_capacity(8 + records.iter().map(Vec::len).sum::<usize>());
+        buf.extend_from_slice(WAVEFORM_TILE_MAGIC);
+        buf.extend_from_slice(&WAVEFORM_TILE_VERSION.to_le_bytes());
+        buf.extend_from_slice(&(records.len() as u16).to_le_bytes());
+        for record in records {
+            buf.extend_from_slice(&record);
+        }
+        buf
+    }
+
+    /// Manifest metadata without serializing full peak arrays.
+    pub fn to_manifest_payload(&self, source_path: &str) -> WaveformManifestPayload {
+        WaveformManifestPayload {
+            source_path: source_path.to_string(),
+            revision: Self::source_revision(std::path::Path::new(source_path)),
+            sample_rate: self.header.sample_rate,
+            total_frames: self.header.total_frames,
+            channels: self.header.channels,
+            duration_sec: if self.header.sample_rate == 0 {
+                0.0
+            } else {
+                self.header.total_frames as f64 / self.header.sample_rate as f64
+            },
+            tile_peaks: WAVEFORM_TILE_PEAKS as u32,
+            levels: self
+                .mipmap_headers
+                .iter()
+                .enumerate()
+                .map(|(level, header)| WaveformManifestLevelPayload {
+                    level: level as u32,
+                    division_factor: header.division_factor,
+                    peak_count: header.peak_count,
+                    tile_count: header
+                        .peak_count
+                        .div_ceil(WAVEFORM_TILE_PEAKS as u32),
+                })
+                .collect(),
+        }
+    }
+
     /// 将指定级别的 mipmap 数据序列化为二进制格式
     ///
     /// 二进制协议格式：
@@ -605,6 +717,128 @@ pub struct PeaksSegmentResult {
     pub actual_duration_sec: f64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WaveformManifestLevelPayload {
+    pub level: u32,
+    pub division_factor: u32,
+    pub peak_count: u32,
+    pub tile_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WaveformManifestPayload {
+    pub source_path: String,
+    pub revision: String,
+    pub sample_rate: u32,
+    pub total_frames: u64,
+    pub channels: u16,
+    pub duration_sec: f64,
+    pub tile_peaks: u32,
+    pub levels: Vec<WaveformManifestLevelPayload>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WaveformTileRequest {
+    pub level: usize,
+    pub tile_index: u32,
+}
+
+/// Byte-budgeted in-memory cache for decoded peak files.
+///
+/// Entries whose Arc is still held outside the cache are treated as pinned;
+/// eviction skips them until the external owner drops its reference.
+#[derive(Debug)]
+pub struct WaveformPeakCache {
+    entries: Vec<(String, std::sync::Arc<HfsPeakFile>, u64)>,
+    total_bytes: u64,
+    budget_bytes: u64,
+}
+
+impl Default for WaveformPeakCache {
+    fn default() -> Self {
+        Self::new(256 * 1024 * 1024)
+    }
+}
+
+impl WaveformPeakCache {
+    pub fn new(budget_bytes: u64) -> Self {
+        Self {
+            entries: Vec::new(),
+            total_bytes: 0,
+            budget_bytes: budget_bytes.max(1),
+        }
+    }
+
+    pub fn get(&mut self, source_path: &str) -> Option<std::sync::Arc<HfsPeakFile>> {
+        let index = self.entries.iter().position(|(key, _, _)| key == source_path)?;
+        let value = self.entries[index].1.clone();
+        self.entries.remove(index);
+        self.entries.push((source_path.to_string(), value.clone(), value.estimated_byte_size()));
+        Some(value)
+    }
+
+    pub fn insert(&mut self, source_path: &str, value: std::sync::Arc<HfsPeakFile>) {
+        self.remove(source_path);
+        let weight = value.estimated_byte_size();
+        self.entries.push((source_path.to_string(), value, weight));
+        self.total_bytes = self.total_bytes.saturating_add(weight);
+        self.enforce_budget();
+    }
+
+    pub fn remove(&mut self, source_path: &str) -> bool {
+        if let Some(index) = self.entries.iter().position(|(key, _, _)| key == source_path) {
+            let (_, _, weight) = self.entries.remove(index);
+            self.total_bytes = self.total_bytes.saturating_sub(weight);
+            return true;
+        }
+        false
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.total_bytes = 0;
+    }
+
+    // Cache introspection accessors: used by unit tests and diagnostics;
+        // no callers in non-test builds.
+    #[allow(dead_code)]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    #[allow(dead_code)]
+    pub fn total_bytes(&self) -> u64 {
+        self.total_bytes
+    }
+
+    #[allow(dead_code)]
+    pub fn budget_bytes(&self) -> u64 {
+        self.budget_bytes
+    }
+
+    fn enforce_budget(&mut self) {
+        while self.total_bytes > self.budget_bytes && !self.entries.is_empty() {
+            let mut evict_index = None;
+            for (index, (_, value, _)) in self.entries.iter().enumerate() {
+                if std::sync::Arc::strong_count(value) <= 1 {
+                    evict_index = Some(index);
+                    break;
+                }
+            }
+            let Some(index) = evict_index else { break };
+            let (_, _, weight) = self.entries.remove(index);
+            self.total_bytes = self.total_bytes.saturating_sub(weight);
+        }
+    }
+}
+
 /// 多级峰值查询响应
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -775,8 +1009,8 @@ pub fn compute_mipmap_peaks_with_progress<F: FnMut(f32)>(
         }
     }
 
-    // 回退到 symphonia
-    compute_mipmap_peaks_symphonia(path, source_file_size, source_modified_ns, &mut progress_cb)
+    // 其他格式（含视频容器中的音轨）统一走 Symphonia 解码峰值计算。
+    compute_mipmap_peaks_media(path, source_file_size, source_modified_ns, &mut progress_cb)
 }
 
 /// 使用 hound 计算 WAV 文件的多级峰值
@@ -926,138 +1160,72 @@ fn compute_mipmap_peaks_hound<F: FnMut(f32)>(
     Ok(file)
 }
 
-/// 使用 symphonia 计算其他格式文件的多级峰值
-fn compute_mipmap_peaks_symphonia<F: FnMut(f32)>(
+/// 使用 Symphonia 计算非 WAV 媒体（音频与视频容器）的多级峰值。
+fn compute_mipmap_peaks_media<F: FnMut(f32)>(
     path: &Path,
     source_file_size: u64,
     source_modified_ns: u64,
     progress_cb: &mut Option<F>,
 ) -> Result<HfsPeakFile, String> {
-    use symphonia::core::codecs::DecoderOptions;
-    use symphonia::core::formats::FormatOptions;
-    use symphonia::core::io::MediaSourceStream;
-    use symphonia::core::meta::MetadataOptions;
-    use symphonia::core::probe::Hint;
+    let probe = crate::media::probe_media(path, 0, None)
+        .ok_or_else(|| "symphonia media probe failed".to_string())?;
+    let sample_rate = probe.sample_rate.max(1);
+    let channels = probe.channels.max(1);
+    let total_frames = probe.total_frames;
 
-    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
-
-    let mut hint = Hint::new();
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        hint.with_extension(ext);
-    }
-
-    let probed = symphonia::default::get_probe()
-        .format(
-            &hint,
-            mss,
-            &FormatOptions::default(),
-            &MetadataOptions::default(),
-        )
-        .map_err(|e| e.to_string())?;
-
-    let mut format = probed.format;
-    let track = format
-        .default_track()
-        .ok_or_else(|| "no default track".to_string())?;
-    let mut decoder = symphonia::default::get_codecs()
-        .make(&track.codec_params, &DecoderOptions::default())
-        .map_err(|e| e.to_string())?;
-
-    let sample_rate = track.codec_params.sample_rate.unwrap_or(44100);
-    let channels = track
-        .codec_params
-        .channels
-        .map(|c| c.count() as u16)
-        .unwrap_or(1);
-
-    // 估算总帧数（可能不精确）
-    let total_frames = track.codec_params.n_frames.unwrap_or(0);
-
-    // 初始化输出缓冲区
     let division_factors = calculate_division_factors(sample_rate);
     let mut output_buffers: Vec<Vec<(f32, f32)>> =
         division_factors.iter().map(|_| Vec::new()).collect();
-
-    // 创建计算器
     let mut calculator = MipmapPeakCalculator::new(sample_rate, channels, total_frames);
 
-    // 输出回调
     let mut output_callback = |level: usize, min: f32, max: f32| {
         if level < output_buffers.len() {
             output_buffers[level].push((min, max));
         }
     };
 
-    // 进度跟踪
     let mut frames_processed: u64 = 0;
     let progress_interval = if total_frames > 0 {
         (total_frames / 20).max(1)
     } else {
         44100
-    }; // symphonia 可能没有精确 total_frames
+    };
 
-    // 解码循环
-    let track_id = track.id;
-    loop {
-        let packet = match format.next_packet() {
-            Ok(p) => p,
-            Err(symphonia::core::errors::Error::IoError(_)) => break,
-            Err(e) => return Err(e.to_string()),
-        };
-
-        if packet.track_id() != track_id {
-            continue;
-        }
-
-        let decoded = match decoder.decode(&packet) {
-            Ok(d) => d,
-            Err(symphonia::core::errors::Error::IoError(_)) => break,
-            Err(e) => return Err(e.to_string()),
-        };
-
-        // 使用 SampleBuffer 转换为 f32 interleaved
-        let spec = *decoded.spec();
-        let duration = decoded.capacity() as u64;
-        let mut sbuf = symphonia::core::audio::SampleBuffer::<f32>::new(duration, spec);
-        sbuf.copy_interleaved_ref(decoded);
-        let samples = sbuf.samples();
-
-        // 处理帧
-        let frames = samples.len() / channels as usize;
-        for f in 0..frames {
-            let base = f * channels as usize;
-            let mut ch_min = f32::INFINITY;
-            let mut ch_max = f32::NEG_INFINITY;
-            for ch in 0..channels as usize {
-                let v = samples.get(base + ch).copied().unwrap_or(0.0);
-                if v < ch_min {
-                    ch_min = v;
+    crate::media::visit_media_audio_frames(
+        path,
+        Some(probe.audio_stream_index),
+        |frame, _rate, ch| {
+            let ch = ch.max(1) as usize;
+            let frames = frame.len() / ch;
+            for f in 0..frames {
+                let base = f * ch;
+                let mut ch_min = f32::INFINITY;
+                let mut ch_max = f32::NEG_INFINITY;
+                for c in 0..ch {
+                    let v = frame.get(base + c).copied().unwrap_or(0.0);
+                    ch_min = ch_min.min(v);
+                    ch_max = ch_max.max(v);
                 }
-                if v > ch_max {
-                    ch_max = v;
-                }
-            }
-            calculator.process_frame(ch_min, ch_max, &mut output_callback);
-            frames_processed += 1;
-            if frames_processed % progress_interval == 0 {
-                if let Some(cb) = progress_cb.as_mut() {
-                    if total_frames > 0 {
-                        cb(frames_processed as f32 / total_frames as f32);
-                    } else {
-                        // total_frames 未知时，基于文件大小估算
-                        let estimated_total = source_file_size / ((channels as u64) * 4).max(1);
-                        cb((frames_processed as f32 / estimated_total as f32).min(0.99));
+                calculator.process_frame(ch_min, ch_max, &mut output_callback);
+                frames_processed += 1;
+                if frames_processed % progress_interval == 0 {
+                    if let Some(cb) = progress_cb.as_mut() {
+                        if total_frames > 0 {
+                            cb(frames_processed as f32 / total_frames as f32);
+                        } else {
+                            let estimated_total = source_file_size / ((channels as u64) * 4).max(1);
+                            cb((frames_processed as f32 / estimated_total as f32).min(0.99));
+                        }
                     }
                 }
             }
-        }
-    }
+            Ok(())
+        },
+    )
+    .map_err(|e| e)?;
 
-    // 刷新剩余数据
     calculator.flush(&mut output_callback);
 
-    // 构建 HfsPeakFile
     let mut file = HfsPeakFile::new(
         channels,
         sample_rate,
@@ -1487,4 +1655,103 @@ fn get_metadata_fingerprint(path: &Path) -> (u64, u64) {
         .unwrap_or(0);
 
     (len, mtime_ns)
+}
+
+#[cfg(test)]
+mod waveform_tile_tests {
+    use super::*;
+
+    fn fixture() -> HfsPeakFile {
+        let mut file = HfsPeakFile::new(1, 4, 5, 12, 34);
+        let data = MipmapData {
+            min: vec![-1.0, -0.5, 0.0, 0.5, 1.0],
+            max: vec![1.0, 0.5, 0.0, -0.5, -1.0],
+        };
+        file.add_mipmap(1, data);
+        file
+    }
+
+    #[test]
+    fn waveform_tile_envelope_contains_only_requested_peaks() {
+        let file = fixture();
+        let bytes = file.to_tile_binary(&[WaveformTileRequest {
+            level: 0,
+            tile_index: 0,
+        }]);
+
+        assert_eq!(&bytes[0..4], WAVEFORM_TILE_MAGIC);
+        assert_eq!(u16::from_le_bytes([bytes[4], bytes[5]]), WAVEFORM_TILE_VERSION);
+        assert_eq!(u16::from_le_bytes([bytes[6], bytes[7]]), 1);
+
+        let expected_values: Vec<f32> = vec![
+            -1.0, -0.5, 0.0, 0.5, 1.0, 1.0, 0.5, 0.0, -0.5, -1.0,
+        ];
+        let offset = 8 + 24;
+        assert_eq!(bytes.len(), offset + expected_values.len() * 4);
+        for (index, expected) in expected_values.iter().enumerate() {
+            let start = offset + index * 4;
+            let raw: [u8; 4] = bytes[start..start + 4].try_into().unwrap();
+            assert_eq!(f32::from_le_bytes(raw), *expected);
+        }
+    }
+
+    #[test]
+    fn out_of_range_tile_requests_are_omitted() {
+        let file = fixture();
+        let bytes = file.to_tile_binary(&[
+            WaveformTileRequest {
+                level: 9,
+                tile_index: 0,
+            },
+            WaveformTileRequest {
+                level: 0,
+                tile_index: 2,
+            },
+        ]);
+        assert_eq!(u16::from_le_bytes([bytes[6], bytes[7]]), 0);
+        assert_eq!(bytes.len(), 8);
+    }
+
+    #[test]
+    fn manifest_reports_one_tile_for_short_file() {
+        let file = fixture();
+        let manifest = file.to_manifest_payload("/audio.wav");
+        assert_eq!(manifest.tile_peaks, 4096);
+        assert_eq!(manifest.levels.len(), 1);
+        assert_eq!(manifest.levels[0].peak_count, 5);
+        assert_eq!(manifest.levels[0].tile_count, 1);
+    }
+
+    #[test]
+    fn waveform_peak_cache_evicts_by_bytes_and_respects_pins() {
+        let mut cache = WaveformPeakCache::new(10);
+        let first = std::sync::Arc::new(fixture());
+        let second = std::sync::Arc::new(fixture());
+        let pinned = first.clone();
+
+        cache.insert("a", first);
+        cache.insert("b", second);
+        assert!(cache.len() <= 1);
+
+        drop(pinned);
+        let third = std::sync::Arc::new(fixture());
+        cache.insert("c", third);
+        assert!(cache.len() <= 1);
+    }
+
+    #[test]
+    fn waveform_peak_cache_tracks_weights_and_clear() {
+        let mut cache = WaveformPeakCache::new(10);
+        let value = std::sync::Arc::new(fixture());
+        let weight = value.estimated_byte_size();
+        let pinned = value.clone();
+        cache.insert("a", value);
+        assert!(weight > 0);
+        assert_eq!(cache.total_bytes(), weight);
+        drop(pinned);
+        assert!(cache.total_bytes() > 0);
+        cache.clear();
+        assert_eq!(cache.total_bytes(), 0);
+        assert!(cache.is_empty());
+    }
 }

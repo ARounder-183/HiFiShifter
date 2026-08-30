@@ -3,7 +3,7 @@
  *
  * 作用：
  * - 判定当前边缘拖拽是否应触发“多选整体拉伸”。
- * - 计算固定一侧（左/右）时，所有 Clip 的新 start/length/playbackRate。
+ * - 计算固定一侧（左/右）时，所有 Clip 的新 start/length/clipPlaybackRate。
  */
 import type { ClipInfo } from "../../../../features/session/sessionTypes";
 import { clamp } from "../math";
@@ -15,7 +15,7 @@ export type StretchGroupClipInitial = {
     startSec: number;
     endSec: number;
     lengthSec: number;
-    playbackRate: number;
+    clipPlaybackRate: number;
     fadeInSec: number;
     fadeOutSec: number;
     trackId: string;
@@ -32,7 +32,7 @@ export type StretchGroupState = {
 export type StretchGroupClipNext = {
     startSec: number;
     lengthSec: number;
-    playbackRate: number;
+    clipPlaybackRate: number;
     fadeInSec: number;
     fadeOutSec: number;
 };
@@ -111,7 +111,7 @@ export function buildStretchGroupState(params: {
             startSec,
             endSec,
             lengthSec,
-            playbackRate: normalizePlaybackRate(Number(clip.playbackRate) || 1),
+            clipPlaybackRate: normalizePlaybackRate(Number(clip.clipPlaybackRate ?? 1) || 1),
             fadeInSec: normalizeFade(Number(clip.fadeInSec) || 0, lengthSec),
             fadeOutSec: normalizeFade(Number(clip.fadeOutSec) || 0, lengthSec),
             trackId: String(clip.trackId),
@@ -178,8 +178,8 @@ export function computeStretchGroupUpdate(params: {
         const startSec = nextGroupStart + relStart * scale;
         const endSec = nextGroupStart + relEnd * scale;
         const lengthSec = Math.max(MIN_SPAN_SEC, endSec - startSec);
-        const playbackRate = clamp(
-            (initial.playbackRate * Math.max(MIN_SPAN_SEC, initial.lengthSec)) /
+        const clipPlaybackRate = clamp(
+            (initial.clipPlaybackRate * Math.max(MIN_SPAN_SEC, initial.lengthSec)) /
                 Math.max(MIN_SPAN_SEC, lengthSec),
             0.1,
             10,
@@ -194,7 +194,7 @@ export function computeStretchGroupUpdate(params: {
         byId[clipId] = {
             startSec,
             lengthSec,
-            playbackRate,
+            clipPlaybackRate,
             fadeInSec: scaledFades.fadeInSec,
             fadeOutSec: scaledFades.fadeOutSec,
         };

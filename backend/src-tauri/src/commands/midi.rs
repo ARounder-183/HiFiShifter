@@ -26,6 +26,18 @@ fn error_payload(error: &str) -> crate::models::TimelineStatePayload {
         project: None,
         missing_files: Some(vec![error.to_string()]),
         disabled_group_ids: vec![],
+        tempo_map: None,
+    }
+}
+
+/// 设置工程 BPM，并在 Tempo Map 存在时同步 0 位置点（保持回退一致）。
+fn set_project_bpm_syncing_tempo_map(tl: &mut crate::state::TimelineState, bpm: f64) {
+    let clamped = bpm.clamp(10.0, 960.0);
+    tl.bpm = clamped;
+    if let Some(points) = tl.tempo_map.as_mut() {
+        if let Some(first) = points.first_mut() {
+            first.bpm = clamped;
+        }
     }
 }
 
@@ -65,8 +77,11 @@ pub(super) fn get_midi_tracks(
         }
     };
 
-    let tracks_with_notes: Vec<&MidiTrackInfo> =
-        parse_result.tracks.iter().filter(|t| t.note_count > 0).collect();
+    let tracks_with_notes: Vec<&MidiTrackInfo> = parse_result
+        .tracks
+        .iter()
+        .filter(|t| t.note_count > 0)
+        .collect();
 
     midi_log(format!(
         "get_midi_tracks: parsed tracks_total={} tracks_with_notes={}",
@@ -79,6 +94,11 @@ pub(super) fn get_midi_tracks(
         "tracks": tracks_with_notes,
         "initial_bpm": parse_result.initial_bpm,
         "has_bpm": parse_result.has_tempo,
+        "has_time_signature": !parse_result.time_signature_events.is_empty(),
+        "has_key_signature": !parse_result.key_signature_events.is_empty(),
+        "tempo_point_count": parse_result.tempo_events.len(),
+        "time_signature_count": parse_result.time_signature_events.len(),
+        "key_signature_count": parse_result.key_signature_events.len(),
     })
 }
 
@@ -92,7 +112,9 @@ pub(super) fn read_midi_clipboard_to_memory(state: &AppState) -> serde_json::Val
     let midi_data = match crate::commands::reaper_clipboard::read_midi_clipboard() {
         Ok(data) => data,
         Err(e) => {
-            midi_log(format!("read_midi_clipboard_to_memory: clipboard_error={e}"));
+            midi_log(format!(
+                "read_midi_clipboard_to_memory: clipboard_error={e}"
+            ));
             return serde_json::json!({"ok": false, "error": "midi_clipboard_empty"});
         }
     };
@@ -138,8 +160,11 @@ pub(super) fn read_midi_clipboard_to_memory(state: &AppState) -> serde_json::Val
         }
     }
 
-    let tracks_with_notes: Vec<&MidiTrackInfo> =
-        parse_result.tracks.iter().filter(|t| t.note_count > 0).collect();
+    let tracks_with_notes: Vec<&MidiTrackInfo> = parse_result
+        .tracks
+        .iter()
+        .filter(|t| t.note_count > 0)
+        .collect();
 
     midi_log(format!(
         "read_midi_clipboard_to_memory: parsed tracks_total={} tracks_with_notes={} initial_bpm={:.2}",
@@ -154,6 +179,11 @@ pub(super) fn read_midi_clipboard_to_memory(state: &AppState) -> serde_json::Val
         "tracks": tracks_with_notes,
         "initial_bpm": parse_result.initial_bpm,
         "has_bpm": parse_result.has_tempo,
+        "has_time_signature": !parse_result.time_signature_events.is_empty(),
+        "has_key_signature": !parse_result.key_signature_events.is_empty(),
+        "tempo_point_count": parse_result.tempo_events.len(),
+        "time_signature_count": parse_result.time_signature_events.len(),
+        "key_signature_count": parse_result.key_signature_events.len(),
     })
 }
 
@@ -248,7 +278,7 @@ pub(super) fn import_midi_to_pitch(
     // ── BPM 导入与重映射 ──
     let import_as_project = import_midi_bpm_as_project.unwrap_or(false);
     if import_as_project {
-        tl.bpm = initial_bpm;
+        set_project_bpm_syncing_tempo_map(&mut tl, initial_bpm);
         midi_log(format!(
             "import_midi_to_pitch: set_project_bpm from {project_bpm} to {initial_bpm}"
         ));
@@ -400,12 +430,8 @@ pub(super) fn import_midi_to_pitch(
         align_offset,
     );
 
-    let touched = midi_import::write_notes_to_pitch_edit(
-        &notes,
-        frame_period_ms,
-        target_slice,
-        align_offset,
-    );
+    let touched =
+        midi_import::write_notes_to_pitch_edit(&notes, frame_period_ms, target_slice, align_offset);
 
     // 填补音符之间的空隙（仅在导入的音符范围内）
     if fill_gaps.unwrap_or(false) {
@@ -450,11 +476,15 @@ pub(super) fn import_midi_to_pitch(
         return serde_json::json!({"ok": false, "error": "no_frames_touched"});
     }
 
+    tl.sync_clip_takes_from_flat();
     state.audio_engine.update_timeline(tl.clone());
 
     if let Some(ref guid) = clipboard_guid {
         if !guid.is_empty() {
-            let mut cache = state.clipboard_midi_cache.lock().unwrap_or_else(|e| e.into_inner());
+            let mut cache = state
+                .clipboard_midi_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             cache.remove(guid);
         }
     }
@@ -485,14 +515,22 @@ pub(super) fn import_midi_as_clip(
     import_midi_bpm_as_project: Option<bool>,
     clipboard_guid: Option<String>,
     close_leading_gap: Option<bool>,
+    import_midi_as_tempo_map: Option<bool>,
+    import_midi_tempo: Option<bool>,
+    import_midi_time_signature: Option<bool>,
+    import_midi_key_signature: Option<bool>,
 ) -> crate::models::TimelineStatePayload {
     midi_log(format!(
-        "import_midi_as_clip: path={} clipboard_guid={:?} track_indices={:?} track_id={:?} start_sec={:.3} fill_gaps={:?} multi_track_merge={:?} note_bpm_mode={:?} specified_bpm={:?} import_midi_bpm_as_project={:?} close_leading_gap={:?}",
-        midi_path, clipboard_guid, track_indices, track_id, start_sec, fill_gaps, multi_track_merge, note_bpm_mode, specified_bpm, import_midi_bpm_as_project, close_leading_gap
+        "import_midi_as_clip: path={} clipboard_guid={:?} track_indices={:?} track_id={:?} start_sec={:.3} fill_gaps={:?} multi_track_merge={:?} note_bpm_mode={:?} specified_bpm={:?} import_midi_bpm_as_project={:?} close_leading_gap={:?} import_as_tempo_map={:?} import_tempo={:?} import_ts={:?} import_key={:?}",
+        midi_path, clipboard_guid, track_indices, track_id, start_sec, fill_gaps, multi_track_merge, note_bpm_mode, specified_bpm, import_midi_bpm_as_project, close_leading_gap, import_midi_as_tempo_map, import_midi_tempo, import_midi_time_signature, import_midi_key_signature
     ));
 
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     let project_bpm = tl.bpm;
+    let (project_beats_per_bar, project_time_signature_denominator) = {
+        let p = state.project.lock().unwrap_or_else(|e| e.into_inner());
+        (p.beats_per_bar, p.time_signature_denominator)
+    };
 
     let (mut parse_result, source_stem) = match resolve_midi_source(
         state,
@@ -514,7 +552,7 @@ pub(super) fn import_midi_as_clip(
     // ── BPM 导入与重映射 ──
     let import_as_project = import_midi_bpm_as_project.unwrap_or(false);
     if import_as_project {
-        tl.bpm = initial_bpm;
+        set_project_bpm_syncing_tempo_map(&mut tl, initial_bpm);
         midi_log(format!(
             "import_midi_as_clip: set_project_bpm from {project_bpm} to {initial_bpm}"
         ));
@@ -543,6 +581,122 @@ pub(super) fn import_midi_as_clip(
             for note in track_notes {
                 note.start_sec *= scale;
                 note.end_sec *= scale;
+            }
+        }
+    }
+
+    // ── 导入为 Tempo Map（替换工程现有 Tempo Map） ──
+    if import_midi_as_tempo_map.unwrap_or(false) {
+        let points = midi_import::build_tempo_map_points_from_midi(
+            &parse_result,
+            import_midi_tempo.unwrap_or(true),
+            import_midi_time_signature.unwrap_or(true),
+            import_midi_key_signature.unwrap_or(false),
+            tl.bpm,
+            project_beats_per_bar,
+            // 工程拍号分母透传：MIDI 无拍号事件时回退到工程基准
+            // （否则 6/8 等工程会被静默重置为 6/4）。
+            project_time_signature_denominator,
+        );
+        let render_scale_signature_before = tl.render_scale_signature();
+
+        // 先判断是否真的会产生变化，再决定是否打撤销快照（与
+        // set_timeline_tempo_map 的幂等约定一致：无变化不产生撤销步）。
+        let will_change = match &points {
+            Some(pts) => {
+                let has_change = pts.iter().any(|p| p.position_sec > 1e-9) || pts.len() > 1;
+                if has_change {
+                    true
+                } else {
+                    // 无 0 之后的变化：工程基准值（BPM/拍号）是否与现状不同。
+                    pts.first()
+                        .map(|first| {
+                            (tl.bpm - first.bpm.clamp(10.0, 960.0)).abs() > 1e-9
+                                || project_beats_per_bar
+                                    != first.numerator.unwrap_or(4).clamp(1, 32)
+                                || project_time_signature_denominator
+                                    != first.denominator.unwrap_or(4)
+                        })
+                        .unwrap_or(false)
+                }
+            }
+            None => tl.tempo_map.is_some(),
+        };
+        if will_change {
+            state.checkpoint_timeline(&tl);
+        }
+
+        // 无变化分支把 0 位置点的音阶（调号）应用到工程时可能改变工程音阶；
+        // render_scale_signature 会覆盖该情况，无需单独跟踪 project_scale_changed。
+        match points {
+            Some(points) => {
+                let has_change = points.iter().any(|p| p.position_sec > 1e-9) || points.len() > 1;
+                if has_change {
+                    tl.tempo_map = Some(points);
+                    tl.normalize_tempo_map();
+                    // 初始点即工程基准记录：音阶为空时物化为工程音阶。
+                    {
+                        let p = state.project.lock().unwrap_or_else(|e| e.into_inner());
+                        if let Some(first_points) = tl.tempo_map.as_mut() {
+                            if let Some(first) = first_points.first_mut() {
+                                if first.scale.is_none() {
+                                    first.scale =
+                                        Some(crate::state::tempo_scale_data_from_project(&p));
+                                }
+                            }
+                        }
+                    }
+                    // 同步工程基准 BPM / 拍号 / 音阶（含导入的调号，与
+                    // set_timeline_tempo_map 的双向同步约定一致）。
+                    {
+                        let mut p = state.project.lock().unwrap_or_else(|e| e.into_inner());
+                        state.sync_project_record_from_tempo_map(&mut tl, &mut p);
+                    }
+                    midi_log(format!(
+                        "import_midi_as_clip: tempo_map imported with {} points",
+                        tl.tempo_map.as_ref().map(|p| p.len()).unwrap_or(0)
+                    ));
+                } else {
+                    // 无 0 之后的变化：仅把 0 位置点的参数应用到工程基准（速度/拍号/音阶）。
+                    if let Some(first) = points.first() {
+                        tl.bpm = first.bpm.clamp(10.0, 960.0);
+                        if let Ok(mut p) = state.project.lock() {
+                            p.beats_per_bar = first.numerator.unwrap_or(4).clamp(1, 32);
+                            p.time_signature_denominator = first.denominator.unwrap_or(4);
+                            if let Some(scale) = first.scale.as_ref() {
+                                if let Some(key) = scale.key.as_deref() {
+                                    let key = key.to_string();
+                                    if p.base_scale != key || p.use_custom_scale {
+                                        // 工程基准音阶变化已由 render_scale_signature 捕获。
+                                    }
+                                    tl.project_scale_notes =
+                                        crate::state::scale_notes_for_key(&key)
+                                            .unwrap_or_else(|| vec![0, 2, 4, 5, 7, 9, 11]);
+                                    p.base_scale = key;
+                                    p.use_custom_scale = false;
+                                    p.custom_scale = None;
+                                    p.dirty = true;
+                                }
+                            }
+                            p.dirty = true;
+                        }
+                    }
+                    tl.tempo_map = None;
+                    midi_log("import_midi_as_clip: no tempo map change (initial values applied to project)");
+                }
+            }
+            None => {
+                tl.tempo_map = None;
+                midi_log("import_midi_as_clip: no tempo map events found; cleared");
+            }
+        }
+        let render_scale_signature_after = tl.render_scale_signature();
+        if render_scale_signature_before != render_scale_signature_after {
+            for clip in &tl.clips {
+                crate::synth_clip_cache::invalidate_clip_all_caches(&clip.id);
+            }
+            if let Some(handle) = state.app_handle.get() {
+                crate::commands::playback::request_background_render(handle);
             }
         }
     }
@@ -654,6 +808,7 @@ pub(super) fn import_midi_as_clip(
                 .map(|c| c.track_id.clone())
                 .unwrap_or_default(),
         );
+        tl.sync_clip_takes_from_flat();
         state.audio_engine.update_timeline(tl.clone());
         let mut payload = tl.to_payload();
         payload.created_clip_ids = Some(vec![clip_id]);
@@ -716,10 +871,7 @@ pub(super) fn import_midi_as_clip(
                     .iter()
                     .map(|n| n.start_sec)
                     .fold(f64::INFINITY, f64::min);
-                let last_end = group
-                    .iter()
-                    .map(|n| n.end_sec)
-                    .fold(0.0f64, f64::max);
+                let last_end = group.iter().map(|n| n.end_sec).fold(0.0f64, f64::max);
                 let normalized: Vec<midi_import::MidiNoteEvent> = group
                     .iter()
                     .map(|n| midi_import::MidiNoteEvent {
@@ -824,6 +976,7 @@ pub(super) fn import_midi_as_clip(
                 }
             }
         }
+        tl.sync_clip_takes_from_flat();
         state.audio_engine.update_timeline(tl.clone());
         let mut payload = tl.to_payload();
         payload.created_clip_ids = Some(created_clip_ids);
@@ -836,7 +989,10 @@ pub(super) fn import_midi_as_clip(
 
         if let Some(ref guid) = clipboard_guid {
             if !guid.is_empty() {
-                let mut cache = state.clipboard_midi_cache.lock().unwrap_or_else(|e| e.into_inner());
+                let mut cache = state
+                    .clipboard_midi_cache
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
                 cache.remove(guid);
             }
         }
@@ -868,7 +1024,6 @@ pub(super) fn replace_midi_clip_data(
         clip_id, midi_path, track_indices, fill_gaps, close_leading_gap
     ));
 
-
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     let project_bpm = tl.bpm;
 
@@ -890,13 +1045,17 @@ pub(super) fn replace_midi_clip_data(
     // ── BPM 重映射 ──
     let import_as_project = import_midi_bpm_as_project.unwrap_or(false);
     if import_as_project {
-        tl.bpm = initial_bpm;
+        set_project_bpm_syncing_tempo_map(&mut tl, initial_bpm);
     }
 
     let mode = note_bpm_mode.as_deref().unwrap_or("midi");
     let target_bpm: Option<f64> = match mode {
         "project" => {
-            if import_as_project { None } else { Some(project_bpm) }
+            if import_as_project {
+                None
+            } else {
+                Some(project_bpm)
+            }
         }
         "specified" => specified_bpm.filter(|&b| b > 0.0 && b.is_finite()),
         _ => None,
@@ -1011,6 +1170,7 @@ pub(super) fn replace_midi_clip_data(
             .map(|c| c.track_id.clone())
             .unwrap_or_default(),
     );
+    tl.sync_clip_takes_from_flat();
     state.audio_engine.update_timeline(tl.clone());
     let mut payload = tl.to_payload();
     payload.project = Some(state.project_meta_payload());
@@ -1021,7 +1181,10 @@ pub(super) fn replace_midi_clip_data(
 
     if let Some(ref guid) = clipboard_guid {
         if !guid.is_empty() {
-            let mut cache = state.clipboard_midi_cache.lock().unwrap_or_else(|e| e.into_inner());
+            let mut cache = state
+                .clipboard_midi_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             cache.remove(guid);
         }
     }

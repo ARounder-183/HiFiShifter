@@ -75,7 +75,6 @@ export function useAutoBackupScheduler({
             return;
         }
         resetBaseline();
-        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [
         settings.timedBackupEnabled,
         settings.timedBackupIntervalSec,
@@ -92,7 +91,6 @@ export function useAutoBackupScheduler({
         if (status === "New project" || status === "Project opened") {
             resetBaseline();
         }
-        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [status]);
 
     useEffect(() => {
@@ -120,6 +118,7 @@ export function useAutoBackupScheduler({
         }, 1000);
 
         return () => window.clearInterval(timerId);
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- runTimedBackupNow 每次渲染重建，加入依赖会改变定时器重启时序（既有模式）
     }, [settings.timedBackupEnabled]);
 
     useEffect(() => {
@@ -130,5 +129,6 @@ export function useAutoBackupScheduler({
         if (!hasEditSinceBaseline) return;
 
         void runTimedBackupNow();
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- runTimedBackupNow 每次渲染重建，加入依赖会改变检测重跑时机（既有模式）
     }, [settings.timedBackupEnabled, projectDirty, paramsEpoch]);
 }

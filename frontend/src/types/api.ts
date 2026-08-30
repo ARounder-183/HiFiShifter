@@ -14,7 +14,11 @@ export interface RuntimeInfo {
     is_playing?: boolean;
     playback_target?: string | null;
     timeline?: TimelineState;
-    /** GPU backend name for this build: "DirectML", "OpenCL", "CoreML", or "". */
+    /**
+     * Backend the live vocoder session actually runs on: "CoreML", "WebGPU",
+     * "DirectML", "CPU", or "" while no session has been built yet.
+     * This reflects runtime reality, not the compiled-in default.
+     */
     gpuBackend: string;
 }
 
@@ -33,6 +37,30 @@ export interface TimelineTrack {
     color: string;
 }
 
+export interface TimelineClipTake {
+    id: string;
+    name: string;
+    gain: number;
+    source_path?: string;
+    source_path_relative?: string;
+    duration_sec?: number;
+    duration_frames?: number;
+    source_sample_rate?: number;
+    source_start_sec: number;
+    source_end_sec: number;
+    playback_rate: number;
+    reversed: boolean;
+    loop_enabled: boolean;
+    midi_note_data?: Array<{
+        start_sec: number;
+        end_sec: number;
+        note: number;
+        velocity: number;
+        channel?: number;
+    }>;
+    midi_fill_gaps?: boolean;
+}
+
 export interface TimelineClip {
     id: string;
     group_id?: string;
@@ -41,6 +69,8 @@ export interface TimelineClip {
     start_sec: number;
     length_sec: number;
     color: string;
+    takes?: TimelineClipTake[];
+    active_take_id?: string;
     source_path?: string;
     source_path_relative?: string;
     duration_sec?: number;
@@ -56,11 +86,24 @@ export interface TimelineClip {
     source_start_sec?: number;
     source_end_sec?: number;
     playback_rate?: number;
+    /** Clip 级播放倍率；实际速率 = clip_playback_rate × active take playback_rate。 */
+    clip_playback_rate?: number;
     reversed?: boolean;
+    /** Loop（循环源）：超出源媒体区间时按周期回绕产生循环内容。 */
+    loop_enabled?: boolean;
+    /** 吸附偏移（秒）：相对 Clip 起点的偏移，默认 0；旧工程缺失时补齐为 0。 */
+    snap_offset_sec?: number;
     fade_in_sec?: number;
     fade_out_sec?: number;
-    fade_in_curve?: string;
-    fade_out_curve?: string;
+    /** REAPER 浮点形状 id（整数 0..6 七预设；小数变体透传保存）。 */
+    fade_in_shape?: number;
+    fade_out_shape?: number;
+    /** 曲率（REAPER D_FADEINDIR/OUTDIR），范围 [-1, 1]。 */
+    fade_in_dir?: number;
+    fade_out_dir?: number;
+    /** 自动交叉淡化长度（秒），与手动 fade 分离存储。 */
+    auto_fade_in_sec?: number;
+    auto_fade_out_sec?: number;
     formant_morph?: {
         enabled: boolean;
         target_f1_hz: number;
@@ -92,6 +135,8 @@ export interface ProjectMeta {
         notes: number[];
     } | null;
     beats_per_bar?: number;
+    /** 工程基准拍号分母（1/2/4/8/16/32）。 */
+    time_signature_denominator?: number;
     grid_size?: string;
     stretch_algorithm_override?: "linear" | "signalsmith" | "soundtouch" | null;
     hifigan_mel_stretch_override?: boolean | null;
@@ -109,12 +154,41 @@ export interface TimelineState {
     missing_files?: string[];
     skipped_files?: string[];
     disabled_group_ids?: string[];
+    /** Tempo Map 数据（null = 无 Tempo Map）。 */
+    tempo_map?: TempoMapPayload;
 }
+
+/** Tempo Map 变化点（后端 camelCase 载荷，与 `TempoPointPayload` 对应）。 */
+export interface TempoPointPayload {
+    id: string;
+    positionSec: number;
+    bpm: number;
+    /** 拍号分子；null 表示“跟随之前的拍号”（0 位置初始点必须显式）。 */
+    numerator: number | null;
+    /** 拍号分母；null 表示“跟随之前的拍号”。 */
+    denominator: number | null;
+    scale: {
+        key?: string | null;
+        name?: string | null;
+        notes?: number[] | null;
+    } | null;
+}
+
+/**
+ * 后端 Tempo Map 载荷：变化点的“裸数组”（null = 无 Tempo Map）。
+ *
+ * 与后端 `TimelineStatePayload.tempo_map: Option<Vec<TempoPointPayload>>` 及
+ * `set_timeline_tempo_map` 命令参数一一对应 —— 注意是数组本身，
+ * 不是 `{ points: [...] }` 包装对象。
+ */
+export type TempoMapPayload = TempoPointPayload[] | null;
 
 export interface TimelineResult {
     ok: true;
     tracks: TimelineTrack[];
     clips: TimelineClip[];
+    created_clip_ids?: string[];
+    created_track_ids?: string[];
     selected_track_id: string | null;
     selected_clip_id: string | null;
     bpm: number;
@@ -124,6 +198,11 @@ export interface TimelineResult {
     missing_files?: string[];
     skipped_files?: string[];
     disabled_group_ids?: string[];
+    tempo_map?: TempoMapPayload;
+    /** `open_project` 专用：工程文件版本高于当前程序，等待用户确认。 */
+    project_version_too_new?: boolean;
+    project_file_version?: number;
+    current_project_file_version?: number;
 }
 
 export interface TrackSummaryResult {
@@ -232,6 +311,12 @@ export interface ParamFramesPayload {
     start_frame: number;
     orig: number[];
     edit: number[];
+    /**
+     * 二进制编码的曲线数据（Base64）。`paramsApi.getParamFrames` 默认请求二进制
+     * 并在 API 层解码成 `orig`/`edit`，正常情况下调用方不会见到该字段有值。
+     * 协议见 `pianoRoll/paramFramesBinaryCodec.ts`。
+     */
+    binary?: string | null;
     reference_kind: ParamReferenceKind;
 
     analysis_pending?: boolean;
@@ -313,18 +398,22 @@ export interface DmlAdapterList {
 export interface BenchmarkResult {
     cpuMedianMs: number;
     cpuRtFactor: number;
-    /** OpenCL GPU inference time (ms), null if unavailable or failed. */
+    /** WebGPU inference time (ms), null if unavailable or failed. */
     gpuMedianMs?: number | null;
-    /** OpenCL GPU real-time factor, null if unavailable or failed. */
+    /** WebGPU real-time factor, null if unavailable or failed. */
     gpuRtFactor?: number | null;
+    /** Display name of the GPU backend ("CoreML", "WebGPU", ...). */
+    gpuBackendName?: string | null;
+    /** Detailed error message when the GPU benchmark could not complete. */
+    gpuError?: string | null;
     /** DirectML GPU inference time (ms), null if unavailable or failed. */
     dmlMedianMs?: number | null;
     /** DirectML GPU real-time factor, null if unavailable or failed. */
     dmlRtFactor?: number | null;
     benchmarkSamples: number;
-    /** True when OpenCL EP was available and used for GPU benchmark. */
+    /** True when WebGPU EP was available for the GPU benchmark. */
     gpuAvailable: boolean;
-    /** True when DirectML EP was available and used for benchmark. */
+    /** True when DirectML EP was available for the benchmark. */
     dmlAvailable: boolean;
     /** GPU device ID that was used. */
     gpuDeviceId: number;

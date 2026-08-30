@@ -1,65 +1,60 @@
 #!/usr/bin/env bash
 # build-gpu-linux.sh
-# Build the HiFiShifter Linux binary with OpenCL GPU support.
+# Build the HiFiShifter Linux binary with WebGPU GPU support.
 #
-# GPU acceleration is baked into the Linux build target — no extra
-# Cargo features are needed.  OpenCL is accessed at runtime via the
-# ONNX Runtime generic execution provider API.
+# GPU acceleration uses the ONNX Runtime WebGPU Execution Provider
+# (Dawn/Vulkan backend) on Linux x86_64. Linux ARM64 builds are CPU-only
+# because there is no prebuilt WebGPU ORT binary for that target.
+# No extra Cargo features are needed — the `webgpu` feature is enabled
+# by default in the x86_64 Linux ort dependency.
 #
 # Usage:
 #   ./scripts/build-gpu-linux.sh
 #
 # Prerequisites:
-#   ./scripts/download-ort.sh          # download ONNX Runtime GPU package
-#   sudo apt-get install -y ocl-icd-opencl-dev ocl-icd-libopencl1
+#   - Rust toolchain (stable)
+#   - System deps installed (see scripts/install_deps_linux.sh)
+#   - Frontend built (cd frontend && npm ci && npm run build)
 #
-# Environment (required):
-#   ORT_LIB_LOCATION  - Path to ONNX Runtime library directory
-#                       (set automatically by download-ort.sh)
+# The ort crate's `download-binaries` feature automatically downloads
+# the ONNX Runtime prebuilt binaries with WebGPU support at build time
+# on x86_64.
+# These are statically linked, so no runtime .so deployment is needed.
 #
-# Environment (optional):
-#   CARGO_TARGET      - Rust target triple (default: x86_64-unknown-linux-gnu)
+# WebGPU requires a Vulkan-capable GPU with drivers installed.
+# On headless/WSL systems without a GPU, the build still succeeds and
+# gracefully falls back to CPU inference at runtime.
+#   sudo apt-get install -y libvulkan1 mesa-vulkan-drivers
 
 set -euxo pipefail
 
 CARGO_TARGET="${CARGO_TARGET:-x86_64-unknown-linux-gnu}"
 SRC_TAURI="backend/src-tauri"
-
-echo "=== Build Linux (OpenCL GPU) Binary ==="
-echo "  Target:   ${CARGO_TARGET}"
-echo "  ORT_LIB:  ${ORT_LIB_LOCATION:-<not set>}"
-
-# Auto-detect ORT lib directory if not set (download-ort.sh extracts to /tmp/ort-gpu/).
-if [ -z "${ORT_LIB_LOCATION:-}" ]; then
-    ORT_LIB_LOCATION="$(find /tmp/ort-gpu -maxdepth 3 -type d -name lib 2>/dev/null | head -1 || true)"
-    if [ -z "${ORT_LIB_LOCATION:-}" ]; then
-        echo "ERROR: ORT_LIB_LOCATION is not set and could not auto-detect" >&2
-        echo "Run ./scripts/download-ort.sh first, or set ORT_LIB_LOCATION manually." >&2
-        exit 1
-    fi
-    echo "  Auto-detected ORT lib: ${ORT_LIB_LOCATION}"
+WEBGPU_BUILD=false
+if [[ "$CARGO_TARGET" == x86_64-unknown-linux-* ]]; then
+    WEBGPU_BUILD=true
 fi
 
-# ort-sys v2.0.0-rc.12 defaults to static linking (.a), but the ONNX Runtime
-# package only ships shared libraries (.so).  Force dynamic linking.
-export ORT_PREFER_DYNAMIC_LINK=1
-
-# -rpath,$ORIGIN: runtime linker searches binary's directory for .so files
-# -rpath-link,<ORT_LIB_LOCATION>: build-time linker resolves transitive NEEDED deps
-export RUSTFLAGS="-Awarnings -C link-args=-Wl,-rpath,\$ORIGIN -Wl,-rpath-link,${ORT_LIB_LOCATION}"
-export LIBRARY_PATH="${ORT_LIB_LOCATION}${LIBRARY_PATH:+:}${LIBRARY_PATH:-}"
-export LD_LIBRARY_PATH="${ORT_LIB_LOCATION}${LD_LIBRARY_PATH:+:}${LD_LIBRARY_PATH:-}"
-
-echo "=== ORT lib directory ==="
-ls -la "${ORT_LIB_LOCATION}/"
+echo "=== Build Linux (WebGPU) Binary ==="
+echo "  Target:   ${CARGO_TARGET}"
+echo "  Features: onnx (includes webgpu via ort dependency)"
+if [ "$WEBGPU_BUILD" = true ]; then
+    echo "  WebGPU:   enabled (x86_64)"
+else
+    echo "  WebGPU:   disabled (CPU-only for ${CARGO_TARGET})"
+fi
 
 cd "${SRC_TAURI}"
 cargo build --release --target "${CARGO_TARGET}" --no-default-features --features onnx
 
-# Copy ORT shared libraries alongside the binary for distribution
 BIN_DIR="target/${CARGO_TARGET}/release"
-if [ -n "${ORT_LIB_LOCATION:-}" ] && [ -d "${ORT_LIB_LOCATION}" ]; then
-    cp -v "${ORT_LIB_LOCATION}"/*.so* "${BIN_DIR}/" 2>/dev/null || true
-fi
 echo "=== Release directory contents ==="
 ls -la "${BIN_DIR}/"
+echo ""
+echo "=== Build complete ==="
+echo "Binary: ${BIN_DIR}/HiFiShifter"
+if [ "$WEBGPU_BUILD" = true ]; then
+    echo "WebGPU GPU acceleration is compiled in (falls back to CPU if no GPU available)."
+else
+    echo "WebGPU is not compiled for ${CARGO_TARGET}; this build is CPU-only."
+fi

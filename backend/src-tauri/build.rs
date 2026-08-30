@@ -36,10 +36,89 @@ fn main() {
     // tauri.windows.conf.json handles the bundling.
     copy_directml_dll();
 
+    // Stage the ONNX Runtime dylibs (WebGPU/Dawn, CoreML providers, ...) into
+    // resources/macos so tauri.macos.conf.json can bundle them into
+    // Contents/Resources/macos. Without this, the app links
+    // @rpath/libwebgpu_dawn.dylib but the .app does not contain it, and dyld
+    // fails at launch.
+    stage_ort_macos_dylibs();
+
+    // Generate a CoreML-compatible NSF-HiFiGAN model variant (macOS ARM64
+    // only): the stock model derives Pad pads at runtime, which the CoreML EP
+    // cannot compile.  The generated file is gitignored and produced on
+    // demand during the build.
+    generate_coreml_model_variant();
+
     // tauri_build validates resources listed in tauri.conf.json and its
-    // platform-specific merges (tauri.windows.conf.json, tauri.macos.conf.json).
-    // All resource files must exist before this call.
+    // platform-specific merges (tauri.windows.conf.json, tauri.linux.conf.json),
+    // and copies bundle.macOS.frameworks for darwin targets. All referenced
+    // files must exist before this call.
     tauri_build::build();
+
+    // ── Windows: comctl32!TaskDialogIndirect v6 manifest vs. delay-load ─────
+    // The dependency tree (winit/tauri dialog) statically imports
+    // comctl32.dll!TaskDialogIndirect, which exists only in the v6
+    // side-by-side assembly. Without a v6 manifest the loader binds to the
+    // v5 copy in System32 and process init fails immediately with
+    // STATUS_ENTRYPOINT_NOT_FOUND (0xC0000139).
+    //
+    // The main binary gets a Common-Controls v6 manifest from tauri_build
+    // (resource.lib); cargo has no link-arg channel for the lib unit-test
+    // harness, so the harness cannot embed a manifest.
+    //
+    // Root fix: delay-load comctl32 wholesale (/DELAYLOAD) for every target
+    // of this crate via `cargo:rustc-link-arg` (build-script link args only
+    // apply to this package's own targets and do not touch the ~400
+    // dependency crates — unlike `[target.*] rustflags`, which rewrites
+    // every crate's fingerprint and forces a full rebuild). The harness
+    // never binds comctl32 at startup and unit tests never open dialogs (so
+    // the load never triggers); the main binary keeps its v6 manifest and
+    // binds v6 on first real dialog use. `cargo test` and `cargo build`
+    // work directly on Windows with no manifest injection of any kind.
+    #[cfg(all(target_os = "windows", target_env = "msvc"))]
+    {
+        // Delay-load comctl32 for all targets of this package (bin, lib
+        // unit-test harness, integration tests). Static TaskDialogIndirect
+        // imports are only resolvable against the v6 assembly; delaying the
+        // whole module keeps harness executables loadable without a
+        // manifest. delayimp.lib provides the __delayLoadHelper2 stub.
+        println!("cargo:rustc-link-arg=/DELAYLOAD:comctl32.dll");
+        println!("cargo:rustc-link-arg=/DEFAULTLIB:delayimp.lib");
+        // Targets without a comctl32 import report LNK4199 "ignored"; silence it.
+        println!("cargo:rustc-link-arg=/IGNORE:4199");
+        // The manifest below is still embedded for integration tests
+        // (tests/): kept defensively, so any future integration test that
+        // really opens a system dialog binds the v6 assembly.
+        let manifest_out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap_or_default())
+            .join("hifishifter_tests.manifest");
+        let manifest_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+        type="win32"
+        name="Microsoft.Windows.Common-Controls"
+        version="6.0.0.0"
+        processorArchitecture="*"
+        publicKeyToken="6595b64144ccf1df"
+        language="*"
+      />
+    </dependentAssembly>
+  </dependency>
+</assembly>
+"#;
+        let _ = std::fs::write(&manifest_out, manifest_xml);
+        // Only `-tests` may be used here (integration test targets only).
+        // A generic `rustc-link-arg` would also reach the main binary — it
+        // already embeds a manifest from tauri_build's resource.lib and a
+        // second /MANIFEST:EMBED would hit CVT1100 duplicate resource.
+        println!("cargo:rustc-link-arg-tests=/MANIFEST:EMBED");
+        println!(
+            "cargo:rustc-link-arg-tests=/MANIFESTINPUT:{}",
+            manifest_out.display()
+        );
+        println!("cargo:rustc-link-arg-tests=/MANIFESTUAC:NO");
+    }
 }
 
 /// 在编译时自动构建前端静态资源。
@@ -60,11 +139,12 @@ fn build_frontend() {
         return;
     }
 
-    // 当关键文件变更时重新触发 build.rs
-    println!("cargo:rerun-if-changed=../../frontend/src");
-    println!("cargo:rerun-if-changed=../../frontend/package.json");
-    println!("cargo:rerun-if-changed=../../frontend/vite.config.ts");
-    println!("cargo:rerun-if-changed=../../frontend/vite.config.js");
+    // NOTE: deliberately NO cargo:rerun-if-changed for frontend paths.
+    // The frontend is only (re)built when `dist` is missing (see below), so
+    // declaring e.g. ../../frontend/src would only re-run this build script —
+    // and with it the whole WORLD/Signalsmith/SoundTouch native rebuilds —
+    // on every frontend edit without ever rebuilding the frontend. That is
+    // pure build-time tax; keep the script out of the frontend watch set.
 
     // Allow CI to skip frontend build if artifact is provided.
     // Set HIFISHIFTER_SKIP_FRONTEND_BUILD=1 to skip building frontend here.
@@ -178,9 +258,9 @@ fn build_world_static() {
     println!("cargo:rerun-if-changed={}", world_src_dir);
 
     // Compile WORLD as static library
-    cc::Build::new()
+    let mut world = cc::Build::new();
+    world
         .cpp(true)
-        .std("c++11")
         .include(world_src_dir)
         .file(format!("{}/cheaptrick.cpp", world_src_dir))
         .file(format!("{}/codec.cpp", world_src_dir))
@@ -192,8 +272,19 @@ fn build_world_static() {
         .file(format!("{}/matlabfunctions.cpp", world_src_dir))
         .file(format!("{}/stonemask.cpp", world_src_dir))
         .file(format!("{}/synthesis.cpp", world_src_dir))
-        .file(format!("{}/synthesisrealtime.cpp", world_src_dir))
-        .compile("world");
+        .file(format!("{}/synthesisrealtime.cpp", world_src_dir));
+
+    // C++ 标准旗标按编译器家族分发（与下方 sstretch 构建同一模式）：
+    // MSVC 的 cl 不认识 GCC 风格的 `-std:c++11`，传入只会得到 D9002
+    // "ignoring unknown option" 警告并被忽略 —— cl 默认即 ≥C++14，
+    // 显式给 /std:c++14 行为不变、警告消失。
+    if world.get_compiler().is_like_msvc() {
+        world.flag("/std:c++14");
+    } else {
+        world.flag("-std=c++11");
+    }
+
+    world.compile("world");
 
     println!("cargo:rustc-link-lib=static=world");
 }
@@ -354,6 +445,25 @@ fn build_vslib() {
                 dll_dst.display()
             );
         }
+        // Test executables live in target/<profile>/deps/, where the loader
+        // looks for DLLs; copy there as well or cargo test cannot start.
+        let deps_dir = target_dir.join("deps");
+        let _ = std::fs::create_dir_all(&deps_dir);
+        let dll_dst_deps = deps_dir.join("vslib_x64.dll");
+        if dll_dst_deps != dll_dst {
+            if let Err(e) = std::fs::copy(&dll_src, &dll_dst_deps) {
+                println!(
+                    "cargo:warning=[vslib] could not copy DLL to {}: {}",
+                    dll_dst_deps.display(),
+                    e
+                );
+            } else {
+                println!(
+                    "cargo:warning=[vslib] copied vslib_x64.dll to {}",
+                    dll_dst_deps.display()
+                );
+            }
+        }
     } else {
         println!("cargo:warning=[vslib] OUT_DIR not set; skipping DLL copy")
     }
@@ -381,29 +491,37 @@ fn build_soundtouch() {
 
     let st_src = "third_party/soundtouch-static/soundtouch";
 
+    // Re-run this script only when the SoundTouch source tree changes
+    // (consistent with build_world_static / build_signalsmith_stretch).
+    println!("cargo:rerun-if-changed={}", st_src);
+
     // Verify SoundTouch source exists; auto-clone if missing
     let st_src_path = Path::new(st_src);
     if !st_src_path.join("CMakeLists.txt").exists() {
-        println!(
-            "cargo:warning=[soundtouch] SoundTouch source not found, auto-cloning..."
-        );
+        println!("cargo:warning=[soundtouch] SoundTouch source not found, auto-cloning...");
         if st_src_path.exists() {
             let _ = std::fs::remove_dir_all(st_src_path);
         }
-        let parent = st_src_path.parent().expect("[soundtouch] invalid source path");
+        let parent = st_src_path
+            .parent()
+            .expect("[soundtouch] invalid source path");
         let _ = std::fs::create_dir_all(parent);
 
         let mut clone = Command::new("git");
         clone.args([
             "clone",
-            "--depth", "1",
-            "--branch", "2.3.3",
+            "--depth",
+            "1",
+            "--branch",
+            "2.3.3",
             "https://codeberg.org/soundtouch/soundtouch.git",
             "soundtouch",
         ]);
         clone.current_dir(parent);
 
-        let status = clone.status().expect("[soundtouch] failed to run git clone");
+        let status = clone
+            .status()
+            .expect("[soundtouch] failed to run git clone");
         if !status.success() {
             eprintln!("\n========================================");
             eprintln!("ERROR: Failed to auto-clone SoundTouch source!");
@@ -414,9 +532,7 @@ fn build_soundtouch() {
             eprintln!("========================================\n");
             panic!("SoundTouch source clone failed. See error message above for instructions.");
         }
-        println!(
-            "cargo:warning=[soundtouch] SoundTouch source cloned successfully"
-        );
+        println!("cargo:warning=[soundtouch] SoundTouch source cloned successfully");
     }
 
     // Only re-run if build.rs itself changes - the SoundTouch source tree is modified
@@ -424,13 +540,8 @@ fn build_soundtouch() {
     println!("cargo:rerun-if-changed=build.rs");
 
     let target = std::env::var("TARGET").unwrap_or_default();
-    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_else(|_| {
-        target
-            .split('-')
-            .nth(2)
-            .unwrap_or_default()
-            .to_string()
-    });
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS")
+        .unwrap_or_else(|_| target.split('-').nth(2).unwrap_or_default().to_string());
     println!(
         "cargo:warning=[soundtouch] TARGET={} TARGET_OS={}",
         target, target_os
@@ -441,9 +552,13 @@ fn build_soundtouch() {
 
     // Patch SoundTouchDLL.rc to use windows.h instead of afxres.h (MFC header not always available)
     if is_windows {
-        let rc_file = st_src_path.join("source").join("SoundTouchDLL").join("SoundTouchDLL.rc");
+        let rc_file = st_src_path
+            .join("source")
+            .join("SoundTouchDLL")
+            .join("SoundTouchDLL.rc");
         if rc_file.exists() {
-            let content = std::fs::read_to_string(&rc_file).expect("[soundtouch] failed to read SoundTouchDLL.rc");
+            let content = std::fs::read_to_string(&rc_file)
+                .expect("[soundtouch] failed to read SoundTouchDLL.rc");
             // Only write if the file actually needs patching to avoid triggering Tauri's file watcher.
             if content.contains("afxres.h") && !content.contains("#include <windows.h>") {
                 let patched = content.replace("#include \"afxres.h\"", "#include <windows.h>");
@@ -457,8 +572,11 @@ fn build_soundtouch() {
                     patched
                 };
                 if patched != content {
-                    std::fs::write(&rc_file, &patched).expect("[soundtouch] failed to write patched SoundTouchDLL.rc");
-                    println!("cargo:warning=[soundtouch] patched SoundTouchDLL.rc to use windows.h");
+                    std::fs::write(&rc_file, &patched)
+                        .expect("[soundtouch] failed to write patched SoundTouchDLL.rc");
+                    println!(
+                        "cargo:warning=[soundtouch] patched SoundTouchDLL.rc to use windows.h"
+                    );
                 }
             }
         }
@@ -483,11 +601,17 @@ fn build_soundtouch() {
         }
     }
 
-    println!("cargo:warning=[soundtouch] is_windows={} is_apple={}", is_windows, is_apple);
+    println!(
+        "cargo:warning=[soundtouch] is_windows={} is_apple={}",
+        is_windows, is_apple
+    );
 
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
     let build_dir = Path::new(&out_dir).join("soundtouch_build");
-    println!("cargo:warning=[soundtouch] build_dir={}", build_dir.display());
+    println!(
+        "cargo:warning=[soundtouch] build_dir={}",
+        build_dir.display()
+    );
 
     // Step 1: CMake configure - build SoundTouchDLL as a shared library.
     // Use the path as-is (cmake handles relative paths fine, and canonicalize
@@ -501,15 +625,23 @@ fn build_soundtouch() {
     cfg.arg("-DSOUNDTOUCH_DLL=ON");
 
     if is_apple {
-        cfg.arg("-DCMAKE_INSTALL_NAME_DIR=@executable_path");
+        cfg.arg("-DCMAKE_INSTALL_NAME_DIR=@rpath");
         cfg.arg("-DCMAKE_MACOSX_RPATH=ON");
     }
 
     println!("cargo:warning=[soundtouch] spawning cmake configure...");
-    let status = cfg.status().expect("[soundtouch] failed to run cmake configure");
-    println!("cargo:warning=[soundtouch] cmake configure exit status: {}", status);
+    let status = cfg
+        .status()
+        .expect("[soundtouch] failed to run cmake configure");
+    println!(
+        "cargo:warning=[soundtouch] cmake configure exit status: {}",
+        status
+    );
     if !status.success() {
-        panic!("[soundtouch] CMake configure failed with exit code {:?}", status.code());
+        panic!(
+            "[soundtouch] CMake configure failed with exit code {:?}",
+            status.code()
+        );
     }
     println!("cargo:warning=[soundtouch] cmake configure succeeded");
 
@@ -519,14 +651,22 @@ fn build_soundtouch() {
     bld.arg("--config").arg("Release");
 
     println!("cargo:warning=[soundtouch] spawning cmake build...");
-    let output = bld.output().expect("[soundtouch] failed to run cmake build");
-    println!("cargo:warning=[soundtouch] cmake build exit status: {}", output.status);
+    let output = bld
+        .output()
+        .expect("[soundtouch] failed to run cmake build");
+    println!(
+        "cargo:warning=[soundtouch] cmake build exit status: {}",
+        output.status
+    );
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
         println!("cargo:warning=[soundtouch] cmake build stderr:\n{}", stderr);
         println!("cargo:warning=[soundtouch] cmake build stdout:\n{}", stdout);
-        panic!("[soundtouch] CMake build failed with exit code {:?}", output.status.code());
+        panic!(
+            "[soundtouch] CMake build failed with exit code {:?}",
+            output.status.code()
+        );
     }
     println!("cargo:warning=[soundtouch] cmake build succeeded");
 
@@ -540,31 +680,73 @@ fn build_soundtouch() {
         format!("lib{}.so", lib_name)
     };
 
-    let lib_src = find_file(&build_dir, &lib_filename)
-        .unwrap_or_else(|| {
+    let lib_src = find_file(&build_dir, &lib_filename).unwrap_or_else(|| {
+        panic!(
+            "[soundtouch] Could not find {} in build directory {}",
+            lib_filename,
+            build_dir.display()
+        )
+    });
+    println!(
+        "cargo:warning=[soundtouch] found shared lib: {}",
+        lib_src.display()
+    );
+
+    // Force a stable, relocatable Mach-O install name.  The library is bundled
+    // into HiFiShifter.app/Contents/Frameworks and loaded through @rpath, so it
+    // must record `@rpath/libSoundTouchDLL.dylib` instead of an absolute path
+    // or an executable-relative path (which would point at Contents/MacOS).
+    if is_apple {
+        let install_name = format!("@rpath/{}", lib_filename);
+        let status = Command::new("install_name_tool")
+            .arg("-id")
+            .arg(&install_name)
+            .arg(&lib_src)
+            .status()
+            .expect("[soundtouch] failed to run install_name_tool");
+        if !status.success() {
             panic!(
-                "[soundtouch] Could not find {} in build directory {}",
-                lib_filename,
-                build_dir.display()
-            )
-        });
-    println!("cargo:warning=[soundtouch] found shared lib: {}", lib_src.display());
+                "[soundtouch] install_name_tool failed to set {} on {}",
+                install_name,
+                lib_src.display()
+            );
+        }
+        println!(
+            "cargo:warning=[soundtouch] set dylib install name to {}",
+            install_name
+        );
+    }
 
     // Step 4: Link against the shared library
     let lib_search = lib_src.parent().unwrap();
     println!("cargo:rustc-link-search=native={}", lib_search.display());
     println!("cargo:rustc-link-lib=dylib={}", lib_name);
 
-    // Set rpath so the binary finds the shared library in its own directory at runtime.
-    // Linux/ELF uses `$ORIGIN`, while macOS uses dyld-specific loader paths.
+    // Set rpath so the binary finds the shared library at runtime.
+    // macOS:
+    //   1. @executable_path/../Frameworks — primary location: Tauri
+    //      bundle.macOS.frameworks copies the dylib into Contents/Frameworks
+    //   2. @executable_path/../Resources  — fallback location: Tauri
+    //      bundle.macOS.files copies the dylib into Contents/Resources
+    //   3. @executable_path/../Resources/macos — ONNX Runtime dylibs staged
+    //      by stage_ort_macos_dylibs() (libwebgpu_dawn.dylib, providers, ...)
+    //   4. @executable_path                — finds the copy next to the binary
+    //      during plain cargo runs (target/<triple>/release/)
+    // Linux:
+    //   1. $ORIGIN — finds libSoundTouchDLL.so next to the binary
+    //   2. $ORIGIN/../lib/HiFiShifter — finds it in the AppImage AppDir layout
     if is_apple {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/../Frameworks");
+        println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/../Resources");
+        println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/../Resources/macos");
         println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path");
     } else if !is_windows {
         println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
+        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../lib/HiFiShifter");
     }
 
     // Step 5: Copy shared library to target dir (for runtime linking) AND to
-    // source tree (for Tauri resource bundling / tauri_build validation).
+    // source tree (for Tauri macOS framework bundling / tauri_build validation).
     let target_dir = Path::new(&out_dir)
         .ancestors()
         .nth(3)
@@ -586,6 +768,28 @@ fn build_soundtouch() {
         );
     }
 
+    // Test executables live in target/<profile>/deps/, where the loader
+    // looks for shared libraries; copy there as well or cargo test cannot start.
+    let deps_dir = target_dir.join("deps");
+    let _ = std::fs::create_dir_all(&deps_dir);
+    let lib_dst_deps = deps_dir.join(&lib_filename);
+    if lib_dst_deps != lib_dst_target {
+        if let Err(e) = std::fs::copy(&lib_src, &lib_dst_deps) {
+            println!(
+                "cargo:warning=[soundtouch] could not copy {} to {}: {}",
+                lib_src.display(),
+                lib_dst_deps.display(),
+                e
+            );
+        } else {
+            println!(
+                "cargo:warning=[soundtouch] copied {} to {}",
+                lib_src.display(),
+                lib_dst_deps.display()
+            );
+        }
+    }
+
     // Also copy to source tree path for tauri_build resource validation.
     // IMPORTANT: only write if bytes differ - writing unconditionally updates the
     // file timestamp every build, which triggers Tauri's dev watcher and causes
@@ -596,21 +800,20 @@ fn build_soundtouch() {
     if src_bytes != dst_bytes {
         if let Err(e) = std::fs::write(&lib_dst_resource, &src_bytes) {
             println!(
-                "cargo:warning=[soundtouch] could not copy {} to resource path {}: {}",
+                "cargo:warning=[soundtouch] could not copy {} to framework source path {}: {}",
                 lib_src.display(),
                 lib_dst_resource.display(),
                 e
             );
         } else {
             println!(
-                "cargo:warning=[soundtouch] updated resource DLL at {}",
+                "cargo:warning=[soundtouch] updated macOS framework dylib at {}",
                 lib_dst_resource.display()
             );
         }
     } else {
-        println!("cargo:warning=[soundtouch] resource DLL unchanged, skipping write");
+        println!("cargo:warning=[soundtouch] macOS framework dylib unchanged, skipping write");
     }
-
 }
 
 /// Recursively search for a file by name under `dir`.
@@ -720,3 +923,600 @@ fn copy_directml_dll() {
         println!("cargo:warning=[ort] DirectML.dll resource unchanged, skipping write");
     }
 }
+
+/// Stage the ONNX Runtime shared libraries into `resources/macos/` so Tauri
+/// can bundle them into `Contents/Resources/macos`.
+///
+/// ort-sys (`copy-dylibs` feature) places every `.dylib` from the downloaded
+/// ORT package next to the final binary (target/<triple>/release). The app
+/// links against some of them (e.g. `libwebgpu_dawn.dylib` for the WebGPU
+/// execution provider) with the install name `@rpath/<name>`, so they must be
+/// present inside the .app or dyld fails before main() runs.
+fn stage_ort_macos_dylibs() {
+    use std::path::Path;
+
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+
+    let out_dir = std::env::var("OUT_DIR").unwrap_or_default();
+    if out_dir.is_empty() {
+        return;
+    }
+
+    // OUT_DIR = .../target/<triple>/<profile>/build/<pkg>-<hash>/out
+    // 4 levels up = target/<triple>/<profile>/ (same dir ort-sys copies into).
+    let target_dir = Path::new(&out_dir)
+        .ancestors()
+        .nth(3)
+        .expect("[ort] unexpected OUT_DIR depth");
+    let staging_dir = Path::new("resources/macos");
+    // This directory is a build output. Without an explicit rerun guard, Cargo's
+    // default filesystem tracking sees newly staged dylibs as inputs and starts
+    // another build, creating a watch loop in `cargo tauri dev`.
+    println!("cargo:rerun-if-changed=build.rs");
+
+    if let Err(e) = std::fs::create_dir_all(staging_dir) {
+        println!(
+            "cargo:warning=[ort] could not create {}: {}",
+            staging_dir.display(),
+            e
+        );
+        return;
+    }
+
+    let mut staged = 0usize;
+    let entries = match std::fs::read_dir(target_dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            println!(
+                "cargo:warning=[ort] could not read {}: {}",
+                target_dir.display(),
+                e
+            );
+            return;
+        }
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(name) => name.to_string(),
+            None => continue,
+        };
+        // SoundTouch is staged and bundled separately.
+        if !name.ends_with(".dylib") || name == "libSoundTouchDLL.dylib" {
+            continue;
+        }
+
+        let dst = staging_dir.join(&name);
+        let src_bytes = std::fs::read(&path).unwrap_or_default();
+        let dst_bytes = std::fs::read(&dst).unwrap_or_default();
+        if src_bytes == dst_bytes {
+            println!(
+                "cargo:warning=[ort] {} unchanged, skipping write",
+                dst.display()
+            );
+            continue;
+        }
+
+        let temp_dst = staging_dir.join(format!("{}.tmp", name));
+        if let Err(e) = std::fs::write(&temp_dst, &src_bytes) {
+            println!(
+                "cargo:warning=[ort] could not stage {} to {}: {}",
+                path.display(),
+                temp_dst.display(),
+                e
+            );
+            continue;
+        }
+        if let Err(e) = std::fs::rename(&temp_dst, &dst) {
+            println!(
+                "cargo:warning=[ort] could not replace {} with {}: {}",
+                temp_dst.display(),
+                dst.display(),
+                e
+            );
+            let _ = std::fs::remove_file(&temp_dst);
+            continue;
+        }
+        println!(
+            "cargo:warning=[ort] staged {} to {}",
+            path.display(),
+            dst.display()
+        );
+
+        // Make the staged dylib relocatable: set @rpath/<name> as its install
+        // name and rewrite absolute dependency paths to @rpath/<basename>.
+        normalize_macos_dylib(&dst, staging_dir);
+        staged += 1;
+    }
+
+    if staged == 0 {
+        println!(
+            "cargo:warning=[ort] no ORT dylibs found in {} (expected on macOS ARM64)",
+            target_dir.display()
+        );
+    } else {
+        println!(
+            "cargo:warning=[ort] staged {} ORT dylib(s) into {}",
+            staged,
+            staging_dir.display()
+        );
+    }
+}
+
+/// Make a dylib relocatable inside the app bundle: force its install name to
+/// `@rpath/<name>` and rewrite absolute LC_LOAD_DYLIB entries to
+/// `@rpath/<basename>` — but only for dependencies that are bundled next to it
+/// (system libraries under /usr/lib and /System/Library are left untouched).
+/// Failures are warnings only; the prebuilt ORT dylibs are unsigned so
+/// install_name_tool can always modify them.
+fn normalize_macos_dylib(path: &std::path::Path, staging_dir: &std::path::Path) {
+    use std::process::Command;
+
+    let name = match path.file_name().and_then(|n| n.to_str()) {
+        Some(name) => name,
+        None => return,
+    };
+
+    let install_name = format!("@rpath/{}", name);
+    let id_status = Command::new("install_name_tool")
+        .arg("-id")
+        .arg(&install_name)
+        .arg(path)
+        .status();
+    if let Ok(status) = id_status {
+        if status.success() {
+            println!(
+                "cargo:warning=[ort] set install name {} on {}",
+                install_name,
+                path.display()
+            );
+        }
+    }
+
+    let output = match Command::new("otool").arg("-L").arg(path).output() {
+        Ok(output) => output,
+        Err(e) => {
+            println!(
+                "cargo:warning=[ort] otool failed for {}: {}",
+                path.display(),
+                e
+            );
+            return;
+        }
+    };
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    for line in text.lines() {
+        let line = line.trim();
+        // Only rewrite absolute dependency paths.
+        let Some(rest) = line.strip_prefix('/') else {
+            continue;
+        };
+        let dep_path = rest.split_whitespace().next().unwrap_or_default();
+        if dep_path.is_empty() {
+            continue;
+        }
+        let dep_name = match std::path::Path::new(dep_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+        {
+            Some(dep_name) if dep_name.ends_with(".dylib") => dep_name.to_string(),
+            _ => continue,
+        };
+        // Only rewrite ORT-internal dependencies that we bundle; never touch
+        // system libraries.
+        if !staging_dir.join(&dep_name).exists() {
+            continue;
+        }
+        let old = format!("/{}", dep_path);
+        let new = format!("@rpath/{}", dep_name);
+        let change_status = Command::new("install_name_tool")
+            .arg("-change")
+            .arg(&old)
+            .arg(&new)
+            .arg(path)
+            .status();
+        if let Ok(status) = change_status {
+            if status.success() {
+                println!(
+                    "cargo:warning=[ort] rewrote dependency {} -> {} in {}",
+                    old,
+                    new,
+                    path.display()
+                );
+            }
+        }
+    }
+}
+
+/// Minimal protobuf reader/writer (no external crates) used to rewrite the
+/// NSF-HiFiGAN ONNX model so the Pad node's runtime-derived `pads` become a
+/// constant initializer.  CoreML EP cannot compile the stock model's dynamic
+/// pads ("output_features has no value for 'Sub_output_0'").
+#[cfg(target_os = "macos")]
+mod coreml_pb {
+    pub fn write_varint(buf: &mut Vec<u8>, mut v: u64) {
+        while v >= 0x80 {
+            buf.push((v as u8) | 0x80);
+            v >>= 7;
+        }
+        buf.push(v as u8);
+    }
+    pub fn write_tag(buf: &mut Vec<u8>, num: u32, wire: u8) {
+        write_varint(buf, ((num as u64) << 3) | wire as u64);
+    }
+    pub fn write_bytes_field(buf: &mut Vec<u8>, num: u32, payload: &[u8]) {
+        write_tag(buf, num, 2);
+        write_varint(buf, payload.len() as u64);
+        buf.extend_from_slice(payload);
+    }
+    pub fn write_varint_field(buf: &mut Vec<u8>, num: u32, v: u64) {
+        write_tag(buf, num, 0);
+        write_varint(buf, v);
+    }
+
+    pub struct Field {
+        pub num: u32,
+        pub wire: u8,
+        pub payload: Vec<u8>,
+    }
+
+    pub fn parse(data: &[u8]) -> Result<Vec<Field>, String> {
+        let mut fields = Vec::new();
+        let mut pos = 0usize;
+        while pos < data.len() {
+            let tag = read_varint(data, &mut pos)?;
+            let num = (tag >> 3) as u32;
+            let wire = (tag & 7) as u8;
+            match wire {
+                0 => {
+                    let start = pos;
+                    read_varint(data, &mut pos)?;
+                    fields.push(Field {
+                        num,
+                        wire,
+                        payload: data[start..pos].to_vec(),
+                    });
+                }
+                2 => {
+                    let len = read_varint(data, &mut pos)? as usize;
+                    if pos + len > data.len() {
+                        return Err("protobuf length overflow".to_string());
+                    }
+                    fields.push(Field {
+                        num,
+                        wire,
+                        payload: data[pos..pos + len].to_vec(),
+                    });
+                    pos += len;
+                }
+                5 => {
+                    if pos + 4 > data.len() {
+                        return Err("protobuf fixed32 overflow".to_string());
+                    }
+                    fields.push(Field {
+                        num,
+                        wire,
+                        payload: data[pos..pos + 4].to_vec(),
+                    });
+                    pos += 4;
+                }
+                1 => {
+                    if pos + 8 > data.len() {
+                        return Err("protobuf fixed64 overflow".to_string());
+                    }
+                    fields.push(Field {
+                        num,
+                        wire,
+                        payload: data[pos..pos + 8].to_vec(),
+                    });
+                    pos += 8;
+                }
+                w => return Err(format!("unsupported protobuf wire type {w}")),
+            }
+        }
+        Ok(fields)
+    }
+
+    pub fn encode(fields: &[Field]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        for f in fields {
+            write_tag(&mut buf, f.num, f.wire);
+            match f.wire {
+                0 => buf.extend_from_slice(&f.payload),
+                2 => {
+                    write_varint(&mut buf, f.payload.len() as u64);
+                    buf.extend_from_slice(&f.payload);
+                }
+                5 | 1 => buf.extend_from_slice(&f.payload),
+                _ => {}
+            }
+        }
+        buf
+    }
+
+    fn read_varint(data: &[u8], pos: &mut usize) -> Result<u64, String> {
+        let mut shift = 0;
+        let mut val = 0u64;
+        while *pos < data.len() && shift < 64 {
+            let b = data[*pos];
+            *pos += 1;
+            val |= ((b & 0x7f) as u64) << shift;
+            if b & 0x80 == 0 {
+                return Ok(val);
+            }
+            shift += 7;
+        }
+        Err("truncated protobuf varint".to_string())
+    }
+}
+
+/// Rewrite CoreML-incompatible parts of the stock model:
+/// - Pad: dynamic `pads` inputs become constant initializers.
+/// - ConvTranspose: explicit `kernel_shape` attributes are removed so CoreML EP
+///   accepts the upsampling layers.
+/// Only the node/initializer protobuf fields are touched; all other bytes
+/// (including the ~54 MB weight raw_data) are preserved verbatim.
+#[cfg(target_os = "macos")]
+fn rewrite_coreml_model(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
+    use coreml_pb::{encode, parse, Field};
+
+    let patch = load_pads_patch()?;
+    let data = std::fs::read(src).map_err(|e| e.to_string())?;
+    let model_fields = parse(&data)?;
+
+    let mut out_model: Vec<Field> = Vec::new();
+    let mut changed = false;
+    for f in &model_fields {
+        if f.num == 7 && f.wire == 2 {
+            out_model.push(Field {
+                num: 7,
+                wire: 2,
+                payload: rewrite_graph(&f.payload, &patch)?,
+            });
+            changed = true;
+        } else {
+            out_model.push(Field {
+                num: f.num,
+                wire: f.wire,
+                payload: f.payload.clone(),
+            });
+        }
+    }
+    if !changed {
+        return Err("ONNX graph field not found".to_string());
+    }
+    std::fs::write(dst, encode(&out_model)).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Load the Pad-pads patch (name -> constant int64 values).  The stock
+/// model derives Pad pads at runtime; CoreML EP cannot compile dynamic pads,
+/// so this patch records the (constant) values and build.rs rewrites every
+/// affected Pad node to use a constant initializer.
+#[cfg(target_os = "macos")]
+fn load_pads_patch() -> Result<std::collections::HashMap<String, Vec<i64>>, String> {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = manifest.join("resources/models/nsf_hifigan/coreml_pads_patch.txt");
+    let text =
+        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let mut map = std::collections::HashMap::new();
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (name, vals) = line
+            .split_once('=')
+            .ok_or_else(|| format!("bad pads patch line: {line}"))?;
+        let vals = vals
+            .split(',')
+            .map(|v| {
+                v.trim()
+                    .parse::<i64>()
+                    .map_err(|e| format!("bad pads patch value '{v}': {e}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        map.insert(name.trim().to_string(), vals);
+    }
+    Ok(map)
+}
+
+/// Encode a TensorProto with dims=[len], data_type=INT64, int64_data=vals,
+/// name=name.  Values are expected to be non-negative (pads are 0/1).
+#[cfg(target_os = "macos")]
+fn build_int64_tensor(name: &str, vals: &[i64]) -> Vec<u8> {
+    let mut t = Vec::new();
+    let mut dims = Vec::new();
+    coreml_pb::write_varint(&mut dims, vals.len() as u64);
+    coreml_pb::write_bytes_field(&mut t, 1, &dims);
+    coreml_pb::write_varint_field(&mut t, 2, 7);
+    let mut data = Vec::new();
+    for v in vals {
+        coreml_pb::write_varint(&mut data, *v as u64);
+    }
+    coreml_pb::write_bytes_field(&mut t, 7, &data);
+    coreml_pb::write_bytes_field(&mut t, 8, name.as_bytes());
+    t
+}
+
+#[cfg(target_os = "macos")]
+fn rewrite_graph(
+    graph: &[u8],
+    patch: &std::collections::HashMap<String, Vec<i64>>,
+) -> Result<Vec<u8>, String> {
+    use coreml_pb::{encode, parse, Field};
+
+    let gfields = parse(graph)?;
+    let mut nodes: Vec<Field> = Vec::new();
+    let mut inits: Vec<Field> = Vec::new();
+    let mut others: Vec<Field> = Vec::new();
+    let mut next_id = 0usize;
+    let mut new_inits: Vec<Vec<u8>> = Vec::new();
+    for f in &gfields {
+        match (f.num, f.wire) {
+            (1, 2) => nodes.push(Field {
+                num: 1,
+                wire: 2,
+                payload: rewrite_node(&f.payload, patch, &mut next_id, &mut new_inits)?,
+            }),
+            (5, 2) => inits.push(Field {
+                num: 5,
+                wire: 2,
+                payload: f.payload.clone(),
+            }),
+            _ => others.push(Field {
+                num: f.num,
+                wire: f.wire,
+                payload: f.payload.clone(),
+            }),
+        }
+    }
+
+    let mut out = Vec::new();
+    for f in others {
+        out.extend(encode(&[f]));
+    }
+    for f in nodes {
+        out.extend(encode(&[f]));
+    }
+    for f in inits {
+        out.extend(encode(&[f]));
+    }
+    for t in new_inits {
+        out.extend(encode(&[Field {
+            num: 5,
+            wire: 2,
+            payload: t,
+        }]));
+    }
+    Ok(out)
+}
+
+/// Rewrite CoreML-incompatible nodes:
+/// - Pad: replace a dynamic `pads` input listed in the patch with a fresh
+///   constant initializer.
+/// - ConvTranspose: remove the explicit `kernel_shape` attribute.  CoreML EP
+///   only accepts ConvTranspose nodes when `kernel_shape` is not present
+///   (inferred from the constant weight), while the stock model exports it
+///   explicitly for every upsampling layer.
+#[cfg(target_os = "macos")]
+fn rewrite_node(
+    node: &[u8],
+    patch: &std::collections::HashMap<String, Vec<i64>>,
+    next_id: &mut usize,
+    new_inits: &mut Vec<Vec<u8>>,
+) -> Result<Vec<u8>, String> {
+    use coreml_pb::{encode, parse, Field};
+
+    let nf = parse(node)?;
+    let mut op_type = String::new();
+    let mut inputs: Vec<Vec<u8>> = Vec::new();
+    for f in &nf {
+        if f.num == 4 && f.wire == 2 {
+            op_type = String::from_utf8_lossy(&f.payload).into_owned();
+        }
+        if f.num == 1 && f.wire == 2 {
+            inputs.push(f.payload.clone());
+        }
+    }
+
+    if op_type == "ConvTranspose" {
+        let mut out = Vec::new();
+        for f in &nf {
+            if f.num == 5 && f.wire == 2 {
+                let attr = parse(&f.payload)?;
+                let mut name = String::new();
+                for af in &attr {
+                    if af.num == 1 && af.wire == 2 {
+                        name = String::from_utf8_lossy(&af.payload).into_owned();
+                    }
+                }
+                if name == "kernel_shape" {
+                    continue;
+                }
+            }
+            out.extend(encode(&[Field {
+                num: f.num,
+                wire: f.wire,
+                payload: f.payload.clone(),
+            }]));
+        }
+        return Ok(out);
+    }
+
+    if op_type == "Pad" && inputs.len() >= 2 {
+        let pads_name = String::from_utf8_lossy(&inputs[1]).into_owned();
+        if let Some(vals) = patch.get(&pads_name) {
+            let const_name = format!("/coreml_pads_const_{}", *next_id);
+            *next_id += 1;
+            new_inits.push(build_int64_tensor(&const_name, vals));
+
+            let mut out = Vec::new();
+            for f in &nf {
+                if f.num == 1 && f.wire == 2 {
+                    continue; // rebuilt below
+                }
+                out.extend(encode(&[Field {
+                    num: f.num,
+                    wire: f.wire,
+                    payload: f.payload.clone(),
+                }]));
+            }
+            for (i, inp) in inputs.iter().enumerate() {
+                let name: &[u8] = if i == 1 { const_name.as_bytes() } else { inp };
+                coreml_pb::write_bytes_field(&mut out, 1, name);
+            }
+            return Ok(out);
+        }
+    }
+    Ok(node.to_vec())
+}
+
+/// Generate the CoreML-compatible model variant during macOS ARM64 builds.
+/// The output file lives in the resources tree (so Tauri bundles it) but is
+/// gitignored; it is regenerated whenever the stock model, the pads patch or
+/// this build script changes.
+#[cfg(target_os = "macos")]
+fn generate_coreml_model_variant() {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let src = manifest.join("resources/models/nsf_hifigan/pc_nsf_hifigan.onnx");
+    let dst = manifest.join("resources/models/nsf_hifigan/pc_nsf_hifigan_coreml.onnx");
+    if !src.is_file() {
+        println!("cargo:warning=[build.rs] pc_nsf_hifigan.onnx not found; skipping CoreML variant");
+        return;
+    }
+    let patch_path = manifest.join("resources/models/nsf_hifigan/coreml_pads_patch.txt");
+    let build_script = std::path::Path::new(file!());
+    let src_m = std::fs::metadata(&src).and_then(|m| m.modified()).ok();
+    let patch_m = std::fs::metadata(&patch_path)
+        .and_then(|m| m.modified())
+        .ok();
+    let build_m = std::fs::metadata(build_script)
+        .and_then(|m| m.modified())
+        .ok();
+    let dst_m = std::fs::metadata(&dst).and_then(|m| m.modified()).ok();
+    if dst.is_file()
+        && dst_m >= src_m
+        && (patch_m.is_none() || dst_m >= patch_m)
+        && (build_m.is_none() || dst_m >= build_m)
+    {
+        return;
+    }
+    match rewrite_coreml_model(&src, &dst) {
+        Ok(()) => println!(
+            "cargo:warning=[build.rs] generated CoreML model variant: {}",
+            dst.display()
+        ),
+        Err(e) => println!("cargo:warning=[build.rs] failed to generate CoreML model variant: {e}"),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn generate_coreml_model_variant() {}

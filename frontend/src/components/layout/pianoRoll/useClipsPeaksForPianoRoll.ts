@@ -10,7 +10,8 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import type { ClipInfo, FadeCurveType } from "../../../features/session/sessionTypes";
+import type { ClipInfo } from "../../../features/session/sessionTypes";
+import { resolveSourceEndSec } from "../../../utils/loopRender";
 import { waveformMipmapStore } from "../../../utils/waveformMipmapStore";
 
 /** 单个 clip 的波形数据条目（v2：interleaved 格式，与 WaveformTrackCanvas 一致） */
@@ -37,14 +38,23 @@ export interface ClipPeaksEntry {
     fadeInSec: number;
     /** 淡出时长（秒） */
     fadeOutSec: number;
-    /** 淡入曲线类型 */
-    fadeInCurve: FadeCurveType;
-    /** 淡出曲线类型 */
-    fadeOutCurve: FadeCurveType;
+    /** 自动交叉淡化时长（秒）；>0 时有效淡化 = 自动值，否则用手动值。 */
+    autoFadeInSec: number;
+    autoFadeOutSec: number;
+    /** 淡入形状（REAPER 形状 id）与曲率。 */
+    fadeInShape: number;
+    fadeInDir: number;
+    /** 淡出形状（REAPER 形状 id）与曲率。 */
+    fadeOutShape: number;
+    fadeOutDir: number;
     /** source 文件路径（用于从 mipmap store 获取数据） */
     sourcePath: string;
     /** clip 是否静音 */
     muted: boolean;
+    /** 是否倒放 */
+    reversed: boolean;
+    /** Loop（循环源）：超出源窗口的内容按周期回绕重复 */
+    loopEnabled: boolean;
 }
 
 /**
@@ -127,15 +137,26 @@ export function useClipsPeaksForPianoRoll(args: {
             const playbackRate = Number(clip.playbackRate ?? 1);
             const pr = Number.isFinite(playbackRate) && playbackRate > 0 ? playbackRate : 1;
 
-            // sourceEndSec：与 WaveformTrackCanvas 一致，优先使用 clip.sourceEndSec
-            const clipSourceEndSec =
-                Number(clip.sourceEndSec ?? sourceDurationSec) || sourceDurationSec;
+            // sourceEndSec：派生窗口（REAPER 语义）—— 非 Loop 正放取
+            // 起点+长度×速率，与 WaveformTrackCanvas 一致；陈旧存储窗口
+            // 不再冻结静音区。Loop/倒放保持原字段。
+            const clipSourceEndSec = resolveSourceEndSec({
+                loopEnabled: Boolean(clip.loopEnabled),
+                reversed: Boolean(clip.reversed),
+                sourceStartSec: Number(clip.sourceStartSec ?? 0) || 0,
+                playbackRate: pr,
+                lengthSec: clip.lengthSec,
+                sourceEndSec: Number(clip.sourceEndSec ?? sourceDurationSec) || sourceDurationSec,
+            });
 
             return {
                 clipId: clip.id,
                 startSec: clip.startSec,
                 lengthSec: clip.lengthSec,
-                sourceStartSec: Math.max(0, Number(clip.sourceStartSec ?? 0) || 0),
+                // 保留原始值（可为负 / 超界）：渲染端按 loopRender 约定用
+                // floor_mod（modEuclid）归一化，不能在此处 clamp —— 否则
+                // slip/左延伸产生的域外锚点会与 arrange 画布相位错位。
+                sourceStartSec: Number(clip.sourceStartSec ?? 0) || 0,
                 sourceDurationSec: sourceDurationSec > 0 ? sourceDurationSec : 0,
                 sourceEndSec: clipSourceEndSec,
                 sourceSampleRate,
@@ -143,12 +164,17 @@ export function useClipsPeaksForPianoRoll(args: {
                 gain: clip.gain ?? 1,
                 fadeInSec: clip.fadeInSec ?? 0,
                 fadeOutSec: clip.fadeOutSec ?? 0,
-                fadeInCurve: clip.fadeInCurve ?? "linear",
-                fadeOutCurve: clip.fadeOutCurve ?? "linear",
+                autoFadeInSec: clip.autoFadeInSec ?? 0,
+                autoFadeOutSec: clip.autoFadeOutSec ?? 0,
+                fadeInShape: Number.isFinite(clip.fadeInShape) ? clip.fadeInShape : 0,
+                fadeOutShape: Number.isFinite(clip.fadeOutShape) ? clip.fadeOutShape : 0,
+                fadeInDir: clip.fadeInDir ?? 0,
+                fadeOutDir: clip.fadeOutDir ?? 0,
                 sourcePath: clip.sourcePath ?? "",
                 muted: clip.muted ?? false,
+                reversed: Boolean(clip.reversed),
+                loopEnabled: Boolean(clip.loopEnabled),
             };
         });
-        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [clips, visibleStartSec, visibleEndSec, redrawTick]);
 }

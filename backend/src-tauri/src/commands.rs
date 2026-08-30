@@ -34,15 +34,21 @@ pub(crate) mod playback;
 #[path = "commands/processor_caps.rs"]
 mod processor_caps;
 #[path = "commands/project.rs"]
-mod project;
+pub(crate) mod project;
+#[path = "commands/project_import.rs"]
+mod project_import;
 #[path = "commands/reaper.rs"]
 mod reaper;
 #[path = "commands/reaper_clipboard.rs"]
 mod reaper_clipboard;
+#[path = "commands/recording.rs"]
+mod recording;
 #[path = "commands/synth.rs"]
 mod synth;
 #[path = "commands/timeline.rs"]
 mod timeline;
+#[path = "commands/timeline_clipboard.rs"]
+mod timeline_clipboard;
 #[path = "commands/ui_settings.rs"]
 mod ui_settings;
 #[path = "commands/vocalshifter.rs"]
@@ -150,8 +156,9 @@ pub fn open_project(
     state: State<'_, AppState>,
     window: Window,
     project_path: String,
-) -> crate::models::TimelineStatePayload {
-    project::open_project(state, window, project_path)
+    force: Option<bool>,
+) -> crate::models::OpenProjectPayload {
+    project::open_project(state, window, project_path, force)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -170,6 +177,33 @@ pub fn save_project_as(
     notes_markdown: Option<String>,
 ) -> serde_json::Value {
     project::save_project_as(state, window, notes_markdown)
+}
+
+/// 保存到指定路径（带版本冲突检测）；force=true 表示用户已在冲突对话框中
+/// 确认"继续保存"。
+///
+/// zip 归档保存会逐一压缩复制全部引用媒体（可能数 GB），普通保存也有整段
+/// JSON 序列化 + 磁盘写入，必须在阻塞线程池执行，避免冻结 UI 主线程。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn save_project_to_path(
+    app: tauri::AppHandle,
+    window: Window,
+    project_path: String,
+    notes_markdown: Option<String>,
+    force: Option<bool>,
+) -> serde_json::Value {
+    match tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        project::save_project_to_path(state, window, project_path, notes_markdown, force)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => serde_json::json!({
+            "ok": false,
+            "error": format!("Failed to join save task: {error}"),
+        }),
+    }
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -193,6 +227,46 @@ pub fn run_timed_auto_backup(
     project::run_timed_auto_backup(state, path_template)
 }
 
+// ===================== recording =====================
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_recording_settings(state: State<'_, AppState>) -> crate::config::RecordingSettings {
+    recording::get_recording_settings(state)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn save_recording_settings(
+    state: State<'_, AppState>,
+    settings: crate::config::RecordingSettings,
+) -> serde_json::Value {
+    recording::save_recording_settings(state, settings)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_recording_devices() -> serde_json::Value {
+    recording::get_recording_devices()
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_recording_apps() -> serde_json::Value {
+    recording::get_recording_apps()
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn start_recording(state: State<'_, AppState>, start_sec: f64) -> serde_json::Value {
+    recording::start_recording(state, start_sec)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn stop_recording(state: State<'_, AppState>) -> serde_json::Value {
+    recording::stop_recording(state)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_recording_state(state: State<'_, AppState>) -> crate::recording::RecordingStatePayload {
+    recording::get_recording_state(state)
+}
+
 #[tauri::command(rename_all = "camelCase")]
 pub fn set_project_base_scale(state: State<'_, AppState>, base_scale: String) -> serde_json::Value {
     project::set_project_base_scale(state, base_scale)
@@ -210,9 +284,37 @@ pub fn set_project_custom_scale(
 pub fn set_project_timeline_settings(
     state: State<'_, AppState>,
     beats_per_bar: u32,
+    time_signature_denominator: u32,
     grid_size: String,
 ) -> serde_json::Value {
-    project::set_project_timeline_settings(state, beats_per_bar, grid_size)
+    project::set_project_timeline_settings(
+        state,
+        beats_per_bar,
+        time_signature_denominator,
+        grid_size,
+    )
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn import_project_dialog() -> serde_json::Value {
+    project_import::import_project_dialog()
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn import_project(
+    state: State<'_, AppState>,
+    window: Window,
+    project_path: String,
+    place_at_playhead: Option<bool>,
+    import_tempo_map: Option<bool>,
+) -> serde_json::Value {
+    project_import::import_project(
+        state,
+        window,
+        project_path,
+        place_at_playhead,
+        import_tempo_map,
+    )
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -241,6 +343,14 @@ pub fn open_audio_dialog_multi() -> serde_json::Value {
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub fn open_audio_dialog_for_source(
+    source_path: String,
+    dialog_title: String,
+) -> serde_json::Value {
+    dialogs::open_audio_dialog_for_source(source_path, dialog_title)
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub fn pick_output_path() -> serde_json::Value {
     dialogs::pick_output_path()
 }
@@ -261,33 +371,68 @@ pub fn pick_midi_output_path() -> serde_json::Value {
 }
 
 // ===================== waveform =====================
+//
+// 波形命令涉及重计算（mixdown 渲染 / 音频解码 + 峰值统计）。
+// 同步命令会在主线程上执行并阻塞整个 UI（窗口事件 + 其余 IPC），
+// 因此这里一律改为 async + spawn_blocking，把重活卸载到阻塞线程池，
+// 前端在分析期间保持可交互。
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_root_mix_waveform_peaks_segment(
-    state: State<'_, AppState>,
+pub async fn get_root_mix_waveform_peaks_segment(
+    app: tauri::AppHandle,
     track_id: String,
     start_sec: f64,
     duration_sec: f64,
     columns: usize,
 ) -> self::waveform::WaveformPeaksSegmentPayload {
-    waveform::get_root_mix_waveform_peaks_segment(state, track_id, start_sec, duration_sec, columns)
+    match tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        waveform::get_root_mix_waveform_peaks_segment(
+            state,
+            track_id,
+            start_sec,
+            duration_sec,
+            columns,
+        )
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => self::waveform::WaveformPeaksSegmentPayload {
+            ok: false,
+            min: vec![],
+            max: vec![],
+        },
+    }
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_track_mix_waveform_peaks_segment(
-    state: State<'_, AppState>,
+pub async fn get_track_mix_waveform_peaks_segment(
+    app: tauri::AppHandle,
     track_id: String,
     start_sec: f64,
     duration_sec: f64,
     columns: usize,
 ) -> self::waveform::WaveformPeaksSegmentPayload {
-    waveform::get_track_mix_waveform_peaks_segment(
-        state,
-        track_id,
-        start_sec,
-        duration_sec,
-        columns,
-    )
+    match tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        waveform::get_track_mix_waveform_peaks_segment(
+            state,
+            track_id,
+            start_sec,
+            duration_sec,
+            columns,
+        )
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => self::waveform::WaveformPeaksSegmentPayload {
+            ok: false,
+            min: vec![],
+            max: vec![],
+        },
+    }
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -298,50 +443,154 @@ pub fn clear_waveform_cache(state: State<'_, AppState>) -> serde_json::Value {
 // ===================== waveform v2 (二进制 mipmap) =====================
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_waveform_mipmap_binary(
-    state: State<'_, AppState>,
+pub async fn get_waveform_mipmap_binary(
+    app: tauri::AppHandle,
     source_path: String,
     level: u8,
 ) -> String {
-    waveform::get_waveform_mipmap_binary(state, source_path, level)
+    match tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        waveform::get_waveform_mipmap_binary(state, source_path, level)
+    })
+    .await
+    {
+        Ok(result) => result,
+        // 与同步实现的 Err 分支一致：失败返回空字符串。
+        Err(_) => String::new(),
+    }
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn preload_waveform_mipmap(
-    state: State<'_, AppState>,
+pub async fn preload_waveform_mipmap(
+    app: tauri::AppHandle,
     source_path: String,
 ) -> serde_json::Value {
-    waveform::preload_waveform_mipmap(state, source_path)
+    match tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        waveform::preload_waveform_mipmap(state, source_path)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => serde_json::json!({ "ok": false, "error": error.to_string() }),
+    }
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn batch_get_waveform_mipmap(
-    state: State<'_, AppState>,
+pub async fn batch_get_waveform_mipmap(
+    app: tauri::AppHandle,
     source_paths: Vec<String>,
 ) -> std::collections::HashMap<String, [String; 3]> {
-    waveform::batch_get_waveform_mipmap(state, source_paths)
+    match tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        waveform::batch_get_waveform_mipmap(state, source_paths)
+    })
+    .await
+    {
+        Ok(result) => result,
+        // 与同步实现一致：失败时对应文件返回 3 个空字符串。
+        Err(_) => std::collections::HashMap::new(),
+    }
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_waveform_manifest(
+    app: tauri::AppHandle,
+    source_path: String,
+) -> Result<crate::hfspeaks_v2::WaveformManifestPayload, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        waveform::get_waveform_manifest(state, source_path)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_waveform_tiles_binary(
+    app: tauri::AppHandle,
+    source_path: String,
+    revision: String,
+    requests: Vec<crate::hfspeaks_v2::WaveformTileRequest>,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        waveform::get_waveform_tiles_binary(state, source_path, revision, requests)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ===================== timeline =====================
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn import_audio_item(
-    state: State<'_, AppState>,
+pub async fn import_audio_item(
+    app: tauri::AppHandle,
     audio_path: String,
     track_id: Option<Option<String>>,
     start_sec: Option<f64>,
+    media_audio_stream_index: Option<usize>,
 ) -> crate::models::TimelineStatePayload {
-    timeline::import_audio_item(state, audio_path, track_id, start_sec)
+    // 导入大文件（大视频抽轨 / 大音频全量解码预览）耗时明显，
+    // 卸载到阻塞线程池执行，避免同步命令在主线程上冻结前端。
+    tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        timeline::import_audio_item(
+            state,
+            audio_path,
+            track_id,
+            start_sec,
+            media_audio_stream_index,
+        )
+    })
+    .await
+    .unwrap_or_else(|error| crate::models::TimelineStatePayload {
+        ok: false,
+        tracks: Vec::new(),
+        clips: Vec::new(),
+        created_clip_ids: Some(Vec::new()),
+        created_track_ids: None,
+        selected_track_id: None,
+        selected_clip_id: None,
+        bpm: 120.0,
+        playhead_sec: 0.0,
+        project_sec: None,
+        project: None,
+        missing_files: Some(vec![format!("import task failed: {error}")]),
+        disabled_group_ids: Vec::new(),
+        tempo_map: None,
+    })
 }
 #[tauri::command(rename_all = "camelCase")]
-pub fn import_audio_bytes(
-    state: State<'_, AppState>,
+pub async fn import_audio_bytes(
+    app: tauri::AppHandle,
     file_name: String,
     base64_data: String,
     track_id: Option<Option<String>>,
     start_sec: Option<f64>,
 ) -> crate::models::TimelineStatePayload {
-    timeline::import_audio_bytes(state, file_name, base64_data, track_id, start_sec)
+    // base64 解码 + 落盘 + 导入解析都可能较慢，同样放到阻塞线程池。
+    tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        timeline::import_audio_bytes(state, file_name, base64_data, track_id, start_sec)
+    })
+    .await
+    .unwrap_or_else(|error| crate::models::TimelineStatePayload {
+        ok: false,
+        tracks: Vec::new(),
+        clips: Vec::new(),
+        created_clip_ids: Some(Vec::new()),
+        created_track_ids: None,
+        selected_track_id: None,
+        selected_clip_id: None,
+        bpm: 120.0,
+        playhead_sec: 0.0,
+        project_sec: None,
+        project: None,
+        missing_files: Some(vec![format!("import task failed: {error}")]),
+        disabled_group_ids: Vec::new(),
+        tempo_map: None,
+    })
 }
 #[tauri::command(rename_all = "camelCase")]
 pub fn add_track(
@@ -365,8 +614,10 @@ pub fn remove_track(
 pub fn duplicate_track(
     state: State<'_, AppState>,
     track_id: String,
+    parent_track_id: Option<String>,
+    target_index: Option<usize>,
 ) -> crate::models::TimelineStatePayload {
-    timeline::duplicate_track(state, track_id)
+    timeline::duplicate_track(state, track_id, parent_track_id, target_index)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -510,11 +761,18 @@ pub fn set_clip_state(
     source_start_sec: Option<f64>,
     source_end_sec: Option<f64>,
     playback_rate: Option<f32>,
+    clip_playback_rate: Option<f32>,
     reversed: Option<bool>,
+    loop_enabled: Option<bool>,
+    snap_offset_sec: Option<f64>,
     fade_in_sec: Option<f64>,
     fade_out_sec: Option<f64>,
-    fade_in_curve: Option<String>,
-    fade_out_curve: Option<String>,
+    fade_in_shape: Option<f64>,
+    fade_out_shape: Option<f64>,
+    fade_in_dir: Option<f64>,
+    fade_out_dir: Option<f64>,
+    auto_fade_in_sec: Option<f64>,
+    auto_fade_out_sec: Option<f64>,
     color: Option<String>,
     formant_morph: Option<crate::state::ClipFormantMorph>,
     checkpoint: Option<bool>,
@@ -530,11 +788,18 @@ pub fn set_clip_state(
         source_start_sec,
         source_end_sec,
         playback_rate,
+        clip_playback_rate,
         reversed,
+        loop_enabled,
+        snap_offset_sec,
         fade_in_sec,
         fade_out_sec,
-        fade_in_curve,
-        fade_out_curve,
+        fade_in_shape,
+        fade_out_shape,
+        fade_in_dir,
+        fade_out_dir,
+        auto_fade_in_sec,
+        auto_fade_out_sec,
         color,
         formant_morph,
         checkpoint,
@@ -548,6 +813,107 @@ pub fn set_clips_state_bulk(
     checkpoint: Option<bool>,
 ) -> crate::models::TimelineStatePayload {
     timeline::set_clips_state_bulk(state, updates, checkpoint)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_clip_active_take(
+    state: State<'_, AppState>,
+    clip_id: String,
+    take_id: String,
+    checkpoint: Option<bool>,
+) -> crate::models::TimelineStatePayload {
+    timeline::set_clip_active_take(state, clip_id, take_id, checkpoint)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn cycle_clip_takes(
+    state: State<'_, AppState>,
+    clip_ids: Vec<String>,
+    direction: Option<i32>,
+    checkpoint: Option<bool>,
+) -> crate::models::TimelineStatePayload {
+    timeline::cycle_clip_takes(state, clip_ids, direction.unwrap_or(1), checkpoint)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn pack_clips_into_takes(
+    state: State<'_, AppState>,
+    clip_ids: Vec<String>,
+    checkpoint: Option<bool>,
+) -> crate::models::TimelineStatePayload {
+    timeline::pack_clips_into_takes(state, clip_ids, checkpoint)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn explode_clip_takes(
+    state: State<'_, AppState>,
+    clip_id: String,
+    checkpoint: Option<bool>,
+) -> crate::models::TimelineStatePayload {
+    timeline::explode_clip_takes(state, clip_id, checkpoint)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn duplicate_clip_take(
+    state: State<'_, AppState>,
+    clip_id: String,
+    take_id: String,
+    checkpoint: Option<bool>,
+) -> crate::models::TimelineStatePayload {
+    timeline::duplicate_clip_take(state, clip_id, take_id, checkpoint)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn remove_clip_take(
+    state: State<'_, AppState>,
+    clip_id: String,
+    take_id: String,
+    checkpoint: Option<bool>,
+) -> crate::models::TimelineStatePayload {
+    timeline::remove_clip_take(state, clip_id, take_id, checkpoint)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn rename_clip_take(
+    state: State<'_, AppState>,
+    clip_id: String,
+    take_id: String,
+    name: String,
+    checkpoint: Option<bool>,
+) -> crate::models::TimelineStatePayload {
+    timeline::rename_clip_take(state, clip_id, take_id, name, checkpoint)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_clip_take_reversed(
+    state: State<'_, AppState>,
+    clip_id: String,
+    take_id: String,
+    reversed: bool,
+    checkpoint: Option<bool>,
+) -> crate::models::TimelineStatePayload {
+    timeline::set_clip_take_reversed(state, clip_id, take_id, reversed, checkpoint)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn add_clip_take_from_media(
+    state: State<'_, AppState>,
+    clip_id: String,
+    source_path: String,
+    name: Option<String>,
+    checkpoint: Option<bool>,
+) -> crate::models::TimelineStatePayload {
+    timeline::add_clip_take_from_media(state, clip_id, source_path, name, checkpoint)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn import_media_files_as_takes(
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+    track_id: Option<String>,
+    start_sec: Option<f64>,
+) -> crate::models::TimelineStatePayload {
+    timeline::import_media_files_as_takes(state, paths, track_id, start_sec)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -573,6 +939,16 @@ pub fn check_source_files_changed(
     state: State<'_, AppState>,
 ) -> crate::models::CheckSourceFilesChangedPayload {
     timeline::check_source_files_changed(state)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn search_source_file_replacements(
+    state: State<'_, AppState>,
+    folder_path: String,
+    clip_ids: Vec<String>,
+    search_mode: crate::models::SearchSourceFileMode,
+) -> Result<crate::models::SearchSourceFileMatchesPayload, String> {
+    timeline::search_source_file_replacements(state, folder_path, clip_ids, search_mode).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -662,6 +1038,70 @@ pub fn select_clip(
     timeline::select_clip(state, clip_id)
 }
 
+// ===================== native timeline clipboard =====================
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn copy_timeline_clips(state: State<'_, AppState>, clip_ids: Vec<String>) -> serde_json::Value {
+    timeline_clipboard::copy_timeline_clips(&state, clip_ids)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn copy_timeline_tracks(
+    state: State<'_, AppState>,
+    track_ids: Vec<String>,
+) -> serde_json::Value {
+    timeline_clipboard::copy_timeline_tracks(&state, track_ids)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn paste_timeline_clipboard(
+    state: State<'_, AppState>,
+    mode: Option<String>,
+) -> serde_json::Value {
+    timeline_clipboard::paste_timeline_clipboard(&state, mode)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn has_timeline_clipboard() -> serde_json::Value {
+    timeline_clipboard::has_timeline_clipboard()
+}
+
+// ===================== generic system object clipboard =====================
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn write_system_clipboard_object(
+    payload: String,
+    text_summary: Option<String>,
+) -> serde_json::Value {
+    let summary = text_summary
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "HiFiShifter data copied. Paste in HiFiShifter.".to_string());
+    match crate::system_clipboard::write_bytes(payload.as_bytes(), &summary) {
+        Ok(()) => serde_json::json!({ "ok": true }),
+        Err(error) => serde_json::json!({ "ok": false, "error": error }),
+    }
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn read_system_clipboard_object() -> serde_json::Value {
+    match crate::system_clipboard::read_bytes() {
+        Ok(Some(bytes)) => match String::from_utf8(bytes) {
+            Ok(text) => serde_json::json!({ "ok": true, "available": true, "payload": text }),
+            Err(_) => serde_json::json!({ "ok": true, "available": false }),
+        },
+        Ok(None) => serde_json::json!({ "ok": true, "available": false }),
+        Err(error) => serde_json::json!({ "ok": false, "error": error }),
+    }
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_timeline_tempo_map(
+    state: State<'_, AppState>,
+    tempo_map: Option<Vec<crate::models::TempoPointPayload>>,
+) -> crate::models::TimelineStatePayload {
+    timeline::set_timeline_tempo_map(state, tempo_map)
+}
+
 // ===================== params =====================
 
 #[tauri::command(rename_all = "camelCase")]
@@ -672,8 +1112,9 @@ pub fn get_param_frames(
     start_frame: u32,
     frame_count: u32,
     stride: Option<u32>,
+    binary: Option<bool>,
 ) -> crate::models::ParamFramesPayload {
-    params::get_param_frames(state, track_id, param, start_frame, frame_count, stride)
+    params::get_param_frames(state, track_id, param, start_frame, frame_count, stride, binary)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -720,6 +1161,16 @@ pub fn set_static_param(
     params::set_static_param(state, track_id, param, value, checkpoint)
 }
 
+#[tauri::command(rename_all = "camelCase")]
+pub fn stretch_track_linked_params(
+    state: State<'_, AppState>,
+    track_id: String,
+    mappings: Vec<crate::state::StretchLinkedRangeSec>,
+    checkpoint: Option<bool>,
+) -> serde_json::Value {
+    params::stretch_track_linked_params(state, track_id, mappings, checkpoint)
+}
+
 // ===================== synth =====================
 
 #[tauri::command(rename_all = "camelCase")]
@@ -748,19 +1199,59 @@ pub fn process_audio(
     synth::process_audio(state, audio_path)
 }
 
+// 整段 mixdown 渲染耗时可达分钟级，必须放到阻塞线程池执行；
+// 同步命令会在主线程上运行并冻结整个 UI（与 export_audio_advanced 同理）。
 #[tauri::command(rename_all = "camelCase")]
-pub fn synthesize(state: State<'_, AppState>) -> crate::models::SynthesizePayload {
-    synth::synthesize(state)
+pub async fn synthesize(app: tauri::AppHandle) -> crate::models::SynthesizePayload {
+    match tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        synth::synthesize(state)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            eprintln!("synthesize: join task failed: {error}");
+            crate::models::SynthesizePayload {
+                ok: false,
+                sample_rate: 44100,
+                num_samples: 0,
+                duration_sec: 0.0,
+            }
+        }
+    }
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn save_synthesized(state: State<'_, AppState>, output_path: String) -> serde_json::Value {
-    synth::save_synthesized(state, output_path)
+pub async fn save_synthesized(app: tauri::AppHandle, output_path: String) -> serde_json::Value {
+    match tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        synth::save_synthesized(state, output_path)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => serde_json::json!({
+            "ok": false,
+            "error": format!("Failed to join save task: {error}"),
+        }),
+    }
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn save_separated(state: State<'_, AppState>, output_dir: String) -> serde_json::Value {
-    synth::save_separated(state, output_dir)
+pub async fn save_separated(app: tauri::AppHandle, output_dir: String) -> serde_json::Value {
+    match tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        synth::save_separated(state, output_dir)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => serde_json::json!({
+            "ok": false,
+            "error": format!("Failed to join save task: {error}"),
+        }),
+    }
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -802,11 +1293,22 @@ pub fn preview_export_audio_plan(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn quick_export_selected_clips(
-    state: State<'_, AppState>,
+pub async fn quick_export_selected_clips(
+    app: tauri::AppHandle,
     request: synth::QuickExportSelectedClipsRequest,
 ) -> serde_json::Value {
-    synth::quick_export_selected_clips(state, request)
+    match tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        synth::quick_export_selected_clips(state, request)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => serde_json::json!({
+            "ok": false,
+            "error": format!("Failed to join quick export task: {error}"),
+        }),
+    }
 }
 
 // ===================== playback =====================
@@ -835,8 +1337,8 @@ pub fn start_background_render(app: tauri::AppHandle) -> serde_json::Value {
 
 /// 取消正在进行的后台预渲染。
 #[tauri::command(rename_all = "camelCase")]
-pub fn cancel_background_render() -> serde_json::Value {
-    playback::cancel_background_render()
+pub fn cancel_background_render(app: tauri::AppHandle) -> serde_json::Value {
+    playback::cancel_background_render(Some(&app))
 }
 
 // ===================== debug =====================
@@ -915,6 +1417,17 @@ pub fn get_audio_file_info(file_path: String) -> Result<file_browser::AudioFileI
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub async fn get_media_audio_streams(
+    file_path: String,
+) -> Result<Vec<crate::media::MediaAudioStream>, String> {
+    // 缺少时长元数据的大视频需要遍历整个 packet 流来测量时长，
+    // 卸载到阻塞线程池，避免主线程卡顿。
+    tauri::async_runtime::spawn_blocking(move || file_browser::list_media_audio_streams(file_path))
+        .await
+        .map_err(|e| format!("media stream task failed: {e}"))?
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub fn read_audio_preview(
     file_path: String,
     max_frames: Option<u32>,
@@ -923,11 +1436,16 @@ pub fn read_audio_preview(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn search_files_recursive(
+pub async fn search_files_recursive(
     dir_path: String,
     query: String,
 ) -> Result<Vec<file_browser::FileEntry>, String> {
-    file_browser::search_files_recursive(dir_path, query)
+    // 深层目录树的递归遍历可能耗时较长，放到阻塞线程池避免冻结主线程。
+    tauri::async_runtime::spawn_blocking(move || {
+        file_browser::search_files_recursive(dir_path, query)
+    })
+    .await
+    .unwrap_or_else(|error| Err(format!("search task failed: {error}")))
 }
 
 // ===================== vocalshifter =====================
@@ -988,6 +1506,14 @@ pub fn paste_reaper_clipboard(
         selection_start_frame,
         selection_max_frames,
     )
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn has_reaper_clipboard() -> serde_json::Value {
+    serde_json::json!({
+        "ok": true,
+        "available": reaper_clipboard::has_reaper_clipboard(),
+    })
 }
 
 // ===================== cache =====================
@@ -1063,6 +1589,10 @@ pub fn import_midi_as_clip(
     import_midi_bpm_as_project: Option<bool>,
     clipboard_guid: Option<String>,
     close_leading_gap: Option<bool>,
+    import_midi_as_tempo_map: Option<bool>,
+    import_midi_tempo: Option<bool>,
+    import_midi_time_signature: Option<bool>,
+    import_midi_key_signature: Option<bool>,
 ) -> crate::models::TimelineStatePayload {
     midi::import_midi_as_clip(
         state.inner(),
@@ -1077,6 +1607,10 @@ pub fn import_midi_as_clip(
         import_midi_bpm_as_project,
         clipboard_guid,
         close_leading_gap,
+        import_midi_as_tempo_map,
+        import_midi_tempo,
+        import_midi_time_signature,
+        import_midi_key_signature,
     )
 }
 
@@ -1127,8 +1661,7 @@ pub fn get_ui_settings(state: State<'_, AppState>) -> crate::config::UiSettings 
 #[tauri::command(rename_all = "camelCase")]
 pub fn save_ui_settings(
     state: State<'_, AppState>,
-    settings: crate::config::UiSettings,
+    settings: serde_json::Value,
 ) -> serde_json::Value {
     ui_settings::save_ui_settings(state, settings)
 }
-

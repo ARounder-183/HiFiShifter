@@ -2,7 +2,11 @@ import React from "react";
 
 import { drawTimelineCanvas } from "./runtime/timelineCanvasRenderer";
 import { resolveFontFamily } from "./runtime/timelineCanvasStyle";
+import { clearCanvasPhysical, rasterize } from "./runtime/canvasRaster";
 import type { TimelineCanvasClipModel } from "./runtime/timelineCanvasModel";
+import type { TimelineAxis } from "./runtime/timelineAxis";
+import { LAYER_ORDER } from "./runtime/timelineFrameCommitter";
+import { timelineViewportBus } from "../../../utils/timelineViewportBus";
 
 export const TimelineCanvasViewport: React.FC<{
     width: number;
@@ -12,61 +16,99 @@ export const TimelineCanvasViewport: React.FC<{
         activeGroupIds?: Set<string>;
         disabledGroupIds?: string[];
     };
-}> = ({ width, height, model }) => {
+    /** 轨道横向分界线的可见行窗口；用于让分界线延伸到工程末尾之后。 */
+    rowGuides?: {
+        startTrackIndex: number;
+        rowCount: number;
+        rowHeight: number;
+        /** 轨道内容底部边界，与网格相同；分界线只画到该边界。 */
+        contentBottomPx?: number;
+    };
+    /** 主题模式：切换时驱动画布当帧按新主题重绘 clip 配色。 */
+    darkMode?: boolean;
+}> = ({ width, height, model, rowGuides, darkMode }) => {
     const canvasRef = React.useRef<HTMLCanvasElement | null>(null);
-    const rafRef = React.useRef<number | null>(null);
     const widthRef = React.useRef(width);
     const heightRef = React.useRef(height);
     const modelRef = React.useRef(model);
+    const rowGuidesRef = React.useRef(rowGuides);
+    const darkModeRef = React.useRef(darkMode);
 
+    // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
     widthRef.current = width;
+    // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
     heightRef.current = height;
+    // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
     modelRef.current = model;
+    // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
+    rowGuidesRef.current = rowGuides;
+    // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
+    darkModeRef.current = darkMode;
+    /**
+     * 按给定投影重绘 clip 体。
+     *
+     * 流程：统一光栅化 → 按 dpr 设置变换 → 用视口偏移平移内容坐标系 → 绘制。
+     *
+     * @param axis 视口投影；省略时取总线当前值（供挂载后首次绘制使用）。
+     */
+    const invalidate = React.useCallback((axis?: TimelineAxis) => {
+        // 同步绘制：滚动事件在绘制前触发，本画布必须与原生滚动的 DOM 内容层
+        // 在同一帧内提交位移。任何 rAF 延迟都会让 sticky 画布与 DOM 层分离。
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const current = axis ?? timelineViewportBus.getAxis();
 
-    const invalidate = React.useCallback(() => {
-        if (rafRef.current != null) return;
-        rafRef.current = requestAnimationFrame(() => {
-            rafRef.current = null;
-            const canvas = canvasRef.current;
-            if (!canvas) return;
+        // 统一光栅化契约：与波形面共用同一套取整规则，否则两者在半像素 DPR
+        // 下会差一整个物理像素。
+        const target = rasterize(
+            canvas,
+            Math.max(1, Math.ceil(widthRef.current)),
+            Math.max(1, Math.ceil(heightRef.current)),
+            window.devicePixelRatio || 1,
+        );
 
-            const displayWidth = Math.max(1, Math.ceil(widthRef.current));
-            const displayHeight = Math.max(1, Math.ceil(heightRef.current));
-            const dpr = window.devicePixelRatio || 1;
-            const internalWidth = Math.max(1, Math.floor(displayWidth * dpr));
-            const internalHeight = Math.max(1, Math.floor(displayHeight * dpr));
-
-            if (canvas.width !== internalWidth) canvas.width = internalWidth;
-            if (canvas.height !== internalHeight) canvas.height = internalHeight;
-            canvas.style.width = `${displayWidth}px`;
-            canvas.style.height = `${displayHeight}px`;
-
-            const ctx = canvas.getContext("2d");
-            if (!ctx) return;
-            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-            drawTimelineCanvas(ctx, {
-                width: displayWidth,
-                height: displayHeight,
-                clips: modelRef.current.drawClips,
-                fontFamily: resolveFontFamily(),
-                activeGroupIds: modelRef.current.activeGroupIds,
-                disabledGroupIds: modelRef.current.disabledGroupIds,
-            });
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return;
+        ctx.setTransform(target.dpr, 0, 0, target.dpr, 0, 0);
+        // 全物理清屏：round 向上取整时 CSS 尺寸清屏会在底部遗留残影。
+        clearCanvasPhysical(ctx, target);
+        // 画布内容使用内容绝对坐标（与 DOM 内容层同一坐标系），
+        // 由视口偏移统一做水平/竖直平移——两个轴都随滚动同帧提交。
+        ctx.translate(-current.scrollLeftPx, -current.scrollTopPx);
+        drawTimelineCanvas(ctx, {
+            width: target.cssWidthPx,
+            height: target.cssHeightPx,
+            clips: modelRef.current.drawClips,
+            fontFamily: resolveFontFamily(),
+            activeGroupIds: modelRef.current.activeGroupIds,
+            disabledGroupIds: modelRef.current.disabledGroupIds,
+            rowGuides: rowGuidesRef.current,
+            viewportLeft: current.scrollLeftPx,
+            viewportTopPx: current.scrollTopPx,
+            darkMode: darkModeRef.current,
         });
     }, []);
 
     React.useLayoutEffect(() => {
         invalidate();
-    }, [height, invalidate, model, width]);
+    }, [darkMode, height, invalidate, model, width]);
 
     React.useEffect(() => {
-        return () => {
-            if (rafRef.current != null) {
-                cancelAnimationFrame(rafRef.current);
-                rafRef.current = null;
-            }
-        };
-    }, []);
+        // 注册到统一帧提交器：与网格 / 波形的绘制顺序固定，且同一帧内重复的
+        // 视口提交只触发一次重绘。
+        return timelineViewportBus.register(
+            { name: "clip-body", paint: (axis) => invalidate(axis) },
+            LAYER_ORDER.clipBody,
+        );
+    }, [invalidate]);
+
+    React.useEffect(() => {
+        // 浏览器缩放 / 跨屏拖动改变 devicePixelRatio：光栅化与设备像素吸附
+        // 都依赖 dpr，变化后必须重绘一次。
+        const onResize = () => invalidate();
+        window.addEventListener("resize", onResize);
+        return () => window.removeEventListener("resize", onResize);
+    }, [invalidate]);
 
     return <canvas ref={canvasRef} className="absolute inset-0 pointer-events-none" />;
 };

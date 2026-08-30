@@ -6,7 +6,7 @@
 //! covers all laptop and most desktop setups).
 //!
 //! This is used by the frontend to let users select which GPU to use for
-//! ONNX Runtime GPU inference (DirectML, OpenCL, etc.), and by the benchmark
+//! ONNX Runtime GPU inference (DirectML, WebGPU, etc.), and by the benchmark
 //! to report which physical GPU participated in the test.
 
 use serde::Serialize;
@@ -36,8 +36,11 @@ type NvmlDeviceGetNameFn =
     unsafe extern "C" fn(handle: *mut std::ffi::c_void, name: *mut u8, length: u32) -> NvmlReturn;
 type NvmlDeviceGetMemoryInfoFn =
     unsafe extern "C" fn(handle: *mut std::ffi::c_void, memory: *mut NvmlMemory) -> NvmlReturn;
-type NvmlDeviceGetCudaComputeCapabilityFn =
-    unsafe extern "C" fn(handle: *mut std::ffi::c_void, major: *mut i32, minor: *mut i32) -> NvmlReturn;
+type NvmlDeviceGetCudaComputeCapabilityFn = unsafe extern "C" fn(
+    handle: *mut std::ffi::c_void,
+    major: *mut i32,
+    minor: *mut i32,
+) -> NvmlReturn;
 
 // ── Public types ────────────────────────────────────────────────────────────
 
@@ -101,7 +104,8 @@ fn try_enumerate() -> Result<Vec<GpuDeviceInfo>, String> {
     macro_rules! get_fn {
         ($lib:expr, $name:expr, $t:ty) => {{
             unsafe {
-                *$lib.get::<$t>($name.as_bytes())
+                *$lib
+                    .get::<$t>($name.as_bytes())
                     .map_err(|_| format!("nvml.dll missing symbol: {}", $name))?
                     .into_raw()
             }
@@ -113,14 +117,20 @@ fn try_enumerate() -> Result<Vec<GpuDeviceInfo>, String> {
     let nvml_shutdown: NvmlShutdownFn = get_fn!(nvml, "nvmlShutdown", NvmlShutdownFn);
     let nvml_device_get_count: NvmlDeviceGetCountFn =
         get_fn!(nvml, "nvmlDeviceGetCount_v2", NvmlDeviceGetCountFn);
-    let nvml_device_get_handle_by_index: NvmlDeviceGetHandleByIndexFn =
-        get_fn!(nvml, "nvmlDeviceGetHandleByIndex_v2", NvmlDeviceGetHandleByIndexFn);
+    let nvml_device_get_handle_by_index: NvmlDeviceGetHandleByIndexFn = get_fn!(
+        nvml,
+        "nvmlDeviceGetHandleByIndex_v2",
+        NvmlDeviceGetHandleByIndexFn
+    );
     let nvml_device_get_name: NvmlDeviceGetNameFn =
         get_fn!(nvml, "nvmlDeviceGetName", NvmlDeviceGetNameFn);
     let nvml_device_get_memory_info: NvmlDeviceGetMemoryInfoFn =
         get_fn!(nvml, "nvmlDeviceGetMemoryInfo", NvmlDeviceGetMemoryInfoFn);
-    let nvml_device_get_cuda_cc: NvmlDeviceGetCudaComputeCapabilityFn =
-        get_fn!(nvml, "nvmlDeviceGetCudaComputeCapability", NvmlDeviceGetCudaComputeCapabilityFn);
+    let nvml_device_get_cuda_cc: NvmlDeviceGetCudaComputeCapabilityFn = get_fn!(
+        nvml,
+        "nvmlDeviceGetCudaComputeCapability",
+        NvmlDeviceGetCudaComputeCapabilityFn
+    );
 
     // 3. Initialize NVML (wrapped in RAII guard for cleanup)
     let ret = unsafe { nvml_init() };
@@ -134,7 +144,9 @@ fn try_enumerate() -> Result<Vec<GpuDeviceInfo>, String> {
     }
     impl Drop for NvmlGuard {
         fn drop(&mut self) {
-            unsafe { (self.shutdown)(); }
+            unsafe {
+                (self.shutdown)();
+            }
         }
     }
     let _guard = NvmlGuard {

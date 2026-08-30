@@ -82,8 +82,15 @@ pub(super) fn import_vocalshifter_project(
         let mut order_offset = max_existing_order + 1;
 
         // 应用工程 BPM（如果现有工程为空或导入文件自带 BPM 非默认值则采用）
+        // 与 Tempo Map 规范化一致：钳制到 10-960。
         if result.timeline.bpm != 120.0 || tl.tracks.is_empty() {
-            tl.bpm = result.timeline.bpm;
+            tl.bpm = result.timeline.bpm.clamp(10.0, 960.0);
+            // Tempo Map 存在时，工程 BPM 与 0 位置点保持一致。
+            if let Some(points) = tl.tempo_map.as_mut() {
+                if let Some(first) = points.first_mut() {
+                    first.bpm = result.timeline.bpm.clamp(10.0, 960.0);
+                }
+            }
         }
 
         // 合并轨道（调整 order 使其排在现有轨道之后）

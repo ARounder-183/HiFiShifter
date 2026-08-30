@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use lru::LruCache;
+use super::byte_budget_cache::ByteBudgetCache;
 
 use crate::state::TimelineState;
 use crate::time_stretch::time_stretch_interleaved;
@@ -19,7 +19,7 @@ const MAX_STRETCH_CACHE_ENTRIES: usize = 128;
 
 use super::mix::{
     render_callback_f32, render_callback_i16, render_callback_u16, SnapshotTransitionState,
-    TrackMeterScratch,
+    TrackMeterBus, TrackMeterScratch,
 };
 use super::resource_manager::ResourceManager;
 use super::snapshot::{
@@ -34,13 +34,7 @@ use crate::pitch_clip::schedule_clip_pitch_jobs;
 use crate::pitch_clip::get_or_compute_clip_pitch_midi_global;
 use tauri::{Emitter, Manager};
 
-// 仅在 Debug 模式下编译并执行打印
-macro_rules! debug_eprintln {
-    ($($arg:tt)*) => {
-        #[cfg(debug_assertions)]
-        std::eprintln!($($arg)*);
-    }
-}
+// debug_eprintln! 宏现定义于 crate 根（lib.rs），全 crate 热路径可用。
 
 /// 拉伸进度推送给前端的事件 payload。
 #[derive(Debug, Clone, serde::Serialize)]
@@ -142,6 +136,10 @@ impl AudioEngine {
         let meter_app_handle = Arc::new(Mutex::new(app_handle.clone()));
         let meter_shutdown = Arc::new(AtomicBool::new(false));
         let meter_shutdown_for_thread = meter_shutdown.clone();
+        // Lock-free per-track peak handoff between the audio callback and the
+        // meter thread (see mix::TrackMeterBus).
+        let meter_bus = Arc::new(TrackMeterBus::with_capacity(64));
+        let meter_bus_for_meter = meter_bus.clone();
 
         let is_playing_thread = is_playing.clone();
         let target_thread = target.clone();
@@ -156,18 +154,85 @@ impl AudioEngine {
             let meter_generation = meter_generation.clone();
             let meter_app_handle = meter_app_handle.clone();
             let meter_shutdown = meter_shutdown_for_thread.clone();
+            let snapshot_for_meter = snapshot_for_thread.clone();
+            let meter_bus = meter_bus_for_meter.clone();
             thread::spawn(move || {
-                let mut last_generation = u64::MAX;
+                // stderr logging, map rebuilds and event emission all live on
+                // this thread so the audio callback stays lock-free.
+                let debug_pending =
+                    std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1");
+                let mut last_bus_generation = u64::MAX;
+                let mut last_map_generation = u64::MAX;
+                let mut last_pending_log_sec = u64::MAX;
                 loop {
                     if meter_shutdown.load(Ordering::Relaxed) {
                         break;
                     }
                     thread::sleep(Duration::from_millis(33));
-                    let generation = meter_generation.load(Ordering::Relaxed);
-                    if generation == last_generation {
+
+                    // Drain RT-side reports and log them here, not in the callback.
+                    let auto_pause_pos = meter_bus.take_auto_pause_pos();
+                    if auto_pause_pos > 0 {
+                        eprintln!(
+                            "[mix] auto-paused at pos={} — pending clip encountered during background render",
+                            auto_pause_pos
+                        );
+                    }
+                    let pending_pos = meter_bus.take_pending_pos();
+                    if debug_pending && pending_pos > 0 {
+                        let sec = pending_pos / 44100;
+                        if sec != last_pending_log_sec {
+                            last_pending_log_sec = sec;
+                            let snap = snapshot_for_meter.load_full();
+                            for clip in snap.clips.iter() {
+                                if clip.needs_synthesis && clip.rendered_pcm.is_none() {
+                                    let clip_end =
+                                        clip.start_frame.saturating_add(clip.length_frames);
+                                    if clip.start_frame < pending_pos && clip_end > pending_pos {
+                                        eprintln!(
+                                            "[mix] PENDING clip_id={} needs_synthesis=true rendered_pcm=None pos={}",
+                                            clip.clip_id, pending_pos
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    let bus_generation = meter_bus.generation();
+                    let map_generation = meter_generation.load(Ordering::Relaxed);
+                    if bus_generation == last_bus_generation
+                        && map_generation == last_map_generation
+                    {
                         continue;
                     }
-                    last_generation = generation;
+                    let bus_advanced = bus_generation != last_bus_generation;
+                    last_bus_generation = bus_generation;
+                    last_map_generation = map_generation;
+
+                    // Merge fresh RT peaks into the shared meter map. When only
+                    // map_generation changed (worker reset/idle), re-emit as-is.
+                    if bus_advanced {
+                        let snap = snapshot_for_meter.load_full();
+                        let Ok(mut state) = meter_state.lock() else {
+                            continue;
+                        };
+                        let mut next: HashMap<String, TrackMeterValue> =
+                            HashMap::with_capacity(snap.track_ids.len());
+                        for (slot, track_id) in snap.track_ids.iter().enumerate() {
+                            let block_peak = meter_bus.slot_peak(slot);
+                            let prev = state.get(track_id).copied().unwrap_or_default();
+                            next.insert(
+                                track_id.clone(),
+                                TrackMeterValue {
+                                    peak_linear: block_peak,
+                                    max_peak_linear: prev.max_peak_linear.max(block_peak),
+                                    clipped: prev.clipped || block_peak >= 1.0,
+                                },
+                            );
+                        }
+                        *state = next;
+                    }
 
                     let payload = {
                         let Ok(state) = meter_state.lock() else {
@@ -233,8 +298,8 @@ impl AudioEngine {
             let cache_for_cmd = resources.cache().clone();
 
             // Time-stretch cache: computed, pitch-preserving loop buffers.
-            let stretch_cache: Arc<Mutex<HashMap<StretchKey, ResampledStereo>>> =
-                Arc::new(Mutex::new(HashMap::new()));
+            let stretch_cache: Arc<Mutex<ByteBudgetCache<StretchKey, ResampledStereo>>> =
+                Arc::new(Mutex::new(ByteBudgetCache::from_env(MAX_STRETCH_CACHE_ENTRIES)));
             let stretch_cache_for_cmd = stretch_cache.clone();
             let stretch_cache_for_worker = stretch_cache.clone();
 
@@ -349,13 +414,10 @@ impl AudioEngine {
                         };
 
                         if let Ok(mut m) = stretch_cache.lock() {
-                            // Evict oldest entries if cache is full.
-                            if m.len() >= MAX_STRETCH_CACHE_ENTRIES {
-                                if let Some(evict_key) = m.keys().next().cloned() {
-                                    m.remove(&evict_key);
-                                }
-                            }
-                            m.insert(job.key.clone(), stretched_src);
+                            // Byte-budgeted LRU: evicts the least-recently-used
+                            // entry beyond the entry cap or the byte budget.
+                            let pcm_bytes = stretched_src.pcm_bytes();
+                            m.insert(job.key.clone(), stretched_src, pcm_bytes);
                         }
 
                         // 向前端推送拉伸完成事件
@@ -382,8 +444,7 @@ impl AudioEngine {
             let mut scratch_mix: Vec<f32> = Vec::new();
             let mut scratch_mix_fade_from: Vec<f32> = Vec::new();
             let mut snapshot_transition = SnapshotTransitionState::default();
-            let meter_state_for_cb = meter_state.clone();
-            let meter_generation_for_cb = meter_generation.clone();
+            let meter_bus_for_cb = meter_bus.clone();
 
             // Clone atomics for the audio callback to avoid moving the originals.
             let is_playing_cb = is_playing_thread.clone();
@@ -393,8 +454,7 @@ impl AudioEngine {
 
             let stream = match sample_format {
                 cpal::SampleFormat::F32 => {
-                    let meter_state = meter_state_for_cb.clone();
-                    let meter_generation = meter_generation_for_cb.clone();
+                    let meter_bus = meter_bus_for_cb.clone();
                     let mut meter_scratch = TrackMeterScratch::default();
                     device
                         .build_output_stream(
@@ -413,8 +473,7 @@ impl AudioEngine {
                                             &mut scratch_mix_fade_from,
                                             &mut snapshot_transition,
                                             &mut meter_scratch,
-                                            &meter_state,
-                                            meter_generation.as_ref(),
+                                            &meter_bus,
                                         );
                                     }));
                                 if r.is_err() {
@@ -431,8 +490,7 @@ impl AudioEngine {
                         .ok()
                 }
                 cpal::SampleFormat::I16 => {
-                    let meter_state = meter_state_for_cb.clone();
-                    let meter_generation = meter_generation_for_cb.clone();
+                    let meter_bus = meter_bus_for_cb.clone();
                     let mut meter_scratch = TrackMeterScratch::default();
                     device
                         .build_output_stream(
@@ -451,8 +509,7 @@ impl AudioEngine {
                                             &mut scratch_mix_fade_from,
                                             &mut snapshot_transition,
                                             &mut meter_scratch,
-                                            &meter_state,
-                                            meter_generation.as_ref(),
+                                            &meter_bus,
                                         );
                                     }));
                                 if r.is_err() {
@@ -469,8 +526,7 @@ impl AudioEngine {
                         .ok()
                 }
                 cpal::SampleFormat::U16 => {
-                    let meter_state = meter_state_for_cb.clone();
-                    let meter_generation = meter_generation_for_cb.clone();
+                    let meter_bus = meter_bus_for_cb.clone();
                     let mut meter_scratch = TrackMeterScratch::default();
                     device
                         .build_output_stream(
@@ -489,8 +545,7 @@ impl AudioEngine {
                                             &mut scratch_mix_fade_from,
                                             &mut snapshot_transition,
                                             &mut meter_scratch,
-                                            &meter_state,
-                                            meter_generation.as_ref(),
+                                            &meter_bus,
                                         );
                                     }));
                                 if r.is_err() {
@@ -660,7 +715,9 @@ impl AudioEngine {
     /// but have no rendered PCM yet (i.e. a render is in progress or pending).
     pub fn snapshot_has_pending_clips(&self) -> bool {
         let snap = self.snapshot.load();
-        snap.clips.iter().any(|c| c.needs_synthesis && c.rendered_pcm.is_none())
+        snap.clips
+            .iter()
+            .any(|c| c.needs_synthesis && c.rendered_pcm.is_none())
     }
 
     pub fn snapshot_state(&self) -> AudioEngineStateSnapshot {
@@ -716,8 +773,8 @@ struct EngineWorkerState<'a> {
     position_frames: &'a Arc<AtomicU64>,
     duration_frames: &'a Arc<AtomicU64>,
     snapshot: &'a Arc<ArcSwap<EngineSnapshot>>,
-    cache: &'a Arc<Mutex<LruCache<(PathBuf, u32), ResampledStereo>>>,
-    stretch_cache: &'a Arc<Mutex<HashMap<StretchKey, ResampledStereo>>>,
+    cache: &'a Arc<Mutex<ByteBudgetCache<(PathBuf, u32), ResampledStereo>>>,
+    stretch_cache: &'a Arc<Mutex<ByteBudgetCache<StretchKey, ResampledStereo>>>,
     stretch_inflight: &'a Arc<Mutex<HashSet<StretchKey>>>,
     stretch_tx: &'a mpsc::Sender<StretchJob>,
     resources: &'a ResourceManager,
@@ -736,6 +793,11 @@ fn handle_stop(s: &mut EngineWorkerState) {
     s.is_playing.store(false, Ordering::Relaxed);
     *s.target.lock().unwrap_or_else(|e| e.into_inner()) = None;
     s.base_frames.store(0, Ordering::Relaxed);
+    // position_frames 一并归零：停止后 base+position 不再代表可听位置。
+    // 若保留旧值，停止后的杂散 get_playback_state 会让前端把
+    // runtime.playbackPositionSec 恢复成陈旧的已播放时长，
+    // 使下一次 stop 误判"曾处于播放中"并跳回锚点/0。
+    s.position_frames.store(0, Ordering::Relaxed);
     *s.last_play_file = None;
     idle_track_meter_state(s.meter_state, s.meter_generation);
     // 播放停止时清空渲染线程传递的 cache_key 映射
@@ -760,8 +822,20 @@ fn handle_set_playing(s: &mut EngineWorkerState, playing: bool, target: Option<S
     }
 }
 
+fn track_params_affect_render(
+    old: &crate::state::TrackParamsState,
+    new: &crate::state::TrackParamsState,
+) -> bool {
+    old.frame_period_ms != new.frame_period_ms
+        || old.pitch_orig != new.pitch_orig
+        || old.pitch_edit != new.pitch_edit
+        || old.tension_edit != new.tension_edit
+        || old.extra_curves != new.extra_curves
+        || old.extra_params != new.extra_params
+}
+
 fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
-    eprintln!(
+    debug_eprintln!(
         "[engine] handle_update_timeline: tracks={}, clips={}",
         tl.tracks.len(),
         tl.clips.len()
@@ -800,8 +874,8 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
                 let new_params = new_root.and_then(|r| tl.params_by_root_track.get(&r));
 
                 match (old_params, new_params) {
-                    (Some(old), Some(new)) => old.pitch_edit != new.pitch_edit,
-                    (None, Some(new)) => !new.pitch_edit.is_empty(),
+                    (Some(old), Some(new)) => track_params_affect_render(old, new),
+                    (None, Some(new)) => track_params_affect_render(&Default::default(), new),
                     (Some(_), None) => true, // track params 被删除
                     (None, None) => false,
                 }
@@ -815,6 +889,7 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
                         || (old.source_end_sec - clip.source_end_sec).abs() > 1e-6
                         || (old.playback_rate - clip.playback_rate).abs() > 1e-6
                         || old.reversed != clip.reversed
+                        || old.loop_enabled != clip.loop_enabled
                         || (old.length_sec - clip.length_sec).abs() > 1e-6
                         // 检测同路径文件替换：
                         // - duration_frames / source_sample_rate：文件长度或采样率变化
@@ -863,29 +938,18 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
             // 当源文件变更时（包括同路径替换），必须使所有以文件路径为 key 的缓存失效。
             // 使用字符串比较（与 handle_evict_source_path 保持一致），兼容不同 PathBuf 表示形式。
             for stale_path in &stale_source_paths {
-
-                // 1. 解码缓存（ResourceManager LRU）
+                // 1. 解码缓存（解码 LRU，按字节预算）
                 if let Ok(mut cache) = s.cache.lock() {
-                    let keys_to_evict: Vec<(std::path::PathBuf, u32)> = cache
-                        .iter()
-                        .filter(|((p, _), _)| p.to_string_lossy().as_ref() == stale_path.as_str())
-                        .map(|(k, _)| k.clone())
-                        .collect();
-                    for k in keys_to_evict {
-                        cache.pop(&k);
-                    }
+                    cache.invalidate_where(|(p, _)| {
+                        p.to_string_lossy().as_ref() == stale_path.as_str()
+                    });
                 }
 
                 // 2. Stretch 缓存
                 if let Ok(mut sc) = s.stretch_cache.lock() {
-                    let stretch_keys: Vec<StretchKey> = sc
-                        .keys()
-                        .filter(|k| k.path.to_string_lossy().as_ref() == stale_path.as_str())
-                        .cloned()
-                        .collect();
-                    for k in stretch_keys {
-                        sc.remove(&k);
-                    }
+                    sc.invalidate_where(|k| {
+                        k.path.to_string_lossy().as_ref() == stale_path.as_str()
+                    });
                 }
 
                 // 3. Stretch inflight
@@ -901,6 +965,31 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
                 }
             }
         }
+
+        // ── extra_params 变更检测 ──────────────────────────────────────────
+        // 当 track 级别的 extra_params（如 breath_enabled、synth_mode 等）发生变化时，
+        // 使该 root track 及其子轨道上所有 clip 的合成缓存失效，并触发后台预渲染。
+        // 场景：用户切换"气声"功能开关，或更改其他静态声码器参数。
+        // 此检测必须放在 clip 循环之后，以确保每个 root track 只检查一次。
+        for (root_id, new_params) in &tl.params_by_root_track {
+            let old_extra_params = old_tl
+                .params_by_root_track
+                .get(root_id)
+                .map(|p| &p.extra_params);
+            if old_extra_params != Some(&new_params.extra_params) {
+                debug_eprintln!(
+                    "[engine] extra_params changed for root_track={}, invalidating all clips on this track group",
+                    root_id
+                );
+                for clip in &tl.clips {
+                    if tl.resolve_root_track_id(&clip.track_id).as_deref() == Some(root_id.as_str())
+                    {
+                        crate::synth_clip_cache::invalidate_clip_all_caches(&clip.id);
+                        any_cache_invalidated = true;
+                    }
+                }
+            }
+        }
     }
 
     // ── 后台预渲染自动触发 ──────────────────────────────────────────────────
@@ -908,21 +997,22 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
     // any_cache_invalidated 由上方的 clip 变化检测代码设置。
     if any_cache_invalidated {
         use std::sync::atomic::Ordering;
-        let enabled = crate::commands::playback::AUTO_BG_RENDER_ENABLED
-            .load(Ordering::Relaxed);
-        let running = crate::commands::playback::BG_RENDER_ACTIVE
-            .load(Ordering::Relaxed);
+        let enabled = crate::commands::playback::AUTO_BG_RENDER_ENABLED.load(Ordering::Relaxed);
+        let running = crate::commands::playback::BG_RENDER_ACTIVE.load(Ordering::Relaxed);
         if enabled && !tl.clips.is_empty() {
             if !running {
                 // 没有渲染在运行 → 直接启动
                 if let Some(app) = s.app_handle.as_ref() {
-                    eprintln!("[engine] auto-triggering background render ({} clips invalidated)", tl.clips.len());
-                    let _ = crate::commands::playback::start_background_render(app.clone());
+                    debug_eprintln!(
+                        "[engine] auto-triggering background render ({} clips invalidated)",
+                        tl.clips.len()
+                    );
+                    let _ = crate::commands::playback::request_background_render(app);
                 }
             } else {
                 // 渲染已在运行 → 取消旧渲染，标记需要重启
                 // 旧渲染线程检测到取消标志后会退出，然后自动启动新一轮渲染
-                eprintln!("[engine] bg render already running, cancelling and requesting restart ({} clips invalidated)", tl.clips.len());
+                debug_eprintln!("[engine] bg render already running, cancelling and requesting restart ({} clips invalidated)", tl.clips.len());
                 crate::commands::playback::BG_RENDER_CANCEL.store(true, Ordering::Release);
                 crate::commands::playback::BG_RENDER_RESTART_NEEDED.store(true, Ordering::Release);
             }
@@ -949,7 +1039,10 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
                         > 1e-6
                         || (old.source_end_sec - clip.source_end_sec).abs() > 1e-6;
                     let rate_changed = (old.playback_rate - clip.playback_rate).abs() > 1e-6;
-                    pos_changed || source_range_changed || rate_changed
+                    // Loop 开关会改变 pitch 曲线的目标长度（回绕铺满），
+                    // 需要重新截取 + resample 推送。
+                    let loop_changed = old.loop_enabled != clip.loop_enabled;
+                    pos_changed || source_range_changed || rate_changed || loop_changed
                 })
                 .unwrap_or(false)
         })
@@ -960,17 +1053,22 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
     // Detect changes at both clip level AND track level (pitch_edit lives in params_by_root_track).
     let track_pitch_edit_changed = s.last_timeline.as_ref().map_or(false, |old_tl| {
         tl.params_by_root_track.iter().any(|(root_id, new_params)| {
-            old_tl.params_by_root_track.get(root_id)
-                .map_or(true, |old_params| old_params.pitch_edit != new_params.pitch_edit)
+            old_tl
+                .params_by_root_track
+                .get(root_id)
+                .map_or(true, |old_params| {
+                    old_params.pitch_edit != new_params.pitch_edit
+                })
         })
     });
 
-    let clip_changed = track_pitch_edit_changed || tl.clips.iter().any(|clip| {
-        match old_clips_map.get(clip.id.as_str()) {
-            None => true, // 新增 clip
-            Some(old) => clip_pitch_params_changed(old, clip),
-        }
-    });
+    let clip_changed = track_pitch_edit_changed
+        || tl.clips.iter().any(|clip| {
+            match old_clips_map.get(clip.id.as_str()) {
+                None => true, // 新增 clip
+                Some(old) => clip_pitch_params_changed(old, clip),
+            }
+        });
 
     let pitch_params_changed_clip_ids: std::collections::HashSet<&str> = tl
         .clips
@@ -996,7 +1094,7 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
                     let compose_changed = old_track.compose_enabled != track.compose_enabled;
                     let algo_changed = old_track.pitch_analysis_algo != track.pitch_analysis_algo;
                     if compose_changed || algo_changed {
-                        eprintln!("[engine] Track '{}' pitch settings changed: compose {} -> {}, algo {:?} -> {:?}",
+                        debug_eprintln!("[engine] Track '{}' pitch settings changed: compose {} -> {}, algo {:?} -> {:?}",
                             track.id, old_track.compose_enabled, track.compose_enabled,
                             old_track.pitch_analysis_algo, track.pitch_analysis_algo);
                     }
@@ -1006,11 +1104,11 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
     });
 
     if !has_last_timeline {
-        eprintln!("[engine] First timeline update (no last_timeline), forcing pitch schedule");
+        debug_eprintln!("[engine] First timeline update (no last_timeline), forcing pitch schedule");
     }
 
     let needs_pitch_schedule = clip_changed || track_pitch_settings_changed;
-    eprintln!("[engine] Pitch schedule check: clips={}, clip_changed={}, track_changed={}, pitch_edit_changed={}, needs_schedule={}",
+    debug_eprintln!("[engine] Pitch schedule check: clips={}, clip_changed={}, track_changed={}, pitch_edit_changed={}, needs_schedule={}",
         tl.clips.len(), clip_changed, track_pitch_settings_changed, track_pitch_edit_changed, needs_pitch_schedule);
 
     // 预计算需要推送 pitch data 的 MIDI clip（必须在 *s.last_timeline 赋值之前，避免 borrow 冲突）
@@ -1025,6 +1123,7 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
                     || (old.source_end_sec - c.source_end_sec).abs() > 1e-6
                     || (old.playback_rate - c.playback_rate).abs() > 1e-6
                     || old.reversed != c.reversed
+                    || old.loop_enabled != c.loop_enabled
                     || old.midi_fill_gaps != c.midi_fill_gaps
                     || old.muted != c.muted
                     || old.midi_note_data != c.midi_note_data
@@ -1162,13 +1261,16 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
     //
     // 如果后台预渲染（Background Pre-render）正在运行，则不暂停播放，
     // 允许音频回调在未渲染 clip 位置输出静音（自然暂停），渲染线程在后台继续推进。
-    let bg_render = crate::commands::playback::BG_RENDER_ACTIVE
-        .load(std::sync::atomic::Ordering::Relaxed);
+    let bg_render =
+        crate::commands::playback::BG_RENDER_ACTIVE.load(std::sync::atomic::Ordering::Relaxed);
     let any_need_render = !snap.clips.is_empty()
-        && snap.clips.iter().any(|c| c.needs_synthesis && c.rendered_pcm.is_none());
+        && snap
+            .clips
+            .iter()
+            .any(|c| c.needs_synthesis && c.rendered_pcm.is_none());
     let should_halt = (any_need_render || track_pitch_edit_changed) && !bg_render;
     if should_halt && s.is_playing.load(Ordering::Relaxed) {
-        eprintln!(
+        debug_eprintln!(
             "[engine] Halting playback: any_need_render={}, pitch_edit_changed={}, bg_render={}",
             any_need_render, track_pitch_edit_changed, bg_render
         );
@@ -1176,11 +1278,19 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
         if let Some(app) = s.app_handle.as_ref() {
             #[derive(Clone, serde::Serialize)]
             #[serde(rename_all = "camelCase")]
-            struct Evt { active: bool, progress: Option<f64>, target: Option<String> }
-            let _ = app.emit("playback_rendering_state", Evt {
-                active: false, progress: Some(0.0),
-                target: Some("original".to_string()),
-            });
+            struct Evt {
+                active: bool,
+                progress: Option<f64>,
+                target: Option<String>,
+            }
+            let _ = app.emit(
+                "playback_rendering_state",
+                Evt {
+                    active: false,
+                    progress: Some(0.0),
+                    target: Some("original".to_string()),
+                },
+            );
         }
     }
 
@@ -1273,6 +1383,19 @@ fn handle_clip_pitch_ready(s: &mut EngineWorkerState, clip_id: String) {
         s.snapshot.store(Arc::new(snap));
         idle_track_meter_state(s.meter_state, s.meter_generation);
         debug_eprintln!("[engine] Snapshot stored, handle_clip_pitch_ready done");
+
+        // 若此前后台预渲染因为音高分析未完成而跳过了一些 clip，
+        // 现在缓存已经就绪，补触发一次后台渲染，避免用户等待进度结束后
+        // 首次播放时仍要重新渲染。
+        if crate::commands::playback::AUTO_BG_RENDER_ENABLED
+            .load(std::sync::atomic::Ordering::Relaxed)
+            && crate::commands::playback::BG_RENDER_PITCH_PENDING
+                .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            if let Some(app) = s.app_handle.as_ref() {
+                let _ = crate::commands::playback::request_background_render(app);
+            }
+        }
     }
 }
 
@@ -1281,20 +1404,15 @@ fn handle_clip_pitch_ready(s: &mut EngineWorkerState, clip_id: String) {
 /// 在源文件被替换（`replace_clip_source`）时由 command handler 直接发送到引擎，
 /// 确保在 `UpdateTimeline` 处理之前缓存已被清空，避免 `build_snapshot` 使用旧数据。
 fn handle_evict_source_path(s: &mut EngineWorkerState, path: &str) {
-    // 1. 解码缓存（ResourceManager LRU）—— 使用字符串比较以兼容不同 PathBuf 表示
+    // 1. 解码缓存（解码 LRU，按字节预算）—— 使用字符串比较以兼容不同 PathBuf 表示
     if let Ok(mut cache) = s.cache.lock() {
-        let keys: Vec<(std::path::PathBuf, u32)> = cache
-            .iter()
-            .filter(|((p, _), _)| p.to_string_lossy().as_ref() == path)
-            .map(|(k, _)| k.clone())
-            .collect();
-        for k in &keys {
-            cache.pop(k);
-        }
-        if !keys.is_empty() {
-            eprintln!(
+        let before = cache.len();
+        cache.invalidate_where(|(p, _)| p.to_string_lossy().as_ref() == path);
+        let evicted = before - cache.len();
+        if evicted > 0 {
+            debug_eprintln!(
                 "[engine:evict] decode cache: evicted {} entries for path={}",
-                keys.len(),
+                evicted,
                 path
             );
         }
@@ -1302,18 +1420,13 @@ fn handle_evict_source_path(s: &mut EngineWorkerState, path: &str) {
 
     // 2. 拉伸缓存
     if let Ok(mut sc) = s.stretch_cache.lock() {
-        let stretch_keys: Vec<StretchKey> = sc
-            .keys()
-            .filter(|k| k.path.to_string_lossy().as_ref() == path)
-            .cloned()
-            .collect();
-        for k in &stretch_keys {
-            sc.remove(k);
-        }
-        if !stretch_keys.is_empty() {
-            eprintln!(
+        let before = sc.len();
+        sc.invalidate_where(|k| k.path.to_string_lossy().as_ref() == path);
+        let evicted = before - sc.len();
+        if evicted > 0 {
+            debug_eprintln!(
                 "[engine:evict] stretch cache: evicted {} entries for path={}",
-                stretch_keys.len(),
+                evicted,
                 path
             );
         }
@@ -1412,7 +1525,7 @@ fn emit_clip_pitch_data_for_clip(
     let frame_period_ms = 5.0f64;
     let root = tl.resolve_root_track_id(&clip.track_id).unwrap_or_default();
 
-    eprintln!(
+    debug_eprintln!(
         "[pitch:emit] clip_id={} start={:.3}s len={:.3}s src_start={:.3}s src_end={:.3}s pr={:.3} root={}",
         clip.id, clip.start_sec, clip.length_sec,
         clip.source_start_sec, clip.source_end_sec,
@@ -1428,7 +1541,9 @@ fn emit_clip_pitch_data_for_clip(
 
         let pr = clip.playback_rate as f64;
         let pr_valid = if pr.is_finite() && pr > 0.0 { pr } else { 1.0 };
-        let src_start = clip.source_start_sec.max(0.0);
+        // 消费窗口（非 Loop 倒放锚定 se：win=[se−len·r, se]，可为负/超界，
+        // 域外为静音；正放/Loop 保持原字段）。音符可见性与镜像全部以该窗口
+        // 为基准 —— 否则延伸过的倒放 Clip 曲线整体错位。
         let src_end = if clip.source_end_sec > 0.0 {
             clip.source_end_sec
         } else {
@@ -1440,9 +1555,44 @@ fn emit_clip_pitch_data_for_clip(
                 .unwrap_or(clip_len_sec)
                 .max(clip_len_sec)
         };
+        let src_start = if !clip.loop_enabled && clip.reversed {
+            src_end - clip_len_sec * pr_valid
+        } else {
+            clip.source_start_sec
+        };
         let src_total_len = src_end - src_start;
 
+        let clip_visible_frames = target_frames;
+
         for note in notes {
+            // Loop（循环源）：按媒体时长 D 的锚点回绕放置音符（与音频渲染的
+            // floor_mod 映射逐帧一致；纯 MIDI clip 无媒体 → 周期退化为窗口
+            // 跨度）。不能用窗口比较做可见性过滤 —— split 产生的"环绕窗口"
+            // （start > end）会把所有音符误判为越界而全部丢弃。
+            if let Some(placement) =
+                crate::state::place_note_occurrence_in_loop(clip, note.start_sec, note.end_sec, fp)
+            {
+                let note_value = note.note as f32;
+                let mut cycle_offset = 0usize;
+                while cycle_offset < clip_visible_frames {
+                    let write_start = cycle_offset + placement.first_start_frame;
+                    let write_end =
+                        (cycle_offset + placement.first_start_frame + placement.len_frames)
+                            .min(clip_visible_frames);
+                    if write_start >= write_end {
+                        break;
+                    }
+                    for frame in write_start..write_end {
+                        let current = midi_curve[frame];
+                        if note_value > current || current <= 0.0 {
+                            midi_curve[frame] = note_value;
+                        }
+                    }
+                    cycle_offset += placement.cycle_frames;
+                }
+                continue;
+            }
+
             if note.end_sec <= src_start || note.start_sec >= src_end {
                 continue;
             }
@@ -1465,13 +1615,16 @@ fn emit_clip_pitch_data_for_clip(
             }
             let note_start_frame = ((eff_start / pr_valid * 1000.0) / fp).round() as usize;
             let note_end_frame = ((eff_end / pr_valid * 1000.0) / fp).round() as usize;
-            let write_end = note_end_frame.min(target_frames);
-            if note_start_frame < write_end {
-                let note_value = note.note as f32;
-                for frame in note_start_frame..write_end {
-                    let current = midi_curve[frame];
-                    if note_value > current || current <= 0.0 {
-                        midi_curve[frame] = note_value;
+            let note_value = note.note as f32;
+            // 非 Loop：单次写入（Loop 已在上方 placement 分支处理）。
+            {
+                let write_end = note_end_frame.min(target_frames);
+                if note_start_frame < write_end {
+                    for frame in note_start_frame..write_end {
+                        let current = midi_curve[frame];
+                        if note_value > current || current <= 0.0 {
+                            midi_curve[frame] = note_value;
+                        }
                     }
                 }
             }
@@ -1497,7 +1650,7 @@ fn emit_clip_pitch_data_for_clip(
         }
 
         let curve_start_sec = compute_pitch_curve_start_sec(clip);
-        eprintln!(
+        debug_eprintln!(
             "[pitch:emit] clip_id={} (MIDI) → curve_start={:.3}s curve_len={} fp={:.1}ms total_dur={:.3}s",
             clip.id,
             curve_start_sec,
@@ -1518,11 +1671,11 @@ fn emit_clip_pitch_data_for_clip(
     // ── 音频 clip 路径：从 FCPE 缓存获取音高曲线 ──
     let Some(cached) = get_or_compute_clip_pitch_midi_global(tl, clip, &root, frame_period_ms)
     else {
-        eprintln!("[pitch:emit] clip_id={} → 缓存未命中，跳过", clip.id);
+        debug_eprintln!("[pitch:emit] clip_id={} → 缓存未命中，跳过", clip.id);
         return;
     };
 
-    eprintln!(
+    debug_eprintln!(
         "[pitch:emit] clip_id={} cached_midi_len={}",
         clip.id,
         cached.midi.len(),
@@ -1531,17 +1684,29 @@ fn emit_clip_pitch_data_for_clip(
     // 统一截取 + resample（rate==1 时 resample 实际为无损复制）
     let pr = clip.playback_rate as f64;
     let pr = if pr.is_finite() && pr > 0.0 { pr } else { 1.0 };
-    let midi_curve = crate::pitch_clip::trim_and_resample_midi(
+    // 非 Loop 倒放：传入真实消费窗口 [se−len·r, se]。
+    let (trim_src_start, trim_src_end) = crate::state::clip_pitch_trim_window_sec(clip);
+    let mut midi_curve = crate::pitch_clip::trim_and_resample_midi(
         &cached.midi,
         frame_period_ms,
-        clip.source_start_sec,
-        clip.source_end_sec,
+        trim_src_start,
+        trim_src_end,
         pr,
         clip.length_sec.max(0.0),
+        clip.loop_enabled,
+        crate::state::clip_source_media_duration_sec(clip),
+        clip.reversed && clip.loop_enabled,
     );
+    // 非 Loop 倒放：trim_and_resample_midi 按升序窗口映射（文档契约
+    // "调用方在输出后整体翻转"）。前端按时间线顺序直接绘制本曲线，
+    // 必须在此翻转 —— 否则倒放 Clip 的音高曲线相对音频整体镜像
+    // （与 midi_export / assemble_pitch_orig 的处理保持一致）。
+    if clip.reversed && !clip.loop_enabled {
+        midi_curve.reverse();
+    }
     let curve_start_sec = compute_pitch_curve_start_sec(clip);
 
-    eprintln!(
+    debug_eprintln!(
         "[pitch:emit] clip_id={} → curve_start={:.3}s curve_len={} fp={:.1}ms total_dur={:.3}s",
         clip.id,
         curve_start_sec,
@@ -1574,7 +1739,7 @@ mod tests {
     use super::*;
     use crate::audio_engine::resource_manager::ResourceManager;
     use crate::audio_engine::types::{EngineCommand, EngineSnapshot};
-    use crate::state::{Clip, TimelineState};
+    use crate::state::{Clip, TimelineState, TrackParamsState};
     use crate::time_stretch::{update_runtime_stretch_settings, UserStretchAlgorithm};
     use arc_swap::ArcSwap;
     use std::collections::{HashMap, HashSet};
@@ -1586,6 +1751,9 @@ mod tests {
         let mut timeline = TimelineState::default();
         let track_id = timeline.tracks[0].id.clone();
         timeline.clips.push(Clip {
+            takes: vec![],
+            active_take_id: None,
+            clip_playback_rate: 1.0,
             id: "clip-1".to_string(),
             track_id,
             name: "clip".to_string(),
@@ -1608,10 +1776,18 @@ mod tests {
             source_end_sec: 1.0,
             playback_rate: 0.75,
             reversed: false,
+            loop_enabled: false,
+            snap_offset_sec: 0.0,
             fade_in_sec: 0.0,
             fade_out_sec: 0.0,
             fade_in_curve: "sine".to_string(),
             fade_out_curve: "sine".to_string(),
+            fade_in_shape: 0.0,
+            fade_out_shape: 0.0,
+            fade_in_dir: 0.0,
+            fade_out_dir: 0.0,
+            auto_fade_in_sec: 0.0,
+            auto_fade_out_sec: 0.0,
             extra_curves: None,
             extra_params: None,
             formant_morph: None,
@@ -1620,6 +1796,26 @@ mod tests {
             midi_note_data: None,
         });
         timeline
+    }
+
+    #[test]
+    fn track_params_affect_render_detects_curve_and_static_param_changes() {
+        let old = TrackParamsState::default();
+        let mut new = old.clone();
+
+        assert!(!track_params_affect_render(&old, &new));
+
+        new.tension_edit.push(1.0);
+        assert!(track_params_affect_render(&old, &new));
+
+        new = old.clone();
+        new.extra_curves
+            .insert("breath_gain".to_string(), vec![0.5]);
+        assert!(track_params_affect_render(&old, &new));
+
+        new = old.clone();
+        new.extra_params.insert("synth_mode".to_string(), 1.0);
+        assert!(track_params_affect_render(&old, &new));
     }
 
     #[test]
@@ -1632,7 +1828,7 @@ mod tests {
 
         let resources = ResourceManager::new(engine_tx.clone());
         let cache = resources.cache().clone();
-        let stretch_cache = Arc::new(Mutex::new(HashMap::new()));
+        let stretch_cache = Arc::new(Mutex::new(ByteBudgetCache::new(8, u64::MAX)));
         let stretch_inflight = Arc::new(Mutex::new(HashSet::new()));
         let snapshot = Arc::new(ArcSwap::from_pointee(EngineSnapshot {
             bpm: 120.0,
@@ -1672,10 +1868,7 @@ mod tests {
             meter_generation: &meter_generation,
         };
 
-        handle_audio_ready(
-            &mut worker,
-            (PathBuf::from("E:/virtual/test.wav"), 44_100),
-        );
+        handle_audio_ready(&mut worker, (PathBuf::from("E:/virtual/test.wav"), 44_100));
 
         let job = stretch_rx
             .try_recv()

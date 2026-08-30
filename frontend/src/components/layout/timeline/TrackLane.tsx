@@ -1,17 +1,26 @@
 /**
  * TrackLane - 时间轴单轨道视图，负责布局轨道波形、剪辑项与拖拽中的 ghost 预览。
  */
+/* eslint-disable react-refresh/only-export-components -- 文件同时导出组件与 Hook/常量（刷新边界按文件粒度接受） */
 import React from "react";
 
+import { registerDragAbort } from "./gestureFocusGuard";
+import { resolveClipSelectionModifiers } from "../../../features/keybindings/clipSelectionModifiers";
+import { DEFAULT_KEYBINDINGS } from "../../../features/keybindings/defaultKeybindings";
 import type { ClipFormantMorph, ClipInfo, TrackInfo } from "../../../features/session/sessionTypes";
+import type { Keybinding } from "../../../features/keybindings/types";
+import { useI18n } from "../../../i18n/I18nProvider";
+import { useAppTheme } from "../../../theme/AppThemeProvider";
+import type { FadeLengthFormatContext } from "./fadeTooltipText";
 import type { GhostDragInfo } from "./hooks/useClipDrag";
+import type { ClipRenameClickCandidate } from "./clip/ClipHeader";
 import { ClipItem } from "./ClipItem";
+import { OverlapEditLayer } from "./OverlapEditLayer";
 import { CLIP_HEADER_HEIGHT, CLIP_BODY_PADDING_Y } from "./constants";
 import { buildTimelineHitTestIndex, hitTestTimeline } from "./runtime/timelineHitTest";
-import { WaveformTrackCanvas } from "../../waveform/WaveformTrackCanvas";
+import { normalizedTrackColorCss } from "./runtime/timelineCanvasStyle";
 import { MidiPitchTrackCanvas } from "../../waveform/MidiPitchTrackCanvas";
-import { useAppTheme } from "../../../theme/AppThemeProvider";
-import { getWaveformColors } from "../../../theme/waveformColors";
+import { SNAP_HIGHLIGHT_GROUP, clearSnapHighlights } from "../../../utils/snapHighlight";
 
 function compareClipRenderOrder(a: ClipInfo, b: ClipInfo): number {
     const d = (a.startSec ?? 0) - (b.startSec ?? 0);
@@ -85,6 +94,8 @@ type TrackLaneProps = {
 
     ensureSelected: (clipId: string) => void;
     selectClipRemote: (clipId: string) => void;
+    /** 点击轨道空白区（非 clip）：清空 clip 选中状态。 */
+    deselectAllClips: () => void;
     openContextMenu: (clipId: string, clientX: number, clientY: number) => void;
 
     seekFromClientX: (clientX: number, commit: boolean) => void;
@@ -104,8 +115,22 @@ type TrackLaneProps = {
             | "stretch_right"
             | "fade_in"
             | "fade_out"
-            | "gain",
+            | "gain"
+            | "crossfade_edges",
+        /** 延迟起手的类型化私有通道（与 useEditDrag.EditDragChannelOpts 一致）。 */
+        channel?:
+            | {
+                  dragStartClientX?: number;
+                  crossfadePartnerClipId?: string | null;
+                  fadePointerEnv?: {
+                      envTopClientY: number;
+                      bodyHeightPx: number;
+                  } | null;
+              }
+            | undefined,
     ) => void;
+    /** SnapOffset 三角手柄拖拽（左下角；拖动调整吸附偏移）。 */
+    startSnapOffsetDrag?: (e: React.PointerEvent, clipId: string) => void;
     toggleClipMuted: (clipId: string, nextMuted: boolean) => void;
     /** Ctrl+左键选择切换（会更新主选中 clip） */
     onCtrlToggleSelect: (clipId: string) => void;
@@ -124,22 +149,46 @@ type TrackLaneProps = {
 
     clearContextMenu: () => void;
 
-    /** 当前正在重命名的 clipId（来自右键菜单触发） */
+    /** 当前正在重命名的 clipId（来自右键菜单或双击名称） */
     renamingClipId?: string | null;
+    onRenameStart?: (clipId: string) => void;
     onRenameCommit?: (clipId: string, newName: string) => void;
     onRenameDone?: () => void;
+    onRenameClickCandidate?: (candidate: ClipRenameClickCandidate | null) => void;
     onGainCommit?: (clipId: string, db: number) => void;
     onFormantMorphCommit?: (clipId: string, value: ClipFormantMorph, checkpoint: boolean) => void;
     activeGroupIds?: Set<string>;
     disabledGroupIds?: string[];
     onToggleGroupDisabled?: (groupId: string) => void;
 
-    /** Ctrl+拖动复制时的 ghost 预览信息 */
+    /** 复制拖动时的 ghost 预览信息 */
     ghostDrag?: GhostDragInfo | null;
     /** 当前拖拽处于纯竖直换轨锁定时，高亮的目标轨道 */
     verticalTrackLockTrackId?: string | null;
     /** 所有 clip 数据（用于跨轨道 ghost 查找） */
     allClips?: ClipInfo[];
+    /** 在空间足够时显示全部 Take 波形。 */
+    showAllTakes?: boolean;
+    /** 点击 inactive take 波形时切换 active take。 */
+    onActivateTake?: (clipId: string, takeId: string) => void;
+    /** 形状循环键绑定（modifier.fadeShapeCycleClick），透传给 ClipItem。 */
+    fadeShapeCycleKb?: Keybinding | null;
+    /** modifier.clipMultiSelectToggle 绑定（按住并点击切换多选） */
+    multiSelectToggleKb?: Keybinding;
+    /** modifier.clipRangeSelect 绑定（按住并点击范围选择） */
+    rangeSelectKb?: Keybinding;
+    /** modifier.clipPitchDrag 绑定（按住并垂直拖拽波形调整音高） */
+    pitchDragKb?: Keybinding;
+    /** 音高拖拽手势入口（useClipPitchDrag 提供） */
+    onClipPitchDragStart?: (e: React.PointerEvent<HTMLDivElement>, clipId: string) => void;
+    /** 淡化长度 ToolTips 的相对时长时间上下文。 */
+    fadeLengthFormatCtx: FadeLengthFormatContext;
+    /** 修饰键下左键点击包络线 → 循环切换该侧曲线类型。 */
+    onFadeShapeCycleClick?: (clipId: string, side: "in" | "out") => void;
+    /** 抓手上的循环点击：同时切换交叉点两侧。 */
+    onCrossfadeCycleClick?: (sides: Array<{ clipId: string; isOut: boolean }>) => void;
+    /** 单条包络线上的循环点击（Ctrl+点击，非抓手）。 */
+    onFadeShapeSingleCycle?: (side: { clipId: string; isOut: boolean }) => void;
 };
 
 export const TrackLane = React.memo(
@@ -155,16 +204,26 @@ export const TrackLane = React.memo(
             viewportEndSec,
             overlayClipIds = [],
             altPressed,
+            fadeShapeCycleKb = null,
+            multiSelectToggleKb = DEFAULT_KEYBINDINGS["modifier.clipMultiSelectToggle"],
+            rangeSelectKb = DEFAULT_KEYBINDINGS["modifier.clipRangeSelect"],
+            pitchDragKb = DEFAULT_KEYBINDINGS["modifier.clipPitchDrag"],
+            onClipPitchDragStart,
+            fadeLengthFormatCtx,
+            onFadeShapeCycleClick,
+            onCrossfadeCycleClick,
             selectedClipId,
             multiSelectedClipIds,
             multiSelectedSet,
             trackColor,
             ensureSelected,
             selectClipRemote,
+            deselectAllClips,
             openContextMenu,
             seekFromClientX,
             startClipDrag,
             startEditDrag,
+            startSnapOffsetDrag,
             toggleClipMuted,
             onCtrlToggleSelect,
             toggleMultiSelect,
@@ -173,8 +232,10 @@ export const TrackLane = React.memo(
             recordLastClickPosition,
             clearContextMenu,
             renamingClipId,
+            onRenameStart,
             onRenameCommit,
             onRenameDone,
+            onRenameClickCandidate,
             onGainCommit,
             onFormantMorphCommit,
             activeGroupIds,
@@ -183,15 +244,15 @@ export const TrackLane = React.memo(
             ghostDrag,
             verticalTrackLockTrackId,
             allClips,
+            showAllTakes = true,
+            onActivateTake,
         } = props;
 
-        // 获取波形颜色配置
-        const { mode: themeMode } = useAppTheme();
-        const waveformColors = React.useMemo(
-            () => getWaveformColors(themeMode, "timeline"),
-            [themeMode],
-        );
-
+        // 淡变信息浮标与子层 i18n 文案。
+        const { t } = useI18n();
+        // ghost clip 的 color-mix 需要和时间线画布同一套主题化轨道色。
+        const { mode } = useAppTheme();
+        const darkMode = mode === "dark";
         // 波形区域高度计算（与 ClipItem 一致）
         const waveformHeight = Math.max(1, rowHeight - CLIP_BODY_PADDING_Y - CLIP_HEADER_HEIGHT);
         const [hoveredClipId, setHoveredClipId] = React.useState<string | null>(null);
@@ -229,7 +290,7 @@ export const TrackLane = React.memo(
                 });
             }
             return result;
-        }, [ghostDrag, track.id, trackClips, allClips, allTracks]);
+        }, [ghostDrag, track.id, allClips, allTracks]);
 
         const leadingOverlapSecByClipId = React.useMemo(
             () => computeLeadingOverlapSecByClipId(trackClips),
@@ -246,6 +307,7 @@ export const TrackLane = React.memo(
                         trackId: clip.trackId,
                         startSec: clip.startSec,
                         lengthSec: clip.lengthSec,
+                        snapOffsetSec: clip.snapOffsetSec,
                     })),
                 }),
             [pxPerSec, rowHeight, track.id, trackClips],
@@ -279,6 +341,9 @@ export const TrackLane = React.memo(
         const isClipItemTarget = React.useCallback((target: EventTarget | null) => {
             return (target as HTMLElement | null)?.closest?.("[data-hs-clip-item='1']") != null;
         }, []);
+        const isOverlapLayerTarget = React.useCallback((target: EventTarget | null) => {
+            return (target as HTMLElement | null)?.closest?.("[data-hs-overlap-layer='1']") != null;
+        }, []);
         const primeSelection = React.useCallback(
             (clipId: string, shouldPrimeSelection: boolean, clientX?: number) => {
                 if (!shouldPrimeSelection) {
@@ -305,46 +370,72 @@ export const TrackLane = React.memo(
                 // altPressed tracks the stretch modifier (configurable).
                 // For click-selection bypass, only check physical Alt key to avoid
                 // breaking Ctrl/Shift selection when those keys are stretch modifiers.
-                const altKeyDown = Boolean(
-                    event.altKey || event.nativeEvent.getModifierState?.("Alt"),
-                );
-                const ctrlOrMeta = event.ctrlKey || event.metaKey;
-                const doShiftRangeSelect = event.shiftKey && !altKeyDown && !ctrlOrMeta;
+                const selectionMods = resolveClipSelectionModifiers({
+                    event,
+                    multiSelectToggleKb,
+                    rangeSelectKb,
+                });
+                const altKeyDown = selectionMods.altKeyDown;
+                const doShiftRangeSelect = selectionMods.rangeSelectActive;
                 const shiftRangeAnchorClipId = doShiftRangeSelect ? rangeSelectAnchorClipId : null;
-                const doCtrlToggleOnly = ctrlOrMeta && !event.shiftKey && !altKeyDown;
-                const allowSeek = !altKeyDown && !ctrlOrMeta && !event.shiftKey;
-                const shouldPrimeSelection = !doCtrlToggleOnly && !doShiftRangeSelect;
+                const allowSeek =
+                    !altKeyDown &&
+                    !selectionMods.multiSelectToggleRaw &&
+                    !selectionMods.rangeSelectRaw;
+                const shouldPrimeSelection = selectionMods.shouldPrimeSelection;
+                const clipIsSelected =
+                    multiSelectedClipIds.length > 0
+                        ? multiSelectedSet.has(clip.id)
+                        : selectedClipId === clip.id;
+                const primedSelection = shouldPrimeSelection && !clipIsSelected;
                 const startX = event.clientX;
                 const startY = event.clientY;
+                let lastClientX = event.clientX;
                 let moved = false;
 
                 event.preventDefault();
                 event.stopPropagation();
                 clearContextMenu();
 
+                if (primedSelection) {
+                    primeSelection(clip.id, true, event.clientX);
+                }
+
                 const onMove = (ev: PointerEvent) => {
                     if (ev.pointerId !== event.pointerId) return;
                     const dx = ev.clientX - startX;
                     const dy = ev.clientY - startY;
                     if (dx * dx + dy * dy >= 9) moved = true;
+                    lastClientX = ev.clientX;
                 };
 
-                const onUp = (ev: PointerEvent) => {
-                    if (ev.pointerId !== event.pointerId) return;
+                // 失焦取消：切屏期间 pointerup/pointercancel 不送达本窗口。
+                // blur 时走与 onUp 完全相同的收尾（本地仅做选择/seek 语义；
+                // 真正的 clip 拖拽由 useClipDrag 自身的失焦守卫收尾）。
+                let finished = false;
+                const finish = () => {
+                    if (finished) return;
+                    finished = true;
+                    unregisterAbort();
                     window.removeEventListener("pointermove", onMove, true);
                     window.removeEventListener("pointerup", onUp, true);
                     window.removeEventListener("pointercancel", onUp, true);
                     if (!moved) {
                         if (doShiftRangeSelect) {
                             onShiftRangeSelect(clip.id, shiftRangeAnchorClipId, startX);
-                        } else if (shouldPrimeSelection) {
+                        } else if (shouldPrimeSelection && !primedSelection) {
                             primeSelection(clip.id, true, event.clientX);
                         }
                         if (allowSeek) {
-                            seekFromClientX(ev.clientX, true);
+                            seekFromClientX(lastClientX, true);
                         }
                     }
                 };
+                const onUp = (ev: PointerEvent) => {
+                    if (ev.pointerId !== event.pointerId) return;
+                    finish();
+                };
+                const unregisterAbort = registerDragAbort(finish);
 
                 window.addEventListener("pointermove", onMove, true);
                 window.addEventListener("pointerup", onUp, true);
@@ -353,8 +444,12 @@ export const TrackLane = React.memo(
                 startClipDrag(event, clip.id, clip.startSec, false);
             },
             [
-                altPressed,
                 clearContextMenu,
+                selectedClipId,
+                multiSelectedClipIds,
+                multiSelectedSet,
+                multiSelectToggleKb,
+                rangeSelectKb,
                 onShiftRangeSelect,
                 primeSelection,
                 rangeSelectAnchorClipId,
@@ -362,6 +457,57 @@ export const TrackLane = React.memo(
                 startClipDrag,
             ],
         );
+        /**
+         * 轨道空白区（无任何 clip 编辑目标）的播放头手势：交互等级最低的
+         * 播放头拖拽入口。按下立即提交一次 seek，拖动中视觉跟随（commit=false），
+         * 松开提交。与标尺行为一致；Clip / 淡变 / 边缘等更优目标会先行命中，
+         * 因此本手势永远不会与它们抢交互。
+         */
+        const beginBackgroundSeekInteraction = React.useCallback(
+            (event: React.PointerEvent<HTMLDivElement>) => {
+                if (event.button !== 0) return;
+                event.preventDefault();
+                event.stopPropagation();
+                const pointerId = event.pointerId;
+                let lastClientX = event.clientX;
+                seekFromClientX(event.clientX, true);
+
+                const onMove = (ev: PointerEvent) => {
+                    if (ev.pointerId !== pointerId) return;
+                    lastClientX = ev.clientX;
+                    seekFromClientX(ev.clientX, false);
+                };
+
+                // 失焦取消：切屏期间 pointerup/pointercancel 不送达本窗口，
+                // 用最后一次已知的客户坐标提交播放头并清理（防高亮冻结）。
+                let finished = false;
+                const finish = () => {
+                    if (finished) return;
+                    finished = true;
+                    unregisterAbort();
+                    window.removeEventListener("pointermove", onMove, true);
+                    window.removeEventListener("pointerup", onEnd, true);
+                    window.removeEventListener("pointercancel", onEnd, true);
+                    seekFromClientX(lastClientX, true);
+                    // 拖拽结束（含 pointercancel 中断）＝播放头手势语境终止：
+                    // 清除吸附竖线高亮。提交式 seek（setPlayheadFromClientX）内部
+                    // 也会清理，这里显式兜底保证手势语义自包含 — 否则最后一步
+                    // 网格吸附的高亮会冻结在轨道空白区，只有其它拖拽才能覆盖掉。
+                    clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+                };
+                const onEnd = (ev: PointerEvent) => {
+                    if (ev.pointerId !== pointerId) return;
+                    finish();
+                };
+                const unregisterAbort = registerDragAbort(finish);
+
+                window.addEventListener("pointermove", onMove, true);
+                window.addEventListener("pointerup", onEnd, true);
+                window.addEventListener("pointercancel", onEnd, true);
+            },
+            [seekFromClientX],
+        );
+
         const beginEdgeInteraction = React.useCallback(
             (
                 event: React.PointerEvent<HTMLDivElement>,
@@ -374,14 +520,20 @@ export const TrackLane = React.memo(
                 // for edit-mode selection (stretch vs trim). For click-selection
                 // bypass, only check the physical Alt key.
                 const stretchActive = altPressed;
-                const altKeyDown = Boolean(
-                    event.altKey || event.nativeEvent.getModifierState?.("Alt"),
-                );
-                const ctrlOrMeta = event.ctrlKey || event.metaKey;
-                const doShiftRangeSelect = event.shiftKey && !altKeyDown && !ctrlOrMeta;
+                const selectionMods = resolveClipSelectionModifiers({
+                    event,
+                    multiSelectToggleKb,
+                    rangeSelectKb,
+                });
+                const doShiftRangeSelect = selectionMods.rangeSelectActive;
                 const shiftRangeAnchorClipId = doShiftRangeSelect ? rangeSelectAnchorClipId : null;
-                const doCtrlToggleOnly = ctrlOrMeta && !event.shiftKey && !altKeyDown;
-                const shouldPrimeSelection = !doCtrlToggleOnly && !doShiftRangeSelect;
+                const doCtrlToggleOnly = selectionMods.multiSelectToggleActive;
+                const shouldPrimeSelection = selectionMods.shouldPrimeSelection;
+                const clipIsSelected =
+                    multiSelectedClipIds.length > 0
+                        ? multiSelectedSet.has(clipId)
+                        : selectedClipId === clipId;
+                const primedSelection = shouldPrimeSelection && !clipIsSelected;
                 const mode =
                     edge === "trim_left"
                         ? stretchActive
@@ -393,11 +545,16 @@ export const TrackLane = React.memo(
                 const startX = event.clientX;
                 const startY = event.clientY;
                 const pointerId = event.pointerId;
+                const laneEl = event.currentTarget as HTMLElement;
                 let dragStarted = false;
 
                 event.preventDefault();
                 event.stopPropagation();
                 clearContextMenu();
+
+                if (primedSelection) {
+                    primeSelection(clipId, true, event.clientX);
+                }
 
                 const onMove = (ev: PointerEvent) => {
                     if (ev.pointerId !== pointerId || dragStarted) return;
@@ -408,8 +565,14 @@ export const TrackLane = React.memo(
                     startEditDrag(event, clipId, mode);
                 };
 
-                const onEnd = (ev: PointerEvent) => {
-                    if (ev.pointerId !== pointerId) return;
+                // 失焦取消：切屏期间 pointerup/pointercancel 不送达本窗口。
+                // blur 时走与 onEnd 相同的收尾（真正的裁短/拉伸拖拽由
+                // useEditDrag 自身的失焦守卫收尾并提交）。
+                let finished = false;
+                const finish = () => {
+                    if (finished) return;
+                    finished = true;
+                    unregisterAbort();
                     window.removeEventListener("pointermove", onMove, true);
                     window.removeEventListener("pointerup", onEnd, true);
                     window.removeEventListener("pointercancel", onEnd, true);
@@ -422,20 +585,40 @@ export const TrackLane = React.memo(
                             onShiftRangeSelect(clipId, shiftRangeAnchorClipId, startX);
                             return;
                         }
-                        if (shouldPrimeSelection) {
+                        if (shouldPrimeSelection && !primedSelection) {
                             primeSelection(clipId, true, event.clientX);
                         }
-                        seekFromClientX(ev.clientX, true);
+                        // 单击 Clip 边缘（未拖动）→ 播放头跳到该边缘的准确位置。
+                        // lane 容器左缘即时间轴 0 秒的客户坐标；clip 左/右缘在
+                        // lane 内 = startSec（左缘）或 startSec+lengthSec（右缘）。
+                        const edgeClip = trackClips.find((entry) => entry.id === clipId);
+                        const laneRect = laneEl.getBoundingClientRect();
+                        const edgeSec =
+                            edge === "trim_left"
+                                ? (edgeClip?.startSec ?? 0)
+                                : (edgeClip?.startSec ?? 0) + (edgeClip?.lengthSec ?? 0);
+                        seekFromClientX(laneRect.left + edgeSec * pxPerSec, true);
                     }
                 };
+                const onEnd = (ev: PointerEvent) => {
+                    if (ev.pointerId !== pointerId) return;
+                    finish();
+                };
+                const unregisterAbort = registerDragAbort(finish);
 
                 window.addEventListener("pointermove", onMove, true);
                 window.addEventListener("pointerup", onEnd, true);
                 window.addEventListener("pointercancel", onEnd, true);
             },
+            // eslint-disable-next-line react-hooks/exhaustive-deps -- pxPerSec/trackClips 为渲染期值，加入依赖会改变回调重建时机（既有 memo 模式）
             [
                 altPressed,
                 clearContextMenu,
+                selectedClipId,
+                multiSelectedClipIds,
+                multiSelectedSet,
+                multiSelectToggleKb,
+                rangeSelectKb,
                 onCtrlToggleSelect,
                 onShiftRangeSelect,
                 primeSelection,
@@ -444,11 +627,41 @@ export const TrackLane = React.memo(
                 startEditDrag,
             ],
         );
+        // SnapOffset（吸附偏移）角部手势：左下角 ◣ 处按下即进入偏移拖拽
+        // （内部走完整吸附引擎与竖线高亮）。选择预备语义与边缘交互一致。
+        const beginSnapOffsetInteraction = React.useCallback(
+            (event: React.PointerEvent<HTMLDivElement>, clip: ClipInfo) => {
+                if (event.button !== 0) return;
+                const selectionMods = resolveClipSelectionModifiers({
+                    event,
+                    multiSelectToggleKb,
+                    rangeSelectKb,
+                });
+                const doShiftRangeSelect = selectionMods.rangeSelectActive;
+                const doCtrlToggleOnly = selectionMods.multiSelectToggleActive;
+
+                event.preventDefault();
+                event.stopPropagation();
+                clearContextMenu();
+
+                if (!doShiftRangeSelect && !doCtrlToggleOnly) {
+                    primeSelection(clip.id, true, event.clientX);
+                }
+                startSnapOffsetDrag?.(event, clip.id);
+            },
+            [
+                clearContextMenu,
+                multiSelectToggleKb,
+                rangeSelectKb,
+                primeSelection,
+                startSnapOffsetDrag,
+            ],
+        );
 
         return (
             <div
                 key={track.id}
-                className="border-b border-qt-border relative"
+                className="relative"
                 style={{
                     height: rowHeight,
                     backgroundColor: showVerticalTrackLock
@@ -465,7 +678,7 @@ export const TrackLane = React.memo(
                     );
                 }}
                 onContextMenuCapture={(event) => {
-                    if (isClipItemTarget(event.target)) {
+                    if (isClipItemTarget(event.target) || isOverlapLayerTarget(event.target)) {
                         return;
                     }
                     const hit = hitTestLane(event.clientX, event.clientY, event.currentTarget);
@@ -481,7 +694,7 @@ export const TrackLane = React.memo(
                     openContextMenu(hit.clipId, event.clientX, event.clientY);
                 }}
                 onPointerDownCapture={(event) => {
-                    if (isClipItemTarget(event.target)) {
+                    if (isClipItemTarget(event.target) || isOverlapLayerTarget(event.target)) {
                         return;
                     }
                     if (event.button !== 0) {
@@ -489,10 +702,19 @@ export const TrackLane = React.memo(
                     }
                     const hit = hitTestLane(event.clientX, event.clientY, event.currentTarget);
                     if (!hit.clipId) {
+                        // 空白区点击 = 取消 clip 选中（DAW 通用约定），随后进入
+                        // 最低优先级播放头手势（播放头自身 pointer-events-none，
+                        // 拖拽/单击落点都在这里响应）。
+                        deselectAllClips();
+                        beginBackgroundSeekInteraction(event);
                         return;
                     }
                     const clip = trackClips.find((candidate) => candidate.id === hit.clipId);
                     if (!clip) {
+                        return;
+                    }
+                    if (hit.zone === "snap_offset") {
+                        beginSnapOffsetInteraction(event, clip);
                         return;
                     }
                     if (hit.zone === "trim_left" || hit.zone === "trim_right") {
@@ -519,20 +741,6 @@ export const TrackLane = React.memo(
                         </div>
                     </div>
                 ) : null}
-                {/* 轨道级波形 Canvas：一个 Canvas 绘制该轨道所有可见 clip 的波形 */}
-                <WaveformTrackCanvas
-                    clips={trackClips}
-                    leadingOverlapSecByClipId={leadingOverlapSecByClipId}
-                    trackHeight={rowHeight}
-                    waveformTop={CLIP_HEADER_HEIGHT}
-                    waveformHeight={waveformHeight}
-                    pxPerSec={pxPerSec}
-                    viewportWidthPx={viewportWidthPx}
-                    viewportStartSec={viewportStartSec}
-                    viewportEndSec={viewportEndSec}
-                    strokeColor={waveformColors.stroke}
-                    strokeWidth={1}
-                />
                 {/* MIDI 音高预览 Canvas：绘制 MIDI clip 的音高线 */}
                 <MidiPitchTrackCanvas
                     clips={trackClips}
@@ -569,6 +777,7 @@ export const TrackLane = React.memo(
                             seekFromClientX={seekFromClientX}
                             startClipDrag={startClipDrag}
                             startEditDrag={startEditDrag}
+                            startSnapOffsetDrag={startSnapOffsetDrag}
                             toggleClipMuted={toggleClipMuted}
                             onCtrlToggleSelect={onCtrlToggleSelect}
                             toggleMultiSelect={toggleMultiSelect}
@@ -577,18 +786,52 @@ export const TrackLane = React.memo(
                             recordLastClickPosition={recordLastClickPosition}
                             clearContextMenu={clearContextMenu}
                             triggerRename={renamingClipId === clip.id}
+                            onRenameStart={onRenameStart}
                             onRenameCommit={onRenameCommit}
                             onRenameDone={onRenameDone}
+                            onRenameClickCandidate={onRenameClickCandidate}
                             onGainCommit={onGainCommit}
                             onFormantMorphCommit={onFormantMorphCommit}
                             activeGroupIds={activeGroupIds}
                             disabledGroupIds={disabledGroupIds}
                             onToggleGroupDisabled={onToggleGroupDisabled}
                             hovered={hoveredClipId === clip.id}
+                            showAllTakes={showAllTakes}
+                            onActivateTake={onActivateTake}
+                            fadeShapeCycleKb={fadeShapeCycleKb}
+                            multiSelectToggleKb={multiSelectToggleKb}
+                            rangeSelectKb={rangeSelectKb}
+                            pitchDragKb={pitchDragKb}
+                            onClipPitchDragStart={onClipPitchDragStart}
+                            onFadeShapeCycleClick={onFadeShapeCycleClick}
+                            fadeLengthFormatCtx={fadeLengthFormatCtx}
                         />
                     );
                 })}
-                {/* Ghost clip 预览：Ctrl+拖动复制时显示半透明副本 */}
+                {/* 交叉（重叠）区确定性编辑层：双方边缘/淡入淡出都可在合适位置编辑 */}
+                <OverlapEditLayer
+                    trackClips={trackClips}
+                    pxPerSec={pxPerSec}
+                    rowHeight={rowHeight}
+                    altPressed={altPressed}
+                    selectedClipId={selectedClipId}
+                    multiSelectedClipIds={multiSelectedClipIds}
+                    multiSelectedSet={multiSelectedSet}
+                    ensureSelected={ensureSelected}
+                    selectClipRemote={selectClipRemote}
+                    recordLastClickPosition={recordLastClickPosition}
+                    startEditDrag={startEditDrag}
+                    startSnapOffsetDrag={startSnapOffsetDrag}
+                    seekFromClientX={seekFromClientX}
+                    fadeLengthFormatCtx={fadeLengthFormatCtx}
+                    shapeCycleKb={fadeShapeCycleKb}
+                    onCrossfadeCycleClick={onCrossfadeCycleClick}
+                    onFadeShapeSingleCycle={({ clipId, isOut }) =>
+                        onFadeShapeCycleClick?.(clipId, isOut ? "out" : "in")
+                    }
+                    t={(key) => t(key as Parameters<typeof t>[0])}
+                />
+                {/* Ghost clip 预览：复制拖动时显示半透明副本 */}
                 {ghostClips.map(({ clip, ghostStartSec }) => {
                     const ghostLeft = Math.max(0, ghostStartSec * pxPerSec);
                     const ghostWidth = Math.max(1, clip.lengthSec * pxPerSec);
@@ -601,25 +844,29 @@ export const TrackLane = React.memo(
                                 width: ghostWidth,
                                 top: 0,
                                 height: rowHeight - CLIP_BODY_PADDING_Y,
+                                // 抬到 TimelineSurface（zIndex:1，含不透明 clip body
+                                // 画布）之上：clip body 改为不透明后，z 序低于画布的
+                                // ghost 会被完全盖住。
+                                zIndex: 2,
                             }}
                         >
-                            {/* Ghost header 条 */}
+                            {/* Ghost header 条：与真实 Clip 同用归一化轨道色 */}
                             <div
                                 className="absolute left-0 right-0 top-0"
                                 style={{
                                     height: CLIP_HEADER_HEIGHT,
                                     backgroundColor: trackColor
-                                        ? `color-mix(in oklab, var(--qt-clip-bg) 56%, ${trackColor} 44%)`
+                                        ? `color-mix(in oklab, var(--qt-clip-bg) 40%, ${normalizedTrackColorCss(trackColor, darkMode)} 60%)`
                                         : "var(--qt-clip-bg)",
                                 }}
                             />
                             {/* Ghost body 区域 */}
                             <div
-                                className="absolute left-0 right-0 bottom-0 border border-dashed border-white/60"
+                                className="absolute left-0 right-0 bottom-0 border border-dashed border-black/40"
                                 style={{
                                     top: CLIP_HEADER_HEIGHT,
                                     backgroundColor: trackColor
-                                        ? `color-mix(in oklab, var(--qt-clip-bg) 60%, ${trackColor} 40%)`
+                                        ? `color-mix(in oklab, var(--qt-clip-bg) 45%, ${normalizedTrackColorCss(trackColor, darkMode)} 55%)`
                                         : "var(--qt-clip-bg)",
                                 }}
                             />
@@ -649,6 +896,7 @@ export const TrackLane = React.memo(
             prev.seekFromClientX === next.seekFromClientX &&
             prev.startClipDrag === next.startClipDrag &&
             prev.startEditDrag === next.startEditDrag &&
+            prev.startSnapOffsetDrag === next.startSnapOffsetDrag &&
             prev.toggleClipMuted === next.toggleClipMuted &&
             prev.onCtrlToggleSelect === next.onCtrlToggleSelect &&
             prev.toggleMultiSelect === next.toggleMultiSelect &&
@@ -657,18 +905,32 @@ export const TrackLane = React.memo(
             prev.recordLastClickPosition === next.recordLastClickPosition &&
             prev.clearContextMenu === next.clearContextMenu &&
             prev.renamingClipId === next.renamingClipId &&
+            prev.onRenameStart === next.onRenameStart &&
             prev.onRenameCommit === next.onRenameCommit &&
             prev.onRenameDone === next.onRenameDone &&
+            prev.onRenameClickCandidate === next.onRenameClickCandidate &&
             prev.onGainCommit === next.onGainCommit &&
             prev.onFormantMorphCommit === next.onFormantMorphCommit &&
             prev.ghostDrag === next.ghostDrag &&
             prev.verticalTrackLockTrackId === next.verticalTrackLockTrackId &&
             prev.allClips === next.allClips &&
+            prev.showAllTakes === next.showAllTakes &&
+            prev.onActivateTake === next.onActivateTake &&
             sameStringArray(prev.overlayClipIds, next.overlayClipIds) &&
             prev.activeGroupIds === next.activeGroupIds &&
             prev.disabledGroupIds === next.disabledGroupIds &&
-            prev.onToggleGroupDisabled === next.onToggleGroupDisabled
-            // viewportStartSec / viewportEndSec are consumed by WaveformTrackCanvas via the viewport bus
+            prev.onToggleGroupDisabled === next.onToggleGroupDisabled &&
+            // 淡化 tooltip 的时间单位上下文：单位切换时必须重渲染，
+            // 否则 tooltip 一直显示旧单位（其 memo 仅在 5 个原始字段变化时重建）。
+            prev.fadeLengthFormatCtx === next.fadeLengthFormatCtx &&
+            prev.onFadeShapeCycleClick === next.onFadeShapeCycleClick &&
+            prev.onCrossfadeCycleClick === next.onCrossfadeCycleClick &&
+            prev.fadeShapeCycleKb === next.fadeShapeCycleKb &&
+            prev.multiSelectToggleKb === next.multiSelectToggleKb &&
+            prev.rangeSelectKb === next.rangeSelectKb &&
+            prev.pitchDragKb === next.pitchDragKb &&
+            prev.onClipPitchDragStart === next.onClipPitchDragStart
+            // viewportStartSec / viewportEndSec are consumed by TimelineWaveformSurface via the viewport bus
             // after mount, so pure horizontal scroll should not force a TrackLane rerender.
         );
     },

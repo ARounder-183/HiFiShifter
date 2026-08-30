@@ -3,14 +3,17 @@ import { webApi } from "../../../services/webviewApi";
 import type { TimelineState } from "../../../types/api";
 import type { ClipTemplate } from "../sessionTypes";
 import { waveformMipmapStore } from "../../../utils/waveformMipmapStore";
+import { computePasteEndSec, type PasteEndClipLike } from "../pastePlayhead";
 
-// 注意：这�?thunk 依赖 SessionState（目前仍�?sessionSlice.ts 内部定义）�?
-// 我们在此处用 type-only import，避免运行时循环依赖�?
+// 注意：这个 thunk 依赖 SessionState（目前仍然在 sessionSlice.ts 内部定义），
+// 我们在此处用 type-only import，避免运行时循环依赖。
 import type { SessionState } from "../sessionSlice";
 
 export const addTrackRemote = createAsyncThunk(
     "session/addTrackRemote",
-    async (payload: { name?: string; parentTrackId?: string | null }) => {
+    // 注意：不再强制设置灰色 —— 新建轨道使用后端调色板分配的彩色，
+    // 仅新建工程的初始 Main 轨道为灰色（见后端 TimelineState::default）。
+    async (payload: { name?: string; parentTrackId?: string | null; index?: number }) => {
         return webApi.addTrackNested(payload);
     },
 );
@@ -24,8 +27,23 @@ export const removeTrackRemote = createAsyncThunk(
 
 export const duplicateTrackRemote = createAsyncThunk(
     "session/duplicateTrackRemote",
-    async (trackId: string) => {
-        return webApi.duplicateTrack(trackId);
+    async (
+        payload:
+            | string
+            | {
+                  trackId: string;
+                  /** “复制拖动”放置语义：克隆子树的目标父级与同级 index。 */
+                  parentTrackId?: string | null;
+                  targetIndex?: number;
+              },
+    ) => {
+        if (typeof payload === "string") {
+            return webApi.duplicateTrack(payload);
+        }
+        return webApi.duplicateTrack(payload.trackId, {
+            parentTrackId: payload.parentTrackId,
+            targetIndex: payload.targetIndex,
+        });
     },
 );
 
@@ -38,7 +56,8 @@ export const moveTrackRemote = createAsyncThunk(
 
 export const selectTrackRemote = createAsyncThunk(
     "session/selectTrackRemote",
-    async (trackId: string) => {
+    async (arg: string | { trackId: string; applySelectedClip?: boolean }) => {
+        const trackId = typeof arg === "string" ? arg : arg.trackId;
         return webApi.selectTrack(trackId);
     },
 );
@@ -262,11 +281,18 @@ export const setClipStateRemote = createAsyncThunk(
         sourceStartSec?: number;
         sourceEndSec?: number;
         playbackRate?: number;
+        clipPlaybackRate?: number;
         reversed?: boolean;
+        loopEnabled?: boolean;
+        snapOffsetSec?: number;
         fadeInSec?: number;
         fadeOutSec?: number;
-        fadeInCurve?: string;
-        fadeOutCurve?: string;
+        fadeInShape?: number;
+        fadeOutShape?: number;
+        fadeInDir?: number;
+        fadeOutDir?: number;
+        autoFadeInSec?: number;
+        autoFadeOutSec?: number;
         formantMorph?: {
             enabled: boolean;
             targetF1Hz: number;
@@ -279,6 +305,79 @@ export const setClipStateRemote = createAsyncThunk(
     },
 );
 
+export const setClipActiveTakeRemote = createAsyncThunk(
+    "session/setClipActiveTakeRemote",
+    async (payload: { clipId: string; takeId: string; checkpoint?: boolean }) => {
+        return webApi.setClipActiveTake(payload);
+    },
+);
+
+export const cycleClipTakesRemote = createAsyncThunk(
+    "session/cycleClipTakesRemote",
+    async (payload: { clipIds: string[]; direction?: number; checkpoint?: boolean }) => {
+        return webApi.cycleClipTakes(payload);
+    },
+);
+
+export const packClipsIntoTakesRemote = createAsyncThunk(
+    "session/packClipsIntoTakesRemote",
+    async (payload: { clipIds: string[]; checkpoint?: boolean }) => {
+        return webApi.packClipsIntoTakes(payload);
+    },
+);
+
+export const explodeClipTakesRemote = createAsyncThunk(
+    "session/explodeClipTakesRemote",
+    async (payload: { clipId: string; checkpoint?: boolean }) => {
+        return webApi.explodeClipTakes(payload);
+    },
+);
+
+export const duplicateClipTakeRemote = createAsyncThunk(
+    "session/duplicateClipTakeRemote",
+    async (payload: { clipId: string; takeId: string; checkpoint?: boolean }) => {
+        return webApi.duplicateClipTake(payload);
+    },
+);
+
+export const removeClipTakeRemote = createAsyncThunk(
+    "session/removeClipTakeRemote",
+    async (payload: { clipId: string; takeId: string; checkpoint?: boolean }) => {
+        return webApi.removeClipTake(payload);
+    },
+);
+
+export const renameClipTakeRemote = createAsyncThunk(
+    "session/renameClipTakeRemote",
+    async (payload: { clipId: string; takeId: string; name: string; checkpoint?: boolean }) => {
+        return webApi.renameClipTake(payload);
+    },
+);
+
+export const setClipTakeReversedRemote = createAsyncThunk(
+    "session/setClipTakeReversedRemote",
+    async (payload: {
+        clipId: string;
+        takeId: string;
+        reversed: boolean;
+        checkpoint?: boolean;
+    }) => {
+        return webApi.setClipTakeReversed(payload);
+    },
+);
+
+export const addClipTakeFromMediaRemote = createAsyncThunk(
+    "session/addClipTakeFromMediaRemote",
+    async (payload: {
+        clipId: string;
+        sourcePath: string;
+        name?: string;
+        checkpoint?: boolean;
+    }) => {
+        return webApi.addClipTakeFromMedia(payload);
+    },
+);
+
 export const setClipsStateBulkRemote = createAsyncThunk(
     "session/setClipsStateBulkRemote",
     async (payload: {
@@ -286,12 +385,69 @@ export const setClipsStateBulkRemote = createAsyncThunk(
             clipId: string;
             gain?: number;
             muted?: boolean;
+            startSec?: number;
+            lengthSec?: number;
+            sourceStartSec?: number;
+            sourceEndSec?: number;
+            snapOffsetSec?: number;
+            clipPlaybackRate?: number;
             fadeInSec?: number;
             fadeOutSec?: number;
+            fadeInShape?: number;
+            fadeInDir?: number;
+            fadeOutShape?: number;
+            fadeOutDir?: number;
+            autoFadeInSec?: number;
+            autoFadeOutSec?: number;
+            reversed?: boolean;
+            loopEnabled?: boolean;
         }>;
         checkpoint?: boolean;
     }) => {
         return webApi.setClipsStateBulk(payload);
+    },
+);
+
+export const pasteTimelineClipboardRemote = createAsyncThunk(
+    "session/pasteTimelineClipboardRemote",
+    async (mode: "selected" | "new_tracks" | undefined, { rejectWithValue }) => {
+        const result = await webApi.pasteTimelineClipboard(mode);
+        if (!result?.ok) {
+            return rejectWithValue(result?.error ?? "paste_timeline_clipboard_failed");
+        }
+        const createdClipIds = Array.isArray(result.created_clip_ids)
+            ? result.created_clip_ids
+            : Array.isArray((result as { createdClipIds?: string[] }).createdClipIds)
+              ? ((result as { createdClipIds?: string[] }).createdClipIds as string[])
+              : [];
+        // 粘贴产生 Clip 后，把播放光标跳到所有新 Clip 中最靠右的结束位置，
+        // 并同步后端 transport，保证前后端一致。
+        let pasteEndSec: number | null = null;
+        if (createdClipIds.length > 0) {
+            pasteEndSec = computePasteEndSec(
+                (result as { clips?: PasteEndClipLike[] }).clips,
+                createdClipIds,
+            );
+            if (pasteEndSec !== null) {
+                try {
+                    await webApi.setTransport({ playheadSec: pasteEndSec });
+                } catch {
+                    // transport 同步失败不应让粘贴本身报错。
+                }
+            }
+        }
+        // 视图聚焦（若新光标在画面外则水平滚动）由 reducer 记录的
+        // pendingPlayheadRevealSec 驱动，在状态与 DOM 提交后执行，
+        // 避免被旧的工程全长上限钳制。
+        return {
+            ok: true,
+            timeline: result,
+            newClipIds: createdClipIds,
+            pasteEndSec,
+            sourceProject: (result as { sourceProject?: string }).sourceProject,
+            importedTrackCount: (result as { importedTrackCount?: number }).importedTrackCount,
+            importedClipCount: (result as { importedClipCount?: number }).importedClipCount,
+        } as const;
     },
 );
 

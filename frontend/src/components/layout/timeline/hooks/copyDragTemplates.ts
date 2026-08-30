@@ -14,10 +14,14 @@ export async function buildCopyDragTemplates(args: {
             sourceStartSec?: number;
             sourceEndSec?: number;
             playbackRate?: number;
+            reversed?: boolean;
+            loopEnabled?: boolean;
             fadeInSec?: number;
             fadeOutSec?: number;
-            fadeInCurve?: string;
-            fadeOutCurve?: string;
+            fadeInShape?: number;
+            fadeInDir?: number;
+            fadeOutShape?: number;
+            fadeOutDir?: number;
         };
         targetTrackId: string;
     }>;
@@ -36,10 +40,14 @@ export async function buildCopyDragTemplates(args: {
         sourceStartSec: Number(input.now.sourceStartSec ?? 0) || 0,
         sourceEndSec: Number(input.now.sourceEndSec ?? 0) || 0,
         playbackRate: Number(input.now.playbackRate ?? 1) || 1,
+        reversed: Boolean(input.now.reversed),
+        loopEnabled: Boolean(input.now.loopEnabled),
         fadeInSec: Number(input.now.fadeInSec ?? 0) || 0,
         fadeOutSec: Number(input.now.fadeOutSec ?? 0) || 0,
-        fadeInCurve: input.now.fadeInCurve as ClipTemplate["fadeInCurve"],
-        fadeOutCurve: input.now.fadeOutCurve as ClipTemplate["fadeOutCurve"],
+        fadeInShape: Number(input.now.fadeInShape ?? 0) || 0,
+        fadeInDir: Number(input.now.fadeInDir ?? 0) || 0,
+        fadeOutShape: Number(input.now.fadeOutShape ?? 0) || 0,
+        fadeOutDir: Number(input.now.fadeOutDir ?? 0) || 0,
         linkedParams: args.linkedParamsResults[index]?.ok
             ? (args.linkedParamsResults[index]?.linkedParams as ClipTemplate["linkedParams"])
             : undefined,

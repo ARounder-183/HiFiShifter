@@ -80,7 +80,7 @@ export const AppearanceSettingsDialog = ({ open, onOpenChange }: AppearanceSetti
         if (windowCreatedRef.current) return;
 
         void createAppearanceWindow();
-    }, [open]);
+    }, [open]); // eslint-disable-line react-hooks/exhaustive-deps -- createAppearanceWindow 声明在本 effect 之后（const 时序限制无法加入依赖），且引用稳定
 
     const createAppearanceWindow = useCallback(async () => {
         try {

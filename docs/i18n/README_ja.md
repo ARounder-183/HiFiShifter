@@ -36,19 +36,19 @@ HiFiShifterは他のソフトウェアからのプロジェクト移行を容易
 
 ### レイアウト
 
-HiFiShifterは大きく分けて2つの機能エリアに分かれています。上部のトラックパネルと下部のパラメータパネルです。トラックパネルは主にオーディオクリップの処理を担当し、パラメータパネルはパラメータ調整を担当します。
+HiFiShifterは大きく分けて2つの機能エリアに分かれています。上部のトラックパネルと下部のパラメータパネルです。トラックパネルは主にオーディオクリップの編集と配置を担当し、パラメータパネルはパラメータ調整を担当します。
 
 ### トラックパネル
 
 HiFiShifterは、ほとんどの現代的なDAWと同様に、かなり完全なトラックパネルとオーディオクリップ編集機能を提供します。
 
-#### オーディオのインポート
+#### メディアのインポート（音声 / 動画）
 
-HiFiShifterは3つの方法でオーディオをインポートできます：
+HiFiShifterは3つの方法でメディアファイルをインポートできます。動画ファイルは自動的に音声トラックを使用します：
 
-1. システムのファイルマネージャーからトラックにオーディオを直接ドラッグ＆ドロップする。
-2. ツールバーのフォルダアイコンをクリックして内蔵ファイルブラウザを開き、オーディオをトラックにドラッグする。
-3. `Ctrl + F` を押してクイック検索を開き、オーディオを選択してトラックにインポートする（クイック検索のファイルパスは内蔵ファイルブラウザの現在のパスと同じ）。
+1. システムのファイルマネージャーからトラックに音声または動画ファイルを直接ドラッグ＆ドロップする。
+2. ツールバーのフォルダアイコンをクリックして内蔵ファイルブラウザを開き、メディアファイルをトラックにドラッグする。
+3. `Ctrl + F` を押してクイック検索を開き、メディアファイルを選択してトラックにインポートする（クイック検索のファイルパスは内蔵ファイルブラウザの現在のパスと同じ）。
 
 #### オーディオ編集
 
@@ -63,7 +63,7 @@ HiFiShifterは3つの方法でオーディオをインポートできます：
 - **コピードラッグ**：`Ctrl` を押しながらクリップをドラッグすると、ターゲット位置にコピーを作成します（元のクリップはそのまま；コピーはドロップ時に有効）。
 - **グルー**：クリップを右クリックしてメニューから「グルー」を選択します（同じトラックに少なくとも2つのクリップが必要）。
 - **分割**：クリップを選択して `S` を押すと、再生ヘッドの位置で分割します。
-- **コピー/貼り付け**：クリップを選択して `Ctrl + C` を押すと、アプリケーションクリップボードにコピーします。`Ctrl + V` は、選択したクリップの最も左の開始位置を再生ヘッド位置に合わせ、他のクリップの相対的な間隔を維持します。
+- **コピー/貼り付け**：クリップを選択して `Ctrl + C` を押すと、アプリケーションクリップボードにコピーします。`Ctrl + V` は、選択したクリップの最も左の開始位置を再生ヘッド位置に合わせ、他のクリップの相対的な間隔を維持します。コピー時はクリップボードに REAPERMedia 形式のデータも同時に書き込まれ、そのまま REAPER で貼り付けできます。
 
 トラックはネストをサポートしていることに注意してください。あるトラックを別のトラックの下にドラッグして子トラックにし、トラックグループを形成できます。これはその後のパラメータ調整で非常に役立ちます。
 
@@ -124,6 +124,8 @@ VocalShifterが提供するアルゴリズムライブラリ。
 | 選択クリップを削除                           | Delete                                      |
 | 選択クリップをコピー（アプリクリップボード） | Ctrl + C                                    |
 | 再生ヘッドに貼り付け                         | Ctrl + V                                    |
+| グループ化 / グループ解除                    | G / U                                       |
+| テイクを切り替え                             | T（`Shift + T` で前のテイク）               |
 | 選択範囲カーブをコピー（パラメータ）         | Ctrl + C（選択モード）                      |
 | 選択範囲の先頭に貼り付け                     | Ctrl + V（選択モード）                      |
 | クリップを分割                               | S（再生ヘッド位置で選択クリップを分割）     |
@@ -169,10 +171,46 @@ SKIP_FRONTEND=0 bash ./scripts/install_deps_macos.sh
 
 #### Linux
 
+以下のツールがインストールされていることを確認してください：
+
+- **Node.js**（推奨 20+）と npm
+- **Rust ツールチェーン**（`rust-toolchain.toml` を参照 — プロジェクトが自動的にプラットフォームに対応した stable ツールチェーンを選択します）
+- **Tauri 2 CLI**: `cargo install tauri-cli --version "^2"`
+- **CMake**、**pkg-config**、およびシステムビルドツール
+- **GTK3、WebKit2GTK、ALSA** などの Tauri ランタイム開発ライブラリ（下記のインストールスクリプトを参照）
+
+ワンクリックインストールスクリプトを実行：
+
 ```bash
 chmod +x ./scripts/install_deps_linux.sh
-SKIP_FRONTEND=0 bash ./scripts/install_deps_linux.sh
+bash ./scripts/install_deps_linux.sh
 ```
+
+このスクリプトはシステム依存関係、Node.js（存在しない場合）、appimagetool、およびフロントエンドの npm 依存関係をインストールします。
+
+フロントエンド依存関係のインストール（スクリプトを使用しない場合）：
+
+```bash
+npm --prefix frontend ci
+```
+
+#### Linux AppImage ビルド
+
+`vslib` アルゴリズムは Windows 専用のため、Linux ビルドではデフォルト機能を無効にする必要があります：
+
+```bash
+# backend/ ディレクトリから実行（tauri.conf.json のパスはこのディレクトリからの相対パスです）
+cd backend
+cargo tauri build --bundles appimage -- --no-default-features --features onnx
+```
+
+または提供されているヘルパースクリプトを使用：
+
+```bash
+bash scripts/build-linux-appimage.sh
+```
+
+> **注意：** WSL2 環境では FUSE サポートがないため、Tauri bundler の linuxdeploy ステップが失敗する場合があります（エラー：`failed to run linuxdeploy`）。これは WSL2 の既知の制限であり、実際の AppImage 出力には影響しません — AppDir は `target/release/bundle/appimage/` に正しく構築されます。`APPIMAGE_EXTRACT_AND_RUN=1` を設定して手動で `appimagetool` を実行してパッケージ化してください。この問題は実際の Linux マシンや CI では発生しません。
 
 ### 3. SoundTouch ソース
 
@@ -185,25 +223,37 @@ cd backend/src-tauri/third_party/soundtouch-static
 git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.git soundtouch
 ```
 
-### 4. GPUアクセラレーションビルド
+### 4. GPUアクセラレーション
 
-| プラットフォーム            | GPU技術               | 説明                                                            |
-| --------------------------- | --------------------- | --------------------------------------------------------------- |
-| Windows x86_64 / ARM64      | DirectML (DirectX 12) | ort crateが自動ダウンロード、NVIDIA / AMD / Intel Arcに対応     |
-| macOS ARM64 (Apple Silicon) | CoreML                | Apple Neural Engine、自動有効化                                 |
-| macOS x86_64 (Intel)        | —                     | CPUのみ                                                         |
-| Linux x86_64 / ARM64        | —                     | CPUのみ（ONNX RuntimeはOpenCLをネイティブサポートしていません） |
+HiFiShifterは、サポートされているプラットフォームで自動的にGPU推論アクセラレーションを有効にします。メニューバーの**推論デバイス（Inference Device）**から Auto / CPU / GPU を選択でき、**ベンチマークを実行（Run Benchmark）** で各デバイスの推論遅延を比較できます。
+
+| プラットフォーム                | GPU技術                               | 説明                                                                           |
+| ------------------------------- | ------------------------------------- | ------------------------------------------------------------------------------ |
+| Windows x86_64 / ARM64          | DirectML (DirectX 12)                 | 成熟した安定GPUパス、NVIDIA / AMD / Intel Arcに対応                            |
+| macOS ARM64 (Apple Silicon)     | CoreML + WebGPU (Dawn/Metal)          | CoreMLはApple Neural Engineを活用；WebGPUは補助GPUバックエンドとして利用可能   |
+| macOS x86_64 (Intel)            | —                                     | CPUのみ（ort-tract代替バックエンドを使用）                                     |
+| Linux x86_64                    | WebGPU (Dawn/Vulkan)                  | DawnがVulkan APIを通じてGPUにアクセス；GPUがない場合はCPUにフォールバック      |
+| Linux ARM64                     | —                                     | CPUのみ（このターゲット向けのWebGPU ONNX Runtimeプリビルドバイナリがないため） |
+
+> **注意**：WindowsではWebGPUは無効です。Dawn/D3D12バックエンドが一部のGPU/ドライバの組み合わせでネイティブクラッシュを引き起こす可能性があります。DirectMLはWindows向けの成熟した安定GPUパスです。
+>
+> **WSL2ユーザー**：WSL2はLinuxサブ環境にハードウェアVulkanを公開しません。WebGPU/DawnはLavapipe（CPUソフトウェアレンダリング）しか使用できず、非常に低速です。WSL2でGPUアクセラレーションが必要な場合は、WindowsネイティブビルドのDirectMLを使用してください。
 
 #### 全プラットフォーム
 
-ONNX Runtimeのバイナリは、ort crateの `download-binaries` 機能によりビルド時に自動的にダウンロードされます。手動設定は不要です。
+ONNX Runtimeのバイナリは、ort crateの `download-binaries` 機能によりビルド時に自動的にダウンロードされます。手動設定は不要です。GPUプロバイダ（DirectML / WebGPU / CoreML）は、各ターゲットプラットフォーム向けにコンパイル時に自動的に有効化されます。追加の `--features` フラグは不要です。
 
-```powershell
+```bash
 # 開発モード（ホットリロード）
+cd backend
 cargo tauri dev
 
 # リリースビルド
+# Windows / macOS（デフォルト機能：onnx + vslib）
 cargo tauri build
+
+# Linux（vslibはWindows専用のため、デフォルト機能を除外）
+cargo tauri build --bundles appimage -- --no-default-features --features onnx
 
 # Windows ポータブルZIP
 .\scripts\pack-portable.ps1 -SkipBuild
@@ -242,7 +292,6 @@ $env:TAURI_UI_MODE='build'; cargo tauri dev
 ## ドキュメント
 
 - [ユーザーマニュアル](USERMANUAL_ja.md)
-- [Todoリスト](../../todo.md)
 
 ## 謝辞
 

@@ -1,2 +1,30 @@
-[build]
-target = "x86_64-pc-windows-msvc"
+# Default build target follows the host triple (cross-compilation targets
+# are specified via --target at build time or through CI matrix).
+#
+# Platform-specific Cargo configs can be placed in:
+#   .cargo/config-windows.toml   .cargo/config-macos.toml   .cargo/config-linux.toml
+
+# fdk-aac-sys 0.5.0 does not map MSVC's _M_ARM64 to the architecture macros
+# used by FDK_archdef.h. Without a define the header falls into its "#warning"
+# fallback, and MSVC rejects the #warning directive itself (fatal error C1021).
+#
+# Do NOT define __arm__ here: FDK_archdef.h would then take its ARM branch and
+# expose GNU __attribute__ syntax in hbe.cpp to MSVC (compile error). Instead
+# select FDK's generic __x86__ profile, whose fixed-point preference macros are
+# identical to the ARMv8 profile and which is the same code path FDK already
+# uses for successful MSVC x64 builds (_M_X64 -> __x86__).
+#
+# Set both CFLAGS and CXXFLAGS. fdk-aac-sys 0.5.0's build.rs never calls
+# cc::Build::cpp(true), so even though its sources are .cpp files the cc crate
+# reads CFLAGS (not CXXFLAGS) for those compilation commands. CXXFLAGS is kept
+# as a safety net in case a future fdk-aac-sys build script sets cpp(true).
+# No other cc consumer on this target checks __x86__, so the define is safe.
+[env]
+CFLAGS_aarch64_pc_windows_msvc = "-D__x86__"
+CXXFLAGS_aarch64_pc_windows_msvc = "-D__x86__"
+
+# NOTE: comctl32.dll is delay-loaded via build.rs `cargo:rustc-link-arg`
+# (Windows msvc only), NOT via `[target.*] rustflags` here: per-target
+# rustflags are baked into the fingerprint of every dependency crate and
+# force a full rebuild of the whole dependency graph, while build-script
+# link args only apply to this package's own targets.

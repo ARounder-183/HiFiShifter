@@ -49,11 +49,6 @@ const GM_LEAD_1_SQUARE: u8 = 80; // General MIDI Program: Lead 1 (Square)
 const CHILD_CENTS_PREFIX: &str = "child_pitch_offset_cents@";
 const CHILD_DEGREES_PREFIX: &str = "child_pitch_offset_degrees@";
 
-fn sec_to_ticks(sec: f64, bpm: f64) -> u64 {
-    let beats = sec * bpm / 60.0;
-    (beats * TICKS_PER_BEAT as f64).round() as u64
-}
-
 fn delta_u28(t: u64) -> midly::num::u28 {
     midly::num::u28::new(t.min(0x0FFF_FFFF) as u32)
 }
@@ -140,7 +135,7 @@ fn pitch_curve_to_track_events(
     frame_period_ms: f64,
     start_sec: f64,
     channel: u8,
-    bpm: f64,
+    tick_converter: &TempoTickConverter,
 ) -> Vec<TrackEvent<'static>> {
     if pitch_values.is_empty() {
         return Vec::new();
@@ -155,7 +150,7 @@ fn pitch_curve_to_track_events(
     // ── Phase 2: 构建音符候选 ──────────────────────────────────────────────
     struct NoteCandidate {
         start_idx: usize,
-        end_idx: usize,   // exclusive
+        end_idx: usize, // exclusive
         min_pitch: f32,
         max_pitch: f32,
     }
@@ -287,8 +282,8 @@ fn pitch_curve_to_track_events(
 
         let note_start_sec = start_sec + cand.start_idx as f64 * fp / 1000.0;
         let note_end_sec = start_sec + cand.end_idx as f64 * fp / 1000.0;
-        let start_tick = sec_to_ticks(note_start_sec, bpm);
-        let end_tick = sec_to_ticks(note_end_sec, bpm);
+        let start_tick = tick_converter.sec_to_ticks(note_start_sec);
+        let end_tick = tick_converter.sec_to_ticks(note_end_sec);
 
         // NoteOn
         events.push((
@@ -335,7 +330,7 @@ fn pitch_curve_to_track_events(
                 if last_bend_raw != Some(bend_raw) {
                     last_bend_raw = Some(bend_raw);
                     let t = start_sec + fi as f64 * fp / 1000.0;
-                    let tick = sec_to_ticks(t, bpm);
+                    let tick = tick_converter.sec_to_ticks(t);
                     events.push((
                         tick,
                         TrackEvent {
@@ -399,43 +394,212 @@ fn smooth_curve(values: &[f32], window: usize) -> Vec<f32> {
 
 // ── Conductor Track ──────────────────────────────────────────────────────────
 
-fn make_conductor_track(
-    bpm: f64,
-    beats_per_bar: u32,
-    base_scale: &str,
-) -> Vec<TrackEvent<'static>> {
-    let tempo_us_per_beat = (60_000_000.0 / bpm.max(1.0)).round() as u32;
-    let (sharps_flats, major_minor) = scale_to_key_signature(base_scale);
+/// Tempo Map 感知的 秒→tick 转换器（积分各段 BPM）。
+///
+/// 构建时一次性积分各段 BPM 得到每个变化点处的累计 tick 数（O(n)），
+/// 之后每次查询用二分查找定位所在段（O(log n)），避免在逐帧弯音导出
+/// 等热点路径中退化为 O(points × frames)。
+struct TempoTickConverter {
+    /// (sec, bpm)，按 sec 升序，首点位于 0。
+    points: Vec<(f64, f64)>,
+    /// cumulative_ticks[i] = 从 0 到 points[i].sec 的累计 tick 数。
+    cumulative_ticks: Vec<f64>,
+}
 
-    vec![
-        TrackEvent {
-            delta: delta_u28(0),
-            kind: TrackEventKind::Meta(MetaMessage::TrackName(b"Conductor")),
-        },
-        TrackEvent {
-            delta: delta_u28(0),
-            kind: TrackEventKind::Meta(MetaMessage::Tempo(midly::num::u24::new(
-                tempo_us_per_beat.min(16_777_215),
-            ))),
-        },
-        TrackEvent {
-            delta: delta_u28(0),
-            kind: TrackEventKind::Meta(MetaMessage::TimeSignature(
-                beats_per_bar as u8,
-                2,  // 2^2 = 4 = quarter note denominator
-                24, // MIDI clocks per metronome click
-                8,  // 32nd notes per beat
-            )),
-        },
-        TrackEvent {
-            delta: delta_u28(0),
-            kind: TrackEventKind::Meta(MetaMessage::KeySignature(sharps_flats, major_minor)),
-        },
-        TrackEvent {
+impl TempoTickConverter {
+    fn new(timeline: &crate::state::TimelineState, fallback_bpm: f64) -> Self {
+        let mut points: Vec<(f64, f64)> = Vec::new();
+        if let Some(map) = timeline.tempo_map.as_ref() {
+            for p in map {
+                points.push((p.position_sec.max(0.0), p.bpm.clamp(10.0, 960.0)));
+            }
+        }
+        points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        if points.is_empty() || points[0].0 > 1e-9 {
+            points.insert(0, (0.0, fallback_bpm.max(10.0).min(960.0)));
+        }
+
+        let mut cumulative_ticks = Vec::with_capacity(points.len());
+        let mut cumulative = 0.0f64;
+        cumulative_ticks.push(cumulative);
+        let mut last_sec = points[0].0;
+        let mut last_bpm = points[0].1;
+        for &(point_sec, point_bpm) in points.iter().skip(1) {
+            cumulative +=
+                (point_sec - last_sec).max(0.0) * (last_bpm / 60.0) * TICKS_PER_BEAT as f64;
+            cumulative_ticks.push(cumulative);
+            last_sec = point_sec;
+            last_bpm = point_bpm;
+        }
+
+        Self {
+            points,
+            cumulative_ticks,
+        }
+    }
+
+    fn sec_to_ticks(&self, sec: f64) -> u64 {
+        let sec = sec.max(0.0);
+        // 最后一个 position_sec < sec 的点：其 bpm 作用于 (points[idx-1].sec, sec)。
+        let idx = self
+            .points
+            .partition_point(|&(point_sec, _)| point_sec < sec);
+        let (base_ticks, last_sec, bpm) = if idx == 0 {
+            (0.0, 0.0, self.points[0].1)
+        } else {
+            let (last_sec, bpm) = self.points[idx - 1];
+            (self.cumulative_ticks[idx - 1], last_sec, bpm)
+        };
+        (base_ticks + (sec - last_sec).max(0.0) * (bpm / 60.0) * TICKS_PER_BEAT as f64).round()
+            as u64
+    }
+}
+
+/// 由 Tempo Map 构建 Conductor 轨道（变速/变拍/变调全部写入 meta 事件）。
+fn make_conductor_track(
+    timeline: &crate::state::TimelineState,
+    fallback_bpm: f64,
+    fallback_beats_per_bar: u32,
+    fallback_base_scale: &str,
+) -> Vec<TrackEvent<'static>> {
+    let converter = TempoTickConverter::new(timeline, fallback_bpm);
+
+    let mut events: Vec<TrackEvent<'static>> = vec![TrackEvent {
+        delta: delta_u28(0),
+        kind: TrackEventKind::Meta(MetaMessage::TrackName(b"Conductor")),
+    }];
+
+    let mut last_tick: u64 = 0;
+    let mut push_meta =
+        |events: &mut Vec<TrackEvent<'static>>, tick: u64, kind: midly::MetaMessage<'static>| {
+            events.push(TrackEvent {
+                delta: delta_u28(tick.saturating_sub(last_tick)),
+                kind: TrackEventKind::Meta(kind),
+            });
+            last_tick = tick;
+        };
+
+    let Some(map) = timeline.tempo_map.as_ref() else {
+        // 与 TempoTickConverter::new 的钳制保持一致（10-960）。
+        let fallback_bpm = fallback_bpm.max(10.0).min(960.0);
+        let tempo_us_per_beat = (60_000_000.0 / fallback_bpm.max(1.0)).round() as u32;
+        let (sharps_flats, major_minor) = scale_to_key_signature(fallback_base_scale);
+        push_meta(
+            &mut events,
+            0,
+            MetaMessage::Tempo(midly::num::u24::new(tempo_us_per_beat.min(16_777_215))),
+        );
+        push_meta(
+            &mut events,
+            0,
+            MetaMessage::TimeSignature(fallback_beats_per_bar.clamp(1, 32) as u8, 2, 24, 8),
+        );
+        push_meta(
+            &mut events,
+            0,
+            MetaMessage::KeySignature(sharps_flats, major_minor),
+        );
+        events.push(TrackEvent {
             delta: delta_u28(0),
             kind: TrackEventKind::Meta(MetaMessage::EndOfTrack),
-        },
-    ]
+        });
+        return events;
+    };
+
+    // 0 位置点：初始速度 / 拍号 / 调号。
+    let first = &map[0];
+    let (first_num, first_den) = crate::state::TimelineState::effective_time_signature_at(map, 0);
+    let tempo_us_per_beat = (60_000_000.0 / first.bpm.max(1.0)).round() as u32;
+    push_meta(
+        &mut events,
+        0,
+        MetaMessage::Tempo(midly::num::u24::new(tempo_us_per_beat.min(16_777_215))),
+    );
+    push_meta(
+        &mut events,
+        0,
+        MetaMessage::TimeSignature(
+            first_num.clamp(1, 32) as u8,
+            denominator_to_midi_pow2(first_den),
+            24,
+            8,
+        ),
+    );
+    let mut prev_scale: Option<String> = None;
+    if let Some(scale) = first.scale.as_ref() {
+        if let Some(key) = scale.key.as_deref() {
+            let (sf, mi) = scale_to_key_signature(key);
+            push_meta(&mut events, 0, MetaMessage::KeySignature(sf, mi));
+            prev_scale = Some(key.to_string());
+        }
+    }
+    // 初始点音阶为“跟随工程音阶”（null）时，回退写入工程的调号，
+    // 否则消费方（DAW）会按默认 C 大调理解整首乐曲。
+    if prev_scale.is_none() {
+        let (sf, mi) = scale_to_key_signature(fallback_base_scale);
+        push_meta(&mut events, 0, MetaMessage::KeySignature(sf, mi));
+    }
+
+    let mut prev_bpm = first.bpm;
+    let mut prev_num = first_num;
+    let mut prev_den = first_den;
+
+    for (index, point) in map.iter().enumerate().skip(1) {
+        let tick = converter.sec_to_ticks(point.position_sec);
+        if (point.bpm - prev_bpm).abs() > 1e-9 {
+            let us = (60_000_000.0 / point.bpm.max(1.0)).round() as u32;
+            push_meta(
+                &mut events,
+                tick,
+                MetaMessage::Tempo(midly::num::u24::new(us.min(16_777_215))),
+            );
+            prev_bpm = point.bpm;
+        }
+        // 拍号跟随之前的拍号时解析为实际生效值；仅在实际值变化时写入。
+        let (eff_num, eff_den) =
+            crate::state::TimelineState::effective_time_signature_at(map, index);
+        if eff_num != prev_num || eff_den != prev_den {
+            push_meta(
+                &mut events,
+                tick,
+                MetaMessage::TimeSignature(
+                    eff_num.clamp(1, 32) as u8,
+                    denominator_to_midi_pow2(eff_den),
+                    24,
+                    8,
+                ),
+            );
+            prev_num = eff_num;
+            prev_den = eff_den;
+        }
+        let scale_key = point.scale.as_ref().and_then(|s| s.key.clone());
+        if scale_key != prev_scale {
+            if let Some(key) = scale_key.as_deref() {
+                let (sf, mi) = scale_to_key_signature(key);
+                push_meta(&mut events, tick, MetaMessage::KeySignature(sf, mi));
+            }
+            prev_scale = scale_key;
+        }
+    }
+
+    events.push(TrackEvent {
+        delta: delta_u28(0),
+        kind: TrackEventKind::Meta(MetaMessage::EndOfTrack),
+    });
+    events
+}
+
+/// 拍号分母 → MIDI TimeSignature 的 2 的指数（4 → 2 表示四分音符）。
+fn denominator_to_midi_pow2(denominator: u32) -> u8 {
+    match denominator {
+        1 => 0,
+        2 => 1,
+        4 => 2,
+        8 => 3,
+        16 => 4,
+        32 => 5,
+        _ => 2,
+    }
 }
 
 // ── 读取 pitch（含子轨偏移） ─────────────────────────────────────────────────
@@ -469,14 +633,15 @@ fn read_pitch_for_track(
         pitch.push(v);
     }
 
-    // 如果是子轨，应用子轨音高偏移
+    // 如果是子轨，应用子轨音高偏移（Tempo Map 感知：按帧时刻解析生效音阶）
     if entry.track_id != entry.root_track_id {
         let cents_key = format!("{CHILD_CENTS_PREFIX}{}", entry.track_id);
         let degrees_key = format!("{CHILD_DEGREES_PREFIX}{}", entry.track_id);
 
         let cents_curve = params.extra_curves.get(&cents_key);
         let degrees_curve = params.extra_curves.get(&degrees_key);
-        let scale_notes = &timeline.project_scale_notes;
+        let scale_segments = timeline.scale_segments();
+        let mut cursor = crate::pitch_editing::ScaleSegmentsCursor::new(&scale_segments);
 
         for i in 0..frame_count {
             let frame_idx = start_frame + i;
@@ -490,6 +655,7 @@ fn read_pitch_for_track(
 
             if cents_offset.abs() > 1e-9 || degree_offset.abs() > 1e-9 {
                 let v = pitch[i] as f64 + cents_offset / 100.0;
+                let scale_notes = cursor.notes_at((frame_idx as f64) * fp / 1000.0);
                 let v = transpose_midi_by_scale_steps(v, degree_offset, scale_notes);
                 pitch[i] = v as f32;
             }
@@ -529,7 +695,8 @@ fn read_pitch_for_clip(
 
         let pr = clip.playback_rate as f64;
         let pr_valid = if pr.is_finite() && pr > 0.0 { pr } else { 1.0 };
-        let src_start = clip.source_start_sec.max(0.0);
+        // 消费窗口（非 Loop 倒放锚定 se：win=[se−len·r, se]）——
+        // 与引擎 emit / assemble 的窗口模型一致。
         let src_end = if clip.source_end_sec > 0.0 {
             clip.source_end_sec
         } else {
@@ -540,9 +707,41 @@ fn read_pitch_for_clip(
                 .unwrap_or(clip_len)
                 .max(clip_len)
         };
+        let src_start = if !clip.loop_enabled && clip.reversed {
+            src_end - clip_len * pr_valid
+        } else {
+            clip.source_start_sec
+        };
         let src_total_len = src_end - src_start;
 
         for note in notes {
+            // Loop（循环源）：按媒体时长 D 的锚点回绕放置音符（与实时引擎 /
+            // assemble 的放置算法一致）。不能用窗口比较过滤可见性 —— split
+            // 产生的"环绕窗口"（start > end）会把所有音符误判为越界。
+            if let Some(placement) =
+                crate::state::place_note_occurrence_in_loop(clip, note.start_sec, note.end_sec, fp)
+            {
+                let note_value = note.note as f32;
+                let mut cycle_offset = 0usize;
+                while cycle_offset < target_frames {
+                    let write_start = cycle_offset + placement.first_start_frame;
+                    let write_end =
+                        (cycle_offset + placement.first_start_frame + placement.len_frames)
+                            .min(target_frames);
+                    if write_start >= write_end {
+                        break;
+                    }
+                    for frame in write_start..write_end {
+                        let current = midi_curve[frame];
+                        if note_value > current || current <= 0.0 {
+                            midi_curve[frame] = note_value;
+                        }
+                    }
+                    cycle_offset += placement.cycle_frames;
+                }
+                continue;
+            }
+
             if note.end_sec <= src_start || note.start_sec >= src_end {
                 continue;
             }
@@ -604,20 +803,67 @@ fn read_pitch_for_clip(
     let pr = clip.playback_rate as f64;
     let pr = if pr.is_finite() && pr > 0.0 { pr } else { 1.0 };
 
+    // 非 Loop 倒放：传入真实消费窗口 [se−len·r, se]（输出在下方整体反转）。
+    let (trim_src_start, trim_src_end) = crate::state::clip_pitch_trim_window_sec(clip);
     let mut curve = pitch_clip::trim_and_resample_midi(
         &full_midi,
         fp,
-        clip.source_start_sec,
-        clip.source_end_sec,
+        trim_src_start,
+        trim_src_end,
         pr,
         clip_len,
+        clip.loop_enabled,
+        crate::state::clip_source_media_duration_sec(clip),
+        clip.reversed && clip.loop_enabled,
     );
 
-    if clip.reversed && !curve.is_empty() {
+    if clip.reversed && !clip.loop_enabled && !curve.is_empty() {
+        // 非 Loop 倒放：曲线整体反转（既有约定）。
+        // Loop 模式的倒放方向已在 trim_and_resample_midi 内部按
+        // "从 source_end 向下环绕"处理，无需再反转。
         curve.reverse();
     }
 
     Ok((curve, fp))
+}
+
+// ── 选择音高来源 ─────────────────────────────────────────────────────────────
+
+/// 选择导出用的音高数据来源。
+///
+/// - Compose 轨道：优先使用 track 级曲线（包含 pitch_edit、子轨偏移等）。
+/// - 非 Compose 轨道：track 级曲线通常只是全零占位，因此当请求带有
+///   `clip_id` 时，自动退回 clip 级读取：MIDI clip 直接展开音符，音频 clip
+///   按需运行 FCPE。这样用户无需手动开启 Compose 也能完成导出。
+fn read_pitch_for_export(
+    timeline: &TimelineState,
+    entry: &MidiExportTrackEntry,
+) -> Result<(Vec<f32>, f64), String> {
+    let compose_enabled = timeline
+        .tracks
+        .iter()
+        .find(|track| track.id == entry.root_track_id)
+        .map(|track| track.compose_enabled)
+        .unwrap_or(false);
+
+    let track_has_pitch = timeline
+        .params_by_root_track
+        .get(&entry.root_track_id)
+        .map(|params| {
+            params.pitch_orig.iter().any(|value| *value > 0.0)
+                || params.pitch_edit.iter().any(|value| *value > 0.0)
+        })
+        .unwrap_or(false);
+
+    if entry.clip_id.is_some() && (!compose_enabled || !track_has_pitch) {
+        match read_pitch_for_clip(timeline, entry) {
+            Ok(values) => return Ok(values),
+            // clip 级读取失败时继续尝试 track 级数据，避免丢失已有的音高编辑。
+            Err(_) => {}
+        }
+    }
+
+    read_pitch_for_track(timeline, entry)
 }
 
 // ── 主入口 ────────────────────────────────────────────────────────────────────
@@ -637,56 +883,37 @@ pub(super) fn export_pitch_to_midi(
     let mut midi_tracks: Vec<Vec<TrackEvent<'static>>> =
         Vec::with_capacity(request.tracks.len() + 1);
 
-    // Track 0: Conductor
+    // Track 0: Conductor（Tempo Map 感知：变速/变拍/变调写入 meta 事件）
     midi_tracks.push(make_conductor_track(
+        &timeline,
         request.bpm,
         request.beats_per_bar,
         &request.base_scale,
     ));
+    let tick_converter = TempoTickConverter::new(&timeline, request.bpm);
 
     let mut any_pitch_data = false;
 
     for (idx, entry) in request.tracks.iter().enumerate() {
         let channel = channels[idx];
 
-        let name_bytes: &'static [u8] = Box::leak(entry.name.clone().into_bytes().into_boxed_slice());
+        let name_bytes: &'static [u8] =
+            Box::leak(entry.name.clone().into_bytes().into_boxed_slice());
 
-        let (pitch_values, fp) = match read_pitch_for_track(&timeline, entry) {
+        let (pitch_values, fp) = match read_pitch_for_export(&timeline, entry) {
             Ok(v) => v,
             Err(_) => {
-                // Fallback: 尝试从 clip 级读取（非 Compose 轨道）
-                if entry.clip_id.is_some() {
-                    match read_pitch_for_clip(&timeline, entry) {
-                        Ok(v) => v,
-                        Err(_) => {
-                            midi_tracks.push(vec![
-                                TrackEvent {
-                                    delta: delta_u28(0),
-                                    kind: TrackEventKind::Meta(MetaMessage::TrackName(
-                                        name_bytes,
-                                    )),
-                                },
-                                TrackEvent {
-                                    delta: delta_u28(0),
-                                    kind: TrackEventKind::Meta(MetaMessage::EndOfTrack),
-                                },
-                            ]);
-                            continue;
-                        }
-                    }
-                } else {
-                    midi_tracks.push(vec![
-                        TrackEvent {
-                            delta: delta_u28(0),
-                            kind: TrackEventKind::Meta(MetaMessage::TrackName(name_bytes)),
-                        },
-                        TrackEvent {
-                            delta: delta_u28(0),
-                            kind: TrackEventKind::Meta(MetaMessage::EndOfTrack),
-                        },
-                    ]);
-                    continue;
-                }
+                midi_tracks.push(vec![
+                    TrackEvent {
+                        delta: delta_u28(0),
+                        kind: TrackEventKind::Meta(MetaMessage::TrackName(name_bytes)),
+                    },
+                    TrackEvent {
+                        delta: delta_u28(0),
+                        kind: TrackEventKind::Meta(MetaMessage::EndOfTrack),
+                    },
+                ]);
+                continue;
             }
         };
 
@@ -699,8 +926,13 @@ pub(super) fn export_pitch_to_midi(
         }];
 
         if has_pitch {
-            let track_events =
-                pitch_curve_to_track_events(&pitch_values, fp, entry.start_sec, channel, request.bpm);
+            let track_events = pitch_curve_to_track_events(
+                &pitch_values,
+                fp,
+                entry.start_sec,
+                channel,
+                &tick_converter,
+            );
             events.extend(track_events);
         }
 
@@ -718,8 +950,7 @@ pub(super) fn export_pitch_to_midi(
                 .params_by_root_track
                 .get(&entry.root_track_id)
                 .map(|p| {
-                    !p.pitch_edit.iter().any(|v| *v > 0.0)
-                        && !p.pitch_orig.iter().any(|v| *v > 0.0)
+                    !p.pitch_edit.iter().any(|v| *v > 0.0) && !p.pitch_orig.iter().any(|v| *v > 0.0)
                 })
                 .unwrap_or(true)
         });
@@ -752,5 +983,131 @@ pub(super) fn export_pitch_to_midi(
         Err(e) => {
             serde_json::json!({"ok": false, "error": format!("midi_write_error: {}", e)})
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TempoTickConverter;
+    use crate::state::{TempoPointData, TimelineState};
+
+    fn point(id: &str, position_sec: f64, bpm: f64) -> TempoPointData {
+        TempoPointData {
+            id: id.to_string(),
+            position_sec,
+            bpm,
+            numerator: Some(4),
+            denominator: Some(4),
+            scale: None,
+        }
+    }
+
+    fn converter_with(points: &[TempoPointData], fallback_bpm: f64) -> TempoTickConverter {
+        let mut timeline = TimelineState::default();
+        timeline.tempo_map = Some(points.to_vec());
+        TempoTickConverter::new(&timeline, fallback_bpm)
+    }
+
+    #[test]
+    fn fallback_converts_at_constant_tempo() {
+        let converter = TempoTickConverter::new(&TimelineState::default(), 90.0);
+        // 90 BPM = 1.5 beat/s × 480 ticks/beat = 720 ticks/s。
+        assert_eq!(converter.sec_to_ticks(0.0), 0);
+        assert_eq!(converter.sec_to_ticks(1.0), 720);
+        assert_eq!(converter.sec_to_ticks(2.5), 1_800);
+        assert_eq!(converter.sec_to_ticks(-5.0), 0);
+    }
+
+    #[test]
+    fn integrates_each_segment_at_its_own_bpm() {
+        let points = [
+            point("a", 0.0, 120.0),
+            point("b", 10.0, 60.0),
+            point("c", 20.0, 180.0),
+        ];
+        let converter = converter_with(&points, 120.0);
+        assert_eq!(converter.sec_to_ticks(0.0), 0);
+        // 变化点边界处仍按前一段的 BPM 计算。
+        assert_eq!(converter.sec_to_ticks(10.0), 9_600);
+        assert_eq!(converter.sec_to_ticks(15.0), 12_000);
+        assert_eq!(converter.sec_to_ticks(20.0), 14_400);
+        assert_eq!(converter.sec_to_ticks(21.0), 15_840);
+    }
+
+    #[test]
+    fn sorts_points_before_integration() {
+        let points = [
+            point("c", 20.0, 180.0),
+            point("b", 10.0, 60.0),
+            point("a", 0.0, 120.0),
+        ];
+        let converter = converter_with(&points, 120.0);
+        assert_eq!(converter.sec_to_ticks(15.0), 12_000);
+        assert_eq!(converter.sec_to_ticks(21.0), 15_840);
+    }
+
+    #[test]
+    fn duplicate_positions_keep_the_last_bpm_after_the_boundary() {
+        let points = [
+            point("a", 0.0, 120.0),
+            point("b", 10.0, 60.0),
+            point("b2", 10.0, 180.0),
+            point("c", 20.0, 120.0),
+        ];
+        let converter = converter_with(&points, 120.0);
+        assert_eq!(converter.sec_to_ticks(10.0), 9_600);
+        assert_eq!(converter.sec_to_ticks(15.0), 16_800);
+        assert_eq!(converter.sec_to_ticks(21.0), 24_960);
+    }
+
+    #[test]
+    fn inserts_fallback_point_when_map_does_not_start_at_zero() {
+        let points = [point("a", 5.0, 120.0)];
+        let converter = converter_with(&points, 90.0);
+        assert_eq!(converter.sec_to_ticks(4.0), 2_880);
+        assert_eq!(converter.sec_to_ticks(5.0), 3_600);
+        assert_eq!(converter.sec_to_ticks(6.0), 4_560);
+    }
+
+    #[test]
+    fn non_compose_export_reads_midi_clip_fallback() {
+        use super::{read_pitch_for_export, MidiExportTrackEntry, EXPORT_FRAME_PERIOD_MS};
+        use crate::midi_import::MidiNoteEvent;
+
+        let mut timeline = TimelineState::default();
+        let root_id = timeline.tracks[0].id.clone();
+        timeline.ensure_params_for_root(&root_id);
+        assert!(timeline.params_by_root_track.contains_key(&root_id));
+
+        let clip_id = timeline.add_clip(
+            Some(root_id.clone()),
+            Some("MIDI Clip".to_string()),
+            Some(0.0),
+            Some(2.0),
+            None,
+        );
+        if let Some(clip) = timeline.clips.iter_mut().find(|clip| clip.id == clip_id) {
+            clip.midi_note_data = Some(vec![MidiNoteEvent {
+                start_sec: 0.5,
+                end_sec: 1.0,
+                note: 60.0,
+                velocity: 100,
+                channel: 0,
+            }]);
+        }
+
+        let entry = MidiExportTrackEntry {
+            track_id: root_id.clone(),
+            root_track_id: root_id,
+            name: "MIDI Clip".to_string(),
+            start_sec: 0.0,
+            end_sec: 2.0,
+            clip_id: Some(clip_id),
+        };
+
+        // 即使 Compose 关闭且 track 级曲线为空，也应自动走 clip 级读取。
+        let (pitch, fp) = read_pitch_for_export(&timeline, &entry).expect("clip fallback export");
+        assert_eq!(fp, EXPORT_FRAME_PERIOD_MS);
+        assert!(pitch.iter().any(|value| *value > 0.0));
     }
 }

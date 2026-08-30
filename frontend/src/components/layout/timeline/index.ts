@@ -6,6 +6,7 @@ export * from "./dnd";
 
 export * from "./TrackList";
 export * from "./TimeRuler";
+export * from "./timeFormat";
 export * from "./BackgroundGrid";
 export * from "./GlueContextMenu";
 export * from "./ClipContextMenu";
@@ -13,6 +14,9 @@ export * from "./TrackAreaContextMenu";
 export * from "./ClipItem";
 export * from "./TimelineScrollArea";
 export * from "./TrackLane";
+export * from "./SnapHighlightLayer";
 export * from "./TimelineCanvasViewport";
+export * from "./TimelineWaveformSurface";
+export * from "./TimelineSurface";
 export * from "./TimelineTrackHeaderVirtualList";
 export * from "./useTimelineSelectionRect";

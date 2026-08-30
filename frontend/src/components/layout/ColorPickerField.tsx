@@ -46,7 +46,7 @@ export const ColorPickerField: React.FC<ColorPickerFieldProps> = ({
         <div className="flex items-center gap-2 min-w-0">
             <label
                 className="text-xs text-qt-text-muted truncate shrink-0 w-[140px] text-right"
-                title={label}
+                data-tooltip={label}
             >
                 {label}
             </label>

@@ -1,8 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use lru::LruCache;
-
+use super::resource_manager::DecodeCache;
 use super::types::ResampledStereo;
 
 pub(crate) fn linear_resample_interleaved(
@@ -45,14 +44,7 @@ pub(crate) fn linear_resample_interleaved(
 }
 
 pub(crate) fn is_audio_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .map(|e| {
-            ["wav", "mp3", "flac", "ogg", "m4a", "aac"]
-                .iter()
-                .any(|&ext| e.eq_ignore_ascii_case(ext))
-        })
-        .unwrap_or(false)
+    crate::media::is_media_extension(path)
 }
 
 fn read_wav_f32_interleaved(path: &Path) -> Option<(u32, u16, Vec<f32>)> {
@@ -113,72 +105,8 @@ pub(crate) fn decode_audio_f32_interleaved(path: &Path) -> Result<(u32, usize, V
         }
     }
 
-    use symphonia::core::codecs::DecoderOptions;
-    use symphonia::core::errors::Error;
-    use symphonia::core::formats::FormatOptions;
-    use symphonia::core::io::MediaSourceStream;
-    use symphonia::core::meta::MetadataOptions;
-    use symphonia::core::probe::Hint;
-
-    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
-
-    let mut hint = Hint::new();
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        hint.with_extension(ext);
-    }
-
-    let probed = symphonia::default::get_probe()
-        .format(
-            &hint,
-            mss,
-            &FormatOptions::default(),
-            &MetadataOptions::default(),
-        )
-        .map_err(|e| e.to_string())?;
-
-    let mut format = probed.format;
-    let track = format
-        .default_track()
-        .ok_or_else(|| "no default track".to_string())?;
-
-    let mut decoder = symphonia::default::get_codecs()
-        .make(&track.codec_params, &DecoderOptions::default())
-        .map_err(|e| e.to_string())?;
-
-    let sample_rate = track
-        .codec_params
-        .sample_rate
-        .ok_or_else(|| "missing sample_rate in codec params".to_string())?;
-
-    let channels = track.codec_params.channels.map(|c| c.count()).unwrap_or(1);
-
-    let mut out: Vec<f32> = Vec::new();
-
-    loop {
-        let packet = match format.next_packet() {
-            Ok(p) => p,
-            Err(Error::IoError(_)) => break,
-            Err(Error::ResetRequired) => return Err("decoder reset required".to_string()),
-            Err(e) => return Err(e.to_string()),
-        };
-
-        let decoded = match decoder.decode(&packet) {
-            Ok(d) => d,
-            Err(Error::IoError(_)) => break,
-            Err(Error::DecodeError(_)) => continue,
-            Err(e) => return Err(e.to_string()),
-        };
-
-        // 统一使用 Symphonia 高度优化的 SampleBuffer，消除手写的 Option 边界检查开销
-        let spec = *decoded.spec();
-        let duration = decoded.capacity() as u64;
-        let mut sbuf = symphonia::core::audio::SampleBuffer::<f32>::new(duration, spec);
-        sbuf.copy_interleaved_ref(decoded);
-        out.extend_from_slice(sbuf.samples());
-    }
-
-    Ok((sample_rate, channels, out))
+    crate::media::decode_media_audio_f32_interleaved(path, None)
+        .map(|(sr, ch, pcm)| (sr, ch as usize, pcm))
 }
 
 pub(crate) fn decode_resampled_stereo(path: &Path, out_rate: u32) -> Option<ResampledStereo> {
@@ -233,7 +161,7 @@ pub(crate) fn decode_resampled_stereo(path: &Path, out_rate: u32) -> Option<Resa
 pub(crate) fn get_resampled_stereo_cached(
     path: &Path,
     out_rate: u32,
-    cache: &Arc<Mutex<LruCache<(PathBuf, u32), ResampledStereo>>>,
+    cache: &Arc<Mutex<DecodeCache>>,
 ) -> Option<ResampledStereo> {
     if !path.exists() {
         return None;
@@ -251,7 +179,7 @@ pub(crate) fn get_resampled_stereo_cached(
 pub(crate) fn get_resampled_stereo(
     path: &Path,
     out_rate: u32,
-    cache: &Arc<Mutex<LruCache<(PathBuf, u32), ResampledStereo>>>,
+    cache: &Arc<Mutex<DecodeCache>>,
 ) -> Option<ResampledStereo> {
     if !path.exists() {
         return None;
@@ -267,7 +195,8 @@ pub(crate) fn get_resampled_stereo(
     let v = decode_resampled_stereo(path, out_rate)?;
 
     if let Ok(mut map) = cache.lock() {
-        map.push(key, v.clone());
+        let pcm_bytes = v.pcm_bytes();
+        map.insert(key, v.clone(), pcm_bytes);
     }
 
     Some(v)

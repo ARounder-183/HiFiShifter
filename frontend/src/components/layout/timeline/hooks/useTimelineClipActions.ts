@@ -11,23 +11,22 @@
  */
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { AppDispatch, RootState } from "../../../../app/store";
-import { useAppSelector } from "../../../../app/hooks";
-import { useI18n } from "../../../../i18n/I18nProvider";
-import type { ClipTemplate } from "../../../../features/session/sessionTypes";
+import { useAppSelector, useAppStore } from "../../../../app/hooks";
 import {
-    checkpointHistory,
-    createClipsRemote,
-    seekPlayhead,
+    pasteTimelineClipboardRemote,
+    removeClipsRemote,
     selectClipRemote,
+    setClipAutoFades,
     setClipGain,
     setClipMuted,
     setClipStateRemote,
     setClipsStateBulkRemote,
+    setClipboardOperationFailed,
     setMultiSelectedClipIds as setMultiSelectedClipIdsAction,
-    setplayheadSec,
     setSelectedClip,
     setSelectedClipPreservingTrack,
     replaceClipSourceRemote,
+    renameClipTakeRemote,
     splitClipsAtRemote,
 } from "../../../../features/session/sessionSlice";
 import {
@@ -37,9 +36,9 @@ import {
 } from "../../../../features/session/thunks/timelineThunks";
 import { webApi } from "../../../../services/webviewApi";
 import { waveformMipmapStore } from "../../../../utils/waveformMipmapStore";
+import { snapTimelinePosition } from "../../../../utils/timelineSnapping";
 import { computeAutoCrossfadeFromPayload } from "./autoCrossfade";
 import { useTimelineSelectionRect } from "../";
-import { readSystemClipboardObject } from "../../../../utils/systemClipboard";
 import { getBulkEditableClipIds } from "./bulkClipEdit";
 import { getGroupClipIds } from "./useGroupExpansion";
 import { buildBulkClipStateUpdates } from "./bulkClipRemotePayloads";
@@ -123,13 +122,9 @@ export interface UseTimelineClipActionsResult {
     onSelectionRectPointerDown: (e: React.PointerEvent<HTMLDivElement>) => void;
 
     // Clipboard
-    clipClipboardRef: React.MutableRefObject<{
-        templates: ClipTemplate[];
-        groupIds: string[];
-    } | null>;
-    buildClipClipboardTemplates: (
-        ids: string[],
-    ) => Promise<{ templates: ClipTemplate[]; groupIds: string[] }>;
+    clipboardAvailable: boolean;
+    copyClips: (ids: string[]) => Promise<boolean>;
+    cutClips: (ids: string[]) => void;
 
     // Clip operations
     groupClips: (ids: string[]) => void;
@@ -146,12 +141,14 @@ export interface UseTimelineClipActionsResult {
     ) => void;
     rangeSelectAnchorClipId: string | null;
     recordLastClickPosition: (clientX: number) => void;
-    pasteClipsAtPlayhead: () => void;
+    pasteClipsAtPlayhead: (mode?: "selected" | "new_tracks") => void;
     clearContextMenu: () => void;
 
     // TrackLane callbacks
     ensureTrackLaneSelected: (clipId: string) => void;
     selectTrackLaneClipRemote: (clipId: string) => void;
+    /** 点击轨道空白区：清空 clip 选中（单选 + 多选），保留轨道焦点。 */
+    deselectAllTrackLaneClips: () => void;
     openTrackLaneContextMenu: (clipId: string, clientX: number, clientY: number) => void;
     seekFromTrackLaneClientX: (clientX: number, commit: boolean) => void;
     toggleTrackLaneClipMuted: (clipId: string, nextMuted: boolean) => void;
@@ -195,11 +192,24 @@ export function useTimelineClipActions(
         disabledGroupIds,
     } = args;
 
-    const { t } = useI18n();
+    // 实时 store：copy/cut 时以 store 最新状态过滤失效 Clip id，
+    // 避免闭包/ref 里的过期选区把死 id 传给后端。
+    const store = useAppStore();
 
     // ── multiSelectedClipIds ─────────────────────────────────
     const multiSelectedClipIds = useAppSelector(
         (state: RootState) => state.session.multiSelectedClipIds,
+    );
+    const selectedClipId = useAppSelector((state: RootState) => state.session.selectedClipId);
+    const [rangeSelectAnchorClipIdState, setRangeSelectAnchorClipIdState] = useState<string | null>(
+        null,
+    );
+    const updateRangeSelectAnchor = React.useCallback(
+        (clipId: string | null) => {
+            lastClickedClipIdRef.current = clipId;
+            setRangeSelectAnchorClipIdState(clipId);
+        },
+        [lastClickedClipIdRef],
     );
     const multiSelectedClipIdsRef = useRef(multiSelectedClipIds);
     useEffect(() => {
@@ -289,7 +299,7 @@ export function useTimelineClipActions(
     const { selectionRect, onPointerDown: onSelectionRectPointerDown } = useTimelineSelectionRect({
         scrollRef,
         sessionRef,
-        pxPerBeat: pxPerSec,
+        pxPerSec,
         rowHeight,
         clearContextMenu,
         setMultiSelectedClipIds,
@@ -297,33 +307,85 @@ export function useTimelineClipActions(
     });
 
     // ── Clipboard ────────────────────────────────────────────
-    const clipClipboardRef = useRef<{
-        templates: ClipTemplate[];
-        groupIds: string[];
-    } | null>(null);
+    const [clipboardAvailable, setClipboardAvailable] = useState(false);
 
-    const buildClipClipboardTemplates = React.useCallback(async (ids: string[]) => {
-        const clips = sessionRef.current.clips.filter((c) => ids.includes(c.id));
-        const groupIds = clips.map((c) => c.groupId).filter((g): g is string => g != null);
-        const templates = await Promise.all(
-            clips.map(async (clip) => {
-                const linkedParamsResult = await webApi.getClipLinkedParams(clip.id);
-                return {
-                    ...clip,
-                    sourceClipId: clip.id,
-                    waveformPreview: sessionRef.current.clipWaveforms[clip.id],
-                    linkedParams: linkedParamsResult.ok
-                        ? linkedParamsResult.linkedParams
-                        : undefined,
-                };
-            }),
-        );
-        return { templates, groupIds };
+    useEffect(() => {
+        let cancelled = false;
+        const refresh = () => {
+            void webApi
+                .hasTimelineClipboard()
+                .then((result) => {
+                    if (!cancelled) setClipboardAvailable(Boolean(result?.ok && result?.available));
+                })
+                .catch(() => {
+                    if (!cancelled) setClipboardAvailable(false);
+                });
+        };
+        refresh();
+        const timer = window.setInterval(refresh, 2000);
+        return () => {
+            cancelled = true;
+            window.clearInterval(timer);
+        };
     }, []);
+
+    const copyClips = React.useCallback(
+        async (ids: string[], op: "copy" | "cut" = "copy"): Promise<boolean> => {
+            // 只复制当前仍存在的 Clip：失效 id（删除/胶合/拆分替换后的残留）
+            // 会被过滤，避免后端 no_clips_selected 静默失败。
+            const currentClips = store.getState().session.clips;
+            const liveIds = ids.filter((id) => currentClips.some((clip) => clip.id === id));
+            if (liveIds.length === 0) return false;
+
+            const attempt = async (): Promise<boolean> => {
+                try {
+                    const result = await webApi.copyTimelineClips(liveIds);
+                    if (!result?.ok) {
+                        setClipboardAvailable(false);
+                        return false;
+                    }
+                    setClipboardAvailable(true);
+                    return true;
+                } catch {
+                    setClipboardAvailable(false);
+                    return false;
+                }
+            };
+
+            let copied = await attempt();
+            if (!copied) {
+                // 系统剪贴板瞬时被占用（剪贴板管理器 / RDP / 其它进程的延迟
+                // 渲染等）时自动重试一次，让“第一次失败、立刻重试成功”的场景
+                // 无需用户手动反复重试。
+                await new Promise((resolve) => window.setTimeout(resolve, 300));
+                copied = await attempt();
+            }
+            if (!copied) {
+                // 最终失败：状态栏给出可见反馈（此前是静默失败，用户无法区分
+                // “快捷键没触发”与“操作失败”，只能靠反复重选+重试碰运气）。
+                dispatch(setClipboardOperationFailed({ op }));
+            }
+            return copied;
+        },
+        [dispatch, store],
+    );
+
+    const cutClips = React.useCallback(
+        (ids: string[]) => {
+            void (async () => {
+                const copied = await copyClips(ids, "cut");
+                if (!copied) return;
+                setMultiSelectedClipIds([]);
+                void dispatch(removeClipsRemote(ids));
+            })();
+        },
+        [copyClips, dispatch, setMultiSelectedClipIds],
+    );
 
     // ── normalizeClips ───────────────────────────────────────
     const normalizeClips = React.useCallback(
         (ids: string[]) => {
+            const changesById = new Map<string, { gain: number }>();
             for (const id of ids) {
                 const clip = sessionRef.current.clips.find((c) => c.id === id);
                 if (!clip) continue;
@@ -340,8 +402,27 @@ export function useTimelineClipActions(
                 });
                 if (newGain == null) continue;
                 dispatch(setClipGain({ clipId: id, gain: newGain }));
-                void dispatch(setClipStateRemote({ clipId: id, gain: newGain }));
+                changesById.set(id, { gain: newGain });
             }
+            if (changesById.size === 0) return;
+            const clipIds = [...changesById.keys()];
+            // 批量归一化 = 单个撤销步：undo group 内一次 bulk 提交
+            //（逐个 setClipStateRemote 会产生 N 步撤销 + N 次中间快照）。
+            void (async () => {
+                await webApi.beginUndoGroup();
+                try {
+                    await dispatch(
+                        setClipsStateBulkRemote({
+                            updates: buildBulkClipStateUpdates({ clipIds, changesById }),
+                            checkpoint: false,
+                        }),
+                    ).unwrap();
+                } catch {
+                    // 非致命：乐观值保留，此后权威快照会纠正。
+                } finally {
+                    await webApi.endUndoGroup();
+                }
+            })().catch(() => undefined);
         },
         [dispatch, sessionRef],
     );
@@ -391,13 +472,34 @@ export function useTimelineClipActions(
                 }),
             );
         },
-        [dispatch, t],
+        [dispatch, sessionRef, sameSourceConfirmResolverRef, setSameSourceConfirmOpen],
     );
 
     // ── splitClipIdsAtPlayhead ────────────────────────────────
     const splitClipIdsAtPlayhead = React.useCallback(
         (clipIds: string[]) => {
-            const splitSec = Math.max(0, Number(sessionRef.current.playheadSec ?? 0) || 0);
+            const session = sessionRef.current;
+            let splitSec = Math.max(0, Number(session.playheadSec ?? 0) || 0);
+            if (session.timelineSnap.enabled && session.timelineSnap.snapRazorEdits) {
+                const snapped = snapTimelinePosition(
+                    {
+                        settings: session.timelineSnap,
+                        grid: session.grid,
+                        bpm: session.bpm,
+                        beatsPerBar: session.beats,
+                        tempoMap: session.tempoMap,
+                        pxPerSec: Math.max(1e-9, pxPerSec),
+                        clips: session.clips,
+                        tracks: session.tracks,
+                        selectedClipIds: clipIds,
+                        playheadSec: splitSec,
+                        object: "cursor",
+                        anchorTrackId: session.selectedTrackId,
+                    },
+                    splitSec,
+                );
+                splitSec = snapped.sec;
+            }
 
             // Expand to include all group members of any input clip
             const expandedIds = new Set(clipIds);
@@ -424,7 +526,7 @@ export function useTimelineClipActions(
             }
             return eligibleIds;
         },
-        [dispatch],
+        [dispatch, pxPerSec, ignoreGrouping, disabledGroupIds, sessionRef],
     );
 
     const splitSelectedAtPlayhead = React.useCallback(() => {
@@ -436,7 +538,7 @@ export function useTimelineClipActions(
                   : [];
         if (selectedIds.length === 0) return;
         splitClipIdsAtPlayhead(selectedIds);
-    }, [splitClipIdsAtPlayhead]);
+    }, [splitClipIdsAtPlayhead, sessionRef]);
 
     // ── recordLastClickPosition ──────────────────────────────
     const recordLastClickPosition = React.useCallback(
@@ -466,7 +568,7 @@ export function useTimelineClipActions(
             if (anchorTrackIndex == null || targetTrackIndex == null) {
                 setMultiSelectedClipIds([targetClipId]);
                 dispatch(setSelectedClip(targetClipId));
-                lastClickedClipIdRef.current = targetClipId;
+                updateRangeSelectAnchor(targetClipId);
                 lastClickedClientXRef.current = targetClientX ?? null;
                 return;
             }
@@ -509,142 +611,115 @@ export function useTimelineClipActions(
             const next = selected.length > 0 ? selected : [targetClipId];
             setMultiSelectedClipIds(next);
             dispatch(setSelectedClip(targetClipId));
-            lastClickedClipIdRef.current = targetClipId;
+            updateRangeSelectAnchor(targetClipId);
             lastClickedClientXRef.current = targetClientX ?? null;
         },
-        [dispatch, setMultiSelectedClipIds, pxPerSec],
+        [
+            dispatch,
+            setMultiSelectedClipIds,
+            pxPerSec,
+            sessionRef,
+            lastClickedClipIdRef,
+            updateRangeSelectAnchor,
+            lastClickedClientXRef,
+            scrollRef,
+        ],
     );
 
     // ── pasteClipsAtPlayhead ─────────────────────────────────
-    const pasteClipsAtPlayhead = React.useCallback(() => {
-        void (async () => {
-            let tpl: ClipTemplate[] | null = null;
-            let groupIds: string[] = [];
-            const internal = clipClipboardRef.current;
-            if (internal) {
-                tpl = internal.templates;
-                groupIds = internal.groupIds;
+    // 粘贴链状态：idle=空闲；busy=一次粘贴在途；queued=在途期间又收到新的
+    // 粘贴请求（如长按 Ctrl+V 的连续重复粘贴），当前粘贴完成后立即接续，
+    // 避免并发粘贴在后端产生竞态。
+    const pasteChainStateRef = React.useRef<"idle" | "busy" | "queued">("idle");
+    const pasteClipsAtPlayhead = React.useCallback(
+        (mode?: "selected" | "new_tracks") => {
+            if (pasteChainStateRef.current !== "idle") {
+                pasteChainStateRef.current = "queued";
+                return;
             }
-            try {
-                const fromSystem = await readSystemClipboardObject("clip");
-                if (fromSystem?.kind === "clip" && Array.isArray(fromSystem.templates)) {
-                    tpl = fromSystem.templates;
-                    groupIds = ((fromSystem as any).groupIds ?? []).filter(
-                        (g: any) => typeof g === "string",
-                    );
-                    clipClipboardRef.current = { templates: fromSystem.templates, groupIds };
-                }
-            } catch {
-                // ignore and fallback to internal clipboard
-            }
-            if (!tpl || tpl.length === 0) return;
+            pasteChainStateRef.current = "busy";
+            void (async () => {
+                try {
+                    for (;;) {
+                        try {
+                            const result = await dispatch(
+                                pasteTimelineClipboardRemote(mode),
+                            ).unwrap();
+                            setClipboardAvailable(true);
+                            const created = result.newClipIds ?? [];
+                            if (created.length > 0) {
+                                setMultiSelectedClipIds(created);
+                                void dispatch(selectClipRemote(created[0]));
+                                // 播放光标已由 paste thunk 同步到"新 Clip 最靠右结束位置"
+                                // （transport + 本地状态），此处无需再设置。
 
-            const playhead = sessionRef.current.playheadSec ?? 0;
-            const minStart = tpl
-                .map((c) => c.startSec)
-                .reduce((a, b) => Math.min(a, b), Number.POSITIVE_INFINITY);
-            const delta =
-                Number.isFinite(minStart) && minStart !== Number.POSITIVE_INFINITY
-                    ? playhead - minStart
-                    : 0;
-            const templates = tpl.map((c) => ({
-                ...c,
-                startSec: Math.max(0, c.startSec + delta),
-            }));
-            dispatch(checkpointHistory());
-            await webApi.beginUndoGroup();
-            try {
-                const payload = await dispatch(
-                    createClipsRemote({
-                        templates,
-                        options: { placeOnSelectedTrack: true },
-                    }),
-                ).unwrap();
-                const created: string[] = payload?.createdClipIds ?? [];
-                if (!Array.isArray(created) || created.length === 0) return;
-
-                setMultiSelectedClipIds(created);
-                void dispatch(selectClipRemote(created[0]));
-                const targetStartSec = templates.reduce(
-                    (min, t) => Math.min(min, t.startSec),
-                    Number.POSITIVE_INFINITY,
-                );
-                if (Number.isFinite(targetStartSec)) {
-                    dispatch(setplayheadSec(targetStartSec));
-                    void dispatch(seekPlayhead(targetStartSec));
-                }
-
-                if (sessionRef.current.autoCrossfadeEnabled) {
-                    const allClips = (payload?.clips ?? []) as Array<{
-                        id?: string;
-                        track_id?: string;
-                        start_sec?: number;
-                        length_sec?: number;
-                        fade_in_sec?: number;
-                        fade_out_sec?: number;
-                    }>;
-                    const fadeUpdates = computeAutoCrossfadeFromPayload(allClips, created);
-                    if (fadeUpdates.length > 0) {
-                        const changesById = new Map(
-                            fadeUpdates.map((u) => [
-                                u.clipId,
-                                {
-                                    fadeInSec: u.fadeInSec,
-                                    fadeOutSec: u.fadeOutSec,
-                                },
-                            ]),
-                        );
-                        await dispatch(
-                            setClipsStateBulkRemote({
-                                updates: buildBulkClipStateUpdates({
-                                    clipIds: [...changesById.keys()],
-                                    changesById,
-                                }),
-                                checkpoint: false,
-                            }),
-                        ).unwrap();
-                    }
-                }
-
-                // Re-group pasted clips: original grouped clips get new independent groups
-                if (groupIds.length === created.length) {
-                    const groupMap = new Map<string, string[]>();
-                    for (let i = 0; i < groupIds.length; i++) {
-                        const gid = groupIds[i];
-                        if (gid && created[i]) {
-                            const list = groupMap.get(gid);
-                            if (list) list.push(created[i]);
-                            else groupMap.set(gid, [created[i]]);
+                                if (sessionRef.current.autoCrossfadeEnabled) {
+                                    const allClips = (result.timeline?.clips ?? []) as Array<{
+                                        id?: string;
+                                        track_id?: string;
+                                        start_sec?: number;
+                                        length_sec?: number;
+                                        auto_fade_in_sec?: number;
+                                        auto_fade_out_sec?: number;
+                                    }>;
+                                    const fadeUpdates = computeAutoCrossfadeFromPayload(
+                                        allClips,
+                                        created,
+                                    );
+                                    if (fadeUpdates.length > 0) {
+                                        // 粘贴后的自动交叉淡化写入“自动 fade”（与手动 fade 分离）。
+                                        for (const u of fadeUpdates) {
+                                            dispatch(
+                                                setClipAutoFades({
+                                                    clipId: u.clipId,
+                                                    autoFadeInSec: u.autoFadeInSec,
+                                                    autoFadeOutSec: u.autoFadeOutSec,
+                                                }),
+                                            );
+                                            await webApi.setClipState({
+                                                clipId: u.clipId,
+                                                autoFadeInSec: u.autoFadeInSec,
+                                                autoFadeOutSec: u.autoFadeOutSec,
+                                                checkpoint: false,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        } catch {
+                            // 粘贴失败（如剪贴板为空）时终止粘贴链，避免长按期间
+                            // 以固定节奏反复触发必然失败的请求。
+                            setClipboardAvailable(false);
+                            break;
                         }
+                        // 没有排队中的粘贴请求则结束；有则立即接续下一次。
+                        if (pasteChainStateRef.current !== "queued") break;
+                        pasteChainStateRef.current = "busy";
                     }
-                    for (const newClipIds of groupMap.values()) {
-                        if (newClipIds.length >= 2) {
-                            await dispatch(groupClipsRemote(newClipIds)).unwrap();
-                        }
-                    }
+                } finally {
+                    pasteChainStateRef.current = "idle";
                 }
-            } finally {
-                void webApi.endUndoGroup();
-            }
-        })().catch(() => undefined);
-    }, [dispatch, setMultiSelectedClipIds]);
+            })();
+        },
+        [dispatch, setMultiSelectedClipIds, sessionRef],
+    );
 
     // ── TrackLane callbacks ───────────────────────────────────
     const ensureTrackLaneSelected = React.useCallback(
         (clipId: string) => {
-            lastClickedClipIdRef.current = clipId;
+            updateRangeSelectAnchor(clipId);
             const selectedIds = multiSelectedClipIdsRef.current;
             const selectedSet = multiSelectedSetRef.current;
             if (!selectedSet.has(clipId) || selectedIds.length > 1) {
                 setMultiSelectedClipIds([clipId]);
             }
         },
-        [setMultiSelectedClipIds],
+        [setMultiSelectedClipIds, updateRangeSelectAnchor],
     );
 
     const selectTrackLaneClipRemote = React.useCallback(
         (clipId: string) => {
-            lastClickedClipIdRef.current = clipId;
+            updateRangeSelectAnchor(clipId);
             const clip = sessionRef.current.clips.find((entry) => entry.id === clipId);
             const clipTrackId = clip?.trackId ?? null;
             if (
@@ -654,9 +729,9 @@ export function useTimelineClipActions(
             ) {
                 return;
             }
-            const preserveTrackFocus = Boolean(
-                clip && clip.trackId === sessionRef.current.selectedTrackId,
-            );
+            const preserveTrackFocus =
+                !sessionRef.current.paramEditorTimelineClickSelectTrackEnabled ||
+                Boolean(clip && clip.trackId === sessionRef.current.selectedTrackId);
             void dispatch(
                 selectClipRemote({
                     clipId,
@@ -664,12 +739,22 @@ export function useTimelineClipActions(
                 }),
             );
         },
-        [dispatch],
+        [dispatch, updateRangeSelectAnchor, sessionRef],
     );
+
+    // 点击轨道空白区：清空 clip 选中（单选 + 多选）。保留轨道焦点 —— 空白点击
+    // 是"取消 clip 目标"，不是"切换轨道目标"（DAW 通用约定）。
+    const deselectAllTrackLaneClips = React.useCallback(() => {
+        if (multiSelectedClipIdsRef.current.length === 0 && !sessionRef.current.selectedClipId) {
+            return;
+        }
+        setMultiSelectedClipIds([]);
+        dispatch(setSelectedClipPreservingTrack(null));
+    }, [dispatch, setMultiSelectedClipIds, sessionRef]);
 
     const toggleTrackLaneCtrlSelection = React.useCallback(
         (clipId: string) => {
-            lastClickedClipIdRef.current = clipId;
+            updateRangeSelectAnchor(clipId);
 
             const currentSelectionIds =
                 multiSelectedClipIdsRef.current.length > 0
@@ -701,9 +786,12 @@ export function useTimelineClipActions(
             const nextPrimaryClip = sessionRef.current.clips.find(
                 (entry) => entry.id === nextPrimaryClipId,
             );
-            const preserveTrackFocus = Boolean(
-                nextPrimaryClip && nextPrimaryClip.trackId === sessionRef.current.selectedTrackId,
-            );
+            const preserveTrackFocus =
+                !sessionRef.current.paramEditorTimelineClickSelectTrackEnabled ||
+                Boolean(
+                    nextPrimaryClip &&
+                    nextPrimaryClip.trackId === sessionRef.current.selectedTrackId,
+                );
 
             void dispatch(
                 selectClipRemote({
@@ -712,11 +800,10 @@ export function useTimelineClipActions(
                 }),
             );
         },
-        [dispatch, setMultiSelectedClipIds],
+        [dispatch, setMultiSelectedClipIds, updateRangeSelectAnchor, sessionRef],
     );
 
-    const rangeSelectAnchorClipId =
-        lastClickedClipIdRef.current ?? sessionRef.current.selectedClipId ?? null;
+    const rangeSelectAnchorClipId = rangeSelectAnchorClipIdState ?? selectedClipId;
 
     const openTrackLaneContextMenu = React.useCallback(
         (clipId: string, clientX: number, clientY: number) => {
@@ -737,7 +824,7 @@ export function useTimelineClipActions(
             const bounds = scroller.getBoundingClientRect();
             setPlayheadFromClientX(clientX, bounds, scroller.scrollLeft, commit);
         },
-        [setPlayheadFromClientX],
+        [setPlayheadFromClientX, scrollRef],
     );
 
     const toggleTrackLaneClipMuted = React.useCallback(
@@ -784,6 +871,19 @@ export function useTimelineClipActions(
 
     const commitTrackLaneRename = React.useCallback(
         (clipId: string, newName: string) => {
+            const clip = sessionRef.current?.clips.find((entry) => entry.id === clipId);
+            const takes = clip?.takes ?? [];
+            // 仅多 Take Clip 的改名写入 active take（UI 展示名此时取 take 名）。
+            // 单 Take / 无 takes 时展示名是容器 name，必须走容器改名 ——
+            // 后端 rename_take 不回写容器名，误路由会让重命名"看起来无效"。
+            if (takes.length > 1) {
+                const activeTake =
+                    takes.find((entry) => entry.id === clip?.activeTakeId) ?? takes[0];
+                void dispatch(
+                    renameClipTakeRemote({ clipId, takeId: activeTake.id, name: newName }),
+                );
+                return;
+            }
             void dispatch(
                 setClipStateRemote({
                     clipId,
@@ -791,7 +891,7 @@ export function useTimelineClipActions(
                 }),
             );
         },
-        [dispatch],
+        [dispatch, sessionRef],
     );
 
     const handleTrackLaneRenameDone = React.useCallback(() => {
@@ -842,8 +942,9 @@ export function useTimelineClipActions(
         selectionRect,
         onSelectionRectPointerDown,
 
-        clipClipboardRef,
-        buildClipClipboardTemplates,
+        clipboardAvailable,
+        copyClips,
+        cutClips,
 
         groupClips,
         ungroupClips,
@@ -860,6 +961,7 @@ export function useTimelineClipActions(
 
         ensureTrackLaneSelected,
         selectTrackLaneClipRemote,
+        deselectAllTrackLaneClips,
         openTrackLaneContextMenu,
         seekFromTrackLaneClientX,
         toggleTrackLaneClipMuted,

@@ -1,27 +1,21 @@
-//! Signalsmith Stretch FFI 封装
+//! Signalsmith Stretch FFI wrapper.
 //!
-//! 基于 Signalsmith Stretch (MIT) 的音频时间拉伸模块。
-//!
-//! 公共接口：
-//! - `SignalsmithRealtimeStretcher` — 实时流式拉伸器
-//! - `try_time_stretch_interleaved_offline()` — 离线批量拉伸
-//! - `try_time_stretch_interleaved_realtime()` — 实时模式批量拉伸
-//! - `is_available()` — 始终返回 true（静态链接）
+//! Batch stretching uses Signalsmith's `exact()` path (via `outputSeek()`),
+//! which aligns output sample 0 with input sample 0. This is important:
+//! the previous implementation fed the whole input followed by tail silence
+//! and then discarded `outputLatency` samples from the start, which made
+//! short clips silent and cut the leading ~0.06-0.12 s off longer clips.
 
 use std::ffi::c_int;
 
-// ── FFI 声明 ──────────────────────────────────────────────────────
-// 对应 sstretch-c.h 中的 C API
+// FFI declarations matching sstretch-c.h.
 type SStretchState = *mut std::ffi::c_void;
 
 extern "C" {
     fn sstretch_new(sample_rate: u32, channels: u32) -> SStretchState;
     fn sstretch_delete(state: SStretchState);
-    #[allow(dead_code)]
     fn sstretch_reset(state: SStretchState);
     fn sstretch_set_transpose_semitones(state: SStretchState, semitones: f64);
-    #[allow(dead_code)]
-    fn sstretch_set_transpose_factor(state: SStretchState, factor: f64);
     fn sstretch_input_latency(state: SStretchState) -> c_int;
     fn sstretch_output_latency(state: SStretchState) -> c_int;
 
@@ -33,32 +27,25 @@ extern "C" {
         out_frames: u32,
     ) -> c_int;
 
-    fn sstretch_process_offline(
+    fn sstretch_exact(
         state: SStretchState,
         input_interleaved: *const f32,
         in_frames: u32,
         output_interleaved: *mut f32,
         out_frames: u32,
-        time_ratio: f64,
     ) -> c_int;
-
-    fn sstretch_flush(state: SStretchState, output_interleaved: *mut f32, out_frames: u32)
-        -> c_int;
 }
 
-// ── 公共 API ──────────────────────────────────────────────────────
-
-/// Signalsmith Stretch 是否可用。
-/// 由于静态链接，始终返回 true。
+/// Signalsmith Stretch is statically linked, so it is always available.
 pub fn is_available() -> bool {
     true
 }
 
-/// 实时流式拉伸器。
+/// Streaming-style stretcher used by `stretch_stream`-compatible callers.
 ///
-/// 用于 `stretch_stream` 后台 worker 的逐块 process + retrieve 流程。
-/// 注意：Signalsmith Stretch 不区分 process/retrieve，而是一次 process() 调用
-/// 同时消费输入和产出输出。为保持 API 兼容性，我们在内部缓冲输出。
+/// Signalsmith's `process()` consumes input and produces output in the same
+/// call. This wrapper keeps the produced output in an internal buffer and
+/// exposes it through `retrieve_interleaved_into()`.
 pub struct SignalsmithRealtimeStretcher {
     state: SStretchState,
     #[allow(dead_code)]
@@ -67,12 +54,10 @@ pub struct SignalsmithRealtimeStretcher {
     #[allow(dead_code)]
     time_ratio: f64,
 
-    /// 内部输出缓冲区（交错格式）
-    /// process_interleaved() 产出的数据暂存于此，
-    /// retrieve_interleaved_into() 从中取出。
-    #[allow(dead_code)]
     out_buffer: Vec<f32>,
-    #[allow(dead_code)]
+    /// Read cursor into `out_buffer` (avoids O(remaining) `Vec::drain` per
+    /// chunk on long offline stretches); compacts on append/consume-end.
+    out_read_pos: usize,
     temp_out: Vec<f32>,
 }
 
@@ -99,15 +84,9 @@ impl SignalsmithRealtimeStretcher {
             return Err("sstretch_new returned null".to_string());
         }
 
-        // pitch scale = 1.0（不变调），音高偏移为 0 半音
         unsafe {
             sstretch_set_transpose_semitones(state, 0.0);
         }
-
-        eprintln!(
-            "[SignalsmithStretch] Created: sample_rate={}, channels={}, time_ratio={:.6}",
-            sample_rate, channels, time_ratio
-        );
 
         Ok(Self {
             state,
@@ -115,6 +94,7 @@ impl SignalsmithRealtimeStretcher {
             sample_rate: sample_rate.max(1),
             time_ratio,
             out_buffer: Vec::with_capacity(4096),
+            out_read_pos: 0,
             temp_out: Vec::with_capacity(4096),
         })
     }
@@ -127,6 +107,7 @@ impl SignalsmithRealtimeStretcher {
         };
         self.time_ratio = time_ratio;
         self.out_buffer.clear();
+        self.out_read_pos = 0;
         unsafe {
             sstretch_reset(self.state);
             sstretch_set_transpose_semitones(self.state, 0.0);
@@ -134,10 +115,6 @@ impl SignalsmithRealtimeStretcher {
         Ok(())
     }
 
-    /// 输入交错 PCM 进行处理。
-    ///
-    /// Signalsmith Stretch 的 process() 同时消费输入和产出输出。
-    /// 输出帧数 = in_frames * time_ratio（向上取整），结果暂存在内部缓冲区。
     pub fn process_interleaved(
         &mut self,
         input_interleaved: &[f32],
@@ -151,15 +128,12 @@ impl SignalsmithRealtimeStretcher {
             return Ok(());
         }
 
-        // 根据 time_ratio 计算对应的输出帧数
         let out_frames = ((in_frames as f64) * self.time_ratio).ceil() as usize;
         if out_frames == 0 {
             return Ok(());
         }
 
-        // 复用结构体自带的 buffer，消除高频内存分配
         self.temp_out.resize(out_frames * self.channels, 0.0);
-
         let ret = unsafe {
             sstretch_process_interleaved(
                 self.state,
@@ -169,41 +143,42 @@ impl SignalsmithRealtimeStretcher {
                 out_frames as u32,
             )
         };
-
         if ret < 0 {
             return Err("sstretch_process_interleaved failed".to_string());
         }
 
-        // 追加到内部缓冲区
+        if self.out_read_pos > 0 {
+            self.out_buffer.drain(..self.out_read_pos);
+            self.out_read_pos = 0;
+        }
         self.out_buffer.extend_from_slice(&self.temp_out);
-
         Ok(())
     }
 
-    /// 从内部缓冲区取出最多 `max_frames` 帧的交错 PCM。
     pub fn retrieve_interleaved_into(
         &mut self,
         out_interleaved: &mut Vec<f32>,
         max_frames: usize,
     ) -> Result<usize, String> {
-        if self.out_buffer.is_empty() || max_frames == 0 {
+        let remaining = self.out_buffer.len() - self.out_read_pos;
+        if remaining == 0 || max_frames == 0 {
             return Ok(0);
         }
 
-        let avail_samples = self.out_buffer.len();
-        let avail_frames = avail_samples / self.channels.max(1);
+        let avail_frames = remaining / self.channels.max(1);
         let take_frames = avail_frames.min(max_frames);
         let take_samples = take_frames * self.channels;
-
         if take_samples == 0 {
             return Ok(0);
         }
 
-        out_interleaved.extend_from_slice(&self.out_buffer[..take_samples]);
-
-        // 移除已取出的数据
-        self.out_buffer.drain(..take_samples);
-
+        let end = self.out_read_pos + take_samples;
+        out_interleaved.extend_from_slice(&self.out_buffer[self.out_read_pos..end]);
+        self.out_read_pos = end;
+        if self.out_read_pos == self.out_buffer.len() {
+            self.out_buffer.clear();
+            self.out_read_pos = 0;
+        }
         Ok(take_frames)
     }
 
@@ -225,12 +200,96 @@ impl Drop for SignalsmithRealtimeStretcher {
     }
 }
 
-// ── 离线批量拉伸 ──────────────────────────────────────────────────
-
-/// 使用 Signalsmith Stretch 离线模式完成批量时间拉伸。
+/// Run Signalsmith's `exact()` path with an automatic leading-zero pad for
+/// very short clips.
 ///
-/// 内部自动处理延迟补偿。
-/// pitch_scale 保持 1.0（不变调）。
+/// `exact()` internally uses `outputSeek()`, which aligns output sample 0 to
+/// input sample 0 instead of leaving an output-latency-sized gap at the start.
+/// When the source is shorter than the library's seek length, we prepend
+/// silence so the whole source can still be processed without producing a
+/// silent buffer.
+fn stretch_exact_interleaved(
+    input_interleaved: &[f32],
+    channels: usize,
+    sample_rate: u32,
+    time_ratio: f64,
+    out_frames: usize,
+) -> Result<Vec<f32>, String> {
+    if input_interleaved.is_empty() || channels == 0 {
+        return Ok(vec![]);
+    }
+    if channels > 2 {
+        return Err("signalsmith stretch: channels > 2 not supported yet".to_string());
+    }
+
+    let in_frames = input_interleaved.len() / channels;
+    if in_frames == 0 || out_frames == 0 {
+        return Ok(vec![]);
+    }
+
+    let time_ratio = if time_ratio.is_finite() && time_ratio > 1e-6 {
+        time_ratio
+    } else {
+        1.0
+    };
+
+    unsafe {
+        let state = sstretch_new(sample_rate.max(1), channels as u32);
+        if state.is_null() {
+            return Err("sstretch_new returned null".to_string());
+        }
+
+        sstretch_set_transpose_semitones(state, 0.0);
+
+        let input_latency = sstretch_input_latency(state).max(0) as usize;
+        let output_latency = sstretch_output_latency(state).max(0) as usize;
+
+        // Signalsmith's seek length is inputLatency + playbackRate * outputLatency,
+        // where playbackRate = in_frames / out_frames.
+        let playback_rate = in_frames as f64 / out_frames.max(1) as f64;
+        let seek_length = input_latency as f64 + playback_rate * output_latency as f64;
+
+        // Pad the front only when the source is too short for exact alignment.
+        let pad_in = if (in_frames as f64) >= seek_length {
+            0
+        } else {
+            (seek_length - in_frames as f64).ceil().max(0.0) as usize
+        };
+        let pad_out = (pad_in as f64 * time_ratio).round() as usize;
+
+        let padded_in_frames = in_frames + pad_in;
+        let padded_out_frames = out_frames + pad_out;
+
+        let mut padded_input = vec![0.0f32; padded_in_frames * channels];
+        padded_input[pad_in * channels..(pad_in + in_frames) * channels]
+            .copy_from_slice(input_interleaved);
+
+        let mut padded_output = vec![0.0f32; padded_out_frames * channels];
+        let ret = sstretch_exact(
+            state,
+            padded_input.as_ptr(),
+            padded_in_frames as u32,
+            padded_output.as_mut_ptr(),
+            padded_out_frames as u32,
+        );
+
+        sstretch_delete(state);
+
+        if ret < 0 {
+            return Err("sstretch_exact failed".to_string());
+        }
+        if ret == 0 {
+            // Should not happen because we padded past the seek length.
+            return Err("sstretch_exact reported input too short".to_string());
+        }
+
+        let start = pad_out * channels;
+        let end = start + out_frames * channels;
+        Ok(padded_output[start..end].to_vec())
+    }
+}
+
+/// Offline whole-buffer time stretch, latency-aligned from sample 0.
 pub fn try_time_stretch_interleaved_offline(
     input_interleaved: &[f32],
     channels: usize,
@@ -249,58 +308,29 @@ pub fn try_time_stretch_interleaved_offline(
     if in_frames < 2 {
         return Ok(input_interleaved.to_vec());
     }
+
     let time_ratio = if time_ratio.is_finite() && time_ratio > 1e-6 {
         time_ratio
     } else {
         1.0
     };
-
     let out_frames = if out_frames_hint > 0 {
         out_frames_hint
     } else {
         ((in_frames as f64) * time_ratio).ceil() as usize
     };
 
-    unsafe {
-        let state = sstretch_new(sample_rate.max(1), channels as u32);
-        if state.is_null() {
-            return Err("sstretch_new returned null".to_string());
-        }
-
-        // pitch_scale = 1.0（不变调）
-        sstretch_set_transpose_semitones(state, 0.0);
-
-        let mut output = vec![0.0f32; out_frames * channels];
-
-        let got = sstretch_process_offline(
-            state,
-            input_interleaved.as_ptr(),
-            in_frames as u32,
-            output.as_mut_ptr(),
-            out_frames as u32,
-            time_ratio,
-        );
-
-        sstretch_delete(state);
-
-        if got < 0 {
-            return Err("sstretch_process_offline failed".to_string());
-        }
-
-        // 如果实际输出少于期望，截断
-        let actual_frames = got as usize;
-        if actual_frames < out_frames {
-            output.truncate(actual_frames * channels);
-        }
-
-        Ok(output)
-    }
+    stretch_exact_interleaved(
+        input_interleaved,
+        channels,
+        sample_rate,
+        time_ratio,
+        out_frames,
+    )
 }
 
-/// 使用 Signalsmith Stretch 实时模式完成批量时间拉伸。
-///
-/// 与 `try_time_stretch_interleaved_offline` 功能相同，
-/// 但使用流式 process 接口（与 stretch_stream 路径一致）。
+/// Batch "realtime" entry point. This is also a whole-buffer call, so it uses
+/// the same latency-aligned exact path as the offline entry point.
 pub fn try_time_stretch_interleaved_realtime(
     input_interleaved: &[f32],
     channels: usize,
@@ -308,130 +338,83 @@ pub fn try_time_stretch_interleaved_realtime(
     time_ratio: f64,
     out_frames_hint: usize,
 ) -> Result<Vec<f32>, String> {
-    if input_interleaved.is_empty() || channels == 0 {
-        return Ok(vec![]);
-    }
-    if channels > 2 {
-        return Err("signalsmith stretch: channels > 2 not supported yet".to_string());
-    }
+    try_time_stretch_interleaved_offline(
+        input_interleaved,
+        channels,
+        sample_rate,
+        time_ratio,
+        out_frames_hint,
+    )
+}
 
-    let in_frames = input_interleaved.len() / channels;
-    if in_frames < 2 {
-        return Ok(input_interleaved.to_vec());
-    }
-    let time_ratio = if time_ratio.is_finite() && time_ratio > 1e-6 {
-        time_ratio
-    } else {
-        1.0
-    };
+#[cfg(test)]
+mod tests {
+    use super::try_time_stretch_interleaved_realtime;
 
-    let out_frames = if out_frames_hint > 0 {
-        out_frames_hint
-    } else {
-        ((in_frames as f64) * time_ratio).ceil() as usize
-    };
-
-    unsafe {
-        let state = sstretch_new(sample_rate.max(1), channels as u32);
-        if state.is_null() {
-            return Err("sstretch_new returned null".to_string());
+    fn peak_frame(samples: &[f32], channels: usize) -> (usize, f32) {
+        let mut best = (0usize, 0.0f32);
+        for (frame, chunk) in samples.chunks_exact(channels).enumerate() {
+            let peak = chunk.iter().copied().fold(0.0f32, f32::max);
+            if peak > best.1 {
+                best = (frame, peak);
+            }
         }
+        best
+    }
 
-        sstretch_set_transpose_semitones(state, 0.0);
+    #[test]
+    fn short_clip_is_not_silent_and_keeps_its_leading_audio() {
+        // 0.05s mono source at 44.1 kHz, well below Signalsmith's ~0.12s seek length.
+        let sample_rate = 44_100;
+        let in_frames = 2_205;
+        let mut input = vec![0.0f32; in_frames];
+        input[0] = 1.0;
+        input[100] = 0.5;
 
-        // 分块处理
-        const BLOCK: usize = 1024;
+        let out = try_time_stretch_interleaved_realtime(&input, 1, sample_rate, 1.0, in_frames)
+            .expect("signalsmith stretch should succeed");
+        assert_eq!(out.len(), in_frames);
 
-        let input_latency = sstretch_input_latency(state) as usize;
-        let output_latency = sstretch_output_latency(state) as usize;
+        let (peak, value) = peak_frame(&out, 1);
+        assert!(
+            value > 0.5,
+            "short clip became (nearly) silent: peak={value}"
+        );
+        assert!(
+            peak <= 2,
+            "short clip lost its leading audio: peak at frame {peak}"
+        );
+    }
 
-        // 总共需要的输出帧数（含 pre-roll）
-        let total_out = out_frames + output_latency;
-        // 总共需要的输入帧数（含尾部 flush 静音）
-        let total_in = in_frames + input_latency;
+    #[test]
+    fn long_clip_keeps_audio_at_the_very_start() {
+        let sample_rate = 44_100;
+        let in_frames = 8_820; // 0.2s
+        let mut input = vec![0.0f32; in_frames];
+        input[0] = 1.0;
 
-        let mut all_output: Vec<f32> = Vec::with_capacity(total_out * channels);
+        for (out_frames, time_ratio) in
+            [(in_frames, 1.0), (in_frames * 2, 2.0), (in_frames / 2, 0.5)]
+        {
+            let out = try_time_stretch_interleaved_realtime(
+                &input,
+                1,
+                sample_rate,
+                time_ratio,
+                out_frames,
+            )
+            .expect("signalsmith stretch should succeed");
+            assert_eq!(out.len(), out_frames);
 
-        let mut in_cursor: usize = 0;
-        let mut out_produced: usize = 0;
-
-        // 提前在循环外分配好最大容量的复用 Buffer，消除循环内开销
-        let mut in_block = vec![0.0f32; BLOCK * channels];
-        let mut out_block = vec![0.0f32; BLOCK * 4 * channels]; // block_out 最大为 BLOCK * 4
-
-        while in_cursor < total_in || out_produced < total_out {
-            let remain_in = total_in.saturating_sub(in_cursor);
-            let block_in = remain_in.min(BLOCK);
-
-            let block_out = if total_in > 0 {
-                let next_progress = ((in_cursor + block_in) as f64) / (total_in as f64);
-                let next_expected = (next_progress * total_out as f64).round() as usize;
-                next_expected
-                    .saturating_sub(out_produced)
-                    .max(1)
-                    .min(BLOCK * 4)
-            } else {
-                0
-            };
-
-            if block_in == 0 && block_out == 0 {
-                break;
-            }
-
-            // 利用底层 memcpy 极速拷贝数据，超出的部分补 0
-            let valid_in_frames = in_frames.saturating_sub(in_cursor).min(block_in);
-            let valid_in_samples = valid_in_frames * channels;
-            let total_in_samples = block_in * channels;
-
-            if valid_in_samples > 0 {
-                let start = in_cursor * channels;
-                in_block[..valid_in_samples]
-                    .copy_from_slice(&input_interleaved[start..start + valid_in_samples]);
-            }
-            if total_in_samples > valid_in_samples {
-                in_block[valid_in_samples..total_in_samples].fill(0.0);
-            }
-
-            let ret = sstretch_process_interleaved(
-                state,
-                in_block.as_ptr(),
-                block_in as u32,
-                out_block.as_mut_ptr(),
-                block_out as u32,
+            let (peak, value) = peak_frame(&out, 1);
+            assert!(
+                value > 0.5,
+                "stretched clip lost its start (ratio={time_ratio}): peak={value}"
             );
-
-            if ret < 0 {
-                sstretch_delete(state);
-                return Err("sstretch_process_interleaved failed".to_string());
-            }
-
-            // 仅取出当前轮次有效输出的切片
-            all_output.extend_from_slice(&out_block[..block_out * channels]);
-            in_cursor += block_in;
-            out_produced += block_out;
+            assert!(
+                peak <= 2,
+                "stretched clip lost its leading audio (ratio={time_ratio}): peak at frame {peak}"
+            );
         }
-
-        // flush 残余输出
-        if out_produced < total_out {
-            let flush_frames = total_out - out_produced;
-            let mut flush_buf = vec![0.0f32; flush_frames * channels];
-            let _ = sstretch_flush(state, flush_buf.as_mut_ptr(), flush_frames as u32);
-            all_output.extend_from_slice(&flush_buf);
-        }
-
-        sstretch_delete(state);
-
-        // 跳过 pre-roll，取 out_frames 帧
-        let skip = output_latency.min(all_output.len() / channels.max(1));
-        let skip_samples = skip * channels;
-        let available = all_output.len().saturating_sub(skip_samples);
-        let take_samples = (out_frames * channels).min(available);
-
-        if take_samples == 0 {
-            return Ok(vec![]);
-        }
-
-        let result = all_output[skip_samples..skip_samples + take_samples].to_vec();
-        Ok(result)
     }
 }

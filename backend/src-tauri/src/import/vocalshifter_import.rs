@@ -5,7 +5,6 @@
 //
 // 参考规范：用户需求文档§2
 
-use crate::audio_utils::try_read_wav_info;
 use crate::midi_import::{self, MidiNoteEvent};
 use crate::models::PitchRange;
 use crate::state::{Clip, PitchAnalysisAlgo, TimelineState, Track, TrackParamsState};
@@ -44,9 +43,6 @@ fn segment_overlap_sec(left_timeline_sec: f64, right_timeline_sec: f64) -> f64 {
         .min(right_timeline_sec.max(0.0) * 0.5)
         .min(SEGMENT_OVERLAP_MAX_SEC * 0.5)
 }
-
-/// HiFiShifter 支持的音频格式扩展名
-const SUPPORTED_AUDIO_EXTS: &[&str] = &["wav", "flac", "mp3", "ogg", "m4a"];
 
 /// 标准 MIDI 文件扩展名
 const SUPPORTED_MIDI_EXTS: &[&str] = &["mid", "midi", "smf"];
@@ -502,15 +498,20 @@ fn new_clip_id() -> String {
 
 /// 判断音频文件扩展名是否被 HiFiShifter 支持。
 fn is_audio_supported(path: &str) -> bool {
-    Path::new(path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| {
-            SUPPORTED_AUDIO_EXTS
-                .iter()
-                .any(|&ext| ext.eq_ignore_ascii_case(e))
-        })
-        .unwrap_or(false)
+    crate::media::is_media_extension(Path::new(path))
+}
+
+/// 导入时读取音频信息。视频源只做 header 探测，避免在导入阶段全量
+/// 解码整条音轨；波形峰值由前端后续异步生成。
+fn read_audio_info_for_import(
+    path: &str,
+    preview_points: usize,
+) -> Option<crate::audio_utils::WavInfo> {
+    if crate::media::is_video_extension(Path::new(path)) {
+        crate::audio_utils::try_read_audio_header_only(Path::new(path))
+    } else {
+        crate::audio_utils::try_read_wav_info(Path::new(path), preview_points)
+    }
 }
 
 fn is_midi_file(path: &str) -> bool {
@@ -562,10 +563,7 @@ fn create_midi_clip_from_file(
         note.end_sec -= first_start;
     }
 
-    let last_end = notes
-        .iter()
-        .map(|n| n.end_sec)
-        .fold(0.0f64, f64::max);
+    let last_end = notes.iter().map(|n| n.end_sec).fold(0.0f64, f64::max);
 
     let min_note = notes.iter().fold(127.0f32, |m, n| m.min(n.note));
     let max_note = notes.iter().fold(0.0f32, |m, n| m.max(n.note));
@@ -577,9 +575,11 @@ fn create_midi_clip_from_file(
         .to_string();
 
     Ok(Clip {
+        takes: vec![],
+        active_take_id: None,
         id: new_clip_id(),
-            group_id: None,
-            track_id: track_id.to_string(),
+        group_id: None,
+        track_id: track_id.to_string(),
         name: clip_name,
         start_sec,
         length_sec: (last_end / rate).max(0.1),
@@ -602,11 +602,21 @@ fn create_midi_clip_from_file(
         source_start_sec: 0.0,
         source_end_sec: last_end,
         playback_rate: rate as f32,
+        clip_playback_rate: 1.0,
         reversed: false,
+        // MIDI clip（音高参考块）没有源媒体可循环，Loop 保持关闭。
+        loop_enabled: false,
+        snap_offset_sec: 0.0,
         fade_in_sec: 0.0,
         fade_out_sec: 0.0,
         fade_in_curve: String::new(),
         fade_out_curve: String::new(),
+        fade_in_shape: 0.0,
+        fade_out_shape: 0.0,
+        fade_in_dir: 0.0,
+        fade_out_dir: 0.0,
+        auto_fade_in_sec: 0.0,
+        auto_fade_out_sec: 0.0,
         extra_curves: None,
         extra_params: None,
         formant_morph: None,
@@ -621,9 +631,10 @@ fn convert_volume(vs_volume: f64) -> f32 {
     (vs_volume as f32).clamp(0.0, 1.0)
 }
 
-/// 轨道颜色调色板（与 state.rs 中一致）
+/// 轨道颜色调色板（与 state.rs 中一致，灰色开头）
 const TRACK_COLORS: &[&str] = &[
-    "#6f8fa9", "#8c7fa3", "#6f9581", "#aa7f67", "#9a6f82", "#6e95a0", "#a39061", "#996d68",
+    "#74787e", "#4a8fd1", "#7b6bc4", "#43a875", "#cf6f2e", "#f087b5", "#b845a5", "#f0d25e",
+    "#d94f4a",
 ];
 
 fn clip_color() -> String {
@@ -890,18 +901,18 @@ pub fn import_vsp(data: &[u8], vsp_file_dir: &Path) -> Result<VspImportResult, S
         let item_start_sec = base.start_sample / sample_rate;
 
         // 读取音频文件信息
-        let audio_info = try_read_wav_info(Path::new(&audio_path), 4096);
-        let (duration_sec, duration_frames, source_sr, waveform_preview) = match &audio_info {
-            Some(info) => (
-                Some(info.duration_sec),
-                Some(info.total_frames),
-                Some(info.sample_rate),
-                Some(info.waveform_preview.clone()),
-            ),
-            None => (None, None, None, None),
+        let audio_info = read_audio_info_for_import(&audio_path, 4096);
+        let Some(info) = &audio_info else {
+            // 任何解码器都无法识别该媒体文件（例如没有音轨的视频）。
+            skipped_files.push(base.audio_path.clone());
+            continue;
         };
+        let duration_sec = Some(info.duration_sec);
+        let duration_frames = Some(info.total_frames);
+        let source_sr = Some(info.sample_rate);
+        let waveform_preview = Some(info.waveform_preview.clone());
 
-        let source_duration_sec = duration_sec.unwrap_or(0.0);
+        let source_duration_sec = info.duration_sec;
 
         // 处理时间拉伸标记
         let time_markers = ext.map(|e| &e.time_markers[..]).unwrap_or(&[]);
@@ -964,9 +975,11 @@ pub fn import_vsp(data: &[u8], vsp_file_dir: &Path) -> Result<VspImportResult, S
                 let clip_index = hs_clips.len();
 
                 hs_clips.push(Clip {
+                    takes: vec![],
+                    active_take_id: None,
                     id: clip_id.clone(),
-            group_id: None,
-            track_id: track_id.clone(),
+                    group_id: None,
+                    track_id: track_id.clone(),
                     name: format!("{} ({})", clip_name, seg_idx + 1),
                     start_sec: clip_start,
                     length_sec: clip_length,
@@ -989,11 +1002,20 @@ pub fn import_vsp(data: &[u8], vsp_file_dir: &Path) -> Result<VspImportResult, S
                     source_start_sec: seg_src_start,
                     source_end_sec: seg_src_end,
                     playback_rate: rate.clamp(0.1, 10.0),
+                    clip_playback_rate: 1.0,
                     reversed: false,
+                    loop_enabled: crate::config::loop_new_clips_default(),
+                    snap_offset_sec: 0.0,
                     fade_in_sec: 0.0,
                     fade_out_sec: 0.0,
                     fade_in_curve: String::new(),
                     fade_out_curve: String::new(),
+                    fade_in_shape: 0.0,
+                    fade_out_shape: 0.0,
+                    fade_in_dir: 0.0,
+                    fade_out_dir: 0.0,
+                    auto_fade_in_sec: 0.0,
+                    auto_fade_out_sec: 0.0,
                     extra_curves: None,
                     extra_params: None,
                     formant_morph: None,
@@ -1072,9 +1094,11 @@ pub fn import_vsp(data: &[u8], vsp_file_dir: &Path) -> Result<VspImportResult, S
                 .to_string();
 
             hs_clips.push(Clip {
+                takes: vec![],
+                active_take_id: None,
                 id: clip_id.clone(),
-            group_id: None,
-            track_id: track_id.clone(),
+                group_id: None,
+                track_id: track_id.clone(),
                 name: clip_name,
                 start_sec: item_start_sec,
                 length_sec: clip_length,
@@ -1097,11 +1121,20 @@ pub fn import_vsp(data: &[u8], vsp_file_dir: &Path) -> Result<VspImportResult, S
                 source_start_sec: 0.0,
                 source_end_sec: source_duration_sec,
                 playback_rate: rate.clamp(0.1, 10.0),
+                clip_playback_rate: 1.0,
                 reversed: false,
+                loop_enabled: crate::config::loop_new_clips_default(),
+                snap_offset_sec: 0.0,
                 fade_in_sec: 0.0,
                 fade_out_sec: 0.0,
                 fade_in_curve: String::new(),
                 fade_out_curve: String::new(),
+                fade_in_shape: 0.0,
+                fade_out_shape: 0.0,
+                fade_in_dir: 0.0,
+                fade_out_dir: 0.0,
+                auto_fade_in_sec: 0.0,
+                auto_fade_out_sec: 0.0,
                 extra_curves: None,
                 extra_params: None,
                 formant_morph: None,
@@ -1204,7 +1237,7 @@ pub fn import_vsp(data: &[u8], vsp_file_dir: &Path) -> Result<VspImportResult, S
     }
 
     // ─── 第五步：组装 TimelineState ───
-    let timeline = TimelineState {
+    let mut timeline = TimelineState {
         tracks: hs_tracks,
         clips: hs_clips,
         selected_track_id: None,
@@ -1214,9 +1247,11 @@ pub fn import_vsp(data: &[u8], vsp_file_dir: &Path) -> Result<VspImportResult, S
         project_sec: project_end,
         params_by_root_track,
         project_scale_notes: vec![0, 2, 4, 5, 7, 9, 11],
+        tempo_map: None,
         disabled_group_ids: HashSet::new(),
         next_track_order: track_order,
     };
+    timeline.normalize_clip_takes();
 
     Ok(VspImportResult {
         timeline,
@@ -1597,8 +1632,18 @@ pub fn import_vsp_clipboard(
                 1.0
             };
 
-            let bpm_val = if project.bpm > 0.0 { project.bpm } else { 120.0 };
-            match create_midi_clip_from_file(&audio_path, &target_track_id, item_start_sec, rate, bpm_val) {
+            let bpm_val = if project.bpm > 0.0 {
+                project.bpm
+            } else {
+                120.0
+            };
+            match create_midi_clip_from_file(
+                &audio_path,
+                &target_track_id,
+                item_start_sec,
+                rate,
+                bpm_val,
+            ) {
                 Ok(clip) => {
                     hs_clips.push(clip);
                 }
@@ -1621,18 +1666,18 @@ pub fn import_vsp_clipboard(
         let item_start_sec = base.start_sample / sample_rate + time_offset;
 
         // 读取音频文件信息
-        let audio_info = try_read_wav_info(Path::new(&audio_path), 4096);
-        let (duration_sec, duration_frames, source_sr, waveform_preview) = match &audio_info {
-            Some(info) => (
-                Some(info.duration_sec),
-                Some(info.total_frames),
-                Some(info.sample_rate),
-                Some(info.waveform_preview.clone()),
-            ),
-            None => (None, None, None, None),
+        let audio_info = read_audio_info_for_import(&audio_path, 4096);
+        let Some(info) = &audio_info else {
+            // 任何解码器都无法识别该媒体文件（例如没有音轨的视频）。
+            skipped_files.push(base.audio_path.clone());
+            continue;
         };
+        let duration_sec = Some(info.duration_sec);
+        let duration_frames = Some(info.total_frames);
+        let source_sr = Some(info.sample_rate);
+        let waveform_preview = Some(info.waveform_preview.clone());
 
-        let source_duration_sec = duration_sec.unwrap_or(0.0);
+        let source_duration_sec = info.duration_sec;
         let time_markers = ext.map(|e| &e.time_markers[..]).unwrap_or(&[]);
         let pitch_points = ext.map(|e| &e.pitch_points[..]).unwrap_or(&[]);
 
@@ -1693,9 +1738,11 @@ pub fn import_vsp_clipboard(
                 let clip_index = hs_clips.len();
 
                 hs_clips.push(Clip {
+                    takes: vec![],
+                    active_take_id: None,
                     id: clip_id.clone(),
-            group_id: None,
-            track_id: target_track_id.clone(),
+                    group_id: None,
+                    track_id: target_track_id.clone(),
                     name: format!("{} ({})", clip_name, seg_idx + 1),
                     start_sec: clip_start,
                     length_sec: clip_length,
@@ -1718,11 +1765,20 @@ pub fn import_vsp_clipboard(
                     source_start_sec: seg_src_start,
                     source_end_sec: seg_src_end,
                     playback_rate: rate.clamp(0.1, 10.0),
+                    clip_playback_rate: 1.0,
                     reversed: false,
+                    loop_enabled: crate::config::loop_new_clips_default(),
+                    snap_offset_sec: 0.0,
                     fade_in_sec: 0.0,
                     fade_out_sec: 0.0,
                     fade_in_curve: String::new(),
                     fade_out_curve: String::new(),
+                    fade_in_shape: 0.0,
+                    fade_out_shape: 0.0,
+                    fade_in_dir: 0.0,
+                    fade_out_dir: 0.0,
+                    auto_fade_in_sec: 0.0,
+                    auto_fade_out_sec: 0.0,
                     extra_curves: None,
                     extra_params: None,
                     formant_morph: None,
@@ -1800,9 +1856,11 @@ pub fn import_vsp_clipboard(
                 .to_string();
 
             hs_clips.push(Clip {
+                takes: vec![],
+                active_take_id: None,
                 id: clip_id.clone(),
-            group_id: None,
-            track_id: target_track_id.clone(),
+                group_id: None,
+                track_id: target_track_id.clone(),
                 name: clip_name,
                 start_sec: item_start_sec,
                 length_sec: clip_length,
@@ -1825,11 +1883,20 @@ pub fn import_vsp_clipboard(
                 source_start_sec: 0.0,
                 source_end_sec: source_duration_sec,
                 playback_rate: rate.clamp(0.1, 10.0),
+                clip_playback_rate: 1.0,
                 reversed: false,
+                loop_enabled: crate::config::loop_new_clips_default(),
+                snap_offset_sec: 0.0,
                 fade_in_sec: 0.0,
                 fade_out_sec: 0.0,
                 fade_in_curve: String::new(),
                 fade_out_curve: String::new(),
+                fade_in_shape: 0.0,
+                fade_out_shape: 0.0,
+                fade_in_dir: 0.0,
+                fade_out_dir: 0.0,
+                auto_fade_in_sec: 0.0,
+                auto_fade_out_sec: 0.0,
                 extra_curves: None,
                 extra_params: None,
                 formant_morph: None,
@@ -1927,7 +1994,7 @@ pub fn import_vsp_clipboard(
         }
     }
 
-    let timeline = TimelineState {
+    let mut timeline = TimelineState {
         tracks: new_tracks,
         clips: hs_clips,
         selected_track_id: None,
@@ -1937,9 +2004,11 @@ pub fn import_vsp_clipboard(
         project_sec: project_end,
         params_by_root_track,
         project_scale_notes: vec![0, 2, 4, 5, 7, 9, 11],
+        tempo_map: None,
         disabled_group_ids: HashSet::new(),
         next_track_order: next_order,
     };
+    timeline.normalize_clip_takes();
 
     Ok(VspImportResult {
         timeline,
@@ -2149,8 +2218,13 @@ fn import_vsp_clipboard_selected_tracks(
                 1.0
             };
 
-            let bpm_val = if project.bpm > 0.0 { project.bpm } else { 120.0 };
-            match create_midi_clip_from_file(&audio_path, &track_id, item_start_sec, rate, bpm_val) {
+            let bpm_val = if project.bpm > 0.0 {
+                project.bpm
+            } else {
+                120.0
+            };
+            match create_midi_clip_from_file(&audio_path, &track_id, item_start_sec, rate, bpm_val)
+            {
                 Ok(clip) => {
                     hs_clips.push(clip);
                 }
@@ -2172,18 +2246,18 @@ fn import_vsp_clipboard_selected_tracks(
 
         let item_start_sec = base.start_sample / sample_rate;
 
-        let audio_info = try_read_wav_info(Path::new(&audio_path), 4096);
-        let (duration_sec, duration_frames, source_sr, waveform_preview) = match &audio_info {
-            Some(info) => (
-                Some(info.duration_sec),
-                Some(info.total_frames),
-                Some(info.sample_rate),
-                Some(info.waveform_preview.clone()),
-            ),
-            None => (None, None, None, None),
+        let audio_info = read_audio_info_for_import(&audio_path, 4096);
+        let Some(info) = &audio_info else {
+            // 任何解码器都无法识别该媒体文件（例如没有音轨的视频）。
+            skipped_files.push(base.audio_path.clone());
+            continue;
         };
+        let duration_sec = Some(info.duration_sec);
+        let duration_frames = Some(info.total_frames);
+        let source_sr = Some(info.sample_rate);
+        let waveform_preview = Some(info.waveform_preview.clone());
 
-        let source_duration_sec = duration_sec.unwrap_or(0.0);
+        let source_duration_sec = info.duration_sec;
         let time_markers = ext.map(|e| &e.time_markers[..]).unwrap_or(&[]);
         let pitch_points = ext.map(|e| &e.pitch_points[..]).unwrap_or(&[]);
 
@@ -2243,9 +2317,11 @@ fn import_vsp_clipboard_selected_tracks(
                 let clip_index = hs_clips.len();
 
                 hs_clips.push(Clip {
+                    takes: vec![],
+                    active_take_id: None,
                     id: clip_id.clone(),
-            group_id: None,
-            track_id: track_id.clone(),
+                    group_id: None,
+                    track_id: track_id.clone(),
                     name: format!("{} ({})", clip_name, seg_idx + 1),
                     start_sec: clip_start,
                     length_sec: clip_length,
@@ -2268,11 +2344,20 @@ fn import_vsp_clipboard_selected_tracks(
                     source_start_sec: seg_src_start,
                     source_end_sec: seg_src_end,
                     playback_rate: rate.clamp(0.1, 10.0),
+                    clip_playback_rate: 1.0,
                     reversed: false,
+                    loop_enabled: crate::config::loop_new_clips_default(),
+                    snap_offset_sec: 0.0,
                     fade_in_sec: 0.0,
                     fade_out_sec: 0.0,
                     fade_in_curve: String::new(),
                     fade_out_curve: String::new(),
+                    fade_in_shape: 0.0,
+                    fade_out_shape: 0.0,
+                    fade_in_dir: 0.0,
+                    fade_out_dir: 0.0,
+                    auto_fade_in_sec: 0.0,
+                    auto_fade_out_sec: 0.0,
                     extra_curves: None,
                     extra_params: None,
                     formant_morph: None,
@@ -2348,9 +2433,11 @@ fn import_vsp_clipboard_selected_tracks(
                 .to_string();
 
             hs_clips.push(Clip {
+                takes: vec![],
+                active_take_id: None,
                 id: clip_id.clone(),
-            group_id: None,
-            track_id: track_id.clone(),
+                group_id: None,
+                track_id: track_id.clone(),
                 name: clip_name,
                 start_sec: item_start_sec,
                 length_sec: clip_length,
@@ -2373,11 +2460,20 @@ fn import_vsp_clipboard_selected_tracks(
                 source_start_sec: 0.0,
                 source_end_sec: source_duration_sec,
                 playback_rate: rate.clamp(0.1, 10.0),
+                clip_playback_rate: 1.0,
                 reversed: false,
+                loop_enabled: crate::config::loop_new_clips_default(),
+                snap_offset_sec: 0.0,
                 fade_in_sec: 0.0,
                 fade_out_sec: 0.0,
                 fade_in_curve: String::new(),
                 fade_out_curve: String::new(),
+                fade_in_shape: 0.0,
+                fade_out_shape: 0.0,
+                fade_in_dir: 0.0,
+                fade_out_dir: 0.0,
+                auto_fade_in_sec: 0.0,
+                auto_fade_out_sec: 0.0,
                 extra_curves: None,
                 extra_params: None,
                 formant_morph: None,
@@ -2472,7 +2568,7 @@ fn import_vsp_clipboard_selected_tracks(
         }
     }
 
-    let timeline = TimelineState {
+    let mut timeline = TimelineState {
         tracks: hs_tracks,
         clips: hs_clips,
         selected_track_id: None,
@@ -2482,9 +2578,11 @@ fn import_vsp_clipboard_selected_tracks(
         project_sec: project_end,
         params_by_root_track,
         project_scale_notes: vec![0, 2, 4, 5, 7, 9, 11],
+        tempo_map: None,
         disabled_group_ids: HashSet::new(),
         next_track_order: track_order,
     };
+    timeline.normalize_clip_takes();
 
     Ok(VspImportResult {
         timeline,

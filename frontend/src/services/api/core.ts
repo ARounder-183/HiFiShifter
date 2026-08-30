@@ -83,6 +83,13 @@ export const coreApi = {
     openAudioDialogMultiple: () =>
         invoke<{ ok: boolean; canceled?: boolean; paths?: string[] }>("open_audio_dialog_multi"),
 
+    openAudioDialogForSource: (sourcePath: string, dialogTitle: string) =>
+        invoke<{ ok: boolean; canceled?: boolean; path?: string }>(
+            "open_audio_dialog_for_source",
+            sourcePath,
+            dialogTitle,
+        ),
+
     pickOutputPath: () =>
         invoke<{ ok: boolean; canceled?: boolean; path?: string }>("pick_output_path"),
 
@@ -168,7 +175,8 @@ export const coreApi = {
     playOriginal: (startSec = 0) =>
         invoke<{ ok: boolean; playing?: string; start_sec?: number }>("play_original", startSec),
 
-    stopAudio: () => invoke<{ ok: boolean }>("stop_audio"),
+    /** 引擎确在播放时返回精确停止位置（stopped_at_sec），否则为 null。 */
+    stopAudio: () => invoke<{ ok: boolean; stopped_at_sec?: number | null }>("stop_audio"),
 
     // Pitch analysis progress
     getPitchAnalysisProgress: () =>

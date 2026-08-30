@@ -26,15 +26,108 @@ import {
     type SortMode,
 } from "../../features/fileBrowser/fileBrowserSlice";
 import { audioPreview } from "../../features/fileBrowser/audioPreview";
-import type { FileEntry } from "../../services/api/fileBrowser";
+import { fileBrowserApi, type FileEntry } from "../../services/api/fileBrowser";
 import { applySelectWheelChange } from "../../utils/selectWheel";
+import { isPrimaryModifierDown } from "../../utils/platform";
 
-/** 支持的音频扩展名 */
-const AUDIO_EXTENSIONS = new Set(["wav", "mp3", "flac", "ogg", "aac", "aif", "aiff", "m4a"]);
+/** 支持的音频与视频媒体扩展名（视频按音轨导入） */
+const AUDIO_EXTENSIONS = new Set([
+    "wav",
+    "mp3",
+    "flac",
+    "ogg",
+    "oga",
+    "opus",
+    "aac",
+    "m4a",
+    "aif",
+    "aiff",
+    "wma",
+    "ac3",
+    "eac3",
+    "ape",
+    "wv",
+    "mp2",
+    "mpa",
+    "dts",
+    "amr",
+    "mp4",
+    "m4v",
+    "mov",
+    "mkv",
+    "webm",
+    "avi",
+    "flv",
+    "wmv",
+    "ts",
+    "mts",
+    "m2ts",
+    "vob",
+    "mpg",
+    "mpeg",
+    "3gp",
+    "3g2",
+    "ogv",
+    "rm",
+    "rmvb",
+]);
+/** 支持的 MIDI 文件扩展名（可拖拽导入到时间轴或参数编辑器） */
+const MIDI_EXTENSIONS = new Set(["mid", "midi"]);
+
+/**
+ * 支持的工程文件扩展名（可拖拽导入；备份文件如 .hshp-bak 不在其中，
+ * 无需高亮）。注意 FileEntry.extension 是最后一个点后的完整后缀，
+ * 因此 "proj.hshp-bak" 的 extension 为 "hshp-bak"，天然不会误命中。
+ */
+const PROJECT_EXTENSIONS = new Set(["hshp", "hsp", "rpp", "vshp", "vsp"]);
+
 const SORT_MODE_OPTIONS: SortMode[] = ["name", "date", "size"];
 
 function isAudioFile(entry: FileEntry): boolean {
     return !entry.isDir && !!entry.extension && AUDIO_EXTENSIONS.has(entry.extension);
+}
+
+function isMidiFile(entry: FileEntry): boolean {
+    return !entry.isDir && !!entry.extension && MIDI_EXTENSIONS.has(entry.extension);
+}
+
+/** 工程文件（HiFiShifter / Reaper / VocalShifter 工程）。 */
+function isProjectFile(entry: FileEntry): boolean {
+    return !entry.isDir && !!entry.extension && PROJECT_EXTENSIONS.has(entry.extension);
+}
+
+/**
+ * 可拖拽的文件：音频/视频（拖入时间轴）+ MIDI（拖入时间轴或参数编辑器）
+ * + 工程文件（拖入时间轴弹出 打开/导入 操作）。
+ */
+function isDraggableFile(entry: FileEntry): boolean {
+    return isAudioFile(entry) || isMidiFile(entry) || isProjectFile(entry);
+}
+
+const VIDEO_EXTENSIONS = new Set([
+    "mp4",
+    "m4v",
+    "mov",
+    "mkv",
+    "webm",
+    "avi",
+    "flv",
+    "wmv",
+    "ts",
+    "mts",
+    "m2ts",
+    "vob",
+    "mpg",
+    "mpeg",
+    "3gp",
+    "3g2",
+    "ogv",
+    "rm",
+    "rmvb",
+]);
+
+function isVideoFile(entry: FileEntry): boolean {
+    return isAudioFile(entry) && !!entry.extension && VIDEO_EXTENSIONS.has(entry.extension);
 }
 
 /** 格式化文件大小 */
@@ -57,6 +150,24 @@ function FolderIcon({ className }: { className?: string }) {
     );
 }
 
+/** 视频媒体图标 SVG */
+function VideoIcon({ className }: { className?: string }) {
+    return (
+        <svg width="14" height="14" viewBox="0 0 15 15" fill="none" className={className}>
+            <rect
+                x="1.5"
+                y="2.5"
+                width="12"
+                height="10"
+                rx="1.5"
+                stroke="currentColor"
+                strokeWidth="1.2"
+            />
+            <path d="M6 5.5V9.5L9.5 7.5L6 5.5Z" fill="currentColor" />
+        </svg>
+    );
+}
+
 /** 音频文件图标 SVG */
 function AudioIcon({ className }: { className?: string }) {
     return (
@@ -66,6 +177,40 @@ function AudioIcon({ className }: { className?: string }) {
                 stroke="currentColor"
                 strokeWidth="1.2"
                 strokeLinecap="round"
+            />
+        </svg>
+    );
+}
+
+/** MIDI 文件图标 SVG（双音符） */
+function MidiIcon({ className }: { className?: string }) {
+    return (
+        <svg width="14" height="14" viewBox="0 0 15 15" fill="none" className={className}>
+            <path
+                d="M5 2.5V9.5M5 9.5C5 8.39543 4.10457 7.5 3 7.5C1.89543 7.5 1 8.39543 1 9.5C1 10.6046 1.89543 11.5 3 11.5C4.10457 11.5 5 10.6046 5 9.5ZM12.5 3.5V9.5M12.5 9.5C12.5 8.39543 11.6046 7.5 10.5 7.5C9.39543 7.5 8.5 8.39543 8.5 9.5C8.5 10.6046 9.39543 11.5 10.5 11.5C11.6046 11.5 12.5 10.6046 12.5 9.5Z"
+                stroke="currentColor"
+                strokeWidth="1.2"
+                strokeLinecap="round"
+            />
+            <path d="M5 2.5L12.5 1" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+        </svg>
+    );
+}
+
+/** 工程文件图标 SVG（文档 + 星标），用于高亮 hshp/hsp/rpp/vshp/vsp。 */
+function ProjectIcon({ className }: { className?: string }) {
+    return (
+        <svg width="14" height="14" viewBox="0 0 15 15" fill="none" className={className}>
+            <path
+                d="M2.5 1.5H6.5L9 4V13.5H2.5V1.5Z"
+                stroke="currentColor"
+                strokeWidth="1.2"
+                strokeLinejoin="round"
+            />
+            <path d="M6.5 1.5V4H9" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+            <path
+                d="M7.75 6.75L8.36 8.02L9.75 8.18L8.72 9.14L8.96 10.52L7.75 9.84L6.54 10.52L6.78 9.14L5.75 8.18L7.14 8.02L7.75 6.75Z"
+                fill="currentColor"
             />
         </svg>
     );
@@ -101,7 +246,6 @@ export const FileBrowserPanel: React.FC = () => {
 
     // 根据搜索模式决定展示配表
     const isSearchMode = fb.searchQuery.trim().length > 0;
-    const rawEntries = isSearchMode ? (fb.searchResults ?? []) : fb.entries;
     const trimmedSearchQuery = fb.searchQuery.trim();
 
     const hasRegexError = useMemo(() => {
@@ -119,6 +263,7 @@ export const FileBrowserPanel: React.FC = () => {
 
     // 客户端正则过滤（仅在搜索模式且 regexEnabled 时）
     const regexFilteredEntries = useMemo(() => {
+        const rawEntries = isSearchMode ? (fb.searchResults ?? []) : fb.entries;
         if (!isSearchMode || !fb.regexEnabled || !trimmedSearchQuery) {
             return rawEntries;
         }
@@ -128,12 +273,13 @@ export const FileBrowserPanel: React.FC = () => {
         } catch {
             return [];
         }
-    }, [rawEntries, fb.regexEnabled, trimmedSearchQuery, isSearchMode]);
+    }, [isSearchMode, fb.entries, fb.searchResults, fb.regexEnabled, trimmedSearchQuery]);
 
     // 音频过滤
     const audioFilteredEntries = useMemo(() => {
         if (!fb.audioOnly) return regexFilteredEntries;
-        return regexFilteredEntries.filter((e) => e.isDir || isAudioFile(e));
+        // “仅显示媒体文件”：音频/视频 + MIDI（MIDI 可导入时间轴/参数编辑器）。
+        return regexFilteredEntries.filter((e) => e.isDir || isAudioFile(e) || isMidiFile(e));
     }, [regexFilteredEntries, fb.audioOnly]);
 
     // 排序
@@ -170,7 +316,6 @@ export const FileBrowserPanel: React.FC = () => {
     // 选择文件夹（通过后端 rfd dialog）
     const handleOpenFolder = useCallback(async () => {
         try {
-            const { fileBrowserApi } = await import("../../services/api/fileBrowser");
             const result = await fileBrowserApi.pickDirectory();
             if (result.ok && !result.canceled && result.path) {
                 void dispatch(loadDirectory(result.path));
@@ -227,8 +372,8 @@ export const FileBrowserPanel: React.FC = () => {
         (entry: FileEntry, ev?: React.MouseEvent) => {
             const idx = audioEntries.findIndex((e) => e.path === entry.path);
 
-            if (ev?.ctrlKey || ev?.metaKey) {
-                // Ctrl+click: toggle selection
+            if (ev && isPrimaryModifierDown(ev)) {
+                // macOS: Command+click / Windows: Ctrl+click — toggle selection
                 setSelectedPaths((prev) => {
                     const next = new Set(prev);
                     if (next.has(entry.path)) next.delete(entry.path);
@@ -281,6 +426,7 @@ export const FileBrowserPanel: React.FC = () => {
         isRightDrag: boolean; // 右键拖拽标记
     } | null>(null);
     const dragStateRef = useRef(dragState);
+    // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制/事件回调需在同一提交内读取最新值（热路径既有模式）
     dragStateRef.current = dragState;
 
     // ghost 元素跟随鼠标
@@ -340,26 +486,24 @@ export const FileBrowserPanel: React.FC = () => {
                     }),
                 );
                 // 异步获取音频时长，获取后通知 TimelinePanel 更新 ghost 宽度
-                import("../../services/api/fileBrowser").then(({ fileBrowserApi }) => {
-                    fileBrowserApi
-                        .getAudioFileInfo(ds.filePath)
-                        .then((info) => {
-                            if (info && dragStateRef.current?.filePath === ds.filePath) {
-                                window.dispatchEvent(
-                                    new CustomEvent("hifi-file-drag", {
-                                        detail: {
-                                            type: "duration",
-                                            filePath: ds.filePath,
-                                            durationSec: info.durationSec,
-                                        },
-                                    }),
-                                );
-                            }
-                        })
-                        .catch(() => {
-                            /* 获取失败则保持默认宽度 */
-                        });
-                });
+                fileBrowserApi
+                    .getAudioFileInfo(ds.filePath)
+                    .then((info) => {
+                        if (info && dragStateRef.current?.filePath === ds.filePath) {
+                            window.dispatchEvent(
+                                new CustomEvent("hifi-file-drag", {
+                                    detail: {
+                                        type: "duration",
+                                        filePath: ds.filePath,
+                                        durationSec: info.durationSec,
+                                    },
+                                }),
+                            );
+                        }
+                    })
+                    .catch(() => {
+                        /* 获取失败则保持默认宽度 */
+                    });
             }
 
             // 更新 ghost 位置（clamp 到窗口可视范围内，鼠标超出界面时 ghost 停在边缘）
@@ -440,7 +584,7 @@ export const FileBrowserPanel: React.FC = () => {
                         size="1"
                         variant="ghost"
                         color="gray"
-                        title={(t as (key: string) => string)("fb_open_folder")}
+                        data-tooltip={(t as (key: string) => string)("fb_open_folder")}
                         onClick={handleOpenFolder}
                     >
                         <FolderIcon />
@@ -449,7 +593,7 @@ export const FileBrowserPanel: React.FC = () => {
                         size="1"
                         variant="ghost"
                         color="gray"
-                        title={(t as (key: string) => string)("fb_refresh")}
+                        data-tooltip={(t as (key: string) => string)("fb_refresh")}
                         onClick={handleRefresh}
                     >
                         <ReloadIcon />
@@ -458,7 +602,7 @@ export const FileBrowserPanel: React.FC = () => {
                         size="1"
                         variant="ghost"
                         color="gray"
-                        title={t("fb_close")}
+                        data-tooltip={t("fb_close")}
                         onClick={() => dispatch(setVisible(false))}
                     >
                         <Cross2Icon />
@@ -515,7 +659,7 @@ export const FileBrowserPanel: React.FC = () => {
                         size="1"
                         variant={fb.regexEnabled ? "solid" : "ghost"}
                         color="gray"
-                        title={tAny("fb_regex")}
+                        data-tooltip={tAny("fb_regex")}
                         onClick={() => {
                             const nextRegexEnabled = !fb.regexEnabled;
                             dispatch(toggleRegex());
@@ -546,7 +690,7 @@ export const FileBrowserPanel: React.FC = () => {
                         size="1"
                         variant={fb.audioOnly ? "solid" : "ghost"}
                         color="gray"
-                        title={tAny("fb_audio_only")}
+                        data-tooltip={tAny("fb_audio_only")}
                         onClick={() => dispatch(toggleAudioOnly())}
                         style={{
                             width: 22,
@@ -597,12 +741,17 @@ export const FileBrowserPanel: React.FC = () => {
                         size="1"
                         variant="ghost"
                         color="gray"
-                        title={(t as (key: string) => string)("fb_parent_dir")}
+                        data-tooltip={(t as (key: string) => string)("fb_parent_dir")}
                         onClick={handleParentDir}
                     >
                         <ChevronUpIcon />
                     </IconButton>
-                    <Text size="1" color="gray" className="truncate flex-1" title={fb.currentPath}>
+                    <Text
+                        size="1"
+                        color="gray"
+                        className="truncate flex-1"
+                        data-tooltip={fb.currentPath}
+                    >
                         {fb.currentPath}
                     </Text>
                 </Flex>
@@ -730,6 +879,9 @@ const FileEntryRow: React.FC<FileEntryRowProps> = React.memo(
         pathHint,
     }) => {
         const isAudio = isAudioFile(entry);
+        const isMidi = isMidiFile(entry);
+        const isProject = isProjectFile(entry);
+        const isDraggable = isDraggableFile(entry);
 
         return (
             <div
@@ -742,11 +894,11 @@ const FileEntryRow: React.FC<FileEntryRowProps> = React.memo(
                           ? "bg-[color-mix(in_oklab,var(--qt-highlight)_20%,transparent)]"
                           : "",
                     isDragging ? "opacity-50" : "",
-                    !entry.isDir && !isAudio ? "opacity-50" : "",
+                    !entry.isDir && !isDraggable ? "opacity-50" : "",
                 ]
                     .filter(Boolean)
                     .join(" ")}
-                onPointerDown={isAudio ? (e) => onPointerDownForDrag(e, entry) : undefined}
+                onPointerDown={isDraggable ? (e) => onPointerDownForDrag(e, entry) : undefined}
                 onDoubleClick={entry.isDir ? () => onDoubleClickDir(entry.path) : undefined}
                 onClick={isAudio ? (ev: React.MouseEvent) => onClickAudio(entry, ev) : undefined}
             >
@@ -757,9 +909,16 @@ const FileEntryRow: React.FC<FileEntryRowProps> = React.memo(
                     ) : isAudio ? (
                         isPlaying ? (
                             <StopIcon width="12" height="12" className="text-qt-highlight" />
+                        ) : isVideoFile(entry) ? (
+                            <VideoIcon className="text-purple-400" />
                         ) : (
                             <AudioIcon className="text-blue-400" />
                         )
+                    ) : isMidi ? (
+                        <MidiIcon className="text-qt-highlight" />
+                    ) : isProject ? (
+                        // 工程文件高亮：橙色星标文档图标（备份文件如 .hshp-bak 不在此列）。
+                        <ProjectIcon className="text-amber-400" />
                     ) : (
                         <FileIcon width="12" height="12" className="text-qt-text-muted" />
                     )}
@@ -767,7 +926,11 @@ const FileEntryRow: React.FC<FileEntryRowProps> = React.memo(
 
                 {/* 文件名 + 路径提示 */}
                 <div className="flex flex-col min-w-0 flex-1">
-                    <Text size="1" className="truncate" title={entry.name}>
+                    <Text
+                        size="1"
+                        className={isProject ? "truncate text-amber-300" : "truncate"}
+                        data-tooltip={entry.name}
+                    >
                         {entry.name}
                         {entry.isDir ? "/" : ""}
                     </Text>

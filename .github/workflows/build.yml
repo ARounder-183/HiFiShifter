@@ -3,7 +3,7 @@ name: HiFiShifter Cross-Platform Build (Windows, macOS, Linux)
 on:
   workflow_dispatch:
   pull_request:
-    branches: [main]
+    branches: [main, develop]
 
 jobs:
   frontend-build:
@@ -25,6 +25,9 @@ jobs:
         run: |
           npm --prefix frontend ci
           npm --prefix frontend run build
+
+      - name: Run frontend unit tests
+        run: npm --prefix frontend run test
 
       - name: Archive frontend dist
         run: |
@@ -51,35 +54,35 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Windows — DirectML baked into ort dependency
+          # Windows — DirectML + WebGPU baked into ort dependency
           - name: windows-x86_64
             os: windows-latest
             cargo_target: x86_64-pc-windows-msvc
-            cargo_extra: ""                      # default features: onnx + vslib
+            cargo_extra: "-- --profile dist"                      # default features: onnx + vslib
           - name: windows-arm64
             os: windows-11-arm
             cargo_target: aarch64-pc-windows-msvc
-            cargo_extra: "-- --no-default-features --features onnx"   # vslib is x86_64-only
+            cargo_extra: "-- --profile dist --no-default-features --features onnx"   # vslib is x86_64-only
 
-          # macOS — CoreML on ARM64, CPU on x86_64 (baked into ort deps)
+          # macOS — CoreML + WebGPU on ARM64, CPU on x86_64 (baked into ort deps)
           - name: macos-arm64
             os: macos-latest
             cargo_target: aarch64-apple-darwin
-            cargo_extra: "-- --no-default-features --features onnx"
+            cargo_extra: "-- --profile dist --no-default-features --features onnx"
           - name: macos-x86_64
             os: macos-15-intel
             cargo_target: x86_64-apple-darwin
-            cargo_extra: "-- --no-default-features --features onnx"
+            cargo_extra: "-- --profile dist --no-default-features --features onnx"
 
-          # Linux — OpenCL via generic ORT EP API; vslib excluded
+          # Linux — WebGPU (Dawn/Vulkan backend); vslib excluded
           - name: linux-x86_64
             os: ubuntu-24.04
             cargo_target: x86_64-unknown-linux-gnu
-            cargo_extra: "-- --no-default-features --features onnx"
+            cargo_extra: "-- --profile dist --no-default-features --features onnx"
           - name: linux-arm64
             os: ubuntu-24.04-arm
             cargo_target: aarch64-unknown-linux-gnu
-            cargo_extra: "-- --no-default-features --features onnx"
+            cargo_extra: "-- --profile dist --no-default-features --features onnx"
 
     steps:
       - uses: actions/checkout@v6
@@ -155,22 +158,91 @@ jobs:
           sudo apt-get install -y zsync desktop-file-utils libglib2.0-bin libgtk-3-bin librsvg2-bin appstream xdg-utils
           test -x /usr/bin/xdg-open
 
-      - name: Generate Linux WebKit include map for AppImage
+      - name: Generate Linux AppImage library include map
         if: runner.os == 'Linux'
         working-directory: backend/src-tauri
         run: |
           set -euxo pipefail
+          FILES_JSON='{}'
+
+          # ── Helper: add a library to the map (flat usr/lib/) ──────────
+          add_lib() {
+            local libname="$1"
+            local src
+            src="$(find /usr/lib -name "$libname" -type f -print -quit 2>/dev/null || true)"
+            if [ -n "$src" ] && [ -e "$src" ]; then
+              FILES_JSON="$(jq -c --arg k "usr/lib/$libname" --arg v "$src" '. + {($k): $v}' <<<"$FILES_JSON")"
+              echo "  added $libname ← $src"
+            else
+              echo "  WARNING: $libname not found"
+            fi
+          }
+
+          echo "=== Bundling WebKit2GTK runtime libraries ==="
+
+          # ── Core WebKit libraries ─────────────────────────────────────
           mapfile -t WEBKIT_FILES < <(
             { dpkg -L libwebkit2gtk-4.1-0 2>/dev/null || true
               dpkg -L libjavascriptcoregtk-4.1-0 2>/dev/null || true; } \
             | grep -E '^/usr/lib/.+/(libwebkit2gtk-4.1\.so\.0|libjavascriptcoregtk-4.1\.so\.0|webkit2gtk-4.1($|/))' | sort -u
           )
-          FILES_JSON='{}'
           for src in "${WEBKIT_FILES[@]}"; do
-            [ -e "$src" ] && FILES_JSON="$(jq -c --arg k "${src#/}" --arg v "$src" '. + {($k): $v}' <<<"$FILES_JSON")"
+            if [ -e "$src" ]; then
+              fname="$(basename "$src")"
+              if [ -d "$src" ]; then
+                FILES_JSON="$(jq -c --arg k "${src#/}" --arg v "$src" '. + {($k): $v}' <<<"$FILES_JSON")"
+              else
+                FILES_JSON="$(jq -c --arg k "usr/lib/$fname" --arg v "$src" '. + {($k): $v}' <<<"$FILES_JSON")"
+              fi
+            fi
           done
+
+          echo "=== Bundling Wayland + xkbcommon stack ==="
+
+          add_lib "libwayland-client.so.0"
+          add_lib "libwayland-cursor.so.0"
+          add_lib "libwayland-egl.so.1"
+          add_lib "libxkbcommon.so.0"
+
+          echo "=== Bundling Mesa EGL / GLES / GBM stack ==="
+
+          # WebKit2GTK needs EGL + GLESv2 for its GPU-accelerated
+          # compositor.  Without these the WebKit render process aborts
+          # with "Could not create default EGL display".
+          add_lib "libEGL.so.1"
+          add_lib "libGLESv2.so.2"
+          add_lib "libgbm.so.1"
+          add_lib "libdrm.so.2"
+          add_lib "libdrm_amdgpu.so.1"
+          add_lib "libdrm_intel.so.1"
+          add_lib "libdrm_nouveau.so.2"
+          add_lib "libdrm_radeon.so.1"
+          add_lib "libglapi.so.0"
+
+          echo "=== Bundling Mesa software rendering DRI driver ==="
+
+          # Mesa's swrast (software rasterizer) DRI driver guarantees
+          # WebKit can always fall back to CPU rendering on any GPU or
+          # in headless environments.  We ship the DRI driver in the
+          # standard Mesa DRI search path so libEGL can find it.
+          add_dri_driver() {
+            local drv="$1"
+            local src
+            src="$(find /usr/lib -name "${drv}_dri.so" -type f -print -quit 2>/dev/null || true)"
+            if [ -n "$src" ] && [ -e "$src" ]; then
+              FILES_JSON="$(jq -c --arg k "usr/lib/dri/${drv}_dri.so" --arg v "$src" '. + {($k): $v}' <<<"$FILES_JSON")"
+              echo "  added dri/${drv}_dri.so ← $src"
+            fi
+          }
+          add_dri_driver "swrast"
+          add_dri_driver "zink"       # OpenGL over Vulkan — useful fallback
+
+          echo "=== Bundling SoundTouch ==="
+
           ST_SO_PATH="$GITHUB_WORKSPACE/backend/src-tauri/third_party/soundtouch-static/soundtouch/libSoundTouchDLL.so"
           FILES_JSON="$(jq -c --arg k "usr/bin/libSoundTouchDLL.so" --arg v "$ST_SO_PATH" '. + {($k): $v}' <<<"$FILES_JSON")"
+
+          echo "=== Writing tauri.linux.conf.json ==="
           jq -n --argjson files "$FILES_JSON" '{ bundle: { linux: { appimage: { files: $files } } } }' > tauri.linux.conf.json
         shell: bash
 
@@ -220,7 +292,10 @@ jobs:
           HIFISHIFTER_SKIP_FRONTEND_BUILD: "1"
         with:
           projectPath: backend/src-tauri
-          args: --target ${{ matrix.cargo_target }} ${{ matrix.cargo_extra }}
+          # Do NOT pass --target: every runner in this matrix is native to its
+          # target architecture (windows-11-arm is a native ARM64 runner), so
+          # cargo builds for the host default target and writes to
+          args: ${{ matrix.cargo_extra }}
 
       - name: Build and bundle (macOS)
         if: runner.os == 'macOS'
@@ -230,7 +305,20 @@ jobs:
           HIFISHIFTER_SKIP_FRONTEND_BUILD: "1"
         with:
           projectPath: backend/src-tauri
-          args: --target ${{ matrix.cargo_target }} ${{ matrix.cargo_extra }}
+          # Request the .app bundle explicitly: when only the DMG is requested,
+          # tauri-bundler deletes the intermediate .app from bundle/macos right
+          # after creating the DMG ("Cleaning ...HiFiShifter.app"), which leaves
+          # nothing on disk for the bundle verification step to inspect.
+          args: --bundles app,dmg ${{ matrix.cargo_extra }}
+
+      - name: Set LD_LIBRARY_PATH for linuxdeploy (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          # libwebgpu_dawn.so is placed next to the binary by ort-sys copy-dylibs.
+          # linuxdeploy needs to find it to bundle it into the AppImage.
+          DEFAULT_LIB_DIR="${{ github.workspace }}/backend/src-tauri/target/dist"
+          echo "LD_LIBRARY_PATH=${DEFAULT_LIB_DIR}${LD_LIBRARY_PATH:+:}${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+        shell: bash
 
       - name: Build Linux AppImage
         if: runner.os == 'Linux'
@@ -241,7 +329,163 @@ jobs:
           NO_APPSTREAM: "1"
         with:
           projectPath: backend/src-tauri
-          args: --target ${{ matrix.cargo_target }} --bundles appimage ${{ matrix.cargo_extra }}
+          args: --bundles appimage ${{ matrix.cargo_extra }}
+
+      - name: Resolve Tauri release directory
+        if: always()
+        id: tauri-release-dir
+        run: |
+          TRIPLE_DIR="backend/src-tauri/target/${{ matrix.cargo_target }}/dist"
+          DEFAULT_DIR="backend/src-tauri/target/dist"
+          if [ -d "$TRIPLE_DIR" ] && [ -d "$TRIPLE_DIR/bundle" ] && { [ ! -d "$DEFAULT_DIR/bundle" ] || [ "$TRIPLE_DIR/bundle" -nt "$DEFAULT_DIR/bundle" ]; }; then
+            echo "release-dir=$TRIPLE_DIR" >> "$GITHUB_OUTPUT"
+          else
+            echo "release-dir=$DEFAULT_DIR" >> "$GITHUB_OUTPUT"
+          fi
+        shell: bash
+
+      - name: Verify SoundTouch dylib in macOS bundle
+        if: runner.os == 'macOS' && success() && steps.tauri-release-dir.outputs.release-dir != ''
+        working-directory: backend/src-tauri
+        run: |
+          set -euxo pipefail
+          APP_DIR="${GITHUB_WORKSPACE}/${{ steps.tauri-release-dir.outputs.release-dir }}/bundle/macos/HiFiShifter.app"
+          if [ ! -d "$APP_DIR" ]; then
+            echo "ERROR: $APP_DIR not found." >&2
+            echo "When only the DMG is requested, tauri-bundler removes the intermediate .app" >&2
+            echo "after creating the DMG. Build with --bundles app,dmg so the .app is kept." >&2
+            ls -la "$(dirname "$APP_DIR")" 2>/dev/null || true
+            exit 1
+          fi
+          echo "=== macOS bundle layout ==="
+          find "$APP_DIR/Contents" -maxdepth 3 \( -type d -o -type f \) -print | sort
+
+          BIN="$APP_DIR/Contents/MacOS/HiFiShifter"
+          echo "=== Binary @rpath dependencies ==="
+          otool -L "$BIN" | grep -E '@rpath|@executable_path' || true
+          echo "=== Binary rpaths ==="
+          otool -l "$BIN" | grep -A2 'LC_RPATH' || true
+
+          # Every @rpath dylib referenced by the binary must be bundled in one
+          # of the locations dyld searches: Frameworks (SoundTouch),
+          # Resources (SoundTouch fallback), Resources/macos (ORT dylibs such
+          # as libwebgpu_dawn.dylib), or MacOS (cargo-run copies).
+          SEARCH_DIRS=(
+            "$APP_DIR/Contents/Frameworks"
+            "$APP_DIR/Contents/Resources"
+            "$APP_DIR/Contents/Resources/macos"
+            "$APP_DIR/Contents/MacOS"
+          )
+          MISSING=0
+          while IFS= read -r dep; do
+            [ -z "$dep" ] && continue
+            found=""
+            for dir in "${SEARCH_DIRS[@]}"; do
+              if [ -f "$dir/$dep" ]; then
+                found="$dir/$dep"
+                break
+              fi
+            done
+            if [ -z "$found" ]; then
+              echo "ERROR: $dep referenced via @rpath but not bundled" >&2
+              MISSING=1
+            else
+              echo "ok: $dep -> $found"
+              # Every bundled copy must carry a relocatable @rpath install name.
+              otool -D "$found" | grep -F "@rpath/$dep" >/dev/null || MISSING=1
+            fi
+          done < <(otool -L "$BIN" | sed -n 's/.*@rpath\/\([^ ]*\.dylib\).*/\1/p' | sort -u)
+          [ "$MISSING" -eq 0 ] || exit 1
+
+          # dyld must be able to reach Frameworks, Resources, and the ORT
+          # Resources/macos directory.
+          otool -l "$BIN" | grep -F "@executable_path/../Frameworks" >/dev/null
+          otool -l "$BIN" | grep -F "@executable_path/../Resources" >/dev/null
+          otool -l "$BIN" | grep -F "@executable_path/../Resources/macos" >/dev/null
+
+          # Reject stale/typo'd dependency names.
+          if otool -L "$BIN" | grep -F "libSoundTouchDL.dylib" >/dev/null; then
+            echo "ERROR: stale libSoundTouchDL.dylib dependency found" >&2
+            exit 1
+          fi
+        shell: bash
+
+      - name: Dump macOS bundle diagnostics on failure
+        if: runner.os == 'macOS' && failure()
+        working-directory: backend/src-tauri
+        run: |
+          set -euxo pipefail
+          echo "=== candidate bundle dirs ==="
+          find target -maxdepth 6 -type d | grep -E 'bundle' || true
+          APP_DIR="${GITHUB_WORKSPACE}/${{ steps.tauri-release-dir.outputs.release-dir }}/bundle/macos/HiFiShifter.app"
+          if [ -d "$APP_DIR" ]; then
+            echo "=== app contents ==="
+            find "$APP_DIR/Contents" -maxdepth 3 -print | head -100
+            echo "=== binary SoundTouch deps ==="
+            otool -L "$APP_DIR/Contents/MacOS/HiFiShifter" 2>/dev/null | grep -E '@rpath|SoundTouch|executable_path' || true
+            echo "=== binary rpaths ==="
+            otool -l "$APP_DIR/Contents/MacOS/HiFiShifter" 2>/dev/null | grep -A2 'LC_RPATH' || true
+            echo "=== MacOS dir ==="
+            ls -la "$APP_DIR/Contents/MacOS" 2>/dev/null || true
+            echo "=== Resources SoundTouch entries ==="
+            ls -la "$APP_DIR/Contents/Resources" 2>/dev/null | grep -i soundtouch || true
+            echo "=== Resources/macos (ORT dylibs) ==="
+            ls -la "$APP_DIR/Contents/Resources/macos" 2>/dev/null || true
+          fi
+        shell: bash
+
+      # Fallback: if linuxdeploy still fails (e.g., can't find libwebgpu_dawn.so),
+      # manually add the library to the AppDir and re-run appimagetool.
+      - name: Retry AppImage bundling (Linux fallback)
+        if: runner.os == 'Linux' && failure()
+        working-directory: backend/src-tauri
+        run: |
+          set -euxo pipefail
+          TARGET_DIR="${GITHUB_WORKSPACE}/${{ steps.tauri-release-dir.outputs.release-dir }}"
+          APPDIR="$TARGET_DIR/bundle/appimage/HiFiShifter.AppDir"
+          VERSION="$(jq -r '.version' tauri.conf.json)"
+          case "${{ matrix.cargo_target }}" in
+            *aarch64*) ARCH_SUFFIX="arm64" ;;
+            *) ARCH_SUFFIX="amd64" ;;
+          esac
+          OUT_APPIMAGE="$TARGET_DIR/bundle/appimage/HiFiShifter_${VERSION}_${ARCH_SUFFIX}.AppImage"
+
+          echo "=== Checking AppDir state ==="
+          find "$APPDIR" -type f -maxdepth 3 2>/dev/null | head -40 || echo "AppDir not found"
+          echo "=== Binary dynamic dependencies ==="
+          ldd "$TARGET_DIR/HiFiShifter" 2>/dev/null | grep -E 'webgpu|not found|SoundTouch' || true
+
+          if [ -d "$APPDIR/usr/bin" ]; then
+            echo "Adding required shared libraries to AppDir..."
+            for lib in libwebgpu_dawn.so libSoundTouchDLL.so; do
+              if [ -f "$TARGET_DIR/$lib" ]; then
+                cp -v "$TARGET_DIR/$lib" "$APPDIR/usr/bin/"
+              fi
+            done
+            echo "AppDir contents after fix:"
+            ls -la "$APPDIR/usr/bin/" || true
+
+            export APPIMAGE_EXTRACT_AND_RUN=1
+            wget -q -O /tmp/appimagetool "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
+            chmod +x /tmp/appimagetool
+            /tmp/appimagetool "$APPDIR" "$OUT_APPIMAGE" || {
+              echo "appimagetool failed — dumping diagnostics"
+              ls -la "$TARGET_DIR/"
+              ls -la "$APPDIR/usr/bin/" || true
+            }
+            if [ -f "$OUT_APPIMAGE" ]; then
+              echo "SUCCESS: AppImage created"
+              ls -lh "$OUT_APPIMAGE"
+            else
+              echo "ERROR: AppImage was not created"
+              exit 1
+            fi
+          else
+            echo "ERROR: AppDir not found — tauri build failed before creating AppDir"
+            ls -la "$TARGET_DIR/" 2>/dev/null || echo "Target directory does not exist"
+            exit 1
+          fi
+        shell: bash
 
       # ── Portable directory (Windows) ─────────────────────────────────
 
@@ -249,6 +493,9 @@ jobs:
         if: runner.os == 'Windows'
         working-directory: ${{ github.workspace }}
         run: |
+          # Builds run natively without --target and use the dist profile, so
+          # artifacts land in backend/src-tauri/target/dist — no triple path.
+          # The script detects the artifact directory itself.
           pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\pack-portable.ps1 -SkipBuild -NoZip -OutputDir "${{ github.workspace }}"
         shell: pwsh
 
@@ -335,7 +582,7 @@ jobs:
         with:
           name: ${{ steps.artifact-name-win-installer.outputs.artifact-name }}
           path: |
-            backend/src-tauri/target/${{ matrix.cargo_target }}/release/bundle/nsis/*-setup.exe
+            ${{ steps.tauri-release-dir.outputs.release-dir }}/bundle/nsis/*-setup.exe
           if-no-files-found: error
 
       - name: Upload portable (Windows)
@@ -353,16 +600,16 @@ jobs:
         with:
           name: ${{ steps.artifact-name-nonwindows.outputs.artifact-name }}
           path: |
-            backend/src-tauri/target/${{ matrix.cargo_target }}/release/bundle/dmg/*.dmg
+            ${{ steps.tauri-release-dir.outputs.release-dir }}/bundle/dmg/*.dmg
           if-no-files-found: error
 
       - name: Upload AppImage (Linux)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && !cancelled()
         uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.artifact-name-nonwindows.outputs.artifact-name }}
           path: |
-            backend/src-tauri/target/${{ matrix.cargo_target }}/release/bundle/appimage/*.AppImage
+            ${{ steps.tauri-release-dir.outputs.release-dir }}/bundle/appimage/*.AppImage
           if-no-files-found: error
 
       - name: Dump diagnostics on failure (Linux)

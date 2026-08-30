@@ -11,6 +11,11 @@ echo "[install_deps_macos] Installing Homebrew packages"
 brew update || true
 brew install cmake || true
 
+# Install rustup if the user does not already have a Rust toolchain.
+if ! command -v cargo >/dev/null 2>&1 && ! command -v rustup >/dev/null 2>&1; then
+  brew install rustup || true
+fi
+
 # Ensure PKG_CONFIG_PATH available to subsequent steps (in CI append to GITHUB_ENV)
 PKG_PATH="/opt/homebrew/lib/pkgconfig:/opt/homebrew/share/pkgconfig:/usr/local/lib/pkgconfig:/usr/local/share/pkgconfig"
 if [ -n "${GITHUB_ENV:-}" ]; then

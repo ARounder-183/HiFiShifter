@@ -1,3 +1,9 @@
+import {
+    SNAP_OFFSET_HANDLE_SIZE_PX,
+    SNAP_OFFSET_HIT_HEIGHT_PX,
+    snapOffsetHandleXPx,
+} from "../constants";
+
 type VisibleTrack = {
     id: string;
     topPx: number;
@@ -8,7 +14,11 @@ type VisibleClip = {
     trackId: string;
     startSec: number;
     lengthSec: number;
+    /** 吸附偏移（秒，相对 Clip 起点）：命中区跟随 ◣ 三角位置。 */
+    snapOffsetSec?: number;
 };
+
+export type TimelineHitZone = "empty" | "body" | "trim_left" | "trim_right" | "snap_offset";
 
 function compareVisibleClipRenderOrder(a: VisibleClip, b: VisibleClip): number {
     const delta = a.startSec - b.startSec;
@@ -67,7 +77,7 @@ export function hitTestTimeline(
 ): {
     trackId: string | null;
     clipId: string | null;
-    zone: "empty" | "body" | "trim_left" | "trim_right";
+    zone: TimelineHitZone;
 } {
     const track = [...index.tracksById.values()].find((candidate) => {
         const topPx = candidate.topPx - point.scrollTopPx;
@@ -81,6 +91,9 @@ export function hitTestTimeline(
             zone: "empty",
         };
     }
+
+    // 行内局部 y（用于 SnapOffset 角部区判定：行底部条带）。
+    const localY = point.screenY - (track.topPx - point.scrollTopPx);
 
     const worldSec = (point.scrollLeftPx + point.screenX) / Math.max(1e-9, index.pxPerSec);
     const clip = [...(index.clipsByTrackId.get(track.id) ?? [])]
@@ -99,11 +112,33 @@ export function hitTestTimeline(
         };
     }
 
+    const localLeftSec = worldSec - clip.startSec;
+
+    // SnapOffset 命中区：跟随 ◣ 三角位置（三角 x 由 snapOffsetSec 直接换算，
+    // **刻意不做宽度回退钳制** —— 越界由绘制端裁剪，见 constants.ts），横向
+    // 取三角 ± 少量余量，纵向限行底部条带。优先于 trim/body：三角所在处归
+    // 吸附偏移手势（对齐 REAPER 布局）。
+    {
+        const triX = snapOffsetHandleXPx(clip.snapOffsetSec, index.pxPerSec);
+        const localXpx = localLeftSec * index.pxPerSec;
+        if (
+            localY >= index.rowHeight - SNAP_OFFSET_HIT_HEIGHT_PX &&
+            localXpx >= triX - 4 &&
+            localXpx <= triX + SNAP_OFFSET_HANDLE_SIZE_PX + 1
+        ) {
+            return {
+                trackId: track.id,
+                clipId: clip.id,
+                zone: "snap_offset",
+            };
+        }
+    }
+
     return {
         trackId: track.id,
         clipId: clip.id,
         zone:
-            worldSec - clip.startSec <= 0.08
+            localLeftSec <= 0.08
                 ? "trim_left"
                 : clip.startSec + clip.lengthSec - worldSec <= 0.08
                   ? "trim_right"

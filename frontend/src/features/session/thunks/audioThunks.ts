@@ -2,43 +2,26 @@ import { createAsyncThunk } from "@reduxjs/toolkit";
 import { webApi } from "../../../services/webviewApi";
 import type { AdvancedExportRequest } from "../../../services/api/core";
 import type { SessionState } from "../sessionSlice";
-import { requestMissingFileReplacement } from "./missingFilePrompt";
-import { waveformMipmapStore } from "../../../utils/waveformMipmapStore";
+import { computePasteEndSec, type PasteEndClipLike } from "../pastePlayhead";
 
-async function resolveMissingFilesInteractively(timeline: any, missingFiles: string[] | undefined) {
-    let latestTimeline = timeline;
-    const uniquePaths = Array.from(
-        new Set((missingFiles ?? []).filter((p) => typeof p === "string" && p.trim().length > 0)),
-    );
-
-    for (const missingPath of uniquePaths) {
-        const shouldPick = await requestMissingFileReplacement(missingPath);
-        if (!shouldPick) continue;
-
-        const picked = await webApi.openAudioDialog();
-        if (!picked.ok || picked.canceled || !picked.path) continue;
-
-        const targetClipIds = (latestTimeline?.clips ?? [])
-            .filter((clip: any) => clip?.source_path === missingPath)
-            .map((clip: any) => clip.id)
-            .filter((id: unknown): id is string => typeof id === "string");
-
-        if (targetClipIds.length === 0) continue;
-
-        const replaced = await webApi.replaceClipSource({
-            clipIds: targetClipIds,
-            newSourcePath: picked.path,
-            replaceSameSource: true,
-        });
-        if (replaced?.ok) {
-            waveformMipmapStore.invalidate(picked.path);
-            latestTimeline = replaced;
+/** 粘贴产生 Clip 后：光标跳到所有新 Clip 最靠右的结束位置并同步后端 transport。 */
+async function syncPastePlayheadToEnd(
+    clips: PasteEndClipLike[] | undefined,
+    newClipIds: string[],
+): Promise<number | null> {
+    if (newClipIds.length === 0) return null;
+    const pasteEndSec = computePasteEndSec(clips, newClipIds);
+    if (pasteEndSec !== null) {
+        try {
+            await webApi.setTransport({ playheadSec: pasteEndSec });
+        } catch {
+            // transport 同步失败不应让粘贴本身报错。
         }
     }
-
-    return latestTimeline;
+    // 视图聚焦（若新光标在画面外则水平滚动）由 reducer 记录的
+    // pendingPlayheadRevealSec 驱动，在状态与 DOM 提交后执行。
+    return pasteEndSec;
 }
-
 export const processAudio = createAsyncThunk("session/processAudio", async (audioPath: string) => {
     return webApi.processAudio(audioPath);
 });
@@ -95,7 +78,7 @@ export const pasteVocalShifterClipboard = createAsyncThunk(
             | undefined,
         { rejectWithValue, getState },
     ) => {
-        let result = await webApi.pasteVocalShifterClipboard(
+        const result = await webApi.pasteVocalShifterClipboard(
             arg?.selectionStartFrame,
             arg?.selectionMaxFrames,
             arg?.activeParam,
@@ -103,7 +86,6 @@ export const pasteVocalShifterClipboard = createAsyncThunk(
         if (!result?.ok) {
             return rejectWithValue(result?.error ?? "paste_vocalshifter_clipboard_failed");
         }
-        result = await resolveMissingFilesInteractively(result, (result as any)?.missing_files);
         const beforeClipIds = new Set(
             (getState() as { session: SessionState }).session.clips.map((c) => c.id),
         );
@@ -111,7 +93,8 @@ export const pasteVocalShifterClipboard = createAsyncThunk(
         const newClipIds = clips
             .map((c) => c.id)
             .filter((id): id is string => !!id && !beforeClipIds.has(id));
-        return { ...result, newClipIds };
+        const pasteEndSec = await syncPastePlayheadToEnd(clips as PasteEndClipLike[], newClipIds);
+        return { ...result, newClipIds, pasteEndSec };
     },
 );
 
@@ -121,14 +104,13 @@ export const pasteReaperClipboard = createAsyncThunk(
         arg: { selectionStartFrame?: number; selectionMaxFrames?: number } | undefined,
         { rejectWithValue, getState },
     ) => {
-        let result = await webApi.pasteReaperClipboard(
+        const result = await webApi.pasteReaperClipboard(
             arg?.selectionStartFrame,
             arg?.selectionMaxFrames,
         );
         if (!result?.ok) {
             return rejectWithValue(result?.error ?? "paste_reaper_clipboard_failed");
         }
-        result = await resolveMissingFilesInteractively(result, (result as any)?.missing_files);
         const beforeClipIds = new Set(
             (getState() as { session: SessionState }).session.clips.map((c) => c.id),
         );
@@ -136,11 +118,13 @@ export const pasteReaperClipboard = createAsyncThunk(
         const newClipIds = clips
             .map((c) => c.id)
             .filter((id): id is string => !!id && !beforeClipIds.has(id));
+        const pasteEndSec = await syncPastePlayheadToEnd(clips as PasteEndClipLike[], newClipIds);
         return {
             ok: true,
             timeline: result,
             skippedFiles: result.skipped_files as string[] | undefined,
             newClipIds,
+            pasteEndSec,
         } as const;
     },
 );

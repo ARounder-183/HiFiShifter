@@ -5,13 +5,17 @@ use tauri::State;
 
 const CHILD_PITCH_OFFSET_CENTS_PREFIX: &str = "child_pitch_offset_cents@";
 const CHILD_PITCH_OFFSET_DEGREES_PREFIX: &str = "child_pitch_offset_degrees@";
+const CHILD_FORMANT_OFFSET_CENTS_PREFIX: &str = "child_formant_offset_cents@";
 const CHILD_PITCH_OFFSET_CENTS_DEFAULT: f32 = 0.0;
 const CHILD_PITCH_OFFSET_DEGREES_INTERNAL_DEFAULT: f32 = 0.0;
+const CHILD_FORMANT_OFFSET_CENTS_DEFAULT: f32 = 0.0;
+const CHILD_FORMANT_OFFSET_CENTS_RANGE: (f32, f32) = (-2400.0, 2400.0);
 
 #[derive(Clone, Copy)]
 enum ChildPitchOffsetParamMode {
     Cents,
     Degrees,
+    Formant,
 }
 
 #[derive(Clone, Copy)]
@@ -37,6 +41,14 @@ fn parse_child_pitch_offset_param(param: &str) -> Option<ChildPitchOffsetParamSp
             });
         }
     }
+    if let Some(track_id) = param.strip_prefix(CHILD_FORMANT_OFFSET_CENTS_PREFIX) {
+        if !track_id.is_empty() {
+            return Some(ChildPitchOffsetParamSpec {
+                mode: ChildPitchOffsetParamMode::Formant,
+                track_id,
+            });
+        }
+    }
     None
 }
 
@@ -56,6 +68,7 @@ fn resolve_child_pitch_offset_curve_default_value(
     match spec.mode {
         ChildPitchOffsetParamMode::Cents => Some(CHILD_PITCH_OFFSET_CENTS_DEFAULT),
         ChildPitchOffsetParamMode::Degrees => Some(CHILD_PITCH_OFFSET_DEGREES_INTERNAL_DEFAULT),
+        ChildPitchOffsetParamMode::Formant => Some(CHILD_FORMANT_OFFSET_CENTS_DEFAULT),
     }
 }
 
@@ -159,13 +172,16 @@ pub(super) fn get_param_frames(
     start_frame: u32,
     frame_count: u32,
     stride: Option<u32>,
+    binary: Option<bool>,
 ) -> crate::models::ParamFramesPayload {
     if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
         eprintln!(
-            "get_param_frames(track_id={}, param={}, start_frame={}, frame_count={}, stride={:?})",
-            track_id, param, start_frame, frame_count, stride
+            "get_param_frames(track_id={}, param={}, start_frame={}, frame_count={}, stride={:?} binary={:?})",
+            track_id, param, start_frame, frame_count, stride, binary
         );
     }
+    // 二进制模式：orig/edit 以 Base64 单条返回，JSON 里不再展开成 number[]。
+    let binary = binary.unwrap_or(false);
     let (root, fp, entry, compose_enabled, pitch_algo, param_reference_value) = {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -180,6 +196,7 @@ pub(super) fn get_param_frames(
                     start_frame,
                     orig: vec![],
                     edit: vec![],
+                    binary: None,
                     reference_kind: resolve_param_reference_kind("pitch"),
                     analysis_pending: None,
                     analysis_progress: None,
@@ -246,6 +263,7 @@ pub(super) fn get_param_frames(
             start_frame,
             orig: vec![],
             edit: vec![],
+            binary: None,
             reference_kind: resolve_param_reference_kind("pitch"),
             analysis_pending: None,
             analysis_progress: None,
@@ -315,8 +333,9 @@ pub(super) fn get_param_frames(
         param: param.clone(),
         frame_period_ms: fp,
         start_frame,
-        orig,
-        edit,
+        binary: binary.then(|| encode_param_frames_binary(&orig, &edit)),
+        orig: if binary { Vec::new() } else { orig },
+        edit: if binary { Vec::new() } else { edit },
         reference_kind: resolve_param_reference_kind(&param),
         analysis_pending,
         analysis_progress: None,
@@ -324,6 +343,35 @@ pub(super) fn get_param_frames(
         pitch_edit_backend_available,
     }
 }
+/// 将 orig/edit 两组 f32 曲线编码为 Base64 二进制。
+///
+/// 协议：`[Header 8B][orig f32[count]][edit f32[count]]`，小端序。
+///   - Header: magic `"PFB1"`（4B）+ count（u32 LE，两组长度相同）
+///
+/// 注意布局是**平面**（先整个 orig、再整个 edit），而不是 orig/edit 交错。
+/// 平面布局下前端可以用 `new Float32Array(buffer, offset, count)` 直接建零拷贝
+/// 视图，无需逐元素反交错。与前端 `paramFramesBinaryCodec.ts` 配套，
+/// 改动任一侧必须同步另一侧。
+fn encode_param_frames_binary(orig: &[f32], edit: &[f32]) -> String {
+    use base64::Engine as _;
+
+    debug_assert_eq!(orig.len(), edit.len(), "orig/edit length mismatch");
+    let count = orig.len().min(edit.len());
+    let orig = &orig[..count];
+    let edit = &edit[..count];
+
+    let mut bytes = Vec::with_capacity(8 + count * 8);
+    bytes.extend_from_slice(b"PFB1");
+    bytes.extend_from_slice(&(count as u32).to_le_bytes());
+    for v in orig {
+        bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    for v in edit {
+        bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
 
 pub(super) fn set_param_frames(
     state: State<'_, AppState>,
@@ -408,6 +456,19 @@ pub(super) fn set_param_frames(
                 0.0
             }
         };
+
+        if let Some(spec) = parse_child_pitch_offset_param(&param) {
+            if matches!(spec.mode, ChildPitchOffsetParamMode::Formant) {
+                let vv = v.clamp(
+                    CHILD_FORMANT_OFFSET_CENTS_RANGE.0,
+                    CHILD_FORMANT_OFFSET_CENTS_RANGE.1,
+                );
+                if vv != v {
+                    clamped += 1;
+                }
+                v = vv;
+            }
+        }
 
         match param.as_str() {
             "pitch" => {
@@ -618,6 +679,36 @@ pub(super) fn set_static_param(
     };
 
     entry.extra_params.insert(param, value);
+    state.audio_engine.update_timeline(tl.clone());
+
+    serde_json::json!({"ok": true})
+}
+
+/// "锁定参数线"：剪辑拉伸后把旧范围内的参数曲线时域映射到新范围。
+///
+/// 后端一次性完成 pitch（用户编辑过时）/ tension / 所有已存在的自动化曲线
+/// （无论参数是否在 UI 激活）的批量映射，取代旧前端逐参数 get/set/restore
+/// 的多请求流程（旧流程只覆盖 pitch+tension，遗漏其余全部参数曲线）。
+///
+/// 默认不产生独立撤销检查点：曲线映射与剪辑几何变更合并为同一撤销步
+/// （与旧前端 set/restore(checkpoint=false) 的流程保持一致）。
+pub(super) fn stretch_track_linked_params(
+    state: State<'_, AppState>,
+    track_id: String,
+    mappings: Vec<crate::state::StretchLinkedRangeSec>,
+    checkpoint: Option<bool>,
+) -> serde_json::Value {
+    let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+    if checkpoint.unwrap_or(false) {
+        state.checkpoint_timeline(&tl);
+    }
+
+    let Some(root) = tl.resolve_root_track_id(&track_id) else {
+        return serde_json::json!({"ok": false});
+    };
+    tl.stretch_linked_params_in_root_range(&root, &mappings);
+
+    // Ensure realtime playback reflects edits immediately.
     state.audio_engine.update_timeline(tl.clone());
 
     serde_json::json!({"ok": true})

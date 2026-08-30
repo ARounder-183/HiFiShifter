@@ -15,6 +15,8 @@ import {
 } from "../../../../features/session/sessionSlice";
 import { emitExternalFileAction } from "../../../../features/session/projectOpenEvents";
 import { detectExternalPathAction, findFirstExternalPathAction } from "../";
+import { SNAP_HIGHLIGHT_GROUP, clearSnapHighlights } from "../../../../utils/snapHighlight";
+import type { SnapTimelineFn } from "./useTimelineState";
 
 export interface UseTimelineDragDropArgs {
     dispatch: AppDispatch;
@@ -25,6 +27,8 @@ export interface UseTimelineDragDropArgs {
     dropPreviewRef: React.MutableRefObject<HTMLDivElement | null>;
     pendingDropDurationPathRef: React.MutableRefObject<string | null>;
     beatFromClientX: (clientX: number, bounds: DOMRect, xScroll: number) => number;
+    /** 吸附引擎入口（媒体项目对象）。 */
+    snapTimeline?: SnapTimelineFn;
     trackIdFromClientY: (clientY: number) => string | null;
     rowTopForTrackId: (trackId: string | null) => number;
     setDropPreview: React.Dispatch<
@@ -47,6 +51,12 @@ export interface UseTimelineDragDropArgs {
             startSec: number;
         } | null>
     >;
+    /**
+     * 工程文件（hshp/hsp）拖放时的「打开工程 / 导入工程」操作菜单。
+     */
+    setProjectActionMenu?: React.Dispatch<
+        React.SetStateAction<{ x: number; y: number; path: string } | null>
+    >;
     pxPerSec: number;
     rowHeight: number;
     /** MIDI 文件拖放回调（用于创建 MIDI clip） */
@@ -67,12 +77,14 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
         pxPerSecRef,
         dropPreviewRef,
         beatFromClientX,
+        snapTimeline,
         trackIdFromClientY,
         rowTopForTrackId,
         setDropPreview,
         ensureDropPreviewDuration,
         getDropPreviewWidthPx,
         setImportModeMenu,
+        setProjectActionMenu,
         pxPerSec,
         rowHeight,
         onMidiDrop,
@@ -112,7 +124,8 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                 unlisten = await win.onDragDropEvent((event: TauriDragDropEvent) => {
                     if (disposed) return;
                     const payload = ("payload" in event ? event.payload : event) as
-                        TauriDragDropPayload | undefined;
+                        | TauriDragDropPayload
+                        | undefined;
                     const type = String(payload?.type ?? payload?.event ?? "");
                     const paths: string[] = Array.isArray(payload?.paths) ? payload.paths : [];
 
@@ -129,16 +142,26 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                     const scroller = scrollRef.current;
                     const bounds = scroller?.getBoundingClientRect() ?? null;
                     const pos = (payload?.position ?? payload?.pos ?? payload?.cursorPosition) as
-                        { x?: number; y?: number } | undefined;
+                        | { x?: number; y?: number }
+                        | undefined;
                     const dpr = window.devicePixelRatio || 1;
                     const clientX = typeof pos?.x === "number" ? pos.x / dpr : undefined;
                     const clientY = typeof pos?.y === "number" ? pos.y / dpr : undefined;
                     const fallbackBeat = sessionRef.current.playheadSec ?? 0;
-                    const beat =
+                    const trackId = clientY !== undefined ? trackIdFromClientY(clientY) : null;
+                    const rawBeat =
                         clientX !== undefined && bounds && scroller
                             ? beatFromClientX(clientX, bounds, scroller.scrollLeft)
                             : fallbackBeat;
-                    const trackId = clientY !== undefined ? trackIdFromClientY(clientY) : null;
+                    const beat =
+                        snapTimeline && sessionRef.current.timelineSnap.enabled
+                            ? snapTimeline(rawBeat, "clip", {
+                                  anchorTrackId: trackId,
+                                  originSec: rawBeat,
+                                  // drop 预览左缘即被吸附边（无 clipId，行级高亮）。
+                                  highlight: { sources: [{ trackId }] },
+                              })
+                            : rawBeat;
 
                     const primaryPath = paths.length > 0 ? paths[0] : null;
 
@@ -191,10 +214,12 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                     if (type === "leave") {
                         tauriDraggedPathRef.current = null;
                         setDropPreview(null);
+                        clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
                         return;
                     }
 
                     if (type === "drop") {
+                        clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
                         if (primaryPath) {
                             tauriDraggedPathRef.current = primaryPath;
                             tauriLastDropPathRef.current = primaryPath;
@@ -213,11 +238,25 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                             tauriDraggedPathRef.current = null;
                             tauriLastDropPathRef.current = null;
                             setDropPreview(null);
-                            onMidiDrop?.({
-                                midiPath: externalAction.path,
-                                trackId,
-                                startSec: beat,
-                            });
+                            // 仅当落点位于时间轴区域内才在此导入 MIDI；落在其它区域
+                            //（如参数编辑器）时留给对应区域的拖放接收者处理，避免把
+                            // “拖到参数编辑器”误判为“拖到时间轴”（导入目标默认值
+                            // 也会因此选错场景）。
+                            const overTimeline =
+                                bounds != null &&
+                                clientX !== undefined &&
+                                clientY !== undefined &&
+                                clientX >= bounds.left &&
+                                clientX <= bounds.right &&
+                                clientY >= bounds.top &&
+                                clientY <= bounds.bottom;
+                            if (overTimeline) {
+                                onMidiDrop?.({
+                                    midiPath: externalAction.path,
+                                    trackId,
+                                    startSec: beat,
+                                });
+                            }
                             return;
                         }
                         if (externalAction && externalAction.kind !== "importAudio") {
@@ -295,9 +334,25 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
             disposed = true;
             if (unlisten) unlisten();
         };
-    }, [dispatch]);
+        // The helper functions intentionally read refs to avoid re-registering the
+        // native drag-drop listener on every render.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [dispatch, snapTimeline]);
 
     // ── 文件浏览器面板的自定义拖拽事件 ───────────────────────
+    const snapDropBeat = (rawBeat: number, trackId: string | null) => {
+        if (snapTimeline && sessionRef.current.timelineSnap.enabled) {
+            return snapTimeline(rawBeat, "clip", {
+                anchorTrackId: trackId,
+                originSec: rawBeat,
+                // drop 预览左缘即被吸附边（无 clipId，行级高亮）。
+                highlight: { sources: [{ trackId }] },
+            });
+        }
+        clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+        return rawBeat;
+    };
+
     useEffect(() => {
         function onHifiFileDrag(e: Event) {
             const detail = (e as CustomEvent).detail as {
@@ -306,6 +361,9 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                 fileName: string;
                 clientX: number;
                 clientY: number;
+                durationSec: number;
+                filePaths: string[];
+                isRightDrag: boolean;
             };
             if (!detail) return;
 
@@ -324,12 +382,12 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                 setDropPreview((prev) => {
                     if (prev && prev.path === detail.filePath) {
                         if (dropPreviewRef.current) {
-                            const nextDuration = Number((detail as any).durationSec) || 0;
+                            const nextDuration = Number(detail.durationSec) || 0;
                             dropPreviewRef.current.style.width = `${getDropPreviewWidthPx(nextDuration)}px`;
                         }
                         return {
                             ...prev,
-                            durationSec: (detail as any).durationSec,
+                            durationSec: detail.durationSec,
                         };
                     }
                     return prev;
@@ -340,14 +398,18 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
             // 移动时的 DOM 直通与重绘拦截
             if (detail.type === "move" || detail.type === "start") {
                 if (isOverTimeline && scroller) {
-                    const beat = beatFromClientX(detail.clientX, bounds!, scroller.scrollLeft);
+                    const rawBeat = beatFromClientX(detail.clientX, bounds!, scroller.scrollLeft);
                     const trackId = trackIdFromClientY(detail.clientY);
+                    const beat = snapDropBeat(rawBeat, trackId);
                     const path = detail.filePath;
                     const fileName = detail.fileName;
 
                     const moveAction = detectExternalPathAction(path);
                     if (moveAction !== "importAudio" && moveAction !== "importMidi") {
+                        // 非媒体文件不产生 drop 预览：snapDropBeat 已发布过吸附
+                        // 高亮，这里必须清除，否则悬停期间的高亮会残留。
                         setDropPreview(null);
+                        clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
                         return;
                     }
 
@@ -371,6 +433,7 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                     });
                 } else {
                     setDropPreview(null);
+                    clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
                 }
                 return;
             }
@@ -378,10 +441,54 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
             if (detail.type === "drop") {
                 setDropPreview(null);
                 if (isOverTimeline && scroller) {
-                    const beat = beatFromClientX(detail.clientX, bounds!, scroller.scrollLeft);
+                    const rawBeat = beatFromClientX(detail.clientX, bounds!, scroller.scrollLeft);
                     const trackId = trackIdFromClientY(detail.clientY);
-                    const filePaths: string[] = (detail as any).filePaths;
+                    const beat = snapDropBeat(rawBeat, trackId);
+                    const filePaths: string[] = detail.filePaths;
                     const isMulti = Array.isArray(filePaths) && filePaths.length > 1;
+                    const isRightDrag = !!detail.isRightDrag;
+                    const filePath = detail.filePath;
+                    const actionKind = detectExternalPathAction(filePath);
+
+                    // 右键松开后浏览器会立即触发 contextmenu 事件；若不拦截，
+                    // 该事件会被菜单 backdrop 的 onContextMenu 捕获，导致刚
+                    // 弹出的菜单立刻被关闭。注册一次性 capturing 拦截器吞掉它。
+                    const suppressCtx = (ev: Event) => {
+                        ev.preventDefault();
+                        ev.stopImmediatePropagation();
+                        window.removeEventListener("contextmenu", suppressCtx, true);
+                    };
+
+                    if (actionKind === "openProject") {
+                        // 拖入 HiFiShifter 工程（hshp/hsp）：始终弹出
+                        // 「打开工程 / 导入工程」操作菜单，不直接执行打开。
+                        window.addEventListener("contextmenu", suppressCtx, true);
+                        setProjectActionMenu?.({
+                            x: detail.clientX,
+                            y: detail.clientY,
+                            path: filePath,
+                        });
+                        clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+                        return;
+                    }
+
+                    if (
+                        isRightDrag &&
+                        (actionKind === "importAudio" || actionKind === "importMidi")
+                    ) {
+                        // 右键拖拽媒体文件 → 弹出导入模式菜单
+                        // （跨时间添加 / 跨轨道添加 / 作为 Take 添加）。
+                        window.addEventListener("contextmenu", suppressCtx, true);
+                        setImportModeMenu({
+                            x: detail.clientX,
+                            y: detail.clientY,
+                            audioPaths: isMulti ? filePaths : [filePath],
+                            trackId,
+                            startSec: beat,
+                        });
+                        clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+                        return;
+                    }
 
                     if (isMulti) {
                         setImportModeMenu({
@@ -392,28 +499,30 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                             startSec: beat,
                         });
                     } else {
-                        const actionKind = detectExternalPathAction(detail.filePath);
                         if (actionKind === "importMidi") {
                             onMidiDrop?.({
-                                midiPath: detail.filePath,
+                                midiPath: filePath,
                                 trackId,
                                 startSec: beat,
                             });
-                            return;
+                        } else if (actionKind && actionKind !== "importAudio") {
+                            // rpp / vshp / vsp 工程文件：直接视为对应格式的导入。
+                            emitExternalFileAction(actionKind, filePath);
+                        } else {
+                            void dispatch(
+                                importAudioAtPosition({
+                                    audioPath: filePath,
+                                    trackId,
+                                    startSec: beat,
+                                }),
+                            );
                         }
-                        if (actionKind && actionKind !== "importAudio") {
-                            emitExternalFileAction(actionKind, detail.filePath);
-                            return;
-                        }
-                        void dispatch(
-                            importAudioAtPosition({
-                                audioPath: detail.filePath,
-                                trackId,
-                                startSec: beat,
-                            }),
-                        );
                     }
                 }
+                // drop 手势结束：上面的 snapDropBeat 在“导入位置恰好吸附”时会
+                // 再次发布吸附竖线高亮（先清除再计算会导致此结果），必须在手势
+                // 出口统一清除，否则导入完成后高亮会残留在画面上。
+                clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
                 return;
             }
         }
@@ -422,7 +531,10 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
         return () => {
             window.removeEventListener("hifi-file-drag", onHifiFileDrag);
         };
-    }, [dispatch, pxPerSec, rowHeight]);
+        // Re-registering this DOM listener whenever transient helpers change would
+        // interrupt in-flight drag state; the helpers read the latest refs instead.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [dispatch, pxPerSec, rowHeight, snapTimeline]);
 
     return {
         tauriDraggedPathRef,

@@ -9,7 +9,7 @@ import { useI18n } from "../../i18n/I18nProvider";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { exportAudioAdvanced } from "../../features/session/sessionSlice";
 import { fileBrowserApi } from "../../services/api/fileBrowser";
-import { coreApi } from "../../services/api/core";
+import { coreApi, type AdvancedExportRequest } from "../../services/api/core";
 import { ProgressBar } from "../ProgressBar";
 import type { TrackInfo } from "../../features/session/sessionTypes";
 import { applySelectWheelChange } from "../../utils/selectWheel";
@@ -87,7 +87,7 @@ function buildTargetGroups(
     function isTrackExcludedByRule(trackId: string): boolean {
         const track = trackMap.get(trackId);
         if (!track) return true;
-        if (Boolean(track.muted)) return true;
+        if (track.muted) return true;
 
         const stats = trackClipStats.get(trackId);
         if (!stats) return true;
@@ -258,13 +258,25 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
         [targetGroups],
     );
 
+    // 初始化只应在 open 变为 true 时执行一次。此前依赖数组里包含
+    // session.projectSec 与 targetGroups（随 tracks/clips 引用变化），
+    // 对话框打开期间任何后台更新（导入完成、录音入库、工程加载）都会
+    // 重跑该 effect，把用户已填写的输出目录/文件名/时间范围/目标选择
+    // 静默重置为硬编码回退值。projectSec 经 ref 读取打开瞬间的值。
+    const projectSecAtOpenRef = useRef(session.projectSec);
+    useEffect(() => {
+        if (open) {
+            projectSecAtOpenRef.current = session.projectSec;
+        }
+    }, [open, session.projectSec]);
+
     useEffect(() => {
         if (!open) return;
 
         setMode("project");
         setRangeKind("all");
         setCustomStartSec("0");
-        setCustomEndSec(String(Math.max(0, Math.ceil(session.projectSec))));
+        setCustomEndSec(String(Math.max(0, Math.ceil(projectSecAtOpenRef.current))));
         setProjectOutputDir("");
         setProjectFileName("<ProjectName>.wav");
         setSeparatedOutputDir("");
@@ -290,7 +302,8 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
         });
         setSelectedTargetIds(defaultSelected);
         setErrorText("");
-    }, [open, session.projectSec, targetGroups]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅在打开时重置一次表单
+    }, [open]);
 
     useEffect(() => {
         if (!open) return;
@@ -331,38 +344,51 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
         async function setup() {
             try {
                 const mod = await import("@tauri-apps/api/event");
-                unlisten = await mod.listen("export_audio_progress", (event: any) => {
-                    if (disposed) return;
-                    const payload = (event?.payload ?? {}) as {
-                        active?: boolean;
-                        mode?: "project" | "separated";
-                        progress?: number | null;
-                        current?: number | null;
-                        total?: number | null;
-                    };
+                unlisten = await mod.listen(
+                    "export_audio_progress",
+                    (event: {
+                        payload?: {
+                            active?: boolean;
+                            mode?: "project" | "separated";
+                            progress?: number | null;
+                            current?: number | null;
+                            total?: number | null;
+                        };
+                    }) => {
+                        if (disposed) return;
+                        const payload = (event?.payload ?? {}) as {
+                            active?: boolean;
+                            mode?: "project" | "separated";
+                            progress?: number | null;
+                            current?: number | null;
+                            total?: number | null;
+                        };
 
-                    const progressValue =
-                        typeof payload.progress === "number" && Number.isFinite(payload.progress)
-                            ? Math.max(0, Math.min(1, payload.progress))
-                            : null;
+                        const progressValue =
+                            typeof payload.progress === "number" &&
+                            Number.isFinite(payload.progress)
+                                ? Math.max(0, Math.min(1, payload.progress))
+                                : null;
 
-                    setExportProgress({
-                        active: Boolean(payload.active),
-                        mode:
-                            payload.mode === "project" || payload.mode === "separated"
-                                ? payload.mode
-                                : null,
-                        progress: progressValue,
-                        current:
-                            typeof payload.current === "number" && Number.isFinite(payload.current)
-                                ? Math.max(0, Math.floor(payload.current))
-                                : null,
-                        total:
-                            typeof payload.total === "number" && Number.isFinite(payload.total)
-                                ? Math.max(0, Math.floor(payload.total))
-                                : null,
-                    });
-                });
+                        setExportProgress({
+                            active: Boolean(payload.active),
+                            mode:
+                                payload.mode === "project" || payload.mode === "separated"
+                                    ? payload.mode
+                                    : null,
+                            progress: progressValue,
+                            current:
+                                typeof payload.current === "number" &&
+                                Number.isFinite(payload.current)
+                                    ? Math.max(0, Math.floor(payload.current))
+                                    : null,
+                            total:
+                                typeof payload.total === "number" && Number.isFinite(payload.total)
+                                    ? Math.max(0, Math.floor(payload.total))
+                                    : null,
+                        });
+                    },
+                );
             } catch {
                 // 非 Tauri 环境下忽略。
             }
@@ -509,8 +535,8 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
         );
     }
 
-    async function resolveExportConflicts(request: any) {
-        const plan = await coreApi.previewExportAudioPlan(request as any);
+    async function resolveExportConflicts(request: AdvancedExportRequest) {
+        const plan = await coreApi.previewExportAudioPlan(request);
         if (!plan?.ok || !Array.isArray(plan.targets)) {
             return {
                 overwriteExistingPaths: [] as string[],
@@ -1022,7 +1048,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
 
                                 <Flex gap="2" wrap="wrap" align="center">
                                     <Text size="1" color="gray">
-                                        占位符：
+                                        {tAny("export_pattern_placeholders")}
                                     </Text>
                                     {(["<ProjectName>", "<ProjectFolder>"] as const).map(
                                         (token) => (
@@ -1088,7 +1114,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
 
                                 <Flex gap="2" wrap="wrap" align="center">
                                     <Text size="1" color="gray">
-                                        占位符：
+                                        {tAny("export_pattern_placeholders")}
                                     </Text>
                                     {[
                                         "<ExportIndex>",

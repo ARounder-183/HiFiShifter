@@ -19,8 +19,7 @@
  * @module waveformRenderer
  */
 
-import type { FadeCurveType } from "../components/layout/timeline/paths";
-import { fadeCurveGain } from "../components/layout/timeline/paths";
+import { fadeGainSigned } from "../components/layout/timeline/reaperFade";
 import { wfDiag_poolAcquire, wfDiag_poolRelease, wfDiag_poolRegister } from "./waveformDebug";
 
 // ============================================================================
@@ -61,9 +60,11 @@ export interface WaveformRenderParams {
     /** 淡出时长（秒） */
     fadeOutSec: number;
     /** 淡入曲线类型 */
-    fadeInCurve: FadeCurveType;
+    fadeInShape: number;
+    fadeInDir: number;
     /** 淡出曲线类型 */
-    fadeOutCurve: FadeCurveType;
+    fadeOutShape: number;
+    fadeOutDir: number;
     /** 数据起始时间（秒，源文件坐标系） */
     dataStartSec?: number;
     /** 数据持续时间（秒） */
@@ -76,6 +77,23 @@ export interface WaveformRenderParams {
     clipPixelOffset?: number;
     /** clip 完整像素宽度（用于将像素位置映射到 timeline 时间） */
     clipTotalWidthPx?: number;
+
+    /**
+     * Loop（循环源）分片在 clip 内的时间偏移（秒，= 瓦片序号 × 循环周期）。
+     *
+     * 波形按循环周期分片渲染时，每片的数据坐标系是"片内局部时间"；
+     * 淡入淡出必须按 **clip 局部时间** 求值，因此增益阶段需要加上该偏移。
+     * 单片渲染（非 Loop 或单片回退）保持 0 / 未定义。
+     */
+    clipTimeOffsetSec?: number;
+
+    /**
+     * 整条 clip 的真实时长（秒）。Loop 分片渲染时末尾瓦片的
+     * 片内时长（clipDuration）可能超出 clip 剩余长度，
+     * 淡出锚点必须按整条 clip 的终点计算，传入该值以保证相位正确。
+     * 未传时回退为 clipTimeOffsetSec + clipDuration。
+     */
+    clipTotalDurationSec?: number;
 }
 
 // ============================================================================
@@ -86,7 +104,7 @@ export interface WaveformRenderParams {
  * applyGainsToPeaks 内部复用缓冲池
  * 避免每帧 new Float32Array 导致 GC 压力
  */
-let _gainBufferPool: Float32Array[] = [];
+const _gainBufferPool: Float32Array[] = [];
 const _GAIN_POOL_MAX = 32;
 
 function acquireGainBuffer(len: number): Float32Array {
@@ -136,10 +154,14 @@ export function applyGainsToPeaks(peaks: Float32Array, params: WaveformRenderPar
         volumeGain,
         fadeInSec,
         fadeOutSec,
-        fadeInCurve,
-        fadeOutCurve,
+        fadeInShape,
+        fadeInDir,
+        fadeOutShape,
+        fadeOutDir,
         dataStartSec,
         dataDurationSec,
+        clipTimeOffsetSec = 0,
+        clipTotalDurationSec,
     } = params;
 
     const totalSamples = peaks.length / 2;
@@ -168,14 +190,20 @@ export function applyGainsToPeaks(peaks: Float32Array, params: WaveformRenderPar
     const invTotalSamplesM1 = totalSamples > 1 ? 1 / (totalSamples - 1) : 0;
     const invPlaybackRate = 1 / playbackRate;
     const clipSourceEndSec = sourceStartSec + clipDuration * playbackRate;
-    const fadeOutStart = clipDuration - fadeOutSec;
+    // fadeOutStart 以 clip 局部时间计，锚定整条 clip 的真实终点
+    //（Loop 分片的片内时长可能超出 clip 剩余长度）。
+    const clipTotalLenSec = clipTotalDurationSec ?? clipTimeOffsetSec + clipDuration;
+    const fadeOutStart = clipTotalLenSec - fadeOutSec;
     const invFadeInSec = fadeInSec > 0 ? 1 / fadeInSec : 0;
     const invFadeOutSec = fadeOutSec > 0 ? 1 / fadeOutSec : 0;
 
-    // 提取时间映射的线性步长与基准值
-    const baseTime = reversed
-        ? (clipSourceEndSec - effectiveDataStartSec) * invPlaybackRate
-        : (effectiveDataStartSec - sourceStartSec) * invPlaybackRate;
+    // 提取时间映射的线性步长与基准值（time 为 clip 局部时间：
+    // Loop 分片通过 clipTimeOffsetSec 平移到正确的相位）。
+    const baseTime =
+        clipTimeOffsetSec +
+        (reversed
+            ? (clipSourceEndSec - effectiveDataStartSec) * invPlaybackRate
+            : (effectiveDataStartSec - sourceStartSec) * invPlaybackRate);
     const timeStep =
         totalSamples > 1
             ? reversed
@@ -192,12 +220,19 @@ export function applyGainsToPeaks(peaks: Float32Array, params: WaveformRenderPar
 
         // 淡入：时间 0 -> fadeInSec，增益 0 -> 1
         if (fadeInSec > 0 && time < fadeInSec) {
-            gain *= fadeCurveGain(time * invFadeInSec, fadeInCurve);
+            gain *= fadeGainSigned(fadeInShape, fadeInDir, "in", time * invFadeInSec);
         }
 
         // 淡出：时间 (clipDuration - fadeOutSec) -> clipDuration，增益 1 -> 0
         if (fadeOutSec > 0 && time > fadeOutStart) {
-            gain *= 1 - fadeCurveGain((time - fadeOutStart) * invFadeOutSec, fadeOutCurve);
+            // fadeGainSigned("out") 返回的就是该时刻的剩余响度增益（1→0 递减），
+            // 直接相乘；绝不能再套 1 - 补号 —— 那会把淡出反向成淡入。
+            gain *= fadeGainSigned(
+                fadeOutShape,
+                fadeOutDir,
+                "out",
+                (time - fadeOutStart) * invFadeOutSec,
+            );
         }
 
         // 应用增益
@@ -402,13 +437,16 @@ export function renderWaveform(
 
         if (pixelMin === Infinity) continue;
 
+        // 超过 0dB 的峰值截断到画布内：不 clamp 会画出 body 区、盖住 header。
+        const clampY = (y: number): number => Math.max(0, Math.min(canvasHeight, y));
+
         if (mode === "jitter") {
             // ========================================
             // 抖动线模式
             // ========================================
             const t = px & 1 ? 0.75 : 0.25;
             const value = pixelMax + (pixelMin - pixelMax) * t;
-            const y = centerY - value * amplitudeScale;
+            const y = clampY(centerY - value * amplitudeScale);
 
             if (!jitterStarted) {
                 ctx.moveTo(px, y);
@@ -417,8 +455,8 @@ export function renderWaveform(
                 ctx.lineTo(px, y);
             }
         } else {
-            const yTop = centerY - pixelMax * amplitudeScale;
-            const yBot = centerY - pixelMin * amplitudeScale;
+            const yTop = clampY(centerY - pixelMax * amplitudeScale);
+            const yBot = clampY(centerY - pixelMin * amplitudeScale);
 
             // 确保静音段至少有最小可见高度（0.5px）
             if (yBot - yTop < 0.5) {

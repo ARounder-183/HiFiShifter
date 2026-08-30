@@ -36,19 +36,19 @@ HiFiShifter also supports the following operations to facilitate migration from 
 
 ### Layout
 
-HiFiShifter can be roughly divided into two functional areas: the upper track panel and the lower parameter panel. The track panel is mainly responsible for audio clip processing, while the parameter panel handles parameter adjustments.
+HiFiShifter can be roughly divided into two functional areas: the upper track panel and the lower parameter panel. The track panel is mainly responsible for editing and arranging audio clips, while the parameter panel handles parameter adjustments.
 
 ### Track Panel
 
 HiFiShifter provides a fairly complete track panel and audio clip editing functionality, similar to most modern DAWs.
 
-#### Importing Audio
+#### Importing Media (Audio / Video)
 
-HiFiShifter supports three ways to import audio:
+HiFiShifter supports three ways to import media files. Video files automatically use their audio track:
 
-1. Drag and drop audio from the system file manager directly onto a track.
-2. Click the folder icon on the toolbar to open the built-in file browser and drag audio onto a track.
-3. Press `Ctrl + F` to open quick search, select audio, and import it onto a track (the quick search file path matches the built-in file browser's current path).
+1. Drag and drop audio or video files from the system file manager directly onto a track.
+2. Click the folder icon on the toolbar to open the built-in file browser and drag media files onto a track.
+3. Press `Ctrl + F` to open quick search, select media files, and import them onto a track (the quick search file path matches the built-in file browser's current path).
 
 #### Audio Editing
 
@@ -63,7 +63,7 @@ HiFiShifter supports three ways to import audio:
 - **Copy Drag**: Hold `Ctrl` while dragging a clip to create a copy at the target position (the original clip remains unchanged; copying takes effect upon release).
 - **Glue**: Right-click a clip and select "Glue" (requires at least 2 clips on the same track).
 - **Split**: Select a clip and press `S` to split it at the playhead position.
-- **Copy/Paste**: Select a clip and press `Ctrl + C` to copy it to the application clipboard. `Ctrl + V` aligns the leftmost start of the selected clips to the playhead position, preserving relative spacing.
+- **Copy/Paste**: Select a clip and press `Ctrl + C` to copy it to the application clipboard. `Ctrl + V` aligns the leftmost start of the selected clips to the playhead position, preserving relative spacing. Copying also writes REAPERMedia data to the clipboard, so the selection can be pasted directly in REAPER.
 
 Note that tracks support nesting: you can drag a track under another track to form a track group, which will be very useful during parameter adjustment.
 
@@ -124,6 +124,8 @@ Because the official DLL only supports file I/O, processing takes longer compare
 | Delete Selected Clips               | Delete                                  |
 | Copy Selected Clips (app clipboard) | Ctrl + C                                |
 | Paste at Playhead                   | Ctrl + V                                |
+| Group / Ungroup                     | G / U                                   |
+| Cycle Take                          | T (Shift + T: previous)                 |
 | Copy Selection Curve (parameter)    | Ctrl + C (Select mode)                  |
 | Paste to Selection Start            | Ctrl + V (Select mode)                  |
 | Split Clip                          | S (splits selected clip at playhead)    |
@@ -169,10 +171,46 @@ SKIP_FRONTEND=0 bash ./scripts/install_deps_macos.sh
 
 #### Linux
 
+Make sure the following tools are installed:
+
+- **Node.js** (recommended 20+) and npm
+- **Rust toolchain** (see `rust-toolchain.toml` — the project auto-selects the correct platform stable toolchain)
+- **Tauri 2 CLI**: `cargo install tauri-cli --version "^2"`
+- **CMake**, **pkg-config**, and system build tools
+- **GTK3, WebKit2GTK, ALSA** and other Tauri runtime dev libraries (see install script below)
+
+Run the one-click install script:
+
 ```bash
 chmod +x ./scripts/install_deps_linux.sh
-SKIP_FRONTEND=0 bash ./scripts/install_deps_linux.sh
+bash ./scripts/install_deps_linux.sh
 ```
+
+This script installs system dependencies, Node.js (if missing), appimagetool, and frontend npm dependencies.
+
+Install frontend dependencies (if not using the script):
+
+```bash
+npm --prefix frontend ci
+```
+
+#### Linux AppImage Build
+
+The `vslib` algorithm is Windows-only, so Linux builds must disable the default feature:
+
+```bash
+# Run from the backend/ directory (paths in tauri.conf.json are relative to it)
+cd backend
+cargo tauri build --bundles appimage -- --no-default-features --features onnx
+```
+
+Or use the provided helper script:
+
+```bash
+bash scripts/build-linux-appimage.sh
+```
+
+> **Note:** On WSL2, the Tauri bundler's linuxdeploy step may fail due to missing FUSE support (error: `failed to run linuxdeploy`). This is a known WSL2 limitation and does not affect the actual AppImage output — the AppDir is correctly assembled at `target/release/bundle/appimage/`. Set `APPIMAGE_EXTRACT_AND_RUN=1` and run `appimagetool` manually to package. This issue does not exist on real Linux machines or in CI.
 
 ### 3. SoundTouch Source
 
@@ -185,25 +223,37 @@ cd backend/src-tauri/third_party/soundtouch-static
 git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.git soundtouch
 ```
 
-### 4. GPU-Accelerated Build
+### 4. GPU Acceleration
 
-| Platform                    | GPU Technology        | Description                                                     |
-| --------------------------- | --------------------- | --------------------------------------------------------------- |
-| Windows x86_64 / ARM64      | DirectML (DirectX 12) | Auto-downloaded by ort crate, supports NVIDIA / AMD / Intel Arc |
-| macOS ARM64 (Apple Silicon) | CoreML                | Apple Neural Engine, auto-enabled                               |
-| macOS x86_64 (Intel)        | —                     | CPU only                                                        |
-| Linux x86_64 / ARM64        | —                     | CPU only (ONNX Runtime has no native OpenCL support)            |
+HiFiShifter automatically enables GPU-accelerated inference on supported platforms. You can choose between Auto / CPU / GPU from the **Inference Device** menu in the menu bar, and compare per-device latency using **Run Benchmark**.
+
+| Platform                        | GPU Technology                        | Description                                                               |
+| ------------------------------- | ------------------------------------- | ------------------------------------------------------------------------- |
+| Windows x86_64 / ARM64          | DirectML (DirectX 12)                 | Proven, stable GPU path; supports NVIDIA / AMD / Intel Arc                |
+| macOS ARM64 (Apple Silicon)     | CoreML + WebGPU (Dawn/Metal)          | CoreML leverages the Apple Neural Engine; WebGPU as a supplementary GPU backend |
+| macOS x86_64 (Intel)            | —                                     | CPU only (uses the ort-tract alternative backend)                         |
+| Linux x86_64                    | WebGPU (Dawn/Vulkan)                  | Dawn accesses the GPU through the Vulkan API; falls back to CPU if no GPU is present |
+| Linux ARM64                     | —                                     | CPU only (no prebuilt WebGPU ONNX Runtime binary for this target)        |
+
+> **Note**: WebGPU is not enabled on Windows. Its Dawn/D3D12 backend can cause native crashes on some GPU/driver combinations. DirectML is the mature, stable GPU path for Windows.
+>
+> **WSL2 users**: WSL2 does not expose hardware Vulkan to Linux guests. WebGPU/Dawn can only use Lavapipe (CPU software rendering), which is extremely slow. For GPU acceleration on WSL2, use the Windows native build with DirectML instead.
 
 #### All Platforms
 
-ONNX Runtime binaries are automatically downloaded by the ort crate at build time via the `download-binaries` feature — no manual setup needed.
+ONNX Runtime binaries are automatically downloaded by the ort crate at build time via the `download-binaries` feature — no manual setup needed. GPU providers (DirectML / WebGPU / CoreML) are enabled automatically at compile time for each target platform; no extra `--features` flags are required.
 
-```powershell
+```bash
 # Development mode (hot reload)
+cd backend
 cargo tauri dev
 
 # Build Release
+# Windows / macOS (default features: onnx + vslib)
 cargo tauri build
+
+# Linux (vslib is Windows-only; exclude default feature)
+cargo tauri build --bundles appimage -- --no-default-features --features onnx
 
 # Windows portable ZIP
 .\scripts\pack-portable.ps1 -SkipBuild
@@ -242,7 +292,6 @@ $env:TAURI_UI_MODE='build'; cargo tauri dev
 ## Documentation
 
 - [User Manual](USERMANUAL_en.md)
-- [Todo List](../../todo.md)
 
 ## Acknowledgements
 

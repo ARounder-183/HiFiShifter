@@ -32,6 +32,16 @@ import {
 /** 三级 mipmap 的除数因子 */
 const DIV_FACTORS = [16, 512, 4096] as const;
 
+/**
+ * "尚未就绪"重试冷却（毫秒）。
+ *
+ * 后端在波形分析/首次计算完成前会返回**空串**（而非显式错误）——这对
+ * 打开工程瞬间的抢先请求是瞬时条件，不是永久失败。冷却期内不重复请求，
+ * 冷却后由下一次 preload/draw 或 `refresh()`（waveform_analysis_progress
+ * done/cached 事件）自然重试；同时限制对真正缺失文件的请求频率。
+ */
+const RETRY_NOT_READY_COOLDOWN_MS = 3000;
+
 /** 级别选择的 spp 阈值 */
 const SPP_THRESHOLDS = [512, 1024] as const;
 const SPP_HYSTERESIS_ENTER_SCALE = 1.25;
@@ -41,12 +51,12 @@ const SPP_HYSTERESIS_EXIT_SCALE = 0.75;
 const LEVEL_COUNT = 3;
 
 /**
- * 文件级 mipmap 缓存的最大条目数（LRU 上限）。
+ * 文件级 mipmap 缓存的最大 backing-store 字节数。
  *
  * 每个 entry 包含三级 Float32Array，单首 5 分钟立体声歌曲约占数 MB。
  * 该上限在"避免内存累积"与"频繁切换音频不需要重新解码"之间取折中。
  */
-const MAX_FILE_CACHE_SIZE = 512;
+const MAX_CACHE_BYTES = 192 * 1024 * 1024;
 
 // ============== 类型 ==============
 
@@ -72,6 +82,10 @@ interface FileMipmapCache {
     levels: [LevelPeaks | null, LevelPeaks | null, LevelPeaks | null];
     /** 正在加载中的级别 */
     loadingLevels: Set<number>;
+    /** 已确认加载失败、在 invalidate() 前不再自动重试的级别 */
+    failedLevels: Set<number>;
+    /** 当前三级 Float32Array backing store 的总字节数 */
+    bytes: number;
 }
 
 /** 加载状态回调 */
@@ -86,12 +100,20 @@ export type LoadCallback = (
 class WaveformMipmapStoreImpl {
     /** sourcePath → FileMipmapCache */
     private cache = new Map<string, FileMipmapCache>();
+    private cacheBytes = 0;
 
     /** 加载状态监听器 */
     private listeners = new Set<LoadCallback>();
 
     /** 正在进行的加载 Promise（用于 preload 等待已发起的加载） */
     private loadingPromises = new Map<string, Promise<void>>();
+
+    /**
+     * "尚未就绪"重试冷却表：key = `${sourcePath}|${level}`，value = 冷却
+     * 截止时间戳（Date.now() 语义）。后端返回空串（暂未就绪）时写入；
+     * 冷却期内 loadLevel/batchPreload 不再发起请求。
+     */
+    private retryCooldownUntil = new Map<string, number>();
 
     /**
      * interleaved 缓冲区复用池。
@@ -150,11 +172,14 @@ class WaveformMipmapStoreImpl {
      * 写入或覆盖缓存条目，并按 LRU 上限淘汰最旧条目。
      */
     private cacheSet(sourcePath: string, entry: FileMipmapCache): void {
-        if (this.cache.has(sourcePath)) {
+        const previous = this.cache.get(sourcePath);
+        if (previous) {
             // 删除旧位置，确保重新插入到末尾
             this.cache.delete(sourcePath);
+            this.cacheBytes -= previous.bytes;
         }
         this.cache.set(sourcePath, entry);
+        this.cacheBytes += entry.bytes;
         this.evictIfNeeded();
     }
 
@@ -169,14 +194,16 @@ class WaveformMipmapStoreImpl {
     }
 
     /**
-     * 当条目数超过 MAX_FILE_CACHE_SIZE 时，按 LRU 顺序淘汰最旧的。
+     * 当数据超过字节预算时，按 LRU 顺序淘汰最旧的。
      * 被淘汰条目同步 notify "done" 状态以便 UI 释放任何关联视图缓存（保守做法）。
      */
     private evictIfNeeded(): void {
-        while (this.cache.size > MAX_FILE_CACHE_SIZE) {
+        while (this.cacheBytes > MAX_CACHE_BYTES && this.cache.size > 1) {
             const oldestKey = this.cache.keys().next().value as string | undefined;
             if (!oldestKey) break;
+            const oldest = this.cache.get(oldestKey);
             this.cache.delete(oldestKey);
+            this.cacheBytes -= oldest?.bytes ?? 0;
         }
     }
 
@@ -459,11 +486,52 @@ class WaveformMipmapStoreImpl {
     }
 
     /**
+     * 获取零拷贝 min/max 视图及其实际时间边界。
+     *
+     * 共享 WebGL/Canvas surface 直接消费这两个 subarray，避免每帧构造
+     * interleaved、gain 和 downsample 中间数组。
+     */
+    getBestSliceView(
+        sourcePath: string,
+        preferredLevel: WaveformMipmapLevel,
+        startSec: number,
+        durationSec: number,
+    ): {
+        min: Float32Array;
+        max: Float32Array;
+        dataStartSec: number;
+        dataDurationSec: number;
+    } | null {
+        let peaks = this.getPeaks(sourcePath, preferredLevel);
+        if (!peaks) peaks = this.getNearestLoadedLevel(sourcePath, preferredLevel);
+        if (!peaks) return null;
+
+        const { sampleRate, divisionFactor } = peaks;
+        const startIdx = Math.max(0, Math.floor((startSec * sampleRate) / divisionFactor));
+        const endIdx = Math.min(
+            peaks.min.length,
+            Math.ceil(((startSec + durationSec) * sampleRate) / divisionFactor),
+        );
+        if (endIdx <= startIdx) return null;
+
+        return {
+            min: peaks.min.subarray(startIdx, endIdx),
+            max: peaks.max.subarray(startIdx, endIdx),
+            dataStartSec: (startIdx * divisionFactor) / sampleRate,
+            dataDurationSec: ((endIdx - startIdx) * divisionFactor) / sampleRate,
+        };
+    }
+
+    /**
      * 预加载文件的所有三级 mipmap 数据
      *
      * 音频导入/项目打开时调用。
      */
     async preload(sourcePath: string): Promise<void> {
+        // 所有级别都已知失败时不再触发后端计算（例如源文件已缺失）。
+        const existing = this.cache.get(sourcePath);
+        if (existing && existing.failedLevels.size >= LEVEL_COUNT) return;
+
         // 先通知后端预计算（触发磁盘缓存）
         try {
             await waveformApi.preloadWaveformMipmap(sourcePath);
@@ -494,8 +562,13 @@ class WaveformMipmapStoreImpl {
         const needed = sourcePaths.filter((sp) => {
             const entry = this.cache.get(sp);
             if (!entry) return true;
+            // L2 已确认失败（解码损坏/文件缺失）时不再自动重试。
+            if (entry.failedLevels.has(2)) return false;
             // 至少 L2 未加载则需要
-            return entry.levels[2] == null;
+            if (entry.levels[2] != null) return false;
+            // 冷却期（上次拿到空结果 = 后端暂未就绪）内不重复请求。
+            const until = this.retryCooldownUntil.get(`${sp}|2`);
+            return until == null || Date.now() >= until;
         });
 
         if (needed.length === 0) return;
@@ -508,6 +581,8 @@ class WaveformMipmapStoreImpl {
                     sampleRate: 0,
                     levels: [null, null, null],
                     loadingLevels: new Set(),
+                    failedLevels: new Set(),
+                    bytes: 0,
                 };
                 this.cacheSet(sp, entry);
             } else {
@@ -521,24 +596,30 @@ class WaveformMipmapStoreImpl {
             const batchResult = await waveformApi.batchGetWaveformMipmap(needed);
 
             for (const [sourcePath, levels] of Object.entries(batchResult)) {
-                let hasError = false;
                 // 仅解码 L2（索引 2），L0/L1 丢弃
                 const l2Base64 = levels[2];
                 if (l2Base64) {
                     const decoded = decodeWaveformFromBase64(l2Base64);
                     if (decoded) {
                         this.applyDecoded(sourcePath, 2, decoded);
+                        this.notify(sourcePath, "done");
                     } else {
-                        hasError = true;
+                        const entry = this.cache.get(sourcePath);
+                        if (entry) entry.failedLevels.add(2);
+                        this.notify(sourcePath, "error", "batch decode L2 failure");
                     }
                 } else {
-                    hasError = true;
+                    // 空串 = 后端尚未就绪（波形分析/首次计算未完成），是
+                    // **瞬时**条件：绝不能写 failedLevels——否则打开工程
+                    // 瞬间的抢先批量请求会把 L2 永久毒化，波形要等用户
+                    // 滚动/缩放才出现。进入重试冷却，等待 refresh()
+                    // （waveform_analysis_progress done/cached 事件）。
+                    this.retryCooldownUntil.set(
+                        `${sourcePath}|2`,
+                        Date.now() + RETRY_NOT_READY_COOLDOWN_MS,
+                    );
+                    this.notify(sourcePath, "loading");
                 }
-                this.notify(
-                    sourcePath,
-                    hasError ? "error" : "done",
-                    hasError ? "batch decode L2 failure" : undefined,
-                );
             }
         } catch (err) {
             console.warn(
@@ -571,7 +652,73 @@ class WaveformMipmapStoreImpl {
      * 清除指定文件缓存
      */
     invalidate(sourcePath: string): void {
+        this.cacheBytes -= this.cache.get(sourcePath)?.bytes ?? 0;
         this.cache.delete(sourcePath);
+        // 换源/重载时让重试冷却一并失效，新来源立即可以重新请求。
+        this.retryCooldownUntil.delete(`${sourcePath}|0`);
+        this.retryCooldownUntil.delete(`${sourcePath}|1`);
+        this.retryCooldownUntil.delete(`${sourcePath}|2`);
+    }
+
+    /**
+     * 将文件标记为当前不可用（缺失/无法读取）。
+     *
+     * 与加载失败的自然负缓存一致：所有级别在 invalidate() 前都不会再发起
+     * 自动加载，避免缺失文件在渲染循环中被反复请求并持续触发后端进度事件。
+     * 若后续通过重新指定文件等方式恢复，replaceClipSourceRemote 会调用
+     * invalidate() 清除该标记。
+     */
+    markUnavailable(sourcePath: string): void {
+        const normalized = sourcePath;
+        if (!normalized) return;
+
+        let entry = this.cache.get(normalized);
+        if (!entry) {
+            entry = {
+                sampleRate: 0,
+                levels: [null, null, null],
+                loadingLevels: new Set(),
+                failedLevels: new Set(),
+                bytes: 0,
+            };
+            this.cacheSet(normalized, entry);
+        } else {
+            this.touchLru(normalized);
+        }
+
+        const wasAlreadyMarked = entry.failedLevels.size >= LEVEL_COUNT;
+        for (let level = 0; level < LEVEL_COUNT; level++) {
+            entry.failedLevels.add(level);
+        }
+        if (!wasAlreadyMarked) {
+            this.notify(normalized, "error", "source unavailable");
+        }
+    }
+
+    /**
+     * 数据就绪信号（后端 `waveform_analysis_progress` 的 done/cached 事件，
+     * 或调用方主动重试）：清除该文件的重试冷却与失败负缓存，并按需重载。
+     *
+     * 打开工程瞬间的首次预加载/绘制常早于后端分析完成，拿到的是空结果；
+     * 若没有本入口，曾被误判失败的级别只能等 `invalidate()`（换源）才恢复，
+     * 波形要等用户滚动/缩放才出现。数据就绪后由 listener（"done"）驱动
+     * 各波形面重绘。
+     */
+    refresh(sourcePath: string): void {
+        if (!sourcePath) return;
+        this.retryCooldownUntil.delete(`${sourcePath}|0`);
+        this.retryCooldownUntil.delete(`${sourcePath}|1`);
+        this.retryCooldownUntil.delete(`${sourcePath}|2`);
+        const entry = this.cacheGet(sourcePath);
+        if (!entry) return;
+        const poisoned = entry.failedLevels.size > 0;
+        const nothingLoaded =
+            entry.levels[0] == null && entry.levels[1] == null && entry.levels[2] == null;
+        if (poisoned || nothingLoaded) {
+            // 清掉陈旧条目后整体重载（含三级），后端此时应已就绪。
+            this.invalidate(sourcePath);
+            void this.batchPreload([sourcePath]);
+        }
     }
 
     /**
@@ -579,6 +726,8 @@ class WaveformMipmapStoreImpl {
      */
     clear(): void {
         this.cache.clear();
+        this.cacheBytes = 0;
+        this.interleavedPool.length = 0;
     }
 
     /**
@@ -611,6 +760,8 @@ class WaveformMipmapStoreImpl {
                 sampleRate: 0,
                 levels: [null, null, null],
                 loadingLevels: new Set(),
+                failedLevels: new Set(),
+                bytes: 0,
             };
             this.cacheSet(sourcePath, entry);
         } else {
@@ -619,6 +770,15 @@ class WaveformMipmapStoreImpl {
 
         // 已加载 → 立即返回
         if (entry.levels[level]) return Promise.resolve();
+
+        // 已确认失败 → 不再自动重试，避免缺失文件在每次渲染时反复触发后端计算。
+        if (entry.failedLevels.has(level)) return Promise.resolve();
+
+        // 冷却期（上次拿到空结果 = 后端暂未就绪）内不重复请求，等待
+        // refresh()（波形分析完成事件）或冷却结束后的下一次绘制重试。
+        const retryKey = `${sourcePath}|${level}`;
+        const cooldownUntil = this.retryCooldownUntil.get(retryKey);
+        if (cooldownUntil != null && Date.now() < cooldownUntil) return Promise.resolve();
 
         // 正在加载 → 返回已有 Promise（等待完成）
         const promiseKey = `${sourcePath}|${level}`;
@@ -636,11 +796,23 @@ class WaveformMipmapStoreImpl {
                 if (decoded) {
                     this.applyDecoded(sourcePath, level, decoded);
                     this.notify(sourcePath, "done");
+                } else if (raw === "") {
+                    // 空串 = 后端尚未就绪（波形分析/首次计算未完成），
+                    // 是**瞬时**条件：绝不写 failedLevels（否则打开工程
+                    // 瞬间的抢先请求会把该级别永久毒化，波形要等用户
+                    // 滚动/缩放才出现）。进入重试冷却，等待 refresh()。
+                    this.retryCooldownUntil.set(retryKey, Date.now() + RETRY_NOT_READY_COOLDOWN_MS);
+                    this.notify(sourcePath, "loading");
                 } else {
+                    // 非空但解码失败 = 数据损坏，视为永久失败。
+                    const current = this.cache.get(sourcePath);
+                    if (current) current.failedLevels.add(level);
                     this.notify(sourcePath, "error", "decode failed");
                 }
             } catch (err) {
                 const msg = err instanceof Error ? err.message : String(err);
+                const current = this.cache.get(sourcePath);
+                if (current) current.failedLevels.add(level);
                 this.notify(sourcePath, "error", msg);
             } finally {
                 entry!.loadingLevels.delete(level);
@@ -662,6 +834,8 @@ class WaveformMipmapStoreImpl {
                 sampleRate: decoded.sampleRate,
                 levels: [null, null, null],
                 loadingLevels: new Set(),
+                failedLevels: new Set(),
+                bytes: 0,
             };
             this.cacheSet(sourcePath, entry);
         } else {
@@ -670,12 +844,20 @@ class WaveformMipmapStoreImpl {
 
         entry.sampleRate = decoded.sampleRate;
         const clampedLevel = Math.min(level, 2) as 0 | 1 | 2;
+        entry.failedLevels.delete(clampedLevel);
+        this.retryCooldownUntil.delete(`${sourcePath}|${clampedLevel}`);
+        const previous = entry.levels[clampedLevel];
+        const previousBytes = previous ? previous.min.byteLength + previous.max.byteLength : 0;
+        const nextBytes = decoded.min.byteLength + decoded.max.byteLength;
         entry.levels[clampedLevel] = {
             min: decoded.min,
             max: decoded.max,
             divisionFactor: decoded.divisionFactor,
             sampleRate: decoded.sampleRate,
         };
+        entry.bytes += nextBytes - previousBytes;
+        this.cacheBytes += nextBytes - previousBytes;
+        this.evictIfNeeded();
     }
 
     private getSliceFromPeaks(

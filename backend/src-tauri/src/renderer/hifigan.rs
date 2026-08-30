@@ -113,8 +113,13 @@ impl HiFiGanRenderer {
         let pitch_edit = ctx.pitch_edit;
         let clip_midi = ctx.clip_midi;
 
-        eprintln!("[hifigan] render_with_formant: clip_id={} samples={} seg=[{:.3},{:.3})",
-            ctx.clip_id, ctx.mono_pcm.len(), ctx.seg_start_sec, ctx.seg_end_sec);
+        eprintln!(
+            "[hifigan] render_with_formant: clip_id={} samples={} seg=[{:.3},{:.3})",
+            ctx.clip_id,
+            ctx.mono_pcm.len(),
+            ctx.seg_start_sec,
+            ctx.seg_end_sec
+        );
 
         // clip_midi 为空时明确跳过，与 WORLD 链路行为一致。
         // Harvest 分析尚未完成时 clip_midi 可能为空，此时返回原始 PCM。
@@ -198,6 +203,13 @@ impl HiFiGanRenderer {
                 return 0.0;
             }
             let i0 = idx_f.floor().max(0.0) as usize;
+            // 越界（超出曲线末点）时按默认值 0.0 返回：i1 会被钳制到最后一个
+            // 元素，若继续插值会混入末值与 frac（小数部分），产生 0..末值 的
+            // 锯齿振荡，污染最后一个参数点之后的音频（Bug 复现：共振峰偏移
+            // 点之后应回退 0，却渲染出 0..359 剧烈抖动的偏移）。
+            if i0 >= curve.len() {
+                return 0.0;
+            }
             let i1 = (i0 + 1).min(curve.len().saturating_sub(1));
             let frac = (idx_f - i0 as f64).clamp(0.0, 1.0) as f32;
             let a = curve.get(i0).copied().unwrap_or(0.0);
@@ -233,17 +245,21 @@ impl HiFiGanRenderer {
             seg_start
         ));
 
-            let result = crate::nsf_hifigan_onnx::infer_pitch_edit_chunked_optimized(
-                ctx.mono_pcm,
-                sr,
-                ctx.seg_start_sec,
-                midi_fn,
-                formant_shift_fn,
-                &|mel_start: usize, mel_end: usize| -> Option<Vec<f32>> {
+        let result = crate::nsf_hifigan_onnx::infer_pitch_edit_chunked_optimized(
+            ctx.mono_pcm,
+            sr,
+            ctx.seg_start_sec,
+            midi_fn,
+            formant_shift_fn,
+            &|mel_start: usize, mel_end: usize| -> Option<Vec<f32>> {
                 let chunk_start = seg_start + mel_start as u64 * model_hop;
                 let chunk_end = seg_start + mel_end as u64 * model_hop;
                 let hash = crate::synth_clip_cache::compute_param_hash(
-                    &clip_id, chunk_start, chunk_end, sr, "nsf_hifigan_onnx",
+                    &clip_id,
+                    chunk_start,
+                    chunk_end,
+                    sr,
+                    "nsf_hifigan_onnx",
                     &curves_snapshot,
                     extra_curves.iter().map(|(k, v)| (*k, *v)),
                     &std::collections::HashMap::new(),
@@ -251,7 +267,8 @@ impl HiFiGanRenderer {
                 let cache_key = (clip_id.clone(), mel_start);
 
                 let mut cache = global_chunk_cache_ref()
-                    .lock().unwrap_or_else(|e| e.into_inner());
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
                 match cache.get(&cache_key) {
                     Some(entry) if entry.param_hash == hash => {
                         chunk_debug(&format!(
@@ -268,9 +285,7 @@ impl HiFiGanRenderer {
                         None
                     }
                     None => {
-                        chunk_debug(&format!(
-                            "  chunk [{mel_start}..{mel_end}) MISS",
-                        ));
+                        chunk_debug(&format!("  chunk [{mel_start}..{mel_end}) MISS",));
                         None
                     }
                 }
@@ -279,7 +294,11 @@ impl HiFiGanRenderer {
                 let chunk_start = seg_start + mel_start as u64 * model_hop;
                 let chunk_end = seg_start + mel_end as u64 * model_hop;
                 let hash = crate::synth_clip_cache::compute_param_hash(
-                    &clip_id, chunk_start, chunk_end, sr, "nsf_hifigan_onnx",
+                    &clip_id,
+                    chunk_start,
+                    chunk_end,
+                    sr,
+                    "nsf_hifigan_onnx",
                     &curves_snapshot,
                     extra_curves.iter().map(|(k, v)| (*k, *v)),
                     &std::collections::HashMap::new(),
@@ -292,11 +311,15 @@ impl HiFiGanRenderer {
                 ));
 
                 let mut cache = global_chunk_cache_ref()
-                    .lock().unwrap_or_else(|e| e.into_inner());
-                cache.insert(cache_key, ChunkCacheEntry {
-                    param_hash: hash,
-                    waveform: wf,
-                });
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                cache.insert(
+                    cache_key,
+                    ChunkCacheEntry {
+                        param_hash: hash,
+                        waveform: wf,
+                    },
+                );
             },
         )?;
         Ok(result)
@@ -313,8 +336,12 @@ impl HiFiGanRenderer {
         let pitch_edit = ctx.pitch_edit;
         let clip_midi = ctx.clip_midi;
 
-        eprintln!("[hifigan] render_mel_stretch: clip_id={} samples={} rate={:.3}",
-            ctx.clip_id, ctx.mono_pcm.len(), playback_rate);
+        eprintln!(
+            "[hifigan] render_mel_stretch: clip_id={} samples={} rate={:.3}",
+            ctx.clip_id,
+            ctx.mono_pcm.len(),
+            playback_rate
+        );
 
         if clip_midi.is_empty() {
             return Ok(ctx.mono_pcm.to_vec());
@@ -337,6 +364,13 @@ impl HiFiGanRenderer {
                 return 0.0;
             }
             let i0 = idx_f.floor().max(0.0) as usize;
+            // 越界（超出曲线末点）时按默认值 0.0 返回：i1 会被钳制到最后一个
+            // 元素，若继续插值会混入末值与 frac（小数部分），产生 0..末值 的
+            // 锯齿振荡，污染最后一个参数点之后的音频（Bug 复现：共振峰偏移
+            // 点之后应回退 0，却渲染出 0..359 剧烈抖动的偏移）。
+            if i0 >= curve.len() {
+                return 0.0;
+            }
             let i1 = (i0 + 1).min(curve.len().saturating_sub(1));
             let frac = (idx_f - i0 as f64).clamp(0.0, 1.0) as f32;
             let a = curve.get(i0).copied().unwrap_or(0.0);

@@ -1,6 +1,7 @@
 use crate::project::{
-    load_project_file, prepare_source_paths_for_save, project_name_from_path,
-    resolve_source_paths_on_open, serialize_project_file_for_path, CustomScale, ProjectFile,
+    load_project_file, prepare_timeline_for_project_save, project_name_from_path,
+    read_project_file_version, resolve_source_paths_on_open, serialize_project_file_for_path,
+    CustomScale, ProjectFile, CURRENT_PROJECT_FILE_VERSION,
 };
 use crate::state::AppState;
 use crate::synth_clip_cache;
@@ -195,7 +196,7 @@ fn restore_rotated_project_backup(backup_path: Option<&PathBuf>, project_path: &
     }
 }
 
-fn sanitize_file_name_segment(raw: &str) -> String {
+pub(crate) fn sanitize_file_name_segment(raw: &str) -> String {
     raw.chars()
         .map(|ch| match ch {
             '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
@@ -222,7 +223,7 @@ fn resolve_documents_dir(state: &AppState) -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
-fn resolve_project_folder_for_backup(state: &AppState) -> PathBuf {
+pub(crate) fn resolve_project_folder_for_backup(state: &AppState) -> PathBuf {
     let project = state.project.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(path) = project.path.as_deref() {
         let p = PathBuf::from(path);
@@ -233,7 +234,7 @@ fn resolve_project_folder_for_backup(state: &AppState) -> PathBuf {
     resolve_documents_dir(state).unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn resolve_project_name_for_backup(state: &AppState) -> String {
+pub(crate) fn resolve_project_name_for_backup(state: &AppState) -> String {
     let project = state.project.lock().unwrap_or_else(|e| e.into_inner());
 
     if let Some(path) = project.path.as_deref() {
@@ -254,7 +255,7 @@ fn resolve_project_name_for_backup(state: &AppState) -> String {
     }
 }
 
-fn try_apply_time_format_with_fallback(
+pub(crate) fn try_apply_time_format_with_fallback(
     template: &str,
     time: chrono::DateTime<Local>,
 ) -> Result<(String, bool), String> {
@@ -405,6 +406,7 @@ fn build_project_file_snapshot(
         use_custom_scale,
         custom_scale,
         beats_per_bar,
+        time_signature_denominator,
         grid_size,
         notes_markdown,
         stretch_algorithm_override,
@@ -416,6 +418,11 @@ fn build_project_file_snapshot(
             p.use_custom_scale,
             normalize_custom_scale(p.custom_scale.clone()),
             normalize_beats_per_bar(p.beats_per_bar),
+            if matches!(p.time_signature_denominator, 1 | 2 | 4 | 8 | 16 | 32) {
+                p.time_signature_denominator
+            } else {
+                4
+            },
             normalize_grid_size(&p.grid_size),
             p.notes_markdown.clone(),
             p.stretch_algorithm_override,
@@ -423,12 +430,13 @@ fn build_project_file_snapshot(
         )
     };
 
-    let tl_saved = prepare_source_paths_for_save(tl, project_path);
+    let tl_saved = prepare_timeline_for_project_save(tl, project_path);
     let mut pf = ProjectFile::new(
         project_name.to_string(),
         tl_saved,
         base_scale,
         beats_per_bar,
+        time_signature_denominator,
         grid_size,
     );
     pf.use_custom_scale = use_custom_scale && custom_scale.is_some();
@@ -511,61 +519,73 @@ fn save_project_archive_to_zip_inner(
     archive_logs.push(format!("Target zip: {}", zip_path.display()));
     archive_logs.push(format!("Embedded project file: {}", project_entry_name));
 
+    pf.timeline.sync_clip_takes_from_flat();
     for clip in pf.timeline.clips.iter_mut() {
-        let Some(source_path) = clip.source_path.clone() else {
-            continue;
-        };
-        if source_path.trim().is_empty() {
-            clip.source_path = None;
-            continue;
-        }
+        for take in &mut clip.takes {
+            let Some(source_path) = take.source_path.clone() else {
+                continue;
+            };
+            if source_path.trim().is_empty() {
+                take.source_path = None;
+                continue;
+            }
 
-        if let Some(existing) = source_to_entry.get(&source_path) {
-            clip.source_path_relative = Some(existing.clone());
-            clip.source_path = None;
-            continue;
-        }
+            if let Some(existing) = source_to_entry.get(&source_path) {
+                take.source_path_relative = Some(existing.clone());
+                take.source_path = None;
+                continue;
+            }
 
-        let abs_path = PathBuf::from(&source_path);
-        if !abs_path.is_absolute() || !abs_path.exists() {
+            let abs_path = PathBuf::from(&source_path);
+            if !abs_path.is_absolute() || !abs_path.exists() {
+                archive_logs.push(format!(
+                    "Skip missing or non-absolute source: {} (clip={}, take={})",
+                    source_path, clip.id, take.id
+                ));
+                take.source_path = None;
+                continue;
+            }
+
+            let relative_candidate = current_project_dir
+                .as_ref()
+                .and_then(|base_dir| abs_path.strip_prefix(base_dir).ok())
+                .map(|p| p.to_string_lossy().replace('\\', "/"));
+
+            let desired_entry_path = if let Some(rel) = relative_candidate {
+                rel
+            } else {
+                let file_name = abs_path
+                    .file_name()
+                    .and_then(|v| v.to_str())
+                    .unwrap_or("audio.wav");
+                format!("Archived/{}", file_name)
+            };
+
+            let unique_entry = unique_entry_path(&desired_entry_path, &mut used_zip_paths);
+            if unique_entry != desired_entry_path {
+                archive_logs.push(format!(
+                    "Name collision resolved: {} -> {}",
+                    desired_entry_path, unique_entry
+                ));
+            }
+
+            source_to_entry.insert(source_path.clone(), unique_entry.clone());
+            take.source_path_relative = Some(unique_entry.clone());
+            take.source_path = None;
             archive_logs.push(format!(
-                "Skip missing or non-absolute source: {} (clip={})",
-                source_path, clip.id
-            ));
-            clip.source_path = None;
-            continue;
-        }
-
-        let relative_candidate = current_project_dir
-            .as_ref()
-            .and_then(|base_dir| abs_path.strip_prefix(base_dir).ok())
-            .map(|p| p.to_string_lossy().replace('\\', "/"));
-
-        let desired_entry_path = if let Some(rel) = relative_candidate {
-            rel
-        } else {
-            let file_name = abs_path
-                .file_name()
-                .and_then(|v| v.to_str())
-                .unwrap_or("audio.wav");
-            format!("Archived/{}", file_name)
-        };
-
-        let unique_entry = unique_entry_path(&desired_entry_path, &mut used_zip_paths);
-        if unique_entry != desired_entry_path {
-            archive_logs.push(format!(
-                "Name collision resolved: {} -> {}",
-                desired_entry_path, unique_entry
+                "Archive source: {} -> {}",
+                source_path, unique_entry
             ));
         }
-
-        source_to_entry.insert(source_path.clone(), unique_entry.clone());
-        clip.source_path_relative = Some(unique_entry.clone());
-        clip.source_path = None;
-        archive_logs.push(format!(
-            "Archive source: {} -> {}",
-            source_path, unique_entry
-        ));
+        let active_take = clip
+            .active_take_id
+            .as_deref()
+            .and_then(|id| clip.takes.iter().find(|t| t.id == id))
+            .or_else(|| clip.takes.first())
+            .cloned();
+        if let Some(take) = active_take {
+            take.apply_to_clip(clip);
+        }
     }
 
     let bytes = serialize_project_file_for_path(&pf, Path::new(&project_entry_name))?;
@@ -797,6 +817,8 @@ pub(super) fn new_project(
     state: State<'_, AppState>,
     window: Window,
 ) -> crate::models::TimelineStatePayload {
+    // 切换/新建工程前必须中断旧工程的后台预渲染，避免旧渲染继续写入缓存。
+    let _ = crate::commands::playback::cancel_background_render(state.app_handle.get());
     {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
         *tl = crate::state::TimelineState::default();
@@ -830,6 +852,7 @@ pub(super) fn new_project(
 pub(super) fn open_project_dialog() -> serde_json::Value {
     let picked = rfd::FileDialog::new()
         .add_filter("HiFiShifter Project", &["hshp", "hsp"])
+        .add_filter("HiFiShifter Backup Project", &["hshp-bak", "hsp-bak"])
         .add_filter("JSON Project", &["json"])
         .pick_file();
     match picked {
@@ -844,30 +867,105 @@ pub(super) fn open_project(
     state: State<'_, AppState>,
     window: Window,
     project_path: String,
-) -> crate::models::TimelineStatePayload {
+    force: Option<bool>,
+) -> crate::models::OpenProjectPayload {
+    // 打开新工程前先取消旧工程的后台预渲染，防止旧渲染在替换 timeline/清缓存
+    // 期间继续执行并污染新工程的缓存。
+    let _ = crate::commands::playback::cancel_background_render(state.app_handle.get());
     let path = PathBuf::from(&project_path);
-    // 读取字节流，自动检测 MessagePack（v2）或 JSON（v1 兼容）格式。
-    let bytes = fs::read(&path).unwrap_or_default();
+    // 读取字节流，自动检测 MessagePack（v3）或 JSON（v1/v2 兼容）格式。
+    // 读取失败不再静默当作空文件：把 io 错误带回给前端展示。
+    let bytes = match fs::read(&path) {
+        Ok(b) => b,
+        Err(e) => {
+            let mut payload = get_timeline_state(state);
+            payload.ok = false;
+            return crate::models::OpenProjectPayload {
+                timeline: payload,
+                error: Some(format!("failed to read project file: {e}")),
+                project_version_too_new: None,
+                project_file_version: None,
+                current_project_file_version: None,
+            };
+        }
+    };
+    // 先只读取版本号：即使未来版本工程因结构变化而无法完整解析，
+    // 也能在尝试加载前给出明确的“可能不兼容”警告。
+    let project_file_version = read_project_file_version(&bytes).unwrap_or(0);
+    if project_file_version > CURRENT_PROJECT_FILE_VERSION && !force.unwrap_or(false) {
+        let mut payload = get_timeline_state(state);
+        payload.ok = true;
+        return crate::models::OpenProjectPayload {
+            timeline: payload,
+            error: None,
+            project_version_too_new: Some(true),
+            project_file_version: Some(project_file_version),
+            current_project_file_version: Some(CURRENT_PROJECT_FILE_VERSION),
+        };
+    }
+
     let parsed = load_project_file(&bytes);
     let Ok(mut pf) = parsed else {
+        let parse_error = parsed
+            .err()
+            .map(|e| format!("failed to parse project file: {e}"))
+            .unwrap_or_else(|| "failed to parse project file".to_string());
         let mut payload = get_timeline_state(state);
         payload.ok = false;
-        return payload;
+        return crate::models::OpenProjectPayload {
+            timeline: payload,
+            error: Some(parse_error),
+            project_version_too_new: None,
+            project_file_version: None,
+            current_project_file_version: None,
+        };
     };
 
     let (resolved_timeline, missing_files) = resolve_source_paths_on_open(pf.timeline, &path);
     pf.timeline = resolved_timeline;
-    // 旧项目兼容迁移：source_end_sec == 0.0 曾表示"到源文件末尾"，
-    // 新语义要求它是真实的结束时间，此处自动修正为 duration_sec 或 length_sec。
-    for clip in &mut pf.timeline.clips {
-        if clip.source_end_sec == 0.0 {
-            clip.source_end_sec = clip.duration_sec.unwrap_or(clip.length_sec);
+    // 旧项目兼容迁移（仅 v3 及更早）：source_end_sec == 0.0 曾表示"到源文件
+    // 末尾"，新语义要求它是真实的结束时间，此处自动修正为 duration_sec 或
+    // length_sec。v4+ 工程的 se 恒为真实坐标（可为 0/负值，如倒放静音段），
+    // 不得改写。
+    if pf.version < 4 {
+        for clip in &mut pf.timeline.clips {
+            if clip.source_end_sec == 0.0 {
+                clip.source_end_sec = clip.duration_sec.unwrap_or(clip.length_sec);
+            }
         }
     }
+    // v4 迁移：v3 及更早的工程 Clip 不携带 loop_enabled（Loop / 循环源）字段，
+    // 按当前"为新的音频块启用循环"设置作为这些既有**音频** Clip 的 Loop 属性；
+    // 绝不改动已显式携带该字段的 v4+ 工程。
+    // 纯 MIDI / 音高参考块（无源媒体路径）不参与 Loop 迁移 —— 与各格式导入器
+    // 显式创建 `loop_enabled=false` 的 MIDI 块约定保持一致（REAPER 的 LOOP
+    // 语义只作用于音频 item）。
+    if pf.version < 4 {
+        let default_loop = crate::config::loop_new_clips_default();
+        for clip in &mut pf.timeline.clips {
+            if clip.source_path.is_some() {
+                clip.loop_enabled = default_loop;
+            }
+        }
+    }
+    // 非 Loop 存储窗口规范化（对**所有版本**生效）：使存储字段 == 消费
+    // 窗口（正放 se:=ss+len·r；倒放 ss:=se−len·r），与消费端派生值一致、
+    // 功能零变化 —— 用于自愈历史版本写入的陈旧/发散源窗口。
+    // 同一不变式也应用到全部 take（组合速率口径），避免 inactive take 的
+    // 陈旧窗口流向前端 take-lane 显示与 REAPER 导出。
+    for clip in &mut pf.timeline.clips {
+        crate::state::normalize_nonloop_source_window(clip);
+        crate::state::normalize_nonloop_all_take_windows(clip);
+    }
+    // 迁移/规范化都发生在 active take 内存投影上，写回 Take 权威数据。
+    pf.timeline.sync_clip_takes_from_flat();
 
     // 打开工程时清除所有渲染缓存，确保旧的预渲染结果不会影响新的播放。
     // 这是修复"音高分析未完成时播放导致音高编辑不生效"问题的关键步骤。
     eprintln!("[open_project] Clearing all render caches before loading project...");
+    // hnsep 分离缓存键只含 clip_id+采样率+样本数：换工程后同 id/等长 clip
+    // 会命中上一个工程的 stems，必须一并清空（低频操作，整体清空可接受）。
+    crate::hnsep_onnx::clear_separation_cache();
     for clip in &pf.timeline.clips {
         synth_clip_cache::invalidate_clip_all_caches(&clip.id);
     }
@@ -875,11 +973,19 @@ pub(super) fn open_project(
     {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
         *tl = pf.timeline.clone();
+        // 规范化 Tempo Map（排序/钳制/补 0 位置点），并同步工程基准 BPM。
+        tl.normalize_tempo_map();
+        if let Some(points) = tl.tempo_map.as_ref() {
+            if let Some(first) = points.first() {
+                tl.bpm = first.bpm.clamp(10.0, 960.0);
+            }
+        }
         // 打开工程时为所有含 source_path 的 clip 初始化文件元数据 + 内容指纹，
         // 用于本会话中的外部文件变更检测。此数据仅在程序运行期间有效，不持久化。
         for clip in &mut tl.clips {
             crate::state::TimelineState::populate_clip_file_metadata(clip);
         }
+        tl.sync_clip_takes_from_flat();
         let normalized_base_scale = normalize_scale_key(&pf.base_scale);
         let normalized_custom_scale = normalize_custom_scale(pf.custom_scale.clone());
         let normalized_use_custom_scale = pf.use_custom_scale && normalized_custom_scale.is_some();
@@ -890,6 +996,15 @@ pub(super) fn open_project(
         );
         state.audio_engine.update_timeline(tl.clone());
     }
+    // Tempo Map 存在时，工程基准拍号同步为 0 位置点的拍号（分子/分母）。
+    let tempo_map_initial_signature = state
+        .timeline
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .tempo_map
+        .as_ref()
+        .and_then(|points| points.first())
+        .map(|first| (first.numerator, first.denominator));
     state.clear_history();
     {
         let mut p = state.project.lock().unwrap_or_else(|e| e.into_inner());
@@ -901,6 +1016,16 @@ pub(super) fn open_project(
         p.custom_scale = normalize_custom_scale(pf.custom_scale);
         p.use_custom_scale = pf.use_custom_scale && p.custom_scale.is_some();
         p.beats_per_bar = normalize_beats_per_bar(pf.beats_per_bar);
+        p.time_signature_denominator =
+            if matches!(pf.time_signature_denominator, 1 | 2 | 4 | 8 | 16 | 32) {
+                pf.time_signature_denominator
+            } else {
+                4
+            };
+        if let Some((initial_numerator, initial_denominator)) = tempo_map_initial_signature {
+            p.beats_per_bar = initial_numerator.unwrap_or(4).clamp(1, 32);
+            p.time_signature_denominator = initial_denominator.unwrap_or(4);
+        }
         p.grid_size = normalize_grid_size(&pf.grid_size);
         p.stretch_algorithm_override = pf.synth_config.stretch_algorithm_override;
         p.hifigan_mel_stretch_override = pf.synth_config.hifigan_mel_stretch_override;
@@ -912,7 +1037,18 @@ pub(super) fn open_project(
         }
         update_window_title(&window, &p.name, p.dirty);
     }
+    // 防御性修复旧版本工程文件可能存在的“工程音阶与 Tempo Map 初始点分叉”
+    // （早期撤销路径不回写工程记录，保存的文件可能带有不一致的 base_scale）：
+    // 初始点即工程基准记录，加载后以它为准同步工程记录（含 BPM/拍号/音阶）。
+    {
+        let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        let mut p = state.project.lock().unwrap_or_else(|e| e.into_inner());
+        state.sync_project_record_from_tempo_map(&mut tl, &mut p);
+    }
     sync_runtime_stretch_settings(state.inner());
+    if let Some(handle) = state.app_handle.get() {
+        crate::commands::playback::request_background_render(handle);
+    }
 
     // 持久化最近工程列表
     save_recent_projects(state.inner());
@@ -921,7 +1057,13 @@ pub(super) fn open_project(
     if !missing_files.is_empty() {
         payload.missing_files = Some(missing_files);
     }
-    payload
+    crate::models::OpenProjectPayload {
+        timeline: payload,
+        error: None,
+        project_version_too_new: None,
+        project_file_version: None,
+        current_project_file_version: None,
+    }
 }
 
 pub(super) fn save_project(
@@ -938,7 +1080,7 @@ pub(super) fn save_project(
         p.path.clone()
     };
     if let Some(path) = existing_path {
-        return save_project_to_path(state, window, path);
+        return save_project_to_path(state, window, path, None, None);
     }
     // No path yet -> Save As
     save_project_as(state, window, None)
@@ -969,16 +1111,66 @@ pub(super) fn save_project_as(
         .save_file();
     match picked {
         None => serde_json::json!({"ok": true, "canceled": true}),
-        Some(path) => save_project_to_path(state, window, path.display().to_string()),
+        Some(path) => save_project_to_path(state, window, path.display().to_string(), None, None),
     }
 }
 
-fn save_project_to_path(
+/// 读取目标路径已有 HiFiShifter 工程文件的版本号（仅当目标确实是工程文件时）。
+///
+/// - 目标不存在、不是工程文件或读取失败时返回 `None`（无需覆盖警告）。
+/// - ZIP 归档是打包容器而非直接的工程文件，跳过检查。
+fn detect_save_target_version_conflict(path: &Path) -> Option<u32> {
+    if !path.exists() {
+        return None;
+    }
+    if is_zip_path(path) {
+        return None;
+    }
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase());
+    if !matches!(ext.as_deref(), Some("hshp") | Some("hsp") | Some("json")) {
+        return None;
+    }
+    let bytes = fs::read(path).unwrap_or_default();
+    if bytes.is_empty() {
+        return None;
+    }
+    read_project_file_version(&bytes)
+}
+
+/// 保存到指定路径；若目标已存在版本不同的 HiFiShifter 工程文件，先返回
+/// 版本冲突信号而不直接覆盖，由前端弹出确认窗口（force=true 表示已确认）。
+pub(super) fn save_project_to_path(
     state: State<'_, AppState>,
     window: Window,
     project_path: String,
+    notes_markdown: Option<String>,
+    force: Option<bool>,
 ) -> serde_json::Value {
+    if let Some(notes_markdown) = notes_markdown {
+        let mut p = state.project.lock().unwrap_or_else(|e| e.into_inner());
+        p.notes_markdown = notes_markdown;
+    }
     let path = PathBuf::from(&project_path);
+
+    if !force.unwrap_or(false) {
+        if let Some(existing_version) = detect_save_target_version_conflict(&path) {
+            if existing_version != CURRENT_PROJECT_FILE_VERSION {
+                return serde_json::json!({
+                    "ok": false,
+                    "canceled": false,
+                    "versionConflict": true,
+                    "path": project_path,
+                    "existingVersion": existing_version,
+                    "currentVersion": CURRENT_PROJECT_FILE_VERSION,
+                    "existingIsNewer": existing_version > CURRENT_PROJECT_FILE_VERSION,
+                });
+            }
+        }
+    }
+
     if is_zip_path(&path) {
         match save_project_archive_to_zip_inner(state.inner(), &path) {
             Ok(timeline) => {
@@ -1038,8 +1230,32 @@ pub(super) fn set_project_base_scale(
 
     {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        // 工程音阶变化会同步到 Tempo Map 初始点：先打撤销快照，
+        // 否则该 Tempo Map 变化无法撤销（与 set_timeline_tempo_map 的
+        // “工程影响性变化先 checkpoint”约定一致）。
+        if tl.tempo_map.is_some() {
+            state.checkpoint_timeline(&tl);
+        }
         tl.project_scale_notes = base_scale_notes(&normalized);
+        // 初始点即工程基准记录：工程音阶变化同步到 Tempo Map 初始点。
+        if let Some(points) = tl.tempo_map.as_mut() {
+            if let Some(first) = points.first_mut() {
+                first.scale = Some(crate::state::TempoScaleData {
+                    key: Some(normalized.clone()),
+                    name: None,
+                    notes: None,
+                });
+            }
+        }
         state.audio_engine.update_timeline(tl.clone());
+        // 工程音阶变化影响子轨道“度数差”等依赖音阶的渲染（未被子轨道 Tempo Map 音阶覆盖的区域），
+        // 失效所有渲染缓存并触发后台预渲染。
+        for clip in &tl.clips {
+            crate::synth_clip_cache::invalidate_clip_all_caches(&clip.id);
+        }
+    }
+    if let Some(handle) = state.app_handle.get() {
+        crate::commands::playback::request_background_render(handle);
     }
 
     let payload = state.project_meta_payload();
@@ -1078,8 +1294,30 @@ pub(super) fn set_project_custom_scale(
 
     {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        // 与 set_project_base_scale 一致：Tempo Map 初始点会被改写，先打撤销快照。
+        if tl.tempo_map.is_some() {
+            state.checkpoint_timeline(&tl);
+        }
         tl.project_scale_notes = normalized.notes.clone();
+        // 初始点即工程基准记录：工程音阶变化同步到 Tempo Map 初始点。
+        if let Some(points) = tl.tempo_map.as_mut() {
+            if let Some(first) = points.first_mut() {
+                first.scale = Some(crate::state::TempoScaleData {
+                    key: None,
+                    name: Some(normalized.name.clone()),
+                    notes: Some(normalized.notes.clone()),
+                });
+            }
+        }
         state.audio_engine.update_timeline(tl.clone());
+        // 工程音阶变化影响子轨道“度数差”等依赖音阶的渲染（未被子轨道 Tempo Map 音阶覆盖的区域），
+        // 失效所有渲染缓存并触发后台预渲染。
+        for clip in &tl.clips {
+            crate::synth_clip_cache::invalidate_clip_all_caches(&clip.id);
+        }
+    }
+    if let Some(handle) = state.app_handle.get() {
+        crate::commands::playback::request_background_render(handle);
     }
 
     serde_json::json!({ "ok": true, "project": state.project_meta_payload() })
@@ -1088,23 +1326,48 @@ pub(super) fn set_project_custom_scale(
 pub(super) fn set_project_timeline_settings(
     state: State<'_, AppState>,
     beats_per_bar: u32,
+    time_signature_denominator: u32,
     grid_size: String,
 ) -> serde_json::Value {
     let normalized_beats = normalize_beats_per_bar(beats_per_bar);
+    let normalized_denominator = if matches!(time_signature_denominator, 1 | 2 | 4 | 8 | 16 | 32) {
+        time_signature_denominator
+    } else {
+        4
+    };
     let normalized_grid = normalize_grid_size(&grid_size);
 
     let (name, changed, was_clean) = {
         let mut p = state.project.lock().unwrap_or_else(|e| e.into_inner());
-        let changed = p.beats_per_bar != normalized_beats || p.grid_size != normalized_grid;
+        let changed = p.beats_per_bar != normalized_beats
+            || p.time_signature_denominator != normalized_denominator
+            || p.grid_size != normalized_grid;
         if !changed {
             return serde_json::json!({ "ok": true, "project": state.project_meta_payload() });
         }
         let was_clean = !p.dirty;
         p.beats_per_bar = normalized_beats;
+        p.time_signature_denominator = normalized_denominator;
         p.grid_size = normalized_grid;
         p.dirty = true;
         (p.name.clone(), true, was_clean)
     };
+
+    // Tempo Map 存在时，工程基准拍号变化同步到 0 位置点（保持“删除 Tempo Map 后回退一致”）。
+    {
+        let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        // 初始点会被改写：先打撤销快照（工程影响性变化，与上面两个命令一致）。
+        if tl.tempo_map.is_some() {
+            state.checkpoint_timeline(&tl);
+        }
+        if let Some(points) = tl.tempo_map.as_mut() {
+            if let Some(first) = points.first_mut() {
+                first.numerator = Some(normalized_beats);
+                first.denominator = Some(normalized_denominator);
+            }
+            state.audio_engine.update_timeline(tl.clone());
+        }
+    }
 
     if changed && was_clean {
         if let Some(handle) = state.app_handle.get() {
@@ -1150,11 +1413,18 @@ pub(super) fn set_project_stretch_settings(
 
     update_project_stretch_overrides(stretch_algorithm_override, hifigan_mel_stretch_override);
     {
-        let timeline = state.timeline.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let timeline = state
+            .timeline
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         for clip in &timeline.clips {
             crate::synth_clip_cache::invalidate_clip_all_caches(&clip.id);
         }
         state.audio_engine.update_timeline(timeline);
+    }
+    if let Some(handle) = state.app_handle.get() {
+        crate::commands::playback::request_background_render(handle);
     }
     serde_json::json!({ "ok": true, "project": state.project_meta_payload() })
 }

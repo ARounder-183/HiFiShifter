@@ -31,7 +31,11 @@ function isLikelyDiscreteWheelStep(absDelta: number): boolean {
 }
 
 export type ParamEditorWheelAction =
-    "free-scroll" | "horizontal-scroll" | "vertical-pan" | "vertical-zoom" | "horizontal-zoom";
+    | "free-scroll"
+    | "horizontal-scroll"
+    | "vertical-pan"
+    | "vertical-zoom"
+    | "horizontal-zoom";
 
 export type TimelineWheelAction =
     | "free-scroll"

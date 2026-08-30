@@ -52,70 +52,86 @@ export function useAsyncPitchRefresh(): UseAsyncPitchRefreshResult {
     const debounceTimerRef = useRef<number | null>(null);
     const isRefreshingRef = useRef(false);
 
+    // 停止轮询并清空任务引用（完成/失败/过期/出错路径共用）。
+    const stopPoll = useCallback(() => {
+        if (pollTimerRef.current) {
+            clearInterval(pollTimerRef.current);
+            pollTimerRef.current = null;
+        }
+        latestTaskIdRef.current = null;
+        startTimeRef.current = null;
+    }, []);
+
     // Task 3.4: 实现轮询逻辑
-    const pollStatus = useCallback(async (taskId: string) => {
-        try {
-            // Task 7.3: 检查是否为最新任务
-            if (latestTaskIdRef.current !== taskId) {
-                console.log(`[useAsyncPitchRefresh] Task ${taskId} is stale, stopping poll`);
-                return;
-            }
+    const pollStatus = useCallback(
+        async (taskId: string) => {
+            try {
+                // Task 7.3: 检查是否为最新任务
+                if (latestTaskIdRef.current !== taskId) {
+                    console.log(`[useAsyncPitchRefresh] Task ${taskId} is stale, stopping poll`);
+                    return;
+                }
 
-            const info = await coreApi.getPitchRefreshStatus(taskId);
+                const info = await coreApi.getPitchRefreshStatus(taskId);
 
-            if (!info) {
+                if (!info) {
+                    // 任务已被后端回收（正常情况）：必须停止轮询，否则会以
+                    // 500ms 周期无限查询已不存在的任务并反复写 error 状态。
+                    stopPoll();
+                    setState((prev) => ({
+                        ...prev,
+                        isLoading: false,
+                        taskId: null,
+                        error: "Task expired or not found",
+                    }));
+                    return;
+                }
+
+                const elapsed = startTimeRef.current
+                    ? (Date.now() - startTimeRef.current) / 1000
+                    : 0;
+
+                let estimatedRemaining: number | null = null;
+                if (info.progress > 0 && info.progress < 100 && elapsed > 0) {
+                    // Task 3.7: 根据已用时间和进度计算预计剩余时间
+                    const totalEstimated = (elapsed / info.progress) * 100;
+                    estimatedRemaining = Math.max(0, totalEstimated - elapsed);
+                }
+
                 setState((prev) => ({
                     ...prev,
-                    isLoading: false,
-                    error: "Task expired or not found",
+                    progress: info.progress,
+                    status: info.status,
+                    error: info.error || null,
+                    estimatedRemaining,
                 }));
-                return;
-            }
 
-            const elapsed = startTimeRef.current ? (Date.now() - startTimeRef.current) / 1000 : 0;
-
-            let estimatedRemaining: number | null = null;
-            if (info.progress > 0 && info.progress < 100 && elapsed > 0) {
-                // Task 3.7: 根据已用时间和进度计算预计剩余时间
-                const totalEstimated = (elapsed / info.progress) * 100;
-                estimatedRemaining = Math.max(0, totalEstimated - elapsed);
-            }
-
-            setState((prev) => ({
-                ...prev,
-                progress: info.progress,
-                status: info.status,
-                error: info.error || null,
-                estimatedRemaining,
-            }));
-
-            // Task 3.6: 任务完成或失败时停止轮询
-            if (
-                info.status === "completed" ||
-                info.status === "failed" ||
-                info.status === "cancelled"
-            ) {
+                // Task 3.6: 任务完成或失败时停止轮询
+                if (
+                    info.status === "completed" ||
+                    info.status === "failed" ||
+                    info.status === "cancelled"
+                ) {
+                    stopPoll();
+                    setState((prev) => ({
+                        ...prev,
+                        isLoading: false,
+                        taskId: null,
+                    }));
+                }
+            } catch (error) {
+                console.error("[useAsyncPitchRefresh] Poll error:", error);
+                stopPoll();
                 setState((prev) => ({
                     ...prev,
                     isLoading: false,
                     taskId: null,
+                    error: error instanceof Error ? error.message : "Unknown error",
                 }));
-                latestTaskIdRef.current = null;
-                if (pollTimerRef.current) {
-                    clearInterval(pollTimerRef.current);
-                    pollTimerRef.current = null;
-                }
-                startTimeRef.current = null;
             }
-        } catch (error) {
-            console.error("[useAsyncPitchRefresh] Poll error:", error);
-            setState((prev) => ({
-                ...prev,
-                isLoading: false,
-                error: error instanceof Error ? error.message : "Unknown error",
-            }));
-        }
-    }, []);
+        },
+        [stopPoll],
+    );
 
     // Task 3.3: 实现 startRefresh() 函数
     const startRefresh = useCallback(

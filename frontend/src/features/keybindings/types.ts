@@ -7,6 +7,7 @@ export type ActionId =
     // 播放控制
     | "playback.toggle" // 播放/暂停
     | "playback.stop" // 停止播放
+    | "recording.toggle" // 开始/停止录音
     | "playback.focusCursor" // 聚焦播放光标
     | "playback.seekLeft" // 播放光标左移
     | "playback.seekRight" // 播放光标右移
@@ -26,16 +27,23 @@ export type ActionId =
     | "edit.addVibrato" // 添加颤音
     | "edit.quantize" // 量化
     | "edit.meanQuantize" // 均值量化
-    | "edit.pasteReaper" // 粘贴 Reaper 剪贴板数据
-    | "edit.pasteVocalShifter" // 粘贴 VocalShifter 剪贴板数据
+    | "edit.pasteVocalShifter" // 粘贴 VocalShifter 剪贴板
+    | "edit.pasteTracks" // 作为新轨道组粘贴
     // 工程
     | "project.new" // 新建工程
     | "project.open" // 打开工程
     | "project.save" // 保存
     | "project.saveAs" // 另存为
     | "project.export" // 导出音频
+    | "project.importMedia" // 导入媒体文件
+    | "project.importMidi" // 导入 MIDI
+    | "project.importHifishifter" // 导入 HiFiShifter 工程
+    | "project.importReaper" // 导入 Reaper 工程
+    | "project.importVocalShifter" // 导入 VocalShifter 工程
     // 轨道
     | "track.add" // 新建轨道
+    | "track.clone" // 克隆选中轨道
+    | "track.delete" // 删除选中轨道
     | "track.selectUp" // 选择上一条轨道
     | "track.selectDown" // 选择下一条轨道
     // Clip 操作
@@ -47,6 +55,8 @@ export type ActionId =
     | "clip.normalize" // 规格化选中 clip
     | "clip.group" // 编组选中 clip
     | "clip.ungroup" // 解组选中 clip
+    | "clip.cycleTake" // 循环切换选中 clip 的活跃 take
+    | "clip.cycleTakePrev" // 反向循环切换选中 clip 的活跃 take
     // PianoRoll 操作
     | "pianoRoll.copy" // PianoRoll 内复制参数帧
     | "pianoRoll.paste" // PianoRoll 内粘贴参数帧
@@ -64,10 +74,16 @@ export type ActionId =
     | "mode.drawTool" // 切换到绘制工具
     | "mode.lineTool" // 切换到直线/颤音工具
     // 修饰键行为
+    | "modifier.clipMultiSelectToggle" // 按住并点击音频块：切换多选（macOS 为 ⌘）
+    | "modifier.clipRangeSelect" // 按住并点击音频块：从锚点范围选择
     | "modifier.clipSlipEdit" // 拖动 clip 时进入 slip edit
     | "modifier.clipStretch" // clip 边缘拖动时从 trim 变为 stretch
     | "modifier.clipNoSnap" // clip 移动/trim/stretch 时切换吸附
     | "modifier.clipCopyDrag" // 拖动 clip 时进入复制模式
+    | "modifier.clipPitchDrag" // 按住并垂直拖拽 clip 波形：调整 Clip 范围内音高
+    | "modifier.clipCrossfadeGrip" // 交叉点手柄拖拽时切换“反向缩放”模式
+    | "modifier.fadeCurvatureDrag" // 按住并拖动淡入淡出包络线/交叉点时调整曲率
+    | "modifier.fadeShapeCycleClick" // 按住左键点击包络线循环切换曲线类型
     | "modifier.horizontalZoom" // 按住+滚轮水平缩放
     | "modifier.pianoRollVerticalZoom" // PianoRoll Ctrl+滚轮垂直缩放
     | "modifier.scrollHorizontal" // 按住+滚轮水平滚动
@@ -100,29 +116,95 @@ export interface Keybinding {
     modifierOnly?: boolean;
 }
 
+/**
+ * 修饰键冲突检测场景 ID。
+ *
+ * 场景 = 实际会同时消费这些修饰键的一次交互（拖拽目标 / 滚轮区域 / 点击目标）。
+ * 两个修饰键绑定只有当「修饰键组合相同 + 手势类型相同 + 场景有交集」时才会
+ * 互相干扰；同一修饰键出现在不同场景（如 Alt 同时用于音频块主体 Slip 与
+ * 淡化包络曲率）不构成冲突，与 DAW（REAPER 等）惯例一致。
+ */
+export type ModifierConflictScene =
+    // 时间轴：音频块主体拖拽（移动 / Slip / 复制拖动）
+    | "clip.move"
+    // 时间轴：音频块点击选择（多选切换 / 范围选择）
+    | "clip.select"
+    // 时间轴：音频块边缘 trim/stretch
+    | "clip.edge"
+    // 时间轴：音频块增益旋钮拖拽（微调）
+    | "clip.gain"
+    // 时间轴：交叉淡化手柄拖拽
+    | "clip.crossfade"
+    // 时间轴：淡入淡出包络拖拽 / 点击
+    | "clip.fade"
+    // 时间轴：速度标尺拖拽
+    | "tempo.ruler"
+    // 钢琴卷帘：参数线拖拽（绘制/整体移动）
+    | "roll.paramDrag"
+    // 钢琴卷帘：参数形变锚点拖拽
+    | "roll.morph"
+    // 钢琴卷帘：参数选区边缘拉伸
+    | "roll.paramEdge"
+    // 钢琴卷帘：直线/颤音拖拽期间的滚轮
+    | "roll.vibratoWheel"
+    // 时间轴画布滚轮
+    | "wheel.timeline"
+    // 钢琴卷帘画布滚轮
+    | "wheel.pianoRoll"
+    // 琴键区滚轮
+    | "wheel.pianoKeys"
+    // 全局微调：滑杆 / 数值输入框 / 轨道头等部件
+    | "global.fine";
+
 /** 操作元信息（用于 UI 显示） */
 export interface ActionMeta {
     /** 国际化文本的 key（用于操作名称显示） */
     labelKey: string;
-    /** 分组（用于设置面板分组展示） */
+    /**
+     * 分组（用于设置面板分组展示）。
+     * 键盘快捷键按「全局 / 时间轴 / 钢琴卷帘」等使用场景划分；
+     * 修饰键（mod* 组）按其作用的交互场景划分。
+     */
     group:
         | "playback"
+        | "mode"
         | "edit"
         | "project"
         | "clip"
         | "pianoRoll"
-        | "mode"
-        | "modifier"
-        | "quickSearch";
+        | "paramEditor"
+        | "quickSearch"
+        | "modClip"
+        | "modFade"
+        | "modParam"
+        | "modWheel"
+        | "modFine";
     /**
-     * 修饰键操作类型（仅用于修饰键冲突检测）。
-     * 同类型的修饰键绑定才会提示冲突，不同类型不提示。
+     * 修饰键手势类型（存在即表示这是一个修饰键绑定）。
+     * 同一交互目标上「点击」与「拖拽」是可区分的手势，
+     * 因此类型不同的修饰键绑定不构成冲突。
      */
-    modifierOperationType?: "drag" | "wheel";
+    modifierOperationType?: "drag" | "click" | "wheel" | "hold";
     /**
-     * 作用域上下文（仅用于冲突检测）。
+     * 修饰键生效场景（见 ModifierConflictScene）。
+     * 仅用于冲突检测：与其它修饰键绑定的场景有交集时才可能冲突。
+     */
+    conflictScenes?: readonly ModifierConflictScene[];
+    /**
+     * 作用域上下文（仅用于键盘快捷键的冲突检测与事件路由）。
      * 具有不同 scopedContext 的绑定不会视为冲突，
      * 因为它们在不同的 UI 上下文中激活（如 quickSearch 弹窗中）。
+     *
+     * 支持的值：
+     * - `"paramEditorSelect"` — 参数编辑器（钢琴卷帘）内、选择工具下的操作
+     *   （移调/设置音高/平均/平滑/量化等）。焦点不在参数编辑器时该组操作
+     *   不响应（硬排除）。
+     * - `"timelineFocus"`     — 当前焦点窗口为时间轴时优先（时间轴缩放等）。
+     * - `"trackHeaderFocus"`  — 当前焦点位于轨道头时优先（轨道面板操作）。
+     *   与全局操作（如 clip.*）共用按键时按焦点自动路由：
+     *   焦点在轨道头 → 轨道操作；焦点在时间轴 → 音频块操作。
+     * - `"quickSearch"`       — 快速搜索弹窗内的导航/确认键。
+     * - `"pianoRollVibratoDrag"` — 直线/颤音拖拽期间的振幅/频率调节键。
      */
     scopedContext?: string;
 }

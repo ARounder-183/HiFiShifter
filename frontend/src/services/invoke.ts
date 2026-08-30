@@ -111,7 +111,8 @@ function getTauriInvoke(): (<T>(cmd: string, args?: Record<string, unknown>) => 
 
 type BuildArgsResult = Record<string, unknown> | undefined | { __unwired: true };
 
-function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
+/** 位置参数 → Tauri 命名参数（按各命令的手写映射表）。导出供回归测试锁定。 */
+export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
     // 注意：Tauri invoke uses a named-argument object; pywebview uses positional args.
     switch (method) {
         case "set_transport": {
@@ -129,6 +130,7 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
                 audioPath: args[0],
                 ...(args[1] !== undefined ? { trackId: args[1] } : {}),
                 ...(args[2] !== undefined ? { startSec: args[2] } : {}),
+                ...(args[3] !== undefined ? { mediaAudioStreamIndex: args[3] } : {}),
             };
 
         case "import_audio_bytes":
@@ -150,7 +152,11 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
             return { trackId: args[0] };
 
         case "duplicate_track":
-            return { trackId: args[0] };
+            return {
+                trackId: args[0],
+                ...(args[1] !== undefined ? { parentTrackId: args[1] } : {}),
+                ...(args[2] !== undefined ? { targetIndex: args[2] } : {}),
+            };
 
         case "move_track":
             return {
@@ -232,20 +238,98 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
                 sourceStartSec: args[6],
                 sourceEndSec: args[7],
                 playbackRate: args[8],
-                reversed: args[9],
-                fadeInSec: args[10],
-                fadeOutSec: args[11],
-                fadeInCurve: args[12],
-                fadeOutCurve: args[13],
-                color: args[14],
-                formantMorph: args[15],
-                checkpoint: args[16],
+                clipPlaybackRate: args[9],
+                reversed: args[10],
+                loopEnabled: args[11],
+                snapOffsetSec: args[12],
+                fadeInSec: args[13],
+                fadeOutSec: args[14],
+                fadeInShape: args[15],
+                fadeOutShape: args[16],
+                fadeInDir: args[17],
+                fadeOutDir: args[18],
+                autoFadeInSec: args[19],
+                autoFadeOutSec: args[20],
+                color: args[21],
+                formantMorph: args[22],
+                checkpoint: args[23],
             };
 
         case "set_clips_state_bulk":
             return {
                 updates: args[0],
                 checkpoint: args[1],
+            };
+
+        case "set_clip_active_take":
+            return {
+                clipId: args[0],
+                takeId: args[1],
+                checkpoint: args[2],
+            };
+
+        case "cycle_clip_takes":
+            return {
+                clipIds: args[0],
+                direction: args[1],
+                checkpoint: args[2],
+            };
+
+        case "pack_clips_into_takes":
+            return {
+                clipIds: args[0],
+                checkpoint: args[1],
+            };
+
+        case "explode_clip_takes":
+            return {
+                clipId: args[0],
+                checkpoint: args[1],
+            };
+
+        case "duplicate_clip_take":
+            return {
+                clipId: args[0],
+                takeId: args[1],
+                checkpoint: args[2],
+            };
+
+        case "remove_clip_take":
+            return {
+                clipId: args[0],
+                takeId: args[1],
+                checkpoint: args[2],
+            };
+
+        case "rename_clip_take":
+            return {
+                clipId: args[0],
+                takeId: args[1],
+                name: args[2],
+                checkpoint: args[3],
+            };
+
+        case "set_clip_take_reversed":
+            return {
+                clipId: args[0],
+                takeId: args[1],
+                reversed: args[2],
+                checkpoint: args[3],
+            };
+
+        case "add_clip_take_from_media":
+            return {
+                clipId: args[0],
+                sourcePath: args[1],
+                name: args[2],
+                checkpoint: args[3],
+            };
+
+        case "import_media_files_as_takes":
+            return {
+                paths: args[0],
+                trackId: args[1],
+                startSec: args[2],
             };
 
         case "duplicate_clips_bulk":
@@ -256,6 +340,13 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
                 clipIds: args[0],
                 newSourcePath: args[1],
                 replaceSameSource: args[2],
+            };
+
+        case "search_source_file_replacements":
+            return {
+                folderPath: args[0],
+                clipIds: args[1],
+                searchMode: args[2],
             };
 
         case "split_clip":
@@ -313,7 +404,10 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
             return { startSec: args[0] };
 
         case "open_project":
-            return { projectPath: args[0] };
+            return {
+                projectPath: args[0],
+                ...(args[1] !== undefined ? { force: args[1] } : {}),
+            };
 
         case "run_timed_auto_backup":
             return { pathTemplate: args[0] };
@@ -325,7 +419,11 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
             return { customScale: args[0] };
 
         case "set_project_timeline_settings":
-            return { beatsPerBar: args[0], gridSize: args[1] };
+            return {
+                beatsPerBar: args[0],
+                timeSignatureDenominator: args[1],
+                gridSize: args[2],
+            };
 
         case "set_project_stretch_settings":
             return {
@@ -336,8 +434,42 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
         case "save_project":
             return args[0] === undefined ? undefined : { notesMarkdown: args[0] };
 
+        case "import_project":
+            return {
+                projectPath: args[0],
+                ...(args[1] !== undefined ? { placeAtPlayhead: args[1] } : {}),
+                ...(args[2] !== undefined ? { importTempoMap: args[2] } : {}),
+            };
+
+        case "copy_timeline_clips":
+            return { clipIds: args[0] };
+
+        case "copy_timeline_tracks":
+            return { trackIds: args[0] };
+
+        case "paste_timeline_clipboard":
+            return args[0] === undefined ? undefined : { mode: args[0] };
+
+        case "has_timeline_clipboard":
+        case "has_reaper_clipboard":
+        case "read_system_clipboard_object":
+            return {};
+
+        case "write_system_clipboard_object":
+            return {
+                payload: args[0],
+                ...(args[1] !== undefined ? { textSummary: args[1] } : {}),
+            };
+
         case "save_project_as":
             return args[0] === undefined ? undefined : { notesMarkdown: args[0] };
+
+        case "save_project_to_path":
+            return {
+                projectPath: args[0],
+                ...(args[1] !== undefined ? { notesMarkdown: args[1] } : {}),
+                ...(args[2] !== undefined ? { force: args[2] } : {}),
+            };
 
         case "import_vocalshifter_project":
             return { vspPath: args[0] };
@@ -358,6 +490,9 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
                 ...(args[1] !== undefined ? { selectionMaxFrames: args[1] } : {}),
             };
 
+        case "open_audio_dialog_for_source":
+            return { sourcePath: args[0], dialogTitle: args[1] };
+
         case "open_midi_dialog":
             return {};
 
@@ -376,6 +511,12 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
         case "batch_get_waveform_mipmap":
             return { sourcePaths: args[0] };
 
+        case "get_waveform_manifest":
+            return { sourcePath: args[0] };
+
+        case "get_waveform_tiles_binary":
+            return { sourcePath: args[0], revision: args[1], requests: args[2] };
+
         case "get_root_mix_waveform_peaks_segment":
         case "get_track_mix_waveform_peaks_segment":
             return {
@@ -392,6 +533,7 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
                 startFrame: args[2],
                 frameCount: args[3],
                 stride: args[4],
+                binary: args[5],
             };
 
         case "set_param_frames":
@@ -412,6 +554,13 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
                 checkpoint: args[4],
             };
 
+        case "stretch_track_linked_params":
+            return {
+                trackId: args[0],
+                mappings: args[1],
+                checkpoint: args[2],
+            };
+
         case "get_static_param":
             return {
                 trackId: args[0],
@@ -430,6 +579,9 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
             return { dirPath: args[0] };
 
         case "get_audio_file_info":
+            return { filePath: args[0] };
+
+        case "get_media_audio_streams":
             return { filePath: args[0] };
 
         case "read_audio_preview":
@@ -477,7 +629,14 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
                 ...(args[8] !== undefined ? { importMidiBpmAsProject: args[8] } : {}),
                 ...(args[9] != null ? { clipboardGuid: args[9] } : {}),
                 ...(args[10] !== undefined ? { closeLeadingGap: args[10] } : {}),
+                ...(args[11] !== undefined ? { importMidiAsTempoMap: args[11] } : {}),
+                ...(args[12] !== undefined ? { importMidiTempo: args[12] } : {}),
+                ...(args[13] !== undefined ? { importMidiTimeSignature: args[13] } : {}),
+                ...(args[14] !== undefined ? { importMidiKeySignature: args[14] } : {}),
             };
+
+        case "set_timeline_tempo_map":
+            return { tempoMap: args[0] };
 
         case "replace_midi_clip_data":
             return {
@@ -497,6 +656,12 @@ function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
 
         case "save_auto_backup_settings":
             return { settings: args[0] };
+
+        case "save_recording_settings":
+            return { settings: args[0] };
+
+        case "start_recording":
+            return { startSec: args[0] };
 
         case "begin_undo_group":
             return undefined;

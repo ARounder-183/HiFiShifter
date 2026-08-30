@@ -29,8 +29,8 @@ use std::sync::{Mutex, OnceLock};
 use crate::pitch_editing::PitchCurvesSnapshot;
 
 // 导入 clip 渲染状态管理器
-use crate::clip_rendering_state::{global_clip_rendering_state, ClipRenderingState};
 use crate::audio_engine::byte_budget_cache::ByteBudgetCache;
+use crate::clip_rendering_state::{global_clip_rendering_state, ClipRenderingState};
 
 // ─── 缓存容量 ──────────────────────────────────────────────────────────────────
 
@@ -329,6 +329,10 @@ pub struct RenderedClipCacheEntry {
     pub frames: u64,
     /// 采样率（Hz）。
     pub sample_rate: u32,
+    /// 渲染时该 Clip 的 active take id。用于垫音（fallback）查找时识别跨
+    /// Take 的旧渲染：undo 回退等场景下同 clip_id 换了 take，旧条目的内容
+    /// 与当前可听内容无关，不得作为垫音（None = 旧条目/未知，宽松放行）。
+    pub rendered_take_id: Option<String>,
 }
 
 /// 整 Clip 渲染结果的 byte-budgeted LRU 缓存。
@@ -482,15 +486,29 @@ pub fn compute_rendered_clip_hash(
     // 源文件的 mtime（Unix 秒），用于区分同路径不同内容的文件版本。
     // 当文件被外部替换后，此值变化 → hash 变化 → 旧渲染缓存自动失效。
     source_file_mtime: Option<u64>,
+    // Loop（循环源）属性：Loop 与非 Loop 的渲染输出完全不同（整文件平铺 vs
+    // 窗口切片），必须参与哈希 —— 否则后台预渲染与 Loop 开关切换之间的竞态
+    // 会把旧域的渲染结果当作新域的缓存命中。
+    loop_enabled: bool,
+    // 量化的源窗口 `(source_start_sec·1000, source_end_sec·1000)`：
+    // 渲染输入随 trim/split 的锚点推进而变化，同样必须参与哈希。
+    source_range_q: (i64, i64),
 ) -> u64 {
     let mut h: u64 = 14695981039346656037u64;
 
     fn include_rendered_extra_curve(renderer_id: &str, param_id: &str) -> bool {
+        // vslib 把全部曲线烘焙进合成输出（含共通 volume/pan），
+        // 因此这些曲线必须参与渲染缓存 key。
+        if renderer_id == "vslib" {
+            return true;
+        }
+        // 共通 volume/pan 在 mix 阶段实时应用，改变它们不应触发底层重渲染。
+        if crate::renderer::common_params::is_common_mix_param(param_id) {
+            return false;
+        }
+        // nsf-hifigan 的气声与张力属于渲染后处理，有独立缓存 key。
         !(renderer_id == "nsf_hifigan_onnx"
-            && matches!(
-                param_id,
-                "breath_gain" | "hifigan_tension" | "hifigan_volume"
-            ))
+            && matches!(param_id, "breath_gain" | "hifigan_tension"))
     }
 
     macro_rules! mix_bytes {
@@ -513,6 +531,9 @@ pub fn compute_rendered_clip_hash(
     mix_bytes!(&end_frame.to_le_bytes());
     mix_bytes!(&sr.to_le_bytes());
     mix_bytes!(&playback_rate.to_bits().to_le_bytes());
+    mix_bytes!(&[u8::from(loop_enabled)]);
+    mix_bytes!(&source_range_q.0.to_le_bytes());
+    mix_bytes!(&source_range_q.1.to_le_bytes());
 
     // 混入与 clip 时间范围重叠的 pitch_edit 曲线片段
     let fp = frame_period_ms.max(0.1);
@@ -537,7 +558,10 @@ pub fn compute_rendered_clip_hash(
     }
 
     // 混入 extra_curves，并且【只 Hash 当前时间切片的片段】，避免性能问题与错误缓存失效
-    let mut sorted_curves: Vec<(&String, &[f32])> = extra_curves.iter().map(|(k, v)| (k, v.as_slice())).collect();
+    let mut sorted_curves: Vec<(&String, &[f32])> = extra_curves
+        .iter()
+        .map(|(k, v)| (k, v.as_slice()))
+        .collect();
     sorted_curves.sort_by_key(|(k, _)| k.as_str());
     for (k, v) in sorted_curves {
         // 调用已定义好的过滤函数，防止后处理参数改变引发灾难级的底层重渲染
@@ -593,6 +617,8 @@ pub fn compute_breath_noise_hash(
     extra_params: &std::collections::HashMap<String, f64>,
     formant_morph: Option<&crate::state::ClipFormantMorph>,
     source_file_mtime: Option<u64>,
+    loop_enabled: bool,
+    source_range_q: (i64, i64),
 ) -> u64 {
     let filtered_curves: std::collections::HashMap<String, Vec<f32>> = extra_curves
         .iter()
@@ -614,6 +640,8 @@ pub fn compute_breath_noise_hash(
         formant_morph,
         None,
         source_file_mtime,
+        loop_enabled,
+        source_range_q,
     )
 }
 
@@ -696,6 +724,9 @@ pub struct TensionRenderedClipCacheEntry {
     pub pcm_stereo: Arc<Vec<f32>>,
     pub frames: u64,
     pub sample_rate: u32,
+    /// 渲染时该 Clip 的 active take id；语义同
+    /// [`RenderedClipCacheEntry::rendered_take_id`]（垫音防跨 Take 复用）。
+    pub rendered_take_id: Option<String>,
 }
 
 pub struct TensionRenderedClipCache {
@@ -751,7 +782,10 @@ static GLOBAL_TENSION_RENDERED_CLIP_CACHE: OnceLock<Mutex<TensionRenderedClipCac
 pub fn global_tension_rendered_clip_cache() -> &'static Mutex<TensionRenderedClipCache> {
     GLOBAL_TENSION_RENDERED_CLIP_CACHE.get_or_init(|| {
         let budget = crate::audio_engine::byte_budget_cache::env_cache_budget_bytes() / 4;
-        Mutex::new(TensionRenderedClipCache::new(rendered_clip_capacity(), budget))
+        Mutex::new(TensionRenderedClipCache::new(
+            rendered_clip_capacity(),
+            budget,
+        ))
     })
 }
 
@@ -864,8 +898,7 @@ pub fn invalidate_clip_all_caches(clip_id: &str) {
         if cache.len() < before {
             eprintln!(
                 "[cache:invalidate] clip_id={} RenderedClipCache invalidated (had {} entries)",
-                clip_id,
-                before
+                clip_id, before
             );
         }
     }
@@ -923,10 +956,22 @@ pub fn invalidate_clip_all_caches(clip_id: &str) {
     );
 }
 
-/// 专门为音高编辑提供的“柔性”缓存失效策略，仅失效片段级合成缓存和解除旧 Hash 绑定，
-/// 保留 RenderedClipCache，使得在新的预渲染完成前，系统可以无缝回退播放上一次渲染的音频！
+/// 专门为音高编辑提供的“柔性”缓存失效策略：仅失效片段级合成缓存，并解除旧的
+/// `pending_rendered_keys` 绑定。
+///
+/// 必须保留 `RenderedClipCache`：
+///
+/// 1. 该缓存的 key 已经包含完整渲染参数（pitch_edit、renderer、curves、params、
+///    source/trim/rate/formant 等），真实参数变化会自动产生新的 hash，旧条目
+///    自然不会再被精确命中，不会造成错误复用。
+/// 2. 保留最近一次渲染结果，可在新渲染完成前无缝垫音，避免播放瞬间出现静音。
+/// 3. 引擎 `last_timeline` 有时晚于 AppState 时间线更新（例如音高分析完成后
+///    异步组装 pitch_orig/pitch_edit 的场景），播放时据此产生的“假失效”不应摧毁
+///    已经按当前参数渲染好的缓存；否则首次播放会整段静音、气声缺失，第二次播放才恢复。
 pub fn invalidate_clip_for_pitch_edit(clip_id: &str) {
-    eprintln!("[cache:invalidate] clip_id={clip_id} pitch_edit invalidated (synth + pending keys cleared)");
+    eprintln!(
+        "[cache:invalidate] clip_id={clip_id} pitch_edit invalidated (synth + pending keys cleared, rendered cache kept)"
+    );
     // 1. SynthClipCache 失效
     {
         let mut cache = global_synth_clip_cache()
@@ -941,37 +986,55 @@ pub fn invalidate_clip_for_pitch_edit(clip_id: &str) {
             .unwrap_or_else(|e| e.into_inner());
         map.remove(clip_id);
     }
-    // 3. RenderedClipCache 也失效，强制下次播放时重新合成
-    {
-        let mut cache = global_rendered_clip_cache()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        cache.invalidate(clip_id);
+    // 注意：不要失效 RenderedClipCache，原因见上方文档注释。
+}
+
+/// 垫音身份校验：条目与当前 Clip 的 active take 都已知时必须一致。
+/// 任一方未知（旧条目 / 无 take 工程）保持既有宽松行为，避免回归。
+fn take_identity_matches(entry_take: Option<&str>, active_take: Option<&str>) -> bool {
+    match (entry_take, active_take) {
+        (Some(a), Some(b)) => a == b,
+        _ => true,
     }
 }
 
-/// 获取指定 clip 最近一次成功的整 clip 渲染结果（用作平滑过渡的垫音）
-pub fn get_latest_rendered_pcm(clip_id: &str) -> Option<(Arc<Vec<f32>>, Option<Arc<Vec<f32>>>)> {
+/// 获取指定 clip 最近一次成功的整 clip 渲染结果（用作平滑过渡的垫音）。
+///
+/// `active_take_id` 为当前活跃 take：同 clip_id 换了 take 的旧渲染（undo
+/// 回退等场景）与当前可听内容无关，不得作为垫音。
+pub fn get_latest_rendered_pcm(
+    clip_id: &str,
+    active_take_id: Option<&str>,
+) -> Option<(Arc<Vec<f32>>, Option<Arc<Vec<f32>>>)> {
     let cache = global_rendered_clip_cache()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let entry = cache
         .inner
         .iter()
-        .find(|(k, _)| k.clip_id == clip_id)
+        .find(|(k, v)| {
+            k.clip_id == clip_id
+                && take_identity_matches(v.rendered_take_id.as_deref(), active_take_id)
+        })
         .map(|(_, v)| v)?;
     Some((entry.pcm_stereo.clone(), entry.breath_noise_stereo.clone()))
 }
 
 /// 获取指定 clip 最近一次成功的 Tension 渲染结果（用作平滑过渡的垫音）
-pub fn get_latest_tension_rendered_pcm(clip_id: &str) -> Option<Arc<Vec<f32>>> {
+pub fn get_latest_tension_rendered_pcm(
+    clip_id: &str,
+    active_take_id: Option<&str>,
+) -> Option<Arc<Vec<f32>>> {
     let cache = global_tension_rendered_clip_cache()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let entry = cache
         .inner
         .iter()
-        .find(|(k, _)| k.clip_id == clip_id)
+        .find(|(k, v)| {
+            k.clip_id == clip_id
+                && take_identity_matches(v.rendered_take_id.as_deref(), active_take_id)
+        })
         .map(|(_, v)| v)?;
     Some(entry.pcm_stereo.clone())
 }
@@ -1008,6 +1071,8 @@ mod tests {
             Some(&formant_a),
             None,
             None, // source_file_mtime
+            false,
+            (0, 1_000),
         );
         let hash_b = compute_rendered_clip_hash(
             "clip-1",
@@ -1024,9 +1089,39 @@ mod tests {
             Some(&formant_b),
             None,
             None, // source_file_mtime
+            false,
+            (0, 1_000),
         );
 
         assert_ne!(hash_a, hash_b);
+    }
+
+    #[test]
+    fn rendered_clip_hash_changes_when_loop_or_source_range_changes() {
+        // Loop（循环源）与源窗口（trim/split 锚点推进）都会改变渲染输入，
+        // 任一变化必须使渲染缓存失效。
+        let base = |loop_enabled: bool, range: (i64, i64)| {
+            compute_rendered_clip_hash(
+                "clip-1",
+                "demo.wav",
+                0,
+                48_000,
+                48_000,
+                "nsf_hifigan_onnx",
+                &[60.0, 61.0, 62.0],
+                5.0,
+                1.0,
+                &std::collections::HashMap::new(),
+                &std::collections::HashMap::new(),
+                None,
+                None,
+                None, // source_file_mtime
+                loop_enabled,
+                range,
+            )
+        };
+        assert_ne!(base(false, (0, 1_000)), base(true, (0, 1_000)));
+        assert_ne!(base(false, (0, 1_000)), base(false, (500, 1_000)));
     }
 
     #[test]
@@ -1064,6 +1159,8 @@ mod tests {
                 Some(formant),
                 None,
                 None, // source_file_mtime
+                false,
+                (0, 1_000),
             )
         };
 

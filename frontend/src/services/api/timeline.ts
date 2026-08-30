@@ -1,4 +1,4 @@
-import type { TimelineResult, TrackSummaryResult } from "../../types/api";
+import type { TimelineResult, TrackSummaryResult, TempoMapPayload } from "../../types/api";
 import type { LinkedParamCurves } from "../../features/session/sessionTypes";
 
 import { invoke } from "../invoke";
@@ -14,6 +14,15 @@ export interface SourceFileChange {
 
 export interface CheckSourceFilesChangedResult {
     changed: SourceFileChange[];
+}
+
+export interface SourceFileMatchCandidate {
+    path: string;
+    exact_hash: boolean;
+}
+
+export interface SearchSourceFileMatchesResult {
+    matches: Record<string, SourceFileMatchCandidate[]>;
 }
 
 export const timelineApi = {
@@ -38,9 +47,24 @@ export const timelineApi = {
     setProjectLength: (projectSec: number) =>
         invoke<TimelineResult>("set_project_length", projectSec),
 
+    // Tempo Map
+    setTimelineTempoMap: (tempoMap: TempoMapPayload | null) =>
+        invoke<TimelineResult>("set_timeline_tempo_map", tempoMap),
+
     // Import
-    importAudioItem: (audioPath: string, trackId?: string | null, startSec?: number) =>
-        invoke<TimelineResult>("import_audio_item", audioPath, trackId, startSec),
+    importAudioItem: (
+        audioPath: string,
+        trackId?: string | null,
+        startSec?: number,
+        mediaAudioStreamIndex?: number,
+    ) =>
+        invoke<TimelineResult>(
+            "import_audio_item",
+            audioPath,
+            trackId,
+            startSec,
+            mediaAudioStreamIndex,
+        ),
 
     importAudioBytes: (
         fileName: string,
@@ -62,7 +86,16 @@ export const timelineApi = {
 
     removeTrack: (trackId: string) => invoke<TimelineResult>("remove_track", trackId),
 
-    duplicateTrack: (trackId: string) => invoke<TimelineResult>("duplicate_track", trackId),
+    duplicateTrack: (
+        trackId: string,
+        placement?: { parentTrackId?: string | null; targetIndex?: number },
+    ) =>
+        invoke<TimelineResult>(
+            "duplicate_track",
+            trackId,
+            placement?.parentTrackId ?? null,
+            placement?.targetIndex,
+        ),
 
     moveTrack: (payload: { trackId: string; targetIndex: number; parentTrackId?: string | null }) =>
         invoke<TimelineResult>(
@@ -161,11 +194,18 @@ export const timelineApi = {
         sourceStartSec?: number;
         sourceEndSec?: number;
         playbackRate?: number;
+        clipPlaybackRate?: number;
         reversed?: boolean;
+        loopEnabled?: boolean;
+        snapOffsetSec?: number;
         fadeInSec?: number;
         fadeOutSec?: number;
-        fadeInCurve?: string;
-        fadeOutCurve?: string;
+        fadeInShape?: number;
+        fadeOutShape?: number;
+        fadeInDir?: number;
+        fadeOutDir?: number;
+        autoFadeInSec?: number;
+        autoFadeOutSec?: number;
         color?: string;
         formantMorph?: {
             enabled: boolean;
@@ -187,11 +227,18 @@ export const timelineApi = {
             payload.sourceStartSec,
             payload.sourceEndSec,
             payload.playbackRate,
+            payload.clipPlaybackRate,
             payload.reversed,
+            payload.loopEnabled,
+            payload.snapOffsetSec,
             payload.fadeInSec,
             payload.fadeOutSec,
-            payload.fadeInCurve,
-            payload.fadeOutCurve,
+            payload.fadeInShape,
+            payload.fadeOutShape,
+            payload.fadeInDir,
+            payload.fadeOutDir,
+            payload.autoFadeInSec,
+            payload.autoFadeOutSec,
             payload.color,
             payload.formantMorph,
             payload.checkpoint,
@@ -202,11 +249,119 @@ export const timelineApi = {
             clipId: string;
             gain?: number;
             muted?: boolean;
+            startSec?: number;
+            lengthSec?: number;
+            sourceStartSec?: number;
+            sourceEndSec?: number;
+            snapOffsetSec?: number;
+            clipPlaybackRate?: number;
             fadeInSec?: number;
             fadeOutSec?: number;
+            fadeInShape?: number;
+            fadeInDir?: number;
+            fadeOutShape?: number;
+            fadeOutDir?: number;
+            autoFadeInSec?: number;
+            autoFadeOutSec?: number;
+            /** 倒放开关（后端 ClipStatePatch 支持，必须与乐观更新字段一致）。 */
+            reversed?: boolean;
+            /** Loop（循环源）开关。 */
+            loopEnabled?: boolean;
         }>;
         checkpoint?: boolean;
     }) => invoke<TimelineResult>("set_clips_state_bulk", payload.updates, payload.checkpoint),
+
+    setClipActiveTake: (payload: { clipId: string; takeId: string; checkpoint?: boolean }) =>
+        invoke<TimelineResult>(
+            "set_clip_active_take",
+            payload.clipId,
+            payload.takeId,
+            payload.checkpoint,
+        ),
+
+    cycleClipTakes: (payload: { clipIds: string[]; direction?: number; checkpoint?: boolean }) =>
+        invoke<TimelineResult>(
+            "cycle_clip_takes",
+            payload.clipIds,
+            payload.direction,
+            payload.checkpoint,
+        ),
+
+    packClipsIntoTakes: (payload: { clipIds: string[]; checkpoint?: boolean }) =>
+        invoke<TimelineResult>("pack_clips_into_takes", payload.clipIds, payload.checkpoint),
+
+    explodeClipTakes: (payload: { clipId: string; checkpoint?: boolean }) =>
+        invoke<TimelineResult>("explode_clip_takes", payload.clipId, payload.checkpoint),
+
+    duplicateClipTake: (payload: { clipId: string; takeId: string; checkpoint?: boolean }) =>
+        invoke<TimelineResult>(
+            "duplicate_clip_take",
+            payload.clipId,
+            payload.takeId,
+            payload.checkpoint,
+        ),
+
+    removeClipTake: (payload: { clipId: string; takeId: string; checkpoint?: boolean }) =>
+        invoke<TimelineResult>(
+            "remove_clip_take",
+            payload.clipId,
+            payload.takeId,
+            payload.checkpoint,
+        ),
+
+    renameClipTake: (payload: {
+        clipId: string;
+        takeId: string;
+        name: string;
+        checkpoint?: boolean;
+    }) =>
+        invoke<TimelineResult>(
+            "rename_clip_take",
+            payload.clipId,
+            payload.takeId,
+            payload.name,
+            payload.checkpoint,
+        ),
+
+    setClipTakeReversed: (payload: {
+        clipId: string;
+        takeId: string;
+        reversed: boolean;
+        checkpoint?: boolean;
+    }) =>
+        invoke<TimelineResult>(
+            "set_clip_take_reversed",
+            payload.clipId,
+            payload.takeId,
+            payload.reversed,
+            payload.checkpoint,
+        ),
+
+    addClipTakeFromMedia: (payload: {
+        clipId: string;
+        sourcePath: string;
+        name?: string;
+        checkpoint?: boolean;
+    }) =>
+        invoke<TimelineResult>(
+            "add_clip_take_from_media",
+            payload.clipId,
+            payload.sourcePath,
+            payload.name,
+            payload.checkpoint,
+        ),
+
+    importMediaFilesAsTakes: (payload: {
+        paths: string[];
+        trackId?: string | null;
+        startSec?: number;
+    }) =>
+        invoke<TimelineResult>(
+            "import_media_files_as_takes",
+            payload.paths,
+            payload.trackId,
+            payload.startSec,
+        ),
 
     duplicateClipsBulk: (payload: {
         sourceClipIds: string[];
@@ -254,7 +409,56 @@ export const timelineApi = {
 
     selectClip: (clipId: string | null) => invoke<TimelineResult>("select_clip", clipId),
 
-    /// 检查所有已导入的音频源文件是否被外部修改或删除。
+    // Native cross-process timeline clipboard (backend system clipboard)
+    copyTimelineClips: (clipIds: string[]) =>
+        invoke<{ ok: boolean; error?: string; kind?: "clips" | "tracks" }>(
+            "copy_timeline_clips",
+            clipIds,
+        ),
+
+    copyTimelineTracks: (trackIds: string[]) =>
+        invoke<{ ok: boolean; error?: string; kind?: "clips" | "tracks" }>(
+            "copy_timeline_tracks",
+            trackIds,
+        ),
+
+    pasteTimelineClipboard: (mode?: "selected" | "new_tracks") =>
+        invoke<
+            TimelineResult & {
+                error?: string;
+                sourceProject?: string;
+                importedTrackCount?: number;
+                importedClipCount?: number;
+            }
+        >("paste_timeline_clipboard", mode),
+
+    hasTimelineClipboard: () =>
+        invoke<{
+            ok: boolean;
+            available?: boolean;
+            kind?: "clips" | "tracks" | "project" | "reaper";
+            clipCount?: number;
+            trackCount?: number;
+            sourceProject?: string;
+        }>("has_timeline_clipboard"),
+
+    hasReaperClipboard: () => invoke<{ ok: boolean; available?: boolean }>("has_reaper_clipboard"),
+
+    /// 在指定文件夹及其子文件夹中搜索候选源文件。
+    /// searchMode 为 "file_name"（精准文件名）或 "extension_hash"（文件扩展名 + 哈希）。
+    searchSourceFileReplacements: (
+        folderPath: string,
+        clipIds: string[],
+        searchMode: "file_name" | "extension_hash",
+    ) =>
+        invoke<SearchSourceFileMatchesResult>(
+            "search_source_file_replacements",
+            folderPath,
+            clipIds,
+            searchMode,
+        ),
+
+    /// 检查所有已导入的媒体源文件是否被外部修改或删除。
     /// 前端在窗口重新获得焦点时调用此方法。
     checkSourceFilesChanged: () =>
         invoke<CheckSourceFilesChangedResult>("check_source_files_changed"),

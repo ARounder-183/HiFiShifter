@@ -18,10 +18,11 @@ fn update_window_title(window: &Window, name: &str, dirty: bool) {
     let _ = window.set_title(&title);
 }
 
-/// 弹出文件选择对话框，选择 .rpp 文件。
+/// 弹出文件选择对话框，选择 .rpp / .rpp-bak 文件。
 pub(super) fn open_reaper_dialog() -> serde_json::Value {
     let picked = rfd::FileDialog::new()
-        .add_filter("Reaper Project", &["rpp", "RPP"])
+        .add_filter("Reaper Project", &["rpp"])
+        .add_filter("Reaper Backup Project", &["rpp-bak"])
         .pick_file();
 
     match picked {
@@ -62,8 +63,47 @@ pub(super) fn import_reaper_project(
         let mut order_offset = max_existing_order + 1;
 
         // 应用工程 BPM（如果现有工程为空则直接应用；否则覆盖写入）
+        // 与 Tempo Map 规范化一致：钳制到 10-960，避免非法 BPM 写入工程。
         if result.timeline.bpm != 120.0 || tl.tracks.is_empty() {
-            tl.bpm = result.timeline.bpm;
+            tl.bpm = result.timeline.bpm.clamp(10.0, 960.0);
+        }
+        // 导入文件不含 Tempo Map 时，保持工程现有 Tempo Map 与工程 BPM 一致。
+        if result.tempo_map.is_none() {
+            let project_bpm = tl.bpm;
+            if let Some(points) = tl.tempo_map.as_mut() {
+                if let Some(first) = points.first_mut() {
+                    first.bpm = project_bpm.clamp(10.0, 960.0);
+                }
+            }
+        }
+
+        // 导入的 .rpp 包含 Tempo Map（变速/变拍）时替换工程现有 Tempo Map。
+        // 工程级 TEMPO/TEMPOENVEX 数据才是 Tempo Map 的来源；REAPER MIDI item
+        // 内部的变速（IGNTEMPO）不参与。
+        if result.tempo_map.is_some() {
+            tl.tempo_map = result.tempo_map.clone();
+            tl.normalize_tempo_map();
+            // 初始点即工程基准记录：音阶为空时物化为工程音阶。
+            {
+                let p = state.project.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(points) = tl.tempo_map.as_mut() {
+                    if let Some(first) = points.first_mut() {
+                        if first.scale.is_none() {
+                            first.scale = Some(crate::state::tempo_scale_data_from_project(&p));
+                        }
+                    }
+                }
+            }
+            if let Some(first) = tl.tempo_map.as_ref().and_then(|p| p.first()) {
+                tl.bpm = first.bpm.clamp(10.0, 960.0);
+            }
+            // 失效渲染缓存（音阶部分可能变化，且时间轴结构变化）。
+            for clip in &tl.clips {
+                crate::synth_clip_cache::invalidate_clip_all_caches(&clip.id);
+            }
+            if let Some(handle) = state.app_handle.get() {
+                crate::commands::playback::request_background_render(handle);
+            }
         }
 
         // 合并轨道（调整 order 使其排在现有轨道之后）
@@ -114,7 +154,12 @@ pub(super) fn import_reaper_project(
     // 更新工程元信息
     {
         let p = &mut *state.project.lock().unwrap_or_else(|e| e.into_inner());
-        p.beats_per_bar = result.beats_per_bar.clamp(1, 32);
+        if let Some(first) = result.tempo_map.as_ref().and_then(|points| points.first()) {
+            p.beats_per_bar = first.numerator.unwrap_or(4).clamp(1, 32);
+            p.time_signature_denominator = first.denominator.unwrap_or(4);
+        } else {
+            p.beats_per_bar = result.beats_per_bar.clamp(1, 32);
+        }
         update_window_title(window, &p.name, p.dirty);
     }
 
@@ -122,7 +167,15 @@ pub(super) fn import_reaper_project(
     let mut json = serde_json::to_value(&payload).unwrap_or_default();
 
     if !result.skipped_files.is_empty() {
-        json["skipped_files"] = serde_json::json!(result.skipped_files);
+        // 多 take item 的每个 take 都可能引用同一缺失文件；按导入端约定
+        // "同一提示只报一次"，在命令边界去重后返回（保持首次出现顺序）。
+        let mut seen = std::collections::HashSet::new();
+        let deduped: Vec<String> = result
+            .skipped_files
+            .into_iter()
+            .filter(|path| seen.insert(path.clone()))
+            .collect();
+        json["skipped_files"] = serde_json::json!(deduped);
     }
 
     json

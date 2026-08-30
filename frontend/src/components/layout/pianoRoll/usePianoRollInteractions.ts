@@ -4,7 +4,6 @@ import type {
     MutableRefObject,
     PointerEvent as ReactPointerEvent,
     UIEvent,
-    WheelEvent,
 } from "react";
 import { useCallback, useEffect, useRef } from "react";
 
@@ -38,12 +37,21 @@ import {
     CHILD_PITCH_OFFSET_DEGREES_RANGE,
     isChildPitchOffsetCentsParam,
     isChildPitchOffsetDegreesParam,
+    isChildFormantOffsetCentsParam,
     snapChildPitchOffsetValue,
 } from "./childPitchOffsetParams";
 import { buildChildOffsetPasteValues as buildChildOffsetPasteValuesHelper } from "./childPitchOffsetPaste";
-import { computeAnchoredHorizontalZoom } from "../../../utils/horizontalZoom";
+import { resolveHorizontalWheelZoom } from "../timeline/runtime/timelineScrollRange";
+import { resolveTimelineMinPxPerSec } from "../timeline/runtime/timelineZoomBounds";
 import { getParamEditorWheelAction, getVibratoDragWheelTarget } from "./wheelGesture";
 import { transformSelectionByRightDrag } from "./selectionTransforms";
+import {
+    buildSelectionDragDense,
+    fetchFullResCurve,
+    readPvRange,
+    selectionDragRange,
+    uploadFullResCurve,
+} from "./selectionEditData";
 import {
     computeVibratoDragAdjustment,
     resolveVibratoDragKeyboardAdjustment,
@@ -58,6 +66,11 @@ import {
     writeSystemClipboardObject,
 } from "../../../utils/systemClipboard";
 import { secFromViewportClientX } from "./seekPlayheadMapping";
+import {
+    createTimelineAxis,
+    secToViewportPx,
+    viewportPxToSec,
+} from "../timeline/runtime/timelineAxis.js";
 
 type CanvasCursor = "default" | "crosshair" | "grab" | "grabbing" | "ew-resize";
 
@@ -73,9 +86,17 @@ export function usePianoRollInteractions(args: {
     scrollLeftRef: MutableRefObject<number>;
     pxPerBeatRef: MutableRefObject<number>;
     pxPerSecRef: MutableRefObject<number>;
-    setPxPerBeat: (next: number) => void;
-    /** 当前 BPM，用于动态计算 pxPerBeat 的合法范围 */
-    bpm: number;
+    /** 连续滚轮缩放期间暂存最新结果，下一 tick 以此为基础继续锚定。 */
+    horizontalZoomChainRef: MutableRefObject<{
+        nextPxPerSec: number;
+        nextScrollLeft: number;
+    } | null>;
+    /** 水平缩放结果回调（与轨道视图共用同一套计算逻辑）。 */
+    onHorizontalZoom: (nextPxPerSec: number, nextScrollLeft: number) => void;
+    /** 是否启用“同步时间轴视图”。 */
+    syncTimelineEnabled: boolean;
+    /** 轨道头与钢琴卷帘之间的水平偏移（ref，始终与缩放应用侧一致）。 */
+    timelineOffsetRef: MutableRefObject<number>;
     /** 项目时长（秒），用于计算缩放时的 maxScroll */
     dynamicProjectSec: number;
     setPitchView: (next: ValueViewport) => void;
@@ -198,6 +219,11 @@ export function usePianoRollInteractions(args: {
     pitchSnapUnit?: "semitone" | "scale";
     /** 音高吸附调式（支持内置与自定义） */
     projectScale?: ScaleLike;
+    /**
+     * Tempo Map 感知的音阶解析：给定绝对秒返回生效音阶。
+     * 未提供时退化为全局 projectScale。
+     */
+    scaleAtSec?: (sec: number) => ScaleLike | undefined;
     /** 音高吸附容差（音分） */
     pitchSnapToleranceCents?: number;
     /** 快捷键映射表 */
@@ -229,8 +255,10 @@ export function usePianoRollInteractions(args: {
         scrollLeftRef,
         pxPerBeatRef,
         pxPerSecRef,
-        setPxPerBeat,
-        bpm,
+        horizontalZoomChainRef,
+        onHorizontalZoom,
+        syncTimelineEnabled,
+        timelineOffsetRef,
         dynamicProjectSec,
         setPitchView,
         setParamViewport,
@@ -281,12 +309,14 @@ export function usePianoRollInteractions(args: {
         paramEditorSeekPlayheadEnabled,
         paramValuePopupEnabled,
         onParamValuePreviewChange,
+        onContextMenu,
     } = args;
 
     const {
         pitchSnapEnabled,
         pitchSnapUnit,
         projectScale,
+        scaleAtSec,
         pitchSnapToleranceCents,
         keybindingMap,
         onEditAction,
@@ -297,6 +327,33 @@ export function usePianoRollInteractions(args: {
         onMorphOverlayChange,
         currentParamRange,
     } = args;
+
+    /**
+     * 由滚动 ref 构造当前投影。
+     *
+     * 用 ref 而非 React state：滚动事件中 ref 同步更新，state 要到下一帧才落地，
+     * 命中测试若用 state 会比画面慢一帧。
+     */
+    const axisFromRefs = useCallback(
+        () =>
+            createTimelineAxis({
+                pxPerSec: pxPerSecRef.current,
+                scrollLeftPx: scrollLeftRef.current,
+            }),
+        [pxPerSecRef, scrollLeftRef],
+    );
+
+    /**
+     * beat → 视口 x。
+     *
+     * 此前写作 `beat * pxPerBeat - scrollLeft`（pxPerBeat = pxPerSec * secPerBeat），
+     * 与主画布的曲线投影分属两条算式。现在统一为「beat 先转 sec，再走
+     * `secToViewportPx`」，与时间线侧和 `render.ts` 同源。
+     */
+    const beatToViewportPx = useCallback(
+        (beat: number) => secToViewportPx(axisFromRefs(), beat * secPerBeat),
+        [axisFromRefs, secPerBeat],
+    );
 
     const PARAM_FINE_WHEEL_SCALE = 0.1;
 
@@ -319,18 +376,20 @@ export function usePianoRollInteractions(args: {
     const disposeFineAdjustedPointerState = useCallback(
         (_state: FineAdjustedPointerState | null | undefined) => {
             // 参数微调不再参与参数编辑器拖拽逻辑；此处保留空实现以复用既有拖拽收尾流程。
+            void _state;
         },
         [],
     );
 
     const pointerFineWheelScale = useCallback(
         (ev: { ctrlKey: boolean; shiftKey: boolean; altKey: boolean; metaKey?: boolean }) =>
-            isModifierActive(paramFineAdjustKb, ev as any) ? PARAM_FINE_WHEEL_SCALE : 1,
+            isModifierActive(paramFineAdjustKb, ev) ? PARAM_FINE_WHEEL_SCALE : 1,
         [paramFineAdjustKb],
     );
 
     const createFineAdjustedPointerState = useCallback(
         (ev: FineAdjustedPointerInput, _dragTarget: HTMLCanvasElement | null = null) => {
+            void _dragTarget;
             return {
                 adjustedClientX: ev.clientX,
                 adjustedClientY: ev.clientY,
@@ -357,7 +416,7 @@ export function usePianoRollInteractions(args: {
         (ev: { ctrlKey: boolean; shiftKey: boolean; altKey: boolean; metaKey?: boolean }) => {
             const noSnapKb = keybindingMap?.["modifier.clipNoSnap" as ActionId];
             if (noSnapKb) {
-                return Boolean(isModifierActive(noSnapKb, ev as any));
+                return Boolean(isModifierActive(noSnapKb, ev));
             }
             return Boolean(ev.shiftKey);
         },
@@ -780,7 +839,7 @@ export function usePianoRollInteractions(args: {
     /** Apply pitch snap to a drawn value when editParam is "pitch" and snap is enabled.
      *  When snapToggleHeld=true, the snap state is toggled (XOR with pitchSnapEnabled). */
     const snapDrawValue = useCallback(
-        (v: number, snapToggleHeld = false): number => {
+        (v: number, snapToggleHeld = false, frame?: number): number => {
             const effective = snapToggleHeld ? !pitchSnapEnabled : pitchSnapEnabled;
             if (!effective) return v;
 
@@ -792,9 +851,17 @@ export function usePianoRollInteractions(args: {
             }
 
             if (editParam !== "pitch") return v;
+            // Tempo Map 感知：优先按帧时刻解析生效音阶。
+            const framePeriodMs = paramViewRef.current?.framePeriodMs;
+            const effectiveScale =
+                pitchSnapUnit === "scale"
+                    ? frame != null && framePeriodMs != null
+                        ? (scaleAtSec?.((frame * framePeriodMs) / 1000) ?? projectScale)
+                        : projectScale
+                    : undefined;
             const snapped =
-                pitchSnapUnit === "scale" && projectScale
-                    ? snapToScale(v, projectScale)
+                pitchSnapUnit === "scale" && effectiveScale
+                    ? snapToScale(v, effectiveScale)
                     : snapToSemitone(v);
             const toleranceSemitone = Math.max(0, Number(pitchSnapToleranceCents ?? 0) / 100);
             if (Math.abs(v - snapped) <= toleranceSemitone) {
@@ -802,7 +869,15 @@ export function usePianoRollInteractions(args: {
             }
             return snapped + (v - snapped > 0 ? 1 : -1) * toleranceSemitone;
         },
-        [pitchSnapEnabled, pitchSnapUnit, projectScale, pitchSnapToleranceCents, editParam],
+        [
+            pitchSnapEnabled,
+            pitchSnapUnit,
+            projectScale,
+            scaleAtSec,
+            pitchSnapToleranceCents,
+            editParam,
+            paramViewRef,
+        ],
     );
 
     const pitchDeltaToDegreeSteps = useCallback(
@@ -850,6 +925,7 @@ export function usePianoRollInteractions(args: {
             clipboardPitch: number[],
             mode: "cents" | "degrees",
         ): Promise<number[] | null> => {
+            const fp = paramViewRef.current?.framePeriodMs;
             return buildChildOffsetPasteValuesHelper({
                 tracks,
                 rootTrackId,
@@ -861,9 +937,15 @@ export function usePianoRollInteractions(args: {
                 paramsApi,
                 pitchDeltaToDegreeSteps,
                 projectScale,
+                scaleAtFrame:
+                    fp != null
+                        ? (frame: number) => scaleAtSec?.((frame * fp) / 1000) ?? projectScale
+                        : undefined,
             });
         },
-        [tracks, pitchDeltaToDegreeSteps, projectScale, rootTrackId],
+        // paramViewRef is a ref; it is intentionally not a dependency.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+        [tracks, pitchDeltaToDegreeSteps, projectScale, scaleAtSec, rootTrackId],
     );
 
     const updateSelectionUi = useCallback(
@@ -896,7 +978,7 @@ export function usePianoRollInteractions(args: {
                 const t = denom === 0 ? 1 : (f - startFrame) / denom;
                 const base = startValue + (endValue - startValue) * t;
                 const wave = amplitude * Math.sin(2 * Math.PI * safeFreq * t);
-                dense[f - minF] = snapDrawValue(base + wave, shiftHeld);
+                dense[f - minF] = snapDrawValue(base + wave, shiftHeld, f);
             }
             return { minF, maxF, dense };
         },
@@ -997,7 +1079,7 @@ export function usePianoRollInteractions(args: {
                 !panRef.current &&
                 !strokeRef.current &&
                 !morphDragRef.current &&
-                isModifierActive(paramMorphKb, e as any);
+                isModifierActive(paramMorphKb, e);
             morphModifierDownRef.current = active;
 
             if (!active) {
@@ -1048,7 +1130,6 @@ export function usePianoRollInteractions(args: {
         setMorphOverlay,
         strokeRef,
         toolMode,
-        liveEditActiveRef,
     ]);
 
     useEffect(() => {
@@ -1118,12 +1199,11 @@ export function usePianoRollInteractions(args: {
             const canvas = canvasRef.current;
             if (!canvas) return 0;
             const rect = canvas.getBoundingClientRect();
-            const x = clientX - rect.left;
-            const sl = scrollerRef.current?.scrollLeft ?? scrollLeftRef.current;
-            const ppb = pxPerBeatRef.current;
-            return (sl + x) / Math.max(1e-9, ppb);
+            // 视口 x → sec → beat：逆投影走 axis，与 pointerSec 同源。
+            // 此前写作 `(scrollLeft + x) / pxPerBeat`，是又一套独立算式。
+            return viewportPxToSec(axisFromRefs(), clientX - rect.left) / secPerBeat;
         },
-        [canvasRef, scrollerRef, scrollLeftRef, pxPerBeatRef],
+        [canvasRef, axisFromRefs, secPerBeat],
     );
 
     const pointerSec = useCallback(
@@ -1134,11 +1214,13 @@ export function usePianoRollInteractions(args: {
             return secFromViewportClientX({
                 clientX,
                 viewportLeft: rect.left,
-                scrollLeft: scrollerRef.current?.scrollLeft ?? scrollLeftRef.current,
-                pxPerSec: pxPerSecRef.current,
+                axis: createTimelineAxis({
+                    pxPerSec: pxPerSecRef.current,
+                    scrollLeftPx: scrollLeftRef.current,
+                }),
             });
         },
-        [canvasRef, scrollerRef, scrollLeftRef, pxPerSecRef],
+        [canvasRef, scrollLeftRef, pxPerSecRef],
     );
 
     const pointerValue = useCallback(
@@ -1158,22 +1240,54 @@ export function usePianoRollInteractions(args: {
     const onRulerMouseDown = useCallback(
         (e: ReactMouseEvent<HTMLDivElement>) => {
             if (e.button !== 0) return;
-            const bounds = (e.currentTarget as HTMLDivElement).getBoundingClientRect();
-            const sl = scrollerRef.current?.scrollLeft ?? scrollLeftRef.current;
-            const sec = clamp(
-                secFromViewportClientX({
-                    clientX: e.clientX,
-                    viewportLeft: bounds.left,
-                    scrollLeft: sl,
-                    pxPerSec: pxPerSecRef.current,
-                }),
-                0,
-                1e12,
-            );
-            dispatch(setplayheadSec(sec));
-            void dispatch(seekPlayhead(sec));
+            const ruler = e.currentTarget as HTMLDivElement;
+            let moved = false;
+            let lastSec = 0;
+
+            const updateAt = (clientX: number, commit: boolean): number => {
+                const bounds = ruler.getBoundingClientRect();
+                const sec = clamp(
+                    secFromViewportClientX({
+                        clientX,
+                        viewportLeft: bounds.left,
+                        axis: createTimelineAxis({
+                            pxPerSec: pxPerSecRef.current,
+                            scrollLeftPx: scrollLeftRef.current,
+                        }),
+                    }),
+                    0,
+                    1e12,
+                );
+
+                dispatch(setplayheadSec(sec));
+                if (commit) {
+                    void dispatch(seekPlayhead(sec));
+                }
+                return sec;
+            };
+
+            // 标尺没有其他编辑操作需要区分，按下时立即提交一次 seek。
+            lastSec = updateAt(e.clientX, true);
+
+            const onMove = (ev: MouseEvent) => {
+                moved = true;
+                lastSec = updateAt(ev.clientX, false);
+            };
+
+            const onEnd = (ev: MouseEvent) => {
+                window.removeEventListener("mousemove", onMove, true);
+                window.removeEventListener("mouseup", onEnd, true);
+                window.removeEventListener("mouseleave", onEnd, true);
+                if (!moved) return;
+                lastSec = updateAt(ev.clientX, false);
+                void dispatch(seekPlayhead(lastSec));
+            };
+
+            window.addEventListener("mousemove", onMove, true);
+            window.addEventListener("mouseup", onEnd, true);
+            window.addEventListener("mouseleave", onEnd, true);
         },
-        [dispatch, scrollerRef, scrollLeftRef, pxPerSecRef],
+        [dispatch, scrollLeftRef, pxPerSecRef],
     );
 
     const onScrollerMouseDownCapture = useCallback((e: ReactMouseEvent) => {
@@ -1194,11 +1308,11 @@ export function usePianoRollInteractions(args: {
     const onScrollerContextMenu = useCallback(
         (e: ReactMouseEvent) => {
             e.preventDefault();
-            if (args.onContextMenu) {
-                args.onContextMenu(e.clientX, e.clientY);
+            if (onContextMenu) {
+                onContextMenu(e.clientX, e.clientY);
             }
         },
-        [args.onContextMenu],
+        [onContextMenu],
     );
 
     const onScrollerKeyDown = useCallback(
@@ -1278,7 +1392,7 @@ export function usePianoRollInteractions(args: {
                 if (kb.modifierOnly) {
                     keyMatch = isModifierActive(kb, e.nativeEvent);
                 } else {
-                    let pressedKey = e.key === " " ? "space" : e.key.toLowerCase();
+                    const pressedKey = e.key === " " ? "space" : e.key.toLowerCase();
                     if (pressedKey !== kb.key) keyMatch = false;
                     else {
                         const isMac = navigator.platform.toLowerCase().includes("mac");
@@ -1331,7 +1445,7 @@ export function usePianoRollInteractions(args: {
                 if (kb.modifierOnly) {
                     keyMatch = isModifierActive(kb, e.nativeEvent);
                 } else {
-                    let pressedKey = e.key === " " ? "space" : e.key.toLowerCase();
+                    const pressedKey = e.key === " " ? "space" : e.key.toLowerCase();
                     if (pressedKey !== kb.key) keyMatch = false;
                     else {
                         const isMac = navigator.platform.toLowerCase().includes("mac");
@@ -1419,6 +1533,7 @@ export function usePianoRollInteractions(args: {
             toolMode,
             selectedTrackId,
             buildChildOffsetPasteValues,
+            invalidate,
         ],
     );
 
@@ -1545,19 +1660,19 @@ export function usePianoRollInteractions(args: {
 
             const pointerXRaw = e.clientX - bounds.left;
             const pointerYRaw = e.clientY - bounds.top;
-            if (
-                pointerXRaw < 0 ||
-                pointerYRaw < 0 ||
-                pointerXRaw > bounds.width ||
-                pointerYRaw > bounds.height
-            ) {
-                return;
-            }
 
             // We rely on preventDefault to stop native scrolling while zooming.
             e.preventDefault();
 
             if (wheelAction === "vertical-zoom") {
+                if (
+                    pointerXRaw < 0 ||
+                    pointerYRaw < 0 ||
+                    pointerXRaw > bounds.width ||
+                    pointerYRaw > bounds.height
+                ) {
+                    return;
+                }
                 const h = Math.max(1, bounds.height);
                 const y = clamp(pointerYRaw, 0, h);
                 const t = yToViewportT(y, h);
@@ -1595,47 +1710,36 @@ export function usePianoRollInteractions(args: {
             }
             const dir = e.deltaY < 0 ? 1 : -1;
             const factor = dir > 0 ? 1.1 : 0.9;
-            const curPxPerBeat = pxPerBeatRef.current;
-
-            // Playhead-based zoom: use playhead position as anchor instead of pointer
-            const secPerBeatLocal = 60 / Math.max(1, bpm);
-            const totalBeats = Math.max(0, dynamicProjectSec / Math.max(1e-9, secPerBeatLocal));
-            let anchorX: number;
-            let anchorBeat: number;
-            if (playheadZoomEnabled && playheadSec != null) {
-                anchorBeat = clamp(playheadSec / secPerBeatLocal, 0, totalBeats);
-                anchorX = anchorBeat * curPxPerBeat - el.scrollLeft;
-                if (anchorX < 0 || anchorX > bounds.width) {
-                    anchorX = bounds.width / 2;
-                }
-                anchorX = clamp(anchorX, 0, Math.max(1, bounds.width));
-            } else {
-                anchorX = clamp(pointerXRaw, 0, Math.max(1, bounds.width));
-                anchorBeat = clamp(
-                    (anchorX + el.scrollLeft) / Math.max(1e-9, curPxPerBeat),
-                    0,
-                    totalBeats,
-                );
-            }
-
-            const minPxPerBeat = MIN_PX_PER_SEC * secPerBeatLocal;
-            const maxPxPerBeat = MAX_PX_PER_SEC * secPerBeatLocal;
-
-            const zoomResult = computeAnchoredHorizontalZoom({
-                currentScale: curPxPerBeat,
+            const totalSec = Math.max(0, dynamicProjectSec);
+            const minPxPerSec = resolveTimelineMinPxPerSec({
+                baseMinPxPerSec: MIN_PX_PER_SEC,
+                projectSec: totalSec,
+                viewportWidthPx: el.clientWidth,
+            });
+            // 与轨道视图共用同一套水平缩放逻辑（秒为单位）：
+            // 鼠标锚点 / 播放光标锚点 / 平滑右延滚动范围全部一致。
+            const pendingZoom = horizontalZoomChainRef.current;
+            const zoomResult = resolveHorizontalWheelZoom({
                 factor,
-                minScale: minPxPerBeat,
-                maxScale: maxPxPerBeat,
-                scrollLeft: el.scrollLeft,
-                viewportWidth: Math.max(1, bounds.width),
-                anchorSec: anchorBeat,
-                contentSec: totalBeats,
+                basePxPerSec: pendingZoom?.nextPxPerSec ?? pxPerSecRef.current,
+                baseScrollLeft: pendingZoom?.nextScrollLeft ?? scrollLeftRef.current,
+                totalSec,
+                viewportWidth: el.clientWidth,
+                playheadZoomEnabled: Boolean(playheadZoomEnabled),
+                playheadSec: playheadSec ?? null,
+                anchorScreenX: pointerXRaw,
+                minPxPerSec,
+                maxPxPerSec: MAX_PX_PER_SEC,
+                minScrollLeft: syncTimelineEnabled ? -timelineOffsetRef.current : 0,
+                anchorOffsetPx: syncTimelineEnabled ? timelineOffsetRef.current : 0,
             });
             if (!zoomResult) return;
 
-            setPxPerBeat(zoomResult.nextScale);
-            el.scrollLeft = zoomResult.nextScrollLeft;
-            syncScrollLeft(el);
+            horizontalZoomChainRef.current = {
+                nextPxPerSec: zoomResult.nextPxPerSec,
+                nextScrollLeft: zoomResult.nextScrollLeft,
+            };
+            onHorizontalZoom(zoomResult.nextPxPerSec, zoomResult.nextScrollLeft);
         },
         [
             scrollerRef,
@@ -1649,9 +1753,11 @@ export function usePianoRollInteractions(args: {
             setPitchView,
             setParamViewport,
             invalidate,
-            pxPerBeatRef,
-            setPxPerBeat,
             syncScrollLeft,
+            horizontalZoomChainRef,
+            onHorizontalZoom,
+            syncTimelineEnabled,
+            timelineOffsetRef,
             prVerticalZoomKb,
             scrollHorizontalKb,
             scrollVerticalKb,
@@ -1659,16 +1765,18 @@ export function usePianoRollInteractions(args: {
             vibratoAmplitudeAdjustKb,
             vibratoFrequencyAdjustKb,
             applyVibratoDragAdjustment,
-            bpm,
             dynamicProjectSec,
             playheadSec,
             playheadZoomEnabled,
+            currentParamRange,
+            pxPerSecRef,
+            scrollLeftRef,
         ],
     );
 
     // React's onWheel handler may run in a passive listener in modern React.
     // Keep this for compatibility, but do not call preventDefault here.
-    const onScrollerWheel = useCallback((_e: WheelEvent<HTMLDivElement>) => {
+    const onScrollerWheel = useCallback(() => {
         // no-op; wheel is handled via native listener with passive:false
     }, []);
 
@@ -1760,20 +1868,20 @@ export function usePianoRollInteractions(args: {
     const isPointerNearStretchSelectionEdge = useCallback(
         (e: ReactPointerEvent<HTMLCanvasElement>): boolean => {
             if (toolMode !== "select") return false;
-            if (!isModifierActive(paramStretchKb, e.nativeEvent as any)) return false;
+            if (!isModifierActive(paramStretchKb, e.nativeEvent)) return false;
             const sel = selectionRef.current;
             const canvas = canvasRef.current;
             if (!sel || !canvas) return false;
             const aBeat = Math.min(sel.aBeat, sel.bBeat);
             const bBeat = Math.max(sel.aBeat, sel.bBeat);
             const rect = canvas.getBoundingClientRect();
-            const leftX = aBeat * pxPerBeatRef.current - scrollLeftRef.current;
-            const rightX = bBeat * pxPerBeatRef.current - scrollLeftRef.current;
+            const leftX = beatToViewportPx(aBeat);
+            const rightX = beatToViewportPx(bBeat);
             const localX = e.clientX - rect.left;
             const edgeHitPx = 8;
             return Math.abs(localX - leftX) <= edgeHitPx || Math.abs(localX - rightX) <= edgeHitPx;
         },
-        [toolMode, paramStretchKb, selectionRef, canvasRef, pxPerBeatRef, scrollLeftRef],
+        [toolMode, paramStretchKb, selectionRef, canvasRef, beatToViewportPx],
     );
 
     const onCanvasPointerMove = useCallback(
@@ -1789,7 +1897,7 @@ export function usePianoRollInteractions(args: {
                                   rawValue: rawPreviewValue,
                                   effectiveSnap: isEffectivePitchSnapActive(e.nativeEvent),
                                   pitchSnapUnit,
-                                  projectScale,
+                                  projectScale: scaleAtSec?.(pointerSec(e.clientX)) ?? projectScale,
                                   pitchSnapToleranceCents,
                               })
                             : rawPreviewValue;
@@ -1832,6 +1940,7 @@ export function usePianoRollInteractions(args: {
             isEffectivePitchSnapActive,
             pitchSnapUnit,
             projectScale,
+            scaleAtSec,
             pitchSnapToleranceCents,
             getCurveValueNearPointer,
             panRef,
@@ -1840,6 +1949,7 @@ export function usePianoRollInteractions(args: {
             isPointerNearDraggableSelection,
             setCanvasCursor,
             getDefaultCanvasCursor,
+            pointerSec,
         ],
     );
 
@@ -1874,7 +1984,7 @@ export function usePianoRollInteractions(args: {
                               rawValue: rawPreviewValue,
                               effectiveSnap: isEffectivePitchSnapActive(e.nativeEvent),
                               pitchSnapUnit,
-                              projectScale,
+                              projectScale: scaleAtSec?.(pointerSec(e.clientX)) ?? projectScale,
                               pitchSnapToleranceCents,
                           })
                         : rawPreviewValue;
@@ -1972,8 +2082,7 @@ export function usePianoRollInteractions(args: {
                     const stride = Math.max(1, pvForMorph.stride);
                     const hit = existingMorph.points.find((p) => {
                         const sec = (p.frame * fp) / 1000;
-                        const beat = sec / secPerBeat;
-                        const x = beat * pxPerBeatRef.current - scrollLeftRef.current;
+                        const x = secToViewportPx(axisFromRefs(), sec);
                         const mapped = editParam === "pitch" ? p.value + 0.5 : p.value;
                         const y = valueToY(editParam, mapped, h);
                         return (
@@ -2128,12 +2237,12 @@ export function usePianoRollInteractions(args: {
                     const aBeat = Math.min(sel.aBeat, sel.bBeat);
                     const bBeat = Math.max(sel.aBeat, sel.bBeat);
 
-                    if (isModifierActive(paramStretchKb, e.nativeEvent as any)) {
+                    if (isModifierActive(paramStretchKb, e.nativeEvent)) {
                         const canvas = canvasRef.current;
                         if (canvas) {
                             const rect = canvas.getBoundingClientRect();
-                            const leftX = aBeat * pxPerBeatRef.current - scrollLeftRef.current;
-                            const rightX = bBeat * pxPerBeatRef.current - scrollLeftRef.current;
+                            const leftX = beatToViewportPx(aBeat);
+                            const rightX = beatToViewportPx(bBeat);
                             const localX = e.clientX - rect.left;
                             const EDGE_HIT_PX = 8;
                             const hitLeft = Math.abs(localX - leftX) <= EDGE_HIT_PX;
@@ -2693,8 +2802,8 @@ export function usePianoRollInteractions(args: {
                                                 liveEditActiveRef.current = false;
                                             }
                                             setCanvasCursor("grab");
-                                            if (args.onContextMenu && document.hasFocus() && ev) {
-                                                args.onContextMenu(ev.clientX, ev.clientY);
+                                            if (onContextMenu && document.hasFocus() && ev) {
+                                                onContextMenu(ev.clientX, ev.clientY);
                                             }
                                             invalidate();
                                             return;
@@ -2782,7 +2891,9 @@ export function usePianoRollInteractions(args: {
                                     e.currentTarget as HTMLCanvasElement,
                                 );
 
-                                // 保存选区内曲线原始值
+                                // 选区帧范围 —— 注意这里**不**夹到 pv 的已加载窗口内。
+                                // 「全选」时选区覆盖整个工程，若按 pv 裁剪，后续只会改到
+                                // 显示范围内的参数，工程其余部分纹丝不动（本次修复的 bug）。
                                 const selStartSec = aBeat * secPerBeat;
                                 const selEndSec = bBeat * secPerBeat;
                                 const selStartFrame = Math.max(
@@ -2790,22 +2901,72 @@ export function usePianoRollInteractions(args: {
                                     Math.floor((selStartSec * 1000) / fp),
                                 );
                                 const selEndFrame = Math.max(0, Math.ceil((selEndSec * 1000) / fp));
-                                const stride = Math.max(1, pv.stride);
-                                const selStartIdx = Math.max(
-                                    0,
-                                    Math.round((selStartFrame - pv.startFrame) / stride),
-                                );
-                                const selEndIdx = Math.min(
-                                    pv.edit.length - 1,
-                                    Math.round((selEndFrame - pv.startFrame) / stride),
-                                );
-                                const origValues = pv.edit.slice(selStartIdx, selEndIdx + 1);
+
+                                // 取选区的全分辨率原始值。
+                                // pv 在低缩放下按画布宽度做了降采样，直接拿去变换再回写
+                                // 会把全分辨率曲线覆盖掉，所以变换的输入必须是 stride=1
+                                // 的数据。pv 已以 stride=1 覆盖时零开销直接切片，行为与
+                                // 改动前一致；否则分块向后端拉取（不阻塞拖动）。
+                                const origCurvePromise = fetchFullResCurve({
+                                    trackId: rootTrackId ?? "",
+                                    param: editParam,
+                                    startFrame: selStartFrame,
+                                    endFrame: selEndFrame,
+                                    paramView: pv,
+                                });
+                                // 先用 pv 覆盖到的部分做即时预览；全分辨率数据到位后自动
+                                // 替换，之后的每一帧预览都基于无损数据。
+                                let origValues = readPvRange(pv, selStartFrame, selEndFrame);
+                                let dragSettled = false;
+                                void origCurvePromise.then((curve) => {
+                                    if (dragSettled) return;
+                                    origValues = curve.values;
+                                });
+
+                                // 预览取数：从 pv 读当前值（pv 可能降采样，仅用于即时反馈）。
+                                const makePvSourceAt = (src: typeof pv) => {
+                                    const step = Math.max(1, Math.floor(src.stride));
+                                    return (frame: number) => {
+                                        const idx = Math.round((frame - src.startFrame) / step);
+                                        return idx >= 0 && idx < src.edit.length
+                                            ? src.edit[idx]
+                                            : 0;
+                                    };
+                                };
+
+                                // 逐帧变换。拖动过程中 `lastValueDelta` / `lastScaleStepDelta`
+                                // 会被 onMove 更新，这里读到的是最新值。
+                                const transformDragValue = (orig: number, frame: number) => {
+                                    if (
+                                        useScaleDegreeTranspose &&
+                                        editParam === "pitch" &&
+                                        dragAnchorScale
+                                    ) {
+                                        // 每个帧用其落地时刻的生效音阶做度数移调。
+                                        const frameScale =
+                                            scaleAtSec?.((frame * fp) / 1000) ?? dragAnchorScale;
+                                        return orig === 0
+                                            ? 0
+                                            : transposePitchByScaleSteps(
+                                                  orig,
+                                                  lastScaleStepDelta,
+                                                  frameScale,
+                                              );
+                                    }
+                                    return orig + lastValueDelta;
+                                };
+
+                                // Tempo Map 感知：度数差以拖动锚点帧的生效音阶计算。
+                                const dragAnchorFrame = selStartFrame;
+                                const dragAnchorScale =
+                                    scaleAtSec?.((dragAnchorFrame * fp) / 1000) ?? projectScale;
                                 ensureLiveEditBase(pv);
                                 if (liveEditActiveRef) liveEditActiveRef.current = true;
                                 if (
                                     editParam === "pitch" ||
                                     isChildPitchOffsetCentsParam(editParam) ||
-                                    isChildPitchOffsetDegreesParam(editParam)
+                                    isChildPitchOffsetDegreesParam(editParam) ||
+                                    isChildFormantOffsetCentsParam(editParam)
                                 ) {
                                     onPitchSnapGestureActiveChange?.(true);
                                 }
@@ -2834,12 +2995,12 @@ export function usePianoRollInteractions(args: {
                                     const effectiveSnap = isEffectivePitchSnapActive(ev);
                                     const yDragEnabled = currentDragDir !== "x-only";
                                     if (effectiveSnap && editParam === "pitch" && yDragEnabled) {
-                                        if (pitchSnapUnit === "scale" && projectScale) {
+                                        if (pitchSnapUnit === "scale" && dragAnchorScale) {
                                             useScaleDegreeTranspose = true;
                                             lastScaleStepDelta = scaleStepDeltaBetween(
                                                 startMouseVal,
                                                 currentVal,
-                                                projectScale,
+                                                dragAnchorScale,
                                             );
                                             rawValueDelta = 0;
                                         } else {
@@ -2860,6 +3021,13 @@ export function usePianoRollInteractions(args: {
                                     ) {
                                         useScaleDegreeTranspose = false;
                                         rawValueDelta = Math.round(rawValueDelta);
+                                    } else if (
+                                        effectiveSnap &&
+                                        isChildFormantOffsetCentsParam(editParam) &&
+                                        yDragEnabled
+                                    ) {
+                                        useScaleDegreeTranspose = false;
+                                        rawValueDelta = Math.round(rawValueDelta / 50) * 50;
                                     } else {
                                         useScaleDegreeTranspose = false;
                                         if (!yDragEnabled) {
@@ -2887,105 +3055,40 @@ export function usePianoRollInteractions(args: {
                                     liveEditOverrideRef.current = null;
                                     ensureLiveEditBase(pvNow);
 
-                                    // 构造覆盖原选区 + 新位置的完整 dense 数组
-                                    const selLen = selEndIdx - selStartIdx + 1;
-                                    const origDenseStart = pv.startFrame + selStartIdx * stride;
+                                    // 构造覆盖原选区 + 新位置的 dense 数组（逐帧索引）。
+                                    // 预览阶段从 pv 取上下文 —— pv 只是显示数据，不会回写。
+                                    const selLen = origValues.length;
+                                    if (selLen === 0) return;
 
-                                    // 计算需要覆盖的帧范围：原选区 ∪ 新位置选区
-                                    const newDenseStart = origDenseStart + lastFrameDelta;
-                                    const overallMinFrame = Math.max(
-                                        0,
-                                        Math.min(origDenseStart, newDenseStart),
-                                    );
-                                    const origDenseEnd = origDenseStart + (selLen - 1) * stride;
-                                    const newDenseEnd = newDenseStart + (selLen - 1) * stride;
-                                    const overallMaxFrame = Math.max(origDenseEnd, newDenseEnd);
-
-                                    // 边缘平滑度：扩展 dense 范围以包含选区边界外侧上下文
+                                    // 边缘平滑度：扩展范围以包含选区边界外侧上下文
                                     // halfSpan 与 applyEdgeSmoothingToDense 内的计算保持一致
                                     const edgeSmoothStr = clamp(
                                         Number(edgeSmoothnessPercent) || 0,
                                         0,
                                         100,
                                     );
-                                    const edgeHalfSpanIdx = Math.ceil(
+                                    const extraEdgeFrames = Math.ceil(
                                         Math.round((edgeSmoothStr / 100) * Math.floor(selLen / 2)) /
                                             2,
                                     );
-                                    const extraEdgeFrames = edgeHalfSpanIdx * stride;
-                                    const overallMinFrameExt = Math.max(
-                                        0,
-                                        overallMinFrame - extraEdgeFrames,
-                                    );
-                                    const overallMaxFrameExt = overallMaxFrame + extraEdgeFrames;
 
-                                    const overallLen =
-                                        Math.floor(
-                                            (overallMaxFrameExt - overallMinFrameExt) / stride,
-                                        ) + 1;
-                                    const dense = new Array<number>(overallLen);
-
-                                    // 先用当前 edit 曲线填充整个范围（含扩展部分；选区外锚点应基于当前新值）
-                                    for (let i = 0; i < overallLen; i++) {
-                                        const globalIdx = Math.round(
-                                            (overallMinFrameExt + i * stride - pv.startFrame) /
-                                                stride,
-                                        );
-                                        dense[i] =
-                                            globalIdx >= 0 && globalIdx < pvNow.edit.length
-                                                ? pvNow.edit[globalIdx]
-                                                : 0;
-                                    }
-                                    const denseBefore = dense.slice();
-                                    // 再将选区值写入新位置（覆盖 orig）
-                                    for (let i = 0; i < selLen; i++) {
-                                        const targetFrame = newDenseStart + i * stride;
-                                        const denseIdx = Math.round(
-                                            (targetFrame - overallMinFrameExt) / stride,
-                                        );
-                                        if (denseIdx >= 0 && denseIdx < overallLen) {
-                                            const orig = origValues[i] ?? 0;
-                                            if (
-                                                useScaleDegreeTranspose &&
-                                                editParam === "pitch" &&
-                                                projectScale
-                                            ) {
-                                                dense[denseIdx] =
-                                                    orig === 0
-                                                        ? 0
-                                                        : transposePitchByScaleSteps(
-                                                              orig,
-                                                              lastScaleStepDelta,
-                                                              projectScale,
-                                                          );
-                                            } else {
-                                                dense[denseIdx] = orig + lastValueDelta;
-                                            }
-                                        }
-                                    }
-
-                                    const movedStartDenseIdx = Math.round(
-                                        (newDenseStart - overallMinFrameExt) / stride,
-                                    );
-                                    const changeFactor = computeSelectionChangeFactor(
-                                        denseBefore,
-                                        dense,
-                                        movedStartDenseIdx,
-                                        selLen,
-                                    );
-                                    applyEdgeSmoothingToDense(
-                                        dense,
-                                        movedStartDenseIdx,
-                                        selLen,
-                                        changeFactor,
-                                    );
+                                    const built = buildSelectionDragDense({
+                                        sourceAt: makePvSourceAt(pvNow),
+                                        origValues,
+                                        origStartFrame: selStartFrame,
+                                        frameDelta: lastFrameDelta,
+                                        extraEdgeFrames,
+                                        transform: (orig, frame) => transformDragValue(orig, frame),
+                                        computeChangeFactor: computeSelectionChangeFactor,
+                                        applyEdgeSmoothing: applyEdgeSmoothingToDense,
+                                    });
 
                                     applyDenseToLiveEdit(
                                         pvNow,
-                                        overallMinFrameExt,
-                                        dense,
-                                        overallMinFrameExt,
-                                        overallMaxFrameExt,
+                                        built.startFrame,
+                                        built.values,
+                                        built.startFrame,
+                                        built.endFrame,
                                         "draw",
                                     );
 
@@ -3012,7 +3115,9 @@ export function usePianoRollInteractions(args: {
                                                 fineScale: 1,
                                                 effectiveSnap,
                                                 pitchSnapUnit,
-                                                projectScale,
+                                                projectScale:
+                                                    scaleAtSec?.(pointerSec(ev.clientX)) ??
+                                                    projectScale,
                                             }),
                                         });
                                     }
@@ -3020,152 +3125,116 @@ export function usePianoRollInteractions(args: {
                                     invalidate();
                                 };
 
-                                const onUp = () => {
+                                const onUp = async () => {
                                     window.removeEventListener("pointermove", onMove);
                                     window.removeEventListener("pointerup", onUp);
                                     window.removeEventListener("pointercancel", onUp);
                                     disposeFineAdjustedPointerState(finePointerState);
                                     clearActivePointerGestureEnd(onUp);
+                                    // 标记手势结束，避免已发出的取数请求再覆写 origValues
+                                    dragSettled = true;
 
                                     // 提交拖拽结果到后端
                                     const pvNow = paramViewRef.current;
                                     if (pvNow && rootTrackId) {
-                                        const selLen = selEndIdx - selStartIdx + 1;
-                                        const origDenseStart = pv.startFrame + selStartIdx * stride;
-                                        const newDenseStart = origDenseStart + lastFrameDelta;
-
-                                        const overallMinFrame = Math.max(
-                                            0,
-                                            Math.min(origDenseStart, newDenseStart),
-                                        );
-                                        const origDenseEnd = origDenseStart + (selLen - 1) * stride;
-                                        const newDenseEnd = newDenseStart + (selLen - 1) * stride;
-                                        const overallMaxFrame = Math.max(origDenseEnd, newDenseEnd);
-
-                                        // 边缘平滑度：扩展 dense 范围以包含选区边界外侧上下文
-                                        const edgeSmoothStrUp = clamp(
-                                            Number(edgeSmoothnessPercent) || 0,
-                                            0,
-                                            100,
-                                        );
-                                        const edgeHalfSpanIdxUp = Math.ceil(
-                                            Math.round(
-                                                (edgeSmoothStrUp / 100) * Math.floor(selLen / 2),
-                                            ) / 2,
-                                        );
-                                        const extraEdgeFramesUp = edgeHalfSpanIdxUp * stride;
-                                        const overallMinFrameExt = Math.max(
-                                            0,
-                                            overallMinFrame - extraEdgeFramesUp,
-                                        );
-                                        const overallMaxFrameExt =
-                                            overallMaxFrame + extraEdgeFramesUp;
-
-                                        const overallLen =
-                                            Math.floor(
-                                                (overallMaxFrameExt - overallMinFrameExt) / stride,
-                                            ) + 1;
-
-                                        // 构造最终提交的 dense 数组
-                                        const finalDense = new Array<number>(overallLen);
-
-                                        // 先用当前 edit 填充整个范围（含扩展部分；选区外锚点应基于当前新值）
-                                        for (let i = 0; i < overallLen; i++) {
-                                            const globalIdx = Math.round(
-                                                (overallMinFrameExt +
-                                                    i * stride -
-                                                    pvNow.startFrame) /
-                                                    stride,
+                                        // 等待拖动开始时发起的全分辨率取数完成 —— 提交必须
+                                        // 基于无损数据，不能拿降采样的 pv 值去覆盖后端。
+                                        origValues = (await origCurvePromise).values;
+                                        const selLen = origValues.length;
+                                        if (selLen > 0) {
+                                            // 边缘平滑度：扩展 dense 范围以包含选区边界外侧上下文
+                                            const edgeSmoothStrUp = clamp(
+                                                Number(edgeSmoothnessPercent) || 0,
+                                                0,
+                                                100,
                                             );
-                                            finalDense[i] =
-                                                globalIdx >= 0 && globalIdx < pvNow.edit.length
-                                                    ? pvNow.edit[globalIdx]
-                                                    : 0;
-                                        }
-                                        const finalDenseBefore = finalDense.slice();
-                                        // 再将偏移后的选区值写入新位置
-                                        for (let i = 0; i < selLen; i++) {
-                                            const targetFrame = newDenseStart + i * stride;
-                                            const denseIdx = Math.round(
-                                                (targetFrame - overallMinFrameExt) / stride,
+                                            const extraEdgeFramesUp = Math.ceil(
+                                                Math.round(
+                                                    (edgeSmoothStrUp / 100) *
+                                                        Math.floor(selLen / 2),
+                                                ) / 2,
                                             );
-                                            if (denseIdx >= 0 && denseIdx < overallLen) {
-                                                const orig = origValues[i] ?? 0;
-                                                if (
-                                                    useScaleDegreeTranspose &&
-                                                    editParam === "pitch" &&
-                                                    projectScale
-                                                ) {
-                                                    finalDense[denseIdx] =
-                                                        orig === 0
-                                                            ? 0
-                                                            : transposePitchByScaleSteps(
-                                                                  orig,
-                                                                  lastScaleStepDelta,
-                                                                  projectScale,
-                                                              );
-                                                } else {
-                                                    finalDense[denseIdx] = orig + lastValueDelta;
+
+                                            // 提交前把整段范围的全分辨率数据拉下来作为基底。
+                                            // 这是「回写不失真」的关键：预览用的是可能降采样的
+                                            // pv，提交必须用 stride=1 的真实曲线，否则会把
+                                            // 降采样后的值写回后端、覆盖掉原始分辨率。
+                                            const upRange = selectionDragRange({
+                                                origStartFrame: selStartFrame,
+                                                origValuesLength: selLen,
+                                                frameDelta: lastFrameDelta,
+                                                extraEdgeFrames: extraEdgeFramesUp,
+                                            });
+                                            // pv 若已以 stride=1 覆盖该范围则直接切片（零 IPC）；
+                                            // 否则分块拉取。pvNow.edit 是拖动前的值，正是回写
+                                            // 所需的「当前后端值」。
+                                            const commitBase = await fetchFullResCurve({
+                                                trackId: rootTrackId,
+                                                param: editParam,
+                                                startFrame: upRange.startFrame,
+                                                endFrame: upRange.endFrame,
+                                                paramView: pvNow,
+                                            });
+
+                                            const built = buildSelectionDragDense({
+                                                sourceAt: (frame) =>
+                                                    commitBase.values[
+                                                        frame - commitBase.startFrame
+                                                    ] ?? 0,
+                                                origValues,
+                                                origStartFrame: selStartFrame,
+                                                frameDelta: lastFrameDelta,
+                                                extraEdgeFrames: extraEdgeFramesUp,
+                                                transform: (orig, frame) =>
+                                                    transformDragValue(orig, frame),
+                                                computeChangeFactor: computeSelectionChangeFactor,
+                                                applyEdgeSmoothing: applyEdgeSmoothingToDense,
+                                            });
+                                            const finalDense = built.values;
+                                            const overallMinFrameExt = built.startFrame;
+
+                                            // 立即同步更新本地 paramView state（逐帧映射到 pv 的
+                                            // 采样栅格上；pv 只是显示，随后会被后端数据刷新）
+                                            const nextEdit = pvNow.edit.slice();
+                                            const pvStepUp = Math.max(1, Math.floor(pvNow.stride));
+                                            for (let i = 0; i < finalDense.length; i++) {
+                                                const globalIdx = Math.round(
+                                                    (overallMinFrameExt + i - pvNow.startFrame) /
+                                                        pvStepUp,
+                                                );
+                                                if (globalIdx >= 0 && globalIdx < nextEdit.length) {
+                                                    nextEdit[globalIdx] = finalDense[i];
                                                 }
                                             }
+                                            setParamView({
+                                                ...pvNow,
+                                                edit: nextEdit,
+                                            });
+                                            liveEditOverrideRef.current = null;
+
+                                            // 确保选区位置最终正确
+                                            const beatDeltaForSel =
+                                                (lastFrameDelta * fp) / 1000 / secPerBeat;
+                                            selectionRef.current = {
+                                                aBeat: aBeat + beatDeltaForSel,
+                                                bBeat: bBeat + beatDeltaForSel,
+                                            };
+                                            updateSelectionUi(selectionRef.current);
+
+                                            // 分块回写：整段编辑只打一个撤销点，块之间让出
+                                            // 事件循环，超长工程也不会卡死界面。
+                                            void (async () => {
+                                                await uploadFullResCurve({
+                                                    trackId: rootTrackId,
+                                                    param: editParam,
+                                                    startFrame: overallMinFrameExt,
+                                                    values: finalDense,
+                                                });
+                                                if (liveEditActiveRef)
+                                                    liveEditActiveRef.current = false;
+                                                bumpRefreshToken();
+                                            })();
                                         }
-
-                                        const movedStartDenseIdx = Math.round(
-                                            (newDenseStart - overallMinFrameExt) / stride,
-                                        );
-                                        const changeFactor = computeSelectionChangeFactor(
-                                            finalDenseBefore,
-                                            finalDense,
-                                            movedStartDenseIdx,
-                                            selLen,
-                                        );
-                                        applyEdgeSmoothingToDense(
-                                            finalDense,
-                                            movedStartDenseIdx,
-                                            selLen,
-                                            changeFactor,
-                                        );
-
-                                        // 立即同步更新本地 paramView state
-                                        const nextEdit = pvNow.edit.slice();
-                                        for (let i = 0; i < overallLen; i++) {
-                                            const globalIdx = Math.round(
-                                                (overallMinFrameExt +
-                                                    i * stride -
-                                                    pvNow.startFrame) /
-                                                    stride,
-                                            );
-                                            if (globalIdx >= 0 && globalIdx < nextEdit.length) {
-                                                nextEdit[globalIdx] = finalDense[i];
-                                            }
-                                        }
-                                        setParamView({
-                                            ...pvNow,
-                                            edit: nextEdit,
-                                        });
-                                        liveEditOverrideRef.current = null;
-
-                                        // 确保选区位置最终正确
-                                        const beatDeltaForSel =
-                                            (lastFrameDelta * fp) / 1000 / secPerBeat;
-                                        selectionRef.current = {
-                                            aBeat: aBeat + beatDeltaForSel,
-                                            bBeat: bBeat + beatDeltaForSel,
-                                        };
-                                        updateSelectionUi(selectionRef.current);
-
-                                        void (async () => {
-                                            await paramsApi.setParamFrames(
-                                                rootTrackId,
-                                                editParam,
-                                                overallMinFrameExt,
-                                                finalDense,
-                                                true,
-                                            );
-                                            if (liveEditActiveRef)
-                                                liveEditActiveRef.current = false;
-                                            bumpRefreshToken();
-                                        })();
                                     } else {
                                         if (liveEditActiveRef) liveEditActiveRef.current = false;
                                     }
@@ -3265,15 +3334,19 @@ export function usePianoRollInteractions(args: {
                             }
 
                             if (Math.abs(deltaPx) > 0.01) {
-                                const maxScrollLeft = Math.max(
+                                const drawingMaxScrollLeft = Math.max(
                                     0,
                                     maxSelectableBeat * Math.max(1e-9, pxPerBeatRef.current) -
                                         scroller.clientWidth,
                                 );
+                                const nativeOffset = syncTimelineEnabled
+                                    ? timelineOffsetRef.current
+                                    : 0;
+                                const nativeMaxScrollLeft = drawingMaxScrollLeft + nativeOffset;
                                 const nextScrollLeft = clamp(
                                     scroller.scrollLeft + deltaPx,
                                     0,
-                                    maxScrollLeft,
+                                    nativeMaxScrollLeft,
                                 );
                                 if (Math.abs(nextScrollLeft - scroller.scrollLeft) > 0.01) {
                                     scroller.scrollLeft = nextScrollLeft;
@@ -3284,7 +3357,7 @@ export function usePianoRollInteractions(args: {
 
                         const clampedClientX = clamp(clientX, bounds.left, bounds.right);
                         const beat =
-                            (scroller.scrollLeft + (clampedClientX - bounds.left)) /
+                            (scrollLeftRef.current + (clampedClientX - bounds.left)) /
                             Math.max(1e-9, pxPerBeatRef.current);
                         return clampSelectionBeat(beat);
                     };
@@ -3352,7 +3425,7 @@ export function usePianoRollInteractions(args: {
             const rawValue = pointerValue(e.clientY);
             const isDrawMode = mode === "draw";
             const snapToggleHeld = isSnapToggleModifierHeld(e.nativeEvent);
-            const value = isDrawMode ? snapDrawValue(rawValue, snapToggleHeld) : rawValue;
+            const value = isDrawMode ? snapDrawValue(rawValue, snapToggleHeld, frame) : rawValue;
 
             const isLineTool = toolMode === "line";
             const isVibratoTool = toolMode === "vibrato";
@@ -3427,7 +3500,7 @@ export function usePianoRollInteractions(args: {
                     const yDragEnabled = currentDragDir !== "x-only";
                     const rawV2 = yDragEnabled ? pointerValue(adjusted.clientY) : value;
                     const moveSnapToggleHeld = isSnapToggleModifierHeld(ev);
-                    const v2 = isDrawMode ? snapDrawValue(rawV2, moveSnapToggleHeld) : rawV2;
+                    const v2 = isDrawMode ? snapDrawValue(rawV2, moveSnapToggleHeld, f2) : rawV2;
 
                     // Update stroke to only have start and current end
                     st.points = [
@@ -3477,7 +3550,7 @@ export function usePianoRollInteractions(args: {
                                     const t = denom === 0 ? 1 : (f - startFrame) / denom;
                                     const raw = startValue + (v2 - startValue) * t;
                                     dense[f - minF] = isDrawMode
-                                        ? snapDrawValue(raw, moveSnapToggleHeld)
+                                        ? snapDrawValue(raw, moveSnapToggleHeld, f)
                                         : raw;
                                 }
                                 applyDenseToLiveEdit(pv2, minF, dense, minF, maxF, mode);
@@ -3588,7 +3661,7 @@ export function usePianoRollInteractions(args: {
                         : (last?.value ?? value);
                     const rawV2 = rawV2Abs;
                     const moveSnapToggleHeld = isSnapToggleModifierHeld(ev);
-                    const v2 = isDrawMode ? snapDrawValue(rawV2, moveSnapToggleHeld) : rawV2;
+                    const v2 = isDrawMode ? snapDrawValue(rawV2, moveSnapToggleHeld, f2) : rawV2;
 
                     const pv2 = paramViewRef.current;
                     if (last && last.frame === f2) {
@@ -3707,6 +3780,8 @@ export function usePianoRollInteractions(args: {
             ensureLiveEditBase,
             paramView?.framePeriodMs,
             secPerBeat,
+            axisFromRefs,
+            beatToViewportPx,
             pointerValue,
             strokeRef,
             applyDenseToLiveEdit,
@@ -3715,7 +3790,6 @@ export function usePianoRollInteractions(args: {
             applyMorphOverlayPreview,
             applyPostStrokeSmoothing,
             buildMorphDense,
-            buildMorphOverlayFromSelection,
             commitStroke,
             bumpRefreshToken,
             liveEditOverrideRef,
@@ -3723,9 +3797,9 @@ export function usePianoRollInteractions(args: {
             setParamView,
             setCanvasCursor,
             onPitchSnapGestureActiveChange,
-            pitchSnapEnabled,
             pitchSnapUnit,
             projectScale,
+            scaleAtSec,
             pitchSnapToleranceCents,
             isSnapToggleModifierHeld,
             isEffectivePitchSnapActive,
@@ -3734,6 +3808,8 @@ export function usePianoRollInteractions(args: {
             disposeFineAdjustedPointerState,
             pxPerBeatRef,
             scrollLeftRef,
+            syncTimelineEnabled,
+            timelineOffsetRef,
             valueToY,
             buildVibratoDense,
             paramEditorSeekPlayheadEnabled,
@@ -3742,6 +3818,16 @@ export function usePianoRollInteractions(args: {
             setActivePointerGestureEnd,
             clearActivePointerGestureEnd,
             setVibratoDragCaptureActive,
+            dynamicProjectSec,
+            dispatch,
+            dragDirection,
+            edgeSmoothnessPercent,
+            getDefaultCanvasCursor,
+            liveEditActiveRef,
+            onContextMenu,
+            onCycleDragDirection,
+            paramStretchKb,
+            snapDrawValue,
         ],
     );
 
