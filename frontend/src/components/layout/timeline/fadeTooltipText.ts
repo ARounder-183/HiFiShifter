@@ -31,7 +31,7 @@ export type { FadeLengthFormatContext };
 export type FadeLabelLookup = (key: string) => string;
 
 /** 形状 id → i18n 键（与 ClipContextMenu 的 FADE_SHAPE_OPTIONS 同源）。 */
-const SHAPE_LABEL_KEYS: Record<number, string> = {
+export const SHAPE_LABEL_KEYS: Record<number, string> = {
     0: "fade_shape_linear",
     1: "fade_shape_fast_start",
     2: "fade_shape_fast_end",

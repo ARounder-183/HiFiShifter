@@ -1991,7 +1991,13 @@ fn split_transition_options(state: &State<'_, AppState>) -> SplitTransitionOptio
         },
         duration_sec: settings.split_transition_duration_sec,
         duration_percent: settings.split_transition_duration_percent,
-        curve: Some(settings.split_transition_curve),
+        // "keep"（默认）= 分割后保留原 Clip 的淡化曲线类型，不修改；
+        // 其余为新版 REAPER 预设 id（normalize 已迁移旧命名曲线）。
+        curve: if settings.split_transition_curve == "keep" {
+            None
+        } else {
+            Some(settings.split_transition_curve)
+        },
         overlap_fades: settings.auto_crossfade
             || settings.split_transition_overlap_crossfade == "always",
     }

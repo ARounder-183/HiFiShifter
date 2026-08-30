@@ -702,6 +702,7 @@ export const zhTW = {
     split_transition_duration_percent_unit: "%",
     split_transition_duration_percent_hint: "百分比按分割後前後兩個音訊塊的全長合計折算。",
     split_transition_curve: "淡化曲線",
+    split_transition_curve_keep: "不修改淡化曲線",
     split_transition_overlap_crossfade: "重疊交叉淡化",
     split_transition_overlap_crossfade_auto: "跟隨自動交叉淡化",
     split_transition_overlap_crossfade_always: "始終套用",

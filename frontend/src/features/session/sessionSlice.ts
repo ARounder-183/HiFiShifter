@@ -15,9 +15,9 @@ import type {
     DragDirection,
     DrawDragDirection,
     EditParam,
-    FadeCurveType,
     GridSize,
     PitchSnapUnit,
+    SplitTransitionCurveType,
     TimelineSnapSettings,
     TimeUnit,
     TimeUnitChoice,
@@ -26,6 +26,7 @@ import type {
     ToolModeGroup,
     TrackInfo,
 } from "./sessionTypes";
+import { normalizeSplitTransitionCurve } from "./sessionTypes";
 import { modEuclid, resolveLoopMediaDurationSec } from "../../utils/loopRender";
 
 import {
@@ -278,6 +279,7 @@ function normalizeTimelineSnapSettings(
     };
 }
 
+export type { FadeCurveType } from "./sessionTypes";
 export type {
     AutomationPoint,
     ClipInfo,
@@ -286,7 +288,6 @@ export type {
     DragDirection,
     DrawDragDirection,
     EditParam,
-    FadeCurveType,
     GridSize,
     ToolMode,
     ToolModeGroup,
@@ -332,7 +333,8 @@ export interface SessionState {
     splitTransitionDurationUnit: "seconds" | "percent";
     splitTransitionDurationSec: number;
     splitTransitionDurationPercent: number;
-    splitTransitionCurve: FadeCurveType;
+    /** 淡化曲线（新版 REAPER 预设；"keep" = 分割后保留原 Clip 曲线，默认）。 */
+    splitTransitionCurve: SplitTransitionCurveType;
     splitTransitionOverlapCrossfade: "auto" | "always";
     /** 吸附总开关（兼容旧字段 gridSnapEnabled）。 */
     snapEnabled: boolean;
@@ -1759,7 +1761,7 @@ const initialState: SessionState = {
     splitTransitionDurationUnit: "seconds",
     splitTransitionDurationSec: 0.01,
     splitTransitionDurationPercent: 1,
-    splitTransitionCurve: "sine" as FadeCurveType,
+    splitTransitionCurve: "keep",
     splitTransitionOverlapCrossfade: "auto",
     snapEnabled: true,
     timelineSnap: createDefaultTimelineSnapSettings(),
@@ -2108,7 +2110,7 @@ const sessionSlice = createSlice({
         setSplitTransitionDurationPercent(state, action: PayloadAction<number>) {
             state.splitTransitionDurationPercent = clamp(Number(action.payload) || 1, 0.01, 100);
         },
-        setSplitTransitionCurve(state, action: PayloadAction<FadeCurveType>) {
+        setSplitTransitionCurve(state, action: PayloadAction<SplitTransitionCurveType>) {
             state.splitTransitionCurve = action.payload;
         },
         setSplitTransitionOverlapCrossfade(state, action: PayloadAction<"auto" | "always">) {
@@ -2850,11 +2852,9 @@ const sessionSlice = createSlice({
                     state.splitTransitionDurationPercent = clamp(splitPercent, 0.01, 100);
                 }
                 const splitCurve = s.splitTransitionCurve as string;
-                if (
-                    ["linear", "sine", "exponential", "logarithmic", "scurve"].includes(splitCurve)
-                ) {
-                    state.splitTransitionCurve = splitCurve as FadeCurveType;
-                }
+                // 旧命名曲线在加载期迁移为新版预设 id；未知值回退 "keep"
+                //（保留原 Clip 曲线，不再改写）。
+                state.splitTransitionCurve = normalizeSplitTransitionCurve(splitCurve);
                 state.splitTransitionOverlapCrossfade =
                     s.splitTransitionOverlapCrossfade === "always" ? "always" : "auto";
                 const loadedSnapEnabled = s.snapEnabled ?? s.gridSnap ?? true;

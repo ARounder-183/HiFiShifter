@@ -6,6 +6,51 @@ export type ScaleHighlightMode = "always" | "off";
 export type DragDirection = "free" | "x-only" | "y-only";
 export type DrawDragDirection = "free" | "x-only";
 export type FadeCurveType = "linear" | "sine" | "exponential" | "logarithmic" | "scurve";
+
+/**
+ * 分割过渡的“淡化曲线”设置（新版 REAPER 形状/曲率模型）。
+ *
+ * - `"keep"`：分割后**保留原 Clip 的淡化曲线类型，不再修改**（默认值）；
+ * - 其余取值与 `timeline/reaperFade.ts` 的 `FADE_PRESETS` 一一对应，
+ *   写入边界淡变时同时应用该预设的默认曲率（淡入/淡出各自方向）。
+ */
+export type SplitTransitionCurveType =
+    | "keep"
+    | "linear"
+    | "convexSlight"
+    | "lateSlight"
+    | "convexSharp"
+    | "lateSharp"
+    | "sSlight"
+    | "sSharp";
+
+/**
+ * 兼容迁移：旧命名曲线（v3/早期 v4，淡化模型重构前）→ 新版预设 id。
+ * 未知值一律回退为 "keep"（保留原曲线，不再强行改写）。
+ * - linear → linear；exponential → lateSlight；logarithmic → convexSlight；
+ * - sine / scurve → sSlight（与后端 legacy_curve_to_fade_spec 同语义）。
+ */
+export function normalizeSplitTransitionCurve(value: string): SplitTransitionCurveType {
+    switch (value) {
+        case "linear":
+        case "convexSlight":
+        case "lateSlight":
+        case "convexSharp":
+        case "lateSharp":
+        case "sSlight":
+        case "sSharp":
+            return value;
+        case "exponential":
+            return "lateSlight";
+        case "logarithmic":
+            return "convexSlight";
+        case "sine":
+        case "scurve":
+            return "sSlight";
+        default:
+            return "keep";
+    }
+}
 export type TimeUnit = "barBeats" | "barDivisions" | "seconds" | "clock";
 export type TimeUnitChoice = TimeUnit | "none";
 // EditParam 是一个字符串，可以是 "pitch" 或声码器额外参数 ID（如 "breath_gain"、"hifigan_tension"）

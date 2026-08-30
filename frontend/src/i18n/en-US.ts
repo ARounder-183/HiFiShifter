@@ -801,6 +801,7 @@ export const enUS = {
     split_transition_duration_percent_hint:
         "The percentage is applied to the combined full length of the two clips created by the split.",
     split_transition_curve: "Fade Curve",
+    split_transition_curve_keep: "Keep Original Fade Curve",
     split_transition_overlap_crossfade: "Overlap Crossfade",
     split_transition_overlap_crossfade_auto: "Follow Auto Crossfade",
     split_transition_overlap_crossfade_always: "Always Apply",
