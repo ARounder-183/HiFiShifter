@@ -3123,6 +3123,37 @@ mod tests {
     }
 
     #[test]
+    fn track_color_rotation_starts_with_gray_and_cycles() {
+        // 调色板以灰色开头（与前端取色器顺序一致：灰→蓝→紫→绿→橙→
+        // 粉→洋红→黄→红）：新建工程的初始 Main 轨道 = palette[0]（灰）。
+        let mut tl = TimelineState::default();
+        assert_eq!(tl.tracks[0].color, track_palette_color(0));
+        assert_eq!(tl.tracks[0].color, "#74787e");
+
+        // 「添加轨道」按当前轨道总数轮转：蓝 → 紫 → … → 红 → 灰 → 蓝…
+        // 验证前 12 条新轨道（覆盖完整一轮 + 回到灰色后再出发）。
+        let mut ids = Vec::new();
+        for i in 1..=12 {
+            let id = tl.add_track(Some(format!("T{i}")), None, None);
+            let color = tl.tracks.iter().find(|t| t.id == id).unwrap().color.clone();
+            let expected = track_palette_color(i); // Main 已占 index 0
+            assert_eq!(color, expected, "add_track #{i} 的颜色");
+            ids.push(id);
+        }
+
+        // 完整一轮：第 9 条新轨道回到灰色（palette 长度 = 9）。
+        assert_eq!(
+            tl.tracks.iter().find(|t| t.id == ids[8]).unwrap().color,
+            "#74787e"
+        );
+        // 第 10 条新轨道重新从蓝色开始。
+        assert_eq!(
+            tl.tracks.iter().find(|t| t.id == ids[9]).unwrap().color,
+            "#4a8fd1"
+        );
+    }
+
+    #[test]
     fn clip_take_switch_cycle_and_remove_keep_projection_in_sync() {
         let mut tl = TimelineState::default();
         let track_id = tl.tracks[0].id.clone();
@@ -5865,6 +5896,7 @@ pub(crate) fn new_id(prefix: &str) -> String {
 }
 
 const TRACK_COLOR_PALETTE: &[&str] = &[
+    "#74787e", // 灰（初始 Main 轨道色；也是整条轮转的起点）
     "#4a8fd1", // 蓝
     "#7b6bc4", // 紫
     "#43a875", // 绿
@@ -6267,6 +6299,8 @@ impl TimelineState {
         let order = self.next_track_order;
         self.next_track_order += 1;
 
+        // 调色板第一个颜色就是灰色（初始 Main 轨道色）：新建工程 Main = 灰
+        // （palette[0]），此后添加的轨道按 蓝 → 紫 → … → 红 → 灰 → … 循环。
         let color = track_palette_color(self.tracks.len());
 
         let track = Track {

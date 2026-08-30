@@ -74,6 +74,13 @@ const AUDIO_EXTENSIONS = new Set([
 /** 支持的 MIDI 文件扩展名（可拖拽导入到时间轴或参数编辑器） */
 const MIDI_EXTENSIONS = new Set(["mid", "midi"]);
 
+/**
+ * 支持的工程文件扩展名（可拖拽导入；备份文件如 .hshp-bak 不在其中，
+ * 无需高亮）。注意 FileEntry.extension 是最后一个点后的完整后缀，
+ * 因此 "proj.hshp-bak" 的 extension 为 "hshp-bak"，天然不会误命中。
+ */
+const PROJECT_EXTENSIONS = new Set(["hshp", "hsp", "rpp", "vshp", "vsp"]);
+
 const SORT_MODE_OPTIONS: SortMode[] = ["name", "date", "size"];
 
 function isAudioFile(entry: FileEntry): boolean {
@@ -84,9 +91,17 @@ function isMidiFile(entry: FileEntry): boolean {
     return !entry.isDir && !!entry.extension && MIDI_EXTENSIONS.has(entry.extension);
 }
 
-/** 可拖拽的媒体文件：音频/视频（拖入时间轴）+ MIDI（拖入时间轴或参数编辑器）。 */
+/** 工程文件（HiFiShifter / Reaper / VocalShifter 工程）。 */
+function isProjectFile(entry: FileEntry): boolean {
+    return !entry.isDir && !!entry.extension && PROJECT_EXTENSIONS.has(entry.extension);
+}
+
+/**
+ * 可拖拽的文件：音频/视频（拖入时间轴）+ MIDI（拖入时间轴或参数编辑器）
+ * + 工程文件（拖入时间轴弹出 打开/导入 操作）。
+ */
 function isDraggableFile(entry: FileEntry): boolean {
-    return isAudioFile(entry) || isMidiFile(entry);
+    return isAudioFile(entry) || isMidiFile(entry) || isProjectFile(entry);
 }
 
 const VIDEO_EXTENSIONS = new Set([
@@ -178,6 +193,25 @@ function MidiIcon({ className }: { className?: string }) {
                 strokeLinecap="round"
             />
             <path d="M5 2.5L12.5 1" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+        </svg>
+    );
+}
+
+/** 工程文件图标 SVG（文档 + 星标），用于高亮 hshp/hsp/rpp/vshp/vsp。 */
+function ProjectIcon({ className }: { className?: string }) {
+    return (
+        <svg width="14" height="14" viewBox="0 0 15 15" fill="none" className={className}>
+            <path
+                d="M2.5 1.5H6.5L9 4V13.5H2.5V1.5Z"
+                stroke="currentColor"
+                strokeWidth="1.2"
+                strokeLinejoin="round"
+            />
+            <path d="M6.5 1.5V4H9" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+            <path
+                d="M7.75 6.75L8.36 8.02L9.75 8.18L8.72 9.14L8.96 10.52L7.75 9.84L6.54 10.52L6.78 9.14L5.75 8.18L7.14 8.02L7.75 6.75Z"
+                fill="currentColor"
+            />
         </svg>
     );
 }
@@ -845,6 +879,7 @@ const FileEntryRow: React.FC<FileEntryRowProps> = React.memo(
     }) => {
         const isAudio = isAudioFile(entry);
         const isMidi = isMidiFile(entry);
+        const isProject = isProjectFile(entry);
         const isDraggable = isDraggableFile(entry);
 
         return (
@@ -880,6 +915,9 @@ const FileEntryRow: React.FC<FileEntryRowProps> = React.memo(
                         )
                     ) : isMidi ? (
                         <MidiIcon className="text-qt-highlight" />
+                    ) : isProject ? (
+                        // 工程文件高亮：橙色星标文档图标（备份文件如 .hshp-bak 不在此列）。
+                        <ProjectIcon className="text-amber-400" />
                     ) : (
                         <FileIcon width="12" height="12" className="text-qt-text-muted" />
                     )}
@@ -887,7 +925,11 @@ const FileEntryRow: React.FC<FileEntryRowProps> = React.memo(
 
                 {/* 文件名 + 路径提示 */}
                 <div className="flex flex-col min-w-0 flex-1">
-                    <Text size="1" className="truncate" data-tooltip={entry.name}>
+                    <Text
+                        size="1"
+                        className={isProject ? "truncate text-amber-300" : "truncate"}
+                        data-tooltip={entry.name}
+                    >
                         {entry.name}
                         {entry.isDir ? "/" : ""}
                     </Text>

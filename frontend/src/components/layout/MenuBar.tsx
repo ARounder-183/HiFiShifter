@@ -8,6 +8,7 @@ import {
     openVocalShifterFromDialog,
     addTrackRemote,
     removeTrackRemote,
+    duplicateTrackRemote,
     refreshRuntime,
     clearWaveformCacheRemote,
     persistUiSettings,
@@ -39,6 +40,7 @@ import {
     getPianoRollSelection,
     subscribePianoRollSelection,
 } from "../../utils/pianoRollSelectionBus";
+import { computeInsertBelowPlacement } from "../../features/session/trackUtils";
 
 import {
     importAudioAtPosition,
@@ -402,6 +404,15 @@ export const MenuBar: React.FC<MenuBarProps> = ({
         onImportMidiFromMenu();
     }, [onImportMidiFromMenu]);
 
+    // 快捷键「导入媒体文件」→ 复用文件菜单的导入流程（多文件/多音轨选择）。
+    useEffect(() => {
+        const handler = () => {
+            void handleImportAudioFromMenu();
+        };
+        window.addEventListener("hifi:importMediaFromMenu", handler);
+        return () => window.removeEventListener("hifi:importMediaFromMenu", handler);
+    }, [handleImportAudioFromMenu]);
+
     return (
         <Flex
             align="center"
@@ -479,6 +490,9 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         }}
                     >
                         {t("menu_import_media")}{" "}
+                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                            {shortcutLabel("project.importMedia")}
+                        </div>
                     </DropdownMenu.Item>
                     <DropdownMenu.Item
                         onSelect={() => {
@@ -486,16 +500,40 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         }}
                     >
                         {t("menu_import_midi")}{" "}
+                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                            {shortcutLabel("project.importMidi")}
+                        </div>
                     </DropdownMenu.Item>
-                    <DropdownMenu.Item onSelect={onImportProject}>
-                        {t("menu_import_hifishifter")}
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item onSelect={() => void dispatch(openReaperFromDialog())}>
-                        {t("menu_import_reaper")}
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item onSelect={() => void dispatch(openVocalShifterFromDialog())}>
-                        {t("menu_import_vocalshifter")}
-                    </DropdownMenu.Item>
+                    {/* 导入外部工程（HiFiShifter / Reaper / VocalShifter）*/}
+                    <DropdownMenu.Sub>
+                        <DropdownMenu.SubTrigger>
+                            {tAny("menu_import_external_project")}
+                        </DropdownMenu.SubTrigger>
+                        <DropdownMenu.SubContent>
+                            <DropdownMenu.Item onSelect={onImportProject}>
+                                {t("menu_import_hifishifter")}
+                                <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                                    {shortcutLabel("project.importHifishifter")}
+                                </div>
+                            </DropdownMenu.Item>
+                            <DropdownMenu.Item
+                                onSelect={() => void dispatch(openReaperFromDialog())}
+                            >
+                                {t("menu_import_reaper")}
+                                <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                                    {shortcutLabel("project.importReaper")}
+                                </div>
+                            </DropdownMenu.Item>
+                            <DropdownMenu.Item
+                                onSelect={() => void dispatch(openVocalShifterFromDialog())}
+                            >
+                                {t("menu_import_vocalshifter")}
+                                <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                                    {shortcutLabel("project.importVocalShifter")}
+                                </div>
+                            </DropdownMenu.Item>
+                        </DropdownMenu.SubContent>
+                    </DropdownMenu.Sub>
                     <DropdownMenu.Item onSelect={() => setExportDialogOpen(true)}>
                         {t("menu_export_audio")}{" "}
                         <div className="ml-auto pl-4 text-xs text-qt-text-muted">
@@ -592,8 +630,36 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     <span>{t("menu_track")}</span>
                 </DropdownMenu.Trigger>
                 <DropdownMenu.Content variant="soft" color="gray">
-                    <DropdownMenu.Item onSelect={() => dispatch(addTrackRemote({}))}>
+                    <DropdownMenu.Item
+                        onSelect={() => {
+                            // 新建轨道继承选中轨道的层级，并紧跟在选中轨道下方插入。
+                            const placement = computeInsertBelowPlacement(
+                                s.tracks,
+                                s.selectedTrackId,
+                            );
+                            dispatch(
+                                addTrackRemote({
+                                    parentTrackId: placement.parentTrackId,
+                                    index: placement.index,
+                                }),
+                            );
+                        }}
+                    >
                         {t("track_add")}
+                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                            {shortcutLabel("track.add")}
+                        </div>
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item
+                        disabled={!s.selectedTrackId}
+                        onSelect={() =>
+                            s.selectedTrackId && dispatch(duplicateTrackRemote(s.selectedTrackId))
+                        }
+                    >
+                        {tAny("menu_clone_selected_track")}
+                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                            {shortcutLabel("track.clone")}
+                        </div>
                     </DropdownMenu.Item>
                     <DropdownMenu.Item
                         disabled={
@@ -607,6 +673,9 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         }
                     >
                         {t("track_remove_selected")}
+                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                            {shortcutLabel("track.delete")}
+                        </div>
                     </DropdownMenu.Item>
                 </DropdownMenu.Content>
             </DropdownMenu.Root>

@@ -51,6 +51,12 @@ export interface UseTimelineDragDropArgs {
             startSec: number;
         } | null>
     >;
+    /**
+     * 工程文件（hshp/hsp）拖放时的「打开工程 / 导入工程」操作菜单。
+     */
+    setProjectActionMenu?: React.Dispatch<
+        React.SetStateAction<{ x: number; y: number; path: string } | null>
+    >;
     pxPerSec: number;
     rowHeight: number;
     /** MIDI 文件拖放回调（用于创建 MIDI clip） */
@@ -78,6 +84,7 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
         ensureDropPreviewDuration,
         getDropPreviewWidthPx,
         setImportModeMenu,
+        setProjectActionMenu,
         pxPerSec,
         rowHeight,
         onMidiDrop,
@@ -436,6 +443,49 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                     const beat = snapDropBeat(rawBeat, trackId);
                     const filePaths: string[] = (detail as any).filePaths;
                     const isMulti = Array.isArray(filePaths) && filePaths.length > 1;
+                    const isRightDrag = !!(detail as any).isRightDrag;
+                    const filePath = detail.filePath;
+                    const actionKind = detectExternalPathAction(filePath);
+
+                    // 右键松开后浏览器会立即触发 contextmenu 事件；若不拦截，
+                    // 该事件会被菜单 backdrop 的 onContextMenu 捕获，导致刚
+                    // 弹出的菜单立刻被关闭。注册一次性 capturing 拦截器吞掉它。
+                    const suppressCtx = (ev: Event) => {
+                        ev.preventDefault();
+                        ev.stopImmediatePropagation();
+                        window.removeEventListener("contextmenu", suppressCtx, true);
+                    };
+
+                    if (actionKind === "openProject") {
+                        // 拖入 HiFiShifter 工程（hshp/hsp）：始终弹出
+                        // 「打开工程 / 导入工程」操作菜单，不直接执行打开。
+                        window.addEventListener("contextmenu", suppressCtx, true);
+                        setProjectActionMenu?.({
+                            x: detail.clientX,
+                            y: detail.clientY,
+                            path: filePath,
+                        });
+                        clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+                        return;
+                    }
+
+                    if (
+                        isRightDrag &&
+                        (actionKind === "importAudio" || actionKind === "importMidi")
+                    ) {
+                        // 右键拖拽媒体文件 → 弹出导入模式菜单
+                        // （跨时间添加 / 跨轨道添加 / 作为 Take 添加）。
+                        window.addEventListener("contextmenu", suppressCtx, true);
+                        setImportModeMenu({
+                            x: detail.clientX,
+                            y: detail.clientY,
+                            audioPaths: isMulti ? filePaths : [filePath],
+                            trackId,
+                            startSec: beat,
+                        });
+                        clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+                        return;
+                    }
 
                     if (isMulti) {
                         setImportModeMenu({
@@ -446,19 +496,19 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                             startSec: beat,
                         });
                     } else {
-                        const actionKind = detectExternalPathAction(detail.filePath);
                         if (actionKind === "importMidi") {
                             onMidiDrop?.({
-                                midiPath: detail.filePath,
+                                midiPath: filePath,
                                 trackId,
                                 startSec: beat,
                             });
                         } else if (actionKind && actionKind !== "importAudio") {
-                            emitExternalFileAction(actionKind, detail.filePath);
+                            // rpp / vshp / vsp 工程文件：直接视为对应格式的导入。
+                            emitExternalFileAction(actionKind, filePath);
                         } else {
                             void dispatch(
                                 importAudioAtPosition({
-                                    audioPath: detail.filePath,
+                                    audioPath: filePath,
                                     trackId,
                                     startSec: beat,
                                 }),

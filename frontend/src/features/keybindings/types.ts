@@ -35,8 +35,15 @@ export type ActionId =
     | "project.save" // 保存
     | "project.saveAs" // 另存为
     | "project.export" // 导出音频
+    | "project.importMedia" // 导入媒体文件
+    | "project.importMidi" // 导入 MIDI
+    | "project.importHifishifter" // 导入 HiFiShifter 工程
+    | "project.importReaper" // 导入 Reaper 工程
+    | "project.importVocalShifter" // 导入 VocalShifter 工程
     // 轨道
     | "track.add" // 新建轨道
+    | "track.clone" // 克隆选中轨道
+    | "track.delete" // 删除选中轨道
     | "track.selectUp" // 选择上一条轨道
     | "track.selectDown" // 选择下一条轨道
     // Clip 操作
@@ -187,6 +194,17 @@ export interface ActionMeta {
      * 作用域上下文（仅用于键盘快捷键的冲突检测与事件路由）。
      * 具有不同 scopedContext 的绑定不会视为冲突，
      * 因为它们在不同的 UI 上下文中激活（如 quickSearch 弹窗中）。
+     *
+     * 支持的值：
+     * - `"paramEditorSelect"` — 参数编辑器（钢琴卷帘）内、选择工具下的操作
+     *   （移调/设置音高/平均/平滑/量化等）。焦点不在参数编辑器时该组操作
+     *   不响应（硬排除）。
+     * - `"timelineFocus"`     — 当前焦点窗口为时间轴时优先（时间轴缩放等）。
+     * - `"trackHeaderFocus"`  — 当前焦点位于轨道头时优先（轨道面板操作）。
+     *   与全局操作（如 clip.*）共用按键时按焦点自动路由：
+     *   焦点在轨道头 → 轨道操作；焦点在时间轴 → 音频块操作。
+     * - `"quickSearch"`       — 快速搜索弹窗内的导航/确认键。
+     * - `"pianoRollVibratoDrag"` — 直线/颤音拖拽期间的振幅/频率调节键。
      */
     scopedContext?: string;
 }

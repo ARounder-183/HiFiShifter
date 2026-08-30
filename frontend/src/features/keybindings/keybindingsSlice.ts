@@ -278,8 +278,16 @@ export function findConflicts(
                     continue;
                 }
             } else if (!isModifierMeta(selfMeta) && !isModifierMeta(otherMeta)) {
-                // 键盘快捷键 vs 键盘快捷键：作用域上下文不同则不冲突
-                // （例如 quickSearch 弹窗内的绑定不与全局绑定冲突）
+                // 键盘快捷键 vs 键盘快捷键：作用域上下文不同则不冲突。
+                //
+                // 这把「赋值时的冲突检测」与「运行时的焦点路由」（见
+                // focusRouting.ts）对齐：不同作用域共用按键是刻意支持的设计
+                // （例如「添加轨道」Ctrl+T 与参数编辑器「音高设置到」Ctrl+T、
+                // 音频块删除 Delete 与轨道删除 Ctrl+Delete），它们不会在同一
+                // 焦点下同时响应，而是由当前焦点决定期望的编辑目标 —— 与
+                // 复制/粘贴（clip.copy 与 pianoRoll.copy 共用 Ctrl+C）同构。
+                // 同样的按键在相同作用域内重复使用（例如两个 paramEditorSelect
+                // 操作）才是真正的歧义，必须提示冲突。
                 if (selfMeta?.scopedContext !== otherMeta?.scopedContext) {
                     continue;
                 }

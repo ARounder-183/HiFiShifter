@@ -18,10 +18,11 @@ fn update_window_title(window: &Window, name: &str, dirty: bool) {
     let _ = window.set_title(&title);
 }
 
-/// 弹出文件选择对话框，选择 .rpp 文件。
+/// 弹出文件选择对话框，选择 .rpp / .rpp-bak 文件。
 pub(super) fn open_reaper_dialog() -> serde_json::Value {
     let picked = rfd::FileDialog::new()
-        .add_filter("Reaper Project", &["rpp", "RPP"])
+        .add_filter("Reaper Project", &["rpp"])
+        .add_filter("Reaper Backup Project", &["rpp-bak"])
         .pick_file();
 
     match picked {

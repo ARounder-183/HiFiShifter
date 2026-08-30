@@ -31,9 +31,10 @@ fn segment_overlap_sec(left_timeline_sec: f64, right_timeline_sec: f64) -> f64 {
         .min(SEGMENT_OVERLAP_MAX_SEC * 0.5)
 }
 
-/// 轨道颜色调色板（与 state.rs / vocalshifter_import.rs 一致）
+/// 轨道颜色调色板（与 state.rs / vocalshifter_import.rs 一致，灰色开头）
 const TRACK_COLORS: &[&str] = &[
-    "#4a8fd1", "#7b6bc4", "#43a875", "#cf6f2e", "#f087b5", "#b845a5", "#f0d25e", "#d94f4a",
+    "#74787e", "#4a8fd1", "#7b6bc4", "#43a875", "#cf6f2e", "#f087b5", "#b845a5", "#f0d25e",
+    "#d94f4a",
 ];
 
 fn clip_color() -> String {

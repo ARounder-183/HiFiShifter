@@ -81,7 +81,14 @@ export function EditContextMenu({
     const meanQuantizeShortcut = useMenuShortcut("edit.meanQuantize");
 
     useEffect(() => {
-        function handleClickOutside(e: MouseEvent) {
+        // 在 window 的捕获阶段监听 pointerdown：目标/冒泡阶段的监听会被
+        // 时间轴与钢琴卷帘交互的 stopPropagation 吞掉。例如点击 Clip 时
+        // ClipItem 的 onPointerDown 会在 React 根容器上 stopPropagation，
+        // 事件根本到不了 document —— 这是此前"点击轨道/Clip 菜单不消失"
+        // 的根源。捕获阶段在一切目标处理器之前运行，任何 stopPropagation
+        // 都无法阻断（与时间轴 Clip 菜单、轨道列表菜单、标尺菜单的关闭
+        // 方式一致）。
+        function handlePointerDownOutside(e: PointerEvent) {
             if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
                 onClose();
             }
@@ -89,11 +96,11 @@ export function EditContextMenu({
         function handleEsc(e: KeyboardEvent) {
             if (e.key === "Escape") onClose();
         }
-        document.addEventListener("mousedown", handleClickOutside);
-        document.addEventListener("keydown", handleEsc);
+        window.addEventListener("pointerdown", handlePointerDownOutside, true);
+        window.addEventListener("keydown", handleEsc, true);
         return () => {
-            document.removeEventListener("mousedown", handleClickOutside);
-            document.removeEventListener("keydown", handleEsc);
+            window.removeEventListener("pointerdown", handlePointerDownOutside, true);
+            window.removeEventListener("keydown", handleEsc, true);
         };
     }, [onClose]);
 
@@ -173,11 +180,7 @@ export function EditContextMenu({
             {isPitchParam && onSaveAsPitchRef && (
                 <>
                     <div className={sepClass} />
-                    {item(
-                        tAny("menu_save_as_pitch_ref"),
-                        undefined,
-                        closeAfter(onSaveAsPitchRef),
-                    )}
+                    {item(tAny("menu_save_as_pitch_ref"), undefined, closeAfter(onSaveAsPitchRef))}
                     {onExportMidi &&
                         item(tAny("menu_export_midi"), undefined, closeAfter(onExportMidi))}
                 </>

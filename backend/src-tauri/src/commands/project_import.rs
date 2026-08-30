@@ -23,7 +23,9 @@ fn update_window_title(window: &Window, name: &str, dirty: bool) {
 
 pub(super) fn import_project_dialog() -> serde_json::Value {
     let picked = rfd::FileDialog::new()
-        .add_filter("HiFiShifter Project", &["hshp", "hsp", "json"])
+        .add_filter("HiFiShifter Project", &["hshp", "hsp"])
+        .add_filter("HiFiShifter Backup Project", &["hshp-bak", "hsp-bak"])
+        .add_filter("JSON Project", &["json"])
         .pick_file();
     match picked {
         None => serde_json::json!({"ok": true, "canceled": true}),

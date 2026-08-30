@@ -5,33 +5,16 @@ import type { ClipTemplate } from "../sessionTypes";
 import { waveformMipmapStore } from "../../../utils/waveformMipmapStore";
 import { computePasteEndSec, type PasteEndClipLike } from "../pastePlayhead";
 
-// 注意：这�?thunk 依赖 SessionState（目前仍�?sessionSlice.ts 内部定义）�?
-// 我们在此处用 type-only import，避免运行时循环依赖�?
+// 注意：这个 thunk 依赖 SessionState（目前仍然在 sessionSlice.ts 内部定义），
+// 我们在此处用 type-only import，避免运行时循环依赖。
 import type { SessionState } from "../sessionSlice";
-
-/** 新建轨道的默认颜色：中性灰（偏深）。后端 add_track 会自行分配彩色，
- * 创建成功后立即覆盖为灰色 —— 除非用户之后手动改色。 */
-const NEW_TRACK_DEFAULT_COLOR = "#74787e";
 
 export const addTrackRemote = createAsyncThunk(
     "session/addTrackRemote",
-    async (payload: { name?: string; parentTrackId?: string | null }, { getState }) => {
-        // getState() 返回根 state，session 切片在 .session 下。
-        const state = getState() as { session: SessionState };
-        const beforeIds = new Set(state.session.tracks.map((track) => track.id));
-        const result = await webApi.addTrackNested(payload);
-        const snapshot = result as {
-            ok?: boolean;
-            tracks?: Array<{ id: string; color?: string }>;
-        };
-        const newTrack = (snapshot.tracks ?? []).find((track) => !beforeIds.has(track.id));
-        if (snapshot.ok !== false && newTrack) {
-            // 后端持久化灰色 + 就地修正快照：reducer 应用快照时即是灰色，
-            // 不会出现"后端彩色闪一下再变灰"。
-            void webApi.setTrackState({ trackId: newTrack.id, color: NEW_TRACK_DEFAULT_COLOR });
-            newTrack.color = NEW_TRACK_DEFAULT_COLOR;
-        }
-        return result;
+    // 注意：不再强制设置灰色 —— 新建轨道使用后端调色板分配的彩色，
+    // 仅新建工程的初始 Main 轨道为灰色（见后端 TimelineState::default）。
+    async (payload: { name?: string; parentTrackId?: string | null; index?: number }) => {
+        return webApi.addTrackNested(payload);
     },
 );
 
@@ -373,7 +356,12 @@ export const renameClipTakeRemote = createAsyncThunk(
 
 export const setClipTakeReversedRemote = createAsyncThunk(
     "session/setClipTakeReversedRemote",
-    async (payload: { clipId: string; takeId: string; reversed: boolean; checkpoint?: boolean }) => {
+    async (payload: {
+        clipId: string;
+        takeId: string;
+        reversed: boolean;
+        checkpoint?: boolean;
+    }) => {
         return webApi.setClipTakeReversed(payload);
     },
 );

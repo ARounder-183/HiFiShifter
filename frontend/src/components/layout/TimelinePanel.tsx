@@ -291,6 +291,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     const onImportTargetChange =
         midiDialogSource === "dragDrop" ? onImportTargetDragDropChange : onImportTargetMenuChange;
     const { t } = useI18n();
+    const tAny = t as (key: string) => string;
     const ignoreGrouping = useAppSelector((state) => state.session.ignoreGrouping);
     const disabledGroupIds = useAppSelector((state) => state.session.disabledGroupIds);
     // 双击名称的第一次点击会把播放头移动到点击位置，第二次点击可能落在播放头线上。
@@ -314,6 +315,13 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         midiPath: string | null;
     }>({ open: false, clipId: null, midiPath: null });
     const [timeDisplaySettingsOpen, setTimeDisplaySettingsOpen] = React.useState(false);
+
+    // 文件浏览器拖入 HiFiShifter 工程（hshp/hsp）时的「打开工程 / 导入工程」菜单。
+    const [projectActionMenu, setProjectActionMenu] = React.useState<{
+        x: number;
+        y: number;
+        path: string;
+    } | null>(null);
 
     // ── 1. State / refs / viewport / scroll / 坐标转换 ──────
     const state = useTimelineState();
@@ -859,6 +867,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             ensureDropPreviewDuration,
             getDropPreviewWidthPx,
             setImportModeMenu,
+            setProjectActionMenu,
             pxPerSec,
             rowHeight,
             onMidiDrop: (payload) => {
@@ -1288,43 +1297,37 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             }),
         [pxPerSec, scrollLeft, timelineScrollTop, viewportWidth],
     );
-    const sparseClipRenderModel = useMemo(
-        () => {
-            // 前导重叠秒数：每个 clip 的"被同轨前一个 clip 压住"部分，
-            // canvas 在该区画半透色块，让下 clip 的色块/波形透出——避免两层
-            // 不透明色块叠加成脏色。
-            const leadingOverlapSecByClipId: Record<string, number> = {};
-            for (const track of visibleTracks) {
-                const clips = visibleTrackClipsById[track.id] ?? [];
-                Object.assign(
-                    leadingOverlapSecByClipId,
-                    computeLeadingOverlapSecByClipId(clips),
-                );
-            }
-            return buildSparseClipRenderModel({
-                visibleTracks,
-                startTrackIndex: timelineRenderModel.startIndex,
-                visibleTrackClipsById,
-                axis: timelineAxis,
-                rowHeight,
-                selectedClipId: s.selectedClipId,
-                multiSelectedClipIds,
-                renamingClipId,
-                disabledGroupIds,
-                leadingOverlapSecByClipId,
-            });
-        },
-        [
-            multiSelectedClipIds,
-            timelineAxis,
-            renamingClipId,
-            rowHeight,
-            s.selectedClipId,
-            timelineRenderModel.startIndex,
-            visibleTrackClipsById,
+    const sparseClipRenderModel = useMemo(() => {
+        // 前导重叠秒数：每个 clip 的"被同轨前一个 clip 压住"部分，
+        // canvas 在该区画半透色块，让下 clip 的色块/波形透出——避免两层
+        // 不透明色块叠加成脏色。
+        const leadingOverlapSecByClipId: Record<string, number> = {};
+        for (const track of visibleTracks) {
+            const clips = visibleTrackClipsById[track.id] ?? [];
+            Object.assign(leadingOverlapSecByClipId, computeLeadingOverlapSecByClipId(clips));
+        }
+        return buildSparseClipRenderModel({
             visibleTracks,
-        ],
-    );
+            startTrackIndex: timelineRenderModel.startIndex,
+            visibleTrackClipsById,
+            axis: timelineAxis,
+            rowHeight,
+            selectedClipId: s.selectedClipId,
+            multiSelectedClipIds,
+            renamingClipId,
+            disabledGroupIds,
+            leadingOverlapSecByClipId,
+        });
+    }, [
+        multiSelectedClipIds,
+        timelineAxis,
+        renamingClipId,
+        rowHeight,
+        s.selectedClipId,
+        timelineRenderModel.startIndex,
+        visibleTrackClipsById,
+        visibleTracks,
+    ]);
     const timelineCanvasModel = useMemo(
         () => ({
             drawClips: sparseClipRenderModel.drawClips,
@@ -1790,9 +1793,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                             trackId !== sessionRef.current.selectedTrackId
                         ) {
                             // 同容器捕获路径：点击切轨不恢复后端记住的选中 clip。
-                            void dispatch(
-                                selectTrackRemote({ trackId, applySelectedClip: false }),
-                            );
+                            void dispatch(selectTrackRemote({ trackId, applySelectedClip: false }));
                         }
                         startDeferredPlayheadSeek({
                             startClientX: e.clientX,
@@ -1808,7 +1809,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         });
                     }}
                 >
-                    {/* Track Lanes（外层含右侧虚拟宽度，内容层严格等于工程宽） */}
+                    {/* Track Lanes（外层含右侧虚拟宽度，内容层覆盖工程宽 + 视口宽） */}
                     <div
                         className="relative"
                         style={{
@@ -1816,10 +1817,17 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                             height: contentHeight,
                         }}
                     >
-                        {/* 内容层宽度严格等于工程宽：右侧虚拟宽度只用于滚动，不渲染任何内容 */}
+                        {/* 内容层宽度 = 工程宽 + 视口宽（= paddedContentWidth）：
+                            拖拽预览 / 吸附竖线高亮 / 拖拽中的 clip 与 ghost / 选区框等
+                            瞬态 UI 不再被“严格等于工程宽”的旧内容层按工程长度裁剪 ——
+                            用户看到与操作到的轨道在可视与可操作范围内表现为无限延伸
+                            （水平滚动的 maxScrollLeft 上限是有意保留的）。 */}
                         <div
                             className="absolute top-0 left-0 overflow-hidden"
-                            style={{ width: contentWidth, height: contentHeight }}
+                            style={{
+                                width: timelineScrollRange.paddedContentWidth,
+                                height: contentHeight,
+                            }}
                         >
                             {selectionRect ? (
                                 <div
@@ -1972,29 +1980,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 contentHeight={contentHeight}
                             />
 
-                            {/* Drop preview (ghost item) */}
-                            {dropPreview ? (
-                                <div
-                                    ref={dropPreviewRef}
-                                    className="absolute z-30 pointer-events-none"
-                                    style={{
-                                        left: Math.max(0, dropPreview.startSec * pxPerSec),
-                                        top: rowTopForTrackId(dropPreview.trackId) + 8,
-                                        width:
-                                            dropPreview.durationSec > 0
-                                                ? Math.max(1, pxPerSec * dropPreview.durationSec)
-                                                : 80,
-                                        height: rowHeight - 16,
-                                    }}
-                                >
-                                    <div className="h-full w-full rounded-sm border border-dashed border-qt-highlight bg-[color-mix(in_oklab,var(--qt-highlight)_20%,transparent)]">
-                                        <div className="px-2 pt-1 text-[10px] text-qt-text truncate">
-                                            {dropPreview.fileName}
-                                        </div>
-                                    </div>
-                                </div>
-                            ) : null}
-
                             {s.clipFormantToolWindow.open && activeFormantToolClip ? (
                                 <ClipFormantToolWindow
                                     clip={activeFormantToolClip}
@@ -2014,6 +1999,32 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                             {/* Playhead 已移入 TimelineSurface sticky 层：与网格/Clip/
                                 波形在同一滚动事件内更新，避免 DOM 原生层与 sticky 层错帧。 */}
                         </div>
+
+                        {/* Drop preview (ghost item)。
+                            渲染在外层 padded 容器内（同一坐标原点）：预览宽度超出
+                            工程右缘时仍完整显示 —— 拖入比工程剩余更长或更靠右的
+                            媒体时，预览与实际导入一样不受“工程长度”限制。 */}
+                        {dropPreview ? (
+                            <div
+                                ref={dropPreviewRef}
+                                className="absolute z-30 pointer-events-none"
+                                style={{
+                                    left: Math.max(0, dropPreview.startSec * pxPerSec),
+                                    top: rowTopForTrackId(dropPreview.trackId) + 8,
+                                    width:
+                                        dropPreview.durationSec > 0
+                                            ? Math.max(1, pxPerSec * dropPreview.durationSec)
+                                            : 80,
+                                    height: rowHeight - 16,
+                                }}
+                            >
+                                <div className="h-full w-full rounded-sm border border-dashed border-qt-highlight bg-[color-mix(in_oklab,var(--qt-highlight)_20%,transparent)]">
+                                    <div className="px-2 pt-1 text-[10px] text-qt-text truncate">
+                                        {dropPreview.fileName}
+                                    </div>
+                                </div>
+                            </div>
+                        ) : null}
 
                         {viewportWidth > 0 ? (
                             /* 背景网格 / Clip 体 / 波形面全部锚定在同一 sticky 视口层：
@@ -2137,6 +2148,49 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 }}
                             >
                                 {t("import_as_takes")}
+                            </button>
+                        </div>
+                    </div>
+                )}
+
+                {/* 工程文件（hshp/hsp）拖放操作菜单：打开工程 / 导入工程 */}
+                {projectActionMenu && (
+                    <div
+                        className="fixed inset-0 z-[9999]"
+                        onClick={() => setProjectActionMenu(null)}
+                        onContextMenu={(e) => {
+                            e.preventDefault();
+                            setProjectActionMenu(null);
+                        }}
+                    >
+                        <div
+                            className="absolute bg-qt-panel border border-qt-border rounded shadow-lg py-1 min-w-[180px]"
+                            style={{ left: projectActionMenu.x, top: projectActionMenu.y }}
+                            onClick={(e) => e.stopPropagation()}
+                        >
+                            <button
+                                className="w-full text-left px-3 py-1.5 text-sm text-qt-text hover:bg-qt-hover"
+                                onClick={() => {
+                                    const m = projectActionMenu;
+                                    setProjectActionMenu(null);
+                                    emitExternalFileAction("openProject", m.path);
+                                }}
+                            >
+                                {t("menu_open_project")}
+                            </button>
+                            <button
+                                className="w-full text-left px-3 py-1.5 text-sm text-qt-text hover:bg-qt-hover"
+                                onClick={() => {
+                                    const m = projectActionMenu;
+                                    setProjectActionMenu(null);
+                                    window.dispatchEvent(
+                                        new CustomEvent("hifi:importProjectPick", {
+                                            detail: { path: m.path },
+                                        }),
+                                    );
+                                }}
+                            >
+                                {tAny("import_project_dialog_title")}
                             </button>
                         </div>
                     </div>

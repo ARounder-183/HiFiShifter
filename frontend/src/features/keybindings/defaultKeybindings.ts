@@ -31,7 +31,7 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     "edit.initialize": { key: "backspace" },
     "edit.transposeCents": { key: "f", ctrl: true },
     "edit.transposeDegrees": { key: "i", ctrl: true },
-    "edit.setPitch": { key: "t", ctrl: true },
+    "edit.setPitch": { key: "0", ctrl: true },
     "edit.average": { key: "e", ctrl: true },
     "edit.smooth": { key: "m", ctrl: true },
     "edit.addVibrato": { key: "b", ctrl: true },
@@ -46,9 +46,16 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     "project.save": { key: "s", ctrl: true },
     "project.saveAs": { key: "s", ctrl: true, shift: true },
     "project.export": { key: "e", ctrl: true },
+    "project.importMedia": { key: "o", ctrl: true },
+    "project.importMidi": { key: "__none__" },
+    "project.importHifishifter": { key: "__none__" },
+    "project.importReaper": { key: "__none__" },
+    "project.importVocalShifter": { key: "__none__" },
 
     // 轨道
     "track.add": { key: "t", ctrl: true },
+    "track.clone": { key: "d", ctrl: true },
+    "track.delete": { key: "delete", ctrl: true },
     "track.selectUp": { key: "arrowup" },
     "track.selectDown": { key: "arrowdown" },
 
@@ -242,8 +249,35 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
     "project.save": { labelKey: "kb_project_save", group: "project" },
     "project.saveAs": { labelKey: "kb_project_save_as", group: "project" },
     "project.export": { labelKey: "kb_project_export", group: "project" },
+    "project.importMedia": { labelKey: "kb_project_import_media", group: "project" },
+    "project.importMidi": { labelKey: "kb_project_import_midi", group: "project" },
+    "project.importHifishifter": {
+        labelKey: "kb_project_import_hifishifter",
+        group: "project",
+    },
+    "project.importReaper": {
+        labelKey: "kb_project_import_reaper",
+        group: "project",
+    },
+    "project.importVocalShifter": {
+        labelKey: "kb_project_import_vocalshifter",
+        group: "project",
+    },
 
     "track.add": { labelKey: "kb_track_add", group: "project" },
+    // 克隆/删除选中轨道是轨道面板操作：与全局操作（如 clip.delete 的裸
+    // Delete）共用按键时由焦点裁决 —— 焦点在轨道头优先轨道操作，否则落
+    // 回全局操作（拷贝/粘贴同构的焦点路由，见 focusRouting.ts）。
+    "track.clone": {
+        labelKey: "kb_track_clone",
+        group: "project",
+        scopedContext: "trackHeaderFocus",
+    },
+    "track.delete": {
+        labelKey: "kb_track_delete",
+        group: "project",
+        scopedContext: "trackHeaderFocus",
+    },
     "track.selectUp": { labelKey: "kb_track_select_up", group: "project" },
     "track.selectDown": { labelKey: "kb_track_select_down", group: "project" },
 
@@ -258,8 +292,16 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
     "clip.cycleTake": { labelKey: "kb_clip_cycle_take", group: "clip" },
     "clip.cycleTakePrev": { labelKey: "kb_clip_cycle_take_prev", group: "clip" },
 
-    "pianoRoll.copy": { labelKey: "kb_pianoroll_copy", group: "pianoRoll" },
-    "pianoRoll.paste": { labelKey: "kb_pianoroll_paste", group: "pianoRoll" },
+    "pianoRoll.copy": {
+        labelKey: "kb_pianoroll_copy",
+        group: "pianoRoll",
+        scopedContext: "paramEditorSelect",
+    },
+    "pianoRoll.paste": {
+        labelKey: "kb_pianoroll_paste",
+        group: "pianoRoll",
+        scopedContext: "paramEditorSelect",
+    },
     "pianoRoll.shiftParamUp": {
         labelKey: "kb_pianoroll_shift_param_up",
         group: "pianoRoll",

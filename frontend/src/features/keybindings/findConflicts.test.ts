@@ -108,4 +108,34 @@ describe("findConflicts — 键盘快捷键按作用域检测", () => {
         const conflicts = findConflicts({}, "clip.split", { key: "g" });
         expect(conflicts).toContain("clip.group");
     });
+
+    it("clip.* 与 pianoRoll 复制/粘贴共用 Ctrl+C/V 不算冲突（焦点路由，同复制/粘贴先例）", () => {
+        // 参数编辑器内的参数帧复制/粘贴与时间轴音频块复制/粘贴共绑
+        // Ctrl+C/V，由焦点决定期望目标 —— 与「添加轨道 vs 音高设置到」
+        // 的焦点路由同构，不视为冲突。
+        const copyConflicts = findConflicts(
+            {},
+            "pianoRoll.copy",
+            DEFAULT_KEYBINDINGS["clip.copy"],
+        );
+        expect(copyConflicts).not.toContain("clip.copy");
+        const pasteConflicts = findConflicts(
+            {},
+            "pianoRoll.paste",
+            DEFAULT_KEYBINDINGS["clip.paste"],
+        );
+        expect(pasteConflicts).not.toContain("clip.paste");
+    });
+
+    it("track.delete 与 clip.delete 共用 Delete 不算冲突（轨道头焦点路由）", () => {
+        // 用户把「删除选中轨道」重绑为裸 Delete 时，轨道头焦点删除轨道、
+        // 时间轴焦点删除音频块；findConflicts 不拦截该赋值。
+        const conflicts = findConflicts({}, "track.delete", { key: "delete" });
+        expect(conflicts).not.toContain("clip.delete");
+    });
+
+    it("相同作用域内键值相同仍为冲突（paramEditorSelect 内两个操作共用按键）", () => {
+        const conflicts = findConflicts({}, "edit.quantize", { key: "q", ctrl: true });
+        expect(conflicts).toContain("edit.meanQuantize");
+    });
 });

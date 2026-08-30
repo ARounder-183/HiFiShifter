@@ -3,7 +3,12 @@ import { Flex, Box, Text, IconButton, Select } from "@radix-ui/themes";
 import { Cross2Icon, PlusIcon } from "@radix-ui/react-icons";
 import { shallowEqual } from "react-redux";
 import type { TrackInfo, TrackMeterInfo } from "../../../features/session/sessionTypes";
-import { isNoneBinding, isModifierActive } from "../../../features/keybindings/keybindingsSlice";
+import {
+    isNoneBinding,
+    isModifierActive,
+    selectKeybinding,
+    formatKeybinding,
+} from "../../../features/keybindings/keybindingsSlice";
 import type { Keybinding } from "../../../features/keybindings/types";
 import type { MessageKey } from "../../../i18n/messages";
 import { useAppSelector } from "../../../app/hooks";
@@ -477,6 +482,17 @@ const TrackListInner: React.FC<TrackListProps> = ({
     const trackCtxMenuRef = useRef<HTMLDivElement | null>(null);
     const [listScrollTop, setListScrollTop] = useState(0);
     const [listViewportHeight, setListViewportHeight] = useState(0);
+
+    // 轨道右键菜单的快捷键提示（随用户在快捷键设置中的自定义绑定实时变化）。
+    const trackAddShortcut = useAppSelector((s) =>
+        formatKeybinding(selectKeybinding(s, "track.add"), ""),
+    );
+    const trackCloneShortcut = useAppSelector((s) =>
+        formatKeybinding(selectKeybinding(s, "track.clone"), ""),
+    );
+    const trackDeleteShortcut = useAppSelector((s) =>
+        formatKeybinding(selectKeybinding(s, "track.delete"), ""),
+    );
 
     // 自动修正菜单溢出屏幕
     useLayoutEffect(() => {
@@ -1989,32 +2005,47 @@ const TrackListInner: React.FC<TrackListProps> = ({
                     onPointerDown={(e) => e.stopPropagation()}
                 >
                     <button
-                        className="w-full text-left px-3 py-1.5 text-sm hover:bg-qt-button-hover transition-colors"
+                        className="w-full text-left px-3 py-1.5 text-sm hover:bg-qt-button-hover transition-colors flex items-center justify-between gap-3"
                         onClick={() => {
                             onCreateTrackBelow?.(trackCtxMenu.trackId);
                             setTrackCtxMenu(null);
                         }}
                     >
-                        {t("track_add")}
+                        <span>{t("track_add")}</span>
+                        {trackAddShortcut && (
+                            <span className="text-[10px] opacity-50 shrink-0">
+                                {trackAddShortcut}
+                            </span>
+                        )}
                     </button>
                     <button
-                        className="w-full text-left px-3 py-1.5 text-sm hover:bg-qt-button-hover transition-colors"
+                        className="w-full text-left px-3 py-1.5 text-sm hover:bg-qt-button-hover transition-colors flex items-center justify-between gap-3"
                         onClick={() => {
                             onDuplicateTrack?.(trackCtxMenu.trackId);
                             setTrackCtxMenu(null);
                         }}
                     >
-                        {t("track_clone")}
+                        <span>{t("track_clone")}</span>
+                        {trackCloneShortcut && (
+                            <span className="text-[10px] opacity-50 shrink-0">
+                                {trackCloneShortcut}
+                            </span>
+                        )}
                     </button>
                     <button
-                        className="w-full text-left px-3 py-1.5 text-sm hover:bg-qt-button-hover transition-colors text-red-400 hover:text-red-300"
+                        className="w-full text-left px-3 py-1.5 text-sm hover:bg-qt-button-hover transition-colors text-red-400 hover:text-red-300 flex items-center justify-between gap-3"
                         disabled={isLastRootTrack(trackCtxMenu.trackId)}
                         onClick={() => {
                             onRemoveTrack(trackCtxMenu.trackId);
                             setTrackCtxMenu(null);
                         }}
                     >
-                        {t("ctx_delete")}
+                        <span>{t("ctx_delete")}</span>
+                        {trackDeleteShortcut && (
+                            <span className="text-[10px] opacity-50 shrink-0">
+                                {trackDeleteShortcut}
+                            </span>
+                        )}
                     </button>
                 </div>
             )}

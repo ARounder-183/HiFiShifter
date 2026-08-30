@@ -33,22 +33,12 @@ export const redoRemote = createAsyncThunk("session/redoRemote", async () => {
     return webApi.redoTimeline();
 });
 
-/** 新工程的初始轨道统一为中性灰（后端 add_track 会分配彩色，这里覆盖）。 */
-const NEW_PROJECT_TRACK_COLOR = "#74787e";
-
+/** 新建工程的初始轨道（Main）为灰色：后端 TimelineState::default 直接
+ * 创建灰色初始轨道（见 backend state.rs），此处无需再覆盖快照。 */
 export const newProjectRemote = createAsyncThunk("session/newProjectRemote", async () => {
     // 新建工程前先取消旧工程的后台预渲染，避免旧渲染继续占用资源。
     await coreApi.cancelBackgroundRender();
-    const result = await webApi.newProject();
-    // 就地修正快照：reducer 应用时初始轨道即为灰色（仅新建工程；打开既有
-    // 工程走 openProjectFromDialog，不在此列，用户自选的颜色不受影响）。
-    const snapshot = result as { ok?: boolean; tracks?: Array<{ color?: string }> };
-    if (snapshot.ok !== false && Array.isArray(snapshot.tracks)) {
-        for (const track of snapshot.tracks) {
-            track.color = NEW_PROJECT_TRACK_COLOR;
-        }
-    }
-    return result;
+    return webApi.newProject();
 });
 
 export const openProjectFromDialog = createAsyncThunk(

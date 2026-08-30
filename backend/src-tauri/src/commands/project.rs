@@ -852,6 +852,7 @@ pub(super) fn new_project(
 pub(super) fn open_project_dialog() -> serde_json::Value {
     let picked = rfd::FileDialog::new()
         .add_filter("HiFiShifter Project", &["hshp", "hsp"])
+        .add_filter("HiFiShifter Backup Project", &["hshp-bak", "hsp-bak"])
         .add_filter("JSON Project", &["json"])
         .pick_file();
     match picked {

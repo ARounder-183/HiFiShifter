@@ -28,7 +28,9 @@ import {
     pickProjectToImport,
     importProjectFromPath,
     openVocalShifterFromPath,
+    openVocalShifterFromDialog,
     openReaperFromPath,
+    openReaperFromDialog,
     importAudioFromPath,
     saveProjectRemote,
     saveProjectAsRemote,
@@ -37,6 +39,8 @@ import {
     setToolMode,
     checkpointHistory,
     addTrackRemote,
+    duplicateTrackRemote,
+    removeTrackRemote,
     replaceClipSourceRemote,
 } from "./features/session/sessionSlice";
 import { useI18n } from "./i18n/I18nProvider";
@@ -50,7 +54,7 @@ import { QuickSearchPopup } from "./components/layout/QuickSearchPopup";
 import { useKeybindings } from "./features/keybindings/useKeybindings";
 import type { ActionId } from "./features/keybindings/types";
 import { store } from "./app/store";
-import { resolveRootTrackId } from "./features/session/trackUtils";
+import { resolveRootTrackId, computeInsertBelowPlacement } from "./features/session/trackUtils";
 import { getParamShiftStep } from "./components/layout/pianoRoll/paramShiftStep";
 import { runConfirmedExitClose } from "./confirmedExitClose";
 import { paramsApi } from "./services/api";
@@ -319,8 +323,9 @@ function mergeLatestSourceFileChanges(
 function detectExternalActionKindFromPath(path: string): ExternalFileActionKind | null {
     const normalized = String(path ?? "").trim();
     if (!normalized) return null;
-    if (/\.(hshp|hsp|json)$/i.test(normalized)) return "openProject";
-    if (/\.rpp$/i.test(normalized)) return "importReaper";
+    // 备份工程文件（.hshp-bak/.hsp-bak/.rpp-bak）与正本同格式，一并识别。
+    if (/\.(hshp|hsp|hshp-bak|hsp-bak|json)$/i.test(normalized)) return "openProject";
+    if (/\.(rpp|rpp-bak)$/i.test(normalized)) return "importReaper";
     if (/\.(vshp|vsp)$/i.test(normalized)) return "importVocalShifter";
     if (
         /\.(wav|flac|mp3|ogg|oga|opus|aac|m4a|aif|aiff|wma|ac3|eac3|ape|wv|mp2|mpa|dts|amr|mp4|m4v|mov|mkv|webm|avi|flv|wmv|ts|mts|m2ts|vob|mpg|mpeg|3gp|3g2|ogv|rm|rmvb)$/i.test(
@@ -1579,6 +1584,25 @@ function AppInner() {
         };
     }, [handleExternalFileAction]);
 
+    // 文件浏览器拖拽工程文件 → "导入工程"：携带路径打开导入选项对话框。
+    useEffect(() => {
+        function onImportProjectPick(event: Event) {
+            const path = String(
+                (event as CustomEvent<{ path?: string }>).detail?.path ?? "",
+            ).trim();
+            if (!path) return;
+            setProjectImportPick({ open: true, path });
+        }
+
+        window.addEventListener("hifi:importProjectPick", onImportProjectPick as EventListener);
+        return () => {
+            window.removeEventListener(
+                "hifi:importProjectPick",
+                onImportProjectPick as EventListener,
+            );
+        };
+    }, []);
+
     useEffect(() => {
         runtimeRef.current = {
             isPlaying: Boolean(runtimeIsPlaying),
@@ -2263,6 +2287,22 @@ function AppInner() {
                         }),
                     );
                     break;
+                case "project.importMedia":
+                    // 多文件/多音轨选择等交互由 MenuBar 的流程处理（与菜单项一致）。
+                    window.dispatchEvent(new CustomEvent("hifi:importMediaFromMenu"));
+                    break;
+                case "project.importMidi":
+                    handleImportMidiFromMenu();
+                    break;
+                case "project.importHifishifter":
+                    void handleImportProject();
+                    break;
+                case "project.importReaper":
+                    void dispatch(openReaperFromDialog());
+                    break;
+                case "project.importVocalShifter":
+                    void dispatch(openVocalShifterFromDialog());
+                    break;
                 case "mode.toggle": {
                     const cur = runtimeRef.current.toolMode;
                     if (cur === "select") {
@@ -2285,9 +2325,36 @@ function AppInner() {
                     setQuickSearchOpen(true);
                     break;
                 case "track.add": {
+                    // 新建轨道继承当前选中轨道的轨道层级（同 parentId），
+                    // 并紧跟在选中轨道下方插入（同级列表紧后一位）。
                     const ss = store.getState().session;
-                    const parentId = ss.selectedTrackId ?? null;
-                    void dispatch(addTrackRemote({ parentTrackId: parentId }));
+                    const placement = computeInsertBelowPlacement(ss.tracks, ss.selectedTrackId);
+                    void dispatch(
+                        addTrackRemote({
+                            parentTrackId: placement.parentTrackId,
+                            index: placement.index,
+                        }),
+                    );
+                    break;
+                }
+                case "track.clone": {
+                    const ss = store.getState().session;
+                    const selectedId = ss.selectedTrackId;
+                    if (!selectedId) break;
+                    void dispatch(duplicateTrackRemote(selectedId));
+                    break;
+                }
+                case "track.delete": {
+                    const ss = store.getState().session;
+                    const selectedId = ss.selectedTrackId;
+                    if (!selectedId) break;
+                    const selected = ss.tracks.find((t) => t.id === selectedId);
+                    // 与菜单一致：只剩下最后一个根轨道时禁止删除根轨道。
+                    if (!selected) break;
+                    if (!selected.parentId && ss.tracks.filter((t) => !t.parentId).length <= 1) {
+                        break;
+                    }
+                    void dispatch(removeTrackRemote(selectedId));
                     break;
                 }
                 case "track.selectUp":
@@ -2543,7 +2610,13 @@ function AppInner() {
                     break;
             }
         },
-        [dispatch, handleNewProject, handleOpenProject],
+        [
+            dispatch,
+            handleNewProject,
+            handleOpenProject,
+            handleImportMidiFromMenu,
+            handleImportProject,
+        ],
     );
 
     useKeybindings(handleKeybindingAction);

@@ -62,13 +62,15 @@ export function extractLocalFilePath(dt: DataTransfer): { path: string; name: st
 export function isProjectFilePath(path: string | null | undefined): boolean {
     const normalized = String(path ?? "").trim();
     if (!normalized) return false;
-    return /\.(hshp|hsp|json)$/i.test(normalized);
+    // 含备份工程文件（.hshp-bak / .hsp-bak）：格式与 .hshp/.hsp 相同，
+    // 系统级拖放/启动参数打开备份文件时按打开工程处理。
+    return /\.(hshp|hsp|hshp-bak|hsp-bak|json)$/i.test(normalized);
 }
 
 export function isReaperProjectFilePath(path: string | null | undefined): boolean {
     const normalized = String(path ?? "").trim();
     if (!normalized) return false;
-    return /\.rpp$/i.test(normalized);
+    return /\.(rpp|rpp-bak)$/i.test(normalized);
 }
 
 export function isVocalShifterProjectFilePath(path: string | null | undefined): boolean {
