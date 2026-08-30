@@ -215,11 +215,15 @@ export function drawTimelineCanvas(
         // 1~2 物理像素的渐变线，粗细随落点相位漂移。
         ctx.lineWidth = 1 / dpr;
         for (let index = 1; index <= rowCount; index += 1) {
-            const y = (Math.round(((startTrackIndex + index) * rowHeight) * dpr) + 0.5) / dpr;
-            if (y < viewportTopPx - 1 || y > viewportTopPx + args.height + 1) continue;
-            // 和网格使用完全相同的轨道内容底边：正常区域与工程末尾延长段落
-            // 都不会在轨道区下方画线，也不需要额外 DOM 遮挡。
-            if (y > bottomPx + 1e-6) continue;
+            const rawY = (startTrackIndex + index) * rowHeight;
+            // 边界判定用原始坐标：吸附只是绘制细节。最后一条轨道的底边与
+            // contentBottomPx 重合，若用吸附后的 y 过 guard（容差 1e-6），
+            // +0.5/dpr 的偏移会让这根线被误跳——底边横线消失。
+            if (rawY < viewportTopPx - 1 || rawY > viewportTopPx + args.height + 2) continue;
+            if (rawY > bottomPx + 1e-6) continue;
+            // 线体落在边界上方的设备像素行内：画布高度恰为内容底边，
+            // 若线心压在边界 +(0.5/dpr) 上，整根线会被画布下缘裁掉。
+            const y = (Math.round(rawY * dpr) - 0.5) / dpr;
             ctx.beginPath();
             ctx.moveTo(viewportLeft, y);
             ctx.lineTo(viewportLeft + args.width, y);
