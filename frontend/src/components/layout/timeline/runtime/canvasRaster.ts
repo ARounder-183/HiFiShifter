@@ -16,6 +16,9 @@
  * 1. 绘制坐标一律是 **CSS 像素**；
  * 2. 物理尺寸一律 `Math.round(css * dpr)`；
  * 3. WebGL 的 `u_resolution` 必须传 `physical / dpr`，**不是** CSS 尺寸。
+ * 4. 清屏必须覆盖整个物理 backing store（`clearCanvasPhysical`），不能沿用
+ *    `clearRect(0,0,cssW,cssH)`：当 `round(cssH*dpr)` 向上取整时，底部
+ *    0~0.5 物理行永远不被清除，贴底绘制的内容会永久残留在画布最底边。
  *
  * 推导：顶点在 CSS 空间 → NDC = `pos / (physical/dpr) * 2 - 1` → 物理像素
  * = `pos * dpr`，与 Canvas2D 的 `setTransform(dpr,…)` 严格等价。
@@ -96,4 +99,24 @@ export function rasterize(
         resolutionWidth: physicalWidth / effectiveDpr,
         resolutionHeight: physicalHeight / effectiveDpr,
     };
+}
+
+/**
+ * 按契约清空画布的整个物理 backing store。
+ *
+ * 历史教训：在 `setTransform(dpr,…)` 下用 `clearRect(0,0,cssW,cssH)` 只会
+ * 清除 `cssH*dpr` 行；当 `Math.round(cssH*dpr)` 向上取整时，底部
+ * `round(cssH*dpr) − cssH*dpr`（0~0.5）行物理像素永远不会被清除，贴底绘制的
+ * 曲线/网格/选区带/波形颜色会永久残留在画布最底边——表现为一条无法去除的
+ * 彩色残影。因此统一在设备坐标（单位变换）下按 physical 尺寸清除，事后再由
+ * 调用方设置/恢复业务变换（本函数内部 save/restore，不改变调用方变换状态）。
+ */
+export function clearCanvasPhysical(
+    ctx: CanvasRenderingContext2D,
+    target: RasterTarget,
+): void {
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, target.physicalWidth, target.physicalHeight);
+    ctx.restore();
 }

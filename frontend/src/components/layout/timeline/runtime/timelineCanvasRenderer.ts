@@ -191,7 +191,18 @@ export function drawTimelineCanvas(
         (typeof document !== "undefined" &&
             document.documentElement.dataset.theme === "dark");
 
-    ctx.clearRect(0, 0, args.width, args.height);
+    // 全物理清屏：与 rasterize 同契约（round(css*dpr)），CSS 尺寸清屏在
+    // 向上取整时会在画布底部遗留 0~0.5 物理行的永久残影。
+    const clearDpr = window.devicePixelRatio || 1;
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(
+        0,
+        0,
+        Math.round(args.width * clearDpr),
+        Math.round(args.height * clearDpr),
+    );
+    ctx.restore();
 
     // 轨道横向分界线由 sticky 画布统一绘制：工程末尾之后的空白区也要有
     // 同样的分界线，且滚动/缩放时与 Clip 体同帧同步。

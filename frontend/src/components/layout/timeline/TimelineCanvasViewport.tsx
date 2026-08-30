@@ -2,7 +2,7 @@ import React from "react";
 
 import { drawTimelineCanvas } from "./runtime/timelineCanvasRenderer";
 import { resolveFontFamily } from "./runtime/timelineCanvasStyle";
-import { rasterize } from "./runtime/canvasRaster";
+import { clearCanvasPhysical, rasterize } from "./runtime/canvasRaster";
 import type { TimelineCanvasClipModel } from "./runtime/timelineCanvasModel";
 import type { TimelineAxis } from "./runtime/timelineAxis";
 import { LAYER_ORDER } from "./runtime/timelineFrameCommitter";
@@ -65,7 +65,8 @@ export const TimelineCanvasViewport: React.FC<{
         const ctx = canvas.getContext("2d");
         if (!ctx) return;
         ctx.setTransform(target.dpr, 0, 0, target.dpr, 0, 0);
-        ctx.clearRect(0, 0, target.cssWidthPx, target.cssHeightPx);
+        // 全物理清屏：round 向上取整时 CSS 尺寸清屏会在底部遗留残影。
+        clearCanvasPhysical(ctx, target);
         // 画布内容使用内容绝对坐标（与 DOM 内容层同一坐标系），
         // 由视口偏移统一做水平/竖直平移——两个轴都随滚动同帧提交。
         ctx.translate(-current.scrollLeftPx, -current.scrollTopPx);

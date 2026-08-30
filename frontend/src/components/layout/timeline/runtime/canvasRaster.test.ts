@@ -15,7 +15,7 @@
 
 import { test } from "vitest";
 
-import { rasterize } from "./canvasRaster.js";
+import { clearCanvasPhysical, rasterize } from "./canvasRaster.js";
 
 function assertEqual(actual: unknown, expected: unknown, label: string): void {
     if (actual !== expected) {
@@ -113,5 +113,66 @@ test("components/layout/timeline/runtime/canvasRaster.test.ts scripted checks", 
         assertEqual(first.physicalHeight, second.physicalHeight, "idempotent height");
         assertEqual(first.resolutionWidth, second.resolutionWidth, "idempotent resolution");
         assertTrue(!canvas.style.width.includes("NaN"), "style has no NaN");
+    }
+
+    // ── 6. 清屏契约：必须覆盖整个物理 backing store ──────────────────
+    // round 向上取整（css*dpr 带 0.5 尾数）时，CSS 尺寸清屏只覆盖 css*dpr 行，
+    // 底部 0~0.5 物理行永远不被清除 → 贴底绘制内容形成永久残影。
+    // clearCanvasPhysical 必须在单位变换下按 physical 尺寸清除。
+    {
+        const target = rasterize(fakeCanvas(), 101, 101, 1.5); // 151.5 → 152（向上取整）
+        assertTrue(
+            target.physicalHeight > target.cssHeightPx * target.dpr,
+            "chosen size must have a residue tail row (round-up)",
+        );
+
+        const calls: Array<readonly unknown[]> = [];
+        const ctx = {
+            save(): void {
+                calls.push(["save"]);
+            },
+            restore(): void {
+                calls.push(["restore"]);
+            },
+            setTransform(...args: number[]): void {
+                calls.push(["setTransform", ...args]);
+            },
+            clearRect(...args: number[]): void {
+                calls.push(["clearRect", ...args]);
+            },
+        } as unknown as CanvasRenderingContext2D;
+
+        clearCanvasPhysical(ctx, target);
+        const clear = calls.find((c) => c[0] === "clearRect");
+        assertTrue(Boolean(clear), "clearRect called");
+        assertEqual(clear?.[3], target.physicalWidth, "clear width = physicalWidth");
+        assertEqual(clear?.[4], target.physicalHeight, "clear height = physicalHeight");
+
+        // 清屏前必须复位为单位变换（否则 physical 尺寸再乘 dpr 会越界清除；
+        // 反方向，CSS 尺寸下的 dpr 变换则清不到尾行）。
+        const identityIndex = calls.findIndex(
+            (c) =>
+                c[0] === "setTransform" &&
+                c[1] === 1 &&
+                c[2] === 0 &&
+                c[3] === 0 &&
+                c[4] === 1 &&
+                c[5] === 0 &&
+                c[6] === 0,
+        );
+        const clearIndex = calls.findIndex((c) => c[0] === "clearRect");
+        assertTrue(identityIndex >= 0, "transform reset to identity before clear");
+        assertTrue(clearIndex > identityIndex, "clear happens under identity transform");
+
+        // 回归守护：CSS 尺寸清屏必须能被识别为错误（清不到尾行）。
+        const cssClearActive = calls.some(
+            (c) =>
+                c[0] === "clearRect" &&
+                (c[3] === target.cssWidthPx || c[4] === target.cssHeightPx),
+        );
+        assertTrue(
+            !cssClearActive,
+            "must not clear by CSS dimensions (leaves the tail row dirty)",
+        );
     }
 });

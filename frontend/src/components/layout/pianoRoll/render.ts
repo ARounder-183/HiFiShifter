@@ -13,7 +13,7 @@
 import type { ParamMorphOverlay, ParamName, ParamViewSegment, ValueViewport } from "./types";
 import type { ClipPeaksEntry } from "./useClipsPeaksForPianoRoll";
 import { clamp } from "../timeline";
-import { rasterize } from "../timeline/runtime/canvasRaster";
+import { clearCanvasPhysical, rasterize } from "../timeline/runtime/canvasRaster";
 import {
     durationToWidthPx,
     secToContentPx,
@@ -448,7 +448,8 @@ export function drawPianoRoll(args: {
             // 统一光栅化契约：与时间线画布、波形面共用同一套取整规则。
             const target = rasterize(axisCanvas, w, h, window.devicePixelRatio || 1);
             ctx.setTransform(target.dpr, 0, 0, target.dpr, 0, 0);
-            ctx.clearRect(0, 0, target.cssWidthPx, target.cssHeightPx);
+            // 全物理清屏：round 向上取整时 CSS 尺寸清屏会在底部遗留残影。
+            clearCanvasPhysical(ctx, target);
 
             ctx.strokeStyle = colors.axisBorder;
             ctx.beginPath();
@@ -656,7 +657,9 @@ export function drawPianoRoll(args: {
     // 半像素 DPR 下会差一整个物理像素；现在全部收敛到 rasterize()。
     const target = rasterize(canvas, w, h, window.devicePixelRatio || 1);
     ctx.setTransform(target.dpr, 0, 0, target.dpr, 0, 0);
-    ctx.clearRect(0, 0, target.cssWidthPx, target.cssHeightPx);
+    // 全物理清屏：round 向上取整时 CSS 尺寸清屏会在底部遗留残影
+    // （贴底曲线/网格/选区带/播放头的颜色永久残留在画布最底边）。
+    clearCanvasPhysical(ctx, target);
 
     // 所有 x 坐标 = axis.secToViewportPx(sec)，与时间线侧同一实现。
     // 可见区间仅用于裁剪，且只能由 axis 提供：此前这里写作

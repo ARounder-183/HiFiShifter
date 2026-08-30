@@ -1,5 +1,8 @@
 import type { WaveformGeometry } from "./geometry.ts";
-import { rasterize } from "../components/layout/timeline/runtime/canvasRaster.ts";
+import {
+    clearCanvasPhysical,
+    rasterize,
+} from "../components/layout/timeline/runtime/canvasRaster.ts";
 
 /**
  * 波形描边宽度（CSS 像素）。
@@ -222,7 +225,8 @@ export class Canvas2dWaveformRenderer implements WaveformSurfaceRenderer {
         if (!back || !visible) throw new Error("Canvas 2D is unavailable");
 
         back.setTransform(target.dpr, 0, 0, target.dpr, 0, 0);
-        back.clearRect(0, 0, target.cssWidthPx, target.cssHeightPx);
+        // 全物理清屏：否则 back 画布底部残留行会被 drawImage 带到可见画布。
+        clearCanvasPhysical(back, target);
         back.lineWidth = 1;
         const vertices = geometry.vertices;
         // 相邻段几乎总是同一颜色（逐像素 min/max 包络）：把同色段合并进

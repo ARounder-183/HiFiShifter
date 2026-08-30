@@ -8,6 +8,7 @@ import React, {
     useRef,
     useState,
 } from "react";
+import { flushSync } from "react-dom";
 import { Flex, Text, Button, Select, Box, IconButton, DropdownMenu } from "@radix-ui/themes";
 import {
     ChevronDownIcon,
@@ -950,11 +951,16 @@ export const PianoRollPanel: React.FC = () => {
     const scrollLeftRef = useRef(scrollLeft);
     const pxPerBeatRef = useRef(pxPerBeat);
     const pxPerSecRef = useRef(pxPerSec);
+    // 同步开关的 ref 镜像：rAF 原子提交与每帧对账循环读取最新值，避免陈旧闭包。
+    const paramEditorSyncTimelineRef = useRef(s.paramEditorSyncTimeline);
     // 渲染期立即同步 ref，确保同步视口在 layout effect 落地时，
     // Canvas 读取到的是与标尺/网格同一帧的新缩放与滚动值。
-    scrollLeftRef.current = scrollLeft;
-    pxPerBeatRef.current = pxPerBeat;
-    pxPerSecRef.current = pxPerSec;
+    // 仅在值变化时回写 ref：渲染期的 state→ref 同步必须与被提交的状态同帧存在，
+    // 无条件覆盖会抹掉 rAF 原子提交中已落地的值（refs 只能由 render/提交写入）。
+    if (scrollLeftRef.current !== scrollLeft) scrollLeftRef.current = scrollLeft;
+    if (pxPerBeatRef.current !== pxPerBeat) pxPerBeatRef.current = pxPerBeat;
+    if (pxPerSecRef.current !== pxPerSec) pxPerSecRef.current = pxPerSec;
+    paramEditorSyncTimelineRef.current = s.paramEditorSyncTimeline;
     const timelineSyncApplyingRef = useRef(false);
     const timelineOffsetRef = useRef(0);
     const [timelineOffsetPx, setTimelineOffsetPx] = useState(0);
@@ -970,6 +976,8 @@ export const PianoRollPanel: React.FC = () => {
         nextPxPerSec: number;
         nextScrollLeft: number;
     } | null>(null);
+    // 水平缩放提交的 rAF 合并：一帧内多次滚轮/快捷键缩放只做一次原子提交。
+    const zoomRafRef = useRef<number | null>(null);
 
     // 测量轨道时间线区与参数编辑器画布区之间的全局水平偏移，
     // 用于同步时把参数编辑器的绘制坐标与轨道视图按同一屏幕位置对齐。
@@ -1175,17 +1183,55 @@ export const PianoRollPanel: React.FC = () => {
 
     const queueHorizontalZoom = useCallback(
         (nextPxPerSec: number, nextNativeScrollLeft: number) => {
-            pxPerBeatRef.current = nextPxPerSec * (60 / Math.max(1e-6, s.bpm));
-            pxPerSecRef.current = nextPxPerSec;
+            // 事件内只记录缩放意图，**绝不**在提交前改写 refs/state：任何
+            // “ref 先行”都会让夹缝中的 rAF 绘制读到“新缩放 + 旧滚动”的
+            // 混合投影——参数线/原始音高线/参考线等所有线条整体抽搐一帧。
             horizontalZoomPendingRef.current = {
                 nextScale: nextPxPerSec,
                 nextScrollLeft: nextNativeScrollLeft,
             };
-            setPxPerSec(nextPxPerSec);
+            // 与 TimelineScrollArea 相同的“一帧一次原子提交”：rAF 合并同帧
+            // 内的连续缩放事件；flushSync 把两个 state 在同一批提交中落地，
+            // DOM 内容宽度按新缩放重排后，layout effect 在同一提交内写原生
+            // scrollLeft 并同帧重绘标尺/网格/画布/波形（applyScrollLayers）。
+            // refs 只随 render 写入、与 state 同帧移动——绘制前所有图层拿到
+            // 同一对投影值，不存在任何混合帧窗口。
+            if (zoomRafRef.current == null) {
+                zoomRafRef.current = requestAnimationFrame(() => {
+                    zoomRafRef.current = null;
+                    const pending = horizontalZoomPendingRef.current;
+                    if (!pending) return;
+                    const offset = paramEditorSyncTimelineRef.current
+                        ? timelineOffsetRef.current
+                        : 0;
+                    const drawingScrollLeft = timelineViewportNativeToState(
+                        pending.nextScrollLeft,
+                        offset,
+                    );
+                    flushSync(() => {
+                        setPxPerSec(pending.nextScale);
+                        setScrollLeft(drawingScrollLeft);
+                    });
+                });
+            }
         },
-        [s.bpm, setPxPerSec],
+        [setPxPerSec, setScrollLeft],
     );
 
+    const handleHorizontalZoom = useCallback(
+        (nextPxPerSec: number, nextScrollLeft: number) => {
+            // 计算结果为绘制坐标；同步时需换算回原生（轨道）坐标再交给 layout effect。
+            const nativeNextScrollLeft = timelineViewportStateToNative(
+                nextScrollLeft,
+                s.paramEditorSyncTimeline ? timelineOffsetRef.current : 0,
+            );
+            queueHorizontalZoom(nextPxPerSec, nativeNextScrollLeft);
+        },
+        [s.paramEditorSyncTimeline, queueHorizontalZoom],
+    );
+
+    // 工具栏/快捷键聚焦缩放（hifi:zoomTimelineFocus）。放在 handleHorizontalZoom
+    // 定义之后，避免 render 期求值 deps 时命中 const 的 TDZ。
     useEffect(() => {
         function onZoomFocused(e: Event) {
             const { playheadSec, projectSec } = zoomTimelineStateRef.current;
@@ -1206,9 +1252,11 @@ export const PianoRollPanel: React.FC = () => {
             const zoom = resolveHorizontalWheelZoom({
                 factor,
                 basePxPerSec: pxPerSecRef.current,
-                baseScrollLeft: syncEnabled
-                    ? timelineViewportSync.get().scrollLeft
-                    : scrollLeftRef.current,
+                // 与滚轮路径同一契约：base 一律用绘制坐标（scrollLeftRef），
+                // 并显式传入同步模式的负向最小滚动与锚点偏移；结果同样交给
+                // handleHorizontalZoom 换算回原生坐标——两个缩放入口的坐标
+                // 空间保持一致，避免同步模式下基准坐标空间错位。
+                baseScrollLeft: scrollLeftRef.current,
                 totalSec: projectSec,
                 viewportWidth: scroller.clientWidth,
                 playheadZoomEnabled: true,
@@ -1220,28 +1268,18 @@ export const PianoRollPanel: React.FC = () => {
                     viewportWidthPx: scroller.clientWidth,
                 }),
                 maxPxPerSec: MAX_PX_PER_SEC,
+                minScrollLeft: syncEnabled ? -timelineOffsetRef.current : 0,
+                anchorOffsetPx: syncEnabled ? timelineOffsetRef.current : 0,
             });
             if (!zoom) return;
 
-            queueHorizontalZoom(zoom.nextPxPerSec, zoom.nextScrollLeft);
+            handleHorizontalZoom(zoom.nextPxPerSec, zoom.nextScrollLeft);
         }
 
         window.addEventListener("hifi:zoomTimelineFocus", onZoomFocused as EventListener);
         return () =>
             window.removeEventListener("hifi:zoomTimelineFocus", onZoomFocused as EventListener);
-    }, [s.paramEditorSyncTimeline, queueHorizontalZoom]);
-
-    const handleHorizontalZoom = useCallback(
-        (nextPxPerSec: number, nextScrollLeft: number) => {
-            // 计算结果为绘制坐标；同步时需换算回原生（轨道）坐标再交给 layout effect。
-            const nativeNextScrollLeft = timelineViewportStateToNative(
-                nextScrollLeft,
-                s.paramEditorSyncTimeline ? timelineOffsetRef.current : 0,
-            );
-            queueHorizontalZoom(nextPxPerSec, nativeNextScrollLeft);
-        },
-        [s.paramEditorSyncTimeline, queueHorizontalZoom],
-    );
+    }, [s.paramEditorSyncTimeline, handleHorizontalZoom]);
     // 副参数独立显示开关，默认全部关闭
     const [secondaryParamVisible, setSecondaryParamVisible] = useState<
         Partial<Record<ParamName, boolean>>
@@ -1845,6 +1883,10 @@ export const PianoRollPanel: React.FC = () => {
                 cancelAnimationFrame(scrollStateRafRef.current);
                 scrollStateRafRef.current = null;
             }
+            if (zoomRafRef.current != null) {
+                cancelAnimationFrame(zoomRafRef.current);
+                zoomRafRef.current = null;
+            }
         };
     }, []);
 
@@ -1862,6 +1904,15 @@ export const PianoRollPanel: React.FC = () => {
         drawRef.current();
         // 波形面走同一条同步链：不能在 React state（rAF）提交后再画。
         pianoRollViewportBus.emit(next, pxPerSecRef.current, viewSizeRef.current.w);
+        // 播放头 DOM 线并入同帧提交：缩放（pxPerSec 变化）时立即对齐新投影，
+        // 避免与画布的播放头错位一帧（与 useVisualPlayhead 的 onFrame 同源）。
+        const playheadLeftPx = visualPlayheadSecRef.current * pxPerSecRef.current;
+        if (rulerPlayheadLineRef.current) {
+            rulerPlayheadLineRef.current.style.left = `${playheadLeftPx}px`;
+        }
+        if (rulerPlayheadHeadRef.current) {
+            rulerPlayheadHeadRef.current.style.left = `${playheadLeftPx}px`;
+        }
     }
 
     function syncScrollLeft(scroller: HTMLDivElement) {
@@ -1895,6 +1946,36 @@ export const PianoRollPanel: React.FC = () => {
         syncScrollLeft(el);
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [contentWidth, s.grid, s.beats]);
+
+    // 渲染期刷新 syncScrollLeft 引用（其函数体随每次渲染重建）。
+    const syncScrollLeftRef = useRef(syncScrollLeft);
+    syncScrollLeftRef.current = syncScrollLeft;
+
+    // 每帧对账自愈（镜像时间轴侧 reconcile）：原生 scroller 是滚动/缩放的
+    // 唯一事实源，sticky 画布层经 refs/总线跟随。任何路径漏发/迟发了这些值
+    // （提交被浏览器钳制/量化、异常中断的缩放事务……）都会让画布与 DOM
+    // 内容层错位，表现为线条抽搐一帧；这里每帧以原生值对账，发现失步立即
+    // 经 syncScrollLeft 重发（refs → bus → 标尺/网格/画布同帧），把残余
+    // 错位变成被治愈的一帧。绝大多数帧只是两次数值比较，空闲开销可忽略。
+    useEffect(() => {
+        let raf = 0;
+        const reconcile = () => {
+            raf = requestAnimationFrame(reconcile);
+            const scroller = scrollerRef.current;
+            if (!scroller) return;
+            const offset = paramEditorSyncTimelineRef.current ? timelineOffsetRef.current : 0;
+            const drawingScrollLeft = timelineViewportNativeToState(scroller.scrollLeft, offset);
+            if (
+                lastScrollLeftRef.current != null &&
+                Math.abs(lastScrollLeftRef.current - drawingScrollLeft) <= 0.25
+            ) {
+                return;
+            }
+            syncScrollLeftRef.current(scroller);
+        };
+        raf = requestAnimationFrame(reconcile);
+        return () => cancelAnimationFrame(raf);
+    }, []);
 
     const valueToY = useCallback((param: ParamName, v: number, h: number): number => {
         const H = Math.max(1, h);
