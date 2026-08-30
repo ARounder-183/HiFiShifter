@@ -2256,12 +2256,27 @@ function AppInner() {
                         }),
                     );
                     break;
-                case "edit.undo":
-                    void dispatch(undoRemote());
+                case "edit.undo": {
+                    // 长按 Ctrl+Z = 连续撤销（每拍撤销一步；后端按消息队列
+                    // 串行处理，无需忙守卫）。
+                    const fire = () => {
+                        void dispatch(undoRemote());
+                        return true;
+                    };
+                    fire();
+                    beginHoldRepeat(selectMergedKeybindings(store.getState())["edit.undo"], fire);
                     break;
-                case "edit.redo":
-                    void dispatch(redoRemote());
+                }
+                case "edit.redo": {
+                    // 长按 Ctrl+Y = 连续重做。
+                    const fire = () => {
+                        void dispatch(redoRemote());
+                        return true;
+                    };
+                    fire();
+                    beginHoldRepeat(selectMergedKeybindings(store.getState())["edit.redo"], fire);
                     break;
+                }
                 case "edit.selectAll":
                     window.dispatchEvent(
                         new CustomEvent("hifi:editOp", {
@@ -2663,13 +2678,24 @@ function AppInner() {
                     }
                     break;
                 }
-                case "edit.pasteTracks":
-                    window.dispatchEvent(
-                        new CustomEvent("hifi:editOp", {
-                            detail: { op: "pasteTracks" },
-                        }),
+                case "edit.pasteTracks": {
+                    // 长按 = 连续作为新轨道组粘贴。接收端 pasteClipsAtPlayhead
+                    // 自带粘贴链守卫（busy/queued），重复事件排队处理、不会并发。
+                    const op = "pasteTracks" as const;
+                    const fire = () => {
+                        window.dispatchEvent(new CustomEvent("hifi:editOp", { detail: { op } }));
+                        return true;
+                    };
+                    fire();
+                    beginHoldRepeat(
+                        selectMergedKeybindings(store.getState())["edit.pasteTracks"],
+                        fire,
                     );
                     break;
+                }
+                // 注：edit.pasteVocalShifter（文件型剪贴板）未启用长按重复 ——
+                // 其接收端（钢琴卷帘）无粘贴链守卫，50ms 节奏下重复导入同一
+                // 剪贴板文件可能并发；且该操作边际收益低。
                 // clip.* 操作由 TimelinePanel 的 useKeyboardShortcuts 处理
                 default:
                     break;
