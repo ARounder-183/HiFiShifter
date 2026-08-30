@@ -1,5 +1,17 @@
 import { useEffect, useLayoutEffect, useRef } from "react";
 import { useI18n } from "../../i18n/I18nProvider";
+import { useAppSelector } from "../../app/hooks";
+import { selectKeybinding, formatKeybinding } from "../../features/keybindings/keybindingsSlice";
+import type { ActionId } from "../../features/keybindings/types";
+
+/**
+ * 读取动作当前生效的快捷键文本（跟随用户在快捷键设置中的自定义绑定）。
+ * 未绑定（None binding）时返回 undefined，菜单项不显示快捷键。
+ */
+function useMenuShortcut(actionId: ActionId): string | undefined {
+    const kb = useAppSelector((state) => selectKeybinding(state, actionId));
+    return formatKeybinding(kb, "") || undefined;
+}
 
 interface EditContextMenuProps {
     x: number;
@@ -50,6 +62,24 @@ export function EditContextMenu({
     const tAny = t as (key: string) => string;
     const menuRef = useRef<HTMLDivElement>(null);
 
+    // 菜单项右侧的快捷键提示：从快捷键注册表读取当前生效的绑定。
+    // 参数编辑器的复制/剪切/粘贴与时间轴共用 clip.* 动作（焦点在参数
+    // 编辑器时由参数编辑器接管，见 useKeyboardShortcuts 的焦点分发）。
+    const copyShortcut = useMenuShortcut("clip.copy");
+    const cutShortcut = useMenuShortcut("clip.cut");
+    const pasteShortcut = useMenuShortcut("clip.paste");
+    const selectAllShortcut = useMenuShortcut("edit.selectAll");
+    const deselectShortcut = useMenuShortcut("edit.deselect");
+    const initializeShortcut = useMenuShortcut("edit.initialize");
+    const transposeCentsShortcut = useMenuShortcut("edit.transposeCents");
+    const transposeDegreesShortcut = useMenuShortcut("edit.transposeDegrees");
+    const setPitchShortcut = useMenuShortcut("edit.setPitch");
+    const averageShortcut = useMenuShortcut("edit.average");
+    const smoothShortcut = useMenuShortcut("edit.smooth");
+    const addVibratoShortcut = useMenuShortcut("edit.addVibrato");
+    const quantizeShortcut = useMenuShortcut("edit.quantize");
+    const meanQuantizeShortcut = useMenuShortcut("edit.meanQuantize");
+
     useEffect(() => {
         function handleClickOutside(e: MouseEvent) {
             if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
@@ -83,8 +113,20 @@ export function EditContextMenu({
     }, [x, y]);
 
     const itemClass =
-        "px-3 py-1.5 text-left w-full text-[12px] transition-colors cursor-pointer hover:bg-qt-button-hover select-none text-qt-text";
+        "px-3 py-1.5 text-left w-full text-[12px] transition-colors cursor-pointer hover:bg-qt-button-hover select-none text-qt-text flex items-center justify-between gap-3";
+    const shortcutClass = "text-[10px] opacity-50 shrink-0";
     const sepClass = "my-1 border-t border-qt-border";
+
+    const item = (label: string, shortcut: string | undefined, onClick: () => void) => (
+        <div className={itemClass} onClick={onClick}>
+            <span>{label}</span>
+            {shortcut && <span className={shortcutClass}>{shortcut}</span>}
+        </div>
+    );
+    const closeAfter = (action?: () => void) => () => {
+        action?.();
+        onClose();
+    };
 
     return (
         <div
@@ -94,163 +136,50 @@ export function EditContextMenu({
             style={{ left: x, top: y }}
             onPointerDown={(e) => e.stopPropagation()}
         >
-            <div
-                className={itemClass}
-                onClick={() => {
-                    onCopy?.();
-                    onClose();
-                }}
-            >
-                {tAny("menu_copy")}
-            </div>
-            <div
-                className={itemClass}
-                onClick={() => {
-                    onCut?.();
-                    onClose();
-                }}
-            >
-                {tAny("menu_cut")}
-            </div>
-            <div
-                className={itemClass}
-                onClick={() => {
-                    onPaste?.();
-                    onClose();
-                }}
-            >
-                {tAny("menu_paste")}
-            </div>
+            {item(tAny("menu_copy"), copyShortcut, closeAfter(onCopy))}
+            {item(tAny("menu_cut"), cutShortcut, closeAfter(onCut))}
+            {item(tAny("menu_paste"), pasteShortcut, closeAfter(onPaste))}
             <div className={sepClass} />
-            <div
-                className={itemClass}
-                onClick={() => {
-                    onSelectAll?.();
-                    onClose();
-                }}
-            >
-                {tAny("menu_select_all")}
-            </div>
-            <div
-                className={itemClass}
-                onClick={() => {
-                    onDeselect?.();
-                    onClose();
-                }}
-            >
-                {tAny("menu_deselect")}
-            </div>
+            {item(tAny("menu_select_all"), selectAllShortcut, closeAfter(onSelectAll))}
+            {item(tAny("menu_deselect"), deselectShortcut, closeAfter(onDeselect))}
             <div className={sepClass} />
-            <div
-                className={itemClass}
-                onClick={() => {
-                    onInitialize?.();
-                    onClose();
-                }}
-            >
-                {tAny("menu_initialize")}
-            </div>
+            {item(tAny("menu_initialize"), initializeShortcut, closeAfter(onInitialize))}
             {isPitchParam && (
                 <>
                     <div className={sepClass} />
-                    <div
-                        className={itemClass}
-                        onClick={() => {
-                            onTransposeCents?.();
-                            onClose();
-                        }}
-                    >
-                        {tAny("menu_transpose_cents")}
-                    </div>
-                    <div
-                        className={itemClass}
-                        onClick={() => {
-                            onTransposeDegrees?.();
-                            onClose();
-                        }}
-                    >
-                        {tAny("menu_transpose_degrees")}
-                    </div>
+                    {item(
+                        tAny("menu_transpose_cents"),
+                        transposeCentsShortcut,
+                        closeAfter(onTransposeCents),
+                    )}
+                    {item(
+                        tAny("menu_transpose_degrees"),
+                        transposeDegreesShortcut,
+                        closeAfter(onTransposeDegrees),
+                    )}
                 </>
             )}
-            <div
-                className={itemClass}
-                onClick={() => {
-                    onSetPitch?.();
-                    onClose();
-                }}
-            >
-                {isPitchParam ? tAny("menu_set_pitch") : tAny("menu_set_value")}
-            </div>
+            {item(
+                isPitchParam ? tAny("menu_set_pitch") : tAny("menu_set_value"),
+                setPitchShortcut,
+                closeAfter(onSetPitch),
+            )}
             <div className={sepClass} />
-            <div
-                className={itemClass}
-                onClick={() => {
-                    onAverage?.();
-                    onClose();
-                }}
-            >
-                {tAny("menu_average")}
-            </div>
-            <div
-                className={itemClass}
-                onClick={() => {
-                    onSmooth?.();
-                    onClose();
-                }}
-            >
-                {tAny("menu_smooth")}
-            </div>
-            <div
-                className={itemClass}
-                onClick={() => {
-                    onAddVibrato?.();
-                    onClose();
-                }}
-            >
-                {tAny("menu_add_vibrato")}
-            </div>
-            <div
-                className={itemClass}
-                onClick={() => {
-                    onQuantize?.();
-                    onClose();
-                }}
-            >
-                {tAny("menu_quantize")}
-            </div>
-            <div
-                className={itemClass}
-                onClick={() => {
-                    onMeanQuantize?.();
-                    onClose();
-                }}
-            >
-                {tAny("menu_mean_quantize")}
-            </div>
+            {item(tAny("menu_average"), averageShortcut, closeAfter(onAverage))}
+            {item(tAny("menu_smooth"), smoothShortcut, closeAfter(onSmooth))}
+            {item(tAny("menu_add_vibrato"), addVibratoShortcut, closeAfter(onAddVibrato))}
+            {item(tAny("menu_quantize"), quantizeShortcut, closeAfter(onQuantize))}
+            {item(tAny("menu_mean_quantize"), meanQuantizeShortcut, closeAfter(onMeanQuantize))}
             {isPitchParam && onSaveAsPitchRef && (
                 <>
                     <div className={sepClass} />
-                    <div
-                        className={itemClass}
-                        onClick={() => {
-                            onSaveAsPitchRef();
-                            onClose();
-                        }}
-                    >
-                        {tAny("menu_save_as_pitch_ref")}
-                    </div>
-                    {onExportMidi && (
-                        <div
-                            className={itemClass}
-                            onClick={() => {
-                                onExportMidi();
-                                onClose();
-                            }}
-                        >
-                            {tAny("menu_export_midi")}
-                        </div>
+                    {item(
+                        tAny("menu_save_as_pitch_ref"),
+                        undefined,
+                        closeAfter(onSaveAsPitchRef),
                     )}
+                    {onExportMidi &&
+                        item(tAny("menu_export_midi"), undefined, closeAfter(onExportMidi))}
                 </>
             )}
         </div>

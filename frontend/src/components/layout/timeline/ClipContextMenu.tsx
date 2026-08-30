@@ -5,6 +5,7 @@ import { useI18n } from "../../../i18n/I18nProvider";
 import type { MessageKey } from "../../../i18n/messages";
 import { useAppDispatch, useAppSelector } from "../../../app/hooks";
 import { selectKeybinding, formatKeybinding } from "../../../features/keybindings/keybindingsSlice";
+import type { ActionId } from "../../../features/keybindings/types";
 import {
     addClipTakeFromMediaRemote,
     cycleClipTakesRemote,
@@ -50,6 +51,15 @@ const MenuItem: React.FC<{
 );
 
 const Divider: React.FC = () => <div className="my-1 border-t border-qt-border" />;
+
+/**
+ * 读取动作当前生效的快捷键文本（跟随用户在快捷键设置中的自定义绑定）。
+ * 未绑定（None binding）时返回 undefined，菜单项不显示快捷键。
+ */
+function useMenuShortcut(actionId: ActionId): string | undefined {
+    const kb = useAppSelector((state) => selectKeybinding(state, actionId));
+    return formatKeybinding(kb, "") || undefined;
+}
 
 /**
  * Take 行菜单项：点击行切换 active take；行尾“倒放”小按钮翻转**该 Take
@@ -333,8 +343,17 @@ export const ClipContextMenu: React.FC<{
     const audioOnlyIds = selectedClips.filter((c) => !isPitch(c)).map((c) => c.id);
     const pitchOnlyIds = selectedClips.filter(isPitch).map((c) => c.id);
 
-    const normalizeKb = useAppSelector((state) => selectKeybinding(state, "clip.normalize"));
-    const normalizeShortcut = normalizeKb ? formatKeybinding(normalizeKb, "") : undefined;
+    // 菜单项右侧的快捷键提示：从快捷键注册表读取当前生效的绑定
+    //（用户自定义后菜单同步跟随），未绑定动作的菜单项不显示。
+    const normalizeShortcut = useMenuShortcut("clip.normalize");
+    const deleteShortcut = useMenuShortcut("clip.delete");
+    const copyShortcut = useMenuShortcut("clip.copy");
+    const cutShortcut = useMenuShortcut("clip.cut");
+    const splitShortcut = useMenuShortcut("clip.split");
+    const groupShortcut = useMenuShortcut("clip.group");
+    const ungroupShortcut = useMenuShortcut("clip.ungroup");
+    const cycleTakeNextShortcut = useMenuShortcut("clip.cycleTake");
+    const cycleTakePrevShortcut = useMenuShortcut("clip.cycleTakePrev");
 
     // 胶合：仅同轨且多选时可用，且不能混合音高参考块和常规音频块
     const hasMixedTypes = hasPitchAdjustment && !allPitchAdjustment;
@@ -400,6 +419,7 @@ export const ClipContextMenu: React.FC<{
 
             <MenuItem
                 label={isMulti ? t("ctx_delete_all") : t("ctx_delete")}
+                shortcut={deleteShortcut}
                 danger
                 onClick={() => {
                     onDelete(ids);
@@ -482,6 +502,7 @@ export const ClipContextMenu: React.FC<{
                                 <Divider />
                                 <MenuItem
                                     label={t("clip_take_cycle_prev")}
+                                    shortcut={cycleTakePrevShortcut}
                                     onClick={() => {
                                         void dispatch(
                                             cycleClipTakesRemote({
@@ -494,6 +515,7 @@ export const ClipContextMenu: React.FC<{
                                 />
                                 <MenuItem
                                     label={t("clip_take_cycle_next")}
+                                    shortcut={cycleTakeNextShortcut}
                                     onClick={() => {
                                         void dispatch(
                                             cycleClipTakesRemote({
@@ -663,6 +685,7 @@ export const ClipContextMenu: React.FC<{
             )}
             <MenuItem
                 label={isMulti ? t("ctx_copy_all") : t("ctx_copy")}
+                shortcut={copyShortcut}
                 onClick={() => {
                     onCopy(ids);
                     close();
@@ -670,6 +693,7 @@ export const ClipContextMenu: React.FC<{
             />
             <MenuItem
                 label={isMulti ? t("ctx_cut_all") : t("ctx_cut")}
+                shortcut={cutShortcut}
                 onClick={() => {
                     onCut(ids);
                     close();
@@ -704,6 +728,7 @@ export const ClipContextMenu: React.FC<{
             )}
             <MenuItem
                 label={t("ctx_split_at_playhead")}
+                shortcut={splitShortcut}
                 disabled={isMulti ? !canSplitSelected : !playheadInClip}
                 onClick={() => {
                     onSplit(ids);
@@ -725,6 +750,7 @@ export const ClipContextMenu: React.FC<{
                     {isMulti && !hasGroup && (
                         <MenuItem
                             label={t("group")}
+                            shortcut={groupShortcut}
                             onClick={() => {
                                 onGroup?.(ids);
                                 close();
@@ -734,6 +760,7 @@ export const ClipContextMenu: React.FC<{
                     {hasGroup && (
                         <MenuItem
                             label={t("ungroup")}
+                            shortcut={ungroupShortcut}
                             onClick={() => {
                                 onUngroup?.(ids);
                                 close();
