@@ -1300,7 +1300,10 @@ pub fn infer_pitch_edit_chunked_optimized(
         }
 
         // 4. 分块迭代 — 批量推理：收集所有未命中缓存的 chunk，一次 GPU 调用处理
-        let total_samples = mono_pcm.len().max(t * hop);
+        // 输出长度 = 重建内容真实长度（t×hop）。mel 提取的尾部窗损失使
+        // t×hop < 输入长度；尾部对齐（含斜坡收尾）在步骤 5 统一完成，
+        // 若此处直接按输入长度初始化并留零，会预先制造"内容↔零"缺口。
+        let total_samples = t.saturating_mul(hop).max(1);
         let mut out = vec![0.0f32; total_samples];
 
         // 4a. 分离已缓存和需要推理的 chunk
@@ -1387,13 +1390,14 @@ pub fn infer_pitch_edit_chunked_optimized(
             linear_resample_mono(&out, model_sr, sample_rate)
         };
 
-        // 对齐到输入长度
+        // 对齐到输入长度。mel 提取的尾部窗损失（最后不足一帧 hop 的内容
+        // 没有帧覆盖）使重建内容比输入短 1~2 帧（模型 hop），裸 resize 补
+        // 零 / truncate 会在"内容末端 ↔ 补零"交界留下单帧硬切 —— 淡出增益
+        // 在淡出区前段仍接近 1 时即末尾 Click（与 mel stretch 路径同根因）。
+        // 修复：对齐边界处做 ~2 帧 hop 的线性收尾，让内容平滑落到 0。
         let target = mono_pcm.len();
-        if out.len() > target {
-            out.truncate(target);
-        } else if out.len() < target {
-            out.resize(target, 0.0);
-        }
+        let ramp_samples = tail_ramp_samples(hop, model_sr, sample_rate);
+        smooth_tail_then_align(&mut out, target, ramp_samples);
 
         Ok(out)
     })
@@ -1682,14 +1686,55 @@ impl NsfHifiganOnnx {
             linear_resample_mono(&y_vec, model_sr, sample_rate)
         };
 
-        // 8. 对齐到拉伸后的目标长度
+        // 8. 对齐到拉伸后的目标长度。
+        // mel 提取的尾部窗损失（最后不足一帧 hop 的内容没有帧覆盖）与帧数
+        // 取整会让重建输出比严格目标短 1~2 帧（模型 hop≈10ms）。裸 resize
+        // 补零 / truncate 会在"内容末端 ↔ 补零/截断"的交界留下单帧硬切 ——
+        // 淡出增益在淡出区前段仍接近 1（尤其"先慢后快"曲线），即末尾 Click
+        //（HiFiGAN Mel Stretch 特有；外部精确拉伸器输出铺满目标，无此偏差）。
+        // 修复：对齐边界处做 ~2 帧 hop 的线性收尾，让内容平滑落到 0，
+        // 后续所有 pad/truncate（pitch_editing / 渲染装配）都切在 ≈0 上。
         let target_len = ((audio_mono.len() as f64) / playback_rate).round().max(0.0) as usize;
-        if out.len() > target_len {
-            out.truncate(target_len);
-        } else if out.len() < target_len {
-            out.resize(target_len, 0.0);
-        }
+        let ramp_samples = tail_ramp_samples(self.cfg.hop_size, model_sr, sample_rate);
+        smooth_tail_then_align(&mut out, target_len, ramp_samples);
         Ok(out)
+    }
+}
+
+/// 模型 hop 换算到目标采样率后的 2 倍 —— 重建内容末端的线性收尾斜坡长度
+/// （覆盖 mel 提取尾部窗损失 + 帧数取整的最大偏差）。
+fn tail_ramp_samples(hop: usize, model_sr: u32, out_sr: u32) -> usize {
+    let hop_out = (hop as u64)
+        .saturating_mul(out_sr.max(1) as u64)
+        .div_ceil(model_sr.max(1) as u64) as usize;
+    hop_out.saturating_mul(2)
+}
+
+/// 对齐输出长度到 `target_len`，并把"内容末端 ↔ 补零/截断"的边界做成
+/// 线性收尾（边界处 ≈0），避免重建内容在 fade 增益仍大时硬切。
+fn smooth_tail_then_align(out: &mut Vec<f32>, target_len: usize, ramp: usize) {
+    if out.len() > target_len {
+        // 截断前：把 [target-ramp, target) 线性压到 ≈0，截断点落在收尾内。
+        let start = target_len.saturating_sub(ramp);
+        let n = target_len.saturating_sub(start);
+        if n >= 2 {
+            for i in start..target_len {
+                let k = (target_len - i) as f32 / n as f32;
+                out[i] *= k;
+            }
+        }
+        out.truncate(target_len);
+    } else if out.len() < target_len {
+        // 补零前：把内容末端 [len-ramp, len) 线性压到 ≈0，补零区从 ≈0 开始。
+        let start = out.len().saturating_sub(ramp);
+        let n = out.len().saturating_sub(start);
+        if n >= 2 {
+            for i in start..out.len() {
+                let k = (out.len() - i) as f32 / n as f32;
+                out[i] *= k;
+            }
+        }
+        out.resize(target_len, 0.0);
     }
 }
 
@@ -2320,4 +2365,74 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
         gpu_devices,
         dml_adapters,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::smooth_tail_then_align;
+
+    /// mel stretch 对齐收尾：补零前内容末端平滑落到 ≈0，补零区从 ≈0 开始，
+    /// 边界不再有单帧硬切（修复"HiFiGAN Mel Stretch 尾部 Click"的根因）。
+    #[test]
+    fn align_pads_short_output_with_smooth_tail() {
+        let mut out = vec![1.0f32; 100];
+        // 内容 100 → 目标 250，收尾 50：末尾从 1 平滑降到 ~0.02，然后补零。
+        smooth_tail_then_align(&mut out, 250, 50);
+        assert_eq!(out.len(), 250);
+        // 前半保持原样
+        assert_eq!(out[0], 1.0);
+        assert_eq!(out[49], 1.0);
+        // 收尾严格单调递减
+        for i in 50..99 {
+            assert!(
+                out[i] > out[i + 1],
+                "tail must be strictly decreasing at {i}: {} vs {}",
+                out[i],
+                out[i + 1]
+            );
+        }
+        // 末帧（收尾终点）与补零区起点都 ≈0
+        assert!(out[99].abs() < 0.03, "last content frame: {}", out[99]);
+        assert_eq!(out[100], 0.0);
+        assert_eq!(out[249], 0.0);
+    }
+
+    #[test]
+    fn align_truncates_long_output_on_smooth_tail() {
+        let mut out = vec![1.0f32; 300];
+        // 内容 300 → 目标 200，收尾 50：截断点落在收尾末端（≈0），
+        // 尾后即输出边界 —— 与组装层后续 pad/truncate 的切点一致。
+        smooth_tail_then_align(&mut out, 200, 50);
+        assert_eq!(out.len(), 200);
+        assert_eq!(out[0], 1.0);
+        assert_eq!(out[149], 1.0);
+        for i in 150..199 {
+            assert!(
+                out[i] > out[i + 1],
+                "tail must be strictly decreasing at {i}: {} vs {}",
+                out[i],
+                out[i + 1]
+            );
+        }
+        assert!(out[199].abs() < 0.03, "truncated edge: {}", out[199]);
+    }
+
+    #[test]
+    fn align_exact_length_is_untouched() {
+        let mut out = vec![0.5f32; 120];
+        smooth_tail_then_align(&mut out, 120, 50);
+        assert_eq!(out.len(), 120);
+        assert!(out.iter().all(|&v| (v - 0.5).abs() < 1e-6));
+    }
+
+    #[test]
+    fn align_tiny_ramp_degrades_gracefully() {
+        // ramp 过小（或不合理输入）时不得 panic/破坏长度。
+        let mut out = vec![1.0f32; 4];
+        smooth_tail_then_align(&mut out, 2, 0);
+        assert_eq!(out.len(), 2);
+        let mut out2 = vec![1.0f32; 2];
+        smooth_tail_then_align(&mut out2, 6, 4);
+        assert_eq!(out2.len(), 6);
+    }
 }

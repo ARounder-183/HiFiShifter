@@ -832,9 +832,10 @@ pub fn render_mixdown_interleaved(
             .max(0.0) as usize;
         let frames_to_mix = ((window_len_sec) * out_rate as f64).round().max(0.0) as usize;
 
-        let max_frames_to_mix = frames_to_mix
-            .min(out_frames.saturating_sub(out_offset_frames))
-            .min(seg_frames.saturating_sub(seg_offset_frames));
+        // 只按输出窗口裁剪循环上界；segment 可能比 clip 短（深拉伸/窗口越出
+        // 源素材），越界帧在循环内按淡出语义处理（区间收缩 + 末帧保持衰减），
+        // 不能在循环上界把淡出区尾部提前截断（截断=增益未走完时硬切）。
+        let max_frames_to_mix = frames_to_mix.min(out_frames.saturating_sub(out_offset_frames));
         if max_frames_to_mix == 0 {
             continue;
         }
@@ -843,6 +844,29 @@ pub fn render_mixdown_interleaved(
 
         let has_volume_curve = volume_curve.is_some() && !volume_curve.as_ref().unwrap().is_empty();
         let has_pan_curve = pan_curve.is_some() && !pan_curve.as_ref().unwrap().is_empty();
+        // 淡出（端点锁定 + 内容耗尽收缩），语义与 audio_engine/mix.rs 一致：
+        // - 末帧进度恰为 1 → 增益精确 0（防 e<1 曲线末端阶跃）；
+        // - segment 越界（内容不足）时淡出区间收缩为 [E-N, L]（E=内容末端），
+        //   之后保持末帧内容按淡出增益衰减 —— 杜绝硬切 Click。
+        let default_zone_start = clip_total_frames.saturating_sub(fade_out_frames);
+        // Loop（循环源）：平铺回绕内容永不耗尽，不做收缩。
+        let content_end_clip = if loop_mode {
+            clip_total_frames
+        } else {
+            (pre_silence_frames
+                .saturating_add(loop_local_offset_frames)
+                .saturating_add(seg_offset_frames)
+                .saturating_add(seg_frames))
+            .min(clip_total_frames)
+        };
+        let fade_zone_start = if content_end_clip < default_zone_start {
+            content_end_clip.saturating_sub(fade_out_frames)
+        } else {
+            default_zone_start
+        };
+        let mut last_l: f32 = 0.0;
+        let mut last_r: f32 = 0.0;
+        let mut has_last: bool = false;
         for f in 0..max_frames_to_mix {
             if f % 4096 == 0 && mixdown_cancelled(&opts) {
                 return Err("export_cancelled".to_string());
@@ -872,28 +896,74 @@ pub fn render_mixdown_interleaved(
                     None => ((local_in_clip + 1) as f32 / fade_in_frames as f32).clamp(0.0, 1.0),
                 };
             }
-            // 淡出区间 [total-N, total-1]（N 帧）与淡入帧居中式约定镜像，
-            // 且做端点锁定：最后一帧进度恰为 1 → 增益精确 0（杜绝末尾
-            // Click；与 audio_engine/mix.rs 同一约定，导出与预览一致）。
-            if fade_out_frames > 0 && local_in_clip + fade_out_frames >= clip_total_frames {
-                let remain = clip_total_frames.saturating_sub(local_in_clip);
-                // 淡出表按【区间内时间进度】下降采样（见 audio_engine/mix.rs
-                // 同一约定的注释）；用已消耗进度索引，避免把淡出反向。
-                // (remain-1)/N 的补号形式使进度从首帧 1/N 走到末帧 1。
-                let consumed = 1.0 - remain.saturating_sub(1) as f64 / fade_out_frames as f64;
-                g *= match &fade_out_lut {
-                    Some(lut) => crate::fade_curves::sample_fade_lut(
-                        lut,
-                        consumed * crate::fade_curves::FADE_LUT_SIZE as f64,
-                    ),
-                    None => {
-                        (remain.saturating_sub(1) as f32 / fade_out_frames as f32).clamp(0.0, 1.0)
-                    }
-                };
+            if fade_out_frames > 0
+                && local_in_clip >= fade_zone_start
+                && local_in_clip < clip_total_frames
+            {
+                let progress =
+                    (local_in_clip - fade_zone_start + 1) as f64 / fade_out_frames.max(1) as f64;
+                if progress <= 1.0 {
+                    g *= match &fade_out_lut {
+                        Some(lut) => crate::fade_curves::sample_fade_lut(
+                            lut,
+                            progress * crate::fade_curves::FADE_LUT_SIZE as f64,
+                        ),
+                        None => (progress as f32).clamp(0.0, 1.0),
+                    };
+                } else {
+                    // 收缩后的淡出在这帧之前已走完 → 静音。
+                    g = 0.0;
+                }
             }
             if g <= 0.0 {
                 continue;
             }
+
+            // 内容耗尽：fade 激活时保持末帧按淡出增益继续衰减（E 处及其后
+            // 增益从 ~1 平滑走到 0）；不激活时维持“越界静音”语义。
+            let seg_avail = si + 1 < segment.len();
+            if !seg_avail {
+                if fade_out_frames > 0
+                    && local_in_clip >= fade_zone_start
+                    && local_in_clip < clip_total_frames
+                    && has_last
+                {
+                    // 只有真存在曲线时才计算
+                    let abs_sec = clip_start_sec + (local_in_clip as f64 / out_rate as f64);
+                    let mut final_g = g;
+                    if has_volume_curve {
+                        let vol = sample_automation_curve_at_sec(
+                            volume_curve,
+                            abs_sec,
+                            volume_curve_frame_period_ms,
+                            1.0,
+                        );
+                        final_g *= vol;
+                    }
+                    let pan = if has_pan_curve {
+                        sample_automation_curve_at_sec(
+                            pan_curve,
+                            abs_sec,
+                            pan_curve_frame_period_ms,
+                            0.0,
+                        )
+                    } else {
+                        0.0
+                    }
+                    .clamp(-1.0, 1.0);
+                    let (left_gain, right_gain) = if pan <= 0.0 {
+                        (1.0, 1.0 + pan)
+                    } else {
+                        (1.0 - pan, 1.0)
+                    };
+                    mix[oi] += last_l * final_g * left_gain;
+                    mix[oi + 1] += last_r * final_g * right_gain;
+                }
+                continue;
+            }
+            last_l = segment[si];
+            last_r = segment[si + 1];
+            has_last = true;
 
             // 只有真存在曲线时才计算
             let mut final_g = g;
@@ -921,8 +991,8 @@ pub fn render_mixdown_interleaved(
                 (1.0 - pan, 1.0)
             };
 
-            mix[oi] += segment[si] * final_g * left_gain;
-            mix[oi + 1] += segment[si + 1] * final_g * right_gain;
+            mix[oi] += last_l * final_g * left_gain;
+            mix[oi + 1] += last_r * final_g * right_gain;
         }
     }
 
@@ -953,6 +1023,7 @@ pub fn render_mixdown_interleaved(
 #[cfg(test)]
 mod tests {
     use super::build_loop_tiled_segment;
+    use super::*;
 
     /// 交错 PCM：帧 i 的样本值为 [i as f32, i as f32 + 0.5]。
     fn make_pcm(frames: usize, channels: usize) -> Vec<f32> {
@@ -1030,5 +1101,126 @@ mod tests {
         let one = vec![0.5f32, 0.25f32];
         let out = build_loop_tiled_segment(&one, 2, 1234567, false, 3);
         assert_eq!(out, vec![0.5, 0.25, 0.5, 0.25, 0.5, 0.25]);
+    }
+
+    // ── 淡出尾部 Click 回归（拉伸 × 内容耗尽）────────────────────────
+    // 用户在“拉伸到 50%~30%”的 clip 上复现的末尾 Click 有两个叠加根源：
+    // 1) e<1（先慢后快）曲线在末帧留下 (1/N)^e 级增益阶跃 —— 端点锁定 +
+    //    着陆窗消除；
+    // 2) 深拉伸 clip 被拉长到超出源窗口，内容在淡出区内/前耗尽 → 增益
+    //    还很大时硬切静音 —— 淡出起点收缩到内容末端 + 末帧保持衰减消除。
+    #[test]
+    fn fade_out_tail_is_click_free_for_stretched_and_exhausted_clips() {
+        use crate::state::TimelineState;
+        use crate::time_stretch::StretchAlgorithm;
+        let out_rate = 48_000u32;
+        let src_sec = 1.0f64;
+
+        let dir = std::env::temp_dir().join("hifishifter_fade_probe");
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav_path = dir.join("tone_1s_48k.wav");
+        {
+            let spec = hound::WavSpec {
+                channels: 1,
+                sample_rate: out_rate,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            };
+            let mut w = hound::WavWriter::create(&wav_path, spec).unwrap();
+            let frames = (src_sec * out_rate as f64).round() as usize;
+            for i in 0..frames {
+                let t = i as f64 / out_rate as f64;
+                let v = (2.0 * std::f64::consts::PI * 440.0 * t).sin() * 0.8;
+                w.write_sample((v * i16::MAX as f64).round() as i16)
+                    .unwrap();
+            }
+            w.finalize().unwrap();
+        }
+
+        // (rate, len_sec)：len 跨越"内容恰好用尽"（窗口/rate）与"超出内容"
+        // （耗尽点落进淡出区/淡出区前）两种情况。
+        let scenarios: &[(f64, f64)] = &[
+            (1.0, 1.001), // 内容充足
+            (0.5, 2.001), // 内容恰好用尽
+            (0.5, 2.25),  // 耗尽点落进淡出区
+            (0.5, 2.60),  // 耗尽点在淡出区之前
+            (0.3, 3.60),  // 深拉伸 + 耗尽点落进淡出区
+            (0.3, 4.20),  // 深拉伸 + 耗尽点在淡出区之前
+        ];
+        for &(rate, len_sec) in scenarios {
+            for (fade_sec, shape, dir) in
+                [(0.2f64, 1.0f64, 1.0f64), (0.2, 1.0, 0.0), (0.2, 0.0, 0.0)]
+            {
+                let mut tl = TimelineState::default();
+                let track_id = tl.tracks[0].id.clone();
+                let clip_id = tl.add_clip(
+                    Some(track_id),
+                    Some("T".into()),
+                    Some(0.0),
+                    Some(len_sec),
+                    None,
+                );
+                {
+                    let c = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+                    c.source_path = Some(wav_path.to_string_lossy().to_string());
+                    c.source_start_sec = 0.0;
+                    c.source_end_sec = src_sec;
+                    c.duration_sec = Some(src_sec);
+                    c.playback_rate = rate as f32;
+                    c.loop_enabled = false;
+                    c.fade_out_sec = fade_sec;
+                    c.fade_out_shape = shape;
+                    c.fade_out_dir = dir;
+                }
+                tl.project_sec = len_sec;
+
+                let opts = MixdownOptions {
+                    sample_rate: out_rate,
+                    start_sec: 0.0,
+                    end_sec: None,
+                    stretch: StretchAlgorithm::LinearResample,
+                    apply_pitch_edit: false,
+                    export_format: ExportFormat::Wav32f,
+                    quality_preset: QualityPreset::Export,
+                    cancel_flag: None,
+                };
+                let (r, ch, _dur, mix) = render_mixdown_interleaved(&tl, opts).expect("render ok");
+                let ch = ch as usize;
+                let frames = mix.len() / ch;
+                let tail_start =
+                    frames.saturating_sub((fade_sec * 3.0 * r as f64).round() as usize);
+                // 逐帧（双声道）样本差：正弦基线 ≈0.8×2π×440/48000≈0.046，
+                // 任何硬切（淡出末端残留阶跃 / 内容耗尽断崖）≥0.5 —— 阈值
+                // 0.15 留足余量；0.5ms 峰值块对 440Hz 有采样窗口振荡，不用。
+                let mut max_frame_step = 0.0f32;
+                for i in (tail_start + 1)..frames {
+                    for c in 0..ch {
+                        let step = (mix[i * ch + c] - mix[(i - 1) * ch + c]).abs();
+                        if step > max_frame_step {
+                            max_frame_step = step;
+                        }
+                    }
+                }
+                let last_ms_peak = mix[frames.saturating_sub(out_rate as usize / 1000) * ch..]
+                    .iter()
+                    .copied()
+                    .map(f32::abs)
+                    .fold(0.0f32, f32::max);
+
+                eprintln!(
+                    "[fade-tail] rate={rate} len={len_sec}s fade={fade_sec}s shape={shape} dir={dir} -> max_frame_step={max_frame_step} last_ms_peak={last_ms_peak}"
+                );
+                // 无单帧硬切：任何帧间样本差必须远低于源幅值。
+                assert!(
+                    max_frame_step < 0.15,
+                    "fade-out tail has a hard click rate={rate} len={len_sec}s shape={shape} dir={dir}: {max_frame_step}"
+                );
+                // 末尾必须真正落到静音（端点锁定：最后一帧增益精确 0）。
+                assert!(
+                    last_ms_peak < 0.02,
+                    "fade-out tail does not reach silence rate={rate} len={len_sec}s shape={shape} dir={dir}: {last_ms_peak}"
+                );
+            }
+        }
     }
 }
