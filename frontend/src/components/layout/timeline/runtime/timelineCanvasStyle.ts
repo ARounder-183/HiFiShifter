@@ -527,8 +527,14 @@ export function buildTimelineClipVisualStyle(args: {
         headerFill: rgba(headerRgb, darkMode ? 0.85 : 0.8),
         bodyFill: rgba(bodyRgb, darkMode ? 0.82 : 0.76),
         // 描边：选中 = 白色 2px（在提亮的色块上清晰醒目，REAPER 惯例）；
-        // 未选中 = 同色调描边 —— 让色块边缘"闭合"且与色块同调。
-        borderStroke: args.selected ? "rgba(255, 255, 255, 0.6)" : rgba(headerRgb, 0.55),
+        // 未选中 = 主题对比色 1px —— 深色主题亮线、浅色主题暗线（不再用
+        // 同色调淡描边）。相邻 clip 交界处两条对比线并排，任何轨道色/主题
+        // 下都能一眼看出是两个 clip，而不是连续的同一块。
+        borderStroke: args.selected
+            ? "rgba(255, 255, 255, 0.6)"
+            : darkMode
+              ? "rgba(235, 240, 248, 0.50)"
+              : "rgba(22, 26, 34, 0.55)",
         borderLineWidth: args.selected ? 2 : 1,
         snapOffsetTriFill,
         snapOffsetTriStroke,

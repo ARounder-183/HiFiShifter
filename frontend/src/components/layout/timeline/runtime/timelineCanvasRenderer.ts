@@ -139,6 +139,7 @@ export function drawTimelineCanvas(
         height: number;
         clips: Array<{
             id: string;
+            trackId: string;
             leftPx: number;
             topPx: number;
             widthPx: number;
@@ -237,6 +238,31 @@ export function drawTimelineCanvas(
         ctx.restore();
     }
 
+    // 同轨 clip 的左缘集合：用于判定"本 clip 右缘是否紧贴另一个 clip"
+    // （相邻 clip 间画泳道底色分隔缝，见下方绘制）—— 避免把两个相连的
+    // clip 误认成连续的一块。leftPx 来自同一投影函数，紧贴时可能引入
+    // 亚像素误差，因此按 0.5px 容差匹配。
+    const sameTrackClipLefts = new Map<string, number[]>();
+    for (const c of args.clips) {
+        let list = sameTrackClipLefts.get(c.trackId);
+        if (!list) sameTrackClipLefts.set(c.trackId, (list = []));
+        list.push(c.leftPx);
+    }
+    for (const list of sameTrackClipLefts.values()) list.sort((a, b) => a - b);
+    const hasAdjacentRight = (trackId: string, rightEdgePx: number): boolean => {
+        const list = sameTrackClipLefts.get(trackId);
+        if (!list) return false;
+        // 二分查找首个 >= rightEdgePx - 0.5 的左缘。
+        let lo = 0;
+        let hi = list.length;
+        while (lo < hi) {
+            const mid = (lo + hi) >> 1;
+            if (list[mid] < rightEdgePx - 0.5) lo = mid + 1;
+            else hi = mid;
+        }
+        return lo < list.length && Math.abs(list[lo] - rightEdgePx) <= 0.5;
+    };
+
     for (const clip of args.clips) {
         const clipLeft = clip.leftPx;
         const clipTop = clip.topPx;
@@ -328,6 +354,15 @@ export function drawTimelineCanvas(
         ctx.fillRect(clipLeft, clipTop + headerHeight, clipWidth, 1);
 
         ctx.restore();
+
+        // 相邻 clip 分隔缝：右缘紧贴下一个同轨 clip 时，在两块之间画一条
+        // 泳道底色竖线（贯穿 header+body）。与两侧的主题对比描边组成
+        // "描边+底缝+描边"分隔带，任何轨道色/主题下都能一眼看出是两个
+        // clip，而不是连续的同一块。颜色与泳道底色（LANE_BG）一致。
+        if (hasAdjacentRight(clip.trackId, clipLeft + clipWidth)) {
+            ctx.fillStyle = darkMode ? "rgb(31, 31, 31)" : "rgb(237, 240, 245)";
+            ctx.fillRect(clipLeft + clipWidth - 0.5, clipTop, 1, clipHeight);
+        }
 
         // 编组激活 = 深金描边 + 外圈（编组语义，非选中语义）。
         // 选中不画边框 —— 由色块提亮表达（Ableton 式，见 style 的 selected 分支）；
