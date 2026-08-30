@@ -9,6 +9,13 @@
 //! g(t)=t^a/(t^a+(1-t)^a)（a≥1）。曲率 dir∈[-1,1] 经方向镜像 σ
 //! （淡入 +1 / 淡出 −1）归一到 u=σ·dir 驱动轴：
 //! log2(e) = log2(p0) + k·(u − u0)。（详见 TS 侧模块文档。）
+//!
+//! ## 端点着陆（de-click landing）
+//! 幂族曲线在端点斜率可能趋近无穷（e<1 时淡出末端 g(ε)=ε^e 下降极快），
+//! 逐帧点采样会在 clip 末尾留下不可忽略的增益阶跃 → Click。为此对所有
+//! 曲线施加 raised-cosine 着陆窗：淡出在末尾 `FADE_LANDING_FRAC` 区间
+//! 内把增益平滑拉到 0、淡入在开头对称地从 0 平滑拉起（C¹ 衔接、端点
+//! 零斜率）。内部采样点（黄金锚点 t≤0.75 / ≥0.25）不受影响。
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -103,6 +110,8 @@ fn core_ascending(spec: &ShapeSpec, u: f64, x: f64) -> f64 {
 ///
 /// - `mode_out=false` 淡入（上升）；`true` 淡出（下降；内部做时间镜像与 σ 归一）。
 /// - 端点精确：淡入 g(0)=0/g(1)=1；淡出反向。
+/// - 端点着陆：淡出在末尾 `FADE_LANDING_FRAC` 区间、淡入在开头同长度区间
+///   乘 raised-cosine 着陆窗，保证端部零斜率、逐帧增益步长有界（防 Click）。
 pub fn fade_gain_signed(shape: f64, dir: f64, mode_out: bool, t: f64) -> f64 {
     let t = if t.is_finite() { t.clamp(0.0, 1.0) } else { 0.0 };
     let dir = if dir.is_finite() { dir.clamp(-1.0, 1.0) } else { 0.0 };
@@ -122,7 +131,7 @@ pub fn fade_gain_signed(shape: f64, dir: f64, mode_out: bool, t: f64) -> f64 {
     let u = sigma * dir;
     let x = if mode_out { 1.0 - t } else { t };
     let spec = resolve_shape(shape);
-    let gain = core_ascending(&spec, u, x);
+    let gain = core_ascending(&spec, u, x) * landing_window(t, mode_out);
     if gain.is_finite() {
         gain
     } else {
@@ -138,6 +147,39 @@ pub fn fade_gain(shape: f64, dir: f64, t: f64) -> f64 {
 
 /// LUT 尺寸：音频混音用。
 pub const FADE_LUT_SIZE: usize = 1024;
+
+/// 端点着陆窗长度（归一化进度比例）。
+///
+/// 淡出的末尾这段 / 淡入的开头这段被 raised-cosine 窗覆盖，把曲线平滑
+/// 拉回/拉离 0。取 1/8：在最恶劣的“先慢后快”组合（e≈0.04）下，10ms 级
+/// 淡化（N≈480）的逐帧增益步长仍 ≤ ~2.4%，人耳不可闻；再小的 τ 会把
+/// 残余阶跃压回一个采样点内。曲线中部形态（黄金锚点区间）完全不受影响。
+pub const FADE_LANDING_FRAC: f64 = 0.125;
+
+/// raised-cosine 着陆窗：淡出在 (1-τ, 1]、淡入在 [0, τ) 内取值。
+///
+/// - 淡出：t=1-τ 处窗值为 1（且导数 0，与原始曲线 C¹ 衔接），t=1 处为 0；
+/// - 淡入：t=τ 处窗值为 1（且导数 0），t=0 处为 0；
+/// - 窗外恒为 1。
+#[inline]
+fn landing_window(t: f64, mode_out: bool) -> f64 {
+    let tau = FADE_LANDING_FRAC;
+    let u = if mode_out {
+        let lo = 1.0 - tau;
+        if t <= lo {
+            return 1.0;
+        }
+        (t - lo) / tau
+    } else {
+        if t >= tau {
+            return 1.0;
+        }
+        (tau - t) / tau
+    };
+    let x = u * std::f64::consts::FRAC_PI_2;
+    let c = x.cos();
+    c * c
+}
 
 /// 构建一条完整淡化查表（含两端点，共 N+1 项）。
 ///
@@ -304,6 +346,87 @@ mod tests {
                     fade_gain_signed(3.0, 0.35, out, idx / FADE_LUT_SIZE as f64) as f32;
                 let got = sample_fade_lut(&table, idx);
                 assert!((got - want).abs() < 5e-3, "idx={idx} out={out}");
+            }
+        }
+    }
+
+    /// 着陆窗在衔接点两侧连续（C⁰；导数零由窗函数定义保证，这里验证
+    /// 一阶采样步长在衔接点不突跳）。
+    #[test]
+    fn landing_window_is_continuous_at_junctions() {
+        let eps = 1e-9;
+        for &s in &SHAPES {
+            for &d in &[-1.0, 0.0, 1.0] {
+                let lo = 1.0 - FADE_LANDING_FRAC;
+                let g_lo_m = fade_gain_signed(s, d, true, lo - eps);
+                let g_lo_p = fade_gain_signed(s, d, true, lo + eps);
+                assert!((g_lo_m - g_lo_p).abs() < 1e-6, "out junction s={s} d={d}");
+                let g_hi_m = fade_gain_signed(s, d, false, FADE_LANDING_FRAC - eps);
+                let g_hi_p = fade_gain_signed(s, d, false, FADE_LANDING_FRAC + eps);
+                assert!((g_hi_m - g_hi_p).abs() < 1e-6, "in junction s={s} d={d}");
+            }
+        }
+    }
+
+    /// 端点锁定后的逐帧采样（淡出用 (k+1)/N 进度、淡入对称）必须：
+    /// 1. 最后一帧（淡出）/ 第一帧（淡入）精确落在 0；
+    /// 2. 且整条增益序列的逐帧步长有界 —— 对“先慢后快”最恶劣组合
+    ///    （e 低至 ~0.04）也不得再留下可闻单帧阶跃。
+    #[test]
+    fn per_frame_gain_step_is_click_safe_for_slow_start_fade_outs() {
+        // (shape, dir) 使淡出 u = -dir < 0 → e < 1（末端陡峭）。
+        let worst_cases: &[(f64, f64)] = &[(1.0, 1.0), (1.0, 0.6), (3.0, 1.0), (3.0, 0.35)];
+        for &(shape, dir) in worst_cases {
+            for &frames in &[480usize, 2048, 48000] {
+                let table = global_fade_lut(shape, dir, true);
+                let mut prev = 1.0f32;
+                let mut max_step = 0.0f32;
+                for frame in 0..frames {
+                    // 端点锁定约定：最后一帧进度恰为 1（与 mix.rs/mixdown.rs 一致）。
+                    let consumed = (frame + 1) as f64 / frames as f64;
+                    let g = sample_fade_lut(&table, consumed * FADE_LUT_SIZE as f64);
+                    assert!(
+                        g <= prev + 1e-6,
+                        "fade-out must stay monotonically decreasing s={shape} d={dir} N={frames} frame={frame}"
+                    );
+                    max_step = max_step.max(prev - g);
+                    prev = g;
+                }
+                assert_eq!(
+                    prev, 0.0,
+                    "last frame must be exactly silent s={shape} d={dir}"
+                );
+                assert!(
+                    max_step < 0.025,
+                    "per-frame gain step too large (click risk) s={shape} d={dir} N={frames}: {max_step}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn per_frame_gain_step_is_click_safe_for_fast_start_fade_ins() {
+        // 淡入 u = dir < 0 → e < 1（起点陡峭），对称于淡出问题。
+        let worst_cases: &[(f64, f64)] = &[(1.0, -1.0), (1.0, -0.6), (3.0, -1.0), (3.0, -0.35)];
+        for &(shape, dir) in worst_cases {
+            for &frames in &[480usize, 2048, 48000] {
+                let table = global_fade_lut(shape, dir, false);
+                let mut prev = 0.0f32;
+                let mut max_step = 0.0f32;
+                for frame in 0..frames {
+                    let consumed = (frame + 1) as f64 / frames as f64;
+                    let g = sample_fade_lut(&table, consumed * FADE_LUT_SIZE as f64);
+                    assert!(
+                        g >= prev - 1e-6,
+                        "fade-in must stay monotonically increasing s={shape} d={dir} N={frames} frame={frame}"
+                    );
+                    max_step = max_step.max(g - prev);
+                    prev = g;
+                }
+                assert!(
+                    max_step < 0.025,
+                    "per-frame gain step too large (click risk) s={shape} d={dir} N={frames}: {max_step}"
+                );
             }
         }
     }

@@ -316,6 +316,25 @@ pub(crate) fn mix_snapshot_clips_into_scratch(
         let clip_off = overlap_start - clip_start;
         let mix_frames = (overlap_end - overlap_start) as usize;
 
+        // 淡出（端点锁定 + 内容耗尽收缩）：
+        // - 端点锁定：N 帧区间的最后一帧（clip 末帧）进度恰为 1 → 增益精确
+        //   0。旧公式 `1-remain/N` 让末帧进度停在 1-1/N，对“先慢后快”
+        //   曲线（e<1）留下 (1/N)^e 级增益阶跃 → Click。
+        // - 内容耗尽：深拉伸（播放速率 0.3~0.5）的 clip 被拉长到超出源窗口
+        //   时，源内容会在淡出区之前/内部耗尽（sample_clip_pcm 返回 None）。
+        //   若直接静音，会在增益还很大时硬切（与曲线形状无关）。处理：
+        //   淡出区间收缩为 [E-N, L]（E=内容末端），内容末端之后按淡出增益
+        //   保持末帧衰减 —— 全程无阶跃。
+        let default_zone_start = clip.length_frames.saturating_sub(clip.fade_out_frames);
+        let content_end = clip_content_end_frame(clip);
+        let fade_zone_start = match content_end {
+            Some(end) if end < default_zone_start => end.saturating_sub(clip.fade_out_frames),
+            _ => default_zone_start,
+        };
+        let mut last_l: f32 = 0.0;
+        let mut last_r: f32 = 0.0;
+        let mut has_last: bool = false;
+
         for f in 0..mix_frames {
             let local = clip_off + f as u64;
 
@@ -342,30 +361,61 @@ pub(crate) fn mix_snapshot_clips_into_scratch(
                     None => ((local + 1) as f32 / clip.fade_in_frames as f32).clamp(0.0, 1.0),
                 };
             }
-            if clip.fade_out_frames > 0 && local + clip.fade_out_frames > clip.length_frames {
-                let remain = clip.length_frames.saturating_sub(local);
+            if clip.fade_out_frames > 0 && local >= fade_zone_start && local < clip.length_frames {
                 // 淡出表按【区间内时间进度】下降采样（t=0 处 1 → t=1 处 0），
                 // 因此必须用"已消耗进度"索引。剩余比例的走向恰好相反，
-                // 用它做索引会把淡出整体反成淡入（历史 bug）。线性分支的
-                // remain/N 与补号形式恒等，保持不动。
-                let consumed = 1.0 - remain as f64 / clip.fade_out_frames as f64;
-                g *= match &clip.fade_out_lut {
-                    Some(lut) => crate::fade_curves::sample_fade_lut(
-                        lut,
-                        consumed * crate::fade_curves::FADE_LUT_SIZE as f64,
-                    ),
-                    None => (remain as f32 / clip.fade_out_frames as f32).clamp(0.0, 1.0),
-                };
+                // 用它做索引会把淡出整体反成淡入（历史 bug）。进度起点
+                // 1/N、终点 1（端点锁定），区间由 content_end 决定。
+                let progress =
+                    (local - fade_zone_start + 1) as f64 / clip.fade_out_frames.max(1) as f64;
+                if progress <= 1.0 {
+                    g *= match &clip.fade_out_lut {
+                        Some(lut) => crate::fade_curves::sample_fade_lut(
+                            lut,
+                            progress * crate::fade_curves::FADE_LUT_SIZE as f64,
+                        ),
+                        None => (progress as f32).clamp(0.0, 1.0),
+                    };
+                } else {
+                    // 收缩后的淡出在这帧之前已走完 → 静音。
+                    g = 0.0;
+                }
             }
             if g <= 0.0 {
                 continue;
             }
 
+            let oi = (out_off + f) * 2;
             let Some((l, r)) = sample_clip_pcm(clip, local, local_adj) else {
+                // 内容耗尽：淡出激活时保持末帧内容按淡出增益继续衰减（E
+                // 处及其后增益从 ~1 平滑走到 0），杜绝“增益还很大时内容
+                // 硬切”的 Click。淡出未激活时维持越界静音语义。
+                if clip.fade_out_frames > 0
+                    && local >= fade_zone_start
+                    && local < clip.length_frames
+                    && has_last
+                {
+                    let mixed_l = last_l * g;
+                    let mixed_r = last_r * g;
+                    scratch[oi] += mixed_l;
+                    scratch[oi + 1] += mixed_r;
+                    if let (Some(m), Some(slot)) = (meter.as_deref_mut(), meter_slot) {
+                        let peak = &mut m.track_peaks[slot];
+                        let l_abs = mixed_l.abs();
+                        let r_abs = mixed_r.abs();
+                        if l_abs > *peak {
+                            *peak = l_abs;
+                        }
+                        if r_abs > *peak {
+                            *peak = r_abs;
+                        }
+                    }
+                }
                 continue;
             };
-
-            let oi = (out_off + f) * 2;
+            last_l = l;
+            last_r = r;
+            has_last = true;
             let mixed_l = l * g;
             let mixed_r = r * g;
             scratch[oi] += mixed_l;
@@ -383,6 +433,35 @@ pub(crate) fn mix_snapshot_clips_into_scratch(
             }
         }
     }
+}
+
+/// 估算 clip 内容末端（输出帧域，第一个"无内容"帧；deep-stretch 等造成
+/// 内容不足时 < clip.length_frames）。`None` = 内容不会在此 clip 内耗尽
+/// （repeat / Loop 回绕 / 内容覆盖整条 clip）。
+fn clip_content_end_frame(clip: &EngineClip) -> Option<u64> {
+    if clip.repeat {
+        return None;
+    }
+    if clip.loop_anchor_frame.is_some() {
+        return None;
+    }
+    if let Some(pcm) = clip.rendered_pcm.as_ref() {
+        // 合成（pitch edit）clip：渲染缓冲即内容源。
+        return Some((pcm.len() / 2) as u64);
+    }
+    let window = clip.src_end_frame.saturating_sub(clip.src_start_frame);
+    if window == 0 {
+        return Some(0);
+    }
+    let rate = if clip.playback_rate.is_finite() && clip.playback_rate > 0.0 {
+        clip.playback_rate
+    } else {
+        1.0
+    };
+    // 映射：src_frame = round((local + offset) * rate)，内容为 src 域 [0, window)。
+    // 首个越界帧 ≈ window/rate - offset（±1 帧误差由主循环 hold 兜底）。
+    let end = ((window as f64) / rate).floor() as u64;
+    Some(end.saturating_sub(clip.local_src_offset_frames.max(0) as u64))
 }
 
 fn snapshot_has_pending_clip(snap: &EngineSnapshot, pos0: u64, pos1: u64) -> bool {

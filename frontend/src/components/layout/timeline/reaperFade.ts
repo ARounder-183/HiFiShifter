@@ -36,6 +36,32 @@ export const FADE_S_SHARP = 6; // "Slow Start/End Steep"
 const E_MIN = 0.01;
 const E_MAX = 64;
 
+/**
+ * 端点着陆窗长度（归一化进度比例，与 Rust `fade_curves.rs`
+ * `FADE_LANDING_FRAC` 同步）。淡出的末尾 / 淡入的开头这段被
+ * raised-cosine 窗覆盖，把曲线平滑拉回/拉离 0。
+ */
+export const FADE_LANDING_FRAC = 1 / 8;
+
+/**
+ * raised-cosine 着陆窗：淡出在 (1-τ, 1]、淡入在 [0, τ) 内取值；窗外恒为 1。
+ * 两端窗导数均为 0，与原始曲线 C¹ 衔接（淡出 t=1 处、淡入 t=0 处零斜率）。
+ */
+function landingWindow(t: number, mode: "in" | "out"): number {
+    const tau = FADE_LANDING_FRAC;
+    let u: number;
+    if (mode === "out") {
+        const lo = 1 - tau;
+        if (t <= lo) return 1;
+        u = (t - lo) / tau;
+    } else {
+        if (t >= tau) return 1;
+        u = (tau - t) / tau;
+    }
+    const c = Math.cos((u * Math.PI) / 2);
+    return c * c;
+}
+
 type ShapeSpec =
     | { kind: "power"; p0: number; u0: number; k: number }
     | { kind: "s"; a0: number; ks: number }
@@ -103,6 +129,9 @@ function coreAscending(spec: ShapeSpec, u: number, x: number): number {
  * @param dir   该侧存储的曲率 [-1,1]（淡入/淡出各自约定）
  * @param mode  'in'（上升）/ 'out'（下降；内部完成时间镜像与 σ 符号归一）
  * @param t     该侧区间内的进度 [0,1]
+ *
+ * 端点着陆：淡出末尾/淡入开头乘 raised-cosine 窗（见模块头注释），
+ * 保证端部零斜率、逐帧增益步长有界（防 Click）。
  */
 export function fadeGainSigned(shape: number, dir: number, mode: "in" | "out", t: number): number {
     const clampedT = Number.isFinite(t) ? Math.min(1, Math.max(0, t)) : 0;
@@ -113,7 +142,7 @@ export function fadeGainSigned(shape: number, dir: number, mode: "in" | "out", t
     const u = sigma * Math.min(1, Math.max(-1, dir));
     const x = mode === "out" ? 1 - clampedT : clampedT;
     const spec = resolveShapeSpec(shape);
-    const gain = coreAscending(spec, u, x);
+    const gain = coreAscending(spec, u, x) * landingWindow(clampedT, mode);
     return Number.isFinite(gain) ? gain : clampedT;
 }
 
