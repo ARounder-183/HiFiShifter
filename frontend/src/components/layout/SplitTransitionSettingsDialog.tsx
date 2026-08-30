@@ -12,7 +12,9 @@ import {
     setSplitTransitionOverlapCrossfade,
     persistUiSettings,
 } from "../../features/session/sessionSlice";
-import type { FadeCurveType } from "../../features/session/sessionTypes";
+import type { SplitTransitionCurveType } from "../../features/session/sessionTypes";
+import { FADE_PRESETS } from "./timeline/reaperFade";
+import { SHAPE_LABEL_KEYS } from "./timeline/fadeTooltipText";
 import { isModifierActive, selectKeybinding } from "../../features/keybindings/keybindingsSlice";
 import { applySelectWheelChange } from "../../utils/selectWheel";
 
@@ -21,12 +23,14 @@ interface Props {
     onOpenChange: (open: boolean) => void;
 }
 
-const CURVE_OPTIONS: Array<{ value: FadeCurveType; labelKey: string }> = [
-    { value: "linear", labelKey: "fade_curve_linear" },
-    { value: "sine", labelKey: "fade_curve_sine" },
-    { value: "exponential", labelKey: "fade_curve_exponential" },
-    { value: "logarithmic", labelKey: "fade_curve_logarithmic" },
-    { value: "scurve", labelKey: "fade_curve_scurve" },
+// 新版“分割过渡淡化曲线”枚举：最开头是“不修改淡化曲线”（保留原 Clip
+// 曲线类型，默认值），其后按 REAPER 菜单顺序列出七预设（FADE_PRESETS）。
+const CURVE_OPTIONS: Array<{ value: SplitTransitionCurveType; labelKey: string }> = [
+    { value: "keep", labelKey: "split_transition_curve_keep" },
+    ...FADE_PRESETS.map((preset) => ({
+        value: preset.id,
+        labelKey: SHAPE_LABEL_KEYS[preset.shape] ?? "fade_shape_linear",
+    })),
 ];
 
 export function SplitTransitionSettingsDialog({ open, onOpenChange }: Props) {
@@ -234,7 +238,7 @@ export function SplitTransitionSettingsDialog({ open, onOpenChange }: Props) {
                             value={splitTransitionCurve}
                             size="2"
                             onValueChange={(v) => {
-                                dispatch(setSplitTransitionCurve(v as FadeCurveType));
+                                dispatch(setSplitTransitionCurve(v as SplitTransitionCurveType));
                                 void dispatch(persistUiSettings());
                             }}
                         >

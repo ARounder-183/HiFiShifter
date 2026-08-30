@@ -798,6 +798,7 @@ export const koKR = {
     split_transition_duration_percent_hint:
         "백분율은 분할로 생성된 앞뒤 두 클립의 전체 길이 합계를 기준으로 계산됩니다.",
     split_transition_curve: "페이드 커브",
+    split_transition_curve_keep: "페이드 커브 변경 안 함",
     split_transition_overlap_crossfade: "오버랩 크로스페이드",
     split_transition_overlap_crossfade_auto: "자동 크로스페이드 따르기",
     split_transition_overlap_crossfade_always: "항상 적용",

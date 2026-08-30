@@ -701,6 +701,7 @@ export const zhCN = {
     split_transition_duration_percent_unit: "%",
     split_transition_duration_percent_hint: "百分比按分割后前后两个音频块的全长合计折算。",
     split_transition_curve: "淡化曲线",
+    split_transition_curve_keep: "不修改淡化曲线",
     split_transition_overlap_crossfade: "重叠交叉淡化",
     split_transition_overlap_crossfade_auto: "跟随自动交叉淡化",
     split_transition_overlap_crossfade_always: "始终应用",

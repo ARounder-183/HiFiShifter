@@ -719,8 +719,10 @@ fn default_split_transition_duration_percent() -> f64 {
     1.0
 }
 
+/// 分割过渡“淡化曲线”：新版 REAPER 预设 id；"keep"（默认）= 分割后保留
+/// 原 Clip 的淡化曲线类型，不再修改。
 fn default_split_transition_curve() -> String {
-    "sine".to_string()
+    "keep".to_string()
 }
 
 fn default_split_transition_overlap_crossfade() -> String {
@@ -847,11 +849,17 @@ impl UiSettings {
             self.split_transition_duration_percent =
                 self.split_transition_duration_percent.clamp(0.01, 100.0);
         }
-        if !["linear", "sine", "exponential", "logarithmic", "scurve"]
-            .contains(&self.split_transition_curve.as_str())
-        {
-            self.split_transition_curve = default_split_transition_curve();
-        }
+        // 新版预设 id（"keep" + FADE_PRESETS）；旧命名曲线（淡化模型重构前）
+        // 在此迁移到等价预设：exponential→lateSlight、logarithmic→convexSlight、
+        // sine/scurve→sSlight、linear→linear；其余未知值回退默认 "keep"。
+        self.split_transition_curve = match self.split_transition_curve.as_str() {
+            "keep" | "linear" | "convexSlight" | "lateSlight" | "convexSharp"
+            | "lateSharp" | "sSlight" | "sSharp" => self.split_transition_curve.clone(),
+            "exponential" => "lateSlight".to_string(),
+            "logarithmic" => "convexSlight".to_string(),
+            "sine" | "scurve" => "sSlight".to_string(),
+            _ => default_split_transition_curve(),
+        };
         if !["auto", "always"].contains(&self.split_transition_overlap_crossfade.as_str()) {
             self.split_transition_overlap_crossfade = default_split_transition_overlap_crossfade();
         }
@@ -901,7 +909,7 @@ mod tests {
         assert_eq!(settings.split_transition_duration_unit, "seconds");
         assert!((settings.split_transition_duration_sec - 0.01).abs() < 1e-12);
         assert!((settings.split_transition_duration_percent - 1.0).abs() < 1e-12);
-        assert_eq!(settings.split_transition_curve, "sine");
+        assert_eq!(settings.split_transition_curve, "keep");
         assert_eq!(settings.split_transition_overlap_crossfade, "auto");
     }
 
@@ -921,8 +929,29 @@ mod tests {
         assert_eq!(settings.split_transition_duration_unit, "seconds");
         assert!((settings.split_transition_duration_sec - 10.0).abs() < 1e-12);
         assert!((settings.split_transition_duration_percent - 100.0).abs() < 1e-12);
-        assert_eq!(settings.split_transition_curve, "sine");
+        assert_eq!(settings.split_transition_curve, "keep");
         assert_eq!(settings.split_transition_overlap_crossfade, "auto");
+    }
+
+    #[test]
+    fn ui_settings_migrates_legacy_split_transition_curve_names() {
+        // 旧命名曲线（淡化模型重构前）→ 新版预设 id；未知值回退 "keep"。
+        let migrate = |curve: &str| {
+            let mut settings = UiSettings {
+                split_transition_curve: curve.to_string(),
+                ..UiSettings::default()
+            };
+            settings.normalize_split_transition();
+            settings.split_transition_curve
+        };
+        assert_eq!(migrate("keep"), "keep");
+        assert_eq!(migrate("linear"), "linear");
+        assert_eq!(migrate("lateSharp"), "lateSharp");
+        assert_eq!(migrate("sine"), "sSlight");
+        assert_eq!(migrate("scurve"), "sSlight");
+        assert_eq!(migrate("exponential"), "lateSlight");
+        assert_eq!(migrate("logarithmic"), "convexSlight");
+        assert_eq!(migrate("bogus"), "keep");
     }
 
     #[test]

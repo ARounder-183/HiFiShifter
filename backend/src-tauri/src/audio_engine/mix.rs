@@ -342,19 +342,24 @@ pub(crate) fn mix_snapshot_clips_into_scratch(
                     None => ((local + 1) as f32 / clip.fade_in_frames as f32).clamp(0.0, 1.0),
                 };
             }
-            if clip.fade_out_frames > 0 && local + clip.fade_out_frames > clip.length_frames {
+            // 淡出区间 [total-N, total-1]（N 帧）与淡入帧居中式约定镜像，
+            // 且做端点锁定：最后一帧进度恰为 1 → 增益精确 0。若沿用旧公式
+            // `1 - remain/N`，末帧进度停在 1-1/N，对“先慢后快”曲线（e<1）
+            // 会在 clip 末尾留下 (1/N)^e 级增益阶跃 → Click。
+            if clip.fade_out_frames > 0 && local + clip.fade_out_frames >= clip.length_frames {
                 let remain = clip.length_frames.saturating_sub(local);
                 // 淡出表按【区间内时间进度】下降采样（t=0 处 1 → t=1 处 0），
                 // 因此必须用"已消耗进度"索引。剩余比例的走向恰好相反，
-                // 用它做索引会把淡出整体反成淡入（历史 bug）。线性分支的
-                // remain/N 与补号形式恒等，保持不动。
-                let consumed = 1.0 - remain as f64 / clip.fade_out_frames as f64;
+                // 用它做索引会把淡出整体反成淡入（历史 bug）。
+                // (remain-1)/N 的补号形式使进度从首帧 1/N 走到末帧 1。
+                let consumed = 1.0 - remain.saturating_sub(1) as f64 / clip.fade_out_frames as f64;
                 g *= match &clip.fade_out_lut {
                     Some(lut) => crate::fade_curves::sample_fade_lut(
                         lut,
                         consumed * crate::fade_curves::FADE_LUT_SIZE as f64,
                     ),
-                    None => (remain as f32 / clip.fade_out_frames as f32).clamp(0.0, 1.0),
+                    None => (remain.saturating_sub(1) as f32 / clip.fade_out_frames as f32)
+                        .clamp(0.0, 1.0),
                 };
             }
             if g <= 0.0 {

@@ -1238,6 +1238,25 @@ pub fn clamp_fade_dir(dir: f64) -> f64 {
     dir.clamp(-1.0, 1.0)
 }
 
+/// 新版“分割过渡淡化曲线”预设 id → （形状 id, 淡入默认曲率, 淡出默认曲率）。
+///
+/// id 与前端 `reaperFade.ts` 的 `FADE_PRESETS` / `DEFAULT_FADE_DIR_BY_SHAPE`
+/// 对应（四元组顺序：shape / dir-in / dir-out）。`"keep"`（分割后保留原
+/// Clip 曲线，不修改）由调用方在转换前拦截为 `curve=None`，本函数只认
+/// 预设 id；未知值返回 None（调用方按“不修改”处理）。
+pub fn split_transition_curve_spec(curve: &str) -> Option<(f64, f64, f64)> {
+    match curve {
+        "linear" => Some((0.0, 0.0, 0.0)),
+        "convexSlight" => Some((1.0, 0.0, 0.0)),
+        "lateSlight" => Some((2.0, 1.0, -1.0)),
+        "convexSharp" => Some((3.0, -1.0, 1.0)),
+        "lateSharp" => Some((4.0, 1.0, -1.0)),
+        "sSlight" => Some((5.0, 0.0, 0.0)),
+        "sSharp" => Some((6.0, 0.0, 0.0)),
+        _ => None,
+    }
+}
+
 impl Clip {
     /// 读取期兼容：把旧命名曲线字符串换算成 (shape, dir)。
     ///
@@ -5085,7 +5104,7 @@ mod tests {
             duration_unit: SplitTransitionDurationUnit::Seconds,
             duration_sec: 0.1,
             duration_percent: 1.0,
-            curve: Some("sine".to_string()),
+            curve: Some("lateSlight".to_string()),
             overlap_fades: false,
         };
         let right_id = tl
@@ -5101,8 +5120,51 @@ mod tests {
         assert!((right.length_sec - 1.5).abs() < 1e-9);
         assert!((right.fade_in_sec - 0.1).abs() < 1e-9);
         assert!((right.source_start_sec - 2.0).abs() < 1e-9);
-        assert_eq!(left.fade_out_shape, 5.0);
-        assert_eq!(right.fade_in_shape, 5.0);
+        // 新版预设（lateSlight = 形状 2）：淡出侧默认曲率 -1、淡入侧 +1。
+        assert_eq!(left.fade_out_shape, 2.0);
+        assert_eq!(left.fade_out_dir, -1.0);
+        assert_eq!(right.fade_in_shape, 2.0);
+        assert_eq!(right.fade_in_dir, 1.0);
+    }
+
+    #[test]
+    fn split_transition_keep_preserves_original_fade_curves() {
+        // "keep"（curve=None）= 分割后保留原 Clip 的淡化曲线类型，不再修改：
+        // 只写淡化时长，不碰 shape/dir。
+        let mut tl = TimelineState::default();
+        let track_id = tl.add_track(Some("Track".to_string()), None, None);
+        let clip_id = tl.add_clip(Some(track_id), Some("A".into()), Some(0.0), Some(2.0), None);
+        {
+            let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            clip.fade_out_shape = 3.5; // 小数变体（基础族 3）
+            clip.fade_out_dir = 0.6;
+            clip.fade_in_shape = 5.1;
+            clip.fade_in_dir = -0.4;
+        }
+
+        let options = SplitTransitionOptions {
+            enabled: true,
+            mode: SplitTransitionMode::FadeOnly,
+            duration_unit: SplitTransitionDurationUnit::Seconds,
+            duration_sec: 0.1,
+            duration_percent: 1.0,
+            curve: None, // "keep" → 调用层映射为 None
+            overlap_fades: false,
+        };
+        let right_id = tl
+            .split_clip_with_transition(&clip_id, 0.5, &options)
+            .expect("split should create right clip");
+
+        let left = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+        let right = tl.clips.iter().find(|c| c.id == right_id).unwrap();
+        // 时长照常写入……
+        assert!((left.fade_out_sec - 0.1).abs() < 1e-9);
+        assert!((right.fade_in_sec - 0.1).abs() < 1e-9);
+        // ……但曲线类型（形状/曲率）原样保留，包括小数变体。
+        assert_eq!(left.fade_out_shape, 3.5);
+        assert_eq!(left.fade_out_dir, 0.6);
+        assert_eq!(right.fade_in_shape, 5.1);
+        assert_eq!(right.fade_in_dir, -0.4);
     }
 
     #[test]
@@ -5125,7 +5187,7 @@ mod tests {
             duration_unit: SplitTransitionDurationUnit::Seconds,
             duration_sec: 0.1,
             duration_percent: 1.0,
-            curve: Some("sine".to_string()),
+            curve: Some("sSlight".to_string()),
             overlap_fades: true,
         };
         let right_id = tl
@@ -5325,7 +5387,7 @@ mod tests {
             duration_unit: SplitTransitionDurationUnit::Seconds,
             duration_sec: 0.1,
             duration_percent: 1.0,
-            curve: Some("sine".to_string()),
+            curve: Some("sSlight".to_string()),
             overlap_fades: true,
         };
         let right_id = tl
@@ -8160,19 +8222,20 @@ impl TimelineState {
         }
 
         // 仅淡入淡出模式：切割处创建的是“手动淡化”（不随重叠自动变化）。
+        // 淡化曲线：opts.curve=None（“keep”）时**不修改**两段的 shape/dir，
+        // 保留原 Clip 的曲线类型；否则按新版预设写入（含各侧默认曲率）。
         let set_manual_fade = |left: &mut Clip, right: &mut Clip, fade_len: f64| {
             left.fade_out_sec = fade_len.min(left.length_sec);
             right.fade_in_sec = fade_len.min(right.length_sec);
             left.auto_fade_out_sec = 0.0;
             right.auto_fade_in_sec = 0.0;
-            if let Some(curve) = opts.curve.as_deref() {
-                // 分割过渡设置仍是旧命名曲线（独立 UI 设置），在边界写入时
-                // 统一换算为 REAPER 形状/曲率模型。
-                let (shape, dir) = legacy_curve_to_fade_spec(curve);
+            if let Some((shape, dir_in, dir_out)) =
+                opts.curve.as_deref().and_then(split_transition_curve_spec)
+            {
                 left.fade_out_shape = shape;
-                left.fade_out_dir = dir;
+                left.fade_out_dir = dir_out;
                 right.fade_in_shape = shape;
-                right.fade_in_dir = dir;
+                right.fade_in_dir = dir_in;
             }
         };
         // 延伸重叠模式：重叠区的交叉淡化写入“自动交叉淡化”长度（跟随重叠，
@@ -8182,14 +8245,13 @@ impl TimelineState {
             right.auto_fade_in_sec = fade_len.min(right.length_sec);
             left.fade_out_sec = 0.0;
             right.fade_in_sec = 0.0;
-            if let Some(curve) = opts.curve.as_deref() {
-                // 分割过渡设置仍是旧命名曲线（独立 UI 设置），在边界写入时
-                // 统一换算为 REAPER 形状/曲率模型。
-                let (shape, dir) = legacy_curve_to_fade_spec(curve);
+            if let Some((shape, dir_in, dir_out)) =
+                opts.curve.as_deref().and_then(split_transition_curve_spec)
+            {
                 left.fade_out_shape = shape;
-                left.fade_out_dir = dir;
+                left.fade_out_dir = dir_out;
                 right.fade_in_shape = shape;
-                right.fade_in_dir = dir;
+                right.fade_in_dir = dir_in;
             }
         };
 

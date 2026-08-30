@@ -109,6 +109,7 @@ The track view is one of HiFiShifter's core features, allowing you to crop, spli
 For view navigation, drag the middle mouse button (hold the scroll wheel) to pan. Horizontal/vertical zoom or scrolling can be done by holding modifiers like `Ctrl`, `Alt`, `Shift` while scrolling the mouse wheel. These modifiers can be adjusted in the shortcut settings.
 
 Common shortcuts:
+
 > **macOS users**: `Ctrl` below corresponds to `Command (⌘)` and `Alt` to `Option (⌥)`.
 
 - `Space`: Play / Pause (does not return to start)
@@ -192,8 +193,49 @@ The `Split Transition` toolbar button is located to the right of `Auto Crossfade
 - `Extend & Overlap` (default): After splitting, automatically extends the left clip's tail forward by X and the right clip's head backward by X, creating a 2X-second overlap. The extension keeps the source material at the same timeline position and correctly accounts for playback rate. Extensions are clamped to the clip source's actual length. When `Auto Crossfade` is also enabled, a crossfade is automatically created across this overlap.
 - `Transition Length X`: The fade/overlap length used by both modes, 0.01 seconds by default.
 - `Transition Length Unit`: Choose `Seconds` or `Percent`. Percent defaults to 1% and is calculated from the combined full length of the two clips after the split; for example, two clips totaling 10 seconds at 1% gives 0.1 seconds.
-- `Fade Curve`: Selects the fade curve used by split transitions.
+- `Fade Curve`: Selects the fade curve written to the boundary fades by split transitions. The default is `Keep Original Fade Curve`.
 - `Overlap Crossfade`: With `Follow Auto Crossfade`, crossfades are only added to the overlap when `Auto Crossfade` is enabled. With `Always Apply`, crossfades are always added to the overlap.
+
+### Clip Fades & Crossfades
+
+Every clip carries its own fade-in / fade-out envelope, and the interaction model matches REAPER almost exactly: what you edit is not the whole shaded fade area, but the two lines actually visible on screen — the fade envelope line, and the vertical edge line of the fade region.
+
+**Adjusting fade length**
+
+- Drag the fade envelope line (or the vertical edge line of the fade region) at the left / right end of a clip to change the fade-in / fade-out length. Dragging inward from a clip's top-left / top-right corner creates a fade from zero.
+- Clicking a fade control (without dragging) moves the playhead to the corresponding position: the envelope line addresses the inner edge of the fade region (fade-in → its right edge, fade-out → its left edge), the crossfade grip the clicked position, and a clip edge that edge's exact position.
+- Hovering over fade controls (envelope line, edge line, crossfade grip) shows a tooltip with the fade-in / fade-out type (curve icon), the length (in the primary / secondary time units from the time display settings), and the curvature.
+
+**Fade shapes and curvature**
+
+HiFiShifter provides the same 7 fade shapes as REAPER: `Linear`, `Fast Start`, `Fast End`, `Fast Start Steep`, `Fast End Steep`, `Slow Start/End (S-Curve)`, and `Slow Start/End Steep`.
+
+- Right-click a fade envelope line or a fade region edge line to open the fade-specific context menu: seven shape buttons (current shape highlighted) on top, and a curvature slider with a mini curve preview below. Curvature ranges from `-1.00` to `+1.00` and applies in real time. The slider supports wheel stepping (hold the `Fine Adjust` modifier for finer steps), and the mini curve itself can be dragged directly.
+- Hold the `Fade Curvature` modifier (default `Alt`) and drag the envelope line to "pull" the curve through the pointer position.
+- Double-click the envelope line to reset that side's curvature to the default of the current shape; switching shapes also resets the curvature to the new shape's default.
+- Hold the `Cycle Fade Shape` modifier (default `Ctrl`) and click the envelope line to cycle through fade shapes.
+- The clip context menu also contains `Fade In` / `Fade Out` shape rows for switching fade shapes directly.
+
+**Auto crossfade**
+
+The `Auto Crossfade` toolbar button (enabled by default) behaves like its REAPER / VEGAS Pro counterparts: when moving clips creates an overlap on the same track, a crossfade covering the overlap is applied to both clips automatically.
+
+- Auto-crossfade lengths are stored separately from manual fade lengths: when the overlap disappears, the auto fades are cleared and the previous manual fades are restored; conversely, manually dragging a fade length converts that side into a manual fade.
+- When one clip fully contains another, the overlap is not considered a valid crossfade relationship and no auto crossfade is triggered.
+- The fade lengths shown on the timeline and in the parameter editor are always the "effective" fades: auto crossfade takes priority over manual fades.
+
+**Editing in the overlap region**
+
+When two clips overlap, the overlap region provides full editing controls for both clips, with the same interactions as regular clips: the left side of the overlap belongs to the later clip (its left edge for trim / extend, plus its fade-in controls), and the right side belongs to the earlier clip (its right edge, plus its fade-out controls). Clip edges take priority, then fade region edge lines, then envelope lines.
+
+Where the two fade curves intersect there is a grip (the crossfade grip):
+
+- Dragging the grip moves the crossfade as a whole while keeping the overlap length unchanged;
+- Holding the `Crossfade Reverse Mode` modifier (default `Ctrl`) while dragging moves the two clips' edges in opposite directions, changing the overlap length and scaling the fade lengths proportionally;
+- Holding the `Fade Curvature` modifier (default `Alt`) while dragging adjusts both fade curves' curvature at once;
+- Right-clicking the grip opens a two-column fade menu (earlier clip's fade-out and later clip's fade-in) for setting both shapes and curvatures independently; double-clicking the grip resets both sides' curvature at once.
+
+All of these modifiers can be reassigned in `Options -> Keyboard Shortcuts...` under the `Modifiers · Fades & Crossfades` group.
 
 ### Timeline Time Display
 

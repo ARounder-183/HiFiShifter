@@ -872,17 +872,23 @@ pub fn render_mixdown_interleaved(
                     None => ((local_in_clip + 1) as f32 / fade_in_frames as f32).clamp(0.0, 1.0),
                 };
             }
-            if fade_out_frames > 0 && local_in_clip + fade_out_frames > clip_total_frames {
+            // 淡出区间 [total-N, total-1]（N 帧）与淡入帧居中式约定镜像，
+            // 且做端点锁定：最后一帧进度恰为 1 → 增益精确 0（杜绝末尾
+            // Click；与 audio_engine/mix.rs 同一约定，导出与预览一致）。
+            if fade_out_frames > 0 && local_in_clip + fade_out_frames >= clip_total_frames {
                 let remain = clip_total_frames.saturating_sub(local_in_clip);
                 // 淡出表按【区间内时间进度】下降采样（见 audio_engine/mix.rs
                 // 同一约定的注释）；用已消耗进度索引，避免把淡出反向。
-                let consumed = 1.0 - remain as f64 / fade_out_frames as f64;
+                // (remain-1)/N 的补号形式使进度从首帧 1/N 走到末帧 1。
+                let consumed = 1.0 - remain.saturating_sub(1) as f64 / fade_out_frames as f64;
                 g *= match &fade_out_lut {
                     Some(lut) => crate::fade_curves::sample_fade_lut(
                         lut,
                         consumed * crate::fade_curves::FADE_LUT_SIZE as f64,
                     ),
-                    None => (remain as f32 / fade_out_frames as f32).clamp(0.0, 1.0),
+                    None => {
+                        (remain.saturating_sub(1) as f32 / fade_out_frames as f32).clamp(0.0, 1.0)
+                    }
                 };
             }
             if g <= 0.0 {

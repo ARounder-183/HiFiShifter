@@ -732,6 +732,7 @@ export const jaJP = {
     split_transition_duration_percent_hint:
         "パーセントは分割で生成された前後2つのクリップの合計の長さに対して計算されます。",
     split_transition_curve: "フェードカーブ",
+    split_transition_curve_keep: "フェードカーブを変更しない",
     split_transition_overlap_crossfade: "オーバーラップのクロスフェード",
     split_transition_overlap_crossfade_auto: "自動クロスフェードに従う",
     split_transition_overlap_crossfade_always: "常に適用",
