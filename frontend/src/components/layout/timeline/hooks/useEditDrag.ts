@@ -298,17 +298,6 @@ export type EditDragState = {
             promoteFromLinear: boolean;
         };
     } | null;
-    /**
-     * 多选曲率拖拽：每个选中 clip 自身的包络基准环境（跨轨各行 body 高度
-     * 与增益=1 基线的客户 Y 均不同，无法共用 anchor 的环境）。
-     * anchor clip 仍用 fadeCurveEnv；此处存放其余选中（DOM 查表失败则缺项）。
-     */
-    fadeCurveEnvByClipId: Record<string, FadeCurvePointerEnv> | null;
-    /** 多选曲率拖拽：每个选中 clip 该侧的 {leftSec, shape, baseDir, widthSec} 快照。 */
-    fadeCurveSidesByClipId: Record<
-        string,
-        { leftSec: number; shape: number; baseDir: number; widthSec: number }
-    > | null;
     /** Per-clip base state for multi-clip trim operations */
     baseByClipId: Record<
         string,
@@ -631,74 +620,9 @@ export function useEditDrag(deps: {
                 },
             };
         }
-        // 多选曲率拖拽：为每个选中 clip 采集独立的"增益=1 基准线"环境。
-        // 跨轨各行 body 高度/顶部客户 Y 不同，曲率求解必须逐 clip 用自己的
-        // 环境（anchor 用上面 fadePointerEnv；其余按 data-hs-clip-id 查 DOM）。
-        // DOM 不可见（虚拟化卸载）的 clip 直接缺项跳过 —— 宁可少改不可算错。
-        let fadeCurveEnvByClipId: EditDragState["fadeCurveEnvByClipId"] = null;
-        let fadeCurveSidesByClipId: EditDragState["fadeCurveSidesByClipId"] = null;
-        if (type === "fade_in" || type === "fade_out") {
-            const envMap: Record<string, FadeCurvePointerEnv> = {};
-            const sideMap: Record<
-                string,
-                { leftSec: number; shape: number; baseDir: number; widthSec: number }
-            > = {};
-            for (const otherId of selectedClipIds) {
-                if (otherId === clipId) continue;
-                const otherClip = sessionRef.current.clips.find((c) => c.id === otherId);
-                if (!otherClip) continue;
-                let rootEl: Element | null = null;
-                try {
-                    rootEl = document.querySelector(
-                        `[data-hs-clip-id="${CSS.escape(otherId)}"]`,
-                    );
-                } catch {
-                    rootEl = null;
-                }
-                const bodyEl = rootEl?.querySelector("[data-hs-clip-body]");
-                if (bodyEl instanceof HTMLElement) {
-                    const rect = bodyEl.getBoundingClientRect();
-                    if (rect.height > 0) {
-                        envMap[otherId] = {
-                            envTopClientY: rect.top,
-                            bodyHeightPx: rect.height,
-                        };
-                    }
-                }
-                const otherWidthSec = Math.max(
-                    0,
-                    Math.min(
-                        type === "fade_in"
-                            ? Number(otherClip.fadeInSec ?? 0)
-                            : Number(otherClip.fadeOutSec ?? 0),
-                        otherClip.lengthSec,
-                    ),
-                );
-                const otherRawShape = Number(
-                    type === "fade_in" ? otherClip.fadeInShape : otherClip.fadeOutShape,
-                );
-                const otherBase = resolveCurvatureEditBase(Number.isFinite(otherRawShape) ? otherRawShape : 0);
-                sideMap[otherId] = {
-                    // leftSec：淡化区域左缘（秒）—— resolveCurvePointer 用它把
-                    // 指针时间归一化到 [0,1]；fade_in 从 clip 起点开始，fade_out
-                    // 从 clip 末尾减去区域宽度处开始。
-                    leftSec:
-                        type === "fade_in"
-                            ? otherClip.startSec
-                            : otherClip.startSec + otherClip.lengthSec - otherWidthSec,
-                    shape: otherBase.shape,
-                    baseDir:
-                        (type === "fade_in"
-                            ? Number(otherClip.fadeInDir ?? 0)
-                            : Number(otherClip.fadeOutDir ?? 0)) || 0,
-                    widthSec: otherWidthSec,
-                };
-            }
-            if (Object.keys(envMap).length > 0 || Object.keys(sideMap).length > 0) {
-                fadeCurveEnvByClipId = envMap;
-                fadeCurveSidesByClipId = sideMap;
-            }
-        }
+        // 多选曲率拖拽（曾按 per-clip 环境广播）已撤回：曲率拖拽的指针 Y 必须
+        // 映射到命中 clip 自己的"增益=1"基线，跨 clip 共用同一 Y 会得到错误
+        // 的曲率（对齐 REAPER 只改当前 item），故只保留 anchor 的 fadeCurveEnv。
         editDragRef.current = {
             type,
             pointerId: e.pointerId,
@@ -734,8 +658,6 @@ export function useEditDrag(deps: {
             crossfadePartnerFadeInAuto,
             fadeCurveEnv: fadePointerEnv,
             fadeCurveSide,
-            fadeCurveEnvByClipId,
-            fadeCurveSidesByClipId,
             crossfadeCurveSides,
             baseByClipId: Object.fromEntries(
                 selectedClipIds.map((id) => {
@@ -1245,73 +1167,40 @@ export function useEditDrag(deps: {
                         drag.fadeCurveEnv &&
                         drag.fadeCurveSide
                     ) {
-                        // 求解器输出按"位置差"累积的方向基准（side.baseDir 每帧更新），
-                        // 保证从任意位置拖拽都不跳变。多选时每 clip 用**自己的**环境与
-                        // 形状/基准（跨轨各行 body 高度/基线客户 Y 不同，不能共用 anchor
-                        // 的指针→增益映射），逐 clip 解算并广播。
-                        const curveEnvByClipId = drag.fadeCurveEnvByClipId ?? {};
-                        const curveSidesByClipId = drag.fadeCurveSidesByClipId ?? {};
-                        const solvedPerClip: Array<{ clipId: string; dir: number }> = [];
-                        const anchorPt = resolveCurvePointer(
+                        const pt = resolveCurvePointer(
                             drag.fadeCurveEnv,
                             drag.fadeCurveSide,
                             beat,
                             currentEv.clientY,
                         );
-                        if (anchorPt) {
-                            const anchorDir = solveNearestCurveDir({
-                                shape: drag.fadeCurveSide.shape,
-                                dir: drag.fadeCurveSide.baseDir,
-                                mode: "in",
-                                pointerX01: anchorPt.t,
-                                pointerY01: anchorPt.gain,
-                                aspectYOverX:
-                                    drag.fadeCurveEnv.bodyHeightPx /
-                                    Math.max(1, drag.fadeCurveSide.widthSec * pxPerSec),
-                            }).dir;
-                            drag.fadeCurveSide.baseDir = anchorDir;
-                            solvedPerClip.push({ clipId: drag.clipId, dir: anchorDir });
-                        }
-                        for (const otherId of drag.selectedClipIds) {
-                            if (otherId === drag.clipId) continue;
-                            const env = (curveEnvByClipId as Record<string, FadeCurvePointerEnv>)[
-                                otherId
-                            ];
-                            const side = curveSidesByClipId[otherId];
-                            if (!env || !side) continue;
-                            const pt = resolveCurvePointer(env, side, beat, currentEv.clientY);
-                            if (!pt) continue;
-                            const dir = solveNearestCurveDir({
-                                shape: side.shape,
-                                dir: side.baseDir,
-                                mode: "in",
-                                pointerX01: pt.t,
-                                pointerY01: pt.gain,
-                                aspectYOverX:
-                                    env.bodyHeightPx / Math.max(1, side.widthSec * pxPerSec),
-                            }).dir;
-                            side.baseDir = dir;
-                            solvedPerClip.push({ clipId: otherId, dir });
-                        }
-                        if (solvedPerClip.length === 0) return;
-                        batch(() => {
-                            for (const s of solvedPerClip) {
-                                dispatch(setClipFades({ clipId: s.clipId, fadeInDir: s.dir }));
-                            }
-                        });
+                        if (!pt) return;
+                        const nextDir = solveNearestCurveDir({
+                            shape: drag.fadeCurveSide.shape,
+                            dir: drag.fadeCurveSide.baseDir,
+                            mode: "in",
+                            pointerX01: pt.t,
+                            pointerY01: pt.gain,
+                            aspectYOverX:
+                                drag.fadeCurveEnv.bodyHeightPx /
+                                Math.max(1, drag.fadeCurveSide.widthSec * pxPerSec),
+                        }).dir;
+                        const side = drag.fadeCurveSide;
+                        side.baseDir = nextDir;
+                        // 曲率只作用于当前 clip 的该侧：指针 Y 必须映射到该 clip
+                        // 自己的"增益=1"基线，而各行/各 clip 的 body 几何不同，
+                        // 无法跨 clip 共用同一指针 Y（对齐 REAPER，只改当前 item）。
+                        dispatch(setClipFades({ clipId: drag.clipId, fadeInDir: nextDir }));
                         try {
                             const now = Date.now();
-                            for (const s of solvedPerClip) {
-                                const key = `${s.clipId}:curve-in`;
-                                const last = lastRemoteSentRef.current[key] || 0;
-                                if (now - last > 200) {
-                                    lastRemoteSentRef.current[key] = now;
-                                    void webApi.setClipState({
-                                        clipId: s.clipId,
-                                        fadeInDir: s.dir,
-                                        checkpoint: false,
-                                    });
-                                }
+                            const key = `${drag.clipId}:curve-in`;
+                            const last = lastRemoteSentRef.current[key] || 0;
+                            if (now - last > 200) {
+                                lastRemoteSentRef.current[key] = now;
+                                void webApi.setClipState({
+                                    clipId: drag.clipId,
+                                    fadeInDir: nextDir,
+                                    checkpoint: false,
+                                });
                             }
                         } catch {
                             // Best-effort remote preview update.
@@ -1377,70 +1266,38 @@ export function useEditDrag(deps: {
                         drag.fadeCurveEnv &&
                         drag.fadeCurveSide
                     ) {
-                        // 多选：逐 clip 用自己的环境/形状/基准解算（见 fade_in 分支注释）。
-                        const curveEnvByClipId = drag.fadeCurveEnvByClipId ?? {};
-                        const curveSidesByClipId = drag.fadeCurveSidesByClipId ?? {};
-                        const solvedPerClip: Array<{ clipId: string; dir: number }> = [];
-                        const anchorPt = resolveCurvePointer(
+                        // 曲率只作用于当前 clip 的该侧（理由见 fade_in 分支注释）。
+                        const pt = resolveCurvePointer(
                             drag.fadeCurveEnv,
                             drag.fadeCurveSide,
                             beat,
                             currentEv.clientY,
                         );
-                        if (anchorPt) {
-                            const anchorDir = solveNearestCurveDir({
-                                shape: drag.fadeCurveSide.shape,
-                                dir: drag.fadeCurveSide.baseDir,
-                                mode: "out",
-                                pointerX01: anchorPt.t,
-                                pointerY01: anchorPt.gain,
-                                aspectYOverX:
-                                    drag.fadeCurveEnv.bodyHeightPx /
-                                    Math.max(1, drag.fadeCurveSide.widthSec * pxPerSec),
-                            }).dir;
-                            drag.fadeCurveSide.baseDir = anchorDir;
-                            solvedPerClip.push({ clipId: drag.clipId, dir: anchorDir });
-                        }
-                        for (const otherId of drag.selectedClipIds) {
-                            if (otherId === drag.clipId) continue;
-                            const env = (curveEnvByClipId as Record<string, FadeCurvePointerEnv>)[
-                                otherId
-                            ];
-                            const side = curveSidesByClipId[otherId];
-                            if (!env || !side) continue;
-                            const pt = resolveCurvePointer(env, side, beat, currentEv.clientY);
-                            if (!pt) continue;
-                            const dir = solveNearestCurveDir({
-                                shape: side.shape,
-                                dir: side.baseDir,
-                                mode: "out",
-                                pointerX01: pt.t,
-                                pointerY01: pt.gain,
-                                aspectYOverX:
-                                    env.bodyHeightPx / Math.max(1, side.widthSec * pxPerSec),
-                            }).dir;
-                            side.baseDir = dir;
-                            solvedPerClip.push({ clipId: otherId, dir });
-                        }
-                        if (solvedPerClip.length === 0) return;
-                        batch(() => {
-                            for (const s of solvedPerClip) {
-                                dispatch(setClipFades({ clipId: s.clipId, fadeOutDir: s.dir }));
-                            }
-                        });
+                        if (!pt) return;
+                        const nextDir = solveNearestCurveDir({
+                            shape: drag.fadeCurveSide.shape,
+                            dir: drag.fadeCurveSide.baseDir,
+                            mode: "out",
+                            pointerX01: pt.t,
+                            pointerY01: pt.gain,
+                            aspectYOverX:
+                                drag.fadeCurveEnv.bodyHeightPx /
+                                Math.max(1, drag.fadeCurveSide.widthSec * pxPerSec),
+                        }).dir;
+                        const side = drag.fadeCurveSide;
+                        side.baseDir = nextDir;
+                        dispatch(setClipFades({ clipId: drag.clipId, fadeOutDir: nextDir }));
                         try {
                             const now = Date.now();
-                            for (const s of solvedPerClip) {
-                                const key = `${s.clipId}:curve-out`;
-                                const last = lastRemoteSentRef.current[key] || 0;
-                                if (now - last > 200) {
-                                    lastRemoteSentRef.current[key] = now;
-                                    void webApi.setClipState({
-                                        clipId: s.clipId,
-                                        fadeOutDir: s.dir,
-                                        checkpoint: false,
-                                    });
-                                }
+                            const key = `${drag.clipId}:curve-out`;
+                            const last = lastRemoteSentRef.current[key] || 0;
+                            if (now - last > 200) {
+                                lastRemoteSentRef.current[key] = now;
+                                void webApi.setClipState({
+                                    clipId: drag.clipId,
+                                    fadeOutDir: nextDir,
+                                    checkpoint: false,
+                                });
                             }
                         } catch {
                             // Best-effort remote preview update.

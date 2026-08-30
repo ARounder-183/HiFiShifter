@@ -447,7 +447,6 @@ export const ClipItem = React.memo(function ClipItem({
     return (
         <div
             data-hs-clip-item="1"
-            data-hs-clip-id={clip.id}
             className="absolute overflow-visible group"
             style={{
                 left,
