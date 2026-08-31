@@ -83,7 +83,7 @@ fn vslib_temp_dir() -> std::path::PathBuf {
     // 尝试通过 GetShortPathNameW 获取 8.3 短路径（纯 ASCII）
     if let Some(short) = get_short_path(&t) {
         if short.to_string_lossy().bytes().all(|b| b.is_ascii()) {
-            eprintln!(
+            log::warn!(
                 "[vslib] %TEMP% is non-ASCII, using 8.3 short path: {}",
                 short.display()
             );
@@ -96,12 +96,12 @@ fn vslib_temp_dir() -> std::path::PathBuf {
         let probe = win_temp.join(".hs_vslib_probe");
         if std::fs::write(&probe, b"").is_ok() {
             let _ = std::fs::remove_file(&probe);
-            eprintln!("[vslib] %TEMP% is non-ASCII, using C:\\Windows\\Temp instead");
+            log::warn!("[vslib] %TEMP% is non-ASCII, using C:\\Windows\\Temp instead");
             return win_temp;
         }
     }
     // 最后回退：原始 temp 路径（vslib 可能报 VSERR_WAVEOPEN）
-    eprintln!("[vslib] WARNING: temp dir is non-ASCII and C:\\Windows\\Temp is not writable; vslib will likely fail");
+    log::warn!("[vslib] WARNING: temp dir is non-ASCII and C:\\Windows\\Temp is not writable; vslib will likely fail");
     t
 }
 
@@ -404,7 +404,7 @@ impl ClipProcessor for VslibProcessor {
 
         let input_stats = sample_stats_f32(ctx.mono_pcm);
         let dll_version = unsafe { VslibGetVersion() };
-        eprintln!(
+        debug_eprintln!(
             "[vslib] begin clip_id={} sr={} in_frames={} out_frames={} seg_start={:.3}s rate={:.3} frame_period_ms={:.3} pitch_frames={} input_nonzero={} input_peak={:.6} dll_version={} temp_wav={}",
             ctx.clip_id,
             ctx.sample_rate,
@@ -440,7 +440,7 @@ impl ClipProcessor for VslibProcessor {
             check(unsafe { VslibSetProjectInfo(proj.0, &mut prj_info) })
                 .map_err(|e| format!("VslibSetProjectInfo: {e}"))?;
             if debug {
-                eprintln!(
+                log::warn!(
                     "[vslib] project_info: master_volume={:.3} samp_freq={}",
                     prj_info.masterVolume, prj_info.sampFreq,
                 );
@@ -472,7 +472,7 @@ impl ClipProcessor for VslibProcessor {
         let ctrl_pnt_ps = info.ctrlPntPs;
         let sample_org = info.sampleOrg;
 
-        eprintln!(
+        debug_eprintln!(
             "[vslib] item_info: item_num={} sample_org={} sample_edit={} ctrl_pnt_num={} ctrl_pnt_ps={} synth_mode={} track_num={} offset={} channel={}",
             item_num,
             info.sampleOrg,
@@ -505,7 +505,7 @@ impl ClipProcessor for VslibProcessor {
         info.synthMode = synth_mode;
         check(unsafe { VslibSetItemInfo(proj.0, item_num, &mut info) })
             .map_err(|e| format!("VslibSetItemInfo: {e}"))?;
-        eprintln!(
+        debug_eprintln!(
             "[vslib] synth_mode_applied: item_num={} synth_mode={}",
             item_num, synth_mode,
         );
@@ -586,7 +586,7 @@ impl ClipProcessor for VslibProcessor {
                 let _ = check(unsafe { VslibSetCtrlPntInfoEx2(proj.0, item_num, pnt, &mut cp2) });
 
                 if debug && sample_points.contains(&pnt) {
-                    eprintln!(
+                    log::warn!(
                         "[vslib] ctrl_pnt[{}]: abs={:.3}s pit_edit={} pit_flag={} volume={:.3} pan={:.3} formant={} breathiness={}",
                         pnt,
                         at_abs,
@@ -601,7 +601,7 @@ impl ClipProcessor for VslibProcessor {
             }
 
             if has_pitch {
-                eprintln!(
+                debug_eprintln!(
                     "[vslib] pitch_via_ctrl_pnt: clip_id={} total_ctrl_pnts={} pitch_applied={}",
                     ctx.clip_id, ctrl_pnt_num, pitch_applied_count,
                 );
@@ -623,7 +623,7 @@ impl ClipProcessor for VslibProcessor {
                 ),
             ];
             let (_, end_time2) = stretch_points[1];
-            eprintln!(
+            debug_eprintln!(
                 "[vslib] time_stretch: clip_id={} sample_org={} end_time1={} end_time2={} rate={:.3}",
                 ctx.clip_id, sample_org, sample_org, end_time2, ctx.playback_rate
             );
@@ -637,14 +637,14 @@ impl ClipProcessor for VslibProcessor {
                     if let Err(e) =
                         check(unsafe { VslibSetTimeCtrlPnt(proj.0, item_num, 0, time1, time2) })
                     {
-                        eprintln!("[vslib] WARNING: VslibSetTimeCtrlPnt(0, {time1}, {time2}): {e}");
+                        log_warn_limited!("[vslib] WARNING: VslibSetTimeCtrlPnt(0, {time1}, {time2}): {e}");
                     }
                 } else {
                     let (time1, time2) = stretch_points[0];
                     if let Err(e) =
                         check(unsafe { VslibAddTimeCtrlPnt(proj.0, item_num, time1, time2) })
                     {
-                        eprintln!("[vslib] WARNING: VslibAddTimeCtrlPnt({time1}, {time2}): {e}");
+                        log_warn_limited!("[vslib] WARNING: VslibAddTimeCtrlPnt({time1}, {time2}): {e}");
                     } else {
                         stretch_pnt_num += 1;
                     }
@@ -656,7 +656,7 @@ impl ClipProcessor for VslibProcessor {
                     if let Err(e) = check(unsafe {
                         VslibSetTimeCtrlPnt(proj.0, item_num, last_index, time1, time2)
                     }) {
-                        eprintln!(
+                        log_warn_limited!(
                             "[vslib] WARNING: VslibSetTimeCtrlPnt({}, {time1}, {time2}): {e}",
                             last_index
                         );
@@ -666,7 +666,7 @@ impl ClipProcessor for VslibProcessor {
                     if let Err(e) =
                         check(unsafe { VslibAddTimeCtrlPnt(proj.0, item_num, time1, time2) })
                     {
-                        eprintln!("[vslib] WARNING: VslibAddTimeCtrlPnt({time1}, {time2}): {e}");
+                        log_warn_limited!("[vslib] WARNING: VslibAddTimeCtrlPnt({time1}, {time2}): {e}");
                     } else {
                         stretch_pnt_num += 1;
                     }
@@ -675,7 +675,7 @@ impl ClipProcessor for VslibProcessor {
                 let _ = check(unsafe {
                     VslibGetTimeCtrlPntNum(proj.0, item_num, &mut stretch_pnt_num)
                 });
-                eprintln!(
+                debug_eprintln!(
                     "[vslib] time_stretch_ctrl_points: clip_id={} count={}",
                     ctx.clip_id, stretch_pnt_num
                 );
@@ -687,7 +687,7 @@ impl ClipProcessor for VslibProcessor {
                     })
                     .is_ok()
                     {
-                        eprintln!(
+                        debug_eprintln!(
                             "[vslib] time_stretch_ctrl_point[{}]: time1={} time2={}",
                             pnt, time1, time2
                         );
@@ -703,7 +703,7 @@ impl ClipProcessor for VslibProcessor {
             })
             .is_ok()
             {
-                eprintln!(
+                debug_eprintln!(
                     "[vslib] stretch_verify_edit: time1={:.3} -> time2={:.3} expected={:.3}",
                     end_time1, mapped_edit_sample, end_time2_f64
                 );
@@ -715,7 +715,7 @@ impl ClipProcessor for VslibProcessor {
             })
             .is_ok()
             {
-                eprintln!(
+                debug_eprintln!(
                     "[vslib] stretch_verify_org: time2={:.3} -> time1={:.3} expected={:.3}",
                     end_time2_f64, mapped_org_sample, end_time1
                 );
@@ -766,7 +766,7 @@ impl ClipProcessor for VslibProcessor {
         .map_err(|e| format!("VslibGetMixData(stereo): {e}"))?;
 
         let (left_stats, right_stats) = stereo_channel_stats(&buf_stereo);
-        eprintln!(
+        debug_eprintln!(
             "[vslib] mix_data: mix_frames={} buf_i16={} left_nonzero={} left_peak={} left_first_nonzero={:?} right_nonzero={} right_peak={} right_first_nonzero={:?}",
             mix_frames,
             buf_stereo.len(),
@@ -778,13 +778,13 @@ impl ClipProcessor for VslibProcessor {
             right_stats.first_nonzero,
         );
         if left_stats.nonzero == 0 && right_stats.nonzero > 0 {
-            eprintln!(
+            log_warn_limited!(
                 "[vslib] WARNING: left channel is silent while right channel has audio; downmix will use right channel"
             );
         } else if right_stats.nonzero == 0 && left_stats.nonzero > 0 {
-            eprintln!("[vslib] WARNING: right channel is silent while left channel has audio");
+            log_warn_limited!("[vslib] WARNING: right channel is silent while left channel has audio");
         } else if left_stats.nonzero == 0 && right_stats.nonzero == 0 {
-            eprintln!(
+            log_warn_limited!(
                 "[vslib] WARNING: mix output is fully silent despite successful VslibGetMixData"
             );
         }
@@ -803,7 +803,7 @@ impl ClipProcessor for VslibProcessor {
         apply_head_declick_ramp(&mut out, ctx.sample_rate);
 
         let out_stats = sample_stats_f32(&out);
-        eprintln!(
+        debug_eprintln!(
             "[vslib] mono_out: frames={} nonzero={} peak={:.6} first_nonzero={:?}",
             out.len(),
             out_stats.nonzero,

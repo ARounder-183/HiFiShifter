@@ -165,9 +165,9 @@ fn ensure_ort_init() -> Result<(), String> {
             return Err(format!("failed to create ORT environment: {e}"));
         }
 
-        eprintln!("[ort] initialized: {}", ort::info());
+        log::warn!("[ort] initialized: {}", ort::info());
         let providers = crate::vocoder_ort_session::diagnose_available_providers();
-        eprintln!("[ort] available providers: {providers:?}");
+        log::warn!("[ort] available providers: {providers:?}");
         Ok(())
     }) {
         Ok(()) => Ok(()),
@@ -655,12 +655,12 @@ pub fn drop_shared_session() {
         for _ in 0..10 {
             if let Ok(mut guard) = mutex.try_lock() {
                 *guard = None;
-                eprintln!("[nsf_hifigan] shared session dropped");
+                log::warn!("[nsf_hifigan] shared session dropped");
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        eprintln!(
+        log::error!(
             "[nsf_hifigan] WARNING: could not acquire SHARED_SESSION lock at shutdown — giving up"
         );
     }
@@ -945,7 +945,7 @@ impl NsfHifiganOnnx {
             Ok(data) => Ok(data),
             Err(ModelRunError::Message(e)) => Err(e),
             Err(ModelRunError::TimedOut) => {
-                eprintln!(
+                log::warn!(
                     "[nsf_hifigan] model inference timed out after {timeout:?}; disabling the hung EP and retrying with a fresh session"
                 );
                 crate::vocoder_ort_session::disable_coreml("vocoder inference timed out");
@@ -1087,7 +1087,7 @@ pub fn is_available() -> bool {
         Err(e) => {
             let debug = std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1");
             if debug && !LOGGED_UNAVAILABLE.swap(true, Ordering::Relaxed) {
-                eprintln!("nsf_hifigan_onnx: unavailable: {e}");
+                log::warn!("nsf_hifigan_onnx: unavailable: {e}");
             }
             false
         }
@@ -1323,7 +1323,7 @@ pub fn infer_pitch_edit_chunked_optimized(
 
         let total_chunks = (t + CHUNK_MAX_FRAMES - 1) / CHUNK_MAX_FRAMES;
         let processed_before = cached_chunks.len();
-        eprintln!(
+        log::warn!(
             "[nsf_hifigan] chunked_opt: t={} chunks={} cached={} infer={}",
             t,
             total_chunks,
@@ -1356,7 +1356,7 @@ pub fn infer_pitch_edit_chunked_optimized(
 
             let t_batch = std::time::Instant::now();
             let batch_results = sess.run_model_batch(&batch_items)?;
-            eprintln!(
+            log::warn!(
                 "[nsf_hifigan] chunked_opt: batch_gpu={}ms for {} chunks",
                 t_batch.elapsed().as_millis(),
                 batch_results.len()
@@ -2069,7 +2069,7 @@ fn benchmark_gpu_ep(
     };
 
     let (gpu_session, ep) = gpu_session_res.map_err(|e| {
-        eprintln!("[benchmark] GPU session creation FAILED for '{gpu_ep_choice}': {e}");
+        log::error!("[benchmark] GPU session creation FAILED for '{gpu_ep_choice}': {e}");
         e
     })?;
 
@@ -2080,7 +2080,7 @@ fn benchmark_gpu_ep(
         ));
     }
 
-    eprintln!("[benchmark] GPU session created: ep={ep}");
+    log::warn!("[benchmark] GPU session created: ep={ep}");
     let gpu_session = Arc::new(Mutex::new(gpu_session));
     let timeout = std::time::Duration::from_secs(120);
 
@@ -2094,7 +2094,7 @@ fn benchmark_gpu_ep(
             Ok(Some(_)) => {}
             Ok(None) => {
                 let msg = format!("{ep} warmup inference timed out after {timeout:?}");
-                eprintln!("[benchmark] WARNING: {msg}");
+                log::warn!("[benchmark] WARNING: {msg}");
                 if ep == "coreml" {
                     crate::vocoder_ort_session::disable_coreml("benchmark warmup timed out");
                 }
@@ -2102,7 +2102,7 @@ fn benchmark_gpu_ep(
             }
             Err(e) => {
                 let msg = format!("{ep} warmup inference failed: {e}");
-                eprintln!("[benchmark] WARNING: {msg}");
+                log::warn!("[benchmark] WARNING: {msg}");
                 return Err(msg);
             }
         }
@@ -2117,7 +2117,7 @@ fn benchmark_gpu_ep(
             Ok(Some(ms)) => gpu_times.push(ms),
             Ok(None) => {
                 let msg = format!("{ep} inference timed out after {timeout:?}");
-                eprintln!("[benchmark] WARNING: {msg}");
+                log::warn!("[benchmark] WARNING: {msg}");
                 if ep == "coreml" {
                     crate::vocoder_ort_session::disable_coreml("benchmark inference timed out");
                 }
@@ -2125,7 +2125,7 @@ fn benchmark_gpu_ep(
             }
             Err(e) => {
                 let msg = format!("{ep} inference failed: {e}");
-                eprintln!("[benchmark] WARNING: {msg}");
+                log::warn!("[benchmark] WARNING: {msg}");
                 return Err(msg);
             }
         }
@@ -2138,7 +2138,7 @@ fn benchmark_gpu_ep(
     gpu_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let median = gpu_times[gpu_times.len() / 2];
     let rtf = audio_sec / (median / 1000.0);
-    eprintln!("[benchmark] GPU({ep}): median={median:.1}ms rtf={rtf:.3}x");
+    log::warn!("[benchmark] GPU({ep}): median={median:.1}ms rtf={rtf:.3}x");
     Ok((median, rtf, ep))
 }
 
@@ -2175,23 +2175,23 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
         .map(|n| n.get())
         .unwrap_or(0);
 
-    eprintln!("[benchmark] ========================================");
-    eprintln!(
+    log::warn!("[benchmark] ========================================");
+    log::warn!(
         "[benchmark] model={} frames={frames} audio_sec={audio_sec:.2}s runs={runs}",
         onnx_path
             .file_name()
             .map(|n| n.to_string_lossy())
             .unwrap_or_default()
     );
-    eprintln!(
+    log::warn!(
         "[benchmark] model_sr={} num_mels={} hop={} n_fft={}",
         cfg.sampling_rate, cfg.num_mels, cfg.hop_size, cfg.n_fft
     );
-    eprintln!("[benchmark] cpu_cores={cpu_cores} ort={ort_build_info}");
-    eprintln!("[benchmark] providers={available_providers:?}");
-    eprintln!("[benchmark] dml_adapters={dml_adapters:?}");
-    eprintln!("[benchmark] gpu_devices(NVML)={gpu_devices:?}");
-    eprintln!("[benchmark] env HIFISHIFTER_ORT_EP={:?} HIFISHIFTER_HIFIGAN_ORT_EP={:?} HIFISHIFTER_DML_DEVICE_ID={:?}",
+    log::warn!("[benchmark] cpu_cores={cpu_cores} ort={ort_build_info}");
+    log::warn!("[benchmark] providers={available_providers:?}");
+    log::warn!("[benchmark] dml_adapters={dml_adapters:?}");
+    log::warn!("[benchmark] gpu_devices(NVML)={gpu_devices:?}");
+    log::warn!("[benchmark] env HIFISHIFTER_ORT_EP={:?} HIFISHIFTER_HIFIGAN_ORT_EP={:?} HIFISHIFTER_DML_DEVICE_ID={:?}",
         std::env::var("HIFISHIFTER_ORT_EP").ok(),
         std::env::var("HIFISHIFTER_HIFIGAN_ORT_EP").ok(),
         std::env::var("HIFISHIFTER_DML_DEVICE_ID").ok());
@@ -2206,7 +2206,7 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
             &onnx_path,
             crate::vocoder_ort_session::OrtSessionRole::Vocoder,
         )?;
-        eprintln!(
+        log::warn!(
             "[benchmark] CPU session created in {}ms",
             t_session.elapsed().as_millis()
         );
@@ -2232,7 +2232,7 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
     cpu_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let cpu_median = cpu_times[cpu_times.len() / 2];
     let cpu_rt_factor = audio_sec / (cpu_median / 1000.0);
-    eprintln!(
+    log::warn!(
         "[benchmark] CPU: total={}ms runs={:?} median={cpu_median:.1}ms rtf={cpu_rt_factor:.3}x",
         t_cpu_total.elapsed().as_millis(),
         cpu_times
@@ -2259,7 +2259,7 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
                     break;
                 }
                 Err(e) => {
-                    eprintln!("[benchmark] GPU candidate '{candidate}' unusable: {e}");
+                    log::error!("[benchmark] GPU candidate '{candidate}' unusable: {e}");
                     gpu_error = Some(e);
                 }
             }
@@ -2282,7 +2282,7 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
         };
 
         if let Ok((mut dml_session, ep)) = dml_session_res {
-            eprintln!(
+            log::warn!(
                 "[benchmark] DirectML session created in {}ms (ep={ep})",
                 dml_total.elapsed().as_millis()
             );
@@ -2308,28 +2308,28 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
                         let t = std::time::Instant::now();
                         let _ = dml_session.run(ort::inputs![mt, ft]).unwrap();
                         let ms = t.elapsed().as_secs_f64() * 1000.0;
-                        eprintln!("[benchmark] DirectML run {run_i}: {ms:.1}ms");
+                        log::warn!("[benchmark] DirectML run {run_i}: {ms:.1}ms");
                         dml_times.push(ms);
                     }
                     dml_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
                     let median = dml_times[dml_times.len() / 2];
                     dml_median = Some(median);
                     dml_rt_factor = Some(audio_sec / (median / 1000.0));
-                    eprintln!("[benchmark] DirectML: total={}ms runs={dml_times:?} median={median:.1}ms rtf={:.3}x",
+                    log::info!("[benchmark] DirectML: total={}ms runs={dml_times:?} median={median:.1}ms rtf={:.3}x",
                         dml_total.elapsed().as_millis(), audio_sec / (median / 1000.0));
                 } else {
-                    eprintln!(
+                    log::error!(
                         "[benchmark] WARNING: DirectML EP registered but warmup inference FAILED."
                     );
                 }
             }
         } else {
-            eprintln!("[benchmark] DirectML session creation FAILED");
+            log::error!("[benchmark] DirectML session creation FAILED");
         }
     }
 
     // Log diagnostic info for debugging
-    eprintln!(
+    log::warn!(
         "[benchmark] Providers: {:?} | GPU device_id: {} | GPU works: {} | DirectML available: {}",
         available_providers, gpu_device_id, gpu_actually_working, dml_available
     );

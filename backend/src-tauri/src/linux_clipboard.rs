@@ -405,11 +405,11 @@ mod tests {
     #[test]
     fn x11_multi_target_clipboard_roundtrip() {
         if std::env::var("HIFISHIFTER_CLIPBOARD_TEST").as_deref() != Ok("1") {
-            eprintln!("skipped: set HIFISHIFTER_CLIPBOARD_TEST=1 to run");
+            log::warn!("skipped: set HIFISHIFTER_CLIPBOARD_TEST=1 to run");
             return;
         }
         if is_wayland_session() {
-            eprintln!("skipped: test only covers the X11 backend");
+            log::warn!("skipped: test only covers the X11 backend");
             return;
         }
 

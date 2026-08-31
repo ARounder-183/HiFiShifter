@@ -8,7 +8,7 @@ use crate::midi_import::{self, MidiTrackInfo};
 use crate::state::{AppState, PitchAnalysisAlgo, Track};
 
 fn midi_log(message: impl AsRef<str>) {
-    eprintln!("[midi_import] {}", message.as_ref());
+    log::error!("[midi_import] {}", message.as_ref());
 }
 
 fn error_payload(error: &str) -> crate::models::TimelineStatePayload {

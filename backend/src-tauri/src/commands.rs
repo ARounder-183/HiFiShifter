@@ -13,6 +13,8 @@ mod common;
 mod core;
 #[path = "commands/debug.rs"]
 mod debug;
+#[path = "commands/diagnostics.rs"]
+mod diagnostics;
 #[path = "commands/dialogs.rs"]
 mod dialogs;
 #[path = "commands/file_browser.rs"]
@@ -1232,7 +1234,7 @@ pub async fn synthesize(app: tauri::AppHandle) -> crate::models::SynthesizePaylo
     {
         Ok(result) => result,
         Err(error) => {
-            eprintln!("synthesize: join task failed: {error}");
+            log::error!("synthesize: join task failed: {error}");
             crate::models::SynthesizePayload {
                 ok: false,
                 sample_rate: 44100,
@@ -1369,6 +1371,43 @@ pub fn debug_realtime_render_stats(
     state: State<'_, AppState>,
 ) -> crate::models::DebugRealtimeRenderStatsPayload {
     debug::debug_realtime_render_stats(state)
+}
+
+// ===================== diagnostics =====================
+//
+// 诊断包导出涉及日志读取、zip 压缩与推理基准测试（可能数十秒），
+// 放到阻塞线程池执行；输出路径选择对话框单独走同步命令（主线程）。
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn open_log_folder(app: tauri::AppHandle) -> serde_json::Value {
+    diagnostics::open_log_folder(app)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn pick_diagnostics_output_path() -> serde_json::Value {
+    diagnostics::pick_diagnostics_output_path()
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn export_diagnostics(app: tauri::AppHandle, output_path: String) -> serde_json::Value {
+    match tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        diagnostics::export_diagnostics(state, output_path)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => serde_json::json!({
+            "ok": false,
+            "error": format!("Failed to join export task: {error}"),
+        }),
+    }
+}
+
+/// 前端把 invoke 失败 / 全局异常回传到后端统一日志（fire-and-forget）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn log_frontend_error(message: String, detail: Option<String>) -> serde_json::Value {
+    diagnostics::log_frontend_error(message, detail)
 }
 
 // ===================== pitch_progress =====================

@@ -250,7 +250,7 @@ pub(super) fn synthesize(state: State<'_, AppState>) -> SynthesizePayload {
     let out_path = match new_temp_wav_path("synth") {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("synthesize: temp path error: {e}");
+            log::error!("synthesize: temp path error: {e}");
             return SynthesizePayload {
                 ok: false,
                 sample_rate: 44100,
@@ -263,7 +263,7 @@ pub(super) fn synthesize(state: State<'_, AppState>) -> SynthesizePayload {
     let result = match render_timeline_to_wav(&state, &out_path, 0.0, None) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("synthesize: render error: {e}");
+            log::error!("synthesize: render error: {e}");
             return SynthesizePayload {
                 ok: false,
                 sample_rate: 44100,
@@ -331,7 +331,7 @@ pub(super) fn save_synthesized(
             })
         }
         Err(e) => {
-            eprintln!("save_synthesized: render failed: {e}");
+            log::error!("save_synthesized: render failed: {e}");
             serde_json::json!({
                 "ok": false,
                 "path": output_path,
@@ -349,7 +349,7 @@ pub(super) fn save_separated(state: State<'_, AppState>, output_dir: String) -> 
     let out_dir = Path::new(&output_dir);
     if !out_dir.exists() {
         if let Err(e) = fs::create_dir_all(out_dir) {
-            eprintln!("save_separated: create dir failed: {e}");
+            log::error!("save_separated: create dir failed: {e}");
             return serde_json::json!({"ok": false, "error": format!("Cannot create directory: {e}")});
         }
     }
@@ -469,7 +469,7 @@ pub(super) fn save_separated(state: State<'_, AppState>, output_dir: String) -> 
                 }));
             }
             Err(e) => {
-                eprintln!(
+                log::error!(
                     "save_separated: render failed for track '{}': {e}",
                     root.name
                 );

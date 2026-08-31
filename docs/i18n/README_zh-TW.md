@@ -289,6 +289,28 @@ $env:TAURI_UI_MODE='build'; cargo tauri dev
 
 **注意：** 首次編譯需要很長的時間，請耐心等待。
 
+## 日誌與故障排除
+
+應用程式會自動將執行日誌寫入系統標準日誌目錄，無需任何命令列參數：
+
+| 系統 | 日誌目錄 |
+| --- | --- |
+| Windows | `%LOCALAPPDATA%\com.arounder.hifishifter\logs` |
+| macOS | `~/Library/Logs/com.arounder.hifishifter` |
+| Linux | `~/.local/share/com.arounder.hifishifter/logs` |
+
+- 在應用程式內透過 **說明 → 開啟日誌資料夾** 可以直接定位日誌；**說明 → 匯出診斷資訊** 可以一鍵產生診斷套件（系統資訊 + 全部日誌 + 推理裝置基準測試結果），提交 issue 時附上即可。
+- 日誌依大小自動輪替：單一檔案上限 8 MiB，預設保留 3 份歷史（`hifishifter.1.log` … `hifishifter.3.log`）。
+  - 高頻重複的錯誤 / 警告會自動限流：同一位置的日誌預設每 10 秒最多輸出一條，被抑制的條數會在下一條輸出前以 `[throttled]` 彙總行補記。
+- 前端與後端的錯誤都會統一記錄在同一份日誌檔案裡，方便按時間軸對照排查。
+
+進階選項：
+
+- 啟動參數 `--log-file=<path>`：將日誌寫入指定路徑；`--log-file=-` 明確關閉檔案日誌。
+- 環境變數 `HIFISHIFTER_LOG=debug`（或 `trace` / `info` / `warn` / `error`）：調整日誌詳細程度。
+- 環境變數 `HIFISHIFTER_LOG_DIR`：覆蓋預設日誌目錄。
+- 在終端機執行 `HiFiShifter --benchmark`：直接執行推理裝置基準測試並輸出 JSON 結果。
+
 ## 文件
 
 - [使用手冊](USERMANUAL_zh-TW.md)

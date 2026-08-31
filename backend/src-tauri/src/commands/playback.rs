@@ -126,7 +126,7 @@ fn is_clip_pitch_analysis_ready(
 
 pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde_json::Value {
     guard_json_command("play_original", || {
-        eprintln!("[play_original] called start_sec={start_sec}");
+        log::warn!("[play_original] called start_sec={start_sec}");
         let timeline = match state.timeline.lock() {
             Ok(g) => g.clone(),
             Err(p) => p.into_inner().clone(),
@@ -144,7 +144,7 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
         // ── 后台预渲染激活时：立即开始播放，不等待渲染 ──────────────────────
         let bg_render = BG_RENDER_ACTIVE.load(std::sync::atomic::Ordering::Relaxed);
         if bg_render {
-            eprintln!(
+            log::warn!(
                 "[play_original] background render active — playing immediately (non-blocking)"
             );
             // 更新引擎 snapshot，让已渲染完成的 clip 立即可用
@@ -162,7 +162,7 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
         let clips_needing_render =
             collect_clips_needing_render(&timeline, state.audio_engine.sample_rate_hz());
         let need_prerender = !clips_needing_render.is_empty();
-        eprintln!(
+        log::warn!(
             "[play_original] clips_needing_render={} need_prerender={} timeline_version={}",
             clips_needing_render.len(),
             need_prerender,
@@ -184,7 +184,7 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
         }
 
         if !need_prerender && snapshot_has_pending {
-            eprintln!("[play_original] clips_needing_render=0 but snapshot has pending synthesis — waiting for render");
+            log::warn!("[play_original] clips_needing_render=0 but snapshot has pending synthesis — waiting for render");
             state.audio_engine.seek_sec(start_sec);
             state.audio_engine.update_timeline(timeline);
             if let Some(app) = state.app_handle.get().cloned() {
@@ -232,7 +232,7 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
                         }
                     }
                 }
-                eprintln!(
+                log::warn!(
                     "[play_original] engine_sr={} (used for hash computation)",
                     engine_sr
                 );
@@ -276,7 +276,7 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
                 clips_to_render.sort_by(|a, b| a.clip.start_sec.total_cmp(&b.clip.start_sec));
 
                 if cache_log {
-                    eprintln!(
+                    log::warn!(
                         "[play_original][cache] prerender_targets={} engine_sr={} collect_ms={:.2} ready_filter_ms={:.2}",
                         clips_to_render.len(),
                         engine_sr,
@@ -406,7 +406,7 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
                     if base_entry.is_some() {
                         cache_hit_count += 1;
                         if cache_log {
-                            eprintln!(
+                            log::warn!(
                                 "[play_original][cache] HIT clip_id={} hash={:#018x}",
                                 clip_render_info.clip.id, clip_render_info.cache_key.param_hash
                             );
@@ -421,7 +421,7 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
                     if base_entry.is_none() {
                         cache_miss_count += 1;
                         if cache_log {
-                            eprintln!(
+                            log::warn!(
                                 "[play_original][cache] MISS clip_id={} hash={:#018x}",
                                 clip_render_info.clip.id, clip_render_info.cache_key.param_hash
                             );
@@ -453,7 +453,7 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
                                 {
                                     let nonzero =
                                         stereo_pcm.iter().filter(|&&v| v.abs() > 1e-6).count();
-                                    eprintln!(
+                                    log::warn!(
                         "[play_original] clip rendered: id={} pcm_len={} nonzero={} hash={:#018x}",
                         clip_render_info.clip.id, stereo_pcm.len(), nonzero,
                         clip_render_info.cache_key.param_hash
@@ -492,14 +492,14 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
                                 // 掩盖真正的失败原因；这里改为按"本轮作废"处理，
                                 // 与时间线版本变更走同一条退出路径。
                                 if e == BG_RENDER_CANCELLED_ERR {
-                                    eprintln!(
+                                    log::warn!(
                                         "play_original: render cancelled at clip_id={} (project switch)",
                                         clip_render_info.clip.id
                                     );
                                     cancelled = true;
                                     break;
                                 }
-                                eprintln!(
+                                log::error!(
                                     "play_original: clip render failed: clip_id={} err={}",
                                     clip_render_info.clip.id, e
                                 );
@@ -545,7 +545,7 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
                             }
                             Err(e) => {
                                 tension_elapsed += tension_started_at.elapsed();
-                                eprintln!(
+                                log::error!(
                                     "play_original: tension render failed: clip_id={} err={}",
                                     clip_render_info.clip.id, e
                                 );
@@ -571,7 +571,7 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
                 if cancelled {
                     crate::nsf_hifigan_onnx::set_chunk_progress_callback(None);
                     if cache_log {
-                        eprintln!(
+                        log::warn!(
                             "[play_original][cache] CANCELLED total={} hit={} miss={} rendered_ok={} rendered_fail={} cache_probe_ms={:.2} render_ms={:.2} tension_ms={:.2} total_ms={:.2}",
                             clips_to_render.len(),
                             cache_hit_count,
@@ -606,7 +606,7 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
                 // 解决方案：渲染失败时降级为播放原始音频（等同于无 pitch edit 路径）。
                 if any_error {
                     if cache_log {
-                        eprintln!(
+                        log::error!(
                             "[play_original][cache] ERROR total={} hit={} miss={} rendered_ok={} rendered_fail={} cache_probe_ms={:.2} render_ms={:.2} tension_ms={:.2} total_ms={:.2}",
                             clips_to_render.len(),
                             cache_hit_count,
@@ -619,7 +619,7 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
                             play_started_at.elapsed().as_secs_f64() * 1000.0
                         );
                     }
-                    eprintln!("[play_original] rendering had errors, falling back to original audio playback");
+                    log::error!("[play_original] rendering had errors, falling back to original audio playback");
                     // 推送失败通知
                     if rendering_state_active {
                         let _ = app.emit(
@@ -645,7 +645,7 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
 
                 if timeline_version_from_app(&app) != render_timeline_version {
                     if cache_log {
-                        eprintln!(
+                        log::warn!(
                             "[play_original][cache] ABORTED_BY_TIMELINE_CHANGE total={} hit={} miss={} rendered_ok={} rendered_fail={} cache_probe_ms={:.2} render_ms={:.2} tension_ms={:.2} total_ms={:.2}",
                             clips_to_render.len(),
                             cache_hit_count,
@@ -681,7 +681,7 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
                 engine.set_playing(true, Some("original"));
                 let update_elapsed = update_started_at.elapsed();
 
-                eprintln!(
+                log::warn!(
                     "[play_original][timing] total={} hit={} miss={} collect_ms={:.2} ready_filter_ms={:.2} sig_check_ms={:.2} cache_probe_ms={:.2} render_ms={:.2} tension_ms={:.2} update_timeline_ms={:.2} total_ms={:.2}",
                     clips_to_render.len(),
                     cache_hit_count,
@@ -697,7 +697,7 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
                 );
 
                 if cache_log {
-                    eprintln!(
+                    log::warn!(
                         "[play_original][cache] SUMMARY total={} hit={} miss={} rendered_ok={} rendered_fail={} cache_probe_ms={:.2} render_ms={:.2} tension_ms={:.2} update_timeline_ms={:.2} total_ms={:.2}",
                         clips_to_render.len(),
                         cache_hit_count,
@@ -843,7 +843,7 @@ fn collect_clips_needing_render(
     let sr = if engine_sr > 0 { engine_sr } else { 44100 };
 
     if debug {
-        eprintln!(
+        log::warn!(
             "[collect_clips_needing_render] engine_sr={} effective_sr={} clips_count={}",
             engine_sr,
             sr,
@@ -926,7 +926,7 @@ fn collect_clips_needing_render(
         };
 
         if debug {
-            eprintln!(
+            log::warn!(
                 "[collect_clips_needing_render] clip_id={} sr={} start_frame={} end_frame={} hash={:#018x}",
                 clip.id, sr, start_frame, end_frame, param_hash
             );
@@ -1210,7 +1210,7 @@ fn render_single_clip(
         ) {
             Ok(true) => {
                 if debug {
-                    eprintln!(
+                    log::warn!(
                         "render_single_clip: pitch_edit applied to clip_id={}",
                         &clip_variant.id
                     );
@@ -1218,7 +1218,7 @@ fn render_single_clip(
             }
             Ok(false) => {}
             Err(e) => {
-                eprintln!("[pitch_edit] clip_id={} ERROR: {e}", &clip_variant.id);
+                log::error!("[pitch_edit] clip_id={} ERROR: {e}", &clip_variant.id);
             }
         }
 
@@ -1337,7 +1337,7 @@ fn render_single_clip(
         // BreathNoiseCache 命中：仅需渲染 harmonic_only（1 次 HNSEP + 1 次 HiFiGAN），
         // noise stem 直接复用缓存。
         if debug {
-            eprintln!(
+            log::warn!(
                 "render_single_clip: breath_noise_cache HIT for clip_id={}, skipping second render_variant",
                 clip.id
             );
@@ -1364,7 +1364,7 @@ fn render_single_clip(
 
         // 长度不一致：丢弃缓存, 走完整的双 render miss 路径重新生成 noise。
         if debug {
-            eprintln!(
+            log::warn!(
                 "render_single_clip: breath_noise_cache STALE for clip_id={} (harmonic_len={} cached_noise_len={}), \
                  invalidating and falling back to full 2-pass render",
                 clip.id,
@@ -1392,7 +1392,7 @@ fn render_single_clip(
     //       → breath_noise_stereo = noise_stereo
     // 直接使用 HNSEP 的 noise 输出作为 breath_noise，省去第二次完整的 ProcessorChain + HiFiGAN。
     if debug {
-        eprintln!(
+        log::warn!(
             "render_single_clip: breath_noise_cache MISS for clip_id={}, optimized 1-pass render",
             clip.id
         );
@@ -1519,7 +1519,7 @@ pub(crate) fn start_background_render(app: tauri::AppHandle) -> serde_json::Valu
 
     // 防止重复启动
     if BG_RENDER_ACTIVE.swap(true, Ordering::AcqRel) {
-        eprintln!("[bg_render] already active, skipping");
+        log::warn!("[bg_render] already active, skipping");
         return serde_json::json!({"ok": true, "skipped": true, "reason": "already_active"});
     }
     // 清除可能残留的上一轮取消标志
@@ -1539,7 +1539,7 @@ pub(crate) fn start_background_render(app: tauri::AppHandle) -> serde_json::Valu
     match result {
         Ok(value) => value,
         Err(payload) => {
-            eprintln!(
+            log::error!(
                 "[bg_render] panic during render setup (payload={:?}); resetting active flag",
                 payload
             );
@@ -1577,7 +1577,7 @@ fn start_background_render_inner(app: tauri::AppHandle, render_generation: u64) 
     let total = clips_to_render.len();
 
     if total == 0 {
-        eprintln!(
+        log::warn!(
             "[bg_render] no clips need rendering (ready={} skipped_not_ready={})",
             clips_to_render.len(),
             skipped_not_ready
@@ -1591,7 +1591,7 @@ fn start_background_render_inner(app: tauri::AppHandle, render_generation: u64) 
 
     let render_timeline_version = state.timeline_version.load(Ordering::Acquire);
 
-    eprintln!(
+    log::warn!(
         "[bg_render] starting background render: {} clips, engine_sr={}, timeline_version={}",
         total, sr, render_timeline_version
     );
@@ -1666,7 +1666,7 @@ fn start_background_render_inner(app: tauri::AppHandle, render_generation: u64) 
             );
         }));
         if outcome.is_err() {
-            eprintln!("[bg_render] render thread panicked; resetting flags");
+            log::error!("[bg_render] render thread panicked; resetting flags");
             // 只有当前代数仍属于本线程时才清理，避免把新工程的新一轮状态清掉。
             if BG_RENDER_GENERATION.load(Ordering::Acquire) == render_generation {
                 BG_RENDER_ACTIVE.store(false, Ordering::Release);
@@ -1728,7 +1728,7 @@ fn render_background_pass(
         for clip_render_info in clips_to_render {
             // 检查取消标志（用户在渲染中重新编辑参数时会设置）
             if BG_RENDER_CANCEL.load(Ordering::Relaxed) {
-                eprintln!(
+                log::warn!(
                     "[bg_render] cancel flag detected at clip {}/{}",
                     rendered_count, total
                 );
@@ -1758,7 +1758,7 @@ fn render_background_pass(
             if base_entry.is_some() {
                 cache_hit_count += 1;
                 if cache_log {
-                    eprintln!(
+                    log::warn!(
                         "[bg_render][cache] HIT clip_id={} hash={:#018x}",
                         clip_render_info.clip.id, clip_render_info.cache_key.param_hash
                     );
@@ -1773,7 +1773,7 @@ fn render_background_pass(
             if base_entry.is_none() {
                 cache_miss_count += 1;
                 if cache_log {
-                    eprintln!(
+                    log::warn!(
                         "[bg_render][cache] MISS clip_id={} hash={:#018x}",
                         clip_render_info.clip.id, clip_render_info.cache_key.param_hash
                     );
@@ -1840,7 +1840,7 @@ fn render_background_pass(
                             break;
                         }
                         render_elapsed += render_started_at.elapsed();
-                        eprintln!(
+                        log::error!(
                             "[bg_render] clip render failed: clip_id={} err={}",
                             clip_render_info.clip.id, e
                         );
@@ -1894,7 +1894,7 @@ fn render_background_pass(
                     }
                     Err(e) => {
                         tension_elapsed += tension_started_at.elapsed();
-                        eprintln!(
+                        log::error!(
                             "[bg_render] tension render failed: clip_id={} err={}",
                             clip_render_info.clip.id, e
                         );
@@ -1933,7 +1933,7 @@ fn render_background_pass(
 
             // 检查是否需要立即重启（用户在渲染中重新编辑参数时会设置）
             if BG_RENDER_RESTART_NEEDED.swap(false, Ordering::AcqRel) {
-                eprintln!(
+                log::warn!(
                     "[bg_render] cancelled by new edit (rendered {}/{}), restarting with fresh params...",
                     rendered_count, total
                 );
@@ -1944,7 +1944,7 @@ fn render_background_pass(
 
             // 真正取消（时间线版本变更等）：发出完成事件
             if cache_log {
-                eprintln!(
+                log::info!(
                     "[bg_render][cache] CANCELLED total={} hit={} miss={} rendered_ok={} rendered_fail={}",
                     total, cache_hit_count, cache_miss_count,
                     render_success_count, render_failed_count
@@ -1967,7 +1967,7 @@ fn render_background_pass(
         // 中的 auto-trigger 形成反馈循环。
 
         if cache_log {
-            eprintln!(
+            log::warn!(
                 "[bg_render][cache] DONE total={} hit={} miss={} rendered_ok={} rendered_fail={} cache_probe_ms={:.2} render_ms={:.2} tension_ms={:.2} total_ms={:.2}",
                 total,
                 cache_hit_count,
@@ -1980,7 +1980,7 @@ fn render_background_pass(
                 started_at.elapsed().as_secs_f64() * 1000.0
             );
         }
-        eprintln!(
+        log::warn!(
             "[bg_render] complete: {} clips, {} hit, {} miss, {} ok, {} fail in {:.2}s",
             total,
             cache_hit_count,
@@ -2007,7 +2007,7 @@ fn render_background_pass(
         if should_follow_up_render(skipped_not_ready, render_success_count)
             && AUTO_BG_RENDER_ENABLED.load(Ordering::Relaxed)
         {
-            eprintln!(
+            log::warn!(
                 "[bg_render] follow-up pass needed: {} clip(s) were not pitch-ready, {} clip(s) newly rendered in this pass",
                 skipped_not_ready, render_success_count
             );
@@ -2015,7 +2015,7 @@ fn render_background_pass(
             return;
         }
         if skipped_not_ready > 0 && render_success_count == 0 {
-            eprintln!(
+            log::warn!(
                 "[bg_render] {} clip(s) still not pitch-ready but this pass made no new progress; waiting for pitch analysis completion instead of re-rendering",
                 skipped_not_ready
             );
@@ -2023,7 +2023,7 @@ fn render_background_pass(
 
         // 若完成时恰好有新编辑触发的重启请求，立即启动新一轮渲染
         if BG_RENDER_RESTART_NEEDED.swap(false, Ordering::AcqRel) {
-            eprintln!("[bg_render] completed but restart was requested during finalization, starting new render");
+            log::warn!("[bg_render] completed but restart was requested during finalization, starting new render");
             start_background_render(app.clone());
             return;
         }
@@ -2070,7 +2070,7 @@ pub(crate) fn request_background_render(app: &tauri::AppHandle) -> serde_json::V
         // 让之后启动的渲染轮次能区分"这次取消是针对旧轮次的"。
         crate::commands::render_cancel::request_global_cancel();
         BG_RENDER_RESTART_NEEDED.store(true, Ordering::Release);
-        eprintln!("[bg_render] caches invalidated while render active; requesting restart");
+        log::warn!("[bg_render] caches invalidated while render active; requesting restart");
         return serde_json::json!({"ok": true, "restart_requested": true});
     }
 
@@ -2119,7 +2119,7 @@ pub(super) fn cancel_background_render(app: Option<&tauri::AppHandle>) -> serde_
     BG_RENDER_PITCH_PENDING.store(false, Ordering::Release);
     // 递增代数，使旧渲染线程的收尾清理不再影响新的一轮渲染。
     BG_RENDER_GENERATION.fetch_add(1, Ordering::AcqRel);
-    eprintln!("[bg_render] cancel requested, was_active={was_active}");
+    log::warn!("[bg_render] cancel requested, was_active={was_active}");
     // 立即通知前端“后台渲染已结束”，避免旧线程迟到的进度事件让状态卡在
     // “渲染中 100%”。如果随后有新工程的新一轮渲染，会再发 active=true。
     if let Some(app) = app {

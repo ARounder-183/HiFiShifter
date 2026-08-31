@@ -18,6 +18,7 @@ dependencies = [
  "hound",
  "libc",
  "libloading 0.8.9",
+ "log",
  "lru",
  "midly",
  "ndarray 0.16.1",

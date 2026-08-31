@@ -313,7 +313,7 @@ fn analyze_clip_with_cache(
         return Err("No source path".to_string());
     };
 
-    eprintln!(
+    log::warn!(
         "[pitch:analyze] clip_id={} source={} duration_sec={:?} fp={:.1}ms algo={:?}",
         clip.id, source_path, clip.duration_sec, frame_period_ms, algo,
     );
@@ -349,7 +349,7 @@ fn analyze_clip_with_cache(
             .map_err(|e| format!("Cache lock error: {}", e))?;
         if let Some(cached) = cache_guard.get(&cache_key) {
             if debug {
-                eprintln!(
+                log::warn!(
                     "clip_pitch_cache: HIT for clip_id={} key={}",
                     clip.id,
                     &cache_key[..16]
@@ -358,7 +358,7 @@ fn analyze_clip_with_cache(
             return Ok(cached);
         }
         if debug {
-            eprintln!(
+            log::warn!(
                 "clip_pitch_cache: MISS for clip_id={} key={}",
                 clip.id,
                 &cache_key[..16]
@@ -432,7 +432,7 @@ fn analyze_clip_with_cache(
     }
 
     if debug {
-        eprintln!(
+        log::warn!(
             "clip_pitch_cache: ANALYZED clip_id={} midi_len={} key={}",
             clip.id,
             midi.len(),
@@ -490,7 +490,7 @@ fn process_single_clip(
 
     let track_gain_value = tracks_gain.get(&clip.track_id).copied().unwrap_or(1.0);
 
-    eprintln!(
+    log::warn!(
         "[pitch:process] clip_id={} start={:.3}s len={:.3}s src_start={:.3}s src_end={:.3}s pr={:.2} track_gain={:.2}",
         clip.id, clip_start_sec, clip_timeline_len_sec,
         clip.source_start_sec, clip.source_end_sec,
@@ -500,7 +500,7 @@ fn process_single_clip(
     // Check if clip has valid source
     let Some(_source_path) = clip.source_path.as_ref() else {
         if debug {
-            eprintln!("  clip {} skipped: no source path", clip.id);
+            log::warn!("  clip {} skipped: no source path", clip.id);
         }
         return Err(format!("Clip {} has no source path", clip.id));
     };
@@ -557,7 +557,7 @@ fn process_single_clip(
         // 分析完成后清除当?clip 名称
         tracker.set_current_clip(None);
         if debug {
-            eprintln!(
+            log::warn!(
                 "  clip {} completed (cache_hit={}), overall progress={:.1}%",
                 clip.id,
                 was_cache_hit,
@@ -631,7 +631,7 @@ fn process_single_clip(
         }
         Err(e) => {
             if debug {
-                eprintln!("  clip {} failed: {}", clip.id, e);
+                log::error!("  clip {} failed: {}", clip.id, e);
             }
             Err(format!("Clip {}: {}", clip.id, e))
         }
@@ -685,7 +685,7 @@ fn compute_pitch_curve_parallel(
         .partition(|_clip| matches!(algo, PitchAnalysisAlgo::WorldDll));
 
     if debug {
-        eprintln!(
+        log::warn!(
             "compute_pitch_curve_parallel: {} total clips ({} WORLD, {} ONNX/other)",
             clips.len(),
             world_clips.len(),
@@ -698,7 +698,7 @@ fn compute_pitch_curve_parallel(
     // Process ONNX clips in parallel (no locking constraints)
     if !onnx_clips.is_empty() {
         if debug {
-            eprintln!(
+            log::warn!(
                 "  Processing {} ONNX clips in parallel...",
                 onnx_clips.len()
             );
@@ -741,7 +741,7 @@ fn compute_pitch_curve_parallel(
     // Process WORLD clips serially (due to world_dll_mutex)
     if !world_clips.is_empty() {
         if debug {
-            eprintln!("  Processing {} WORLD clips serially...", world_clips.len());
+            log::warn!("  Processing {} WORLD clips serially...", world_clips.len());
         }
 
         // Sort by workload descending (not as critical for serial, but consistent)
@@ -785,7 +785,7 @@ fn compute_pitch_curve_parallel(
     }
 
     if debug {
-        eprintln!(
+        log::error!(
             "compute_pitch_curve_parallel: {} successes, {} failures",
             successes.len(),
             failures.len()
@@ -809,7 +809,7 @@ fn compute_pitch_curve_parallel(
 
     // Return partial results (even if some clips failed, as long as <50% failed)
     if !failures.is_empty() && debug {
-        eprintln!(
+        log::error!(
             "  Warning: {} clips failed but continuing with {} successes",
             failures.len(),
             successes.len()
@@ -876,7 +876,7 @@ fn compute_pitch_curve_with_incremental_refresh(
         determine_clips_to_analyze(clips, old_snapshot.as_ref(), &new_snapshot);
 
     if debug {
-        eprintln!(
+        log::warn!(
             "Incremental refresh: {} clips need analysis, {} unchanged (cached)",
             clips_to_analyze.len(),
             unchanged_clip_ids.len()
@@ -996,7 +996,7 @@ fn compute_pitch_curve_with_incremental_refresh(
 
     // Task 9.6: Results are already merged in all_results
     if debug {
-        eprintln!(
+        log::warn!(
             "Incremental refresh complete: {} total results ({} analyzed, {} cached)",
             all_results.len(),
             clips_to_analyze.len(),
@@ -1261,7 +1261,7 @@ fn fuse_clip_pitches_optimized(
 
     if debug {
         let nonzero = out.iter().filter(|&&v| v.is_finite() && v > 0.0).count();
-        eprintln!(
+        log::warn!(
             "[pitch:fuse] result: {}/{} frames ({:.1}%) have pitch",
             nonzero,
             out.len(),
@@ -1288,7 +1288,7 @@ pub(crate) fn compute_pitch_curve(job: &PitchJob, mut on_progress: impl FnMut(f3
     ) && !crate::fcpe_onnx::is_available()
     {
         if debug {
-            eprintln!(
+            log::warn!(
                 "pitch: FCPE unavailable; return zeros (root_track_id={} key={} frames={})",
                 job.root_track_id, job.key, job.target_frames
             );
@@ -1304,7 +1304,7 @@ pub(crate) fn compute_pitch_curve(job: &PitchJob, mut on_progress: impl FnMut(f3
     }
 
     if debug {
-        eprintln!(
+        log::warn!(
             "pitch: start analysis v2 (root_track_id={} key={} clips={} frames={} fp_ms={} algo={:?})",
             job.root_track_id,
             job.key,
@@ -1524,7 +1524,7 @@ pub(crate) fn compute_pitch_curve(job: &PitchJob, mut on_progress: impl FnMut(f3
         // ?playback_rate != 1 时，actual_audio_sec ?clip_timeline_len_sec 不同是正常的
         // （actual_audio_sec ?clip_timeline_len_sec × playback_rate），不应被当作错?
         if debug {
-            eprintln!(
+            log::warn!(
                 "pitch: [ALIGNMENT] clip_id={} clip_timeline_len_sec={:.3} actual_audio_sec={:.3} ratio={:.3} playback_rate={:.2}",
                 clip.id,
                 clip_timeline_len_sec,
@@ -1532,7 +1532,7 @@ pub(crate) fn compute_pitch_curve(job: &PitchJob, mut on_progress: impl FnMut(f3
                 ratio,
                 playback_rate
             );
-            eprintln!(
+            log::warn!(
                 "  frames_from_timeline={} frames_from_audio={} midi_len={}",
                 clip_frames_from_timeline,
                 clip_frames_from_audio,
@@ -1593,7 +1593,7 @@ pub(crate) fn compute_pitch_curve(job: &PitchJob, mut on_progress: impl FnMut(f3
 
     if debug {
         let any_nonzero = out.iter().any(|&v| v.is_finite() && v > 0.0);
-        eprintln!(
+        log::warn!(
             "pitch: done analysis v2 (root_track_id={} key={} any_nonzero={})",
             job.root_track_id, job.key, any_nonzero
         );

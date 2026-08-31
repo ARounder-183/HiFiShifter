@@ -173,7 +173,7 @@ impl AudioEngine {
                     // Drain RT-side reports and log them here, not in the callback.
                     let auto_pause_pos = meter_bus.take_auto_pause_pos();
                     if auto_pause_pos > 0 {
-                        eprintln!(
+                        log::warn!(
                             "[mix] auto-paused at pos={} — pending clip encountered during background render",
                             auto_pause_pos
                         );
@@ -189,7 +189,7 @@ impl AudioEngine {
                                     let clip_end =
                                         clip.start_frame.saturating_add(clip.length_frames);
                                     if clip.start_frame < pending_pos && clip_end > pending_pos {
-                                        eprintln!(
+                                        log::warn!(
                                             "[mix] PENDING clip_id={} needs_synthesis=true rendered_pcm=None pos={}",
                                             clip.clip_id, pending_pos
                                         );
@@ -264,7 +264,7 @@ impl AudioEngine {
             let device = match host.default_output_device() {
                 Some(d) => d,
                 None => {
-                    eprintln!("AudioEngine: no default output device");
+                    log::warn!("AudioEngine: no default output device");
                     loop {
                         match rx.recv() {
                             Ok(EngineCommand::Shutdown) | Err(_) => break,
@@ -281,7 +281,7 @@ impl AudioEngine {
             let default_config = match device.default_output_config() {
                 Ok(c) => c,
                 Err(e) => {
-                    eprintln!("AudioEngine: default_output_config failed: {e}");
+                    log::error!("AudioEngine: default_output_config failed: {e}");
                     return;
                 }
             };
@@ -450,7 +450,7 @@ impl AudioEngine {
             let is_playing_cb = is_playing_thread.clone();
             let position_frames_cb = position_frames_thread.clone();
             let duration_frames_cb = duration_frames_thread.clone();
-            let err_fn = |err| eprintln!("AudioEngine stream error: {err}");
+            let err_fn = |err| log_error_limited!("AudioEngine stream error: {err}");
 
             let stream = match sample_format {
                 cpal::SampleFormat::F32 => {
@@ -477,7 +477,7 @@ impl AudioEngine {
                                         );
                                     }));
                                 if r.is_err() {
-                                    eprintln!(
+                                    log::error!(
                                         "AudioEngine: panic in audio callback (f32); silencing output"
                                     );
                                     data.fill(0.0);
@@ -513,7 +513,7 @@ impl AudioEngine {
                                         );
                                     }));
                                 if r.is_err() {
-                                    eprintln!(
+                                    log::error!(
                                         "AudioEngine: panic in audio callback (i16); silencing output"
                                     );
                                     data.fill(0);
@@ -549,7 +549,7 @@ impl AudioEngine {
                                         );
                                     }));
                                 if r.is_err() {
-                                    eprintln!(
+                                    log::error!(
                                         "AudioEngine: panic in audio callback (u16); silencing output"
                                     );
                                     data.fill(u16::MAX / 2);
@@ -565,12 +565,12 @@ impl AudioEngine {
             };
 
             let Some(stream) = stream else {
-                eprintln!("AudioEngine: failed to build output stream");
+                log::error!("AudioEngine: failed to build output stream");
                 return;
             };
 
             if let Err(e) = stream.play() {
-                eprintln!("AudioEngine: stream.play failed: {e}");
+                log::error!("AudioEngine: stream.play failed: {e}");
                 return;
             }
 
@@ -1445,7 +1445,7 @@ fn handle_evict_source_path(s: &mut EngineWorkerState, path: &str) {
             si.remove(k);
         }
         if !inflight_keys.is_empty() {
-            eprintln!(
+            log::warn!(
                 "[engine:evict] stretch inflight: removed {} entries for path={}",
                 inflight_keys.len(),
                 path

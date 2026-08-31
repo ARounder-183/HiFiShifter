@@ -97,7 +97,7 @@ pub fn formant_debug_log(message: impl AsRef<str>) {
         return;
     }
     let line = format!("[formant] {}", message.as_ref());
-    eprintln!("{line}");
+    log::warn!("{line}");
     let log_path = std::env::temp_dir().join("hifishifter-formant-debug.log");
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) {
         let _ = writeln!(file, "{line}");

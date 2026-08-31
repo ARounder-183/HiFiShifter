@@ -49,7 +49,7 @@ pub(super) fn get_root_mix_waveform_peaks_segment(
 ) -> WaveformPeaksSegmentPayload {
     guard_waveform_command("get_root_mix_waveform_peaks_segment", || {
         if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
-            eprintln!(
+            log::warn!(
                 "get_root_mix_waveform_peaks_segment(track_id={}, start_sec={:.3}, duration_sec={:.3}, columns={})",
                 track_id, start_sec, duration_sec, columns
             );
@@ -189,7 +189,7 @@ pub(super) fn get_track_mix_waveform_peaks_segment(
 ) -> WaveformPeaksSegmentPayload {
     guard_waveform_command("get_track_mix_waveform_peaks_segment", || {
         if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
-            eprintln!(
+            log::warn!(
                 "get_track_mix_waveform_peaks_segment(track_id={}, start_sec={:.3}, duration_sec={:.3}, columns={})",
                 track_id, start_sec, duration_sec, columns
             );

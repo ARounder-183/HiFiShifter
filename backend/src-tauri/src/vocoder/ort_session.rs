@@ -50,7 +50,7 @@ fn coreml_disabled() -> bool {
 }
 
 pub(crate) fn disable_coreml(reason: &str) {
-    eprintln!("ort_session: disabling CoreML EP for this process: {reason}");
+    log::warn!("ort_session: disabling CoreML EP for this process: {reason}");
     COREML_DISABLED
         .get_or_init(|| std::sync::atomic::AtomicBool::new(false))
         .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -173,7 +173,7 @@ fn resolve_dml_device_id() -> Option<i32> {
     let adapters = crate::dml_adapters::enumerate_dml_adapters().adapters;
     if let Some(best) = adapters.first() {
         let device_id = best.device_id as i32;
-        eprintln!(
+        log::warn!(
             "ort_session: auto-detected DML device_id={device_id} name='{}' vram={}MB",
             best.name, best.dedicated_video_memory_mb
         );
@@ -324,7 +324,7 @@ fn try_register_webgpu_ep(
                     "WebGPU EP build panicked: {}",
                     panic.downcast_ref::<&str>().copied().unwrap_or("unknown")
                 );
-                eprintln!("ort_session: {msg}");
+                log::warn!("ort_session: {msg}");
                 return Err(msg);
             }
         }
@@ -344,12 +344,12 @@ fn try_register_webgpu_ep(
 
     match register_result {
         Ok(Ok(b)) => {
-            eprintln!("ort_session: WebGPU EP registered successfully{wsl_note}");
+            log::info!("ort_session: WebGPU EP registered successfully{wsl_note}");
             Ok((b, "webgpu"))
         }
         Ok(Err(e)) => {
             let msg = format!("WebGPU EP registration failed: {e}{wsl_note}");
-            eprintln!("ort_session: {msg}");
+            log::error!("ort_session: {msg}");
             Err(msg)
         }
         Err(panic) => {
@@ -357,7 +357,7 @@ fn try_register_webgpu_ep(
                 "WebGPU EP registration panicked (likely Dawn/D3D12 init crash): {}{wsl_note}",
                 panic.downcast_ref::<&str>().copied().unwrap_or("unknown")
             );
-            eprintln!("ort_session: {msg}");
+            log::warn!("ort_session: {msg}");
             log_vulkan_diagnostics();
             Err(msg)
         }
@@ -396,7 +396,7 @@ fn try_register_coreml_ep(
                 "CoreML EP build panicked: {}",
                 panic.downcast_ref::<&str>().copied().unwrap_or("unknown")
             );
-            eprintln!("ort_session: {msg}");
+            log::error!("ort_session: {msg}");
             return Err(msg);
         }
     };
@@ -407,12 +407,12 @@ fn try_register_coreml_ep(
 
     match register_result {
         Ok(Ok(b)) => {
-            eprintln!("ort_session: CoreML EP registered successfully");
+            log::info!("ort_session: CoreML EP registered successfully");
             Ok((b, "coreml"))
         }
         Ok(Err(e)) => {
             let msg = format!("CoreML EP registration failed: {e}");
-            eprintln!("ort_session: {msg}");
+            log::error!("ort_session: {msg}");
             Err(msg)
         }
         Err(panic) => {
@@ -420,7 +420,7 @@ fn try_register_coreml_ep(
                 "CoreML EP registration panicked: {}",
                 panic.downcast_ref::<&str>().copied().unwrap_or("unknown")
             );
-            eprintln!("ort_session: {msg}");
+            log::warn!("ort_session: {msg}");
             Err(msg)
         }
     }
@@ -450,7 +450,7 @@ fn log_vulkan_diagnostics() {
     // Check for Vulkan ICDs
     for icd_dir in ["/usr/share/vulkan/icd.d", "/etc/vulkan/icd.d"] {
         if let Ok(entries) = std::fs::read_dir(icd_dir) {
-            eprintln!(
+            log::warn!(
                 "ort_session: vulkan ICD dir {icd_dir}: {} entries",
                 entries.count()
             );
@@ -458,12 +458,12 @@ fn log_vulkan_diagnostics() {
     }
     // Check if /dev/dxg is present (WSL2 D3D12 passthrough)
     if std::path::Path::new("/dev/dxg").exists() {
-        eprintln!("ort_session: WSL2 D3D12 passthrough (/dev/dxg) is available — WebGPU/Dawn cannot use this on Linux (Vulkan backend only)");
+        log::warn!("ort_session: WSL2 D3D12 passthrough (/dev/dxg) is available — WebGPU/Dawn cannot use this on Linux (Vulkan backend only)");
     }
     if is_wsl2() {
-        eprintln!("ort_session: WSL2 detected — Vulkan hardware acceleration is not available from the Windows GPU driver.");
-        eprintln!("ort_session: Only Mesa Lavapipe (software Vulkan) may be available, which is slow and may lack required Dawn features.");
-        eprintln!("ort_session: For GPU acceleration on WSL2, use the Windows build of HiFiShifter with DirectML instead.");
+        log::warn!("ort_session: WSL2 detected — Vulkan hardware acceleration is not available from the Windows GPU driver.");
+        log::warn!("ort_session: Only Mesa Lavapipe (software Vulkan) may be available, which is slow and may lack required Dawn features.");
+        log::warn!("ort_session: For GPU acceleration on WSL2, use the Windows build of HiFiShifter with DirectML instead.");
     }
 }
 
@@ -483,14 +483,14 @@ fn try_register_directml_ep(
     builder: ort::session::builder::SessionBuilder,
     role: OrtSessionRole,
 ) -> Result<(ort::session::builder::SessionBuilder, &'static str), String> {
-    eprintln!("ort_session: try_register_directml_ep");
+    log::warn!("ort_session: try_register_directml_ep");
     let device_id = resolve_dml_device_id();
     let dml = if let Some(id) = device_id {
-        eprintln!("ort_session[{role:?}]: DirectML device_id={id} (old API)");
+        log::warn!("ort_session[{role:?}]: DirectML device_id={id} (old API)");
         ort::ep::DirectML::default().with_device_id(id).build()
     } else {
         // Last resort: no DXGI adapters found, fall back to DML2
-        eprintln!("ort_session[{role:?}]: DirectML auto-select (DML2 fallback)");
+        log::warn!("ort_session[{role:?}]: DirectML auto-select (DML2 fallback)");
         ort::ep::DirectML::default()
             .with_performance_preference(ort::ep::directml::PerformancePreference::HighPerformance)
             .with_device_filter(ort::ep::directml::DeviceFilter::Gpu)
@@ -538,20 +538,20 @@ pub fn build_ort_session(
         // DirectML with strict mode first, then with fallback
         match build_dml_session_inner(onnx_path, role, &choice, true) {
             Ok((session, ep)) => return Ok((session, ep)),
-            Err(e) => eprintln!(
+            Err(e) => log::error!(
                 "ort_session[{role:?}]: strict DirectML failed (will retry with CPU fallback): {e}"
             ),
         }
         match build_dml_session_inner(onnx_path, role, &choice, false) {
             Ok((session, ep)) => return Ok((session, ep)),
-            Err(e) => eprintln!("ort_session[{role:?}]: DirectML with fallback failed: {e}"),
+            Err(e) => log::error!("ort_session[{role:?}]: DirectML with fallback failed: {e}"),
         }
     }
 
     // ── Windows: WebGPU not compiled (uses DirectML instead) ──────────
     #[cfg(target_os = "windows")]
     if choice == "webgpu" {
-        eprintln!("ort_session[{role:?}]: WebGPU is not available on Windows. Use DirectML ('auto' or 'directml' or 'gpu') for GPU acceleration, or 'cpu' for CPU-only.");
+        log::warn!("ort_session[{role:?}]: WebGPU is not available on Windows. Use DirectML ('auto' or 'directml' or 'gpu') for GPU acceleration, or 'cpu' for CPU-only.");
         // Fall through to CPU below.
     }
 
@@ -569,12 +569,12 @@ pub fn build_ort_session(
                     return Ok((session, ep.to_string()));
                 }
                 Err(e) => {
-                    eprintln!("ort_session[{role:?}]: WebGPU unavailable — {e}");
+                    log::warn!("ort_session[{role:?}]: WebGPU unavailable — {e}");
                     log_vulkan_diagnostics();
                 }
             },
             Err(e) => {
-                eprintln!(
+                log::error!(
                     "ort_session[{role:?}]: failed to create session builder for WebGPU — {e}"
                 );
                 log_vulkan_diagnostics();
@@ -604,14 +604,14 @@ pub fn build_ort_session(
                     Ok((b, ep)) => {
                         match build_gpu_session_finalize(b, onnx_path, role, "CoreML") {
                             Ok(session) => return Ok((session, ep.to_string())),
-                            Err(e) => eprintln!(
+                            Err(e) => log::error!(
                                 "ort_session[{role:?}]: CoreML session creation failed (will try WebGPU): {e}"
                             ),
                         }
                     }
-                    Err(e) => eprintln!("ort_session[{role:?}]: CoreML unavailable: {e}"),
+                    Err(e) => log::error!("ort_session[{role:?}]: CoreML unavailable: {e}"),
                 },
-                Err(e) => eprintln!(
+                Err(e) => log::error!(
                     "ort_session[{role:?}]: failed to create session builder for CoreML: {e}"
                 ),
             }
@@ -620,14 +620,14 @@ pub fn build_ort_session(
             Ok(builder) => match try_register_webgpu_ep(builder, role) {
                 Ok((b, ep)) => match build_gpu_session_finalize(b, onnx_path, role, "WebGPU") {
                     Ok(session) => return Ok((session, ep.to_string())),
-                    Err(e) => eprintln!(
+                    Err(e) => log::error!(
                         "ort_session[{role:?}]: WebGPU session creation failed (will try CPU): {e}"
                     ),
                 },
-                Err(e) => eprintln!("ort_session[{role:?}]: WebGPU unavailable: {e}"),
+                Err(e) => log::error!("ort_session[{role:?}]: WebGPU unavailable: {e}"),
             },
             Err(e) => {
-                eprintln!("ort_session[{role:?}]: failed to create session builder for WebGPU: {e}")
+                log::error!("ort_session[{role:?}]: failed to create session builder for WebGPU: {e}")
             }
         }
     }
@@ -698,7 +698,7 @@ fn smoke_test_gpu_session(
     }
 
     if input_pairs.is_empty() {
-        eprintln!("ort_session[{role:?}]: GPU smoke test skipped (no f32 tensor inputs)");
+        log::warn!("ort_session[{role:?}]: GPU smoke test skipped (no f32 tensor inputs)");
         return Ok(session);
     }
 
@@ -725,7 +725,7 @@ fn smoke_test_gpu_session(
             let _ = run_thread.join();
             match result {
                 Ok(_) => {
-                    eprintln!("ort_session[{role:?}]: {ep_name} smoke test passed - EP is functional");
+                    log::error!("ort_session[{role:?}]: {ep_name} smoke test passed - EP is functional");
                     Ok(session)
                 }
                 Err(e) => Err(format!(
@@ -761,7 +761,7 @@ fn build_gpu_session_finalize(
         .file_name()
         .map(|n| n.to_string_lossy())
         .unwrap_or_default();
-    eprintln!(
+    log::warn!(
         "ort_session[{role:?}]: model={model_name} ep={ep_name} (global_env={})",
         env_ep_choice(),
     );
@@ -794,18 +794,18 @@ fn build_gpu_session_finalize(
     let t_create = std::time::Instant::now();
     let mut session = builder.commit_from_file(onnx_path).map_err(|e| {
         let msg = format!("load onnx into {ep_name} ort session failed: {e}");
-        eprintln!("ort_session[{role:?}]: {msg}");
+        log::warn!("ort_session[{role:?}]: {msg}");
         msg
     })?;
     let create_ms = t_create.elapsed().as_millis();
 
-    eprintln!(
+    log::warn!(
         "ort_session[{role:?}]: created session ep={ep_name} intra_threads={threads} commit_ms={create_ms}",
     );
 
     // Log session I/O metadata
     for input in session.inputs() {
-        eprintln!(
+        log::warn!(
             "ort_session[{:?}]:   input name='{}' dtype={:?}",
             role,
             input.name(),
@@ -813,7 +813,7 @@ fn build_gpu_session_finalize(
         );
     }
     for output in session.outputs() {
-        eprintln!(
+        log::warn!(
             "ort_session[{:?}]:   output name='{}' dtype={:?}",
             role,
             output.name(),
@@ -830,7 +830,7 @@ fn build_gpu_session_finalize(
     match smoke_test_gpu_session(session, role, ep_name) {
         Ok(s) => session = s,
         Err(e) => {
-            eprintln!("ort_session[{role:?}]: {ep_name} smoke test failed, discarding session and falling back to CPU: {e}");
+            log::error!("ort_session[{role:?}]: {ep_name} smoke test failed, discarding session and falling back to CPU: {e}");
             return Err(e);
         }
     }
@@ -851,7 +851,7 @@ fn build_dml_session_inner(
 
     let (builder, selected) = try_register_directml_ep(builder, role)?;
 
-    eprintln!(
+    log::warn!(
         "ort_session[{role:?}]: model={} ep={selected} strict={strict} (choice={choice}, global_env={})",
         onnx_path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
         env_ep_choice(),
@@ -922,12 +922,12 @@ fn build_dml_session_inner(
     let create_ms = t_create.elapsed().as_millis();
 
     // ── Detailed diagnostic logging ────────────────────────────────────
-    eprintln!(
+    log::warn!(
         "ort_session[{role:?}]: created session ep={selected} strict={strict} intra_threads={threads} commit_ms={create_ms}",
     );
     // Log session I/O metadata (names, shapes, types)
     for input in session.inputs() {
-        eprintln!(
+        log::warn!(
             "ort_session[{:?}]:   input name='{}' dtype={:?}",
             role,
             input.name(),
@@ -935,7 +935,7 @@ fn build_dml_session_inner(
         );
     }
     for output in session.outputs() {
-        eprintln!(
+        log::warn!(
             "ort_session[{:?}]:   output name='{}' dtype={:?}",
             role,
             output.name(),
@@ -947,7 +947,7 @@ fn build_dml_session_inner(
     match smoke_test_gpu_session(session, role, "DirectML") {
         Ok(s) => session = s,
         Err(e) => {
-            eprintln!("ort_session[{role:?}]: DirectML smoke test failed, discarding session and falling back to CPU: {e}");
+            log::error!("ort_session[{role:?}]: DirectML smoke test failed, discarding session and falling back to CPU: {e}");
             return Err(e);
         }
     }
@@ -994,7 +994,7 @@ fn build_cpu_session(
     let mut builder =
         Session::builder().map_err(|e| format!("create ort session builder failed: {e}"))?;
 
-    eprintln!(
+    log::warn!(
         "ort_session[{role:?}]: model={} ep=cpu (choice={choice}, global_env={})",
         onnx_path
             .file_name()
@@ -1020,7 +1020,7 @@ fn build_cpu_session(
         .map_err(|e| format!("load onnx into ort session failed: {e}"))?;
     let create_ms = t_create.elapsed().as_millis();
 
-    eprintln!(
+    log::warn!(
         "ort_session[{role:?}]: created session ep=cpu intra_threads={threads} commit_ms={create_ms}",
     );
 
@@ -1103,17 +1103,17 @@ fn probe_webgpu_ep_available() -> bool {
                 };
                 match builder.with_execution_providers([wgpu]) {
                     Ok(_) => {
-                        eprintln!("ort_session: probe_webgpu_ep — AVAILABLE");
+                        log::warn!("ort_session: probe_webgpu_ep — AVAILABLE");
                         true
                     }
                     Err(e) => {
-                        eprintln!("ort_session: probe_webgpu_ep — NOT available: {e}");
+                        log::warn!("ort_session: probe_webgpu_ep — NOT available: {e}");
                         false
                     }
                 }
             }
             Err(e) => {
-                eprintln!("ort_session: probe_webgpu_ep — session builder failed: {e}");
+                log::error!("ort_session: probe_webgpu_ep — session builder failed: {e}");
                 false
             }
         }));
@@ -1122,7 +1122,7 @@ fn probe_webgpu_ep_available() -> bool {
         Ok(available) => available,
         Err(panic) => {
             let msg = panic.downcast_ref::<&str>().copied().unwrap_or("unknown");
-            eprintln!("ort_session: probe_webgpu_ep — PANICKED: {msg}");
+            log::error!("ort_session: probe_webgpu_ep — PANICKED: {msg}");
             log_vulkan_diagnostics();
             false
         }
@@ -1139,17 +1139,17 @@ fn probe_coreml_ep_available() -> bool {
                 let ep = build_coreml_ep().build();
                 match builder.with_execution_providers([ep]) {
                     Ok(_) => {
-                        eprintln!("ort_session: probe_coreml_ep - AVAILABLE");
+                        log::warn!("ort_session: probe_coreml_ep - AVAILABLE");
                         true
                     }
                     Err(e) => {
-                        eprintln!("ort_session: probe_coreml_ep - NOT available: {e}");
+                        log::warn!("ort_session: probe_coreml_ep - NOT available: {e}");
                         false
                     }
                 }
             }
             Err(e) => {
-                eprintln!("ort_session: probe_coreml_ep - session builder failed: {e}");
+                log::error!("ort_session: probe_coreml_ep - session builder failed: {e}");
                 false
             }
         }));
@@ -1158,7 +1158,7 @@ fn probe_coreml_ep_available() -> bool {
         Ok(available) => available,
         Err(panic) => {
             let msg = panic.downcast_ref::<&str>().copied().unwrap_or("unknown");
-            eprintln!("ort_session: probe_coreml_ep - PANICKED: {msg}");
+            log::error!("ort_session: probe_coreml_ep - PANICKED: {msg}");
             false
         }
     }

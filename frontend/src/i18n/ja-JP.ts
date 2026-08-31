@@ -311,6 +311,10 @@ export const jaJP = {
     import_audio_failed: "メディアのインポートに失敗しました",
     status_project_version_confirmation: "プロジェクトファイルのバージョン確認",
 
+    menu_open_log_folder: "ログフォルダーを開く",
+    menu_export_diagnostics: "診断情報をエクスポート…",
+    menu_open_log_folder_failed: "ログフォルダーを開けませんでした",
+    menu_export_diagnostics_failed: "診断情報のエクスポートに失敗しました",
     menu_about: "HiFiShifter について",
     glue: "グルー",
     group: "グループ化",

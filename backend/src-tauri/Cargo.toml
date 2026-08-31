@@ -48,6 +48,7 @@ encoding_rs = "0.8"
 midly = "0.5"
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
 libloading = "0.8"
+log = { version = "0.4", features = ["std"] }
 
 rustfft = "6"
 num-complex = "0.4"

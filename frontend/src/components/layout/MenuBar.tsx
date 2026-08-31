@@ -1116,6 +1116,45 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 <DropdownMenu.Content variant="soft" color="gray">
                     <DropdownMenu.Item
                         onSelect={async () => {
+                            const { openLogFolder } = await import(
+                                "../../services/api/diagnostics"
+                            );
+                            try {
+                                const res = await openLogFolder();
+                                if (!res.ok) {
+                                    window.alert(res.error || tAny("menu_open_log_folder_failed"));
+                                }
+                            } catch (e) {
+                                window.alert(String(e));
+                            }
+                        }}
+                    >
+                        {tAny("menu_open_log_folder")}
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item
+                        onSelect={async () => {
+                            const { pickDiagnosticsOutputPath, exportDiagnostics } = await import(
+                                "../../services/api/diagnostics"
+                            );
+                            try {
+                                const pick = await pickDiagnosticsOutputPath();
+                                if (!pick?.ok || !pick.path) return; // 用户取消
+                                const res = await exportDiagnostics(pick.path);
+                                if (!res.ok) {
+                                    window.alert(
+                                        res.error || tAny("menu_export_diagnostics_failed"),
+                                    );
+                                }
+                            } catch (e) {
+                                window.alert(String(e));
+                            }
+                        }}
+                    >
+                        {tAny("menu_export_diagnostics")}
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Separator />
+                    <DropdownMenu.Item
+                        onSelect={async () => {
                             const { openUrl } = await import("@tauri-apps/plugin-opener");
                             openUrl("https://github.com/ARounder-183/HiFiShifter");
                         }}

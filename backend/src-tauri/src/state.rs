@@ -2382,7 +2382,7 @@ impl TimelineState {
             }
 
             if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
-                eprintln!(
+                log::warn!(
                     "state: [INVALIDATE] Cleared stale pitch curves for root_track={} (key changed, user_modified={})",
                     root_track_id, entry.pitch_edit_user_modified
                 );
@@ -2810,7 +2810,7 @@ impl AppState {
 
         // 保存到磁盘缓存
         if let Err(e) = hfs_cache.save(path, &peaks) {
-            eprintln!("Warning: failed to save v2 peaks cache: {}", e);
+            log::error!("Warning: failed to save v2 peaks cache: {}", e);
         }
 
         // 发送 done 状态事件
@@ -9422,7 +9422,7 @@ impl TimelineState {
                         .take(8)
                         .map(|v| format!("{:.4}", v))
                         .collect();
-                    eprintln!(
+                    log::warn!(
                         "import_audio_item: audio_info ok: total_frames={}, sample_rate={}, duration_sec={:.6}, preview_len={}, preview_max={:.4}, preview_head=[{}]",
                         info.total_frames,
                         info.sample_rate,
@@ -9440,7 +9440,7 @@ impl TimelineState {
             None => {
                 if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
                     let exists = Path::new(audio_path).exists();
-                    eprintln!(
+                    log::error!(
                         "import_audio_item: audio_info FAILED: path_exists={} path={}",
                         exists, audio_path
                     );
@@ -9466,7 +9466,7 @@ impl TimelineState {
 
         // DEBUG: 打印导入clip时的关键参数
         if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
-            eprintln!(
+            log::warn!(
                 "import_audio_item: clip created: clip_id={}, duration_frames={:?}, sample_rate={:?}, computed_length_sec={:.6}",
                 &clip_id[..8.min(clip_id.len())],
                 duration_frames,
@@ -9531,7 +9531,7 @@ impl TimelineState {
         let new_size = new_meta.as_ref().map(|m| m.len());
         let new_fp = crate::audio_utils::compute_file_fingerprint(Path::new(new_source_path));
         if new_fp.is_none() {
-            eprintln!(
+            log::warn!(
                 "[replace_clip_sources] WARNING: compute_file_fingerprint failed for path={} (file may be locked), keeping old fingerprint",
                 new_source_path
             );

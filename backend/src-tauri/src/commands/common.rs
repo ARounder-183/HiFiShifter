@@ -21,7 +21,7 @@ pub(crate) fn guard_json_command(
     match catch_unwind(AssertUnwindSafe(f)) {
         Ok(v) => v,
         Err(_) => {
-            eprintln!("command panicked: {name}");
+            log::error!("command panicked: {name}");
             serde_json::json!({"ok": false, "error": format!("panic in command: {name}")})
         }
     }
@@ -34,7 +34,7 @@ pub(crate) fn guard_waveform_command(
     match catch_unwind(AssertUnwindSafe(f)) {
         Ok(v) => v,
         Err(_) => {
-            eprintln!("command panicked: {name}");
+            log::error!("command panicked: {name}");
             super::waveform::WaveformPeaksSegmentPayload {
                 ok: false,
                 min: vec![],

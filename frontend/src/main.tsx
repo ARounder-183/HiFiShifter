@@ -12,6 +12,10 @@ import { fadeToolTipSuppress } from "./components/layout/timeline/FadeContextMen
 import { I18nProvider } from "./i18n/I18nProvider";
 import { AppThemeProvider } from "./theme/AppThemeProvider";
 import { initModifierWatcher } from "./components/layout/timeline/hooks/modifierWatcher";
+import { installGlobalErrorReporting } from "./services/frontendErrorLog";
+
+// 全局兜底：未捕获异常 / 未处理的 Promise rejection 回传到后端统一日志。
+installGlobalErrorReporting();
 
 /** 进程级全局手势基建：自愈式修饰键跟踪（淡化曲率等 modifierOnly 键位）。 */
 function GlobalGestureServices() {

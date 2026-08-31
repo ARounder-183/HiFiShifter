@@ -58,7 +58,7 @@ impl ResourceManager {
 
                     // 直接使用布尔值判断，消除系统调用
                     if !ok && debug_commands {
-                        eprintln!(
+                        log::error!(
                             "AudioEngine: ResourceManager decode failed: path={} out_rate={} ",
                             path.display(),
                             out_rate

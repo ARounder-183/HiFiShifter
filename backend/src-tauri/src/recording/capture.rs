@@ -212,7 +212,7 @@ pub fn run_capture(
             if let Some(queue) = ctx.monitor_queue.clone() {
                 match build_monitor_stream(&output_device, queue) {
                     Ok(stream) => monitor_stream = Some(stream),
-                    Err(err) => eprintln!("[recording] monitor unavailable: {err}"),
+                    Err(err) => log::warn!("[recording] monitor unavailable: {err}"),
                 }
             }
         }
@@ -334,7 +334,7 @@ fn run_cpal_input(
     };
     let resampler = Arc::new(Mutex::new(resampler));
     let err_callback = |err: cpal::StreamError| {
-        eprintln!("[recording] input stream error: {err}");
+        log_error_limited!("[recording] input stream error: {err}");
     };
     let capture_ctx = ctx.clone();
     let capture_resampler = resampler.clone();
@@ -698,7 +698,7 @@ fn build_monitor_stream(
 ) -> Result<cpal::Stream, String> {
     let (config, sample_format) = pick_monitor_config(device)?;
     let err_callback = |err: cpal::StreamError| {
-        eprintln!("[recording] monitor stream error: {err}");
+        log_error_limited!("[recording] monitor stream error: {err}");
     };
     let stream = device
         .build_output_stream_raw(

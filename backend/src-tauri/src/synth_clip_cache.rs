@@ -881,7 +881,7 @@ pub fn invalidate_clip_all_caches(clip_id: &str) {
         let before = cache.len();
         cache.invalidate(clip_id);
         if cache.len() < before {
-            eprintln!(
+            log::warn!(
                 "[cache:invalidate] clip_id={} SynthClipCache invalidated",
                 clip_id
             );
@@ -896,7 +896,7 @@ pub fn invalidate_clip_all_caches(clip_id: &str) {
         let before = cache.len();
         cache.invalidate(clip_id);
         if cache.len() < before {
-            eprintln!(
+            log::warn!(
                 "[cache:invalidate] clip_id={} RenderedClipCache invalidated (had {} entries)",
                 clip_id, before
             );
@@ -911,7 +911,7 @@ pub fn invalidate_clip_all_caches(clip_id: &str) {
         let before = cache.len();
         cache.invalidate(clip_id);
         if cache.len() < before {
-            eprintln!(
+            log::warn!(
                 "[cache:invalidate] clip_id={} TensionRenderedClipCache invalidated",
                 clip_id
             );
@@ -926,7 +926,7 @@ pub fn invalidate_clip_all_caches(clip_id: &str) {
         let before = cache.len();
         cache.invalidate(clip_id);
         if cache.len() < before {
-            eprintln!(
+            log::warn!(
                 "[cache:invalidate] clip_id={} BreathNoiseCache invalidated",
                 clip_id
             );
@@ -939,7 +939,7 @@ pub fn invalidate_clip_all_caches(clip_id: &str) {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         if map.remove(clip_id).is_some() {
-            eprintln!(
+            log::warn!(
                 "[cache:invalidate] clip_id={} pending_rendered_key removed",
                 clip_id
             );
@@ -950,7 +950,7 @@ pub fn invalidate_clip_all_caches(clip_id: &str) {
     //    当源文件被替换后，旧的推理输出不再有效，必须使 chunk 缓存失效。
     crate::renderer::hifigan::invalidate_chunk_cache_for_clip(clip_id);
 
-    eprintln!(
+    log::warn!(
         "[cache:invalidate] clip_id={} all caches invalidated",
         clip_id
     );
@@ -969,7 +969,7 @@ pub fn invalidate_clip_all_caches(clip_id: &str) {
 ///    异步组装 pitch_orig/pitch_edit 的场景），播放时据此产生的“假失效”不应摧毁
 ///    已经按当前参数渲染好的缓存；否则首次播放会整段静音、气声缺失，第二次播放才恢复。
 pub fn invalidate_clip_for_pitch_edit(clip_id: &str) {
-    eprintln!(
+    log::warn!(
         "[cache:invalidate] clip_id={clip_id} pitch_edit invalidated (synth + pending keys cleared, rendered cache kept)"
     );
     // 1. SynthClipCache 失效

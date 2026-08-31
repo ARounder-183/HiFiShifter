@@ -962,7 +962,7 @@ pub(super) fn open_project(
 
     // 打开工程时清除所有渲染缓存，确保旧的预渲染结果不会影响新的播放。
     // 这是修复"音高分析未完成时播放导致音高编辑不生效"问题的关键步骤。
-    eprintln!("[open_project] Clearing all render caches before loading project...");
+    log::warn!("[open_project] Clearing all render caches before loading project...");
     // hnsep 分离缓存键只含 clip_id+采样率+样本数：换工程后同 id/等长 clip
     // 会命中上一个工程的 stems，必须一并清空（低频操作，整体清空可接受）。
     crate::hnsep_onnx::clear_separation_cache();

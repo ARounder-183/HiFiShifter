@@ -175,7 +175,7 @@ pub(super) fn get_param_frames(
     binary: Option<bool>,
 ) -> crate::models::ParamFramesPayload {
     if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
-        eprintln!(
+        log::warn!(
             "get_param_frames(track_id={}, param={}, start_frame={}, frame_count={}, stride={:?} binary={:?})",
             track_id, param, start_frame, frame_count, stride, binary
         );
@@ -505,7 +505,7 @@ pub(super) fn set_param_frames(
 
     if debug {
         // This helps diagnose whether the frontend is sending invalid / extreme curves.
-        eprintln!(
+        log::warn!(
             "set_param_frames(param={param}, start_frame={start_frame}, len={}): non_finite={non_finite} clamped={clamped} min={min_v:.3} max={max_v:.3} max_delta={max_delta:.3}",
             written
         );

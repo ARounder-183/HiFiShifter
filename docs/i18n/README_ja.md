@@ -289,6 +289,28 @@ $env:TAURI_UI_MODE='build'; cargo tauri dev
 
 **注意：** 初回コンパイルには非常に長い時間がかかります。しばらくお待ちください。
 
+## ログとトラブルシューティング
+
+アプリは実行ログを自動的に OS 標準のログディレクトリへ書き込みます。コマンドライン引数は不要です：
+
+| OS | ログディレクトリ |
+| --- | --- |
+| Windows | `%LOCALAPPDATA%\com.arounder.hifishifter\logs` |
+| macOS | `~/Library/Logs/com.arounder.hifishifter` |
+| Linux | `~/.local/share/com.arounder.hifishifter/logs` |
+
+- アプリ内の **ヘルプ → ログフォルダーを開く** でログの場所を直接開けます。**ヘルプ → 診断情報をエクスポート…** では、システム情報・全ログ・推論デバイスのベンチマーク結果を含む診断パッケージをワンクリックで生成できます。issue 報告時に添付してください。
+- ログはサイズに応じて自動ローテーションされます：1 ファイル上限 8 MiB、履歴は 3 世代まで保持（`hifishifter.1.log` … `hifishifter.3.log`）。
+  - 繰り返し発生するエラー / 警告は自動的にスロットリングされます：同じ位置のログは 10 秒ごとに最大 1 件出力され、抑制された件数は次の出力前に `[throttled]` 行で補記されます。
+- フロントエンドとバックエンドのエラーは同じログファイルに記録されるため、1 つのファイルで時系列に沿って調査できます。
+
+詳細オプション：
+
+- 起動引数 `--log-file=<path>`：ログを指定パスに書き込みます。`--log-file=-` でファイルログを明示的に無効化。
+- 環境変数 `HIFISHIFTER_LOG=debug`（`trace` / `info` / `warn` / `error`）：ログの詳細度を調整。
+- 環境変数 `HIFISHIFTER_LOG_DIR`：既定のログディレクトリを上書き。
+- ターミナルで `HiFiShifter --benchmark` を実行：推論デバイスのベンチマークを実行し、JSON 結果を出力します。
+
 ## ドキュメント
 
 - [ユーザーマニュアル](USERMANUAL_ja.md)

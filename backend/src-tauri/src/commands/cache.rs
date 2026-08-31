@@ -43,7 +43,7 @@ pub(super) fn clear_cache(_state: State<'_, AppState>) -> Result<u64, String> {
                         }
                     }
                     Err(e) => {
-                        eprintln!("clear_cache: cannot read synth cache dir: {}", e);
+                        log::error!("clear_cache: cannot read synth cache dir: {}", e);
                     }
                 }
             }

@@ -487,7 +487,7 @@ pub fn render_mixdown_interleaved(
                 Ok(v) => v,
                 Err(e) => {
                     if debug {
-                        eprintln!(
+                        log::error!(
                             "mixdown: decode failed; clip_id={} track_id={} path={} err={}",
                             clip.id, clip.track_id, source_path, e
                         );
@@ -681,7 +681,7 @@ pub fn render_mixdown_interleaved(
                 }
                 Err(err) => {
                     if debug {
-                        eprintln!(
+                        log::error!(
                             "mixdown: formant morph failed; clip_id={} path={} err={}",
                             clip.id, source_path, err
                         );
@@ -737,7 +737,7 @@ pub fn render_mixdown_interleaved(
                     segment = seg;
                 }
                 Err(e) => {
-                    eprintln!("[pitch_edit] clip_id={} ERROR: {e}", clip.id);
+                    log::error!("[pitch_edit] clip_id={} ERROR: {e}", clip.id);
                     segment = seg;
                 }
             }
@@ -1004,7 +1004,7 @@ pub fn render_mixdown_interleaved(
                 max_abs = a;
             }
         }
-        eprintln!(
+        log::warn!(
             "mixdown: rendered window start_sec={:.3} end_sec={:.3} sr={} frames={} max_abs={:.6} clips_considered={} clips_decoded={} clips_mixed={}",
             start_sec,
             end_sec,
@@ -1207,7 +1207,7 @@ mod tests {
                     .map(f32::abs)
                     .fold(0.0f32, f32::max);
 
-                eprintln!(
+                log::warn!(
                     "[fade-tail] rate={rate} len={len_sec}s fade={fade_sec}s shape={shape} dir={dir} -> max_frame_step={max_frame_step} last_ms_peak={last_ms_peak}"
                 );
                 // 无单帧硬切：任何帧间样本差必须远低于源幅值。

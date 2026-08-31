@@ -100,6 +100,12 @@ The `Options` menu allows you to modify various settings of HiFiShifter:
 - `Snap/Grid Settings...`: Opens the [Snap / Grid Settings](#snap--grid-settings) dialog (it can also be opened from the `Snap` button's right-click context menu on the timeline toolbar).
 - `Keyboard Shortcuts...`: Allows you to configure HiFiShifter's keybindings. Several presets are available.
 
+The `Help` menu provides diagnostics and support entries:
+
+- `Open Log Folder`: Opens the folder containing the run log in the system file manager. See the [Logs and Troubleshooting](#8-logs-and-troubleshooting) section.
+- `Export Diagnostics…`: Lets you pick a save location, then generates a diagnostics package (system info + all logs + inference-device benchmark results) that you can attach to an issue.
+- `About HiFiShifter`: Opens the project homepage.
+
 ## 3. Track View
 
 The general operation logic and shortcuts can be referenced from DAWs like Reaper, VocalShifter, VEGAS Pro. You can customize your shortcut preferences via `Options -> Keyboard Shortcuts...`. The following descriptions are based on default shortcuts.
@@ -491,3 +497,26 @@ Open the recording settings via `File -> Recording...`:
 2. Click the record button. Timeline playback starts from the playhead while capture begins.
 3. Click the record button again to stop recording; timeline playback stops with it.
 4. If the selected track has no clips within the recording range, the recording is imported directly onto that track. Otherwise a new `Recording` track is created immediately below the selected track, the recording is imported there, and the new track and the new clip are selected automatically.
+
+## 8. Logs and Troubleshooting
+
+HiFiShifter automatically writes its run log to the platform-standard log directory — no command-line flags required. When you run into a problem, attaching the log file(s) to an issue helps a lot with diagnosis:
+
+| OS | Log directory |
+| --- | --- |
+| Windows | `%LOCALAPPDATA%\com.arounder.hifishifter\logs` |
+| macOS | `~/Library/Logs/com.arounder.hifishifter` |
+| Linux | `~/.local/share/com.arounder.hifishifter/logs` |
+
+- Use `Help → Open Log Folder` to jump straight to the log files.
+- Use `Help → Export Diagnostics…` to generate a diagnostics package zip (system info + all logs + inference-device benchmark results) and attach it to your issue.
+- Logs rotate automatically by size: 8 MiB per file, with up to 3 historical copies kept (`hifishifter.1.log` … `hifishifter.3.log`).
+  - Frequently repeating errors / warnings are throttled automatically: a given log site emits at most one message per 10-second window, and suppressed messages are summarized in a `[throttled]` line before the next one.
+- Frontend and backend errors are written to the same log file, so a single file tells the whole story in chronological order.
+
+Advanced options (not needed for regular use):
+
+- Launch flag `--log-file=<path>`: write the log to a specific path; `--log-file=-` disables file logging.
+- Environment variable `HIFISHIFTER_LOG=debug` (or `trace` / `info` / `warn` / `error`): adjust log verbosity; release builds default to `info`.
+- Environment variable `HIFISHIFTER_LOG_DIR`: override the default log directory.
+- Run `HiFiShifter --benchmark` in a terminal: run the inference-device benchmark and print the results as JSON.

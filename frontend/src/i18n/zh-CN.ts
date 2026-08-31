@@ -292,6 +292,10 @@ export const zhCN = {
     import_audio_failed: "导入媒体文件失败",
     status_project_version_confirmation: "工程文件版本确认",
 
+    menu_open_log_folder: "打开日志文件夹",
+    menu_export_diagnostics: "导出诊断信息…",
+    menu_open_log_folder_failed: "无法打开日志文件夹",
+    menu_export_diagnostics_failed: "导出诊断信息失败",
     menu_about: "关于 HiFiShifter",
     glue: "胶合",
     group: "编组",

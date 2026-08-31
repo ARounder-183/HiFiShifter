@@ -1092,7 +1092,7 @@ fn process_item(
             // 混合 take 的 item（MIDI active + 音频 inactive）当前只导入
             // active take：显式记录这一限制，避免静默丢数据无人察觉。
             if !item.takes.is_empty() {
-                eprintln!(
+                log::warn!(
                     "reaper_import: item at {} has {} non-active take(s) dropped (mixed MIDI/audio takes are not fully supported yet)",
                     item.position, item.takes.len()
                 );
@@ -1193,7 +1193,7 @@ fn process_item(
         // v4 边界：拆段路径按 active take 展开成多个单 take 段 Clip，
         // 其余 take 无法随之拆分、被静默丢弃 —— 显式告警避免无人察觉。
         if !item.takes.is_empty() {
-            eprintln!(
+            log::warn!(
                 "reaper_import: item at {} has {} non-active take(s) dropped (stretch-marker items import the active take only)",
                 item.position, item.takes.len()
             );

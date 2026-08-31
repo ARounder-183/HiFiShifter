@@ -289,6 +289,28 @@ $env:TAURI_UI_MODE='build'; cargo tauri dev
 
 **Note:** The first compilation will take a long time. Please be patient.
 
+## Logs & Troubleshooting
+
+The app automatically writes its run log to the platform-standard log directory — no command-line flags required:
+
+| OS | Log directory |
+| --- | --- |
+| Windows | `%LOCALAPPDATA%\com.arounder.hifishifter\logs` |
+| macOS | `~/Library/Logs/com.arounder.hifishifter` |
+| Linux | `~/.local/share/com.arounder.hifishifter/logs` |
+
+- Inside the app, use **Help → Open Log Folder** to jump straight to the logs, or **Help → Export Diagnostics** to generate a diagnostics package (system info + all logs + inference-device benchmark results) to attach to an issue.
+- Logs rotate automatically by size: 8 MiB per file, with up to 3 historical copies kept (`hifishifter.1.log` … `hifishifter.3.log`).
+  - Frequently repeating errors / warnings are throttled automatically: a given log site emits at most one message per 10-second window, and suppressed messages are summarized in a `[throttled]` line before the next one.
+- Frontend and backend errors are written to the same log file, so a single file tells the whole story.
+
+Advanced options:
+
+- Launch flag `--log-file=<path>`: write the log to a specific path; `--log-file=-` disables file logging.
+- Environment variable `HIFISHIFTER_LOG=debug` (or `trace` / `info` / `warn` / `error`): adjust log verbosity.
+- Environment variable `HIFISHIFTER_LOG_DIR`: override the default log directory.
+- Run `HiFiShifter --benchmark` in a terminal: run the inference-device benchmark and print JSON results.
+
 ## Documentation
 
 - [User Manual](USERMANUAL_en.md)

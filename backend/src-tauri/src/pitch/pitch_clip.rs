@@ -535,13 +535,13 @@ pub fn schedule_clip_pitch_jobs(
                 key: String::new(),
             },
         );
-        eprintln!(
+        log::warn!(
             "[pitch_clip] pitch_orig_analysis_started emit result: {:?}",
             r1
         );
         // 发送初始进度（0%，显示第一个 clip 名称）
         let first_clip_name = pending_jobs.first().map(|j| j.clip.name.clone());
-        eprintln!(
+        log::warn!(
             "[pitch_clip] emitting initial progress 0/{}, first_clip={:?}",
             total, first_clip_name
         );
@@ -555,9 +555,9 @@ pub fn schedule_clip_pitch_jobs(
                 total_clips: total,
             },
         );
-        eprintln!("[pitch_clip] initial progress emit result: {:?}", r2);
+        log::info!("[pitch_clip] initial progress emit result: {:?}", r2);
     } else {
-        eprintln!("[pitch_clip] WARNING: app_handle is None, cannot emit events!");
+        log::error!("[pitch_clip] WARNING: app_handle is None, cannot emit events!");
     }
 
     for job in pending_jobs {
@@ -567,7 +567,7 @@ pub fn schedule_clip_pitch_jobs(
 
         std::thread::spawn(move || {
             // 通知进度：开始分析此 clip
-            eprintln!(
+            log::warn!(
                 "[pitch_clip] thread: starting analysis for clip '{}'",
                 job.clip.name
             );
@@ -579,7 +579,7 @@ pub fn schedule_clip_pitch_jobs(
             // 完成一个 clip，更新进度
             let completed = global_batch_state().complete_one();
             global_batch_state().set_current(None);
-            eprintln!(
+            log::warn!(
                 "[pitch_clip] thread: clip '{}' analysis done, midi={}, completed={}/{}",
                 job.clip.name,
                 midi.is_some(),
@@ -604,12 +604,12 @@ pub fn schedule_clip_pitch_jobs(
                         total_clips: total,
                     },
                 );
-                eprintln!(
+                log::error!(
                     "[pitch_clip] thread: progress emit {}/{} result: {:?}",
                     completed, total, r
                 );
             } else {
-                eprintln!("[pitch_clip] thread: WARNING app_handle is None, cannot emit progress!");
+                log::error!("[pitch_clip] thread: WARNING app_handle is None, cannot emit progress!");
             }
 
             // 无论成功与否，先清除 inflight 标记
@@ -638,7 +638,7 @@ pub fn schedule_clip_pitch_jobs(
                             .map(|_| c.id.clone())
                     })
                     .collect();
-                eprintln!(
+                log::warn!(
                     "[pitch_clip] thread: notifying {} clip(s) sharing content key",
                     sharing_clip_ids.len()
                 );
@@ -651,7 +651,7 @@ pub fn schedule_clip_pitch_jobs(
 
             // 所有 clip 完成后，重置全局进度状态
             if completed >= total {
-                eprintln!(
+                log::warn!(
                     "[pitch_clip] thread: all {} clips done, resetting batch state",
                     total
                 );
@@ -750,7 +750,7 @@ pub fn compute_clip_pitch_midi(
     ) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!(
+            log::error!(
                 "[pitch_clip] FCPE inference failed for clip '{}' ({}): {}",
                 clip.name, clip.id, e
             );
@@ -940,7 +940,7 @@ pub fn trim_and_resample_midi(
     }
 
     if src_start_frame >= src_end_frame {
-        eprintln!(
+        log::warn!(
             "[pitch:trim] EMPTY: src_start={:.3}s src_end={:.3}s full_midi_len={} \
              start_frame={} end_frame={} → empty",
             source_start_sec,
@@ -980,7 +980,7 @@ pub fn trim_and_resample_midi(
     let rate_near_one = (playback_rate - 1.0).abs() <= 0.01;
     let target_frames =
         if !loop_enabled && rate_near_one && target_frames > trimmed.len() && !trimmed.is_empty() {
-            eprintln!(
+            log::warn!(
             "[pitch:trim] CLAMP: target_frames {} > trimmed {} (rate≈1), clamping to trimmed.len()",
             target_frames,
             trimmed.len(),
@@ -990,7 +990,7 @@ pub fn trim_and_resample_midi(
             target_frames
         };
 
-    eprintln!(
+    log::warn!(
         "[pitch:trim] src_start={:.3}s src_end={:.3}s rate={:.2} tl_len={:.3}s \
          full_midi_len={} trimmed=[{}..{}]={} → target_frames={}",
         source_start_sec,

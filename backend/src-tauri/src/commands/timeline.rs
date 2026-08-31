@@ -150,7 +150,7 @@ pub(super) fn import_audio_bytes(
     start_sec: Option<f64>,
 ) -> crate::models::TimelineStatePayload {
     if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
-        eprintln!(
+        log::warn!(
             "import_audio_bytes(file_name={}, base64_len={}, track_id={:?}, start_sec={:?})",
             file_name,
             base64_data.len(),
@@ -212,7 +212,7 @@ pub(super) fn import_audio_item(
     media_audio_stream_index: Option<usize>,
 ) -> crate::models::TimelineStatePayload {
     if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
-        eprintln!(
+        log::warn!(
             "import_audio_item(audio_path={}, track_id={:?}, start_sec={:?}, stream={:?})",
             audio_path, track_id, start_sec, media_audio_stream_index
         );

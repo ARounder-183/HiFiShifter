@@ -330,7 +330,7 @@ pub(crate) fn build_snapshot(
                 } else {
                     // 文件已变更 → 同步重新解码并更新缓存
                     if debug {
-                        eprintln!(
+                        log::warn!(
                             "[snapshot] clip_id={} source_file_mtime mismatch — forcing re-decode path={}",
                             clip.id,
                             path.display()
@@ -347,7 +347,7 @@ pub(crate) fn build_snapshot(
                         }
                         None => {
                             if debug {
-                                eprintln!("[snapshot] clip_id={} re-decode failed, using cached data as fallback", clip.id);
+                                log::error!("[snapshot] clip_id={} re-decode failed, using cached data as fallback", clip.id);
                             }
                             v
                         }
@@ -356,7 +356,7 @@ pub(crate) fn build_snapshot(
             }
             None => {
                 if debug {
-                    eprintln!(
+                    log::warn!(
                         "[snapshot] SKIP clip_id={} reason=source_not_in_resource_cache path={}",
                         clip.id,
                         path.display()
@@ -693,7 +693,7 @@ pub(crate) fn build_snapshot(
 
                 let cache_key = if let Some(pk) = pending_key {
                     if debug {
-                        eprintln!(
+                        log::warn!(
                             "[snapshot] clip_id={} using pending_rendered_key hash={:#018x}",
                             clip.id, pk.param_hash
                         );
@@ -734,7 +734,7 @@ pub(crate) fn build_snapshot(
                             ),
                         );
                         if debug {
-                            eprintln!(
+                            log::warn!(
                                 "[snapshot] clip_id={} fallback self-computed hash={:#018x} (no pending key)",
                                 clip.id, param_hash
                             );
@@ -808,7 +808,7 @@ pub(crate) fn build_snapshot(
                             };
 
                             if debug {
-                                eprintln!(
+                                log::warn!(
                                     "[snapshot] clip_id={} tension_hash={:#018x} tension_cache_hit={}",
                                     clip.id, tension_hash, pcm.is_some()
                                 );
@@ -817,7 +817,7 @@ pub(crate) fn build_snapshot(
                     }
 
                     if debug {
-                        eprintln!(
+                        log::warn!(
                             "[snapshot] clip_id={} hash={:#018x} rendered_cache_hit={} needs_synthesis=true",
                             clip.id, key.param_hash, pcm.is_some()
                         );
@@ -873,7 +873,7 @@ pub(crate) fn build_snapshot(
 
                         if let Some(old_pcm) = fallback_pcm {
                             if debug {
-                                eprintln!("[snapshot] clip_id={} exact hash missed, seamless fallback to PREVIOUS rendered PCM", clip.id);
+                                log::warn!("[snapshot] clip_id={} exact hash missed, seamless fallback to PREVIOUS rendered PCM", clip.id);
                             }
                             // 即使是旧版缓存，我们也要将 needs_synthesis 设为 true，
                             // 这样下一次重新触发播放时，引擎才会识别到最新 Hash 未渲染而去重新渲染
@@ -904,7 +904,7 @@ pub(crate) fn build_snapshot(
                                 .unwrap_or(false);
 
                             if debug {
-                                eprintln!(
+                                log::warn!(
                                     "[snapshot] clip_id={} cache missing, keep muted waiting render (ready={}, rendering={})",
                                     clip.id,
                                     pitch_analysis_ready,
@@ -970,7 +970,7 @@ pub(crate) fn build_snapshot(
     clips_out.sort_by_key(|c| c.start_frame);
 
     if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
-        eprintln!(
+        log::warn!(
             "AudioEngine: snapshot built: tracks={} clips_in_timeline={} clips_audible={} duration_frames={} sr={}",
             timeline.tracks.len(),
             timeline.clips.len(),
@@ -979,7 +979,7 @@ pub(crate) fn build_snapshot(
             out_rate
         );
         if let Some(c0) = clips_out.first() {
-            eprintln!(
+            log::warn!(
                 "AudioEngine: first clip: start_frame={} len_frames={} src_start={:.1} src_end={:.1} gain={:.3} rate={:.3}",
                 c0.start_frame,
                 c0.length_frames,
