@@ -18,7 +18,7 @@ mod clip_rendering_state;
 mod fade_curves;
 pub(crate) mod commands;
 mod formant_cache;
-#[path = "audio/formant_morph.rs"]
+#[path = "audio/formant_morph/mod.rs"]
 mod formant_morph;
 #[path = "audio/hifigan_tension.rs"]
 mod hifigan_tension;
