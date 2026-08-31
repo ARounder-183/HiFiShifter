@@ -1,3 +1,19 @@
+// 播放与渲染命令门面下的"播放 / 预渲染"实现。
+//
+// 主要内容：
+// - `play_original`：带音高编辑时的前台 clip 级增量预渲染 + 实时混音；
+// - `start_background_render` / `cancel_background_render` / `request_background_render`：
+//   "后台预渲染"整轮渲染的启动、取消与重启调度；
+// - `collect_clips_needing_render` / `render_single_clip` 等渲染辅助函数。
+//
+// 与其他模块的关系：
+// - `commands.rs` 是本文件对外的唯一入口（`#[tauri::command]` 只允许出现在那里）；
+// - `audio_engine/engine.rs` 在缓存失效时会读写本文件的 `BG_RENDER_*` 全局标志，
+//   以中断并重启后台渲染；
+// - `commands/project.rs` 在新建/打开工程时调用 `cancel_background_render`；
+// - 渲染取消信号的抽象位于 `commands/render_cancel.rs`，
+//   前台与后台渲染各用一套彼此隔离的令牌（详见该模块头注释）。
+
 use crate::models::PlaybackStatePayload;
 use crate::state::AppState;
 use tauri::Emitter;
@@ -20,7 +36,24 @@ pub(crate) static AUTO_BG_RENDER_ENABLED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 /// 后台渲染取消标志。当用户在渲染中重新编辑参数时，
-/// `handle_update_timeline` 设置此标志以中断旧渲染线程。
+/// `audio_engine/engine.rs` 的缓存失效处理设置此标志以中断旧渲染线程。
+///
+/// ★ 生命周期契约：置位与清除必须成对出现，否则标志会永久粘滞。
+///   - 置位：**只能**通过 `commands::render_cancel::request_global_cancel()`
+///     （它会同时推进纪元）。调用点有 `cancel_background_render`
+///     （仅当确实有后台渲染在跑）、`request_background_render`（后台渲染在跑
+///     且有新失效时请求重启），以及 `audio_engine/engine.rs` 的缓存失效处理。
+///     请**不要**直接 `store(true, ..)`，那样纪元不推进，新轮次会把它当历史残留忽略。
+///   - 清除：`start_background_render` 开头、后台渲染各条退出分支，
+///     以及 `request_background_render` 的 disabled 分支（兜底）。
+///
+/// 历史上这里曾被无条件置位：由于本标志只在"后台预渲染"的路径上被清除，
+/// 一旦后台预渲染未启用，打开工程后它便永远为 true，导致后续所有前台
+/// `play_original` 预渲染在解码后的第一个检查点被中止（长音频渲染不出来）。
+///
+/// ★ 前台播放预渲染不得读取本标志 —— 它应使用
+/// `commands::render_cancel::RenderCancelToken` 传入的私有令牌，
+/// 由 `cancel_background_render` 通过 `cancel_all_foreground()` 显式通知。
 pub(crate) static BG_RENDER_CANCEL: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
@@ -339,6 +372,15 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
                 let mut pending_clip_ids_written: std::collections::HashSet<String> =
                     std::collections::HashSet::new();
 
+                // ★ 本轮前台渲染使用私有的取消令牌，而不是全局 `BG_RENDER_CANCEL`。
+                // 全局标志由 `cancel_background_render`（新建/打开工程时必被调用）
+                // 无条件置位，却只在后台预渲染的路径上清除；若后台预渲染未启用，
+                // 它会永久保持为 true，使本轮渲染在解码后的第一个检查点就"失败"。
+                // 控制块是 RAII 的：提前 return / panic 都会自动从登记表注销。
+                let foreground_cancel =
+                    crate::commands::render_cancel::ForegroundRenderCancel::register();
+                let cancel_token = foreground_cancel.token();
+
                 // 逐 clip 预渲染，全部完成后再开始播放
                 for clip_render_info in &clips_to_render {
                     if rendered_count % 32 == 0 {
@@ -400,6 +442,7 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
                             &tl_for_render,
                             &clip_render_info.clip,
                             clip_render_info.sr,
+                            &cancel_token,
                         ) {
                             Ok(rendered) => {
                                 // render_single_clip 涵盖解码、resample、可选 stretch、pitch processor。
@@ -444,6 +487,18 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
                             }
                             Err(e) => {
                                 render_elapsed += render_started_at.elapsed();
+                                // 主动取消（工程切换 / 新建工程）≠ 渲染失败。
+                                // 之前把它算进 any_error，会让整轮降级为"播放原声"，
+                                // 掩盖真正的失败原因；这里改为按"本轮作废"处理，
+                                // 与时间线版本变更走同一条退出路径。
+                                if e == BG_RENDER_CANCELLED_ERR {
+                                    eprintln!(
+                                        "play_original: render cancelled at clip_id={} (project switch)",
+                                        clip_render_info.clip.id
+                                    );
+                                    cancelled = true;
+                                    break;
+                                }
                                 eprintln!(
                                     "play_original: clip render failed: clip_id={} err={}",
                                     clip_render_info.clip.id, e
@@ -889,14 +944,22 @@ fn collect_clips_needing_render(
 /// 渲染单个 clip 的完整 stereo PCM（从源文件解码 -> resample -> pitch edit -> stereo）。
 ///
 /// 复用 mixdown.rs 中的解码和 resample 逻辑，通过 Renderer trait 调用 pitch edit。
-fn bg_render_cancel_requested() -> bool {
-    BG_RENDER_CANCEL.load(std::sync::atomic::Ordering::Relaxed)
-}
-
+///
+/// # 参数 `cancel`
+/// 本轮渲染的取消令牌。各耗时阶段之间会通过它设置检查点，一旦请求取消就
+/// 立即返回 `BG_RENDER_CANCELLED_ERR`。
+///
+/// ★ 不要在此函数内部直接读取全局 `BG_RENDER_CANCEL`：该标志由
+/// `cancel_background_render`（新建/打开工程时必被调用）无条件置位，却只在
+/// 后台预渲染的启动/收尾路径清除。若后台预渲染未启用，它会永久保持为 true，
+/// 使前台 `play_original` 预渲染在解码后的第一个检查点就"失败"，
+/// 表现为长音频渲染不出来、播放降级为原声。取消信号必须由调用方显式传入，
+/// 详见 `commands/render_cancel.rs` 的模块头注释。
 fn render_single_clip(
     timeline: &crate::state::TimelineState,
     clip: &crate::state::Clip,
     out_rate: u32,
+    cancel: &crate::commands::render_cancel::RenderCancelToken,
 ) -> Result<RenderedClipOutput, String> {
     let source_path = clip
         .source_path
@@ -913,7 +976,7 @@ fn render_single_clip(
     if in_frames < 2 {
         return Err("source audio too short".to_string());
     }
-    if bg_render_cancel_requested() {
+    if cancel.is_cancelled() {
         return Err(BG_RENDER_CANCELLED_ERR.to_string());
     }
 
@@ -1015,7 +1078,7 @@ fn render_single_clip(
     };
     let mut segment = segment;
 
-    if bg_render_cancel_requested() {
+    if cancel.is_cancelled() {
         return Err(BG_RENDER_CANCELLED_ERR.to_string());
     }
 
@@ -1106,7 +1169,7 @@ fn render_single_clip(
     // build_loop_tiled_segment）—— segment 天然覆盖整条 clip 的消费量，
     // 参数线阶段按绝对帧读取当前曲线即可，无需额外平铺。
 
-    if bg_render_cancel_requested() {
+    if cancel.is_cancelled() {
         return Err(BG_RENDER_CANCELLED_ERR.to_string());
     }
 
@@ -1179,7 +1242,7 @@ fn render_single_clip(
     };
 
     if !breath_enabled {
-        if bg_render_cancel_requested() {
+        if cancel.is_cancelled() {
             return Err(BG_RENDER_CANCELLED_ERR.to_string());
         }
         return Ok(RenderedClipOutput {
@@ -1285,7 +1348,7 @@ fn render_single_clip(
         harmonic_curves.insert("breath_gain".to_string(), vec![0.0; curve_len]);
         harmonic_only_clip.extra_params = Some(merged_extra_params.clone());
         harmonic_only_clip.extra_curves = Some(harmonic_curves);
-        if bg_render_cancel_requested() {
+        if cancel.is_cancelled() {
             return Err(BG_RENDER_CANCELLED_ERR.to_string());
         }
         let harmonic_only = render_variant(&harmonic_only_clip);
@@ -1344,7 +1407,7 @@ fn render_single_clip(
     // Step 2: Pre-populate HNSEP cache by doing separation once.
     // This ensures the subsequent render_variant(harmonic_only) hits the cache
     // and only runs HiFiGAN, skipping HNSEP.
-    if bg_render_cancel_requested() {
+    if cancel.is_cancelled() {
         return Err(BG_RENDER_CANCELLED_ERR.to_string());
     }
     let noise_mono = crate::hnsep_onnx::infer_noise_mono(&clip.id, &mono, out_rate)?;
@@ -1355,7 +1418,7 @@ fn render_single_clip(
     harmonic_curves.insert("breath_gain".to_string(), vec![0.0; curve_len]);
     harmonic_only_clip.extra_params = Some(merged_extra_params.clone());
     harmonic_only_clip.extra_curves = Some(harmonic_curves);
-    if bg_render_cancel_requested() {
+    if cancel.is_cancelled() {
         return Err(BG_RENDER_CANCELLED_ERR.to_string());
     }
     let harmonic_only = render_variant(&harmonic_only_clip);
@@ -1658,6 +1721,9 @@ fn render_background_pass(
         // 只有真正开始合成时才向前端发出进度事件。若本轮全部命中缓存，
         // 则完全不需要展示渲染进度，避免打开工程后的首次播放闪一下进度条。
         let mut rendering_started = false;
+        // 后台预渲染继续跟踪全局 `BG_RENDER_CANCEL`：时间线编辑会置位它来
+        // 中断本轮并触发重启（见 audio_engine/engine.rs 的失效处理）。
+        let cancel_token = crate::commands::render_cancel::RenderCancelToken::background();
 
         for clip_render_info in clips_to_render {
             // 检查取消标志（用户在渲染中重新编辑参数时会设置）
@@ -1735,7 +1801,12 @@ fn render_background_pass(
                 }
 
                 let render_started_at = std::time::Instant::now();
-                match render_single_clip(&timeline, &clip_render_info.clip, clip_render_info.sr) {
+                match render_single_clip(
+                    &timeline,
+                    &clip_render_info.clip,
+                    clip_render_info.sr,
+                    &cancel_token,
+                ) {
                     Ok(rendered) => {
                         render_elapsed += render_started_at.elapsed();
                         let stereo_pcm = rendered.rendered_stereo;
@@ -1985,11 +2056,19 @@ pub(crate) fn request_background_render(app: &tauri::AppHandle) -> serde_json::V
     use std::sync::atomic::Ordering;
 
     if !AUTO_BG_RENDER_ENABLED.load(Ordering::Relaxed) {
+        // 后台预渲染未启用时，这里是不再有人清理全局取消标志的最后一道防线。
+        // 置位它的 `cancel_background_render` 在打开/新建工程时必被调用，
+        // 若此处不复位，标志会一直保持为 true（见该标志的生命周期注释）。
+        if !BG_RENDER_ACTIVE.load(Ordering::Relaxed) {
+            BG_RENDER_CANCEL.store(false, Ordering::Release);
+        }
         return serde_json::json!({"ok": true, "skipped": true, "reason": "disabled"});
     }
 
     if BG_RENDER_ACTIVE.load(Ordering::Relaxed) {
-        BG_RENDER_CANCEL.store(true, Ordering::Release);
+        // 走 request_global_cancel 而非直接置位：它需要推进纪元，
+        // 让之后启动的渲染轮次能区分"这次取消是针对旧轮次的"。
+        crate::commands::render_cancel::request_global_cancel();
         BG_RENDER_RESTART_NEEDED.store(true, Ordering::Release);
         eprintln!("[bg_render] caches invalidated while render active; requesting restart");
         return serde_json::json!({"ok": true, "restart_requested": true});
@@ -2008,13 +2087,34 @@ pub(crate) fn request_background_render(app: &tauri::AppHandle) -> serde_json::V
     serde_json::json!({"ok": true, "starting": true})
 }
 
-/// 取消当前正在运行的后台预渲染（如果有）。
+/// 取消当前正在运行的后台预渲染（如果有），并通知前台预渲染退出。
+///
+/// 本函数由 `new_project` / `open_project` **无条件**调用（前端对应 thunk 也会
+/// 各调一次），因此"当时没有后台渲染在跑"是常态而非异常，必须按 `was_active`
+/// 分流处理全局取消标志，详见下方注释。
 pub(super) fn cancel_background_render(app: Option<&tauri::AppHandle>) -> serde_json::Value {
     use std::sync::atomic::Ordering;
     let was_active = BG_RENDER_ACTIVE.swap(false, Ordering::AcqRel);
-    // 让正在运行的渲染循环在下一个 clip 边界立刻退出，而不是继续把旧工程
-    // 渲染完。同时清除重启标记，避免取消后被错误地按旧渲染状态自动重启。
-    BG_RENDER_CANCEL.store(true, Ordering::Release);
+    if was_active {
+        // 让正在运行的渲染循环在下一个 clip 边界立刻退出，而不是继续把旧工程
+        // 渲染完。走 request_global_cancel 以同时推进纪元（见 render_cancel.rs）。
+        crate::commands::render_cancel::request_global_cancel();
+    } else {
+        // ★ 没有任何后台渲染在跑时，绝不能留下取消信号。
+        //
+        // `BG_RENDER_CANCEL` 只在"后台预渲染"的启动（`start_background_render`
+        // 开头）与收尾路径上被清除。而 `request_background_render` 在后台预渲染
+        // 未启用时会走 disabled 分支直接返回、不清理标志。
+        // 于是"打开工程（内部必调本函数）且后台预渲染关闭"会让标志永久为 true，
+        // 之后每次前台 `play_original` 预渲染都在解码后的第一个检查点被中止，
+        // 表现为"长音频渲染不出来、播放降级为原声"。
+        // 因此这里必须主动复位，而不是简单地不置位。
+        BG_RENDER_CANCEL.store(false, Ordering::Release);
+    }
+    // 前台预渲染不再读取全局标志，需要显式通知它们退出，
+    // 否则切工程时正在跑的 `play_original` 轮次无法及时中断。
+    crate::commands::render_cancel::cancel_all_foreground();
+    // 清除重启标记，避免取消后被错误地按旧渲染状态自动重启。
     BG_RENDER_RESTART_NEEDED.store(false, Ordering::Release);
     BG_RENDER_PITCH_PENDING.store(false, Ordering::Release);
     // 递增代数，使旧渲染线程的收尾清理不再影响新的一轮渲染。
