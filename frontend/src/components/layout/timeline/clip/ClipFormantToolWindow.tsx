@@ -1,11 +1,12 @@
 import React from "react";
 import { Button, Flex, Slider, Switch, Text } from "@radix-ui/themes";
 import { useAppDispatch, useAppSelector } from "../../../../app/hooks";
-import type { ClipInfo, ClipFormantMorph } from "../../../../features/session/sessionTypes";
-import {
-    setClipFormantAnalysis,
-    type ClipFormantAnalysisState,
-} from "../../../../features/session/sessionSlice";
+import type {
+    ClipFormantAnalysisState,
+    ClipInfo,
+    ClipFormantMorph,
+} from "../../../../features/session/sessionTypes";
+import { setClipFormantAnalysis } from "../../../../features/session/sessionSlice";
 import { timelineApi } from "../../../../services/api/timeline";
 import { useI18n } from "../../../../i18n/I18nProvider";
 import { VowelChart } from "./VowelChart";
