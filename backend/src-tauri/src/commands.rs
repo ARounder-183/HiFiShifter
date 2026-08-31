@@ -29,6 +29,8 @@ mod params;
 mod pitch_cache;
 #[path = "commands/pitch_progress.rs"]
 mod pitch_progress;
+#[path = "commands/formant.rs"]
+mod formant;
 #[path = "commands/playback.rs"]
 pub(crate) mod playback;
 #[path = "commands/processor_caps.rs"]
@@ -440,6 +442,23 @@ pub async fn get_track_mix_waveform_peaks_segment(
 #[tauri::command(rename_all = "camelCase")]
 pub fn clear_waveform_cache(state: State<'_, AppState>) -> serde_json::Value {
     waveform::clear_waveform_cache(state)
+}
+
+// ===================== clip formant analysis =====================
+//
+// 源共振峰分析涉及音频解码 + LPC 逐帧计算，走 spawn_blocking 避免阻塞 UI。
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn analyze_clip_formants(
+    app: tauri::AppHandle,
+    clip_id: String,
+) -> Result<formant::ClipFormantAnalysisPayload, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        formant::analyze_clip_formants(state, clip_id)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ===================== waveform v2 (二进制 mipmap) =====================

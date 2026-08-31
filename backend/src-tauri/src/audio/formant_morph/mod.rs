@@ -33,6 +33,7 @@
  * - 任何新的保护逻辑不得引入逐帧乱跳的增益（必须有时间平滑）。
  */
 
+pub(crate) mod analysis;
 mod correction;
 mod decimator;
 mod lpc;

@@ -167,6 +167,110 @@ pub fn invalidate_formant_cache_for_clip(clip_id: &str) {
     if let Ok(mut cache) = global_formant_cache().lock() {
         cache.invalidate(clip_id);
     }
+    // 源共振峰分析缓存同步失效（键内含 clip_id）
+    if let Ok(mut cache) = global_formant_analysis_cache().lock() {
+        cache.retain(|k, _| k.clip_id != clip_id);
+    }
+}
+
+// ── 源共振峰分析缓存（供前端可视化，与音频 FormantCache 分开） ───────────
+
+/// 分析缓存条目键：clip + 源文件 + mtime + 消费窗口（1 ms 量化）。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct FormantAnalysisKey {
+    clip_id: String,
+    source_path: PathBuf,
+    mtime: Option<u64>,
+    window_start_q: i64,
+    window_end_q: i64,
+}
+
+/// 分析缓存容量上限（条目极小，仅防无限增长）。
+const FORMANT_ANALYSIS_CACHE_CAP: usize = 256;
+
+fn global_formant_analysis_cache()
+-> &'static Mutex<std::collections::HashMap<FormantAnalysisKey, crate::formant_morph::analysis::FormantAnalysisSummary>>
+{
+    static CACHE: OnceLock<
+        Mutex<std::collections::HashMap<FormantAnalysisKey, crate::formant_morph::analysis::FormantAnalysisSummary>>,
+    > = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// 获取（或计算）clip 的源共振峰分析。
+///
+/// 流程：
+/// 1. 组装缓存键（clip_id + 源路径 + mtime + 消费窗口 1ms 量化）。
+/// 2. 未命中：解码源音频 → 消费窗口切片（倒放预反转，与实时域一致）→
+///    通道平均为 mono → 调用与 DSP 同源的 `analyze_clip_formants`。
+/// 3. 结果写入缓存并返回。
+pub fn get_or_compute_formant_analysis(
+    clip: &crate::state::Clip,
+) -> Result<crate::formant_morph::analysis::FormantAnalysisSummary, String> {
+    let source_path = clip
+        .source_path
+        .as_ref()
+        .ok_or_else(|| "clip_has_no_source_path".to_string())?;
+    let (win_start, win_end) = crate::state::clip_playback_window_sec(clip);
+    let key = FormantAnalysisKey {
+        clip_id: clip.id.clone(),
+        source_path: PathBuf::from(source_path),
+        mtime: clip.source_file_mtime,
+        window_start_q: (win_start * 1000.0).round() as i64,
+        window_end_q: (win_end * 1000.0).round() as i64,
+    };
+
+    {
+        let cache = global_formant_analysis_cache()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if let Some(hit) = cache.get(&key) {
+            return Ok(hit.clone());
+        }
+    }
+
+    let (in_rate, in_channels, pcm) =
+        crate::audio_utils::decode_audio_f32_interleaved(Path::new(source_path))?;
+    let ch = (in_channels as usize).max(1);
+    let frames = pcm.len() / ch;
+    if frames < 2 {
+        return Err("source_audio_too_short".to_string());
+    }
+    let total_sec = frames as f64 / in_rate as f64;
+    let s0 = win_start.max(0.0).min(total_sec);
+    let s1 = win_end.min(total_sec).max(s0);
+    let i0 = (s0 * in_rate as f64).floor() as usize;
+    let i1 = ((s1 * in_rate as f64).ceil() as usize).min(frames);
+    if i1 <= i0 + 1 {
+        return Err("source_slice_too_short".to_string());
+    }
+
+    let mut slice = pcm[i0 * ch..i1 * ch].to_vec();
+    if clip.reversed {
+        crate::mixdown::reverse_interleaved_frames(&mut slice, ch);
+    }
+    // 通道平均 → mono
+    let n = slice.len() / ch;
+    let mut mono = vec![0.0_f32; n];
+    let inv_ch = 1.0 / ch as f32;
+    for (frame_idx, slot) in mono.iter_mut().enumerate() {
+        let mut sum = 0.0_f32;
+        for c in 0..ch {
+            sum += slice[frame_idx * ch + c];
+        }
+        *slot = sum * inv_ch;
+    }
+
+    let summary = crate::formant_morph::analysis::analyze_clip_formants(&mono, in_rate);
+
+    let mut cache = global_formant_analysis_cache()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    if cache.len() >= FORMANT_ANALYSIS_CACHE_CAP {
+        cache.clear();
+    }
+    cache.insert(key, summary.clone());
+    Ok(summary)
 }
 
 pub fn cancel_formant_rebuild_generation(clip_id: &str) {

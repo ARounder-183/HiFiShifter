@@ -378,6 +378,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::ping,
+        commands::analyze_clip_formants,
             commands::get_runtime_info,
             commands::consume_startup_project_path,
             commands::set_ui_locale,
