@@ -207,6 +207,11 @@ export const koKR = {
     clip_formant_status_disabled: "꺼짐",
     clip_formant_status_rebuilding: "재계산 중",
     clip_formant_status_failed: "실패",
+    clip_formant_source: "원본",
+    clip_formant_target: "목표",
+    clip_formant_bypass: "바이패스 청취",
+    clip_formant_no_voiced:
+        "안정적인 모음을 감지하지 못했습니다. 포르만트 조정이 잘 들리지 않을 수 있습니다",
     lang_en: "English",
     lang_zh: "简体中文",
     lang_zh_tw: "繁體中文",

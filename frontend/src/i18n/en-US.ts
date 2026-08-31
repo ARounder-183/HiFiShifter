@@ -212,6 +212,11 @@ export const enUS = {
     clip_formant_status_disabled: "Disabled",
     clip_formant_status_rebuilding: "Rebuilding",
     clip_formant_status_failed: "Failed",
+    clip_formant_source: "Source",
+    clip_formant_target: "Target",
+    clip_formant_bypass: "Bypass",
+    clip_formant_no_voiced:
+        "No stable vowel detected; formant shifting may not be audible",
     language: "Language",
     lang_en: "English",
     lang_zh: "简体中文",

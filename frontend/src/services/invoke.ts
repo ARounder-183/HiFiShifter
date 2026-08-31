@@ -221,6 +221,9 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
         case "get_clip_linked_params":
             return { clipId: args[0] };
 
+        case "analyze_clip_formants":
+            return { clipId: args[0] };
+
         case "apply_clip_linked_params":
             return {
                 clipId: args[0],

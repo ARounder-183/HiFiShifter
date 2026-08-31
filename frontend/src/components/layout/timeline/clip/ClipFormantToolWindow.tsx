@@ -1,6 +1,12 @@
 import React from "react";
-import { Button, Flex, Slider, Text } from "@radix-ui/themes";
+import { Button, Flex, Slider, Switch, Text } from "@radix-ui/themes";
+import { useAppDispatch, useAppSelector } from "../../../../app/hooks";
 import type { ClipInfo, ClipFormantMorph } from "../../../../features/session/sessionTypes";
+import {
+    setClipFormantAnalysis,
+    type ClipFormantAnalysisState,
+} from "../../../../features/session/sessionSlice";
+import { timelineApi } from "../../../../services/api/timeline";
 import { useI18n } from "../../../../i18n/I18nProvider";
 import { VowelChart } from "./VowelChart";
 import { useClipFormantEditor } from "./useClipFormantEditor";
@@ -15,6 +21,9 @@ function clamp(value: number, min: number, max: number): number {
     return Math.min(max, Math.max(min, value));
 }
 
+/** 浊音占比低于该阈值时提示"素材不适合做共振峰调整"。 */
+const VOICED_RATIO_HINT_THRESHOLD = 0.15;
+
 export const ClipFormantToolWindow: React.FC<{
     clip: ClipInfo;
     status: "ready" | "rebuilding" | "failed";
@@ -25,11 +34,18 @@ export const ClipFormantToolWindow: React.FC<{
     onClose: () => void;
 }> = ({ clip, status, x, y, onCommit, onMove, onClose }) => {
     const { t } = useI18n();
+    const dispatch = useAppDispatch();
+    const analysis = useAppSelector(
+        (state) => state.session.clipFormantAnalysis[clip.id] as ClipFormantAnalysisState | undefined,
+    );
     const { draft, updateDraft, flush } = useClipFormantEditor({
         clipId: clip.id,
         value: clip.formantMorph,
         onCommit,
     });
+    // Bypass：仅试听旁通，直接走 onCommit(checkpoint:false)（不产生撤销步，
+    // 不触碰编辑器 dirtyRef 语义），松开时恢复草稿值。
+    const bypassRef = React.useRef(false);
     const [position, setPosition] = React.useState({ x, y });
     const positionRef = React.useRef(position);
     const dragOffsetRef = React.useRef<{ dx: number; dy: number } | null>(null);
@@ -88,6 +104,85 @@ export const ClipFormantToolWindow: React.FC<{
             flush();
         };
     }, [flush]);
+
+    // 窗口打开 / 切换 clip 时拉取一次源共振峰分析（后端有缓存，重复请求廉价）。
+    // 与 clip 消费窗口相关的键由后端管理，前端无需感知窗口变化。
+    React.useEffect(() => {
+        let cancelled = false;
+        dispatch(
+            setClipFormantAnalysis({
+                clipId: clip.id,
+                analysis: {
+                    status: "loading",
+                    sourceF1Hz: 0,
+                    sourceF2Hz: 0,
+                    track: [],
+                    voicedRatio: 0,
+                    message: null,
+                },
+            }),
+        );
+        timelineApi
+            .analyzeClipFormants(clip.id)
+            .then((result) => {
+                if (cancelled) return;
+                dispatch(
+                    setClipFormantAnalysis({
+                        clipId: clip.id,
+                        analysis: {
+                            status: "ready",
+                            sourceF1Hz: result.sourceF1Hz,
+                            sourceF2Hz: result.sourceF2Hz,
+                            track: result.track,
+                            voicedRatio: result.voicedRatio,
+                            message: result.message,
+                        },
+                    }),
+                );
+            })
+            .catch(() => {
+                if (cancelled) return;
+                dispatch(
+                    setClipFormantAnalysis({
+                        clipId: clip.id,
+                        analysis: {
+                            status: "failed",
+                            sourceF1Hz: 0,
+                            sourceF2Hz: 0,
+                            track: [],
+                            voicedRatio: 0,
+                            message: null,
+                        },
+                    }),
+                );
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [clip.id, dispatch]);
+
+    /** 试听旁通：按下临时禁用（checkpoint:false 不产生撤销步），松开恢复。 */
+    const bypassHandlers = {
+        onPointerDown: (event: React.PointerEvent) => {
+            event.preventDefault();
+            event.stopPropagation();
+            if (bypassRef.current) return;
+            bypassRef.current = true;
+            onCommit(clip.id, { ...draft, enabled: false }, false);
+        },
+        onPointerUp: (event: React.PointerEvent) => {
+            event.preventDefault();
+            event.stopPropagation();
+            if (!bypassRef.current) return;
+            bypassRef.current = false;
+            onCommit(clip.id, draft, false);
+        },
+        onPointerCancel: () => {
+            if (!bypassRef.current) return;
+            bypassRef.current = false;
+            onCommit(clip.id, draft, false);
+        },
+    };
 
     React.useEffect(() => {
         document.body.setAttribute(CLIP_FORMANT_ACTIVE_ATTR, "true");
@@ -182,14 +277,25 @@ export const ClipFormantToolWindow: React.FC<{
             </Flex>
 
             <Flex direction="column" gap="3" className="bg-qt-base px-3 py-3">
-                <label className="flex items-center gap-2 text-sm text-qt-text">
-                    <input
-                        type="checkbox"
-                        checked={draft.enabled}
-                        onChange={(event) => updateDraft({ enabled: event.target.checked })}
-                    />
-                    <span>{t("clip_formant_enabled")}</span>
-                </label>
+                <Flex align="center" justify="between">
+                    <Flex align="center" gap="2">
+                        <Switch
+                            checked={draft.enabled}
+                            disabled={status === "failed"}
+                            onCheckedChange={(checked) => updateDraft({ enabled: checked })}
+                        />
+                        <Text size="2">{t("clip_formant_enabled")}</Text>
+                    </Flex>
+                    <Button
+                        size="1"
+                        variant="soft"
+                        color="gray"
+                        disabled={!draft.enabled}
+                        {...bypassHandlers}
+                    >
+                        {t("clip_formant_bypass")}
+                    </Button>
+                </Flex>
 
                 <div className="rounded-lg border border-qt-border bg-qt-panel p-2">
                     <VowelChart
@@ -197,13 +303,31 @@ export const ClipFormantToolWindow: React.FC<{
                         targetF2Hz={draft.targetF2Hz}
                         disabled={!draft.enabled}
                         onChange={updateDraft}
+                        sourceF1Hz={analysis?.status === "ready" ? analysis.sourceF1Hz : undefined}
+                        sourceF2Hz={analysis?.status === "ready" ? analysis.sourceF2Hz : undefined}
+                        track={analysis?.status === "ready" ? analysis.track : undefined}
+                        onPickVowel={(f1, f2) =>
+                            updateDraft({
+                                targetF1Hz: Math.round(f1),
+                                targetF2Hz: Math.round(f2),
+                            })
+                        }
                     />
                     <Flex justify="between" mt="2">
                         <Text size="1" color="gray">
-                            F1 {Math.round(draft.targetF1Hz)} Hz
+                            {t("clip_formant_source")}: F1{" "}
+                            {analysis?.status === "ready" && analysis.sourceF1Hz > 0
+                                ? Math.round(analysis.sourceF1Hz)
+                                : "—"}{" "}
+                            / F2{" "}
+                            {analysis?.status === "ready" && analysis.sourceF2Hz > 0
+                                ? Math.round(analysis.sourceF2Hz)
+                                : "—"}{" "}
+                            Hz
                         </Text>
                         <Text size="1" color="gray">
-                            F2 {Math.round(draft.targetF2Hz)} Hz
+                            {t("clip_formant_target")}: F1 {Math.round(draft.targetF1Hz)} / F2{" "}
+                            {Math.round(draft.targetF2Hz)} Hz
                         </Text>
                     </Flex>
                 </div>
@@ -211,9 +335,19 @@ export const ClipFormantToolWindow: React.FC<{
                 <div className="rounded-lg border border-qt-border bg-qt-panel px-3 py-2">
                     <Flex align="center" justify="between" mb="2">
                         <Text size="2">{t("clip_formant_strength")}</Text>
-                        <Text size="1" color="gray">
-                            {strengthPercent}%
-                        </Text>
+                        <input
+                            type="number"
+                            min={0}
+                            max={100}
+                            value={strengthPercent}
+                            disabled={!draft.enabled}
+                            onChange={(event) => {
+                                const next = Number(event.target.value);
+                                if (!Number.isFinite(next)) return;
+                                updateDraft({ strength: clamp(next / 100, 0, 1) });
+                            }}
+                            className="w-14 rounded border border-qt-border bg-qt-window px-1 py-0.5 text-right text-xs text-qt-text"
+                        />
                     </Flex>
                     <Slider
                         value={[strengthPercent]}
@@ -234,6 +368,13 @@ export const ClipFormantToolWindow: React.FC<{
                 <Text size="1" className={statusClassName}>
                     {statusText}
                 </Text>
+                {analysis?.status === "ready" &&
+                (analysis.message === "no_voiced_frames" ||
+                    analysis.voicedRatio < VOICED_RATIO_HINT_THRESHOLD) ? (
+                    <Text size="1" className="text-qt-warning-text">
+                        {t("clip_formant_no_voiced")}
+                    </Text>
+                ) : null}
             </Flex>
         </div>
     );

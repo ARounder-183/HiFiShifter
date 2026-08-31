@@ -129,6 +129,11 @@ export const jaJP = {
     clip_formant_status_disabled: "無効",
     clip_formant_status_rebuilding: "再構築中",
     clip_formant_status_failed: "失敗",
+    clip_formant_source: "ソース",
+    clip_formant_target: "ターゲット",
+    clip_formant_bypass: "バイパス試聴",
+    clip_formant_no_voiced:
+        "安定した母音を検出できませんでした。フォルマント調整が聞き取れない可能性があります",
     lang_en: "English",
     lang_zh: "简体中文",
     lang_zh_tw: "繁體中文",

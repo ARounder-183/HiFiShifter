@@ -261,6 +261,24 @@ export interface ClipFormantMorph {
     strength: number;
 }
 
+/**
+ * Clip 源共振峰分析状态（供共振峰工具窗口的"源点 → 目标点"可视化）。
+ * 数据来自 analyze_clip_formants 命令，与 clipFormantStatus 平行存储。
+ */
+export interface ClipFormantAnalysisState {
+    status: "loading" | "ready" | "failed";
+    /** 统计源 F1（检出帧中位数，Hz；无检出为 0） */
+    sourceF1Hz: number;
+    /** 统计源 F2（Hz；无检出为 0） */
+    sourceF2Hz: number;
+    /** 稀疏轨迹 [t_norm, f1_hz, f2_hz] */
+    track: Array<[number, number, number]>;
+    /** 检出候选的分析帧占比 [0,1] */
+    voicedRatio: number;
+    /** 诊断消息："source_too_short" / "no_voiced_frames" */
+    message: string | null;
+}
+
 export type WaveformPreview = number[] | { l: number[]; r: number[] };
 
 /**

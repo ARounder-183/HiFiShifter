@@ -8,6 +8,7 @@ import type {
 import type {
     AutomationPoint,
     ClipInfo,
+    ClipFormantAnalysisState,
     ClipFormantMorph,
     ClipTakeInfo,
     ClipTemplate,
@@ -450,6 +451,8 @@ export interface SessionState {
         }
     >;
     clipFormantStatus: Record<string, "ready" | "rebuilding" | "failed">;
+    /** Clip 源共振峰分析结果（共振峰工具窗口可视化用） */
+    clipFormantAnalysis: Record<string, ClipFormantAnalysisState>;
     clipFormantToolWindow: ClipFormantToolWindowState;
     modelDir: string;
     audioPath: string;
@@ -1495,6 +1498,11 @@ function applyTimelineState(
             state.clips.some((clip) => clip.id === clipId),
         ),
     ) as Record<string, "ready" | "rebuilding" | "failed">;
+    state.clipFormantAnalysis = Object.fromEntries(
+        Object.entries(state.clipFormantAnalysis).filter(([clipId]) =>
+            state.clips.some((clip) => clip.id === clipId),
+        ),
+    );
     if (
         state.clipFormantToolWindow.clipId &&
         !state.clips.some((clip) => clip.id === state.clipFormantToolWindow.clipId)
@@ -1828,6 +1836,7 @@ const initialState: SessionState = {
     clipPitchRanges: {},
     clipPitchCurves: {},
     clipFormantStatus: {},
+    clipFormantAnalysis: {},
     clipFormantToolWindow: {
         open: false,
         clipId: null,
@@ -2732,6 +2741,13 @@ const sessionSlice = createSlice({
             }>,
         ) {
             state.clipFormantStatus[action.payload.clipId] = action.payload.status;
+        },
+        /** 写入某个 clip 的源共振峰分析结果（loading/ready/failed 三态）。 */
+        setClipFormantAnalysis(
+            state,
+            action: PayloadAction<{ clipId: string; analysis: ClipFormantAnalysisState }>,
+        ) {
+            state.clipFormantAnalysis[action.payload.clipId] = action.payload.analysis;
         },
         openClipFormantToolWindow(
             state,
@@ -5143,6 +5159,7 @@ export const {
     removeAutomationPoint,
     setClipPitchData,
     setClipFormantStatus,
+    setClipFormantAnalysis,
     openClipFormantToolWindow,
     setClipFormantToolWindowPosition,
     closeClipFormantToolWindow,

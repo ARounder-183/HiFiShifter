@@ -25,6 +25,24 @@ export interface SearchSourceFileMatchesResult {
     matches: Record<string, SourceFileMatchCandidate[]>;
 }
 
+/**
+ * Clip 源共振峰分析结果（analyze_clip_formants）。
+ * 与后端 commands/formant.rs 的 ClipFormantAnalysisPayload 一一对应。
+ */
+export interface ClipFormantAnalysisResult {
+    ok: boolean;
+    /** 统计源 F1（检出帧中位数，Hz；无检出为 0） */
+    sourceF1Hz: number;
+    /** 统计源 F2（Hz；无检出为 0） */
+    sourceF2Hz: number;
+    /** 稀疏轨迹 [t_norm, f1_hz, f2_hz]，按时间升序，≤64 点 */
+    track: Array<[number, number, number]>;
+    /** 检出候选的分析帧占比 [0,1] */
+    voicedRatio: number;
+    /** 诊断消息："source_too_short" / "no_voiced_frames" */
+    message: string | null;
+}
+
 export const timelineApi = {
     // Undo/Redo (backend-authoritative)
     undoTimeline: () => invoke<TimelineResult>("undo_timeline"),
@@ -243,6 +261,13 @@ export const timelineApi = {
             payload.formantMorph,
             payload.checkpoint,
         ),
+
+    /**
+     * 分析 clip 源音频的共振峰（统计 F1/F2 + 稀疏轨迹）。
+     * 用于共振峰工具窗口的"源点 → 目标点"可视化。
+     */
+    analyzeClipFormants: (clipId: string) =>
+        invoke<ClipFormantAnalysisResult>("analyze_clip_formants", clipId),
 
     setClipsStateBulk: (payload: {
         updates: Array<{

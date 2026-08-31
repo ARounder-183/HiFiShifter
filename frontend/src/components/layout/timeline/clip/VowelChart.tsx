@@ -79,7 +79,23 @@ export const VowelChart: React.FC<{
     targetF2Hz: number;
     disabled?: boolean;
     onChange: (next: { targetF1Hz: number; targetF2Hz: number }) => void;
-}> = ({ targetF1Hz, targetF2Hz, disabled = false, onChange }) => {
+    /** 源共振峰统计位置（空心圆显示），缺省时不绘制源点 */
+    sourceF1Hz?: number;
+    sourceF2Hz?: number;
+    /** 源共振峰稀疏轨迹 [t_norm, f1, f2]（低透明度小点） */
+    track?: Array<[number, number, number]>;
+    /** 点击元音字母时回调（一键设为目标），缺省时字母不可点击 */
+    onPickVowel?: (f1: number, f2: number) => void;
+}> = ({
+    targetF1Hz,
+    targetF2Hz,
+    disabled = false,
+    onChange,
+    sourceF1Hz,
+    sourceF2Hz,
+    track,
+    onPickVowel,
+}) => {
     const svgRef = React.useRef<SVGSVGElement | null>(null);
     const draggingRef = React.useRef(false);
 
@@ -205,21 +221,95 @@ export const VowelChart: React.FC<{
             })}
             {VOWEL_POINTS.map((vowel) => {
                 const pos = formantsToPoint(vowel.f1, vowel.f2);
+                const pickable = !disabled && Boolean(onPickVowel);
                 return (
-                    <text
+                    <g
                         key={vowel.label}
-                        x={pos.x}
-                        y={pos.y}
-                        fontSize="15"
-                        fontWeight="600"
-                        textAnchor="middle"
-                        dominantBaseline="middle"
-                        fill="var(--qt-text)"
+                        style={{ cursor: pickable ? "pointer" : "default" }}
+                        onClick={(event) => {
+                            if (!pickable || !onPickVowel) return;
+                            event.stopPropagation();
+                            onPickVowel(vowel.f1, vowel.f2);
+                        }}
                     >
-                        {vowel.label}
-                    </text>
+                        {/* 扩大点击热区 */}
+                        <circle cx={pos.x} cy={pos.y} r="12" fill="transparent" />
+                        <text
+                            x={pos.x}
+                            y={pos.y}
+                            fontSize="15"
+                            fontWeight="600"
+                            textAnchor="middle"
+                            dominantBaseline="middle"
+                            fill="var(--qt-text)"
+                            opacity={pickable ? 1 : 0.9}
+                        >
+                            {vowel.label}
+                        </text>
+                    </g>
                 );
             })}
+            {/* 源共振峰轨迹：低透明度小点（归一化时间只用于排序，这里直接散点展示） */}
+            {track?.map((entry, idx) => {
+                const pos = formantsToPoint(entry[1], entry[2]);
+                return (
+                    <circle
+                        key={`track-${idx}`}
+                        cx={pos.x}
+                        cy={pos.y}
+                        r="2.5"
+                        fill="var(--qt-highlight)"
+                        opacity="0.35"
+                    />
+                );
+            })}
+            {/* 源点 → 目标点：虚线 + 箭头，直观展示"从哪搬到哪" */}
+            {sourceF1Hz !== undefined &&
+            sourceF2Hz !== undefined &&
+            sourceF1Hz > 0 &&
+            sourceF2Hz > 0
+                ? (() => {
+                      const src = formantsToPoint(sourceF1Hz, sourceF2Hz);
+                      const dst = point;
+                      const dx = dst.x - src.x;
+                      const dy = dst.y - src.y;
+                      const len = Math.hypot(dx, dy) || 1;
+                      // 箭头终点收缩到目标圆边缘之外
+                      const arrowLen = Math.min(10, len * 0.4);
+                      const ux = dx / len;
+                      const uy = dy / len;
+                      const ax = dst.x - ux * 10;
+                      const ay = dst.y - uy * 10;
+                      return (
+                          <g>
+                              <line
+                                  x1={src.x}
+                                  y1={src.y}
+                                  x2={ax}
+                                  y2={ay}
+                                  stroke="var(--qt-highlight)"
+                                  strokeWidth="1.5"
+                                  strokeDasharray="5 4"
+                                  opacity="0.75"
+                              />
+                              <polygon
+                                  points={`${ax + ux * arrowLen},${ay + uy * arrowLen} ${ax - uy * 3.5},${ay + ux * 3.5} ${ax + uy * 3.5},${ay - ux * 3.5}`}
+                                  fill="var(--qt-highlight)"
+                                  opacity="0.75"
+                              />
+                              <circle
+                                  cx={src.x}
+                                  cy={src.y}
+                                  r="6"
+                                  fill="none"
+                                  stroke="var(--qt-highlight)"
+                                  strokeWidth="2"
+                                  strokeDasharray="3 2"
+                              />
+                          </g>
+                      );
+                  })()
+                : null}
             <line
                 x1={PAD_LEFT}
                 y1={PAD_TOP}
