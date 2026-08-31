@@ -1,6 +1,6 @@
 MIT License
 
-Copyright (c) 2026 (a+rcosθ,b+rsinθ)
+Copyright (c) 2025-2026 (a+rcosθ,b+rsinθ)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -24,6 +24,10 @@ SOFTWARE.
                         Third-Party Library Notices
 ==============================================================================
 
+The MIT license above applies only to the original code of this project.
+Bundled third-party libraries, models, and model weights remain governed by
+their own licenses as listed below.
+
 1. Signalsmith Stretch
    Copyright (c) 2022 Geraint Luff / Signalsmith Audio Ltd.
    License: MIT
@@ -31,7 +35,8 @@ SOFTWARE.
 
 2. VocalShifter Library (vslib)
    Copyright (c) あっきー (Ackie Sound)
-   License: Free for personal development software
+   License: Freeware. Use is permitted only in freeware developed by
+   individuals (個人開発のフリーソフトに限り使用可能).
    https://ackiesound.ifdef.jp/
 
 3. WORLD - High-quality speech analysis, manipulation and synthesis system
@@ -39,7 +44,33 @@ SOFTWARE.
    License: Modified BSD (3-Clause)
    https://github.com/mmorise/World
 
-4. Portions of code derived from OpenVPI project
+4. SoundTouch - audio time-stretching / pitch-shifting library
+   Copyright (c) Olli Parviainen
+   License: GNU Lesser General Public License v2.1 (LGPL-2.1).
+   Linked dynamically as SoundTouchDLL and built from the upstream source
+   (tag 2.3.3); the license text and source are available at
+   https://codeberg.org/soundtouch/soundtouch and
+   https://www.surina.net/soundtouch/
+
+5. Portions of code derived from OpenVPI project
    Copyright (C) 2023 Team OpenVPI
    License: MIT
    https://github.com/openvpi/SingingVocoders
+
+6. vocal-remover (repo code and the bundled HNSEP model hnsep.onnx)
+   Copyright (c) 2019 tsurumeso
+   License: MIT
+   https://github.com/tsurumeso/vocal-remover
+
+7. FCPE - Fast Context-based Pitch Estimation (bundled model fcpe.onnx)
+   Copyright (c) 2023 CN_ChiTu
+   License: MIT
+   https://github.com/CNChTu/FCPE
+
+8. DiffSinger Community Vocoder (bundled model weights pc_nsf_hifigan.onnx)
+   Model weights provided by the OpenVPI Team.
+   License: CC BY-NC-SA 4.0 (Attribution-NonCommercial-ShareAlike 4.0
+   International). These weights are NOT covered by this project's MIT
+   license and may not be used for commercial purposes. See the NOTICE and
+   STATEMENTS files under third_party/pc_nsf_hifigan_44.1k_hop512_128bin_2025.02/
+   https://openvpi.github.io/vocoders/

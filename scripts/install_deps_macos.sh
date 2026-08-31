@@ -8,6 +8,21 @@ if ! command -v brew >/dev/null 2>&1; then
 fi
 
 echo "[install_deps_macos] Installing Homebrew packages"
+
+# GitHub macOS runner images preinstall stale third-party taps (e.g.
+# hashicorp/tap, aws/tap) whose formulae fail to import during `brew update`
+# on recent Homebrew ("hashicorp/tap/vagrant: formula requires at least a
+# URL"). Untap every non-official tap first; nothing this script installs
+# comes from them.
+while IFS= read -r tap; do
+  [ -z "$tap" ] && continue
+  case "$tap" in
+    homebrew/*) continue ;;
+  esac
+  echo "[install_deps_macos] Untapping third-party tap: $tap"
+  brew untap --force "$tap" || true
+done < <(brew tap 2>/dev/null || true)
+
 brew update || true
 brew install cmake || true
 

@@ -499,6 +499,30 @@ jobs:
           pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\pack-portable.ps1 -SkipBuild -NoZip -OutputDir "${{ github.workspace }}"
         shell: pwsh
 
+      # ── LICENSE alongside artifacts ──────────────────────────────────
+
+      # Place LICENSE next to the DMG/AppImage and the Windows installer so
+      # the uploaded artifacts ship with it. The portable directory already
+      # includes LICENSE via pack-portable.ps1.
+      - name: Stage LICENSE next to bundles/installer
+        if: steps.tauri-release-dir.outputs.release-dir != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          RELEASE_DIR="${GITHUB_WORKSPACE}/${{ steps.tauri-release-dir.outputs.release-dir }}"
+          case "${{ runner.os }}" in
+            Windows) COPY_TARGET="$RELEASE_DIR/bundle/nsis" ;;
+            macOS)   COPY_TARGET="$RELEASE_DIR/bundle/dmg" ;;
+            Linux)   COPY_TARGET="$RELEASE_DIR/bundle/appimage" ;;
+            *)       echo "Unsupported runner OS: ${{ runner.os }}"; exit 1 ;;
+          esac
+          if [ ! -d "$COPY_TARGET" ]; then
+            echo "WARNING: bundle dir not found, LICENSE not staged: $COPY_TARGET" >&2
+            exit 0
+          fi
+          cp -f LICENSE "$COPY_TARGET/LICENSE"
+          echo "Staged $COPY_TARGET/LICENSE"
+
       # ── Artifact naming ───────────────────────────────────────────────
 
       - name: Determine bundles artifact name (non-Windows)
@@ -583,6 +607,7 @@ jobs:
           name: ${{ steps.artifact-name-win-installer.outputs.artifact-name }}
           path: |
             ${{ steps.tauri-release-dir.outputs.release-dir }}/bundle/nsis/*-setup.exe
+            ${{ steps.tauri-release-dir.outputs.release-dir }}/bundle/nsis/LICENSE
           if-no-files-found: error
 
       - name: Upload portable (Windows)
@@ -601,6 +626,7 @@ jobs:
           name: ${{ steps.artifact-name-nonwindows.outputs.artifact-name }}
           path: |
             ${{ steps.tauri-release-dir.outputs.release-dir }}/bundle/dmg/*.dmg
+            ${{ steps.tauri-release-dir.outputs.release-dir }}/bundle/dmg/LICENSE
           if-no-files-found: error
 
       - name: Upload AppImage (Linux)
@@ -610,6 +636,7 @@ jobs:
           name: ${{ steps.artifact-name-nonwindows.outputs.artifact-name }}
           path: |
             ${{ steps.tauri-release-dir.outputs.release-dir }}/bundle/appimage/*.AppImage
+            ${{ steps.tauri-release-dir.outputs.release-dir }}/bundle/appimage/LICENSE
           if-no-files-found: error
 
       - name: Dump diagnostics on failure (Linux)
