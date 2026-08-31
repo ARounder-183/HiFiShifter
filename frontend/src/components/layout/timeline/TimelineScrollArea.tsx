@@ -5,6 +5,7 @@ import { MAX_PX_PER_SEC, MAX_ROW_HEIGHT, MIN_PX_PER_SEC, MIN_ROW_HEIGHT } from "
 import { clamp } from "./math";
 import { isNoneBinding, isModifierActive } from "../../../features/keybindings/keybindingsSlice";
 import type { Keybinding } from "../../../features/keybindings/types";
+import { useDebouncedPersist } from "../../../hooks/useDebouncedPersist";
 import { getTimelineWheelAction } from "../wheelGesture";
 import { shouldDispatchTimelineViewport } from "./runtime/timelineViewportDispatch";
 import { resolveTimelineMinPxPerSec } from "./runtime/timelineZoomBounds";
@@ -159,13 +160,12 @@ export const TimelineScrollArea: React.FC<
         scroller.scrollTop = Math.min(Math.max(0, pending.nextScrollTop), maxScrollTop);
     }, [rowHeight, scrollRef]);
 
-    useEffect(() => {
-        localStorage.setItem("hifishifter.pxPerSec", String(pxPerSec));
-    }, [pxPerSec]);
-
-    useEffect(() => {
-        localStorage.setItem("hifishifter.rowHeight", String(rowHeight));
-    }, [rowHeight]);
+    // ★ 缩放设置必须防抖落盘：`localStorage.setItem` 是同步磁盘 I/O，而
+    // pxPerSec / rowHeight 在滚轮缩放手势中每帧都变，直接写会让每个滚轮
+    // 事件都堵在一次落盘上，与同帧的 React 渲染和画布重绘挤在一起卡顿。
+    // 防抖后一次手势只写一次；卸载时 hook 会补写未落盘的值。
+    useDebouncedPersist("hifishifter.pxPerSec", pxPerSec);
+    useDebouncedPersist("hifishifter.rowHeight", rowHeight);
 
     useEffect(() => {
         const scroller = scrollRef.current;
