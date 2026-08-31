@@ -139,7 +139,8 @@ pub fn select_f1_f2(
 /// 全极点滤波器 |A(e^{-jw})| 的 dB 值（Horner 直接求值）。
 ///
 /// 约定：`coeffs` 为 a[1..=p]（A(z) = 1 + Σ a_k·z⁻ᵏ）。
-fn all_pole_mag_db(coeffs: &[f32], freq_hz: f32, sr: f32) -> f32 {
+/// correction.rs 的 H(k) 计算复用本函数（单一真相）。
+pub(crate) fn all_pole_mag_db(coeffs: &[f32], freq_hz: f32, sr: f32) -> f32 {
     let w = 2.0 * std::f32::consts::PI * freq_hz / sr;
     let mut re = 1.0_f32;
     let mut im = 0.0_f32;
@@ -263,21 +264,13 @@ mod tests {
 
     const SR: f32 = 12_000.0;
 
-    /// 用已知极点构造 LPC 系数（分析约定 a[0]=1：先重建 z 多项式再转回 a）。
+    /// 用已知极点构造 LPC 系数（分析约定 a[0]=1：z 多项式升幂去尾反序）。
+    ///
+    /// 注意：A(z) = Π(1 − p_k·z⁻¹) = z⁻ⁿ·P(z)，因此 a_k = c_{n−k}，
+    /// **不能**再做任何归一化（会改变根的位置）。
     fn coeffs_from(pairs: &[Pole]) -> Vec<f32> {
         let mono = poles_to_coeffs(pairs, &[], SR);
-        // mono = [ap, ..., a1, 1]（z 多项式升幂）→ a = [a1, ..., ap]
-        let mut a: Vec<f32> = mono[..mono.len() - 1]
-            .iter()
-            .rev()
-            .copied()
-            .collect();
-        // 归一化常数项为 1（a[0]=1 约定）：A(z)=1+a1 z⁻¹+…，z 多项式常数项 = ap
-        let norm = *mono.first().unwrap();
-        for v in a.iter_mut() {
-            *v /= norm;
-        }
-        a
+        mono[..mono.len() - 1].iter().rev().copied().collect()
     }
 
     fn pole(freq: f32, bw: f32) -> Pole {
