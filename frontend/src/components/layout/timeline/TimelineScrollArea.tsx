@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef } from "react";
+import { flushSync } from "react-dom";
 
 import { MAX_PX_PER_SEC, MAX_ROW_HEIGHT, MIN_PX_PER_SEC, MIN_ROW_HEIGHT } from "./constants";
 import { clamp } from "./math";
@@ -9,30 +10,18 @@ import { getTimelineWheelAction } from "../wheelGesture";
 import { shouldDispatchTimelineViewport } from "./runtime/timelineViewportDispatch";
 import { resolveTimelineMinPxPerSec } from "./runtime/timelineZoomBounds";
 import { applyNativeScrollLeft } from "./runtime/nativeScrollApply";
-import {
-    resolveHorizontalWheelZoom,
-    resolveTimelineScrollRange,
-} from "./runtime/timelineScrollRange";
+import { resolveHorizontalWheelZoom } from "./runtime/timelineScrollRange";
 
 export const TimelineScrollArea: React.FC<
     Omit<React.HTMLAttributes<HTMLDivElement>, "ref"> & {
         scrollRef: React.MutableRefObject<HTMLDivElement | null>;
-        /**
-         * 水平内容层（决定原生滚动上限的那个 div）。
-         *
-         * 缩放时它的宽度必须**先**按新的 pxPerSec 落地，否则写
-         * `scroller.scrollLeft` 会被浏览器按旧的最大滚动位置钳回去。此前这
-         * 一步靠 `flushSync` 强制整棵树同步提交来实现，现在改为直接命令式
-         * 写入，React 就不必再被阻塞地同步渲染了。
-         */
-        contentSizerRef: React.RefObject<HTMLDivElement | null>;
         projectSec: number;
         pxPerSec: number;
         setPxPerSec: React.Dispatch<React.SetStateAction<number>>;
         rowHeight: number;
         setRowHeight: React.Dispatch<React.SetStateAction<number>>;
         setScrollLeft: React.Dispatch<React.SetStateAction<number>>;
-        /** 缩放时与 pxPerSec 一起提交 scrollLeft state（供窗口化使用）。 */
+        /** 缩放的同一 flushSync 内提交 scrollLeft state（供窗口化立即使用）。 */
         commitScrollLeftState: React.Dispatch<React.SetStateAction<number>>;
         /** 竖直缩放提交 rowHeight 时同步提交 scrollTop state。 */
         commitScrollTopState: React.Dispatch<React.SetStateAction<number>>;
@@ -46,7 +35,6 @@ export const TimelineScrollArea: React.FC<
     }
 > = ({
     scrollRef,
-    contentSizerRef,
     projectSec,
     pxPerSec,
     setPxPerSec,
@@ -71,13 +59,20 @@ export const TimelineScrollArea: React.FC<
         viewportWidth: number;
     } | null>(null);
     const pxPerSecRef = useRef(pxPerSec);
-    // 滚轮缩放路径会在提交 state 前手动刷新此 ref（见下方 wheel handler），
+    // 滚轮缩放路径会在 flushSync 前手动刷新此 ref（见下方 wheel handler），
     // 其余路径由被动 effect 兜底，供 dispatch 去重快照使用。
     useEffect(() => {
         pxPerSecRef.current = pxPerSec;
     }, [pxPerSec]);
     const zoomRafRef = useRef<number | null>(null);
     const zoomPendingRef = useRef<{
+        nextPxPerSec: number;
+        nextScrollLeft: number;
+    } | null>(null);
+
+    // zoom 中心点以秒为基准：rAF 提交的待落地缩放（含目标滚动偏移），
+    // 由 pxPerSec 提交后的 useLayoutEffect 消费。
+    const pendingZoomRef = useRef<{
         nextPxPerSec: number;
         nextScrollLeft: number;
     } | null>(null);
@@ -133,6 +128,25 @@ export const TimelineScrollArea: React.FC<
             }
         };
     }, []);
+
+    useLayoutEffect(() => {
+        // Apply pending cursor-centered zoom scrollLeft after pxPerSec has updated
+        const scroller = scrollRef.current;
+        const pending = pendingZoomRef.current;
+        if (!scroller || !pending) return;
+        if (Math.abs(pending.nextPxPerSec - pxPerSec) > 1e-9) return;
+
+        // flushSync 已让 DOM（含 paddedContentWidth）按新缩放完成提交，这里
+        // 写原生 scrollLeft 不会再被旧宽度钳制。事务在同一布局 effect 内闭合，
+        // 绝不跨帧保持打开：写后回读浏览器实际接受的偏移（钳制/量化/锚定
+        // 都可能修正请求值），并一律以回读值为准同步标尺、React state 与
+        // 视口总线。此前“接受失败则保持事务打开、吞掉后续滚动事件”的设计
+        // 一旦命中拒绝分支就无法恢复，画布层会冻结在旧偏移上，Clip 与其
+        // 选中框从此错位。
+        pendingZoomRef.current = null;
+        applyNativeScrollLeft(scroller, pending.nextScrollLeft);
+        syncScrollLeft(scroller);
+    }, [projectSec, pxPerSec, scrollRef, syncScrollLeft]);
 
     useLayoutEffect(() => {
         const scroller = scrollRef.current;
@@ -283,47 +297,17 @@ export const TimelineScrollArea: React.FC<
                     const pending = zoomPendingRef.current;
                     if (!pending) return;
                     zoomPendingRef.current = null;
+                    pendingZoomRef.current = pending;
                     pxPerSecRef.current = pending.nextPxPerSec;
-
-                    // ── 原子缩放（无 flushSync 版）─────────────────────
-                    // 旧实现用 flushSync 把整棵树同步提交一遍，但它的**唯一
-                    // 硬约束**其实只有一条：内容层宽度必须先按新 pxPerSec
-                    // 重排，否则写 scroller.scrollLeft 会被浏览器按旧的最大
-                    // 滚动位置钳回去，表现为"缩放变了、滚动没变"的水平漂移。
-                    //
-                    // 既然卡点只在内容层宽度，就直接命令式写它（公式与
-                    // TimelinePanel 里 contentWidth / timelineScrollRange 完全
-                    // 一致，React 随后异步提交时会写入相同的字符串，无抖动），
-                    // 于是不必再阻塞地同步渲染整棵树。
-                    //
-                    // 画布层由下面的 syncScrollLeft 在同一帧内同步重绘，与
-                    // 原生 DOM 内容层同帧；React state 随后异步跟上，只服务
-                    // 于窗口化 / 裁剪这类非视觉用途。
-                    let appliedScrollLeft: number | null = null;
-                    const scroller = scrollRef.current;
-                    if (scroller) {
-                        const sizer = contentSizerRef.current;
-                        if (sizer) {
-                            const range = resolveTimelineScrollRange({
-                                contentWidth: Math.max(
-                                    1,
-                                    Math.ceil(projectSec * pending.nextPxPerSec),
-                                ),
-                                viewportWidth: scroller.clientWidth,
-                            });
-                            sizer.style.width = `${range.paddedContentWidth}px`;
-                        }
-                        // 写后回读浏览器实际接受的偏移再广播：钳制/量化/锚定
-                        // 都可能修正请求值，画布层与原生 DOM 层不允许以
-                        // "请求值"为准失步。
-                        appliedScrollLeft = applyNativeScrollLeft(scroller, pending.nextScrollLeft);
-                        syncScrollLeft(scroller);
-                    }
-                    setPxPerSec(pending.nextPxPerSec);
-                    // 必须用**回读值**而非请求值：内容宽度此刻才刚落地，浏览器
-                    // 很可能把请求值钳到新的最大滚动位置上。写入请求值会让
-                    // state 与真实 DOM 差一截，窗口化随之判错可见区间。
-                    commitScrollLeftState(appliedScrollLeft ?? pending.nextScrollLeft);
+                    // 原子缩放：flushSync 让 DOM（Clip/网格/contentWidth）在本帧内
+                    // 按新缩放重排，layout effect 随即写原生 scrollLeft 并经
+                    // syncScrollLeft 同步重绘标尺与画布——全部发生在绘制前。
+                    // scrollLeft state 也必须在同一 flushSync 提交：窗口化/裁剪
+                    // 会读取该 state，旧值会短暂把视口内的 Clip 判为屏外而消失。
+                    flushSync(() => {
+                        setPxPerSec(pending.nextPxPerSec);
+                        commitScrollLeftState(pending.nextScrollLeft);
+                    });
                 });
             }
         };
