@@ -46,7 +46,9 @@ rayon = "1.7"
 lru = "0.12"
 encoding_rs = "0.8"
 midly = "0.5"
-zip = { version = "0.6", default-features = false, features = ["deflate"] }
+zip = { version = "0.6", default-features = false, features = ["deflate", "time"] }
+# zip 的 time feature 使其依赖 time；此处直接引用以完成 SystemTime → zip::DateTime 转换
+time = { version = "0.3", default-features = false, features = ["std"] }
 libloading = "0.8"
 log = { version = "0.4", features = ["std"] }
 

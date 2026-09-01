@@ -41,6 +41,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
+ "time",
  "uuid",
  "windows 0.58.0",
  "windows-core 0.58.0",
@@ -7462,6 +7463,7 @@ dependencies = [
  "crc32fast",
  "crossbeam-utils",
  "flate2",
+ "time",
 ]
 
 [[package]]
