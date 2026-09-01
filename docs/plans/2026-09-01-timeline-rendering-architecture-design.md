@@ -224,7 +224,7 @@ clip 名称 / 增益 / 变速 / 徽标字母保留 **Canvas2D 覆盖层**：
 | **P2b** | 波形实例化绘制（quad 展开上 GPU） | **推迟**——P2a 后 quads 仅 0.25 ms，收益有限；若后续波形仍需压榨再做 |
 | **P2d** | 波形 LOD 档位缓存（让**缩放**也 ≈ 0） | **待做**——缩放帧当前 0.76 ms，性价比低于 clip 体，故排在其后 |
 | **P2e** | clip 体合批 + 去圆角遮罩 | **已完成**（`ac303963`）400 次 `clip()` → 0；合批调用数与 clip 数解耦 |
-| **P3** | GL clip 体渲染器（SDF 实例化），与波形并入同一上下文 | 待评估——P2e 之后需重新测，若 clip 体已足够快则可不做 |
+| **P3** | GL clip 体渲染器（SDF 实例化） | **已完成并默认开启**（`4260caf1` / `bbc53937` / `77388dc9`） |
 | **P4** | 文字覆盖层（Canvas2D，手势期 CSS transform 跟随） | 待评估 |
 | **P5a** | 刻度/标尺/网格跳过键脱离滚动（量化 `scrollLeft`） | **已完成**（`46fd7aaf`） |
 | **P5b** | 标尺整体记忆化 | **已完成**（`97f000c2`） |
@@ -249,8 +249,17 @@ scrollLeft → canvas 层同步绘制 → React 异步跟上。真机结果是**
 结论：该事务的硬约束不止「内容层宽度先落地」，还包括「**DOM 与画布必须同帧
 提交**」。React 调度器在连续缩放下无法保证这一点，canvas 与 DOM 会互相打架。
 
-因此：**要去掉 `flushSync`，前提是把依赖 pxPerSec 的 DOM 全部移出 React**
-（即 P3：clip 体进 canvas / GL）。在此之前不要再动这条路径。
+**更正（2026-09-01，P3 落地后）**：原结论写的是「做完 P3（clip 体进 GL）就能
+拆 `flushSync`」——这个推导不完整。依赖 pxPerSec 的 DOM 至少有三处：
+
+1. 内容层宽度（`paddedContentWidth`）
+2. **标尺刻度位置**（`TimeRulerMarks` 的 `left = tick.contentPx`）
+3. overlay clip 的 DOM（`ClipItem`，数量少但存在）
+
+其中 (2) 也在同一帧里，所以只把 clip 体搬进 GL 并不足以安全拆掉
+`flushSync`——标尺也得进 canvas。也就是说，拆 `flushSync` 的真正前提是
+「**视觉层全部脱离 React**」，那是比 P3 大得多的工程，收益（省掉每帧一次的
+同步整树提交）需要先真机量化再决定是否值得。
 
 `5cae1f65` 中与抖动无关的部分（标尺 `React.memo`）已保留在 `97f000c2`。
 
