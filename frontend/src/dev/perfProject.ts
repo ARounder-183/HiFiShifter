@@ -39,6 +39,21 @@ export const PERF_SOURCE_PREFIX = "hs-perf://";
 /** 合成素材采样率，与主流音频一致。 */
 const DEFAULT_SAMPLE_RATE = 44100;
 
+/** 规模选择的持久化键：写后重载页面即可自动重建（见 `installPerfProjectDevtools`）。 */
+const PERSIST_KEY = "hifishifter.perfProject";
+
+/** 解析持久化的选项 JSON；非法 JSON 返回 `null` 由调用方忽略。 */
+function safeParseJson(raw: string): PerfProjectOptions | null {
+    try {
+        const parsed: unknown = JSON.parse(raw);
+        return typeof parsed === "object" && parsed !== null
+            ? (parsed as PerfProjectOptions)
+            : null;
+    } catch {
+        return null;
+    }
+}
+
 /** 默认轨道配色，与 `TrackList` 的轨道色板同源（取几种便于肉眼区分）。 */
 const TRACK_COLORS = [
     "#4f8ef7",
@@ -291,39 +306,165 @@ function applyFitZoomAndReload(pxPerSec: number): void {
 }
 
 /**
+ * 解析规模描述串为选项。
+ *
+ * 支持两种写法：`"400"`（clip 总数，按 10 轨均分）与 `"10x40"`（轨数 × 每轨
+ * clip 数）；无法解析时返回 `null` 由调用方忽略。
+ *
+ * @param raw 描述串。
+ * @returns 规模选项，解析失败返回 `null`。
+ */
+function parseScaleSpec(raw: string): PerfProjectOptions | null {
+    const trimmed = raw.trim();
+    const pair = /^(\d+)\s*[xX]\s*(\d+)$/.exec(trimmed);
+    if (pair) {
+        return { trackCount: Number(pair[1]), clipsPerTrack: Number(pair[2]) };
+    }
+    const total = Number.parseInt(trimmed, 10);
+    if (!Number.isFinite(total) || total <= 0) return null;
+    return { trackCount: 10, clipsPerTrack: Math.max(1, Math.ceil(total / 10)) };
+}
+
+/** 生成工程并回写摘要，供全局入口与悬浮面板共用。 */
+function generateAndReport(options: PerfProjectOptions): PerfProjectSummary {
+    const summary = generatePerfProject(options);
+    console.info("[perf] 性能工程已生成", summary);
+    return summary;
+}
+
+/**
+ * 挂载 dev-only 悬浮面板。
+ *
+ * 流程：直接用原生 DOM 在右下角插一个固定定位的小面板，提供三档预设与一个
+ * 「清空」按钮，并把当前选择写入 localStorage 以便重载后自动重建。
+ *
+ * 特殊说明：
+ * - **为什么不是快捷键 / dev 菜单**：新增快捷键要动 `ActionId` 联合、默认键位
+ *   表、`ACTION_META`、i18n 与 App.tsx 的 switch 共 4+ 处，还会出现在用户
+ *   可见的快捷键设置面板里；本模块的目标是零生产侵入，故用原生 DOM 自建。
+ * - Tauri 的 `devUrl` 固定为 `http://localhost:5173`，`?perf=` 传不进去，
+ *   面板是 Tauri 开发环境下唯一的零摩擦入口。
+ * - 面板不参与任何渲染链路，也不订阅视口，对 Profile 无干扰；不需要时点
+ *   「清空」并刷新即可（localStorage 被一并清除）。
+ */
+function mountPerfPanel(): void {
+    const panel = document.createElement("div");
+    panel.setAttribute("data-hs-perf-panel", "1");
+    Object.assign(panel.style, {
+        position: "fixed",
+        right: "12px",
+        bottom: "12px",
+        zIndex: "9999",
+        display: "flex",
+        flexDirection: "column",
+        gap: "4px",
+        padding: "8px",
+        borderRadius: "6px",
+        background: "rgba(17, 24, 39, 0.92)",
+        color: "#e5e7eb",
+        font: "12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace",
+        boxShadow: "0 4px 16px rgba(0, 0, 0, 0.35)",
+        userSelect: "none",
+    } satisfies Partial<CSSStyleDeclaration>);
+
+    const title = document.createElement("div");
+    title.textContent = "PERF (dev)";
+    title.style.opacity = "0.6";
+    panel.appendChild(title);
+
+    const status = document.createElement("div");
+    status.style.minHeight = "16px";
+    panel.appendChild(status);
+
+    const makeButton = (label: string, onClick: () => void): HTMLButtonElement => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = label;
+        Object.assign(button.style, {
+            padding: "3px 8px",
+            borderRadius: "4px",
+            border: "1px solid rgba(229, 231, 235, 0.25)",
+            background: "transparent",
+            color: "inherit",
+            font: "inherit",
+            cursor: "pointer",
+        } satisfies Partial<CSSStyleDeclaration>);
+        button.addEventListener("click", onClick);
+        panel.appendChild(button);
+        return button;
+    };
+
+    const run = (spec: string) => {
+        const options = parseScaleSpec(spec);
+        if (options === null) return;
+        const summary = generateAndReport(options);
+        localStorage.setItem(PERSIST_KEY, spec);
+        status.textContent = `${summary.trackCount}×${summary.clipCount / summary.trackCount} = ${summary.clipCount} clip`;
+        applyFitZoomAndReload(summary.fitPxPerSec);
+    };
+
+    makeButton("400 clip", () => run("400"));
+    makeButton("1000 clip", () => run("1000"));
+    makeButton("400 clip + fade", () => {
+        const summary = generateAndReport({ clipsPerTrack: 40, fadeSec: 0.5 });
+        localStorage.setItem(PERSIST_KEY, JSON.stringify({ clipsPerTrack: 40, fadeSec: 0.5 }));
+        status.textContent = `${summary.clipCount} clip · fade 0.5s`;
+        applyFitZoomAndReload(summary.fitPxPerSec);
+    });
+    makeButton("清空", () => {
+        localStorage.removeItem(PERSIST_KEY);
+        store.dispatch(
+            applyTimelinePayload({
+                tracks: [],
+                clips: [],
+                selected_track_id: null,
+                selected_clip_id: null,
+                bpm: 120,
+                playhead_sec: 0,
+            }),
+        );
+        status.textContent = "已清空";
+    });
+
+    document.body.appendChild(panel);
+}
+
+/**
  * 安装 dev-only 全局入口。
  *
  * 流程：
  * 1. 挂 `window.__hsStore`（便于在控制台观察 / 手动 dispatch）与
- *    `window.__hsPerf`（生成工程）；
- * 2. 解析 `?perf=` 查询参数，命中则自动生成并（首次）落到全览缩放档后重载。
- *
- * 特殊说明：`?perf=` 支持两种写法——`?perf=400`（clip 总数，按 10 轨均分）
- * 与 `?perf=10x40`（轨数 × 每轨 clip 数）。首个 URL 参数形式无冲突：全仓
- * 目前没有任何地方读 `location.search`。
+ *    `window.__hsPerf`（以选项对象生成工程）；
+ * 2. 若 localStorage 里有上次选择的规模，自动重建（Tauri 的 `devUrl` 固定，
+ *    `?perf=` 传不进去，持久化是它唯一的"冷启动即全览"通道）；
+ * 3. 解析 `?perf=` 查询参数——仅在直接用浏览器打开 vite dev server 时可达；
+ * 4. 挂载右下角悬浮面板。
  */
 export function installPerfProjectDevtools(): void {
     const scope = window as unknown as Record<string, unknown>;
     scope.__hsStore = store;
     scope.__hsPerf = (options: PerfProjectOptions = {}) => generatePerfProject(options);
 
-    const raw = new URLSearchParams(location.search).get("perf");
-    if (raw == null) return;
-
-    let options: PerfProjectOptions = {};
-    const pair = /^(\d+)\s*[xX]\s*(\d+)$/.exec(raw.trim());
-    if (pair) {
-        options = {
-            trackCount: Number(pair[1]),
-            clipsPerTrack: Number(pair[2]),
-        };
-    } else {
-        const total = Number.parseInt(raw.trim(), 10);
-        if (!Number.isFinite(total) || total <= 0) return;
-        options = { trackCount: 10, clipsPerTrack: Math.max(1, Math.ceil(total / 10)) };
+    const persisted = localStorage.getItem(PERSIST_KEY);
+    let restored = false;
+    if (persisted != null && persisted !== "") {
+        const options = persisted.trimStart().startsWith("{")
+            ? (safeParseJson(persisted) ?? null)
+            : parseScaleSpec(persisted);
+        if (options !== null) {
+            generateAndReport(options);
+            restored = true;
+        }
     }
 
-    const summary = generatePerfProject(options);
-    console.info("[perf] 性能工程已生成", summary);
-    applyFitZoomAndReload(summary.fitPxPerSec);
+    const raw = new URLSearchParams(location.search).get("perf");
+    if (raw != null && !restored) {
+        const options = parseScaleSpec(raw);
+        if (options !== null) {
+            localStorage.setItem(PERSIST_KEY, raw.trim());
+            applyFitZoomAndReload(generateAndReport(options).fitPxPerSec);
+        }
+    }
+
+    mountPerfPanel();
 }
