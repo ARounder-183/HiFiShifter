@@ -75,6 +75,17 @@ export type TimelineCanvasClipModel = {
     isRenaming: boolean;
     /** 吸附偏移（已换算为像素，相对 Clip 左缘）—— 左下角 ◣ 标记。 */
     snapOffsetPx: number;
+    /**
+     * 前导重叠区宽度（像素，相对 Clip 左缘）：被同轨前一个 clip 压住的部分。
+     *
+     * 该区在画布上按半透绘制，让下 clip 的色块与波形透出——否则两层不透明
+     * 色块会叠加成脏色。
+     *
+     * 历史说明：这个字段此前**一直没写进本接口**，只在 `drawClips` 的推断
+     * 返回类型里泄漏出去（构造处未标注类型，故 TS 未报错）。消费端
+     * `drawTimelineCanvas` 却能读到它——类型与实际不符，补上声明。
+     */
+    leadingOverlapPx?: number;
 };
 
 /**

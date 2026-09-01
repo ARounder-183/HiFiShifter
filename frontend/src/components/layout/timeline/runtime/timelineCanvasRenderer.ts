@@ -263,7 +263,74 @@ export function drawTimelineCanvas(
         return lo < list.length && Math.abs(list[lo] - rightEdgePx) <= 0.5;
     };
 
-    for (const clip of args.clips) {
+    // ══════════════════════════════════════════════════════════════════
+    // Clip 绘制：准备 → 合批提交
+    //
+    // 【为什么改】原实现对每个 clip 做一次 `ctx.clip()`（圆角矩形遮罩）。
+    // 遮罩是 Canvas2D 里最贵的操作之一——它要为后续所有绘制建立裁剪层，
+    // 400 个 clip 即 400 次，粗估 4~8 ms/帧，是本画布最大的单项开销。
+    //
+    // 【为什么可以去掉 clip()】圆角矩形只在**四角**有弧线。header 的下边
+    // 与 body 的上边都落在弧线之外（headerHeight 远大于半径），body 的下边
+    // 才受下方两角影响。因此改用「每角独立半径」的 roundRect 分别填充
+    // header / body，结果与「整体裁剪 + 平涂矩形」逐像素等价。
+    //
+    // 【为什么能合批】同一批里的 clip 彼此不遮挡：填充与描边都严格落在各自
+    // 矩形内（相邻分隔缝已收窄到不越界，见下），因此组内绘制顺序无关。
+    // 会遮挡前面 clip 的 clip（前导重叠、编组外圈描边）作为**屏障**先提交
+    // 当前批次，z 序由此严格保持。
+    // ══════════════════════════════════════════════════════════════════
+
+    /** 一个待填充/描边的矩形（每角独立半径）。 */
+    interface RectOp {
+        x: number;
+        y: number;
+        w: number;
+        h: number;
+        /** 四角半径 [左上, 右上, 右下, 左下]（CSS 像素）。 */
+        radii: [number, number, number, number];
+    }
+    interface FillOp extends RectOp {
+        style: string;
+        alpha: number;
+    }
+    interface StrokeOp extends RectOp {
+        style: string;
+        lineWidth: number;
+    }
+
+    type ClipStyle = ReturnType<typeof buildTimelineClipVisualStyle>;
+
+    /** 一个 clip 的绘制计划：几何 + 样式 + 合批所需的矩形清单。 */
+    interface PreparedClip {
+        clip: (typeof args.clips)[number];
+        style: ClipStyle;
+        left: number;
+        top: number;
+        width: number;
+        height: number;
+        headerHeight: number;
+        bodyTop: number;
+        bodyHeight: number;
+        radius: number;
+        leadingOverlapPx: number;
+        isGroupActive: boolean;
+        isGroupDisabled: boolean;
+        fills: FillOp[];
+        strokes: StrokeOp[];
+        /** true = 本 clip 会遮挡批次内已有的 clip，入队前必须提交当前批次。 */
+        barrier: boolean;
+    }
+
+    /** 相邻 clip 分隔缝颜色（泳道底色）。 */
+    const seamColor = darkMode ? "rgb(31, 31, 31)" : "rgb(237, 240, 245)";
+
+    /**
+     * 计算一个 clip 的几何、样式与合批矩形。
+     *
+     * 只做计算，不产生任何绘制调用。
+     */
+    function prepareClip(clip: (typeof args.clips)[number]): PreparedClip {
         const clipLeft = clip.leftPx;
         const clipTop = clip.topPx;
         const clipWidth = Math.max(1, clip.widthPx);
@@ -275,7 +342,7 @@ export function drawTimelineCanvas(
             clip.groupId != null && args.activeGroupIds?.has(clip.groupId) === true;
         const isGroupDisabled =
             clip.groupId != null && (args.disabledGroupIds?.includes(clip.groupId) ?? false);
-        const visualStyle = buildTimelineClipVisualStyle({
+        const style = buildTimelineClipVisualStyle({
             widthPx: clipWidth,
             trackColor: clip.trackColor,
             selected: clip.selected,
@@ -290,172 +357,235 @@ export function drawTimelineCanvas(
             isGroupDisabled,
             darkMode,
         });
-        ctx.save();
-        ctx.globalAlpha = visualStyle.mutedAlpha;
-
         // 圆角半径按 Clip 实际尺寸收敛：极短 / 极矮的 Clip 不能把圆角画爆。
         const radius = Math.max(0, Math.min(CLIP_CORNER_RADIUS_PX, clipWidth / 2, clipHeight / 2));
-        const borderRect = () => {
-            ctx.beginPath();
-            ctx.roundRect(
-                clipLeft + 0.5,
-                clipTop + 0.5,
-                Math.max(0, clipWidth - 1),
-                Math.max(0, clipHeight - 1),
-                radius,
-            );
-        };
-
-        // 主体填色统一裁剪到圆角矩形内：内部各段纯色平涂，四角被一起收圆。
-        // 简洁风（参考 Ableton / REAPER）：不用渐变、高光、发光 —— 平涂的
-        // 边界最清晰，密集轨道里不糊，渲染也最便宜。
-        ctx.save();
-        ctx.beginPath();
-        ctx.roundRect(clipLeft, clipTop, clipWidth, clipHeight, radius);
-        ctx.clip();
-
-        // 前导重叠区（被同轨前一个 clip 压住的部分）宽度：上 clip 在该区
-        // 半透，让下 clip 的色块/波形透出，避免两层不透明色块叠加成脏色。
+        // 前导重叠区（被同轨前一个 clip 压住的部分）宽度。
         const leadingOverlapPx = Math.max(0, Math.min(clipWidth - 1, clip.leadingOverlapPx ?? 0));
-        const overlapStart = clipLeft + leadingOverlapPx;
+        const baseAlpha = style.mutedAlpha;
 
-        // header：色块头部带，与 body 同色稍压深。前导重叠区也用半透。
+        const fills: FillOp[] = [];
         if (leadingOverlapPx > 0.5) {
-            ctx.fillStyle = visualStyle.headerFill;
-            ctx.globalAlpha *= 0.55;
-            ctx.fillRect(clipLeft, clipTop, leadingOverlapPx, headerHeight);
-            ctx.globalAlpha = visualStyle.mutedAlpha;
-            ctx.fillStyle = visualStyle.headerFill;
-            ctx.fillRect(overlapStart, clipTop, clipWidth - leadingOverlapPx, headerHeight);
+            // 重叠区半透，让下 clip 的色块/波形透出（避免两层不透明色块
+            // 叠加成脏色）。左右两段各自只保留外侧的圆角。
+            fills.push({
+                style: style.headerFill,
+                alpha: baseAlpha * 0.55,
+                x: clipLeft,
+                y: clipTop,
+                w: leadingOverlapPx,
+                h: headerHeight,
+                radii: [radius, 0, 0, 0],
+            });
+            fills.push({
+                style: style.headerFill,
+                alpha: baseAlpha,
+                x: clipLeft + leadingOverlapPx,
+                y: clipTop,
+                w: clipWidth - leadingOverlapPx,
+                h: headerHeight,
+                radii: [0, radius, 0, 0],
+            });
+            fills.push({
+                style: style.bodyFill,
+                alpha: baseAlpha * 0.55,
+                x: clipLeft,
+                y: bodyTop,
+                w: leadingOverlapPx,
+                h: bodyHeight,
+                radii: [0, 0, 0, radius],
+            });
+            fills.push({
+                style: style.bodyFill,
+                alpha: baseAlpha,
+                x: clipLeft + leadingOverlapPx,
+                y: bodyTop,
+                w: clipWidth - leadingOverlapPx,
+                h: bodyHeight,
+                radii: [0, 0, radius, 0],
+            });
         } else {
-            ctx.fillStyle = visualStyle.headerFill;
-            ctx.fillRect(clipLeft, clipTop, clipWidth, headerHeight);
+            // header 只有上方两角是圆的；body 只有下方两角是圆的。
+            fills.push({
+                style: style.headerFill,
+                alpha: baseAlpha,
+                x: clipLeft,
+                y: clipTop,
+                w: clipWidth,
+                h: headerHeight,
+                radii: [radius, radius, 0, 0],
+            });
+            fills.push({
+                style: style.bodyFill,
+                alpha: baseAlpha,
+                x: clipLeft,
+                y: bodyTop,
+                w: clipWidth,
+                h: bodyHeight,
+                radii: [0, 0, radius, radius],
+            });
         }
-
-        // body：色块主体。前导重叠区半透。
-        if (leadingOverlapPx > 0.5) {
-            ctx.fillStyle = visualStyle.bodyFill;
-            ctx.globalAlpha *= 0.55;
-            ctx.fillRect(clipLeft, bodyTop, leadingOverlapPx, bodyHeight);
-            ctx.globalAlpha = visualStyle.mutedAlpha;
-            ctx.fillStyle = visualStyle.bodyFill;
-            ctx.fillRect(overlapStart, bodyTop, clipWidth - leadingOverlapPx, bodyHeight);
-        } else {
-            ctx.fillStyle = visualStyle.bodyFill;
-            ctx.fillRect(clipLeft, bodyTop, clipWidth, bodyHeight);
-        }
-
-        // body 中段（两条渐变之间）不再叠加黑色遮罩：此前 0.18→0.50 的加深
-        // 让波形区域的背景发闷显脏（用户反馈"更干净一点"）。渐变区域自身的
-        // 压暗由下方 fadeIn/fadeOut 的独立 fillRect 负责。
 
         // header/body 分隔线：亮色块上的细深线，仅做分区提示。
-        ctx.fillStyle = "rgba(0, 0, 0, 0.14)";
-        ctx.fillRect(clipLeft, clipTop + headerHeight, clipWidth, 1);
-
-        ctx.restore();
+        // 它落在 headerHeight 上，远在圆角弧线之下，因此整宽可见、无需收角。
+        fills.push({
+            style: "rgba(0, 0, 0, 0.14)",
+            alpha: baseAlpha,
+            x: clipLeft,
+            y: clipTop + headerHeight,
+            w: clipWidth,
+            h: 1,
+            radii: [0, 0, 0, 0],
+        });
 
         // 相邻 clip 分隔缝：右缘紧贴下一个同轨 clip 时，在两块之间画一条
-        // 泳道底色竖线（贯穿 header+body）。与两侧的主题对比描边组成
-        // "描边+底缝+描边"分隔带，任何轨道色/主题下都能一眼看出是两个
-        // clip，而不是连续的同一块。颜色与泳道底色（LANE_BG）一致。
+        // 泳道底色竖线。原实现画在 [right-0.5, right+0.5]，但右半边会被
+        // 下一个 clip 覆盖，实际可见的只有左半边——这里直接只画可见的那
+        // 0.5px，使其落在自身矩形内，从而**不参与跨 clip 的遮挡关系**，
+        // 合批时才安全。
         if (hasAdjacentRight(clip.trackId, clipLeft + clipWidth)) {
-            ctx.fillStyle = darkMode ? "rgb(31, 31, 31)" : "rgb(237, 240, 245)";
-            ctx.fillRect(clipLeft + clipWidth - 0.5, clipTop, 1, clipHeight);
+            fills.push({
+                style: seamColor,
+                alpha: baseAlpha,
+                x: clipLeft + clipWidth - 0.5,
+                y: clipTop,
+                w: 0.5,
+                h: clipHeight,
+                radii: [0, 0, 0, 0],
+            });
         }
 
+        const strokes: StrokeOp[] = [];
         // 编组激活 = 深金描边 + 外圈（编组语义，非选中语义）。
-        // 选中不画边框 —— 由色块提亮表达（Ableton 式，见 style 的 selected 分支）；
-        // 未选中画极淡的深色收边，帮助在深背景上定界。
         if (isGroupActive) {
-            ctx.strokeStyle = "rgba(146, 104, 10, 0.8)";
-            ctx.lineWidth = 1;
-            borderRect();
-            ctx.stroke();
-            ctx.strokeRect(
-                clipLeft - 1.5,
-                clipTop - 1.5,
-                Math.max(0, clipWidth + 3),
-                Math.max(0, clipHeight + 3),
-            );
+            strokes.push({
+                style: "rgba(146, 104, 10, 0.8)",
+                lineWidth: 1,
+                x: clipLeft + 0.5,
+                y: clipTop + 0.5,
+                w: Math.max(0, clipWidth - 1),
+                h: Math.max(0, clipHeight - 1),
+                radii: [radius, radius, radius, radius],
+            });
+            strokes.push({
+                style: "rgba(146, 104, 10, 0.8)",
+                lineWidth: 1,
+                x: clipLeft - 1.5,
+                y: clipTop - 1.5,
+                w: Math.max(0, clipWidth + 3),
+                h: Math.max(0, clipHeight + 3),
+                radii: [0, 0, 0, 0],
+            });
         }
-        // 描边：选中 = 白色 2px；未选中 = 淡收边 1px（值随选中态切换）。
-        ctx.strokeStyle = visualStyle.borderStroke;
-        ctx.lineWidth = visualStyle.borderLineWidth;
-        borderRect();
-        ctx.stroke();
+        // 描边：选中 = 白色 2px；未选中 = 淡收边 1px。
+        strokes.push({
+            style: style.borderStroke,
+            lineWidth: style.borderLineWidth,
+            x: clipLeft + 0.5,
+            y: clipTop + 0.5,
+            w: Math.max(0, clipWidth - 1),
+            h: Math.max(0, clipHeight - 1),
+            radii: [radius, radius, radius, radius],
+        });
 
-        if (visualStyle.showGainKnob) {
-            const knobCenterX = clipLeft + visualStyle.gainKnobCenterOffsetX;
-            const knobCenterY = clipTop + visualStyle.gainKnobCenterOffsetY;
-            ctx.fillStyle = visualStyle.gainKnobFill;
-            ctx.strokeStyle = visualStyle.gainKnobStroke;
+        return {
+            clip,
+            style,
+            left: clipLeft,
+            top: clipTop,
+            width: clipWidth,
+            height: clipHeight,
+            headerHeight,
+            bodyTop,
+            bodyHeight,
+            radius,
+            leadingOverlapPx,
+            isGroupActive,
+            isGroupDisabled,
+            fills,
+            strokes,
+            // 屏障：前导重叠会盖住前一个 clip；编组外圈描边会伸出自身矩形
+            // 2px 盖住邻居。二者都必须先提交此前已排入的批次。
+            barrier: leadingOverlapPx > 0.5 || isGroupActive,
+        };
+    }
+
+    /** 绘制无法合批的逐 clip 细节（旋钮 / 徽标 / 文字 / 淡变 / 吸附三角）。 */
+    function drawClipDetails(item: PreparedClip): void {
+        const { clip, style } = item;
+        const { left: clipLeft, top: clipTop, width: clipWidth, height: clipHeight } = item;
+        const bodyTop = item.bodyTop;
+        const bodyHeight = item.bodyHeight;
+        const radius = item.radius;
+
+        ctx.globalAlpha = style.mutedAlpha;
+
+        if (style.showGainKnob) {
+            const knobCenterX = clipLeft + style.gainKnobCenterOffsetX;
+            const knobCenterY = clipTop + style.gainKnobCenterOffsetY;
+            ctx.fillStyle = style.gainKnobFill;
+            ctx.strokeStyle = style.gainKnobStroke;
             ctx.lineWidth = 1;
             ctx.beginPath();
-            ctx.arc(knobCenterX, knobCenterY, visualStyle.gainKnobRadius, 0, Math.PI * 2);
+            ctx.arc(knobCenterX, knobCenterY, style.gainKnobRadius, 0, Math.PI * 2);
             ctx.fill();
             ctx.stroke();
             ctx.beginPath();
-            ctx.fillStyle = visualStyle.gainKnobCoreFill;
+            ctx.fillStyle = style.gainKnobCoreFill;
             ctx.arc(knobCenterX, knobCenterY, 1.7, 0, Math.PI * 2);
             ctx.fill();
-            const angle = ((visualStyle.gainKnobAngleDeg - 90) * Math.PI) / 180;
-            const indicatorOuterX =
-                knobCenterX + Math.cos(angle) * (visualStyle.gainKnobRadius - 1.1);
-            const indicatorOuterY =
-                knobCenterY + Math.sin(angle) * (visualStyle.gainKnobRadius - 1.1);
+            const angle = ((style.gainKnobAngleDeg - 90) * Math.PI) / 180;
+            const indicatorOuterX = knobCenterX + Math.cos(angle) * (style.gainKnobRadius - 1.1);
+            const indicatorOuterY = knobCenterY + Math.sin(angle) * (style.gainKnobRadius - 1.1);
             const indicatorInnerX = knobCenterX + Math.cos(angle) * 1.6;
             const indicatorInnerY = knobCenterY + Math.sin(angle) * 1.6;
             ctx.beginPath();
-            ctx.strokeStyle = visualStyle.gainKnobIndicator;
+            ctx.strokeStyle = style.gainKnobIndicator;
             ctx.lineWidth = 1.2;
             ctx.moveTo(indicatorInnerX, indicatorInnerY);
             ctx.lineTo(indicatorOuterX, indicatorOuterY);
             ctx.stroke();
         }
 
-        if (visualStyle.showChainBadge) {
-            const badgeX = clipLeft + visualStyle.chainBadgeOffsetX;
-            const badgeY = clipTop + visualStyle.chainBadgeOffsetY;
-            const badgeW = visualStyle.chainBadgeWidth;
-            const badgeH = visualStyle.chainBadgeHeight;
-            const badgeR = visualStyle.chainBadgeRadius;
+        if (style.showChainBadge) {
+            const badgeX = clipLeft + style.chainBadgeOffsetX;
+            const badgeY = clipTop + style.chainBadgeOffsetY;
+            const badgeW = style.chainBadgeWidth;
+            const badgeH = style.chainBadgeHeight;
+            const badgeR = style.chainBadgeRadius;
             const badgeCx = badgeX + badgeW / 2;
             const badgeCy = badgeY + badgeH / 2;
 
             ctx.beginPath();
             ctx.roundRect(badgeX, badgeY, badgeW, badgeH, badgeR);
-            ctx.fillStyle = visualStyle.chainBadgeFill;
+            ctx.fillStyle = style.chainBadgeFill;
             ctx.fill();
-            ctx.strokeStyle = visualStyle.chainBadgeStroke;
+            ctx.strokeStyle = style.chainBadgeStroke;
             ctx.lineWidth = 1;
             ctx.stroke();
 
             // Simple chain-link icon: two overlapping circles with a connecting bar
-            ctx.strokeStyle = visualStyle.chainBadgeTextFill;
+            ctx.strokeStyle = style.chainBadgeTextFill;
             ctx.lineWidth = 1.5;
             ctx.lineCap = "round";
             const leftCx = badgeCx - 3;
             const rightCx = badgeCx + 3;
             const linkR = 2.5;
-            // Left link
             ctx.beginPath();
             ctx.ellipse(leftCx, badgeCy - 0.5, linkR, linkR * 0.7, 0, 0, Math.PI * 2);
             ctx.stroke();
-            // Right link
             ctx.beginPath();
             ctx.ellipse(rightCx, badgeCy + 0.5, linkR, linkR * 0.7, 0, 0, Math.PI * 2);
             ctx.stroke();
-            // Connecting bar
             ctx.beginPath();
             ctx.moveTo(leftCx + linkR * 0.5, badgeCy - 1);
             ctx.lineTo(rightCx - linkR * 0.5, badgeCy + 0);
             ctx.stroke();
+            ctx.lineCap = "butt";
 
             // Draw diagonal slash when group is disabled
-            if (isGroupDisabled) {
+            if (item.isGroupDisabled) {
                 ctx.beginPath();
-                ctx.strokeStyle = visualStyle.chainBadgeStroke;
+                ctx.strokeStyle = style.chainBadgeStroke;
                 ctx.lineWidth = 1.5;
                 ctx.moveTo(badgeX + 3, badgeY + 2);
                 ctx.lineTo(badgeX + badgeW - 3, badgeY + badgeH - 2);
@@ -463,101 +593,110 @@ export function drawTimelineCanvas(
             }
         }
 
-        if (visualStyle.showMuteBadge) {
-            const buttonX = clipLeft + visualStyle.muteBadgeOffsetX;
-            const buttonY = clipTop + visualStyle.muteBadgeOffsetY;
-            const buttonWidth = visualStyle.muteBadgeWidth;
-            const buttonHeight = visualStyle.muteBadgeHeight;
-            const buttonRadius = visualStyle.muteBadgeRadius;
+        if (style.showMuteBadge) {
+            const badgeX = clipLeft + style.muteBadgeOffsetX;
+            const badgeY = clipTop + style.muteBadgeOffsetY;
             ctx.beginPath();
-            ctx.roundRect(buttonX, buttonY, buttonWidth, buttonHeight, buttonRadius);
-            ctx.fillStyle = visualStyle.muteBadgeFill;
+            ctx.roundRect(
+                badgeX,
+                badgeY,
+                style.muteBadgeWidth,
+                style.muteBadgeHeight,
+                style.muteBadgeRadius,
+            );
+            ctx.fillStyle = style.muteBadgeFill;
             ctx.fill();
-            ctx.strokeStyle = visualStyle.muteBadgeStroke;
+            ctx.strokeStyle = style.muteBadgeStroke;
             ctx.lineWidth = 1;
             ctx.stroke();
-            ctx.fillStyle = visualStyle.muteBadgeTextFill;
+            ctx.fillStyle = style.muteBadgeTextFill;
             ctx.font = `bold 9px ${fontFamily}`;
             ctx.textBaseline = "middle";
             ctx.textAlign = "center";
             ctx.fillText(
-                visualStyle.muteBadgeLabel,
-                buttonX + buttonWidth / 2,
-                buttonY + buttonHeight / 2 + 0.5,
+                style.muteBadgeLabel,
+                badgeX + style.muteBadgeWidth / 2,
+                badgeY + style.muteBadgeHeight / 2 + 0.5,
             );
             ctx.textAlign = "start";
         }
 
-        if (visualStyle.showFormantBadge) {
-            const buttonX = clipLeft + visualStyle.formantBadgeOffsetX;
-            const buttonY = clipTop + visualStyle.formantBadgeOffsetY;
-            const buttonWidth = visualStyle.formantBadgeWidth;
-            const buttonHeight = visualStyle.formantBadgeHeight;
-            const buttonRadius = visualStyle.formantBadgeRadius;
+        if (style.showFormantBadge) {
+            const badgeX = clipLeft + style.formantBadgeOffsetX;
+            const badgeY = clipTop + style.formantBadgeOffsetY;
             ctx.beginPath();
-            ctx.roundRect(buttonX, buttonY, buttonWidth, buttonHeight, buttonRadius);
-            ctx.fillStyle = visualStyle.formantBadgeFill;
+            ctx.roundRect(
+                badgeX,
+                badgeY,
+                style.formantBadgeWidth,
+                style.formantBadgeHeight,
+                style.formantBadgeRadius,
+            );
+            ctx.fillStyle = style.formantBadgeFill;
             ctx.fill();
-            ctx.strokeStyle = visualStyle.formantBadgeStroke;
+            ctx.strokeStyle = style.formantBadgeStroke;
             ctx.lineWidth = 1;
             ctx.stroke();
-            ctx.fillStyle = visualStyle.formantBadgeTextFill;
+            ctx.fillStyle = style.formantBadgeTextFill;
             ctx.font = `bold 9px ${fontFamily}`;
             ctx.textBaseline = "middle";
             ctx.textAlign = "center";
             ctx.fillText(
-                visualStyle.formantBadgeLabel,
-                buttonX + buttonWidth / 2,
-                buttonY + buttonHeight / 2 + 0.5,
+                style.formantBadgeLabel,
+                badgeX + style.formantBadgeWidth / 2,
+                badgeY + style.formantBadgeHeight / 2 + 0.5,
             );
             ctx.textAlign = "start";
         }
 
-        if (visualStyle.showGainLabel) {
-            ctx.fillStyle = visualStyle.textFill;
+        if (style.showGainLabel) {
+            ctx.fillStyle = style.textFill;
             ctx.font = `10px ${fontFamily}`;
             ctx.textBaseline = "middle";
-            const metrics = ctx.measureText(visualStyle.gainLabel);
+            const metrics = ctx.measureText(style.gainLabel);
             const gainX = clipLeft + clipWidth - metrics.width - 6;
-            if (visualStyle.showPlaybackRate) {
-                const rateMetrics = ctx.measureText(visualStyle.playbackRateLabel);
+            if (style.showPlaybackRate) {
+                const rateMetrics = ctx.measureText(style.playbackRateLabel);
                 const rateX = gainX - rateMetrics.width - 8;
-                ctx.fillText(visualStyle.playbackRateLabel, rateX, clipTop + 9);
+                ctx.fillText(style.playbackRateLabel, rateX, clipTop + 9);
             }
-            ctx.fillText(visualStyle.gainLabel, gainX, clipTop + 9);
+            ctx.fillText(style.gainLabel, gainX, clipTop + 9);
         }
 
-        if (!clip.isRenaming && visualStyle.showName && visualStyle.displayName.length > 0) {
-            const textStartX = clipLeft + visualStyle.leadingControlsWidth;
-            const textEndX = visualStyle.showGainLabel
-                ? clipLeft + clipWidth - visualStyle.trailingReservePx + 4
+        if (!clip.isRenaming && style.showName && style.displayName.length > 0) {
+            const textStartX = clipLeft + style.leadingControlsWidth;
+            const textEndX = style.showGainLabel
+                ? clipLeft + clipWidth - style.trailingReservePx + 4
                 : clipLeft + clipWidth - 8;
             const availableWidth = Math.max(0, textEndX - textStartX);
             if (availableWidth > 12) {
                 ctx.save();
                 ctx.beginPath();
-                ctx.rect(textStartX, clipTop, availableWidth, headerHeight);
+                ctx.rect(textStartX, clipTop, availableWidth, item.headerHeight);
                 ctx.clip();
-                ctx.fillStyle = visualStyle.textFill;
+                ctx.fillStyle = style.textFill;
                 ctx.font = `12px ${fontFamily}`;
                 ctx.textBaseline = "middle";
-                ctx.fillText(visualStyle.displayName, textStartX, clipTop + 9);
+                ctx.fillText(style.displayName, textStartX, clipTop + 9);
                 ctx.restore();
             }
         }
 
+        // ── 淡入淡出 ────────────────────────────────────────────
+        // 压暗区：原实现依赖外层圆角裁剪来收住下方两角，这里改用每角独立
+        // 半径，等价且无需遮罩。
         if (clip.fadeInPx > 0) {
-            // 淡入区压暗：音量从 0 爬升，视觉上"还没到全响"就该更暗。
-            // （0.45 在短渐变时像突兀的黑柱，降到 0.32。）
+            const fadeW = Math.min(clipWidth, clip.fadeInPx);
             ctx.fillStyle = "rgba(0, 0, 0, 0.32)";
-            ctx.fillRect(clipLeft, bodyTop, Math.min(clipWidth, clip.fadeInPx), bodyHeight);
-            // 渐变曲线 = 半透明白：在压暗区与彩色块上都稳定可见（REAPER 式）。
+            ctx.beginPath();
+            ctx.roundRect(clipLeft, bodyTop, fadeW, bodyHeight, [0, 0, 0, radius]);
+            ctx.fill();
             ctx.strokeStyle = "rgba(255, 255, 255, 0.65)";
             ctx.lineWidth = 1.2;
             drawFadeCurveStroke(ctx, {
                 leftPx: clipLeft,
                 topPx: bodyTop,
-                widthPx: Math.min(clipWidth, clip.fadeInPx),
+                widthPx: fadeW,
                 heightPx: bodyHeight,
                 shape: clip.fadeInShape,
                 dir: clip.fadeInDir,
@@ -565,19 +704,18 @@ export function drawTimelineCanvas(
             });
         }
         if (clip.fadeOutPx > 0) {
+            const fadeW = Math.min(clipWidth, clip.fadeOutPx);
+            const fadeX = clipLeft + clipWidth - fadeW;
             ctx.fillStyle = "rgba(0, 0, 0, 0.32)";
-            ctx.fillRect(
-                clipLeft + clipWidth - Math.min(clipWidth, clip.fadeOutPx),
-                bodyTop,
-                Math.min(clipWidth, clip.fadeOutPx),
-                bodyHeight,
-            );
+            ctx.beginPath();
+            ctx.roundRect(fadeX, bodyTop, fadeW, bodyHeight, [0, 0, radius, 0]);
+            ctx.fill();
             ctx.strokeStyle = "rgba(255, 255, 255, 0.65)";
             ctx.lineWidth = 1.2;
             drawFadeCurveStroke(ctx, {
-                leftPx: clipLeft + clipWidth - Math.min(clipWidth, clip.fadeOutPx),
+                leftPx: fadeX,
                 topPx: bodyTop,
-                widthPx: Math.min(clipWidth, clip.fadeOutPx),
+                widthPx: fadeW,
                 heightPx: bodyHeight,
                 shape: clip.fadeOutShape,
                 dir: clip.fadeOutDir,
@@ -588,33 +726,111 @@ export function drawTimelineCanvas(
         // ── SnapOffset（吸附偏移）三角标记 ────────────────────────
         // 左下角等腰直角三角形（直角在左下，◣）。**左侧竖直边严格对齐
         // 偏移位置**（与波形内橙色竖虚线同 x）—— 不做宽度回退钳制；
-        // 三角靠近/越过 Clip 末尾的部分按 Clip 矩形裁剪。offset=0 时
-        // 半透明贴在起点作为可发现性提示。
+        // 三角靠近/越过 Clip 末尾的部分按 Clip 矩形裁剪。
         if (clipWidth >= 12 && clipHeight >= 14) {
             const offsetPx = Math.max(0, Number(clip.snapOffsetPx) || 0);
             const triX = clipLeft + offsetPx;
             const triYBottom = clipTop + clipHeight;
             const size = SNAP_OFFSET_HANDLE_SIZE_PX;
-            ctx.save();
-            ctx.beginPath();
-            ctx.rect(clipLeft, clipTop, clipWidth, clipHeight);
-            ctx.clip();
+            const triRight = triX + size;
+            const clipRight = clipLeft + clipWidth;
             ctx.globalAlpha *= offsetPx > 1e-9 ? 0.95 : 0.55;
+            // 三角整体落在 Clip 内（常态：吸附偏移靠近开头）时**不需要裁剪**。
+            // 原实现无条件 `ctx.clip()` 一次，等于给每个可见 clip 都加一次
+            // 遮罩——本画布最大的单项开销，在全览缩放下是 400 次/帧。
+            // 只有三角真的越过 Clip 右缘时才退回裁剪路径（极罕见）。
+            const needsClip = triRight > clipRight;
+            if (needsClip) {
+                ctx.save();
+                ctx.beginPath();
+                ctx.rect(clipLeft, clipTop, clipWidth, clipHeight);
+                ctx.clip();
+            }
             ctx.beginPath();
             ctx.moveTo(triX, triYBottom - size);
             ctx.lineTo(triX, triYBottom);
-            ctx.lineTo(triX + size, triYBottom);
+            ctx.lineTo(triRight, triYBottom);
             ctx.closePath();
-            // 填充色随 clip 体感亮度取深/浅（timelineCanvasStyle 派生），
-            // 写死的黄色在绿/黄轨道色块上会隐身。
-            ctx.fillStyle = visualStyle.snapOffsetTriFill;
+            ctx.fillStyle = style.snapOffsetTriFill;
             ctx.fill();
-            ctx.strokeStyle = visualStyle.snapOffsetTriStroke;
+            ctx.strokeStyle = style.snapOffsetTriStroke;
             ctx.lineWidth = 1;
             ctx.stroke();
-            ctx.restore();
+            if (needsClip) ctx.restore();
         }
 
-        ctx.restore();
+        ctx.globalAlpha = 1;
     }
+
+    // ── 合批提交 ────────────────────────────────────────────────
+    // 同一批内的 clip 互不遮挡 ⇒ 按「样式」分组累积进 Path2D，最后每种样式
+    // 只发一次 fill / stroke。样式种类由轨道色数与选中态决定，通常是个位数，
+    // 因此绘制调用数从「clip 数 × 每 clip 操作数」塌缩到「样式数 × 2」。
+    interface FillGroup {
+        style: string;
+        alpha: number;
+        path: Path2D;
+    }
+    interface StrokeGroup {
+        style: string;
+        lineWidth: number;
+        path: Path2D;
+    }
+
+    const pending: PreparedClip[] = [];
+
+    function flushBatch(): void {
+        if (pending.length === 0) return;
+
+        const fillGroups = new Map<string, FillGroup>();
+        const strokeGroups = new Map<string, StrokeGroup>();
+
+        for (const item of pending) {
+            for (const op of item.fills) {
+                if (op.w <= 0 || op.h <= 0) continue;
+                const key = `${op.style}|${op.alpha}`;
+                let group = fillGroups.get(key);
+                if (group === undefined) {
+                    group = { style: op.style, alpha: op.alpha, path: new Path2D() };
+                    fillGroups.set(key, group);
+                }
+                group.path.roundRect(op.x, op.y, op.w, op.h, op.radii);
+            }
+            for (const op of item.strokes) {
+                if (op.w <= 0 || op.h <= 0) continue;
+                const key = `${op.style}|${op.lineWidth}`;
+                let group = strokeGroups.get(key);
+                if (group === undefined) {
+                    group = { style: op.style, lineWidth: op.lineWidth, path: new Path2D() };
+                    strokeGroups.set(key, group);
+                }
+                group.path.roundRect(op.x, op.y, op.w, op.h, op.radii);
+            }
+        }
+
+        for (const group of fillGroups.values()) {
+            ctx.globalAlpha = group.alpha;
+            ctx.fillStyle = group.style;
+            ctx.fill(group.path);
+        }
+        for (const group of strokeGroups.values()) {
+            ctx.globalAlpha = 1;
+            ctx.strokeStyle = group.style;
+            ctx.lineWidth = group.lineWidth;
+            ctx.stroke(group.path);
+        }
+        ctx.globalAlpha = 1;
+
+        // 细节层必须在本批次的填充与描边**之后**逐 clip 绘制。
+        for (const item of pending) drawClipDetails(item);
+
+        pending.length = 0;
+    }
+
+    for (const clip of args.clips) {
+        const item = prepareClip(clip);
+        if (item.barrier) flushBatch();
+        pending.push(item);
+    }
+    flushBatch();
 }
