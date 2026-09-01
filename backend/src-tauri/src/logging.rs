@@ -162,6 +162,17 @@ fn default_log_file_path() -> Option<PathBuf> {
 
 struct StderrLogger;
 
+/// 第三方库经 `log` 门面输出的 info 级日志过于啰嗦（例如 symphonia 的 MP3
+/// demuxer 每次解析都会输出 "using xing header for duration"，一次会话可产生
+/// 数百条），按 target 前缀把这些库的 Warn 以下日志丢弃；Warn 及以上保留。
+const DEMOTED_TARGETS: &[(&str, log::LevelFilter)] = &[("symphonia", log::LevelFilter::Warn)];
+
+fn is_demoted(target: &str, level: log::Level) -> bool {
+    DEMOTED_TARGETS
+        .iter()
+        .any(|(prefix, min_level)| target.starts_with(prefix) && level_filter_of(level) > *min_level)
+}
+
 impl log::Log for StderrLogger {
     fn enabled(&self, metadata: &log::Metadata) -> bool {
         metadata.level() <= log::max_level()
@@ -169,6 +180,9 @@ impl log::Log for StderrLogger {
 
     fn log(&self, record: &log::Record) {
         if !self.enabled(record.metadata()) {
+            return;
+        }
+        if is_demoted(record.metadata().target(), record.level()) {
             return;
         }
         // 单次 writeln 保证多线程下行不交错；时间戳由 tee 线程统一补充。
@@ -579,5 +593,18 @@ mod tests {
         assert_eq!(short_source("src\\commands\\playback.rs"), "playback.rs");
         assert_eq!(short_source("src/renderer/vslib_processor.rs"), "vslib_processor.rs");
         assert_eq!(short_source("plain.rs"), "plain.rs");
+    }
+
+    #[test]
+    fn third_party_info_is_demoted() {
+        // symphonia 的 info/debug 被丢弃
+        assert!(is_demoted("symphonia_bundle_mp3::demuxer", log::Level::Info));
+        assert!(is_demoted("symphonia_core::io", log::Level::Debug));
+        // symphonia 的 warn/error 保留
+        assert!(!is_demoted("symphonia_bundle_mp3::demuxer", log::Level::Warn));
+        assert!(!is_demoted("symphonia_bundle_mp3::demuxer", log::Level::Error));
+        // 其他 target 不受影响
+        assert!(!is_demoted("audio_engine", log::Level::Info));
+        assert!(!is_demoted("symphonicax::noisy", log::Level::Info)); // 前缀不匹配
     }
 }

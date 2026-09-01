@@ -1323,7 +1323,7 @@ pub fn infer_pitch_edit_chunked_optimized(
 
         let total_chunks = (t + CHUNK_MAX_FRAMES - 1) / CHUNK_MAX_FRAMES;
         let processed_before = cached_chunks.len();
-        log::warn!(
+        debug_eprintln!(
             "[nsf_hifigan] chunked_opt: t={} chunks={} cached={} infer={}",
             t,
             total_chunks,
@@ -1356,7 +1356,7 @@ pub fn infer_pitch_edit_chunked_optimized(
 
             let t_batch = std::time::Instant::now();
             let batch_results = sess.run_model_batch(&batch_items)?;
-            log::warn!(
+            debug_eprintln!(
                 "[nsf_hifigan] chunked_opt: batch_gpu={}ms for {} chunks",
                 t_batch.elapsed().as_millis(),
                 batch_results.len()
