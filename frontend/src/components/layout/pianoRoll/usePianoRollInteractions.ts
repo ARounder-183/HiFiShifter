@@ -196,8 +196,10 @@ export function usePianoRollInteractions(args: {
     vibratoDragFrequencyDecreaseKb: Keybinding;
     /** 右键菜单回调 */
     onContextMenu?: (x: number, y: number) => void;
-    /** 播放头位置（秒）用于以播放头为中心缩放 */
-    playheadSec?: number;
+    /** 播放头位置（秒）读取器，用于以播放头为中心缩放。播放中必须返回与
+     *  绘制同源的视觉插值值（rAF 逐帧更新），不能用轮询的 store 滞后值——
+     *  以滞后值锚定会让缩放提交时播放头跳变 δ·Δpx。 */
+    getPlayheadSec?: () => number;
     /** 是否以播放头为中心缩放 */
     playheadZoomEnabled?: boolean;
     /** 参数编辑器左键按下时是否同步调整播放头 */
@@ -304,7 +306,7 @@ export function usePianoRollInteractions(args: {
         vibratoDragAmplitudeDecreaseKb,
         vibratoDragFrequencyIncreaseKb,
         vibratoDragFrequencyDecreaseKb,
-        playheadSec,
+        getPlayheadSec,
         playheadZoomEnabled,
         paramEditorSeekPlayheadEnabled,
         paramValuePopupEnabled,
@@ -1726,7 +1728,7 @@ export function usePianoRollInteractions(args: {
                 totalSec,
                 viewportWidth: el.clientWidth,
                 playheadZoomEnabled: Boolean(playheadZoomEnabled),
-                playheadSec: playheadSec ?? null,
+                playheadSec: getPlayheadSec?.() ?? null,
                 anchorScreenX: pointerXRaw,
                 minPxPerSec,
                 maxPxPerSec: MAX_PX_PER_SEC,
@@ -1766,7 +1768,7 @@ export function usePianoRollInteractions(args: {
             vibratoFrequencyAdjustKb,
             applyVibratoDragAdjustment,
             dynamicProjectSec,
-            playheadSec,
+            getPlayheadSec,
             playheadZoomEnabled,
             currentParamRange,
             pxPerSecRef,

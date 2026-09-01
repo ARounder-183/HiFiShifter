@@ -152,4 +152,19 @@ test("services/invoke.test.ts scripted checks", async () => {
         { paths: ["a.wav", "b.wav"], trackId: "track-1", startSec: 2.5 },
         "import_media_files_as_takes mapping",
     );
+    assertEqual(
+        buildTauriArgs("export_diagnostics", ["C:/out/diagnostics.zip"]),
+        { outputPath: "C:/out/diagnostics.zip" },
+        "export_diagnostics mapping",
+    );
+    assertEqual(
+        buildTauriArgs("log_frontend_error", ["Invoke failed: x", "stack..."]),
+        { message: "Invoke failed: x", detail: "stack..." },
+        "log_frontend_error mapping",
+    );
+    assertEqual(
+        buildTauriArgs("log_frontend_error", ["Invoke failed: x"]),
+        { message: "Invoke failed: x", detail: null },
+        "log_frontend_error mapping (no detail)",
+    );
 });

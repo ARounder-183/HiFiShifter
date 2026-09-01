@@ -35,6 +35,12 @@ import { expandClipIdsWithGroups } from "./useGroupExpansion";
 export interface UseTimelineEventHandlersArgs {
     dispatch: AppDispatch;
     sessionRef: React.MutableRefObject<RootState["session"]>;
+    /**
+     * 读取当前播放头（秒）。播放中必须返回与绘制同源的视觉插值值
+     * （rAF 逐帧更新），不能用 33Hz 轮询的 store 滞后值——以滞后值锚定
+     * 会让缩放提交时播放头跳变 δ·Δpx。未提供时回退 sessionRef。
+     */
+    getPlayheadSec?: () => number;
     scrollRef: React.MutableRefObject<HTMLDivElement | null>;
     trackListScrollRef: React.MutableRefObject<HTMLDivElement | null>;
     pxPerSecRef: React.MutableRefObject<number>;
@@ -106,6 +112,7 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
     const {
         dispatch,
         sessionRef,
+        getPlayheadSec,
         scrollRef,
         trackListScrollRef,
         pxPerSecRef,
@@ -372,7 +379,9 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
                 totalSec: dynamicProjectSec,
                 viewportWidth: scroller.clientWidth,
                 playheadZoomEnabled: true,
-                playheadSec: Number(sessionRef.current.playheadSec ?? 0) || 0,
+                playheadSec: getPlayheadSec
+                    ? getPlayheadSec()
+                    : Number(sessionRef.current.playheadSec ?? 0) || 0,
                 anchorScreenX: 0,
                 minPxPerSec: resolveTimelineMinPxPerSec({
                     baseMinPxPerSec: MIN_PX_PER_SEC,
@@ -404,6 +413,7 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
         // eslint-disable-next-line react-hooks/exhaustive-deps -- dynamicProjectSec 随工程变化，加入依赖会让监听在工程变化时重建（既有模式）
     }, [
         commitScrollLeftState,
+        getPlayheadSec,
         keyboardZoomPendingRef,
         pxPerSecRef,
         scrollRef,
@@ -436,7 +446,9 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
             const scroller = scrollRef.current;
             if (!scroller) return;
             const next = computeFocusCursorScrollLeft({
-                playheadSec: Number(sessionRef.current.playheadSec ?? 0) || 0,
+                playheadSec: getPlayheadSec
+                    ? getPlayheadSec()
+                    : Number(sessionRef.current.playheadSec ?? 0) || 0,
                 pxPerSec,
                 contentWidth: dynamicProjectSec * pxPerSec,
             });
@@ -447,5 +459,12 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
         }
         window.addEventListener("hifi:focusCursor", handler);
         return () => window.removeEventListener("hifi:focusCursor", handler);
-    }, [pxPerSec, sessionRef, syncScrollLeft, dynamicProjectSec, scrollRef]);
+    }, [
+        getPlayheadSec,
+        pxPerSec,
+        sessionRef,
+        syncScrollLeft,
+        dynamicProjectSec,
+        scrollRef,
+    ]);
 }

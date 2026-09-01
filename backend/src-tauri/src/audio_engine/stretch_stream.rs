@@ -54,20 +54,20 @@ pub(crate) fn spawn_stretch_stream(
     thread::spawn(move || {
         let pr = playback_rate;
         let time_ratio = 1.0 / pr.max(1e-6);
-        eprintln!(
+        log::warn!(
             "[StretchStream] Starting worker: playback_rate={:.3}, time_ratio={:.6}",
             pr, time_ratio
         );
-        eprintln!(
+        log::warn!(
             "[StretchStream] Interpretation: playback_rate={:.3}x means audio plays {:.3}x faster",
             pr, pr
         );
-        eprintln!("[StretchStream] SoundTouch time_ratio={:.6} means stretched duration is {:.6}x original", time_ratio, time_ratio);
+        log::warn!("[StretchStream] SoundTouch time_ratio={:.6} means stretched duration is {:.6}x original", time_ratio, time_ratio);
         let mut rb =
             match crate::soundtouch::RealtimeStretcher::new(out_rate, 2, time_ratio) {
                 Ok(v) => v,
                 Err(e) => {
-                    eprintln!(
+                    log::error!(
                         "[StretchStream ERROR] Failed to create SoundTouch stretcher: {}",
                         e
                     );

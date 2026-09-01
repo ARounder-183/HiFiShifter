@@ -293,7 +293,17 @@ export const zhTW = {
     import_audio_failed: "匯入媒體檔案失敗",
     status_project_version_confirmation: "工程檔案版本確認",
 
+    menu_open_log_folder: "開啟日誌資料夾",
+    menu_export_diagnostics: "匯出診斷資訊…",
+    menu_open_log_folder_failed: "無法開啟日誌資料夾",
+    menu_export_diagnostics_failed: "匯出診斷資訊失敗",
     menu_about: "關於 HiFiShifter",
+    about_intro:
+        "HiFiShifter 是一款圖形化人聲編輯與合成工具。支援多軌道音訊塊處理，以軌道組為單位使用多種聲碼器完成人聲修音與人力調參，實現人力 VOCALOID 製作的拼調一體化。",
+    about_version: "版本",
+    about_commit: "Commit",
+    about_dirty: "本地有未提交修改",
+    about_open_repo: "前往 GitHub 儲存庫",
     glue: "膠合",
     group: "編組",
     ungroup: "解組",

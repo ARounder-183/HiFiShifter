@@ -155,12 +155,12 @@ pub fn drop_shared_session() {
         for _ in 0..10 {
             if let Ok(mut guard) = mutex.try_lock() {
                 *guard = None;
-                eprintln!("[fcpe] shared session dropped");
+                log::error!("[fcpe] shared session dropped");
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        eprintln!("[fcpe] WARNING: could not acquire SHARED_SESSION lock at shutdown — giving up");
+        log::error!("[fcpe] WARNING: could not acquire SHARED_SESSION lock at shutdown — giving up");
     }
 }
 
@@ -185,7 +185,7 @@ pub fn is_available() -> bool {
         Ok(()) => true,
         Err(e) => {
             if debug_enabled() && !LOGGED_UNAVAILABLE.swap(true, Ordering::Relaxed) {
-                eprintln!("fcpe_onnx: unavailable: {e}");
+                log::warn!("fcpe_onnx: unavailable: {e}");
             }
             false
         }
@@ -559,7 +559,7 @@ fn run_with_named_inputs(
     };
 
     if debug_enabled() {
-        eprintln!("fcpe_onnx: model io = {io_summary}");
+        log::warn!("fcpe_onnx: model io = {io_summary}");
     }
 
     if input_meta.len() == 1 {

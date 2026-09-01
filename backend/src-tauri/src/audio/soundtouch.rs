@@ -235,7 +235,7 @@ impl RealtimeStretcher {
             SoundTouchState::new(sample_rate, channels, time_ratio).map_err(|e| e.to_string())?;
         if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
             if let Some(version) = version_string() {
-                eprintln!(
+                log::warn!(
                     "[SoundTouch] Created realtime stretcher: sr={} ch={} ratio={:.6} version={}",
                     sample_rate, channels, time_ratio, version
                 );

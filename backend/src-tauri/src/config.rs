@@ -1020,7 +1020,7 @@ fn load_config(config_dir: &Path) -> AppConfig {
         Ok(cfg) => cfg,
         Err(e) => {
             // 解析失败不能无痕回退默认值：那会静默丢掉全部用户设置。
-            eprintln!("app_config.json parse failed ({e}); trying .bak fallback");
+            log::error!("app_config.json parse failed ({e}); trying .bak fallback");
             let bak = config_dir.join("app_config.json.bak");
             if let Ok(bak_data) = fs::read_to_string(&bak) {
                 if let Ok(cfg) = serde_json::from_str::<AppConfig>(&bak_data) {
@@ -1050,7 +1050,7 @@ fn save_config(config_dir: &Path, cfg: &AppConfig) {
                 let _ = fs::write(config_dir.join("app_config.json.bak"), &data);
             }
             Err(e) => {
-                eprintln!("app_config.json save failed: {e}");
+                log::error!("app_config.json save failed: {e}");
                 let _ = fs::remove_file(&tmp);
             }
         }

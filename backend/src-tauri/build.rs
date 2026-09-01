@@ -1,4 +1,6 @@
 fn main() {
+    emit_git_info();
+
     build_frontend();
 
     // Allow skipping expensive native builds in CI checks via env var
@@ -48,6 +50,10 @@ fn main() {
     // cannot compile.  The generated file is gitignored and produced on
     // demand during the build.
     generate_coreml_model_variant();
+
+    // Bake git build info (commit / dirty flag / GitHub repo URL) into the
+    // binary for the About dialog, log banners and diagnostics export.
+    emit_git_info();
 
     // tauri_build validates resources listed in tauri.conf.json and its
     // platform-specific merges (tauri.windows.conf.json, tauri.linux.conf.json),
@@ -1520,3 +1526,77 @@ fn generate_coreml_model_variant() {
 
 #[cfg(not(target_os = "macos"))]
 fn generate_coreml_model_variant() {}
+
+// ── git 构建信息 ────────────────────────────────────────────────────
+//
+// 把当前 commit / 脏工作区标志 / GitHub 仓库链接烘进二进制，供关于对话框、
+// 日志会话头与诊断包展示，便于把用户日志精确追溯到某一份构建。
+//
+// 缓存语义说明：一旦打印 `rerun-if-changed`，cargo 的“包内任意文件变化即
+// 重跑 build script”默认行为即被替换。这里只声明 .git/HEAD 与其指向的 ref
+// 文件——commit/checkout 后会重跑；但不提交的源码编辑不会重跑本脚本，
+// 脏标志可能滞后一次构建（commit 哈希本身仍指向最后一次提交，语义正确）。
+
+#[path = "src/build_git.rs"]
+mod build_git;
+
+/// 运行 git 命令并返回 trim 后的 stdout；git 不可用或命令失败时返回 None。
+fn git_output(args: &[&str]) -> Option<String> {
+    let out = std::process::Command::new("git").args(args).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(out.stdout).ok()?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn emit_git_info() {
+    // commit/checkout（以及 ref 变化）会让本脚本重跑，哈希保持新鲜。
+    let head = std::path::Path::new(".git/HEAD");
+    if head.exists() {
+        println!("cargo:rerun-if-changed=.git/HEAD");
+        if let Ok(content) = std::fs::read_to_string(head) {
+            let content = content.trim();
+            if let Some(reference) = content.strip_prefix("ref: ") {
+                let ref_path = std::path::Path::new(".git").join(reference);
+                if ref_path.exists() {
+                    println!("cargo:rerun-if-changed={}", ref_path.display());
+                }
+                // 分支可能存储在 packed-refs 中。
+                let packed = std::path::Path::new(".git/packed-refs");
+                if packed.exists() {
+                    println!("cargo:rerun-if-changed={}", packed.display());
+                }
+            }
+        }
+    }
+
+    let full = git_output(&["rev-parse", "HEAD"]);
+    let Some(full) = full else {
+        // 非 git 构建（如 GitHub 源码 zip）：注入空值，运行时回退为纯版本号。
+        println!("cargo:rustc-env=HIFISHIFTER_GIT_COMMIT=");
+        println!("cargo:rustc-env=HIFISHIFTER_GIT_COMMIT_SHORT=");
+        println!("cargo:rustc-env=HIFISHIFTER_GIT_DIRTY=false");
+        println!("cargo:rustc-env=HIFISHIFTER_GIT_REPO_URL=");
+        return;
+    };
+
+    let short = git_output(&["rev-parse", "--short=9", "HEAD"])
+        .unwrap_or_else(|| full.chars().take(9).collect());
+    let dirty = git_output(&["status", "--porcelain"])
+        .map(|status| build_git::is_dirty(&status))
+        .unwrap_or(false);
+    let repo_url = git_output(&["config", "--get", "remote.origin.url"])
+        .and_then(|raw| build_git::normalize_github_remote_url(&raw))
+        .unwrap_or_default();
+
+    println!("cargo:rustc-env=HIFISHIFTER_GIT_COMMIT={full}");
+    println!("cargo:rustc-env=HIFISHIFTER_GIT_COMMIT_SHORT={short}");
+    println!("cargo:rustc-env=HIFISHIFTER_GIT_DIRTY={dirty}");
+    println!("cargo:rustc-env=HIFISHIFTER_GIT_REPO_URL={repo_url}");
+}

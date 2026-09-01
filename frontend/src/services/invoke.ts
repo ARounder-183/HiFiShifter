@@ -4,6 +4,8 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+import { reportFrontendError } from "./frontendErrorLog";
+
 declare global {
     interface Window {
         pywebview?: {
@@ -672,6 +674,12 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
         case "end_undo_group":
             return undefined;
 
+        case "export_diagnostics":
+            return { outputPath: args[0] };
+
+        case "log_frontend_error":
+            return { message: args[0], detail: args[1] ?? null };
+
         default:
             return { __unwired: true };
     }
@@ -691,6 +699,7 @@ export async function invoke<T>(method: string, ...args: unknown[]): Promise<T> 
                 return await tauriInvoke<T>(method);
             } catch (err) {
                 console.error("Tauri invoke failed", { method, err });
+                reportFrontendError(`Invoke failed: ${method}`, err);
                 throw new BackendInvokeError({
                     mode: "tauri",
                     method,
@@ -703,6 +712,7 @@ export async function invoke<T>(method: string, ...args: unknown[]): Promise<T> 
             return await tauriInvoke<T>(method, invokeArgs);
         } catch (err) {
             console.error("Tauri invoke failed", { method, invokeArgs, err });
+            reportFrontendError(`Invoke failed: ${method}`, err);
             throw new BackendInvokeError({
                 mode: "tauri",
                 method,

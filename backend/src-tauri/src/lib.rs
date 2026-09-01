@@ -1,12 +1,33 @@
-/// 仅在 Debug 模式下编译并执行打印。
-/// 定义在 crate 根，供所有子模块（引擎 worker、snapshot、pitch 等
-/// 热路径）使用，避免 release 下 stderr I/O 拖慢命令处理。
+/// 热路径调试日志：经 `log::debug!` 走统一日志管线，release 默认 Info 级别下
+/// 不产生格式化开销；需要诊断时用 `HIFISHIFTER_LOG=debug` 临时打开。
+/// 定义在 crate 根，供所有子模块（引擎 worker、snapshot、pitch 等）使用。
 macro_rules! debug_eprintln {
     ($($arg:tt)*) => {
-        #[cfg(debug_assertions)]
-        std::eprintln!($($arg)*);
+        log::debug!($($arg)*);
     }
 }
+
+/// 限流警告：同一调用点每 10 秒最多输出一条，窗口内被抑制的条数会在
+/// 下一条输出前以 `[throttled]` 汇总行补记。用于循环 / 回调 / 逐轮询路径上
+/// 可能连发的警告，避免刷屏挤占日志轮转额度。
+macro_rules! log_warn_limited {
+    ($($arg:tt)*) => {
+        $crate::logging::emit_limited(log::Level::Warn, file!(), line!(), format_args!($($arg)*))
+    };
+}
+
+/// 限流错误：语义同 [`log_warn_limited!`]，级别为 error。
+macro_rules! log_error_limited {
+    ($($arg:tt)*) => {
+        $crate::logging::emit_limited(log::Level::Error, file!(), line!(), format_args!($($arg)*))
+    };
+}
+
+pub mod logging;
+mod zip_util;
+mod build_info;
+#[cfg(test)]
+mod build_git;
 
 mod audio_engine;
 #[path = "audio/audio_utils.rs"]
@@ -223,7 +244,7 @@ pub fn run() {
                 let dri_dir = format!("{appdir}/usr/lib/dri");
                 if std::path::Path::new(&dri_dir).is_dir() {
                     std::env::set_var("LIBGL_DRIVERS_PATH", &dri_dir);
-                    eprintln!("[setup] LIBGL_DRIVERS_PATH={dri_dir}");
+                    log::warn!("[setup] LIBGL_DRIVERS_PATH={dri_dir}");
                 }
             }
 
@@ -378,6 +399,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::ping,
+            commands::get_about_info,
         commands::analyze_clip_formants,
             commands::get_runtime_info,
             commands::consume_startup_project_path,
@@ -503,6 +525,10 @@ pub fn run() {
             commands::cancel_background_render,
             commands::debug_realtime_render_stats,
             commands::get_pitch_analysis_progress,
+            commands::open_log_folder,
+            commands::pick_diagnostics_output_path,
+            commands::export_diagnostics,
+            commands::log_frontend_error,
             commands::get_onnx_status,
             commands::get_onnx_diagnostic,
             commands::run_vocoder_benchmark,

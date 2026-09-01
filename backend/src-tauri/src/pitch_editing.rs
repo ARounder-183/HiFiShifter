@@ -1422,7 +1422,7 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
         return Ok(false);
     }
 
-    eprintln!(
+    debug_eprintln!(
         "[pitch_edit] clip_id={} algo={:?} seg=[{:.3},{:.3}) compose_enabled={} user_modified={}",
         clip.id,
         algo,
@@ -1579,7 +1579,7 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
             extra_params,
         };
         if is_vslib {
-            eprintln!(
+            debug_eprintln!(
                 "[pitch_edit:vslib] dispatch clip_id={} processor={} available={} handles_stretch={} in_frames={} out_frames={} seg=[{:.3},{:.3}) rate={:.3}",
                 clip.id,
                 processor.id(),
@@ -1596,7 +1596,7 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
         if is_vslib {
             let nonzero = out.iter().filter(|&&v| v.abs() > 1e-6).count();
             let peak = out.iter().fold(0.0f32, |acc, &v| acc.max(v.abs()));
-            eprintln!(
+            debug_eprintln!(
                 "[pitch_edit:vslib] result clip_id={} out_frames={} nonzero={} peak={:.6}",
                 clip.id,
                 out.len(),
@@ -1612,7 +1612,7 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
     };
 
     if processed.len() != expected_out_frames {
-        eprintln!(
+        log_warn_limited!(
             "pitch_edit: output length mismatch (got {}, expected {}), adjusting",
             processed.len(),
             expected_out_frames
@@ -1765,7 +1765,7 @@ pub fn does_clip_need_processor_render(
     // 例外：needs_processor_stretch 时必须触发预渲染以执行其内部拉伸。
     // 例外：has_pitch_adjustment_active 时，音高参考块提供的 MIDI 音高数据已写入 pitch_edit，
     //       即使 pitch_edit_user_modified 为 false 也应触发渲染。
-    eprintln!("[pitch_edit] does_clip_need_processor_render: clip={} user_modified={} has_adj={} extra={} tension={} formant={} child_off={} child_formant={} stretch={}",
+    debug_eprintln!("[pitch_edit] does_clip_need_processor_render: clip={} user_modified={} has_adj={} extra={} tension={} formant={} child_off={} child_formant={} stretch={}",
         clip.id, entry.pitch_edit_user_modified, entry.has_pitch_adjustment_active,
         extra_processing, tension_processing, formant_processing, has_child_pitch_offset,
         has_child_formant_offset, needs_processor_stretch);

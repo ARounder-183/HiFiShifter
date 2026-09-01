@@ -24,10 +24,10 @@ pub fn remove_old_synth_temp(old_path: Option<&str>) {
         if path.exists() {
             match fs::remove_file(path) {
                 Ok(()) => {
-                    eprintln!("[temp_manager] 已删除旧 synth 临时文件: {}", path.display());
+                    log::warn!("[temp_manager] 已删除旧 synth 临时文件: {}", path.display());
                 }
                 Err(e) => {
-                    eprintln!(
+                    log::warn!(
                         "[temp_manager] 删除旧 synth 临时文件失败: {} — {}",
                         path.display(),
                         e
@@ -65,7 +65,7 @@ pub fn cleanup_stale_temp_files() {
         total_bytes += bytes;
 
         if total_removed > 0 {
-            eprintln!(
+            log::warn!(
                 "[temp_manager] 启动清理完成: 删除 {} 个遗留临时文件, 释放 {:.1} KB",
                 total_removed,
                 total_bytes as f64 / 1024.0,
@@ -107,7 +107,7 @@ fn cleanup_dir_by_prefix(dir: &Path, prefixes: &[&str]) -> (u64, u64) {
                 removed += 1;
             }
             Err(e) => {
-                eprintln!("[temp_manager] 清理失败: {} — {}", path.display(), e);
+                log::warn!("[temp_manager] 清理失败: {} — {}", path.display(), e);
             }
         }
     }

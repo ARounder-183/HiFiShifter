@@ -1597,7 +1597,7 @@ impl HfsPeaksCache {
 
         // 保存到缓存
         if let Err(e) = self.save(source_path, &peaks) {
-            eprintln!("Warning: failed to save peaks cache: {}", e);
+            log::error!("Warning: failed to save peaks cache: {}", e);
         }
 
         Ok(peaks)

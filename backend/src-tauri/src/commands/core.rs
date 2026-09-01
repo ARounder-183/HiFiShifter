@@ -9,6 +9,18 @@ pub(super) fn get_runtime_info(state: State<'_, AppState>) -> crate::models::Run
     state.runtime_info()
 }
 
+/// 关于对话框数据：版本号、commit（非 git 构建为 null）、脏标志与
+/// GitHub 仓库链接（上游非 GitHub 时为 null，前端回退固定链接）。
+pub(super) fn get_about_info() -> serde_json::Value {
+    serde_json::json!({
+        "version": crate::build_info::version(),
+        "commit": crate::build_info::commit_full(),
+        "commitShort": crate::build_info::commit_short(),
+        "dirty": crate::build_info::dirty(),
+        "repoUrl": crate::build_info::repo_url(),
+    })
+}
+
 pub(super) fn consume_startup_project_path(state: State<'_, AppState>) -> serde_json::Value {
     let path = state.take_pending_startup_project_path();
     serde_json::json!({ "ok": true, "path": path })
@@ -93,7 +105,7 @@ pub(super) fn set_transport(
     bpm: Option<f64>,
 ) -> serde_json::Value {
     if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
-        eprintln!(
+        log::warn!(
             "set_transport(playhead_sec={:?}, bpm={:?})",
             playhead_sec, bpm
         );

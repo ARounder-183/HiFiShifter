@@ -289,6 +289,28 @@ $env:TAURI_UI_MODE='build'; cargo tauri dev
 
 **注意：** 首次编译需要很长的时间，请耐心等待
 
+## 日志与故障排查
+
+应用会自动把运行日志写入系统标准日志目录，无需任何命令行参数：
+
+| 系统 | 日志目录 |
+| --- | --- |
+| Windows | `%LOCALAPPDATA%\com.arounder.hifishifter\logs` |
+| macOS | `~/Library/Logs/com.arounder.hifishifter` |
+| Linux | `~/.local/share/com.arounder.hifishifter/logs` |
+
+- 在应用内通过 **帮助 → 打开日志文件夹** 可以直接定位日志；**帮助 → 导出诊断信息** 可以一键生成诊断包（系统信息 + 全部日志 + 推理设备基准测试结果），提交 issue 时附上即可。
+- 日志按大小自动轮转：单个文件上限 8 MiB，默认保留 3 份历史（`hifishifter.1.log` … `hifishifter.3.log`）。
+  - 高频重复的错误 / 警告会自动限流：同一位置的日志默认每 10 秒最多输出一条，被抑制的条数会在下一条输出前以 `[throttled]` 汇总行补记。
+- 前端与后端的错误都会统一记录在同一份日志文件里，方便按时间轴对照排查。
+
+高级选项：
+
+- 启动参数 `--log-file=<path>`：把日志写到指定路径；`--log-file=-` 显式关闭文件日志。
+- 环境变量 `HIFISHIFTER_LOG=debug`（或 `trace` / `info` / `warn` / `error`）：调整日志详细程度。
+- 环境变量 `HIFISHIFTER_LOG_DIR`：覆盖默认日志目录。
+- 终端运行 `HiFiShifter --benchmark`：直接执行推理设备基准测试并输出 JSON 结果。
+
 ## 文档
 
 - [使用手册](docs/i18n/USERMANUAL.md)

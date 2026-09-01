@@ -104,7 +104,7 @@ fn try_enumerate_dxgi() -> Result<Vec<DmlAdapterInfo>, String> {
                 if e.code().0 as u32 == 0x887A0002 {
                     break;
                 }
-                eprintln!("dml_adapters: EnumAdapters1({index}) failed: {e:?}");
+                log::error!("dml_adapters: EnumAdapters1({index}) failed: {e:?}");
                 break;
             }
         }
@@ -120,7 +120,7 @@ fn try_enumerate_dxgi() -> Result<Vec<DmlAdapterInfo>, String> {
     // After sorting, first adapter = recommended (most VRAM = dGPU).
     // The device_id field still holds the true DXGI index for DirectML.
 
-    eprintln!(
+    log::warn!(
         "dml_adapters: enumerated {} unique DXGI GPU adapters ({} total indices scanned)",
         adapters.len(),
         index

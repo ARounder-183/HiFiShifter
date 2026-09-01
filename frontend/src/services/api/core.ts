@@ -72,6 +72,16 @@ export interface QuickExportSelectedClipsRequest {
 export const coreApi = {
     ping: () => invoke<{ ok: boolean; message: string }>("ping"),
     getRuntimeInfo: () => invoke<RuntimeInfo>("get_runtime_info"),
+    /** 关于对话框数据：commit 为 null 表示非 git 构建；repoUrl 为 null 表示
+     *  上游不是 GitHub（前端回退固定链接）。 */
+    getAboutInfo: () =>
+        invoke<{
+            version: string;
+            commit?: string | null;
+            commitShort?: string | null;
+            dirty?: boolean;
+            repoUrl?: string | null;
+        }>("get_about_info"),
     getPlaybackState: () => invoke<PlaybackStateResult>("get_playback_state"),
 
     setUiLocale: (locale: string) =>

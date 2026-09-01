@@ -263,11 +263,11 @@ fn write_contents(
         // auxiliary format must never fail the user's copy.
         if let (Some(format), Some(reaper_bytes)) = (reaper_format.as_ref(), reaper_bytes) {
             if let Err(error) = raw::set_without_clear(format.get(), reaper_bytes) {
-                eprintln!("[hifishifter] reaper clipboard write failed: {error}");
+                log::error!("[hifishifter] reaper clipboard write failed: {error}");
             }
         }
         if let Err(error) = raw::set_string_with(text_summary, clipboard_win::options::NoClear) {
-            eprintln!("[hifishifter] clipboard text write failed: {error}");
+            log::error!("[hifishifter] clipboard text write failed: {error}");
         }
 
         return Ok(());
@@ -355,7 +355,7 @@ fn write_contents(
         let reaper_data = NSData::with_bytes(reaper_bytes);
         let reaper_format_ns = NSString::from_str(REAPER_MEDIA_FORMAT);
         if !pasteboard.setData_forType(Some(&reaper_data), &reaper_format_ns) {
-            eprintln!("[hifishifter] reaper clipboard write failed");
+            log::error!("[hifishifter] reaper clipboard write failed");
         }
     }
 

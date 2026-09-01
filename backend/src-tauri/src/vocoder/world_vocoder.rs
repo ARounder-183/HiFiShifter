@@ -638,7 +638,7 @@ fn vocode_one(
         if debug {
             let voiced_n = voiced.iter().filter(|&&b| b).count();
             let ratio = (voiced_n as f64) / (voiced.len().max(1) as f64);
-            eprintln!(
+            log::warn!(
                 "WORLD vocoder: voiced_ratio={:.3} f0_len={} fp_ms={:.3}",
                 ratio,
                 voiced.len(),

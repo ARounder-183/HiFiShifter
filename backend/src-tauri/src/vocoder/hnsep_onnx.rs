@@ -135,12 +135,12 @@ pub fn drop_shared_session() {
         for _ in 0..10 {
             if let Ok(mut guard) = mutex.try_lock() {
                 *guard = None;
-                eprintln!("[hnsep] shared session dropped");
+                log::error!("[hnsep] shared session dropped");
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        eprintln!("[hnsep] WARNING: could not acquire SHARED_SESSION lock at shutdown — giving up");
+        log::error!("[hnsep] WARNING: could not acquire SHARED_SESSION lock at shutdown — giving up");
     }
 }
 
@@ -165,7 +165,7 @@ pub fn is_available() -> bool {
         Ok(()) => true,
         Err(e) => {
             if debug_enabled() && !LOGGED_UNAVAILABLE.swap(true, Ordering::Relaxed) {
-                eprintln!("hnsep_onnx: unavailable: {e}");
+                log::warn!("hnsep_onnx: unavailable: {e}");
             }
             false
         }
@@ -206,7 +206,7 @@ static HNSEP_CACHE: OnceLock<Mutex<LruCache<u64, HnsepCacheEntry>>> = OnceLock::
 fn global_cache() -> &'static Mutex<LruCache<u64, HnsepCacheEntry>> {
     HNSEP_CACHE.get_or_init(|| {
         let cap = hnsep_cache_initial_capacity();
-        eprintln!("[hnsep] LRU cache initialized with capacity={cap}");
+        log::warn!("[hnsep] LRU cache initialized with capacity={cap}");
         Mutex::new(LruCache::new(
             NonZeroUsize::new(cap).expect("HNSEP cache capacity must be non-zero"),
         ))
@@ -223,7 +223,7 @@ pub fn ensure_cache_capacity(min_capacity: usize) {
     let current_cap = cache.cap().get();
     if next > current_cap {
         cache.resize(NonZeroUsize::new(next).unwrap());
-        eprintln!("[hnsep] LRU cache resized: {current_cap} -> {next}");
+        log::warn!("[hnsep] LRU cache resized: {current_cap} -> {next}");
     }
 }
 
@@ -238,7 +238,7 @@ pub fn clear_separation_cache() {
     let cleared = cache.len();
     cache.clear();
     if cleared > 0 {
-        eprintln!("[hnsep] separation cache cleared ({cleared} entries)");
+        log::warn!("[hnsep] separation cache cleared ({cleared} entries)");
     }
 }
 

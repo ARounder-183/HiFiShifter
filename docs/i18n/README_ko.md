@@ -289,6 +289,28 @@ $env:TAURI_UI_MODE='build'; cargo tauri dev
 
 **참고:** 첫 번째 컴파일은 시간이 오래 걸립니다. 인내심을 가지십시오.
 
+## 로그 및 문제 해결
+
+앱은 실행 로그를 OS 표준 로그 디렉터리에 자동으로 기록합니다. 명령줄 인수가 필요하지 않습니다:
+
+| OS | 로그 디렉터리 |
+| --- | --- |
+| Windows | `%LOCALAPPDATA%\com.arounder.hifishifter\logs` |
+| macOS | `~/Library/Logs/com.arounder.hifishifter` |
+| Linux | `~/.local/share/com.arounder.hifishifter/logs` |
+
+- 앱 내부의 **도움말 → 로그 폴더 열기** 메뉴로 로그 위치를 바로 열 수 있고, **도움말 → 진단 정보 내보내기…** 메뉴로 시스템 정보 + 전체 로그 + 추론 장치 벤치마크 결과가 담긴 진단 패키지를 한 번에 생성할 수 있습니다. 이슈 등록 시 첨부해 주세요.
+- 로그는 크기 기준으로 자동 순환됩니다: 파일당 최대 8 MiB, 최대 3개의 이전 파일 보관 (`hifishifter.1.log` … `hifishifter.3.log`).
+  - 반복되는 오류 / 경고는 자동으로 스로틀링됩니다: 동일한 위치의 로그는 10초 창당 최대 1건만 출력되며, 억제된 건수는 다음 출력 전에 `[throttled]` 행으로 보완 기록됩니다.
+- 프런트엔드와 백엔드 오류가 모두 동일한 로그 파일에 기록되어 하나의 파일로 시간순 추적이 가능합니다.
+
+고급 옵션:
+
+- 실행 인수 `--log-file=<path>`: 로그를 지정한 경로에 기록합니다. `--log-file=-` 은 파일 로그를 명시적으로 비활성화합니다.
+- 환경 변수 `HIFISHIFTER_LOG=debug` (또는 `trace` / `info` / `warn` / `error`): 로그 상세 수준을 조정합니다.
+- 환경 변수 `HIFISHIFTER_LOG_DIR`: 기본 로그 디렉터리를 대체합니다.
+- 터미널에서 `HiFiShifter --benchmark` 실행: 추론 장치 벤치마크를 실행하고 JSON 결과를 출력합니다.
+
 ## 문서
 
 - [사용자 매뉴얼](USERMANUAL_ko.md)

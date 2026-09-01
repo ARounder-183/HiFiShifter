@@ -13,7 +13,6 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use tauri::{Manager, State, Window};
-use zip::write::FileOptions;
 
 fn normalize_scale_key(raw: &str) -> String {
     const SCALE_KEYS: [&str; 12] = [
@@ -606,9 +605,8 @@ fn save_project_archive_to_zip_inner(
     let write_result: Result<(), String> = (|| {
         let file = fs::File::create(&tmp_path).map_err(|e| e.to_string())?;
         let mut zip = zip::ZipWriter::new(file);
-        let options = FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
-        zip.start_file(project_entry_name.clone(), options)
+        zip.start_file(project_entry_name.clone(), crate::zip_util::options_now())
             .map_err(|e| e.to_string())?;
         zip.write_all(&bytes).map_err(|e| e.to_string())?;
 
@@ -619,8 +617,12 @@ fn save_project_archive_to_zip_inner(
             }
             // 使用流式写入，避免将整个文件读入内存。
             let mut src_file = fs::File::open(source_path).map_err(|e| e.to_string())?;
-            zip.start_file(zip_entry, options)
-                .map_err(|e| e.to_string())?;
+            // 保留媒体文件的修改时间等元数据（并允许 >4GiB 的大录音走 ZIP64）。
+            zip.start_file(
+                zip_entry,
+                crate::zip_util::options_for_large_source(Path::new(source_path)),
+            )
+            .map_err(|e| e.to_string())?;
             std::io::copy(&mut src_file, &mut zip).map_err(|e| e.to_string())?;
         }
 
@@ -633,7 +635,7 @@ fn save_project_archive_to_zip_inner(
             "Archive completed at {}",
             Local::now().format("%Y-%m-%d %H:%M:%S")
         ));
-        zip.start_file(log_name.clone(), options)
+        zip.start_file(log_name.clone(), crate::zip_util::options_now())
             .map_err(|e| e.to_string())?;
         let mut log_text = archive_logs.join("\n");
         log_text.push('\n');
@@ -962,7 +964,7 @@ pub(super) fn open_project(
 
     // 打开工程时清除所有渲染缓存，确保旧的预渲染结果不会影响新的播放。
     // 这是修复"音高分析未完成时播放导致音高编辑不生效"问题的关键步骤。
-    eprintln!("[open_project] Clearing all render caches before loading project...");
+    log::warn!("[open_project] Clearing all render caches before loading project...");
     // hnsep 分离缓存键只含 clip_id+采样率+样本数：换工程后同 id/等长 clip
     // 会命中上一个工程的 stems，必须一并清空（低频操作，整体清空可接受）。
     crate::hnsep_onnx::clear_separation_cache();

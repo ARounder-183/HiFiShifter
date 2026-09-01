@@ -15,10 +15,11 @@ export type AppTooltipPosition = {
 /** 气泡内容：纯文本，或含内联 SVG 图标等 ReactNode。 */
 export type AppTooltipContent = string | ReactNode | null;
 
-/** 气泡定位夹紧：预留三行文本（约 56px 高）的底部空间。 */
+/** 气泡定位夹紧：右侧预留约 320px 宽度余量（长链接气泡的上限宽度），
+ *  底部预留三行文本（约 56px 高）的空间。 */
 function clampTooltipPosition(position: AppTooltipPosition): AppTooltipPosition {
     return {
-        x: Math.min(position.x + 14, Math.max(8, window.innerWidth - 260)),
+        x: Math.min(position.x + 14, Math.max(8, window.innerWidth - 320)),
         y: Math.min(position.y + 18, Math.max(8, window.innerHeight - 88)),
     };
 }

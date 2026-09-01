@@ -46,7 +46,7 @@ pub fn invalidate_chunk_cache_for_clip(clip_id: &str) {
             cache.remove(k);
         }
         if !keys.is_empty() {
-            eprintln!(
+            log::warn!(
                 "[hifigan:cache] invalidated {} chunk(s) for clip_id={}",
                 keys.len(),
                 clip_id
@@ -61,7 +61,7 @@ fn debug_enabled() -> bool {
 
 fn chunk_debug(msg: &str) {
     if debug_enabled() {
-        eprintln!("[hifigan-chunk] {msg}");
+        log::warn!("[hifigan-chunk] {msg}");
     }
 }
 
@@ -113,7 +113,7 @@ impl HiFiGanRenderer {
         let pitch_edit = ctx.pitch_edit;
         let clip_midi = ctx.clip_midi;
 
-        eprintln!(
+        debug_eprintln!(
             "[hifigan] render_with_formant: clip_id={} samples={} seg=[{:.3},{:.3})",
             ctx.clip_id,
             ctx.mono_pcm.len(),
@@ -125,7 +125,7 @@ impl HiFiGanRenderer {
         // Harvest 分析尚未完成时 clip_midi 可能为空，此时返回原始 PCM。
         if clip_midi.is_empty() {
             if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
-                eprintln!(
+                log::warn!(
                     "HiFiGanRenderer::render: clip_midi is empty (Harvest not ready?), \
                      skipping inference and returning original PCM"
                 );
@@ -336,7 +336,7 @@ impl HiFiGanRenderer {
         let pitch_edit = ctx.pitch_edit;
         let clip_midi = ctx.clip_midi;
 
-        eprintln!(
+        debug_eprintln!(
             "[hifigan] render_mel_stretch: clip_id={} samples={} rate={:.3}",
             ctx.clip_id,
             ctx.mono_pcm.len(),

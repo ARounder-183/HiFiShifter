@@ -118,7 +118,7 @@ pub(crate) fn decode_resampled_stereo(path: &Path, out_rate: u32) -> Option<Resa
         Ok(v) => v,
         Err(e) => {
             if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
-                eprintln!(
+                log::error!(
                     "AudioEngine: decode failed: path={} err={} ",
                     path.display(),
                     e

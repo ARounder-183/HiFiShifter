@@ -108,7 +108,7 @@ pub fn run_app_capture(
                 run_client_capture(client, sample_rate, channels, ctx.as_ref(), ready_tx)
             }
             Err(primary_err) => {
-                eprintln!(
+                log::warn!(
                     "[recording] process loopback unavailable, using session-muting fallback: {primary_err}"
                 );
                 run_app_capture_fallback(pid, sample_rate, channels, ctx, ready_tx)
