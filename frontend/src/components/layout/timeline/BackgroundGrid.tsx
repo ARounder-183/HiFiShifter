@@ -141,6 +141,8 @@ export const BackgroundGrid: React.FC<{
         swingPercent: Math.max(0, Math.min(100, swingPercent)),
         weakLineXs: effectiveWeakXs,
         strongLineXs: effectiveStrongXs,
+        weakLineXsKey: explicitGridLinesKey(effectiveWeakXs),
+        strongLineXsKey: explicitGridLinesKey(effectiveStrongXs),
         width,
         height,
         contentWidth,
@@ -162,6 +164,8 @@ export const BackgroundGrid: React.FC<{
             swingPercent: Math.max(0, Math.min(100, swingPercent)),
             weakLineXs: effectiveWeakXs,
             strongLineXs: effectiveStrongXs,
+            weakLineXsKey: explicitGridLinesKey(effectiveWeakXs),
+            strongLineXsKey: explicitGridLinesKey(effectiveStrongXs),
             width,
             height,
             contentWidth,
@@ -219,6 +223,11 @@ export const BackgroundGrid: React.FC<{
             // 重绘跳过键必须覆盖**全部**网格线位置：拖动 Tempo Map 的中间变化点时，
             // 受影响的是数组中部以该点为锚的整段线（整体平移），而长度与首尾线不变，
             // 任何抽样校验和都会误判“无需重绘”，造成网格跳变/错位（见 gridLineKey.ts）。
+            //
+            // 因此键由 `latestRef` 提供（`weakLineXsKey` / `strongLineXsKey`），
+            // 与数组一起在渲染期算好——`explicitGridLinesKey` 是 `xs.join(",")`，
+            // 对上百个刻度做一次全量字符串拼接，放在 `draw()` 里就是**每帧两次**
+            // （网格是注册图层）。它只依赖刻度数组，没必要每帧重算。
             // 竖线一根到底、不分段：分段会让每个行边界的端点各自做设备像素
             // 取整，接缝处互相让位，视觉上就是"深浅不一的断线"。
             const ySegments: Array<[number, number]> = [[lineTop, lineBottom]];
@@ -229,8 +238,8 @@ export const BackgroundGrid: React.FC<{
                 latest.weakStepPx,
                 latest.strongStepPx,
                 latest.swingPercent,
-                explicitGridLinesKey(latest.weakLineXs),
-                explicitGridLinesKey(latest.strongLineXs),
+                latest.weakLineXsKey,
+                latest.strongLineXsKey,
                 latest.width,
                 latest.height,
                 latest.contentWidth,

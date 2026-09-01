@@ -23,6 +23,17 @@ function GlobalGestureServices() {
     return null;
 }
 
+// dev-only 性能工程脚手架：动态 import 保证生产构建完全不打包该模块。
+// 用法：`?perf=400`（clip 总数，按 10 轨均分）或 `?perf=10x40`（轨数 × 每轨
+// clip 数）冷启动即全览；运行时也可用控制台 `window.__hsPerf({...})` 重生成。
+if (import.meta.env.DEV) {
+    void import("./dev/perfProject").then((module) => module.installPerfProjectDevtools());
+}
+
+// 帧率探针不再自动挂载：它是排查滚动/缩放掉帧时的临时测量工具，瓶颈
+// 定位完成后已从打包版移除（右上角浮层）。dev 下仍可经 PERF 面板的
+// 「profiler」开关临时开启。
+
 createRoot(document.getElementById("root")!).render(
     <StrictMode>
         <Provider store={store}>

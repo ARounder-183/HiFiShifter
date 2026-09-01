@@ -104,9 +104,19 @@ export function createTimelineFrameCommitter(initial: TimelineAxis): TimelineFra
             const ordered = layers
                 .slice()
                 .sort((a, b) => (a.order === b.order ? a.seq - b.seq : a.order - b.order));
+            // dev 帧率探针：经 globalThis 挂钩上报各图层绘制耗时（毫秒）。
+            // 不做静态 import，生产构建零耦合；未启用探针时只有一次属性查找。
+            const profiler = (globalThis as unknown as Record<string, unknown>)
+                .__hfsFrameProfiler as
+                | { recordLayer(name: string, ms: number): void; recordCommit(ms: number): void }
+                | undefined;
+            const commitStart = profiler ? performance.now() : 0;
             for (const entry of ordered) {
                 try {
+                    const paintStart = profiler ? performance.now() : 0;
                     entry.layer.paint(axis);
+                    if (profiler)
+                        profiler.recordLayer(entry.layer.name, performance.now() - paintStart);
                 } catch (error) {
                     console.error(
                         `[timelineFrame] layer "${entry.layer.name}" paint failed`,
@@ -114,6 +124,7 @@ export function createTimelineFrameCommitter(initial: TimelineAxis): TimelineFra
                     );
                 }
             }
+            if (profiler) profiler.recordCommit(performance.now() - commitStart);
         },
 
         getSnapshot() {

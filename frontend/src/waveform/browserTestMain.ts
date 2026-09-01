@@ -44,8 +44,9 @@ try {
     const data = geometry();
     const webgl = new WebGl2WaveformRenderer(webglCanvas);
     const fallback = new Canvas2dWaveformRenderer(fallbackCanvas);
-    webgl.render(data, 640, 120, window.devicePixelRatio || 1);
-    fallback.render(data, 640, 120, window.devicePixelRatio || 1);
+    // 几何是内容坐标，视口原点取 (0, 0)：测试夹具直接画窗口左上角。
+    webgl.render(data, 640, 120, window.devicePixelRatio || 1, 0, 0);
+    fallback.render(data, 640, 120, window.devicePixelRatio || 1, 0, 0);
 
     const webglPixels = countWebGlPixels(webglCanvas);
     const fallbackPixels = countCanvasPixels(fallbackCanvas);
