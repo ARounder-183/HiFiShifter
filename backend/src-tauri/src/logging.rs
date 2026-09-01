@@ -116,7 +116,7 @@ pub fn init_logging(choice: LogFileChoice) {
     if spawn_stderr_tee(log_path.clone()) {
         log::info!(
             "HiFiShifter v{} ({} {}) starting; log file: {}",
-            env!("CARGO_PKG_VERSION"),
+            crate::build_info::display_version(),
             std::env::consts::OS,
             std::env::consts::ARCH,
             log_path.display()
@@ -457,7 +457,7 @@ impl RotatingLog {
         let _ = writeln!(
             file,
             "==== HiFiShifter v{} ({} {}) log started at {} ====",
-            env!("CARGO_PKG_VERSION"),
+            crate::build_info::display_version(),
             std::env::consts::OS,
             std::env::consts::ARCH,
             chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f")

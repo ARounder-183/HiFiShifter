@@ -73,6 +73,7 @@ import { ExportAudioDialog } from "./ExportAudioDialog";
 import { AutoBackupDialog } from "./AutoBackupDialog";
 import { RecordingSettingsDialog } from "./RecordingSettingsDialog";
 import { BenchmarkDialog } from "./BenchmarkDialog";
+import { AboutDialog } from "./AboutDialog";
 
 import {
     isChildPitchOffsetCentsParam,
@@ -140,6 +141,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     const [autoBackupDialogOpen, setAutoBackupDialogOpen] = useState(false);
     const [recordingDialogOpen, setRecordingDialogOpen] = useState(false);
     const [benchmarkDialogOpen, setBenchmarkDialogOpen] = useState(false);
+    const [aboutDialogOpen, setAboutDialogOpen] = useState(false);
     const [dmlAdapters, setDmlAdapters] = useState<
         { deviceId: number; name: string; memoryMb: number }[]
     >([]);
@@ -1153,12 +1155,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         {tAny("menu_export_diagnostics")}
                     </DropdownMenu.Item>
                     <DropdownMenu.Separator />
-                    <DropdownMenu.Item
-                        onSelect={async () => {
-                            const { openUrl } = await import("@tauri-apps/plugin-opener");
-                            openUrl("https://github.com/ARounder-183/HiFiShifter");
-                        }}
-                    >
+                    <DropdownMenu.Item onSelect={() => setAboutDialogOpen(true)}>
                         {t("menu_about")}
                     </DropdownMenu.Item>
                 </DropdownMenu.Content>
@@ -1224,6 +1221,9 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
             {/* Inference device benchmark */}
             <BenchmarkDialog open={benchmarkDialogOpen} onOpenChange={setBenchmarkDialogOpen} />
+
+            {/* 关于对话框：简介 + 版本 + Commit（可点击跳转源码快照）+ 仓库链接 */}
+            <AboutDialog open={aboutDialogOpen} onOpenChange={setAboutDialogOpen} />
 
             {/* 菜单导入模式选择（多文件） */}
             {menuImportMode && (

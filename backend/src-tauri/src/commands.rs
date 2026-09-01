@@ -82,6 +82,12 @@ pub fn get_runtime_info(state: State<'_, AppState>) -> crate::models::RuntimeInf
     core::get_runtime_info(state)
 }
 
+/// 关于对话框数据（版本 / commit / 仓库链接）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_about_info() -> serde_json::Value {
+    core::get_about_info()
+}
+
 #[tauri::command(rename_all = "camelCase")]
 pub fn consume_startup_project_path(state: State<'_, AppState>) -> serde_json::Value {
     core::consume_startup_project_path(state)

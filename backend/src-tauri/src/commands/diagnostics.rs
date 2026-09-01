@@ -100,7 +100,13 @@ fn build_system_info(state: &State<'_, AppState>) -> serde_json::Value {
     serde_json::json!({
         "app": {
             "name": env!("CARGO_PKG_NAME"),
-            "version": env!("CARGO_PKG_VERSION"),
+            "version": crate::build_info::version(),
+        },
+        "git": {
+            "commit": crate::build_info::commit_full(),
+            "commitShort": crate::build_info::commit_short(),
+            "dirty": crate::build_info::dirty(),
+            "repoUrl": crate::build_info::repo_url(),
         },
         "os": std::env::consts::OS,
         "arch": std::env::consts::ARCH,

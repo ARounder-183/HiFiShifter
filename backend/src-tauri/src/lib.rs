@@ -25,6 +25,9 @@ macro_rules! log_error_limited {
 
 pub mod logging;
 mod zip_util;
+mod build_info;
+#[cfg(test)]
+mod build_git;
 
 mod audio_engine;
 #[path = "audio/audio_utils.rs"]
@@ -396,6 +399,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::ping,
+            commands::get_about_info,
         commands::analyze_clip_formants,
             commands::get_runtime_info,
             commands::consume_startup_project_path,
