@@ -41,9 +41,10 @@ pub(crate) static AUTO_BG_RENDER_ENABLED: std::sync::atomic::AtomicBool =
 /// ★ 生命周期契约：置位与清除必须成对出现，否则标志会永久粘滞。
 ///   - 置位：**只能**通过 `commands::render_cancel::request_global_cancel()`
 ///     （它会同时推进纪元）。调用点有 `cancel_background_render`
-///     （仅当确实有后台渲染在跑）、`request_background_render`（后台渲染在跑
-///     且有新失效时请求重启），以及 `audio_engine/engine.rs` 的缓存失效处理。
-///     请**不要**直接 `store(true, ..)`，那样纪元不推进，新轮次会把它当历史残留忽略。
+///     （仅当确实有后台渲染在跑），以及后台渲染循环的重启静默窗口晋升
+///     （`request_bg_render_restart` 记录的重启请求挂起超过窗口后，由渲染
+///     线程在 clip 边界调用）。请**不要**直接 `store(true, ..)`，那样纪元
+///     不推进，新轮次会把它当历史残留忽略。
 ///   - 清除：`start_background_render` 开头、后台渲染各条退出分支，
 ///     以及 `request_background_render` 的 disabled 分支（兜底）。
 ///
@@ -57,10 +58,55 @@ pub(crate) static AUTO_BG_RENDER_ENABLED: std::sync::atomic::AtomicBool =
 pub(crate) static BG_RENDER_CANCEL: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// 后台渲染重启标志。旧渲染被取消后，若此标志为 true，
-/// 退出线程将自动启动新一轮渲染。
+/// 后台渲染重启标志。缓存失效 / 编辑发生时置位（见 [`request_bg_render_restart`]），
+/// 渲染循环在 clip 边界仅当请求挂起超过静默窗口后才将其升级为实际取消；
+/// 退出线程看到它为 true 时自动启动新一轮渲染。
 pub(crate) static BG_RENDER_RESTART_NEEDED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+
+/// 最近一次重启请求的时间戳（进程启动相对毫秒）。
+/// 0 表示当前没有挂起的请求（`start_background_render` 入口会清零）。
+pub(crate) static BG_RENDER_RESTART_REQUESTED_AT_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// 重启请求的静默窗口（毫秒）：请求挂起超过该时长后，渲染循环才把它升级为
+/// 实际取消并重启。
+///
+/// 背景：工程增量加载 / 连续编辑会以几十毫秒一次的频率使缓存失效并请求重启；
+/// 旧的"失效即取消"实现导致渲染每轮只推进两三个 clip 就被打破（实测一次工程
+/// 加载产生 202 次重启 / 4 分钟）。合流后，窗口内时间戳被持续刷新、当前轮不被
+/// 打断，风暴结束后由退出路径串联的下一轮渲染最终状态。单次编辑最多延迟一个
+/// 窗口才重启，对"后台"预渲染无感。
+pub(crate) const BG_RENDER_RESTART_QUIET_WINDOW_MS: u64 = 500;
+
+fn now_millis() -> u64 {
+    static PROCESS_START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    PROCESS_START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis() as u64
+}
+
+/// 重启请求是否已"冷却"（挂起超过静默窗口，期间没有更新的请求）。
+/// `last_requested_at_ms == 0`（无记录）视为已冷却，兜底保持旧的立即取消语义。
+fn bg_render_restart_request_is_stale(last_requested_at_ms: u64, now_ms: u64) -> bool {
+    now_ms.saturating_sub(last_requested_at_ms) >= BG_RENDER_RESTART_QUIET_WINDOW_MS
+}
+
+/// 请求重启后台渲染（合流版）。
+///
+/// 不立即取消在途渲染：仅置位重启标志并刷新请求时间戳。渲染循环在 clip
+/// 边界发现请求挂起超过静默窗口后，才通过
+/// `render_cancel::request_global_cancel()`（推进纪元）升级为实际取消，
+/// 退出线程随后自动启动新一轮渲染。
+///
+/// 失效风暴期间时间戳被持续刷新，当前轮不会被反复打断；每轮完成后由退出
+/// 路径串联下一轮，风暴结束后恰好剩一轮渲染最终状态。
+pub(crate) fn request_bg_render_restart() {
+    use std::sync::atomic::Ordering;
+    BG_RENDER_RESTART_NEEDED.store(true, Ordering::Release);
+    BG_RENDER_RESTART_REQUESTED_AT_MS.fetch_max(now_millis(), Ordering::Release);
+}
 
 /// 后台渲染开始时因音高分析未完成而跳过了 clip。
 /// 音高分析完成后由 `handle_clip_pitch_ready` 消费此标记并自动补启动渲染。
@@ -1524,6 +1570,10 @@ pub(crate) fn start_background_render(app: tauri::AppHandle) -> serde_json::Valu
     }
     // 清除可能残留的上一轮取消标志
     BG_RENDER_CANCEL.store(false, Ordering::Release);
+    // 清除残留的重启请求（新一轮从干净状态开始；之后的失效会重新置位
+    // 并刷新时间戳）。这样新轮次不会被上一轮遗留的请求立即晋升取消。
+    BG_RENDER_RESTART_NEEDED.store(false, Ordering::Release);
+    BG_RENDER_RESTART_REQUESTED_AT_MS.store(0, Ordering::Release);
     // 每次启动递增代数：旧渲染线程的清理逻辑不能再影响这一次新渲染。
     BG_RENDER_GENERATION.fetch_add(1, Ordering::AcqRel);
     let render_generation = BG_RENDER_GENERATION.load(Ordering::Acquire);
@@ -1726,6 +1776,19 @@ fn render_background_pass(
         let cancel_token = crate::commands::render_cancel::RenderCancelToken::background();
 
         for clip_render_info in clips_to_render {
+            // 方案 A：重启请求静默窗口 —— 请求挂起超过窗口才升级为实际取消。
+            // 失效风暴（工程加载 / 连续编辑）期间时间戳被持续刷新、当前轮
+            // 不被打断；单次编辑最多延迟一个窗口重启。
+            if BG_RENDER_RESTART_NEEDED.load(Ordering::Relaxed)
+                && bg_render_restart_request_is_stale(
+                    BG_RENDER_RESTART_REQUESTED_AT_MS.load(Ordering::Relaxed),
+                    now_millis(),
+                )
+            {
+                // 走 request_global_cancel 而非直接置位：需要推进纪元
+                //（见 BG_RENDER_CANCEL 的生命周期契约）。
+                crate::commands::render_cancel::request_global_cancel();
+            }
             // 检查取消标志（用户在渲染中重新编辑参数时会设置）
             if BG_RENDER_CANCEL.load(Ordering::Relaxed) {
                 log::warn!(
@@ -2066,11 +2129,13 @@ pub(crate) fn request_background_render(app: &tauri::AppHandle) -> serde_json::V
     }
 
     if BG_RENDER_ACTIVE.load(Ordering::Relaxed) {
-        // 走 request_global_cancel 而非直接置位：它需要推进纪元，
-        // 让之后启动的渲染轮次能区分"这次取消是针对旧轮次的"。
-        crate::commands::render_cancel::request_global_cancel();
-        BG_RENDER_RESTART_NEEDED.store(true, Ordering::Release);
-        log::warn!("[bg_render] caches invalidated while render active; requesting restart");
+        // 方案 A：不再立即取消在途渲染（失效风暴会被反复打断，每轮只能
+        // 推进两三个 clip）。仅合流地记录重启请求，由渲染循环在 clip 边界
+        // 按静默窗口决定是否升级为取消。
+        request_bg_render_restart();
+        debug_eprintln!(
+            "[bg_render] caches invalidated while render active; restart requested (coalesced)"
+        );
         return serde_json::json!({"ok": true, "restart_requested": true});
     }
 
@@ -2137,7 +2202,7 @@ pub(super) fn cancel_background_render(app: Option<&tauri::AppHandle>) -> serde_
 
 #[cfg(test)]
 mod tests {
-    use super::should_follow_up_render;
+    use super::{bg_render_restart_request_is_stale, should_follow_up_render, BG_RENDER_RESTART_QUIET_WINDOW_MS};
 
     #[test]
     fn bg_render_follow_up_requires_progress() {
@@ -2148,5 +2213,43 @@ mod tests {
         assert!(!should_follow_up_render(1, 0));
         // 没有跳过 → 不补轮。
         assert!(!should_follow_up_render(0, 3));
+    }
+
+    #[test]
+    fn restart_request_not_stale_within_quiet_window() {
+        // 请求刚发生（差值 < 窗口）→ 未冷却，不晋升取消。
+        assert!(!bg_render_restart_request_is_stale(1_000, 1_000));
+        assert!(!bg_render_restart_request_is_stale(
+            1_000,
+            1_000 + BG_RENDER_RESTART_QUIET_WINDOW_MS - 1
+        ));
+    }
+
+    #[test]
+    fn restart_request_stale_after_quiet_window() {
+        // 挂起达到 / 超过窗口 → 已冷却，渲染循环应晋升为取消。
+        assert!(bg_render_restart_request_is_stale(
+            1_000,
+            1_000 + BG_RENDER_RESTART_QUIET_WINDOW_MS
+        ));
+        assert!(bg_render_restart_request_is_stale(
+            1_000,
+            1_000 + BG_RENDER_RESTART_QUIET_WINDOW_MS * 10
+        ));
+    }
+
+    #[test]
+    fn restart_request_without_timestamp_defaults_to_stale() {
+        // 时间戳为 0（无记录）时按"请求发生在进程启动时刻"计算：
+        // 进程运行超过窗口 → 视为已冷却，兜底保持旧的立即取消语义。
+        assert!(bg_render_restart_request_is_stale(0, BG_RENDER_RESTART_QUIET_WINDOW_MS));
+        // 进程刚启动、仍在首个窗口内 → 未冷却（窗口语义一致）。
+        assert!(!bg_render_restart_request_is_stale(0, 50));
+    }
+
+    #[test]
+    fn restart_request_clock_regression_never_stale() {
+        // 时钟回退（now < last）→ 饱和减法得 0 → 未冷却，不会误触发取消。
+        assert!(!bg_render_restart_request_is_stale(5_000, 4_999));
     }
 }

@@ -604,12 +604,12 @@ pub fn schedule_clip_pitch_jobs(
                         total_clips: total,
                     },
                 );
-                log::error!(
+                debug_eprintln!(
                     "[pitch_clip] thread: progress emit {}/{} result: {:?}",
                     completed, total, r
                 );
             } else {
-                log::error!("[pitch_clip] thread: WARNING app_handle is None, cannot emit progress!");
+                log::warn!("[pitch_clip] thread: WARNING app_handle is None, cannot emit progress!");
             }
 
             // 无论成功与否，先清除 inflight 标记

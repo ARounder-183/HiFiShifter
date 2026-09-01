@@ -1010,13 +1010,11 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
                     let _ = crate::commands::playback::request_background_render(app);
                 }
             } else {
-                // 渲染已在运行 → 取消旧渲染，标记需要重启
-                // 旧渲染线程检测到取消标志后会退出，然后自动启动新一轮渲染
-                debug_eprintln!("[engine] bg render already running, cancelling and requesting restart ({} clips invalidated)", tl.clips.len());
-                // 走 request_global_cancel 而非直接置位：它需要推进纪元，
-                // 否则这次取消会被之后启动的渲染轮次当作历史残留而忽略。
-                crate::commands::render_cancel::request_global_cancel();
-                crate::commands::playback::BG_RENDER_RESTART_NEEDED.store(true, Ordering::Release);
+                // 渲染已在运行 → 合流地请求重启（不再立即取消在途渲染，
+                // 避免加载 / 连续编辑期间的失效风暴反复打断渲染）。
+                // 渲染循环会在 clip 边界按静默窗口决定是否升级为取消。
+                debug_eprintln!("[engine] bg render already running, requesting coalesced restart ({} clips invalidated)", tl.clips.len());
+                crate::commands::playback::request_bg_render_restart();
             }
         }
     }
