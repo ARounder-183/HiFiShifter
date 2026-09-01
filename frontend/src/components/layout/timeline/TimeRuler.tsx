@@ -475,7 +475,7 @@ function TimeRulerContextMenu({
     );
 }
 
-export const TimeRuler: React.FC<{
+const TimeRulerInner: React.FC<{
     scrollLeft: number;
     ticks: readonly TimelineTick[];
     pxPerBeat: number;
@@ -899,3 +899,16 @@ export const TimeRuler: React.FC<{
         </Box>
     );
 };
+
+/**
+ * 标尺整体做记忆化。
+ *
+ * 滚动期间它的 props 现在都是稳定的：`scrollLeft` 走量化值（见
+ * `TICK_WINDOW_STEP_PX` 的注释）、`ticks` 也只在量化锚点跨越时才变。此前它
+ * 是裸 `React.FC`，父组件每帧重渲染都会把整棵标尺子树（刻度、拍号、Tempo
+ * Map 行）重新协调一遍——而它内部真正需要重画的只有 `TimeRulerMarks`。
+ *
+ * 说明：个别 prop（如 `t`）若每次渲染都是新引用，memo 会退化为"每次都重渲
+ * 染"，行为与改前一致、无副作用；但只要绝大多数 prop 稳定，就能跳过。
+ */
+export const TimeRuler = React.memo(TimeRulerInner);

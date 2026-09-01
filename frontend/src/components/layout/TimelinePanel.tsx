@@ -1296,6 +1296,16 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         () => s.tracks.slice(timelineRenderModel.startIndex, timelineRenderModel.endIndex + 1),
         [s.tracks, timelineRenderModel.startIndex, timelineRenderModel.endIndex],
     );
+    /**
+     * 水平内容层（决定原生滚动上限的 div）的 ref。
+     *
+     * 滚轮缩放时，它的宽度必须**先**按新 pxPerSec 落地，否则写原生
+     * scrollLeft 会被浏览器按旧的最大滚动位置钳制。`TimelineScrollArea` 会
+     * 命令式改写它（取代此前的 flushSync 全树同步提交）；React 随后异步提交
+     * 时会写入相同的宽度字符串，因此不会抖动。
+     */
+    const timelineContentSizerRef = React.useRef<HTMLDivElement | null>(null);
+
     const visibleTrackClipCacheRef = React.useRef<
         Record<
             string,
@@ -1596,6 +1606,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 {/* Tracks Area */}
                 <TimelineScrollArea
                     scrollRef={scrollRef}
+                    contentSizerRef={timelineContentSizerRef}
                     projectSec={dynamicProjectSec}
                     pxPerSec={pxPerSec}
                     setPxPerSec={setPxPerSec}
@@ -1937,6 +1948,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 >
                     {/* Track Lanes（外层含右侧虚拟宽度，内容层覆盖工程宽 + 视口宽） */}
                     <div
+                        ref={timelineContentSizerRef}
                         className="relative"
                         style={{
                             width: timelineScrollRange.paddedContentWidth,
