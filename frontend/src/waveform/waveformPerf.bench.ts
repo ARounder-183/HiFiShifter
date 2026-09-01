@@ -109,7 +109,7 @@ function registerScenario(spec: ScenarioSpec): void {
             `markers=${warmScene.markers.length}`,
             `pixelColumns=${warmGeometry.lineCount}`,
             `vertices=${warmGeometry.vertices.length / 6}`,
-            `vertexBytes=${(warmGeometry.vertices.length * 4 / 1024).toFixed(0)}KB`,
+            `vertexBytes=${((warmGeometry.vertices.length * 4) / 1024).toFixed(0)}KB`,
             `estPeakScans=${Math.round(estimatedPeakScans).toLocaleString("en-US")}`,
             `getPeaksCalls=${peaks.callCount()}`,
         ].join("  "),

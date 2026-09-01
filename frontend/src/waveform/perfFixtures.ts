@@ -103,10 +103,7 @@ export function createSyntheticPeakSource(
     const divisionFactor = options.divisionFactor ?? DEFAULT_DIVISION_FACTOR;
     const mediaDurationSec = options.mediaDurationSec ?? 60;
 
-    const peakCount = Math.max(
-        1,
-        Math.ceil((mediaDurationSec * sampleRate) / divisionFactor),
-    );
+    const peakCount = Math.max(1, Math.ceil((mediaDurationSec * sampleRate) / divisionFactor));
     const cache = new Map<string, { min: Float32Array; max: Float32Array }>();
     let calls = 0;
 
