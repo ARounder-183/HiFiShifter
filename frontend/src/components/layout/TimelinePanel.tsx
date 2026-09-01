@@ -307,6 +307,22 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         [],
     );
     const [timelineScrollTop, setTimelineScrollTop] = React.useState(0);
+    // ── 竖直滚动的 React 提交量化（与水平 scrollLeft 同一套思路）──────
+    // onScroll 每帧直写 state 会让 TimelinePanel 整树重渲染（探针实测
+    // react p50 20ms，是竖直拖拽掉帧的根因）。React 里的 scrollTop 只服务
+    // 窗口化与裁剪模型，竖直 overscan 有 4 行缓冲，滞后半个缓冲以内绝对安全；
+    // sticky 画布层走视口总线命令式更新，不受滞后影响。
+    const scrollTopRafRef = React.useRef<number | null>(null);
+    const reactCommittedScrollTopRef = React.useRef(0);
+    const lastScrollTopRef = React.useRef(0);
+    React.useEffect(
+        () => () => {
+            if (scrollTopRafRef.current != null) {
+                cancelAnimationFrame(scrollTopRafRef.current);
+            }
+        },
+        [],
+    );
     // 时间轴 scroller 水平滚动条的占用高度（offsetHeight - clientHeight）。
     // 轨道头底部按此留出同高占位（bottomGutterHeightPx），保证轨道头与
     // 时间轴区域的竖直滚动范围严格一致。
@@ -373,6 +389,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         setRowHeight,
         altPressed,
         trackVolumeUi,
+
         setTrackVolumeUi,
         sameSourceConfirmOpen,
         setSameSourceConfirmOpen,
@@ -417,6 +434,25 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         startDeferredPlayheadSeek,
         keyboardZoomPendingRef,
     } = state;
+
+    /** 竖直量化步长：overscan(4 行) 缓冲的一半，滞后永不越出 overscan 窗口。 */
+    const scrollTopStepPx = Math.max(1, Math.round(rowHeight * 2));
+    const commitTimelineScrollTop = React.useCallback(
+        (next: number) => {
+            lastScrollTopRef.current = next;
+            if (scrollTopRafRef.current != null) return;
+            scrollTopRafRef.current = requestAnimationFrame(() => {
+                scrollTopRafRef.current = null;
+                const latest = lastScrollTopRef.current;
+                if (Math.abs(latest - reactCommittedScrollTopRef.current) < scrollTopStepPx) {
+                    return;
+                }
+                reactCommittedScrollTopRef.current = latest;
+                setTimelineScrollTop(latest);
+            });
+        },
+        [scrollTopStepPx],
+    );
 
     // ── 轨道头与时间轴区域的竖直滚动对齐 ─────────────────
     // 右侧时间轴 scroller 常驻水平滚动条（占高 h），其竖直滚动范围因此比
@@ -1629,7 +1665,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         setRowHeight={setRowHeight}
                         setScrollLeft={setScrollLeftAction}
                         commitScrollLeftState={setScrollLeftState}
-                        commitScrollTopState={setTimelineScrollTop}
+                        commitScrollTopState={commitTimelineScrollTop}
                         rulerContentRef={rulerContentRef}
                         scrollHorizontalKb={scrollHorizontalKb}
                         scrollVerticalKb={scrollVerticalKb}
@@ -1653,7 +1689,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                             // 绘制前拿到新 scrollTop（总线同步派发）；React state
                             // 只驱动窗口化等非视觉更新。
                             syncScrollTop(el.scrollTop);
-                            setTimelineScrollTop(el.scrollTop);
+                            commitTimelineScrollTop(el.scrollTop);
                             if (trackListScrollRef.current) {
                                 if (
                                     Math.abs(trackListScrollRef.current.scrollTop - el.scrollTop) >=

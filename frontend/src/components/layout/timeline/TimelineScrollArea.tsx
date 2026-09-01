@@ -24,7 +24,9 @@ export const TimelineScrollArea: React.FC<
         /** 缩放的同一 flushSync 内提交 scrollLeft state（供窗口化立即使用）。 */
         commitScrollLeftState: React.Dispatch<React.SetStateAction<number>>;
         /** 竖直缩放提交 rowHeight 时同步提交 scrollTop state。 */
-        commitScrollTopState: React.Dispatch<React.SetStateAction<number>>;
+        /** 量化提交（见 TimelinePanel.commitTimelineScrollTop）：只接受具体数值，
+         *  不再透传 Dispatch，避免调用方绕过量化把每帧 scrollTop 写进 React。 */
+        commitScrollTopState: (next: number) => void;
         rulerContentRef: React.MutableRefObject<HTMLDivElement | null>;
         scrollHorizontalKb?: Keybinding;
         scrollVerticalKb?: Keybinding;
