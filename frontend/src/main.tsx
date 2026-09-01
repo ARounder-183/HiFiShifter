@@ -26,13 +26,9 @@ if (import.meta.env.DEV) {
     void import("./dev/perfProject").then((module) => module.installPerfProjectDevtools());
 }
 
-// 帧率探针：**dev 与打包版都可用**——按 localStorage 开关动态加载，未开启时
-// 这个 chunk 根本不会下载，对正常使用零影响。打包版没有 PERF 面板，需要
-// 测量时在控制台执行下面这行后刷新：
-//   localStorage.setItem("hifishifter.frameProfiler", "1"); location.reload()
-if (localStorage.getItem("hifishifter.frameProfiler") === "1") {
-    void import("./dev/frameProfiler").then((module) => module.startFrameProfiler());
-}
+// 帧率探针不再自动挂载：它是排查滚动/缩放掉帧时的临时测量工具，瓶颈
+// 定位完成后已从打包版移除（右上角浮层）。dev 下仍可经 PERF 面板的
+// 「profiler」开关临时开启。
 
 createRoot(document.getElementById("root")!).render(
     <StrictMode>
