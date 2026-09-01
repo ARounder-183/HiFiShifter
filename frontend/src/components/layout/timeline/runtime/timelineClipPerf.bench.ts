@@ -39,8 +39,7 @@ const ROW_HEIGHT = 96;
 /** 单个 clip 时长（秒）：与波形基准同为「1 分钟音频」场景。 */
 const CLIP_LENGTH_SEC = 60;
 
-/** 名称截断用到的字号与字体，与 `timelineCanvasStyle` 的常量一致。 */
-const NAME_FONT_STYLE = "12px";
+/** 字体族，与 `timelineCanvasStyle.resolveFontFamily()` 的缺省值一致。 */
 const FONT_FAMILY = "sans-serif";
 
 interface ClipFixture {
@@ -266,6 +265,3 @@ registerScenario({
     clipsPerTrack: 4,
     pxPerSec: 1500 / (4 * CLIP_LENGTH_SEC),
 });
-
-// 名称字号常量供后来者对照（避免与 timelineCanvasStyle 里的定义漂移）。
-void NAME_FONT_STYLE;
