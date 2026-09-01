@@ -28,15 +28,24 @@
 
 import { rasterize } from "./canvasRaster.js";
 
-/** 开关 key：置为 "1" 时启用 GL clip 体。 */
+/**
+ * 开关 key：显式置为 "0" 时关闭 GL clip 体，**其余任何值（含未设置）都开启**。
+ *
+ * P3 起默认走 GL；这个 key 是给真机出问题时**一键退回**用的逃生门，而不是
+ * 开关。需要关闭时在控制台执行：
+ *
+ *     localStorage.setItem("hifishifter.glClipBodies", "0"); location.reload();
+ */
 export const PERF_GL_CLIP_BODIES_KEY = "hifishifter.glClipBodies";
 
-/** 是否启用 GL clip 体（dev-only，localStorage 开关）。 */
+/** 是否启用 GL clip 体（默认开启；显式写 "0" 才关闭）。 */
 export function isGlClipBodiesEnabled(): boolean {
     try {
-        return localStorage.getItem(PERF_GL_CLIP_BODIES_KEY) === "1";
+        return localStorage.getItem(PERF_GL_CLIP_BODIES_KEY) !== "0";
     } catch {
-        return false;
+        // 读不到 localStorage（如隐私模式）时按默认行为走 GL；若 GL 本身
+        // 不可用，TimelineCanvasViewport 会自行退回 Canvas2D。
+        return true;
     }
 }
 

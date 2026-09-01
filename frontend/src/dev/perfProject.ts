@@ -412,19 +412,17 @@ function mountPerfPanel(): void {
         status.textContent = `${summary.clipCount} clip · fade 0.5s`;
         applyFitZoomAndReload(summary.fitPxPerSec);
     });
-    // ── GL clip 体开关（P3，dev A/B 用）──────────────────────────
-    // 切换 localStorage 后派发自定义事件，TimelineCanvasViewport 监听它
-    // 即时建拆 GL 渲染器，无需刷新页面。
-    const glToggle = makeButton("GL clip: off", () => {
-        const next = localStorage.getItem(PERF_GL_CLIP_BODIES_KEY) === "1" ? "0" : "1";
+    // ── GL clip 体开关（P3）──────────────────────────────────────
+    // 默认开启；切到 "0" 即退回 Canvas2D。切换 localStorage 后派发自定义
+    // 事件，TimelineCanvasViewport 监听它即时建拆 GL 渲染器，无需刷新。
+    const glEnabled = (): boolean => localStorage.getItem(PERF_GL_CLIP_BODIES_KEY) !== "0";
+    const glToggle = makeButton(`GL clip: ${glEnabled() ? "on" : "off"}`, () => {
+        const next = glEnabled() ? "0" : "1";
         localStorage.setItem(PERF_GL_CLIP_BODIES_KEY, next);
         glToggle.textContent = `GL clip: ${next === "1" ? "on" : "off"}`;
         window.dispatchEvent(new Event(PERF_GL_CLIP_BODIES_KEY));
         status.textContent = `GL clip bodies ${next === "1" ? "ON" : "OFF"}`;
     });
-    if (localStorage.getItem(PERF_GL_CLIP_BODIES_KEY) === "1") {
-        glToggle.textContent = "GL clip: on";
-    }
 
     makeButton("清空", () => {
         localStorage.removeItem(PERSIST_KEY);
