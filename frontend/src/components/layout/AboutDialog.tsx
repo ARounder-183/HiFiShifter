@@ -68,16 +68,12 @@ export function AboutDialog({ open, onOpenChange }: AboutDialogProps) {
     return (
         <Dialog.Root open={open} onOpenChange={onOpenChange}>
             <Dialog.Content style={{ maxWidth: 460 }} onKeyDown={(e) => e.stopPropagation()}>
-                <Dialog.Title>HiFiShifter</Dialog.Title>
-                <Dialog.Description size="2" color="gray">
-                    {tAny("menu_about")}
+                <Dialog.Title>{tAny("menu_about")}</Dialog.Title>
+                <Dialog.Description size="2" style={{ lineHeight: 1.7 }}>
+                    {tAny("about_intro")}
                 </Dialog.Description>
 
                 <Flex direction="column" gap="3" mt="4">
-                    <Text size="2" style={{ lineHeight: 1.7 }}>
-                        {tAny("about_intro")}
-                    </Text>
-
                     <Flex direction="column" gap="2">
                         <Flex align="center" gap="2">
                             <Text size="2" color="gray">
