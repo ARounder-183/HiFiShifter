@@ -65,6 +65,14 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
     const rootRef = React.useRef<HTMLDivElement | null>(null);
     const [rendererKind, setRendererKind] = React.useState<"webgl2" | "canvas2d">("webgl2");
 
+    // render 期写 ref 镜像（本仓库热路径既有模式，见 TimelineCanvasViewport）。
+    // 目的：`draw` 的引用必须稳定——它一旦每渲染都变，下面的 layout effect
+    // 就会每帧执行，与视口总线驱动的 paint 重复画一遍。故所有 props 改从
+    // ref 读取，`draw` 的依赖里只剩真正会变的东西。
+    const propsRef = React.useRef(props);
+    // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制回调需在同一提交内读取最新 props（热路径既有模式，见 TimelineCanvasViewport）
+    propsRef.current = props;
+
     const invalidate = React.useCallback(() => {
         if (rafRef.current != null) return;
         rafRef.current = requestAnimationFrame(() => {
@@ -100,8 +108,13 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
      *
      * 特殊说明：视口的秒级窗口一律由 axis 派生（禁止 `scrollLeft / pxPerSec`
      * 反算），以保证与 clip 体画布、网格、标尺严格同源。
+     *
+     * 依赖说明：props 一律经 `propsRef` 读取，**不进依赖**——否则每次父组件
+     * 渲染都会换掉本函数引用，让下方 layout effect 每帧触发一次与总线 paint
+     * 重复的全量重绘（P1 要消除的重复绘制）。
      */
     const draw = React.useCallback(() => {
+        const props = propsRef.current;
         // 总线驱动时以总线投影为准：滚动事件在绘制前触发，sticky 波形面必须与
         // 原生滚动的 DOM 内容层在同一帧提交位移（DAW 式无缝滚动）。
         const source = props.viewportSource;
@@ -145,7 +158,7 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
         if (fallbackRendererRef.current) {
             renderWith(fallbackRendererRef.current, geometry, props, widthPx);
         }
-    }, [props, renderWith, rendererKind]);
+    }, [renderWith, rendererKind]);
 
     /**
      * 视觉输入（行数据 / 颜色 / 尺寸 / 缩放）变化时必须在 layout effect
@@ -153,16 +166,36 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
      * commit 中更新 Clip DOM 与 Clip 体画布，波形面若再经 rAF 延迟一帧，
      * 就会在编辑手势中相对 Clip“甩出去”。
      * 视口滚动由 timelineViewportBus 的同步订阅负责，这里不重复绘制。
+     *
+     * **总线驱动时只把「缩放」留在签名里，滚动剔掉。**
+     *
+     * 总线驱动时视口取自 `source.getAxis()`，scrollLeft / scrollTop / 视口宽
+     * 的变化都会 emit（滚动事件、ResizeObserver，时间线还有每帧对账兜底），
+     * 因此它们不必进签名——放进来的话，滚动每帧都是一个新 axis 对象，于是每
+     * 帧在总线 paint 之外又全量重绘一次，这正是 P1 要消除的重复绘制。
+     *
+     * 但**缩放不能剔**：参数编辑器缩放只 `flushSync` 写 state
+     * （`PianoRollPanel.tsx:1214`），若锚点恰好让 scrollLeft 不变就不会触发
+     * 原生 scroll 事件 → 不 emit → 波形停帧。故单独保留 `pxPerSec`。
+     * 非总线驱动时 axis 是唯一视口来源，整体进签名。
      */
     const visualSignature = React.useMemo(
         () => ({
             rows: props.rows,
             color: props.color,
-            widthPx: props.widthPx,
             heightPx: props.heightPx,
-            axis: props.axis,
+            viewportTopPx: props.viewportTopPx,
+            pxPerSec: props.axis.pxPerSec,
+            axis: props.viewportSource ? null : props.axis,
         }),
-        [props.rows, props.color, props.widthPx, props.heightPx, props.axis],
+        [
+            props.rows,
+            props.color,
+            props.heightPx,
+            props.viewportTopPx,
+            props.axis,
+            props.viewportSource,
+        ],
     );
     const previousVisualSignatureRef = React.useRef(visualSignature);
 
@@ -173,7 +206,7 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
             previousVisualSignatureRef.current = visualSignature;
             drawRef.current();
         }
-    }, [draw, props.viewportSource, visualSignature]);
+    }, [draw, props.viewportSource, rendererKind, visualSignature]);
 
     React.useEffect(() => {
         const fallbackCanvas = fallbackCanvasRef.current;

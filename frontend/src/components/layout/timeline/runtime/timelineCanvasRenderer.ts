@@ -2,6 +2,7 @@ import {
     buildTimelineClipVisualStyle,
     CLIP_CORNER_RADIUS_PX,
     resolveFontFamily,
+    resolveThemeColor,
 } from "./timelineCanvasStyle.js";
 import { SNAP_OFFSET_HANDLE_SIZE_PX } from "../constants.js";
 import { fadeGainSigned } from "../reaperFade.js";
@@ -210,10 +211,9 @@ export function drawTimelineCanvas(
         const bottomPx = Number.isFinite(contentBottomPx)
             ? (contentBottomPx as number)
             : Number.POSITIVE_INFINITY;
-        const borderColor =
-            (typeof document !== "undefined"
-                ? getComputedStyle(document.documentElement).getPropertyValue("--qt-border").trim()
-                : "") || "rgba(148, 163, 184, 0.22)";
+        // 主题色走进程级缓存（见 timelineCanvasStyle.resolveThemeColor）：
+        // 这里每帧都会执行，裸调 getComputedStyle 会触发强制样式重算。
+        const borderColor = resolveThemeColor("--qt-border", "rgba(148, 163, 184, 0.22)");
         const dpr = window.devicePixelRatio || 1;
         ctx.save();
         ctx.strokeStyle = borderColor;

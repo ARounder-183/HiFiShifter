@@ -1304,6 +1304,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             }
         >
     >({});
+    /** 上一次返回的 `Record<trackId, clips>`；用于在外层做引用复用。 */
+    const visibleTrackClipsByIdRef = React.useRef<Record<string, typeof s.clips>>({});
     const visibleTrackClipsById = useMemo(() => {
         const nextCache: typeof visibleTrackClipCacheRef.current = {};
         const nextByTrackId = {} as Record<string, typeof s.clips>;
@@ -1336,6 +1338,21 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         }
 
         visibleTrackClipCacheRef.current = nextCache;
+
+        // 连外层对象一起复用：各轨道的 `clips` 数组本身已是稳定引用，但若
+        // 每次都新建外层对象，下游 `TimelineWaveformSurface.rows` 与
+        // `buildSparseClipRenderModel` 的 memo 会在**每个滚动帧**失效——
+        // 视口秒窗每帧都变，导致 `visibleClipIdsByTrackId` 每次都是新数组。
+        // 那会让两块画布在总线 paint 之外又被 React 提交重绘一次（P1 要消除的
+        // 重复绘制）。轨道集合与各自的 clips 引用都没变时，直接返回旧对象。
+        const prevByTrackId = visibleTrackClipsByIdRef.current;
+        const prevKeys = Object.keys(prevByTrackId);
+        const nextKeys = Object.keys(nextByTrackId);
+        const sameShape =
+            prevKeys.length === nextKeys.length &&
+            nextKeys.every((key) => prevByTrackId[key] === nextByTrackId[key]);
+        if (sameShape) return prevByTrackId;
+        visibleTrackClipsByIdRef.current = nextByTrackId;
         return nextByTrackId;
         // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅类型位置引用 s.clips（缓存已按需要稳定化）；加入整个 s 会让缓存扫描随任何会话变化失效（既有模式）
     }, [clipById, timelineRenderModel.visibleClipIdsByTrackId, visibleTracks]);
@@ -1369,6 +1386,23 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             }),
         [pxPerSec, scrollLeft, timelineScrollTop, viewportWidth],
     );
+    /**
+     * 「内容轴」：只含 `pxPerSec`，不含滚动。
+     *
+     * clip 体渲染模型（`buildSparseClipRenderModel`）的全部投影都落在**内容
+     * 坐标系**上——`secToContentPx` / `durationToWidthPx` / `secToSpanPx`
+     * 只消费 `pxPerSec`，`topPx` 由 `(startTrackIndex + i) * rowHeight` 得出。
+     * 因此滚动帧里模型内容**逐像素不变**，却因为 `timelineAxis` 每帧都是新
+     * 对象而被整体重建一次，进而让 `drawClips` 也是新数组、让 clip 体画布在
+     * 总线 paint 之外又被 React 提交重绘一遍。
+     *
+     * 把滚动从依赖里剥掉后，`drawClips` 的**引用**在纯滚动帧保持稳定，
+     * 这是 P1 消除重复绘制的前提。
+     */
+    const contentAxis = useMemo(
+        () => createTimelineAxis({ pxPerSec, dpr: window.devicePixelRatio || 1 }),
+        [pxPerSec],
+    );
     const sparseClipRenderModel = useMemo(() => {
         // 前导重叠秒数：每个 clip 的"被同轨前一个 clip 压住"部分，
         // canvas 在该区画半透色块，让下 clip 的色块/波形透出——避免两层
@@ -1382,7 +1416,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             visibleTracks,
             startTrackIndex: timelineRenderModel.startIndex,
             visibleTrackClipsById,
-            axis: timelineAxis,
+            axis: contentAxis,
             rowHeight,
             selectedClipId: s.selectedClipId,
             multiSelectedClipIds,
@@ -1392,7 +1426,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         });
     }, [
         multiSelectedClipIds,
-        timelineAxis,
+        contentAxis,
         renamingClipId,
         rowHeight,
         s.selectedClipId,

@@ -172,15 +172,31 @@ export function buildSparseClipRenderModel(args: {
     // 边缘（延长截短/拉伸/淡入淡出）完全不可达。配合 ClipItem 去掉会建立独立层叠
     // 上下文的 transform，交叉处两个 clip 的手柄都位于其它 clip body 之上、可被编辑。
     for (const trackClips of Object.values(args.visibleTrackClipsById)) {
-        for (let i = 0; i < trackClips.length; i += 1) {
-            const a = trackClips[i];
-            for (let j = i + 1; j < trackClips.length; j += 1) {
-                const b = trackClips[j];
-                const aStart = a.startSec;
-                const aEnd = aStart + a.lengthSec;
+        if (trackClips.length < 2) continue;
+        // 排序后线性扫描（原实现是 O(n²) 全对比较）。
+        //
+        // 判据不变：仍把每一对**存在重叠**的两个 clip 都加入 overlay。
+        // 按 startSec 升序后，对固定的 a 而言，一旦某个 b 的起点越过了 a 的
+        // 末端，它后面所有 clip 的起点只会更靠右，必然也不与 a 重叠 ——
+        // 因此可以直接 `break`，把内层从「与 a 之后的全部 clip 比较」收敛为
+        // 「与 a 真正相交的那一段」。
+        //
+        // 复杂度：排序 O(n log n) + 扫描 O(n + 重叠对数)。单轨 400 clip 时
+        // 原实现固定 8 万次比较；首尾相接的常见排布下重叠对数为 0，扫描退化为
+        // O(n)。必须复制后再排序——入参数组是上游 memo 的缓存值，就地排序会
+        // 破坏缓存引用并让下游 memo 每帧失效。
+        const sorted = trackClips.slice().sort((a, b) => a.startSec - b.startSec);
+        for (let i = 0; i < sorted.length; i += 1) {
+            const a = sorted[i];
+            const aStart = a.startSec;
+            const aEnd = aStart + a.lengthSec;
+            for (let j = i + 1; j < sorted.length; j += 1) {
+                const b = sorted[j];
                 const bStart = b.startSec;
+                // 升序 ⇒ 越过后不可能再重叠，提前跳出内层。
+                if (bStart >= aEnd - 1e-9) break;
                 const bEnd = bStart + b.lengthSec;
-                if (Math.min(aEnd, bEnd) > Math.max(aStart, bStart) + 1e-9) {
+                if (Math.min(aEnd, bEnd) > bStart + 1e-9) {
                     overlayClipIds.add(a.id);
                     overlayClipIds.add(b.id);
                 }

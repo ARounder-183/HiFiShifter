@@ -77,13 +77,68 @@ export function measureTextWidth(text: string, fontStyle: string, fontFamily: st
     return text.length * sizePx * 0.55;
 }
 
-/** Read the current font-family from the --qt-font-family CSS custom property. */
+/**
+ * 读取当前字体族（`--qt-font-family`）。
+ *
+ * 流程：
+ * 1. **优先读内联样式**——`AppThemeProvider` 挂载后总是把当前字体写到
+ *    `documentElement.style`（`AppThemeProvider.tsx:182`），直接读内联值既
+ *    拿得到最新结果，又不会触发强制样式重算；
+ * 2. 内联缺失时（首帧早于 provider effect）才回落到 `getComputedStyle`。
+ *
+ * 特殊说明：本函数在绘制热路径上每帧被调用多次（`drawTimelineCanvas` 一次、
+ * `TimelineCanvasViewport` 一次）。改前一律走 `getComputedStyle`，把浏览器的
+ * 样式重算拖进了每一帧。改后稳态零重算，且因为是现读内联值，不需要任何
+ * 失效机制。
+ */
 export function resolveFontFamily(): string {
     if (typeof document === "undefined") return "sans-serif";
-    const font = getComputedStyle(document.documentElement)
+    const inline = document.documentElement.style.getPropertyValue("--qt-font-family").trim();
+    if (inline) return inline;
+    const computed = getComputedStyle(document.documentElement)
         .getPropertyValue("--qt-font-family")
         .trim();
-    return font || "sans-serif";
+    return computed || "sans-serif";
+}
+
+// ── 主题色读取（进程级缓存 + 主题切换失效）─────────────────────────────
+// 绘制热路径每帧都要读 `--qt-border` 之类的主题变量，而 `getComputedStyle`
+// 会触发**强制样式重算**：在 clip 密集的帧里反复调用，等于把浏览器的样式
+// 流水线拖进渲染关键路径。这里做一层进程级缓存，并在 documentElement 的
+// 主题相关属性变化时整体失效——主题变量的唯一变更入口就是 data-theme 切换
+// 与 provider 写内联样式（见 index.css 与 AppThemeProvider）。
+
+const themeColorCache = new Map<string, string>();
+let themeObserverInstalled = false;
+
+/** 安装主题变更监听：任何主题相关属性变化都清空缓存（极低频）。 */
+function installThemeInvalidation(): void {
+    if (themeObserverInstalled || typeof MutationObserver === "undefined") return;
+    themeObserverInstalled = true;
+    new MutationObserver(() => {
+        themeColorCache.clear();
+    }).observe(document.documentElement, {
+        attributes: true,
+        attributeFilter: ["data-theme", "style"],
+    });
+}
+
+/**
+ * 读取主题 CSS 变量（带缓存）。
+ *
+ * @param name 变量名，形如 `"--qt-border"`。
+ * @param fallback 读取不到时的兜底值。
+ * @returns 变量值（已 trim）。
+ */
+export function resolveThemeColor(name: string, fallback: string): string {
+    if (typeof document === "undefined") return fallback;
+    installThemeInvalidation();
+    const cached = themeColorCache.get(name);
+    if (cached !== undefined) return cached;
+    const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    const resolved = value || fallback;
+    themeColorCache.set(name, resolved);
+    return resolved;
 }
 
 const NAME_FONT_STYLE = "12px";
@@ -91,6 +146,30 @@ const LABEL_FONT_STYLE = "10px";
 
 /** A representative character set for estimating average char width. */
 const CHAR_SAMPLE = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+
+/** 字符样本宽度的缓存键（字体族 + 字号样式），字体切换即换键。 */
+let charSampleCacheKey = "";
+let charSampleCacheWidth = 0;
+
+/**
+ * 取字符样本在给定字体下的像素宽度（带缓存）。
+ *
+ * 流程：以 `NAME_FONT_STYLE + fontFamily` 为键缓存 `measureText` 结果；
+ * 键变化（字体/字号切换）时重测一次。
+ *
+ * 特殊说明：这是**每个 clip 每帧**都会走的路径，测量本身必须移出循环——
+ * 缓存是这里唯一必要的优化，不能靠调用方保证。
+ *
+ * @param fontFamily CSS font-family。
+ * @returns 样本字符串宽度（像素）。
+ */
+function charSampleWidth(fontFamily: string): number {
+    const key = `${NAME_FONT_STYLE}|${fontFamily}`;
+    if (key === charSampleCacheKey) return charSampleCacheWidth;
+    charSampleCacheWidth = measureTextWidth(CHAR_SAMPLE, NAME_FONT_STYLE, fontFamily);
+    charSampleCacheKey = key;
+    return charSampleCacheWidth;
+}
 
 function clamp(value: number, min: number, max: number): number {
     return Math.min(max, Math.max(min, value));
@@ -497,11 +576,11 @@ export function buildTimelineClipVisualStyle(args: {
 
     const textStartPx = controlsRightEdge + 6;
 
-    // Font-aware average char width for name truncation
-    const avgCharWidth = Math.max(
-        1,
-        measureTextWidth(CHAR_SAMPLE, NAME_FONT_STYLE, fontFamily) / CHAR_SAMPLE.length,
-    );
+    // Font-aware average char width for name truncation.
+    // 平均字宽只依赖 (fontStyle, fontFamily) 这一个组合，而它此前**每个 clip
+    // 每帧都要重新测一次**（400 clip 即 400 次 measureText）。缓存后整帧只
+    // 在字体真正变化时测一次。
+    const avgCharWidth = Math.max(1, charSampleWidth(fontFamily) / CHAR_SAMPLE.length);
     const maxChars = Math.max(
         1,
         Math.floor((args.widthPx - textStartPx - trailingReservePx) / avgCharWidth),

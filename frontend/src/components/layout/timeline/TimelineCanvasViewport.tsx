@@ -89,6 +89,11 @@ export const TimelineCanvasViewport: React.FC<{
         });
     }, []);
 
+    // `model` 必须留在依赖里：clip 数据变化（拖拽 / trim / 选中）时视口并没
+    // 变，总线不会 emit，只有这条路径能让画布跟上。
+    // 它不会造成滚动帧的重复绘制——`drawClips` 全部投影在内容坐标系上，配合
+    // `TimelinePanel` 的内容轴与稳定 `visibleTrackClipsById`，其**引用**在纯
+    // 滚动帧保持不变（见 TimelinePanel 的 contentAxis 注释）。
     React.useLayoutEffect(() => {
         invalidate();
     }, [darkMode, height, invalidate, model, width]);
