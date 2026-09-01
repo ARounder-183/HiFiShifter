@@ -1276,11 +1276,13 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 clips: s.clips,
                 viewportStartSec,
                 viewportEndSec,
+                pxPerSec,
                 rowHeight,
                 scrollTopPx: timelineScrollTop,
                 viewportHeightPx: scrollRef.current?.clientHeight ?? 0,
             }),
         [
+            pxPerSec,
             rowHeight,
             s.clips,
             s.tracks,
@@ -1454,6 +1456,18 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     // ═════════════════════════════════════════════════════════
     // JSX 渲染
     // ═════════════════════════════════════════════════════════
+
+    // scrollLeft 现在按 REACT_SCROLL_STEP_PX 量化提交，React 渲染期用
+    // `timelineAxis` 算出的播放头 left 最多滞后一个步长；而播放头的真实位置
+    // 由 useVisualPlayhead / syncScrollLeft 用**实时** scrollLeft 命令式写入。
+    // 这里在每次提交后立即用实时值纠正一次，避免 React 的滞后写入把播放头
+    // 推回旧位置。仅在提交时运行（滚动中约每 256px 一次），成本可忽略。
+    React.useLayoutEffect(() => {
+        const scroller = scrollRef.current;
+        if (!scroller || !playheadRef.current) return;
+        const playheadLeftPx = (Number(s.playheadSec ?? 0) || 0) * pxPerSec;
+        playheadRef.current.style.left = `${playheadLeftPx - scroller.scrollLeft}px`;
+    }, [pxPerSec, s.playheadSec, scrollLeft, playheadRef, scrollRef]);
 
     return (
         <Profiler

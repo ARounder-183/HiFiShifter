@@ -43,6 +43,7 @@ import {
 } from "../";
 import type { TimelineTick } from "../runtime/buildTimelineTicks.js";
 import { buildTimelineTicks } from "../runtime/buildTimelineTicks.js";
+import { REACT_SCROLL_STEP_PX } from "../runtime/timelineRenderModel.js";
 import { createTimelineAxis } from "../runtime/timelineAxis.js";
 import {
     snapTimelinePosition,
@@ -336,6 +337,8 @@ export function useTimelineState(): TimelineStateResult {
     const rulerPlayheadLineRef = useRef<HTMLDivElement | null>(null);
     const rulerPlayheadHeadRef = useRef<HTMLDivElement | null>(null);
     const scrollLeftRef = useRef(0);
+    /** 最近一次真正提交给 React 的 scrollLeft（量化基准）。 */
+    const reactCommittedScrollLeftRef = useRef(0);
     const scrollStateRafRef = useRef<number | null>(null);
     const paramEditorSyncTimelineRef = useRef(s.paramEditorSyncTimeline);
     paramEditorSyncTimelineRef.current = s.paramEditorSyncTimeline;
@@ -490,7 +493,12 @@ export function useTimelineState(): TimelineStateResult {
         if (scrollStateRafRef.current == null) {
             scrollStateRafRef.current = requestAnimationFrame(() => {
                 scrollStateRafRef.current = null;
-                setScrollLeft(scrollLeftRef.current);
+                const next = scrollLeftRef.current;
+                if (Math.abs(next - reactCommittedScrollLeftRef.current) < REACT_SCROLL_STEP_PX) {
+                    return;
+                }
+                reactCommittedScrollLeftRef.current = next;
+                setScrollLeft(next);
             });
         }
     }, []);

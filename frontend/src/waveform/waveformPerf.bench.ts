@@ -134,6 +134,7 @@ function registerScenario(spec: ScenarioSpec): void {
                 tracks: scenario.tracks,
                 clips: scenario.clips,
                 viewportStartSec: viewportStartSec(axis),
+                pxPerSec: axis.pxPerSec,
                 viewportEndSec: viewportEndSec(axis),
                 rowHeight: ROW_HEIGHT,
                 scrollTopPx: 0,
