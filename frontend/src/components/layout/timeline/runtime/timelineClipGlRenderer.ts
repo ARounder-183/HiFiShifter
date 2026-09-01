@@ -44,6 +44,24 @@ export function isGlClipBodiesEnabled(): boolean {
 // 每实例 24 个 float。之所以存 RGBA 而不是字符串，是为了让 CPU 侧只做纯数值
 // 写入——颜色解析在 `buildClipBodyInstance` 里一次性完成。
 
+/**
+ * GL 块面渲染器需要的最小接口。
+ *
+ * 用结构化接口而非直接引用 `GlClipBodyRenderer` 类型，是为了让调用方可以
+ * 传入自己的实现（例如测试里的 mock）。
+ */
+export interface GlClipBodySink {
+    render(
+        instances: Float32Array,
+        instanceCount: number,
+        widthPx: number,
+        heightPx: number,
+        dpr: number,
+        originXPx: number,
+        originYPx: number,
+    ): void;
+}
+
 /** 单实例的 float 个数。 */
 export const CLIP_INSTANCE_FLOATS = 24;
 

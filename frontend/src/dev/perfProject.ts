@@ -31,6 +31,7 @@ import { store } from "../app/store";
 import { applyTimelinePayload } from "../features/session/sessionSlice";
 import type { TimelineClip, TimelineState, TimelineTrack } from "../types/api";
 import { waveformMipmapStore } from "../utils/waveformMipmapStore";
+import { PERF_GL_CLIP_BODIES_KEY } from "../components/layout/timeline/runtime/timelineClipGlRenderer.js";
 import { createSyntheticPeakSource, type SyntheticPeakSource } from "../waveform/perfFixtures";
 
 /** 合成源路径前缀：被本模块短路、绝不打到后端。 */
@@ -411,6 +412,20 @@ function mountPerfPanel(): void {
         status.textContent = `${summary.clipCount} clip · fade 0.5s`;
         applyFitZoomAndReload(summary.fitPxPerSec);
     });
+    // ── GL clip 体开关（P3，dev A/B 用）──────────────────────────
+    // 切换 localStorage 后派发自定义事件，TimelineCanvasViewport 监听它
+    // 即时建拆 GL 渲染器，无需刷新页面。
+    const glToggle = makeButton("GL clip: off", () => {
+        const next = localStorage.getItem(PERF_GL_CLIP_BODIES_KEY) === "1" ? "0" : "1";
+        localStorage.setItem(PERF_GL_CLIP_BODIES_KEY, next);
+        glToggle.textContent = `GL clip: ${next === "1" ? "on" : "off"}`;
+        window.dispatchEvent(new Event(PERF_GL_CLIP_BODIES_KEY));
+        status.textContent = `GL clip bodies ${next === "1" ? "ON" : "OFF"}`;
+    });
+    if (localStorage.getItem(PERF_GL_CLIP_BODIES_KEY) === "1") {
+        glToggle.textContent = "GL clip: on";
+    }
+
     makeButton("清空", () => {
         localStorage.removeItem(PERSIST_KEY);
         store.dispatch(

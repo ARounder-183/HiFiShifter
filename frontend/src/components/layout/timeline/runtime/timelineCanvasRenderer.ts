@@ -5,6 +5,11 @@ import {
     resolveThemeColor,
 } from "./timelineCanvasStyle.js";
 import { SNAP_OFFSET_HANDLE_SIZE_PX } from "../constants.js";
+import {
+    buildClipBodyInstance,
+    CLIP_INSTANCE_FLOATS,
+    type GlClipBodySink,
+} from "./timelineClipGlRenderer.js";
 import { fadeGainSigned } from "../reaperFade.js";
 
 function drawFadeCurveStroke(
@@ -182,6 +187,25 @@ export function drawTimelineCanvas(
         disabledGroupIds?: string[];
         /** 主题模式（React 侧显式传入，切换时驱动画布同帧重绘） */
         darkMode?: boolean;
+        /**
+         * GL 块面渲染器（P3，dev 开关控制）。
+         *
+         * 提供时，clip 的**主体块面**（header / body / 前导重叠区 / 分隔线 /
+         * 分隔缝 / 描边）改由它实例化绘制，本函数只画细节层（旋钮 / 徽标 /
+         * 文字 / 淡变 / 吸附三角）。不提供时全部走 Canvas2D 合批路径。
+         *
+         * 编组激活的 clip 会自动退回 Canvas2D：它的外圈描边伸出矩形 2px，
+         * 超出 GL 渲染器的单矩形模型。
+         */
+        glBodies?: GlClipBodySink | null;
+        /**
+         * 视口左上角的**内容坐标**（CSS 像素）。
+         *
+         * Canvas2D 路径靠 `ctx.translate` 实现，GL 路径没有这个变换，必须
+         * 显式给出。仅在传了 `glBodies` 时使用；为兼容既有调用方可选，缺省 0。
+         */
+        originXPx?: number;
+        originYPx?: number;
     },
 ): void {
     const fontFamily = args.fontFamily || resolveFontFamily();
@@ -316,6 +340,16 @@ export function drawTimelineCanvas(
         leadingOverlapPx: number;
         isGroupActive: boolean;
         isGroupDisabled: boolean;
+        /** 右缘是否紧贴下一个同轨 clip（需要画分隔缝）。 */
+        hasSeam: boolean;
+        /**
+         * 是否交给 GL 绘制块面。
+         *
+         * 编组激活的 clip **不走 GL**：它的外圈描边伸出矩形 2px，会与邻居
+         * 重叠着色，超出 GL 渲染器的单矩形模型，故退回 Canvas2D 路径
+         * （数量受选中/编组限制，通常很少）。
+         */
+        useGl: boolean;
         fills: FillOp[];
         strokes: StrokeOp[];
         /** true = 本 clip 会遮挡批次内已有的 clip，入队前必须提交当前批次。 */
@@ -442,7 +476,8 @@ export function drawTimelineCanvas(
         // 下一个 clip 覆盖，实际可见的只有左半边——这里直接只画可见的那
         // 0.5px，使其落在自身矩形内，从而**不参与跨 clip 的遮挡关系**，
         // 合批时才安全。
-        if (hasAdjacentRight(clip.trackId, clipLeft + clipWidth)) {
+        const hasSeam = hasAdjacentRight(clip.trackId, clipLeft + clipWidth);
+        if (hasSeam) {
             fills.push({
                 style: seamColor,
                 alpha: baseAlpha,
@@ -501,6 +536,8 @@ export function drawTimelineCanvas(
             leadingOverlapPx,
             isGroupActive,
             isGroupDisabled,
+            hasSeam,
+            useGl: args.glBodies != null && !isGroupActive,
             fills,
             strokes,
             // 屏障：前导重叠会盖住前一个 clip；编组外圈描边会伸出自身矩形
@@ -779,13 +816,64 @@ export function drawTimelineCanvas(
 
     const pending: PreparedClip[] = [];
 
+    /**
+     * GL 实例数据的复用缓冲。
+     *
+     * 容量按需倍增、跨帧复用（稳态零分配），与波形 P2a 的顶点缓冲池同一
+     * 思路：数据上传 GPU 后 CPU 侧即不再需要。
+     */
+    let glInstanceBuffer = new Float32Array(0);
+
     function flushBatch(): void {
         if (pending.length === 0) return;
+
+        // ── GL 路径：块面走实例化渲染 ────────────────────────────
+        // 走 GL 的 clip 不再进入下方的 Path2D 合批（两种途径画同一块面
+        // 会叠色）。退回 Canvas2D 的只有编组激活的 clip（数量很少）。
+        // 细节层（旋钮 / 徽标 / 文字…）无论哪条路径都照旧逐 clip 画在本
+        // canvas 上——它位于 GL canvas **之上**，所以块面先画、细节后画
+        // 的顺序天然成立。
+        const glBodies = args.glBodies ?? null;
+        let canvasItems = pending;
+        if (glBodies !== null) {
+            let glCount = 0;
+            for (const item of pending) {
+                if (item.useGl) glCount += 1;
+            }
+            if (glCount > 0) {
+                const needed = glCount * CLIP_INSTANCE_FLOATS;
+                if (glInstanceBuffer.length < needed) {
+                    glInstanceBuffer = new Float32Array(needed * 2);
+                }
+                let index = 0;
+                for (const item of pending) {
+                    if (!item.useGl) continue;
+                    buildClipBodyInstance(
+                        glInstanceBuffer,
+                        index,
+                        item.clip,
+                        item.style,
+                        item.hasSeam ? seamColor : null,
+                    );
+                    index += 1;
+                }
+                glBodies.render(
+                    glInstanceBuffer,
+                    glCount,
+                    args.width,
+                    args.height,
+                    window.devicePixelRatio || 1,
+                    args.originXPx ?? 0,
+                    args.originYPx ?? 0,
+                );
+            }
+            canvasItems = pending.filter((item) => !item.useGl);
+        }
 
         const fillGroups = new Map<string, FillGroup>();
         const strokeGroups = new Map<string, StrokeGroup>();
 
-        for (const item of pending) {
+        for (const item of canvasItems) {
             for (const op of item.fills) {
                 if (op.w <= 0 || op.h <= 0) continue;
                 const key = `${op.style}|${op.alpha}`;
