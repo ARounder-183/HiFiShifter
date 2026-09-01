@@ -124,6 +124,8 @@ const TimelineTransportBridge = React.memo(function TimelineTransportBridge(prop
     rulerPlayheadLineRef: React.MutableRefObject<HTMLDivElement | null>;
     rulerPlayheadHeadRef: React.MutableRefObject<HTMLDivElement | null>;
     scrollRef: React.MutableRefObject<HTMLDivElement | null>;
+    /** 接收每帧视觉插值播放头（秒），供缩放锚点等命令式读取（与绘制同源）。 */
+    visualPlayheadRef: React.MutableRefObject<number>;
     syncScrollLeft: (next: number) => void;
     autoScrollEnabled: boolean;
     projectSec: number;
@@ -134,6 +136,7 @@ const TimelineTransportBridge = React.memo(function TimelineTransportBridge(prop
         rulerPlayheadLineRef,
         rulerPlayheadHeadRef,
         scrollRef,
+        visualPlayheadRef,
         syncScrollLeft,
         autoScrollEnabled,
         projectSec,
@@ -156,6 +159,9 @@ const TimelineTransportBridge = React.memo(function TimelineTransportBridge(prop
         isTransportAdvancing,
         onFrame: React.useCallback(
             (visualPlayheadSec: number) => {
+                // 同步共享 ref：缩放锚点与提交后纠正读取的必须是与绘制同源的
+                // 插值播放头，否则播放中缩放会以滞后的 store 值锚定造成跳变。
+                visualPlayheadRef.current = visualPlayheadSec;
                 const playheadLeftPx = visualPlayheadSec * pxPerSecRef.current;
 
                 // 自动滚动先行：syncScrollLeft 内部会用 Redux 同步播放头（滞后于
@@ -204,6 +210,7 @@ const TimelineTransportBridge = React.memo(function TimelineTransportBridge(prop
                 syncScrollLeft,
                 transport.isPlaying,
                 projectSec,
+                visualPlayheadRef,
             ],
         ),
     });
@@ -348,6 +355,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
 
     // ── 1. State / refs / viewport / scroll / 坐标转换 ──────
     const state = useTimelineState();
+    // 视觉插值播放头的共享读取点：bridge 的 onFrame 每帧写入（与绘制同源），
+    // 缩放锚点与提交后纠正读取同一值——播放中缩放不得以 33Hz 轮询的 store
+    // 滞后值锚定，否则播放头会跳变 δ·Δpx（δ = 轮询间隔内的插值领先量）。
+    const visualPlayheadSecRef = React.useRef(0);
+    const getVisualPlayheadSec = React.useCallback(() => visualPlayheadSecRef.current, []);
     // 面板卸载时清空吸附竖线高亮（拖拽手势异常中断的兜底）。
     React.useEffect(() => {
         return () => {
@@ -977,6 +989,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     useTimelineEventHandlers({
         dispatch,
         sessionRef,
+        getPlayheadSec: getVisualPlayheadSec,
         scrollRef,
         trackListScrollRef,
         pxPerSecRef,
@@ -1496,14 +1509,16 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     // scrollLeft 现在按 REACT_SCROLL_STEP_PX 量化提交，React 渲染期用
     // `timelineAxis` 算出的播放头 left 最多滞后一个步长；而播放头的真实位置
     // 由 useVisualPlayhead / syncScrollLeft 用**实时** scrollLeft 命令式写入。
-    // 这里在每次提交后立即用实时值纠正一次，避免 React 的滞后写入把播放头
+    // 这里在每次提交后立即用视觉插值值纠正一次，避免 React 的滞后写入把播放头
     // 推回旧位置。仅在提交时运行（滚动中约每 256px 一次），成本可忽略。
+    // ★ 必须读视觉插值 ref 而非 s.playheadSec：后者是 33Hz 轮询的滞后值，
+    //   缩放提交帧用它写播放头，下一帧 rAF 又写视觉值——表现为缩放瞬间跳变。
     React.useLayoutEffect(() => {
         const scroller = scrollRef.current;
         if (!scroller || !playheadRef.current) return;
-        const playheadLeftPx = (Number(s.playheadSec ?? 0) || 0) * pxPerSec;
+        const playheadLeftPx = visualPlayheadSecRef.current * pxPerSec;
         playheadRef.current.style.left = `${playheadLeftPx - scroller.scrollLeft}px`;
-    }, [pxPerSec, s.playheadSec, scrollLeft, playheadRef, scrollRef]);
+    }, [pxPerSec, s.playheadSec, scrollLeft, playheadRef, scrollRef, visualPlayheadSecRef]);
 
     return (
         <Profiler
@@ -1671,7 +1686,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         scrollVerticalKb={scrollVerticalKb}
                         horizontalZoomKb={horizontalZoomKb}
                         verticalZoomKb={verticalZoomKb}
-                        getPlayheadSec={() => Number(sessionRef.current.playheadSec ?? 0) || 0}
+                        getPlayheadSec={getVisualPlayheadSec}
                         playheadZoomEnabled={s.playheadZoomEnabled}
                         className="flex-1 bg-qt-graph-bg overflow-auto relative custom-scrollbar"
                         data-timeline-scroller
@@ -2794,6 +2809,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         rulerPlayheadLineRef={rulerPlayheadLineRef}
                         rulerPlayheadHeadRef={rulerPlayheadHeadRef}
                         scrollRef={scrollRef}
+                        visualPlayheadRef={visualPlayheadSecRef}
                         syncScrollLeft={syncScrollLeft}
                         autoScrollEnabled={s.autoScrollEnabled}
                         projectSec={dynamicProjectSec}

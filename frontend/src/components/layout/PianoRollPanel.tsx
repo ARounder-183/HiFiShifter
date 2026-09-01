@@ -469,6 +469,9 @@ export const PianoRollPanel: React.FC = () => {
     const dispatch = useAppDispatch();
     const rafRef = useRef<number | null>(null);
     const visualPlayheadSecRef = useRef(0);
+    // 视觉插值播放头读取器（与绘制同源）：缩放锚点必须使用它，不能用 33Hz
+    // 轮询的 store 滞后值——播放中缩放以滞后值锚定会让播放头跳变 δ·Δpx。
+    const getVisualPlayheadSec = useCallback(() => visualPlayheadSecRef.current, []);
     const rulerPlayheadLineRef = useRef<HTMLDivElement | null>(null);
     const rulerPlayheadHeadRef = useRef<HTMLDivElement | null>(null);
     const drawRef = useRef<() => void>(() => {});
@@ -1237,7 +1240,7 @@ export const PianoRollPanel: React.FC = () => {
     // 定义之后，避免 render 期求值 deps 时命中 const 的 TDZ。
     useEffect(() => {
         function onZoomFocused(e: Event) {
-            const { playheadSec, projectSec } = zoomTimelineStateRef.current;
+            const { projectSec } = zoomTimelineStateRef.current;
             const active = document.activeElement as HTMLElement | null;
             const inPianoRoll =
                 active?.hasAttribute("data-piano-roll-scroller") ||
@@ -1263,7 +1266,7 @@ export const PianoRollPanel: React.FC = () => {
                 totalSec: projectSec,
                 viewportWidth: scroller.clientWidth,
                 playheadZoomEnabled: true,
-                playheadSec: Number(playheadSec ?? 0) || 0,
+                playheadSec: getVisualPlayheadSec(),
                 anchorScreenX: 0,
                 minPxPerSec: resolveTimelineMinPxPerSec({
                     baseMinPxPerSec: MIN_PX_PER_SEC,
@@ -1282,7 +1285,7 @@ export const PianoRollPanel: React.FC = () => {
         window.addEventListener("hifi:zoomTimelineFocus", onZoomFocused as EventListener);
         return () =>
             window.removeEventListener("hifi:zoomTimelineFocus", onZoomFocused as EventListener);
-    }, [s.paramEditorSyncTimeline, handleHorizontalZoom]);
+    }, [getVisualPlayheadSec, s.paramEditorSyncTimeline, handleHorizontalZoom]);
     // 副参数独立显示开关，默认全部关闭
     const [secondaryParamVisible, setSecondaryParamVisible] = useState<
         Partial<Record<ParamName, boolean>>
@@ -2747,9 +2750,8 @@ export const PianoRollPanel: React.FC = () => {
         onContextMenu: useCallback((x: number, y: number) => {
             setCtxMenu({ x, y });
         }, []),
-        playheadSec: s.playheadSec,
-        playheadZoomEnabled: s.playheadZoomEnabled,
-        paramEditorSeekPlayheadEnabled: s.paramEditorSeekPlayheadEnabled,
+        getPlayheadSec: getVisualPlayheadSec,
+        playheadZoomEnabled: s.playheadZoomEnabled,        paramEditorSeekPlayheadEnabled: s.paramEditorSeekPlayheadEnabled,
         pitchSnapEnabled: s.pitchSnapEnabled,
         pitchSnapUnit: s.pitchSnapUnit,
         projectScale: effectiveProjectScale,
