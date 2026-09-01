@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { resolveActionByFocus } from "./focusRouting";
 import type { Keybinding } from "./types";
+import { IS_MAC } from "../../utils/platform";
 
 /** 构造一个 KeyboardEvent 形状的事件 */
 function keyEvent(
@@ -10,10 +11,13 @@ function keyEvent(
     return {
         key,
         code: key === " " ? "Space" : `Key${key.toUpperCase()}`,
-        ctrlKey: Boolean(mods.ctrl),
+        // 主修饰键按平台映射：macOS = ⌘(metaKey)，Windows/Linux = Ctrl。
+        // 与 `isModifierActive` → `isPrimaryModifierDown` 的映射一致；若写死
+        // `ctrlKey` + `metaKey: false`，这套测试就只在 Windows/Linux 通过。
+        ctrlKey: IS_MAC ? false : Boolean(mods.ctrl),
+        metaKey: IS_MAC ? Boolean(mods.ctrl) : false,
         shiftKey: Boolean(mods.shift),
         altKey: Boolean(mods.alt),
-        metaKey: false,
     } as unknown as KeyboardEvent;
 }
 

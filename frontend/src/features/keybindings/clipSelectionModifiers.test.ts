@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { resolveClipSelectionModifiers } from "./clipSelectionModifiers";
 import { DEFAULT_KEYBINDINGS } from "./defaultKeybindings";
 import type { Keybinding } from "./types";
+import { IS_MAC } from "../../utils/platform";
 
 const MULTI = DEFAULT_KEYBINDINGS["modifier.clipMultiSelectToggle"];
 const RANGE = DEFAULT_KEYBINDINGS["modifier.clipRangeSelect"];
@@ -14,7 +15,11 @@ function mods(
 ) {
     return resolveClipSelectionModifiers({
         event: {
-            ctrlKey: Boolean(flags.ctrl),
+            // 主修饰键按平台映射：macOS = ⌘(metaKey)，Windows/Linux = Ctrl。
+            // 与 `isModifierActive` → `isPrimaryModifierDown` 的映射一致；
+            // 直接写 ctrlKey 会让这套测试只在 Windows/Linux 通过。
+            ctrlKey: IS_MAC ? false : Boolean(flags.ctrl),
+            metaKey: IS_MAC ? Boolean(flags.ctrl) : false,
             shiftKey: Boolean(flags.shift),
             altKey: Boolean(flags.alt),
         },
@@ -24,7 +29,7 @@ function mods(
 }
 
 describe("resolveClipSelectionModifiers — 与写死时代行为对齐", () => {
-    it("仅 Ctrl（主修饰键）：多选切换生效", () => {
+    it("仅主修饰键（Windows/Linux Ctrl / macOS ⌘）：多选切换生效", () => {
         const m = mods({ ctrl: true });
         expect(m.multiSelectToggleActive).toBe(true);
         expect(m.rangeSelectActive).toBe(false);
@@ -38,7 +43,7 @@ describe("resolveClipSelectionModifiers — 与写死时代行为对齐", () => 
         expect(m.shouldPrimeSelection).toBe(false);
     });
 
-    it("Ctrl+Shift 同时按下：两者互斥，退回普通单选", () => {
+    it("主修饰键+Shift 同时按下：两者互斥，退回普通单选", () => {
         const m = mods({ ctrl: true, shift: true });
         expect(m.multiSelectToggleActive).toBe(false);
         expect(m.rangeSelectActive).toBe(false);
