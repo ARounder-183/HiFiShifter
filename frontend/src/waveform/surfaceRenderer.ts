@@ -44,32 +44,78 @@ export function expandLineSegmentsToQuads(vertices: Float32Array): Float32Array 
         const y1 = vertices[base + 1];
         const x2 = vertices[base + 6];
         const y2 = vertices[base + 7];
-        const dx = x2 - x1;
-        const dy = y2 - y1;
-        const length = Math.hypot(dx, dy);
-        const nx = length > 1e-9 ? (-dy / length) * half : 0;
-        const ny = length > 1e-9 ? (dx / length) * half : half;
+        const segDx = x2 - x1;
+        const segDy = y2 - y1;
+        const length = Math.hypot(segDx, segDy);
+        const nx = length > 1e-9 ? (-segDy / length) * half : 0;
+        const ny = length > 1e-9 ? (segDx / length) * half : half;
         const outBase = segment * 36;
         // 四角：A = p1 + n, B = p2 + n, C = p2 - n, D = p1 - n
         // 三角形 1: A B C；三角形 2: A C D
-        const corners = [
-            [x1 + nx, y1 + ny, base + 2], // A（起点色）
-            [x2 + nx, y2 + ny, base + 8], // B（终点色）
-            [x2 - nx, y2 - ny, base + 8], // C（终点色）
-            [x1 + nx, y1 + ny, base + 2], // A
-            [x2 - nx, y2 - ny, base + 8], // C
-            [x1 - nx, y1 - ny, base + 2], // D（起点色）
-        ] as const;
-        for (let corner = 0; corner < 6; corner += 1) {
-            const [cx, cy, colorBase] = corners[corner];
-            const o = outBase + corner * 6;
-            out[o] = cx;
-            out[o + 1] = cy;
-            out[o + 2] = vertices[colorBase];
-            out[o + 3] = vertices[colorBase + 1];
-            out[o + 4] = vertices[colorBase + 2];
-            out[o + 5] = vertices[colorBase + 3];
-        }
+        //
+        // 六个角点**全部内联展开**：此前这里是一个 `corners` 数组字面量 + 一次
+        // 循环，等于每段分配 7 个数组（15,200 段 ≈ 10.6 万次/帧）。语义上它
+        // 与下面 6 组直接写入完全等价，但每帧十万次分配会把 GC 拖进渲染关键
+        // 路径。起点色/终点色各取一次到局部量，避免重复的 Float32Array 索引。
+        const ax = x1 + nx;
+        const ay = y1 + ny;
+        const bx = x2 + nx;
+        const by = y2 + ny;
+        const cx = x2 - nx;
+        const cy = y2 - ny;
+        const dx = x1 - nx;
+        const dy = y1 - ny;
+        const r1 = vertices[base + 2];
+        const g1 = vertices[base + 3];
+        const b1 = vertices[base + 4];
+        const a1 = vertices[base + 5];
+        const r2 = vertices[base + 8];
+        const g2 = vertices[base + 9];
+        const b2 = vertices[base + 10];
+        const a2 = vertices[base + 11];
+
+        // A（起点色）
+        out[outBase] = ax;
+        out[outBase + 1] = ay;
+        out[outBase + 2] = r1;
+        out[outBase + 3] = g1;
+        out[outBase + 4] = b1;
+        out[outBase + 5] = a1;
+        // B（终点色）
+        out[outBase + 6] = bx;
+        out[outBase + 7] = by;
+        out[outBase + 8] = r2;
+        out[outBase + 9] = g2;
+        out[outBase + 10] = b2;
+        out[outBase + 11] = a2;
+        // C（终点色）
+        out[outBase + 12] = cx;
+        out[outBase + 13] = cy;
+        out[outBase + 14] = r2;
+        out[outBase + 15] = g2;
+        out[outBase + 16] = b2;
+        out[outBase + 17] = a2;
+        // A（起点色）
+        out[outBase + 18] = ax;
+        out[outBase + 19] = ay;
+        out[outBase + 20] = r1;
+        out[outBase + 21] = g1;
+        out[outBase + 22] = b1;
+        out[outBase + 23] = a1;
+        // C（终点色）
+        out[outBase + 24] = cx;
+        out[outBase + 25] = cy;
+        out[outBase + 26] = r2;
+        out[outBase + 27] = g2;
+        out[outBase + 28] = b2;
+        out[outBase + 29] = a2;
+        // D（起点色）
+        out[outBase + 30] = dx;
+        out[outBase + 31] = dy;
+        out[outBase + 32] = r1;
+        out[outBase + 33] = g1;
+        out[outBase + 34] = b1;
+        out[outBase + 35] = a1;
     }
     return out.subarray(0, required);
 }

@@ -21,7 +21,7 @@ import { waveformMipmapStore } from "../utils/waveformMipmapStore";
 import type { TimelineAxis } from "../components/layout/timeline/runtime/timelineAxis.ts";
 import { LAYER_ORDER } from "../components/layout/timeline/runtime/timelineFrameCommitter.ts";
 import type { TimelineLayer } from "../components/layout/timeline/runtime/timelineFrameCommitter.ts";
-import { buildWaveformGeometry } from "./geometry";
+import { buildWaveformGeometry, type WaveformVertexSink } from "./geometry";
 import { buildWaveformScene, type WaveformSceneRow } from "./sceneBuilder";
 import {
     Canvas2dWaveformRenderer,
@@ -63,6 +63,15 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
     const rafRef = React.useRef<number | null>(null);
     const drawRef = React.useRef<() => void>(() => {});
     const rootRef = React.useRef<HTMLDivElement | null>(null);
+    /**
+     * 顶点缓冲槽：跨帧复用，稳态零分配。
+     *
+     * 此前 `buildWaveformGeometry` 每帧末尾 `slice()` 出一份独立副本
+     * （实测 703 KB/帧），而顶点在 `render()` 内上传 GPU 之后 CPU 侧就不
+     * 再需要——那份拷贝纯属浪费，反而制造了周期性的 GC 压力。
+     * 渲染器不得跨 `render()` 边界持有 `geometry.vertices`。
+     */
+    const vertexSinkRef = React.useRef<WaveformVertexSink>({ buffer: new Float32Array(0) });
     const [rendererKind, setRendererKind] = React.useState<"webgl2" | "canvas2d">("webgl2");
 
     // render 期写 ref 镜像（本仓库热路径既有模式，见 TimelineCanvasViewport）。
@@ -144,6 +153,7 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
                     sourceDurationSec,
                 );
             },
+            sink: vertexSinkRef.current,
         });
 
         if (rendererKind === "webgl2" && webglRendererRef.current) {

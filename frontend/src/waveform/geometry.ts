@@ -79,47 +79,83 @@ function gainAtClipTime(
     return gain;
 }
 
-// ── 顶点写入的模块级复用缓冲 ─────────────────────────────────────────
-// 滚动热路径上每帧构建几何：先写入可增长的 Float32Array（跨帧复用，
-// 稳态零分配），最后 slice 出独立副本返回，避免 number[] 装箱推送与
-// 逐帧新建大数组的 GC 压力。
-let vertexScratch = new Float32Array(8192);
-let vertexScratchLength = 0;
+/**
+ * 顶点缓冲槽。
+ *
+ * 由调用方持有并跨帧复用：`buffer` 容量不足时会被替换为更大的新数组，
+ * 调用方下次传入新的即可。这样**稳态零分配**——否则每帧末尾都要把顶点
+ * `slice()` 成独立副本（实测 703 KB/帧），纯属浪费：顶点一旦上传 GPU /
+ * 提交给 Canvas2D，CPU 侧就不再需要它了。
+ */
+export interface WaveformVertexSink {
+    buffer: Float32Array;
+}
 
-function createVertexSink(): (
-    x: number,
-    y: number,
-    r: number,
-    g: number,
-    b: number,
-    a: number,
-) => void {
+/**
+ * 未显式提供 sink 时的模块级兜底槽。
+ *
+ * 保留它有多个原因：基准（`waveformPerf.bench.ts`）与单元测试不传 sink，
+ * 行为应与改动前一致（跨调用复用同一块缓冲、稳态零分配）；生产侧则由
+ * `WaveformSurface` 各自持有一个槽，避免两个波形面互相踩缓冲。
+ */
+const fallbackSink: WaveformVertexSink = { buffer: new Float32Array(0) };
+
+/** 写入游标与当前缓冲打包在一起，避免模块级可变状态。 */
+interface VertexSinkState {
+    buffer: Float32Array;
+    length: number;
+}
+
+/** 初始容量（元素个数）：与改动前 `vertexScratch` 的初值一致。 */
+const INITIAL_VERTEX_CAPACITY = 8192;
+
+function createVertexSink(
+    state: VertexSinkState,
+): (x: number, y: number, r: number, g: number, b: number, a: number) => void {
     return (x, y, r, g, b, a) => {
-        if (vertexScratchLength + 6 > vertexScratch.length) {
+        if (state.length + 6 > state.buffer.length) {
             const next = new Float32Array(
-                Math.max(vertexScratch.length * 2, vertexScratchLength + 6),
+                Math.max(state.buffer.length * 2 || INITIAL_VERTEX_CAPACITY, state.length + 6),
             );
-            next.set(vertexScratch.subarray(0, vertexScratchLength));
-            vertexScratch = next;
+            next.set(state.buffer.subarray(0, state.length));
+            state.buffer = next;
         }
-        const i = vertexScratchLength;
-        vertexScratch[i] = x;
-        vertexScratch[i + 1] = y;
-        vertexScratch[i + 2] = r;
-        vertexScratch[i + 3] = g;
-        vertexScratch[i + 4] = b;
-        vertexScratch[i + 5] = a;
-        vertexScratchLength = i + 6;
+        const i = state.length;
+        state.buffer[i] = x;
+        state.buffer[i + 1] = y;
+        state.buffer[i + 2] = r;
+        state.buffer[i + 3] = g;
+        state.buffer[i + 4] = b;
+        state.buffer[i + 5] = a;
+        state.length = i + 6;
     };
 }
 
+/**
+ * 由波形场景构建逐线段顶点几何。
+ *
+ * 流程：遍历场景的段与标记，按像素列采样 mipmap、算包络与淡变增益，把
+ * 每条线段写成 2 个顶点（每顶点 `x, y, r, g, b, a` 共 6 个 float）。
+ *
+ * @param args.scene 绘制场景（`buildWaveformScene` 的产物）。
+ * @param args.color 波形描边色（hex / rgb(a)）。
+ * @param args.getPeaks 峰值解析器。
+ * @param args.sink 顶点写入目标；**跨帧复用可做到稳态零分配**。容量不足时
+ *   内部倍增并把新缓冲写回 `sink.buffer`。省略时使用模块级兜底槽。
+ * @returns 顶点视图（**借用 `sink.buffer`，调用方不得长期持有**——下一次
+ *   构建会覆写它；生产侧只在同一次 `render()` 内使用，安全）、线段数与
+ *   数据完整性标志。
+ */
 export function buildWaveformGeometry(args: {
     scene: WaveformScene;
     color: string;
     getPeaks: WaveformPeakResolver;
+    sink?: WaveformVertexSink;
 }): WaveformGeometry {
     const [red, green, blue, colorAlpha] = parseWaveformColor(args.color);
-    const push = createVertexSink();
+    const sink = args.sink ?? fallbackSink;
+    const state: VertexSinkState = { buffer: sink.buffer, length: 0 };
+    const push = createVertexSink(state);
     let complete = true;
 
     for (const segment of args.scene.segments) {
@@ -240,11 +276,13 @@ export function buildWaveformGeometry(args: {
         }
     }
 
-    // 先取长度再清零：slice 出独立副本供 GPU/2D 渲染器安全持有。
-    const used = vertexScratchLength;
-    vertexScratchLength = 0;
+    // 直接返回缓冲视图，不再 slice 出副本：顶点在 `render()` 内即被上传
+    // GPU / 提交给 Canvas2D，此后 CPU 侧不再需要。这省掉每帧一次约 703 KB
+    // 的拷贝（400 clip / 全览实测值）。代价是调用方不能跨帧持有返回值。
+    const used = state.length;
+    sink.buffer = state.buffer;
     return {
-        vertices: vertexScratch.slice(0, used),
+        vertices: state.buffer.subarray(0, used),
         lineCount: used / 12,
         complete,
     };
