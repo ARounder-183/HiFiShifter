@@ -15,7 +15,10 @@ import { describe, expect, it } from "vitest";
 
 import {
     buildClipBodyInstance,
+    buildGuideInstance,
     CLIP_INSTANCE_FLOATS,
+    INSTANCE_MODE_BOX,
+    INSTANCE_MODE_FLAT,
     parseRgbaColor,
 } from "./timelineClipGlRenderer.js";
 
@@ -99,8 +102,10 @@ describe("clip 实例数据布局", () => {
         expect(buffer[20]).toBeCloseTo(0.5, 6);
         expect(buffer[21]).toBeCloseTo(31 / 255, 6);
 
-        // 全部 24 个槽位都被覆盖（没有未初始化的空洞）
-        expect(buffer.length).toBe(24);
+        // 全部槽位都被覆盖（没有未初始化的空洞）
+        expect(buffer.length).toBe(CLIP_INSTANCE_FLOATS);
+        // clip 圆角盒的模式标记
+        expect(buffer[24]).toBe(INSTANCE_MODE_BOX);
     });
 
     it("极小 clip：圆角按尺寸收敛，重叠宽度被钳到宽度以内", () => {
@@ -125,6 +130,28 @@ describe("clip 实例数据布局", () => {
         expect(buffer[19]).toBe(0);
         // 无分隔缝
         expect(buffer[20]).toBe(0);
+    });
+
+    it("平面矩形实例（行分界线）：模式为 FLAT，颜色落在 border 槽", () => {
+        const buffer = new Float32Array(CLIP_INSTANCE_FLOATS);
+        buildGuideInstance(buffer, 0, 0, 96, 1500, 1 / 2, "rgba(148, 163, 184, 0.22)");
+
+        // 几何
+        expect(buffer[0]).toBe(0);
+        expect(buffer[1]).toBe(96);
+        expect(buffer[2]).toBe(1500);
+        expect(buffer[3]).toBeCloseTo(0.5, 6);
+        // 无圆角、无分区、无描边、无重叠、无分隔缝
+        expect(buffer[4]).toBe(0);
+        expect(buffer[5]).toBe(0);
+        expect(buffer[18]).toBe(0);
+        expect(buffer[19]).toBe(0);
+        expect(buffer[20]).toBe(0);
+        // 颜色在 border 槽
+        expect(buffer[14]).toBeCloseTo(148 / 255, 6);
+        expect(buffer[17]).toBeCloseTo(0.22, 6);
+        // 模式 = FLAT
+        expect(buffer[24]).toBe(INSTANCE_MODE_FLAT);
     });
 
     it("多个实例按固定步长排布，互不覆盖", () => {

@@ -7,6 +7,7 @@ import {
 import { SNAP_OFFSET_HANDLE_SIZE_PX } from "../constants.js";
 import {
     buildClipBodyInstance,
+    buildGuideInstance,
     CLIP_INSTANCE_FLOATS,
     type GlClipBodySink,
 } from "./timelineClipGlRenderer.js";
@@ -215,6 +216,9 @@ export function drawTimelineCanvas(
     const darkMode =
         args.darkMode ??
         (typeof document !== "undefined" && document.documentElement.dataset.theme === "dark");
+    // 行分界线颜色：Canvas2D 路径与 GL 路径共用（GL 路径在 flushBatch 里
+    // 把它写进实例的 border 色槽）。
+    const guideBorderColor = resolveThemeColor("--qt-border", "rgba(148, 163, 184, 0.22)");
 
     // 全物理清屏：与 rasterize 同契约（round(css*dpr)），CSS 尺寸清屏在
     // 向上取整时会在画布底部遗留 0~0.5 物理行的永久残影。
@@ -226,6 +230,9 @@ export function drawTimelineCanvas(
 
     // 轨道横向分界线由 sticky 画布统一绘制：工程末尾之后的空白区也要有
     // 同样的分界线，且滚动/缩放时与 Clip 体同帧同步。
+    // 行分界线（内容坐标 y + 线高）。Canvas2D 路径直接画；GL 路径把它作为
+    // 「平面矩形」实例交给 glBodies，与 clip 同一次 draw call 绘制。
+    const guideLines: Array<{ y: number; h: number }> = [];
     if (args.rowGuides && args.rowGuides.rowCount > 0) {
         const { startTrackIndex, rowCount, rowHeight, contentBottomPx } = args.rowGuides;
         const viewportLeft = Number.isFinite(args.viewportLeft) ? (args.viewportLeft as number) : 0;
@@ -237,29 +244,40 @@ export function drawTimelineCanvas(
             : Number.POSITIVE_INFINITY;
         // 主题色走进程级缓存（见 timelineCanvasStyle.resolveThemeColor）：
         // 这里每帧都会执行，裸调 getComputedStyle 会触发强制样式重算。
-        const borderColor = resolveThemeColor("--qt-border", "rgba(148, 163, 184, 0.22)");
+        const borderColor = guideBorderColor;
         const dpr = window.devicePixelRatio || 1;
-        ctx.save();
-        ctx.strokeStyle = borderColor;
-        // 行分界线对齐设备像素：分数 DPR 下 1px CSS 线会被抗锯齿拆成
-        // 1~2 物理像素的渐变线，粗细随落点相位漂移。
-        ctx.lineWidth = 1 / dpr;
-        for (let index = 1; index <= rowCount; index += 1) {
-            const rawY = (startTrackIndex + index) * rowHeight;
-            // 边界判定用原始坐标：吸附只是绘制细节。最后一条轨道的底边与
-            // contentBottomPx 重合，若用吸附后的 y 过 guard（容差 1e-6），
-            // +0.5/dpr 的偏移会让这根线被误跳——底边横线消失。
-            if (rawY < viewportTopPx - 1 || rawY > viewportTopPx + args.height + 2) continue;
-            if (rawY > bottomPx + 1e-6) continue;
-            // 线体落在边界上方的设备像素行内：画布高度恰为内容底边，
-            // 若线心压在边界 +(0.5/dpr) 上，整根线会被画布下缘裁掉。
-            const y = (Math.round(rawY * dpr) - 0.5) / dpr;
-            ctx.beginPath();
-            ctx.moveTo(viewportLeft, y);
-            ctx.lineTo(viewportLeft + args.width, y);
-            ctx.stroke();
+        // GL 模式：行分界线作为「平面矩形」实例交给 glBodies，与 clip 同一次
+        // draw call 绘制，且排在 clip 实例**之前**——保持「线在下、clip 在上」
+        // 的原层叠顺序（Canvas2D 路径里分界线先画、clip 后画会盖住它）。
+        // 这样也修掉了 2D canvas 位于 GL canvas 之上导致的 0.5px 压线差异。
+        if (args.glBodies) {
+            for (let index = 1; index <= rowCount; index += 1) {
+                const rawY = (startTrackIndex + index) * rowHeight;
+                if (rawY < viewportTopPx - 1 || rawY > viewportTopPx + args.height + 2) continue;
+                if (rawY > bottomPx + 1e-6) continue;
+                guideLines.push({
+                    y: (Math.round(rawY * dpr) - 0.5) / dpr,
+                    h: 1 / dpr,
+                });
+            }
+        } else {
+            ctx.save();
+            ctx.strokeStyle = borderColor;
+            // 行分界线对齐设备像素：分数 DPR 下 1px CSS 线会被抗锯齿拆成
+            // 1~2 物理像素的渐变线，粗细随落点相位漂移。
+            ctx.lineWidth = 1 / dpr;
+            for (let index = 1; index <= rowCount; index += 1) {
+                const rawY = (startTrackIndex + index) * rowHeight;
+                if (rawY < viewportTopPx - 1 || rawY > viewportTopPx + args.height + 2) continue;
+                if (rawY > bottomPx + 1e-6) continue;
+                const y = (Math.round(rawY * dpr) - 0.5) / dpr;
+                ctx.beginPath();
+                ctx.moveTo(viewportLeft, y);
+                ctx.lineTo(viewportLeft + args.width, y);
+                ctx.stroke();
+            }
+            ctx.restore();
         }
-        ctx.restore();
     }
 
     // 同轨 clip 的左缘集合：用于判定"本 clip 右缘是否紧贴另一个 clip"
@@ -836,16 +854,32 @@ export function drawTimelineCanvas(
         const glBodies = args.glBodies ?? null;
         let canvasItems = pending;
         if (glBodies !== null) {
-            let glCount = 0;
+            let glClipCount = 0;
             for (const item of pending) {
-                if (item.useGl) glCount += 1;
+                if (item.useGl) glClipCount += 1;
             }
-            if (glCount > 0) {
-                const needed = glCount * CLIP_INSTANCE_FLOATS;
+            const guideCount = guideLines.length;
+            const totalCount = glClipCount + guideCount;
+            if (totalCount > 0) {
+                const needed = totalCount * CLIP_INSTANCE_FLOATS;
                 if (glInstanceBuffer.length < needed) {
                     glInstanceBuffer = new Float32Array(needed * 2);
                 }
                 let index = 0;
+                // 分界线排在 clip 实例**之前**：同一 draw call 内后画的盖住
+                // 先画的，与 Canvas2D 路径「先画线、后画 clip」的层叠一致。
+                for (const guide of guideLines) {
+                    buildGuideInstance(
+                        glInstanceBuffer,
+                        index,
+                        args.viewportLeft ?? 0,
+                        guide.y,
+                        args.width,
+                        guide.h,
+                        guideBorderColor,
+                    );
+                    index += 1;
+                }
                 for (const item of pending) {
                     if (!item.useGl) continue;
                     buildClipBodyInstance(
@@ -859,7 +893,7 @@ export function drawTimelineCanvas(
                 }
                 glBodies.render(
                     glInstanceBuffer,
-                    glCount,
+                    totalCount,
                     args.width,
                     args.height,
                     window.devicePixelRatio || 1,

@@ -72,7 +72,18 @@ export interface GlClipBodySink {
 }
 
 /** 单实例的 float 个数。 */
-export const CLIP_INSTANCE_FLOATS = 24;
+export const CLIP_INSTANCE_FLOATS = 25;
+
+/**
+ * 实例类型。
+ *
+ * - `0` = clip 圆角盒（header/body 分区、描边、分隔缝、前导重叠）；
+ * - `1` = 平面矩形（无圆角、无分区、无描边）——用于行分界线这类"就是一块
+ *   纯色"的元素。它复用同一套实例缓冲与 draw call，避免为一条 1px 横线
+ *   单独发一次 draw。
+ */
+export const INSTANCE_MODE_BOX = 0;
+export const INSTANCE_MODE_FLAT = 1;
 
 const OFF_X = 0;
 const OFF_Y = 1;
@@ -87,6 +98,7 @@ const OFF_BORDER_WIDTH = 18;
 const OFF_OVERLAP_PX = 19;
 const OFF_SEAM = 20; // x 分量：缝宽（0 = 无）
 const OFF_SEAM_RGB = 21; // 21..23
+const OFF_MODE = 24;
 
 /**
  * 解析 `rgba(r, g, b, a)` 为 0..1 的四个分量。
@@ -207,6 +219,67 @@ export function buildClipBodyInstance(
         out[base + OFF_SEAM_RGB + 1] = seam[1];
         out[base + OFF_SEAM_RGB + 2] = seam[2];
     }
+
+    out[base + OFF_MODE] = INSTANCE_MODE_BOX;
+}
+
+/**
+ * 写入一个「平面矩形」实例（行分界线用）。
+ *
+ * 与 clip 圆角盒的区别：无圆角、无 header/body 分区、无描边、无分隔缝，
+ * 片元着色器直接输出给定颜色——这样一条 1 设备像素的横线不必为它单独
+ * 发一次 draw call。
+ *
+ * @param out 目标 Float32Array。
+ * @param index 实例序号。
+ * @param x 内容坐标 x（CSS 像素）。
+ * @param y 内容坐标 y（已吸附到设备像素，CSS 像素）。
+ * @param w 宽（CSS 像素）。
+ * @param h 高（CSS 像素，通常为 1/dpr）。
+ * @param colorCss 线色。
+ */
+export function buildGuideInstance(
+    out: Float32Array,
+    index: number,
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    colorCss: string,
+): void {
+    const base = index * CLIP_INSTANCE_FLOATS;
+    const color = parseRgbaColor(colorCss);
+
+    out[base + OFF_X] = x;
+    out[base + OFF_Y] = y;
+    out[base + OFF_W] = w;
+    out[base + OFF_H] = h;
+    out[base + OFF_RADIUS] = 0;
+    out[base + OFF_HEADER_H] = 0;
+
+    // 平面矩形只用 border 色槽承载颜色；其余槽位清零，避免读到脏数据。
+    out[base + OFF_BODY_RGBA] = 0;
+    out[base + OFF_BODY_RGBA + 1] = 0;
+    out[base + OFF_BODY_RGBA + 2] = 0;
+    out[base + OFF_BODY_RGBA + 3] = 0;
+    out[base + OFF_HEADER_RGBA] = 0;
+    out[base + OFF_HEADER_RGBA + 1] = 0;
+    out[base + OFF_HEADER_RGBA + 2] = 0;
+    out[base + OFF_HEADER_RGBA + 3] = 0;
+
+    out[base + OFF_BORDER_RGBA] = color[0];
+    out[base + OFF_BORDER_RGBA + 1] = color[1];
+    out[base + OFF_BORDER_RGBA + 2] = color[2];
+    out[base + OFF_BORDER_RGBA + 3] = color[3];
+
+    out[base + OFF_BORDER_WIDTH] = 0;
+    out[base + OFF_OVERLAP_PX] = 0;
+    out[base + OFF_SEAM] = 0;
+    out[base + OFF_SEAM_RGB] = 0;
+    out[base + OFF_SEAM_RGB + 1] = 0;
+    out[base + OFF_SEAM_RGB + 2] = 0;
+
+    out[base + OFF_MODE] = INSTANCE_MODE_FLAT;
 }
 
 /** clip 圆角半径（CSS 像素），与 `timelineCanvasStyle.CLIP_CORNER_RADIUS_PX` 同值。 */
@@ -234,6 +307,7 @@ in float i_borderWidth;
 in float i_overlapPx;
 in float i_seamW;
 in vec3 i_seamColor;
+in float i_mode;
 
 uniform vec2 u_resolution;
 uniform vec2 u_viewOrigin;
@@ -249,9 +323,11 @@ out float v_borderWidth;
 out float v_overlapPx;
 out float v_seamW;
 out vec3 v_seamColor;
+out float v_mode;
 
 void main() {
-    float pad = max(i_borderWidth * 0.5, 1.0);
+    // 平面矩形不外扩（它就是精确的矩形）；圆角盒才需要为描边预留边界。
+    float pad = i_mode > 0.5 ? 0.0 : max(i_borderWidth * 0.5, 1.0);
     vec2 center = vec2(i_rect[0] + i_rect[2] * 0.5, i_rect[1] + i_rect[3] * 0.5);
     vec2 halfSize = vec2(i_rect[2] * 0.5 + pad, i_rect[3] * 0.5 + pad);
     vec2 pos = center + (a_unit - 0.5) * 2.0 * halfSize;
@@ -271,6 +347,7 @@ void main() {
     v_overlapPx = i_overlapPx;
     v_seamW = i_seamW;
     v_seamColor = i_seamColor;
+    v_mode = i_mode;
 }`;
 
 const FRAGMENT_SHADER = `#version 300 es
@@ -287,6 +364,7 @@ in float v_borderWidth;
 in float v_overlapPx;
 in float v_seamW;
 in vec3 v_seamColor;
+in float v_mode;
 
 out vec4 outColor;
 
@@ -297,6 +375,12 @@ float roundedBoxSdf(vec2 p, vec2 b, float r) {
 }
 
 void main() {
+    // 平面矩形：直接输出颜色（四边形本身就是精确矩形，无需 SDF / 分区）。
+    if (v_mode > 0.5) {
+        outColor = v_borderColor;
+        return;
+    }
+
     vec2 p = v_local - v_half;
     float sdf = roundedBoxSdf(p, v_half, v_radius);
 
@@ -445,6 +529,7 @@ export class GlClipBodyRenderer {
         setup("i_overlapPx", 1, OFF_OVERLAP_PX);
         setup("i_seamW", 1, OFF_SEAM);
         setup("i_seamColor", 3, OFF_SEAM_RGB);
+        setup("i_mode", 1, OFF_MODE);
 
         gl.bindVertexArray(null);
     }
