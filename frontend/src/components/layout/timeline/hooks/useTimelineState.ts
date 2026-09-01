@@ -15,6 +15,7 @@
  * - Mipmap 预加载
  */
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+
 import { registerDragAbort } from "../gestureFocusGuard";
 import { useAppDispatch, useAppSelector } from "../../../../app/hooks";
 import { store, type RootState } from "../../../../app/store";
@@ -23,6 +24,7 @@ import { timelineViewportBus } from "../../../../utils/timelineViewportBus";
 import { timelineViewportSync } from "../../../../utils/timelineViewportSync";
 import { IS_MAC, isPrimaryModifierDown } from "../../../../utils/platform";
 
+import { TICK_WINDOW_STEP_PX } from "../runtime/buildTimelineTicks.js";
 import { waveformMipmapStore } from "../../../../utils/waveformMipmapStore";
 import { fileBrowserApi } from "../../../../services/api/fileBrowser";
 import { seekPlayhead, setplayheadSec } from "../../../../features/session/sessionSlice";
@@ -179,6 +181,19 @@ export interface TimelineStateResult {
     dynamicProjectSec: number;
     /** 统一刻度源：标尺刻度与背景网格线共用（由 buildTimelineTicks 生成）。 */
     timelineTicks: TimelineTick[];
+    /**
+     * 供标尺消费的**量化**滚动位置。
+     *
+     * `timelineTicks` 与 `TimeRulerMarks` 都按内容坐标自行做可见范围二分，
+     * 并各自留有缓冲（标尺缓冲为 `max(320, viewportWidth * 0.5)`）。因此喂给
+     * 它们一个量化后的滚动位置是安全的：只要量化步长不超过缓冲，渲染窗口
+     * 始终是视口的超集。
+     *
+     * 用它替代原始 `scrollLeft`，可以让刻度与标尺子树在滚动期间**不重算也
+     * 不重渲染**——此前每帧都重算 tick 数组并产生新引用，连带 TimeRuler 的
+     * 全部刻度 DOM 与 BackgroundGrid 的 SVG 路径每帧重建。
+     */
+    rulerScrollLeft: number;
     clipsByTrackId: Map<string, RootState["session"]["clips"]>;
     viewportStartSec: number;
     viewportEndSec: number;
@@ -752,13 +767,22 @@ export function useTimelineState(): TimelineStateResult {
     // 刻度天然是网格线的子集，两者不可能错位（此前两者各用一套步长选择：
     // 网格走 resolveGridLineSamplingPlan、标尺走 buildRulerTicks，Tempo Map
     // 下 beat 与像素非线性，必然分叉）。
+    // 刻度窗口量化：见 `rulerScrollLeft` 的注释。
+    // 步长必须**小于**下游消费者的缓冲（标尺为 max(320, viewportWidth*0.5)），
+    // 这样即使按量化的位置生成刻度，视口也始终被完整覆盖。
+    const tickAnchorPx = Math.floor(scrollLeft / TICK_WINDOW_STEP_PX) * TICK_WINDOW_STEP_PX;
+
     const timelineTicks = useMemo(() => {
         const beatsPerBar = Math.max(1, Math.round(s.beats || 4));
         return buildTimelineTicks({
+            // 从量化锚点起、按「视口 + 一个步长」取刻度：锚点 ≤ scrollLeft <
+            // 锚点 + 步长，因此覆盖区间必然包含真实视口 [scrollLeft,
+            // scrollLeft + viewportWidth]，多出来的只有步长那么宽的一部分。
             axis: createTimelineAxis({
                 pxPerSec,
-                scrollLeftPx: scrollLeft,
-                viewportWidthPx: Number.isFinite(viewportWidth) ? viewportWidth : 0,
+                scrollLeftPx: tickAnchorPx,
+                viewportWidthPx:
+                    (Number.isFinite(viewportWidth) ? viewportWidth : 0) + TICK_WINDOW_STEP_PX,
             }),
             bpm: s.bpm,
             beatsPerBar,
@@ -781,7 +805,7 @@ export function useTimelineState(): TimelineStateResult {
         s.tempoMap,
         viewportWidth,
         pxPerSec,
-        scrollLeft,
+        tickAnchorPx,
     ]);
 
     // ── clipsByTrackId ───────────────────────────────────────
@@ -1220,6 +1244,7 @@ export function useTimelineState(): TimelineStateResult {
         contentHeight,
         dynamicProjectSec,
         timelineTicks,
+        rulerScrollLeft: tickAnchorPx,
         clipsByTrackId,
         viewportStartSec,
         viewportEndSec,

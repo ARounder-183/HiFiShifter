@@ -93,6 +93,20 @@ export interface TimelineTick {
  * @param args.tempoMap 速度映射；为 null 或空时走均匀网格。
  * @returns 升序刻度数组。
  */
+/**
+ * 刻度窗口的量化步长（CSS 像素）。
+ *
+ * `timelineTicks` 与 `TimeRulerMarks` 都按内容坐标自行做可见范围二分，并各
+ * 自带缓冲，因此喂给它们一个**量化后**的滚动位置是安全的：锚点 ≤ 真实
+ * scrollLeft < 锚点 + 步长，只要把取刻度用的视口宽加上一个步长，覆盖区间就
+ * 必然包含真实视口。这样滚动期间刻度数组与标尺子树都不必每帧重算重渲染。
+ *
+ * 约束：步长必须小于下游 `TimeRulerMarks` 的缓冲
+ * （`max(320, viewportWidth * 0.5)`），否则标尺窗口会漏刻度。
+ * 该不变式由 `buildTimelineTicks.windowing.test.ts` 锁住。
+ */
+export const TICK_WINDOW_STEP_PX = 256;
+
 export function buildTimelineTicks(args: {
     axis: TimelineAxis;
     bpm: number;

@@ -382,6 +382,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         contentHeight,
         dynamicProjectSec,
         timelineTicks,
+        rulerScrollLeft,
         viewportStartSec,
         viewportEndSec,
         scrollHorizontalKb,
@@ -1495,8 +1496,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 {/* playheadSec 传提交值（而非渲染期读 ref）：视觉插值由
                     playheadLineRef/playheadHeadRef 命令式驱动；React 仅在该值
                     真正变化时重写 style.left，写入的是最新提交位置而非陈旧值。 */}
+                {/* 标尺不消费实时滚动位置：刻度与可见范围都按量化的
+                    `rulerScrollLeft` 生成（缓冲已保证覆盖视口），这样滚动期间
+                    `TimeRulerMarks` 的 memo 不会失效，整棵刻度子树不必每帧重渲染。 */}
                 <TimeRuler
-                    scrollLeft={scrollLeft}
+                    scrollLeft={rulerScrollLeft}
                     ticks={timelineTicks}
                     pxPerBeat={pxPerBeat}
                     pxPerSec={pxPerSec}
