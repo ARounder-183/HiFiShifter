@@ -26,6 +26,14 @@ if (import.meta.env.DEV) {
     void import("./dev/perfProject").then((module) => module.installPerfProjectDevtools());
 }
 
+// 帧率探针：**dev 与打包版都可用**——按 localStorage 开关动态加载，未开启时
+// 这个 chunk 根本不会下载，对正常使用零影响。打包版没有 PERF 面板，需要
+// 测量时在控制台执行下面这行后刷新：
+//   localStorage.setItem("hifishifter.frameProfiler", "1"); location.reload()
+if (localStorage.getItem("hifishifter.frameProfiler") === "1") {
+    void import("./dev/frameProfiler").then((module) => module.startFrameProfiler());
+}
+
 createRoot(document.getElementById("root")!).render(
     <StrictMode>
         <Provider store={store}>

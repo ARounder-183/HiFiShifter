@@ -31,6 +31,7 @@ import { store } from "../app/store";
 import { applyTimelinePayload } from "../features/session/sessionSlice";
 import type { TimelineClip, TimelineState, TimelineTrack } from "../types/api";
 import { waveformMipmapStore } from "../utils/waveformMipmapStore";
+import { startFrameProfiler, stopFrameProfiler } from "./frameProfiler";
 import { PERF_GL_CLIP_BODIES_KEY } from "../components/layout/timeline/runtime/timelineClipGlRenderer.js";
 import { createSyntheticPeakSource, type SyntheticPeakSource } from "../waveform/perfFixtures";
 
@@ -42,6 +43,9 @@ const DEFAULT_SAMPLE_RATE = 44100;
 
 /** 规模选择的持久化键：写后重载页面即可自动重建（见 `installPerfProjectDevtools`）。 */
 const PERSIST_KEY = "hifishifter.perfProject";
+
+/** 帧率探针开关 key（探针本身也只在 dev 模式加载）。 */
+const FRAME_PROFILER_KEY = "hifishifter.frameProfiler";
 
 /** 解析持久化的选项 JSON；非法 JSON 返回 `null` 由调用方忽略。 */
 function safeParseJson(raw: string): PerfProjectOptions | null {
@@ -423,6 +427,25 @@ function mountPerfPanel(): void {
         window.dispatchEvent(new Event(PERF_GL_CLIP_BODIES_KEY));
         status.textContent = `GL clip bodies ${next === "1" ? "ON" : "OFF"}`;
     });
+
+    // ── 帧率探针开关 ────────────────────────────
+    // 打开后右上角出现浮层：FPS / 帧间隔 / 各图层绘制耗时 / React 提交耗时。
+    let profilerOn = localStorage.getItem(FRAME_PROFILER_KEY) === "1";
+    const profilerButton = makeButton(`profiler: ${profilerOn ? "on" : "off"}`, () => {
+        profilerOn = !profilerOn;
+        localStorage.setItem(FRAME_PROFILER_KEY, profilerOn ? "1" : "0");
+        profilerButton.textContent = `profiler: ${profilerOn ? "on" : "off"}`;
+        if (profilerOn) {
+            startFrameProfiler();
+        } else {
+            stopFrameProfiler();
+        }
+        status.textContent = `frame profiler ${profilerOn ? "ON" : "OFF"}`;
+    });
+    if (profilerOn) {
+        startFrameProfiler();
+        profilerButton.textContent = "profiler: on";
+    }
 
     makeButton("清空", () => {
         localStorage.removeItem(PERSIST_KEY);

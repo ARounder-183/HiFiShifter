@@ -9,7 +9,7 @@
  *
  * 此文件只保留：JSX 渲染 + 胶水 + 拖拽 hooks 桥接
  */
-import React, { useMemo } from "react";
+import React, { useMemo, Profiler } from "react";
 import { Flex, Dialog, Button, Text } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppTheme } from "../../theme/AppThemeProvider";
@@ -1456,1270 +1456,1311 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     // ═════════════════════════════════════════════════════════
 
     return (
-        <Flex className="h-full w-full bg-qt-graph-bg overflow-hidden">
-            <TrackList
-                t={t}
-                tracks={s.tracks}
-                trackMeters={s.trackMeters}
-                selectedTrackId={s.selectedTrackId}
-                rowHeight={rowHeight}
-                setRowHeight={setRowHeight}
-                verticalZoomKb={verticalZoomKb}
-                paramFineAdjustKb={paramFineAdjustKb}
-                trackVolumeUi={trackVolumeUi}
-                listScrollRef={trackListScrollRef}
-                onSelectTrack={handleSelectTrack}
-                onRemoveTrack={handleRemoveTrack}
-                onMoveTrack={handleMoveTrack}
-                copyDragKb={copyDragKb}
-                onDuplicateTrackTo={handleDuplicateTrackTo}
-                onToggleMute={handleToggleTrackMute}
-                onToggleSolo={handleToggleTrackSolo}
-                onToggleCompose={handleToggleTrackCompose}
-                onVolumeUiChange={handleTrackVolumeUiChange}
-                onVolumeCommit={handleTrackVolumeCommit}
-                onAddTrack={handleAddTrack}
-                onTrackColorChange={handleTrackColorChange}
-                onAlgoChange={handleTrackAlgoChange}
-                onTrackNameChange={handleTrackNameChange}
-                onDuplicateTrack={handleDuplicateTrack}
-                onCreateTrackBelow={handleCreateTrackBelow}
-                onScrollTopChange={handleTrackListScrollTopChange}
-                headerHeight={timeRulerHeightPx(
-                    Boolean(s.tempoMap && s.tempoMap.points.length > 0 && s.tempoMapVisible),
-                )}
-                bottomGutterHeightPx={horizontalScrollbarGutterPx}
-            />
-
-            {/* Timeline View (Right) */}
-            <Flex direction="column" className="flex-1 relative overflow-hidden bg-qt-graph-bg">
-                {/* playheadSec 传提交值（而非渲染期读 ref）：视觉插值由
-                    playheadLineRef/playheadHeadRef 命令式驱动；React 仅在该值
-                    真正变化时重写 style.left，写入的是最新提交位置而非陈旧值。 */}
-                {/* 标尺不消费实时滚动位置：刻度与可见范围都按量化的
-                    `rulerScrollLeft` 生成（缓冲已保证覆盖视口），这样滚动期间
-                    `TimeRulerMarks` 的 memo 不会失效，整棵刻度子树不必每帧重渲染。 */}
-                <TimeRuler
-                    scrollLeft={rulerScrollLeft}
-                    ticks={timelineTicks}
-                    pxPerBeat={pxPerBeat}
-                    pxPerSec={pxPerSec}
-                    viewportWidth={viewportWidth}
-                    playheadSec={s.playheadSec}
-                    playheadLineRef={rulerPlayheadLineRef}
-                    playheadHeadRef={rulerPlayheadHeadRef}
-                    contentRef={rulerContentRef}
-                    timeContext={timeContext}
-                    primaryUnit={s.primaryTimeUnit}
-                    secondaryUnit={s.secondaryTimeUnit}
-                    onPrimaryUnitChange={handlePrimaryUnitChange}
-                    onSecondaryUnitChange={handleSecondaryUnitChange}
-                    onOpenSettings={() => setTimeDisplaySettingsOpen(true)}
-                    onCopyPlayheadTime={() => void handleCopyPlayheadTime()}
-                    t={t as (key: string) => string}
-                    tempoMap={s.tempoMap}
-                    tempoMapVisible={s.tempoMapVisible}
-                    projectSec={dynamicProjectSec}
-                    grid={s.grid}
-                    snapEnabled={s.snapEnabled}
-                    timelineSnap={s.timelineSnap}
-                    projectScale={projectScale}
-                    projectScaleName={
-                        s.project.useCustomScale
-                            ? (s.project.customScale?.name ?? undefined)
-                            : undefined
+        <Profiler
+            id="TimelinePanel"
+            onRender={(_id, _phase, actualDuration) => {
+                // dev 帧率探针：经 globalThis 挂钩上报 React 提交耗时。
+                // 未启用探针时只有一次属性查找，零成本。
+                (
+                    globalThis as unknown as {
+                        __hfsFrameProfiler?: { recordReact(ms: number): void };
                     }
-                    fallbackDenominator={s.project.timeSignatureDenominator}
-                    customScalePresets={s.customScalePresets}
-                    onTempoMapChange={handleTempoMapChange}
-                    onTempoMapCommit={handleTempoMapCommit}
-                    onMouseDown={(e) => {
-                        if (e.button !== 0) return;
-                        document.body.setAttribute("data-hs-focus-window", "timeline");
-                        const scroller = scrollRef.current;
-                        if (!scroller) return;
-                        const ruler = e.currentTarget as HTMLDivElement;
-                        let moved = false;
-                        let lastClientX = e.clientX;
-                        let lastSec = 0;
-
-                        const updateAt = (clientX: number, commit: boolean): number =>
-                            setPlayheadFromClientX(
-                                clientX,
-                                ruler.getBoundingClientRect(),
-                                scroller.scrollLeft,
-                                commit,
-                            );
-
-                        // 标尺没有其他编辑操作需要区分，按下时立即提交一次 seek。
-                        lastSec = updateAt(e.clientX, true);
-
-                        const onMove = (ev: MouseEvent) => {
-                            moved = true;
-                            lastClientX = ev.clientX;
-                            lastSec = updateAt(ev.clientX, false);
-                        };
-
-                        // 失焦取消：切屏期间 mouseup 不送达本窗口，blur 时以
-                        // 最后一次已知位置收尾（提交 seek + 清吸附高亮），
-                        // 防止监听器泄漏：否则下次点击会被旧的 onEnd 消费。
-                        const finish = () => {
-                            unregisterAbort();
-                            window.removeEventListener("mousemove", onMove, true);
-                            window.removeEventListener("mouseup", onEnd, true);
-                            window.removeEventListener("mouseleave", onEnd, true);
-                            if (!moved) {
-                                // 未拖动的单击不会发布高亮；仍兜底清除一次，
-                                // 防止此前异常中断手势的残留。
-                                clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
-                                return;
-                            }
-                            lastSec = updateAt(lastClientX, false);
-                            void dispatch(seekPlayhead(lastSec));
-                            // 最后一步 update 仍会发布一次吸附高亮，必须在其后
-                            // 清除：否则拖拽标尺后网格吸附的竖线会冻结在画面上，
-                            // 且任何单击跳转都不再清理它。
-                            clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
-                        };
-                        const onEnd = (ev: MouseEvent) => {
-                            lastClientX = ev.clientX;
-                            finish();
-                        };
-                        const unregisterAbort = registerDragAbort(finish);
-
-                        window.addEventListener("mousemove", onMove, true);
-                        window.addEventListener("mouseup", onEnd, true);
-                        window.addEventListener("mouseleave", onEnd, true);
-                    }}
-                />
-
-                {/* Tracks Area */}
-                <TimelineScrollArea
-                    scrollRef={scrollRef}
-                    projectSec={dynamicProjectSec}
-                    pxPerSec={pxPerSec}
-                    setPxPerSec={setPxPerSec}
+                ).__hfsFrameProfiler?.recordReact(actualDuration);
+            }}
+        >
+            <Flex className="h-full w-full bg-qt-graph-bg overflow-hidden">
+                <TrackList
+                    t={t}
+                    tracks={s.tracks}
+                    trackMeters={s.trackMeters}
+                    selectedTrackId={s.selectedTrackId}
                     rowHeight={rowHeight}
                     setRowHeight={setRowHeight}
-                    setScrollLeft={setScrollLeftAction}
-                    commitScrollLeftState={setScrollLeftState}
-                    commitScrollTopState={setTimelineScrollTop}
-                    rulerContentRef={rulerContentRef}
-                    scrollHorizontalKb={scrollHorizontalKb}
-                    scrollVerticalKb={scrollVerticalKb}
-                    horizontalZoomKb={horizontalZoomKb}
                     verticalZoomKb={verticalZoomKb}
-                    getPlayheadSec={() => Number(sessionRef.current.playheadSec ?? 0) || 0}
-                    playheadZoomEnabled={s.playheadZoomEnabled}
-                    className="flex-1 bg-qt-graph-bg overflow-auto relative custom-scrollbar"
-                    data-timeline-scroller
-                    onDoubleClickCapture={(e) => {
-                        // 时间轴非输入区域的双击只用于自定义交互，不应触发 WebView 文本选择；
-                        // 显式声明可选择（data-hs-selectable）的区域保留原生双击行为。
-                        if (isEditableTarget(e.target)) return;
-                        const target = e.target as HTMLElement | null;
-                        if (target?.closest?.("[data-hs-selectable='true']")) return;
-                        e.preventDefault();
-                    }}
-                    onScroll={(e) => {
-                        const el = e.currentTarget as HTMLDivElement;
-                        // 竖直轴同帧提交：sticky 画布层（clip 体/波形面）必须在
-                        // 绘制前拿到新 scrollTop（总线同步派发）；React state
-                        // 只驱动窗口化等非视觉更新。
-                        syncScrollTop(el.scrollTop);
-                        setTimelineScrollTop(el.scrollTop);
-                        if (trackListScrollRef.current) {
+                    paramFineAdjustKb={paramFineAdjustKb}
+                    trackVolumeUi={trackVolumeUi}
+                    listScrollRef={trackListScrollRef}
+                    onSelectTrack={handleSelectTrack}
+                    onRemoveTrack={handleRemoveTrack}
+                    onMoveTrack={handleMoveTrack}
+                    copyDragKb={copyDragKb}
+                    onDuplicateTrackTo={handleDuplicateTrackTo}
+                    onToggleMute={handleToggleTrackMute}
+                    onToggleSolo={handleToggleTrackSolo}
+                    onToggleCompose={handleToggleTrackCompose}
+                    onVolumeUiChange={handleTrackVolumeUiChange}
+                    onVolumeCommit={handleTrackVolumeCommit}
+                    onAddTrack={handleAddTrack}
+                    onTrackColorChange={handleTrackColorChange}
+                    onAlgoChange={handleTrackAlgoChange}
+                    onTrackNameChange={handleTrackNameChange}
+                    onDuplicateTrack={handleDuplicateTrack}
+                    onCreateTrackBelow={handleCreateTrackBelow}
+                    onScrollTopChange={handleTrackListScrollTopChange}
+                    headerHeight={timeRulerHeightPx(
+                        Boolean(s.tempoMap && s.tempoMap.points.length > 0 && s.tempoMapVisible),
+                    )}
+                    bottomGutterHeightPx={horizontalScrollbarGutterPx}
+                />
+
+                {/* Timeline View (Right) */}
+                <Flex direction="column" className="flex-1 relative overflow-hidden bg-qt-graph-bg">
+                    {/* playheadSec 传提交值（而非渲染期读 ref）：视觉插值由
+                    playheadLineRef/playheadHeadRef 命令式驱动；React 仅在该值
+                    真正变化时重写 style.left，写入的是最新提交位置而非陈旧值。 */}
+                    {/* 标尺不消费实时滚动位置：刻度与可见范围都按量化的
+                    `rulerScrollLeft` 生成（缓冲已保证覆盖视口），这样滚动期间
+                    `TimeRulerMarks` 的 memo 不会失效，整棵刻度子树不必每帧重渲染。 */}
+                    <TimeRuler
+                        scrollLeft={rulerScrollLeft}
+                        ticks={timelineTicks}
+                        pxPerBeat={pxPerBeat}
+                        pxPerSec={pxPerSec}
+                        viewportWidth={viewportWidth}
+                        playheadSec={s.playheadSec}
+                        playheadLineRef={rulerPlayheadLineRef}
+                        playheadHeadRef={rulerPlayheadHeadRef}
+                        contentRef={rulerContentRef}
+                        timeContext={timeContext}
+                        primaryUnit={s.primaryTimeUnit}
+                        secondaryUnit={s.secondaryTimeUnit}
+                        onPrimaryUnitChange={handlePrimaryUnitChange}
+                        onSecondaryUnitChange={handleSecondaryUnitChange}
+                        onOpenSettings={() => setTimeDisplaySettingsOpen(true)}
+                        onCopyPlayheadTime={() => void handleCopyPlayheadTime()}
+                        t={t as (key: string) => string}
+                        tempoMap={s.tempoMap}
+                        tempoMapVisible={s.tempoMapVisible}
+                        projectSec={dynamicProjectSec}
+                        grid={s.grid}
+                        snapEnabled={s.snapEnabled}
+                        timelineSnap={s.timelineSnap}
+                        projectScale={projectScale}
+                        projectScaleName={
+                            s.project.useCustomScale
+                                ? (s.project.customScale?.name ?? undefined)
+                                : undefined
+                        }
+                        fallbackDenominator={s.project.timeSignatureDenominator}
+                        customScalePresets={s.customScalePresets}
+                        onTempoMapChange={handleTempoMapChange}
+                        onTempoMapCommit={handleTempoMapCommit}
+                        onMouseDown={(e) => {
+                            if (e.button !== 0) return;
+                            document.body.setAttribute("data-hs-focus-window", "timeline");
+                            const scroller = scrollRef.current;
+                            if (!scroller) return;
+                            const ruler = e.currentTarget as HTMLDivElement;
+                            let moved = false;
+                            let lastClientX = e.clientX;
+                            let lastSec = 0;
+
+                            const updateAt = (clientX: number, commit: boolean): number =>
+                                setPlayheadFromClientX(
+                                    clientX,
+                                    ruler.getBoundingClientRect(),
+                                    scroller.scrollLeft,
+                                    commit,
+                                );
+
+                            // 标尺没有其他编辑操作需要区分，按下时立即提交一次 seek。
+                            lastSec = updateAt(e.clientX, true);
+
+                            const onMove = (ev: MouseEvent) => {
+                                moved = true;
+                                lastClientX = ev.clientX;
+                                lastSec = updateAt(ev.clientX, false);
+                            };
+
+                            // 失焦取消：切屏期间 mouseup 不送达本窗口，blur 时以
+                            // 最后一次已知位置收尾（提交 seek + 清吸附高亮），
+                            // 防止监听器泄漏：否则下次点击会被旧的 onEnd 消费。
+                            const finish = () => {
+                                unregisterAbort();
+                                window.removeEventListener("mousemove", onMove, true);
+                                window.removeEventListener("mouseup", onEnd, true);
+                                window.removeEventListener("mouseleave", onEnd, true);
+                                if (!moved) {
+                                    // 未拖动的单击不会发布高亮；仍兜底清除一次，
+                                    // 防止此前异常中断手势的残留。
+                                    clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+                                    return;
+                                }
+                                lastSec = updateAt(lastClientX, false);
+                                void dispatch(seekPlayhead(lastSec));
+                                // 最后一步 update 仍会发布一次吸附高亮，必须在其后
+                                // 清除：否则拖拽标尺后网格吸附的竖线会冻结在画面上，
+                                // 且任何单击跳转都不再清理它。
+                                clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+                            };
+                            const onEnd = (ev: MouseEvent) => {
+                                lastClientX = ev.clientX;
+                                finish();
+                            };
+                            const unregisterAbort = registerDragAbort(finish);
+
+                            window.addEventListener("mousemove", onMove, true);
+                            window.addEventListener("mouseup", onEnd, true);
+                            window.addEventListener("mouseleave", onEnd, true);
+                        }}
+                    />
+
+                    {/* Tracks Area */}
+                    <TimelineScrollArea
+                        scrollRef={scrollRef}
+                        projectSec={dynamicProjectSec}
+                        pxPerSec={pxPerSec}
+                        setPxPerSec={setPxPerSec}
+                        rowHeight={rowHeight}
+                        setRowHeight={setRowHeight}
+                        setScrollLeft={setScrollLeftAction}
+                        commitScrollLeftState={setScrollLeftState}
+                        commitScrollTopState={setTimelineScrollTop}
+                        rulerContentRef={rulerContentRef}
+                        scrollHorizontalKb={scrollHorizontalKb}
+                        scrollVerticalKb={scrollVerticalKb}
+                        horizontalZoomKb={horizontalZoomKb}
+                        verticalZoomKb={verticalZoomKb}
+                        getPlayheadSec={() => Number(sessionRef.current.playheadSec ?? 0) || 0}
+                        playheadZoomEnabled={s.playheadZoomEnabled}
+                        className="flex-1 bg-qt-graph-bg overflow-auto relative custom-scrollbar"
+                        data-timeline-scroller
+                        onDoubleClickCapture={(e) => {
+                            // 时间轴非输入区域的双击只用于自定义交互，不应触发 WebView 文本选择；
+                            // 显式声明可选择（data-hs-selectable）的区域保留原生双击行为。
+                            if (isEditableTarget(e.target)) return;
+                            const target = e.target as HTMLElement | null;
+                            if (target?.closest?.("[data-hs-selectable='true']")) return;
+                            e.preventDefault();
+                        }}
+                        onScroll={(e) => {
+                            const el = e.currentTarget as HTMLDivElement;
+                            // 竖直轴同帧提交：sticky 画布层（clip 体/波形面）必须在
+                            // 绘制前拿到新 scrollTop（总线同步派发）；React state
+                            // 只驱动窗口化等非视觉更新。
+                            syncScrollTop(el.scrollTop);
+                            setTimelineScrollTop(el.scrollTop);
+                            if (trackListScrollRef.current) {
+                                if (
+                                    Math.abs(trackListScrollRef.current.scrollTop - el.scrollTop) >=
+                                    0.5
+                                ) {
+                                    trackListScrollRef.current.scrollTop = el.scrollTop;
+                                }
+                            }
+                        }}
+                        onMouseDownCapture={(e) => {
+                            if (e.button === 1) {
+                                e.preventDefault();
+                            }
+                        }}
+                        onAuxClick={(e) => {
+                            if (e.button === 1) {
+                                e.preventDefault();
+                            }
+                        }}
+                        onContextMenu={(e) => {
+                            e.preventDefault();
+                            setContextMenu(null);
+
+                            const target = e.target as HTMLElement | null;
+                            if (target?.closest?.("[data-hs-context-menu='1']")) return;
+
+                            const trackId = trackIdFromClientY(e.clientY);
+                            if (!trackId) {
+                                setTrackAreaMenu(null);
+                                return;
+                            }
+
+                            const scroller = scrollRef.current;
+                            const bounds = scroller?.getBoundingClientRect() ?? null;
+                            const timeAtPointer =
+                                bounds && scroller
+                                    ? beatFromClientX(e.clientX, bounds, scroller.scrollLeft)
+                                    : null;
+
+                            if (timeAtPointer != null) {
+                                const clipsHere = sessionRef.current.clips
+                                    .filter((c) => c.trackId === trackId)
+                                    .filter((c) => {
+                                        const start = Number(c.startSec ?? 0) || 0;
+                                        const end = start + (Number(c.lengthSec ?? 0) || 0);
+                                        return timeAtPointer >= start && timeAtPointer <= end;
+                                    })
+                                    .sort((a, b) => a.startSec - b.startSec);
+
+                                if (clipsHere.length > 0) {
+                                    if (target?.closest?.("[data-hs-clip-item='1']")) return;
+
+                                    const topClip = clipsHere[clipsHere.length - 1];
+                                    setContextMenu({
+                                        x: e.clientX,
+                                        y: e.clientY,
+                                        clipId: topClip.id,
+                                        overlappingClipIds:
+                                            clipsHere.length > 1
+                                                ? clipsHere.map((c) => c.id)
+                                                : undefined,
+                                    });
+                                    return;
+                                }
+                            }
+
+                            if (sessionRef.current.selectedTrackId !== trackId) {
+                                void dispatch(selectTrackRemote(trackId));
+                            }
+                            setTrackAreaMenu({
+                                x: e.clientX,
+                                y: e.clientY,
+                                trackId,
+                            });
+                        }}
+                        onPointerDown={onSelectionRectPointerDown}
+                        onDragOver={(e) => {
+                            const dt = e.dataTransfer;
+                            const tauriPath = tauriDraggedPathRef.current;
+                            const hasDomFile = Boolean(dt?.files && dt.files.length > 0);
+                            const isTauri = Boolean(
+                                (window as unknown as { __TAURI__?: unknown }).__TAURI__,
+                            );
+                            if (!isTauri && !hasFileDrag(dt) && !hasDomFile && !tauriPath) return;
+                            e.preventDefault();
+                            const info = extractLocalFilePath(dt);
+                            const el = e.currentTarget as HTMLDivElement;
+                            const bounds = el.getBoundingClientRect();
+                            const beat = beatFromClientX(e.clientX, bounds, el.scrollLeft);
+                            const trackId = trackIdFromClientY(e.clientY);
+                            const path = info?.path || tauriPath || "";
+                            const fileName =
+                                info?.name ||
+                                (tauriPath
+                                    ? String(tauriPath.split(/[\\/]/).pop() ?? tauriPath)
+                                    : hasDomFile
+                                      ? String(dt?.files?.[0]?.name ?? "Audio")
+                                      : "Audio");
+                            const dragAction = detectExternalPathAction(path);
                             if (
-                                Math.abs(trackListScrollRef.current.scrollTop - el.scrollTop) >= 0.5
+                                path &&
+                                dragAction !== "importAudio" &&
+                                dragAction !== "importMidi"
                             ) {
-                                trackListScrollRef.current.scrollTop = el.scrollTop;
-                            }
-                        }
-                    }}
-                    onMouseDownCapture={(e) => {
-                        if (e.button === 1) {
-                            e.preventDefault();
-                        }
-                    }}
-                    onAuxClick={(e) => {
-                        if (e.button === 1) {
-                            e.preventDefault();
-                        }
-                    }}
-                    onContextMenu={(e) => {
-                        e.preventDefault();
-                        setContextMenu(null);
-
-                        const target = e.target as HTMLElement | null;
-                        if (target?.closest?.("[data-hs-context-menu='1']")) return;
-
-                        const trackId = trackIdFromClientY(e.clientY);
-                        if (!trackId) {
-                            setTrackAreaMenu(null);
-                            return;
-                        }
-
-                        const scroller = scrollRef.current;
-                        const bounds = scroller?.getBoundingClientRect() ?? null;
-                        const timeAtPointer =
-                            bounds && scroller
-                                ? beatFromClientX(e.clientX, bounds, scroller.scrollLeft)
-                                : null;
-
-                        if (timeAtPointer != null) {
-                            const clipsHere = sessionRef.current.clips
-                                .filter((c) => c.trackId === trackId)
-                                .filter((c) => {
-                                    const start = Number(c.startSec ?? 0) || 0;
-                                    const end = start + (Number(c.lengthSec ?? 0) || 0);
-                                    return timeAtPointer >= start && timeAtPointer <= end;
-                                })
-                                .sort((a, b) => a.startSec - b.startSec);
-
-                            if (clipsHere.length > 0) {
-                                if (target?.closest?.("[data-hs-clip-item='1']")) return;
-
-                                const topClip = clipsHere[clipsHere.length - 1];
-                                setContextMenu({
-                                    x: e.clientX,
-                                    y: e.clientY,
-                                    clipId: topClip.id,
-                                    overlappingClipIds:
-                                        clipsHere.length > 1
-                                            ? clipsHere.map((c) => c.id)
-                                            : undefined,
-                                });
+                                setDropPreview(null);
                                 return;
                             }
-                        }
-
-                        if (sessionRef.current.selectedTrackId !== trackId) {
-                            void dispatch(selectTrackRemote(trackId));
-                        }
-                        setTrackAreaMenu({
-                            x: e.clientX,
-                            y: e.clientY,
-                            trackId,
-                        });
-                    }}
-                    onPointerDown={onSelectionRectPointerDown}
-                    onDragOver={(e) => {
-                        const dt = e.dataTransfer;
-                        const tauriPath = tauriDraggedPathRef.current;
-                        const hasDomFile = Boolean(dt?.files && dt.files.length > 0);
-                        const isTauri = Boolean(
-                            (window as unknown as { __TAURI__?: unknown }).__TAURI__,
-                        );
-                        if (!isTauri && !hasFileDrag(dt) && !hasDomFile && !tauriPath) return;
-                        e.preventDefault();
-                        const info = extractLocalFilePath(dt);
-                        const el = e.currentTarget as HTMLDivElement;
-                        const bounds = el.getBoundingClientRect();
-                        const beat = beatFromClientX(e.clientX, bounds, el.scrollLeft);
-                        const trackId = trackIdFromClientY(e.clientY);
-                        const path = info?.path || tauriPath || "";
-                        const fileName =
-                            info?.name ||
-                            (tauriPath
-                                ? String(tauriPath.split(/[\\/]/).pop() ?? tauriPath)
-                                : hasDomFile
-                                  ? String(dt?.files?.[0]?.name ?? "Audio")
-                                  : "Audio");
-                        const dragAction = detectExternalPathAction(path);
-                        if (path && dragAction !== "importAudio" && dragAction !== "importMidi") {
-                            setDropPreview(null);
-                            return;
-                        }
-                        if (dragAction === "importMidi") {
-                            // MIDI 文件使用默认时长显示 drop preview
-                            setDropPreview({
-                                path,
-                                fileName,
-                                trackId,
-                                startSec: beat,
-                                durationSec: 2,
-                            });
-                        } else {
-                            if (path) {
-                                ensureDropPreviewDuration(path);
-                            }
-                            setDropPreview({
-                                path,
-                                fileName,
-                                trackId,
-                                startSec: beat,
-                                durationSec: 0,
-                            });
-                        }
-                    }}
-                    onDragLeave={(e) => {
-                        const related = e.relatedTarget as Node | null;
-                        if (related && (e.currentTarget as HTMLDivElement).contains(related))
-                            return;
-                        setDropPreview(null);
-                    }}
-                    onDrop={(e) => {
-                        const dt = e.dataTransfer;
-                        const tauriPath = tauriDraggedPathRef.current;
-                        const lastTauriDropPath = tauriLastDropPathRef.current;
-                        const hasDomFile = Boolean(dt?.files && dt.files.length > 0);
-                        const isTauri = Boolean(
-                            (window as unknown as { __TAURI__?: unknown }).__TAURI__,
-                        );
-                        if (!isTauri && !hasFileDrag(dt) && !hasDomFile && !tauriPath) return;
-                        e.preventDefault();
-
-                        if (isTauri && Date.now() - (tauriDropHandledAtRef.current || 0) < 500) {
-                            setDropPreview(null);
-                            return;
-                        }
-
-                        const info = extractLocalFilePath(dt);
-                        const el = e.currentTarget as HTMLDivElement;
-                        const bounds = el.getBoundingClientRect();
-                        const beat = beatFromClientX(e.clientX, bounds, el.scrollLeft);
-                        const trackId = trackIdFromClientY(e.clientY);
-                        setDropPreview(null);
-                        const resolvedPath = info?.path || lastTauriDropPath || tauriPath;
-                        if (resolvedPath) {
-                            tauriDraggedPathRef.current = null;
-                            tauriLastDropPathRef.current = null;
-                            const actionKind = detectExternalPathAction(resolvedPath);
-                            if (actionKind === "importMidi") {
-                                onMidiClipPathChange(resolvedPath);
-                                onMidiClipStartSecChange(beat);
-                                onMidiClipTrackIdChange(trackId);
-                                onMidiClipDialogOpenChange(true);
-                                return;
-                            }
-                            if (actionKind && actionKind !== "importAudio") {
-                                emitExternalFileAction(actionKind, resolvedPath);
-                                return;
-                            }
-                            void dispatch(
-                                importAudioAtPosition({
-                                    audioPath: resolvedPath,
+                            if (dragAction === "importMidi") {
+                                // MIDI 文件使用默认时长显示 drop preview
+                                setDropPreview({
+                                    path,
+                                    fileName,
                                     trackId,
                                     startSec: beat,
-                                }),
+                                    durationSec: 2,
+                                });
+                            } else {
+                                if (path) {
+                                    ensureDropPreviewDuration(path);
+                                }
+                                setDropPreview({
+                                    path,
+                                    fileName,
+                                    trackId,
+                                    startSec: beat,
+                                    durationSec: 0,
+                                });
+                            }
+                        }}
+                        onDragLeave={(e) => {
+                            const related = e.relatedTarget as Node | null;
+                            if (related && (e.currentTarget as HTMLDivElement).contains(related))
+                                return;
+                            setDropPreview(null);
+                        }}
+                        onDrop={(e) => {
+                            const dt = e.dataTransfer;
+                            const tauriPath = tauriDraggedPathRef.current;
+                            const lastTauriDropPath = tauriLastDropPathRef.current;
+                            const hasDomFile = Boolean(dt?.files && dt.files.length > 0);
+                            const isTauri = Boolean(
+                                (window as unknown as { __TAURI__?: unknown }).__TAURI__,
                             );
-                            return;
-                        }
+                            if (!isTauri && !hasFileDrag(dt) && !hasDomFile && !tauriPath) return;
+                            e.preventDefault();
 
-                        if (isTauri) {
-                            window.setTimeout(() => {
-                                const p =
-                                    tauriLastDropPathRef.current || tauriDraggedPathRef.current;
-                                if (!p) return;
+                            if (
+                                isTauri &&
+                                Date.now() - (tauriDropHandledAtRef.current || 0) < 500
+                            ) {
+                                setDropPreview(null);
+                                return;
+                            }
+
+                            const info = extractLocalFilePath(dt);
+                            const el = e.currentTarget as HTMLDivElement;
+                            const bounds = el.getBoundingClientRect();
+                            const beat = beatFromClientX(e.clientX, bounds, el.scrollLeft);
+                            const trackId = trackIdFromClientY(e.clientY);
+                            setDropPreview(null);
+                            const resolvedPath = info?.path || lastTauriDropPath || tauriPath;
+                            if (resolvedPath) {
                                 tauriDraggedPathRef.current = null;
                                 tauriLastDropPathRef.current = null;
-                                const actionKind = detectExternalPathAction(p);
+                                const actionKind = detectExternalPathAction(resolvedPath);
                                 if (actionKind === "importMidi") {
-                                    onMidiClipPathChange(p);
+                                    onMidiClipPathChange(resolvedPath);
                                     onMidiClipStartSecChange(beat);
                                     onMidiClipTrackIdChange(trackId);
                                     onMidiClipDialogOpenChange(true);
                                     return;
                                 }
                                 if (actionKind && actionKind !== "importAudio") {
-                                    emitExternalFileAction(actionKind, p);
+                                    emitExternalFileAction(actionKind, resolvedPath);
                                     return;
                                 }
                                 void dispatch(
                                     importAudioAtPosition({
-                                        audioPath: p,
+                                        audioPath: resolvedPath,
                                         trackId,
                                         startSec: beat,
                                     }),
                                 );
-                            }, 0);
-                        }
-
-                        const fallbackFile = dt.files?.[0] ?? null;
-                        if (fallbackFile) {
-                            void dispatch(
-                                importAudioFileAtPosition({
-                                    file: fallbackFile,
-                                    trackId,
-                                    startSec: beat,
-                                }),
-                            );
-                        }
-                    }}
-                    onPointerDownCapture={(e) => {
-                        document.body.setAttribute("data-hs-focus-window", "timeline");
-                        const scroller = scrollRef.current;
-                        if (
-                            scroller &&
-                            isPointerOnNativeScrollbar(scroller, e.clientX, e.clientY)
-                        ) {
-                            return;
-                        }
-                        if (e.button === 0) {
-                            const target = e.target as HTMLElement | null;
-                            // 任意空白处按下即取消 clip 选中：容器捕获先于所有
-                            // lane 处理器执行，保证"点击任意轨道的空白（含轨道区
-                            // 下方空白）都取消选中"。clip / overlap 层 / 标尺 /
-                            // 输入目标除外 —— 它们各自的路由决定选中的去向。
-                            if (
-                                !isEditableTarget(e.target) &&
-                                !target?.closest?.(
-                                    "[data-hs-clip-item='1'],[data-hs-overlap-layer='1'],[data-hs-context-menu='1'],[data-hs-floating-menu='1']",
-                                )
-                            ) {
-                                deselectAllTrackLaneClips();
+                                return;
                             }
-                            // 在 capture 阶段直接切换轨道：不依赖后续 mousedown，
-                            // 即使子元素在 pointerdown 里 preventDefault/停止冒泡，
-                            // “允许时间轴点击切换轨道”也能稳定触发。
-                            // applySelectedClip: false —— 点击切轨不得让后端把
-                            // 该轨道记住的 selected_clip_id 恢复回来，否则刚完成
-                            // 的空白取消选中会被异步覆盖（"点其他轨道空白不取消
-                            // 选中"的根因）。
-                            if (!isEditableTarget(e.target)) {
-                                const trackId = trackIdFromClientY(e.clientY);
-                                if (
-                                    s.paramEditorTimelineClickSelectTrackEnabled &&
-                                    trackId &&
-                                    trackId !== sessionRef.current.selectedTrackId
-                                ) {
+
+                            if (isTauri) {
+                                window.setTimeout(() => {
+                                    const p =
+                                        tauriLastDropPathRef.current || tauriDraggedPathRef.current;
+                                    if (!p) return;
+                                    tauriDraggedPathRef.current = null;
+                                    tauriLastDropPathRef.current = null;
+                                    const actionKind = detectExternalPathAction(p);
+                                    if (actionKind === "importMidi") {
+                                        onMidiClipPathChange(p);
+                                        onMidiClipStartSecChange(beat);
+                                        onMidiClipTrackIdChange(trackId);
+                                        onMidiClipDialogOpenChange(true);
+                                        return;
+                                    }
+                                    if (actionKind && actionKind !== "importAudio") {
+                                        emitExternalFileAction(actionKind, p);
+                                        return;
+                                    }
                                     void dispatch(
-                                        selectTrackRemote({
+                                        importAudioAtPosition({
+                                            audioPath: p,
                                             trackId,
-                                            applySelectedClip: false,
+                                            startSec: beat,
                                         }),
                                     );
-                                }
+                                }, 0);
                             }
-                            return;
-                        }
-                        if (e.button !== 1) return;
-                        if (isEditableTarget(e.target)) return;
-                        e.preventDefault();
-                        startPanPointer(e);
-                    }}
-                    onMouseDown={(e) => {
-                        if (e.button !== 0) return;
-                        // 输入框/可编辑区域内的点击只负责文本光标，不应触发时间轴点击逻辑
-                        //（尤其不能在名称编辑框中点击时跳转播放头）。
-                        if (isEditableTarget(e.target)) return;
-                        // Guard scrollbar interactions first — avoid clearing
-                        // multi-selection when dragging the native scrollbar.
-                        const scroller = scrollRef.current;
-                        if (scroller && isPointerOnNativeScrollbar(scroller, e.clientX, e.clientY))
-                            return;
-                        setContextMenu(null);
-                        setTrackAreaMenu(null);
-                        setMultiSelectedClipIds([]);
-                        if (!scroller) return;
-                        const trackId = trackIdFromClientY(e.clientY);
-                        if (
-                            s.paramEditorTimelineClickSelectTrackEnabled &&
-                            trackId &&
-                            trackId !== sessionRef.current.selectedTrackId
-                        ) {
-                            // 同容器捕获路径：点击切轨不恢复后端记住的选中 clip。
-                            void dispatch(selectTrackRemote({ trackId, applySelectedClip: false }));
-                        }
-                        startDeferredPlayheadSeek({
-                            startClientX: e.clientX,
-                            startClientY: e.clientY,
-                            getBounds: () => {
-                                const cur = scrollRef.current;
-                                return cur ? cur.getBoundingClientRect() : null;
-                            },
-                            getScrollLeft: () => {
-                                const cur = scrollRef.current;
-                                return cur ? cur.scrollLeft : scroller.scrollLeft;
-                            },
-                        });
-                    }}
-                >
-                    {/* Track Lanes（外层含右侧虚拟宽度，内容层覆盖工程宽 + 视口宽） */}
-                    <div
-                        className="relative"
-                        style={{
-                            width: timelineScrollRange.paddedContentWidth,
-                            height: contentHeight,
+
+                            const fallbackFile = dt.files?.[0] ?? null;
+                            if (fallbackFile) {
+                                void dispatch(
+                                    importAudioFileAtPosition({
+                                        file: fallbackFile,
+                                        trackId,
+                                        startSec: beat,
+                                    }),
+                                );
+                            }
+                        }}
+                        onPointerDownCapture={(e) => {
+                            document.body.setAttribute("data-hs-focus-window", "timeline");
+                            const scroller = scrollRef.current;
+                            if (
+                                scroller &&
+                                isPointerOnNativeScrollbar(scroller, e.clientX, e.clientY)
+                            ) {
+                                return;
+                            }
+                            if (e.button === 0) {
+                                const target = e.target as HTMLElement | null;
+                                // 任意空白处按下即取消 clip 选中：容器捕获先于所有
+                                // lane 处理器执行，保证"点击任意轨道的空白（含轨道区
+                                // 下方空白）都取消选中"。clip / overlap 层 / 标尺 /
+                                // 输入目标除外 —— 它们各自的路由决定选中的去向。
+                                if (
+                                    !isEditableTarget(e.target) &&
+                                    !target?.closest?.(
+                                        "[data-hs-clip-item='1'],[data-hs-overlap-layer='1'],[data-hs-context-menu='1'],[data-hs-floating-menu='1']",
+                                    )
+                                ) {
+                                    deselectAllTrackLaneClips();
+                                }
+                                // 在 capture 阶段直接切换轨道：不依赖后续 mousedown，
+                                // 即使子元素在 pointerdown 里 preventDefault/停止冒泡，
+                                // “允许时间轴点击切换轨道”也能稳定触发。
+                                // applySelectedClip: false —— 点击切轨不得让后端把
+                                // 该轨道记住的 selected_clip_id 恢复回来，否则刚完成
+                                // 的空白取消选中会被异步覆盖（"点其他轨道空白不取消
+                                // 选中"的根因）。
+                                if (!isEditableTarget(e.target)) {
+                                    const trackId = trackIdFromClientY(e.clientY);
+                                    if (
+                                        s.paramEditorTimelineClickSelectTrackEnabled &&
+                                        trackId &&
+                                        trackId !== sessionRef.current.selectedTrackId
+                                    ) {
+                                        void dispatch(
+                                            selectTrackRemote({
+                                                trackId,
+                                                applySelectedClip: false,
+                                            }),
+                                        );
+                                    }
+                                }
+                                return;
+                            }
+                            if (e.button !== 1) return;
+                            if (isEditableTarget(e.target)) return;
+                            e.preventDefault();
+                            startPanPointer(e);
+                        }}
+                        onMouseDown={(e) => {
+                            if (e.button !== 0) return;
+                            // 输入框/可编辑区域内的点击只负责文本光标，不应触发时间轴点击逻辑
+                            //（尤其不能在名称编辑框中点击时跳转播放头）。
+                            if (isEditableTarget(e.target)) return;
+                            // Guard scrollbar interactions first — avoid clearing
+                            // multi-selection when dragging the native scrollbar.
+                            const scroller = scrollRef.current;
+                            if (
+                                scroller &&
+                                isPointerOnNativeScrollbar(scroller, e.clientX, e.clientY)
+                            )
+                                return;
+                            setContextMenu(null);
+                            setTrackAreaMenu(null);
+                            setMultiSelectedClipIds([]);
+                            if (!scroller) return;
+                            const trackId = trackIdFromClientY(e.clientY);
+                            if (
+                                s.paramEditorTimelineClickSelectTrackEnabled &&
+                                trackId &&
+                                trackId !== sessionRef.current.selectedTrackId
+                            ) {
+                                // 同容器捕获路径：点击切轨不恢复后端记住的选中 clip。
+                                void dispatch(
+                                    selectTrackRemote({ trackId, applySelectedClip: false }),
+                                );
+                            }
+                            startDeferredPlayheadSeek({
+                                startClientX: e.clientX,
+                                startClientY: e.clientY,
+                                getBounds: () => {
+                                    const cur = scrollRef.current;
+                                    return cur ? cur.getBoundingClientRect() : null;
+                                },
+                                getScrollLeft: () => {
+                                    const cur = scrollRef.current;
+                                    return cur ? cur.scrollLeft : scroller.scrollLeft;
+                                },
+                            });
                         }}
                     >
-                        {/* 内容层宽度 = 工程宽 + 视口宽（= paddedContentWidth）：
-                            拖拽预览 / 吸附竖线高亮 / 拖拽中的 clip 与 ghost / 选区框等
-                            瞬态 UI 不再被“严格等于工程宽”的旧内容层按工程长度裁剪 ——
-                            用户看到与操作到的轨道在可视与可操作范围内表现为无限延伸
-                            （水平滚动的 maxScrollLeft 上限是有意保留的）。 */}
+                        {/* Track Lanes（外层含右侧虚拟宽度，内容层覆盖工程宽 + 视口宽） */}
                         <div
-                            className="absolute top-0 left-0 overflow-hidden"
+                            className="relative"
                             style={{
                                 width: timelineScrollRange.paddedContentWidth,
                                 height: contentHeight,
                             }}
                         >
-                            {selectionRect ? (
-                                <div
-                                    className="absolute z-40 pointer-events-none"
-                                    style={{
-                                        left: selectionRect.x1,
-                                        top: selectionRect.y1,
-                                        width: Math.max(1, selectionRect.x2 - selectionRect.x1),
-                                        height: Math.max(1, selectionRect.y2 - selectionRect.y1),
-                                        border: "1px dashed var(--qt-highlight)",
-                                        backgroundColor:
-                                            "color-mix(in oklab, var(--qt-highlight) 12%, transparent)",
-                                    }}
-                                />
-                            ) : null}
-
-                            {clipDropNewTrack ? (
-                                <div
-                                    className="absolute left-0 right-0 pointer-events-none z-20"
-                                    style={{
-                                        top: s.tracks.length * rowHeight,
-                                        height: rowHeight,
-                                    }}
-                                >
-                                    <div
-                                        className="absolute inset-0"
-                                        style={{
-                                            border: "1px dashed var(--qt-highlight)",
-                                            backgroundColor:
-                                                "color-mix(in oklab, var(--qt-highlight) 10%, transparent)",
-                                        }}
-                                    />
-                                    {newTrackGhostClips.map((clip) => (
-                                        <div
-                                            key={`new-track-ghost-${clip.id}`}
-                                            className="absolute opacity-60"
-                                            style={{
-                                                left: Math.max(0, clip.startSec * pxPerSec),
-                                                width: Math.max(1, clip.lengthSec * pxPerSec),
-                                                top: 0,
-                                                height: rowHeight - 8,
-                                                paddingTop: 8,
-                                            }}
-                                        >
-                                            <div
-                                                className="absolute left-0 right-0 top-0 rounded-t-sm"
-                                                style={{
-                                                    height: 18,
-                                                    backgroundColor:
-                                                        "color-mix(in oklab, var(--qt-highlight) 55%, transparent)",
-                                                }}
-                                            />
-                                            <div
-                                                className="absolute left-0 right-0 bottom-0 rounded-sm border border-dashed border-white/70"
-                                                style={{
-                                                    top: 18,
-                                                    backgroundColor:
-                                                        "color-mix(in oklab, var(--qt-highlight) 20%, transparent)",
-                                                }}
-                                            />
-                                        </div>
-                                    ))}
-                                </div>
-                            ) : null}
-
+                            {/* 内容层宽度 = 工程宽 + 视口宽（= paddedContentWidth）：
+                            拖拽预览 / 吸附竖线高亮 / 拖拽中的 clip 与 ghost / 选区框等
+                            瞬态 UI 不再被“严格等于工程宽”的旧内容层按工程长度裁剪 ——
+                            用户看到与操作到的轨道在可视与可操作范围内表现为无限延伸
+                            （水平滚动的 maxScrollLeft 上限是有意保留的）。 */}
                             <div
-                                className="absolute left-0 right-0"
+                                className="absolute top-0 left-0 overflow-hidden"
                                 style={{
-                                    top: timelineRenderModel.startIndex * rowHeight,
+                                    width: timelineScrollRange.paddedContentWidth,
+                                    height: contentHeight,
                                 }}
                             >
-                                {visibleTracks.map((track) => {
-                                    const trackClips =
-                                        visibleTrackClipsById[track.id] ?? ([] as typeof s.clips);
+                                {selectionRect ? (
+                                    <div
+                                        className="absolute z-40 pointer-events-none"
+                                        style={{
+                                            left: selectionRect.x1,
+                                            top: selectionRect.y1,
+                                            width: Math.max(1, selectionRect.x2 - selectionRect.x1),
+                                            height: Math.max(
+                                                1,
+                                                selectionRect.y2 - selectionRect.y1,
+                                            ),
+                                            border: "1px dashed var(--qt-highlight)",
+                                            backgroundColor:
+                                                "color-mix(in oklab, var(--qt-highlight) 12%, transparent)",
+                                        }}
+                                    />
+                                ) : null}
 
-                                    return (
-                                        <TrackLane
-                                            key={track.id}
-                                            track={track}
-                                            allTracks={s.tracks}
-                                            trackClips={trackClips}
-                                            rowHeight={rowHeight}
-                                            pxPerSec={pxPerSec}
-                                            bpm={s.bpm}
-                                            viewportWidthPx={viewportWidth}
-                                            viewportStartSec={viewportStartSec}
-                                            viewportEndSec={viewportEndSec}
-                                            overlayClipIds={
-                                                sparseClipRenderModel.overlayClipIdsByTrackId[
-                                                    track.id
-                                                ] ?? []
-                                            }
-                                            altPressed={altPressed}
-                                            selectedClipId={
-                                                selectedClipTrackId === track.id
-                                                    ? s.selectedClipId
-                                                    : null
-                                            }
-                                            multiSelectedClipIds={multiSelectedClipIds}
-                                            multiSelectedSet={multiSelectedSet}
-                                            trackColor={track.color || undefined}
-                                            ensureSelected={ensureTrackLaneSelected}
-                                            selectClipRemote={selectTrackLaneClipRemote}
-                                            deselectAllClips={deselectAllTrackLaneClips}
-                                            onShiftRangeSelect={selectClipRangeByRect}
-                                            rangeSelectAnchorClipId={rangeSelectAnchorClipId}
-                                            recordLastClickPosition={recordLastClickPosition}
-                                            openContextMenu={openTrackLaneContextMenu}
-                                            seekFromClientX={seekFromTrackLaneClientX}
-                                            ghostDrag={ghostDrag}
-                                            verticalTrackLockTrackId={verticalTrackLockTrackId}
-                                            allClips={s.clips}
-                                            showAllTakes={s.showAllTakes}
-                                            onActivateTake={activateTrackLaneTake}
-                                            fadeShapeCycleKb={fadeShapeCycleKb}
-                                            multiSelectToggleKb={clipMultiSelectToggleKb}
-                                            rangeSelectKb={clipRangeSelectKb}
-                                            pitchDragKb={pitchDragKb}
-                                            onClipPitchDragStart={startClipPitchDrag}
-                                            fadeLengthFormatCtx={fadeLengthFormatCtx}
-                                            onFadeShapeCycleClick={handleFadeShapeCycleClick}
-                                            onCrossfadeCycleClick={handleCrossfadeCycleClick}
-                                            startClipDrag={startClipDrag}
-                                            startEditDrag={startEditDrag}
-                                            startSnapOffsetDrag={startSnapOffsetDrag}
-                                            toggleClipMuted={toggleTrackLaneClipMuted}
-                                            onCtrlToggleSelect={toggleTrackLaneCtrlSelection}
-                                            clearContextMenu={clearContextMenu}
-                                            toggleMultiSelect={toggleTrackLaneMultiSelect}
-                                            renamingClipId={renamingClipId}
-                                            onRenameStart={clipActions.setRenamingClipId}
-                                            onRenameClickCandidate={registerRenameClickCandidate}
-                                            onRenameCommit={commitTrackLaneRename}
-                                            onRenameDone={handleTrackLaneRenameDone}
-                                            onGainCommit={commitTrackLaneGain}
-                                            onFormantMorphCommit={commitTrackLaneFormantMorph}
-                                            activeGroupIds={activeGroupIds}
-                                            disabledGroupIds={disabledGroupIds}
-                                            onToggleGroupDisabled={handleToggleGroupDisabled}
+                                {clipDropNewTrack ? (
+                                    <div
+                                        className="absolute left-0 right-0 pointer-events-none z-20"
+                                        style={{
+                                            top: s.tracks.length * rowHeight,
+                                            height: rowHeight,
+                                        }}
+                                    >
+                                        <div
+                                            className="absolute inset-0"
+                                            style={{
+                                                border: "1px dashed var(--qt-highlight)",
+                                                backgroundColor:
+                                                    "color-mix(in oklab, var(--qt-highlight) 10%, transparent)",
+                                            }}
                                         />
-                                    );
-                                })}
+                                        {newTrackGhostClips.map((clip) => (
+                                            <div
+                                                key={`new-track-ghost-${clip.id}`}
+                                                className="absolute opacity-60"
+                                                style={{
+                                                    left: Math.max(0, clip.startSec * pxPerSec),
+                                                    width: Math.max(1, clip.lengthSec * pxPerSec),
+                                                    top: 0,
+                                                    height: rowHeight - 8,
+                                                    paddingTop: 8,
+                                                }}
+                                            >
+                                                <div
+                                                    className="absolute left-0 right-0 top-0 rounded-t-sm"
+                                                    style={{
+                                                        height: 18,
+                                                        backgroundColor:
+                                                            "color-mix(in oklab, var(--qt-highlight) 55%, transparent)",
+                                                    }}
+                                                />
+                                                <div
+                                                    className="absolute left-0 right-0 bottom-0 rounded-sm border border-dashed border-white/70"
+                                                    style={{
+                                                        top: 18,
+                                                        backgroundColor:
+                                                            "color-mix(in oklab, var(--qt-highlight) 20%, transparent)",
+                                                    }}
+                                                />
+                                            </div>
+                                        ))}
+                                    </div>
+                                ) : null}
+
+                                <div
+                                    className="absolute left-0 right-0"
+                                    style={{
+                                        top: timelineRenderModel.startIndex * rowHeight,
+                                    }}
+                                >
+                                    {visibleTracks.map((track) => {
+                                        const trackClips =
+                                            visibleTrackClipsById[track.id] ??
+                                            ([] as typeof s.clips);
+
+                                        return (
+                                            <TrackLane
+                                                key={track.id}
+                                                track={track}
+                                                allTracks={s.tracks}
+                                                trackClips={trackClips}
+                                                rowHeight={rowHeight}
+                                                pxPerSec={pxPerSec}
+                                                bpm={s.bpm}
+                                                viewportWidthPx={viewportWidth}
+                                                viewportStartSec={viewportStartSec}
+                                                viewportEndSec={viewportEndSec}
+                                                overlayClipIds={
+                                                    sparseClipRenderModel.overlayClipIdsByTrackId[
+                                                        track.id
+                                                    ] ?? []
+                                                }
+                                                altPressed={altPressed}
+                                                selectedClipId={
+                                                    selectedClipTrackId === track.id
+                                                        ? s.selectedClipId
+                                                        : null
+                                                }
+                                                multiSelectedClipIds={multiSelectedClipIds}
+                                                multiSelectedSet={multiSelectedSet}
+                                                trackColor={track.color || undefined}
+                                                ensureSelected={ensureTrackLaneSelected}
+                                                selectClipRemote={selectTrackLaneClipRemote}
+                                                deselectAllClips={deselectAllTrackLaneClips}
+                                                onShiftRangeSelect={selectClipRangeByRect}
+                                                rangeSelectAnchorClipId={rangeSelectAnchorClipId}
+                                                recordLastClickPosition={recordLastClickPosition}
+                                                openContextMenu={openTrackLaneContextMenu}
+                                                seekFromClientX={seekFromTrackLaneClientX}
+                                                ghostDrag={ghostDrag}
+                                                verticalTrackLockTrackId={verticalTrackLockTrackId}
+                                                allClips={s.clips}
+                                                showAllTakes={s.showAllTakes}
+                                                onActivateTake={activateTrackLaneTake}
+                                                fadeShapeCycleKb={fadeShapeCycleKb}
+                                                multiSelectToggleKb={clipMultiSelectToggleKb}
+                                                rangeSelectKb={clipRangeSelectKb}
+                                                pitchDragKb={pitchDragKb}
+                                                onClipPitchDragStart={startClipPitchDrag}
+                                                fadeLengthFormatCtx={fadeLengthFormatCtx}
+                                                onFadeShapeCycleClick={handleFadeShapeCycleClick}
+                                                onCrossfadeCycleClick={handleCrossfadeCycleClick}
+                                                startClipDrag={startClipDrag}
+                                                startEditDrag={startEditDrag}
+                                                startSnapOffsetDrag={startSnapOffsetDrag}
+                                                toggleClipMuted={toggleTrackLaneClipMuted}
+                                                onCtrlToggleSelect={toggleTrackLaneCtrlSelection}
+                                                clearContextMenu={clearContextMenu}
+                                                toggleMultiSelect={toggleTrackLaneMultiSelect}
+                                                renamingClipId={renamingClipId}
+                                                onRenameStart={clipActions.setRenamingClipId}
+                                                onRenameClickCandidate={
+                                                    registerRenameClickCandidate
+                                                }
+                                                onRenameCommit={commitTrackLaneRename}
+                                                onRenameDone={handleTrackLaneRenameDone}
+                                                onGainCommit={commitTrackLaneGain}
+                                                onFormantMorphCommit={commitTrackLaneFormantMorph}
+                                                activeGroupIds={activeGroupIds}
+                                                disabledGroupIds={disabledGroupIds}
+                                                onToggleGroupDisabled={handleToggleGroupDisabled}
+                                            />
+                                        );
+                                    })}
+                                </div>
+
+                                {/* 吸附竖线高亮层：拖拽手势中高亮吸附对象与被吸附对象 */}
+                                <SnapHighlightLayer
+                                    pxPerSec={pxPerSec}
+                                    rowHeight={rowHeight}
+                                    tracks={s.tracks}
+                                    contentHeight={contentHeight}
+                                />
+
+                                {s.clipFormantToolWindow.open && activeFormantToolClip ? (
+                                    <ClipFormantToolWindow
+                                        clip={activeFormantToolClip}
+                                        status={
+                                            s.clipFormantStatus[activeFormantToolClip.id] ?? "ready"
+                                        }
+                                        x={s.clipFormantToolWindow.x}
+                                        y={s.clipFormantToolWindow.y}
+                                        onCommit={commitTrackLaneFormantMorph}
+                                        onMove={(x, y) =>
+                                            dispatch(setClipFormantToolWindowPosition({ x, y }))
+                                        }
+                                        onClose={() => dispatch(closeClipFormantToolWindow())}
+                                    />
+                                ) : null}
+
+                                {/* Playhead 已移入 TimelineSurface sticky 层：与网格/Clip/
+                                波形在同一滚动事件内更新，避免 DOM 原生层与 sticky 层错帧。 */}
                             </div>
 
-                            {/* 吸附竖线高亮层：拖拽手势中高亮吸附对象与被吸附对象 */}
-                            <SnapHighlightLayer
-                                pxPerSec={pxPerSec}
-                                rowHeight={rowHeight}
-                                tracks={s.tracks}
-                                contentHeight={contentHeight}
-                            />
-
-                            {s.clipFormantToolWindow.open && activeFormantToolClip ? (
-                                <ClipFormantToolWindow
-                                    clip={activeFormantToolClip}
-                                    status={
-                                        s.clipFormantStatus[activeFormantToolClip.id] ?? "ready"
-                                    }
-                                    x={s.clipFormantToolWindow.x}
-                                    y={s.clipFormantToolWindow.y}
-                                    onCommit={commitTrackLaneFormantMorph}
-                                    onMove={(x, y) =>
-                                        dispatch(setClipFormantToolWindowPosition({ x, y }))
-                                    }
-                                    onClose={() => dispatch(closeClipFormantToolWindow())}
-                                />
-                            ) : null}
-
-                            {/* Playhead 已移入 TimelineSurface sticky 层：与网格/Clip/
-                                波形在同一滚动事件内更新，避免 DOM 原生层与 sticky 层错帧。 */}
-                        </div>
-
-                        {/* Drop preview (ghost item)。
+                            {/* Drop preview (ghost item)。
                             渲染在外层 padded 容器内（同一坐标原点）：预览宽度超出
                             工程右缘时仍完整显示 —— 拖入比工程剩余更长或更靠右的
                             媒体时，预览与实际导入一样不受“工程长度”限制。 */}
-                        {dropPreview ? (
-                            <div
-                                ref={dropPreviewRef}
-                                className="absolute z-30 pointer-events-none"
-                                style={{
-                                    left: Math.max(0, dropPreview.startSec * pxPerSec),
-                                    top: rowTopForTrackId(dropPreview.trackId) + 8,
-                                    width:
-                                        dropPreview.durationSec > 0
-                                            ? Math.max(1, pxPerSec * dropPreview.durationSec)
-                                            : 80,
-                                    height: rowHeight - 16,
-                                }}
-                            >
-                                <div className="h-full w-full rounded-sm border border-dashed border-qt-highlight bg-[color-mix(in_oklab,var(--qt-highlight)_20%,transparent)]">
-                                    <div className="px-2 pt-1 text-[10px] text-qt-text truncate">
-                                        {dropPreview.fileName}
+                            {dropPreview ? (
+                                <div
+                                    ref={dropPreviewRef}
+                                    className="absolute z-30 pointer-events-none"
+                                    style={{
+                                        left: Math.max(0, dropPreview.startSec * pxPerSec),
+                                        top: rowTopForTrackId(dropPreview.trackId) + 8,
+                                        width:
+                                            dropPreview.durationSec > 0
+                                                ? Math.max(1, pxPerSec * dropPreview.durationSec)
+                                                : 80,
+                                        height: rowHeight - 16,
+                                    }}
+                                >
+                                    <div className="h-full w-full rounded-sm border border-dashed border-qt-highlight bg-[color-mix(in_oklab,var(--qt-highlight)_20%,transparent)]">
+                                        <div className="px-2 pt-1 text-[10px] text-qt-text truncate">
+                                            {dropPreview.fileName}
+                                        </div>
                                     </div>
                                 </div>
-                            </div>
-                        ) : null}
+                            ) : null}
 
-                        {viewportWidth > 0 ? (
-                            /* 背景网格 / Clip 体 / 波形面全部锚定在同一 sticky 视口层：
+                            {viewportWidth > 0 ? (
+                                /* 背景网格 / Clip 体 / 波形面全部锚定在同一 sticky 视口层：
                                滚动时三者经同一条同步链（scroll 事件内）提交位移，任一
                                层都不允许再走 React state / rAF，否则会与其它层分裂。 */
-                            <TimelineSurface
-                                tracks={visibleTracks}
-                                startTrackIndex={timelineRenderModel.startIndex}
-                                clipsByTrackId={visibleTrackClipsById}
-                                rowHeight={rowHeight}
-                                widthPx={Math.max(1, Math.ceil(viewportWidth))}
-                                heightPx={visibleTrackCanvasHeight}
-                                topPx={0}
-                                axis={timelineAxis}
-                                playheadSec={s.playheadSec}
-                                clipModel={timelineCanvasModel}
-                                darkMode={darkMode}
-                                contentWidth={contentWidth}
-                                pxPerBeat={pxPerBeat}
-                                grid={s.grid}
-                                beatsPerBar={Math.max(1, Math.round(s.beats || 4))}
-                                gridVisible={s.timelineSnap.gridVisible}
-                                gridMinSpacingPx={s.timelineSnap.gridMinSpacingPx}
-                                gridSwingPercent={
-                                    s.timelineSnap.swingEnabled ? s.timelineSnap.swingPercent : 0
-                                }
-                                ticks={timelineTicks}
-                                gridBottomPx={trackGridHeight}
-                                gridOverlayLayerRef={trackGridOverlayLayerRef}
-                                playheadLineRef={playheadRef}
-                            />
-                        ) : null}
-                    </div>
-                </TimelineScrollArea>
+                                <TimelineSurface
+                                    tracks={visibleTracks}
+                                    startTrackIndex={timelineRenderModel.startIndex}
+                                    clipsByTrackId={visibleTrackClipsById}
+                                    rowHeight={rowHeight}
+                                    widthPx={Math.max(1, Math.ceil(viewportWidth))}
+                                    heightPx={visibleTrackCanvasHeight}
+                                    topPx={0}
+                                    axis={timelineAxis}
+                                    playheadSec={s.playheadSec}
+                                    clipModel={timelineCanvasModel}
+                                    darkMode={darkMode}
+                                    contentWidth={contentWidth}
+                                    pxPerBeat={pxPerBeat}
+                                    grid={s.grid}
+                                    beatsPerBar={Math.max(1, Math.round(s.beats || 4))}
+                                    gridVisible={s.timelineSnap.gridVisible}
+                                    gridMinSpacingPx={s.timelineSnap.gridMinSpacingPx}
+                                    gridSwingPercent={
+                                        s.timelineSnap.swingEnabled
+                                            ? s.timelineSnap.swingPercent
+                                            : 0
+                                    }
+                                    ticks={timelineTicks}
+                                    gridBottomPx={trackGridHeight}
+                                    gridOverlayLayerRef={trackGridOverlayLayerRef}
+                                    playheadLineRef={playheadRef}
+                                />
+                            ) : null}
+                        </div>
+                    </TimelineScrollArea>
 
-                {/* 导入模式选择菜单 */}
-                {importModeMenu && (
-                    <div
-                        className="fixed inset-0 z-[9999]"
-                        onClick={() => setImportModeMenu(null)}
-                        onContextMenu={(e) => {
-                            e.preventDefault();
-                            setImportModeMenu(null);
-                        }}
-                    >
+                    {/* 导入模式选择菜单 */}
+                    {importModeMenu && (
                         <div
-                            className="absolute bg-qt-panel border border-qt-border rounded shadow-lg py-1 min-w-[180px]"
-                            style={{
-                                left: importModeMenu.x,
-                                top: importModeMenu.y,
+                            className="fixed inset-0 z-[9999]"
+                            onClick={() => setImportModeMenu(null)}
+                            onContextMenu={(e) => {
+                                e.preventDefault();
+                                setImportModeMenu(null);
                             }}
-                            onClick={(e) => e.stopPropagation()}
                         >
-                            <button
-                                className="w-full text-left px-3 py-1.5 text-sm text-qt-text hover:bg-qt-hover"
-                                onClick={() => {
-                                    const m = importModeMenu;
-                                    setImportModeMenu(null);
-                                    if (m.audioPaths.length === 1) {
-                                        void dispatch(
-                                            importAudioAtPosition({
-                                                audioPath: m.audioPaths[0],
-                                                trackId: m.trackId,
-                                                startSec: m.startSec,
-                                            }),
-                                        );
-                                    } else {
+                            <div
+                                className="absolute bg-qt-panel border border-qt-border rounded shadow-lg py-1 min-w-[180px]"
+                                style={{
+                                    left: importModeMenu.x,
+                                    top: importModeMenu.y,
+                                }}
+                                onClick={(e) => e.stopPropagation()}
+                            >
+                                <button
+                                    className="w-full text-left px-3 py-1.5 text-sm text-qt-text hover:bg-qt-hover"
+                                    onClick={() => {
+                                        const m = importModeMenu;
+                                        setImportModeMenu(null);
+                                        if (m.audioPaths.length === 1) {
+                                            void dispatch(
+                                                importAudioAtPosition({
+                                                    audioPath: m.audioPaths[0],
+                                                    trackId: m.trackId,
+                                                    startSec: m.startSec,
+                                                }),
+                                            );
+                                        } else {
+                                            void dispatch(
+                                                importMultipleAudioAtPosition({
+                                                    audioPaths: m.audioPaths,
+                                                    mode: "across-time",
+                                                    trackId: m.trackId,
+                                                    startSec: m.startSec,
+                                                }),
+                                            );
+                                        }
+                                    }}
+                                >
+                                    {t("import_across_time") || "Import across time (same track)"}
+                                </button>
+                                <button
+                                    className="w-full text-left px-3 py-1.5 text-sm text-qt-text hover:bg-qt-hover"
+                                    onClick={() => {
+                                        const m = importModeMenu;
+                                        setImportModeMenu(null);
+                                        if (m.audioPaths.length === 1) {
+                                            void dispatch(
+                                                importAudioAtPosition({
+                                                    audioPath: m.audioPaths[0],
+                                                    trackId: null,
+                                                    startSec: m.startSec,
+                                                }),
+                                            );
+                                        } else {
+                                            void dispatch(
+                                                importMultipleAudioAtPosition({
+                                                    audioPaths: m.audioPaths,
+                                                    mode: "across-tracks",
+                                                    trackId: m.trackId,
+                                                    startSec: m.startSec,
+                                                }),
+                                            );
+                                        }
+                                    }}
+                                >
+                                    {t("import_across_tracks")}
+                                </button>
+                                <button
+                                    className="w-full text-left px-3 py-1.5 text-sm text-qt-text hover:bg-qt-hover"
+                                    onClick={() => {
+                                        const m = importModeMenu;
+                                        setImportModeMenu(null);
                                         void dispatch(
                                             importMultipleAudioAtPosition({
                                                 audioPaths: m.audioPaths,
-                                                mode: "across-time",
+                                                mode: "as-takes",
                                                 trackId: m.trackId,
                                                 startSec: m.startSec,
                                             }),
                                         );
-                                    }
-                                }}
-                            >
-                                {t("import_across_time") || "Import across time (same track)"}
-                            </button>
-                            <button
-                                className="w-full text-left px-3 py-1.5 text-sm text-qt-text hover:bg-qt-hover"
-                                onClick={() => {
-                                    const m = importModeMenu;
-                                    setImportModeMenu(null);
-                                    if (m.audioPaths.length === 1) {
-                                        void dispatch(
-                                            importAudioAtPosition({
-                                                audioPath: m.audioPaths[0],
-                                                trackId: null,
-                                                startSec: m.startSec,
-                                            }),
-                                        );
-                                    } else {
-                                        void dispatch(
-                                            importMultipleAudioAtPosition({
-                                                audioPaths: m.audioPaths,
-                                                mode: "across-tracks",
-                                                trackId: m.trackId,
-                                                startSec: m.startSec,
-                                            }),
-                                        );
-                                    }
-                                }}
-                            >
-                                {t("import_across_tracks")}
-                            </button>
-                            <button
-                                className="w-full text-left px-3 py-1.5 text-sm text-qt-text hover:bg-qt-hover"
-                                onClick={() => {
-                                    const m = importModeMenu;
-                                    setImportModeMenu(null);
-                                    void dispatch(
-                                        importMultipleAudioAtPosition({
-                                            audioPaths: m.audioPaths,
-                                            mode: "as-takes",
-                                            trackId: m.trackId,
-                                            startSec: m.startSec,
-                                        }),
-                                    );
-                                }}
-                            >
-                                {t("import_as_takes")}
-                            </button>
+                                    }}
+                                >
+                                    {t("import_as_takes")}
+                                </button>
+                            </div>
                         </div>
-                    </div>
-                )}
+                    )}
 
-                {/* 工程文件（hshp/hsp）拖放操作菜单：打开工程 / 导入工程 */}
-                {projectActionMenu && (
-                    <div
-                        className="fixed inset-0 z-[9999]"
-                        onClick={() => setProjectActionMenu(null)}
-                        onContextMenu={(e) => {
-                            e.preventDefault();
-                            setProjectActionMenu(null);
-                        }}
-                    >
+                    {/* 工程文件（hshp/hsp）拖放操作菜单：打开工程 / 导入工程 */}
+                    {projectActionMenu && (
                         <div
-                            className="absolute bg-qt-panel border border-qt-border rounded shadow-lg py-1 min-w-[180px]"
-                            style={{ left: projectActionMenu.x, top: projectActionMenu.y }}
-                            onClick={(e) => e.stopPropagation()}
+                            className="fixed inset-0 z-[9999]"
+                            onClick={() => setProjectActionMenu(null)}
+                            onContextMenu={(e) => {
+                                e.preventDefault();
+                                setProjectActionMenu(null);
+                            }}
                         >
-                            <button
-                                className="w-full text-left px-3 py-1.5 text-sm text-qt-text hover:bg-qt-hover"
-                                onClick={() => {
-                                    const m = projectActionMenu;
-                                    setProjectActionMenu(null);
-                                    emitExternalFileAction("openProject", m.path);
-                                }}
+                            <div
+                                className="absolute bg-qt-panel border border-qt-border rounded shadow-lg py-1 min-w-[180px]"
+                                style={{ left: projectActionMenu.x, top: projectActionMenu.y }}
+                                onClick={(e) => e.stopPropagation()}
                             >
-                                {t("menu_open_project")}
-                            </button>
-                            <button
-                                className="w-full text-left px-3 py-1.5 text-sm text-qt-text hover:bg-qt-hover"
-                                onClick={() => {
-                                    const m = projectActionMenu;
-                                    setProjectActionMenu(null);
-                                    window.dispatchEvent(
-                                        new CustomEvent("hifi:importProjectPick", {
-                                            detail: { path: m.path },
-                                        }),
-                                    );
-                                }}
-                            >
-                                {tAny("import_project_dialog_title")}
-                            </button>
+                                <button
+                                    className="w-full text-left px-3 py-1.5 text-sm text-qt-text hover:bg-qt-hover"
+                                    onClick={() => {
+                                        const m = projectActionMenu;
+                                        setProjectActionMenu(null);
+                                        emitExternalFileAction("openProject", m.path);
+                                    }}
+                                >
+                                    {t("menu_open_project")}
+                                </button>
+                                <button
+                                    className="w-full text-left px-3 py-1.5 text-sm text-qt-text hover:bg-qt-hover"
+                                    onClick={() => {
+                                        const m = projectActionMenu;
+                                        setProjectActionMenu(null);
+                                        window.dispatchEvent(
+                                            new CustomEvent("hifi:importProjectPick", {
+                                                detail: { path: m.path },
+                                            }),
+                                        );
+                                    }}
+                                >
+                                    {tAny("import_project_dialog_title")}
+                                </button>
+                            </div>
                         </div>
-                    </div>
-                )}
+                    )}
 
-                <FadeContextMenuHost />
-                {contextMenu
-                    ? (() => {
-                          const ctxClip = sessionRef.current.clips.find(
-                              (c) => c.id === contextMenu.clipId,
-                          );
-                          if (!ctxClip) return null;
+                    <FadeContextMenuHost />
+                    {contextMenu
+                        ? (() => {
+                              const ctxClip = sessionRef.current.clips.find(
+                                  (c) => c.id === contextMenu.clipId,
+                              );
+                              if (!ctxClip) return null;
 
-                          const selectedIds = resolveQuickExportClipIds({
-                              contextClipId: contextMenu.clipId,
-                              multiSelectedClipIds,
-                          });
-                          const selectedClips = sessionRef.current.clips.filter((c) =>
-                              selectedIds.includes(c.id),
-                          );
+                              const selectedIds = resolveQuickExportClipIds({
+                                  contextClipId: contextMenu.clipId,
+                                  multiSelectedClipIds,
+                              });
+                              const selectedClips = sessionRef.current.clips.filter((c) =>
+                                  selectedIds.includes(c.id),
+                              );
 
-                          const _ctxScroller = scrollRef.current;
-                          const _ctxBounds = _ctxScroller?.getBoundingClientRect();
-                          const contextTimeSec =
-                              _ctxBounds && _ctxScroller
-                                  ? beatFromClientX(
-                                        contextMenu.x,
-                                        _ctxBounds,
-                                        _ctxScroller.scrollLeft,
-                                    )
-                                  : ctxClip.startSec;
+                              const _ctxScroller = scrollRef.current;
+                              const _ctxBounds = _ctxScroller?.getBoundingClientRect();
+                              const contextTimeSec =
+                                  _ctxBounds && _ctxScroller
+                                      ? beatFromClientX(
+                                            contextMenu.x,
+                                            _ctxBounds,
+                                            _ctxScroller.scrollLeft,
+                                        )
+                                      : ctxClip.startSec;
 
-                          const overlappingFadeClips = collectFadeContextClips({
-                              allClips: sessionRef.current.clips,
-                              contextClip: ctxClip,
-                              contextTimeSec,
-                              explicitOverlappingClipIds: contextMenu.overlappingClipIds,
-                          });
+                              const overlappingFadeClips = collectFadeContextClips({
+                                  allClips: sessionRef.current.clips,
+                                  contextClip: ctxClip,
+                                  contextTimeSec,
+                                  explicitOverlappingClipIds: contextMenu.overlappingClipIds,
+                              });
 
-                          const currentPlayheadSec = sessionRef.current.playheadSec;
-                          const playheadInClip =
-                              currentPlayheadSec >= ctxClip.startSec &&
-                              currentPlayheadSec <= ctxClip.startSec + ctxClip.lengthSec;
+                              const currentPlayheadSec = sessionRef.current.playheadSec;
+                              const playheadInClip =
+                                  currentPlayheadSec >= ctxClip.startSec &&
+                                  currentPlayheadSec <= ctxClip.startSec + ctxClip.lengthSec;
 
-                          return createPortal(
-                              <ClipContextMenu
-                                  x={contextMenu.x}
-                                  y={contextMenu.y}
-                                  clip={ctxClip}
-                                  selectedClips={selectedClips}
-                                  overlappingClips={overlappingFadeClips}
-                                  playheadInClip={playheadInClip}
-                                  canSplitSelected={selectedClips.some((c) => {
+                              return createPortal(
+                                  <ClipContextMenu
+                                      x={contextMenu.x}
+                                      y={contextMenu.y}
+                                      clip={ctxClip}
+                                      selectedClips={selectedClips}
+                                      overlappingClips={overlappingFadeClips}
+                                      playheadInClip={playheadInClip}
+                                      canSplitSelected={selectedClips.some((c) => {
+                                          const splitSec = Math.max(
+                                              0,
+                                              Number(sessionRef.current.playheadSec ?? 0) || 0,
+                                          );
+                                          return (
+                                              splitSec >= c.startSec &&
+                                              splitSec <= c.startSec + c.lengthSec
+                                          );
+                                      })}
+                                      onClose={() => setContextMenu(null)}
+                                      onDelete={(ids) => {
+                                          setContextMenu(null);
+                                          setMultiSelectedClipIds([]);
+                                          void dispatch(removeClipsRemote(ids));
+                                      }}
+                                      onMute={(ids, muted) => {
+                                          // 批量走 bulk 通道：单次 IPC + 单个撤销步
+                                          //（逐个 setClipStateRemote 会产生 N 次
+                                          // IPC/N 步撤销）。乐观更新先行。
+                                          for (const id of ids) {
+                                              dispatch(
+                                                  setClipMuted({
+                                                      clipId: id,
+                                                      muted,
+                                                  }),
+                                              );
+                                          }
+                                          void dispatch(
+                                              setClipsStateBulkRemote({
+                                                  updates: ids.map((id) => ({
+                                                      clipId: id,
+                                                      muted,
+                                                  })),
+                                                  checkpoint: true,
+                                              }),
+                                          );
+                                      }}
+                                      onRename={(clipId) => {
+                                          setContextMenu(null);
+                                          clipActions.setRenamingClipId(clipId);
+                                      }}
+                                      onCopy={(ids) => {
+                                          const s = sessionRef.current;
+                                          const expandedIds = expandClipIdsWithGroups(
+                                              ids,
+                                              s.clips,
+                                              s.ignoreGrouping,
+                                              s.disabledGroupIds,
+                                          );
+                                          void copyClips(expandedIds);
+                                      }}
+                                      onCut={(ids) => {
+                                          const s = sessionRef.current;
+                                          const expandedIds = expandClipIdsWithGroups(
+                                              ids,
+                                              s.clips,
+                                              s.ignoreGrouping,
+                                              s.disabledGroupIds,
+                                          );
+                                          setContextMenu(null);
+                                          cutClips(expandedIds);
+                                      }}
+                                      onReplace={(ids) => {
+                                          void replaceClipSources(ids);
+                                      }}
+                                      onReplaceMidi={(ids) => {
+                                          if (ids.length > 0) {
+                                              void openReplaceMidiForClip(ids[0]);
+                                          }
+                                      }}
+                                      onQuickExport={(ids) => {
+                                          setQuickExportDialog({
+                                              open: true,
+                                              clipIds: ids,
+                                          });
+                                      }}
+                                      onSplit={(clipIds) => {
+                                          setContextMenu(null);
+                                          splitClipIdsAtPlayhead(clipIds);
+                                      }}
+                                      onGroup={(ids) => {
+                                          setContextMenu(null);
+                                          groupClips(ids);
+                                      }}
+                                      onUngroup={(ids) => {
+                                          setContextMenu(null);
+                                          ungroupClips(ids);
+                                      }}
+                                      onGlue={(ids) => {
+                                          setContextMenu(null);
+                                          if (ids.length >= 2) {
+                                              void dispatch(glueClipsRemote(ids));
+                                              setMultiSelectedClipIds([]);
+                                          }
+                                      }}
+                                      onConvertToPitchRef={(ids) => {
+                                          setContextMenu(null);
+                                          void dispatch(convertClipsToPitchReferenceRemote(ids));
+                                          setMultiSelectedClipIds([]);
+                                      }}
+                                      onUpdatePitchRef={(ids) => {
+                                          setContextMenu(null);
+                                          void dispatch(updatePitchReferenceRemote(ids));
+                                          setMultiSelectedClipIds([]);
+                                      }}
+                                      onExportMidi={(ids) => {
+                                          setContextMenu(null);
+                                          void handleExportMidi(ids);
+                                      }}
+                                      onFadeShapeChange={(clipId, target, shape) => {
+                                          // 切换形状必须重置曲率（REAPER 语义：各形状的
+                                          // 默认曲率由形状自身定义，见 reaperFade 的
+                                          // DEFAULT_FADE_DIR_BY_SHAPE / defaultFadeDirFor）。
+                                          const dir = defaultFadeDirFor(shape, target === "out");
+                                          dispatch(
+                                              setClipFades({
+                                                  clipId,
+                                                  ...(target === "in"
+                                                      ? { fadeInShape: shape, fadeInDir: dir }
+                                                      : { fadeOutShape: shape, fadeOutDir: dir }),
+                                              }),
+                                          );
+                                          void dispatch(
+                                              setClipStateRemote({
+                                                  clipId,
+                                                  ...(target === "in"
+                                                      ? { fadeInShape: shape, fadeInDir: dir }
+                                                      : { fadeOutShape: shape, fadeOutDir: dir }),
+                                              }),
+                                          );
+                                      }}
+                                      onNormalize={normalizeClips}
+                                      onToggleReverse={(ids, reversed) => {
+                                          // 批量走 bulk 通道：单次 IPC + 单个撤销步
+                                          //（逐个 setClipStateRemote 会产生 N 次 IPC/N 步撤销）。
+                                          void dispatch(
+                                              setClipsStateBulkRemote({
+                                                  updates: ids.map((id) => ({
+                                                      clipId: id,
+                                                      reversed,
+                                                  })),
+                                                  checkpoint: true,
+                                              }),
+                                          );
+                                      }}
+                                      onToggleLoop={(ids, loopEnabled) => {
+                                          const session = sessionRef.current;
+                                          const updates = ids.map((id) => {
+                                              const clip = session.clips.find(
+                                                  (entry) => entry.id === id,
+                                              );
+                                              const update: {
+                                                  clipId: string;
+                                                  loopEnabled: boolean;
+                                                  sourceEndSec?: number;
+                                              } = { clipId: id, loopEnabled };
+                                              // 关闭循环的瞬间：非 Loop 正放 Clip 按
+                                              // 派生窗口模型归一 source_end
+                                              //（= 起点+长度×速率）。循环期间锚点被
+                                              // 回绕/窗口被保持，直接关掉会把陈旧
+                                              // 窗口带入非 Loop 状态 —— 静音区冻结、
+                                              // 音频错位都源于此。
+                                              // 与后端 clip_effective_source_end_sec
+                                              // 一致：不按 midiNoteData 排除 —— 音高
+                                              // 参考块等无源媒体 Clip 的音高曲线
+                                              //（trim_and_resample_midi）同样使用派生
+                                              // 窗口，存储值也必须一并归一。
+                                              if (!loopEnabled && clip && !clip.reversed) {
+                                                  const rate =
+                                                      Number(clip.playbackRate) > 0
+                                                          ? Number(clip.playbackRate)
+                                                          : 1;
+                                                  update.sourceEndSec =
+                                                      (Number(clip.sourceStartSec) || 0) +
+                                                      Math.max(0, clip.lengthSec) * rate;
+                                              }
+                                              return update;
+                                          });
+                                          void dispatch(
+                                              setClipsStateBulkRemote({
+                                                  updates,
+                                                  checkpoint: true,
+                                              }),
+                                          );
+                                      }}
+                                  />,
+                                  document.body,
+                              );
+                          })()
+                        : null}
+
+                    {trackAreaMenu
+                        ? createPortal(
+                              <TrackAreaContextMenu
+                                  x={trackAreaMenu.x}
+                                  y={trackAreaMenu.y}
+                                  canPaste={clipboardAvailable}
+                                  canSplit={(multiSelectedClipIds.length > 0
+                                      ? multiSelectedClipIds
+                                      : sessionRef.current.selectedClipId
+                                        ? [sessionRef.current.selectedClipId]
+                                        : []
+                                  ).some((id) => {
+                                      const clip = sessionRef.current.clips.find(
+                                          (c) => c.id === id,
+                                      );
+                                      if (!clip) return false;
                                       const splitSec = Math.max(
                                           0,
                                           Number(sessionRef.current.playheadSec ?? 0) || 0,
                                       );
                                       return (
-                                          splitSec >= c.startSec &&
-                                          splitSec <= c.startSec + c.lengthSec
+                                          splitSec >= clip.startSec &&
+                                          splitSec <= clip.startSec + clip.lengthSec
                                       );
                                   })}
-                                  onClose={() => setContextMenu(null)}
-                                  onDelete={(ids) => {
-                                      setContextMenu(null);
-                                      setMultiSelectedClipIds([]);
-                                      void dispatch(removeClipsRemote(ids));
-                                  }}
-                                  onMute={(ids, muted) => {
-                                      // 批量走 bulk 通道：单次 IPC + 单个撤销步
-                                      //（逐个 setClipStateRemote 会产生 N 次
-                                      // IPC/N 步撤销）。乐观更新先行。
-                                      for (const id of ids) {
-                                          dispatch(
-                                              setClipMuted({
-                                                  clipId: id,
-                                                  muted,
-                                              }),
-                                          );
-                                      }
-                                      void dispatch(
-                                          setClipsStateBulkRemote({
-                                              updates: ids.map((id) => ({
-                                                  clipId: id,
-                                                  muted,
-                                              })),
-                                              checkpoint: true,
-                                          }),
-                                      );
-                                  }}
-                                  onRename={(clipId) => {
-                                      setContextMenu(null);
-                                      clipActions.setRenamingClipId(clipId);
-                                  }}
-                                  onCopy={(ids) => {
-                                      const s = sessionRef.current;
-                                      const expandedIds = expandClipIdsWithGroups(
-                                          ids,
-                                          s.clips,
-                                          s.ignoreGrouping,
-                                          s.disabledGroupIds,
-                                      );
-                                      void copyClips(expandedIds);
-                                  }}
-                                  onCut={(ids) => {
-                                      const s = sessionRef.current;
-                                      const expandedIds = expandClipIdsWithGroups(
-                                          ids,
-                                          s.clips,
-                                          s.ignoreGrouping,
-                                          s.disabledGroupIds,
-                                      );
-                                      setContextMenu(null);
-                                      cutClips(expandedIds);
-                                  }}
-                                  onReplace={(ids) => {
-                                      void replaceClipSources(ids);
-                                  }}
-                                  onReplaceMidi={(ids) => {
-                                      if (ids.length > 0) {
-                                          void openReplaceMidiForClip(ids[0]);
-                                      }
-                                  }}
-                                  onQuickExport={(ids) => {
-                                      setQuickExportDialog({
-                                          open: true,
-                                          clipIds: ids,
-                                      });
-                                  }}
-                                  onSplit={(clipIds) => {
-                                      setContextMenu(null);
-                                      splitClipIdsAtPlayhead(clipIds);
-                                  }}
-                                  onGroup={(ids) => {
-                                      setContextMenu(null);
-                                      groupClips(ids);
-                                  }}
-                                  onUngroup={(ids) => {
-                                      setContextMenu(null);
-                                      ungroupClips(ids);
-                                  }}
-                                  onGlue={(ids) => {
-                                      setContextMenu(null);
-                                      if (ids.length >= 2) {
-                                          void dispatch(glueClipsRemote(ids));
-                                          setMultiSelectedClipIds([]);
-                                      }
-                                  }}
-                                  onConvertToPitchRef={(ids) => {
-                                      setContextMenu(null);
-                                      void dispatch(convertClipsToPitchReferenceRemote(ids));
-                                      setMultiSelectedClipIds([]);
-                                  }}
-                                  onUpdatePitchRef={(ids) => {
-                                      setContextMenu(null);
-                                      void dispatch(updatePitchReferenceRemote(ids));
-                                      setMultiSelectedClipIds([]);
-                                  }}
-                                  onExportMidi={(ids) => {
-                                      setContextMenu(null);
-                                      void handleExportMidi(ids);
-                                  }}
-                                  onFadeShapeChange={(clipId, target, shape) => {
-                                      // 切换形状必须重置曲率（REAPER 语义：各形状的
-                                      // 默认曲率由形状自身定义，见 reaperFade 的
-                                      // DEFAULT_FADE_DIR_BY_SHAPE / defaultFadeDirFor）。
-                                      const dir = defaultFadeDirFor(shape, target === "out");
-                                      dispatch(
-                                          setClipFades({
-                                              clipId,
-                                              ...(target === "in"
-                                                  ? { fadeInShape: shape, fadeInDir: dir }
-                                                  : { fadeOutShape: shape, fadeOutDir: dir }),
-                                          }),
-                                      );
-                                      void dispatch(
-                                          setClipStateRemote({
-                                              clipId,
-                                              ...(target === "in"
-                                                  ? { fadeInShape: shape, fadeInDir: dir }
-                                                  : { fadeOutShape: shape, fadeOutDir: dir }),
-                                          }),
-                                      );
-                                  }}
-                                  onNormalize={normalizeClips}
-                                  onToggleReverse={(ids, reversed) => {
-                                      // 批量走 bulk 通道：单次 IPC + 单个撤销步
-                                      //（逐个 setClipStateRemote 会产生 N 次 IPC/N 步撤销）。
-                                      void dispatch(
-                                          setClipsStateBulkRemote({
-                                              updates: ids.map((id) => ({ clipId: id, reversed })),
-                                              checkpoint: true,
-                                          }),
-                                      );
-                                  }}
-                                  onToggleLoop={(ids, loopEnabled) => {
-                                      const session = sessionRef.current;
-                                      const updates = ids.map((id) => {
-                                          const clip = session.clips.find(
-                                              (entry) => entry.id === id,
-                                          );
-                                          const update: {
-                                              clipId: string;
-                                              loopEnabled: boolean;
-                                              sourceEndSec?: number;
-                                          } = { clipId: id, loopEnabled };
-                                          // 关闭循环的瞬间：非 Loop 正放 Clip 按
-                                          // 派生窗口模型归一 source_end
-                                          //（= 起点+长度×速率）。循环期间锚点被
-                                          // 回绕/窗口被保持，直接关掉会把陈旧
-                                          // 窗口带入非 Loop 状态 —— 静音区冻结、
-                                          // 音频错位都源于此。
-                                          // 与后端 clip_effective_source_end_sec
-                                          // 一致：不按 midiNoteData 排除 —— 音高
-                                          // 参考块等无源媒体 Clip 的音高曲线
-                                          //（trim_and_resample_midi）同样使用派生
-                                          // 窗口，存储值也必须一并归一。
-                                          if (!loopEnabled && clip && !clip.reversed) {
-                                              const rate =
-                                                  Number(clip.playbackRate) > 0
-                                                      ? Number(clip.playbackRate)
-                                                      : 1;
-                                              update.sourceEndSec =
-                                                  (Number(clip.sourceStartSec) || 0) +
-                                                  Math.max(0, clip.lengthSec) * rate;
-                                          }
-                                          return update;
-                                      });
-                                      void dispatch(
-                                          setClipsStateBulkRemote({
-                                              updates,
-                                              checkpoint: true,
-                                          }),
-                                      );
-                                  }}
+                                  onPaste={pasteClipsAtPlayhead}
+                                  onSplit={splitSelectedAtPlayhead}
+                                  onClose={() => setTrackAreaMenu(null)}
                               />,
                               document.body,
-                          );
-                      })()
-                    : null}
+                          )
+                        : null}
 
-                {trackAreaMenu
-                    ? createPortal(
-                          <TrackAreaContextMenu
-                              x={trackAreaMenu.x}
-                              y={trackAreaMenu.y}
-                              canPaste={clipboardAvailable}
-                              canSplit={(multiSelectedClipIds.length > 0
-                                  ? multiSelectedClipIds
-                                  : sessionRef.current.selectedClipId
-                                    ? [sessionRef.current.selectedClipId]
-                                    : []
-                              ).some((id) => {
-                                  const clip = sessionRef.current.clips.find((c) => c.id === id);
-                                  if (!clip) return false;
-                                  const splitSec = Math.max(
-                                      0,
-                                      Number(sessionRef.current.playheadSec ?? 0) || 0,
-                                  );
-                                  return (
-                                      splitSec >= clip.startSec &&
-                                      splitSec <= clip.startSec + clip.lengthSec
-                                  );
-                              })}
-                              onPaste={pasteClipsAtPlayhead}
-                              onSplit={splitSelectedAtPlayhead}
-                              onClose={() => setTrackAreaMenu(null)}
-                          />,
-                          document.body,
-                      )
-                    : null}
-
-                <QuickClipExportDialog
-                    open={quickExportDialog.open}
-                    clipIds={quickExportDialog.clipIds}
-                    onOpenChange={(open) =>
-                        setQuickExportDialog((prev) => (open ? prev : { open: false, clipIds: [] }))
-                    }
-                />
-
-                <MidiTrackSelectDialog
-                    open={midiClipDialogOpen}
-                    onOpenChange={onMidiClipDialogOpenChange}
-                    midiPath={midiClipPath}
-                    importTarget={importTarget}
-                    onImportTargetChange={onImportTargetChange}
-                    clipboardGuid={midiClipClipboardGuid ?? null}
-                    rootTrackComposeEnabled={midiClipRootTrackComposeEnabled}
-                    onRequestEnableCompose={handleRequestEnableCompose}
-                    onImportAsClip={handleMidiClipImport}
-                    importPosition={importPosition}
-                    onImportPositionChange={onImportPositionChange}
-                    fillGaps={fillGaps}
-                    onFillGapsChange={onFillGapsChange}
-                    multiTrackMerge={multiTrackMerge}
-                    onMultiTrackMergeChange={onMultiTrackMergeChange}
-                    projectBpm={s.bpm}
-                    importBpmAsProject={importBpmAsProject}
-                    onImportBpmAsProjectChange={onImportBpmAsProjectChange}
-                    noteBpmMode={noteBpmMode}
-                    onNoteBpmModeChange={onNoteBpmModeChange}
-                    specifiedBpm={specifiedBpm}
-                    onSpecifiedBpmChange={onSpecifiedBpmChange}
-                    closeLeadingGap={closeLeadingGap}
-                    onCloseLeadingGapChange={onCloseLeadingGapChange}
-                    importTempoMapEnabled={importTempoMapEnabled}
-                    onImportTempoMapEnabledChange={onImportTempoMapEnabledChange}
-                    importTempoMapTempo={importTempoMapTempo}
-                    onImportTempoMapTempoChange={onImportTempoMapTempoChange}
-                    importTempoMapTimeSignature={importTempoMapTimeSignature}
-                    onImportTempoMapTimeSignatureChange={onImportTempoMapTimeSignatureChange}
-                    importTempoMapKeySignature={importTempoMapKeySignature}
-                    onImportTempoMapKeySignatureChange={onImportTempoMapKeySignatureChange}
-                />
-
-                <MidiTrackSelectDialog
-                    open={replaceMidiDialog.open}
-                    onOpenChange={(open) => {
-                        if (!open)
-                            setReplaceMidiDialog({ open: false, clipId: null, midiPath: null });
-                    }}
-                    midiPath={replaceMidiDialog.midiPath}
-                    mode="replaceMidi"
-                    onImportAsClip={handleReplaceMidiImport}
-                    fillGaps={fillGaps}
-                    onFillGapsChange={onFillGapsChange}
-                    projectBpm={s.bpm}
-                    importBpmAsProject={importBpmAsProject}
-                    onImportBpmAsProjectChange={onImportBpmAsProjectChange}
-                    noteBpmMode={noteBpmMode}
-                    onNoteBpmModeChange={onNoteBpmModeChange}
-                    specifiedBpm={specifiedBpm}
-                    onSpecifiedBpmChange={onSpecifiedBpmChange}
-                    closeLeadingGap={closeLeadingGap}
-                    onCloseLeadingGapChange={onCloseLeadingGapChange}
-                />
-
-                <Dialog.Root
-                    open={sameSourceConfirmOpen}
-                    onOpenChange={(open) => {
-                        setSameSourceConfirmOpen(open);
-                        if (!open && sameSourceConfirmResolverRef.current) {
-                            sameSourceConfirmResolverRef.current(false);
-                            sameSourceConfirmResolverRef.current = null;
+                    <QuickClipExportDialog
+                        open={quickExportDialog.open}
+                        clipIds={quickExportDialog.clipIds}
+                        onOpenChange={(open) =>
+                            setQuickExportDialog((prev) =>
+                                open ? prev : { open: false, clipIds: [] },
+                            )
                         }
-                    }}
-                >
-                    <Dialog.Content maxWidth="480px">
-                        <Dialog.Title>{t("ctx_replace")}</Dialog.Title>
-                        <Dialog.Description>
-                            <Text size="2">{t("clip_replace_same_source_confirm")}</Text>
-                        </Dialog.Description>
-                        <Flex justify="end" gap="2" mt="4">
-                            <Button
-                                variant="soft"
-                                color="gray"
-                                onClick={() => {
-                                    setSameSourceConfirmOpen(false);
-                                    if (sameSourceConfirmResolverRef.current) {
-                                        sameSourceConfirmResolverRef.current(false);
-                                        sameSourceConfirmResolverRef.current = null;
-                                    }
-                                }}
-                            >
-                                {t("cancel")}
-                            </Button>
-                            <Button
-                                onClick={() => {
-                                    setSameSourceConfirmOpen(false);
-                                    if (sameSourceConfirmResolverRef.current) {
-                                        sameSourceConfirmResolverRef.current(true);
-                                        sameSourceConfirmResolverRef.current = null;
-                                    }
-                                }}
-                            >
-                                {t("ok")}
-                            </Button>
-                        </Flex>
-                    </Dialog.Content>
-                </Dialog.Root>
+                    />
 
-                <TimelineTransportBridge
-                    pxPerSecRef={pxPerSecRef}
-                    playheadRef={playheadRef}
-                    rulerPlayheadLineRef={rulerPlayheadLineRef}
-                    rulerPlayheadHeadRef={rulerPlayheadHeadRef}
-                    scrollRef={scrollRef}
-                    syncScrollLeft={syncScrollLeft}
-                    autoScrollEnabled={s.autoScrollEnabled}
-                    projectSec={dynamicProjectSec}
-                />
+                    <MidiTrackSelectDialog
+                        open={midiClipDialogOpen}
+                        onOpenChange={onMidiClipDialogOpenChange}
+                        midiPath={midiClipPath}
+                        importTarget={importTarget}
+                        onImportTargetChange={onImportTargetChange}
+                        clipboardGuid={midiClipClipboardGuid ?? null}
+                        rootTrackComposeEnabled={midiClipRootTrackComposeEnabled}
+                        onRequestEnableCompose={handleRequestEnableCompose}
+                        onImportAsClip={handleMidiClipImport}
+                        importPosition={importPosition}
+                        onImportPositionChange={onImportPositionChange}
+                        fillGaps={fillGaps}
+                        onFillGapsChange={onFillGapsChange}
+                        multiTrackMerge={multiTrackMerge}
+                        onMultiTrackMergeChange={onMultiTrackMergeChange}
+                        projectBpm={s.bpm}
+                        importBpmAsProject={importBpmAsProject}
+                        onImportBpmAsProjectChange={onImportBpmAsProjectChange}
+                        noteBpmMode={noteBpmMode}
+                        onNoteBpmModeChange={onNoteBpmModeChange}
+                        specifiedBpm={specifiedBpm}
+                        onSpecifiedBpmChange={onSpecifiedBpmChange}
+                        closeLeadingGap={closeLeadingGap}
+                        onCloseLeadingGapChange={onCloseLeadingGapChange}
+                        importTempoMapEnabled={importTempoMapEnabled}
+                        onImportTempoMapEnabledChange={onImportTempoMapEnabledChange}
+                        importTempoMapTempo={importTempoMapTempo}
+                        onImportTempoMapTempoChange={onImportTempoMapTempoChange}
+                        importTempoMapTimeSignature={importTempoMapTimeSignature}
+                        onImportTempoMapTimeSignatureChange={onImportTempoMapTimeSignatureChange}
+                        importTempoMapKeySignature={importTempoMapKeySignature}
+                        onImportTempoMapKeySignatureChange={onImportTempoMapKeySignatureChange}
+                    />
 
-                <TimelineDisplaySettingsDialog
-                    open={timeDisplaySettingsOpen}
-                    onOpenChange={setTimeDisplaySettingsOpen}
-                />
+                    <MidiTrackSelectDialog
+                        open={replaceMidiDialog.open}
+                        onOpenChange={(open) => {
+                            if (!open)
+                                setReplaceMidiDialog({ open: false, clipId: null, midiPath: null });
+                        }}
+                        midiPath={replaceMidiDialog.midiPath}
+                        mode="replaceMidi"
+                        onImportAsClip={handleReplaceMidiImport}
+                        fillGaps={fillGaps}
+                        onFillGapsChange={onFillGapsChange}
+                        projectBpm={s.bpm}
+                        importBpmAsProject={importBpmAsProject}
+                        onImportBpmAsProjectChange={onImportBpmAsProjectChange}
+                        noteBpmMode={noteBpmMode}
+                        onNoteBpmModeChange={onNoteBpmModeChange}
+                        specifiedBpm={specifiedBpm}
+                        onSpecifiedBpmChange={onSpecifiedBpmChange}
+                        closeLeadingGap={closeLeadingGap}
+                        onCloseLeadingGapChange={onCloseLeadingGapChange}
+                    />
 
-                {/* 音高拖拽悬浮 ToolTips：跟随指针展示 Clip 范围内音高变化量 */}
-                <AppTooltipBubble
-                    text={pitchDragTooltip?.text ?? null}
-                    position={pitchDragTooltip?.position ?? null}
-                />
+                    <Dialog.Root
+                        open={sameSourceConfirmOpen}
+                        onOpenChange={(open) => {
+                            setSameSourceConfirmOpen(open);
+                            if (!open && sameSourceConfirmResolverRef.current) {
+                                sameSourceConfirmResolverRef.current(false);
+                                sameSourceConfirmResolverRef.current = null;
+                            }
+                        }}
+                    >
+                        <Dialog.Content maxWidth="480px">
+                            <Dialog.Title>{t("ctx_replace")}</Dialog.Title>
+                            <Dialog.Description>
+                                <Text size="2">{t("clip_replace_same_source_confirm")}</Text>
+                            </Dialog.Description>
+                            <Flex justify="end" gap="2" mt="4">
+                                <Button
+                                    variant="soft"
+                                    color="gray"
+                                    onClick={() => {
+                                        setSameSourceConfirmOpen(false);
+                                        if (sameSourceConfirmResolverRef.current) {
+                                            sameSourceConfirmResolverRef.current(false);
+                                            sameSourceConfirmResolverRef.current = null;
+                                        }
+                                    }}
+                                >
+                                    {t("cancel")}
+                                </Button>
+                                <Button
+                                    onClick={() => {
+                                        setSameSourceConfirmOpen(false);
+                                        if (sameSourceConfirmResolverRef.current) {
+                                            sameSourceConfirmResolverRef.current(true);
+                                            sameSourceConfirmResolverRef.current = null;
+                                        }
+                                    }}
+                                >
+                                    {t("ok")}
+                                </Button>
+                            </Flex>
+                        </Dialog.Content>
+                    </Dialog.Root>
+
+                    <TimelineTransportBridge
+                        pxPerSecRef={pxPerSecRef}
+                        playheadRef={playheadRef}
+                        rulerPlayheadLineRef={rulerPlayheadLineRef}
+                        rulerPlayheadHeadRef={rulerPlayheadHeadRef}
+                        scrollRef={scrollRef}
+                        syncScrollLeft={syncScrollLeft}
+                        autoScrollEnabled={s.autoScrollEnabled}
+                        projectSec={dynamicProjectSec}
+                    />
+
+                    <TimelineDisplaySettingsDialog
+                        open={timeDisplaySettingsOpen}
+                        onOpenChange={setTimeDisplaySettingsOpen}
+                    />
+
+                    {/* 音高拖拽悬浮 ToolTips：跟随指针展示 Clip 范围内音高变化量 */}
+                    <AppTooltipBubble
+                        text={pitchDragTooltip?.text ?? null}
+                        position={pitchDragTooltip?.position ?? null}
+                    />
+                </Flex>
             </Flex>
-        </Flex>
+        </Profiler>
     );
 };
