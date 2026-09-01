@@ -24,6 +24,7 @@ macro_rules! log_error_limited {
 }
 
 pub mod logging;
+mod zip_util;
 
 mod audio_engine;
 #[path = "audio/audio_utils.rs"]

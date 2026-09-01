@@ -120,10 +120,8 @@ fn build_system_info(state: &State<'_, AppState>) -> serde_json::Value {
 fn write_base_zip(out: &Path, system_info: &serde_json::Value) -> Result<(), String> {
     let file = std::fs::File::create(out).map_err(|e| format!("create zip failed: {e}"))?;
     let mut zip = zip::ZipWriter::new(file);
-    let options =
-        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
-    zip.start_file("system_info.json", options.clone())
+    zip.start_file("system_info.json", crate::zip_util::options_now())
         .map_err(|e| format!("zip add system_info failed: {e}"))?;
     let info = serde_json::to_string_pretty(system_info)
         .map_err(|e| format!("serialize system_info failed: {e}"))?;
@@ -139,11 +137,12 @@ fn write_base_zip(out: &Path, system_info: &serde_json::Value) -> Result<(), Str
             log::warn!("[diagnostics] skipping oversized log file {name} ({size} bytes)");
             continue;
         }
-        match std::fs::read(&path) {
-            Ok(bytes) => {
-                zip.start_file(format!("logs/{name}"), options.clone())
+        // 流式写入（避免整文件读入内存），并保留日志文件的修改时间。
+        match std::fs::File::open(&path) {
+            Ok(mut src) => {
+                zip.start_file(format!("logs/{name}"), crate::zip_util::options_for_source(&path))
                     .map_err(|e| format!("zip add {name} failed: {e}"))?;
-                zip.write_all(&bytes)
+                std::io::copy(&mut src, &mut zip)
                     .map_err(|e| format!("write {name} failed: {e}"))?;
             }
             Err(e) => log::warn!("[diagnostics] failed to read log file {name}: {e}"),
@@ -171,9 +170,7 @@ fn append_benchmark(zip_path: &Path) -> Result<(), String> {
         .map_err(|e| format!("reopen zip failed: {e}"))?;
     let mut zip = zip::ZipWriter::new_append(file)
         .map_err(|e| format!("append zip failed: {e}"))?;
-    let options =
-        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-    zip.start_file("benchmark.json", options.clone())
+    zip.start_file("benchmark.json", crate::zip_util::options_now())
         .map_err(|e| format!("zip add benchmark failed: {e}"))?;
     zip.write_all(benchmark.as_bytes())
         .map_err(|e| format!("write benchmark failed: {e}"))?;
