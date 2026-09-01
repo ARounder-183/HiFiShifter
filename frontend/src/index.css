@@ -450,6 +450,8 @@ textarea {
     border: 1px solid var(--qt-border);
     box-shadow: 0 2px 10px var(--qt-overlay);
     white-space: pre-line;
-    max-width: 320px;
+    /* 400px：容纳关于对话框里两行展示的完整仓库链接（约 320px），其余
+       短文案不受影响（只在内容超过 320px 时才会用满更宽的气泡）。 */
+    max-width: 400px;
     tab-size: 4;
 }

@@ -93,12 +93,14 @@ export function AboutDialog({ open, onOpenChange }: AboutDialogProps) {
                                 <Text size="2" color="gray">
                                     {tAny("about_commit")}
                                 </Text>
-                                {/* 点击跳转到该 commit 的源码快照。 */}
+                                {/* 点击跳转到该 commit 的源码快照；tooltip 展示完整链接——
+                                    按自然边界拆两行，避免 320px 气泡内在连字符处断行、
+                                    哈希溢出（pre-line 保留换行）。 */}
                                 <button
                                     type="button"
                                     onClick={() => void openExternal(`${repoUrl}/tree/${info?.commit}`)}
+                                    data-tooltip={`${repoUrl}\n/tree/${info?.commit}`}
                                     className="text-xs text-qt-accent underline underline-offset-2 hover:text-qt-text"
-                                    title={`${repoUrl}/tree/${info?.commit}`}
                                 >
                                     {commitShort}
                                 </button>
@@ -108,7 +110,12 @@ export function AboutDialog({ open, onOpenChange }: AboutDialogProps) {
                 </Flex>
 
                 <Flex gap="3" mt="4" justify="end">
-                    <Button size="2" variant="soft" onClick={() => void openExternal(repoUrl)}>
+                    <Button
+                        size="2"
+                        variant="soft"
+                        data-tooltip={repoUrl}
+                        onClick={() => void openExternal(repoUrl)}
+                    >
                         {tAny("about_open_repo")}
                     </Button>
                     <Dialog.Close>
