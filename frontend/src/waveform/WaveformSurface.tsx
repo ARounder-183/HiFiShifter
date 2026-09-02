@@ -405,7 +405,16 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
             props.rows.flatMap((row) => row.clips.map((clip) => clip.sourcePath)),
         );
         return waveformMipmapStore.addListener((sourcePath, status) => {
-            if (status === "done" && needed.has(sourcePath)) invalidate();
+            if (status !== "done" || !needed.has(sourcePath)) return;
+            // 数据就绪会改变几何结果。「余量窗口」复用判定只看 rows 引用 /
+            // axis / 尺寸（见 draw 内 canReuse），不感知峰值数据是否已加载——
+            // 若只 invalidate，draw 会命中 canReuse 走 repaint()，把**数据缺失
+            // 时**构建的空几何原样重画一遍：表现为打开工程/导入音频并分析完成
+            // 后波形仍空白，要等滚动滚出余量或缩放才出现。必须先作废几何缓存
+            // 强制全量重建。（7286592a 修的是视口宽度不发布，本处是同一症状
+            // 的第二个根源。）
+            geometryCacheRef.current = null;
+            invalidate();
         });
     }, [invalidate, props.rows]);
 
