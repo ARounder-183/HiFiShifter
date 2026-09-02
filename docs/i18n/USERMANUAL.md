@@ -397,7 +397,7 @@ HiFiShifter 支持工程内的速度映射，允许在时间轴的不同位置�
         - Reaper：在 Reaper 的 MIDI 编辑器中，选中音符，并复制，即可将选中的音符数据导出至系统剪贴板中，供 HiFiShifter 读取。注意，由于 Reaper 的剪贴板音符数据并不包含 BPM 信息，导入时，可以使用当前工程 BPM，或者自行指定。
         - FL Studio：在 FL Studio 的钢琴窗界面中，点击钢琴窗左上角的小三角展开菜单，选择 `文件` -> `复制到 MIDI 剪贴板`，即可将当前通道的所有音符导出至系统剪贴板中，供 HiFiShifter 读取。
     - 轨道选择区：允许你选择即将导入的 MIDI 轨道。
-    - 将 MIDI BPM 导入为工程 BPM：启用后，将 MIDI 的初始 BPM 导入为工程 BPM。HiFiShifter 目前仍然不支持变速 BPM。
+    - 将 MIDI BPM 导入为工程 BPM：启用后，将 MIDI 的初始 BPM 导入为工程 BPM。
     - 音符 BPM：允许设置将要导入的音符的 BPM 映射方式。
         - MIDI 自身 BPM：不进行 BPM 映射，直接以 MIDI 自身 BPM 导入。
         - 当前工程 BPM：将音符 BPM 映射到当前工程 BPM 后再导入。
@@ -501,16 +501,16 @@ HiFiShifter 支持直接在时间轴上录音。录音时可以从当前播放�
 
 HiFiShifter 会自动把运行日志写入系统标准日志目录，无需任何命令行参数。遇到问题时，把日志文件提交给开发者即可帮助定位：
 
-| 系统 | 日志目录 |
-| --- | --- |
+| 系统    | 日志目录                                       |
+| ------- | ---------------------------------------------- |
 | Windows | `%LOCALAPPDATA%\com.arounder.hifishifter\logs` |
-| macOS | `~/Library/Logs/com.arounder.hifishifter` |
-| Linux | `~/.local/share/com.arounder.hifishifter/logs` |
+| macOS   | `~/Library/Logs/com.arounder.hifishifter`      |
+| Linux   | `~/.local/share/com.arounder.hifishifter/logs` |
 
 - 通过 `帮助 → 打开日志文件夹` 可以直接定位日志文件。
 - 通过 `帮助 → 导出诊断信息…` 可以一键生成诊断包 zip（系统信息 + 全部日志 + 推理设备基准测试结果），提交 issue 时附上即可。
 - 日志按大小自动轮转：单个文件上限 8 MiB，默认保留 3 份历史（`hifishifter.1.log` … `hifishifter.3.log`）。
-  - 高频重复的错误 / 警告会自动限流：同一位置的日志默认每 10 秒最多输出一条，被抑制的条数会在下一条输出前以 `[throttled]` 汇总行补记。
+    - 高频重复的错误 / 警告会自动限流：同一位置的日志默认每 10 秒最多输出一条，被抑制的条数会在下一条输出前以 `[throttled]` 汇总行补记。
 - 前端与后端的错误都会统一记录在同一份日志文件里，方便按时间轴对照排查。
 
 高级选项（一般用户无需使用）：

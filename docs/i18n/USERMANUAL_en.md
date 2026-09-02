@@ -398,7 +398,7 @@ Pitch Reference Clips can be created through the following methods:
         - Reaper: In Reaper's MIDI Editor, select notes and copy them to export the selected note data to the system clipboard for HiFiShifter to read. Note that since Reaper's clipboard note data does not include BPM information, when importing, you can use the current project BPM or specify one manually.
         - FL Studio: In FL Studio's Piano Roll, click the small triangle in the top-left corner and select `File` -> `Copy to MIDI Clipboard` to export all notes of the current channel to the system clipboard for HiFiShifter to read.
     - Track Selection: Allows you to select which MIDI tracks to import.
-    - Import MIDI BPM as Project BPM: When enabled, imports the MIDI's initial BPM as the project BPM. HiFiShifter still does not support variable BPM.
+    - Import MIDI BPM as Project BPM: When enabled, imports the MIDI's initial BPM as the project BPM.
     - Note BPM: Configures the BPM mapping for imported notes.
         - MIDI own BPM: Import directly with the MIDI's own BPM without BPM mapping.
         - Current Project BPM: Map note BPM to the current project BPM before importing.
@@ -502,16 +502,16 @@ Open the recording settings via `File -> Recording...`:
 
 HiFiShifter automatically writes its run log to the platform-standard log directory — no command-line flags required. When you run into a problem, attaching the log file(s) to an issue helps a lot with diagnosis:
 
-| OS | Log directory |
-| --- | --- |
+| OS      | Log directory                                  |
+| ------- | ---------------------------------------------- |
 | Windows | `%LOCALAPPDATA%\com.arounder.hifishifter\logs` |
-| macOS | `~/Library/Logs/com.arounder.hifishifter` |
-| Linux | `~/.local/share/com.arounder.hifishifter/logs` |
+| macOS   | `~/Library/Logs/com.arounder.hifishifter`      |
+| Linux   | `~/.local/share/com.arounder.hifishifter/logs` |
 
 - Use `Help → Open Log Folder` to jump straight to the log files.
 - Use `Help → Export Diagnostics…` to generate a diagnostics package zip (system info + all logs + inference-device benchmark results) and attach it to your issue.
 - Logs rotate automatically by size: 8 MiB per file, with up to 3 historical copies kept (`hifishifter.1.log` … `hifishifter.3.log`).
-  - Frequently repeating errors / warnings are throttled automatically: a given log site emits at most one message per 10-second window, and suppressed messages are summarized in a `[throttled]` line before the next one.
+    - Frequently repeating errors / warnings are throttled automatically: a given log site emits at most one message per 10-second window, and suppressed messages are summarized in a `[throttled]` line before the next one.
 - Frontend and backend errors are written to the same log file, so a single file tells the whole story in chronological order.
 
 Advanced options (not needed for regular use):

@@ -398,7 +398,7 @@ HiFiShifter는 프로젝트 단위 템포 맵을 지원하여 타임라인의 �
         - Reaper: Reaper의 MIDI 에디터에서 노트를 선택하고 복사하면 선택한 노트 데이터가 시스템 클립보드로 출력되어 HiFiShifter에서 읽을 수 있습니다. Reaper의 클립보드 노트 데이터에는 BPM 정보가 포함되어 있지 않으므로, 가져올 때 현재 프로젝트 BPM을 사용하거나 수동으로 지정할 수 있습니다.
         - FL Studio: FL Studio의 피아노 롤 화면에서 왼쪽 상단의 작은 삼각형을 클릭하여 메뉴를 펼치고 `파일` -> `MIDI 클립보드로 복사`를 선택하면 현재 채널의 모든 노트가 시스템 클립보드로 출력되어 HiFiShifter에서 읽을 수 있습니다.
     - 트랙 선택: 가져올 MIDI 트랙을 선택할 수 있습니다.
-    - MIDI BPM을 프로젝트 BPM으로 가져오기: 활성화하면 MIDI의 초기 BPM을 프로젝트 BPM으로 가져옵니다. HiFiShifter는 현재까지도 가변 BPM을 지원하지 않습니다.
+    - MIDI BPM을 프로젝트 BPM으로 가져오기: 활성화하면 MIDI의 초기 BPM을 프로젝트 BPM으로 가져옵니다.
     - 노트 BPM: 가져올 노트의 BPM 매핑 방식을 설정할 수 있습니다.
         - MIDI 자체 BPM: BPM 매핑을 하지 않고 MIDI 자체 BPM으로 직접 가져옵니다.
         - 현재 프로젝트 BPM: 노트 BPM을 현재 프로젝트 BPM으로 매핑한 후 가져옵니다.
@@ -502,16 +502,16 @@ HiFiShifter는 타임라인에서 직접 녹음할 수 있습니다. 녹음 중�
 
 HiFiShifter는 실행 로그를 OS 표준 로그 디렉터리에 자동으로 기록합니다. 명령줄 인수가 필요하지 않습니다. 문제가 발생하면 로그 파일을 첨부해 보고하면 원인 파악에 큰 도움이 됩니다:
 
-| OS | 로그 디렉터리 |
-| --- | --- |
+| OS      | 로그 디렉터리                                  |
+| ------- | ---------------------------------------------- |
 | Windows | `%LOCALAPPDATA%\com.arounder.hifishifter\logs` |
-| macOS | `~/Library/Logs/com.arounder.hifishifter` |
-| Linux | `~/.local/share/com.arounder.hifishifter/logs` |
+| macOS   | `~/Library/Logs/com.arounder.hifishifter`      |
+| Linux   | `~/.local/share/com.arounder.hifishifter/logs` |
 
 - `도움말 → 로그 폴더 열기` 메뉴로 로그 파일 위치를 바로 열 수 있습니다.
 - `도움말 → 진단 정보 내보내기…` 메뉴로 진단 패키지 zip(시스템 정보 + 전체 로그 + 추론 장치 벤치마크 결과)을 한 번에 생성할 수 있습니다. 이슈 등록 시 첨부해 주세요.
 - 로그는 크기 기준으로 자동 순환됩니다: 파일당 최대 8 MiB, 최대 3개의 이전 파일 보관 (`hifishifter.1.log` … `hifishifter.3.log`).
-  - 반복되는 오류 / 경고는 자동으로 스로틀링됩니다: 동일한 위치의 로그는 10초 창당 최대 1건만 출력되며, 억제된 건수는 다음 출력 전에 `[throttled]` 행으로 보완 기록됩니다.
+    - 반복되는 오류 / 경고는 자동으로 스로틀링됩니다: 동일한 위치의 로그는 10초 창당 최대 1건만 출력되며, 억제된 건수는 다음 출력 전에 `[throttled]` 행으로 보완 기록됩니다.
 - 프런트엔드와 백엔드 오류가 모두 동일한 로그 파일에 기록되어 하나의 파일로 시간순 추적이 가능합니다.
 
 고급 옵션(일반적인 사용에는 불필요):
