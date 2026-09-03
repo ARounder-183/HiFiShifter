@@ -1181,24 +1181,8 @@ fn render_single_clip(
     // 5. 时间拉伸（playback_rate != 1）
     // 若合成处理器声明自己处理时间拉伸（handles_time_stretch = true），
     // 则跳过此处的时间拉伸，由处理器在 pitch edit 阶段通过 ClipProcessContext.playback_rate 内部完成。
-    let processor_handles_stretch = {
-        let clip_root = timeline.resolve_root_track_id(&clip.track_id);
-        clip_root
-            .and_then(|root| {
-                let t = timeline.tracks.iter().find(|t| t.id == root)?;
-                let kind = crate::state::SynthPipelineKind::from_track_algo(&t.pitch_analysis_algo);
-                let has_adjustment = timeline
-                    .params_by_root_track
-                    .get(&root)
-                    .map(|e| e.has_pitch_adjustment_active)
-                    .unwrap_or(false);
-                Some(crate::renderer::processor_handles_time_stretch(
-                    kind,
-                    t.compose_enabled || has_adjustment,
-                ))
-            })
-            .unwrap_or(false)
-    };
+    let processor_handles_stretch =
+        crate::pitch_editing::processor_should_handle_stretch(timeline, clip);
     if (playback_rate - 1.0).abs() > 1e-6 && !processor_handles_stretch {
         let seg_frames_in = segment.len() / 2;
         let target_frames = ((seg_frames_in as f64) / playback_rate).round().max(2.0) as usize;

@@ -296,22 +296,8 @@ pub(crate) fn build_snapshot(
         } else {
             1.0
         };
-        let processor_handles_stretch = timeline
-            .resolve_root_track_id(&clip.track_id)
-            .and_then(|root| {
-                let t = tracks_by_id.get(root.as_str()).copied()?;
-                let kind = crate::state::SynthPipelineKind::from_track_algo(&t.pitch_analysis_algo);
-                let has_adjustment = timeline
-                    .params_by_root_track
-                    .get(&root)
-                    .map(|e| e.has_pitch_adjustment_active)
-                    .unwrap_or(false);
-                Some(crate::renderer::processor_handles_time_stretch(
-                    kind,
-                    t.compose_enabled || has_adjustment,
-                ))
-            })
-            .unwrap_or(false);
+        let processor_handles_stretch =
+            crate::pitch_editing::processor_should_handle_stretch(timeline, clip);
 
         let src = match get_resampled_stereo_cached(path, out_rate, cache) {
             Some(v) => {

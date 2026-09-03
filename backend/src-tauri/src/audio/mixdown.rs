@@ -695,14 +695,8 @@ pub fn render_mixdown_interleaved(
         // - playback_rate != 1: stretch the trimmed window to (src_len / playback_rate) in timeline time.
         // 若合成处理器声明自己处理时间拉伸（handles_time_stretch = true，如 vslib），
         // 则跳过此处外部拉伸，由 pitch edit 阶段的处理器内部完成。
-        let processor_handles_stretch = timeline
-            .resolve_root_track_id(&clip.track_id)
-            .and_then(|root| timeline.tracks.iter().find(|t| t.id == root))
-            .map(|t| {
-                let kind = crate::state::SynthPipelineKind::from_track_algo(&t.pitch_analysis_algo);
-                crate::renderer::processor_handles_time_stretch(kind, t.compose_enabled)
-            })
-            .unwrap_or(false);
+        let processor_handles_stretch =
+            crate::pitch_editing::processor_should_handle_stretch(timeline, clip);
         // 外部 SoundTouch 拉伸的执行条件：
         //   !processor_handles_stretch → 处理器不内部拉伸（World/HiFiGAN chain 内有 TimeStretchStage，vslib 原生拉伸）
         //   !opts.apply_pitch_edit    → pitch edit 链不会运行，内部拉伸无法触发，需回退到外部拉伸
