@@ -306,7 +306,17 @@ impl ProcessingStage for HiFiGanStage {
 
         // harmonic 直接走 HiFiGAN；时间拉伸已在处理器外部完成
         let processed_harmonic = if cc.clip_midi.is_empty() {
-            (*harmonic).clone()
+            if (cc.playback_rate - 1.0).abs() > 1.0e-6 {
+                crate::time_stretch::time_stretch_interleaved(
+                    &harmonic,
+                    1,
+                    cc.sample_rate,
+                    cc.out_frames,
+                    crate::time_stretch::resolved_external_stretch_algorithm(),
+                )
+            } else {
+                (*harmonic).clone()
+            }
         } else {
             let render_ctx = RenderContext {
                 mono_pcm: &harmonic,

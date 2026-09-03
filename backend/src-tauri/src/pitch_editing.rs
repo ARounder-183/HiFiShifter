@@ -322,7 +322,47 @@ pub(crate) fn hifigan_formant_shift_active_for_clip(
     )
 }
 
+/// 判定当前 clip 是否应由处理器内部消费 Mel Stretch。
+///
+/// 调用方跳过外部拉伸前必须使用同一个判定；否则气声/张力/共振峰这类
+/// 独立效果在 Compose 关闭时会出现“外部不拉伸、内部也不拉伸”的错位。
+pub(crate) fn processor_should_handle_stretch(
+    timeline: &TimelineState,
+    clip: &crate::state::Clip,
+) -> bool {
+    let Some(root_id) = timeline.resolve_root_track_id(&clip.track_id) else {
+        return false;
+    };
+    let Some((track, entry)) = root_pitch_edit_state(timeline, &root_id) else {
+        return false;
+    };
+    let algo = PitchEditAlgorithm::from_track_algo(&track.pitch_analysis_algo);
+    if matches!(algo, PitchEditAlgorithm::Bypass) {
+        return false;
+    }
+    let effect_processing = matches!(algo, PitchEditAlgorithm::NsfHifiganOnnx)
+        && (track_requests_extra_processing(algo, entry, clip, clip.start_sec.max(0.0))
+            || hifigan_tension_active_for_clip(entry, clip, clip.start_sec.max(0.0))
+            || hifigan_formant_shift_active_for_clip(entry, clip, clip.start_sec.max(0.0))
+            || active_child_formant_offset_config(timeline, &clip.track_id).is_some());
+    let rate = (clip.playback_rate as f64).max(1e-6);
+    crate::renderer::processor_handles_time_stretch(
+        algo.into_kind(),
+        track.compose_enabled || entry.has_pitch_adjustment_active || effect_processing,
+    ) && ((rate - 1.0).abs() > 1e-6 || effect_processing)
+}
+
 impl PitchEditAlgorithm {
+    fn into_kind(self) -> SynthPipelineKind {
+        match self {
+            Self::WorldVocoder => SynthPipelineKind::WorldVocoder,
+            Self::NsfHifiganOnnx => SynthPipelineKind::NsfHifiganOnnx,
+            #[cfg(feature = "vslib")]
+            Self::VocalShifterVslib => SynthPipelineKind::VocalShifterVslib,
+            Self::Bypass => SynthPipelineKind::WorldVocoder,
+        }
+    }
+
     pub fn from_track_algo(algo: &PitchAnalysisAlgo) -> Self {
         if let Some(v) = pitch_edit_algo_from_env() {
             if matches!(v.as_str(), "nsf_hifigan" | "nsf_hifigan_onnx" | "onnx") {
@@ -371,6 +411,7 @@ mod tests {
         active_child_formant_offset_config, build_clip_effective_formant_shift_curve,
         child_formant_offset_curve_key, common_pan_curve_for_clip, common_volume_curve_for_clip,
         extra_curve_for_clip, hifigan_formant_shift_active_for_clip,
+        processor_should_handle_stretch,
     };
     #[cfg(feature = "vslib")]
     use crate::state::SynthPipelineKind;
@@ -466,6 +507,42 @@ mod tests {
 
     fn clip_track_root(timeline: &TimelineState, clip: &Clip) -> Option<String> {
         timeline.resolve_root_track_id(&clip.track_id)
+    }
+
+    #[test]
+    fn breath_only_effect_uses_mel_stretch_without_compose() {
+        crate::time_stretch::update_runtime_stretch_settings(
+            crate::time_stretch::UserStretchAlgorithm::Signalsmith,
+            true,
+            None,
+            None,
+        );
+        let mut timeline = TimelineState::default();
+        let root = timeline.add_track(Some("root".to_string()), None, None);
+        timeline.set_track_state(
+            &root,
+            None,
+            None,
+            None,
+            Some(false),
+            Some(crate::state::PitchAnalysisAlgo::NsfHifiganOnnx),
+            None,
+            None,
+        );
+        timeline.params_by_root_track.insert(
+            root.clone(),
+            TrackParamsState {
+                frame_period_ms: 5.0,
+                ..Default::default()
+            },
+        );
+
+        let mut clip = make_clip();
+        clip.track_id = root;
+        clip.playback_rate = 0.5;
+        clip.extra_params = Some(HashMap::from([("breath_enabled".to_string(), 1.0)]));
+
+        assert!(processor_should_handle_stretch(&timeline, &clip));
     }
 
     #[test]
@@ -1360,13 +1437,23 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
 
     // 当处理器声明 handles_time_stretch 且 playback_rate != 1.0 时，
     // 即使用户没有编辑音高/张力/共振峰，也需要触发处理器渲染以执行其内部拉伸。
+    // HiFiGAN 效果（气声/张力/共振峰）可在 Compose 关闭时独立触发渲染；
+    // 若这类效果启用而 Mel Stretch 又被选中，外部预拉伸必须跳过，让
+    // processor 使用真实 playback_rate 完成内部时间伸缩。
+    let processor_effect_processing = matches!(algo, PitchEditAlgorithm::NsfHifiganOnnx)
+        && (extra_processing
+            || tension_processing
+            || formant_processing
+            || has_child_formant_offset);
     let needs_processor_stretch = {
         let kind = SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo);
         let compose_or_pitch_adjust = track.compose_enabled || entry.has_pitch_adjustment_active;
-        let handles =
-            crate::renderer::processor_handles_time_stretch(kind, compose_or_pitch_adjust);
+        let handles = crate::renderer::processor_handles_time_stretch(
+            kind,
+            compose_or_pitch_adjust || processor_effect_processing,
+        );
         let rate = (clip.playback_rate as f64).max(1e-6);
-        handles && (rate - 1.0).abs() > 1e-6
+        (handles && (rate - 1.0).abs() > 1e-6) || processor_effect_processing
     };
 
     // v2 semantics: do nothing until the user actually modified the edit curve.
@@ -1396,7 +1483,12 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
     let kind = SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo);
     let clip_playback_rate = (clip.playback_rate as f64).max(1e-6);
     let processor_handles_stretch =
-        crate::renderer::processor_handles_time_stretch(kind, track.compose_enabled);
+        crate::renderer::processor_handles_time_stretch(
+            kind,
+            track.compose_enabled
+                || entry.has_pitch_adjustment_active
+                || processor_effect_processing,
+        );
 
     // Quick skip when user never set a target in this segment window.
     let seg_frames = pcm_stereo.len() / 2;
