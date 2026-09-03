@@ -195,6 +195,29 @@ export function formatPlaybackRateLabel(rate: number): string {
     return `x${trimmed.length > 0 ? trimmed : "1"}`;
 }
 
+/**
+ * 解析用户输入的播放速率：接受 `1.5`、`x1.5`、`×1.5`、`1.5x`、`150%` 等形式
+ * （% 按百分比换算）。返回 null 表示无法解析或数值非法（非有限 / ≤0）。
+ * 是否钳制到速率上下限由调用方决定。
+ */
+export function parsePlaybackRateInput(raw: string): number | null {
+    let text = raw.trim().toLowerCase();
+    if (text.length === 0) return null;
+    let percent = false;
+    if (text.endsWith("%")) {
+        percent = true;
+        text = text.slice(0, -1).trim();
+    }
+    // 允许 "x1.5" / "×1.5" / "1.5x"（与角标展示格式一致）
+    text = text.replace(/^[×x*]/, "").trim();
+    text = text.replace(/[×x*]$/, "").trim();
+    const value = Number(text);
+    if (!Number.isFinite(value) || value <= 0) return null;
+    const rate = percent ? value / 100 : value;
+    if (!Number.isFinite(rate) || rate <= 0) return null;
+    return rate;
+}
+
 function parseHexColor(color: string): { r: number; g: number; b: number } | null {
     if (!color.startsWith("#")) return null;
     const hex = color.slice(1);

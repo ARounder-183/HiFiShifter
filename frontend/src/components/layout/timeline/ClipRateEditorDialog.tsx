@@ -1,0 +1,365 @@
+/**
+ * 播放速率高级编辑浮层（右键 Clip 右上角的播放速率角标触发）。
+ *
+ * 上下文菜单样式的固定定位面板（与 ClipContextMenu 同款视觉），而非大弹窗：
+ * - 直接输入拉伸倍率（与角标展示值同口径：有效速率）；
+ * - 原 BPM 预填 Clip 起始位置的 Tempo 区间 BPM（无 Tempo Map 时为工程 BPM），
+ *   新 BPM 按 当前倍率 预填（原 BPM × 倍率）——倍率与原/新 BPM 三者自洽：
+ *   打开时所见倍率与角标一致，改新 BPM 即“把这段当成新 BPM 来播”；
+ * - “自动调整 Clip 长度”开关（默认开）：源窗口保持不变，时长按新旧速率
+ *   反比缩放；
+ * - 多选 Clip 时批量应用到所有可编辑目标。
+ */
+
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useI18n } from "../../../i18n/I18nProvider";
+import { useAppSelector } from "../../../app/hooks";
+import {
+    isModifierActive,
+    selectKeybinding,
+} from "../../../features/keybindings/keybindingsSlice";
+import { tempoAtSec, clampBpm } from "../../../utils/tempoMap";
+import type { TempoMap } from "../../../utils/tempoMap";
+import {
+    formatPlaybackRateLabel,
+    parsePlaybackRateInput,
+} from "./runtime/timelineCanvasStyle";
+import type { ClipInfo } from "../../../features/session/sessionTypes";
+
+const FALLBACK_BEATS_PER_BAR = 4;
+
+// 滚轮步进：普通 / 精细（修饰键 = modifier.paramFineAdjust）。
+const RATE_WHEEL_STEP = 0.1;
+const RATE_FINE_STEP = 0.01;
+const BPM_WHEEL_STEP = 1;
+const BPM_FINE_STEP = 0.1;
+// 有效速率上下限（与 set_clip_state reducer 的 clamp 同口径）。
+const MIN_RATE = 0.1;
+const MAX_RATE = 10;
+
+export interface ClipRateEditorPosition {
+    x: number;
+    y: number;
+}
+
+export interface ClipRateEditorDialogProps {
+    open: boolean;
+    /** 目标 Clip（打开时由父级从会话状态解析；null 时不渲染）。 */
+    clip: ClipInfo | null;
+    /** 右键触发时的屏幕坐标（浮层锚点）。 */
+    position: ClipRateEditorPosition | null;
+    tempoMap: TempoMap | null;
+    /** 工程 BPM（无 Tempo Map 区间时的回退值）。 */
+    projectBpm: number;
+    /** 批量应用提示：多选时可编辑目标数（含当前 Clip）。 */
+    targetCount: number;
+    onApply: (rate: number, adjustLength: boolean) => void;
+    onOpenChange: (open: boolean) => void;
+}
+
+/** 数字输入失败解析时的占位语义：保留字符串、提交时校验。 */
+function parseBpmText(raw: string): number | null {
+    const value = Number(raw.trim());
+    if (!Number.isFinite(value) || value <= 0) return null;
+    return clampBpm(value);
+}
+
+function formatSeconds(sec: number): string {
+    if (!Number.isFinite(sec) || sec < 0) return "0.00 s";
+    return `${sec.toFixed(2)} s`;
+}
+
+/** 面板内容：仅在 open 时按目标 Clip 挂载（key = clip.id），预填一次。 */
+function ClipRateEditorFields({
+    clip,
+    position,
+    tempoMap,
+    projectBpm,
+    targetCount,
+    onApply,
+    onClose,
+}: {
+    clip: ClipInfo;
+    position: ClipRateEditorPosition;
+    tempoMap: TempoMap | null;
+    projectBpm: number;
+    targetCount: number;
+    onApply: (rate: number, adjustLength: boolean) => void;
+    onClose: () => void;
+}) {
+    const { t } = useI18n();
+    const tAny = t as (key: string) => string;
+    const menuRef = useRef<HTMLDivElement | null>(null);
+    // 精细调整修饰键（与 FadeContextMenu 的滑轮步进同一来源）。
+    const fineAdjustKb = useAppSelector((state) =>
+        selectKeybinding(state, "modifier.paramFineAdjust"),
+    );
+
+    const currentBpm = tempoAtSec(tempoMap, clip.startSec, {
+        bpm: projectBpm,
+        beatsPerBar: FALLBACK_BEATS_PER_BAR,
+    }).bpm;
+    const prefilledOldBpm = String(Number(currentBpm.toFixed(2)));
+
+    const [rateText, setRateText] = useState(() =>
+        formatPlaybackRateLabel(clip.playbackRate).replace(/^x/i, ""),
+    );
+    const [oldBpmText, setOldBpmText] = useState(prefilledOldBpm);
+    // 自洽预填：新 BPM = 原 BPM × 当前倍率（与速率字段在打开时一致）。
+    const [newBpmText, setNewBpmText] = useState(() =>
+        String(Number((currentBpm * clip.playbackRate).toFixed(2))),
+    );
+    const [autoLength, setAutoLength] = useState(true);
+
+    const parsed = useMemo(() => {
+        const rate = parsePlaybackRateInput(rateText);
+        const oldBpm = parseBpmText(oldBpmText);
+        const newBpm = parseBpmText(newBpmText);
+        return { rate, oldBpm, newBpm };
+    }, [rateText, oldBpmText, newBpmText]);
+
+    const canApply = parsed.rate != null && parsed.oldBpm != null && parsed.newBpm != null;
+
+    const previewSec = useMemo(() => {
+        const oldRate = Number(clip.playbackRate) || 1;
+        const lengthSec = Number(clip.lengthSec) || 0;
+        return autoLength ? (lengthSec * oldRate) / (parsed.rate ?? oldRate) : lengthSec;
+    }, [clip, parsed.rate, autoLength]);
+
+    function applyRate(nextRate: number) {
+        setRateText(formatPlaybackRateLabel(nextRate).replace(/^x/i, ""));
+    }
+
+    // ── 滚轮步进（普通 / 精细修饰键）────────────────────────────────────
+    // 与 FadeContextMenu 的曲率滑块同一模式：deltaY 向上 = 增大。
+    // 倍率：0.1 / 精细 0.01；BPM：1 / 精细 0.1。写入走格式化值（滚轮不是
+    // 打字，可以直接吸附到步进精度），并保持三字段联动。
+
+    function updateRateValue(next: number) {
+        const clamped = Math.min(MAX_RATE, Math.max(MIN_RATE, next));
+        setRateText(formatPlaybackRateLabel(clamped).replace(/^x/i, ""));
+        const oldBpm = parseBpmText(oldBpmText);
+        if (oldBpm != null) {
+            setNewBpmText(String(Number((oldBpm * clamped).toFixed(2))));
+        }
+    }
+
+    function updateOldBpmValue(next: number) {
+        const clamped = clampBpm(next);
+        setOldBpmText(String(Number(clamped.toFixed(2))));
+        const newBpm = parseBpmText(newBpmText);
+        if (newBpm != null && clamped > 1e-6) {
+            applyRate(newBpm / clamped);
+        }
+    }
+
+    function updateNewBpmValue(next: number) {
+        const clamped = clampBpm(next);
+        setNewBpmText(String(Number(clamped.toFixed(2))));
+        const oldBpm = parseBpmText(oldBpmText);
+        if (oldBpm != null && oldBpm > 1e-6) {
+            applyRate(clamped / oldBpm);
+        }
+    }
+
+    // 视口边缘夹紧（与 ClipContextMenu 同款）。
+    useLayoutEffect(() => {
+        const el = menuRef.current;
+        if (!el) return;
+        const rect = el.getBoundingClientRect();
+        if (rect.right > window.innerWidth) {
+            el.style.left = `${Math.max(0, window.innerWidth - rect.width)}px`;
+        }
+        if (rect.bottom > window.innerHeight) {
+            el.style.top = `${Math.max(0, window.innerHeight - rect.height)}px`;
+        }
+    }, [position]);
+
+    // 点击面板以外（捕获阶段）→ 关闭；Escape → 关闭。
+    useEffect(() => {
+        const onDocPointerDown = (event: PointerEvent) => {
+            const target = event.target instanceof Element ? event.target : null;
+            if (menuRef.current && target && menuRef.current.contains(target)) return;
+            onClose();
+        };
+        const onKey = (event: KeyboardEvent) => {
+            if (event.key === "Escape") onClose();
+        };
+        document.addEventListener("pointerdown", onDocPointerDown, true);
+        window.addEventListener("keydown", onKey);
+        return () => {
+            document.removeEventListener("pointerdown", onDocPointerDown, true);
+            window.removeEventListener("keydown", onKey);
+        };
+    }, [onClose]);
+
+    return (
+        <div
+            ref={menuRef}
+            role="menu"
+            data-hs-floating-menu="1"
+            data-hs-context-menu="1"
+            className="fixed z-[999] w-[248px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-2 px-3 flex flex-col gap-2"
+            style={{ left: position.x, top: position.y }}
+            onPointerDown={(e) => e.stopPropagation()}
+            onContextMenu={(e) => e.preventDefault()}
+        >
+            <div className="text-[12px] font-medium">{tAny("clip_rate_editor_title")}</div>
+            <div className="text-[10px] text-qt-text/60 leading-snug">
+                {tAny("clip_rate_editor_bpm_hint")}
+            </div>
+
+            <label className="flex flex-col gap-1">
+                <span className="text-[10px] text-qt-text/60">{tAny("clip_rate_editor_rate")}</span>
+                    <input
+                        className="w-full text-xs rounded px-2 py-1 outline-none bg-black/20 border border-qt-border"
+                        value={rateText}
+                        onChange={(e) => {
+                            setRateText(e.target.value);
+                            // 手动改倍率 → 新 BPM 跟随（保持 原 BPM 不变）。
+                            const rate = parsePlaybackRateInput(e.target.value);
+                            const oldBpm = parseBpmText(oldBpmText);
+                            if (rate != null && oldBpm != null) {
+                                setNewBpmText(String(Number((oldBpm * rate).toFixed(2))));
+                            }
+                        }}
+                        onKeyDown={(e) => {
+                            e.stopPropagation();
+                            if (e.key === "Enter" && canApply) {
+                                onApply(parsed.rate as number, autoLength);
+                                onClose();
+                            }
+                        }}
+                        onWheel={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            const fine = isModifierActive(fineAdjustKb, e.nativeEvent);
+                            const step = fine ? RATE_FINE_STEP : RATE_WHEEL_STEP;
+                            const current =
+                                parsePlaybackRateInput(rateText) ?? clip.playbackRate;
+                            updateRateValue(current + step * (e.deltaY < 0 ? 1 : -1));
+                        }}
+                    />
+            </label>
+
+            <div className="flex gap-2">
+                <label className="flex-1 flex flex-col gap-1">
+                    <span className="text-[10px] text-qt-text/60">
+                        {tAny("clip_rate_editor_old_bpm")}
+                    </span>
+                    <input
+                        className="w-full text-xs rounded px-2 py-1 outline-none bg-black/20 border border-qt-border"
+                        value={oldBpmText}
+                        onChange={(e) => {
+                            setOldBpmText(e.target.value);
+                            // 修改原 BPM → 倍率 = 新 / 原。
+                            const oldBpm = parseBpmText(e.target.value);
+                            const newBpm = parseBpmText(newBpmText);
+                            if (oldBpm != null && newBpm != null && oldBpm > 1e-6) {
+                                applyRate(newBpm / oldBpm);
+                            }
+                        }}
+                        onWheel={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            const fine = isModifierActive(fineAdjustKb, e.nativeEvent);
+                            const step = fine ? BPM_FINE_STEP : BPM_WHEEL_STEP;
+                            const current =
+                                parseBpmText(oldBpmText) ?? currentBpm;
+                            updateOldBpmValue(current + step * (e.deltaY < 0 ? 1 : -1));
+                        }}
+                    />
+                </label>
+                <label className="flex-1 flex flex-col gap-1">
+                    <span className="text-[10px] text-qt-text/60">
+                        {tAny("clip_rate_editor_new_bpm")}
+                    </span>
+                    <input
+                        className="w-full text-xs rounded px-2 py-1 outline-none bg-black/20 border border-qt-border"
+                        value={newBpmText}
+                        onChange={(e) => {
+                            setNewBpmText(e.target.value);
+                            // 修改新 BPM → 倍率 = 新 / 原。
+                            const oldBpm = parseBpmText(oldBpmText);
+                            const newBpm = parseBpmText(e.target.value);
+                            if (oldBpm != null && newBpm != null && oldBpm > 1e-6) {
+                                applyRate(newBpm / oldBpm);
+                            }
+                        }}
+                        onWheel={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            const fine = isModifierActive(fineAdjustKb, e.nativeEvent);
+                            const step = fine ? BPM_FINE_STEP : BPM_WHEEL_STEP;
+                            const current = parseBpmText(newBpmText) ?? currentBpm;
+                            updateNewBpmValue(current + step * (e.deltaY < 0 ? 1 : -1));
+                        }}
+                    />
+                </label>
+            </div>
+
+            <label className="flex items-center gap-2 select-none">
+                <input
+                    type="checkbox"
+                    className="accent-current"
+                    checked={autoLength}
+                    onChange={(e) => setAutoLength(e.target.checked)}
+                />
+                <span className="text-[11px]">{tAny("clip_rate_editor_auto_length")}</span>
+            </label>
+
+            <div className="text-[10px] text-qt-text/60">
+                {tAny("clip_rate_editor_result")}
+                {": "}
+                {formatSeconds(previewSec)}
+                {!autoLength ? ` (${tAny("clip_rate_editor_keep_length")})` : ""}
+            </div>
+
+            {targetCount > 1 ? (
+                <div className="text-[10px] text-qt-text/60">
+                    {tAny("clip_rate_editor_multi").replace("{count}", String(targetCount))}
+                </div>
+            ) : null}
+
+            <div className="flex justify-end pt-1">
+                <button
+                    role="menuitem"
+                    className="px-2 py-1 text-[11px] rounded bg-qt-button-hover/60 hover:bg-qt-button-hover disabled:opacity-40"
+                    disabled={!canApply}
+                    onClick={() => {
+                        if (parsed.rate == null) return;
+                        onApply(parsed.rate, autoLength);
+                        onClose();
+                    }}
+                >
+                    {tAny("clip_rate_editor_apply")}
+                </button>
+            </div>
+        </div>
+    );
+}
+
+export function ClipRateEditorDialog({
+    open,
+    clip,
+    position,
+    tempoMap,
+    projectBpm,
+    targetCount,
+    onApply,
+    onOpenChange,
+}: ClipRateEditorDialogProps) {
+    if (!open || !clip || !position) return null;
+    return (
+        <ClipRateEditorFields
+            key={clip.id}
+            clip={clip}
+            position={position}
+            tempoMap={tempoMap}
+            projectBpm={projectBpm}
+            targetCount={targetCount}
+            onApply={onApply}
+            onClose={() => onOpenChange(false)}
+        />
+    );
+}

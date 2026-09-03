@@ -181,7 +181,11 @@ export function AppTooltipProvider({
                 prev.nodeKey === nodeKey &&
                 typeof content === "string" &&
                 typeof prev.text === "string" &&
-                prev.text === content
+                prev.text === content &&
+                // 位置也参与去重：文本未变但鼠标移动时必须跟随更新位置，
+                // 否则气泡会停在首次悬停的位置（hover 跟随语义）。
+                prev.position.x === position.x &&
+                prev.position.y === position.y
                     ? prev
                     : { text: content, nodeKey, position },
             );
