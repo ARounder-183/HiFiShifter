@@ -419,6 +419,93 @@ export function formatDurationUnit(
     }
 }
 
+/**
+ * 解析 {@link formatDurationUnit} 输出格式的时长文本 → 秒。
+ * 与各单位的展示口径严格互逆：
+ * - seconds：十进制数值（如 "12.500"）；
+ * - clock：`分:秒.毫秒` 或 `时:分:秒.毫秒`；
+ * - barBeats：`小节.拍.小单位`（0 基，小单位 = 拍内小数 ×1000）；
+ * - barDivisions：`小节.网格序/切分数`（0 基）。
+ * 不匹配该单位格式时返回 null。
+ */
+export function parseDurationUnit(
+    raw: string,
+    unit: TimeUnit,
+    ctx: Pick<TimeFormatContext, "bpm" | "beatsPerBar" | "grid">,
+): number | null {
+    const text = raw.trim();
+    if (text.length === 0) return null;
+    const bpm = Math.max(1, ctx.bpm || 120);
+    switch (unit) {
+        case "seconds": {
+            if (!/^\d+(\.\d+)?$/.test(text)) return null;
+            const value = Number(text);
+            return Number.isFinite(value) && value >= 0 ? value : null;
+        }
+        case "clock": {
+            if (!text.includes(":")) return null;
+            const parts = text.split(":");
+            if (parts.length < 2 || parts.length > 3) return null;
+            const secPart = Number(parts[parts.length - 1]);
+            const minPart = Number(parts[parts.length - 2]);
+            const hourPart = parts.length === 3 ? Number(parts[0]) : 0;
+            if (![secPart, minPart, hourPart].every(Number.isFinite)) return null;
+            if (secPart < 0 || minPart < 0 || hourPart < 0) return null;
+            return hourPart * 3600 + minPart * 60 + secPart;
+        }
+        case "barBeats": {
+            if (!text.includes(".")) return null;
+            const parts = text.split(".");
+            if (parts.length < 2 || parts.length > 3) return null;
+            const bar = Number(parts[0]);
+            const beat = Number(parts[1]);
+            const sub = parts.length === 3 ? Number(parts[2]) : 0;
+            if (![bar, beat, sub].every(Number.isFinite)) return null;
+            if (bar < 0 || beat < 0 || sub < 0) return null;
+            const bpb = normalizeBeatsPerBar(ctx.beatsPerBar);
+            const beatTotal = bar * bpb + beat + sub / 1000;
+            return (beatTotal * 60) / bpm;
+        }
+        case "barDivisions": {
+            if (!text.includes("/")) return null;
+            const slashParts = text.split("/");
+            if (slashParts.length !== 2) return null;
+            const left = slashParts[0];
+            if (!left.includes(".")) return null;
+            const dotParts = left.split(".");
+            if (dotParts.length !== 2) return null;
+            const bar = Number(dotParts[0]);
+            const index = Number(dotParts[1]);
+            if (![bar, index].every(Number.isFinite) || bar < 0 || index < 0) return null;
+            const bpb = normalizeBeatsPerBar(ctx.beatsPerBar);
+            const step = Math.max(1e-9, gridStepBeats(ctx.grid));
+            const beatTotal = bar * bpb + index * step;
+            return (beatTotal * 60) / bpm;
+        }
+    }
+}
+
+/**
+ * 解析用户输入的时长：依次尝试 主时间单位 → 副时间单位 的格式
+ * （跳过"不使用"与重复），首个成功解析的单位即为结果。
+ */
+export function parseDurationInput(
+    raw: string,
+    primary: TimeUnit,
+    secondary: TimeUnitChoice,
+    ctx: Pick<TimeFormatContext, "bpm" | "beatsPerBar" | "grid">,
+): number | null {
+    const candidates: TimeUnit[] = [primary];
+    if (secondary !== "none" && secondary !== primary) {
+        candidates.push(secondary as TimeUnit);
+    }
+    for (const unit of candidates) {
+        const sec = parseDurationUnit(raw, unit, ctx);
+        if (sec != null) return sec;
+    }
+    return null;
+}
+
 export interface FadeLengthFormatContext {
     primaryTimeUnit: TimeUnit;
     secondaryTimeUnit: TimeUnitChoice;

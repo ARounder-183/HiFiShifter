@@ -8,14 +8,14 @@ import {
     selectKeybinding,
 } from "../../../../features/keybindings/keybindingsSlice";
 import { CLIP_HEADER_HEIGHT } from "../constants";
-import { formatGainDbValue, gainToDb } from "../math";
+import { formatEditNumber, formatGainDbValue, gainToDb } from "../math";
 import { AppTooltipBubble } from "../../../../components/AppTooltip";
 import { useI18n } from "../../../../i18n/I18nProvider";
 import { useAppTheme } from "../../../../theme/AppThemeProvider";
 import { resolveTimelineClipHeaderVisibility } from "../runtime/timelineClipHeaderVisibility";
 import {
     buildTimelineClipVisualStyle,
-    formatPlaybackRateLabel,
+    measureTextWidth,
     parsePlaybackRateInput,
 } from "../runtime/timelineCanvasStyle";
 import { ClipFormantButton } from "./ClipFormantButton";
@@ -180,6 +180,16 @@ export const ClipHeader: React.FC<{
     const badgeInputRef = useRef<HTMLInputElement>(null);
     // 输入框文本的镜像：滚轮的原生监听经 ref 读取当前值，避免逐键重挂监听。
     const badgeInputValRef = useRef("");
+    // 编辑框宽度：按当前（可自定义）字体实测文本宽度——ch 估算在自定义
+    // 字体下不可靠；含内边距/边框/光标余量，下限保持原 w-14 的 56px。
+    const rateInputWidthPx = Math.max(
+        56,
+        Math.ceil(measureTextWidth(badgeInputVal, "11px", fontFamily)) + 12,
+    );
+    const gainInputWidthPx = Math.max(
+        56,
+        Math.ceil(measureTextWidth(badgeInputVal, "12px", fontFamily)) + 12,
+    );
     // 编辑字段的镜像（供文档级捕获提交做幂等判定——blur 与父级捕获可能
     // 先后到达，第二次提交必须空转）。
     const badgeEditingRef = useRef<ClipBadgeEditField | null>(null);
@@ -245,8 +255,8 @@ export const ClipHeader: React.FC<{
         // 预填：速率 = 角标展示的有效速率（去 "x" 前缀）；增益 = 当前 dB。
         const prefilled =
             field === "rate"
-                ? formatPlaybackRateLabel(clip.playbackRate).replace(/^x/i, "")
-                : clampedGainDb.toFixed(1);
+                ? formatEditNumber(clip.playbackRate)
+                : formatEditNumber(clampedGainDb);
         badgeInputValRef.current = prefilled;
         setBadgeInputVal(prefilled);
         badgeEditingRef.current = field;
@@ -354,7 +364,7 @@ export const ClipHeader: React.FC<{
                     parsePlaybackRateInput(badgeInputValRef.current) ?? clip.playbackRate;
                 const step = fine ? CLIP_RATE_WHEEL_FINE_STEP : CLIP_RATE_WHEEL_STEP;
                 const next = Math.min(10, Math.max(0.1, current + direction * step));
-                const text = formatPlaybackRateLabel(next).replace(/^x/i, "");
+                const text = formatEditNumber(next);
                 badgeInputValRef.current = text;
                 setBadgeInputVal(text);
             } else {
@@ -362,7 +372,7 @@ export const ClipHeader: React.FC<{
                 const current = Number.isFinite(parsed) ? parsed : clampedGainDb;
                 const step = fine ? CLIP_GAIN_WHEEL_FINE_STEP_DB : CLIP_GAIN_WHEEL_STEP_DB;
                 const next = Math.min(12, Math.max(-12, current + direction * step));
-                const text = next.toFixed(1);
+                const text = formatEditNumber(next);
                 badgeInputValRef.current = text;
                 setBadgeInputVal(text);
             }
@@ -835,8 +845,10 @@ export const ClipHeader: React.FC<{
                     {badgeEditing === "rate" ? (
                         <input
                             ref={badgeInputRef}
-                            className="w-14 text-[11px] rounded px-1 outline-none text-right"
+                            className="text-[11px] rounded px-1 outline-none text-right"
                             style={{
+                                // 实测文本宽度：自定义字体下 ch 估算不可靠
+                                width: `${rateInputWidthPx}px`,
                                 color: isDark ? "rgba(255,255,255,0.95)" : "rgba(0,0,0,0.88)",
                                 backgroundColor: isDark
                                     ? "rgba(0,0,0,0.95)"
@@ -894,8 +906,10 @@ export const ClipHeader: React.FC<{
                     {badgeEditing === "gain" ? (
                         <input
                             ref={badgeInputRef}
-                            className="w-14 text-xs rounded px-1 outline-none text-right"
+                            className="text-xs rounded px-1 outline-none text-right"
                             style={{
+                                // 实测文本宽度：自定义字体下 ch 估算不可靠
+                                width: `${gainInputWidthPx}px`,
                                 color: isDark ? "rgba(255,255,255,0.95)" : "rgba(0,0,0,0.88)",
                                 backgroundColor: isDark
                                     ? "rgba(0,0,0,0.95)"

@@ -167,8 +167,14 @@ export interface UseTimelineClipActionsResult {
      */
     commitTrackLaneRate: (
         clipId: string,
-        rate: number,
-        options?: { adjustLength?: boolean },
+        timing: {
+            /** 有效速率（角标展示值）；缺省 = 不修改速率。 */
+            rate?: number;
+            /** 直接设定时长（秒）；优先于 rate 的自动调长。 */
+            durationSec?: number;
+            /** 速率变化时是否自动调整时长（默认 true）。 */
+            autoLength?: boolean;
+        },
     ) => void;
     /** 角标行内编辑目标（镜像 renamingClipId 管线）。 */
     editingBadge: { clipId: string; field: "rate" | "gain" } | null;
@@ -949,12 +955,27 @@ export function useTimelineClipActions(
     );
 
     const commitTrackLaneRate = React.useCallback(
-        (clipId: string, rate: number, options?: { adjustLength?: boolean }) => {
+        (
+            clipId: string,
+            timing: {
+                /** 有效速率（角标展示值）；缺省 = 不修改速率。 */
+                rate?: number;
+                /** 直接设定时长（秒）；优先于 rate 的自动调长。 */
+                durationSec?: number;
+                /** 速率变化时是否自动调整时长（默认 true）。 */
+                autoLength?: boolean;
+            },
+        ) => {
             const session = sessionRef.current;
-            if (!Number.isFinite(rate) || rate <= 0) return;
+            const autoLength = timing.autoLength !== false;
             // 与 set_clip_state / 乐观分支同口径：有效速率钳制 0.1~10。
-            const nextEffective = Math.min(10, Math.max(0.1, rate));
-            const adjustLength = options?.adjustLength ?? true;
+            const requestedRate =
+                timing.rate != null && Number.isFinite(timing.rate) && timing.rate > 0
+                    ? Math.min(10, Math.max(0.1, timing.rate))
+                    : null;
+            if (requestedRate == null && timing.durationSec == null) return;
+            // effective 可被“时长即拉伸”路径反推填充。
+            let effective = requestedRate;
             const targetIds = getBulkEditableClipIds({
                 activeClipId: clipId,
                 multiSelectedClipIds: multiSelectedClipIdsRef.current,
@@ -962,7 +983,7 @@ export function useTimelineClipActions(
             });
             const changesById = new Map<
                 string,
-                { clipPlaybackRate: number; lengthSec?: number }
+                { clipPlaybackRate?: number; lengthSec?: number }
             >();
             // “锁定参数线”启用且时长变化时：链接参数线时域映射（与边缘拉伸
             // 同一管线，按根轨道分组批量提交）。
@@ -986,30 +1007,40 @@ export function useTimelineClipActions(
                 const takeRate = activeTake
                     ? Number(activeTake.playbackRate) || 1
                     : (Number(clip.playbackRate) || 1) / (Number(clip.clipPlaybackRate) || 1);
-                const containerRate = Math.min(10, Math.max(0.1, nextEffective / takeRate));
-                const change: { clipPlaybackRate: number; lengthSec?: number } = {
-                    clipPlaybackRate: containerRate,
-                };
-                if (adjustLength) {
-                    const oldEffective = Number(clip.playbackRate) || 1;
-                    // 源窗口保持不变：时长按有效速率反比缩放（加速 → 变短）。
-                    // snapOffset 由乐观分支与后端 patch 各自下钳，无需携带。
-                    const nextLengthSec = Math.max(
-                        0,
-                        (Number(clip.lengthSec) || 0) * (oldEffective / nextEffective),
+                const oldEffective = Number(clip.playbackRate) || 1;
+                const oldLengthSec = Number(clip.lengthSec) || 0;
+                const change: { clipPlaybackRate?: number; lengthSec?: number } = {};
+                if (effective != null) {
+                    change.clipPlaybackRate = Math.min(
+                        10,
+                        Math.max(0.1, effective / takeRate),
                     );
+                }
+                // 时长：显式时长优先，且**时长即拉伸**——源窗口保持不变，
+                // 由时长反推有效速率（改时长同时改倍率）；无显式时长时，
+                // 速率变化 + 自动调长才反比缩放时长（加速 → 变短）。
+                let nextLengthSec: number | null = null;
+                if (timing.durationSec != null && Number.isFinite(timing.durationSec)) {
+                    nextLengthSec = Math.max(0, timing.durationSec);
+                    if (effective == null && nextLengthSec > 1e-6) {
+                        effective = Math.max(
+                            0.1,
+                            Math.min(10, (oldLengthSec * oldEffective) / nextLengthSec),
+                        );
+                    }
+                } else if (effective != null && autoLength) {
+                    nextLengthSec = Math.max(0, oldLengthSec * (oldEffective / effective));
+                }
+                if (nextLengthSec != null && Math.abs(nextLengthSec - oldLengthSec) > 1e-6) {
                     change.lengthSec = nextLengthSec;
-                    if (
-                        session.lockParamLinesEnabled &&
-                        Math.abs(nextLengthSec - (Number(clip.lengthSec) || 0)) > 1e-6
-                    ) {
+                    if (session.lockParamLinesEnabled) {
                         const rootTrackId = resolveRootTrackId(session.tracks, clip.trackId);
                         if (rootTrackId) {
                             const trackMappings =
                                 mappingsByRootTrack.get(rootTrackId) ?? [];
                             trackMappings.push({
                                 oldStartSec: clip.startSec,
-                                oldLengthSec: Number(clip.lengthSec) || 0,
+                                oldLengthSec: oldLengthSec,
                                 newStartSec: clip.startSec,
                                 newLengthSec: nextLengthSec,
                             });
@@ -1040,7 +1071,8 @@ export function useTimelineClipActions(
     );
 
     // ── Return ───────────────────────────────────────────────
-    return {        multiSelectedClipIds,
+    return {
+        multiSelectedClipIds,
         multiSelectedSet,
         multiSelectedClipIdsRef,
         multiSelectedSetRef,

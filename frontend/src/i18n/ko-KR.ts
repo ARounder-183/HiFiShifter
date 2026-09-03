@@ -405,6 +405,7 @@ export const koKR = {
     clip_rate_editor_auto_length: "새 배율에 맞춰 클립 길이 자동 조정",
     clip_rate_editor_result: "조정된 길이",
     clip_rate_editor_keep_length: "길이 변경 없음",
+    clip_rate_editor_duration: "길이",
     clip_rate_editor_apply: "적용",
     clip_rate_editor_multi: "선택된 {count}개 클립에 동시에 적용됩니다",
     glue: "붙이기",

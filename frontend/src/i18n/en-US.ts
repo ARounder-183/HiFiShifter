@@ -410,6 +410,7 @@ export const enUS = {
     clip_rate_editor_auto_length: "Auto-adjust clip length to match the new rate",
     clip_rate_editor_result: "Resulting length",
     clip_rate_editor_keep_length: "length unchanged",
+    clip_rate_editor_duration: "Duration",
     clip_rate_editor_apply: "Apply",
     clip_rate_editor_multi: "Will also apply to {count} selected clips",
     glue: "Glue",

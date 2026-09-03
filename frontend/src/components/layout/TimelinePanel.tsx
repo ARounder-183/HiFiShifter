@@ -697,7 +697,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     const commitTrackLaneBadgeEdit = React.useCallback(
         (clipId: string, field: "rate" | "gain", value: number) => {
             if (field === "rate") {
-                commitTrackLaneRate(clipId, value, { adjustLength: true });
+                commitTrackLaneRate(clipId, { rate: value, autoLength: true });
             } else {
                 commitTrackLaneGain(clipId, value);
             }
@@ -2903,9 +2903,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 ? multiSelectedClipIds.length
                                 : 1
                         }
-                        onApply={(rate, adjustLength) => {
+                        formatCtx={fadeLengthFormatCtx}
+                        onApply={(rate, adjustLength, durationSec) => {
                             if (rateEditorClipId != null) {
-                                commitTrackLaneRate(rateEditorClipId, rate, { adjustLength });
+                                commitTrackLaneRate(rateEditorClipId, {
+                                    rate,
+                                    durationSec: durationSec ?? undefined,
+                                    autoLength: adjustLength,
+                                });
                             }
                         }}
                         onOpenChange={(o) => {

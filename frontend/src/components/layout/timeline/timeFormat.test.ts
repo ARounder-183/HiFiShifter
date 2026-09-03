@@ -1,9 +1,12 @@
-import { test } from "vitest";
+import { expect, test } from "vitest";
 
 import {
     beatFromSec,
     buildRulerTicks,
     formatBarBeatsLabel,
+    formatDurationUnit,
+    parseDurationInput,
+    parseDurationUnit,
     formatBarDivisionsLabel,
     formatClockLabel,
     formatCursorTime,
@@ -484,4 +487,51 @@ test("components/layout/timeline/timeFormat.test.ts scripted checks", async () =
     }
 
     void checks;
+});
+
+// ── 时长解析（formatDurationUnit 的逆运算）────────────────────────
+test("parseDurationUnit parses seconds and clock formats", () => {
+    const ctx = { bpm: 120, beatsPerBar: 4, grid: "1/16" };
+    expect(parseDurationUnit("12.500", "seconds", ctx)).toBe(12.5);
+    expect(parseDurationUnit("3", "seconds", ctx)).toBe(3);
+    expect(parseDurationUnit("0:02.500", "clock", ctx)).toBe(2.5);
+    expect(parseDurationUnit("1:02.500", "clock", ctx)).toBe(62.5);
+    expect(parseDurationUnit("abc", "seconds", ctx)).toBeNull();
+    expect(parseDurationUnit("-1", "seconds", ctx)).toBeNull();
+});
+
+test("parseDurationUnit parses beat-based formats (zero-based)", () => {
+    const ctx = { bpm: 120, beatsPerBar: 4, grid: "1/16" };
+    // barBeats 0 基：bar 1 = 第 2 小节 = 拍 4 = 2s @120bpm
+    expect(parseDurationUnit("0.0.000", "barBeats", ctx)).toBe(0);
+    expect(parseDurationUnit("1.0.000", "barBeats", ctx)).toBe(2);
+    // bar 1 + 拍 2 + 小单位 500 → 拍 6.5 → 3.25s
+    expect(parseDurationUnit("1.2.500", "barBeats", ctx)).toBe(3.25);
+    // barDivisions：网格 1/16 → 每格 0.25 拍；bar 1 + 2 格 = 拍 4.5 → 2.25s
+    expect(parseDurationUnit("1.2/16", "barDivisions", ctx)).toBe(2.25);
+    expect(parseDurationUnit("abc", "barBeats", ctx)).toBeNull();
+});
+
+test("parseDurationInput tries primary then secondary unit", () => {
+    const ctx = { bpm: 120, beatsPerBar: 4, grid: "1/16" };
+    // 主单位 seconds："5.3" → 5.3 秒（不当作 小节.拍）
+    expect(parseDurationInput("5.3", "seconds", "barBeats", ctx)).toBe(5.3);
+    // 主单位 barBeats："5.3" → 小节 5 拍 3
+    expect(parseDurationInput("5.3", "barBeats", "seconds", ctx)).toBe((5 * 4 + 3) * 0.5);
+    // 主单位解析失败 → 回退副单位（clock）
+    expect(parseDurationInput("1:02.500", "seconds", "clock", ctx)).toBe(62.5);
+    // 都无法解析 → null
+    expect(parseDurationInput("abc", "seconds", "barBeats", ctx)).toBeNull();
+});
+
+test("parseDurationUnit/formatDurationUnit round-trip", () => {
+    const ctx = { bpm: 120, beatsPerBar: 4, grid: "1/16" };
+    for (const sec of [0, 0.5, 2, 12.5, 62.5]) {
+        for (const unit of ["seconds", "clock", "barBeats", "barDivisions"] as const) {
+            const text = formatDurationUnit(unit, sec, ctx);
+            const parsed = parseDurationUnit(text, unit, ctx);
+            expect(parsed).not.toBeNull();
+            expect(Math.abs((parsed ?? 0) - sec)).toBeLessThan(0.001);
+        }
+    }
 });

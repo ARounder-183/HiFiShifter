@@ -14,16 +14,17 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "../../../i18n/I18nProvider";
 import { useAppSelector } from "../../../app/hooks";
-import {
-    isModifierActive,
-    selectKeybinding,
-} from "../../../features/keybindings/keybindingsSlice";
+import { isModifierActive, selectKeybinding } from "../../../features/keybindings/keybindingsSlice";
 import { tempoAtSec, clampBpm } from "../../../utils/tempoMap";
 import type { TempoMap } from "../../../utils/tempoMap";
+import { parsePlaybackRateInput } from "./runtime/timelineCanvasStyle";
+import { formatEditNumber } from "./math";
 import {
-    formatPlaybackRateLabel,
-    parsePlaybackRateInput,
-} from "./runtime/timelineCanvasStyle";
+    formatDurationUnit,
+    formatFadeLengthTooltip,
+    parseDurationInput,
+    type FadeLengthFormatContext,
+} from "./timeFormat";
 import type { ClipInfo } from "../../../features/session/sessionTypes";
 
 const FALLBACK_BEATS_PER_BAR = 4;
@@ -53,7 +54,9 @@ export interface ClipRateEditorDialogProps {
     projectBpm: number;
     /** 批量应用提示：多选时可编辑目标数（含当前 Clip）。 */
     targetCount: number;
-    onApply: (rate: number, adjustLength: boolean) => void;
+    /** 主/副时间单位的时长格式化上下文（与淡化 ToolTips 同源）。 */
+    formatCtx: FadeLengthFormatContext;
+    onApply: (rate: number, adjustLength: boolean, durationSec: number | null) => void;
     onOpenChange: (open: boolean) => void;
 }
 
@@ -64,11 +67,6 @@ function parseBpmText(raw: string): number | null {
     return clampBpm(value);
 }
 
-function formatSeconds(sec: number): string {
-    if (!Number.isFinite(sec) || sec < 0) return "0.00 s";
-    return `${sec.toFixed(2)} s`;
-}
-
 /** 面板内容：仅在 open 时按目标 Clip 挂载（key = clip.id），预填一次。 */
 function ClipRateEditorFields({
     clip,
@@ -76,6 +74,7 @@ function ClipRateEditorFields({
     tempoMap,
     projectBpm,
     targetCount,
+    formatCtx,
     onApply,
     onClose,
 }: {
@@ -84,7 +83,8 @@ function ClipRateEditorFields({
     tempoMap: TempoMap | null;
     projectBpm: number;
     targetCount: number;
-    onApply: (rate: number, adjustLength: boolean) => void;
+    formatCtx: FadeLengthFormatContext;
+    onApply: (rate: number, adjustLength: boolean, durationSec: number | null) => void;
     onClose: () => void;
 }) {
     const { t } = useI18n();
@@ -99,17 +99,32 @@ function ClipRateEditorFields({
         bpm: projectBpm,
         beatsPerBar: FALLBACK_BEATS_PER_BAR,
     }).bpm;
-    const prefilledOldBpm = String(Number(currentBpm.toFixed(2)));
+    const prefilledOldBpm = formatEditNumber(currentBpm);
 
-    const [rateText, setRateText] = useState(() =>
-        formatPlaybackRateLabel(clip.playbackRate).replace(/^x/i, ""),
-    );
+    const [rateText, setRateText] = useState(() => formatEditNumber(clip.playbackRate));
     const [oldBpmText, setOldBpmText] = useState(prefilledOldBpm);
     // 自洽预填：新 BPM = 原 BPM × 当前倍率（与速率字段在打开时一致）。
     const [newBpmText, setNewBpmText] = useState(() =>
-        String(Number((currentBpm * clip.playbackRate).toFixed(2))),
+        formatEditNumber(currentBpm * clip.playbackRate),
     );
     const [autoLength, setAutoLength] = useState(true);
+    // 时长：允许以主/副时间单位格式输入；解析经 parseDurationInput。
+    const [durationText, setDurationText] = useState(() =>
+        formatDurationUnit(formatCtx.primaryTimeUnit, Number(clip.lengthSec) || 0, formatCtx),
+    );
+    const [durationEdited, setDurationEdited] = useState(false);
+    const [rateEdited, setRateEdited] = useState(false);
+
+    const parsedDuration = useMemo(
+        () =>
+            parseDurationInput(
+                durationText,
+                formatCtx.primaryTimeUnit,
+                formatCtx.secondaryTimeUnit,
+                formatCtx,
+            ),
+        [durationText, formatCtx],
+    );
 
     const parsed = useMemo(() => {
         const rate = parsePlaybackRateInput(rateText);
@@ -118,16 +133,32 @@ function ClipRateEditorFields({
         return { rate, oldBpm, newBpm };
     }, [rateText, oldBpmText, newBpmText]);
 
-    const canApply = parsed.rate != null && parsed.oldBpm != null && parsed.newBpm != null;
+    const rateChanged =
+        rateEdited && parsed.rate != null
+            ? Math.abs(parsed.rate - clip.playbackRate) > 1e-9
+            : false;
+    const durationChanged =
+        durationEdited && parsedDuration != null
+            ? Math.abs(parsedDuration - (Number(clip.lengthSec) || 0)) > 1e-9
+            : false;
+
+    const canApply =
+        (!rateEdited || parsed.rate != null) &&
+        (!durationEdited || parsedDuration != null) &&
+        (rateChanged || durationChanged);
 
     const previewSec = useMemo(() => {
-        const oldRate = Number(clip.playbackRate) || 1;
-        const lengthSec = Number(clip.lengthSec) || 0;
-        return autoLength ? (lengthSec * oldRate) / (parsed.rate ?? oldRate) : lengthSec;
-    }, [clip, parsed.rate, autoLength]);
+        if (durationChanged && parsedDuration != null) return parsedDuration;
+        if (rateChanged && parsed.rate != null && autoLength) {
+            const oldRate = Number(clip.playbackRate) || 1;
+            return ((Number(clip.lengthSec) || 0) * oldRate) / parsed.rate;
+        }
+        return Number(clip.lengthSec) || 0;
+    }, [clip, parsed.rate, autoLength, rateChanged, durationChanged, parsedDuration]);
 
     function applyRate(nextRate: number) {
-        setRateText(formatPlaybackRateLabel(nextRate).replace(/^x/i, ""));
+        setRateEdited(true);
+        setRateText(formatEditNumber(nextRate));
     }
 
     // ── 滚轮步进（普通 / 精细修饰键）────────────────────────────────────
@@ -137,7 +168,7 @@ function ClipRateEditorFields({
 
     function updateRateValue(next: number) {
         const clamped = Math.min(MAX_RATE, Math.max(MIN_RATE, next));
-        setRateText(formatPlaybackRateLabel(clamped).replace(/^x/i, ""));
+        setRateText(formatEditNumber(clamped));
         const oldBpm = parseBpmText(oldBpmText);
         if (oldBpm != null) {
             setNewBpmText(String(Number((oldBpm * clamped).toFixed(2))));
@@ -146,7 +177,7 @@ function ClipRateEditorFields({
 
     function updateOldBpmValue(next: number) {
         const clamped = clampBpm(next);
-        setOldBpmText(String(Number(clamped.toFixed(2))));
+        setOldBpmText(formatEditNumber(clamped));
         const newBpm = parseBpmText(newBpmText);
         if (newBpm != null && clamped > 1e-6) {
             applyRate(newBpm / clamped);
@@ -155,7 +186,7 @@ function ClipRateEditorFields({
 
     function updateNewBpmValue(next: number) {
         const clamped = clampBpm(next);
-        setNewBpmText(String(Number(clamped.toFixed(2))));
+        setNewBpmText(formatEditNumber(clamped));
         const oldBpm = parseBpmText(oldBpmText);
         if (oldBpm != null && oldBpm > 1e-6) {
             applyRate(clamped / oldBpm);
@@ -211,35 +242,40 @@ function ClipRateEditorFields({
 
             <label className="flex flex-col gap-1">
                 <span className="text-[10px] text-qt-text/60">{tAny("clip_rate_editor_rate")}</span>
-                    <input
-                        className="w-full text-xs rounded px-2 py-1 outline-none bg-black/20 border border-qt-border"
-                        value={rateText}
-                        onChange={(e) => {
-                            setRateText(e.target.value);
-                            // 手动改倍率 → 新 BPM 跟随（保持 原 BPM 不变）。
-                            const rate = parsePlaybackRateInput(e.target.value);
-                            const oldBpm = parseBpmText(oldBpmText);
-                            if (rate != null && oldBpm != null) {
-                                setNewBpmText(String(Number((oldBpm * rate).toFixed(2))));
-                            }
-                        }}
-                        onKeyDown={(e) => {
-                            e.stopPropagation();
-                            if (e.key === "Enter" && canApply) {
-                                onApply(parsed.rate as number, autoLength);
-                                onClose();
-                            }
-                        }}
-                        onWheel={(e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            const fine = isModifierActive(fineAdjustKb, e.nativeEvent);
-                            const step = fine ? RATE_FINE_STEP : RATE_WHEEL_STEP;
-                            const current =
-                                parsePlaybackRateInput(rateText) ?? clip.playbackRate;
-                            updateRateValue(current + step * (e.deltaY < 0 ? 1 : -1));
-                        }}
-                    />
+                <input
+                    className="w-full text-xs rounded px-2 py-1 outline-none bg-black/20 border border-qt-border"
+                    value={rateText}
+                    onChange={(e) => {
+                        setRateEdited(true);
+                        setRateText(e.target.value);
+                        // 手动改倍率 → 新 BPM 跟随（保持 原 BPM 不变）。
+                        const rate = parsePlaybackRateInput(e.target.value);
+                        const oldBpm = parseBpmText(oldBpmText);
+                        if (rate != null && oldBpm != null) {
+                            setNewBpmText(formatEditNumber(oldBpm * rate));
+                        }
+                    }}
+                    onKeyDown={(e) => {
+                        e.stopPropagation();
+                        if (e.key === "Enter" && canApply) {
+                            onApply(
+                                parsed.rate ?? clip.playbackRate,
+                                autoLength && !durationChanged,
+                                durationChanged ? parsedDuration : null,
+                            );
+                            onClose();
+                        }
+                    }}
+                    onWheel={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setRateEdited(true);
+                        const fine = isModifierActive(fineAdjustKb, e.nativeEvent);
+                        const step = fine ? RATE_FINE_STEP : RATE_WHEEL_STEP;
+                        const current = parsePlaybackRateInput(rateText) ?? clip.playbackRate;
+                        updateRateValue(current + step * (e.deltaY < 0 ? 1 : -1));
+                    }}
+                />
             </label>
 
             <div className="flex gap-2">
@@ -264,8 +300,7 @@ function ClipRateEditorFields({
                             e.stopPropagation();
                             const fine = isModifierActive(fineAdjustKb, e.nativeEvent);
                             const step = fine ? BPM_FINE_STEP : BPM_WHEEL_STEP;
-                            const current =
-                                parseBpmText(oldBpmText) ?? currentBpm;
+                            const current = parseBpmText(oldBpmText) ?? currentBpm;
                             updateOldBpmValue(current + step * (e.deltaY < 0 ? 1 : -1));
                         }}
                     />
@@ -298,6 +333,58 @@ function ClipRateEditorFields({
                 </label>
             </div>
 
+            <label className="flex flex-col gap-1">
+                <span className="text-[10px] text-qt-text/60">
+                    {tAny("clip_rate_editor_duration")}
+                    {": "}
+                    {formatFadeLengthTooltip(Number(clip.lengthSec) || 0, formatCtx)}
+                </span>
+                <input
+                    className={`w-full text-xs rounded px-2 py-1 outline-none bg-black/20 border ${
+                        durationEdited && parsedDuration == null
+                            ? "border-red-400/80"
+                            : "border-qt-border"
+                    }`}
+                    value={durationText}
+                    onChange={(e) => {
+                        setDurationEdited(true);
+                        setDurationText(e.target.value);
+                        // 时长即拉伸：源窗口保持不变，由时长反推有效速率，
+                        // 并联动 倍率 / 新 BPM 字段（三者始终自洽）。
+                        const dur = parseDurationInput(
+                            e.target.value,
+                            formatCtx.primaryTimeUnit,
+                            formatCtx.secondaryTimeUnit,
+                            formatCtx,
+                        );
+                        const oldLengthSec = Number(clip.lengthSec) || 0;
+                        const oldRate = Number(clip.playbackRate) || 1;
+                        if (dur != null && dur > 1e-6 && oldRate > 1e-6) {
+                            const implied = Math.min(
+                                10,
+                                Math.max(0.1, (oldLengthSec * oldRate) / dur),
+                            );
+                            setRateEdited(true);
+                            updateRateValue(implied);
+                        }
+                    }}
+                    onKeyDown={(e) => {
+                        e.stopPropagation();
+                        if (e.key === "Enter" && canApply) {
+                            onApply(
+                                parsed.rate ?? clip.playbackRate,
+                                autoLength,
+                                durationChanged && parsedDuration != null ? parsedDuration : null,
+                            );
+                            onClose();
+                        }
+                    }}
+                />
+                <span className="text-[10px] text-qt-text/60 tabular-nums">
+                    {formatFadeLengthTooltip(previewSec, formatCtx)}
+                </span>
+            </label>
+
             <label className="flex items-center gap-2 select-none">
                 <input
                     type="checkbox"
@@ -311,8 +398,10 @@ function ClipRateEditorFields({
             <div className="text-[10px] text-qt-text/60">
                 {tAny("clip_rate_editor_result")}
                 {": "}
-                {formatSeconds(previewSec)}
-                {!autoLength ? ` (${tAny("clip_rate_editor_keep_length")})` : ""}
+                {formatFadeLengthTooltip(previewSec, formatCtx)}
+                {!autoLength && !durationChanged
+                    ? ` (${tAny("clip_rate_editor_keep_length")})`
+                    : ""}
             </div>
 
             {targetCount > 1 ? (
@@ -327,8 +416,11 @@ function ClipRateEditorFields({
                     className="px-2 py-1 text-[11px] rounded bg-qt-button-hover/60 hover:bg-qt-button-hover disabled:opacity-40"
                     disabled={!canApply}
                     onClick={() => {
-                        if (parsed.rate == null) return;
-                        onApply(parsed.rate, autoLength);
+                        onApply(
+                            parsed.rate ?? clip.playbackRate,
+                            autoLength && !durationChanged,
+                            durationChanged && parsedDuration != null ? parsedDuration : null,
+                        );
                         onClose();
                     }}
                 >
@@ -346,6 +438,7 @@ export function ClipRateEditorDialog({
     tempoMap,
     projectBpm,
     targetCount,
+    formatCtx,
     onApply,
     onOpenChange,
 }: ClipRateEditorDialogProps) {
@@ -358,6 +451,7 @@ export function ClipRateEditorDialog({
             tempoMap={tempoMap}
             projectBpm={projectBpm}
             targetCount={targetCount}
+            formatCtx={formatCtx}
             onApply={onApply}
             onClose={() => onOpenChange(false)}
         />

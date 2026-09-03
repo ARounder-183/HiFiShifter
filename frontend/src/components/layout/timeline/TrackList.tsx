@@ -1,5 +1,7 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { registerDragAbort } from "./gestureFocusGuard";
+import { formatEditNumber } from "./math";
+import { measureTextWidth } from "./runtime/timelineCanvasStyle";
 import { Flex, Box, Text, IconButton, Select } from "@radix-ui/themes";
 import { Cross2Icon, PlusIcon } from "@radix-ui/react-icons";
 import { shallowEqual } from "react-redux";
@@ -439,7 +441,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
 }) => {
     const listRef = useRef<HTMLDivElement | null>(null);
     // 轨道头色条/取色预览需要和时间线画布同一套主题化轨道色。
-    const { mode } = useAppTheme();
+    const { mode, fontFamily } = useAppTheme();
     const darkMode = mode === "dark";
     const rowHeightRef = useRef(rowHeight);
     const pendingVerticalZoomRef = useRef<{
@@ -474,6 +476,11 @@ const TrackListInner: React.FC<TrackListProps> = ({
     const [editingGainTrackId, setEditingGainTrackId] = useState<string | null>(null);
     const editingGainTrackIdRef = useRef<string | null>(null);
     const [editingGainValue, setEditingGainValue] = useState("");
+    // 轨道增益编辑框宽度：按当前（可自定义）字体实测，保证完整展示。
+    const editingGainWidthPx = Math.max(
+        56,
+        Math.ceil(measureTextWidth(editingGainValue, "12px", fontFamily)) + 12,
+    );
     const editingGainInputRef = useRef<HTMLInputElement | null>(null);
 
     // 轨道颜色选择器弹出状�?
@@ -737,7 +744,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
         const db = clampGainDb(gainToDb(volume));
         editingGainTrackIdRef.current = trackId;
         setEditingGainTrackId(trackId);
-        setEditingGainValue(db.toFixed(1));
+        setEditingGainValue(formatEditNumber(db));
     }
 
     function commitTrackGainEdit() {
@@ -779,7 +786,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
             const parsed = parseFloat(editingGainValue);
             const current = Number.isFinite(parsed) ? parsed : 0;
             const next = clampGainDb(current + direction * step);
-            setEditingGainValue(next.toFixed(1));
+            setEditingGainValue(formatEditNumber(next));
         };
         input.addEventListener("wheel", onWheel, { passive: false });
         return () => input.removeEventListener("wheel", onWheel);
@@ -1919,7 +1926,11 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                         {editingGainTrackId === track.id ? (
                                                             <input
                                                                 ref={editingGainInputRef}
-                                                                className="w-14 text-xs rounded px-1 outline-none text-left tabular-nums bg-qt-base text-qt-text border border-qt-border"
+                                                                className="text-xs rounded px-1 outline-none text-left tabular-nums bg-qt-base text-qt-text border border-qt-border"
+                                                                style={{
+                                                                    // 实测文本宽度：自定义字体下 ch 估算不可靠
+                                                                    width: `${editingGainWidthPx}px`,
+                                                                }}
                                                                 value={editingGainValue}
                                                                 onChange={(e) =>
                                                                     setEditingGainValue(

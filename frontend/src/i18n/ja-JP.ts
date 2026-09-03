@@ -333,6 +333,7 @@ export const jaJP = {
     clip_rate_editor_auto_length: "クリップ長を新しい倍率に合わせて自動調整",
     clip_rate_editor_result: "調整後の長さ",
     clip_rate_editor_keep_length: "長さは変更なし",
+    clip_rate_editor_duration: "長さ",
     clip_rate_editor_apply: "適用",
     clip_rate_editor_multi: "選択中の {count} 個のクリップにも同時に適用されます",
     glue: "グルー",
