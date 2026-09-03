@@ -1540,7 +1540,8 @@ fn generate_coreml_model_variant() {}
 //   “有新提交”信号）；
 // - `<gitdir>/HEAD`、当前分支 ref 文件与 packed-refs（ref 可能松散或打包存储；
 //   worktree 下分支 ref 在 common dir，故两处都声明）；
-// - `src`（源码编辑即重跑，未提交的改动能及时翻转脏标志）。
+// - 脏标志监视集：后端 src、打包 resources、前端源码（产出被嵌入的 dist）——
+//   即“所有会进入二进制的输入树”；影响产物的未提交修改能及时翻转脏标志。
 // 注意：一旦打印任何 rerun-if-changed，cargo 的“包内任意文件变化即重跑
 // build script”默认行为即被替换——本脚本其余部分（third_party 原生库等）
 // 已各自显式声明其依赖路径，不受影响。
@@ -1607,8 +1608,26 @@ fn emit_git_info() {
             declare_rerun_if_exists(&std::path::Path::new(dir).join(&reference));
         }
     }
-    // 源码编辑即重跑：未提交的改动能及时翻转脏标志。
-    println!("cargo:rerun-if-changed=src");
+    // ── 脏标志监视集 ────────────────────────────────────────────────
+    // 语义：dirty = “构建产物可能偏离 commit”。因此监视所有会进入二进制
+    // 的输入树——后端 Rust（src）、打包资源（resources）、前端源码（产出
+    // 被嵌入的 dist）。原生库输入由上方各 native builder 自行声明。
+    // README / docs 等不影响产物的修改不触发重跑：它们既不会造成构建与
+    // commit 的差异，也就不需要（不应该）标脏。
+    // 无法直接声明仓库根：rerun-if-changed 指向目录时会递归遍历，仓库根
+    // 下的 node_modules 与 target 会让遍历代价爆炸，故用这份精选清单。
+    for watched in [
+        "src",
+        "resources",
+        "../../frontend/src",
+        "../../frontend/public",
+        "../../frontend/index.html",
+        "../../frontend/package.json",
+        "../../frontend/vite.config.ts",
+        "../../frontend/tsconfig.json",
+    ] {
+        declare_rerun_if_exists(std::path::Path::new(watched));
+    }
 
     let short = git_output(&["rev-parse", "--short=9", "HEAD"])
         .unwrap_or_else(|| full.chars().take(9).collect());
