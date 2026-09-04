@@ -145,6 +145,9 @@ import { markProjectDirty } from "./sessionDirtyState";
 import { resolveTrackIdForClipSelection } from "./selectionFocus";
 
 const MAX_TRACK_VOLUME = 4;
+/** 播放光标"真实挪动"判定阈值：低于该值的差异视为浮点噪声，
+ * 不触发撤销/重做后的"聚焦播放光标"（视图滚动）登记。 */
+const PLAYHEAD_MOVE_EPS_SEC = 1e-6;
 const VALID_GRID_SIZES = new Set<GridSize>([
     "1/1",
     "1/2",
@@ -1383,7 +1386,8 @@ function clearTakeRollback(clipIds: readonly string[]): void {
  *               对于"权威操作"（open/new/import/undo/redo/save/fetchTimeline 等），
  *               应传 `force: true` 以确保状态一定被应用。
  *               `adoptPlayhead: true` 时采纳载荷的 playhead_sec —— 仅限工程生命
- *               周期载入（打开/新建/导入）与后端直接导入等播放头权威流程。
+ *               周期载入（打开/新建/导入）与撤销/重做（检查点快照即回退/
+ *               恢复后的后端实际光标，视觉编辑点必须跟随）等播放头权威流程。
  *               编辑类命令不得传入：它们携带的 playhead_sec 是编辑未触及的
  *               旧值（播放期间停留在本次播放的起始位置），采纳会让光标跳变。
  */
@@ -3625,13 +3629,30 @@ const sessionSlice = createSlice({
                     ok?: boolean;
                 } & TimelineState;
                 if (!payload.ok) return;
-                // 保留播放头位置，避免 UI 跳变
-                const currentPlayheadSec = state.playheadSec;
+                // 撤销把时间线（含 playhead_sec）整体回退到上一个检查点：快照里
+                // 的 playhead_sec 就是该状态形成时的播放光标位置，也是回退之后
+                // 一切以光标为锚点的编辑操作（粘贴/分割/录音起点等）在后端的
+                // 实际操作点。必须采纳它让视觉光标同步归位 —— 若沿用撤销前的
+                // 本地光标（可能是上一步操作挪过去的位置，如粘贴的
+                // pasteEndSec），视觉停在 B、后端实际停在 A，下一次操作就会落
+                // 在视觉之外的位置（视觉编辑点 ≠ 实际编辑点）。
+                // 播放中例外：光标归传输层（音频时钟）所有，检查点值停留在
+                // 本次播放的起始位置已过期，且轮询会持续覆写，不做本地改写。
+                const prevPlayheadSec = state.playheadSec;
                 applyTimelineState(state, payload, {
                     force: true,
                     preserveProjectNotes: false,
+                    adoptPlayhead: !state.runtime.isPlaying,
                 });
-                state.playheadSec = currentPlayheadSec;
+                // 光标随回退真实挪动时登记"聚焦播放光标"：离屏时由
+                // TimelinePanel 的 useLayoutEffect 滚动到可见（画面内不扰动），
+                // 保证用户看得到回退后的实际操作点。
+                if (
+                    !state.runtime.isPlaying &&
+                    Math.abs(state.playheadSec - prevPlayheadSec) > PLAYHEAD_MOVE_EPS_SEC
+                ) {
+                    state.pendingPlayheadRevealSec = state.playheadSec;
+                }
             })
 
             .addCase(undoRemote.rejected, (state, action) => {
@@ -3653,10 +3674,22 @@ const sessionSlice = createSlice({
                     ok?: boolean;
                 } & TimelineState;
                 if (!payload.ok) return;
-                // 保留播放头位置，避免 UI 跳变
-                const currentPlayheadSec = state.playheadSec;
-                applyTimelineState(state, payload, { force: true });
-                state.playheadSec = currentPlayheadSec;
+                // 与 undoRemote.fulfilled 对称：重做恢复的时间线快照携带的
+                // playhead_sec 是该状态（被撤销暂存时）的光标位置，即重做后
+                // 后端的实际操作点 —— 采纳它，视觉光标与实际编辑点保持一致。
+                // 播放中例外同 undoRemote.fulfilled：光标归传输层所有。
+                const prevPlayheadSec = state.playheadSec;
+                applyTimelineState(state, payload, {
+                    force: true,
+                    preserveProjectNotes: false,
+                    adoptPlayhead: !state.runtime.isPlaying,
+                });
+                if (
+                    !state.runtime.isPlaying &&
+                    Math.abs(state.playheadSec - prevPlayheadSec) > PLAYHEAD_MOVE_EPS_SEC
+                ) {
+                    state.pendingPlayheadRevealSec = state.playheadSec;
+                }
             })
 
             .addCase(redoRemote.rejected, (state, action) => {
