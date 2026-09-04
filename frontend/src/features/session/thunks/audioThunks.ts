@@ -66,6 +66,21 @@ export const exportAudioAdvanced = createAsyncThunk(
     },
 );
 
+/** 粘贴载荷 → 新建 Clip id 列表。后端权威返回 created_clip_ids；
+ * 字段缺失（旧后端/其它载荷形状）时回退到粘贴前后的 Clip id diff。 */
+function resolveNewClipIds(
+    result: { clips?: Array<{ id?: string }>; created_clip_ids?: unknown } | null | undefined,
+    beforeClipIds: Set<string>,
+): string[] {
+    const payloadIds = result?.created_clip_ids;
+    if (Array.isArray(payloadIds) && payloadIds.length > 0) {
+        return payloadIds.filter((id): id is string => typeof id === "string");
+    }
+    return (result?.clips ?? [])
+        .map((c) => c.id)
+        .filter((id): id is string => !!id && !beforeClipIds.has(id));
+}
+
 export const pasteVocalShifterClipboard = createAsyncThunk(
     "session/pasteVocalShifterClipboard",
     async (
@@ -90,9 +105,10 @@ export const pasteVocalShifterClipboard = createAsyncThunk(
             (getState() as { session: SessionState }).session.clips.map((c) => c.id),
         );
         const clips = (result as { clips?: Array<{ id?: string }> }).clips ?? [];
-        const newClipIds = clips
-            .map((c) => c.id)
-            .filter((id): id is string => !!id && !beforeClipIds.has(id));
+        const newClipIds = resolveNewClipIds(
+            result as { clips?: Array<{ id?: string }>; created_clip_ids?: unknown },
+            beforeClipIds,
+        );
         const pasteEndSec = await syncPastePlayheadToEnd(clips as PasteEndClipLike[], newClipIds);
         return { ...result, newClipIds, pasteEndSec };
     },
@@ -115,9 +131,7 @@ export const pasteReaperClipboard = createAsyncThunk(
             (getState() as { session: SessionState }).session.clips.map((c) => c.id),
         );
         const clips = (result as { clips?: Array<{ id?: string }> }).clips ?? [];
-        const newClipIds = clips
-            .map((c) => c.id)
-            .filter((id): id is string => !!id && !beforeClipIds.has(id));
+        const newClipIds = resolveNewClipIds(result, beforeClipIds);
         const pasteEndSec = await syncPastePlayheadToEnd(clips as PasteEndClipLike[], newClipIds);
         return {
             ok: true,

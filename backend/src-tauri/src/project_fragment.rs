@@ -293,12 +293,9 @@ pub enum FragmentTrackPlacement {
     /// Append every imported root track at the end of the current track list.
     /// Used by track/project paste and by "Paste as New Tracks".
     AppendAtEnd,
-    /// Put every copied clip onto the currently selected track. Ancestor-only
-    /// tracks in the fragment are not recreated.
-    SelectedTrackOnly,
     /// Preserve the relative order of the source clip tracks starting at the
-    /// currently selected track. Missing target tracks are created as roots.
-    #[allow(dead_code)]
+    /// currently selected track. Missing target tracks are created as roots
+    /// at the end of the display order.
     SelectedTracksRelative,
 }
 
@@ -335,8 +332,90 @@ fn push_cloned_track(
     id
 }
 
-fn track_id_at_index(timeline: &TimelineState, index: usize) -> Option<String> {
-    timeline.tracks.get(index).map(|track| track.id.clone())
+/// 当前时间线的轨道显示顺序：根轨道按 order，子轨道 DFS 跟随父轨道，
+/// 与 `build_track_payload` / UI 的顺序一致。
+fn display_track_order(timeline: &TimelineState) -> Vec<String> {
+    let mut by_parent: HashMap<Option<&str>, Vec<&Track>> = HashMap::new();
+    for track in &timeline.tracks {
+        by_parent
+            .entry(track.parent_id.as_deref())
+            .or_default()
+            .push(track);
+    }
+    for siblings in by_parent.values_mut() {
+        siblings.sort_by_key(|track| track.order);
+    }
+
+    fn walk(
+        track: &Track,
+        by_parent: &HashMap<Option<&str>, Vec<&Track>>,
+        out: &mut Vec<String>,
+        depth: u32,
+    ) {
+        // 深度护栏：防御异常数据构成的环。
+        if depth > 64 {
+            return;
+        }
+        out.push(track.id.clone());
+        if let Some(children) = by_parent.get(&Some(track.id.as_str())) {
+            for child in children {
+                walk(child, by_parent, out, depth + 1);
+            }
+        }
+    }
+
+    let mut out = Vec::with_capacity(timeline.tracks.len());
+    if let Some(roots) = by_parent.get(&None::<&str>) {
+        for root in roots {
+            walk(root, &by_parent, &mut out, 0);
+        }
+    }
+    out
+}
+
+/// 源片段中实际承载 clip 的轨道，按其显示顺序排列。
+fn clip_tracks_in_display_order(source_timeline: &TimelineState) -> Vec<&Track> {
+    let clip_track_ids: BTreeSet<&str> = source_timeline
+        .clips
+        .iter()
+        .map(|clip| clip.track_id.as_str())
+        .collect();
+    if clip_track_ids.is_empty() {
+        return Vec::new();
+    }
+    display_track_order(source_timeline)
+        .into_iter()
+        .filter(|id| clip_track_ids.contains(id.as_str()))
+        .filter_map(|id| {
+            source_timeline
+                .tracks
+                .iter()
+                .find(|track| track.id == id)
+        })
+        .collect()
+}
+
+/// 在轨道列表末尾（显示顺序）新建根轨道，克隆源轨道的元数据。
+/// order 取 `max(next_track_order, 现有根 order + 1)`：order 允许稀疏，
+/// 单调计数器未必大于既有最大根 order，直接使用可能插进显示序列中部。
+fn push_track_at_display_end(timeline: &mut TimelineState, source: &Track) -> String {
+    let max_root_order = timeline
+        .tracks
+        .iter()
+        .filter(|track| track.parent_id.is_none())
+        .map(|track| track.order)
+        .max()
+        .unwrap_or(0);
+    let order = timeline.next_track_order.max(max_root_order + 1);
+    timeline.next_track_order = order + 1;
+
+    let id = new_id("track");
+    let mut track = source.clone();
+    track.id = id.clone();
+    track.parent_id = None;
+    track.order = order;
+    timeline.tracks.push(track);
+    id
 }
 
 fn remap_group_id(group_map: &mut HashMap<String, String>, old_group_id: &str) -> String {
@@ -402,67 +481,50 @@ pub fn merge_project_fragment(
                 track_id_map.insert(source.id.clone(), new_id);
             }
         }
-        FragmentTrackPlacement::SelectedTrackOnly => {
-            // Map every source track that actually contains clips onto the
-            // currently selected track. Ancestor-only tracks are ignored, so
-            // pasting a child clip never creates an extra child track.
-            let clip_track_ids: BTreeSet<String> = source_timeline
-                .clips
-                .iter()
-                .map(|clip| clip.track_id.clone())
-                .collect();
-            let target_track_id = timeline
-                .selected_track_id
-                .clone()
-                .or_else(|| timeline.tracks.first().map(|track| track.id.clone()))
-                .unwrap_or_else(|| {
-                    push_cloned_track(timeline, &TimelineState::default().tracks[0], None)
-                });
-            let target_root_id = timeline
-                .resolve_root_track_id(&target_track_id)
-                .unwrap_or_else(|| target_track_id.clone());
-            for track_id in clip_track_ids {
-                track_id_map.insert(track_id, target_track_id.clone());
-            }
-            // Forced track-fragment flattening: full root params are written
-            // into the target track's root group even though hierarchy is not
-            // recreated.
-            for source_root_id in source_timeline.params_by_root_track.keys() {
-                track_id_map
-                    .entry(source_root_id.clone())
-                    .or_insert_with(|| target_root_id.clone());
-            }
-        }
         FragmentTrackPlacement::SelectedTracksRelative => {
+            // 粘贴需求语义：起始目标轨道 = 当前选中轨道；源数据包含多轨时
+            // 按显示顺序向下扩展；目标轨道不足时自动新建根轨道。
+            // 映射基于当前时间线的显示顺序（树形 DFS、同级按 order，与
+            // build_track_payload / UI 一致）。直接用 Vec 下标会在
+            // Vec 顺序 ≠ 显示顺序（拖动重排后）时错位。
+            let clip_tracks = clip_tracks_in_display_order(source_timeline);
+            let mut display_order = display_track_order(timeline);
             let selected_index = timeline
                 .selected_track_id
                 .as_ref()
-                .and_then(|selected| {
-                    timeline
-                        .tracks
-                        .iter()
-                        .position(|track| track.id == *selected)
-                })
-                .unwrap_or(timeline.tracks.len());
-
-            let mut clip_tracks: Vec<&Track> = source_tracks
-                .iter()
-                .filter(|track| {
-                    source_timeline
-                        .clips
-                        .iter()
-                        .any(|clip| clip.track_id == track.id)
-                })
-                .collect();
-            clip_tracks.sort_by_key(|track| track.order);
+                .and_then(|selected| display_order.iter().position(|id| id == selected))
+                .unwrap_or(0);
 
             for (offset, source_track) in clip_tracks.iter().enumerate() {
-                let target_index = selected_index.saturating_add(offset);
-                let mapped_id = match track_id_at_index(timeline, target_index) {
-                    Some(existing) => existing,
-                    None => push_cloned_track(timeline, source_track, None),
+                let mapped_id = match display_order.get(selected_index + offset) {
+                    Some(existing_id) => existing_id.clone(),
+                    None => {
+                        let new_id = push_track_at_display_end(timeline, source_track);
+                        display_order.push(new_id.clone());
+                        new_id
+                    }
                 };
                 track_id_map.insert(source_track.id.clone(), mapped_id);
+            }
+
+            // 参数以源根轨道为键。未被映射的参数根（例如 clip 落在子轨道、
+            // 根轨道仅作为祖先出现）落到其第一个含 clip 后代的目标根上，
+            // 与旧行为（参数归并进目标根）保持等价。
+            for source_root_id in source_timeline.params_by_root_track.keys() {
+                if track_id_map.contains_key(source_root_id) {
+                    continue;
+                }
+                let target_root = clip_tracks
+                    .iter()
+                    .find(|track| {
+                        source_timeline.resolve_root_track_id(&track.id).as_deref()
+                            == Some(source_root_id.as_str())
+                    })
+                    .and_then(|track| track_id_map.get(&track.id).cloned())
+                    .and_then(|mapped| timeline.resolve_root_track_id(&mapped));
+                if let Some(target_root) = target_root {
+                    track_id_map.insert(source_root_id.clone(), target_root);
+                }
             }
         }
     }
@@ -639,6 +701,23 @@ mod tests {
         tl
     }
 
+    /// 三个根轨道的目标时间线，其中后两个的 order 交换过：
+    /// 显示顺序 = [Main, T3, T2]，Vec 顺序 = [Main, T2, T3]。
+    fn target_with_swapped_display_order() -> TimelineState {
+        let mut tl = TimelineState::default();
+        let t2 = tl.add_track(Some("T2".to_string()), None, None);
+        let t3 = tl.add_track(Some("T3".to_string()), None, None);
+        for track in tl.tracks.iter_mut() {
+            if track.id == t2 {
+                track.order = 2;
+            } else if track.id == t3 {
+                track.order = 1;
+            }
+        }
+        tl.selected_track_id = None;
+        tl
+    }
+
     #[test]
     fn clip_fragment_keeps_ancestors_but_not_untouched_siblings() {
         let tl = timeline_with_child();
@@ -679,7 +758,7 @@ mod tests {
             &fragment,
             FragmentMergeOptions {
                 anchor_sec: Some(10.0),
-                track_placement: FragmentTrackPlacement::SelectedTrackOnly,
+                track_placement: FragmentTrackPlacement::SelectedTracksRelative,
             },
         )
         .unwrap();
@@ -727,7 +806,7 @@ mod tests {
             &fragment,
             FragmentMergeOptions {
                 anchor_sec: Some(0.0),
-                track_placement: FragmentTrackPlacement::SelectedTrackOnly,
+                track_placement: FragmentTrackPlacement::SelectedTracksRelative,
             },
         )
         .unwrap();
@@ -785,7 +864,7 @@ mod tests {
             &fragment,
             FragmentMergeOptions {
                 anchor_sec: Some(0.0),
-                track_placement: FragmentTrackPlacement::SelectedTrackOnly,
+                track_placement: FragmentTrackPlacement::SelectedTracksRelative,
             },
         )
         .unwrap();
@@ -866,6 +945,120 @@ mod tests {
         assert_eq!(target.tracks.len(), 2);
         assert_eq!(merge.imported_clip_count, 2);
         assert!(target.tracks.iter().all(|track| track.parent_id.is_none()));
+        // 第二个源轨道超出目标范围 → 自动新建，且克隆源轨道名。
+        let pasted_second = target
+            .clips
+            .iter()
+            .find(|clip| clip.id == merge.created_clip_ids[1])
+            .unwrap();
+        let second_track = target
+            .tracks
+            .iter()
+            .find(|track| track.id == pasted_second.track_id)
+            .unwrap();
+        assert_eq!(second_track.name, "Sibling");
+    }
+
+    #[test]
+    fn relative_paste_follows_display_order_not_vec_order() {
+        // 拖动重排后 Vec 顺序 ≠ 显示顺序：映射必须按显示顺序（DFS），
+        // 否则多轨数据会贴错轨道。
+        let mut target = target_with_swapped_display_order();
+        let display = display_track_order(&target);
+        assert_ne!(
+            display,
+            target.tracks.iter().map(|t| t.id.clone()).collect::<Vec<_>>(),
+            "前置条件：显示顺序与 Vec 顺序不同"
+        );
+        // 选中显示序列末尾的轨道（Vec 下标 1、显示下标 2）。
+        let selected = display[2].clone();
+        target.selected_track_id = Some(selected.clone());
+
+        let source = timeline_with_child();
+        let ids: Vec<String> = source
+            .clips
+            .iter()
+            .filter(|clip| clip.name == "a" || clip.name == "b")
+            .map(|clip| clip.id.clone())
+            .collect();
+        let fragment = build_clip_fragment(&source, &ids, "src".into()).unwrap();
+
+        let existing_ids: Vec<String> = target.tracks.iter().map(|t| t.id.clone()).collect();
+        let merge = merge_project_fragment(
+            &mut target,
+            &fragment,
+            FragmentMergeOptions {
+                anchor_sec: Some(0.0),
+                track_placement: FragmentTrackPlacement::SelectedTracksRelative,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(merge.imported_clip_count, 2);
+        let first = target
+            .clips
+            .iter()
+            .find(|clip| clip.id == merge.created_clip_ids[0])
+            .unwrap();
+        assert_eq!(first.track_id, selected, "首段贴到选中轨道");
+        let second = target
+            .clips
+            .iter()
+            .find(|clip| clip.id == merge.created_clip_ids[1])
+            .unwrap();
+        // 显示顺序中选中轨道之后没有轨道 → 新建，而不是 Vec 顺序里的下一轨。
+        assert!(
+            !existing_ids.contains(&second.track_id),
+            "目标不足时新建轨道，而非映射到 Vec 顺序错位的既有轨道"
+        );
+    }
+
+    #[test]
+    fn auto_created_tracks_extend_below_display_order() {
+        let source = timeline_with_child();
+        let all_ids: Vec<String> = source.clips.iter().map(|clip| clip.id.clone()).collect();
+        let fragment = build_clip_fragment(&source, &all_ids, "src".into()).unwrap();
+
+        let mut target = TimelineState::default();
+        target.selected_track_id = Some(target.tracks[0].id.clone());
+        let merge = merge_project_fragment(
+            &mut target,
+            &fragment,
+            FragmentMergeOptions {
+                anchor_sec: Some(0.0),
+                track_placement: FragmentTrackPlacement::SelectedTracksRelative,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(merge.imported_clip_count, 3);
+        assert_eq!(target.tracks.len(), 3, "1 个既有轨道 + 2 个自动新建");
+        let mut ordered: Vec<&crate::state::Track> = target.tracks.iter().collect();
+        ordered.sort_by_key(|track| track.order);
+        let names: Vec<&str> = ordered.iter().map(|track| track.name.as_str()).collect();
+        assert_eq!(names, ["Main", "Child", "Sibling"], "新建轨道按显示顺序铺在下方");
+        assert!(ordered.iter().all(|track| track.parent_id.is_none()));
+        // 每个新建轨道的 order 都严格大于前一轨道（不与既有 order 冲突）。
+        for pair in ordered.windows(2) {
+            assert!(pair[1].order > pair[0].order);
+        }
+        // 每个源 clip 落在与源轨道同名的目标轨道上。
+        for clip in &target.clips {
+            let track_name = target
+                .tracks
+                .iter()
+                .find(|track| track.id == clip.track_id)
+                .unwrap()
+                .name
+                .as_str();
+            let expected = match clip.name.as_str() {
+                "a" => "Main",
+                "b" => "Child",
+                "c" => "Sibling",
+                other => panic!("unexpected pasted clip name: {other}"),
+            };
+            assert_eq!(track_name, expected, "clip {} 贴到对应轨道", clip.name);
+        }
     }
 
     #[test]

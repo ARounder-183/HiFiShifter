@@ -7,7 +7,7 @@ use crate::midi_import::MidiNoteEvent;
 use crate::models::PitchRange;
 use crate::reaper_parser::{
     self, reaper_fade_auto_length_sec, reaper_fade_effective_length_sec,
-    reaper_fade_manual_length_sec, stretch_segments_from_markers, ReaperData, ReaperEnvelope,
+    reaper_fade_manual_length_sec, stretch_segments_full_cover, ReaperData, ReaperEnvelope,
     ReaperItem, ReaperMidiEvent, ReaperMidiSourceData, ReaperTake, ReaperTrack,
 };
 use crate::state::{
@@ -566,6 +566,7 @@ pub fn import_reaper_clipboard(
     selected_track_idx: usize,
     ordered_track_ids: &[String],
     project_bpm: f64,
+    next_track_order: i32,
 ) -> Result<ReaperImportResult, String> {
     let reaper_data = reaper_parser::parse_clipboard_bytes(data)?;
     convert_reaper_data_clipboard(
@@ -574,6 +575,7 @@ pub fn import_reaper_clipboard(
         selected_track_idx,
         ordered_track_ids,
         project_bpm,
+        next_track_order,
     )
 }
 
@@ -586,6 +588,7 @@ fn convert_reaper_data_clipboard(
     selected_track_idx: usize,
     ordered_track_ids: &[String],
     project_bpm: f64,
+    next_track_order: i32,
 ) -> Result<ReaperImportResult, String> {
     if data.is_track_data {
         // 有 Track 信息，创建新轨道；clipboard 数据可能无 TEMPO 行，传入 fallback BPM
@@ -598,6 +601,7 @@ fn convert_reaper_data_clipboard(
             selected_track_idx,
             ordered_track_ids,
             project_bpm,
+            next_track_order,
         )
     }
 }
@@ -612,6 +616,7 @@ fn convert_reaper_items_to_existing_tracks(
     selected_track_idx: usize,
     ordered_track_ids: &[String],
     project_bpm: f64,
+    next_track_order: i32,
 ) -> Result<ReaperImportResult, String> {
     let mut skipped_files: Vec<String> = Vec::new();
     let mut clips: Vec<Clip> = Vec::new();
@@ -624,8 +629,10 @@ fn convert_reaper_items_to_existing_tracks(
     let mut pitch_offset_by_track: std::collections::HashMap<String, Vec<PitchFrameAccumulator>> =
         std::collections::HashMap::new();
 
-    // 当前已有轨道的最大 order，用于分配新轨道 order
-    let mut next_order = ordered_track_ids.len() as i32;
+    // 自动新建轨道的起始 order：order 允许稀疏，不能假设它等于轨道数
+    // （调用方传入 max(next_track_order, 现有最大 order + 1)），
+    // 否则新建轨道可能插进显示序列中部而非"下方扩展"。
+    let mut next_order = next_track_order.max(ordered_track_ids.len() as i32);
 
     // 计算所有 item 中最小的 position，用于 offset 到 playhead
     let min_position = data
@@ -1186,7 +1193,28 @@ fn process_item(
     let pitch_envelope = find_pitch_envelope(&item.envelopes);
 
     // ─── 处理 Stretch Markers ───
-    let segments = stretch_segments_from_markers(&item.stretch_markers);
+    // 拉伸标记是 Take 属性：先有标记、后有 Item 裁断。分段映射以全部标记
+    // 为锚点（含窗口外锚点），再按 item 窗口裁断出各段；倒放 take 的标记
+    // 源坐标在构建时镜像回原始媒体坐标。缺媒体时长（无法镜像）时回退到
+    // 单 clip 路径，显式告警避免静默丢速率。
+    if item_reversed
+        && !item.stretch_markers.is_empty()
+        && !duration_sec.is_some_and(|d| d.is_finite() && d > 0.0)
+    {
+        log::warn!(
+            "reaper_import: reversed item at {} has {} stretch marker(s) but media duration is unknown; ignoring markers",
+            item.position,
+            item.stretch_markers.len()
+        );
+    }
+    let segments = stretch_segments_full_cover(
+        &item.stretch_markers,
+        s_offs,
+        play_rate,
+        item_length,
+        duration_sec,
+        item_reversed,
+    );
 
     if !segments.is_empty() {
         // 有 stretch markers：拆分为多段
@@ -1208,25 +1236,13 @@ fn process_item(
             .map(|seg| (seg.offset_length() / play_rate).max(0.001))
             .collect();
         let mut current_timeline_pos = item_pos + time_offset;
-        let mut cumulative_source_pos: f64 = 0.0;
-        let (source_min_bound, source_max_bound, has_source_section) =
-            compute_take_source_bounds_sec(take, duration_sec);
-        let source_anchor = compute_take_source_anchor_sec(
-            take,
-            source_min_bound,
-            source_max_bound,
-            has_source_section,
-            item_reversed,
-        );
 
         for (seg_idx, seg) in segments.iter().enumerate() {
             let seg_avg_rate = seg.velocity_average().max(0.01);
             let effective_rate = seg_avg_rate * play_rate;
             let seg_timeline_duration = seg_timeline_durations[seg_idx];
-            // 源消耗量 = 时间线时长 × 播放速率
-            let seg_source_duration = seg_timeline_duration * effective_rate;
 
-            // 分段重叠与淡入淡出
+            // 分段重叠与淡入淡出（重叠伸入相邻段的内容，总是可行的）
             let want_pre = if seg_idx > 0 {
                 segment_overlap_sec(seg_timeline_durations[seg_idx - 1], seg_timeline_duration)
             } else {
@@ -1237,41 +1253,24 @@ fn process_item(
             } else {
                 0.0
             };
-            let actual_pre_src = (want_pre * effective_rate).min(cumulative_source_pos);
+            let actual_pre_src = want_pre * effective_rate;
             let actual_post_src = want_post * effective_rate;
             let actual_pre_tl = actual_pre_src / effective_rate;
             let actual_post_tl = actual_post_src / effective_rate;
 
+            // 段源窗口由标记映射直接给出（原始媒体坐标，start ≤ end）。
+            // 倒放段：时间线推进时源位置自 end 向 start 递减，pre 重叠
+            // 伸向时间线上更早一段的内容 = 窗口高端之外，post 反之。
             let (clip_src_start, clip_src_end) = if item_reversed {
-                let raw_start =
-                    source_anchor - cumulative_source_pos - seg_source_duration - actual_post_src;
-                let raw_end = source_anchor - cumulative_source_pos + actual_pre_src;
-                let start = raw_start.max(source_min_bound).min(source_max_bound);
-                let end = raw_end.max(start).min(source_max_bound);
-                (start, end)
+                (
+                    seg.src_start - actual_post_src,
+                    (seg.src_end + actual_pre_src).max(seg.src_start - actual_post_src),
+                )
             } else {
-                // 正放：允许段起点为负（REAPER 左延伸 item = 前导静音），
-                // 仅对上界与有限性做钳制；下界不再强制 ≥0。
-                let raw_start =
-                    (s_offs + cumulative_source_pos - actual_pre_src).min(source_max_bound);
-                let start = if raw_start.is_finite() {
-                    raw_start
-                } else {
-                    0.0
-                };
-                let raw_end =
-                    s_offs + cumulative_source_pos + seg_source_duration + actual_post_src;
-                // 派生窗口：终点不按媒体时长钳制（超出部分 = 静音尾巴）。
-                let clamped_end = if raw_end.is_finite() { raw_end } else { start };
-                let end = clamped_end.max(start);
-                // 整段完全落在媒体起点之前的病态 item：回退为非负窗口，
-                // 避免零长度/全负窗口。
-                if end - start <= 1e-9 {
-                    let fallback_start = start.max(0.0);
-                    (fallback_start, end.max(fallback_start))
-                } else {
-                    (start, end)
-                }
+                (
+                    seg.src_start - actual_pre_src,
+                    (seg.src_end + actual_post_src).max(seg.src_start - actual_pre_src),
+                )
             };
             let clip_start = current_timeline_pos - actual_pre_tl;
             let clip_length = (seg_timeline_duration + actual_pre_tl + actual_post_tl).max(0.001);
@@ -1361,7 +1360,6 @@ fn process_item(
             );
 
             current_timeline_pos += seg_timeline_duration;
-            cumulative_source_pos += seg_source_duration;
         }
 
         for seg_idx in 0..seg_count {
@@ -1947,6 +1945,7 @@ fn process_midi_item(
 mod tests {
     use super::*;
     use crate::reaper_parser::ReaperSource;
+    use crate::reaper_parser::ReaperStretchMarker;
 
     #[test]
     fn loop_source_window_extends_to_media_end() {
@@ -2110,5 +2109,96 @@ mod tests {
         assert_eq!(clip.takes[1].name, "Alt");
         assert_eq!(clip.takes[1].source_start_sec, 2.0);
         assert!(!skipped.is_empty(), "missing sources are reported");
+    }
+
+    #[test]
+    fn stretch_marker_item_splits_with_leading_segment_at_base_rate() {
+        let mut item = ReaperItem {
+            position: 10.0,
+            length: 53.18616059322192,
+            has_loop_token: true,
+            is_loop: true,
+            default_take: ReaperTake {
+                name: "Vocal-5-1.wav".to_string(),
+                s_offs: 0.0,
+                source: {
+                    let mut src = ReaperSource::new();
+                    src.source_type = "WAVE".to_string();
+                    src.file_path = "C:/missing/Vocal-5-1.wav".to_string();
+                    Some(src)
+                },
+                ..ReaperTake::default()
+            },
+            ..ReaperItem::default()
+        };
+        for (offset, position, vc) in [
+            (2.05, 2.05, 0.502487562),
+            (2.971878688, 3.902976163, 0.0),
+            (8.142757375, 6.240799448, 0.509465607),
+            (10.770669133, 10.578918316, 0.0),
+            (28.138154992, 31.798583333, 0.0),
+        ] {
+            item.stretch_markers.push(ReaperStretchMarker {
+                offset,
+                position,
+                velocity_change: vc,
+            });
+        }
+
+        let mut clips = Vec::new();
+        let mut skipped = Vec::new();
+        let mut pitch = Vec::new();
+        let mut groups = HashMap::new();
+        process_item(
+            &item,
+            "track_1",
+            None,
+            0.0,
+            &mut clips,
+            &mut skipped,
+            &mut pitch,
+            120.0,
+            &mut groups,
+        );
+
+        assert_eq!(clips.len(), 6, "前导段 + 4 个标记段 + 尾段");
+
+        // 前导段：落在 item 起点，基准速率，源从 SOFFS 起；
+        // 源终点 = 首标记源位置 + 0.05s 段间重叠。
+        let lead = &clips[0];
+        assert!((lead.start_sec - 10.0).abs() < 1e-9);
+        assert!((lead.playback_rate - 1.0).abs() < 1e-6);
+        assert!((lead.source_start_sec - 0.0).abs() < 1e-9);
+        assert!((lead.source_end_sec - 2.10).abs() < 1e-6);
+
+        // 首个标记段：速率 = Δ源/Δtake媒体 ≈ 2.01，源窗口覆盖标记锚点区间。
+        let second = &clips[1];
+        let expected_rate = (3.902976163 - 2.05) / (2.971878688 - 2.05);
+        assert!((second.playback_rate - expected_rate).abs() < 1e-6);
+        assert!(second.source_start_sec < 2.05 && second.source_end_sec > 3.902976163,
+            "源窗口必须锚定标记的绝对源位置（允许段间重叠外扩）");
+
+        // 中间段抽查：压缩段速率 < 1。
+        let compressed = &clips[2];
+        assert!((compressed.playback_rate - (6.240799448 - 3.902976163)
+            / (8.142757375 - 2.971878688))
+        .abs()
+            < 1e-6);
+
+        // 尾段：基准速率外推，且 clips 链一直铺到 item 末端
+        //（旧实现丢失末标记之后的 25s）。
+        let tail = clips.last().unwrap();
+        assert!((tail.playback_rate - 1.0).abs() < 1e-6);
+        let tail_end = tail.start_sec + tail.length_sec;
+        assert!((tail_end - (10.0 + 53.18616059322192)).abs() < 1e-9);
+
+        // 段间时间线连续（重叠只发生在相邻段的共享边界上）。
+        for pair in clips.windows(2) {
+            let prev_end = pair[0].start_sec + pair[0].length_sec;
+            assert!(
+                (pair[1].start_sec - prev_end).abs() < pair[1].length_sec.max(0.05) + 1e-6,
+                "相邻段起点应落在前段范围内"
+            );
+        }
     }
 }

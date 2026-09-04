@@ -79,13 +79,13 @@ test("utils/tempoMap.test.ts scripted checks", async () => {
     }
 
     {
-        // Reaper_Example.rpp：169.6 BPM @ 0s，184 BPM @ 0.353773584906s（恰好 1 拍后）。
+        // 0s 起 120 BPM（每拍 0.5s），0.5s（恰好 1 拍后）切 240 BPM（每拍 0.25s）。
         const map = mapWith([
-            { positionSec: 0, bpm: 169.6 },
-            { positionSec: 0.353773584906, bpm: 184 },
+            { positionSec: 0, bpm: 120 },
+            { positionSec: 0.5, bpm: 240 },
         ]);
-        assertNear(secToBeat(map, 0.353773584906, 120), 1, "beat integration at first point");
-        const secondBeatSec = 0.353773584906 + 60 / 184;
+        assertNear(secToBeat(map, 0.5, 120), 1, "beat integration at first point");
+        const secondBeatSec = 0.5 + 60 / 240;
         assertNear(secToBeat(map, secondBeatSec, 120), 2, "beat integration after tempo change");
         assertNear(beatToSec(map, 2, 120), secondBeatSec, "beat→sec after tempo change");
     }

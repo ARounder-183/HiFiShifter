@@ -243,7 +243,7 @@ pub(super) fn paste_reaper_clipboard(
     };
 
     // 从当前 timeline 读取光标位置、选中轨道、轨道顺序、BPM
-    let (playhead_sec, selected_track_idx, ordered_track_ids, project_bpm) = {
+    let (playhead_sec, selected_track_idx, ordered_track_ids, project_bpm, next_track_order) = {
         let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
 
         // 按 order 排序的轨道 ID
@@ -258,7 +258,13 @@ pub(super) fn paste_reaper_clipboard(
             .and_then(|sel| ordered.iter().position(|id| id == sel))
             .unwrap_or(0);
 
-        (tl.playhead_sec, sel_idx, ordered, tl.bpm)
+        // 自动新建轨道的起始 order：order 允许稀疏，取「单调计数器」与
+        // 「现有最大 order + 1」的较大值，保证新建轨道排在显示序列末尾。
+        let next_track_order = tl
+            .next_track_order
+            .max(tl.tracks.iter().map(|t| t.order).max().unwrap_or(0) + 1);
+
+        (tl.playhead_sec, sel_idx, ordered, tl.bpm, next_track_order)
     };
 
     // 解析并转换
@@ -268,6 +274,7 @@ pub(super) fn paste_reaper_clipboard(
         selected_track_idx,
         &ordered_track_ids,
         project_bpm,
+        next_track_order,
     ) {
         Ok(r) => r,
         Err(e) => {
@@ -362,6 +369,28 @@ pub(super) fn paste_reaper_clipboard(
 
     let payload = get_timeline_state_from_ref(state);
     let mut json = serde_json::to_value(&payload).unwrap_or_default();
+
+    // 粘贴需求 3/4：前端依据 created_clip_ids 完成整体替换选区（选中本次
+    // 导入的全部 Clip）并把播放光标跳到其中最靠右的结束位置。导入产生的
+    // Clip/轨道 id 全部为新生成，因此 result.timeline 即"新建集合"。
+    // 该字段同时覆盖两条前端路径：剪贴板回退（paste_timeline_clipboard
+    // 无 HiFiShifter 数据时转走本命令）与钢琴卷帘的 REAPERMedia 直接粘贴。
+    json["created_clip_ids"] = serde_json::json!(
+        result
+            .timeline
+            .clips
+            .iter()
+            .map(|clip| clip.id.clone())
+            .collect::<Vec<_>>()
+    );
+    json["created_track_ids"] = serde_json::json!(
+        result
+            .timeline
+            .tracks
+            .iter()
+            .map(|track| track.id.clone())
+            .collect::<Vec<_>>()
+    );
 
     if !result.skipped_files.is_empty() {
         json["skipped_files"] = serde_json::json!(result.skipped_files);

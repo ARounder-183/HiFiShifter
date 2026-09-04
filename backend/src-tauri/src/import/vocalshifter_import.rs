@@ -1490,6 +1490,7 @@ pub fn import_vsp_clipboard(
     playhead_sec: f64,
     selected_track_idx: usize,
     ordered_track_ids: &[String],
+    next_track_order: i32,
 ) -> Result<VspImportResult, String> {
     let (project, vsp_tracks, item_bases, item_exts) = parse_vsp_file(data)?;
 
@@ -1512,6 +1513,7 @@ pub fn import_vsp_clipboard(
             &item_exts,
             vsp_file_dir,
             ordered_track_ids,
+            next_track_order,
         );
     }
 
@@ -1555,7 +1557,7 @@ pub fn import_vsp_clipboard(
     let mut synth_mode_by_track: std::collections::HashMap<String, i32> =
         std::collections::HashMap::new();
 
-    let mut next_order = ordered_track_ids.len() as i32;
+    let mut next_order = next_track_order.max(ordered_track_ids.len() as i32);
 
     for &item_idx in &selected_indices {
         let base = &item_bases[item_idx];
@@ -2026,6 +2028,7 @@ fn import_vsp_clipboard_selected_tracks(
     item_exts: &[VspItemExt],
     vsp_file_dir: &Path,
     ordered_track_ids: &[String],
+    next_track_order: i32,
 ) -> Result<VspImportResult, String> {
     let sample_rate = project.sample_rate.max(1) as f64;
 
@@ -2056,7 +2059,9 @@ fn import_vsp_clipboard_selected_tracks(
     let mut synth_mode_by_track: std::collections::HashMap<String, i32> =
         std::collections::HashMap::new();
 
-    let mut track_order = ordered_track_ids.len() as i32;
+    // 自动新建轨道的起始 order：order 允许稀疏，调用方传入
+    // max(next_track_order, 现有最大 order + 1)，保证新建轨道排在末尾。
+    let mut track_order = next_track_order.max(ordered_track_ids.len() as i32);
 
     // 原始轨道索引 + (is_world, synth_mode) → 新建的 HiFiShifter 轨道 ID
     let mut vsp_to_hs_track: std::collections::HashMap<(i32, bool, i32), String> =
