@@ -171,7 +171,10 @@ function ClipRateEditorFields({
         setRateText(formatEditNumber(clamped));
         const oldBpm = parseBpmText(oldBpmText);
         if (oldBpm != null) {
-            setNewBpmText(String(Number((oldBpm * clamped).toFixed(2))));
+            // 与手动改倍率的联动路径同口径：formatEditNumber 保留 6 位精度。
+            // 展示级取整（如 toFixed(2)）会让新 BPM 与倍率/时长不再精确对应，
+            // 且连续滚轮步进时每次都重新舍入，漂移会累积。
+            setNewBpmText(formatEditNumber(oldBpm * clamped));
         }
     }
 

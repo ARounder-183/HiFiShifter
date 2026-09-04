@@ -1,3 +1,10 @@
+/**
+ * 时间轴数学工具的不变量回归（./math）。
+ *
+ * 覆盖 `formatEditNumber`：编辑态数值文本必须保留 6 位小数精度、只清理
+ * 浮点噪声而不降到展示级取整——由时长/BPM 换算出的倍率（如 1.2456）被
+ * 舍入为 1.25 后，提交的实际倍率就与用户输入的时长不再精确对应。
+ */
 import { expect, test } from "vitest";
 
 import { formatEditNumber } from "./math";

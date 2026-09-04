@@ -535,3 +535,55 @@ test("parseDurationUnit/formatDurationUnit round-trip", () => {
         }
     }
 });
+
+// ── 严格互逆：展示格式永远不会产生的形态必须拒绝 ────────────────────
+test("parseDurationUnit rejects malformed clock forms", () => {
+    const ctx = { bpm: 120, beatsPerBar: 4, grid: "1/16" };
+    // 秒位进位形态（formatClockLabel 按 %60 拆分，永不产生）
+    expect(parseDurationUnit("1:90.000", "clock", ctx)).toBeNull();
+    expect(parseDurationUnit("0:60.000", "clock", ctx)).toBeNull();
+    expect(parseDurationUnit("1:70:10.000", "clock", ctx)).toBeNull();
+    // 毫秒必须恰好 3 位
+    expect(parseDurationUnit("1:5.1", "clock", ctx)).toBeNull();
+    expect(parseDurationUnit("1:02.50", "clock", ctx)).toBeNull();
+    expect(parseDurationUnit("1:02.5000", "clock", ctx)).toBeNull();
+    // 合法形态：不带补零的 分:秒.毫秒（展示原样）、带小时的形态
+    expect(parseDurationUnit("1:5.123", "clock", ctx)).toBe(65.123);
+    expect(parseDurationUnit("1:02:03.500", "clock", ctx)).toBe(3723.5);
+});
+
+test("parseDurationUnit rejects malformed barBeats forms", () => {
+    const ctx = { bpm: 120, beatsPerBar: 4, grid: "1/16" };
+    // 小单位不是恰好 3 位（.5 会被歧义解读为 005 或 500，一律拒绝）
+    expect(parseDurationUnit("1.2.5", "barBeats", ctx)).toBeNull();
+    expect(parseDurationUnit("1.2.5000", "barBeats", ctx)).toBeNull();
+    // 段数错误 / 负数 / 小数段
+    expect(parseDurationUnit("1.2.5.6", "barBeats", ctx)).toBeNull();
+    expect(parseDurationUnit("1.-2.500", "barBeats", ctx)).toBeNull();
+    expect(parseDurationUnit("1.2.5..", "barBeats", ctx)).toBeNull();
+    // 拍序号超出每小节拍数（0 基：bpb=4 时拍序号只能为 0..3）
+    expect(parseDurationUnit("1.4.000", "barBeats", ctx)).toBeNull();
+    expect(parseDurationUnit("1.5.500", "barBeats", ctx)).toBeNull();
+    // 两段形态（视小单位为 000）仍然合法
+    expect(parseDurationUnit("5.3", "barBeats", ctx)).toBe((5 * 4 + 3) * 0.5);
+});
+
+test("parseDurationUnit rejects mismatched barDivisions denominators", () => {
+    const ctx = { bpm: 120, beatsPerBar: 4, grid: "1/16" };
+    // 切分数与当前网格（1/16 → 每小节 16 格）不符：拒绝，不按当前步长静默解析
+    expect(parseDurationUnit("1.2/999", "barDivisions", ctx)).toBeNull();
+    expect(parseDurationUnit("1.2/16.5", "barDivisions", ctx)).toBeNull();
+    // 左段段数错误 / 网格序号含小数或负号
+    expect(parseDurationUnit("1.2.3/16", "barDivisions", ctx)).toBeNull();
+    expect(parseDurationUnit("1.-1/16", "barDivisions", ctx)).toBeNull();
+    // 网格序号超出单小节范围（0 基：0..16）
+    expect(parseDurationUnit("1.17/16", "barDivisions", ctx)).toBeNull();
+    // 边界：恰好在下一小节起点的序号（与展示侧 floor(inBarBeat/step+1e-9) 一致）
+    expect(parseDurationUnit("1.16/16", "barDivisions", ctx)).toBe(4);
+    // 附点网格的小数切分数按展示原样比对：den 直接取展示侧输出
+    const dottedCtx = { bpm: 120, beatsPerBar: 4, grid: "1/8d" };
+    const emitted = formatDurationUnit("barDivisions", 1.5, dottedCtx);
+    const den = emitted.split("/")[1] ?? "";
+    expect(parseDurationUnit(`1.2/${den}`, "barDivisions", dottedCtx)).not.toBeNull();
+    expect(parseDurationUnit(`1.2/${den}9`, "barDivisions", dottedCtx)).toBeNull();
+});

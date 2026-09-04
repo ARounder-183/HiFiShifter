@@ -421,12 +421,16 @@ export function formatDurationUnit(
 
 /**
  * 解析 {@link formatDurationUnit} 输出格式的时长文本 → 秒。
- * 与各单位的展示口径严格互逆：
+ * 与各单位的展示口径严格互逆（只接受展示格式的合法形态，形态不符返回 null）：
  * - seconds：十进制数值（如 "12.500"）；
- * - clock：`分:秒.毫秒` 或 `时:分:秒.毫秒`；
- * - barBeats：`小节.拍.小单位`（0 基，小单位 = 拍内小数 ×1000）；
- * - barDivisions：`小节.网格序/切分数`（0 基）。
- * 不匹配该单位格式时返回 null。
+ * - clock：`分:秒.毫秒` 或 `时:分:秒.毫秒` —— 分钟/秒必须 < 60，毫秒恰好
+ *   3 位（与 formatClockLabel 的输出一致；`1:90.000`、`1:5.1` 等拒绝）；
+ * - barBeats：`小节.拍.小单位`（0 基，各段仅数字；小单位恰好 3 位 < 1000，
+ *   拍 < beatsPerBar；兼容省略小单位的 `小节.拍` 两段形态，视小单位为 000。
+ *   `1.2.5`、`1.2.5000` 等非法形态拒绝）；
+ * - barDivisions：`小节.网格序/切分数`（0 基，各段仅数字；切分数必须与当前
+ *   网格的 formatDivisionCount 展示完全一致，网格序为该范围内的整数序号。
+ *   `1.2/999` 这类与当前网格不符的输入拒绝，不静默按当前网格步长解析）。
  */
 export function parseDurationUnit(
     raw: string,
@@ -443,41 +447,47 @@ export function parseDurationUnit(
             return Number.isFinite(value) && value >= 0 ? value : null;
         }
         case "clock": {
-            if (!text.includes(":")) return null;
-            const parts = text.split(":");
-            if (parts.length < 2 || parts.length > 3) return null;
-            const secPart = Number(parts[parts.length - 1]);
-            const minPart = Number(parts[parts.length - 2]);
-            const hourPart = parts.length === 3 ? Number(parts[0]) : 0;
-            if (![secPart, minPart, hourPart].every(Number.isFinite)) return null;
-            if (secPart < 0 || minPart < 0 || hourPart < 0) return null;
-            return hourPart * 3600 + minPart * 60 + secPart;
+            // 展示格式（formatClockLabel）：`分:秒.毫秒` / `时:分:秒.毫秒`，
+            // 毫秒恒为 3 位；分钟/秒 < 60（展示侧按 %60 拆分，永远不产生
+            // `1:90.000` 这类进位形态，输入侧同样拒绝）。
+            const match =
+                /^(?:(\d+):(\d{1,2}):(\d{1,2})|(\d{1,2}):(\d{1,2}))\.(\d{3})$/.exec(text);
+            if (!match) return null;
+            const hasHours = match[1] !== undefined;
+            const hourPart = hasHours ? Number(match[1]) : 0;
+            const minPart = Number(hasHours ? match[2] : match[4]);
+            const secPart = Number(hasHours ? match[3] : match[5]);
+            const msPart = Number(match[6]);
+            if (minPart >= 60 || secPart >= 60) return null;
+            return hourPart * 3600 + minPart * 60 + secPart + msPart / 1000;
         }
         case "barBeats": {
-            if (!text.includes(".")) return null;
-            const parts = text.split(".");
-            if (parts.length < 2 || parts.length > 3) return null;
-            const bar = Number(parts[0]);
-            const beat = Number(parts[1]);
-            const sub = parts.length === 3 ? Number(parts[2]) : 0;
-            if (![bar, beat, sub].every(Number.isFinite)) return null;
-            if (bar < 0 || beat < 0 || sub < 0) return null;
+            // 展示格式（formatDurationUnit）：`bar.beat.sub`，各段仅数字、
+            // 0 基；sub 恒为 3 位（0..999），拍 < beatsPerBar。兼容省略 sub
+            // 的两段形态 `bar.beat`（视作 sub=000）。
+            const match = /^(\d+)\.(\d+)(?:\.(\d{3}))?$/.exec(text);
+            if (!match) return null;
+            const bar = Number(match[1]);
+            const beat = Number(match[2]);
+            const sub = match[3] !== undefined ? Number(match[3]) : 0;
             const bpb = normalizeBeatsPerBar(ctx.beatsPerBar);
+            if (beat >= bpb) return null;
             const beatTotal = bar * bpb + beat + sub / 1000;
             return (beatTotal * 60) / bpm;
         }
         case "barDivisions": {
-            if (!text.includes("/")) return null;
-            const slashParts = text.split("/");
-            if (slashParts.length !== 2) return null;
-            const left = slashParts[0];
-            if (!left.includes(".")) return null;
-            const dotParts = left.split(".");
-            if (dotParts.length !== 2) return null;
-            const bar = Number(dotParts[0]);
-            const index = Number(dotParts[1]);
-            if (![bar, index].every(Number.isFinite) || bar < 0 || index < 0) return null;
+            // 展示格式（formatDurationUnit）：`bar.index/den`，各段仅数字、
+            // 0 基。den 必须与当前网格的单小节切分数展示（formatDivisionCount）
+            // 完全一致；index 为该网格内的整数序号（0..floor(divisions+ε)，
+            // 与展示侧 floor(inBarBeat/step+1e-9) 的取值范围一致）。
+            const match = /^(\d+)\.(\d+)\/(.+)$/.exec(text);
+            if (!match) return null;
             const bpb = normalizeBeatsPerBar(ctx.beatsPerBar);
+            const divisions = gridDivisionsPerBar(ctx.grid, bpb);
+            if (match[3] !== formatDivisionCount(divisions)) return null;
+            const bar = Number(match[1]);
+            const index = Number(match[2]);
+            if (index > Math.floor(divisions + 1e-9)) return null;
             const step = Math.max(1e-9, gridStepBeats(ctx.grid));
             const beatTotal = bar * bpb + index * step;
             return (beatTotal * 60) / bpm;
