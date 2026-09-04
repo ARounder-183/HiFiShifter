@@ -2751,7 +2751,8 @@ export const PianoRollPanel: React.FC = () => {
             setCtxMenu({ x, y });
         }, []),
         getPlayheadSec: getVisualPlayheadSec,
-        playheadZoomEnabled: s.playheadZoomEnabled,        paramEditorSeekPlayheadEnabled: s.paramEditorSeekPlayheadEnabled,
+        playheadZoomEnabled: s.playheadZoomEnabled,
+        paramEditorSeekPlayheadEnabled: s.paramEditorSeekPlayheadEnabled,
         pitchSnapEnabled: s.pitchSnapEnabled,
         pitchSnapUnit: s.pitchSnapUnit,
         projectScale: effectiveProjectScale,

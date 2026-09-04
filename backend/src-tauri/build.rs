@@ -1,6 +1,4 @@
 fn main() {
-    emit_git_info();
-
     build_frontend();
 
     // Allow skipping expensive native builds in CI checks via env var
