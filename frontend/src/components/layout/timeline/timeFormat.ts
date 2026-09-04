@@ -419,6 +419,132 @@ export function formatDurationUnit(
     }
 }
 
+/**
+ * 解析时长文本 → 秒。宽松面向**用户输入**（拉伸右键菜单 TextBox 等场景）：
+ * 用户不必按展示格式逐字输入，常见拼写尽量转换为合法时长；仅当完全无法
+ * 解读时返回 null（由调用方禁用应用按钮）。
+ *
+ * 硬性保证：{@link formatDurationUnit} 的每个输出都能解析回原值（预填值
+ * 回灌/粘贴光标标签不丢精度）。在此之上每个单位接受：
+ * - seconds：`12.5`、`12,5`（十进制逗号）、`12.`（尾点）、标尺标签的 `..`
+ *   不精确标记；纯数字即秒；
+ * - clock：`分:秒[.小数]` / `时:分:秒[.小数]` / 纯数字（视作秒）。分/秒
+ *   > 60 自动进位（`1:90` = 150s，DAW 惯例），小数位数任意，点/逗号皆可；
+ * - barBeats：`小节.拍[.小单位]`，各段仅数字。小单位按"拍内小数"左对齐
+ *   解读（`.5` = 半拍、`.25` = 四分之一拍；3 位展示形态 `.500`/`.005`
+ *   按字面解读，保持互逆）；拍 > beatsPerBar 自动进位（`1.4.000` =
+ *   下一小节起点）；两段形态视小单位为 0；
+ * - barDivisions：`小节.网格序[/切分数]`。省略切分数按当前网格步长；键入
+ *   切分数时以键入值定义网格（步长 = 每小节拍数 / 切分数，粘贴其他网格
+ *   设置下的标签按其自身网格解读，而非静默套用当前网格）；网格序超出
+ *   自动顺延到下一小节，不拒绝。
+ *
+ * 公共宽松规则：去尾随 `..`（标尺不精确标记）与尾随 `.`（打字中间态）；
+ * 十进制逗号仅在纯数值/时分秒语境生效。无法解读的输入（"abc"、"1.2.3.4"、
+ * 负号、空段等）返回 null —— 时长不可为负，不尝试猜测符号。
+ */
+export function parseDurationUnit(
+    raw: string,
+    unit: TimeUnit,
+    ctx: Pick<TimeFormatContext, "bpm" | "beatsPerBar" | "grid">,
+): number | null {
+    const text = raw.trim().replace(/\.+$/, "");
+    if (text.length === 0) return null;
+    const bpm = Math.max(1, ctx.bpm || 120);
+    const bpb = normalizeBeatsPerBar(ctx.beatsPerBar);
+    switch (unit) {
+        case "seconds": {
+            // 点/逗号皆可为小数分隔符；纯数字即秒。
+            if (!/^\d+(?:[.,]\d+)?$/.test(text)) return null;
+            const value = Number(text.replace(",", "."));
+            return Number.isFinite(value) ? value : null;
+        }
+        case "clock": {
+            // 冒号分隔 1..3 段（时/分/秒），每段数字 + 任意小数（点/逗号）；
+            // 分/秒 > 60 直接按单位加权相加进位。展示格式（毫秒恒 3 位、
+            // 分秒 < 60）是其子集，天然互逆。
+            const parts = text.split(":");
+            if (parts.length > 3) return null;
+            let seconds = 0;
+            let unitScale = 1;
+            for (let i = parts.length - 1; i >= 0; i -= 1) {
+                const segment = parts[i].replace(",", ".");
+                if (!/^\d+(?:\.\d+)?$/.test(segment)) return null;
+                seconds += Number(segment) * unitScale;
+                unitScale *= 60;
+            }
+            return Number.isFinite(seconds) ? seconds : null;
+        }
+        case "barBeats": {
+            // `小节.拍[.小单位]`：各段仅数字。小单位左对齐按拍内小数解读
+            // （Number(段) / 10^位数）："5"→0.5、"25"→0.25；3 位展示形态
+            // 即字面值（"500"→0.5、"005"→0.005），互逆不破。拍 > bpb 的
+            // 进位隐含在求和里，不拒绝。
+            const segments = text.split(".");
+            if (segments.length < 2 || segments.length > 3) return null;
+            if (!segments.every((segment) => /^\d+$/.test(segment))) return null;
+            const bar = Number(segments[0]);
+            const beat = Number(segments[1]);
+            const subText = segments.length === 3 ? segments[2] : "";
+            const sub = subText === "" ? 0 : Number(subText) / 10 ** subText.length;
+            const beatTotal = bar * bpb + beat + sub;
+            return (beatTotal * 60) / bpm;
+        }
+        case "barDivisions": {
+            // `小节.网格序[/切分数]`。键入切分数 → 步长 = 每小节拍数 / 切分数
+            // （展示形态 "16"、"5.3333" 由此互逆）；省略 → 当前网格步长。
+            // 网格序超出单小节范围时隐含顺延到下一小节，不拒绝。
+            const slashIndex = text.indexOf("/");
+            let left = text;
+            let step = Math.max(1e-9, gridStepBeats(ctx.grid));
+            if (slashIndex >= 0) {
+                left = text.slice(0, slashIndex);
+                const denText = text.slice(slashIndex + 1).replace(",", ".");
+                if (!/^\d+(?:\.\d+)?$/.test(denText)) return null;
+                const den = Number(denText);
+                if (!Number.isFinite(den) || den <= 0) return null;
+                step = Math.max(1e-9, bpb / den);
+            }
+            const dotParts = left.split(".");
+            if (dotParts.length !== 2) return null;
+            if (!dotParts.every((segment) => /^\d+$/.test(segment))) return null;
+            const beatTotal = Number(dotParts[0]) * bpb + Number(dotParts[1]) * step;
+            return (beatTotal * 60) / bpm;
+        }
+    }
+}
+
+/**
+ * 解析用户输入的时长：候选单位 = 主时间单位 → 副时间单位（跳过"不使用"
+ * 与重复），首个成功解析的单位即为结果。
+ *
+ * 类别优先级：**"纯时长"语境（seconds / clock）先于"小节.拍"语境
+ * （barBeats / barDivisions）**——两类候选同时存在时，`1.2` 首先读作
+ * 1.2 秒，而不是 1 小节 2 拍。键入普通数值/时分秒远比键入小节.拍常见，
+ * 而小节.拍 类仍有不受影响的可靠键入形态：三段式 `1.2.000`（纯时长无法
+ * 解读两段以上文本）与带切分数的 `1.2/16`（斜杠形态）。
+ * 各类别内部保持 主→副 顺序；只有单一类别候选时顺序不变。
+ */
+export function parseDurationInput(
+    raw: string,
+    primary: TimeUnit,
+    secondary: TimeUnitChoice,
+    ctx: Pick<TimeFormatContext, "bpm" | "beatsPerBar" | "grid">,
+): number | null {
+    const candidates: TimeUnit[] = [primary];
+    if (secondary !== "none" && secondary !== primary) {
+        candidates.push(secondary as TimeUnit);
+    }
+    const isPlainTime = (unit: TimeUnit) => unit === "seconds" || unit === "clock";
+    const plainTime = candidates.filter(isPlainTime);
+    const beatContext = candidates.filter((unit) => !isPlainTime(unit));
+    for (const unit of [...plainTime, ...beatContext]) {
+        const sec = parseDurationUnit(raw, unit, ctx);
+        if (sec != null) return sec;
+    }
+    return null;
+}
+
 export interface FadeLengthFormatContext {
     primaryTimeUnit: TimeUnit;
     secondaryTimeUnit: TimeUnitChoice;

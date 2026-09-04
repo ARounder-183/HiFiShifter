@@ -105,6 +105,7 @@ import { useTimelineEventHandlers } from "./timeline/hooks/useTimelineEventHandl
 import { useSnapOffsetDrag } from "./timeline/hooks/useSnapOffsetDrag";
 import { expandClipIdsWithGroups } from "./timeline/hooks/useGroupExpansion";
 import { useVisualPlayhead } from "../../hooks/useVisualPlayhead";
+import { ClipRateEditorDialog } from "./timeline/ClipRateEditorDialog";
 import {
     computeAutoFollowScrollLeft,
     computeFocusCursorScrollLeft,
@@ -668,7 +669,41 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         commitTrackLaneRename,
         handleTrackLaneRenameDone,
         commitTrackLaneGain,
+        commitTrackLaneRate,
+        editingBadge,
+        setEditingBadge,
+        handleBadgeEditDone,
     } = clipActions;
+    // 右键播放速率角标 → 高级编辑浮层（BPM 换算）的目标 Clip 与锚点。
+    const [rateEditorClipId, setRateEditorClipId] = React.useState<string | null>(null);
+    const [rateEditorPosition, setRateEditorPosition] = React.useState<{
+        x: number;
+        y: number;
+    } | null>(null);
+    const openRateBadgeMenu = React.useCallback((clipId: string, screenX: number, screenY: number) => {
+        setRateEditorClipId(clipId);
+        setRateEditorPosition({ x: screenX, y: screenY });
+    }, []);
+
+    // 角标行内编辑开始：镜像 renamingClipId（onRenameStart）的两参适配器。
+    const startTrackLaneBadgeEdit = React.useCallback(
+        (clipId: string, field: "rate" | "gain") => {
+            setEditingBadge({ clipId, field });
+        },
+        [setEditingBadge],
+    );
+
+    // 角标行内编辑提交：按字段路由到速率（自动调整时长）/增益提交。
+    const commitTrackLaneBadgeEdit = React.useCallback(
+        (clipId: string, field: "rate" | "gain", value: number) => {
+            if (field === "rate") {
+                commitTrackLaneRate(clipId, { rate: value, autoLength: true });
+            } else {
+                commitTrackLaneGain(clipId, value);
+            }
+        },
+        [commitTrackLaneGain, commitTrackLaneRate],
+    );
     // 传给 React.memo 化的 TrackList / TrackLane 的回调必须引用稳定，
     // 否则每次 TimelinePanel 渲染（播放头提交值、滚动、修饰键）都会击穿 memo。
     const handleToggleGroupDisabled = React.useCallback(
@@ -1533,7 +1568,37 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 ).__hfsFrameProfiler?.recordReact(actualDuration);
             }}
         >
-            <Flex className="h-full w-full bg-qt-graph-bg overflow-hidden">
+            <Flex
+                className="h-full w-full bg-qt-graph-bg overflow-hidden"
+                onPointerDownCapture={(e) => {
+                    // 点击轨道背景等非输入区域时，主动失焦当前聚焦的输入框，
+                    // 让名称/速率/增益/轨道增益等行内编辑器走各自的 onBlur
+                    // 提交路径（背景 pointerdown 会 preventDefault，焦点不
+                    // 转移时 blur 不会自然触发，输入框将无法退出）。
+                    //
+                    // ★ 失焦延迟到 rAF：若点击落在编辑中的 Clip 内部，ClipItem
+                    //   捕获阶段的 controller.commit() 必须先获胜——同步 blur
+                    //   会经 onBlur 抢先提交一次，controller 再提交一次，造成
+                    //   双重提交。rAF 时编辑器已卸载/失焦，重复提交自然消失。
+                    //   浮层面板（data-hs-floating-menu）不参与失焦逻辑。
+                    const target = e.target as HTMLElement | null;
+                    if (
+                        target?.closest?.(
+                            "input,textarea,select,[contenteditable='true'],[data-hs-floating-menu]",
+                        )
+                    ) {
+                        return;
+                    }
+                    const active = document.activeElement as HTMLElement | null;
+                    if (active && active.tagName === "INPUT") {
+                        requestAnimationFrame(() => {
+                            if (document.activeElement === active) {
+                                active.blur();
+                            }
+                        });
+                    }
+                }}
+            >
                 <TrackList
                     t={t}
                     tracks={s.tracks}
@@ -2185,6 +2250,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                                 onRenameCommit={commitTrackLaneRename}
                                                 onRenameDone={handleTrackLaneRenameDone}
                                                 onGainCommit={commitTrackLaneGain}
+                                                editingBadge={editingBadge}
+                                                onBadgeEditStart={startTrackLaneBadgeEdit}
+                                                onBadgeEditCommit={commitTrackLaneBadgeEdit}
+                                                onBadgeEditDone={handleBadgeEditDone}
+                                                onRateBadgeMenu={openRateBadgeMenu}
                                                 onFormantMorphCommit={commitTrackLaneFormantMorph}
                                                 activeGroupIds={activeGroupIds}
                                                 disabledGroupIds={disabledGroupIds}
@@ -2813,6 +2883,39 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         syncScrollLeft={syncScrollLeft}
                         autoScrollEnabled={s.autoScrollEnabled}
                         projectSec={dynamicProjectSec}
+                    />
+
+                    {/* 右键播放速率角标 → 高级编辑（倍率 + BPM 换算，批量应用） */}
+                    <ClipRateEditorDialog
+                        open={rateEditorClipId != null && rateEditorPosition != null}
+                        clip={
+                            rateEditorClipId
+                                ? s.clips.find((entry) => entry.id === rateEditorClipId) ?? null
+                                : null
+                        }
+                        tempoMap={s.tempoMap}
+                        position={rateEditorPosition}
+                        projectBpm={s.bpm}
+                        targetCount={
+                            rateEditorClipId != null &&
+                            multiSelectedClipIds.length > 0 &&
+                            multiSelectedSet.has(rateEditorClipId)
+                                ? multiSelectedClipIds.length
+                                : 1
+                        }
+                        formatCtx={fadeLengthFormatCtx}
+                        onApply={(rate, adjustLength, durationSec) => {
+                            if (rateEditorClipId != null) {
+                                commitTrackLaneRate(rateEditorClipId, {
+                                    rate,
+                                    durationSec: durationSec ?? undefined,
+                                    autoLength: adjustLength,
+                                });
+                            }
+                        }}
+                        onOpenChange={(o) => {
+                            if (!o) setRateEditorClipId(null);
+                        }}
                     />
 
                     <TimelineDisplaySettingsDialog

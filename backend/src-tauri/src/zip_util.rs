@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-use chrono::{Datelike, DateTime as ChronoDateTime, Local, TimeZone, Timelike};
+use chrono::{DateTime as ChronoDateTime, Local};
 
 /// 为磁盘上的源文件构造条目选项（保留修改时间与 unix 权限位）。
 /// 元数据读取失败时回退为当前时间。
@@ -68,6 +68,7 @@ fn datetime_from_chrono(dt: ChronoDateTime<Local>) -> zip::DateTime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{Datelike, TimeZone, Timelike};
     use std::time::{Duration, SystemTime};
 
     /// 1980-01-01 00:00:00 的 DOS 位域：datepart = 1 | (1<<5) | (0<<9) = 33，

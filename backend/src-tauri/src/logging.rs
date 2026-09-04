@@ -99,12 +99,14 @@ pub fn init_logging(choice: LogFileChoice) {
     install_panic_hook();
 
     let log_path = match choice {
-        LogFileChoice::Disabled => None,
+        // `--log-file=-`：用户显式关闭文件日志，属正常路径，静默返回 ——
+        // 不得落入下方“默认目录未解析”的警告分支（那会误导用户以为出错）。
+        LogFileChoice::Disabled => return,
         LogFileChoice::Explicit(path) => Some(path),
         LogFileChoice::Default => default_log_file_path(),
     };
     let Some(log_path) = log_path else {
-        log::warn!("file logging unavailable (no --log-file and default log dir unresolved)");
+        log::warn!("file logging unavailable (default log dir unresolved)");
         return;
     };
 
@@ -445,7 +447,10 @@ struct RotatingLog {
 impl RotatingLog {
     fn open(path: PathBuf) -> std::io::Result<Self> {
         let file = Self::open_with_rotation(&path)?;
-        Ok(Self { path, file, bytes_written: 0, lines_since_check: 0 })
+        // 追加模式下文件可能已接近上限（上次会话遗留）：按真实长度初始化
+        // 计数，否则本轮要再写满一个 MAX 才会触发轮转，文件可超出上限近一倍。
+        let bytes_written = file.metadata().map(|m| m.len()).unwrap_or(0);
+        Ok(Self { path, file, bytes_written, lines_since_check: 0 })
     }
 
     /// 打开（必要时先轮转）日志文件并写入会话头。
@@ -495,7 +500,8 @@ impl RotatingLog {
         {
             self.lines_since_check = 0;
             self.file = Self::open_with_rotation(&self.path)?;
-            self.bytes_written = 0;
+            // 轮转后是新文件（仅含会话头），同样按真实长度重置计数。
+            self.bytes_written = self.file.metadata().map(|m| m.len()).unwrap_or(0);
         }
         Ok(())
     }

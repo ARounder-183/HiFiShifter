@@ -5,6 +5,7 @@ import { test } from "vitest";
 
 import reducer from "./sessionSlice.ts";
 import { moveClipRemote } from "./thunks/timelineThunks.ts";
+import { undoRemote, redoRemote } from "./thunks/projectThunks.ts";
 import { stopAudioPlayback, syncPlaybackState } from "./thunks/transportThunks.ts";
 
 /**
@@ -218,5 +219,117 @@ test("features/session/sessionSlice.playheadGuard.test.ts sync aligns the playhe
             50.09,
             "polls after the stop transition never move the playhead",
         );
+    }
+});
+
+/**
+ * 撤销/重做播放光标归位回归：
+ *
+ * 后端 undo/redo 把时间线（含 playhead_sec）整体回退/恢复到检查点快照 ——
+ * 快照里的 playhead_sec 就是回退后后端的实际光标位置，也是后续一切以光标
+ * 为锚点的编辑操作（粘贴/分割等）的实际操作点。前端必须采纳它让视觉光标
+ * 同步归位：若沿用撤销前的本地光标（可能是上一步操作挪过去的位置，如粘贴
+ * 的 pasteEndSec），视觉停在 B、后端实际停在 A，下一次操作就会落在视觉之
+ * 外的位置（视觉编辑点 ≠ 实际编辑点）。
+ *
+ * 这是"编辑快照不拥有播放头"原则的例外：编辑命令的 playhead_sec 是未触及
+ * 的旧值，而撤销/重做的 playhead_sec 是后端权威状态的组成部分。
+ */
+test("features/session/sessionSlice.playheadGuard.test.ts undo/redo adopt the checkpoint playhead", async () => {
+    function assertEqual(actual: unknown, expected: unknown, label: string): void {
+        if (actual !== expected) {
+            throw new Error(`${label}: expected ${String(expected)}, received ${String(actual)}`);
+        }
+    }
+
+    function timelinePayload(playheadSec: number) {
+        return {
+            ok: true,
+            tracks: [],
+            clips: [],
+            selected_track_id: null,
+            selected_clip_id: null,
+            playhead_sec: playheadSec,
+            project_sec: 32,
+            bpm: 120,
+            disabled_group_ids: [],
+        } as any;
+    }
+
+    function initState(overrides: { playheadSec: number; isPlaying: boolean }) {
+        const base = reducer(undefined, { type: "@@INIT" }) as any;
+        return {
+            ...base,
+            playheadSec: overrides.playheadSec,
+            runtime: { ...base.runtime, isPlaying: overrides.isPlaying },
+        };
+    }
+
+    // 暂停中撤销 B→A：视觉光标跟随回退后的快照光标（9 → 5），并登记
+    // "聚焦播放光标"，离屏时由 TimelinePanel 滚动到可见。
+    {
+        const pended = reducer(initState({ playheadSec: 9, isPlaying: false }), undoRemote.pending("req-undo", undefined));
+        const next = reducer(
+            pended,
+            undoRemote.fulfilled(timelinePayload(5), "req-undo", undefined),
+        );
+        assertEqual(next.playheadSec, 5, "paused undo adopts the checkpoint playhead");
+        assertEqual(
+            next.pendingPlayheadRevealSec,
+            5,
+            "moved playhead registers a reveal request",
+        );
+    }
+
+    // 重做 A→B：对称地跟随恢复快照的光标（5 → 9）。
+    {
+        const pended = reducer(initState({ playheadSec: 5, isPlaying: false }), redoRemote.pending("req-redo", undefined));
+        const next = reducer(
+            pended,
+            redoRemote.fulfilled(timelinePayload(9), "req-redo", undefined),
+        );
+        assertEqual(next.playheadSec, 9, "redo adopts the restored checkpoint playhead");
+        assertEqual(next.pendingPlayheadRevealSec, 9, "redo registers a reveal request");
+    }
+
+    // 光标未挪动（该状态形成后光标未变）：不登记聚焦请求，无谓滚动。
+    {
+        const pended = reducer(initState({ playheadSec: 5, isPlaying: false }), undoRemote.pending("req-undo-2", undefined));
+        const next = reducer(
+            pended,
+            undoRemote.fulfilled(timelinePayload(5), "req-undo-2", undefined),
+        );
+        assertEqual(next.playheadSec, 5, "identical playhead stays put");
+        assertEqual(
+            next.pendingPlayheadRevealSec,
+            null,
+            "no reveal request when the playhead did not move",
+        );
+    }
+
+    // 播放中撤销：光标归传输层（音频时钟）所有，检查点值停留在本次播放的
+    // 起始位置已过期 —— 保持轮询位置，不采纳快照值。
+    {
+        const pended = reducer(initState({ playheadSec: 50, isPlaying: true }), undoRemote.pending("req-undo-3", undefined));
+        const next = reducer(
+            pended,
+            undoRemote.fulfilled(timelinePayload(7), "req-undo-3", undefined),
+        );
+        assertEqual(next.playheadSec, 50, "playing undo keeps the polled playhead");
+        assertEqual(
+            next.pendingPlayheadRevealSec,
+            null,
+            "playing undo never registers a reveal",
+        );
+    }
+
+    // 乱序防护：过期 undo 响应（requestId 不匹配）不得改写光标。
+    {
+        const pended = reducer(initState({ playheadSec: 9, isPlaying: false }), undoRemote.pending("req-undo-new", undefined));
+        const next = reducer(
+            pended,
+            undoRemote.fulfilled(timelinePayload(5), "req-undo-stale", undefined),
+        );
+        assertEqual(next.playheadSec, 9, "stale undo response is discarded");
     }
 });

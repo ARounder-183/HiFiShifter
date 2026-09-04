@@ -236,8 +236,15 @@ pub struct ReaperStretchMarker {
 
 #[derive(Debug, Clone)]
 pub struct ReaperStretchSegment {
+    /// 段起点，take 媒体时间（item 时间 × take 播放速率，item 起点为 0）。
     pub offset_start: f64,
+    /// 段终点，take 媒体时间。
     pub offset_end: f64,
+    /// 段起点对应的源媒体位置（原始媒体坐标，start ≤ end；倒放 take 已做
+    /// 镜像换算，时间线推进时源位置自 end 向 start 递减）。
+    pub src_start: f64,
+    /// 段终点对应的源媒体位置（原始媒体坐标）。
+    pub src_end: f64,
     pub velocity_start: f64,
     pub velocity_end: f64,
 }
@@ -252,28 +259,150 @@ impl ReaperStretchSegment {
     }
 }
 
-pub fn stretch_segments_from_markers(markers: &[ReaperStretchMarker]) -> Vec<ReaperStretchSegment> {
-    let mut segments = Vec::new();
-    if markers.len() < 2 {
-        return segments;
+/// 将 REAPER 拉伸标记展开为覆盖整个 item 窗口的分段源映射。
+///
+/// 拉伸标记是 REAPER Take 的属性：它直接锚定"take 媒体时间 → 源媒体位置"
+/// 的分段线性映射，且**先于 Item 的裁断存在**。因此：
+/// - 所有标记（无论是否落在 item 窗口内）都是映射锚点，不得因窗口裁断
+///   被丢弃或钳位——末标记超出 item 末尾时，其所在段的速率仍治理 item
+///   尾部区域；窗口起点在首标记之前时，同理由既有锚点段穿越决定。
+/// - 标记的 `offset` 是 take 媒体时间（item 时间 × playrate，item 起点为
+///   原点）；`position` 是该 take 源坐标系下的绝对位置（随 u 单调递增）。
+///   倒放 take 的该坐标系被 REAPER 预先翻转为"媒体全长 − 原始位置"
+///   （实测 SM_Test_2：镜像轴 = 媒体文件全长，而非 SECTION 长度），本函数
+///   在 `reversed` 时用 `media_length_sec` 把各段源窗口镜像回原始媒体坐标。
+/// - item 起点的隐式锚点为 (0, SOFFS)，仅当首标记 offset > 0 时插入；
+///   存在 offset ≤ 0 的标记时，窗口起点由其所在段穿越决定（REAPER 的
+///   裁断/倒放会同步平移标记，两种表达保持一致）。
+/// - 最后一个锚点之后、窗口终点之前按基准速率（斜率 1）外推。
+///
+/// `velocity_*` 为该段源消耗斜率（Δ源 / Δtake媒体，恒为正），段起点锚点
+/// 上的速率变化系数展开为段内线性速率坡（倒放 take 的该系数已被 REAPER 反号，
+/// 直接套用即为原始坐标下的坡向）。
+/// 窗口外的锚点只参与几何计算，不产生额外段。无标记、item 长度非正、
+/// 或倒放 take 缺少媒体时长（无法镜像坐标系）时返回空表，调用方回退到
+/// 单 clip 路径。
+pub fn stretch_segments_full_cover(
+    markers: &[ReaperStretchMarker],
+    s_offs: f64,
+    play_rate: f64,
+    item_length: f64,
+    media_length_sec: Option<f64>,
+    reversed: bool,
+) -> Vec<ReaperStretchSegment> {
+    if markers.is_empty() {
+        return Vec::new();
     }
-    let mut current_start: Option<(f64, &ReaperStretchMarker)> = None;
+    let u_end = item_length * play_rate;
+    if !u_end.is_finite() || u_end <= 1e-9 {
+        return Vec::new();
+    }
 
-    for marker in markers {
-        if let Some((start_offset, last_marker)) = current_start {
-            let offset_length = marker.offset - start_offset;
-            if offset_length.abs() > 1e-12 {
-                let velocity_average = (marker.position - last_marker.position) / offset_length;
-                let velocity_half = last_marker.velocity_change * velocity_average;
-                segments.push(ReaperStretchSegment {
-                    offset_start: start_offset,
-                    offset_end: marker.offset,
-                    velocity_start: velocity_average - velocity_half,
-                    velocity_end: velocity_average + velocity_half,
-                });
-            }
+    // 倒放 take 的源窗口镜像（s → 媒体全长 − s）必须知道媒体全长。
+    let media_length_sec = if reversed {
+        match media_length_sec {
+            Some(len) if len.is_finite() && len > 0.0 => Some(len),
+            _ => return Vec::new(),
         }
-        current_start = Some((marker.offset, marker));
+    } else {
+        None
+    };
+
+    // 锚点 (take媒体时间, take源坐标位置, 速率变化系数)，按时间排序；
+    // 窗口外的标记保留（take 属性，先于裁断存在）。take 源坐标系随 u
+    // 单调递增，几何全部在该坐标系内计算，仅在输出时镜像。
+    let mut ordered: Vec<&ReaperStretchMarker> = markers.iter().collect();
+    ordered.sort_by(|a, b| a.offset.partial_cmp(&b.offset).unwrap_or(std::cmp::Ordering::Equal));
+    let mut anchors: Vec<(f64, f64, f64)> = Vec::with_capacity(ordered.len() + 1);
+    for marker in ordered {
+        if !marker.offset.is_finite() || !marker.position.is_finite() {
+            continue;
+        }
+        if anchors
+            .last()
+            .is_some_and(|last: &(f64, f64, f64)| (last.0 - marker.offset).abs() <= 1e-9)
+        {
+            continue;
+        }
+        anchors.push((marker.offset, marker.position, marker.velocity_change));
+    }
+    if anchors.is_empty() {
+        return Vec::new();
+    }
+
+    // item 起点隐式锚点：仅当首标记在窗口起点之后。
+    if anchors[0].0 > 1e-9 {
+        anchors.insert(0, (0.0, s_offs, 0.0));
+    }
+
+    // 输出：正放直接取存储坐标；倒放把段源窗口镜像回原始媒体坐标
+    // （时间线推进时源位置自 end 向 start 递减）。速率坡为坐标无关量，
+    // 两种情况同形。
+    let emit =
+        |offset_start: f64,
+         offset_end: f64,
+         s_lo: f64,
+         s_hi: f64,
+         velocity_start: f64,
+         velocity_end: f64| {
+            if !reversed {
+                ReaperStretchSegment {
+                    offset_start,
+                    offset_end,
+                    src_start: s_lo,
+                    src_end: s_hi,
+                    velocity_start,
+                    velocity_end,
+                }
+            } else {
+                let len = media_length_sec.unwrap_or(0.0);
+                ReaperStretchSegment {
+                    offset_start,
+                    offset_end,
+                    src_start: len - s_hi,
+                    src_end: len - s_lo,
+                    velocity_start,
+                    velocity_end,
+                }
+            }
+        };
+
+    let mut segments = Vec::with_capacity(anchors.len());
+    for pair in anchors.windows(2) {
+        let (u_a, s_a, vc_a) = pair[0];
+        let (u_b, s_b, _) = pair[1];
+        let du = u_b - u_a;
+        if du <= 1e-9 {
+            continue;
+        }
+        let lo = u_a.max(0.0);
+        let hi = u_b.min(u_end);
+        if hi - lo <= 1e-9 {
+            continue;
+        }
+        let rate = (s_b - s_a) / du;
+        if !rate.is_finite() {
+            continue;
+        }
+        let s_lo = s_a + rate * (lo - u_a);
+        let s_hi = s_a + rate * (hi - u_a);
+        segments.push(emit(
+            lo,
+            hi,
+            s_lo,
+            s_hi,
+            rate * (1.0 - vc_a),
+            rate * (1.0 + vc_a),
+        ));
+    }
+
+    // 末锚点之后、窗口终点之前：基准速率（斜率 1）外推。
+    let last = anchors[anchors.len() - 1];
+    if u_end - last.0 > 1e-9 {
+        let lo = last.0.max(0.0);
+        let s_lo = last.1 + (lo - last.0);
+        let s_hi = last.1 + (u_end - last.0);
+        segments.push(emit(lo, u_end, s_lo, s_hi, 1.0, 1.0));
     }
 
     segments
@@ -583,11 +712,6 @@ fn parse_fade_array(tokens: &[&str]) -> Vec<f64> {
 /// 使用同一 selector）写入标记：为 1 时该淡化由 REAPER 自动生成并跟踪与相邻
 /// item 的重叠量（如拖动重叠形成的自动交叉淡化），其真实长度位于第 3 个参数
 /// （索引 2）；为 0 时是普通手动淡化（长度位于第 2 个参数，索引 1）。
-///
-/// 真实 .rpp 示例（karate killo.rpp）：
-/// - 手动 FADEOUT：`FADEIN 1 0.01 0 1 0 0 0` → 长度 0.01（索引 1），非自动；
-/// - 自动交叉淡化：`FADEOUT 1.1 0.01 0.022018 1 1 0 0` → 长度 0.022018（索引 2，
-///   恰等于两 item 的重叠量），selector（索引 4）为 1 → 自动。
 pub fn reaper_fade_is_auto(values: &[f64]) -> bool {
     if values.len() < 4 {
         return false;
@@ -1534,8 +1658,9 @@ mod tests {
     }
 
     #[test]
-    fn parses_tempo_envelope_from_example_rpp() {
-        // 来自 C:\Users\z\Desktop\Reaper_Example.rpp 的 TEMPOENVEX 块（节选）。
+    fn parses_tempo_envelope_block_with_time_signatures() {
+        // TEMPOENVEX 的 PT 行：`PT 位置 BPM 形状 [slowcurv(打包拍号) …]`，
+        // 拍号打包值 262148 = 4/4、262147 = 3/4；块内其余行仅用于确认被忽略。
         let block_text = "<TEMPOENVEX\n\
 EGUID {2A001931-7D16-4259-A7F4-7ED6A60C53C6}\n\
 ACT 1 -1\n\
@@ -1543,10 +1668,10 @@ VIS 1 0 1\n\
 LANEHEIGHT 0 0\n\
 ARM 1\n\
 DEFSHAPE 1 -1 -1\n\
-PT 0.000000000000 169.6000000000 1 262148 0 1 0 \"\" 0 169 0 ABBB\n\
-PT 0.353773584906 184.0000000000 1\n\
-PT 0.679860541427 198.4000000000 1\n\
-PT 4.904195314949 145.6000000000 1 262147 0 1 0 \"\" 0 41 0 ABB\n\
+PT 0 120 1 262148 0 1 0 \"\" 0 169 0 ABBB\n\
+PT 0.5 140 1\n\
+PT 1 160 1\n\
+PT 4 100 1 262147 0 1 0 \"\" 0 41 0 ABB\n\
 >";
         let lines: Vec<String> = block_text.lines().map(|s| s.to_string()).collect();
         let root = parse_blocks(&lines);
@@ -1559,38 +1684,38 @@ PT 4.904195314949 145.6000000000 1 262147 0 1 0 \"\" 0 41 0 ABB\n\
         let envelope = parse_tempo_envelope_block(tempo_block);
 
         assert_eq!(envelope.points.len(), 4);
-        // 首点：169.6 BPM、4/4。
+        // 首点：120 BPM、4/4。
         let first = &envelope.points[0];
-        assert!((first.position_sec - 0.0).abs() < 1e-12);
-        assert!((first.bpm - 169.6).abs() < 1e-9);
+        assert_eq!(first.position_sec, 0.0);
+        assert_eq!(first.bpm, 120.0);
         assert_eq!(first.shape, 1);
         assert_eq!(first.numerator, Some(4));
         assert_eq!(first.denominator, Some(4));
         // 普通点：无拍号信息（继承前一点）。
         let second = &envelope.points[1];
-        assert!((second.bpm - 184.0).abs() < 1e-9);
+        assert_eq!(second.bpm, 140.0);
         assert_eq!(second.numerator, None);
-        // 末点：145.6 BPM、3/4（ABB 拍型）。
+        // 末点：100 BPM、3/4（ABB 拍型）。
         let last = &envelope.points[3];
-        assert!((last.position_sec - 4.904195314949).abs() < 1e-12);
-        assert!((last.bpm - 145.6).abs() < 1e-9);
+        assert_eq!(last.position_sec, 4.0);
+        assert_eq!(last.bpm, 100.0);
         assert_eq!(last.numerator, Some(3));
         assert_eq!(last.denominator, Some(4));
     }
 
     #[test]
     fn distinguishes_auto_crossfade_fades_from_manual_fades() {
-        // 真实 .rpp（karate killo.rpp / ces.rpp / fade_test.rpp）中的实际 FADEIN/FADEOUT 行。
+        // REAPER 的 fade 数组：索引 1 = 手动长度，索引 2 = 自动交叉淡化长度，
+        // 倒数第 3 个值为自动 selector。
         // - 手动淡化：selector（索引 4）为 0，长度在手动的索引 1、自动为 0。
         let manual_in = parse_fade_array(&["FADEIN", "1", "0.01", "0", "1", "0", "0", "0"]);
         assert!(!reaper_fade_is_auto(&manual_in));
-        assert!((reaper_fade_manual_length_sec(&manual_in) - 0.01).abs() < 1e-12);
-        assert!(reaper_fade_auto_length_sec(&manual_in) == 0.0);
+        assert_eq!(reaper_fade_manual_length_sec(&manual_in), 0.01);
+        assert_eq!(reaper_fade_auto_length_sec(&manual_in), 0.0);
 
-        let manual_long =
-            parse_fade_array(&["FADEIN", "1", "0.674609629036", "0", "1", "0", "0", "0"]);
+        let manual_long = parse_fade_array(&["FADEIN", "1", "0.67", "0", "1", "0", "0", "0"]);
         assert!(!reaper_fade_is_auto(&manual_long));
-        assert!((reaper_fade_manual_length_sec(&manual_long) - 0.674609629036).abs() < 1e-12);
+        assert_eq!(reaper_fade_manual_length_sec(&manual_long), 0.67);
         assert_eq!(
             reaper_fade_effective_length_sec(&manual_long),
             reaper_fade_manual_length_sec(&manual_long),
@@ -1598,41 +1723,30 @@ PT 4.904195314949 145.6000000000 1 262147 0 1 0 \"\" 0 41 0 ABB\n\
 
         // - 自动交叉淡化：selector（索引 4）为 1；索引 1 = 手动长度（保留），
         //   索引 2 = 自动长度（= 重叠量）。有效长度取自动。
-        let auto_out =
-            parse_fade_array(&["FADEOUT", "1.1", "0.01", "0.022018", "1", "1", "0", "0"]);
+        let auto_out = parse_fade_array(&["FADEOUT", "1.1", "0.01", "0.02", "1", "1", "0", "0"]);
         assert!(reaper_fade_is_auto(&auto_out));
         assert_eq!(auto_out[1], 0.01); // 手动长度不被自动值覆盖
-        assert!((reaper_fade_manual_length_sec(&auto_out) - 0.01).abs() < 1e-12);
-        assert!((reaper_fade_auto_length_sec(&auto_out) - 0.022018).abs() < 1e-12);
-        assert!((reaper_fade_effective_length_sec(&auto_out) - 0.022018).abs() < 1e-12);
+        assert_eq!(reaper_fade_manual_length_sec(&auto_out), 0.01);
+        assert_eq!(reaper_fade_auto_length_sec(&auto_out), 0.02);
+        assert_eq!(reaper_fade_effective_length_sec(&auto_out), 0.02);
 
-        let auto_in = parse_fade_array(&["FADEIN", "1.1", "0.01", "0.022018", "1", "1", "0", "0"]);
+        let auto_in = parse_fade_array(&["FADEIN", "1.1", "0.01", "0.02", "1", "1", "0", "0"]);
         assert!(reaper_fade_is_auto(&auto_in));
-        assert!(reaper_fade_manual_length_sec(&auto_in) == 0.01);
-        assert!((reaper_fade_auto_length_sec(&auto_in) - 0.022018).abs() < 1e-12);
+        assert_eq!(reaper_fade_manual_length_sec(&auto_in), 0.01);
+        assert_eq!(reaper_fade_auto_length_sec(&auto_in), 0.02);
 
-        // fade_test.rpp 场景：Item A 手动淡出 0.6711s → 重叠后自动交叉淡化 0.176286s
+        // 重叠场景：Item A 手动淡出 0.67s → 重叠后自动交叉淡化 0.18s
         // （自动 = 重叠量），手动淡化被保留在索引 1。
-        let a_fadeout = parse_fade_array(&[
-            "FADEOUT",
-            "1.1",
-            "0.67114827520773",
-            "0.17628573810208",
-            "1",
-            "1",
-            "0",
-            "0",
-        ]);
+        let a_fadeout = parse_fade_array(&["FADEOUT", "1.1", "0.67", "0.18", "1", "1", "0", "0"]);
         assert!(reaper_fade_is_auto(&a_fadeout));
-        assert!((reaper_fade_manual_length_sec(&a_fadeout) - 0.67114827520773).abs() < 1e-12);
-        assert!((reaper_fade_auto_length_sec(&a_fadeout) - 0.17628573810208).abs() < 1e-12);
-        assert!((reaper_fade_effective_length_sec(&a_fadeout) - 0.17628573810208).abs() < 1e-12);
+        assert_eq!(reaper_fade_manual_length_sec(&a_fadeout), 0.67);
+        assert_eq!(reaper_fade_auto_length_sec(&a_fadeout), 0.18);
+        assert_eq!(reaper_fade_effective_length_sec(&a_fadeout), 0.18);
 
-        let b_fadein =
-            parse_fade_array(&["FADEIN", "1.1", "0", "0.17628573810208", "1", "1", "0", "0"]);
+        let b_fadein = parse_fade_array(&["FADEIN", "1.1", "0", "0.18", "1", "1", "0", "0"]);
         assert!(reaper_fade_is_auto(&b_fadein));
-        assert!(reaper_fade_manual_length_sec(&b_fadein) == 0.0);
-        assert!((reaper_fade_auto_length_sec(&b_fadein) - 0.17628573810208).abs() < 1e-12);
+        assert_eq!(reaper_fade_manual_length_sec(&b_fadein), 0.0);
+        assert_eq!(reaper_fade_auto_length_sec(&b_fadein), 0.18);
 
         // 过短数组（<4 个值）不能把 shape 误当 selector / 自动标记。
         assert!(!reaper_fade_is_auto(&[1.0, 0.1]));
@@ -1641,37 +1755,30 @@ PT 4.904195314949 145.6000000000 1 262147 0 1 0 \"\" 0 41 0 ABB\n\
 
     #[test]
     fn decodes_reaper7_shape_and_curvature_fields() {
-        // fade_in_out_test.rpp（REAPER 7.78 / win64 实测导出）：
         // 淡入曲率 0.25、淡出曲率 0.35，形状槽为整数 0。
-        let fade_in = parse_fade_array(&[
-            "FADEIN", "0", "0.89154277826174", "0", "0", "0", "0.25", "0",
-        ]);
-        let fade_out = parse_fade_array(&[
-            "FADEOUT", "0", "0.61492516492441", "0", "0", "0", "0.35", "0",
-        ]);
+        let fade_in = parse_fade_array(&["FADEIN", "0", "0.9", "0", "0", "0", "0.25", "0"]);
+        let fade_out = parse_fade_array(&["FADEOUT", "0", "0.61", "0", "0", "0", "0.35", "0"]);
         assert_eq!(fade_in.len(), 7);
         assert!(!reaper_fade_is_auto(&fade_in));
-        assert!((reaper_fade_manual_length_sec(&fade_in) - 0.89154277826174).abs() < 1e-12);
+        assert_eq!(reaper_fade_manual_length_sec(&fade_in), 0.9);
         let (in_shape, in_dir) = reaper_fade_shape_dir(&fade_in);
         assert_eq!(in_shape, 0.0);
-        assert!((in_dir - 0.25).abs() < 1e-12);
+        assert_eq!(in_dir, 0.25);
         let (out_shape, out_dir) = reaper_fade_shape_dir(&fade_out);
         assert_eq!(out_shape, 0.0);
-        assert!((out_dir - 0.35).abs() < 1e-12);
+        assert_eq!(out_dir, 0.35);
 
-        // 开发者帖实测样本：小数变体形状 `5.1` 在索引 0 与镜像槽同步出现；
+        // 小数变体形状 `5.1` 在索引 0 与镜像槽同步出现；
         // 镜像槽（索引 3）存的是取整后的基础形状（官方自动淡化样本中
         // 形状 1.1 对应镜像槽写 1），仅在索引 0 缺失时作为回退。
-        let fractional = parse_fade_array(&[
-            "FADEIN", "5.1", "0.40101698468005", "0", "5.1", "0", "0", "0",
-        ]);
+        let fractional = parse_fade_array(&["FADEIN", "5.1", "0.4", "0", "5.1", "0", "0", "0"]);
         let (shape, dir) = reaper_fade_shape_dir(&fractional);
-        assert!((shape - 5.1).abs() < 1e-12, "fractional shape passthrough");
+        assert_eq!(shape, 5.1, "fractional shape passthrough");
         assert_eq!(dir, 0.0);
 
-        let auto = parse_fade_array(&["FADEOUT", "1.1", "0.01", "0.022018", "1", "1", "0", "0"]);
+        let auto = parse_fade_array(&["FADEOUT", "1.1", "0.01", "0.02", "1", "1", "0", "0"]);
         let (auto_shape, auto_dir) = reaper_fade_shape_dir(&auto);
-        assert!((auto_shape - 1.1).abs() < 1e-12);
+        assert_eq!(auto_shape, 1.1);
         assert_eq!(auto_dir, 0.0);
 
         // 索引 5 的曲率越界时夹紧到 [-1, 1]；短数组的曲率回退 0。
@@ -1704,5 +1811,161 @@ PT 4.904195314949 145.6000000000 1 262147 0 1 0 \"\" 0 41 0 ABB\n\
         let (shape, dir) = reaper_fade_shape_dir(&manual);
         assert!((shape - 5.1).abs() < 1e-12);
         assert!((dir - (-0.75)).abs() < 1e-12);
+    }
+
+    // 5 个标记：0/2 号带速率变化系数，其余缺省（段内线性）；首标记不在
+    // item 起点（有前导段），末标记在窗口终点之前（有尾段）。
+    // 段 1 速率 2 × (1 − vc 0.5) = 1，与前导段的基准速率衔接。
+    const SM_TEST_TOKENS: &[&str] = &[
+        "SM",
+        "1", "1", "0.5", "+",
+        "2", "3", "+",
+        "4", "5", "0.25", "+",
+        "6", "11", "+",
+        "10", "12",
+    ];
+
+    #[test]
+    fn parses_sm_groups_with_optional_rate_handles() {
+        let markers = parse_stretch_markers(SM_TEST_TOKENS);
+        assert_eq!(markers.len(), 5);
+        assert_eq!(markers[0].offset, 1.0);
+        assert_eq!(markers[0].position, 1.0);
+        assert_eq!(markers[0].velocity_change, 0.5);
+        // 无速率手柄的标记缺省 0（段内线性）。
+        assert_eq!(markers[1].velocity_change, 0.0);
+        assert_eq!(markers[2].offset, 4.0);
+        assert_eq!(markers[2].position, 5.0);
+        assert_eq!(markers[2].velocity_change, 0.25);
+    }
+
+    #[test]
+    fn stretch_markers_not_at_item_start_cover_leading_and_trailing() {
+        let markers = parse_stretch_markers(SM_TEST_TOKENS);
+        // item：POSITION 0 / LENGTH 20 / PLAYRATE 1 / SOFFS 0。
+        let segments = stretch_segments_full_cover(&markers, 0.0, 1.0, 20.0, None, false);
+        assert_eq!(segments.len(), 6, "前导段 + 4 个标记段 + 尾段");
+
+        // 前导段：item 开头到首标记，基准速率 1。
+        let lead = &segments[0];
+        assert_eq!(lead.offset_start, 0.0);
+        assert_eq!(lead.offset_end, 1.0);
+        assert_eq!(lead.velocity_average(), 1.0);
+
+        // 标记段速率 = Δ源媒体 / Δtake媒体；段 1 源 [1,3] 摊在 [1,2]，速率 2。
+        let second = &segments[1];
+        assert_eq!(second.velocity_average(), 2.0);
+        assert_eq!(second.offset_start, 1.0);
+        // 速率变化系数展开为段内坡：2 × (1 − 0.5) = 1，与前导段速率衔接。
+        assert_eq!(second.velocity_start, 1.0);
+
+        // 尾段：末标记源位置沿基准速率外推到 item 末端。
+        let tail = segments.last().unwrap();
+        assert_eq!(tail.offset_start, 10.0);
+        assert_eq!(tail.offset_end, 20.0);
+        assert_eq!(tail.velocity_average(), 1.0);
+
+        // 段链连续，且铺满整个 item 的 take 媒体时间。
+        for pair in segments.windows(2) {
+            assert_eq!(pair[1].offset_start, pair[0].offset_end);
+        }
+        let covered: f64 = segments.iter().map(|s| s.offset_length()).sum();
+        assert_eq!(covered, 20.0);
+    }
+
+    #[test]
+    fn stretch_marker_at_item_start_merges_with_base_anchor() {
+        // 首标记钉在 item 开头（源位置 = SOFFS）：不产生前导段。
+        let markers = vec![
+            ReaperStretchMarker { offset: 0.0, position: 5.0, velocity_change: 0.0 },
+            ReaperStretchMarker { offset: 4.0, position: 7.0, velocity_change: 0.0 },
+        ];
+        let segments = stretch_segments_full_cover(&markers, 5.0, 1.0, 10.0, None, false);
+        assert_eq!(segments.len(), 2);
+        // [0,4] 消耗源 [5,7]；尾段 [4,10] 基准速率外推到源 12。
+        assert!((segments[0].offset_end - 4.0).abs() < 1e-12);
+        assert!((segments[0].velocity_average() - 0.5).abs() < 1e-12);
+        assert!((segments[1].velocity_average() - 1.0).abs() < 1e-12);
+        assert!((segments[1].offset_end - 10.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn single_stretch_marker_still_covers_full_item() {
+        // 旧实现 markers.len() < 2 直接返回空表 → 单标记 item 完全忽略拉伸。
+        let markers = vec![ReaperStretchMarker {
+            offset: 3.0,
+            position: 1.0,
+            velocity_change: 0.0,
+        }];
+        let segments = stretch_segments_full_cover(&markers, 0.0, 1.0, 10.0, None, false);
+        assert_eq!(segments.len(), 2);
+        // 前导段：源 [0,1] 摊在 [0,3]，斜率 1/3（拖动首标记 = 拉伸前导区）。
+        assert!((segments[0].velocity_average() - 1.0 / 3.0).abs() < 1e-12);
+        assert!((segments[1].velocity_average() - 1.0).abs() < 1e-12);
+        let covered: f64 = segments.iter().map(|s| s.offset_length()).sum();
+        assert!((covered - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn stretch_full_cover_without_markers_or_length_is_empty() {
+        assert!(stretch_segments_full_cover(&[], 0.0, 1.0, 10.0, None, false).is_empty());
+        assert!(stretch_segments_full_cover(
+            &[ReaperStretchMarker { offset: 1.0, position: 1.0, velocity_change: 0.0 }],
+            0.0,
+            1.0,
+            0.0,
+            None,
+            false,
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn stretch_full_cover_offsets_scale_with_play_rate() {
+        // take 媒体时间 = item 时间 × play_rate：item 4s、rate 2 → u_end = 8。
+        // 标记在 item 1s（u=2）钉住源 2s 处：前导段斜率 1，尾段斜率 1。
+        let markers = vec![ReaperStretchMarker {
+            offset: 2.0,
+            position: 2.0,
+            velocity_change: 0.0,
+        }];
+        let segments = stretch_segments_full_cover(&markers, 0.0, 2.0, 4.0, None, false);
+        assert_eq!(segments.len(), 2);
+        assert!((segments[0].offset_end - 2.0).abs() < 1e-12);
+        assert!((segments[0].velocity_average() - 1.0).abs() < 1e-12);
+        assert!((segments[1].offset_end - 8.0).abs() < 1e-12);
+        assert!((segments[1].velocity_average() - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn stretch_full_cover_reversed_mirrors_source_windows() {
+        // 倒放 take 的标记 position 处于 REAPER 预翻转的源坐标系
+        // （s = 媒体全长 − 原始位置）；输出时用媒体全长把各段源窗口
+        // 镜像回原始坐标（start ≤ end），速率坡保持不变。
+        let markers = vec![
+            ReaperStretchMarker { offset: 0.0, position: 5.0, velocity_change: 0.5 },
+            ReaperStretchMarker { offset: 4.0, position: 9.0, velocity_change: 0.0 },
+        ];
+        let segments = stretch_segments_full_cover(&markers, 5.0, 1.0, 10.0, Some(20.0), true);
+        assert_eq!(segments.len(), 2);
+        // 段 1：take 源坐标 [5,9] → 原始坐标 [11,15]（20−9=11、20−5=15）。
+        assert!((segments[0].offset_start - 0.0).abs() < 1e-12);
+        assert!((segments[0].offset_end - 4.0).abs() < 1e-12);
+        assert!((segments[0].src_start - 11.0).abs() < 1e-12);
+        assert!((segments[0].src_end - 15.0).abs() < 1e-12);
+        // 速率坡与坐标系无关：vc=0.5 展开为 [0.5, 1.5]。
+        assert!((segments[0].velocity_start - 0.5).abs() < 1e-12);
+        assert!((segments[0].velocity_end - 1.5).abs() < 1e-12);
+        // 尾段：基准速率外推，镜像后 src [5,11]，与段 1 衔接
+        // （倒放推进时源位置自 end 向 start 递减）。
+        assert!((segments[1].offset_start - 4.0).abs() < 1e-12);
+        assert!((segments[1].offset_end - 10.0).abs() < 1e-12);
+        assert!((segments[1].src_start - 5.0).abs() < 1e-12);
+        assert!((segments[1].src_end - 11.0).abs() < 1e-12);
+        assert!((segments[1].velocity_average() - 1.0).abs() < 1e-12);
+
+        // 倒放但缺少有效媒体全长时无法镜像 → 返回空表（调用方回退单 clip 路径）。
+        assert!(stretch_segments_full_cover(&markers, 5.0, 1.0, 10.0, None, true).is_empty());
+        assert!(stretch_segments_full_cover(&markers, 5.0, 1.0, 10.0, Some(0.0), true).is_empty());
     }
 }

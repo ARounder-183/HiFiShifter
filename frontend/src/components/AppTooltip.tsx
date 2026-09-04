@@ -93,7 +93,8 @@ export function AppTooltipProvider({
         // 直到 pointerup/cancel；期间忽略 pointerover/out 的切换，
         // 文本仍随源元素属性变化实时刷新（MutationObserver 路径）。
         let pinned = false;
-        let pinnedPosition: AppTooltipPosition | null = null;
+        /** 最近一次气泡显示所用的原始位置（渲染时再统一夹紧）。 */
+        let lastShownPosition: AppTooltipPosition | null = null;
         // ReactNode 内容注册表：元素 → {content, key}。设置方通过全局事件
         // 写入；Provider 在悬停/钉住刷新时优先取用富内容。
         const customContentByElement = new Map<
@@ -139,7 +140,7 @@ export function AppTooltipProvider({
             // 若气泡正在显示，此刻立即清除 —— 用户右键的第一反馈就是浮标消失。
             if (event.button !== 0 || hasOpenMenuNow()) {
                 pinned = false;
-                pinnedPosition = null;
+                lastShownPosition = null;
                 currentElement = null;
                 setTooltip(null);
                 return;
@@ -148,27 +149,39 @@ export function AppTooltipProvider({
             const element = target?.closest?.("[data-tooltip]") ?? null;
             const attr = element?.getAttribute("data-tooltip") || "";
             if (element && (attr || customContentByElement.has(element))) {
+                // 钉住：保持气泡当前显示位置——按下不应让气泡跳到按下点。
                 pinned = true;
                 currentElement = element;
-                pinnedPosition = clampTooltipPosition({
+                const kept = lastShownPosition ?? {
                     x: event.clientX,
                     y: event.clientY,
-                });
+                };
                 const cached = customContentByElement.get(element);
                 setTooltip(
                     cached
-                        ? { text: cached.content, nodeKey: cached.key, position: pinnedPosition }
-                        : { text: attr, position: pinnedPosition },
+                        ? { text: cached.content, nodeKey: cached.key, position: kept }
+                        : { text: attr, position: kept },
                 );
             } else {
                 // 按在其他地方：结束钉住（后续 pointerover 照常工作）。
                 pinned = false;
-                pinnedPosition = null;
             }
         };
-        const onGestureEnd = () => {
+        const onGestureEnd = (event: PointerEvent) => {
             pinned = false;
-            pinnedPosition = null;
+            // 松开瞬间把气泡回到指针当前位置（否则冻结在按下位置，
+            // 直到用户再次移动鼠标才更新）。
+            if (currentElement) {
+                setTooltip((prev) =>
+                    prev
+                        ? {
+                              ...prev,
+                              position: { x: event.clientX, y: event.clientY },
+                          }
+                        : prev,
+                );
+                lastShownPosition = { x: event.clientX, y: event.clientY };
+            }
         };
 
         const showAt = (
@@ -176,12 +189,17 @@ export function AppTooltipProvider({
             nodeKey: string | undefined,
             position: AppTooltipPosition,
         ) => {
+            lastShownPosition = position;
             setTooltip((prev) =>
                 prev &&
                 prev.nodeKey === nodeKey &&
                 typeof content === "string" &&
                 typeof prev.text === "string" &&
-                prev.text === content
+                prev.text === content &&
+                // 位置也参与去重：文本未变但鼠标移动时必须跟随更新位置，
+                // 否则气泡会停在首次悬停的位置（hover 跟随语义）。
+                prev.position.x === position.x &&
+                prev.position.y === position.y
                     ? prev
                     : { text: content, nodeKey, position },
             );
@@ -229,12 +247,9 @@ export function AppTooltipProvider({
                     : {
                           text: content,
                           nodeKey,
-                          position:
-                              pinned && pinnedPosition
-                                  ? pinnedPosition
-                                  : lastEvent
-                                    ? { x: lastEvent.clientX, y: lastEvent.clientY }
-                                    : { x: 0, y: 0 },
+                          position: lastEvent
+                              ? { x: lastEvent.clientX, y: lastEvent.clientY }
+                              : (prev?.position ?? { x: 0, y: 0 }),
                       },
             );
         };
@@ -258,7 +273,7 @@ export function AppTooltipProvider({
         // 的属性（长度/曲率数值实时变化）→ 气泡文本即时刷新，位置不重摆。
         const clearForMenu = () => {
             pinned = false;
-            pinnedPosition = null;
+            lastShownPosition = null;
             currentElement = null;
             setTooltip(null);
         };
@@ -298,24 +313,17 @@ export function AppTooltipProvider({
             if (!currentElement) return;
             if (hasOpenContextMenu()) {
                 pinned = false;
-                pinnedPosition = null;
+                lastShownPosition = null;
                 setTooltip(null);
                 currentElement = null;
                 return;
             }
             const { content, nodeKey } = resolveContent(currentElement);
             if (pinned) {
-                // 钉住模式：只同步内容（数值可能已随拖拽更新），位置冻结。
+                // 钉住（拖拽）模式：内容仍取自钉住的元素，位置跟随指针——
+                // 拖拽中气泡不再冻结在按下位置。
                 if (!isRenderable(content)) return;
-                setTooltip((prev) =>
-                    prev && prev.nodeKey === nodeKey && prev.text === content
-                        ? prev
-                        : {
-                              text: content,
-                              nodeKey,
-                              position: pinnedPosition ?? prev?.position ?? { x: 0, y: 0 },
-                          },
-                );
+                showAt(content, nodeKey, { x: event.clientX, y: event.clientY });
                 return;
             }
             if (!isRenderable(content)) {

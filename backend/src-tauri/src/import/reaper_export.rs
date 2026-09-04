@@ -673,7 +673,6 @@ mod tests {
 
     #[test]
     fn negative_soffs_silence_tail_roundtrips() {
-        // REAPER 左延伸 item（test_2.rpp 语义）：LOOP 0 + 负 SOFFS（前导静音），
         // LENGTH 覆盖整个可见区间。导出必须逐字保留负 SOFFS 与 LOOP 0 ——
         // 不得把静音尾巴推断成 LOOP，也不得把 SOFFS 钳到 0。
         let mut timeline = TimelineState::default();

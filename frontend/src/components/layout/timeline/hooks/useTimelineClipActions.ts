@@ -28,7 +28,10 @@ import {
     replaceClipSourceRemote,
     renameClipTakeRemote,
     splitClipsAtRemote,
+    bumpParamsEpoch,
 } from "../../../../features/session/sessionSlice";
+import { resolveRootTrackId } from "../../../../features/session/trackUtils";
+import { paramsApi } from "../../../../services/api";
 import {
     groupClipsRemote,
     ungroupClipsRemote,
@@ -157,6 +160,26 @@ export interface UseTimelineClipActionsResult {
     commitTrackLaneRename: (clipId: string, newName: string) => void;
     handleTrackLaneRenameDone: () => void;
     commitTrackLaneGain: (clipId: string, db: number) => void;
+    /**
+     * 提交新的播放速率（有效速率， badge 展示值）。多选时批量应用到所有
+     * 可编辑 Clip；adjustLength（默认 true）按新旧速率反比缩放各 Clip
+     * 时长，使源消费窗口保持不变。
+     */
+    commitTrackLaneRate: (
+        clipId: string,
+        timing: {
+            /** 有效速率（角标展示值）；缺省 = 不修改速率。 */
+            rate?: number;
+            /** 直接设定时长（秒）；优先于 rate 的自动调长。 */
+            durationSec?: number;
+            /** 速率变化时是否自动调整时长（默认 true）。 */
+            autoLength?: boolean;
+        },
+    ) => void;
+    /** 角标行内编辑目标（镜像 renamingClipId 管线）。 */
+    editingBadge: { clipId: string; field: "rate" | "gain" } | null;
+    setEditingBadge: (next: { clipId: string; field: "rate" | "gain" } | null) => void;
+    handleBadgeEditDone: () => void;
 
     // sameSourceConfirm helpers (forwarded from state)
     sameSourceConfirmResolverRef: React.MutableRefObject<((confirmed: boolean) => void) | null>;
@@ -260,6 +283,11 @@ export function useTimelineClipActions(
         startSec: number;
     } | null>(null);
     const [renamingClipId, setRenamingClipId] = useState<string | null>(null);
+    // 角标（播放速率/增益）行内编辑目标：镜像 renamingClipId 的管线。
+    const [editingBadge, setEditingBadge] = useState<{
+        clipId: string;
+        field: "rate" | "gain";
+    } | null>(null);
 
     const clearContextMenu = React.useCallback(() => {
         setContextMenu(null);
@@ -898,6 +926,10 @@ export function useTimelineClipActions(
         setRenamingClipId(null);
     }, []);
 
+    const handleBadgeEditDone = React.useCallback(() => {
+        setEditingBadge(null);
+    }, []);
+
     const commitTrackLaneGain = React.useCallback(
         (clipId: string, db: number) => {
             const gain = Math.pow(10, db / 20);
@@ -920,6 +952,122 @@ export function useTimelineClipActions(
             );
         },
         [dispatch],
+    );
+
+    const commitTrackLaneRate = React.useCallback(
+        (
+            clipId: string,
+            timing: {
+                /** 有效速率（角标展示值）；缺省 = 不修改速率。 */
+                rate?: number;
+                /** 直接设定时长（秒）；优先于 rate 的自动调长。 */
+                durationSec?: number;
+                /** 速率变化时是否自动调整时长（默认 true）。 */
+                autoLength?: boolean;
+            },
+        ) => {
+            const session = sessionRef.current;
+            const autoLength = timing.autoLength !== false;
+            // 与 set_clip_state / 乐观分支同口径：有效速率钳制 0.1~10。
+            const requestedRate =
+                timing.rate != null && Number.isFinite(timing.rate) && timing.rate > 0
+                    ? Math.min(10, Math.max(0.1, timing.rate))
+                    : null;
+            if (requestedRate == null && timing.durationSec == null) return;
+            // effective 可被“时长即拉伸”路径反推填充。
+            let effective = requestedRate;
+            const targetIds = getBulkEditableClipIds({
+                activeClipId: clipId,
+                multiSelectedClipIds: multiSelectedClipIdsRef.current,
+                multiSelectedSet: multiSelectedSetRef.current,
+            });
+            const changesById = new Map<
+                string,
+                { clipPlaybackRate?: number; lengthSec?: number }
+            >();
+            // “锁定参数线”启用且时长变化时：链接参数线时域映射（与边缘拉伸
+            // 同一管线，按根轨道分组批量提交）。
+            const mappingsByRootTrack = new Map<
+                string,
+                Array<{
+                    oldStartSec: number;
+                    oldLengthSec: number;
+                    newStartSec: number;
+                    newLengthSec: number;
+                }>
+            >();
+            for (const targetId of targetIds) {
+                const clip = session.clips.find((entry) => entry.id === targetId);
+                if (!clip) continue;
+                const takes = clip.takes ?? [];
+                const activeTake =
+                    takes.find((entry) => entry.id === clip.activeTakeId) ?? takes[0];
+                // 有效速率 = Clip 级 × take 级：改写 Clip 级以保持 take 速率
+                // 不变（与 reducer / 乐观分支的 previousTakeRate 口径一致）。
+                const takeRate = activeTake
+                    ? Number(activeTake.playbackRate) || 1
+                    : (Number(clip.playbackRate) || 1) / (Number(clip.clipPlaybackRate) || 1);
+                const oldEffective = Number(clip.playbackRate) || 1;
+                const oldLengthSec = Number(clip.lengthSec) || 0;
+                const change: { clipPlaybackRate?: number; lengthSec?: number } = {};
+                if (effective != null) {
+                    change.clipPlaybackRate = Math.min(
+                        10,
+                        Math.max(0.1, effective / takeRate),
+                    );
+                }
+                // 时长：显式时长优先，且**时长即拉伸**——源窗口保持不变，
+                // 由时长反推有效速率（改时长同时改倍率）；无显式时长时，
+                // 速率变化 + 自动调长才反比缩放时长（加速 → 变短）。
+                let nextLengthSec: number | null = null;
+                if (timing.durationSec != null && Number.isFinite(timing.durationSec)) {
+                    nextLengthSec = Math.max(0, timing.durationSec);
+                    if (effective == null && nextLengthSec > 1e-6) {
+                        effective = Math.max(
+                            0.1,
+                            Math.min(10, (oldLengthSec * oldEffective) / nextLengthSec),
+                        );
+                    }
+                } else if (effective != null && autoLength) {
+                    nextLengthSec = Math.max(0, oldLengthSec * (oldEffective / effective));
+                }
+                if (nextLengthSec != null && Math.abs(nextLengthSec - oldLengthSec) > 1e-6) {
+                    change.lengthSec = nextLengthSec;
+                    if (session.lockParamLinesEnabled) {
+                        const rootTrackId = resolveRootTrackId(session.tracks, clip.trackId);
+                        if (rootTrackId) {
+                            const trackMappings =
+                                mappingsByRootTrack.get(rootTrackId) ?? [];
+                            trackMappings.push({
+                                oldStartSec: clip.startSec,
+                                oldLengthSec: oldLengthSec,
+                                newStartSec: clip.startSec,
+                                newLengthSec: nextLengthSec,
+                            });
+                            mappingsByRootTrack.set(rootTrackId, trackMappings);
+                        }
+                    }
+                }
+                changesById.set(targetId, change);
+            }
+            const persistPromise = dispatch(
+                setClipsStateBulkRemote({
+                    updates: buildBulkClipStateUpdates({ clipIds: targetIds, changesById }),
+                    checkpoint: true,
+                }),
+            );
+            // “锁定参数线”：后端应用新长度后，将旧范围的参数线时域映射到
+            // 新范围，并 bump 参数纪元让参数编辑器重新拉取。
+            if (mappingsByRootTrack.size > 0) {
+                const stretchTasks = Array.from(mappingsByRootTrack, ([trackId, mappings]) =>
+                    paramsApi.stretchTrackLinkedParams(trackId, mappings, false),
+                );
+                void Promise.resolve(persistPromise)
+                    .then(() => Promise.allSettled(stretchTasks))
+                    .finally(() => dispatch(bumpParamsEpoch()));
+            }
+        },
+        [dispatch, multiSelectedClipIdsRef, multiSelectedSetRef, sessionRef],
     );
 
     // ── Return ───────────────────────────────────────────────
@@ -970,6 +1118,10 @@ export function useTimelineClipActions(
         commitTrackLaneRename,
         handleTrackLaneRenameDone,
         commitTrackLaneGain,
+        commitTrackLaneRate,
+        editingBadge,
+        setEditingBadge,
+        handleBadgeEditDone,
 
         sameSourceConfirmResolverRef,
     };

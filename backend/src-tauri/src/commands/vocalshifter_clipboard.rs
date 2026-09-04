@@ -371,7 +371,7 @@ fn paste_vsp_project(state: &AppState, path: &std::path::Path) -> serde_json::Va
     let vsp_dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
 
     // 从当前 timeline 读取光标位置、选中轨道、轨道顺序
-    let (playhead_sec, selected_track_idx, ordered_track_ids) = {
+    let (playhead_sec, selected_track_idx, ordered_track_ids, next_track_order) = {
         let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
 
         let mut sorted_tracks: Vec<_> = tl.tracks.iter().collect();
@@ -384,7 +384,13 @@ fn paste_vsp_project(state: &AppState, path: &std::path::Path) -> serde_json::Va
             .and_then(|sel| ordered.iter().position(|id| id == sel))
             .unwrap_or(0);
 
-        (tl.playhead_sec, sel_idx, ordered)
+        // 自动新建轨道的起始 order：order 允许稀疏，取「单调计数器」与
+        // 「现有最大 order + 1」的较大值，保证新建轨道排在显示序列末尾。
+        let next_track_order = tl
+            .next_track_order
+            .max(tl.tracks.iter().map(|t| t.order).max().unwrap_or(0) + 1);
+
+        (tl.playhead_sec, sel_idx, ordered, next_track_order)
     };
 
     let result = match crate::vocalshifter_import::import_vsp_clipboard(
@@ -393,6 +399,7 @@ fn paste_vsp_project(state: &AppState, path: &std::path::Path) -> serde_json::Va
         playhead_sec,
         selected_track_idx,
         &ordered_track_ids,
+        next_track_order,
     ) {
         Ok(r) => r,
         Err(e) => {
@@ -506,6 +513,25 @@ fn paste_vsp_project(state: &AppState, path: &std::path::Path) -> serde_json::Va
 
     let payload = get_timeline_state_from_ref(state);
     let mut json = serde_json::to_value(&payload).unwrap_or_default();
+
+    // 粘贴需求 3/4：与 REAPER 剪贴板粘贴一致，前端依据 created_clip_ids
+    // 完成选区整体替换与播放光标定位。导入产生的 Clip/轨道 id 全部为新生成。
+    json["created_clip_ids"] = serde_json::json!(
+        result
+            .timeline
+            .clips
+            .iter()
+            .map(|clip| clip.id.clone())
+            .collect::<Vec<_>>()
+    );
+    json["created_track_ids"] = serde_json::json!(
+        result
+            .timeline
+            .tracks
+            .iter()
+            .map(|track| track.id.clone())
+            .collect::<Vec<_>>()
+    );
 
     if !result.skipped_files.is_empty() {
         json["skipped_files"] = serde_json::json!(result.skipped_files);

@@ -1,5 +1,7 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { registerDragAbort } from "./gestureFocusGuard";
+import { formatEditNumber } from "./math";
+import { measureTextWidth } from "./runtime/timelineCanvasStyle";
 import { Flex, Box, Text, IconButton, Select } from "@radix-ui/themes";
 import { Cross2Icon, PlusIcon } from "@radix-ui/react-icons";
 import { shallowEqual } from "react-redux";
@@ -439,7 +441,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
 }) => {
     const listRef = useRef<HTMLDivElement | null>(null);
     // 轨道头色条/取色预览需要和时间线画布同一套主题化轨道色。
-    const { mode } = useAppTheme();
+    const { mode, fontFamily } = useAppTheme();
     const darkMode = mode === "dark";
     const rowHeightRef = useRef(rowHeight);
     const pendingVerticalZoomRef = useRef<{
@@ -472,7 +474,13 @@ const TrackListInner: React.FC<TrackListProps> = ({
     const [volumeTooltipPos, setVolumeTooltipPos] = useState<{ x: number; y: number } | null>(null);
     const [volumeDrag, setVolumeDrag] = useState<{ trackId: string; baseDb: number } | null>(null);
     const [editingGainTrackId, setEditingGainTrackId] = useState<string | null>(null);
+    const editingGainTrackIdRef = useRef<string | null>(null);
     const [editingGainValue, setEditingGainValue] = useState("");
+    // 轨道增益编辑框宽度：按当前（可自定义）字体实测，保证完整展示。
+    const editingGainWidthPx = Math.max(
+        56,
+        Math.ceil(measureTextWidth(editingGainValue, "12px", fontFamily)) + 12,
+    );
     const editingGainInputRef = useRef<HTMLInputElement | null>(null);
 
     // 轨道颜色选择器弹出状�?
@@ -734,13 +742,16 @@ const TrackListInner: React.FC<TrackListProps> = ({
 
     function beginTrackGainEdit(trackId: string, volume: number) {
         const db = clampGainDb(gainToDb(volume));
+        editingGainTrackIdRef.current = trackId;
         setEditingGainTrackId(trackId);
-        setEditingGainValue(db.toFixed(1));
+        setEditingGainValue(formatEditNumber(db));
     }
 
     function commitTrackGainEdit() {
-        if (!editingGainTrackId) return;
-        const trackId = editingGainTrackId;
+        // 幂等：文档级捕获与 onBlur 可能先后到达，只有第一次生效。
+        const trackId = editingGainTrackIdRef.current;
+        if (!trackId) return;
+        editingGainTrackIdRef.current = null;
         const parsed = parseFloat(editingGainValue);
         if (!isNaN(parsed)) {
             const nextDb = clampGainDb(parsed);
@@ -753,8 +764,48 @@ const TrackListInner: React.FC<TrackListProps> = ({
     }
 
     function cancelTrackGainEdit() {
+        editingGainTrackIdRef.current = null;
         setEditingGainTrackId(null);
     }
+
+    // 轨道增益输入框的滚轮步进：普通 0.5 dB / 精细 0.1 dB（与增益旋钮同一
+    // 精细修饰键）。★ 非被动原生监听挂在输入框自身——先于列表级 wheel 处理
+    // 器（缩放/滚动）触发，stopPropagation + preventDefault 完全拦截；
+    // 仅编辑态挂载，一般状态滚轮仍走列表的缩放/滚动。
+    useEffect(() => {
+        const input = editingGainInputRef.current;
+        if (!input || !editingGainTrackId) return;
+        const onWheel = (e: WheelEvent) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const fine = isModifierActive(paramFineAdjustKb, e);
+            const direction = e.deltaY < 0 ? 1 : -1;
+            const step = fine
+                ? TRACK_GAIN_WHEEL_FINE_STEP_DB
+                : TRACK_GAIN_WHEEL_STEP_DB;
+            const parsed = parseFloat(editingGainValue);
+            const current = Number.isFinite(parsed) ? parsed : 0;
+            const next = clampGainDb(current + direction * step);
+            setEditingGainValue(formatEditNumber(next));
+        };
+        input.addEventListener("wheel", onWheel, { passive: false });
+        return () => input.removeEventListener("wheel", onWheel);
+    }, [editingGainTrackId, editingGainValue, paramFineAdjustKb]);
+
+    // 点击输入框以外的任何位置（含轨道列表背景/时间线）→ 提交并退出编辑。
+    // ★ 文档级捕获：不依赖 blur（背景 pointerdown 会 preventDefault，焦点不
+    //   转移则 blur 不触发）——保证退出。
+    useEffect(() => {
+        if (!editingGainTrackId) return;
+        const onDocPointerDown = (e: PointerEvent) => {
+            const target = e.target instanceof Element ? e.target : null;
+            if (target && editingGainInputRef.current?.contains(target)) return;
+            commitTrackGainEdit();
+        };
+        document.addEventListener("pointerdown", onDocPointerDown, true);
+        return () => document.removeEventListener("pointerdown", onDocPointerDown, true);
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- 每编辑会话挂载一次；editingGainValue 变化时重挂保持闭包新鲜
+    }, [editingGainTrackId, editingGainValue]);
 
     useEffect(() => {
         rowHeightRef.current = rowHeight;
@@ -1875,7 +1926,11 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                         {editingGainTrackId === track.id ? (
                                                             <input
                                                                 ref={editingGainInputRef}
-                                                                className="w-14 text-xs rounded px-1 outline-none text-left tabular-nums bg-qt-base text-qt-text border border-qt-border"
+                                                                className="text-xs rounded px-1 outline-none text-left tabular-nums bg-qt-base text-qt-text border border-qt-border"
+                                                                style={{
+                                                                    // 实测文本宽度：自定义字体下 ch 估算不可靠
+                                                                    width: `${editingGainWidthPx}px`,
+                                                                }}
                                                                 value={editingGainValue}
                                                                 onChange={(e) =>
                                                                     setEditingGainValue(

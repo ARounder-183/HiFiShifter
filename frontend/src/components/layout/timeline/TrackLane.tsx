@@ -156,6 +156,12 @@ type TrackLaneProps = {
     onRenameDone?: () => void;
     onRenameClickCandidate?: (candidate: ClipRenameClickCandidate | null) => void;
     onGainCommit?: (clipId: string, db: number) => void;
+    /** 角标行内编辑（镜像 renamingClipId 管线） */
+    editingBadge?: { clipId: string; field: "rate" | "gain" } | null;
+    onBadgeEditStart?: (clipId: string, field: "rate" | "gain") => void;
+    onBadgeEditCommit?: (clipId: string, field: "rate" | "gain", value: number) => void;
+    onBadgeEditDone?: () => void;
+    onRateBadgeMenu?: (clipId: string, screenX: number, screenY: number) => void;
     onFormantMorphCommit?: (clipId: string, value: ClipFormantMorph, checkpoint: boolean) => void;
     activeGroupIds?: Set<string>;
     disabledGroupIds?: string[];
@@ -237,6 +243,11 @@ export const TrackLane = React.memo(
             onRenameDone,
             onRenameClickCandidate,
             onGainCommit,
+            editingBadge,
+            onBadgeEditStart,
+            onBadgeEditCommit,
+            onBadgeEditDone,
+            onRateBadgeMenu,
             onFormantMorphCommit,
             activeGroupIds,
             disabledGroupIds,
@@ -791,6 +802,11 @@ export const TrackLane = React.memo(
                             onRenameDone={onRenameDone}
                             onRenameClickCandidate={onRenameClickCandidate}
                             onGainCommit={onGainCommit}
+                            editingBadge={editingBadge}
+                            onBadgeEditStart={onBadgeEditStart}
+                            onBadgeEditCommit={onBadgeEditCommit}
+                            onBadgeEditDone={onBadgeEditDone}
+                            onRateBadgeMenu={onRateBadgeMenu}
                             onFormantMorphCommit={onFormantMorphCommit}
                             activeGroupIds={activeGroupIds}
                             disabledGroupIds={disabledGroupIds}
@@ -910,6 +926,12 @@ export const TrackLane = React.memo(
             prev.onRenameDone === next.onRenameDone &&
             prev.onRenameClickCandidate === next.onRenameClickCandidate &&
             prev.onGainCommit === next.onGainCommit &&
+            prev.editingBadge?.clipId === next.editingBadge?.clipId &&
+            prev.editingBadge?.field === next.editingBadge?.field &&
+            prev.onBadgeEditStart === next.onBadgeEditStart &&
+            prev.onBadgeEditCommit === next.onBadgeEditCommit &&
+            prev.onBadgeEditDone === next.onBadgeEditDone &&
+            prev.onRateBadgeMenu === next.onRateBadgeMenu &&
             prev.onFormantMorphCommit === next.onFormantMorphCommit &&
             prev.ghostDrag === next.ghostDrag &&
             prev.verticalTrackLockTrackId === next.verticalTrackLockTrackId &&

@@ -410,16 +410,31 @@ export const setClipsStateBulkRemote = createAsyncThunk(
 
 export const pasteTimelineClipboardRemote = createAsyncThunk(
     "session/pasteTimelineClipboardRemote",
-    async (mode: "selected" | "new_tracks" | undefined, { rejectWithValue }) => {
+    async (
+        mode: "selected" | "new_tracks" | undefined,
+        { rejectWithValue, getState },
+    ) => {
         const result = await webApi.pasteTimelineClipboard(mode);
         if (!result?.ok) {
             return rejectWithValue(result?.error ?? "paste_timeline_clipboard_failed");
         }
-        const createdClipIds = Array.isArray(result.created_clip_ids)
+        // 剪贴板无 HiFiShifter 数据时后端会回退到 REAPERMedia 粘贴，其载荷
+        // 现在同样携带 created_clip_ids；这里对缺失该字段的载荷以前后 diff
+        // 兜底，保证"选中新 Clip + 光标跳末尾"两条需求在任何路径都生效。
+        const rawCreated = Array.isArray(result.created_clip_ids)
             ? result.created_clip_ids
             : Array.isArray((result as { createdClipIds?: string[] }).createdClipIds)
               ? ((result as { createdClipIds?: string[] }).createdClipIds as string[])
               : [];
+        let createdClipIds = rawCreated.filter((id): id is string => typeof id === "string");
+        if (createdClipIds.length === 0) {
+            const beforeClipIds = new Set(
+                (getState() as { session: SessionState }).session.clips.map((c) => c.id),
+            );
+            createdClipIds = ((result as { clips?: Array<{ id?: string }> }).clips ?? [])
+                .map((c) => c.id)
+                .filter((id): id is string => !!id && !beforeClipIds.has(id));
+        }
         // 粘贴产生 Clip 后，把播放光标跳到所有新 Clip 中最靠右的结束位置，
         // 并同步后端 transport，保证前后端一致。
         let pasteEndSec: number | null = null;

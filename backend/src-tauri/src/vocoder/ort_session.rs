@@ -725,7 +725,9 @@ fn smoke_test_gpu_session(
             let _ = run_thread.join();
             match result {
                 Ok(_) => {
-                    log::error!("ort_session[{role:?}]: {ep_name} smoke test passed - EP is functional");
+                    // 成功用例：info 而非 error —— EP 功能正常是健康状态，
+                    // error 级别会误导用户/CI 把正常运行当作失败。
+                    log::info!("ort_session[{role:?}]: {ep_name} smoke test passed - EP is functional");
                     Ok(session)
                 }
                 Err(e) => Err(format!(

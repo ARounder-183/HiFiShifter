@@ -108,7 +108,9 @@ fn read_fragment() -> Result<ProjectFragment, String> {
 fn paste_placement(mode: Option<&str>) -> FragmentTrackPlacement {
     match mode.unwrap_or("selected") {
         "new_tracks" | "tracks" => FragmentTrackPlacement::AppendAtEnd,
-        _ => FragmentTrackPlacement::SelectedTrackOnly,
+        // 粘贴需求：起始目标轨道 = 当前选中轨道；多轨数据按显示顺序向下
+        // 扩展，轨道不足自动新建（轨道/工程片段粘贴仍走 AppendAtEnd）。
+        _ => FragmentTrackPlacement::SelectedTracksRelative,
     }
 }
 

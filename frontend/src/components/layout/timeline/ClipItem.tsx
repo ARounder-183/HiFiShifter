@@ -46,6 +46,7 @@ import {
     ClipHeader,
     type ClipRenameClickCandidate,
     type ClipRenameController,
+    type ClipBadgeEditController,
 } from "./clip/ClipHeader";
 
 /** 重叠遮罩：被压住的 Clip 以该不透明度透出。0.5 会把两个彩色块混成脏色。 */
@@ -82,6 +83,11 @@ export const ClipItem = React.memo(function ClipItem({
     onRenameDone,
     onRenameClickCandidate,
     onGainCommit,
+    editingBadge,
+    onBadgeEditStart,
+    onBadgeEditCommit,
+    onBadgeEditDone,
+    onRateBadgeMenu,
     onFormantMorphCommit,
     activeGroupIds,
     disabledGroupIds,
@@ -166,6 +172,12 @@ export const ClipItem = React.memo(function ClipItem({
     onRenameDone?: () => void;
     onRenameClickCandidate?: (candidate: ClipRenameClickCandidate | null) => void;
     onGainCommit?: (clipId: string, db: number) => void;
+    /** 角标行内编辑（镜像 renamingClipId 管线）：父级持有的编辑目标与回调 */
+    editingBadge?: { clipId: string; field: "rate" | "gain" } | null;
+    onBadgeEditStart?: (clipId: string, field: "rate" | "gain") => void;
+    onBadgeEditCommit?: (clipId: string, field: "rate" | "gain", value: number) => void;
+    onBadgeEditDone?: () => void;
+    onRateBadgeMenu?: (clipId: string, screenX: number, screenY: number) => void;
     onFormantMorphCommit?: (clipId: string, value: ClipFormantMorph, checkpoint: boolean) => void;
     activeGroupIds?: Set<string>;
     disabledGroupIds?: string[];
@@ -193,6 +205,10 @@ export const ClipItem = React.memo(function ClipItem({
     const { t } = useI18n();
     const isPlaying = useAppSelector((state) => state.session.runtime.isPlaying);
     const renameControllerRef = React.useRef<ClipRenameController | null>(null);
+    const badgeEditControllerRef = React.useRef<ClipBadgeEditController | null>(null);
+    // 角标编辑时整块 DOM 同样需要压过 timeline Canvas（与名称编辑一致），
+    // 否则 Canvas 中的原始倍率/增益文本会把输入框盖住。
+    const badgeEditingHere = editingBadge?.clipId === clip.id;
 
     // 不要对 left/width 取整：背景网格与时间标尺均按浮点像素位置绘制。
     // 若这里 Math.round，Clip 会相对网格最多向右偏 0.5px；在常用缩放
@@ -468,19 +484,24 @@ export const ClipItem = React.memo(function ClipItem({
                 top: 0,
                 height: clipHeightPx,
                 boxShadow: interactionHintBoxShadow,
-                // 名称编辑时整块 DOM 需要压过 timeline Canvas（zIndex:1），
+                // 名称/角标编辑时整块 DOM 需要压过 timeline Canvas（zIndex:1），
                 // 否则 Canvas 中的原始名称会把输入框盖住。
-                zIndex: triggerRename ? 60 : undefined,
+                zIndex: triggerRename || badgeEditingHere ? 60 : undefined,
             }}
             onPointerDownCapture={(e) => {
-                // 正在编辑名称时，点击 Clip 内输入框以外的任意位置都先提交编辑。
+                // 正在编辑名称/角标时，点击 Clip 内输入框以外的任意位置都先提交编辑。
                 // 输入框自身的 pointerdown 会在命中 input 时跳过。
                 const target = e.target as HTMLElement | null;
                 const isInputTarget =
                     target?.closest?.("input,textarea,select,[contenteditable='true']") != null;
+                if (isInputTarget) return;
                 const controller = renameControllerRef.current;
-                if (!isInputTarget && controller?.isEditing()) {
+                if (controller?.isEditing()) {
                     controller.commit();
+                }
+                const badgeController = badgeEditControllerRef.current;
+                if (badgeController?.isEditing()) {
+                    badgeController.commit();
                 }
             }}
             onContextMenu={(e) => {
@@ -756,6 +777,14 @@ export const ClipItem = React.memo(function ClipItem({
                     onRenameClickCandidate={onRenameClickCandidate}
                     renameControllerRef={renameControllerRef}
                     onGainCommit={onGainCommit}
+                    editingBadgeField={
+                        editingBadge?.clipId === clip.id ? editingBadge.field : null
+                    }
+                    onBadgeEditStart={onBadgeEditStart}
+                    onBadgeEditCommit={onBadgeEditCommit}
+                    onBadgeEditDone={onBadgeEditDone}
+                    badgeEditControllerRef={badgeEditControllerRef}
+                    onRateBadgeMenu={onRateBadgeMenu}
                     onFormantMorphCommit={onFormantMorphCommit}
                     onToggleGroupDisabled={onToggleGroupDisabled}
                     activeGroupIds={activeGroupIds}

@@ -1,6 +1,4 @@
 fn main() {
-    emit_git_info();
-
     build_frontend();
 
     // Allow skipping expensive native builds in CI checks via env var
@@ -1532,10 +1530,19 @@ fn generate_coreml_model_variant() {}
 // 把当前 commit / 脏工作区标志 / GitHub 仓库链接烘进二进制，供关于对话框、
 // 日志会话头与诊断包展示，便于把用户日志精确追溯到某一份构建。
 //
-// 缓存语义说明：一旦打印 `rerun-if-changed`，cargo 的“包内任意文件变化即
-// 重跑 build script”默认行为即被替换。这里只声明 .git/HEAD 与其指向的 ref
-// 文件——commit/checkout 后会重跑；但不提交的源码编辑不会重跑本脚本，
-// 脏标志可能滞后一次构建（commit 哈希本身仍指向最后一次提交，语义正确）。
+// 缓存语义：build.rs 的工作目录是包根（backend/src-tauri），而 .git 在仓库
+// 根目录——因此 rerun-if-changed 必须使用 `git rev-parse --absolute-git-dir`
+// 解析出的**绝对路径**（相对路径 `.git/...` 永远不存在，指令形同虚设，
+// commit 后不会重跑本脚本，哈希就冻结在旧值上）。声明的信号：
+// - `<gitdir>/logs/HEAD`（reflog：每次 commit/checkout 都会追加，最可靠的
+//   “有新提交”信号）；
+// - `<gitdir>/HEAD`、当前分支 ref 文件与 packed-refs（ref 可能松散或打包存储；
+//   worktree 下分支 ref 在 common dir，故两处都声明）；
+// - 脏标志监视集：后端 src、打包 resources、前端源码（产出被嵌入的 dist）——
+//   即“所有会进入二进制的输入树”；影响产物的未提交修改能及时翻转脏标志。
+// 注意：一旦打印任何 rerun-if-changed，cargo 的“包内任意文件变化即重跑
+// build script”默认行为即被替换——本脚本其余部分（third_party 原生库等）
+// 已各自显式声明其依赖路径，不受影响。
 
 #[path = "src/build_git.rs"]
 mod build_git;
@@ -1555,36 +1562,70 @@ fn git_output(args: &[&str]) -> Option<String> {
     }
 }
 
-fn emit_git_info() {
-    // commit/checkout（以及 ref 变化）会让本脚本重跑，哈希保持新鲜。
-    let head = std::path::Path::new(".git/HEAD");
-    if head.exists() {
-        println!("cargo:rerun-if-changed=.git/HEAD");
-        if let Ok(content) = std::fs::read_to_string(head) {
-            let content = content.trim();
-            if let Some(reference) = content.strip_prefix("ref: ") {
-                let ref_path = std::path::Path::new(".git").join(reference);
-                if ref_path.exists() {
-                    println!("cargo:rerun-if-changed={}", ref_path.display());
-                }
-                // 分支可能存储在 packed-refs 中。
-                let packed = std::path::Path::new(".git/packed-refs");
-                if packed.exists() {
-                    println!("cargo:rerun-if-changed={}", packed.display());
-                }
-            }
-        }
+/// 声明 rerun-if-changed（路径存在时才声明，避免不存在路径的指令干扰缓存指纹）。
+fn declare_rerun_if_exists(path: &std::path::Path) {
+    if path.exists() {
+        println!("cargo:rerun-if-changed={}", path.display());
     }
+}
 
-    let full = git_output(&["rev-parse", "HEAD"]);
-    let Some(full) = full else {
-        // 非 git 构建（如 GitHub 源码 zip）：注入空值，运行时回退为纯版本号。
+fn emit_git_info() {
+    // 非 git 构建（如 GitHub 源码 zip）：注入空值，运行时回退为纯版本号。
+    // 不打印任何 git 相关的 rerun 指令，保持既有指令集不变。
+    let Some(full) = git_output(&["rev-parse", "HEAD"]) else {
         println!("cargo:rustc-env=HIFISHIFTER_GIT_COMMIT=");
         println!("cargo:rustc-env=HIFISHIFTER_GIT_COMMIT_SHORT=");
         println!("cargo:rustc-env=HIFISHIFTER_GIT_DIRTY=false");
         println!("cargo:rustc-env=HIFISHIFTER_GIT_REPO_URL=");
         return;
     };
+
+    // 真实 git 目录（绝对路径；worktree 下为 .git/worktrees/<name>）。
+    let git_dir = git_output(&["rev-parse", "--absolute-git-dir"]);
+    // packed-refs 存放在 common dir（主仓库与 gitdir 相同；worktree 下为主 .git）。
+    // `--path-format=absolute` 需要 git ≥ 2.31，失败则跳过该指令。
+    let common_dir = git_output(&[
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-common-dir",
+    ]);
+
+    if let Some(dir) = &git_dir {
+        let dir_path = std::path::Path::new(dir);
+        for relative in ["HEAD", "logs/HEAD", "packed-refs"] {
+            declare_rerun_if_exists(&dir_path.join(relative));
+        }
+    }
+    if let Some(common) = &common_dir {
+        declare_rerun_if_exists(&std::path::Path::new(common).join("packed-refs"));
+    }
+    // 当前分支的 ref 文件：提交时 mtime 变化（松散 ref 在 common dir，
+    // per-worktree ref 在 gitdir，两处都声明）。
+    if let Some(reference) = git_output(&["rev-parse", "--symbolic-full-name", "HEAD"]) {
+        for dir in [&git_dir, &common_dir].into_iter().flatten() {
+            declare_rerun_if_exists(&std::path::Path::new(dir).join(&reference));
+        }
+    }
+    // ── 脏标志监视集 ────────────────────────────────────────────────
+    // 语义：dirty = “构建产物可能偏离 commit”。因此监视所有会进入二进制
+    // 的输入树——后端 Rust（src）、打包资源（resources）、前端源码（产出
+    // 被嵌入的 dist）。原生库输入由上方各 native builder 自行声明。
+    // README / docs 等不影响产物的修改不触发重跑：它们既不会造成构建与
+    // commit 的差异，也就不需要（不应该）标脏。
+    // 无法直接声明仓库根：rerun-if-changed 指向目录时会递归遍历，仓库根
+    // 下的 node_modules 与 target 会让遍历代价爆炸，故用这份精选清单。
+    for watched in [
+        "src",
+        "resources",
+        "../../frontend/src",
+        "../../frontend/public",
+        "../../frontend/index.html",
+        "../../frontend/package.json",
+        "../../frontend/vite.config.ts",
+        "../../frontend/tsconfig.json",
+    ] {
+        declare_rerun_if_exists(std::path::Path::new(watched));
+    }
 
     let short = git_output(&["rev-parse", "--short=9", "HEAD"])
         .unwrap_or_else(|| full.chars().take(9).collect());

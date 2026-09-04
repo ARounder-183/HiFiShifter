@@ -4,6 +4,7 @@ import {
     buildTimelineClipVisualStyle,
     computeTimelineFadeShadeRange,
     formatPlaybackRateLabel,
+    parsePlaybackRateInput,
 } from "./timelineCanvasStyle.js";
 
 test("components/layout/timeline/runtime/timelineCanvasStyle.test.ts scripted checks", async () => {
@@ -170,4 +171,37 @@ test("components/layout/timeline/runtime/timelineCanvasStyle.test.ts scripted ch
     assertEqual(formatPlaybackRateLabel(2), "x2", "integer rates collapse to bare number");
     assertEqual(formatPlaybackRateLabel(0), "x1", "non-positive rates fall back to x1");
     assertEqual(formatPlaybackRateLabel(NaN), "x1", "non-finite rates fall back to x1");
+});
+
+
+test("parsePlaybackRateInput accepts plain, prefixed and percent forms", () => {
+    function assertEqual(actual: unknown, expected: unknown, label: string): void {
+        const a = JSON.stringify(actual);
+        const e = JSON.stringify(expected);
+        if (a !== e) throw new Error(`${label}: expected ${e}, received ${a}`);
+    }
+    const check = (raw: string, expected: number | null, label: string) =>
+        assertEqual(parsePlaybackRateInput(raw), expected, label);
+    check("1.5", 1.5, "plain decimal");
+    check(" 2 ", 2, "whitespace trimmed");
+    check("x1.5", 1.5, "x prefix");
+    check("×0.5", 0.5, "fullwidth multiply prefix");
+    check("1.5x", 1.5, "trailing x");
+    check("150%", 1.5, "percent form");
+    check("50%", 0.5, "percent below 100");
+});
+
+test("parsePlaybackRateInput rejects invalid input", () => {
+    function assertEqual(actual: unknown, expected: unknown, label: string): void {
+        const a = JSON.stringify(actual);
+        const e = JSON.stringify(expected);
+        if (a !== e) throw new Error(`${label}: expected ${e}, received ${a}`);
+    }
+    const check = (raw: string, label: string) =>
+        assertEqual(parsePlaybackRateInput(raw), null, label);
+    check("", "empty string");
+    check("abc", "non numeric");
+    check("-1", "negative");
+    check("0", "zero");
+    check("NaN", "NaN literal");
 });
