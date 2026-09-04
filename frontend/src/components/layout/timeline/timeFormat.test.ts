@@ -512,13 +512,23 @@ test("parseDurationUnit parses beat-based formats (zero-based)", () => {
     expect(parseDurationUnit("abc", "barBeats", ctx)).toBeNull();
 });
 
-test("parseDurationInput tries primary then secondary unit", () => {
+test("parseDurationInput prefers plain time over beat context", () => {
     const ctx = { bpm: 120, beatsPerBar: 4, grid: "1/16" };
-    // 主单位 seconds："5.3" → 5.3 秒（不当作 小节.拍）
-    expect(parseDurationInput("5.3", "seconds", "barBeats", ctx)).toBe(5.3);
-    // 主单位 barBeats："5.3" → 小节 5 拍 3
-    expect(parseDurationInput("5.3", "barBeats", "seconds", ctx)).toBe((5 * 4 + 3) * 0.5);
-    // 主单位解析失败 → 回退副单位（clock）
+    // 两类候选同时存在：`1.2` / `5.3` 首先读作秒，而不是 小节.拍
+    expect(parseDurationInput("1.2", "barBeats", "seconds", ctx)).toBe(1.2);
+    expect(parseDurationInput("5.3", "barBeats", "seconds", ctx)).toBe(5.3);
+    expect(parseDurationInput("1.2", "barDivisions", "clock", ctx)).toBe(1.2);
+    // 主单位本就是纯时长时行为不变
+    expect(parseDurationInput("1.2", "seconds", "barBeats", ctx)).toBe(1.2);
+    // 小节.拍 类仍有不受影响的键入形态：三段式 / 斜杠切分（纯时长无法解读）
+    expect(parseDurationInput("1.2.000", "barBeats", "seconds", ctx)).toBe(3);
+    expect(parseDurationInput("1.2/16", "barDivisions", "seconds", ctx)).toBe(2.25);
+    // 时分秒键入同样优先（clock 与 barBeats 同时候选）
+    expect(parseDurationInput("1:30", "barBeats", "clock", ctx)).toBe(90);
+    // 仅单一类别候选（副单位"不使用"）：保持该类别解读，顺序不变
+    expect(parseDurationInput("1.2", "barBeats", "none", ctx)).toBe(3);
+    expect(parseDurationInput("1.2", "seconds", "none", ctx)).toBe(1.2);
+    // 类别内保持 主→副 回退
     expect(parseDurationInput("1:02.500", "seconds", "clock", ctx)).toBe(62.5);
     // 都无法解析 → null
     expect(parseDurationInput("abc", "seconds", "barBeats", ctx)).toBeNull();
@@ -536,54 +546,84 @@ test("parseDurationUnit/formatDurationUnit round-trip", () => {
     }
 });
 
-// ── 严格互逆：展示格式永远不会产生的形态必须拒绝 ────────────────────
-test("parseDurationUnit rejects malformed clock forms", () => {
+// ── 宽松解析：展示格式之外的常见用户输入形态，尽量转换为合法时长 ────
+test("parseDurationUnit accepts lenient clock forms", () => {
     const ctx = { bpm: 120, beatsPerBar: 4, grid: "1/16" };
-    // 秒位进位形态（formatClockLabel 按 %60 拆分，永不产生）
-    expect(parseDurationUnit("1:90.000", "clock", ctx)).toBeNull();
-    expect(parseDurationUnit("0:60.000", "clock", ctx)).toBeNull();
-    expect(parseDurationUnit("1:70:10.000", "clock", ctx)).toBeNull();
-    // 毫秒必须恰好 3 位
-    expect(parseDurationUnit("1:5.1", "clock", ctx)).toBeNull();
-    expect(parseDurationUnit("1:02.50", "clock", ctx)).toBeNull();
-    expect(parseDurationUnit("1:02.5000", "clock", ctx)).toBeNull();
-    // 合法形态：不带补零的 分:秒.毫秒（展示原样）、带小时的形态
-    expect(parseDurationUnit("1:5.123", "clock", ctx)).toBe(65.123);
-    expect(parseDurationUnit("1:02:03.500", "clock", ctx)).toBe(3723.5);
+    // 分/秒超 60 自动进位（DAW 惯例：1:90 = 2:30 = 150s）
+    expect(parseDurationUnit("1:90.000", "clock", ctx)).toBe(150);
+    expect(parseDurationUnit("0:60.000", "clock", ctx)).toBe(60);
+    expect(parseDurationUnit("1:70:10.000", "clock", ctx)).toBe(7810);
+    // 小数秒位数任意（展示形态恒 3 位是其子集）
+    expect(parseDurationUnit("1:02.5", "clock", ctx)).toBe(62.5);
+    expect(parseDurationUnit("1:02.4999", "clock", ctx)).toBeCloseTo(62.4999, 6);
+    // 带小时、纯数字视作秒
+    expect(parseDurationUnit("1:02:03.5", "clock", ctx)).toBe(3723.5);
+    expect(parseDurationUnit("90", "clock", ctx)).toBe(90);
+    // 粘贴标尺/光标标签：`..` 不精确标记被剥除
+    expect(parseDurationUnit("1:02.4999..", "clock", ctx)).toBeCloseTo(62.4999, 6);
+    // 十进制逗号
+    expect(parseDurationUnit("1:02,5", "clock", ctx)).toBe(62.5);
+    // 完全无法解读仍拒绝
+    expect(parseDurationUnit("1::30", "clock", ctx)).toBeNull();
+    expect(parseDurationUnit("1:abc", "clock", ctx)).toBeNull();
+    expect(parseDurationUnit("1:2:3:4", "clock", ctx)).toBeNull();
 });
 
-test("parseDurationUnit rejects malformed barBeats forms", () => {
+test("parseDurationUnit accepts lenient barBeats forms", () => {
     const ctx = { bpm: 120, beatsPerBar: 4, grid: "1/16" };
-    // 小单位不是恰好 3 位（.5 会被歧义解读为 005 或 500，一律拒绝）
-    expect(parseDurationUnit("1.2.5", "barBeats", ctx)).toBeNull();
-    expect(parseDurationUnit("1.2.5000", "barBeats", ctx)).toBeNull();
-    // 段数错误 / 负数 / 小数段
+    // 短小单位按"拍内小数"左对齐解读：.5 = 半拍（用户直觉），而非 005
+    expect(parseDurationUnit("1.2.5", "barBeats", ctx)).toBe((4 + 2 + 0.5) * 0.5);
+    expect(parseDurationUnit("1.2.25", "barBeats", ctx)).toBe((4 + 2 + 0.25) * 0.5);
+    // 3 位展示形态按字面解读（互逆不破）：.500 = 0.5 拍、.005 = 0.005 拍
+    expect(parseDurationUnit("1.2.500", "barBeats", ctx)).toBe(3.25);
+    expect(parseDurationUnit("1.2.005", "barBeats", ctx)).toBe((4 + 2 + 0.005) * 0.5);
+    // 拍序号超出每小节拍数：自动进位不拒绝（1.4.000 = 下一小节起点）
+    expect(parseDurationUnit("1.4.000", "barBeats", ctx)).toBe(4);
+    expect(parseDurationUnit("1.5.500", "barBeats", ctx)).toBe((4 + 5 + 0.5) * 0.5);
+    // 粘贴标尺标签：`..` 标记剥除后按左对齐小数解读
+    expect(parseDurationUnit("1.2.333..", "barBeats", ctx)).toBeCloseTo((4 + 2 + 0.333) * 0.5, 6);
+    // 两段形态（视小单位为 0）
+    expect(parseDurationUnit("5.3", "barBeats", ctx)).toBe((5 * 4 + 3) * 0.5);
+    // 无法解读仍拒绝：段数错误 / 负号 / 空段；单段不放行（保持"纯数字=秒"逃生口）
     expect(parseDurationUnit("1.2.5.6", "barBeats", ctx)).toBeNull();
     expect(parseDurationUnit("1.-2.500", "barBeats", ctx)).toBeNull();
-    expect(parseDurationUnit("1.2.5..", "barBeats", ctx)).toBeNull();
-    // 拍序号超出每小节拍数（0 基：bpb=4 时拍序号只能为 0..3）
-    expect(parseDurationUnit("1.4.000", "barBeats", ctx)).toBeNull();
-    expect(parseDurationUnit("1.5.500", "barBeats", ctx)).toBeNull();
-    // 两段形态（视小单位为 000）仍然合法
-    expect(parseDurationUnit("5.3", "barBeats", ctx)).toBe((5 * 4 + 3) * 0.5);
+    expect(parseDurationUnit("1..500", "barBeats", ctx)).toBeNull();
+    expect(parseDurationUnit("5", "barBeats", ctx)).toBeNull();
 });
 
-test("parseDurationUnit rejects mismatched barDivisions denominators", () => {
+test("parseDurationUnit accepts lenient barDivisions forms", () => {
     const ctx = { bpm: 120, beatsPerBar: 4, grid: "1/16" };
-    // 切分数与当前网格（1/16 → 每小节 16 格）不符：拒绝，不按当前步长静默解析
-    expect(parseDurationUnit("1.2/999", "barDivisions", ctx)).toBeNull();
-    expect(parseDurationUnit("1.2/16.5", "barDivisions", ctx)).toBeNull();
-    // 左段段数错误 / 网格序号含小数或负号
-    expect(parseDurationUnit("1.2.3/16", "barDivisions", ctx)).toBeNull();
-    expect(parseDurationUnit("1.-1/16", "barDivisions", ctx)).toBeNull();
-    // 网格序号超出单小节范围（0 基：0..16）
-    expect(parseDurationUnit("1.17/16", "barDivisions", ctx)).toBeNull();
-    // 边界：恰好在下一小节起点的序号（与展示侧 floor(inBarBeat/step+1e-9) 一致）
+    // 省略切分数：按当前网格步长（1/16 → 0.25 拍/格）
+    expect(parseDurationUnit("1.2", "barDivisions", ctx)).toBe((4 + 2 * 0.25) * 0.5);
+    // 键入切分数定义网格：步长 = 每小节拍数 / 切分数（而非静默套用当前网格）
+    expect(parseDurationUnit("1.2/32", "barDivisions", ctx)).toBe((4 + 2 * (4 / 32)) * 0.5);
+    expect(parseDurationUnit("1.2/999", "barDivisions", ctx)).toBe((4 + 2 * (4 / 999)) * 0.5);
+    // 网格序超出单小节范围：隐含顺延到下一小节，不拒绝
+    expect(parseDurationUnit("1.17/16", "barDivisions", ctx)).toBe((4 + 17 * 0.25) * 0.5);
+    // 边界：恰好在下一小节起点的序号（展示侧 floor(inBarBeat/step+1e-9) 可产生）
     expect(parseDurationUnit("1.16/16", "barDivisions", ctx)).toBe(4);
-    // 附点网格的小数切分数按展示原样比对：den 直接取展示侧输出
+    // 附点网格的小数切分数：键入值直接定义步长，与展示形态互逆
     const dottedCtx = { bpm: 120, beatsPerBar: 4, grid: "1/8d" };
     const emitted = formatDurationUnit("barDivisions", 1.5, dottedCtx);
     const den = emitted.split("/")[1] ?? "";
+    const parsed = parseDurationUnit(emitted, "barDivisions", dottedCtx);
+    expect(parsed).not.toBeNull();
+    expect(Math.abs((parsed ?? 0) - 1.5)).toBeLessThan(0.001);
     expect(parseDurationUnit(`1.2/${den}`, "barDivisions", dottedCtx)).not.toBeNull();
-    expect(parseDurationUnit(`1.2/${den}9`, "barDivisions", dottedCtx)).toBeNull();
+    // 无法解读仍拒绝：左段段数错误 / 负号 / 切分数非数值 / 空切分数
+    expect(parseDurationUnit("1.2.3/16", "barDivisions", ctx)).toBeNull();
+    expect(parseDurationUnit("1.-1/16", "barDivisions", ctx)).toBeNull();
+    expect(parseDurationUnit("1.2/abc", "barDivisions", ctx)).toBeNull();
+    expect(parseDurationUnit("1.2/", "barDivisions", ctx)).toBeNull();
+});
+
+test("parseDurationUnit accepts lenient seconds forms", () => {
+    const ctx = { bpm: 120, beatsPerBar: 4, grid: "1/16" };
+    // 十进制逗号 / 尾点 / 标尺标签的 `..` 标记
+    expect(parseDurationUnit("1,5", "seconds", ctx)).toBe(1.5);
+    expect(parseDurationUnit("12.", "seconds", ctx)).toBe(12);
+    expect(parseDurationUnit("12.4999..", "seconds", ctx)).toBeCloseTo(12.4999, 6);
+    // 负数不是合法时长（不猜测符号）
+    expect(parseDurationUnit("-1", "seconds", ctx)).toBeNull();
+    expect(parseDurationUnit("1.2.5", "seconds", ctx)).toBeNull();
 });
