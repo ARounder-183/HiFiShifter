@@ -43,6 +43,9 @@ pub fn remove_old_synth_temp(old_path: Option<&str>) {
 /// 清理范围：
 /// - `%TEMP%/hifishifter/synth_*.wav`（合成临时文件）
 /// - `%TEMP%/hifishifter/import_*.*`（导入临时文件）
+/// - `%TEMP%/hifishifter/glue_*.wav`（胶合烘焙文件，仅清理超过 7 天的：
+///   已保存的工程会直接引用 glue 文件作为 clip 源，无条件清理会弄坏
+///   最近的工程；按文件龄清理只限制无主的陈旧残留）
 /// - `%TEMP%/hs_vslib_*.wav`（vslib 崩溃残留）
 ///
 /// 此函数不会阻塞，内部 spawn 后台线程执行。
@@ -51,9 +54,14 @@ pub fn cleanup_stale_temp_files() {
         let mut total_removed = 0u64;
         let mut total_bytes = 0u64;
 
-        // 1. 清理 %TEMP%/hifishifter/ 下的 synth_*.wav 和 import_*.*
+        // 1. 清理 %TEMP%/hifishifter/ 下的 synth_*.wav、import_*.* 和
+        //    超过 7 天的 glue_*.wav
         if let Ok(hs_dir) = hifishifter_temp_dir() {
             let (removed, bytes) = cleanup_dir_by_prefix(&hs_dir, &["synth_", "import_"]);
+            total_removed += removed;
+            total_bytes += bytes;
+            let (removed, bytes) =
+                cleanup_dir_by_prefix_older_than(&hs_dir, &["glue_"], 7 * 24 * 3600);
             total_removed += removed;
             total_bytes += bytes;
         }
@@ -74,10 +82,11 @@ pub fn cleanup_stale_temp_files() {
     });
 }
 
-/// 扫描目录，删除文件名以指定前缀开头的文件。
+/// 扫描目录，删除文件名以指定前缀开头、且修改时间早于 `max_age_sec`
+/// 秒之前的文件。`max_age_sec = 0` 等价于不限龄。
 ///
 /// 返回 `(删除文件数, 释放字节数)`。
-fn cleanup_dir_by_prefix(dir: &Path, prefixes: &[&str]) -> (u64, u64) {
+fn cleanup_dir_by_prefix_older_than(dir: &Path, prefixes: &[&str], max_age_sec: u64) -> (u64, u64) {
     let mut removed = 0u64;
     let mut bytes = 0u64;
 
@@ -95,9 +104,20 @@ fn cleanup_dir_by_prefix(dir: &Path, prefixes: &[&str]) -> (u64, u64) {
             Some(n) => n,
             None => continue,
         };
-        let matches = prefixes.iter().any(|prefix| file_name.starts_with(prefix));
-        if !matches {
+        if !prefixes.iter().any(|prefix| file_name.starts_with(prefix)) {
             continue;
+        }
+        if max_age_sec > 0 {
+            let age_ok = entry
+                .metadata()
+                .ok()
+                .and_then(|meta| meta.modified().ok())
+                .and_then(|mtime| mtime.elapsed().ok())
+                .map(|elapsed| elapsed.as_secs() > max_age_sec)
+                .unwrap_or(false);
+            if !age_ok {
+                continue;
+            }
         }
         if let Ok(meta) = entry.metadata() {
             bytes += meta.len();
@@ -113,4 +133,11 @@ fn cleanup_dir_by_prefix(dir: &Path, prefixes: &[&str]) -> (u64, u64) {
     }
 
     (removed, bytes)
+}
+
+/// 扫描目录，删除文件名以指定前缀开头的文件。
+///
+/// 返回 `(删除文件数, 释放字节数)`。
+fn cleanup_dir_by_prefix(dir: &Path, prefixes: &[&str]) -> (u64, u64) {
+    cleanup_dir_by_prefix_older_than(dir, prefixes, 0)
 }

@@ -48,6 +48,10 @@ async function syncAutoCrossfadeFromLatestTimeline(args: {
             ).unwrap(),
         );
         await Promise.allSettled(fadePromises);
+        // 淡化更新完成后再重新拉取：上面这份 latestTimeline 是淡化前的
+        // 快照，若直接返回，fulfilled reducer 会把刚应用的自动淡化从
+        // UI 上回滚掉（后端仍保留，前后端就此分叉）。
+        return await webApi.getTimelineState();
     }
     return latestTimeline;
 }
@@ -137,6 +141,11 @@ export const importAudioFromPath = createAsyncThunk(
     "session/importAudioFromPath",
     async (audioPath: string, { dispatch, rejectWithValue, getState }) => {
         dispatch(setAudioPathAction(audioPath));
+        // 在发起导入前捕获现有 clip id 集合：await 期间其他 thunk 的
+        // fulfilled 可能已把新 clip 写进 state，事后取差集会得到空集。
+        const beforeClipIds = new Set(
+            (getState() as { session: SessionState }).session.clips.map((c) => c.id),
+        );
         const imported = await webApi.importAudioItem(audioPath);
         if (!(imported as { ok?: boolean }).ok) {
             const failure = imported as {
@@ -147,9 +156,6 @@ export const importAudioFromPath = createAsyncThunk(
                 failure.error?.message ?? failure.missing_files?.[0] ?? "import_audio_item_failed",
             );
         }
-        const beforeClipIds = new Set(
-            (getState() as { session: SessionState }).session.clips.map((c) => c.id),
-        );
         const result = imported as { clips?: Array<{ id?: string }> };
         const newClipIds = (result.clips ?? [])
             .map((c) => c.id)

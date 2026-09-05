@@ -3592,22 +3592,6 @@ function AppInner() {
                             {t("loading")}
                         </span>
                     ) : null}
-                    {pianoRollStatus.asyncRefreshActive ? (
-                        <span
-                            className="shrink-0 rounded px-1 py-0 text-xs font-medium"
-                            style={{
-                                background: "var(--accent-3)",
-                                color: "var(--accent-11)",
-                                fontSize: "11px",
-                                lineHeight: "16px",
-                            }}
-                        >
-                            {t("refreshing_pitch_data") || "Refreshing pitch data"}
-                            {pianoRollStatus.asyncRefreshProgress > 0
-                                ? ` ${Math.round(pianoRollStatus.asyncRefreshProgress)}%`
-                                : ""}
-                        </span>
-                    ) : null}
                     {rendering.active ? (
                         <span
                             className="shrink-0 rounded px-1 py-0 text-xs font-medium"

@@ -974,8 +974,6 @@ export function useTimelineClipActions(
                     ? Math.min(10, Math.max(0.1, timing.rate))
                     : null;
             if (requestedRate == null && timing.durationSec == null) return;
-            // effective 可被“时长即拉伸”路径反推填充。
-            let effective = requestedRate;
             const targetIds = getBulkEditableClipIds({
                 activeClipId: clipId,
                 multiSelectedClipIds: multiSelectedClipIdsRef.current,
@@ -1010,6 +1008,11 @@ export function useTimelineClipActions(
                 const oldEffective = Number(clip.playbackRate) || 1;
                 const oldLengthSec = Number(clip.lengthSec) || 0;
                 const change: { clipPlaybackRate?: number; lengthSec?: number } = {};
+                // effective 按 clip 独立推导：多选 clip 的长度/速率各异，
+                // “时长即拉伸”反推出的速率绝不能跨 clip 复用（旧实现把第一
+                // 个 clip 的反推值泄漏给其余 clip，且第一个 clip 自己的速率
+                // 反而漏写）。
+                let effective = requestedRate;
                 if (effective != null) {
                     change.clipPlaybackRate = Math.min(
                         10,
@@ -1026,6 +1029,10 @@ export function useTimelineClipActions(
                         effective = Math.max(
                             0.1,
                             Math.min(10, (oldLengthSec * oldEffective) / nextLengthSec),
+                        );
+                        change.clipPlaybackRate = Math.min(
+                            10,
+                            Math.max(0.1, effective / takeRate),
                         );
                     }
                 } else if (effective != null && autoLength) {

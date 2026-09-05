@@ -721,6 +721,8 @@ function applyTimelineStatePreservingPitchVisuals(state: SessionState, timeline:
     // 必须捕获浅拷贝快照：在 Immer producer 内直接持有 state.clipPitchCurves
     // 得到的是 draft 代理，applyTimelineState 随后的 prune（delete 缺失 clip）
     // 会透过代理可见，"恢复"赋值等于把已删空的 draft 原样写回。
+    // 注意：此处**整包恢复**是有意契约（见 clipCreation.test）——部分载荷
+    // 可能不含未变化的 clip，按新 clip 集过滤会误删仍然有效的曲线。
     const currentClipPitchCurves = { ...state.clipPitchCurves };
     applyTimelineState(state, timeline, { force: true });
     state.paramsEpoch = currentParamsEpoch;
@@ -1343,6 +1345,16 @@ const TAKE_FLAT_KEYS = [
     "midiFillGaps",
 ] as const;
 
+function snapshotTakeValue(value: unknown): unknown {
+    // captureTakeRollback 在 Immer producer 内运行：对象/数组字段（如
+    // midiNoteData）读到的是 draft 代理，存进模块级 Map 后会在 producer
+    // 结束时被吊销；回滚时把吊销代理写回 state 会让 Immer finalization
+    // 抛 "Cannot perform 'get' on a proxy that has been revoked"。
+    // 这里做一次脱壳拷贝（take 快照字段均为 JSON 数据）。
+    if (value === null || typeof value !== "object") return value;
+    return JSON.parse(JSON.stringify(value)) as unknown;
+}
+
 function captureTakeRollback(state: SessionState, clipIds: readonly string[]): void {
     for (const clipId of clipIds) {
         const clip = state.clips.find((entry) => entry.id === clipId);
@@ -1353,7 +1365,7 @@ function captureTakeRollback(state: SessionState, clipIds: readonly string[]): v
         const flat = {} as TakeOptimisticFlat;
         for (const key of TAKE_FLAT_KEYS) {
             // @ts-expect-error -- 按同构键组浅拷贝，字段集合由类型约束保证一致
-            flat[key] = clip[key];
+            flat[key] = snapshotTakeValue(clip[key]);
         }
         pendingTakeRollbacks.set(clipId, { activeTakeId: clip.activeTakeId, flat });
     }
@@ -2427,6 +2439,11 @@ const sessionSlice = createSlice({
             const clip = state.clips.find((entry) => entry.id === action.payload.clipId);
             if (clip) {
                 clip.lengthSec = Math.max(0.0, action.payload.lengthSec);
+                // 与后端及 applyOptimisticClipState 一致：偏移必须落在
+                // [0, length] 内，否则留下越界的"幻影吸附目标"。
+                if (clip.snapOffsetSec > clip.lengthSec) {
+                    clip.snapOffsetSec = clip.lengthSec;
+                }
             }
         },
         /** SnapOffset（吸附偏移）乐观更新：拖拽三角手柄实时预览。 */
@@ -2665,7 +2682,9 @@ const sessionSlice = createSlice({
             }
             markProjectDirty(state.project);
             ensureClipAutomation(state, clipId);
-            const target = state.clipAutomation[clipId][action.payload.param];
+            // ensureClipAutomation 只播种 pitch/tension；其他 param（如
+            // vocoder 参数）直接索引会拿到 undefined 并在 push 时抛错。
+            const target = (state.clipAutomation[clipId][action.payload.param] ??= []);
             target.push({
                 id: createId("pt"),
                 beat: Math.max(0, action.payload.beat),
@@ -2688,7 +2707,7 @@ const sessionSlice = createSlice({
             }
             markProjectDirty(state.project);
             ensureClipAutomation(state, clipId);
-            const target = state.clipAutomation[clipId][action.payload.param];
+            const target = (state.clipAutomation[clipId][action.payload.param] ??= []);
             const point = target.find((entry) => entry.id === action.payload.pointId);
             if (point) {
                 point.beat = Math.max(0, action.payload.beat);
@@ -2706,7 +2725,7 @@ const sessionSlice = createSlice({
             }
             markProjectDirty(state.project);
             ensureClipAutomation(state, clipId);
-            const target = state.clipAutomation[clipId][action.payload.param];
+            const target = (state.clipAutomation[clipId][action.payload.param] ??= []);
             state.clipAutomation[clipId][action.payload.param] = target.filter(
                 (entry) => entry.id !== action.payload.pointId,
             );
@@ -3076,9 +3095,17 @@ const sessionSlice = createSlice({
                     path?: string;
                     imported?: { ok?: boolean } & TimelineState;
                     newClipIds?: string[];
+                    requiresModeChoice?: boolean;
+                    requiresStreamChoice?: boolean;
                 };
                 if (payload.canceled) {
                     state.status = "Import canceled";
+                    return;
+                }
+                // 多文件/多音轨流程在这里只是"等待用户下一步选择"，并没有
+                // imported 载荷 —— 不能落入下面的 else 分支误报导入失败。
+                if (payload.requiresModeChoice || payload.requiresStreamChoice) {
+                    state.status = "Waiting for import options";
                     return;
                 }
                 if (payload.path) {
@@ -4989,10 +5016,15 @@ const sessionSlice = createSlice({
                 // 用旧值覆盖前端已更新的 playheadSec 会导致光标闪烁。
                 const requestedSec = action.meta.arg as number;
                 const backendSec = Number(payload.playhead_sec ?? requestedSec);
-                // 仅在前端 playheadSec 与请求参数一致（未被更新的请求覆盖）
-                // 或后端返回值与请求参数不同时才采纳后端值。
+                // 仅当【前端 playheadSec 仍等于本次请求值】（未被更新的请求
+                // 覆盖）且后端返回值与请求参数不同（发生了 clamp 之类修正）
+                // 时才采纳后端值 —— 缺少前一半条件时，先发请求的迟到响应
+                // 会把光标从新位置拖回旧位置。
                 const EPS = 0.001;
-                if (Math.abs(backendSec - requestedSec) > EPS) {
+                if (
+                    Math.abs(state.playheadSec - requestedSec) <= EPS &&
+                    Math.abs(backendSec - requestedSec) > EPS
+                ) {
                     // 后端对位置做了修正（如 clamp），采纳后端值
                     state.playheadSec = Math.max(0, backendSec);
                 }
@@ -5080,6 +5112,11 @@ const sessionSlice = createSlice({
             .addCase(fetchSelectedTrackSummary.fulfilled, (state, action) => {
                 const payload = action.payload as TrackSummaryResult | { ok?: false };
                 if (!payload.ok) {
+                    return;
+                }
+                // 过期响应丢弃：快速连续切轨时，旧轨道的迟到摘要不得覆盖
+                // 当前选中轨道。
+                if (payload.track_id !== state.selectedTrackId) {
                     return;
                 }
                 state.selectedTrackSummary = {

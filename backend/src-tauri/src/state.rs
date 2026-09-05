@@ -1512,6 +1512,38 @@ pub struct RuntimeState {
     pub synthesized_wav_path: Option<String>,
 }
 
+/// 波形 mipmap 计算的 RAII inflight 标记。
+///
+/// 构造时把 `key` 插入 `waveform_inflight`，Drop（包括 panic 展开与提前
+/// 返回路径）时移除并唤醒全部 condvar 等待者。此前手工 insert/remove 的
+/// 写法一旦在计算或写盘过程中 panic，标记会永久残留，该文件的后续所有
+/// 请求都会在无超时的 condvar 等待中永久挂起。
+struct WaveformInflightGuard<'a> {
+    state: &'a AppState,
+    key: String,
+}
+
+impl<'a> WaveformInflightGuard<'a> {
+    /// 立即插入标记（无论此前是否已有——HashSet insert 幂等）。
+    fn acquire(state: &'a AppState, key: &str) -> Self {
+        let mut inflight = state
+            .waveform_inflight
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        inflight.insert(key.to_string());
+        Self {
+            state,
+            key: key.to_string(),
+        }
+    }
+}
+
+impl Drop for WaveformInflightGuard<'_> {
+    fn drop(&mut self) {
+        self.state.remove_waveform_inflight(&self.key);
+    }
+}
+
 /// Tempo Map 变化点携带的音阶覆盖数据（None = 跟随工程音阶）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -2505,6 +2537,12 @@ pub struct AppState {
     /// In-memory cache of clipboard MIDI bytes, keyed by GUID (first 8 bytes of blake3 hash as hex).
     pub clipboard_midi_cache: std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>,
 
+    /// 进程内 UI 设置缓存（`ripple_settings` / `split_transition_options`
+    /// 在持有 timeline 锁的每个拖拽 tick 里读取；若每次都走磁盘读 +
+    /// JSON 解析，会在全局锁内做慢 IO）。由 get/save_ui_settings 维护，
+    /// 首次访问时兜底从磁盘加载。
+    pub cached_ui_settings: std::sync::RwLock<Option<std::sync::Arc<crate::config::UiSettings>>>,
+
     // Set in Tauri setup. Used for async notifications.
     pub app_handle: OnceLock<tauri::AppHandle>,
 
@@ -2525,6 +2563,9 @@ pub struct AppState {
 
     /// 正在进行的录音会话（非录制时为 None）。
     pub recording: std::sync::Mutex<Option<crate::recording::ActiveRecording>>,
+    /// 录音启动互斥（CAS）：设备就绪等待最长 8s，不能放在 `recording`
+    /// 锁内，否则 meter 轮询（current_state）会同步阻塞整个等待期。
+    pub recording_starting: std::sync::atomic::AtomicBool,
 
     /// App config directory for persisting recent projects etc.
     pub config_dir: OnceLock<std::path::PathBuf>,
@@ -2558,6 +2599,7 @@ impl Default for AppState {
             waveform_inflight: std::sync::Mutex::new(std::collections::HashSet::new()),
             waveform_inflight_cv: std::sync::Condvar::new(),
             clipboard_midi_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+            cached_ui_settings: std::sync::RwLock::new(None),
 
             app_handle: OnceLock::new(),
             pitch_inflight: std::sync::Mutex::new(std::collections::HashSet::new()),
@@ -2567,6 +2609,7 @@ impl Default for AppState {
 
             audio_engine: AudioEngine::new(),
             recording: std::sync::Mutex::new(None),
+            recording_starting: std::sync::atomic::AtomicBool::new(false),
             config_dir: OnceLock::new(),
             pending_startup_project_path: Mutex::new(None),
         }
@@ -2703,12 +2746,16 @@ impl AppState {
                     }
                     return Ok(found.clone());
                 }
-                // 极端情况：前一线程计算失败未放入缓存，继续往下重新计算
-            } else {
-                // 标记当前线程为此文件的计算者
-                inflight.insert(source_path.to_string());
+                // 极端情况：前一线程计算失败未放入缓存，由下方的 guard
+                // 登记本线程为新的计算者后继续重算。
             }
         }
+
+        // RAII 计算者标记：构造即插入 inflight，Drop（含 panic 展开）时移除
+        // 并唤醒全部等待者。此前手工 insert/remove 的写法一旦在计算或写盘
+        // 过程中 panic，标记会永久残留，该文件的后续所有请求都会在无超时
+        // 的 condvar 等待中永久挂起。
+        let _inflight_guard = WaveformInflightGuard::acquire(self, source_path);
 
         // ── 3. 磁盘缓存 ──
         let cache_dir = {
@@ -2744,8 +2791,7 @@ impl AppState {
                     }),
                 );
             }
-            // 移除 inflight 标记并通知等待线程
-            self.remove_waveform_inflight(source_path);
+            // inflight 标记由 _inflight_guard 的 Drop 移除并通知等待线程
             return Ok(cached);
         }
 
@@ -2803,7 +2849,7 @@ impl AppState {
                         }),
                     );
                 }
-                self.remove_waveform_inflight(source_path);
+                // inflight 标记由 _inflight_guard 的 Drop 移除并通知等待线程
                 return Err(e);
             }
         };
@@ -2834,8 +2880,7 @@ impl AppState {
                 .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
             cache.insert(source_path, peaks.clone());
         }
-        // 移除 inflight 标记并通知等待线程
-        self.remove_waveform_inflight(source_path);
+        // 移除 inflight 标记并通知等待线程（由 _inflight_guard 的 Drop 完成）
         Ok(peaks)
     }
 
@@ -2847,6 +2892,40 @@ impl AppState {
             .unwrap_or_else(|e| e.into_inner());
         inflight.remove(source_path);
         self.waveform_inflight_cv.notify_all();
+    }
+
+    /// 读取 UI 设置（带进程内缓存；磁盘读 + JSON 解析只在缓存未建立时发生）。
+    pub fn ui_settings_snapshot(&self) -> std::sync::Arc<crate::config::UiSettings> {
+        if let Some(cached) = self
+            .cached_ui_settings
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            return cached.clone();
+        }
+        let mut settings = if let Some(dir) = self.config_dir.get() {
+            crate::config::load_ui_settings(dir)
+        } else {
+            crate::config::UiSettings::default()
+        };
+        settings.normalize_ripple_mode();
+        settings.normalize_split_transition();
+        settings.normalize_time_display();
+        let arc = std::sync::Arc::new(settings);
+        *self
+            .cached_ui_settings
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Some(arc.clone());
+        arc
+    }
+
+    /// 用最新设置刷新进程内缓存（get_ui_settings / save_ui_settings 调用）。
+    pub fn store_ui_settings_cache(&self, settings: &crate::config::UiSettings) {
+        *self
+            .cached_ui_settings
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Some(std::sync::Arc::new(settings.clone()));
     }
 
     pub fn project_meta_payload(&self) -> ProjectMetaPayload {
@@ -8716,6 +8795,9 @@ impl TimelineState {
                     min: -24.0,
                     max: 24.0,
                 });
+            } else {
+                // 渲染失败：半成品 glue 文件没人引用，立即删除，避免泄漏。
+                let _ = std::fs::remove_file(&glue_path);
             }
         }
 
@@ -9572,15 +9654,9 @@ impl TimelineState {
 
     /// 检查所有有 source_path 的 clip，使用分层策略检测外部文件变更。
     ///
-    /// 第 1 层：存在性检查。
-    /// 第 2 层：元数据比对（文件大小 + 修改时间），均未变 → 跳过。
-    /// 第 3 层：内容指纹验证（头 64KB + 尾 64KB FNV-1a），
-    ///          若指纹一致 → 仅元数据变化（如云同步/touch），静默更新；
-    ///          若指纹不一致 → 内容确实被修改 → 报告 "modified"。
-    ///
-    /// 对 GB 级音频文件也只读取最多 128KB，IO 开销可忽略。
-    pub fn check_source_files_changed(&self) -> crate::models::CheckSourceFilesChangedPayload {
-        let mut changed: Vec<crate::models::SourceFileChangePayload> = Vec::new();
+    /// 收集源文件检查清单（无磁盘 IO，可在持锁状态下安全调用）。
+    pub fn source_file_check_list(&self) -> Vec<SourceFileCheckItem> {
+        let mut items: Vec<SourceFileCheckItem> = Vec::new();
         let mut reported_paths: HashSet<String> = HashSet::new();
 
         for clip in &self.clips {
@@ -9592,70 +9668,109 @@ impl TimelineState {
                 if reported_paths.contains(source_path) {
                     continue;
                 }
-
-                let path = std::path::Path::new(source_path);
-
-                // ── 第 1 层：存在性检查 ──────────────────────────────────────
-                if !path.exists() {
-                    reported_paths.insert(source_path.to_string());
-                    changed.push(crate::models::SourceFileChangePayload {
-                        clip_id: clip.id.clone(),
-                        clip_name: clip.name.clone(),
-                        source_path: source_path.to_string(),
-                        change: "deleted".to_string(),
-                    });
-                    continue;
-                }
-
-                // ── 第 2 层：元数据快速比对 ─────────────────────────────────
-                let current_meta = std::fs::metadata(path).ok();
-                let current_size = current_meta.as_ref().map(|m| m.len());
-                let current_mtime = current_meta
-                    .as_ref()
-                    .and_then(|m| m.modified().ok())
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs());
-
-                let old_mtime = take.source_file_mtime;
-                let old_size = take.source_file_size;
-                let old_fp = take.source_file_fingerprint;
-
-                // 若大小和 mtime 均与记录一致，通常可跳过。
-                // 但工程文件可能保存了旧的源文件指纹：例如用户在关闭工程后手动替换了
-                // 同名文件，重新打开工程时 mtime/size 会以“新文件”为基线刷新，因此
-                // 元数据一致并不代表内容与工程保存时一致。只要存在指纹，就必须进入
-                // 指纹验证层，用工程中保存的哈希重新判断内容是否发生变化。
-                if current_size == old_size && current_mtime == old_mtime && old_fp.is_none() {
-                    continue;
-                }
-
-                // 旧工程既无元数据也无指纹 → 跳过检测（无法判断是否变更）
-                if old_mtime.is_none() && old_size.is_none() && old_fp.is_none() {
-                    continue;
-                }
-
-                // ── 第 3 层：内容指纹验证 ────────────────────────────────────
-                let current_fp = crate::audio_utils::compute_file_fingerprint(path);
-                if current_fp.is_some() && current_fp == old_fp {
-                    // 内容未变，仅元数据被修改（touch、云同步等）→ 静默更新记录，不打扰用户
-                    // Note: 此处为只读引用，无法原地更新 clip 的元数据。
-                    //       元数据将在下次 reload/replace 时自然更新。
-                    continue;
-                }
-
-                // 内容确实发生变化
                 reported_paths.insert(source_path.to_string());
-                changed.push(crate::models::SourceFileChangePayload {
+                items.push(SourceFileCheckItem {
                     clip_id: clip.id.clone(),
                     clip_name: clip.name.clone(),
                     source_path: source_path.to_string(),
-                    change: "modified".to_string(),
+                    source_file_mtime: take.source_file_mtime,
+                    source_file_size: take.source_file_size,
+                    source_file_fingerprint: take.source_file_fingerprint,
                 });
             }
+        }
+        items
+    }
+
+    /// 对检查清单执行磁盘 IO（存在性 / 元数据 / 指纹），报告变更文件。
+    pub fn evaluate_source_file_changes(
+        items: &[SourceFileCheckItem],
+    ) -> crate::models::CheckSourceFilesChangedPayload {
+        let mut changed: Vec<crate::models::SourceFileChangePayload> = Vec::new();
+
+        for item in items {
+            let path = std::path::Path::new(&item.source_path);
+
+            // ── 第 1 层：存在性检查 ──────────────────────────────────────
+            if !path.exists() {
+                changed.push(crate::models::SourceFileChangePayload {
+                    clip_id: item.clip_id.clone(),
+                    clip_name: item.clip_name.clone(),
+                    source_path: item.source_path.clone(),
+                    change: "deleted".to_string(),
+                });
+                continue;
+            }
+
+            // ── 第 2 层：元数据快速比对 ─────────────────────────────────
+            let current_meta = std::fs::metadata(path).ok();
+            let current_size = current_meta.as_ref().map(|m| m.len());
+            let current_mtime = current_meta
+                .as_ref()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs());
+
+            let old_mtime = item.source_file_mtime;
+            let old_size = item.source_file_size;
+            let old_fp = item.source_file_fingerprint;
+
+            // 若大小和 mtime 均与记录一致，通常可跳过。
+            // 但工程文件可能保存了旧的源文件指纹：例如用户在关闭工程后手动替换了
+            // 同名文件，重新打开工程时 mtime/size 会以“新文件”为基线刷新，因此
+            // 元数据一致并不代表内容与工程保存时一致。只要存在指纹，就必须进入
+            // 指纹验证层，用工程中保存的哈希重新判断内容是否发生变化。
+            if current_size == old_size && current_mtime == old_mtime && old_fp.is_none() {
+                continue;
+            }
+
+            // 旧工程既无元数据也无指纹 → 跳过检测（无法判断是否变更）
+            if old_mtime.is_none() && old_size.is_none() && old_fp.is_none() {
+                continue;
+            }
+
+            // ── 第 3 层：内容指纹验证 ────────────────────────────────────
+            let current_fp = crate::audio_utils::compute_file_fingerprint(path);
+            if current_fp.is_some() && current_fp == old_fp {
+                // 内容未变，仅元数据被修改（touch、云同步等）→ 静默更新记录，不打扰用户
+                // Note: 此处为只读引用，无法原地更新 clip 的元数据。
+                //       元数据将在下次 reload/replace 时自然更新。
+                continue;
+            }
+
+            // 内容确实发生变化
+            changed.push(crate::models::SourceFileChangePayload {
+                clip_id: item.clip_id.clone(),
+                clip_name: item.clip_name.clone(),
+                source_path: item.source_path.clone(),
+                change: "modified".to_string(),
+            });
         }
 
         crate::models::CheckSourceFilesChangedPayload { changed }
     }
+
+    /// 第 1 层：存在性检查。
+    /// 第 2 层：元数据比对（文件大小 + 修改时间），均未变 → 跳过。
+    /// 第 3 层：内容指纹验证（头 64KB + 尾 64KB FNV-1a），
+    ///          若指纹一致 → 仅元数据变化（如云同步/touch），静默更新；
+    ///          若指纹不一致 → 内容确实被修改 → 报告 "modified"。
+    ///
+    /// 对 GB 级音频文件也只读取最多 128KB，IO 开销可忽略。
+    pub fn check_source_files_changed(&self) -> crate::models::CheckSourceFilesChangedPayload {
+        let items = self.source_file_check_list();
+        Self::evaluate_source_file_changes(&items)
+    }
+}
+
+/// 检查所需的 take 元数据快照（锁内克隆，磁盘 IO 在锁外进行）。
+pub struct SourceFileCheckItem {
+    pub clip_id: String,
+    pub clip_name: String,
+    pub source_path: String,
+    pub source_file_mtime: Option<u64>,
+    pub source_file_size: Option<u64>,
+    pub source_file_fingerprint: Option<u64>,
 }
 
 fn build_track_payload(tracks: &[Track]) -> Vec<TimelineTrack> {

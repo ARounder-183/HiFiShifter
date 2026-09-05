@@ -4,14 +4,6 @@ import { createContext, useContext, useState, useMemo, useCallback, type ReactNo
 export interface PianoRollStatus {
     /** usePianoRollData 的数据加载中 */
     dataLoading: boolean;
-    /** asyncRefresh 正在异步刷新 pitch */
-    asyncRefreshActive: boolean;
-    /** asyncRefresh 进度 0-100 */
-    asyncRefreshProgress: number;
-    /** asyncRefresh 状态文本 */
-    asyncRefreshStatus: string | null;
-    /** asyncRefresh 错误 */
-    asyncRefreshError: string | null;
 }
 
 interface PianoRollStatusContextValue {
@@ -21,10 +13,6 @@ interface PianoRollStatusContextValue {
 
 const DEFAULT_STATUS: PianoRollStatus = {
     dataLoading: false,
-    asyncRefreshActive: false,
-    asyncRefreshProgress: 0,
-    asyncRefreshStatus: null,
-    asyncRefreshError: null,
 };
 
 const PianoRollStatusContext = createContext<PianoRollStatusContextValue | null>(null);

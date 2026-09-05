@@ -17,6 +17,10 @@ interface FileBrowserState {
     regexEnabled: boolean;
     sortMode: SortMode;
     audioOnly: boolean; // 仅显示音频文件
+    // 最近一次目录/搜索请求的 requestId：快速连续导航/搜索时，迟到的旧
+    // 响应若不丢弃，会把面板拉回用户已离开的目录或过期的搜索结果。
+    latestLoadRequestId: string | null;
+    latestSearchRequestId: string | null;
 }
 
 const STORAGE_KEY = "hifishifter.fileBrowser.lastPath";
@@ -40,6 +44,8 @@ const initialState: FileBrowserState = {
     regexEnabled: false,
     sortMode: "name" as SortMode,
     audioOnly: localStorage.getItem(AUDIO_ONLY_KEY) === "true",
+    latestLoadRequestId: null,
+    latestSearchRequestId: null,
 };
 
 export const loadDirectory = createAsyncThunk(
@@ -102,28 +108,36 @@ const fileBrowserSlice = createSlice({
     },
     extraReducers: (builder) => {
         builder
-            .addCase(loadDirectory.pending, (state) => {
+            .addCase(loadDirectory.pending, (state, action) => {
                 state.loading = true;
                 state.error = null;
+                state.latestLoadRequestId = action.meta.requestId;
             })
             .addCase(loadDirectory.fulfilled, (state, action) => {
+                // 只接受最新一次请求的结果：进入慢目录 A 后又快速进入 B 时，
+                // A 的迟到响应不得覆盖 B 的列表。
+                if (action.meta.requestId !== state.latestLoadRequestId) return;
                 state.loading = false;
                 state.currentPath = action.payload.dirPath;
                 state.entries = action.payload.entries;
                 localStorage.setItem(STORAGE_KEY, action.payload.dirPath);
             })
             .addCase(loadDirectory.rejected, (state, action) => {
+                if (action.meta.requestId !== state.latestLoadRequestId) return;
                 state.loading = false;
                 state.error = String(action.payload ?? "Unknown error");
             })
-            .addCase(searchFilesRecursive.pending, (state) => {
+            .addCase(searchFilesRecursive.pending, (state, action) => {
                 state.searchLoading = true;
+                state.latestSearchRequestId = action.meta.requestId;
             })
             .addCase(searchFilesRecursive.fulfilled, (state, action) => {
+                if (action.meta.requestId !== state.latestSearchRequestId) return;
                 state.searchLoading = false;
                 state.searchResults = action.payload;
             })
-            .addCase(searchFilesRecursive.rejected, (state) => {
+            .addCase(searchFilesRecursive.rejected, (state, action) => {
+                if (action.meta.requestId !== state.latestSearchRequestId) return;
                 state.searchLoading = false;
                 state.searchResults = [];
             });

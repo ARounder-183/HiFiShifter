@@ -460,8 +460,14 @@ fn clip_content_end_frame(clip: &EngineClip) -> Option<u64> {
     };
     // 映射：src_frame = round((local + offset) * rate)，内容为 src 域 [0, window)。
     // 首个越界帧 ≈ window/rate - offset（±1 帧误差由主循环 hold 兜底）。
+    // offset 为负（前导静音，snapshot 的既有约定）时内容末端应后移 |offset|。
     let end = ((window as f64) / rate).floor() as u64;
-    Some(end.saturating_sub(clip.local_src_offset_frames.max(0) as u64))
+    let offset = clip.local_src_offset_frames;
+    Some(if offset >= 0 {
+        end.saturating_sub(offset as u64)
+    } else {
+        end.saturating_add(offset.unsigned_abs())
+    })
 }
 
 fn snapshot_has_pending_clip(snap: &EngineSnapshot, pos0: u64, pos1: u64) -> bool {
@@ -482,8 +488,12 @@ fn render_snapshot_window(
     scratch: &mut Vec<f32>,
     meter: Option<&mut TrackMeterScratch>,
 ) -> bool {
-    scratch.resize(frames * 2, 0.0);
-    scratch.fill(0.0);
+    if scratch.len() == frames * 2 {
+        scratch.fill(0.0);
+    } else {
+        scratch.clear();
+        scratch.resize(frames * 2, 0.0);
+    }
 
     if snapshot_has_pending_clip(snap, pos0, pos1) {
         return false;
@@ -548,8 +558,12 @@ fn mix_into_scratch_stereo(
     meter: &mut TrackMeterScratch,
     bus: &TrackMeterBus,
 ) -> Option<BlockRender> {
-    scratch.resize(frames * 2, 0.0);
-    scratch.fill(0.0);
+    if scratch.len() == frames * 2 {
+        scratch.fill(0.0);
+    } else {
+        scratch.clear();
+        scratch.resize(frames * 2, 0.0);
+    }
 
     if !is_playing.load(Ordering::Relaxed) {
         return None;

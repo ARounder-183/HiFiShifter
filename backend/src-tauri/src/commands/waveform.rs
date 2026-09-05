@@ -123,7 +123,10 @@ pub(super) fn get_root_mix_waveform_peaks_segment(
 
         let (_sr, ch, _dur, mix) = match crate::mixdown::render_mixdown_interleaved(&tl, opts) {
             Ok(v) => v,
-            Err(_) => {
+            Err(e) => {
+                // 渲染失败必须留痕：否则前端只看到空波形，无法区分
+                // “工程为空”和“解码/渲染失败”。
+                log::error!("mixdown waveform peaks render failed: {e}");
                 return WaveformPeaksSegmentPayload {
                     ok: false,
                     min: vec![],
@@ -263,7 +266,10 @@ pub(super) fn get_track_mix_waveform_peaks_segment(
 
         let (_sr, ch, _dur, mix) = match crate::mixdown::render_mixdown_interleaved(&tl, opts) {
             Ok(v) => v,
-            Err(_) => {
+            Err(e) => {
+                // 渲染失败必须留痕：否则前端只看到空波形，无法区分
+                // “工程为空”和“解码/渲染失败”。
+                log::error!("mixdown waveform peaks render failed: {e}");
                 return WaveformPeaksSegmentPayload {
                     ok: false,
                     min: vec![],
@@ -382,7 +388,8 @@ pub(super) fn batch_get_waveform_mipmap(
                 let l2 = encoder.encode(data.to_binary_level(2));
                 result.insert(path, [l0, l1, l2]);
             }
-            Err(_) => {
+            Err(e) => {
+                log::warn!("waveform mipmap batch compute failed for {path}: {e}");
                 result.insert(path, [String::new(), String::new(), String::new()]);
             }
         }

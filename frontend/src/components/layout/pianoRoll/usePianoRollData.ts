@@ -127,8 +127,8 @@ export function usePianoRollData(args: {
                         const payload = event.payload ?? {};
                         if (payload?.rootTrackId && payload.rootTrackId !== rootTrackId) return;
 
-                        // 鑻ョ敤鎴锋鍦ㄧ粯鍒舵洸绾匡紙pointer down锛夛紝鎺ㄨ繜鏇茬嚎鍒锋柊锟?pointer-up 鍚庯紝
-                        // 閬垮厤鍚庣鍒嗘瀽缁撴灉瑕嗙洊鐢ㄦ埛姝ｅ湪缁樺埗锟?liveEditOverride 鍐呭锟?
+                        // 若用户正在绘制曲线（pointer down），推迟曲线刷新到 pointer-up 之后，
+                        // 避免后端分析结果覆盖用户正在绘制的内容（liveEditOverride 机制）。
                         if (liveEditActiveRef.current) {
                             pendingPitchUpdatedRefreshRef.current = true;
                         } else {
@@ -137,6 +137,12 @@ export function usePianoRollData(args: {
                         }
                     },
                 );
+                // await 期间 effect 可能已被清理（快速切换参数/轨道/卸载）：
+                // 此时必须立刻注销，否则监听器泄漏并存活整个应用生命周期。
+                if (disposed) {
+                    unlistenUpdated();
+                    unlistenUpdated = null;
+                }
             } catch {
                 // Safe no-op: browser/pywebview builds won't have the Tauri API.
             }

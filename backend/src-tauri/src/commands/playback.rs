@@ -173,13 +173,19 @@ fn is_clip_pitch_analysis_ready(
 pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde_json::Value {
     guard_json_command("play_original", || {
         log::warn!("[play_original] called start_sec={start_sec}");
-        let timeline = match state.timeline.lock() {
-            Ok(g) => g.clone(),
-            Err(p) => p.into_inner().clone(),
+        // clone 与版本号必须在同一把锁的作用域内读取：分离读取时，并发
+        // checkpoint（先解锁后 bump 版本）会让旧 timeline 配上新版本号，
+        // 后台渲染误以为自己是最新的，把过期状态写回引擎。
+        let (timeline, render_timeline_version) = {
+            let guard = match state.timeline.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            let version = state
+                .timeline_version
+                .load(std::sync::atomic::Ordering::Acquire);
+            (guard.clone(), version)
         };
-        let render_timeline_version = state
-            .timeline_version
-            .load(std::sync::atomic::Ordering::Acquire);
         let bpm = timeline.bpm;
         let playhead_sec = timeline.playhead_sec;
         if !(bpm.is_finite() && bpm > 0.0) {
@@ -1612,9 +1618,15 @@ fn start_background_render_inner(app: tauri::AppHandle, render_generation: u64) 
     // so the original app can be moved into the thread.
     let app_clone = app.clone();
     let state = app_clone.state::<AppState>();
-    let timeline = match state.timeline.lock() {
-        Ok(g) => g.clone(),
-        Err(p) => p.into_inner().clone(),
+    // 与 play_original 相同：clone 和版本号必须同锁域读取，避免旧 timeline
+    // 配新版本号导致后台渲染覆盖更新的编辑。
+    let (timeline, render_timeline_version) = {
+        let guard = match state.timeline.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let version = state.timeline_version.load(Ordering::Acquire);
+        (guard.clone(), version)
     };
 
     let engine_sr = state.audio_engine.sample_rate_hz();
@@ -1642,8 +1654,6 @@ fn start_background_render_inner(app: tauri::AppHandle, render_generation: u64) 
         // 当前端有实质性编辑时，自然会触发下一次渲染。
         return serde_json::json!({"ok": true, "rendered": 0});
     }
-
-    let render_timeline_version = state.timeline_version.load(Ordering::Acquire);
 
     log::warn!(
         "[bg_render] starting background render: {} clips, engine_sr={}, timeline_version={}",

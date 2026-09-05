@@ -376,7 +376,6 @@ export const jaJP = {
     solo: "ソロ",
     status_analyzing_pitch: "ピッチを分析中",
     status_stretching: "タイムストレッチ中",
-    refreshing_pitch_data: "ピッチデータを更新中",
 
     fb_title: "ファイルブラウザ",
     fb_search_placeholder: "ファイルを検索...",

@@ -194,16 +194,29 @@ class WaveformMipmapStoreImpl {
     }
 
     /**
-     * 当数据超过字节预算时，按 LRU 顺序淘汰最旧的。
-     * 被淘汰条目同步 notify "done" 状态以便 UI 释放任何关联视图缓存（保守做法）。
+     * 当数据超过字节预算时，按 LRU 顺序淘汰最旧的**有字节贡献**的条目。
+     * 被淘汰条目同步 notify "done" 状态以便 UI 释放任何关联视图缓存
+     * （几何缓存持有指向被淘汰 buffer 的 subarray 视图，不通知的话视图
+     * 会把 buffer 钉在内存里，cacheBytes 与真实占用背离）。
+     *
+     * 0 字节条目（缺失/损坏文件的负缓存标记）对预算无贡献：淘汰它们
+     * 不会释放任何内存，只会丢掉失败状态，让已损坏文件重新打后端 ——
+     * 因此跳过，让负缓存标记与条目同生共死。
      */
     private evictIfNeeded(): void {
         while (this.cacheBytes > MAX_CACHE_BYTES && this.cache.size > 1) {
-            const oldestKey = this.cache.keys().next().value as string | undefined;
+            let oldestKey: string | undefined;
+            for (const [key, entry] of this.cache) {
+                if (entry.bytes > 0) {
+                    oldestKey = key;
+                    break;
+                }
+            }
             if (!oldestKey) break;
             const oldest = this.cache.get(oldestKey);
             this.cache.delete(oldestKey);
             this.cacheBytes -= oldest?.bytes ?? 0;
+            this.notify(oldestKey, "done");
         }
     }
 
@@ -566,6 +579,8 @@ class WaveformMipmapStoreImpl {
             if (entry.failedLevels.has(2)) return false;
             // 至少 L2 未加载则需要
             if (entry.levels[2] != null) return false;
+            // 已有单发 loadLevel(2) 在途 → 交给它，避免同一文件双请求。
+            if (this.loadingPromises.has(`${sp}|2`)) return false;
             // 冷却期（上次拿到空结果 = 后端暂未就绪）内不重复请求。
             const until = this.retryCooldownUntil.get(`${sp}|2`);
             return until == null || Date.now() >= until;
@@ -573,8 +588,12 @@ class WaveformMipmapStoreImpl {
 
         if (needed.length === 0) return;
 
-        // 通知进入 loading 状态（仅标记 L2）
+        // 通知进入 loading 状态（仅标记 L2），并把本批次注册进共享去重表：
+        // 否则批预载在途时并发的 loadLevel(2) 找不到已有 Promise，会对
+        // 同一批文件再发一轮相同请求。
+        const registered: string[] = [];
         for (const sp of needed) {
+            if (this.loadingPromises.has(`${sp}|2`)) continue;
             let entry = this.cache.get(sp);
             if (!entry) {
                 entry = {
@@ -590,52 +609,69 @@ class WaveformMipmapStoreImpl {
             }
             entry.loadingLevels.add(2);
             this.notify(sp, "loading");
+            registered.push(sp);
         }
 
-        try {
-            const batchResult = await waveformApi.batchGetWaveformMipmap(needed);
+        if (registered.length === 0) return;
 
-            for (const [sourcePath, levels] of Object.entries(batchResult)) {
-                // 仅解码 L2（索引 2），L0/L1 丢弃
-                const l2Base64 = levels[2];
-                if (l2Base64) {
-                    const decoded = decodeWaveformFromBase64(l2Base64);
-                    if (decoded) {
-                        this.applyDecoded(sourcePath, 2, decoded);
-                        this.notify(sourcePath, "done");
+        const batchPromise = (async () => {
+            try {
+                const batchResult = await waveformApi.batchGetWaveformMipmap(registered);
+
+                for (const [sourcePath, levels] of Object.entries(batchResult)) {
+                    // 仅解码 L2（索引 2），L0/L1 丢弃
+                    const l2Base64 = levels[2];
+                    if (l2Base64) {
+                        const decoded = decodeWaveformFromBase64(l2Base64);
+                        if (decoded) {
+                            this.applyDecoded(sourcePath, 2, decoded);
+                            this.notify(sourcePath, "done");
+                        } else {
+                            const entry = this.cache.get(sourcePath);
+                            if (entry) entry.failedLevels.add(2);
+                            this.notify(sourcePath, "error", "batch decode L2 failure");
+                        }
                     } else {
-                        const entry = this.cache.get(sourcePath);
-                        if (entry) entry.failedLevels.add(2);
-                        this.notify(sourcePath, "error", "batch decode L2 failure");
+                        // 空串 = 后端尚未就绪（波形分析/首次计算未完成），是
+                        // **瞬时**条件：绝不能写 failedLevels——否则打开工程
+                        // 瞬间的抢先批量请求会把 L2 永久毒化，波形要等用户
+                        // 滚动/缩放才出现。进入重试冷却，等待 refresh()
+                        // （waveform_analysis_progress done/cached 事件）。
+                        this.retryCooldownUntil.set(
+                            `${sourcePath}|2`,
+                            Date.now() + RETRY_NOT_READY_COOLDOWN_MS,
+                        );
+                        this.notify(sourcePath, "loading");
                     }
-                } else {
-                    // 空串 = 后端尚未就绪（波形分析/首次计算未完成），是
-                    // **瞬时**条件：绝不能写 failedLevels——否则打开工程
-                    // 瞬间的抢先批量请求会把 L2 永久毒化，波形要等用户
-                    // 滚动/缩放才出现。进入重试冷却，等待 refresh()
-                    // （waveform_analysis_progress done/cached 事件）。
-                    this.retryCooldownUntil.set(
-                        `${sourcePath}|2`,
-                        Date.now() + RETRY_NOT_READY_COOLDOWN_MS,
-                    );
-                    this.notify(sourcePath, "loading");
+                }
+            } catch (err) {
+                console.warn(
+                    "[WaveformMipmapStore] batchPreload failed, falling back to individual preload:",
+                    err,
+                );
+                // 回退前先注销本批次的共享 Promise：loadLevel 以它做去重，
+                // 保留键会让回退路径的 loadLevel(2) 等待本批次自身 → 死锁。
+                for (const sp of registered) {
+                    this.loadingPromises.delete(`${sp}|2`);
+                }
+                const promises = registered.map((sp) => this.preload(sp));
+                await Promise.allSettled(promises);
+            } finally {
+                for (const sp of registered) {
+                    const entry = this.cache.get(sp);
+                    if (entry) {
+                        entry.loadingLevels.delete(2);
+                    }
+                    this.loadingPromises.delete(`${sp}|2`);
                 }
             }
-        } catch (err) {
-            console.warn(
-                "[WaveformMipmapStore] batchPreload failed, falling back to individual preload:",
-                err,
-            );
-            const promises = needed.map((sp) => this.preload(sp));
-            await Promise.allSettled(promises);
-        } finally {
-            for (const sp of needed) {
-                const entry = this.cache.get(sp);
-                if (entry) {
-                    entry.loadingLevels.delete(2);
-                }
-            }
+        })();
+
+        for (const sp of registered) {
+            this.loadingPromises.set(`${sp}|2`, batchPromise);
         }
+
+        await batchPromise;
     }
 
     /**
@@ -728,6 +764,10 @@ class WaveformMipmapStoreImpl {
         this.cache.clear();
         this.cacheBytes = 0;
         this.interleavedPool.length = 0;
+        // 在途请求与重试冷却一并清空：否则 clear() 之后完成的在途加载会
+        // 通过 applyDecoded 让"已清空"的缓存悄悄复活，冷却键也会残留。
+        this.loadingPromises.clear();
+        this.retryCooldownUntil.clear();
     }
 
     /**

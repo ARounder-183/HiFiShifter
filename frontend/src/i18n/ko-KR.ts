@@ -449,7 +449,6 @@ export const koKR = {
     solo: "솔로",
     status_analyzing_pitch: "피치 분석 중",
     status_stretching: "타임 스트레치 중",
-    refreshing_pitch_data: "피치 데이터 새로고침 중",
 
     fb_title: "파일 브라우저",
     fb_search_placeholder: "파일 검색...",

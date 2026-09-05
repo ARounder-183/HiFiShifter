@@ -43,7 +43,13 @@ const SOFT_KNEE: f32 = 0.85;
 /// strength ∈ [0,1]；返回值 clamp 到 (0, sr/2) 防御。
 pub fn moved_pole_freq(current_hz: f32, target_hz: f32, strength: f32) -> f32 {
     let strength = strength.clamp(0.0, 1.0);
-    current_hz + (target_hz - current_hz) * strength
+    let moved = current_hz + (target_hz - current_hz) * strength;
+    // 文档承诺的防御：把迁移结果限回可听的 (0, sr/2)。上游通常已钳制，
+    // 这里兜底 NaN/越界输入（如参数被旧工程文件直传）。
+    if !moved.is_finite() || moved <= 0.0 {
+        return current_hz.max(1.0);
+    }
+    moved
 }
 
 /// 浊音权重的一阶平滑器（非线性 attack/release）。

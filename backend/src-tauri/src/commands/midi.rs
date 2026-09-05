@@ -252,12 +252,13 @@ pub(super) fn import_midi_to_pitch(
         midi_path, clipboard_guid, track_indices, selection_start_frame, selection_max_frames, fill_gaps, note_bpm_mode, specified_bpm, import_midi_bpm_as_project, close_leading_gap
     ));
 
-    // 先锁 timeline 读取 bpm / playhead / 选中轨道等信息（与 paste_midi_clipboard_inner 一致）
-    let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-
-    let project_bpm = tl.bpm;
-    let playhead_sec = tl.playhead_sec;
-    let frame_period_ms_raw = tl.frame_period_ms().max(0.1);
+    // 先短暂锁定读取 bpm / playhead 等信息；MIDI 磁盘解析放在锁外 ——
+    // 本命令是同步命令（主线程），持锁解析会在阻塞主线程的同时冻结
+    // 所有其他命令与 UI 轮询。
+    let (project_bpm, playhead_sec, frame_period_ms_raw) = {
+        let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        (tl.bpm, tl.playhead_sec, tl.frame_period_ms().max(0.1))
+    };
 
     // 使用工程 BPM 作为 fallback tempo（与 Reaper 剪贴板路径一致）
     let parse_result = match resolve_midi_source(
@@ -272,6 +273,8 @@ pub(super) fn import_midi_to_pitch(
             return serde_json::json!({"ok": false, "error": e});
         }
     };
+
+    let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
 
     let initial_bpm = parse_result.initial_bpm;
 

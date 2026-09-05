@@ -261,6 +261,18 @@ export const TrackLane = React.memo(
 
         // 淡变信息浮标与子层 i18n 文案。
         const { t } = useI18n();
+        // OverlapEditLayer 是 React.memo 组件：内联箭头函数每次渲染都是新
+        // 引用，会让 memo 永远失效（hoveredClipId 变化即触发 O(n²) 区域
+        // 重建）。这里用 useCallback 稳定引用。
+        const handleFadeShapeSingleCycle = React.useCallback(
+            ({ clipId, isOut }: { clipId: string; isOut: boolean }) =>
+                onFadeShapeCycleClick?.(clipId, isOut ? "out" : "in"),
+            [onFadeShapeCycleClick],
+        );
+        const tForOverlapLayer = React.useCallback(
+            (key: string) => t(key as Parameters<typeof t>[0]),
+            [t],
+        );
         // ghost clip 的 color-mix 需要和时间线画布同一套主题化轨道色。
         const { mode } = useAppTheme();
         const darkMode = mode === "dark";
@@ -842,10 +854,8 @@ export const TrackLane = React.memo(
                     fadeLengthFormatCtx={fadeLengthFormatCtx}
                     shapeCycleKb={fadeShapeCycleKb}
                     onCrossfadeCycleClick={onCrossfadeCycleClick}
-                    onFadeShapeSingleCycle={({ clipId, isOut }) =>
-                        onFadeShapeCycleClick?.(clipId, isOut ? "out" : "in")
-                    }
-                    t={(key) => t(key as Parameters<typeof t>[0])}
+                    onFadeShapeSingleCycle={handleFadeShapeSingleCycle}
+                    t={tForOverlapLayer}
                 />
                 {/* Ghost clip 预览：复制拖动时显示半透明副本 */}
                 {ghostClips.map(({ clip, ghostStartSec }) => {

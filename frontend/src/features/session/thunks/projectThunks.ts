@@ -210,13 +210,16 @@ export const openVocalShifterFromDialog = createAsyncThunk(
         if (picked.canceled || !picked.path) {
             return { ok: true, canceled: true } as const;
         }
+        // 必须在发起导入前捕获现有 clip id 集合：await 期间其他 thunk 的
+        // fulfilled 可能已把新 clip 写进 state，事后取差集会得到空集，
+        // 后续选中/交叉淡化步骤全部静默失效。
+        const beforeClipIds = new Set(
+            (getState() as { session: SessionState }).session.clips.map((c) => c.id),
+        );
         const result = await webApi.importVocalShifterProject(picked.path);
         if (!result?.ok) {
             return rejectWithValue(result?.error ?? "import_vocalshifter_failed");
         }
-        const beforeClipIds = new Set(
-            (getState() as { session: SessionState }).session.clips.map((c) => c.id),
-        );
         const clips = (result as { clips?: Array<{ id?: string }> }).clips ?? [];
         const newClipIds = clips
             .map((c) => c.id)
@@ -277,13 +280,14 @@ export const importProjectFromPath = createAsyncThunk(
         },
         { rejectWithValue, getState },
     ) => {
+        // 必须在发起导入前捕获（理由同上）
+        const beforeClipIds = new Set(
+            (getState() as { session: SessionState }).session.clips.map((c) => c.id),
+        );
         const result = await webApi.importProject(payload);
         if (!result?.ok) {
             return rejectWithValue(result?.error ?? "import_project_failed");
         }
-        const beforeClipIds = new Set(
-            (getState() as { session: SessionState }).session.clips.map((c) => c.id),
-        );
         const newClipIds = ((result as { clips?: Array<{ id?: string }> }).clips ?? [])
             .map((c) => c.id)
             .filter((id): id is string => !!id && !beforeClipIds.has(id));
@@ -309,13 +313,14 @@ export const openReaperFromDialog = createAsyncThunk(
         if (picked.canceled || !picked.path) {
             return { ok: true, canceled: true } as const;
         }
+        // 必须在发起导入前捕获（理由同上）
+        const beforeClipIds = new Set(
+            (getState() as { session: SessionState }).session.clips.map((c) => c.id),
+        );
         const result = await webApi.importReaperProject(picked.path);
         if (!result?.ok) {
             return rejectWithValue(result?.error ?? "import_reaper_failed");
         }
-        const beforeClipIds = new Set(
-            (getState() as { session: SessionState }).session.clips.map((c) => c.id),
-        );
         const clips = (result as { clips?: Array<{ id?: string }> }).clips ?? [];
         const newClipIds = clips
             .map((c) => c.id)

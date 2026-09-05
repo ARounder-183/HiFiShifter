@@ -208,6 +208,44 @@ function TempoPointDialog({
         });
     }, [open, focus]);
 
+    // 滚轮调值必须挂非被动原生监听：React root 上的 wheel 监听是 passive 的，
+    // 合成事件里的 preventDefault() 是空操作，调值的同时会滚动对话框内容。
+    // （应用后移除合成 onWheel，避免同一事件双重调节。）
+    useEffect(() => {
+        if (!open) return;
+        const el = bpmRef.current;
+        if (!el) return;
+        const listener = (ev: WheelEvent) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            const direction = ev.deltaY < 0 ? 1 : -1;
+            const step = isModifierActive(paramFineAdjustKb, ev) ? 0.1 : 1;
+            const current = Number(bpmText);
+            const base = Number.isFinite(current) ? current : Number(point?.bpm ?? 120);
+            const next = Math.round((base + direction * step) * 1000) / 1000;
+            setBpmText(formatTempoBpm(clampBpm(next)));
+        };
+        el.addEventListener("wheel", listener, { passive: false });
+        return () => el.removeEventListener("wheel", listener);
+    }, [open, bpmText, point?.bpm, paramFineAdjustKb]);
+
+    useEffect(() => {
+        if (!open) return;
+        const el = numRef.current;
+        if (!el) return;
+        const listener = (ev: WheelEvent) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            const direction = ev.deltaY < 0 ? 1 : -1;
+            const current = Number(numText);
+            const base = Number.isFinite(current) && current >= 1 ? Math.round(current) : 4;
+            setSigFollow(false);
+            setNumText(String(Math.min(32, Math.max(1, base + direction))));
+        };
+        el.addEventListener("wheel", listener, { passive: false });
+        return () => el.removeEventListener("wheel", listener);
+    }, [open, numText]);
+
     const commit = useCallback(() => {
         if (!point) return;
         const bpm = clampBpm(Number(bpmText) || 120);
@@ -252,29 +290,6 @@ function TempoPointDialog({
         ...customScalePresets.map((p) => `custom:${p.id}`),
     ];
 
-    const applyBpmWheel = (e: React.WheelEvent<HTMLInputElement>) => {
-        e.preventDefault();
-        e.stopPropagation();
-        const direction = e.deltaY < 0 ? 1 : -1;
-        const step = isModifierActive(paramFineAdjustKb, e) ? 0.1 : 1;
-        const current = Number(bpmText);
-        const base = Number.isFinite(current) ? current : Number(point?.bpm ?? 120);
-        const nextRaw = base + direction * step;
-        const next = Math.round(nextRaw * 1000) / 1000;
-        setBpmText(formatTempoBpm(clampBpm(next)));
-    };
-
-    // 拍号分子滚轮：跟随状态下先解除跟随（以实际生效值为基础继续调节）。
-    const applyNumeratorWheel = (e: React.WheelEvent<HTMLInputElement>) => {
-        e.preventDefault();
-        e.stopPropagation();
-        const direction = e.deltaY < 0 ? 1 : -1;
-        const current = Number(numText);
-        const base = Number.isFinite(current) && current >= 1 ? Math.round(current) : 4;
-        setSigFollow(false);
-        setNumText(String(Math.min(32, Math.max(1, base + direction))));
-    };
-
     return (
         <Dialog.Root open={open} onOpenChange={(next) => !next && onCancel()}>
             <Dialog.Content maxWidth="420px">
@@ -300,7 +315,6 @@ function TempoPointDialog({
                             onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => {
                                 if (e.key === "Enter") commit();
                             }}
-                            onWheel={applyBpmWheel}
                             style={{ width: 90 }}
                         />
                         <Text size="1" className="text-qt-text-muted">
@@ -327,7 +341,6 @@ function TempoPointDialog({
                             onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => {
                                 if (e.key === "Enter") commit();
                             }}
-                            onWheel={applyNumeratorWheel}
                             style={{ width: 48 }}
                         />
                         <Text size="1">/</Text>
@@ -552,6 +565,22 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
         onDialogOpenChange?.(dialogState != null);
     }, [dialogState, onDialogOpenChange]);
     const dragDraftRef = useRef<TempoMap | null>(null);
+    // 旗帜拖拽期间通过 ref 读取实时视口参数：mid-drag 缩放/滚动时
+    // pxPerSec/scrollLeft 会变化，若在 effect 闭包里捕获旧值，拖拽位移
+    // 会按旧比例换算（标记跳位），而把 pxPerSec 放进 effect 依赖又会让
+    // effect 在缩放瞬间重挂监听、中断拖拽。
+    const dragPxPerSecRef = useRef(pxPerSec);
+    useEffect(() => {
+        dragPxPerSecRef.current = pxPerSec;
+    }, [pxPerSec]);
+    const dragScrollLeftRef = useRef(scrollLeft);
+    useEffect(() => {
+        dragScrollLeftRef.current = scrollLeft;
+    }, [scrollLeft]);
+    const dragViewportWidthRef = useRef(viewportWidth);
+    useEffect(() => {
+        dragViewportWidthRef.current = viewportWidth;
+    }, [viewportWidth]);
     /** 已消费的编辑请求：防止同一个请求在 effect 重跑时被重复处理（重复建点）。 */
     const consumedEditRequestRef = useRef<TempoPointEditRequest | null>(null);
 
@@ -738,16 +767,21 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
         if (snapEnabled && base) {
             sec = snapTempoPosition(positionSec, snapEnabled, base, mapFallback.bpm);
         }
-        const { map, point } = createTempoPointAt(base, sec, mapFallback, {
+        const { map, point, created } = createTempoPointAt(base, sec, mapFallback, {
             projectScale: projectScale ?? undefined,
             projectScaleName,
         });
         queueMicrotask(() => {
             setSelectedId(point.id);
-            openDialogState(point.id, point, map.points[0].id === point.id, focus, {
-                positionSec: sec,
-                baseMap: base,
-            });
+            // created=false（命中既有点）时不要标记 pendingCreate：
+            // 此时要编辑的是既有点，没有任何"待创建"数据需要提交。
+            openDialogState(
+                point.id,
+                point,
+                map.points[0].id === point.id,
+                focus,
+                created ? { positionSec: sec, baseMap: base } : undefined,
+            );
         });
     }, [
         editRequest,
@@ -1052,16 +1086,13 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             if (effSnap) {
                 sec = snapTempoPosition(sec, effSnap, base, mapFallback.bpm);
             }
-            const { map, point } = createTempoPointAt(base, sec, mapFallback, {
+            const { map, point, created } = createTempoPointAt(base, sec, mapFallback, {
                 projectScale: projectScale ?? undefined,
                 projectScaleName,
             });
-            // 与已有点过近（< 1e-6s）时该点会被规范化丢弃：放弃本次双击，避免
-            // 进入一个“即将消失”的标签的内联编辑状态。
-            const tooClose = map.points.some(
-                (p) => p.id !== point.id && Math.abs(p.positionSec - point.positionSec) < 1e-6,
-            );
-            if (tooClose) return;
+            // 与已有过近点（< 1e-6s）冲突时放弃本次双击：此时不存在可创建
+            // 的新点，直接编辑既有点应由点击既有点自身的路径发起。
+            if (!created) return;
             // 上一次双击的新增点若尚未提交，先合并提交（保持其存在），
             // 否则其“待提交”状态会被本次覆盖而无法单独取消。
             if (pendingInlineAddRef.current && tempoMap) {
@@ -1117,7 +1148,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             const drag = dragRef.current;
             if (!drag || !tempoMap) return;
             const dx = e.clientX - drag.startClientX;
-            const rawSec = Math.max(0, drag.startSec + dx / Math.max(1e-9, pxPerSec));
+            const rawSec = Math.max(0, drag.startSec + dx / Math.max(1e-9, dragPxPerSecRef.current));
             // 吸附网格必须使用拖拽开始时的 Tempo Map 快照：变化点自身移动会改变
             // 其后的网格原点/BPM，若用实时 tempoMap 计算吸附，会使网格跟着标签移动，
             // 造成“刚脱离吸附又被自己拉回”的一顿一顿效果。
@@ -1150,7 +1181,8 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             // 时间轴本身，与 clip 分布无关，因此上限取"工程末尾与当前视口末尾"
             // 的较大者——保证标记始终落在用户看得见、够得着的范围内。
             const viewportEndSec =
-                (scrollLeft + Math.max(0, viewportWidth)) / Math.max(1e-9, pxPerSec);
+                (dragScrollLeftRef.current + Math.max(0, dragViewportWidthRef.current)) /
+                Math.max(1e-9, dragPxPerSecRef.current);
             sec = clampTempoPointSec({
                 points: tempoMap.points,
                 pointId: drag.pointId,
@@ -1192,11 +1224,9 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                 endSnapGesture();
             }
         };
-        // eslint-disable-next-line react-hooks/exhaustive-deps -- scrollLeft/viewportWidth 随滚动变化，加入依赖会让指针监听随滚动重建（既有模式）
     }, [
         draggingId,
         tempoMap,
-        pxPerSec,
         snapEnabled,
         noSnapKb,
         snapTempoPosition,
@@ -1259,11 +1289,17 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
         if (st.pendingCreate && st.pendingPositionSec != null) {
             const base = st.pendingBaseMap ?? null;
             const mapFallback = baseFallbackOf(base);
-            const { map } = createTempoPointAt(base, st.pendingPositionSec, mapFallback, {
-                projectScale: projectScale ?? undefined,
-                projectScaleName,
-            });
-            commitMap(updateTempoPoint(map, pointId, patch));
+            const { map, point: effectivePoint } = createTempoPointAt(
+                base,
+                st.pendingPositionSec,
+                mapFallback,
+                {
+                    projectScale: projectScale ?? undefined,
+                    projectScaleName,
+                },
+            );
+            // created=false（创建被拒，返回既有点）时表单值应落到既有点上。
+            commitMap(updateTempoPoint(map, effectivePoint.id, patch));
             setDialogState(null);
             return;
         }

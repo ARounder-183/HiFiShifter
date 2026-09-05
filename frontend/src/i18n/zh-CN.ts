@@ -357,7 +357,6 @@ export const zhCN = {
     solo: "独奏",
     status_analyzing_pitch: "正在分析音高",
     status_stretching: "正在拉伸",
-    refreshing_pitch_data: "刷新音高数据",
 
     fb_title: "文件浏览器",
     fb_search_placeholder: "搜索文件...",

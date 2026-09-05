@@ -570,13 +570,29 @@ export function buildBeatCache(map: TempoMap, fallbackBpm: number): TempoMapBeat
     return { map, fallbackBpm: safeBpm, pointBeats, beatRates };
 }
 
+// 进程级 memo：secToBeat / beatToSec / beatToBarBeat 会被标尺刻度格式化
+// 每帧调用上百次，直接调 buildBeatCache 意味着每帧 O(N)×数百次的数组
+// 分配。TempoMap 在编辑时走不可变更新（新建 map/points），因此按
+// map + points 引用 + fallbackBpm 缓存是安全的。
+const beatCacheMemo = new WeakMap<TempoMap, TempoMapBeatCache>();
+
+function getBeatCache(map: TempoMap, fallbackBpm: number): TempoMapBeatCache {
+    const cached = beatCacheMemo.get(map);
+    if (cached && cached.fallbackBpm === fallbackBpm && cached.map.points === map.points) {
+        return cached;
+    }
+    const built = buildBeatCache(map, fallbackBpm);
+    beatCacheMemo.set(map, built);
+    return built;
+}
+
 /** 秒 → 全局拍。无 Tempo Map 时退化为恒定 BPM。 */
 export function secToBeat(map: TempoMap | null, sec: number, fallbackBpm: number): number {
     const safeSec = Math.max(0, sec);
     if (!map || map.points.length === 0) {
         return (safeSec * Math.max(1, fallbackBpm || 120)) / 60;
     }
-    const cache = buildBeatCache(map, fallbackBpm);
+    const cache = getBeatCache(map, fallbackBpm);
     const idx = pointIndexAtSec(map, safeSec);
     const point = map.points[idx];
     return cache.pointBeats[idx] + (safeSec - point.positionSec) * cache.beatRates[idx];
@@ -588,7 +604,7 @@ export function beatToSec(map: TempoMap | null, beat: number, fallbackBpm: numbe
     if (!map || map.points.length === 0) {
         return (safeBeat * 60) / Math.max(1, fallbackBpm || 120);
     }
-    const cache = buildBeatCache(map, fallbackBpm);
+    const cache = getBeatCache(map, fallbackBpm);
     const { points } = map;
     for (let i = points.length - 1; i >= 0; i -= 1) {
         if (safeBeat >= cache.pointBeats[i] - 1e-9) {
@@ -628,7 +644,7 @@ export function beatToBarBeat(
         return { bar: barIndex + 1, beat: beatIndex + 1, sub: inBar - beatIndex };
     }
 
-    const cache = buildBeatCache(map, fallbackBpm);
+    const cache = getBeatCache(map, fallbackBpm);
     const { points } = map;
     // 每段生效拍号（跟随之前的拍号时解析为实际值）。
     const segmentSigs = effectiveTimeSignatures(map);
@@ -667,24 +683,9 @@ export function beatToBarBeat(
         const leftover = segLen - fullBars * bpb;
         bar += fullBars + (leftover > 1e-9 ? 1 : 0);
     }
-
-    // 超出工程末尾：按最后一段外推。
-    const lastIndex = points.length - 1;
-    const bpb = Math.max(1, beatsPerBarOf(segmentSigs[lastIndex]));
-    const rel = safeBeat - cache.pointBeats[lastIndex];
-    let fullBars = Math.floor(rel / bpb);
-    const inBar = rel - fullBars * bpb;
-    let beatIndex = Math.floor(inBar);
-    let sub = inBar - beatIndex;
-    if (sub > 1 - 1e-9) {
-        beatIndex += 1;
-        sub = 0;
-        if (beatIndex >= bpb) {
-            fullBars += 1;
-            beatIndex = 0;
-        }
-    }
-    return { bar: bar + fullBars, beat: beatIndex + 1, sub };
+    // 末段的 segEndBeat 为 Infinity，循环必然在末段内 return ——
+    // 此处不可达（旧版在这里有一段"超出工程末尾外推"的死代码）。
+    return { bar, beat: 1, sub: 0 };
 }
 
 /** 秒 → 小节.拍.余量。 */
@@ -961,13 +962,18 @@ export function removeTempoPoint(map: TempoMap, id: string): TempoMap | null {
  * - BPM 继承该位置当前生效值；拍号默认“跟随之前的拍号”（timeSignature: null）；
  * - 音阶默认“跟随工程音阶”（scale: null）。
  * 首次创建（map 为 null）时，0 位置初始点即工程基准记录：携带工程 BPM/拍号/音阶。
+ *
+ * 返回 `created` 表示是否真的插入了新点：当目标位置与既有过近点
+ * （< 1e-6s）冲突时，`point` 为该**既有点**且 `created` 为 false ——
+ * 调用方应选中/编辑返回的 point，而不是拿一个未插入的“幽灵点”进入
+ * 选中/内联编辑状态（旧实现会让 UI 呈现一个不存在的新点）。
  */
 export function createTempoPointAt(
     map: TempoMap | null,
     sec: number,
     fallback: { bpm: number; beatsPerBar: number; denominator?: number },
     opts?: { projectScale?: ScaleLike; projectScaleName?: string },
-): { map: TempoMap; point: TempoPoint } {
+): { map: TempoMap; point: TempoPoint; created: boolean } {
     const at = tempoAtSec(map, sec, fallback);
     const point: TempoPoint = {
         id: createTempoPointId(),
@@ -994,11 +1000,18 @@ export function createTempoPointAt(
             // 新建位置即 0：直接以工程基准点作为初始点（必须显式携带拍号/音阶，
             // 否则后续序列化会把 numerator/denominator 写成 null，后端按 4/4 物化，
             // 与工程基准（如 3/4）不一致）。
-            return { map: { points: [first] }, point: first };
+            return { map: { points: [first] }, point: first, created: true };
         }
-        return { map: { points: [first, point] }, point };
+        return { map: { points: [first, point] }, point, created: true };
     }
-    return { map: insertTempoPoint(map, point), point };
+    const nextMap = insertTempoPoint(map, point);
+    if (nextMap.points.includes(point)) {
+        return { map: nextMap, point, created: true };
+    }
+    // 插入被拒（与既有过近点冲突）：返回既有点本身。
+    const existing =
+        map.points.find((p) => Math.abs(p.positionSec - point.positionSec) < 1e-6) ?? point;
+    return { map: nextMap, point: existing, created: false };
 }
 
 /**

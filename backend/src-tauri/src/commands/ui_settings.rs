@@ -64,6 +64,8 @@ pub(super) fn get_ui_settings(state: State<'_, AppState>) -> UiSettings {
     // Sync "loop for new clips" default (used by importers / legacy project migration)
     crate::config::set_loop_new_clips_default(settings.loop_new_clips);
     crate::config::set_sync_edits_across_takes(settings.sync_edits_across_takes);
+    // 刷新进程内缓存，供拖拽热路径（ripple/split 选项）无盘读取
+    state.store_ui_settings_cache(&settings);
     settings
 }
 
@@ -120,6 +122,8 @@ pub(super) fn save_ui_settings(
     if let Some(dir) = state.config_dir.get() {
         crate::config::save_ui_settings(dir, &settings);
     }
+    // 刷新进程内缓存，供拖拽热路径（ripple/split 选项）无盘读取
+    state.store_ui_settings_cache(&settings);
     crate::time_stretch::update_global_stretch_defaults(
         settings.default_stretch_algorithm,
         settings.default_hifigan_mel_stretch,

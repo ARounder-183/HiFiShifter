@@ -189,6 +189,16 @@ pub(super) fn import_audio_bytes(
         ));
     }
 
+    // 与 import_audio_item 一致的可解码性校验：否则不可解码的负载会留下
+    // 一个时长回退 4s、无波形的坏 clip，且其临时文件永远无人清理。
+    if crate::audio_utils::try_read_audio_header_only(&path).is_none() {
+        let _ = fs::remove_file(&path);
+        return import_audio_bytes_error(&format!(
+            "media_has_no_audio_or_unsupported_codec: {}",
+            path.display()
+        ));
+    }
+
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     state.checkpoint_timeline(&tl);
     let resolved_track_id: Option<String> = match track_id {
@@ -1680,11 +1690,18 @@ pub(super) fn replace_clip_source(
 
 /// 检查所有已导入的媒体源文件是否被外部修改或删除。
 /// 前端在窗口重新获得焦点时调用此命令，以便提示用户做出相应处理。
+///
+/// 两段式：锁内仅克隆待检查的元数据清单，存在性/元数据/指纹的磁盘 IO
+/// 全部放在锁外 —— 网络盘或冷缓存上这些 IO 可能极慢，不能占着全局
+/// timeline 锁。
 pub(super) fn check_source_files_changed(
     state: State<'_, AppState>,
 ) -> crate::models::CheckSourceFilesChangedPayload {
-    let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-    tl.check_source_files_changed()
+    let items = {
+        let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        tl.source_file_check_list()
+    };
+    crate::state::TimelineState::evaluate_source_file_changes(&items)
 }
 
 const MAX_SOURCE_MATCH_CANDIDATES_PER_CLIP: usize = 200;
@@ -1952,14 +1969,11 @@ pub(super) fn split_clips_at(
 ///
 /// 返回 `(模式, 是否平移参数线)`。参数线跟随开关读取全局“锁定参数线”
 /// 设置，与前端拖拽移动时传入的 `moveLinkedParams` 语义保持一致。
+///
+/// 走 AppState 的进程内缓存：本函数在持有 timeline 锁的每个拖拽 tick 里
+/// 被调用，直接读盘会在全局锁内做慢 IO。
 fn ripple_settings(state: &State<'_, AppState>) -> (crate::state::RippleMode, bool) {
-    let settings = if let Some(dir) = state.config_dir.get() {
-        let mut settings = crate::config::load_ui_settings(dir);
-        settings.normalize_ripple_mode();
-        settings
-    } else {
-        crate::config::UiSettings::default()
-    };
+    let settings = state.ui_settings_snapshot();
     (
         crate::state::RippleMode::from_str(&settings.ripple_mode),
         settings.lock_param_lines,
@@ -1967,13 +1981,7 @@ fn ripple_settings(state: &State<'_, AppState>) -> (crate::state::RippleMode, bo
 }
 
 fn split_transition_options(state: &State<'_, AppState>) -> SplitTransitionOptions {
-    let settings = if let Some(dir) = state.config_dir.get() {
-        let mut settings = crate::config::load_ui_settings(dir);
-        settings.normalize_split_transition();
-        settings
-    } else {
-        crate::config::UiSettings::default()
-    };
+    let settings = state.ui_settings_snapshot();
 
     let mode = if settings.split_transition_mode == "overlap" {
         SplitTransitionMode::ExtendOverlap
@@ -1996,7 +2004,7 @@ fn split_transition_options(state: &State<'_, AppState>) -> SplitTransitionOptio
         curve: if settings.split_transition_curve == "keep" {
             None
         } else {
-            Some(settings.split_transition_curve)
+            Some(settings.split_transition_curve.clone())
         },
         overlap_fades: settings.auto_crossfade
             || settings.split_transition_overlap_crossfade == "always",

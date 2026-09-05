@@ -91,9 +91,12 @@ fn sample_automation_curve_at_sec(
     if !idx_f.is_finite() {
         return default_value;
     }
-    let i0 = (idx_f as usize).min(curve.len().saturating_sub(1));
-    let i1 = (i0 + 1).min(curve.len().saturating_sub(1));
-    let frac = (idx_f - i0 as f64) as f32; // fraction 在 [0, 1) 内，无需 clamp
+    let last = curve.len().saturating_sub(1);
+    let i0 = (idx_f as usize).min(last);
+    let i1 = (i0 + 1).min(last);
+    // 越界时 i0 已钳到末位，frac 会发散：必须钳制，保持“持有末值”语义，
+    // 与实时引擎 mix.rs 的采样器一致（否则导出音量随超出时长线性爆表）。
+    let frac = ((idx_f - i0 as f64) as f32).clamp(0.0, 1.0);
     let a = curve.get(i0).copied().unwrap_or(default_value);
     let b = curve.get(i1).copied().unwrap_or(a);
     a + (b - a) * frac

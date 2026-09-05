@@ -414,6 +414,11 @@ export const pasteTimelineClipboardRemote = createAsyncThunk(
         mode: "selected" | "new_tracks" | undefined,
         { rejectWithValue, getState },
     ) => {
+        // 在发起粘贴前捕获现有 clip id 集合：await 期间其他 thunk 的
+        // fulfilled 可能已把新 clip 写进 state，事后 diff 兜底会得到空集。
+        const beforeClipIds = new Set(
+            (getState() as { session: SessionState }).session.clips.map((c) => c.id),
+        );
         const result = await webApi.pasteTimelineClipboard(mode);
         if (!result?.ok) {
             return rejectWithValue(result?.error ?? "paste_timeline_clipboard_failed");
@@ -428,9 +433,6 @@ export const pasteTimelineClipboardRemote = createAsyncThunk(
               : [];
         let createdClipIds = rawCreated.filter((id): id is string => typeof id === "string");
         if (createdClipIds.length === 0) {
-            const beforeClipIds = new Set(
-                (getState() as { session: SessionState }).session.clips.map((c) => c.id),
-            );
             createdClipIds = ((result as { clips?: Array<{ id?: string }> }).clips ?? [])
                 .map((c) => c.id)
                 .filter((id): id is string => !!id && !beforeClipIds.has(id));

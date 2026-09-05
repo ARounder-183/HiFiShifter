@@ -435,13 +435,6 @@ export interface BenchmarkResult_simple {
     benchmarkSamples: number;
 }
 
-export interface PitchTaskStatusPayload {
-    status: "running" | "completed" | "failed" | "cancelled";
-    progress: number;
-    error?: string | null;
-    result_key?: string | null;
-}
-
 // ─── Processor param descriptors ────────────────────────────────────────────
 
 export type ParamKindDto =

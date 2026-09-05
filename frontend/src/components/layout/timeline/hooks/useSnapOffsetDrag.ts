@@ -110,9 +110,12 @@ export function useSnapOffsetDrag(deps: {
         }
 
         function onMove(ev: PointerEvent) {
+            // 只响应本手势指针：dragRef 可能已被另一指针的手势覆盖，
+            // 此时按事件 pointerId 过滤，避免拿别人的坐标改自己的 clip。
+            if (ev.pointerId !== e.pointerId) return;
             const drag = dragRef.current;
             const el = scrollRef.current;
-            if (!drag || drag.pointerId !== ev.pointerId || !el) return;
+            if (!drag || drag.pointerId !== e.pointerId || !el) return;
             // 位移阈值内不视为拖拽：不建检查点、不改状态。
             if (!drag.checkpointed) {
                 if (Math.abs(ev.clientX - drag.startClientX) < 2) return;
@@ -185,8 +188,22 @@ export function useSnapOffsetDrag(deps: {
         }
 
         function onEnd(ev: PointerEvent) {
+            if (ev.pointerId !== e.pointerId) {
+                // 非本手势指针的事件（另一手指/指针）：与本手势无关。
+                return;
+            }
             const drag = dragRef.current;
-            if (!drag || drag.pointerId !== ev.pointerId) return;
+            if (!drag || drag.pointerId !== e.pointerId) {
+                // 本手势指针的 up/cancel 到达，但 dragRef 已被其他手势覆盖
+                // → 本手势被遗弃。仍必须解绑监听器并释放交互锁，否则监听
+                // 器永久悬挂、_interactionLockCount 只增不减。
+                window.removeEventListener("pointermove", onMove);
+                window.removeEventListener("pointerup", onEnd);
+                window.removeEventListener("pointercancel", onEnd);
+                unregisterAbort();
+                dispatch(endInteraction());
+                return;
+            }
             finish();
         }
 

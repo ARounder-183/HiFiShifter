@@ -660,9 +660,12 @@ fn vocode_one_streaming(
     abs_time_start_sec: f64,
     semitone_at_time: &impl Fn(f64) -> f64,
     synth: &mut crate::streaming_world::StreamingWorldSynthesizer,
-) -> Result<Vec<f64>, String> {
+) -> Result<(Vec<f64>, bool), String> {
+    // 返回值的 bool = 是否回退到了批量合成。回退时流式合成器里仍滞留本
+    // chunk 的帧，调用方必须重置合成器，否则下一 chunk 会从错误的时间轴
+    // 位置取样本（整体错位）。
     if x_f64.is_empty() {
-        return Ok(vec![]);
+        return Ok((vec![], false));
     }
 
     let fp = if frame_period_ms.is_finite() && frame_period_ms > 0.1 {
@@ -691,7 +694,7 @@ fn vocode_one_streaming(
         .map_err(|_| "WORLD: f0 too long".to_string())?;
 
     if f0.is_empty() {
-        return Ok(x_f64.to_vec());
+        return Ok((x_f64.to_vec(), false));
     }
 
     let voiced: Vec<bool> = f0.iter().map(|&hz| hz > 0.0).collect();
@@ -801,8 +804,8 @@ fn vocode_one_streaming(
 
     // 若流式合成输出长度不足（合成器需要更多帧才能输出），
     // 回退到批量 Synthesis 保证输出长度正确
-    let y_f64 = if y_f64_raw.len() >= x_f64.len() {
-        y_f64_raw[..x_f64.len()].to_vec()
+    let (y_f64, streaming_fell_back) = if y_f64_raw.len() >= x_f64.len() {
+        (y_f64_raw[..x_f64.len()].to_vec(), false)
     } else {
         // 流式输出不足，用批量合成补全
         let y_length: i32 = x_f64
@@ -823,7 +826,7 @@ fn vocode_one_streaming(
                 y.as_mut_ptr(),
             );
         }
-        y
+        (y, true)
     };
 
     // voiced/unvoiced 混合（与 vocode_one 相同逻辑）
@@ -832,7 +835,7 @@ fn vocode_one_streaming(
         blend_unvoiced_regions_with_silence_gate(&mut out, x_f64, &voiced, fp, fs);
     }
 
-    Ok(out)
+    Ok((out, streaming_fell_back))
 }
 
 /// WORLD vocoder pitch shift, chunked to avoid huge memory usage.
@@ -933,7 +936,7 @@ where
         let abs_time_start_sec = start_sec + (pad_start as f64) / (sample_rate as f64);
 
         // 使用流式合成器处理当前块
-        let y_f64 = vocode_one_streaming(
+        let (y_f64, streaming_fell_back) = vocode_one_streaming(
             &x_f64,
             sr,
             frame_period_ms,
@@ -944,6 +947,19 @@ where
             &mut streaming_synth,
         )?;
 
+        if streaming_fell_back {
+            // 批量合成兜底后，流式合成器内仍滞留本 chunk 的帧；继续使用会让
+            // 下一 chunk 的 pull_samples 从错误的时间轴位置吐样本（整体错位
+            // 最多一个 chunk）。整机重建以丢弃积压，代价只是一次冷启动。
+            streaming_synth = crate::streaming_world::StreamingWorldSynthesizer::new(
+                sample_rate,
+                frame_period_ms,
+                fft_size,
+                synth_buffer_size,
+                synth_pointers,
+            );
+        }
+
         if y_f64.len() != x_f64.len() {
             return Err("WORLD: chunk output length mismatch".to_string());
         }
@@ -953,12 +969,23 @@ where
         let dst_start = chunk_start;
         let dst_end = chunk_end;
 
-        for i in 0..(dst_end - dst_start) {
-            let src_idx = central_start + i;
+        // 写入范围扩展到本块尾部 [chunk_end, chunk_end+overlap)：pad 输入里
+        // 含这部分样本的渲染。下一块的块首交叉淡化会把它作为 prev 读出；
+        // 旧实现从不写尾部，prev 恒为 0，等效于从静音淡入 —— 块边界处
+        // 先硬切到 0（咔哒）再爬升（凹陷），每 6s 重复一次。
+        let write_end = if overlap_len > 0 {
+            (chunk_end + overlap_len).min(total_frames)
+        } else {
+            chunk_end
+        };
+
+        for dst_idx in dst_start..write_end {
+            let src_idx = central_start + (dst_idx - dst_start);
             let v = clamp11(y_f64[src_idx]) as f32;
-            let dst_idx = dst_start + i;
 
             if overlap_len > 0 && chunk_start > 0 && dst_idx < chunk_start + overlap_len {
+                // 块首：与上一块写入的尾部做等功率交叉淡化
+                // （prev·cos + curr·sin，t: 0→1 由上一块连续过渡到本块）。
                 let t = (dst_idx - chunk_start) as f32 / overlap_len as f32;
                 let angle = t.clamp(0.0, 1.0) * std::f32::consts::FRAC_PI_2;
                 let w_curr = angle.sin();

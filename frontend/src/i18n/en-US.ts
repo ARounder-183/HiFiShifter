@@ -453,7 +453,6 @@ export const enUS = {
     solo: "Solo",
     status_analyzing_pitch: "Analyzing pitch",
     status_stretching: "Stretching",
-    refreshing_pitch_data: "Refreshing pitch data",
 
     fb_title: "File Browser",
     fb_search_placeholder: "Search files...",

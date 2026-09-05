@@ -157,8 +157,6 @@ import {
     selectMergedKeybindings,
 } from "../../features/keybindings/keybindingsSlice";
 
-import { useAsyncPitchRefresh } from "../../hooks/useAsyncPitchRefresh";
-import { ProgressBar } from "../ProgressBar";
 
 import { usePianoRollStatusUpdate } from "../../contexts/PianoRollStatusContext";
 import { MidiTrackSelectDialog } from "./MidiTrackSelectDialog";
@@ -602,9 +600,6 @@ export const PianoRollPanel: React.FC = () => {
     const effectivePitchSnapVisual =
         snapGestureActive && snapToggleHeld ? !s.pitchSnapEnabled : s.pitchSnapEnabled;
 
-    // Task 6.3: 集成 useAsyncPitchRefresh Hook
-    const asyncRefresh = useAsyncPitchRefresh();
-    const [showSuccessMessage] = useState(false);
 
     // MIDI 导入弹窗状态
     const [midiDialogOpen, setMidiDialogOpen] = useState(false);
@@ -3138,23 +3133,12 @@ export const PianoRollPanel: React.FC = () => {
         invalidate();
     }, [s.toolMode, invalidate]);
 
-    // 同步 isLoading 和 asyncRefresh 状态到全局 Context
+    // 同步数据加载状态到全局 Context
     useEffect(() => {
         updatePianoRollStatus({
             dataLoading: isLoading,
-            asyncRefreshActive: asyncRefresh.isLoading,
-            asyncRefreshProgress: asyncRefresh.progress,
-            asyncRefreshStatus: asyncRefresh.status,
-            asyncRefreshError: asyncRefresh.error,
         });
-    }, [
-        isLoading,
-        asyncRefresh.isLoading,
-        asyncRefresh.progress,
-        asyncRefresh.status,
-        asyncRefresh.error,
-        updatePianoRollStatus,
-    ]);
+    }, [isLoading, updatePianoRollStatus]);
 
     // ── Edit operation handler (shared by context menu + MenuBar events) ──
     const handleEditOp = useCallback(
@@ -5326,52 +5310,6 @@ export const PianoRollPanel: React.FC = () => {
             </Flex>
 
             {/* Task 6.5: 参数面板顶部添加进度条区 ?*/}
-            {asyncRefresh.isLoading && (
-                <Flex className="px-3 py-2 bg-qt-base border-b border-qt-border">
-                    <ProgressBar
-                        percentage={asyncRefresh.progress}
-                        label={tAny("refreshing_pitch_data") || "Refreshing pitch data"}
-                        showCancel={true}
-                        onCancel={async () => {
-                            // Task 6.6: 取消按钮点击时调 ?cancelRefresh()
-                            await asyncRefresh.cancelRefresh();
-                        }}
-                        estimatedRemaining={asyncRefresh.estimatedRemaining}
-                    />
-                </Flex>
-            )}
-
-            {/* Task 6.7: 任务完成后显示成功提 ?*/}
-            {showSuccessMessage && (
-                <Flex
-                    align="center"
-                    gap="2"
-                    className="px-3 py-2 bg-green-900/20 border-b border-green-700 text-green-300 text-sm"
-                >
-                    <span>&#x2713;</span>
-                    <span></span>
-                </Flex>
-            )}
-
-            {/* Task 6.8: 任务失败时显示错误消息和重试按钮 */}
-            {asyncRefresh.status === "failed" && asyncRefresh.error && (
-                <Flex
-                    align="center"
-                    justify="between"
-                    className="px-3 py-2 bg-red-900/20 border-b border-red-700 text-red-300 text-sm"
-                >
-                    <span></span>
-                    <Button
-                        size="1"
-                        variant="soft"
-                        color="red"
-                        onClick={() => rootTrackId && void asyncRefresh.startRefresh(rootTrackId)}
-                    >
-                        {tAny("retry") || "Retry"}
-                    </Button>
-                </Flex>
-            )}
-
             {/* Note/Curve Editor Area */}
             <Flex className="flex-1 overflow-hidden relative">
                 {/* Left axis + corner */}

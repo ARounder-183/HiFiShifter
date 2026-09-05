@@ -114,10 +114,12 @@ pub fn apply_formant_morph_mono(
     }
 
     let target_f1 = params.target_f1_hz.clamp(TARGET_F1_MIN, TARGET_F1_MAX) as f32;
+    // F2 的间隙约束必须基于**钳制后**的 F1：用原始值时，越界的 F1（如旧工程
+    // 文件 / IPC 直传 2000Hz）会把 F2 拉到 [F2_MAX, +∞) 之外。
     let target_f2 = params
         .target_f2_hz
         .clamp(TARGET_F2_MIN, TARGET_F2_MAX)
-        .max(params.target_f1_hz + TARGET_MIN_GAP) as f32;
+        .max(target_f1 as f64 + TARGET_MIN_GAP) as f32;
 
     // ── 1. 分析域：降采样 + 逐帧 LPC / 极点 / 候选 ──────────────────────
     let Some(mut decimator) = Decimator::new(sample_rate, ANALYSIS_TARGET_RATE as u32) else {
@@ -195,6 +197,8 @@ pub fn apply_formant_morph_mono(
     let mut frame_buf: Vec<num_complex::Complex32> = vec![num_complex::Complex32::new(0.0, 0.0); fft_size];
     let mut gate = VoicingGate::new();
     let tracks_max = (tracks.len() - 1) as f32;
+    let mut dry_windowed = vec![0.0_f32; fft_size];
+    let mut wet_windowed = vec![0.0_f32; fft_size];
 
     let mut start = 0usize;
     while start + fft_size <= padded.len() {
@@ -270,13 +274,17 @@ pub fn apply_formant_morph_mono(
 
             fft_inverse.process(&mut frame_buf);
 
-            // 加合成窗 + 逐帧 RMS 对齐
-            let dry_windowed: Vec<f32> = padded[start..start + fft_size]
+            // 加合成窗 + 逐帧 RMS 对齐（缓冲区在循环外分配，避免每 hop 两次堆分配）
+            for (i, (s, w)) in padded[start..start + fft_size]
                 .iter()
                 .zip(analysis_window.iter())
-                .map(|(s, w)| s * w)
-                .collect();
-            let mut wet_windowed: Vec<f32> = frame_buf.iter().map(|c| c.re * inv_n).collect();
+                .enumerate()
+            {
+                dry_windowed[i] = s * w;
+            }
+            for (i, c) in frame_buf.iter().enumerate() {
+                wet_windowed[i] = c.re * inv_n;
+            }
             correction::match_frame_energy(&dry_windowed, &mut wet_windowed);
             for i in 0..fft_size {
                 ola[start + i] += wet_windowed[i] * synthesis_window[i];

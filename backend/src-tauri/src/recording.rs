@@ -259,13 +259,38 @@ fn meter_loop(
 }
 
 pub fn start(state: &AppState, start_sec: f64) -> Result<RecordingStartedInfo, String> {
-    let mut recording_guard = state
-        .recording
-        .lock()
-        .unwrap_or_else(|err| err.into_inner());
-    if recording_guard.is_some() {
+    // 以 CAS 抢占启动权：设备就绪等待最长 8s，这期间绝不能持有
+    // `recording` 锁，否则 meter 轮询（current_state，同步命令）会阻塞
+    // 整个等待期。CAS + Drop 守卫覆盖全部提前返回路径。
+    if state
+        .recording_starting
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        )
+        .is_err()
+    {
         return Err("recording_error_already_active".to_string());
     }
+    struct StartingGuard<'a>(&'a std::sync::atomic::AtomicBool);
+    impl Drop for StartingGuard<'_> {
+        fn drop(&mut self) {
+            self.0.store(false, std::sync::atomic::Ordering::Release);
+        }
+    }
+    let _starting_guard = StartingGuard(&state.recording_starting);
+
+    {
+        let recording_guard = state
+            .recording
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if recording_guard.is_some() {
+            return Err("recording_error_already_active".to_string());
+        }
+    } // 锁在此释放，之后的慢操作（设备就绪等待）不占用它
 
     let settings = load_settings(state);
     let output_path = resolve_output_path(state, &settings)?;
@@ -346,18 +371,25 @@ pub fn start(state: &AppState, start_sec: f64) -> Result<RecordingStartedInfo, S
         meter_loop(app_handle, meter_stop, meter_level, meter_peak, started_at)
     });
 
-    *recording_guard = Some(ActiveRecording {
-        start_sec,
-        output_path: output_path.clone(),
-        started_at,
-        stop_signal,
-        level,
-        peak,
-        thread_join: Some(thread_join),
-        writer_tx: Some(writer_tx),
-        writer_join: Some(writer_join),
-        meter_join: Some(meter_join),
-    });
+    // 安装 ActiveRecording（CAS 已互斥并发 start，此处直接写入）
+    {
+        let mut recording_guard = state
+            .recording
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        recording_guard.replace(ActiveRecording {
+            start_sec,
+            output_path: output_path.clone(),
+            started_at,
+            stop_signal,
+            level,
+            peak,
+            thread_join: Some(thread_join),
+            writer_tx: Some(writer_tx),
+            writer_join: Some(writer_join),
+            meter_join: Some(meter_join),
+        });
+    }
 
     Ok(RecordingStartedInfo {
         start_sec,
@@ -366,13 +398,18 @@ pub fn start(state: &AppState, start_sec: f64) -> Result<RecordingStartedInfo, S
 }
 
 pub fn stop(state: &AppState) -> Result<RecordingFinishedInfo, String> {
-    let mut recording_guard = state
-        .recording
-        .lock()
-        .unwrap_or_else(|err| err.into_inner());
-    let mut active = recording_guard
-        .take()
-        .ok_or_else(|| "recording_error_not_active".to_string())?;
+    // take 出 ActiveRecording 后立即释放锁：join 捕获/写盘线程可能耗时
+    // （WASAPI/COM 拆解），甚至被卡死的捕获线程会无限等待 —— 不能让
+    // current_state（meter 轮询，同步命令）和其余录音命令同步阻塞。
+    let mut active = {
+        let mut recording_guard = state
+            .recording
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        recording_guard
+            .take()
+            .ok_or_else(|| "recording_error_not_active".to_string())?
+    };
 
     active.stop_signal.store(true, Ordering::Relaxed);
     let thread_result = match active.thread_join.take() {

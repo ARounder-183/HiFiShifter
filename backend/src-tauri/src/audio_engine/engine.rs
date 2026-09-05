@@ -180,10 +180,10 @@ impl AudioEngine {
                     }
                     let pending_pos = meter_bus.take_pending_pos();
                     if debug_pending && pending_pos > 0 {
-                        let sec = pending_pos / 44100;
+                        let snap = snapshot_for_meter.load_full();
+                        let sec = pending_pos / u64::from(snap.sample_rate.max(1));
                         if sec != last_pending_log_sec {
                             last_pending_log_sec = sec;
-                            let snap = snapshot_for_meter.load_full();
                             for clip in snap.clips.iter() {
                                 if clip.needs_synthesis && clip.rendered_pcm.is_none() {
                                     let clip_end =

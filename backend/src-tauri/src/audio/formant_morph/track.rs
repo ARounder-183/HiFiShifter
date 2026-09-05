@@ -203,11 +203,14 @@ pub fn smooth_tracks(tracks: &mut Vec<TrackPoint>) {
     let radius = MEDIAN_WINDOW / 2;
     let n = tracks.len();
 
-    let median_at = |values: &[f32], idx: usize| -> f32 {
+    // 复用同一窗口缓冲区：逐帧 to_vec + 排序在长素材上是十万级的分配开销
+    let mut window: Vec<f32> = Vec::with_capacity(MEDIAN_WINDOW);
+    let mut median_at = |values: &[f32], idx: usize| -> f32 {
         let lo = idx.saturating_sub(radius);
         let hi = (idx + radius).min(n - 1);
-        let mut window: Vec<f32> = values[lo..=hi].to_vec();
-        window.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        window.clear();
+        window.extend_from_slice(&values[lo..=hi]);
+        window.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         window[window.len() / 2]
     };
 

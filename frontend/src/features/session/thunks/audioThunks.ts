@@ -93,6 +93,11 @@ export const pasteVocalShifterClipboard = createAsyncThunk(
             | undefined,
         { rejectWithValue, getState },
     ) => {
+        // 在发起粘贴前捕获现有 clip id 集合：await 期间其他 thunk 的
+        // fulfilled 可能已把新 clip 写进 state，事后取差集会得到空集。
+        const beforeClipIds = new Set(
+            (getState() as { session: SessionState }).session.clips.map((c) => c.id),
+        );
         const result = await webApi.pasteVocalShifterClipboard(
             arg?.selectionStartFrame,
             arg?.selectionMaxFrames,
@@ -101,9 +106,6 @@ export const pasteVocalShifterClipboard = createAsyncThunk(
         if (!result?.ok) {
             return rejectWithValue(result?.error ?? "paste_vocalshifter_clipboard_failed");
         }
-        const beforeClipIds = new Set(
-            (getState() as { session: SessionState }).session.clips.map((c) => c.id),
-        );
         const clips = (result as { clips?: Array<{ id?: string }> }).clips ?? [];
         const newClipIds = resolveNewClipIds(
             result as { clips?: Array<{ id?: string }>; created_clip_ids?: unknown },
@@ -120,6 +122,10 @@ export const pasteReaperClipboard = createAsyncThunk(
         arg: { selectionStartFrame?: number; selectionMaxFrames?: number } | undefined,
         { rejectWithValue, getState },
     ) => {
+        // 在发起粘贴前捕获（理由同上）
+        const beforeClipIds = new Set(
+            (getState() as { session: SessionState }).session.clips.map((c) => c.id),
+        );
         const result = await webApi.pasteReaperClipboard(
             arg?.selectionStartFrame,
             arg?.selectionMaxFrames,
@@ -127,9 +133,6 @@ export const pasteReaperClipboard = createAsyncThunk(
         if (!result?.ok) {
             return rejectWithValue(result?.error ?? "paste_reaper_clipboard_failed");
         }
-        const beforeClipIds = new Set(
-            (getState() as { session: SessionState }).session.clips.map((c) => c.id),
-        );
         const clips = (result as { clips?: Array<{ id?: string }> }).clips ?? [];
         const newClipIds = resolveNewClipIds(result, beforeClipIds);
         const pasteEndSec = await syncPastePlayheadToEnd(clips as PasteEndClipLike[], newClipIds);

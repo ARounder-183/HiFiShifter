@@ -161,7 +161,6 @@ export interface TimelineStateResult {
 
     // State values
     scrollLeft: number;
-    nativeScrollLeft: number;
     pxPerSec: number;
     setPxPerSec: React.Dispatch<React.SetStateAction<number>>;
     viewportWidth: number;
@@ -358,7 +357,6 @@ export function useTimelineState(): TimelineStateResult {
 
     // ── State 声明 ────────────────────────────────────────────
     const [scrollLeft, setScrollLeft] = useState(0);
-    const [nativeScrollLeft, setNativeScrollLeft] = useState(0);
     const setScrollLeftState = setScrollLeft;
     const [pxPerSec, setPxPerSec] = useState(() => {
         const stored = Number(localStorage.getItem("hifishifter.pxPerSec"));
@@ -388,7 +386,6 @@ export function useTimelineState(): TimelineStateResult {
 
     useEffect(() => {
         scrollLeftRef.current = scrollLeft;
-        setNativeScrollLeft(scrollLeft);
     }, [scrollLeft]);
 
     useEffect(() => {
@@ -477,7 +474,6 @@ export function useTimelineState(): TimelineStateResult {
         if (rulerPlayheadHeadRef.current) {
             rulerPlayheadHeadRef.current.style.left = `${playheadLeftPx}px`;
         }
-        setNativeScrollLeft(next);
         // ★ 立即广播视口变化 → sticky 画布层同步重绘（绕过 React）
         timelineViewportBus.emit(
             next,
@@ -1179,6 +1175,17 @@ export function useTimelineState(): TimelineStateResult {
 
         function finish() {
             const pan = panRef.current;
+            if (pan && pan.pointerId !== e.pointerId) {
+                // panRef 已被另一指针的平移覆盖：本手势只清理自身资源
+                // （监听器 + 失焦守卫 + 光标/选择态），不触碰当前 pan 状态。
+                unregisterAbort();
+                window.removeEventListener("pointermove", onMove);
+                window.removeEventListener("pointerup", end);
+                window.removeEventListener("pointercancel", end);
+                document.body.style.cursor = prevCursor;
+                document.body.style.userSelect = prevSelect;
+                return;
+            }
             if (!pan) return;
             panRef.current = null;
             unregisterAbort(); // 收尾第一步注销失焦守卫（幂等防双触发）
@@ -1191,8 +1198,20 @@ export function useTimelineState(): TimelineStateResult {
 
         function end(ev: PointerEvent) {
             const pan = panRef.current;
-            if (!pan) return;
-            if (pan.pointerId != null && ev.pointerId !== pan.pointerId) return;
+            if (!pan) {
+                // panRef 已空：本手势的监听器仍需解绑（可能被 blur 兜底
+                // 或并发收尾抢先清空）。
+                window.removeEventListener("pointermove", onMove);
+                window.removeEventListener("pointerup", end);
+                window.removeEventListener("pointercancel", end);
+                return;
+            }
+            if (pan.pointerId != null && ev.pointerId !== pan.pointerId) {
+                // 非本平移指针的事件：若是本手势的指针已被覆盖，走 finish
+                // 的 abandoned 分支清理；否则（另一指针的杂散事件）忽略。
+                if (ev.pointerId === e.pointerId) finish();
+                return;
+            }
             finish();
         }
 
@@ -1233,7 +1252,6 @@ export function useTimelineState(): TimelineStateResult {
         panRef,
 
         scrollLeft,
-        nativeScrollLeft,
         pxPerSec,
         setPxPerSec,
         viewportWidth,

@@ -358,7 +358,6 @@ export const zhTW = {
     solo: "獨奏",
     status_analyzing_pitch: "正在分析音高",
     status_stretching: "正在拉伸",
-    refreshing_pitch_data: "重新整理音高資料",
 
     fb_title: "檔案瀏覽器",
     fb_search_placeholder: "搜尋檔案...",

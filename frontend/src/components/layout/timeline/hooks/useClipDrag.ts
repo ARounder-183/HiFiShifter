@@ -614,7 +614,14 @@ export function useClipDrag(deps: {
 
         function end() {
             const drag = clipDragRef.current;
-            if (!drag || drag.pointerId !== e.pointerId) return;
+            if (!drag || drag.pointerId !== e.pointerId) {
+                // 本手势已被另一指针覆盖（dragRef 指向别的手势）：仍必须
+                // 解绑本手势在 window 上的监听器，否则永久悬挂。
+                window.removeEventListener("pointermove", scheduleMove);
+                window.removeEventListener("pointerup", end);
+                window.removeEventListener("pointercancel", end);
+                return;
+            }
             clipDragRef.current = null;
             unregisterAbort(); // 收尾第一步注销失焦守卫（幂等防双触发）
             setClipDropNewTrack(false);

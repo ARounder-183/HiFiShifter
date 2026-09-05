@@ -6,7 +6,6 @@ import type {
     OnnxDiagnosticResult,
     OnnxStatusResult,
     PitchProgressPayload,
-    PitchTaskStatusPayload,
     PlaybackStateResult,
     ProcessAudioResult,
     RuntimeInfo,
@@ -204,11 +203,4 @@ export const coreApi = {
         invoke<{ ok: boolean; skipped?: boolean; rendering?: number }>("start_background_render"),
     cancelBackgroundRender: () =>
         invoke<{ ok: boolean; wasActive?: boolean }>("cancel_background_render"),
-
-    // Async pitch refresh task system
-    startPitchRefreshTask: (rootTrackId: string) =>
-        invoke<string>("start_pitch_refresh_task", rootTrackId),
-    getPitchRefreshStatus: (taskId: string) =>
-        invoke<PitchTaskStatusPayload | null>("get_pitch_refresh_status", taskId),
-    cancelPitchTask: (taskId: string) => invoke<{ ok: boolean }>("cancel_pitch_task", taskId),
 };

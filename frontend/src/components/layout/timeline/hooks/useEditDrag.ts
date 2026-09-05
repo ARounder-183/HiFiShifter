@@ -1912,7 +1912,25 @@ export function useEditDrag(deps: {
 
         function end() {
             const drag = editDragRef.current;
-            if (!drag || drag.pointerId !== e.pointerId) return;
+            if (!drag || drag.pointerId !== e.pointerId) {
+                // 本手势已被另一指针覆盖（dragRef 指向别的手势）。本手势在
+                // window 上的监听器与已开的 undo 组仍必须收尾，否则监听器
+                // 永久悬挂、suppress_checkpoints 卡死（撤销栈冻结）。
+                window.removeEventListener("pointermove", onMove);
+                window.removeEventListener("pointerup", end);
+                window.removeEventListener("pointercancel", end);
+                if (gainUndoGroupPromise) {
+                    void finishGainUndoGroup().catch(() => undefined);
+                }
+                if (fadeUndoGroupPromise) {
+                    void finishFadeUndoGroup().catch(() => undefined);
+                }
+                if (crossfadeUndoGroupPromise) {
+                    void finishCrossfadeUndoGroup().catch(() => undefined);
+                }
+                dispatch(endInteraction());
+                return;
+            }
             editDragRef.current = null;
             // 收尾第一步注销失焦守卫（幂等防双触发；blur 与 pointerup 竞态安全）。
             unregisterAbort();
