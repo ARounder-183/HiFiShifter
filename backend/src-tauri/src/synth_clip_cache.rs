@@ -535,6 +535,27 @@ pub fn compute_rendered_clip_hash(
     mix_bytes!(&source_range_q.0.to_le_bytes());
     mix_bytes!(&source_range_q.1.to_le_bytes());
 
+    // 混入拉伸设置：渲染输出依赖拉伸模式 —— HiFiGAN Mel Stretch 开启时由
+    // 处理器在 mel 域内部拉伸，关闭时由外部算法预拉伸后以 rate=1 渲染；
+    // 气声噪声 stem 同样跟随外部算法。用户切换算法/开关后旧缓存必须失效，
+    // 否则会持续返回旧算法的渲染结果（谐波与气声都不更新）。
+    {
+        let stretch = crate::time_stretch::current_runtime_stretch_settings();
+        mix_bytes!(b"stretch_settings");
+        mix_bytes!(&(stretch.default_algorithm as u32).to_le_bytes());
+        mix_bytes!(&[u8::from(stretch.default_hifigan_mel_stretch)]);
+        mix_bytes!(&stretch
+            .project_algorithm_override
+            .map(|a| a as u32)
+            .unwrap_or(u32::MAX)
+            .to_le_bytes());
+        mix_bytes!(&stretch
+            .project_hifigan_mel_stretch_override
+            .map(u8::from)
+            .unwrap_or(u8::MAX)
+            .to_le_bytes());
+    }
+
     // 混入与 clip 时间范围重叠的 pitch_edit 曲线片段
     let fp = frame_period_ms.max(0.1);
     let start_sec = start_frame as f64 / sr.max(1) as f64;
@@ -898,7 +919,8 @@ pub fn invalidate_clip_all_caches(clip_id: &str) {
         if cache.len() < before {
             debug_eprintln!(
                 "[cache:invalidate] clip_id={} RenderedClipCache invalidated (had {} entries)",
-                clip_id, before
+                clip_id,
+                before
             );
         }
     }
@@ -1122,6 +1144,46 @@ mod tests {
         };
         assert_ne!(base(false, (0, 1_000)), base(true, (0, 1_000)));
         assert_ne!(base(false, (0, 1_000)), base(false, (500, 1_000)));
+    }
+
+    #[test]
+    fn rendered_clip_hash_follows_stretch_settings() {
+        // 渲染输出依赖拉伸模式（Mel Stretch 内部拉伸 vs 外部算法预拉伸），
+        // 气声噪声 stem 也跟随外部算法。切换任一设置都必须使缓存失效。
+        use crate::time_stretch::{update_runtime_stretch_settings, UserStretchAlgorithm};
+        let base = || {
+            compute_rendered_clip_hash(
+                "clip-1",
+                "demo.wav",
+                0,
+                48_000,
+                48_000,
+                "nsf_hifigan_onnx",
+                &[60.0, 61.0, 62.0],
+                5.0,
+                0.5,
+                &std::collections::HashMap::new(),
+                &std::collections::HashMap::new(),
+                None,
+                None,
+                None, // source_file_mtime
+                false,
+                (0, 1_000),
+            )
+        };
+
+        update_runtime_stretch_settings(UserStretchAlgorithm::Signalsmith, true, None, None);
+        let mel_on_signalsmith = base();
+        update_runtime_stretch_settings(UserStretchAlgorithm::Soundtouch, true, None, None);
+        let mel_on_soundtouch = base();
+        update_runtime_stretch_settings(UserStretchAlgorithm::Signalsmith, false, None, None);
+        let mel_off = base();
+
+        // 恢复默认，避免影响其它测试
+        update_runtime_stretch_settings(UserStretchAlgorithm::Signalsmith, true, None, None);
+
+        assert_ne!(mel_on_signalsmith, mel_on_soundtouch);
+        assert_ne!(mel_on_signalsmith, mel_off);
     }
 
     #[test]

@@ -212,17 +212,24 @@ fn sample_curve_at_abs_sec(
     a + (b - a) * frac
 }
 
-/// 把噪声 stem 线性重采样到目标长度（按样本数，而非采样率比）。
+/// 把噪声（气声）stem 对齐到谐波输出的（时间轴）长度。
 ///
-/// 时间拉伸只作用在谐波分支上：`render_mel_stretch_with_formant` 在 mel 域把
-/// 谐波拉伸到**时间轴**长度，而 HNSEP 分离出的噪声 stem 仍是**源速率**长度。
-/// 若直接按 `min(harmonic, noise)` 混合：
+/// 拉伸场景（playback_rate != 1）不能用线性重采样：气声噪声不是白噪声，
+/// 其谱包络（共振峰形状）会随线性重采样按 1/rate 整体缩放 —— 慢放时气声
+/// 变闷（频谱压半）、快放时变亮且混叠，听感上就是"气声没有被正确拉伸"。
+/// 因此这里与谐波分支一致使用外部拉伸算法（用户选择 Linear 时仍为线性）；
+/// Mel Stretch 只作用于谐波分支 —— 对噪声做 HiFiGAN 重合成会注入谐波伪影。
+///
+/// 若直接按 `min(harmonic, noise)` 混合还会更糟：
 /// - `playback_rate < 1`（拉长）时谐波比噪声长，输出被截断到噪声长度，
 ///   clip 拉伸出来的尾巴整段丢失（听感上就是"下一段音频被截断"）；
 /// - `playback_rate > 1`（缩短）时噪声比谐波长，噪声尾部被丢掉。
-///
-/// 噪声是随机信号，线性重采样即可保持其统计特性，代价远低于再跑一次分离。
-pub(crate) fn resample_noise_to_len(noise: &[f32], target_len: usize) -> Vec<f32> {
+pub(crate) fn align_noise_stem_to_len(
+    noise: &[f32],
+    sample_rate: u32,
+    target_len: usize,
+    algorithm: crate::time_stretch::StretchAlgorithm,
+) -> Vec<f32> {
     if target_len == 0 || noise.is_empty() {
         return Vec::new();
     }
@@ -232,18 +239,7 @@ pub(crate) fn resample_noise_to_len(noise: &[f32], target_len: usize) -> Vec<f32
     if noise.len() == 1 {
         return vec![noise[0]; target_len];
     }
-
-    let src_last = noise.len() - 1;
-    let scale = src_last as f64 / (target_len.saturating_sub(1)).max(1) as f64;
-    let mut out = Vec::with_capacity(target_len);
-    for idx in 0..target_len {
-        let src = idx as f64 * scale;
-        let i0 = (src as usize).min(src_last.saturating_sub(1));
-        let i1 = (i0 + 1).min(src_last);
-        let frac = (src - i0 as f64) as f32;
-        out.push(noise[i0] + (noise[i1] - noise[i0]) * frac);
-    }
-    out
+    crate::time_stretch::time_stretch_interleaved(noise, 1, sample_rate, target_len, algorithm)
 }
 
 impl ProcessingStage for HiFiGanStage {
@@ -271,40 +267,71 @@ impl ProcessingStage for HiFiGanStage {
             .extra_curves
             .get("formant_shift_cents")
             .map(|v| v.as_slice());
-        if !breath_enabled {
-            // ── 非 Breath 路径 ──────────────────────────────────────────────
-            let render_ctx = RenderContext {
-                mono_pcm: &input_pcm,
-                sample_rate: cc.sample_rate,
-                seg_start_sec: cc.seg_start_sec,
-                seg_end_sec: cc.seg_end_sec,
-                clip_start_sec: cc.clip_start_sec,
-                frame_period_ms: cc.frame_period_ms,
-                pitch_edit: cc.pitch_edit,
-                clip_midi: cc.clip_midi,
-                clip_id: cc.clip_id,
-            };
-            let renderer = crate::renderer::hifigan::HiFiGanRenderer;
-            return if (cc.playback_rate - 1.0).abs() > 1.0e-6 {
-                renderer.render_mel_stretch_with_formant(
-                    &render_ctx,
-                    cc.playback_rate,
-                    formant_curve,
-                )
-            } else {
-                renderer.render_with_formant(&render_ctx, formant_curve)
-            };
+        // HNSEP 不可用时降级为非 Breath 路径：调用方已因气声跳过外部拉伸，
+        // 硬错误会让整个 clip 以源速率输出（被截断/补零），比"没有气声"
+        // 严重得多。
+        if breath_enabled && crate::hnsep_onnx::is_available() {
+            return self.process_breath(input_pcm, cc, formant_curve);
+        }
+        if breath_enabled {
+            log::warn!(
+                "HiFiGanStage: breath enabled but HNSEP unavailable, \
+                 falling back to non-breath rendering (clip_id={})",
+                cc.clip_id
+            );
         }
 
-        // ── Breath 路径 ─────────────────────────────────────────────────────
-        if !crate::hnsep_onnx::is_available() {
-            return Err("HNSEP is enabled but model is unavailable".to_string());
+        // ── 非 Breath 路径 ──────────────────────────────────────────────
+        let render_ctx = RenderContext {
+            mono_pcm: &input_pcm,
+            sample_rate: cc.sample_rate,
+            seg_start_sec: cc.seg_start_sec,
+            seg_end_sec: cc.seg_end_sec,
+            clip_start_sec: cc.clip_start_sec,
+            frame_period_ms: cc.frame_period_ms,
+            pitch_edit: cc.pitch_edit,
+            clip_midi: cc.clip_midi,
+            clip_id: cc.clip_id,
+        };
+        let renderer = crate::renderer::hifigan::HiFiGanRenderer;
+        if (cc.playback_rate - 1.0).abs() > 1.0e-6 {
+            if cc.clip_midi.is_empty() {
+                // 无 F0 无法走 mel 拉伸（HiFiGAN 需要音高激励）：回退外部算法
+                // 原位拉伸，保证输出帧数与"处理器内部拉伸"的承诺一致 ——
+                // 调用方已因此跳过外部预拉伸，这里若再返回原 PCM 就会出现
+                // "外部不拉伸、内部也不拉伸"，输出被截断/补零。
+                return Ok(crate::time_stretch::time_stretch_interleaved(
+                    &input_pcm,
+                    1,
+                    cc.sample_rate,
+                    cc.out_frames,
+                    crate::time_stretch::resolved_external_stretch_algorithm(),
+                ));
+            }
+            return renderer.render_mel_stretch_with_formant(
+                &render_ctx,
+                cc.playback_rate,
+                formant_curve,
+            );
         }
+        renderer.render_with_formant(&render_ctx, formant_curve)
+    }
+}
 
+impl HiFiGanStage {
+    /// Breath 路径：HNSEP 分离谐波/噪声 → 谐波走 HiFiGAN（mel 拉伸或外部
+    /// 算法回退）→ 噪声对齐到时间轴长度后按 breath_gain 混合。
+    fn process_breath(
+        &self,
+        input_pcm: Vec<f32>,
+        cc: &crate::renderer::traits::ClipProcessContext<'_>,
+        formant_curve: Option<&[f32]>,
+    ) -> Result<Vec<f32>, String> {
         let (harmonic, noise) =
             crate::hnsep_onnx::infer_harmonic_noise_mono(cc.clip_id, &input_pcm, cc.sample_rate)?;
 
-        // harmonic 直接走 HiFiGAN；时间拉伸已在处理器外部完成
+        // 谐波分支：有 F0（clip_midi）时走 HiFiGAN mel 拉伸/渲染；无 F0 时
+        // 回退外部算法拉伸 —— 两种情况输出都是时间轴长度 out_frames。
         let processed_harmonic = if cc.clip_midi.is_empty() {
             if (cc.playback_rate - 1.0).abs() > 1.0e-6 {
                 crate::time_stretch::time_stretch_interleaved(
@@ -353,8 +380,15 @@ impl ProcessingStage for HiFiGanStage {
         }
 
         // 噪声 stem 与谐波对齐到同一（时间轴）长度后再混合。
-        // 不能用 `min(harmonic, noise)`：那会在拉伸后把谐波尾巴裁掉。
-        let noise_aligned = resample_noise_to_len(&noise, processed_harmonic.len());
+        // 不能用 `min(harmonic, noise)`：那会在拉伸后把谐波尾巴裁掉；
+        // 也不能用线性重采样：气声的谱包络会被按 1/rate 缩放（变闷/混叠），
+        // 必须与拉伸算法一致地做高质量时间拉伸。
+        let noise_aligned = align_noise_stem_to_len(
+            &noise,
+            cc.sample_rate,
+            processed_harmonic.len(),
+            crate::time_stretch::resolved_external_stretch_algorithm(),
+        );
         let out_len = processed_harmonic.len();
 
         let has_varying_curve = breath_curve.map_or(false, |c| {
@@ -435,17 +469,52 @@ mod tests {
     }
 
     #[test]
-    fn resample_noise_to_len_keeps_identity_length() {
+    fn align_noise_stem_keeps_identity_length() {
         let noise = vec![0.1f32, 0.2, 0.3, 0.4];
-        assert_eq!(super::resample_noise_to_len(&noise, 4), noise);
+        assert_eq!(
+            super::align_noise_stem_to_len(
+                &noise,
+                44_100,
+                4,
+                crate::time_stretch::StretchAlgorithm::SignalsmithStretch
+            ),
+            noise
+        );
     }
 
     #[test]
-    fn resample_noise_to_len_stretches_without_truncating() {
+    fn align_noise_stem_follows_runtime_stretch_algorithm() {
+        // 线性算法下必须与 time_stretch_interleaved(LinearResample) 完全一致 ——
+        // 保证"噪声跟随用户选择的拉伸算法"这一契约（此前是无条件线性重采样，
+        // 气声谱包络被按 1/rate 缩放，听感即"气声没有被正确拉伸"）。
+        let noise: Vec<f32> = (0..64).map(|i| ((i as f32) * 0.25).sin()).collect();
+        let out = super::align_noise_stem_to_len(
+            &noise,
+            44_100,
+            128,
+            crate::time_stretch::StretchAlgorithm::LinearResample,
+        );
+        let expected = crate::time_stretch::time_stretch_interleaved(
+            &noise,
+            1,
+            44_100,
+            128,
+            crate::time_stretch::StretchAlgorithm::LinearResample,
+        );
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn align_noise_stem_stretches_without_truncating() {
         // 拉伸场景（playback_rate < 1）：谐波比噪声长，噪声必须被拉长，
         // 否则 min() 会把谐波（进而整个 clip）的尾巴裁掉。
         let noise = vec![1.0f32, 2.0, 3.0, 4.0];
-        let out = super::resample_noise_to_len(&noise, 8);
+        let out = super::align_noise_stem_to_len(
+            &noise,
+            44_100,
+            8,
+            crate::time_stretch::StretchAlgorithm::LinearResample,
+        );
         assert_eq!(out.len(), 8);
         // 端点应贴合原始端点
         assert!((out[0] - 1.0).abs() < 1e-6);
@@ -455,20 +524,29 @@ mod tests {
     }
 
     #[test]
-    fn resample_noise_to_len_shrinks_for_speedup() {
+    fn align_noise_stem_shrinks_for_speedup() {
         let noise = vec![0.0f32, 1.0, 2.0, 3.0];
-        let out = super::resample_noise_to_len(&noise, 2);
+        let out = super::align_noise_stem_to_len(
+            &noise,
+            44_100,
+            2,
+            crate::time_stretch::StretchAlgorithm::LinearResample,
+        );
         assert_eq!(out.len(), 2);
         assert!((out[0] - 0.0).abs() < 1e-6);
         assert!((out[1] - 3.0).abs() < 1e-6);
     }
 
     #[test]
-    fn resample_noise_to_len_handles_degenerate_inputs() {
-        assert!(super::resample_noise_to_len(&[], 8).is_empty());
-        assert!(super::resample_noise_to_len(&[0.5], 0).is_empty());
+    fn align_noise_stem_handles_degenerate_inputs() {
+        use crate::time_stretch::StretchAlgorithm::SignalsmithStretch;
+        assert!(super::align_noise_stem_to_len(&[], 44_100, 8, SignalsmithStretch).is_empty());
+        assert!(super::align_noise_stem_to_len(&[0.5], 44_100, 0, SignalsmithStretch).is_empty());
         // 单样本输入：按常数填充，不得 panic
-        assert_eq!(super::resample_noise_to_len(&[0.5], 3), vec![0.5, 0.5, 0.5]);
+        assert_eq!(
+            super::align_noise_stem_to_len(&[0.5], 44_100, 3, SignalsmithStretch),
+            vec![0.5, 0.5, 0.5]
+        );
     }
 
     #[test]

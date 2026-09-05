@@ -118,8 +118,7 @@ pub(crate) fn selected_pitch_curves_snapshot<'a>(
     })
 }
 
-fn pitch_edit_backend_available_for_track(track: &crate::state::Track) -> bool {
-    let algo = PitchEditAlgorithm::from_track_algo(&track.pitch_analysis_algo);
+fn pitch_edit_backend_available_for_algo(algo: PitchEditAlgorithm) -> bool {
     match algo {
         PitchEditAlgorithm::WorldVocoder => crate::world_vocoder::is_available(),
         PitchEditAlgorithm::NsfHifiganOnnx => crate::nsf_hifigan_onnx::is_available(),
@@ -127,6 +126,11 @@ fn pitch_edit_backend_available_for_track(track: &crate::state::Track) -> bool {
         PitchEditAlgorithm::VocalShifterVslib => true,
         PitchEditAlgorithm::Bypass => true,
     }
+}
+
+fn pitch_edit_backend_available_for_track(track: &crate::state::Track) -> bool {
+    let algo = PitchEditAlgorithm::from_track_algo(&track.pitch_analysis_algo);
+    pitch_edit_backend_available_for_algo(algo)
 }
 
 pub(crate) fn extra_param_enabled(extra_params: &HashMap<String, f64>, key: &str) -> bool {
@@ -326,6 +330,9 @@ pub(crate) fn hifigan_formant_shift_active_for_clip(
 ///
 /// 调用方跳过外部拉伸前必须使用同一个判定；否则气声/张力/共振峰这类
 /// 独立效果在 Compose 关闭时会出现“外部不拉伸、内部也不拉伸”的错位。
+/// 注意：本判定不探测合成后端的运行时可用性（ONNX 会话加载失败等）——
+/// 那类失败由 [`maybe_apply_pitch_edit_to_clip_segment`] 在渲染时回退
+/// 外部拉伸兜底，此处保持纯静态判定以保证行为可预测、测试可确定。
 pub(crate) fn processor_should_handle_stretch(
     timeline: &TimelineState,
     clip: &crate::state::Clip,
@@ -410,7 +417,8 @@ mod tests {
     use super::{
         active_child_formant_offset_config, build_clip_effective_formant_shift_curve,
         child_formant_offset_curve_key, common_pan_curve_for_clip, common_volume_curve_for_clip,
-        extra_curve_for_clip, hifigan_formant_shift_active_for_clip,
+        does_clip_need_processor_render, extra_curve_for_clip,
+        hifigan_formant_shift_active_for_clip, maybe_apply_pitch_edit_to_clip_segment,
         processor_should_handle_stretch,
     };
     #[cfg(feature = "vslib")]
@@ -543,6 +551,131 @@ mod tests {
         clip.extra_params = Some(HashMap::from([("breath_enabled".to_string(), 1.0)]));
 
         assert!(processor_should_handle_stretch(&timeline, &clip));
+    }
+
+    fn breath_only_timeline() -> (TimelineState, Clip) {
+        // 构造"Compose 关闭 + 气声开启 + Mel Stretch + rate=0.5"的场景
+        //（8c911b54 试图修复、但只改了拉伸判定一侧的问题场景）。
+        crate::time_stretch::update_runtime_stretch_settings(
+            crate::time_stretch::UserStretchAlgorithm::Signalsmith,
+            true,
+            None,
+            None,
+        );
+        let mut timeline = TimelineState::default();
+        let root = timeline.add_track(Some("root".to_string()), None, None);
+        timeline.set_track_state(
+            &root,
+            None,
+            None,
+            None,
+            Some(false), // compose_enabled = false
+            Some(crate::state::PitchAnalysisAlgo::NsfHifiganOnnx),
+            None,
+            None,
+        );
+        timeline.params_by_root_track.insert(
+            root.clone(),
+            TrackParamsState {
+                frame_period_ms: 5.0,
+                ..Default::default()
+            },
+        );
+
+        let mut clip = make_clip();
+        clip.track_id = root;
+        clip.playback_rate = 0.5;
+        clip.extra_params = Some(HashMap::from([("breath_enabled".to_string(), 1.0)]));
+        (timeline, clip)
+    }
+
+    #[test]
+    fn breath_only_effect_requires_processor_render_without_compose() {
+        // processor_should_handle_stretch 返回 true 时调用方会跳过外部拉伸；
+        // 预渲染判定必须同步放行，否则实时引擎永远拿不到 rendered_pcm，
+        // 回退为源速率 varispeed（变调）播放。
+        let (timeline, clip) = breath_only_timeline();
+        assert!(processor_should_handle_stretch(&timeline, &clip));
+        assert!(does_clip_need_processor_render(&timeline, &clip, 0.0));
+    }
+
+    #[test]
+    fn breath_only_compose_off_still_stretches_segment_to_timeline_length() {
+        // 回归：Compose 关闭 + 气声开启 + Mel Stretch 时，外部拉伸被跳过，
+        // maybe_apply 曾直接返回 Ok(false) 且不改写 PCM → 音频保持源速率
+        // （导出被截断/补零，实时 varispeed 变调）。修复后无论处理器是否
+        // 可用（后端不可用时走外部拉伸兜底），输出长度都必须等于时间轴
+        // 帧数 = 源帧数 / playback_rate。
+        let (timeline, clip) = breath_only_timeline();
+
+        // 0.1s @ 44.1k 立体声（短输入让可能的 ONNX 推理保持快速）。
+        let frames_in = 4_410usize;
+        let mut pcm = vec![0.25f32; frames_in * 2];
+        let applied =
+            maybe_apply_pitch_edit_to_clip_segment(&timeline, &clip, 0.0, 0.0, 44_100, &mut pcm)
+                .expect("maybe_apply must not error");
+
+        let expected_frames = frames_in * 2; // rate = 0.5 → 拉长一倍
+        assert_eq!(
+            pcm.len(),
+            expected_frames * 2,
+            "breath-only clip must end up at timeline length (applied={applied})"
+        );
+        // 拉伸后不得是静音
+        assert!(pcm.iter().any(|&v| v.abs() > 1e-4));
+    }
+
+    #[test]
+    fn mel_stretch_with_pending_analysis_keeps_timeline_length() {
+        // 回归：Compose 开启 + Mel Stretch + rate≠1，但音高分析尚未就绪
+        //（pitch 曲线缓存为空）。外部拉伸已被跳过，此前 maybe_apply 在
+        // build_clip_input_pitch_curve 返回 None 时直接放弃 → 音频保持源
+        // 速率被截断/补零。修复后纯拉伸场景传空曲线让处理器内部回退外部
+        // 算法拉伸（后端不可用时在 maybe_apply 兜底），长度必须正确。
+        crate::time_stretch::update_runtime_stretch_settings(
+            crate::time_stretch::UserStretchAlgorithm::Signalsmith,
+            true,
+            None,
+            None,
+        );
+        let mut timeline = TimelineState::default();
+        let root = timeline.add_track(Some("root".to_string()), None, None);
+        timeline.set_track_state(
+            &root,
+            None,
+            None,
+            None,
+            Some(true), // compose_enabled = true
+            Some(crate::state::PitchAnalysisAlgo::NsfHifiganOnnx),
+            None,
+            None,
+        );
+        timeline.params_by_root_track.insert(
+            root.clone(),
+            TrackParamsState {
+                frame_period_ms: 5.0,
+                ..Default::default()
+            },
+        );
+
+        let mut clip = make_clip();
+        clip.track_id = root;
+        clip.playback_rate = 0.5;
+        // 无气声、无音高编辑 —— 纯 Mel Stretch 场景。
+
+        let frames_in = 4_410usize;
+        let mut pcm = vec![0.25f32; frames_in * 2];
+        let applied =
+            maybe_apply_pitch_edit_to_clip_segment(&timeline, &clip, 0.0, 0.0, 44_100, &mut pcm)
+                .expect("maybe_apply must not error");
+
+        let expected_frames = frames_in * 2;
+        assert_eq!(
+            pcm.len(),
+            expected_frames * 2,
+            "mel-stretch clip with pending analysis must keep timeline length (applied={applied})"
+        );
+        assert!(pcm.iter().any(|&v| v.abs() > 1e-4));
     }
 
     #[test]
@@ -1420,9 +1553,6 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
     let has_child_pitch_offset = child_offset_cfg.is_some();
     let child_formant_cfg = active_child_formant_offset_config(timeline, &clip.track_id);
     let has_child_formant_offset = child_formant_cfg.is_some();
-    if !track.compose_enabled && !entry.has_pitch_adjustment_active {
-        return Ok(false);
-    }
 
     let algo = PitchEditAlgorithm::from_track_algo(&track.pitch_analysis_algo);
     if matches!(algo, PitchEditAlgorithm::Bypass) {
@@ -1435,8 +1565,6 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
     let formant_processing = matches!(algo, PitchEditAlgorithm::NsfHifiganOnnx)
         && hifigan_formant_shift_active_for_clip(entry, clip, clip_start_sec);
 
-    // 当处理器声明 handles_time_stretch 且 playback_rate != 1.0 时，
-    // 即使用户没有编辑音高/张力/共振峰，也需要触发处理器渲染以执行其内部拉伸。
     // HiFiGAN 效果（气声/张力/共振峰）可在 Compose 关闭时独立触发渲染；
     // 若这类效果启用而 Mel Stretch 又被选中，外部预拉伸必须跳过，让
     // processor 使用真实 playback_rate 完成内部时间伸缩。
@@ -1445,6 +1573,18 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
             || tension_processing
             || formant_processing
             || has_child_formant_offset);
+
+    // Compose 关闭时，HiFiGAN 独立效果（气声/张力/共振峰）仍必须进入处理器：
+    // 调用方已按 processor_should_handle_stretch 跳过外部拉伸，若此处不放行，
+    // 会出现“外部不拉伸、内部也不运行”的错位 —— 音频以源速率被截断/补零
+    // （导出），或回退为 varispeed 变调播放（实时引擎）。
+    if !track.compose_enabled && !entry.has_pitch_adjustment_active && !processor_effect_processing
+    {
+        return Ok(false);
+    }
+
+    // 当处理器声明 handles_time_stretch 且 playback_rate != 1.0 时，
+    // 即使用户没有编辑音高/张力/共振峰，也需要触发处理器渲染以执行其内部拉伸。
     let needs_processor_stretch = {
         let kind = SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo);
         let compose_or_pitch_adjust = track.compose_enabled || entry.has_pitch_adjustment_active;
@@ -1482,13 +1622,10 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
     // - handles_time_stretch=false：输入 PCM 已由外部时间拉伸预拉伸，帧数 = 时间轴帧数
     let kind = SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo);
     let clip_playback_rate = (clip.playback_rate as f64).max(1e-6);
-    let processor_handles_stretch =
-        crate::renderer::processor_handles_time_stretch(
-            kind,
-            track.compose_enabled
-                || entry.has_pitch_adjustment_active
-                || processor_effect_processing,
-        );
+    let processor_handles_stretch = crate::renderer::processor_handles_time_stretch(
+        kind,
+        track.compose_enabled || entry.has_pitch_adjustment_active || processor_effect_processing,
+    );
 
     // Quick skip when user never set a target in this segment window.
     let seg_frames = pcm_stereo.len() / 2;
@@ -1514,6 +1651,23 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
         return Ok(false);
     }
 
+    // 合成后端不可用（如 ONNX 会话加载失败）时，处理器只会原样返回输入，
+    // 不会兑现"内部拉伸"的承诺 —— 而调用方已按 processor_should_handle_stretch
+    // 跳过外部拉伸。此处必须回退外部拉伸保证长度正确，否则音频以源速率
+    // 被截断/补零（导出）或变调播放（实时）。
+    if !pitch_edit_backend_available_for_algo(algo) {
+        if processor_handles_stretch && (clip_playback_rate - 1.0).abs() > 1e-6 {
+            *pcm_stereo = crate::time_stretch::time_stretch_interleaved(
+                pcm_stereo,
+                2,
+                sample_rate,
+                expected_out_frames,
+                crate::time_stretch::resolved_external_stretch_algorithm(),
+            );
+        }
+        return Ok(false);
+    }
+
     debug_eprintln!(
         "[pitch_edit] clip_id={} algo={:?} seg=[{:.3},{:.3}) compose_enabled={} user_modified={}",
         clip.id,
@@ -1534,15 +1688,39 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
     let is_vslib = false;
 
     // 在渲染前统一构建 clip 输入 pitch 曲线（根轨对应曲线 + 子轨偏移变换）。
-    let Some(timeline_midi) = build_clip_input_pitch_curve(
+    // 音高合成依赖分析曲线；纯效果/拉伸处理（如 Compose 关闭时的气声）不依赖。
+    let pitch_edit_pending = has_pitch_user_edit || entry.has_pitch_adjustment_active;
+    let timeline_midi: Vec<f32> = match build_clip_input_pitch_curve(
         timeline,
         clip,
         clip_start_sec,
         frame_period_ms,
         clip_playback_rate,
         is_vslib,
-    ) else {
-        return Ok(false);
+    ) {
+        Some(v) => v,
+        None => {
+            // 曲线尚未就绪（分析未完成/不可用），无法做音高合成。
+            if pitch_edit_pending {
+                // 若外部拉伸已被跳过（承诺由处理器内部完成），必须在此回退
+                // 外部拉伸，保证该窗口内音频长度正确（否则会以源速率被
+                // 截断/补零）；分析完成后 ClipPitchReady 会触发重渲染。
+                if processor_handles_stretch && (clip_playback_rate - 1.0).abs() > 1e-6 {
+                    *pcm_stereo = crate::time_stretch::time_stretch_interleaved(
+                        pcm_stereo,
+                        2,
+                        sample_rate,
+                        expected_out_frames,
+                        crate::time_stretch::resolved_external_stretch_algorithm(),
+                    );
+                }
+                return Ok(false);
+            }
+            // 纯效果/拉伸处理：不依赖音高曲线，传空曲线让处理器继续运行，
+            // 其内部会以外部算法回退完成时间拉伸（breath 与非 breath 路径
+            // 均已实现该回退）。
+            Vec::new()
+        }
     };
 
     if has_pitch_user_edit && !has_child_pitch_offset && !is_vslib {
@@ -1816,18 +1994,6 @@ pub fn does_clip_need_processor_render(
     let Some((track, entry)) = root_pitch_edit_state(timeline, &clip_root) else {
         return false;
     };
-    // 当存在非静音的音高参考块时，即使 compose_enabled 为 false，
-    // 也需要触发处理器预渲染，确保音高参考块的 MIDI 数据能应用到同组的音频块。
-    // 同样，用户手动绘制了 pitch 曲线时也必须触发渲染。
-    if !track.compose_enabled
-        && !entry.has_pitch_adjustment_active
-        && !entry.pitch_edit_user_modified
-    {
-        return false;
-    }
-    if !pitch_edit_backend_available_for_track(track) && !entry.pitch_edit_user_modified {
-        return false;
-    }
 
     let algo = PitchEditAlgorithm::from_track_algo(&track.pitch_analysis_algo);
     if matches!(algo, PitchEditAlgorithm::Bypass) {
@@ -1839,6 +2005,35 @@ pub fn does_clip_need_processor_render(
         && hifigan_tension_active_for_clip(entry, clip, clip_start_sec);
     let formant_processing = matches!(algo, PitchEditAlgorithm::NsfHifiganOnnx)
         && hifigan_formant_shift_active_for_clip(entry, clip, clip_start_sec);
+    // HiFiGAN 独立效果（气声/张力/共振峰）在 Compose 关闭时同样需要预渲染：
+    // processor_should_handle_stretch 会据此跳过外部拉伸，若此处不放行，
+    // 实时引擎永远拿不到 rendered_pcm，会回退为源速率 varispeed（变调）播放。
+    let effect_processing = matches!(algo, PitchEditAlgorithm::NsfHifiganOnnx)
+        && (extra_processing
+            || tension_processing
+            || formant_processing
+            || has_child_formant_offset);
+
+    // 当存在非静音的音高参考块时，即使 compose_enabled 为 false，
+    // 也需要触发处理器预渲染，确保音高参考块的 MIDI 数据能应用到同组的音频块。
+    // 同样，用户手动绘制了 pitch 曲线时也必须触发渲染。
+    if !track.compose_enabled
+        && !entry.has_pitch_adjustment_active
+        && !entry.pitch_edit_user_modified
+        && !effect_processing
+    {
+        return false;
+    }
+    // 后端不可用且用户没有音高编辑时无需预渲染 —— 例外：效果处理仍在
+    // 预渲染路径中由 maybe_apply 回退外部拉伸，保证拉伸后长度正确
+    // （此判定为 true 时调用方已跳过外部拉伸，若这里不放行会回到
+    // varispeed 变调播放）。
+    if !pitch_edit_backend_available_for_track(track)
+        && !entry.pitch_edit_user_modified
+        && !effect_processing
+    {
+        return false;
+    }
 
     // 当处理器声明 handles_time_stretch 且 playback_rate != 1.0 时，
     // 即使用户没有编辑音高，也需要触发处理器预渲染以执行其内部拉伸。

@@ -144,14 +144,12 @@ pub(crate) fn schedule_stretch_jobs(
         let Some(source_path) = clip.source_path.as_ref() else {
             continue;
         };
-        let processor_handles_stretch = timeline
-            .resolve_root_track_id(&clip.track_id)
-            .and_then(|root| timeline.tracks.iter().find(|t| t.id == root))
-            .map(|t| {
-                let kind = crate::state::SynthPipelineKind::from_track_algo(&t.pitch_analysis_algo);
-                crate::renderer::processor_handles_time_stretch(kind, t.compose_enabled)
-            })
-            .unwrap_or(false);
+        // 与 build_snapshot 的换入判定保持同一个谓词（processor_should_handle_stretch）：
+        // 处理器内部拉伸（Mel Stretch / HiFiGAN 效果）时不调度外部拉伸任务，
+        // 否则白跑 CPU 且与消费端判定漂移 —— 气声等效果在 Compose 关闭时
+        // 曾因此出现"调度了拉伸但快照不使用，引擎按源速率 varispeed 播放"。
+        let processor_handles_stretch =
+            crate::pitch_editing::processor_should_handle_stretch(timeline, clip);
         let playback_rate = clip.playback_rate as f64;
         let playback_rate = if playback_rate.is_finite() && playback_rate > 0.0 {
             playback_rate
@@ -670,7 +668,8 @@ pub(crate) fn build_snapshot(
 
             debug_eprintln!(
                 "[snapshot] clip_id={} needs_pitch_edit={}",
-                clip.id, needs_pitch_edit
+                clip.id,
+                needs_pitch_edit
             );
 
             if needs_pitch_edit {
@@ -681,7 +680,8 @@ pub(crate) fn build_snapshot(
                     if debug {
                         log::warn!(
                             "[snapshot] clip_id={} using pending_rendered_key hash={:#018x}",
-                            clip.id, pk.param_hash
+                            clip.id,
+                            pk.param_hash
                         );
                     }
                     Some(pk)
@@ -1075,11 +1075,10 @@ mod tests {
             midi_fill_gaps: false,
             midi_note_data: None,
         });
-        let params = tl
-            .params_by_root_track
-            .entry(root)
-            .or_default();
-        params.extra_curves.insert("volume".to_string(), vec![0.25f32; 10]);
+        let params = tl.params_by_root_track.entry(root).or_default();
+        params
+            .extra_curves
+            .insert("volume".to_string(), vec![0.25f32; 10]);
         tl
     }
 
@@ -1121,13 +1120,15 @@ mod tests {
         let fp = engine_clip.volume_curve_frame_period_ms;
         assert!(fp > 0.0 && fp.is_finite(), "invalid frame period {fp}");
         // volume 是混音级参数：即使 clip 不需要合成，也必须实时生效。
-        assert!(!engine_clip.needs_synthesis, "plain clip should use source PCM");
+        assert!(
+            !engine_clip.needs_synthesis,
+            "plain clip should use source PCM"
+        );
         assert!(
             engine_clip.breath_curve.is_none(),
             "breath should not hijack plain clip volume"
         );
     }
-
 }
 
 pub(crate) fn build_snapshot_for_file(

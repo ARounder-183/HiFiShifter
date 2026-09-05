@@ -416,6 +416,11 @@ mod tests {
             StretchAlgorithm::LinearResample
         ));
         assert!(!should_use_hifigan_mel_stretch());
+
+        // 恢复默认：这些是进程级全局设置，测试结束必须还原，否则会把
+        // 生效算法永久留在 Linear，与并行测试（如 stretch 任务调度断言
+        // Signalsmith）竞态。
+        update_runtime_stretch_settings(UserStretchAlgorithm::Signalsmith, true, None, None);
     }
 }
 

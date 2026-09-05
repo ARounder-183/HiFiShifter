@@ -1440,7 +1440,21 @@ fn render_single_clip(
     if cancel.is_cancelled() {
         return Err(BG_RENDER_CANCELLED_ERR.to_string());
     }
-    let noise_mono = crate::hnsep_onnx::infer_noise_mono(&clip.id, &mono, out_rate)?;
+    // HNSEP 分离失败（模型缺失/推理错误）时降级为非 breath 渲染：外层已因
+    // 气声跳过外部拉伸，硬错误会让整条 clip 无声等待，比"没有气声"严重得多。
+    let noise_mono = match crate::hnsep_onnx::infer_noise_mono(&clip.id, &mono, out_rate) {
+        Ok(noise) => noise,
+        Err(e) => {
+            log::warn!(
+                "render_single_clip: HNSEP failed for clip_id={}, falling back to non-breath render: {e}",
+                clip.id
+            );
+            return Ok(RenderedClipOutput {
+                rendered_stereo: render_variant(clip),
+                breath_noise_stereo: None,
+            });
+        }
+    };
 
     // Step 3: Render harmonic_only through ProcessorChain (HNSEP cache hits → HiFiGAN only)
     let mut harmonic_only_clip = clip.clone();
@@ -1459,9 +1473,15 @@ fn render_single_clip(
     let noise_stereo: Vec<f32> = {
         let noise_mono_raw = noise_mono.as_ref();
         // 时间拉伸若由处理器内部完成（mel 域），谐波输出是**时间轴**长度，
-        // 而 HNSEP 的噪声 stem 仍是**源速率**长度。必须重采样对齐后再转立体声，
-        // 否则拉伸出来的尾巴会整段缺失（此前是直接补静音）。
-        let aligned = crate::renderer::chain::resample_noise_to_len(noise_mono_raw, out_frames);
+        // 而 HNSEP 的噪声 stem 仍是**源速率**长度。必须对齐后再转立体声；
+        // 对齐必须用与谐波一致的拉伸算法 —— 线性重采样会把气声的谱包络
+        // 按 1/rate 缩放（慢放变闷、快放混叠），听感即"气声没有被正确拉伸"。
+        let aligned = crate::renderer::chain::align_noise_stem_to_len(
+            noise_mono_raw,
+            out_rate,
+            out_frames,
+            crate::time_stretch::resolved_external_stretch_algorithm(),
+        );
         let mut stereo = Vec::with_capacity(out_len);
         // Duplicate each mono sample to L/R channels
         for &s in &aligned {
