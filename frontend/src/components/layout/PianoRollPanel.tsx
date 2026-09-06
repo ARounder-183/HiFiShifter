@@ -22,7 +22,7 @@ import {
 } from "@radix-ui/react-icons";
 
 import { shallowEqual } from "react-redux";
-import { useAppDispatch, useAppSelector } from "../../app/hooks";
+import { useAppDispatch, useAppSelector, useAppStore } from "../../app/hooks";
 import type { RootState } from "../../app/store";
 import { useI18n } from "../../i18n/I18nProvider";
 import {
@@ -70,7 +70,10 @@ import {
     timelineViewportStateToNative,
 } from "../../utils/timelineViewportSync";
 import { isModifierActive, isNoneBinding } from "../../features/keybindings/keybindingsSlice";
-import { getActiveSurface } from "../../features/uiFocus/focusSurface";
+import {
+    getActiveSurface,
+    setActiveSurfaceExplicit,
+} from "../../features/uiFocus/focusSurface";
 import { findFirstExternalPathAction } from "./timeline/dnd";
 import type { ScaleLike } from "../../utils/musicalScales";
 import {
@@ -467,6 +470,9 @@ const FormantParamButton: React.FC<FormantParamButtonProps> = ({
 
 export const PianoRollPanel: React.FC = () => {
     const dispatch = useAppDispatch();
+    // 事件监听器内同步读取 session（如 selectClipParamRange 的 Clip 查找），
+    // 避免闭包快照滞后。
+    const store = useAppStore();
     const rafRef = useRef<number | null>(null);
     const visualPlayheadSecRef = useRef(0);
     // 视觉插值播放头读取器（与绘制同源）：缩放锚点必须使用它，不能用 33Hz
@@ -3115,8 +3121,12 @@ export const PianoRollPanel: React.FC = () => {
         };
     }, [pitchViewRef]);
 
-    // Silence unused state warnings; selectionUi is future UI.
-    void selectionUi;
+    // 选区在所有工具模式下保留并持续渲染（选区带 / 剪贴板预览在 render.ts
+    // 不按工具门控）：绘制 / 直线颤音工具下不再自动清空，用户可以换轨后
+    // 直接对保留的选区做复制/剪切（路由见 focusRouting.resolveCopyCutRoute，
+    // 依据 session.paramSelectionActive / selectionContext）。与选区的交互
+    // （拖拽 / 右键菜单 / 变形）仍只在选择工具下生效（各交互路径已有
+    // toolMode 门控）。
 
     useEffect(() => {
         setCanvasCursor(s.toolMode === "select" ? "default" : "crosshair");
@@ -3125,13 +3135,6 @@ export const PianoRollPanel: React.FC = () => {
     useEffect(() => {
         setCtxMenu(null);
     }, [s.toolMode]);
-
-    // 切换工具时清除选区
-    useEffect(() => {
-        selectionRef.current = null;
-        setSelectionUi(null);
-        invalidate();
-    }, [s.toolMode, invalidate]);
 
     // 同步数据加载状态到全局 Context
     useEffect(() => {
@@ -3158,6 +3161,26 @@ export const PianoRollPanel: React.FC = () => {
                 if (s.toolMode !== "select") return;
                 selectionRef.current = null;
                 setSelectionUi(null);
+                invalidate();
+                return;
+            }
+
+            // 双击 Clip（无拖拽，ClipItem 派发）：按 Clip 起止范围在参数编辑器
+            // 内创建选区，并把交互焦点切到参数编辑器侧 —— 复制/剪切路由
+            // （resolveCopyCutRoute 依据 selectionContext，经由下方 selectionUi
+            // 同步派发 setParamSelectionActive 标记）与活动表面
+            // （focusSurface，外来源粘贴兜底等）随之指向参数编辑器。
+            if (op === "selectClipParamRange") {
+                const clipId = typeof data?.clipId === "string" ? data.clipId : "";
+                const clip = store
+                    .getState()
+                    .session.clips.find((entry) => entry.id === clipId);
+                if (!clip) return;
+                const aBeat = Math.max(0, clip.startSec / secPerBeat);
+                const bBeat = Math.max(0, (clip.startSec + clip.lengthSec) / secPerBeat);
+                selectionRef.current = { aBeat, bBeat };
+                setSelectionUi({ aBeat, bBeat });
+                setActiveSurfaceExplicit("pianoRoll");
                 invalidate();
                 return;
             }

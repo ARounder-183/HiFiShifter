@@ -266,6 +266,17 @@ export const ClipItem = React.memo(function ClipItem({
     const cornerInEdgeRef = React.useRef<HTMLDivElement | null>(null);
     const cornerOutCapRef = React.useRef<HTMLDivElement | null>(null);
     const cornerOutEdgeRef = React.useRef<HTMLDivElement | null>(null);
+    // 双击 Clip（无拖拽）→ 在参数编辑器内按 Clip 起止范围创建选区。
+    // 手动 pointerdown 双击判定（同一 pointerId、位移 ≤6px、间隔 ≤500ms），
+    // 与 ClipHeader 角标双击同一套模式 —— Clip 的 pointerdown 会
+    // preventDefault，原生 dblclick 不可靠；首次按下后发生拖拽（位移超
+    // 阈值）会使待定记录失效，避免"拖拽后落点回位"被误判为双击。
+    const paramRangeDoubleClickRef = React.useRef<{
+        pointerId: number;
+        clientX: number;
+        clientY: number;
+        time: number;
+    } | null>(null);
     React.useLayoutEffect(() => {
         publishFadeRichTooltip(cornerInCapRef.current, cornerRichContentIn);
         publishFadeRichTooltip(cornerInEdgeRef.current, cornerRichContentIn);
@@ -517,6 +528,37 @@ export const ClipItem = React.memo(function ClipItem({
             onPointerDown={(e) => {
                 if (e.button !== 0) return;
 
+                // 双击判定（第二次按下命中才拦截）：命中后阻断本次 Clip 的
+                // 点击/拖拽流程，改为请求参数编辑器按 Clip 起止范围创建选区
+                // （hifi:editOp/selectClipParamRange → PianoRollPanel），交互
+                // 焦点（复制/剪切路由与活动表面）随之切到参数编辑器侧。
+                const previousDoublePress = paramRangeDoubleClickRef.current;
+                const isParamRangeDoubleClick =
+                    previousDoublePress != null &&
+                    previousDoublePress.pointerId === e.pointerId &&
+                    Math.abs(previousDoublePress.clientX - e.clientX) <= 6 &&
+                    Math.abs(previousDoublePress.clientY - e.clientY) <= 6 &&
+                    performance.now() - previousDoublePress.time <= 500;
+                paramRangeDoubleClickRef.current = isParamRangeDoubleClick
+                    ? null
+                    : {
+                          pointerId: e.pointerId,
+                          clientX: e.clientX,
+                          clientY: e.clientY,
+                          time: performance.now(),
+                      };
+                if (isParamRangeDoubleClick) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    clearContextMenu();
+                    window.dispatchEvent(
+                        new CustomEvent("hifi:editOp", {
+                            detail: { op: "selectClipParamRange", clipId: clip.id },
+                        }),
+                    );
+                    return;
+                }
+
                 // altPressed tracks the stretch modifier (configurable), used only
                 // for edge-handle behavior. For click-selection bypass (slip-edit),
                 // we only check the physical Alt key to avoid breaking primary-modifier/Shift
@@ -580,7 +622,11 @@ export const ClipItem = React.memo(function ClipItem({
                     if (ev.pointerId !== e.pointerId) return;
                     const dx = ev.clientX - startX;
                     const dy = ev.clientY - startY;
-                    if (dx * dx + dy * dy >= 9) moved = true;
+                    if (dx * dx + dy * dy >= 9) {
+                        moved = true;
+                        // 拖拽发生：使待定的双击记录失效（拖拽不属于双击）。
+                        paramRangeDoubleClickRef.current = null;
+                    }
                     lastClientX = ev.clientX;
                 }
 

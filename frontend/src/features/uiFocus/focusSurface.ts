@@ -27,6 +27,16 @@ export function getActiveSurface(): EditSurfaceId | null {
     return activeSurface;
 }
 
+/**
+ * 编程式设置活动表面：用于不经过 pointer 事件的聚焦场景 —— 例如双击
+ * Clip 在参数编辑器内创建选区后，把交互焦点（复制/剪切路由、外来源
+ * 粘贴兜底等）切到参数编辑器侧。下一次 pointerdown / focusin 仍会照常
+ * 覆盖本值。
+ */
+export function setActiveSurfaceExplicit(surface: EditSurfaceId): void {
+    activeSurface = surface;
+}
+
 /** 由事件目标解析所属编辑表面；不在任何表面内时返回 null。 */
 export function resolveSurfaceFromTarget(target: EventTarget | null): EditSurfaceId | null {
     const el = target as HTMLElement | null;
