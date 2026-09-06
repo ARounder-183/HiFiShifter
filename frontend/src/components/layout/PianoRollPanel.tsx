@@ -146,6 +146,7 @@ import { getParamEditorWheelAction } from "./pianoRoll/wheelGesture";
 import type { Keybinding } from "../../features/keybindings/types";
 import { pianoKeySound } from "../../utils/PianoKeySound";
 import { computeAutoFollowScrollLeft } from "../../utils/autoFollowScroll";
+import { readDevicePixelRatio, snapToDevicePx } from "../../utils/devicePixelLine";
 import { useVisualPlayhead } from "../../hooks/useVisualPlayhead";
 import {
     getVisibleSecondaryParamIds,
@@ -1852,11 +1853,16 @@ export const PianoRollPanel: React.FC = () => {
             (visualPlayheadSec: number) => {
                 visualPlayheadSecRef.current = visualPlayheadSec;
                 const playheadLeftPx = visualPlayheadSec * pxPerSecRef.current;
+                // 播放头 DOM 写入统一设备像素吸附（与时间线侧同一函数）：
+                // 分数 DPR 下不吸附的落点相位随播放连续变化，1/2 物理像素
+                // 交替 —— 即"播放时粗细不一"。
+                const dpr = readDevicePixelRatio();
+                const snappedPlayheadLeftPx = snapToDevicePx(playheadLeftPx, dpr);
                 if (rulerPlayheadLineRef.current) {
-                    rulerPlayheadLineRef.current.style.left = `${playheadLeftPx}px`;
+                    rulerPlayheadLineRef.current.style.left = `${snappedPlayheadLeftPx}px`;
                 }
                 if (rulerPlayheadHeadRef.current) {
-                    rulerPlayheadHeadRef.current.style.left = `${playheadLeftPx}px`;
+                    rulerPlayheadHeadRef.current.style.left = `${snappedPlayheadLeftPx}px`;
                 }
                 if (!s.paramEditorSyncTimeline && s.autoScrollEnabled && s.runtime.isPlaying) {
                     const scroller = scrollerRef.current;
@@ -1917,7 +1923,11 @@ export const PianoRollPanel: React.FC = () => {
         pianoRollViewportBus.emit(next, pxPerSecRef.current, viewSizeRef.current.w);
         // 播放头 DOM 线并入同帧提交：缩放（pxPerSec 变化）时立即对齐新投影，
         // 避免与画布的播放头错位一帧（与 useVisualPlayhead 的 onFrame 同源）。
-        const playheadLeftPx = visualPlayheadSecRef.current * pxPerSecRef.current;
+        // 设备像素吸附与其余播放头写入点一致（见 onFrame 注释）。
+        const playheadLeftPx = snapToDevicePx(
+            visualPlayheadSecRef.current * pxPerSecRef.current,
+            readDevicePixelRatio(),
+        );
         if (rulerPlayheadLineRef.current) {
             rulerPlayheadLineRef.current.style.left = `${playheadLeftPx}px`;
         }

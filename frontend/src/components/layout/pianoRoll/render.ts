@@ -19,10 +19,12 @@ import {
     secToContentPx,
     secToSpanPx,
     secToViewportPx,
+    strokePx,
     viewportEndSec,
     viewportStartSec,
     type TimelineAxis,
 } from "../timeline/runtime/timelineAxis";
+import { wholeDevicePxLength } from "../../../utils/devicePixelLine";
 import { AXIS_W, PITCH_MAX_MIDI, PITCH_MIN_MIDI } from "./constants";
 import { framesToTime } from "./utils";
 import { resolveSecondaryOverlayValues } from "./secondaryOverlaySelection";
@@ -1484,11 +1486,20 @@ export function drawPianoRoll(args: {
     }
 
     // Playhead（统一用 sec 坐标系）
-    const phx = secToViewportPx(axis, playheadSec);
+    //
+    // 设备像素对齐（与 56238d45 网格修复同法，遵循 timelineAxis 强制约束 3
+    // 「描边必须经 snapPx/strokePx 对齐」）：旧写法 `lineWidth=1 + x+0.5` 是
+    // dpr=1 时代的整像素技巧 —— 分数 DPR（125%/150%）下 1 CSS px = 1.25/1.5
+    // 物理像素，且 +0.5 不再对齐设备像素边界，播放头每帧重绘时覆盖的物理
+    // 像素数随落点相位变化，就是画布版"播放时粗细不一"。
+    // 修正：线宽取整物理像素；奇数物理像素宽的居中描边由 strokePx 补半个
+    // 设备像素，使线体恰好覆盖整数个设备列。
+    const phWidthPx = wholeDevicePxLength(1, axis.dpr);
+    const phx = strokePx(axis, secToViewportPx(axis, playheadSec), phWidthPx);
     ctx.strokeStyle = colors.playheadLine;
-    ctx.lineWidth = 1;
+    ctx.lineWidth = phWidthPx;
     ctx.beginPath();
-    ctx.moveTo(phx + 0.5, 0);
-    ctx.lineTo(phx + 0.5, h);
+    ctx.moveTo(phx, 0);
+    ctx.lineTo(phx, h);
     ctx.stroke();
 }

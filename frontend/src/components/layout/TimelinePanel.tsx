@@ -110,6 +110,7 @@ import {
     computeAutoFollowScrollLeft,
     computeFocusCursorScrollLeft,
 } from "../../utils/autoFollowScroll";
+import { readDevicePixelRatio, snapToDevicePx } from "../../utils/devicePixelLine";
 import { buildSparseClipRenderModel } from "./timeline/runtime/timelineCanvasModel";
 import { buildTimelineRenderModel } from "./timeline/runtime/timelineRenderModel";
 import { computeLeadingOverlapSecByClipId } from "./timeline/TrackLane";
@@ -189,16 +190,22 @@ const TimelineTransportBridge = React.memo(function TimelineTransportBridge(prop
                 }
 
                 // 播放头定位（在自动滚动之后，用最新 scrollLeft + 视觉插值）。
+                // 写入前吸附到设备像素边界（readDevicePixelRatio 每帧现读，
+                // 浏览器缩放/跨屏后下一帧自愈）：分数 DPR 下不吸附的落点相位
+                // 随播放连续变化，1/2 物理像素交替 —— 即"播放时粗细不一"。
+                // 与 React 渲染侧（TimelineSurface / TimeRulerPlayhead）同一
+                // 吸附函数，命令式与声明式两条路径逐设备像素一致。
+                const dpr = readDevicePixelRatio();
                 const scroller = scrollRef.current;
                 const screenLeft = playheadLeftPx - (scroller?.scrollLeft ?? 0);
                 if (playheadRef.current) {
-                    playheadRef.current.style.left = `${screenLeft}px`;
+                    playheadRef.current.style.left = `${snapToDevicePx(screenLeft, dpr)}px`;
                 }
                 if (rulerPlayheadLineRef.current) {
-                    rulerPlayheadLineRef.current.style.left = `${playheadLeftPx}px`;
+                    rulerPlayheadLineRef.current.style.left = `${snapToDevicePx(playheadLeftPx, dpr)}px`;
                 }
                 if (rulerPlayheadHeadRef.current) {
-                    rulerPlayheadHeadRef.current.style.left = `${playheadLeftPx}px`;
+                    rulerPlayheadHeadRef.current.style.left = `${snapToDevicePx(playheadLeftPx, dpr)}px`;
                 }
             },
             [
@@ -1550,7 +1557,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         const scroller = scrollRef.current;
         if (!scroller || !playheadRef.current) return;
         const playheadLeftPx = visualPlayheadSecRef.current * pxPerSec;
-        playheadRef.current.style.left = `${playheadLeftPx - scroller.scrollLeft}px`;
+        // 与播放头其余写入点同一设备像素吸附（见 TimelineTransportBridge onFrame）。
+        playheadRef.current.style.left = `${snapToDevicePx(
+            playheadLeftPx - scroller.scrollLeft,
+            readDevicePixelRatio(),
+        )}px`;
     }, [pxPerSec, s.playheadSec, scrollLeft, playheadRef, scrollRef, visualPlayheadSecRef]);
 
     return (

@@ -26,6 +26,7 @@ import {
 } from "./TempoMapRulerRow.tsx";
 import { RULER_BASE_HEIGHT_PX, timeRulerHeightPx } from "./rulerHeight.ts";
 import type { TimelineTick } from "./runtime/buildTimelineTicks.js";
+import { readDevicePixelRatio, snapToDevicePx, wholeDevicePxLength } from "../../../utils/devicePixelLine.ts";
 
 function unitLabelKey(unit: TimeUnit): string {
     switch (unit) {
@@ -177,13 +178,20 @@ const TimeRulerPlayhead = React.memo(function TimeRulerPlayhead({
     lineRef?: React.Ref<HTMLDivElement>;
     headRef?: React.Ref<HTMLDivElement>;
 }) {
-    const playheadLeft = playheadSec * pxPerSec;
+    // 播放头竖线设备像素对齐（与 56238d45 的网格线修复同根同法）：
+    // 分数 DPR（125%/150%）下 1px CSS 线覆盖 1.25/1.5 物理像素，落点相位
+    // 随播放/拖动连续变化，取整后粗细在 1↔2 物理像素间跳动。位置吸附到
+    // 设备像素边界、线宽取整物理像素后粗细恒定；本渲染值是初始值，播放/
+    // 滚动期间的逐帧写入（useVisualPlayhead onFrame / syncScrollLeft）使用
+    // 同一套吸附，双方逐设备像素一致。
+    const dpr = readDevicePixelRatio();
+    const playheadLeft = snapToDevicePx(playheadSec * pxPerSec, dpr);
     return (
         <>
             <div
                 ref={lineRef}
-                className="absolute top-0 bottom-0 w-px bg-qt-playhead z-20 pointer-events-none"
-                style={{ left: playheadLeft }}
+                className="absolute top-0 bottom-0 bg-qt-playhead z-20 pointer-events-none"
+                style={{ left: playheadLeft, width: wholeDevicePxLength(1, dpr) }}
             />
             <div
                 ref={headRef}

@@ -25,6 +25,7 @@ import { TimelineWaveformSurface } from "./TimelineWaveformSurface";
 import { secToViewportPx, type TimelineAxis } from "./runtime/timelineAxis.js";
 import { LAYER_ORDER } from "./runtime/timelineFrameCommitter.js";
 import type { TimelineTick } from "./runtime/buildTimelineTicks.js";
+import { snapToDevicePx, wholeDevicePxLength } from "../../../utils/devicePixelLine.ts";
 
 export const TimelineSurface = React.memo(function TimelineSurface(props: {
     tracks: readonly TrackInfo[];
@@ -158,11 +159,22 @@ export const TimelineSurface = React.memo(function TimelineSurface(props: {
             />
             <div
                 ref={props.playheadLineRef}
-                className="absolute w-px bg-qt-playhead z-20 pointer-events-none"
+                className="absolute bg-qt-playhead z-20 pointer-events-none"
                 style={{
                     top: props.topPx,
                     height: props.heightPx,
-                    left: secToViewportPx(viewportAxis, Number(props.playheadSec) || 0),
+                    // 播放头设备像素对齐（与 56238d45 网格修复同法）：位置吸附
+                    // 到设备像素边界、宽度取整物理像素。否则分数 DPR 下落点
+                    // 相位随播放/滚动变化，1 物理像素与 2 物理像素交替 —— 即
+                    // "播放时粗细不一"。逐帧命令式写入（useVisualPlayhead /
+                    // syncScrollLeft）使用同一吸附，双方逐设备像素一致。
+                    // dpr 取 props.axis（React 渲染期真实 dpr）；总线 axis 不
+                    // 承载 dpr（emit 不 patch 该字段，恒为默认 1）。
+                    left: snapToDevicePx(
+                        secToViewportPx(viewportAxis, Number(props.playheadSec) || 0),
+                        props.axis.dpr,
+                    ),
+                    width: wholeDevicePxLength(1, props.axis.dpr),
                 }}
             />
         </div>

@@ -23,6 +23,7 @@ import { shallowEqual } from "react-redux";
 import { timelineViewportBus } from "../../../../utils/timelineViewportBus";
 import { timelineViewportSync } from "../../../../utils/timelineViewportSync";
 import { IS_MAC, isPrimaryModifierDown } from "../../../../utils/platform";
+import { readDevicePixelRatio, snapToDevicePx } from "../../../../utils/devicePixelLine";
 
 import { TICK_WINDOW_STEP_PX } from "../runtime/buildTimelineTicks.js";
 import { waveformMipmapStore } from "../../../../utils/waveformMipmapStore";
@@ -465,14 +466,18 @@ export function useTimelineState(): TimelineStateResult {
         }
         const playheadLeftPx =
             (Number(sessionRef.current.playheadSec ?? 0) || 0) * pxPerSecRef.current;
+        // 播放头写入统一设备像素吸附（readDevicePixelRatio 每次现读）：分数
+        // DPR 下不吸附的落点相位随滚动/播放变化，线宽 1↔2 物理像素交替。
+        // 与 React 渲染侧（TimelineSurface / TimeRulerPlayhead）同一函数。
+        const dpr = readDevicePixelRatio();
         if (playheadRef.current) {
-            playheadRef.current.style.left = `${playheadLeftPx - next}px`;
+            playheadRef.current.style.left = `${snapToDevicePx(playheadLeftPx - next, dpr)}px`;
         }
         if (rulerPlayheadLineRef.current) {
-            rulerPlayheadLineRef.current.style.left = `${playheadLeftPx}px`;
+            rulerPlayheadLineRef.current.style.left = `${snapToDevicePx(playheadLeftPx, dpr)}px`;
         }
         if (rulerPlayheadHeadRef.current) {
-            rulerPlayheadHeadRef.current.style.left = `${playheadLeftPx}px`;
+            rulerPlayheadHeadRef.current.style.left = `${snapToDevicePx(playheadLeftPx, dpr)}px`;
         }
         // ★ 立即广播视口变化 → sticky 画布层同步重绘（绕过 React）
         timelineViewportBus.emit(
@@ -1025,11 +1030,13 @@ export function useTimelineState(): TimelineStateResult {
             } else {
                 // 更新 Redux state 使三角形头部（TimeRulerPlayhead）与竖线同步
                 dispatch(setplayheadSec(beat));
-                // 同时直接操作 DOM 确保竖线无延迟跟随
+                // 同时直接操作 DOM 确保竖线无延迟跟随（设备像素吸附与其余
+                // 播放头写入点一致，避免拖拽中相位漂移造成粗细变化）。
                 if (playheadRef.current) {
-                    playheadRef.current.style.left = `${
-                        beat * pxPerSecRef.current - scrollLeftRef.current
-                    }px`;
+                    playheadRef.current.style.left = `${snapToDevicePx(
+                        beat * pxPerSecRef.current - scrollLeftRef.current,
+                        readDevicePixelRatio(),
+                    )}px`;
                 }
             }
             return beat;
