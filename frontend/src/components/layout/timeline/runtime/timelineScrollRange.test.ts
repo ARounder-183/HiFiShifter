@@ -420,5 +420,76 @@ test("components/layout/timeline/runtime/timelineScrollRange.test.ts scripted ch
         }
     }
 
+    // 回归：播放光标在工程末端之后（点击右侧空白区/播放越过最后 clip 都会
+    // 出现）时，缩放中心 = 光标真实位置，不得钳回工程末端。
+    // 旧逻辑把 playheadSec 钳到 totalSec：中心被“钉”在工程末端，结果
+    // scrollLeft 永远比允许的最大滚动位置偏左一个屏幕偏移，且画面内锚定
+    // 分支锚定的是错误的内容点（工程末端而非播放光标）。
+    {
+        // 光标在画面外（右侧）：应居中于真实光标位置，结果被结果级 clamp
+        // 收敛到允许的最大滚动位置（= 工程宽度），而不是停在其左侧。
+        const zoom = resolveHorizontalWheelZoom({
+            factor: 1.1,
+            basePxPerSec: 100,
+            baseScrollLeft: 2900,
+            totalSec: 30,
+            viewportWidth: 1000,
+            playheadZoomEnabled: true,
+            playheadSec: 45,
+            anchorScreenX: 0,
+            minPxPerSec: 0.5,
+            maxPxPerSec: 8000,
+        });
+        // 真实中心 45s 居中 → 45*110 - 500 = 4450，超出允许最大 30*110 =
+        // 3300 → 钳到 3300（旧逻辑：中心钳到 30s → 画面内锚定 → 3200，
+        // 比允许位置偏左 100px 且到不了右端）。
+        assertNear(zoom!.nextScrollLeft, 3300, "beyond-end playhead zoom reaches the allowed max");
+    }
+
+    {
+        // 光标在画面内（低缩放下工程末端的空白区可见）：锚定真实光标的
+        // 屏幕位置，世界点保持固定。
+        const basePxPerSec = 40;
+        const baseScrollLeft = 1000;
+        const playheadSec = 45;
+        const zoom = resolveHorizontalWheelZoom({
+            factor: 1.1,
+            basePxPerSec,
+            baseScrollLeft,
+            totalSec: 30,
+            viewportWidth: 1000,
+            playheadZoomEnabled: true,
+            playheadSec,
+            anchorScreenX: 0,
+            minPxPerSec: 0.5,
+            maxPxPerSec: 8000,
+        });
+        // 光标屏幕 x = 45*40 - 1000 = 800（画面内）→ 锚定：45*44 - 800 =
+        // 1180，仍在允许范围内（30*44 = 1320）不触发钳制。
+        assertNear(zoom!.nextScrollLeft, 1180, "beyond-end playhead anchors at its screen position");
+        assertNear(
+            (zoom!.nextScrollLeft + 800) / zoom!.nextPxPerSec,
+            playheadSec,
+            "anchored world point is the real playhead, not the clamped project end",
+        );
+    }
+
+    // 防御：非法播放头（NaN）不产生 NaN 滚动值，按 0 处理。
+    {
+        const zoom = resolveHorizontalWheelZoom({
+            factor: 1.1,
+            basePxPerSec: 100,
+            baseScrollLeft: 400,
+            totalSec: 10,
+            viewportWidth: 1000,
+            playheadZoomEnabled: true,
+            playheadSec: Number.NaN,
+            anchorScreenX: 0,
+            minPxPerSec: 0.5,
+            maxPxPerSec: 8000,
+        });
+        assertNear(zoom!.nextScrollLeft, 0, "non-finite playhead falls back to zero scroll");
+    }
+
     void checks;
 });

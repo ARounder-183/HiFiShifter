@@ -108,8 +108,17 @@ export function resolveHorizontalWheelZoom(args: {
 
     let nextScrollLeft: number;
     if (playheadZoomEnabled && playheadSec != null) {
+        // 缩放中心 = 播放光标的**真实**位置。这里不得把它钳制到 [0, totalSec]：
+        // 播放光标可以合法地落在工程末端之后（点击工程右侧空白区、播放越过
+        // 最后一个 clip、播放中的视觉插值），钳回末端会把中心“钉”在工程末端
+        // ——结果 scrollLeft = totalSec*nextPps - playheadScreenX 永远比允许的
+        // 最大滚动位置（totalSec*nextPps）偏左一个屏幕偏移，无论怎样缩放都到
+        // 不了允许的右端；且“光标在画面内”分支锚定的内容点从播放光标变成了
+        // 工程末端，首个缩放步进就会向左跳变。
+        // 中心只需防非法值；范围约束由末尾对**结果**的 clamp
+        // （maxScrollLeft = 工程宽度，见 resolveTimelineScrollRange）承担。
         nextScrollLeft = resolvePlayheadZoomScrollLeft({
-            playheadSec: clampNumber(playheadSec, 0, totalSec),
+            playheadSec: Number.isFinite(playheadSec) ? Math.max(0, playheadSec) : 0,
             basePxPerSec,
             baseScrollLeft,
             nextPxPerSec,

@@ -33,6 +33,7 @@ import { applyNativeScrollLeft } from "../runtime/nativeScrollApply";
 import { gridStepBeats, MIN_PX_PER_SEC, MAX_PX_PER_SEC } from "../";
 import { computeFocusCursorScrollLeft } from "../../../../utils/autoFollowScroll";
 import { resolveTimelineMinPxPerSec } from "../runtime/timelineZoomBounds";
+import { getDynamicProjectSec } from "../../../../features/session/projectBoundary";
 import { expandClipIdsWithGroups } from "./useGroupExpansion";
 
 // ── Args 类型 ─────────────────────────────────────────────────
@@ -105,9 +106,6 @@ export interface UseTimelineEventHandlersArgs {
 
     // auto-scroll
     syncScrollLeft: (next: number) => void;
-
-    // session values (for zoom / focusCursor)
-    dynamicProjectSec: number;
 }
 
 // ── Hook 实现 ─────────────────────────────────────────────────
@@ -137,7 +135,6 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
         setContextMenu,
         setTrackAreaMenu,
         syncScrollLeft,
-        dynamicProjectSec,
     } = args;
 
     // 实时 store（事件监听器内同步读取，避免闭包捕获过期选区/状态）
@@ -370,11 +367,16 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
             const scroller = scrollRef.current;
             if (!scroller) return;
 
+            // 实时工程长度：本监听的依赖刻意不含 dynamicProjectSec（工程变化
+            // 不重建监听），闭包值是挂载时的快照——工程变长后缩放上限仍钳在
+            // 旧工程末端，视图无法到达当前允许的滚动范围。sessionRef 在
+            // store 订阅内同步更新，事件触发时读取的必然是当前值。
+            const totalSec = getDynamicProjectSec(sessionRef.current.clips);
             const zoom = resolveHorizontalWheelZoom({
                 factor,
                 basePxPerSec: pxPerSecRef.current,
                 baseScrollLeft: scroller.scrollLeft,
-                totalSec: dynamicProjectSec,
+                totalSec,
                 viewportWidth: scroller.clientWidth,
                 playheadZoomEnabled: true,
                 playheadSec: getPlayheadSec
@@ -383,7 +385,7 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
                 anchorScreenX: 0,
                 minPxPerSec: resolveTimelineMinPxPerSec({
                     baseMinPxPerSec: MIN_PX_PER_SEC,
-                    projectSec: dynamicProjectSec,
+                    projectSec: totalSec,
                     viewportWidthPx: scroller.clientWidth,
                 }),
                 maxPxPerSec: MAX_PX_PER_SEC,
@@ -408,7 +410,7 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
         window.addEventListener("hifi:zoomTimelineFocus", onZoomFocused as EventListener);
         return () =>
             window.removeEventListener("hifi:zoomTimelineFocus", onZoomFocused as EventListener);
-        // eslint-disable-next-line react-hooks/exhaustive-deps -- dynamicProjectSec 随工程变化，加入依赖会让监听在工程变化时重建（既有模式）
+        // 工程长度经 sessionRef 实时读取，监听无需随工程变化重建。
     }, [
         commitScrollLeftState,
         getPlayheadSec,
@@ -448,7 +450,9 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
                     ? getPlayheadSec()
                     : Number(sessionRef.current.playheadSec ?? 0) || 0,
                 pxPerSec,
-                contentWidth: dynamicProjectSec * pxPerSec,
+                // 与 zoomTimelineFocus 同源：实时读取工程长度（sessionRef 在
+                // store 订阅内同步更新），不依赖渲染期闭包。
+                contentWidth: getDynamicProjectSec(sessionRef.current.clips) * pxPerSec,
             });
             // 写后回读浏览器实际接受的偏移再广播：请求值可能被钳制/量化/锚定
             // 修正，sticky 画布层必须与原生 DOM 层使用同一偏移。
@@ -457,5 +461,5 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
         }
         window.addEventListener("hifi:focusCursor", handler);
         return () => window.removeEventListener("hifi:focusCursor", handler);
-    }, [getPlayheadSec, pxPerSec, sessionRef, syncScrollLeft, dynamicProjectSec, scrollRef]);
+    }, [getPlayheadSec, pxPerSec, sessionRef, syncScrollLeft, scrollRef]);
 }

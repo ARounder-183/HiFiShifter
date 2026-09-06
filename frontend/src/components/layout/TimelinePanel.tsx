@@ -1047,7 +1047,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         setContextMenu,
         setTrackAreaMenu,
         syncScrollLeft,
-        dynamicProjectSec,
     });
 
     // ── 5. 拖拽 hooks 桥接 ──────────────────────────────────

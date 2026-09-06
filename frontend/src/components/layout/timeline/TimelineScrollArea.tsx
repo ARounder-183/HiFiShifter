@@ -60,6 +60,13 @@ export const TimelineScrollArea: React.FC<
         pxPerSec: number;
         viewportWidth: number;
     } | null>(null);
+    // 工程长度镜像：wheel 监听不随工程变化重建（见下方 effect 的依赖注释），
+    // 缩放上/下限若读闭包里的 projectSec 会停在监听挂载时的快照——工程变长
+    // 后缩放被钳制在旧工程末端，无法到达当前允许的滚动范围。经 ref 间接读取。
+    const projectSecRef = useRef(projectSec);
+    useEffect(() => {
+        projectSecRef.current = projectSec;
+    }, [projectSec]);
     const pxPerSecRef = useRef(pxPerSec);
     // 滚轮缩放路径会在 flushSync 前手动刷新此 ref（见下方 wheel handler），
     // 其余路径由被动 effect 兜底，供 dispatch 去重快照使用。
@@ -268,7 +275,9 @@ export const TimelineScrollArea: React.FC<
             const basePxPerSec = zoomPendingRef.current?.nextPxPerSec ?? pxPerSecRef.current;
             const baseScrollLeft = zoomPendingRef.current?.nextScrollLeft ?? scroller.scrollLeft;
 
-            const totalSec = Math.max(0, projectSec);
+            // 实时工程长度（ref 镜像）：缩放范围必须跟随当前工程，而不是
+            // 监听挂载时的快照。
+            const totalSec = Math.max(0, projectSecRef.current);
             const minPxPerSec = resolveTimelineMinPxPerSec({
                 baseMinPxPerSec: MIN_PX_PER_SEC,
                 projectSec: totalSec,
@@ -320,7 +329,8 @@ export const TimelineScrollArea: React.FC<
         return () => {
             scroller.removeEventListener("wheel", handler);
         };
-        // eslint-disable-next-line react-hooks/exhaustive-deps -- projectSec 随工程长度变化，加入依赖会让 wheel 监听在工程变化时重建（既有模式）
+        // projectSec 不入依赖：监听读 projectSecRef（渲染期镜像），
+        // 工程变化无需重建 wheel 监听。
     }, [
         scrollRef,
         syncScrollLeft,
