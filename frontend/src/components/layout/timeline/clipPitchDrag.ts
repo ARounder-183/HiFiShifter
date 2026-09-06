@@ -23,12 +23,22 @@ export function computePitchDragCents(adjustedDeltaY: number): number {
 }
 
 /**
+ * 单帧音分偏移（deltaSemitones = cents / 100）。
+ * 无声帧（0）保持为 0 —— 与 edit.transposeCents 同一模型；供
+ * shiftPitchFrames 与参数编辑器的拖拽实时预览共用。
+ */
+export function shiftPitchValue(value: number, deltaSemitones: number): number {
+    if (value === 0) return 0;
+    return value + deltaSemitones;
+}
+
+/**
  * 对基准 pitch 帧数组应用整体音分偏移。
  * 无声帧（0）保持为 0；返回新数组，不改写输入。
  */
 export function shiftPitchFrames(base: number[], deltaSemitones: number): number[] {
     if (deltaSemitones === 0) return base.slice();
-    return base.map((v) => (v === 0 ? 0 : v + deltaSemitones));
+    return base.map((v) => shiftPitchValue(v, deltaSemitones));
 }
 
 /** 拖拽 ToolTips 的音分文本（与 formatGainDbValue 同风格）。 */

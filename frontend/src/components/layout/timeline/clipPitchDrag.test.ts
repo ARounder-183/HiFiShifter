@@ -4,6 +4,7 @@ import {
     computePitchDragCents,
     formatPitchDragCents,
     shiftPitchFrames,
+    shiftPitchValue,
 } from "./clipPitchDrag";
 
 describe("computePitchDragCents", () => {
@@ -31,6 +32,14 @@ describe("shiftPitchFrames", () => {
         const out = shiftPitchFrames(base, 0);
         expect(out).not.toBe(base);
         expect(out).toEqual(base);
+    });
+});
+
+describe("shiftPitchValue", () => {
+    it("非零帧加半音偏移；无声帧（0）保持为 0", () => {
+        expect(shiftPitchValue(60, 1.2)).toBe(61.2);
+        expect(shiftPitchValue(60, -2)).toBe(58);
+        expect(shiftPitchValue(0, 3)).toBe(0);
     });
 });
 

@@ -36,6 +36,10 @@ interface ClipPitchDragState {
     lastSentAt: number;
     sendTimer: number | null;
     sendChain: Promise<unknown>;
+    /** 是否已派发 selectClipParamRange（拖拽发生 → 选区定在 Clip 首尾）。 */
+    selectionApplied: boolean;
+    /** 上次实时预览派发的音分（变化才派发，避免事件刷屏）。 */
+    publishedCents: number | null;
 }
 
 /**
@@ -111,6 +115,8 @@ export function useClipPitchDrag(deps: {
                 lastSentAt: 0,
                 sendTimer: null,
                 sendChain: Promise.resolve(),
+                selectionApplied: false,
+                publishedCents: null,
             };
             dragRef.current = state;
 
@@ -164,6 +170,21 @@ export function useClipPitchDrag(deps: {
                 window.removeEventListener("pointercancel", onUp, true);
             };
 
+            // 提交桥：把最终偏移回灌给参数编辑器（paramView 就地更新 + 清除
+            // 实时覆盖层）。cents 为 0 时等价于"清除预览、回到基准"—— 用于
+            // 基准帧获取失败等无后端写入的收尾路径。
+            const publishCommit = (cents: number) => {
+                window.dispatchEvent(
+                    new CustomEvent("hifi:pitchDragCommit", {
+                        detail: {
+                            cents,
+                            startFrame: state.startFrame,
+                            frameCount: state.frameCount,
+                        },
+                    }),
+                );
+            };
+
             function onMove(ev: PointerEvent) {
                 const st = dragRef.current;
                 if (!st || ev.pointerId !== st.pointerId) return;
@@ -186,6 +207,30 @@ export function useClipPitchDrag(deps: {
                     text: formatDragTooltip(cents),
                     position: { x: ev.clientX, y: ev.clientY },
                 });
+                // 拖拽发生：把参数编辑器选区定在 Clip 首尾（与双击 Clip 同一
+                // 操作），交互焦点（复制/剪切路由与活动表面）随之切到参数侧。
+                if (!st.selectionApplied) {
+                    st.selectionApplied = true;
+                    window.dispatchEvent(
+                        new CustomEvent("hifi:editOp", {
+                            detail: { op: "selectClipParamRange", clipId: st.clipId },
+                        }),
+                    );
+                }
+                // 实时预览桥：把音分偏移推给参数编辑器，画布立即渲染拖拽
+                // 结果（音分不变时跳过，避免事件刷屏）。
+                if (st.publishedCents !== st.currentCents) {
+                    st.publishedCents = st.currentCents;
+                    window.dispatchEvent(
+                        new CustomEvent("hifi:pitchDragPreview", {
+                            detail: {
+                                cents: st.currentCents,
+                                startFrame: st.startFrame,
+                                frameCount: st.frameCount,
+                            },
+                        }),
+                    );
+                }
                 scheduleSend();
             }
 
@@ -202,6 +247,11 @@ export function useClipPitchDrag(deps: {
                     st.sendTimer = null;
                 }
                 setPitchDragTooltip(null);
+                // 最终结果回灌参数编辑器（清除实时覆盖层并就地把最终偏移
+                // 应用到 paramView，与随后的 epoch 重取数无缝衔接）。
+                // 基准帧未就绪（获取失败）时以 0 偏移收尾：清除预览、回到
+                // 基准，后端未被写入，保持一致。
+                publishCommit(st.base ? st.currentCents : 0);
                 // 未产生偏移或基准帧未就绪：无变更，不落盘（也未开组）。
                 if (!st.base || st.currentCents === 0) return;
                 try {
@@ -290,6 +340,8 @@ export function useClipPitchDrag(deps: {
                         unregisterAbort();
                         teardown();
                         setPitchDragTooltip(null);
+                        // 清除已派发的实时预览（回到基准）。
+                        publishCommit(0);
                         return;
                     }
                     state.base = (res.edit ?? []).map((v) => Number(v) || 0);
@@ -299,6 +351,8 @@ export function useClipPitchDrag(deps: {
                         dragRef.current = null;
                         teardown();
                         setPitchDragTooltip(null);
+                        // 清除已派发的实时预览（回到基准）。
+                        publishCommit(0);
                     }
                 }
             })();

@@ -75,6 +75,7 @@ import {
     setActiveSurfaceExplicit,
 } from "../../features/uiFocus/focusSurface";
 import { findFirstExternalPathAction } from "./timeline/dnd";
+import { shiftPitchValue } from "./timeline/clipPitchDrag";
 import type { ScaleLike } from "../../utils/musicalScales";
 import {
     pasteReaperClipboard,
@@ -2538,6 +2539,81 @@ export const PianoRollPanel: React.FC = () => {
         bumpRefreshToken,
         invalidate,
     });
+
+    // Clip 音高拖拽（修饰键 + 波形垂直拖拽）的实时预览桥：拖拽侧以节流
+    // 后端预览写入修改 pitch 参数线；这里把同一音分偏移实时应用到本机
+    // live 覆盖层，画布立即渲染拖拽结果 —— 与选择工具在选区内垂直拖拽的
+    // 实时编辑同一渲染路径。仅当前参数为"音高"时生效（其余参数无法展示
+    // 音高曲线；选区设定仍由 selectClipParamRange 完成）。
+    // 提交事件把最终偏移就地写入 paramView 并清除覆盖层，与拖拽侧的
+    // epoch 重取数无缝衔接（同键同值，无闪跳）。
+    useEffect(() => {
+        function readDragWindow(e: Event): {
+            cents: number;
+            startFrame: number;
+            frameCount: number;
+        } | null {
+            const detail = (
+                e as CustomEvent<{
+                    cents?: number;
+                    startFrame?: number;
+                    frameCount?: number;
+                }>
+            ).detail;
+            if (!detail) return null;
+            const cents = Number(detail.cents ?? 0);
+            const startFrame = Math.max(0, Math.floor(Number(detail.startFrame ?? 0)));
+            const frameCount = Math.max(1, Math.floor(Number(detail.frameCount ?? 1)));
+            if (!Number.isFinite(cents) || !Number.isFinite(startFrame)) return null;
+            return { cents, startFrame, frameCount };
+        }
+        function applyPitchDragPreview(e: Event) {
+            const drag = readDragWindow(e);
+            if (!drag || !paramView || editParam !== "pitch" || !pitchEnabled) return;
+            ensureLiveEditBase(paramView);
+            const override = liveEditOverrideRef.current;
+            if (!override || override.key !== paramView.key) return;
+            const deltaSemitones = drag.cents / 100;
+            const windowEndFrame = drag.startFrame + drag.frameCount;
+            for (let i = 0; i < override.edit.length; i += 1) {
+                const frame = paramView.startFrame + i * paramView.stride;
+                if (frame < drag.startFrame || frame >= windowEndFrame) continue;
+                // 以 paramView 的原始帧为基准重复推导（预览事件幂等，不叠加）。
+                const base = paramView.edit[i] ?? 0;
+                override.edit[i] = shiftPitchValue(base, deltaSemitones);
+            }
+            invalidate();
+        }
+        function commitPitchDragPreview(e: Event) {
+            const drag = readDragWindow(e);
+            if (!drag || !paramView || editParam !== "pitch" || !pitchEnabled) return;
+            const deltaSemitones = drag.cents / 100;
+            const windowEndFrame = drag.startFrame + drag.frameCount;
+            const nextEdit = paramView.edit.slice();
+            for (let i = 0; i < nextEdit.length; i += 1) {
+                const frame = paramView.startFrame + i * paramView.stride;
+                if (frame < drag.startFrame || frame >= windowEndFrame) continue;
+                nextEdit[i] = shiftPitchValue(paramView.edit[i] ?? 0, deltaSemitones);
+            }
+            setParamView({ ...paramView, edit: nextEdit });
+            liveEditOverrideRef.current = null;
+            invalidate();
+        }
+        window.addEventListener("hifi:pitchDragPreview", applyPitchDragPreview);
+        window.addEventListener("hifi:pitchDragCommit", commitPitchDragPreview);
+        return () => {
+            window.removeEventListener("hifi:pitchDragPreview", applyPitchDragPreview);
+            window.removeEventListener("hifi:pitchDragCommit", commitPitchDragPreview);
+        };
+    }, [
+        paramView,
+        editParam,
+        pitchEnabled,
+        ensureLiveEditBase,
+        liveEditOverrideRef,
+        setParamView,
+        invalidate,
+    ]);
 
     // 包装 commitStroke：在 pointer-up 提交笔画后，清除 liveEditActive 状态，
     // 并触发可能被延迟 ?pitch_orig_updated 曲线刷新 ?
