@@ -59,6 +59,7 @@ export type ActionId =
     | "clip.cycleTakePrev" // 反向循环切换选中 clip 的活跃 take
     // PianoRoll 操作
     | "pianoRoll.copy" // PianoRoll 内复制参数帧
+    | "pianoRoll.cut" // PianoRoll 内剪切参数帧
     | "pianoRoll.paste" // PianoRoll 内粘贴参数帧
     | "pianoRoll.shiftParamUp" // 选中 clip 参数线整体上移
     | "pianoRoll.shiftParamDown" // 选中 clip 参数线整体下移

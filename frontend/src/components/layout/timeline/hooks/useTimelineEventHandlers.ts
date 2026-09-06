@@ -2,33 +2,37 @@
  * useTimelineEventHandlers — 全局自定义事件监听
  *
  * 从 TimelinePanel.tsx 拆分而来，负责：
- * - hifi:editOp（selectAll / deselect / paste / split）
+ * - hifi:timelineEditOp（时间轴编辑操作唯一入口：copy/cut/paste/pasteTracks/
+ *   split/delete/normalize/group/ungroup/cycleTake/selectAll/deselect ——
+ *   由全局路由 focusRouting.resolveEditOpRoute 按活动编辑表面定向派发，
+ *   事件名即契约，消费者不再自行判断焦点）
  * - hifi:nudgePlayhead（播放头微移）
  * - hifi:zoomTimelineFocus（聚焦缩放）
  * - context menu dismiss（pointerdown 外部关闭）
  * - auto-scroll（播放时保持播放头可见）
  * - hifi:focusCursor（滚动到播放头中心；粘贴后的聚焦由
  *   pendingPlayheadRevealSec + TimelinePanel useLayoutEffect 驱动）
- * - useKeyboardShortcuts 桥接
  */
 import { useEffect } from "react";
 import { flushSync } from "react-dom";
 import type { AppDispatch, RootState } from "../../../../app/store";
 import { useAppStore } from "../../../../app/hooks";
 import {
+    cycleClipTakesRemote,
+    removeClipsRemote,
     seekPlayhead,
     selectTrackRemote,
     setplayheadSec,
     setSelectedClip,
     setSelectedClipPreservingTrack,
 } from "../../../../features/session/sessionSlice";
+import { beginHoldRepeat, selectMergedKeybindings } from "../../../../features/keybindings";
+import { getActiveSurface } from "../../../../features/uiFocus/focusSurface";
 import { resolveHorizontalWheelZoom } from "../runtime/timelineScrollRange";
 import { applyNativeScrollLeft } from "../runtime/nativeScrollApply";
-import { useKeyboardShortcuts } from "./useKeyboardShortcuts";
 import { gridStepBeats, MIN_PX_PER_SEC, MAX_PX_PER_SEC } from "../";
 import { computeFocusCursorScrollLeft } from "../../../../utils/autoFollowScroll";
 import { resolveTimelineMinPxPerSec } from "../runtime/timelineZoomBounds";
-import { shouldRouteClipPasteToParamEditor } from "../clipboardFocusRouting";
 import { expandClipIdsWithGroups } from "./useGroupExpansion";
 
 // ── Args 类型 ─────────────────────────────────────────────────
@@ -70,7 +74,6 @@ export interface UseTimelineEventHandlersArgs {
     normalizeClips: (ids: string[]) => void;
     groupClips: (ids: string[]) => void;
     ungroupClips: (ids: string[]) => void;
-    isEditableTarget: (target: EventTarget | null) => boolean;
 
     // context menu
     contextMenu: {
@@ -129,7 +132,6 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
         normalizeClips,
         groupClips,
         ungroupClips,
-        isEditableTarget,
         contextMenu,
         trackAreaMenu,
         setContextMenu,
@@ -141,93 +143,18 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
     // 实时 store（事件监听器内同步读取，避免闭包捕获过期选区/状态）
     const store = useAppStore();
 
-    // ── useKeyboardShortcuts 桥接 ────────────────────────────
-    useKeyboardShortcuts({
-        dispatch,
-        setMultiSelectedClipIds,
-        copyClips,
-        cutClips,
-        isEditableTarget,
-        onNormalize: normalizeClips,
-        onPaste: pasteClipsAtPlayhead,
-        onSplitSelected: splitSelectedAtPlayhead,
-        onGroup: groupClips,
-        onUngroup: ungroupClips,
-    });
-
-    // ── hifi:editOp ──────────────────────────────────────────
-    useEffect(() => {
-        function onEditOp(e: Event) {
-            const op = (e as CustomEvent<{ op?: string }>).detail?.op;
-            const active = document.activeElement as HTMLElement | null;
-            const inPianoRoll = Boolean(
-                active?.hasAttribute("data-piano-roll-scroller") ||
-                active?.closest?.("[data-piano-roll-scroller]"),
-            );
-            const inTrackHeader = Boolean(
-                Boolean(active?.closest?.("[data-track-list-panel]")) ||
-                document.body.getAttribute("data-hs-focus-window") === "trackHeader",
-            );
-            const deferToPianoRollForSelection =
-                inPianoRoll &&
-                sessionRef.current.toolMode === "select" &&
-                (op === "selectAll" || op === "deselect");
-            if (deferToPianoRollForSelection) return;
-            if (
-                op === "paste" &&
-                shouldRouteClipPasteToParamEditor({
-                    inPianoRoll,
-                    inTrackHeader,
-                })
-            ) {
-                return;
-            }
-            if (inPianoRoll && op !== "selectAll" && op !== "deselect") {
-                return;
-            }
-
-            if (op === "selectAll") {
-                const allIds = sessionRef.current.clips.map((clip) => clip.id);
-                setMultiSelectedClipIds(allIds);
-                dispatch(setSelectedClipPreservingTrack(allIds[0] ?? null));
-                return;
-            }
-
-            if (op === "deselect") {
-                setMultiSelectedClipIds([]);
-                dispatch(setSelectedClip(null));
-                return;
-            }
-
-            if (op === "paste") {
-                pasteClipsAtPlayhead();
-                return;
-            }
-            if (op === "pasteTracks") {
-                pasteClipsAtPlayhead("new_tracks");
-                return;
-            }
-            if (op === "split") {
-                splitSelectedAtPlayhead();
-            }
-        }
-        window.addEventListener("hifi:editOp", onEditOp as EventListener);
-        return () => window.removeEventListener("hifi:editOp", onEditOp as EventListener);
-    }, [
-        dispatch,
-        pasteClipsAtPlayhead,
-        sessionRef,
-        setMultiSelectedClipIds,
-        splitSelectedAtPlayhead,
-    ]);
-
-    // ── hifi:timelineEditOp (menu routing when timeline has focus) ─
+    // ── hifi:timelineEditOp（时间轴编辑操作唯一入口）──────────
+    // 全局路由（focusRouting.resolveEditOpRoute）按「活动编辑表面」把
+    // clip.* 快捷键与菜单编辑操作定向派发到这里 —— 事件名即契约，本消费
+    // 者信任事件、不再自行判断焦点（旧版在此重猜 activeElement / body
+    // 属性，与参数编辑器侧的判断互相矛盾，正是复制/剪切/粘贴冲突的根因）。
+    // 选区在处理器内实时读取 store（同步、权威）：菜单打开时机与鼠标点击
+    // 选择之间可能隔着未提交的渲染，闭包里的选区是旧值，会让复制/剪切
+    // 作用到过期（甚至已删除）的 Clip 上而静默失败。
     useEffect(() => {
         function onTimelineEditOp(e: Event) {
             const op = (e as CustomEvent<{ op?: string }>).detail?.op;
-            // 实时读取 store（同步、权威）：菜单打开的时机与鼠标点击选择之间可能
-            // 隔着未提交的渲染，闭包里的 multiSelectedClipIds 是旧选区，会
-            // 让复制/剪切作用到过期 Clip 上而静默失败。
+            if (!op) return;
             const session = store.getState().session;
             const rawSelectedIds =
                 session.multiSelectedClipIds.length > 0
@@ -235,31 +162,106 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
                     : session.selectedClipId
                       ? [session.selectedClipId]
                       : [];
+            // 过滤已删除/已不存在的 Clip id：让失效选区（如删除、胶合、
+            // 拆分替换 id 后的残留）不再把死 id 传给后端造成静默失败。
             const selectedIds = rawSelectedIds.filter((id) =>
                 session.clips.some((clip) => clip.id === id),
             );
-            if (op === "copy" || op === "cut") {
-                if (selectedIds.length === 0) return;
-                const expandedIds = expandClipIdsWithGroups(
+            const expandedIds = () =>
+                expandClipIdsWithGroups(
                     selectedIds,
                     session.clips,
                     session.ignoreGrouping,
                     session.disabledGroupIds,
                 );
-                if (op === "copy") void copyClips(expandedIds);
-                else cutClips(expandedIds);
-                return;
-            }
-            if (op === "paste") {
-                pasteClipsAtPlayhead();
-            } else if (op === "pasteTracks") {
-                pasteClipsAtPlayhead("new_tracks");
+
+            switch (op) {
+                case "copy": {
+                    if (selectedIds.length === 0) return;
+                    void copyClips(expandedIds());
+                    return;
+                }
+                case "cut": {
+                    if (selectedIds.length === 0) return;
+                    cutClips(expandedIds());
+                    return;
+                }
+                case "paste": {
+                    pasteClipsAtPlayhead();
+                    // 长按重复：首次立即粘贴，持续按住后按统一节奏连续重复
+                    // （holdRepeat 管理器，与「添加轨道」等共用同一套长按逻辑）。
+                    // 仅作用于时间轴粘贴路径（参数编辑器粘贴不重复）。
+                    const pasteKb = selectMergedKeybindings(store.getState())["clip.paste"];
+                    if (pasteKb) beginHoldRepeat(pasteKb, pasteClipsAtPlayhead);
+                    return;
+                }
+                case "pasteTracks": {
+                    pasteClipsAtPlayhead("new_tracks");
+                    return;
+                }
+                case "split": {
+                    splitSelectedAtPlayhead();
+                    return;
+                }
+                case "delete": {
+                    if (selectedIds.length === 0) return;
+                    setMultiSelectedClipIds([]);
+                    void dispatch(removeClipsRemote(selectedIds));
+                    return;
+                }
+                case "normalize": {
+                    if (selectedIds.length === 0) return;
+                    normalizeClips(selectedIds);
+                    return;
+                }
+                case "group": {
+                    if (selectedIds.length < 2) return;
+                    groupClips(selectedIds);
+                    return;
+                }
+                case "ungroup": {
+                    if (selectedIds.length === 0) return;
+                    ungroupClips(selectedIds);
+                    return;
+                }
+                case "cycleTake": {
+                    if (selectedIds.length === 0) return;
+                    void dispatch(cycleClipTakesRemote({ clipIds: selectedIds, direction: 1 }));
+                    return;
+                }
+                case "cycleTakePrev": {
+                    if (selectedIds.length === 0) return;
+                    void dispatch(cycleClipTakesRemote({ clipIds: selectedIds, direction: -1 }));
+                    return;
+                }
+                case "selectAll": {
+                    const allIds = session.clips.map((clip) => clip.id);
+                    setMultiSelectedClipIds(allIds);
+                    dispatch(setSelectedClipPreservingTrack(allIds[0] ?? null));
+                    return;
+                }
+                case "deselect": {
+                    setMultiSelectedClipIds([]);
+                    dispatch(setSelectedClip(null));
+                    return;
+                }
             }
         }
         window.addEventListener("hifi:timelineEditOp", onTimelineEditOp as EventListener);
         return () =>
             window.removeEventListener("hifi:timelineEditOp", onTimelineEditOp as EventListener);
-    }, [store, copyClips, cutClips, pasteClipsAtPlayhead]);
+    }, [
+        dispatch,
+        store,
+        copyClips,
+        cutClips,
+        pasteClipsAtPlayhead,
+        splitSelectedAtPlayhead,
+        normalizeClips,
+        groupClips,
+        ungroupClips,
+        setMultiSelectedClipIds,
+    ]);
 
     // ── hifi:selectAdjacentTrack ────────────────────────────
     useEffect(() => {
@@ -359,11 +361,7 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
     // ── hifi:zoomTimelineFocus ───────────────────────────────
     useEffect(() => {
         function onZoomFocused(e: Event) {
-            const active = document.activeElement as HTMLElement | null;
-            const inTimeline =
-                active?.hasAttribute("data-timeline-scroller") ||
-                active?.closest?.("[data-timeline-scroller]") ||
-                document.body.getAttribute("data-hs-focus-window") === "timeline";
+            const inTimeline = getActiveSurface() === "timeline";
             if (!inTimeline) return;
 
             const factor = Number((e as CustomEvent<{ factor?: number }>).detail?.factor ?? 1);
@@ -459,12 +457,5 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
         }
         window.addEventListener("hifi:focusCursor", handler);
         return () => window.removeEventListener("hifi:focusCursor", handler);
-    }, [
-        getPlayheadSec,
-        pxPerSec,
-        sessionRef,
-        syncScrollLeft,
-        dynamicProjectSec,
-        scrollRef,
-    ]);
+    }, [getPlayheadSec, pxPerSec, sessionRef, syncScrollLeft, dynamicProjectSec, scrollRef]);
 }

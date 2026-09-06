@@ -285,6 +285,7 @@ export const zhCN = {
     menu_export_separated: "导出分轨音频",
 
     status_error_prefix: "错误",
+    clipboard_error_empty: "剪贴板中没有可粘贴的内容",
     status_target_original: "原音",
     status_target_synthesized: "合成",
     status_target_none: "空闲",
@@ -589,6 +590,7 @@ export const zhCN = {
     kb_gesture_wheel: "滚轮",
     kb_gesture_hold: "按住",
     kb_pianoroll_copy: "复制参数帧",
+    kb_pianoroll_cut: "剪切参数帧",
     kb_pianoroll_paste: "粘贴参数帧",
     kb_pianoroll_shift_param_up: "参数线上移（音频块范围）",
     kb_pianoroll_shift_param_down: "参数线下移（音频块范围）",

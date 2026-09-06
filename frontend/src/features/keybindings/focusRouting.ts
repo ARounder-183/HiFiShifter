@@ -22,6 +22,7 @@
 import type { ActionId, Keybinding } from "./types";
 import { ACTION_META } from "./defaultKeybindings";
 import { matchesKeybinding } from "./keybindingMatch";
+import type { EditSurfaceId } from "../uiFocus/focusSurface";
 
 /** 全局快捷键路由关心的焦点域。 */
 export type KeybindingFocusDomain = "pianoRoll" | "timeline" | "trackHeader" | null;
@@ -99,6 +100,140 @@ export function isScopeActive(
     toolMode: string,
 ): boolean {
     return scopePriority(scopedContext, domain, toolMode) === 0;
+}
+
+// ── 编辑操作路由（复制/剪切/粘贴等冲突的最终裁决） ──────────────────
+//
+// clip.copy 与 pianoRoll.copy 共绑 Ctrl+C/X/V 只是「同键异义」，裁决依据
+// 按操作分派：
+// - 复制/剪切：按键那一刻内容尚不存在，只能按活动编辑表面
+//   （focusSurface.getActiveSurface()，由最后一次 pointerdown 落点驱动）
+//   裁决"捕获哪个编辑器的内容"。
+// - 粘贴：单剪贴板纪律保证"槽位内容 = 用户最后一次复制的意图"，因此按
+//   剪贴板载荷类型定向（resolvePasteRoute，last-copy-wins），点击表面仅
+//   在槽位为空/外来数据时兜底 —— 例如"点轨道换轨后在参数编辑器粘贴"
+//   这类跨表面工作流不再被点击动作打断。
+// 路由把同义 actionId 归一为同一编辑 op 后定向派发 —— 冲突在结构上消解，
+// 而不是被特判规则压住。
+
+/** 双表面共享的编辑操作，以及时间轴专有操作。 */
+export type EditOp =
+    | "copy"
+    | "cut"
+    | "paste"
+    | "selectAll"
+    | "deselect"
+    | "pasteTracks"
+    | "delete"
+    | "split"
+    | "normalize"
+    | "group"
+    | "ungroup"
+    | "cycleTake"
+    | "cycleTakePrev";
+
+/** 事件通道即契约：hifi:editOp 只属于参数编辑器，hifi:timelineEditOp 只属于时间轴。 */
+export type EditOpChannel = "hifi:editOp" | "hifi:timelineEditOp";
+
+/**
+ * 快捷键 actionId → 编辑操作。clip.* 与 pianoRoll.* 的同义操作归一为同一
+ * op（路由只看表面，不看哪个同义绑定赢得了作用域竞争）；参数编辑器专有
+ * 操作（shiftParam*、pasteVocalShifter 等）不在此表 —— 它们只有单一归属，
+ * 直接走既有派发路径。
+ */
+export const ACTION_TO_EDIT_OP: Partial<Record<ActionId, EditOp>> = {
+    "clip.copy": "copy",
+    "clip.cut": "cut",
+    "clip.paste": "paste",
+    "clip.delete": "delete",
+    "clip.split": "split",
+    "clip.normalize": "normalize",
+    "clip.group": "group",
+    "clip.ungroup": "ungroup",
+    "clip.cycleTake": "cycleTake",
+    "clip.cycleTakePrev": "cycleTakePrev",
+    "pianoRoll.copy": "copy",
+    "pianoRoll.cut": "cut",
+    "pianoRoll.paste": "paste",
+    "edit.selectAll": "selectAll",
+    "edit.deselect": "deselect",
+    "edit.pasteTracks": "pasteTracks",
+};
+
+/**
+ * 解析编辑操作的目标通道（事件名）。
+ *
+ * - copy/cut：按活动表面路由（复制时内容尚不存在，只能由表面裁决）。
+ * - paste：**此处仅作兜底** —— 正常路径由 resolvePasteRoute 按剪贴板载荷
+ *   类型（last-copy-wins）路由；只有槽位为空/外来数据时才落到本函数，
+ *   按活动表面选择 REAPER/MIDI 兜底流程的归属。
+ * - selectAll/deselect：参数编辑器仅在 select 工具下实现（见
+ *   PianoRollPanel.handleEditOp 的工具守卫），draw/vibrato 工具下落回
+ *   时间轴全选 Clip（与既有行为一致）。
+ * - delete/split/…：时间轴专有操作，固定路由到时间轴通道 —— 无论最后
+ *   点击的是哪个表面（裸 Delete 删除选中 Clip 等既有语义保持不变）。
+ * - 未收录的 op：返回 null，由调用方走各自的固定通道。
+ */
+export function resolveEditOpRoute(
+    surface: EditSurfaceId | null,
+    op: EditOp | string,
+    toolMode?: string,
+): EditOpChannel | null {
+    switch (op) {
+        case "copy":
+        case "cut":
+            if (surface === "pianoRoll") return "hifi:editOp";
+            if (surface === "timeline" || surface === "trackHeader") {
+                return "hifi:timelineEditOp";
+            }
+            return null;
+        case "paste":
+            // 兜底路径：见 resolvePasteRoute（内容路由的主裁决在它之上）。
+            if (surface === "pianoRoll") return "hifi:editOp";
+            if (surface === "timeline" || surface === "trackHeader") {
+                return "hifi:timelineEditOp";
+            }
+            return null;
+        case "selectAll":
+        case "deselect":
+            if (surface === "pianoRoll" && toolMode === "select") return "hifi:editOp";
+            return "hifi:timelineEditOp";
+        case "pasteTracks":
+        case "delete":
+        case "split":
+        case "normalize":
+        case "group":
+        case "ungroup":
+        case "cycleTake":
+        case "cycleTakePrev":
+            return "hifi:timelineEditOp";
+        default:
+            return null;
+    }
+}
+
+/**
+ * 粘贴的内容路由（last-copy-wins）。
+ *
+ * 单剪贴板纪律保证"槽位内容 = 用户最后一次复制的意图"，因此粘贴不再按
+ * 点击表面裁决，而按载荷类型定向：参数线数据贴回参数编辑器的实时上下文
+ * （选区 + 当前轨道 —— 轨道点击换轨后依然成立），Clip 载荷贴到播放头。
+ * 槽位为空或承载外来数据（REAPER/MIDI，不携带我们的意图）时，才退回按
+ * 活动表面选择兜底流程：参数编辑器表面的 REAPER/MIDI 兜底（含 MIDI 导入
+ * 对话框）与时间轴表面的播放头 REAPER 粘贴各归其位。
+ *
+ * @param clipboardKind 后端 clipboard_kind 探测结果：
+ *   "clips" | "tracks" | "project" | "param" | null。
+ */
+export function resolvePasteRoute(
+    clipboardKind: string | null,
+    surface: EditSurfaceId | null,
+): EditOpChannel | null {
+    if (clipboardKind === "param") return "hifi:editOp";
+    if (clipboardKind === "clips" || clipboardKind === "tracks" || clipboardKind === "project") {
+        return "hifi:timelineEditOp";
+    }
+    return resolveEditOpRoute(surface, "paste");
 }
 
 /** 硬排除是否包含需要被排除的作用域（仅用于单测断言）。 */

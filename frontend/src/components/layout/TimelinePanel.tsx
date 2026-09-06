@@ -1042,7 +1042,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         normalizeClips,
         groupClips,
         ungroupClips,
-        isEditableTarget,
         contextMenu,
         trackAreaMenu,
         setContextMenu,
@@ -1570,6 +1569,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         >
             <Flex
                 className="h-full w-full bg-qt-graph-bg overflow-hidden"
+                // 编辑表面声明：文档级 pointerdown/focusin 捕获据此把本面板
+                // 解析为「timeline」表面（轨道列在其内部以 trackHeader 就近
+                // 覆盖，见 focusSurface.ts / data-hs-surface）。
+                data-hs-surface="timeline"
                 onPointerDownCapture={(e) => {
                     // 点击轨道背景等非输入区域时，主动失焦当前聚焦的输入框，
                     // 让名称/速率/增益/轨道增益等行内编辑器走各自的 onBlur
@@ -1677,7 +1680,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         onTempoMapCommit={handleTempoMapCommit}
                         onMouseDown={(e) => {
                             if (e.button !== 0) return;
-                            document.body.setAttribute("data-hs-focus-window", "timeline");
                             const scroller = scrollRef.current;
                             if (!scroller) return;
                             const ruler = e.currentTarget as HTMLDivElement;
@@ -1997,7 +1999,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                             }
                         }}
                         onPointerDownCapture={(e) => {
-                            document.body.setAttribute("data-hs-focus-window", "timeline");
                             const scroller = scrollRef.current;
                             if (
                                 scroller &&

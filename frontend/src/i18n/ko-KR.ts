@@ -376,6 +376,7 @@ export const koKR = {
     menu_export_separated: "트랙별 오디오 내보내기",
 
     status_error_prefix: "오류",
+    clipboard_error_empty: "클립보드에 붙여넣을 내용이 없습니다",
     status_target_original: "원본",
     status_target_synthesized: "합성",
     status_target_none: "대기 중",
@@ -681,6 +682,7 @@ export const koKR = {
     kb_gesture_wheel: "휠",
     kb_gesture_hold: "누른 채",
     kb_pianoroll_copy: "파라미터 프레임 복사",
+    kb_pianoroll_cut: "파라미터 프레임 잘라내기",
     kb_pianoroll_paste: "파라미터 프레임 붙여넣기",
     kb_pianoroll_shift_param_up: "파라미터 위로 이동 (클립 범위)",
     kb_pianoroll_shift_param_down: "파라미터 아래로 이동 (클립 범위)",

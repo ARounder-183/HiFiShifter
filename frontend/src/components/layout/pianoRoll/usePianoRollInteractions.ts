@@ -34,13 +34,11 @@ import {
 } from "../../../utils/musicalScales";
 import type { ScaleLike } from "../../../utils/musicalScales";
 import {
-    CHILD_PITCH_OFFSET_DEGREES_RANGE,
     isChildPitchOffsetCentsParam,
     isChildPitchOffsetDegreesParam,
     isChildFormantOffsetCentsParam,
     snapChildPitchOffsetValue,
 } from "./childPitchOffsetParams";
-import { buildChildOffsetPasteValues as buildChildOffsetPasteValuesHelper } from "./childPitchOffsetPaste";
 import { resolveHorizontalWheelZoom } from "../timeline/runtime/timelineScrollRange";
 import { resolveTimelineMinPxPerSec } from "../timeline/runtime/timelineZoomBounds";
 import { getParamEditorWheelAction, getVibratoDragWheelTarget } from "./wheelGesture";
@@ -61,10 +59,6 @@ import {
     getDrawPreviewValue,
     getSelectDragPreviewValue,
 } from "./paramValuePreviewLogic";
-import {
-    readSystemClipboardObject,
-    writeSystemClipboardObject,
-} from "../../../utils/systemClipboard";
 import { secFromViewportClientX } from "./seekPlayheadMapping";
 import {
     createTimelineAxis,
@@ -77,8 +71,6 @@ type CanvasCursor = "default" | "crosshair" | "grab" | "grabbing" | "ew-resize";
 export function usePianoRollInteractions(args: {
     dispatch: AppDispatch;
     rootTrackId: string | null;
-    selectedTrackId: string | null;
-    tracks: Array<{ id: string; parentId?: string | null }>;
     editParam: ParamName;
     pitchEnabled: boolean;
     toolMode: string;
@@ -127,12 +119,6 @@ export function usePianoRollInteractions(args: {
         startRectH: number;
     } | null>;
 
-    clipboardRef: MutableRefObject<{
-        param: ParamName;
-        framePeriodMs: number;
-        values: number[];
-    } | null>;
-
     paramView: ParamViewSegment | null;
     paramViewRef: MutableRefObject<ParamViewSegment | null>;
 
@@ -164,10 +150,7 @@ export function usePianoRollInteractions(args: {
 
     /** pointer down 期间设为 true，pointer up 后由 commitStroke 包装层重置为 false。
      *  用于保护 pitch_orig_updated 事件触发的曲线刷新不覆盖正在绘制的内容。 */
-    liveEditActiveRef?: MutableRefObject<boolean>; /** pianoRoll.copy 绑定 */
-    pianoRollCopyKb: Keybinding;
-    /** pianoRoll.paste 绑定 */
-    pianoRollPasteKb: Keybinding;
+    liveEditActiveRef?: MutableRefObject<boolean>;
     /** modifier.pianoRollVerticalZoom 绑定 */
     prVerticalZoomKb: Keybinding;
     /** modifier.horizontalZoom 绑定 */
@@ -248,8 +231,6 @@ export function usePianoRollInteractions(args: {
     const {
         dispatch,
         rootTrackId,
-        selectedTrackId,
-        tracks,
         editParam,
         pitchEnabled,
         toolMode,
@@ -275,7 +256,6 @@ export function usePianoRollInteractions(args: {
         setCanvasCursor,
         strokeRef,
         panRef,
-        clipboardRef,
         paramView,
         paramViewRef,
         bumpRefreshToken,
@@ -291,8 +271,6 @@ export function usePianoRollInteractions(args: {
         setParamView,
         liveEditOverrideRef,
         liveEditActiveRef,
-        pianoRollCopyKb,
-        pianoRollPasteKb,
         prVerticalZoomKb,
         horizontalZoomKb,
         scrollHorizontalKb,
@@ -882,74 +860,6 @@ export function usePianoRollInteractions(args: {
         ],
     );
 
-    const pitchDeltaToDegreeSteps = useCallback(
-        (basePitch: number, targetPitch: number, scale: ScaleLike): number => {
-            if (!Number.isFinite(basePitch) || !Number.isFinite(targetPitch)) {
-                return 0;
-            }
-            if (Math.abs(targetPitch - basePitch) <= 1e-9) return 0;
-
-            const minStep = Number(CHILD_PITCH_OFFSET_DEGREES_RANGE.min);
-            const maxStep = Number(CHILD_PITCH_OFFSET_DEGREES_RANGE.max);
-            const minPitch = transposePitchByScaleSteps(basePitch, minStep, scale);
-            const maxPitch = transposePitchByScaleSteps(basePitch, maxStep, scale);
-            const lowPitch = Math.min(minPitch, maxPitch);
-            const highPitch = Math.max(minPitch, maxPitch);
-            if (targetPitch <= lowPitch) {
-                return minPitch <= maxPitch ? minStep : maxStep;
-            }
-            if (targetPitch >= highPitch) {
-                return minPitch <= maxPitch ? maxStep : minStep;
-            }
-
-            let left = minStep;
-            let right = maxStep;
-            const ascending = minPitch <= maxPitch;
-            for (let i = 0; i < 24; i += 1) {
-                const mid = (left + right) / 2;
-                const midPitch = transposePitchByScaleSteps(basePitch, mid, scale);
-                if (midPitch < targetPitch === ascending) {
-                    left = mid;
-                } else {
-                    right = mid;
-                }
-            }
-            return (left + right) / 2;
-        },
-        [],
-    );
-
-    const buildChildOffsetPasteValues = useCallback(
-        async (
-            targetTrackId: string,
-            startFrame: number,
-            frameCount: number,
-            clipboardPitch: number[],
-            mode: "cents" | "degrees",
-        ): Promise<number[] | null> => {
-            const fp = paramViewRef.current?.framePeriodMs;
-            return buildChildOffsetPasteValuesHelper({
-                tracks,
-                rootTrackId,
-                targetTrackId,
-                startFrame,
-                frameCount,
-                clipboardPitch,
-                mode,
-                paramsApi,
-                pitchDeltaToDegreeSteps,
-                projectScale,
-                scaleAtFrame:
-                    fp != null
-                        ? (frame: number) => scaleAtSec?.((frame * fp) / 1000) ?? projectScale
-                        : undefined,
-            });
-        },
-        // paramViewRef is a ref; it is intentionally not a dependency.
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-        [tracks, pitchDeltaToDegreeSteps, projectScale, scaleAtSec, rootTrackId],
-    );
-
     const updateSelectionUi = useCallback(
         (next: { aBeat: number; bBeat: number } | null) => {
             setSelectionUi(next);
@@ -1376,166 +1286,19 @@ export function usePianoRollInteractions(args: {
                 }
             }
 
-            if (!selectionRef.current) return;
-
-            const sel = selectionRef.current;
-            const aBeat = Math.min(sel.aBeat, sel.bBeat);
-            const bBeat = Math.max(sel.aBeat, sel.bBeat);
-            const startSec = aBeat * secPerBeat;
-            const durSec = Math.max(0, (bBeat - aBeat) * secPerBeat);
-            const fp = paramView?.framePeriodMs ?? 5;
-            const startFrame = Math.max(0, Math.floor((startSec * 1000) / fp));
-            const frameCount = clamp(Math.ceil((durSec * 1000) / fp), 1, 200_000);
-
-            // 检测 pianoRoll.copy 绑定
-            {
-                const kb = pianoRollCopyKb;
-                let keyMatch = false;
-                if (kb.modifierOnly) {
-                    keyMatch = isModifierActive(kb, e.nativeEvent);
-                } else {
-                    const pressedKey = e.key === " " ? "space" : e.key.toLowerCase();
-                    if (pressedKey !== kb.key) keyMatch = false;
-                    else {
-                        const isMac = navigator.platform.toLowerCase().includes("mac");
-                        const modKey = isMac ? e.metaKey : e.ctrlKey;
-                        keyMatch =
-                            modKey === Boolean(kb.ctrl) &&
-                            e.shiftKey === Boolean(kb.shift) &&
-                            e.altKey === Boolean(kb.alt);
-                    }
-                }
-                if (keyMatch) {
-                    e.preventDefault();
-                    void (async () => {
-                        const res = await paramsApi.getParamFrames(
-                            rootTrackId,
-                            editParam,
-                            startFrame,
-                            frameCount,
-                            1,
-                        );
-                        if (!res?.ok) return;
-                        const payload = res as ParamFramesPayload;
-                        clipboardRef.current = {
-                            param: editParam,
-                            framePeriodMs: Number(payload.frame_period_ms ?? fp) || fp,
-                            values: (payload.edit ?? []).map((v) => Number(v) || 0),
-                        };
-                        try {
-                            await writeSystemClipboardObject({
-                                version: 1,
-                                kind: "param",
-                                param: editParam,
-                                framePeriodMs: Number(payload.frame_period_ms ?? fp) || fp,
-                                values: (payload.edit ?? []).map((v) => Number(v) || 0),
-                            });
-                        } catch {
-                            // ignore clipboard write failures
-                        }
-                        // 刷新剪贴板预览
-                        invalidate();
-                    })();
-                    return;
-                }
-            }
-
-            // 检测 pianoRoll.paste 绑定
-            {
-                const kb = pianoRollPasteKb;
-                let keyMatch = false;
-                if (kb.modifierOnly) {
-                    keyMatch = isModifierActive(kb, e.nativeEvent);
-                } else {
-                    const pressedKey = e.key === " " ? "space" : e.key.toLowerCase();
-                    if (pressedKey !== kb.key) keyMatch = false;
-                    else {
-                        const isMac = navigator.platform.toLowerCase().includes("mac");
-                        const modKey = isMac ? e.metaKey : e.ctrlKey;
-                        keyMatch =
-                            modKey === Boolean(kb.ctrl) &&
-                            e.shiftKey === Boolean(kb.shift) &&
-                            e.altKey === Boolean(kb.alt);
-                    }
-                }
-                if (keyMatch) {
-                    e.preventDefault();
-                    void (async () => {
-                        let clip = clipboardRef.current;
-                        try {
-                            const fromSystem = await readSystemClipboardObject("param");
-                            if (fromSystem?.kind === "param") {
-                                clip = {
-                                    param: fromSystem.param,
-                                    framePeriodMs: Number(fromSystem.framePeriodMs) || fp,
-                                    values: Array.isArray(fromSystem.values)
-                                        ? fromSystem.values.map((v) => Number(v) || 0)
-                                        : [],
-                                };
-                                clipboardRef.current = clip;
-                            }
-                        } catch {
-                            // ignore and fallback to internal clipboard
-                        }
-                        if (!clip) return;
-                        const targetIsChildCents = isChildPitchOffsetCentsParam(editParam);
-                        const targetIsChildDegrees = isChildPitchOffsetDegreesParam(editParam);
-                        const canConvertPitchToChildOffset =
-                            (targetIsChildCents || targetIsChildDegrees) &&
-                            clip.param === "pitch" &&
-                            selectedTrackId != null;
-
-                        let pasteValues: number[];
-                        if (clip.param === editParam) {
-                            pasteValues =
-                                clip.values.length > frameCount
-                                    ? clip.values.slice(0, frameCount)
-                                    : clip.values;
-                        } else if (canConvertPitchToChildOffset) {
-                            const converted = await buildChildOffsetPasteValues(
-                                selectedTrackId!,
-                                startFrame,
-                                frameCount,
-                                clip.values.length > frameCount
-                                    ? clip.values.slice(0, frameCount)
-                                    : clip.values,
-                                targetIsChildCents ? "cents" : "degrees",
-                            );
-                            if (!converted) return;
-                            pasteValues = converted;
-                        } else {
-                            return;
-                        }
-
-                        await paramsApi.setParamFrames(
-                            rootTrackId,
-                            editParam,
-                            startFrame,
-                            pasteValues,
-                            true,
-                        );
-                        bumpRefreshToken();
-                    })();
-                }
-            }
+            // 复制/粘贴（pianoRoll.copy / pianoRoll.paste）已上移：由全局路由
+            // （useKeybindings → focusRouting.resolveEditOpRoute）按活动编辑
+            // 表面定向派发到 PianoRollPanel.handleEditOp 唯一执行，本地不再
+            // 维护平行的键位匹配分支（旧分支与 handleEditOp 重复且行为已
+            // 分叉，是复制/粘贴冲突的放大器）。
         },
         [
             rootTrackId,
-            selectionRef,
-            secPerBeat,
-            paramView?.framePeriodMs,
             editParam,
             pitchEnabled,
-            clipboardRef,
-            bumpRefreshToken,
-            pianoRollCopyKb,
-            pianoRollPasteKb,
             keybindingMap,
             onEditAction,
             toolMode,
-            selectedTrackId,
-            buildChildOffsetPasteValues,
-            invalidate,
         ],
     );
 

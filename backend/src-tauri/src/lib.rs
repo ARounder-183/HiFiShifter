@@ -504,6 +504,7 @@ pub fn run() {
             commands::copy_timeline_tracks,
             commands::paste_timeline_clipboard,
             commands::has_timeline_clipboard,
+            commands::clipboard_kind,
             commands::write_system_clipboard_object,
             commands::read_system_clipboard_object,
             commands::load_default_model,

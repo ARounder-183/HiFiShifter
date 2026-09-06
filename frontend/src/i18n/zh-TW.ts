@@ -286,6 +286,7 @@ export const zhTW = {
     menu_export_separated: "匯出分軌音訊",
 
     status_error_prefix: "錯誤",
+    clipboard_error_empty: "剪貼簿中沒有可貼上的內容",
     status_target_original: "原音",
     status_target_synthesized: "合成",
     status_target_none: "閒置",
@@ -590,6 +591,7 @@ export const zhTW = {
     kb_gesture_wheel: "滾輪",
     kb_gesture_hold: "按住",
     kb_pianoroll_copy: "複製參數幀",
+    kb_pianoroll_cut: "剪下參數幀",
     kb_pianoroll_paste: "貼上參數幀",
     kb_pianoroll_shift_param_up: "參數線上移（音訊塊範圍）",
     kb_pianoroll_shift_param_down: "參數線下移（音訊塊範圍）",

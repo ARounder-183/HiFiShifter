@@ -467,6 +467,10 @@ export const timelineApi = {
             sourceProject?: string;
         }>("has_timeline_clipboard"),
 
+    // 剪贴板载荷类型探测（粘贴内容路由依据）：后端缓存优先，未变化时
+    // 不打开系统剪贴板。kind："clips" | "tracks" | "project" | "param" | null。
+    clipboardKind: () => invoke<{ ok: boolean; kind: string | null }>("clipboard_kind"),
+
     hasReaperClipboard: () => invoke<{ ok: boolean; available?: boolean }>("has_reaper_clipboard"),
 
     /// 在指定文件夹及其子文件夹中搜索候选源文件。

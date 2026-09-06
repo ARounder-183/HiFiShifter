@@ -4,7 +4,12 @@ import { selectMergedKeybindings } from "./keybindingsSlice";
 import { ACTION_META } from "./defaultKeybindings";
 import type { ActionId } from "./types";
 import type { RootState } from "../../app/store";
-import { resolveActionByFocus, type KeybindingFocusDomain } from "./focusRouting";
+import {
+    resolveActionByFocus,
+    ACTION_TO_EDIT_OP,
+    type KeybindingFocusDomain,
+} from "./focusRouting";
+import { getActiveSurface } from "../uiFocus/focusSurface";
 import { consumeHoldRepeatKeyDown } from "./holdRepeat";
 import {
     matchesKeybinding,
@@ -40,29 +45,20 @@ function isEditableTarget(target: EventTarget | null): boolean {
     return false;
 }
 
-/** 计算当前键盘焦点域（与 MenuBar / TimelinePanel / TrackList 的标记一致） */
-function computeFocusDomain(active: HTMLElement | null): KeybindingFocusDomain {
-    const focusWindow = document.body.getAttribute("data-hs-focus-window");
-    const inPianoRoll =
-        active?.hasAttribute("data-piano-roll-scroller") ||
-        active?.closest?.("[data-piano-roll-scroller]") ||
-        focusWindow === "pianoRoll";
-    const inTimeline =
-        active?.hasAttribute("data-timeline-scroller") ||
-        active?.closest?.("[data-timeline-scroller]") ||
-        focusWindow === "timeline";
-    const inTrackHeader =
-        Boolean(active?.closest?.("[data-track-list-panel]")) || focusWindow === "trackHeader";
-    if (inPianoRoll) return "pianoRoll";
-    if (inTimeline) return "timeline";
-    if (inTrackHeader) return "trackHeader";
-    return null;
+/**
+ * 计算当前焦点域：即「活动编辑表面」（focusSurface 单一事实源，由最后
+ * 一次 pointerdown / focusin 落点驱动）。不读 document.activeElement ——
+ * 时间轴/轨道列刻意 preventDefault 自管焦点，DOM 焦点会滞留在上一个
+ * 可聚焦元素上，曾导致复制/剪切/粘贴被路由到错误的编辑器。
+ */
+function computeFocusDomain(): KeybindingFocusDomain {
+    return getActiveSurface();
 }
 
 export type KeybindingActionHandler = (actionId: ActionId) => void;
 
 /**
- * 全局快捷键监听 Hook
+ * 全局快捷键监听 Hook（window 上唯一的 keydown 监听器）
  *
  * 从 Redux store 读取合并后的快捷键映射，统一监听 keydown 事件，
  * 匹配到操作后回调 handler。
@@ -70,8 +66,11 @@ export type KeybindingActionHandler = (actionId: ActionId) => void;
  * 冲突解决（焦点路由）：同键值的多个绑定按「激活作用域 > 全局 >
  * 其它作用域 > 硬排除」排序取首位（见 focusRouting.ts），因此例如
  * 「添加轨道（Ctrl+T）」与「音高设置到（Ctrl+T）」可以在不同焦点域
- * 下共存 —— 参数编辑器内 select 工具下按 Ctrl+T 打开音高设置，
- * 时间轴/轨道头下按 Ctrl+T 新建轨道，与复制/粘贴的焦点分发同构。
+ * 下共存。
+ *
+ * 复制/剪切/粘贴等编辑操作（clip.* 与 pianoRoll.* 共绑 Ctrl+C/X/V）是
+ * 「同键异义」：归一为同一编辑 op 后由 handler 按活动编辑表面定向派发
+ * （见 focusRouting.resolveEditOpRoute），冲突在结构上消解。
  */
 export function useKeybindings(handler: KeybindingActionHandler): void {
     const keybindings = useAppSelector(selectMergedKeybindings);
@@ -94,7 +93,7 @@ export function useKeybindings(handler: KeybindingActionHandler): void {
 
     useEffect(() => {
         function onKeyDown(e: KeyboardEvent) {
-            // 长按重复（添加轨道/克隆轨道等，见 holdRepeat.ts）：同键自动
+            // 长按重复（添加轨道/克隆轨道/粘贴等，见 holdRepeat.ts）：同键自动
             // 重复被吞掉（节奏由计时器控制），其它按键终止长按。放在最前，
             // 与粘贴的长按终止语义一致（新按键 = 意图变化）。
             if (consumeHoldRepeatKeyDown(e)) return;
@@ -119,8 +118,7 @@ export function useKeybindings(handler: KeybindingActionHandler): void {
                 }
             }
 
-            const active = document.activeElement as HTMLElement | null;
-            const domain = computeFocusDomain(active);
+            const domain = computeFocusDomain();
 
             const key = normalizeEventKey(e);
             const isArrowKey =
@@ -141,44 +139,32 @@ export function useKeybindings(handler: KeybindingActionHandler): void {
             );
             if (!matched) return;
 
-            // 参数编辑器（钢琴卷帘）内的快捷键由其自身 onKeyDown 处理，不拦截
-            if (domain === "pianoRoll") {
-                if (ACTION_META[matched]?.scopedContext === "pianoRollVibratoDrag") {
-                    return;
-                }
-                if (
-                    matched.startsWith("pianoRoll.") &&
-                    matched !== "pianoRoll.shiftParamUp" &&
-                    matched !== "pianoRoll.shiftParamDown" &&
-                    matched !== "pianoRoll.shiftParamUpSelection" &&
-                    matched !== "pianoRoll.shiftParamDownSelection"
-                ) {
-                    return;
-                }
-                if (matched === "clip.copy" || matched === "clip.paste") {
-                    return;
-                }
-                // paramEditorSelect 作用域的操作只有在「select 工具」下才会被
-                // 路由到这里（见 focusRouting.scopePriority），此时交给 PianoRoll 处理。
-                if (ACTION_META[matched]?.scopedContext === "paramEditorSelect") {
-                    return;
-                }
-                if (matched === "edit.selectAll" || matched === "edit.deselect") {
-                    if (toolModeRef.current === "select") {
-                        return;
-                    }
-                }
-            }
-
-            // clip.* 操作由 TimelinePanel 内部处理，避免全局层提前吞掉事件。
-            // （焦点在轨道头且发生键值重叠时，trackHeaderFocus 作用域的轨道
-            // 操作会因更高优先级被路由到此处 —— 见 resolveActionByFocus。）
-            if (matched.startsWith("clip.")) {
+            // OS 自动重复：仅 REPEATABLE_ACTIONS（快进/缩放/轨道导航）走系统
+            // 重复，其余一律吞掉 —— 复制/剪切等编辑操作若放行重复，会以键率
+            // 向后端发送重复请求；粘贴的连续重复由 holdRepeat 计时器管理。
+            if (e.repeat && !REPEATABLE_ACTIONS.has(matched)) {
+                e.preventDefault();
                 return;
             }
 
-            if (e.repeat && !REPEATABLE_ACTIONS.has(matched)) {
+            // ── 编辑操作统一路由（复制/剪切/粘贴、全选、clip 专有操作等）──
+            // clip.* 与 pianoRoll.* 的同义绑定归一为同一编辑 op，由 handler
+            // 按活动编辑表面定向派发到唯一执行者（事件名即契约，消费者不再
+            // 自行判断焦点）。表面未知时 handler 按 no-op 处理。剪贴板组
+            // （pianoRoll.copy/cut/paste）虽属 paramEditorSelect 作用域，但
+            // 必须先于下方的"作用域放行"检查路由，否则会被错误交回卷帘本地。
+            if (ACTION_TO_EDIT_OP[matched]) {
                 e.preventDefault();
+                e.stopPropagation();
+                handlerRef.current(matched);
+                return;
+            }
+
+            // 参数编辑器作用域的其余快捷键（edit.* 对话框类：移调/量化/平均
+            // 化…）由卷帘 scroller 本地 onKeyDown 处理 —— 需要打开
+            // openEditDialog 弹窗，不经过全局路由（与既有行为一致）。
+            const matchedScope = ACTION_META[matched]?.scopedContext;
+            if (matchedScope === "paramEditorSelect" || matchedScope === "pianoRollVibratoDrag") {
                 return;
             }
 

@@ -63,8 +63,8 @@ export function EditContextMenu({
     const menuRef = useRef<HTMLDivElement>(null);
 
     // 菜单项右侧的快捷键提示：从快捷键注册表读取当前生效的绑定。
-    // 参数编辑器的复制/剪切/粘贴与时间轴共用 clip.* 动作（焦点在参数
-    // 编辑器时由参数编辑器接管，见 useKeyboardShortcuts 的焦点分发）。
+    // 参数编辑器与时间轴共用 Ctrl+C/X/V（复制/剪切/粘贴按「活动编辑
+    // 表面」定向派发，见 focusRouting.resolveEditOpRoute）。
     const copyShortcut = useMenuShortcut("clip.copy");
     const cutShortcut = useMenuShortcut("clip.cut");
     const pasteShortcut = useMenuShortcut("clip.paste");

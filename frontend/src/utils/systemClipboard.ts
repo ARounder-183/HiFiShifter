@@ -1,9 +1,14 @@
 /*
  * 系统剪贴板对象读写工具。
  *
- * 实际传输由 Rust 后端负责：后端写入平台原生自定义格式，并附带
- * base64 文本信封作为回退。这样两个 HiFiShifter 进程之间复制粘贴
- * 不再依赖 WebView 的剪贴板权限，在 Windows / macOS / Linux 上均可工作。
+ * 实际传输由 Rust 后端负责：写入平台原生自定义格式，并附带 base64 文本
+ * 信封作为回退。这样两个 HiFiShifter 进程之间复制粘贴不依赖 WebView 的
+ * 剪贴板权限，在 Windows / macOS / Linux 上均可工作。
+ *
+ * 单剪贴板纪律：时间轴 Clip 与参数线载荷共享同一个原生格式槽位、互相
+ * 覆盖（最后复制的获胜）；读取方按自身格式解析，解析失败即视为"没有
+ * 可粘贴的本类数据"（时间轴侧统一报 timeline_clipboard_empty，由前端
+ * 映射为"剪贴板中没有可粘贴的内容"提示）。
  */
 
 import type { ClipTemplate } from "../features/session/sessionTypes";

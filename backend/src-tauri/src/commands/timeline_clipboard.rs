@@ -4,6 +4,11 @@
 //! `crate::system_clipboard`.  Copying happens in the backend so no WebView
 //! clipboard permission is required, and pasting works across two running
 //! HiFiShifter processes.
+//!
+//! 单剪贴板纪律：`OBJECT_FORMAT` 槽位是整个应用的**唯一**逻辑剪贴板，时间轴
+//! Clip 与参数线载荷互相覆盖（最后复制的获胜），读取方只按自己的格式解析，
+//! 解析失败一律视为"没有可粘贴的内容"（细节进日志），由上层给出统一的
+//! 剪贴板为空提示并继续走 REAPER 回退 —— 不做跨类型判别。
 
 use crate::project_fragment::{
     build_clip_fragment, build_track_fragment, merge_project_fragment, FragmentMergeOptions,
@@ -96,13 +101,88 @@ fn write_fragment(
 ) -> Result<(), String> {
     let summary = fragment_summary_with_reaper(fragment, reaper);
     let bytes = fragment.encode()?;
+    // 写入即替换整个逻辑剪贴板：参数线等其它载荷随 empty() 一并清除
+    // （system_clipboard::write_contents），"只同时存在一个"由写入保证。
     system_clipboard::write_bytes_with_reaper(&bytes, &summary, reaper.map(|r| r.bytes.as_slice()))
 }
 
 fn read_fragment() -> Result<ProjectFragment, String> {
     let bytes =
         system_clipboard::read_bytes()?.ok_or_else(|| "timeline_clipboard_empty".to_string())?;
-    ProjectFragment::decode(&bytes)
+    // 槽位内容无法按时间轴载荷解析（被参数线复制覆盖 / 损坏 / 未知版本）时，
+    // 一律按"没有可粘贴的内容"处理并继续上层 REAPER 回退；解析细节仅进日志，
+    // 不把裸 serde 错误透给用户。
+    ProjectFragment::decode(&bytes).map_err(|error| {
+        log::warn!("[hifishifter] timeline clipboard payload unusable: {error}");
+        "timeline_clipboard_empty".to_string()
+    })
+}
+
+/// 判断槽位字节是否为参数线载荷（前端 `writeSystemClipboardObject` 写入的
+/// JSON，`version:1` + `kind:"param"`）。
+fn is_param_payload(bytes: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .and_then(|value| {
+            let kind = value.get("kind")?.as_str()?.to_string();
+            let version = value.get("version")?.as_u64()?;
+            (kind == "param" && version == 1).then_some(kind)
+        })
+        .is_some()
+}
+
+/// 剪贴板当前载荷类型探测（粘贴的内容路由依据，last-copy-wins）。
+///
+/// 缓存优先：本进程写入后序号未变化时直接用缓存应答，不打开系统剪贴板
+/// （打开是全局独占操作，见 system_clipboard 模块注释）。缓存失效时真实
+/// 读取并按"时间轴载荷优先，其次参数线 JSON"判别，成功后回填缓存。
+/// kind："clips" | "tracks" | "project" | "param" | null（空/外来/无法识别）。
+pub(super) fn clipboard_kind() -> serde_json::Value {
+    if let Some(cache) = system_clipboard::read_clipboard_cache_if_current() {
+        return json!({ "ok": true, "kind": cache.hifi_kind });
+    }
+
+    let bytes = match system_clipboard::read_bytes() {
+        Ok(Some(bytes)) if !bytes.is_empty() => bytes,
+        _ => return json!({ "ok": true, "kind": null }),
+    };
+
+    if let Ok(fragment) = ProjectFragment::decode(&bytes) {
+        let kind = match fragment.kind {
+            ProjectFragmentKind::Clips => "clips",
+            ProjectFragmentKind::Tracks => "tracks",
+            ProjectFragmentKind::Project => "project",
+        };
+        if let Some(seq) = system_clipboard::clipboard_seq_num() {
+            system_clipboard::write_clipboard_cache(ClipboardCacheEntry {
+                seq,
+                hifi_kind: Some(kind.to_string()),
+                hifi_clip_count: fragment.timeline.clips.len() as u64,
+                hifi_track_count: fragment.timeline.tracks.len() as u64,
+                hifi_source_project: Some(fragment.source_project_name.clone()),
+                reaper_available: system_clipboard::has_reaper_format(),
+            });
+        }
+        return json!({ "ok": true, "kind": kind });
+    }
+
+    if is_param_payload(&bytes) {
+        if let Some(seq) = system_clipboard::clipboard_seq_num() {
+            system_clipboard::write_clipboard_cache(ClipboardCacheEntry {
+                seq,
+                hifi_kind: Some("param".to_string()),
+                // 参数线载荷不参与时间轴可用性判定（counts 为 0 时
+                // has_timeline_clipboard 视为时间轴不可用）。
+                hifi_clip_count: 0,
+                hifi_track_count: 0,
+                hifi_source_project: None,
+                reaper_available: system_clipboard::has_reaper_format(),
+            });
+        }
+        return json!({ "ok": true, "kind": "param" });
+    }
+
+    json!({ "ok": true, "kind": null })
 }
 
 fn paste_placement(mode: Option<&str>) -> FragmentTrackPlacement {
@@ -385,5 +465,36 @@ pub(super) fn has_timeline_clipboard() -> serde_json::Value {
                 json!({ "ok": true, "available": false })
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 参数线载荷判别：与前端 writeSystemClipboardObject 写入的 JSON 契约一致
+    /// （version:1 + kind:"param"）。
+    #[test]
+    fn param_payload_is_recognized() {
+        let json = serde_json::json!({
+            "version": 1,
+            "kind": "param",
+            "param": "pitch",
+            "framePeriodMs": 5,
+            "values": [123],
+        });
+        assert!(is_param_payload(json.to_string().as_bytes()));
+    }
+
+    #[test]
+    fn non_param_payloads_are_rejected() {
+        // 其它 kind / 版本不符 / 非 JSON（如时间轴 MessagePack 载荷）都不算参数线。
+        let clip_json = serde_json::json!({ "version": 1, "kind": "clip", "param": "x" });
+        assert!(!is_param_payload(clip_json.to_string().as_bytes()));
+        let wrong_version = serde_json::json!({ "version": 2, "kind": "param" });
+        assert!(!is_param_payload(wrong_version.to_string().as_bytes()));
+        assert!(!is_param_payload(b"{\"kind\": \"param\"")); // 截断 JSON
+        assert!(!is_param_payload(&[0x7b, 0x00, 0xff])); // 二进制
+        assert!(!is_param_payload(b""));
     }
 }

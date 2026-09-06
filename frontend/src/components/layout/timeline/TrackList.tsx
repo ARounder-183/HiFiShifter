@@ -1295,7 +1295,14 @@ const TrackListInner: React.FC<TrackListProps> = ({
     const showVolumeTooltip = volumeTooltipTrackId != null && volumeTooltipPos != null;
 
     return (
-        <Flex direction="column" className="w-64 border-r border-qt-border bg-qt-window shrink-0">
+        // 编辑表面声明：文档级 pointerdown/focusin 捕获据此把轨道列解析为
+        // 「trackHeader」表面（嵌套于 TimelinePanel 的 timeline 表面内，
+        // closest 就近解析优先命中，见 focusSurface.ts / data-hs-surface）。
+        <Flex
+            direction="column"
+            className="w-64 border-r border-qt-border bg-qt-window shrink-0"
+            data-hs-surface="trackHeader"
+        >
             <Box
                 className="border-b border-qt-border px-2 flex items-center justify-between gap-2 bg-qt-window shadow-sm z-10 relative"
                 style={{ height: headerHeight }}
@@ -1313,14 +1320,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                     if (listScrollRef) listScrollRef.current = el;
                 }}
                 data-track-list-panel
-                onFocusCapture={() => {
-                    document.body.setAttribute("data-hs-focus-window", "trackHeader");
-                }}
-                onMouseDownCapture={() => {
-                    document.body.setAttribute("data-hs-focus-window", "trackHeader");
-                }}
                 onPointerDown={(e) => {
-                    document.body.setAttribute("data-hs-focus-window", "trackHeader");
                     startPanPointerLocal?.(e);
                 }}
                 onKeyDownCapture={(e) => {

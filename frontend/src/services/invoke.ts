@@ -456,6 +456,7 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
             return args[0] === undefined ? undefined : { mode: args[0] };
 
         case "has_timeline_clipboard":
+        case "clipboard_kind":
         case "has_reaper_clipboard":
         case "read_system_clipboard_object":
             return {};

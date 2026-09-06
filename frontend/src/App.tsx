@@ -9,6 +9,7 @@ import { webApi } from "./services/webviewApi";
 import { settingsApi } from "./services/api/settings";
 import { fileBrowserApi } from "./services/api/fileBrowser";
 import { IS_LINUX } from "./utils/platform";
+import { clipboardErrorKey } from "./utils/clipboardError";
 import {
     closeVocalShifterSkippedFilesDialog,
     closeReaperSkippedFilesDialog,
@@ -54,6 +55,11 @@ import { QuickSearchPopup } from "./components/layout/QuickSearchPopup";
 import { useKeybindings } from "./features/keybindings/useKeybindings";
 import { selectMergedKeybindings } from "./features/keybindings/keybindingsSlice";
 import { beginHoldRepeat } from "./features/keybindings/holdRepeat";
+import { ACTION_TO_EDIT_OP, resolveEditOpRoute, resolvePasteRoute } from "./features/keybindings/focusRouting";
+import {
+    installFocusSurfaceTracking,
+    getActiveSurface,
+} from "./features/uiFocus/focusSurface";
 import type { ActionId } from "./features/keybindings/types";
 import { store } from "./app/store";
 import { resolveRootTrackId, computeInsertBelowPlacement } from "./features/session/trackUtils";
@@ -925,8 +931,11 @@ function AppInner() {
         };
     }, []);
 
+    // 剪贴板错误码可能带回退链后缀/细节，先经 token 精确映射为 i18n key
+    // （未收录的码回退显示原文，保留诊断信息）。
+    const mappedErrorKey = error ? errorCodeKey[error] ?? clipboardErrorKey(error) : "";
     const errorText = error
-        ? `${t("status_error_prefix")}：${errorCodeKey[error] ? t(errorCodeKey[error] as MessageKey) : error}`
+        ? `${t("status_error_prefix")}：${mappedErrorKey ? t(mappedErrorKey as MessageKey) : error}`
         : statusText;
 
     // 构建 pitch 分析进度文本（分析中时显示在状态栏左侧）
@@ -2247,6 +2256,46 @@ function AppInner() {
     // 统一快捷键处理（通过 keybindings 模块管理，用户可自定义）
     const handleKeybindingAction = useCallback(
         (actionId: ActionId) => {
+            // ── 编辑操作统一路由 ──
+            // clip.* 与 pianoRoll.* 的同义绑定（Ctrl+C/X/V）归一为同一编辑 op
+            // 后定向派发到唯一执行者 —— 事件名即契约：hifi:editOp 只属于
+            // 参数编辑器，hifi:timelineEditOp 只属于时间轴，消费者不再自行
+            // 判断焦点。裁决规则见 focusRouting：复制/剪切按活动编辑表面
+            // （focusSurface，由最后一次 pointerdown 落点驱动）；粘贴按剪贴板
+            // 载荷类型（last-copy-wins，内容路由见 resolvePasteRoute），槽位
+            // 为空/外来数据时才按活动表面兜底。
+            const editOp = ACTION_TO_EDIT_OP[actionId];
+            if (editOp) {
+                if (editOp === "paste") {
+                    // 内容路由（last-copy-wins）：探测剪贴板载荷类型后定向派发。
+                    // 键盘事件已在 useKeybindings 同步消费，此处异步探测不影响
+                    // 焦点语义；探测失败按外来源/空处理，回退表面裁决。
+                    void (async () => {
+                        let kind: string | null = null;
+                        try {
+                            kind = (await webApi.clipboardKind()).kind ?? null;
+                        } catch {
+                            // 探测失败不阻塞粘贴。
+                        }
+                        const channel = resolvePasteRoute(kind, getActiveSurface());
+                        if (channel) {
+                            window.dispatchEvent(
+                                new CustomEvent(channel, { detail: { op: "paste" } }),
+                            );
+                        }
+                    })();
+                    return;
+                }
+                const channel = resolveEditOpRoute(
+                    getActiveSurface(),
+                    editOp,
+                    store.getState().session.toolMode,
+                );
+                if (channel) {
+                    window.dispatchEvent(new CustomEvent(channel, { detail: { op: editOp } }));
+                }
+                return;
+            }
             switch (actionId) {
                 case "playback.toggle":
                     if (runtimeRef.current.isPlaying) {
@@ -2314,20 +2363,9 @@ function AppInner() {
                     beginHoldRepeat(selectMergedKeybindings(store.getState())["edit.redo"], fire);
                     break;
                 }
-                case "edit.selectAll":
-                    window.dispatchEvent(
-                        new CustomEvent("hifi:editOp", {
-                            detail: { op: "selectAll" },
-                        }),
-                    );
-                    break;
-                case "edit.deselect":
-                    window.dispatchEvent(
-                        new CustomEvent("hifi:editOp", {
-                            detail: { op: "deselect" },
-                        }),
-                    );
-                    break;
+                // edit.selectAll / edit.deselect 由顶部「编辑操作统一路由」按
+                // 活动编辑表面定向派发（select 工具下的参数编辑器全选走
+                // hifi:editOp，其余走 hifi:timelineEditOp），此处不再重复派发。
                 case "project.new":
                     handleNewProject();
                     break;
@@ -2718,9 +2756,12 @@ function AppInner() {
                 case "edit.pasteTracks": {
                     // 长按 = 连续作为新轨道组粘贴。接收端 pasteClipsAtPlayhead
                     // 自带粘贴链守卫（busy/queued），重复事件排队处理、不会并发。
+                    // pasteTracks 是时间轴专有操作，固定路由到时间轴通道。
                     const op = "pasteTracks" as const;
                     const fire = () => {
-                        window.dispatchEvent(new CustomEvent("hifi:editOp", { detail: { op } }));
+                        window.dispatchEvent(
+                            new CustomEvent("hifi:timelineEditOp", { detail: { op } }),
+                        );
                         return true;
                     };
                     fire();
@@ -2733,7 +2774,8 @@ function AppInner() {
                 // 注：edit.pasteVocalShifter（文件型剪贴板）未启用长按重复 ——
                 // 其接收端（钢琴卷帘）无粘贴链守卫，50ms 节奏下重复导入同一
                 // 剪贴板文件可能并发；且该操作边际收益低。
-                // clip.* 操作由 TimelinePanel 的 useKeyboardShortcuts 处理
+                // 注：clip.* / pianoRoll.copy|cut|paste / edit.selectAll 等
+                // 编辑操作已在函数顶部按活动编辑表面统一路由（focusRouting）。
                 default:
                     break;
             }
@@ -2748,6 +2790,12 @@ function AppInner() {
     );
 
     useKeybindings(handleKeybindingAction);
+
+    // 活动编辑表面跟踪：document 捕获阶段解析 pointerdown / focusin 落点，
+    // 为编辑快捷键（复制/剪切/粘贴等）的归属裁决提供单一事实源 —— 捕获
+    // 阶段位于传播链最前端，子元素的 preventDefault / stopPropagation 均
+    // 无法逃过解析（时间轴正是靠 preventDefault 自管焦点的）。
+    useEffect(() => installFocusSurfaceTracking(), []);
 
     useEffect(() => {
         if (!runtimeIsPlaying) return;

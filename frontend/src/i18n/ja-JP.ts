@@ -304,6 +304,7 @@ export const jaJP = {
     menu_export_separated: "トラック別オーディオをエクスポート",
 
     status_error_prefix: "エラー",
+    clipboard_error_empty: "クリップボードに貼り付けられる内容がありません",
     status_target_original: "原音",
     status_target_synthesized: "合成音",
     status_target_none: "待機中",
@@ -609,6 +610,7 @@ export const jaJP = {
     kb_gesture_wheel: "ホイール",
     kb_gesture_hold: "押しながら",
     kb_pianoroll_copy: "パラメータフレームをコピー",
+    kb_pianoroll_cut: "パラメータフレームをカット",
     kb_pianoroll_paste: "パラメータフレームをペースト",
     kb_pianoroll_shift_param_up: "パラメータを上へ移動（クリップ範囲）",
     kb_pianoroll_shift_param_down: "パラメータを下へ移動（クリップ範囲）",

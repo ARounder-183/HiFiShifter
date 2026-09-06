@@ -1095,6 +1095,11 @@ pub fn has_timeline_clipboard() -> serde_json::Value {
     timeline_clipboard::has_timeline_clipboard()
 }
 
+#[tauri::command(rename_all = "camelCase")]
+pub fn clipboard_kind() -> serde_json::Value {
+    timeline_clipboard::clipboard_kind()
+}
+
 // ===================== generic system object clipboard =====================
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1105,8 +1110,27 @@ pub fn write_system_clipboard_object(
     let summary = text_summary
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "HiFiShifter data copied. Paste in HiFiShifter.".to_string());
+    // 单剪贴板纪律：本次写入替换整个逻辑剪贴板（时间轴 Clip 载荷随
+    // empty() 一并清除），最后复制的获胜。
     match crate::system_clipboard::write_bytes(payload.as_bytes(), &summary) {
-        Ok(()) => serde_json::json!({ "ok": true }),
+        Ok(()) => {
+            // 记录缓存（clipboard_kind 探测与可用性轮询的快速路径）：
+            // 参数线载荷占据槽位，时间轴可用性判定为不可用（counts 0）。
+            if let Some(seq) = crate::system_clipboard::clipboard_seq_num() {
+                crate::system_clipboard::write_clipboard_cache(
+                    crate::system_clipboard::ClipboardCacheEntry {
+                        seq,
+                        hifi_kind: Some("param".to_string()),
+                        hifi_clip_count: 0,
+                        hifi_track_count: 0,
+                        hifi_source_project: None,
+                        // write_contents 的 empty() 清除了 REAPERMedia。
+                        reaper_available: false,
+                    },
+                );
+            }
+            serde_json::json!({ "ok": true })
+        }
         Err(error) => serde_json::json!({ "ok": false, "error": error }),
     }
 }
@@ -1116,6 +1140,8 @@ pub fn read_system_clipboard_object() -> serde_json::Value {
     match crate::system_clipboard::read_bytes() {
         Ok(Some(bytes)) => match String::from_utf8(bytes) {
             Ok(text) => serde_json::json!({ "ok": true, "available": true, "payload": text }),
+            // 二进制载荷（如时间轴 MessagePack）对本读取方等价于
+            // "没有可用的参数线数据"，由前端回退内部剪贴板。
             Err(_) => serde_json::json!({ "ok": true, "available": false }),
         },
         Ok(None) => serde_json::json!({ "ok": true, "available": false }),

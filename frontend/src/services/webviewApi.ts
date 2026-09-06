@@ -148,6 +148,7 @@ export const webApi = {
     copyTimelineTracks: timelineApi.copyTimelineTracks,
     pasteTimelineClipboard: timelineApi.pasteTimelineClipboard,
     hasTimelineClipboard: timelineApi.hasTimelineClipboard,
+    clipboardKind: timelineApi.clipboardKind,
     hasReaperClipboard: timelineApi.hasReaperClipboard,
 
     // 检查已导入媒体源文件是否被外部修改或删除

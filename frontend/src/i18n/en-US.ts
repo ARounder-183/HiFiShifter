@@ -381,6 +381,7 @@ export const enUS = {
     menu_export_separated: "Export Separated Tracks",
 
     status_error_prefix: "Error",
+    clipboard_error_empty: "Nothing to paste from the clipboard.",
     status_target_original: "Original",
     status_target_synthesized: "Synthesized",
     status_target_none: "Idle",
@@ -681,6 +682,7 @@ export const enUS = {
     kb_gesture_wheel: "Wheel",
     kb_gesture_hold: "Hold",
     kb_pianoroll_copy: "Copy Param Frames",
+    kb_pianoroll_cut: "Cut Param Frames",
     kb_pianoroll_paste: "Paste Param Frames",
     kb_pianoroll_shift_param_up: "Shift Param Up (clip range)",
     kb_pianoroll_shift_param_down: "Shift Param Down (clip range)",

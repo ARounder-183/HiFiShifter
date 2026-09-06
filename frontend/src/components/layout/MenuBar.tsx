@@ -56,6 +56,9 @@ import {
     isNoneBinding,
 } from "../../features/keybindings/keybindingsSlice";
 import type { ActionId } from "../../features/keybindings/types";
+import { resolveEditOpRoute, resolvePasteRoute } from "../../features/keybindings/focusRouting";
+import { getActiveSurface } from "../../features/uiFocus/focusSurface";
+import { webApi } from "../../services/webviewApi";
 import { KeybindingsDialog } from "./KeybindingsDialog";
 import { AppearanceSettingsDialog } from "./AppearanceSettingsDialog";
 import {
@@ -331,35 +334,38 @@ export const MenuBar: React.FC<MenuBarProps> = ({
         return formatKeybinding(kb, "");
     }
 
-    /** 派发编辑操作事件给 PianoRollPanel / TimelinePanel */
-    const dispatchEditOp = useCallback((op: string, data?: Record<string, unknown>) => {
-        const active = document.activeElement as HTMLElement | null;
-        const inPianoRoll =
-            active?.hasAttribute("data-piano-roll-scroller") ||
-            active?.closest?.("[data-piano-roll-scroller]") ||
-            document.body.getAttribute("data-hs-focus-window") === "pianoRoll";
-        const inTrackHeader =
-            Boolean(active?.closest?.("[data-track-list-panel]")) ||
-            document.body.getAttribute("data-hs-focus-window") === "trackHeader";
-        const inTimeline =
-            active?.hasAttribute("data-timeline-scroller") ||
-            active?.closest?.("[data-timeline-scroller]") ||
-            document.body.getAttribute("data-hs-focus-window") === "timeline";
-
-        if (
-            (op === "copy" || op === "cut" || op === "paste" || op === "pasteTracks") &&
-            inTimeline &&
-            !inPianoRoll &&
-            !inTrackHeader
-        ) {
-            window.dispatchEvent(
-                new CustomEvent("hifi:timelineEditOp", { detail: { op, ...data } }),
-            );
-            return;
-        }
-
-        window.dispatchEvent(new CustomEvent("hifi:editOp", { detail: { op, ...data } }));
-    }, []);
+    /**
+     * 派发编辑操作事件：与键盘快捷键共用同一裁决（focusRouting）。
+     * copy/cut 等按「活动编辑表面」定向派发；paste 按剪贴板载荷类型路由
+     * （last-copy-wins，resolvePasteRoute —— 与键盘路径同一套规则），槽位
+     * 为空/外来数据时才退回活动表面兜底。未收录的操作（参数编辑器专有：
+     * 对话框确认、pasteVocalShifter 等）落回参数编辑器通道，与既有行为一致。
+     */
+    const dispatchEditOp = useCallback(
+        (op: string, data?: Record<string, unknown>) => {
+            if (op === "paste") {
+                void (async () => {
+                    let kind: string | null = null;
+                    try {
+                        kind = (await webApi.clipboardKind()).kind ?? null;
+                    } catch {
+                        // 探测失败不阻塞粘贴。
+                    }
+                    const channel = resolvePasteRoute(kind, getActiveSurface());
+                    if (channel) {
+                        window.dispatchEvent(
+                            new CustomEvent(channel, { detail: { op, ...data } }),
+                        );
+                    }
+                })();
+                return;
+            }
+            const channel =
+                resolveEditOpRoute(getActiveSurface(), op, s.toolMode) ?? "hifi:editOp";
+            window.dispatchEvent(new CustomEvent(channel, { detail: { op, ...data } }));
+        },
+        [s.toolMode],
+    );
 
     const handleImportAudioFromMenu = useCallback(async () => {
         try {

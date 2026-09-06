@@ -73,6 +73,7 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
 
     // PianoRoll 操作
     "pianoRoll.copy": { key: "c", ctrl: true },
+    "pianoRoll.cut": { key: "x", ctrl: true },
     "pianoRoll.paste": { key: "v", ctrl: true },
     "pianoRoll.shiftParamUp": { key: "=" },
     "pianoRoll.shiftParamDown": { key: "-" },
@@ -294,6 +295,11 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
 
     "pianoRoll.copy": {
         labelKey: "kb_pianoroll_copy",
+        group: "pianoRoll",
+        scopedContext: "paramEditorSelect",
+    },
+    "pianoRoll.cut": {
+        labelKey: "kb_pianoroll_cut",
         group: "pianoRoll",
         scopedContext: "paramEditorSelect",
     },

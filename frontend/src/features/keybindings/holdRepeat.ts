@@ -15,13 +15,11 @@
  * 双触发）；未进行长按时，OS 自动重复由各调用方自行决定
  * （如方向键类导航仍在 REPEATABLE_ACTIONS 中走系统重复）。
  *
- * 多监听器安全：全局 keydown 由 App（useKeybindings）与
- * TimelinePanel（useKeyboardShortcuts）两个捕获监听器依次消费，
- * 两者都会调用 `consumeHoldRepeatKeyDown`。因此"非重复按键 = 终止"
- * 的规则只对**异键**生效：同一个 keydown 事件在第二个监听器到达时
- * （同键、非重复）绝不会杀死第一个监听器刚布防的长按；同键真重按
- * 仍由动作路径的 `begin`（内部先 stop 再布防）重建，与粘贴的重启
- * 语义等价。
+ * 多监听器安全：全局 keydown 只由 App（useKeybindings）这一个捕获
+ * 监听器消费并调用 `consumeHoldRepeatKeyDown`（时间轴的独立快捷键
+ * 监听已并入全局路由）。因此"非重复按键 = 终止"的规则只对**异键**
+ * 生效：同键真重按仍由动作路径的 `begin`（内部先 stop 再布防）重建，
+ * 与粘贴的重启语义等价。
  */
 
 import type { Keybinding } from "./types";

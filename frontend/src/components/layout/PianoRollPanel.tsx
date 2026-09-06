@@ -69,6 +69,7 @@ import {
     timelineViewportStateToNative,
 } from "../../utils/timelineViewportSync";
 import { isModifierActive, isNoneBinding } from "../../features/keybindings/keybindingsSlice";
+import { getActiveSurface } from "../../features/uiFocus/focusSurface";
 import { findFirstExternalPathAction } from "./timeline/dnd";
 import type { ScaleLike } from "../../utils/musicalScales";
 import {
@@ -524,8 +525,8 @@ export const PianoRollPanel: React.FC = () => {
     );
     const editParam = s.editParam as ParamName;
     // pitchSnapOpen 已在顶部工具栏 JSX 内声明和使用，无需重复声明
-    const pianoRollCopyKb = useAppSelector((state) => selectKeybinding(state, "pianoRoll.copy"));
-    const pianoRollPasteKb = useAppSelector((state) => selectKeybinding(state, "pianoRoll.paste"));
+    // pianoRoll.copy/cut/paste 的复制/剪切/粘贴已由全局路由统一派发到
+    // handleEditOp，本地不再需要键位匹配（见 useKeybindings/focusRouting）。
     const prVerticalZoomKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.pianoRollVerticalZoom"),
     );
@@ -1236,11 +1237,7 @@ export const PianoRollPanel: React.FC = () => {
     useEffect(() => {
         function onZoomFocused(e: Event) {
             const { projectSec } = zoomTimelineStateRef.current;
-            const active = document.activeElement as HTMLElement | null;
-            const inPianoRoll =
-                active?.hasAttribute("data-piano-roll-scroller") ||
-                active?.closest?.("[data-piano-roll-scroller]") ||
-                document.body.getAttribute("data-hs-focus-window") === "pianoRoll";
+            const inPianoRoll = getActiveSurface() === "pianoRoll";
             if (!inPianoRoll) return;
 
             const factor = Number((e as CustomEvent<{ factor?: number }>).detail?.factor ?? 1);
@@ -2684,8 +2681,6 @@ export const PianoRollPanel: React.FC = () => {
     const interactions = usePianoRollInteractions({
         dispatch,
         rootTrackId,
-        selectedTrackId: effectiveSelectedTrackId,
-        tracks: s.tracks,
         editParam,
         pitchEnabled,
         toolMode: s.toolMode,
@@ -2711,7 +2706,6 @@ export const PianoRollPanel: React.FC = () => {
         setCanvasCursor,
         strokeRef,
         panRef,
-        clipboardRef,
         paramView,
         paramViewRef,
         bumpRefreshToken,
@@ -2727,8 +2721,6 @@ export const PianoRollPanel: React.FC = () => {
         setParamView,
         liveEditOverrideRef,
         liveEditActiveRef,
-        pianoRollCopyKb,
-        pianoRollPasteKb,
         prVerticalZoomKb,
         horizontalZoomKb,
         scrollHorizontalKb,
@@ -3950,34 +3942,35 @@ export const PianoRollPanel: React.FC = () => {
     // Keep the ref in sync so usePianoRollInteractions can dispatch edit ops
     handleEditActionRef.current = (op: string) => void handleEditOp(op);
 
-    // Listen for edit operations dispatched from MenuBar
+    // Listen for edit operations dispatched from MenuBar / 全局路由
+    // hifi:editOp 是参数编辑器专属通道（事件名即契约）：全局路由
+    // （focusRouting.resolveEditOpRoute）按活动编辑表面把编辑操作定向派发
+    // 到这里，消费者信任事件、不再自行判断焦点 —— 旧版在此重猜
+    // activeElement / body 属性，与时间轴侧判断互相矛盾，正是复制/剪切/
+    // 粘贴冲突的根因。selectAll/deselect 的工具模式守卫在 handleEditOp 内。
     useEffect(() => {
         const handler = (e: Event) => {
             const detail = (e as CustomEvent).detail;
             if (!detail?.op) return;
             const { op, ...data } = detail;
-            const active = document.activeElement as HTMLElement | null;
-            const inPianoRoll =
-                active?.hasAttribute("data-piano-roll-scroller") ||
-                active?.closest?.("[data-piano-roll-scroller]") ||
-                document.body.getAttribute("data-hs-focus-window") === "pianoRoll";
-            const inTrackHeader =
-                Boolean(active?.closest?.("[data-track-list-panel]")) ||
-                document.body.getAttribute("data-hs-focus-window") === "trackHeader";
-
-            if (op === "paste" && !inPianoRoll && !inTrackHeader) {
-                return;
-            }
-            if (op === "selectAll" || op === "deselect") {
-                if (!inPianoRoll || s.toolMode !== "select") {
-                    return;
-                }
-            }
             void handleEditOp(op, data);
         };
         window.addEventListener("hifi:editOp", handler);
         return () => window.removeEventListener("hifi:editOp", handler);
-    }, [handleEditOp, s.toolMode]);
+    }, [handleEditOp]);
+
+    // 单剪贴板纪律：时间轴复制/剪切替换整个应用剪贴板后（copyClips 成功时
+    // 派发 hifi:clipboardReplaced），参数线内部剪贴板缓存随之失效 —— 否则
+    // "复制 Clip 后在参数编辑器粘贴"会把更早复制、已被剪贴板替换掉的参数线
+    // 数据从内部缓存复活，违反"剪贴板只保留最后复制的一份"的语义。
+    useEffect(() => {
+        const handler = () => {
+            clipboardRef.current = null;
+            invalidate();
+        };
+        window.addEventListener("hifi:clipboardReplaced", handler);
+        return () => window.removeEventListener("hifi:clipboardReplaced", handler);
+    }, [invalidate]);
 
     // Dispatch helper: context menu dialog ops → open MenuBar dialogs
     const openEditDialog = useCallback(
@@ -4316,6 +4309,10 @@ export const PianoRollPanel: React.FC = () => {
             ref={paramEditorRef}
             direction="column"
             className="relative h-full w-full bg-qt-graph-bg border-t border-qt-border"
+            // 编辑表面声明：文档级 pointerdown/focusin 捕获据此把整个参数
+            // 编辑器（工具栏/标尺/卷帘）解析为「pianoRoll」表面，作为复制/
+            // 剪切/粘贴等编辑快捷键的归属依据（见 focusSurface.ts）。
+            data-hs-surface="pianoRoll"
         >
             {/* Header / Parameter Switch */}
             <Flex
@@ -5374,7 +5371,6 @@ export const PianoRollPanel: React.FC = () => {
                         onTempoMapChange={handleTempoMapChange}
                         onTempoMapCommit={handleTempoMapCommit}
                         onMouseDown={(e) => {
-                            document.body.setAttribute("data-hs-focus-window", "pianoRoll");
                             interactions.onRulerMouseDown(e);
                         }}
                     />
@@ -5384,13 +5380,6 @@ export const PianoRollPanel: React.FC = () => {
                         className="flex-1 bg-qt-graph-bg overflow-x-scroll overflow-y-scroll relative custom-scrollbar outline-none focus:outline-none focus-visible:outline-none"
                         data-piano-roll-scroller
                         tabIndex={0}
-                        onFocus={() => {
-                            document.body.setAttribute("data-hs-focus-window", "pianoRoll");
-                        }}
-                        onMouseDownCapture={(e) => {
-                            document.body.setAttribute("data-hs-focus-window", "pianoRoll");
-                            interactions.onScrollerMouseDownCapture(e);
-                        }}
                         onAuxClick={interactions.onScrollerAuxClick}
                         onScroll={onScrollerScroll}
                         onContextMenu={interactions.onScrollerContextMenu}

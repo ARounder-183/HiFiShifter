@@ -14,7 +14,6 @@ import { useClipFormantEditor } from "./useClipFormantEditor";
 import { registerDragAbort } from "../gestureFocusGuard";
 import {
     CLIP_FORMANT_ACTIVE_ATTR,
-    CLIP_FORMANT_FOCUS_WINDOW,
     shouldSuppressFormantToolSpaceDefault,
 } from "./clipFormantInteractionGuards";
 
@@ -187,12 +186,8 @@ export const ClipFormantToolWindow: React.FC<{
 
     React.useEffect(() => {
         document.body.setAttribute(CLIP_FORMANT_ACTIVE_ATTR, "true");
-        document.body.setAttribute("data-hs-focus-window", CLIP_FORMANT_FOCUS_WINDOW);
         return () => {
             document.body.removeAttribute(CLIP_FORMANT_ACTIVE_ATTR);
-            if (document.body.getAttribute("data-hs-focus-window") === CLIP_FORMANT_FOCUS_WINDOW) {
-                document.body.removeAttribute("data-hs-focus-window");
-            }
         };
     }, []);
 
@@ -222,11 +217,7 @@ export const ClipFormantToolWindow: React.FC<{
                 WebkitUserSelect: "none",
             }}
             tabIndex={0}
-            onFocus={() => {
-                document.body.setAttribute("data-hs-focus-window", CLIP_FORMANT_FOCUS_WINDOW);
-            }}
             onPointerDown={(event) => {
-                document.body.setAttribute("data-hs-focus-window", CLIP_FORMANT_FOCUS_WINDOW);
                 event.stopPropagation();
             }}
             onMouseDown={(event) => {

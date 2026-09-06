@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { resolveActionByFocus } from "./focusRouting";
+import {
+    resolveActionByFocus,
+    resolveEditOpRoute,
+    resolvePasteRoute,
+    ACTION_TO_EDIT_OP,
+} from "./focusRouting";
 import type { Keybinding } from "./types";
 import { IS_MAC } from "../../utils/platform";
 
@@ -185,5 +190,96 @@ describe("resolveActionByFocus — 焦点感知路由", () => {
             "select",
         );
         expect(result).toBe("track.add");
+    });
+});
+
+describe("resolveEditOpRoute（复制/剪切/粘贴的表面定向派发）", () => {
+    it("copy/cut/paste 严格按活动编辑表面路由", () => {
+        for (const op of ["copy", "cut", "paste"] as const) {
+            expect(resolveEditOpRoute("pianoRoll", op)).toBe("hifi:editOp");
+            expect(resolveEditOpRoute("timeline", op)).toBe("hifi:timelineEditOp");
+            expect(resolveEditOpRoute("trackHeader", op)).toBe("hifi:timelineEditOp");
+        }
+    });
+
+    it("copy/cut/paste 在表面未知（启动初期）时不派发", () => {
+        for (const op of ["copy", "cut", "paste"] as const) {
+            expect(resolveEditOpRoute(null, op)).toBeNull();
+        }
+    });
+
+    it("selectAll/deselect：参数编辑器仅在 select 工具下接手，其余落时间轴", () => {
+        expect(resolveEditOpRoute("pianoRoll", "selectAll", "select")).toBe("hifi:editOp");
+        expect(resolveEditOpRoute("pianoRoll", "deselect", "select")).toBe("hifi:editOp");
+        expect(resolveEditOpRoute("pianoRoll", "selectAll", "draw")).toBe("hifi:timelineEditOp");
+        expect(resolveEditOpRoute("pianoRoll", "selectAll")).toBe("hifi:timelineEditOp");
+        expect(resolveEditOpRoute("timeline", "selectAll", "select")).toBe("hifi:timelineEditOp");
+        expect(resolveEditOpRoute(null, "deselect")).toBe("hifi:timelineEditOp");
+    });
+
+    it("时间轴专有操作固定路由到时间轴通道（与最后点击的表面无关）", () => {
+        for (const op of [
+            "delete",
+            "split",
+            "normalize",
+            "group",
+            "ungroup",
+            "cycleTake",
+            "cycleTakePrev",
+            "pasteTracks",
+        ] as const) {
+            expect(resolveEditOpRoute("pianoRoll", op)).toBe("hifi:timelineEditOp");
+            expect(resolveEditOpRoute("timeline", op)).toBe("hifi:timelineEditOp");
+        }
+    });
+
+    it("未收录的操作返回 null（调用方走各自固定通道）", () => {
+        expect(resolveEditOpRoute("pianoRoll", "pasteVocalShifter")).toBeNull();
+        expect(resolveEditOpRoute("timeline", "shiftParamUp")).toBeNull();
+    });
+
+    it("ACTION_TO_EDIT_OP：clip.* 与 pianoRoll.* 同义操作归一为同一 op", () => {
+        expect(ACTION_TO_EDIT_OP["clip.copy"]).toBe("copy");
+        expect(ACTION_TO_EDIT_OP["pianoRoll.copy"]).toBe("copy");
+        expect(ACTION_TO_EDIT_OP["clip.cut"]).toBe("cut");
+        expect(ACTION_TO_EDIT_OP["pianoRoll.cut"]).toBe("cut");
+        expect(ACTION_TO_EDIT_OP["clip.paste"]).toBe("paste");
+        expect(ACTION_TO_EDIT_OP["pianoRoll.paste"]).toBe("paste");
+        expect(ACTION_TO_EDIT_OP["edit.selectAll"]).toBe("selectAll");
+        // 参数编辑器专有操作不在此表（单一归属，无需路由裁决）
+        expect(ACTION_TO_EDIT_OP["pianoRoll.shiftParamUp"]).toBeUndefined();
+        expect(ACTION_TO_EDIT_OP["edit.pasteVocalShifter"]).toBeUndefined();
+    });
+});
+
+describe("resolvePasteRoute（粘贴的内容路由，last-copy-wins）", () => {
+    it("参数线载荷贴回参数编辑器 —— 与点击表面无关", () => {
+        expect(resolvePasteRoute("param", "timeline")).toBe("hifi:editOp");
+        expect(resolvePasteRoute("param", "trackHeader")).toBe("hifi:editOp");
+        expect(resolvePasteRoute("param", "pianoRoll")).toBe("hifi:editOp");
+        expect(resolvePasteRoute("param", null)).toBe("hifi:editOp");
+    });
+
+    it("Clip / 整轨 / 工程载荷贴到播放头 —— 与点击表面无关", () => {
+        for (const kind of ["clips", "tracks", "project"] as const) {
+            expect(resolvePasteRoute(kind, "pianoRoll")).toBe("hifi:timelineEditOp");
+            expect(resolvePasteRoute(kind, "timeline")).toBe("hifi:timelineEditOp");
+            expect(resolvePasteRoute(kind, null)).toBe("hifi:timelineEditOp");
+        }
+    });
+
+    it("槽位为空/外来数据时按活动表面兜底", () => {
+        // 参数编辑器表面：保留 REAPER/MIDI 兜底流程（含 MIDI 导入对话框）。
+        expect(resolvePasteRoute(null, "pianoRoll")).toBe("hifi:editOp");
+        // 时间轴/轨道头表面：播放头 REAPER 粘贴。
+        expect(resolvePasteRoute(null, "timeline")).toBe("hifi:timelineEditOp");
+        expect(resolvePasteRoute(null, "trackHeader")).toBe("hifi:timelineEditOp");
+        // 表面未知（启动初期）：不派发。
+        expect(resolvePasteRoute(null, null)).toBeNull();
+    });
+
+    it("未知 kind 视同外来源（表面兜底）", () => {
+        expect(resolvePasteRoute("reaper", "timeline")).toBe("hifi:timelineEditOp");
+        expect(resolvePasteRoute("weird", "pianoRoll")).toBe("hifi:editOp");
     });
 });

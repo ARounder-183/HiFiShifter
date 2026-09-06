@@ -372,6 +372,15 @@ export function useTimelineClipActions(
                         setClipboardAvailable(false);
                         return false;
                     }
+                    // 单剪贴板纪律：Clip 复制替换整个应用剪贴板（copy/cut 共用
+                    // 本入口），显式失效参数编辑器的内部参数线剪贴板缓存 ——
+                    // 否则"复制 Clip 后在参数编辑器粘贴"会把更早复制、已被
+                    // 剪贴板替换掉的参数线数据从内部缓存复活。
+                    window.dispatchEvent(
+                        new CustomEvent("hifi:clipboardReplaced", {
+                            detail: { kind: "clips" },
+                        }),
+                    );
                     setClipboardAvailable(true);
                     return true;
                 } catch {
