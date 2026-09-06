@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import { explicitGridLinesKey } from "./gridLineKey";
 import { resolveGridLineSamplingPlan } from "./gridLineSampling";
+import { resolveGridDrawViewport } from "./gridDrawViewport";
 import { clearGridRedrawHandler, setGridRedrawHandler } from "./gridRedrawBridge";
 import type { TimelineAxis } from "./runtime/timelineAxis";
 import type { TimelineTick } from "./runtime/buildTimelineTicks";
@@ -337,22 +338,47 @@ export const BackgroundGrid: React.FC<{
         [useExplicitLines],
     );
 
+    // 统一取视口：有总线时一律用总线快照（原生滚动真值），仅无总线时退回
+    // React props（量化 scrollLeft，仅供参数编辑器过渡路径）。见
+    // gridDrawViewport.ts 顶注——React 重绘若消费量化 scrollLeft，拖拽 Clip
+    // 改变 contentWidth 触发重绘时会把网格画在滞后偏移上，且帧提交器按
+    // axisEquals 去重后不会再纠正。
+    const resolveDrawViewport = useCallback(
+        (): { scrollLeftPx: number; scrollTopPx: number } =>
+            resolveGridDrawViewport({
+                busAxis: viewportBus?.getAxis() ?? null,
+                propScrollLeftPx: latestRef.current.scrollLeft,
+                propViewportTopPx: latestRef.current.viewportTopPx,
+            }),
+        [viewportBus],
+    );
+
     // 浏览器缩放 / 跨屏拖动会改变 devicePixelRatio：线宽按物理像素取整，
     // dpr 变化后必须重绘一次，否则旧的吸附相位会残留。
     useEffect(() => {
-        const onResize = () => draw();
+        const onResize = () => {
+            const vp = resolveDrawViewport();
+            draw(vp.scrollLeftPx, vp.scrollTopPx);
+        };
         window.addEventListener("resize", onResize);
         return () => window.removeEventListener("resize", onResize);
-    }, [draw]);
+    }, [draw, resolveDrawViewport]);
 
     // 绘制必须在 paint 前同步完成（useLayoutEffect）：缩放时网格线的间距
     // 随 pxPerBeat 变化，若走 passive useEffect 会在 DOM 重排后的下一帧才
     // 切换，与 Clip/标尺产生一帧错位。滚动仅影响窗口化（位置为内容坐标，
     // 随原生滚动移动），同样受益于同帧提交。
+    //
+    // 水平/竖直偏移经 resolveDrawViewport 取权威视口（总线快照），而非本组
+    // 件的 scrollLeft prop——后者是量化提交的 React state，可永久滞后原生
+    // 滚动最多一个死区宽度（256px）。数据依赖（ticks/contentWidth/尺寸…）
+    // 变化触发的本次重绘必须与总线 paint 输出逐像素一致。
     useLayoutEffect(() => {
-        draw(scrollLeft, viewportTopPx);
+        const vp = resolveDrawViewport();
+        draw(vp.scrollLeftPx, vp.scrollTopPx);
     }, [
         draw,
+        resolveDrawViewport,
         scrollLeft,
         viewportTopPx,
         samplingPlan.weakStepPx,

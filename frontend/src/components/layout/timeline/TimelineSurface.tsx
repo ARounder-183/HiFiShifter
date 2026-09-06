@@ -89,6 +89,14 @@ export const TimelineSurface = React.memo(function TimelineSurface(props: {
         );
     }, [props.gridOverlayLayerRef, props.gridVisible]);
 
+    // 播放头竖线的水平位置必须与网格 / Clip 体画布同一事实源：总线快照
+    // （滚动事件内同步提交的原生滚动真值）。props.axis.scrollLeftPx 是量化
+    // 提交的 React state（REACT_SCROLL_STEP_PX 死区，可永久滞后最多 255px），
+    // 拖拽 Clip 的逐帧重渲染会用该滞后值重写本元素位置，把命令式同步的正确
+    // 位置覆盖回错误值——与 BackgroundGrid 的重绘偏移同根（见
+    // gridDrawViewport.ts 顶注）。
+    const viewportAxis = timelineViewportBus.getAxis();
+
     /* eslint-disable react-hooks/refs -- playhead 参考线：ref 属性透传 + 样式按渲染期当前 props 计算（同一提交内跟随播放头更新，既有模式） */
     return (
         <div
@@ -154,7 +162,7 @@ export const TimelineSurface = React.memo(function TimelineSurface(props: {
                 style={{
                     top: props.topPx,
                     height: props.heightPx,
-                    left: secToViewportPx(props.axis, Number(props.playheadSec) || 0),
+                    left: secToViewportPx(viewportAxis, Number(props.playheadSec) || 0),
                 }}
             />
         </div>
