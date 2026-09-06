@@ -106,9 +106,9 @@ export function isScopeActive(
 //
 // clip.copy 与 pianoRoll.copy 共绑 Ctrl+C/X/V 只是「同键异义」，裁决依据
 // 按操作分派：
-// - 复制/剪切：按键那一刻内容尚不存在，只能按活动编辑表面
-//   （focusSurface.getActiveSurface()，由最后一次 pointerdown 落点驱动）
-//   裁决"捕获哪个编辑器的内容"。
+// - 复制/剪切：按"当前选中的是什么"路由（选区数据，resolveCopyCutRoute）
+//   —— 仅参数线选区 → 参数复制；仅 Clip 选区 → Clip 复制；两者并存按
+//   selectionContext（最近被触碰的选区上下文，轨道换轨计入参数侧）仲裁。
 // - 粘贴：单剪贴板纪律保证"槽位内容 = 用户最后一次复制的意图"，因此按
 //   剪贴板载荷类型定向（resolvePasteRoute，last-copy-wins），点击表面仅
 //   在槽位为空/外来数据时兜底 —— 例如"点轨道换轨后在参数编辑器粘贴"
@@ -161,9 +161,39 @@ export const ACTION_TO_EDIT_OP: Partial<Record<ActionId, EditOp>> = {
 };
 
 /**
+ * 复制/剪切的选择路由 —— 复制按键那一刻内容尚不存在，裁决依据是"当前
+ * 选中了什么"，与粘贴的"剪贴板里有什么"（resolvePasteRoute）首尾呼应：
+ *
+ * - 仅参数线选区存在 → 参数复制（**与点击表面无关**：在时间轴/轨道头换轨
+ *   后直接 Ctrl+C，复制的是换轨目标轨道的参数线，无需先点回参数编辑器）；
+ * - 仅 Clip 选区存在 → Clip 复制（镜像场景同理）；
+ * - 两者并存 → 按 selectionContext（最近被触碰的选区上下文：轨道换轨与
+ *   参数选区变化记 "param"，Clip 选中变化记 "clips"）仲裁；
+ * - 两者皆空 → 无操作。
+ *
+ * selectionContext 无记录（启动初期理论上不可达，防御性保留）时退回按
+ * 活动表面裁决。
+ */
+export function resolveCopyCutRoute(args: {
+    surface: EditSurfaceId | null;
+    clipSelectionActive: boolean;
+    paramSelectionActive: boolean;
+    selectionContext: "param" | "clips" | null;
+}): EditOpChannel | null {
+    const { surface, clipSelectionActive, paramSelectionActive, selectionContext } = args;
+    if (paramSelectionActive && !clipSelectionActive) return "hifi:editOp";
+    if (!paramSelectionActive && clipSelectionActive) return "hifi:timelineEditOp";
+    if (!paramSelectionActive && !clipSelectionActive) return null;
+    if (selectionContext === "param") return "hifi:editOp";
+    if (selectionContext === "clips") return "hifi:timelineEditOp";
+    return resolveEditOpRoute(surface, "copy");
+}
+
+/**
  * 解析编辑操作的目标通道（事件名）。
  *
- * - copy/cut：按活动表面路由（复制时内容尚不存在，只能由表面裁决）。
+ * - copy/cut：**此处仅作兜底** —— 正常路径由 resolveCopyCutRoute 按"当前
+ *   选中的是什么"路由（选区数据）；仅双选区并存且无上下文记录时触达。
  * - paste：**此处仅作兜底** —— 正常路径由 resolvePasteRoute 按剪贴板载荷
  *   类型（last-copy-wins）路由；只有槽位为空/外来数据时才落到本函数，
  *   按活动表面选择 REAPER/MIDI 兜底流程的归属。

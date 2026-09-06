@@ -55,7 +55,12 @@ import { QuickSearchPopup } from "./components/layout/QuickSearchPopup";
 import { useKeybindings } from "./features/keybindings/useKeybindings";
 import { selectMergedKeybindings } from "./features/keybindings/keybindingsSlice";
 import { beginHoldRepeat } from "./features/keybindings/holdRepeat";
-import { ACTION_TO_EDIT_OP, resolveEditOpRoute, resolvePasteRoute } from "./features/keybindings/focusRouting";
+import {
+    ACTION_TO_EDIT_OP,
+    resolveCopyCutRoute,
+    resolveEditOpRoute,
+    resolvePasteRoute,
+} from "./features/keybindings/focusRouting";
 import {
     installFocusSurfaceTracking,
     getActiveSurface,
@@ -2284,6 +2289,26 @@ function AppInner() {
                             );
                         }
                     })();
+                    return;
+                }
+                if (editOp === "copy" || editOp === "cut") {
+                    // 选择路由（复制时内容尚不存在，看"当前选中了什么"）：仅
+                    // 参数线选区 → 参数复制；仅 Clip 选区 → Clip 复制；两者并存
+                    // 按 selectionContext（最近被触碰的选区上下文，换轨计入参数
+                    // 侧）仲裁；皆空 → 无操作。
+                    const session = store.getState().session;
+                    const channel = resolveCopyCutRoute({
+                        surface: getActiveSurface(),
+                        clipSelectionActive:
+                            session.multiSelectedClipIds.length > 0 || !!session.selectedClipId,
+                        paramSelectionActive: session.paramSelectionActive,
+                        selectionContext: session.selectionContext,
+                    });
+                    if (channel) {
+                        window.dispatchEvent(
+                            new CustomEvent(channel, { detail: { op: editOp } }),
+                        );
+                    }
                     return;
                 }
                 const channel = resolveEditOpRoute(

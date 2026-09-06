@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
     resolveActionByFocus,
+    resolveCopyCutRoute,
     resolveEditOpRoute,
     resolvePasteRoute,
     ACTION_TO_EDIT_OP,
@@ -193,8 +194,8 @@ describe("resolveActionByFocus — 焦点感知路由", () => {
     });
 });
 
-describe("resolveEditOpRoute（复制/剪切/粘贴的表面定向派发）", () => {
-    it("copy/cut/paste 严格按活动编辑表面路由", () => {
+describe("resolveEditOpRoute（编辑操作的表面兜底层）", () => {
+    it("copy/cut/paste 兜底层仍按活动编辑表面路由", () => {
         for (const op of ["copy", "cut", "paste"] as const) {
             expect(resolveEditOpRoute("pianoRoll", op)).toBe("hifi:editOp");
             expect(resolveEditOpRoute("timeline", op)).toBe("hifi:timelineEditOp");
@@ -252,6 +253,65 @@ describe("resolveEditOpRoute（复制/剪切/粘贴的表面定向派发）", ()
     });
 });
 
+describe("resolveCopyCutRoute（复制/剪切的选择路由）", () => {
+    it("仅参数线选区存在 → 参数复制，与点击表面无关", () => {
+        for (const surface of ["pianoRoll", "timeline", "trackHeader", null] as const) {
+            expect(
+                resolveCopyCutRoute({
+                    surface,
+                    clipSelectionActive: false,
+                    paramSelectionActive: true,
+                    selectionContext: "param",
+                }),
+            ).toBe("hifi:editOp");
+        }
+    });
+
+    it("仅 Clip 选区存在 → Clip 复制，与点击表面无关", () => {
+        for (const surface of ["pianoRoll", "timeline", "trackHeader", null] as const) {
+            expect(
+                resolveCopyCutRoute({
+                    surface,
+                    clipSelectionActive: true,
+                    paramSelectionActive: false,
+                    selectionContext: "clips",
+                }),
+            ).toBe("hifi:timelineEditOp");
+        }
+    });
+
+    it("双选区并存 → 最近被触碰的选区上下文仲裁（换轨计入参数侧）", () => {
+        const both = { clipSelectionActive: true, paramSelectionActive: true };
+        expect(
+            resolveCopyCutRoute({ surface: "timeline", ...both, selectionContext: "param" }),
+        ).toBe("hifi:editOp");
+        expect(
+            resolveCopyCutRoute({ surface: "pianoRoll", ...both, selectionContext: "clips" }),
+        ).toBe("hifi:timelineEditOp");
+    });
+
+    it("双选区并存且无上下文记录（防御）→ 表面兜底", () => {
+        const both = {
+            clipSelectionActive: true,
+            paramSelectionActive: true,
+            selectionContext: null,
+        };
+        expect(resolveCopyCutRoute({ surface: "pianoRoll", ...both })).toBe("hifi:editOp");
+        expect(resolveCopyCutRoute({ surface: "timeline", ...both })).toBe("hifi:timelineEditOp");
+        expect(resolveCopyCutRoute({ surface: null, ...both })).toBeNull();
+    });
+
+    it("双选区皆空 → 无操作", () => {
+        expect(
+            resolveCopyCutRoute({
+                surface: "pianoRoll",
+                clipSelectionActive: false,
+                paramSelectionActive: false,
+                selectionContext: "clips",
+            }),
+        ).toBeNull();
+    });
+});
 describe("resolvePasteRoute（粘贴的内容路由，last-copy-wins）", () => {
     it("参数线载荷贴回参数编辑器 —— 与点击表面无关", () => {
         expect(resolvePasteRoute("param", "timeline")).toBe("hifi:editOp");

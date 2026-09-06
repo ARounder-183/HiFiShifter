@@ -45,6 +45,7 @@ import {
     addTrackRemote,
     importMidiAsClip,
     setTempoMap,
+    setParamSelectionActive,
 } from "../../features/session/sessionSlice";
 import { resolveRootTrackId } from "../../features/session/trackUtils";
 import { useAppTheme } from "../../theme/AppThemeProvider";
@@ -2212,6 +2213,13 @@ export const PianoRollPanel: React.FC = () => {
         aBeat: number;
         bBeat: number;
     } | null>(null);
+    // 参数线选区存在性入仓（session.paramSelectionActive）：复制/剪切按
+    // "当前选中了什么"路由时以此判定参数侧（selectionRef 的每次变更都
+    // 成对经过 setSelectionUi，见 usePianoRollInteractions）。拖拽期间的
+    // 重复派发值不变，immer 判定无修改直接跳过。
+    useEffect(() => {
+        dispatch(setParamSelectionActive(selectionUi !== null));
+    }, [dispatch, selectionUi]);
     const [paramMorphOverlay, setParamMorphOverlay] = useState<ParamMorphOverlay | null>(null);
     const [canvasCursor, setCanvasCursor] = useState<CSSProperties["cursor"]>(
         s.toolMode === "select" ? "default" : "crosshair",

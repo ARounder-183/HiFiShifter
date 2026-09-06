@@ -56,7 +56,11 @@ import {
     isNoneBinding,
 } from "../../features/keybindings/keybindingsSlice";
 import type { ActionId } from "../../features/keybindings/types";
-import { resolveEditOpRoute, resolvePasteRoute } from "../../features/keybindings/focusRouting";
+import {
+    resolveCopyCutRoute,
+    resolveEditOpRoute,
+    resolvePasteRoute,
+} from "../../features/keybindings/focusRouting";
 import { getActiveSurface } from "../../features/uiFocus/focusSurface";
 import { webApi } from "../../services/webviewApi";
 import { KeybindingsDialog } from "./KeybindingsDialog";
@@ -336,13 +340,26 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
     /**
      * 派发编辑操作事件：与键盘快捷键共用同一裁决（focusRouting）。
-     * copy/cut 等按「活动编辑表面」定向派发；paste 按剪贴板载荷类型路由
-     * （last-copy-wins，resolvePasteRoute —— 与键盘路径同一套规则），槽位
-     * 为空/外来数据时才退回活动表面兜底。未收录的操作（参数编辑器专有：
-     * 对话框确认、pasteVocalShifter 等）落回参数编辑器通道，与既有行为一致。
+     * copy/cut 按"当前选中了什么"路由（resolveCopyCutRoute，双选区并存时
+     * 按 selectionContext 仲裁）；paste 按剪贴板载荷类型路由
+     * （last-copy-wins，resolvePasteRoute），槽位为空/外来数据时才退回活动
+     * 表面兜底。未收录的操作（参数编辑器专有：对话框确认、pasteVocalShifter
+     * 等）落回参数编辑器通道，与既有行为一致。
      */
     const dispatchEditOp = useCallback(
         (op: string, data?: Record<string, unknown>) => {
+            if (op === "copy" || op === "cut") {
+                const channel = resolveCopyCutRoute({
+                    surface: getActiveSurface(),
+                    clipSelectionActive: s.multiSelectedClipIds.length > 0 || !!s.selectedClipId,
+                    paramSelectionActive: s.paramSelectionActive,
+                    selectionContext: s.selectionContext,
+                });
+                if (channel) {
+                    window.dispatchEvent(new CustomEvent(channel, { detail: { op, ...data } }));
+                }
+                return;
+            }
             if (op === "paste") {
                 void (async () => {
                     let kind: string | null = null;
@@ -364,7 +381,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 resolveEditOpRoute(getActiveSurface(), op, s.toolMode) ?? "hifi:editOp";
             window.dispatchEvent(new CustomEvent(channel, { detail: { op, ...data } }));
         },
-        [s.toolMode],
+        [s],
     );
 
     const handleImportAudioFromMenu = useCallback(async () => {

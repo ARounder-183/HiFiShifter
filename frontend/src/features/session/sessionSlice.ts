@@ -434,6 +434,13 @@ export interface SessionState {
     selectedClipId: string | null;
     /** 多选 clip 的 id 列表（框选 / 主修饰键 + 点击） */
     multiSelectedClipIds: string[];
+    /** 参数编辑器当前是否存在参数线选区（PianoRollPanel selectionUi 同步；
+     *  复制/剪切路由依据之一，见 focusRouting.resolveCopyCutRoute） */
+    paramSelectionActive: boolean;
+    /** 最近被触碰的选区上下文：轨道选中变化（换轨 = 参数编辑器重定向）与
+     *  参数线选区变化记 "param"，Clip 选中变化记 "clips"。两者并存时由它
+     *  仲裁复制/剪切的归属。 */
+    selectionContext: "param" | "clips" | null;
     clipAutomation: Record<string, Record<string, AutomationPoint[]>>;
     selectedPointId: string | null;
     clipWaveforms: Record<string, WaveformPreview>;
@@ -1846,6 +1853,8 @@ const initialState: SessionState = {
     selectedTrackId: "track_main",
     selectedClipId: null,
     multiSelectedClipIds: [],
+    paramSelectionActive: false,
+    selectionContext: null,
     clipAutomation: {},
     selectedPointId: null,
     clipWaveforms: {},
@@ -2391,6 +2400,7 @@ const sessionSlice = createSlice({
         setSelectedClip(state, action: PayloadAction<string | null>) {
             state.selectedClipId = action.payload;
             state.selectedPointId = null;
+            state.selectionContext = "clips";
             if (action.payload) {
                 const nextTrackId = resolveTrackIdForClipSelection({
                     currentTrackId: state.selectedTrackId,
@@ -2406,12 +2416,21 @@ const sessionSlice = createSlice({
         setSelectedClipPreservingTrack(state, action: PayloadAction<string | null>) {
             state.selectedClipId = action.payload;
             state.selectedPointId = null;
+            state.selectionContext = "clips";
             if (action.payload) {
                 ensureClipAutomation(state, action.payload);
             }
         },
         setMultiSelectedClipIds(state, action: PayloadAction<string[]>) {
             state.multiSelectedClipIds = action.payload;
+            state.selectionContext = "clips";
+        },
+        /** 参数线选区存在性同步（PianoRollPanel 在 selectionUi 变化时派发），
+         *  同时把剪贴板上下文标记为参数侧。拖拽期间的重复派发值不变，
+         *  immer 判定无修改直接跳过，不触发重渲染。 */
+        setParamSelectionActive(state, action: PayloadAction<boolean>) {
+            state.paramSelectionActive = action.payload;
+            state.selectionContext = "param";
         },
         /** 复制/剪切失败（系统剪贴板被占用等）时在状态栏给出可见反馈。 */
         setClipboardOperationFailed(state, action: PayloadAction<{ op: "copy" | "cut" }>) {
@@ -5076,6 +5095,10 @@ const sessionSlice = createSlice({
             .addCase(selectTrackRemote.pending, (state, action) => {
                 state.selectedTrackId =
                     typeof action.meta.arg === "string" ? action.meta.arg : action.meta.arg.trackId;
+                // 换轨手势（轨道头 / 时间轴行 / 键盘）即参数编辑器重定向：
+                // 剪贴板上下文记为参数侧。fulfilled 恢复该轨道记住的 Clip
+                // 时不改写本标记（见 applySelectedClip 分支）。
+                state.selectionContext = "param";
             })
 
             .addCase(selectTrackRemote.fulfilled, (state, action) => {
@@ -5204,6 +5227,7 @@ export const {
     setSelectedClip,
     setSelectedClipPreservingTrack,
     setMultiSelectedClipIds,
+    setParamSelectionActive,
     setClipboardOperationFailed,
     moveClipStart,
     moveClipTrack,
