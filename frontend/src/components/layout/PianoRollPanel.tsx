@@ -2877,6 +2877,18 @@ export const PianoRollPanel: React.FC = () => {
         ),
     });
 
+    // 参数数据更新后重算当前悬停浮窗：键盘平移参数线（"=" / "-" / "]" / "["
+    // 及其 Shift/Ctrl 变体）、撤销/重做、远端写入都只更新 paramView 数据，
+    // 不会触发 pointermove —— 悬停值是 pointermove 时的快照，若不在此重算，
+    // 浮窗会一直显示旧值直到用户再次移动鼠标。声明顺序在 paramViewRef 同步
+    // effect（上方）之后，重算读到的是本次渲染的最新数据。
+    // refreshParamValuePreview 先解构出稳定引用：直接依赖 interactions 对象
+    // 会让 effect 每次渲染都触发（setState 新对象 → 无限重渲染）。
+    const { refreshParamValuePreview } = interactions;
+    useEffect(() => {
+        refreshParamValuePreview();
+    }, [paramView, refreshParamValuePreview]);
+
     const onScrollerWheelNative = interactions.onScrollerWheelNative;
     const onScrollerScroll = useCallback(
         (e: React.UIEvent<HTMLDivElement>) => {

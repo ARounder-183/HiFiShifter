@@ -1292,14 +1292,7 @@ export function usePianoRollInteractions(args: {
             // 维护平行的键位匹配分支（旧分支与 handleEditOp 重复且行为已
             // 分叉，是复制/粘贴冲突的放大器）。
         },
-        [
-            rootTrackId,
-            editParam,
-            pitchEnabled,
-            keybindingMap,
-            onEditAction,
-            toolMode,
-        ],
+        [rootTrackId, editParam, pitchEnabled, keybindingMap, onEditAction, toolMode],
     );
 
     const onScrollerWheelNative = useCallback(
@@ -1590,8 +1583,9 @@ export function usePianoRollInteractions(args: {
         return toolMode === "select" ? "default" : "crosshair";
     }, [toolMode]);
 
-    const getCurveValueNearPointer = useCallback(
-        (clientX: number, clientY: number): number | null => {
+    /** 指针横坐标所在帧的曲线值（不含「靠近参数线」的邻域判定）。 */
+    const getCurveValueAtPointerFrame = useCallback(
+        (clientX: number): number | null => {
             const pv = paramViewRef.current;
             const canvas = canvasRef.current;
             if (!pv || pv.edit.length === 0 || !canvas) return null;
@@ -1603,7 +1597,18 @@ export function usePianoRollInteractions(args: {
             const idx = Math.round((frame - pv.startFrame) / Math.max(1, pv.stride));
             const curveVal = idx >= 0 && idx < pv.edit.length ? Number(pv.edit[idx]) : null;
             if (curveVal == null || !Number.isFinite(curveVal)) return null;
+            return curveVal;
+        },
+        [paramViewRef, canvasRef, pointerBeat, secPerBeat],
+    );
 
+    const getCurveValueNearPointer = useCallback(
+        (clientX: number, clientY: number): number | null => {
+            const curveVal = getCurveValueAtPointerFrame(clientX);
+            if (curveVal == null) return null;
+
+            const canvas = canvasRef.current;
+            if (!canvas) return null;
             const rect = canvas.getBoundingClientRect();
             const rectH = rect.height || viewSizeRef.current.h || 1;
             const mouseY = clientY - rect.top;
@@ -1611,8 +1616,54 @@ export function usePianoRollInteractions(args: {
             const curveY = valueToY(editParam, mappedCurveVal, rectH);
             return Math.abs(mouseY - curveY) < 10 ? curveVal : null;
         },
-        [paramViewRef, canvasRef, pointerBeat, secPerBeat, viewSizeRef, editParam, valueToY],
+        [getCurveValueAtPointerFrame, canvasRef, viewSizeRef, editParam, valueToY],
     );
+
+    // ── 悬停浮窗的数据变化跟随 ─────────────────────────────────
+    // 浮窗值是 pointermove 时的快照；键盘平移参数线 / 撤销重做 / 远端写入
+    // 只会更新 paramView 数据，不动鼠标 —— 没有下面这两个 ref，浮窗会一直
+    // 显示旧值，直到用户再次移动鼠标。
+    // - lastPointerClientRef：最后一次画布内的指针位置（pointerleave 清空）；
+    // - hoverPreviewNearCurveRef：悬停预览是否已激活（指针此前落在参数线
+    //   10px 邻域内）。激活后即使曲线因大幅平移（如 Shift+= 的一个八度）
+    //   远离指针，数据刷新仍按指针所在帧的新值续显 —— 否则第一拍就会把
+    //   浮窗甩没；指针再次移动时恢复常规邻域判定。
+    const lastPointerClientRef = useRef<{ x: number; y: number } | null>(null);
+    const hoverPreviewNearCurveRef = useRef(false);
+
+    /**
+     * 用最新参数数据重算当前悬停浮窗的值（无需移动鼠标）。
+     *
+     * 仅当悬停预览已激活且无拖拽/平移手势进行时生效；拖拽路径的预览由
+     * 拖拽自身实时驱动，不在此重算。曲线数据被清空等待重取时（如音频块
+     * 范围平移经 checkpointHistory 触发的清空+强制重取）续显旧值，避免
+     * 长按期间浮窗反复闪烁；新数据落地后按指针所在帧重算。
+     */
+    const refreshParamValuePreview = useCallback(() => {
+        if (!paramValuePopupEnabled) return;
+        if (!hoverPreviewNearCurveRef.current) return;
+        if (strokeRef.current || panRef.current) return;
+        const last = lastPointerClientRef.current;
+        if (!last) return;
+        if (!paramViewRef.current) return;
+        const value = getCurveValueAtPointerFrame(last.x);
+        if (value == null || !Number.isFinite(value)) {
+            onParamValuePreviewChange?.(null);
+            return;
+        }
+        onParamValuePreviewChange?.({
+            clientX: last.x,
+            clientY: last.y,
+            value,
+        });
+    }, [
+        paramValuePopupEnabled,
+        onParamValuePreviewChange,
+        getCurveValueAtPointerFrame,
+        strokeRef,
+        panRef,
+        paramViewRef,
+    ]);
 
     const isPointerNearDraggableSelection = useCallback(
         (clientX: number, clientY: number): boolean => {
@@ -1651,6 +1702,7 @@ export function usePianoRollInteractions(args: {
 
     const onCanvasPointerMove = useCallback(
         (e: ReactPointerEvent<HTMLCanvasElement>) => {
+            lastPointerClientRef.current = { x: e.clientX, y: e.clientY };
             if (paramValuePopupEnabled) {
                 const draggingLeft = Boolean(strokeRef.current) && (e.buttons & 1) === 1;
                 if (draggingLeft) {
@@ -1673,6 +1725,9 @@ export function usePianoRollInteractions(args: {
                     });
                 } else {
                     const nearCurveValue = getCurveValueNearPointer(e.clientX, e.clientY);
+                    // 记录悬停激活状态：数据刷新（refreshParamValuePreview）
+                    // 只续显已激活的浮窗。
+                    hoverPreviewNearCurveRef.current = nearCurveValue != null;
                     if (nearCurveValue == null) {
                         onParamValuePreviewChange?.(null);
                     } else {
@@ -1720,9 +1775,21 @@ export function usePianoRollInteractions(args: {
 
     const onCanvasPointerLeave = useCallback(() => {
         if (panRef.current || strokeRef.current) return;
+        // 指针离开画布：悬停激活状态与最后位置一并失效，避免离画布后的
+        // 数据刷新用过期坐标续显浮窗。
+        hoverPreviewNearCurveRef.current = false;
+        lastPointerClientRef.current = null;
         onParamValuePreviewChange?.(null);
         setCanvasCursor(getDefaultCanvasCursor());
-    }, [panRef, strokeRef, onParamValuePreviewChange, setCanvasCursor, getDefaultCanvasCursor]);
+    }, [
+        panRef,
+        strokeRef,
+        onParamValuePreviewChange,
+        setCanvasCursor,
+        getDefaultCanvasCursor,
+        hoverPreviewNearCurveRef,
+        lastPointerClientRef,
+    ]);
 
     const onCanvasPointerDown = useCallback(
         (e: ReactPointerEvent<HTMLCanvasElement>) => {
@@ -3601,7 +3668,13 @@ export function usePianoRollInteractions(args: {
             onParamValuePreviewChange?.(null);
             return;
         }
-        const clearPreview = () => onParamValuePreviewChange?.(null);
+        // pointerup/pointercancel 清除浮窗的同时复位悬停激活状态：拖拽/平移/
+        // 点击结束后，激活与否必须由下一次 pointermove 重新判定，否则随后
+        // 的数据刷新会在旧激活标记下用过期坐标续显浮窗。
+        const clearPreview = () => {
+            hoverPreviewNearCurveRef.current = false;
+            onParamValuePreviewChange?.(null);
+        };
         window.addEventListener("pointerup", clearPreview);
         window.addEventListener("pointercancel", clearPreview);
         return () => {
@@ -3622,5 +3695,6 @@ export function usePianoRollInteractions(args: {
         onCanvasPointerMove,
         onCanvasPointerLeave,
         onCanvasPointerDown,
+        refreshParamValuePreview,
     };
 }
