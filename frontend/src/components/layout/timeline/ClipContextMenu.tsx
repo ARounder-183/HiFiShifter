@@ -293,6 +293,9 @@ export const ClipContextMenu: React.FC<{
     onToggleLoop?: (ids: string[], loopEnabled: boolean) => void;
     /** 切换淡入/淡出的 REAPER 形状预设（保留曲率 dir 不变）。 */
     onFadeShapeChange?: (clipId: string, target: "in" | "out", shape: number) => void;
+    /** 打开"编辑播放速率"浮层（锚点 = 菜单位置）。与倍率角标右键同一浮层；
+     *  多选时以右键的 clip 为 anchor 批量应用（提交管线内聚）。 */
+    onEditRate?: (clipId: string, screenX: number, screenY: number) => void;
 }> = ({
     x,
     y,
@@ -321,6 +324,7 @@ export const ClipContextMenu: React.FC<{
     onToggleReverse,
     onToggleLoop,
     onFadeShapeChange,
+    onEditRate,
 }) => {
     const { t } = useI18n();
     const dispatch = useAppDispatch();
@@ -743,6 +747,17 @@ export const ClipContextMenu: React.FC<{
                     close();
                 }}
             />
+            {onEditRate && (
+                <MenuItem
+                    label={t("ctx_edit_rate")}
+                    onClick={() => {
+                        // 锚点 = 菜单弹出位置：菜单关闭后浮层原地展开。
+                        // 多选时右键的 clip 即 anchor（提交走 getBulkEditableClipIds 批量管线）。
+                        onEditRate(clip.id, x, y);
+                        close();
+                    }}
+                />
+            )}
 
             {(isMulti || hasGroup) && (
                 <>

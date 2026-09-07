@@ -2681,6 +2681,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                           );
                                       }}
                                       onNormalize={normalizeClips}
+                                      onEditRate={openRateBadgeMenu}
                                       onToggleReverse={(ids, reversed) => {
                                           // 批量走 bulk 通道：单次 IPC + 单个撤销步
                                           //（逐个 setClipStateRemote 会产生 N 次 IPC/N 步撤销）。

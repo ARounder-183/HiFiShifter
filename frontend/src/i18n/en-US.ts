@@ -486,6 +486,7 @@ export const enUS = {
     ctx_replace_midi_all: "Replace MIDI All",
     ctx_split_at_playhead: "Split at Playhead",
     ctx_normalize: "Normalize",
+    ctx_edit_rate: "Edit Playback Rate…",
     ctx_reverse: "Reverse",
     ctx_unreverse: "Unreverse",
     ctx_reverse_selected: "Reverse Selected",

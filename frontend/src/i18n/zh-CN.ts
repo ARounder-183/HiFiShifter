@@ -390,6 +390,7 @@ export const zhCN = {
     ctx_replace_midi_all: "替换全部 MIDI",
     ctx_split_at_playhead: "在播放头处分割",
     ctx_normalize: "规格化",
+    ctx_edit_rate: "编辑播放速率…",
     ctx_reverse: "倒放",
     ctx_unreverse: "取消倒放",
     ctx_reverse_selected: "倒放选中项",

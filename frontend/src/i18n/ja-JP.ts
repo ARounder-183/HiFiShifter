@@ -409,6 +409,7 @@ export const jaJP = {
     ctx_replace_midi_all: "すべてのMIDIを置換",
     ctx_split_at_playhead: "再生ヘッドで分割",
     ctx_normalize: "ノーマライズ",
+    ctx_edit_rate: "再生速度を編集…",
     ctx_reverse: "逆再生",
     ctx_unreverse: "逆再生を解除",
     ctx_reverse_selected: "選択項目を逆再生",

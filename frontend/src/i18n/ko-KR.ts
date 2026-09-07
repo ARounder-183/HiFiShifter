@@ -482,6 +482,7 @@ export const koKR = {
     ctx_replace_midi_all: "모든 MIDI 교체",
     ctx_split_at_playhead: "재생 위치에서 분할",
     ctx_normalize: "노멀라이즈",
+    ctx_edit_rate: "재생 속도 편집…",
     ctx_reverse: "역재생",
     ctx_unreverse: "역재생 해제",
     ctx_reverse_selected: "선택 항목 역재생",

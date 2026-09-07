@@ -391,6 +391,7 @@ export const zhTW = {
     ctx_replace_midi_all: "取代全部 MIDI",
     ctx_split_at_playhead: "在播放頭處分割",
     ctx_normalize: "正規化",
+    ctx_edit_rate: "編輯播放速率…",
     ctx_reverse: "倒放",
     ctx_unreverse: "取消倒放",
     ctx_reverse_selected: "倒放選取項目",
