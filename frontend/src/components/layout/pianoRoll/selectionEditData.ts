@@ -20,6 +20,7 @@
 
 import { paramsApi } from "../../../services/api";
 import type { ParamName, ParamViewSegment } from "./types";
+import { applyEdgeBlend, type EdgeShape } from "./paramSmoothing";
 
 /** 单次 IPC 收发的帧数上限。约 32k 帧 ≈ 190 ms @ fp 5.8ms，单次处理不会掉帧。 */
 const CHUNK_FRAMES = 32_768;
@@ -149,6 +150,14 @@ export function selectionDragRange(args: {
     };
 }
 
+/** buildSelectionDragDense 的边缘淡化参数（halfSpan 已换算为 dense 索引数）。 */
+export type SelectionDragEdgeBlend = {
+    halfSpanFrames: number;
+    shape?: EdgeShape;
+    /** pitch 等哨兵参数的“可编辑值”判定（v!==0）；缺省全部可编辑。 */
+    isEditable?: (v: number) => boolean;
+};
+
 /**
  * 构造选区拖动后的 dense 数组（**逐帧索引**：`values[k]` 对应第 `startFrame + k` 帧）。
  *
@@ -164,6 +173,7 @@ export function selectionDragRange(args: {
  * @param frameDelta      X 方向帧偏移（纯上下拖动时为 0）
  * @param extraEdgeFrames 边缘平滑需要向两侧额外扩展的帧数
  * @param transform       逐帧变换：(原始值, 落地帧) => 新值
+ * @param edgeBlend       边缘淡化参数（delta 空间交叉淡化；缺省不淡化）
  */
 export function buildSelectionDragDense(args: {
     sourceAt: (frame: number) => number;
@@ -172,29 +182,10 @@ export function buildSelectionDragDense(args: {
     frameDelta: number;
     extraEdgeFrames: number;
     transform: (origValue: number, frame: number) => number;
-    computeChangeFactor?: (
-        before: number[],
-        after: number[],
-        editedStartIdx: number,
-        editedLen: number,
-    ) => number;
-    applyEdgeSmoothing?: (
-        dense: number[],
-        editedStartIdx: number,
-        editedLen: number,
-        changeFactor: number,
-    ) => void;
+    edgeBlend?: SelectionDragEdgeBlend;
 }): { startFrame: number; endFrame: number; values: number[] } {
-    const {
-        sourceAt,
-        origValues,
-        origStartFrame,
-        frameDelta,
-        extraEdgeFrames,
-        transform,
-        computeChangeFactor,
-        applyEdgeSmoothing,
-    } = args;
+    const { sourceAt, origValues, origStartFrame, frameDelta, extraEdgeFrames, transform, edgeBlend } =
+        args;
 
     const selLen = origValues.length;
     const { startFrame, endFrame } = selectionDragRange({
@@ -223,10 +214,17 @@ export function buildSelectionDragDense(args: {
         }
     }
 
-    if (computeChangeFactor && applyEdgeSmoothing) {
+    if (edgeBlend && edgeBlend.halfSpanFrames > 0) {
         const movedStartIdx = newStartFrame - startFrame;
-        const factor = computeChangeFactor(before, values, movedStartIdx, selLen);
-        applyEdgeSmoothing(values, movedStartIdx, selLen, factor);
+        applyEdgeBlend({
+            dense: values,
+            base: before,
+            editedStartIdx: movedStartIdx,
+            editedLen: selLen,
+            halfSpanFrames: edgeBlend.halfSpanFrames,
+            shape: edgeBlend.shape,
+            isEditable: edgeBlend.isEditable,
+        });
     }
 
     return { startFrame, endFrame, values };

@@ -1484,13 +1484,15 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 defaultUseProjectScale={true}
                 projectScaleLabel={projectScaleLabelWithHint}
                 defaultToleranceCents={s.pitchSnapToleranceCents}
-                onConfirm={(unit, scaleValue, toleranceCents, quantizeUnit) =>
+                defaultSmoothness={s.edgeSmoothnessPercent}
+                onConfirm={(unit, scaleValue, toleranceCents, quantizeUnit, edgeSmoothnessPercent) =>
                     dispatchEditOp("quantize", {
                         unit,
                         scale: resolveScaleToken(scaleValue),
                         toleranceCents,
                         tolerance: toleranceCents,
                         quantizeUnit,
+                        edgeSmoothnessPercent,
                     })
                 }
             />
@@ -1504,13 +1506,15 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 defaultUseProjectScale={true}
                 projectScaleLabel={projectScaleLabelWithHint}
                 defaultToleranceCents={s.pitchSnapToleranceCents}
-                onConfirm={(unit, scaleValue, toleranceCents, quantizeUnit) =>
+                defaultSmoothness={s.edgeSmoothnessPercent}
+                onConfirm={(unit, scaleValue, toleranceCents, quantizeUnit, edgeSmoothnessPercent) =>
                     dispatchEditOp("meanQuantize", {
                         unit,
                         scale: resolveScaleToken(scaleValue),
                         toleranceCents,
                         tolerance: toleranceCents,
                         quantizeUnit,
+                        edgeSmoothnessPercent,
                     })
                 }
             />

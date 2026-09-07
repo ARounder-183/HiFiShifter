@@ -42,7 +42,18 @@ import {
 import { resolveHorizontalWheelZoom } from "../timeline/runtime/timelineScrollRange";
 import { resolveTimelineMinPxPerSec } from "../timeline/runtime/timelineZoomBounds";
 import { getParamEditorWheelAction, getVibratoDragWheelTarget } from "./wheelGesture";
-import { transformSelectionByRightDrag } from "./selectionTransforms";
+import {
+    createSelectionAmplifier,
+    rightDragUpScale,
+    transformSelectionByRightDrag,
+} from "./selectionTransforms";
+import {
+    applyEdgeBlend,
+    drawSmoothSigmaMsFromStrength,
+    edgeHalfSpanFramesForSelection,
+    editablePitchValue,
+    smoothCurveGaussian,
+} from "./paramSmoothing";
 import {
     buildSelectionDragDense,
     fetchFullResCurve,
@@ -411,115 +422,47 @@ export function usePianoRollInteractions(args: {
         [isSnapToggleModifierHeld, pitchSnapEnabled],
     );
 
-    const computeSelectionChangeFactor = useCallback(
+    /**
+     * 边缘淡化（delta 空间交叉淡化）的原地包装。
+     * halfSpan 由调用方经 edgeHalfSpanForIndices 预先算好（毫秒定标）。
+     */
+    const blendDenseEdges = useCallback(
         (
-            beforeDense: number[],
-            afterDense: number[],
+            dense: number[],
+            base: number[],
             editedStartIdx: number,
             editedLen: number,
+            halfSpanFrames: number,
         ) => {
-            if (editedLen <= 0) return 0;
-            const maxIdx = Math.min(beforeDense.length, afterDense.length) - 1;
-            if (maxIdx < 0) return 0;
-
-            const startIdx = clamp(editedStartIdx, 0, maxIdx);
-            const endIdx = clamp(editedStartIdx + editedLen - 1, startIdx, maxIdx);
-
-            const calcMean = (arr: number[]) => {
-                let sum = 0;
-                let count = 0;
-                for (let idx = startIdx; idx <= endIdx; idx += 1) {
-                    const v = Number(arr[idx] ?? 0);
-                    if (!Number.isFinite(v)) continue;
-                    if (editParam === "pitch" && v === 0) continue;
-                    sum += v;
-                    count += 1;
-                }
-                return { sum, count };
-            };
-
-            const before = calcMean(beforeDense);
-            const after = calcMean(afterDense);
-            if (before.count <= 0 || after.count <= 0) return 0;
-
-            const meanDelta = Math.abs(after.sum / after.count - before.sum / before.count);
-            if (meanDelta <= 1e-9) return 0;
-
-            let boundaryDelta = 0;
-            let boundaryCount = 0;
-            if (startIdx > 0) {
-                boundaryDelta += Math.abs(
-                    Number(beforeDense[startIdx] ?? 0) - Number(beforeDense[startIdx - 1] ?? 0),
-                );
-                boundaryCount += 1;
-            }
-            if (endIdx < maxIdx) {
-                boundaryDelta += Math.abs(
-                    Number(beforeDense[endIdx] ?? 0) - Number(beforeDense[endIdx + 1] ?? 0),
-                );
-                boundaryCount += 1;
-            }
-            const boundaryMean = boundaryCount > 0 ? boundaryDelta / boundaryCount : 0;
-            return clamp(meanDelta / (meanDelta + boundaryMean + 1e-6), 0, 1);
+            if (!(halfSpanFrames > 0) || editedLen <= 0) return;
+            applyEdgeBlend({
+                dense,
+                base,
+                editedStartIdx,
+                editedLen,
+                halfSpanFrames,
+                isEditable: editParam === "pitch" ? editablePitchValue : undefined,
+            });
         },
         [editParam],
     );
 
-    const applyEdgeSmoothingToDense = useCallback(
-        (editedDense: number[], editedStartIdx: number, editedLen: number, changeFactor = 1) => {
-            const effectiveChange = clamp(Number(changeFactor) || 0, 0, 1);
-            if (effectiveChange <= 0) return;
-            const strength = clamp(Number(edgeSmoothnessPercent) || 0, 0, 100);
-            if (strength <= 0 || editedLen <= 1) return;
-
-            const maxTransitionFrames = Math.floor(editedLen / 2);
-            if (maxTransitionFrames <= 0) return;
-
-            const transitionFrames = Math.round((strength / 100) * maxTransitionFrames);
-            if (transitionFrames <= 0) return;
-
-            const snapshot = editedDense.slice();
-            const maxIdx = snapshot.length - 1;
-            if (maxIdx < 1) return;
-
-            const startIdx = clamp(editedStartIdx, 0, maxIdx);
-            const endIdx = clamp(editedStartIdx + editedLen - 1, 0, maxIdx);
-            const halfSpan = transitionFrames / 2;
-            if (halfSpan <= 0) return;
-
-            // 左边界：以边界为中心，在 [P-half, P+half] 内从选区外过渡到选区内。
-            if (startIdx > 0) {
-                const left = Math.max(0, Math.floor(startIdx - halfSpan));
-                const right = Math.min(maxIdx, Math.ceil(startIdx + halfSpan));
-                const span = Math.max(1e-9, 2 * halfSpan);
-                for (let idx = left; idx <= right; idx++) {
-                    const t = clamp((idx - (startIdx - halfSpan)) / span, 0, 1);
-                    const outsideIdx = Math.min(startIdx - 1, idx);
-                    const insideIdx = Math.max(startIdx, idx);
-                    const outsideVal = snapshot[outsideIdx] ?? editedDense[idx];
-                    const insideVal = snapshot[insideIdx] ?? editedDense[idx];
-                    const smoothed = outsideVal + (insideVal - outsideVal) * t;
-                    editedDense[idx] = snapshot[idx] + (smoothed - snapshot[idx]) * effectiveChange;
-                }
-            }
-
-            // 右边界：以边界为中心，在 [Q-half, Q+half] 内从选区内过渡到选区外。
-            if (endIdx < maxIdx) {
-                const left = Math.max(0, Math.floor(endIdx - halfSpan));
-                const right = Math.min(maxIdx, Math.ceil(endIdx + halfSpan));
-                const span = Math.max(1e-9, 2 * halfSpan);
-                for (let idx = left; idx <= right; idx++) {
-                    const t = clamp((idx - (endIdx - halfSpan)) / span, 0, 1);
-                    const insideIdx = Math.min(endIdx, idx);
-                    const outsideIdx = Math.max(endIdx + 1, idx);
-                    const insideVal = snapshot[insideIdx] ?? editedDense[idx];
-                    const outsideVal = snapshot[outsideIdx] ?? editedDense[idx];
-                    const smoothed = insideVal + (outsideVal - insideVal) * t;
-                    editedDense[idx] = snapshot[idx] + (smoothed - snapshot[idx]) * effectiveChange;
-                }
-            }
+    /**
+     * 平滑度 → 每侧过渡带半宽（dense 索引）。
+     * indicesLen 为 dense 索引数；strideValue 为 dense 索引的采样间距
+     * （提交路径恒为 1，预览路径与 pv 的 stride 一致）。
+     */
+    const edgeHalfSpanForIndices = useCallback(
+        (indicesLen: number, strideValue: number) => {
+            const pv = paramViewRef.current;
+            const fpMs = (pv?.framePeriodMs ?? 5) * Math.max(1, strideValue);
+            return edgeHalfSpanFramesForSelection({
+                strengthPercent: edgeSmoothnessPercent ?? 0,
+                framePeriodMs: fpMs,
+                editedLen: indicesLen,
+            });
         },
-        [edgeSmoothnessPercent],
+        [edgeSmoothnessPercent, paramViewRef],
     );
 
     const morphOverlayRef = useRef<ParamMorphOverlay | null>(null);
@@ -723,6 +666,12 @@ export function usePianoRollInteractions(args: {
         [applyDenseToLiveEdit, buildMorphDense, ensureLiveEditBase, paramViewRef],
     );
 
+    /**
+     * 手绘结束后的自动平滑：单次高斯核（σ = 强度% × 40ms，毫秒定标）。
+     * 只作用于绘制范围本身（旧实现会外溢 1% 并把绘制曲线整体替换为
+     * 101 帧窗 ×3 遍的 box 均值 —— 手势细节被抹平）；trend 延拓消除端点
+     * 内拉；pitch=0 哨兵帧不参与也不被改写；长未浊缺口不跨段桥接。
+     */
     const applyPostStrokeSmoothing = useCallback(
         async (points: StrokePoint[], mode: StrokeMode) => {
             if (mode !== "draw") return;
@@ -730,7 +679,8 @@ export function usePianoRollInteractions(args: {
             if (!trackId || points.length === 0) return;
 
             const strengthPercent = clamp(Number(edgeSmoothnessPercent) || 0, 0, 100);
-            if (strengthPercent <= 0) return;
+            const sigmaMs = drawSmoothSigmaMsFromStrength(strengthPercent);
+            if (!(sigmaMs > 0)) return;
 
             let minF = Number.POSITIVE_INFINITY;
             let maxF = 0;
@@ -741,62 +691,28 @@ export function usePianoRollInteractions(args: {
             }
             if (!Number.isFinite(minF) || maxF < minF) return;
 
-            const editedLen = maxF - minF + 1;
-            const extend = Math.max(1, Math.ceil(editedLen * 0.01));
-            const smoothStart = Math.max(0, minF - extend);
-            const smoothEnd = maxF + extend;
-            const smoothCount = smoothEnd - smoothStart + 1;
-
-            const res = await paramsApi.getParamFrames(
-                trackId,
-                editParam,
-                smoothStart,
-                smoothCount,
-                1,
-            );
+            const smoothCount = maxF - minF + 1;
+            const res = await paramsApi.getParamFrames(trackId, editParam, minF, smoothCount, 1);
             if (!res?.ok) return;
             const payload = res as ParamFramesPayload;
             const vals = (payload.edit ?? []).map((v) => Number(v) || 0);
             if (vals.length === 0) return;
+            const fpMs = Number(payload.frame_period_ms) || 5;
 
-            const strength = strengthPercent / 100;
-            const radius = Math.max(1, Math.round(strength * 50));
-            const passes = Math.max(1, Math.round(strength * 3));
-            let buf = vals.slice();
-            for (let p = 0; p < passes; p += 1) {
-                const next = new Array<number>(buf.length);
-                for (let i = 0; i < buf.length; i += 1) {
-                    const lo = Math.max(0, i - radius);
-                    const hi = Math.min(buf.length - 1, i + radius);
-                    let sum = 0;
-                    let count = 0;
-                    for (let j = lo; j <= hi; j += 1) {
-                        if (editParam === "pitch" && vals[j] === 0) continue;
-                        sum += buf[j];
-                        count += 1;
-                    }
-                    next[i] =
-                        editParam === "pitch" && vals[i] === 0
-                            ? 0
-                            : count > 0
-                              ? sum / count
-                              : buf[i];
-                }
-                buf = next;
-            }
+            const smoothed = smoothCurveGaussian(vals, {
+                sigmaMs,
+                framePeriodMs: fpMs,
+                valueFilter: editParam === "pitch" ? editablePitchValue : undefined,
+            });
 
-            const smoothed = vals.map((v, i) =>
-                editParam === "pitch" && v === 0 ? 0 : v + (buf[i] - v) * strength,
-            );
-
-            await paramsApi.setParamFrames(trackId, editParam, smoothStart, smoothed, false);
+            await paramsApi.setParamFrames(trackId, editParam, minF, smoothed, false);
 
             const pvNow = paramViewRef.current;
             if (pvNow) {
                 const nextEdit = pvNow.edit.slice();
                 const stride = Math.max(1, pvNow.stride);
                 for (let i = 0; i < smoothed.length; i += 1) {
-                    const frame = smoothStart + i;
+                    const frame = minF + i;
                     const idx = Math.round((frame - pvNow.startFrame) / stride);
                     if (idx >= 0 && idx < nextEdit.length) {
                         nextEdit[idx] = smoothed[i];
@@ -2147,17 +2063,12 @@ export function usePianoRollInteractions(args: {
                                     const nextLen = nextEndIdx - nextStartIdx + 1;
                                     if (nextLen <= 0) return null;
 
-                                    const edgeSmoothStr = clamp(
-                                        Number(edgeSmoothnessPercent) || 0,
-                                        0,
-                                        100,
+                                    // 平滑度 → 毫秒定标的过渡带半宽（dense 索引）
+                                    const edgeHalfSpanIdx = edgeHalfSpanForIndices(
+                                        nextLen,
+                                        stride,
                                     );
-                                    const edgeHalfSpanIdx = Math.ceil(
-                                        Math.round(
-                                            (edgeSmoothStr / 100) * Math.floor(nextLen / 2),
-                                        ) / 2,
-                                    );
-                                    const extraEdgeFrames = edgeHalfSpanIdx * stride;
+                                    const extraEdgeFrames = Math.ceil(edgeHalfSpanIdx) * stride;
                                     const overallMinFrame = Math.max(
                                         0,
                                         Math.min(oldStartFrame, nextStartFrame) - extraEdgeFrames,
@@ -2282,17 +2193,12 @@ export function usePianoRollInteractions(args: {
                                     const movedStartDenseIdx = Math.round(
                                         (nextStartFrame - overallMinFrame) / stride,
                                     );
-                                    const changeFactor = computeSelectionChangeFactor(
+                                    blendDenseEdges(
+                                        dense,
                                         denseBefore,
-                                        dense,
                                         movedStartDenseIdx,
                                         nextLen,
-                                    );
-                                    applyEdgeSmoothingToDense(
-                                        dense,
-                                        movedStartDenseIdx,
-                                        nextLen,
-                                        changeFactor,
+                                        edgeHalfSpanIdx,
                                     );
 
                                     return {
@@ -2468,103 +2374,97 @@ export function usePianoRollInteractions(args: {
                                         0,
                                         Math.ceil((selEndSec * 1000) / fp),
                                     );
-                                    const stride = Math.max(1, pv.stride);
-                                    const selStartIdx = Math.max(
-                                        0,
-                                        Math.round((selStartFrame - pv.startFrame) / stride),
-                                    );
-                                    const selEndIdx = Math.min(
-                                        pv.edit.length - 1,
-                                        Math.round((selEndFrame - pv.startFrame) / stride),
-                                    );
-                                    const origValues = pv.edit.slice(selStartIdx, selEndIdx + 1);
-
-                                    let didDrag = false;
-                                    let latestDense = origValues.slice();
-                                    let latestAppliedStartFrame = selStartFrame;
-                                    let latestAppliedDense = origValues.slice();
+                                     // 拖拽数据与选区移动拖拽同一模式：先用 pv 近似值立即
+                                     // 预览，全分辨率到位后自动替换；提交必须等全分辨率
+                                     // 数据 —— 绝不把降采样值当连续帧写回后端（旧实现在
+                                     // stride>1 时会把 stride 间隔采样当连续帧写入：
+                                     // 时间压缩 + 覆盖未选帧，已修复）。
+                                     let origValues = readPvRange(pv, selStartFrame, selEndFrame);
+                                     let lastDy = 0;
+                                     let didDrag = false;
 
                                     ensureLiveEditBase(pv);
                                     if (liveEditActiveRef) liveEditActiveRef.current = true;
 
+                                    const origCurvePromise = fetchFullResCurve({
+                                        trackId: rootTrackId ?? "",
+                                        param: editParam,
+                                        startFrame: selStartFrame,
+                                        endFrame: selEndFrame,
+                                        paramView: pv,
+                                    });
+                                    let dragSettled = false;
+                                    void origCurvePromise.then((curve) => {
+                                        if (dragSettled) return;
+                                        origValues = curve.values;
+                                    });
+
+                                    // 残差放大器的趋势按 origValues 引用缓存：每次 move
+                                    // 只做逐帧缩放，不重复高斯卷积。
+                                    let amplifier: {
+                                        src: number[];
+                                        apply: (scale: number) => number[];
+                                    } | null = null;
+                                    const getAmplifier = () => {
+                                        if (!amplifier || amplifier.src !== origValues) {
+                                            amplifier = {
+                                                src: origValues,
+                                                apply: createSelectionAmplifier(
+                                                    origValues,
+                                                    editParam,
+                                                    { framePeriodMs: fp },
+                                                ).apply,
+                                            };
+                                        }
+                                        return amplifier;
+                                    };
+
+                                    const pvSourceAt = (pvNow: ParamViewSegment) => {
+                                        const step = Math.max(1, Math.floor(pvNow.stride));
+                                        return (frame: number) => {
+                                            const idx = Math.round(
+                                                (frame - pvNow.startFrame) / step,
+                                            );
+                                            return idx >= 0 && idx < pvNow.edit.length
+                                                ? pvNow.edit[idx]
+                                                : 0;
+                                        };
+                                    };
+
+                                    /**
+                                     * 帧索引 dense（values[k] ↔ startFrame + k）：选区值已含
+                                     * 变换，边缘淡化在 buildSelectionDragDense 内完成。复用与
+                                     * 选区移动/提交完全相同的纯函数，任意 stride 下预览与
+                                     * 提交一致。
+                                     */
                                     const buildRightDragDense = (
                                         pvNow: ParamViewSegment,
-                                        nextSelectionValues: number[],
+                                        selectionValues: number[],
                                     ) => {
-                                        const selLen = nextSelectionValues.length;
-                                        const maxTransitionFrames = Math.floor(selLen / 2);
-                                        const transitionFrames =
-                                            Number(edgeSmoothnessPercent) > 0 &&
-                                            maxTransitionFrames > 0
-                                                ? Math.round(
-                                                      (clamp(
-                                                          Number(edgeSmoothnessPercent) || 0,
-                                                          0,
-                                                          100,
-                                                      ) /
-                                                          100) *
-                                                          maxTransitionFrames,
-                                                  )
-                                                : 0;
-                                        const extraEdgeFrames =
-                                            Math.max(0, Math.ceil(transitionFrames / 2)) * stride;
-                                        const denseStartFrame = Math.max(
-                                            0,
-                                            selStartFrame - extraEdgeFrames,
-                                        );
-                                        const denseEndFrame = selEndFrame + extraEdgeFrames;
-                                        const denseLength =
-                                            Math.floor((denseEndFrame - denseStartFrame) / stride) +
-                                            1;
-                                        const dense = new Array<number>(denseLength);
-
-                                        for (let index = 0; index < denseLength; index += 1) {
-                                            const globalIdx = Math.round(
-                                                (denseStartFrame +
-                                                    index * stride -
-                                                    pvNow.startFrame) /
-                                                    stride,
-                                            );
-                                            dense[index] =
-                                                globalIdx >= 0 && globalIdx < pvNow.edit.length
-                                                    ? pvNow.edit[globalIdx]
-                                                    : 0;
-                                        }
-
-                                        const denseBefore = dense.slice();
-                                        const selectionStartDenseIdx = Math.round(
-                                            (selStartFrame - denseStartFrame) / stride,
-                                        );
-
-                                        for (
-                                            let index = 0;
-                                            index < nextSelectionValues.length;
-                                            index += 1
-                                        ) {
-                                            const denseIdx = selectionStartDenseIdx + index;
-                                            if (denseIdx >= 0 && denseIdx < dense.length) {
-                                                dense[denseIdx] = nextSelectionValues[index] ?? 0;
-                                            }
-                                        }
-
-                                        const changeFactor = computeSelectionChangeFactor(
-                                            denseBefore,
-                                            dense,
-                                            selectionStartDenseIdx,
-                                            selLen,
-                                        );
-                                        applyEdgeSmoothingToDense(
-                                            dense,
-                                            selectionStartDenseIdx,
-                                            selLen,
-                                            changeFactor,
-                                        );
-
-                                        return {
-                                            denseStartFrame,
-                                            denseEndFrame,
-                                            dense,
-                                        };
+                                        const selLen = selectionValues.length;
+                                        // 平滑度 → 毫秒定标的过渡带半宽（帧）
+                                        const edgeHalfSpan = edgeHalfSpanForIndices(selLen, 1);
+                                        return buildSelectionDragDense({
+                                            sourceAt: pvSourceAt(pvNow),
+                                            origValues: selectionValues,
+                                            origStartFrame: selStartFrame,
+                                            frameDelta: 0,
+                                            extraEdgeFrames: Math.max(
+                                                0,
+                                                Math.ceil(edgeHalfSpan),
+                                            ),
+                                            transform: (orig) => orig,
+                                            edgeBlend:
+                                                edgeHalfSpan > 0
+                                                    ? {
+                                                          halfSpanFrames: edgeHalfSpan,
+                                                          isEditable:
+                                                              editParam === "pitch"
+                                                                  ? editablePitchValue
+                                                                  : undefined,
+                                                      }
+                                                    : undefined,
+                                        });
                                     };
 
                                     const suppressContextMenu = (ev: Event) => {
@@ -2585,24 +2485,31 @@ export function usePianoRollInteractions(args: {
                                         if (Math.abs(dy) >= 2) {
                                             didDrag = true;
                                         }
-
-                                        latestDense = transformSelectionByRightDrag(
-                                            origValues,
-                                            editParam,
-                                            dy,
-                                        );
+                                        lastDy = dy;
 
                                         const pvNow = paramViewRef.current;
                                         if (!pvNow) return;
-                                        const nextApplied = buildRightDragDense(pvNow, latestDense);
-                                        latestAppliedStartFrame = nextApplied.denseStartFrame;
-                                        latestAppliedDense = nextApplied.dense;
+                                        // 上拖：残差放大（趋势已缓存，仅逐帧缩放）；
+                                        // 下拖：高斯平滑。两者都基于 origValues 无状态重算。
+                                        const selectionValues =
+                                            dy >= 0
+                                                ? getAmplifier().apply(rightDragUpScale(dy))
+                                                : transformSelectionByRightDrag(
+                                                      origValues,
+                                                      editParam,
+                                                      dy,
+                                                      { framePeriodMs: fp },
+                                                  );
+                                        const nextApplied = buildRightDragDense(
+                                            pvNow,
+                                            selectionValues,
+                                        );
                                         applyDenseToLiveEdit(
                                             pvNow,
-                                            nextApplied.denseStartFrame,
-                                            nextApplied.dense,
-                                            nextApplied.denseStartFrame,
-                                            nextApplied.denseEndFrame,
+                                            nextApplied.startFrame,
+                                            nextApplied.values,
+                                            nextApplied.startFrame,
+                                            nextApplied.endFrame,
                                             "draw",
                                         );
                                         if (paramValuePopupEnabled) {
@@ -2616,7 +2523,7 @@ export function usePianoRollInteractions(args: {
                                         invalidate();
                                     };
 
-                                    const onUp = (ev?: globalThis.PointerEvent) => {
+                                    const onUp = async (ev?: globalThis.PointerEvent) => {
                                         window.removeEventListener("pointermove", onMove);
                                         window.removeEventListener("pointerup", onUp);
                                         window.removeEventListener("pointercancel", onUp);
@@ -2651,32 +2558,109 @@ export function usePianoRollInteractions(args: {
                                             return;
                                         }
 
-                                        const nextEdit = pvNow.edit.slice();
-                                        for (let i = 0; i < latestAppliedDense.length; i += 1) {
-                                            const frame = latestAppliedStartFrame + i * stride;
-                                            const idx = Math.round(
-                                                (frame - pvNow.startFrame) / stride,
+                                        // 全分辨率无损提交（与选区移动拖拽同一范式）：
+                                        // 等待拖动开始时发起的全分辨率取数，用最终 dy 在
+                                        // 真实曲线上重算变换，帧索引重建（含边缘淡化）后
+                                        // 分块回写 —— 预览用的 pv 近似值绝不写回后端。
+                                        dragSettled = true;
+                                        const fullRes = await origCurvePromise;
+                                        const selLen = fullRes.values.length;
+                                        if (selLen > 0) {
+                                            const selectionValues =
+                                                lastDy >= 0
+                                                    ? createSelectionAmplifier(
+                                                          fullRes.values,
+                                                          editParam,
+                                                          { framePeriodMs: fp },
+                                                      ).apply(rightDragUpScale(lastDy))
+                                                    : transformSelectionByRightDrag(
+                                                          fullRes.values,
+                                                          editParam,
+                                                          lastDy,
+                                                          { framePeriodMs: fp },
+                                                      );
+                                            const edgeHalfSpan = edgeHalfSpanForIndices(selLen, 1);
+                                            const extraEdgeFrames = Math.max(
+                                                0,
+                                                Math.ceil(edgeHalfSpan),
                                             );
-                                            if (idx >= 0 && idx < nextEdit.length) {
-                                                nextEdit[idx] = latestAppliedDense[i] ?? 0;
-                                            }
-                                        }
-                                        setParamView({ ...pvNow, edit: nextEdit });
-                                        liveEditOverrideRef.current = null;
+                                            const upRange = selectionDragRange({
+                                                origStartFrame: selStartFrame,
+                                                origValuesLength: selLen,
+                                                frameDelta: 0,
+                                                extraEdgeFrames,
+                                            });
+                                            // pv 若已以 stride=1 覆盖该范围则直接切片（零 IPC）；
+                                            // 否则分块拉取。commitBase 是拖动前的当前后端值。
+                                            const commitBase = await fetchFullResCurve({
+                                                trackId: rootTrackId,
+                                                param: editParam,
+                                                startFrame: upRange.startFrame,
+                                                endFrame: upRange.endFrame,
+                                                paramView: pvNow,
+                                            });
+                                            const built = buildSelectionDragDense({
+                                                sourceAt: (frame) =>
+                                                    commitBase.values[
+                                                        frame - commitBase.startFrame
+                                                    ] ?? 0,
+                                                origValues: selectionValues,
+                                                origStartFrame: selStartFrame,
+                                                frameDelta: 0,
+                                                extraEdgeFrames,
+                                                transform: (orig) => orig,
+                                                edgeBlend:
+                                                    edgeHalfSpan > 0
+                                                        ? {
+                                                              halfSpanFrames: edgeHalfSpan,
+                                                              isEditable:
+                                                                  editParam === "pitch"
+                                                                      ? editablePitchValue
+                                                                      : undefined,
+                                                          }
+                                                        : undefined,
+                                            });
+                                            const finalDense = built.values;
 
-                                        void (async () => {
-                                            await paramsApi.setParamFrames(
-                                                rootTrackId,
-                                                editParam,
-                                                latestAppliedStartFrame,
-                                                latestAppliedDense,
-                                                true,
-                                            );
+                                            // 立即同步本地 paramView state（逐帧映射到 pv 的
+                                            // 采样栅格上；pv 只是显示，随后会被后端数据刷新）
+                                            const nextEdit = pvNow.edit.slice();
+                                            const pvStepUp = Math.max(1, Math.floor(pvNow.stride));
+                                            for (let i = 0; i < finalDense.length; i += 1) {
+                                                const globalIdx = Math.round(
+                                                    (built.startFrame + i - pvNow.startFrame) /
+                                                        pvStepUp,
+                                                );
+                                                if (
+                                                    globalIdx >= 0 &&
+                                                    globalIdx < nextEdit.length
+                                                ) {
+                                                    nextEdit[globalIdx] = finalDense[i];
+                                                }
+                                            }
+                                            setParamView({ ...pvNow, edit: nextEdit });
+                                            liveEditOverrideRef.current = null;
+
+                                            // 分块回写：整段编辑只打一个撤销点，块之间让出
+                                            // 事件循环，超长工程也不会卡死界面。
+                                            void (async () => {
+                                                await uploadFullResCurve({
+                                                    trackId: rootTrackId,
+                                                    param: editParam,
+                                                    startFrame: built.startFrame,
+                                                    values: finalDense,
+                                                });
+                                                if (liveEditActiveRef) {
+                                                    liveEditActiveRef.current = false;
+                                                }
+                                                bumpRefreshToken();
+                                            })();
+                                        } else {
+                                            liveEditOverrideRef.current = null;
                                             if (liveEditActiveRef) {
                                                 liveEditActiveRef.current = false;
                                             }
-                                            bumpRefreshToken();
-                                        })();
+                                        }
 
                                         const suppressOnce = (evt: globalThis.MouseEvent) => {
                                             evt.preventDefault();
@@ -2892,27 +2876,28 @@ export function usePianoRollInteractions(args: {
                                     const selLen = origValues.length;
                                     if (selLen === 0) return;
 
-                                    // 边缘平滑度：扩展范围以包含选区边界外侧上下文
-                                    // halfSpan 与 applyEdgeSmoothingToDense 内的计算保持一致
-                                    const edgeSmoothStr = clamp(
-                                        Number(edgeSmoothnessPercent) || 0,
-                                        0,
-                                        100,
-                                    );
-                                    const extraEdgeFrames = Math.ceil(
-                                        Math.round((edgeSmoothStr / 100) * Math.floor(selLen / 2)) /
-                                            2,
-                                    );
+                                    // 边缘平滑度：毫秒定标的过渡带半宽。预览 dense
+                                    // 是按帧索引的（sourceAt 内部消化 pv 的 stride），
+                                    // halfSpan 与 extraEdgeFrames 都以帧为单位。
+                                    const edgeHalfSpanIdx = edgeHalfSpanForIndices(selLen, 1);
 
                                     const built = buildSelectionDragDense({
                                         sourceAt: makePvSourceAt(pvNow),
                                         origValues,
                                         origStartFrame: selStartFrame,
                                         frameDelta: lastFrameDelta,
-                                        extraEdgeFrames,
+                                        extraEdgeFrames: Math.ceil(edgeHalfSpanIdx),
                                         transform: (orig, frame) => transformDragValue(orig, frame),
-                                        computeChangeFactor: computeSelectionChangeFactor,
-                                        applyEdgeSmoothing: applyEdgeSmoothingToDense,
+                                        edgeBlend:
+                                            edgeHalfSpanIdx > 0
+                                                ? {
+                                                      halfSpanFrames: edgeHalfSpanIdx,
+                                                      isEditable:
+                                                          editParam === "pitch"
+                                                              ? editablePitchValue
+                                                              : undefined,
+                                                  }
+                                                : undefined,
                                     });
 
                                     applyDenseToLiveEdit(
@@ -2974,18 +2959,14 @@ export function usePianoRollInteractions(args: {
                                         origValues = (await origCurvePromise).values;
                                         const selLen = origValues.length;
                                         if (selLen > 0) {
-                                            // 边缘平滑度：扩展 dense 范围以包含选区边界外侧上下文
-                                            const edgeSmoothStrUp = clamp(
-                                                Number(edgeSmoothnessPercent) || 0,
-                                                0,
-                                                100,
+                                            // 边缘平滑度：毫秒定标的过渡带半宽（帧），
+                                            // 扩展 dense 范围以包含选区边界外侧上下文。
+                                            // 提交 dense 恒为 stride=1。
+                                            const edgeHalfSpanUp = edgeHalfSpanForIndices(
+                                                selLen,
+                                                1,
                                             );
-                                            const extraEdgeFramesUp = Math.ceil(
-                                                Math.round(
-                                                    (edgeSmoothStrUp / 100) *
-                                                        Math.floor(selLen / 2),
-                                                ) / 2,
-                                            );
+                                            const extraEdgeFramesUp = Math.ceil(edgeHalfSpanUp);
 
                                             // 提交前把整段范围的全分辨率数据拉下来作为基底。
                                             // 这是「回写不失真」的关键：预览用的是可能降采样的
@@ -3019,8 +3000,16 @@ export function usePianoRollInteractions(args: {
                                                 extraEdgeFrames: extraEdgeFramesUp,
                                                 transform: (orig, frame) =>
                                                     transformDragValue(orig, frame),
-                                                computeChangeFactor: computeSelectionChangeFactor,
-                                                applyEdgeSmoothing: applyEdgeSmoothingToDense,
+                                                edgeBlend:
+                                                    edgeHalfSpanUp > 0
+                                                        ? {
+                                                              halfSpanFrames: edgeHalfSpanUp,
+                                                              isEditable:
+                                                                  editParam === "pitch"
+                                                                      ? editablePitchValue
+                                                                      : undefined,
+                                                          }
+                                                        : undefined,
                                             });
                                             const finalDense = built.values;
                                             const overallMinFrameExt = built.startFrame;
@@ -3617,8 +3606,8 @@ export function usePianoRollInteractions(args: {
             pointerValue,
             strokeRef,
             applyDenseToLiveEdit,
-            applyEdgeSmoothingToDense,
-            computeSelectionChangeFactor,
+            blendDenseEdges,
+            edgeHalfSpanForIndices,
             applyMorphOverlayPreview,
             applyPostStrokeSmoothing,
             buildMorphDense,
