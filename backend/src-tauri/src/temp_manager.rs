@@ -24,11 +24,11 @@ pub fn remove_old_synth_temp(old_path: Option<&str>) {
         if path.exists() {
             match fs::remove_file(path) {
                 Ok(()) => {
-                    log::warn!("[temp_manager] 已删除旧 synth 临时文件: {}", path.display());
+                    log::warn!("[temp_manager] removed stale synth temp file: {}", path.display());
                 }
                 Err(e) => {
                     log::warn!(
-                        "[temp_manager] 删除旧 synth 临时文件失败: {} — {}",
+                        "[temp_manager] failed to remove stale synth temp file: {} — {}",
                         path.display(),
                         e
                     );
@@ -74,7 +74,7 @@ pub fn cleanup_stale_temp_files() {
 
         if total_removed > 0 {
             log::warn!(
-                "[temp_manager] 启动清理完成: 删除 {} 个遗留临时文件, 释放 {:.1} KB",
+                "[temp_manager] startup cleanup finished: removed {} stale temp files, freed {:.1} KB",
                 total_removed,
                 total_bytes as f64 / 1024.0,
             );
@@ -127,7 +127,7 @@ fn cleanup_dir_by_prefix_older_than(dir: &Path, prefixes: &[&str], max_age_sec: 
                 removed += 1;
             }
             Err(e) => {
-                log::warn!("[temp_manager] 清理失败: {} — {}", path.display(), e);
+                log::warn!("[temp_manager] cleanup failed: {} — {}", path.display(), e);
             }
         }
     }

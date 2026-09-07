@@ -1671,7 +1671,7 @@ fn emit_clip_pitch_data_for_clip(
     // ── 音频 clip 路径：从 FCPE 缓存获取音高曲线 ──
     let Some(cached) = get_or_compute_clip_pitch_midi_global(tl, clip, &root, frame_period_ms)
     else {
-        debug_eprintln!("[pitch:emit] clip_id={} → 缓存未命中，跳过", clip.id);
+        debug_eprintln!("[pitch:emit] clip_id={} → cache miss, skipping", clip.id);
         return;
     };
 
