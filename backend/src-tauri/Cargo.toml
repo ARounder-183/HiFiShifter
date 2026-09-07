@@ -61,6 +61,8 @@ ndarray = { version = "0.16", optional = true }
 clipboard-win = "5"
 libc = "0.2"
 windows-core = "0.58"
+windows-core-webview2 = { package = "windows-core", version = "0.61" }
+webview2-com = "0.38"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-foundation = { version = "0.3", features = ["NSString", "NSData"] }

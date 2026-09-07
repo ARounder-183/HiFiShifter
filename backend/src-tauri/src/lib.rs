@@ -147,6 +147,9 @@ mod vslib;
 #[path = "vocoder/world_vocoder.rs"]
 mod world_vocoder;
 
+#[cfg(target_os = "windows")]
+mod webview2_accelerators;
+
 /// Internal pure-function exports used by integration tests (tests/).
 ///
 /// Kept unconditional (no feature gate): comctl32.dll is delay-loaded via
@@ -347,6 +350,15 @@ pub fn run() {
                         let _ = win.set_fullscreen(false);
                     }
                 }
+            }
+
+            // 禁用 WebView2 的浏览器级快捷键（Ctrl+Plus/Minus 缩放、Ctrl+F
+            // 查找、F5 刷新等）—— 它们不可被页面取消，会抢占应用快捷键
+            // （参数线微调 Ctrl+= / Ctrl+- 等）。与窗口状态恢复相互独立，
+            // 因此放在 cfg_dir 块之外。
+            #[cfg(target_os = "windows")]
+            if let Some(win) = app.get_webview_window("main") {
+                webview2_accelerators::disable_browser_accelerator_keys(&win);
             }
 
             // 启动时清理上次遗留的临时文件（后台线程，不阻塞启动）
