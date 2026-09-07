@@ -2,21 +2,23 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
     beginHoldRepeat,
     consumeHoldRepeatKeyDown,
+    handleHoldRepeatKeyUp,
     isHoldRepeatActive,
     stopHoldRepeat,
 } from "./holdRepeat";
 
 function keyEvent(
     key: string,
-    opts: { repeat?: boolean; ctrl?: boolean } = {},
+    opts: { repeat?: boolean; ctrl?: boolean; shift?: boolean; code?: string } = {},
 ): { ev: KeyboardEvent; preventDefault: ReturnType<typeof vi.fn> } {
     const preventDefault = vi.fn();
     const ev = {
         key,
+        code: opts.code,
         repeat: Boolean(opts.repeat),
         ctrlKey: Boolean(opts.ctrl),
         metaKey: false,
-        shiftKey: false,
+        shiftKey: Boolean(opts.shift),
         altKey: false,
         preventDefault,
     } as unknown as KeyboardEvent;
@@ -214,5 +216,72 @@ describe("holdRepeat — 长按重复管理器（粘贴同款节奏）", () => {
         vi.advanceTimersByTime(200);
         expect(fireA).not.toHaveBeenCalled();
         expect(fireB).toHaveBeenCalledTimes(2);
+    });
+
+    it("Shift 变体（Shift+= 事件键为 '+'）：同键 OS 重复按物理键位吞掉", () => {
+        // 大幅变体默认绑定 { key: "=", shift: true }；US 布局按住 Shift 时
+        // keydown 的 e.key 是 "+"（上档字符）。OS 自动重复事件必须按
+        // e.code（Equal）归位后识别为同键：吞掉 + preventDefault。
+        const fire = vi.fn();
+        beginHoldRepeat({ key: "=", shift: true }, fire, {
+            initialDelayMs: 100,
+            repeatIntervalMs: 50,
+        });
+        const { ev, preventDefault } = keyEvent("+", {
+            code: "Equal",
+            repeat: true,
+            shift: true,
+        });
+        expect(consumeHoldRepeatKeyDown(ev)).toBe(true);
+        expect(preventDefault).toHaveBeenCalled();
+        expect(fire).not.toHaveBeenCalled();
+        vi.advanceTimersByTime(100);
+        expect(fire).not.toHaveBeenCalled();
+        vi.advanceTimersByTime(50);
+        expect(fire).toHaveBeenCalledTimes(1);
+    });
+
+    it("Shift 变体：松开主键（e.key='+'）终止长按", () => {
+        // 回归：keyup 时 Shift 仍按住 → e.key 是 "+" 而非 "="；若只按
+        // e.key 比较，先松主键不会终止长按（重复在松键后继续）。
+        const fire = vi.fn();
+        beginHoldRepeat({ key: "=", shift: true }, fire, {
+            initialDelayMs: 100,
+            repeatIntervalMs: 50,
+        });
+        const { ev } = keyEvent("+", { code: "Equal", shift: true });
+        handleHoldRepeatKeyUp(ev);
+        expect(isHoldRepeatActive()).toBe(false);
+        vi.advanceTimersByTime(1000);
+        expect(fire).not.toHaveBeenCalled();
+    });
+
+    it("Shift 变体：先松 Shift 再松主键（e.key='='）同样终止长按", () => {
+        const fire = vi.fn();
+        beginHoldRepeat({ key: "=", shift: true }, fire, {
+            initialDelayMs: 100,
+            repeatIntervalMs: 50,
+        });
+        const { ev } = keyEvent("=", { code: "Equal" });
+        handleHoldRepeatKeyUp(ev);
+        expect(isHoldRepeatActive()).toBe(false);
+        vi.advanceTimersByTime(1000);
+        expect(fire).not.toHaveBeenCalled();
+    });
+
+    it("Ctrl 微调变体（字符不变形）：行为与普通长按一致", () => {
+        const fire = vi.fn();
+        beginHoldRepeat({ key: "=", ctrl: true }, fire, {
+            initialDelayMs: 100,
+            repeatIntervalMs: 50,
+        });
+        const rep = keyEvent("=", { code: "Equal", repeat: true, ctrl: true });
+        expect(consumeHoldRepeatKeyDown(rep.ev)).toBe(true);
+        expect(rep.preventDefault).toHaveBeenCalled();
+        vi.advanceTimersByTime(150);
+        expect(fire).toHaveBeenCalledTimes(1);
+        const { ev } = keyEvent("=", { code: "Equal", ctrl: true });
+        handleHoldRepeatKeyUp(ev);
+        expect(isHoldRepeatActive()).toBe(false);
     });
 });

@@ -23,6 +23,7 @@
  */
 
 import type { Keybinding } from "./types";
+import { physicalKeyFromEvent } from "./keybindingMatch";
 
 export interface HoldRepeatOptions {
     /** 按下后到开始重复的停顿（毫秒）。默认 400。 */
@@ -46,6 +47,13 @@ function isModifierKey(key: string): boolean {
     return k === "control" || k === "shift" || k === "alt" || k === "meta";
 }
 
+/** 事件主键是否就是长按主键（Shift 上档字符按物理键位归位后比较）。 */
+function isHeldKey(e: Pick<KeyboardEvent, "key" | "code">): boolean {
+    const a = active;
+    if (!a) return false;
+    return e.key.toLowerCase() === a.key || physicalKeyFromEvent(e) === a.key;
+}
+
 function stop(): void {
     if (!active) return;
     if (active.initialTimer != null) clearTimeout(active.initialTimer);
@@ -54,10 +62,20 @@ function stop(): void {
 }
 
 function onKeyUp(e: KeyboardEvent): void {
+    handleHoldRepeatKeyUp(e);
+}
+
+/**
+ * keyup 终止判定。生产路径由 window keyup 捕获监听调用；单独导出是为了
+ * 让无 DOM 的单测（vitest node 环境）能直接驱动同一逻辑。
+ */
+export function handleHoldRepeatKeyUp(e: KeyboardEvent): void {
     const a = active;
     if (!a) return;
     // 松开主键或任意修饰键都结束长按（与粘贴实现一致）。
-    if (e.key.toLowerCase() === a.key || isModifierKey(e.key)) {
+    // 主键按物理键位比较：Shift 变体（如 Shift+=，事件键为 "+"）松开时
+    // e.key 是上档字符，按 e.code 归位后才能正确终止长按。
+    if (isHeldKey(e) || isModifierKey(e.key)) {
         stop();
     }
 }
@@ -128,9 +146,10 @@ export function stopHoldRepeat(): void {
  */
 export function consumeHoldRepeatKeyDown(e: KeyboardEvent): boolean {
     if (!active) return false;
-    const key = e.key.toLowerCase();
     if (e.repeat) {
-        if (key === active.key) {
+        // 同键（按物理键位比较，Shift 上档字符归位后命中）→ 吞掉并
+        // preventDefault，节奏交给计时器。
+        if (isHeldKey(e)) {
             e.preventDefault();
         }
         return true;
@@ -138,7 +157,7 @@ export function consumeHoldRepeatKeyDown(e: KeyboardEvent): boolean {
     // 同键非重复事件：放行。同键真重按（松开再按下）由动作路径的
     // beginHoldRepeat（内部先 stop）重建 —— 与「重新按下粘贴键 = 重启
     // 长按」的既有语义等价。
-    if (key !== active.key) {
+    if (!isHeldKey(e)) {
         stop();
     }
     return false;

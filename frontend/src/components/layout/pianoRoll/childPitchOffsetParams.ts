@@ -100,10 +100,47 @@ export function snapChildPitchOffsetValue(param: string, value: number): number 
     return value;
 }
 
-export function childPitchOffsetShiftStep(param: string): number | null {
-    if (isChildPitchOffsetCentsParam(param)) return 100;
-    if (isChildPitchOffsetDegreesParam(param)) return 1;
-    if (isChildFormantOffsetCentsParam(param)) return 50;
+export type ParamShiftMagnitude = "normal" | "coarse" | "fine";
+
+export function childPitchOffsetShiftStep(
+    param: string,
+    magnitude: ParamShiftMagnitude = "normal",
+): number | null {
+    if (isChildPitchOffsetCentsParam(param)) {
+        // 音高偏移以音分为单位：默认 ±100（一个半音），微调 ±1 音分，
+        // 大幅 ±1200（一个八度）。
+        switch (magnitude) {
+            case "fine":
+                return 1;
+            case "coarse":
+                return 1200;
+            default:
+                return 100;
+        }
+    }
+    if (isChildPitchOffsetDegreesParam(param)) {
+        // 度数（音级）已是 granularity 最小的音乐单位：微调与默认相同
+        // （±1 音级）；大幅 ±7 ≈ 七声音阶的一个八度（与音级量程 ±14 =
+        // ±2 个八度一致）。
+        switch (magnitude) {
+            case "coarse":
+                return 7;
+            default:
+                return 1;
+        }
+    }
+    if (isChildFormantOffsetCentsParam(param)) {
+        // 共振峰偏移同样以音分为单位：默认 ±50（与 UI 吸附步长一致），
+        // 微调 ±1 音分，大幅 ±1200（一个八度）。
+        switch (magnitude) {
+            case "fine":
+                return 1;
+            case "coarse":
+                return 1200;
+            default:
+                return 50;
+        }
+    }
     return null;
 }
 

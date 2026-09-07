@@ -70,10 +70,7 @@ import {
     timelineViewportStateToNative,
 } from "../../utils/timelineViewportSync";
 import { isModifierActive, isNoneBinding } from "../../features/keybindings/keybindingsSlice";
-import {
-    getActiveSurface,
-    setActiveSurfaceExplicit,
-} from "../../features/uiFocus/focusSurface";
+import { getActiveSurface, setActiveSurfaceExplicit } from "../../features/uiFocus/focusSurface";
 import { findFirstExternalPathAction } from "./timeline/dnd";
 import { shiftPitchValue } from "./timeline/clipPitchDrag";
 import type { ScaleLike } from "../../utils/musicalScales";
@@ -125,7 +122,11 @@ import {
 } from "./timeline/runtime/timelineAxis.js";
 import { usePianoRollInteractions } from "./pianoRoll/usePianoRollInteractions";
 import { useLiveParamEditing } from "./pianoRoll/useLiveParamEditing";
-import { getParamShiftStep } from "./pianoRoll/paramShiftStep";
+import { getParamShiftStep, parseParamShiftMagnitude } from "./pianoRoll/paramShiftStep";
+import {
+    beginSelectionParamEdit,
+    endSelectionParamEdit,
+} from "../../features/session/selectionEditInFlight";
 import {
     buildChildPitchOffsetCentsParam,
     buildChildPitchOffsetDegreesParam,
@@ -163,7 +164,6 @@ import {
     selectKeybinding,
     selectMergedKeybindings,
 } from "../../features/keybindings/keybindingsSlice";
-
 
 import { usePianoRollStatusUpdate } from "../../contexts/PianoRollStatusContext";
 import { MidiTrackSelectDialog } from "./MidiTrackSelectDialog";
@@ -609,7 +609,6 @@ export const PianoRollPanel: React.FC = () => {
 
     const effectivePitchSnapVisual =
         snapGestureActive && snapToggleHeld ? !s.pitchSnapEnabled : s.pitchSnapEnabled;
-
 
     // MIDI 导入弹窗状态
     const [midiDialogOpen, setMidiDialogOpen] = useState(false);
@@ -3258,9 +3257,7 @@ export const PianoRollPanel: React.FC = () => {
             // （focusSurface，外来源粘贴兜底等）随之指向参数编辑器。
             if (op === "selectClipParamRange") {
                 const clipId = typeof data?.clipId === "string" ? data.clipId : "";
-                const clip = store
-                    .getState()
-                    .session.clips.find((entry) => entry.id === clipId);
+                const clip = store.getState().session.clips.find((entry) => entry.id === clipId);
                 if (!clip) return;
                 const aBeat = Math.max(0, clip.startSec / secPerBeat);
                 const bBeat = Math.max(0, (clip.startSec + clip.lengthSec) / secPerBeat);
@@ -3751,15 +3748,27 @@ export const PianoRollPanel: React.FC = () => {
                 }
                 case "shiftParamUpSelection":
                 case "shiftParamDownSelection": {
-                    const descriptor = processorParamsRef.current.find(
-                        (param) => param.id === editParam,
-                    );
-                    const step = getParamShiftStep(editParam, descriptor);
-                    const delta = op === "shiftParamUpSelection" ? step : -step;
-                    await applySelectionEditWithEdgeSmoothing(
-                        (vals) => vals.map((v) => v + delta),
-                        Number(data?.edgeSmoothnessPercent),
-                    );
+                    // 长按重复的节拍守卫：上一拍（后端读写仍在途）未完成时
+                    // 跳过本拍 —— 在途标记经 selectionEditInFlight 与 App
+                    // 端 fire 共享，两端双重检查避免重复事件堆积。
+                    if (!beginSelectionParamEdit()) return;
+                    try {
+                        const descriptor = processorParamsRef.current.find(
+                            (param) => param.id === editParam,
+                        );
+                        const magnitude = parseParamShiftMagnitude(data?.magnitude);
+                        const step = getParamShiftStep(editParam, descriptor, magnitude);
+                        const delta = op === "shiftParamUpSelection" ? step : -step;
+                        // 不透传 data?.edgeSmoothnessPercent：键盘路径的事件
+                        // detail 不携带该值，直接沿用 store 的边缘平滑设置
+                        // （与音频块范围平移路径一致；Number(undefined)=NaN
+                        // 会被误判为 0，跳过平滑）。
+                        await applySelectionEditWithEdgeSmoothing((vals) =>
+                            vals.map((v) => v + delta),
+                        );
+                    } finally {
+                        endSelectionParamEdit();
+                    }
                     break;
                 }
                 case "smooth": {

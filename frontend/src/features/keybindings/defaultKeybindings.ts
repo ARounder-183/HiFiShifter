@@ -75,10 +75,24 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     "pianoRoll.copy": { key: "c", ctrl: true },
     "pianoRoll.cut": { key: "x", ctrl: true },
     "pianoRoll.paste": { key: "v", ctrl: true },
+    // 参数线平移三档变化幅度：
+    // - 默认（无修饰键）：每参数的常规步长（音高 ±1 半音等）；
+    // - Shift：大幅步长（音高 ±1200 音分 = 一个八度等）；
+    // - Ctrl：微调步长（音高 ±1 音分等）。
+    // 注意：Shift 按下时 e.key 是上档字符（US 布局 Shift+= 产出 "+"），
+    // 匹配时按 e.code 物理键位归位（见 keybindingMatch.ts）。
     "pianoRoll.shiftParamUp": { key: "=" },
     "pianoRoll.shiftParamDown": { key: "-" },
     "pianoRoll.shiftParamUpSelection": { key: "]" },
     "pianoRoll.shiftParamDownSelection": { key: "[" },
+    "pianoRoll.shiftParamUpLarge": { key: "=", shift: true },
+    "pianoRoll.shiftParamDownLarge": { key: "-", shift: true },
+    "pianoRoll.shiftParamUpSelectionLarge": { key: "]", shift: true },
+    "pianoRoll.shiftParamDownSelectionLarge": { key: "[", shift: true },
+    "pianoRoll.shiftParamUpSmall": { key: "=", ctrl: true },
+    "pianoRoll.shiftParamDownSmall": { key: "-", ctrl: true },
+    "pianoRoll.shiftParamUpSelectionSmall": { key: "]", ctrl: true },
+    "pianoRoll.shiftParamDownSelectionSmall": { key: "[", ctrl: true },
     "pianoRoll.vibratoDragAmplitudeIncrease": { key: "arrowup" },
     "pianoRoll.vibratoDragAmplitudeDecrease": { key: "arrowdown" },
     "pianoRoll.vibratoDragFrequencyIncrease": { key: "arrowleft" },
@@ -322,6 +336,38 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
     },
     "pianoRoll.shiftParamDownSelection": {
         labelKey: "kb_pianoroll_shift_param_down_selection",
+        group: "pianoRoll",
+    },
+    "pianoRoll.shiftParamUpLarge": {
+        labelKey: "kb_pianoroll_shift_param_up_large",
+        group: "pianoRoll",
+    },
+    "pianoRoll.shiftParamDownLarge": {
+        labelKey: "kb_pianoroll_shift_param_down_large",
+        group: "pianoRoll",
+    },
+    "pianoRoll.shiftParamUpSmall": {
+        labelKey: "kb_pianoroll_shift_param_up_small",
+        group: "pianoRoll",
+    },
+    "pianoRoll.shiftParamDownSmall": {
+        labelKey: "kb_pianoroll_shift_param_down_small",
+        group: "pianoRoll",
+    },
+    "pianoRoll.shiftParamUpSelectionLarge": {
+        labelKey: "kb_pianoroll_shift_param_up_selection_large",
+        group: "pianoRoll",
+    },
+    "pianoRoll.shiftParamDownSelectionLarge": {
+        labelKey: "kb_pianoroll_shift_param_down_selection_large",
+        group: "pianoRoll",
+    },
+    "pianoRoll.shiftParamUpSelectionSmall": {
+        labelKey: "kb_pianoroll_shift_param_up_selection_small",
+        group: "pianoRoll",
+    },
+    "pianoRoll.shiftParamDownSelectionSmall": {
+        labelKey: "kb_pianoroll_shift_param_down_selection_small",
         group: "pianoRoll",
     },
     "pianoRoll.vibratoDragAmplitudeIncrease": {

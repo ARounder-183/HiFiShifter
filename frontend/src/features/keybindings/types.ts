@@ -63,8 +63,16 @@ export type ActionId =
     | "pianoRoll.paste" // PianoRoll 内粘贴参数帧
     | "pianoRoll.shiftParamUp" // 选中 clip 参数线整体上移
     | "pianoRoll.shiftParamDown" // 选中 clip 参数线整体下移
+    | "pianoRoll.shiftParamUpLarge" // 选中 clip 参数线大幅上移（Shift+=）
+    | "pianoRoll.shiftParamDownLarge" // 选中 clip 参数线大幅下移（Shift+-）
+    | "pianoRoll.shiftParamUpSmall" // 选中 clip 参数线微调上移（Ctrl+=）
+    | "pianoRoll.shiftParamDownSmall" // 选中 clip 参数线微调下移（Ctrl+-）
     | "pianoRoll.shiftParamUpSelection" // 参数编辑器选择范围内参数线上移
     | "pianoRoll.shiftParamDownSelection" // 参数编辑器选择范围内参数线下移
+    | "pianoRoll.shiftParamUpSelectionLarge" // 选择范围内参数线大幅上移（Shift+]）
+    | "pianoRoll.shiftParamDownSelectionLarge" // 选择范围内参数线大幅下移（Shift+[）
+    | "pianoRoll.shiftParamUpSelectionSmall" // 选择范围内参数线微调上移（Ctrl+]）
+    | "pianoRoll.shiftParamDownSelectionSmall" // 选择范围内参数线微调下移（Ctrl+[）
     | "pianoRoll.vibratoDragAmplitudeIncrease" // 直线/颤音拖拽时增大振幅
     | "pianoRoll.vibratoDragAmplitudeDecrease" // 直线/颤音拖拽时减小振幅
     | "pianoRoll.vibratoDragFrequencyIncrease" // 直线/颤音拖拽时增大频率

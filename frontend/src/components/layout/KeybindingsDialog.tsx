@@ -22,6 +22,7 @@ import {
     GROUP_LABEL_KEYS,
 } from "../../features/keybindings/defaultKeybindings";
 import type { ActionId, ActionMeta, Keybinding } from "../../features/keybindings/types";
+import { canonicalKeyFromEvent } from "../../features/keybindings/keybindingMatch";
 import {
     KEYBINDING_PRESET_SELECTION_IDS,
     KEYBINDING_PRESETS,
@@ -170,7 +171,10 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
             // 普通模式：忽略单独按下修饰键
             if (isPhysicalModifierKey(e.key)) return;
 
-            const key = e.key === " " ? "space" : e.key.toLowerCase();
+            // 录入规范化：Shift 会改写标点字符（US 布局 Shift+= 产出 "+"），
+            // 按 e.code 还原为物理键位的基础字符（"="），与默认绑定一致，
+            // 才能参与冲突检测与运行时匹配（见 keybindingMatch.ts）。
+            const key = canonicalKeyFromEvent(e);
             const ctrl = isMac ? e.metaKey : e.ctrlKey;
 
             const newBinding: Keybinding = {
