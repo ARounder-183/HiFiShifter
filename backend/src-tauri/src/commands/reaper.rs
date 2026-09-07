@@ -58,10 +58,6 @@ pub(super) fn import_reaper_project(
     {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
 
-        // 计算现有轨道的最大 order
-        let max_existing_order = tl.tracks.iter().map(|t| t.order).max().unwrap_or(-1);
-        let mut order_offset = max_existing_order + 1;
-
         // 应用工程 BPM（如果现有工程为空则直接应用；否则覆盖写入）
         // 与 Tempo Map 规范化一致：钳制到 10-960，避免非法 BPM 写入工程。
         if result.timeline.bpm != 120.0 || tl.tracks.is_empty() {
@@ -106,13 +102,19 @@ pub(super) fn import_reaper_project(
             }
         }
 
-        // 合并轨道（调整 order 使其排在现有轨道之后）
+        // 合并轨道（排在现有轨道之后）：导入轨道的 order 统一置为
+        // "现有根级数量"（同级排序键相同 → 归一化时按 Vec 序稳定排在
+        // 既有根之后），随后由 normalize_track_vec 重写全部同级序号。
+        let root_base = tl
+            .tracks
+            .iter()
+            .filter(|t| t.parent_id.is_none())
+            .count() as i32;
         for mut track in result.timeline.tracks {
-            track.order = order_offset;
-            order_offset += 1;
+            track.order = root_base;
             tl.tracks.push(track);
         }
-        tl.next_track_order = order_offset;
+        tl.normalize_track_vec();
 
         // 合并 clips
         for mut clip in result.timeline.clips {

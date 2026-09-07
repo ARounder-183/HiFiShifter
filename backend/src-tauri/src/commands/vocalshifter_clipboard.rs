@@ -374,9 +374,8 @@ fn paste_vsp_project(state: &AppState, path: &std::path::Path) -> serde_json::Va
     let (playhead_sec, selected_track_idx, ordered_track_ids, next_track_order) = {
         let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
 
-        let mut sorted_tracks: Vec<_> = tl.tracks.iter().collect();
-        sorted_tracks.sort_by_key(|t| t.order);
-        let ordered: Vec<String> = sorted_tracks.iter().map(|t| t.id.clone()).collect();
+        // 轨道显示顺序 = Vec 顺序（normalize_track_vec 不变式，DFS）。
+        let ordered: Vec<String> = tl.tracks.iter().map(|t| t.id.clone()).collect();
 
         let sel_idx = tl
             .selected_track_id
@@ -421,12 +420,19 @@ fn paste_vsp_project(state: &AppState, path: &std::path::Path) -> serde_json::Va
         state.checkpoint_timeline(&tl);
 
         if !result.timeline.tracks.is_empty() {
+            // 导入轨道的 order 统一置为"现有根级数量"（归一化时按 Vec 序
+            // 稳定排在既有根之后），随后 normalize_track_vec 重写同级序号。
+            let root_base = tl
+                .tracks
+                .iter()
+                .filter(|t| t.parent_id.is_none())
+                .count() as i32;
             for track in &result.timeline.tracks {
-                tl.tracks.push(track.clone());
+                let mut t = track.clone();
+                t.order = root_base;
+                tl.tracks.push(t);
             }
-            tl.next_track_order = tl
-                .next_track_order
-                .max(tl.tracks.iter().map(|t| t.order).max().unwrap_or(0) + 1);
+            tl.normalize_track_vec();
         }
 
         for clip in &result.timeline.clips {

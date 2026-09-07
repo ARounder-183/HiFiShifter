@@ -6030,6 +6030,147 @@ mod tests {
             "tension must follow the clip"
         );
     }
+
+    // ─── 轨道顺序单一事实来源（normalize_track_vec 不变式） ───
+
+    fn track_ids_in_vec_order(timeline: &TimelineState) -> Vec<String> {
+        timeline.tracks.iter().map(|t| t.id.clone()).collect()
+    }
+
+    #[test]
+    fn move_root_track_reorders_vec_and_sibling_ranks() {
+        let mut tl = TimelineState::default(); // 预置 Main 根轨道
+        let a = tl.tracks[0].id.clone();
+        let b = tl.add_track(Some("B".into()), None, None);
+        let c = tl.add_track(Some("C".into()), None, None);
+        assert_eq!(track_ids_in_vec_order(&tl), vec![a.clone(), b.clone(), c.clone()]);
+
+        // 把 C 拖到第一位（同级 index 0，不含自身计数）。
+        tl.move_track(&c, 0, None);
+        assert_eq!(
+            track_ids_in_vec_order(&tl),
+            vec![c.clone(), a.clone(), b.clone()],
+            "Vec 顺序必须立即反映拖拽结果（REAPER 导出按 Vec 序）"
+        );
+        // 同级序号连续、与 Vec 顺序一致。
+        let orders: Vec<i32> = tl.tracks.iter().map(|t| t.order).collect();
+        assert_eq!(orders, vec![0, 1, 2]);
+        assert_eq!(tl.next_track_order, 4);
+
+        // 拖回中间位。
+        tl.move_track(&c, 1, None);
+        assert_eq!(track_ids_in_vec_order(&tl), vec![a, c, b]);
+    }
+
+    #[test]
+    fn move_child_between_parents_keeps_dfs_vec_invariant() {
+        let mut tl = TimelineState::default();
+        let a = tl.tracks[0].id.clone();
+        let b = tl.add_track(Some("B".into()), None, None);
+        let a1 = tl.add_track(Some("A1".into()), Some(a.clone()), None);
+        // DFS：A, A1, B。
+        assert_eq!(track_ids_in_vec_order(&tl), vec![a.clone(), a1.clone(), b.clone()]);
+
+        // 把 A1 拖到 B 之下（B 的子级末尾）。
+        tl.move_track(&a1, 0, Some(b.clone()));
+        // DFS：A, B, A1 —— 子轨道物理紧跟其父轨道。
+        assert_eq!(track_ids_in_vec_order(&tl), vec![a, b, a1.clone()]);
+        // 同级序号按各自 parent 独立编号。
+        assert_eq!(tl.tracks.iter().find(|t| t.id == a1).unwrap().order, 0);
+    }
+
+    #[test]
+    fn duplicate_child_track_places_clone_after_source_without_order_collision() {
+        let mut tl = TimelineState::default();
+        let root = tl.tracks[0].id.clone();
+        let s1 = tl.add_track(Some("S1".into()), Some(root.clone()), None);
+        let s2 = tl.add_track(Some("S2".into()), Some(root.clone()), None);
+        assert_eq!(track_ids_in_vec_order(&tl), vec![root.clone(), s1.clone(), s2.clone()]);
+
+        let clone = tl.duplicate_track(&s1);
+        assert_eq!(clone.len(), 1);
+        let clone_id = &clone[0];
+        // 克隆紧贴源轨道之后，且同级序号互不冲突（旧实现"源后整体 +1"在
+        // 拖拽重排后的稀疏 order 上会产生重复序号）。
+        assert_eq!(
+            track_ids_in_vec_order(&tl),
+            vec![root.clone(), s1.clone(), clone_id.clone(), s2.clone()]
+        );
+        let ranks: Vec<i32> = tl
+            .tracks
+            .iter()
+            .filter(|t| t.parent_id.as_deref() == Some(root.as_str()))
+            .map(|t| t.order)
+            .collect();
+        assert_eq!(ranks, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn duplicate_root_subtree_places_clone_group_after_source() {
+        let mut tl = TimelineState::default();
+        let a = tl.tracks[0].id.clone();
+        let a_child = tl.add_track(Some("A1".into()), Some(a.clone()), None);
+        let b = tl.add_track(Some("B".into()), None, None);
+
+        let clones = tl.duplicate_track(&a);
+        let a_copy = clones[0].clone();
+        let a1_copy = clones[1].clone();
+        // DFS：A, A1, A(Copy), A1(Copy), B —— 克隆子树整块插在源根之后。
+        assert_eq!(
+            track_ids_in_vec_order(&tl),
+            vec![a.clone(), a_child, a_copy, a1_copy, b]
+        );
+    }
+
+    #[test]
+    fn remove_track_closes_sibling_ranks_and_keeps_vec_invariant() {
+        let mut tl = TimelineState::default();
+        let a = tl.tracks[0].id.clone();
+        let b = tl.add_track(Some("B".into()), None, None);
+        let c = tl.add_track(Some("C".into()), None, None);
+        tl.move_track(&c, 0, None); // Vec: C, A, B
+
+        tl.remove_track(&a);
+        assert_eq!(track_ids_in_vec_order(&tl), vec![c.clone(), b.clone()]);
+        let orders: Vec<i32> = tl.tracks.iter().map(|t| t.order).collect();
+        assert_eq!(orders, vec![0, 1], "删除后同级序号必须闭合空洞");
+    }
+
+    #[test]
+    fn normalize_repairs_orphan_parent_as_root() {
+        let mut tl = TimelineState::default();
+        let a = tl.tracks[0].id.clone();
+        // 直接构造孤儿数据（parent 指向不存在的轨道）。
+        tl.tracks.push(crate::state::Track {
+            id: "orphan_t".to_string(),
+            name: "Orphan".to_string(),
+            parent_id: Some("missing_parent".to_string()),
+            order: 0,
+            muted: false,
+            solo: false,
+            volume: 1.0,
+            compose_enabled: false,
+            pitch_analysis_algo: PitchAnalysisAlgo::default(),
+            color: "#888888".to_string(),
+        });
+        tl.normalize_track_vec();
+        assert_eq!(track_ids_in_vec_order(&tl), vec![a, "orphan_t".to_string()]);
+        assert_eq!(tl.tracks[1].parent_id, Some("missing_parent".to_string()));
+        assert_eq!(tl.tracks[1].order, 0, "孤儿作为独立根编号");
+    }
+
+    #[test]
+    fn add_track_with_index_inserts_at_display_position() {
+        let mut tl = TimelineState::default();
+        let a = tl.tracks[0].id.clone();
+        let b = tl.add_track(Some("B".into()), None, None);
+        let inserted = tl.add_track(Some("New".into()), None, Some(1));
+        assert_eq!(
+            track_ids_in_vec_order(&tl),
+            vec![a, inserted, b],
+            "指定插入位时新轨道落在该显示位"
+        );
+    }
 }
 
 pub(crate) fn new_id(prefix: &str) -> String {
@@ -6430,6 +6571,152 @@ impl TimelineState {
         segments.join("|")
     }
 
+    /// 轨道顺序的单一事实来源：`tracks` Vec 的顺序 == UI 显示顺序（树形 DFS）。
+    ///
+    /// - 同级排序键 = (order, 归一化前的 Vec 下标)：对历史数据 / 归一化前的
+    ///   临时 order 值也能得到稳定确定的结果；
+    /// - 孤儿（parent 不存在）、环、超深链（>64 层）的轨道兜底为根轨道；
+    /// - 归一化后每个 `order` = 同级序号（0-based），`next_track_order`
+    ///   收敛为 `tracks.len() + 1`。
+    ///
+    /// 所有改变轨道集合 / 层级 / 顺序的入口（增删移克隆、导入、粘贴、
+    /// 工程加载、撤销恢复）都必须在收尾调用一次。此后所有消费方**直接按
+    /// Vec 顺序**读取显示顺序（REAPER 导出、粘贴轨道映射、payload 构造），
+    /// 不再各自按 `order` 排序。
+    pub fn normalize_track_vec(&mut self) {
+        let total = self.tracks.len();
+        if total == 0 {
+            return;
+        }
+
+        // 1) 同级分组：parent_id → 归一化前的 Vec 下标列表。
+        let mut children_of: HashMap<Option<String>, Vec<usize>> = HashMap::new();
+        for (idx, t) in self.tracks.iter().enumerate() {
+            children_of.entry(t.parent_id.clone()).or_default().push(idx);
+        }
+        // 2) 同级排序键 = (order, 归一化前 Vec 下标)。
+        for siblings in children_of.values_mut() {
+            siblings.sort_by_key(|&idx| (self.tracks[idx].order, idx));
+        }
+
+        // 3) 根级 = parent 为空 + 兜底（parent 指向不存在轨道的孤儿）。
+        //    （parent 存在但成环 / 超深的轨道在 DFS 后统一兜底追加。）
+        let mut roots: Vec<usize> = children_of
+            .get(&None::<String>)
+            .cloned()
+            .unwrap_or_default();
+        for (idx, t) in self.tracks.iter().enumerate() {
+            if let Some(pid) = t.parent_id.as_deref() {
+                if !self.tracks.iter().any(|p| p.id == pid) {
+                    roots.push(idx);
+                }
+            }
+        }
+        roots.sort_by_key(|&idx| (self.tracks[idx].order, idx));
+        roots.dedup();
+
+        let mut new_vec: Vec<Track> = Vec::with_capacity(total);
+        let mut visited = vec![false; total];
+        let mut sibling_rank: HashMap<Option<String>, i32> = HashMap::new();
+
+        fn walk(
+            idx: usize,
+            depth: u32,
+            tracks: &[Track],
+            children_of: &HashMap<Option<String>, Vec<usize>>,
+            visited: &mut [bool],
+            sibling_rank: &mut HashMap<Option<String>, i32>,
+            out: &mut Vec<Track>,
+        ) {
+            if depth > 64 || visited[idx] {
+                return;
+            }
+            visited[idx] = true;
+            let mut track = tracks[idx].clone();
+            // 同级序号按 DFS 访问顺序连续分配（同 parent 的子轨道在 DFS 中
+            // 连续访问，故计数器按 parent 键累计即可）。
+            let rank = sibling_rank.entry(track.parent_id.clone()).or_insert(0);
+            track.order = *rank;
+            *rank += 1;
+            out.push(track);
+            if depth < 64 {
+                let child_key = tracks[idx].id.clone();
+                if let Some(children) = children_of.get(&Some(child_key)) {
+                    for &child in children {
+                        walk(
+                            child,
+                            depth + 1,
+                            tracks,
+                            children_of,
+                            visited,
+                            sibling_rank,
+                            out,
+                        );
+                    }
+                }
+            }
+        }
+
+        for root in roots {
+            walk(
+                root,
+                0,
+                &self.tracks,
+                &children_of,
+                &mut visited,
+                &mut sibling_rank,
+                &mut new_vec,
+            );
+        }
+        // 兜底：环 / 超深等不可达轨道按 (order, 原下标) 追加为根。
+        let mut leftovers: Vec<usize> = (0..total).filter(|&idx| !visited[idx]).collect();
+        leftovers.sort_by_key(|&idx| (self.tracks[idx].order, idx));
+        for idx in leftovers {
+            walk(
+                idx,
+                0,
+                &self.tracks,
+                &children_of,
+                &mut visited,
+                &mut sibling_rank,
+                &mut new_vec,
+            );
+        }
+
+        self.tracks = new_vec;
+        self.next_track_order = self.tracks.len() as i32 + 1;
+    }
+
+    /// 把 `track_id` 安插到其同级序列的 `target_index` 位（0-based，
+    /// 不含自身计数——与前端 `computeDropSpec` 的语义一致）：
+    /// 重写同级 order 后归一化，物理重排整个 Vec。
+    fn place_track_among_siblings(&mut self, track_id: &str, target_index: usize) {
+        let parent_id = self
+            .tracks
+            .iter()
+            .find(|t| t.id == track_id)
+            .and_then(|t| t.parent_id.clone());
+        let own_idx = match self.tracks.iter().position(|t| t.id == track_id) {
+            Some(idx) => idx,
+            None => return,
+        };
+        // 同级（不含自身），按当前显示顺序（order, Vec 下标）稳定排序。
+        let mut siblings: Vec<usize> = self
+            .tracks
+            .iter()
+            .enumerate()
+            .filter(|&(_, t)| t.parent_id == parent_id && t.id != track_id)
+            .map(|(idx, _)| idx)
+            .collect();
+        siblings.sort_by_key(|&idx| (self.tracks[idx].order, idx));
+        let target_index = target_index.min(siblings.len());
+        siblings.insert(target_index, own_idx);
+        for (rank, idx) in siblings.iter().enumerate() {
+            self.tracks[*idx].order = rank as i32;
+        }
+        self.normalize_track_vec();
+    }
+
     pub fn add_track(
         &mut self,
         name: Option<String>,
@@ -6459,10 +6746,12 @@ impl TimelineState {
         };
         self.tracks.push(track);
 
-        // Best-effort insert ordering: we encode ordering using `order`, but for now
-        // we accept `index` by nudging orders for the same parent.
+        // 归一化：order 字段重写为同级序号、Vec 重排为 DFS 显示顺序。
+        // 指定了插入位置时先按该位置安插同级序号。
         if let Some(i) = index {
-            self.reorder_siblings(&id, i);
+            self.place_track_among_siblings(&id, i);
+        } else {
+            self.normalize_track_vec();
         }
 
         self.selected_track_id = Some(id.clone());
@@ -6472,6 +6761,9 @@ impl TimelineState {
     /// 克隆轨道：
     /// - 普通子轨道：创建新子轨道（同 parent），克隆所有 clip
     /// - 根轨道：创建整个轨道组（根 + 后代），克隆所有 clip + params_by_root_track
+    ///
+    /// 克隆体安插在源轨道显示位置之后一位；同级序号与 Vec 顺序由
+    /// `normalize_track_vec` 统一重写（无需移位启发式，也不产生 order 冲突）。
     pub fn duplicate_track(&mut self, track_id: &str) -> Vec<String> {
         use std::collections::HashMap;
 
@@ -6481,10 +6773,6 @@ impl TimelineState {
         };
 
         let is_root = source.parent_id.is_none();
-
-        // 显示顺序由树形 DFS 决定（每层按 order 排序），因此“紧贴源轨道
-        // 之后”= 同级（同 parent）中把源轨道之后的 order 整体后移一位，
-        // 克隆占据 source.order + 1。不跨父级重编号，避免影响其他分组。
 
         if is_root {
             // ── 根轨道：收集整棵子树 ──
@@ -6507,14 +6795,6 @@ impl TimelineState {
                 }
             }
 
-            // 根层级：位于源根之后的根轨道整体后移一位，为克隆子树腾位。
-            let src_root_order = source.order;
-            for t in self.tracks.iter_mut() {
-                if t.parent_id.is_none() && t.id != track_id && t.order > src_root_order {
-                    t.order += 1;
-                }
-            }
-
             // old_id → new_id 映射
             let id_map: HashMap<String, String> = all_ids
                 .iter()
@@ -6523,8 +6803,7 @@ impl TimelineState {
 
             let mut new_track_ids = Vec::new();
 
-            // 克隆轨道。子树内部保持原有相对顺序：
-            // 克隆根 = 源根 order + 1，后代 = 源对应轨道 order + 1。
+            // 克隆轨道。order 暂拷源值（归一化时统一重写为同级序号）。
             for old_id in &all_ids {
                 let src_track = match self.tracks.iter().find(|t| &t.id == old_id) {
                     Some(t) => t,
@@ -6537,12 +6816,10 @@ impl TimelineState {
                     .and_then(|pid| id_map.get(pid))
                     .cloned();
 
-                let order = src_track.order + 1;
-
                 let mut cloned = src_track.clone();
                 cloned.id = new_tid.clone();
                 cloned.parent_id = new_parent;
-                cloned.order = order;
+                cloned.order = src_track.order;
                 // 根轨道名称加 " (Copy)" 后缀
                 if old_id == track_id {
                     cloned.name = format!("{} (Copy)", cloned.name);
@@ -6574,24 +6851,34 @@ impl TimelineState {
                     .insert(new_root_id.clone(), params);
             }
 
+            // 克隆根安插到源根显示位置之后一位（Vec 序 == 显示序，不变式）。
+            let source_rank = self
+                .tracks
+                .iter()
+                .take_while(|t| t.id != track_id)
+                .filter(|t| t.parent_id.is_none())
+                .count();
+            self.place_track_among_siblings(&new_root_id, source_rank + 1);
+
             self.selected_track_id = Some(new_root_id);
             new_track_ids
         } else {
             // ── 普通子轨道：只克隆单个轨道 + 其 clip ──
-            // 同级中位于源轨道之后的全部后移一位，克隆紧贴源轨道之后。
-            let src_order = source.order;
-            for t in self.tracks.iter_mut() {
-                if t.parent_id == source.parent_id && t.id != track_id && t.order > src_order {
-                    t.order += 1;
-                }
-            }
+            // 源轨道在同级显示序列（Vec 序，不变式）中的位置。
+            let parent_id = source.parent_id.clone();
+            let source_rank = self
+                .tracks
+                .iter()
+                .filter(|t| t.parent_id == parent_id)
+                .position(|t| t.id == track_id)
+                .unwrap_or(0);
 
             let new_tid = new_id("track");
 
             let mut cloned = source.clone();
             cloned.id = new_tid.clone();
             cloned.name = format!("{} (Copy)", cloned.name);
-            cloned.order = src_order + 1;
+            cloned.order = source.order;
             self.tracks.push(cloned);
 
             // 克隆 clip
@@ -6608,6 +6895,9 @@ impl TimelineState {
                 cloned.track_id = new_tid.clone();
                 self.clips.push(cloned);
             }
+
+            // 安插到源轨道之后一位（同级序号重写 + 归一化）。
+            self.place_track_among_siblings(&new_tid, source_rank + 1);
 
             self.selected_track_id = Some(new_tid.clone());
             vec![new_tid]
@@ -6634,30 +6924,8 @@ impl TimelineState {
     }
 
     fn reorder_siblings(&mut self, track_id: &str, target_index: usize) {
-        let parent_id = self
-            .tracks
-            .iter()
-            .find(|t| t.id == track_id)
-            .and_then(|t| t.parent_id.clone());
-        let mut siblings: Vec<_> = self
-            .tracks
-            .iter()
-            .filter(|t| t.parent_id == parent_id && t.id != track_id)
-            .cloned()
-            .collect();
-        siblings.sort_by_key(|t| t.order);
-        let target_index = target_index.min(siblings.len());
-
-        // Pull this track out and rebuild orders.
-        let mut rebuilt: Vec<String> = siblings.into_iter().map(|t| t.id).collect();
-        rebuilt.insert(target_index, track_id.to_string());
-
-        for (i, tid) in rebuilt.iter().enumerate() {
-            if let Some(t) = self.tracks.iter_mut().find(|t| &t.id == tid) {
-                t.order = i as i32;
-            }
-        }
-        self.next_track_order = rebuilt.len() as i32 + 1;
+        // 同级序号重写 + Vec 物理重排（单一事实来源见 normalize_track_vec）。
+        self.place_track_among_siblings(track_id, target_index);
     }
 
     pub fn remove_track(&mut self, track_id: &str) {
@@ -6704,6 +6972,8 @@ impl TimelineState {
                 self.selected_clip_id = None;
             }
         }
+        // 关闭同级序号空洞，维持“Vec 顺序 == 显示顺序”不变式。
+        self.normalize_track_vec();
     }
 
     pub fn move_track(
@@ -6750,6 +7020,7 @@ impl TimelineState {
         if let Some(t) = self.tracks.iter_mut().find(|t| t.id == track_id) {
             t.parent_id = parent_track_id;
         }
+        // 同级安插 + Vec 归一化（含新 parent 下的显示位置）。
         self.reorder_siblings(track_id, target_index);
     }
 
@@ -6884,7 +7155,8 @@ impl TimelineState {
                 pitch_analysis_algo: PitchAnalysisAlgo::default(),
                 color: track_palette_color(self.tracks.len()),
             });
-            self.next_track_order += 1;
+            // 维持"Vec 顺序 == 显示顺序"不变式（新轨道排在末尾）。
+            self.normalize_track_vec();
         }
 
         // If this is a new clip referencing an existing audio source, inherit cached metadata
@@ -7887,6 +8159,8 @@ impl TimelineState {
                 };
                 self.next_track_order += 1;
                 self.tracks.push(track);
+                // 维持"Vec 顺序 == 显示顺序"不变式（visual_track_ids 按 Vec 序）。
+                self.normalize_track_vec();
                 visual_ids = self.visual_track_ids();
             }
             let Some(target_track_id) = visual_ids.get(target_row).cloned() else {

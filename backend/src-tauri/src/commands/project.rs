@@ -975,6 +975,9 @@ pub(super) fn open_project(
     {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
         *tl = pf.timeline.clone();
+        // 归一化轨道顺序（历史工程文件的 order 字段可能陈旧/冲突：
+        // Vec 顺序 == 显示顺序的单一事实来源，加载即自愈）。
+        tl.normalize_track_vec();
         // 规范化 Tempo Map（排序/钳制/补 0 位置点），并同步工程基准 BPM。
         tl.normalize_tempo_map();
         if let Some(points) = tl.tempo_map.as_ref() {

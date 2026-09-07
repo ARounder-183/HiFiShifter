@@ -118,14 +118,15 @@ fn expand_track_ids_with_ancestors_and_descendants(
 }
 
 fn ordered_selected_tracks(timeline: &TimelineState, selected: &BTreeSet<String>) -> Vec<Track> {
-    let mut tracks: Vec<Track> = timeline
+    // 源 timeline 的 Vec 顺序 == 显示顺序（normalize_track_vec 不变式）：
+    // 过滤保持相对顺序即可，按 order 重排反而会把不同层级的轨道交错
+    //（子轨道与根轨道的同级序号空间相互独立）。
+    timeline
         .tracks
         .iter()
         .filter(|track| selected.contains(&track.id))
         .cloned()
-        .collect();
-    tracks.sort_by_key(|track| track.order);
-    tracks
+        .collect()
 }
 
 fn selected_clips(timeline: &TimelineState, clip_ids: &[String]) -> Vec<Clip> {
@@ -629,6 +630,8 @@ pub fn merge_project_fragment(
 
     let imported_track_count = track_id_map.values().collect::<BTreeSet<_>>().len();
     let imported_clip_count = created_clip_ids.len();
+    // 合并产生的轨道/层级变更统一归一化（Vec 顺序 == 显示顺序）。
+    timeline.normalize_track_vec();
     Ok(FragmentMergeResult {
         created_track_ids,
         created_clip_ids,
