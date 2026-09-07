@@ -973,6 +973,245 @@ mod tests {
         track_mode.normalize_ripple_mode();
         assert_eq!(track_mode.ripple_mode, "track");
     }
+
+    // ── 窗口状态：清洗 / 合并 / 显示器交集校验 ────────────────────────────────
+
+    use super::{
+        centered_position, clamp_size_to_bounds, load_window_state, merge_window_state,
+        overlap_size, sanitize_window_state, save_window_state, PhysicalRect, WindowState,
+        MIN_VISIBLE_OVERLAP_H, MIN_VISIBLE_OVERLAP_W,
+    };
+
+    #[test]
+    fn sanitize_window_state_rejects_degenerate_sizes() {
+        // 历史版本最小化时落盘的 width=0.0 必须被清洗
+        let ws = WindowState {
+            x: Some(100),
+            y: Some(100),
+            width: Some(0.0),
+            height: Some(-5.0),
+            maximized: Some(false),
+            fullscreen: Some(false),
+        };
+        let clean = sanitize_window_state(ws);
+        assert_eq!(clean.width, None);
+        assert_eq!(clean.height, None);
+        assert_eq!(clean.x, Some(100));
+        assert_eq!(clean.y, Some(100));
+
+        let bad = WindowState {
+            width: Some(f64::NAN),
+            height: Some(100_000_000.0),
+            ..WindowState::default()
+        };
+        let clean = sanitize_window_state(bad);
+        assert_eq!(clean.width, None);
+        assert_eq!(clean.height, None);
+
+        let ok = WindowState {
+            width: Some(1280.0),
+            height: Some(800.0),
+            ..WindowState::default()
+        };
+        let clean = sanitize_window_state(ok);
+        assert_eq!(clean.width, Some(1280.0));
+        assert_eq!(clean.height, Some(800.0));
+    }
+
+    #[test]
+    fn sanitize_window_state_coordinate_rules() {
+        // 多显示器布局下 -25600 是合法坐标（左侧副屏），不得被阈值误杀 ——
+        // 是否在已连接显示器内由恢复侧交集校验负责
+        let ws = WindowState {
+            x: Some(-25600),
+            y: Some(-25600),
+            ..WindowState::default()
+        };
+        let clean = sanitize_window_state(ws);
+        assert_eq!(clean.x, Some(-25600));
+        assert_eq!(clean.y, Some(-25600));
+
+        // Windows 最小化停泊哨兵（物理 -32000 经低倍缩放换算后仍 ≤ -32000
+        // 的原始值）与超界坐标必须拒绝
+        let ws = WindowState {
+            x: Some(-32000),
+            y: Some(-32000),
+            ..WindowState::default()
+        };
+        let clean = sanitize_window_state(ws);
+        assert_eq!(clean.x, None);
+        assert_eq!(clean.y, None);
+
+        let ws = WindowState {
+            x: Some(5_000_000),
+            y: Some(-5_000_000),
+            ..WindowState::default()
+        };
+        let clean = sanitize_window_state(ws);
+        assert_eq!(clean.x, None);
+        assert_eq!(clean.y, None);
+    }
+
+    #[test]
+    fn merge_window_state_keeps_last_good_geometry_when_capture_unavailable() {
+        // 最小化/最大化/全屏/隐藏关闭时几何捕获不到（全 None）→ 保留上一次好值
+        let prev = WindowState {
+            x: Some(100),
+            y: Some(200),
+            width: Some(1280.0),
+            height: Some(800.0),
+            maximized: Some(false),
+            fullscreen: Some(false),
+        };
+        let incoming = WindowState {
+            maximized: Some(true),
+            ..WindowState::default()
+        };
+        let merged = merge_window_state(prev, incoming);
+        assert_eq!(merged.x, Some(100));
+        assert_eq!(merged.y, Some(200));
+        assert_eq!(merged.width, Some(1280.0));
+        assert_eq!(merged.height, Some(800.0));
+        assert_eq!(merged.maximized, Some(true));
+    }
+
+    #[test]
+    fn merge_window_state_self_heals_poisoned_geometry() {
+        // 历史污染文件（width=0.0）在下一次保存时被清洗掉
+        let prev = WindowState {
+            x: Some(-25600),
+            y: Some(-25600),
+            width: Some(0.0),
+            height: Some(0.0),
+            maximized: Some(false),
+            fullscreen: Some(false),
+        };
+        let incoming = WindowState {
+            maximized: Some(false),
+            ..WindowState::default()
+        };
+        let merged = merge_window_state(prev, incoming);
+        assert_eq!(merged.width, None);
+        assert_eq!(merged.height, None);
+        // 坐标在合法值域内保留（屏幕外与否交给恢复侧交集校验）
+        assert_eq!(merged.x, Some(-25600));
+        assert_eq!(merged.y, Some(-25600));
+    }
+
+    #[test]
+    fn overlap_and_fallback_geometry_helpers() {
+        let monitor = PhysicalRect {
+            x: 0.0,
+            y: 0.0,
+            width: 1920.0,
+            height: 1080.0,
+        };
+        // 最小化停泊矩形与显示器不相交
+        let parked = PhysicalRect {
+            x: -32000.0,
+            y: -32000.0,
+            width: 1280.0,
+            height: 800.0,
+        };
+        assert_eq!(overlap_size(&parked, &monitor), (0.0, 0.0));
+
+        // 部分可见但低于阈值 → 判定屏幕外
+        let barely = PhysicalRect {
+            x: monitor.width - 100.0,
+            y: 0.0,
+            width: 1280.0,
+            height: 800.0,
+        };
+        let (ow, oh) = overlap_size(&barely, &monitor);
+        assert_eq!((ow, oh), (100.0, 800.0));
+        assert!(ow < MIN_VISIBLE_OVERLAP_W || oh < MIN_VISIBLE_OVERLAP_H);
+
+        // 完整在屏内
+        let inside = PhysicalRect {
+            x: 10.0,
+            y: 10.0,
+            width: 800.0,
+            height: 600.0,
+        };
+        assert_eq!(overlap_size(&inside, &monitor), (800.0, 600.0));
+
+        // 尺寸钳制与居中回退
+        assert_eq!(
+            clamp_size_to_bounds(4000.0, 3000.0, &monitor),
+            (1920.0, 1080.0)
+        );
+        assert_eq!(centered_position((800.0, 600.0), &monitor), (560, 240));
+        // 窗口大于显示器时贴左上角
+        assert_eq!(centered_position((3840.0, 2160.0), &monitor), (0, 0));
+    }
+
+    #[test]
+    fn save_window_state_round_trip_merges_and_self_heals() {
+        let dir = std::env::temp_dir().join(format!(
+            "hifishifter_cfg_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp config dir");
+
+        // 正常保存 → 读回一致
+        save_window_state(
+            &dir,
+            &WindowState {
+                x: Some(120),
+                y: Some(48),
+                width: Some(1440.0),
+                height: Some(900.0),
+                maximized: Some(false),
+                fullscreen: Some(false),
+            },
+        );
+        let ws = load_window_state(&dir);
+        assert_eq!(ws.x, Some(120));
+        assert_eq!(ws.y, Some(48));
+        assert_eq!(ws.width, Some(1440.0));
+        assert_eq!(ws.height, Some(900.0));
+
+        // 模拟历史污染文件（0.0 尺寸 / 停泊坐标）直接落盘
+        let poisoned = r#"{"window":{"x":-25600,"y":-25600,"width":0.0,"height":0.0,"maximized":false,"fullscreen":false}}"#;
+        std::fs::write(dir.join("app_config.json"), poisoned).expect("write poisoned config");
+
+        // 最小化关闭：几何捕获不到（全 None）→ 合并保留污染几何 → 清洗尺寸
+        save_window_state(
+            &dir,
+            &WindowState {
+                maximized: Some(true),
+                ..WindowState::default()
+            },
+        );
+        let ws = load_window_state(&dir);
+        assert_eq!(ws.width, None);
+        assert_eq!(ws.height, None);
+        assert_eq!(ws.x, Some(-25600));
+        assert_eq!(ws.y, Some(-25600));
+        assert_eq!(ws.maximized, Some(true));
+
+        // 恢复正常关闭 → 几何被新值覆盖
+        save_window_state(
+            &dir,
+            &WindowState {
+                x: Some(10),
+                y: Some(20),
+                width: Some(1280.0),
+                height: Some(720.0),
+                maximized: Some(false),
+                fullscreen: Some(false),
+            },
+        );
+        let ws = load_window_state(&dir);
+        assert_eq!((ws.x, ws.y), (Some(10), Some(20)));
+        assert_eq!((ws.width, ws.height), (Some(1280.0), Some(720.0)));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 /// 持久化配置根结构。
@@ -1071,7 +1310,10 @@ fn sanitize_window_state(mut ws: WindowState) -> WindowState {
         }
     }
 
-    // 坐标校验：拒绝典型的哨兵值（如 -32768）或极端不合理的坐标
+    // 坐标校验：拒绝典型的哨兵值（如 -32768）或极端不合理的坐标。
+    // 注意：-25600 这类"中等偏移"在多显示器布局下是合法坐标（如左侧
+    // 副屏），不能靠阈值过滤 —— 是否落在已连接显示器内由恢复侧的
+    // 显示器交集校验负责（见 PhysicalRect / overlap_size）。
     if let Some(x) = ws.x {
         if x <= INVALID_COORD_MIN || x.abs() > MAX_COORD_ABS {
             ws.x = None;
@@ -1086,16 +1328,82 @@ fn sanitize_window_state(mut ws: WindowState) -> WindowState {
     ws
 }
 
+/// 保存时合并：几何字段为 None（最小化/最大化/全屏/隐藏窗口时捕获不到
+/// 有意义的值）时保留上一次的好值；标志位总是更新。合并后再清洗一次，
+/// 保证任何情况下落盘的窗口状态都不会是明显的垃圾值（如历史版本在
+/// 最小化时落盘的 width=0.0）。
+fn merge_window_state(mut prev: WindowState, incoming: WindowState) -> WindowState {
+    if incoming.x.is_some() {
+        prev.x = incoming.x;
+    }
+    if incoming.y.is_some() {
+        prev.y = incoming.y;
+    }
+    if incoming.width.is_some() {
+        prev.width = incoming.width;
+    }
+    if incoming.height.is_some() {
+        prev.height = incoming.height;
+    }
+    if incoming.maximized.is_some() {
+        prev.maximized = incoming.maximized;
+    }
+    if incoming.fullscreen.is_some() {
+        prev.fullscreen = incoming.fullscreen;
+    }
+    sanitize_window_state(prev)
+}
+
 pub fn load_window_state(config_dir: &Path) -> WindowState {
     let ws = load_config(config_dir).window;
     sanitize_window_state(ws)
 }
 
-/// 将窗口状态写回配置文件（保留其他字段）
+/// 将窗口状态写回配置文件（保留其他字段）。
 pub fn save_window_state(config_dir: &Path, ws: &WindowState) {
     let mut cfg = load_config(config_dir);
-    cfg.window = ws.clone();
+    cfg.window = merge_window_state(cfg.window.clone(), ws.clone());
     save_config(config_dir, &cfg);
+}
+
+// ── 窗口恢复的显示器交集校验（纯函数，lib.rs 在启动时调用） ────────────────
+
+/// 物理像素矩形（f64，便于交集/钳制运算）。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PhysicalRect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// 恢复的窗口与显示器的可见重叠阈值：窗口至少要有这么大的区域落在某台
+/// 已连接显示器内，否则视为"屏幕外"，回退主显示器内居中。取值只需保证
+/// 用户能看到并拖到标题栏即可，不必覆盖大部分窗口。
+pub const MIN_VISIBLE_OVERLAP_W: f64 = 120.0;
+pub const MIN_VISIBLE_OVERLAP_H: f64 = 60.0;
+
+/// 两矩形的相交宽高（不相交时为 (0, 0)）。
+pub fn overlap_size(a: &PhysicalRect, b: &PhysicalRect) -> (f64, f64) {
+    let w = (a.x + a.width).min(b.x + b.width) - a.x.max(b.x);
+    let h = (a.y + a.height).min(b.y + b.height) - a.y.max(b.y);
+    (w.max(0.0), h.max(0.0))
+}
+
+/// 把窗口尺寸钳制到显示器边界内（窗口不允许大于显示器）。
+pub fn clamp_size_to_bounds(width: f64, height: f64, bounds: &PhysicalRect) -> (f64, f64) {
+    (
+        width.min(bounds.width).max(1.0),
+        height.min(bounds.height).max(1.0),
+    )
+}
+
+/// 在显示器内居中放置窗口；窗口不小于显示器时贴左上角。
+/// 返回物理像素坐标（配合 `Position::Physical` 使用）。
+pub fn centered_position(window: (f64, f64), bounds: &PhysicalRect) -> (i32, i32) {
+    let x = bounds.x + ((bounds.width - window.0) / 2.0).max(0.0);
+    let y = bounds.y + ((bounds.height - window.1) / 2.0).max(0.0);
+    (x.round() as i32, y.round() as i32)
 }
 
 /// 从 config dir 读取最近工程列表；读取失败时返回空列表。

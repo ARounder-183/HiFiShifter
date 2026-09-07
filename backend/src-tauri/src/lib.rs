@@ -328,20 +328,117 @@ pub fn run() {
             if let Some(cfg_dir) = state.config_dir.get() {
                 if let Some(win) = app.get_webview_window("main") {
                     let ws = crate::config::load_window_state(cfg_dir);
-                    // 应用尺寸与位置（非最大化/全屏状态先应用尺寸/位置，再切换最大化）
+                    let scale = win.scale_factor().unwrap_or(1.0);
+
+                    // 尺寸：合法才应用（清洗后 None 时保持 tauri.conf.json 默认值）
                     if let (Some(w), Some(h)) = (ws.width, ws.height) {
                         let _ = win.set_size(tauri::Size::Logical(tauri::LogicalSize {
                             width: w,
                             height: h,
                         }));
                     }
+
+                    // 位置：恢复出的矩形必须与某台已连接显示器有足够的可见
+                    // 重叠，否则一律回退主显示器内居中。保存的是逻辑像素，
+                    // 按 set_position(Logical) 的同一换算（当前 scale）转回
+                    // 物理像素做交集判断 —— 校验的就是实际落点。处理两类
+                    // 事故：保存后显示器被拔出/改变布局；历史版本在窗口
+                    // 最小化时落盘的停泊坐标（如 -25600）。
                     if let (Some(x), Some(y)) = (ws.x, ws.y) {
-                        let _ =
-                            win.set_position(tauri::Position::Logical(tauri::LogicalPosition {
-                                x: x as f64,
-                                y: y as f64,
-                            }));
+                        let probe_w = ws.width.map(|w| w * scale).unwrap_or_else(|| {
+                            win.inner_size().map(|s| s.width as f64).unwrap_or(1200.0)
+                        });
+                        let probe_h = ws.height.map(|h| h * scale).unwrap_or_else(|| {
+                            win.inner_size().map(|s| s.height as f64).unwrap_or(800.0)
+                        });
+                        let probe = crate::config::PhysicalRect {
+                            x: x as f64 * scale,
+                            y: y as f64 * scale,
+                            width: probe_w,
+                            height: probe_h,
+                        };
+                        let monitor_bounds = |m: &tauri::Monitor| crate::config::PhysicalRect {
+                            x: m.position().x as f64,
+                            y: m.position().y as f64,
+                            width: m.size().width as f64,
+                            height: m.size().height as f64,
+                        };
+                        let monitors = win.available_monitors().unwrap_or_default();
+
+                        // 与恢复矩形可见重叠量最大的显示器（若有）
+                        let mut anchor: Option<(crate::config::PhysicalRect, f64)> = None;
+                        for m in &monitors {
+                            let bounds = monitor_bounds(m);
+                            let (ow, oh) = crate::config::overlap_size(&probe, &bounds);
+                            if ow < crate::config::MIN_VISIBLE_OVERLAP_W
+                                || oh < crate::config::MIN_VISIBLE_OVERLAP_H
+                            {
+                                continue;
+                            }
+                            let area = ow * oh;
+                            let better = match &anchor {
+                                Some((_, best_area)) => area > *best_area,
+                                None => true,
+                            };
+                            if better {
+                                anchor = Some((bounds, area));
+                            }
+                        }
+
+                        match anchor {
+                            Some((bounds, _)) => {
+                                // 位置有效；尺寸超出该显示器时钳制
+                                if let (Some(w), Some(h)) = (ws.width, ws.height) {
+                                    let (cw, ch) = crate::config::clamp_size_to_bounds(
+                                        w * scale,
+                                        h * scale,
+                                        &bounds,
+                                    );
+                                    if cw < w * scale - 0.5 || ch < h * scale - 0.5 {
+                                        let _ = win.set_size(tauri::Size::Physical(
+                                            tauri::PhysicalSize {
+                                                width: cw.round() as u32,
+                                                height: ch.round() as u32,
+                                            },
+                                        ));
+                                    }
+                                }
+                                let _ = win.set_position(tauri::Position::Logical(
+                                    tauri::LogicalPosition {
+                                        x: x as f64,
+                                        y: y as f64,
+                                    },
+                                ));
+                            }
+                            None => {
+                                // 回退：主显示器（缺失时取第一台已连接显示器）
+                                // 内居中，尺寸钳制到该显示器。绝不让窗口落在
+                                // 屏幕外导致"启动即不可见"。
+                                let fallback = win
+                                    .primary_monitor()
+                                    .ok()
+                                    .flatten()
+                                    .or_else(|| monitors.first().cloned());
+                                if let Some(m) = fallback {
+                                    let bounds = monitor_bounds(&m);
+                                    let (cw, ch) = crate::config::clamp_size_to_bounds(
+                                        probe_w, probe_h, &bounds,
+                                    );
+                                    let _ =
+                                        win.set_size(tauri::Size::Physical(tauri::PhysicalSize {
+                                            width: cw.round() as u32,
+                                            height: ch.round() as u32,
+                                        }));
+                                    let (px, py) =
+                                        crate::config::centered_position((cw, ch), &bounds);
+                                    let _ = win.set_position(tauri::Position::Physical(
+                                        tauri::PhysicalPosition { x: px, y: py },
+                                    ));
+                                }
+                            }
+                        }
                     }
+
                     if ws.fullscreen.unwrap_or(false) {
                         let _ = win.set_fullscreen(true);
                     } else if ws.maximized.unwrap_or(false) {
@@ -376,23 +473,32 @@ pub fn run() {
 
                 let maximized = win.is_maximized().unwrap_or(false);
                 let fullscreen = win.is_fullscreen().unwrap_or(false);
+                let minimized = win.is_minimized().unwrap_or(false);
+                let visible = win.is_visible().unwrap_or(true);
                 let mut x_opt = None;
                 let mut y_opt = None;
                 let mut w_opt = None;
                 let mut h_opt = None;
-                // 统一保存为逻辑像素：outer_position()/inner_size() 返回物理
-                // 像素，而恢复端按 Logical 解释；在 125%/150% 缩放屏上若不换算，
-                // 每次重启窗口都会放大 scale 倍并持续漂移。
-                let scale = win.scale_factor().unwrap_or(1.0);
-                if let Ok(pos) = win.outer_position() {
-                    let logical: tauri::LogicalPosition<f64> = pos.to_logical(scale);
-                    x_opt = Some(logical.x.round() as i32);
-                    y_opt = Some(logical.y.round() as i32);
-                }
-                if let Ok(size) = win.inner_size() {
-                    let logical: tauri::LogicalSize<f64> = size.to_logical(scale);
-                    w_opt = Some(logical.width);
-                    h_opt = Some(logical.height);
+                // 最小化（Windows 会把窗口停泊到 -32000 物理坐标，按 125% 缩放
+                // 换算成逻辑像素正是 -25600 的污染来源）、最大化/全屏（此时
+                // 几何是显示器边界而非窗口几何）、隐藏：捕获不到有意义的窗口
+                // 几何。几何字段留 None → save_window_state 保留上一次的好值，
+                // 只更新标志位；下次正常关闭时几何会被刷新。
+                if !minimized && !maximized && !fullscreen && visible {
+                    // 统一保存为逻辑像素：outer_position()/inner_size() 返回物理
+                    // 像素，而恢复端按 Logical 解释；在 125%/150% 缩放屏上若不换算，
+                    // 每次重启窗口都会放大 scale 倍并持续漂移。
+                    let scale = win.scale_factor().unwrap_or(1.0);
+                    if let Ok(pos) = win.outer_position() {
+                        let logical: tauri::LogicalPosition<f64> = pos.to_logical(scale);
+                        x_opt = Some(logical.x.round() as i32);
+                        y_opt = Some(logical.y.round() as i32);
+                    }
+                    if let Ok(size) = win.inner_size() {
+                        let logical: tauri::LogicalSize<f64> = size.to_logical(scale);
+                        w_opt = Some(logical.width);
+                        h_opt = Some(logical.height);
+                    }
                 }
 
                 if let Some(cfg_dir) = win.app_handle().state::<state::AppState>().config_dir.get()
@@ -412,7 +518,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::ping,
             commands::get_about_info,
-        commands::analyze_clip_formants,
+            commands::analyze_clip_formants,
             commands::get_runtime_info,
             commands::consume_startup_project_path,
             commands::set_ui_locale,
