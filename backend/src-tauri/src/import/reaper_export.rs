@@ -393,6 +393,16 @@ fn slice_curve_with_default(
 pub fn build_clip_export_curves(timeline: &TimelineState, clip: &Clip) -> ClipExportCurves {
     let root = timeline.resolve_root_track_id(&clip.track_id);
     let root_entry = root.as_deref().and_then(|id| timeline.params_by_root_track.get(id));
+    // Compose（合成）门控，与渲染端同语义：根轨道未开启 Compose 时音高
+    // 曲线不参与渲染，REAPER 剪贴板同样不做音高参数的转换与输出 —— 否则
+    // 导出的是渲染中根本不生效的陈旧数据。子轨道沿 parent 链回溯**根轨
+    // 道**的 Compose 判定（子轨自身的开关不参与）；根轨道不存在时视为
+    // 关闭（无从提供权威音高数据）。
+    let root_compose_enabled = root
+        .as_deref()
+        .and_then(|id| timeline.tracks.iter().find(|t| t.id == id))
+        .map(|t| t.compose_enabled)
+        .unwrap_or(false);
     let frame_period_ms = root_entry
         .map(|entry| entry.frame_period_ms.max(0.1))
         .unwrap_or(5.0);
@@ -428,8 +438,12 @@ pub fn build_clip_export_curves(timeline: &TimelineState, clip: &Clip) -> ClipEx
         frame_period_ms,
         volume: merged_curve("volume"),
         pan: merged_curve("pan"),
-        pitch_offset: crate::pitch_editing::compute_clip_export_pitch_offsets(timeline, clip)
-            .map(|p| p.offsets),
+        pitch_offset: if root_compose_enabled {
+            crate::pitch_editing::compute_clip_export_pitch_offsets(timeline, clip)
+                .map(|p| p.offsets)
+        } else {
+            None
+        },
     }
 }
 
@@ -1367,6 +1381,8 @@ mod tests {
         // 组内 clip 包络完全缺失）。
         let mut timeline = TimelineState::default();
         let root_id = timeline.tracks[0].id.clone();
+        // 音高导出门控在根轨道 Compose：命中根轨道解析的前提是根轨已开启。
+        timeline.tracks[0].compose_enabled = true;
         timeline.tracks.push(crate::state::Track {
             id: "child_track_t".to_string(),
             name: "Child".to_string(),
@@ -1410,6 +1426,102 @@ mod tests {
             "偏移 = pitch_edit − pitch_orig = 1"
         );
         assert!((curves.volume.as_ref().unwrap()[0] - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn reaper_pitch_export_gated_by_root_track_compose() {
+        // Compose（合成）门控：根轨道未开启 Compose 时不做音高参数的转换
+        // 与输出（pitch_offset = None → take 无 PITCHENV）；音量/声像曲线
+        // 不受门控影响。子轨道的 clip 沿 parent 链按**根轨道**判定：
+        // 子轨关/根轨开 → 仍导出；子轨开/根轨关 → 不导出。
+        let mut timeline = TimelineState::default();
+        let root_id = timeline.tracks[0].id.clone();
+        // 子轨 compose=false：判定必须回溯根轨道，而不是子轨自身。
+        timeline.tracks.push(crate::state::Track {
+            id: "child_track_t".to_string(),
+            name: "Child".to_string(),
+            parent_id: Some(root_id.clone()),
+            order: 1,
+            muted: false,
+            solo: false,
+            volume: 1.0,
+            compose_enabled: false,
+            pitch_analysis_algo: crate::state::PitchAnalysisAlgo::default(),
+            color: "#888888".to_string(),
+        });
+        let child_clip_id = timeline.add_clip(
+            Some("child_track_t".to_string()),
+            Some("Child Clip".to_string()),
+            Some(0.0),
+            Some(0.01),
+            Some("C:/audio/a.wav".to_string()),
+        );
+        let root_clip_id = timeline.add_clip(
+            Some(root_id.clone()),
+            Some("Root Clip".to_string()),
+            Some(0.0),
+            Some(0.01),
+            Some("C:/audio/a.wav".to_string()),
+        );
+        timeline.params_by_root_track.insert(
+            root_id.clone(),
+            crate::state::TrackParamsState {
+                frame_period_ms: 5.0,
+                pitch_orig: vec![60.0; 4],
+                pitch_edit: vec![61.0; 4],
+                pitch_edit_user_modified: true,
+                extra_curves: {
+                    let mut curves = std::collections::HashMap::new();
+                    curves.insert("volume".to_string(), vec![0.5f32; 4]);
+                    curves
+                },
+                ..crate::state::TrackParamsState::default()
+            },
+        );
+
+        // 根轨 compose=off：根轨与子轨上的 clip 都不导出音高，音量照常。
+        for clip_id in [child_clip_id.as_str(), root_clip_id.as_str()] {
+            let clip = timeline.clips.iter().find(|c| c.id == clip_id).unwrap();
+            let curves = build_clip_export_curves(&timeline, clip);
+            assert!(
+                curves.pitch_offset.is_none(),
+                "根轨 compose=off 时 clip {clip_id} 不得导出音高偏移"
+            );
+            assert!(
+                curves.volume.is_some(),
+                "音量/声像曲线不受 compose 门控影响"
+            );
+        }
+
+        // 根轨 compose=on：子轨（自身 compose=false）的 clip 照常导出音高
+        // —— 判定只看根轨道。
+        timeline.tracks[0].compose_enabled = true;
+        let clip = timeline
+            .clips
+            .iter()
+            .find(|c| c.id == child_clip_id)
+            .unwrap();
+        let curves = build_clip_export_curves(&timeline, clip);
+        assert!(
+            curves.pitch_offset.is_some(),
+            "根轨 compose=on 时子轨 clip 正常导出音高偏移"
+        );
+
+        // 根轨 compose=off、子轨 compose=on：仍不导出（同样只看根轨道）。
+        timeline.tracks[0].compose_enabled = false;
+        if let Some(child) = timeline.tracks.iter_mut().find(|t| t.id == "child_track_t") {
+            child.compose_enabled = true;
+        }
+        let clip = timeline
+            .clips
+            .iter()
+            .find(|c| c.id == child_clip_id)
+            .unwrap();
+        let curves = build_clip_export_curves(&timeline, clip);
+        assert!(
+            curves.pitch_offset.is_none(),
+            "子轨自身 compose=on 不能越过根轨道的门控"
+        );
     }
 
     #[test]
