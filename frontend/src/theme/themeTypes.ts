@@ -115,7 +115,6 @@ export type QtColorToken =
     | "qt-graph-grid-strong"
     | "qt-graph-grid-weak"
     | "qt-scrollbar-thumb"
-    | "qt-scrollbar-thumb-hover"
     | "qt-overlay"
     | "qt-divider"
     | "qt-subtle-1"
@@ -151,7 +150,6 @@ export const QT_COLOR_TOKENS: QtColorToken[] = [
     "qt-graph-grid-strong",
     "qt-graph-grid-weak",
     "qt-scrollbar-thumb",
-    "qt-scrollbar-thumb-hover",
     "qt-overlay",
     "qt-divider",
     "qt-subtle-1",
@@ -188,7 +186,6 @@ export const QT_COLOR_TOKEN_LABELS: Record<QtColorToken, string> = {
     "qt-graph-grid-strong": "appearance_color_graph_grid_strong",
     "qt-graph-grid-weak": "appearance_color_graph_grid_weak",
     "qt-scrollbar-thumb": "appearance_color_scrollbar_thumb",
-    "qt-scrollbar-thumb-hover": "appearance_color_scrollbar_thumb_hover",
     "qt-overlay": "appearance_color_overlay",
     "qt-divider": "appearance_color_divider",
     "qt-subtle-1": "appearance_color_subtle_1",

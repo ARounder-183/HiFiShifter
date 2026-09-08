@@ -1025,6 +1025,8 @@ export const jaJP = {
     // スクロール修飾キーバインド
     kb_modifier_scroll_h: "水平スクロール（タイムライン / ピアノロール / 鍵盤ホイール）",
     kb_modifier_scroll_v: "垂直スクロール（タイムライン / ピアノロールホイール）",
+    kb_modifier_scrollbar_zoom:
+        "スクロールバーホイールズーム（スクロールバー上でホイール = その軸のズーム）",
 
     // ダイアログ共通
     ok: "OK",
@@ -1157,7 +1159,6 @@ export const jaJP = {
     appearance_color_graph_grid_strong: "グラフグリッド（強）",
     appearance_color_graph_grid_weak: "グラフグリッド（弱）",
     appearance_color_scrollbar_thumb: "スクロールバーサム",
-    appearance_color_scrollbar_thumb_hover: "スクロールバーサムホバー",
     appearance_color_overlay: "オーバーレイ",
     appearance_color_divider: "区切り線",
     appearance_color_subtle_1: "微細レイヤー 1",

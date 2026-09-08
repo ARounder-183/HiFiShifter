@@ -992,6 +992,7 @@ export const zhTW = {
     // 捲動修飾鍵繫結
     kb_modifier_scroll_h: "水平捲動（時間軸 / 鋼琴捲簾 / 琴鍵區滾輪）",
     kb_modifier_scroll_v: "垂直捲動（時間軸 / 鋼琴捲簾滾輪）",
+    kb_modifier_scrollbar_zoom: "捲軸滾輪縮放（懸停捲軸 + 滾輪 = 該軸縮放）",
 
     // 對話框通用按鈕
     ok: "確定",
@@ -1123,7 +1124,6 @@ export const zhTW = {
     appearance_color_graph_grid_strong: "圖表格線（強）",
     appearance_color_graph_grid_weak: "圖表格線（弱）",
     appearance_color_scrollbar_thumb: "捲軸滑塊",
-    appearance_color_scrollbar_thumb_hover: "捲軸滑塊懸停",
     appearance_color_overlay: "遮罩層",
     appearance_color_divider: "分隔線",
     appearance_color_subtle_1: "細微層 1",

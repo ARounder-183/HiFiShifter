@@ -178,7 +178,6 @@ export const koKR = {
     appearance_color_graph_grid_strong: "그래프 격자 (강)",
     appearance_color_graph_grid_weak: "그래프 격자 (약)",
     appearance_color_scrollbar_thumb: "스크롤바 썸",
-    appearance_color_scrollbar_thumb_hover: "스크롤바 썸 호버",
     appearance_color_overlay: "오버레이",
     appearance_color_divider: "구분선",
     appearance_color_subtle_1: "미세 레이어 1",
@@ -1093,6 +1092,7 @@ export const koKR = {
     // 스크롤 수정 키바인딩
     kb_modifier_scroll_h: "가로 스크롤 (타임라인 / 피아노 롤 / 피아노 키 휠)",
     kb_modifier_scroll_v: "세로 스크롤 (타임라인 / 피아노 롤 휠)",
+    kb_modifier_scrollbar_zoom: "스크롤바 휠 줌 (스크롤바 위에서 휠 = 해당 축 줌)",
 
     // 다이얼로그 공통
     ok: "확인",

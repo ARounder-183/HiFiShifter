@@ -40,7 +40,6 @@
     --qt-graph-grid-strong: rgba(255, 255, 255, 0.22);
     --qt-graph-grid-weak: rgba(255, 255, 255, 0.1);
     --qt-scrollbar-thumb: #555555;
-    --qt-scrollbar-thumb-hover: #707070;
     --qt-overlay: rgba(0, 0, 0, 0.35);
     --qt-divider: rgba(255, 255, 255, 0.04);
     --qt-subtle-1: rgba(255, 255, 255, 0.025);
@@ -89,7 +88,6 @@
     --qt-graph-grid-strong: rgba(74, 88, 112, 0.55);
     --qt-graph-grid-weak: rgba(74, 88, 112, 0.3);
     --qt-scrollbar-thumb: #b4bac7;
-    --qt-scrollbar-thumb-hover: #969ead;
     --qt-overlay: rgba(20, 24, 32, 0.22);
     --qt-divider: rgba(32, 38, 52, 0.1);
     --qt-subtle-1: rgba(28, 36, 52, 0.025);
@@ -184,10 +182,21 @@ textarea {
     box-shadow: none;
 }
 
-/* Qt/DAW-style scrollbars */
-::-webkit-scrollbar {
-    width: 10px;
-    height: 10px;
+/*
+ * Qt/DAW 风格滚动条（标准 CSS 滚动条属性）。
+ *
+ * 不用 ::-webkit-scrollbar 自绘：WebView2/Chromium 在分数设备缩放
+ * （Windows 125%/150%、浏览器缩放）下，作者自绘滚动条的滑块命中与
+ * 拖拽映射有缺陷 —— 实测拖拽滑块时内容滚动速度被放大约 dpr² 倍，滑块
+ * 直接飞离指针（同页对照：原生滚动条映射正确）。标准属性走引擎原生
+ * 主题渲染，任意缩放下命中与拖拽映射都正确，也是各引擎的标准化方向
+ * （::-webkit-scrollbar 非标准且已废弃）。主题色经 scrollbar-color
+ * 保留；hover 变色与圆角自绘无法用标准属性表达，让位给交互正确性。
+ * scrollbar-width 不继承，通配选择器等价于旧的全局 ::-webkit-scrollbar。
+ */
+* {
+    scrollbar-width: thin;
+    scrollbar-color: var(--qt-scrollbar-thumb, #555555) var(--qt-base, #303030);
 }
 
 .qt-overlay {
@@ -195,57 +204,17 @@ textarea {
     backdrop-filter: blur(2px);
 }
 
-::-webkit-scrollbar-corner {
-    background: var(--qt-base, #303030);
+/* 紧凑面板变体：透明轨道（时间轴 / 参数编辑器 / 列表等自定义容器沿用） */
+.custom-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: var(--qt-scrollbar-thumb, #555555) transparent;
 }
 
-::-webkit-scrollbar-track {
-    background: var(--qt-base, #303030);
-    border-left: 1px solid var(--qt-border, #444444);
-}
-
-::-webkit-scrollbar-thumb {
-    background: var(--qt-scrollbar-thumb, #555555);
-    border-radius: 2px;
-    border: 2px solid var(--qt-base, #303030);
-}
-
-::-webkit-scrollbar-thumb:hover {
-    background: var(--qt-scrollbar-thumb-hover, #777777);
-}
-
-.custom-scrollbar::-webkit-scrollbar {
-    width: 8px;
-    height: 8px;
-}
-
-.custom-scrollbar::-webkit-scrollbar-track {
-    background: transparent;
-    border: none;
-}
-
-.custom-scrollbar::-webkit-scrollbar-thumb {
-    background: var(--qt-scrollbar-thumb, #555555);
-    border-radius: 4px;
-    border: 2px solid transparent;
-    background-clip: content-box;
-}
-
-.custom-scrollbar::-webkit-scrollbar-thumb:hover {
-    background: var(--qt-scrollbar-thumb-hover, #777777);
-    border-radius: 4px;
-    border: 2px solid transparent;
-    background-clip: content-box;
-}
-
-/* 隐藏纵向滚动条（保留滚动功能）用于左侧轨道头 */
+/* 隐藏纵向滚动条（保留滚动功能）用于左侧轨道头。
+ * 置于 .custom-scrollbar 之后：同类选择器按源序覆盖 scrollbar-width。 */
 .hide-v-scrollbar {
-    scrollbar-width: none; /* Firefox */
-    -ms-overflow-style: none; /* IE 10+ */
-}
-.hide-v-scrollbar::-webkit-scrollbar {
-    width: 0;
-    height: 0;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
 }
 
 /* Unified popup/menu/dialog surfaces for Radix and custom panels */

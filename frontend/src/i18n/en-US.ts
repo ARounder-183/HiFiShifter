@@ -1096,6 +1096,7 @@ export const enUS = {
     // Scroll modifier keybindings
     kb_modifier_scroll_h: "Horizontal Scroll (timeline / piano roll / piano keys wheel)",
     kb_modifier_scroll_v: "Vertical Scroll (timeline / piano roll wheel)",
+    kb_modifier_scrollbar_zoom: "Scrollbar Wheel Zoom (hover a scrollbar + wheel = zoom that axis)",
 
     // Common short keys for dialogs
     ok: "OK",
@@ -1228,7 +1229,6 @@ export const enUS = {
     appearance_color_graph_grid_strong: "Graph Grid (Strong)",
     appearance_color_graph_grid_weak: "Graph Grid (Weak)",
     appearance_color_scrollbar_thumb: "Scrollbar Thumb",
-    appearance_color_scrollbar_thumb_hover: "Scrollbar Thumb Hover",
     appearance_color_overlay: "Overlay",
     appearance_color_divider: "Divider",
     appearance_color_subtle_1: "Subtle Layer 1",

@@ -991,6 +991,7 @@ export const zhCN = {
     // Scroll modifier keybindings
     kb_modifier_scroll_h: "水平滚动（时间轴 / 钢琴卷帘 / 琴键区滚轮）",
     kb_modifier_scroll_v: "竖直滚动（时间轴 / 钢琴卷帘滚轮）",
+    kb_modifier_scrollbar_zoom: "滚动条滚轮缩放（悬停滚动条 + 滚轮 = 该轴缩放）",
 
     // Common short keys for dialogs
     ok: "确定",
@@ -1122,7 +1123,6 @@ export const zhCN = {
     appearance_color_graph_grid_strong: "图表网格（强）",
     appearance_color_graph_grid_weak: "图表网格（弱）",
     appearance_color_scrollbar_thumb: "滚动条滑块",
-    appearance_color_scrollbar_thumb_hover: "滚动条滑块悬停",
     appearance_color_overlay: "遮罩层",
     appearance_color_divider: "分割线",
     appearance_color_subtle_1: "细微层 1",
