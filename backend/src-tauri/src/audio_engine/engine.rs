@@ -5,7 +5,7 @@ use std::sync::{
     mpsc, Arc, Mutex,
 };
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -16,6 +16,11 @@ use crate::time_stretch::time_stretch_interleaved;
 
 /// Maximum stretch cache entries to prevent unbounded RAM growth.
 const MAX_STRETCH_CACHE_ENTRIES: usize = 128;
+
+/// 总线停滞多久后把瞬时电平归零回落。播放时音频块每 ~10-20ms 前进一次
+/// 总线 generation，此阈值远大于块周期、远小于人的感知；暂停 / 流停止后
+/// 用它触发电平条回落（见 meter 线程内的注释）。
+const METER_STALL_FALLBACK: Duration = Duration::from_millis(150);
 
 use super::mix::{
     render_callback_f32, render_callback_i16, render_callback_u16, SnapshotTransitionState,
@@ -164,6 +169,8 @@ impl AudioEngine {
                 let mut last_bus_generation = u64::MAX;
                 let mut last_map_generation = u64::MAX;
                 let mut last_pending_log_sec = u64::MAX;
+                // 总线最后一次前进的时刻（播放中每块都前进）。
+                let mut last_bus_advance = Instant::now();
                 loop {
                     if meter_shutdown.load(Ordering::Relaxed) {
                         break;
@@ -201,18 +208,42 @@ impl AudioEngine {
 
                     let bus_generation = meter_bus.generation();
                     let map_generation = meter_generation.load(Ordering::Relaxed);
-                    if bus_generation == last_bus_generation
-                        && map_generation == last_map_generation
-                    {
-                        continue;
-                    }
                     let bus_advanced = bus_generation != last_bus_generation;
-                    last_bus_generation = bus_generation;
-                    last_map_generation = map_generation;
+                    let map_changed = map_generation != last_map_generation;
+                    if !bus_advanced && !map_changed {
+                        // ── 总线停滞回落（暂停 / 流停止）──────────────────
+                        // RT 回调在 is_playing=false 时静音返回、不再
+                        // publish，总线 generation 冻结。若冻结前最后一块的
+                        // 峰值尚未被本线程消费，上面的 bus_advanced 合并会把
+                        // slot 里保留的非零块峰值重新写进刚被 idle 清零的
+                        // meter_state，随后 generation 永不再前进 —— 电平计
+                        // 就冻结在最后一次峰值上（“暂停不回落”）。这里在
+                        // 停滞超过 METER_STALL_FALLBACK 后把瞬时峰值归零并
+                        // 重发一次：无论最后一块与 idle 的先后时序如何都会
+                        // 自愈；峰值保持（max）与削波标志保留不动。正常播放
+                        // 时总线每块都前进，此分支不会触发。
+                        if last_bus_advance.elapsed() < METER_STALL_FALLBACK {
+                            continue;
+                        }
+                        let Ok(mut state) = meter_state.lock() else {
+                            continue;
+                        };
+                        let mut changed = false;
+                        for value in state.values_mut() {
+                            if value.peak_linear != 0.0 {
+                                value.peak_linear = 0.0;
+                                changed = true;
+                            }
+                        }
+                        if !changed {
+                            continue;
+                        }
+                    }
 
                     // Merge fresh RT peaks into the shared meter map. When only
                     // map_generation changed (worker reset/idle), re-emit as-is.
                     if bus_advanced {
+                        last_bus_advance = Instant::now();
                         let snap = snapshot_for_meter.load_full();
                         let Ok(mut state) = meter_state.lock() else {
                             continue;
@@ -233,6 +264,8 @@ impl AudioEngine {
                         }
                         *state = next;
                     }
+                    last_bus_generation = bus_generation;
+                    last_map_generation = map_generation;
 
                     let payload = {
                         let Ok(state) = meter_state.lock() else {
