@@ -41,6 +41,7 @@ import {
 } from "./childPitchOffsetParams";
 import { resolveHorizontalWheelZoom } from "../timeline/runtime/timelineScrollRange";
 import { resolveTimelineMinPxPerSec } from "../timeline/runtime/timelineZoomBounds";
+import { nativeScrollbarZoneAt } from "../../../utils/nativeScrollbar";
 import { getParamEditorWheelAction, getVibratoDragWheelTarget } from "./wheelGesture";
 import {
     createSelectionAmplifier,
@@ -170,6 +171,8 @@ export function usePianoRollInteractions(args: {
     scrollHorizontalKb: Keybinding;
     /** modifier.scrollVertical 绑定 */
     scrollVerticalKb: Keybinding;
+    /** modifier.scrollbarZoom 绑定（悬停滚动条 + 滚轮 = 该轴缩放） */
+    scrollbarZoomKb: Keybinding;
     /** modifier.paramMorph 绑定 */
     paramMorphKb: Keybinding;
     /** modifier.paramFineAdjust 绑定 */
@@ -286,6 +289,7 @@ export function usePianoRollInteractions(args: {
         horizontalZoomKb,
         scrollHorizontalKb,
         scrollVerticalKb,
+        scrollbarZoomKb,
         paramMorphKb,
         paramFineAdjustKb,
         paramStretchKb,
@@ -1267,6 +1271,14 @@ export function usePianoRollInteractions(args: {
                 if (isNoneBinding(kb)) return noModifierPressed;
                 return isModifierActive(kb, e);
             };
+            // ── 悬停原生滚动条：滚轮语义只归属该滚动条的轴 ──────────────
+            // 无修饰键 = 该轴滚动（竖直条 → 视口纵向平移；水平条 → 横向滚动）；
+            // 按住 modifier.scrollbarZoom（默认 Alt）= 该轴缩放。优先于全局绑定。
+            const scrollbarZone = nativeScrollbarZoneAt(el, e.clientX, e.clientY);
+            const scrollbarZoomRequested =
+                scrollbarZone != null &&
+                !isNoneBinding(scrollbarZoomKb) &&
+                isModifierActive(scrollbarZoomKb, e);
             const horizontalScrollModifierActive = isWheelBindingRequested(scrollHorizontalKb);
             const wheelAction = getParamEditorWheelAction({
                 deltaX: e.deltaX,
@@ -1275,6 +1287,8 @@ export function usePianoRollInteractions(args: {
                 verticalPanRequested: isWheelBindingRequested(scrollVerticalKb),
                 verticalZoomRequested: isWheelBindingRequested(prVerticalZoomKb),
                 horizontalZoomRequested: isWheelBindingRequested(horizontalZoomKb),
+                scrollbarZone,
+                scrollbarZoomRequested,
             });
 
             const applyVerticalPanDelta = (deltaY: number) => {
@@ -1435,6 +1449,7 @@ export function usePianoRollInteractions(args: {
             prVerticalZoomKb,
             scrollHorizontalKb,
             scrollVerticalKb,
+            scrollbarZoomKb,
             horizontalZoomKb,
             vibratoAmplitudeAdjustKb,
             vibratoFrequencyAdjustKb,
@@ -2064,10 +2079,7 @@ export function usePianoRollInteractions(args: {
                                     if (nextLen <= 0) return null;
 
                                     // 平滑度 → 毫秒定标的过渡带半宽（dense 索引）
-                                    const edgeHalfSpanIdx = edgeHalfSpanForIndices(
-                                        nextLen,
-                                        stride,
-                                    );
+                                    const edgeHalfSpanIdx = edgeHalfSpanForIndices(nextLen, stride);
                                     const extraEdgeFrames = Math.ceil(edgeHalfSpanIdx) * stride;
                                     const overallMinFrame = Math.max(
                                         0,
@@ -2374,14 +2386,14 @@ export function usePianoRollInteractions(args: {
                                         0,
                                         Math.ceil((selEndSec * 1000) / fp),
                                     );
-                                     // 拖拽数据与选区移动拖拽同一模式：先用 pv 近似值立即
-                                     // 预览，全分辨率到位后自动替换；提交必须等全分辨率
-                                     // 数据 —— 绝不把降采样值当连续帧写回后端（旧实现在
-                                     // stride>1 时会把 stride 间隔采样当连续帧写入：
-                                     // 时间压缩 + 覆盖未选帧，已修复）。
-                                     let origValues = readPvRange(pv, selStartFrame, selEndFrame);
-                                     let lastDy = 0;
-                                     let didDrag = false;
+                                    // 拖拽数据与选区移动拖拽同一模式：先用 pv 近似值立即
+                                    // 预览，全分辨率到位后自动替换；提交必须等全分辨率
+                                    // 数据 —— 绝不把降采样值当连续帧写回后端（旧实现在
+                                    // stride>1 时会把 stride 间隔采样当连续帧写入：
+                                    // 时间压缩 + 覆盖未选帧，已修复）。
+                                    let origValues = readPvRange(pv, selStartFrame, selEndFrame);
+                                    let lastDy = 0;
+                                    let didDrag = false;
 
                                     ensureLiveEditBase(pv);
                                     if (liveEditActiveRef) liveEditActiveRef.current = true;
@@ -2449,10 +2461,7 @@ export function usePianoRollInteractions(args: {
                                             origValues: selectionValues,
                                             origStartFrame: selStartFrame,
                                             frameDelta: 0,
-                                            extraEdgeFrames: Math.max(
-                                                0,
-                                                Math.ceil(edgeHalfSpan),
-                                            ),
+                                            extraEdgeFrames: Math.max(0, Math.ceil(edgeHalfSpan)),
                                             transform: (orig) => orig,
                                             edgeBlend:
                                                 edgeHalfSpan > 0
@@ -2631,10 +2640,7 @@ export function usePianoRollInteractions(args: {
                                                     (built.startFrame + i - pvNow.startFrame) /
                                                         pvStepUp,
                                                 );
-                                                if (
-                                                    globalIdx >= 0 &&
-                                                    globalIdx < nextEdit.length
-                                                ) {
+                                                if (globalIdx >= 0 && globalIdx < nextEdit.length) {
                                                     nextEdit[globalIdx] = finalDense[i];
                                                 }
                                             }

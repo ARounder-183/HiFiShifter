@@ -21,6 +21,9 @@ const WHEEL_AXIS_EPSILON = 0.5;
 const VIBRATO_TOUCHPAD_DELTA_THRESHOLD = 220;
 const VIBRATO_TOUCHPAD_FREQUENCY_AXIS_RATIO = 0.75;
 
+/** 指针悬停的原生滚动条区域（滚动条悬停语境下滚轮语义只归属该轴）。 */
+export type ScrollbarZone = "vertical" | "horizontal";
+
 function isLikelyDiscreteWheelStep(absDelta: number): boolean {
     const rounded = Math.round(absDelta);
     if (Math.abs(absDelta - rounded) > WHEEL_AXIS_EPSILON) {
@@ -126,9 +129,30 @@ export function getWheelGestureAxis(input: {
 }
 
 /**
+ * 悬停滚动条语境的滚轮语义：滚轮只作用于该滚动条的轴。
+ *
+ * - 无修饰键：滚轮 = 该轴滚动（竖直滚动条 → 滚动；水平滚动条 → 水平滚动）；
+ * - 按住 modifier.scrollbarZoom（默认 Alt）：滚轮 = 该轴缩放。
+ *
+ * 该判定优先于一切按键绑定解析 —— 悬停滚动条时用户意图明确指向该轴，
+ * 不应再被"默认滚轮 = 水平缩放"之类的全局绑定覆盖。
+ */
+function scrollbarZoneAction<T extends string>(
+    zone: ScrollbarZone,
+    zoomRequested: boolean,
+    verticalScrollAction: T,
+): T {
+    if (zone === "vertical") {
+        return (zoomRequested ? "vertical-zoom" : verticalScrollAction) as T;
+    }
+    return (zoomRequested ? "horizontal-zoom" : "horizontal-scroll") as T;
+}
+
+/**
  * 解析 ParamEditor 的滚轮手势动作。
  *
  * 流程：
+ * 0. 悬停在原生滚动条上（scrollbarZone）→ 滚轮只归属该轴（滚动 / 缩放）。
  * 1. 横向滚动 + 纵向 pan 同时按下 → free-scroll（双轴自由滚动）。
  * 2. 单独按下显式快捷键时直接命中对应分支。
  * 3. 没有显式请求时，回退到基于 deltaX/deltaY 主轴的轴向判断；
@@ -146,7 +170,19 @@ export function getParamEditorWheelAction(input: {
     verticalPanRequested: boolean;
     verticalZoomRequested: boolean;
     horizontalZoomRequested: boolean;
+    /** 指针悬停的原生滚动条区域；悬停时优先于一切按键绑定。 */
+    scrollbarZone?: ScrollbarZone | null;
+    /** 悬停滚动条时是否按下了 modifier.scrollbarZoom 缩放修饰键。 */
+    scrollbarZoomRequested?: boolean;
 }): ParamEditorWheelAction {
+    if (input.scrollbarZone) {
+        return scrollbarZoneAction(
+            input.scrollbarZone,
+            Boolean(input.scrollbarZoomRequested),
+            "vertical-pan",
+        );
+    }
+
     // 双轴自由滚动：仅当横向滚动 + 纵向 pan 同时按下
     if (input.horizontalScrollRequested && input.verticalPanRequested) {
         return "free-scroll";
@@ -182,6 +218,7 @@ export function getParamEditorWheelAction(input: {
  * 解析 Timeline 的滚轮手势动作。
  *
  * 流程：
+ * 0. 悬停在原生滚动条上（scrollbarZone）→ 滚轮只归属该轴（滚动 / 缩放）。
  * 1. 横向滚动 + 纵向滚动快捷键同时按下 → free-scroll（双轴自由滚动）。
  * 2. 单独按下显式快捷键时直接命中对应分支。
  * 3. 没有显式请求时，回退到基于 deltaX/deltaY 主轴的轴向判断；
@@ -198,7 +235,19 @@ export function getTimelineWheelAction(input: {
     verticalScrollRequested: boolean;
     verticalZoomRequested: boolean;
     horizontalZoomRequested: boolean;
+    /** 指针悬停的原生滚动条区域；悬停时优先于一切按键绑定。 */
+    scrollbarZone?: ScrollbarZone | null;
+    /** 悬停滚动条时是否按下了 modifier.scrollbarZoom 缩放修饰键。 */
+    scrollbarZoomRequested?: boolean;
 }): TimelineWheelAction {
+    if (input.scrollbarZone) {
+        return scrollbarZoneAction(
+            input.scrollbarZone,
+            Boolean(input.scrollbarZoomRequested),
+            "vertical-scroll",
+        );
+    }
+
     // 双轴自由滚动：仅当横向滚动 + 纵向滚动同时按下
     if (input.horizontalScrollRequested && input.verticalScrollRequested) {
         return "free-scroll";

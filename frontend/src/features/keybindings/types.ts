@@ -97,6 +97,7 @@ export type ActionId =
     | "modifier.pianoRollVerticalZoom" // PianoRoll Ctrl+滚轮垂直缩放
     | "modifier.scrollHorizontal" // 按住+滚轮水平滚动
     | "modifier.scrollVertical" // 按住+滚轮竖直滚动
+    | "modifier.scrollbarZoom" // 悬停滚动条+滚轮 = 该轴缩放（按住）
     | "modifier.pianoKeysVerticalScroll" // 钢琴键垂直滚动（按住+滚轮）
     | "modifier.pianoKeysVerticalZoom" // 钢琴键垂直缩放（按住+滚轮）
     | "modifier.paramMorph" // 参数编辑器形变模式（按住）
@@ -162,6 +163,8 @@ export type ModifierConflictScene =
     | "wheel.pianoRoll"
     // 琴键区滚轮
     | "wheel.pianoKeys"
+    // 悬停在原生滚动条上的滚轮（时间轴 / 参数编辑器等所有自定义滚轮面）
+    | "wheel.scrollbar"
     // 全局微调：滑杆 / 数值输入框 / 轨道头等部件
     | "global.fine";
 

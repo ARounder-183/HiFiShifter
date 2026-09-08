@@ -151,6 +151,10 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
         shift: true,
     },
     "modifier.scrollVertical": { key: "alt", modifierOnly: true, alt: true },
+    // 悬停在原生滚动条上滚轮时的"缩放"修饰键（无修饰键时滚轮 = 该轴滚动）。
+    // 默认 Alt：与 REAPER 等对齐；仅在滚动条悬停语境生效，不与全局
+    // scrollVertical（同为 Alt）冲突 —— 悬停滚动条时本键位优先。
+    "modifier.scrollbarZoom": { key: "alt", modifierOnly: true, alt: true },
     "modifier.pianoKeysVerticalScroll": { key: "__none__", modifierOnly: true },
     "modifier.pianoKeysVerticalZoom": { key: "alt", modifierOnly: true, alt: true },
     "modifier.paramMorph": { key: "alt", modifierOnly: true, alt: true },
@@ -496,6 +500,12 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
         group: "modWheel",
         modifierOperationType: "wheel",
         conflictScenes: ["wheel.timeline", "wheel.pianoRoll"],
+    },
+    "modifier.scrollbarZoom": {
+        labelKey: "kb_modifier_scrollbar_zoom",
+        group: "modWheel",
+        modifierOperationType: "wheel",
+        conflictScenes: ["wheel.scrollbar"],
     },
     "modifier.pianoKeysVerticalScroll": {
         labelKey: "kb_modifier_piano_keys_scroll_v",

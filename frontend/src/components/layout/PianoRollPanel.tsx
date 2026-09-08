@@ -109,14 +109,16 @@ import {
     listReferenceRootTracks,
 } from "./pianoRoll/referenceRootTracks";
 import { buildReferenceRootTrackTriggerElement } from "./pianoRoll/referenceRootTrackTrigger";
-import { averageSelectionValues, smoothSelectionValues, smoothContextPadFrames } from "./pianoRoll/selectionTransforms";
+import {
+    averageSelectionValues,
+    smoothSelectionValues,
+    smoothContextPadFrames,
+} from "./pianoRoll/selectionTransforms";
 import {
     applySelectionEditWithEdgeSmoothing,
     type SelectionEditExtension,
 } from "./pianoRoll/selectionEditApply";
-import {
-    editablePitchValue,
-} from "./pianoRoll/paramSmoothing";
+import { editablePitchValue } from "./pianoRoll/paramSmoothing";
 import { usePianoRollData } from "./pianoRoll/usePianoRollData";
 import { useClipsPeaksForPianoRoll } from "./pianoRoll/useClipsPeaksForPianoRoll";
 import { PianoRollWaveformSurface } from "./pianoRoll/PianoRollWaveformSurface";
@@ -554,6 +556,9 @@ export const PianoRollPanel: React.FC = () => {
     );
     const scrollVerticalKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.scrollVertical"),
+    );
+    const scrollbarZoomKb = useAppSelector((state) =>
+        selectKeybinding(state, "modifier.scrollbarZoom"),
     );
     const pianoKeysVerticalScrollKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.pianoKeysVerticalScroll"),
@@ -2831,6 +2836,7 @@ export const PianoRollPanel: React.FC = () => {
         horizontalZoomKb,
         scrollHorizontalKb,
         scrollVerticalKb,
+        scrollbarZoomKb,
         paramMorphKb,
         paramStretchKb: stretchKb,
         vibratoAmplitudeAdjustKb,
@@ -3646,9 +3652,7 @@ export const PianoRollPanel: React.FC = () => {
                             kind: "deltaAt",
                             deltaAt: (frame, baseValue) => {
                                 const scale =
-                                    fixedScale ??
-                                    projectScaleAtSec((frame * fpMs) / 1000) ??
-                                    "C";
+                                    fixedScale ?? projectScaleAtSec((frame * fpMs) / 1000) ?? "C";
                                 return (
                                     transposePitchByScaleSteps(baseValue, degreeSteps, scale) -
                                     baseValue

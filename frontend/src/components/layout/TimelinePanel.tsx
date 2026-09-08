@@ -424,6 +424,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         viewportEndSec,
         scrollHorizontalKb,
         scrollVerticalKb,
+        scrollbarZoomKb,
         horizontalZoomKb,
         verticalZoomKb,
         paramFineAdjustKb,
@@ -687,10 +688,13 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         x: number;
         y: number;
     } | null>(null);
-    const openRateBadgeMenu = React.useCallback((clipId: string, screenX: number, screenY: number) => {
-        setRateEditorClipId(clipId);
-        setRateEditorPosition({ x: screenX, y: screenY });
-    }, []);
+    const openRateBadgeMenu = React.useCallback(
+        (clipId: string, screenX: number, screenY: number) => {
+            setRateEditorClipId(clipId);
+            setRateEditorPosition({ x: screenX, y: screenY });
+        },
+        [],
+    );
 
     // 角标行内编辑开始：镜像 renamingClipId（onRenameStart）的两参适配器。
     const startTrackLaneBadgeEdit = React.useCallback(
@@ -1761,6 +1765,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         rulerContentRef={rulerContentRef}
                         scrollHorizontalKb={scrollHorizontalKb}
                         scrollVerticalKb={scrollVerticalKb}
+                        scrollbarZoomKb={scrollbarZoomKb}
                         horizontalZoomKb={horizontalZoomKb}
                         verticalZoomKb={verticalZoomKb}
                         getPlayheadSec={getVisualPlayheadSec}
@@ -2902,7 +2907,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         open={rateEditorClipId != null && rateEditorPosition != null}
                         clip={
                             rateEditorClipId
-                                ? s.clips.find((entry) => entry.id === rateEditorClipId) ?? null
+                                ? (s.clips.find((entry) => entry.id === rateEditorClipId) ?? null)
                                 : null
                         }
                         tempoMap={s.tempoMap}
