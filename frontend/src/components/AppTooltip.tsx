@@ -1,4 +1,11 @@
-import { useEffect, useRef, useState, type PropsWithChildren, type ReactNode } from "react";
+import {
+    useEffect,
+    useLayoutEffect,
+    useRef,
+    useState,
+    type PropsWithChildren,
+    type ReactNode,
+} from "react";
 
 /**
  * 富内容注册事件：任意模块可以把某个元素的信息浮标设为 ReactNode
@@ -7,24 +14,19 @@ import { useEffect, useRef, useState, type PropsWithChildren, type ReactNode } f
 export const HS_TOOLTIP_CONTENT_EVENT = "hs-tooltip-content";
 import { createPortal } from "react-dom";
 
-export type AppTooltipPosition = {
-    x: number;
-    y: number;
-};
+import {
+    CURSOR_OFFSET_X,
+    CURSOR_OFFSET_Y,
+    clampTooltipPosition,
+    type AppTooltipPosition,
+} from "./appTooltipPosition";
+
+export type { AppTooltipPosition } from "./appTooltipPosition";
 
 /** 气泡内容：纯文本，或含内联 SVG 图标等 ReactNode。 */
 export type AppTooltipContent = string | ReactNode | null;
 
-/** 气泡定位夹紧：右侧预留约 320px 宽度余量（长链接气泡的上限宽度），
- *  底部预留三行文本（约 56px 高）的空间。 */
-function clampTooltipPosition(position: AppTooltipPosition): AppTooltipPosition {
-    return {
-        x: Math.min(position.x + 14, Math.max(8, window.innerWidth - 320)),
-        y: Math.min(position.y + 18, Math.max(8, window.innerHeight - 88)),
-    };
-}
-
-/** 气泡内容：纯文本，或含内联 SVG 图标等信息浮标的 ReactNode。 */
+/** 内容可渲染判定：null / 空字符串不显示气泡。 */
 function isRenderable(content: AppTooltipContent): boolean {
     if (content == null) return false;
     if (typeof content === "string") return content.length > 0;
@@ -46,11 +48,29 @@ export function AppTooltipBubble({
     text: AppTooltipContent;
     position: AppTooltipPosition | null;
 }) {
+    const bubbleRef = useRef<HTMLDivElement | null>(null);
+    // 气泡内容宽度不定（两字短文案 → 400px 长链接），挂载后按实测尺寸
+    // 夹紧。useLayoutEffect 在绘制前完成修正，首帧不闪；初始样式用原始
+    // 光标偏移落点，修正前后只差夹紧差值。
+    useLayoutEffect(() => {
+        const el = bubbleRef.current;
+        if (!el || !position) return;
+        const clamped = clampTooltipPosition(position, el.offsetWidth, el.offsetHeight);
+        el.style.left = `${clamped.x}px`;
+        el.style.top = `${clamped.y}px`;
+    });
     if (!position || !isRenderable(text)) return null;
 
-    const clamped = clampTooltipPosition(position);
     return createPortal(
-        <div className="app-tooltip" role="tooltip" style={{ left: clamped.x, top: clamped.y }}>
+        <div
+            ref={bubbleRef}
+            className="app-tooltip"
+            role="tooltip"
+            style={{
+                left: position.x + CURSOR_OFFSET_X,
+                top: position.y + CURSOR_OFFSET_Y,
+            }}
+        >
             {text}
         </div>,
         document.body,
