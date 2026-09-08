@@ -23,6 +23,7 @@ mod file_browser;
 mod midi;
 #[path = "commands/midi_export.rs"]
 mod midi_export;
+pub(crate) use midi_export::TempoTickConverter;
 #[path = "commands/onnx_status.rs"]
 mod onnx_status;
 #[path = "commands/params.rs"]

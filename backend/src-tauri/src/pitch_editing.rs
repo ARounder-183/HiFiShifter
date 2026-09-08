@@ -1185,6 +1185,95 @@ fn apply_child_pitch_offset_to_midi(
     current
 }
 
+/// REAPER 导出用的逐帧音高偏移样本（`compute_clip_export_pitch_offsets`）。
+#[derive(Debug, Clone)]
+pub(crate) struct ExportPitchOffsetFrames {
+    /// 逐帧半音偏移（绝对半音量，可直接写 take PITCHENV 值）；
+    /// **0 = 该帧不做音高修正**（`pitch_orig ≤ 0` 或 `pitch_edit ≤ 0` 的
+    /// 无声/未分析/未编辑帧，与渲染端"值 ≤ 0 不变换"语义一致）。
+    /// 帧周期与根轨道 entry 一致（调用方切片同源）。
+    pub offsets: Vec<f32>,
+}
+
+/// 计算 clip 时间范围内的总音高偏移（REAPER take PITCHENV 的值源）。
+///
+/// 与渲染语义逐帧对齐（见 `apply_child_pitch_offset_to_midi` 的消费点）：
+/// - 根轨道编辑线：`pitch_edit − pitch_orig`（读取规则与 `get_param_frames`
+///   / MIDI 导出一致）；
+/// - **`pitch_orig ≤ 0` 或 `pitch_edit ≤ 0` 的帧一律偏移 = 0（"不做音高
+///   修正"）**——渲染端对值 ≤ 0 的帧不应用编辑与子轨变换，导出必须同款
+///   处理，不得用邻近帧桥接（否则无声区会被相邻有声帧的修正值污染）；
+/// - 子轨音分差/度数差：作用在**编辑后**音高上的再变换（度数差先、音分差
+///   后，root → 父 → 子逐层），度数差为依赖音阶的非线性换算；
+/// - 总偏移 = 子轨变换后的有效音高 − 原始音高（可超过 ±24，REAPER PIT
+///   包络值域无限制，不做钳制）；
+/// - `pitch_orig` 为空（未分析）时回退 `pending_pitch_offset` 切片（缺失
+///   帧 = 0 = 不做修正）；
+/// - 两者皆无 → 返回 None（不导出音高包络）。
+pub(crate) fn compute_clip_export_pitch_offsets(
+    timeline: &TimelineState,
+    clip: &crate::state::Clip,
+) -> Option<ExportPitchOffsetFrames> {
+    let root_track_id = timeline.resolve_root_track_id(&clip.track_id)?;
+    let entry = timeline.params_by_root_track.get(&root_track_id)?;
+    let frame_period_ms = entry.frame_period_ms.max(0.1);
+
+    let clip_start = clip.start_sec.max(0.0);
+    let clip_length = clip.length_sec.max(0.0);
+    let start_frame = ((clip_start * 1000.0) / frame_period_ms).floor().max(0.0) as usize;
+    let frame_count =
+        (((clip_length * 1000.0) / frame_period_ms).ceil().max(1.0)) as usize;
+    let end_frame = start_frame + frame_count;
+
+    let child_cfg = active_child_pitch_offset_config(timeline, &clip.track_id);
+    let scale_segments = timeline.scale_segments();
+
+    let mut offsets: Vec<f32> = Vec::with_capacity(frame_count);
+
+    if entry.pitch_orig.is_empty() {
+        // 未分析：回退 pending（REAPER 导入的待应用偏移）；缺失帧 = 0。
+        let Some(pending) = entry.pending_pitch_offset.as_ref() else {
+            return None;
+        };
+        for frame_idx in start_frame..end_frame {
+            let value = pending
+                .get(frame_idx)
+                .copied()
+                .filter(|v| v.is_finite())
+                .unwrap_or(0.0);
+            offsets.push(value);
+        }
+        return Some(ExportPitchOffsetFrames { offsets });
+    }
+
+    let mut scale_cursor = ScaleSegmentsCursor::new(&scale_segments);
+    for frame_idx in start_frame..end_frame {
+        let orig = entry.pitch_orig.get(frame_idx).copied().unwrap_or(0.0) as f64;
+        let edit_raw = entry.pitch_edit.get(frame_idx).copied().unwrap_or(0.0) as f64;
+        // 原始音高或当前音高为 0 → "不做音高修正"（偏移 0）。
+        // 渲染端对 ≤ 0 的帧不应用编辑与子轨变换，导出保持一致。
+        if !(orig.is_finite() && orig > 0.0) || !(edit_raw.is_finite() && edit_raw > 0.0) {
+            offsets.push(0.0);
+            continue;
+        }
+        let t_sec = (frame_idx as f64) * frame_period_ms / 1000.0;
+        let effective = match child_cfg.as_ref() {
+            Some(cfg) => {
+                let scale_notes = scale_cursor.notes_at(t_sec);
+                apply_child_pitch_offset_to_midi(edit_raw, cfg, frame_idx, scale_notes)
+            }
+            None => edit_raw,
+        };
+        if !effective.is_finite() || effective <= 0.0 {
+            offsets.push(0.0);
+            continue;
+        }
+        offsets.push((effective - orig) as f32);
+    }
+
+    Some(ExportPitchOffsetFrames { offsets })
+}
+
 pub(crate) fn build_clip_input_pitch_curve(
     timeline: &TimelineState,
     clip: &crate::state::Clip,

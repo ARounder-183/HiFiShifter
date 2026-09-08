@@ -399,7 +399,7 @@ fn smooth_curve(values: &[f32], window: usize) -> Vec<f32> {
 /// 构建时一次性积分各段 BPM 得到每个变化点处的累计 tick 数（O(n)），
 /// 之后每次查询用二分查找定位所在段（O(log n)），避免在逐帧弯音导出
 /// 等热点路径中退化为 O(points × frames)。
-struct TempoTickConverter {
+pub(crate) struct TempoTickConverter {
     /// (sec, bpm)，按 sec 升序，首点位于 0。
     points: Vec<(f64, f64)>,
     /// cumulative_ticks[i] = 从 0 到 points[i].sec 的累计 tick 数。
@@ -407,7 +407,7 @@ struct TempoTickConverter {
 }
 
 impl TempoTickConverter {
-    fn new(timeline: &crate::state::TimelineState, fallback_bpm: f64) -> Self {
+    pub(crate) fn new(timeline: &crate::state::TimelineState, fallback_bpm: f64) -> Self {
         let mut points: Vec<(f64, f64)> = Vec::new();
         if let Some(map) = timeline.tempo_map.as_ref() {
             for p in map {
@@ -452,6 +452,28 @@ impl TempoTickConverter {
         };
         (base_ticks + (sec - last_sec).max(0.0) * (bpm / 60.0) * TICKS_PER_BEAT as f64).round()
             as u64
+    }
+
+    /// Tempo Map 感知的 秒→四分音符（QN）换算（不取整，与 `sec_to_ticks`
+    /// 同源积分）。REAPER 剪贴板的 ENVSEG `SEG_RANGE` QN 字段用此换算——
+    /// 原生数据在变速工程下按 Tempo Map 积分（秒 × 常量 BPM 的线性换算
+    /// 会产生节拍网格错位）。
+    pub(crate) fn sec_to_qn(&self, sec: f64) -> f64 {
+        let sec = sec.max(0.0);
+        let idx = self
+            .points
+            .partition_point(|&(point_sec, _)| point_sec < sec);
+        let (base_qn, last_sec, bpm) = if idx == 0 {
+            (0.0, 0.0, self.points[0].1)
+        } else {
+            let (last_sec, bpm) = self.points[idx - 1];
+            (
+                self.cumulative_ticks[idx - 1] / TICKS_PER_BEAT as f64,
+                last_sec,
+                bpm,
+            )
+        };
+        base_qn + (sec - last_sec).max(0.0) * (bpm / 60.0)
     }
 }
 

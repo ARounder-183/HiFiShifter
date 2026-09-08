@@ -1,8 +1,8 @@
 //! Convert selected HiFiShifter clips into REAPERMedia clipboard data.
 
 use crate::reaper_parser::{
-    ReaperData, ReaperIgnTempo, ReaperItem, ReaperMidiEvent, ReaperMidiSourceData, ReaperSource,
-    ReaperTrack,
+    item_time_to_take_env_u, ReaperData, ReaperEnvelope, ReaperIgnTempo, ReaperItem,
+    ReaperMidiEvent, ReaperMidiSourceData, ReaperSource, ReaperTrack,
 };
 use crate::state::{Clip, ClipTake, TimelineState};
 use std::collections::BTreeMap;
@@ -233,7 +233,12 @@ fn fill_reaper_take(
     true
 }
 
-fn build_item(clip: &Clip, bpm: f64) -> Option<ReaperItem> {
+fn build_item(
+    clip: &Clip,
+    bpm: f64,
+    curves: &ClipExportCurves,
+    qn_at: &dyn Fn(f64) -> f64,
+) -> Option<ReaperItem> {
     let mut working = clip.clone();
     working.normalize_takes();
     if working.takes.is_empty() {
@@ -244,6 +249,9 @@ fn build_item(clip: &Clip, bpm: f64) -> Option<ReaperItem> {
     let mut item = ReaperItem::default();
     item.position = working.start_sec.max(0.0);
     item.length = working.length_sec.max(0.001);
+    // 双时基（原生形态）：POSITION/LENGTH 附带 QN 值（Tempo Map 积分）。
+    item.position_qn = Some(qn_at(item.position));
+    item.length_qn = Some(qn_at(item.position + item.length) - item.position_qn.unwrap_or(0.0));
     // SnapOffset：相对 Clip 起点的偏移，与 REAPER SNAPOFFS 同语义直传。
     item.snap_offs = working.snap_offset_sec.max(0.0);
     // LOOP 是 REAPER 的 Item 级标志：多 take Clip 各 take 的 loop_enabled
@@ -281,15 +289,28 @@ fn build_item(clip: &Clip, bpm: f64) -> Option<ReaperItem> {
     } else {
         1.0
     };
+    let combined_rate_f32 = clip_rate * active_take.playback_rate;
+    let combined_rate = combined_rate_f32 as f64;
     if !fill_reaper_take(
         &mut item.default_take,
         &active_take,
         working.length_sec,
         bpm,
         true,
-        clip_rate * active_take.playback_rate,
+        combined_rate_f32,
     ) {
         return None;
+    }
+
+    // ── 音高参数线 → 活跃 take 的 PITCHENV（default take 的 ITEM 直属块） ──
+    // 坐标为 take 媒体时间 u = (t − item_pos) × |PLAYRATE[0]|（唯一转换点
+    // item_time_to_take_env_u）；值不钳制（REAPER PIT 值域无限制）。
+    // MIDI take 不写音高包络（HiFiShifter 音高线基于音频分析，MIDI take
+    // 的 PIT 包络在 REAPER 中无对应渲染语义）。
+    if active_take.midi_note_data.is_none() {
+        if let Some(env) = build_take_pitch_envelope(curves, item.length, combined_rate) {
+            item.default_take.envelopes.push(env);
+        }
     }
 
     // 显式 TAKE 块列出除 active 之外的全部 take（active 已由 default_take
@@ -318,9 +339,442 @@ fn build_item(clip: &Clip, bpm: f64) -> Option<ReaperItem> {
     Some(item)
 }
 
+// ─── 参数线 → REAPER 包络 ────────────────────────────────────────────────────
+
+/// 精简容差。
+const SIMPLIFY_TOLERANCE_VOLUME: f64 = 0.005;
+const SIMPLIFY_TOLERANCE_PAN: f64 = 0.005;
+const SIMPLIFY_TOLERANCE_PITCH: f64 = 0.02;
+
+/// 每个导出 Clip 的参数线视图（命令层从 live timeline 预解析后传入）。
+///
+/// 所有切片以"帧 0 = clip 起点"对齐；帧周期统一 `frame_period_ms`。
+#[derive(Debug, Clone, Default)]
+pub struct ClipExportCurves {
+    pub frame_period_ms: f64,
+    /// 逐帧半音偏移；**0 = 该帧不做音高修正**（无声/未分析/未编辑帧）。
+    pub pitch_offset: Option<Vec<f32>>,
+    /// volume 倍率切片（相对轨道推子，默认 1.0）。
+    pub volume: Option<Vec<f32>>,
+    /// pan 切片（默认 0.0，−1..1）。
+    pub pan: Option<Vec<f32>>,
+}
+
+impl ClipExportCurves {
+    /// 是否携带任何包络数据。
+    pub fn is_empty(&self) -> bool {
+        self.pitch_offset.is_none() && self.volume.is_none() && self.pan.is_none()
+    }
+}
+
+fn curve_default_value(key: &str) -> f32 {
+    if key == "pan" {
+        0.0
+    } else {
+        1.0
+    }
+}
+
+/// 曲线切片（帧 0 = clip 起点），不足处补参数默认值（与
+/// `extract_linked_params_from_root_range` 的切片语义一致）。
+fn slice_curve_with_default(
+    curve: &[f32],
+    start_frame: usize,
+    count: usize,
+    default: f32,
+) -> Vec<f32> {
+    (0..count)
+        .map(|i| curve.get(start_frame + i).copied().unwrap_or(default))
+        .collect()
+}
+
+/// 为导出 clip 预解析参数线视图（渲染同款合并语义：
+/// `clip.extra_curves[key]` 按 key 覆盖根轨道曲线）。
+pub fn build_clip_export_curves(timeline: &TimelineState, clip: &Clip) -> ClipExportCurves {
+    let root = timeline.resolve_root_track_id(&clip.track_id);
+    let root_entry = root.as_deref().and_then(|id| timeline.params_by_root_track.get(id));
+    let frame_period_ms = root_entry
+        .map(|entry| entry.frame_period_ms.max(0.1))
+        .unwrap_or(5.0);
+    let start_frame = ((clip.start_sec.max(0.0) * 1000.0) / frame_period_ms)
+        .floor()
+        .max(0.0) as usize;
+    let frame_count =
+        (((clip.length_sec.max(0.0) * 1000.0) / frame_period_ms).ceil().max(1.0)) as usize;
+
+    let merged_curve = |key: &str| -> Option<Vec<f32>> {
+        // 渲染同款合并：clip.extra_curves[key] 覆盖 root[key]（整 key 覆盖）；
+        // volume 兼容旧 `hifigan_volume` key（common_volume_curve_for_clip 同款）。
+        let legacy_key = if key == "volume" { Some("hifigan_volume") } else { None };
+        let clip_override = clip
+            .extra_curves
+            .as_ref()
+            .and_then(|c| c.get(key).or_else(|| legacy_key.and_then(|k| c.get(k))));
+        let root_curve = root_entry.and_then(|e| {
+            e.extra_curves
+                .get(key)
+                .or_else(|| legacy_key.and_then(|k| e.extra_curves.get(k)))
+        });
+        let curve = clip_override.or(root_curve)?;
+        Some(slice_curve_with_default(
+            curve,
+            start_frame,
+            frame_count,
+            curve_default_value(key),
+        ))
+    };
+
+    ClipExportCurves {
+        frame_period_ms,
+        volume: merged_curve("volume"),
+        pan: merged_curve("pan"),
+        pitch_offset: crate::pitch_editing::compute_clip_export_pitch_offsets(timeline, clip)
+            .map(|p| p.offsets),
+    }
+}
+
+/// 视线简化：折线段间所有样本偏差 ≤ tolerance 才延伸，否则落折点。
+///
+/// - 全默认 → 空表（整条包络不写）；
+/// - 端点强制：恒写 range_start 与 range_end 两端点（不得依赖 hold 语义
+///   跨 Item / 段边界）；
+/// - 平坦非默认 → 恰好 2 点；斜线 → 仅折点。
+fn simplify_breakpoints(
+    samples: &[(f64, f64)],
+    range_start: f64,
+    range_end: f64,
+    default_value: f64,
+    tolerance: f64,
+) -> Vec<(f64, f64)> {
+    if samples.is_empty() || range_end <= range_start {
+        return Vec::new();
+    }
+    if samples
+        .iter()
+        .all(|(_, v)| (v - default_value).abs() <= tolerance)
+    {
+        return Vec::new();
+    }
+
+    let value_at = |t: f64| -> f64 {
+        let idx = samples.partition_point(|s| s.0 < t);
+        if idx == 0 {
+            return samples[0].1;
+        }
+        if idx >= samples.len() {
+            return samples[samples.len() - 1].1;
+        }
+        let (t0, v0) = samples[idx - 1];
+        let (t1, v1) = samples[idx];
+        if (t1 - t0).abs() < 1e-12 {
+            return v0;
+        }
+        let frac = ((t - t0) / (t1 - t0)).clamp(0.0, 1.0);
+        v0 + (v1 - v0) * frac
+    };
+
+    // 折线 a→f 是否容纳 (a, f) 内全部样本（端点精确）。
+    let line_fits = |a: usize, f: usize| -> bool {
+        let (ta, va) = samples[a];
+        let (tf, vf) = samples[f];
+        let span = tf - ta;
+        if span <= 1e-12 {
+            return (vf - va).abs() <= tolerance;
+        }
+        let slope = (vf - va) / span;
+        samples[a + 1..f]
+            .iter()
+            .all(|(tj, vj)| (vj - (va + slope * (tj - ta))).abs() <= tolerance)
+    };
+
+    let mut out: Vec<(f64, f64)> = Vec::new();
+    let push_point = |t: f64, v: f64, out: &mut Vec<(f64, f64)>| {
+        if let Some(last) = out.last_mut() {
+            if (last.0 - t).abs() <= 1e-9 {
+                last.1 = v;
+                return;
+            }
+        }
+        out.push((t, v));
+    };
+
+    // 首端点（强制）。
+    let first_t = samples[0].0.max(range_start);
+    push_point(first_t, value_at(first_t), &mut out);
+
+    let mut anchor = 0usize;
+    loop {
+        // 找从 anchor 出发能容纳税入的最远样本。
+        let mut f = anchor + 1;
+        let mut farthest = anchor + 1;
+        while f < samples.len() {
+            if line_fits(anchor, f) {
+                farthest = f;
+                f += 1;
+            } else {
+                break;
+            }
+        }
+        let (t, v) = samples[farthest];
+        push_point(t, v, &mut out);
+        anchor = farthest;
+        if anchor + 1 >= samples.len() {
+            break;
+        }
+    }
+
+    // 末端点（强制）。若末点值与端值在容差内相等（帧网格取不到精确 range_end
+    // 的常态），把末点延伸到 range_end 而不是追加第四点——最后一段的偏差
+    // 仍在容差内，且保持"线性段只有端点"的精简不变式。
+    let end_t = range_end;
+    let end_v = value_at(end_t);
+    if let Some(last) = out.last_mut() {
+        if (last.1 - end_v).abs() <= tolerance {
+            last.0 = end_t;
+            last.1 = end_v;
+        } else {
+            push_point(end_t, end_v, &mut out);
+        }
+    } else {
+        push_point(end_t, end_v, &mut out);
+    }
+    out
+}
+
+/// 音高参数线 → 活跃 take 的 PITCHENV（default take 的 ITEM 直属块）。
+///
+/// - 坐标 u = t_rel × 组合速率（`item_time_to_take_env_u` 唯一转换点）；
+/// - 端点强制（u=0 与 u=item_length×rate）；值为 0 的帧 = 不做音高修正
+///  （显式 0 落点，不得依赖 hold 语义跨界或桥接邻近帧）；
+/// - 值不钳制（REAPER PIT 值域无限制）；DEFSHAPE 范围按最大偏移写入。
+fn build_take_pitch_envelope(
+    curves: &ClipExportCurves,
+    item_length_sec: f64,
+    combined_rate: f64,
+) -> Option<ReaperEnvelope> {
+    let values = curves.pitch_offset.as_ref()?;
+    let frame_period_ms = if curves.frame_period_ms > 0.0 {
+        curves.frame_period_ms
+    } else {
+        5.0
+    };
+    let samples: Vec<(f64, f64)> = values
+        .iter()
+        .enumerate()
+        .map(|(i, v)| (i as f64 * frame_period_ms / 1000.0, *v as f64))
+        .collect();
+    let range_end = item_length_sec.max(1e-6);
+    let breakpoints = simplify_breakpoints(&samples, 0.0, range_end, 0.0, SIMPLIFY_TOLERANCE_PITCH);
+    if breakpoints.is_empty() {
+        return None;
+    }
+
+    let points: Vec<Vec<f64>> = breakpoints
+        .iter()
+        .map(|(t, v)| {
+            vec![
+                item_time_to_take_env_u(*t, combined_rate),
+                *v,
+                0.0, // shape = 线性
+            ]
+        })
+        .collect();
+    let max_abs = points
+        .iter()
+        .map(|p| p[1].abs())
+        .fold(0.0_f64, f64::max);
+    let display_range = (max_abs.ceil() as i64).clamp(3, 96) as f64;
+
+    Some(ReaperEnvelope {
+        env_type: "PITCHENV".to_string(),
+        act: vec![1, -1],
+        seg_range: None,
+        points,
+        def_shape: Some(vec![0.0, display_range, -1.0]),
+    })
+}
+
+/// 音量/声像参数线 → ENVSEG 轨道包络段（每个连续 clip 组一条段）。
+///
+/// - VOLENV2 值 = 轨道推子 × 曲线（绝对量）；PANENV2 值 = 曲线值；
+/// - 段范围 = 连续组跨度（gap ≤ 1 帧视为连续；无曲线数据的 clip 打断分组，
+///   其范围不属于任何段 → REAPER 段外不生效，保持目标轨既有自动化）；
+/// - 段内相对坐标 + 端点强制（相对 0 / 相对 len）；QN 域由 bpm 换算。
+fn build_track_envseg_envelopes(
+    clip_pairs: &[(&Clip, &ClipExportCurves)],
+    track_volume: f64,
+    timeline: &TimelineState,
+) -> Vec<ReaperEnvelope> {
+    // QN 字段按 Tempo Map 积分换算（原生 REAPER 语义：变速工程下 QN ≠
+    // 秒 × 常量 BPM 的线性值，否则节拍网格错位）。
+    let converter = crate::commands::TempoTickConverter::new(timeline, timeline.bpm);
+    let qn_at = move |sec: f64| -> f64 { converter.sec_to_qn(sec) };
+    let mut out = Vec::new();
+    build_envseg_for_key(
+        clip_pairs,
+        EnvSegKey::Volume,
+        "VOLENV2",
+        track_volume,
+        SIMPLIFY_TOLERANCE_VOLUME,
+        track_volume,
+        &qn_at,
+        &mut out,
+    );
+    build_envseg_for_key(
+        clip_pairs,
+        EnvSegKey::Pan,
+        "PANENV2",
+        0.0,
+        SIMPLIFY_TOLERANCE_PAN,
+        1.0,
+        &qn_at,
+        &mut out,
+    );
+    out
+}
+
+/// ENVSEG 段的参数线种类。
+#[derive(Clone, Copy, PartialEq)]
+enum EnvSegKey {
+    Volume,
+    Pan,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_envseg_for_key(
+    clip_pairs: &[(&Clip, &ClipExportCurves)],
+    key: EnvSegKey,
+    env_type: &str,
+    default_value: f64,
+    tolerance: f64,
+    volume_factor: f64,
+    qn_at: &dyn Fn(f64) -> f64,
+    out: &mut Vec<ReaperEnvelope>,
+) {
+    let frame_period = 5.0f64;
+    let merge_gap_sec = frame_period / 1000.0 + 1e-6;
+
+    // 每个 clip 的采样（绝对工程秒）；无曲线数据的 clip 不产生采样但参与分组。
+    let mut entries: Vec<(f64, f64, Option<Vec<(f64, f64)>>)> = clip_pairs
+        .iter()
+        .map(|(clip, curves)| {
+            let clip_start = clip.start_sec.max(0.0);
+            let clip_end = clip_start + clip.length_sec.max(0.0);
+            let curve = match key {
+                EnvSegKey::Volume => curves.volume.as_ref(),
+                EnvSegKey::Pan => curves.pan.as_ref(),
+            };
+            let fp = if curves.frame_period_ms > 0.0 {
+                curves.frame_period_ms
+            } else {
+                frame_period
+            };
+            let samples = curve.map(|curve| {
+                curve
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| {
+                        let t = clip_start + i as f64 * fp / 1000.0;
+                        let value = match key {
+                            // VOLENV2 = 绝对量（推子 × 曲线倍率）。
+                            EnvSegKey::Volume => (volume_factor * *v as f64).clamp(0.0, 4.0),
+                            EnvSegKey::Pan => (*v as f64).clamp(-1.0, 1.0),
+                        };
+                        (t, value)
+                    })
+                    .filter(|(t, _)| *t <= clip_end + merge_gap_sec)
+                    .collect::<Vec<(f64, f64)>>()
+            });
+            (clip_start, clip_end, samples)
+        })
+        .collect();
+    entries.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+    // 连续组聚合。
+    let mut group: Vec<Vec<(f64, f64)>> = Vec::new();
+    let mut group_start = 0.0f64;
+    let mut group_end = 0.0f64;
+    let flush = |group: &mut Vec<Vec<(f64, f64)>>,
+                 group_start: &mut f64,
+                 group_end: &mut f64,
+                 out: &mut Vec<ReaperEnvelope>| {
+        if group.is_empty() {
+            return;
+        }
+        let (start, end) = (*group_start, *group_end);
+        let mut samples: Vec<(f64, f64)> = group.drain(..).flatten().collect();
+        samples.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let relative: Vec<(f64, f64)> = samples
+            .into_iter()
+            .map(|(t, v)| (t - start, v))
+            .collect();
+        let span_end = end - start;
+        let breakpoints = simplify_breakpoints(&relative, 0.0, span_end, default_value, tolerance);
+        if !breakpoints.is_empty() {
+            // 原生 REAPER 剪贴板语义（样例 ClipboardData/20260908-025849，
+            // 多轨双时基形态）：
+            // - SEG_RANGE = [起秒, 终秒, 起QN, 终QN]——第二字段是**终点**
+            //   而非长度；起点/终点均为工程绝对值（与 item POSITION 同基）；
+            // - PT 位置与第 8 字段 QN = **工程绝对值**（start+t / QN(start+t)），
+            //   REAPER 粘贴时把复制区首个时间位置对齐到光标（整体平移），
+            //   段与 item 的相对关系由此保持。
+            let start_qn = qn_at(start);
+            let end_qn = qn_at(start + span_end);
+            let points = breakpoints
+                .iter()
+                .map(|(t, v)| {
+                    vec![
+                        start + t,
+                        *v,
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        qn_at(start + t),
+                    ]
+                })
+                .collect();
+            out.push(ReaperEnvelope {
+                env_type: env_type.to_string(),
+                act: vec![1, -1],
+                seg_range: Some(vec![start, start + span_end, start_qn, end_qn]),
+                points,
+                def_shape: None,
+            });
+        }
+        *group_start = 0.0;
+        *group_end = 0.0;
+    };
+
+    for (clip_start, clip_end, samples) in entries {
+        match samples {
+            Some(samples) if !samples.is_empty() => {
+                let contiguous = !group.is_empty() && clip_start <= group_end + merge_gap_sec;
+                if !contiguous {
+                    flush(&mut group, &mut group_start, &mut group_end, out);
+                }
+                if group.is_empty() {
+                    group_start = clip_start;
+                    group_end = clip_end;
+                } else {
+                    group_end = group_end.max(clip_end);
+                }
+                group.push(samples);
+            }
+            _ => {
+                // 无曲线数据的 clip 打断分组（其范围不进段）。
+                flush(&mut group, &mut group_start, &mut group_end, out);
+            }
+        }
+    }
+    flush(&mut group, &mut group_start, &mut group_end, out);
+}
+
 pub fn build_reaper_clipboard(
     timeline: &TimelineState,
     clip_ids: &[String],
+    curves_by_clip: &BTreeMap<String, ClipExportCurves>,
 ) -> Result<ReaperExportResult, String> {
     let unique_ids: Vec<&String> = {
         let mut seen = std::collections::HashSet::new();
@@ -331,7 +785,16 @@ pub fn build_reaper_clipboard(
     };
 
     let mut items_by_track: BTreeMap<usize, Vec<ReaperItem>> = BTreeMap::new();
+    // (导出轨道下标 → 该轨道导出 clip 的 (clip, 曲线视图)，用于轨道包络段聚合)
+    let mut clips_by_track: BTreeMap<usize, Vec<(&Clip, &ClipExportCurves)>> = BTreeMap::new();
     let mut skipped_clip_count = 0_usize;
+    // 无曲线数据 clip 的共享空视图（生命周期覆盖整个导出流程）。
+    let empty_curves = ClipExportCurves::default();
+    // 双时基 QN 换算（原生 REAPER 剪贴板的 POSITION/LENGTH/ENVSEG 均携带
+    // 按 Tempo Map 积分的 QN 值）。
+    let qn_converter = crate::commands::TempoTickConverter::new(timeline, timeline.bpm);
+    let qn_at = move |sec: f64| -> f64 { qn_converter.sec_to_qn(sec) };
+    let qn_at = &qn_at;
 
     for clip_id in unique_ids {
         let Some(clip) = timeline.clips.iter().find(|clip| clip.id == *clip_id) else {
@@ -346,11 +809,16 @@ pub fn build_reaper_clipboard(
             skipped_clip_count += 1;
             continue;
         };
-        let Some(item) = build_item(clip, timeline.bpm) else {
+        let curves = curves_by_clip.get(clip_id).unwrap_or(&empty_curves);
+        let Some(item) = build_item(clip, timeline.bpm, curves, qn_at) else {
             skipped_clip_count += 1;
             continue;
         };
         items_by_track.entry(track_index).or_default().push(item);
+        clips_by_track
+            .entry(track_index)
+            .or_default()
+            .push((clip, curves));
     }
 
     if items_by_track.is_empty() {
@@ -370,6 +838,18 @@ pub fn build_reaper_clipboard(
                 .partial_cmp(&right.position)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
+        // ── 音量/声像参数线 → ENVSEG 轨道包络段（随 item 剪贴板携带） ──
+        if let Some(clip_pairs) = clips_by_track.remove(track_index) {
+            // VOLENV2 是绝对量 → 用**链式有效推子增益**（根轨×父×子，与
+            // 渲染端 compute_track_gains 同款）；组内 clip 单看自身轨道
+            // 音量会丢根轨增益。
+            let track_volume = timeline
+                .tracks
+                .get(*track_index)
+                .map(|t| timeline.effective_track_volume(&t.id) as f64)
+                .unwrap_or(1.0);
+            track.envelopes = build_track_envseg_envelopes(&clip_pairs, track_volume, timeline);
+        }
         data.tracks.push(track);
         data.track_offsets
             .push(track_index.saturating_sub(first_track_index) as usize);
@@ -435,7 +915,7 @@ mod tests {
             clip.sync_take_from_flat();
         }
 
-        let export = build_reaper_clipboard(&timeline, &[clip_id]).unwrap();
+        let export = build_reaper_clipboard(&timeline, &[clip_id], &BTreeMap::new()).unwrap();
         let parsed = parse_for_test(&export.bytes);
         let item = &parsed.tracks[0].items[0];
         // Item 默认 take：VOLPAN <trim> <pan> <take volume> <pan law>。
@@ -478,7 +958,7 @@ mod tests {
             clip.takes[1].playback_rate = 1.5;
         }
 
-        let export = build_reaper_clipboard(&timeline, &[clip_id]).unwrap();
+        let export = build_reaper_clipboard(&timeline, &[clip_id], &BTreeMap::new()).unwrap();
         let parsed = parse_for_test(&export.bytes);
         let item = &parsed.tracks[0].items[0];
         // active take（Second）作为 default take：PLAYRATE = clip 级 × take 自身。
@@ -516,7 +996,7 @@ mod tests {
             clip.sync_take_from_flat();
         }
 
-        let export = build_reaper_clipboard(&timeline, &[clip_id]).unwrap();
+        let export = build_reaper_clipboard(&timeline, &[clip_id], &BTreeMap::new()).unwrap();
         assert_eq!(export.exported_clip_count, 1);
         let parsed = parse_for_test(&export.bytes);
         assert_eq!(parsed.tracks.len(), 1);
@@ -542,7 +1022,7 @@ mod tests {
             Some(path.to_string()),
         );
 
-        let export = build_reaper_clipboard(&timeline, &[clip_id]).unwrap();
+        let export = build_reaper_clipboard(&timeline, &[clip_id], &BTreeMap::new()).unwrap();
         let parsed = parse_for_test(&export.bytes);
         parsed.tracks[0].items[0]
             .default_take
@@ -589,7 +1069,7 @@ mod tests {
             clip.sync_take_from_flat();
         }
 
-        let export = build_reaper_clipboard(&timeline, &[clip_id]).unwrap();
+        let export = build_reaper_clipboard(&timeline, &[clip_id], &BTreeMap::new()).unwrap();
         assert_eq!(export.exported_clip_count, 1);
         let parsed = parse_for_test(&export.bytes);
         let item = &parsed.tracks[0].items[0];
@@ -613,7 +1093,7 @@ mod tests {
             clip.source_path = None;
             clip.midi_note_data = None;
         }
-        let result = build_reaper_clipboard(&timeline, &[clip_id]);
+        let result = build_reaper_clipboard(&timeline, &[clip_id], &BTreeMap::new());
         assert!(result.is_err());
     }
 
@@ -639,7 +1119,7 @@ mod tests {
             clip.sync_take_from_flat();
         }
 
-        let export = build_reaper_clipboard(&timeline, &[clip_id.clone()]).unwrap();
+        let export = build_reaper_clipboard(&timeline, &[clip_id.clone()], &BTreeMap::new()).unwrap();
         let parsed = parse_for_test(&export.bytes);
         let item = &parsed.tracks[0].items[0];
         assert!(item.is_loop, "loop flag must be exported");
@@ -661,7 +1141,7 @@ mod tests {
             // 同步纪律：改写投影后必须写回 Take 权威数据。
             clip.sync_take_from_flat();
         }
-        let export2 = build_reaper_clipboard(&timeline, &[clip_id.clone()]).unwrap();
+        let export2 = build_reaper_clipboard(&timeline, &[clip_id.clone()], &BTreeMap::new()).unwrap();
         let parsed2 = parse_for_test(&export2.bytes);
         let item2 = &parsed2.tracks[0].items[0];
         assert!(!item2.is_loop, "short non-loop clip must not infer loop");
@@ -693,7 +1173,7 @@ mod tests {
             clip.sync_take_from_flat();
         }
 
-        let export = build_reaper_clipboard(&timeline, &[clip_id]).unwrap();
+        let export = build_reaper_clipboard(&timeline, &[clip_id], &BTreeMap::new()).unwrap();
         let parsed = parse_for_test(&export.bytes);
         let item = &parsed.tracks[0].items[0];
         assert!(
@@ -729,7 +1209,7 @@ mod tests {
             clip.sync_take_from_flat();
         }
 
-        let export = build_reaper_clipboard(&timeline, &[clip_id]).unwrap();
+        let export = build_reaper_clipboard(&timeline, &[clip_id], &BTreeMap::new()).unwrap();
         let parsed = parse_for_test(&export.bytes);
         let item = &parsed.tracks[0].items[0];
         assert!(item.is_loop, "loop flag must be exported");
@@ -755,5 +1235,736 @@ mod tests {
         let take = &item.default_take;
         let anchor = super::compute_anchor_from_section_for_test(take);
         assert!((anchor - 1.0).abs() < 1e-9);
+    }
+
+    // ─── 参数线 → 包络导出 ───
+
+    #[test]
+    fn reaper_export_track_order_follows_display_order_after_drag() {
+        // 拖拽换序后导出：REAPER 剪贴板的 TRACK 顺序必须跟随显示顺序
+        //（tracks Vec 顺序，normalize_track_vec 不变式），而非轨道创建顺序。
+        let mut timeline = TimelineState::default();
+        let track_a = timeline.tracks[0].id.clone();
+        let track_b = timeline.add_track(Some("B".into()), None, None);
+        let clip_a = timeline.add_clip(
+            Some(track_a),
+            Some("A".into()),
+            Some(0.0),
+            Some(1.0),
+            Some("C:/audio/a.wav".into()),
+        );
+        let clip_b = timeline.add_clip(
+            Some(track_b.clone()),
+            Some("B".into()),
+            Some(0.0),
+            Some(1.0),
+            Some("C:/audio/b.wav".into()),
+        );
+
+        // 拖拽：B 移到最上。
+        timeline.move_track(&track_b, 0, None);
+        assert_eq!(timeline.tracks[0].id, track_b, "Vec 顺序反映拖拽");
+
+        let export = build_reaper_clipboard(&timeline, &[clip_a, clip_b], &BTreeMap::new())
+            .expect("export");
+        let parsed = parse_for_test(&export.bytes);
+        assert_eq!(parsed.tracks.len(), 2);
+        // 第一条 TRACK = 显示顺序第一的 B 轨道。
+        assert_eq!(
+            parsed.tracks[0].items[0]
+                .default_take
+                .source
+                .as_ref()
+                .unwrap()
+                .file_path,
+            "C:/audio/b.wav"
+        );
+        assert_eq!(
+            parsed.tracks[1].items[0]
+                .default_take
+                .source
+                .as_ref()
+                .unwrap()
+                .file_path,
+            "C:/audio/a.wav"
+        );
+    }
+
+    fn pitch_values(values: &[f32]) -> Vec<f32> {
+        values.to_vec()
+    }
+
+    #[test]
+    fn simplify_breakpoints_rules() {
+        let fp = 0.005f64;
+        // 全默认（样本 == 默认值 1.0）→ 空表。
+        let default_samples: Vec<(f64, f64)> =
+            (0..400).map(|i| (i as f64 * fp, 1.0)).collect();
+        assert!(simplify_breakpoints(&default_samples, 0.0, 2.0, 1.0, 0.005).is_empty());
+        // 平坦非默认 → 恰 2 端点。
+        let flat: Vec<(f64, f64)> = (0..400).map(|i| (i as f64 * fp, 0.8)).collect();
+        let out = simplify_breakpoints(&flat, 0.0, 2.0, 1.0, 0.005);
+        assert_eq!(out.len(), 2);
+        assert!(out[0].0.abs() < 1e-9 && (out[0].1 - 0.8).abs() < 1e-9);
+        assert!((out[1].0 - 2.0).abs() < 1e-9);
+        // 线性斜线 → 恰 2 端点（中间点全在容差内的直线上）。
+        let line: Vec<(f64, f64)> = (0..400)
+            .map(|i| {
+                let t = i as f64 * fp;
+                (t, 1.0 - t / 2.0)
+            })
+            .collect();
+        let out = simplify_breakpoints(&line, 0.0, 2.0, 1.0, 0.005);
+        assert_eq!(out.len(), 2);
+        // 折线 → 仅折点（slope 变化处）+ 端点。
+        let bent: Vec<(f64, f64)> = (0..400)
+            .map(|i| {
+                let t = i as f64 * fp;
+                (t, if t < 1.0 { t } else { 2.0 - t })
+            })
+            .collect();
+        let out = simplify_breakpoints(&bent, 0.0, 2.0, 1.0, 0.005);
+        // 斜率在 t=1 处翻转：应产生 (0,0) (≈1,≈1) (2,≈0)（端点强制）。
+        assert!(out.len() <= 4, "折点数量应精简，实际 {:?}", out);
+        assert!(out.iter().any(|(t, v)| (t - 1.0).abs() < 0.02 && (v - 1.0).abs() < 0.02));
+    }
+
+    #[test]
+    fn pitch_env_zero_frames_mean_no_correction() {
+        // 原始音高 / 当前音高为 0 的帧 → 偏移 = 0（"不做音高修正"），
+        // 不得用邻近有声帧的修正值桥接（旧实现把无声区污染成 +2）。
+        let mut timeline = TimelineState::default();
+        let track_id = timeline.tracks[0].id.clone();
+        let clip_id = timeline.add_clip(
+            Some(track_id.clone()),
+            Some("Zero".to_string()),
+            Some(0.0),
+            Some(0.015),
+            Some("C:/audio/a.wav".to_string()),
+        );
+        // 3 帧（5ms）：orig [60, 0, 60]、edit [62, 62, 0] → 偏移 [2, 0, 0]。
+        timeline.params_by_root_track.insert(
+            track_id,
+            crate::state::TrackParamsState {
+                frame_period_ms: 5.0,
+                pitch_orig: vec![60.0, 0.0, 60.0],
+                pitch_edit: vec![62.0, 62.0, 0.0],
+                pitch_edit_user_modified: true,
+                ..crate::state::TrackParamsState::default()
+            },
+        );
+        let clip = timeline.clips.iter().find(|c| c.id == clip_id).unwrap();
+        let result =
+            crate::pitch_editing::compute_clip_export_pitch_offsets(&timeline, clip)
+                .expect("offsets");
+        assert_eq!(result.offsets, vec![2.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn clip_in_track_group_resolves_root_track_curves() {
+        // 轨道组内的 clip：参数线存于根轨道 entry，曲线视图必须经
+        // resolve_root_track_id 命中（修复：导出曾用 fragment timeline 导致
+        // 组内 clip 包络完全缺失）。
+        let mut timeline = TimelineState::default();
+        let root_id = timeline.tracks[0].id.clone();
+        timeline.tracks.push(crate::state::Track {
+            id: "child_track_t".to_string(),
+            name: "Child".to_string(),
+            parent_id: Some(root_id.clone()),
+            order: 1,
+            muted: false,
+            solo: false,
+            volume: 1.0,
+            compose_enabled: false,
+            pitch_analysis_algo: crate::state::PitchAnalysisAlgo::default(),
+            color: "#888888".to_string(),
+        });
+        let clip_id = timeline.add_clip(
+            Some("child_track_t".to_string()),
+            Some("Grouped".to_string()),
+            Some(0.0),
+            Some(0.05),
+            Some("C:/audio/a.wav".to_string()),
+        );
+        timeline.params_by_root_track.insert(
+            root_id,
+            crate::state::TrackParamsState {
+                frame_period_ms: 5.0,
+                pitch_orig: vec![60.0; 10],
+                pitch_edit: vec![61.0; 10],
+                pitch_edit_user_modified: true,
+                extra_curves: {
+                    let mut curves = std::collections::HashMap::new();
+                    curves.insert("volume".to_string(), vec![0.5f32; 10]);
+                    curves
+                },
+                ..crate::state::TrackParamsState::default()
+            },
+        );
+        let clip = timeline.clips.iter().find(|c| c.id == clip_id).unwrap();
+        let curves = build_clip_export_curves(&timeline, clip);
+        assert!(curves.pitch_offset.is_some(), "音高偏移经根轨道解析命中");
+        assert!(curves.volume.is_some(), "音量曲线经根轨道解析命中");
+        assert!(
+            (curves.pitch_offset.as_ref().unwrap()[0] - 1.0).abs() < 1e-6,
+            "偏移 = pitch_edit − pitch_orig = 1"
+        );
+        assert!((curves.volume.as_ref().unwrap()[0] - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn export_pitch_offsets_fold_child_scale_and_cents_offsets() {
+        // 子轨音分差 +50（= +0.5 半音）作用在编辑后音高上：
+        // orig 60、edit 62 → 有效 62.5 → 偏移 = 2.5。
+        let mut timeline = TimelineState::default();
+        let root_id = timeline.tracks[0].id.clone();
+        timeline.tracks.push(crate::state::Track {
+            id: "child_track_t".to_string(),
+            name: "Child".to_string(),
+            parent_id: Some(root_id.clone()),
+            order: 1,
+            muted: false,
+            solo: false,
+            volume: 1.0,
+            compose_enabled: false,
+            pitch_analysis_algo: crate::state::PitchAnalysisAlgo::default(),
+            color: "#888888".to_string(),
+        });
+        let clip_id = timeline.add_clip(
+            Some("child_track_t".to_string()),
+            Some("Child Clip".to_string()),
+            Some(0.0),
+            Some(0.01),
+            Some("C:/audio/a.wav".to_string()),
+        );
+        timeline.params_by_root_track.insert(
+            root_id,
+            crate::state::TrackParamsState {
+                frame_period_ms: 5.0,
+                pitch_orig: vec![60.0, 60.0],
+                pitch_edit: vec![62.0, 62.0],
+                pitch_edit_user_modified: true,
+                extra_curves: {
+                    let mut curves = std::collections::HashMap::new();
+                    curves.insert(
+                        "child_pitch_offset_cents@child_track_t".to_string(),
+                        vec![50.0f32, 50.0],
+                    );
+                    curves
+                },
+                ..crate::state::TrackParamsState::default()
+            },
+        );
+        let clip = timeline.clips.iter().find(|c| c.id == clip_id).unwrap();
+        let result =
+            crate::pitch_editing::compute_clip_export_pitch_offsets(&timeline, clip)
+                .expect("offsets");
+        assert_eq!(result.offsets, vec![2.5, 2.5]);
+    }
+
+    #[test]
+    fn pitch_env_u_coordinates_scale_with_combined_rate_and_forces_endpoints() {
+        // clip 2s、组合速率 0.5 → u 域 0..1；线性偏移 +1 → −1。
+        // 端点强制：u=0 与 u_end 恒存在；线性段仅 2 点。
+        let n = 400usize;
+        let offsets: Vec<f32> = (0..n)
+            .map(|i| {
+                let t = i as f64 * 0.005;
+                (1.0 - t) as f32 // (0,+1) → (2,−1) 线性
+            })
+            .collect();
+        let curves = ClipExportCurves {
+            frame_period_ms: 5.0,
+            pitch_offset: Some(offsets),
+            volume: None,
+            pan: None,
+        };
+        let env = build_take_pitch_envelope(&curves, 2.0, 0.5).expect("envelope");
+        assert_eq!(env.env_type, "PITCHENV");
+        assert_eq!(env.points.len(), 2, "线性段只留端点");
+        // u = t × rate：t=0 → u=0；t=2 → u=1。
+        assert!((env.points[0][0]).abs() < 1e-9);
+        assert!((env.points[1][0] - 1.0).abs() < 1e-9);
+        // 值：+1 / ≈−1（末帧 1.995s hold，误差 ≤ 容差量级）。
+        assert!((env.points[0][1] - 1.0).abs() < 1e-6);
+        assert!((env.points[1][1] + 1.0).abs() < 0.02);
+        // DEFSHAPE 显示范围 = max(3, ceil(max|offset|))。
+        assert_eq!(env.def_shape.as_ref().map(|s| s[1]), Some(3.0));
+    }
+
+    #[test]
+    fn pitch_env_values_are_not_clamped() {
+        // REAPER PIT 包络值无上下限：平坦 +30 原样写出。
+        let curves = ClipExportCurves {
+            frame_period_ms: 5.0,
+            pitch_offset: Some(pitch_values(&[30.0; 400])),
+            volume: None,
+            pan: None,
+        };
+        let env = build_take_pitch_envelope(&curves, 2.0, 1.0).expect("envelope");
+        assert_eq!(env.points.len(), 2);
+        assert!((env.points[0][1] - 30.0).abs() < 1e-6, "值不钳制");
+        assert!((env.points[1][1] - 30.0).abs() < 1e-6);
+        // DEFSHAPE 范围随值放大（30 > 3）。
+        assert_eq!(env.def_shape.as_ref().map(|s| s[1]), Some(30.0));
+    }
+
+    #[test]
+    fn pitch_env_skipped_when_all_default() {
+        // 全 0 偏移（= 全部"不做修正"）→ 不写包络。
+        let curves = ClipExportCurves {
+            frame_period_ms: 5.0,
+            pitch_offset: Some(pitch_values(&[0.0; 400])),
+            volume: None,
+            pan: None,
+        };
+        assert!(build_take_pitch_envelope(&curves, 2.0, 1.0).is_none());
+    }
+
+    #[test]
+    fn pitch_env_keeps_zero_frames_unbridged() {
+        // 首帧原始音高为 0（无声）→ 偏移 0 显式落点，不得桥接为邻近值 +2
+        //（旧实现把无声区污染成 +2）。
+        let mut values = vec![0.0f32; 400];
+        for slot in values.iter_mut().skip(1) {
+            *slot = 2.0;
+        }
+        let curves = ClipExportCurves {
+            frame_period_ms: 5.0,
+            pitch_offset: Some(values),
+            volume: None,
+            pan: None,
+        };
+        let env = build_take_pitch_envelope(&curves, 2.0, 1.0).expect("envelope");
+        assert!(
+            (env.points[0][1]).abs() < 1e-9,
+            "端点 u=0 处偏移必须为 0，实际 {}",
+            env.points[0][1]
+        );
+        // 随后显式升到 +2 并保持到段末。
+        assert!((env.points[1][1] - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn pitch_env_u_domain_independent_of_clip_position() {
+        // Take 包络为 u 域（媒体时间），与 clip 的工程位置无关：
+        // clip 在 45s 的导出必须与 clip 在 0s 完全一致（PT 0..len×rate），
+        // 端点强制落在 item 起止（不得被工程位置污染，也不得依赖 hold）。
+        let make_curves = |values: Vec<f32>| ClipExportCurves {
+            frame_period_ms: 5.0,
+            pitch_offset: Some(values),
+            volume: None,
+            pan: None,
+        };
+        let env_at_0 = build_take_pitch_envelope(&make_curves(pitch_values(&[1.0; 400])), 2.0, 1.0)
+            .expect("envelope at 0");
+        let env_at_45 =
+            build_take_pitch_envelope(&make_curves(pitch_values(&[1.0; 400])), 2.0, 1.0)
+                .expect("envelope at 45");
+        assert_eq!(env_at_0.points, env_at_45.points, "u 域与工程位置无关");
+        assert!((env_at_45.points[0][0]).abs() < 1e-9, "起点 = item 起点 u=0");
+        assert!(
+            (env_at_45.points[1][0] - 2.0).abs() < 1e-9,
+            "终点 = item 终点 u=len×rate"
+        );
+    }
+
+    #[test]
+    fn envseg_seg_range_uses_project_absolute_positions() {
+        // 原生 REAPER 剪贴板语义（样例 ClipboardData/20260908-025849，双时基
+        // 多轨形态）：SEG_RANGE = [起秒, 终秒, 起QN, 终QN]（与 item POSITION
+        // 同基），PT 位置与第 8 字段 QN 均为**工程绝对值**。混用相对 PT 会让
+        // REAPER 按绝对解释时把包络点落在工程起点附近（非零位置 clip 的
+        // 包络整体错位）。
+        let mut timeline = TimelineState::default();
+        let track_id = timeline.tracks[0].id.clone();
+        let clip_id = timeline.add_clip(
+            Some(track_id),
+            Some("Abs45".to_string()),
+            Some(45.0),
+            Some(2.0),
+            Some("C:/audio/a.wav".to_string()),
+        );
+        let mut curves_by_clip = BTreeMap::new();
+        curves_by_clip.insert(
+            clip_id.clone(),
+            ClipExportCurves {
+                frame_period_ms: 5.0,
+                pitch_offset: None,
+                volume: Some(vec![0.8; 400]),
+                pan: None,
+            },
+        );
+
+        let export =
+            build_reaper_clipboard(&timeline, &[clip_id], &curves_by_clip).expect("export");
+        let parsed = parse_for_test(&export.bytes);
+        let item = &parsed.tracks[0].items[0];
+        assert!((item.position - 45.0).abs() < 1e-9, "item POSITION 绝对");
+        assert!(
+            item.position_qn.map(|qn| (qn - 90.0).abs() < 1e-9).unwrap_or(false),
+            "双时基 POSITION QN（bpm 120 → 45s = 90 QN）"
+        );
+        let seg = &parsed.tracks[0].envelopes[0];
+        let range = seg.seg_range.as_ref().unwrap();
+        assert!(
+            (range[0] - 45.0).abs() < 1e-9,
+            "SEG_RANGE[0] 必须为工程绝对位置 45，实际 {}",
+            range[0]
+        );
+        assert!(
+            (range[1] - 47.0).abs() < 1e-9,
+            "SEG_RANGE[1] 为**终点**（45+2=47），实际 {}",
+            range[1]
+        );
+        // QN 字段同基（bpm 120 → 2 QN/s）：起 90，终 94。
+        assert!((range[2] - 90.0).abs() < 1e-9);
+        assert!((range[3] - 94.0).abs() < 1e-9);
+        // PT 绝对：45 → 47（含第 8 字段绝对 QN 90 → 94）。
+        assert!((seg.points[0][0] - 45.0).abs() < 1e-9);
+        assert!((seg.points[1][0] - 47.0).abs() < 1e-9);
+        assert!((seg.points[0][7] - 90.0).abs() < 1e-9);
+        assert!((seg.points[1][7] - 94.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn envseg_export_writes_seg_range_and_dual_timebase_points() {
+        // volume 曲线平坦 0.8（推子 1.0）→ VOLENV2 段 2 点；
+        // bpm 120 → QN = 秒 × 2。段范围 = clip 跨度 [0, 2]。
+        let mut timeline = TimelineState::default();
+        let track_id = timeline.tracks[0].id.clone();
+        let clip_id = timeline.add_clip(
+            Some(track_id),
+            Some("EnvSeg".to_string()),
+            Some(0.0),
+            Some(2.0),
+            Some("C:/audio/a.wav".to_string()),
+        );
+        let mut curves_by_clip = BTreeMap::new();
+        curves_by_clip.insert(
+            clip_id.clone(),
+            ClipExportCurves {
+                frame_period_ms: 5.0,
+                pitch_offset: None,
+                volume: Some(vec![0.8; 400]),
+                pan: None,
+            },
+        );
+
+        let export =
+            build_reaper_clipboard(&timeline, &[clip_id], &curves_by_clip).expect("export");
+        let parsed = parse_for_test(&export.bytes);
+        let track = &parsed.tracks[0];
+        assert_eq!(track.envelopes.len(), 1, "一条 VOLENV2 段");
+        let seg = &track.envelopes[0];
+        assert_eq!(seg.env_type, "VOLENV2");
+        // SEG_RANGE = [start, len, start_qn, len_qn]，bpm 120 → qn = ×2。
+        let range = seg.seg_range.as_ref().unwrap();
+        assert!(range[0].abs() < 1e-9);
+        assert!((range[1] - 2.0).abs() < 1e-9);
+        assert!((range[3] - 4.0).abs() < 1e-9);
+        // 平坦非默认 → 恰 2 端点；8 值双时基 PT；值 = 推子 × 曲线 = 0.8。
+        assert_eq!(seg.points.len(), 2);
+        assert_eq!(seg.points[0].len(), 8);
+        assert!((seg.points[0][1] - 0.8).abs() < 1e-6);
+        assert!((seg.points[1][1] - 0.8).abs() < 1e-6);
+        assert!((seg.points[1][0] - 2.0).abs() < 1e-6);
+        assert!((seg.points[1][7] - 4.0).abs() < 1e-6, "末位 QN 值");
+    }
+
+    #[test]
+    fn envelope_round_trip_aligns_first_position_to_paste_cursor() {
+        // 导出 clip @45s → 以光标 10s 粘贴：导入端把"数据首个时间位置"
+        // （min item POSITION = 45）对齐到光标（time_offset = 10 − 45 = −35），
+        // item 与 ENVSEG 段整体平移 → 包络落在 [10, 12]，与 item 同步。
+        let mut timeline = TimelineState::default();
+        let track_id = timeline.tracks[0].id.clone();
+        let clip_id = timeline.add_clip(
+            Some(track_id),
+            Some("Offset45".into()),
+            Some(45.0),
+            Some(2.0),
+            Some("C:/audio/a.wav".into()),
+        );
+        let mut curves_by_clip = BTreeMap::new();
+        curves_by_clip.insert(
+            clip_id.clone(),
+            ClipExportCurves {
+                frame_period_ms: 5.0,
+                pitch_offset: Some(pitch_values(&[1.0; 400])),
+                volume: Some(vec![0.8; 400]),
+                pan: None,
+            },
+        );
+        let export =
+            build_reaper_clipboard(&timeline, &[clip_id], &curves_by_clip).expect("export");
+        let parsed = parse_for_test(&export.bytes);
+        // 导出侧：绝对位置。
+        assert!((parsed.tracks[0].items[0].position - 45.0).abs() < 1e-9);
+
+        let result = crate::reaper_import::test_import_items_for_round_trip(parsed, 10.0)
+            .expect("re-import");
+        let clip = &result.timeline.clips[0];
+        assert!(
+            (clip.start_sec - 10.0).abs() < 1e-6,
+            "首个时间位置对齐光标（45 → 10），实际 {}",
+            clip.start_sec
+        );
+        let params = result.timeline.params_by_root_track.values().next().unwrap();
+        let fp = 0.005f64;
+        let volume = params.extra_curves.get("volume").expect("volume");
+        assert!((volume[(10.0 / fp) as usize] - 0.8).abs() < 1e-3, "包络随 item 平移");
+        assert!((volume[(12.0 / fp) as usize] - 0.8).abs() < 1e-3);
+        assert!(
+            (volume[(5.0 / fp) as usize] - 1.0).abs() < 1e-6,
+            "段外保持默认"
+        );
+        let pending = params.pending_pitch_offset.as_ref().expect("pending");
+        assert!((pending[(10.0 / fp) as usize] - 1.0).abs() < 1e-3, "音高包络随 item 平移");
+    }
+
+    #[test]
+    fn envseg_qn_fields_follow_tempo_map() {
+        // 变速工程：0-10s @ 120 BPM（2 QN/s），10s 起 60 BPM（1 QN/s）。
+        // 段 [10, 12]：start_qn = 20；span_qn = QN(12) − QN(10) = 2
+        //（按常量 BPM 线性换算会得 4 —— 变速下节拍网格错位的来源）。
+        let mut timeline = TimelineState::default();
+        timeline.bpm = 120.0;
+        timeline.tempo_map = Some(vec![
+            crate::state::TempoPointData {
+                id: "tp0".to_string(),
+                position_sec: 0.0,
+                bpm: 120.0,
+                numerator: None,
+                denominator: None,
+                scale: None,
+            },
+            crate::state::TempoPointData {
+                id: "tp1".to_string(),
+                position_sec: 10.0,
+                bpm: 60.0,
+                numerator: None,
+                denominator: None,
+                scale: None,
+            },
+        ]);
+        let track_id = timeline.tracks[0].id.clone();
+        let clip_id = timeline.add_clip(
+            Some(track_id),
+            Some("Tempo".into()),
+            Some(10.0),
+            Some(2.0),
+            Some("C:/audio/a.wav".into()),
+        );
+        let mut curves_by_clip = BTreeMap::new();
+        curves_by_clip.insert(
+            clip_id.clone(),
+            ClipExportCurves {
+                frame_period_ms: 5.0,
+                pitch_offset: None,
+                volume: Some(vec![0.8; 400]),
+                pan: None,
+            },
+        );
+
+        let export =
+            build_reaper_clipboard(&timeline, &[clip_id], &curves_by_clip).expect("export");
+        let parsed = parse_for_test(&export.bytes);
+        let range = parsed.tracks[0].envelopes[0]
+            .seg_range
+            .as_ref()
+            .unwrap();
+        assert!((range[0] - 10.0).abs() < 1e-9);
+        assert!((range[1] - 12.0).abs() < 1e-9, "终点 = 10+2");
+        assert!(
+            (range[2] - 20.0).abs() < 1e-6,
+            "start_qn = 前 10s 的 120 BPM 积分 = 20 QN，实际 {}",
+            range[2]
+        );
+        assert!(
+            (range[3] - 22.0).abs() < 1e-6,
+            "end_qn = QN(12) = 20 + 2，实际 {}",
+            range[3]
+        );
+        // PT 第 8 字段（绝对 QN）：20 → 22。
+        let points = &parsed.tracks[0].envelopes[0].points;
+        assert!((points[0][7] - 20.0).abs() < 1e-6);
+        assert!((points[1][7] - 22.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn envseg_multi_clip_segments_match_native_sample_layout() {
+        // 对照原生样例 ClipboardData/20260908-015013（单轨 5 个 item、每 item
+        // 一条 ENVSEG 段、SEG_RANGE == item POSITION、PT 段内相对、末尾单个
+        // TRACKSKIP）：同轨两个非相邻 clip → 两条独立段，位置为工程绝对值。
+        let mut timeline = TimelineState::default();
+        let track_id = timeline.tracks[0].id.clone();
+        let clip_a = timeline.add_clip(
+            Some(track_id.clone()),
+            Some("Vocal-5".into()),
+            Some(45.0),
+            Some(3.824),
+            Some("C:/audio/v5.wav".into()),
+        );
+        let clip_b = timeline.add_clip(
+            Some(track_id),
+            Some("Vocal-6".into()),
+            Some(49.0),
+            Some(3.727),
+            Some("C:/audio/v6.wav".into()),
+        );
+        let mut curves_by_clip = BTreeMap::new();
+        curves_by_clip.insert(
+            clip_a.clone(),
+            ClipExportCurves {
+                frame_period_ms: 5.0,
+                pitch_offset: None,
+                volume: Some(vec![0.8; 765]),
+                pan: None,
+            },
+        );
+        curves_by_clip.insert(
+            clip_b.clone(),
+            ClipExportCurves {
+                frame_period_ms: 5.0,
+                pitch_offset: None,
+                volume: Some(vec![0.6; 746]),
+                pan: None,
+            },
+        );
+
+        let export =
+            build_reaper_clipboard(&timeline, &[clip_a, clip_b], &curves_by_clip).expect("export");
+        let text = String::from_utf8_lossy(&export.bytes);
+        assert_eq!(text.matches("<ENVSEG VOLENV2").count(), 2, "两条 ENVSEG 段");
+        let parsed = parse_for_test(&export.bytes);
+        assert_eq!(parsed.tracks.len(), 1, "同轨两个 clip → 同一 TRACK 块");
+        let segs = &parsed.tracks[0].envelopes;
+        assert_eq!(segs.len(), 2);
+        // SEG_RANGE = [起秒, 终秒, …]：起点 = item 的工程绝对位置（45 / 49），
+        // 终点 = 起点 + clip 长度；PT 为工程绝对秒。
+        assert!((segs[0].seg_range.as_ref().unwrap()[0] - 45.0).abs() < 1e-9);
+        assert!((segs[1].seg_range.as_ref().unwrap()[0] - 49.0).abs() < 1e-9);
+        assert!((segs[0].points[0][0] - 45.0).abs() < 1e-9, "PT 工程绝对");
+        assert!((segs[1].points[0][0] - 49.0).abs() < 1e-9, "PT 工程绝对");
+        // 末尾恰好一个 TRACKSKIP。
+        assert_eq!(text.matches("TRACKSKIP").count(), 1);
+    }
+
+    #[test]
+    fn envseg_volume_uses_effective_track_chain_gain() {
+        // 组内 clip：根轨推子 0.5 × 子轨推子 1.0 = 链式有效增益 0.5；
+        // VOLENV2 绝对值 = 0.5 × 曲线 1.2 = 0.6（旧实现只取子轨 1.0 → 1.2）。
+        let mut timeline = TimelineState::default();
+        let root_id = timeline.tracks[0].id.clone();
+        timeline.tracks[0].volume = 0.5;
+        timeline.tracks.push(crate::state::Track {
+            id: "child_track_t".to_string(),
+            name: "Child".to_string(),
+            parent_id: Some(root_id.clone()),
+            order: 1,
+            muted: false,
+            solo: false,
+            volume: 1.0,
+            compose_enabled: false,
+            pitch_analysis_algo: crate::state::PitchAnalysisAlgo::default(),
+            color: "#888888".to_string(),
+        });
+        let clip_id = timeline.add_clip(
+            Some("child_track_t".to_string()),
+            Some("Chain".to_string()),
+            Some(0.0),
+            Some(1.0),
+            Some("C:/audio/a.wav".to_string()),
+        );
+        let mut curves_by_clip = BTreeMap::new();
+        curves_by_clip.insert(
+            clip_id.clone(),
+            ClipExportCurves {
+                frame_period_ms: 5.0,
+                pitch_offset: None,
+                volume: Some(vec![1.2; 200]),
+                pan: None,
+            },
+        );
+        let export =
+            build_reaper_clipboard(&timeline, &[clip_id], &curves_by_clip).expect("export");
+        let parsed = parse_for_test(&export.bytes);
+        let seg = &parsed.tracks[0].envelopes[0];
+        assert!((seg.points[0][1] - 0.6).abs() < 1e-6, "链式增益 0.5 × 1.2");
+    }
+
+    #[test]
+    fn envseg_volume_values_scale_with_track_fader() {
+        // 推子 0.5 × 曲线 1.2 = 0.6（绝对量写入段）。
+        let mut timeline = TimelineState::default();
+        timeline.tracks[0].volume = 0.5;
+        let track_id = timeline.tracks[0].id.clone();
+        let clip_id = timeline.add_clip(
+            Some(track_id),
+            Some("Fader".to_string()),
+            Some(0.0),
+            Some(1.0),
+            Some("C:/audio/a.wav".to_string()),
+        );
+        let mut curves_by_clip = BTreeMap::new();
+        curves_by_clip.insert(
+            clip_id.clone(),
+            ClipExportCurves {
+                frame_period_ms: 5.0,
+                pitch_offset: None,
+                volume: Some(vec![1.2; 200]),
+                pan: None,
+            },
+        );
+        let export =
+            build_reaper_clipboard(&timeline, &[clip_id], &curves_by_clip).expect("export");
+        let parsed = parse_for_test(&export.bytes);
+        let seg = &parsed.tracks[0].envelopes[0];
+        assert!((seg.points[0][1] - 0.6).abs() < 1e-6);
+    }
+
+    #[test]
+    fn envelope_export_round_trips_to_import_curves() {
+        // 导出（PIT + ENVSEG）→ 重解析 → 导入 → 帧域偏移/曲线还原。
+        let mut timeline = TimelineState::default();
+        let track_id = timeline.tracks[0].id.clone();
+        let clip_id = timeline.add_clip(
+            Some(track_id),
+            Some("RoundTrip".to_string()),
+            Some(0.0),
+            Some(2.0),
+            Some("C:/audio/a.wav".to_string()),
+        );
+        let mut curves_by_clip = BTreeMap::new();
+        curves_by_clip.insert(
+            clip_id.clone(),
+            ClipExportCurves {
+                frame_period_ms: 5.0,
+                pitch_offset: Some(pitch_values(&[1.0; 400])),
+                volume: Some(vec![0.8; 400]),
+                pan: None,
+            },
+        );
+        let export =
+            build_reaper_clipboard(&timeline, &[clip_id], &curves_by_clip).expect("export");
+        let parsed = parse_for_test(&export.bytes);
+
+        // 导入端（目标轨推子 1.0 → 除法不变）。
+        let result = crate::reaper_import::test_import_items_for_round_trip(parsed, 0.0)
+            .expect("re-import");
+        let params = result
+            .timeline
+            .params_by_root_track
+            .values()
+            .next()
+            .expect("params");
+        // PIT +1 → pending 偏移帧 ≈ +1。
+        let pending = params.pending_pitch_offset.as_ref().expect("pending");
+        assert!((pending[0] - 1.0).abs() < 1e-3);
+        // ENVSEG +0.8 → volume 曲线帧 ≈ 0.8（推子 1.0 → 不除）。
+        let volume = params.extra_curves.get("volume").expect("volume curve");
+        assert!((volume[0] - 0.8).abs() < 1e-3);
+        assert!((volume[(1.0 / 0.005) as usize] - 0.8).abs() < 1e-3);
     }
 }

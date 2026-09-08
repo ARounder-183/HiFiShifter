@@ -2361,6 +2361,27 @@ impl TimelineState {
         }
     }
 
+    /// 轨道有效推子增益：沿 parent 链逐节点相乘（与渲染端
+    /// `compute_track_gains` 的音量部分同款）。供 REAPER 包络导出的
+    /// "绝对值 = 链式增益 × 曲线" 与导入的相对化除法使用。
+    pub fn effective_track_volume(&self, track_id: &str) -> f32 {
+        let mut gain = 1.0f32;
+        let mut cur: Option<String> = Some(track_id.to_string());
+        let mut safety = 0usize;
+        while let Some(id) = cur {
+            let Some(node) = self.tracks.iter().find(|t| t.id == id) else {
+                break;
+            };
+            gain *= node.volume.clamp(0.0, 4.0);
+            cur = node.parent_id.clone();
+            safety += 1;
+            if safety > 256 {
+                break;
+            }
+        }
+        gain
+    }
+
     pub fn frame_period_ms(&self) -> f64 {
         default_frame_period_ms()
     }

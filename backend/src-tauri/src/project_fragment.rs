@@ -6,7 +6,54 @@
 //! for native cross-process timeline copy/paste, whole-track copy/paste, and
 //! merging another project into the current one.
 
-use crate::state::{new_id, Clip, LinkedParamCurvesPayload, TimelineState, Track};
+use crate::state::{new_id, Clip, LinkedParamCurvesPayload, SynthPipelineKind, TimelineState, Track};
+
+/// 批量参数（Tracks/Project fragment 整体携带的全局曲线）随粘贴锚点平移：
+/// merge 会把 clips 平移 `time_offset_sec`，曲线必须同步平移——否则粘贴后
+/// 的 clip 丢失/错位参数线（曲线留在源位置）。头部不足处补参数默认值；
+/// 负向平移截掉越界头部。
+fn shift_track_params_for_merge(
+    params: &crate::state::TrackParamsState,
+    delta_frames: isize,
+    kind: SynthPipelineKind,
+) -> crate::state::TrackParamsState {
+    fn shift_curve(curve: &[f32], delta: isize, default: f32) -> Vec<f32> {
+        if delta == 0 {
+            return curve.to_vec();
+        }
+        if delta > 0 {
+            let mut out = vec![default; delta as usize];
+            out.extend_from_slice(curve);
+            out
+        } else {
+            let n = (-delta) as usize;
+            if n >= curve.len() {
+                Vec::new()
+            } else {
+                curve[n..].to_vec()
+            }
+        }
+    }
+
+    let mut out = params.clone();
+    out.pitch_orig = shift_curve(&params.pitch_orig, delta_frames, 0.0);
+    out.pitch_edit = shift_curve(&params.pitch_edit, delta_frames, 0.0);
+    out.tension_edit = shift_curve(&params.tension_edit, delta_frames, 0.0);
+    out.pending_pitch_offset = params
+        .pending_pitch_offset
+        .as_ref()
+        .map(|pending| shift_curve(pending, delta_frames, 0.0));
+    out.extra_curves = params
+        .extra_curves
+        .iter()
+        .map(|(key, curve)| {
+            let default_value =
+                crate::renderer::automation_curve_default_value(kind, key).unwrap_or(0.0);
+            (key.clone(), shift_curve(curve, delta_frames, default_value))
+        })
+        .collect();
+    out
+}
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -316,6 +363,90 @@ pub struct FragmentMergeResult {
     pub imported_clip_count: usize,
 }
 
+/// 把平移后的批量参数按范围覆写进目标根轨道（复制语义）：只覆盖
+/// `[start, start+len)` 区间，目标轨道其他区间的既有参数线保持不动；
+/// 范围不足处补参数默认值。`pitch_orig` 一并携带（复制轨道的分析基线
+/// 随曲线走，避免粘贴后必须重分析才有导出基线）。
+fn apply_shifted_params_range(
+    timeline: &mut TimelineState,
+    root_track_id: &str,
+    shifted: &crate::state::TrackParamsState,
+    start_sec: f64,
+    length_sec: f64,
+    kind: SynthPipelineKind,
+) {
+    timeline.ensure_params_for_root(root_track_id);
+    let fp = timeline.frame_period_ms().max(0.1);
+    let start_frame = ((start_sec.max(0.0) * 1000.0) / fp).floor() as usize;
+    let frame_count = (((length_sec.max(0.0) * 1000.0) / fp).ceil() as usize).max(1);
+    let end_frame = start_frame.saturating_add(frame_count);
+    let Some(entry) = timeline.params_by_root_track.get_mut(root_track_id) else {
+        return;
+    };
+
+    fn write_shifted_range(
+        dst: &mut Vec<f32>,
+        src: &[f32],
+        start_frame: usize,
+        frame_count: usize,
+        default: f32,
+    ) {
+        if dst.len() < start_frame + frame_count {
+            dst.resize(start_frame + frame_count, default);
+        }
+        for offset in 0..frame_count {
+            let idx = start_frame + offset;
+            dst[idx] = src.get(idx).copied().unwrap_or(default);
+        }
+    }
+
+    write_shifted_range(
+        &mut entry.pitch_orig,
+        &shifted.pitch_orig,
+        start_frame,
+        frame_count,
+        0.0,
+    );
+    if shifted.pitch_edit_user_modified && shifted.pitch_edit.iter().any(|v| *v != 0.0) {
+        write_shifted_range(
+            &mut entry.pitch_edit,
+            &shifted.pitch_edit,
+            start_frame,
+            frame_count,
+            0.0,
+        );
+        entry.pitch_edit_user_modified = true;
+    }
+    write_shifted_range(
+        &mut entry.tension_edit,
+        &shifted.tension_edit,
+        start_frame,
+        frame_count,
+        0.0,
+    );
+    for (key, curve) in entry.extra_curves.iter_mut() {
+        let default_value =
+            crate::renderer::automation_curve_default_value(kind, key).unwrap_or(0.0);
+        let src = shifted
+            .extra_curves
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| vec![default_value; frame_count]);
+        write_shifted_range(curve, &src, start_frame, frame_count, default_value);
+    }
+    // 源 entry 有而目标没有的 extra key：补齐写入。
+    for (key, src_curve) in shifted.extra_curves.iter() {
+        if entry.extra_curves.contains_key(key) {
+            continue;
+        }
+        let default_value =
+            crate::renderer::automation_curve_default_value(kind, key).unwrap_or(0.0);
+        let mut curve = Vec::new();
+        write_shifted_range(&mut curve, src_curve, start_frame, frame_count, default_value);
+        entry.extra_curves.insert(key.clone(), curve);
+    }
+}
+
 fn push_cloned_track(
     timeline: &mut TimelineState,
     source: &Track,
@@ -454,6 +585,14 @@ pub fn merge_project_fragment(
 
     let mut track_id_map: HashMap<String, String> = HashMap::new();
     let source_tracks = source_timeline.tracks.clone();
+    // 合并前已存在的目标轨道 id：粘贴进"既有轨道"时参数走范围受限合并
+    //（复制语义，不覆盖目标轨道其他区间的参数线）；粘贴进"本次新建轨道"
+    // 时批量参数整体写入。
+    let pre_existing_track_ids: std::collections::HashSet<String> = timeline
+        .tracks
+        .iter()
+        .map(|track| track.id.clone())
+        .collect();
 
     let mut source_roots: Vec<&Track> = source_tracks
         .iter()
@@ -562,9 +701,46 @@ pub fn merge_project_fragment(
 
     for (source_root_id, params) in &source_timeline.params_by_root_track {
         if let Some(mapped_root_id) = track_id_map.get(source_root_id) {
-            timeline
-                .params_by_root_track
-                .insert(mapped_root_id.clone(), params.clone());
+            // 批量参数与 clips 同步平移：粘贴锚点把 clips 平移了
+            // time_offset_sec，全局曲线必须按同一帧数平移（否则曲线留在
+            // 源位置 → 粘贴后的 clip 参数线偏移/丢失）。
+            let kind = source_tracks
+                .iter()
+                .find(|track| &track.id == source_root_id)
+                .map(|track| SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo))
+                .unwrap_or(SynthPipelineKind::WorldVocoder);
+            let delta_frames = (time_offset_sec * 1000.0 / params.frame_period_ms.max(0.1))
+                .round() as isize;
+            let shifted = shift_track_params_for_merge(params, delta_frames, kind);
+            if pre_existing_track_ids.contains(mapped_root_id) {
+                // 粘贴进既有轨道：范围受限合并（复制语义）——只覆盖本次粘贴
+                // clip 的区间，目标轨道其他区间的既有参数线保持不动
+                //（wholesale 覆盖会把源曲线平移后整体替换，破坏目标轨道上
+                // 其他 clip 的参数线）。
+                let pasted_spans: Vec<(f64, f64)> = clip_id_map
+                    .values()
+                    .filter_map(|new_id| timeline.clips.iter().find(|clip| clip.id == *new_id))
+                    .filter(|clip| {
+                        timeline.resolve_root_track_id(&clip.track_id).as_deref()
+                            == Some(mapped_root_id.as_str())
+                    })
+                    .map(|clip| (clip.start_sec, clip.length_sec))
+                    .collect();
+                for (start_sec, length_sec) in pasted_spans {
+                    apply_shifted_params_range(
+                        timeline,
+                        mapped_root_id,
+                        &shifted,
+                        start_sec,
+                        length_sec,
+                        kind,
+                    );
+                }
+            } else {
+                timeline
+                    .params_by_root_track
+                    .insert(mapped_root_id.clone(), shifted);
+            }
             // Full-track fragments carry pitch_orig/pitch_edit. Ensure the
             // target root is in compose mode so those curves actually render.
             if params.pitch_edit_user_modified {
@@ -775,6 +951,113 @@ mod tests {
         assert_ne!(pasted.id, source_clip_id);
         assert!((pasted.start_sec - 10.0).abs() < 1e-9);
         assert_eq!(target.selected_clip_id.as_deref(), Some(pasted.id.as_str()));
+    }
+
+    #[test]
+    fn internal_copy_paste_shifts_wholesale_params_with_anchor() {
+        // 诊断：非零位置 clip（45..47）带根轨道 volume 曲线 → 复制 →
+        // 粘贴到 100s：曲线必须随 clip 平移到 100..102。
+        let mut tl = TimelineState::default();
+        let track_id = tl.tracks[0].id.clone();
+        let clip_id = tl.add_clip(
+            Some(track_id.clone()),
+            Some("C1".to_string()),
+            Some(45.0),
+            Some(2.0),
+            Some("C:/audio/a.wav".to_string()),
+        );
+        tl.params_by_root_track.insert(
+            track_id.clone(),
+            crate::state::TrackParamsState {
+                frame_period_ms: 5.0,
+                extra_curves: {
+                    let mut m = std::collections::HashMap::new();
+                    let mut curve = vec![1.0f32; 20000];
+                    for v in curve.iter_mut().skip(9000).take(400) {
+                        *v = 0.5;
+                    }
+                    m.insert("volume".to_string(), curve);
+                    m
+                },
+                ..crate::state::TrackParamsState::default()
+            },
+        );
+
+        let fragment = build_clip_fragment(&tl, &[clip_id.clone()], "src".into()).unwrap();
+        // 单 clip（全子树选择）→ TRACK fragment：参数整体携带（无 linked）。
+        let wholesale = fragment
+            .timeline
+            .params_by_root_track
+            .get(&track_id)
+            .expect("track fragment carries params wholesale");
+        let vol = wholesale.extra_curves.get("volume").expect("volume payload");
+        assert!(
+            (vol[9000] - 0.5).abs() < 1e-6,
+            "批量参数保持全局帧基（帧 9000 = 45s 处 0.5），实际 {}",
+            vol[9000]
+        );
+
+        let mut target = TimelineState::default();
+        let merge = merge_project_fragment(
+            &mut target,
+            &fragment,
+            FragmentMergeOptions {
+                anchor_sec: Some(100.0),
+                track_placement: FragmentTrackPlacement::SelectedTracksRelative,
+            },
+        )
+        .unwrap();
+        let pasted = target
+            .clips
+            .iter()
+            .find(|c| c.id == merge.created_clip_ids[0])
+            .cloned()
+            .unwrap();
+        assert!((pasted.start_sec - 100.0).abs() < 1e-9);
+        let root = target.resolve_root_track_id(&pasted.track_id).unwrap();
+        let entry = target.params_by_root_track.get(&root).expect("params");
+        let fp = 0.005f64;
+        let at = |entry: &crate::state::TrackParamsState, sec: f64| {
+            entry
+                .extra_curves
+                .get("volume")
+                .and_then(|c| c.get((sec / fp) as usize))
+                .copied()
+                .unwrap_or(f32::NAN)
+        };
+        assert!((at(entry, 100.0) - 0.5).abs() < 1e-6, "@100s 期望 0.5，实际 {}", at(entry, 100.0));
+        assert!((at(entry, 101.0) - 0.5).abs() < 1e-6, "@101s 期望 0.5，实际 {}", at(entry, 101.0));
+        assert!(
+            (at(entry, 99.0) - 1.0).abs() < 1e-6,
+            "@99s 期望默认 1.0，实际 {}",
+            at(entry, 99.0)
+        );
+
+        // 同一时间线内复制粘贴（复制语义）：源区间 [45..47] 必须保持不动，
+        // 粘贴区间 [100..102] 写入平移后的曲线。
+        let mut same_tl = tl.clone();
+        let merge2 = merge_project_fragment(
+            &mut same_tl,
+            &fragment,
+            FragmentMergeOptions {
+                anchor_sec: Some(100.0),
+                track_placement: FragmentTrackPlacement::SelectedTracksRelative,
+            },
+        )
+        .unwrap();
+        let pasted2 = same_tl
+            .clips
+            .iter()
+            .find(|c| c.id == merge2.created_clip_ids[0])
+            .cloned()
+            .unwrap();
+        assert!((pasted2.start_sec - 100.0).abs() < 1e-9);
+        let entry2 = same_tl
+            .params_by_root_track
+            .get(&track_id)
+            .expect("params");
+        assert!((at(entry2, 45.0) - 0.5).abs() < 1e-6, "源区间保持：@45s 期望 0.5，实际 {}", at(entry2, 45.0));
+        assert!((at(entry2, 100.0) - 0.5).abs() < 1e-6, "粘贴区间写入：@100s 期望 0.5，实际 {}", at(entry2, 100.0));
     }
 
     #[test]

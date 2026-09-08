@@ -92,7 +92,25 @@ fn build_reaper_clipboard(
     timeline: &crate::state::TimelineState,
     clip_ids: &[String],
 ) -> Option<crate::reaper_export::ReaperExportResult> {
-    crate::reaper_export::build_reaper_clipboard(timeline, clip_ids).ok()
+    // 参数线 → 包络的曲线视图从 live timeline 预解析（pitch_orig / 子轨偏移
+    // 曲线 / 根轨道 extra_curves 都只在 live state 上完整）。
+    let curves_by_clip: std::collections::BTreeMap<String, crate::reaper_export::ClipExportCurves> =
+        clip_ids
+            .iter()
+            .filter_map(|clip_id| {
+                timeline
+                    .clips
+                    .iter()
+                    .find(|clip| &clip.id == clip_id)
+                    .map(|clip| {
+                        (
+                            clip.id.clone(),
+                            crate::reaper_export::build_clip_export_curves(timeline, clip),
+                        )
+                    })
+            })
+            .collect();
+    crate::reaper_export::build_reaper_clipboard(timeline, clip_ids, &curves_by_clip).ok()
 }
 
 fn write_fragment(
@@ -305,7 +323,11 @@ pub(super) fn copy_timeline_clips(state: &AppState, clip_ids: Vec<String>) -> se
     let reaper = if reaper_clip_ids.is_empty() {
         None
     } else {
-        build_reaper_clipboard(&fragment.timeline, &reaper_clip_ids)
+        // REAPER 导出（含参数线→包络的曲线视图）必须用 **live timeline**：
+        // clip 级 fragment 不携带 params_by_root_track（轨道组内 clip 的
+        // 音高/音量/声像曲线存于根轨道 entry），用 fragment 会整体丢包络。
+        // live timeline 与 fragment 的 clips 同 id，导出等价。
+        build_reaper_clipboard(&timeline, &reaper_clip_ids)
     };
     drop(timeline);
 
@@ -349,7 +371,11 @@ pub(super) fn copy_timeline_tracks(state: &AppState, track_ids: Vec<String>) -> 
     let reaper = if reaper_clip_ids.is_empty() {
         None
     } else {
-        build_reaper_clipboard(&fragment.timeline, &reaper_clip_ids)
+        // REAPER 导出（含参数线→包络的曲线视图）必须用 **live timeline**：
+        // clip 级 fragment 不携带 params_by_root_track（轨道组内 clip 的
+        // 音高/音量/声像曲线存于根轨道 entry），用 fragment 会整体丢包络。
+        // live timeline 与 fragment 的 clips 同 id，导出等价。
+        build_reaper_clipboard(&timeline, &reaper_clip_ids)
     };
     drop(timeline);
 
