@@ -25,6 +25,7 @@ import {
     type TempoPointEditRequest,
 } from "./TempoMapRulerRow.tsx";
 import { RULER_BASE_HEIGHT_PX, timeRulerHeightPx } from "./rulerHeight.ts";
+import { RULER_LABEL_HIDDEN_GAP_PX } from "./runtime/buildTimelineTicks.js";
 import type { TimelineTick } from "./runtime/buildTimelineTicks.js";
 import {
     readDevicePixelRatio,
@@ -124,7 +125,7 @@ const TimeRulerMarks = React.memo(function TimeRulerMarks({
                 //   保证后出现的刻度文本完整可见、两个标签绝不重叠。
                 const nextTick = visibleTicks[index + 1];
                 const gapPx = nextTick != null ? nextTick.contentPx - tick.contentPx : null;
-                const labelHidden = gapPx != null && gapPx < 26;
+                const labelHidden = gapPx != null && gapPx < RULER_LABEL_HIDDEN_GAP_PX;
                 const labelMaxWidth = gapPx != null ? (labelHidden ? 0 : gapPx - 6) : undefined;
                 return (
                     <div key={tick.beat} className="absolute top-0 bottom-0" style={{ left }}>
