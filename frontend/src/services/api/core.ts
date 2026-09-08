@@ -187,6 +187,23 @@ export const coreApi = {
     /** 引擎确在播放时返回精确停止位置（stopped_at_sec），否则为 null。 */
     stopAudio: () => invoke<{ ok: boolean; stopped_at_sec?: number | null }>("stop_audio"),
 
+    /** 设置节拍器（开关 / 音量 / 细分模式 / 重音 / 音色），并按新模式重建响点表。 */
+    setMetronome: (payload: {
+        enabled: boolean;
+        gain: number;
+        mode: string;
+        accent: boolean;
+        sound: string;
+    }) =>
+        invoke<{ ok: boolean }>(
+            "set_metronome",
+            payload.enabled,
+            payload.gain,
+            payload.mode,
+            payload.accent,
+            payload.sound,
+        ),
+
     // Pitch analysis progress
     getPitchAnalysisProgress: () =>
         invoke<PitchProgressPayload | null>("get_pitch_analysis_progress"),

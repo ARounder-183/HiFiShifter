@@ -360,6 +360,15 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
         case "split_clips_at":
             return { clipIds: args[0], splitSec: args[1] };
 
+        case "close_track_gaps":
+            return { trackId: args[0], fromSec: args[1] };
+
+        case "analyze_clip_silence":
+            return { clipIds: args[0], options: args[1] };
+
+        case "remove_clip_silence":
+            return { clipIds: args[0], options: args[1] };
+
         case "glue_clips":
             return { clipIds: args[0] };
 
@@ -407,6 +416,15 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
 
         case "play_original":
             return { startSec: args[0] };
+
+        case "set_metronome":
+            return {
+                enabled: args[0],
+                gain: args[1],
+                mode: args[2],
+                accent: args[3],
+                sound: args[4],
+            };
 
         case "open_project":
             return {

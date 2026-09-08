@@ -47,6 +47,7 @@ import {
     setTempoMap,
 } from "../../features/session/sessionSlice";
 import { setTempoMapRemote } from "../../features/session/thunks/tempoMapThunks";
+import { updateMetronome } from "../../features/session/thunks/transportThunks";
 import {
     computeEffectiveSnap,
     isSnapGestureActive,
@@ -79,6 +80,30 @@ import {
 import type { RecordingSettings } from "../../services/api/recording";
 import { RecordingSettingsDialog } from "./RecordingSettingsDialog";
 
+/** 节拍器图标（机身 + 摆锤；与 TempoMapCornerButton 的节拍器造型一致）。 */
+function MetronomeIcon() {
+    return (
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            {/* 节拍器机身（梯形轮廓） */}
+            <path
+                d="M5.6 2.2 H10.4 L13 13.4 H3 Z"
+                stroke="currentColor"
+                strokeWidth="1.1"
+                strokeLinejoin="round"
+            />
+            {/* 摆锤 */}
+            <path
+                d="M8 11.2 L11 4.4"
+                stroke="currentColor"
+                strokeWidth="1.2"
+                strokeLinecap="round"
+            />
+            {/* 配重圆点 */}
+            <circle cx="11" cy="4.4" r="1.1" fill="currentColor" />
+        </svg>
+    );
+}
+
 export function ActionBar() {
     const dispatch = useAppDispatch();
     const s = useAppSelector((state: RootState) => state.session);
@@ -98,6 +123,8 @@ export function ActionBar() {
     const [recordingSettingsOpen, setRecordingSettingsOpen] = useState(false);
     const [recordingMenuPos, setRecordingMenuPos] = useState<{ x: number; y: number } | null>(null);
     const recordingMenuRef = useRef<HTMLDivElement | null>(null);
+    const [metronomeMenuPos, setMetronomeMenuPos] = useState<{ x: number; y: number } | null>(null);
+    const metronomeMenuRef = useRef<HTMLDivElement | null>(null);
 
     // ── "拖动时切换吸附"（modifier.clipNoSnap）────────────────────────
     // 时间轴拖拽手势进行中且按住该修饰键时，工具栏吸附按钮临时显示为
@@ -150,6 +177,24 @@ export function ActionBar() {
             window.removeEventListener("keydown", onKeyDown, true);
         };
     }, [recordingMenuPos]);
+
+    useEffect(() => {
+        if (!metronomeMenuPos) return;
+        const onPointerDown = (e: PointerEvent) => {
+            const target = e.target as Node | null;
+            if (metronomeMenuRef.current?.contains(target)) return;
+            setMetronomeMenuPos(null);
+        };
+        const onKeyDown = (e: KeyboardEvent) => {
+            if (e.key === "Escape") setMetronomeMenuPos(null);
+        };
+        window.addEventListener("pointerdown", onPointerDown, true);
+        window.addEventListener("keydown", onKeyDown, true);
+        return () => {
+            window.removeEventListener("pointerdown", onPointerDown, true);
+            window.removeEventListener("keydown", onKeyDown, true);
+        };
+    }, [metronomeMenuPos]);
 
     const recordingSourceLabel = (() => {
         switch (recording.settings.captureMode) {
@@ -1074,7 +1119,131 @@ export function ActionBar() {
                         </div>
                     )}
                 </Box>
-                {recording.active || recording.countdownRemaining > 0 ? (
+                <Box style={{ position: "relative" }} data-hs-context-menu>
+                    <IconButton
+                        size="1"
+                        variant={s.metronomeEnabled ? "solid" : "soft"}
+                        color="gray"
+                        data-tooltip={t("action_metronome")}
+                        onClick={() => {
+                            void dispatch(
+                                updateMetronome({ metronomeEnabled: !s.metronomeEnabled }),
+                            );
+                        }}
+                        onContextMenu={(event) => {
+                            event.preventDefault();
+                            setMetronomeMenuPos({ x: event.clientX, y: event.clientY });
+                        }}
+                    >
+                        <MetronomeIcon />
+                    </IconButton>
+                    {metronomeMenuPos && (
+                        <div
+                            ref={metronomeMenuRef}
+                            data-hs-context-menu
+                            className="fixed z-50 min-w-[200px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
+                            style={{ left: metronomeMenuPos.x, top: metronomeMenuPos.y }}
+                        >
+                            <div className="px-3 py-1 text-[11px] uppercase tracking-wide text-qt-text-muted">
+                                {t("metronome_volume")}
+                            </div>
+                            <div className="px-3 py-1.5 flex items-center gap-2">
+                                <input
+                                    type="range"
+                                    min={0}
+                                    max={100}
+                                    step={5}
+                                    value={Math.round(s.metronomeGain * 100)}
+                                    onChange={(e) => {
+                                        void dispatch(
+                                            updateMetronome({
+                                                metronomeGain: Number(e.target.value) / 100,
+                                            }),
+                                        );
+                                    }}
+                                    onPointerDown={(e) => e.stopPropagation()}
+                                    className="flex-1"
+                                />
+                                <span className="text-[11px] tabular-nums w-8 text-right opacity-70">
+                                    {Math.round(s.metronomeGain * 100)}
+                                </span>
+                            </div>
+                            <div className="my-1 border-t border-qt-border" />
+                            <div className="px-3 py-1 text-[11px] uppercase tracking-wide text-qt-text-muted">
+                                {t("metronome_mode")}
+                            </div>
+                            {(
+                                [
+                                    ["grid", "metronome_mode_grid"],
+                                    ["beat", "metronome_mode_beat"],
+                                    ["bar", "metronome_mode_bar"],
+                                ] as const
+                            ).map(([mode, key]) => (
+                                <button
+                                    key={mode}
+                                    type="button"
+                                    className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
+                                    onClick={() => {
+                                        void dispatch(updateMetronome({ metronomeMode: mode }));
+                                        setMetronomeMenuPos(null);
+                                    }}
+                                    onPointerDown={(e) => e.stopPropagation()}
+                                >
+                                    <span>{t(key)}</span>
+                                    {s.metronomeMode === mode ? <CheckIcon /> : null}
+                                </button>
+                            ))}
+                            <div className="my-1 border-t border-qt-border" />
+                            <div className="px-3 py-1 text-[11px] uppercase tracking-wide text-qt-text-muted">
+                                {t("metronome_sound")}
+                            </div>
+                            {(
+                                [
+                                    ["click", "metronome_sound_click"],
+                                    ["woodblock", "metronome_sound_woodblock"],
+                                    ["beep", "metronome_sound_beep"],
+                                ] as const
+                            ).map(([sound, key]) => (
+                                <button
+                                    key={sound}
+                                    type="button"
+                                    className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
+                                    onClick={() => {
+                                        void dispatch(updateMetronome({ metronomeSound: sound }));
+                                        setMetronomeMenuPos(null);
+                                    }}
+                                    onPointerDown={(e) => e.stopPropagation()}
+                                >
+                                    <span>{t(key)}</span>
+                                    {s.metronomeSound === sound ? <CheckIcon /> : null}
+                                </button>
+                            ))}
+                            <div className="my-1 border-t border-qt-border" />
+                            <button
+                                type="button"
+                                className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-qt-button-hover"
+                                onClick={() => {
+                                    void dispatch(
+                                        updateMetronome({ metronomeAccent: !s.metronomeAccent }),
+                                    );
+                                }}
+                                onPointerDown={(e) => e.stopPropagation()}
+                            >
+                                <span>{t("metronome_accent")}</span>
+                                {s.metronomeAccent ? <CheckIcon /> : null}
+                            </button>
+                            <div className="my-1 border-t border-qt-border" />
+                            <div
+                                className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] opacity-40 cursor-default"
+                                title={t("metronome_count_in_soon")}
+                            >
+                                <span>{t("metronome_count_in")}</span>
+                                <span className="opacity-70">{t("metronome_count_in_off")}</span>
+                            </div>
+                        </div>
+                    )}
+                </Box>
+                {recording.active || recording.countdownRemaining > 0 ?(
                     <Flex align="center" gap="1" className="shrink-0">
                         <Text
                             size="1"

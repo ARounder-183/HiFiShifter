@@ -174,6 +174,71 @@ const MAX_COORD_ABS: i32 = 1_000_000;
 ///
 /// 该文件负责管理应用的可序列化配置项，包括 UI 相关的偏好
 /// 以及窗口状态。窗口状态用于在程序重启后恢复上次的窗口尺寸、位置和最大化/全屏状态。
+/// 静音检测对话框的上次使用参数。
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct SilenceDetectSettings {
+    #[serde(default = "default_silence_method")]
+    pub method: String,
+    #[serde(default = "default_silence_threshold")]
+    pub threshold_db: f64,
+    #[serde(default)]
+    pub adaptive: bool,
+    #[serde(default = "default_silence_min_silence")]
+    pub min_silence_ms: f64,
+    #[serde(default)]
+    pub min_sound_ms: f64,
+    #[serde(default = "default_silence_padding")]
+    pub padding_ms: f64,
+    #[serde(default = "default_silence_cut_fade")]
+    pub cut_fade_ms: f64,
+    #[serde(default = "default_silence_action")]
+    pub action: String,
+    #[serde(default = "default_true_value")]
+    pub delete_silent_clips: bool,
+    #[serde(default)]
+    pub sync_all_takes: bool,
+}
+
+impl Default for SilenceDetectSettings {
+    fn default() -> Self {
+        Self {
+            method: default_silence_method(),
+            threshold_db: default_silence_threshold(),
+            adaptive: false,
+            min_silence_ms: default_silence_min_silence(),
+            min_sound_ms: 0.0,
+            padding_ms: default_silence_padding(),
+            cut_fade_ms: default_silence_cut_fade(),
+            action: default_silence_action(),
+            delete_silent_clips: true,
+            sync_all_takes: false,
+        }
+    }
+}
+
+fn default_silence_method() -> String {
+    "rms".to_string()
+}
+fn default_silence_threshold() -> f64 {
+    -50.0
+}
+fn default_silence_min_silence() -> f64 {
+    120.0
+}
+fn default_silence_padding() -> f64 {
+    10.0
+}
+fn default_silence_cut_fade() -> f64 {
+    5.0
+}
+fn default_silence_action() -> String {
+    "close".to_string()
+}
+fn default_true_value() -> bool {
+    true
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct UiSettings {
@@ -239,6 +304,28 @@ pub struct UiSettings {
     pub show_param_value_popup: bool,
     #[serde(default = "default_true")]
     pub lock_param_lines: bool,
+
+    // ── 节拍器（Metronome）──
+    /// 是否启用（传输栏节拍器按钮 / playback.metronome 快捷键切换）。
+    #[serde(default)]
+    pub metronome_enabled: bool,
+    /// 音量 0..1（默认 0.5）。
+    #[serde(default = "default_metronome_gain")]
+    pub metronome_gain: f64,
+    /// 细分模式：grid（跟随网格标尺，默认）/ beat（仅每拍）/ bar（仅小节首）。
+    #[serde(default = "default_metronome_mode")]
+    pub metronome_mode: String,
+    /// 是否强调小节首（重音音色）。
+    #[serde(default = "default_true")]
+    pub metronome_accent: bool,
+    /// 音色：click（默认）/ woodblock / beep（程序化合成）。
+    #[serde(default = "default_metronome_sound")]
+    pub metronome_sound: String,
+
+    /// 静音检测对话框的上次使用参数。
+    #[serde(default)]
+    pub silence_detect_options: SilenceDetectSettings,
+
     #[serde(default)]
     pub quick_search_auto_normalize: bool,
     #[serde(default)]
@@ -703,6 +790,18 @@ fn default_ripple_mode() -> String {
     "off".to_string()
 }
 
+fn default_metronome_gain() -> f64 {
+    0.5
+}
+
+fn default_metronome_mode() -> String {
+    "grid".to_string()
+}
+
+fn default_metronome_sound() -> String {
+    "click".to_string()
+}
+
 fn default_split_transition_mode() -> String {
     "overlap".to_string()
 }
@@ -788,6 +887,12 @@ impl Default for UiSettings {
             show_clipboard_preview: true,
             show_param_value_popup: true,
             lock_param_lines: true,
+            metronome_enabled: false,
+            metronome_gain: default_metronome_gain(),
+            metronome_mode: default_metronome_mode(),
+            metronome_accent: true,
+            metronome_sound: default_metronome_sound(),
+            silence_detect_options: SilenceDetectSettings::default(),
             quick_search_auto_normalize: false,
             visible_reference_root_track_ids: Vec::new(),
             default_stretch_algorithm: UserStretchAlgorithm::default(),

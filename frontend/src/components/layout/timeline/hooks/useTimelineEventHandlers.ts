@@ -87,6 +87,8 @@ export interface UseTimelineEventHandlersArgs {
         x: number;
         y: number;
         trackId: string;
+        /** 右键点击位置对应的时间轴时间（秒），供“关闭间隙”等位置锚定操作使用。 */
+        timeSec: number;
     } | null;
     setContextMenu: React.Dispatch<
         React.SetStateAction<{
@@ -101,6 +103,7 @@ export interface UseTimelineEventHandlersArgs {
             x: number;
             y: number;
             trackId: string;
+            timeSec: number;
         } | null>
     >;
 

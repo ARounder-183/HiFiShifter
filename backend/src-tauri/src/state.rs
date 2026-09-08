@@ -4591,6 +4591,191 @@ mod tests {
     }
 
     #[test]
+    fn close_gaps_anchors_on_previous_clip_tail() {
+        let mut timeline = TimelineState::default();
+        let track = timeline.add_track(Some("A".into()), None, None);
+        let other = timeline.add_track(Some("B".into()), None, None);
+        let a0 = timeline.add_clip(Some(track.clone()), Some("a0".into()), Some(1.0), Some(2.0), None);
+        let a1 = timeline.add_clip(Some(track.clone()), Some("a1".into()), Some(8.0), Some(1.0), None);
+        let a2 = timeline.add_clip(Some(track.clone()), Some("a2".into()), Some(12.0), Some(2.0), None);
+        let a3 = timeline.add_clip(Some(track.clone()), Some("a3".into()), Some(14.5), Some(0.5), None);
+        // 其他轨道不受影响。
+        let b0 = timeline.add_clip(Some(other.clone()), Some("b0".into()), Some(8.0), Some(1.0), None);
+
+        let start_of = |tl: &TimelineState, name: &str| {
+            tl.clips
+                .iter()
+                .find(|c| c.name == name)
+                .map(|c| c.start_sec)
+                .unwrap_or(f64::NAN)
+        };
+
+        // 在 a0、a1 之间的空隙（T0=6.0）右键：a1 头对齐 a0 尾（3.0），后续依次首尾相连。
+        let moves = timeline.close_track_gaps_moves(&track, 6.0);
+        timeline.move_clips(&moves, false);
+        assert_eq!(start_of(&timeline, "a0"), 1.0);
+        assert_eq!(start_of(&timeline, "a1"), 3.0);
+        assert_eq!(start_of(&timeline, "a2"), 4.0);
+        assert_eq!(start_of(&timeline, "a3"), 6.0);
+        assert_eq!(start_of(&timeline, "b0"), 8.0);
+        // 移动集只包含受影响轨道上 T0 之后的 Clip。
+        assert_eq!(moves.len(), 3);
+        assert!(moves.iter().all(|m| {
+            let c = timeline.clips.iter().find(|c| c.id == m.clip_id).unwrap();
+            c.track_id == track
+        }));
+    }
+
+    #[test]
+    fn close_gaps_without_previous_clip_anchors_at_project_start() {
+        let mut timeline = TimelineState::default();
+        let track = timeline.add_track(Some("A".into()), None, None);
+        let a0 = timeline.add_clip(Some(track.clone()), Some("a0".into()), Some(10.0), Some(2.0), None);
+        let a1 = timeline.add_clip(Some(track.clone()), Some("a1".into()), Some(15.0), Some(1.0), None);
+
+        // 前方无 Clip：第一个受影响 Clip 对齐工程最开头（0）。
+        let moves = timeline.close_track_gaps_moves(&track, 5.0);
+        timeline.move_clips(&moves, false);
+        assert_eq!(find_clip_start(&timeline, &a0), 0.0);
+        assert_eq!(find_clip_start(&timeline, &a1), 2.0);
+    }
+
+    #[test]
+    fn close_gaps_treats_clip_containing_click_as_anchor_and_keeps_overlaps() {
+        let mut timeline = TimelineState::default();
+        let track = timeline.add_track(Some("A".into()), None, None);
+        // a1 重叠在 a0 尾部上（不动）；a3 与 a2 原本重叠（跟随 a2 的位移，
+        // 保持交叠）；a4 与 a3 之间有正向间隙（闭合到重叠群末端）。
+        let a0 = timeline.add_clip(Some(track.clone()), Some("a0".into()), Some(1.0), Some(3.0), None);
+        let a1 = timeline.add_clip(Some(track.clone()), Some("a1".into()), Some(3.5), Some(1.0), None);
+        let a2 = timeline.add_clip(Some(track.clone()), Some("a2".into()), Some(6.0), Some(2.0), None);
+        let a3 = timeline.add_clip(Some(track.clone()), Some("a3".into()), Some(7.0), Some(1.0), None);
+        let a4 = timeline.add_clip(Some(track.clone()), Some("a4".into()), Some(20.0), Some(1.0), None);
+
+        // T0=2.0 落在 a0 内：a0/a1 不动；a2 闭合 a1 尾后的间隙（→4.5）；
+        // a3 与 a2 原本重叠 → 继承 a2 的 -1.5 位移（→5.5）；a4 闭合到
+        // 就位内容尾端 6.5。
+        let moves = timeline.close_track_gaps_moves(&track, 2.0);
+        timeline.move_clips(&moves, false);
+        assert_eq!(find_clip_start(&timeline, &a0), 1.0);
+        assert_eq!(find_clip_start(&timeline, &a1), 3.5);
+        assert_eq!(find_clip_start(&timeline, &a2), 4.5);
+        assert_eq!(find_clip_start(&timeline, &a3), 5.5);
+        assert_eq!(find_clip_start(&timeline, &a4), 6.5);
+    }
+
+    #[test]
+    fn silence_removal_close_splits_removes_and_compacts() {
+        let mut timeline = TimelineState::default();
+        let track = timeline.add_track(Some("A".into()), None, None);
+        let clip_id = timeline.add_clip(Some(track.clone()), Some("a".into()), Some(0.0), Some(10.0), None);
+
+        let outcome = timeline.apply_silence_removal(
+            &[(clip_id.clone(), vec![(2.0, 4.0), (6.0, 8.0)])],
+            SilenceRemovalAction::Close,
+            true,
+            0.005,
+            false,
+        );
+        // 3 个发声段保留：[0,2] [2,4] [4,6]，静音段被删除。
+        assert_eq!(outcome.kept_clip_ids.len(), 3);
+        assert_eq!(timeline.clips.len(), 3);
+        let mut starts: Vec<f64> = timeline.clips.iter().map(|c| c.start_sec).collect();
+        starts.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(starts, vec![0.0, 2.0, 4.0]);
+        // 切边淡化：首段无 fade-in、有 fade-out；中间段两者皆有；末段反之。
+        let first = timeline.clips.iter().find(|c| c.start_sec == 0.0).unwrap();
+        assert!(first.fade_in_sec.abs() < 1e-9);
+        assert!((first.fade_out_sec - 0.005).abs() < 1e-9);
+        let middle = timeline.clips.iter().find(|c| c.start_sec == 2.0).unwrap();
+        assert!((middle.fade_in_sec - 0.005).abs() < 1e-9);
+        assert!((middle.fade_out_sec - 0.005).abs() < 1e-9);
+        let last = timeline.clips.iter().find(|c| c.start_sec == 4.0).unwrap();
+        assert!((last.fade_in_sec - 0.005).abs() < 1e-9);
+        assert!(last.fade_out_sec.abs() < 1e-9);
+        assert!(outcome.removed_clip_ids.len() == 2);
+        let _ = clip_id;
+    }
+
+    #[test]
+    fn silence_removal_keep_preserves_gaps() {
+        let mut timeline = TimelineState::default();
+        let track = timeline.add_track(Some("A".into()), None, None);
+        let clip_id = timeline.add_clip(Some(track.clone()), Some("a".into()), Some(0.0), Some(10.0), None);
+
+        let outcome = timeline.apply_silence_removal(
+            &[(clip_id.clone(), vec![(2.0, 4.0), (6.0, 8.0)])],
+            SilenceRemovalAction::Keep,
+            true,
+            0.0,
+            false,
+        );
+        // 保留间隙：发声段位置不变。
+        assert_eq!(outcome.kept_clip_ids.len(), 3);
+        let mut starts: Vec<f64> = timeline.clips.iter().map(|c| c.start_sec).collect();
+        starts.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(starts, vec![0.0, 4.0, 8.0]);
+    }
+
+    #[test]
+    fn silence_removal_split_keeps_silent_pieces() {
+        let mut timeline = TimelineState::default();
+        let track = timeline.add_track(Some("A".into()), None, None);
+        let clip_id = timeline.add_clip(Some(track.clone()), Some("a".into()), Some(0.0), Some(10.0), None);
+
+        let outcome = timeline.apply_silence_removal(
+            &[(clip_id.clone(), vec![(2.0, 4.0)])],
+            SilenceRemovalAction::Split,
+            true,
+            0.0,
+            false,
+        );
+        // 仅切分：全部段（含静音段）保留，不做淡化。
+        assert_eq!(outcome.kept_clip_ids.len(), 3);
+        assert_eq!(outcome.removed_clip_ids.len(), 0);
+        assert!(timeline.clips.iter().all(|c| c.fade_in_sec.abs() < 1e-9));
+    }
+
+    #[test]
+    fn silence_removal_fully_silent_clip_is_removed_or_kept() {
+        let mut timeline = TimelineState::default();
+        let track = timeline.add_track(Some("A".into()), None, None);
+        let clip_id = timeline.add_clip(Some(track.clone()), Some("a".into()), Some(1.0), Some(4.0), None);
+
+        // 删除全静音 Clip。
+        let outcome = timeline.apply_silence_removal(
+            &[(clip_id.clone(), vec![(1.0, 5.0)])],
+            SilenceRemovalAction::Close,
+            true,
+            0.0,
+            false,
+        );
+        assert_eq!(outcome.removed_clip_ids, vec![clip_id.clone()]);
+        assert!(timeline.clips.is_empty());
+
+        // delete_silent_clips = false → 保留原样。
+        let clip_id2 = timeline.add_clip(Some(track.clone()), Some("b".into()), Some(1.0), Some(4.0), None);
+        let outcome = timeline.apply_silence_removal(
+            &[(clip_id2.clone(), vec![(1.0, 5.0)])],
+            SilenceRemovalAction::Close,
+            false,
+            0.0,
+            false,
+        );
+        assert_eq!(outcome.kept_clip_ids, vec![clip_id2]);
+        assert_eq!(timeline.clips.len(), 1);
+    }
+
+    #[test]
+    fn close_gaps_click_after_last_clip_is_noop() {
+        let mut timeline = TimelineState::default();
+        let track = timeline.add_track(Some("A".into()), None, None);
+        let _a0 = timeline.add_clip(Some(track.clone()), Some("a0".into()), Some(1.0), Some(2.0), None);
+        // 点击位置在所有 Clip 之后 → 无受影响 Clip。
+        assert!(timeline.close_track_gaps_moves(&track, 10.0).is_empty());
+    }
+
+    #[test]
     fn create_clips_bulk_creates_multiple_snapshot_clips() {
         let mut timeline = TimelineState::default();
         let track_id = timeline.add_track(Some("Track".to_string()), None, None);
@@ -6232,6 +6417,28 @@ fn default_fade_curve() -> String {
     String::new()
 }
 
+/// 静音切除的动作模式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SilenceRemovalAction {
+    /// 切除静音并闭合：删除静音段后同 Clip 内片段左移首尾相接。
+    Close,
+    /// 仅切除：删除静音段，保留间隙。
+    Keep,
+    /// 仅切分：只在静音边界切分，静音段保留为独立片段。
+    Split,
+}
+
+/// [`TimelineState::apply_silence_removal`] 的结果。
+#[derive(Debug, Default)]
+pub struct SilenceRemovalOutcome {
+    /// 处理后仍然存在的（发声）片段 id，供前端恢复选区。
+    pub kept_clip_ids: Vec<String>,
+    /// 被删除的片段 id（全静音 Clip 或被切除的静音段）。
+    pub removed_clip_ids: Vec<String>,
+    /// 发生几何变化的根轨道（用于调度音高重分析）。
+    pub touched_root_track_ids: std::collections::HashSet<String>,
+}
+
 impl TimelineState {
     pub(crate) fn ensure_project_end_sec(&mut self, end_sec: f64) {
         if !(end_sec.is_finite()) {
@@ -7363,6 +7570,270 @@ impl TimelineState {
         }
         self.move_clips(&moves, move_linked_params);
         shifted_ids
+    }
+
+    /// 关闭间隙（Close Gaps）：计算 `track_id` 轨道上 `from_sec` 之后所有
+    /// Clip 为消除相互间隙所需的左移批量（纯计算，不修改状态）。
+    ///
+    /// 语义：
+    /// - `from_sec` 之前的 Clip 完全不动，只推进“游标”；
+    /// - 包含 `from_sec` 的 Clip 作为锚点不动（其首已在点击位置左侧）；
+    /// - 第一个受影响 Clip 的头对齐到**其前最后一个 Clip 的尾**（无前一个
+    ///   Clip 时对齐到工程最开头 0）；
+    /// - 与前一个 Clip 存在正向间隙的 Clip 左移闭合到游标（游标 = 已就位
+    ///   内容的最大尾端）；
+    /// - 与前一个 Clip 原本重叠 / 紧贴的 Clip **继承前一个 Clip 的位移**，
+    ///   保持原有交叠（交叉淡化）关系不被拉开或压平；游标取
+    ///   `max(cursor, clip_end)` 兼容交叠群。
+    ///
+    /// 返回的 `MoveClipPayload` 列表可直接交给 [`TimelineState::move_clips`]
+    /// （锁定参数线联动与撤销检查点由调用方决定）。
+    pub fn close_track_gaps_moves(&self, track_id: &str, from_sec: f64) -> Vec<MoveClipPayload> {
+        let from_ok = from_sec.is_finite();
+        let mut clips: Vec<&Clip> = self
+            .clips
+            .iter()
+            .filter(|c| c.track_id == track_id)
+            .collect();
+        // 稳定排序：按 start 升序，同起点保持现有顺序。
+        clips.sort_by(|a, b| {
+            a.start_sec
+                .partial_cmp(&b.start_sec)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let mut moves: Vec<MoveClipPayload> = Vec::new();
+        // cursor：已就位内容（含未受影响部分）的最大尾端，即下一个带间隙
+        // Clip 的对齐目标；初值 0 = 工程最开头。
+        let mut cursor = 0.0f64;
+        // 前一个 Clip 的原始尾端（用于判定原始间距）与其位移（重叠跟随者
+        // 继承同一位移，保持相对间距）。
+        let mut prev_end = f64::NEG_INFINITY;
+        let mut prev_delta = 0.0f64;
+        for clip in clips {
+            let end = clip.start_sec + clip.length_sec;
+            if !from_ok || clip.start_sec <= from_sec {
+                // 点击位置之前（或恰好包含点击位置）的 Clip：不动，只推进游标。
+                cursor = cursor.max(end);
+                prev_end = end;
+                prev_delta = 0.0;
+                continue;
+            }
+            // 与前一个 Clip 的原始间距：正值 = 间隙（闭合），非正值 =
+            // 重叠/紧贴（继承位移，保持原交叠）。
+            let orig_gap = clip.start_sec - prev_end;
+            let delta = if !prev_end.is_finite() || orig_gap > 1e-9 {
+                cursor - clip.start_sec
+            } else {
+                prev_delta
+            };
+            if delta.abs() > 1e-9 {
+                let target = (clip.start_sec + delta).max(0.0);
+                moves.push(MoveClipPayload {
+                    clip_id: clip.id.clone(),
+                    start_sec: target,
+                    track_id: None,
+                });
+                prev_delta = target - clip.start_sec;
+            } else {
+                prev_delta = 0.0;
+            }
+            cursor = cursor.max(clip.start_sec + delta + clip.length_sec);
+            prev_end = end;
+        }
+        moves
+    }
+
+    /// 应用静音切除变换：对每个 Clip 在静音边界切分（复用 [`Self::split_clip`]
+    /// 的几何与分 Take 窗口切分），按动作删除静音段 / 闭合间隙 / 设置切边淡化。
+    ///
+    /// `per_clip`：`(clip_id, 静音区间列表)`——区间为**时间线绝对秒**锚定、
+    /// 升序、已合并（由分析层产出）。锁定参数线开启时（`move_linked_params`），
+    /// 闭合搬移走 [`Self::move_clips`]，静音区的曲线数据清零为参考值。
+    pub(crate) fn apply_silence_removal(
+        &mut self,
+        per_clip: &[(String, Vec<(f64, f64)>)],
+        action: SilenceRemovalAction,
+        delete_silent_clips: bool,
+        cut_fade_sec: f64,
+        move_linked_params: bool,
+    ) -> SilenceRemovalOutcome {
+        let mut outcome = SilenceRemovalOutcome::default();
+        let eps = 1e-4;
+        for (clip_id, regions) in per_clip {
+            let Some(clip) = self.clips.iter().find(|c| c.id == *clip_id) else {
+                continue;
+            };
+            let track_id = clip.track_id.clone();
+            let clip_start = clip.start_sec;
+            let clip_end = clip.start_sec + clip.length_sec;
+            // 防御性收敛到 Clip 范围内（分析层已保证，此处兜底）。
+            let regions: Vec<(f64, f64)> = regions
+                .iter()
+                .map(|(s, e)| ((*s).max(clip_start), (*e).min(clip_end)))
+                .filter(|(s, e)| *e - *s > eps)
+                .collect();
+            if regions.is_empty() {
+                outcome.kept_clip_ids.push(clip_id.clone());
+                continue;
+            }
+
+            // 全静音（并集覆盖整段）：整 Clip 删除或跳过。
+            let fully_silent = regions.first().unwrap().0 <= clip_start + eps
+                && regions.last().unwrap().1 >= clip_end - eps
+                && regions.windows(2).all(|w| w[1].0 - w[0].1 <= eps);
+            if fully_silent {
+                if delete_silent_clips {
+                    outcome.removed_clip_ids.push(clip_id.clone());
+                    self.remove_clips(&[clip_id.clone()]);
+                } else {
+                    outcome.kept_clip_ids.push(clip_id.clone());
+                }
+                continue;
+            }
+
+            // 切点 = 静音区边界中落在 Clip 内部的部分（升序去重）。
+            let mut cuts: Vec<f64> = regions
+                .iter()
+                .flat_map(|(s, e)| [*s, *e])
+                .filter(|t| *t > clip_start + eps && *t < clip_end - eps)
+                .collect();
+            cuts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            cuts.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+
+            // 切分：左段保留原 id；切点升序 → 含切点的段始终是当前最右段。
+            let mut pieces: Vec<String> = Vec::new();
+            let mut right_id = clip_id.clone();
+            for cut in &cuts {
+                match self.split_clip(&right_id, *cut) {
+                    Some(new_id) => {
+                        pieces.push(right_id.clone());
+                        right_id = new_id;
+                    }
+                    None => break,
+                }
+            }
+            pieces.push(right_id);
+
+            // 分段几何（切分后、删除/搬移前）。
+            let pieces_info: Vec<(String, f64, f64)> = pieces
+                .iter()
+                .filter_map(|id| {
+                    self.clips
+                        .iter()
+                        .find(|c| c.id == *id)
+                        .map(|c| (c.id.clone(), c.start_sec, c.start_sec + c.length_sec))
+                })
+                .collect();
+            let is_silent_piece = |s: f64, e: f64| {
+                regions
+                    .iter()
+                    .any(|(rs, re)| s >= rs - eps && e <= re + eps)
+            };
+            let silent_ids: Vec<String> = pieces_info
+                .iter()
+                .filter(|(_, s, e)| is_silent_piece(*s, *e))
+                .map(|(id, _, _)| id.clone())
+                .collect();
+            let audible: Vec<(String, f64, f64)> = pieces_info
+                .iter()
+                .filter(|(_, s, e)| !is_silent_piece(*s, *e))
+                .map(|(id, s, e)| (id.clone(), *s, *e))
+                .collect();
+
+            if let Some(root) = self.resolve_root_track_id(&track_id) {
+                outcome.touched_root_track_ids.insert(root);
+            }
+
+            if action == SilenceRemovalAction::Split {
+                // 仅切分：静音段保留为独立片段，不做淡化（交给用户手工处理）。
+                for (id, _, _) in &pieces_info {
+                    outcome.kept_clip_ids.push(id.clone());
+                }
+                continue;
+            }
+
+            if audible.is_empty() {
+                // 兜底：分段后无发声段（理论上已被 fully_silent 捕获）。
+                if delete_silent_clips {
+                    self.remove_clips(&silent_ids);
+                    outcome.removed_clip_ids.extend(silent_ids);
+                } else {
+                    for (id, _, _) in &pieces_info {
+                        outcome.kept_clip_ids.push(id.clone());
+                    }
+                }
+                continue;
+            }
+
+            // Close：先清空静音区的根轨道曲线数据（片段搬移前，旧窗口数据完好；
+            // 搬移的 extract/apply 只覆盖片段自身窗口，清不掉静音区残留）。
+            if action == SilenceRemovalAction::Close && move_linked_params {
+                if let Some(root) = self.resolve_root_track_id(&track_id) {
+                    let had_user_pitch = self
+                        .params_by_root_track
+                        .get(&root)
+                        .map(|e| e.pitch_edit_user_modified)
+                        .unwrap_or(false);
+                    for (rs, re) in &regions {
+                        self.clear_linked_params_in_root_range(
+                            &root, *rs, re - rs, had_user_pitch, None,
+                        );
+                    }
+                }
+            }
+
+            if !silent_ids.is_empty() {
+                outcome.removed_clip_ids.extend(silent_ids.iter().cloned());
+                self.remove_clips(&silent_ids);
+            }
+
+            // Close：同 Clip 内闭合——从原 Clip 起点开始紧凑排布发声段。
+            if action == SilenceRemovalAction::Close {
+                let mut moves: Vec<MoveClipPayload> = Vec::new();
+                let mut cursor = clip_start;
+                for (id, s, e) in &audible {
+                    let len = e - s;
+                    if *s > cursor + 1e-9 {
+                        moves.push(MoveClipPayload {
+                            clip_id: id.clone(),
+                            start_sec: cursor,
+                            track_id: None,
+                        });
+                        cursor += len;
+                    } else {
+                        // 已贴合 / 重叠：不动，游标取最大尾端。
+                        cursor = cursor.max(*e);
+                    }
+                }
+                if !moves.is_empty() {
+                    self.move_clips(&moves, move_linked_params);
+                }
+            }
+
+            // 切边淡化（按切割前的原始位置判断哪条边是切割边）。
+            if cut_fade_sec > 1e-6 {
+                for (id, s, _) in &audible {
+                    if *s > clip_start + 1e-6 {
+                        if let Some(c) = self.clips.iter_mut().find(|c| c.id == *id) {
+                            c.fade_in_sec = cut_fade_sec.min(c.length_sec * 0.5);
+                        }
+                    }
+                }
+                for (id, _, e) in &audible {
+                    if *e < clip_end - 1e-6 {
+                        if let Some(c) = self.clips.iter_mut().find(|c| c.id == *id) {
+                            c.fade_out_sec = cut_fade_sec.min(c.length_sec * 0.5);
+                        }
+                    }
+                }
+            }
+
+            for (id, _, _) in &audible {
+                outcome.kept_clip_ids.push(id.clone());
+            }
+        }
+        outcome
     }
 
     /// 批量删除多个 clip，只触发一次状态变更

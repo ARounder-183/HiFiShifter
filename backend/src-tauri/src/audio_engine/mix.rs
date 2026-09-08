@@ -3,6 +3,8 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 
+use super::metronome::MetronomeRt;
+use super::metronome::MetronomeVoices;
 use super::types::EngineClip;
 use super::types::EngineSnapshot;
 use super::util::clamp11;
@@ -557,6 +559,8 @@ fn mix_into_scratch_stereo(
     transition: &mut SnapshotTransitionState,
     meter: &mut TrackMeterScratch,
     bus: &TrackMeterBus,
+    metro: &MetronomeRt,
+    metro_voices: &mut MetronomeVoices,
 ) -> Option<BlockRender> {
     if scratch.len() == frames * 2 {
         scratch.fill(0.0);
@@ -648,6 +652,9 @@ fn mix_into_scratch_stereo(
         }
     }
 
+    // 节拍器叠加：与实际出声的块同步（自动暂停 / 未播放的静音路径不会走到这里）。
+    metro_voices.mix(scratch, metro, pos0, pos1, snap.sample_rate);
+
     if current_ready || transition.fade_from_snapshot.is_some() {
         advance_playback_position(frames, is_playing, position_frames, duration_frames);
     }
@@ -666,6 +673,8 @@ pub(crate) fn render_callback_f32(
     transition: &mut SnapshotTransitionState,
     meter_scratch: &mut TrackMeterScratch,
     meter_bus: &TrackMeterBus,
+    metro: &MetronomeRt,
+    metro_voices: &mut MetronomeVoices,
 ) {
     let frames = if out_channels == 0 {
         0
@@ -693,6 +702,8 @@ pub(crate) fn render_callback_f32(
         transition,
         &mut *meter_scratch,
         meter_bus,
+        metro,
+        metro_voices,
     );
     if let Some(block) = block.as_ref() {
         // Publish per-track peaks so meters always mirror the output. The
@@ -730,6 +741,8 @@ pub(crate) fn render_callback_i16(
     transition: &mut SnapshotTransitionState,
     meter_scratch: &mut TrackMeterScratch,
     meter_bus: &TrackMeterBus,
+    metro: &MetronomeRt,
+    metro_voices: &mut MetronomeVoices,
 ) {
     let frames = if out_channels == 0 {
         0
@@ -756,6 +769,8 @@ pub(crate) fn render_callback_i16(
         transition,
         &mut *meter_scratch,
         meter_bus,
+        metro,
+        metro_voices,
     );
     if let Some(block) = block.as_ref() {
         // Publish per-track peaks so meters always mirror the output. The
@@ -794,6 +809,8 @@ pub(crate) fn render_callback_u16(
     transition: &mut SnapshotTransitionState,
     meter_scratch: &mut TrackMeterScratch,
     meter_bus: &TrackMeterBus,
+    metro: &MetronomeRt,
+    metro_voices: &mut MetronomeVoices,
 ) {
     let frames = if out_channels == 0 {
         0
@@ -820,6 +837,8 @@ pub(crate) fn render_callback_u16(
         transition,
         &mut *meter_scratch,
         meter_bus,
+        metro,
+        metro_voices,
     );
     if let Some(block) = block.as_ref() {
         // Publish per-track peaks so meters always mirror the output. The

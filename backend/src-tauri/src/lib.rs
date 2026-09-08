@@ -47,6 +47,8 @@ mod launch_args;
 mod media;
 #[path = "audio/mixdown.rs"]
 mod mixdown;
+#[path = "audio/silence_detect.rs"]
+mod silence_detect;
 mod models;
 mod pitch_analysis;
 #[path = "pitch/pitch_clip.rs"]
@@ -611,6 +613,9 @@ pub fn run() {
             commands::search_source_file_replacements,
             commands::split_clip,
             commands::split_clips_at,
+            commands::analyze_clip_silence,
+            commands::remove_clip_silence,
+            commands::close_track_gaps,
             commands::glue_clips,
             commands::group_clips,
             commands::ungroup_clips,
@@ -637,6 +642,7 @@ pub fn run() {
             commands::get_export_audio_defaults,
             commands::preview_export_audio_plan,
             commands::quick_export_selected_clips,
+            commands::set_metronome,
             commands::play_original,
             commands::stop_audio,
             commands::get_playback_state,

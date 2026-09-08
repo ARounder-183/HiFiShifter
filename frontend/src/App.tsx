@@ -20,6 +20,7 @@ import {
     syncPlaybackState,
     stopAudioPlayback,
     playOriginal,
+    updateMetronome,
     undoRemote,
     redoRemote,
     newProjectRemote,
@@ -2332,6 +2333,13 @@ function AppInner() {
                     } else {
                         void dispatch(playOriginal());
                     }
+                    break;
+                case "playback.metronome":
+                    void dispatch(
+                        updateMetronome({
+                            metronomeEnabled: !store.getState().session.metronomeEnabled,
+                        }),
+                    );
                     break;
                 case "playback.focusCursor":
                     window.dispatchEvent(new CustomEvent("hifi:focusCursor"));

@@ -1374,6 +1374,9 @@ pub(super) fn set_project_timeline_settings(
         }
     }
 
+    // 网格 / 拍号变化影响节拍器响点表（细分步长 / 小节首位置），重建之。
+    crate::commands::playback::refresh_metronome_schedule(&state);
+
     if changed && was_clean {
         if let Some(handle) = state.app_handle.get() {
             use tauri::Manager;

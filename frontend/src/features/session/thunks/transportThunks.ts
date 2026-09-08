@@ -1,7 +1,42 @@
 import { createAsyncThunk } from "@reduxjs/toolkit";
 import { webApi } from "../../../services/webviewApi";
 
+import { setMetronomeConfig, persistUiSettings } from "../sessionSlice";
 import type { SessionState } from "../sessionSlice";
+
+/**
+ * 更新节拍器配置并即时应用到引擎：
+ * 1. 更新 Redux（UI 立即反映）；2. `set_metronome`（引擎原子配置 + 按细分
+ * 模式重建响点表 + 持久化到 UiSettings）；3. 同步一份到通用设置持久化，
+ * 防止后续任意设置保存把节拍器字段回写成陈旧值。
+ */
+export const updateMetronome = createAsyncThunk(
+    "session/updateMetronome",
+    async (
+        payload: Partial<{
+            metronomeEnabled: boolean;
+            metronomeGain: number;
+            metronomeMode: "grid" | "beat" | "bar";
+            metronomeSound: "click" | "woodblock" | "beep";
+            metronomeAccent: boolean;
+        }>,
+        { dispatch, getState },
+    ) => {
+        dispatch(setMetronomeConfig(payload));
+        const s = (getState() as { session: SessionState }).session;
+        try {
+            await webApi.setMetronome({
+                enabled: s.metronomeEnabled,
+                gain: s.metronomeGain,
+                mode: s.metronomeMode,
+                accent: s.metronomeAccent,
+                sound: s.metronomeSound,
+            });
+        } finally {
+            void dispatch(persistUiSettings());
+        }
+    },
+);
 
 export const fetchTimeline = createAsyncThunk("session/fetchTimeline", async () => {
     return webApi.getTimelineState();

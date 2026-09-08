@@ -22,12 +22,14 @@ import type {
     TimelineSnapSettings,
     TimeUnit,
     TimeUnitChoice,
+    SilenceDetectSettings,
     TrackMeterInfo,
     ToolMode,
     ToolModeGroup,
     TrackInfo,
 } from "./sessionTypes";
 import { normalizeSplitTransitionCurve } from "./sessionTypes";
+import { SILENCE_DETECT_DEFAULTS } from "./sessionTypes";
 import { modEuclid, resolveLoopMediaDurationSec } from "../../utils/loopRender";
 
 import {
@@ -37,6 +39,8 @@ import {
     pasteTimelineClipboardRemote,
     duplicateClipsBulkRemote,
     duplicateTrackRemote,
+    analyzeSilenceRemote,
+    removeSilenceRemote,
     fetchSelectedTrackSummary,
     convertClipsToPitchReferenceRemote,
     updatePitchReferenceRemote,
@@ -55,6 +59,7 @@ import {
     toggleGroupDisabledRemote,
     moveClipRemote,
     moveClipsRemote,
+    closeTrackGapsRemote,
     moveTrackRemote,
     removeClipRemote,
     removeClipsRemote,
@@ -395,6 +400,24 @@ export interface SessionState {
 
     /** 在粘贴/创建时是否锁定参数线以应用 linked params */
     lockParamLinesEnabled: boolean;
+
+    /** 节拍器：是否启用（跟随网格标尺发出节拍器声音） */
+    metronomeEnabled: boolean;
+    /** 节拍器音量 0..1 */
+    metronomeGain: number;
+    /** 节拍器细分模式：grid（跟随网格标尺）/ beat（仅每拍）/ bar（仅小节首） */
+    metronomeMode: "grid" | "beat" | "bar";
+    /** 节拍器音色（程序化合成预设） */
+    metronomeSound: "click" | "woodblock" | "beep";
+    /** 节拍器是否强调小节首（重音音色） */
+    metronomeAccent: boolean;
+
+    /** 静音检测预览：clipId → 检测到的静音区间（时间线秒），由设置对话框管理生命周期 */
+    silencePreviewSegments: Record<string, Array<[number, number]>> | null;
+    /** 最近一次静音预览请求 id（乱序守卫） */
+    _silencePreviewRequestId: string | null;
+    /** 静音检测对话框的上次使用参数（持久化到 UiSettings） */
+    silenceDetectOptions: SilenceDetectSettings;
     /** 快速搜索放置音频时自动规格化 */
     quickSearchAutoNormalizeEnabled: boolean;
     /** PianoRoll 中显示的其他 root track 参考线 */
@@ -1422,6 +1445,9 @@ function applyTimelineState(
 
     applyTimelineTracksOnly(state, timeline);
 
+    // 静音检测预览覆盖层锚定在旧时间线上，任何全量快照应用即失效。
+    state.silencePreviewSegments = null;
+
     state.clips = timeline.clips.map((clip: TimelineClip) => {
         const parsed = {
             id: clip.id,
@@ -1817,6 +1843,14 @@ const initialState: SessionState = {
     lineVibratoDragDirection: "free" as DrawDragDirection,
     edgeSmoothnessPercent: 0,
     lockParamLinesEnabled: true,
+    metronomeEnabled: false,
+    metronomeGain: 0.5,
+    metronomeMode: "grid",
+    metronomeSound: "click",
+    metronomeAccent: true,
+    _silencePreviewRequestId: null,
+    silencePreviewSegments: null,
+    silenceDetectOptions: { ...SILENCE_DETECT_DEFAULTS },
     quickSearchAutoNormalizeEnabled: false,
     visibleReferenceRootTrackIds: [],
     defaultStretchAlgorithm: "signalsmith",
@@ -1968,6 +2002,9 @@ export {
     removeClipsRemote,
     moveClipRemote,
     moveClipsRemote,
+    closeTrackGapsRemote,
+    analyzeSilenceRemote,
+    removeSilenceRemote,
     duplicateClipsBulkRemote,
     duplicateTrackRemote,
     setClipStateRemote,
@@ -1999,6 +2036,8 @@ export {
     loadUiSettings,
     persistUiSettings,
 } from "./thunks/runtimeThunks";
+
+export { updateMetronome } from "./thunks/transportThunks";
 
 export { loadModel, loadDefaultModel } from "./thunks/modelThunks";
 
@@ -2224,6 +2263,47 @@ const sessionSlice = createSlice({
         },
         toggleLockParamLines(state) {
             state.lockParamLinesEnabled = !state.lockParamLinesEnabled;
+        },
+        /** 更新节拍器配置（引擎应用 + 持久化由 thunk `updateMetronome` 负责）。 */
+        setMetronomeConfig(
+            state,
+            action: PayloadAction<
+                Partial<{
+                    metronomeEnabled: boolean;
+                    metronomeGain: number;
+                    metronomeMode: "grid" | "beat" | "bar";
+                    metronomeSound: "click" | "woodblock" | "beep";
+                    metronomeAccent: boolean;
+                }>
+            >,
+        ) {
+            const p = action.payload;
+            if (p.metronomeEnabled != null) state.metronomeEnabled = p.metronomeEnabled;
+            if (p.metronomeGain != null)
+                state.metronomeGain = Math.min(1, Math.max(0, Number(p.metronomeGain) || 0));
+            if (p.metronomeMode === "grid" || p.metronomeMode === "beat" || p.metronomeMode === "bar")
+                state.metronomeMode = p.metronomeMode;
+            if (
+                p.metronomeSound === "click" ||
+                p.metronomeSound === "woodblock" ||
+                p.metronomeSound === "beep"
+            )
+                state.metronomeSound = p.metronomeSound;
+            if (p.metronomeAccent != null) state.metronomeAccent = p.metronomeAccent;
+        },
+        /** 设置/清除静音检测预览覆盖层（对话框打开期间存在，任何时间线提交即失效）。 */
+        setSilencePreview(
+            state,
+            action: PayloadAction<Record<string, Array<[number, number]>> | null>,
+        ) {
+            state.silencePreviewSegments = action.payload;
+        },
+        /** 更新静音检测对话框参数（持久化由调用方走 persistUiSettings）。 */
+        setSilenceDetectOptions(state, action: PayloadAction<Partial<SilenceDetectSettings>>) {
+            state.silenceDetectOptions = {
+                ...state.silenceDetectOptions,
+                ...action.payload,
+            };
         },
         toggleQuickSearchAutoNormalize(state) {
             state.quickSearchAutoNormalizeEnabled = !state.quickSearchAutoNormalizeEnabled;
@@ -2996,6 +3076,30 @@ const sessionSlice = createSlice({
                 }
                 if (s.lockParamLines != null)
                     state.lockParamLinesEnabled = Boolean(s.lockParamLines);
+                if (s.metronomeEnabled != null)
+                    state.metronomeEnabled = Boolean(s.metronomeEnabled);
+                if (s.metronomeGain != null) {
+                    const gain = Number(s.metronomeGain);
+                    if (Number.isFinite(gain)) state.metronomeGain = Math.min(1, Math.max(0, gain));
+                }
+                if (s.metronomeMode != null) {
+                    state.metronomeMode =
+                        s.metronomeMode === "beat" || s.metronomeMode === "bar"
+                            ? s.metronomeMode
+                            : "grid";
+                }
+                if (s.metronomeAccent != null)
+                    state.metronomeAccent = Boolean(s.metronomeAccent);
+                if (s.metronomeSound != null) {
+                    state.metronomeSound =
+                        s.metronomeSound === "woodblock" || s.metronomeSound === "beep"
+                            ? s.metronomeSound
+                            : "click";
+                }
+                if (s.silenceDetectOptions != null) {
+                    const o = s.silenceDetectOptions as Partial<SilenceDetectSettings>;
+                    state.silenceDetectOptions = { ...state.silenceDetectOptions, ...o };
+                }
                 if (s.quickSearchAutoNormalize != null)
                     state.quickSearchAutoNormalizeEnabled = Boolean(s.quickSearchAutoNormalize);
                 if (Array.isArray(s.visibleReferenceRootTrackIds)) {
@@ -4616,6 +4720,57 @@ const sessionSlice = createSlice({
                 applyTimelineState(state, payload, { force: true });
             })
 
+            .addCase(closeTrackGapsRemote.fulfilled, (state, action) => {
+                const payload = action.payload as {
+                    ok?: boolean;
+                } & TimelineState;
+                if (!payload.ok) {
+                    return;
+                }
+                // 关闭间隙由后端一次性计算并应用（含“锁定参数线”联动结果），
+                // 这里整包采纳快照即可。
+                applyTimelineState(state, payload, { force: true });
+            })
+            .addCase(analyzeSilenceRemote.pending, (state, action) => {
+                state._silencePreviewRequestId = action.meta.requestId;
+            })
+            .addCase(analyzeSilenceRemote.fulfilled, (state, action) => {
+                // 乱序守卫：只采纳最近一次预览请求（防抖后旧响应覆盖新参数结果）。
+                if (state._silencePreviewRequestId !== action.meta.requestId) {
+                    return;
+                }
+                state._silencePreviewRequestId = null;
+                const map: Record<string, Array<[number, number]>> = {};
+                for (const report of action.payload.reports) {
+                    if (report.ok && report.regions.length > 0) {
+                        map[report.clipId] = report.regions.map(
+                            (g) => [g.startSec, g.endSec] as [number, number],
+                        );
+                    }
+                }
+                state.silencePreviewSegments = map;
+            })
+            .addCase(removeSilenceRemote.fulfilled, (state, action) => {
+                const payload = action.payload as unknown as {
+                    ok?: boolean;
+                    timeline?: TimelineState;
+                    keptClipIds?: string[];
+                };
+                if (!payload.ok || !payload.timeline) {
+                    return;
+                }
+                // 整包采纳后端快照（applyTimelineState 会一并清除预览覆盖层）。
+                applyTimelineState(state, payload.timeline, { force: true });
+                // 恢复选区为处理后的发声片段（与 split 的“选中结果”惯例一致）。
+                const kept = (payload.keptClipIds ?? []).filter((id) =>
+                    state.clips.some((c) => c.id === id),
+                );
+                if (kept.length > 0) {
+                    state.multiSelectedClipIds = kept;
+                    state.selectedClipId = kept[0];
+                }
+            })
+
             .addCase(splitClipRemote.fulfilled, (state, action) => {
                 const payload = action.payload as {
                     ok?: boolean;
@@ -5215,6 +5370,9 @@ export const {
     upsertCustomScalePreset,
     removeCustomScalePreset,
     toggleLockParamLines,
+    setMetronomeConfig,
+    setSilencePreview,
+    setSilenceDetectOptions,
     toggleQuickSearchAutoNormalize,
     setDefaultStretchAlgorithm,
     setDefaultHifiganMelStretch,

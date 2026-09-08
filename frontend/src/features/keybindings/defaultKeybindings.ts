@@ -16,6 +16,7 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     // 播放控制
     "playback.toggle": { key: "space" },
     "playback.stop": { key: "enter" }, // 停止并回到本次播放起点
+    "playback.metronome": { key: "m" }, // 节拍器开关
     "recording.toggle": { key: "r", ctrl: true },
     "playback.focusCursor": { key: "'" }, // 聚焦播放光标
     "playback.seekLeft": { key: "arrowleft" },
@@ -182,6 +183,7 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
 
     "playback.toggle": { labelKey: "kb_playback_toggle", group: "playback" },
     "playback.stop": { labelKey: "kb_playback_stop", group: "playback" },
+    "playback.metronome": { labelKey: "kb_playback_metronome", group: "playback" },
     "recording.toggle": { labelKey: "kb_recording_toggle", group: "playback" },
     "playback.focusCursor": {
         labelKey: "kb_playback_focus_cursor",

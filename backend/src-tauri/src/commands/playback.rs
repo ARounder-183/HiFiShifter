@@ -193,6 +193,11 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
         }
         let start_sec = playhead_sec.max(0.0) + start_sec.max(0.0);
 
+        // 节拍器：每次播放启动都按当前工程/设置重建响点表（保证与实际
+        // 出声内容一致），并同步配置（应用启动后可能尚未同步过）。
+        sync_metronome_config(&state);
+        refresh_metronome_schedule(&state);
+
         // ── 后台预渲染激活时：立即开始播放，不等待渲染 ──────────────────────
         let bg_render = BG_RENDER_ACTIVE.load(std::sync::atomic::Ordering::Relaxed);
         if bg_render {
@@ -1561,6 +1566,107 @@ pub(super) fn get_playback_state(state: State<'_, AppState>) -> PlaybackStatePay
         position_sec: pb.position_sec,
         duration_sec: pb.duration_sec,
     }
+}
+
+// ─── 节拍器（Metronome） ──────────────────────────────────────────────────────
+
+use crate::audio_engine::metronome::{
+    build_click_schedule, build_tempo_segments, grid_step_beats, MetronomeConfig, MetronomeMode,
+    MetronomeSound,
+};
+
+/// 由 UI 设置解析细分模式（参与响点表展开；引擎 RT 侧不感知模式）。
+fn metronome_mode_from_settings(settings: &crate::config::UiSettings) -> MetronomeMode {
+    match settings.metronome_mode.as_str() {
+        "beat" => MetronomeMode::Beat,
+        "bar" => MetronomeMode::Bar,
+        _ => MetronomeMode::Grid,
+    }
+}
+
+/// 由 UI 设置解析节拍器配置（设置持久化的唯一来源是 `UiSettings`）。
+fn metronome_config_from_settings(settings: &crate::config::UiSettings) -> MetronomeConfig {
+    MetronomeConfig {
+        enabled: settings.metronome_enabled,
+        gain: settings.metronome_gain.clamp(0.0, 1.0) as f32,
+        accent_enabled: settings.metronome_accent,
+        sound: match settings.metronome_sound.as_str() {
+            "woodblock" => MetronomeSound::Woodblock,
+            "beep" => MetronomeSound::Beep,
+            _ => MetronomeSound::Click,
+        },
+    }
+}
+
+/// 把 UI 设置中的节拍器配置同步到引擎（不重建响点表）。
+pub(super) fn sync_metronome_config(state: &State<'_, AppState>) {
+    let config = metronome_config_from_settings(&state.ui_settings_snapshot());
+    state.audio_engine.set_metronome(config);
+}
+
+/// 由当前工程（BPM / Tempo Map / 工程长度）与 UI 设置（网格、细分模式）
+/// 重建引擎的节拍器响点表。
+///
+/// 调用时机：播放启动（保证与实际出声内容一致）、Tempo Map / 网格 /
+/// 拍号 / 节拍器设置变化。响点表构建为毫秒级，无需后台线程。
+pub(super) fn refresh_metronome_schedule(state: &State<'_, AppState>) {
+    let (bpm, tempo_map, project_sec) = {
+        let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        (tl.bpm, tl.tempo_map.clone(), tl.project_sec)
+    };
+    let (beats_per_bar, denominator) = {
+        let p = state.project.lock().unwrap_or_else(|e| e.into_inner());
+        (p.beats_per_bar, p.time_signature_denominator)
+    };
+    let settings = state.ui_settings_snapshot();
+    let segments = build_tempo_segments(bpm, tempo_map.as_deref(), beats_per_bar, denominator);
+    let step = match metronome_mode_from_settings(&settings) {
+        MetronomeMode::Grid => grid_step_beats(&settings.grid_size).unwrap_or(1.0),
+        MetronomeMode::Beat => 1.0,
+        // 0 = 仅小节首（按各段拍号锚步进，见 build_click_schedule）。
+        MetronomeMode::Bar => 0.0,
+    };
+    let clicks =
+        build_click_schedule(&segments, step, state.audio_engine.sample_rate_hz(), project_sec + 2.0);
+    state
+        .audio_engine
+        .set_metronome_schedule(std::sync::Arc::new(clicks));
+}
+
+/// 设置节拍器（前端节拍器按钮 / 设置菜单）。
+///
+/// 持久化仍走通用 `save_ui_settings` 通道；本命令只负责把配置即时应用到
+/// 引擎并按新模式重建响点表（细分模式参与响点展开）。
+pub(super) fn set_metronome(
+    state: State<'_, AppState>,
+    enabled: bool,
+    gain: f64,
+    mode: String,
+    accent: bool,
+    sound: String,
+) -> serde_json::Value {
+    let mut settings = (*state.ui_settings_snapshot()).clone();
+    settings.metronome_enabled = enabled;
+    settings.metronome_gain = gain.clamp(0.0, 1.0);
+    settings.metronome_mode = match mode.as_str() {
+        "beat" => "beat".to_string(),
+        "bar" => "bar".to_string(),
+        _ => "grid".to_string(),
+    };
+    settings.metronome_accent = accent;
+    settings.metronome_sound = match sound.as_str() {
+        "woodblock" => "woodblock".to_string(),
+        "beep" => "beep".to_string(),
+        _ => "click".to_string(),
+    };
+    // 写回设置缓存 + 磁盘（与前端 persistUiSettings 等价的权威路径）。
+    if let Some(dir) = state.config_dir.get() {
+        let _ = crate::config::save_ui_settings(dir, &settings);
+    }
+    state.store_ui_settings_cache(&settings);
+    sync_metronome_config(&state);
+    refresh_metronome_schedule(&state);
+    serde_json::json!({"ok": true})
 }
 
 // ─── 后台预渲染（Background Pre-render）─────────────────────────────────────────

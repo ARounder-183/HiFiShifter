@@ -36,6 +36,8 @@ mod pitch_progress;
 mod formant;
 #[path = "commands/playback.rs"]
 pub(crate) mod playback;
+#[path = "commands/silence.rs"]
+mod silence;
 #[path = "commands/processor_caps.rs"]
 mod processor_caps;
 #[path = "commands/project.rs"]
@@ -998,6 +1000,30 @@ pub fn split_clips_at(
     timeline::split_clips_at(state, clip_ids, split_sec)
 }
 #[tauri::command(rename_all = "camelCase")]
+pub fn analyze_clip_silence(
+    state: State<'_, AppState>,
+    clip_ids: Vec<String>,
+    options: crate::models::SilenceDetectOptionsPayload,
+) -> crate::models::SilenceAnalyzeResultPayload {
+    silence::analyze_clip_silence(state, clip_ids, options)
+}
+#[tauri::command(rename_all = "camelCase")]
+pub fn remove_clip_silence(
+    state: State<'_, AppState>,
+    clip_ids: Vec<String>,
+    options: crate::models::SilenceDetectOptionsPayload,
+) -> crate::models::RemoveSilenceResultPayload {
+    silence::remove_clip_silence(state, clip_ids, options)
+}
+#[tauri::command(rename_all = "camelCase")]
+pub fn close_track_gaps(
+    state: State<'_, AppState>,
+    track_id: String,
+    from_sec: f64,
+) -> crate::models::TimelineStatePayload {
+    timeline::close_track_gaps(state, track_id, from_sec)
+}
+#[tauri::command(rename_all = "camelCase")]
 pub fn glue_clips(
     state: State<'_, AppState>,
     clip_ids: Vec<String>,
@@ -1368,6 +1394,18 @@ pub async fn quick_export_selected_clips(
 }
 
 // ===================== playback =====================
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_metronome(
+    state: State<'_, AppState>,
+    enabled: bool,
+    gain: f64,
+    mode: String,
+    accent: bool,
+    sound: String,
+) -> serde_json::Value {
+    playback::set_metronome(state, enabled, gain, mode, accent, sound)
+}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde_json::Value {

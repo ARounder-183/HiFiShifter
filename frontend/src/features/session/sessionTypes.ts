@@ -183,6 +183,34 @@ export interface TrackMeterInfo {
     clipped: boolean;
 }
 
+export interface SilenceDetectSettings {
+    method: "rms" | "peak";
+    thresholdDb: number;
+    adaptive: boolean;
+    minSilenceMs: number;
+    minSoundMs: number;
+    paddingMs: number;
+    cutFadeMs: number;
+    action: "close" | "keep" | "split";
+    deleteSilentClips: boolean;
+    syncAllTakes: boolean;
+}
+
+/** 静音检测参数的默认值（双击参数行重置的基准；与后端 config 的
+ * SilenceDetectSettings::default 保持一致）。 */
+export const SILENCE_DETECT_DEFAULTS: SilenceDetectSettings = {
+    method: "rms",
+    thresholdDb: -50,
+    adaptive: false,
+    minSilenceMs: 120,
+    minSoundMs: 0,
+    paddingMs: 10,
+    cutFadeMs: 5,
+    action: "close",
+    deleteSilentClips: true,
+    syncAllTakes: false,
+};
+
 export interface ClipTakeInfo {
     id: string;
     name: string;

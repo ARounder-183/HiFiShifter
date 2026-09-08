@@ -1965,6 +1965,39 @@ pub(super) fn split_clips_at(
     payload
 }
 
+/// 关闭间隙（Close Gaps）：把 `track_id` 轨道上 `from_sec`（右键点击位置）
+/// 之后的所有 Clip 左移闭合相互间隙。
+///
+/// 与涟漪编辑共用 `move_clips` 搬运原语；参数线是否随 Clip 平移读取全局
+/// “锁定参数线”设置（`ripple_settings`，与拖拽移动的 `moveLinkedParams`
+/// 语义一致）。位移完全在后端计算，前端只传轨道 + 时间，保证原子性。
+pub(super) fn close_track_gaps(
+    state: State<'_, AppState>,
+    track_id: String,
+    from_sec: f64,
+) -> crate::models::TimelineStatePayload {
+    let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+    let moves = tl.close_track_gaps_moves(&track_id, from_sec);
+    if moves.is_empty() {
+        // 无需移动：不打撤销检查点，直接返回当前快照。
+        let mut payload = tl.to_payload();
+        payload.project = Some(state.project_meta_payload());
+        return payload;
+    }
+    state.checkpoint_timeline(&tl);
+    let (_, link) = ripple_settings(&state);
+    tl.move_clips(&moves, link);
+    let root_id = tl.resolve_root_track_id(&track_id);
+    state.audio_engine.update_timeline(tl.clone());
+    let mut payload = tl.to_payload();
+    payload.project = Some(state.project_meta_payload());
+    drop(tl);
+    if let Some(root_id) = root_id {
+        crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root_id);
+    }
+    payload
+}
+
 /// 读取波纹编辑（自动跟进）模式与“参数线是否随剪辑一起平移”的设置。
 ///
 /// 返回 `(模式, 是否平移参数线)`。参数线跟随开关读取全局“锁定参数线”
@@ -2233,6 +2266,9 @@ pub(super) fn set_timeline_tempo_map(
     // 若此处仍持有 `tl`，命令线程会在自己的锁上自我死锁，整个应用
     // “未响应”（后台预渲染开启时必现）。
     drop(tl);
+
+    // Tempo Map 变化（BPM / 拍号）改变节拍器响点表，重建之。
+    crate::commands::playback::refresh_metronome_schedule(&state);
 
     if scale_changed {
         if let Some(handle) = state.app_handle.get() {

@@ -41,6 +41,23 @@ export interface UiSettings {
     showClipboardPreview: boolean;
     showParamValuePopup?: boolean;
     lockParamLines?: boolean;
+    metronomeEnabled?: boolean;
+    metronomeGain?: number;
+    metronomeMode?: string;
+    metronomeAccent?: boolean;
+    metronomeSound?: string;
+    silenceDetectOptions?: {
+        method?: string;
+        thresholdDb?: number;
+        adaptive?: boolean;
+        minSilenceMs?: number;
+        minSoundMs?: number;
+        paddingMs?: number;
+        cutFadeMs?: number;
+        action?: string;
+        deleteSilentClips?: boolean;
+        syncAllTakes?: boolean;
+    };
     quickSearchAutoNormalize?: boolean;
     visibleReferenceRootTrackIds?: string[];
     defaultStretchAlgorithm?: StretchAlgorithmOption;

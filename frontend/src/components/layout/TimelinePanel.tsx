@@ -44,6 +44,7 @@ import {
     convertClipsToPitchReferenceRemote,
     updatePitchReferenceRemote,
     removeClipsRemote,
+    closeTrackGapsRemote,
     persistUiSettings,
     setPrimaryTimeUnit,
     setSecondaryTimeUnit,
@@ -71,6 +72,7 @@ import { paramsApi } from "../../services/api/params";
 import { resolveRootTrackId } from "../../features/session/trackUtils";
 import { SCALE_NOTES } from "../../utils/musicalScales";
 import { QuickClipExportDialog } from "./QuickClipExportDialog";
+import { SilenceDetectionDialog } from "./timeline/SilenceDetectionDialog";
 import { MidiTrackSelectDialog } from "./MidiTrackSelectDialog";
 
 import {
@@ -346,6 +348,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         open: boolean;
         clipIds: string[];
     }>({ open: false, clipIds: [] });
+    const [silenceDialogIds, setSilenceDialogIds] = React.useState<string[] | null>(null);
 
     const [replaceMidiDialog, setReplaceMidiDialog] = React.useState<{
         open: boolean;
@@ -1860,6 +1863,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 x: e.clientX,
                                 y: e.clientY,
                                 trackId,
+                                timeSec: timeAtPointer ?? 0,
                             });
                         }}
                         onPointerDown={onSelectionRectPointerDown}
@@ -2685,6 +2689,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                               }),
                                           );
                                       }}
+                                      onSilenceDetection={(ids) => setSilenceDialogIds(ids)}
                                       onNormalize={normalizeClips}
                                       onEditRate={openRateBadgeMenu}
                                       onToggleReverse={(ids, reversed) => {
@@ -2771,6 +2776,19 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                           splitSec <= clip.startSec + clip.lengthSec
                                       );
                                   })}
+                                  canCloseGaps={sessionRef.current.clips.some(
+                                      (c) =>
+                                          c.trackId === trackAreaMenu.trackId &&
+                                          c.startSec > trackAreaMenu.timeSec + 1e-9,
+                                  )}
+                                  onCloseGaps={() => {
+                                      void dispatch(
+                                          closeTrackGapsRemote({
+                                              trackId: trackAreaMenu.trackId,
+                                              fromSec: trackAreaMenu.timeSec,
+                                          }),
+                                      );
+                                  }}
                                   onPaste={pasteClipsAtPlayhead}
                                   onSplit={splitSelectedAtPlayhead}
                                   onClose={() => setTrackAreaMenu(null)}
@@ -2779,6 +2797,13 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                           )
                         : null}
 
+                    <SilenceDetectionDialog
+                        open={silenceDialogIds != null}
+                        clipIds={silenceDialogIds ?? []}
+                        onOpenChange={(open) => {
+                            if (!open) setSilenceDialogIds(null);
+                        }}
+                    />
                     <QuickClipExportDialog
                         open={quickExportDialog.open}
                         clipIds={quickExportDialog.clipIds}

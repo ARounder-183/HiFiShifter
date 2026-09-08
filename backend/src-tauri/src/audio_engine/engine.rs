@@ -22,6 +22,7 @@ const MAX_STRETCH_CACHE_ENTRIES: usize = 128;
 /// 用它触发电平条回落（见 meter 线程内的注释）。
 const METER_STALL_FALLBACK: Duration = Duration::from_millis(150);
 
+use super::metronome;
 use super::mix::{
     render_callback_f32, render_callback_i16, render_callback_u16, SnapshotTransitionState,
     TrackMeterBus, TrackMeterScratch,
@@ -146,6 +147,12 @@ impl AudioEngine {
         let meter_bus = Arc::new(TrackMeterBus::with_capacity(64));
         let meter_bus_for_meter = meter_bus.clone();
 
+        // 节拍器：命令线程写配置/响点表，音频回调无锁读取（见 metronome.rs）。
+        let metro = Arc::new(metronome::MetronomeRt::new());
+        let metro_for_worker = metro.clone();
+        let metro_for_cb = metro.clone();
+
+        let metro_for_thread = metro_for_worker;
         let is_playing_thread = is_playing.clone();
         let target_thread = target.clone();
         let base_frames_thread = base_frames.clone();
@@ -489,6 +496,8 @@ impl AudioEngine {
                 cpal::SampleFormat::F32 => {
                     let meter_bus = meter_bus_for_cb.clone();
                     let mut meter_scratch = TrackMeterScratch::default();
+                    let metro = metro_for_cb.clone();
+                    let mut metro_voices = metronome::MetronomeVoices::default();
                     device
                         .build_output_stream(
                             &config,
@@ -507,6 +516,8 @@ impl AudioEngine {
                                             &mut snapshot_transition,
                                             &mut meter_scratch,
                                             &meter_bus,
+                                            metro.as_ref(),
+                                            &mut metro_voices,
                                         );
                                     }));
                                 if r.is_err() {
@@ -525,6 +536,8 @@ impl AudioEngine {
                 cpal::SampleFormat::I16 => {
                     let meter_bus = meter_bus_for_cb.clone();
                     let mut meter_scratch = TrackMeterScratch::default();
+                    let metro = metro_for_cb.clone();
+                    let mut metro_voices = metronome::MetronomeVoices::default();
                     device
                         .build_output_stream(
                             &config,
@@ -543,6 +556,8 @@ impl AudioEngine {
                                             &mut snapshot_transition,
                                             &mut meter_scratch,
                                             &meter_bus,
+                                            metro.as_ref(),
+                                            &mut metro_voices,
                                         );
                                     }));
                                 if r.is_err() {
@@ -561,6 +576,8 @@ impl AudioEngine {
                 cpal::SampleFormat::U16 => {
                     let meter_bus = meter_bus_for_cb.clone();
                     let mut meter_scratch = TrackMeterScratch::default();
+                    let metro = metro_for_cb.clone();
+                    let mut metro_voices = metronome::MetronomeVoices::default();
                     device
                         .build_output_stream(
                             &config,
@@ -579,6 +596,8 @@ impl AudioEngine {
                                             &mut snapshot_transition,
                                             &mut meter_scratch,
                                             &meter_bus,
+                                            metro.as_ref(),
+                                            &mut metro_voices,
                                         );
                                     }));
                                 if r.is_err() {
@@ -636,6 +655,12 @@ impl AudioEngine {
                             meter_generation: &meter_generation,
                         };
                         match cmd {
+                            EngineCommand::SetMetronome { config } => {
+                                metro_for_thread.store_config(&config);
+                            }
+                            EngineCommand::SetMetronomeSchedule { clicks } => {
+                                metro_for_thread.store_schedule(clicks);
+                            }
                             EngineCommand::EvictSourcePath { path } => {
                                 handle_evict_source_path(&mut state, &path);
                             }
@@ -689,6 +714,16 @@ impl AudioEngine {
 
     pub fn sample_rate_hz(&self) -> u32 {
         self.sample_rate.load(Ordering::Relaxed).max(1)
+    }
+
+    /// 更新节拍器配置（开关 / 音量 / 细分模式 / 重音 / 音色）。
+    pub fn set_metronome(&self, config: metronome::MetronomeConfig) {
+        let _ = self.tx.send(EngineCommand::SetMetronome { config });
+    }
+
+    /// 换入节拍器响点表（升序，输出设备采样率域）。
+    pub fn set_metronome_schedule(&self, clicks: Arc<Vec<metronome::MetronomeClick>>) {
+        let _ = self.tx.send(EngineCommand::SetMetronomeSchedule { clicks });
     }
 
     #[allow(dead_code)]
