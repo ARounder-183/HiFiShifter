@@ -1119,6 +1119,89 @@ export function ActionBar() {
                         </div>
                     )}
                 </Box>
+                {recording.active || recording.countdownRemaining > 0 ?(
+                    <Flex align="center" gap="1" className="shrink-0">
+                        <Text
+                            size="1"
+                            color={recording.active ? "red" : "gray"}
+                            className="tabular-nums"
+                        >
+                            {recording.countdownRemaining > 0
+                                ? `-${recording.countdownRemaining}`
+                                : formatRecordingTime(recording.elapsedSec)}
+                        </Text>
+                        <div
+                            style={{
+                                width: 48,
+                                height: 6,
+                                borderRadius: 3,
+                                background: "var(--qt-border)",
+                                overflow: "hidden",
+                                flexShrink: 0,
+                            }}
+                        >
+                            <div
+                                style={{
+                                    width: `${Math.min(100, Math.round((recording.level || 0) * 100))}%`,
+                                    height: "100%",
+                                    background: recording.level > 0.98 ? "red" : "#e5484d",
+                                    transition: "width 80ms linear",
+                                }}
+                            />
+                        </div>
+                    </Flex>
+                ) : null}
+                {recording.error ? (
+                    <Text
+                        size="1"
+                        color="red"
+                        title={recording.error}
+                        className="truncate"
+                        style={{ maxWidth: 220 }}
+                    >
+                        {recordingErrorMessage(recording.error)}
+                    </Text>
+                ) : null}
+            </Flex>
+
+            <Separator orientation="vertical" size="2" />
+
+            {/* File Browser Toggle */}
+            <Flex gap="1" className="shrink-0">
+                <IconButton
+                    size="1"
+                    variant={fileBrowserVisible ? "solid" : "ghost"}
+                    data-tooltip={tAny("fb_title")}
+                    onClick={() => dispatch(toggleVisible())}
+                >
+                    <svg
+                        width="15"
+                        height="15"
+                        viewBox="0 0 15 15"
+                        fill="none"
+                        xmlns="http://www.w3.org/2000/svg"
+                    >
+                        <path
+                            d="M2 3.5C2 3.22386 2.22386 3 2.5 3H5.29289L6.64645 4.35355C6.74021 4.44732 6.86739 4.5 7 4.5H12.5C12.7761 4.5 13 4.72386 13 5V11.5C13 11.7761 12.7761 12 12.5 12H2.5C2.22386 12 2 11.7761 2 11.5V3.5Z"
+                            fill="currentColor"
+                        />
+                    </svg>
+                </IconButton>
+                <IconButton
+                    size="1"
+                    variant={notebookVisible ? "solid" : "ghost"}
+                    data-tooltip={t("notebook")}
+                    onClick={() => dispatch(toggleNotebookVisible())}
+                >
+                    <Pencil1Icon />
+                </IconButton>
+            </Flex>
+
+            <Separator orientation="vertical" size="2" />
+
+            {/* Toolbar Toggles */}
+            <Flex align="center" gap="1" className="shrink-0">
+                {/* Metronome */}
                 <Box style={{ position: "relative" }} data-hs-context-menu>
                     <IconButton
                         size="1"
@@ -1235,88 +1318,6 @@ export function ActionBar() {
                         </div>
                     )}
                 </Box>
-                {recording.active || recording.countdownRemaining > 0 ?(
-                    <Flex align="center" gap="1" className="shrink-0">
-                        <Text
-                            size="1"
-                            color={recording.active ? "red" : "gray"}
-                            className="tabular-nums"
-                        >
-                            {recording.countdownRemaining > 0
-                                ? `-${recording.countdownRemaining}`
-                                : formatRecordingTime(recording.elapsedSec)}
-                        </Text>
-                        <div
-                            style={{
-                                width: 48,
-                                height: 6,
-                                borderRadius: 3,
-                                background: "var(--qt-border)",
-                                overflow: "hidden",
-                                flexShrink: 0,
-                            }}
-                        >
-                            <div
-                                style={{
-                                    width: `${Math.min(100, Math.round((recording.level || 0) * 100))}%`,
-                                    height: "100%",
-                                    background: recording.level > 0.98 ? "red" : "#e5484d",
-                                    transition: "width 80ms linear",
-                                }}
-                            />
-                        </div>
-                    </Flex>
-                ) : null}
-                {recording.error ? (
-                    <Text
-                        size="1"
-                        color="red"
-                        title={recording.error}
-                        className="truncate"
-                        style={{ maxWidth: 220 }}
-                    >
-                        {recordingErrorMessage(recording.error)}
-                    </Text>
-                ) : null}
-            </Flex>
-
-            <Separator orientation="vertical" size="2" />
-
-            {/* File Browser Toggle */}
-            <Flex gap="1" className="shrink-0">
-                <IconButton
-                    size="1"
-                    variant={fileBrowserVisible ? "solid" : "ghost"}
-                    data-tooltip={tAny("fb_title")}
-                    onClick={() => dispatch(toggleVisible())}
-                >
-                    <svg
-                        width="15"
-                        height="15"
-                        viewBox="0 0 15 15"
-                        fill="none"
-                        xmlns="http://www.w3.org/2000/svg"
-                    >
-                        <path
-                            d="M2 3.5C2 3.22386 2.22386 3 2.5 3H5.29289L6.64645 4.35355C6.74021 4.44732 6.86739 4.5 7 4.5H12.5C12.7761 4.5 13 4.72386 13 5V11.5C13 11.7761 12.7761 12 12.5 12H2.5C2.22386 12 2 11.7761 2 11.5V3.5Z"
-                            fill="currentColor"
-                        />
-                    </svg>
-                </IconButton>
-                <IconButton
-                    size="1"
-                    variant={notebookVisible ? "solid" : "ghost"}
-                    data-tooltip={t("notebook")}
-                    onClick={() => dispatch(toggleNotebookVisible())}
-                >
-                    <Pencil1Icon />
-                </IconButton>
-            </Flex>
-
-            <Separator orientation="vertical" size="2" />
-
-            {/* Toolbar Toggles */}
-            <Flex align="center" gap="1" className="shrink-0">
                 {/* Auto Crossfade */}
                 <IconButton
                     size="1"
