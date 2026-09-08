@@ -1232,14 +1232,6 @@ export function ActionBar() {
                                 <span>{t("metronome_accent")}</span>
                                 {s.metronomeAccent ? <CheckIcon /> : null}
                             </button>
-                            <div className="my-1 border-t border-qt-border" />
-                            <div
-                                className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left text-[12px] opacity-40 cursor-default"
-                                title={t("metronome_count_in_soon")}
-                            >
-                                <span>{t("metronome_count_in")}</span>
-                                <span className="opacity-70">{t("metronome_count_in_off")}</span>
-                            </div>
                         </div>
                     )}
                 </Box>
