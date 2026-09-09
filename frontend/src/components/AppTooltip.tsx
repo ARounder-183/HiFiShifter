@@ -98,12 +98,21 @@ export function AppTooltipProvider({
     useEffect(() => {
         let currentElement: Element | null = null;
         let lastEvent: PointerEvent | null = null;
-        // 外部抑制查询：① props getter（淡变菜单打开）；② 任意上下文菜单
-        // （Clip / 轨道背景 / 时间标尺等，均带 data-hs-context-menu 标记）
-        // 正挂载在 DOM 中。选择器查询仅在指针事件与 DOM 变更回调里执行。
+        // 外部抑制查询：① props getter（淡变菜单打开）；② 任意菜单/弹层
+        // 正打开。两类标记：
+        // - data-hs-floating-menu：时间轴浮动菜单（挂载即打开）；
+        // - Radix popper wrapper：DropdownMenu/Select/Popover 打开期间
+        //   才存在（ActionBar/PianoRoll 等处的 data-hs-context-menu 是
+        //   **常驻**容器标记，不能用作“菜单已打开”判据 —— 那会永久
+        //   抑制所有 tooltip）。
+        // 选择器查询仅在指针事件与 DOM 变更回调里执行。
         const hasOpenContextMenu = (): boolean => {
             if (suppressGetterRef.current?.() === true) return true;
-            return document.querySelector("[data-hs-floating-menu]") != null;
+            return (
+                document.querySelector(
+                    "[data-hs-floating-menu], [data-radix-popper-content-wrapper]",
+                ) != null
+            );
         };
         // ── 手势钉住（pin）语义 ─────────────────────────────────────
         // 拖拽淡化包络等细粒度控件时，指针会在一串相邻小命中块之间移动，
@@ -299,7 +308,9 @@ export function AppTooltipProvider({
         };
         const hasOpenMenuNow = () =>
             suppressGetterRef.current?.() === true ||
-            document.querySelector("[data-hs-floating-menu]") != null;
+            document.querySelector(
+                "[data-hs-floating-menu], [data-radix-popper-content-wrapper]",
+            ) != null;
 
         const tooltipObserver = new MutationObserver((mutations) => {
             // 菜单挂载/卸载属于结构变化 —— 浮标必须【立即】消失，

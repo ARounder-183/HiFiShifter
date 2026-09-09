@@ -32,6 +32,15 @@ export function PitchSnapSettingsDialog({ open, onOpenChange }: Props) {
         }
     }, [open, pitchSnapToleranceCents]);
 
+    // 容差提交：输入后按 Enter / Esc / 点遮罩关闭也应生效（与
+    // SplitTransitionSettingsDialog 的 onBlur 提交一致），不能只有点 OK
+    // 才提交 —— 否则数字被静默丢弃。
+    const commitTolerance = () => {
+        const parsed = Math.abs(Math.round(Number(toleranceInput) || 0));
+        dispatch(setPitchSnapToleranceCents(parsed));
+        void dispatch(persistUiSettings());
+    };
+
     return (
         <Dialog.Root open={open} onOpenChange={onOpenChange}>
             <Dialog.Content style={{ maxWidth: 360 }} onKeyDown={(e) => e.stopPropagation()}>
@@ -83,6 +92,12 @@ export function PitchSnapSettingsDialog({ open, onOpenChange }: Props) {
                             type="number"
                             value={toleranceInput}
                             onChange={(e) => setToleranceInput(e.target.value)}
+                            onBlur={commitTolerance}
+                            onKeyDown={(e) => {
+                                if (e.key === "Enter") {
+                                    e.currentTarget.blur();
+                                }
+                            }}
                             style={{ flex: 1 }}
                         />
                     </Flex>
@@ -90,15 +105,7 @@ export function PitchSnapSettingsDialog({ open, onOpenChange }: Props) {
 
                 <Flex justify="end" mt="4">
                     <Dialog.Close>
-                        <Button
-                            variant="soft"
-                            color="gray"
-                            onClick={() => {
-                                const parsed = Math.abs(Math.round(Number(toleranceInput) || 0));
-                                dispatch(setPitchSnapToleranceCents(parsed));
-                                void dispatch(persistUiSettings());
-                            }}
-                        >
+                        <Button variant="soft" color="gray" onClick={commitTolerance}>
                             {tAny("ok")}
                         </Button>
                     </Dialog.Close>

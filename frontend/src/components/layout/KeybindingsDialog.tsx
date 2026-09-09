@@ -301,7 +301,8 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
 
     return (
         <Dialog.Root open={open} onOpenChange={onOpenChange}>
-            {/* Overlay 阻塞下层所有交互 */}
+            {/* Overlay 阻塞下层所有交互。注意：按键拦截由下方 window 捕获
+                阶段监听负责 —— 本 div 不可聚焦，onKeyDown 永远不会触发。 */}
             {open && (
                 <div
                     style={{
@@ -311,10 +312,6 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
                         background: "rgba(0,0,0,0.4)",
                     }}
                     onPointerDown={(e) => e.stopPropagation()}
-                    onKeyDown={(e) => {
-                        if (!recordingId) return;
-                        e.stopPropagation();
-                    }}
                 />
             )}
             <Dialog.Content

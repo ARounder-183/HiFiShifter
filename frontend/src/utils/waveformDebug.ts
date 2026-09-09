@@ -15,11 +15,20 @@
 const INTERVAL_MS = 2000;
 
 let _enabled = false;
+/**
+ * 开关探测节流：这些 wfDiag_* 钩子挂在渲染/缓冲池热路径上，逐次同步读
+ * localStorage 会拖慢热路径（部分平台还会触发存储访问警告）。开关变化
+ * 的感知延迟最多 2 秒即可，与汇总输出节奏一致。
+ */
+let _lastFlagCheck = 0;
 function isEnabled(): boolean {
-    return (
+    const now = Date.now();
+    if (now - _lastFlagCheck < INTERVAL_MS) return _enabled;
+    _lastFlagCheck = now;
+    _enabled =
         typeof window !== "undefined" &&
-        window.localStorage?.getItem("hifishifter.debugWaveform") === "1"
-    );
+        window.localStorage?.getItem("hifishifter.debugWaveform") === "1";
+    return _enabled;
 }
 
 // ── 帧统计 ──────────────────────────────────────────
@@ -60,6 +69,9 @@ function ensureTimer(): void {
                 clearInterval(_timer);
                 _timer = null;
             }
+            // 关闭时同步复位内部使能标记：否则后续调用继续累计计数却永不
+            // 输出，重新打开开关时会先看到一段错位的旧计数。
+            _enabled = false;
             reset();
             return;
         }

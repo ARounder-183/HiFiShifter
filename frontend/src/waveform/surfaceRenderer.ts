@@ -32,9 +32,7 @@ export function expandLineSegmentsToQuads(vertices: Float32Array): Float32Array 
     const segmentCount = Math.floor(vertices.length / 12);
     const required = segmentCount * 36;
     if (quadScratch === null || quadScratch.length < required) {
-        let capacity = Math.max(4096, required);
-        while (capacity < required) capacity *= 2;
-        quadScratch = new Float32Array(capacity);
+        quadScratch = new Float32Array(Math.max(4096, required));
     }
     const out = quadScratch;
     const half = WAVEFORM_STROKE_WIDTH_PX / 2;

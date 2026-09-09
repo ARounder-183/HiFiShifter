@@ -349,6 +349,11 @@ export function useClipPitchDrag(deps: {
                 } catch {
                     if (dragRef.current === state) {
                         dragRef.current = null;
+                        // 与上方 !res.ok 分支对齐：一次性 abort 闭包必须注销，
+                        // 否则残留在 gestureFocusGuard 的活动集合里（每次
+                        // blur 空跑且无法释放）。
+                        finalized = true;
+                        unregisterAbort();
                         teardown();
                         setPitchDragTooltip(null);
                         // 清除已派发的实时预览（回到基准）。

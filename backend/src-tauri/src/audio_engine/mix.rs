@@ -12,7 +12,9 @@ use super::util::clamp11;
 const SNAPSHOT_XFADE_FRAMES: usize = 256;
 
 /// Unsigned 16-bit silence level (0x8000), keeping the waveform centered.
-const U16_SILENCE: u16 = 32768;
+// u16 输出格式的静音样本（f32 0.0 → i16/u16 中点）。pub 供 engine.rs 的
+// panic 恢复路径复用，保证与正常静音同值（32767 会产生 1 LSB 阶跃）。
+pub(crate) const U16_SILENCE: u16 = 32768;
 
 /// Map a [-1, 1] sample to unsigned 16-bit with 0x8000 as the zero point.
 #[inline]
@@ -838,7 +840,9 @@ pub(crate) fn render_callback_u16(
     }
 
     if !is_playing.load(Ordering::Relaxed) {
-        data.fill(u16::MAX / 2);
+        // 与正常静音路径同一常量（32768）：panic 恢复路径若用 u16::MAX/2
+        // （=32767）会在切换瞬间产生 1 LSB 的可闻阶跃。
+        data.fill(U16_SILENCE);
         return;
     }
 

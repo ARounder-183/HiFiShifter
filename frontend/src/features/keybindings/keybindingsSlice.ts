@@ -1,4 +1,9 @@
-import { createSlice, type PayloadAction } from "@reduxjs/toolkit";
+import {
+    createListenerMiddleware,
+    createSlice,
+    isAnyOf,
+    type PayloadAction,
+} from "@reduxjs/toolkit";
 import type { ActionId, ActionMeta, Keybinding, KeybindingMap, KeybindingOverrides } from "./types";
 import { DEFAULT_KEYBINDINGS, ACTION_META } from "./defaultKeybindings";
 import { loadKeybindingOverrides, saveKeybindingOverrides } from "./keybindingStorage";
@@ -181,24 +186,40 @@ const keybindingsSlice = createSlice({
             } else {
                 state.overrides[actionId] = binding;
             }
-            saveKeybindingOverrides(state.overrides);
         },
 
         /** 重置某个操作的快捷键为默认值 */
         resetKeybinding(state, action: PayloadAction<ActionId>) {
             delete state.overrides[action.payload];
-            saveKeybindingOverrides(state.overrides);
         },
 
         /** 重置所有快捷键为默认值 */
         resetAllKeybindings(state) {
             state.overrides = {};
-            saveKeybindingOverrides(state.overrides);
         },
     },
 });
 
 export const { setKeybinding, resetKeybinding, resetAllKeybindings } = keybindingsSlice.actions;
+
+/**
+ * 持久化收口：覆盖项落盘统一由 listener middleware 完成。
+ * reducer 必须保持纯函数 —— 在 reducer 里写 localStorage 会让 DevTools
+ * 的跳转/重放（以及可能的未来 SSR/快照恢复路径）反复触发副作用。
+ */
+export const keybindingsPersistenceMiddleware = createListenerMiddleware<{
+    keybindings: { overrides: KeybindingOverrides };
+}>();
+keybindingsPersistenceMiddleware.startListening({
+    matcher: isAnyOf(
+        keybindingsSlice.actions.setKeybinding,
+        keybindingsSlice.actions.resetKeybinding,
+        keybindingsSlice.actions.resetAllKeybindings,
+    ),
+    effect: (_action, api) => {
+        saveKeybindingOverrides(api.getState().keybindings.overrides);
+    },
+});
 
 export default keybindingsSlice.reducer;
 

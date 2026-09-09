@@ -25,7 +25,7 @@ const METER_STALL_FALLBACK: Duration = Duration::from_millis(150);
 use super::metronome;
 use super::mix::{
     render_callback_f32, render_callback_i16, render_callback_u16, SnapshotTransitionState,
-    TrackMeterBus, TrackMeterScratch,
+    TrackMeterBus, TrackMeterScratch, U16_SILENCE,
 };
 use super::resource_manager::ResourceManager;
 use super::snapshot::{
@@ -91,6 +91,10 @@ pub struct AudioEngine {
     position_frames: Arc<AtomicU64>,
     duration_frames: Arc<AtomicU64>,
     sample_rate: Arc<AtomicU32>,
+    /// worker 线程已把 sample_rate 初始化为输出设备真实值的标志。
+    /// 初始 AtomicU32 为 44100：真实设备就是 44100 时无法用“值变化”判断
+    /// 就绪（此前 play_original 由此固定白等 200ms）。
+    worker_ready: Arc<AtomicBool>,
     /// Shutdown flag shared with the meter thread.
     meter_shutdown: Arc<AtomicBool>,
 }
@@ -106,6 +110,7 @@ impl Clone for AudioEngine {
             position_frames: self.position_frames.clone(),
             duration_frames: self.duration_frames.clone(),
             sample_rate: self.sample_rate.clone(),
+            worker_ready: self.worker_ready.clone(),
             meter_shutdown: self.meter_shutdown.clone(),
         }
     }
@@ -132,6 +137,7 @@ impl AudioEngine {
         let position_frames = Arc::new(AtomicU64::new(0));
         let duration_frames = Arc::new(AtomicU64::new(0));
         let sample_rate = Arc::new(AtomicU32::new(44100));
+        let worker_ready = Arc::new(AtomicBool::new(false));
 
         // Shared snapshot store for both the audio callback and command-side status queries.
         // This is updated by the engine worker thread.
@@ -159,6 +165,7 @@ impl AudioEngine {
         let position_frames_thread = position_frames.clone();
         let duration_frames_thread = duration_frames.clone();
         let sample_rate_thread = sample_rate.clone();
+        let worker_ready_thread = worker_ready.clone();
 
         let snapshot_for_thread = snapshot.clone();
         {
@@ -305,15 +312,7 @@ impl AudioEngine {
                 Some(d) => d,
                 None => {
                     log::warn!("AudioEngine: no default output device");
-                    loop {
-                        match rx.recv() {
-                            Ok(EngineCommand::Shutdown) | Err(_) => break,
-                            Ok(_) => {
-                                is_playing_thread.store(false, Ordering::Relaxed);
-                                *target_thread.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                            }
-                        }
-                    }
+                    drain_commands_without_output(rx, is_playing_thread, target_thread, worker_ready_thread);
                     return;
                 }
             };
@@ -322,12 +321,14 @@ impl AudioEngine {
                 Ok(c) => c,
                 Err(e) => {
                     log::error!("AudioEngine: default_output_config failed: {e}");
+                    drain_commands_without_output(rx, is_playing_thread, target_thread, worker_ready_thread);
                     return;
                 }
             };
 
             let sr = default_config.sample_rate().0;
             sample_rate_thread.store(sr, Ordering::Relaxed);
+            worker_ready_thread.store(true, Ordering::Release);
 
             // Re-initialize the shared snapshot to the actual output sample rate.
             snapshot_for_thread.store(Arc::new(EngineSnapshot::empty(sr)));
@@ -604,7 +605,7 @@ impl AudioEngine {
                                     log::error!(
                                         "AudioEngine: panic in audio callback (u16); silencing output"
                                     );
-                                    data.fill(u16::MAX / 2);
+                                    data.fill(U16_SILENCE);
                                     is_playing_cb.store(false, Ordering::Relaxed);
                                 }
                             },
@@ -618,11 +619,13 @@ impl AudioEngine {
 
             let Some(stream) = stream else {
                 log::error!("AudioEngine: failed to build output stream");
+                drain_commands_without_output(rx, is_playing_thread, target_thread, worker_ready_thread);
                 return;
             };
 
             if let Err(e) = stream.play() {
                 log::error!("AudioEngine: stream.play failed: {e}");
+                drain_commands_without_output(rx, is_playing_thread, target_thread, worker_ready_thread);
                 return;
             }
 
@@ -708,12 +711,19 @@ impl AudioEngine {
             position_frames,
             duration_frames,
             sample_rate,
+            worker_ready,
             meter_shutdown,
         }
     }
 
     pub fn sample_rate_hz(&self) -> u32 {
         self.sample_rate.load(Ordering::Relaxed).max(1)
+    }
+
+    /// worker 线程是否已就绪（sample_rate 已初始化为输出设备真实值；
+    /// 无输出设备路径也会置位 —— 等待没有意义）。
+    pub fn worker_ready(&self) -> bool {
+        self.worker_ready.load(Ordering::Acquire)
     }
 
     /// 更新节拍器配置（开关 / 音量 / 细分模式 / 重音 / 音色）。
@@ -809,6 +819,29 @@ impl AudioEngine {
 }
 
 // ─── Worker 状态结构体 ────────────────────────────────────────────────────────
+
+/// 无输出设备 / default_output_config 失败 / 输出流构建或播放失败的兜底：
+/// 继续接收命令并按“未播放”处理，绝不能让 worker 线程退出 —— rx 被 drop
+/// 后所有 `AudioEngine::xxx()` 的 `send` 会静默失败，播放/停止/seek/节拍器
+/// 全部无响应且无恢复路径（仅重启应用）。
+fn drain_commands_without_output(
+    rx: mpsc::Receiver<EngineCommand>,
+    is_playing: Arc<AtomicBool>,
+    target: Arc<Mutex<Option<String>>>,
+    worker_ready: Arc<AtomicBool>,
+) {
+    // 无输出路径 worker 就绪（等待采样率没有意义），别让调用方白等。
+    worker_ready.store(true, Ordering::Release);
+    loop {
+        match rx.recv() {
+            Ok(EngineCommand::Shutdown) | Err(_) => break,
+            Ok(_) => {
+                is_playing.store(false, Ordering::Relaxed);
+                *target.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            }
+        }
+    }
+}
 
 /// Worker 线程的所有可变状态，按命令处理函数传递。
 fn reset_track_meter_state(

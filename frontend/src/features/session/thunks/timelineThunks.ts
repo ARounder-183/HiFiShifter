@@ -260,7 +260,10 @@ export const closeTrackGapsRemote = createAsyncThunk(
 export const analyzeSilenceRemote = createAsyncThunk(
     "session/analyzeSilenceRemote",
     async (payload: { clipIds: string[]; options: SilenceDetectOptionsPayload }) => {
-        return (await webApi.analyzeClipSilence(payload.clipIds, payload.options)) as SilenceAnalyzeResult;
+        return (await webApi.analyzeClipSilence(
+            payload.clipIds,
+            payload.options,
+        )) as SilenceAnalyzeResult;
     },
 );
 
@@ -268,7 +271,10 @@ export const analyzeSilenceRemote = createAsyncThunk(
 export const removeSilenceRemote = createAsyncThunk(
     "session/removeSilenceRemote",
     async (payload: { clipIds: string[]; options: SilenceDetectOptionsPayload }) => {
-        return (await webApi.removeClipSilence(payload.clipIds, payload.options)) as RemoveSilenceResult;
+        return (await webApi.removeClipSilence(
+            payload.clipIds,
+            payload.options,
+        )) as RemoveSilenceResult;
     },
 );
 
@@ -440,10 +446,7 @@ export const setClipsStateBulkRemote = createAsyncThunk(
 
 export const pasteTimelineClipboardRemote = createAsyncThunk(
     "session/pasteTimelineClipboardRemote",
-    async (
-        mode: "selected" | "new_tracks" | undefined,
-        { rejectWithValue, getState },
-    ) => {
+    async (mode: "selected" | "new_tracks" | undefined, { rejectWithValue, getState }) => {
         // 在发起粘贴前捕获现有 clip id 集合：await 期间其他 thunk 的
         // fulfilled 可能已把新 clip 写进 state，事后 diff 兜底会得到空集。
         const beforeClipIds = new Set(

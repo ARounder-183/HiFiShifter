@@ -144,10 +144,6 @@ export interface TimelineStateResult {
     rulerPlayheadHeadRef: React.MutableRefObject<HTMLDivElement | null>;
     playheadRef: React.MutableRefObject<HTMLDivElement | null>;
     dropPreviewRef: React.MutableRefObject<HTMLDivElement | null>;
-    playheadDragRef: React.MutableRefObject<{
-        pointerId: number;
-        lastBeat: number;
-    } | null>;
     lastClickedClipIdRef: React.MutableRefObject<string | null>;
     scrollLeftRef: React.MutableRefObject<number>;
     pxPerSecRef: React.MutableRefObject<number>;
@@ -348,10 +344,6 @@ export function useTimelineState(): TimelineStateResult {
     const pendingTimelineSyncViewportRef = useRef<{
         scrollLeft: number;
         pxPerSec: number;
-    } | null>(null);
-    const playheadDragRef = useRef<{
-        pointerId: number;
-        lastBeat: number;
     } | null>(null);
     const lastClickedClipIdRef = useRef<string | null>(null);
     const playheadRef = useRef<HTMLDivElement | null>(null);
@@ -1246,7 +1238,7 @@ export function useTimelineState(): TimelineStateResult {
         rulerPlayheadHeadRef,
         playheadRef,
         dropPreviewRef,
-        playheadDragRef,
+
         lastClickedClipIdRef,
         scrollLeftRef,
         pxPerSecRef,

@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Flex, DropdownMenu } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
+import { shallowEqual } from "react-redux";
 import type { RootState } from "../../app/store";
 import {
     openReaperFromDialog,
@@ -119,6 +120,40 @@ function timeUnitLabelKey(unit: TimeUnit): string {
     }
 }
 
+/** MenuBar 实际消费的 session 字段子集（配合 shallowEqual 阻断播放轮询的重渲染）。
+ *  新增消费字段时必须同步补充到这里。 */
+const selectMenuBarSession = (state: RootState) => {
+    const session = state.session;
+    return {
+        autoBackgroundRender: session.autoBackgroundRender,
+        defaultHifiganMelStretch: session.defaultHifiganMelStretch,
+        defaultStretchAlgorithm: session.defaultStretchAlgorithm,
+        edgeSmoothnessPercent: session.edgeSmoothnessPercent,
+        editParam: session.editParam,
+        multiSelectedClipIds: session.multiSelectedClipIds,
+        ortDeviceId: session.ortDeviceId,
+        ortEp: session.ortEp,
+        paramSelectionActive: session.paramSelectionActive,
+        pitchSnapToleranceCents: session.pitchSnapToleranceCents,
+        playheadSec: session.playheadSec,
+        primaryTimeUnit: session.primaryTimeUnit,
+        project: session.project,
+        projectSec: session.projectSec,
+        secondaryTimeUnit: session.secondaryTimeUnit,
+        selectedClipId: session.selectedClipId,
+        selectedTrackId: session.selectedTrackId,
+        selectionContext: session.selectionContext,
+        showAllTakes: session.showAllTakes,
+        showClipboardPreview: session.showClipboardPreview,
+        showParamValuePopup: session.showParamValuePopup,
+        syncEditsAcrossTakes: session.syncEditsAcrossTakes,
+        tempoMap: session.tempoMap,
+        tempoMapVisible: session.tempoMapVisible,
+        toolMode: session.toolMode,
+        tracks: session.tracks,
+    };
+};
+
 export const MenuBar: React.FC<MenuBarProps> = ({
     onNewProject,
     onOpenProject,
@@ -137,7 +172,11 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     const { t, setLocale } = useI18n();
     const tAny = t as (key: string) => string;
     const dispatch = useAppDispatch();
-    const s = useAppSelector((state: RootState) => state.session);
+    // 只选取本组件实际消费的字段子集并以 shallowEqual 比较：播放期间
+    // runtime.playbackPositionSec 每 ~33ms 变一次，整片 session 的对象引用
+    // 随之失效，若直接订阅 state.session，全部菜单定义会以 ≥30Hz 重建。
+    const s = useAppSelector(selectMenuBarSession, shallowEqual);
+    const gpuBackend = useAppSelector((state: RootState) => state.session.runtime.gpuBackend);
     const theme = useAppTheme();
     const keybindings = useAppSelector(selectMergedKeybindings);
     const [kbDialogOpen, setKbDialogOpen] = useState(false);
@@ -370,15 +409,12 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     }
                     const channel = resolvePasteRoute(kind, getActiveSurface());
                     if (channel) {
-                        window.dispatchEvent(
-                            new CustomEvent(channel, { detail: { op, ...data } }),
-                        );
+                        window.dispatchEvent(new CustomEvent(channel, { detail: { op, ...data } }));
                     }
                 })();
                 return;
             }
-            const channel =
-                resolveEditOpRoute(getActiveSurface(), op, s.toolMode) ?? "hifi:editOp";
+            const channel = resolveEditOpRoute(getActiveSurface(), op, s.toolMode) ?? "hifi:editOp";
             window.dispatchEvent(new CustomEvent(channel, { detail: { op, ...data } }));
         },
         [s],
@@ -830,10 +866,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                         });
                                     }}
                                 >
-                                    {withCheck(
-                                        theme.modeSetting === mode,
-                                        tAny(`theme_${mode}`),
-                                    )}
+                                    {withCheck(theme.modeSetting === mode, tAny(`theme_${mode}`))}
                                 </DropdownMenu.Item>
                             ))}
                         </DropdownMenu.SubContent>
@@ -1026,10 +1059,10 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         <DropdownMenu.SubTrigger>
                             {`${t("menu_inference_device")}: ${
                                 s.ortEp === "auto"
-                                    ? `${t("menu_inference_auto")}${s.runtime.gpuBackend ? ` (${s.runtime.gpuBackend})` : ""}`
+                                    ? `${t("menu_inference_auto")}${gpuBackend ? ` (${gpuBackend})` : ""}`
                                     : s.ortEp === "cpu"
                                       ? t("menu_inference_cpu")
-                                      : `${t("menu_inference_gpu")} (${s.runtime.gpuBackend || "GPU"})`
+                                      : `${t("menu_inference_gpu")} (${gpuBackend || "GPU"})`
                             }`}
                         </DropdownMenu.SubTrigger>
                         <DropdownMenu.SubContent>
@@ -1153,9 +1186,8 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 <DropdownMenu.Content variant="soft" color="gray">
                     <DropdownMenu.Item
                         onSelect={async () => {
-                            const { openLogFolder } = await import(
-                                "../../services/api/diagnostics"
-                            );
+                            const { openLogFolder } =
+                                await import("../../services/api/diagnostics");
                             try {
                                 const res = await openLogFolder();
                                 if (!res.ok) {
@@ -1170,9 +1202,8 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     </DropdownMenu.Item>
                     <DropdownMenu.Item
                         onSelect={async () => {
-                            const { pickDiagnosticsOutputPath, exportDiagnostics } = await import(
-                                "../../services/api/diagnostics"
-                            );
+                            const { pickDiagnosticsOutputPath, exportDiagnostics } =
+                                await import("../../services/api/diagnostics");
                             try {
                                 const pick = await pickDiagnosticsOutputPath();
                                 if (!pick?.ok || !pick.path) return; // 用户取消
@@ -1272,10 +1303,10 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     >
                         <div className="px-4 py-3 border-b border-qt-border">
                             <div className="text-sm font-medium text-qt-text">
-                                {tAny("import_dialog_title") || t("menu_import_media")}
+                                {tAny("import_dialog_title")}
                             </div>
                             <div className="mt-1 text-xs text-qt-text-muted">
-                                {(tAny("import_files_selected") || "").replace(
+                                {(tAny("import_files_selected") as string).replace(
                                     "{count}",
                                     String(menuImportMode.audioPaths.length),
                                 )}
@@ -1341,7 +1372,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                 className="px-3 py-1.5 text-xs text-qt-text hover:bg-qt-hover rounded-lg"
                                 onClick={() => setMenuImportMode(null)}
                             >
-                                {tAny("cancel") || "Cancel"}
+                                {tAny("cancel")}
                             </button>
                         </div>
                     </div>
@@ -1360,14 +1391,13 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     >
                         <div className="px-4 py-3 border-b border-qt-border">
                             <div className="text-sm font-medium text-qt-text">
-                                {tAny("media_stream_select_title") || "Select audio stream"}
+                                {tAny("media_stream_select_title")}
                             </div>
                             <div className="mt-1 text-xs text-qt-text-muted truncate">
                                 {mediaStreamImport.path}
                             </div>
                             <div className="mt-1 text-xs text-qt-text-muted">
-                                {tAny("media_stream_select_hint") ||
-                                    "This file contains multiple audio streams. Select one to extract and import."}
+                                {tAny("media_stream_select_hint")}
                             </div>
                         </div>
 
@@ -1400,8 +1430,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                         }}
                                     >
                                         <span className="font-medium">
-                                            {tAny("media_stream_track") || "Track"}{" "}
-                                            {stream.index + 1}
+                                            {tAny("media_stream_track")} {stream.index + 1}
                                         </span>
                                         <span className="ml-2 text-xs text-qt-text-muted">
                                             {meta.join(" · ")}
@@ -1416,7 +1445,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                 className="px-3 py-1.5 text-xs text-qt-text hover:bg-qt-hover rounded-lg"
                                 onClick={() => setMediaStreamImport(null)}
                             >
-                                {tAny("cancel") || "Cancel"}
+                                {tAny("cancel")}
                             </button>
                         </div>
                     </div>
@@ -1497,7 +1526,13 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 projectScaleLabel={projectScaleLabelWithHint}
                 defaultToleranceCents={s.pitchSnapToleranceCents}
                 defaultSmoothness={s.edgeSmoothnessPercent}
-                onConfirm={(unit, scaleValue, toleranceCents, quantizeUnit, edgeSmoothnessPercent) =>
+                onConfirm={(
+                    unit,
+                    scaleValue,
+                    toleranceCents,
+                    quantizeUnit,
+                    edgeSmoothnessPercent,
+                ) =>
                     dispatchEditOp("quantize", {
                         unit,
                         scale: resolveScaleToken(scaleValue),
@@ -1519,7 +1554,13 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 projectScaleLabel={projectScaleLabelWithHint}
                 defaultToleranceCents={s.pitchSnapToleranceCents}
                 defaultSmoothness={s.edgeSmoothnessPercent}
-                onConfirm={(unit, scaleValue, toleranceCents, quantizeUnit, edgeSmoothnessPercent) =>
+                onConfirm={(
+                    unit,
+                    scaleValue,
+                    toleranceCents,
+                    quantizeUnit,
+                    edgeSmoothnessPercent,
+                ) =>
                     dispatchEditOp("meanQuantize", {
                         unit,
                         scale: resolveScaleToken(scaleValue),

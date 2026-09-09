@@ -1,7 +1,9 @@
 import { configureStore } from "@reduxjs/toolkit";
 import sessionReducer from "../features/session/sessionSlice";
 import fileBrowserReducer from "../features/fileBrowser/fileBrowserSlice";
-import keybindingsReducer from "../features/keybindings/keybindingsSlice";
+import keybindingsReducer, {
+    keybindingsPersistenceMiddleware,
+} from "../features/keybindings/keybindingsSlice";
 import notebookReducer from "../features/notebook/notebookSlice";
 import recordingReducer from "../features/recording/recordingSlice";
 
@@ -24,7 +26,7 @@ export const store = configureStore({
             },
             // 注意：此前豁免的 "session.timeline" 并不存在于 SessionState
             // （状态是 tracks/clips 等平铺字段），属死配置，已移除。
-        }),
+        }).prepend(keybindingsPersistenceMiddleware.middleware),
 });
 
 export type RootState = ReturnType<typeof store.getState>;

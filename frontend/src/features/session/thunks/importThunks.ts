@@ -298,17 +298,16 @@ export const importAudioAtPosition = createAsyncThunk(
                 }
             }
 
-            // 导入后将光标定位到第一个音频块的起始位置
+            // 导入后将光标定位到第一个音频块的起始位置。必须以独立字段交给
+            // reducer 显式采纳：playhead_sec 是传输层字段，全量快照应用默认
+            // 不采纳（防播放中编辑的光标跳变），塞进 imported 里会被静默丢弃。
             const importedResult = latestTimeline ?? imported;
-            if (importedResult && typeof payload.startSec === "number") {
-                (importedResult as unknown as Record<string, unknown>).playhead_sec =
-                    payload.startSec;
-            }
 
             return {
                 ok: true,
                 imported: importedResult,
                 newClipIds,
+                playheadSec: typeof payload.startSec === "number" ? payload.startSec : undefined,
             };
         } finally {
             void webApi.endUndoGroup();
@@ -385,17 +384,14 @@ export const importAudioFileAtPosition = createAsyncThunk(
                 newClipIds,
             });
 
-            // 导入后将光标定位到第一个音频块的起始位置
+            // 导入后将光标定位到第一个音频块的起始位置（经独立字段交 reducer 采纳）。
             const importedResult = latestTimeline ?? imported;
-            if (importedResult && typeof payload.startSec === "number") {
-                (importedResult as unknown as Record<string, unknown>).playhead_sec =
-                    payload.startSec;
-            }
 
             return {
                 ok: true,
                 imported: importedResult,
                 newClipIds,
+                playheadSec: typeof payload.startSec === "number" ? payload.startSec : undefined,
             };
         } catch (err) {
             return rejectWithValue(
@@ -448,7 +444,6 @@ export const importMultipleAudioAtPosition = createAsyncThunk(
             );
 
             let lastImported: unknown = null;
-            let firstImported: unknown = null;
             const accumulatedNewClipIds: string[] = [];
 
             if (mode === "as-takes") {
@@ -499,7 +494,6 @@ export const importMultipleAudioAtPosition = createAsyncThunk(
                 for (const audioPath of audioPaths) {
                     const imported = await webApi.importAudioItem(audioPath, targetTrackId, cursor);
                     if (!(imported as { ok?: boolean }).ok) continue;
-                    if (!firstImported) firstImported = imported;
                     lastImported = imported;
                     const result = imported as {
                         clips?: Array<{ id?: string; start_sec?: number; length_sec?: number }>;
@@ -512,12 +506,6 @@ export const importMultipleAudioAtPosition = createAsyncThunk(
                         (c) => Math.abs((c.start_sec ?? 0) - cursor) < 0.01,
                     );
                     cursor += newClip?.length_sec ?? 0;
-                }
-
-                // Override playhead to the start of the FIRST imported clip
-                if (lastImported && firstImported) {
-                    const li = lastImported as Record<string, unknown>;
-                    li.playhead_sec = startSec;
                 }
             } else {
                 // "across-tracks" — start from current track, then use subsequent existing tracks,
@@ -602,13 +590,11 @@ export const importMultipleAudioAtPosition = createAsyncThunk(
                 newClipIds,
             });
 
-            // 导入后将光标定位到第一个音频块的起始位置
+            // 导入后将光标定位到起始位置（经独立字段交 reducer 采纳，
+            // 塞进 imported.playhead_sec 会被快照应用静默丢弃）。
             const importedResult = latestTimeline ?? lastImported;
-            if (importedResult) {
-                (importedResult as Record<string, unknown>).playhead_sec = startSec;
-            }
 
-            return { ok: true, imported: importedResult, newClipIds };
+            return { ok: true, imported: importedResult, newClipIds, playheadSec: startSec };
         } finally {
             void webApi.endUndoGroup();
         }
@@ -647,7 +633,6 @@ export const importMultipleAudioFilesAtPosition = createAsyncThunk(
             const accumulatedNewClipIds: string[] = [];
 
             let lastImported: unknown = null;
-            let firstImported: unknown = null;
 
             if (mode === "across-time") {
                 let cursor = startSec;
@@ -691,7 +676,6 @@ export const importMultipleAudioFilesAtPosition = createAsyncThunk(
                         cursor,
                     );
                     if (!(imported as { ok?: boolean }).ok) continue;
-                    if (!firstImported) firstImported = imported;
                     lastImported = imported;
                     const result = imported as {
                         clips?: Array<{ id?: string; start_sec?: number; length_sec?: number }>;
@@ -788,13 +772,11 @@ export const importMultipleAudioFilesAtPosition = createAsyncThunk(
                 newClipIds,
             });
 
-            // 导入后将光标定位到第一个音频块的起始位置
+            // 导入后将光标定位到起始位置（经独立字段交 reducer 采纳，
+            // 塞进 imported.playhead_sec 会被快照应用静默丢弃）。
             const importedResult = latestTimeline ?? lastImported;
-            if (importedResult) {
-                (importedResult as Record<string, unknown>).playhead_sec = startSec;
-            }
 
-            return { ok: true, imported: importedResult, newClipIds };
+            return { ok: true, imported: importedResult, newClipIds, playheadSec: startSec };
         } finally {
             void webApi.endUndoGroup();
         }
@@ -825,6 +807,12 @@ export const importMidiAsClip = createAsyncThunk(
     ) => {
         await webApi.beginUndoGroup();
         try {
+            // 必须在发起导入前捕获现有 clip id 集合（契约见 openVocalShifterFromDialog）：
+            // await 期间其他 thunk 的 fulfilled 可能已把新 clip 写进 state，
+            // 事后取差集会漏掉真正新增的 clip。
+            const beforeClipIds = new Set(
+                (getState() as { session: SessionState }).session.clips.map((c) => c.id),
+            );
             let targetTrackId: string | undefined;
             if (payload.trackId === null || payload.trackId === undefined) {
                 const state = getState() as { session: SessionState };
@@ -864,9 +852,6 @@ export const importMidiAsClip = createAsyncThunk(
                     "import_midi_clip_failed";
                 return rejectWithValue(errMsg);
             }
-            const beforeClipIds = new Set(
-                (getState() as { session: SessionState }).session.clips.map((c) => c.id),
-            );
             const result = imported as { clips?: Array<{ id?: string }> };
             const newClipIds = (result.clips ?? [])
                 .map((c) => c.id)

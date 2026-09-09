@@ -104,11 +104,7 @@ export function edgeHalfSpanFramesForSelection(args: {
     const editedLen = Math.max(0, Math.floor(Number(args.editedLen) || 0));
     const strength = Math.min(100, Math.max(0, Number(args.strengthPercent) || 0));
     if (strength <= 0 || editedLen <= 0) return 0;
-    return strengthToHalfSpanFrames(
-        strength,
-        args.framePeriodMs,
-        Math.floor(editedLen / 4),
-    );
+    return strengthToHalfSpanFrames(strength, args.framePeriodMs, Math.floor(editedLen / 4));
 }
 
 /**
@@ -179,7 +175,10 @@ export function applyEdgeBlend(args: EdgeBlendArgs): void {
     const isEditable = args.isEditable ?? (() => true);
     const maxIdx = n - 1;
     const startIdx = Math.min(maxIdx, Math.max(0, Math.floor(args.editedStartIdx)));
-    const endIdx = Math.min(maxIdx, Math.max(startIdx, Math.floor(args.editedStartIdx + args.editedLen - 1)));
+    const endIdx = Math.min(
+        maxIdx,
+        Math.max(startIdx, Math.floor(args.editedStartIdx + args.editedLen - 1)),
+    );
 
     // 选区内已写入的编辑值快照（先取后写，避免读写交错）
     const edited = dense.slice(startIdx, endIdx + 1);
@@ -200,9 +199,7 @@ export function applyEdgeBlend(args: EdgeBlendArgs): void {
         const lo = Math.max(0, Math.floor(b - half));
         const hi = Math.min(maxIdx, Math.ceil(b + half));
         for (let f = lo; f <= hi; f += 1) {
-            const u = ascending
-                ? (f - (b - half)) / (2 * half)
-                : (b + half - f) / (2 * half);
+            const u = ascending ? (f - (b - half)) / (2 * half) : (b + half - f) / (2 * half);
             const w = edgeBlendWeight(shape, u);
             if (w <= 0) continue;
             if (!isEditable(base[f])) continue;
@@ -290,10 +287,7 @@ export function smoothCurveGaussian(values: number[], opts: GaussianSmoothOption
     }
 
     // 分段：连续无效帧长度 > gapBridge 处硬切（不跨段取均值）
-    const gapBridge = Math.max(
-        0,
-        Math.round(opts.gapBridgeFrames ?? GAP_BRIDGE_MAX_MS / fp),
-    );
+    const gapBridge = Math.max(0, Math.round(opts.gapBridgeFrames ?? GAP_BRIDGE_MAX_MS / fp));
     const segmentOf = new Array<number>(n).fill(0);
     let seg = 0;
     let invalidRun = 0;

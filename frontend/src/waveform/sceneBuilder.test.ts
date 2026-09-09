@@ -279,7 +279,6 @@ test("waveform/sceneBuilder.test.ts scripted checks", async () => {
  * 相对 clip / 网格就会错位，因此用多组随机参数锁死。
  */
 test("waveform/sceneBuilder.test.ts 窗口局部坐标 ≡ 视口坐标 + 平移", async () => {
-
     /**
      * 带容差的数值比较。
      *

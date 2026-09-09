@@ -67,14 +67,12 @@ export interface ClipPeaksEntry {
  * @param args.clips - 当前 track 下的所有 clip
  * @param args.visibleStartSec - 可见区域起始时间（秒）
  * @param args.visibleEndSec - 可见区域结束时间（秒）
- * @param args.pxPerSec - 像素/秒比例，用于选择 Mipmap 级别
  * @returns ClipPeaksEntry 数组，每个 entry 对应一个可见 clip
  */
 export function useClipsPeaksForPianoRoll(args: {
     clips: ClipInfo[];
     visibleStartSec: number;
     visibleEndSec: number;
-    pxPerSec?: number;
 }): ClipPeaksEntry[] {
     const { clips, visibleStartSec, visibleEndSec } = args;
 
@@ -89,7 +87,9 @@ export function useClipsPeaksForPianoRoll(args: {
         }
 
         const unsub = waveformMipmapStore.addListener((sourcePath, status) => {
-            if (status === "done" && neededPaths.has(sourcePath)) {
+            // done = 数据就绪；evicted = 可见数据被内存压力淘汰（渲染循环
+            // 会重新发起加载，这里只负责触发一次重绘）。
+            if ((status === "done" || status === "evicted") && neededPaths.has(sourcePath)) {
                 setRedrawTick((t) => t + 1);
             }
         });

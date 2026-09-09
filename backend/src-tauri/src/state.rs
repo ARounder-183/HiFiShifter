@@ -2735,7 +2735,7 @@ impl AppState {
         // ── 2. Inflight 去重检查 ──
         // 如果另一线程已在计算同一文件，等待它完成后从缓存读取
         {
-            let mut inflight = self
+            let inflight = self
                 .waveform_inflight
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());

@@ -1027,10 +1027,7 @@ export function useTimelineClipActions(
                 // 反而漏写）。
                 let effective = requestedRate;
                 if (effective != null) {
-                    change.clipPlaybackRate = Math.min(
-                        10,
-                        Math.max(0.1, effective / takeRate),
-                    );
+                    change.clipPlaybackRate = Math.min(10, Math.max(0.1, effective / takeRate));
                 }
                 // 时长：显式时长优先，且**时长即拉伸**——源窗口保持不变，
                 // 由时长反推有效速率（改时长同时改倍率）；无显式时长时，
@@ -1043,10 +1040,7 @@ export function useTimelineClipActions(
                             0.1,
                             Math.min(10, (oldLengthSec * oldEffective) / nextLengthSec),
                         );
-                        change.clipPlaybackRate = Math.min(
-                            10,
-                            Math.max(0.1, effective / takeRate),
-                        );
+                        change.clipPlaybackRate = Math.min(10, Math.max(0.1, effective / takeRate));
                     }
                 } else if (effective != null && autoLength) {
                     nextLengthSec = Math.max(0, oldLengthSec * (oldEffective / effective));
@@ -1056,8 +1050,7 @@ export function useTimelineClipActions(
                     if (session.lockParamLinesEnabled) {
                         const rootTrackId = resolveRootTrackId(session.tracks, clip.trackId);
                         if (rootTrackId) {
-                            const trackMappings =
-                                mappingsByRootTrack.get(rootTrackId) ?? [];
+                            const trackMappings = mappingsByRootTrack.get(rootTrackId) ?? [];
                             trackMappings.push({
                                 oldStartSec: clip.startSec,
                                 oldLengthSec: oldLengthSec,

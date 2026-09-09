@@ -377,9 +377,7 @@ export const ClipContextMenu: React.FC<{
 
     // 静音检测：至少一个目标 Clip 的活跃 Take 含音频源才可用。
     const hasAudioTake = (c: ClipInfo) => (c.takes ?? []).some((tk) => !!tk.sourcePath);
-    const silenceEligible = isMulti
-        ? selectedClips.some(hasAudioTake)
-        : hasAudioTake(clip);
+    const silenceEligible = isMulti ? selectedClips.some(hasAudioTake) : hasAudioTake(clip);
 
     // 多选中是否全部静音
     const allMuted = isMulti ? selectedClips.every((c) => c.muted) : clip.muted;

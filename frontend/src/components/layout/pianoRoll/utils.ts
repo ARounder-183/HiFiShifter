@@ -35,6 +35,10 @@ export function timeToFrame(timeSec: number, framePeriodMs: number): number {
 /**
  * Convert time in seconds to canvas pixel position.
  *
+ * 注意：这是**旧坐标公式**，生产路径已统一走 timelineAxis 的
+ * `secToViewportPx`（二者等价性由 renderProjection.test.ts 的随机比对守护）。
+ * 保留它仅为给该回归测试提供独立的参照实现，勿在新代码中使用。
+ *
  * @param timeSec - Time in seconds
  * @param visibleStartSec - Start of visible time range
  * @param visibleDurSec - Duration of visible time range
@@ -49,23 +53,4 @@ export function timeToPixel(
 ): number {
     const denom = Math.max(1e-9, visibleDurSec);
     return ((timeSec - visibleStartSec) / denom) * canvasWidth;
-}
-
-/**
- * Convert canvas pixel position to time in seconds.
- *
- * @param pixelX - Pixel position on canvas
- * @param visibleStartSec - Start of visible time range
- * @param visibleDurSec - Duration of visible time range
- * @param canvasWidth - Width of canvas in pixels
- * @returns Time in seconds
- */
-export function pixelToTime(
-    pixelX: number,
-    visibleStartSec: number,
-    visibleDurSec: number,
-    canvasWidth: number,
-): number {
-    const w = Math.max(1, canvasWidth);
-    return visibleStartSec + (pixelX / w) * visibleDurSec;
 }

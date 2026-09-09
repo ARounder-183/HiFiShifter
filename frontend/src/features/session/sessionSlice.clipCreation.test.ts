@@ -74,6 +74,7 @@ test("features/session/sessionSlice.clipCreation.test.ts scripted checks", async
                     ],
                 } as unknown as TimelineResult,
                 newClipIds: ["clip-b"],
+                playheadSec: 4,
             },
             "req-import",
             {

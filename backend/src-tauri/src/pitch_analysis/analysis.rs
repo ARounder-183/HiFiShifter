@@ -602,10 +602,12 @@ fn process_single_clip(
             // Calculate pre_silence_sec for clip placement.
             // 前导静音按消费方向取值（正放看窗口起点 <0；倒放看 se 越过媒体
             // 末端）；Loop 的负 source_start 是环绕锚点，不产生前导静音。
+            // clip_leading_silence_sec 内部已除以 playback_rate，不能再除一次
+            // （双重除法会让静音段随速率缩放、与 mixdown/实时引擎不一致）。
             let pre_silence_sec = crate::state::clip_leading_silence_sec(
                 clip,
                 crate::state::clip_source_media_duration_sec(clip),
-            ) / playback_rate.max(1e-6);
+            );
 
             // Estimate clip_total_frames (from original audio)
             let clip_total_frames = if clip.loop_enabled {
@@ -944,10 +946,11 @@ fn compute_pitch_curve_with_incremental_refresh(
                 1.0
             };
             // 前导静音按消费方向取值（同 process_single_clip；Loop 恒为 0）。
+            // clip_leading_silence_sec 内部已除以 playback_rate，不能再除一次。
             let pre_silence_sec = crate::state::clip_leading_silence_sec(
                 clip,
                 crate::state::clip_source_media_duration_sec(clip),
-            ) / playback_rate.max(1e-6);
+            );
 
             // 全量分析策略：缓存中是全量源音频曲线，做 trim+resample
             // 非 Loop 倒放：传入真实消费窗口 [se−len·r, se]。
@@ -1389,8 +1392,8 @@ pub(crate) fn compute_pitch_curve(job: &PitchJob, mut on_progress: impl FnMut(f3
 
         // 前导静音按消费方向取值（正放看窗口起点 <0；倒放看 se 越过媒体
         // 末端）；Loop 的负 source_start 是环绕锚点，不产生前导静音。
-        let pre_silence_sec =
-            crate::state::clip_leading_silence_sec(clip, Some(total_sec)) / playback_rate.max(1e-6);
+        // clip_leading_silence_sec 内部已除以 playback_rate，不能再除一次。
+        let pre_silence_sec = crate::state::clip_leading_silence_sec(clip, Some(total_sec));
 
         // ── 分析片段构建 ────────────────────────────────────────────────
         // Loop（循环源）：分析对象必须是**整段消费量**的回绕平铺（锚点 +

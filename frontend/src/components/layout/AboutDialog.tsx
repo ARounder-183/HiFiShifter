@@ -98,7 +98,9 @@ export function AboutDialog({ open, onOpenChange }: AboutDialogProps) {
                                     哈希溢出（pre-line 保留换行）。 */}
                                 <button
                                     type="button"
-                                    onClick={() => void openExternal(`${repoUrl}/tree/${info?.commit}`)}
+                                    onClick={() =>
+                                        void openExternal(`${repoUrl}/tree/${info?.commit}`)
+                                    }
                                     data-tooltip={`${repoUrl}\n/tree/${info?.commit}`}
                                     className="text-xs text-qt-accent underline underline-offset-2 hover:text-qt-text"
                                 >
@@ -120,7 +122,7 @@ export function AboutDialog({ open, onOpenChange }: AboutDialogProps) {
                     </Button>
                     <Dialog.Close>
                         <Button size="2" variant="surface" color="gray">
-                            {tAny("cancel") || "Close"}
+                            {tAny("cancel")}
                         </Button>
                     </Dialog.Close>
                 </Flex>

@@ -400,10 +400,6 @@ pub fn vowel_formant_preset(vowel: &str) -> Option<(f64, f64)> {
 
 // ── 内部辅助 ────────────────────────────────────────────────────────────
 
-fn peak_abs(input: &[f32]) -> f32 {
-    input.iter().fold(0.0_f32, |p, s| p.max(s.abs()))
-}
-
 fn average_channels_to_mono(input: &[f32], channels: usize, frames: usize) -> Vec<f32> {
     let mut mono = vec![0.0_f32; frames];
     let inv_ch = 1.0 / channels as f32;
@@ -446,6 +442,10 @@ fn apply_mono_delta_to_interleaved(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn peak_abs(input: &[f32]) -> f32 {
+        input.iter().fold(0.0_f32, |p, s| p.max(s.abs()))
+    }
 
     fn default_params(enabled: bool, strength: f64) -> ClipFormantMorph {
         ClipFormantMorph {

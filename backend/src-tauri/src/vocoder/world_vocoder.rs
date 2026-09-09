@@ -967,7 +967,6 @@ where
         let central_start = chunk_start - pad_start;
 
         let dst_start = chunk_start;
-        let dst_end = chunk_end;
 
         // 写入范围扩展到本块尾部 [chunk_end, chunk_end+overlap)：pad 输入里
         // 含这部分样本的渲染。下一块的块首交叉淡化会把它作为 prev 读出；

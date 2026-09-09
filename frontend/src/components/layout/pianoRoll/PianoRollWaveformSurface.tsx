@@ -87,7 +87,6 @@ export const PianoRollWaveformSurface = React.memo(function PianoRollWaveformSur
     return (
         <WaveformSurface
             rows={rows}
-            widthPx={props.widthPx}
             heightPx={props.heightPx}
             axis={axis}
             color={props.colors.stroke}

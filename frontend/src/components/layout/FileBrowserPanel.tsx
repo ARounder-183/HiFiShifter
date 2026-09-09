@@ -560,6 +560,30 @@ export const FileBrowserPanel: React.FC = () => {
             setDragState(null);
         }
 
+        // 指针在窗口外（任务栏/另一显示器）松开时 pointerup 不会派发，
+        // pointercancel / lostpointercapture 是唯一可靠的收尾信号 —— 否则
+        // 拖拽态永久卡死（ghost 滞留、列表行保持半透明、move 事件持续派发）。
+        function onPointerCancel() {
+            const ds = dragStateRef.current;
+            if (ds?.active) {
+                window.dispatchEvent(
+                    new CustomEvent("hifi-file-drag", {
+                        detail: {
+                            type: "drop",
+                            filePath: ds.filePath,
+                            fileName: ds.fileName,
+                            filePaths: ds.allFilePaths,
+                            clientX: ds.startX,
+                            clientY: ds.startY,
+                            isRightDrag: ds.isRightDrag,
+                            canceled: true,
+                        },
+                    }),
+                );
+            }
+            setDragState(null);
+        }
+
         // 右键拖拽时抑制浏览器原生右键菜单
         function onContextMenu(e: MouseEvent) {
             if (dragStateRef.current?.isRightDrag) {
@@ -569,10 +593,14 @@ export const FileBrowserPanel: React.FC = () => {
 
         window.addEventListener("pointermove", onPointerMove);
         window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerCancel);
+        window.addEventListener("blur", onPointerCancel);
         window.addEventListener("contextmenu", onContextMenu, true);
         return () => {
             window.removeEventListener("pointermove", onPointerMove);
             window.removeEventListener("pointerup", onPointerUp);
+            window.removeEventListener("pointercancel", onPointerCancel);
+            window.removeEventListener("blur", onPointerCancel);
             window.removeEventListener("contextmenu", onContextMenu, true);
         };
     }, [dragState !== null]); // eslint-disable-line react-hooks/exhaustive-deps

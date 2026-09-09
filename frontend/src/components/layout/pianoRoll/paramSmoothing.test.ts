@@ -72,21 +72,37 @@ describe("edgeHalfSpanFramesForSelection 选区半宽", () => {
     it("时间上限优先，选区长度上限兜底", () => {
         // 100 帧 @5ms：时间上限 12 < 长度上限 25 → 12
         expect(
-            edgeHalfSpanFramesForSelection({ strengthPercent: 100, framePeriodMs: 5, editedLen: 100 }),
+            edgeHalfSpanFramesForSelection({
+                strengthPercent: 100,
+                framePeriodMs: 5,
+                editedLen: 100,
+            }),
         ).toBe(12);
         // 20 帧：长度上限 floor(20/4)=5 → 5
         expect(
-            edgeHalfSpanFramesForSelection({ strengthPercent: 100, framePeriodMs: 5, editedLen: 20 }),
+            edgeHalfSpanFramesForSelection({
+                strengthPercent: 100,
+                framePeriodMs: 5,
+                editedLen: 20,
+            }),
         ).toBe(5);
         // 8 帧：长度上限 2 → 2（过渡带不越过选区中点）
         expect(
-            edgeHalfSpanFramesForSelection({ strengthPercent: 100, framePeriodMs: 5, editedLen: 8 }),
+            edgeHalfSpanFramesForSelection({
+                strengthPercent: 100,
+                framePeriodMs: 5,
+                editedLen: 8,
+            }),
         ).toBe(2);
     });
 
     it("零强度 / 空选区 → 0", () => {
         expect(
-            edgeHalfSpanFramesForSelection({ strengthPercent: 0, framePeriodMs: 5, editedLen: 100 }),
+            edgeHalfSpanFramesForSelection({
+                strengthPercent: 0,
+                framePeriodMs: 5,
+                editedLen: 100,
+            }),
         ).toBe(0);
         expect(
             edgeHalfSpanFramesForSelection({ strengthPercent: 50, framePeriodMs: 5, editedLen: 0 }),
@@ -146,12 +162,24 @@ describe("applyEdgeBlend：delta 空间边缘交叉淡化", () => {
         for (let k = 0; k < 3; k += 1) {
             const dense = cur.slice();
             for (let i = 10; i < 30; i += 1) dense[i] += 2;
-            applyEdgeBlend({ dense, base: cur, editedStartIdx: 10, editedLen: 20, halfSpanFrames: HALF });
+            applyEdgeBlend({
+                dense,
+                base: cur,
+                editedStartIdx: 10,
+                editedLen: 20,
+                halfSpanFrames: HALF,
+            });
             cur = dense;
         }
         const once = base.slice();
         for (let i = 10; i < 30; i += 1) once[i] += 6;
-        applyEdgeBlend({ dense: once, base, editedStartIdx: 10, editedLen: 20, halfSpanFrames: HALF });
+        applyEdgeBlend({
+            dense: once,
+            base,
+            editedStartIdx: 10,
+            editedLen: 20,
+            halfSpanFrames: HALF,
+        });
         expectCloseTo(cur, once);
     });
 
@@ -249,7 +277,11 @@ describe("smoothCurveGaussian 高斯平滑", () => {
 
     it("阶跃：对称、单调、无过冲、远处不变", () => {
         const step = [...new Array<number>(20).fill(0), ...new Array<number>(20).fill(1)];
-        const out = smoothCurveGaussian(step, { sigmaMs: 5, framePeriodMs: FP, medianPrepass: false });
+        const out = smoothCurveGaussian(step, {
+            sigmaMs: 5,
+            framePeriodMs: FP,
+            medianPrepass: false,
+        });
         for (const v of out) {
             expect(v).toBeGreaterThanOrEqual(-1e-12);
             expect(v).toBeLessThanOrEqual(1 + 1e-12);

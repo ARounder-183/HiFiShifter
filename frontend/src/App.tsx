@@ -123,6 +123,54 @@ const statusKey: Record<string, string> = {
     "Clipboard copy failed": "status_clipboard_copy_failed",
     "Clipboard cut failed": "status_clipboard_cut_failed",
     "VocalShifter imported with skipped files": "vs_import_skipped_header",
+    // 播放/停止传输状态
+    "Playing original": "status_playing_original",
+    "Play original failed": "status_play_original_failed",
+    "Stopping audio...": "status_stopping_audio",
+    "Audio stopped": "status_audio_stopped",
+    "Stop audio failed": "status_stop_audio_failed",
+    // 导入类状态
+    "Audio imported": "status_audio_imported",
+    "Dropped audio imported": "status_dropped_audio_imported",
+    "Clips duplicated": "status_clips_duplicated",
+    "Clip edit rejected": "status_clip_edit_rejected",
+    "Import done": "status_import_done",
+    "Import failed": "status_import_failed",
+    "Import audio failed": "status_import_audio_failed",
+    "Project imported": "status_project_imported",
+    "VocalShifter project imported": "status_vocalshifter_project_imported",
+    "Reaper project imported": "status_reaper_project_imported",
+    "Pasted VocalShifter clipboard data": "status_pasted_vocalshifter_clipboard",
+    "Pasted Reaper clipboard data": "status_pasted_reaper_clipboard",
+    "Timeline clipboard pasted": "status_timeline_clipboard_pasted",
+    "Paste timeline clipboard failed": "status_paste_timeline_failed",
+    "Tempo map updated": "status_tempo_map_updated",
+    "Waiting for import options": "status_waiting_import_options",
+    "Waveform cache cleared": "status_waveform_cache_cleared",
+    // 进行中状态（setPending）
+    "Applying pitch shift...": "status_applying_pitch_shift",
+    "Clearing waveform cache...": "status_clearing_waveform_cache",
+    "Exporting WAV...": "status_exporting_wav",
+    "Exporting audio...": "status_exporting_audio",
+    "Exporting separated tracks...": "status_exporting_separated",
+    "Importing MIDI clip...": "status_importing_midi",
+    "Importing Reaper project...": "status_importing_reaper",
+    "Importing VocalShifter project...": "status_importing_vocalshifter",
+    "Importing audio...": "status_importing_audio",
+    "Importing dropped audio...": "status_importing_dropped",
+    "Importing multiple audio files...": "status_importing_multiple",
+    "Importing project...": "status_importing_project",
+    "Loading default model...": "status_loading_default_model",
+    "Loading model...": "status_loading_model",
+    "Pasting Reaper clipboard data...": "status_pasting_reaper",
+    "Pasting VocalShifter clipboard data...": "status_pasting_vocalshifter",
+    "Pasting timeline clipboard...": "status_pasting_timeline",
+    "Picking project to import...": "status_picking_project",
+    "Playing original...": "status_playing_original_busy",
+    "Processing audio...": "status_processing_audio",
+    "Refreshing runtime...": "status_refreshing_runtime",
+    "Selecting output path...": "status_selecting_output",
+    "Synthesizing...": "status_synthesizing",
 };
 
 // 后端返回的错误码 → i18n key 映射
@@ -135,6 +183,16 @@ const errorCodeKey: Record<string, string> = {
     import_parse_failed: "vs_import_parse_failed",
     /* 前端合成码：音频导入 fulfilled 但 ok=false（原版只写灰色 status，失败不可辨） */
     import_audio_failed: "status_import_audio_failed",
+    // Take 操作被拒绝 / 失败（sessionSlice 以原文写入 error 通道）
+    "Take switch rejected": "status_take_switch_rejected",
+    "Take cycle rejected": "status_take_cycle_rejected",
+    "Take reverse rejected": "status_take_reverse_rejected",
+    "Add take from media failed": "status_add_take_failed",
+    "Duplicate take failed": "status_duplicate_take_failed",
+    "Explode takes failed": "status_explode_takes_failed",
+    "Pack into takes failed": "status_pack_takes_failed",
+    "Remove take failed": "status_remove_take_failed",
+    "Rename take failed": "status_rename_take_failed",
 };
 
 // 这些状态表示工程内容刚被替换/导入，需立即执行一次缺失媒体检测，
@@ -368,8 +426,9 @@ function AppInner() {
     const toolMode = useAppSelector((state) => state.session.toolMode);
     const drawToolMode = useAppSelector((state) => state.session.drawToolMode);
     const projectDirty = useAppSelector((state) => state.session.project.dirty);
-    const playheadSec = useAppSelector((state) => state.session.playheadSec);
-    const selectedTrackId = useAppSelector((state) => state.session.selectedTrackId);
+    // playheadSec / selectedTrackId 均只在 handleImportMidiFromMenu 打开对话框
+    // 的瞬间需要快照，经 store.getState() 读取即可 —— 订阅它们会让 AppInner
+    // 随播放头移动 / seek 高频重渲。
     const paramsEpoch = useAppSelector((state) => state.session.paramsEpoch);
     const recordingActive = useAppSelector((state) => state.recording.active);
     const recordingSettings = useAppSelector((state) => state.recording.settings);
@@ -377,9 +436,9 @@ function AppInner() {
     const selectedClipId = useAppSelector((state) => state.session.selectedClipId);
     const multiSelectedClipIds = useAppSelector((state) => state.session.multiSelectedClipIds);
     const sessionClips = useAppSelector((state) => state.session.clips);
-    const playbackPositionSec = useAppSelector(
-        (state) => state.session.runtime.playbackPositionSec,
-    );
+    // 注意：playbackPositionSec 以 ~30Hz 持续变化，这里不能订阅（否则每次
+    // 播放 tick 都重渲 AppInner）；需要它的地方（录音自动停止）在回调内经
+    // store.getState() 同步读取最新值。
     // 使用 ref 桥接最新的工程修改状态
     const projectDirtyRef = useRef(projectDirty);
     useEffect(() => {
@@ -528,13 +587,14 @@ function AppInner() {
     }, []);
 
     const handleImportMidiFromMenu = useCallback(() => {
+        const session = store.getState().session;
         setMidiDialogSource("menu");
         setMidiClipPath(null);
         setMidiClipClipboardGuid(null);
-        setMidiClipStartSec(playheadSec ?? 0);
-        setMidiClipTrackId(selectedTrackId ?? null);
+        setMidiClipStartSec(session.playheadSec ?? 0);
+        setMidiClipTrackId(session.selectedTrackId ?? null);
         setMidiClipDialogOpen(true);
-    }, [playheadSec, selectedTrackId]);
+    }, []);
 
     const handleFillGapsChange = useCallback((v: boolean) => {
         setFillGaps(v);
@@ -693,6 +753,14 @@ function AppInner() {
     const statusText = useMemo(() => {
         // 精确匹配
         if (statusKey[status]) return t(statusKey[status] as MessageKey);
+        // 带数量的状态：提取数字回填占位符模板（如 "Waveform cache cleared (3 files)"）
+        const counted = status.match(/^(.+?)\s*\((\d+)\s*\w+\)$/);
+        if (counted) {
+            const baseKey = statusKey[counted[1]];
+            if (baseKey && (t(baseKey as MessageKey) as string).includes("{n}")) {
+                return (t(baseKey as MessageKey) as string).replace("{n}", counted[2]);
+            }
+        }
         // 前缀匹配：支持 "Export done — path" 等带后缀的状态
         for (const key of Object.keys(statusKey)) {
             if (status.startsWith(key) && status.length > key.length) {
@@ -1000,6 +1068,12 @@ function AppInner() {
                         setStretching({ active, clipName });
                     },
                 );
+                // cleanup 可能发生在 await resolve 之前：已卸载则立即反注册，
+                // 否则该监听器会泄漏（StrictMode 双挂载时尤其明显）。
+                if (disposed) {
+                    unlisten();
+                    unlisten = null;
+                }
             } catch {
                 // Safe no-op for non-Tauri builds.
             }
@@ -1071,6 +1145,10 @@ function AppInner() {
                         dispatch(setTrackMeters(next));
                     },
                 );
+                if (disposed) {
+                    unlisten();
+                    unlisten = null;
+                }
             } catch {
                 // Safe no-op for non-Tauri builds.
             }
@@ -1228,6 +1306,10 @@ function AppInner() {
                         }
                     },
                 );
+                if (disposed) {
+                    unlisten();
+                    unlisten = null;
+                }
             } catch {
                 // Safe no-op for non-Tauri builds.
             }
@@ -1284,6 +1366,10 @@ function AppInner() {
                         renderingWasActiveRef.current = active;
                     },
                 );
+                if (disposed) {
+                    unlisten();
+                    unlisten = null;
+                }
             } catch {
                 // Safe no-op for non-Tauri builds.
             }
@@ -2901,7 +2987,11 @@ function AppInner() {
         if (recordingStartSec == null || Number(recordingStartSec) > endSec + 0.05) return;
 
         const id = window.setInterval(() => {
-            if (Number(playbackPositionSec ?? 0) >= endSec - 0.05) {
+            // 不能把 playbackPositionSec 放进闭包/依赖：它随播放轮询 ~33ms 变化，
+            // 会让本 effect 不停地销毁重建这个 100ms interval，回调永远等不到触发。
+            // 经 store 同步读取最新播放位置。
+            const positionSec = Number(store.getState().session.runtime.playbackPositionSec ?? 0);
+            if (positionSec >= endSec - 0.05) {
                 void dispatch(stopRecordingFlow());
             }
         }, 100);
@@ -2909,7 +2999,6 @@ function AppInner() {
     }, [
         dispatch,
         multiSelectedClipIds,
-        playbackPositionSec,
         recordingActive,
         recordingSettings.autoStopAtSelectionEnd,
         recordingStartSec,

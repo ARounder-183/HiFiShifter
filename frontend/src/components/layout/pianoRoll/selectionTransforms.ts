@@ -118,10 +118,7 @@ export function createSelectionAmplifier(
                 ? Math.max(0, Number(opts.trendSigmaMs) || 0)
                 : Math.min(
                       AMPLIFY_TREND_SIGMA_MAX_MS,
-                      Math.max(
-                          AMPLIFY_TREND_SIGMA_MIN_MS,
-                          spanMs / AMPLIFY_TREND_SPAN_DIVISOR,
-                      ),
+                      Math.max(AMPLIFY_TREND_SIGMA_MIN_MS, spanMs / AMPLIFY_TREND_SPAN_DIVISOR),
                   );
         // σ 不足以形成平滑（<0.5 帧）时高斯为恒等 → trend = values → 残差 0
         // → apply 恒等（显式 trendSigmaMs=0 即"不做残差放大"）。
@@ -215,9 +212,7 @@ export function smoothSelectionValues(
     return smoothCurveGaussian(values, {
         sigmaMs: smoothSigmaMsFromUnits(units),
         framePeriodMs: Math.max(1e-6, Number(opts?.framePeriodMs) || 5),
-        valueFilter: isPitchParam(editParam)
-            ? (v) => Number.isFinite(v) && v !== 0
-            : undefined,
+        valueFilter: isPitchParam(editParam) ? (v) => Number.isFinite(v) && v !== 0 : undefined,
         leftContext: opts?.leftContext,
         rightContext: opts?.rightContext,
     });
@@ -262,10 +257,5 @@ export function transformSelectionByRightDrag(
             framePeriodMs: opts?.framePeriodMs,
         });
     }
-    return smoothSelectionValues(
-        values,
-        editParam,
-        rightDragDownSmoothStrength(dragDelta),
-        opts,
-    );
+    return smoothSelectionValues(values, editParam, rightDragDownSmoothStrength(dragDelta), opts);
 }

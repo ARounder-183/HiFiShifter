@@ -39,7 +39,8 @@ pub struct MixdownOptions {
 pub struct MixdownResult {
     pub sample_rate: u32,
     pub duration_sec: f64,
-    /// 实际导出声道数（应用 Mono 下混后）。
+    /// 实际导出声道数（应用 Mono 下混后；诊断/元数据保留字段）。
+    #[allow(dead_code)]
     pub channels: u16,
     /// 写盘字节数。
     pub bytes_written: u64,

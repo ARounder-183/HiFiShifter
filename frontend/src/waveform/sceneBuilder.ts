@@ -290,6 +290,18 @@ export function buildWaveformScene(args: {
                         sourceStartSec: 0,
                         sourceEndSec: mediaDurationSec,
                     });
+                    if (guard === 4095 && localStartSec + periodSec < visibleLocalEndSec - 1e-9) {
+                        // 超短周期 × 长循环 × 极缩放可能超出 4096 个周期的上限。
+                        // 简单截断会让剩余范围整段空白（旧实现有退化兜底）；
+                        // 剩余周期都已亚像素级，退化为覆盖余下区间的单片近似，
+                        // 视觉上是一段致密块，好过整段空白。
+                        tiles.push({
+                            localStartSec: localStartSec + periodSec,
+                            durationSec: visibleLocalEndSec - (localStartSec + periodSec),
+                            sourceStartSec: 0,
+                            sourceEndSec: mediaDurationSec,
+                        });
+                    }
                 }
 
                 const firstMarker = Math.max(
@@ -350,18 +362,36 @@ export function buildWaveformScene(args: {
                 for (let index = 0; index + 1 < boundaries.length; index += 1) {
                     const localStartSec = boundaries[index];
                     const localEndSec = boundaries[index + 1];
-                    const [pieceSourceStartSec, pieceSourceEndSec] = sourceRangeForLocal(
-                        tile,
-                        reversed,
-                        playbackRate,
-                        localStartSec,
-                        localEndSec,
-                    );
                     const x = secToViewportPx(axis, clip.startSec + localStartSec);
                     const right = secToViewportPx(axis, clip.startSec + localEndSec);
                     const clippedX = Math.max(0, x);
                     const clippedRight = Math.min(widthPx, right);
                     if (clippedRight <= clippedX) continue;
+
+                    const localSpan = localEndSec - localStartSec;
+                    let drawnLocalStartSec = localStartSec;
+                    let drawnLocalEndSec = localEndSec;
+                    if (localSpan > 1e-9 && (clippedX > x + 1e-9 || clippedRight < right - 1e-9)) {
+                        // 屏幕矩形被视口裁剪：本地区间必须按同一比例裁剪。
+                        // 几何层的像素↔源时间映射（sourceSecondsPerPixel =
+                        // 源时长 / screenRect.width）与淡化包络映射（clipLocal
+                        // 区间 / t）都基于裁剪后的宽度 —— 不一致裁剪会把波形
+                        // 拉伸（相对音频平移/错缩）且包络位置漂移。上游的
+                        // sec 级可见性裁剪通常已覆盖，本分支是浮点误差与未来
+                        // 放宽裁剪时的守护。
+                        const pxPerLocalSec = (right - x) / localSpan;
+                        drawnLocalStartSec =
+                            localStartSec + (clippedX - x) / Math.max(1e-9, pxPerLocalSec);
+                        drawnLocalEndSec =
+                            localEndSec - (right - clippedRight) / Math.max(1e-9, pxPerLocalSec);
+                    }
+                    const [pieceSourceStartSec, pieceSourceEndSec] = sourceRangeForLocal(
+                        tile,
+                        reversed,
+                        playbackRate,
+                        drawnLocalStartSec,
+                        drawnLocalEndSec,
+                    );
 
                     segments.push({
                         clipId: clip.id,
@@ -369,8 +399,8 @@ export function buildWaveformScene(args: {
                         sourceSampleRate: finitePositive(clip.sourceSampleRate ?? 44100, 44100),
                         sourceStartSec: Math.max(0, pieceSourceStartSec),
                         sourceEndSec: Math.min(mediaDurationSec, pieceSourceEndSec),
-                        clipLocalStartSec: localStartSec,
-                        clipLocalEndSec: localEndSec,
+                        clipLocalStartSec: drawnLocalStartSec,
+                        clipLocalEndSec: drawnLocalEndSec,
                         clipTotalDurationSec: clip.lengthSec,
                         screenRect: {
                             x: clippedX,

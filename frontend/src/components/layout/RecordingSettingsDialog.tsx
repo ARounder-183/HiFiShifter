@@ -47,19 +47,24 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
         void dispatch(loadRecordingApps());
     }, [open, dispatch]);
 
+    // 草稿只在“打开”这一时机初始化一次：loadRecordingSettings() 稍后回填
+    // savedSettings 会再次触发本 effect —— 若以 savedSettings 为依赖，用户
+    // 在加载间隙已修改的采样率/增益/勾选会被静默还原（pathTemplate 已有
+    // 输入中保护，其余字段没有）。经 ref 读取打开瞬间的最新已存值。
+    const savedSettingsRef = useRef(savedSettings);
+    savedSettingsRef.current = savedSettings;
     useEffect(() => {
-        if (open) {
-            setDraft((prev) => ({
-                ...savedSettings,
-                // 保留用户正在输入但尚未保存的路径模板。
-                pathTemplate:
-                    prev.pathTemplate &&
-                    prev.pathTemplate !== DEFAULT_RECORDING_SETTINGS.pathTemplate
-                        ? prev.pathTemplate
-                        : savedSettings.pathTemplate,
-            }));
-        }
-    }, [open, savedSettings]);
+        if (!open) return;
+        const saved = savedSettingsRef.current;
+        setDraft((prev) => ({
+            ...saved,
+            // 保留用户正在输入但尚未保存的路径模板（跨关闭/重开仍保留）。
+            pathTemplate:
+                prev.pathTemplate && prev.pathTemplate !== DEFAULT_RECORDING_SETTINGS.pathTemplate
+                    ? prev.pathTemplate
+                    : saved.pathTemplate,
+        }));
+    }, [open]);
 
     function getPathInputElement(): HTMLInputElement | null {
         const input = pathInputRef.current;

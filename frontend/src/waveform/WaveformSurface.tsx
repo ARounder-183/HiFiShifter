@@ -32,11 +32,11 @@ import {
 
 export interface WaveformSurfaceProps {
     rows: readonly WaveformSceneRow[];
-    widthPx: number;
     heightPx: number;
     /**
      * 统一坐标投影：视口起点、缩放倍率、滚动位置的**唯一来源**。
      * 总线驱动时会被总线快照覆盖 scrollLeftPx / pxPerSec / scrollTopPx。
+     * 绘制宽度取 axis.viewportWidthPx（props.widthPx 从未被 draw 使用，已移除）。
      */
     axis: TimelineAxis;
     color: string;
@@ -73,6 +73,8 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
      * 渲染器不得跨 `render()` 边界持有 `geometry.vertices`。
      */
     const vertexSinkRef = React.useRef<WaveformVertexSink>({ buffer: new Float32Array(0) });
+    /** 上一帧的 mipmap 选级（selectLevelStable 的迟滞基准）。 */
+    const levelStickyRef = React.useRef<0 | 1 | 2 | null>(null);
     /**
      * 几何缓存的锚点：记录「当前 GPU 上的几何是按什么窗口与缩放构建的」。
      *
@@ -232,9 +234,13 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
             scene,
             color: props.color,
             getPeaks: (sourcePath, sampleRate, sourceStartSec, sourceDurationSec) => {
-                const level = waveformMipmapStore.selectLevel(
-                    Math.max(1, Math.round(sampleRate / Math.max(1e-6, pxPerSec))),
-                );
+                // 迟滞选级：spp 在阈值附近时 selectLevel 会在两档间来回跳变
+                // （每次跳变都拉取不同级别的 peaks → 几何反复重建）；用上一帧
+                // 的选级做迟滞（与 mipmap store 的 selectLevelStable 同参数）。
+                const spp = Math.max(1, Math.round(sampleRate / Math.max(1e-6, pxPerSec)));
+                const previousLevel = levelStickyRef.current;
+                const level = waveformMipmapStore.selectLevelStable(spp, previousLevel);
+                levelStickyRef.current = level;
                 return waveformMipmapStore.getBestSliceView(
                     sourcePath,
                     level,
@@ -405,14 +411,23 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
             props.rows.flatMap((row) => row.clips.map((clip) => clip.sourcePath)),
         );
         return waveformMipmapStore.addListener((sourcePath, status) => {
-            if (status !== "done" || !needed.has(sourcePath)) return;
-            // 数据就绪会改变几何结果。「余量窗口」复用判定只看 rows 引用 /
-            // axis / 尺寸（见 draw 内 canReuse），不感知峰值数据是否已加载——
-            // 若只 invalidate，draw 会命中 canReuse 走 repaint()，把**数据缺失
-            // 时**构建的空几何原样重画一遍：表现为打开工程/导入音频并分析完成
-            // 后波形仍空白，要等滚动滚出余量或缩放才出现。必须先作废几何缓存
-            // 强制全量重建。（7286592a 修的是视口宽度不发布，本处是同一症状
-            // 的第二个根源。）
+            if (!needed.has(sourcePath)) {
+                // 不可见文件的驱逐：只需释放几何缓存里钉住的 subarray 视图
+                // （buffer 已被淘汰），不触发数据型重建 —— 下一次因滚动/缩放
+                // 发生的重绘自然会重建。
+                if (status === "evicted") {
+                    geometryCacheRef.current = null;
+                }
+                return;
+            }
+            // 数据就绪（done）或可见数据被驱逐（evicted）都会改变几何结果。
+            // 「余量窗口」复用判定只看 rows 引用 / axis / 尺寸（见 draw 内
+            // canReuse），不感知峰值数据是否已加载——若只 invalidate，draw 会
+            // 命中 canReuse 走 repaint()，把**数据缺失时**构建的空几何原样
+            // 重画一遍：表现为打开工程/导入音频并分析完成后波形仍空白，要等
+            // 滚动滚出余量或缩放才出现。必须先作废几何缓存强制全量重建。
+            // （7286592a 修的是视口宽度不发布，本处是同一症状的第二个根源。）
+            if (status !== "done" && status !== "evicted") return;
             geometryCacheRef.current = null;
             invalidate();
         });

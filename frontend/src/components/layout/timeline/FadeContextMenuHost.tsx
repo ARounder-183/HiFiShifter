@@ -28,7 +28,7 @@ import { useAppDispatch, useAppSelector } from "../../../app/hooks";
 import { setClipFades } from "../../../features/session/sessionSlice";
 import { webApi } from "../../../services/webviewApi";
 import type { ClipInfo } from "../../../features/session/sessionTypes";
-import { defaultFadeDirFor, FADE_PRESETS } from "./reaperFade";
+import { defaultFadeDirFor } from "./reaperFade";
 import { FadeContextMenu, type FadeContextSide } from "./FadeContextMenu";
 import { onFadeContextMenuRequest, onFadeCurvatureReset } from "./fadeContextMenuBus";
 import { getBulkEditableClipIds } from "./hooks/bulkClipEdit";
@@ -313,4 +313,3 @@ export const FadeContextMenuHost: React.FC = () => {
 };
 
 /** 七预设形状 id 列表便捷引用（供循环点击使用）。 */
-export const CYCLE_SHAPES = FADE_PRESETS.map((preset) => preset.shape);

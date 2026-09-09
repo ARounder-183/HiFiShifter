@@ -10,7 +10,9 @@ import {
 /** 构造带 closest 链的最小元素桩（模拟 DOM 中的 target 及其祖先）。
  * 与真实 closest 一致：从自身起向上查找第一个带有该属性的节点。 */
 function fakeTarget(chain: (string | null)[]): EventTarget {
-    const makeNode = (i: number): {
+    const makeNode = (
+        i: number,
+    ): {
         getAttribute: (name: string) => string | null;
         closest: (selector: string) => unknown;
     } => ({

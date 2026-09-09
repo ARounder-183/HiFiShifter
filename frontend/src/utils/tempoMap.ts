@@ -354,13 +354,23 @@ export const DEFAULT_TIME_SIGNATURE: TempoTimeSignature = { numerator: 4, denomi
  * 计算每个变化点“生效拍号”的一趟扫描结果（与 points 等长）：
  * 从前往后携带最近一个显式拍号；0 位置点必须显式（规范化保证），
  * 因此任何位置都有确定的值。
+ *
+ * 结果按 map 引用缓存（WeakMap）：TempoMap 是不可变更新（每次编辑产生新
+ * 引用），而该函数被标尺/网格热路径每帧数百次调用，逐次 map 重建数组
+ * 是纯浪费。
  */
+const effectiveTimeSignaturesCache = new WeakMap<TempoMap, TempoTimeSignature[]>();
+
 export function effectiveTimeSignatures(map: TempoMap): TempoTimeSignature[] {
+    const cached = effectiveTimeSignaturesCache.get(map);
+    if (cached) return cached;
     let carry: TempoTimeSignature | null = null;
-    return map.points.map((point) => {
+    const result = map.points.map((point) => {
         if (point.timeSignature) carry = point.timeSignature;
         return carry ?? DEFAULT_TIME_SIGNATURE;
     });
+    effectiveTimeSignaturesCache.set(map, result);
+    return result;
 }
 
 /** 下标处变化点的生效拍号（跟随之前的拍号时解析为实际值）。 */
@@ -411,8 +421,9 @@ export function tempoAtSec(
         const beatsPerBar = clampNumerator(fallback.beatsPerBar || 4);
         return { bpm: clampBpm(fallback.bpm), numerator: beatsPerBar, denominator: 4 };
     }
-    const point = map.points[pointIndexAtSec(map, sec)];
-    const sig = effectiveTimeSignatureAt(map, pointIndexAtSec(map, sec));
+    const idx = pointIndexAtSec(map, sec);
+    const point = map.points[idx];
+    const sig = effectiveTimeSignatures(map)[idx];
     return {
         bpm: point.bpm,
         numerator: sig.numerator,
@@ -725,7 +736,14 @@ export function snapSecToTempoGrid(
     const point = map.points[idx];
     const bpm = Math.max(1, point.bpm);
     const localBeat = (safeSec - point.positionSec) * (bpm / 60);
-    const snappedLocal = Math.max(0, Math.round(localBeat / safeStep) * safeStep);
+    let snappedLocal = Math.max(0, Math.round(localBeat / safeStep) * safeStep);
+    // 就近取整可能越过段末（落进下一段的地界），而可见网格线只在段内
+    // 生成 —— 钳到段末保证吸附落点始终落在一条可见网格线上。
+    const nextPoint = map.points[idx + 1];
+    if (nextPoint) {
+        const segEndBeat = ((nextPoint.positionSec - point.positionSec) * bpm) / 60;
+        snappedLocal = Math.min(snappedLocal, segEndBeat);
+    }
     return point.positionSec + (snappedLocal * 60) / bpm;
 }
 

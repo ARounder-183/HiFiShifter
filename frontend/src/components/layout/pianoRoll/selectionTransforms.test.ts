@@ -20,8 +20,7 @@ describe("smoothSelectionValues（高斯化后的「平滑化」op）", () => {
         const wobble = [60, 62, 60, 58, 60, 62, 60, 58, 60];
         const weak = smoothSelectionValues(wobble, "loudness", 0.2, { framePeriodMs: 5 });
         const strong = smoothSelectionValues(wobble, "loudness", 0.9, { framePeriodMs: 5 });
-        const peakDeviation = (arr: number[]) =>
-            Math.max(...arr.map((v) => Math.abs(v - 60)));
+        const peakDeviation = (arr: number[]) => Math.max(...arr.map((v) => Math.abs(v - 60)));
         expect(peakDeviation(strong)).toBeLessThan(peakDeviation(weak));
         expect(peakDeviation(weak)).toBeLessThan(2);
     });

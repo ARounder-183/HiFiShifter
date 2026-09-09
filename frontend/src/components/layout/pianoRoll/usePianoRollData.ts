@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { ParamFramesPayload } from "../../../types/api";
 import { paramsApi } from "../../../services/api";
@@ -24,8 +24,8 @@ export function usePianoRollData(args: {
     scrollLeftRef: React.MutableRefObject<number>;
     pxPerBeatRef: React.MutableRefObject<number>;
     invalidate: () => void;
-    /** 澶栭儴閫氱煡褰撳墠鏄惁姝ｅ湪杩涜 live 缂栬緫锛坧ointer down 鏈熼棿锟?true锛夛拷?
-     *  锟?true 鏃讹紝pitch_orig_updated 瑙﹀彂鐨勬洸绾垮埛鏂颁細琚帹杩熷埌 pointer-up 鍚庢墽琛岋拷?*/
+    /** 外部通知当前是否正在进行 live 编辑（pointer down 期间为 true）。
+     *  为 true 时，pitch_orig_updated 触发的曲线刷新会被推迟到 pointer-up 后执行。 */
     liveEditActiveRef?: React.MutableRefObject<boolean>;
 }) {
     const {
@@ -47,14 +47,14 @@ export function usePianoRollData(args: {
         liveEditActiveRef: externalLiveEditActiveRef,
     } = args;
 
-    // 鍐呴儴 fallback锛氳嫢澶栭儴鏈紶锟?liveEditActiveRef锛屽垯浣跨敤鍐呴儴 ref锛堝缁堜负 false锛夛拷?
+    // 内部 fallback：若外部未传入 liveEditActiveRef，则使用内部 ref（始终为 false）。
     const internalLiveEditActiveRef = useRef(false);
     const liveEditActiveRef = externalLiveEditActiveRef ?? internalLiveEditActiveRef;
 
-    // 锟?pitch_orig_updated 鍒拌揪鏃惰嫢姝ｅ湪缂栬緫锛屽皢鍒锋柊鎺ㄨ繜锟?pointer-up 鍚庢墽琛岋拷?
+    // pitch_orig_updated 到达时若正在编辑，将刷新推迟到 pointer-up 后执行。
     const pendingPitchUpdatedRefreshRef = useRef(false);
     const [paramView, setParamView] = useState<ParamViewSegment | null>(null);
-    // 鍓弬鏁版洸绾匡紙锟?edit锛岀敤浜庡彔鍔犳樉绀猴級
+    // 副参数曲线（与 edit 区分，用于叠加显示）
     const [secondaryParamViews, setSecondaryParamViews] = useState<
         Partial<Record<ParamName, ParamViewSegment>>
     >({});
@@ -95,7 +95,7 @@ export function usePianoRollData(args: {
     const lastAppliedForceParamFetchTokenRef = useRef(0);
 
     // Force parameter refresh when the session state changes meaningfully (undo/redo/timeline edits).
-    // 鍚屾椂娓呴櫎鏃ф洸绾挎暟鎹紝閬垮厤鏃ф暟鎹湪鏂版暟鎹埌杈惧墠鐭殏鏄剧ず锛堜篃淇鍒濇瀵煎叆鍚庢洸绾夸笉鏄剧ず鐨勯棶棰橈級锟?
+    // 同时清除旧曲线数据，避免旧数据在新数据到达前短暂显示（也修复初次导入后曲线不显示的问题）。
     useEffect(() => {
         if (!rootTrackId) return;
         setParamView(null);
@@ -104,9 +104,9 @@ export function usePianoRollData(args: {
         setForceParamFetchToken((x) => x + 1);
     }, [paramsEpoch, rootTrackId]);
 
-    // 鐩戝惉 pitch_orig_updated 浜嬩欢锛岃Е鍙戞洸绾垮埛鏂帮拷?
-    // 娉ㄦ剰锛氬垎鏋愯繘搴︾姸鎬侊紙started/progress锛夌敱鍏ㄥ眬 PitchAnalysisProvider 缁熶竴绠＄悊锟?
-    // 姝ゅ鍙礋璐ｅ湪鍒嗘瀽瀹屾垚鍚庡埛锟?PianoRoll 鏇茬嚎鏁版嵁锟?
+    // 监听 pitch_orig_updated 事件，触发曲线刷新。
+    // 注意：分析进度状态（started/progress）由全局 PitchAnalysisProvider 统一管理。
+    // 此处只负责在分析完成后刷新 PianoRoll 曲线数据。
     useEffect(() => {
         let disposed = false;
         let unlistenUpdated: null | (() => void) = null;
@@ -165,7 +165,7 @@ export function usePianoRollData(args: {
         setReferencePitchViews({});
     }, [editParam, pitchEnabled]);
 
-    // 锟?editParam 鍒囨崲鏃讹紝娓呴櫎鍓弬鏁扮紦锟?
+    // editParam 切换时，清除副参数缓存。
     useEffect(() => {
         setSecondaryParamViews({});
     }, [editParam, rootTrackId]);
@@ -253,10 +253,8 @@ export function usePianoRollData(args: {
         const paramStartSecQ = Math.max(0, q(covParamStartSec));
         const paramDurSecQ = Math.max(quantStepSec, q(covParamDurSec));
 
-        // DEBUG: Log data request parameters
-        const debugEnabled =
-            typeof window !== "undefined" &&
-            window.localStorage?.getItem("hifishifter.debugPianoRoll") === "1";
+        // DEBUG: Log data request parameters（复用函数入口已读取的 debug 开关）
+        const debugEnabled = debug;
 
         if (debugEnabled) {
             console.log("[usePianoRollData] Request params:", {
@@ -450,7 +448,7 @@ export function usePianoRollData(args: {
             })();
         }
 
-        // 鍓弬鏁板紓姝ュ姞杞斤紙鐙珛璇锋眰锛屼笉褰卞搷涓诲弬鏁板埛鏂伴€昏緫锟?
+        // 副参数异步加载（独立请求，不影响主参数刷新逻辑）。
         void (async () => {
             if (req.secondaryRequests.length === 0) return;
             const secReqId = ++secondaryFetchReqIdRef.current;
@@ -514,9 +512,8 @@ export function usePianoRollData(args: {
 
         if (shouldFetchParam) {
             void (async () => {
-                const debugEnabled =
-                    typeof window !== "undefined" &&
-                    window.localStorage?.getItem("hifishifter.debugPianoRoll") === "1";
+                // 复用外层已读取的 debug 开关，避免每次取数都同步访问 localStorage
+                const debugEnabled = debug;
                 beginLoading();
                 try {
                     if (debugEnabled) {
@@ -925,6 +922,7 @@ export function usePianoRollData(args: {
         editParam,
         secondaryParamIds,
         referenceRootTrackIds,
+        pitchEnabled,
         scrollLeft,
         pxPerBeat,
         secPerBeat,
@@ -934,8 +932,8 @@ export function usePianoRollData(args: {
     ]);
 
     /**
-     * 鐢卞閮紙PianoRollPanel锛夊湪 pointer-up 鏃惰皟鐢紝閫氱煡 live 缂栬緫宸茬粨鏉燂拷?
-     * 鑻ユ鍓嶆湁琚帹杩熺殑 pitch_orig_updated 鍒锋柊锛屾鏃剁珛鍗宠Е鍙戯拷?
+     * 由外部（PianoRollPanel）在 pointer-up 时调用，通知 live 编辑已经结束。
+     * 若此前有被推迟的 pitch_orig_updated 刷新，此时立即触发。
      */
     function notifyLiveEditEnded() {
         if (pendingPitchUpdatedRefreshRef.current) {
@@ -945,18 +943,23 @@ export function usePianoRollData(args: {
         }
     }
 
+    // 引用必须跨渲染稳定：它被下游 commitStroke / onCanvasPointerDown 等
+    // 长依赖数组的 useCallback 链消费，内联箭头函数会让整条 memo 体系
+    // 每次渲染都失效重建。
+    const bumpRefreshToken = useCallback(() => {
+        setRefreshToken((x) => x + 1);
+        // Also bump forceParamFetchToken so refreshVisible() bypasses the
+        // "paramCoversVisible" cache check and actually re-fetches data
+        // from the backend after edit operations.
+        setForceParamFetchToken((x) => x + 1);
+    }, []);
+
     return {
         paramView,
         setParamView,
         secondaryParamViews,
         referencePitchViews,
-        bumpRefreshToken: () => {
-            setRefreshToken((x) => x + 1);
-            // Also bump forceParamFetchToken so refreshVisible() bypasses the
-            // "paramCoversVisible" cache check and actually re-fetches data
-            // from the backend after edit operations.
-            setForceParamFetchToken((x) => x + 1);
-        },
+        bumpRefreshToken,
         refreshNow,
         refreshSecondaryNow,
         notifyLiveEditEnded,

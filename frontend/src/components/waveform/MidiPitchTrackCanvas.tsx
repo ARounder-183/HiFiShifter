@@ -388,8 +388,12 @@ export const MidiPitchTrackCanvas = React.memo(
             ctx.setTransform(scaleX, 0, 0, scaleY, 0, 0);
             ctx.clearRect(0, 0, displayW, displayH);
 
-            canvas.style.width = `${displayW}px`;
-            canvas.style.height = `${displayH}px`;
+            // 尺寸未变时跳过 style 写入：每帧无条件赋值会触发浏览器样式
+            // 失效检查，滚动帧纯属浪费（与 WaveformTrackCanvas 的相等性守卫同模式）。
+            const nextStyleW = `${displayW}px`;
+            const nextStyleH = `${displayH}px`;
+            if (canvas.style.width !== nextStyleW) canvas.style.width = nextStyleW;
+            if (canvas.style.height !== nextStyleH) canvas.style.height = nextStyleH;
 
             // 只处理 MIDI clip
             for (const clip of currentClips) {

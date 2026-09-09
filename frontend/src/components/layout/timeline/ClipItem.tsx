@@ -309,6 +309,12 @@ export const ClipItem = React.memo(function ClipItem({
      */
     const fadeCornerReserve = fadeCornerReservePx(bodyHeight);
 
+    // bodyHeight 渲染期镜像：曲率拖拽环境在 pointerdown 时按行高推导
+    // gain 基准线，若垂直缩放（rowHeight 变）后回调未重建，闭包里的
+    // bodyHeight 是旧行高，曲率映射会系统性偏差。经 ref 读取最新值。
+    const bodyHeightRef = React.useRef(bodyHeight);
+    bodyHeightRef.current = bodyHeight;
+
     const startDeferredFadeEditDrag = React.useCallback(
         (e: React.PointerEvent<HTMLDivElement>, type: "fade_in" | "fade_out") => {
             // 仅左键触发渐变编辑：中键（aux click/自动滚动）与右键（上下文菜单）
@@ -358,7 +364,7 @@ export const ClipItem = React.memo(function ClipItem({
                     const rect = targetEl.getBoundingClientRect();
                     fadePointerEnv = {
                         envTopClientY: rect.top - hitYLocal,
-                        bodyHeightPx: bodyHeight,
+                        bodyHeightPx: bodyHeightRef.current,
                     };
                 }
             }

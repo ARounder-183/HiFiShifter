@@ -135,63 +135,82 @@ export function useLiveParamEditing(args: {
                 setParamView({ ...pv, edit: nextEdit });
             }
 
-            if (mode === "restore") {
-                applyToParamViewDense(minF, null);
-                liveEditOverrideRef.current = null;
-                invalidate();
-                await paramsApi.restoreParamFrames(trackId, editParam, minF, maxF - minF + 1, true);
-                bumpRefreshToken();
-                return;
-            }
-
-            const len = maxF - minF + 1;
-            const out = new Array<number>(len);
-
-            // Prefer committing the exact dense values that were shown in the live preview.
-            // This keeps the committed curve identical to what the user saw.
-            const pvEdit = (() => {
-                const pvNow = paramView;
-                if (!pvNow) return null;
-                const live = liveEditOverrideRef.current;
-                if (live && live.key === pvNow.key) return live.edit;
-                return pvNow.edit;
-            })();
-            const pvStart = paramView?.startFrame ?? 0;
-            const pvStride = paramView?.stride ?? 1;
-
-            const canSliceFromPv =
-                Boolean(paramView) && pvStride === 1 && Array.isArray(pvEdit) && pvEdit.length > 0;
-
-            if (canSliceFromPv) {
-                for (let f = minF; f <= maxF; f += 1) {
-                    const i = f - pvStart;
-                    out[f - minF] =
-                        i >= 0 && i < (pvEdit as number[]).length
-                            ? ((pvEdit as number[])[i] ?? 0)
-                            : 0;
+            // 提交是 fire-and-forget 调用（调用方不 await），任何 IPC 失败都必须
+            // 在此兜底：否则 unhandledrejection，且 live 预览层会冻结在半提交状态。
+            try {
+                if (mode === "restore") {
+                    applyToParamViewDense(minF, null);
+                    liveEditOverrideRef.current = null;
+                    invalidate();
+                    await paramsApi.restoreParamFrames(
+                        trackId,
+                        editParam,
+                        minF,
+                        maxF - minF + 1,
+                        true,
+                    );
+                    bumpRefreshToken();
+                    return;
                 }
-            } else {
-                // Fallback: replay the stroke in time order onto a dense buffer.
-                for (let i = 0; i < len; i += 1) out[i] = uniq[0].value;
-                for (let sIdx = 0; sIdx < uniq.length - 1; sIdx += 1) {
-                    const a = uniq[sIdx];
-                    const b = uniq[sIdx + 1];
-                    const minSeg = Math.min(a.frame, b.frame);
-                    const maxSeg = Math.max(a.frame, b.frame);
-                    const denom = b.frame - a.frame;
-                    for (let f = minSeg; f <= maxSeg; f += 1) {
-                        if (f < minF || f > maxF) continue;
-                        const t = denom === 0 ? 1 : (f - a.frame) / denom;
-                        out[f - minF] = a.value + (b.value - a.value) * t;
+
+                const len = maxF - minF + 1;
+                const out = new Array<number>(len);
+
+                // Prefer committing the exact dense values that were shown in the live preview.
+                // This keeps the committed curve identical to what the user saw.
+                const pvEdit = (() => {
+                    const pvNow = paramView;
+                    if (!pvNow) return null;
+                    const live = liveEditOverrideRef.current;
+                    if (live && live.key === pvNow.key) return live.edit;
+                    return pvNow.edit;
+                })();
+                const pvStart = paramView?.startFrame ?? 0;
+                const pvStride = paramView?.stride ?? 1;
+
+                const canSliceFromPv =
+                    Boolean(paramView) &&
+                    pvStride === 1 &&
+                    Array.isArray(pvEdit) &&
+                    pvEdit.length > 0;
+
+                if (canSliceFromPv) {
+                    for (let f = minF; f <= maxF; f += 1) {
+                        const i = f - pvStart;
+                        out[f - minF] =
+                            i >= 0 && i < (pvEdit as number[]).length
+                                ? ((pvEdit as number[])[i] ?? 0)
+                                : 0;
+                    }
+                } else {
+                    // Fallback: replay the stroke in time order onto a dense buffer.
+                    for (let i = 0; i < len; i += 1) out[i] = uniq[0].value;
+                    for (let sIdx = 0; sIdx < uniq.length - 1; sIdx += 1) {
+                        const a = uniq[sIdx];
+                        const b = uniq[sIdx + 1];
+                        const minSeg = Math.min(a.frame, b.frame);
+                        const maxSeg = Math.max(a.frame, b.frame);
+                        const denom = b.frame - a.frame;
+                        for (let f = minSeg; f <= maxSeg; f += 1) {
+                            if (f < minF || f > maxF) continue;
+                            const t = denom === 0 ? 1 : (f - a.frame) / denom;
+                            out[f - minF] = a.value + (b.value - a.value) * t;
+                        }
                     }
                 }
-            }
 
-            await paramsApi.setParamFrames(trackId, editParam, minF, out, true);
-            applyToParamViewDense(minF, out);
-            liveEditOverrideRef.current = null;
-            invalidate();
-            bumpRefreshToken();
+                await paramsApi.setParamFrames(trackId, editParam, minF, out, true);
+                applyToParamViewDense(minF, out);
+                liveEditOverrideRef.current = null;
+                invalidate();
+                bumpRefreshToken();
+            } catch (err) {
+                // 失败时复位 live 预览层，避免覆盖层冻结；状态由下一次
+                // refresh（paramsEpoch/滚动等）对账恢复。
+                liveEditOverrideRef.current = null;
+                invalidate();
+                console.error("[commitStroke] failed:", err);
+            }
         },
         [
             rootTrackId,

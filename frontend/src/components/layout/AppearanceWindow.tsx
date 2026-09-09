@@ -517,6 +517,16 @@ export const AppearanceWindow: React.FC = () => {
     const systemFonts = useSystemFonts();
     const fileInputRef = useRef<HTMLInputElement>(null);
 
+    /**
+     * 未保存草稿标记：任何用户编辑（调色板/强调色/圆角/字体/主题名/主题
+     * 选择/导入）置位，focus / storage 同步据此跳过对编辑态的覆盖。
+     * 应用（handleApply）会落盘并关闭窗口，无需复位。
+     */
+    const draftDirtyRef = useRef(false);
+    const markDraftDirty = useCallback(() => {
+        draftDirtyRef.current = true;
+    }, []);
+
     /* ── 初始化 ── */
     useEffect(() => {
         const themes = loadCustomThemes();
@@ -535,6 +545,11 @@ export const AppearanceWindow: React.FC = () => {
 
     useEffect(() => {
         const syncFromStorage = () => {
+            // 有未保存的草稿（用户正在编辑颜色/主题名/字体等，尚未点“应用”）
+            // 时，focus / storage / appearance-applied 同步一律跳过：否则在
+            // 编辑过程中点一下主窗口再切回来（或收到外部应用事件），全部
+            // 草稿会被 localStorage 旧值静默覆盖。
+            if (draftDirtyRef.current) return;
             const latest = loadAppearance();
             theme.applySettings(latest);
             setAccentColor(latest.accentColor);
@@ -589,10 +604,11 @@ export const AppearanceWindow: React.FC = () => {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
-    /* ── 强调色 → 灰阶自动映射 ── */
-    useEffect(() => {
-        setGrayColor(getAutoGray(accentColor));
-    }, [accentColor]);
+    /* ── 强调色 → 灰阶自动映射 ──
+     * 注意：映射只应在“用户点击强调色块”时执行一次（见强调色点击处理器）。
+     * 不能用 effect 监听 accentColor —— 任何来源的 accentColor 变化
+     * （focus 同步、主题选择带出的 grayColor）都会被自动映射覆盖，用户
+     * 手动选择的不同灰阶会被静默改掉。 */
 
     /* ── 内置颜色 ── */
     const builtinColors = useMemo(() => getBuiltinThemeColors(theme.mode), [theme.mode]);
@@ -731,6 +747,7 @@ export const AppearanceWindow: React.FC = () => {
 
     /* ── 颜色操作 ── */
     const handleResetColors = useCallback(() => {
+        markDraftDirty();
         setEditColors((prev) => {
             const next = { ...prev };
             for (const token of paletteTokens) {
@@ -741,17 +758,21 @@ export const AppearanceWindow: React.FC = () => {
         setEditWaveform(undefined);
         setEditThemeName("");
         setActiveThemeId(null);
-    }, [paletteTokens]);
+    }, [paletteTokens, markDraftDirty]);
 
-    const handleSelectTheme = useCallback((item: CustomTheme) => {
-        setActiveThemeId(item.id);
-        setEditColors(item.colors);
-        setEditWaveform(item.waveformColors);
-        setEditThemeName(item.name);
-        if (item.accentColor) setAccentColor(item.accentColor);
-        if (item.grayColor) setGrayColor(item.grayColor);
-        if (item.radius) setRadius(item.radius);
-    }, []);
+    const handleSelectTheme = useCallback(
+        (item: CustomTheme) => {
+            markDraftDirty();
+            setActiveThemeId(item.id);
+            setEditColors(item.colors);
+            setEditWaveform(item.waveformColors);
+            setEditThemeName(item.name);
+            if (item.accentColor) setAccentColor(item.accentColor);
+            if (item.grayColor) setGrayColor(item.grayColor);
+            if (item.radius) setRadius(item.radius);
+        },
+        [markDraftDirty],
+    );
 
     const handleDeleteTheme = useCallback(
         (id: string) => {
@@ -806,6 +827,7 @@ export const AppearanceWindow: React.FC = () => {
             reader.onload = () => {
                 const result = importThemeFromJson(reader.result as string);
                 if (result) {
+                    markDraftDirty();
                     const updated = [...customThemes, result.theme];
                     setCustomThemes(updated);
                     saveCustomThemes(updated);
@@ -821,12 +843,16 @@ export const AppearanceWindow: React.FC = () => {
             reader.readAsText(file);
             e.target.value = "";
         },
-        [customThemes],
+        [customThemes, markDraftDirty],
     );
 
-    const updateColorToken = useCallback((token: QtColorToken, value: string) => {
-        setEditColors((prev) => ({ ...prev, [token]: value }));
-    }, []);
+    const updateColorToken = useCallback(
+        (token: QtColorToken, value: string) => {
+            markDraftDirty();
+            setEditColors((prev) => ({ ...prev, [token]: value }));
+        },
+        [markDraftDirty],
+    );
 
     const modifiedColorCount = useMemo(
         () =>
@@ -982,7 +1008,10 @@ export const AppearanceWindow: React.FC = () => {
                                             <input
                                                 type="text"
                                                 value={editThemeName}
-                                                onChange={(e) => setEditThemeName(e.target.value)}
+                                                onChange={(e) => {
+                                                    markDraftDirty();
+                                                    setEditThemeName(e.target.value);
+                                                }}
                                                 className="flex-1 rounded border border-qt-border bg-qt-base px-2 py-1.5 text-[11px] text-qt-text focus:outline-none focus:ring-1 focus:ring-qt-highlight/30 transition-all"
                                                 placeholder={tAny("appearance_custom_theme")}
                                             />
@@ -1023,11 +1052,15 @@ export const AppearanceWindow: React.FC = () => {
                                                     <div className="absolute bottom-1 left-1.5 right-1.5 flex gap-0.5">
                                                         <div
                                                             className="h-1.5 flex-1 rounded-sm"
-                                                            style={{ backgroundColor: preview.bar1 }}
+                                                            style={{
+                                                                backgroundColor: preview.bar1,
+                                                            }}
                                                         />
                                                         <div
                                                             className="h-1.5 flex-1 rounded-sm"
-                                                            style={{ backgroundColor: preview.bar2 }}
+                                                            style={{
+                                                                backgroundColor: preview.bar2,
+                                                            }}
                                                         />
                                                     </div>
                                                 </div>
@@ -1072,7 +1105,12 @@ export const AppearanceWindow: React.FC = () => {
                                                         "var(--qt-panel)",
                                                 }}
                                                 onClick={() => {
+                                                    markDraftDirty();
                                                     setAccentColor(c);
+                                                    // 强调色 → 灰阶自动映射只在用户
+                                                    // 主动点选强调色时执行一次（主题
+                                                    // 自带/存储带入的 grayColor 不被覆盖）。
+                                                    setGrayColor(getAutoGray(c));
                                                 }}
                                             >
                                                 {isSelected && (
@@ -1111,7 +1149,10 @@ export const AppearanceWindow: React.FC = () => {
                                                         ? "bg-qt-highlight/12"
                                                         : "bg-qt-base hover:bg-qt-hover")
                                                 }
-                                                onClick={() => setRadius(r)}
+                                                onClick={() => {
+                                                    markDraftDirty();
+                                                    setRadius(r);
+                                                }}
                                             >
                                                 <div
                                                     className="w-7 h-5 border-2 transition-colors duration-100"
@@ -1196,22 +1237,27 @@ export const AppearanceWindow: React.FC = () => {
                                     <input
                                         type="text"
                                         value={fontFamily}
-                                        onChange={(e: ChangeEvent<HTMLInputElement>) =>
-                                            setFontFamily(e.target.value)
-                                        }
+                                        onChange={(e: ChangeEvent<HTMLInputElement>) => {
+                                            markDraftDirty();
+                                            setFontFamily(e.target.value);
+                                        }}
                                         className="flex-1 rounded-xl border border-[color:var(--qt-divider)] bg-qt-surface/40 px-3 py-2 text-[11px] text-qt-text font-mono focus:outline-none focus:ring-1 focus:ring-qt-highlight/30 transition-all"
                                         placeholder={DEFAULT_FONT_FAMILY}
                                         spellCheck={false}
                                     />
                                     <button
                                         className={SECONDARY_BUTTON_CLASS}
-                                        onClick={() => setFontFamily(DEFAULT_FONT_FAMILY)}
+                                        onClick={() => {
+                                            markDraftDirty();
+                                            setFontFamily(DEFAULT_FONT_FAMILY);
+                                        }}
                                     >
                                         {tAny("appearance_reset")}
                                     </button>
                                     <button
                                         className={SECONDARY_BUTTON_CLASS}
                                         onClick={() => {
+                                            markDraftDirty();
                                             setFontFamily(DEFAULT_FONT_FAMILY);
                                             setFontSearch("");
                                         }}
@@ -1323,6 +1369,7 @@ export const AppearanceWindow: React.FC = () => {
                                                                     : "border-transparent text-qt-text hover:border-[color:var(--qt-divider)] hover:bg-qt-surface/40")
                                                             }
                                                             onClick={() => {
+                                                                markDraftDirty();
                                                                 setFontFamily(f);
                                                                 setFontSearch("");
                                                             }}

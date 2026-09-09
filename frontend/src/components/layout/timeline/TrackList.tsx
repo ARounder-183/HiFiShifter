@@ -780,9 +780,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
             e.stopPropagation();
             const fine = isModifierActive(paramFineAdjustKb, e);
             const direction = e.deltaY < 0 ? 1 : -1;
-            const step = fine
-                ? TRACK_GAIN_WHEEL_FINE_STEP_DB
-                : TRACK_GAIN_WHEEL_STEP_DB;
+            const step = fine ? TRACK_GAIN_WHEEL_FINE_STEP_DB : TRACK_GAIN_WHEEL_STEP_DB;
             const parsed = parseFloat(editingGainValue);
             const current = Number.isFinite(parsed) ? parsed : 0;
             const next = clampGainDb(current + direction * step);
@@ -1097,8 +1095,20 @@ const TrackListInner: React.FC<TrackListProps> = ({
             fineActive: isModifierActive(paramFineAdjustKb, e.nativeEvent),
         };
 
+        // tooltip 位置 rAF 合帧：setVolumeTooltipPos 每次都会让整个 TrackList
+        // （含全部轨道行）重渲，pointermove 频率下逐事件执行纯属浪费。
+        let tooltipRafId: number | null = null;
+        let queuedTooltip: { x: number; y: number } | null = null;
         const onMove = (ev: PointerEvent) => {
-            setVolumeTooltipPos({ x: ev.clientX, y: ev.clientY });
+            queuedTooltip = { x: ev.clientX, y: ev.clientY };
+            if (tooltipRafId == null) {
+                tooltipRafId = requestAnimationFrame(() => {
+                    tooltipRafId = null;
+                    const queued = queuedTooltip;
+                    queuedTooltip = null;
+                    if (queued) setVolumeTooltipPos(queued);
+                });
+            }
             const adjustedY = advanceFineAxisDrag(
                 fineAxisState,
                 ev.clientY,
@@ -1119,6 +1129,10 @@ const TrackListInner: React.FC<TrackListProps> = ({
             window.removeEventListener("pointermove", onMove);
             window.removeEventListener("pointerup", onEnd);
             window.removeEventListener("pointercancel", onEnd);
+            if (tooltipRafId != null) {
+                cancelAnimationFrame(tooltipRafId);
+                tooltipRafId = null;
+            }
             setVolumeDrag(null);
             onVolumeCommit(trackId, dbToGain(lastDb));
         };
@@ -1447,6 +1461,22 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                         let lastClientX = e.clientX;
                                         let lastClientY = e.clientY;
 
+                                        // 拖放指示重算 rAF 合帧：onMove 的 computeDropSpec
+                                        // + trackAtClientY + 指示线求值是数百 Hz 的纯浪费，
+                                        // 整行列表也随 setDragUi 逐事件重渲；合帧到每帧
+                                        // 一次（与 useClipDrag 的 ticking 模式一致）。
+                                        let dragUiRafId: number | null = null;
+                                        let queuedMoveEvent: PointerEvent | null = null;
+                                        function scheduleDragUi() {
+                                            if (dragUiRafId != null) return;
+                                            dragUiRafId = requestAnimationFrame(() => {
+                                                dragUiRafId = null;
+                                                const pending = queuedMoveEvent;
+                                                queuedMoveEvent = null;
+                                                if (pending != null) applyDragUi(pending);
+                                            });
+                                        }
+
                                         function onMove(ev: PointerEvent) {
                                             const drag = dragRef.current;
                                             if (!drag || drag.pointerId !== e.pointerId) return;
@@ -1465,6 +1495,12 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                 document.body.style.userSelect = "none";
                                             }
 
+                                            scheduleDragUi();
+                                        }
+
+                                        function applyDragUi(ev: PointerEvent) {
+                                            const drag = dragRef.current;
+                                            if (!drag || drag.pointerId !== e.pointerId) return;
                                             // 复制拖动修饰键按住时：预览与放置都按
                                             // “源轨道不剔除”的复制索引计算。
                                             const copyMode = Boolean(
@@ -1529,6 +1565,11 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                             window.removeEventListener("pointermove", onMove);
                                             window.removeEventListener("pointerup", end);
                                             window.removeEventListener("pointercancel", end);
+                                            if (dragUiRafId != null) {
+                                                cancelAnimationFrame(dragUiRafId);
+                                                dragUiRafId = null;
+                                            }
+                                            queuedMoveEvent = null;
 
                                             document.body.style.cursor = prevCursor;
                                             document.body.style.userSelect = prevSelect;

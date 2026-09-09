@@ -77,17 +77,19 @@ export function PitchAnalysisProvider({ children }: { children: ReactNode }) {
                     const completed = Number(progress.completedClips ?? 0);
                     const finished =
                         p >= 1 || (progress.totalClips > 0 && completed >= progress.totalClips);
+                    // 复位即可，绝不能提前 return：后面的监听器注册
+                    // 仍必须执行，否则本会话内再发起的新分析将没有进度事件可听。
                     if (finished) {
                         setStateRaw(DEFAULT_STATE);
-                        return;
+                    } else {
+                        setStateRaw({
+                            pending: true,
+                            progress: Number.isFinite(p) ? Math.max(0, Math.min(1, p)) : 0,
+                            currentClip: progress.currentClipName ?? null,
+                            completedClips: progress.completedClips ?? null,
+                            totalClips: progress.totalClips ?? null,
+                        });
                     }
-                    setStateRaw({
-                        pending: true,
-                        progress: Number.isFinite(p) ? Math.max(0, Math.min(1, p)) : 0,
-                        currentClip: progress.currentClipName ?? null,
-                        completedClips: progress.completedClips ?? null,
-                        totalClips: progress.totalClips ?? null,
-                    });
                 }
             } catch {
                 // 非 Tauri 环境忽略
@@ -122,6 +124,11 @@ export function PitchAnalysisProvider({ children }: { children: ReactNode }) {
                         });
                     },
                 );
+                if (disposed) {
+                    unlistenStarted();
+                    unlistenStarted = null;
+                    return;
+                }
 
                 unlistenProgress = await mod.listen<ProgressPayload>(
                     "pitch_orig_analysis_progress",
@@ -150,6 +157,11 @@ export function PitchAnalysisProvider({ children }: { children: ReactNode }) {
                         });
                     },
                 );
+                if (disposed) {
+                    unlistenProgress();
+                    unlistenProgress = null;
+                    return;
+                }
 
                 unlistenUpdated = await mod.listen<UpdatedPayload>(
                     "pitch_orig_updated",
@@ -159,6 +171,11 @@ export function PitchAnalysisProvider({ children }: { children: ReactNode }) {
                         setStateRaw(DEFAULT_STATE);
                     },
                 );
+                if (disposed) {
+                    unlistenUpdated();
+                    unlistenUpdated = null;
+                    return;
+                }
             } catch {
                 // Safe no-op：浏览器 / pywebview 构建中没有 Tauri API。
             }

@@ -573,6 +573,10 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
     useEffect(() => {
         dragPxPerSecRef.current = pxPerSec;
     }, [pxPerSec]);
+    // 拖拽期间经 ref 读取实时 tempoMap：拖拽每帧 onChange(draft) 都会更新
+    // map，若把它放进拖拽 effect 的依赖，effect 会每帧卸载/重挂 3 个
+    // window 监听 + abort 注册（与 dragPxPerSecRef 同理要避免）。
+    const dragTempoMapRef = useRef<TempoMap | null>(tempoMap);
     const dragScrollLeftRef = useRef(scrollLeft);
     useEffect(() => {
         dragScrollLeftRef.current = scrollLeft;
@@ -581,6 +585,8 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
     useEffect(() => {
         dragViewportWidthRef.current = viewportWidth;
     }, [viewportWidth]);
+    // tempoMap 镜像保持与最新渲染同步（拖拽中每帧更新也持续跟随）。
+    dragTempoMapRef.current = tempoMap;
     /** 已消费的编辑请求：防止同一个请求在 effect 重跑时被重复处理（重复建点）。 */
     const consumedEditRequestRef = useRef<TempoPointEditRequest | null>(null);
 
@@ -1144,21 +1150,15 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
 
     useEffect(() => {
         if (!draggingId) return;
-        if (!tempoMap) {
-            // 拖拽进行中 Tempo Map 被外部清空（撤销/远程同步等）：没有可提交的
-            // map，按取消收尾，防止 dragRef / 吸附手势深度 / 拖拽态残留。
-            if (dragRef.current) {
-                dragRef.current = null;
-                dragDraftRef.current = null;
-                endSnapGesture();
-                clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
-                setDraggingId(null);
-            }
-            return;
-        }
+        // 拖拽主 effect 不依赖 tempoMap（经 dragTempoMapRef 读取）：拖拽每帧
+        // onChange(draft) 都会更新 map，若作为依赖会让 effect 每帧卸载/重挂
+        // window 监听与 abort 注册。“map 被外部清空”的取消逻辑由下方独立
+        // 的小 effect 承担。
+        if (!dragTempoMapRef.current) return;
         const handleMove = (e: PointerEvent) => {
             const drag = dragRef.current;
-            if (!drag || !tempoMap) return;
+            const liveMap = dragTempoMapRef.current;
+            if (!drag || !liveMap) return;
             const dx = e.clientX - drag.startClientX;
             const rawSec = Math.max(
                 0,
@@ -1199,13 +1199,13 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                 (dragScrollLeftRef.current + Math.max(0, dragViewportWidthRef.current)) /
                 Math.max(1e-9, dragPxPerSecRef.current);
             sec = clampTempoPointSec({
-                points: tempoMap.points,
+                points: liveMap.points,
                 pointId: drag.pointId,
                 desiredSec: sec,
                 minGapSec,
                 maxSec: Math.max(projectSec, viewportEndSec),
             });
-            const draft = updateTempoPoint(tempoMap, drag.pointId, { positionSec: sec });
+            const draft = updateTempoPoint(liveMap, drag.pointId, { positionSec: sec });
             dragDraftRef.current = draft;
             onChange(draft);
         };
@@ -1235,7 +1235,6 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
         };
     }, [
         draggingId,
-        tempoMap,
         snapEnabled,
         noSnapKb,
         snapTempoPosition,
@@ -1244,6 +1243,19 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
         commitMap,
         projectSec,
     ]);
+
+    // 拖拽进行中 Tempo Map 被外部清空（撤销/远程同步等）的兜底：独立小
+    // effect 只在“清空”时收尾，避免把 tempoMap 放进拖拽主 effect 的依赖。
+    useEffect(() => {
+        if (tempoMap || !draggingId) return;
+        if (dragRef.current) {
+            dragRef.current = null;
+            dragDraftRef.current = null;
+            endSnapGesture();
+            clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+            setDraggingId(null);
+        }
+    }, [tempoMap, draggingId]);
 
     useEffect(
         () => () => {
@@ -1370,8 +1382,10 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                 };
             }
             const idx = tempoMap.points.findIndex((p) => p.positionSec >= positionSec - 1e-6);
-            // 前一个点（若本身即第一个点则为其自身）。
-            const prevIndex = Math.max(0, idx - 1);
+            // 新点位于最后一个点之后时 findIndex 返回 -1：此时“之前的拍号”
+            // 是末点的生效值 —— 原实现 Math.max(0, -2)=0 会把末段拍号误显示
+            // 为第一个点的拍号。
+            const prevIndex = idx === -1 ? tempoMap.points.length - 1 : Math.max(0, idx - 1);
             return effectiveTimeSignatureAt(tempoMap, prevIndex);
         },
         [tempoMap, fallbackBeatsPerBar, fallbackDenominator],

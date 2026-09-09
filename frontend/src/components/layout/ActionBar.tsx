@@ -18,6 +18,7 @@ import {
     StopIcon,
 } from "@radix-ui/react-icons";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
+import { shallowEqual } from "react-redux";
 import type { RootState } from "../../app/store";
 import { useI18n } from "../../i18n/I18nProvider";
 import { PitchSnapSettingsDialog } from "./PitchSnapSettingsDialog";
@@ -105,9 +106,45 @@ function MetronomeIcon() {
     );
 }
 
+/** ActionBar 实际消费的 session 字段子集（配合 shallowEqual 阻断播放轮询的重渲染）。
+ *  新增消费字段时必须同步补充到这里。 */
+const selectActionBarSession = (state: RootState) => {
+    const session = state.session;
+    return {
+        autoCrossfadeEnabled: session.autoCrossfadeEnabled,
+        autoScrollEnabled: session.autoScrollEnabled,
+        beats: session.beats,
+        bpm: session.bpm,
+        grid: session.grid,
+        ignoreGrouping: session.ignoreGrouping,
+        metronomeAccent: session.metronomeAccent,
+        metronomeEnabled: session.metronomeEnabled,
+        metronomeGain: session.metronomeGain,
+        metronomeMode: session.metronomeMode,
+        metronomeSound: session.metronomeSound,
+        paramEditorSeekPlayheadEnabled: session.paramEditorSeekPlayheadEnabled,
+        paramEditorTimelineClickSelectTrackEnabled:
+            session.paramEditorTimelineClickSelectTrackEnabled,
+        playheadSec: session.playheadSec,
+        playheadZoomEnabled: session.playheadZoomEnabled,
+        project: session.project,
+        rippleMode: session.rippleMode,
+        snapEnabled: session.snapEnabled,
+        splitTransitionEnabled: session.splitTransitionEnabled,
+        tempoMap: session.tempoMap,
+    };
+};
+
 export function ActionBar() {
     const dispatch = useAppDispatch();
-    const s = useAppSelector((state: RootState) => state.session);
+    // 只选取本组件实际消费的字段子集并以 shallowEqual 比较：播放期间
+    // runtime.playbackPositionSec 每 ~33ms 变一次，整片 session 的对象引用
+    // 随之失效，若直接订阅 state.session，本组件（含全部子菜单定义）会以
+    // ≥30Hz 重渲染。
+    const s = useAppSelector(selectActionBarSession, shallowEqual);
+    // runtime 的两个标量单独订阅：runtime 对象随播放轮询每 tick 新建，
+    // 但 isPlaying 本身只在播放/暂停时变化。
+    const isPlaying = useAppSelector((state: RootState) => state.session.runtime.isPlaying);
     const fileBrowserVisible = useAppSelector((state: RootState) => state.fileBrowser.visible);
     const notebookVisible = useAppSelector((state: RootState) => state.notebook.visible);
     const recording = useAppSelector((state: RootState) => state.recording);
@@ -1006,15 +1043,15 @@ export function ActionBar() {
                     variant="solid"
                     size="1"
                     onClick={() => {
-                        if (s.runtime.isPlaying) {
+                        if (isPlaying) {
                             dispatch(stopAudioPlayback());
                             return;
                         }
                         dispatch(playOriginal());
                     }}
-                    data-tooltip={s.runtime.isPlaying ? tAny("action_pause") : t("action_play_out")}
+                    data-tooltip={isPlaying ? tAny("action_pause") : t("action_play_out")}
                 >
-                    {s.runtime.isPlaying ? <PauseIcon /> : <PlayIcon />}
+                    {isPlaying ? <PauseIcon /> : <PlayIcon />}
                 </IconButton>
                 <Box style={{ position: "relative" }} data-hs-context-menu>
                     <IconButton

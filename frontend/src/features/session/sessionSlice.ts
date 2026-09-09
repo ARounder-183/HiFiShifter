@@ -964,8 +964,11 @@ function applyOptimisticBulkClipState(
         loopEnabled?: boolean;
     }>,
 ) {
+    // 多选批量拖拽每帧都会带 K 个 update 进来，逐 update 全量 find 是
+    // O(K·N)；先建一次 id 索引把复杂度压回 O(N+K)。
+    const clipsById = new Map(state.clips.map((c) => [c.id, c]));
     for (const update of updates) {
-        const clip = state.clips.find((entry) => entry.id === update.clipId);
+        const clip = clipsById.get(update.clipId);
         if (!clip) continue;
         if (update.gain !== undefined) {
             clip.gain = clamp(Number(update.gain), 0, 4);
@@ -1448,6 +1451,10 @@ function applyTimelineState(
     // 静音检测预览覆盖层锚定在旧时间线上，任何全量快照应用即失效。
     state.silencePreviewSegments = null;
 
+    // 旧 clips 的 id 索引：playback_rate 缺失时的回退查询需要 O(1) 命中，
+    // 否则 per-clip find 会让千级 clip 工程的全量快照应用退化为 O(n²)。
+    const oldClipsById = new Map(state.clips.map((c) => [c.id, c]));
+
     state.clips = timeline.clips.map((clip: TimelineClip) => {
         const parsed = {
             id: clip.id,
@@ -1485,7 +1492,7 @@ function applyTimelineState(
             playbackRate:
                 clip.playback_rate != null
                     ? clamp(Number(clip.playback_rate), 0.1, 10)
-                    : (state.clips.find((c) => c.id === clip.id)?.playbackRate ?? 1),
+                    : (oldClipsById.get(clip.id)?.playbackRate ?? 1),
             clipPlaybackRate: clamp(Number(clip.clip_playback_rate ?? 1) || 1, 0.1, 10),
             reversed: Boolean(clip.reversed),
             loopEnabled: Boolean(clip.loop_enabled),
@@ -3299,6 +3306,7 @@ const sessionSlice = createSlice({
                     ok?: boolean;
                     imported?: TimelineState;
                     newClipIds?: string[];
+                    playheadSec?: number;
                 };
                 const ok = Boolean(payload.ok);
                 if (ok) {
@@ -3310,6 +3318,12 @@ const sessionSlice = createSlice({
                 }
                 if (ok && payload.imported && payload.imported.tracks) {
                     applyTimelineStatePreservingPitchVisuals(state, payload.imported);
+                    // 导入定位光标：thunk 以独立字段带回的导入起始位置
+                    // （对应旧乐观路径 upsertImportedClip 的 playheadSec=startSec）。
+                    if (typeof payload.playheadSec === "number") {
+                        state.playheadSec = Math.max(0, payload.playheadSec);
+                        state.pendingPlayheadRevealSec = state.playheadSec;
+                    }
                     if (payload.newClipIds && payload.newClipIds.length > 0) {
                         applyAutoCrossfadeInReducer(state, payload.newClipIds);
                         state.multiSelectedClipIds = payload.newClipIds;
@@ -3329,6 +3343,7 @@ const sessionSlice = createSlice({
                     ok?: boolean;
                     imported?: TimelineState;
                     newClipIds?: string[];
+                    playheadSec?: number;
                 };
                 const ok = Boolean(payload.ok);
                 if (ok) {
@@ -3340,6 +3355,11 @@ const sessionSlice = createSlice({
                 }
                 if (ok && payload.imported && payload.imported.tracks) {
                     applyTimelineStatePreservingPitchVisuals(state, payload.imported);
+                    // 导入定位光标：thunk 以独立字段带回的导入起始位置。
+                    if (typeof payload.playheadSec === "number") {
+                        state.playheadSec = Math.max(0, payload.playheadSec);
+                        state.pendingPlayheadRevealSec = state.playheadSec;
+                    }
                     if (payload.newClipIds && payload.newClipIds.length > 0) {
                         applyAutoCrossfadeInReducer(state, payload.newClipIds);
                         state.multiSelectedClipIds = payload.newClipIds;
@@ -3359,6 +3379,7 @@ const sessionSlice = createSlice({
                     ok?: boolean;
                     imported?: TimelineState;
                     newClipIds?: string[];
+                    playheadSec?: number;
                 };
                 const ok = Boolean(payload.ok);
                 if (ok) {
@@ -3370,6 +3391,11 @@ const sessionSlice = createSlice({
                 }
                 if (ok && payload.imported && payload.imported.tracks) {
                     applyTimelineStatePreservingPitchVisuals(state, payload.imported);
+                    // 导入定位光标：thunk 以独立字段带回的导入起始位置。
+                    if (typeof payload.playheadSec === "number") {
+                        state.playheadSec = Math.max(0, payload.playheadSec);
+                        state.pendingPlayheadRevealSec = state.playheadSec;
+                    }
                     if (payload.newClipIds && payload.newClipIds.length > 0) {
                         applyAutoCrossfadeInReducer(state, payload.newClipIds);
                         state.multiSelectedClipIds = payload.newClipIds;
@@ -3389,6 +3415,7 @@ const sessionSlice = createSlice({
                     ok?: boolean;
                     imported?: TimelineState;
                     newClipIds?: string[];
+                    playheadSec?: number;
                 };
                 const ok = Boolean(payload.ok);
                 if (ok) {
@@ -3400,6 +3427,11 @@ const sessionSlice = createSlice({
                 }
                 if (ok && payload.imported && payload.imported.tracks) {
                     applyTimelineStatePreservingPitchVisuals(state, payload.imported);
+                    // 导入定位光标：thunk 以独立字段带回的导入起始位置。
+                    if (typeof payload.playheadSec === "number") {
+                        state.playheadSec = Math.max(0, payload.playheadSec);
+                        state.pendingPlayheadRevealSec = state.playheadSec;
+                    }
                     if (payload.newClipIds && payload.newClipIds.length > 0) {
                         applyAutoCrossfadeInReducer(state, payload.newClipIds);
                     }
@@ -3422,6 +3454,7 @@ const sessionSlice = createSlice({
                     ok?: boolean;
                     imported?: TimelineState;
                     newClipIds?: string[];
+                    playheadSec?: number;
                 };
                 const ok = Boolean(payload.ok);
                 state.status = ok ? "MIDI clip created" : "MIDI import failed";
@@ -5122,6 +5155,10 @@ const sessionSlice = createSlice({
                 const { clipId, preserveTrackFocus } = parseSelectClipRemoteArg(action.meta.arg);
                 state.selectedClipId = clipId;
                 state.selectedPointId = null;
+                // 与 setSelectedClip 一致：点选 Clip 即把复制/剪切路由的上下文
+                // 仲裁切换到 Clip 侧，否则上一次参数选区遗留的 "param" 会让
+                // Ctrl+C/Ctrl+X 错误路由到参数编辑器。
+                state.selectionContext = "clips";
                 if (clipId) {
                     const nextTrackId = resolveTrackIdForClipSelection({
                         currentTrackId: state.selectedTrackId,

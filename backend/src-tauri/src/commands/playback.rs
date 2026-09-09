@@ -278,17 +278,19 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
                     == Some("1");
                 let play_started_at = std::time::Instant::now();
 
-                // 等待 engine worker 就绪（最多 200ms，通常 <5ms 即可）
-                let mut engine_sr = engine_for_sr.sample_rate_hz();
-                if engine_sr == 44100 {
+                // 等待 engine worker 就绪（最多 200ms，通常 <5ms 即可）。
+                // 用显式的 worker_ready 标志：真实输出设备就是 44100 时，
+                // “sample_rate 值变化”永远不发生 —— 旧轮询会把 44.1kHz 设备
+                // 的每次播放固定拖慢 200ms。
+                if !engine_for_sr.worker_ready() {
                     for _ in 0..40 {
                         std::thread::sleep(std::time::Duration::from_millis(5));
-                        engine_sr = engine_for_sr.sample_rate_hz();
-                        if engine_sr != 44100 {
+                        if engine_for_sr.worker_ready() {
                             break;
                         }
                     }
                 }
+                let engine_sr = engine_for_sr.sample_rate_hz();
                 log::warn!(
                     "[play_original] engine_sr={} (used for hash computation)",
                     engine_sr
@@ -1066,8 +1068,10 @@ fn render_single_clip(
     // 负的 source_start 是环绕锚点而非 leading silence。
     let loop_mode = clip.loop_enabled;
     let (win_start_sec, win_end_sec) = crate::state::clip_playback_window_sec(clip);
-    let pre_silence_sec =
-        crate::state::clip_leading_silence_sec(clip, Some(total_sec)) / playback_rate.max(1e-6);
+    // 注意：clip_leading_silence_sec 内部已除以 playback_rate（state.rs:151-163），
+    // 这里不能再除一次 —— 双重除法会把前导静音放大/缩小 1/rate 倍，
+    // 使播放预渲染与 mixdown 导出、实时引擎三者不一致。
+    let pre_silence_sec = crate::state::clip_leading_silence_sec(clip, Some(total_sec));
     let slice_start_sec = win_start_sec.max(0.0);
     let src_end_limit_sec = win_end_sec.min(total_sec).max(slice_start_sec);
     if !loop_mode && src_end_limit_sec - slice_start_sec <= 1e-9 {

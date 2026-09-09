@@ -272,7 +272,7 @@ mod tests {
         cancel_all_foreground();
         assert!(live.token().is_cancelled());
 
-        let registry = FOREGROUND_CANCELS.lock().unwrap();
+        let registry = FOREGROUND_CANCELS.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(registry.len(), 1, "已析构的控制块应从登记表中移除");
     }
 }

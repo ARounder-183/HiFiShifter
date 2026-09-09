@@ -84,7 +84,12 @@ import {
     scaleClipFadesForStretch,
     type StretchGroupState,
 } from "./stretchGroup";
-import { applyBulkFadeValue, applyBulkGainDeltaDb, getBulkEditableClipIds } from "./bulkClipEdit";
+import {
+    applyBulkFadeValue,
+    applyBulkGainDeltaDb,
+    collectSelectedClipsById,
+    getBulkEditableClipIds,
+} from "./bulkClipEdit";
 import { expandClipIdsWithGroups } from "./useGroupExpansion";
 import { buildBulkClipStateUpdates } from "./bulkClipRemotePayloads";
 import {
@@ -1248,8 +1253,12 @@ export function useEditDrag(deps: {
                     );
                     const fadeUpdates = applyBulkFadeValue({
                         clipIds: drag.selectedClipIds,
-                        clipsById: new Map(
-                            sessionRef.current.clips.map((clip) => [clip.id, clip] as const),
+                        // 只收集选中 clip 的实时长度（单次遍历），消费端仅按
+                        // 选中 id 查询 —— 每帧全量 clips 建 Map 在千级 clip 下
+                        // 纯属浪费（与 gain 分支的选中子集做法对齐）。
+                        clipsById: collectSelectedClipsById(
+                            sessionRef.current.clips,
+                            drag.selectedClipIds,
                         ),
                         target: "fadeInSec",
                         nextValue: next,
@@ -1343,8 +1352,10 @@ export function useEditDrag(deps: {
                     );
                     const fadeUpdates = applyBulkFadeValue({
                         clipIds: drag.selectedClipIds,
-                        clipsById: new Map(
-                            sessionRef.current.clips.map((clip) => [clip.id, clip] as const),
+                        // 只收集选中 clip 的实时长度（见 fadeIn 分支注释）。
+                        clipsById: collectSelectedClipsById(
+                            sessionRef.current.clips,
+                            drag.selectedClipIds,
                         ),
                         target: "fadeOutSec",
                         nextValue: next,
@@ -1916,6 +1927,10 @@ export function useEditDrag(deps: {
                 // 本手势已被另一指针覆盖（dragRef 指向别的手势）。本手势在
                 // window 上的监听器与已开的 undo 组仍必须收尾，否则监听器
                 // 永久悬挂、suppress_checkpoints 卡死（撤销栈冻结）。
+                // 第一步必须注销 abort：否则本 end 残留在 gestureFocusGuard
+                // 的活动集合里，每次窗口 blur 都会重复执行 —— 再次关组会吞掉
+                // 其它活跃手势的 undo 组、再次放锁会放掉当前手势的锁。
+                unregisterAbort();
                 window.removeEventListener("pointermove", onMove);
                 window.removeEventListener("pointerup", end);
                 window.removeEventListener("pointercancel", end);
@@ -2676,31 +2691,37 @@ export function useEditDrag(deps: {
                     .finally(() => dispatch(bumpParamsEpoch()));
             }
 
-            // 在所有持久化请求完成后释放交互锁
-            void Promise.resolve(persistPromise).finally(async () => {
-                if (gainUndoGroupPromise) {
-                    try {
-                        await finishGainUndoGroup();
-                    } catch {
-                        // Best-effort undo-group cleanup.
+            // 在所有持久化请求完成后释放交互锁。persistPromise 失败时
+            // （后端拒绝/网络错误）finally 之后仍会产生 unhandledrejection，
+            // 必须显式接住 —— endInteraction 已在 finally 内保证执行。
+            void Promise.resolve(persistPromise)
+                .catch(() => {
+                    // 持久化失败已由各 fulfilled reducer 的 setRejected 呈现给用户。
+                })
+                .finally(async () => {
+                    if (gainUndoGroupPromise) {
+                        try {
+                            await finishGainUndoGroup();
+                        } catch {
+                            // Best-effort undo-group cleanup.
+                        }
                     }
-                }
-                if (fadeUndoGroupPromise) {
-                    try {
-                        await finishFadeUndoGroup();
-                    } catch {
-                        // Best-effort undo-group cleanup.
+                    if (fadeUndoGroupPromise) {
+                        try {
+                            await finishFadeUndoGroup();
+                        } catch {
+                            // Best-effort undo-group cleanup.
+                        }
                     }
-                }
-                if (crossfadeUndoGroupPromise) {
-                    try {
-                        await finishCrossfadeUndoGroup();
-                    } catch {
-                        // Best-effort undo-group cleanup.
+                    if (crossfadeUndoGroupPromise) {
+                        try {
+                            await finishCrossfadeUndoGroup();
+                        } catch {
+                            // Best-effort undo-group cleanup.
+                        }
                     }
-                }
-                dispatch(endInteraction());
-            });
+                    dispatch(endInteraction());
+                });
         }
 
         window.addEventListener("pointermove", onMove);

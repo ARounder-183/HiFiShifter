@@ -173,7 +173,6 @@ test("components/layout/timeline/runtime/timelineCanvasStyle.test.ts scripted ch
     assertEqual(formatPlaybackRateLabel(NaN), "x1", "non-finite rates fall back to x1");
 });
 
-
 test("parsePlaybackRateInput accepts plain, prefixed and percent forms", () => {
     function assertEqual(actual: unknown, expected: unknown, label: string): void {
         const a = JSON.stringify(actual);

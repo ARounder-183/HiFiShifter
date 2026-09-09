@@ -268,22 +268,24 @@ test("features/session/sessionSlice.playheadGuard.test.ts undo/redo adopt the ch
     // 暂停中撤销 B→A：视觉光标跟随回退后的快照光标（9 → 5），并登记
     // "聚焦播放光标"，离屏时由 TimelinePanel 滚动到可见。
     {
-        const pended = reducer(initState({ playheadSec: 9, isPlaying: false }), undoRemote.pending("req-undo", undefined));
+        const pended = reducer(
+            initState({ playheadSec: 9, isPlaying: false }),
+            undoRemote.pending("req-undo", undefined),
+        );
         const next = reducer(
             pended,
             undoRemote.fulfilled(timelinePayload(5), "req-undo", undefined),
         );
         assertEqual(next.playheadSec, 5, "paused undo adopts the checkpoint playhead");
-        assertEqual(
-            next.pendingPlayheadRevealSec,
-            5,
-            "moved playhead registers a reveal request",
-        );
+        assertEqual(next.pendingPlayheadRevealSec, 5, "moved playhead registers a reveal request");
     }
 
     // 重做 A→B：对称地跟随恢复快照的光标（5 → 9）。
     {
-        const pended = reducer(initState({ playheadSec: 5, isPlaying: false }), redoRemote.pending("req-redo", undefined));
+        const pended = reducer(
+            initState({ playheadSec: 5, isPlaying: false }),
+            redoRemote.pending("req-redo", undefined),
+        );
         const next = reducer(
             pended,
             redoRemote.fulfilled(timelinePayload(9), "req-redo", undefined),
@@ -294,7 +296,10 @@ test("features/session/sessionSlice.playheadGuard.test.ts undo/redo adopt the ch
 
     // 光标未挪动（该状态形成后光标未变）：不登记聚焦请求，无谓滚动。
     {
-        const pended = reducer(initState({ playheadSec: 5, isPlaying: false }), undoRemote.pending("req-undo-2", undefined));
+        const pended = reducer(
+            initState({ playheadSec: 5, isPlaying: false }),
+            undoRemote.pending("req-undo-2", undefined),
+        );
         const next = reducer(
             pended,
             undoRemote.fulfilled(timelinePayload(5), "req-undo-2", undefined),
@@ -310,22 +315,24 @@ test("features/session/sessionSlice.playheadGuard.test.ts undo/redo adopt the ch
     // 播放中撤销：光标归传输层（音频时钟）所有，检查点值停留在本次播放的
     // 起始位置已过期 —— 保持轮询位置，不采纳快照值。
     {
-        const pended = reducer(initState({ playheadSec: 50, isPlaying: true }), undoRemote.pending("req-undo-3", undefined));
+        const pended = reducer(
+            initState({ playheadSec: 50, isPlaying: true }),
+            undoRemote.pending("req-undo-3", undefined),
+        );
         const next = reducer(
             pended,
             undoRemote.fulfilled(timelinePayload(7), "req-undo-3", undefined),
         );
         assertEqual(next.playheadSec, 50, "playing undo keeps the polled playhead");
-        assertEqual(
-            next.pendingPlayheadRevealSec,
-            null,
-            "playing undo never registers a reveal",
-        );
+        assertEqual(next.pendingPlayheadRevealSec, null, "playing undo never registers a reveal");
     }
 
     // 乱序防护：过期 undo 响应（requestId 不匹配）不得改写光标。
     {
-        const pended = reducer(initState({ playheadSec: 9, isPlaying: false }), undoRemote.pending("req-undo-new", undefined));
+        const pended = reducer(
+            initState({ playheadSec: 9, isPlaying: false }),
+            undoRemote.pending("req-undo-new", undefined),
+        );
         const next = reducer(
             pended,
             undoRemote.fulfilled(timelinePayload(5), "req-undo-stale", undefined),

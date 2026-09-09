@@ -32,8 +32,16 @@ fn decode_wav_f32_interleaved_hound(path: &Path) -> Result<(u32, u16, Vec<f32>),
 
     let channels = spec.channels;
     let sample_rate = spec.sample_rate;
-    // hound::duration() 返回每声道的帧数（frames），总样本数 = frames * channels
-    let mut out: Vec<f32> = Vec::with_capacity(reader.duration() as usize * channels as usize);
+    // hound::duration() 返回每声道的帧数（frames），总样本数 = frames * channels。
+    // duration() 来自头字段，损坏文件可声称巨量帧数 → with_capacity 一次性
+    // 分配失败 abort 进程；按文件大小钳制上界（总样本 ≤ 文件字节 / 最少每样本字节），
+    // metadata 不可得时用 64M 样本的兜底上界。
+    let min_bytes_per_sample = (spec.bits_per_sample as usize / 8).max(1);
+    let file_bound = std::fs::metadata(path)
+        .map(|m| (m.len() as usize).saturating_div(min_bytes_per_sample))
+        .unwrap_or(1 << 22);
+    let mut out: Vec<f32> =
+        Vec::with_capacity(reader.duration().min(file_bound.min(u32::MAX as usize) as u32) as usize * channels as usize);
 
     match (spec.sample_format, spec.bits_per_sample) {
         (SampleFormat::Int, 16) => {

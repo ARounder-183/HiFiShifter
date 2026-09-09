@@ -492,7 +492,6 @@ function TimeRulerContextMenu({
 const TimeRulerInner: React.FC<{
     scrollLeft: number;
     ticks: readonly TimelineTick[];
-    pxPerBeat: number;
     pxPerSec: number;
     viewportWidth?: number;
     playheadSec: number;
@@ -528,7 +527,6 @@ const TimeRulerInner: React.FC<{
 }> = ({
     scrollLeft,
     ticks,
-    pxPerBeat: _pxPerBeat,
     pxPerSec,
     viewportWidth,
     playheadSec,
@@ -558,7 +556,6 @@ const TimeRulerInner: React.FC<{
     onTempoMapChange,
     onTempoMapCommit,
 }) => {
-    void _pxPerBeat;
     const tAny = useMemo(() => t ?? ((key: string) => key), [t]);
     const useManualTransform = contentRef != null;
     const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; sec: number } | null>(null);

@@ -89,9 +89,7 @@ export interface TimelinePerfScenario {
  *
  * @returns 轨道、clip、坐标投影与内容总时长。
  */
-export function buildTimelinePerfScenario(
-    args: TimelinePerfScenarioArgs,
-): TimelinePerfScenario {
+export function buildTimelinePerfScenario(args: TimelinePerfScenarioArgs): TimelinePerfScenario {
     const clipLengthSec = args.clipLengthSec ?? DEFAULT_CLIP_LENGTH_SEC;
     const gapSec = args.gapSec ?? DEFAULT_GAP_SEC;
     const viewportWidthPx = args.viewportWidthPx ?? DEFAULT_VIEWPORT_WIDTH_PX;

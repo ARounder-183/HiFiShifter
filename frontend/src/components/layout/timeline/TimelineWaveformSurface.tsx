@@ -82,7 +82,6 @@ export const TimelineWaveformSurface = React.memo(function TimelineWaveformSurfa
     return (
         <WaveformSurface
             rows={rows}
-            widthPx={props.widthPx}
             heightPx={props.heightPx}
             axis={props.axis}
             viewportTopPx={props.startTrackIndex * props.rowHeight}

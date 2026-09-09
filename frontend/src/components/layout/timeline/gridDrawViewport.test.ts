@@ -25,7 +25,11 @@ test("components/layout/timeline/gridDrawViewport.test.ts scripted checks", asyn
         propScrollLeftPx: laggedPropScrollLeft,
         propViewportTopPx: 0,
     });
-    assertEqual(resolved.scrollLeftPx, authoritativeScrollLeft, "bus scrollLeft wins over stale prop");
+    assertEqual(
+        resolved.scrollLeftPx,
+        authoritativeScrollLeft,
+        "bus scrollLeft wins over stale prop",
+    );
     assertEqual(resolved.scrollTopPx, 0, "bus scrollTop wins over prop");
 
     // 滞后量可以是最 Dead 区宽度以内的任意值（0–255px），方向也可为反向

@@ -440,7 +440,7 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                         size="1"
                         variant={regexEnabled ? "solid" : "ghost"}
                         color="gray"
-                        data-tooltip={tAny("fb_regex") || "Regex"}
+                        data-tooltip={tAny("fb_regex")}
                         onClick={() => {
                             setRegexEnabled((v) => !v);
                             focusSearchInput();
@@ -488,9 +488,9 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                                 focusSearchInput();
                             }}
                         >
-                            <Select.Item value="name">{tAny("fb_sort_name") || "Name"}</Select.Item>
-                            <Select.Item value="date">{tAny("fb_sort_date") || "Date"}</Select.Item>
-                            <Select.Item value="size">{tAny("fb_sort_size") || "Size"}</Select.Item>
+                            <Select.Item value="name">{tAny("fb_sort_name")}</Select.Item>
+                            <Select.Item value="date">{tAny("fb_sort_date")}</Select.Item>
+                            <Select.Item value="size">{tAny("fb_sort_size")}</Select.Item>
                         </Select.Content>
                     </Select.Root>
                     {loading && (
@@ -583,7 +583,7 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                                 focusSearchInput();
                             }}
                         />
-                        <span>{tAny("qs_auto_normalize") || "放置时自动规格化"}</span>
+                        <span>{tAny("qs_auto_normalize")}</span>
                     </label>
                     {sortedResults.length > 0 && (
                         <Text size="1" color="gray" className="text-[10px]">

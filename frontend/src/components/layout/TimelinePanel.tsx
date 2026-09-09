@@ -1664,7 +1664,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     <TimeRuler
                         scrollLeft={rulerScrollLeft}
                         ticks={timelineTicks}
-                        pxPerBeat={pxPerBeat}
                         pxPerSec={pxPerSec}
                         viewportWidth={viewportWidth}
                         playheadSec={s.playheadSec}

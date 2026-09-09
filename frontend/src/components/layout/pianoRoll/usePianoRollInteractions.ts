@@ -710,7 +710,14 @@ export function usePianoRollInteractions(args: {
                 valueFilter: editParam === "pitch" ? editablePitchValue : undefined,
             });
 
-            await paramsApi.setParamFrames(trackId, editParam, minF, smoothed, false);
+            try {
+                await paramsApi.setParamFrames(trackId, editParam, minF, smoothed, false);
+            } catch (err) {
+                // 绘制后的自动平滑是增强步骤：失败只跳过平滑与视图同步，
+                // 不产生 unhandledrejection（主提交 commitStroke 已自兜底）。
+                console.error("[applyPostStrokeSmoothing] failed:", err);
+                return;
+            }
 
             const pvNow = paramViewRef.current;
             if (pvNow) {
@@ -1075,7 +1082,6 @@ export function usePianoRollInteractions(args: {
             if (e.button !== 0) return;
             const ruler = e.currentTarget as HTMLDivElement;
             let moved = false;
-            let lastSec = 0;
 
             const updateAt = (clientX: number, commit: boolean): number => {
                 const bounds = ruler.getBoundingClientRect();
@@ -1092,27 +1098,44 @@ export function usePianoRollInteractions(args: {
                     1e12,
                 );
 
-                dispatch(setplayheadSec(sec));
                 if (commit) {
+                    dispatch(setplayheadSec(sec));
                     void dispatch(seekPlayhead(sec));
                 }
                 return sec;
             };
 
             // 标尺没有其他编辑操作需要区分，按下时立即提交一次 seek。
-            lastSec = updateAt(e.clientX, true);
+            let lastSec = updateAt(e.clientX, true);
+
+            // 拖动中的 setplayheadSec 逐事件派发会让所有订阅 session 的组件
+            // 随 mousemove 频率重渲；rAF 合帧后与画布重绘节奏一致。
+            let rafId: number | null = null;
+            let queuedSec: number | null = null;
 
             const onMove = (ev: MouseEvent) => {
                 moved = true;
-                lastSec = updateAt(ev.clientX, false);
+                queuedSec = updateAt(ev.clientX, false);
+                if (rafId == null) {
+                    rafId = requestAnimationFrame(() => {
+                        rafId = null;
+                        if (queuedSec == null) return;
+                        dispatch(setplayheadSec(queuedSec));
+                        queuedSec = null;
+                    });
+                }
             };
 
             const onEnd = (ev: MouseEvent) => {
                 window.removeEventListener("mousemove", onMove, true);
                 window.removeEventListener("mouseup", onEnd, true);
                 window.removeEventListener("mouseleave", onEnd, true);
+                if (rafId != null) {
+                    cancelAnimationFrame(rafId);
+                    rafId = null;
+                }
                 if (!moved) return;
-                lastSec = updateAt(ev.clientX, false);
+                lastSec = updateAt(ev.clientX, true);
                 void dispatch(seekPlayhead(lastSec));
             };
 
@@ -1122,10 +1145,6 @@ export function usePianoRollInteractions(args: {
         },
         [dispatch, scrollLeftRef, pxPerSecRef],
     );
-
-    const onScrollerMouseDownCapture = useCallback((e: ReactMouseEvent) => {
-        if (e.button === 1) e.preventDefault();
-    }, []);
 
     const onScrollerAuxClick = useCallback((e: ReactMouseEvent) => {
         if (e.button === 1) e.preventDefault();
@@ -1463,12 +1482,6 @@ export function usePianoRollInteractions(args: {
             scrollLeftRef,
         ],
     );
-
-    // React's onWheel handler may run in a passive listener in modern React.
-    // Keep this for compatibility, but do not call preventDefault here.
-    const onScrollerWheel = useCallback(() => {
-        // no-op; wheel is handled via native listener with passive:false
-    }, []);
 
     useEffect(() => {
         const onKeyDown = (e: globalThis.KeyboardEvent) => {
@@ -2220,18 +2233,18 @@ export function usePianoRollInteractions(args: {
                                     (stride * fp) / 1000 / secPerBeat,
                                 );
 
-                                const onMove = (ev: globalThis.PointerEvent) => {
-                                    if ((ev.buttons & 1) !== 1) {
-                                        onUp();
-                                        return;
-                                    }
+                                // 预览重算 rAF 合帧：dense 重建 + 整份 live 拷贝 +
+                                // React setState 都是 O(n)，pointermove 在高刷鼠标上
+                                // 可达数百 Hz，逐事件执行长选区会卡顿；与左键选区
+                                // 拖动路径同模式，一帧至多重算一次。
+                                let previewRafId: number | null = null;
+                                let queuedCursorBeat: number | null = null;
+                                const runPreviewStep = () => {
+                                    const cursorBeat = queuedCursorBeat;
+                                    if (cursorBeat == null) return;
+                                    queuedCursorBeat = null;
                                     const pvNow = paramViewRef.current;
                                     if (!pvNow) return;
-                                    const adjusted = getFineAdjustedPointerPosition(
-                                        finePointerState,
-                                        ev,
-                                    );
-                                    const cursorBeat = pointerBeat(adjusted.clientX);
                                     const nextABeat =
                                         edgeKind === "left"
                                             ? clamp(cursorBeat, 0, bBeat - minBeatSpan)
@@ -2258,12 +2271,36 @@ export function usePianoRollInteractions(args: {
                                     invalidate();
                                 };
 
+                                const onMove = (ev: globalThis.PointerEvent) => {
+                                    if ((ev.buttons & 1) !== 1) {
+                                        onUp();
+                                        return;
+                                    }
+                                    const adjusted = getFineAdjustedPointerPosition(
+                                        finePointerState,
+                                        ev,
+                                    );
+                                    queuedCursorBeat = pointerBeat(adjusted.clientX);
+                                    if (previewRafId == null) {
+                                        previewRafId = requestAnimationFrame(() => {
+                                            previewRafId = null;
+                                            runPreviewStep();
+                                        });
+                                    }
+                                };
+
                                 const onUp = () => {
                                     window.removeEventListener("pointermove", onMove);
                                     window.removeEventListener("pointerup", onUp);
                                     window.removeEventListener("pointercancel", onUp);
                                     disposeFineAdjustedPointerState(finePointerState);
                                     clearActivePointerGestureEnd(onUp);
+                                    // 取消挂起的预览帧：松手后的提交路径负责重建。
+                                    if (previewRafId != null) {
+                                        cancelAnimationFrame(previewRafId);
+                                        previewRafId = null;
+                                    }
+                                    queuedCursorBeat = null;
 
                                     const pvNow = paramViewRef.current;
                                     const selNow = selectionRef.current;
@@ -2818,10 +2855,15 @@ export function usePianoRollInteractions(args: {
                                 // 替换，之后的每一帧预览都基于无损数据。
                                 let origValues = readPvRange(pv, selStartFrame, selEndFrame);
                                 let dragSettled = false;
-                                void origCurvePromise.then((curve) => {
-                                    if (dragSettled) return;
-                                    origValues = curve.values;
-                                });
+                                void origCurvePromise
+                                    .then((curve) => {
+                                        if (dragSettled) return;
+                                        origValues = curve.values;
+                                    })
+                                    .catch(() => {
+                                        // 取数失败只降级预览保真度（继续用 pv 数据预览）；
+                                        // 提交路径（onUp）有自己的 try/catch 兜底。
+                                    });
 
                                 // 预览取数：从 pv 读当前值（pv 可能降采样，仅用于即时反馈）。
                                 const makePvSourceAt = (src: typeof pv) => {
@@ -2878,6 +2920,84 @@ export function usePianoRollInteractions(args: {
                                 let lastFrameDelta = 0; // 帧偏移（整数）
                                 // 使用闭包变量跟踪当前拖动方向（可通过右键切换）
                                 let currentDragDir = dragDirection ?? "y-only";
+
+                                // 预览重算 rAF 合帧：与右键下拖路径同模式。pointermove
+                                // 在高刷新率鼠标上可达 125–1000Hz，而每次预览是
+                                // O(选区帧数) 的 dense 构建 + 整份 live 拷贝 + React
+                                // setState（全面板重渲），长选区逐事件执行会明显卡顿；
+                                // 一帧至多重算一次，onMove 只更新标量偏移。
+                                let previewRafId: number | null = null;
+                                let previewQueued = false;
+                                const runPreviewStep = () => {
+                                    const pvNow = paramViewRef.current;
+                                    if (!pvNow) return;
+
+                                    // Reset live overlay before each preview step to prevent
+                                    // stale values from the previous drag position lingering
+                                    // outside the current range
+                                    liveEditOverrideRef.current = null;
+                                    ensureLiveEditBase(pvNow);
+
+                                    // 构造覆盖原选区 + 新位置的 dense 数组（逐帧索引）。
+                                    // 预览阶段从 pv 取上下文 —— pv 只是显示数据，不会回写。
+                                    const selLen = origValues.length;
+                                    if (selLen === 0) return;
+
+                                    // 边缘平滑度：毫秒定标的过渡带半宽。预览 dense
+                                    // 是按帧索引的（sourceAt 内部消化 pv 的 stride），
+                                    // halfSpan 与 extraEdgeFrames 都以帧为单位。
+                                    const edgeHalfSpanIdx = edgeHalfSpanForIndices(selLen, 1);
+
+                                    const built = buildSelectionDragDense({
+                                        sourceAt: makePvSourceAt(pvNow),
+                                        origValues,
+                                        origStartFrame: selStartFrame,
+                                        frameDelta: lastFrameDelta,
+                                        extraEdgeFrames: Math.ceil(edgeHalfSpanIdx),
+                                        transform: (orig, frame) => transformDragValue(orig, frame),
+                                        edgeBlend:
+                                            edgeHalfSpanIdx > 0
+                                                ? {
+                                                      halfSpanFrames: edgeHalfSpanIdx,
+                                                      isEditable:
+                                                          editParam === "pitch"
+                                                              ? editablePitchValue
+                                                              : undefined,
+                                                  }
+                                                : undefined,
+                                    });
+
+                                    applyDenseToLiveEdit(
+                                        pvNow,
+                                        built.startFrame,
+                                        built.values,
+                                        built.startFrame,
+                                        built.endFrame,
+                                        "draw",
+                                    );
+
+                                    // 实时更新选区位置显示
+                                    const beatDeltaForSel =
+                                        (lastFrameDelta * fp) / 1000 / secPerBeat;
+                                    selectionRef.current = {
+                                        aBeat: aBeat + beatDeltaForSel,
+                                        bBeat: bBeat + beatDeltaForSel,
+                                    };
+                                    updateSelectionUi(selectionRef.current);
+
+                                    invalidate();
+                                };
+                                const schedulePreview = () => {
+                                    previewQueued = true;
+                                    if (previewRafId == null) {
+                                        previewRafId = requestAnimationFrame(() => {
+                                            previewRafId = null;
+                                            if (!previewQueued) return;
+                                            previewQueued = false;
+                                            runPreviewStep();
+                                        });
+                                    }
+                                };
 
                                 const onMove = (ev: globalThis.PointerEvent) => {
                                     if ((ev.buttons & 1) !== 1) {
@@ -2947,61 +3067,7 @@ export function usePianoRollInteractions(args: {
                                     lastFrameDelta =
                                         currentDragDir === "y-only" ? 0 : rawFrameDelta;
 
-                                    const pvNow = paramViewRef.current;
-                                    if (!pvNow) return;
-
-                                    // Reset live overlay before each move to prevent stale values
-                                    // from the previous drag position lingering outside the current range
-                                    liveEditOverrideRef.current = null;
-                                    ensureLiveEditBase(pvNow);
-
-                                    // 构造覆盖原选区 + 新位置的 dense 数组（逐帧索引）。
-                                    // 预览阶段从 pv 取上下文 —— pv 只是显示数据，不会回写。
-                                    const selLen = origValues.length;
-                                    if (selLen === 0) return;
-
-                                    // 边缘平滑度：毫秒定标的过渡带半宽。预览 dense
-                                    // 是按帧索引的（sourceAt 内部消化 pv 的 stride），
-                                    // halfSpan 与 extraEdgeFrames 都以帧为单位。
-                                    const edgeHalfSpanIdx = edgeHalfSpanForIndices(selLen, 1);
-
-                                    const built = buildSelectionDragDense({
-                                        sourceAt: makePvSourceAt(pvNow),
-                                        origValues,
-                                        origStartFrame: selStartFrame,
-                                        frameDelta: lastFrameDelta,
-                                        extraEdgeFrames: Math.ceil(edgeHalfSpanIdx),
-                                        transform: (orig, frame) => transformDragValue(orig, frame),
-                                        edgeBlend:
-                                            edgeHalfSpanIdx > 0
-                                                ? {
-                                                      halfSpanFrames: edgeHalfSpanIdx,
-                                                      isEditable:
-                                                          editParam === "pitch"
-                                                              ? editablePitchValue
-                                                              : undefined,
-                                                  }
-                                                : undefined,
-                                    });
-
-                                    applyDenseToLiveEdit(
-                                        pvNow,
-                                        built.startFrame,
-                                        built.values,
-                                        built.startFrame,
-                                        built.endFrame,
-                                        "draw",
-                                    );
-
-                                    // 实时更新选区位置显示
-                                    const beatDeltaForSel =
-                                        (lastFrameDelta * fp) / 1000 / secPerBeat;
-                                    selectionRef.current = {
-                                        aBeat: aBeat + beatDeltaForSel,
-                                        bBeat: bBeat + beatDeltaForSel,
-                                    };
-                                    updateSelectionUi(selectionRef.current);
-
+                                    // 悬停弹窗跟随原始事件坐标（廉价，不合帧）。
                                     if (paramValuePopupEnabled) {
                                         const previewCurrentVal = yDragEnabled
                                             ? currentVal
@@ -3023,7 +3089,8 @@ export function usePianoRollInteractions(args: {
                                         });
                                     }
 
-                                    invalidate();
+                                    // O(n) 预览重算合帧到下一渲染帧（见上方注释）。
+                                    schedulePreview();
                                 };
 
                                 const onUp = async () => {
@@ -3032,6 +3099,13 @@ export function usePianoRollInteractions(args: {
                                     window.removeEventListener("pointercancel", onUp);
                                     disposeFineAdjustedPointerState(finePointerState);
                                     clearActivePointerGestureEnd(onUp);
+                                    // 取消挂起的预览帧：松手后由提交路径以全分辨率
+                                    // 数据重建，预览层不得再覆盖提交结果。
+                                    if (previewRafId != null) {
+                                        cancelAnimationFrame(previewRafId);
+                                        previewRafId = null;
+                                    }
+                                    previewQueued = false;
                                     // 标记手势结束，避免已发出的取数请求再覆写 origValues
                                     dragSettled = true;
 
@@ -3788,12 +3862,10 @@ export function usePianoRollInteractions(args: {
 
     return {
         onRulerMouseDown,
-        onScrollerMouseDownCapture,
         onScrollerAuxClick,
         onScrollerScroll,
         onScrollerContextMenu,
         onScrollerKeyDown,
-        onScrollerWheel,
         onScrollerWheelNative,
         onCanvasPointerMove,
         onCanvasPointerLeave,

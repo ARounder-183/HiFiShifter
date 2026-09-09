@@ -140,6 +140,8 @@ const fileBrowserSlice = createSlice({
                 if (action.meta.requestId !== state.latestSearchRequestId) return;
                 state.searchLoading = false;
                 state.searchResults = [];
+                // 失败必须可见：静默置空会让用户误以为“确实无匹配”。
+                state.error = String(action.payload ?? "Search failed");
             });
     },
 });

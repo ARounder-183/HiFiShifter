@@ -22,6 +22,23 @@ export function getBulkEditableClipIds(args: BulkEditableArgs): string[] {
     return [activeClipId];
 }
 
+/**
+ * 单次遍历收集选中 clip 的实时快照：批量编辑热路径（每 rAF 帧）的
+ * clipsById 只需选中子集 —— 对全部 clips 建 Map 在千级 clip 工程下
+ * 每帧都是无谓的分配与拷贝。
+ */
+export function collectSelectedClipsById(
+    clips: ReadonlyArray<ClipLengthLike & { id: string }>,
+    selectedClipIds: readonly string[],
+): Map<string, ClipLengthLike> {
+    const selected = new Set(selectedClipIds);
+    const result = new Map<string, ClipLengthLike>();
+    for (const clip of clips) {
+        if (selected.has(clip.id)) result.set(clip.id, clip);
+    }
+    return result;
+}
+
 export function applyBulkFadeValue(args: {
     clipIds: string[];
     clipsById: Map<string, ClipLengthLike>;

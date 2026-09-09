@@ -36,7 +36,8 @@ export const ClipFormantToolWindow: React.FC<{
     const { t } = useI18n();
     const dispatch = useAppDispatch();
     const analysis = useAppSelector(
-        (state) => state.session.clipFormantAnalysis[clip.id] as ClipFormantAnalysisState | undefined,
+        (state) =>
+            state.session.clipFormantAnalysis[clip.id] as ClipFormantAnalysisState | undefined,
     );
     const { draft, updateDraft, flush } = useClipFormantEditor({
         clipId: clip.id,

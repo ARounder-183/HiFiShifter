@@ -44,11 +44,7 @@ export function resolveGridDrawViewport(args: {
     propViewportTopPx: number | null | undefined;
 }): GridDrawViewport {
     const bus = args.busAxis;
-    if (
-        bus &&
-        Number.isFinite(bus.scrollLeftPx) &&
-        Number.isFinite(bus.scrollTopPx)
-    ) {
+    if (bus && Number.isFinite(bus.scrollLeftPx) && Number.isFinite(bus.scrollTopPx)) {
         return { scrollLeftPx: bus.scrollLeftPx, scrollTopPx: bus.scrollTopPx };
     }
     return {

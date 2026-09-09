@@ -42,10 +42,7 @@ export function isSampleRateAllowed(format: ExportFormat, rate: number): boolean
  * 纠正策略：对高于表内档位的值逐级减半（88.2k→44.1k、96k→48k、192k→48k），
  * 若仍不在表内则取对数距离最近的一档。
  */
-export function nearestAllowedSampleRate(
-    format: ExportFormat,
-    rate: number,
-): number | null {
+export function nearestAllowedSampleRate(format: ExportFormat, rate: number): number | null {
     const options = sampleRateOptions(format);
     if (!Number.isFinite(rate) || rate <= 0 || options.includes(rate)) return null;
 
@@ -55,9 +52,11 @@ export function nearestAllowedSampleRate(
     }
     if (options.includes(candidate)) return candidate;
 
-    return options.reduce((best, value) =>
-        Math.abs(Math.log2(value / rate)) < Math.abs(Math.log2(best / rate)) ? value : best,
-    options[0]);
+    return options.reduce(
+        (best, value) =>
+            Math.abs(Math.log2(value / rate)) < Math.abs(Math.log2(best / rate)) ? value : best,
+        options[0],
+    );
 }
 
 /**

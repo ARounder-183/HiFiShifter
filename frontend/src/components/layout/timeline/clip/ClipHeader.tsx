@@ -381,7 +381,6 @@ export const ClipHeader: React.FC<{
         return () => input.removeEventListener("wheel", onWheel);
     }, [badgeEditing, fineAdjustKb, clip.playbackRate, clampedGainDb]);
 
-
     // ── 名称内联编辑 ────────────────────────────────────────────────────────
     const [nameEditing, setNameEditing] = useState(false);
     const [nameInputVal, setNameInputVal] = useState("");

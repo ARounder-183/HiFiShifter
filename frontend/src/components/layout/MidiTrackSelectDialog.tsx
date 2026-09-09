@@ -211,18 +211,22 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
     // 当前有效的剪贴板 GUID
     const effectiveClipboardGuid = localClipboardGuid ?? clipboardGuid;
 
+    // 加载请求序号：关闭/重新打开会让旧序号作废 —— 迟到的响应不得把上一
+    // 个来源的轨道列表写进新会话（重开时会被 tracks.length 短路跳过加载，
+    // 展示旧文件轨道并以其索引导入）。
+    const loadSeqRef = useRef(0);
+
     // 加载轨道列表的函数
     const loadTracks = useCallback(
         (path: string) => {
-            console.info("[midi_import_ui] load_tracks:start", { midiPath: path });
-
+            const seq = ++loadSeqRef.current;
             setLoading(true);
             setError(null);
 
             paramsApi
                 .getMidiTracks(path)
                 .then((res) => {
-                    console.info("[midi_import_ui] load_tracks:response", res);
+                    if (seq !== loadSeqRef.current) return;
                     if (res.ok && res.tracks) {
                         setTracks(res.tracks);
                         setInitialBpm(res.initial_bpm ?? null);
@@ -256,13 +260,13 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
     // 从剪贴板 GUID 加载轨道（通过后端缓存查询，不重复读取剪贴板）
     const loadTracksFromClipboard = useCallback(
         (guid: string) => {
-            console.info("[midi_import_ui] loadTracksFromClipboard:start", { guid });
+            const seq = ++loadSeqRef.current;
             setLoading(true);
             setError(null);
             paramsApi
                 .getMidiTracks("", guid)
                 .then((res) => {
-                    console.info("[midi_import_ui] loadTracksFromClipboard:response", res);
+                    if (seq !== loadSeqRef.current) return;
                     if (res.ok && res.tracks) {
                         setTracks(res.tracks);
                         setInitialBpm(res.initial_bpm ?? null);
@@ -295,6 +299,9 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
     // 当弹窗打开且有 effectivePath 或 effectiveClipboardGuid，加载轨道列表
     useEffect(() => {
         if (!open) {
+            // 关闭即作废在途加载：迟到的响应不得把旧来源的轨道列表回填进
+            // state（否则重开会因 tracks.length 短路跳过加载、展示旧数据）。
+            loadSeqRef.current += 1;
             setTracks([]);
             setError(null);
             setSelectedTracks([]);
@@ -479,18 +486,6 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                       : undefined;
             const maxFrames = effectivePosition === "selection" ? selectionMaxFrames : undefined;
 
-            console.info("[midi_import_ui] import:start", {
-                midiPath: midiSrc,
-                clipboardGuid: effectiveClipboardGuid,
-                trackIndices,
-                importPosition,
-                effectivePosition,
-                startFrame,
-                maxFrames,
-                noteBpmMode,
-                specifiedBpm,
-                importBpmAsProject,
-            });
             const res = await paramsApi.importMidiToPitch(
                 midiSrc,
                 trackIndices,
@@ -503,7 +498,6 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                 effectiveClipboardGuid ?? undefined,
                 closeLeadingGap,
             );
-            console.info("[midi_import_ui] import:response", res);
             if (res.ok) {
                 onImported?.({
                     notes_imported: res.notes_imported ?? 0,

@@ -466,7 +466,11 @@ test("components/layout/timeline/runtime/timelineScrollRange.test.ts scripted ch
         });
         // 光标屏幕 x = 45*40 - 1000 = 800（画面内）→ 锚定：45*44 - 800 =
         // 1180，仍在允许范围内（30*44 = 1320）不触发钳制。
-        assertNear(zoom!.nextScrollLeft, 1180, "beyond-end playhead anchors at its screen position");
+        assertNear(
+            zoom!.nextScrollLeft,
+            1180,
+            "beyond-end playhead anchors at its screen position",
+        );
         assertNear(
             (zoom!.nextScrollLeft + 800) / zoom!.nextPxPerSec,
             playheadSec,

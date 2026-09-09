@@ -261,6 +261,16 @@ export const TrackLane = React.memo(
 
         // 淡变信息浮标与子层 i18n 文案。
         const { t } = useI18n();
+        // 渲染期 ref 镜像：边缘单击收尾（finish）在 pointerdown 与 pointerup
+        // 之间读取播放头落点，若期间发生缩放/clip 移动，闭包里的 pxPerSec /
+        // trackClips 已过期，seek 会落到错误时间。镜像让收尾时读到最新值
+        // （无需把它们加进长依赖数组引发回调逐渲染重建）。
+        const pxPerSecRef = React.useRef(pxPerSec);
+        // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式事件回调需在同一提交内读取最新值（热路径既有模式）
+        pxPerSecRef.current = pxPerSec;
+        const trackClipsRef = React.useRef(trackClips);
+        // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式事件回调需在同一提交内读取最新值（热路径既有模式）
+        trackClipsRef.current = trackClips;
         // OverlapEditLayer 是 React.memo 组件：内联箭头函数每次渲染都是新
         // 引用，会让 memo 永远失效（hoveredClipId 变化即触发 O(n²) 区域
         // 重建）。这里用 useCallback 稳定引用。
@@ -279,6 +289,16 @@ export const TrackLane = React.memo(
         // 波形区域高度计算（与 ClipItem 一致）
         const waveformHeight = Math.max(1, rowHeight - CLIP_BODY_PADDING_Y - CLIP_HEADER_HEIGHT);
         const [hoveredClipId, setHoveredClipId] = React.useState<string | null>(null);
+        // hover 命中测试合帧的队列（scheduleHoverHitTest 定义在 hitTestLane 之后，
+        // 因为依赖其回调引用）。
+        const hoverRafRef = React.useRef<number | null>(null);
+        const hoverQueuedRef = React.useRef<{ x: number; y: number; el: HTMLElement } | null>(null);
+        React.useEffect(
+            () => () => {
+                if (hoverRafRef.current != null) cancelAnimationFrame(hoverRafRef.current);
+            },
+            [],
+        );
         const showVerticalTrackLock = verticalTrackLockTrackId === track.id;
 
         // 计算当前轨道上需要渲染的 ghost clip 列表
@@ -360,6 +380,26 @@ export const TrackLane = React.memo(
                 );
             },
             [laneHitTestIndex],
+        );
+        // hover 命中测试合帧：pointermove 在高刷鼠标上可达数百 Hz，逐事件
+        // getBoundingClientRect + hitTest 纯属浪费。rAF 合帧到每帧一次，
+        // setState 的同值短路还能再省掉无变化的整行重渲。
+        const scheduleHoverHitTest = React.useCallback(
+            (x: number, y: number, el: HTMLElement) => {
+                hoverQueuedRef.current = { x, y, el };
+                if (hoverRafRef.current != null) return;
+                hoverRafRef.current = requestAnimationFrame(() => {
+                    hoverRafRef.current = null;
+                    const queued = hoverQueuedRef.current;
+                    hoverQueuedRef.current = null;
+                    if (!queued) return;
+                    const hit = hitTestLane(queued.x, queued.y, queued.el as HTMLDivElement);
+                    setHoveredClipId((previous) =>
+                        previous === hit.clipId ? previous : hit.clipId,
+                    );
+                });
+            },
+            [hitTestLane],
         );
         const isClipItemTarget = React.useCallback((target: EventTarget | null) => {
             return (target as HTMLElement | null)?.closest?.("[data-hs-clip-item='1']") != null;
@@ -614,13 +654,14 @@ export const TrackLane = React.memo(
                         // 单击 Clip 边缘（未拖动）→ 播放头跳到该边缘的准确位置。
                         // lane 容器左缘即时间轴 0 秒的客户坐标；clip 左/右缘在
                         // lane 内 = startSec（左缘）或 startSec+lengthSec（右缘）。
-                        const edgeClip = trackClips.find((entry) => entry.id === clipId);
+                        // 经 ref 镜像读取，避免 down→up 之间缩放/位移导致的过期值。
+                        const edgeClip = trackClipsRef.current.find((entry) => entry.id === clipId);
                         const laneRect = laneEl.getBoundingClientRect();
                         const edgeSec =
                             edge === "trim_left"
                                 ? (edgeClip?.startSec ?? 0)
                                 : (edgeClip?.startSec ?? 0) + (edgeClip?.lengthSec ?? 0);
-                        seekFromClientX(laneRect.left + edgeSec * pxPerSec, true);
+                        seekFromClientX(laneRect.left + edgeSec * pxPerSecRef.current, true);
                     }
                 };
                 const onEnd = (ev: PointerEvent) => {
@@ -633,7 +674,6 @@ export const TrackLane = React.memo(
                 window.addEventListener("pointerup", onEnd, true);
                 window.addEventListener("pointercancel", onEnd, true);
             },
-            // eslint-disable-next-line react-hooks/exhaustive-deps -- pxPerSec/trackClips 为渲染期值，加入依赖会改变回调重建时机（既有 memo 模式）
             [
                 altPressed,
                 clearContextMenu,
@@ -695,10 +735,7 @@ export const TrackLane = React.memo(
                         : undefined,
                 }}
                 onPointerMoveCapture={(event) => {
-                    const hit = hitTestLane(event.clientX, event.clientY, event.currentTarget);
-                    setHoveredClipId((previous) =>
-                        previous === hit.clipId ? previous : hit.clipId,
-                    );
+                    scheduleHoverHitTest(event.clientX, event.clientY, event.currentTarget);
                 }}
                 onContextMenuCapture={(event) => {
                     if (isClipItemTarget(event.target) || isOverlapLayerTarget(event.target)) {

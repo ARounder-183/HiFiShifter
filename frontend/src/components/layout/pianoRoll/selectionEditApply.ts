@@ -16,11 +16,7 @@
 import { paramsApi } from "../../../services/api";
 import type { ParamFramesPayload } from "../../../types/api";
 import type { ParamName } from "./types";
-import {
-    applyEdgeBlend,
-    edgeHalfSpanFramesForSelection,
-    type EdgeShape,
-} from "./paramSmoothing";
+import { applyEdgeBlend, edgeHalfSpanFramesForSelection, type EdgeShape } from "./paramSmoothing";
 
 /** 编辑延拓描述：选区外的"编辑意图"如何延展。 */
 export type SelectionEditExtension =

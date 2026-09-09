@@ -237,13 +237,16 @@ export const openVocalShifterFromDialog = createAsyncThunk(
 export const openVocalShifterFromPath = createAsyncThunk(
     "session/openVocalShifterFromPath",
     async (vspPath: string, { rejectWithValue, getState }) => {
+        // 必须在发起导入前捕获现有 clip id 集合（与 Dialog 变体同契约）：
+        // await 期间其他 thunk 的 fulfilled 可能已把新 clip 写进 state，
+        // 事后取差集会漏掉真正新增的 clip。
+        const beforeClipIds = new Set(
+            (getState() as { session: SessionState }).session.clips.map((c) => c.id),
+        );
         const result = await webApi.importVocalShifterProject(vspPath);
         if (!result?.ok) {
             return rejectWithValue(result?.error ?? "import_vocalshifter_failed");
         }
-        const beforeClipIds = new Set(
-            (getState() as { session: SessionState }).session.clips.map((c) => c.id),
-        );
         const clips = (result as { clips?: Array<{ id?: string }> }).clips ?? [];
         const newClipIds = clips
             .map((c) => c.id)
@@ -338,13 +341,16 @@ export const openReaperFromDialog = createAsyncThunk(
 export const openReaperFromPath = createAsyncThunk(
     "session/openReaperFromPath",
     async (rppPath: string, { rejectWithValue, getState }) => {
+        // 必须在发起导入前捕获现有 clip id 集合（与 Dialog 变体同契约）：
+        // await 期间其他 thunk 的 fulfilled 可能已把新 clip 写进 state，
+        // 事后取差集会漏掉真正新增的 clip。
+        const beforeClipIds = new Set(
+            (getState() as { session: SessionState }).session.clips.map((c) => c.id),
+        );
         const result = await webApi.importReaperProject(rppPath);
         if (!result?.ok) {
             return rejectWithValue(result?.error ?? "import_reaper_failed");
         }
-        const beforeClipIds = new Set(
-            (getState() as { session: SessionState }).session.clips.map((c) => c.id),
-        );
         const clips = (result as { clips?: Array<{ id?: string }> }).clips ?? [];
         const newClipIds = clips
             .map((c) => c.id)

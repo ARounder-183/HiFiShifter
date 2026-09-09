@@ -404,9 +404,15 @@ export function useSlipDrag(deps: {
                 })();
             }
 
-            void Promise.resolve(persistPromise).finally(() => {
-                dispatch(endInteraction());
-            });
+            // 持久化失败（后端拒绝/网络错误）不得变成 unhandledrejection；
+            // endInteraction 已在 finally 内保证执行。
+            void Promise.resolve(persistPromise)
+                .catch(() => {
+                    // 失败已由 setClipStateRemote 的 rejected reducer 呈现给用户。
+                })
+                .finally(() => {
+                    dispatch(endInteraction());
+                });
 
             window.removeEventListener("pointermove", onMove);
             window.removeEventListener("pointerup", end);

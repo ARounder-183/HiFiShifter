@@ -70,6 +70,7 @@ import {
     timelineViewportStateToNative,
 } from "../../utils/timelineViewportSync";
 import { isModifierActive, isNoneBinding } from "../../features/keybindings/keybindingsSlice";
+import { useNonPassiveWheel } from "../../utils/useNonPassiveWheel";
 import { getActiveSurface, setActiveSurfaceExplicit } from "../../features/uiFocus/focusSurface";
 import { findFirstExternalPathAction } from "./timeline/dnd";
 import { shiftPitchValue } from "./timeline/clipPitchDrag";
@@ -570,6 +571,18 @@ export const PianoRollPanel: React.FC = () => {
     const paramFineAdjustKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.paramFineAdjust"),
     );
+    // 边缘平滑度滑块的滚轮步进：React 17+ 的根容器 wheel 监听是 passive，
+    // JSX onWheel 里的 preventDefault 无效（伴随干预警告），必须走原生
+    // 非 passive 监听（与主画布滚轮路径同模式）。
+    const edgeSmoothnessWheelRef = useNonPassiveWheel<HTMLInputElement>((e) => {
+        e.preventDefault();
+        const fine = isModifierActive(paramFineAdjustKb, e.nativeEvent);
+        const step = fine ? 1 : 5;
+        const dir = e.deltaY < 0 ? 1 : -1;
+        const next = clamp(Math.round(s.edgeSmoothnessPercent) + dir * step, 0, 100);
+        dispatch(setEdgeSmoothnessPercent(next));
+        void dispatch(persistUiSettings());
+    });
     const stretchKb = useAppSelector((state) => selectKeybinding(state, "modifier.clipStretch"));
     const vibratoAmplitudeAdjustKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.vibratoAmplitudeAdjust"),
@@ -1540,12 +1553,18 @@ export const PianoRollPanel: React.FC = () => {
     const handleStaticParamChange = useCallback(
         async (paramId: string, value: number) => {
             if (!rootTrackId) return;
-            const result = await paramsApi.setStaticParam(rootTrackId, paramId, value, true);
-            if (result.ok) {
-                setProcessorStaticValues((prev) => ({
-                    ...prev,
-                    [paramId]: value,
-                }));
+            try {
+                const result = await paramsApi.setStaticParam(rootTrackId, paramId, value, true);
+                if (result.ok) {
+                    setProcessorStaticValues((prev) => ({
+                        ...prev,
+                        [paramId]: value,
+                    }));
+                }
+            } catch (err) {
+                // 静态参数调整是滑块 onValueChange 的 fire-and-forget 调用，
+                // IPC 失败必须兜底，否则 unhandledrejection 且滑块值不一致。
+                console.error("[setStaticParam] failed:", err);
             }
         },
         [rootTrackId],
@@ -1754,12 +1773,15 @@ export const PianoRollPanel: React.FC = () => {
               : true;
 
     const visibleSecondaryParamIds = useMemo(() => {
+        // 依赖 state 版 processorParams 而非 ref：切换算法后 ref 已更新，但
+        // 若 editParam/开关不变，memo 不重算会让副参数列表继续持有旧算法
+        // 的参数 id（持续对已不存在的参数发起取数，眼睛开关与叠加层不一致）。
         return getVisibleSecondaryParamIds({
             editParam,
-            processorParamIds: processorParamsRef.current.map((p) => p.id as ParamName),
+            processorParamIds: processorParams.map((p) => p.id as ParamName),
             secondaryParamVisible,
         });
-    }, [editParam, secondaryParamVisible]);
+    }, [editParam, secondaryParamVisible, processorParams]);
 
     const updateVisibleReferenceRootTrackIds = useCallback(
         (nextTrackIds: string[]) => {
@@ -2524,7 +2546,6 @@ export const PianoRollPanel: React.FC = () => {
         clips: trackClips,
         visibleStartSec,
         visibleEndSec,
-        pxPerSec,
     });
     // Data and viewport changes should always trigger a canvas redraw.
     // usePianoRollData() may call invalidate() before these refs update,
@@ -2723,6 +2744,18 @@ export const PianoRollPanel: React.FC = () => {
         invalidate();
     }, [s.showClipboardPreview, invalidate]);
 
+    // scaleSegments 帧间缓存：播放头 invalidate 会让画布每帧重绘，但
+    // tempoMap / 工程音阶 / 可见区间在帧间通常不变。按引用 + 0.02s 量化
+    // 区间做 key，未变时复用上帧结果，避免每帧遍历 tempo 段并分配新数组。
+    // 可见区间两侧本就各留 5s 余量，量化引入的 0.02s 漂移不会影响覆盖。
+    const scaleSegmentsCacheRef = useRef<{
+        tempoMap: unknown;
+        scale: unknown;
+        qStart: number;
+        qEnd: number;
+        result: ReturnType<typeof buildScaleSegments>;
+    }>({ tempoMap: null, scale: null, qStart: NaN, qEnd: NaN, result: [] });
+
     // Keep draw function always up-to-date (invalidate() is stable and calls drawRef.current()).
     drawRef.current = () => {
         // 滚动热路径的投影：用 ref 构造，因为滚动时 ref 同步更新而 React
@@ -2733,6 +2766,27 @@ export const PianoRollPanel: React.FC = () => {
             viewportWidthPx: viewSizeRef.current.w,
             dpr: window.devicePixelRatio || 1,
         });
+        const scaleSegStartQ =
+            Math.round(Math.max(0, viewportStartSec(drawAxis) - 5) / 0.02) * 0.02;
+        const scaleSegEndQ = Math.round((viewportEndSec(drawAxis) + 5) / 0.02) * 0.02;
+        const segCache = scaleSegmentsCacheRef.current;
+        if (
+            segCache.tempoMap !== s.tempoMap ||
+            segCache.scale !== effectiveProjectScale ||
+            segCache.qStart !== scaleSegStartQ ||
+            segCache.qEnd !== scaleSegEndQ
+        ) {
+            segCache.tempoMap = s.tempoMap;
+            segCache.scale = effectiveProjectScale;
+            segCache.qStart = scaleSegStartQ;
+            segCache.qEnd = scaleSegEndQ;
+            segCache.result = buildScaleSegments(
+                s.tempoMap,
+                effectiveProjectScale,
+                scaleSegStartQ,
+                scaleSegEndQ,
+            );
+        }
         drawPianoRoll({
             axisCanvas: axisCanvasRef.current,
             canvas: canvasRef.current,
@@ -2741,7 +2795,6 @@ export const PianoRollPanel: React.FC = () => {
             pitchView: pitchViewRef.current,
             paramViews: paramViewsRef.current,
             valueToY,
-            clipPeaks,
             paramView: pitchEnabled ? paramView : null,
             secondaryParamViews: pitchEnabled ? secondaryParamViews : {},
             secondaryParamIds: pitchEnabled ? visibleSecondaryParamIds : [],
@@ -2759,7 +2812,6 @@ export const PianoRollPanel: React.FC = () => {
             // 用 Redux 提交值会让 60fps 的重绘画着同一个旧播放头（且与标尺
             // 的 DOM 插值播放头节奏不一致、短暂错位）。
             playheadSec: visualPlayheadSecRef.current,
-            waveformColors,
             referencePitchOverlays,
             detectedPitchCurves,
             isDark: themeMode === "dark",
@@ -2771,12 +2823,7 @@ export const PianoRollPanel: React.FC = () => {
             scaleHighlightMode: s.scaleHighlightMode,
             // 可见秒区间由 axis 提供：此前这里写作 scrollLeft / pxPerSec
             // （先除后乘），与其余图层的换算不等价。
-            scaleSegments: buildScaleSegments(
-                s.tempoMap,
-                effectiveProjectScale,
-                Math.max(0, viewportStartSec(drawAxis) - 5),
-                viewportEndSec(drawAxis) + 5,
-            ),
+            scaleSegments: segCache.result,
             toolMode: s.toolMode,
             snapToggleHeld: snapToggleHeld,
             paramMorphOverlay,
@@ -3051,7 +3098,7 @@ export const PianoRollPanel: React.FC = () => {
                 const scroller = scrollerRef.current;
                 if (scroller) {
                     scroller.scrollLeft += e.deltaX;
-                    syncScrollLeft(scroller);
+                    syncScrollLeftRef.current(scroller);
                 }
                 applyVerticalPanDelta(e.deltaY);
                 return;
@@ -3062,7 +3109,7 @@ export const PianoRollPanel: React.FC = () => {
                 const scroller = scrollerRef.current;
                 if (!scroller) return;
                 scroller.scrollLeft += horizontalDelta;
-                syncScrollLeft(scroller);
+                syncScrollLeftRef.current(scroller);
                 return;
             }
 
@@ -3142,7 +3189,6 @@ export const PianoRollPanel: React.FC = () => {
         return () => {
             el.removeEventListener("wheel", handler);
         };
-        // eslint-disable-next-line react-hooks/exhaustive-deps -- syncScrollLeft 随渲染重建；加入依赖会让 wheel 监听器每渲染重挂（热路径既有模式）
     }, [
         editParam,
         setPitchView,
@@ -4812,25 +4858,13 @@ export const PianoRollPanel: React.FC = () => {
                                 {tAny("edge_smoothness_short")}:
                             </Text>
                             <input
+                                ref={edgeSmoothnessWheelRef}
                                 className="qt-range"
                                 type="range"
                                 min={0}
                                 max={100}
                                 step={1}
                                 value={Math.round(s.edgeSmoothnessPercent)}
-                                onWheel={(e) => {
-                                    e.preventDefault();
-                                    const fine = isModifierActive(paramFineAdjustKb, e.nativeEvent);
-                                    const step = fine ? 1 : 5;
-                                    const dir = e.deltaY < 0 ? 1 : -1;
-                                    const next = clamp(
-                                        Math.round(s.edgeSmoothnessPercent) + dir * step,
-                                        0,
-                                        100,
-                                    );
-                                    dispatch(setEdgeSmoothnessPercent(next));
-                                    void dispatch(persistUiSettings());
-                                }}
                                 onChange={(e) => {
                                     const next = Number(e.currentTarget.value);
                                     dispatch(setEdgeSmoothnessPercent(next));
@@ -5349,7 +5383,6 @@ export const PianoRollPanel: React.FC = () => {
                     <TimeRuler
                         scrollLeft={scrollLeft}
                         ticks={timelineTicks}
-                        pxPerBeat={pxPerBeat}
                         pxPerSec={pxPerSec}
                         viewportWidth={viewSize.w}
                         playheadSec={s.playheadSec}

@@ -91,7 +91,7 @@ interface FileMipmapCache {
 /** 加载状态回调 */
 export type LoadCallback = (
     sourcePath: string,
-    status: "loading" | "done" | "error",
+    status: "loading" | "done" | "error" | "evicted",
     error?: string,
 ) => void;
 
@@ -124,11 +124,20 @@ class WaveformMipmapStoreImpl {
     /** 池的最大容量（条目数） */
     private static readonly POOL_MAX = 32;
 
+    /**
+     * 缓存代次：invalidate()/clear() 递增。在途加载发起时记下当时的代次，
+     * 响应回来时若代次已变（缓存已被清除/换源），过期响应必须整体丢弃 ——
+     * 否则旧文件的波形会写入"已清空"的缓存，出现短暂错源数据。
+     */
+    private generation = 0;
+
     private acquireInterleaved(minLen: number): Float32Array {
         for (let i = 0; i < this.interleavedPool.length; i++) {
             if (this.interleavedPool[i].buffer.byteLength / 4 >= minLen) {
                 const buf = this.interleavedPool[i];
                 this.interleavedPool.splice(i, 1);
+                // 取出即收回所有权标记：该 buffer 可被再次 release 归还。
+                this.pooledInterleavedBuffers.delete(buf.buffer);
                 wfDiag_poolAcquire("interleaved", true);
                 return new Float32Array(buf.buffer, 0, minLen);
             }
@@ -137,10 +146,19 @@ class WaveformMipmapStoreImpl {
         return new Float32Array(minLen);
     }
 
+    /**
+     * 已入池 buffer 的所有权标记：同一视图双重归还会让池里出现两份共享
+     * 同一 backing buffer 的条目，后续两次 acquire 返回互相覆盖的视图。
+     * WeakSet O(1) 查重，不阻止 buffer 被 GC。
+     */
+    private pooledInterleavedBuffers = new WeakSet<ArrayBufferLike>();
+
     releaseInterleaved(buf: Float32Array): void {
-        const accepted =
+        const capacityOk =
             buf.length > 0 && this.interleavedPool.length < WaveformMipmapStoreImpl.POOL_MAX;
+        const accepted = capacityOk && !this.pooledInterleavedBuffers.has(buf.buffer);
         if (accepted) {
+            this.pooledInterleavedBuffers.add(buf.buffer);
             this.interleavedPool.push(new Float32Array(buf.buffer));
         }
         wfDiag_poolRelease("interleaved", accepted);
@@ -195,9 +213,13 @@ class WaveformMipmapStoreImpl {
 
     /**
      * 当数据超过字节预算时，按 LRU 顺序淘汰最旧的**有字节贡献**的条目。
-     * 被淘汰条目同步 notify "done" 状态以便 UI 释放任何关联视图缓存
+     * 被淘汰条目同步 notify "evicted" 状态以便 UI 释放任何关联视图缓存
      * （几何缓存持有指向被淘汰 buffer 的 subarray 视图，不通知的话视图
      * 会把 buffer 钉在内存里，cacheBytes 与真实占用背离）。
+     *
+     * 注意：不能用 "done" 通知驱逐 —— "done" 的消费方（波形面）把它解释为
+     * “数据就绪”并强制全量重建，驱逐会因此触发一轮“空白重建 → 重载 →
+     * 再重建”的可感知闪烁。
      *
      * 0 字节条目（缺失/损坏文件的负缓存标记）对预算无贡献：淘汰它们
      * 不会释放任何内存，只会丢掉失败状态，让已损坏文件重新打后端 ——
@@ -216,7 +238,7 @@ class WaveformMipmapStoreImpl {
             const oldest = this.cache.get(oldestKey);
             this.cache.delete(oldestKey);
             this.cacheBytes -= oldest?.bytes ?? 0;
-            this.notify(oldestKey, "done");
+            this.notify(oldestKey, "evicted");
         }
     }
 
@@ -617,8 +639,11 @@ class WaveformMipmapStoreImpl {
         const batchPromise = (async () => {
             try {
                 const batchResult = await waveformApi.batchGetWaveformMipmap(registered);
+                // 在途代次快照：响应回来时缓存可能已被 clear/invalidate 清除。
+                const requestGeneration = this.generation;
 
                 for (const [sourcePath, levels] of Object.entries(batchResult)) {
+                    if (this.generation !== requestGeneration) return;
                     // 仅解码 L2（索引 2），L0/L1 丢弃
                     const l2Base64 = levels[2];
                     if (l2Base64) {
@@ -694,6 +719,8 @@ class WaveformMipmapStoreImpl {
         this.retryCooldownUntil.delete(`${sourcePath}|0`);
         this.retryCooldownUntil.delete(`${sourcePath}|1`);
         this.retryCooldownUntil.delete(`${sourcePath}|2`);
+        // 代次递增：本文件的在途响应作废（applyDecoded 校验后代次不再写入）。
+        this.generation += 1;
     }
 
     /**
@@ -768,6 +795,8 @@ class WaveformMipmapStoreImpl {
         // 通过 applyDecoded 让"已清空"的缓存悄悄复活，冷却键也会残留。
         this.loadingPromises.clear();
         this.retryCooldownUntil.clear();
+        // 代次递增：所有在途响应作废（applyDecoded 校验代次，过期不写入）。
+        this.generation += 1;
     }
 
     /**
@@ -827,10 +856,15 @@ class WaveformMipmapStoreImpl {
 
         entry.loadingLevels.add(level);
         this.notify(sourcePath, "loading");
+        // 在途代次快照：响应回来时缓存可能已被 clear/invalidate 清除。
+        const requestGeneration = this.generation;
 
         const promise = (async () => {
             try {
                 const raw = await waveformApi.getWaveformMipmapBinary(sourcePath, level);
+                // 代次不匹配 = 响应属于已被清除/换源的旧缓存：整体丢弃，
+                // 不得让旧数据复活（也不得重新创建缓存条目）。
+                if (this.generation !== requestGeneration) return;
                 const decoded = decodeWaveformFromBase64(raw);
 
                 if (decoded) {
@@ -948,7 +982,11 @@ class WaveformMipmapStoreImpl {
     /**
      * 通知所有监听器
      */
-    private notify(sourcePath: string, status: "loading" | "done" | "error", error?: string): void {
+    private notify(
+        sourcePath: string,
+        status: "loading" | "done" | "error" | "evicted",
+        error?: string,
+    ): void {
         for (const cb of this.listeners) {
             try {
                 cb(sourcePath, status, error);

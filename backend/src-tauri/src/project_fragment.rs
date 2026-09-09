@@ -379,7 +379,6 @@ fn apply_shifted_params_range(
     let fp = timeline.frame_period_ms().max(0.1);
     let start_frame = ((start_sec.max(0.0) * 1000.0) / fp).floor() as usize;
     let frame_count = (((length_sec.max(0.0) * 1000.0) / fp).ceil() as usize).max(1);
-    let end_frame = start_frame.saturating_add(frame_count);
     let Some(entry) = timeline.params_by_root_track.get_mut(root_track_id) else {
         return;
     };

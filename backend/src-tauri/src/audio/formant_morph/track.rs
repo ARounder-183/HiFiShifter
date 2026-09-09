@@ -48,7 +48,9 @@ const MAX_RATE_PER_FRAME: f32 = 0.15;
 pub struct FormantCandidate {
     pub f1: Pole,
     pub f2: Pole,
-    /// 该帧 LPC 残差能量比（透传给浊音 gate）。
+    /// 该帧 LPC 残差能量比（透传给浊音 gate；当前 gate 直接读分析结果，
+    /// 此字段保留供候选级门控使用）。
+    #[allow(dead_code)]
     pub residual_ratio: f32,
 }
 

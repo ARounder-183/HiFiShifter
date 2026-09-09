@@ -108,16 +108,35 @@ export function SnapGridSettingsDialog({ open, onOpenChange }: Props) {
         dispatch(setTimelineSnapSettings(next));
     };
 
-    const handleSwingChange = (nextPercent: number, forceAlign = false) => {
+    const swingSettingsFor = (percent: number) => {
         const prev = session.timelineSnap;
-        const nextSettings = {
+        return {
             ...prev,
-            swingPercent: nextPercent,
-            swingEnabled: nextPercent > 0 || prev.swingEnabled,
+            swingPercent: percent,
+            swingEnabled: percent > 0 || prev.swingEnabled,
         };
+    };
+
+    // 拖动中只更新设置值（轻量 Redux 写）。对齐剪辑 + checkpoint + IPC 一律
+    // 推迟到 onValueCommit：Radix 拖动会以高频率触发 onValueChange，逐 tick
+    // 全量重排会刷满撤销栈并打爆 move_clips / save_ui_settings IPC（与
+    // TimelineDisplaySettingsDialog 的 onValueCommit 模式一致）。
+    const handleSwingPreview = (nextPercent: number) => {
+        const nextSettings = swingSettingsFor(nextPercent);
         dispatch(
             setTimelineSnapSettings({
-                swingPercent: nextPercent,
+                swingPercent: nextSettings.swingPercent,
+                swingEnabled: nextSettings.swingEnabled,
+            }),
+        );
+    };
+
+    const handleSwingCommit = (nextPercent: number, forceAlign = false) => {
+        const prev = session.timelineSnap;
+        const nextSettings = swingSettingsFor(nextPercent);
+        dispatch(
+            setTimelineSnapSettings({
+                swingPercent: nextSettings.swingPercent,
                 swingEnabled: nextSettings.swingEnabled,
             }),
         );
@@ -220,7 +239,8 @@ export function SnapGridSettingsDialog({ open, onOpenChange }: Props) {
                                     const enabled = Boolean(v);
                                     patch({ swingEnabled: enabled });
                                     if (enabled && session.clips.length > 0) {
-                                        handleSwingChange(snap.swingPercent, true);
+                                        // 离散开关动作：直接走提交（对齐 + checkpoint + 持久化）。
+                                        handleSwingCommit(snap.swingPercent, true);
                                     } else {
                                         persist();
                                     }
@@ -237,8 +257,9 @@ export function SnapGridSettingsDialog({ open, onOpenChange }: Props) {
                                 min={0}
                                 max={100}
                                 step={1}
-                                onValueChange={(values) =>
-                                    handleSwingChange(
+                                onValueChange={(values) => handleSwingPreview(values[0] ?? 0)}
+                                onValueCommit={(values) =>
+                                    handleSwingCommit(
                                         values[0] ?? 0,
                                         !snap.swingEnabled && (values[0] ?? 0) > 0,
                                     )

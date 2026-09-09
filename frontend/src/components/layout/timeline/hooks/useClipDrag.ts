@@ -114,6 +114,12 @@ export type ClipDragState = {
     lastTrackId: string | null;
     lastDeltaBeat: number;
     copyMode: boolean;
+    /**
+     * 拖动转场时是否已进入“移动事务”（beginInteraction + 后端 undo group）。
+     * 拖拽中途从移动切换为复制（按住复制修饰键）时，收尾仍须据此释放锁与
+     * undo group，并把已被乐观移动的原 clip 回滚到初始位置。
+     */
+    beganMoveTransaction: boolean;
     multiSelectToggleActive: boolean;
     startClientX: number;
     startClientY: number;
@@ -198,7 +204,6 @@ export function useClipDrag(deps: {
         ignoreGrouping,
         onCtrlClick,
     } = deps;
-    void snapEnabled;
 
     const clipDragRef = useRef<ClipDragState | null>(null);
     const [ghostDrag, setGhostDrag] = useState<GhostDragInfo | null>(null);
@@ -371,6 +376,7 @@ export function useClipDrag(deps: {
             lastTrackId: targetTrackId,
             lastDeltaBeat: 0,
             copyMode: false,
+            beganMoveTransaction: false,
             // 多选切换修饰键 + 点击（无拖动）标记；仅在未发生拖动时生效。
             // 拖动开始后此标记被清除，由拖拽逻辑接管（是否复制由复制拖动绑定决定）。
             multiSelectToggleActive: resolveClipSelectionModifiers({
@@ -390,6 +396,9 @@ export function useClipDrag(deps: {
         // 失焦取消：切屏（Alt+Tab）期间 pointerup/pointercancel 不会送达本
         // 窗口，拖拽会永久卡死（交互锁/undo group/ghost 全部悬置）。注册
         // 事件无关的 end()，由 gestureFocusGuard 在窗口 blur 时统一收尾。
+        // 同时捕获本手势自己的状态：双指针场景下另一手势可能先覆盖
+        // clipDragRef，end() 收尾时仍须能释放本手势的锁 / undo 组。
+        const ownDrag = clipDragRef.current;
         const unregisterAbort = registerDragAbort(end);
         setVerticalTrackLockTrackId(null);
         scroller.setPointerCapture(e.pointerId);
@@ -436,6 +445,8 @@ export function useClipDrag(deps: {
                     // Begin backend undo group so that move_clip + auto-crossfade
                     // share a single backend undo entry.
                     void webApi.beginUndoGroup();
+                    // 记录已进入移动事务：中途切换复制模式后收尾仍要释放。
+                    drag.beganMoveTransaction = true;
                 }
                 // 吸附手势登记（复制拖动同样参与吸附与竖线高亮）。
                 beginSnapGesture();
@@ -615,11 +626,25 @@ export function useClipDrag(deps: {
         function end() {
             const drag = clipDragRef.current;
             if (!drag || drag.pointerId !== e.pointerId) {
-                // 本手势已被另一指针覆盖（dragRef 指向别的手势）：仍必须
-                // 解绑本手势在 window 上的监听器，否则永久悬挂。
+                // 本手势已被另一指针覆盖（dragRef 指向别的手势）：仍必须解绑
+                // 本手势在 window 上的监听器，并按 ownDrag 释放本手势已开启
+                // 的吸附手势 / 交互锁 / 后端 undo 组 —— 否则锁计数只增不减、
+                // 撤销栈被冻结到重启（对照 useSnapOffsetDrag 的同场景收尾）。
                 window.removeEventListener("pointermove", scheduleMove);
                 window.removeEventListener("pointerup", end);
                 window.removeEventListener("pointercancel", end);
+                unregisterAbort();
+                if (ownDrag) {
+                    if (ownDrag.hasMoved) endSnapGesture();
+                    if (ownDrag.beganMoveTransaction) {
+                        void webApi.endUndoGroup();
+                        dispatch(endInteraction());
+                    }
+                    // ghost/drop 目标高亮是共享 UI：清掉残留即可，活跃手势的
+                    // 下一次 onMove 会立刻重设。
+                    setGhostDrag(null);
+                    setClipDropNewTrack(false);
+                }
                 return;
             }
             clipDragRef.current = null;
@@ -719,10 +744,38 @@ export function useClipDrag(deps: {
             };
 
             if (drag.copyMode) {
-                // copyMode 下原 clip 未被移动，直接根据 ghost 偏移量计算副本位置
+                // copyMode 下原 clip 不移动，直接根据 ghost 偏移量计算副本位置
                 // copyMode 不使用交互锁（原 clip 未被拖动改变位置）
                 // 复制不产生波纹，松手前把跟随集恢复原位（覆盖预览残留）。
                 endSnapGesture();
+                // 拖拽中途从移动切到复制：原 clip 已被乐观移走，必须先按初始
+                // 位置回滚，并释放移动事务（交互锁 + 后端 undo 组）—— 否则
+                // 锁永久悬置、撤销栈冻结，Redux 乐观态与后端永久分叉。
+                if (drag.beganMoveTransaction) {
+                    batch(() => {
+                        for (const id of drag.clipIds) {
+                            const initial = drag.initialById[id];
+                            if (!initial) continue;
+                            dispatch(
+                                moveClipStart({
+                                    clipId: id,
+                                    startSec: Math.max(0, initial.startSec),
+                                }),
+                            );
+                            if (drag.allowTrackMove) {
+                                dispatch(
+                                    moveClipTrack({
+                                        clipId: id,
+                                        trackId: initial.trackId,
+                                    }),
+                                );
+                            }
+                        }
+                    });
+                    void webApi.endUndoGroup();
+                    dispatch(endInteraction());
+                    drag.beganMoveTransaction = false;
+                }
                 applyRippleFollowerShift(dispatch, drag.rippleFollowers, 0);
                 restoreInitialAutoFades(dispatch, drag.initialAutoFadeById);
                 void (async () => {
