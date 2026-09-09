@@ -47,6 +47,8 @@ mod launch_args;
 mod media;
 #[path = "audio/mixdown.rs"]
 mod mixdown;
+#[path = "audio/encode/mod.rs"]
+mod encode;
 #[path = "audio/silence_detect.rs"]
 mod silence_detect;
 mod models;

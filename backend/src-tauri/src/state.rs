@@ -9513,7 +9513,7 @@ impl TimelineState {
                 }
             }
 
-            let render_result = crate::mixdown::render_mixdown_wav(
+            let render_result = crate::mixdown::render_mixdown_to_file(
                 &render_timeline,
                 &glue_path,
                 crate::mixdown::MixdownOptions {
@@ -9522,7 +9522,8 @@ impl TimelineState {
                     end_sec: Some(end),
                     stretch: crate::time_stretch::resolved_external_stretch_algorithm(),
                     apply_pitch_edit: true,
-                    export_format: crate::mixdown::ExportFormat::Wav32f,
+                    // 胶合烘焙固定 32-bit float WAV（内部临时文件）。
+                    output: crate::encode::OutputSpec::wav_32f(),
                     quality_preset: crate::mixdown::QualityPreset::Export,
                     cancel_flag: None,
                 },

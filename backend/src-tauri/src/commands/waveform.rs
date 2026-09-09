@@ -116,7 +116,7 @@ pub(super) fn get_root_mix_waveform_peaks_segment(
             stretch: crate::time_stretch::resolved_external_stretch_algorithm(),
             apply_pitch_edit: true,
             // 瀹炴椂棰勮浣跨敤榛樿璐ㄩ噺锛圵av16 + Realtime锛夈€?
-            export_format: crate::mixdown::ExportFormat::Wav16,
+            output: crate::encode::OutputSpec::default(),
             quality_preset: crate::mixdown::QualityPreset::Realtime,
             cancel_flag: None,
         };
@@ -259,7 +259,7 @@ pub(super) fn get_track_mix_waveform_peaks_segment(
             stretch: crate::time_stretch::resolved_external_stretch_algorithm(),
             apply_pitch_edit: true,
             // 瀹炴椂棰勮浣跨敤榛樿璐ㄩ噺锛圵av16 + Realtime锛夈€?
-            export_format: crate::mixdown::ExportFormat::Wav16,
+            output: crate::encode::OutputSpec::default(),
             quality_preset: crate::mixdown::QualityPreset::Realtime,
             cancel_flag: None,
         };

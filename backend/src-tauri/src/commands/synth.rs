@@ -70,6 +70,12 @@ pub(crate) struct ExportAudioRequest {
     pub skip_existing_paths: Vec<String>,
     pub sample_rate: Option<u32>,
     pub bit_depth: Option<u32>,
+    /// 输出格式（"wav" | "mp3" | "flac"）。缺省时按旧协议走 bit_depth → WAV。
+    #[serde(default)]
+    pub format: Option<crate::encode::OutputFormat>,
+    /// 完整编码参数包（含三格式各自的参数）。缺省时其余参数取持久化设置。
+    #[serde(default)]
+    pub encoder: Option<crate::encode::OutputSpec>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +85,9 @@ pub(crate) struct QuickExportSelectedClipsRequest {
     pub clip_ids: Vec<String>,
     pub output_dir: String,
     pub file_name: String,
+    /// 可选输出格式；缺省时使用持久化设置中的格式。
+    #[serde(default)]
+    pub format: Option<crate::encode::OutputFormat>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -103,6 +112,10 @@ pub(crate) struct ExportAudioDefaultsPayload {
     pub separated_file_name: String,
     pub sample_rate: u32,
     pub bit_depth: u32,
+    /// 持久化的输出格式（"wav" | "mp3" | "flac"）。
+    pub format: crate::encode::OutputFormat,
+    /// 持久化的完整编码参数包。
+    pub encoder: crate::encode::OutputSpec,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -311,13 +324,14 @@ pub(super) fn save_synthesized(
         end_sec: None,
         stretch: crate::time_stretch::resolved_external_stretch_algorithm(),
         apply_pitch_edit: true,
-        export_format: crate::mixdown::ExportFormat::Wav32f,
+        // 旧"保存合成结果"接口：固定 32-bit float WAV，行为与重构前一致。
+        output: crate::encode::OutputSpec::wav_32f(),
         quality_preset: crate::mixdown::QualityPreset::Export,
         cancel_flag: None,
     };
 
     // 3. 直接调用 mixdown 模块进行高质量重新渲染并写入目标路径
-    match crate::mixdown::render_mixdown_wav(&timeline, out_path, opts) {
+    match crate::mixdown::render_mixdown_to_file(&timeline, out_path, opts) {
         Ok(result) => {
             let num_samples = (result.duration_sec * result.sample_rate as f64)
                 .round()
@@ -449,12 +463,13 @@ pub(super) fn save_separated(state: State<'_, AppState>, output_dir: String) -> 
             end_sec: None,
             stretch: crate::time_stretch::resolved_external_stretch_algorithm(),
             apply_pitch_edit: true,
-            export_format: crate::mixdown::ExportFormat::Wav32f,
+            // 旧分轨导出接口：固定 32-bit float WAV，行为与重构前一致。
+            output: crate::encode::OutputSpec::wav_32f(),
             quality_preset: crate::mixdown::QualityPreset::Export,
             cancel_flag: None,
         };
 
-        match crate::mixdown::render_mixdown_wav(&sub_tl, &out_path, opts) {
+        match crate::mixdown::render_mixdown_to_file(&sub_tl, &out_path, opts) {
             Ok(result) => {
                 let num_samples = (result.duration_sec * result.sample_rate as f64)
                     .round()
@@ -490,6 +505,145 @@ pub(super) fn save_separated(state: State<'_, AppState>, output_dir: String) -> 
         "tracks": results,
         "output_dir": output_dir,
     })
+}
+
+// ─── 导出编码参数解析 ─────────────────────────────────────────────────────────
+
+/// CBR 合法码率兜底区间；精确吸附由 rusty_mp3 的 `snap_bitrate` 完成。
+const MP3_BITRATE_RANGE: std::ops::RangeInclusive<u32> = 8..=320;
+const MP3_VBR_QUALITY_MAX: u8 = 9;
+const FLAC_COMPRESSION_MAX: u8 = 8;
+
+/// MP3 CBR 比特率的宽松归一化。
+fn normalize_mp3_bitrate(value: u32) -> u32 {
+    value.clamp(*MP3_BITRATE_RANGE.start(), *MP3_BITRATE_RANGE.end())
+}
+
+/// 从持久化设置组装导出编码描述；未知 / 缺失字段宽松回退默认值。
+pub(super) fn persisted_output_spec(
+    settings: &crate::config::ExportSettings,
+) -> crate::encode::OutputSpec {
+    use crate::encode::{FlacBitDepth, Mp3BitrateMode};
+    let mut spec = crate::encode::OutputSpec::default();
+
+    if let Some(value) = settings.format.as_deref().and_then(crate::encode::OutputFormat::from_name)
+    {
+        spec.format = value;
+    }
+    if let Some(value) = settings
+        .channel_mode
+        .as_deref()
+        .and_then(crate::encode::ChannelMode::from_name)
+    {
+        spec.channel_mode = value;
+    }
+    if let Some(value) = settings
+        .dither
+        .as_deref()
+        .and_then(crate::encode::DitherMode::from_name)
+    {
+        spec.dither = value;
+    }
+    spec.wav.bit_depth = match settings.bit_depth {
+        16 => crate::encode::WavBitDepth::I16,
+        24 => crate::encode::WavBitDepth::I24,
+        _ => crate::encode::WavBitDepth::F32,
+    };
+
+    match settings.mp3_mode.as_deref().map(str::trim).map(str::to_ascii_lowercase) {
+        Some(value) if value == "cbr" => {
+            spec.mp3.mode = Mp3BitrateMode::Cbr {
+                bitrate_kbps: normalize_mp3_bitrate(settings.mp3_bitrate_kbps.unwrap_or(320)),
+            };
+        }
+        Some(value) if value == "vbr" => {
+            spec.mp3.mode = Mp3BitrateMode::Vbr {
+                quality_index: settings
+                    .mp3_vbr_quality_index
+                    .unwrap_or(2)
+                    .min(MP3_VBR_QUALITY_MAX),
+            };
+        }
+        _ => {}
+    }
+    if let Some(tags) = &settings.mp3_tags {
+        spec.mp3.tags = tags.clone();
+    }
+
+    if let Some(value) = settings
+        .flac_bit_depth
+        .as_deref()
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+    {
+        match value.as_str() {
+            "i16" => spec.flac.bit_depth = FlacBitDepth::I16,
+            "i24" => spec.flac.bit_depth = FlacBitDepth::I24,
+            _ => {}
+        }
+    }
+    if let Some(value) = settings.flac_compression_level {
+        spec.flac.compression_level = value.min(FLAC_COMPRESSION_MAX);
+    }
+
+    spec
+}
+
+/// 解析请求的输出编码描述：
+/// - 携带完整 `encoder` → 直接采用（`format` 字段冗余时以请求 `format` 为准）；
+/// - 仅携带 `format` → 其余参数取持久化设置；
+/// - 两者都缺（旧前端 / 旧调用方）→ bit_depth 驱动的 WAV，行为与重构前一致。
+pub(super) fn resolve_output_spec(
+    request: &ExportAudioRequest,
+    settings: &crate::config::ExportSettings,
+) -> crate::encode::OutputSpec {
+    if let Some(encoder) = &request.encoder {
+        let mut spec = encoder.clone();
+        if let Some(format) = request.format {
+            spec.format = format;
+        }
+        return spec;
+    }
+    if let Some(format) = request.format {
+        let mut spec = persisted_output_spec(settings);
+        spec.format = format;
+        return spec;
+    }
+    crate::encode::OutputSpec::wav_legacy(request.bit_depth.unwrap_or(32))
+}
+
+/// 把编码描述写回持久化设置（导出成功时调用）。
+fn apply_output_spec_to_settings(
+    settings: &mut crate::config::ExportSettings,
+    spec: &crate::encode::OutputSpec,
+) {
+    settings.format = Some(spec.format.as_name().to_string());
+    settings.channel_mode = Some(spec.channel_mode.as_name().to_string());
+    settings.dither = Some(spec.dither.as_name().to_string());
+    settings.bit_depth = match spec.wav.bit_depth {
+        crate::encode::WavBitDepth::I16 => 16,
+        crate::encode::WavBitDepth::I24 => 24,
+        crate::encode::WavBitDepth::F32 => 32,
+    };
+    match spec.mp3.mode {
+        crate::encode::Mp3BitrateMode::Cbr { bitrate_kbps } => {
+            settings.mp3_mode = Some("cbr".to_string());
+            settings.mp3_bitrate_kbps = Some(bitrate_kbps);
+        }
+        crate::encode::Mp3BitrateMode::Vbr { quality_index } => {
+            settings.mp3_mode = Some("vbr".to_string());
+            settings.mp3_vbr_quality_index = Some(quality_index);
+        }
+    }
+    settings.mp3_tags = Some(spec.mp3.tags.clone());
+    settings.flac_bit_depth = Some(
+        match spec.flac.bit_depth {
+            crate::encode::FlacBitDepth::I16 => "i16",
+            crate::encode::FlacBitDepth::I24 => "i24",
+        }
+        .to_string(),
+    );
+    settings.flac_compression_level = Some(spec.flac.compression_level);
 }
 
 pub(super) fn get_export_audio_defaults(state: State<'_, AppState>) -> ExportAudioDefaultsPayload {
@@ -541,6 +695,7 @@ pub(super) fn get_export_audio_defaults(state: State<'_, AppState>) -> ExportAud
 
     let sample_rate = normalize_export_sample_rate(export_settings.sample_rate);
     let bit_depth = normalize_export_bit_depth(export_settings.bit_depth);
+    let output_spec = persisted_output_spec(&export_settings);
 
     ExportAudioDefaultsPayload {
         ok: true,
@@ -552,6 +707,8 @@ pub(super) fn get_export_audio_defaults(state: State<'_, AppState>) -> ExportAud
         separated_file_name,
         sample_rate,
         bit_depth,
+        format: output_spec.format,
+        encoder: output_spec,
     }
 }
 
@@ -567,12 +724,22 @@ pub(super) fn preview_export_audio_plan(
     let project_name = resolve_project_name(&state);
     let project_folder = resolve_project_folder(&state).display().to_string();
     let export_start_time = Local::now();
+    let export_settings = state
+        .config_dir
+        .get()
+        .map(|config_dir| crate::config::load_export_settings(config_dir))
+        .unwrap_or_default();
+    let output_format = resolve_output_spec(&request, &export_settings).format;
 
     match request.mode {
         ExportAudioMode::Project => {
-            let Ok((path, _, _)) =
-                resolve_project_output_path(&state, &request, &project_name, export_start_time)
-            else {
+            let Ok((path, _, _)) = resolve_project_output_path(
+                &state,
+                &request,
+                &project_name,
+                export_start_time,
+                output_format,
+            ) else {
                 return ExportAudioPlanPayload {
                     ok: false,
                     mode: ExportAudioMode::Project,
@@ -669,6 +836,7 @@ pub(super) fn preview_export_audio_plan(
                     &target.track_id,
                     &project_name,
                     Local::now(),
+                    output_format,
                     &mut used_names,
                 ) {
                     Ok(value) => value,
@@ -709,9 +877,13 @@ pub(super) fn export_audio_advanced(
     let cancel_flag = Arc::new(AtomicBool::new(false));
     let _cancel_guard = install_export_cancel_flag(cancel_flag.clone());
 
+    let export_settings = state
+        .config_dir
+        .get()
+        .map(|config_dir| crate::config::load_export_settings(config_dir))
+        .unwrap_or_default();
+    let output_spec = resolve_output_spec(&request, &export_settings);
     let requested_sample_rate = normalize_export_sample_rate(request.sample_rate.unwrap_or(44_100));
-    let requested_bit_depth = normalize_export_bit_depth(request.bit_depth.unwrap_or(32));
-    let requested_export_format = export_format_from_bit_depth(requested_bit_depth);
 
     let overwrite_path_keys: HashSet<String> = request
         .overwrite_existing_paths
@@ -749,6 +921,7 @@ pub(super) fn export_audio_advanced(
                 &request,
                 &project_name,
                 export_start_time,
+                output_spec.format,
             ) {
                 Ok(value) => value,
                 Err(error) => {
@@ -818,12 +991,12 @@ pub(super) fn export_audio_advanced(
                 end_sec,
                 stretch: crate::time_stretch::resolved_external_stretch_algorithm(),
                 apply_pitch_edit: true,
-                export_format: requested_export_format,
+                output: output_spec.clone(),
                 quality_preset: crate::mixdown::QualityPreset::Export,
                 cancel_flag: Some(cancel_flag.clone()),
             };
 
-            match crate::mixdown::render_mixdown_wav(&timeline, &out_path, opts) {
+            match crate::mixdown::render_mixdown_to_file(&timeline, &out_path, opts) {
                 Ok(result) => {
                     let num_samples = (result.duration_sec * result.sample_rate as f64)
                         .round()
@@ -836,7 +1009,7 @@ pub(super) fn export_audio_advanced(
                         None,
                         None,
                         Some(requested_sample_rate),
-                        Some(requested_bit_depth),
+                        Some(&output_spec),
                     );
 
                     emit_export_audio_progress(
@@ -854,8 +1027,10 @@ pub(super) fn export_audio_advanced(
                         "ok": true,
                         "mode": "project",
                         "path": out_path.display().to_string(),
+                        "format": output_spec.format.as_name(),
                         "sample_rate": result.sample_rate,
                         "num_samples": num_samples,
+                        "bytes_written": result.bytes_written,
                     })
                 }
                 Err(e) => {
@@ -1023,6 +1198,7 @@ pub(super) fn export_audio_advanced(
                     &target.track_id,
                     &project_name,
                     Local::now(),
+                    output_spec.format,
                     &mut used_names,
                 ) {
                     Ok(value) => value,
@@ -1152,12 +1328,12 @@ pub(super) fn export_audio_advanced(
                     end_sec,
                     stretch: crate::time_stretch::resolved_external_stretch_algorithm(),
                     apply_pitch_edit: true,
-                    export_format: requested_export_format,
+                    output: output_spec.clone(),
                     quality_preset: crate::mixdown::QualityPreset::Export,
                     cancel_flag: Some(cancel_flag.clone()),
                 };
 
-                match crate::mixdown::render_mixdown_wav(&sub_timeline, &out_path, opts) {
+                match crate::mixdown::render_mixdown_to_file(&sub_timeline, &out_path, opts) {
                     Ok(result) => {
                         let num_samples = (result.duration_sec * result.sample_rate as f64)
                             .round()
@@ -1169,8 +1345,10 @@ pub(super) fn export_audio_advanced(
                             "name": target.track_name,
                             "path": out_path.display().to_string(),
                             "ok": true,
+                            "format": output_spec.format.as_name(),
                             "sample_rate": result.sample_rate,
                             "num_samples": num_samples,
+                            "bytes_written": result.bytes_written,
                         }));
                     }
                     Err(e) => {
@@ -1223,7 +1401,7 @@ pub(super) fn export_audio_advanced(
                     Some(output_dir_template.to_string()),
                     Some(pattern.to_string()),
                     Some(requested_sample_rate),
-                    Some(requested_bit_depth),
+                    Some(&output_spec),
                 );
             }
 
@@ -1326,8 +1504,11 @@ pub(super) fn quick_export_selected_clips(
         .map(|config_dir| crate::config::load_export_settings(config_dir))
         .unwrap_or_default();
     let requested_sample_rate = normalize_export_sample_rate(export_settings.sample_rate);
-    let requested_bit_depth = normalize_export_bit_depth(export_settings.bit_depth);
-    let requested_export_format = export_format_from_bit_depth(requested_bit_depth);
+    // 快捷导出不暴露编码参数：除可选格式覆盖外，全部沿用持久化设置。
+    let mut output_spec = persisted_output_spec(&export_settings);
+    if let Some(format) = request.format {
+        output_spec.format = format;
+    }
 
     let project_name = resolve_project_name(&state);
     let project_folder = resolve_project_folder(&state).display().to_string();
@@ -1369,11 +1550,10 @@ pub(super) fn quick_export_selected_clips(
     };
     rendered_file_name = sanitize_file_name_segment(&rendered_file_name);
     if rendered_file_name.is_empty() {
-        rendered_file_name = format!("{project_name}_quick_export.wav");
+        rendered_file_name = format!("{project_name}_quick_export");
     }
-    if !rendered_file_name.to_ascii_lowercase().ends_with(".wav") {
-        rendered_file_name.push_str(".wav");
-    }
+    // 按格式替换 / 补全扩展名（wav/mp3/flac 原地替换，其余追加）。
+    rendered_file_name = crate::encode::with_format_extension(&rendered_file_name, output_spec.format);
 
     let out_path = Path::new(&output_dir).join(&rendered_file_name);
     if let Some(parent) = out_path.parent() {
@@ -1386,7 +1566,7 @@ pub(super) fn quick_export_selected_clips(
         }
     }
 
-    match crate::mixdown::render_mixdown_wav(
+    match crate::mixdown::render_mixdown_to_file(
         &export_timeline,
         &out_path,
         crate::mixdown::MixdownOptions {
@@ -1395,7 +1575,7 @@ pub(super) fn quick_export_selected_clips(
             end_sec: Some(end_sec),
             stretch: crate::time_stretch::resolved_external_stretch_algorithm(),
             apply_pitch_edit: true,
-            export_format: requested_export_format,
+            output: output_spec.clone(),
             quality_preset: crate::mixdown::QualityPreset::Export,
             cancel_flag: None,
         },
@@ -1408,7 +1588,7 @@ pub(super) fn quick_export_selected_clips(
                 None,
                 None,
                 Some(requested_sample_rate),
-                Some(requested_bit_depth),
+                Some(&output_spec),
             );
             let num_samples = (result.duration_sec * result.sample_rate as f64)
                 .round()
@@ -1416,9 +1596,11 @@ pub(super) fn quick_export_selected_clips(
             serde_json::json!({
                 "ok": true,
                 "path": out_path.display().to_string(),
+                "format": output_spec.format.as_name(),
                 "sample_rate": result.sample_rate,
                 "num_samples": num_samples,
                 "duration_sec": result.duration_sec,
+                "bytes_written": result.bytes_written,
             })
         }
         Err(error) => serde_json::json!({
@@ -1696,14 +1878,6 @@ fn normalize_export_bit_depth(bit_depth: u32) -> u32 {
     }
 }
 
-fn export_format_from_bit_depth(bit_depth: u32) -> crate::mixdown::ExportFormat {
-    match normalize_export_bit_depth(bit_depth) {
-        16 => crate::mixdown::ExportFormat::Wav16,
-        24 => crate::mixdown::ExportFormat::Wav24,
-        _ => crate::mixdown::ExportFormat::Wav32f,
-    }
-}
-
 fn try_apply_time_format(template: &str, time: chrono::DateTime<Local>) -> Result<String, String> {
     let direct = std::panic::catch_unwind(|| time.format(template).to_string());
     if let Ok(value) = direct {
@@ -1751,6 +1925,7 @@ fn resolve_project_output_path(
     request: &ExportAudioRequest,
     project_name: &str,
     export_start_time: chrono::DateTime<Local>,
+    format: crate::encode::OutputFormat,
 ) -> Result<(PathBuf, String, String), String> {
     let project_folder = resolve_project_folder(state).display().to_string();
     let project_output_dir = request
@@ -1786,11 +1961,10 @@ fn resolve_project_output_path(
 
         file_name = sanitize_file_name_segment(&file_name);
         if file_name.is_empty() {
-            file_name = format!("{project_name}.wav");
+            file_name = format!("{project_name}");
         }
-        if !file_name.to_ascii_lowercase().ends_with(".wav") {
-            file_name.push_str(".wav");
-        }
+        // 按所选格式替换 / 补全扩展名（wav/mp3/flac 原地替换，其余追加）。
+        file_name = crate::encode::with_format_extension(&file_name, format);
 
         return Ok((
             Path::new(&output_dir).join(&file_name),
@@ -1863,7 +2037,7 @@ fn persist_successful_export_settings(
     separated_output_dir: Option<String>,
     separated_file_name_pattern: Option<String>,
     sample_rate: Option<u32>,
-    bit_depth: Option<u32>,
+    output_spec: Option<&crate::encode::OutputSpec>,
 ) {
     let Some(config_dir) = state.config_dir.get() else {
         return;
@@ -1886,8 +2060,8 @@ fn persist_successful_export_settings(
     if let Some(value) = sample_rate {
         settings.sample_rate = normalize_export_sample_rate(value);
     }
-    if let Some(value) = bit_depth {
-        settings.bit_depth = normalize_export_bit_depth(value);
+    if let Some(spec) = output_spec {
+        apply_output_spec_to_settings(&mut settings, spec);
     }
 
     crate::config::save_export_settings(config_dir, &settings);
@@ -1903,8 +2077,10 @@ fn build_unique_export_file_name(
     track_id: &str,
     project_name: &str,
     export_time: chrono::DateTime<Local>,
+    format: crate::encode::OutputFormat,
     used_names: &mut HashSet<String>,
 ) -> Result<PathBuf, String> {
+    let extension = format.extension();
     let mut rendered = pattern.to_string();
     let index_token = format!("{:0width$}", track_index, width = index_width);
     let export_index_token = format!("{:0width$}", export_index, width = index_width);
@@ -1919,32 +2095,19 @@ fn build_unique_export_file_name(
     let mut relative = normalize_export_relative_path(&rendered);
     if relative.as_os_str().is_empty() {
         relative.push(format!(
-            "{}_{}.wav",
+            "{}_{}.{extension}",
             export_index_token,
             sanitize_file_name_segment(track_name)
         ));
     }
-    if relative
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| ext.eq_ignore_ascii_case("wav"))
-        != Some(true)
+    // 末段扩展名按格式替换 / 补全（wav/mp3/flac 原地替换，其余追加）。
     {
-        let stem = relative
+        let file_name = relative
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("track")
             .to_string();
-        let mut new_file_name = sanitize_file_name_segment(&stem);
-        if new_file_name.is_empty() {
-            new_file_name = format!(
-                "{}_{}.wav",
-                export_index_token,
-                sanitize_file_name_segment(track_name)
-            );
-        } else if !new_file_name.to_ascii_lowercase().ends_with(".wav") {
-            new_file_name.push_str(".wav");
-        }
+        let new_file_name = crate::encode::with_format_extension(&file_name, format);
         relative.set_file_name(new_file_name);
     }
 
@@ -1957,21 +2120,15 @@ fn build_unique_export_file_name(
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_default();
-    let file_name = PathBuf::from(&candidate)
-        .file_name()
+    let stem = relative
+        .file_stem()
         .and_then(|name| name.to_str())
-        .unwrap_or("track.wav")
+        .unwrap_or("track")
         .to_string();
-    let lower = file_name.to_ascii_lowercase();
-    let stem = if lower.ends_with(".wav") {
-        file_name[..file_name.len() - 4].to_string()
-    } else {
-        file_name
-    };
 
     let mut seq = 2usize;
     loop {
-        let file = format!("{}_{}.wav", stem, seq);
+        let file = format!("{stem}_{seq}.{extension}");
         let next = if parent.as_os_str().is_empty() {
             file
         } else {

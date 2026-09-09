@@ -70,7 +70,7 @@ pub(crate) fn render_timeline_to_wav(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
-    crate::mixdown::render_mixdown_wav(
+    crate::mixdown::render_mixdown_to_file(
         &timeline,
         output_path,
         crate::mixdown::MixdownOptions {
@@ -79,8 +79,8 @@ pub(crate) fn render_timeline_to_wav(
             end_sec,
             stretch: crate::time_stretch::resolved_external_stretch_algorithm(),
             apply_pitch_edit: true,
-            // 导出时使用最高质量：32-bit float + Export 预设。
-            export_format: crate::mixdown::ExportFormat::Wav32f,
+            // 临时渲染固定 32-bit float WAV（内部用途，不受导出设置影响）。
+            output: crate::encode::OutputSpec::wav_32f(),
             quality_preset: crate::mixdown::QualityPreset::Export,
             cancel_flag: None,
         },

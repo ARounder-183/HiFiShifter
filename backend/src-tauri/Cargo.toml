@@ -52,6 +52,10 @@ time = { version = "0.3", default-features = false, features = ["std"] }
 libloading = "0.8"
 log = { version = "0.4", features = ["std"] }
 
+rusty_mp3 = "=0.7.0"
+rusty_flac = "=0.1.2"
+id3 = "1"
+
 rustfft = "6"
 num-complex = "0.4"
 aberth = "0.4"

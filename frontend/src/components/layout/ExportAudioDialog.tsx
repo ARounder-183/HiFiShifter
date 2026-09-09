@@ -4,12 +4,39 @@
  */
 
 import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
-import { Button, Dialog, Flex, Select, Text, TextField } from "@radix-ui/themes";
+import {
+    Button,
+    Dialog,
+    Flex,
+    SegmentedControl,
+    Select,
+    Slider,
+    Text,
+    TextField,
+} from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { exportAudioAdvanced } from "../../features/session/sessionSlice";
 import { fileBrowserApi } from "../../services/api/fileBrowser";
-import { coreApi, type AdvancedExportRequest } from "../../services/api/core";
+import {
+    coreApi,
+    type AdvancedExportRequest,
+    type ChannelMode,
+    type DitherMode,
+    type ExportEncoderSpec,
+    type ExportFormat,
+    type FlacBitDepth,
+    type Mp3Tags,
+    type WavBitDepth,
+} from "../../services/api/core";
+import {
+    applyExtensionToFileName,
+    FLAC_COMPRESSION_RANGE,
+    MP3_BITRATES,
+    MP3_VBR_AVG_KBPS,
+    nearestAllowedSampleRate,
+    sampleRateOptions,
+} from "../../utils/exportFormat";
 import { ProgressBar } from "../ProgressBar";
 import type { TrackInfo } from "../../features/session/sessionTypes";
 import { applySelectWheelChange } from "../../utils/selectWheel";
@@ -21,7 +48,13 @@ interface ExportAudioDialogProps {
 
 type ExportMode = "project" | "separated";
 type ExportRangeKind = "all" | "custom";
-type ExportBitDepth = 16 | 24 | 32;
+type Mp3ModeKind = "cbr" | "vbr";
+
+/** FLAC 压缩级别滑条的滚轮步进选项（"0" ~ "8"，供 applySelectWheelChange 使用）。 */
+const FLAC_LEVEL_OPTIONS = Array.from(
+    { length: FLAC_COMPRESSION_RANGE.max - FLAC_COMPRESSION_RANGE.min + 1 },
+    (_, index) => String(FLAC_COMPRESSION_RANGE.min + index),
+);
 
 type TargetKind = "root" | "sub";
 
@@ -197,7 +230,19 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
         "<ExportIndex>_<TrackName>.wav",
     );
     const [sampleRate, setSampleRate] = useState("48000");
-    const [bitDepth, setBitDepth] = useState<ExportBitDepth>(32);
+    const [sampleRateNotice, setSampleRateNotice] = useState("");
+    // ── 编码格式与参数（持久化经 get_export_audio_defaults / 导出成功回写）──
+    const [format, setFormat] = useState<ExportFormat>("wav");
+    const [channelMode, setChannelMode] = useState<ChannelMode>("stereo");
+    const [dither, setDither] = useState<DitherMode>("none");
+    const [wavBitDepth, setWavBitDepth] = useState<WavBitDepth>("f32");
+    const [flacBitDepth, setFlacBitDepth] = useState<FlacBitDepth>("i24");
+    const [flacLevel, setFlacLevel] = useState<number>(FLAC_COMPRESSION_RANGE.default);
+    const [mp3Mode, setMp3Mode] = useState<Mp3ModeKind>("vbr");
+    const [mp3Bitrate, setMp3Bitrate] = useState(320);
+    const [mp3Quality, setMp3Quality] = useState(2);
+    const [mp3Tags, setMp3Tags] = useState<Mp3Tags>({});
+    const [encoderOpen, setEncoderOpen] = useState(false);
     const [selectedTargetIds, setSelectedTargetIds] = useState<string[]>([]);
     const [errorText, setErrorText] = useState("");
     const [submitting, setSubmitting] = useState(false);
@@ -282,7 +327,18 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
         setSeparatedOutputDir("");
         setSeparatedNamePattern("<ExportIndex>_<TrackName>.wav");
         setSampleRate("48000");
-        setBitDepth(32);
+        setSampleRateNotice("");
+        setFormat("wav");
+        setChannelMode("stereo");
+        setDither("none");
+        setWavBitDepth("f32");
+        setFlacBitDepth("i24");
+        setFlacLevel(FLAC_COMPRESSION_RANGE.default);
+        setMp3Mode("vbr");
+        setMp3Bitrate(320);
+        setMp3Quality(2);
+        setMp3Tags({});
+        setEncoderOpen(false);
         setSubmitting(false);
         setExportProgress({
             active: false,
@@ -314,17 +370,67 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                 const defaults = await coreApi.getExportAudioDefaults();
                 if (disposed || !defaults?.ok) return;
                 setProjectOutputDir(defaults.projectOutputDir ?? "");
-                setProjectFileName(defaults.projectFileName ?? "<ProjectName>.wav");
                 setSeparatedOutputDir(defaults.separatedOutputDir ?? "");
+                const nextFormat: ExportFormat =
+                    defaults.format === "mp3" || defaults.format === "flac"
+                        ? defaults.format
+                        : "wav";
+                setFormat(nextFormat);
+                setChannelMode(defaults.encoder?.channelMode === "mono" ? "mono" : "stereo");
+                setDither(defaults.encoder?.dither === "tpdf" ? "tpdf" : "none");
+                setWavBitDepth(
+                    defaults.encoder?.wav?.bitDepth === "i16" ||
+                        defaults.encoder?.wav?.bitDepth === "i24"
+                        ? defaults.encoder.wav.bitDepth
+                        : "f32",
+                );
+                setFlacBitDepth(defaults.encoder?.flac?.bitDepth === "i16" ? "i16" : "i24");
+                setFlacLevel(
+                    typeof defaults.encoder?.flac?.compressionLevel === "number"
+                        ? defaults.encoder.flac.compressionLevel
+                        : FLAC_COMPRESSION_RANGE.default,
+                );
+                const persistedMode = defaults.encoder?.mp3?.mode;
+                if (persistedMode?.mode === "cbr") {
+                    setMp3Mode("cbr");
+                    setMp3Bitrate(persistedMode.bitrateKbps);
+                } else if (persistedMode?.mode === "vbr") {
+                    setMp3Mode("vbr");
+                    setMp3Quality(persistedMode.qualityIndex);
+                }
+                setMp3Tags({
+                    title: defaults.encoder?.mp3?.tags?.title ?? "",
+                    artist: defaults.encoder?.mp3?.tags?.artist ?? "",
+                    album: defaults.encoder?.mp3?.tags?.album ?? "",
+                    comment: defaults.encoder?.mp3?.tags?.comment ?? "",
+                });
+                // 文件名 / 命名模板的旧后缀按持久化格式归一。
+                setProjectFileName(
+                    applyExtensionToFileName(
+                        defaults.projectFileName ?? "<ProjectName>.wav",
+                        nextFormat,
+                    ),
+                );
                 setSeparatedNamePattern(
-                    defaults.separatedFileName ?? "<ExportIndex>_<TrackName>.wav",
+                    applyExtensionToFileName(
+                        defaults.separatedFileName ?? "<ExportIndex>_<TrackName>.wav",
+                        nextFormat,
+                    ),
                 );
-                setSampleRate(String(defaults.sampleRate ?? 48000));
-                setBitDepth(
-                    defaults.bitDepth === 16 || defaults.bitDepth === 24 || defaults.bitDepth === 32
-                        ? defaults.bitDepth
-                        : 32,
-                );
+                const defaultRate = Number(defaults.sampleRate ?? 48000);
+                const corrected = nearestAllowedSampleRate(nextFormat, defaultRate);
+                if (corrected != null) {
+                    setSampleRate(String(corrected));
+                    setSampleRateNotice(
+                        tAny("export_dialog_sample_rate_autocorrected").replace(
+                            "{rate}",
+                            String(corrected),
+                        ),
+                    );
+                } else {
+                    setSampleRate(String(defaultRate));
+                    setSampleRateNotice("");
+                }
             } catch {
                 // 保持回退默认值。
             }
@@ -334,6 +440,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
         return () => {
             disposed = true;
         };
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- 与上方打开时重置同理，仅在打开时加载一次持久化设置
     }, [open]);
 
     useEffect(() => {
@@ -441,6 +548,50 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
         keepProgressVisible,
         awaitingConflictDecision,
     ]);
+
+    /** 格式切换：文件名/命名模板扩展名原地替换 + 采样率合法性自动纠正。 */
+    function handleFormatChange(next: ExportFormat) {
+        if (next === format) return;
+        setFormat(next);
+        setProjectFileName((name) => applyExtensionToFileName(name, next));
+        setSeparatedNamePattern((pattern) => applyExtensionToFileName(pattern, next));
+
+        const corrected = nearestAllowedSampleRate(next, Number(sampleRate));
+        if (corrected != null) {
+            setSampleRate(String(corrected));
+            setSampleRateNotice(
+                tAny("export_dialog_sample_rate_autocorrected").replace(
+                    "{rate}",
+                    String(corrected),
+                ),
+            );
+        } else {
+            setSampleRateNotice("");
+        }
+    }
+
+    /** 组装完整编码参数包（与后端 crate::encode::OutputSpec 对应）。 */
+    function buildEncoderSpec(): ExportEncoderSpec {
+        return {
+            format,
+            channelMode,
+            dither,
+            wav: { bitDepth: wavBitDepth },
+            mp3: {
+                mode:
+                    mp3Mode === "cbr"
+                        ? { mode: "cbr", bitrateKbps: mp3Bitrate }
+                        : { mode: "vbr", qualityIndex: mp3Quality },
+                tags: {
+                    title: mp3Tags.title?.trim() ? mp3Tags.title : null,
+                    artist: mp3Tags.artist?.trim() ? mp3Tags.artist : null,
+                    album: mp3Tags.album?.trim() ? mp3Tags.album : null,
+                    comment: mp3Tags.comment?.trim() ? mp3Tags.comment : null,
+                },
+            },
+            flac: { bitDepth: flacBitDepth, compressionLevel: flacLevel },
+        };
+    }
 
     function toggleTarget(targetId: string) {
         setSelectedTargetIds((prev) => {
@@ -624,6 +775,9 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
         if (code === "export_invalid_time_format") {
             return tAny("export_dialog_error_invalid_time_format");
         }
+        if (code === "mp3_unsupported_sample_rate") {
+            return tAny("export_dialog_error_mp3_unsupported_sample_rate");
+        }
         return code || tAny("status_export_failed");
     }
 
@@ -691,7 +845,8 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                     projectOutputDir: outputDir,
                     projectFileName: fileName,
                     sampleRate: resolvedSampleRate,
-                    bitDepth,
+                    format,
+                    encoder: buildEncoderSpec(),
                 });
                 if (conflicts.canceled) {
                     setSubmitting(false);
@@ -704,7 +859,8 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                         projectOutputDir: outputDir,
                         projectFileName: fileName,
                         sampleRate: resolvedSampleRate,
-                        bitDepth,
+                        format,
+                        encoder: buildEncoderSpec(),
                         overwriteExistingPaths: conflicts.overwriteExistingPaths,
                         skipExistingPaths: conflicts.skipExistingPaths,
                     }),
@@ -755,7 +911,8 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                     separatedNamePattern.trim() || "<ExportIndex>_<TrackName>.wav",
                 separatedTargets: selectedTargets,
                 sampleRate: resolvedSampleRate,
-                bitDepth,
+                format,
+                encoder: buildEncoderSpec(),
             });
             if (conflicts.canceled) {
                 setSubmitting(false);
@@ -771,7 +928,8 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                         separatedNamePattern.trim() || "<ExportIndex>_<TrackName>.wav",
                     separatedTargets: selectedTargets,
                     sampleRate: resolvedSampleRate,
-                    bitDepth,
+                    format,
+                    encoder: buildEncoderSpec(),
                     overwriteExistingPaths: conflicts.overwriteExistingPaths,
                     skipExistingPaths: conflicts.skipExistingPaths,
                 }),
@@ -923,52 +1081,27 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
 
                         <Flex align="center" gap="2">
                             <Text size="2" style={{ minWidth: 132 }}>
-                                {tAny("export_dialog_sample_rate")}
+                                {tAny("export_dialog_format")}
                             </Text>
-                            <Select.Root
-                                value={sampleRate}
-                                onValueChange={(value) => setSampleRate(value)}
+                            <SegmentedControl.Root
+                                value={format}
+                                onValueChange={(value) => handleFormatChange(value as ExportFormat)}
                             >
-                                <Select.Trigger
-                                    style={{ flex: 1 }}
-                                    onWheel={(event) => {
-                                        applySelectWheelChange({
-                                            event,
-                                            currentValue: sampleRate,
-                                            options: [
-                                                "22050",
-                                                "32000",
-                                                "44100",
-                                                "48000",
-                                                "88200",
-                                                "96000",
-                                            ],
-                                            onChange: setSampleRate,
-                                        });
-                                    }}
-                                />
-                                <Select.Content>
-                                    <Select.Item value="22050">22050 Hz</Select.Item>
-                                    <Select.Item value="32000">32000 Hz</Select.Item>
-                                    <Select.Item value="44100">44100 Hz</Select.Item>
-                                    <Select.Item value="48000">48000 Hz</Select.Item>
-                                    <Select.Item value="88200">88200 Hz</Select.Item>
-                                    <Select.Item value="96000">96000 Hz</Select.Item>
-                                </Select.Content>
-                            </Select.Root>
+                                <SegmentedControl.Item value="wav">WAV</SegmentedControl.Item>
+                                <SegmentedControl.Item value="mp3">MP3</SegmentedControl.Item>
+                                <SegmentedControl.Item value="flac">FLAC</SegmentedControl.Item>
+                            </SegmentedControl.Root>
                         </Flex>
 
                         <Flex align="center" gap="2">
                             <Text size="2" style={{ minWidth: 132 }}>
-                                {tAny("export_dialog_bit_depth")}
+                                {tAny("export_dialog_sample_rate")}
                             </Text>
                             <Select.Root
-                                value={String(bitDepth)}
+                                value={sampleRate}
                                 onValueChange={(value) => {
-                                    const parsed = Number(value);
-                                    if (parsed === 16 || parsed === 24 || parsed === 32) {
-                                        setBitDepth(parsed);
-                                    }
+                                    setSampleRate(value);
+                                    setSampleRateNotice("");
                                 }}
                             >
                                 <Select.Trigger
@@ -976,28 +1109,377 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                     onWheel={(event) => {
                                         applySelectWheelChange({
                                             event,
-                                            currentValue: String(bitDepth),
-                                            options: ["16", "24", "32"],
+                                            currentValue: sampleRate,
+                                            options: sampleRateOptions(format).map(String),
                                             onChange: (next) => {
-                                                const parsed = Number(next);
-                                                if (
-                                                    parsed === 16 ||
-                                                    parsed === 24 ||
-                                                    parsed === 32
-                                                ) {
-                                                    setBitDepth(parsed);
-                                                }
+                                                setSampleRate(next);
+                                                setSampleRateNotice("");
                                             },
                                         });
                                     }}
                                 />
                                 <Select.Content>
-                                    <Select.Item value="16">16-bit</Select.Item>
-                                    <Select.Item value="24">24-bit</Select.Item>
-                                    <Select.Item value="32">32-bit</Select.Item>
+                                    {sampleRateOptions(format).map((rate) => (
+                                        <Select.Item key={rate} value={String(rate)}>
+                                            {rate} Hz
+                                        </Select.Item>
+                                    ))}
                                 </Select.Content>
                             </Select.Root>
                         </Flex>
+
+                        {sampleRateNotice ? (
+                            <Text size="1" color="amber">
+                                {sampleRateNotice}
+                            </Text>
+                        ) : null}
+
+                        {format !== "mp3" ? (
+                            <Flex align="center" gap="2">
+                                <Text size="2" style={{ minWidth: 132 }}>
+                                    {tAny("export_dialog_bit_depth")}
+                                </Text>
+                                <Select.Root
+                                    value={format === "wav" ? wavBitDepth : flacBitDepth}
+                                    onValueChange={(value) => {
+                                        if (format === "wav") {
+                                            if (
+                                                value === "i16" ||
+                                                value === "i24" ||
+                                                value === "f32"
+                                            ) {
+                                                setWavBitDepth(value);
+                                            }
+                                        } else if (value === "i16" || value === "i24") {
+                                            setFlacBitDepth(value);
+                                        }
+                                    }}
+                                >
+                                    <Select.Trigger
+                                        style={{ flex: 1 }}
+                                        onWheel={(event) => {
+                                            const isWav = format === "wav";
+                                            applySelectWheelChange({
+                                                event,
+                                                currentValue: isWav ? wavBitDepth : flacBitDepth,
+                                                options: isWav ? ["i16", "i24", "f32"] : ["i16", "i24"],
+                                                onChange: (next) => {
+                                                    if (isWav) {
+                                                        if (
+                                                            next === "i16" ||
+                                                            next === "i24" ||
+                                                            next === "f32"
+                                                        ) {
+                                                            setWavBitDepth(next);
+                                                        }
+                                                    } else if (next === "i16" || next === "i24") {
+                                                        setFlacBitDepth(next);
+                                                    }
+                                                },
+                                            });
+                                        }}
+                                    />
+                                    <Select.Content>
+                                        <Select.Item value="i16">16-bit</Select.Item>
+                                        <Select.Item value="i24">24-bit</Select.Item>
+                                        {format === "wav" && (
+                                            <Select.Item value="f32">32-bit float</Select.Item>
+                                        )}
+                                    </Select.Content>
+                                </Select.Root>
+                            </Flex>
+                        ) : (
+                            <Text size="1" color="gray">
+                                {tAny("export_dialog_mp3_bit_depth_note")}
+                            </Text>
+                        )}
+
+                        <Flex align="center" gap="2">
+                            <Button
+                                variant="ghost"
+                                color="gray"
+                                size="1"
+                                onClick={() => setEncoderOpen((prev) => !prev)}
+                            >
+                                {encoderOpen ? "▾" : "▸"} {tAny("export_dialog_encoder_params")}
+                            </Button>
+                        </Flex>
+
+                        {encoderOpen && (
+                            <Flex direction="column" gap="3" pl="1">
+                                    {format === "mp3" && (
+                                        <>
+                                            <Flex align="center" gap="2">
+                                                <Text size="2" style={{ minWidth: 132 }}>
+                                                    {tAny("export_dialog_mp3_mode")}
+                                                </Text>
+                                                <Select.Root
+                                                    value={mp3Mode}
+                                                    onValueChange={(value) => {
+                                                        if (value === "cbr" || value === "vbr") {
+                                                            setMp3Mode(value);
+                                                        }
+                                                    }}
+                                                >
+                                                    <Select.Trigger
+                                                        style={{ flex: 1 }}
+                                                        onWheel={(event) => {
+                                                            applySelectWheelChange({
+                                                                event,
+                                                                currentValue: mp3Mode,
+                                                                options: ["vbr", "cbr"],
+                                                                onChange: (next) => {
+                                                                    if (next === "cbr" || next === "vbr") {
+                                                                        setMp3Mode(next);
+                                                                    }
+                                                                },
+                                                            });
+                                                        }}
+                                                    />
+                                                    <Select.Content>
+                                                        <Select.Item value="vbr">
+                                                            {tAny("export_dialog_mp3_mode_vbr")}
+                                                        </Select.Item>
+                                                        <Select.Item value="cbr">
+                                                            {tAny("export_dialog_mp3_mode_cbr")}
+                                                        </Select.Item>
+                                                    </Select.Content>
+                                                </Select.Root>
+                                            </Flex>
+
+                                            {mp3Mode === "cbr" ? (
+                                                <Flex align="center" gap="2">
+                                                    <Text size="2" style={{ minWidth: 132 }}>
+                                                        {tAny("export_dialog_mp3_bitrate")}
+                                                    </Text>
+                                                    <Select.Root
+                                                        value={String(mp3Bitrate)}
+                                                        onValueChange={(value) =>
+                                                            setMp3Bitrate(Number(value))
+                                                        }
+                                                    >
+                                                        <Select.Trigger
+                                                            style={{ flex: 1 }}
+                                                            onWheel={(event) => {
+                                                                applySelectWheelChange({
+                                                                    event,
+                                                                    currentValue: String(mp3Bitrate),
+                                                                    options: MP3_BITRATES.map(String),
+                                                                    onChange: (next) =>
+                                                                        setMp3Bitrate(Number(next)),
+                                                                });
+                                                            }}
+                                                        />
+                                                        <Select.Content>
+                                                            {MP3_BITRATES.map((rate) => (
+                                                                <Select.Item
+                                                                    key={rate}
+                                                                    value={String(rate)}
+                                                                >
+                                                                    {rate} kbps
+                                                                </Select.Item>
+                                                            ))}
+                                                        </Select.Content>
+                                                    </Select.Root>
+                                                </Flex>
+                                            ) : (
+                                                <Flex align="center" gap="2">
+                                                    <Text size="2" style={{ minWidth: 132 }}>
+                                                        {tAny("export_dialog_mp3_quality")}
+                                                    </Text>
+                                                    <Select.Root
+                                                        value={String(mp3Quality)}
+                                                        onValueChange={(value) =>
+                                                            setMp3Quality(Number(value))
+                                                        }
+                                                    >
+                                                        <Select.Trigger
+                                                            style={{ flex: 1 }}
+                                                            onWheel={(event) => {
+                                                                applySelectWheelChange({
+                                                                    event,
+                                                                    currentValue: String(mp3Quality),
+                                                                    options: MP3_VBR_AVG_KBPS.map(
+                                                                        (_, index) => String(index),
+                                                                    ),
+                                                                    onChange: (next) =>
+                                                                        setMp3Quality(Number(next)),
+                                                                });
+                                                            }}
+                                                        />
+                                                        <Select.Content>
+                                                            {MP3_VBR_AVG_KBPS.map((avg, index) => (
+                                                                <Select.Item
+                                                                    key={index}
+                                                                    value={String(index)}
+                                                                >
+                                                                    q{index} · ~{avg} kbps
+                                                                </Select.Item>
+                                                            ))}
+                                                        </Select.Content>
+                                                    </Select.Root>
+                                                </Flex>
+                                            )}
+
+                                            <Flex direction="column" gap="2">
+                                                <Text size="2" color="gray">
+                                                    {tAny("export_dialog_mp3_tags")}
+                                                </Text>
+                                                <div className="grid grid-cols-2 gap-2">
+                                                    {(
+                                                        [
+                                                            ["title", "export_dialog_tag_title"],
+                                                            ["artist", "export_dialog_tag_artist"],
+                                                            ["album", "export_dialog_tag_album"],
+                                                            ["comment", "export_dialog_tag_comment"],
+                                                        ] as const
+                                                    ).map(([key, i18nKey]) => (
+                                                        <label
+                                                            key={key}
+                                                            className="flex flex-col gap-1 text-xs text-qt-text"
+                                                        >
+                                                            <Text size="1" color="gray">
+                                                                {tAny(i18nKey)}
+                                                            </Text>
+                                                            <TextField.Root
+                                                                size="1"
+                                                                value={mp3Tags[key] ?? ""}
+                                                                onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                                                                    setMp3Tags((prev) => ({
+                                                                        ...prev,
+                                                                        [key]: event.target.value,
+                                                                    }))
+                                                                }
+                                                            />
+                                                        </label>
+                                                    ))}
+                                                </div>
+                                            </Flex>
+                                        </>
+                                    )}
+
+                                    {format === "flac" && (
+                                        <>
+                                            <Flex align="center" gap="2">
+                                                <Text size="2" style={{ minWidth: 132 }}>
+                                                    {tAny("export_dialog_flac_level")}
+                                                </Text>
+                                                <Slider
+                                                    min={FLAC_COMPRESSION_RANGE.min}
+                                                    max={FLAC_COMPRESSION_RANGE.max}
+                                                    step={1}
+                                                    value={[flacLevel]}
+                                                    onValueChange={(value) =>
+                                                        setFlacLevel(
+                                                            Array.isArray(value) ? value[0] : value,
+                                                        )
+                                                    }
+                                                    onWheel={(event) => {
+                                                        applySelectWheelChange({
+                                                            event,
+                                                            currentValue: String(flacLevel),
+                                                            options: FLAC_LEVEL_OPTIONS,
+                                                            onChange: (next) =>
+                                                                setFlacLevel(Number(next)),
+                                                        });
+                                                    }}
+                                                    style={{ flex: 1 }}
+                                                />
+                                                <Text
+                                                    size="1"
+                                                    color="gray"
+                                                    style={{ minWidth: 24, textAlign: "right" }}
+                                                >
+                                                    {flacLevel}
+                                                </Text>
+                                            </Flex>
+                                            <Text size="1" color="gray">
+                                                {tAny("export_dialog_flac_level_hint")}
+                                            </Text>
+                                        </>
+                                    )}
+
+                                    {((format === "wav" &&
+                                        (wavBitDepth === "i16" || wavBitDepth === "i24")) ||
+                                        format === "flac") && (
+                                        <Flex align="center" gap="2">
+                                            <Text size="2" style={{ minWidth: 132 }}>
+                                                {tAny("export_dialog_dither")}
+                                            </Text>
+                                            <Select.Root
+                                                value={dither}
+                                                onValueChange={(value) => {
+                                                    if (value === "none" || value === "tpdf") {
+                                                        setDither(value);
+                                                    }
+                                                }}
+                                            >
+                                                <Select.Trigger
+                                                    style={{ flex: 1 }}
+                                                    onWheel={(event) => {
+                                                        applySelectWheelChange({
+                                                            event,
+                                                            currentValue: dither,
+                                                            options: ["none", "tpdf"],
+                                                            onChange: (next) => {
+                                                                if (next === "none" || next === "tpdf") {
+                                                                    setDither(next);
+                                                                }
+                                                            },
+                                                        });
+                                                    }}
+                                                />
+                                                <Select.Content>
+                                                    <Select.Item value="none">
+                                                        {tAny("export_dialog_dither_none")}
+                                                    </Select.Item>
+                                                    <Select.Item value="tpdf">
+                                                        {tAny("export_dialog_dither_tpdf")}
+                                                    </Select.Item>
+                                                </Select.Content>
+                                            </Select.Root>
+                                        </Flex>
+                                    )}
+
+                                    <Flex align="center" gap="2">
+                                        <Text size="2" style={{ minWidth: 132 }}>
+                                            {tAny("export_dialog_channel_mode")}
+                                        </Text>
+                                        <Select.Root
+                                            value={channelMode}
+                                            onValueChange={(value) => {
+                                                if (value === "stereo" || value === "mono") {
+                                                    setChannelMode(value);
+                                                }
+                                            }}
+                                        >
+                                            <Select.Trigger
+                                                style={{ flex: 1 }}
+                                                onWheel={(event) => {
+                                                    applySelectWheelChange({
+                                                        event,
+                                                        currentValue: channelMode,
+                                                        options: ["stereo", "mono"],
+                                                        onChange: (next) => {
+                                                            if (next === "stereo" || next === "mono") {
+                                                                setChannelMode(next);
+                                                            }
+                                                        },
+                                                    });
+                                                }}
+                                            />
+                                            <Select.Content>
+                                                <Select.Item value="stereo">
+                                                    {tAny("export_dialog_channel_stereo")}
+                                                </Select.Item>
+                                                <Select.Item value="mono">
+                                                    {tAny("export_dialog_channel_mono")}
+                                                </Select.Item>
+                                            </Select.Content>
+                                        </Select.Root>
+                                    </Flex>
+                                </Flex>
+                            )}
 
                         {mode === "project" ? (
                             <>

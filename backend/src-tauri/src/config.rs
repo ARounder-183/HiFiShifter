@@ -477,6 +477,10 @@ fn default_ort_ep() -> String {
 /// 导出音频设置（持久化到 app_config.json）
 ///
 /// 用于记住导出窗口中不同导出类型的输出目录与文件名设置。
+///
+/// 新增的格式 / 编码参数字段沿用本文件既有惯例以字符串存枚举值
+/// （如 `"wav"`、`"tpdf"`），解析由 `crate::encode` 的 `from_name`
+/// 宽松完成，非法值回退默认，避免手改配置破坏整体加载。
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportSettings {
@@ -492,6 +496,29 @@ pub struct ExportSettings {
     pub sample_rate: u32,
     #[serde(default = "default_export_bit_depth")]
     pub bit_depth: u32,
+    /// 输出格式："wav" | "mp3" | "flac"（缺省 → wav）。
+    #[serde(default)]
+    pub format: Option<String>,
+    /// 导出声道："stereo" | "mono"（缺省 → stereo）。
+    #[serde(default)]
+    pub channel_mode: Option<String>,
+    /// 抖动："none" | "tpdf"（缺省 → none）。
+    #[serde(default)]
+    pub dither: Option<String>,
+    /// MP3 码率模式："cbr" | "vbr"（缺省 → vbr）。
+    #[serde(default)]
+    pub mp3_mode: Option<String>,
+    #[serde(default)]
+    pub mp3_bitrate_kbps: Option<u32>,
+    #[serde(default)]
+    pub mp3_vbr_quality_index: Option<u8>,
+    #[serde(default)]
+    pub mp3_tags: Option<crate::encode::Mp3Tags>,
+    /// FLAC 位深："i16" | "i24"（缺省 → i24）。
+    #[serde(default)]
+    pub flac_bit_depth: Option<String>,
+    #[serde(default)]
+    pub flac_compression_level: Option<u8>,
 }
 
 /// 自动备份设置（持久化到 app_config.json）
@@ -750,6 +777,15 @@ impl Default for ExportSettings {
             separated_file_name_pattern: None,
             sample_rate: default_export_sample_rate(),
             bit_depth: default_export_bit_depth(),
+            format: None,
+            channel_mode: None,
+            dither: None,
+            mp3_mode: None,
+            mp3_bitrate_kbps: None,
+            mp3_vbr_quality_index: None,
+            mp3_tags: None,
+            flac_bit_depth: None,
+            flac_compression_level: None,
         }
     }
 }
