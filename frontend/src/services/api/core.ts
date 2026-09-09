@@ -28,8 +28,7 @@ export type ChannelMode = "stereo" | "mono";
 
 /** MP3 码率模式：CBR 固定码率，或 VBR 质量档（LAME/ffmpeg 式 -q:a 0..9）。 */
 export type Mp3BitrateMode =
-    | { mode: "cbr"; bitrateKbps: number }
-    | { mode: "vbr"; qualityIndex: number };
+    { mode: "cbr"; bitrateKbps: number } | { mode: "vbr"; qualityIndex: number };
 
 export interface Mp3Tags {
     title?: string | null;

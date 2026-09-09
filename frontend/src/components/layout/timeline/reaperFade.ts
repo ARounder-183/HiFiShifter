@@ -306,13 +306,7 @@ export function resolveCurvatureEditBase(shape: number): {
 }
 
 export type FadePresetId =
-    | "linear"
-    | "convexSlight"
-    | "lateSlight"
-    | "convexSharp"
-    | "lateSharp"
-    | "sSlight"
-    | "sSharp";
+    "linear" | "convexSlight" | "lateSlight" | "convexSharp" | "lateSharp" | "sSlight" | "sSharp";
 
 /** 右键菜单七预设 ↔ REAPER 形状 id（顺序对齐 REAPER 7.x 菜单）。 */
 export const FADE_PRESETS: ReadonlyArray<{ id: FadePresetId; shape: number }> = [
