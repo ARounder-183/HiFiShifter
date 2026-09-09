@@ -788,6 +788,20 @@ export function ActionBar() {
                                             }),
                                         );
                                     }}
+                                    onWheel={(e) => {
+                                        e.preventDefault();
+                                        e.stopPropagation();
+                                        // 粗步长 = 滑块步长 5%；按住“精细调整”修饰键时步长 1%。
+                                        const fine = isModifierActive(paramFineAdjustKb, e);
+                                        const delta = (e.deltaY < 0 ? 1 : -1) * (fine ? 1 : 5);
+                                        const next = Math.min(
+                                            100,
+                                            Math.max(0, Math.round(s.metronomeGain * 100) + delta),
+                                        );
+                                        void dispatch(
+                                            updateMetronome({ metronomeGain: next / 100 }),
+                                        );
+                                    }}
                                     onPointerDown={(e) => e.stopPropagation()}
                                     className="flex-1"
                                 />
