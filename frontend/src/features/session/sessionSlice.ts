@@ -2281,7 +2281,11 @@ const sessionSlice = createSlice({
             if (p.metronomeEnabled != null) state.metronomeEnabled = p.metronomeEnabled;
             if (p.metronomeGain != null)
                 state.metronomeGain = Math.min(1, Math.max(0, Number(p.metronomeGain) || 0));
-            if (p.metronomeMode === "grid" || p.metronomeMode === "beat" || p.metronomeMode === "bar")
+            if (
+                p.metronomeMode === "grid" ||
+                p.metronomeMode === "beat" ||
+                p.metronomeMode === "bar"
+            )
                 state.metronomeMode = p.metronomeMode;
             if (
                 p.metronomeSound === "click" ||
@@ -2297,6 +2301,12 @@ const sessionSlice = createSlice({
             action: PayloadAction<Record<string, Array<[number, number]>> | null>,
         ) {
             state.silencePreviewSegments = action.payload;
+            // 清除预览（关闭 / 应用）时一并作废在途分析请求：否则对话框
+            // 关闭后迟到的 fulfilled 仍通过 requestId 守卫，把过期的静音
+            // 区域重新画回时间线（甚至画到切除后的新剪辑上）。
+            if (action.payload === null) {
+                state._silencePreviewRequestId = null;
+            }
         },
         /** 更新静音检测对话框参数（持久化由调用方走 persistUiSettings）。 */
         setSilenceDetectOptions(state, action: PayloadAction<Partial<SilenceDetectSettings>>) {
@@ -3088,8 +3098,7 @@ const sessionSlice = createSlice({
                             ? s.metronomeMode
                             : "grid";
                 }
-                if (s.metronomeAccent != null)
-                    state.metronomeAccent = Boolean(s.metronomeAccent);
+                if (s.metronomeAccent != null) state.metronomeAccent = Boolean(s.metronomeAccent);
                 if (s.metronomeSound != null) {
                     state.metronomeSound =
                         s.metronomeSound === "woodblock" || s.metronomeSound === "beep"
@@ -4733,6 +4742,15 @@ const sessionSlice = createSlice({
             })
             .addCase(analyzeSilenceRemote.pending, (state, action) => {
                 state._silencePreviewRequestId = action.meta.requestId;
+            })
+            .addCase(analyzeSilenceRemote.rejected, (state, action) => {
+                // 失败：与最新请求匹配时清掉过期预览（旧参数的区域不能再
+                // 停留在覆盖层上误导用户）；非最新请求直接忽略。
+                if (state._silencePreviewRequestId !== action.meta.requestId) {
+                    return;
+                }
+                state._silencePreviewRequestId = null;
+                state.silencePreviewSegments = null;
             })
             .addCase(analyzeSilenceRemote.fulfilled, (state, action) => {
                 // 乱序守卫：只采纳最近一次预览请求（防抖后旧响应覆盖新参数结果）。

@@ -6361,8 +6361,18 @@ mod tests {
         });
         tl.normalize_track_vec();
         assert_eq!(track_ids_in_vec_order(&tl), vec![a, "orphan_t".to_string()]);
-        assert_eq!(tl.tracks[1].parent_id, Some("missing_parent".to_string()));
-        assert_eq!(tl.tracks[1].order, 0, "孤儿作为独立根编号");
+        // 悬空 parent_id 修复为 None（真根）：visual_track_ids 与
+        // build_track_payload 才能与 Vec 顺序一致地呈现该轨道。
+        assert_eq!(tl.tracks[1].parent_id, None);
+        // 修复为真根后与既有根同级连续编号（sibling_rank 按 None 键累计，
+        // Main=0、孤儿=1）。
+        assert_eq!(tl.tracks[1].order, 1, "孤儿作为真根同级连续编号");
+        // 三处消费者的不变式：payload 顺序 == Vec 顺序。
+        let payload_ids = build_track_payload(&tl.tracks)
+            .iter()
+            .map(|t| t.id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(payload_ids, track_ids_in_vec_order(&tl));
     }
 
     #[test]
@@ -6811,6 +6821,22 @@ impl TimelineState {
     /// 工程加载、撤销恢复）都必须在收尾调用一次。此后所有消费方**直接按
     /// Vec 顺序**读取显示顺序（REAPER 导出、粘贴轨道映射、payload 构造），
     /// 不再各自按 `order` 排序。
+    /// 合并外部导入的轨道（REAPER / VocalShifter 导入与剪贴板粘贴共用）：
+    /// 导入轨道的 order 统一置为"现有根级数量"（同级排序键相同 → 归一化时
+    /// 按 Vec 序稳定排在既有根之后），随后 normalize_track_vec 重写全部
+    /// 同级序号。抽取为单一入口，防止四处合并规则分叉。
+    pub(crate) fn append_imported_tracks(&mut self, tracks: Vec<Track>) {
+        if tracks.is_empty() {
+            return;
+        }
+        let root_base = self.tracks.iter().filter(|t| t.parent_id.is_none()).count() as i32;
+        for mut track in tracks {
+            track.order = root_base;
+            self.tracks.push(track);
+        }
+        self.normalize_track_vec();
+    }
+
     pub fn normalize_track_vec(&mut self) {
         let total = self.tracks.len();
         if total == 0 {
@@ -6828,20 +6854,29 @@ impl TimelineState {
         }
 
         // 3) 根级 = parent 为空 + 兜底（parent 指向不存在轨道的孤儿）。
-        //    （parent 存在但成环 / 超深的轨道在 DFS 后统一兜底追加。）
+        //    孤儿的悬空 parent_id 直接修复为 None（作为真根参与 DFS）：
+        //    否则"Vec 顺序 == 显示顺序"不变式在三处消费者之间破裂 ——
+        //    normalize 把孤儿按根排序、visual_track_ids 完全丢掉它、
+        //    build_track_payload 把它追加到末尾，同一份数据呈现三种顺序。
+        //    （parent 存在但成环 / 超深的轨道在 DFS 后统一兜底为根。）
         let mut roots: Vec<usize> = children_of
             .get(&None::<String>)
             .cloned()
             .unwrap_or_default();
+        let mut orphan_indices: Vec<usize> = Vec::new();
         for (idx, t) in self.tracks.iter().enumerate() {
             if let Some(pid) = t.parent_id.as_deref() {
                 if !self.tracks.iter().any(|p| p.id == pid) {
-                    roots.push(idx);
+                    orphan_indices.push(idx);
                 }
             }
         }
+        roots.extend_from_slice(&orphan_indices);
         roots.sort_by_key(|&idx| (self.tracks[idx].order, idx));
         roots.dedup();
+        for &idx in &orphan_indices {
+            self.tracks[idx].parent_id = None;
+        }
 
         let mut new_vec: Vec<Track> = Vec::with_capacity(total);
         let mut visited = vec![false; total];
@@ -6897,8 +6932,13 @@ impl TimelineState {
             );
         }
         // 兜底：环 / 超深等不可达轨道按 (order, 原下标) 追加为根。
+        // 同样修复悬空引用：不可达子树的挂链整体拍平为独立根，保证
+        // visual_track_ids / build_track_payload 与 Vec 顺序一致。
         let mut leftovers: Vec<usize> = (0..total).filter(|&idx| !visited[idx]).collect();
         leftovers.sort_by_key(|&idx| (self.tracks[idx].order, idx));
+        for &idx in &leftovers {
+            self.tracks[idx].parent_id = None;
+        }
         for idx in leftovers {
             walk(
                 idx,
@@ -10291,7 +10331,8 @@ impl TimelineState {
                     let exists = Path::new(audio_path).exists();
                     log::error!(
                         "import_audio_item: audio_info FAILED: path_exists={} path={}",
-                        exists, audio_path
+                        exists,
+                        audio_path
                     );
                 }
             }

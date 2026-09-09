@@ -4,7 +4,9 @@
 //! 方式进入输出队列 —— 若在 push 阶段就把帧落盘，Xing 头将无法位于文件头
 //! （上游源码注释明言该场景需要 two-pass）。因此本实现把全部 MP3 帧
 //! 缓冲在内存中，`finish()` 后一次性写盘；内存峰值 ≈ 成品文件大小
-//! （320 kbps 五分钟约 115 MB，人声典型工程远小于此）。
+//! 外加编码器内部的全量帧 PCM 缓冲（CBR 默认启用 3R1 水库时为全部帧的
+//! f32 PCM；320 kbps 五分钟约 115 MB 成品 + ~100 MB PCM，人声典型工程远
+//! 小于此）。
 //!
 //! 立体声 / 联合立体声由 rusty_mp3 逐帧自动决策；ID3v2 标签在音频帧之前
 //! 写入（与 Xing/Info 头共存）。采样率合法性由 [`super::create_encoder`]
@@ -28,7 +30,7 @@ pub struct Mp3FileEncoder {
     scratch: Vec<f32>,
     path: PathBuf,
     cancel_flag: Option<Arc<AtomicBool>>,
-    tags: Mp3EncodeOptions,
+    options: Mp3EncodeOptions,
 }
 
 impl Mp3FileEncoder {
@@ -57,7 +59,7 @@ impl Mp3FileEncoder {
             scratch: Vec::new(),
             path: output_path.to_path_buf(),
             cancel_flag,
-            tags: options.clone(),
+            options: options.clone(),
         })
     }
 
@@ -67,8 +69,7 @@ impl Mp3FileEncoder {
         loop {
             match self.encoder.next_packet() {
                 Ok(packet) => self.out.extend_from_slice(&packet),
-                Err(rusty_mp3::error::Error::Again)
-                | Err(rusty_mp3::error::Error::Eof) => break,
+                Err(rusty_mp3::error::Error::Again) | Err(rusty_mp3::error::Error::Eof) => break,
                 Err(e) => {
                     // 非 drain 状态错误（理论上不会出现在 push/pull 循环里），
                     // 记录后中止排空，避免无限循环。
@@ -107,7 +108,7 @@ impl FileAudioEncoder for Mp3FileEncoder {
 
         // ID3v2 前置于音频帧；空标签直接跳过。
         let mut file_bytes = Vec::with_capacity(self.out.len() + 1024);
-        if let Some(tags) = self.tags.tags.normalized() {
+        if let Some(tags) = self.options.tags.normalized() {
             let mut tag = id3::Tag::default();
             if let Some(title) = &tags.title {
                 tag.set_title(title);

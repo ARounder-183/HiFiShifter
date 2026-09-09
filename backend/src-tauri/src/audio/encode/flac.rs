@@ -2,7 +2,8 @@
 //!
 //! rusty_flac 的 `Encoder::finish(self)` 一次性返回完整 FLAC 流（暂无流式
 //! 写盘 API），因此与 MP3 相同采用"内存缓冲、finish 后落盘"策略；内存峰值
-//! ≈ 成品文件大小。FLAC 采样率为全表（≤ 2^20 Hz），无需 MP3 式的档位约束。
+//! ≈ 成品文件大小 + 编码器内部缓存的全部 i32 量化平面（约 4 B/样本/声道）。
+//! FLAC 采样率为全表（≤ 2^20 Hz），无需 MP3 式的档位约束。
 //! 量化经 [`super::quantize`]（可选 TPDF 抖动）手动完成后 `push_interleaved`，
 //! 以便与 WAV 整数输出保持完全一致的量化语义。
 
@@ -68,8 +69,12 @@ impl FileAudioEncoder for FlacFileEncoder {
         self.scratch.clear();
         self.scratch.reserve(interleaved.len());
         for &sample in interleaved {
-            self.scratch
-                .push(quantize::quantize_sample(sample, self.bits, self.dither, &mut self.dither_state));
+            self.scratch.push(quantize::quantize_sample(
+                sample,
+                self.bits,
+                self.dither,
+                &mut self.dither_state,
+            ));
         }
         encoder
             .push_interleaved(&self.scratch)

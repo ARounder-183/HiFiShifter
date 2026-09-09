@@ -5,6 +5,7 @@ import type { ScaleKey } from "../../utils/musicalScales";
 import { useAppSelector } from "../../app/hooks";
 import { isModifierActive, selectKeybinding } from "../../features/keybindings/keybindingsSlice";
 import { applySelectWheelChange } from "../../utils/selectWheel";
+import { useWheelScrollGuard } from "../../utils/useWheelScrollGuard";
 import { buildScaleSelectGroups } from "../../utils/scaleSelection";
 
 interface Props {
@@ -705,6 +706,8 @@ export function QuantizeDialog({
     defaultSmoothness = 0,
     onConfirm,
 }: QuantizeProps) {
+    // 滚轮守卫：滑块滚轮步进时阻止祖先容器滚动（见 useWheelScrollGuard）。
+    const quantizeWheelGuard = useWheelScrollGuard<HTMLDivElement>('input[type="range"]');
     const { t } = useI18n();
     const tAny = t as (key: string) => string;
     const toleranceDefault = defaultTolerance ?? defaultToleranceCents;
@@ -736,11 +739,22 @@ export function QuantizeDialog({
             setQuantizeUnit(String(defaultQuantizeUnit));
             setSmoothness(String(Math.round(defaultSmoothness)));
         }
-    }, [open, defaultScale, toleranceDefault, defaultUseProjectScale, defaultQuantizeUnit, defaultSmoothness]);
+    }, [
+        open,
+        defaultScale,
+        toleranceDefault,
+        defaultUseProjectScale,
+        defaultQuantizeUnit,
+        defaultSmoothness,
+    ]);
 
     return (
         <Dialog.Root open={open} onOpenChange={onOpenChange}>
-            <Dialog.Content style={{ maxWidth: 360 }} onKeyDown={(e) => e.stopPropagation()}>
+            <Dialog.Content
+                ref={quantizeWheelGuard}
+                style={{ maxWidth: 360 }}
+                onKeyDown={(e) => e.stopPropagation()}
+            >
                 <Dialog.Title>{tAny("menu_quantize")}</Dialog.Title>
                 <Flex direction="column" gap="3" mt="3">
                     {!valueMode && (
@@ -856,7 +870,9 @@ export function QuantizeDialog({
                             step={1}
                             value={Math.round(Number(smoothness) || 0)}
                             onWheel={(e) => {
-                                e.preventDefault();
+                                // 阻止默认滚动由 Dialog.Content 上的原生非被动
+                                // 守卫完成（React onWheel 的 preventDefault 是
+                                // no-op，见 useWheelScrollGuard）。
                                 const fine = isModifierActive(paramFineAdjustKb, e.nativeEvent);
                                 const step = fine ? 1 : 5;
                                 const dir = e.deltaY < 0 ? 1 : -1;
@@ -933,6 +949,8 @@ export function MeanQuantizeDialog({
     defaultSmoothness = 0,
     onConfirm,
 }: MeanQuantizeProps) {
+    // 滚轮守卫：滑块滚轮步进时阻止祖先容器滚动（见 useWheelScrollGuard）。
+    const meanQuantizeWheelGuard = useWheelScrollGuard<HTMLDivElement>('input[type="range"]');
     const { t } = useI18n();
     const tAny = t as (key: string) => string;
     const toleranceDefault = defaultTolerance ?? defaultToleranceCents;
@@ -964,11 +982,22 @@ export function MeanQuantizeDialog({
             setQuantizeUnit(String(defaultQuantizeUnit));
             setSmoothness(String(Math.round(defaultSmoothness)));
         }
-    }, [open, defaultScale, toleranceDefault, defaultUseProjectScale, defaultQuantizeUnit, defaultSmoothness]);
+    }, [
+        open,
+        defaultScale,
+        toleranceDefault,
+        defaultUseProjectScale,
+        defaultQuantizeUnit,
+        defaultSmoothness,
+    ]);
 
     return (
         <Dialog.Root open={open} onOpenChange={onOpenChange}>
-            <Dialog.Content style={{ maxWidth: 360 }} onKeyDown={(e) => e.stopPropagation()}>
+            <Dialog.Content
+                ref={meanQuantizeWheelGuard}
+                style={{ maxWidth: 360 }}
+                onKeyDown={(e) => e.stopPropagation()}
+            >
                 <Dialog.Title>{tAny("mean_quantize_title")}</Dialog.Title>
                 <Flex direction="column" gap="3" mt="3">
                     {!valueMode && (
@@ -1084,7 +1113,9 @@ export function MeanQuantizeDialog({
                             step={1}
                             value={Math.round(Number(smoothness) || 0)}
                             onWheel={(e) => {
-                                e.preventDefault();
+                                // 阻止默认滚动由 Dialog.Content 上的原生非被动
+                                // 守卫完成（React onWheel 的 preventDefault 是
+                                // no-op，见 useWheelScrollGuard）。
                                 const fine = isModifierActive(paramFineAdjustKb, e.nativeEvent);
                                 const step = fine ? 1 : 5;
                                 const dir = e.deltaY < 0 ? 1 : -1;

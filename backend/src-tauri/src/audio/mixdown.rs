@@ -355,6 +355,10 @@ pub fn render_mixdown_to_file(
     .map_err(|e| e.to_string())?;
 
     // 分块推送，块间响应取消（WAV 增量写盘；MP3/FLAC 内存缓冲，取消即丢弃）。
+    // WAV 在 create_encoder 内已截断/创建目标文件；MP3/FLAC 仅在 finish()
+    // 里一次性写盘。取消/失败时据此决定是否清理：MP3/FLAC 未写盘前不能
+    // 删 —— 覆盖导出场景会把用户上一次的成品误删掉。
+    let mut output_touched = matches!(opts.output.format, crate::encode::OutputFormat::Wav);
     let encode_result: Result<u64, EncodeError> = {
         let chunk_samples = 8192usize * channels as usize;
         let mut offset = 0usize;
@@ -368,6 +372,7 @@ pub fn render_mixdown_to_file(
             }
             offset = end;
             if offset >= mix.len() {
+                output_touched = true;
                 break encoder.finish().map(|summary| summary.bytes_written);
             }
         }
@@ -381,9 +386,9 @@ pub fn render_mixdown_to_file(
             bytes_written,
         }),
         Err(e) => {
-            // 取消或失败：尽力删除半成品。WAV 已被截断创建；MP3/FLAC 尚未
-            // 落盘（不存在）。注意覆盖导出时这与重构前的"取消即删"行为一致。
-            let _ = std::fs::remove_file(output_path);
+            if output_touched {
+                let _ = std::fs::remove_file(output_path);
+            }
             Err(e.to_string())
         }
     }
@@ -514,8 +519,9 @@ pub fn render_mixdown_interleaved(
         }
 
         let (win_start_sec, win_end_sec) = crate::state::clip_playback_window_sec(clip);
-        let pre_silence_sec =
-            crate::state::clip_leading_silence_sec(clip, Some(total_sec)) / playback_rate.max(1e-6);
+        // clip_leading_silence_sec 返回的是**时间线秒**（内部已除以 playback_rate），
+        // 与引擎 snapshot 的 pre_silence_sec 同源；这里不能再除一次。
+        let pre_silence_sec = crate::state::clip_leading_silence_sec(clip, Some(total_sec));
 
         let src_end_limit_sec = win_end_sec.min(total_sec).max(win_start_sec.max(0.0));
         let slice_start_sec = win_start_sec.max(0.0);

@@ -41,4 +41,13 @@ describe("clampTooltipPosition（按气泡实测尺寸夹紧）", () => {
         expect(p.x).toBe(8);
         expect(p.y).toBe(8);
     });
+
+    test("负锚点（指针越出视口）双向钳制不低于最小间距", () => {
+        // clampAxisPosition 此前只夹上界：anchor+offset < edgeGap 时
+        //（合成指针 / 拖拽中光标可为负），气泡会整段画出窗外左缘。
+        const p = clampTooltipPosition({ x: -40, y: -30 }, 41, 25, VW, VH);
+        expect(p.x).toBe(8);
+        expect(p.y).toBe(8);
+        expect(p.x).toBeGreaterThanOrEqual(8);
+    });
 });

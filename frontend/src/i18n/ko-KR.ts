@@ -702,7 +702,7 @@ export const koKR = {
     metronome_mode_beat: "박만",
     metronome_mode_bar: "마디 머리만",
     metronome_sound: "음색",
-    metronome_sound_click: "클릭",
+    metronome_sound_click: "클릭 소리",
     metronome_sound_woodblock: "우드블록",
     metronome_sound_beep: "비프",
     metronome_accent: "강세 강조",

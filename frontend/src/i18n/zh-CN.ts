@@ -610,7 +610,7 @@ export const zhCN = {
     metronome_mode_beat: "仅每拍",
     metronome_mode_bar: "仅小节首",
     metronome_sound: "音色",
-    metronome_sound_click: "点击",
+    metronome_sound_click: "嗒声",
     metronome_sound_woodblock: "木鱼",
     metronome_sound_beep: "蜂鸣",
     metronome_accent: "强调重拍",

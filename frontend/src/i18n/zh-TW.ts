@@ -611,7 +611,7 @@ export const zhTW = {
     metronome_mode_beat: "僅每拍",
     metronome_mode_bar: "僅小節首",
     metronome_sound: "音色",
-    metronome_sound_click: "點擊",
+    metronome_sound_click: "嗒聲",
     metronome_sound_woodblock: "木魚",
     metronome_sound_beep: "蜂鳴",
     metronome_accent: "強調重拍",

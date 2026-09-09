@@ -46,4 +46,11 @@ describe("sample rate helpers", () => {
         expect(nearestAllowedSampleRate("mp3", 48000)).toBeNull();
         expect(nearestAllowedSampleRate("mp3", Number.NaN)).toBeNull();
     });
+
+    it("reduces to the smallest table entry for below-table rates", () => {
+        expect(nearestAllowedSampleRate("mp3", 4000)).toBe(8000);
+        expect(nearestAllowedSampleRate("mp3", 0)).toBeNull();
+        expect(nearestAllowedSampleRate("mp3", -44100)).toBeNull();
+        expect(nearestAllowedSampleRate("mp3", Number.POSITIVE_INFINITY)).toBeNull();
+    });
 });

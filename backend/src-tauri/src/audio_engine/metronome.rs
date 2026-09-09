@@ -110,8 +110,8 @@ impl MetronomeRt {
     }
 
     pub(crate) fn store_config(&self, config: &MetronomeConfig) {
-        // 配置变化同样推进世代：换音色 / 换增益时旧的尾音一并作废。
-        self.generation.fetch_add(1, Ordering::Relaxed);
+        // 先存载荷再推进世代（Release）：RT 读到新世代必见新配置。
+        // 换音色 / 换增益时旧的尾音一并作废。
         self.enabled
             .store(config.enabled, std::sync::atomic::Ordering::Relaxed);
         self.gain_bits
@@ -120,16 +120,18 @@ impl MetronomeRt {
             .store(config.accent_enabled, std::sync::atomic::Ordering::Relaxed);
         self.sound
             .store(config.sound.to_u8(), std::sync::atomic::Ordering::Relaxed);
+        self.generation.fetch_add(1, Ordering::Release);
     }
 
     pub(crate) fn store_schedule(&self, clicks: Arc<Vec<MetronomeClick>>) {
-        // 推进世代：RT 在下一个块把旧表的残留尾音整体清空。
-        self.generation.fetch_add(1, Ordering::Relaxed);
+        // 先存表再推进世代（Release）：RT 读到新世代必见新表 —— 换表后
+        // 绝无"修改前 + 修改后"的响点叠加。
         self.schedule.store(Some(clicks));
+        self.generation.fetch_add(1, Ordering::Release);
     }
 
     pub(crate) fn generation(&self) -> u64 {
-        self.generation.load(Ordering::Relaxed)
+        self.generation.load(Ordering::Acquire)
     }
 
     fn gain(&self) -> f32 {
@@ -173,8 +175,10 @@ fn click_timbre(sound: MetronomeSound, accent: bool) -> ClickTimbre {
     }
 }
 
-/// 包络衰减到 1e-4 的尾长上限（秒）。9.2·τ 已足够安静，再封顶防极端参数。
-const CLICK_MAX_TAIL_SEC: f32 = 0.25;
+/// 包络衰减到 1e-4 的尾长上限（秒）。9.2·τ 已足够安静（−80 dB），
+/// 上限只为防极端参数：Beep（τ=0.06）需 0.55 s 才自然衰减到底，
+/// 封顶过低会在尾端留下可闻的幅度阶跃（截断咔哒声）。
+const CLICK_MAX_TAIL_SEC: f32 = 0.6;
 
 fn click_tail_frames(timbre: &ClickTimbre, sample_rate: u32) -> i64 {
     let tail = (timbre.tau * 9.21).clamp(0.001, CLICK_MAX_TAIL_SEC);
@@ -185,7 +189,7 @@ fn click_tail_frames(timbre: &ClickTimbre, sample_rate: u32) -> i64 {
 const CLICK_PEAK: f32 = 0.8;
 
 /// 同时存在的响点尾音上限。极限情形（1/64 网格 @ 960 BPM ≈ 3.9 ms 步长，
-/// beep 尾长 250 ms）约 64 个；超限时丢弃最旧的尾音。
+/// beep 尾长 600 ms）约 150 个；超限时丢弃最旧的尾音。
 const MAX_METRONOME_VOICES: usize = 64;
 
 struct ActiveClick {
@@ -206,7 +210,7 @@ impl Default for MetronomeVoices {
     fn default() -> Self {
         Self {
             generation: 0,
-            active: Vec::with_capacity(8),
+            active: Vec::with_capacity(MAX_METRONOME_VOICES),
         }
     }
 }
@@ -226,10 +230,10 @@ impl MetronomeVoices {
     ) {
         // ① 世代失配（换响点表 / 换配置）→ 旧表的残留尾音整体丢弃，
         //    保证换表后绝无"修改前 + 修改后"的响点叠加。
-        let generation = metro.generation();
-        if generation != self.generation {
+        let generation_at_entry = metro.generation();
+        if generation_at_entry != self.generation {
             self.active.clear();
-            self.generation = generation;
+            self.generation = generation_at_entry;
         }
 
         // ② 无条件剪枝：尾部已越过高水位线的尾音一律移除。
@@ -243,7 +247,22 @@ impl MetronomeVoices {
         if gain <= 1e-4 {
             return;
         }
-        let Some(schedule) = metro.schedule.load_full() else {
+        // ③ 成对读取世代与响点表（写侧先存表后推进世代，Release/Acquire）：
+        //    校验窗口内世代未变 → 该表即该世代的表；窗口内恰逢又换表
+        //    （罕见）→ 按新世代重读（读到新世代必见新表），并按新世代清空
+        //    尾音，绝不在未清尾音的旧世代上混合新表。
+        let g1 = metro.generation();
+        let mut schedule = metro.schedule.load_full();
+        let mut generation = g1;
+        if metro.generation() != g1 {
+            generation = metro.generation();
+            schedule = metro.schedule.load_full();
+        }
+        if generation != self.generation {
+            self.active.clear();
+            self.generation = generation;
+        }
+        let Some(schedule) = schedule else {
             return;
         };
         let schedule: &[MetronomeClick] = &schedule;
@@ -255,7 +274,7 @@ impl MetronomeVoices {
         while idx < schedule.len() && schedule[idx].frame < pos1 {
             let click = &schedule[idx];
             let start = click.frame as i64;
-            // ③ 起振去重：该帧的尾音已在池中（位置回退 / 播放头回跳后
+            // ④ 起振去重：该帧的尾音已在池中（位置回退 / 播放头回跳后
             //    重新覆盖同一帧区间）则跳过，绝不叠加第二次起振。
             if !self.active.iter().any(|v| v.start_frame == start) {
                 let accent = click.accent && accent_enabled;
@@ -318,17 +337,21 @@ pub(crate) struct MetroSegment {
     pub(crate) beats_per_bar: f64,
 }
 
-/// 工程拍号 → 每小节拍数（分子 × 4 ÷ 分母，镜像前端 `beatsPerBarOf`）。
-fn project_bar_beats(beats_per_bar: u32, denominator: u32) -> f64 {
-    let num = if beats_per_bar >= 1 { beats_per_bar as f64 } else { 4.0 };
-    let den = if denominator >= 1 { denominator as f64 } else { 4.0 };
-    num * 4.0 / den
+/// 工程拍号 → 无 Tempo Map 时的每小节拍数。与前端 `buildTempoGridLines`
+/// 无 Map 分支一致：`beatsPerBarOf({ numerator, denominator: 4 })` = 分子
+/// （拍号 7/8 → 小节步长 7 拍，与时间标尺画出的 7/8 小节线一致）。
+fn project_bar_beats(beats_per_bar: u32) -> f64 {
+    if beats_per_bar >= 1 {
+        beats_per_bar as f64
+    } else {
+        4.0
+    }
 }
 
 /// 由工程 BPM / Tempo Map 构建展开分段。
 ///
-/// - 无 Tempo Map：单段（工程 BPM + 工程拍号），网格从工程 0 点全局对齐
-///   （与 `buildTempoGridLines` 无 Map 分支一致）；
+/// - 无 Tempo Map：单段（工程 BPM + 工程拍号，小节步长 = 分子，与
+///   `buildTempoGridLines` 无 Map 分支一致），网格从工程 0 点全局对齐；
 /// - 有 Tempo Map：**每个变化点一段**，拍号按 `effectiveTimeSignatures`
 ///   carry（null 跟随前点，种子 4/4）。`normalize_tempo_map` 已保证点升序、
 ///   去重、首点位于 0 且显式携带拍号；此处仍做防御性规范化。
@@ -336,12 +359,12 @@ pub(crate) fn build_tempo_segments(
     bpm: f64,
     tempo_map: Option<&[crate::state::TempoPointData]>,
     project_beats_per_bar: u32,
-    project_denominator: u32,
+    _project_denominator: u32,
     end_sec: f64,
 ) -> Vec<MetroSegment> {
     let end_sec = if end_sec.is_finite() && end_sec > 0.0 { end_sec } else { 0.0 };
     let fallback_spb = 60.0 / bpm.clamp(10.0, 960.0).max(1.0);
-    let fallback_bpb = project_bar_beats(project_beats_per_bar, project_denominator);
+    let fallback_bpb = project_bar_beats(project_beats_per_bar);
 
     let Some(points) = tempo_map else {
         if end_sec <= 0.0 {
@@ -447,7 +470,8 @@ pub(crate) fn grid_step_beats(grid: &str) -> Option<f64> {
 /// 的 Tempo Map 分支，弱线与强线取并集）：
 /// - 弱响点（`step_beats > 0`）：`段起点 + k×step×每拍秒数`，k = 0,1,2…
 ///   （变化点本身就是网格线）；奇数 k 施加 Swing 偏移
-///   （`(swing/100) × 0.5 × step × 每拍秒数`，仅弱线，镜像 `swingAt`）；
+///   （`(swing/100) × 0.5 × step × 每拍秒数`，仅弱线且不与小节线重合时，
+///   镜像 `swingAt`；小节线永不偏移）；
 /// - 强响点（小节线）：`段起点 + k×beatsPerBar×每拍秒数`，全部重音、
 ///   不受 Swing 影响。小节线**独立于弱网格**参与展开（如 7/8 段内 3.5 拍
 ///   处不在 1/4 网格上，但时间标尺同样画出它）——否则强拍会丢失；
@@ -469,8 +493,12 @@ pub(crate) fn build_click_schedule(
     let swing = swing_percent.clamp(0.0, 100.0) / 100.0;
     let bar_only = !(step_beats.is_finite() && step_beats > eps);
     let step = if bar_only { 0.0 } else { step_beats };
+    // 防御性上限：极端网格 × 时长组合下防止无界内存/排序耗时。
+    // 命中即截断并告警（后段整段丢弃，不产生半张表）。
+    const MAX_SCHEDULE_CLICKS: usize = 2_000_000;
+    let mut truncated = false;
 
-    for seg in segments {
+    'segments: for seg in segments {
         let seg_len = seg.end_sec - seg.start_sec;
         if seg_len <= eps {
             continue;
@@ -481,8 +509,12 @@ pub(crate) fn build_click_schedule(
             let line_sec = step * seg.sec_per_beat;
             let line_count = (seg_len / line_sec + eps).floor().max(0.0) as u64;
             for k in 0..=line_count {
-                // Swing：仅弱网格线的奇数格（镜像前端 swingAt：k % 2 == 1）。
-                let swing_sec = if k % 2 == 1 {
+                // Swing：仅弱网格线的奇数格（镜像前端 swingAt：k % 2 == 1）；
+                // 与段内小节线重合的弱线不再偏移 —— 小节线永不偏移，
+                // 否则同一拍点出现"偏移的弱响 + 未偏移的小节响"双击。
+                let r = (k as f64 * step) % bpb;
+                let accent = r < 1e-4 || (bpb - r).abs() < 1e-4;
+                let swing_sec = if k % 2 == 1 && !accent {
                     swing * 0.5 * step * seg.sec_per_beat
                 } else {
                     0.0
@@ -491,11 +523,12 @@ pub(crate) fn build_click_schedule(
                 if t > duration_sec + 1e-6 {
                     break;
                 }
-                // 重音 = 该弱线与段内小节线重合（k×step 是 bpb 的整数倍）。
-                let r = (k as f64 * step) % bpb;
-                let accent = r < 1e-4 || (bpb - r).abs() < 1e-4;
                 let frame = (t * sr).round().max(0.0) as u64;
                 clicks.push(MetronomeClick { frame, accent });
+                if clicks.len() >= MAX_SCHEDULE_CLICKS {
+                    truncated = true;
+                    break 'segments;
+                }
             }
         }
         // 强网格线（小节线，全部重音；永不偏移）。
@@ -508,10 +541,14 @@ pub(crate) fn build_click_schedule(
             }
             let frame = (t * sr).round().max(0.0) as u64;
             clicks.push(MetronomeClick { frame, accent: true });
+            if clicks.len() >= MAX_SCHEDULE_CLICKS {
+                truncated = true;
+                break 'segments;
+            }
         }
-        if clicks.len() >= 2_000_000 {
-            break;
-        }
+    }
+    if truncated {
+        log::warn!("metronome click schedule truncated at {MAX_SCHEDULE_CLICKS} clicks");
     }
 
     // 段边界（下一变化点位置）同时是前段末线与后段 k=0 小节线：同帧合并，
@@ -724,19 +761,41 @@ mod tests {
 
     #[test]
     fn bar_lines_off_the_weak_grid_are_still_clicked() {
-        // 工程拍号 7/8（bpb = 3.5）无 Tempo Map：小节锚 0，3.5 拍/小节。
-        // 1/4 网格只落在整数拍上；1.75s（3.5 拍）不在其上，但它是时间
-        // 标尺画出的小节线 → 节拍器必须在该处发声并标记重音。
+        // 工程拍号 7/8 无 Tempo Map：与时间标尺（buildTempoGridLines 无 Map
+        // 分支）一致，小节步长 = 分子 7 拍。1/4 网格只落在整数拍上；
+        // 3.5s（7 拍 @120BPM）不在其上，但它是标尺画出的小节线 → 节拍器
+        // 必须在该处发声并标记重音。
         let segs = build_tempo_segments(120.0, None, 7, 8, 6.0);
-        assert!((segs[0].beats_per_bar - 3.5).abs() < 1e-9);
+        assert!((segs[0].beats_per_bar - 7.0).abs() < 1e-9);
         let clicks = build_click_schedule(&segs, 1.0, 1000, 4.0, 0.0);
         let accent_frames: Vec<u64> = clicks
             .iter()
             .filter(|c| c.accent)
             .map(|c| c.frame)
             .collect();
-        // 小节线：0、1.75s、3.5s。
-        assert_eq!(accent_frames, vec![0, 1750, 3500]);
+        // 小节线：0、3.5s。
+        assert_eq!(accent_frames, vec![0, 3500]);
+    }
+
+    #[test]
+    fn swing_does_not_double_hit_bar_starts() {
+        // 3/4 工程 + Swing 50%：k=3 的弱线与小节线重合。重合弱线不得施加
+        // Swing 偏移，否则同一小节首出现"偏移的弱响 + 未偏移的小节响"
+        // 相距约 125ms 的双击。
+        let segs = build_tempo_segments(120.0, None, 3, 4, 6.0);
+        let clicks = build_click_schedule(&segs, 1.0, 44100, 4.0, 50.0);
+        // 唯一重合点：1.5s（第 1 小节首 = 3 拍）。重合弱线不再偏移，
+        // 与未偏移小节线同帧合并 → 附近只能有一个响点帧。
+        let bar_start = (1.5f64 * 44100.0).round() as u64;
+        let near: Vec<&MetronomeClick> = clicks
+            .iter()
+            .filter(|c| (c.frame as f64 - bar_start as f64).abs() < 4410.0)
+            .collect();
+        assert_eq!(near.len(), 1, "bar start must not double-hit: {near:?}");
+        assert!(near[0].accent);
+        // Swing 仍然作用于普通奇数弱格：k=1（0.625s）。
+        let k1 = (0.625f64 * 44100.0).round() as u64;
+        assert!(clicks.iter().any(|c| c.frame == k1 && !c.accent));
     }
 
     #[test]

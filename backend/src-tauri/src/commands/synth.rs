@@ -526,7 +526,10 @@ pub(super) fn persisted_output_spec(
     use crate::encode::{FlacBitDepth, Mp3BitrateMode};
     let mut spec = crate::encode::OutputSpec::default();
 
-    if let Some(value) = settings.format.as_deref().and_then(crate::encode::OutputFormat::from_name)
+    if let Some(value) = settings
+        .format
+        .as_deref()
+        .and_then(crate::encode::OutputFormat::from_name)
     {
         spec.format = value;
     }
@@ -550,7 +553,12 @@ pub(super) fn persisted_output_spec(
         _ => crate::encode::WavBitDepth::F32,
     };
 
-    match settings.mp3_mode.as_deref().map(str::trim).map(str::to_ascii_lowercase) {
+    match settings
+        .mp3_mode
+        .as_deref()
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+    {
         Some(value) if value == "cbr" => {
             spec.mp3.mode = Mp3BitrateMode::Cbr {
                 bitrate_kbps: normalize_mp3_bitrate(settings.mp3_bitrate_kbps.unwrap_or(320)),
@@ -590,7 +598,9 @@ pub(super) fn persisted_output_spec(
 }
 
 /// 解析请求的输出编码描述：
-/// - 携带完整 `encoder` → 直接采用（`format` 字段冗余时以请求 `format` 为准）；
+/// - 携带完整 `encoder` → 直接采用（`format` 字段冗余时以请求 `format` 为准），
+///   并做与持久化路径同一套的宽松归一化（请求来自前端，但防御损坏/手改
+///   配置造成的越界值）；
 /// - 仅携带 `format` → 其余参数取持久化设置；
 /// - 两者都缺（旧前端 / 旧调用方）→ bit_depth 驱动的 WAV，行为与重构前一致。
 pub(super) fn resolve_output_spec(
@@ -602,6 +612,15 @@ pub(super) fn resolve_output_spec(
         if let Some(format) = request.format {
             spec.format = format;
         }
+        match &mut spec.mp3.mode {
+            crate::encode::Mp3BitrateMode::Cbr { bitrate_kbps } => {
+                *bitrate_kbps = normalize_mp3_bitrate(*bitrate_kbps);
+            }
+            crate::encode::Mp3BitrateMode::Vbr { quality_index } => {
+                *quality_index = (*quality_index).min(MP3_VBR_QUALITY_MAX);
+            }
+        }
+        spec.flac.compression_level = spec.flac.compression_level.min(FLAC_COMPRESSION_MAX);
         return spec;
     }
     if let Some(format) = request.format {
@@ -1503,12 +1522,19 @@ pub(super) fn quick_export_selected_clips(
         .get()
         .map(|config_dir| crate::config::load_export_settings(config_dir))
         .unwrap_or_default();
-    let requested_sample_rate = normalize_export_sample_rate(export_settings.sample_rate);
     // 快捷导出不暴露编码参数：除可选格式覆盖外，全部沿用持久化设置。
     let mut output_spec = persisted_output_spec(&export_settings);
     if let Some(format) = request.format {
         output_spec.format = format;
     }
+    // 快捷导出也不暴露采样率选择：目标格式是 MP3 时把持久化采样率吸附到
+    // MPEG 合法档位（与前端 nearestAllowedSampleRate 同规则），否则
+    // "WAV @96k 的持久化设置 + MP3 快捷导出"会被编码器以
+    // mp3_unsupported_sample_rate 拒绝。
+    let requested_sample_rate = snap_sample_rate_for_format(
+        output_spec.format,
+        normalize_export_sample_rate(export_settings.sample_rate),
+    );
 
     let project_name = resolve_project_name(&state);
     let project_folder = resolve_project_folder(&state).display().to_string();
@@ -1553,7 +1579,8 @@ pub(super) fn quick_export_selected_clips(
         rendered_file_name = format!("{project_name}_quick_export");
     }
     // 按格式替换 / 补全扩展名（wav/mp3/flac 原地替换，其余追加）。
-    rendered_file_name = crate::encode::with_format_extension(&rendered_file_name, output_spec.format);
+    rendered_file_name =
+        crate::encode::with_format_extension(&rendered_file_name, output_spec.format);
 
     let out_path = Path::new(&output_dir).join(&rendered_file_name);
     if let Some(parent) = out_path.parent() {
@@ -1869,6 +1896,33 @@ fn normalize_export_sample_rate(sample_rate: u32) -> u32 {
         | 96_000 | 176_400 | 192_000 => sample_rate,
         _ => 44_100,
     }
+}
+
+/// 把采样率吸附到 MP3（MPEG-1/2/2.5 Layer III）的合法档位；其它格式原样返回。
+/// 纠正策略与前端 `nearestAllowedSampleRate` 一致：高于表内档位逐级减半
+/// （88.2k→44.1k、96k→48k、192k→48k），仍不在表内取对数最近邻。
+fn snap_sample_rate_for_format(format: crate::encode::OutputFormat, rate: u32) -> u32 {
+    if format != crate::encode::OutputFormat::Mp3 || crate::encode::MP3_SAMPLE_RATES.contains(&rate)
+    {
+        return rate;
+    }
+    let mut candidate = rate;
+    for _ in 0..8 {
+        if crate::encode::MP3_SAMPLE_RATES.contains(&candidate) {
+            return candidate;
+        }
+        candidate = (candidate / 2).max(1);
+    }
+    let rate_f = f64::from(rate);
+    crate::encode::MP3_SAMPLE_RATES
+        .iter()
+        .copied()
+        .min_by(|a, b| {
+            let da = (f64::from(*a) / rate_f).log2().abs();
+            let db = (f64::from(*b) / rate_f).log2().abs();
+            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .unwrap_or(rate)
 }
 
 fn normalize_export_bit_depth(bit_depth: u32) -> u32 {

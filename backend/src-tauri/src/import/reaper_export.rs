@@ -470,6 +470,48 @@ fn simplify_breakpoints(
         return Vec::new();
     }
 
+    // 单样本：无折线可言，端点强制（区间两端同值）。
+    // （低于一个帧周期的短 clip 可达此处，此前 samples[1] 越界 panic。）
+    if samples.len() == 1 {
+        let v = samples[0].1;
+        let first_t = samples[0].0.clamp(range_start, range_end);
+        return vec![(first_t, v), (range_end, v)];
+    }
+
+    // O(n) 快速通道，消除最坏输入（恒平坦 / 全程线性 —— 也是最常见形态）
+    // 在下方贪心扫描里的 O(n²) 逐帧重扫：
+    // - 全部样本在容差内等于首样本值 → 平坦；
+    // - 全部样本在容差内落在首末样本连线上 → 直线；
+    // 两者都输出恰好 2 个端点。真实曲线几乎必然违背其一，落到贪心扫描
+    // （单段越界即 break，实际复杂度接近 O(n)）。
+    {
+        let (t0, v0) = samples[0];
+        let (tn, vn) = samples[samples.len() - 1];
+        let span = tn - t0;
+        let slope = if span > 1e-12 { (vn - v0) / span } else { 0.0 };
+        let mut flat = true;
+        let mut linear = true;
+        for (tj, vj) in samples.iter() {
+            if (vj - v0).abs() > tolerance {
+                flat = false;
+            }
+            if (vj - (v0 + slope * (tj - t0))).abs() > tolerance {
+                linear = false;
+            }
+            if !flat && !linear {
+                break;
+            }
+        }
+        if flat || linear {
+            let first_t = t0.max(range_start);
+            let last_t = range_end.max(first_t);
+            return vec![
+                (first_t, v0 + slope * (first_t - t0)),
+                (last_t, v0 + slope * (last_t - t0)),
+            ];
+        }
+    }
+
     let value_at = |t: f64| -> f64 {
         let idx = samples.partition_point(|s| s.0 < t);
         if idx == 0 {
@@ -665,8 +707,14 @@ fn build_envseg_for_key(
     qn_at: &dyn Fn(f64) -> f64,
     out: &mut Vec<ReaperEnvelope>,
 ) {
-    let frame_period = 5.0f64;
-    let merge_gap_sec = frame_period / 1000.0 + 1e-6;
+    // 帧周期按实际采样推导（默认 5ms；root 级曲线可能用别的周期）：
+    // 合并间隙与缺失 frame_period_ms 的兜底都从这里取值，硬编码 5ms
+    // 会把本应连续的组判为断开。
+    let base_frame_period_ms = clip_pairs
+        .iter()
+        .map(|(_, curves)| curves.frame_period_ms)
+        .fold(5.0f64, f64::max);
+    let merge_gap_sec = base_frame_period_ms / 1000.0 + 1e-6;
 
     // 每个 clip 的采样（绝对工程秒）；无曲线数据的 clip 不产生采样但参与分组。
     let mut entries: Vec<(f64, f64, Option<Vec<(f64, f64)>>)> = clip_pairs
@@ -681,7 +729,7 @@ fn build_envseg_for_key(
             let fp = if curves.frame_period_ms > 0.0 {
                 curves.frame_period_ms
             } else {
-                frame_period
+                base_frame_period_ms
             };
             let samples = curve.map(|curve| {
                 curve
@@ -1341,6 +1389,34 @@ mod tests {
         // 斜率在 t=1 处翻转：应产生 (0,0) (≈1,≈1) (2,≈0)（端点强制）。
         assert!(out.len() <= 4, "折点数量应精简，实际 {:?}", out);
         assert!(out.iter().any(|(t, v)| (t - 1.0).abs() < 0.02 && (v - 1.0).abs() < 0.02));
+    }
+
+    #[test]
+    fn simplify_breakpoints_single_sample_and_prefix_regression() {
+        // 单样本非默认：不得 panic（此前 samples[1] 越界），输出两端点。
+        let out = simplify_breakpoints(&[(0.005, 0.8)], 0.0, 0.02, 1.0, 0.005);
+        assert_eq!(out.len(), 2);
+        assert!((out[0].1 - 0.8).abs() < 1e-9 && (out[1].1 - 0.8).abs() < 1e-9);
+        assert!((out[1].0 - 0.02).abs() < 1e-9);
+        // 长线性前缀 + 末端折点：O(n) 快速通道不命中（非全程线性），
+        // 但线性段必须被一条弦覆盖且结果有效（不得退化成逐点输出）。
+        let fp = 0.005f64;
+        let n = 20_000usize;
+        let samples: Vec<(f64, f64)> = (0..n)
+            .map(|i| {
+                let t = i as f64 * fp;
+                let v = if t < 90.0 {
+                    t / 90.0
+                } else {
+                    1.0 - (t - 90.0) / 10.0
+                };
+                (t, v)
+            })
+            .collect();
+        let out = simplify_breakpoints(&samples, 0.0, 100.0, 0.0, 0.005);
+        assert!(out.len() <= 6, "长线性前缀应精简，实际 {}", out.len());
+        assert_eq!(out.first().unwrap().0, 0.0);
+        assert!((out.last().unwrap().0 - 100.0).abs() < 1e-9);
     }
 
     #[test]

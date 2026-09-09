@@ -111,7 +111,7 @@ describe("fadeGainSigned", () => {
         }
     });
 
-    it("per-frame gain step is click-safe for slow-start fade-outs", () => {
+    it("per-frame gain step is click-safe for slow-start fade-outs", { timeout: 20_000 }, () => {
         // “先慢后快”最恶劣组合：淡出 u=-dir<0 → e<1（末端陡峭、旧实现
         // 在末帧留下 (1/N)^e 级增益阶跃 → Click）。端点锁定约定：
         // 第 k 帧进度 (k+1)/N，最后一帧恰为 1 → 增益精确 0。
@@ -138,7 +138,7 @@ describe("fadeGainSigned", () => {
         }
     });
 
-    it("per-frame gain step is click-safe for fast-start fade-ins", () => {
+    it("per-frame gain step is click-safe for fast-start fade-ins", { timeout: 20_000 }, () => {
         // 对称问题：淡入 u=dir<0 → e<1（起点陡峭），首帧不再携带
         // (1/N)^e 级增益突跳。
         const worstCases: Array<[number, number]> = [

@@ -19,6 +19,36 @@ use std::path::Path;
 /// 帧周期（秒）
 const FRAME_PERIOD: f64 = 0.005;
 
+/// RPP 数值防御上限（秒）：损坏 / 伪造数据的极端 POSITION / LENGTH /
+/// 包络点位置不得把帧向量 resize 到不可分配的规模（24h ≈ 1.7e7 帧）。
+/// 合法工程远低于该值；超界输入按上限处理并表现为内容截断。
+const MAX_IMPORT_ITEM_SEC: f64 = 86_400.0;
+const MAX_IMPORT_FRAME_IDX: usize = (MAX_IMPORT_ITEM_SEC / FRAME_PERIOD) as usize;
+
+fn clamp_import_position(v: f64) -> f64 {
+    if v.is_finite() {
+        v.clamp(-MAX_IMPORT_ITEM_SEC, MAX_IMPORT_ITEM_SEC)
+    } else {
+        0.0
+    }
+}
+
+fn clamp_import_length(v: f64) -> f64 {
+    if v.is_finite() {
+        v.clamp(0.0, MAX_IMPORT_ITEM_SEC)
+    } else {
+        0.0
+    }
+}
+
+/// 帧号钳制：把任意有限秒值折进安全的帧下标范围。
+fn clamp_import_frame(sec: f64) -> usize {
+    if !sec.is_finite() {
+        return 0;
+    }
+    ((sec / FRAME_PERIOD).floor().max(0.0) as usize).min(MAX_IMPORT_FRAME_IDX)
+}
+
 /// 分段重叠上限（秒）
 const SEGMENT_OVERLAP_MAX_SEC: f64 = 0.1;
 
@@ -590,12 +620,14 @@ fn convert_reaper_items_to_existing_tracks(
     let mut next_order = next_track_order.max(ordered_track_ids.len() as i32);
 
     // 计算所有 item 中最小的 position，用于 offset 到 playhead
+    // （空 item 集合 → INFINITY → 不可数 → offset 取 0；不能用 f64::MAX
+    // 兜底，那会算出 ~-1.8e308 的垃圾偏移把包络段整体丢弃）。
     let min_position = data
         .tracks
         .iter()
         .flat_map(|t| t.items.iter())
         .map(|item| item.position)
-        .fold(f64::MAX, f64::min);
+        .fold(f64::INFINITY, f64::min);
     let time_offset = if min_position.is_finite() {
         playhead_sec - min_position
     } else {
@@ -817,7 +849,11 @@ fn convert_reaper_items_to_existing_tracks(
     Ok(ReaperImportResult {
         timeline,
         skipped_files,
-        beats_per_bar: data.tempo.as_ref().map(|t| t.beats_per_bar).unwrap_or(4),
+        beats_per_bar: data
+            .tempo
+            .as_ref()
+            .map(|t| t.beats_per_bar.clamp(1, 32))
+            .unwrap_or(4),
         tempo_map: None,
     })
 }
@@ -1201,7 +1237,11 @@ fn convert_reaper_data(
     Ok(ReaperImportResult {
         timeline,
         skipped_files,
-        beats_per_bar: data.tempo.as_ref().map(|t| t.beats_per_bar).unwrap_or(4),
+        beats_per_bar: data
+            .tempo
+            .as_ref()
+            .map(|t| t.beats_per_bar.clamp(1, 32))
+            .unwrap_or(4),
         tempo_map,
     })
 }
@@ -1318,8 +1358,11 @@ fn process_item(
         crate::config::loop_new_clips_default()
     };
     let s_offs = take.s_offs; // source offset (seconds)
-    let item_pos = item.position; // timeline position (seconds)
-    let item_length = item.length; // visible length (seconds)
+
+    // 防御性钳制：损坏 / 伪造 RPP 的极端 POSITION/LENGTH 不得进入下游
+    // 帧向量分配（合法工程远低于一天）。
+    let item_pos = clamp_import_position(item.position);
+    let item_length = clamp_import_length(item.length);
     let (manual_fade_in_sec, manual_fade_out_sec, auto_fade_in_sec, auto_fade_out_sec) =
         effective_item_fades(item, take, item_length.max(0.0));
     // 形状/曲率与长度使用同一 take-vs-item 优先规则。
@@ -1619,6 +1662,24 @@ fn process_item(
         } else {
             hs_takes[active_take_idx].name.clone()
         };
+        // 非活跃 take 的包络当前不进 ClipTake（v4 边界）：留痕避免静默
+        // 丢用户数据（活跃 take 的包络已晋升为轨道曲线 / PITCHENV）。
+        let dropped_take_envs: usize = (active_take_idx != 0)
+            .then(|| item.default_take.envelopes.len())
+            .unwrap_or(0)
+            + item
+                .takes
+                .iter()
+                .enumerate()
+                .filter(|(idx, _)| *idx + 1 != active_take_idx)
+                .map(|(_, t)| t.envelopes.len())
+                .sum::<usize>();
+        if dropped_take_envs > 0 {
+            log::warn!(
+                "reaper_import: item at {} drops {dropped_take_envs} envelope(s) on non-active take(s) (ClipTake has no envelope container yet)",
+                item.position
+            );
+        }
         let clip_id = new_clip_id();
         let clip_start = item_pos + time_offset;
 
@@ -1796,8 +1857,9 @@ fn overwrite_accum_span(
     if points.is_empty() || span_end_sec <= span_start_sec {
         return;
     }
-    let start_frame = (span_start_sec / FRAME_PERIOD).floor().max(0.0) as usize;
-    let end_frame = (span_end_sec / FRAME_PERIOD).ceil().max(0.0) as usize;
+    let start_frame = clamp_import_frame(span_start_sec);
+    let end_frame =
+        ((span_end_sec / FRAME_PERIOD).ceil().max(0.0) as usize).min(MAX_IMPORT_FRAME_IDX);
     let entry = accum.entry(key.to_string()).or_default();
     for frame_idx in start_frame..=end_frame {
         let t = frame_idx as f64 * FRAME_PERIOD;
@@ -1879,22 +1941,25 @@ fn write_take_envelope_frames(
 }
 
 /// 迭代 [start, end] 覆盖的帧（自动扩容），返回 (帧号, 可变槽位)。
+///
+/// 直接对目标子切片迭代：此前 `iter_mut().enumerate().filter(range)` 会
+/// 为每个 item 扫过整个轨道级累积器（O(items × 工程帧数)，长工程导入
+/// 秒级卡顿）；resize 后目标区间必在界内。
 fn pitch_frame_span<'a>(
     accum: &'a mut Vec<PitchFrameAccumulator>,
     start_sec: f64,
     end_sec: f64,
 ) -> impl Iterator<Item = (usize, &'a mut PitchFrameAccumulator)> + 'a {
-    let start_frame = (start_sec / FRAME_PERIOD).floor().max(0.0) as usize;
-    let end_frame = (end_sec / FRAME_PERIOD).ceil().max(0.0) as usize;
+    let start_frame = clamp_import_frame(start_sec);
+    let end_frame = ((end_sec / FRAME_PERIOD).ceil().max(0.0) as usize).min(MAX_IMPORT_FRAME_IDX);
     let end_frame = end_frame.max(start_frame);
     if end_frame >= accum.len() {
         accum.resize(end_frame + 1, PitchFrameAccumulator::default());
     }
-    let range = start_frame..=end_frame;
-    accum
+    accum[start_frame..=end_frame]
         .iter_mut()
         .enumerate()
-        .filter(move |(idx, _)| range.contains(idx))
+        .map(move |(i, slot)| (i + start_frame, slot))
 }
 
 /// take 包络按 u↔t 映射累积到帧（value = 包络在 u 处的采样）。
@@ -1905,8 +1970,9 @@ fn accumulate_take_env(
     item_end_tl: f64,
     take_rate: f64,
 ) {
-    let start_frame = (item_start_tl / FRAME_PERIOD).floor().max(0.0) as usize;
-    let end_frame = (item_end_tl / FRAME_PERIOD).ceil().max(0.0) as usize;
+    let start_frame = clamp_import_frame(item_start_tl);
+    let end_frame =
+        ((item_end_tl / FRAME_PERIOD).ceil().max(0.0) as usize).min(MAX_IMPORT_FRAME_IDX);
     for frame_idx in start_frame..=end_frame {
         let t = frame_idx as f64 * FRAME_PERIOD;
         let time_in_item = t - item_start_tl;
@@ -2169,6 +2235,7 @@ fn process_midi_item(
     // 应用 SOFFS 和 PLAYRATE
     let soffs = take.s_offs.max(0.0);
     let raw_play_rate = take.play_rate.first().copied().unwrap_or(1.0);
+    let reversed_playback = raw_play_rate < 0.0;
     let play_rate = raw_play_rate.abs().max(0.01);
 
     for note in &mut notes {
@@ -2176,10 +2243,28 @@ fn process_midi_item(
         note.end_sec = note.end_sec - soffs;
     }
 
-    let item_length = item.length.max(0.0);
+    let item_length = clamp_import_length(item.length);
 
     // 过滤掉完全在窗口外的音符（使用源时间窗口）
     notes.retain(|n| n.end_sec > 0.0 && n.start_sec < item_length * play_rate);
+
+    // 倒放（PLAYRATE < 0）：源窗口内容镜像逆序 —— 与音频路径"倒放消费
+    // 窗口"语义一致，绝不静默丢弃 PLAYRATE 的符号（此前导入为正放）。
+    if reversed_playback {
+        let span = item_length * play_rate;
+        for note in &mut notes {
+            let s = note.start_sec.clamp(0.0, span);
+            let e = note.end_sec.clamp(0.0, span);
+            note.start_sec = span - e;
+            note.end_sec = span - s;
+        }
+        notes.retain(|n| n.end_sec > n.start_sec + 1e-6);
+        notes.sort_by(|a, b| {
+            a.start_sec
+                .partial_cmp(&b.start_sec)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+    }
 
     if notes.is_empty() {
         return;
@@ -2202,7 +2287,7 @@ fn process_midi_item(
     // MIDI take 的音量包络 v1 不消费（见 process_item 的 MIDI 分支说明），
     // 但音量钮语义一致：存在激活 VOLENV 时同样按"包络取代钮"中性化。
     let take_gain = take_linear_gain(item, take, take_volume_envelope_active(take));
-    let clip_start = item.position + time_offset;
+    let clip_start = clamp_import_position(item.position) + time_offset;
 
     let clip_id = new_clip_id();
     let clip_name = if take.name.is_empty() {

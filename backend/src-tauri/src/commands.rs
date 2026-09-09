@@ -1000,20 +1000,39 @@ pub fn split_clips_at(
     timeline::split_clips_at(state, clip_ids, split_sec)
 }
 #[tauri::command(rename_all = "camelCase")]
-pub fn analyze_clip_silence(
-    state: State<'_, AppState>,
+pub async fn analyze_clip_silence(
+    app: tauri::AppHandle,
     clip_ids: Vec<String>,
     options: crate::models::SilenceDetectOptionsPayload,
 ) -> crate::models::SilenceAnalyzeResultPayload {
-    silence::analyze_clip_silence(state, clip_ids, options)
+    // 逐 Take 全文件解码 + 逐 hop 分析是重活，且设置对话框的实时预览会在
+    // 每次选项变化时重新调用：走 spawn_blocking，避免阻塞 UI 命令线程
+    // （与 analyze_clip_formants 同款）。JoinError（任务 panic）按
+    // "无报告"干跑处理。
+    tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        silence::analyze_clip_silence(state, clip_ids, options)
+    })
+    .await
+    .unwrap_or(crate::models::SilenceAnalyzeResultPayload {
+        ok: false,
+        reports: Vec::new(),
+    })
 }
 #[tauri::command(rename_all = "camelCase")]
-pub fn remove_clip_silence(
-    state: State<'_, AppState>,
+pub async fn remove_clip_silence(
+    app: tauri::AppHandle,
     clip_ids: Vec<String>,
     options: crate::models::SilenceDetectOptionsPayload,
-) -> crate::models::RemoveSilenceResultPayload {
-    silence::remove_clip_silence(state, clip_ids, options)
+) -> Result<crate::models::RemoveSilenceResultPayload, String> {
+    // 同上：切除前的分析与几何变换都是重活，卸载到阻塞线程池。
+    // 返回 Err（含任务 panic）时前端保持对话框打开并呈现失败。
+    tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        silence::remove_clip_silence(state, clip_ids, options)
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 #[tauri::command(rename_all = "camelCase")]
 pub fn close_track_gaps(

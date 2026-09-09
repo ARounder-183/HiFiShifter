@@ -123,6 +123,11 @@ impl ReaperItem {
         if self.default_take.source.is_some() {
             return &self.default_take;
         }
+        // 兜底与 reaper_active_take_index 保持一致：默认 take 无 source 时
+        // 优先取第一个带 source 的显式 take，再回退第一个显式 take。
+        if let Some(first_sourced) = self.takes.iter().find(|t| t.source.is_some()) {
+            return first_sourced;
+        }
         if let Some(first_take) = self.takes.first() {
             return first_take;
         }
@@ -655,6 +660,20 @@ fn parse_blocks(lines: &[String]) -> Block {
 
 // ─── 文本分割 ───
 
+/// 宽松解码一行并跳过空白行。RPP 结构行是 ASCII，媒体路径 / NAME 等字段
+/// 可能来自第三方生成器的非 UTF-8 编码（latin1 等）：整行丢弃会让 item
+/// 无声源可导入；替换式解码只影响展示文本，不会破坏块结构。
+fn push_lossy_line(raw: &[u8], lines: &mut Vec<String>) {
+    if raw.is_empty() {
+        return;
+    }
+    let s = String::from_utf8_lossy(raw);
+    let trimmed = s.trim();
+    if !trimmed.is_empty() {
+        lines.push(trimmed.to_string());
+    }
+}
+
 /// Reaper 使用两种分隔符：\r\n（.rpp 文件）和 \0（剪贴板数据）。
 fn split_lines(data: &[u8]) -> Vec<String> {
     let mut lines = Vec::with_capacity(data.len() / 40);
@@ -663,46 +682,26 @@ fn split_lines(data: &[u8]) -> Vec<String> {
     while i < data.len() {
         if data[i] == 0x00 {
             if i > start {
-                if let Ok(s) = std::str::from_utf8(&data[start..i]) {
-                    let trimmed = s.trim();
-                    if !trimmed.is_empty() {
-                        lines.push(trimmed.to_string());
-                    }
-                }
+                push_lossy_line(&data[start..i], &mut lines);
             }
             start = i + 1;
         } else if data[i] == 0x0D && i + 1 < data.len() && data[i + 1] == 0x0A {
             if i > start {
-                if let Ok(s) = std::str::from_utf8(&data[start..i]) {
-                    let trimmed = s.trim();
-                    if !trimmed.is_empty() {
-                        lines.push(trimmed.to_string());
-                    }
-                }
+                push_lossy_line(&data[start..i], &mut lines);
             }
             start = i + 2;
             i += 1; // 跳过 \n
         } else if data[i] == 0x0A {
             // 单独的 \n
             if i > start {
-                if let Ok(s) = std::str::from_utf8(&data[start..i]) {
-                    let trimmed = s.trim();
-                    if !trimmed.is_empty() {
-                        lines.push(trimmed.to_string());
-                    }
-                }
+                push_lossy_line(&data[start..i], &mut lines);
             }
             start = i + 1;
         }
         i += 1;
     }
     if start < data.len() {
-        if let Ok(s) = std::str::from_utf8(&data[start..]) {
-            let trimmed = s.trim();
-            if !trimmed.is_empty() {
-                lines.push(trimmed.to_string());
-            }
-        }
+        push_lossy_line(&data[start..], &mut lines);
     }
     lines
 }
@@ -1328,7 +1327,7 @@ fn parse_source_block(block: &Block) -> ReaperSource {
                     beat_note: tokens[4].parse::<u32>().unwrap_or(4),
                 });
             }
-            "E" | "e" if tokens.len() >= 4 => {
+            "E" if tokens.len() >= 4 => {
                 let tick_offset = tokens[1].parse::<u64>().unwrap_or(0);
                 midi_events.push(ReaperMidiEvent {
                     tick_offset,
@@ -1341,7 +1340,7 @@ fn parse_source_block(block: &Block) -> ReaperSource {
                     },
                 });
             }
-            "X" | "x" if tokens.len() >= 6 => {
+            "X" if tokens.len() >= 6 => {
                 let hi = tokens[1].parse::<u64>().unwrap_or(0);
                 let lo = tokens[2].parse::<u64>().unwrap_or(0);
                 let tick_offset = (hi << 32) | lo;

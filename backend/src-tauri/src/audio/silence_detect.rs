@@ -46,6 +46,10 @@ const WINDOW_SEC: f64 = 0.02;
 const REFINE_WINDOW_SEC: f64 = 0.025;
 const REFINE_STEP_SEC: f64 = 0.00025;
 
+/// 单次分析的最大 hop 数（5ms hop ≈ 5.5 小时）。防御性上限：损坏工程数据
+/// 里的异常巨大 `clip_length_sec` 会先触发分配失败把进程 abort。
+const MAX_ANALYSIS_HOPS: usize = 4_000_000;
+
 /// 对单个 Take 的消费窗口做静音分析。
 ///
 /// 返回**时间线绝对秒**锚定的静音区间（升序、已合并、已内缩 padding）。
@@ -111,10 +115,18 @@ pub(crate) fn analyze_take_silence(
             return None;
         }
         let consumed = (local_sec - leading) * rate;
-        let src_sec = if loop_enabled {
-            let anchor = if reversed { se } else { ss };
-            let raw = if reversed { anchor - consumed } else { anchor + consumed };
-            raw.rem_euclid(media_dur_sec)
+        // Loop 语义与引擎 / mixdown 一致（帧域）：
+        //   正放 idx(f) = floor_mod(round(ss·sr) + f, D_frames)
+        //   倒放 idx(f) = floor_mod(round(se·sr) − 1 − f, D_frames)
+        // 倒放锚点同样 clamp 到媒体时长（source_end 越界时与引擎对齐）。
+        let frame_f = if loop_enabled {
+            let consumed_frames = consumed * sr;
+            if reversed {
+                let anchor = (se.min(media_dur_sec) * sr).round() - 1.0;
+                (anchor - consumed_frames).rem_euclid(frames as f64)
+            } else {
+                (ss * sr + consumed_frames).rem_euclid(frames as f64)
+            }
         } else {
             if consumed < 0.0 {
                 return None;
@@ -122,23 +134,40 @@ pub(crate) fn analyze_take_silence(
             if consumed >= range_sec {
                 return None;
             }
-            if reversed {
+            let src_sec = if reversed {
                 win_end - consumed
             } else {
                 win_start + consumed
-            }
+            };
+            src_sec * sr
         };
-        let frame = (src_sec * sr).floor().clamp(0.0, (frames - 1) as f64) as usize;
-        let base = frame * channels;
-        let mut acc = 0.0f32;
-        for ch in 0..channels {
-            acc += pcm[base + ch];
+        if !(frame_f >= 0.0) {
+            return None;
         }
-        Some(acc / channels as f32)
+        let frame = frame_f.floor().clamp(0.0, (frames - 1) as f64) as usize;
+        let base = frame * channels;
+        // 峰值选择下混：取各声道中绝对值最大的样本。若取声道平均，
+        // 反相立体声（L=−R）会整体抵消成"静音"，与导出 / 监听表现不符。
+        let mut best = pcm[base];
+        let mut best_abs = best.abs();
+        for ch in 1..channels {
+            let v = pcm[base + ch];
+            let a = v.abs();
+            if a > best_abs {
+                best_abs = a;
+                best = v;
+            }
+        }
+        Some(best)
     };
 
     // ── 逐 hop 电平（RMS / Peak）──────────────────────────────────────────
     let total_hops = ((clip_length_sec / HOP_SEC).ceil() as usize).max(1);
+    if total_hops > MAX_ANALYSIS_HOPS {
+        return Err(format!(
+            "clip too long for silence analysis ({clip_length_sec:.0}s)"
+        ));
+    }
     let refine_step = REFINE_STEP_SEC;
     let mut levels_db: Vec<f64> = Vec::with_capacity(total_hops);
     for hop in 0..total_hops {

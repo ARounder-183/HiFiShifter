@@ -160,16 +160,19 @@ fn analyze_clips(
             continue;
         }
         let total = union.iter().map(|(s, e)| (e - s).max(0.0)).sum();
+        // padding 把整段静音的区间两端各内缩 pad 秒，判定"全静音"必须
+        // 把 pad 计入容差，否则带 padding 时 fully_silent 永远为 false。
+        let pad = (opts.padding_ms / 1000.0).max(0.0);
         reports.push(ClipSilenceReportPayload {
             clip_id: meta.clip_id.clone(),
             ok: true,
             message: None,
             fully_silent: union
                 .first()
-                .is_some_and(|(s, _)| *s <= meta.clip_start_sec + 1e-4)
-                && union
-                    .last()
-                    .is_some_and(|(_, e)| *e >= meta.clip_start_sec + meta.clip_length_sec - 1e-4),
+                .is_some_and(|(s, _)| *s <= meta.clip_start_sec + pad + 1e-4)
+                && union.last().is_some_and(|(_, e)| {
+                    *e >= meta.clip_start_sec + meta.clip_length_sec - pad - 1e-4
+                }),
             total_silent_sec: total,
             regions: union
                 .into_iter()
@@ -180,13 +183,20 @@ fn analyze_clips(
                 .collect(),
         });
     }
-    // 找不到的 clip id（并发编辑中被删除等）。
+    // 找不到的 clip id（并发编辑中被删除等）：补报，保证 reports 与
+    // clip_ids 一一对应，前端不至于静默少一条。
     for clip_id in clip_ids {
         if reported.insert(clip_id.clone()) {
-            continue;
+            reports.push(ClipSilenceReportPayload {
+                clip_id: clip_id.clone(),
+                ok: false,
+                message: Some("source_missing".to_string()),
+                fully_silent: false,
+                total_silent_sec: 0.0,
+                regions: Vec::new(),
+            });
         }
     }
-    let _ = reported;
     reports
 }
 

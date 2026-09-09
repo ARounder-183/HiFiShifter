@@ -102,19 +102,9 @@ pub(super) fn import_reaper_project(
             }
         }
 
-        // 合并轨道（排在现有轨道之后）：导入轨道的 order 统一置为
-        // "现有根级数量"（同级排序键相同 → 归一化时按 Vec 序稳定排在
-        // 既有根之后），随后由 normalize_track_vec 重写全部同级序号。
-        let root_base = tl
-            .tracks
-            .iter()
-            .filter(|t| t.parent_id.is_none())
-            .count() as i32;
-        for mut track in result.timeline.tracks {
-            track.order = root_base;
-            tl.tracks.push(track);
-        }
-        tl.normalize_track_vec();
+        // 合并轨道（排在现有轨道之后）+ 重写同级序号（共用入口见
+        // append_imported_tracks）。
+        tl.append_imported_tracks(result.timeline.tracks);
 
         // 合并 clips
         for mut clip in result.timeline.clips {

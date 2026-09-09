@@ -419,21 +419,9 @@ fn paste_vsp_project(state: &AppState, path: &std::path::Path) -> serde_json::Va
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
         state.checkpoint_timeline(&tl);
 
-        if !result.timeline.tracks.is_empty() {
-            // 导入轨道的 order 统一置为"现有根级数量"（归一化时按 Vec 序
-            // 稳定排在既有根之后），随后 normalize_track_vec 重写同级序号。
-            let root_base = tl
-                .tracks
-                .iter()
-                .filter(|t| t.parent_id.is_none())
-                .count() as i32;
-            for track in &result.timeline.tracks {
-                let mut t = track.clone();
-                t.order = root_base;
-                tl.tracks.push(t);
-            }
-            tl.normalize_track_vec();
-        }
+        // 导入轨道合并（order 置为"现有根级数量"）+ 重写同级序号
+        // （共用入口见 append_imported_tracks）。
+        tl.append_imported_tracks(result.timeline.tracks.clone());
 
         for clip in &result.timeline.clips {
             let mut c = clip.clone();

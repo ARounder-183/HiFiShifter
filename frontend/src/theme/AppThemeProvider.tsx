@@ -74,11 +74,16 @@ export function AppThemeProvider({ children }: PropsWithChildren) {
     const [appearance, setAppearance] = useState<AppearanceSettings>(loadInitialAppearance);
 
     // 系统深浅色偏好（auto 模式的解析来源），随系统切换实时更新。
-    const [systemDark, setSystemDark] = useState<boolean>(
-        () => window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? true,
-    );
+    const [systemDark, setSystemDark] = useState<boolean>(() => {
+        // 无 window 的环境（SSR / 部分测试）下直接读 window 会抛
+        // ReferenceError：`window.matchMedia?.(...)` 的可选链帮不上忙。
+        // 与 devicePixelLine 等工具保持同一守卫约定。
+        if (typeof window === "undefined") return true;
+        return window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? true;
+    });
 
     useEffect(() => {
+        if (typeof window === "undefined") return;
         const mq = window.matchMedia?.("(prefers-color-scheme: dark)");
         if (!mq) return;
         const onChange = (e: MediaQueryListEvent) => setSystemDark(e.matches);
@@ -92,8 +97,7 @@ export function AppThemeProvider({ children }: PropsWithChildren) {
     /* ── 独立 state（方便子组件直接控制） ── */
     const modeSetting = appearance.mode;
     // auto → 系统偏好；显式 dark/light 原样使用。
-    const mode: ThemeMode =
-        modeSetting === "auto" ? (systemDark ? "dark" : "light") : modeSetting;
+    const mode: ThemeMode = modeSetting === "auto" ? (systemDark ? "dark" : "light") : modeSetting;
     const accentColor = appearance.accentColor;
     const grayColor = appearance.grayColor;
     const radius = appearance.radius;

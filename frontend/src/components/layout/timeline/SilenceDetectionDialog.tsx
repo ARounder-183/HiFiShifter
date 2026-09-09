@@ -4,6 +4,7 @@ import { useI18n } from "../../../i18n/I18nProvider";
 import { useAppDispatch, useAppSelector } from "../../../app/hooks";
 import { isModifierActive, selectKeybinding } from "../../../features/keybindings/keybindingsSlice";
 import { applySelectWheelChange } from "../../../utils/selectWheel";
+import { useWheelScrollGuard } from "../../../utils/useWheelScrollGuard";
 import {
     setSilenceDetectOptions,
     setSilencePreview,
@@ -49,6 +50,9 @@ export const SilenceDetectionDialog: React.FC<{
     const [analyzing, setAnalyzing] = useState(false);
     const [applying, setApplying] = useState(false);
     const debounceRef = useRef<number | null>(null);
+    // 滚轮守卫：滑块滚轮步进时阻止对话框内容滚动（React onWheel 的
+    // preventDefault 是 passive no-op，见 useWheelScrollGuard）。
+    const wheelGuard = useWheelScrollGuard<HTMLDivElement>('input[type="range"]');
 
     // 打开时用已记忆的参数初始化，并清掉上一次的预览报告。
     useEffect(() => {
@@ -57,6 +61,20 @@ export const SilenceDetectionDialog: React.FC<{
             setReports([]);
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅在打开瞬间用 store 种子化
+    }, [open]);
+
+    // 打开时在 body 上标记：模态对话框打开期间阻塞全局快捷键（捕获阶段
+    // 的 window 监听先于对话框内部处理，箭头/空格/字母键否则会穿透到
+    // 对话框背后暗改轨道选择 / 误触播放）。
+    useEffect(() => {
+        if (open) {
+            document.body.setAttribute("data-silence-dialog-open", "true");
+        } else {
+            document.body.removeAttribute("data-silence-dialog-open");
+        }
+        return () => {
+            document.body.removeAttribute("data-silence-dialog-open");
+        };
     }, [open]);
 
     // 关闭/卸载时清除覆盖层。
@@ -80,9 +98,7 @@ export const SilenceDetectionDialog: React.FC<{
         debounceRef.current = window.setTimeout(() => {
             debounceRef.current = null;
             setAnalyzing(true);
-            void dispatch(
-                analyzeSilenceRemote({ clipIds, options: { ...options } }),
-            )
+            void dispatch(analyzeSilenceRemote({ clipIds, options: { ...options } }))
                 .unwrap()
                 .then((result) => setReports(result.reports))
                 .catch(() => setReports([]))
@@ -100,9 +116,7 @@ export const SilenceDetectionDialog: React.FC<{
         if (applying) return;
         setApplying(true);
         try {
-            await dispatch(
-                removeSilenceRemote({ clipIds, options: { ...options } }),
-            ).unwrap();
+            await dispatch(removeSilenceRemote({ clipIds, options: { ...options } })).unwrap();
             // 记忆本次参数为下次默认。
             dispatch(setSilenceDetectOptions(options));
             void dispatch(persistUiSettings());
@@ -127,16 +141,15 @@ export const SilenceDetectionDialog: React.FC<{
     /**
      * 滑块滚轮步进：向上 / 向下各走一步；按住“精细调整”修饰键时步长为 1，
      * 否则用该控件的粗步长。与 TransposeCentsDialog 等编辑对话框同款手势。
+     * 阻止默认滚动由 Dialog.Content 上的原生非被动守卫完成（React onWheel
+     * 的 preventDefault 是 passive no-op，见 useWheelScrollGuard）。
      */
     const wheelDelta = (e: React.WheelEvent<HTMLInputElement>, coarse: number): number => {
-        e.preventDefault();
-        e.stopPropagation();
         const fine = isModifierActive(paramFineAdjustKb, e.nativeEvent);
         return (e.deltaY < 0 ? 1 : -1) * (fine ? 1 : coarse);
     };
 
-    const clampRange = (v: number, min: number, max: number) =>
-        Math.min(max, Math.max(min, v));
+    const clampRange = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v));
 
     // 双击参数行 = 该参数重置回默认值（提示文案挂在行 title 上）。
     const resetHint = tAny("silence_double_click_reset");
@@ -148,7 +161,11 @@ export const SilenceDetectionDialog: React.FC<{
                 if (!next) closeAndCleanup();
             }}
         >
-            <Dialog.Content style={{ maxWidth: 460 }} onKeyDown={(e) => e.stopPropagation()}>
+            <Dialog.Content
+                ref={wheelGuard}
+                style={{ maxWidth: 460 }}
+                onKeyDown={(e) => e.stopPropagation()}
+            >
                 <Dialog.Title>{tAny("ctx_silence_detection")}</Dialog.Title>
 
                 <Flex direction="column" gap="3" mt="3">
@@ -179,7 +196,9 @@ export const SilenceDetectionDialog: React.FC<{
                             />
                             <Select.Content>
                                 <Select.Item value="rms">{tAny("silence_method_rms")}</Select.Item>
-                                <Select.Item value="peak">{tAny("silence_method_peak")}</Select.Item>
+                                <Select.Item value="peak">
+                                    {tAny("silence_method_peak")}
+                                </Select.Item>
                             </Select.Content>
                         </Select.Root>
                     </Flex>
@@ -311,9 +330,15 @@ export const SilenceDetectionDialog: React.FC<{
                                 }
                             />
                             <Select.Content>
-                                <Select.Item value="close">{tAny("silence_action_close")}</Select.Item>
-                                <Select.Item value="keep">{tAny("silence_action_keep")}</Select.Item>
-                                <Select.Item value="split">{tAny("silence_action_split")}</Select.Item>
+                                <Select.Item value="close">
+                                    {tAny("silence_action_close")}
+                                </Select.Item>
+                                <Select.Item value="keep">
+                                    {tAny("silence_action_keep")}
+                                </Select.Item>
+                                <Select.Item value="split">
+                                    {tAny("silence_action_split")}
+                                </Select.Item>
                             </Select.Content>
                         </Select.Root>
                     </Flex>
@@ -346,14 +371,18 @@ export const SilenceDetectionDialog: React.FC<{
                     </label>
 
                     {/* 预览摘要（与时间线上的红色覆盖层联动） */}
-                    <Flex direction="column" gap="1" className="rounded border border-qt-border p-2">
+                    <Flex
+                        direction="column"
+                        gap="1"
+                        className="rounded border border-qt-border p-2"
+                    >
                         <Text size="1" className="text-qt-text-muted">
                             {analyzing
                                 ? tAny("silence_analyzing")
                                 : totalRegions > 0
                                   ? tAny("silence_preview_summary")
-                                      .replace("{n}", String(totalRegions))
-                                      .replace("{dur}", totalSilent.toFixed(2))
+                                        .replace("{n}", String(totalRegions))
+                                        .replace("{dur}", totalSilent.toFixed(2))
                                   : tAny("silence_no_silence")}
                         </Text>
                         {clipIds.slice(0, 6).map((id) => {
@@ -365,8 +394,8 @@ export const SilenceDetectionDialog: React.FC<{
                                 <Text key={id} size="1" className="text-qt-text-muted">
                                     {`· ${name}: `}
                                     {report && !report.ok
-                                        ? (tAny("silence_skipped") +
-                                              (report.message ? ` (${report.message})` : ""))
+                                        ? tAny("silence_skipped") +
+                                          (report.message ? ` (${report.message})` : "")
                                         : regions > 0
                                           ? tAny("silence_preview_clip")
                                                 .replace("{n}", String(regions))
@@ -380,7 +409,10 @@ export const SilenceDetectionDialog: React.FC<{
                         })}
                         {clipIds.length > 6 ? (
                             <Text size="1" className="text-qt-text-muted">
-                                {tAny("silence_more_clips").replace("{n}", String(clipIds.length - 6))}
+                                {tAny("silence_more_clips").replace(
+                                    "{n}",
+                                    String(clipIds.length - 6),
+                                )}
                             </Text>
                         ) : null}
                     </Flex>

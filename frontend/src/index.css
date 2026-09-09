@@ -192,7 +192,11 @@ textarea {
  * 主题渲染，任意缩放下命中与拖拽映射都正确，也是各引擎的标准化方向
  * （::-webkit-scrollbar 非标准且已废弃）。主题色经 scrollbar-color
  * 保留；hover 变色与圆角自绘无法用标准属性表达，让位给交互正确性。
- * scrollbar-width 不继承，通配选择器等价于旧的全局 ::-webkit-scrollbar。
+ *
+ * 两个属性都是**继承**的（CSS Scrollbars L1）：挂在 `:root` 即可全局生效，
+ * 通配选择器只是保守起见保持显式（旧的全局 ::-webkit-scrollbar 语义）。
+ * 标准滚动条属性 Chromium 121+ 才支持；此前的 WebView2 会回退到无样式的
+ * 默认滚动条（可接受：Tauri WebView2 是常青更新）。
  */
 * {
     scrollbar-width: thin;

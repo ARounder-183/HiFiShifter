@@ -188,7 +188,10 @@ export const TimelineScrollArea: React.FC<
             const e = evt as globalThis.WheelEvent;
             const noModifierPressed = !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
             const isWheelBindingRequested = (kb?: Keybinding) => {
-                if (!kb) return noModifierPressed;
+                // 未提供绑定的动作 = 未请求（绝不能把"无修饰键滚轮"当成
+                // 某个未配置动作的触发条件，否则 plain wheel 会被未来调用方
+                // 意外劫持成 free-scroll / zoom）。
+                if (!kb) return false;
                 if (isNoneBinding(kb)) return noModifierPressed;
                 return isModifierActive(kb, e);
             };

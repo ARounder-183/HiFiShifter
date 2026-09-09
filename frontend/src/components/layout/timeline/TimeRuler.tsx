@@ -732,7 +732,9 @@ const TimeRulerInner: React.FC<{
         if (!el || !hover) return;
         const rulerWidth = rulerRef.current?.clientWidth ?? viewportWidth ?? 0;
         el.style.left = `${clampAxisPosition(hover.x, el.offsetWidth, rulerWidth, 10, 4)}px`;
-    });
+        // 只在输入变化时重定位：无依赖数组会在滚动 / 缩放热路径的每次渲染
+        // 都强制回流（读 offsetWidth / clientWidth）。
+    }, [hover, viewportWidth]);
 
     /**
      * 事件是否来自标尺自身 DOM 子树之外（如 Radix Dialog 门户到 body 的

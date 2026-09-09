@@ -106,6 +106,11 @@ export function useKeybindings(handler: KeybindingActionHandler): void {
             // Quick Search 打开时，交给弹窗自身输入框处理（避免 ↑/↓ 与时间轴缩放冲突）
             if (document.body.hasAttribute("data-quick-search-open")) return;
 
+            // 静音检测等模态对话框打开时，阻塞所有快捷键：捕获阶段的 window
+            // 监听先于对话框内部处理，箭头/空格/字母键否则会穿透到对话框背后
+            // （暗改轨道选择 / 误触播放 / 触发时间轴动作）。
+            if (document.body.hasAttribute("data-silence-dialog-open")) return;
+
             // 直线/颤音拖拽期间，命中振幅/频率方向键时，交给参数编辑器本地监听处理。
             if (document.body.hasAttribute("data-piano-roll-vibrato-drag-active")) {
                 const fineAdjustKb = keybindingsRef.current["modifier.paramFineAdjust"];

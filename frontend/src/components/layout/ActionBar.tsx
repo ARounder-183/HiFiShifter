@@ -65,6 +65,7 @@ import {
 } from "../../utils/tempoMap";
 import { SCALE_KEYS, SCALE_LABELS, type ScaleLike } from "../../utils/musicalScales";
 import { applySelectWheelChange } from "../../utils/selectWheel";
+import { useWheelScrollGuard } from "../../utils/useWheelScrollGuard";
 import { isModifierActive, selectKeybinding } from "../../features/keybindings/keybindingsSlice";
 import { toggleVisible } from "../../features/fileBrowser/fileBrowserSlice";
 import { toggleNotebookVisible } from "../../features/notebook/notebookSlice";
@@ -125,6 +126,9 @@ export function ActionBar() {
     const recordingMenuRef = useRef<HTMLDivElement | null>(null);
     const [metronomeMenuPos, setMetronomeMenuPos] = useState<{ x: number; y: number } | null>(null);
     const metronomeMenuRef = useRef<HTMLDivElement | null>(null);
+    // 滚轮守卫：节拍器音量滑块滚轮步进时不触发默认滚动
+    // （React onWheel 的 preventDefault 是 passive no-op，见 useWheelScrollGuard）。
+    const metronomeVolumeWheelGuard = useWheelScrollGuard<HTMLInputElement>();
 
     // ── "拖动时切换吸附"（modifier.clipNoSnap）────────────────────────
     // 时间轴拖拽手势进行中且按住该修饰键时，工具栏吸附按钮临时显示为
@@ -777,6 +781,7 @@ export function ActionBar() {
                             <div className="px-3 py-1.5 flex items-center gap-2">
                                 <input
                                     type="range"
+                                    ref={metronomeVolumeWheelGuard}
                                     min={0}
                                     max={100}
                                     step={5}
@@ -789,8 +794,8 @@ export function ActionBar() {
                                         );
                                     }}
                                     onWheel={(e) => {
-                                        e.preventDefault();
-                                        e.stopPropagation();
+                                        // 阻止默认滚动由滑块上的原生非被动守卫完成
+                                        // （React onWheel 的 preventDefault 是 no-op）。
                                         // 粗步长 = 滑块步长 5%；按住“精细调整”修饰键时步长 1%。
                                         const fine = isModifierActive(paramFineAdjustKb, e);
                                         const delta = (e.deltaY < 0 ? 1 : -1) * (fine ? 1 : 5);
@@ -1249,7 +1254,7 @@ export function ActionBar() {
                         </div>
                     )}
                 </Box>
-                {recording.active || recording.countdownRemaining > 0 ?(
+                {recording.active || recording.countdownRemaining > 0 ? (
                     <Flex align="center" gap="1" className="shrink-0">
                         <Text
                             size="1"

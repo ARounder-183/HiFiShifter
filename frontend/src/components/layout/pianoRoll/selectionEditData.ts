@@ -184,8 +184,15 @@ export function buildSelectionDragDense(args: {
     transform: (origValue: number, frame: number) => number;
     edgeBlend?: SelectionDragEdgeBlend;
 }): { startFrame: number; endFrame: number; values: number[] } {
-    const { sourceAt, origValues, origStartFrame, frameDelta, extraEdgeFrames, transform, edgeBlend } =
-        args;
+    const {
+        sourceAt,
+        origValues,
+        origStartFrame,
+        frameDelta,
+        extraEdgeFrames,
+        transform,
+        edgeBlend,
+    } = args;
 
     const selLen = origValues.length;
     const { startFrame, endFrame } = selectionDragRange({
@@ -228,6 +235,32 @@ export function buildSelectionDragDense(args: {
     }
 
     return { startFrame, endFrame, values };
+}
+
+/**
+ * 把 pv 步距采样的 dense 数组展开为逐帧（stride=1）数组。
+ *
+ * 拉伸边缘拖拽的预览数据是 pv 步距采样（`dense[k]` ↔ `startFrame + k×stride`）。
+ * 提交必须逐帧回写：按渲染同款的**线性插值**展开 —— 否则把 stride 间隔采样
+ * 当连续帧写入会造成时间压缩，并覆盖未选帧（stride=1 时原样返回，零开销）。
+ */
+export function expandStrideSampledDense(dense: number[], stride: number): number[] {
+    const step = Math.max(1, Math.floor(stride));
+    if (step === 1 || dense.length === 0) {
+        return dense;
+    }
+    const out = new Array<number>((dense.length - 1) * step + 1);
+    for (let i = 0; i < dense.length; i += 1) {
+        out[i * step] = dense[i];
+    }
+    for (let i = 0; i < dense.length - 1; i += 1) {
+        const a = dense[i];
+        const b = dense[i + 1];
+        for (let f = 1; f < step; f += 1) {
+            out[i * step + f] = a + ((b - a) * f) / step;
+        }
+    }
+    return out;
 }
 
 /**

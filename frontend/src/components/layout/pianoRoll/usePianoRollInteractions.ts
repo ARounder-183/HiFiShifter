@@ -57,6 +57,7 @@ import {
 } from "./paramSmoothing";
 import {
     buildSelectionDragDense,
+    expandStrideSampledDense,
     fetchFullResCurve,
     readPvRange,
     selectionDragRange,
@@ -1712,15 +1713,7 @@ export function usePianoRollInteractions(args: {
         lastPointerClientRef.current = null;
         onParamValuePreviewChange?.(null);
         setCanvasCursor(getDefaultCanvasCursor());
-    }, [
-        panRef,
-        strokeRef,
-        onParamValuePreviewChange,
-        setCanvasCursor,
-        getDefaultCanvasCursor,
-        hoverPreviewNearCurveRef,
-        lastPointerClientRef,
-    ]);
+    }, [panRef, strokeRef, onParamValuePreviewChange, setCanvasCursor, getDefaultCanvasCursor]);
 
     const onCanvasPointerDown = useCallback(
         (e: ReactPointerEvent<HTMLCanvasElement>) => {
@@ -2297,16 +2290,32 @@ export function usePianoRollInteractions(args: {
                                     setParamView({ ...pvNow, edit: nextEdit });
                                     liveEditOverrideRef.current = null;
 
+                                    // 全分辨率无损提交（与右拖 / 选区拖拽同一范式）：
+                                    // buildDense 产生的是 pv 步距采样（dense[k] ↔
+                                    // overallMinFrame + k×stride）；按渲染同款线性插值
+                                    // 展开为逐帧值后分块回写 —— 绝不把 stride 间隔采样
+                                    // 当连续帧写入（旧实现在 stride>1 时时间压缩 +
+                                    // 覆盖未选帧，见 selectionEditData.expandStrideSampledDense）。
+                                    const expanded = expandStrideSampledDense(built.dense, stride);
                                     void (async () => {
-                                        await paramsApi.setParamFrames(
-                                            rootTrackId,
-                                            editParam,
-                                            built.overallMinFrame,
-                                            built.dense,
-                                            true,
-                                        );
-                                        if (liveEditActiveRef) liveEditActiveRef.current = false;
-                                        bumpRefreshToken();
+                                        try {
+                                            await uploadFullResCurve({
+                                                trackId: rootTrackId,
+                                                param: editParam,
+                                                startFrame: built.overallMinFrame,
+                                                values: expanded,
+                                            });
+                                        } catch (err) {
+                                            console.error(
+                                                "[pianoRoll] stretch-edge commit failed",
+                                                err,
+                                            );
+                                        } finally {
+                                            if (liveEditActiveRef) {
+                                                liveEditActiveRef.current = false;
+                                            }
+                                            bumpRefreshToken();
+                                        }
                                     })();
                                     setCanvasCursor("default");
                                     invalidate();
@@ -2394,6 +2403,9 @@ export function usePianoRollInteractions(args: {
                                     let origValues = readPvRange(pv, selStartFrame, selEndFrame);
                                     let lastDy = 0;
                                     let didDrag = false;
+                                    // 下拖预览的 rAF 合帧状态（见 onMove）。
+                                    let previewRafId: number | null = null;
+                                    let previewQueuedDy: number | null = null;
 
                                     ensureLiveEditBase(pv);
                                     if (liveEditActiveRef) liveEditActiveRef.current = true;
@@ -2406,10 +2418,19 @@ export function usePianoRollInteractions(args: {
                                         paramView: pv,
                                     });
                                     let dragSettled = false;
-                                    void origCurvePromise.then((curve) => {
-                                        if (dragSettled) return;
-                                        origValues = curve.values;
-                                    });
+                                    void origCurvePromise
+                                        .then((curve) => {
+                                            if (dragSettled) return;
+                                            origValues = curve.values;
+                                        })
+                                        .catch((err) => {
+                                            // 取数失败只影响预览保真度：保持 pv 近似值，
+                                            // 提交路径会再次尝试并有自己的失败处理。
+                                            console.error(
+                                                "[pianoRoll] full-res curve fetch failed",
+                                                err,
+                                            );
+                                        });
 
                                     // 残差放大器的趋势按 origValues 引用缓存：每次 move
                                     // 只做逐帧缩放，不重复高斯卷积。
@@ -2496,31 +2517,7 @@ export function usePianoRollInteractions(args: {
                                         }
                                         lastDy = dy;
 
-                                        const pvNow = paramViewRef.current;
-                                        if (!pvNow) return;
-                                        // 上拖：残差放大（趋势已缓存，仅逐帧缩放）；
-                                        // 下拖：高斯平滑。两者都基于 origValues 无状态重算。
-                                        const selectionValues =
-                                            dy >= 0
-                                                ? getAmplifier().apply(rightDragUpScale(dy))
-                                                : transformSelectionByRightDrag(
-                                                      origValues,
-                                                      editParam,
-                                                      dy,
-                                                      { framePeriodMs: fp },
-                                                  );
-                                        const nextApplied = buildRightDragDense(
-                                            pvNow,
-                                            selectionValues,
-                                        );
-                                        applyDenseToLiveEdit(
-                                            pvNow,
-                                            nextApplied.startFrame,
-                                            nextApplied.values,
-                                            nextApplied.startFrame,
-                                            nextApplied.endFrame,
-                                            "draw",
-                                        );
+                                        // 悬停弹窗跟随原始事件坐标（廉价，不合帧）。
                                         if (paramValuePopupEnabled) {
                                             onParamValuePreviewChange?.({
                                                 clientX: ev.clientX,
@@ -2529,7 +2526,48 @@ export function usePianoRollInteractions(args: {
                                                 displayText: formatRightDragMorphPercent(dy),
                                             });
                                         }
-                                        invalidate();
+
+                                        // 下拖是 O(n·r) 高斯重卷积（r 随拖距增长）：
+                                        // rAF 合帧，一帧至多重算一次 —— 与上拖的
+                                        // "趋势缓存"路径保持同量级的每帧成本，长选区
+                                        // 全选拖动不再随拖距变卡。
+                                        previewQueuedDy = dy;
+                                        if (previewRafId == null) {
+                                            previewRafId = requestAnimationFrame(() => {
+                                                previewRafId = null;
+                                                const queued = previewQueuedDy;
+                                                previewQueuedDy = null;
+                                                if (queued === null) return;
+                                                const pvNow = paramViewRef.current;
+                                                if (!pvNow) return;
+                                                // 上拖：残差放大（趋势已缓存，仅逐帧缩放）；
+                                                // 下拖：高斯平滑。两者都基于 origValues 无状态重算。
+                                                const selectionValues =
+                                                    queued >= 0
+                                                        ? getAmplifier().apply(
+                                                              rightDragUpScale(queued),
+                                                          )
+                                                        : transformSelectionByRightDrag(
+                                                              origValues,
+                                                              editParam,
+                                                              queued,
+                                                              { framePeriodMs: fp },
+                                                          );
+                                                const nextApplied = buildRightDragDense(
+                                                    pvNow,
+                                                    selectionValues,
+                                                );
+                                                applyDenseToLiveEdit(
+                                                    pvNow,
+                                                    nextApplied.startFrame,
+                                                    nextApplied.values,
+                                                    nextApplied.startFrame,
+                                                    nextApplied.endFrame,
+                                                    "draw",
+                                                );
+                                                invalidate();
+                                            });
+                                        }
                                     };
 
                                     const onUp = async (ev?: globalThis.PointerEvent) => {
@@ -2543,6 +2581,11 @@ export function usePianoRollInteractions(args: {
                                         );
                                         disposeFineAdjustedPointerState(finePointerState);
                                         clearActivePointerGestureEnd(onUp);
+                                        if (previewRafId != null) {
+                                            cancelAnimationFrame(previewRafId);
+                                            previewRafId = null;
+                                            previewQueuedDy = null;
+                                        }
 
                                         if (!didDrag) {
                                             liveEditOverrideRef.current = null;
@@ -2557,117 +2600,9 @@ export function usePianoRollInteractions(args: {
                                             return;
                                         }
 
-                                        const pvNow = paramViewRef.current;
-                                        if (!pvNow || !rootTrackId) {
-                                            if (liveEditActiveRef) {
-                                                liveEditActiveRef.current = false;
-                                            }
-                                            setCanvasCursor("grab");
-                                            invalidate();
-                                            return;
-                                        }
-
-                                        // 全分辨率无损提交（与选区移动拖拽同一范式）：
-                                        // 等待拖动开始时发起的全分辨率取数，用最终 dy 在
-                                        // 真实曲线上重算变换，帧索引重建（含边缘淡化）后
-                                        // 分块回写 —— 预览用的 pv 近似值绝不写回后端。
-                                        dragSettled = true;
-                                        const fullRes = await origCurvePromise;
-                                        const selLen = fullRes.values.length;
-                                        if (selLen > 0) {
-                                            const selectionValues =
-                                                lastDy >= 0
-                                                    ? createSelectionAmplifier(
-                                                          fullRes.values,
-                                                          editParam,
-                                                          { framePeriodMs: fp },
-                                                      ).apply(rightDragUpScale(lastDy))
-                                                    : transformSelectionByRightDrag(
-                                                          fullRes.values,
-                                                          editParam,
-                                                          lastDy,
-                                                          { framePeriodMs: fp },
-                                                      );
-                                            const edgeHalfSpan = edgeHalfSpanForIndices(selLen, 1);
-                                            const extraEdgeFrames = Math.max(
-                                                0,
-                                                Math.ceil(edgeHalfSpan),
-                                            );
-                                            const upRange = selectionDragRange({
-                                                origStartFrame: selStartFrame,
-                                                origValuesLength: selLen,
-                                                frameDelta: 0,
-                                                extraEdgeFrames,
-                                            });
-                                            // pv 若已以 stride=1 覆盖该范围则直接切片（零 IPC）；
-                                            // 否则分块拉取。commitBase 是拖动前的当前后端值。
-                                            const commitBase = await fetchFullResCurve({
-                                                trackId: rootTrackId,
-                                                param: editParam,
-                                                startFrame: upRange.startFrame,
-                                                endFrame: upRange.endFrame,
-                                                paramView: pvNow,
-                                            });
-                                            const built = buildSelectionDragDense({
-                                                sourceAt: (frame) =>
-                                                    commitBase.values[
-                                                        frame - commitBase.startFrame
-                                                    ] ?? 0,
-                                                origValues: selectionValues,
-                                                origStartFrame: selStartFrame,
-                                                frameDelta: 0,
-                                                extraEdgeFrames,
-                                                transform: (orig) => orig,
-                                                edgeBlend:
-                                                    edgeHalfSpan > 0
-                                                        ? {
-                                                              halfSpanFrames: edgeHalfSpan,
-                                                              isEditable:
-                                                                  editParam === "pitch"
-                                                                      ? editablePitchValue
-                                                                      : undefined,
-                                                          }
-                                                        : undefined,
-                                            });
-                                            const finalDense = built.values;
-
-                                            // 立即同步本地 paramView state（逐帧映射到 pv 的
-                                            // 采样栅格上；pv 只是显示，随后会被后端数据刷新）
-                                            const nextEdit = pvNow.edit.slice();
-                                            const pvStepUp = Math.max(1, Math.floor(pvNow.stride));
-                                            for (let i = 0; i < finalDense.length; i += 1) {
-                                                const globalIdx = Math.round(
-                                                    (built.startFrame + i - pvNow.startFrame) /
-                                                        pvStepUp,
-                                                );
-                                                if (globalIdx >= 0 && globalIdx < nextEdit.length) {
-                                                    nextEdit[globalIdx] = finalDense[i];
-                                                }
-                                            }
-                                            setParamView({ ...pvNow, edit: nextEdit });
-                                            liveEditOverrideRef.current = null;
-
-                                            // 分块回写：整段编辑只打一个撤销点，块之间让出
-                                            // 事件循环，超长工程也不会卡死界面。
-                                            void (async () => {
-                                                await uploadFullResCurve({
-                                                    trackId: rootTrackId,
-                                                    param: editParam,
-                                                    startFrame: built.startFrame,
-                                                    values: finalDense,
-                                                });
-                                                if (liveEditActiveRef) {
-                                                    liveEditActiveRef.current = false;
-                                                }
-                                                bumpRefreshToken();
-                                            })();
-                                        } else {
-                                            liveEditOverrideRef.current = null;
-                                            if (liveEditActiveRef) {
-                                                liveEditActiveRef.current = false;
-                                            }
-                                        }
-
+                                        // 释放后按下的 contextmenu 一律吞掉（右键拖拽
+                                        // 的收尾手势）；先注册再走后续早退分支，避免
+                                        // 异常退出时弹出原生菜单。
                                         const suppressOnce = (evt: globalThis.MouseEvent) => {
                                             evt.preventDefault();
                                             evt.stopPropagation();
@@ -2685,6 +2620,149 @@ export function usePianoRollInteractions(args: {
                                                 true,
                                             );
                                         }, 0);
+
+                                        const pvNow = paramViewRef.current;
+                                        if (!pvNow || !rootTrackId) {
+                                            if (liveEditActiveRef) {
+                                                liveEditActiveRef.current = false;
+                                            }
+                                            setCanvasCursor("grab");
+                                            invalidate();
+                                            return;
+                                        }
+
+                                        // 全分辨率无损提交（与选区移动拖拽同一范式）：
+                                        // 等待拖动开始时发起的全分辨率取数，用最终 dy 在
+                                        // 真实曲线上重算变换，帧索引重建（含边缘淡化）后
+                                        // 分块回写 —— 预览用的 pv 近似值绝不写回后端。
+                                        // await 链路上的任何 IPC 失败都必须复位
+                                        // liveEdit 状态（否则预览覆盖层永久冻结、曲线
+                                        // 刷新被永久搁置）。
+                                        dragSettled = true;
+                                        try {
+                                            const fullRes = await origCurvePromise;
+                                            const selLen = fullRes.values.length;
+                                            if (selLen > 0) {
+                                                const selectionValues =
+                                                    lastDy >= 0
+                                                        ? createSelectionAmplifier(
+                                                              fullRes.values,
+                                                              editParam,
+                                                              { framePeriodMs: fp },
+                                                          ).apply(rightDragUpScale(lastDy))
+                                                        : transformSelectionByRightDrag(
+                                                              fullRes.values,
+                                                              editParam,
+                                                              lastDy,
+                                                              { framePeriodMs: fp },
+                                                          );
+                                                const edgeHalfSpan = edgeHalfSpanForIndices(
+                                                    selLen,
+                                                    1,
+                                                );
+                                                const extraEdgeFrames = Math.max(
+                                                    0,
+                                                    Math.ceil(edgeHalfSpan),
+                                                );
+                                                const upRange = selectionDragRange({
+                                                    origStartFrame: selStartFrame,
+                                                    origValuesLength: selLen,
+                                                    frameDelta: 0,
+                                                    extraEdgeFrames,
+                                                });
+                                                // pv 若已以 stride=1 覆盖该范围则直接切片（零 IPC）；
+                                                // 否则分块拉取。commitBase 是拖动前的当前后端值。
+                                                const commitBase = await fetchFullResCurve({
+                                                    trackId: rootTrackId,
+                                                    param: editParam,
+                                                    startFrame: upRange.startFrame,
+                                                    endFrame: upRange.endFrame,
+                                                    paramView: pvNow,
+                                                });
+                                                const built = buildSelectionDragDense({
+                                                    sourceAt: (frame) =>
+                                                        commitBase.values[
+                                                            frame - commitBase.startFrame
+                                                        ] ?? 0,
+                                                    origValues: selectionValues,
+                                                    origStartFrame: selStartFrame,
+                                                    frameDelta: 0,
+                                                    extraEdgeFrames,
+                                                    transform: (orig) => orig,
+                                                    edgeBlend:
+                                                        edgeHalfSpan > 0
+                                                            ? {
+                                                                  halfSpanFrames: edgeHalfSpan,
+                                                                  isEditable:
+                                                                      editParam === "pitch"
+                                                                          ? editablePitchValue
+                                                                          : undefined,
+                                                              }
+                                                            : undefined,
+                                                });
+                                                const finalDense = built.values;
+
+                                                // 立即同步本地 paramView state（逐帧映射到 pv 的
+                                                // 采样栅格上；pv 只是显示，随后会被后端数据刷新）
+                                                const nextEdit = pvNow.edit.slice();
+                                                const pvStepUp = Math.max(
+                                                    1,
+                                                    Math.floor(pvNow.stride),
+                                                );
+                                                for (let i = 0; i < finalDense.length; i += 1) {
+                                                    const globalIdx = Math.round(
+                                                        (built.startFrame + i - pvNow.startFrame) /
+                                                            pvStepUp,
+                                                    );
+                                                    if (
+                                                        globalIdx >= 0 &&
+                                                        globalIdx < nextEdit.length
+                                                    ) {
+                                                        nextEdit[globalIdx] = finalDense[i];
+                                                    }
+                                                }
+                                                setParamView({ ...pvNow, edit: nextEdit });
+                                                liveEditOverrideRef.current = null;
+
+                                                // 分块回写：整段编辑只打一个撤销点，块之间让出
+                                                // 事件循环，超长工程也不会卡死界面。上传失败同样
+                                                // 复位 liveEdit（finally），不让覆盖层冻结。
+                                                void (async () => {
+                                                    try {
+                                                        await uploadFullResCurve({
+                                                            trackId: rootTrackId,
+                                                            param: editParam,
+                                                            startFrame: built.startFrame,
+                                                            values: finalDense,
+                                                        });
+                                                    } catch (err) {
+                                                        console.error(
+                                                            "[pianoRoll] right-drag upload failed",
+                                                            err,
+                                                        );
+                                                    } finally {
+                                                        if (liveEditActiveRef) {
+                                                            liveEditActiveRef.current = false;
+                                                        }
+                                                        bumpRefreshToken();
+                                                    }
+                                                })();
+                                            } else {
+                                                liveEditOverrideRef.current = null;
+                                                if (liveEditActiveRef) {
+                                                    liveEditActiveRef.current = false;
+                                                }
+                                            }
+                                        } catch (err) {
+                                            console.error(
+                                                "[pianoRoll] right-drag commit failed",
+                                                err,
+                                            );
+                                            liveEditOverrideRef.current = null;
+                                            if (liveEditActiveRef) {
+                                                liveEditActiveRef.current = false;
+                                            }
+                                        }
 
                                         setCanvasCursor("grab");
                                         invalidate();
@@ -2960,107 +3038,137 @@ export function usePianoRollInteractions(args: {
                                     // 提交拖拽结果到后端
                                     const pvNow = paramViewRef.current;
                                     if (pvNow && rootTrackId) {
-                                        // 等待拖动开始时发起的全分辨率取数完成 —— 提交必须
-                                        // 基于无损数据，不能拿降采样的 pv 值去覆盖后端。
-                                        origValues = (await origCurvePromise).values;
-                                        const selLen = origValues.length;
-                                        if (selLen > 0) {
-                                            // 边缘平滑度：毫秒定标的过渡带半宽（帧），
-                                            // 扩展 dense 范围以包含选区边界外侧上下文。
-                                            // 提交 dense 恒为 stride=1。
-                                            const edgeHalfSpanUp = edgeHalfSpanForIndices(
-                                                selLen,
-                                                1,
-                                            );
-                                            const extraEdgeFramesUp = Math.ceil(edgeHalfSpanUp);
-
-                                            // 提交前把整段范围的全分辨率数据拉下来作为基底。
-                                            // 这是「回写不失真」的关键：预览用的是可能降采样的
-                                            // pv，提交必须用 stride=1 的真实曲线，否则会把
-                                            // 降采样后的值写回后端、覆盖掉原始分辨率。
-                                            const upRange = selectionDragRange({
-                                                origStartFrame: selStartFrame,
-                                                origValuesLength: selLen,
-                                                frameDelta: lastFrameDelta,
-                                                extraEdgeFrames: extraEdgeFramesUp,
-                                            });
-                                            // pv 若已以 stride=1 覆盖该范围则直接切片（零 IPC）；
-                                            // 否则分块拉取。pvNow.edit 是拖动前的值，正是回写
-                                            // 所需的「当前后端值」。
-                                            const commitBase = await fetchFullResCurve({
-                                                trackId: rootTrackId,
-                                                param: editParam,
-                                                startFrame: upRange.startFrame,
-                                                endFrame: upRange.endFrame,
-                                                paramView: pvNow,
-                                            });
-
-                                            const built = buildSelectionDragDense({
-                                                sourceAt: (frame) =>
-                                                    commitBase.values[
-                                                        frame - commitBase.startFrame
-                                                    ] ?? 0,
-                                                origValues,
-                                                origStartFrame: selStartFrame,
-                                                frameDelta: lastFrameDelta,
-                                                extraEdgeFrames: extraEdgeFramesUp,
-                                                transform: (orig, frame) =>
-                                                    transformDragValue(orig, frame),
-                                                edgeBlend:
-                                                    edgeHalfSpanUp > 0
-                                                        ? {
-                                                              halfSpanFrames: edgeHalfSpanUp,
-                                                              isEditable:
-                                                                  editParam === "pitch"
-                                                                      ? editablePitchValue
-                                                                      : undefined,
-                                                          }
-                                                        : undefined,
-                                            });
-                                            const finalDense = built.values;
-                                            const overallMinFrameExt = built.startFrame;
-
-                                            // 立即同步更新本地 paramView state（逐帧映射到 pv 的
-                                            // 采样栅格上；pv 只是显示，随后会被后端数据刷新）
-                                            const nextEdit = pvNow.edit.slice();
-                                            const pvStepUp = Math.max(1, Math.floor(pvNow.stride));
-                                            for (let i = 0; i < finalDense.length; i++) {
-                                                const globalIdx = Math.round(
-                                                    (overallMinFrameExt + i - pvNow.startFrame) /
-                                                        pvStepUp,
+                                        // await 链路上的任何 IPC 失败都必须复位
+                                        // liveEdit 状态（否则预览覆盖层永久冻结、
+                                        // 曲线刷新被永久搁置）。
+                                        try {
+                                            // 等待拖动开始时发起的全分辨率取数完成 —— 提交必须
+                                            // 基于无损数据，不能拿降采样的 pv 值去覆盖后端。
+                                            origValues = (await origCurvePromise).values;
+                                            const selLen = origValues.length;
+                                            if (selLen > 0) {
+                                                // 边缘平滑度：毫秒定标的过渡带半宽（帧），
+                                                // 扩展 dense 范围以包含选区边界外侧上下文。
+                                                // 提交 dense 恒为 stride=1。
+                                                const edgeHalfSpanUp = edgeHalfSpanForIndices(
+                                                    selLen,
+                                                    1,
                                                 );
-                                                if (globalIdx >= 0 && globalIdx < nextEdit.length) {
-                                                    nextEdit[globalIdx] = finalDense[i];
-                                                }
-                                            }
-                                            setParamView({
-                                                ...pvNow,
-                                                edit: nextEdit,
-                                            });
-                                            liveEditOverrideRef.current = null;
+                                                const extraEdgeFramesUp = Math.ceil(edgeHalfSpanUp);
 
-                                            // 确保选区位置最终正确
-                                            const beatDeltaForSel =
-                                                (lastFrameDelta * fp) / 1000 / secPerBeat;
-                                            selectionRef.current = {
-                                                aBeat: aBeat + beatDeltaForSel,
-                                                bBeat: bBeat + beatDeltaForSel,
-                                            };
-                                            updateSelectionUi(selectionRef.current);
-
-                                            // 分块回写：整段编辑只打一个撤销点，块之间让出
-                                            // 事件循环，超长工程也不会卡死界面。
-                                            void (async () => {
-                                                await uploadFullResCurve({
+                                                // 提交前把整段范围的全分辨率数据拉下来作为基底。
+                                                // 这是「回写不失真」的关键：预览用的是可能降采样的
+                                                // pv，提交必须用 stride=1 的真实曲线，否则会把
+                                                // 降采样后的值写回后端、覆盖掉原始分辨率。
+                                                const upRange = selectionDragRange({
+                                                    origStartFrame: selStartFrame,
+                                                    origValuesLength: selLen,
+                                                    frameDelta: lastFrameDelta,
+                                                    extraEdgeFrames: extraEdgeFramesUp,
+                                                });
+                                                // pv 若已以 stride=1 覆盖该范围则直接切片（零 IPC）；
+                                                // 否则分块拉取。pvNow.edit 是拖动前的值，正是回写
+                                                // 所需的「当前后端值」。
+                                                const commitBase = await fetchFullResCurve({
                                                     trackId: rootTrackId,
                                                     param: editParam,
-                                                    startFrame: overallMinFrameExt,
-                                                    values: finalDense,
+                                                    startFrame: upRange.startFrame,
+                                                    endFrame: upRange.endFrame,
+                                                    paramView: pvNow,
                                                 });
-                                                if (liveEditActiveRef)
-                                                    liveEditActiveRef.current = false;
-                                                bumpRefreshToken();
-                                            })();
+
+                                                const built = buildSelectionDragDense({
+                                                    sourceAt: (frame) =>
+                                                        commitBase.values[
+                                                            frame - commitBase.startFrame
+                                                        ] ?? 0,
+                                                    origValues,
+                                                    origStartFrame: selStartFrame,
+                                                    frameDelta: lastFrameDelta,
+                                                    extraEdgeFrames: extraEdgeFramesUp,
+                                                    transform: (orig, frame) =>
+                                                        transformDragValue(orig, frame),
+                                                    edgeBlend:
+                                                        edgeHalfSpanUp > 0
+                                                            ? {
+                                                                  halfSpanFrames: edgeHalfSpanUp,
+                                                                  isEditable:
+                                                                      editParam === "pitch"
+                                                                          ? editablePitchValue
+                                                                          : undefined,
+                                                              }
+                                                            : undefined,
+                                                });
+                                                const finalDense = built.values;
+                                                const overallMinFrameExt = built.startFrame;
+
+                                                // 立即同步更新本地 paramView state（逐帧映射到 pv 的
+                                                // 采样栅格上；pv 只是显示，随后会被后端数据刷新）
+                                                const nextEdit = pvNow.edit.slice();
+                                                const pvStepUp = Math.max(
+                                                    1,
+                                                    Math.floor(pvNow.stride),
+                                                );
+                                                for (let i = 0; i < finalDense.length; i++) {
+                                                    const globalIdx = Math.round(
+                                                        (overallMinFrameExt +
+                                                            i -
+                                                            pvNow.startFrame) /
+                                                            pvStepUp,
+                                                    );
+                                                    if (
+                                                        globalIdx >= 0 &&
+                                                        globalIdx < nextEdit.length
+                                                    ) {
+                                                        nextEdit[globalIdx] = finalDense[i];
+                                                    }
+                                                }
+                                                setParamView({
+                                                    ...pvNow,
+                                                    edit: nextEdit,
+                                                });
+                                                liveEditOverrideRef.current = null;
+
+                                                // 确保选区位置最终正确
+                                                const beatDeltaForSel =
+                                                    (lastFrameDelta * fp) / 1000 / secPerBeat;
+                                                selectionRef.current = {
+                                                    aBeat: aBeat + beatDeltaForSel,
+                                                    bBeat: bBeat + beatDeltaForSel,
+                                                };
+                                                updateSelectionUi(selectionRef.current);
+
+                                                // 分块回写：整段编辑只打一个撤销点，块之间让出
+                                                // 事件循环，超长工程也不会卡死界面。上传失败
+                                                // 同样复位 liveEdit（finally），不让覆盖层冻结。
+                                                void (async () => {
+                                                    try {
+                                                        await uploadFullResCurve({
+                                                            trackId: rootTrackId,
+                                                            param: editParam,
+                                                            startFrame: overallMinFrameExt,
+                                                            values: finalDense,
+                                                        });
+                                                    } catch (err) {
+                                                        console.error(
+                                                            "[pianoRoll] select-drag upload failed",
+                                                            err,
+                                                        );
+                                                    } finally {
+                                                        if (liveEditActiveRef)
+                                                            liveEditActiveRef.current = false;
+                                                        bumpRefreshToken();
+                                                    }
+                                                })();
+                                            }
+                                        } catch (err) {
+                                            console.error(
+                                                "[pianoRoll] select-drag commit failed",
+                                                err,
+                                            );
+                                            liveEditOverrideRef.current = null;
+                                            if (liveEditActiveRef)
+                                                liveEditActiveRef.current = false;
                                         }
                                     } else {
                                         if (liveEditActiveRef) liveEditActiveRef.current = false;

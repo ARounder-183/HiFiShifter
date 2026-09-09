@@ -828,9 +828,7 @@ export const ClipItem = React.memo(function ClipItem({
                     onRenameClickCandidate={onRenameClickCandidate}
                     renameControllerRef={renameControllerRef}
                     onGainCommit={onGainCommit}
-                    editingBadgeField={
-                        editingBadge?.clipId === clip.id ? editingBadge.field : null
-                    }
+                    editingBadgeField={editingBadge?.clipId === clip.id ? editingBadge.field : null}
                     onBadgeEditStart={onBadgeEditStart}
                     onBadgeEditCommit={onBadgeEditCommit}
                     onBadgeEditDone={onBadgeEditDone}
@@ -896,8 +894,16 @@ export const ClipItem = React.memo(function ClipItem({
 
                         {/* 静音检测预览：把检测到的静音区染成半透明红色（pointer-events-none）。 */}
                         {(silencePreviewRegions ?? []).map(([segStart, segEnd], i) => {
-                            const segLeft = (segStart - clip.startSec) * pxPerSec;
-                            const segWidth = Math.max(1, (segEnd - segStart) * pxPerSec);
+                            // 防御性钳制到 Clip 本体：后端区域越过 clip 末端
+                            // 时不得把红色画到相邻 Clip 上。
+                            const clampedStart = Math.max(segStart, clip.startSec);
+                            const clampedEnd = Math.min(
+                                segEnd,
+                                clip.startSec + Math.max(0, clip.lengthSec),
+                            );
+                            if (clampedEnd <= clampedStart) return null;
+                            const segLeft = (clampedStart - clip.startSec) * pxPerSec;
+                            const segWidth = Math.max(1, (clampedEnd - clampedStart) * pxPerSec);
                             if (segLeft + segWidth <= 0 || segLeft >= width) return null;
                             return (
                                 <div

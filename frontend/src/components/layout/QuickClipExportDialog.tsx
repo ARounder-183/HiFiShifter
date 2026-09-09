@@ -107,7 +107,9 @@ export function QuickClipExportDialog({ open, clipIds, onOpenChange }: QuickClip
                         ? "quick_export_error_missing_output_dir"
                         : result.error === "quick_export_file_name_required"
                           ? "quick_export_error_missing_file_name"
-                          : null;
+                          : result.error === "mp3_unsupported_sample_rate"
+                            ? "export_dialog_error_mp3_unsupported_sample_rate"
+                            : null;
                 setErrorText(
                     errorKey ? t(errorKey as MessageKey) : String(result.error ?? "Export failed"),
                 );

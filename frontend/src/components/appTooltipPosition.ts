@@ -24,7 +24,13 @@ export function clampAxisPosition(
     offset: number,
     edgeGap: number,
 ): number {
-    return Math.min(anchor + offset, Math.max(edgeGap, viewportSize - elementSize - edgeGap));
+    // 双向钳制：上界收回必要距离（或视口装不下时的左缘最小间距）；下界
+    // 同样不小于最小间距 —— 指针坐标可为负 / 越出视口（合成指针、拖拽
+    // 中的光标），否则气泡会整段画出窗外。
+    return Math.max(
+        edgeGap,
+        Math.min(anchor + offset, Math.max(edgeGap, viewportSize - elementSize - edgeGap)),
+    );
 }
 
 /**

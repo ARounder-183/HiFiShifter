@@ -7,9 +7,17 @@ import type { SessionState } from "../sessionSlice";
 /**
  * 更新节拍器配置并即时应用到引擎：
  * 1. 更新 Redux（UI 立即反映）；2. `set_metronome`（引擎原子配置 + 按细分
- * 模式重建响点表 + 持久化到 UiSettings）；3. 同步一份到通用设置持久化，
- * 防止后续任意设置保存把节拍器字段回写成陈旧值。
+ * 模式重建响点表，并写回后端设置缓存）；3. 磁盘持久化**去抖**走通用
+ * `save_ui_settings` 通道 —— 音量滑杆 / 滚轮细调是高频手势，逐次全量
+ * 配置写盘（读-合并-写-备份 ≈ 8 次文件操作）既拖慢命令线程，也会与
+ * 并发的其他设置保存互相踩踏。
  */
+// 引擎写入串行化链：Tauri 命令在线程池上并发执行，滚轮连发的多次
+// set_metronome 若不排序，引擎可能停在较旧的增益/模式上。
+let metronomeInvokeChain: Promise<void> = Promise.resolve();
+// 磁盘持久化去抖计时器（trailing edge：停止操作后统一落盘一次）。
+let metronomePersistTimer: ReturnType<typeof setTimeout> | undefined;
+
 export const updateMetronome = createAsyncThunk(
     "session/updateMetronome",
     async (
@@ -24,17 +32,29 @@ export const updateMetronome = createAsyncThunk(
     ) => {
         dispatch(setMetronomeConfig(payload));
         const s = (getState() as { session: SessionState }).session;
+        const snapshot = {
+            enabled: s.metronomeEnabled,
+            gain: s.metronomeGain,
+            mode: s.metronomeMode,
+            accent: s.metronomeAccent,
+            sound: s.metronomeSound,
+        };
+        const run = metronomeInvokeChain.then(async () => {
+            await webApi.setMetronome(snapshot);
+        });
+        // 引擎同步失败不阻塞 UI：保留乐观状态，由下一次操作或去抖持久化
+        // 时自然收敛（节拍器是非关键路径）。
+        metronomeInvokeChain = run.catch(() => undefined);
         try {
-            await webApi.setMetronome({
-                enabled: s.metronomeEnabled,
-                gain: s.metronomeGain,
-                mode: s.metronomeMode,
-                accent: s.metronomeAccent,
-                sound: s.metronomeSound,
-            });
-        } finally {
-            void dispatch(persistUiSettings());
+            await run;
+        } catch (err) {
+            console.error("[metronome] engine sync failed", err);
         }
+        if (metronomePersistTimer != null) clearTimeout(metronomePersistTimer);
+        metronomePersistTimer = setTimeout(() => {
+            metronomePersistTimer = undefined;
+            void dispatch(persistUiSettings());
+        }, 500);
     },
 );
 

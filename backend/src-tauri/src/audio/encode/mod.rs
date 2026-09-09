@@ -6,7 +6,8 @@
 //!
 //! 落盘策略：WAV 走 hound 增量写盘；MP3 与 FLAC 因编码器约束
 //! （rusty_mp3 的 Xing/Info 头、rusty_flac 的 `finish(self)` 全量输出）
-//! 在内存缓冲后一次性写盘，内存峰值 ≈ 成品文件大小，详见各自模块注释。
+//! 在内存缓冲后一次性写盘，内存峰值 ≈ 成品文件大小 + 编码器内部的全量
+//! PCM/平面缓冲，详见各自模块注释。
 
 pub mod flac;
 pub mod mp3;
@@ -134,7 +135,11 @@ impl ChannelMode {
 ///
 /// 立体声 / 联合立体声由 rusty_mp3 逐帧自动决策，不作为用户参数暴露。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "mode", rename_all = "lowercase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "mode",
+    rename_all = "lowercase",
+    rename_all_fields = "camelCase"
+)]
 pub enum Mp3BitrateMode {
     Cbr { bitrate_kbps: u32 },
     Vbr { quality_index: u8 },
@@ -462,10 +467,7 @@ mod tests {
             artist: Some(" 秋浪 ".to_string()),
             ..Default::default()
         };
-        assert_eq!(
-            filled.normalized().unwrap().artist.as_deref(),
-            Some("秋浪")
-        );
+        assert_eq!(filled.normalized().unwrap().artist.as_deref(), Some("秋浪"));
     }
 
     #[test]
@@ -473,9 +475,7 @@ mod tests {
         let cbr = Mp3BitrateMode::Cbr { bitrate_kbps: 320 };
         let json = serde_json::to_string(&cbr).unwrap();
         assert_eq!(json, r#"{"mode":"cbr","bitrateKbps":320}"#);
-        let vbr = Mp3BitrateMode::Vbr {
-            quality_index: 2,
-        };
+        let vbr = Mp3BitrateMode::Vbr { quality_index: 2 };
         let json = serde_json::to_string(&vbr).unwrap();
         assert_eq!(json, r#"{"mode":"vbr","qualityIndex":2}"#);
         let round: Mp3BitrateMode = serde_json::from_str(&json).unwrap();
