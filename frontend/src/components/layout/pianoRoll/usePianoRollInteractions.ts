@@ -370,7 +370,7 @@ export function usePianoRollInteractions(args: {
 
     const disposeFineAdjustedPointerState = useCallback(
         (_state: FineAdjustedPointerState | null | undefined) => {
-            // 参数微调不再参与参数编辑器拖拽逻辑；此处保留空实现以复用既有拖拽收尾流程。
+            // 精细调整不再参与参数编辑器拖拽逻辑；此处保留空实现以复用既有拖拽收尾流程。
             void _state;
         },
         [],

@@ -195,7 +195,7 @@ function TempoPointDialog({
     const bpmRef = useRef<HTMLInputElement | null>(null);
     const numRef = useRef<HTMLInputElement | null>(null);
 
-    // 修饰键“参数微调”：滚轮调节 BPM 时步长 0.1，否则 1（与左上角 BPM 控件一致）。
+    // 修饰键“精细调整”：滚轮调节 BPM 时步长 0.1，否则 1（与左上角 BPM 控件一致）。
     const paramFineAdjustKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.paramFineAdjust"),
     );
