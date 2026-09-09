@@ -84,6 +84,29 @@ export function useVisualPlayhead({
     useEffect(() => {
         if (!isTransportAdvancing) return;
 
+        // RAF（重）启动时的锚点陈旧防护：锚点只在 playheadSec 写入时刷新
+        // （轮询采样 / seek / 停止对齐），而本 effect 在 isTransportAdvancing
+        // 翻转时重启 —— 该翻转可能发生在 playheadSec 长时间未变的窗口之后
+        // （自动暂停后再次播放、阻塞式预渲染窗口、暂停后继续）。此时锚点的
+        // 时刻停在翻转之前，直接按 1x 外推会把整段"传输未前进"的空闲时长
+        // 一次性加到光标上（向前飞跃数秒），直到下一个轮询采样到达才弹回
+        // —— 反复播放/暂停/停止时可见的光标跳变。引擎未前进期间位置是
+        // 真实冻结的：把锚点重置到当前视觉位置、时刻重置为现在，视觉连续
+        // （不跳变）且不携带外推债务。锚点新鲜（正常播放中翻转）时不做
+        // 任何事，保持逐样本精确的既有插值。
+        const nowMs = performance.now();
+        const anchorAgeSec = (nowMs - syncAnchorRef.current.timestampMs) / 1000;
+        if (
+            !Number.isFinite(anchorAgeSec) ||
+            anchorAgeSec < 0 ||
+            anchorAgeSec > PLAYHEAD_SAMPLE_FRESH_SEC
+        ) {
+            syncAnchorRef.current = {
+                playheadSec: visualPlayheadSecRef.current,
+                timestampMs: nowMs,
+            };
+        }
+
         let rafId = 0;
 
         const tick = (timestampMs: number) => {

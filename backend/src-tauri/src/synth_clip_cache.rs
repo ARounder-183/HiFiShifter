@@ -411,6 +411,31 @@ pub fn global_rendered_clip_cache() -> &'static Mutex<RenderedClipCache> {
     })
 }
 
+/// 渲染 Clip 缓存代数：每次 `build_snapshot` 的 rendered_pcm 解析输入发生
+/// 变化时递增 —— 包括向 `global_rendered_clip_cache` **插入**条目，以及
+/// pending keys 的**注册 / 移除 / 清空**（见
+/// `register_pending_rendered_key` 等）。
+///
+/// `EngineSnapshot` 构建时捕获当前代数；"原地等待渲染"期间，meter 线程比对
+/// 快照代数与当前代数即可**精确**判断"快照是否落后于解析输入"：落后 → 请求
+/// worker 重建快照解除等待。相比在每条渲染路径上散布重建触发（插入时机与
+/// 等待标志置位时机存在竞态：渲染先于光标到达完成时触发被跳过，等待永不
+/// 解除），这是单一、自愈、精确的解除机制。
+pub(crate) static RENDERED_CLIP_CACHE_GENERATION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// 当前渲染 Clip 缓存代数。
+pub(crate) fn render_cache_generation() -> u64 {
+    use std::sync::atomic::Ordering;
+    RENDERED_CLIP_CACHE_GENERATION.load(Ordering::Acquire)
+}
+
+/// 渲染 Clip 缓存插入后递增代数（插入点调用）。
+pub(crate) fn bump_render_cache_generation() {
+    use std::sync::atomic::Ordering;
+    RENDERED_CLIP_CACHE_GENERATION.fetch_add(1, Ordering::AcqRel);
+}
+
 // ─── Pending Rendered Keys（渲染线程 → snapshot 的 cache_key 传递）──────────
 
 static PENDING_RENDERED_KEYS: OnceLock<Mutex<HashMap<String, RenderedClipCacheKey>>> =
@@ -425,11 +450,29 @@ pub fn global_pending_rendered_keys() -> &'static Mutex<HashMap<String, Rendered
 }
 
 /// 渲染线程调用：注册一个 clip 的 cache_key。
+///
+/// 同时递增渲染缓存代数：`build_snapshot` 的 rendered_pcm 解析依赖
+/// "缓存条目 ∪ pending keys"两部分，任一变化都会改变解析结果 ——
+/// "原地等待渲染"的解除检查（meter 线程比对快照代数与当前代数）必须能
+/// 观察到 key 的注册。典型场景：重启/补渲染的 pass 对已入库 clip 走
+/// cache-hit 路径（无 insert、无条目代数变化），但会把上一轮被
+/// `clear_pending_rendered_keys` 清掉的 key 重新注册回来 —— 不递增代数，
+/// 等待中的快照将永远得不到重建。
+/// 仅在 key 实际新增 / 变化时递增（相同 key 的重复注册不改变解析结果，
+/// 避免无谓的重建触发）。
 pub fn register_pending_rendered_key(clip_id: &str, key: RenderedClipCacheKey) {
     let mut map = global_pending_rendered_keys()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    map.insert(clip_id.to_string(), key);
+    let changed = match map.get(clip_id) {
+        Some(existing) => *existing != key,
+        None => true,
+    };
+    if changed {
+        map.insert(clip_id.to_string(), key);
+        drop(map);
+        bump_render_cache_generation();
+    }
 }
 
 /// `build_snapshot` 调用：查找某个 clip 的渲染线程 cache_key。
@@ -443,19 +486,33 @@ pub fn lookup_pending_rendered_key(clip_id: &str) -> Option<RenderedClipCacheKey
 }
 
 /// 清除单个 clip 的 pending rendered key。
+///
+/// 仅在实际移除时递增代数（no-op 不触发无谓的重建）。
 pub fn remove_pending_rendered_key(clip_id: &str) {
     let mut map = global_pending_rendered_keys()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    map.remove(clip_id);
+    let removed = map.remove(clip_id);
+    drop(map);
+    if removed.is_some() {
+        bump_render_cache_generation();
+    }
 }
 
 /// 清空所有 pending rendered keys（播放停止或新一轮渲染开始时调用）。
+///
+/// 同样递增代数（见 `register_pending_rendered_key`）：清空后快照的
+/// rendered_pcm 解析结果随之改变，等待解除检查必须能观察到。
 pub fn clear_pending_rendered_keys() {
     let mut map = global_pending_rendered_keys()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    let was_empty = map.is_empty();
     map.clear();
+    drop(map);
+    if !was_empty {
+        bump_render_cache_generation();
+    }
 }
 
 /// 计算整 Clip 渲染的参数哈希。
@@ -1064,6 +1121,60 @@ pub fn get_latest_tension_rendered_pcm(
 #[cfg(test)]
 mod tests {
     use super::compute_rendered_clip_hash;
+
+    /// 渲染缓存代数语义（"原地等待渲染"解除检查的依据，
+    /// 见 RENDERED_CLIP_CACHE_GENERATION）：缓存条目插入、pending key 的
+    /// 注册 / 清除都必须推进代数；空清空不推进。
+    #[test]
+    fn render_cache_generation_bumps_on_resolution_input_changes() {
+        use super::{
+            bump_render_cache_generation, clear_pending_rendered_keys,
+            register_pending_rendered_key, remove_pending_rendered_key,
+            render_cache_generation, RenderedClipCacheKey,
+        };
+
+        bump_render_cache_generation();
+        let gen0 = render_cache_generation();
+
+        // 注册 pending key → 代数推进。
+        let key = RenderedClipCacheKey {
+            clip_id: "gen-test-clip".to_string(),
+            param_hash: 0x1234,
+        };
+        register_pending_rendered_key("gen-test-clip", key.clone());
+        let gen1 = render_cache_generation();
+        assert!(gen1 > gen0, "registering a pending key bumps the generation");
+
+        // 非空清空 → 代数推进。
+        clear_pending_rendered_keys();
+        let gen2 = render_cache_generation();
+        assert!(gen2 > gen1, "clearing non-empty pending keys bumps the generation");
+
+        // 空清空 → 代数不变（无解析输入变化）。
+        clear_pending_rendered_keys();
+        assert_eq!(
+            render_cache_generation(),
+            gen2,
+            "clearing empty pending keys must not bump the generation"
+        );
+
+        // 移除不存在的 key → 代数不变。
+        remove_pending_rendered_key("gen-test-clip");
+        assert_eq!(
+            render_cache_generation(),
+            gen2,
+            "removing an absent key must not bump the generation"
+        );
+
+        // 注册后移除 → 代数推进。
+        register_pending_rendered_key("gen-test-clip", key);
+        let gen3 = render_cache_generation();
+        remove_pending_rendered_key("gen-test-clip");
+        assert!(render_cache_generation() > gen3, "removing a registered key bumps the generation");
+
+        // 清理测试残留（不影响其他测试的全局状态）。
+        clear_pending_rendered_keys();
+    }
 
     #[test]
     fn rendered_clip_hash_changes_when_formant_morph_changes() {

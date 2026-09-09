@@ -1025,16 +1025,19 @@ function AppInner() {
         : null;
 
     // 后端"播放/预渲染"状态：active/target 镜像进 Redux（state.session
-    // .playbackRenderingActive/Target）供播放轮询 reducer 在阻塞式预渲染期间
-    // 拒采陈旧传输态；进度百分比只影响状态栏展示，留在本地状态避免高频
+    // .playbackRenderingActive/Target）供状态栏展示；blocking（阻塞式前台
+    // 预渲染的独立镜像）供播放轮询 reducer 与本文件的轮询 tick 守卫拒采
+    // 陈旧传输态。进度百分比只影响状态栏展示，留在本地状态避免高频
     // progress 事件惊动订阅全量 session 的组件。
     const renderingActive = useAppSelector((state) => state.session.playbackRenderingActive);
     const renderingTarget = useAppSelector((state) => state.session.playbackRenderingTarget);
+    const renderingBlocking = useAppSelector((state) => state.session.playbackBlockingRenderActive);
     const [renderingProgress, setRenderingProgress] = useState<number | null>(null);
     const rendering = {
         active: renderingActive,
         progress: renderingProgress,
         target: renderingTarget,
+        blocking: renderingBlocking,
     };
 
     const [stretching, setStretching] = useState<{
@@ -1357,11 +1360,31 @@ function AppInner() {
                                 : null;
                         const target = typeof payload?.target === "string" ? payload.target : null;
 
-                        // 镜像进 Redux：阻塞式预渲染（target="original"）期间
-                        // 播放轮询 reducer 据此拒采陈旧传输态（App.tsx 的轮询
-                        // tick 守卫同样读取该状态）。进度只驱动状态栏，留在
+                        // 按 target 分 ref 跟踪两类渲染的活跃状态：前台（阻塞式）
+                        // 与后台渲染线程会并发发射事件，单一布尔镜像会被互相覆盖
+                        // —— 后台渲染的完成事件（active=false）会把前台预渲染的
+                        // 拒采窗口提前关闭，让渲染期间派发的陈旧轮询响应溜进
+                        // reducer（光标跳变）。
+                        if (target === "original") {
+                            originalRenderActiveRef.current = active;
+                        } else if (target === "background") {
+                            backgroundRenderActiveRef.current = active;
+                        }
+                        const anyActive =
+                            originalRenderActiveRef.current || backgroundRenderActiveRef.current;
+
+                        // 镜像进 Redux：playbackRenderingActive/Target 驱动状态栏
+                        // （任意渲染），playbackBlockingRenderActive 专供播放轮询
+                        // reducer 在阻塞式预渲染期间拒采陈旧传输态（App.tsx 的
+                        // 轮询 tick 守卫同样读取该状态）。进度只驱动状态栏，留在
                         // 本地状态。
-                        dispatch(setPlaybackRenderingState({ active, target }));
+                        dispatch(
+                            setPlaybackRenderingState({
+                                active: anyActive,
+                                target,
+                                blocking: originalRenderActiveRef.current,
+                            }),
+                        );
                         setRenderingProgress(p);
 
                         // 渲染从 active→inactive（完成）时，延迟同步一次播放状态，
@@ -1405,6 +1428,11 @@ function AppInner() {
 
     const playbackSyncInFlightRef = useRef(false);
     const renderingWasActiveRef = useRef(false);
+    // 按 target 隔离的渲染活跃状态（见 playback_rendering_state 监听器）：
+    // 前台（阻塞式）与后台渲染线程并发发射事件，必须分 ref 跟踪才能把
+    // "阻塞式前台预渲染"窗口的开关与后台渲染的生命周期解耦。
+    const originalRenderActiveRef = useRef(false);
+    const backgroundRenderActiveRef = useRef(false);
 
     const closeWindowNow = useCallback(async () => {
         try {
@@ -2414,20 +2442,28 @@ function AppInner() {
                 return;
             }
             switch (actionId) {
-                case "playback.toggle":
-                    if (runtimeRef.current.isPlaying) {
+                case "playback.toggle": {
+                    // 以 store 实时状态判定播放态：runtimeRef 在 effect 提交后才
+                    // 刷新，快速连续按键（播放/停止连打）时会基于过期值对同一
+                    // 状态双重派发（连按两次 Space 派发两次 play/两次 stop），
+                    // 第二次会把刚建立的播放重新拉回起点（光标小跳）。
+                    const isPlayingNow = Boolean(store.getState().session.runtime.isPlaying);
+                    if (isPlayingNow) {
                         void dispatch(stopAudioPlayback());
                     } else {
                         void dispatch(playOriginal());
                     }
                     break;
-                case "playback.stop":
-                    if (runtimeRef.current.isPlaying) {
+                }
+                case "playback.stop": {
+                    const isPlayingNow = Boolean(store.getState().session.runtime.isPlaying);
+                    if (isPlayingNow) {
                         void dispatch(stopAudioPlayback({ restoreAnchor: true }));
                     } else {
                         void dispatch(playOriginal());
                     }
                     break;
+                }
                 case "playback.metronome":
                     void dispatch(
                         updateMetronome({
@@ -2967,10 +3003,12 @@ function AppInner() {
         // Increase playhead sync frequency to ~30Hz for smoother playhead updates
         const intervalMs = 33;
         const id = window.setInterval(() => {
-            // 阻塞式预渲染（target=”original”）阶段后端还未真正进入 playing，
-            // 若此时同步会把前端”准备播放”状态误判为停止，导致 stop 锚点丢失。
-            // 后台预渲染（target=”background”）是独立线程，播放应正常同步。
-            if (rendering.active && rendering.target === "original") return;
+            // 阻塞式前台预渲染（target="original"）阶段后端还未真正进入 playing，
+            // 若此时同步会把前端"准备播放"状态误判为停止，导致 stop 锚点丢失。
+            // 后台预渲染（target="background"）是独立线程，播放应正常同步。
+            // 读取按 target 隔离的 blocking 镜像：两类渲染并发发射事件，
+            // 后台渲染的完成事件不得提前关闭本守卫。
+            if (rendering.blocking) return;
             if (playbackSyncInFlightRef.current) return;
             playbackSyncInFlightRef.current = true;
             // 派发时刻的传输纪元与时钟读数：响应迟到且期间发生过
@@ -2989,7 +3027,7 @@ function AppInner() {
             });
         }, intervalMs);
         return () => window.clearInterval(id);
-    }, [dispatch, runtimeIsPlaying, rendering.active, rendering.target]);
+    }, [dispatch, runtimeIsPlaying, rendering.blocking]);
 
     useEffect(() => {
         if (!recordingActive || !recordingSettings.autoStopAtSelectionEnd) return;

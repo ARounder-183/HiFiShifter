@@ -150,6 +150,7 @@ const TrackHeaderPlayheadTime = React.memo(function TrackHeaderPlayheadTime() {
             playheadSec: state.session.playheadSec,
             playheadSampledAtMs: state.session.playheadSampledAtMs,
             isPlaying: state.session.runtime.isPlaying,
+            playbackWaitingForRender: state.session.runtime.playbackWaitingForRender,
             playbackPositionSec: state.session.runtime.playbackPositionSec,
             primaryTimeUnit: state.session.primaryTimeUnit,
             secondaryTimeUnit: state.session.secondaryTimeUnit,
@@ -163,7 +164,11 @@ const TrackHeaderPlayheadTime = React.memo(function TrackHeaderPlayheadTime() {
         shallowEqual,
     );
     const [visualSec, setVisualSec] = useState(selector.playheadSec);
-    const isTransportAdvancing = selector.isPlaying && selector.playbackPositionSec > 1e-4;
+    // 原地等待渲染（位置冻结）期间不得推进视觉插值（见 TimelinePanel 同名注释）。
+    const isTransportAdvancing =
+        selector.isPlaying &&
+        !selector.playbackWaitingForRender &&
+        selector.playbackPositionSec > 1e-4;
     useVisualPlayhead({
         syncedPlayheadSec: selector.playheadSec,
         syncedAtMs: selector.playheadSampledAtMs,

@@ -438,6 +438,9 @@ pub struct ModelConfig {
 pub struct PlaybackStatePayload {
     pub ok: bool,
     pub is_playing: bool,
+    /// "传输层原地等待渲染"：is_playing=true 但引擎位置冻结（等待后台渲染
+    /// 完成后自动开始/继续播放）。前端轮询据此跳过时延外推、冻结播放光标。
+    pub waiting_for_render: bool,
     pub target: Option<String>,
     pub base_sec: f64,
     pub position_sec: f64,

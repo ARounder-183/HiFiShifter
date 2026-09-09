@@ -58,9 +58,10 @@ pub(crate) struct TrackMeterBus {
     /// f32 bits of each track slot's latest block peak.
     slots: Vec<AtomicU32>,
     generation: AtomicU64,
-    /// Position of the block that auto-paused playback during a pending
-    /// background render (0 = none). Drained + logged by the meter thread.
-    auto_pause_pos: AtomicU64,
+    /// Position of the block that entered "transport waiting for render"
+    /// （原地等待后台渲染：位置冻结、静音输出，0 = none）。
+    /// Drained + logged by the meter thread.
+    transport_wait_pos: AtomicU64,
     /// Position of the last block that rendered silence while a clip was
     /// still pending synthesis. Debug aid, drained by the meter thread.
     pending_pos: AtomicU64,
@@ -71,7 +72,7 @@ impl TrackMeterBus {
         Self {
             slots: (0..capacity).map(|_| AtomicU32::new(0)).collect(),
             generation: AtomicU64::new(0),
-            auto_pause_pos: AtomicU64::new(0),
+            transport_wait_pos: AtomicU64::new(0),
             pending_pos: AtomicU64::new(0),
         }
     }
@@ -89,9 +90,9 @@ impl TrackMeterBus {
         )
     }
 
-    /// Drain the recorded auto-pause position (0 if none recorded).
-    pub(crate) fn take_auto_pause_pos(&self) -> u64 {
-        self.auto_pause_pos.swap(0, Ordering::Relaxed)
+    /// Drain the recorded transport-wait position (0 if none recorded).
+    pub(crate) fn take_transport_wait_pos(&self) -> u64 {
+        self.transport_wait_pos.swap(0, Ordering::Relaxed)
     }
 
     /// Drain the recorded pending-clip position (0 if none recorded).
@@ -554,6 +555,7 @@ fn mix_into_scratch_stereo(
     frames: usize,
     snapshot: &Arc<ArcSwap<EngineSnapshot>>,
     is_playing: &AtomicBool,
+    play_start_wait: &AtomicBool,
     position_frames: &AtomicU64,
     duration_frames: &AtomicU64,
     scratch: &mut Vec<f32>,
@@ -595,22 +597,48 @@ fn mix_into_scratch_stereo(
     let current_ready =
         render_snapshot_window(frames, &snap, pos0, pos1, scratch, Some(&mut *meter));
 
-    if !current_ready && transition.fade_from_snapshot.is_none() {
-        // 若后台预渲染激活，自动暂停播放（而非无限静音等待）。
-        // 已渲染完成的 clip 在后台渲染线程存入缓存后，
-        // 用户可手动再次按下播放键继续。
-        let bg_render =
-            crate::commands::playback::BG_RENDER_ACTIVE.load(std::sync::atomic::Ordering::Relaxed);
-        if bg_render {
-            is_playing.store(false, std::sync::atomic::Ordering::Relaxed);
-            // stderr I/O must stay off the RT thread: record the position and
-            // let the meter thread log it.
-            bus.auto_pause_pos.store(pos0, Ordering::Relaxed);
-        }
-        // Debug aid: report the pending clip via the meter thread as well.
-        bus.pending_pos.store(pos0, Ordering::Relaxed);
-        // cursor 暂停，不推进 position，输出静音等待
+    let bg_render =
+        crate::commands::playback::BG_RENDER_ACTIVE.load(std::sync::atomic::Ordering::Relaxed);
+
+    // 就绪块即"未在等待"：所有推进路径（正常播放 / xfade 混合 / 陈旧内容
+    // 播放）都经过这里或下方分支清除标志。
+    if current_ready {
+        play_start_wait.store(false, Ordering::Relaxed);
+    }
+
+    if !current_ready && bg_render {
+        // ── 原地等待渲染（Case A + Case B 统一）──
+        // Case B：起播位置落在未渲染 Clip（一个或多个）内；Case A：播放途中
+        // 光标推进到未渲染 Clip 开头。两种情况统一处理：保持 is_playing=true、
+        // 位置不推进、静音输出，直到后台渲染完成并重建快照后自动开始/继续
+        // 播放 —— 等价于"关闭后台预渲染时先渲染完再起播"的体验，但渲染已在
+        // 后台运行，无需阻塞、无需用户手动重按播放。
+        //
+        // 等待期间不播放旧快照的陈旧内容（丢弃 xfade 来源），与"静音等待"
+        // 语义一致；解除等待后从新快照干净起播。pending 窗口的 scratch 在
+        // render_snapshot_window 内已是全零。
+        transition.fade_from_snapshot = None;
+        transition.fade_remaining_frames = 0;
+        play_start_wait.store(true, Ordering::Relaxed);
+        // stderr I/O must stay off the RT thread: report via the meter thread.
+        bus.transport_wait_pos.store(pos0, Ordering::Relaxed);
         return Some(BlockRender { snapshot: snap });
+    }
+
+    if !current_ready {
+        // 后台预渲染未激活但窗口未就绪（罕见兜底：bg 关闭时起播窗口不应有
+        // 未渲染 clip，如 play_original 的 snapshot_has_pending 分支）：维持
+        // 既有行为 —— 无陈旧内容时静音停留（不推进、不暂停）；有陈旧内容时
+        // 落入下方 xfade/陈旧播放路径继续出声。静音停留同样置等待标志并
+        // 上报等待位置：meter 线程的代数脏检查据此解除等待（与 bg 激活时
+        // 同一套机制）。
+        if transition.fade_from_snapshot.is_none() {
+            play_start_wait.store(true, Ordering::Relaxed);
+            bus.transport_wait_pos.store(pos0, Ordering::Relaxed);
+            // Debug aid: report the pending clip via the meter thread as well.
+            bus.pending_pos.store(pos0, Ordering::Relaxed);
+            return Some(BlockRender { snapshot: snap });
+        }
     }
 
     // 本块是否有实际出声：节拍器与实际出声的块同步叠加
@@ -641,6 +669,8 @@ fn mix_into_scratch_stereo(
             // 旧快照内容可持续数秒）。
             metro_voices.mix(scratch, metro, pos0, pos1, snap.sample_rate);
             advance_playback_position(frames, is_playing, position_frames, duration_frames);
+            // 陈旧内容推进中：音频在出声，非等待态。
+            play_start_wait.store(false, Ordering::Relaxed);
             return Some(BlockRender { snapshot: snap });
         }
 
@@ -684,6 +714,7 @@ pub(crate) fn render_callback_f32(
     out_channels: usize,
     snapshot: &Arc<ArcSwap<EngineSnapshot>>,
     is_playing: &AtomicBool,
+    play_start_wait: &AtomicBool,
     position_frames: &AtomicU64,
     duration_frames: &AtomicU64,
     scratch: &mut Vec<f32>,
@@ -713,6 +744,7 @@ pub(crate) fn render_callback_f32(
         frames,
         snapshot,
         is_playing,
+        play_start_wait,
         position_frames,
         duration_frames,
         scratch,
@@ -752,6 +784,7 @@ pub(crate) fn render_callback_i16(
     out_channels: usize,
     snapshot: &Arc<ArcSwap<EngineSnapshot>>,
     is_playing: &AtomicBool,
+    play_start_wait: &AtomicBool,
     position_frames: &AtomicU64,
     duration_frames: &AtomicU64,
     scratch: &mut Vec<f32>,
@@ -780,6 +813,7 @@ pub(crate) fn render_callback_i16(
         frames,
         snapshot,
         is_playing,
+        play_start_wait,
         position_frames,
         duration_frames,
         scratch,
@@ -820,6 +854,7 @@ pub(crate) fn render_callback_u16(
     out_channels: usize,
     snapshot: &Arc<ArcSwap<EngineSnapshot>>,
     is_playing: &AtomicBool,
+    play_start_wait: &AtomicBool,
     position_frames: &AtomicU64,
     duration_frames: &AtomicU64,
     scratch: &mut Vec<f32>,
@@ -850,6 +885,7 @@ pub(crate) fn render_callback_u16(
         frames,
         snapshot,
         is_playing,
+        play_start_wait,
         position_frames,
         duration_frames,
         scratch,

@@ -150,6 +150,7 @@ const TimelineTransportBridge = React.memo(function TimelineTransportBridge(prop
             playheadSec: state.session.playheadSec,
             playheadSampledAtMs: state.session.playheadSampledAtMs,
             isPlaying: state.session.runtime.isPlaying,
+            playbackWaitingForRender: state.session.runtime.playbackWaitingForRender,
             playbackPositionSec: state.session.runtime.playbackPositionSec,
         }),
         // 无 shallowEqual 时每次 dispatch 都产生新对象引用，
@@ -157,7 +158,13 @@ const TimelineTransportBridge = React.memo(function TimelineTransportBridge(prop
         shallowEqual,
     );
 
-    const isTransportAdvancing = transport.isPlaying && transport.playbackPositionSec > 1e-4;
+    // 原地等待渲染（位置冻结）期间不得推进视觉插值：否则 RAF 会以 1x 从
+    // 冻结前锚点持续外推整个等待时长，恢复采样到达时光标大幅回跳
+    // （往复跳动的根源）。positionSec 条件是等待标志缺省时的兼容兜底。
+    const isTransportAdvancing =
+        transport.isPlaying &&
+        !transport.playbackWaitingForRender &&
+        transport.playbackPositionSec > 1e-4;
 
     useVisualPlayhead({
         syncedPlayheadSec: transport.playheadSec,

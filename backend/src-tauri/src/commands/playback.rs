@@ -193,12 +193,21 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
         }
         let start_sec = playhead_sec.max(0.0) + start_sec.max(0.0);
 
+        // 记录新的播放请求：复位引擎的停止意图标志。前台预渲染路径的
+        // set_playing(true) 只发生在渲染完成时 —— 若不在请求时复位，用户
+        // 此前任何一次停止（哪怕只是暂停）都会让渲染完成被永久拒绝
+        // （渲染完毕后完全无法播放）。必须先于渲染线程派生入队，使命令
+        // 顺序为 请求 → （渲染窗口内的用户停止）→ 完成。
+        state.audio_engine.begin_play_intent();
+
         // 节拍器：每次播放启动都按当前工程/设置重建响点表（保证与实际
         // 出声内容一致），并同步配置（应用启动后可能尚未同步过）。
         sync_metronome_config(&state);
         refresh_metronome_schedule(&state);
 
-        // ── 后台预渲染激活时：立即开始播放，不等待渲染 ──────────────────────
+        // ── 后台预渲染激活时：立即进入播放流程，不等待渲染 ──────────────
+        // 起播窗口未就绪时传输层原地等待（音频回调静音冻结，渲染完成自动
+        // 起播），已就绪窗口则正常出声。
         let bg_render = BG_RENDER_ACTIVE.load(std::sync::atomic::Ordering::Relaxed);
         if bg_render {
             log::warn!(
@@ -241,25 +250,27 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
         }
 
         if !need_prerender && snapshot_has_pending {
-            log::warn!("[play_original] clips_needing_render=0 but snapshot has pending synthesis — waiting for render");
+            // 快照中的 pending 合成来自旧 update_timeline 的一次性滞后
+            //（collect_clips_needing_render 基于当前时间线已返回空）。
+            // update_timeline 会按当前时间线重建快照，pending 随之消除；
+            // 直接播放即可。旧实现在此发出 active=true 的渲染事件却没有任何
+            // 路径把它关闭 —— 前端拒采窗口永久卡死（光标冻结 + 假播放态）。
+            log::warn!("[play_original] clips_needing_render=0 but snapshot has pending synthesis — rebuilding snapshot and playing");
             state.audio_engine.seek_sec(start_sec);
             state.audio_engine.update_timeline(timeline);
-            if let Some(app) = state.app_handle.get().cloned() {
-                let _ = app.emit(
-                    "playback_rendering_state",
-                    PlaybackRenderingStateEvent {
-                        active: true,
-                        progress: Some(0.0),
-                        target: Some("original".to_string()),
-                    },
-                );
-            }
-            return serde_json::json!({"ok": true, "playing": "original", "start_sec": start_sec, "waiting_for_render": true});
+            state.audio_engine.set_playing(true, Some("original"));
+            return serde_json::json!({"ok": true, "playing": "original", "start_sec": start_sec});
         }
 
         // ── 有 pitch edit：Clip 级增量预渲染 + 实时混音 ──────────────────────────
-        // 后台线程按时间线顺序逐 clip 渲染，第一个 clip 渲染完即开始播放
-        // 播放过程中继续后台渲染后续 clip，音频回调中遇到未合成 clip 时静音等待
+        // 后台线程按时间线顺序逐 clip 渲染，渲染完成后开始播放；
+        // 播放过程中继续后台渲染后续 clip，音频回调遇到未合成 clip 时
+        // 原地等待（位置冻结、静音输出，渲染完成后自动继续）。
+        //
+        // 提前把引擎位置对齐到本次播放起点：渲染窗口内 get_playback_state
+        // 报告的就是真实的"将要播放的位置"（而非上一场播放/停止的陈旧残留）；
+        // 完成路径因此不再强制回跳到起始点 —— 渲染窗口内的用户 seek 得以保留。
+        state.audio_engine.seek_sec(start_sec);
         if let Some(app) = state.app_handle.get().cloned() {
             let engine = state.audio_engine.clone();
             let tl_for_render = timeline.clone();
@@ -272,6 +283,15 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
             let engine_for_sr = state.audio_engine.clone();
 
             std::thread::spawn(move || {
+                // ★ panic 隔离：渲染循环中的 panic（native 推理库、缓存锁等）
+                // 不得吞掉收尾工作 —— 否则 "playback_rendering_state" 的
+                // active=false 完成事件永不发出，前端拒采窗口永久卡死
+                // （轮询停摆 + 假播放态 = 渲染后完全无法播放的另一种形态）。
+                // panic 时清掉 chunk 进度回调（残留回调会在后续渲染中继续
+                // 发射 active=true 的 original 事件，重新粘住拒采窗口）并
+                // 补发完成事件。正常路径的收尾 emit 由循环体自己负责，
+                // 此处不重复发送。
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let cache_log = std::env::var("HIFISHIFTER_RENDER_CACHE_LOG")
                     .ok()
                     .as_deref()
@@ -535,6 +555,7 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
                                         .lock()
                                         .unwrap_or_else(|e| e.into_inner());
                                 cache.insert(clip_render_info.cache_key.clone(), entry.clone());
+                                crate::synth_clip_cache::bump_render_cache_generation();
                                 crate::synth_clip_cache::register_pending_rendered_key(
                                     &clip_render_info.clip.id,
                                     clip_render_info.cache_key.clone(),
@@ -735,9 +756,18 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
 
                 let update_started_at = std::time::Instant::now();
                 crate::nsf_hifigan_onnx::set_chunk_progress_callback(None);
-                engine.seek_sec(render_start_sec);
-                engine.update_timeline(tl_for_render);
-                engine.set_playing(true, Some("original"));
+                // 渲染完成：应用时间线；仅当用户未在渲染期间按过停止时才进入
+                // 播放。旧实现无条件 seek + set_playing(true)，用户在渲染窗口
+                // （后台预渲染负载下可达数秒）内按 Stop 后，播放仍会被"复活"，
+                // 光标跳回播放起点 —— 反复播放/停止时跳变的根源之一。
+                // 停止意图由 worker 内的 stopped_since_play 标志原子判定
+                // （见 handle_complete_prerender_and_play），与停止命令的到达
+                // 时序无关。播放起始位置已在命令层提前 seek，完成路径不再
+                // 回跳，渲染窗口内的用户 seek 也得以保留。
+                log::warn!(
+                    "[play_original] prerender complete start_sec={render_start_sec} — applying snapshot (resumes only if not stopped)"
+                );
+                engine.complete_prerender_and_play(tl_for_render);
                 let update_elapsed = update_started_at.elapsed();
 
                 log::warn!(
@@ -773,6 +803,21 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
 
                 // 推送渲染完成
                 if rendering_state_active {
+                    let _ = app.emit(
+                        "playback_rendering_state",
+                        PlaybackRenderingStateEvent {
+                            active: false,
+                            progress: Some(1.0),
+                            target: Some("original".to_string()),
+                        },
+                    );
+                }
+                }));
+                if outcome.is_err() {
+                    log::error!(
+                        "[play_original] render thread panicked; clearing progress callback and emitting rendering-done"
+                    );
+                    crate::nsf_hifigan_onnx::set_chunk_progress_callback(None);
                     let _ = app.emit(
                         "playback_rendering_state",
                         PlaybackRenderingStateEvent {
@@ -1576,6 +1621,7 @@ pub(super) fn get_playback_state(state: State<'_, AppState>) -> PlaybackStatePay
     PlaybackStatePayload {
         ok: true,
         is_playing: pb.is_playing,
+        waiting_for_render: pb.waiting_for_render,
         target: pb.target,
         base_sec: pb.base_sec,
         position_sec: pb.position_sec,
@@ -2046,6 +2092,7 @@ fn render_background_pass(
                             .lock()
                             .unwrap_or_else(|e| e.into_inner());
                         cache.insert(clip_render_info.cache_key.clone(), entry.clone());
+                        crate::synth_clip_cache::bump_render_cache_generation();
                         crate::synth_clip_cache::register_pending_rendered_key(
                             &clip_render_info.clip.id,
                             clip_render_info.cache_key.clone(),
@@ -2054,6 +2101,13 @@ fn render_background_pass(
 
                         base_entry = Some(entry);
                         render_success_count += 1;
+                        // 等待解除由 meter 线程统一驱动：快照携带渲染缓存代数，
+                        // meter 线程在等待期间发现"快照代数落后于缓存代数"即
+                        // 请求 worker 重建快照（见 engine.rs meter 循环与
+                        // synth_clip_cache::RENDERED_CLIP_CACHE_GENERATION）。
+                        // 不在此处触发重建：插入发生时光标可能尚未到达等待点
+                        //（标志未置位会被跳过），渲染线程退出后更无后续插入——
+                        // 两条路径都会让等待永久悬空。
                     }
                     Err(e) => {
                         if e == BG_RENDER_CANCELLED_ERR {

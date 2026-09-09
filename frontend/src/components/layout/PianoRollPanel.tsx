@@ -1876,7 +1876,11 @@ export const PianoRollPanel: React.FC = () => {
         invalidate();
     }, [s.playheadSec, invalidate]);
 
-    const isTransportAdvancing = s.runtime.isPlaying && s.runtime.playbackPositionSec > 1e-4;
+    // 原地等待渲染（位置冻结）期间不得推进视觉插值（见 TimelinePanel 同名注释）。
+    const isTransportAdvancing =
+        s.runtime.isPlaying &&
+        !s.runtime.playbackWaitingForRender &&
+        s.runtime.playbackPositionSec > 1e-4;
 
     useVisualPlayhead({
         syncedPlayheadSec: s.playheadSec,

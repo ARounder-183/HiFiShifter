@@ -33,6 +33,9 @@ pub(crate) struct StretchJob {
 #[derive(Debug, Clone)]
 pub struct AudioEngineStateSnapshot {
     pub is_playing: bool,
+    /// "传输层原地等待渲染"：is_playing=true 但位置冻结（等待后台渲染完成
+    /// 后自动开始/继续播放）。前端轮询据此跳过时延外推、冻结播放光标。
+    pub waiting_for_render: bool,
     pub target: Option<String>,
     pub base_sec: f64,
     pub position_sec: f64,
@@ -142,6 +145,11 @@ pub(crate) struct EngineSnapshot {
     pub(crate) duration_frames: u64,
     pub(crate) track_ids: Arc<Vec<String>>,
     pub(crate) clips: Arc<Vec<EngineClip>>,
+    /// 构建本快照时的渲染 Clip 缓存代数（见
+    /// `synth_clip_cache::RENDERED_CLIP_CACHE_GENERATION`）。"原地等待渲染"
+    /// 期间，meter 线程比对快照代数与当前缓存代数：落后即说明有新渲染结果
+    /// 尚未反映进快照 → 请求重建以解除等待。
+    pub(crate) render_cache_generation: u64,
 }
 
 impl EngineSnapshot {
@@ -152,6 +160,7 @@ impl EngineSnapshot {
             duration_frames: 0,
             track_ids: Arc::new(vec![]),
             clips: Arc::new(vec![]),
+            render_cache_generation: 0,
         }
     }
 }
@@ -197,6 +206,34 @@ pub(crate) enum EngineCommand {
     /// 换入节拍器响点表（命令层按工程 Tempo Map + 网格预展开）。
     SetMetronomeSchedule {
         clicks: Arc<Vec<crate::audio_engine::metronome::MetronomeClick>>,
+    },
+    /// 按当前 last_timeline 重建快照（最小路径）。**发送方是 meter 线程**：
+    /// "原地等待渲染"期间它比对快照携带的渲染缓存代数与当前缓存代数，
+    /// 落后即发送本命令 —— 等待中的音频回调只能通过新快照观察到刚入库的
+    /// rendered_pcm，从而解除等待并自动开始/继续播放。
+    RebuildSnapshot,
+    /// 用户发起了新的播放请求（play_original 入口处发送）。
+    ///
+    /// 复位 `stopped_since_play`：完成命令的停止意图判定以"自**本次播放
+    /// 请求**以来"为准，而不是"自上一次 set_playing(true) 以来"。前台
+    /// 预渲染路径中 set_playing(true) 只发生在渲染完成时 —— 若请求本身
+    /// 不复位标志，用户此前任何一次停止（哪怕只是按了一次空格暂停）都会
+    /// 让所有后续预渲染完成被永久拒绝：标志唯一清除点是完成命令自身，而
+    /// 完成命令恰被它把关（意图死锁，表现为渲染完毕后完全无法播放）。
+    /// 命令按序处理：请求先入队、渲染窗口内的用户停止后入队，完成时
+    /// 标志仍能正确反映"渲染期间用户是否停止过"。
+    BeginPlayIntent,
+    /// 前台预渲染线程完成后的"应用时间线并开始播放"。
+    ///
+    /// 与"先 update_timeline 再 set_playing"两条独立命令的区别：本命令在
+    /// worker 内**原子地**检查"用户是否在渲染期间按过停止"——若是则只重建
+    /// 快照、不进入播放。两条独立命令存在竞态：停止命令插在渲染线程的
+    /// update_timeline 与 set_playing 之间时（Tauri 命令线程池并发 + 渲染
+    /// 线程独立推进），set_playing 仍会执行，播放会在用户明确停止后"复活"，
+    /// 播放光标随之跳回播放起点（后台预渲染负载下渲染窗口可达数秒，为
+    /// 反复播放/暂停/停止时跳变的根源之一）。
+    CompletePrerenderAndPlay {
+        timeline: TimelineState,
     },
     Stop,
     Shutdown,

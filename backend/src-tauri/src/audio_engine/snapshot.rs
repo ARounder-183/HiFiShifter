@@ -991,6 +991,9 @@ pub(crate) fn build_snapshot(
         duration_frames,
         track_ids: Arc::new(track_ids),
         clips: Arc::new(clips_out),
+        // 捕获构建时刻的渲染缓存代数：meter 线程据此判断"等待中的快照是否
+        // 落后于缓存"并请求重建（见 synth_clip_cache::RENDERED_CLIP_CACHE_GENERATION）。
+        render_cache_generation: crate::synth_clip_cache::render_cache_generation(),
     }
 }
 
@@ -1183,5 +1186,6 @@ pub(crate) fn build_snapshot_for_file(
             pan_curve_frame_period_ms: 5.0,
             needs_synthesis: false,
         }]),
+        render_cache_generation: crate::synth_clip_cache::render_cache_generation(),
     }
 }

@@ -86,6 +86,12 @@ pub struct AudioEngine {
     snapshot: Arc<ArcSwap<EngineSnapshot>>,
 
     is_playing: Arc<AtomicBool>,
+    /// "传输层原地等待渲染"标志（RT 回调动态判定）：后台渲染进行中遇到
+    /// 未渲染窗口（起播位置落在其中，或播放途中推进到其开头）时置位 ——
+    /// 保持播放态、位置冻结、静音输出，直到覆盖该窗口的 Clip 全部就绪
+    /// （后台渲染入库 + 快照重建）后自动开始/继续播放。就绪块 / 停止 /
+    /// 暂停判定清除。后台渲染线程据它决定是否重建快照解锁等待。
+    play_start_wait: Arc<AtomicBool>,
     target: Arc<Mutex<Option<String>>>,
     base_frames: Arc<AtomicU64>,
     position_frames: Arc<AtomicU64>,
@@ -105,6 +111,7 @@ impl Clone for AudioEngine {
             tx: self.tx.clone(),
             snapshot: self.snapshot.clone(),
             is_playing: self.is_playing.clone(),
+            play_start_wait: self.play_start_wait.clone(),
             target: self.target.clone(),
             base_frames: self.base_frames.clone(),
             position_frames: self.position_frames.clone(),
@@ -132,6 +139,7 @@ impl AudioEngine {
         let tx_for_worker = tx.clone();
 
         let is_playing = Arc::new(AtomicBool::new(false));
+        let play_start_wait = Arc::new(AtomicBool::new(false));
         let target = Arc::new(Mutex::new(None));
         let base_frames = Arc::new(AtomicU64::new(0));
         let position_frames = Arc::new(AtomicU64::new(0));
@@ -160,6 +168,7 @@ impl AudioEngine {
 
         let metro_for_thread = metro_for_worker;
         let is_playing_thread = is_playing.clone();
+        let play_start_wait_thread = play_start_wait.clone();
         let target_thread = target.clone();
         let base_frames_thread = base_frames.clone();
         let position_frames_thread = position_frames.clone();
@@ -175,6 +184,7 @@ impl AudioEngine {
             let meter_shutdown = meter_shutdown_for_thread.clone();
             let snapshot_for_meter = snapshot_for_thread.clone();
             let meter_bus = meter_bus_for_meter.clone();
+            let tx_for_meter = tx.clone();
             thread::spawn(move || {
                 // stderr logging, map rebuilds and event emission all live on
                 // this thread so the audio callback stays lock-free.
@@ -183,6 +193,9 @@ impl AudioEngine {
                 let mut last_bus_generation = u64::MAX;
                 let mut last_map_generation = u64::MAX;
                 let mut last_pending_log_sec = u64::MAX;
+                // 上一次记录的等待位置（去重等待日志：回调每个块都上报，
+                // 同一位置只记一次；位置变化 / 新一轮等待重新记录）。
+                let mut last_wait_log_pos = u64::MAX;
                 // 总线最后一次前进的时刻（播放中每块都前进）。
                 let mut last_bus_advance = Instant::now();
                 loop {
@@ -192,13 +205,28 @@ impl AudioEngine {
                     thread::sleep(Duration::from_millis(33));
 
                     // Drain RT-side reports and log them here, not in the callback.
-                    let auto_pause_pos = meter_bus.take_auto_pause_pos();
-                    if auto_pause_pos > 0 {
-                        log::warn!(
-                            "[mix] auto-paused at pos={} — pending clip encountered during background render",
-                            auto_pause_pos
-                        );
+                    let transport_wait_pos = meter_bus.take_transport_wait_pos();
+                    if transport_wait_pos > 0 {
+                        // ── 原地等待渲染的解除检查 ──────────────────────────
+                        // 快照携带构建时刻的渲染缓存代数；落后于当前缓存代数
+                        // 说明有新渲染结果尚未反映进快照（等待期间插入 /
+                        // 插入发生在等待开始之前皆覆盖）→ 请求 worker 重建
+                        // 快照。重建后新快照代数追平，检查自然停止 —— 精确
+                        // 触发、无轮询重建风暴。解除延迟 ≤ 一个 meter 周期
+                        // （33ms），等待中的音频本就静音，无感知。
+                        let snap = snapshot_for_meter.load_full();
+                        let cache_gen = crate::synth_clip_cache::render_cache_generation();
+                        if snap.render_cache_generation != cache_gen {
+                            let _ = tx_for_meter.send(EngineCommand::RebuildSnapshot);
+                        }
+                        if transport_wait_pos != last_wait_log_pos {
+                            log::warn!(
+                                "[mix] transport waiting for render at pos={} (snapshot gen={} cache gen={}) — staying frozen until ready",
+                                transport_wait_pos, snap.render_cache_generation, cache_gen
+                            );
+                        }
                     }
+                    last_wait_log_pos = transport_wait_pos;
                     let pending_pos = meter_bus.take_pending_pos();
                     if debug_pending && pending_pos > 0 {
                         let snap = snapshot_for_meter.load_full();
@@ -489,6 +517,7 @@ impl AudioEngine {
 
             // Clone atomics for the audio callback to avoid moving the originals.
             let is_playing_cb = is_playing_thread.clone();
+            let play_start_wait_cb = play_start_wait_thread.clone();
             let position_frames_cb = position_frames_thread.clone();
             let duration_frames_cb = duration_frames_thread.clone();
             let err_fn = |err| log_error_limited!("AudioEngine stream error: {err}");
@@ -510,6 +539,7 @@ impl AudioEngine {
                                             channels,
                                             &snapshot_for_cb,
                                             is_playing_cb.as_ref(),
+                                            play_start_wait_cb.as_ref(),
                                             position_frames_cb.as_ref(),
                                             duration_frames_cb.as_ref(),
                                             &mut scratch_mix,
@@ -550,6 +580,7 @@ impl AudioEngine {
                                             channels,
                                             &snapshot_for_cb,
                                             is_playing_cb.as_ref(),
+                                            play_start_wait_cb.as_ref(),
                                             position_frames_cb.as_ref(),
                                             duration_frames_cb.as_ref(),
                                             &mut scratch_mix,
@@ -590,6 +621,7 @@ impl AudioEngine {
                                             channels,
                                             &snapshot_for_cb,
                                             is_playing_cb.as_ref(),
+                                            play_start_wait_cb.as_ref(),
                                             position_frames_cb.as_ref(),
                                             duration_frames_cb.as_ref(),
                                             &mut scratch_mix,
@@ -632,6 +664,10 @@ impl AudioEngine {
             let mut last_timeline: Option<TimelineState> = None;
             let mut last_play_file: Option<(PathBuf, f64, String)> = None;
             let mut app_handle_for_worker: Option<tauri::AppHandle> = app_handle;
+            // "最近一次传输意图是否为用户停止"。handle_stop 置位、
+            // handle_set_playing(true) 复位；前台预渲染完成命令据此决定
+            // 是否进入播放（见 EngineCommand::CompletePrerenderAndPlay）。
+            let mut stopped_since_play = false;
 
             loop {
                 match rx.recv() {
@@ -640,6 +676,7 @@ impl AudioEngine {
                         let mut state = EngineWorkerState {
                             sr,
                             is_playing: &is_playing_thread,
+                            play_start_wait: &play_start_wait_thread,
                             target: &target_thread,
                             base_frames: &base_frames_thread,
                             position_frames: &position_frames_thread,
@@ -656,6 +693,7 @@ impl AudioEngine {
                             app_handle: app_handle_for_worker.clone(),
                             meter_state: &meter_state,
                             meter_generation: &meter_generation,
+                            stopped_since_play: &mut stopped_since_play,
                         };
                         match cmd {
                             EngineCommand::SetMetronome { config } => {
@@ -674,6 +712,15 @@ impl AudioEngine {
                             }
                             EngineCommand::UpdateTimeline(tl) => {
                                 handle_update_timeline(&mut state, tl)
+                            }
+                            EngineCommand::RebuildSnapshot => {
+                                handle_rebuild_snapshot(&mut state)
+                            }
+                            EngineCommand::BeginPlayIntent => {
+                                handle_begin_play_intent(&mut state)
+                            }
+                            EngineCommand::CompletePrerenderAndPlay { timeline } => {
+                                handle_complete_prerender_and_play(&mut state, timeline)
                             }
                             EngineCommand::StretchReady { key } => {
                                 handle_stretch_ready(&mut state, key)
@@ -706,6 +753,7 @@ impl AudioEngine {
             tx,
             snapshot,
             is_playing,
+            play_start_wait,
             target,
             base_frames,
             position_frames,
@@ -761,6 +809,20 @@ impl AudioEngine {
         let _ = self.tx.send(EngineCommand::UpdateTimeline(timeline));
     }
 
+    /// 前台预渲染完成：应用时间线；仅当用户未在渲染期间按过停止时进入播放
+    /// （见 [`EngineCommand::CompletePrerenderAndPlay`] 与
+    /// [`handle_complete_prerender_and_play`]）。
+    pub fn complete_prerender_and_play(&self, timeline: TimelineState) {
+        let _ = self.tx.send(EngineCommand::CompletePrerenderAndPlay { timeline });
+    }
+
+    /// 记录"新的播放请求"：复位停止意图标志（见
+    /// [`EngineCommand::BeginPlayIntent`]）。必须在派生前台渲染线程**之前**
+    /// 发送，使完成命令的判定窗口恰好覆盖本次播放请求。
+    pub fn begin_play_intent(&self) {
+        let _ = self.tx.send(EngineCommand::BeginPlayIntent);
+    }
+
     pub fn seek_sec(&self, sec: f64) {
         let _ = self.tx.send(EngineCommand::SeekSec { sec });
     }
@@ -805,6 +867,9 @@ impl AudioEngine {
         let dur = self.duration_frames.load(Ordering::Relaxed);
         AudioEngineStateSnapshot {
             is_playing: self.is_playing(),
+            // 原地等待渲染：is_playing=true 但引擎未推进（等待后台渲染完成
+            // 后自动开始/继续播放），前端轮询据此冻结光标、不做时延外推。
+            waiting_for_render: self.play_start_wait.load(Ordering::Relaxed),
             target: self
                 .target
                 .lock()
@@ -869,6 +934,9 @@ fn idle_track_meter_state(
 struct EngineWorkerState<'a> {
     sr: u32,
     is_playing: &'a Arc<AtomicBool>,
+    /// 播放起点等待渲染标志（RT 原子的 worker 侧引用，见
+    /// [`AudioEngine::play_start_wait`]）。
+    play_start_wait: &'a Arc<AtomicBool>,
     target: &'a Arc<Mutex<Option<String>>>,
     base_frames: &'a Arc<AtomicU64>,
     position_frames: &'a Arc<AtomicU64>,
@@ -886,12 +954,19 @@ struct EngineWorkerState<'a> {
     app_handle: Option<tauri::AppHandle>,
     meter_state: &'a Arc<Mutex<HashMap<String, TrackMeterValue>>>,
     meter_generation: &'a Arc<AtomicU64>,
+    /// "最近一次传输意图是否为用户停止"。handle_stop 置位、
+    /// handle_set_playing(true) 复位；前台预渲染完成命令据此决定是否进入
+    /// 播放，防止渲染窗口内的用户停止被完成路径的 set_playing 覆盖
+    /// （播放复活 + 播放光标跳回起点）。
+    stopped_since_play: &'a mut bool,
 }
 
 // ─── 命令处理函数 ─────────────────────────────────────────────────────────────
 
 fn handle_stop(s: &mut EngineWorkerState) {
     s.is_playing.store(false, Ordering::Relaxed);
+    // 清除起点等待：等待中的用户停止立即生效，不再自动起播。
+    s.play_start_wait.store(false, Ordering::Relaxed);
     *s.target.lock().unwrap_or_else(|e| e.into_inner()) = None;
     s.base_frames.store(0, Ordering::Relaxed);
     // position_frames 一并归零：停止后 base+position 不再代表可听位置。
@@ -900,6 +975,8 @@ fn handle_stop(s: &mut EngineWorkerState) {
     // 使下一次 stop 误判"曾处于播放中"并跳回锚点/0。
     s.position_frames.store(0, Ordering::Relaxed);
     *s.last_play_file = None;
+    // 记录"用户停止"意图：在途前台预渲染完成时不得据此重新进入播放。
+    *s.stopped_since_play = true;
     idle_track_meter_state(s.meter_state, s.meter_generation);
     // 播放停止时清空渲染线程传递的 cache_key 映射
     crate::synth_clip_cache::clear_pending_rendered_keys();
@@ -915,12 +992,57 @@ fn handle_seek_sec(s: &mut EngineWorkerState, sec: f64) {
 
 fn handle_set_playing(s: &mut EngineWorkerState, playing: bool, target: Option<String>) {
     s.is_playing.store(playing, Ordering::Relaxed);
+    // 等待标志由音频回调动态判定（未就绪块置位 / 就绪块清除），命令侧
+    // 一律复位：新播放会话 / 停止都从"非等待"开始，避免残留等待态。
+    s.play_start_wait.store(false, Ordering::Relaxed);
     *s.target.lock().unwrap_or_else(|e| e.into_inner()) = target;
     if playing {
+        // 显式播放命令刷新传输意图：此后的预渲染完成可以（重新）进入播放。
+        *s.stopped_since_play = false;
         reset_track_meter_state(s.meter_state, s.meter_generation);
     } else {
         idle_track_meter_state(s.meter_state, s.meter_generation);
     }
+}
+
+/// 新的播放请求：复位"用户停止"意图标志（见
+/// [`EngineCommand::BeginPlayIntent`] 的意图死锁说明）。
+fn handle_begin_play_intent(s: &mut EngineWorkerState) {
+    *s.stopped_since_play = false;
+}
+
+/// 最小快照重建：仅从 last_timeline 重建并换入快照，**不**执行
+/// handle_update_timeline 的播放暂停判定与 pitch 分析调度副作用 ——
+/// 它由后台渲染线程在"起点等待渲染"期间每个 clip 入库后高频调用，
+/// 必须保持幂等且轻量。等待中的音频回调借助新快照观察到就绪的
+/// rendered_pcm，解除等待并自动开始播放。
+fn handle_rebuild_snapshot(s: &mut EngineWorkerState) {
+    let Some(tl) = s.last_timeline.clone() else {
+        return;
+    };
+    let snap = build_snapshot(&tl, s.sr, s.cache, s.stretch_cache);
+    s.duration_frames
+        .store(snap.duration_frames, Ordering::Relaxed);
+    s.snapshot.store(Arc::new(snap));
+    idle_track_meter_state(s.meter_state, s.meter_generation);
+}
+
+/// 前台预渲染完成：应用时间线并（仅当用户未在渲染期间停止时）进入播放。
+///
+/// 原子性由 worker 命令队列保证：更新快照与播放决策在同一条命令内完成，
+/// 插在中间的用户停止不会被完成路径的 set_playing 覆盖。渲染期间用户
+/// seek 的位置也得以保留（完成路径不再强制回跳到渲染起始点）。
+/// 停止意图的判定窗口由 `BeginPlayIntent`（播放请求）开启 —— 此前的历史
+/// 停止（如上一次暂停）不参与判定。
+fn handle_complete_prerender_and_play(s: &mut EngineWorkerState, tl: TimelineState) {
+    handle_update_timeline(s, tl);
+    if *s.stopped_since_play {
+        debug_eprintln!(
+            "[engine] prerender completed after user stop — staying stopped (no ghost playback)"
+        );
+        return;
+    }
+    handle_set_playing(s, true, Some("original".to_string()));
 }
 
 fn track_params_affect_render(
@@ -1376,6 +1498,8 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
             any_need_render, track_pitch_edit_changed, bg_render
         );
         s.is_playing.store(false, Ordering::Relaxed);
+        // 播放被暂停判定终结：清除等待标志（等待仅在 bg 渲染进行中有效）。
+        s.play_start_wait.store(false, Ordering::Relaxed);
         if let Some(app) = s.app_handle.as_ref() {
             #[derive(Clone, serde::Serialize)]
             #[serde(rename_all = "camelCase")]
@@ -1596,9 +1720,9 @@ fn handle_play_file(s: &mut EngineWorkerState, path: PathBuf, offset_sec: f64, t
     let base = (offset_sec.max(0.0) * s.sr as f64).round().max(0.0) as u64;
     s.base_frames.store(base, Ordering::Relaxed);
     s.position_frames.store(0, Ordering::Relaxed);
-    s.is_playing.store(true, Ordering::Relaxed);
-    *s.target.lock().unwrap_or_else(|e| e.into_inner()) = Some(target);
-    reset_track_meter_state(s.meter_state, s.meter_generation);
+    // 经 handle_set_playing 进入播放：同步复位停止意图标志（直接 store
+    // is_playing 会绕过它，文件播放之后的前台预渲染完成会被历史停止误拒）。
+    handle_set_playing(s, true, Some(target));
 }
 
 // ─── 辅助函数 ───────────────────────────────────────────────────────────────
@@ -1937,8 +2061,10 @@ mod tests {
             duration_frames: 0,
             track_ids: Arc::new(vec![]),
             clips: Arc::new(vec![]),
+            render_cache_generation: 0,
         }));
         let is_playing = Arc::new(AtomicBool::new(false));
+        let play_start_wait = Arc::new(AtomicBool::new(false));
         let target = Arc::new(Mutex::new(None));
         let base_frames = Arc::new(AtomicU64::new(0));
         let position_frames = Arc::new(AtomicU64::new(0));
@@ -1947,10 +2073,12 @@ mod tests {
         let meter_generation = Arc::new(AtomicU64::new(0));
         let mut last_timeline = Some(timeline);
         let mut last_play_file = None;
+        let mut stopped_since_play = false;
 
         let mut worker = EngineWorkerState {
             sr: 44_100,
             is_playing: &is_playing,
+            play_start_wait: &play_start_wait,
             target: &target,
             base_frames: &base_frames,
             position_frames: &position_frames,
@@ -1967,6 +2095,7 @@ mod tests {
             app_handle: None,
             meter_state: &meter_state,
             meter_generation: &meter_generation,
+            stopped_since_play: &mut stopped_since_play,
         };
 
         handle_audio_ready(&mut worker, (PathBuf::from("E:/virtual/test.wav"), 44_100));
@@ -1978,5 +2107,115 @@ mod tests {
             job.algorithm,
             crate::time_stretch::StretchAlgorithm::SignalsmithStretch
         ));
+    }
+
+    /// 前台预渲染完成命令的停止意图判定（反复播放/停止时光标跳变与
+    /// "渲染完毕后无法播放"的后端根源，见 handle_complete_prerender_and_play）：
+    /// 1. 渲染期间无用户停止 → 完成命令进入播放；
+    /// 2. 渲染期间用户停止 → 完成命令保持停止，绝不复活播放；
+    /// 3. 历史停止后发起新播放请求（BeginPlayIntent）→ 完成命令恢复播放
+    ///    （意图死锁回归：请求不复位标志会让所有后续预渲染播放被永久拒绝）。
+    #[test]
+    fn complete_prerender_and_play_respects_user_stop() {
+        update_runtime_stretch_settings(UserStretchAlgorithm::Signalsmith, false, None, None);
+
+        let timeline = make_plain_stretch_timeline();
+        let (engine_tx, _engine_rx) = mpsc::channel::<EngineCommand>();
+        let (stretch_tx, _stretch_rx) = mpsc::channel();
+
+        let resources = ResourceManager::new(engine_tx.clone());
+        let cache = resources.cache().clone();
+        let stretch_cache = Arc::new(Mutex::new(ByteBudgetCache::new(8, u64::MAX)));
+        let stretch_inflight = Arc::new(Mutex::new(HashSet::new()));
+        let snapshot = Arc::new(ArcSwap::from_pointee(EngineSnapshot::empty(44_100)));
+        let is_playing = Arc::new(AtomicBool::new(false));
+        let play_start_wait = Arc::new(AtomicBool::new(false));
+        let target = Arc::new(Mutex::new(None));
+        let base_frames = Arc::new(AtomicU64::new(0));
+        let position_frames = Arc::new(AtomicU64::new(0));
+        let duration_frames = Arc::new(AtomicU64::new(0));
+        let meter_state = Arc::new(Mutex::new(HashMap::new()));
+        let meter_generation = Arc::new(AtomicU64::new(0));
+        let mut last_timeline = Some(timeline.clone());
+        let mut last_play_file = None;
+        let mut stopped_since_play = false;
+
+        let mut worker = EngineWorkerState {
+            sr: 44_100,
+            is_playing: &is_playing,
+            play_start_wait: &play_start_wait,
+            target: &target,
+            base_frames: &base_frames,
+            position_frames: &position_frames,
+            duration_frames: &duration_frames,
+            snapshot: &snapshot,
+            cache: &cache,
+            stretch_cache: &stretch_cache,
+            stretch_inflight: &stretch_inflight,
+            stretch_tx: &stretch_tx,
+            resources: &resources,
+            tx: &engine_tx,
+            last_timeline: &mut last_timeline,
+            last_play_file: &mut last_play_file,
+            app_handle: None,
+            meter_state: &meter_state,
+            meter_generation: &meter_generation,
+            stopped_since_play: &mut stopped_since_play,
+        };
+
+        // 场景 1：正常播放 → 渲染完成 → 应进入播放（target=original）。
+        handle_complete_prerender_and_play(&mut worker, timeline.clone());
+        assert!(
+            is_playing.load(std::sync::atomic::Ordering::Relaxed),
+            "completion without a user stop must start playback"
+        );
+        assert_eq!(
+            *target.lock().unwrap(),
+            Some("original".to_string()),
+            "completion playback targets the original transport"
+        );
+
+        // 场景 2：用户在渲染窗口内停止 → 后续完成命令不得复活播放。
+        handle_stop(&mut worker);
+        assert!(!is_playing.load(std::sync::atomic::Ordering::Relaxed));
+        handle_complete_prerender_and_play(&mut worker, timeline.clone());
+        assert!(
+            !is_playing.load(std::sync::atomic::Ordering::Relaxed),
+            "completion after a user stop must stay stopped (no ghost playback)"
+        );
+        assert_eq!(*target.lock().unwrap(), None);
+
+        // 场景 3（意图死锁回归）：停止后用户再次发起播放请求
+        // （BeginPlayIntent 复位停止意图）→ 此后的完成命令必须恢复进入
+        // 播放。旧实现在请求时不复位标志，而前台预渲染路径的
+        // set_playing(true) 只发生在完成命令里 —— 标志唯一清除点恰是
+        // 被它把关的命令，任何一次"先停止后播放"都会让后续所有预渲染
+        // 播放永久被拒（渲染完毕后完全无法播放）。
+        handle_begin_play_intent(&mut worker);
+        handle_complete_prerender_and_play(&mut worker, timeline.clone());
+        assert!(
+            is_playing.load(std::sync::atomic::Ordering::Relaxed),
+            "a new play request re-arms the completion path after a stop"
+        );
+        assert_eq!(*target.lock().unwrap(), Some("original".to_string()));
+
+        // 场景 4：播放请求之后、完成之前的用户停止仍然拦截（幽灵播放防护
+        // 不因请求复位而失效）。
+        handle_stop(&mut worker);
+        handle_complete_prerender_and_play(&mut worker, timeline.clone());
+        assert!(
+            !is_playing.load(std::sync::atomic::Ordering::Relaxed),
+            "a stop between the play request and completion still blocks playback"
+        );
+
+        // 场景 5：停止后用户再次显式播放（set_playing=true）→ 播放意图
+        // 刷新，此后的完成命令恢复"可以进入播放"的语义。
+        handle_set_playing(&mut worker, true, Some("original".to_string()));
+        assert!(is_playing.load(std::sync::atomic::Ordering::Relaxed));
+        handle_complete_prerender_and_play(&mut worker, timeline.clone());
+        assert!(
+            is_playing.load(std::sync::atomic::Ordering::Relaxed),
+            "an explicit play after the stop re-arms the completion path"
+        );
     }
 }

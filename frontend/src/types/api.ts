@@ -300,6 +300,9 @@ export interface SynthesizeResult {
 export interface PlaybackStateResult {
     ok: true;
     is_playing: boolean;
+    /** "传输层原地等待渲染"：is_playing=true 但引擎位置冻结（等待后台渲染
+     * 完成后自动开始/继续播放）。旧后端不带此字段。 */
+    waiting_for_render?: boolean;
     target: string | null;
     base_sec: number;
     position_sec: number;

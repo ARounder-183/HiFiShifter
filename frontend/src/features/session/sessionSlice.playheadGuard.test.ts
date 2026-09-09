@@ -698,3 +698,347 @@ test("features/session/sessionSlice.playheadGuard.test.ts polls are refused whil
         assertEqual(next.playheadSec, 50.09, "after the render ends polls apply again");
     }
 });
+
+/**
+ * 阻塞式前台预渲染镜像按 target 隔离：前台（target="original"）与后台
+ * （target="background"）渲染线程并发发射 playback_rendering_state 事件，
+ * 单一 active 布尔会被互相覆盖 —— 后台渲染的完成事件若能关闭前台拒采
+ * 窗口，渲染期间派发的陈旧轮询响应就会在窗口内溜进 reducer（光标跳变）。
+ * 镜像以 blocking 字段（App.tsx 按 target 分 ref 跟踪）单独驱动拒采。
+ */
+test("features/session/sessionSlice.playheadGuard.test.ts background render events cannot close the blocking prerender window", async () => {
+    function assertEqual(actual: unknown, expected: unknown, label: string): void {
+        if (actual !== expected) {
+            throw new Error(`${label}: expected ${String(expected)}, received ${String(actual)}`);
+        }
+    }
+
+    function playingState(playheadSec: number) {
+        const base = reducer(undefined, { type: "@@INIT" }) as any;
+        return {
+            ...base,
+            playheadSec,
+            runtime: {
+                ...base.runtime,
+                isPlaying: true,
+                playbackPositionSec: playheadSec,
+            },
+        };
+    }
+
+    const syncPayload = (isPlaying: boolean, positionSec: number) =>
+        ({
+            ok: true,
+            is_playing: isPlaying,
+            target: "original",
+            base_sec: 0,
+            position_sec: positionSec,
+            duration_sec: 200,
+        }) as any;
+
+    const syncArgs = { epoch: 0, dispatchedAtMs: performance.now() };
+
+    // 前台预渲染 active 期间，后台渲染完成（active=false, target=background）：
+    // 拒采窗口必须保持关闭，陈旧"未播放"采样不得应用。
+    {
+        const started = reducer(
+            playingState(50),
+            setPlaybackRenderingState({ active: true, target: "original", blocking: true }),
+        );
+        const bgDone = reducer(
+            started,
+            setPlaybackRenderingState({ active: false, target: "background", blocking: true }),
+        );
+        const next = reducer(
+            bgDone,
+            syncPlaybackState.fulfilled(syncPayload(false, 50), "req", syncArgs),
+        );
+        assertEqual(
+            next.runtime.isPlaying,
+            true,
+            "background completion keeps the blocking window closed",
+        );
+        assertEqual(
+            next.playheadSec,
+            50,
+            "stale poll during blocking prerender never moves the playhead",
+        );
+    }
+
+    // 前台预渲染完成（active=false, target=original）：窗口关闭，恢复采信。
+    {
+        const started = reducer(
+            playingState(50),
+            setPlaybackRenderingState({ active: true, target: "original", blocking: true }),
+        );
+        const fgDone = reducer(
+            started,
+            setPlaybackRenderingState({ active: false, target: "original", blocking: false }),
+        );
+        const next = reducer(
+            fgDone,
+            syncPlaybackState.fulfilled(syncPayload(false, 50.09), "req", syncArgs),
+        );
+        assertEqual(next.playheadSec, 50.09, "after the blocking render ends polls apply again");
+    }
+
+    // 兼容路径：未携带 blocking 的旧载荷按 active+target 推导
+    //（active + target="original" → 拒采窗口开启）。
+    {
+        const started = reducer(
+            playingState(50),
+            setPlaybackRenderingState({ active: true, target: "original" }),
+        );
+        const next = reducer(
+            started,
+            syncPlaybackState.fulfilled(syncPayload(false, 50), "req", syncArgs),
+        );
+        assertEqual(next.playheadSec, 50, "legacy payload still opens the blocking window");
+    }
+});
+
+/**
+ * 播放启动归零陈旧引擎位置：后台预渲染自动暂停（轮询"播放→停止跃迁"）把
+ * runtime.playbackPositionSec 留在冻结位置（>0，与 stop_audio 路径的归零
+ * 不同）。它驱动 isTransportAdvancing 代理（isPlaying && positionSec > ε），
+ * 若再次播放时不清零，fulfilled 翻转 isPlaying 的瞬间 advancing 即为真 ——
+ * 视觉插值从陈旧锚点按 1x 外推整个暂停时长，直到首个轮询采样才弹回
+ * （反复播放/暂停时的光标跳变）。fulfilled 必须把陈旧位置归零，让
+ * advancing 保持 false、光标原地等待首个新鲜采样。
+ */
+test("features/session/sessionSlice.playheadGuard.test.ts starting playback clears the stale engine position report", async () => {
+    function assertEqual(actual: unknown, expected: unknown, label: string): void {
+        if (actual !== expected) {
+            throw new Error(`${label}: expected ${String(expected)}, received ${String(actual)}`);
+        }
+    }
+
+    function autoPausedState(playheadSec: number) {
+        const base = reducer(undefined, { type: "@@INIT" }) as any;
+        return {
+            ...base,
+            playheadSec,
+            runtime: {
+                ...base.runtime,
+                isPlaying: false,
+                // 自动暂停路径的残留：冻结位置 > 0（stop 路径会归零，
+                // 轮询跃迁路径不会）。
+                playbackPositionSec: playheadSec,
+            },
+        };
+    }
+
+    const next = reducer(
+        autoPausedState(50.09),
+        playOriginal.fulfilled(
+            { ok: true, clipId: null, anchorSec: 50.09, playing: "original" },
+            "req",
+            undefined,
+        ),
+    );
+    assertEqual(next.runtime.isPlaying, true, "play flips the transport state");
+    assertEqual(
+        next.runtime.playbackPositionSec,
+        0,
+        "stale position is cleared so visual advancing stays off until the first poll",
+    );
+    assertEqual(
+        next.playheadSec,
+        50.09,
+        "clearing the position report never moves the playhead itself",
+    );
+});
+
+/**
+ * 原地等待渲染（Case A + Case B 统一）：后台渲染进行中遇到未渲染窗口
+ * （起播位置落在其中，或播放途中推进到其开头）时，引擎保持 is_playing=true
+ * 但位置冻结。轮询采样携带 waiting_for_render=true —— reducer 必须保持播放
+ * 态、冻结光标（不做时延外推、不改写 playheadSec/playbackPositionSec）；
+ * 渲染完成后的首个前进采样正常应用并清除等待标志。
+ */
+test("features/session/sessionSlice.playheadGuard.test.ts transport waits in place for render and auto-resumes when ready", async () => {
+    function assertEqual(actual: unknown, expected: unknown, label: string): void {
+        if (actual !== expected) {
+            throw new Error(`${label}: expected ${String(expected)}, received ${String(actual)}`);
+        }
+    }
+    function assertNear(actual: unknown, expected: number, label: string, tolSec = 0.05): void {
+        const value = Number(actual);
+        if (!Number.isFinite(value) || Math.abs(value - expected) > tolSec) {
+            throw new Error(
+                `${label}: expected ~${String(expected)} (±${tolSec}), received ${String(actual)}`,
+            );
+        }
+    }
+
+    // 起播位置落在未渲染 Clip 内（前一场自动暂停残留位置 50.09）。
+    const base = reducer(undefined, { type: "@@INIT" }) as any;
+    const started = reducer(
+        {
+            ...base,
+            playheadSec: 50.09,
+            runtime: {
+                ...base.runtime,
+                isPlaying: false,
+                playbackPositionSec: 50.09,
+            },
+        },
+        playOriginal.fulfilled(
+            { ok: true, clipId: null, anchorSec: 50.09, playing: "original" },
+            "req",
+            undefined,
+        ),
+    );
+    assertEqual(started.runtime.isPlaying, true, "play starts");
+    assertEqual(started.runtime.playbackPositionSec, 0, "position report zeroed at play start");
+
+    const syncPayload = (isPlaying: boolean, positionSec: number, waiting: boolean) =>
+        ({
+            ok: true,
+            is_playing: isPlaying,
+            waiting_for_render: waiting,
+            target: "original",
+            base_sec: 0,
+            position_sec: positionSec,
+            duration_sec: 200,
+        }) as any;
+
+    // 等待采样 #1：引擎位置冻结在起播点（50.02 仅为采样值，位置不前进）。
+    const waiting = reducer(
+        started,
+        syncPlaybackState.fulfilled(syncPayload(true, 50.02, true), "req", {
+            epoch: started._transportEpoch,
+            dispatchedAtMs: performance.now(),
+        }),
+    );
+    assertEqual(
+        waiting.runtime.playbackWaitingForRender,
+        true,
+        "waiting sample sets the waiting flag",
+    );
+    assertEqual(waiting.runtime.isPlaying, true, "waiting keeps the playing state");
+    assertEqual(waiting.playheadSec, 50.09, "waiting freezes the playhead at the start position");
+    assertEqual(
+        waiting.runtime.playbackPositionSec,
+        0,
+        "waiting keeps the position report frozen so visual advancing stays off",
+    );
+
+    // 等待采样 #2（多个等待周期）：继续冻结，不得漂移。
+    const waiting2 = reducer(
+        waiting,
+        syncPlaybackState.fulfilled(syncPayload(true, 50.02, true), "req", {
+            epoch: waiting._transportEpoch,
+            dispatchedAtMs: performance.now(),
+        }),
+    );
+    assertEqual(waiting2.playheadSec, 50.09, "repeated waiting samples never drift the playhead");
+
+    // 渲染完成：首个前进采样正常应用（含时延外推）并清除等待标志。
+    const resumed = reducer(
+        waiting2,
+        syncPlaybackState.fulfilled(syncPayload(true, 50.09, false), "req", {
+            epoch: waiting2._transportEpoch,
+            dispatchedAtMs: performance.now(),
+        }),
+    );
+    assertEqual(
+        resumed.runtime.playbackWaitingForRender,
+        false,
+        "resuming sample clears the waiting flag",
+    );
+    assertEqual(resumed.runtime.isPlaying, true, "resume keeps playing");
+    assertNear(resumed.playheadSec, 50.09, "resume advances the playhead from the frozen position");
+    assertNear(resumed.runtime.playbackPositionSec, 50.09, "resume adopts the engine position");
+});
+
+/**
+ * Case A 进入等待（播放途中推进到未渲染 Clip 开头）：进入等待前
+ * playbackPositionSec 停留在前进采样值（>0）。等待采样必须归零它 ——
+ * 否则 isTransportAdvancing 代理保持 true，视觉插值 RAF 以 1x 从冻结前
+ * 锚点外推整个等待时长（无界前漂），恢复采样到达时光标大幅回跳
+ * （往复跳动的根源）。等待期间的光标冻结在当前视觉位置不动。
+ */
+test("features/session/sessionSlice.playheadGuard.test.ts case-a wait zeroes the advancing position and freezes the playhead", async () => {
+    function assertEqual(actual: unknown, expected: unknown, label: string): void {
+        if (actual !== expected) {
+            throw new Error(`${label}: expected ${String(expected)}, received ${String(actual)}`);
+        }
+    }
+    function assertNear(actual: unknown, expected: number, label: string, tolSec = 0.05): void {
+        const value = Number(actual);
+        if (!Number.isFinite(value) || Math.abs(value - expected) > tolSec) {
+            throw new Error(
+                `${label}: expected ~${String(expected)} (±${tolSec}), received ${String(actual)}`,
+            );
+        }
+    }
+
+    const base = reducer(undefined, { type: "@@INIT" }) as any;
+    const syncPayload = (isPlaying: boolean, positionSec: number, waiting: boolean) =>
+        ({
+            ok: true,
+            is_playing: isPlaying,
+            waiting_for_render: waiting,
+            target: "original",
+            base_sec: 0,
+            position_sec: positionSec,
+            duration_sec: 200,
+        }) as any;
+    const syncArgs = { epoch: 0, dispatchedAtMs: performance.now() };
+
+    // 播放中正常前进（positionSec=50.6 已应用）。
+    const playing = reducer(
+        {
+            ...base,
+            playheadSec: 50.5,
+            runtime: { ...base.runtime, isPlaying: true, playbackPositionSec: 50.5 },
+        },
+        syncPlaybackState.fulfilled(syncPayload(true, 50.6, false), "req", syncArgs),
+    );
+    assertEqual(playing.runtime.playbackPositionSec, 50.6, "playing poll advances position");
+
+    // 引擎冻结（等待采样）：positionSec 归零、标志置位、光标原地冻结。
+    const waited = reducer(
+        playing,
+        syncPlaybackState.fulfilled(syncPayload(true, 50.62, true), "req", syncArgs),
+    );
+    assertEqual(waited.runtime.playbackWaitingForRender, true, "waiting sample sets the flag");
+    assertEqual(
+        waited.runtime.playbackPositionSec,
+        0,
+        "waiting zeroes the advancing position so the visual interpolation stops",
+    );
+    assertNear(waited.playheadSec, 50.6, "waiting freezes the playhead in place", 0.001);
+    assertEqual(waited.runtime.isPlaying, true, "waiting keeps the playing state");
+
+    // 恢复采样：等待标志清除、光标从冻结位置继续推进。
+    const resumed = reducer(
+        waited,
+        syncPlaybackState.fulfilled(syncPayload(true, 50.62, false), "req", syncArgs),
+    );
+    assertEqual(resumed.runtime.playbackWaitingForRender, false, "resume clears the flag");
+    assertNear(resumed.playheadSec, 50.62, "resume advances from the frozen position");
+
+    // 竞态采样（等待标志翻转窗口内的 waiting=false 采样）之后紧跟等待采样：
+    // 冻结必须恢复（positionSec 重新归零）。
+    const raced = reducer(
+        resumed,
+        syncPlaybackState.fulfilled(syncPayload(true, 50.63, false), "req", syncArgs),
+    );
+    const refrozen = reducer(
+        raced,
+        syncPlaybackState.fulfilled(syncPayload(true, 50.63, true), "req", syncArgs),
+    );
+    assertEqual(
+        refrozen.runtime.playbackWaitingForRender,
+        true,
+        "re-entering wait re-sets the flag",
+    );
+    assertEqual(
+        refrozen.runtime.playbackPositionSec,
+        0,
+        "re-entering wait re-zeroes the position",
+    );
+    assertEqual(refrozen.playheadSec, raced.playheadSec, "re-entering wait freezes in place");
+});

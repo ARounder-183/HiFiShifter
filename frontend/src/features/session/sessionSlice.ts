@@ -444,6 +444,16 @@ export interface SessionState {
      */
     playbackRenderingActive: boolean;
     playbackRenderingTarget: string | null;
+    /**
+     * 阻塞式前台预渲染（target="original"）的独立活跃镜像。
+     *
+     * 与 playbackRenderingActive（任意渲染，驱动状态栏）分离的原因：前台与
+     * 后台渲染线程会并发发射 playback_rendering_state 事件，单一镜像会被
+     * 互相覆盖 —— 后台渲染的 active=false 完成事件会提前关闭前台预渲染的
+     * 拒采窗口，让渲染期间派发的陈旧轮询响应溜进 reducer（光标跳变）。
+     * 由 App.tsx 的事件监听按 target 分 ref 跟踪后一并派发。
+     */
+    playbackBlockingRenderActive: boolean;
 
     // Monotonic bump token for invalidating parameter curve caches.
     // - Not included in undo/redo snapshots.
@@ -526,6 +536,12 @@ export interface SessionState {
         audioLoaded: boolean;
         hasSynthesized: boolean;
         isPlaying: boolean;
+        /** "传输层原地等待渲染"：isPlaying=true 但引擎位置冻结（后台渲染
+         * 进行中遇到未渲染窗口——起播位置落在其中，或播放途中推进到其
+         * 开头——保持播放态静音等待，就绪后自动开始/继续播放）。轮询据此
+         * 跳过外推、冻结播放光标；视觉层的 isTransportAdvancing 代理经由
+         * 播放启动时的 positionSec 归零自然为 false，无需额外接线。 */
+        playbackWaitingForRender: boolean;
         playbackTarget: string | null;
         playbackPositionSec: number;
         playbackDurationSec: number;
@@ -1915,6 +1931,7 @@ const initialState: SessionState = {
     autoBackgroundRender: true,
     playbackRenderingActive: false,
     playbackRenderingTarget: null,
+    playbackBlockingRenderActive: false,
 
     paramsEpoch: 0,
     playbackRateVersion: 0,
@@ -1974,6 +1991,7 @@ const initialState: SessionState = {
         audioLoaded: false,
         hasSynthesized: false,
         isPlaying: false,
+        playbackWaitingForRender: false,
         playbackTarget: null,
         playbackPositionSec: 0,
         playbackDurationSec: 0,
@@ -2395,13 +2413,22 @@ const sessionSlice = createSlice({
         toggleAutoBackgroundRender(state) {
             state.autoBackgroundRender = !state.autoBackgroundRender;
         },
-        /** 镜像后端 `playback_rendering_state` 事件的 active/target（进度走 App 本地状态）。 */
+        /** 镜像后端 `playback_rendering_state` 事件的 active/target（进度走 App 本地状态）。
+         *  `blocking` 为阻塞式前台预渲染（target="original"）的独立镜像；缺省时按
+         *  active+target 推导（测试夹具与旧调用方的兼容路径）。 */
         setPlaybackRenderingState(
             state,
-            action: PayloadAction<{ active: boolean; target: string | null }>,
+            action: PayloadAction<{
+                active: boolean;
+                target: string | null;
+                blocking?: boolean;
+            }>,
         ) {
             state.playbackRenderingActive = action.payload.active;
             state.playbackRenderingTarget = action.payload.target;
+            state.playbackBlockingRenderActive =
+                action.payload.blocking ??
+                (action.payload.active && action.payload.target === "original");
         },
         setVisibleReferenceRootTrackIds(state, action: PayloadAction<string[]>) {
             state.visibleReferenceRootTrackIds = Array.from(
@@ -3018,6 +3045,7 @@ const sessionSlice = createSlice({
                         audioLoaded: payload.audio_loaded,
                         hasSynthesized: payload.has_synthesized,
                         isPlaying: nextIsPlaying,
+                        playbackWaitingForRender: false,
                         playbackTarget: payload.playback_target ?? null,
                         playbackPositionSec: state.runtime.playbackPositionSec,
                         playbackDurationSec: state.runtime.playbackDurationSec,
@@ -3748,6 +3776,18 @@ const sessionSlice = createSlice({
                 const ok = Boolean(payload.ok);
                 state.runtime.isPlaying = ok;
                 state.runtime.playbackTarget = ok ? "original" : null;
+                // 新播放会话：清除上一场遗留的"起点等待"标志（引擎侧由
+                // set_playing 同步重置，此处保持两侧一致）。
+                state.runtime.playbackWaitingForRender = false;
+                // 新一次播放会话开始：引擎位置报告（playbackPositionSec）
+                // 已是上一场播放/自动暂停的陈旧残留，必须归零。它驱动
+                // isTransportAdvancing 代理（isPlaying && positionSec > ε），
+                // 若保留旧值， fulfilled 翻转 isPlaying 的瞬间 advancing 即为
+                // 真 —— 视觉插值从陈旧锚点按 1x 外推整个暂停时长，直到首个
+                // 轮询采样到达才弹回（后台预渲染自动暂停后再次播放时的
+                // 典型光标跳变）。归零后 advancing 保持 false，光标原地等待
+                // 首个轮询采样建立新锚点。
+                state.runtime.playbackPositionSec = 0;
                 state.playbackClipId = ok ? (payload.clipId ?? null) : null;
                 // Store the playhead position at which playback started,
                 // so Play/Stop can restore it.
@@ -3814,6 +3854,9 @@ const sessionSlice = createSlice({
                     state.playheadSec = Math.max(0, payload.stopped_at_sec);
                 }
                 state.runtime.isPlaying = false;
+                // 等待中的用户停止立即生效：清除"起点等待"标志（引擎侧
+                // handle_stop 同步清除，此处保持两侧一致）。
+                state.runtime.playbackWaitingForRender = false;
                 state.runtime.playbackTarget = null;
                 state.runtime.playbackPositionSec = 0;
                 state.runtime.playbackDurationSec = 0;
@@ -3836,6 +3879,7 @@ const sessionSlice = createSlice({
                 const payload = action.payload as {
                     ok?: boolean;
                     is_playing?: boolean;
+                    waiting_for_render?: boolean;
                     target?: string | null;
                     base_sec?: number;
                     position_sec?: number;
@@ -3852,7 +3896,9 @@ const sessionSlice = createSlice({
                 // 迟到的"未播放"采样（纪元未变、乱序防护拦不住）会经跃迁
                 // 分支把光标拽回播放起点、掐灭 isPlaying 并让轮询停摆 ——
                 // 光标卡死而音频继续播。
-                if (state.playbackRenderingActive && state.playbackRenderingTarget === "original") {
+                // 注意读取的是 playbackBlockingRenderActive（按 target 隔离
+                // 的前台渲染镜像）：后台渲染的完成事件不得提前关闭本窗口。
+                if (state.playbackBlockingRenderActive) {
                     return;
                 }
                 // 乱序防护：轮询在派发时携带当时的传输纪元，响应到达时若纪元
@@ -3871,6 +3917,31 @@ const sessionSlice = createSlice({
                 const nextTarget = payload.target ?? null;
                 const nextPositionSec = payload.position_sec ?? 0;
                 const nextDurationSec = payload.duration_sec ?? 0;
+                // "传输层原地等待渲染"（Case A + Case B 统一）：后台渲染进行中
+                // 遇到未渲染窗口（起播位置落在其中，或播放途中推进到其开头）
+                // 时引擎保持 is_playing=true 但位置冻结，等待渲染完成后自动
+                // 开始/继续播放。旧后端不带此字段 → 视为 false。
+                const nextWaitingForRender = nextIsPlaying && Boolean(payload.waiting_for_render);
+
+                // 原地等待采样：保持播放态、光标冻结 —— 不做时延外推（位置
+                // 并未前进，外推会让光标按 IPC 时延缓慢漂移）、不改写
+                // playheadSec，并**归零 playbackPositionSec**：它是
+                // isTransportAdvancing 代理（isPlaying && positionSec > ε）的
+                // 输入，Case A 进入等待时它停留在冻结前最后一个前进采样值
+                // （>0）—— 不归零会让视觉插值 RAF 以 1x 从冻结前锚点外推
+                // 整个等待时长（无界前漂），恢复采样到达时光标大幅回跳
+                // （往复跳动的根源）。归零后 advancing 翻 false、RAF 停止，
+                // 光标冻结在当前视觉位置；渲染完成后的首个前进采样经正常
+                // 分支以新鲜锚点恢复推进。
+                if (nextWaitingForRender) {
+                    if (!state.runtime.playbackWaitingForRender) {
+                        state.runtime.playbackWaitingForRender = true;
+                    }
+                    if (state.runtime.playbackPositionSec !== 0) {
+                        state.runtime.playbackPositionSec = 0;
+                    }
+                    return;
+                }
 
                 // 采样外推：payload 的 base+position 是"后端执行命令那一刻"
                 // 的引擎位置；从派发到本 reducer 处理（≈IPC 到达）的往返时延
@@ -3915,6 +3986,7 @@ const sessionSlice = createSlice({
                 const shouldUpdatePlaybackFields =
                     nextIsPlaying !== state.runtime.isPlaying ||
                     nextTarget !== state.runtime.playbackTarget ||
+                    state.runtime.playbackWaitingForRender ||
                     Math.abs(nextPositionSec - state.runtime.playbackPositionSec) > EPS_SEC ||
                     Math.abs(nextDurationSec - state.runtime.playbackDurationSec) > EPS_SEC ||
                     Math.abs(nextplayheadSec - state.playheadSec) > EPS_SEC;
@@ -3934,6 +4006,10 @@ const sessionSlice = createSlice({
 
                 state.runtime.isPlaying = nextIsPlaying;
                 state.runtime.playbackTarget = nextTarget;
+                // 走到正常应用分支说明已不在"起点等待渲染"状态（等待采样在
+                // 上游被拦截）：清除标志。首个前进采样同时携带新位置与时延
+                // 外推，视觉插值以新鲜锚点从起播位置自然恢复推进。
+                state.runtime.playbackWaitingForRender = false;
                 state.runtime.playbackPositionSec = nextPositionSec;
                 state.runtime.playbackDurationSec = nextDurationSec;
 

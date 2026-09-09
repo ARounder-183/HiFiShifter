@@ -62,6 +62,24 @@ export const fetchTimeline = createAsyncThunk("session/fetchTimeline", async () 
     return webApi.getTimelineState();
 });
 
+// 传输命令串行化链：Tauri 命令在线程池上并发执行，快速连续的
+// 播放/停止/seek（播放停止连打）若不排序，后端可能以与派发相反的顺序
+// 处理 stop_audio 与 play_original（例如 stop 落在新 play 之后把刚启动的
+// 引擎掐灭），前端传输状态与引擎随之分裂。与 metronomeInvokeChain 同构：
+// 每个传输 thunk 的后端调用序列排队执行，派发顺序 = 执行顺序。
+// 响应侧的乱序防护（_transportEpoch）依然保留 —— 它兜底 IPC 延迟导致的
+// 迟到响应，两者互补。
+let transportInvokeChain: Promise<void> = Promise.resolve();
+
+function enqueueTransportCommand<T>(run: () => Promise<T>): Promise<T> {
+    const result = transportInvokeChain.then(run, run);
+    transportInvokeChain = result.then(
+        () => undefined,
+        () => undefined,
+    );
+    return result;
+}
+
 export const stopAudioPlayback = createAsyncThunk(
     "session/stopAudioPlayback",
     async (options: { restoreAnchor?: boolean } | void, { getState }) => {
@@ -75,23 +93,29 @@ export const stopAudioPlayback = createAsyncThunk(
         // 只 seek 过就按 Stop 跳到 0 等光标跳变）。
         const wasPlaying = Boolean(state.session._stopInterruptedPlayback);
         const anchorSec = state.session.playbackAnchorSec;
-        const result = await webApi.stopAudio();
-        // Only restore when this stop action actually interrupted active playback.
-        if (restoreAnchor && wasPlaying && anchorSec !== undefined && anchorSec !== null) {
-            await webApi.setTransport({ playheadSec: anchorSec });
-        }
+        // stop_audio 与其后的锚点回写 set_transport 必须作为单个原子序列
+        // 入链：中间插入的 play/seek 会把锚点回写排到新播放之后，覆盖新
+        // 播放的起始位置（光标跳变）。
+        const result = await enqueueTransportCommand(async () => {
+            const stopResult = await webApi.stopAudio();
+            // Only restore when this stop action actually interrupted active playback.
+            if (restoreAnchor && wasPlaying && anchorSec !== undefined && anchorSec !== null) {
+                await webApi.setTransport({ playheadSec: anchorSec });
+            }
+            return stopResult;
+        });
         return { ...result, restoreAnchor, wasPlaying, anchorSec };
     },
 );
 
 export const seekPlayhead = createAsyncThunk("session/seekPlayhead", async (sec: number) => {
-    return webApi.setTransport({ playheadSec: sec });
+    return enqueueTransportCommand(() => webApi.setTransport({ playheadSec: sec }));
 });
 
 export const updateTransportBpm = createAsyncThunk(
     "session/updateTransportBpm",
     async (bpm: number) => {
-        return webApi.setTransport({ bpm });
+        return enqueueTransportCommand(() => webApi.setTransport({ bpm }));
     },
 );
 
@@ -125,8 +149,13 @@ export const playOriginal = createAsyncThunk("session/playOriginal", async (_, {
     const state = getState() as { session: SessionState };
     const anchorSec = state.session.playheadSec;
     // Ensure backend transport is in sync before starting playback.
-    await webApi.setTransport({ playheadSec: anchorSec });
-    const result = await webApi.playOriginal(0);
+    // set_transport 与 play_original 作为单个原子序列入链（见
+    // transportInvokeChain）：两者之间插入的 stop_audio 会把引擎停在新播放
+    // 的起始位置上，前端却按"已播放"处理。
+    const result = await enqueueTransportCommand(async () => {
+        await webApi.setTransport({ playheadSec: anchorSec });
+        return webApi.playOriginal(0);
+    });
     return {
         ...result,
         clipId: null,
