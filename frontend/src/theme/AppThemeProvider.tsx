@@ -195,16 +195,17 @@ export function AppThemeProvider({ children }: PropsWithChildren) {
         }
     }
 
-    /* ── 副作用：同步 data-theme & font CSS variable ── */
-    useEffect(() => {
-        document.documentElement.dataset.theme = mode;
-    }, [mode]);
-
-    useEffect(() => {
-        document.documentElement.style.setProperty("--qt-font-family", fontFamily);
-        document.documentElement.style.setProperty("--default-font-family", fontFamily);
-        document.body.style.fontFamily = fontFamily;
-    }, [fontFamily]);
+    /* ── DOM 主题态同步（渲染期写入，幂等） ── */
+    // 必须在 render 期写入而不是 effect：React 的 layout effect 自底向上
+    // 冲刷，时间线画布等后代组件在"切主题当帧重绘"的 useLayoutEffect 会先
+    // 于本组件的任何 effect 执行 —— 若延迟到 effect 里写 data-theme，画布
+    // 同帧读到的仍是旧主题变量，表现为轨道分界线等画布元素要等下一次交互
+    // 才变色。渲染期写入保证后代的一切 layout effect 读到的都是新主题。
+    // （写入是幂等的：无关重渲染重复写同一值无副作用。）
+    document.documentElement.dataset.theme = mode;
+    document.documentElement.style.setProperty("--qt-font-family", fontFamily);
+    document.documentElement.style.setProperty("--default-font-family", fontFamily);
+    document.body.style.fontFamily = fontFamily;
 
     useEffect(() => {
         const applyPreviewFromStorage = () => {
