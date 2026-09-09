@@ -44,6 +44,7 @@ export const jaJP = {
     export_dialog_targets: "分離トラックの出力対象",
     export_dialog_select_all: "すべて選択",
     export_dialog_select_exclude_muted: "ミュートを除外",
+    export_dialog_export: "エクスポート",
     export_dialog_select_none: "すべて解除",
     export_dialog_select_all_subtracks: "子トラックをすべて選択",
     export_dialog_error_invalid_range:

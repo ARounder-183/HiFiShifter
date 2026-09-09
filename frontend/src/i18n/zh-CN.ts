@@ -44,6 +44,7 @@ export const zhCN = {
     export_dialog_targets: "分轨导出目标",
     export_dialog_select_all: "全选",
     export_dialog_select_exclude_muted: "排除静音",
+    export_dialog_export: "导出",
     export_dialog_select_none: "全不选",
     export_dialog_select_all_subtracks: "子轨全选",
     export_dialog_error_invalid_range: "时间范围无效，结束时间必须大于开始时间。",

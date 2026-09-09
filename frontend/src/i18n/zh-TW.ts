@@ -45,6 +45,7 @@ export const zhTW = {
     export_dialog_targets: "分軌匯出目標",
     export_dialog_select_all: "全選",
     export_dialog_select_exclude_muted: "排除靜音",
+    export_dialog_export: "匯出",
     export_dialog_select_none: "全不選",
     export_dialog_select_all_subtracks: "子軌全選",
     export_dialog_error_invalid_range: "時間範圍無效，結束時間必須大於開始時間。",

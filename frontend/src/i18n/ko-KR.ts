@@ -44,6 +44,7 @@ export const koKR = {
     export_dialog_targets: "분리 트랙 출력 대상",
     export_dialog_select_all: "전체 선택",
     export_dialog_select_exclude_muted: "음소거 제외",
+    export_dialog_export: "내보내기",
     export_dialog_select_none: "전체 해제",
     export_dialog_select_all_subtracks: "하위 트랙 전체 선택",
     export_dialog_error_invalid_range:

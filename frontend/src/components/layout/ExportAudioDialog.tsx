@@ -607,8 +607,13 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
     }
 
     function selectExcludeMutedTargets() {
-        setSelectedTargetIds(
-            allTargets.filter((target) => !target.excludedByRule).map((target) => target.id),
+        // 只对当前已选中的项做筛选：从中移除被静音规则排除的目标，
+        // 未选中的项保持原样（不批量改选所有未静音目标）。
+        setSelectedTargetIds((prev) =>
+            prev.filter((id) => {
+                const target = allTargets.find((item) => item.id === id);
+                return target != null && !target.excludedByRule;
+            }),
         );
     }
 
@@ -1636,14 +1641,6 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                             size="1"
                                             variant="soft"
                                             color="gray"
-                                            onClick={selectExcludeMutedTargets}
-                                        >
-                                            {tAny("export_dialog_select_exclude_muted")}
-                                        </Button>
-                                        <Button
-                                            size="1"
-                                            variant="soft"
-                                            color="gray"
                                             onClick={clearSelectedTargets}
                                         >
                                             {tAny("export_dialog_select_none")}
@@ -1658,6 +1655,14 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                             }
                                         >
                                             {tAny("export_dialog_select_all_subtracks")}
+                                        </Button>
+                                        <Button
+                                            size="1"
+                                            variant="soft"
+                                            color="gray"
+                                            onClick={selectExcludeMutedTargets}
+                                        >
+                                            {tAny("export_dialog_select_exclude_muted")}
                                         </Button>
                                     </Flex>
                                     <Flex direction="column" gap="2" mt="2">
@@ -1722,7 +1727,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                             }}
                             disabled={session.busy || submitting}
                         >
-                            {tAny("menu_export_audio")}
+                            {tAny("export_dialog_export")}
                         </Button>
                     </Flex>
                 </Dialog.Content>

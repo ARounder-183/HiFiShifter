@@ -127,6 +127,7 @@ export const enUS = {
     export_dialog_targets: "Separated Track Targets",
     export_dialog_select_all: "Select All",
     export_dialog_select_exclude_muted: "Exclude Muted",
+    export_dialog_export: "Export",
     export_dialog_select_none: "Select None",
     export_dialog_select_all_subtracks: "Select All Sub Tracks",
     export_dialog_error_invalid_range: "Invalid time range. End must be greater than start.",
