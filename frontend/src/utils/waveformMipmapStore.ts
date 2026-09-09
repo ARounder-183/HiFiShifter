@@ -51,6 +51,26 @@ const SPP_HYSTERESIS_EXIT_SCALE = 0.75;
 const LEVEL_COUNT = 3;
 
 /**
+ * "尚未就绪"自动重试次数上限。
+ *
+ * 后端 `get_or_compute_waveform_peaks_v2` 是**同步阻塞**的：调用即出结果，
+ * 不存在"稍后再来"的中间态，且只有被调用时才会 emit
+ * `waveform_analysis_progress`。于是存在一个死锁：
+ *
+ *   首次请求早于后端就绪 → 拿到空串 → 前端进入 3 秒冷却并等待 refresh()；
+ *   而 refresh() 只能由后端的进度事件驱动，后端又只在**被调用**时才 emit；
+ *   冷却期内前端不会再调用 → 事件永不到达 → refresh() 永不触发。
+ *
+ * 结果就是"波形分析完了却仍然空白，非要用户滚动/缩放才出现"——用户手势是
+ * 唯一能重新触发 getPeaks() 的力量，而且还得等冷却过去（这正是"只有水平
+ * 放得足够大才会加载"的由来）。
+ *
+ * 因此冷却不能是终端态：必须由本模块自己排一次重试，把"等外部事件"改成
+ * "自己回头再问一次"。上限用于兜住真正缺失的文件（否则会无限重试）。
+ */
+const NOT_READY_MAX_RETRY = 5;
+
+/**
  * 文件级 mipmap 缓存的最大 backing-store 字节数。
  *
  * 每个 entry 包含三级 Float32Array，单首 5 分钟立体声歌曲约占数 MB。
@@ -125,11 +145,42 @@ class WaveformMipmapStoreImpl {
     private static readonly POOL_MAX = 32;
 
     /**
-     * 缓存代次：invalidate()/clear() 递增。在途加载发起时记下当时的代次，
-     * 响应回来时若代次已变（缓存已被清除/换源），过期响应必须整体丢弃 ——
-     * 否则旧文件的波形会写入"已清空"的缓存，出现短暂错源数据。
+     * 缓存代次（全局）：仅 `clear()` 递增 —— 全局作废时所有在途响应一律丢弃。
      */
-    private generation = 0;
+    private globalGeneration = 0;
+
+    /**
+     * 缓存代次（按文件）：仅 `invalidate(sourcePath)` 递增。
+     *
+     * 【为什么必须按文件记账，而不是一个全局代次】
+     * `invalidate()` 是**单文件**语义（换源 / 重算某一个文件）。而打开工程
+     * 或导入音频时，后端会为每个文件各发一次 `waveform_analysis_progress`
+     * done/cached → `refresh()` → `invalidate()`。若代次是全局的，第 k 个
+     * 文件的 invalidate 会把前 k−1 个文件**正在途**的响应一并作废；那些
+     * 文件既没有新请求、也没有任何通知，波形面不会重绘 —— 波形一直空白，
+     * 直到用户滚动/缩放触发全量重建才重新取数。多文件工程/批量导入时每个
+     * 文件都会互相踩，症状因此"更严重"。
+     *
+     * 按文件记账后，作废严格限定在真正被 invalidate 的那一个文件。
+     */
+    private pathGenerations = new Map<string, number>();
+
+    /**
+     * "尚未就绪"自动重试的定时器与已尝试次数，key = `${path}|${level}`。
+     *
+     * 用途见 NOT_READY_MAX_RETRY 的说明：把冷却从终端态改成自愈态。
+     */
+    private notReadyTimers = new Map<string, ReturnType<typeof setTimeout>>();
+    private notReadyAttempts = new Map<string, number>();
+
+    /**
+     * 在途请求的作废令牌：全局代次 + 该文件代次。
+     *
+     * 发起前取值、响应后比对，不一致即表示该响应属于已被作废的旧缓存。
+     */
+    private loadToken(sourcePath: string): string {
+        return `${this.globalGeneration}|${this.pathGenerations.get(sourcePath) ?? 0}`;
+    }
 
     private acquireInterleaved(minLen: number): Float32Array {
         for (let i = 0; i < this.interleavedPool.length; i++) {
@@ -614,6 +665,7 @@ class WaveformMipmapStoreImpl {
         // 否则批预载在途时并发的 loadLevel(2) 找不到已有 Promise，会对
         // 同一批文件再发一轮相同请求。
         const registered: string[] = [];
+        const registeredEntries: FileMipmapCache[] = [];
         for (const sp of needed) {
             if (this.loadingPromises.has(`${sp}|2`)) continue;
             let entry = this.cache.get(sp);
@@ -632,18 +684,31 @@ class WaveformMipmapStoreImpl {
             entry.loadingLevels.add(2);
             this.notify(sp, "loading");
             registered.push(sp);
+            registeredEntries.push(entry);
         }
 
-        if (registered.length === 0) return;
+        if (registered.length === 0) {
+            return;
+        }
+
+        // 令牌快照（**发起前**、逐文件）：响应回来时某个文件的缓存可能已被
+        // invalidate()/clear() 作废。旧实现把快照放在 await 之后，于是这个
+        // 校验恒为假、形同虚设。
+        const requestTokens = registered.map((sp) => this.loadToken(sp));
+        let selfPromise: Promise<void> | null = null;
 
         const batchPromise = (async () => {
             try {
                 const batchResult = await waveformApi.batchGetWaveformMipmap(registered);
-                // 在途代次快照：响应回来时缓存可能已被 clear/invalidate 清除。
-                const requestGeneration = this.generation;
 
                 for (const [sourcePath, levels] of Object.entries(batchResult)) {
-                    if (this.generation !== requestGeneration) return;
+                    const index = registered.indexOf(sourcePath);
+                    if (index >= 0 && this.loadToken(sourcePath) !== requestTokens[index]) {
+                        // 该文件已被作废：丢弃本条响应，并按需补发一次
+                        // （与 loadLevel 同一套语义，避免"丢了就没人再要"）。
+                        this.requeueIfMissing(sourcePath, 2);
+                        continue;
+                    }
                     // 仅解码 L2（索引 2），L0/L1 丢弃
                     const l2Base64 = levels[2];
                     if (l2Base64) {
@@ -660,13 +725,15 @@ class WaveformMipmapStoreImpl {
                         // 空串 = 后端尚未就绪（波形分析/首次计算未完成），是
                         // **瞬时**条件：绝不能写 failedLevels——否则打开工程
                         // 瞬间的抢先批量请求会把 L2 永久毒化，波形要等用户
-                        // 滚动/缩放才出现。进入重试冷却，等待 refresh()
-                        // （waveform_analysis_progress done/cached 事件）。
+                        // 滚动/缩放才出现。进入重试冷却；与单发路径一样，
+                        // 必须自己排重试而不能只等 refresh()（见
+                        // NOT_READY_MAX_RETRY 的死锁说明）。
                         this.retryCooldownUntil.set(
                             `${sourcePath}|2`,
                             Date.now() + RETRY_NOT_READY_COOLDOWN_MS,
                         );
                         this.notify(sourcePath, "loading");
+                        this.scheduleNotReadyRetry(sourcePath, 2);
                     }
                 }
             } catch (err) {
@@ -682,16 +749,20 @@ class WaveformMipmapStoreImpl {
                 const promises = registered.map((sp) => this.preload(sp));
                 await Promise.allSettled(promises);
             } finally {
-                for (const sp of registered) {
-                    const entry = this.cache.get(sp);
-                    if (entry) {
-                        entry.loadingLevels.delete(2);
+                for (let i = 0; i < registered.length; i += 1) {
+                    // 只清**本批次自己登记的**那个 entry：期间可能已被
+                    // invalidate 并换成新 entry，误清新请求的标记会让它在
+                    // getPeaks 里被判定为"没人在加载"而重复发请求。
+                    registeredEntries[i].loadingLevels.delete(2);
+                    const key = `${registered[i]}|2`;
+                    if (this.loadingPromises.get(key) === selfPromise) {
+                        this.loadingPromises.delete(key);
                     }
-                    this.loadingPromises.delete(`${sp}|2`);
                 }
             }
         })();
 
+        selfPromise = batchPromise;
         for (const sp of registered) {
             this.loadingPromises.set(`${sp}|2`, batchPromise);
         }
@@ -719,8 +790,31 @@ class WaveformMipmapStoreImpl {
         this.retryCooldownUntil.delete(`${sourcePath}|0`);
         this.retryCooldownUntil.delete(`${sourcePath}|1`);
         this.retryCooldownUntil.delete(`${sourcePath}|2`);
-        // 代次递增：本文件的在途响应作废（applyDecoded 校验后代次不再写入）。
-        this.generation += 1;
+        // 代次递增：本文件（**仅限本文件**）的在途响应作废。
+        this.pathGenerations.set(sourcePath, (this.pathGenerations.get(sourcePath) ?? 0) + 1);
+        // 该文件已被换源/重算：残留的"尚未就绪"重试必须一并作废。
+        this.clearNotReadyRetry(sourcePath);
+        // ★ 在途登记必须同步清除。否则 `refresh()` → `invalidate()` →
+        // `batchPreload()` 的铁三角会被自己的判重挡死：
+        //   - batchPreload 见 `loadingPromises.has(path|2)` 就把该文件滤掉，
+        //     registered 为空 → 一个请求都不发；
+        //   - 而那个在途 Promise 又因为代次不匹配被整包丢弃；
+        //   - 后续 getPeaks() 拿到的也还是这个（必然空转的）旧 Promise。
+        // 结果：该文件既无数据、也无新请求、更无通知 → 波形永久空白。
+        this.releaseInFlight(sourcePath);
+    }
+
+    /**
+     * 丢弃某文件的在途加载登记。
+     *
+     * 只摘掉 `loadingPromises` 里的键（Promise 本身仍在跑，只是它的结果不再
+     * 被采纳 —— 由 `loadToken` 校验兜底），这样紧随其后的 `loadLevel` /
+     * `batchPreload` 能立刻发出新请求，不必等旧 Promise 落地。
+     */
+    private releaseInFlight(sourcePath: string): void {
+        for (let level = 0; level < LEVEL_COUNT; level += 1) {
+            this.loadingPromises.delete(`${sourcePath}|${level}`);
+        }
     }
 
     /**
@@ -773,15 +867,40 @@ class WaveformMipmapStoreImpl {
         this.retryCooldownUntil.delete(`${sourcePath}|1`);
         this.retryCooldownUntil.delete(`${sourcePath}|2`);
         const entry = this.cacheGet(sourcePath);
-        if (!entry) return;
+        if (!entry) {
+            return;
+        }
         const poisoned = entry.failedLevels.size > 0;
         const nothingLoaded =
             entry.levels[0] == null && entry.levels[1] == null && entry.levels[2] == null;
-        if (poisoned || nothingLoaded) {
-            // 清掉陈旧条目后整体重载（含三级），后端此时应已就绪。
-            this.invalidate(sourcePath);
-            void this.batchPreload([sourcePath]);
-        }
+        if (!poisoned && !nothingLoaded) return;
+
+        // ★ 有加载在途时**绝不能** invalidate。
+        //
+        // 后端每次 `get_or_compute_waveform_peaks_v2` 内存命中都会 emit
+        // `cached`，而 `batch_get_waveform_mipmap` 每个文件各调一次 ——
+        // 也就是说 **"向后端要一次数据"必然触发一次 `cached` 事件**，事件又
+        // 会回到本函数。若此刻数据还没落地就 invalidate：
+        //
+        //   refresh() → invalidate(代次++) → batchPreload 发新请求
+        //     → 后端再 emit `cached` → 再 refresh() → 再 invalidate …
+        //
+        // 每一轮都把上一轮的在途响应按代次作废，**数据永远写不进缓存**，
+        // L0/L1 的在途加载也接连被杀（日志实测：`mipmap.load` 紧跟
+        // `staleDrop` 无限交替，130ms 内二十余轮 IPC）——这就是"波形永不
+        // 出现 + 无论工程大小都一直卡顿"的根源。
+        //
+        // 在途请求要么成功（applyDecoded 清 failedLevels、notify "done"
+        // 驱动重绘），要么空结果走"未就绪自愈重试"。两条路都会收敛，等它
+        // 即可；invalidate 只该发生在真正无人负责该文件数据的时候。
+        const inFlight =
+            entry.loadingLevels.size > 0 ||
+            [0, 1, 2].some((level) => this.loadingPromises.has(`${sourcePath}|${level}`));
+        if (inFlight) return;
+
+        // 清掉陈旧条目后整体重载（含三级），后端此时应已就绪。
+        this.invalidate(sourcePath);
+        void this.batchPreload([sourcePath]);
     }
 
     /**
@@ -795,8 +914,13 @@ class WaveformMipmapStoreImpl {
         // 通过 applyDecoded 让"已清空"的缓存悄悄复活，冷却键也会残留。
         this.loadingPromises.clear();
         this.retryCooldownUntil.clear();
-        // 代次递增：所有在途响应作废（applyDecoded 校验代次，过期不写入）。
-        this.generation += 1;
+        for (const timer of this.notReadyTimers.values()) clearTimeout(timer);
+        this.notReadyTimers.clear();
+        this.notReadyAttempts.clear();
+        // 全局代次递增：所有在途响应作废（按文件代次表一并复位，避免残留
+        // 令牌让新加载被误判为过期）。
+        this.globalGeneration += 1;
+        this.pathGenerations.clear();
     }
 
     /**
@@ -836,6 +960,9 @@ class WaveformMipmapStoreImpl {
         } else {
             this.touchLru(sourcePath);
         }
+        // 闭包内需要稳定引用：`entry` 是 let，TS 不会把窄化结果带进 async
+        // 闭包（原实现只能靠 `entry!` 断言）。
+        const ownedEntry = entry;
 
         // 已加载 → 立即返回
         if (entry.levels[level]) return Promise.resolve();
@@ -856,27 +983,37 @@ class WaveformMipmapStoreImpl {
 
         entry.loadingLevels.add(level);
         this.notify(sourcePath, "loading");
-        // 在途代次快照：响应回来时缓存可能已被 clear/invalidate 清除。
-        const requestGeneration = this.generation;
+        // 在途令牌快照（**必须在发起前取**）：响应回来时该文件的缓存可能
+        // 已被 clear()/invalidate() 作废。
+        const requestToken = this.loadToken(sourcePath);
+        let selfPromise: Promise<void> | null = null;
 
         const promise = (async () => {
+            let stale = false;
             try {
                 const raw = await waveformApi.getWaveformMipmapBinary(sourcePath, level);
-                // 代次不匹配 = 响应属于已被清除/换源的旧缓存：整体丢弃，
+                // 令牌不匹配 = 响应属于已被清除/换源的旧缓存：整体丢弃，
                 // 不得让旧数据复活（也不得重新创建缓存条目）。
-                if (this.generation !== requestGeneration) return;
+                // 丢弃**不是终态**——见 finally 里的 requeueIfMissing。
+                if (this.loadToken(sourcePath) !== requestToken) {
+                    stale = true;
+                    return;
+                }
                 const decoded = decodeWaveformFromBase64(raw);
 
                 if (decoded) {
                     this.applyDecoded(sourcePath, level, decoded);
+                    this.clearNotReadyRetry(sourcePath, level);
                     this.notify(sourcePath, "done");
                 } else if (raw === "") {
                     // 空串 = 后端尚未就绪（波形分析/首次计算未完成），
                     // 是**瞬时**条件：绝不写 failedLevels（否则打开工程
                     // 瞬间的抢先请求会把该级别永久毒化，波形要等用户
-                    // 滚动/缩放才出现）。进入重试冷却，等待 refresh()。
+                    // 滚动/缩放才出现）。进入重试冷却——但**不能只等
+                    // refresh()**：见 NOT_READY_MAX_RETRY，必须自己排重试。
                     this.retryCooldownUntil.set(retryKey, Date.now() + RETRY_NOT_READY_COOLDOWN_MS);
                     this.notify(sourcePath, "loading");
+                    this.scheduleNotReadyRetry(sourcePath, level);
                 } else {
                     // 非空但解码失败 = 数据损坏，视为永久失败。
                     const current = this.cache.get(sourcePath);
@@ -889,13 +1026,82 @@ class WaveformMipmapStoreImpl {
                 if (current) current.failedLevels.add(level);
                 this.notify(sourcePath, "error", msg);
             } finally {
-                entry!.loadingLevels.delete(level);
-                this.loadingPromises.delete(promiseKey);
+                ownedEntry.loadingLevels.delete(level);
+                // 只摘掉**自己**的登记：作废路径可能已经清掉旧键并登记了新
+                // 请求，无条件 delete 会把新请求连坐掉（又一次“无人重试”）。
+                if (this.loadingPromises.get(promiseKey) === selfPromise) {
+                    this.loadingPromises.delete(promiseKey);
+                }
+                if (stale) this.requeueIfMissing(sourcePath, level);
             }
         })();
 
+        selfPromise = promise;
         this.loadingPromises.set(promiseKey, promise);
         return promise;
+    }
+
+    /**
+     * 清掉某个（或某文件全部）级别的"尚未就绪"重试状态。
+     *
+     * 数据到手、缓存条目作废、整体清空时都必须调用，否则定时器会在之后
+     * 把已经不需要的重试重新点起来。
+     */
+    private clearNotReadyRetry(sourcePath: string, level?: 0 | 1 | 2): void {
+        if (level == null) {
+            for (let l = 0; l < LEVEL_COUNT; l += 1) {
+                this.clearNotReadyRetry(sourcePath, l as 0 | 1 | 2);
+            }
+            return;
+        }
+        const key = `${sourcePath}|${level}`;
+        const timer = this.notReadyTimers.get(key);
+        if (timer != null) {
+            clearTimeout(timer);
+            this.notReadyTimers.delete(key);
+        }
+        this.notReadyAttempts.delete(key);
+    }
+
+    /**
+     * 为"后端暂未就绪"排一次自动重试（有界）。
+     *
+     * 冷却到点后先摘掉冷却键（否则 loadLevel 会立刻被冷却挡回去），再补发
+     * 一次请求；成功则 notify "done"，波形面随即重绘——全程不需要用户操作。
+     */
+    private scheduleNotReadyRetry(sourcePath: string, level: 0 | 1 | 2): void {
+        const key = `${sourcePath}|${level}`;
+        if (this.notReadyTimers.has(key)) return;
+        const attempts = this.notReadyAttempts.get(key) ?? 0;
+        if (attempts >= NOT_READY_MAX_RETRY) return;
+        this.notReadyAttempts.set(key, attempts + 1);
+        const timer = setTimeout(() => {
+            this.notReadyTimers.delete(key);
+            this.retryCooldownUntil.delete(key);
+            this.requeueIfMissing(sourcePath, level);
+        }, RETRY_NOT_READY_COOLDOWN_MS + 50);
+        this.notReadyTimers.set(key, timer);
+    }
+
+    /**
+     * 过期响应被丢弃后的补发。
+     *
+     * 【为什么必须有它】只丢不补 = 终态：既没有数据、也没有通知，波形面
+     * 永远等不到重绘时机，波形要等用户滚动/缩放触发全量重建才出现 —— 正是
+     * 本修复要根治的症状（"分析完成后波形仍空白"）。
+     *
+     * 【什么时候不补】缓存里已经没有该条目时说明没人再需要它（invalidate/
+     * clear 之后尚未有人重新登记），补发会把刚作废的旧数据重新拉回来，
+     * 违背代次机制的初衷，故直接放弃。
+     */
+    private requeueIfMissing(sourcePath: string, level: 0 | 1 | 2): void {
+        const entry = this.cache.get(sourcePath);
+        if (!entry || entry.levels[level]) return;
+        if (entry.failedLevels.has(level)) return;
+        if (entry.loadingLevels.has(level)) return;
+        const cooldownUntil = this.retryCooldownUntil.get(`${sourcePath}|${level}`);
+        if (cooldownUntil != null && Date.now() < cooldownUntil) return;
+        void this.loadLevel(sourcePath, level);
     }
 
     /**
