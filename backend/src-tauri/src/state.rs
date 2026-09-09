@@ -2582,6 +2582,19 @@ pub struct AppState {
 
     pub audio_engine: AudioEngine,
 
+    /// 传输命令串行化锁（叶子锁：先取它再取 timeline，绝无反向持有）。
+    ///
+    /// Tauri 同步命令在阻塞线程池上并发执行，`set_transport` / `play_original`
+    /// / `stop_audio` / `get_playback_state` 之间没有先后保证。快速连续
+    /// 播放/暂停/停止时，乱序执行会让 stop 杀掉刚启动的播放、或与 play 的
+    /// `timeline.playhead_sec` 读改交错，前端随即陷入"引擎实际已停但仍在
+    /// 轮询推进光标"的分裂状态（播放光标跳变的根源之一）。把四个传输命令
+    /// 放到同一把锁内全序执行：用户点击顺序（前端逐个 await）即后端执行
+    /// 顺序，状态机不再有交错态。锁内最重的工作是 play_original 的节拍器
+    /// 响点表重建（毫秒级），30Hz 的 get_playback_state 等锁开销可忽略；
+    /// play_original 派生的渲染线程不持有也不需要这把锁。
+    pub transport_lock: std::sync::Mutex<()>,
+
     /// 正在进行的录音会话（非录制时为 None）。
     pub recording: std::sync::Mutex<Option<crate::recording::ActiveRecording>>,
     /// 录音启动互斥（CAS）：设备就绪等待最长 8s，不能放在 `recording`
@@ -2629,6 +2642,7 @@ impl Default for AppState {
             pitch_timeline_snapshot: Mutex::new(HashMap::new()),
 
             audio_engine: AudioEngine::new(),
+            transport_lock: std::sync::Mutex::new(()),
             recording: std::sync::Mutex::new(None),
             recording_starting: std::sync::atomic::AtomicBool::new(false),
             config_dir: OnceLock::new(),

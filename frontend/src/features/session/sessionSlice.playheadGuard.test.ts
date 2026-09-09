@@ -3,10 +3,10 @@ import { test } from "vitest";
 /* eslint-disable @typescript-eslint/no-explicit-any -- 测试夹具：
    reducer 初始化 action 与全量时间线载荷无法在不使用 any 的情况下构造 */
 
-import reducer from "./sessionSlice.ts";
+import reducer, { setPlaybackRenderingState } from "./sessionSlice.ts";
 import { moveClipRemote } from "./thunks/timelineThunks.ts";
 import { undoRemote, redoRemote } from "./thunks/projectThunks.ts";
-import { stopAudioPlayback, syncPlaybackState } from "./thunks/transportThunks.ts";
+import { playOriginal, stopAudioPlayback, syncPlaybackState } from "./thunks/transportThunks.ts";
 
 /**
  * 播放头所有权回归测试：
@@ -158,6 +158,14 @@ test("features/session/sessionSlice.playheadGuard.test.ts sync aligns the playhe
             throw new Error(`${label}: expected ${String(expected)}, received ${String(actual)}`);
         }
     }
+    function assertNear(actual: unknown, expected: number, label: string, tolSec = 0.05): void {
+        const value = Number(actual);
+        if (!Number.isFinite(value) || Math.abs(value - expected) > tolSec) {
+            throw new Error(
+                `${label}: expected ~${String(expected)} (±${tolSec}), received ${String(actual)}`,
+            );
+        }
+    }
 
     function playingState(playheadSec: number) {
         const base = reducer(undefined, { type: "@@INIT" }) as any;
@@ -182,20 +190,46 @@ test("features/session/sessionSlice.playheadGuard.test.ts sync aligns the playhe
             duration_sec: 200,
         }) as any;
 
-    // 播放中：轮询推进光标。
+    // 播放中：轮询推进光标。播放分支的采样会按"派发→处理"时延外推，因此
+    // 用容差断言（测试里时延 ≈ 0）。
     {
         const next = reducer(
             playingState(50),
-            syncPlaybackState.fulfilled(syncPayload(true, 50.02), "req", undefined),
+            syncPlaybackState.fulfilled(syncPayload(true, 50.02), "req", {
+                epoch: 0,
+                dispatchedAtMs: performance.now(),
+            }),
         );
-        assertEqual(next.playheadSec, 50.02, "playing poll advances the playhead");
+        assertNear(next.playheadSec, 50.02, "playing poll advances the playhead");
     }
 
-    // 播放→停止跃迁：光标对齐到引擎冻结的精确停止位置。
+    // 采样外推：payload 是"后端执行命令那一刻"的位置，reducer 必须把它按时延
+    // 外推到处理时刻 —— 100ms 前派发的采样应落在 采样值+0.1s。
+    {
+        const next = reducer(
+            playingState(50),
+            syncPlaybackState.fulfilled(syncPayload(true, 50.0), "req", {
+                epoch: 0,
+                dispatchedAtMs: performance.now() - 100,
+            }),
+        );
+        assertNear(next.playheadSec, 50.1, "playing sample is extrapolated to arrival time", 0.05);
+        // 采样时刻随写入了采样值一并记录，供视觉插值锚定。
+        assertEqual(
+            next.playheadSampledAtMs > 0,
+            true,
+            "polled playhead records its sampling timestamp",
+        );
+    }
+
+    // 播放→停止跃迁：光标对齐到引擎冻结的精确停止位置（冻结位置不外推）。
     {
         const next = reducer(
             playingState(50.02),
-            syncPlaybackState.fulfilled(syncPayload(false, 50.09), "req", undefined),
+            syncPlaybackState.fulfilled(syncPayload(false, 50.09), "req", {
+                epoch: 0,
+                dispatchedAtMs: performance.now() - 500,
+            }),
         );
         assertEqual(
             next.playheadSec,
@@ -205,14 +239,22 @@ test("features/session/sessionSlice.playheadGuard.test.ts sync aligns the playhe
     }
 
     // 已停止后的后续轮询：不再改写光标（例如 handle_stop 后 position 归零）。
+    // 跃迁应用时会推进传输纪元，因此第二次轮询必须携带最新纪元才被应用 ——
+    // 这同时验证了纪元防护不会误伤"当前"轮询。
     {
         const stopped = reducer(
             playingState(50.02),
-            syncPlaybackState.fulfilled(syncPayload(false, 50.09), "req", undefined),
+            syncPlaybackState.fulfilled(syncPayload(false, 50.09), "req", {
+                epoch: 0,
+                dispatchedAtMs: performance.now(),
+            }),
         );
         const next = reducer(
             stopped,
-            syncPlaybackState.fulfilled(syncPayload(false, 0), "req", undefined),
+            syncPlaybackState.fulfilled(syncPayload(false, 0), "req", {
+                epoch: stopped._transportEpoch,
+                dispatchedAtMs: performance.now(),
+            }),
         );
         assertEqual(
             next.playheadSec,
@@ -338,5 +380,321 @@ test("features/session/sessionSlice.playheadGuard.test.ts undo/redo adopt the ch
             undoRemote.fulfilled(timelinePayload(5), "req-undo-stale", undefined),
         );
         assertEqual(next.playheadSec, 9, "stale undo response is discarded");
+    }
+});
+
+/**
+ * 播放轮询乱序防护（传输纪元）：后端预渲染（ONNX 推理）负载下 IPC 往返
+ * 可延迟至数百毫秒，跨 播放/暂停/停止 边界的迟到轮询快照按新语义应用会把
+ * isPlaying 复活/掐灭、并把光标改写成旧播放位置或 0。轮询在派发时携带传输
+ * 纪元，fulfilled 与当前纪元比对，不一致的响应直接丢弃。
+ */
+test("features/session/sessionSlice.playheadGuard.test.ts sync responses crossing a transport operation are discarded", async () => {
+    function assertEqual(actual: unknown, expected: unknown, label: string): void {
+        if (actual !== expected) {
+            throw new Error(`${label}: expected ${String(expected)}, received ${String(actual)}`);
+        }
+    }
+
+    function playingState(playheadSec: number, epoch: number) {
+        const base = reducer(undefined, { type: "@@INIT" }) as any;
+        return {
+            ...base,
+            playheadSec,
+            _transportEpoch: epoch,
+            runtime: {
+                ...base.runtime,
+                isPlaying: true,
+                playbackPositionSec: playheadSec,
+            },
+        };
+    }
+
+    const syncPayload = (isPlaying: boolean, positionSec: number) =>
+        ({
+            ok: true,
+            is_playing: isPlaying,
+            target: "original",
+            base_sec: 0,
+            position_sec: positionSec,
+            duration_sec: 200,
+        }) as any;
+
+    // 停止前的播放采样迟到：不得复活 isPlaying、不得把光标推回旧播放位置。
+    {
+        const stopped = reducer(
+            playingState(50, 0),
+            stopAudioPlayback.pending("req-stop", undefined),
+        );
+        const next = reducer(
+            stopped,
+            syncPlaybackState.fulfilled(syncPayload(true, 53), "req", {
+                epoch: 0,
+                dispatchedAtMs: performance.now(),
+            }),
+        );
+        assertEqual(next.runtime.isPlaying, false, "stale playing snapshot cannot revive playback");
+        assertEqual(next.playheadSec, 50, "stale playing snapshot cannot move the playhead");
+    }
+
+    // 停止→播放间隙采样（引擎已归零 base/position）迟到：不得把光标写成 0、
+    // 不得掐灭刚建立的播放状态。
+    {
+        const pended = reducer(playingState(50, 0), playOriginal.pending("req-play", undefined));
+        const played = reducer(
+            pended,
+            playOriginal.fulfilled(
+                { ok: true, clipId: null, anchorSec: 42, playing: "original" },
+                "req-play",
+                undefined,
+            ),
+        );
+        assertEqual(played.playheadSec, 50, "play adopts the anchor at dispatch, not the payload");
+        const next = reducer(
+            played,
+            syncPlaybackState.fulfilled(syncPayload(false, 0), "req", {
+                epoch: 1,
+                dispatchedAtMs: performance.now(),
+            }),
+        );
+        assertEqual(next.runtime.isPlaying, true, "stale stopped snapshot cannot kill playback");
+        assertEqual(next.playheadSec, 50, "stale stopped snapshot cannot move the playhead");
+    }
+
+    // 纪元匹配的轮询照常推进光标。
+    {
+        const next = reducer(
+            playingState(50, 7),
+            syncPlaybackState.fulfilled(syncPayload(true, 50.02), "req", {
+                epoch: 7,
+                dispatchedAtMs: performance.now(),
+            }),
+        );
+        if (!(Math.abs(Number(next.playheadSec) - 50.02) <= 0.05)) {
+            throw new Error(
+                `matching-epoch poll advances the playhead: expected ~50.02, received ${String(next.playheadSec)}`,
+            );
+        }
+    }
+});
+
+/**
+ * 跃迁防呆：引擎被用户停止后 base/position 归零。竞态下（阻塞预渲染窗口
+ * 溜进的轮询、乱序响应）"播放→停止跃迁"分支拿到 0/0 不代表真实停止点，
+ * 写 0 会把光标拽到工程开头；真实冻结点（自动暂停/自然结束）总是 > 0。
+ */
+test("features/session/sessionSlice.playheadGuard.test.ts zero frozen position never zeroes the playhead", async () => {
+    function assertEqual(actual: unknown, expected: unknown, label: string): void {
+        if (actual !== expected) {
+            throw new Error(`${label}: expected ${String(expected)}, received ${String(actual)}`);
+        }
+    }
+
+    function playingState(playheadSec: number) {
+        const base = reducer(undefined, { type: "@@INIT" }) as any;
+        return {
+            ...base,
+            playheadSec,
+            _transportEpoch: 3,
+            runtime: {
+                ...base.runtime,
+                isPlaying: true,
+                playbackPositionSec: playheadSec,
+            },
+        };
+    }
+
+    const syncPayload = (baseSec: number, positionSec: number) =>
+        ({
+            ok: true,
+            is_playing: false,
+            target: null,
+            base_sec: baseSec,
+            position_sec: positionSec,
+            duration_sec: 200,
+        }) as any;
+
+    // 0/0（引擎被 handle_stop 归零后）：跃迁应用，但光标原地不动。
+    {
+        const next = reducer(
+            playingState(50.02),
+            syncPlaybackState.fulfilled(syncPayload(0, 0), "req", {
+                epoch: 3,
+                dispatchedAtMs: performance.now(),
+            }),
+        );
+        assertEqual(next.runtime.isPlaying, false, "transition still applies");
+        assertEqual(next.playheadSec, 50.02, "zeroed engine state never zeroes the playhead");
+    }
+
+    // 真实冻结点 > 0（后台渲染自动暂停）：照常对齐。
+    {
+        const next = reducer(
+            playingState(50.02),
+            syncPlaybackState.fulfilled(syncPayload(0, 50.09), "req", {
+                epoch: 3,
+                dispatchedAtMs: performance.now(),
+            }),
+        );
+        assertEqual(next.playheadSec, 50.09, "frozen position aligns the playhead");
+    }
+});
+
+/**
+ * 锚点保留：暂停只结束"进行中的播放"，不清除"本次播放的起始位置"。旧行为
+ * 在暂停时把锚点清零，导致暂停后按 Stop 时 wasPlaying 启发式
+ * （playheadSec ≠ anchor）仍判定"曾处于播放中"，把光标"恢复"到 0
+ * （播放→暂停→停止 光标跳到工程开头）。保留锚点后 Stop 回到最近一次播放的
+ * 起点，与播放中按 Stop 的行为一致（REAPER 语义），且再次按 Stop 幂等。
+ */
+test("features/session/sessionSlice.playheadGuard.test.ts pause keeps the playback anchor for the next stop", async () => {
+    function assertEqual(actual: unknown, expected: unknown, label: string): void {
+        if (actual !== expected) {
+            throw new Error(`${label}: expected ${String(expected)}, received ${String(actual)}`);
+        }
+    }
+
+    function playingState(playheadSec: number, anchorSec: number) {
+        const base = reducer(undefined, { type: "@@INIT" }) as any;
+        return {
+            ...base,
+            playheadSec,
+            playbackAnchorSec: anchorSec,
+            runtime: {
+                ...base.runtime,
+                isPlaying: true,
+                playbackPositionSec: playheadSec,
+            },
+        };
+    }
+
+    // 暂停（无锚点恢复）：光标对齐精确停止点，锚点保留。
+    {
+        const next = reducer(
+            playingState(42.3, 10),
+            stopAudioPlayback.fulfilled(
+                {
+                    ok: true,
+                    stopped_at_sec: 42.5,
+                    restoreAnchor: false,
+                    wasPlaying: true,
+                    anchorSec: 10,
+                },
+                "req",
+                undefined,
+            ),
+        );
+        assertEqual(next.playheadSec, 42.5, "pause aligns to the exact stop position");
+        assertEqual(next.playbackAnchorSec, 10, "pause keeps the playback anchor");
+    }
+
+    // 暂停后按 Stop（锚点恢复）：回到最近一次播放的起点（而不是 0）。
+    {
+        const next = reducer(
+            playingState(42.3, 10),
+            stopAudioPlayback.fulfilled(
+                {
+                    ok: true,
+                    stopped_at_sec: 42.5,
+                    restoreAnchor: true,
+                    wasPlaying: true,
+                    anchorSec: 10,
+                },
+                "req",
+                { restoreAnchor: true },
+            ),
+        );
+        assertEqual(next.playheadSec, 10, "stop restores the anchor position");
+        assertEqual(next.playbackAnchorSec, 10, "stop keeps the anchor for idempotent repeats");
+    }
+});
+
+/**
+ * 阻塞式前台预渲染窗口拒采：target="original" 的渲染 active 期间，引擎尚未
+ * 真正进入 playing，`get_playback_state` 返回上一场播放/seek 的陈旧传输态。
+ * 短渲染（全缓存命中）完成后实时轮询已推进光标，渲染期间派发的轮询响应
+ * 此刻才迟到到达 —— 纪元未变（渲染期间无传输操作），乱序防护拦不住；
+ * 若按"播放→停止跃迁"应用，会把光标拽回播放起点、掐灭 isPlaying 并让
+ * 轮询停摆（光标卡死而音频继续播）。渲染状态镜像（Redux）让 reducer 在
+ * 该窗口内一概拒采；渲染结束（active=false）后恢复采信。
+ */
+test("features/session/sessionSlice.playheadGuard.test.ts polls are refused while a blocking foreground render is active", async () => {
+    function assertEqual(actual: unknown, expected: unknown, label: string): void {
+        if (actual !== expected) {
+            throw new Error(`${label}: expected ${String(expected)}, received ${String(actual)}`);
+        }
+    }
+
+    function playingState(playheadSec: number) {
+        const base = reducer(undefined, { type: "@@INIT" }) as any;
+        return {
+            ...base,
+            playheadSec,
+            runtime: {
+                ...base.runtime,
+                isPlaying: true,
+                playbackPositionSec: playheadSec,
+            },
+        };
+    }
+
+    const syncPayload = (isPlaying: boolean, positionSec: number) =>
+        ({
+            ok: true,
+            is_playing: isPlaying,
+            target: "original",
+            base_sec: 0,
+            position_sec: positionSec,
+            duration_sec: 200,
+        }) as any;
+
+    const syncArgs = { epoch: 0, dispatchedAtMs: performance.now() };
+
+    // 阻塞式预渲染进行中：陈旧"未播放"采样被拒采，播放状态与光标不受影响。
+    {
+        const started = reducer(
+            playingState(50),
+            setPlaybackRenderingState({ active: true, target: "original" }),
+        );
+        const next = reducer(
+            started,
+            syncPlaybackState.fulfilled(syncPayload(false, 50), "req", syncArgs),
+        );
+        assertEqual(next.runtime.isPlaying, true, "blocking prerender window refuses stale polls");
+        assertEqual(next.playheadSec, 50, "blocking prerender window never moves the playhead");
+    }
+
+    // 后台预渲染（target="background"）不拒采：播放是实时的，轮询照常推进。
+    {
+        const started = reducer(
+            playingState(50),
+            setPlaybackRenderingState({ active: true, target: "background" }),
+        );
+        const next = reducer(
+            started,
+            syncPlaybackState.fulfilled(syncPayload(true, 50.02), "req", syncArgs),
+        );
+        if (!(Math.abs(Number(next.playheadSec) - 50.02) <= 0.05)) {
+            throw new Error(
+                `background render keeps polls flowing: expected ~50.02, received ${String(next.playheadSec)}`,
+            );
+        }
+    }
+
+    // 渲染结束（active=false）：恢复采信，跃迁对齐照常工作。
+    {
+        const started = reducer(
+            playingState(50),
+            setPlaybackRenderingState({ active: true, target: "original" }),
+        );
+        const ended = reducer(
+            started,
+            setPlaybackRenderingState({ active: false, target: "original" }),
+        );
+        const next = reducer(
+            ended,
+            syncPlaybackState.fulfilled(syncPayload(false, 50.09), "req", syncArgs),
+        );
+        assertEqual(next.playheadSec, 50.09, "after the render ends polls apply again");
     }
 });

@@ -148,6 +148,7 @@ const TrackHeaderPlayheadTime = React.memo(function TrackHeaderPlayheadTime() {
     const selector = useAppSelector(
         (state) => ({
             playheadSec: state.session.playheadSec,
+            playheadSampledAtMs: state.session.playheadSampledAtMs,
             isPlaying: state.session.runtime.isPlaying,
             playbackPositionSec: state.session.runtime.playbackPositionSec,
             primaryTimeUnit: state.session.primaryTimeUnit,
@@ -165,6 +166,7 @@ const TrackHeaderPlayheadTime = React.memo(function TrackHeaderPlayheadTime() {
     const isTransportAdvancing = selector.isPlaying && selector.playbackPositionSec > 1e-4;
     useVisualPlayhead({
         syncedPlayheadSec: selector.playheadSec,
+        syncedAtMs: selector.playheadSampledAtMs,
         isTransportAdvancing,
         onFrame: React.useCallback((sec: number) => setVisualSec(sec), []),
     });

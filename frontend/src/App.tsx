@@ -39,6 +39,7 @@ import {
     saveProjectToPathRemote,
     setTrackMeters,
     setToolMode,
+    setPlaybackRenderingState,
     checkpointHistory,
     addTrackRemote,
     duplicateTrackRemote,
@@ -215,12 +216,7 @@ const DEFAULT_AUTO_BACKUP_SETTINGS: AutoBackupSettings = {
 };
 
 type SourceFileChangeAction =
-    | "pending"
-    | "processing"
-    | "ignored"
-    | "reloaded"
-    | "replaced"
-    | "failed";
+    "pending" | "processing" | "ignored" | "reloaded" | "replaced" | "failed";
 
 type SourceFileChangedItem = SourceFileChange & {
     action: SourceFileChangeAction;
@@ -1028,11 +1024,18 @@ function AppInner() {
           })()
         : null;
 
-    const [rendering, setRendering] = useState<{
-        active: boolean;
-        progress: number | null;
-        target: string | null;
-    }>({ active: false, progress: null, target: null });
+    // 后端"播放/预渲染"状态：active/target 镜像进 Redux（state.session
+    // .playbackRenderingActive/Target）供播放轮询 reducer 在阻塞式预渲染期间
+    // 拒采陈旧传输态；进度百分比只影响状态栏展示，留在本地状态避免高频
+    // progress 事件惊动订阅全量 session 的组件。
+    const renderingActive = useAppSelector((state) => state.session.playbackRenderingActive);
+    const renderingTarget = useAppSelector((state) => state.session.playbackRenderingTarget);
+    const [renderingProgress, setRenderingProgress] = useState<number | null>(null);
+    const rendering = {
+        active: renderingActive,
+        progress: renderingProgress,
+        target: renderingTarget,
+    };
 
     const [stretching, setStretching] = useState<{
         active: boolean;
@@ -1354,13 +1357,24 @@ function AppInner() {
                                 : null;
                         const target = typeof payload?.target === "string" ? payload.target : null;
 
-                        setRendering({ active, progress: p, target });
+                        // 镜像进 Redux：阻塞式预渲染（target="original"）期间
+                        // 播放轮询 reducer 据此拒采陈旧传输态（App.tsx 的轮询
+                        // tick 守卫同样读取该状态）。进度只驱动状态栏，留在
+                        // 本地状态。
+                        dispatch(setPlaybackRenderingState({ active, target }));
+                        setRenderingProgress(p);
 
                         // 渲染从 active→inactive（完成）时，延迟同步一次播放状态，
-                        // 使前端能感知后端已真正开始播放。
+                        // 使前端能感知后端已真正开始播放。同样携带当前传输纪元
+                        // 与派发时刻，与 30Hz 轮询响应共享乱序丢弃与时延外推。
                         if (!active && renderingWasActiveRef.current) {
                             setTimeout(() => {
-                                dispatch(syncPlaybackState());
+                                dispatch(
+                                    syncPlaybackState({
+                                        epoch: store.getState().session._transportEpoch,
+                                        dispatchedAtMs: performance.now(),
+                                    }),
+                                );
                             }, 200);
                         }
                         renderingWasActiveRef.current = active;
@@ -1798,8 +1812,7 @@ function AppInner() {
         sourceFileCheckBusyRef.current = true;
         try {
             const result = (await webApi.checkSourceFilesChanged()) as
-                | { changed?: SourceFileChange[] }
-                | undefined;
+                { changed?: SourceFileChange[] } | undefined;
             const ignored = ignoredSourcePathsRef.current;
             const changes = normalizeSourceFileChanges(result?.changed ?? []).filter(
                 (change) => !ignored.has(change.source_path),
@@ -1835,8 +1848,7 @@ function AppInner() {
                 }
 
                 const refreshed = (await webApi.checkSourceFilesChanged()) as
-                    | { changed?: SourceFileChange[] }
-                    | undefined;
+                    { changed?: SourceFileChange[] } | undefined;
                 const remaining = normalizeSourceFileChanges(refreshed?.changed ?? []).filter(
                     (change) => !ignored.has(change.source_path),
                 );
@@ -1880,8 +1892,7 @@ function AppInner() {
         sourceFileCheckBusyRef.current = true;
         try {
             const result = (await webApi.checkSourceFilesChanged()) as
-                | { changed?: SourceFileChange[] }
-                | undefined;
+                { changed?: SourceFileChange[] } | undefined;
             const rawChanges = normalizeSourceFileChanges(result?.changed ?? []);
 
             setSourceFileChangedDialog((prev) => {
@@ -1941,8 +1952,7 @@ function AppInner() {
         sourceFileCheckBusyRef.current = true;
         try {
             const result = (await webApi.checkSourceFilesChanged()) as
-                | { changed?: SourceFileChange[] }
-                | undefined;
+                { changed?: SourceFileChange[] } | undefined;
             const changes = normalizeSourceFileChanges(result?.changed ?? []);
             markMissingSourceFilesUnavailable(changes);
             const items = changes.map((change) => ({ ...change, action: "pending" as const }));
@@ -2102,8 +2112,7 @@ function AppInner() {
             let becameMissing = false;
             try {
                 const result = (await webApi.checkSourceFilesChanged()) as
-                    | { changed?: SourceFileChange[] }
-                    | undefined;
+                    { changed?: SourceFileChange[] } | undefined;
                 const latest = normalizeSourceFileChanges(result?.changed ?? []).find(
                     (change) =>
                         change.clip_id === item.clip_id ||
@@ -2280,8 +2289,7 @@ function AppInner() {
         sourceFileCheckBusyRef.current = true;
         try {
             const result = (await webApi.checkSourceFilesChanged()) as
-                | { changed?: SourceFileChange[] }
-                | undefined;
+                { changed?: SourceFileChange[] } | undefined;
             const rawChanges = normalizeSourceFileChanges(result?.changed ?? []);
             const baseItems = sourceFileInitialChangesRef.current.map((item) => ({ ...item }));
             const changes = mergeLatestSourceFileChanges(baseItems, rawChanges)
@@ -2965,7 +2973,17 @@ function AppInner() {
             if (rendering.active && rendering.target === "original") return;
             if (playbackSyncInFlightRef.current) return;
             playbackSyncInFlightRef.current = true;
-            const p = dispatch(syncPlaybackState()) as unknown as Promise<unknown>;
+            // 派发时刻的传输纪元与时钟读数：响应迟到且期间发生过
+            // 播放/停止/seek/isPlaying 翻转时，reducer 把该响应按乱序丢弃；
+            // 时钟读数用于把采样位置外推到处理时刻（消除 IPC 时延滞后/抖动
+            // 造成的视觉跳变）。
+            const dispatchedAtMs = performance.now();
+            const p = dispatch(
+                syncPlaybackState({
+                    epoch: store.getState().session._transportEpoch,
+                    dispatchedAtMs,
+                }),
+            ) as unknown as Promise<unknown>;
             p.finally(() => {
                 playbackSyncInFlightRef.current = false;
             });

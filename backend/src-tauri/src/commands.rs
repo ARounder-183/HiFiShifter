@@ -119,6 +119,16 @@ pub fn set_transport(
     playhead_sec: Option<f64>,
     bpm: Option<f64>,
 ) -> serde_json::Value {
+    // 传输命令全序化（见 AppState::transport_lock 注释）：seek（含播放/停止
+    // 流程内的锚点恢复）必须与 play/stop 全序执行，否则与它们交错的 seek
+    // 会把 timeline.playhead_sec 写到中间态上。
+    // 经 state.inner() 取锁：guard 借用原始 'r 生命周期而非局部 State 包装，
+    // 否则随后按值传入内部函数会触发 E0505。
+    let _transport_order = state
+        .inner()
+        .transport_lock
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     core::set_transport(state, playhead_sec, bpm)
 }
 #[tauri::command(rename_all = "camelCase")]
@@ -1428,16 +1438,37 @@ pub fn set_metronome(
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde_json::Value {
+    // 传输命令全序化（见 AppState::transport_lock 注释）：快速连续
+    // 播放/暂停/停止时，Tauri 线程池的并发执行会让 stop 与 play 交错
+    // （stop 杀掉刚起的播放 / play 读到写了一半的 playhead），前端状态机
+    // 与引擎分裂后光标跳变。锁内工作最重的是节拍器响点表重建（毫秒级）。
+    let _transport_order = state
+        .inner()
+        .transport_lock
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     playback::play_original(state, start_sec)
 }
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn stop_audio(state: State<'_, AppState>) -> serde_json::Value {
+    let _transport_order = state
+        .inner()
+        .transport_lock
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     playback::stop_audio(state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_playback_state(state: State<'_, AppState>) -> crate::models::PlaybackStatePayload {
+    // 与播放/停止同一把锁：保证轮询读到的 (is_playing, base, position) 是
+    // 某个传输命令完成后的完整状态，而不是 stop+play 交错的中间态。
+    let _transport_order = state
+        .inner()
+        .transport_lock
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     playback::get_playback_state(state)
 }
 

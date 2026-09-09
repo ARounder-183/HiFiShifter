@@ -1538,7 +1538,7 @@ pub(super) fn stop_audio(state: State<'_, AppState>) -> serde_json::Value {
     // 改），仍停留在本次播放的起始位置；若不回写，暂停后的任何编辑操作回灌
     // 全量快照都会把前端播放头拉回"播放起始位置"。停止（Stop）流程随后由
     // 前端显式 seek 回锚点覆盖，不受影响。
-    // 必须在 stop() 之前取快照，且仅在确实在播放时写入——否则未播放时的
+    // 必须在 stop() 之前取快照，且仅在确实有可听位置时写入——否则未播放时的
     // stop 调用（如录音收尾）会把 0 写进播放头。仅改字段、不做撤销检查点
     // （与 set_transport 的 playhead 分支一致：播放头不参与撤销）。
     //
@@ -1546,15 +1546,26 @@ pub(super) fn stop_audio(state: State<'_, AppState>) -> serde_json::Value {
     // 仍在前进。因此把引擎的精确停止位置随响应返回（stopped_at_sec），
     // 前端在暂停时把视觉光标同步到该位置——否则视觉位置与后端记录的暂停点
     // 不一致，后续任何编辑回灌快照都会让光标再次右跳到真实位置。
+    //
+    // ★ 两类"有可听位置"的引擎状态都要覆盖：
+    // 1. is_playing=true —— 常规播放中的暂停（base+elapsed 即暂停点）；
+    // 2. is_playing=false 但 position>0 —— 后台预渲染遇未渲染 clip 时引擎
+    //    自动暂停：is_playing 已被音频回调翻转为 false，但 base+position 冻结
+    //    在真实停止点（handle_stop 之后 position 才会归零，二者可区分）。
+    //    此时同样要把该位置写回并返回，前端暂停分支才能把光标对齐到精确
+    //    冻结点（最后一次轮询采样略滞后）；停在"播放起始位置"的旧字段不动，
+    //    编辑回灌快照也不会把光标拉回。
     let pb = state.audio_engine.snapshot_state();
+    let audible_sec = if pb.is_playing || pb.position_sec > 1e-9 {
+        Some(pb.base_sec + pb.position_sec)
+    } else {
+        None
+    };
     let mut stopped_at_sec: Option<f64> = None;
-    if pb.is_playing {
-        let paused_sec = pb.base_sec + pb.position_sec;
-        if paused_sec.is_finite() && paused_sec >= 0.0 {
-            let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-            tl.playhead_sec = paused_sec;
-            stopped_at_sec = Some(paused_sec);
-        }
+    if let Some(paused_sec) = audible_sec.filter(|sec| sec.is_finite() && *sec >= 0.0) {
+        let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        tl.playhead_sec = paused_sec;
+        stopped_at_sec = Some(paused_sec);
     }
     state.audio_engine.stop();
     serde_json::json!({ "ok": true, "stopped_at_sec": stopped_at_sec })

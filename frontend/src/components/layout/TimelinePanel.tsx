@@ -148,6 +148,7 @@ const TimelineTransportBridge = React.memo(function TimelineTransportBridge(prop
     const transport = useAppSelector(
         (state) => ({
             playheadSec: state.session.playheadSec,
+            playheadSampledAtMs: state.session.playheadSampledAtMs,
             isPlaying: state.session.runtime.isPlaying,
             playbackPositionSec: state.session.runtime.playbackPositionSec,
         }),
@@ -160,6 +161,7 @@ const TimelineTransportBridge = React.memo(function TimelineTransportBridge(prop
 
     useVisualPlayhead({
         syncedPlayheadSec: transport.playheadSec,
+        syncedAtMs: transport.playheadSampledAtMs,
         isTransportAdvancing,
         onFrame: React.useCallback(
             (visualPlayheadSec: number) => {

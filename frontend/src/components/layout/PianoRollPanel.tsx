@@ -897,8 +897,7 @@ export const PianoRollPanel: React.FC = () => {
                     const type = String(payload.type ?? payload.event ?? "");
                     const paths: string[] = Array.isArray(payload.paths) ? payload.paths : [];
                     const pos = (payload.position ?? payload.pos ?? payload.cursorPosition) as
-                        | { x?: number; y?: number }
-                        | undefined;
+                        { x?: number; y?: number } | undefined;
                     const dpr = window.devicePixelRatio || 1;
                     const clientX = typeof pos?.x === "number" ? pos.x / dpr : undefined;
                     const clientY = typeof pos?.y === "number" ? pos.y / dpr : undefined;
@@ -1881,6 +1880,7 @@ export const PianoRollPanel: React.FC = () => {
 
     useVisualPlayhead({
         syncedPlayheadSec: s.playheadSec,
+        syncedAtMs: s.playheadSampledAtMs,
         isTransportAdvancing,
         onFrame: useCallback(
             (visualPlayheadSec: number) => {

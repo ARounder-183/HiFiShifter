@@ -69,15 +69,11 @@ export const stopAudioPlayback = createAsyncThunk(
             (options as { restoreAnchor?: boolean } | undefined)?.restoreAnchor,
         );
         const state = getState() as { session: SessionState };
-        const positionSec = Number(state.session.runtime.playbackPositionSec ?? 0);
-        const wasPlaying = Boolean(
-            state.session.runtime.isPlaying ||
-            positionSec > 1e-4 ||
-            Math.abs(
-                Number(state.session.playheadSec ?? 0) -
-                    Number(state.session.playbackAnchorSec ?? 0),
-            ) > 1e-4,
-        );
+        // pending reducer 在本 thunk 运行前已把 runtime.isPlaying 乐观置 false，
+        // "停止时是否真的打断了播放"以它捕获的翻转前快照为准 —— 任何基于
+        // playhead/anchor 差值的推断都会误判（暂停后按 Stop 把光标"恢复"到 0、
+        // 只 seek 过就按 Stop 跳到 0 等光标跳变）。
+        const wasPlaying = Boolean(state.session._stopInterruptedPlayback);
         const anchorSec = state.session.playbackAnchorSec;
         const result = await webApi.stopAudio();
         // Only restore when this stop action actually interrupted active playback.
@@ -99,9 +95,31 @@ export const updateTransportBpm = createAsyncThunk(
     },
 );
 
-export const syncPlaybackState = createAsyncThunk("session/syncPlaybackState", async () => {
-    return webApi.getPlaybackState();
-});
+/** `syncPlaybackState` 的派发参数（通过 meta.arg 传给 fulfilled reducer）。 */
+export interface SyncPlaybackStateArgs {
+    /** 派发时刻的传输纪元（乱序防护，见 sessionSlice._transportEpoch）。 */
+    epoch: number;
+    /** 派发时刻的 performance.now()（毫秒）：轮询载荷按"派发→处理"时延
+     * 外推到处理时刻（真实可听位置），消除 IPC 往返时延造成的视觉滞后。 */
+    dispatchedAtMs: number;
+}
+
+/**
+ * 同步播放状态（30Hz 播放轮询 / 渲染完成后的延迟同步）。
+ *
+ * 调用方必须传入派发时刻的传输纪元与时钟读数（见 `SyncPlaybackStateArgs`）：
+ * fulfilled reducer 据此丢弃跨 播放/停止/seek 传输操作的迟到响应（乱序
+ * 防护），并把采样位置外推到处理时刻（光标跳变防护，见 reducer 内注释）。
+ */
+export const syncPlaybackState = createAsyncThunk(
+    "session/syncPlaybackState",
+    // 纪元/时戳仅通过 meta.arg 传递给 fulfilled reducer，payload creator
+    // 本身不需要读取它们。
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    async (_args: SyncPlaybackStateArgs) => {
+        return webApi.getPlaybackState();
+    },
+);
 
 export const playOriginal = createAsyncThunk("session/playOriginal", async (_, { getState }) => {
     const state = getState() as { session: SessionState };

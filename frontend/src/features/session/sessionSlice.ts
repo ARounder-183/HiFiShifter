@@ -431,6 +431,19 @@ export interface SessionState {
     ortDeviceId: number | null;
     /** 后台预渲染：编辑后立即在后台渲染，无需等待播放触发 */
     autoBackgroundRender: boolean;
+    /**
+     * 后端"播放/预渲染"状态镜像（`playback_rendering_state` 事件）——只镜像
+     * 播放轮询 reducer 需要的 active/target 两个原始值字段（变化低频，且
+     * 订阅全量 session 的组件以 shallowEqual 比较，原始值不会因高频 progress
+     * 事件破坏相等性）；进度百分比由 App 本地状态展示。
+     *
+     * target="original"（阻塞式前台预渲染）active 期间，引擎尚未真正进入
+     * playing，`get_playback_state` 返回的是上一场播放/seek 的陈旧传输态 ——
+     * 播放轮询 reducer 据此拒采（见 syncPlaybackState.fulfilled），否则渲染
+     * 完成后迟到的"未播放"采样会把光标拽回播放起点并掐灭轮询。
+     */
+    playbackRenderingActive: boolean;
+    playbackRenderingTarget: string | null;
 
     // Monotonic bump token for invalidating parameter curve caches.
     // - Not included in undo/redo snapshots.
@@ -440,6 +453,19 @@ export interface SessionState {
     playbackRateVersion: number;
 
     playheadSec: number;
+    /**
+     * playheadSec 最近一次由**播放轮询**写入时的 performance.now()（毫秒，
+     * 与 RAF/视觉插值同一时钟源；0 表示从未由轮询写入）。
+     *
+     * 轮询载荷的 base+position 是"后端执行命令那一刻"的引擎位置；reducer
+     * 会把它按"派发→处理"的往返时延外推到处理时刻（真实可听位置）再写入，
+     * 并同时记录该时刻。useVisualPlayhead 据此把视觉插值锚定在采样时刻：
+     * 采样值与锚定时刻严格配对，IPC 往返时延及其抖动不再造成视觉光标的
+     * 系统性滞后与回跳（后台预渲染负载下时延可达数十～数百毫秒）。
+     * seek/stop/粘贴等非轮询写入不更新该时间戳 —— 陈旧的时间戳让
+     * useVisualPlayhead 走硬复位分支，不会被外推放大。
+     */
+    playheadSampledAtMs: number;
     /**
      * 待执行的“聚焦播放光标”请求（粘贴后跳转光标时设置）。
      *
@@ -572,6 +598,27 @@ export interface SessionState {
      * 总是最后一个生效，撤/重做等权威操作不受影响。
      */
     _latestEditRequestId: string | null;
+
+    /**
+     * 传输层纪元（单调递增）。播放头所有权在 播放/暂停/停止/seek 之间
+     * 交接的瞬间递增；30Hz 播放轮询在派发时携带当时的纪元，fulfilled 时
+     * 与当前纪元比对，不一致的响应（跨传输操作的迟到/乱序快照）直接丢弃。
+     *
+     * 背景：后端预渲染（ONNX 推理）会令 IPC 往返延迟至数十～数百毫秒，
+     * 停止→播放的间隙采样（引擎已归零 base/position）或停止前的播放采样
+     * 迟到后按旧语义应用，会把 isPlaying 复活/掐灭并把光标改写成 0 或旧
+     * 播放位置 —— 即反复播放/暂停/停止时播放光标跳变的主要根源。与
+     * `_latestHistoryOpRequestId` / seekPlayhead 的乱序防护同理。
+     */
+    _transportEpoch: number;
+
+    /**
+     * 最近一次 stop/pause 命令**开始瞬间**的真实播放状态（由
+     * `stopAudioPlayback.pending` 在乐观置 false 之前捕获）。
+     * `stopAudioPlayback` thunk 据此判定 wasPlaying（Stop 是否恢复锚点），
+     * 避免任何基于 playhead/anchor 差值的误判恢复（跳变）。
+     */
+    _stopInterruptedPlayback: boolean;
 }
 
 function clamp(value: number, minValue: number, maxValue: number): number {
@@ -1866,11 +1913,14 @@ const initialState: SessionState = {
     gpuDeviceId: 0,
     ortDeviceId: null,
     autoBackgroundRender: true,
+    playbackRenderingActive: false,
+    playbackRenderingTarget: null,
 
     paramsEpoch: 0,
     playbackRateVersion: 0,
 
     playheadSec: 0,
+    playheadSampledAtMs: 0,
     pendingPlayheadRevealSec: null,
     tracks: [
         {
@@ -1962,6 +2012,8 @@ const initialState: SessionState = {
     _interactionLockCount: 0,
     _latestHistoryOpRequestId: null,
     _latestEditRequestId: null,
+    _transportEpoch: 0,
+    _stopInterruptedPlayback: false,
 };
 
 export {
@@ -2342,6 +2394,14 @@ const sessionSlice = createSlice({
         },
         toggleAutoBackgroundRender(state) {
             state.autoBackgroundRender = !state.autoBackgroundRender;
+        },
+        /** 镜像后端 `playback_rendering_state` 事件的 active/target（进度走 App 本地状态）。 */
+        setPlaybackRenderingState(
+            state,
+            action: PayloadAction<{ active: boolean; target: string | null }>,
+        ) {
+            state.playbackRenderingActive = action.payload.active;
+            state.playbackRenderingTarget = action.payload.target;
         },
         setVisibleReferenceRootTrackIds(state, action: PayloadAction<string[]>) {
             state.visibleReferenceRootTrackIds = Array.from(
@@ -2946,12 +3006,18 @@ const sessionSlice = createSlice({
                         timeline?: TimelineState;
                         gpu_backend?: string;
                     };
+                    const nextIsPlaying = payload.is_playing ?? false;
+                    if (nextIsPlaying !== state.runtime.isPlaying) {
+                        // 播放状态被权威刷新翻转时推进传输纪元，使在途播放轮询
+                        // 的迟到响应（采样于翻转前的另一侧）被丢弃。
+                        state._transportEpoch = (Number(state._transportEpoch) || 0) + 1;
+                    }
                     state.runtime = {
                         device: payload.device,
                         modelLoaded: payload.model_loaded,
                         audioLoaded: payload.audio_loaded,
                         hasSynthesized: payload.has_synthesized,
-                        isPlaying: payload.is_playing ?? false,
+                        isPlaying: nextIsPlaying,
                         playbackTarget: payload.playback_target ?? null,
                         playbackPositionSec: state.runtime.playbackPositionSec,
                         playbackDurationSec: state.runtime.playbackDurationSec,
@@ -3664,7 +3730,13 @@ const sessionSlice = createSlice({
                 state.status = "Failed";
             })
 
-            .addCase(playOriginal.pending, (state) => setPending(state, "Playing original..."))
+            .addCase(playOriginal.pending, (state) => {
+                setPending(state, "Playing original...");
+                // 播放操作开始即交接播放头所有权：在途播放轮询（采样于本次
+                // 播放序列之前，可能携带停止间隙的 0 位置或旧播放位置）的
+                // 迟到响应按乱序丢弃，防止光标被拽回旧位置/0。
+                state._transportEpoch = (Number(state._transportEpoch) || 0) + 1;
+            })
             .addCase(playOriginal.fulfilled, (state, action) => {
                 state.busy = false;
                 state.lastResult = action.payload;
@@ -3680,16 +3752,37 @@ const sessionSlice = createSlice({
                 // Store the playhead position at which playback started,
                 // so Play/Stop can restore it.
                 state.playbackAnchorSec = ok ? (payload.anchorSec ?? 0) : 0;
+                if (ok) {
+                    // 传输层接管（引擎随即开始播放/进入预渲染等待）后推进纪元：
+                    // 播放命令序列期间（set_transport 与引擎真正 set_playing 之间）
+                    // 派发的轮询采样到"尚未播放"的引擎态，其迟到响应不得在
+                    // isPlaying 已翻转之后应用（否则会把光标写成 0/旧位置并
+                    // 短暂掐灭播放状态）。
+                    state._transportEpoch = (Number(state._transportEpoch) || 0) + 1;
+                }
                 state.status = ok ? "Playing original" : "Play original failed";
             })
             .addCase(playOriginal.rejected, setRejected)
 
             .addCase(stopAudioPlayback.pending, (state) => {
                 setPending(state, "Stopping audio...");
+                // 捕获"翻转前"的真实播放状态供 thunk 判定 wasPlaying：
+                // pending 先于 thunk 体运行，thunk 里读到的 runtime.isPlaying
+                // 已被本 reducer 置 false；停止是否真的打断了播放（决定
+                // Stop 是否恢复锚点）只能在此处留下快照。旧实现用
+                // playheadSec/anchor 差值推断，会在"暂停后按 Stop"、"只 seek
+                // 过就按 Stop"时误判，把光标恢复到 0（跳变）。
+                state._stopInterruptedPlayback = state.runtime.isPlaying;
                 // Pause UI immediately on user stop/pause command; backend sync will
                 // confirm the final transport state shortly after.
                 state.runtime.isPlaying = false;
                 state.runtime.playbackTarget = null;
+                // 停止/暂停操作开始即交接播放头所有权：在途播放轮询（采样于
+                // 本次停止之前、携带旧播放位置）的迟到响应按乱序丢弃 —— 否则
+                // 它会把 isPlaying 复活并把光标推回旧播放位置，随后的下一次
+                // 轮询发现引擎已停（base/position 归零）再经跃迁分支把光标
+                // 写成 0。这是后台预渲染负载下 IPC 延迟放大后最明显的跳变。
+                state._transportEpoch = (Number(state._transportEpoch) || 0) + 1;
             })
             .addCase(stopAudioPlayback.fulfilled, (state, action) => {
                 state.busy = false;
@@ -3725,8 +3818,17 @@ const sessionSlice = createSlice({
                 state.runtime.playbackPositionSec = 0;
                 state.runtime.playbackDurationSec = 0;
                 state.playbackClipId = null;
-                state.playbackAnchorSec = 0;
+                // ★ 保留锚点：暂停只结束"进行中的播放"，不清除"本次播放的起始
+                // 位置"。旧行为在暂停时把锚点清零，让"最近一次播放起点"信息
+                // 丢失（配合旧 wasPlaying 启发式会把 播放→暂停→停止 的光标
+                // "恢复"到工程开头）。保留后 Stop 始终能回到最近一次播放的
+                // 起点（与播放中按 Stop 的行为一致，也是 REAPER 语义）；是否
+                // 恢复由 thunk 的 wasPlaying（_stopInterruptedPlayback 快照）
+                // 把关，已停止后的重复 Stop 不会再次恢复，天然幂等。
                 state.status = payload.ok ? "Audio stopped" : "Stop audio failed";
+                // 权威停止已应用，推进传输纪元：丢弃停止命令序列期间派发的
+                // 轮询响应（其采样可能来自停止前后的任意一侧）。
+                state._transportEpoch = (Number(state._transportEpoch) || 0) + 1;
             })
             .addCase(stopAudioPlayback.rejected, setRejected)
 
@@ -3742,25 +3844,72 @@ const sessionSlice = createSlice({
                 if (!payload.ok) {
                     return;
                 }
+                // 阻塞式前台预渲染（target="original"）active 期间，引擎尚未
+                // 真正进入 playing，此刻的传输态是上一场播放/seek 的陈旧值，
+                // 一概拒采。渲染完成事件（active=false）先于渲染期间派发的
+                // 轮询响应被处理（同一 IPC 通道按序送达），所以该镜像可靠：
+                // 没有它，短渲染（全缓存命中）完成后实时轮询已推进光标，
+                // 迟到的"未播放"采样（纪元未变、乱序防护拦不住）会经跃迁
+                // 分支把光标拽回播放起点、掐灭 isPlaying 并让轮询停摆 ——
+                // 光标卡死而音频继续播。
+                if (state.playbackRenderingActive && state.playbackRenderingTarget === "original") {
+                    return;
+                }
+                // 乱序防护：轮询在派发时携带当时的传输纪元，响应到达时若纪元
+                // 已推进（期间发生过 播放/停止/seek 或 isPlaying 翻转），说明
+                // 该快照采样于旧的传输状态 —— 按新语义应用会把 isPlaying 复活/
+                // 掐灭，并把光标改写成旧播放位置或 0（反复播放/暂停/停止时
+                // 播放光标跳变的主要根源）。直接丢弃，等下一次轮询读取新态。
+                // arg 缺省（如测试夹具）时保持旧行为不拦截。
+                const arg = action.meta.arg as
+                    { epoch?: number; dispatchedAtMs?: number } | undefined;
+                if (arg && typeof arg.epoch === "number" && arg.epoch !== state._transportEpoch) {
+                    return;
+                }
 
                 const nextIsPlaying = Boolean(payload.is_playing);
                 const nextTarget = payload.target ?? null;
                 const nextPositionSec = payload.position_sec ?? 0;
                 const nextDurationSec = payload.duration_sec ?? 0;
 
+                // 采样外推：payload 的 base+position 是"后端执行命令那一刻"
+                // 的引擎位置；从派发到本 reducer 处理（≈IPC 到达）的往返时延
+                // 内引擎继续前进。把它外推到处理时刻才是此刻的真实可听位置
+                // —— 否则视觉插值会系统性滞后一个往返时延（后台预渲染负载下
+                // 可达数十~数百毫秒），且时延抖动会让光标在每次采样到达时
+                // 反复回跳、暂停时前跳、播放时后跳。外推后"采样值=到达时刻
+                // 位置"与锚定时刻严格配对，插值逐样本精确（见
+                // useVisualPlayhead 的锚定注释）。
+                // 引擎已冻结（停止/自动暂停）时不外推：冻结位置是真实停止点。
+                const sampledNowMs = performance.now();
+                const dispatchedAtMs = arg?.dispatchedAtMs;
+                const latencySec =
+                    nextIsPlaying && typeof dispatchedAtMs === "number"
+                        ? Math.max(0, (sampledNowMs - dispatchedAtMs) / 1000)
+                        : 0;
+
                 // 0.5ms 阈值：避免轮询带来的浮点抖动导致无意义的 Redux 更新
                 const EPS_SEC = 0.0005;
 
                 let nextplayheadSec = state.playheadSec;
                 if (nextIsPlaying) {
-                    const absSec = (payload.base_sec ?? 0) + nextPositionSec;
+                    const absSec = (payload.base_sec ?? 0) + nextPositionSec + latencySec;
                     nextplayheadSec = Math.max(0, absSec);
                 } else if (state.runtime.isPlaying) {
                     // 播放→停止跃迁（音频自然结束 / 引擎等待重渲染时自动暂停）：
                     // 引擎的 position 冻结在真实停止点，而本地光标还停留在最后
                     // 一次轮询采样（略落后）。对齐一次，保证视觉位置 = 真实
                     // 位置；此后的轮询（is_playing=false 分支）不再改写光标。
-                    nextplayheadSec = Math.max(0, (payload.base_sec ?? 0) + nextPositionSec);
+                    //
+                    // 防呆：引擎被用户停止（handle_stop）后 base/position 一并
+                    // 归零。竞态下（阻塞预渲染窗口溜进的轮询、乱序响应）这个
+                    // 0/0 不代表真实停止点 —— 写 0 会把光标拽到工程开头。真实
+                    // 冻结点（自动暂停 / 自然结束）总是 > 0；从 0.0 起播且首个
+                    // 块即自动暂停时冻结点本就是 0，光标已在该处，不写亦无偏差。
+                    const frozenSec = Math.max(0, (payload.base_sec ?? 0) + nextPositionSec);
+                    if (frozenSec > EPS_SEC) {
+                        nextplayheadSec = frozenSec;
+                    }
                 }
 
                 const shouldUpdatePlaybackFields =
@@ -3775,6 +3924,14 @@ const sessionSlice = createSlice({
                     return;
                 }
 
+                if (nextIsPlaying !== state.runtime.isPlaying) {
+                    // 应用 isPlaying 跃迁的同时推进传输纪元：同一窗口内其他
+                    // 在途轮询（采样于跃迁另一侧，如 200ms 渲染完成延迟同步与
+                    // 30Hz 轮询并发）的迟到响应按乱序丢弃，避免把刚应用的
+                    // 跃迁再次翻转/回退。
+                    state._transportEpoch = (Number(state._transportEpoch) || 0) + 1;
+                }
+
                 state.runtime.isPlaying = nextIsPlaying;
                 state.runtime.playbackTarget = nextTarget;
                 state.runtime.playbackPositionSec = nextPositionSec;
@@ -3782,6 +3939,9 @@ const sessionSlice = createSlice({
 
                 if (nextIsPlaying || nextplayheadSec !== state.playheadSec) {
                     state.playheadSec = nextplayheadSec;
+                    // 记录采样时刻：视觉插值据此把外推直线锚定在该时刻
+                    // （而非 React 提交时刻），使采样值与锚定时刻严格配对。
+                    state.playheadSampledAtMs = sampledNowMs;
                 }
                 if (!nextIsPlaying) {
                     state.playbackClipId = null;
@@ -4021,8 +4181,7 @@ const sessionSlice = createSlice({
             .addCase(pickProjectToImport.fulfilled, (state, action) => {
                 state.busy = false;
                 const payload = action.payload as
-                    | { ok: true; canceled: true }
-                    | { ok: true; canceled: false; path: string };
+                    { ok: true; canceled: true } | { ok: true; canceled: false; path: string };
                 if (!payload || (payload as { canceled?: boolean }).canceled) {
                     state.status = "Import canceled";
                 }
@@ -5232,6 +5391,12 @@ const sessionSlice = createSlice({
                 }
             })
 
+            .addCase(seekPlayhead.pending, (state) => {
+                // seek 交接播放头所有权：seek 之前派发的在途播放轮询采样的是
+                // seek 前的引擎位置，其迟到响应会把光标拽回旧位置（先跳回再
+                // 被 seek 后的轮询拉回 —— 播放中点击标尺/拖拽时的可见跳变）。
+                state._transportEpoch = (Number(state._transportEpoch) || 0) + 1;
+            })
             .addCase(seekPlayhead.fulfilled, (state, action) => {
                 const payload = action.payload as {
                     ok?: boolean;
@@ -5411,6 +5576,7 @@ export const {
     setDragDirection,
     setEdgeSmoothnessPercent,
     setplayheadSec,
+    setPlaybackRenderingState,
     setPendingPlayheadReveal,
     setModelDir,
     setAudioPath,
