@@ -469,6 +469,18 @@ pub fn run() {
         })
         // 在窗口事件中监听 CloseRequested，保存窗口状态到配置目录
         .on_window_event(|win, event| {
+            // 主窗口真正销毁（其 CloseRequested 可能被前端的"未保存更改"确认
+            // 拦截，因此必须挂 Destroyed 而非 CloseRequested）→ 退出应用。
+            // 否则"外观设置"等子窗口会让进程继续存活，出现主窗口已关、
+            // 子窗口残留且无法关闭的情况；exit 会先同步关闭全部剩余窗口，
+            // 再走 RunEvent::Exit 的引擎/会话清理。
+            if let tauri::WindowEvent::Destroyed = event {
+                if win.label() == "main" {
+                    win.app_handle().exit(0);
+                }
+                return;
+            }
+
             if let tauri::WindowEvent::CloseRequested { .. } = event {
                 // 仅针对主窗口保存状态
                 if win.label() != "main" {

@@ -168,6 +168,7 @@ export const jaJP = {
     lang_ko: "한국어",
 
     theme: "テーマ",
+    theme_auto: "自動",
     theme_dark: "ダーク",
     theme_light: "ライト",
 

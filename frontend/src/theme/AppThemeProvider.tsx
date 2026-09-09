@@ -26,17 +26,22 @@ import type {
     RadixRadius,
     AppearanceSettings,
     QtColorToken,
+    ThemeModeSetting,
 } from "./themeTypes";
 import { QT_COLOR_TOKENS } from "./themeTypes";
 import { loadAppearance, saveAppearance, loadCustomThemes } from "./themeStorage";
 
+/** 实际渲染用的主题模式（由设置解析而来；auto 已解析为当前系统偏好）。 */
 export type ThemeMode = "dark" | "light";
 const PREVIEW_SETTINGS_KEY = "hifishifter.appearance.preview";
 const PREVIEW_COLORS_KEY = "hifishifter.appearance.preview.colors";
 
 interface ThemeContextValue {
+    /** 解析后的实际渲染模式（auto → 系统 Deep/浅色）。 */
     mode: ThemeMode;
-    setMode: (mode: ThemeMode) => void;
+    /** 用户设置的主题模式（未解析，含 auto）。 */
+    modeSetting: ThemeModeSetting;
+    setMode: (mode: ThemeModeSetting) => void;
     toggleMode: () => void;
 
     /* ── Radix Theme 动态属性 ── */
@@ -68,11 +73,27 @@ function loadInitialAppearance(): AppearanceSettings {
 export function AppThemeProvider({ children }: PropsWithChildren) {
     const [appearance, setAppearance] = useState<AppearanceSettings>(loadInitialAppearance);
 
+    // 系统深浅色偏好（auto 模式的解析来源），随系统切换实时更新。
+    const [systemDark, setSystemDark] = useState<boolean>(
+        () => window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? true,
+    );
+
+    useEffect(() => {
+        const mq = window.matchMedia?.("(prefers-color-scheme: dark)");
+        if (!mq) return;
+        const onChange = (e: MediaQueryListEvent) => setSystemDark(e.matches);
+        mq.addEventListener("change", onChange);
+        return () => mq.removeEventListener("change", onChange);
+    }, []);
+
     // 快照：用于打开外观设置对话框时保存当前状态，关闭时如果未保存则回退
     const snapshotRef = useRef<AppearanceSettings | null>(null);
 
     /* ── 独立 state（方便子组件直接控制） ── */
-    const mode = appearance.mode;
+    const modeSetting = appearance.mode;
+    // auto → 系统偏好；显式 dark/light 原样使用。
+    const mode: ThemeMode =
+        modeSetting === "auto" ? (systemDark ? "dark" : "light") : modeSetting;
     const accentColor = appearance.accentColor;
     const grayColor = appearance.grayColor;
     const radius = appearance.radius;
@@ -88,18 +109,19 @@ export function AppThemeProvider({ children }: PropsWithChildren) {
     );
 
     const setMode = useCallback(
-        (next: ThemeMode) => {
+        (next: ThemeModeSetting) => {
             updateField("mode", next);
         },
         [updateField],
     );
 
     const toggleMode = useCallback(() => {
-        setAppearance((prev) => ({
-            ...prev,
-            mode: prev.mode === "dark" ? "light" : "dark",
-        }));
-    }, []);
+        setAppearance((prev) => {
+            // auto 视为当前解析值，切换到其相反模式（退出 auto）。
+            const resolved = prev.mode === "auto" ? (systemDark ? "dark" : "light") : prev.mode;
+            return { ...prev, mode: resolved === "dark" ? "light" : "dark" };
+        });
+    }, [systemDark]);
 
     const setAccentColor = useCallback(
         (color: RadixAccentColor) => {
@@ -257,6 +279,7 @@ export function AppThemeProvider({ children }: PropsWithChildren) {
     const value = useMemo<ThemeContextValue>(
         () => ({
             mode,
+            modeSetting,
             setMode,
             toggleMode,
             accentColor,
@@ -273,6 +296,7 @@ export function AppThemeProvider({ children }: PropsWithChildren) {
         }),
         [
             mode,
+            modeSetting,
             setMode,
             toggleMode,
             accentColor,

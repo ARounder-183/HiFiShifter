@@ -811,21 +811,33 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         </DropdownMenu.SubContent>
                     </DropdownMenu.Sub>
                     <DropdownMenu.Separator />
-                    <DropdownMenu.Item
-                        onSelect={() => {
-                            const nextMode = theme.mode === "dark" ? "light" : "dark";
-                            theme.applySettings({
-                                mode: nextMode,
-                                accentColor: theme.accentColor,
-                                grayColor: theme.grayColor,
-                                radius: theme.radius,
-                                fontFamily: theme.fontFamily,
-                                activeCustomThemeId: theme.activeCustomThemeId,
-                            });
-                        }}
-                    >
-                        {t("theme")}: {theme.mode === "dark" ? t("theme_dark") : t("theme_light")}
-                    </DropdownMenu.Item>
+                    <DropdownMenu.Sub>
+                        <DropdownMenu.SubTrigger>
+                            {`${t("theme")}: ${tAny(`theme_${theme.modeSetting}`)}`}
+                        </DropdownMenu.SubTrigger>
+                        <DropdownMenu.SubContent>
+                            {(["auto", "dark", "light"] as const).map((mode) => (
+                                <DropdownMenu.Item
+                                    key={mode}
+                                    onSelect={() => {
+                                        theme.applySettings({
+                                            mode,
+                                            accentColor: theme.accentColor,
+                                            grayColor: theme.grayColor,
+                                            radius: theme.radius,
+                                            fontFamily: theme.fontFamily,
+                                            activeCustomThemeId: theme.activeCustomThemeId,
+                                        });
+                                    }}
+                                >
+                                    {withCheck(
+                                        theme.modeSetting === mode,
+                                        tAny(`theme_${mode}`),
+                                    )}
+                                </DropdownMenu.Item>
+                            ))}
+                        </DropdownMenu.SubContent>
+                    </DropdownMenu.Sub>
                     <DropdownMenu.Item onSelect={() => setAppearanceDialogOpen(true)}>
                         {tAny("menu_appearance_settings")}
                     </DropdownMenu.Item>

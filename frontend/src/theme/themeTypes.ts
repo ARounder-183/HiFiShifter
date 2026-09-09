@@ -233,10 +233,16 @@ export interface ThemeExportData {
 
 /* ─────────────────── 外观设置 ─────────────────── */
 
+/** 主题模式设置：auto = 跟随系统深浅色偏好（实时同步系统切换） */
+export type ThemeModeSetting = "auto" | "dark" | "light";
+
+/** 所有主题模式（按 UI 显示顺序） */
+export const THEME_MODE_SETTINGS: ThemeModeSetting[] = ["auto", "dark", "light"];
+
 /** 用户外观偏好 */
 export interface AppearanceSettings {
-    /** 主题模式 */
-    mode: "dark" | "light";
+    /** 主题模式（auto 由 AppThemeProvider 解析为当前系统偏好） */
+    mode: ThemeModeSetting;
     /** Radix 强调色 */
     accentColor: RadixAccentColor;
     /** Radix 灰阶色系 */
@@ -251,7 +257,7 @@ export interface AppearanceSettings {
 
 /** 默认外观设置 */
 export const DEFAULT_APPEARANCE: AppearanceSettings = {
-    mode: "dark",
+    mode: "auto",
     accentColor: "iris",
     grayColor: "mauve",
     radius: "medium",

@@ -245,6 +245,7 @@ export const koKR = {
     lang_ko: "한국어",
 
     theme: "테마",
+    theme_auto: "자동",
     theme_dark: "다크",
     theme_light: "라이트",
 

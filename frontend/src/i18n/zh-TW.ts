@@ -159,6 +159,7 @@ export const zhTW = {
     lang_ko: "한국어",
 
     theme: "主題",
+    theme_auto: "自動",
     theme_dark: "深色",
     theme_light: "淺色",
 

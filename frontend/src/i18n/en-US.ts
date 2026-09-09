@@ -251,6 +251,7 @@ export const enUS = {
     lang_ko: "한국어",
 
     theme: "Theme",
+    theme_auto: "Auto",
     theme_dark: "Dark",
     theme_light: "Light",
 

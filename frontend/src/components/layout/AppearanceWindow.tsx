@@ -28,6 +28,7 @@ import {
     type RadixRadius,
     type CustomTheme,
     type QtColorToken,
+    type ThemeModeSetting,
 } from "../../theme/themeTypes";
 import { getBuiltinThemeColors } from "../../theme/defaultThemes";
 import {
@@ -129,6 +130,31 @@ const PALETTE_GROUPS: Array<{ labelKey: string; tokens: QtColorToken[] }> = [
 
 const CARD_CLASS = "rounded-md border border-qt-border bg-qt-panel";
 const SECTION_LABEL_CLASS = "text-[11px] font-semibold text-qt-text";
+
+/** 主题模式卡片的迷你预览配色：auto = 深浅各半（示意跟随系统）。 */
+const MODE_PREVIEW: Record<
+    ThemeModeSetting,
+    { bg: string; top: string; bar1: string; bar2: string }
+> = {
+    auto: {
+        bg: "linear-gradient(90deg, #2d2d2d 50%, #f0f0f0 50%)",
+        top: "linear-gradient(90deg, #353535 50%, #ffffff 50%)",
+        bar1: "rgba(59,130,246,0.4)",
+        bar2: "#404040",
+    },
+    dark: {
+        bg: "#2d2d2d",
+        top: "#353535",
+        bar1: "rgba(59,130,246,0.4)",
+        bar2: "#404040",
+    },
+    light: {
+        bg: "#f0f0f0",
+        top: "#ffffff",
+        bar1: "rgba(91,91,214,0.3)",
+        bar2: "#d9d9e0",
+    },
+};
 const SECONDARY_BUTTON_CLASS =
     "px-3 py-1.5 text-[11px] font-medium rounded border border-qt-border bg-qt-surface text-qt-text-muted hover:bg-qt-hover hover:text-qt-text transition-colors cursor-pointer select-none";
 const PRIMARY_BUTTON_CLASS =
@@ -435,7 +461,7 @@ async function emitThemeApplied() {
 
 async function emitThemePreview(payload: {
     settings: {
-        mode: "dark" | "light";
+        mode: ThemeModeSetting;
         accentColor: RadixAccentColor;
         grayColor: RadixGrayColor;
         radius: RadixRadius;
@@ -611,10 +637,12 @@ export const AppearanceWindow: React.FC = () => {
     }, [editColors, theme.mode]);
 
     useEffect(() => {
+        // 预览/应用均透传"设置值"（含 auto），而非解析后的具体模式，
+        // 避免把 auto 固化成 dark/light；各窗口自行按系统偏好解析。
         localStorage.setItem(
             PREVIEW_SETTINGS_KEY,
             JSON.stringify({
-                mode: theme.mode,
+                mode: theme.modeSetting,
                 accentColor,
                 grayColor,
                 radius,
@@ -624,7 +652,7 @@ export const AppearanceWindow: React.FC = () => {
         localStorage.setItem(PREVIEW_COLORS_KEY, JSON.stringify(editColors));
         void emitThemePreview({
             settings: {
-                mode: theme.mode,
+                mode: theme.modeSetting,
                 accentColor,
                 grayColor,
                 radius,
@@ -632,7 +660,7 @@ export const AppearanceWindow: React.FC = () => {
             },
             colors: editColors,
         });
-    }, [theme.mode, accentColor, grayColor, radius, fontFamily, editColors]);
+    }, [theme.modeSetting, accentColor, grayColor, radius, fontFamily, editColors]);
 
     /* ── 应用 & 关闭 ── */
     const handleApply = useCallback(() => {
@@ -665,7 +693,7 @@ export const AppearanceWindow: React.FC = () => {
         }
 
         theme.applySettings({
-            mode: theme.mode,
+            mode: theme.modeSetting,
             accentColor,
             grayColor,
             radius,
@@ -968,10 +996,10 @@ export const AppearanceWindow: React.FC = () => {
                                 <span className={SECTION_LABEL_CLASS}>
                                     {tAny("appearance_mode")}
                                 </span>
-                                <div className="grid grid-cols-2 gap-2">
-                                    {(["dark", "light"] as const).map((mode) => {
-                                        const isSelected = theme.mode === mode;
-                                        const isDarkMode = mode === "dark";
+                                <div className="grid grid-cols-3 gap-2">
+                                    {(["auto", "dark", "light"] as const).map((mode) => {
+                                        const isSelected = theme.modeSetting === mode;
+                                        const preview = MODE_PREVIEW[mode];
                                         return (
                                             <button
                                                 key={mode}
@@ -986,45 +1014,27 @@ export const AppearanceWindow: React.FC = () => {
                                             >
                                                 <div
                                                     className="w-full h-10 rounded-lg overflow-hidden relative"
-                                                    style={{
-                                                        backgroundColor: isDarkMode
-                                                            ? "#2d2d2d"
-                                                            : "#f0f0f0",
-                                                    }}
+                                                    style={{ backgroundColor: preview.bg }}
                                                 >
                                                     <div
                                                         className="absolute inset-x-0 top-0 h-3"
-                                                        style={{
-                                                            backgroundColor: isDarkMode
-                                                                ? "#353535"
-                                                                : "#fff",
-                                                        }}
+                                                        style={{ backgroundColor: preview.top }}
                                                     />
                                                     <div className="absolute bottom-1 left-1.5 right-1.5 flex gap-0.5">
                                                         <div
                                                             className="h-1.5 flex-1 rounded-sm"
-                                                            style={{
-                                                                backgroundColor: isDarkMode
-                                                                    ? "rgba(59,130,246,0.4)"
-                                                                    : "rgba(91,91,214,0.3)",
-                                                            }}
+                                                            style={{ backgroundColor: preview.bar1 }}
                                                         />
                                                         <div
                                                             className="h-1.5 flex-1 rounded-sm"
-                                                            style={{
-                                                                backgroundColor: isDarkMode
-                                                                    ? "#404040"
-                                                                    : "#d9d9e0",
-                                                            }}
+                                                            style={{ backgroundColor: preview.bar2 }}
                                                         />
                                                     </div>
                                                 </div>
                                                 <span
                                                     className={`text-[10px] font-medium ${isSelected ? "text-qt-highlight" : "text-qt-text-muted"}`}
                                                 >
-                                                    {tAny(
-                                                        isDarkMode ? "theme_dark" : "theme_light",
-                                                    )}
+                                                    {tAny(`theme_${mode}`)}
                                                 </span>
                                             </button>
                                         );

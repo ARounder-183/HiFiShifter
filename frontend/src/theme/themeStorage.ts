@@ -19,6 +19,7 @@ import {
     RADIX_ACCENT_COLORS,
     RADIX_GRAY_COLORS,
     RADIX_RADIUS_OPTIONS,
+    THEME_MODE_SETTINGS,
 } from "./themeTypes";
 
 /* ─────────── Storage Keys ─────────── */
@@ -36,7 +37,12 @@ export function loadAppearance(): AppearanceSettings {
         const raw = localStorage.getItem(APPEARANCE_KEY);
         if (raw) {
             const parsed = JSON.parse(raw) as Partial<AppearanceSettings>;
-            return { ...DEFAULT_APPEARANCE, ...parsed };
+            const settings = { ...DEFAULT_APPEARANCE, ...parsed };
+            // mode 只接受合法值（旧数据 dark/light 仍有效；脏数据回退默认）。
+            if (!THEME_MODE_SETTINGS.includes(settings.mode)) {
+                settings.mode = DEFAULT_APPEARANCE.mode;
+            }
+            return settings;
         }
     } catch {
         // fallthrough
@@ -48,11 +54,8 @@ export function loadAppearance(): AppearanceSettings {
         return { ...DEFAULT_APPEARANCE, mode: legacyMode };
     }
 
-    // 检测系统偏好
-    const prefersDark =
-        typeof window !== "undefined" &&
-        window.matchMedia?.("(prefers-color-scheme: dark)").matches;
-    return { ...DEFAULT_APPEARANCE, mode: prefersDark ? "dark" : "light" };
+    // 默认：自动跟随系统深浅色（由 AppThemeProvider 实时解析系统偏好）。
+    return { ...DEFAULT_APPEARANCE };
 }
 
 /** 保存外观设置 */

@@ -158,6 +158,7 @@ export const zhCN = {
     lang_ko: "한국어",
 
     theme: "主题",
+    theme_auto: "自动",
     theme_dark: "深色",
     theme_light: "浅色",
 
