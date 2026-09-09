@@ -263,6 +263,90 @@ pub struct TempoPointPayload {
     pub scale: Option<TempoScalePayload>,
 }
 
+// ─── 静音检测（Silence Detection）载荷 ───────────────────────────────────────
+
+/// 静音检测选项（与 audio/silence_detect.rs 的 SilenceDetectOptions 一一对应）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SilenceDetectOptionsPayload {
+    /// "rms"（默认）| "peak"。
+    #[serde(default)]
+    pub method: String,
+    /// 阈值 dBFS（−96…−6）。
+    #[serde(default)]
+    pub threshold_db: f64,
+    /// 自适应阈值（估计噪底 + 6 dB，忽略 threshold_db）。
+    #[serde(default)]
+    pub adaptive: bool,
+    /// 最短静音时长 ms。
+    #[serde(default)]
+    pub min_silence_ms: f64,
+    /// 最短发声时长 ms（0 = 关）。
+    #[serde(default)]
+    pub min_sound_ms: f64,
+    /// 保留余量 ms。
+    #[serde(default)]
+    pub padding_ms: f64,
+    /// 切口淡化 ms（0 = 关）。
+    #[serde(default)]
+    pub cut_fade_ms: f64,
+    /// 动作："close"（切除并闭合，默认）| "keep"（仅切除保留间隙）| "split"（仅切分）。
+    #[serde(default)]
+    pub action: String,
+    /// 全静音 Clip 是否删除。
+    #[serde(default = "default_true_value")]
+    pub delete_silent_clips: bool,
+    /// 跨 Take 同步：true = 所有 Take 的静音并集决定切点；false = 仅活跃 Take。
+    #[serde(default)]
+    pub sync_all_takes: bool,
+}
+
+fn default_true_value() -> bool {
+    true
+}
+
+/// 单个静音区间（时间线绝对秒锚定）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SilenceRegionPayload {
+    pub start_sec: f64,
+    pub end_sec: f64,
+}
+
+/// 单个 Clip 的静音分析报告。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipSilenceReportPayload {
+    pub clip_id: String,
+    pub ok: bool,
+    /// 跳过 / 失败原因："no_audio_source" | "source_missing" | 其他后端消息。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    pub fully_silent: bool,
+    pub total_silent_sec: f64,
+    pub regions: Vec<SilenceRegionPayload>,
+}
+
+/// `analyze_clip_silence`（干跑预览）结果。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SilenceAnalyzeResultPayload {
+    pub ok: bool,
+    pub reports: Vec<ClipSilenceReportPayload>,
+}
+
+/// `remove_clip_silence`（执行切除）结果：整包时间线快照 + 报告 + 选区线索。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveSilenceResultPayload {
+    pub ok: bool,
+    pub timeline: TimelineStatePayload,
+    pub reports: Vec<ClipSilenceReportPayload>,
+    /// 处理后仍存在的片段 id（供前端恢复选区）。
+    pub kept_clip_ids: Vec<String>,
+    pub removed_clip_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct TimelineStatePayload {

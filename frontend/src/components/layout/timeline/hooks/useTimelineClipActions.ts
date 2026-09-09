@@ -88,12 +88,15 @@ export interface UseTimelineClipActionsResult {
         x: number;
         y: number;
         trackId: string;
+        /** 右键点击位置对应的时间轴时间（秒），供“关闭间隙”等位置锚定操作使用。 */
+        timeSec: number;
     } | null;
     setTrackAreaMenu: React.Dispatch<
         React.SetStateAction<{
             x: number;
             y: number;
             trackId: string;
+            timeSec: number;
         } | null>
     >;
     importModeMenu: {
@@ -274,6 +277,7 @@ export function useTimelineClipActions(
         x: number;
         y: number;
         trackId: string;
+        timeSec: number;
     } | null>(null);
     const [importModeMenu, setImportModeMenu] = useState<{
         x: number;

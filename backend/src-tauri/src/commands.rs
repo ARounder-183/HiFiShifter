@@ -23,6 +23,7 @@ mod file_browser;
 mod midi;
 #[path = "commands/midi_export.rs"]
 mod midi_export;
+pub(crate) use midi_export::TempoTickConverter;
 #[path = "commands/onnx_status.rs"]
 mod onnx_status;
 #[path = "commands/params.rs"]
@@ -35,6 +36,8 @@ mod pitch_progress;
 mod formant;
 #[path = "commands/playback.rs"]
 pub(crate) mod playback;
+#[path = "commands/silence.rs"]
+mod silence;
 #[path = "commands/processor_caps.rs"]
 mod processor_caps;
 #[path = "commands/project.rs"]
@@ -997,6 +1000,49 @@ pub fn split_clips_at(
     timeline::split_clips_at(state, clip_ids, split_sec)
 }
 #[tauri::command(rename_all = "camelCase")]
+pub async fn analyze_clip_silence(
+    app: tauri::AppHandle,
+    clip_ids: Vec<String>,
+    options: crate::models::SilenceDetectOptionsPayload,
+) -> crate::models::SilenceAnalyzeResultPayload {
+    // 逐 Take 全文件解码 + 逐 hop 分析是重活，且设置对话框的实时预览会在
+    // 每次选项变化时重新调用：走 spawn_blocking，避免阻塞 UI 命令线程
+    // （与 analyze_clip_formants 同款）。JoinError（任务 panic）按
+    // "无报告"干跑处理。
+    tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        silence::analyze_clip_silence(state, clip_ids, options)
+    })
+    .await
+    .unwrap_or(crate::models::SilenceAnalyzeResultPayload {
+        ok: false,
+        reports: Vec::new(),
+    })
+}
+#[tauri::command(rename_all = "camelCase")]
+pub async fn remove_clip_silence(
+    app: tauri::AppHandle,
+    clip_ids: Vec<String>,
+    options: crate::models::SilenceDetectOptionsPayload,
+) -> Result<crate::models::RemoveSilenceResultPayload, String> {
+    // 同上：切除前的分析与几何变换都是重活，卸载到阻塞线程池。
+    // 返回 Err（含任务 panic）时前端保持对话框打开并呈现失败。
+    tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        silence::remove_clip_silence(state, clip_ids, options)
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+#[tauri::command(rename_all = "camelCase")]
+pub fn close_track_gaps(
+    state: State<'_, AppState>,
+    track_id: String,
+    from_sec: f64,
+) -> crate::models::TimelineStatePayload {
+    timeline::close_track_gaps(state, track_id, from_sec)
+}
+#[tauri::command(rename_all = "camelCase")]
 pub fn glue_clips(
     state: State<'_, AppState>,
     clip_ids: Vec<String>,
@@ -1367,6 +1413,18 @@ pub async fn quick_export_selected_clips(
 }
 
 // ===================== playback =====================
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_metronome(
+    state: State<'_, AppState>,
+    enabled: bool,
+    gain: f64,
+    mode: String,
+    accent: bool,
+    sound: String,
+) -> serde_json::Value {
+    playback::set_metronome(state, enabled, gain, mode, accent, sound)
+}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde_json::Value {

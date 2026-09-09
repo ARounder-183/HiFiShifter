@@ -26,17 +26,22 @@ import type {
     RadixRadius,
     AppearanceSettings,
     QtColorToken,
+    ThemeModeSetting,
 } from "./themeTypes";
 import { QT_COLOR_TOKENS } from "./themeTypes";
 import { loadAppearance, saveAppearance, loadCustomThemes } from "./themeStorage";
 
+/** 实际渲染用的主题模式（由设置解析而来；auto 已解析为当前系统偏好）。 */
 export type ThemeMode = "dark" | "light";
 const PREVIEW_SETTINGS_KEY = "hifishifter.appearance.preview";
 const PREVIEW_COLORS_KEY = "hifishifter.appearance.preview.colors";
 
 interface ThemeContextValue {
+    /** 解析后的实际渲染模式（auto → 系统 Deep/浅色）。 */
     mode: ThemeMode;
-    setMode: (mode: ThemeMode) => void;
+    /** 用户设置的主题模式（未解析，含 auto）。 */
+    modeSetting: ThemeModeSetting;
+    setMode: (mode: ThemeModeSetting) => void;
     toggleMode: () => void;
 
     /* ── Radix Theme 动态属性 ── */
@@ -68,11 +73,31 @@ function loadInitialAppearance(): AppearanceSettings {
 export function AppThemeProvider({ children }: PropsWithChildren) {
     const [appearance, setAppearance] = useState<AppearanceSettings>(loadInitialAppearance);
 
+    // 系统深浅色偏好（auto 模式的解析来源），随系统切换实时更新。
+    const [systemDark, setSystemDark] = useState<boolean>(() => {
+        // 无 window 的环境（SSR / 部分测试）下直接读 window 会抛
+        // ReferenceError：`window.matchMedia?.(...)` 的可选链帮不上忙。
+        // 与 devicePixelLine 等工具保持同一守卫约定。
+        if (typeof window === "undefined") return true;
+        return window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? true;
+    });
+
+    useEffect(() => {
+        if (typeof window === "undefined") return;
+        const mq = window.matchMedia?.("(prefers-color-scheme: dark)");
+        if (!mq) return;
+        const onChange = (e: MediaQueryListEvent) => setSystemDark(e.matches);
+        mq.addEventListener("change", onChange);
+        return () => mq.removeEventListener("change", onChange);
+    }, []);
+
     // 快照：用于打开外观设置对话框时保存当前状态，关闭时如果未保存则回退
     const snapshotRef = useRef<AppearanceSettings | null>(null);
 
     /* ── 独立 state（方便子组件直接控制） ── */
-    const mode = appearance.mode;
+    const modeSetting = appearance.mode;
+    // auto → 系统偏好；显式 dark/light 原样使用。
+    const mode: ThemeMode = modeSetting === "auto" ? (systemDark ? "dark" : "light") : modeSetting;
     const accentColor = appearance.accentColor;
     const grayColor = appearance.grayColor;
     const radius = appearance.radius;
@@ -88,18 +113,19 @@ export function AppThemeProvider({ children }: PropsWithChildren) {
     );
 
     const setMode = useCallback(
-        (next: ThemeMode) => {
+        (next: ThemeModeSetting) => {
             updateField("mode", next);
         },
         [updateField],
     );
 
     const toggleMode = useCallback(() => {
-        setAppearance((prev) => ({
-            ...prev,
-            mode: prev.mode === "dark" ? "light" : "dark",
-        }));
-    }, []);
+        setAppearance((prev) => {
+            // auto 视为当前解析值，切换到其相反模式（退出 auto）。
+            const resolved = prev.mode === "auto" ? (systemDark ? "dark" : "light") : prev.mode;
+            return { ...prev, mode: resolved === "dark" ? "light" : "dark" };
+        });
+    }, [systemDark]);
 
     const setAccentColor = useCallback(
         (color: RadixAccentColor) => {
@@ -173,16 +199,17 @@ export function AppThemeProvider({ children }: PropsWithChildren) {
         }
     }
 
-    /* ── 副作用：同步 data-theme & font CSS variable ── */
-    useEffect(() => {
-        document.documentElement.dataset.theme = mode;
-    }, [mode]);
-
-    useEffect(() => {
-        document.documentElement.style.setProperty("--qt-font-family", fontFamily);
-        document.documentElement.style.setProperty("--default-font-family", fontFamily);
-        document.body.style.fontFamily = fontFamily;
-    }, [fontFamily]);
+    /* ── DOM 主题态同步（渲染期写入，幂等） ── */
+    // 必须在 render 期写入而不是 effect：React 的 layout effect 自底向上
+    // 冲刷，时间线画布等后代组件在"切主题当帧重绘"的 useLayoutEffect 会先
+    // 于本组件的任何 effect 执行 —— 若延迟到 effect 里写 data-theme，画布
+    // 同帧读到的仍是旧主题变量，表现为轨道分界线等画布元素要等下一次交互
+    // 才变色。渲染期写入保证后代的一切 layout effect 读到的都是新主题。
+    // （写入是幂等的：无关重渲染重复写同一值无副作用。）
+    document.documentElement.dataset.theme = mode;
+    document.documentElement.style.setProperty("--qt-font-family", fontFamily);
+    document.documentElement.style.setProperty("--default-font-family", fontFamily);
+    document.body.style.fontFamily = fontFamily;
 
     useEffect(() => {
         const applyPreviewFromStorage = () => {
@@ -257,6 +284,7 @@ export function AppThemeProvider({ children }: PropsWithChildren) {
     const value = useMemo<ThemeContextValue>(
         () => ({
             mode,
+            modeSetting,
             setMode,
             toggleMode,
             accentColor,
@@ -273,6 +301,7 @@ export function AppThemeProvider({ children }: PropsWithChildren) {
         }),
         [
             mode,
+            modeSetting,
             setMode,
             toggleMode,
             accentColor,

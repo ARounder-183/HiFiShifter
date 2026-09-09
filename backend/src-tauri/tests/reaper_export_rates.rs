@@ -51,7 +51,9 @@ fn multi_take_export_preserves_combined_rates_and_nonzero_active_index() {
         clip.takes[1].playback_rate = 1.5;
     }
 
-    let export = build_reaper_clipboard(&timeline, &[clip_id]).expect("clipboard export");
+    let export =
+        build_reaper_clipboard(&timeline, &[clip_id], &std::collections::BTreeMap::new())
+            .expect("clipboard export");
     assert_eq!(export.exported_clip_count, 1);
     let parsed = parse_clipboard_bytes(&export.bytes).expect("parse exported clipboard");
     let item = &parsed.tracks[0].items[0];

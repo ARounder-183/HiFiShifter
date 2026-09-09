@@ -13,7 +13,12 @@ import { useAppTheme } from "../../theme/AppThemeProvider";
 import { loadAppearance, loadCustomThemes } from "../../theme/themeStorage";
 import type { QtColorToken } from "../../theme/themeTypes";
 import { QT_COLOR_TOKENS } from "../../theme/themeTypes";
-import type { RadixAccentColor, RadixGrayColor, RadixRadius } from "../../theme/themeTypes";
+import type {
+    RadixAccentColor,
+    RadixGrayColor,
+    RadixRadius,
+    ThemeModeSetting,
+} from "../../theme/themeTypes";
 
 /* ═══════════════════════════════════════════════════════════
  * Props
@@ -37,7 +42,7 @@ export const AppearanceSettingsDialog = ({ open, onOpenChange }: AppearanceSetti
 
             if (settingsRaw) {
                 const settings = JSON.parse(settingsRaw) as {
-                    mode: "dark" | "light";
+                    mode: ThemeModeSetting;
                     accentColor: RadixAccentColor;
                     grayColor: RadixGrayColor;
                     radius: RadixRadius;
@@ -146,7 +151,7 @@ export const AppearanceSettingsDialog = ({ open, onOpenChange }: AppearanceSetti
 
                 unlistenPreview = await listen<{
                     settings: {
-                        mode: "dark" | "light";
+                        mode: ThemeModeSetting;
                         accentColor: RadixAccentColor;
                         grayColor: RadixGrayColor;
                         radius: RadixRadius;

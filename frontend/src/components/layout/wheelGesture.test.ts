@@ -134,5 +134,119 @@ test("components/layout/wheelGesture.test.ts scripted checks", async () => {
         "param editor ctrl wheel zooms vertically",
     );
 
+    // ── 悬停原生滚动条（modifier.scrollbarZoom 语境）──────────────────
+    // 悬停竖直滚动条：无修饰键 = 竖直滚动，覆盖"默认滚轮 = 水平缩放"绑定
+    assertEqual(
+        getTimelineWheelAction({
+            deltaX: 0,
+            deltaY: 120,
+            horizontalScrollRequested: false,
+            verticalScrollRequested: false,
+            verticalZoomRequested: false,
+            horizontalZoomRequested: true,
+            scrollbarZone: "vertical",
+        }),
+        "vertical-scroll",
+        "timeline v-scrollbar plain wheel scrolls vertically",
+    );
+    assertEqual(
+        getParamEditorWheelAction({
+            deltaX: 0,
+            deltaY: 120,
+            horizontalScrollRequested: false,
+            verticalPanRequested: false,
+            verticalZoomRequested: false,
+            horizontalZoomRequested: true,
+            scrollbarZone: "vertical",
+        }),
+        "vertical-pan",
+        "param editor v-scrollbar plain wheel pans vertically",
+    );
+    // 悬停竖直滚动条 + 缩放修饰键 = 竖直缩放
+    assertEqual(
+        getTimelineWheelAction({
+            deltaX: 0,
+            deltaY: 120,
+            horizontalScrollRequested: false,
+            verticalScrollRequested: false,
+            verticalZoomRequested: false,
+            horizontalZoomRequested: false,
+            scrollbarZone: "vertical",
+            scrollbarZoomRequested: true,
+        }),
+        "vertical-zoom",
+        "timeline v-scrollbar modifier wheel zooms vertically",
+    );
+    // 悬停水平滚动条：无修饰键 = 水平滚动，修饰键 = 水平缩放
+    assertEqual(
+        getTimelineWheelAction({
+            deltaX: 0,
+            deltaY: 120,
+            horizontalScrollRequested: false,
+            verticalScrollRequested: false,
+            verticalZoomRequested: false,
+            horizontalZoomRequested: true,
+            scrollbarZone: "horizontal",
+        }),
+        "horizontal-scroll",
+        "timeline h-scrollbar plain wheel scrolls horizontally",
+    );
+    assertEqual(
+        getTimelineWheelAction({
+            deltaX: 0,
+            deltaY: 120,
+            horizontalScrollRequested: false,
+            verticalScrollRequested: false,
+            verticalZoomRequested: false,
+            horizontalZoomRequested: false,
+            scrollbarZone: "horizontal",
+            scrollbarZoomRequested: true,
+        }),
+        "horizontal-zoom",
+        "timeline h-scrollbar modifier wheel zooms horizontally",
+    );
+    assertEqual(
+        getParamEditorWheelAction({
+            deltaX: 0,
+            deltaY: 120,
+            horizontalScrollRequested: false,
+            verticalPanRequested: false,
+            verticalZoomRequested: false,
+            horizontalZoomRequested: false,
+            scrollbarZone: "horizontal",
+            scrollbarZoomRequested: true,
+        }),
+        "horizontal-zoom",
+        "param editor h-scrollbar modifier wheel zooms horizontally",
+    );
+    // scrollbarZone 优先于 free-scroll 组合与一切绑定
+    assertEqual(
+        getTimelineWheelAction({
+            deltaX: 0,
+            deltaY: 120,
+            horizontalScrollRequested: true,
+            verticalScrollRequested: true,
+            verticalZoomRequested: false,
+            horizontalZoomRequested: false,
+            scrollbarZone: "vertical",
+        }),
+        "vertical-scroll",
+        "scrollbar zone overrides free-scroll binding combo",
+    );
+    // scrollbarZone 缺省 / null：行为与旧版完全一致
+    assertEqual(
+        getTimelineWheelAction({
+            deltaX: 0,
+            deltaY: 120,
+            horizontalScrollRequested: false,
+            verticalScrollRequested: false,
+            verticalZoomRequested: false,
+            horizontalZoomRequested: true,
+            scrollbarZone: null,
+        }),
+        "horizontal-zoom",
+        "null scrollbar zone keeps legacy behavior",
+    );
+
     void checks;
 });

@@ -16,6 +16,7 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     // 播放控制
     "playback.toggle": { key: "space" },
     "playback.stop": { key: "enter" }, // 停止并回到本次播放起点
+    "playback.metronome": { key: "m" }, // 节拍器开关
     "recording.toggle": { key: "r", ctrl: true },
     "playback.focusCursor": { key: "'" }, // 聚焦播放光标
     "playback.seekLeft": { key: "arrowleft" },
@@ -75,10 +76,24 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     "pianoRoll.copy": { key: "c", ctrl: true },
     "pianoRoll.cut": { key: "x", ctrl: true },
     "pianoRoll.paste": { key: "v", ctrl: true },
+    // 参数线平移三档变化幅度：
+    // - 默认（无修饰键）：每参数的常规步长（音高 ±1 半音等）；
+    // - Shift：大幅步长（音高 ±1200 音分 = 一个八度等）；
+    // - Ctrl：微调步长（音高 ±1 音分等）。
+    // 注意：Shift 按下时 e.key 是上档字符（US 布局 Shift+= 产出 "+"），
+    // 匹配时按 e.code 物理键位归位（见 keybindingMatch.ts）。
     "pianoRoll.shiftParamUp": { key: "=" },
     "pianoRoll.shiftParamDown": { key: "-" },
     "pianoRoll.shiftParamUpSelection": { key: "]" },
     "pianoRoll.shiftParamDownSelection": { key: "[" },
+    "pianoRoll.shiftParamUpLarge": { key: "=", shift: true },
+    "pianoRoll.shiftParamDownLarge": { key: "-", shift: true },
+    "pianoRoll.shiftParamUpSelectionLarge": { key: "]", shift: true },
+    "pianoRoll.shiftParamDownSelectionLarge": { key: "[", shift: true },
+    "pianoRoll.shiftParamUpSmall": { key: "=", ctrl: true },
+    "pianoRoll.shiftParamDownSmall": { key: "-", ctrl: true },
+    "pianoRoll.shiftParamUpSelectionSmall": { key: "]", ctrl: true },
+    "pianoRoll.shiftParamDownSelectionSmall": { key: "[", ctrl: true },
     "pianoRoll.vibratoDragAmplitudeIncrease": { key: "arrowup" },
     "pianoRoll.vibratoDragAmplitudeDecrease": { key: "arrowdown" },
     "pianoRoll.vibratoDragFrequencyIncrease": { key: "arrowleft" },
@@ -137,6 +152,10 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
         shift: true,
     },
     "modifier.scrollVertical": { key: "alt", modifierOnly: true, alt: true },
+    // 悬停在原生滚动条上滚轮时的"缩放"修饰键（无修饰键时滚轮 = 该轴滚动）。
+    // 默认 Alt：与 REAPER 等对齐；仅在滚动条悬停语境生效，不与全局
+    // scrollVertical（同为 Alt）冲突 —— 悬停滚动条时本键位优先。
+    "modifier.scrollbarZoom": { key: "alt", modifierOnly: true, alt: true },
     "modifier.pianoKeysVerticalScroll": { key: "__none__", modifierOnly: true },
     "modifier.pianoKeysVerticalZoom": { key: "alt", modifierOnly: true, alt: true },
     "modifier.paramMorph": { key: "alt", modifierOnly: true, alt: true },
@@ -164,6 +183,7 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
 
     "playback.toggle": { labelKey: "kb_playback_toggle", group: "playback" },
     "playback.stop": { labelKey: "kb_playback_stop", group: "playback" },
+    "playback.metronome": { labelKey: "kb_playback_metronome", group: "playback" },
     "recording.toggle": { labelKey: "kb_recording_toggle", group: "playback" },
     "playback.focusCursor": {
         labelKey: "kb_playback_focus_cursor",
@@ -324,6 +344,38 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
         labelKey: "kb_pianoroll_shift_param_down_selection",
         group: "pianoRoll",
     },
+    "pianoRoll.shiftParamUpLarge": {
+        labelKey: "kb_pianoroll_shift_param_up_large",
+        group: "pianoRoll",
+    },
+    "pianoRoll.shiftParamDownLarge": {
+        labelKey: "kb_pianoroll_shift_param_down_large",
+        group: "pianoRoll",
+    },
+    "pianoRoll.shiftParamUpSmall": {
+        labelKey: "kb_pianoroll_shift_param_up_small",
+        group: "pianoRoll",
+    },
+    "pianoRoll.shiftParamDownSmall": {
+        labelKey: "kb_pianoroll_shift_param_down_small",
+        group: "pianoRoll",
+    },
+    "pianoRoll.shiftParamUpSelectionLarge": {
+        labelKey: "kb_pianoroll_shift_param_up_selection_large",
+        group: "pianoRoll",
+    },
+    "pianoRoll.shiftParamDownSelectionLarge": {
+        labelKey: "kb_pianoroll_shift_param_down_selection_large",
+        group: "pianoRoll",
+    },
+    "pianoRoll.shiftParamUpSelectionSmall": {
+        labelKey: "kb_pianoroll_shift_param_up_selection_small",
+        group: "pianoRoll",
+    },
+    "pianoRoll.shiftParamDownSelectionSmall": {
+        labelKey: "kb_pianoroll_shift_param_down_selection_small",
+        group: "pianoRoll",
+    },
     "pianoRoll.vibratoDragAmplitudeIncrease": {
         labelKey: "kb_pianoroll_vibrato_drag_amp_increase",
         group: "pianoRoll",
@@ -450,6 +502,12 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
         group: "modWheel",
         modifierOperationType: "wheel",
         conflictScenes: ["wheel.timeline", "wheel.pianoRoll"],
+    },
+    "modifier.scrollbarZoom": {
+        labelKey: "kb_modifier_scrollbar_zoom",
+        group: "modWheel",
+        modifierOperationType: "wheel",
+        conflictScenes: ["wheel.scrollbar"],
     },
     "modifier.pianoKeysVerticalScroll": {
         labelKey: "kb_modifier_piano_keys_scroll_v",

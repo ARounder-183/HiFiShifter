@@ -7,6 +7,7 @@ import { isNoneBinding, isModifierActive } from "../../../features/keybindings/k
 import type { Keybinding } from "../../../features/keybindings/types";
 import { useDebouncedPersist } from "../../../hooks/useDebouncedPersist";
 import { getTimelineWheelAction } from "../wheelGesture";
+import { nativeScrollbarZoneAt } from "../../../utils/nativeScrollbar";
 import { shouldDispatchTimelineViewport } from "./runtime/timelineViewportDispatch";
 import { resolveTimelineMinPxPerSec } from "./runtime/timelineZoomBounds";
 import { applyNativeScrollLeft } from "./runtime/nativeScrollApply";
@@ -30,6 +31,8 @@ export const TimelineScrollArea: React.FC<
         rulerContentRef: React.MutableRefObject<HTMLDivElement | null>;
         scrollHorizontalKb?: Keybinding;
         scrollVerticalKb?: Keybinding;
+        /** modifier.scrollbarZoom：悬停滚动条 + 滚轮 = 该轴缩放。 */
+        scrollbarZoomKb?: Keybinding;
         horizontalZoomKb?: Keybinding;
         verticalZoomKb?: Keybinding;
         getPlayheadSec?: () => number;
@@ -49,6 +52,7 @@ export const TimelineScrollArea: React.FC<
     onScroll,
     scrollHorizontalKb,
     scrollVerticalKb,
+    scrollbarZoomKb,
     horizontalZoomKb,
     verticalZoomKb,
     getPlayheadSec,
@@ -184,14 +188,40 @@ export const TimelineScrollArea: React.FC<
             const e = evt as globalThis.WheelEvent;
             const noModifierPressed = !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
             const isWheelBindingRequested = (kb?: Keybinding) => {
+                // 未提供绑定的动作 = 未请求（绝不能把"无修饰键滚轮"当成
+                // 某个未配置动作的触发条件，否则 plain wheel 会被未来调用方
+                // 意外劫持成 free-scroll / zoom）。
                 if (!kb) return false;
                 if (isNoneBinding(kb)) return noModifierPressed;
                 return isModifierActive(kb, e);
             };
-            const horizontalScrollRequested = isWheelBindingRequested(scrollHorizontalKb);
-            const verticalScrollRequested = isWheelBindingRequested(scrollVerticalKb);
-            const horizontalZoomRequested = isWheelBindingRequested(horizontalZoomKb);
-            const verticalZoomRequested = isWheelBindingRequested(verticalZoomKb);
+            // ── 悬停原生滚动条：滚轮语义只归属该滚动条的轴 ──────────────
+            // 无修饰键 = 该轴滚动；按住 modifier.scrollbarZoom（默认 Alt）=
+            // 该轴缩放。优先于一切全局绑定（时间轴默认滚轮 = 水平缩放），
+            // 也不参与 free-scroll 双轴组合 —— 悬停对象已经明确了轴。
+            const scrollbarZone = nativeScrollbarZoneAt(scroller, e.clientX, e.clientY);
+            const scrollbarZoomRequested =
+                scrollbarZone != null &&
+                scrollbarZoomKb != null &&
+                !isNoneBinding(scrollbarZoomKb) &&
+                isModifierActive(scrollbarZoomKb, e);
+
+            const horizontalScrollRequested =
+                scrollbarZone === "horizontal" && !scrollbarZoomRequested
+                    ? true
+                    : !scrollbarZone && isWheelBindingRequested(scrollHorizontalKb);
+            const verticalScrollRequested =
+                scrollbarZone === "vertical" && !scrollbarZoomRequested
+                    ? true
+                    : !scrollbarZone && isWheelBindingRequested(scrollVerticalKb);
+            const horizontalZoomRequested =
+                scrollbarZone == null
+                    ? isWheelBindingRequested(horizontalZoomKb)
+                    : scrollbarZone === "horizontal" && scrollbarZoomRequested;
+            const verticalZoomRequested =
+                scrollbarZone == null
+                    ? isWheelBindingRequested(verticalZoomKb)
+                    : scrollbarZone === "vertical" && scrollbarZoomRequested;
 
             const wheelAction = getTimelineWheelAction({
                 deltaX: e.deltaX,
@@ -341,6 +371,7 @@ export const TimelineScrollArea: React.FC<
         rulerContentRef,
         scrollHorizontalKb,
         scrollVerticalKb,
+        scrollbarZoomKb,
         horizontalZoomKb,
         verticalZoomKb,
         getPlayheadSec,

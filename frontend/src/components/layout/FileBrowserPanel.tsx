@@ -506,12 +506,21 @@ export const FileBrowserPanel: React.FC = () => {
                     });
             }
 
-            // 更新 ghost 位置（clamp 到窗口可视范围内，鼠标超出界面时 ghost 停在边缘）
+            // 更新 ghost 位置（clamp 到窗口可视范围内，鼠标超出界面时 ghost 停在边缘。
+            // 余量按 ghost 实测尺寸计算：文件名长短不一，固定余量会让 ghost
+            // 在窗口右缘脱离光标，长文件名仍会溢出右边界）。
             if (ghostRef.current) {
-                const clampedX = Math.max(0, Math.min(e.clientX + 12, window.innerWidth - 100));
-                const clampedY = Math.max(0, Math.min(e.clientY + 12, window.innerHeight - 30));
-                ghostRef.current.style.left = `${clampedX}px`;
-                ghostRef.current.style.top = `${clampedY}px`;
+                const ghost = ghostRef.current;
+                const clampedX = Math.max(
+                    0,
+                    Math.min(e.clientX + 12, window.innerWidth - ghost.offsetWidth - 4),
+                );
+                const clampedY = Math.max(
+                    0,
+                    Math.min(e.clientY + 12, window.innerHeight - ghost.offsetHeight - 4),
+                );
+                ghost.style.left = `${clampedX}px`;
+                ghost.style.top = `${clampedY}px`;
             }
 
             // 发送拖拽移动事件（TimelinePanel 监听）

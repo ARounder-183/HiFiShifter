@@ -24,6 +24,7 @@ import { timelineViewportBus } from "../../../../utils/timelineViewportBus";
 import { timelineViewportSync } from "../../../../utils/timelineViewportSync";
 import { IS_MAC, isPrimaryModifierDown } from "../../../../utils/platform";
 import { readDevicePixelRatio, snapToDevicePx } from "../../../../utils/devicePixelLine";
+import { nativeScrollbarZoneAt } from "../../../../utils/nativeScrollbar";
 
 import { TICK_WINDOW_STEP_PX } from "../runtime/buildTimelineTicks.js";
 import { waveformMipmapStore } from "../../../../utils/waveformMipmapStore";
@@ -203,6 +204,7 @@ export interface TimelineStateResult {
     stretchKbRef: React.MutableRefObject<Keybinding>;
     scrollHorizontalKb: Keybinding;
     scrollVerticalKb: Keybinding;
+    scrollbarZoomKb: Keybinding;
     horizontalZoomKb: Keybinding;
     verticalZoomKb: Keybinding;
     paramFineAdjustKb: Keybinding;
@@ -709,6 +711,9 @@ export function useTimelineState(): TimelineStateResult {
     const scrollVerticalKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.scrollVertical"),
     );
+    const scrollbarZoomKb = useAppSelector((state) =>
+        selectKeybinding(state, "modifier.scrollbarZoom"),
+    );
     const horizontalZoomKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.horizontalZoom"),
     );
@@ -1133,16 +1138,7 @@ export function useTimelineState(): TimelineStateResult {
         clientX: number,
         clientY: number,
     ): boolean {
-        const bounds = scroller.getBoundingClientRect();
-        const horizontalScrollbarHeight = scroller.offsetHeight - scroller.clientHeight;
-        if (horizontalScrollbarHeight > 0 && clientY > bounds.bottom - horizontalScrollbarHeight) {
-            return true;
-        }
-        const verticalScrollbarWidth = scroller.offsetWidth - scroller.clientWidth;
-        if (verticalScrollbarWidth > 0 && clientX > bounds.right - verticalScrollbarWidth) {
-            return true;
-        }
-        return false;
+        return nativeScrollbarZoneAt(scroller, clientX, clientY) != null;
     }
 
     // ── startPanPointer (中键平移) ───────────────────────────
@@ -1285,6 +1281,7 @@ export function useTimelineState(): TimelineStateResult {
         stretchKbRef,
         scrollHorizontalKb,
         scrollVerticalKb,
+        scrollbarZoomKb,
         horizontalZoomKb,
         verticalZoomKb,
         paramFineAdjustKb,

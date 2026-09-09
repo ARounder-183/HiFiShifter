@@ -1,6 +1,11 @@
 import { createAsyncThunk } from "@reduxjs/toolkit";
 import { webApi } from "../../../services/webviewApi";
-import type { TimelineState } from "../../../types/api";
+import type {
+    TimelineState,
+    SilenceDetectOptionsPayload,
+    SilenceAnalyzeResult,
+    RemoveSilenceResult,
+} from "../../../types/api";
 import type { ClipTemplate } from "../sessionTypes";
 import { waveformMipmapStore } from "../../../utils/waveformMipmapStore";
 import { computePasteEndSec, type PasteEndClipLike } from "../pastePlayhead";
@@ -239,6 +244,31 @@ export const removeClipsRemote = createAsyncThunk(
     "session/removeClipsRemote",
     async (clipIds: string[]) => {
         return webApi.removeClips(clipIds);
+    },
+);
+
+// 关闭间隙（Close Gaps）：位移完全在后端计算（含“锁定参数线”联动），
+// 前端只传轨道 id 与右键点击位置。
+export const closeTrackGapsRemote = createAsyncThunk(
+    "session/closeTrackGapsRemote",
+    async (payload: { trackId: string; fromSec: number }) => {
+        return webApi.closeTrackGaps(payload.trackId, payload.fromSec);
+    },
+);
+
+// 静音检测（干跑）：供设置对话框实时预览，不修改任何状态。
+export const analyzeSilenceRemote = createAsyncThunk(
+    "session/analyzeSilenceRemote",
+    async (payload: { clipIds: string[]; options: SilenceDetectOptionsPayload }) => {
+        return (await webApi.analyzeClipSilence(payload.clipIds, payload.options)) as SilenceAnalyzeResult;
+    },
+);
+
+// 静音切除：后端单命令完成“切分 → 删除 → 闭合 → 切边淡化”（单次撤销）。
+export const removeSilenceRemote = createAsyncThunk(
+    "session/removeSilenceRemote",
+    async (payload: { clipIds: string[]; options: SilenceDetectOptionsPayload }) => {
+        return (await webApi.removeClipSilence(payload.clipIds, payload.options)) as RemoveSilenceResult;
     },
 );
 

@@ -11,6 +11,42 @@ use crate::state::AppState;
 
 use super::core::get_timeline_state_from_ref;
 
+/// 将导入曲线按其"非默认跨度"覆写合并进既有 root entry。
+///
+/// - `imported` 为时间线全局帧数组（与 root entry 同帧基，5ms）；
+/// - 跨度 = 首个/末个偏离默认值的帧；跨度内覆写，跨度外保持既有数据不动；
+/// - 曲线不足处用参数默认值补齐（volume=1.0、pan=0.0）。
+fn merge_extra_curve_entry(
+    existing: &mut crate::state::TrackParamsState,
+    key: &str,
+    imported: &[f32],
+) {
+    let default_value: f32 = match key {
+        "volume" | "hifigan_volume" => 1.0,
+        "pan" => 0.0,
+        _ => 0.0,
+    };
+    let Some(first) = imported
+        .iter()
+        .position(|v| (v - default_value).abs() > 1e-6)
+    else {
+        return;
+    };
+    let last = imported
+        .iter()
+        .rposition(|v| (v - default_value).abs() > 1e-6)
+        .unwrap_or(first);
+    let required_len = last + 1;
+    let curve = existing
+        .extra_curves
+        .entry(key.to_string())
+        .or_insert_with(|| vec![default_value; required_len]);
+    if curve.len() < required_len {
+        curve.resize(required_len, default_value);
+    }
+    curve[first..=last].copy_from_slice(&imported[first..=last]);
+}
+
 // ---------------------------------------------------------------------------
 // 平台特定的剪贴板读取
 // ---------------------------------------------------------------------------
@@ -243,13 +279,19 @@ pub(super) fn paste_reaper_clipboard(
     };
 
     // 从当前 timeline 读取光标位置、选中轨道、轨道顺序、BPM
-    let (playhead_sec, selected_track_idx, ordered_track_ids, project_bpm, next_track_order) = {
+    let (playhead_sec, selected_track_idx, ordered_track_ids, ordered_track_volumes, project_bpm, next_track_order) = {
         let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
 
-        // 按 order 排序的轨道 ID
-        let mut sorted_tracks: Vec<_> = tl.tracks.iter().collect();
-        sorted_tracks.sort_by_key(|t| t.order);
-        let ordered: Vec<String> = sorted_tracks.iter().map(|t| t.id.clone()).collect();
+        // 轨道显示顺序 = Vec 顺序（normalize_track_vec 不变式，DFS）。
+        // TRACKSKIP 偏移按此映射到"选中轨道及其下方"的显示序列。
+        let ordered: Vec<String> = tl.tracks.iter().map(|t| t.id.clone()).collect();
+        // ENVSEG VOLENV2 的相对化除法基准 = 链式有效推子增益（根轨×父×子，
+        // 与渲染端 compute_track_gains 同款），不是子轨自身推子。
+        let volumes: Vec<f32> = tl
+            .tracks
+            .iter()
+            .map(|t| tl.effective_track_volume(&t.id))
+            .collect();
 
         // 选中轨道的下标
         let sel_idx = tl
@@ -264,7 +306,14 @@ pub(super) fn paste_reaper_clipboard(
             .next_track_order
             .max(tl.tracks.iter().map(|t| t.order).max().unwrap_or(0) + 1);
 
-        (tl.playhead_sec, sel_idx, ordered, tl.bpm, next_track_order)
+        (
+            tl.playhead_sec,
+            sel_idx,
+            ordered,
+            volumes,
+            tl.bpm,
+            next_track_order,
+        )
     };
 
     // 解析并转换
@@ -273,6 +322,7 @@ pub(super) fn paste_reaper_clipboard(
         playhead_sec,
         selected_track_idx,
         &ordered_track_ids,
+        &ordered_track_volumes,
         project_bpm,
         next_track_order,
     ) {
@@ -304,15 +354,9 @@ pub(super) fn paste_reaper_clipboard(
     {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
 
-        if !result.timeline.tracks.is_empty() {
-            // 有新轨道：合并到现有 timeline
-            for track in &result.timeline.tracks {
-                tl.tracks.push(track.clone());
-            }
-            tl.next_track_order = tl
-                .next_track_order
-                .max(tl.tracks.iter().map(|t| t.order).max().unwrap_or(0) + 1);
-        }
+        // 有新轨道：合并到现有 timeline（order 置为"现有根级数量"）+
+        // 重写同级序号（共用入口见 append_imported_tracks）。
+        tl.append_imported_tracks(result.timeline.tracks.clone());
 
         // 合并 clips
         for clip in &result.timeline.clips {
@@ -321,16 +365,25 @@ pub(super) fn paste_reaper_clipboard(
             tl.clips.push(c);
         }
 
-        // 合并 pitch params（pending_pitch_offset 需要合并到已有的 entry）
+        // 合并 pitch params（pending_pitch_offset 需要合并到已有的 entry）。
+        // 曲线 key（volume/pan）按"非默认跨度覆写"合并进既有 root entry；
+        // 粘贴目标可能是子轨道，曲线/pending 一律重定向到其根轨道。
         for (track_id, new_params) in &result.timeline.params_by_root_track {
-            if let Some(existing) = tl.params_by_root_track.get_mut(track_id) {
+            let root_id = tl
+                .resolve_root_track_id(track_id)
+                .unwrap_or_else(|| track_id.clone());
+            if let Some(existing) = tl.params_by_root_track.get_mut(&root_id) {
                 // 轨道已有 pitch 数据 → 只设置 pending offset
                 if let Some(ref offsets) = new_params.pending_pitch_offset {
                     existing.pending_pitch_offset = Some(offsets.clone());
                 }
+                // 包络晋升 / ENVSEG 段曲线：按导入数据非默认跨度覆写
+                //（跨度外保持用户既有自动化不动）。
+                for (key, imported) in &new_params.extra_curves {
+                    merge_extra_curve_entry(existing, key, imported);
+                }
             } else {
-                tl.params_by_root_track
-                    .insert(track_id.clone(), new_params.clone());
+                tl.params_by_root_track.insert(root_id, new_params.clone());
             }
         }
 

@@ -72,12 +72,18 @@ pub struct ReaperItem {
     pub fade_out: Vec<f64>,
     pub mute: Vec<i32>,
     pub selected: bool,
-    pub envelopes: Vec<ReaperEnvelope>,
     pub takes: Vec<ReaperTake>,
-    // 首个 take 的属性（item 自身也是一个隐式 take）
+    // 首个 take 的属性（item 自身也是一个隐式 take）。
+    // 注意：ITEM 直属包络块（PITCHENV/VOLENV/…）在 REAPER 语义中属于默认
+    // take，解析时直接归入 `default_take.envelopes`，item 级不再单独持有。
     pub default_take: ReaperTake,
     pub stretch_markers: Vec<ReaperStretchMarker>,
     pub group_id: Option<i32>,
+    /// 双时基 QN 值（原生 REAPER 剪贴板写 `POSITION <sec> <qn>` /
+    /// `LENGTH <sec> <qn>`，QN 按 Tempo Map 积分）。None = 单值形式
+    ///（QN 未知时的回退，REAPER 仍按秒解析）。
+    pub position_qn: Option<f64>,
+    pub length_qn: Option<f64>,
 }
 
 impl Default for ReaperItem {
@@ -93,11 +99,12 @@ impl Default for ReaperItem {
             fade_out: vec![0.0; 7],
             mute: vec![0, 0],
             selected: false,
-            envelopes: Vec::new(),
             takes: Vec::new(),
             default_take: ReaperTake::default(),
             stretch_markers: Vec::new(),
             group_id: None,
+            position_qn: None,
+            length_qn: None,
         }
     }
 }
@@ -116,10 +123,24 @@ impl ReaperItem {
         if self.default_take.source.is_some() {
             return &self.default_take;
         }
+        // 兜底与 reaper_active_take_index 保持一致：默认 take 无 source 时
+        // 优先取第一个带 source 的显式 take，再回退第一个显式 take。
+        if let Some(first_sourced) = self.takes.iter().find(|t| t.source.is_some()) {
+            return first_sourced;
+        }
         if let Some(first_take) = self.takes.first() {
             return first_take;
         }
         &self.default_take
+    }
+
+    /// 返回活跃 take 的包络列表。
+    ///
+    /// 与 `active_take()` 使用同一选择规则：导入端"只取活跃 take 包络"
+    /// （含 ITEM 直属包络 = 默认 take 包络）统一经由本访问器，消除旧实现
+    /// 中 parser 晋升规则与导入端活跃 take 判定不一致的问题。
+    pub fn active_take_envelopes(&self) -> &[ReaperEnvelope] {
+        self.active_take().envelopes.as_slice()
     }
 }
 
@@ -134,6 +155,14 @@ pub struct ReaperTake {
     pub play_rate: Vec<f64>, // [rate, preserve, pitch, method, ...]
     pub chan_mode: i32,
     pub source: Option<ReaperSource>,
+    /// 本 take 的包络（PITCHENV / VOLENV / PANENV / MUTEENV）。
+    ///
+    /// REAPER 语义：ITEM 直属包络块属于默认 take；TAKE 块内的包络属于该
+    /// take。旧实现把"活跃 take 的包络"晋升进 item.envelopes，导致默认
+    /// take 与显式 take 的包络混流（且无 SEL 时晋升规则与导入端活跃 take
+    /// 判定冲突）；现在包络一律按归属存放在 take 上，由导入端按活跃 take
+    /// 取用。
+    pub envelopes: Vec<ReaperEnvelope>,
 }
 
 impl Default for ReaperTake {
@@ -148,6 +177,7 @@ impl Default for ReaperTake {
             play_rate: vec![1.0, 1.0, 0.0, -1.0, 0.0, 0.0025],
             chan_mode: 0,
             source: None,
+            envelopes: Vec::new(),
         }
     }
 }
@@ -414,6 +444,12 @@ pub struct ReaperEnvelope {
     pub act: Vec<i32>,
     pub seg_range: Option<Vec<f64>>,
     pub points: Vec<Vec<f64>>,
+    /// `DEFSHAPE <shape> <pitchEnvRange> <snap>` 原值（解析保留、导出回写）。
+    ///
+    /// 对 take 音高包络（PITCHENV）而言 field 2 是显示范围（默认 -1 = 跟随
+    /// 全局偏好，典型 ±3 半音）；导出时按包络实际最大偏移写入更大的范围，
+    /// 避免 REAPER 显示/绘制裁切。
+    pub def_shape: Option<Vec<f64>>,
 }
 
 impl Default for ReaperEnvelope {
@@ -423,6 +459,7 @@ impl Default for ReaperEnvelope {
             act: vec![1, -1],
             seg_range: None,
             points: Vec::new(),
+            def_shape: None,
         }
     }
 }
@@ -497,6 +534,29 @@ fn parse_tempo_env_time_signature(slow_curv: f64) -> Option<(u32, u32)> {
     None
 }
 
+// ─── Take 包络 u 域换算（唯一转换点） ──────────────────────────────────────
+//
+// REAPER take 包络点坐标是 take 媒体时间 u（pitch_test.rpp 证据：包络末点
+// 与 LENGTH×|PLAYRATE| 精确相等）；u=0 对应 item 起点，与 SOFFS/倒放/
+// 拉伸标记无关（拉伸标记只改 u→源位置映射，不改 u→时间映射）。
+// 若 REAPER 实测推翻该结论，只需修正这两个函数。
+
+/// take 媒体时间 u → item 相对时间线秒。
+///
+/// 保留为设计文档指定的"唯一转换点"反向函数（导入端按帧 t→u 采样，故当前
+/// 无直接调用者；u 域结论被 REAPER 实测推翻时，u↔t 的整体翻转只改这里）。
+#[allow(dead_code)]
+#[inline]
+pub fn take_env_u_to_item_time(u: f64, take_rate: f64) -> f64 {
+    u / take_rate.max(1e-6)
+}
+
+/// item 相对时间线秒 → take 媒体时间 u（导出反向换算同用此点）。
+#[inline]
+pub fn item_time_to_take_env_u(item_time: f64, take_rate: f64) -> f64 {
+    item_time * take_rate.max(0.0)
+}
+
 // ─── 块解析器 ───
 
 const ENVELOPE_TYPES: &[&str] = &[
@@ -506,6 +566,7 @@ const ENVELOPE_TYPES: &[&str] = &[
     "PANENV",
     "PANENV2",
     "MUTEENV",
+    "MUTEENV2",
     "TEMPOENVEX",
     "PITCHENV",
 ];
@@ -599,6 +660,20 @@ fn parse_blocks(lines: &[String]) -> Block {
 
 // ─── 文本分割 ───
 
+/// 宽松解码一行并跳过空白行。RPP 结构行是 ASCII，媒体路径 / NAME 等字段
+/// 可能来自第三方生成器的非 UTF-8 编码（latin1 等）：整行丢弃会让 item
+/// 无声源可导入；替换式解码只影响展示文本，不会破坏块结构。
+fn push_lossy_line(raw: &[u8], lines: &mut Vec<String>) {
+    if raw.is_empty() {
+        return;
+    }
+    let s = String::from_utf8_lossy(raw);
+    let trimmed = s.trim();
+    if !trimmed.is_empty() {
+        lines.push(trimmed.to_string());
+    }
+}
+
 /// Reaper 使用两种分隔符：\r\n（.rpp 文件）和 \0（剪贴板数据）。
 fn split_lines(data: &[u8]) -> Vec<String> {
     let mut lines = Vec::with_capacity(data.len() / 40);
@@ -607,46 +682,26 @@ fn split_lines(data: &[u8]) -> Vec<String> {
     while i < data.len() {
         if data[i] == 0x00 {
             if i > start {
-                if let Ok(s) = std::str::from_utf8(&data[start..i]) {
-                    let trimmed = s.trim();
-                    if !trimmed.is_empty() {
-                        lines.push(trimmed.to_string());
-                    }
-                }
+                push_lossy_line(&data[start..i], &mut lines);
             }
             start = i + 1;
         } else if data[i] == 0x0D && i + 1 < data.len() && data[i + 1] == 0x0A {
             if i > start {
-                if let Ok(s) = std::str::from_utf8(&data[start..i]) {
-                    let trimmed = s.trim();
-                    if !trimmed.is_empty() {
-                        lines.push(trimmed.to_string());
-                    }
-                }
+                push_lossy_line(&data[start..i], &mut lines);
             }
             start = i + 2;
             i += 1; // 跳过 \n
         } else if data[i] == 0x0A {
             // 单独的 \n
             if i > start {
-                if let Ok(s) = std::str::from_utf8(&data[start..i]) {
-                    let trimmed = s.trim();
-                    if !trimmed.is_empty() {
-                        lines.push(trimmed.to_string());
-                    }
-                }
+                push_lossy_line(&data[start..i], &mut lines);
             }
             start = i + 1;
         }
         i += 1;
     }
     if start < data.len() {
-        if let Ok(s) = std::str::from_utf8(&data[start..]) {
-            let trimmed = s.trim();
-            if !trimmed.is_empty() {
-                lines.push(trimmed.to_string());
-            }
-        }
+        push_lossy_line(&data[start..], &mut lines);
     }
     lines
 }
@@ -1043,9 +1098,20 @@ fn parse_item_block(block: &Block) -> ReaperItem {
         }
         let key = tokens[0].to_uppercase();
         match key.as_str() {
-            "POSITION" if tokens.len() >= 2 => item.position = parse_double(&tokens[1]),
+            "POSITION" if tokens.len() >= 2 => {
+                item.position = parse_double(&tokens[1]);
+                // 双时基（原生 `POSITION <sec> <qn>`）：第二值为 QN。
+                if tokens.len() >= 3 {
+                    item.position_qn = Some(parse_double(&tokens[2]));
+                }
+            }
             "SNAPOFFS" if tokens.len() >= 2 => item.snap_offs = parse_double(&tokens[1]),
-            "LENGTH" if tokens.len() >= 2 => item.length = parse_double(&tokens[1]),
+            "LENGTH" if tokens.len() >= 2 => {
+                item.length = parse_double(&tokens[1]);
+                if tokens.len() >= 3 {
+                    item.length_qn = Some(parse_double(&tokens[2]));
+                }
+            }
             "LOOP" if tokens.len() >= 2 => {
                 item.is_loop = parse_bool(&tokens[1]);
                 item.has_loop_token = true;
@@ -1111,41 +1177,45 @@ fn parse_item_block(block: &Block) -> ReaperItem {
     // 将 stretch markers 转换为 stretch segments（存储在 item 上）
     item.stretch_markers = raw_markers;
 
-    // 处理 SOURCE 子块：按顺序分配给 default_take 和各 take
+    // 处理 SOURCE 子块：按顺序分配给 default_take 和各 take。
+    //
+    // 行式 take 布局（无 <TAKE> 子块）中，每个 take 的包络块与其 SOURCE 块
+    // 一样都是 ITEM 的直属子块，归属由文档序决定：SOURCE 开启该 take 的
+    // 包络上下文（REAPER 写出顺序恒为 take 标量行 → SOURCE → 包络块；
+    // 空 take 也有 <SOURCE EMPTY>）。首 SOURCE 之前出现的包络归默认 take。
     let mut source_idx: isize = -1;
-    let mut take_envelopes: Vec<Vec<ReaperEnvelope>> = Vec::new();
+    let mut env_targets_default = true;
+    let mut env_explicit_idx = 0usize;
     for child in &block.children {
         let block_type = child.block_type();
         if block_type.as_deref() == Some("TAKE") {
-            let (take, take_envs) = parse_take_block(child);
-            item.takes.push(take);
-            take_envelopes.push(take_envs);
+            item.takes.push(parse_take_block(child));
         } else if block_type.as_deref() == Some("SOURCE") {
             let source = parse_source_block(child);
             source_idx += 1;
             if source_idx == 0 {
                 item.default_take.source = Some(source);
+                env_targets_default = true;
             } else {
-                let take_idx = (source_idx - 1) as usize;
+                env_targets_default = false;
+                env_explicit_idx = (source_idx - 1) as usize;
+                let take_idx = env_explicit_idx;
                 if take_idx < item.takes.len() {
                     item.takes[take_idx].source = Some(source);
                 }
             }
         } else if let Some(ref bt) = block_type {
             if is_envelope_type(bt) {
-                item.envelopes.push(parse_envelope_block(child));
+                let envelope = parse_envelope_block(child);
+                if env_targets_default || env_explicit_idx >= item.takes.len() {
+                    // ITEM 直属包络块 = 默认 take 的包络（REAPER 语义，
+                    // pitch_test.rpp 的 item 级 PITCHENV 即此形态）。
+                    // 不再晋升到 item 级混流——活跃 take 判定由导入端统一执行。
+                    item.default_take.envelopes.push(envelope);
+                } else {
+                    item.takes[env_explicit_idx].envelopes.push(envelope);
+                }
             }
-        }
-    }
-
-    if !take_envelopes.is_empty() {
-        let active_take_idx = item
-            .takes
-            .iter()
-            .position(|take| take.selected)
-            .unwrap_or(0);
-        if let Some(envs) = take_envelopes.get(active_take_idx) {
-            item.envelopes.extend(envs.iter().cloned());
         }
     }
 
@@ -1160,9 +1230,8 @@ fn current_take_mut<'a>(item: &'a mut ReaperItem, is_default: bool) -> Option<&'
     }
 }
 
-fn parse_take_block(block: &Block) -> (ReaperTake, Vec<ReaperEnvelope>) {
+fn parse_take_block(block: &Block) -> ReaperTake {
     let mut take = ReaperTake::default();
-    let mut envelopes: Vec<ReaperEnvelope> = Vec::new();
 
     for line in &block.lines {
         let tokens = split_tokens(line);
@@ -1210,12 +1279,13 @@ fn parse_take_block(block: &Block) -> (ReaperTake, Vec<ReaperEnvelope>) {
             take.source = Some(parse_source_block(child));
         } else if let Some(ref bt) = block_type {
             if is_envelope_type(bt) {
-                envelopes.push(parse_envelope_block(child));
+                // TAKE 块内的包络块属于该 take（PITCHENV/VOLENV/PANENV/MUTEENV）。
+                take.envelopes.push(parse_envelope_block(child));
             }
         }
     }
 
-    (take, envelopes)
+    take
 }
 
 fn parse_source_block(block: &Block) -> ReaperSource {
@@ -1257,7 +1327,7 @@ fn parse_source_block(block: &Block) -> ReaperSource {
                     beat_note: tokens[4].parse::<u32>().unwrap_or(4),
                 });
             }
-            "E" | "e" if tokens.len() >= 4 => {
+            "E" if tokens.len() >= 4 => {
                 let tick_offset = tokens[1].parse::<u64>().unwrap_or(0);
                 midi_events.push(ReaperMidiEvent {
                     tick_offset,
@@ -1270,7 +1340,7 @@ fn parse_source_block(block: &Block) -> ReaperSource {
                     },
                 });
             }
-            "X" | "x" if tokens.len() >= 6 => {
+            "X" if tokens.len() >= 6 => {
                 let hi = tokens[1].parse::<u64>().unwrap_or(0);
                 let lo = tokens[2].parse::<u64>().unwrap_or(0);
                 let tick_offset = (hi << 32) | lo;
@@ -1328,6 +1398,7 @@ fn parse_envelope_block(block: &Block) -> ReaperEnvelope {
             "<ENVSEG" if tokens.len() > 1 => env.env_type = tokens[1].to_string(),
             "ACT" => env.act = parse_int_array(&tokens),
             "SEG_RANGE" => env.seg_range = Some(parse_double_array(&tokens)),
+            "DEFSHAPE" => env.def_shape = Some(parse_double_array(&tokens)),
             "PT" => env.points.push(parse_double_array(&tokens)),
             _ => {}
         }
@@ -1517,6 +1588,40 @@ fn push_reaper_source(out: &mut Vec<u8>, source: &ReaperSource) {
     push_reaper_token(out, ">".to_string());
 }
 
+/// 单时基包络块（.rpp / TRACK 块 / ITEM·TAKE 直属包络）：
+/// `<TYPE>` + ACT/VIS/LANEHEIGHT/ARM/DEFSHAPE 头 + PT。
+pub fn push_reaper_envelope_plain(out: &mut Vec<u8>, env: &ReaperEnvelope) {
+    push_reaper_token(out, format!("<{}", env.env_type));
+    if !env.act.is_empty() {
+        push_reaper_int_array(out, "ACT", &env.act);
+    }
+    push_reaper_token(out, "VIS 1 1 1".to_string());
+    push_reaper_token(out, "LANEHEIGHT 0 0".to_string());
+    push_reaper_token(out, "ARM 0".to_string());
+    match env.def_shape.as_ref() {
+        Some(shape) => push_reaper_array(out, "DEFSHAPE", shape),
+        None => push_reaper_token(out, "DEFSHAPE 0 -1 -1".to_string()),
+    }
+    for point in &env.points {
+        push_reaper_array(out, "PT", point);
+    }
+    push_reaper_token(out, ">".to_string());
+}
+
+/// 剪贴板 ENVSEG 轨道包络段（对齐 REAPERMedia 样例形态）：
+/// `<ENVSEG <TYPE>` + SEG_RANGE（4 值双时基）+ PT（8 值双时基），无其它头。
+/// 坐标/QN 值由导出方预算后存入 points / seg_range，此处原样写出。
+pub fn push_reaper_envelope_clipboard_segment(out: &mut Vec<u8>, env: &ReaperEnvelope) {
+    push_reaper_token(out, format!("<ENVSEG {}", env.env_type));
+    if let Some(range) = env.seg_range.as_ref() {
+        push_reaper_array(out, "SEG_RANGE", range);
+    }
+    for point in &env.points {
+        push_reaper_array(out, "PT", point);
+    }
+    push_reaper_token(out, ">".to_string());
+}
+
 fn push_reaper_take(out: &mut Vec<u8>, take: &ReaperTake, is_item_default: bool) {
     if !is_item_default {
         push_reaper_token(
@@ -1548,19 +1653,45 @@ fn push_reaper_take(out: &mut Vec<u8>, take: &ReaperTake, is_item_default: bool)
     if let Some(source) = take.source.as_ref() {
         push_reaper_source(out, source);
     }
+    // take 包络位于 SOURCE 之后（REAPER 正典块序，pitch_test.rpp 同构）。
+    for envelope in &take.envelopes {
+        push_reaper_envelope_plain(out, envelope);
+    }
 }
 
 fn push_reaper_item(out: &mut Vec<u8>, item: &ReaperItem) {
     push_reaper_token(out, "<ITEM".to_string());
-    push_reaper_token(
-        out,
-        format!("POSITION {}", format_reaper_f64(item.position)),
-    );
+    // 原生 REAPER 剪贴板为双时基：`POSITION <sec> <qn>` / `LENGTH <sec> <qn>`
+    //（QN 按 Tempo Map 积分；样例 ClipboardData/20260908-025849）。
+    match item.position_qn {
+        Some(qn) => push_reaper_token(
+            out,
+            format!(
+                "POSITION {} {}",
+                format_reaper_f64(item.position),
+                format_reaper_f64(qn)
+            ),
+        ),
+        None => push_reaper_token(
+            out,
+            format!("POSITION {}", format_reaper_f64(item.position)),
+        ),
+    }
     push_reaper_token(
         out,
         format!("SNAPOFFS {}", format_reaper_f64(item.snap_offs)),
     );
-    push_reaper_token(out, format!("LENGTH {}", format_reaper_f64(item.length)));
+    match item.length_qn {
+        Some(qn) => push_reaper_token(
+            out,
+            format!(
+                "LENGTH {} {}",
+                format_reaper_f64(item.length),
+                format_reaper_f64(qn)
+            ),
+        ),
+        None => push_reaper_token(out, format!("LENGTH {}", format_reaper_f64(item.length))),
+    }
     push_reaper_token(out, format!("LOOP {}", if item.is_loop { 1 } else { 0 }));
     push_reaper_token(
         out,
@@ -1570,19 +1701,11 @@ fn push_reaper_item(out: &mut Vec<u8>, item: &ReaperItem) {
     push_reaper_array(out, "FADEOUT", &item.fade_out);
     push_reaper_int_array(out, "MUTE", &item.mute);
     push_reaper_token(out, format!("SEL {}", if item.selected { 1 } else { 0 }));
+    // default take（= ITEM 直属包络的归属者）先行，随后各显式 TAKE 块；
+    // 各 take 的包络由 push_reaper_take 写在其 SOURCE 之后。
     push_reaper_take(out, &item.default_take, true);
     for take in &item.takes {
         push_reaper_take(out, take, false);
-    }
-    for envelope in &item.envelopes {
-        push_reaper_token(out, format!("<{}", envelope.env_type));
-        if let Some(range) = envelope.seg_range.as_ref() {
-            push_reaper_array(out, "SEG_RANGE", range);
-        }
-        for point in &envelope.points {
-            push_reaper_array(out, "PT", point);
-        }
-        push_reaper_token(out, ">".to_string());
     }
     push_reaper_token(out, ">".to_string());
 }
@@ -1618,11 +1741,14 @@ pub fn serialize_reaper_clipboard(data: &ReaperData, as_track_data: bool) -> Vec
             push_reaper_item(&mut out, item);
         }
         for envelope in &track.envelopes {
-            push_reaper_token(&mut out, format!("<{}", envelope.env_type));
-            for point in &envelope.points {
-                push_reaper_array(&mut out, "PT", point);
+            if as_track_data {
+                // TRACK 块内：常规包络块（完整头 + 单时基 PT）。
+                push_reaper_envelope_plain(&mut out, envelope);
+            } else {
+                // 剪贴板条目数据：ENVSEG 轨道包络段（REAPER 复制 item 时
+                // 携带其上轨道包络的原生形态，见 REAPERMedia 样例）。
+                push_reaper_envelope_clipboard_segment(&mut out, envelope);
             }
-            push_reaper_token(&mut out, ">".to_string());
         }
 
         if as_track_data {
@@ -1967,5 +2093,135 @@ PT 4 100 1 262147 0 1 0 \"\" 0 41 0 ABB\n\
         // 倒放但缺少有效媒体全长时无法镜像 → 返回空表（调用方回退单 clip 路径）。
         assert!(stretch_segments_full_cover(&markers, 5.0, 1.0, 10.0, None, true).is_empty());
         assert!(stretch_segments_full_cover(&markers, 5.0, 1.0, 10.0, Some(0.0), true).is_empty());
+    }
+
+    #[test]
+    fn take_envelopes_belong_to_their_takes() {
+        // 两个 take 各带 PITCHENV（数值区分：default +1 / Alt +5）：
+        // ITEM 直属包络 → default take；TAKE 内包络 → 该 take。
+        let text = "<REAPER_PROJECT 0.1 \"7.0\" 0\n\
+  <TRACK\n\
+    NAME T\n\
+    <ITEM\n\
+      POSITION 0\n\
+      LENGTH 10\n\
+      LOOP 1\n\
+      <SOURCE WAVE\n\
+        FILE \"C:/a.wav\"\n\
+      >\n\
+      <PITCHENV\n\
+        ACT 1 -1\n\
+        PT 0 1 0\n\
+        PT 5 -1 0\n\
+      >\n\
+      TAKE\n\
+      NAME Alt\n\
+      <SOURCE WAVE\n\
+        FILE \"C:/b.wav\"\n\
+      >\n\
+      <PITCHENV\n\
+        ACT 1 -1\n\
+        PT 0 5 0\n\
+      >\n\
+    >\n\
+  >\n\
+>";
+        let data = parse_clipboard_bytes(text.as_bytes()).expect("parse");
+        let item = &data.tracks[0].items[0];
+        // 包络按归属存放在 take 上（item 级不再混流）。
+        assert_eq!(item.default_take.envelopes.len(), 1);
+        assert_eq!(item.default_take.envelopes[0].env_type, "PITCHENV");
+        assert_eq!(item.default_take.envelopes[0].points[0][1], 1.0);
+        assert_eq!(item.takes.len(), 1);
+        assert_eq!(item.takes[0].envelopes.len(), 1);
+        assert_eq!(item.takes[0].envelopes[0].points[0][1], 5.0);
+
+        // 无 TAKE SEL → 活跃 take = default take（source 存在）。
+        assert_eq!(item.active_take().name, "");
+        assert_eq!(item.active_take_envelopes()[0].points[0][1], 1.0);
+
+        // TAKE SEL → 活跃 take 切换，包络随之。（注意：Rust 字符串续行剥掉
+        // 了源码缩进，行首无空格。）
+        let sel_text = text.replace("\nTAKE\n", "\nTAKE SEL\n");
+        let data = parse_clipboard_bytes(sel_text.as_bytes()).expect("parse");
+        let item = &data.tracks[0].items[0];
+        assert!(item.takes[0].selected);
+        assert_eq!(item.active_take().name, "Alt");
+        assert_eq!(item.active_take_envelopes()[0].points[0][1], 5.0);
+    }
+
+    #[test]
+    fn serialize_take_envelopes_and_envseg_round_trips() {
+        // default take 带 PITCHENV（含 DEFSHAPE 范围），显式 take 带 VOLENV；
+        // track.envelopes 一条 VOLENV2 段（SEG_RANGE + 8 值双时基 PT）。
+        // 条目模式 → 轨道包络写 <ENVSEG VOLENV2> 段；再解析回读验证归属。
+        let mut env = ReaperEnvelope {
+            env_type: "PITCHENV".to_string(),
+            act: vec![1, -1],
+            points: vec![vec![0.0, 1.0, 0.0], vec![5.0, -1.0, 0.0]],
+            ..ReaperEnvelope::default()
+        };
+        env.def_shape = Some(vec![0.0, 3.0, -1.0]);
+        let mut item = ReaperItem::default();
+        item.position = 0.0;
+        item.length = 10.0;
+        // take 包络上下文由 SOURCE 块定位（文档序），测试数据须携带 SOURCE。
+        item.default_take.source = Some({
+            let mut src = ReaperSource::new();
+            src.source_type = "WAVE".to_string();
+            src.file_path = "C:/a.wav".to_string();
+            src
+        });
+        item.default_take.envelopes.push(env);
+        let mut take = ReaperTake::default();
+        take.name = "Alt".to_string();
+        take.source = Some({
+            let mut src = ReaperSource::new();
+            src.source_type = "WAVE".to_string();
+            src.file_path = "C:/b.wav".to_string();
+            src
+        });
+        take.envelopes.push(ReaperEnvelope {
+            env_type: "VOLENV".to_string(),
+            act: vec![1, -1],
+            points: vec![vec![0.0, 0.5, 0.0]],
+            ..ReaperEnvelope::default()
+        });
+        item.takes.push(take);
+
+        let mut track = ReaperTrack::default();
+        track.items.push(item);
+        track.envelopes.push(ReaperEnvelope {
+            env_type: "VOLENV2".to_string(),
+            act: vec![1, -1],
+            seg_range: Some(vec![0.0, 10.0, 0.0, 20.0]),
+            points: vec![
+                vec![0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                vec![10.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 20.0],
+            ],
+            ..ReaperEnvelope::default()
+        });
+        let mut data = ReaperData::default();
+        data.is_track_data = false;
+        data.tracks.push(track);
+
+        let bytes = serialize_reaper_clipboard(&data, false);
+        let parsed = parse_clipboard_bytes(&bytes).expect("round-trip parse");
+        let item = &parsed.tracks[0].items[0];
+        assert_eq!(item.default_take.envelopes.len(), 1);
+        assert_eq!(item.default_take.envelopes[0].env_type, "PITCHENV");
+        assert_eq!(
+            item.default_take.envelopes[0].def_shape.as_ref().map(|s| s[1]),
+            Some(3.0)
+        );
+        assert_eq!(item.takes[0].envelopes.len(), 1);
+        assert_eq!(item.takes[0].envelopes[0].env_type, "VOLENV");
+        // 轨道包络段回读：块头 <ENVSEG VOLENV2> → env_type=VOLENV2 + seg_range。
+        let seg = &parsed.tracks[0].envelopes[0];
+        assert_eq!(seg.env_type, "VOLENV2");
+        assert_eq!(seg.seg_range.as_ref().map(|r| r[1]), Some(10.0));
+        assert_eq!(seg.points.len(), 2);
+        assert_eq!(seg.points[1].len(), 8);
+        assert!((seg.points[1][7] - 20.0).abs() < 1e-9, "末位 QN 值");
     }
 }

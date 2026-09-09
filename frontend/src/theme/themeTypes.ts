@@ -115,7 +115,6 @@ export type QtColorToken =
     | "qt-graph-grid-strong"
     | "qt-graph-grid-weak"
     | "qt-scrollbar-thumb"
-    | "qt-scrollbar-thumb-hover"
     | "qt-overlay"
     | "qt-divider"
     | "qt-subtle-1"
@@ -151,7 +150,6 @@ export const QT_COLOR_TOKENS: QtColorToken[] = [
     "qt-graph-grid-strong",
     "qt-graph-grid-weak",
     "qt-scrollbar-thumb",
-    "qt-scrollbar-thumb-hover",
     "qt-overlay",
     "qt-divider",
     "qt-subtle-1",
@@ -188,7 +186,6 @@ export const QT_COLOR_TOKEN_LABELS: Record<QtColorToken, string> = {
     "qt-graph-grid-strong": "appearance_color_graph_grid_strong",
     "qt-graph-grid-weak": "appearance_color_graph_grid_weak",
     "qt-scrollbar-thumb": "appearance_color_scrollbar_thumb",
-    "qt-scrollbar-thumb-hover": "appearance_color_scrollbar_thumb_hover",
     "qt-overlay": "appearance_color_overlay",
     "qt-divider": "appearance_color_divider",
     "qt-subtle-1": "appearance_color_subtle_1",
@@ -236,10 +233,16 @@ export interface ThemeExportData {
 
 /* ─────────────────── 外观设置 ─────────────────── */
 
+/** 主题模式设置：auto = 跟随系统深浅色偏好（实时同步系统切换） */
+export type ThemeModeSetting = "auto" | "dark" | "light";
+
+/** 所有主题模式（按 UI 显示顺序） */
+export const THEME_MODE_SETTINGS: ThemeModeSetting[] = ["auto", "dark", "light"];
+
 /** 用户外观偏好 */
 export interface AppearanceSettings {
-    /** 主题模式 */
-    mode: "dark" | "light";
+    /** 主题模式（auto 由 AppThemeProvider 解析为当前系统偏好） */
+    mode: ThemeModeSetting;
     /** Radix 强调色 */
     accentColor: RadixAccentColor;
     /** Radix 灰阶色系 */
@@ -254,7 +257,7 @@ export interface AppearanceSettings {
 
 /** 默认外观设置 */
 export const DEFAULT_APPEARANCE: AppearanceSettings = {
-    mode: "dark",
+    mode: "auto",
     accentColor: "iris",
     grayColor: "mauve",
     radius: "medium",

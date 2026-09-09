@@ -298,6 +298,11 @@ export const ClipItem = React.memo(function ClipItem({
 
     // Clip 总高：边缘所有权切分（淡化角控件 vs 裁短）依赖它，取单一来源。
     const clipHeightPx = Math.max(1, rowHeight - CLIP_BODY_PADDING_Y);
+
+    // 静音检测预览覆盖层（对话框打开期间存在；任何时间线提交自动清除）。
+    const silencePreviewRegions = useAppSelector(
+        (state) => state.session.silencePreviewSegments?.[clip.id] ?? null,
+    );
     /**
      * 淡化角控件在 body 区内（header 之下）保留的高度；其下沿以下归裁短。
      * 角控件不得覆盖 header —— header 上有旋钮/badge/名称等交互控件。
@@ -823,9 +828,7 @@ export const ClipItem = React.memo(function ClipItem({
                     onRenameClickCandidate={onRenameClickCandidate}
                     renameControllerRef={renameControllerRef}
                     onGainCommit={onGainCommit}
-                    editingBadgeField={
-                        editingBadge?.clipId === clip.id ? editingBadge.field : null
-                    }
+                    editingBadgeField={editingBadge?.clipId === clip.id ? editingBadge.field : null}
                     onBadgeEditStart={onBadgeEditStart}
                     onBadgeEditCommit={onBadgeEditCommit}
                     onBadgeEditDone={onBadgeEditDone}
@@ -888,6 +891,28 @@ export const ClipItem = React.memo(function ClipItem({
                                 }
                             />
                         )}
+
+                        {/* 静音检测预览：把检测到的静音区染成半透明红色（pointer-events-none）。 */}
+                        {(silencePreviewRegions ?? []).map(([segStart, segEnd], i) => {
+                            // 防御性钳制到 Clip 本体：后端区域越过 clip 末端
+                            // 时不得把红色画到相邻 Clip 上。
+                            const clampedStart = Math.max(segStart, clip.startSec);
+                            const clampedEnd = Math.min(
+                                segEnd,
+                                clip.startSec + Math.max(0, clip.lengthSec),
+                            );
+                            if (clampedEnd <= clampedStart) return null;
+                            const segLeft = (clampedStart - clip.startSec) * pxPerSec;
+                            const segWidth = Math.max(1, (clampedEnd - clampedStart) * pxPerSec);
+                            if (segLeft + segWidth <= 0 || segLeft >= width) return null;
+                            return (
+                                <div
+                                    key={i}
+                                    className="absolute top-0 bottom-0 bg-red-500/30 pointer-events-none"
+                                    style={{ left: segLeft, width: segWidth }}
+                                />
+                            );
+                        })}
 
                         {/* 波形由 TimelineWaveformSurface（共享 WebGL2 波形面）统一渲染，此处不再包含波形内容 */}
                     </div>

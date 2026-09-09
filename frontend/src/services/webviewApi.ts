@@ -44,6 +44,7 @@ export const webApi = {
     exportAudioAdvanced: coreApi.exportAudioAdvanced,
     playOriginal: coreApi.playOriginal,
     stopAudio: coreApi.stopAudio,
+    setMetronome: coreApi.setMetronome,
     startBackgroundRender: coreApi.startBackgroundRender,
     cancelBackgroundRender: coreApi.cancelBackgroundRender,
 
@@ -137,6 +138,9 @@ export const webApi = {
     searchSourceFileReplacements: timelineApi.searchSourceFileReplacements,
     splitClip: timelineApi.splitClip,
     splitClipsAt: timelineApi.splitClipsAt,
+    closeTrackGaps: timelineApi.closeTrackGaps,
+    analyzeClipSilence: timelineApi.analyzeClipSilence,
+    removeClipSilence: timelineApi.removeClipSilence,
     glueClips: timelineApi.glueClips,
     groupClips: timelineApi.groupClips,
     ungroupClips: timelineApi.ungroupClips,

@@ -134,11 +134,25 @@ pub(super) fn set_transport(
 
     // Keep realtime engine transport aligned.
     state.audio_engine.seek_sec(tl.playhead_sec);
-    if (tl.bpm - prev_bpm).abs() > 1e-9 {
+    let bpm_changed = (tl.bpm - prev_bpm).abs() > 1e-9;
+    if bpm_changed {
         state.audio_engine.update_timeline(tl.clone());
     }
+    let playhead = tl.playhead_sec;
+    let bpm_now = tl.bpm;
 
-    serde_json::json!({"ok": true, "playhead_sec": tl.playhead_sec, "bpm": tl.bpm })
+    // BPM 变化会改变节拍器响点表（时间锚定），重建之。其余 seek 场景
+    // 响点表不变，无需重建。
+    //
+    // ⚠ 必须先 `drop(tl)` 再刷新：refresh_metronome_schedule 内部会重新
+    // 加 timeline 锁，std Mutex 不可重入，锁内调用 = 自我死锁
+    // （症状：修改 BPM 后应用整体未响应）。
+    drop(tl);
+    if bpm_changed {
+        crate::commands::playback::refresh_metronome_schedule(&state);
+    }
+
+    serde_json::json!({"ok": true, "playhead_sec": playhead, "bpm": bpm_now })
 }
 
 // ===================== undo / redo =====================

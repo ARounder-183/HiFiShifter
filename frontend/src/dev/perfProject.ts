@@ -333,7 +333,7 @@ function parseScaleSpec(raw: string): PerfProjectOptions | null {
 /** 生成工程并回写摘要，供全局入口与悬浮面板共用。 */
 function generateAndReport(options: PerfProjectOptions): PerfProjectSummary {
     const summary = generatePerfProject(options);
-    console.info("[perf] 性能工程已生成", summary);
+    console.info("[perf] synthetic project generated", summary);
     return summary;
 }
 

@@ -179,5 +179,13 @@ pub(super) fn save_ui_settings(
         }
     }
 
+    // Swing 参与节拍器响点展开（弱网格线奇数格偏移）：变化时重建响点表，
+    // 使节拍器与时间标尺的 Swing 语义保持一致（播放中也实时生效）。
+    if prev_settings.timeline_snap.swing_enabled != settings.timeline_snap.swing_enabled
+        || prev_settings.timeline_snap.swing_percent != settings.timeline_snap.swing_percent
+    {
+        crate::commands::playback::refresh_metronome_schedule(&state);
+    }
+
     serde_json::json!({ "ok": true })
 }

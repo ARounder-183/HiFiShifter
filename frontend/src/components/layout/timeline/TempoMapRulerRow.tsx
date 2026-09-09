@@ -195,7 +195,7 @@ function TempoPointDialog({
     const bpmRef = useRef<HTMLInputElement | null>(null);
     const numRef = useRef<HTMLInputElement | null>(null);
 
-    // 修饰键“参数微调”：滚轮调节 BPM 时步长 0.1，否则 1（与左上角 BPM 控件一致）。
+    // 修饰键“精细调整”：滚轮调节 BPM 时步长 0.1，否则 1（与左上角 BPM 控件一致）。
     const paramFineAdjustKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.paramFineAdjust"),
     );
@@ -1143,12 +1143,27 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
     );
 
     useEffect(() => {
-        if (!draggingId || !tempoMap) return;
+        if (!draggingId) return;
+        if (!tempoMap) {
+            // 拖拽进行中 Tempo Map 被外部清空（撤销/远程同步等）：没有可提交的
+            // map，按取消收尾，防止 dragRef / 吸附手势深度 / 拖拽态残留。
+            if (dragRef.current) {
+                dragRef.current = null;
+                dragDraftRef.current = null;
+                endSnapGesture();
+                clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+                setDraggingId(null);
+            }
+            return;
+        }
         const handleMove = (e: PointerEvent) => {
             const drag = dragRef.current;
             if (!drag || !tempoMap) return;
             const dx = e.clientX - drag.startClientX;
-            const rawSec = Math.max(0, drag.startSec + dx / Math.max(1e-9, dragPxPerSecRef.current));
+            const rawSec = Math.max(
+                0,
+                drag.startSec + dx / Math.max(1e-9, dragPxPerSecRef.current),
+            );
             // 吸附网格必须使用拖拽开始时的 Tempo Map 快照：变化点自身移动会改变
             // 其后的网格原点/BPM，若用实时 tempoMap 计算吸附，会使网格跟着标签移动，
             // 造成“刚脱离吸附又被自己拉回”的一顿一顿效果。
@@ -1217,12 +1232,6 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             window.removeEventListener("pointermove", handleMove);
             window.removeEventListener("pointerup", handleUp);
             window.removeEventListener("pointercancel", handleUp);
-            // effect 因依赖变化中途卸载时补齐手势深度（正常路径已在
-            // handleUp 中结束；dragRef 仍非空说明是异常卸载路径）。
-            if (dragRef.current) {
-                dragRef.current = null;
-                endSnapGesture();
-            }
         };
     }, [
         draggingId,
@@ -1235,6 +1244,16 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
         commitMap,
         projectSec,
     ]);
+
+    useEffect(
+        () => () => {
+            if (dragRef.current) {
+                dragRef.current = null;
+                endSnapGesture();
+            }
+        },
+        [],
+    );
 
     // ── 可见性计算 ──
     const visibleState = useMemo(() => {

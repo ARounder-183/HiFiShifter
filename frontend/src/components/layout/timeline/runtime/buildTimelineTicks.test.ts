@@ -19,7 +19,7 @@
 
 import { test } from "vitest";
 
-import { buildTimelineTicks } from "./buildTimelineTicks.js";
+import { buildTimelineTicks, RULER_LABEL_HIDDEN_GAP_PX } from "./buildTimelineTicks.js";
 import { createTimelineAxis, secToContentPx, secToViewportPx } from "./timelineAxis.js";
 import type { TempoMap } from "../../../../utils/tempoMap.ts";
 
@@ -37,7 +37,7 @@ function assertTrue(condition: boolean, label: string): void {
  * 标尺隐藏标签的间距阈值（与 TimeRulerMarks 的 labelHidden 判定一致）。
  * 带标签的刻度间距必须大于它，否则标尺上只剩没有文字的竖线。
  */
-const RULER_LABEL_HIDDEN_PX = 26;
+const RULER_LABEL_HIDDEN_PX = RULER_LABEL_HIDDEN_GAP_PX;
 
 /** 两段式 Tempo Map：10 秒处提速并换成 3/4 拍。 */
 function twoSegmentTempoMap(): TempoMap {
@@ -54,6 +54,33 @@ function twoSegmentTempoMap(): TempoMap {
                 positionSec: 10,
                 bpm: 180,
                 timeSignature: { numerator: 3, denominator: 4 },
+            },
+        ],
+    } as unknown as TempoMap;
+}
+
+/**
+ * 变化点不落在标签相位上的 Tempo Map（本文件变化点回归的核心用例）。
+ *
+ * 7.4s 处的变化点不在上一段的标签栅格上，且距上一段末尾标签（7s）仅
+ * 40px —— 标签枚举的跨段最小间距约束会跳过段起点（m=0），变化点处既无
+ * 竖线也无文字，悬在 7s 与 8.34s 两个标尺值之间。§4 的强制规则必须让
+ * 该点带标签，并令 7s 的常规标签让位。
+ */
+function offsetTempoMap(): TempoMap {
+    return {
+        points: [
+            {
+                id: "tp-a",
+                positionSec: 0,
+                bpm: 120,
+                timeSignature: { numerator: 4, denominator: 4 },
+            },
+            {
+                id: "tp-b",
+                positionSec: 7.4,
+                bpm: 128,
+                timeSignature: { numerator: 4, denominator: 4 },
             },
         ],
     } as unknown as TempoMap;
@@ -88,6 +115,7 @@ test("components/layout/timeline/runtime/buildTimelineTicks.test.ts scripted che
     const scenarios = [
         { label: "uniform", tempoMap: null as TempoMap | null },
         { label: "tempo-2seg", tempoMap: twoSegmentTempoMap() },
+        { label: "tempo-offset", tempoMap: offsetTempoMap() },
         { label: "tempo-multi", tempoMap: multiPointTempoMap() },
     ];
 
@@ -180,6 +208,24 @@ test("components/layout/timeline/runtime/buildTimelineTicks.test.ts scripted che
                     `${tag}: label gap ${gapPx}px must clear the ${RULER_LABEL_HIDDEN_PX}px ` +
                         `hide threshold, otherwise the ruler is left with bare lines`,
                 );
+            }
+
+            // ── 3d. 变化点位置必须强制带标签 ──────────────────────────
+            // 变化点（Tempo Map 段起点）的标尺值不能依赖标签栅格的整除/间距
+            // 判定：标签枚举的跨段最小间距约束会跳过段起点（m=0），变化点
+            // 便悬在两个标尺值之间、读不出时间位置。凡有刻度的变化点必须
+            // showLabel；与之冲突的常规标签让位由 3b 的间距不变量兜底。
+            if (scenario.tempoMap) {
+                for (const point of scenario.tempoMap.points) {
+                    const cpTick = ticks.find(
+                        (tick) => Math.abs(tick.sec - point.positionSec) < 1e-6,
+                    );
+                    if (!cpTick) continue; // 点不在本次生成范围内
+                    assertTrue(
+                        cpTick.showLabel,
+                        `${tag}: change point at ${point.positionSec}s must carry a ruler label`,
+                    );
+                }
             }
 
             // ── 3c. 标签必须铺满生成范围，不得聚在一端 ────────────────

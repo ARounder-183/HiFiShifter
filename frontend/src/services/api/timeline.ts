@@ -1,4 +1,11 @@
-import type { TimelineResult, TrackSummaryResult, TempoMapPayload } from "../../types/api";
+import type {
+    TimelineResult,
+    TrackSummaryResult,
+    TempoMapPayload,
+    SilenceDetectOptionsPayload,
+    SilenceAnalyzeResult,
+    RemoveSilenceResult,
+} from "../../types/api";
 import type { LinkedParamCurves } from "../../features/session/sessionTypes";
 
 import { invoke } from "../invoke";
@@ -416,6 +423,15 @@ export const timelineApi = {
 
     splitClipsAt: (clipIds: string[], splitSec: number) =>
         invoke<TimelineResult>("split_clips_at", clipIds, splitSec),
+
+    closeTrackGaps: (trackId: string, fromSec: number) =>
+        invoke<TimelineResult>("close_track_gaps", trackId, fromSec),
+
+    analyzeClipSilence: (clipIds: string[], options: SilenceDetectOptionsPayload) =>
+        invoke<SilenceAnalyzeResult>("analyze_clip_silence", clipIds, options),
+
+    removeClipSilence: (clipIds: string[], options: SilenceDetectOptionsPayload) =>
+        invoke<RemoveSilenceResult>("remove_clip_silence", clipIds, options),
 
     glueClips: (clipIds: string[]) => invoke<TimelineResult>("glue_clips", clipIds),
 

@@ -20,6 +20,7 @@ import {
     syncPlaybackState,
     stopAudioPlayback,
     playOriginal,
+    updateMetronome,
     undoRemote,
     redoRemote,
     newProjectRemote,
@@ -61,14 +62,13 @@ import {
     resolveEditOpRoute,
     resolvePasteRoute,
 } from "./features/keybindings/focusRouting";
-import {
-    installFocusSurfaceTracking,
-    getActiveSurface,
-} from "./features/uiFocus/focusSurface";
+import { installFocusSurfaceTracking, getActiveSurface } from "./features/uiFocus/focusSurface";
 import type { ActionId } from "./features/keybindings/types";
 import { store } from "./app/store";
 import { resolveRootTrackId, computeInsertBelowPlacement } from "./features/session/trackUtils";
 import { getParamShiftStep } from "./components/layout/pianoRoll/paramShiftStep";
+import { resolveParamShiftIntent } from "./features/keybindings/paramShiftActions";
+import { isSelectionParamEditInFlight } from "./features/session/selectionEditInFlight";
 import { runConfirmedExitClose } from "./confirmedExitClose";
 import { paramsApi } from "./services/api";
 import { coreApi } from "./services/api/core";
@@ -938,7 +938,7 @@ function AppInner() {
 
     // 剪贴板错误码可能带回退链后缀/细节，先经 token 精确映射为 i18n key
     // （未收录的码回退显示原文，保留诊断信息）。
-    const mappedErrorKey = error ? errorCodeKey[error] ?? clipboardErrorKey(error) : "";
+    const mappedErrorKey = error ? (errorCodeKey[error] ?? clipboardErrorKey(error)) : "";
     const errorText = error
         ? `${t("status_error_prefix")}：${mappedErrorKey ? t(mappedErrorKey as MessageKey) : error}`
         : statusText;
@@ -2305,9 +2305,7 @@ function AppInner() {
                         selectionContext: session.selectionContext,
                     });
                     if (channel) {
-                        window.dispatchEvent(
-                            new CustomEvent(channel, { detail: { op: editOp } }),
-                        );
+                        window.dispatchEvent(new CustomEvent(channel, { detail: { op: editOp } }));
                     }
                     return;
                 }
@@ -2335,6 +2333,13 @@ function AppInner() {
                     } else {
                         void dispatch(playOriginal());
                     }
+                    break;
+                case "playback.metronome":
+                    void dispatch(
+                        updateMetronome({
+                            metronomeEnabled: !store.getState().session.metronomeEnabled,
+                        }),
+                    );
                     break;
                 case "playback.focusCursor":
                     window.dispatchEvent(new CustomEvent("hifi:focusCursor"));
@@ -2515,11 +2520,23 @@ function AppInner() {
                     );
                     break;
                 case "pianoRoll.shiftParamUp":
-                case "pianoRoll.shiftParamDown": {
-                    const isUp = actionId === "pianoRoll.shiftParamUp";
+                case "pianoRoll.shiftParamDown":
+                case "pianoRoll.shiftParamUpLarge":
+                case "pianoRoll.shiftParamDownLarge":
+                case "pianoRoll.shiftParamUpSmall":
+                case "pianoRoll.shiftParamDownSmall": {
+                    // 三档幅度：默认 / 大幅（Shift，音高 = 一个八度等）/
+                    // 微调（Ctrl，音高 = 1 音分等），步长见 getParamShiftStep。
+                    // 方向/幅度由 resolveParamShiftIntent 统一解析（变体 id
+                    // 以 Large/Small 结尾，方向判定不能用 endsWith）。
+                    const intent = resolveParamShiftIntent(actionId);
+                    if (!intent || intent.selectionOp) break;
+                    const isUp = intent.isUp;
+                    const magnitude = intent.magnitude;
                     const busyRef = paramShiftBusyRef;
-                    // 长按 "=" / "-" = 连续上移/下移参数线。异步链路进行中时
-                    // 跳过本拍，避免 50ms 节奏下 IPC 与历史检查点堆积。
+                    // 长按 "=" / "-" / Shift+=" / Ctrl+=" = 连续上移/下移
+                    // 参数线。异步链路进行中时跳过本拍，避免 50ms 节奏下
+                    // IPC 与历史检查点堆积。
                     const fire = (): boolean => {
                         if (busyRef.current) return false;
                         const ss = store.getState().session;
@@ -2567,7 +2584,7 @@ function AppInner() {
                                     }
                                     descriptor = descriptors?.find((param) => param.id === editP);
                                 }
-                                const step = getParamShiftStep(editP, descriptor);
+                                const step = getParamShiftStep(editP, descriptor, magnitude);
                                 const delta = isUp ? step : -step;
                                 const clampNum = (v: number, minV: number, maxV: number) =>
                                     Math.min(maxV, Math.max(minV, v));
@@ -2747,17 +2764,44 @@ function AppInner() {
                     break;
                 }
                 case "pianoRoll.shiftParamUpSelection":
-                case "pianoRoll.shiftParamDownSelection": {
-                    window.dispatchEvent(
-                        new CustomEvent("hifi:editOp", {
-                            detail: {
-                                op:
-                                    actionId === "pianoRoll.shiftParamUpSelection"
-                                        ? "shiftParamUpSelection"
-                                        : "shiftParamDownSelection",
-                            },
-                        }),
-                    );
+                case "pianoRoll.shiftParamDownSelection":
+                case "pianoRoll.shiftParamUpSelectionLarge":
+                case "pianoRoll.shiftParamDownSelectionLarge":
+                case "pianoRoll.shiftParamUpSelectionSmall":
+                case "pianoRoll.shiftParamDownSelectionSmall": {
+                    // 选择范围平移同样分三档幅度；op 名沿用消费端（PianoRollPanel）
+                    // 的既有契约，幅度经事件 detail 透传（解析同上）。
+                    const intent = resolveParamShiftIntent(actionId);
+                    if (!intent || !intent.selectionOp) break;
+                    const op = intent.selectionOp;
+                    const magnitude = intent.magnitude;
+                    // 长按 "]" / "["（及 Shift/Ctrl 变体）= 连续上移/下移选区
+                    // 范围参数线。执行体在 PianoRollPanel，在途标记经
+                    // selectionEditInFlight 共享 —— 上一拍未完成时跳过本拍。
+                    // 首拍与音频块范围平移同构的守卫：无选区 / 无根轨道 /
+                    // pitch 不可用时不布防长按（否则空转重复直至松键）。
+                    const fire = (): boolean => {
+                        if (isSelectionParamEditInFlight()) return false;
+                        const ss = store.getState().session;
+                        if (!ss.paramSelectionActive) return false;
+                        const rootTrkId = resolveRootTrackId(ss.tracks, ss.selectedTrackId);
+                        if (!rootTrkId) return false;
+                        if (ss.editParam === "pitch") {
+                            const rootTrk = ss.tracks.find((tr) => tr.id === rootTrkId);
+                            if (!rootTrk?.composeEnabled || rootTrk.pitchAnalysisAlgo === "none") {
+                                return false;
+                            }
+                        }
+                        window.dispatchEvent(
+                            new CustomEvent("hifi:editOp", {
+                                detail: { op, magnitude },
+                            }),
+                        );
+                        return true;
+                    };
+                    if (fire()) {
+                        beginHoldRepeat(selectMergedKeybindings(store.getState())[actionId], fire);
+                    }
                     break;
                 }
                 case "edit.pasteVocalShifter":

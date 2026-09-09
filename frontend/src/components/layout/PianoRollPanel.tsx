@@ -70,10 +70,7 @@ import {
     timelineViewportStateToNative,
 } from "../../utils/timelineViewportSync";
 import { isModifierActive, isNoneBinding } from "../../features/keybindings/keybindingsSlice";
-import {
-    getActiveSurface,
-    setActiveSurfaceExplicit,
-} from "../../features/uiFocus/focusSurface";
+import { getActiveSurface, setActiveSurfaceExplicit } from "../../features/uiFocus/focusSurface";
 import { findFirstExternalPathAction } from "./timeline/dnd";
 import { shiftPitchValue } from "./timeline/clipPitchDrag";
 import type { ScaleLike } from "../../utils/musicalScales";
@@ -112,7 +109,16 @@ import {
     listReferenceRootTracks,
 } from "./pianoRoll/referenceRootTracks";
 import { buildReferenceRootTrackTriggerElement } from "./pianoRoll/referenceRootTrackTrigger";
-import { averageSelectionValues, smoothSelectionValues } from "./pianoRoll/selectionTransforms";
+import {
+    averageSelectionValues,
+    smoothSelectionValues,
+    smoothContextPadFrames,
+} from "./pianoRoll/selectionTransforms";
+import {
+    applySelectionEditWithEdgeSmoothing,
+    type SelectionEditExtension,
+} from "./pianoRoll/selectionEditApply";
+import { editablePitchValue } from "./pianoRoll/paramSmoothing";
 import { usePianoRollData } from "./pianoRoll/usePianoRollData";
 import { useClipsPeaksForPianoRoll } from "./pianoRoll/useClipsPeaksForPianoRoll";
 import { PianoRollWaveformSurface } from "./pianoRoll/PianoRollWaveformSurface";
@@ -125,7 +131,11 @@ import {
 } from "./timeline/runtime/timelineAxis.js";
 import { usePianoRollInteractions } from "./pianoRoll/usePianoRollInteractions";
 import { useLiveParamEditing } from "./pianoRoll/useLiveParamEditing";
-import { getParamShiftStep } from "./pianoRoll/paramShiftStep";
+import { getParamShiftStep, parseParamShiftMagnitude } from "./pianoRoll/paramShiftStep";
+import {
+    beginSelectionParamEdit,
+    endSelectionParamEdit,
+} from "../../features/session/selectionEditInFlight";
 import {
     buildChildPitchOffsetCentsParam,
     buildChildPitchOffsetDegreesParam,
@@ -163,7 +173,6 @@ import {
     selectKeybinding,
     selectMergedKeybindings,
 } from "../../features/keybindings/keybindingsSlice";
-
 
 import { usePianoRollStatusUpdate } from "../../contexts/PianoRollStatusContext";
 import { MidiTrackSelectDialog } from "./MidiTrackSelectDialog";
@@ -548,6 +557,9 @@ export const PianoRollPanel: React.FC = () => {
     const scrollVerticalKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.scrollVertical"),
     );
+    const scrollbarZoomKb = useAppSelector((state) =>
+        selectKeybinding(state, "modifier.scrollbarZoom"),
+    );
     const pianoKeysVerticalScrollKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.pianoKeysVerticalScroll"),
     );
@@ -609,7 +621,6 @@ export const PianoRollPanel: React.FC = () => {
 
     const effectivePitchSnapVisual =
         snapGestureActive && snapToggleHeld ? !s.pitchSnapEnabled : s.pitchSnapEnabled;
-
 
     // MIDI 导入弹窗状态
     const [midiDialogOpen, setMidiDialogOpen] = useState(false);
@@ -2825,6 +2836,7 @@ export const PianoRollPanel: React.FC = () => {
         horizontalZoomKb,
         scrollHorizontalKb,
         scrollVerticalKb,
+        scrollbarZoomKb,
         paramMorphKb,
         paramStretchKb: stretchKb,
         vibratoAmplitudeAdjustKb,
@@ -2877,6 +2889,18 @@ export const PianoRollPanel: React.FC = () => {
             [],
         ),
     });
+
+    // 参数数据更新后重算当前悬停浮窗：键盘平移参数线（"=" / "-" / "]" / "["
+    // 及其 Shift/Ctrl 变体）、撤销/重做、远端写入都只更新 paramView 数据，
+    // 不会触发 pointermove —— 悬停值是 pointermove 时的快照，若不在此重算，
+    // 浮窗会一直显示旧值直到用户再次移动鼠标。声明顺序在 paramViewRef 同步
+    // effect（上方）之后，重算读到的是本次渲染的最新数据。
+    // refreshParamValuePreview 先解构出稳定引用：直接依赖 interactions 对象
+    // 会让 effect 每次渲染都触发（setState 新对象 → 无限重渲染）。
+    const { refreshParamValuePreview } = interactions;
+    useEffect(() => {
+        refreshParamValuePreview();
+    }, [paramView, refreshParamValuePreview]);
 
     const onScrollerWheelNative = interactions.onScrollerWheelNative;
     const onScrollerScroll = useCallback(
@@ -3258,9 +3282,7 @@ export const PianoRollPanel: React.FC = () => {
             // （focusSurface，外来源粘贴兜底等）随之指向参数编辑器。
             if (op === "selectClipParamRange") {
                 const clipId = typeof data?.clipId === "string" ? data.clipId : "";
-                const clip = store
-                    .getState()
-                    .session.clips.find((entry) => entry.id === clipId);
+                const clip = store.getState().session.clips.find((entry) => entry.id === clipId);
                 if (!clip) return;
                 const aBeat = Math.max(0, clip.startSec / secPerBeat);
                 const bBeat = Math.max(0, (clip.startSec + clip.lengthSec) / secPerBeat);
@@ -3375,143 +3397,32 @@ export const PianoRollPanel: React.FC = () => {
             const startFrame = Math.max(0, Math.floor((startSec * 1000) / fp));
             const frameCount = clamp(Math.ceil((durSec * 1000) / fp), 1, 200_000);
 
-            const applySelectionEditWithEdgeSmoothing = async (
+            // 选区编辑统一入口：取数/编辑/边缘淡化/回写全部在
+            // selectionEditApply 模块内完成（delta 空间交叉淡化 + 毫秒定标）。
+            // 平滑度解析顺序保持旧语义：对话框显式传入 → store 全局设置。
+            const runSelectionEdit = async (
                 editSelection: (currentSelectionVals: number[]) => number[],
-                smoothnessInput?: number,
+                extension?: SelectionEditExtension,
             ) => {
-                const smoothness = clamp(
-                    Number(
-                        smoothnessInput ??
+                const ok = await applySelectionEditWithEdgeSmoothing({
+                    trackId: rootTrackId,
+                    param: editParam,
+                    startFrame,
+                    frameCount,
+                    framePeriodMs: fp,
+                    smoothnessPercent: clamp(
+                        Number(
                             (data?.edgeSmoothnessPercent as number | undefined) ??
-                            s.edgeSmoothnessPercent,
-                    ) || 0,
-                    0,
-                    100,
-                );
-
-                const maxTransitionFrames = Math.floor(frameCount / 2);
-                const transitionFrames =
-                    smoothness > 0 && maxTransitionFrames > 0
-                        ? Math.round((smoothness / 100) * maxTransitionFrames)
-                        : 0;
-                const halfSpan = transitionFrames > 0 ? transitionFrames / 2 : 0;
-                const extend = Math.max(0, Math.ceil(halfSpan));
-
-                const extStart = Math.max(0, startFrame - extend);
-                const extCount = frameCount + Math.max(0, startFrame - extStart) + extend;
-                const selOffset = startFrame - extStart;
-
-                const res = await paramsApi.getParamFrames(
-                    rootTrackId,
-                    editParam,
-                    extStart,
-                    extCount,
-                    1,
-                );
-                if (!res?.ok) return;
-
-                const payload = res as ParamFramesPayload;
-                const beforeDense = (payload.edit ?? []).map((v) => Number(v) || 0);
-                if (beforeDense.length <= 0) return;
-
-                const selEnd = Math.min(beforeDense.length - 1, selOffset + frameCount - 1);
-                if (selOffset < 0 || selOffset >= beforeDense.length || selEnd < selOffset) {
-                    return;
-                }
-                const actualSelLen = selEnd - selOffset + 1;
-                const currentSel = beforeDense.slice(selOffset, selOffset + actualSelLen);
-                const nextSel = editSelection(currentSel);
-
-                const editedDense = beforeDense.slice();
-                for (let i = 0; i < actualSelLen; i += 1) {
-                    editedDense[selOffset + i] = Number(nextSel[i] ?? currentSel[i] ?? 0) || 0;
-                }
-
-                if (smoothness > 0 && transitionFrames > 0) {
-                    const calcMean = (arr: number[]) => {
-                        let sum = 0;
-                        let count = 0;
-                        for (let i = 0; i < actualSelLen; i += 1) {
-                            const v = Number(arr[selOffset + i] ?? 0);
-                            if (editParam === "pitch" && v === 0) continue;
-                            sum += v;
-                            count += 1;
-                        }
-                        return { sum, count };
-                    };
-
-                    const beforeMean = calcMean(beforeDense);
-                    const afterMean = calcMean(editedDense);
-                    const meanDelta =
-                        beforeMean.count > 0 && afterMean.count > 0
-                            ? Math.abs(
-                                  afterMean.sum / afterMean.count -
-                                      beforeMean.sum / beforeMean.count,
-                              )
-                            : 0;
-
-                    let boundaryDelta = 0;
-                    let boundaryCount = 0;
-                    if (selOffset > 0) {
-                        boundaryDelta += Math.abs(
-                            Number(beforeDense[selOffset] ?? 0) -
-                                Number(beforeDense[selOffset - 1] ?? 0),
-                        );
-                        boundaryCount += 1;
-                    }
-                    if (selEnd < beforeDense.length - 1) {
-                        boundaryDelta += Math.abs(
-                            Number(beforeDense[selEnd] ?? 0) - Number(beforeDense[selEnd + 1] ?? 0),
-                        );
-                        boundaryCount += 1;
-                    }
-                    const boundaryMean = boundaryCount > 0 ? boundaryDelta / boundaryCount : 0;
-                    const changeFactor = clamp(meanDelta / (meanDelta + boundaryMean + 1e-6), 0, 1);
-
-                    if (changeFactor > 0) {
-                        const snapshot = editedDense.slice();
-                        const span = Math.max(1e-9, 2 * halfSpan);
-
-                        if (selOffset > 0) {
-                            const left = Math.max(0, Math.floor(selOffset - halfSpan));
-                            const right = Math.min(
-                                editedDense.length - 1,
-                                Math.ceil(selOffset + halfSpan),
-                            );
-                            for (let idx = left; idx <= right; idx += 1) {
-                                const t = clamp((idx - (selOffset - halfSpan)) / span, 0, 1);
-                                const outsideIdx = Math.min(selOffset - 1, idx);
-                                const insideIdx = Math.max(selOffset, idx);
-                                const outsideVal = snapshot[outsideIdx] ?? editedDense[idx];
-                                const insideVal = snapshot[insideIdx] ?? editedDense[idx];
-                                const smoothed = outsideVal + (insideVal - outsideVal) * t;
-                                editedDense[idx] =
-                                    snapshot[idx] + (smoothed - snapshot[idx]) * changeFactor;
-                            }
-                        }
-
-                        if (selEnd < editedDense.length - 1) {
-                            const left = Math.max(0, Math.floor(selEnd - halfSpan));
-                            const right = Math.min(
-                                editedDense.length - 1,
-                                Math.ceil(selEnd + halfSpan),
-                            );
-                            for (let idx = left; idx <= right; idx += 1) {
-                                const t = clamp((idx - (selEnd - halfSpan)) / span, 0, 1);
-                                const insideIdx = Math.min(selEnd, idx);
-                                const outsideIdx = Math.max(selEnd + 1, idx);
-                                const insideVal = snapshot[insideIdx] ?? editedDense[idx];
-                                const outsideVal = snapshot[outsideIdx] ?? editedDense[idx];
-                                const smoothed = insideVal + (outsideVal - insideVal) * t;
-                                editedDense[idx] =
-                                    snapshot[idx] + (smoothed - snapshot[idx]) * changeFactor;
-                            }
-                        }
-                    }
-                }
-
-                await paramsApi.setParamFrames(rootTrackId, editParam, extStart, editedDense, true);
-                bumpRefreshToken();
+                                s.edgeSmoothnessPercent,
+                        ) || 0,
+                        0,
+                        100,
+                    ),
+                    editSelection,
+                    extension,
+                    isEditable: editParam === "pitch" ? editablePitchValue : undefined,
+                });
+                if (ok) bumpRefreshToken();
             };
 
             switch (op) {
@@ -3699,12 +3610,12 @@ export const PianoRollPanel: React.FC = () => {
                     const cents = Number(data?.cents ?? 0);
                     if (cents === 0) return;
                     const delta = cents / 100;
-                    await applySelectionEditWithEdgeSmoothing(
+                    await runSelectionEdit(
                         (vals) =>
                             editParam === "pitch"
                                 ? vals.map((v) => (v === 0 ? 0 : v + delta))
                                 : vals.map((v) => v + delta),
-                        Number(data?.edgeSmoothnessPercent),
+                        { kind: "deltaAt", deltaAt: () => delta },
                     );
                     break;
                 }
@@ -3716,66 +3627,106 @@ export const PianoRollPanel: React.FC = () => {
                         scaleToken === "__project__" ? null : resolveScaleFromToken(scaleToken);
                     const degreeSteps = degreeInputToScaleSteps(degrees);
                     if (degreeSteps === 0) return;
-                    await applySelectionEditWithEdgeSmoothing((vals) => {
-                        const fpMs = Number(paramView?.framePeriodMs ?? fp) || fp;
-                        return editParam === "pitch"
-                            ? vals.map((midi, i) => {
-                                  if (midi === 0) return 0;
-                                  const scale =
-                                      fixedScale ??
-                                      projectScaleAtSec(((startFrame + i) * fpMs) / 1000) ??
-                                      "C";
-                                  return transposePitchByScaleSteps(midi, degreeSteps, scale);
-                              })
-                            : vals.map((midi, i) => {
-                                  const scale =
-                                      fixedScale ??
-                                      projectScaleAtSec(((startFrame + i) * fpMs) / 1000) ??
-                                      "C";
-                                  return transposePitchByScaleSteps(midi, degreeSteps, scale);
-                              });
-                    }, Number(data?.edgeSmoothnessPercent));
+                    const fpMs = Number(paramView?.framePeriodMs ?? fp) || fp;
+                    await runSelectionEdit(
+                        (vals) => {
+                            return editParam === "pitch"
+                                ? vals.map((midi, i) => {
+                                      if (midi === 0) return 0;
+                                      const scale =
+                                          fixedScale ??
+                                          projectScaleAtSec(((startFrame + i) * fpMs) / 1000) ??
+                                          "C";
+                                      return transposePitchByScaleSteps(midi, degreeSteps, scale);
+                                  })
+                                : vals.map((midi, i) => {
+                                      const scale =
+                                          fixedScale ??
+                                          projectScaleAtSec(((startFrame + i) * fpMs) / 1000) ??
+                                          "C";
+                                      return transposePitchByScaleSteps(midi, degreeSteps, scale);
+                                  });
+                        },
+                        // 选区外的延拓 delta：按延拓帧自己的生效音阶逐帧计算
+                        {
+                            kind: "deltaAt",
+                            deltaAt: (frame, baseValue) => {
+                                const scale =
+                                    fixedScale ?? projectScaleAtSec((frame * fpMs) / 1000) ?? "C";
+                                return (
+                                    transposePitchByScaleSteps(baseValue, degreeSteps, scale) -
+                                    baseValue
+                                );
+                            },
+                        },
+                    );
                     break;
                 }
                 case "setPitch": {
                     const parsed = Number(data?.value ?? data?.midiNote);
                     const midiNote = Number.isFinite(parsed) ? parsed : 60;
-                    await applySelectionEditWithEdgeSmoothing(
+                    await runSelectionEdit(
                         (vals) =>
                             editParam === "pitch"
                                 ? vals.map((v) => (v === 0 ? 0 : midiNote))
                                 : vals.map(() => midiNote),
-                        Number(data?.edgeSmoothnessPercent),
+                        // 选区外延拓 = 目标值本身：向目标的自然滑移
+                        { kind: "editedAt", editedAt: () => midiNote },
                     );
                     break;
                 }
                 case "shiftParamUpSelection":
                 case "shiftParamDownSelection": {
-                    const descriptor = processorParamsRef.current.find(
-                        (param) => param.id === editParam,
-                    );
-                    const step = getParamShiftStep(editParam, descriptor);
-                    const delta = op === "shiftParamUpSelection" ? step : -step;
-                    await applySelectionEditWithEdgeSmoothing(
-                        (vals) => vals.map((v) => v + delta),
-                        Number(data?.edgeSmoothnessPercent),
-                    );
+                    // 长按重复的节拍守卫：上一拍（后端读写仍在途）未完成时
+                    // 跳过本拍 —— 在途标记经 selectionEditInFlight 与 App
+                    // 端 fire 共享，两端双重检查避免重复事件堆积。
+                    if (!beginSelectionParamEdit()) return;
+                    try {
+                        const descriptor = processorParamsRef.current.find(
+                            (param) => param.id === editParam,
+                        );
+                        const magnitude = parseParamShiftMagnitude(data?.magnitude);
+                        const step = getParamShiftStep(editParam, descriptor, magnitude);
+                        const delta = op === "shiftParamUpSelection" ? step : -step;
+                        // 不透传 data?.edgeSmoothnessPercent：键盘路径的事件
+                        // detail 不携带该值，直接沿用 store 的边缘平滑设置
+                        // （runSelectionEdit 内部的解析顺序已保证该行为）。
+                        await runSelectionEdit((vals) => vals.map((v) => v + delta), {
+                            kind: "deltaAt",
+                            deltaAt: () => delta,
+                        });
+                    } finally {
+                        endSelectionParamEdit();
+                    }
                     break;
                 }
                 case "smooth": {
                     const strength = clamp((Number(data?.strength ?? 50) || 0) / 100, 0, 1);
                     if (strength <= 0) return;
+                    // 多取两侧各 3σ 帧上下文：高斯平滑用真实延拓做边界，
+                    // 平滑结果与选区外曲线无缝（旧实现只取选区内、边界处
+                    // 会产生新台阶）。
+                    const fpMs = Number(paramView?.framePeriodMs ?? fp) || fp;
+                    const pad = smoothContextPadFrames(strength, fpMs);
+                    const ctxStart = Math.max(0, startFrame - pad);
+                    const leftLen = startFrame - ctxStart;
                     const res = await paramsApi.getParamFrames(
                         rootTrackId,
                         editParam,
-                        startFrame,
-                        frameCount,
+                        ctxStart,
+                        leftLen + frameCount + pad,
                         1,
                     );
                     if (!res?.ok) return;
                     const payload = res as ParamFramesPayload;
-                    const vals = (payload.edit ?? []).map((v) => Number(v));
-                    const result = smoothSelectionValues(vals, editParam, strength);
+                    const all = (payload.edit ?? []).map((v) => Number(v));
+                    const vals = all.slice(leftLen, leftLen + frameCount);
+                    if (vals.length === 0) return;
+                    const result = smoothSelectionValues(vals, editParam, strength, {
+                        framePeriodMs: fpMs,
+                        leftContext: all.slice(0, leftLen),
+                        rightContext: all.slice(leftLen + frameCount),
+                    });
                     await paramsApi.setParamFrames(
                         rootTrackId,
                         editParam,
@@ -3842,30 +3793,17 @@ export const PianoRollPanel: React.FC = () => {
                             Number(data?.tolerance ?? data?.toleranceCents ?? 0) || 0,
                         );
                         const defaultValue = currentParamDefaultValue;
-                        const res = await paramsApi.getParamFrames(
-                            rootTrackId,
-                            editParam,
-                            startFrame,
-                            frameCount,
-                            1,
+                        // 走统一选区编辑编排（含边缘淡化，平滑度取对话框/全局设置；
+                        // 强度为 0 时与旧的纯选区写入逐字节一致）。量化 delta 在选区
+                        // 外的延拓用缺省规则：边界帧实际 delta 常数延拓。
+                        await runSelectionEdit((vals) =>
+                            vals.map((v) => {
+                                const stepCount = Math.round((v - defaultValue) / quantizeUnit);
+                                const snapped = defaultValue + stepCount * quantizeUnit;
+                                if (Math.abs(v - snapped) <= tolerance) return v;
+                                return snapped + (v > snapped ? 1 : -1) * tolerance;
+                            }),
                         );
-                        if (!res?.ok) return;
-                        const payload = res as ParamFramesPayload;
-                        const vals = (payload.edit ?? []).map((v) => Number(v) || 0);
-                        const quantized = vals.map((v) => {
-                            const stepCount = Math.round((v - defaultValue) / quantizeUnit);
-                            const snapped = defaultValue + stepCount * quantizeUnit;
-                            if (Math.abs(v - snapped) <= tolerance) return v;
-                            return snapped + (v > snapped ? 1 : -1) * tolerance;
-                        });
-                        await paramsApi.setParamFrames(
-                            rootTrackId,
-                            editParam,
-                            startFrame,
-                            quantized,
-                            true,
-                        );
-                        bumpRefreshToken();
                         break;
                     }
 
@@ -3879,20 +3817,10 @@ export const PianoRollPanel: React.FC = () => {
                     );
                     const toleranceSemitone = toleranceCents / 100;
                     // project base scale is controlled from toolbar; do not change it here
-                    const res = await paramsApi.getParamFrames(
-                        rootTrackId,
-                        editParam,
-                        startFrame,
-                        frameCount,
-                        1,
-                    );
-                    if (!res?.ok) return;
-                    const payload = res as ParamFramesPayload;
-                    const vals = (payload.edit ?? []).map((v) => Number(v) || 0);
-                    const fpMs = Number(payload.frame_period_ms ?? fp) || fp;
+                    const fpMs = Number(paramView?.framePeriodMs ?? fp) || fp;
                     const scaleAt = (i: number): ScaleLike =>
                         fixedScale ?? projectScaleAtSec(((startFrame + i) * fpMs) / 1000) ?? "C";
-                    const quantized =
+                    await runSelectionEdit((vals) =>
                         unit === "semitone"
                             ? vals.map((v) =>
                                   editParam === "pitch" && v === 0
@@ -3917,15 +3845,8 @@ export const PianoRollPanel: React.FC = () => {
                                                       (v - snapped > 0 ? 1 : -1) *
                                                           toleranceSemitone;
                                         })(),
-                              );
-                    await paramsApi.setParamFrames(
-                        rootTrackId,
-                        editParam,
-                        startFrame,
-                        quantized,
-                        true,
+                              ),
                     );
-                    bumpRefreshToken();
                     break;
                 }
                 case "meanQuantize": {
@@ -3939,34 +3860,24 @@ export const PianoRollPanel: React.FC = () => {
                             Number(data?.tolerance ?? data?.toleranceCents ?? 0) || 0,
                         );
                         const defaultValue = currentParamDefaultValue;
-                        const res = await paramsApi.getParamFrames(
-                            rootTrackId,
-                            editParam,
-                            startFrame,
-                            frameCount,
-                            1,
+                        // 均值量化是整体平移：delta 在 editSelection 内计算并捕获，
+                        // 选区外按同一 delta 延拓（保持均值量化语义）。
+                        let valueMeanDelta = 0;
+                        await runSelectionEdit(
+                            (vals) => {
+                                if (vals.length === 0) return vals;
+                                const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
+                                const stepCount = Math.round((avg - defaultValue) / quantizeUnit);
+                                const quantizedAvg = defaultValue + stepCount * quantizeUnit;
+                                valueMeanDelta = quantizedAvg - avg;
+                                return vals.map((v) => {
+                                    const moved = v + valueMeanDelta;
+                                    if (Math.abs(moved - v) <= tolerance) return v;
+                                    return moved + (v > moved ? 1 : -1) * tolerance;
+                                });
+                            },
+                            { kind: "deltaAt", deltaAt: () => valueMeanDelta },
                         );
-                        if (!res?.ok) return;
-                        const payload = res as ParamFramesPayload;
-                        const vals = (payload.edit ?? []).map((v) => Number(v) || 0);
-                        if (vals.length === 0) return;
-                        const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
-                        const stepCount = Math.round((avg - defaultValue) / quantizeUnit);
-                        const quantizedAvg = defaultValue + stepCount * quantizeUnit;
-                        const delta = quantizedAvg - avg;
-                        const result = vals.map((v) => {
-                            const moved = v + delta;
-                            if (Math.abs(moved - v) <= tolerance) return v;
-                            return moved + (v > moved ? 1 : -1) * tolerance;
-                        });
-                        await paramsApi.setParamFrames(
-                            rootTrackId,
-                            editParam,
-                            startFrame,
-                            result,
-                            true,
-                        );
-                        bumpRefreshToken();
                         break;
                     }
 
@@ -3980,55 +3891,37 @@ export const PianoRollPanel: React.FC = () => {
                         Math.round(Number(data?.toleranceCents ?? 0) || 0),
                     );
                     const toleranceSemitone = toleranceCents / 100;
-                    const res = await paramsApi.getParamFrames(
-                        rootTrackId,
-                        editParam,
-                        startFrame,
-                        frameCount,
-                        1,
+                    const fpMs = Number(paramView?.framePeriodMs ?? fp) || fp;
+                    let meanDelta = 0;
+                    await runSelectionEdit(
+                        (vals) => {
+                            // pitch=0 视为未编辑，不参与均值；全部未浊时 delta=0，
+                            // 结果与输入逐帧相同（相比旧的直接 return 会多一个
+                            // 无变化的撤销点，无副作用，可接受）。
+                            const nonZero = vals.filter((v) => v !== 0);
+                            if (nonZero.length === 0) return vals.slice();
+                            const avg = nonZero.reduce((a, b) => a + b, 0) / nonZero.length;
+                            const midScale =
+                                fixedScale ??
+                                projectScaleAtSec(
+                                    ((startFrame + Math.floor(vals.length / 2)) * fpMs) / 1000,
+                                ) ??
+                                "C";
+                            const quantizedAvg =
+                                unit === "semitone"
+                                    ? snapToSemitone(avg)
+                                    : snapToScale(avg, midScale);
+                            meanDelta = quantizedAvg - avg;
+                            return vals.map((v) => {
+                                if (v === 0) return 0;
+                                const moved = v + meanDelta;
+                                return Math.abs(moved - v) <= toleranceSemitone
+                                    ? v
+                                    : moved + (v - moved > 0 ? 1 : -1) * toleranceSemitone;
+                            });
+                        },
+                        { kind: "deltaAt", deltaAt: () => meanDelta },
                     );
-                    if (!res?.ok) return;
-                    const payload = res as ParamFramesPayload;
-                    const vals = (payload.edit ?? []).map((v) => Number(v) || 0);
-                    if (vals.length === 0) return;
-                    // pitch=0 视为未编辑，不参与均值
-                    const nonZero = editParam === "pitch" ? vals.filter((v) => v !== 0) : vals;
-                    if (nonZero.length === 0) return;
-                    const avg = nonZero.reduce((a, b) => a + b, 0) / nonZero.length;
-                    const midScale =
-                        fixedScale ??
-                        projectScaleAtSec(
-                            ((startFrame + Math.floor(vals.length / 2)) *
-                                (Number(payload.frame_period_ms ?? fp) || fp)) /
-                                1000,
-                        ) ??
-                        "C";
-                    const quantizedAvg =
-                        unit === "semitone" ? snapToSemitone(avg) : snapToScale(avg, midScale);
-                    const delta = quantizedAvg - avg;
-                    const result =
-                        editParam === "pitch"
-                            ? vals.map((v) => {
-                                  if (v === 0) return 0;
-                                  const moved = v + delta;
-                                  return Math.abs(moved - v) <= toleranceSemitone
-                                      ? v
-                                      : moved + (v - moved > 0 ? 1 : -1) * toleranceSemitone;
-                              })
-                            : vals.map((v) => {
-                                  const moved = v + delta;
-                                  return Math.abs(moved - v) <= toleranceSemitone
-                                      ? v
-                                      : moved + (v - moved > 0 ? 1 : -1) * toleranceSemitone;
-                              });
-                    await paramsApi.setParamFrames(
-                        rootTrackId,
-                        editParam,
-                        startFrame,
-                        result,
-                        true,
-                    );
-                    bumpRefreshToken();
                     break;
                 }
             }

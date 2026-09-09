@@ -19,6 +19,7 @@ import {
     RADIX_ACCENT_COLORS,
     RADIX_GRAY_COLORS,
     RADIX_RADIUS_OPTIONS,
+    THEME_MODE_SETTINGS,
 } from "./themeTypes";
 
 /* ─────────── Storage Keys ─────────── */
@@ -36,7 +37,12 @@ export function loadAppearance(): AppearanceSettings {
         const raw = localStorage.getItem(APPEARANCE_KEY);
         if (raw) {
             const parsed = JSON.parse(raw) as Partial<AppearanceSettings>;
-            return { ...DEFAULT_APPEARANCE, ...parsed };
+            const settings = { ...DEFAULT_APPEARANCE, ...parsed };
+            // mode 只接受合法值（旧数据 dark/light 仍有效；脏数据回退默认）。
+            if (!THEME_MODE_SETTINGS.includes(settings.mode)) {
+                settings.mode = DEFAULT_APPEARANCE.mode;
+            }
+            return settings;
         }
     } catch {
         // fallthrough
@@ -48,18 +54,23 @@ export function loadAppearance(): AppearanceSettings {
         return { ...DEFAULT_APPEARANCE, mode: legacyMode };
     }
 
-    // 检测系统偏好
-    const prefersDark =
-        typeof window !== "undefined" &&
-        window.matchMedia?.("(prefers-color-scheme: dark)").matches;
-    return { ...DEFAULT_APPEARANCE, mode: prefersDark ? "dark" : "light" };
+    // 默认：自动跟随系统深浅色（由 AppThemeProvider 实时解析系统偏好）。
+    return { ...DEFAULT_APPEARANCE };
 }
 
-/** 保存外观设置 */
+/**
+ * 保存外观设置（内存中的外观状态照常更新；配额 / 隐私模式等持久化失败
+ * 只记录告警，不向调用方抛出 —— 否则外观切换会在点击处理器里以未处理
+ * 异常中断后续 UI 更新）。
+ */
 export function saveAppearance(settings: AppearanceSettings): void {
-    localStorage.setItem(APPEARANCE_KEY, JSON.stringify(settings));
-    // 同步旧版 key（兼容其他可能直接读取的代码）
-    localStorage.setItem(LEGACY_THEME_KEY, settings.mode);
+    try {
+        localStorage.setItem(APPEARANCE_KEY, JSON.stringify(settings));
+        // 同步旧版 key（兼容其他可能直接读取的代码）
+        localStorage.setItem(LEGACY_THEME_KEY, settings.mode);
+    } catch (err) {
+        console.warn("[theme] failed to persist appearance settings", err);
+    }
 }
 
 /* ─────────── 自定义主题列表 ─────────── */
@@ -77,9 +88,13 @@ export function loadCustomThemes(): CustomTheme[] {
     return [];
 }
 
-/** 保存自定义主题列表 */
+/** 保存自定义主题列表（持久化失败只记录告警，见 saveAppearance）。 */
 export function saveCustomThemes(themes: CustomTheme[]): void {
-    localStorage.setItem(CUSTOM_THEMES_KEY, JSON.stringify(themes));
+    try {
+        localStorage.setItem(CUSTOM_THEMES_KEY, JSON.stringify(themes));
+    } catch (err) {
+        console.warn("[theme] failed to persist custom themes", err);
+    }
 }
 
 /* ─────────── 主题导入/导出 (v2) ─────────── */

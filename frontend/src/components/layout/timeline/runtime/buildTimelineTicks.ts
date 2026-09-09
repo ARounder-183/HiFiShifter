@@ -45,6 +45,13 @@ import { secToContentPx, type TimelineAxis } from "./timelineAxis.js";
 /** 弱网格线的最大条数（与 gridLineSampling 的密度上限一致）。 */
 const MAX_WEAK_GRID_LINES = 160;
 
+/**
+ * 标尺隐藏标签的间距阈值（px）：相邻带标签刻度的间距低于它时，渲染层
+ * （TimeRulerMarks）把左侧标签整体隐藏，保证右侧标签完整可见。
+ * 步长选择与变化点标签的让位判定共用该值，避免两处阈值漂移。
+ */
+export const RULER_LABEL_HIDDEN_GAP_PX = 26;
+
 /** 一个刻度：网格线与标尺刻度的最小公共单位。 */
 export interface TimelineTick {
     /** 工程时间（秒）。 */
@@ -57,7 +64,10 @@ export interface TimelineTick {
     readonly isBarStart: boolean;
     /** 是否作为强网格线绘制（小节过密时按 stride 抽取，避免糊成一片）。 */
     readonly isStrongGridLine: boolean;
-    /** 是否渲染标尺标签。标尺只渲染这部分与小节的刻度，保持标签密度稳定。 */
+    /**
+     * 是否渲染标尺标签。标尺只渲染这部分与小节的刻度，保持标签密度稳定。
+     * Tempo Map 变化点位置的刻度强制携带标签（见 buildTimelineTicks §4）。
+     */
     readonly showLabel: boolean;
     /** 主单位标签文本。 */
     readonly primaryLabel: string;
@@ -384,6 +394,66 @@ export function buildTimelineTicks(args: {
     // merged 的迭代顺序即 lines 的顺序（已升序），显式排序以消除对上游顺序的
     // 隐式依赖。
     ticks.sort((a, b) => a.sec - b.sec);
+
+    // ── 4. 变化点位置强制展示标尺值 ────────────────────────────────
+    // 变化点（Tempo Map 段起点）处天然存在刻度：buildTempoGridLines 在每个段
+    // 起点必画 k=0 弱线与 k=0 小节强线，因此它能否带标签只取决于 §3b 的标签
+    // 枚举。枚举按“段内 m*stepBeats、m % stride == 0”推进，并用跨段最小间距
+    // 约束拒绝候选：当变化点落在上一段末尾标签的 minLabelSpacingPx 之内时，
+    // m=0 被跳过、下一个标签落到段内数拍之后 —— 变化点处便既没有竖线也没有
+    // 文字（TimeRulerMarks 只渲染 showLabel 刻度）。用户看到变化点旗帜悬在
+    // 两个标尺值之间，读不出它的时间位置；缩放/点的位置不同，有无标签还会
+    // 随机变化，观感上更怪。
+    //
+    // 规则（变化点优先，常规标签让位）：
+    // - 每个位于生成范围内的变化点强制 showLabel（竖线由既有小节强线承担，
+    //   不新增刻度，背景网格的输出不受影响）；
+    // - 距变化点不足“一个标签位”（minLabelSpacingPx，至少 26px 隐藏阈值）的
+    //   常规标签让位隐藏，保证变化点标签的显示宽度 —— 让位后相邻标签间距
+    //   仍不小于隐藏阈值，与 §3b 的密度约束自洽；
+    // - 两个变化点自身贴得过近（< 26px，仅极端缩小或密集点时出现）时左侧
+    //   让位，与渲染层“间距不足时左标签隐藏”的约定一致。
+    if (tempoMap && tempoMap.points.length > 0) {
+        const changePointKeys = new Set(
+            tempoMap.points.map((point) => Math.round(point.positionSec * 1e6)),
+        );
+        const isChangePoint = (sec: number): boolean => {
+            const key = Math.round(sec * 1e6);
+            return (
+                changePointKeys.has(key) ||
+                changePointKeys.has(key - 1) ||
+                changePointKeys.has(key + 1)
+            );
+        };
+        const changePointPx: number[] = [];
+        for (const tick of ticks) {
+            if (isChangePoint(tick.sec)) changePointPx.push(tick.contentPx);
+        }
+        if (changePointPx.length > 0) {
+            const reservePx = Math.max(args.minLabelSpacingPx, RULER_LABEL_HIDDEN_GAP_PX);
+            for (let i = 0; i < ticks.length; i += 1) {
+                const tick = ticks[i];
+                if (isChangePoint(tick.sec)) {
+                    if (!tick.showLabel) ticks[i] = { ...tick, showLabel: true };
+                    continue;
+                }
+                if (!tick.showLabel) continue;
+                const crowded = changePointPx.some(
+                    (cpPx) => Math.abs(tick.contentPx - cpPx) < reservePx,
+                );
+                if (crowded) ticks[i] = { ...tick, showLabel: false };
+            }
+            for (let i = 1; i < ticks.length; i += 1) {
+                const prev = ticks[i - 1];
+                const curr = ticks[i];
+                if (!prev.showLabel || !curr.showLabel) continue;
+                if (!isChangePoint(prev.sec) || !isChangePoint(curr.sec)) continue;
+                if (curr.contentPx - prev.contentPx < RULER_LABEL_HIDDEN_GAP_PX) {
+                    ticks[i - 1] = { ...prev, showLabel: false };
+                }
+            }
+        }
+    }
 
     return ticks;
 }

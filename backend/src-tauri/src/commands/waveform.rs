@@ -115,8 +115,9 @@ pub(super) fn get_root_mix_waveform_peaks_segment(
             // stretched clips line up with the same timing as pitch analysis.
             stretch: crate::time_stretch::resolved_external_stretch_algorithm(),
             apply_pitch_edit: true,
-            // 瀹炴椂棰勮浣跨敤榛樿璐ㄩ噺锛圵av16 + Realtime锛夈€?
-            export_format: crate::mixdown::ExportFormat::Wav16,
+            // Peaks 仅内存渲染、不落盘：output 在此路径不被读取
+            // （render_mixdown_interleaved 不做编码），占位 32f 即可。
+            output: crate::encode::OutputSpec::wav_32f(),
             quality_preset: crate::mixdown::QualityPreset::Realtime,
             cancel_flag: None,
         };
@@ -258,8 +259,9 @@ pub(super) fn get_track_mix_waveform_peaks_segment(
             // stretched clips line up with the same timing as pitch analysis.
             stretch: crate::time_stretch::resolved_external_stretch_algorithm(),
             apply_pitch_edit: true,
-            // 瀹炴椂棰勮浣跨敤榛樿璐ㄩ噺锛圵av16 + Realtime锛夈€?
-            export_format: crate::mixdown::ExportFormat::Wav16,
+            // Peaks 仅内存渲染、不落盘：output 在此路径不被读取
+            // （render_mixdown_interleaved 不做编码），占位 32f 即可。
+            output: crate::encode::OutputSpec::wav_32f(),
             quality_preset: crate::mixdown::QualityPreset::Realtime,
             cancel_flag: None,
         };

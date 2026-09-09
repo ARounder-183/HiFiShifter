@@ -74,3 +74,18 @@ their own licenses as listed below.
    license and may not be used for commercial purposes. See the NOTICE and
    STATEMENTS files under third_party/pc_nsf_hifigan_44.1k_hop512_128bin_2025.02/
    https://openvpi.github.io/vocoders/
+
+9. rusty_mp3 - Pure-Rust MP3 (MPEG-1/2/2.5 Layer III) decoder + encoder
+   Copyright (c) Remade-With-Rust contributors
+   License: Apache License 2.0
+   https://github.com/Remade-With-Rust/remade_ffmpeg_rs
+
+10. rusty_flac - Pure-Rust FLAC encoder + decoder
+   Copyright (c) Remade-With-Rust contributors
+   License: Apache License 2.0
+   https://github.com/Remade-With-Rust/rusty_flac
+
+11. id3 - Rust library for reading and writing ID3v2 metadata tags
+   Copyright (c) 2016 James Hurst
+   License: MIT
+   https://github.com/piedoom/rust-id3

@@ -975,6 +975,9 @@ pub(super) fn open_project(
     {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
         *tl = pf.timeline.clone();
+        // 归一化轨道顺序（历史工程文件的 order 字段可能陈旧/冲突：
+        // Vec 顺序 == 显示顺序的单一事实来源，加载即自愈）。
+        tl.normalize_track_vec();
         // 规范化 Tempo Map（排序/钳制/补 0 位置点），并同步工程基准 BPM。
         tl.normalize_tempo_map();
         if let Some(points) = tl.tempo_map.as_ref() {
@@ -1370,6 +1373,9 @@ pub(super) fn set_project_timeline_settings(
             state.audio_engine.update_timeline(tl.clone());
         }
     }
+
+    // 网格 / 拍号变化影响节拍器响点表（细分步长 / 小节首位置），重建之。
+    crate::commands::playback::refresh_metronome_schedule(&state);
 
     if changed && was_clean {
         if let Some(handle) = state.app_handle.get() {

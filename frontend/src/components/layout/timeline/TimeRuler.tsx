@@ -25,8 +25,14 @@ import {
     type TempoPointEditRequest,
 } from "./TempoMapRulerRow.tsx";
 import { RULER_BASE_HEIGHT_PX, timeRulerHeightPx } from "./rulerHeight.ts";
+import { RULER_LABEL_HIDDEN_GAP_PX } from "./runtime/buildTimelineTicks.js";
 import type { TimelineTick } from "./runtime/buildTimelineTicks.js";
-import { readDevicePixelRatio, snapToDevicePx, wholeDevicePxLength } from "../../../utils/devicePixelLine.ts";
+import {
+    readDevicePixelRatio,
+    snapToDevicePx,
+    wholeDevicePxLength,
+} from "../../../utils/devicePixelLine.ts";
+import { clampAxisPosition } from "../../appTooltipPosition";
 
 function unitLabelKey(unit: TimeUnit): string {
     switch (unit) {
@@ -119,7 +125,7 @@ const TimeRulerMarks = React.memo(function TimeRulerMarks({
                 //   保证后出现的刻度文本完整可见、两个标签绝不重叠。
                 const nextTick = visibleTicks[index + 1];
                 const gapPx = nextTick != null ? nextTick.contentPx - tick.contentPx : null;
-                const labelHidden = gapPx != null && gapPx < 26;
+                const labelHidden = gapPx != null && gapPx < RULER_LABEL_HIDDEN_GAP_PX;
                 const labelMaxWidth = gapPx != null ? (labelHidden ? 0 : gapPx - 6) : undefined;
                 return (
                     <div key={tick.beat} className="absolute top-0 bottom-0" style={{ left }}>
@@ -717,10 +723,18 @@ const TimeRulerInner: React.FC<{
     const hoverTime = hover
         ? formatCursorTime(primaryUnit, secondaryUnit, hover.sec, timeContext)
         : null;
-    const hoverTooltipLeft =
-        hover != null && viewportWidth != null
-            ? Math.min(Math.max(4, hover.x + 10), Math.max(4, viewportWidth - 260))
-            : 4;
+    // 悬停时间气泡的水平定位：挂载后按实测宽度夹紧（clampAxisPosition）。
+    // 旧实现预留固定 260px（viewportWidth - 260），把标尺右缘 260px 内的
+    // 悬停气泡整段甩离光标 —— 与 AppTooltip 已修复的同类问题同根。
+    const hoverBubbleRef = useRef<HTMLDivElement | null>(null);
+    useLayoutEffect(() => {
+        const el = hoverBubbleRef.current;
+        if (!el || !hover) return;
+        const rulerWidth = rulerRef.current?.clientWidth ?? viewportWidth ?? 0;
+        el.style.left = `${clampAxisPosition(hover.x, el.offsetWidth, rulerWidth, 10, 4)}px`;
+        // 只在输入变化时重定位：无依赖数组会在滚动 / 缩放热路径的每次渲染
+        // 都强制回流（读 offsetWidth / clientWidth）。
+    }, [hover, viewportWidth]);
 
     /**
      * 事件是否来自标尺自身 DOM 子树之外（如 Radix Dialog 门户到 body 的
@@ -869,8 +883,9 @@ const TimeRulerInner: React.FC<{
 
             {hover && hoverTime ? (
                 <div
+                    ref={hoverBubbleRef}
                     className="absolute top-1 z-40 pointer-events-none rounded border border-qt-border bg-qt-panel px-2 py-1 shadow-lg"
-                    style={{ left: hoverTooltipLeft }}
+                    style={{ left: hover.x + 10 }}
                 >
                     <div className="text-[12px] leading-tight text-qt-text tabular-nums whitespace-nowrap">
                         {hoverTime.primaryLabel}

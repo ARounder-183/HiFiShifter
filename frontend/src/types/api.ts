@@ -183,6 +183,48 @@ export interface TempoPointPayload {
  */
 export type TempoMapPayload = TempoPointPayload[] | null;
 
+// ─── 静音检测（Silence Detection）─────────────────────────────────────────
+
+export interface SilenceDetectOptionsPayload {
+    method: string;
+    thresholdDb: number;
+    adaptive: boolean;
+    minSilenceMs: number;
+    minSoundMs: number;
+    paddingMs: number;
+    cutFadeMs: number;
+    action: string;
+    deleteSilentClips: boolean;
+    syncAllTakes: boolean;
+}
+
+export interface SilenceRegion {
+    startSec: number;
+    endSec: number;
+}
+
+export interface ClipSilenceReport {
+    clipId: string;
+    ok: boolean;
+    message?: string | null;
+    fullySilent: boolean;
+    totalSilentSec: number;
+    regions: SilenceRegion[];
+}
+
+export interface SilenceAnalyzeResult {
+    ok: boolean;
+    reports: ClipSilenceReport[];
+}
+
+export interface RemoveSilenceResult {
+    ok: boolean;
+    timeline: TimelineResult;
+    reports: ClipSilenceReport[];
+    keptClipIds: string[];
+    removedClipIds: string[];
+}
+
 export interface TimelineResult {
     ok: true;
     tracks: TimelineTrack[];

@@ -26,10 +26,13 @@ const MenuItem: React.FC<{
     shortcut?: string;
     disabled?: boolean;
     danger?: boolean;
+    /** 悬停 / 禁用原因提示。 */
+    title?: string;
     onClick: () => void;
-}> = ({ label, shortcut, disabled, danger, onClick }) => (
+}> = ({ label, shortcut, disabled, danger, title, onClick }) => (
     <button
         role="menuitem"
+        title={title}
         className={`px-3 py-1.5 text-left w-full text-[12px] transition-colors flex items-center justify-between gap-3
             ${
                 disabled
@@ -289,10 +292,15 @@ export const ClipContextMenu: React.FC<{
     onUpdatePitchRef?: (ids: string[]) => void;
     onExportMidi?: (ids: string[]) => void;
     onNormalize: (ids: string[]) => void;
+    /** 打开"静音检测"对话框（多选时作用于全部所选 Clip 中含音频源者）。 */
+    onSilenceDetection?: (ids: string[]) => void;
     onToggleReverse: (ids: string[], reversed: boolean) => void;
     onToggleLoop?: (ids: string[], loopEnabled: boolean) => void;
     /** 切换淡入/淡出的 REAPER 形状预设（保留曲率 dir 不变）。 */
     onFadeShapeChange?: (clipId: string, target: "in" | "out", shape: number) => void;
+    /** 打开"编辑播放速率"浮层（锚点 = 菜单位置）。与倍率角标右键同一浮层；
+     *  多选时以右键的 clip 为 anchor 批量应用（提交管线内聚）。 */
+    onEditRate?: (clipId: string, screenX: number, screenY: number) => void;
 }> = ({
     x,
     y,
@@ -318,9 +326,11 @@ export const ClipContextMenu: React.FC<{
     onUpdatePitchRef,
     onExportMidi,
     onNormalize,
+    onSilenceDetection,
     onToggleReverse,
     onToggleLoop,
     onFadeShapeChange,
+    onEditRate,
 }) => {
     const { t } = useI18n();
     const dispatch = useAppDispatch();
@@ -364,6 +374,12 @@ export const ClipContextMenu: React.FC<{
             const trackId = selectedClips[0]?.trackId;
             return !trackId || selectedClips.some((c) => c.trackId !== trackId);
         })();
+
+    // 静音检测：至少一个目标 Clip 的活跃 Take 含音频源才可用。
+    const hasAudioTake = (c: ClipInfo) => (c.takes ?? []).some((tk) => !!tk.sourcePath);
+    const silenceEligible = isMulti
+        ? selectedClips.some(hasAudioTake)
+        : hasAudioTake(clip);
 
     // 多选中是否全部静音
     const allMuted = isMulti ? selectedClips.every((c) => c.muted) : clip.muted;
@@ -743,6 +759,28 @@ export const ClipContextMenu: React.FC<{
                     close();
                 }}
             />
+            {onSilenceDetection && (
+                <MenuItem
+                    label={t("ctx_silence_detection")}
+                    disabled={!silenceEligible}
+                    title={silenceEligible ? undefined : t("silence_no_audio_source")}
+                    onClick={() => {
+                        onSilenceDetection(ids);
+                        close();
+                    }}
+                />
+            )}
+            {onEditRate && (
+                <MenuItem
+                    label={t("ctx_edit_rate")}
+                    onClick={() => {
+                        // 锚点 = 菜单弹出位置：菜单关闭后浮层原地展开。
+                        // 多选时右键的 clip 即 anchor（提交走 getBulkEditableClipIds 批量管线）。
+                        onEditRate(clip.id, x, y);
+                        close();
+                    }}
+                />
+            )}
 
             {(isMulti || hasGroup) && (
                 <>

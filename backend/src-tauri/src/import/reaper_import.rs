@@ -6,7 +6,7 @@ use crate::audio_utils::try_read_audio_header_only;
 use crate::midi_import::MidiNoteEvent;
 use crate::models::PitchRange;
 use crate::reaper_parser::{
-    self, reaper_fade_auto_length_sec, reaper_fade_effective_length_sec,
+    self, item_time_to_take_env_u, reaper_fade_auto_length_sec, reaper_fade_effective_length_sec,
     reaper_fade_manual_length_sec, stretch_segments_full_cover, ReaperData, ReaperEnvelope,
     ReaperItem, ReaperMidiEvent, ReaperMidiSourceData, ReaperTake, ReaperTrack,
 };
@@ -18,6 +18,36 @@ use std::path::Path;
 
 /// 帧周期（秒）
 const FRAME_PERIOD: f64 = 0.005;
+
+/// RPP 数值防御上限（秒）：损坏 / 伪造数据的极端 POSITION / LENGTH /
+/// 包络点位置不得把帧向量 resize 到不可分配的规模（24h ≈ 1.7e7 帧）。
+/// 合法工程远低于该值；超界输入按上限处理并表现为内容截断。
+const MAX_IMPORT_ITEM_SEC: f64 = 86_400.0;
+const MAX_IMPORT_FRAME_IDX: usize = (MAX_IMPORT_ITEM_SEC / FRAME_PERIOD) as usize;
+
+fn clamp_import_position(v: f64) -> f64 {
+    if v.is_finite() {
+        v.clamp(-MAX_IMPORT_ITEM_SEC, MAX_IMPORT_ITEM_SEC)
+    } else {
+        0.0
+    }
+}
+
+fn clamp_import_length(v: f64) -> f64 {
+    if v.is_finite() {
+        v.clamp(0.0, MAX_IMPORT_ITEM_SEC)
+    } else {
+        0.0
+    }
+}
+
+/// 帧号钳制：把任意有限秒值折进安全的帧下标范围。
+fn clamp_import_frame(sec: f64) -> usize {
+    if !sec.is_finite() {
+        return 0;
+    }
+    ((sec / FRAME_PERIOD).floor().max(0.0) as usize).min(MAX_IMPORT_FRAME_IDX)
+}
 
 /// 分段重叠上限（秒）
 const SEGMENT_OVERLAP_MAX_SEC: f64 = 0.1;
@@ -69,82 +99,6 @@ fn convert_volume(vol: f64) -> f32 {
 /// v4 起 Clip 直接保存 REAPER 的形状/曲率原值，无需再经过命名枚举中转。
 use super::reaper_parser::reaper_fade_shape_dir;
 
-fn derive_fades_from_item_volume_envelope(
-    item: &ReaperItem,
-    item_length: f64,
-) -> (Option<f64>, Option<f64>) {
-    let mut points: Vec<(f64, f64)> = item
-        .envelopes
-        .iter()
-        .filter(|env| {
-            let t = env.env_type.to_uppercase();
-            env.act.first().copied().unwrap_or(1) != 0 && (t.contains("VOLENV") || t == "VOLENV")
-        })
-        .flat_map(|env| {
-            env.points.iter().filter_map(|pt| {
-                if pt.len() >= 2 {
-                    let t = pt[0];
-                    let v = pt[1];
-                    if t.is_finite() && v.is_finite() {
-                        Some((t.clamp(0.0, item_length.max(0.0)), v))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            })
-        })
-        .collect();
-
-    if points.len() < 2 || item_length <= 0.0 {
-        return (None, None);
-    }
-
-    points.sort_by(|a, b| a.0.total_cmp(&b.0));
-
-    let peak = points
-        .iter()
-        .map(|(_, v)| *v)
-        .fold(f64::NEG_INFINITY, f64::max);
-    if !peak.is_finite() || peak <= 0.0 {
-        return (None, None);
-    }
-
-    // Reaper item volume envelope does not always plateau at exactly 1.0
-    // (e.g. when item/take gain is already attenuated). Use a relative peak.
-    let unity_threshold = peak * 0.98;
-    let edge_sec = item_length.mul_add(0.05, 0.0).max(0.05);
-
-    let first = points.first().copied();
-    let last = points.last().copied();
-
-    let fade_in = first.and_then(|(t0, v0)| {
-        if t0 <= edge_sec && v0 < unity_threshold {
-            points
-                .iter()
-                .find(|(t, v)| *t > t0 && *v >= unity_threshold)
-                .map(|(t, _)| t.clamp(0.0, item_length))
-        } else {
-            None
-        }
-    });
-
-    let fade_out = last.and_then(|(t1, v1)| {
-        if item_length - t1 <= edge_sec && v1 < unity_threshold {
-            points
-                .iter()
-                .rev()
-                .find(|(t, v)| *t < t1 && *v >= unity_threshold)
-                .map(|(t, _)| (item_length - *t).clamp(0.0, item_length))
-        } else {
-            None
-        }
-    });
-
-    (fade_in, fade_out)
-}
-
 /// 计算 item 的淡入淡出，拆分为「手动淡化长度」与「自动交叉淡化长度」。
 ///
 /// 返回值：`(manual_fade_in_sec, manual_fade_out_sec, auto_fade_in_sec, auto_fade_out_sec)`。
@@ -155,6 +109,11 @@ fn derive_fades_from_item_volume_envelope(
 /// 因此这里把二者分别解析出来：手动值写入 `fade_in_sec / fade_out_sec`，
 /// 自动值写入 `auto_fade_in_sec / auto_fade_out_sec`。这样当 clip 被分开
 /// （自动交叉淡化归零）后，REAPER 原来的手动淡化长度能正确恢复。
+///
+/// 注意：take 音量包络（VOLENV）不再用于"推导淡化"——包络现在被真实导入
+/// 为轨道音量参数线（边缘 ramp 即曲线值，听感等价且保真更高）；旧的
+/// env→fade 启发式是包络不被支持时代的补偿，已删除。淡化只来自
+/// FADEIN/FADEOUT 行。
 fn effective_item_fades(
     item: &ReaperItem,
     take: &ReaperTake,
@@ -164,7 +123,7 @@ fn effective_item_fades(
 
     // 淡化的存在性与“来源选择”（take 优先，其次 item）按“有效长度”判定
     // （自动交叉淡化生效时用自动长度，否则用手动长度）。
-    let (mut fade_in_manual, fade_in_auto);
+    let (fade_in_manual, fade_in_auto);
     if reaper_fade_effective_length_sec(&take.fade_in) > 1e-9 {
         fade_in_manual = reaper_fade_manual_length_sec(&take.fade_in);
         fade_in_auto = reaper_fade_auto_length_sec(&take.fade_in);
@@ -172,28 +131,13 @@ fn effective_item_fades(
         fade_in_manual = reaper_fade_manual_length_sec(&item.fade_in);
         fade_in_auto = reaper_fade_auto_length_sec(&item.fade_in);
     }
-    let (mut fade_out_manual, fade_out_auto);
+    let (fade_out_manual, fade_out_auto);
     if reaper_fade_effective_length_sec(&take.fade_out) > 1e-9 {
         fade_out_manual = reaper_fade_manual_length_sec(&take.fade_out);
         fade_out_auto = reaper_fade_auto_length_sec(&take.fade_out);
     } else {
         fade_out_manual = reaper_fade_manual_length_sec(&item.fade_out);
         fade_out_auto = reaper_fade_auto_length_sec(&item.fade_out);
-    }
-
-    // 显式 FADEIN/FADEOUT 完全缺失（手动与自动都为 0）时才从音量包络推导；
-    // 包络推导出的淡化没有 REAPER 的自动标记，一律作为手动淡化。
-    let (env_fade_in, env_fade_out) =
-        derive_fades_from_item_volume_envelope(item, item_length.max(0.0));
-    if fade_in_manual <= 1e-9 && fade_in_auto <= 1e-9 {
-        if let Some(v) = env_fade_in {
-            fade_in_manual = v.clamp(0.0, max_len.max(0.0));
-        }
-    }
-    if fade_out_manual <= 1e-9 && fade_out_auto <= 1e-9 {
-        if let Some(v) = env_fade_out {
-            fade_out_manual = v.clamp(0.0, max_len.max(0.0));
-        }
     }
 
     (
@@ -320,10 +264,14 @@ fn reaper_take_volume(values: &[f64], explicit_take: bool) -> f64 {
         .unwrap_or(1.0)
 }
 
-fn take_linear_gain(item: &ReaperItem, take: &ReaperTake) -> f64 {
+fn take_linear_gain(item: &ReaperItem, take: &ReaperTake, take_volume_overridden: bool) -> f64 {
     // REAPER 的可听增益 = item trim（VOLPAN[0]，item 级） × take volume
     // （VOLPAN[2] / TAKEVOLPAN[1]）。只取 take volume 会丢掉用户在 item
     // 音量把手上设置的音量（REAPER 把它写进 trim）。
+    //
+    // take_volume_overridden：该 take 存在激活的 VOLENV——REAPER 的绝对
+    // 包络语义下包络取代 take 音量钮（item trim 不受影响），因此钮值按
+    // 1.0 中性化，包络本身晋升为轨道音量曲线，避免双重施加。
     let explicit_take = item
         .takes
         .iter()
@@ -336,7 +284,11 @@ fn take_linear_gain(item: &ReaperItem, take: &ReaperTake) -> f64 {
         .filter(|v| v.is_finite())
         .unwrap_or(1.0);
 
-    let vol = reaper_take_volume(&take.vol_pan, explicit_take);
+    let vol = if take_volume_overridden {
+        1.0
+    } else {
+        reaper_take_volume(&take.vol_pan, explicit_take)
+    };
     if vol != 0.0 {
         return trim * vol;
     }
@@ -353,6 +305,11 @@ fn take_linear_gain(item: &ReaperItem, take: &ReaperTake) -> f64 {
     } else {
         0.0
     }
+}
+
+/// 该 take 是否存在激活的音量包络（绝对语义 → take 音量钮被取代）。
+fn take_volume_envelope_active(take: &ReaperTake) -> bool {
+    find_active_envelope(&take.envelopes, VOL_ENV_TYPES).is_some()
 }
 
 /// 返回 REAPER Item 中 active take 在 `[default_take] + takes` 列表中的下标。
@@ -389,6 +346,8 @@ fn build_audio_clip_take(
     } else {
         crate::config::loop_new_clips_default()
     };
+    // 该 take 自身存在激活 VOLENV 时其音量钮被取代（各 take 独立判定）。
+    let take_volume_overridden = take_volume_envelope_active(take);
     let raw_play_rate = take.play_rate.first().copied().unwrap_or(1.0);
     let source_section_reversed = take
         .source
@@ -466,7 +425,7 @@ fn build_audio_clip_take(
     crate::state::ClipTake {
         id: new_clip_id().replace("clip_", "take_"),
         name,
-        gain: convert_volume(take_linear_gain(item, take)),
+        gain: convert_volume(take_linear_gain(item, take, take_volume_overridden)),
         source_path: if raw_path.is_empty() {
             None
         } else {
@@ -565,6 +524,7 @@ pub fn import_reaper_clipboard(
     playhead_sec: f64,
     selected_track_idx: usize,
     ordered_track_ids: &[String],
+    ordered_track_volumes: &[f32],
     project_bpm: f64,
     next_track_order: i32,
 ) -> Result<ReaperImportResult, String> {
@@ -574,6 +534,7 @@ pub fn import_reaper_clipboard(
         playhead_sec,
         selected_track_idx,
         ordered_track_ids,
+        ordered_track_volumes,
         project_bpm,
         next_track_order,
     )
@@ -587,6 +548,7 @@ fn convert_reaper_data_clipboard(
     playhead_sec: f64,
     selected_track_idx: usize,
     ordered_track_ids: &[String],
+    ordered_track_volumes: &[f32],
     project_bpm: f64,
     next_track_order: i32,
 ) -> Result<ReaperImportResult, String> {
@@ -600,10 +562,29 @@ fn convert_reaper_data_clipboard(
             playhead_sec,
             selected_track_idx,
             ordered_track_ids,
+            ordered_track_volumes,
             project_bpm,
             next_track_order,
         )
     }
+}
+
+/// 测试辅助（仅 test 构建）：把已解析的剪贴板数据按 item 模式导入单一目标轨
+///（推子 1.0），供导出↔导入往返测试使用。
+#[cfg(test)]
+pub(crate) fn test_import_items_for_round_trip(
+    data: ReaperData,
+    playhead_sec: f64,
+) -> Result<ReaperImportResult, String> {
+    convert_reaper_items_to_existing_tracks(
+        data,
+        playhead_sec,
+        0,
+        &["track_1".to_string()],
+        &[1.0],
+        120.0,
+        0,
+    )
 }
 
 /// 将纯 Item 剪贴板数据粘贴到现有轨道。
@@ -615,6 +596,7 @@ fn convert_reaper_items_to_existing_tracks(
     playhead_sec: f64,
     selected_track_idx: usize,
     ordered_track_ids: &[String],
+    ordered_track_volumes: &[f32],
     project_bpm: f64,
     next_track_order: i32,
 ) -> Result<ReaperImportResult, String> {
@@ -628,6 +610,9 @@ fn convert_reaper_items_to_existing_tracks(
     // track_id → pitch offset accumulator
     let mut pitch_offset_by_track: std::collections::HashMap<String, Vec<PitchFrameAccumulator>> =
         std::collections::HashMap::new();
+    // track_id → take 包络晋升 / ENVSEG 段曲线累积器
+    let mut curves_by_track: std::collections::HashMap<String, CurveAccum> =
+        std::collections::HashMap::new();
 
     // 自动新建轨道的起始 order：order 允许稀疏，不能假设它等于轨道数
     // （调用方传入 max(next_track_order, 现有最大 order + 1)），
@@ -635,12 +620,14 @@ fn convert_reaper_items_to_existing_tracks(
     let mut next_order = next_track_order.max(ordered_track_ids.len() as i32);
 
     // 计算所有 item 中最小的 position，用于 offset 到 playhead
+    // （空 item 集合 → INFINITY → 不可数 → offset 取 0；不能用 f64::MAX
+    // 兜底，那会算出 ~-1.8e308 的垃圾偏移把包络段整体丢弃）。
     let min_position = data
         .tracks
         .iter()
         .flat_map(|t| t.items.iter())
         .map(|item| item.position)
-        .fold(f64::MAX, f64::min);
+        .fold(f64::INFINITY, f64::min);
     let time_offset = if min_position.is_finite() {
         playhead_sec - min_position
     } else {
@@ -681,22 +668,118 @@ fn convert_reaper_items_to_existing_tracks(
             tid
         };
 
-        let track_pitch_accum = pitch_offset_by_track
-            .entry(target_track_id.clone())
-            .or_default();
+        {
+            let track_pitch_accum = pitch_offset_by_track
+                .entry(target_track_id.clone())
+                .or_default();
+            let track_curves_accum = curves_by_track
+                .entry(target_track_id.clone())
+                .or_default();
 
-        for item in &reaper_track.items {
-            process_item(
-                item,
-                &target_track_id,
-                None, // no base dir for clipboard
-                time_offset,
-                &mut clips,
-                &mut skipped_files,
-                track_pitch_accum,
-                project_bpm,
-                &mut reaper_group_map,
-            );
+            for item in &reaper_track.items {
+                process_item(
+                    item,
+                    &target_track_id,
+                    None, // no base dir for clipboard
+                    time_offset,
+                    &mut clips,
+                    &mut skipped_files,
+                    track_pitch_accum,
+                    track_curves_accum,
+                    project_bpm,
+                    &mut reaper_group_map,
+                );
+            }
+        }
+
+        // ── ENVSEG 轨道包络段（item 剪贴板携带的轨道包络） ──
+        // REAPER 复制 item 时把覆盖其跨度的轨道包络写成 <ENVSEG <TYPE> +
+        // SEG_RANGE 段；坐标为段内相对时间（项目位置 = seg_range[0] + PT）。
+        // 附带 SEG_RANGE 的视为段；无 SEG_RANGE 的裸 ENVSEG/普通类型块按
+        // 绝对工程秒解释。
+        for env in &reaper_track.envelopes {
+            if !envelope_is_active(env) {
+                continue;
+            }
+            let kind = if env_type_matches(&env.env_type, VOL_ENV_TYPES) {
+                Some("volume")
+            } else if env_type_matches(&env.env_type, PAN_ENV_TYPES) {
+                Some("pan")
+            } else if env_type_matches(&env.env_type, MUTE_ENV_TYPES) {
+                Some(MUTE_GATE_KEY)
+            } else {
+                None
+            };
+            let Some(key) = kind else {
+                continue;
+            };
+            let mut points = reaper_env_points(env);
+            if points.is_empty() {
+                continue;
+            }
+            // ENVSEG 段的 VOLENV2 是绝对量；HiFiShifter 曲线相对轨道推子 →
+            // 相对化除法（take 晋升曲线在 process_item 中已是相对量，不经此处）。
+            if key == "volume" {
+                let track_volume = ordered_track_volumes
+                    .get(target_track_idx)
+                    .copied()
+                    .unwrap_or(1.0);
+                if track_volume.abs() < 1e-6 {
+                    log::warn!(
+                        "reaper_import: target track volume ~0, ENVSEG volume kept absolute"
+                    );
+                } else {
+                    points = points
+                        .into_iter()
+                        .map(|(p, v, s)| (p, v / track_volume as f64, s))
+                        .collect();
+                }
+            }
+            let curves = curves_by_track.entry(target_track_id.clone()).or_default();
+            match env.seg_range.as_ref() {
+                Some(range) => {
+                    // 原生 REAPER 语义（样例 ClipboardData/20260908-025849）：
+                    // SEG_RANGE = [起秒, 终秒, 起QN, 终QN]（第二字段是**终点**
+                    // 而非长度），PT 为**工程绝对秒**。
+                    //
+                    // M2（主路径，原生形态）：seg_start > 0 且所有点 ≥ seg_start
+                    // → 点为绝对工程秒，相对化平移 seg_start（段随 items 一起
+                    // 平移 time_offset）。
+                    //
+                    // M1（回退，旧/第三方形态）：点 < seg_start → 点为段内
+                    // 相对时间，段起点 = seg_range[0]。
+                    let seg_start = range.first().copied().unwrap_or(0.0).max(0.0);
+                    let absolute = seg_start > 1e-6
+                        && points.iter().all(|(p, _, _)| *p >= seg_start - 1e-6);
+                    let points = if absolute {
+                        points
+                            .into_iter()
+                            .map(|(p, v, s)| (p - seg_start, v, s))
+                            .collect()
+                    } else {
+                        points
+                    };
+                    let span_start = seg_start + time_offset;
+                    // SEG_RANGE[1]：> seg_start → 终点（原生）；≤ seg_start →
+                    // 长度（旧形态回退）。缺省回退到点跨度。
+                    let span_end = match range.get(1).copied() {
+                        Some(end) if end.is_finite() && end > seg_start + 1e-9 => {
+                            end + time_offset
+                        }
+                        Some(len) if len.is_finite() && len > 0.0 => span_start + len,
+                        _ => span_start + points.last().map(|(p, _, _)| *p).unwrap_or(0.0),
+                    };
+                    overwrite_accum_span(curves, key, &points, span_start, span_end, span_start);
+                }
+                None => {
+                    // 无 SEG_RANGE：绝对工程秒（+ 光标对齐偏移）。
+                    let span_start = (points.first().map(|(p, _, _)| *p).unwrap_or(0.0)
+                        + time_offset)
+                        .max(0.0);
+                    let span_end = points.last().map(|(p, _, _)| *p).unwrap_or(0.0) + time_offset;
+                    overwrite_accum_span(curves, key, &points, span_start, span_end, 0.0);
+                }
+            }
         }
     }
 
@@ -716,23 +799,30 @@ fn convert_reaper_items_to_existing_tracks(
         let offset_frames = build_pitch_frames(accum, total_frames);
         // 只在有非零偏移时才记录
         if offset_frames.iter().any(|&v| v.abs() > 1e-6) {
-            params_by_root_track.insert(
-                track_id.clone(),
-                TrackParamsState {
+            params_by_root_track
+                .entry(track_id.clone())
+                .or_insert_with(|| TrackParamsState {
                     frame_period_ms,
-                    pitch_orig: Vec::new(),
-                    pitch_edit: Vec::new(),
-                    pitch_edit_user_modified: false,
-                    has_pitch_adjustment_active: false,
-                    tension_orig: Vec::new(),
-                    tension_edit: Vec::new(),
-                    pitch_orig_key: None,
-                    pending_pitch_offset: Some(offset_frames),
-                    extra_curves: Default::default(),
-                    extra_params: Default::default(),
-                },
-            );
+                    ..TrackParamsState::default()
+                })
+                .pending_pitch_offset = Some(offset_frames);
         }
+    }
+
+    // take 包络晋升 + ENVSEG 段 → extra_curves（MUTE 门控乘入 volume）。
+    for (track_id, accum) in &curves_by_track {
+        let curves = build_extra_curves_from_accum(accum, total_frames);
+        if curves.is_empty() {
+            continue;
+        }
+        params_by_root_track
+            .entry(track_id.clone())
+            .or_insert_with(|| TrackParamsState {
+                frame_period_ms,
+                ..TrackParamsState::default()
+            })
+            .extra_curves
+            .extend(curves);
     }
 
     let mut timeline = TimelineState {
@@ -759,7 +849,11 @@ fn convert_reaper_items_to_existing_tracks(
     Ok(ReaperImportResult {
         timeline,
         skipped_files,
-        beats_per_bar: data.tempo.as_ref().map(|t| t.beats_per_bar).unwrap_or(4),
+        beats_per_bar: data
+            .tempo
+            .as_ref()
+            .map(|t| t.beats_per_bar.clamp(1, 32))
+            .unwrap_or(4),
         tempo_map: None,
     })
 }
@@ -912,9 +1006,16 @@ fn convert_reaper_data(
     let mut track_order: i32 = 0;
     let mut reaper_group_map: HashMap<i32, Vec<String>> = HashMap::new();
 
-    // track_id → pitch accumulator
+    // track_id → pitch accumulator / take 包络晋升曲线累积器
     let mut pitch_data_by_track: std::collections::HashMap<String, Vec<PitchFrameAccumulator>> =
         std::collections::HashMap::new();
+    let mut curves_by_track: std::collections::HashMap<String, CurveAccum> =
+        std::collections::HashMap::new();
+    // track_id → 轨道包络（vol, pan, mute gate），待 total_frames 已知后覆写
+    let mut track_envs_by_track: std::collections::HashMap<
+        String,
+        (Option<ReaperEnvelope>, Option<ReaperEnvelope>, Option<ReaperEnvelope>),
+    > = std::collections::HashMap::new();
 
     // 从解析的 TEMPO 中获取 BPM（无则用 fallback），后续 MIDI 转换需要
     let bpm = data.tempo.as_ref().map(|t| t.bpm).unwrap_or(fallback_bpm);
@@ -926,9 +1027,31 @@ fn convert_reaper_data(
     let depths = compute_track_depths(&data.tracks);
     let parent_ids = compute_parent_ids(&depths, &track_ids);
 
+    // 轨道包络预检：REAPER 绝对包络语义下，激活的 VOLENV2 取代轨道推子、
+    // PANENV2 取代声像钮（静态 pan 常量曲线随之抑制）。
+    let track_vol_envs: Vec<Option<ReaperEnvelope>> = data
+        .tracks
+        .iter()
+        .map(|t| find_active_envelope(&t.envelopes, VOL_ENV_TYPES).cloned())
+        .collect();
+    let track_pan_envs: Vec<Option<ReaperEnvelope>> = data
+        .tracks
+        .iter()
+        .map(|t| find_active_envelope(&t.envelopes, PAN_ENV_TYPES).cloned())
+        .collect();
+    let track_gate_envs: Vec<Option<ReaperEnvelope>> = data
+        .tracks
+        .iter()
+        .map(|t| find_active_envelope(&t.envelopes, MUTE_ENV_TYPES).cloned())
+        .collect();
+
     for (i, reaper_track) in data.tracks.iter().enumerate() {
         let track_id = &track_ids[i];
-        let volume = if !reaper_track.vol_pan.is_empty() {
+        // VOLENV2 激活 → 推子被包络取代，Track.volume 中性化为 1.0，
+        // 包络值全量进 volume 曲线（构建阶段覆写），避免双重施加。
+        let volume = if track_vol_envs[i].is_some() {
+            1.0
+        } else if !reaper_track.vol_pan.is_empty() {
             convert_volume(reaper_track.vol_pan[0])
         } else {
             0.9
@@ -954,6 +1077,7 @@ fn convert_reaper_data(
         });
 
         let mut track_pitch_accum: Vec<PitchFrameAccumulator> = Vec::new();
+        let mut track_curves_accum: CurveAccum = BTreeMap::new();
 
         for item in &reaper_track.items {
             process_item(
@@ -964,13 +1088,21 @@ fn convert_reaper_data(
                 &mut hs_clips,
                 &mut skipped_files,
                 &mut track_pitch_accum,
+                &mut track_curves_accum,
                 bpm,
                 &mut reaper_group_map,
             );
         }
 
+        // 轨道包络（绝对语义 + hold 全程覆盖）暂存，待 total_frames 已知后
+        // 统一覆写 take 晋升数据（见下方轨道包络覆写段）。
+        track_envs_by_track.insert(track_id.clone(), (track_vol_envs[i].clone(), track_pan_envs[i].clone(), track_gate_envs[i].clone()));
+
         if !track_pitch_accum.is_empty() {
             pitch_data_by_track.insert(track_id.clone(), track_pitch_accum);
+        }
+        if !track_curves_accum.is_empty() {
+            curves_by_track.insert(track_id.clone(), track_curves_accum);
         }
 
         track_order += 1;
@@ -986,6 +1118,24 @@ fn convert_reaper_data(
     let mut params_by_root_track: BTreeMap<String, TrackParamsState> = BTreeMap::new();
     let frame_period_ms = FRAME_PERIOD * 1000.0;
     let total_frames = ((project_end * 1000.0 / frame_period_ms).ceil() as usize).max(1);
+
+    // 轨道包络优先（绝对语义 + hold 全程覆盖）：覆写 take 晋升数据。
+    // 轨道包络点是工程绝对秒，直接采样整条轨道帧域 [0, project_end]。
+    for (track_id, (vol_env, pan_env, gate_env)) in &track_envs_by_track {
+        if vol_env.is_none() && pan_env.is_none() && gate_env.is_none() {
+            continue;
+        }
+        let accum = curves_by_track.entry(track_id.clone()).or_default();
+        if let Some(env) = vol_env {
+            overwrite_accum_span(accum, "volume", &reaper_env_points(env), 0.0, project_end, 0.0);
+        }
+        if let Some(env) = pan_env {
+            overwrite_accum_span(accum, "pan", &reaper_env_points(env), 0.0, project_end, 0.0);
+        }
+        if let Some(env) = gate_env {
+            overwrite_accum_span(accum, MUTE_GATE_KEY, &reaper_env_points(env), 0.0, project_end, 0.0);
+        }
+    }
 
     for track in &hs_tracks {
         if let Some(points) = pitch_data_by_track.get(&track.id) {
@@ -1016,9 +1166,32 @@ fn convert_reaper_data(
         }
     }
 
+    // take/轨道包络晋升曲线 → extra_curves（MUTE 门控乘入 volume）。
+    for track in &hs_tracks {
+        let Some(accum) = curves_by_track.get(&track.id) else {
+            continue;
+        };
+        let curves = build_extra_curves_from_accum(accum, total_frames);
+        if curves.is_empty() {
+            continue;
+        }
+        let entry = params_by_root_track
+            .entry(track.id.clone())
+            .or_insert_with(|| TrackParamsState {
+                frame_period_ms,
+                ..TrackParamsState::default()
+            });
+        entry.extra_curves.extend(curves);
+    }
+
     // REAPER 轨道 pan（VOLPAN 第二个值）导入为共通声像曲线；
     // 音量（VOLPAN 第一个值）已经作为 Track.volume 导入，无需重复。
+    // PANENV2 激活时取代声像钮 → 静态 pan 常量曲线被抑制（上面已由
+    // 包络覆写写入动态 pan 曲线）。
     for (i, reaper_track) in data.tracks.iter().enumerate() {
+        if track_pan_envs[i].is_some() {
+            continue;
+        }
         let pan = reaper_track.vol_pan.get(1).copied().unwrap_or(0.0);
         if !(pan.is_finite() && pan.abs() > 1e-9) {
             continue;
@@ -1064,7 +1237,11 @@ fn convert_reaper_data(
     Ok(ReaperImportResult {
         timeline,
         skipped_files,
-        beats_per_bar: data.tempo.as_ref().map(|t| t.beats_per_bar).unwrap_or(4),
+        beats_per_bar: data
+            .tempo
+            .as_ref()
+            .map(|t| t.beats_per_bar.clamp(1, 32))
+            .unwrap_or(4),
         tempo_map,
     })
 }
@@ -1080,6 +1257,9 @@ struct PitchFrameAccumulator {
 /// 处理一个 Reaper Item，生成一个或多个 HiFiShifter Clip。
 ///
 /// `time_offset`: 时间偏移量（用于将剪贴板数据对齐到光标位置），.rpp 导入时为 0。
+///
+/// `pitch_accum` / `curves_accum`：本 item 活跃 take 的音高偏移与
+/// VOL/PAN/MUTE 包络晋升数据（按目标轨道累积，构建阶段转成帧曲线）。
 fn process_item(
     item: &ReaperItem,
     track_id: &str,
@@ -1088,6 +1268,7 @@ fn process_item(
     clips: &mut Vec<Clip>,
     skipped_files: &mut Vec<String>,
     pitch_accum: &mut Vec<PitchFrameAccumulator>,
+    curves_accum: &mut BTreeMap<String, Vec<CurveFrameAccumulator>>,
     project_bpm: f64,
     reaper_group_map: &mut HashMap<i32, Vec<String>>,
 ) {
@@ -1104,6 +1285,8 @@ fn process_item(
                     item.position, item.takes.len()
                 );
             }
+            // MIDI take 的包络（v1 边界）不消费：HiFiShifter 的音高线依赖
+            // 音频分析（pitch_orig），MIDI take 无音频可分析，偏移无落点。
             if let Some(ref midi_data) = src.midi_source {
                 process_midi_item(
                     item,
@@ -1162,7 +1345,10 @@ fn process_item(
     let item_reversed = raw_play_rate < 0.0 || source_section_reversed;
     let play_rate = raw_play_rate.abs().max(0.01);
     let item_pitch_semitones = take.play_rate.get(2).copied().unwrap_or(0.0); // 整体音高偏移
-    let take_gain = take_linear_gain(item, take);
+    // 活跃 take 存在激活 VOLENV 时其音量钮被取代（绝对包络语义），
+    // 包络本身由 write_take_envelope_frames 晋升为轨道音量曲线。
+    let take_volume_overridden = take_volume_envelope_active(take);
+    let take_gain = take_linear_gain(item, take, take_volume_overridden);
     let item_muted = item.mute.first().copied().unwrap_or(0) != 0;
     // LOOP 标记：REAPER 显式写出时以其为准；缺失（极老工程/第三方生成器）
     // 时回退到"为新的音频块启用循环"设置。
@@ -1172,8 +1358,11 @@ fn process_item(
         crate::config::loop_new_clips_default()
     };
     let s_offs = take.s_offs; // source offset (seconds)
-    let item_pos = item.position; // timeline position (seconds)
-    let item_length = item.length; // visible length (seconds)
+
+    // 防御性钳制：损坏 / 伪造 RPP 的极端 POSITION/LENGTH 不得进入下游
+    // 帧向量分配（合法工程远低于一天）。
+    let item_pos = clamp_import_position(item.position);
+    let item_length = clamp_import_length(item.length);
     let (manual_fade_in_sec, manual_fade_out_sec, auto_fade_in_sec, auto_fade_out_sec) =
         effective_item_fades(item, take, item_length.max(0.0));
     // 形状/曲率与长度使用同一 take-vs-item 优先规则。
@@ -1189,8 +1378,17 @@ fn process_item(
         reaper_fade_shape_dir(&item.fade_out)
     };
 
-    // 获取音高包络（如果有）
-    let pitch_envelope = find_pitch_envelope(&item.envelopes);
+    // 获取活跃 take 的包络（只取活跃 take；item 直属包络 = 默认 take 的包络）。
+    // 时间基准：take 媒体时间 u，经 take_env_u_to_item_time 映射到 item 时间线。
+    let take_envs = item.active_take_envelopes();
+    let pitch_envelope = find_active_envelope(take_envs, PITCH_ENV_TYPES);
+    let take_vol_env = if take_volume_overridden {
+        find_active_envelope(take_envs, VOL_ENV_TYPES)
+    } else {
+        None
+    };
+    let take_pan_env = find_active_envelope(take_envs, PAN_ENV_TYPES);
+    let take_mute_env = find_active_envelope(take_envs, MUTE_ENV_TYPES);
 
     // ─── 处理 Stretch Markers ───
     // 拉伸标记是 Take 属性：先有标记、后有 Item 裁断。分段映射以全部标记
@@ -1346,19 +1544,6 @@ fn process_item(
             segment_actual_pre_tl.push(actual_pre_tl);
             segment_actual_post_tl.push(actual_post_tl);
 
-            // 写入 pitch 偏移数据
-            write_pitch_for_clip(
-                pitch_accum,
-                clip_start,
-                clip_length,
-                clip_src_start,
-                effective_rate,
-                item_pitch_semitones,
-                pitch_envelope.as_ref(),
-                item_pos + time_offset,
-                item_length,
-            );
-
             current_timeline_pos += seg_timeline_duration;
         }
 
@@ -1477,6 +1662,24 @@ fn process_item(
         } else {
             hs_takes[active_take_idx].name.clone()
         };
+        // 非活跃 take 的包络当前不进 ClipTake（v4 边界）：留痕避免静默
+        // 丢用户数据（活跃 take 的包络已晋升为轨道曲线 / PITCHENV）。
+        let dropped_take_envs: usize = (active_take_idx != 0)
+            .then(|| item.default_take.envelopes.len())
+            .unwrap_or(0)
+            + item
+                .takes
+                .iter()
+                .enumerate()
+                .filter(|(idx, _)| *idx + 1 != active_take_idx)
+                .map(|(_, t)| t.envelopes.len())
+                .sum::<usize>();
+        if dropped_take_envs > 0 {
+            log::warn!(
+                "reaper_import: item at {} drops {dropped_take_envs} envelope(s) on non-active take(s) (ClipTake has no envelope container yet)",
+                item.position
+            );
+        }
         let clip_id = new_clip_id();
         let clip_start = item_pos + time_offset;
 
@@ -1540,134 +1743,322 @@ fn process_item(
         if let Some(gid) = item.group_id {
             reaper_group_map.entry(gid).or_default().push(clip_id);
         }
-
-        // 写入 pitch 偏移数据
-        write_pitch_for_clip(
-            pitch_accum,
-            clip_start,
-            item_length,
-            source_start,
-            effective_rate,
-            item_pitch_semitones,
-            pitch_envelope.as_ref(),
-            clip_start,
-            item_length,
-        );
     }
+
+    // ─── 写入 take 包络晋升数据（pitch / volume / pan / mute gate） ───
+    // 音高与包络使用同一全局 u↔t 仿射映射（take 速率，见 reaper_parser
+    // 的唯一转换点），与拉伸分段无关；帧范围 = item 时间线跨度（分段
+    // clip 恰好铺满该跨度，故逐 item 写一次即可）。
+    write_take_envelope_frames(
+        pitch_accum,
+        curves_accum,
+        item_pos + time_offset,
+        item_length,
+        play_rate,
+        item_pitch_semitones,
+        pitch_envelope,
+        take_vol_env,
+        take_pan_env,
+        take_mute_env,
+    );
 }
 
-// ─── Pitch 处理 ───
+// ─── 包络类型匹配与采样 ───
 
-/// 在 item 的 envelopes 中查找音高包络。
-/// Reaper 的音高包络类型为 "ENVSEG" 且通常是 "PITCHENV" 或以 "PITCH" 开头。
-/// 也可能直接作为 item level 的 envelope 出现。
-fn find_pitch_envelope(envelopes: &[ReaperEnvelope]) -> Option<Vec<(f64, f64)>> {
-    for env in envelopes {
-        let t = env.env_type.to_uppercase();
-        // 在 item 级别的 pitch envelope 通常类型名包含 "PITCH"
-        // 但 Reaper 也可能使用 ENVSEG
-        if t.contains("PITCH") || t == "ENVSEG" {
-            // 检查 act[0] 是否启用（默认 act=[1, -1]）
-            if env.act.first().copied().unwrap_or(1) == 0 {
-                continue;
-            }
-            let mut points = Vec::new();
-            for pt in &env.points {
-                if pt.len() >= 2 {
-                    // pt[0] = time (seconds, relative to item start)
-                    // pt[1] = value (semitones for pitch envelope, range typically -24..+24)
-                    points.push((pt[0], pt[1]));
-                }
-            }
-            if !points.is_empty() {
-                return Some(points);
-            }
-        }
-    }
-    None
+pub(crate) const PITCH_ENV_TYPES: &[&str] = &["PITCHENV"];
+pub(crate) const VOL_ENV_TYPES: &[&str] = &["VOLENV", "VOLENV2"];
+pub(crate) const PAN_ENV_TYPES: &[&str] = &["PANENV", "PANENV2"];
+pub(crate) const MUTE_ENV_TYPES: &[&str] = &["MUTEENV", "MUTEENV2"];
+
+/// 曲线 key：静音门控（内部中间 key，构建阶段乘入 volume 后剥离）。
+const MUTE_GATE_KEY: &str = "@mute_gate";
+
+fn env_type_matches(env_type: &str, kinds: &[&str]) -> bool {
+    kinds.iter().any(|k| env_type.eq_ignore_ascii_case(k))
 }
 
-/// 在音高包络上插值取得指定时间点的值。
-fn interpolate_pitch_envelope(points: &[(f64, f64)], time_sec: f64) -> f64 {
+/// `ACT` 首值判定（缺省 1 = 激活，REAPER 剪贴板 ENVSEG 段常无 ACT 行）。
+fn envelope_is_active(env: &ReaperEnvelope) -> bool {
+    env.act.first().copied().unwrap_or(1) != 0
+}
+
+/// 在包络列表中查找第一个「类型匹配 + 激活 + 有点」的包络。
+///
+/// 注意只匹配精确类型别名：旧实现的 `contains("PITCH") || == "ENVSEG"`
+/// 会把 ENVSEG 误判为音高包络（ENVSEG 是剪贴板轨道包络段的块名，不是
+/// 音高包络）。
+fn find_active_envelope<'a>(envs: &'a [ReaperEnvelope], kinds: &[&str]) -> Option<&'a ReaperEnvelope> {
+    envs.iter().find(|env| {
+        env_type_matches(&env.env_type, kinds) && envelope_is_active(env) && !env.points.is_empty()
+    })
+}
+
+/// 将包络 PT 行预处理为 (位置, 值, 形状) 三元组（按位置升序）。
+pub(crate) fn reaper_env_points(env: &ReaperEnvelope) -> Vec<(f64, f64, i32)> {
+    let mut points: Vec<(f64, f64, i32)> = env
+        .points
+        .iter()
+        .filter(|pt| pt.len() >= 2)
+        .filter(|pt| pt[0].is_finite() && pt[1].is_finite())
+        .map(|pt| (pt[0], pt[1], pt.get(2).copied().unwrap_or(0.0) as i32))
+        .collect();
+    points.sort_by(|a, b| a.0.total_cmp(&b.0));
+    points
+}
+
+/// REAPER 包络采样：shape=1（方波）阶梯保持；其它形状线性近似；
+/// 首点前 / 末点后按 REAPER hold 语义延续首/末点值。
+///
+/// 边界归属：`pos ≤ t` 分段——t 恰落在某点上时取该点值（方波点切换、
+/// 线性点取值都符合 REAPER 语义）。
+pub(crate) fn sample_reaper_envelope(points: &[(f64, f64, i32)], t: f64) -> Option<f64> {
     if points.is_empty() {
-        return 0.0;
+        return None;
     }
-
-    // 二分查找
-    let idx = points.partition_point(|p| p.0 < time_sec);
-
+    let idx = points.partition_point(|p| p.0 <= t);
     if idx == 0 {
-        return points[0].1;
+        return Some(points[0].1);
     }
     if idx == points.len() {
-        return points[points.len() - 1].1;
+        return Some(points[points.len() - 1].1);
     }
-
-    let (t0, v0) = points[idx - 1];
-    let (t1, v1) = points[idx];
-    let dt = t1 - t0;
-
-    if dt.abs() < 1e-12 {
-        return v0;
+    let (t0, v0, shape0) = points[idx - 1];
+    let (t1, v1, _) = points[idx];
+    if shape0 == 1 || (t1 - t0).abs() < 1e-12 {
+        return Some(v0);
     }
-
-    let t = (time_sec - t0) / dt;
-    v0 + (v1 - v0) * t
+    let frac = ((t - t0) / (t1 - t0)).clamp(0.0, 1.0);
+    Some(v0 + (v1 - v0) * frac)
 }
 
-/// 将 pitch 数据写入帧级别的 accumulator。
-/// Reaper 的音高是"相对于原始"的半音偏移，要叠加到原始音高上。
-/// 但由于 HiFiShifter 导入时还没有分析原始音高，这里先记录偏移量，
-/// 后续在 pitch params 构建阶段会将它写入 pitch_edit。
-///
-/// 实现策略：由于 Reaper 的音高是偏移量（相对原始），而 HiFiShifter 的 pitch_edit 是绝对值，
-/// 在导入时我们暂时记录偏移量，等 HiFiShifter 进行音高分析后会用 pitch_orig + offset 来计算。
-/// 如果没有偏移（0半音），则不写入 pitch 数据，让 HiFiShifter 的后续音高分析流程来处理。
-fn write_pitch_for_clip(
-    accum: &mut Vec<PitchFrameAccumulator>,
-    clip_start_sec: f64,
-    clip_length_sec: f64,
-    _source_start_sec: f64,
-    _play_rate: f64,
-    item_pitch_semitones: f64,
-    pitch_envelope: Option<&Vec<(f64, f64)>>,
-    item_start_sec: f64,
-    item_length_sec: f64,
-) {
-    // 如果没有任何音高偏移，跳过（让 HiFiShifter 默认处理）
-    let has_pitch_shift = item_pitch_semitones.abs() > 1e-6;
-    let has_envelope = pitch_envelope.map(|e| !e.is_empty()).unwrap_or(false);
+// ─── 曲线帧累积器 ───
 
-    if !has_pitch_shift && !has_envelope {
+#[derive(Default, Clone, Copy)]
+pub(crate) struct CurveFrameAccumulator {
+    sum: f64,
+    weight: f64,
+}
+
+type CurveAccum = BTreeMap<String, Vec<CurveFrameAccumulator>>;
+
+/// 用包络在 [start_sec, end_sec] 的采样值**覆写**累积器帧（weight=1）。
+///
+/// 优先级机制：轨道包络 / ENVSEG 段覆写 take 晋升数据——先铺 take 贡献，
+/// 再用本函数覆写轨道（或段）覆盖的范围。
+fn overwrite_accum_span(
+    accum: &mut CurveAccum,
+    key: &str,
+    points: &[(f64, f64, i32)],
+    span_start_sec: f64,
+    span_end_sec: f64,
+    // 包络点坐标 → 采样时刻的偏移（轨道包络为绝对时间传 0；ENVSEG 段传段起点）
+    env_time_origin: f64,
+) {
+    if points.is_empty() || span_end_sec <= span_start_sec {
         return;
     }
-
-    let clip_end_sec = clip_start_sec + clip_length_sec;
-    let start_frame = (clip_start_sec / FRAME_PERIOD).floor().max(0.0) as usize;
-    let end_frame = (clip_end_sec / FRAME_PERIOD).ceil().max(0.0) as usize;
-
+    let start_frame = clamp_import_frame(span_start_sec);
+    let end_frame =
+        ((span_end_sec / FRAME_PERIOD).ceil().max(0.0) as usize).min(MAX_IMPORT_FRAME_IDX);
+    let entry = accum.entry(key.to_string()).or_default();
     for frame_idx in start_frame..=end_frame {
-        let frame_time = frame_idx as f64 * FRAME_PERIOD;
-        // 相对于 item 开始的时间
-        let time_in_item = frame_time - item_start_sec;
-
-        if time_in_item < 0.0 || time_in_item > item_length_sec {
+        let t = frame_idx as f64 * FRAME_PERIOD;
+        if t < span_start_sec || t > span_end_sec {
             continue;
         }
-
-        // 计算音高偏移 = 整体偏移 + 包络偏移
-        let mut pitch_offset = item_pitch_semitones;
-        if let Some(env_points) = pitch_envelope {
-            pitch_offset += interpolate_pitch_envelope(env_points, time_in_item);
+        let Some(value) = sample_reaper_envelope(points, t - env_time_origin) else {
+            continue;
+        };
+        if !value.is_finite() {
+            continue;
         }
-
-        if frame_idx >= accum.len() {
-            accum.resize(frame_idx + 1, PitchFrameAccumulator::default());
+        if frame_idx >= entry.len() {
+            entry.resize(frame_idx + 1, CurveFrameAccumulator::default());
         }
-        let entry = &mut accum[frame_idx];
-        entry.sum += pitch_offset;
-        entry.weight += 1.0;
+        entry[frame_idx] = CurveFrameAccumulator { sum: value, weight: 1.0 };
     }
+}
+
+// ─── Take 包络晋升写入 ───
+
+/// 将活跃 take 的包络写入帧累积器（pitch 偏移 + volume/pan/mute gate）。
+///
+/// 时间映射：u = (t − item_start) × take_rate（全局仿射，与拉伸分段无关；
+/// 帧范围 = item 时间线跨度）。音高 = 静态偏移 + PITCHENV 采样（半音，
+/// 叠加语义）；volume/pan 采样值进入轨道曲线；MUTEENV 进入内部门控 key。
+#[allow(clippy::too_many_arguments)]
+fn write_take_envelope_frames(
+    pitch_accum: &mut Vec<PitchFrameAccumulator>,
+    curves_accum: &mut CurveAccum,
+    item_start_tl: f64,
+    item_length_tl: f64,
+    take_rate: f64,
+    static_pitch_semitones: f64,
+    pitch_env: Option<&ReaperEnvelope>,
+    vol_env: Option<&ReaperEnvelope>,
+    pan_env: Option<&ReaperEnvelope>,
+    mute_env: Option<&ReaperEnvelope>,
+) {
+    let item_end_tl = item_start_tl + item_length_tl.max(0.0);
+    let has_pitch_shift = static_pitch_semitones.abs() > 1e-6;
+    let pitch_points = pitch_env.map(reaper_env_points);
+    let has_pitch_env = pitch_points.as_ref().is_some_and(|p| !p.is_empty());
+
+    if has_pitch_shift || has_pitch_env {
+        let static_semitones = static_pitch_semitones;
+        for (frame_idx, entry) in pitch_frame_span(pitch_accum, item_start_tl, item_end_tl) {
+            let t = frame_idx as f64 * FRAME_PERIOD;
+            let time_in_item = t - item_start_tl;
+            if time_in_item < 0.0 || time_in_item > item_length_tl.max(0.0) {
+                continue;
+            }
+            let u = item_time_to_take_env_u(time_in_item, take_rate);
+            let mut offset = static_semitones;
+            if let Some(points) = pitch_points.as_ref() {
+                if let Some(v) = sample_reaper_envelope(points, u) {
+                    offset += v;
+                }
+            }
+            entry.sum += offset;
+            entry.weight += 1.0;
+        }
+    }
+
+    let (vol_points, pan_points, gate_points) = (
+        vol_env.map(reaper_env_points),
+        pan_env.map(reaper_env_points),
+        mute_env.map(reaper_env_points),
+    );
+    if let Some(points) = vol_points.as_ref().filter(|p| !p.is_empty()) {
+        accumulate_take_env(accum_for(curves_accum, "volume"), points, item_start_tl, item_end_tl, take_rate);
+    }
+    if let Some(points) = pan_points.as_ref().filter(|p| !p.is_empty()) {
+        accumulate_take_env(accum_for(curves_accum, "pan"), points, item_start_tl, item_end_tl, take_rate);
+    }
+    if let Some(points) = gate_points.as_ref().filter(|p| !p.is_empty()) {
+        accumulate_take_env(accum_for(curves_accum, MUTE_GATE_KEY), points, item_start_tl, item_end_tl, take_rate);
+    }
+}
+
+/// 迭代 [start, end] 覆盖的帧（自动扩容），返回 (帧号, 可变槽位)。
+///
+/// 直接对目标子切片迭代：此前 `iter_mut().enumerate().filter(range)` 会
+/// 为每个 item 扫过整个轨道级累积器（O(items × 工程帧数)，长工程导入
+/// 秒级卡顿）；resize 后目标区间必在界内。
+fn pitch_frame_span<'a>(
+    accum: &'a mut Vec<PitchFrameAccumulator>,
+    start_sec: f64,
+    end_sec: f64,
+) -> impl Iterator<Item = (usize, &'a mut PitchFrameAccumulator)> + 'a {
+    let start_frame = clamp_import_frame(start_sec);
+    let end_frame = ((end_sec / FRAME_PERIOD).ceil().max(0.0) as usize).min(MAX_IMPORT_FRAME_IDX);
+    let end_frame = end_frame.max(start_frame);
+    if end_frame >= accum.len() {
+        accum.resize(end_frame + 1, PitchFrameAccumulator::default());
+    }
+    accum[start_frame..=end_frame]
+        .iter_mut()
+        .enumerate()
+        .map(move |(i, slot)| (i + start_frame, slot))
+}
+
+/// take 包络按 u↔t 映射累积到帧（value = 包络在 u 处的采样）。
+fn accumulate_take_env(
+    entry: &mut Vec<CurveFrameAccumulator>,
+    points: &[(f64, f64, i32)],
+    item_start_tl: f64,
+    item_end_tl: f64,
+    take_rate: f64,
+) {
+    let start_frame = clamp_import_frame(item_start_tl);
+    let end_frame =
+        ((item_end_tl / FRAME_PERIOD).ceil().max(0.0) as usize).min(MAX_IMPORT_FRAME_IDX);
+    for frame_idx in start_frame..=end_frame {
+        let t = frame_idx as f64 * FRAME_PERIOD;
+        let time_in_item = t - item_start_tl;
+        if time_in_item < 0.0 || (item_end_tl > item_start_tl && time_in_item > item_end_tl - item_start_tl) {
+            continue;
+        }
+        let u = item_time_to_take_env_u(time_in_item, take_rate);
+        let Some(value) = sample_reaper_envelope(points, u) else {
+            continue;
+        };
+        if !value.is_finite() {
+            continue;
+        }
+        if frame_idx >= entry.len() {
+            entry.resize(frame_idx + 1, CurveFrameAccumulator::default());
+        }
+        let slot = &mut entry[frame_idx];
+        slot.sum += value;
+        slot.weight += 1.0;
+    }
+}
+
+fn accum_for<'a>(accum: &'a mut CurveAccum, key: &str) -> &'a mut Vec<CurveFrameAccumulator> {
+    accum.entry(key.to_string()).or_default()
+}
+
+/// 从累积器构建 `extra_curves`（mute gate 乘入 volume；全默认剪枝）。
+pub(crate) fn build_extra_curves_from_accum(
+    curves_accum: &CurveAccum,
+    total_frames: usize,
+) -> BTreeMap<String, Vec<f32>> {
+    let mut out = BTreeMap::new();
+    let vol = curves_accum.get("volume");
+    let gate = curves_accum.get(MUTE_GATE_KEY);
+    let has_vol = vol.is_some_and(|v| v.iter().any(|a| a.weight > 0.0));
+    let has_gate = gate.is_some_and(|v| v.iter().any(|a| a.weight > 0.0));
+    if has_vol || has_gate {
+        let mut curve = Vec::with_capacity(total_frames);
+        let mut non_default = false;
+        for idx in 0..total_frames {
+            let mut value = 1.0f64;
+            if has_vol {
+                if let Some(slot) = vol.and_then(|v| v.get(idx)) {
+                    if slot.weight > 0.0 {
+                        value = slot.sum / slot.weight;
+                    }
+                }
+            }
+            if has_gate {
+                if let Some(slot) = gate.and_then(|g| g.get(idx)) {
+                    if slot.weight > 0.0 {
+                        value *= (slot.sum / slot.weight).clamp(0.0, 1.0);
+                    }
+                }
+            }
+            let value = (value as f32).clamp(0.0, 4.0);
+            if (value - 1.0).abs() > 1e-6 {
+                non_default = true;
+            }
+            curve.push(value);
+        }
+        if non_default {
+            out.insert("volume".to_string(), curve);
+        }
+    }
+    if let Some(pan) = curves_accum.get("pan") {
+        if pan.iter().any(|a| a.weight > 0.0) {
+            let mut curve = Vec::with_capacity(total_frames);
+            let mut non_default = false;
+            for idx in 0..total_frames {
+                let value = match pan.get(idx) {
+                    Some(slot) if slot.weight > 0.0 => (slot.sum / slot.weight) as f32,
+                    _ => 0.0,
+                };
+                let value = value.clamp(-1.0, 1.0);
+                if value.abs() > 1e-6 {
+                    non_default = true;
+                }
+                curve.push(value);
+            }
+            if non_default {
+                out.insert("pan".to_string(), curve);
+            }
+        }
+    }
+    out
 }
 
 /// 从 accumulator 构建 pitch_edit 帧数组。
@@ -1844,6 +2235,7 @@ fn process_midi_item(
     // 应用 SOFFS 和 PLAYRATE
     let soffs = take.s_offs.max(0.0);
     let raw_play_rate = take.play_rate.first().copied().unwrap_or(1.0);
+    let reversed_playback = raw_play_rate < 0.0;
     let play_rate = raw_play_rate.abs().max(0.01);
 
     for note in &mut notes {
@@ -1851,10 +2243,28 @@ fn process_midi_item(
         note.end_sec = note.end_sec - soffs;
     }
 
-    let item_length = item.length.max(0.0);
+    let item_length = clamp_import_length(item.length);
 
     // 过滤掉完全在窗口外的音符（使用源时间窗口）
     notes.retain(|n| n.end_sec > 0.0 && n.start_sec < item_length * play_rate);
+
+    // 倒放（PLAYRATE < 0）：源窗口内容镜像逆序 —— 与音频路径"倒放消费
+    // 窗口"语义一致，绝不静默丢弃 PLAYRATE 的符号（此前导入为正放）。
+    if reversed_playback {
+        let span = item_length * play_rate;
+        for note in &mut notes {
+            let s = note.start_sec.clamp(0.0, span);
+            let e = note.end_sec.clamp(0.0, span);
+            note.start_sec = span - e;
+            note.end_sec = span - s;
+        }
+        notes.retain(|n| n.end_sec > n.start_sec + 1e-6);
+        notes.sort_by(|a, b| {
+            a.start_sec
+                .partial_cmp(&b.start_sec)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+    }
 
     if notes.is_empty() {
         return;
@@ -1874,8 +2284,10 @@ fn process_midi_item(
     let max_note = notes.iter().fold(0.0f32, |m, n| m.max(n.note));
 
     let item_muted = item.mute.first().copied().unwrap_or(0) != 0;
-    let take_gain = take_linear_gain(item, take);
-    let clip_start = item.position + time_offset;
+    // MIDI take 的音量包络 v1 不消费（见 process_item 的 MIDI 分支说明），
+    // 但音量钮语义一致：存在激活 VOLENV 时同样按"包络取代钮"中性化。
+    let take_gain = take_linear_gain(item, take, take_volume_envelope_active(take));
+    let clip_start = clamp_import_position(item.position) + time_offset;
 
     let clip_id = new_clip_id();
     let clip_name = if take.name.is_empty() {
@@ -1947,6 +2359,80 @@ mod tests {
     use crate::reaper_parser::ReaperSource;
     use crate::reaper_parser::ReaperStretchMarker;
 
+    // ─── 包络适配测试辅助（自编简洁数值，不引用真实工程样例） ───
+
+    fn wave_source(path: &str) -> ReaperSource {
+        let mut src = ReaperSource::new();
+        src.source_type = "WAVE".to_string();
+        src.file_path = path.to_string();
+        src
+    }
+
+    fn audio_item(position: f64, length: f64) -> ReaperItem {
+        let mut item = ReaperItem {
+            position,
+            length,
+            has_loop_token: true,
+            is_loop: false,
+            ..ReaperItem::default()
+        };
+        item.default_take.source = Some(wave_source("C:/missing/vocal.wav"));
+        item
+    }
+
+    fn env(env_type: &str, points: Vec<(f64, f64)>) -> ReaperEnvelope {
+        ReaperEnvelope {
+            env_type: env_type.to_string(),
+            act: vec![1, -1],
+            points: points
+                .into_iter()
+                .map(|(p, v)| vec![p, v, 0.0])
+                .collect(),
+            ..ReaperEnvelope::default()
+        }
+    }
+
+    fn run_process_item(
+        item: &ReaperItem,
+    ) -> (
+        Vec<Clip>,
+        Vec<PitchFrameAccumulator>,
+        CurveAccum,
+        Vec<String>,
+    ) {
+        let mut clips = Vec::new();
+        let mut skipped = Vec::new();
+        let mut pitch = Vec::new();
+        let mut curves: CurveAccum = BTreeMap::new();
+        let mut groups = HashMap::new();
+        process_item(
+            item,
+            "track_1",
+            None,
+            0.0,
+            &mut clips,
+            &mut skipped,
+            &mut pitch,
+            &mut curves,
+            120.0,
+            &mut groups,
+        );
+        (clips, pitch, curves, skipped)
+    }
+
+    fn curve_value_at(
+        curves: &CurveAccum,
+        key: &str,
+        frame: usize,
+    ) -> f64 {
+        curves
+            .get(key)
+            .and_then(|slots| slots.get(frame))
+            .filter(|slot| slot.weight > 0.0)
+            .map(|slot| slot.sum / slot.weight)
+            .unwrap_or(f64::NAN)
+    }
+
     #[test]
     fn loop_source_window_extends_to_media_end() {
         // 正向 LOOP：窗口 = [SOFFS, 媒体末尾]，不被 LENGTH 钳制。
@@ -1978,13 +2464,13 @@ mod tests {
         };
         item.takes.push(explicit);
         assert!((reaper_take_volume(&item.takes[0].vol_pan, true) - 1.25).abs() < 1e-9);
-        assert!((take_linear_gain(&item, &item.takes[0]) - 1.25).abs() < 1e-9);
+        assert!((take_linear_gain(&item, &item.takes[0], false) - 1.25).abs() < 1e-9);
 
         // Item 默认 take 的 VOLPAN：<trim> <pan> <volume> <pan law> → volume = [2]。
         let mut item2 = ReaperItem::default();
         item2.default_take.vol_pan = vec![1.0, 0.0, 0.8, -1.0];
         assert!((reaper_take_volume(&item2.default_take.vol_pan, false) - 0.8).abs() < 1e-9);
-        assert!((take_linear_gain(&item2, &item2.default_take) - 0.8).abs() < 1e-9);
+        assert!((take_linear_gain(&item2, &item2.default_take, false) - 0.8).abs() < 1e-9);
     }
 
     #[test]
@@ -1993,19 +2479,19 @@ mod tests {
         // 用户拖动 item 音量把手写的是 trim —— 只取 take volume 会丢增益。
         let mut item = ReaperItem::default();
         item.default_take.vol_pan = vec![0.5, 0.0, 1.0, -1.0]; // trim -6dB
-        assert!((take_linear_gain(&item, &item.default_take) - 0.5).abs() < 1e-9);
+        assert!((take_linear_gain(&item, &item.default_take, false) - 0.5).abs() < 1e-9);
 
         // 提升：trim 与 volume 都 >1（+6dB × +6dB = +12dB）。
         let mut boost = ReaperItem::default();
         boost.default_take.vol_pan = vec![2.0, 0.0, 2.0, -1.0];
-        assert!((take_linear_gain(&boost, &boost.default_take) - 4.0).abs() < 1e-9);
+        assert!((take_linear_gain(&boost, &boost.default_take, false) - 4.0).abs() < 1e-9);
 
         // 负 volume（REAPER 反相）：响度取绝对值保留。
         let mut inverted = ReaperItem::default();
         inverted.default_take.vol_pan = vec![1.0, 0.0, -0.8, -1.0];
-        assert!((take_linear_gain(&inverted, &inverted.default_take) - -0.8).abs() < 1e-9);
+        assert!((take_linear_gain(&inverted, &inverted.default_take, false) - -0.8).abs() < 1e-9);
         assert!(
-            (convert_volume(take_linear_gain(&inverted, &inverted.default_take)) - 0.8).abs()
+            (convert_volume(take_linear_gain(&inverted, &inverted.default_take, false)) - 0.8).abs()
                 < 1e-6
         );
 
@@ -2016,7 +2502,7 @@ mod tests {
             vol_pan: vec![0.0, 0.0, -1.0],
             ..ReaperTake::default()
         });
-        assert!((take_linear_gain(&multi, &multi.takes[0]) - 0.9).abs() < 1e-9);
+        assert!((take_linear_gain(&multi, &multi.takes[0], false) - 0.9).abs() < 1e-9);
 
         // 显式 take 的 TAKEVOLPAN 音量同样乘以 item trim。
         let mut explicit_trim = ReaperItem::default();
@@ -2026,7 +2512,7 @@ mod tests {
             ..ReaperTake::default()
         });
         assert!(
-            (take_linear_gain(&explicit_trim, &explicit_trim.takes[0]) - 0.75).abs() < 1e-9,
+            (take_linear_gain(&explicit_trim, &explicit_trim.takes[0], false) - 0.75).abs() < 1e-9,
             "explicit take gain must include item trim"
         );
     }
@@ -2098,6 +2584,7 @@ mod tests {
             &mut clips,
             &mut skipped,
             &mut pitch,
+            &mut BTreeMap::new(),
             120.0,
             &mut groups,
         );
@@ -2157,6 +2644,7 @@ mod tests {
             &mut clips,
             &mut skipped,
             &mut pitch,
+            &mut BTreeMap::new(),
             120.0,
             &mut groups,
         );
@@ -2200,5 +2688,327 @@ mod tests {
                 "相邻段起点应落在前段范围内"
             );
         }
+    }
+
+    // ─── Take 包络 → HiFiShifter 参数线 ───
+
+    #[test]
+    fn take_pitch_envelope_samples_in_u_domain_scaled_by_play_rate() {
+        // item length 4s、take rate 0.5 → u 域 0..2。
+        // PITCHENV: (u=0, +1) (u=2, −1) → t=0 → +1、t=2s → 0、t=4s → −1
+        //（u→t 斜率 = 1/rate；旧实现把包络坐标直接当 timeline 时间会挤在
+        // 前 2s 内）。
+        let mut item = audio_item(0.0, 4.0);
+        item.default_take.play_rate = vec![0.5, 1.0, 0.0, -1.0, 0.0, 0.0025];
+        item.default_take
+            .envelopes
+            .push(env("PITCHENV", vec![(0.0, 1.0), (2.0, -1.0)]));
+
+        let (_, pitch, _, _) = run_process_item(&item);
+        let frames = build_pitch_frames(&pitch, 801);
+        assert!((frames[0] - 1.0).abs() < 1e-6, "t=0 → u=0 → +1");
+        assert!(frames[400].abs() < 1e-6, "t=2s → u=1 → 0");
+        assert!((frames[800] + 1.0).abs() < 1e-6, "t=4s → u=2 → −1");
+    }
+
+    #[test]
+    fn only_active_take_envelope_is_imported() {
+        // 两个 take 各带 PITCHENV（数值刻意区分：default +1、Alt +5）。
+        // 无 TAKE SEL → 活跃 take = default take → 偏移 +1；
+        // TAKE SEL → 活跃 take = Alt → 偏移 +5。
+        let mut item = audio_item(0.0, 2.0);
+        item.default_take
+            .envelopes
+            .push(env("PITCHENV", vec![(0.0, 1.0)]));
+        item.takes.push(ReaperTake {
+            selected: false,
+            name: "Alt".to_string(),
+            source: Some(wave_source("C:/missing/alt.wav")),
+            envelopes: vec![env("PITCHENV", vec![(0.0, 5.0)])],
+            ..ReaperTake::default()
+        });
+
+        let (_, pitch, _, _) = run_process_item(&item);
+        let frames = build_pitch_frames(&pitch, 401);
+        assert!((frames[0] - 1.0).abs() < 1e-6, "无 SEL → default take 的包络");
+
+        item.takes[0].selected = true;
+        let (_, pitch, _, _) = run_process_item(&item);
+        let frames = build_pitch_frames(&pitch, 401);
+        assert!((frames[0] - 5.0).abs() < 1e-6, "TAKE SEL → 显式 take 的包络");
+    }
+
+    #[test]
+    fn take_volume_envelope_neutralizes_knob_and_promotes_curve() {
+        // take volume 钮 = 2.0 + 激活 VOLENV（0.5 → 1.5）：
+        // 绝对包络语义 → 钮被取代（gain = trim × 1.0），包络晋升为音量曲线。
+        let mut item = audio_item(0.0, 2.0);
+        item.default_take.vol_pan = vec![1.0, 0.0, 2.0, -1.0];
+        item.default_take
+            .envelopes
+            .push(env("VOLENV", vec![(0.0, 0.5), (2.0, 1.5)]));
+
+        let (clips, _, curves, _) = run_process_item(&item);
+        assert!(
+            (clips[0].gain - 1.0).abs() < 1e-6,
+            "gain = trim × 1.0（钮被包络取代），而非 × 2.0"
+        );
+        assert!((curve_value_at(&curves, "volume", 0) - 0.5).abs() < 1e-6);
+        assert!((curve_value_at(&curves, "volume", 400) - 1.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn inactive_envelopes_are_ignored() {
+        // ACT 0 的 PITCHENV / VOLENV 均忽略：无 pitch 偏移、无音量曲线，
+        // 音量钮照常生效（gain = trim × 钮值）。
+        let mut item = audio_item(0.0, 2.0);
+        item.default_take.vol_pan = vec![1.0, 0.0, 2.0, -1.0];
+        item.default_take.envelopes.push(ReaperEnvelope {
+            env_type: "PITCHENV".to_string(),
+            act: vec![0, -1],
+            points: vec![vec![0.0, 3.0, 0.0]],
+            ..ReaperEnvelope::default()
+        });
+        item.default_take.envelopes.push(ReaperEnvelope {
+            env_type: "VOLENV".to_string(),
+            act: vec![0, -1],
+            points: vec![vec![0.0, 0.5, 0.0]],
+            ..ReaperEnvelope::default()
+        });
+
+        let (clips, pitch, curves, _) = run_process_item(&item);
+        assert!((clips[0].gain - 2.0).abs() < 1e-6, "ACT 0 → 钮生效");
+        assert!(pitch.is_empty(), "ACT 0 → 无音高偏移");
+        assert!(curves.get("volume").is_none(), "ACT 0 → 无音量曲线");
+    }
+
+    #[test]
+    fn take_pan_envelope_promotes_to_pan_curve() {
+        let mut item = audio_item(0.0, 2.0);
+        item.default_take
+            .envelopes
+            .push(env("PANENV", vec![(0.0, -1.0), (2.0, 1.0)]));
+
+        let (_, _, curves, _) = run_process_item(&item);
+        assert!((curve_value_at(&curves, "pan", 0) + 1.0).abs() < 1e-6);
+        assert!((curve_value_at(&curves, "pan", 400) - 1.0).abs() < 1e-6);
+    }
+
+    // ─── 轨道包络（.rpp / TRACK 块）→ 曲线 ───
+
+    #[test]
+    fn track_envelopes_override_take_and_neutralize_fader() {
+        // 轨道：VOLPAN [0.5, 0.8] + VOLENV2 (2.0 → 1.0) + PANENV2 (0.5)
+        // + MUTEENV 方波门控（1s..3s 静音）。
+        // - VOLENV2 绝对语义 → Track.volume 中性化为 1.0（推子被取代）；
+        // - PANENV2 取代声像钮 → 静态 0.8 抑制，曲线 = 0.5；
+        // - MUTEENV 乘入门控。
+        let mut data = ReaperData::default();
+        data.is_track_data = true;
+        let mut track = ReaperTrack::default();
+        track.vol_pan = vec![0.5, 0.8, -1.0, -1.0, 1.0];
+        track.envelopes.push(env("VOLENV2", vec![(0.0, 2.0), (4.0, 1.0)]));
+        track.envelopes.push(env("PANENV2", vec![(0.0, 0.5)]));
+        track.envelopes.push(ReaperEnvelope {
+            env_type: "MUTEENV".to_string(),
+            act: vec![1, -1],
+            points: vec![
+                vec![0.0, 1.0, 1.0],
+                vec![1.0, 0.0, 1.0],
+                vec![3.0, 1.0, 1.0],
+            ],
+            ..ReaperEnvelope::default()
+        });
+        data.tracks.push(track);
+
+        let result = convert_reaper_data(data, None, 120.0).unwrap();
+        let hs_track = &result.timeline.tracks[0];
+        assert!(
+            (hs_track.volume - 1.0).abs() < 1e-9,
+            "VOLENV2 取代推子 → Track.volume 中性化"
+        );
+        let params = result.timeline.params_by_root_track.values().next().unwrap();
+        let volume = params.extra_curves.get("volume").unwrap();
+        let pan = params.extra_curves.get("pan").unwrap();
+        let fp = FRAME_PERIOD;
+        // 音量：包络绝对值（非推子 0.5 的乘积）；末端 = 包络末值 1.0。
+        assert!((volume[0] - 2.0).abs() < 1e-3);
+        assert!((volume[(4.0 / fp) as usize] - 1.0).abs() < 1e-3);
+        // 声像：PANENV2 抑制静态 0.8。
+        assert!((pan[0] - 0.5).abs() < 1e-3);
+        // MUTEENV 方波：t∈[1s,3s) 门控 0；t=3s 起恢复。
+        // t=3s 处音量包络本身为 1.25（2→1 线性），门控恢复后 = 1.25。
+        assert!((volume[(1.0 / fp) as usize] - 0.0).abs() < 1e-3);
+        assert!((volume[(2.0 / fp) as usize] - 0.0).abs() < 1e-3);
+        assert!((volume[(3.0 / fp) as usize] - 1.25).abs() < 1e-3);
+    }
+
+    // ─── ENVSEG 轨道包络段（item 剪贴板） ───
+
+    fn envseg_data(seg_start: f64, seg_len: f64, points: Vec<(f64, f64)>) -> ReaperData {
+        let mut data = ReaperData::default();
+        data.is_track_data = false;
+        data.track_offsets = vec![0];
+        let mut track = ReaperTrack::default();
+        track.items.push(audio_item(0.0, 2.0));
+        track.envelopes.push(ReaperEnvelope {
+            env_type: "VOLENV2".to_string(),
+            act: vec![1, -1],
+            seg_range: Some(vec![
+                seg_start,
+                seg_len,
+                seg_start * 2.0,
+                seg_len * 2.0,
+            ]),
+            points: points
+                .into_iter()
+                .map(|(p, v)| vec![p, v, 0.0])
+                .collect(),
+            ..ReaperEnvelope::default()
+        });
+        data.tracks.push(track);
+        data
+    }
+
+    fn run_envseg_import(data: ReaperData) -> crate::state::TrackParamsState {
+        let result = convert_reaper_items_to_existing_tracks(
+            data,
+            0.0,
+            0,
+            &["track_1".to_string()],
+            &[1.0],
+            120.0,
+            0,
+        )
+        .unwrap();
+        result
+            .timeline
+            .params_by_root_track
+            .get("track_1")
+            .cloned()
+            .unwrap()
+    }
+
+    #[test]
+    fn envseg_clipboard_segment_imports_to_target_track_curves() {
+        // <ENVSEG VOLENV2 SEG_RANGE 10 2 ...>，段内相对点 (0, 0.8) (2, 0.4)。
+        // M1（段内相对）：项目位置 = seg_range[0] + PT → t=10..12s。
+        let params = run_envseg_import(envseg_data(
+            10.0,
+            2.0,
+            vec![(0.0, 0.8), (2.0, 0.4)],
+        ));
+        let volume = params.extra_curves.get("volume").unwrap();
+        let fp = FRAME_PERIOD;
+        assert!((volume[(10.0 / fp) as usize] - 0.8).abs() < 1e-3);
+        assert!((volume[(12.0 / fp) as usize] - 0.4).abs() < 1e-3);
+        // 段外为默认（1.0）。
+        assert!((volume[(5.0 / fp) as usize] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn envseg_absolute_points_fall_back_to_absolute_interpretation() {
+        // seg_range[0]=10 且所有点 ≥ 10（相对解释下不可能出现的形态）→
+        // M2 判别：点为绝对工程秒，相对化后段同样落在 t=10..12s。
+        let params = run_envseg_import(envseg_data(
+            10.0,
+            2.0,
+            vec![(10.0, 0.8), (12.0, 0.4)],
+        ));
+        let volume = params.extra_curves.get("volume").unwrap();
+        let fp = FRAME_PERIOD;
+        assert!((volume[(10.0 / fp) as usize] - 0.8).abs() < 1e-3);
+        assert!((volume[(12.0 / fp) as usize] - 0.4).abs() < 1e-3);
+    }
+
+    #[test]
+    fn envseg_native_dual_timebase_multitrack_imports_aligned() {
+        // 原生多轨形态（ClipboardData/20260908-025849）：
+        // - SEG_RANGE = [起秒, 终秒, 起QN, 终QN]（第二字段为终点）；
+        // - PT 为工程绝对秒；
+        // - 各轨 clip 位置不共享时间范围（轨 1 在 0、轨 2 在 77）。
+        // 粘贴对齐（首个位置 → 光标 10s）后：轨 2 的包络必须仍与其 item
+        // 同步（87..90.824），不得被相对解释拉回光标附近。
+        let mut data = ReaperData::default();
+        data.is_track_data = false;
+        data.track_offsets = vec![0, 1];
+        let mut track0 = ReaperTrack::default();
+        track0.items.push(audio_item(0.0, 2.0));
+        track0.envelopes.push(ReaperEnvelope {
+            env_type: "VOLENV2".to_string(),
+            act: vec![1, -1],
+            seg_range: Some(vec![0.0, 2.0, 0.0, 4.0]),
+            points: vec![vec![0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                         vec![2.0, 1.5, 0.0, 0.0, 0.0, 0.0, 0.0, 4.0]],
+            ..ReaperEnvelope::default()
+        });
+        let mut track1 = ReaperTrack::default();
+        track1.items.push(audio_item(77.0, 3.824479166667));
+        track1.envelopes.push(ReaperEnvelope {
+            env_type: "VOLENV2".to_string(),
+            act: vec![1, -1],
+            seg_range: Some(vec![77.0, 80.824479166667, 154.0, 161.648958333334]),
+            points: vec![vec![77.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 154.0],
+                         vec![80.824479166667, 1.5, 0.0, 0.0, 0.0, 0.0, 0.0, 161.648958333334]],
+            ..ReaperEnvelope::default()
+        });
+        data.tracks.push(track0);
+        data.tracks.push(track1);
+
+        let result = convert_reaper_items_to_existing_tracks(
+            data,
+            10.0,
+            0,
+            &["track_1".to_string(), "track_2".to_string()],
+            &[1.0, 1.0],
+            120.0,
+            0,
+        )
+        .unwrap();
+        let fp = FRAME_PERIOD;
+        // item 落点：轨 1 → 10..12；轨 2 → 87..90.824（首个位置对齐光标）。
+        let clip_t1 = result
+            .timeline
+            .clips
+            .iter()
+            .find(|c| c.track_id == "track_1")
+            .unwrap();
+        let clip_t2 = result
+            .timeline
+            .clips
+            .iter()
+            .find(|c| c.track_id == "track_2")
+            .unwrap();
+        assert!((clip_t1.start_sec - 10.0).abs() < 1e-6);
+        assert!((clip_t2.start_sec - 87.0).abs() < 1e-6);
+
+        let params_t1 = result.timeline.params_by_root_track.get("track_1").unwrap();
+        let volume_t1 = params_t1.extra_curves.get("volume").unwrap();
+        assert!((volume_t1[(10.0 / fp) as usize] - 0.5).abs() < 1e-3);
+        assert!((volume_t1[(12.0 / fp) as usize] - 1.5).abs() < 1e-3);
+
+        // 关键：轨 2 的包络必须落在 item 范围内（87..90.824），而不是被
+        // 相对解释拉到光标附近。
+        let params_t2 = result.timeline.params_by_root_track.get("track_2").unwrap();
+        let volume_t2 = params_t2.extra_curves.get("volume").unwrap();
+        assert!((volume_t2[(87.0 / fp) as usize] - 0.5).abs() < 1e-3, "轨 2 包络起点 = item 起点");
+        // 段末（80.824+10 = 90.824s）为端点值 1.5；t=90 处为线性中间值 ≈1.284。
+        let end_frame = (90.824479166667f64 / fp).floor() as usize;
+        assert!(
+            (volume_t2[end_frame] - 1.5).abs() < 5e-3,
+            "轨 2 包络终点 = item 终点（frame {} 实际 {}）",
+            end_frame,
+            volume_t2[end_frame]
+        );
+        let mid = volume_t2[(90.0 / fp) as usize];
+        assert!(
+            (mid - 1.2845).abs() < 5e-3,
+            "线性插值中间值，实际 {}",
+            mid
+        );
+        assert!(
+            (volume_t2[(10.0 / fp) as usize] - 1.0).abs() < 1e-6,
+            "轨 2 的段不得出现在光标附近"
+        );
     }
 }

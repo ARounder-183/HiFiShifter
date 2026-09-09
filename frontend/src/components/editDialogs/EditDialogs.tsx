@@ -5,6 +5,7 @@ import type { ScaleKey } from "../../utils/musicalScales";
 import { useAppSelector } from "../../app/hooks";
 import { isModifierActive, selectKeybinding } from "../../features/keybindings/keybindingsSlice";
 import { applySelectWheelChange } from "../../utils/selectWheel";
+import { useWheelScrollGuard } from "../../utils/useWheelScrollGuard";
 import { buildScaleSelectGroups } from "../../utils/scaleSelection";
 
 interface Props {
@@ -682,11 +683,13 @@ interface QuantizeProps {
     defaultUseProjectScale?: boolean;
     projectScaleLabel?: string;
     defaultToleranceCents?: number;
+    defaultSmoothness?: number;
     onConfirm?: (
         unit: "semitone" | "scale" | "value",
         scaleValue: string,
         toleranceCents: number,
-        quantizeUnit?: number,
+        quantizeUnit: number | undefined,
+        edgeSmoothnessPercent: number,
     ) => void;
 }
 
@@ -700,8 +703,11 @@ export function QuantizeDialog({
     defaultUseProjectScale = true,
     projectScaleLabel,
     defaultToleranceCents = 0,
+    defaultSmoothness = 0,
     onConfirm,
 }: QuantizeProps) {
+    // 滚轮守卫：滑块滚轮步进时阻止祖先容器滚动（见 useWheelScrollGuard）。
+    const quantizeWheelGuard = useWheelScrollGuard<HTMLDivElement>('input[type="range"]');
     const { t } = useI18n();
     const tAny = t as (key: string) => string;
     const toleranceDefault = defaultTolerance ?? defaultToleranceCents;
@@ -720,6 +726,10 @@ export function QuantizeDialog({
     );
     const [toleranceCents, setToleranceCents] = useState<string>(String(toleranceDefault));
     const [quantizeUnit, setQuantizeUnit] = useState<string>(String(defaultQuantizeUnit));
+    const [smoothness, setSmoothness] = useState(String(Math.round(defaultSmoothness)));
+    const paramFineAdjustKb = useAppSelector((state) =>
+        selectKeybinding(state, "modifier.paramFineAdjust"),
+    );
 
     useEffect(() => {
         if (open) {
@@ -727,12 +737,24 @@ export function QuantizeDialog({
             setScaleValue(defaultUseProjectScale ? "__project__" : defaultScale);
             setToleranceCents(String(toleranceDefault));
             setQuantizeUnit(String(defaultQuantizeUnit));
+            setSmoothness(String(Math.round(defaultSmoothness)));
         }
-    }, [open, defaultScale, toleranceDefault, defaultUseProjectScale, defaultQuantizeUnit]);
+    }, [
+        open,
+        defaultScale,
+        toleranceDefault,
+        defaultUseProjectScale,
+        defaultQuantizeUnit,
+        defaultSmoothness,
+    ]);
 
     return (
         <Dialog.Root open={open} onOpenChange={onOpenChange}>
-            <Dialog.Content style={{ maxWidth: 360 }} onKeyDown={(e) => e.stopPropagation()}>
+            <Dialog.Content
+                ref={quantizeWheelGuard}
+                style={{ maxWidth: 360 }}
+                onKeyDown={(e) => e.stopPropagation()}
+            >
                 <Dialog.Title>{tAny("menu_quantize")}</Dialog.Title>
                 <Flex direction="column" gap="3" mt="3">
                     {!valueMode && (
@@ -837,6 +859,34 @@ export function QuantizeDialog({
                             style={{ flex: 1 }}
                         />
                     </Flex>
+                    <Flex align="center" gap="2">
+                        <Text size="2" style={{ minWidth: 80 }}>
+                            {tAny("edge_smoothness")}
+                        </Text>
+                        <input
+                            type="range"
+                            min={0}
+                            max={100}
+                            step={1}
+                            value={Math.round(Number(smoothness) || 0)}
+                            onWheel={(e) => {
+                                // 阻止默认滚动由 Dialog.Content 上的原生非被动
+                                // 守卫完成（React onWheel 的 preventDefault 是
+                                // no-op，见 useWheelScrollGuard）。
+                                const fine = isModifierActive(paramFineAdjustKb, e.nativeEvent);
+                                const step = fine ? 1 : 5;
+                                const dir = e.deltaY < 0 ? 1 : -1;
+                                const current = Math.round(Number(smoothness) || 0);
+                                const next = Math.max(0, Math.min(100, current + dir * step));
+                                setSmoothness(String(next));
+                            }}
+                            onChange={(e) => setSmoothness(e.currentTarget.value)}
+                            style={{ flex: 1 }}
+                        />
+                        <Text size="1" style={{ minWidth: 40, textAlign: "right" }}>
+                            {Math.round(Number(smoothness) || 0)}%
+                        </Text>
+                    </Flex>
                 </Flex>
                 <Flex justify="end" gap="2" mt="4">
                     <Dialog.Close>
@@ -853,6 +903,7 @@ export function QuantizeDialog({
                                 scaleValue,
                                 parsed,
                                 valueMode ? parsedUnit : undefined,
+                                Math.max(0, Math.min(100, Number(smoothness) || 0)),
                             );
                             onOpenChange(false);
                         }}
@@ -875,11 +926,13 @@ interface MeanQuantizeProps {
     defaultUseProjectScale?: boolean;
     projectScaleLabel?: string;
     defaultToleranceCents?: number;
+    defaultSmoothness?: number;
     onConfirm?: (
         unit: "semitone" | "scale" | "value",
         scaleValue: string,
         toleranceCents: number,
-        quantizeUnit?: number,
+        quantizeUnit: number | undefined,
+        edgeSmoothnessPercent: number,
     ) => void;
 }
 
@@ -893,8 +946,11 @@ export function MeanQuantizeDialog({
     defaultUseProjectScale = true,
     projectScaleLabel,
     defaultToleranceCents = 0,
+    defaultSmoothness = 0,
     onConfirm,
 }: MeanQuantizeProps) {
+    // 滚轮守卫：滑块滚轮步进时阻止祖先容器滚动（见 useWheelScrollGuard）。
+    const meanQuantizeWheelGuard = useWheelScrollGuard<HTMLDivElement>('input[type="range"]');
     const { t } = useI18n();
     const tAny = t as (key: string) => string;
     const toleranceDefault = defaultTolerance ?? defaultToleranceCents;
@@ -913,6 +969,10 @@ export function MeanQuantizeDialog({
     );
     const [toleranceCents, setToleranceCents] = useState<string>(String(toleranceDefault));
     const [quantizeUnit, setQuantizeUnit] = useState<string>(String(defaultQuantizeUnit));
+    const [smoothness, setSmoothness] = useState(String(Math.round(defaultSmoothness)));
+    const paramFineAdjustKb = useAppSelector((state) =>
+        selectKeybinding(state, "modifier.paramFineAdjust"),
+    );
 
     useEffect(() => {
         if (open) {
@@ -920,12 +980,24 @@ export function MeanQuantizeDialog({
             setScaleValue(defaultUseProjectScale ? "__project__" : defaultScale);
             setToleranceCents(String(toleranceDefault));
             setQuantizeUnit(String(defaultQuantizeUnit));
+            setSmoothness(String(Math.round(defaultSmoothness)));
         }
-    }, [open, defaultScale, toleranceDefault, defaultUseProjectScale, defaultQuantizeUnit]);
+    }, [
+        open,
+        defaultScale,
+        toleranceDefault,
+        defaultUseProjectScale,
+        defaultQuantizeUnit,
+        defaultSmoothness,
+    ]);
 
     return (
         <Dialog.Root open={open} onOpenChange={onOpenChange}>
-            <Dialog.Content style={{ maxWidth: 360 }} onKeyDown={(e) => e.stopPropagation()}>
+            <Dialog.Content
+                ref={meanQuantizeWheelGuard}
+                style={{ maxWidth: 360 }}
+                onKeyDown={(e) => e.stopPropagation()}
+            >
                 <Dialog.Title>{tAny("mean_quantize_title")}</Dialog.Title>
                 <Flex direction="column" gap="3" mt="3">
                     {!valueMode && (
@@ -1030,6 +1102,34 @@ export function MeanQuantizeDialog({
                             style={{ flex: 1 }}
                         />
                     </Flex>
+                    <Flex align="center" gap="2">
+                        <Text size="2" style={{ minWidth: 80 }}>
+                            {tAny("edge_smoothness")}
+                        </Text>
+                        <input
+                            type="range"
+                            min={0}
+                            max={100}
+                            step={1}
+                            value={Math.round(Number(smoothness) || 0)}
+                            onWheel={(e) => {
+                                // 阻止默认滚动由 Dialog.Content 上的原生非被动
+                                // 守卫完成（React onWheel 的 preventDefault 是
+                                // no-op，见 useWheelScrollGuard）。
+                                const fine = isModifierActive(paramFineAdjustKb, e.nativeEvent);
+                                const step = fine ? 1 : 5;
+                                const dir = e.deltaY < 0 ? 1 : -1;
+                                const current = Math.round(Number(smoothness) || 0);
+                                const next = Math.max(0, Math.min(100, current + dir * step));
+                                setSmoothness(String(next));
+                            }}
+                            onChange={(e) => setSmoothness(e.currentTarget.value)}
+                            style={{ flex: 1 }}
+                        />
+                        <Text size="1" style={{ minWidth: 40, textAlign: "right" }}>
+                            {Math.round(Number(smoothness) || 0)}%
+                        </Text>
+                    </Flex>
                 </Flex>
                 <Flex justify="end" gap="2" mt="4">
                     <Dialog.Close>
@@ -1046,6 +1146,7 @@ export function MeanQuantizeDialog({
                                 scaleValue,
                                 parsed,
                                 valueMode ? parsedUnit : undefined,
+                                Math.max(0, Math.min(100, Number(smoothness) || 0)),
                             );
                             onOpenChange(false);
                         }}

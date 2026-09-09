@@ -335,7 +335,7 @@ Common shortcuts:
 
 Left-drag on a selected curve to move it vertically, horizontally, or freely, depending on the `Drag Direction` setting. While left-dragging, press the right button to quickly toggle drag direction.
 
-Right-drag on a selected curve to adjust its amplitude: drag up to increase amplitude, down to decrease.
+Right-drag on a selected curve to adjust its amplitude: drag up to increase amplitude, down to decrease. For the pitch parameter, amplitude adjustment preserves the note contour and intervals — only the amplitude of vibrato and other fine detail is scaled.
 
 Right-click in the parameter editor to open a context menu with operations such as `Initialize`, `Transpose by Cents`, `Transpose by Degrees`, `Set To`, `Average`, `Smooth`, `Add Vibrato`, `Quantize`, `Mean Quantize`, etc.
 

@@ -77,10 +77,6 @@ pub(super) fn import_vocalshifter_project(
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
         state.checkpoint_timeline(&tl);
 
-        // 计算现有轨道的最大 order
-        let max_existing_order = tl.tracks.iter().map(|t| t.order).max().unwrap_or(-1);
-        let mut order_offset = max_existing_order + 1;
-
         // 应用工程 BPM（如果现有工程为空或导入文件自带 BPM 非默认值则采用）
         // 与 Tempo Map 规范化一致：钳制到 10-960。
         if result.timeline.bpm != 120.0 || tl.tracks.is_empty() {
@@ -93,13 +89,9 @@ pub(super) fn import_vocalshifter_project(
             }
         }
 
-        // 合并轨道（调整 order 使其排在现有轨道之后）
-        for mut track in result.timeline.tracks {
-            track.order = order_offset;
-            order_offset += 1;
-            tl.tracks.push(track);
-        }
-        tl.next_track_order = order_offset;
+        // 合并轨道（排在现有轨道之后）+ 重写同级序号（共用入口见
+        // append_imported_tracks）。
+        tl.append_imported_tracks(result.timeline.tracks);
 
         // 合并 clips
         for mut clip in result.timeline.clips {

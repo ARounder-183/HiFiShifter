@@ -7,6 +7,7 @@ export type ActionId =
     // 播放控制
     | "playback.toggle" // 播放/暂停
     | "playback.stop" // 停止播放
+    | "playback.metronome" // 节拍器开关
     | "recording.toggle" // 开始/停止录音
     | "playback.focusCursor" // 聚焦播放光标
     | "playback.seekLeft" // 播放光标左移
@@ -63,8 +64,16 @@ export type ActionId =
     | "pianoRoll.paste" // PianoRoll 内粘贴参数帧
     | "pianoRoll.shiftParamUp" // 选中 clip 参数线整体上移
     | "pianoRoll.shiftParamDown" // 选中 clip 参数线整体下移
+    | "pianoRoll.shiftParamUpLarge" // 选中 clip 参数线大幅上移（Shift+=）
+    | "pianoRoll.shiftParamDownLarge" // 选中 clip 参数线大幅下移（Shift+-）
+    | "pianoRoll.shiftParamUpSmall" // 选中 clip 参数线微调上移（Ctrl+=）
+    | "pianoRoll.shiftParamDownSmall" // 选中 clip 参数线微调下移（Ctrl+-）
     | "pianoRoll.shiftParamUpSelection" // 参数编辑器选择范围内参数线上移
     | "pianoRoll.shiftParamDownSelection" // 参数编辑器选择范围内参数线下移
+    | "pianoRoll.shiftParamUpSelectionLarge" // 选择范围内参数线大幅上移（Shift+]）
+    | "pianoRoll.shiftParamDownSelectionLarge" // 选择范围内参数线大幅下移（Shift+[）
+    | "pianoRoll.shiftParamUpSelectionSmall" // 选择范围内参数线微调上移（Ctrl+]）
+    | "pianoRoll.shiftParamDownSelectionSmall" // 选择范围内参数线微调下移（Ctrl+[）
     | "pianoRoll.vibratoDragAmplitudeIncrease" // 直线/颤音拖拽时增大振幅
     | "pianoRoll.vibratoDragAmplitudeDecrease" // 直线/颤音拖拽时减小振幅
     | "pianoRoll.vibratoDragFrequencyIncrease" // 直线/颤音拖拽时增大频率
@@ -89,10 +98,11 @@ export type ActionId =
     | "modifier.pianoRollVerticalZoom" // PianoRoll Ctrl+滚轮垂直缩放
     | "modifier.scrollHorizontal" // 按住+滚轮水平滚动
     | "modifier.scrollVertical" // 按住+滚轮竖直滚动
+    | "modifier.scrollbarZoom" // 悬停滚动条+滚轮 = 该轴缩放（按住）
     | "modifier.pianoKeysVerticalScroll" // 钢琴键垂直滚动（按住+滚轮）
     | "modifier.pianoKeysVerticalZoom" // 钢琴键垂直缩放（按住+滚轮）
     | "modifier.paramMorph" // 参数编辑器形变模式（按住）
-    | "modifier.paramFineAdjust" // 参数微调（按住）
+    | "modifier.paramFineAdjust" // 精细调整（按住）
     | "modifier.vibratoAmplitudeAdjust" // 颤音绘制时滚轮调振幅
     | "modifier.vibratoFrequencyAdjust" // 颤音绘制时滚轮调频率
     // 快速搜索
@@ -154,6 +164,8 @@ export type ModifierConflictScene =
     | "wheel.pianoRoll"
     // 琴键区滚轮
     | "wheel.pianoKeys"
+    // 悬停在原生滚动条上的滚轮（时间轴 / 参数编辑器等所有自定义滚轮面）
+    | "wheel.scrollbar"
     // 全局微调：滑杆 / 数值输入框 / 轨道头等部件
     | "global.fine";
 

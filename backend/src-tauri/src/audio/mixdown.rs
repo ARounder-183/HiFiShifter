@@ -1,25 +1,12 @@
+use crate::encode::{create_encoder, ChannelMode, EncodeError, OutputSpec};
 use crate::state::{TimelineState, Track};
 use crate::time_stretch::{time_stretch_interleaved, StretchAlgorithm};
-use hound::{SampleFormat, WavSpec, WavWriter};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 // ─── 导出格式与质量预设 ────────────────────────────────────────────────────────
-
-/// 导出音频格式（位深）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ExportFormat {
-    /// 16-bit 整型（默认，向后兼容，用于实时预览）。
-    #[default]
-    Wav16,
-    /// 24-bit 整型（高质量存档）。
-    #[allow(dead_code)]
-    Wav24,
-    /// 32-bit 浮点（最高质量，用于最终导出）。
-    Wav32f,
-}
 
 /// 质量预设，区分实时预览和最终导出场景。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -38,8 +25,9 @@ pub struct MixdownOptions {
     pub end_sec: Option<f64>,
     pub stretch: StretchAlgorithm,
     pub apply_pitch_edit: bool,
-    /// 导出格式（位深），默认 [`ExportFormat::Wav16`]。
-    pub export_format: ExportFormat,
+    /// 导出编码描述（格式 / 位深 / 码率 / 抖动 / 声道等）。
+    /// 位深、编码参数等由 `crate::encode::OutputSpec` 统一描述。
+    pub output: OutputSpec,
     /// 质量预设，默认 [`QualityPreset::Realtime`]。
     #[allow(dead_code)]
     pub quality_preset: QualityPreset,
@@ -51,6 +39,10 @@ pub struct MixdownOptions {
 pub struct MixdownResult {
     pub sample_rate: u32,
     pub duration_sec: f64,
+    /// 实际导出声道数（应用 Mono 下混后）。
+    pub channels: u16,
+    /// 写盘字节数。
+    pub bytes_written: u64,
 }
 
 fn mixdown_cancelled(opts: &MixdownOptions) -> bool {
@@ -314,7 +306,12 @@ pub(crate) fn clip_duration_sec_from_wav(
     Some(frames as f64 / sample_rate as f64)
 }
 
-pub fn render_mixdown_wav(
+/// 渲染时间线并按 `opts.output` 描述的格式（WAV / MP3 / FLAC）写盘。
+///
+/// 编码在"混音完成 → 写盘"这一分叉点发生：`render_mixdown_interleaved`
+/// 产出交错 f32 后，可选 Mono 下混，再交由 `crate::encode` 的对应编码器
+/// 完成量化、编码与落盘。取消时删除半成品文件并返回 `export_cancelled`。
+pub fn render_mixdown_to_file(
     timeline: &TimelineState,
     output_path: &Path,
     opts: MixdownOptions,
@@ -330,73 +327,71 @@ pub fn render_mixdown_wav(
         return Err("export_cancelled".to_string());
     }
 
-    // 根据 export_format 选择 WavSpec。
-    let spec = match opts.export_format {
-        ExportFormat::Wav16 => WavSpec {
-            channels: out_channels,
-            sample_rate: out_rate,
-            bits_per_sample: 16,
-            sample_format: SampleFormat::Int,
-        },
-        ExportFormat::Wav24 => WavSpec {
-            channels: out_channels,
-            sample_rate: out_rate,
-            bits_per_sample: 24,
-            sample_format: SampleFormat::Int,
-        },
-        ExportFormat::Wav32f => WavSpec {
-            channels: out_channels,
-            sample_rate: out_rate,
-            bits_per_sample: 32,
-            sample_format: SampleFormat::Float,
-        },
+    // Mono 下混在编码分叉点之前完成，不侵入混音核心；混音管线恒为双声道。
+    let (mix, channels) = match opts.output.channel_mode {
+        ChannelMode::Stereo => (mix, out_channels),
+        ChannelMode::Mono => {
+            if out_channels >= 2 {
+                let nch = out_channels as usize;
+                let mut mono = vec![0.0f32; mix.len() / nch];
+                for (frame, chunk) in mix.chunks_exact(nch).enumerate() {
+                    let sum: f32 = chunk.iter().sum();
+                    mono[frame] = clamp11(sum / nch as f32);
+                }
+                (mono, 1u16)
+            } else {
+                (mix, out_channels)
+            }
+        }
     };
-    let mut writer = WavWriter::create(output_path, spec).map_err(|e| e.to_string())?;
 
-    match opts.export_format {
-        ExportFormat::Wav16 => {
-            for (idx, s) in mix.into_iter().enumerate() {
-                if idx % 8192 == 0 && mixdown_cancelled(&opts) {
-                    drop(writer);
-                    let _ = std::fs::remove_file(output_path);
-                    return Err("export_cancelled".to_string());
-                }
-                let v = clamp11(s);
-                let i = (v * i16::MAX as f32).round() as i16;
-                writer.write_sample(i).map_err(|e| e.to_string())?;
+    let mut encoder = create_encoder(
+        output_path,
+        &opts.output,
+        channels,
+        out_rate,
+        opts.cancel_flag.clone(),
+    )
+    .map_err(|e| e.to_string())?;
+
+    // 分块推送，块间响应取消（WAV 增量写盘；MP3/FLAC 内存缓冲，取消即丢弃）。
+    // WAV 在 create_encoder 内已截断/创建目标文件；MP3/FLAC 仅在 finish()
+    // 里一次性写盘。取消/失败时据此决定是否清理：MP3/FLAC 未写盘前不能
+    // 删 —— 覆盖导出场景会把用户上一次的成品误删掉。
+    let mut output_touched = matches!(opts.output.format, crate::encode::OutputFormat::Wav);
+    let encode_result: Result<u64, EncodeError> = {
+        let chunk_samples = 8192usize * channels as usize;
+        let mut offset = 0usize;
+        loop {
+            if mixdown_cancelled(&opts) {
+                break Err(EncodeError::Cancelled);
+            }
+            let end = (offset + chunk_samples).min(mix.len());
+            if let Err(e) = encoder.push(&mix[offset..end]) {
+                break Err(e);
+            }
+            offset = end;
+            if offset >= mix.len() {
+                output_touched = true;
+                break encoder.finish().map(|summary| summary.bytes_written);
             }
         }
-        ExportFormat::Wav24 => {
-            // hound 的 24-bit int 写入使用 i32，有效范围 [-8388608, 8388607]。
-            const MAX24: f32 = 8_388_607.0;
-            for (idx, s) in mix.into_iter().enumerate() {
-                if idx % 8192 == 0 && mixdown_cancelled(&opts) {
-                    drop(writer);
-                    let _ = std::fs::remove_file(output_path);
-                    return Err("export_cancelled".to_string());
-                }
-                let v = clamp11(s);
-                let i = (v * MAX24).round() as i32;
-                writer.write_sample(i).map_err(|e| e.to_string())?;
+    };
+
+    match encode_result {
+        Ok(bytes_written) => Ok(MixdownResult {
+            sample_rate: out_rate,
+            duration_sec,
+            channels,
+            bytes_written,
+        }),
+        Err(e) => {
+            if output_touched {
+                let _ = std::fs::remove_file(output_path);
             }
-        }
-        ExportFormat::Wav32f => {
-            for (idx, s) in mix.into_iter().enumerate() {
-                if idx % 8192 == 0 && mixdown_cancelled(&opts) {
-                    drop(writer);
-                    let _ = std::fs::remove_file(output_path);
-                    return Err("export_cancelled".to_string());
-                }
-                writer.write_sample(s).map_err(|e| e.to_string())?;
-            }
+            Err(e.to_string())
         }
     }
-    writer.finalize().map_err(|e| e.to_string())?;
-
-    Ok(MixdownResult {
-        sample_rate: out_rate,
-        duration_sec,
-    })
 }
 
 pub fn render_mixdown_interleaved(
@@ -524,8 +519,9 @@ pub fn render_mixdown_interleaved(
         }
 
         let (win_start_sec, win_end_sec) = crate::state::clip_playback_window_sec(clip);
-        let pre_silence_sec =
-            crate::state::clip_leading_silence_sec(clip, Some(total_sec)) / playback_rate.max(1e-6);
+        // clip_leading_silence_sec 返回的是**时间线秒**（内部已除以 playback_rate），
+        // 与引擎 snapshot 的 pre_silence_sec 同源；这里不能再除一次。
+        let pre_silence_sec = crate::state::clip_leading_silence_sec(clip, Some(total_sec));
 
         let src_end_limit_sec = win_end_sec.min(total_sec).max(win_start_sec.max(0.0));
         let slice_start_sec = win_start_sec.max(0.0);
@@ -1177,7 +1173,7 @@ mod tests {
                     end_sec: None,
                     stretch: StretchAlgorithm::LinearResample,
                     apply_pitch_edit: false,
-                    export_format: ExportFormat::Wav32f,
+                    output: OutputSpec::wav_32f(),
                     quality_preset: QualityPreset::Export,
                     cancel_flag: None,
                 };
@@ -1218,6 +1214,241 @@ mod tests {
                     "fade-out tail does not reach silence rate={rate} len={len_sec}s shape={shape} dir={dir}: {last_ms_peak}"
                 );
             }
+        }
+    }
+
+    // ── 导出编码（render_mixdown_to_file）────────────────────────────────
+    // 覆盖 WAV 16/32f、FLAC（魔数 + 无损回读）、MP3（ID3 + Xing 头 + 解码
+    // 往返）、Mono 下混、取消与 MP3 采样率硬校验。
+
+    mod encode_render {
+        use super::*;
+        use crate::encode::{
+            ChannelMode, DitherMode, FlacBitDepth, Mp3BitrateMode, Mp3Tags, OutputFormat,
+            OutputSpec, WavBitDepth,
+        };
+        use crate::state::TimelineState;
+        use std::path::PathBuf;
+
+        const RATE: u32 = 44_100;
+        const SRC_SEC: f64 = 0.5;
+
+        /// 生成 440 Hz 正弦单声道源 WAV，返回路径。
+        fn tone_source_wav(dir: &std::path::Path, sample_rate: u32, sec: f64) -> PathBuf {
+            let path = dir.join(format!("tone_{sample_rate}_{sec:.3}s.wav"));
+            let spec = hound::WavSpec {
+                channels: 1,
+                sample_rate,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            };
+            let mut w = hound::WavWriter::create(&path, spec).unwrap();
+            let frames = (sec * sample_rate as f64).round() as usize;
+            for i in 0..frames {
+                let t = i as f64 / sample_rate as f64;
+                let v = (2.0 * std::f64::consts::PI * 440.0 * t).sin() * 0.6;
+                w.write_sample((v * i16::MAX as f64).round() as i16).unwrap();
+            }
+            w.finalize().unwrap();
+            path
+        }
+
+        /// 单 clip 时间线：0 ~ `clip_len` 播放整个源文件。
+        fn clip_timeline(source: &std::path::Path, clip_len: f64) -> TimelineState {
+            let mut tl = TimelineState::default();
+            let track_id = tl.tracks[0].id.clone();
+            let clip_id =
+                tl.add_clip(Some(track_id), Some("T".into()), Some(0.0), Some(clip_len), None);
+            {
+                let c = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+                c.source_path = Some(source.to_string_lossy().to_string());
+                c.source_start_sec = 0.0;
+                c.source_end_sec = SRC_SEC;
+                c.duration_sec = Some(SRC_SEC);
+                c.playback_rate = 1.0;
+                c.loop_enabled = false;
+            }
+            tl.project_sec = clip_len;
+            tl
+        }
+
+        fn opts(spec: OutputSpec) -> MixdownOptions {
+            MixdownOptions {
+                sample_rate: RATE,
+                start_sec: 0.0,
+                end_sec: None,
+                stretch: StretchAlgorithm::LinearResample,
+                apply_pitch_edit: false,
+                output: spec,
+                quality_preset: QualityPreset::Export,
+                cancel_flag: None,
+            }
+        }
+
+        fn tmp_dir(name: &str) -> PathBuf {
+            let dir = std::env::temp_dir().join("hifishifter_encode_tests").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            dir
+        }
+
+        fn base_spec(format: OutputFormat) -> OutputSpec {
+            let mut spec = OutputSpec::default();
+            spec.format = format;
+            spec
+        }
+
+        #[test]
+        fn render_to_wav_16_and_32f_roundtrip() {
+            let dir = tmp_dir("wav");
+            let source = tone_source_wav(&dir, RATE, SRC_SEC);
+            let tl = clip_timeline(&source, SRC_SEC);
+
+            let mut spec16 = base_spec(OutputFormat::Wav);
+            spec16.wav.bit_depth = WavBitDepth::I16;
+            let out16 = dir.join("out16.wav");
+            let result = render_mixdown_to_file(&tl, &out16, opts(spec16)).expect("render wav16");
+            assert_eq!(result.channels, 2);
+            assert!(result.bytes_written > 44);
+            let reader = hound::WavReader::open(&out16).unwrap();
+            assert_eq!(reader.spec().bits_per_sample, 16);
+            assert_eq!(reader.spec().sample_format, hound::SampleFormat::Int);
+            assert_eq!(
+                reader.duration(),
+                (SRC_SEC * RATE as f64).round() as u32
+            );
+
+            let out32 = dir.join("out32f.wav");
+            let result32 = render_mixdown_to_file(&tl, &out32, opts(base_spec(OutputFormat::Wav)))
+                .expect("render wav32f");
+            let reader = hound::WavReader::open(&out32).unwrap();
+            assert_eq!(reader.spec().sample_format, hound::SampleFormat::Float);
+            assert_eq!(result32.channels, 2);
+        }
+
+        #[test]
+        fn render_to_flac_roundtrips_losslessly() {
+            let dir = tmp_dir("flac");
+            let source = tone_source_wav(&dir, RATE, SRC_SEC);
+            let tl = clip_timeline(&source, SRC_SEC);
+
+            let mut spec = base_spec(OutputFormat::Flac);
+            spec.flac.bit_depth = FlacBitDepth::I16;
+            spec.dither = DitherMode::Tpdf;
+            let out = dir.join("out.flac");
+            let result = render_mixdown_to_file(&tl, &out, opts(spec)).expect("render flac");
+            assert_eq!(result.channels, 2);
+            assert!(result.bytes_written > 0);
+
+            let bytes = std::fs::read(&out).unwrap();
+            assert_eq!(&bytes[..4], b"fLaC", "FLAC 魔数");
+            let (info, planes) = rusty_flac::decode(&bytes).expect("decode flac");
+            assert_eq!(info.sample_rate, RATE);
+            assert_eq!(info.channels, 2);
+            let frames = planes[0].len();
+            assert!(frames >= (SRC_SEC * RATE as f64).round() as usize - 1);
+            // 正弦起始样本应接近 0（16-bit 量化 + TPDF 抖动允许 ±2 LSB）。
+            let half = (1i64 << 15) as f64;
+            let l0 = planes[0][0] as f64 / half;
+            assert!(l0.abs() < 0.01, "正弦起始样本应接近 0：{l0}");
+            // 整体能量非零（确实编码了音频内容）。
+            let energy: f64 = planes[0].iter().map(|&s| (s as f64 / half).powi(2)).sum();
+            let rms = (energy / frames as f64).sqrt();
+            assert!(
+                rms > 0.3,
+                "0.6 幅值正弦的 RMS 应明显高于量化噪声：{rms}"
+            );
+        }
+
+        #[test]
+        fn render_to_mp3_has_id3_xing_and_roundtrips() {
+            let dir = tmp_dir("mp3");
+            let source = tone_source_wav(&dir, RATE, SRC_SEC);
+            let tl = clip_timeline(&source, SRC_SEC);
+
+            let mut spec = base_spec(OutputFormat::Mp3);
+            spec.mp3.mode = Mp3BitrateMode::Vbr { quality_index: 2 };
+            spec.mp3.tags = Mp3Tags {
+                title: Some("测试曲".to_string()),
+                artist: Some("HiFiShifter".to_string()),
+                ..Default::default()
+            };
+            let out = dir.join("out.mp3");
+            let result = render_mixdown_to_file(&tl, &out, opts(spec)).expect("render mp3");
+            assert_eq!(result.channels, 2);
+
+            let bytes = std::fs::read(&out).unwrap();
+            assert_eq!(&bytes[..3], b"ID3", "ID3v2 标签前置");
+            assert!(result.bytes_written > 1024);
+
+            // rusty_mp3 自带解码器（与 FFmpeg 位精确对齐）做往返校验。
+            let mut decoder = rusty_mp3::Mp3Decoder::new();
+            decoder.push(&bytes);
+            decoder.flush();
+            let mut decoded_samples = 0usize;
+            let mut decoded_channels = 0u16;
+            loop {
+                match decoder.next_frame() {
+                    Ok(frame) => {
+                        decoded_channels = frame.channels;
+                        decoded_samples += frame.samples.len() / frame.channels as usize;
+                    }
+                    Err(rusty_mp3::error::Error::Eof) => break,
+                    Err(e) => panic!("mp3 decode failed: {e}"),
+                }
+            }
+            assert_eq!(decoded_channels, 2);
+            // 编码补齐到整帧（1152/帧）。Xing/Info 帧是合法 MP3 帧，多数解码器
+            // （含 rusty_mp3 自己）会把它解出为一段静音帧，故容差放宽到 ±2 帧。
+            let expected = (SRC_SEC * RATE as f64).round() as usize;
+            assert!(
+                decoded_samples.abs_diff(expected) <= 1152 * 2,
+                "decoded {decoded_samples} vs expected {expected}"
+            );
+        }
+
+        #[test]
+        fn render_mono_mixdown_yields_single_channel() {
+            let dir = tmp_dir("mono");
+            let source = tone_source_wav(&dir, RATE, SRC_SEC);
+            let tl = clip_timeline(&source, SRC_SEC);
+
+            let mut spec = base_spec(OutputFormat::Wav);
+            spec.channel_mode = ChannelMode::Mono;
+            let out = dir.join("mono.wav");
+            let result = render_mixdown_to_file(&tl, &out, opts(spec)).expect("render mono");
+            assert_eq!(result.channels, 1);
+            let reader = hound::WavReader::open(&out).unwrap();
+            assert_eq!(reader.spec().channels, 1);
+            assert_eq!(reader.duration(), (SRC_SEC * RATE as f64).round() as u32);
+        }
+
+        #[test]
+        fn render_cancelled_flag_removes_partial_file() {
+            let dir = tmp_dir("cancel");
+            let source = tone_source_wav(&dir, RATE, SRC_SEC);
+            let tl = clip_timeline(&source, SRC_SEC);
+
+            let mut o = opts(base_spec(OutputFormat::Wav));
+            let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+            o.cancel_flag = Some(flag);
+            let out = dir.join("cancelled.wav");
+            let err = render_mixdown_to_file(&tl, &out, o).expect_err("must cancel");
+            assert_eq!(err, "export_cancelled");
+            assert!(!out.exists(), "取消后不得残留半成品");
+        }
+
+        #[test]
+        fn render_to_mp3_rejects_unsupported_sample_rate() {
+            let dir = tmp_dir("mp3rate");
+            let source = tone_source_wav(&dir, 48_000, SRC_SEC);
+            let tl = clip_timeline(&source, SRC_SEC);
+
+            let mut o = opts(base_spec(OutputFormat::Mp3));
+            o.sample_rate = 96_000;
+            let out = dir.join("bad_rate.mp3");
+            let err = render_mixdown_to_file(&tl, &out, o).expect_err("96k must be rejected");
+            assert_eq!(err, "mp3_unsupported_sample_rate");
+            assert!(!out.exists());
         }
     }
 }

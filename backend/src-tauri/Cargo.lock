@@ -16,6 +16,7 @@ dependencies = [
  "cpal",
  "encoding_rs",
  "hound",
+ "id3",
  "libc",
  "libloading 0.8.9",
  "log",
@@ -33,6 +34,8 @@ dependencies = [
  "rmp-serde",
  "rubato",
  "rustfft",
+ "rusty_flac",
+ "rusty_mp3",
  "serde",
  "serde_json",
  "symphonia",
@@ -43,8 +46,10 @@ dependencies = [
  "tauri-plugin-opener",
  "time",
  "uuid",
+ "webview2-com",
  "windows 0.58.0",
  "windows-core 0.58.0",
+ "windows-core 0.61.2",
  "wl-clipboard-rs",
  "xcb",
  "zip",
@@ -2224,6 +2229,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d3067d79b975e8844ca9eb072e16b31c3c1c36928edf9c6789548c524d0d954"
 
 [[package]]
+name = "id3"
+version = "1.17.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "24993fcabcbc07c8ac076a8e62db8593d1a5c4dbe81d57e531d2b7cb7f737380"
+dependencies = [
+ "bitflags 2.11.0",
+ "byteorder",
+ "flate2",
+]
+
+[[package]]
 name = "ident_case"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4271,6 +4287,18 @@ name = "rustversion"
 version = "1.0.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
+
+[[package]]
+name = "rusty_flac"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "da915a7f868e284d27c44fac50c16f7f4f092f32fbe78523d0a04a7c276d97f9"
+
+[[package]]
+name = "rusty_mp3"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3fd89ed8a368cceb87ffcc9f3f128fff535ff1cd3ad27e4e64406c29d307a956"
 
 [[package]]
 name = "safetensors"

@@ -2,6 +2,7 @@ import { test } from "vitest";
 
 import {
     buildSelectionDragDense,
+    expandStrideSampledDense,
     pvCoversFullRes,
     selectionDragRange,
 } from "./selectionEditData.js";
@@ -166,5 +167,46 @@ test("components/layout/pianoRoll/selectionEditData.test.ts scripted checks", as
             sourceAt: (frame) => pvSlice[frame - 1] ?? 0,
         });
         assertEqual(fromFull.values.join(","), fromPv.values.join(","), "preview == commit");
+    }
+});
+
+/**
+ * 拉伸边缘拖拽提交路径（stride → 逐帧展开）的不变量：
+ * 采样点精确保留、点间按渲染同款线性插值展开、stride=1 原样返回。
+ */
+test("components/layout/pianoRoll/selectionEditData.test.ts expandStrideSampledDense checks", () => {
+    function assertEqual(actual: unknown, expected: unknown, label: string): void {
+        if (actual !== expected) {
+            throw new Error(`${label}: expected ${String(expected)}, received ${String(actual)}`);
+        }
+    }
+
+    // stride=1 → 原样返回（同一引用，零开销）
+    const dense = [1, 2, 3];
+    assertEqual(expandStrideSampledDense(dense, 1), dense, "stride1 same ref");
+    // 空输入
+    assertEqual(expandStrideSampledDense([], 4).length, 0, "empty stays empty");
+    // 单样本：无插值可言，长度 1
+    {
+        const out = expandStrideSampledDense([7], 5);
+        assertEqual(out.length, 1, "single sample length");
+        assertEqual(out[0], 7, "single sample value");
+    }
+    // 采样点精确保留 + 点间线性插值：dense[k] ↔ startFrame + k×stride
+    {
+        const out = expandStrideSampledDense([0, 10, 30], 4);
+        assertEqual(out.length, 9, "expanded length");
+        const expected = [0, 2.5, 5, 7.5, 10, 15, 20, 25, 30];
+        for (let i = 0; i < expected.length; i += 1) {
+            if (Math.abs(out[i] - expected[i]) > 1e-9) {
+                throw new Error(`out[${i}]: expected ${expected[i]}, received ${out[i]}`);
+            }
+        }
+    }
+    // 小数 stride 按 Math.floor 收敛（与 pv 读取一致）
+    {
+        const out = expandStrideSampledDense([1, 3], 2.9);
+        assertEqual(out.length, 3, "fractional stride length");
+        assertEqual(out[1], 2, "fractional stride midpoint");
     }
 });

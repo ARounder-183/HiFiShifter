@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
-import { Button, Dialog, Flex, Text, TextField } from "@radix-ui/themes";
+import { Button, Dialog, Flex, SegmentedControl, Text, TextField } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import type { MessageKey } from "../../i18n/messages";
-import { coreApi } from "../../services/api/core";
+import { coreApi, type ExportFormat } from "../../services/api/core";
 import { fileBrowserApi } from "../../services/api/fileBrowser";
+import { applyExtensionToFileName } from "../../utils/exportFormat";
 import { buildQuickExportFileName } from "./timeline/quickExportSelection";
 
 interface QuickClipExportDialogProps {
@@ -16,6 +17,8 @@ export function QuickClipExportDialog({ open, clipIds, onOpenChange }: QuickClip
     const { t } = useI18n();
     const [outputDir, setOutputDir] = useState("");
     const [fileName, setFileName] = useState("");
+    // 快捷导出不暴露编码参数：格式可选，参数全部沿用导出对话框的持久化设置。
+    const [format, setFormat] = useState<ExportFormat>("wav");
     const [errorText, setErrorText] = useState("");
     const [submitting, setSubmitting] = useState(false);
 
@@ -34,8 +37,18 @@ export function QuickClipExportDialog({ open, clipIds, onOpenChange }: QuickClip
             .getExportAudioDefaults()
             .then((defaults) => {
                 if (cancelled || !defaults.ok) return;
+                const nextFormat: ExportFormat =
+                    defaults.format === "mp3" || defaults.format === "flac"
+                        ? defaults.format
+                        : "wav";
+                setFormat(nextFormat);
                 setOutputDir(defaults.projectOutputDir ?? "");
-                setFileName(buildQuickExportFileName(defaults.projectName ?? ""));
+                setFileName(
+                    applyExtensionToFileName(
+                        buildQuickExportFileName(defaults.projectName ?? ""),
+                        nextFormat,
+                    ),
+                );
             })
             .catch(() => {
                 if (!cancelled) {
@@ -47,6 +60,11 @@ export function QuickClipExportDialog({ open, clipIds, onOpenChange }: QuickClip
             cancelled = true;
         };
     }, [open]);
+
+    function handleFormatChange(next: ExportFormat) {
+        setFormat(next);
+        setFileName((name) => applyExtensionToFileName(name, next));
+    }
 
     async function handleBrowse() {
         const result = await fileBrowserApi.pickDirectory();
@@ -81,6 +99,7 @@ export function QuickClipExportDialog({ open, clipIds, onOpenChange }: QuickClip
                 clipIds,
                 outputDir: outputDir.trim(),
                 fileName: fileName.trim(),
+                format,
             });
             if (!result.ok) {
                 const errorKey =
@@ -88,7 +107,9 @@ export function QuickClipExportDialog({ open, clipIds, onOpenChange }: QuickClip
                         ? "quick_export_error_missing_output_dir"
                         : result.error === "quick_export_file_name_required"
                           ? "quick_export_error_missing_file_name"
-                          : null;
+                          : result.error === "mp3_unsupported_sample_rate"
+                            ? "export_dialog_error_mp3_unsupported_sample_rate"
+                            : null;
                 setErrorText(
                     errorKey ? t(errorKey as MessageKey) : String(result.error ?? "Export failed"),
                 );
@@ -110,6 +131,21 @@ export function QuickClipExportDialog({ open, clipIds, onOpenChange }: QuickClip
                     {t("quick_export_description").replace("{n}", String(clipIds.length))}
                 </Dialog.Description>
                 <Flex direction="column" gap="3" mt="4">
+                    <div>
+                        <Text as="label" size="2">
+                            {t("quick_export_format")}
+                        </Text>
+                        <Flex mt="1">
+                            <SegmentedControl.Root
+                                value={format}
+                                onValueChange={(value) => handleFormatChange(value as ExportFormat)}
+                            >
+                                <SegmentedControl.Item value="wav">WAV</SegmentedControl.Item>
+                                <SegmentedControl.Item value="mp3">MP3</SegmentedControl.Item>
+                                <SegmentedControl.Item value="flac">FLAC</SegmentedControl.Item>
+                            </SegmentedControl.Root>
+                        </Flex>
+                    </div>
                     <div>
                         <Text as="label" size="2">
                             {t("quick_export_file_name")}

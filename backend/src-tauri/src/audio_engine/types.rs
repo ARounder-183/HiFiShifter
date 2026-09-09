@@ -190,6 +190,14 @@ pub(crate) enum EngineCommand {
     EvictSourcePath {
         path: String,
     },
+    /// 更新节拍器配置（开关 / 音量 / 细分模式 / 重音 / 音色）。
+    SetMetronome {
+        config: crate::audio_engine::metronome::MetronomeConfig,
+    },
+    /// 换入节拍器响点表（命令层按工程 Tempo Map + 网格预展开）。
+    SetMetronomeSchedule {
+        clicks: Arc<Vec<crate::audio_engine::metronome::MetronomeClick>>,
+    },
     Stop,
     Shutdown,
 }

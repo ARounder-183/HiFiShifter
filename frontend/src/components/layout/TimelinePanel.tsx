@@ -44,6 +44,7 @@ import {
     convertClipsToPitchReferenceRemote,
     updatePitchReferenceRemote,
     removeClipsRemote,
+    closeTrackGapsRemote,
     persistUiSettings,
     setPrimaryTimeUnit,
     setSecondaryTimeUnit,
@@ -71,6 +72,7 @@ import { paramsApi } from "../../services/api/params";
 import { resolveRootTrackId } from "../../features/session/trackUtils";
 import { SCALE_NOTES } from "../../utils/musicalScales";
 import { QuickClipExportDialog } from "./QuickClipExportDialog";
+import { SilenceDetectionDialog } from "./timeline/SilenceDetectionDialog";
 import { MidiTrackSelectDialog } from "./MidiTrackSelectDialog";
 
 import {
@@ -346,6 +348,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         open: boolean;
         clipIds: string[];
     }>({ open: false, clipIds: [] });
+    const [silenceDialogIds, setSilenceDialogIds] = React.useState<string[] | null>(null);
 
     const [replaceMidiDialog, setReplaceMidiDialog] = React.useState<{
         open: boolean;
@@ -424,6 +427,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         viewportEndSec,
         scrollHorizontalKb,
         scrollVerticalKb,
+        scrollbarZoomKb,
         horizontalZoomKb,
         verticalZoomKb,
         paramFineAdjustKb,
@@ -687,10 +691,13 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         x: number;
         y: number;
     } | null>(null);
-    const openRateBadgeMenu = React.useCallback((clipId: string, screenX: number, screenY: number) => {
-        setRateEditorClipId(clipId);
-        setRateEditorPosition({ x: screenX, y: screenY });
-    }, []);
+    const openRateBadgeMenu = React.useCallback(
+        (clipId: string, screenX: number, screenY: number) => {
+            setRateEditorClipId(clipId);
+            setRateEditorPosition({ x: screenX, y: screenY });
+        },
+        [],
+    );
 
     // 角标行内编辑开始：镜像 renamingClipId（onRenameStart）的两参适配器。
     const startTrackLaneBadgeEdit = React.useCallback(
@@ -1761,6 +1768,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         rulerContentRef={rulerContentRef}
                         scrollHorizontalKb={scrollHorizontalKb}
                         scrollVerticalKb={scrollVerticalKb}
+                        scrollbarZoomKb={scrollbarZoomKb}
                         horizontalZoomKb={horizontalZoomKb}
                         verticalZoomKb={verticalZoomKb}
                         getPlayheadSec={getVisualPlayheadSec}
@@ -1855,6 +1863,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 x: e.clientX,
                                 y: e.clientY,
                                 trackId,
+                                timeSec: timeAtPointer ?? 0,
                             });
                         }}
                         onPointerDown={onSelectionRectPointerDown}
@@ -2680,7 +2689,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                               }),
                                           );
                                       }}
+                                      onSilenceDetection={(ids) => setSilenceDialogIds(ids)}
                                       onNormalize={normalizeClips}
+                                      onEditRate={openRateBadgeMenu}
                                       onToggleReverse={(ids, reversed) => {
                                           // 批量走 bulk 通道：单次 IPC + 单个撤销步
                                           //（逐个 setClipStateRemote 会产生 N 次 IPC/N 步撤销）。
@@ -2765,6 +2776,19 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                           splitSec <= clip.startSec + clip.lengthSec
                                       );
                                   })}
+                                  canCloseGaps={sessionRef.current.clips.some(
+                                      (c) =>
+                                          c.trackId === trackAreaMenu.trackId &&
+                                          c.startSec > trackAreaMenu.timeSec + 1e-9,
+                                  )}
+                                  onCloseGaps={() => {
+                                      void dispatch(
+                                          closeTrackGapsRemote({
+                                              trackId: trackAreaMenu.trackId,
+                                              fromSec: trackAreaMenu.timeSec,
+                                          }),
+                                      );
+                                  }}
                                   onPaste={pasteClipsAtPlayhead}
                                   onSplit={splitSelectedAtPlayhead}
                                   onClose={() => setTrackAreaMenu(null)}
@@ -2773,6 +2797,13 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                           )
                         : null}
 
+                    <SilenceDetectionDialog
+                        open={silenceDialogIds != null}
+                        clipIds={silenceDialogIds ?? []}
+                        onOpenChange={(open) => {
+                            if (!open) setSilenceDialogIds(null);
+                        }}
+                    />
                     <QuickClipExportDialog
                         open={quickExportDialog.open}
                         clipIds={quickExportDialog.clipIds}
@@ -2901,7 +2932,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         open={rateEditorClipId != null && rateEditorPosition != null}
                         clip={
                             rateEditorClipId
-                                ? s.clips.find((entry) => entry.id === rateEditorClipId) ?? null
+                                ? (s.clips.find((entry) => entry.id === rateEditorClipId) ?? null)
                                 : null
                         }
                         tempoMap={s.tempoMap}

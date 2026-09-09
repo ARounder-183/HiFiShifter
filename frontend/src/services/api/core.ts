@@ -19,6 +19,49 @@ export interface AdvancedSeparatedTarget {
     trackId: string;
 }
 
+/** 导出文件格式（与后端 crate::encode::OutputFormat 的 serde 小写序列化一致）。 */
+export type ExportFormat = "wav" | "mp3" | "flac";
+export type WavBitDepth = "i16" | "i24" | "f32";
+export type FlacBitDepth = "i16" | "i24";
+export type DitherMode = "none" | "tpdf";
+export type ChannelMode = "stereo" | "mono";
+
+/** MP3 码率模式：CBR 固定码率，或 VBR 质量档（LAME/ffmpeg 式 -q:a 0..9）。 */
+export type Mp3BitrateMode =
+    | { mode: "cbr"; bitrateKbps: number }
+    | { mode: "vbr"; qualityIndex: number };
+
+export interface Mp3Tags {
+    title?: string | null;
+    artist?: string | null;
+    album?: string | null;
+    comment?: string | null;
+}
+
+export interface WavEncodeOptions {
+    bitDepth: WavBitDepth;
+}
+
+export interface Mp3EncodeOptions {
+    mode: Mp3BitrateMode;
+    tags?: Mp3Tags;
+}
+
+export interface FlacEncodeOptions {
+    bitDepth: FlacBitDepth;
+    compressionLevel: number;
+}
+
+/** 完整导出编码参数包（与后端 crate::encode::OutputSpec 对应）。 */
+export interface ExportEncoderSpec {
+    format: ExportFormat;
+    channelMode: ChannelMode;
+    dither: DitherMode;
+    wav: WavEncodeOptions;
+    mp3: Mp3EncodeOptions;
+    flac: FlacEncodeOptions;
+}
+
 export interface AdvancedExportRequest {
     mode: "project" | "separated";
     range: {
@@ -35,7 +78,12 @@ export interface AdvancedExportRequest {
     overwriteExistingPaths?: string[];
     skipExistingPaths?: string[];
     sampleRate?: number;
+    /** 旧协议字段：仅在未提供 format 时生效（WAV 位深）。 */
     bitDepth?: 16 | 24 | 32;
+    /** 输出格式；缺省时按旧协议走 bitDepth → WAV。 */
+    format?: ExportFormat;
+    /** 完整编码参数包；缺省时其余参数取持久化设置。 */
+    encoder?: ExportEncoderSpec;
 }
 
 export interface ExportAudioPlanItem {
@@ -60,12 +108,18 @@ export interface ExportAudioDefaults {
     separatedFileName: string;
     sampleRate: number;
     bitDepth: 16 | 24 | 32;
+    /** 持久化的输出格式（"wav" | "mp3" | "flac"）。 */
+    format: ExportFormat;
+    /** 持久化的完整编码参数包。 */
+    encoder: ExportEncoderSpec;
 }
 
 export interface QuickExportSelectedClipsRequest {
     clipIds: string[];
     outputDir: string;
     fileName: string;
+    /** 可选输出格式；缺省时使用持久化设置中的格式。 */
+    format?: ExportFormat;
 }
 
 export const coreApi = {
@@ -158,6 +212,7 @@ export const coreApi = {
             ok: boolean;
             mode?: "project" | "separated";
             path?: string;
+            format?: string;
             output_dir?: string;
             count?: number;
             cancelled?: boolean;
@@ -186,6 +241,23 @@ export const coreApi = {
 
     /** 引擎确在播放时返回精确停止位置（stopped_at_sec），否则为 null。 */
     stopAudio: () => invoke<{ ok: boolean; stopped_at_sec?: number | null }>("stop_audio"),
+
+    /** 设置节拍器（开关 / 音量 / 细分模式 / 重音 / 音色），并按新模式重建响点表。 */
+    setMetronome: (payload: {
+        enabled: boolean;
+        gain: number;
+        mode: string;
+        accent: boolean;
+        sound: string;
+    }) =>
+        invoke<{ ok: boolean }>(
+            "set_metronome",
+            payload.enabled,
+            payload.gain,
+            payload.mode,
+            payload.accent,
+            payload.sound,
+        ),
 
     // Pitch analysis progress
     getPitchAnalysisProgress: () =>

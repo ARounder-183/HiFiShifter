@@ -3,6 +3,8 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 
+use super::metronome::MetronomeRt;
+use super::metronome::MetronomeVoices;
 use super::types::EngineClip;
 use super::types::EngineSnapshot;
 use super::util::clamp11;
@@ -557,6 +559,8 @@ fn mix_into_scratch_stereo(
     transition: &mut SnapshotTransitionState,
     meter: &mut TrackMeterScratch,
     bus: &TrackMeterBus,
+    metro: &MetronomeRt,
+    metro_voices: &mut MetronomeVoices,
 ) -> Option<BlockRender> {
     if scratch.len() == frames * 2 {
         scratch.fill(0.0);
@@ -607,6 +611,10 @@ fn mix_into_scratch_stereo(
         return Some(BlockRender { snapshot: snap });
     }
 
+    // 本块是否有实际出声：节拍器与实际出声的块同步叠加
+    // （自动暂停 / 未播放的静音路径不响节拍器）。
+    let mut metro_audible = current_ready;
+
     if let Some(from_snapshot) = transition.fade_from_snapshot.as_ref() {
         let from_ready = if current_ready {
             render_snapshot_window(frames, from_snapshot, pos0, pos1, scratch_fade_from, None)
@@ -626,6 +634,10 @@ fn mix_into_scratch_stereo(
         if from_ready && !current_ready {
             scratch.resize(scratch_fade_from.len(), 0.0);
             scratch.copy_from_slice(scratch_fade_from.as_slice());
+            // 该块出声来自 fade-from 快照且推进位置：节拍器随实际出声叠加，
+            // 不能因为走了这条早退分支就静音（编辑触发后台预渲染期间，
+            // 旧快照内容可持续数秒）。
+            metro_voices.mix(scratch, metro, pos0, pos1, snap.sample_rate);
             advance_playback_position(frames, is_playing, position_frames, duration_frames);
             return Some(BlockRender { snapshot: snap });
         }
@@ -646,6 +658,17 @@ fn mix_into_scratch_stereo(
             transition.fade_from_snapshot = None;
             transition.fade_remaining_frames = 0;
         }
+
+        if !from_ready && !current_ready {
+            // 两个快照都未就绪（后台预渲染等待期）：本块静音推进，
+            // 节拍器不得在静音上响。
+            metro_audible = false;
+        }
+    }
+
+    // 节拍器叠加：仅在实际出声的块上（见 metro_audible）。
+    if metro_audible {
+        metro_voices.mix(scratch, metro, pos0, pos1, snap.sample_rate);
     }
 
     if current_ready || transition.fade_from_snapshot.is_some() {
@@ -666,6 +689,8 @@ pub(crate) fn render_callback_f32(
     transition: &mut SnapshotTransitionState,
     meter_scratch: &mut TrackMeterScratch,
     meter_bus: &TrackMeterBus,
+    metro: &MetronomeRt,
+    metro_voices: &mut MetronomeVoices,
 ) {
     let frames = if out_channels == 0 {
         0
@@ -693,6 +718,8 @@ pub(crate) fn render_callback_f32(
         transition,
         &mut *meter_scratch,
         meter_bus,
+        metro,
+        metro_voices,
     );
     if let Some(block) = block.as_ref() {
         // Publish per-track peaks so meters always mirror the output. The
@@ -730,6 +757,8 @@ pub(crate) fn render_callback_i16(
     transition: &mut SnapshotTransitionState,
     meter_scratch: &mut TrackMeterScratch,
     meter_bus: &TrackMeterBus,
+    metro: &MetronomeRt,
+    metro_voices: &mut MetronomeVoices,
 ) {
     let frames = if out_channels == 0 {
         0
@@ -756,6 +785,8 @@ pub(crate) fn render_callback_i16(
         transition,
         &mut *meter_scratch,
         meter_bus,
+        metro,
+        metro_voices,
     );
     if let Some(block) = block.as_ref() {
         // Publish per-track peaks so meters always mirror the output. The
@@ -794,6 +825,8 @@ pub(crate) fn render_callback_u16(
     transition: &mut SnapshotTransitionState,
     meter_scratch: &mut TrackMeterScratch,
     meter_bus: &TrackMeterBus,
+    metro: &MetronomeRt,
+    metro_voices: &mut MetronomeVoices,
 ) {
     let frames = if out_channels == 0 {
         0
@@ -820,6 +853,8 @@ pub(crate) fn render_callback_u16(
         transition,
         &mut *meter_scratch,
         meter_bus,
+        metro,
+        metro_voices,
     );
     if let Some(block) = block.as_ref() {
         // Publish per-track peaks so meters always mirror the output. The

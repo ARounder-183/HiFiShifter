@@ -174,6 +174,71 @@ const MAX_COORD_ABS: i32 = 1_000_000;
 ///
 /// 该文件负责管理应用的可序列化配置项，包括 UI 相关的偏好
 /// 以及窗口状态。窗口状态用于在程序重启后恢复上次的窗口尺寸、位置和最大化/全屏状态。
+/// 静音检测对话框的上次使用参数。
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct SilenceDetectSettings {
+    #[serde(default = "default_silence_method")]
+    pub method: String,
+    #[serde(default = "default_silence_threshold")]
+    pub threshold_db: f64,
+    #[serde(default)]
+    pub adaptive: bool,
+    #[serde(default = "default_silence_min_silence")]
+    pub min_silence_ms: f64,
+    #[serde(default)]
+    pub min_sound_ms: f64,
+    #[serde(default = "default_silence_padding")]
+    pub padding_ms: f64,
+    #[serde(default = "default_silence_cut_fade")]
+    pub cut_fade_ms: f64,
+    #[serde(default = "default_silence_action")]
+    pub action: String,
+    #[serde(default = "default_true_value")]
+    pub delete_silent_clips: bool,
+    #[serde(default)]
+    pub sync_all_takes: bool,
+}
+
+impl Default for SilenceDetectSettings {
+    fn default() -> Self {
+        Self {
+            method: default_silence_method(),
+            threshold_db: default_silence_threshold(),
+            adaptive: false,
+            min_silence_ms: default_silence_min_silence(),
+            min_sound_ms: 0.0,
+            padding_ms: default_silence_padding(),
+            cut_fade_ms: default_silence_cut_fade(),
+            action: default_silence_action(),
+            delete_silent_clips: true,
+            sync_all_takes: false,
+        }
+    }
+}
+
+fn default_silence_method() -> String {
+    "rms".to_string()
+}
+fn default_silence_threshold() -> f64 {
+    -50.0
+}
+fn default_silence_min_silence() -> f64 {
+    120.0
+}
+fn default_silence_padding() -> f64 {
+    10.0
+}
+fn default_silence_cut_fade() -> f64 {
+    5.0
+}
+fn default_silence_action() -> String {
+    "close".to_string()
+}
+fn default_true_value() -> bool {
+    true
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct UiSettings {
@@ -239,6 +304,28 @@ pub struct UiSettings {
     pub show_param_value_popup: bool,
     #[serde(default = "default_true")]
     pub lock_param_lines: bool,
+
+    // ── 节拍器（Metronome）──
+    /// 是否启用（传输栏节拍器按钮 / playback.metronome 快捷键切换）。
+    #[serde(default)]
+    pub metronome_enabled: bool,
+    /// 音量 0..1（默认 0.5）。
+    #[serde(default = "default_metronome_gain")]
+    pub metronome_gain: f64,
+    /// 细分模式：grid（跟随网格标尺，默认）/ beat（仅每拍）/ bar（仅小节首）。
+    #[serde(default = "default_metronome_mode")]
+    pub metronome_mode: String,
+    /// 是否强调小节首（重音音色）。
+    #[serde(default = "default_true")]
+    pub metronome_accent: bool,
+    /// 音色：click（默认）/ woodblock / beep（程序化合成）。
+    #[serde(default = "default_metronome_sound")]
+    pub metronome_sound: String,
+
+    /// 静音检测对话框的上次使用参数。
+    #[serde(default)]
+    pub silence_detect_options: SilenceDetectSettings,
+
     #[serde(default)]
     pub quick_search_auto_normalize: bool,
     #[serde(default)]
@@ -390,6 +477,10 @@ fn default_ort_ep() -> String {
 /// 导出音频设置（持久化到 app_config.json）
 ///
 /// 用于记住导出窗口中不同导出类型的输出目录与文件名设置。
+///
+/// 新增的格式 / 编码参数字段沿用本文件既有惯例以字符串存枚举值
+/// （如 `"wav"`、`"tpdf"`），解析由 `crate::encode` 的 `from_name`
+/// 宽松完成，非法值回退默认，避免手改配置破坏整体加载。
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportSettings {
@@ -405,6 +496,29 @@ pub struct ExportSettings {
     pub sample_rate: u32,
     #[serde(default = "default_export_bit_depth")]
     pub bit_depth: u32,
+    /// 输出格式："wav" | "mp3" | "flac"（缺省 → wav）。
+    #[serde(default)]
+    pub format: Option<String>,
+    /// 导出声道："stereo" | "mono"（缺省 → stereo）。
+    #[serde(default)]
+    pub channel_mode: Option<String>,
+    /// 抖动："none" | "tpdf"（缺省 → none）。
+    #[serde(default)]
+    pub dither: Option<String>,
+    /// MP3 码率模式："cbr" | "vbr"（缺省 → vbr）。
+    #[serde(default)]
+    pub mp3_mode: Option<String>,
+    #[serde(default)]
+    pub mp3_bitrate_kbps: Option<u32>,
+    #[serde(default)]
+    pub mp3_vbr_quality_index: Option<u8>,
+    #[serde(default)]
+    pub mp3_tags: Option<crate::encode::Mp3Tags>,
+    /// FLAC 位深："i16" | "i24"（缺省 → i24）。
+    #[serde(default)]
+    pub flac_bit_depth: Option<String>,
+    #[serde(default)]
+    pub flac_compression_level: Option<u8>,
 }
 
 /// 自动备份设置（持久化到 app_config.json）
@@ -663,6 +777,15 @@ impl Default for ExportSettings {
             separated_file_name_pattern: None,
             sample_rate: default_export_sample_rate(),
             bit_depth: default_export_bit_depth(),
+            format: None,
+            channel_mode: None,
+            dither: None,
+            mp3_mode: None,
+            mp3_bitrate_kbps: None,
+            mp3_vbr_quality_index: None,
+            mp3_tags: None,
+            flac_bit_depth: None,
+            flac_compression_level: None,
         }
     }
 }
@@ -701,6 +824,18 @@ fn default_hifigan_mel_stretch() -> bool {
 
 fn default_ripple_mode() -> String {
     "off".to_string()
+}
+
+fn default_metronome_gain() -> f64 {
+    0.5
+}
+
+fn default_metronome_mode() -> String {
+    "grid".to_string()
+}
+
+fn default_metronome_sound() -> String {
+    "click".to_string()
 }
 
 fn default_split_transition_mode() -> String {
@@ -788,6 +923,12 @@ impl Default for UiSettings {
             show_clipboard_preview: true,
             show_param_value_popup: true,
             lock_param_lines: true,
+            metronome_enabled: false,
+            metronome_gain: default_metronome_gain(),
+            metronome_mode: default_metronome_mode(),
+            metronome_accent: true,
+            metronome_sound: default_metronome_sound(),
+            silence_detect_options: SilenceDetectSettings::default(),
             quick_search_auto_normalize: false,
             visible_reference_root_track_ids: Vec::new(),
             default_stretch_algorithm: UserStretchAlgorithm::default(),
@@ -973,6 +1114,245 @@ mod tests {
         track_mode.normalize_ripple_mode();
         assert_eq!(track_mode.ripple_mode, "track");
     }
+
+    // ── 窗口状态：清洗 / 合并 / 显示器交集校验 ────────────────────────────────
+
+    use super::{
+        centered_position, clamp_size_to_bounds, load_window_state, merge_window_state,
+        overlap_size, sanitize_window_state, save_window_state, PhysicalRect, WindowState,
+        MIN_VISIBLE_OVERLAP_H, MIN_VISIBLE_OVERLAP_W,
+    };
+
+    #[test]
+    fn sanitize_window_state_rejects_degenerate_sizes() {
+        // 历史版本最小化时落盘的 width=0.0 必须被清洗
+        let ws = WindowState {
+            x: Some(100),
+            y: Some(100),
+            width: Some(0.0),
+            height: Some(-5.0),
+            maximized: Some(false),
+            fullscreen: Some(false),
+        };
+        let clean = sanitize_window_state(ws);
+        assert_eq!(clean.width, None);
+        assert_eq!(clean.height, None);
+        assert_eq!(clean.x, Some(100));
+        assert_eq!(clean.y, Some(100));
+
+        let bad = WindowState {
+            width: Some(f64::NAN),
+            height: Some(100_000_000.0),
+            ..WindowState::default()
+        };
+        let clean = sanitize_window_state(bad);
+        assert_eq!(clean.width, None);
+        assert_eq!(clean.height, None);
+
+        let ok = WindowState {
+            width: Some(1280.0),
+            height: Some(800.0),
+            ..WindowState::default()
+        };
+        let clean = sanitize_window_state(ok);
+        assert_eq!(clean.width, Some(1280.0));
+        assert_eq!(clean.height, Some(800.0));
+    }
+
+    #[test]
+    fn sanitize_window_state_coordinate_rules() {
+        // 多显示器布局下 -25600 是合法坐标（左侧副屏），不得被阈值误杀 ——
+        // 是否在已连接显示器内由恢复侧交集校验负责
+        let ws = WindowState {
+            x: Some(-25600),
+            y: Some(-25600),
+            ..WindowState::default()
+        };
+        let clean = sanitize_window_state(ws);
+        assert_eq!(clean.x, Some(-25600));
+        assert_eq!(clean.y, Some(-25600));
+
+        // Windows 最小化停泊哨兵（物理 -32000 经低倍缩放换算后仍 ≤ -32000
+        // 的原始值）与超界坐标必须拒绝
+        let ws = WindowState {
+            x: Some(-32000),
+            y: Some(-32000),
+            ..WindowState::default()
+        };
+        let clean = sanitize_window_state(ws);
+        assert_eq!(clean.x, None);
+        assert_eq!(clean.y, None);
+
+        let ws = WindowState {
+            x: Some(5_000_000),
+            y: Some(-5_000_000),
+            ..WindowState::default()
+        };
+        let clean = sanitize_window_state(ws);
+        assert_eq!(clean.x, None);
+        assert_eq!(clean.y, None);
+    }
+
+    #[test]
+    fn merge_window_state_keeps_last_good_geometry_when_capture_unavailable() {
+        // 最小化/最大化/全屏/隐藏关闭时几何捕获不到（全 None）→ 保留上一次好值
+        let prev = WindowState {
+            x: Some(100),
+            y: Some(200),
+            width: Some(1280.0),
+            height: Some(800.0),
+            maximized: Some(false),
+            fullscreen: Some(false),
+        };
+        let incoming = WindowState {
+            maximized: Some(true),
+            ..WindowState::default()
+        };
+        let merged = merge_window_state(prev, incoming);
+        assert_eq!(merged.x, Some(100));
+        assert_eq!(merged.y, Some(200));
+        assert_eq!(merged.width, Some(1280.0));
+        assert_eq!(merged.height, Some(800.0));
+        assert_eq!(merged.maximized, Some(true));
+    }
+
+    #[test]
+    fn merge_window_state_self_heals_poisoned_geometry() {
+        // 历史污染文件（width=0.0）在下一次保存时被清洗掉
+        let prev = WindowState {
+            x: Some(-25600),
+            y: Some(-25600),
+            width: Some(0.0),
+            height: Some(0.0),
+            maximized: Some(false),
+            fullscreen: Some(false),
+        };
+        let incoming = WindowState {
+            maximized: Some(false),
+            ..WindowState::default()
+        };
+        let merged = merge_window_state(prev, incoming);
+        assert_eq!(merged.width, None);
+        assert_eq!(merged.height, None);
+        // 坐标在合法值域内保留（屏幕外与否交给恢复侧交集校验）
+        assert_eq!(merged.x, Some(-25600));
+        assert_eq!(merged.y, Some(-25600));
+    }
+
+    #[test]
+    fn overlap_and_fallback_geometry_helpers() {
+        let monitor = PhysicalRect {
+            x: 0.0,
+            y: 0.0,
+            width: 1920.0,
+            height: 1080.0,
+        };
+        // 最小化停泊矩形与显示器不相交
+        let parked = PhysicalRect {
+            x: -32000.0,
+            y: -32000.0,
+            width: 1280.0,
+            height: 800.0,
+        };
+        assert_eq!(overlap_size(&parked, &monitor), (0.0, 0.0));
+
+        // 部分可见但低于阈值 → 判定屏幕外
+        let barely = PhysicalRect {
+            x: monitor.width - 100.0,
+            y: 0.0,
+            width: 1280.0,
+            height: 800.0,
+        };
+        let (ow, oh) = overlap_size(&barely, &monitor);
+        assert_eq!((ow, oh), (100.0, 800.0));
+        assert!(ow < MIN_VISIBLE_OVERLAP_W || oh < MIN_VISIBLE_OVERLAP_H);
+
+        // 完整在屏内
+        let inside = PhysicalRect {
+            x: 10.0,
+            y: 10.0,
+            width: 800.0,
+            height: 600.0,
+        };
+        assert_eq!(overlap_size(&inside, &monitor), (800.0, 600.0));
+
+        // 尺寸钳制与居中回退
+        assert_eq!(
+            clamp_size_to_bounds(4000.0, 3000.0, &monitor),
+            (1920.0, 1080.0)
+        );
+        assert_eq!(centered_position((800.0, 600.0), &monitor), (560, 240));
+        // 窗口大于显示器时贴左上角
+        assert_eq!(centered_position((3840.0, 2160.0), &monitor), (0, 0));
+    }
+
+    #[test]
+    fn save_window_state_round_trip_merges_and_self_heals() {
+        let dir = std::env::temp_dir().join(format!(
+            "hifishifter_cfg_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp config dir");
+
+        // 正常保存 → 读回一致
+        save_window_state(
+            &dir,
+            &WindowState {
+                x: Some(120),
+                y: Some(48),
+                width: Some(1440.0),
+                height: Some(900.0),
+                maximized: Some(false),
+                fullscreen: Some(false),
+            },
+        );
+        let ws = load_window_state(&dir);
+        assert_eq!(ws.x, Some(120));
+        assert_eq!(ws.y, Some(48));
+        assert_eq!(ws.width, Some(1440.0));
+        assert_eq!(ws.height, Some(900.0));
+
+        // 模拟历史污染文件（0.0 尺寸 / 停泊坐标）直接落盘
+        let poisoned = r#"{"window":{"x":-25600,"y":-25600,"width":0.0,"height":0.0,"maximized":false,"fullscreen":false}}"#;
+        std::fs::write(dir.join("app_config.json"), poisoned).expect("write poisoned config");
+
+        // 最小化关闭：几何捕获不到（全 None）→ 合并保留污染几何 → 清洗尺寸
+        save_window_state(
+            &dir,
+            &WindowState {
+                maximized: Some(true),
+                ..WindowState::default()
+            },
+        );
+        let ws = load_window_state(&dir);
+        assert_eq!(ws.width, None);
+        assert_eq!(ws.height, None);
+        assert_eq!(ws.x, Some(-25600));
+        assert_eq!(ws.y, Some(-25600));
+        assert_eq!(ws.maximized, Some(true));
+
+        // 恢复正常关闭 → 几何被新值覆盖
+        save_window_state(
+            &dir,
+            &WindowState {
+                x: Some(10),
+                y: Some(20),
+                width: Some(1280.0),
+                height: Some(720.0),
+                maximized: Some(false),
+                fullscreen: Some(false),
+            },
+        );
+        let ws = load_window_state(&dir);
+        assert_eq!((ws.x, ws.y), (Some(10), Some(20)));
+        assert_eq!((ws.width, ws.height), (Some(1280.0), Some(720.0)));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 /// 持久化配置根结构。
@@ -1071,7 +1451,10 @@ fn sanitize_window_state(mut ws: WindowState) -> WindowState {
         }
     }
 
-    // 坐标校验：拒绝典型的哨兵值（如 -32768）或极端不合理的坐标
+    // 坐标校验：拒绝典型的哨兵值（如 -32768）或极端不合理的坐标。
+    // 注意：-25600 这类"中等偏移"在多显示器布局下是合法坐标（如左侧
+    // 副屏），不能靠阈值过滤 —— 是否落在已连接显示器内由恢复侧的
+    // 显示器交集校验负责（见 PhysicalRect / overlap_size）。
     if let Some(x) = ws.x {
         if x <= INVALID_COORD_MIN || x.abs() > MAX_COORD_ABS {
             ws.x = None;
@@ -1086,16 +1469,82 @@ fn sanitize_window_state(mut ws: WindowState) -> WindowState {
     ws
 }
 
+/// 保存时合并：几何字段为 None（最小化/最大化/全屏/隐藏窗口时捕获不到
+/// 有意义的值）时保留上一次的好值；标志位总是更新。合并后再清洗一次，
+/// 保证任何情况下落盘的窗口状态都不会是明显的垃圾值（如历史版本在
+/// 最小化时落盘的 width=0.0）。
+fn merge_window_state(mut prev: WindowState, incoming: WindowState) -> WindowState {
+    if incoming.x.is_some() {
+        prev.x = incoming.x;
+    }
+    if incoming.y.is_some() {
+        prev.y = incoming.y;
+    }
+    if incoming.width.is_some() {
+        prev.width = incoming.width;
+    }
+    if incoming.height.is_some() {
+        prev.height = incoming.height;
+    }
+    if incoming.maximized.is_some() {
+        prev.maximized = incoming.maximized;
+    }
+    if incoming.fullscreen.is_some() {
+        prev.fullscreen = incoming.fullscreen;
+    }
+    sanitize_window_state(prev)
+}
+
 pub fn load_window_state(config_dir: &Path) -> WindowState {
     let ws = load_config(config_dir).window;
     sanitize_window_state(ws)
 }
 
-/// 将窗口状态写回配置文件（保留其他字段）
+/// 将窗口状态写回配置文件（保留其他字段）。
 pub fn save_window_state(config_dir: &Path, ws: &WindowState) {
     let mut cfg = load_config(config_dir);
-    cfg.window = ws.clone();
+    cfg.window = merge_window_state(cfg.window.clone(), ws.clone());
     save_config(config_dir, &cfg);
+}
+
+// ── 窗口恢复的显示器交集校验（纯函数，lib.rs 在启动时调用） ────────────────
+
+/// 物理像素矩形（f64，便于交集/钳制运算）。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PhysicalRect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// 恢复的窗口与显示器的可见重叠阈值：窗口至少要有这么大的区域落在某台
+/// 已连接显示器内，否则视为"屏幕外"，回退主显示器内居中。取值只需保证
+/// 用户能看到并拖到标题栏即可，不必覆盖大部分窗口。
+pub const MIN_VISIBLE_OVERLAP_W: f64 = 120.0;
+pub const MIN_VISIBLE_OVERLAP_H: f64 = 60.0;
+
+/// 两矩形的相交宽高（不相交时为 (0, 0)）。
+pub fn overlap_size(a: &PhysicalRect, b: &PhysicalRect) -> (f64, f64) {
+    let w = (a.x + a.width).min(b.x + b.width) - a.x.max(b.x);
+    let h = (a.y + a.height).min(b.y + b.height) - a.y.max(b.y);
+    (w.max(0.0), h.max(0.0))
+}
+
+/// 把窗口尺寸钳制到显示器边界内（窗口不允许大于显示器）。
+pub fn clamp_size_to_bounds(width: f64, height: f64, bounds: &PhysicalRect) -> (f64, f64) {
+    (
+        width.min(bounds.width).max(1.0),
+        height.min(bounds.height).max(1.0),
+    )
+}
+
+/// 在显示器内居中放置窗口；窗口不小于显示器时贴左上角。
+/// 返回物理像素坐标（配合 `Position::Physical` 使用）。
+pub fn centered_position(window: (f64, f64), bounds: &PhysicalRect) -> (i32, i32) {
+    let x = bounds.x + ((bounds.width - window.0) / 2.0).max(0.0);
+    let y = bounds.y + ((bounds.height - window.1) / 2.0).max(0.0);
+    (x.round() as i32, y.round() as i32)
 }
 
 /// 从 config dir 读取最近工程列表；读取失败时返回空列表。

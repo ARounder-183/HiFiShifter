@@ -126,6 +126,12 @@ function installThemeInvalidation(): void {
 /**
  * 读取主题 CSS 变量（带缓存）。
  *
+ * 缓存键包含当前 `data-theme`：主题切换由 provider 在 render 期同步写入
+ * data-theme，而 MutationObserver 的清缓存回调是异步微任务 —— 若只靠观察
+ * 器失效，切主题当帧的重绘（layout effect）仍会命中旧色，轨道分界线等
+ * 画布元素要等下一次交互才变色。键含主题后，同帧重绘必然未命中并读取
+ * 新值；内联样式变化（自定义颜色等）仍由观察器整体失效。
+ *
  * @param name 变量名，形如 `"--qt-border"`。
  * @param fallback 读取不到时的兜底值。
  * @returns 变量值（已 trim）。
@@ -133,11 +139,13 @@ function installThemeInvalidation(): void {
 export function resolveThemeColor(name: string, fallback: string): string {
     if (typeof document === "undefined") return fallback;
     installThemeInvalidation();
-    const cached = themeColorCache.get(name);
+    // dataset 读取是纯属性访问，不触发样式重算。
+    const cacheKey = `${document.documentElement.dataset.theme ?? ""}\u0000${name}`;
+    const cached = themeColorCache.get(cacheKey);
     if (cached !== undefined) return cached;
     const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
     const resolved = value || fallback;
-    themeColorCache.set(name, resolved);
+    themeColorCache.set(cacheKey, resolved);
     return resolved;
 }
 
