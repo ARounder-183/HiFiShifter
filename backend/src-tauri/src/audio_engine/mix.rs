@@ -962,9 +962,8 @@ mod tests {
         // 曲线按**绝对时间**索引：fp=5ms → 每秒 200 帧。
         // 断言采样索引随绝对时间线性推进（而非 clip 局部时间）。
         let curve = vec![0.0f32, 1.0, 2.0, 3.0, 4.0];
-        let at = |abs_frame: u64| {
-            sample_automation_curve(Some(&curve), abs_frame, 44_100, 5.0, 1.0)
-        };
+        let at =
+            |abs_frame: u64| sample_automation_curve(Some(&curve), abs_frame, 44_100, 5.0, 1.0);
         assert!(at(0) < 1e-6, "abs 0s reads curve frame 0");
         // 1ms = 44.1 样本 → 曲线帧 0.2
         assert!((at(44) - 0.2).abs() < 0.05, "got {}", at(44));

@@ -1035,10 +1035,6 @@ test("features/session/sessionSlice.playheadGuard.test.ts case-a wait zeroes the
         true,
         "re-entering wait re-sets the flag",
     );
-    assertEqual(
-        refrozen.runtime.playbackPositionSec,
-        0,
-        "re-entering wait re-zeroes the position",
-    );
+    assertEqual(refrozen.runtime.playbackPositionSec, 0, "re-entering wait re-zeroes the position");
     assertEqual(refrozen.playheadSec, raced.playheadSec, "re-entering wait freezes in place");
 });

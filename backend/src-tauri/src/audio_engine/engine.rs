@@ -7,9 +7,9 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 
+use super::byte_budget_cache::ByteBudgetCache;
 use arc_swap::ArcSwap;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use super::byte_budget_cache::ByteBudgetCache;
 
 use crate::state::TimelineState;
 use crate::time_stretch::time_stretch_interleaved;
@@ -330,7 +330,12 @@ impl AudioEngine {
                 Some(d) => d,
                 None => {
                     log::warn!("AudioEngine: no default output device");
-                    drain_commands_without_output(rx, is_playing_thread, target_thread, worker_ready_thread);
+                    drain_commands_without_output(
+                        rx,
+                        is_playing_thread,
+                        target_thread,
+                        worker_ready_thread,
+                    );
                     return;
                 }
             };
@@ -339,7 +344,12 @@ impl AudioEngine {
                 Ok(c) => c,
                 Err(e) => {
                     log::error!("AudioEngine: default_output_config failed: {e}");
-                    drain_commands_without_output(rx, is_playing_thread, target_thread, worker_ready_thread);
+                    drain_commands_without_output(
+                        rx,
+                        is_playing_thread,
+                        target_thread,
+                        worker_ready_thread,
+                    );
                     return;
                 }
             };
@@ -357,8 +367,9 @@ impl AudioEngine {
             let cache_for_cmd = resources.cache().clone();
 
             // Time-stretch cache: computed, pitch-preserving loop buffers.
-            let stretch_cache: Arc<Mutex<ByteBudgetCache<StretchKey, ResampledStereo>>> =
-                Arc::new(Mutex::new(ByteBudgetCache::from_env(MAX_STRETCH_CACHE_ENTRIES)));
+            let stretch_cache: Arc<Mutex<ByteBudgetCache<StretchKey, ResampledStereo>>> = Arc::new(
+                Mutex::new(ByteBudgetCache::from_env(MAX_STRETCH_CACHE_ENTRIES)),
+            );
             let stretch_cache_for_cmd = stretch_cache.clone();
             let stretch_cache_for_worker = stretch_cache.clone();
 
@@ -641,13 +652,23 @@ impl AudioEngine {
 
             let Some(stream) = stream else {
                 log::error!("AudioEngine: failed to build output stream");
-                drain_commands_without_output(rx, is_playing_thread, target_thread, worker_ready_thread);
+                drain_commands_without_output(
+                    rx,
+                    is_playing_thread,
+                    target_thread,
+                    worker_ready_thread,
+                );
                 return;
             };
 
             if let Err(e) = stream.play() {
                 log::error!("AudioEngine: stream.play failed: {e}");
-                drain_commands_without_output(rx, is_playing_thread, target_thread, worker_ready_thread);
+                drain_commands_without_output(
+                    rx,
+                    is_playing_thread,
+                    target_thread,
+                    worker_ready_thread,
+                );
                 return;
             }
 
@@ -658,83 +679,104 @@ impl AudioEngine {
             // handle_set_playing(true) 复位；前台预渲染完成命令据此决定
             // 是否进入播放（见 EngineCommand::CompletePrerenderAndPlay）。
             let mut stopped_since_play = false;
+            // 合并连发推送时被 try_recv 取出的下一条命令：渲染线程可能以远快
+            // 于本线程消费的速度逐 clip 推送 RenderedClipsChanged，排水时取到
+            // 的其他命令必须原序保留、下一轮优先处理（FIFO 语义不变）。
+            let mut stashed_cmd: Option<EngineCommand> = None;
 
             loop {
-                match rx.recv() {
-                    Ok(EngineCommand::Shutdown) | Err(_) => break,
-                    Ok(cmd) => {
-                        let mut state = EngineWorkerState {
-                            sr,
-                            is_playing: &is_playing_thread,
-                            play_start_wait: &play_start_wait_thread,
-                            target: &target_thread,
-                            base_frames: &base_frames_thread,
-                            position_frames: &position_frames_thread,
-                            duration_frames: &duration_frames_thread,
-                            snapshot: &snapshot_for_thread,
-                            cache: &cache_for_cmd,
-                            stretch_cache: &stretch_cache_for_cmd,
-                            stretch_inflight: &stretch_inflight_for_cmd,
-                            stretch_tx: &stretch_tx,
-                            resources: &resources,
-                            tx: &tx_for_worker,
-                            last_timeline: &mut last_timeline,
-                            last_play_file: &mut last_play_file,
-                            app_handle: app_handle_for_worker.clone(),
-                            meter_state: &meter_state,
-                            meter_generation: &meter_generation,
-                            stopped_since_play: &mut stopped_since_play,
-                        };
-                        match cmd {
-                            EngineCommand::SetMetronome { config } => {
-                                metro_for_thread.store_config(&config);
+                let cmd = match stashed_cmd.take() {
+                    Some(cmd) => cmd,
+                    None => match rx.recv() {
+                        Ok(EngineCommand::Shutdown) => break,
+                        Ok(cmd) => cmd,
+                        Err(_) => break,
+                    },
+                };
+                // 合并连发的 RenderedClipsChanged：每条推送的处理都是一次全量
+                // 快照重建（O(clips)），而重建按当前 last_timeline 整体换入、
+                // 天然幂等 —— 排空队列中紧随其后的重复推送，一次重建即可。
+                // 不合并时，缓存命中的渲染 pass 会以远快于消费的速度把队列
+                // 塞满冗余重建，排在后面的用户命令（stop/seek）被拖延。
+                if matches!(cmd, EngineCommand::RenderedClipsChanged) {
+                    loop {
+                        match rx.try_recv() {
+                            Ok(EngineCommand::RenderedClipsChanged) => continue,
+                            Ok(other) => {
+                                stashed_cmd = Some(other);
+                                break;
                             }
-                            EngineCommand::SetMetronomeSchedule { clicks } => {
-                                metro_for_thread.store_schedule(clicks);
-                            }
-                            EngineCommand::EvictSourcePath { path } => {
-                                handle_evict_source_path(&mut state, &path);
-                            }
-                            EngineCommand::Stop => handle_stop(&mut state),
-                            EngineCommand::SeekSec { sec } => handle_seek_sec(&mut state, sec),
-                            EngineCommand::SetPlaying { playing, target } => {
-                                handle_set_playing(&mut state, playing, target)
-                            }
-                            EngineCommand::UpdateTimeline(tl) => {
-                                handle_update_timeline(&mut state, tl)
-                            }
-                            EngineCommand::RenderedClipsChanged => {
-                                handle_rendered_clips_changed(&mut state)
-                            }
-                            EngineCommand::BeginPlayIntent => {
-                                handle_begin_play_intent(&mut state)
-                            }
-                            EngineCommand::CompletePrerenderAndPlay { timeline } => {
-                                handle_complete_prerender_and_play(&mut state, timeline)
-                            }
-                            EngineCommand::StretchReady { key } => {
-                                handle_stretch_ready(&mut state, key)
-                            }
-                            EngineCommand::ClipPitchReady { clip_id } => {
-                                handle_clip_pitch_ready(&mut state, clip_id)
-                            }
-                            EngineCommand::SetAppHandle { handle } => {
-                                if let Ok(mut app) = meter_app_handle.lock() {
-                                    *app = Some(handle.clone());
-                                }
-                                app_handle_for_worker = Some(handle);
-                            }
-                            EngineCommand::AudioReady { key } => {
-                                handle_audio_ready(&mut state, key)
-                            }
-                            EngineCommand::PlayFile {
-                                path,
-                                offset_sec,
-                                target,
-                            } => handle_play_file(&mut state, path, offset_sec, target),
-                            EngineCommand::Shutdown => unreachable!(),
+                            Err(_) => break,
                         }
                     }
+                }
+                // Shutdown 无论直接收到还是经排水暂存，都统一在此退出；
+                // 下方 match 的 Shutdown 分支因此保持 unreachable 不变。
+                if matches!(cmd, EngineCommand::Shutdown) {
+                    break;
+                }
+                let mut state = EngineWorkerState {
+                    sr,
+                    is_playing: &is_playing_thread,
+                    play_start_wait: &play_start_wait_thread,
+                    target: &target_thread,
+                    base_frames: &base_frames_thread,
+                    position_frames: &position_frames_thread,
+                    duration_frames: &duration_frames_thread,
+                    snapshot: &snapshot_for_thread,
+                    cache: &cache_for_cmd,
+                    stretch_cache: &stretch_cache_for_cmd,
+                    stretch_inflight: &stretch_inflight_for_cmd,
+                    stretch_tx: &stretch_tx,
+                    resources: &resources,
+                    tx: &tx_for_worker,
+                    last_timeline: &mut last_timeline,
+                    last_play_file: &mut last_play_file,
+                    app_handle: app_handle_for_worker.clone(),
+                    meter_state: &meter_state,
+                    meter_generation: &meter_generation,
+                    stopped_since_play: &mut stopped_since_play,
+                };
+                match cmd {
+                    EngineCommand::SetMetronome { config } => {
+                        metro_for_thread.store_config(&config);
+                    }
+                    EngineCommand::SetMetronomeSchedule { clicks } => {
+                        metro_for_thread.store_schedule(clicks);
+                    }
+                    EngineCommand::EvictSourcePath { path } => {
+                        handle_evict_source_path(&mut state, &path);
+                    }
+                    EngineCommand::Stop => handle_stop(&mut state),
+                    EngineCommand::SeekSec { sec } => handle_seek_sec(&mut state, sec),
+                    EngineCommand::SetPlaying { playing, target } => {
+                        handle_set_playing(&mut state, playing, target)
+                    }
+                    EngineCommand::UpdateTimeline(tl) => handle_update_timeline(&mut state, tl),
+                    EngineCommand::RenderedClipsChanged => {
+                        handle_rendered_clips_changed(&mut state)
+                    }
+                    EngineCommand::BeginPlayIntent => handle_begin_play_intent(&mut state),
+                    EngineCommand::CompletePrerenderAndPlay { timeline } => {
+                        handle_complete_prerender_and_play(&mut state, timeline)
+                    }
+                    EngineCommand::StretchReady { key } => handle_stretch_ready(&mut state, key),
+                    EngineCommand::ClipPitchReady { clip_id } => {
+                        handle_clip_pitch_ready(&mut state, clip_id)
+                    }
+                    EngineCommand::SetAppHandle { handle } => {
+                        if let Ok(mut app) = meter_app_handle.lock() {
+                            *app = Some(handle.clone());
+                        }
+                        app_handle_for_worker = Some(handle);
+                    }
+                    EngineCommand::AudioReady { key } => handle_audio_ready(&mut state, key),
+                    EngineCommand::PlayFile {
+                        path,
+                        offset_sec,
+                        target,
+                    } => handle_play_file(&mut state, path, offset_sec, target),
+                    EngineCommand::Shutdown => unreachable!(),
                 }
             }
         });
@@ -803,7 +845,9 @@ impl AudioEngine {
     /// （见 [`EngineCommand::CompletePrerenderAndPlay`] 与
     /// [`handle_complete_prerender_and_play`]）。
     pub fn complete_prerender_and_play(&self, timeline: TimelineState) {
-        let _ = self.tx.send(EngineCommand::CompletePrerenderAndPlay { timeline });
+        let _ = self
+            .tx
+            .send(EngineCommand::CompletePrerenderAndPlay { timeline });
     }
 
     /// 记录"新的播放请求"：复位停止意图标志（见
@@ -1331,7 +1375,9 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
     });
 
     if !has_last_timeline {
-        debug_eprintln!("[engine] First timeline update (no last_timeline), forcing pitch schedule");
+        debug_eprintln!(
+            "[engine] First timeline update (no last_timeline), forcing pitch schedule"
+        );
     }
 
     let needs_pitch_schedule = clip_changed || track_pitch_settings_changed;
@@ -1499,7 +1545,9 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
     if should_halt && s.is_playing.load(Ordering::Relaxed) {
         debug_eprintln!(
             "[engine] Halting playback: any_need_render={}, pitch_edit_changed={}, bg_render={}",
-            any_need_render, track_pitch_edit_changed, bg_render
+            any_need_render,
+            track_pitch_edit_changed,
+            bg_render
         );
         s.is_playing.store(false, Ordering::Relaxed);
         // 播放被暂停判定终结：清除等待标志（等待仅在 bg 渲染进行中有效）。

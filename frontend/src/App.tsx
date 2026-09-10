@@ -216,7 +216,12 @@ const DEFAULT_AUTO_BACKUP_SETTINGS: AutoBackupSettings = {
 };
 
 type SourceFileChangeAction =
-    "pending" | "processing" | "ignored" | "reloaded" | "replaced" | "failed";
+    | "pending"
+    | "processing"
+    | "ignored"
+    | "reloaded"
+    | "replaced"
+    | "failed";
 
 type SourceFileChangedItem = SourceFileChange & {
     action: SourceFileChangeAction;
@@ -1364,10 +1369,14 @@ function AppInner() {
                         // 与后台渲染线程会并发发射事件，单一布尔镜像会被互相覆盖
                         // —— 后台渲染的完成事件（active=false）会把前台预渲染的
                         // 拒采窗口提前关闭，让渲染期间派发的陈旧轮询响应溜进
-                        // reducer（光标跳变）。
+                        // reducer（光标跳变）。写入前先捕获该 target 的活跃值，
+                        // 供下方完成跃迁判定使用。
+                        let wasActiveForTarget = false;
                         if (target === "original") {
+                            wasActiveForTarget = originalRenderActiveRef.current;
                             originalRenderActiveRef.current = active;
                         } else if (target === "background") {
+                            wasActiveForTarget = backgroundRenderActiveRef.current;
                             backgroundRenderActiveRef.current = active;
                         }
                         const anyActive =
@@ -1388,9 +1397,12 @@ function AppInner() {
                         setRenderingProgress(p);
 
                         // 渲染从 active→inactive（完成）时，延迟同步一次播放状态，
-                        // 使前端能感知后端已真正开始播放。同样携带当前传输纪元
-                        // 与派发时刻，与 30Hz 轮询响应共享乱序丢弃与时延外推。
-                        if (!active && renderingWasActiveRef.current) {
+                        // 使前端能感知后端已真正开始播放。跃迁按 target 判定：
+                        // 两类渲染并发时共享单一 was-active 标志会被互相覆盖
+                        //（后发的完成事件吞掉先发 target 的完成同步）。同样携带
+                        // 当前传输纪元与派发时刻，与 30Hz 轮询响应共享乱序丢弃
+                        // 与时延外推。
+                        if (!active && wasActiveForTarget) {
                             setTimeout(() => {
                                 dispatch(
                                     syncPlaybackState({
@@ -1400,7 +1412,6 @@ function AppInner() {
                                 );
                             }, 200);
                         }
-                        renderingWasActiveRef.current = active;
                     },
                 );
                 if (disposed) {
@@ -1427,7 +1438,6 @@ function AppInner() {
     });
 
     const playbackSyncInFlightRef = useRef(false);
-    const renderingWasActiveRef = useRef(false);
     // 按 target 隔离的渲染活跃状态（见 playback_rendering_state 监听器）：
     // 前台（阻塞式）与后台渲染线程并发发射事件，必须分 ref 跟踪才能把
     // "阻塞式前台预渲染"窗口的开关与后台渲染的生命周期解耦。
@@ -1840,7 +1850,8 @@ function AppInner() {
         sourceFileCheckBusyRef.current = true;
         try {
             const result = (await webApi.checkSourceFilesChanged()) as
-                { changed?: SourceFileChange[] } | undefined;
+                | { changed?: SourceFileChange[] }
+                | undefined;
             const ignored = ignoredSourcePathsRef.current;
             const changes = normalizeSourceFileChanges(result?.changed ?? []).filter(
                 (change) => !ignored.has(change.source_path),
@@ -1876,7 +1887,8 @@ function AppInner() {
                 }
 
                 const refreshed = (await webApi.checkSourceFilesChanged()) as
-                    { changed?: SourceFileChange[] } | undefined;
+                    | { changed?: SourceFileChange[] }
+                    | undefined;
                 const remaining = normalizeSourceFileChanges(refreshed?.changed ?? []).filter(
                     (change) => !ignored.has(change.source_path),
                 );
@@ -1920,7 +1932,8 @@ function AppInner() {
         sourceFileCheckBusyRef.current = true;
         try {
             const result = (await webApi.checkSourceFilesChanged()) as
-                { changed?: SourceFileChange[] } | undefined;
+                | { changed?: SourceFileChange[] }
+                | undefined;
             const rawChanges = normalizeSourceFileChanges(result?.changed ?? []);
 
             setSourceFileChangedDialog((prev) => {
@@ -1980,7 +1993,8 @@ function AppInner() {
         sourceFileCheckBusyRef.current = true;
         try {
             const result = (await webApi.checkSourceFilesChanged()) as
-                { changed?: SourceFileChange[] } | undefined;
+                | { changed?: SourceFileChange[] }
+                | undefined;
             const changes = normalizeSourceFileChanges(result?.changed ?? []);
             markMissingSourceFilesUnavailable(changes);
             const items = changes.map((change) => ({ ...change, action: "pending" as const }));
@@ -2140,7 +2154,8 @@ function AppInner() {
             let becameMissing = false;
             try {
                 const result = (await webApi.checkSourceFilesChanged()) as
-                    { changed?: SourceFileChange[] } | undefined;
+                    | { changed?: SourceFileChange[] }
+                    | undefined;
                 const latest = normalizeSourceFileChanges(result?.changed ?? []).find(
                     (change) =>
                         change.clip_id === item.clip_id ||
@@ -2317,7 +2332,8 @@ function AppInner() {
         sourceFileCheckBusyRef.current = true;
         try {
             const result = (await webApi.checkSourceFilesChanged()) as
-                { changed?: SourceFileChange[] } | undefined;
+                | { changed?: SourceFileChange[] }
+                | undefined;
             const rawChanges = normalizeSourceFileChanges(result?.changed ?? []);
             const baseItems = sourceFileInitialChangesRef.current.map((item) => ({ ...item }));
             const changes = mergeLatestSourceFileChanges(baseItems, rawChanges)
