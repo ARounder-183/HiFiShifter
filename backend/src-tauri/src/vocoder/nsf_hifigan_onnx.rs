@@ -677,7 +677,8 @@ pub fn drop_shared_session() {
 /// 正确流程：容器锁快速检查 → **释放容器锁** → 全局构建锁内构建
 /// （与 FCPE / HNSEP 的构建串行化，避免并发 D3D12 初始化在驱动层死锁）
 /// → 容器锁写回。构建前后比对 EP 设置代数：构建期间用户再次切换设备时
-/// 丢弃陈旧结果并按当前设置重建（最多重试 3 次）。
+/// 丢弃陈旧结果并按当前设置重建（最多重试 3 次）。D3D12/DML 的**创建**由
+/// `session_build_lock` 在构建器内部串行化，**烟测在创建锁之外**执行。
 fn get_or_init_shared_session() -> Result<Arc<Mutex<Session>>, String> {
     let mutex = SHARED_SESSION.get_or_init(|| Mutex::new(None));
     // 快路径：已有会话直接克隆返回。
@@ -689,17 +690,10 @@ fn get_or_init_shared_session() -> Result<Arc<Mutex<Session>>, String> {
         return Ok(session);
     }
 
-    let _build_guard = crate::vocoder_ort_session::session_build_lock()
-        .lock()
-        .map_err(|e| format!("session build lock poisoned: {e}"))?;
-    // 双重检查：等构建锁期间其他线程（如设备切换的异步预热）可能已完成构建。
-    if let Some(session) = mutex
-        .lock()
-        .map_err(|e| format!("SHARED_SESSION lock poisoned: {e}"))?
-        .clone()
-    {
-        return Ok(session);
-    }
+    // ★ 不在此处持有外层构建锁：会话创建的串行化在 ort_session 的**创建锁**
+    // 内完成（锁只包围 builder → commit）；烟测在创建锁之外执行，因此挂起的
+    // 烟测不会阻塞其他模块的构建。重复构建由"插入时优先复用已存在的会话"
+    // 与上方快路径消解。
 
     // 构建期间用户再次切换设备（EP 设置代数推进）会让本次构建结果过时 ——
     // 丢弃并按当前设置重建，最多 3 次。
@@ -712,11 +706,16 @@ fn get_or_init_shared_session() -> Result<Arc<Mutex<Session>>, String> {
             log::warn!("[nsf_hifigan] inference device changed during session build — rebuilding with the new EP");
             continue;
         }
-        let arc = Arc::new(Mutex::new(session));
-        mutex
+        let mut guard = mutex
             .lock()
-            .map_err(|e| format!("SHARED_SESSION lock poisoned: {e}"))?
-            .replace(arc.clone());
+            .map_err(|e| format!("SHARED_SESSION lock poisoned: {e}"))?;
+        // 其他线程（设备切换的异步预热 / 并发的渲染线程）可能已完成构建：
+        // 复用已存在的会话，避免无谓替换与重复烟测。
+        if let Some(existing) = guard.as_ref() {
+            return Ok(existing.clone());
+        }
+        let arc = Arc::new(Mutex::new(session));
+        *guard = Some(arc.clone());
         return Ok(arc);
     }
     Err("inference device kept changing during session build".to_string())

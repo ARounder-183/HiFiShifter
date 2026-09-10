@@ -146,17 +146,10 @@ fn get_or_init_shared_session() -> Result<Arc<Mutex<Session>>, String> {
     // 慢路径：构建在全局构建锁内进行（与 Vocoder / HNSEP 串行化，避免并发
     // D3D12 初始化在驱动层死锁），且**不持有容器锁** —— 构建是秒级操作，
     // 持容器锁构建会让设备切换与关机清理全部卡死。
-    let _build_guard = crate::vocoder_ort_session::session_build_lock()
-        .lock()
-        .map_err(|e| format!("session build lock poisoned: {e}"))?;
-    // 双重检查：等锁期间其他线程（如设备切换的异步预热）可能已完成构建。
-    if let Some(session) = mutex
-        .lock()
-        .map_err(|e| format!("SHARED_SESSION lock poisoned: {e}"))?
-        .clone()
-    {
-        return Ok(session);
-    }
+    // ★ 不在此处持有外层构建锁：会话创建的串行化在 ort_session 的**创建锁**
+    // 内完成（锁只包围 builder → commit）；烟测在创建锁之外执行，因此挂起的
+    // 烟测不会阻塞其他模块的构建。重复构建由"插入时优先复用已存在的会话"
+    // 与上方快路径消解。
     // 构建期间 EP 设置再次变化（用户连续切换设备）→ 丢弃陈旧结果并重建。
     for _ in 0..3 {
         let generation_before = crate::vocoder_ort_session::ep_settings_generation();
@@ -167,11 +160,16 @@ fn get_or_init_shared_session() -> Result<Arc<Mutex<Session>>, String> {
             log::warn!("[fcpe] inference device changed during session build — rebuilding with the new EP");
             continue;
         }
-        let arc = Arc::new(Mutex::new(session));
-        mutex
+        let mut guard = mutex
             .lock()
-            .map_err(|e| format!("SHARED_SESSION lock poisoned: {e}"))?
-            .replace(arc.clone());
+            .map_err(|e| format!("SHARED_SESSION lock poisoned: {e}"))?;
+        // 其他线程（设备切换的异步预热 / 并发的渲染线程）可能已完成构建：
+        // 复用已存在的会话，避免无谓替换与重复烟测。
+        if let Some(existing) = guard.as_ref() {
+            return Ok(existing.clone());
+        }
+        let arc = Arc::new(Mutex::new(session));
+        *guard = Some(arc.clone());
         return Ok(arc);
     }
     Err("inference device kept changing during session build".to_string())

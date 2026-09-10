@@ -15,7 +15,6 @@
 // 会在开头复位标志，纪元主要作为"新轮次忽略历史残留"的结构性保障保留。
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
 
 /// 全局"取消请求"纪元：每产生一次新的取消请求就递增。
 static CANCEL_EPOCH: AtomicU64 = AtomicU64::new(0);
@@ -60,6 +59,7 @@ impl RenderCancelToken {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
     /// 涉及全局 `BG_RENDER_CANCEL` / `CANCEL_EPOCH` 的用例必须串行执行：
     /// cargo test 默认并行跑用例，两个用例同时读写同一组全局状态会互相干扰。

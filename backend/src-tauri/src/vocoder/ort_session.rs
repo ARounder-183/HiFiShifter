@@ -38,10 +38,60 @@ use std::sync::{Mutex, OnceLock};
 /// sessions themselves stay fully dynamic.
 pub const SMOKE_TEST_FRAMES: usize = 4096;
 
+/// 烟测（首次推理预热）超时。
+///
+/// 健康的首次推理只需 0.15~1.7s（含 DML 着色器编译）；超时意味着 EP 在
+/// 本进程中已不可用。此值必须**远小于**用户可忍受的冻结时长：设备切换
+/// （如 CPU→GPU）后新建的 DirectML 会话偶发首次推理挂起（观察到会话创建
+/// 成功后烟测永不返回），而烟测在构建路径内 —— 超时值直接决定"渲染进度
+/// 卡在 0%"的时长。旧值 60s（且 strict 与回退两次尝试累计 120s）会让用户
+/// 以为应用永久卡死（实测用户在 20s 后强杀应用）。
+const SMOKE_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// 各 EP 的烟测超时：CoreML 的 MLProgram 首次推理包含图编译，健康路径也
+/// 可能长达数十秒，必须保持宽松；DirectML/WebGPU 的健康首次推理在秒级，
+/// 挂起必须快速检出。
+fn smoke_test_timeout(ep_name: &str) -> std::time::Duration {
+    if ep_name == "CoreML" {
+        std::time::Duration::from_secs(60)
+    } else {
+        SMOKE_TEST_TIMEOUT
+    }
+}
+
 /// Set once a CoreML smoke test times out or fails hard.  The CoreML EP is
 /// then skipped for the rest of the process (WebGPU/CPU take over) so a
 /// hung CoreML inference can never block the benchmark or rendering again.
 static COREML_DISABLED: OnceLock<std::sync::atomic::AtomicBool> = OnceLock::new();
+
+/// 与 CoreML 同构：DirectML 烟测一旦超时（首次推理挂起），本进程内后续
+/// 所有 DirectML 会话构建直接跳过、立即走 CPU。
+///
+/// 触发场景：设备切换后重建 DirectML 会话时首次推理挂起。不这样做的话，
+/// strict 与回退两次尝试各要等一次超时，且其他模型（FCPE/HNSEP）的预热
+/// 也排队在全局构建锁后，整条 ORT 链冻结。禁用后：一次超时（≤10s）即收敛，
+/// 渲染随即在 CPU 上继续推进；用户重启应用即可重新尝试 GPU。
+static DIRECTML_DISABLED: OnceLock<std::sync::atomic::AtomicBool> = OnceLock::new();
+
+#[cfg(target_os = "windows")]
+fn directml_disabled() -> bool {
+    DIRECTML_DISABLED
+        .get_or_init(|| std::sync::atomic::AtomicBool::new(false))
+        .load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn disable_directml(reason: &str) {
+    if !directml_disabled() {
+        log::error!(
+            "ort_session: disabling DirectML EP for this process: {reason}. \
+             Rendering continues on CPU; restart the app to retry GPU."
+        );
+    }
+    DIRECTML_DISABLED
+        .get_or_init(|| std::sync::atomic::AtomicBool::new(false))
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+}
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn coreml_disabled() -> bool {
@@ -158,19 +208,20 @@ pub fn set_runtime_dml_device_id(device_id: Option<i32>) {
     }
 }
 
-/// 全局会话构建串行锁：三个 ONNX 模块（Vocoder / FCPE / HNSEP）的会话
-/// 重建共用。
+/// 全局会话**创建**串行锁：三个 ONNX 模块（Vocoder / FCPE / HNSEP）共用。
 ///
 /// DirectML 会话创建涉及 D3D12 设备与命令队列的初始化。两个线程并发创建
 /// DML 会话（设备切换时 Vocoder 的渲染线程重建与 FCPE 的 pitch 分析线程
 /// TLS 重载会同时触发）可能在驱动层互相死锁 —— 实测表现为渲染进度永久
-/// 卡在 0%，且应用退出时无法清理会话（日志：
-/// `could not acquire SHARED_SESSION lock at shutdown`）。
+/// 卡在 0%。
 ///
-/// ★ 该锁只保护"构建"本身；**绝不允许**在持有它的情况下再去锁各模块的
-/// 会话容器（容器锁的持有时间必须保持在微秒级，否则设备切换与关机清理
-/// 会被构建阻塞）。各模块的构建流程：容器锁快速检查 → 本锁内构建（容器
-/// 锁已释放）→ 容器锁写回。
+/// ★ 锁的边界极严：
+/// - **只包围创建本身**（builder → commit）。烟测（首次推理预热）必须在其
+///   之外执行 —— 烟测可能挂起（上限见 SMOKE_TEST_TIMEOUT），持锁挂起会
+///   阻塞其他模块的会话构建与整条渲染链；
+/// - **绝不允许**在持有它的情况下再去锁各模块的会话容器（容器锁的持有
+///   时间必须保持在微秒级）。各模块的流程：容器锁快速检查（随即释放）
+///   → 构建（创建锁只覆盖 commit）→ 容器锁写回。
 pub(crate) fn session_build_lock() -> &'static Mutex<()> {
     static BUILD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     BUILD_LOCK.get_or_init(|| Mutex::new(()))
@@ -574,12 +625,26 @@ pub fn build_ort_session(
     // ── Windows: DirectML first (proven stable, no crash risk) ─────────
     #[cfg(target_os = "windows")]
     if choice == "auto" || choice == "directml" || choice == "gpu" {
+        if directml_disabled() {
+            log::warn!(
+                "ort_session[{role:?}]: DirectML disabled for this process (earlier smoke test hung) — using CPU"
+            );
+            return build_cpu_session(onnx_path, role, &choice);
+        }
         // DirectML with strict mode first, then with fallback
         match build_dml_session_inner(onnx_path, role, &choice, true) {
             Ok((session, ep)) => return Ok((session, ep)),
             Err(e) => log::error!(
                 "ort_session[{role:?}]: strict DirectML failed (will retry with CPU fallback): {e}"
             ),
+        }
+        // 烟测超时会把 DirectML 标记为不可用（见 disable_directml）——
+        // 此时第二次尝试无需再建会话，直接走 CPU，避免第二次超时冻结。
+        if directml_disabled() {
+            log::warn!(
+                "ort_session[{role:?}]: DirectML disabled after strict-attempt timeout — using CPU"
+            );
+            return build_cpu_session(onnx_path, role, &choice);
         }
         match build_dml_session_inner(onnx_path, role, &choice, false) {
             Ok((session, ep)) => return Ok((session, ep)),
@@ -747,8 +812,12 @@ fn smoke_test_gpu_session(
     // with a generous timeout so a stuck CoreML session can never freeze the
     // benchmark.  If it times out we return an error and the caller falls
     // back to WebGPU/CPU; the orphaned thread (if truly hung) is harmless.
+    //
+    // DirectML 同理：设备切换后新建的 DML 会话偶发首次推理挂起。超时后
+    // 除本次回退外，还会把 DirectML 标记为本进程不可用（见 disable_directml），
+    // 使后续构建（strict 回退尝试、其他模型、后续切换）立即走 CPU。
     let (tx, rx) = std::sync::mpsc::channel();
-    let timeout = std::time::Duration::from_secs(60);
+    let timeout = smoke_test_timeout(ep_name);
     let run_thread = std::thread::spawn(move || {
         // Run inside a block so the returned SessionOutputs (which borrow
         // the session) are dropped before we move the session back.
@@ -779,6 +848,12 @@ fn smoke_test_gpu_session(
             disable_coreml(&format!(
                 "{ep_name} smoke test exceeded {timeout:?} (first inference hung)"
             ));
+            #[cfg(target_os = "windows")]
+            if ep_name == "DirectML" {
+                disable_directml(&format!(
+                    "DirectML smoke test exceeded {timeout:?} (first inference hung)"
+                ));
+            }
             Err(format!(
                 "{ep_name} smoke test timed out after {timeout:?}.                  The EP registered but the first inference did not complete.                  Falling back to WebGPU/CPU."
             ))
@@ -832,13 +907,22 @@ fn build_gpu_session_finalize(
         .with_intra_threads(threads)
         .map_err(|e| format!("set intra op threads failed: {e}"))?;
 
-    let t_create = std::time::Instant::now();
-    let mut session = builder.commit_from_file(onnx_path).map_err(|e| {
-        let msg = format!("load onnx into {ep_name} ort session failed: {e}");
-        log::warn!("ort_session[{role:?}]: {msg}");
-        msg
-    })?;
-    let create_ms = t_create.elapsed().as_millis();
+    // ★ 创建阶段持有全局创建锁（与 DirectML 路径同一把锁）：串行化
+    // D3D12/Metal/Vulkan 等后端设备的创建；烟测在锁外执行（可能挂起，
+    // 上限见 SMOKE_TEST_TIMEOUT）。
+    let (mut session, create_ms) = {
+        let _creation_guard = session_build_lock()
+            .lock()
+            .map_err(|e| format!("session creation lock poisoned: {e}"))?;
+        let t_create = std::time::Instant::now();
+        let session = builder.commit_from_file(onnx_path).map_err(|e| {
+            let msg = format!("load onnx into {ep_name} ort session failed: {e}");
+            log::warn!("ort_session[{role:?}]: {msg}");
+            msg
+        })?;
+        let create_ms = t_create.elapsed().as_millis();
+        (session, create_ms)
+    };
 
     log::warn!(
         "ort_session[{role:?}]: created session ep={ep_name} intra_threads={threads} commit_ms={create_ms}",
@@ -887,16 +971,25 @@ fn build_dml_session_inner(
     choice: &str,
     strict: bool,
 ) -> Result<(Session, String), String> {
-    let builder =
-        Session::builder().map_err(|e| format!("create ort session builder failed: {e}"))?;
+    // ★ 创建阶段持有全局创建锁：两个线程并发创建 D3D12/DML 会话可在驱动层
+    // 互锁（设备切换时 Vocoder/FCPE/HNSEP 的重建会同时到达）。锁只在创建
+    // （builder → commit）期间持有 —— **烟测在锁外执行**：烟测可能挂起
+    // （上限见 SMOKE_TEST_TIMEOUT），持锁挂起会阻塞其他模块的构建与整条渲染链。
+    let (mut session, selected, threads, create_ms) = {
+        let _creation_guard = session_build_lock()
+            .lock()
+            .map_err(|e| format!("session creation lock poisoned: {e}"))?;
 
-    let (builder, selected) = try_register_directml_ep(builder, role)?;
+        let builder =
+            Session::builder().map_err(|e| format!("create ort session builder failed: {e}"))?;
 
-    log::warn!(
-        "ort_session[{role:?}]: model={} ep={selected} strict={strict} (choice={choice}, global_env={})",
-        onnx_path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
-        env_ep_choice(),
-    );
+        let (builder, selected) = try_register_directml_ep(builder, role)?;
+
+        log::warn!(
+            "ort_session[{role:?}]: model={} ep={selected} strict={strict} (choice={choice}, global_env={})",
+            onnx_path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
+            env_ep_choice(),
+        );
 
     // ── DirectML-specific config ────────────────────────────────────────
     let mut builder = builder
@@ -956,11 +1049,14 @@ fn build_dml_session_inner(
         .with_intra_threads(threads)
         .map_err(|e| format!("set intra op threads failed: {e}"))?;
 
-    let t_create = std::time::Instant::now();
-    let mut session = builder
-        .commit_from_file(onnx_path)
-        .map_err(|e| format!("load onnx into ort session failed: {e}"))?;
-    let create_ms = t_create.elapsed().as_millis();
+        let t_create = std::time::Instant::now();
+        let session = builder
+            .commit_from_file(onnx_path)
+            .map_err(|e| format!("load onnx into ort session failed: {e}"))?;
+        let create_ms = t_create.elapsed().as_millis();
+        // 会话创建完成 → 释放创建锁；其后的日志与烟测都在锁外执行。
+        (session, selected, threads, create_ms)
+    };
 
     // ── Detailed diagnostic logging ────────────────────────────────────
     log::warn!(
