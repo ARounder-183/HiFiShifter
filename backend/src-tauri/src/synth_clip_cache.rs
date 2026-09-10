@@ -64,6 +64,12 @@ pub struct SynthClipCache {
 }
 
 impl SynthClipCache {
+    /// 运行时调整字节预算（用户设置"音频缓存预算"时由
+    /// `cache_registry::apply_cache_budget` 调用）。缩容会立即按 LRU 回收。
+    pub fn set_budget(&mut self, budget_bytes: u64) {
+        self.inner.set_budget(budget_bytes);
+    }
+
     /// 创建指定容量和字节预算的缓存。
     pub fn new(capacity: usize, budget_bytes: u64) -> Self {
         Self {
@@ -345,6 +351,12 @@ pub struct RenderedClipCache {
 }
 
 impl RenderedClipCache {
+    /// 运行时调整字节预算（用户设置"音频缓存预算"时由
+    /// `cache_registry::apply_cache_budget` 调用）。缩容会立即按 LRU 回收。
+    pub fn set_budget(&mut self, budget_bytes: u64) {
+        self.inner.set_budget(budget_bytes);
+    }
+
     /// 创建指定容量和字节预算的缓存。
     pub fn new(capacity: usize, budget_bytes: u64) -> Self {
         Self {
@@ -762,6 +774,12 @@ pub struct TensionRenderedClipCache {
 }
 
 impl TensionRenderedClipCache {
+    /// 运行时调整字节预算（用户设置"音频缓存预算"时由
+    /// `cache_registry::apply_cache_budget` 调用）。缩容会立即按 LRU 回收。
+    pub fn set_budget(&mut self, budget_bytes: u64) {
+        self.inner.set_budget(budget_bytes);
+    }
+
     pub fn new(capacity: usize, budget_bytes: u64) -> Self {
         Self {
             inner: ByteBudgetCache::new(capacity, budget_bytes),
@@ -848,6 +866,12 @@ pub struct BreathNoiseCache {
 }
 
 impl BreathNoiseCache {
+    /// 运行时调整字节预算（用户设置"音频缓存预算"时由
+    /// `cache_registry::apply_cache_budget` 调用）。缩容会立即按 LRU 回收。
+    pub fn set_budget(&mut self, budget_bytes: u64) {
+        self.inner.set_budget(budget_bytes);
+    }
+
     pub fn new(capacity: usize, budget_bytes: u64) -> Self {
         Self {
             inner: ByteBudgetCache::new(capacity, budget_bytes),

@@ -41,6 +41,14 @@ fn apply_ort_ep_settings(ep: &str, device_id: Option<i32>) -> bool {
     true
 }
 
+/// 应用缓存预算设置（P1-7）：把用户设定推送（并触发扩容/缩容回收）到各缓存实例。
+fn apply_cache_budget_settings(settings: &UiSettings) {
+    let bytes = settings
+        .audio_cache_budget_mb
+        .saturating_mul(1024 * 1024);
+    crate::cache_registry::apply_cache_budget(bytes);
+}
+
 pub(super) fn get_ui_settings(state: State<'_, AppState>) -> UiSettings {
     let mut settings = if let Some(dir) = state.config_dir.get() {
         crate::config::load_ui_settings(dir)
@@ -49,6 +57,8 @@ pub(super) fn get_ui_settings(state: State<'_, AppState>) -> UiSettings {
     };
     settings.normalize_split_transition();
     settings.normalize_time_display();
+    settings.normalize_cache_budget();
+    apply_cache_budget_settings(&settings);
     crate::time_stretch::update_global_stretch_defaults(
         settings.default_stretch_algorithm,
         settings.default_hifigan_mel_stretch,
@@ -157,6 +167,8 @@ pub(super) fn save_ui_settings(
 
     settings.normalize_split_transition();
     settings.normalize_time_display();
+    settings.normalize_cache_budget();
+    apply_cache_budget_settings(&settings);
     let prev_ep = prev_settings.ort_ep.clone();
 
     if let Some(dir) = state.config_dir.get() {

@@ -88,13 +88,23 @@ fn invalidate_breath_noise(clip_id: &str) -> usize {
 
 /// 共振峰缓存此前**不在**编排函数内，靠调用方手工配对；并入后所有
 /// `invalidate_clip_all_caches` 调用点自动获得正确覆盖（见本文件头部说明）。
+///
+/// 必须调用 `invalidate_formant_cache_for_clip` 而不是直接锁音频缓存：该入口
+/// 同时失效**两个**缓存 —— 音频 PCM 共振峰缓存，以及"源共振峰分析缓存"
+/// （前端可视化用，键含 clip_id）。只失效前者会留下陈旧的分析结果。
 fn invalidate_formant(clip_id: &str) -> usize {
-    let mut cache = crate::formant_cache::global_formant_cache()
+    let before = crate::formant_cache::global_formant_cache()
         .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let before = cache.len();
-    cache.invalidate(clip_id);
-    before.saturating_sub(cache.len())
+        .map(|c| c.len())
+        .unwrap_or(0);
+
+    crate::formant_cache::invalidate_formant_cache_for_clip(clip_id);
+
+    let after = crate::formant_cache::global_formant_cache()
+        .lock()
+        .map(|c| c.len())
+        .unwrap_or(0);
+    before.saturating_sub(after)
 }
 
 fn invalidate_hifigan_chunks(clip_id: &str) -> usize {
@@ -168,6 +178,124 @@ pub(crate) fn invalidate_clip(clip_id: &str, policy: u8) -> (usize, usize) {
     }
 
     (touched, removed)
+}
+
+// ─── 缓存预算编排（P1-7）────────────────────────────────────────────────────
+
+/// 受"音频缓存总预算"约束的缓存。
+pub(crate) struct BudgetedCacheEntry {
+    pub(crate) name: &'static str,
+    /// 该缓存占总预算的份额分母（4 = 取总预算的 1/4）。与各缓存构造期的
+    /// `env_cache_budget_bytes() / N` 保持一致，避免"构造时一套、改预算后另一套"。
+    pub(crate) share_denominator: u64,
+    /// 接收**该缓存自己的**字节预算。
+    pub(crate) set_budget: fn(u64),
+}
+
+fn set_synth_clip_budget(bytes: u64) {
+    crate::synth_clip_cache::global_synth_clip_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .set_budget(bytes);
+}
+fn set_rendered_clip_budget(bytes: u64) {
+    crate::synth_clip_cache::global_rendered_clip_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .set_budget(bytes);
+}
+fn set_tension_clip_budget(bytes: u64) {
+    crate::synth_clip_cache::global_tension_rendered_clip_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .set_budget(bytes);
+}
+fn set_breath_noise_budget(bytes: u64) {
+    crate::synth_clip_cache::global_breath_noise_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .set_budget(bytes);
+}
+fn set_formant_budget(bytes: u64) {
+    crate::formant_cache::global_formant_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .set_budget(bytes);
+}
+fn set_hifigan_chunk_budget(bytes: u64) {
+    crate::renderer::hifigan::global_chunk_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .set_budget(bytes);
+}
+fn set_source_cache_budget(bytes: u64) {
+    crate::audio_utils::set_source_cache_budget(bytes);
+}
+
+/// 受预算约束的缓存清单。新增带字节预算的缓存时在此加一行。
+pub(crate) const BUDGETED: &[BudgetedCacheEntry] = &[
+    BudgetedCacheEntry {
+        name: "SynthClipCache",
+        share_denominator: 4,
+        set_budget: set_synth_clip_budget,
+    },
+    BudgetedCacheEntry {
+        name: "RenderedClipCache",
+        share_denominator: 2,
+        set_budget: set_rendered_clip_budget,
+    },
+    BudgetedCacheEntry {
+        name: "TensionRenderedClipCache",
+        share_denominator: 4,
+        set_budget: set_tension_clip_budget,
+    },
+    BudgetedCacheEntry {
+        name: "BreathNoiseCache",
+        share_denominator: 8,
+        set_budget: set_breath_noise_budget,
+    },
+    BudgetedCacheEntry {
+        name: "FormantCache",
+        share_denominator: 8,
+        set_budget: set_formant_budget,
+    },
+    BudgetedCacheEntry {
+        name: "HifiganChunkCache",
+        share_denominator: 4,
+        set_budget: set_hifigan_chunk_budget,
+    },
+    BudgetedCacheEntry {
+        name: "SourcePcmCache",
+        share_denominator: 4,
+        set_budget: set_source_cache_budget,
+    },
+];
+
+/// 应用"音频缓存总预算"（字节）：记录该值并把份额推送到每个受约束的缓存。
+///
+/// 单缓存份额下限 1 MiB：总预算极小（例如用户设 256 MB）时，`/= 8` 之类仍会
+/// 得到可用值，但若未来加入更大的分母，这个下限能防住"份额被算成 0 导致缓存
+/// 实际关闭"（0 字节预算会让每次插入都被立即驱逐）。
+pub(crate) fn apply_cache_budget(total_bytes: u64) {
+    crate::audio_engine::byte_budget_cache::set_cache_budget_bytes(total_bytes);
+
+    for entry in BUDGETED {
+        let share = (total_bytes / entry.share_denominator.max(1)).max(1024 * 1024);
+        (entry.set_budget)(share);
+        debug_eprintln!(
+            "[cache:budget] {} <- {} MiB (1/{} of {} MiB)",
+            entry.name,
+            share / (1024 * 1024),
+            entry.share_denominator,
+            total_bytes / (1024 * 1024)
+        );
+    }
+
+    log::warn!(
+        "[cache:budget] applied total={} MiB across {} caches",
+        total_bytes / (1024 * 1024),
+        BUDGETED.len()
+    );
 }
 
 #[cfg(test)]

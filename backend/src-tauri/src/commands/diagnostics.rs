@@ -217,8 +217,9 @@ pub(super) fn log_frontend_error(message: String, detail: Option<String>) -> ser
 
 /// 各进程级音频缓存的当前占用（条目数 + 字节），用于诊断与设置界面展示。
 ///
-/// 这些缓存各自的预算互相独立（见 P1-7 的后续工作：统一预算），
-/// 因此这里只**报告实际占用**，不做任何裁决。
+/// 报告的是**实际占用**与**实际生效预算**，不做任何裁决。注意各缓存按份额从
+/// "音频缓存预算基准值"取值（见 `cache_registry::BUDGETED`），份额之和大于 1，
+/// 因此 `budgetBytes` 是基准值而非占用硬上限。
 pub(super) fn get_audio_cache_stats() -> serde_json::Value {
     let (source_entries, source_bytes) = crate::audio_utils::source_cache_stats();
 
@@ -227,18 +228,29 @@ pub(super) fn get_audio_cache_stats() -> serde_json::Value {
         .map(|c| (c.len(), c.total_bytes()))
         .unwrap_or((0, 0));
 
-    let (rendered_entries, rendered_bytes) =
-        crate::synth_clip_cache::global_rendered_clip_cache()
-            .lock()
-            .map(|c| (c.len(), c.total_bytes()))
-            .unwrap_or((0, 0));
+    let (rendered_entries, rendered_bytes) = crate::synth_clip_cache::global_rendered_clip_cache()
+        .lock()
+        .map(|c| (c.len(), c.total_bytes()))
+        .unwrap_or((0, 0));
+
+    let (synth_entries, synth_bytes) = crate::synth_clip_cache::global_synth_clip_cache()
+        .lock()
+        .map(|c| (c.len(), c.total_bytes()))
+        .unwrap_or((0, 0));
+
+    let (formant_entries, formant_bytes) = crate::formant_cache::global_formant_cache()
+        .lock()
+        .map(|c| (c.len(), c.total_bytes()))
+        .unwrap_or((0, 0));
 
     serde_json::json!({
         "ok": true,
-        "totalBudgetBytes": crate::audio_engine::byte_budget_cache::env_cache_budget_bytes(),
+        "budgetBytes": crate::audio_engine::byte_budget_cache::cache_budget_bytes(),
         "source": { "entries": source_entries, "bytes": source_bytes },
         "chunk": { "entries": chunk_entries, "bytes": chunk_bytes },
         "renderedClip": { "entries": rendered_entries, "bytes": rendered_bytes },
+        "synthClip": { "entries": synth_entries, "bytes": synth_bytes },
+        "formant": { "entries": formant_entries, "bytes": formant_bytes },
         "masterBus": {
             "softClipEnabled": crate::master_bus::soft_clip_enabled(),
             "softClipKnee": crate::master_bus::soft_clip_knee(),

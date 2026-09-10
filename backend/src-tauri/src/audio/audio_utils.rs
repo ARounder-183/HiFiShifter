@@ -299,7 +299,8 @@ fn source_cache_budget_bytes() -> u64 {
     {
         return mb.saturating_mul(1024 * 1024);
     }
-    crate::audio_engine::byte_budget_cache::env_cache_budget_bytes() / 4
+    // 与 `cache_registry::BUDGETED` 中 SourcePcmCache 的 1/4 份额保持一致。
+    crate::audio_engine::byte_budget_cache::cache_budget_bytes() / 4
 }
 
 fn source_cache() -> &'static Mutex<ByteBudgetCache<SourceCacheKey, Arc<DecodedSourceAudio>>> {
@@ -364,6 +365,15 @@ pub fn decode_audio_cached_interleaved(path: &Path) -> Result<Arc<DecodedSourceA
     }
 
     Ok(entry)
+}
+
+/// 运行时调整源 PCM 缓存预算（由 `cache_registry::apply_cache_budget` 调用）。
+///
+/// 缩容会立即按 LRU 回收，无需等待下一次插入（见 P1-7）。
+pub fn set_source_cache_budget(bytes: u64) {
+    if let Ok(mut cache) = source_cache().lock() {
+        cache.set_budget(bytes);
+    }
 }
 
 /// 丢弃某路径的所有缓存条目（路径被删除/替换后调用）。

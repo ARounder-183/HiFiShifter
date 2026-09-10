@@ -360,6 +360,16 @@ pub fn run() {
                     ui.master_soft_clip_enabled,
                     ui.master_soft_clip_knee,
                 );
+                // 缓存预算（P1-7）同样提前生效，避免"启动到首次拉取设置"之间
+                // 使用默认预算（用户调小预算的意图会在这段时间内失效）。
+                crate::cache_registry::apply_cache_budget(
+                    ui.audio_cache_budget_mb
+                        .clamp(
+                            crate::audio_engine::byte_budget_cache::MIN_BUDGET_MB,
+                            crate::audio_engine::byte_budget_cache::MAX_BUDGET_MB,
+                        )
+                        .saturating_mul(1024 * 1024),
+                );
             }
 
             // 尝试恢复上次运行时保存的窗口状态（非强制性）

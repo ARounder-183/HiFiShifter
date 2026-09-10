@@ -326,6 +326,15 @@ pub struct UiSettings {
     #[serde(default)]
     pub silence_detect_options: SilenceDetectSettings,
 
+    // ── 缓存预算（P1-7）──
+    /// 音频缓存预算基准值（MB）。
+    ///
+    /// 注意这是**基准值**而非硬上限：各缓存按各自份额从它取（如整 clip 缓存取
+    /// 1/2、共振峰缓存取 1/8，见 `cache_registry::BUDGETED`），份额之和大于 1，
+    /// 因此实际占用上限是"各份额之和 × 本值"。命名沿用方案原文，语义已在此说明。
+    #[serde(default = "default_audio_cache_budget_mb")]
+    pub audio_cache_budget_mb: u64,
+
     // ── 主总线（Master bus）── 见 `audio/master_bus.rs` 与 P0-2
     /// 主总线软削波开关。关闭后退回"裸求和 + 末端硬截断"的旧行为。
     #[serde(default = "default_true")]
@@ -805,6 +814,11 @@ fn default_true() -> bool {
 fn default_master_soft_clip_knee() -> f32 {
     crate::master_bus::DEFAULT_SOFT_CLIP_KNEE
 }
+
+/// 音频缓存预算的默认值（MB），与 `byte_budget_cache` 的默认保持单一来源。
+fn default_audio_cache_budget_mb() -> u64 {
+    crate::audio_engine::byte_budget_cache::default_budget_mb()
+}
 fn default_pitch_snap_unit() -> String {
     "semitone".to_string()
 }
@@ -941,6 +955,7 @@ impl Default for UiSettings {
             metronome_accent: true,
             metronome_sound: default_metronome_sound(),
             silence_detect_options: SilenceDetectSettings::default(),
+            audio_cache_budget_mb: default_audio_cache_budget_mb(),
             master_soft_clip_enabled: true,
             master_soft_clip_knee: default_master_soft_clip_knee(),
             quick_search_auto_normalize: false,
@@ -1021,6 +1036,16 @@ impl UiSettings {
         self.normalize_time_display();
         self.timeline_snap.normalize();
         self.normalize_ripple_mode();
+    }
+
+    /// 规范化音频缓存预算：钳制到允许范围。
+    ///
+    /// 需要它是因为 `settings.json` 可被手工编辑：预算为 0 会让每个缓存变成
+    /// "每次插入立即被驱逐"（等于缓存完全关闭，性能骤降且无报错）；
+    /// 超大值则会把内存吃光。
+    pub fn normalize_cache_budget(&mut self) {
+        self.audio_cache_budget_mb =
+            crate::audio_engine::byte_budget_cache::clamp_budget_mb(self.audio_cache_budget_mb);
     }
 
     /// 规范化波纹编辑模式，避免损坏/未知的持久化值影响编辑行为。
