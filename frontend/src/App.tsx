@@ -2472,11 +2472,12 @@ function AppInner() {
                     break;
                 }
                 case "playback.stop": {
+                    // "停止"语义：仅在播放中时停止并回到本次起播点。
+                    // 未播放时必须是 no-op —— 旧实现在此处派发 playOriginal()，
+                    // 使"停止"键在空闲时反而启动播放（重复触发源之一）。
                     const isPlayingNow = Boolean(store.getState().session.runtime.isPlaying);
                     if (isPlayingNow) {
                         void dispatch(stopAudioPlayback({ restoreAnchor: true }));
-                    } else {
-                        void dispatch(playOriginal());
                     }
                     break;
                 }

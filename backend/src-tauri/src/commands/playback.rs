@@ -204,6 +204,29 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
             }
         }
 
+        // ── 幂等：已在播放时绝不重启传输层 ──────────────────────────────────────
+        // 每次 play 调用都会 seek 回锚点；若调用方重复触发（按钮 + 快捷键、
+        // 双击、UI 自动重试），传输层会被反复拉回起播点 —— 表现正是用户报告的
+        // "音频在放但播放光标不动（光标始终停在锚点）" 与 "重复触发播放/叠音"。
+        // 因此已在播放（且目标为时间线）时直接返回：只确保渲染需求被覆盖，
+        // 绝不再 seek / update_timeline / set_playing。
+        if state.audio_engine.is_playing()
+            && state
+                .audio_engine
+                .snapshot_state()
+                .target
+                .as_deref()
+                == Some("original")
+        {
+            if need_prerender && !BG_RENDER_ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
+                if let Some(app) = state.app_handle.get() {
+                    ensure_render_pass_running(app);
+                }
+            }
+            log::warn!("[play_original] already playing — idempotent no-op (no restart)");
+            return serde_json::json!({"ok": true, "playing": "original", "start_sec": start_sec});
+        }
+
         // ── 立即武装传输层 ─────────────────────────────────────────────────────
         // 覆盖起播窗口的 Clip 尚未就绪时，音频回调进入原地等待（保持播放态、
         // 位置冻结、静音输出）；渲染线程每完成一个 Clip 都会推送刷新引擎
