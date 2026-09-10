@@ -458,6 +458,7 @@ export const jaJP = {
     onnx_unavailable_label: "（利用不可）",
     solo: "ソロ",
     status_analyzing_pitch: "ピッチを分析中",
+    status_analyzing_waveform: "波形を分析中",
     status_stretching: "タイムストレッチ中",
 
     fb_title: "ファイルブラウザ",

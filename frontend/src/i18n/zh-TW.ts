@@ -439,6 +439,7 @@ export const zhTW = {
     onnx_unavailable_label: "（不可用）",
     solo: "獨奏",
     status_analyzing_pitch: "正在分析音高",
+    status_analyzing_waveform: "正在分析波形",
     status_stretching: "正在拉伸",
 
     fb_title: "檔案瀏覽器",

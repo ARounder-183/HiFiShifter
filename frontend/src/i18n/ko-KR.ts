@@ -530,6 +530,7 @@ export const koKR = {
     onnx_unavailable_label: " (사용 불가)",
     solo: "솔로",
     status_analyzing_pitch: "피치 분석 중",
+    status_analyzing_waveform: "파형 분석 중",
     status_stretching: "타임 스트레치 중",
 
     fb_title: "파일 브라우저",

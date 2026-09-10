@@ -535,6 +535,7 @@ export const enUS = {
     onnx_unavailable_label: " (unavailable)",
     solo: "Solo",
     status_analyzing_pitch: "Analyzing pitch",
+    status_analyzing_waveform: "Analyzing waveform",
     status_stretching: "Stretching",
 
     fb_title: "File Browser",

@@ -3843,7 +3843,7 @@ function AppInner() {
                                 lineHeight: "16px",
                             }}
                         >
-                            {"Analyzing waveform"}
+                            {t("status_analyzing_waveform")}
                             {waveformAnalysis.sourcePath ? ` "${waveformAnalysis.sourcePath}"` : ""}
                             {waveformAnalysis.progress != null
                                 ? ` ${Math.round(waveformAnalysis.progress * 100)}%`
