@@ -5,6 +5,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use super::byte_budget_cache::ByteBudgetCache;
 
 use crate::state::{Clip, TimelineState, Track};
+use crate::synth_clip_cache::RenderedFallbackIndex;
 
 use super::io::{decode_resampled_stereo, get_resampled_stereo_cached, is_audio_path};
 use super::types::{EngineClip, EngineSnapshot, ResampledStereo, StretchJob, StretchKey};
@@ -250,6 +251,9 @@ pub(crate) fn build_snapshot(
 
     // 预分配内存
     let mut clips_out: Vec<EngineClip> = Vec::with_capacity(timeline.clips.len());
+
+    // 垫音查询索引：首次需要时才构建（见循环内的惰性 get_or_insert_with）。
+    let mut fallback_index: Option<RenderedFallbackIndex> = None;
 
     for clip in &timeline.clips {
         if clip.muted {
@@ -834,18 +838,23 @@ pub(crate) fn build_snapshot(
                             },
                         );
 
+                        // 惰性构建一次索引：取一次缓存锁、扫一遍，之后所有 clip
+                        // 的垫音查询都只查内存表。此前逐 clip 调用单次查询函数，
+                        // 每次都要重新取锁并重扫整个缓存（见 P1-4 / B7）。
+                        // 惰性是因为纯命中路径一个垫音都不需要，不该白付这次扫描。
+                        let fallback_index = fallback_index
+                            .get_or_insert_with(RenderedFallbackIndex::build);
+
                         if needs_tension {
-                            fallback_pcm = crate::synth_clip_cache::get_latest_tension_rendered_pcm(
-                                &clip.id,
-                                clip.active_take_id.as_deref(),
-                            );
+                            fallback_pcm = fallback_index
+                                .latest_tension(&clip.id, clip.active_take_id.as_deref());
                         }
 
                         if fallback_pcm.is_none() {
-                            if let Some((p, b)) = crate::synth_clip_cache::get_latest_rendered_pcm(
-                                &clip.id,
-                                clip.active_take_id.as_deref(),
-                            ) {
+                            if let Some((p, b)) =
+                                fallback_index
+                                    .latest_rendered(&clip.id, clip.active_take_id.as_deref())
+                            {
                                 fallback_pcm = Some(p);
                                 fallback_breath = b;
                             }

@@ -976,50 +976,209 @@ fn take_identity_matches(entry_take: Option<&str>, active_take: Option<&str>) ->
     }
 }
 
-/// 获取指定 clip 最近一次成功的整 clip 渲染结果（用作平滑过渡的垫音）。
+// ─── 批量垫音查询（P1-4 / B7）───────────────────────────────────────────────
+
+/// 「最近一次渲染结果」的批量查询索引。
 ///
-/// `active_take_id` 为当前活跃 take：同 clip_id 换了 take 的旧渲染（undo
-/// 回退等场景）与当前可听内容无关，不得作为垫音。
-pub fn get_latest_rendered_pcm(
-    clip_id: &str,
-    active_take_id: Option<&str>,
-) -> Option<(Arc<Vec<f32>>, Option<Arc<Vec<f32>>>)> {
-    let cache = global_rendered_clip_cache()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let entry = cache
-        .inner
-        .iter()
-        .find(|(k, v)| {
-            k.clip_id == clip_id
-                && take_identity_matches(v.rendered_take_id.as_deref(), active_take_id)
-        })
-        .map(|(_, v)| v)?;
-    Some((entry.pcm_stereo.clone(), entry.breath_noise_stereo.clone()))
+/// # 为什么需要它
+///
+/// `build_snapshot` 的降级垫音路径此前**逐 clip** 调用上面的单次查询函数，
+/// 而每次调用都会：重新取一次缓存 `Mutex`、从头扫一遍整个缓存。于是构建一次
+/// 快照的代价是 O(clips × cache_entries) 次字符串比较 **加上** O(clips) 次锁
+/// 往返，并且每次都去和渲染线程的 `insert` 抢同一把锁 —— 高频编辑期间快照被
+/// 反复重建，渲染写入因此被反复推迟（见 B7）。
+///
+/// 索引把这一步改成：**取一次锁、扫一遍**，按 `clip_id` 分组后供逐 clip 查询。
+/// 复杂度降为 O(cache_entries + clips)，锁往返降为 1 次。
+///
+/// # 语义与单次查询完全一致
+///
+/// 两者都是"在 **LRU 顺序**（最近使用优先）下，第一个 `clip_id` 与 take 身份
+/// 都匹配的条目"。这里保持 LRU 顺序，且对同一 `clip_id` **保留全部候选** ——
+/// take 过滤必须留到查询时做，因为 take 身份取决于查询方而不是索引。
+pub struct RenderedFallbackIndex {
+    rendered: HashMap<String, Vec<FallbackRenderedCandidate>>,
+    tension: HashMap<String, Vec<FallbackTensionCandidate>>,
 }
 
-/// 获取指定 clip 最近一次成功的 Tension 渲染结果（用作平滑过渡的垫音）
-pub fn get_latest_tension_rendered_pcm(
-    clip_id: &str,
-    active_take_id: Option<&str>,
-) -> Option<Arc<Vec<f32>>> {
-    let cache = global_tension_rendered_clip_cache()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let entry = cache
-        .inner
-        .iter()
-        .find(|(k, v)| {
-            k.clip_id == clip_id
-                && take_identity_matches(v.rendered_take_id.as_deref(), active_take_id)
+struct FallbackRenderedCandidate {
+    take_id: Option<String>,
+    pcm: Arc<Vec<f32>>,
+    breath: Option<Arc<Vec<f32>>>,
+}
+
+struct FallbackTensionCandidate {
+    take_id: Option<String>,
+    pcm: Arc<Vec<f32>>,
+}
+
+impl RenderedFallbackIndex {
+    /// 取一次锁、扫一遍，构建两个缓存的索引。
+    ///
+    /// 只在确实有 clip 需要垫音时才应调用（`build_snapshot` 中惰性构建，见
+    /// 调用点）—— 否则纯命中路径会白付一次 O(cache) 的分组与分配。
+    pub fn build() -> Self {
+        let mut rendered: HashMap<String, Vec<FallbackRenderedCandidate>> = HashMap::new();
+        {
+            let cache = global_rendered_clip_cache()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            // `iter()` 为 LRU 顺序（最近使用优先）；`push` 保序，因此每个
+            // clip_id 的候选列表内部也是 LRU 顺序。
+            for (k, v) in cache.inner.iter() {
+                rendered
+                    .entry(k.clip_id.clone())
+                    .or_default()
+                    .push(FallbackRenderedCandidate {
+                        take_id: v.rendered_take_id.clone(),
+                        pcm: v.pcm_stereo.clone(),
+                        breath: v.breath_noise_stereo.clone(),
+                    });
+            }
+        }
+
+        let mut tension: HashMap<String, Vec<FallbackTensionCandidate>> = HashMap::new();
+        {
+            let cache = global_tension_rendered_clip_cache()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            for (k, v) in cache.inner.iter() {
+                tension
+                    .entry(k.clip_id.clone())
+                    .or_default()
+                    .push(FallbackTensionCandidate {
+                        take_id: v.rendered_take_id.clone(),
+                        pcm: v.pcm_stereo.clone(),
+                    });
+            }
+        }
+
+        Self { rendered, tension }
+    }
+
+    /// 该 clip 最近一次成功的整 clip 渲染（含可选的气声 stem）。
+    pub fn latest_rendered(
+        &self,
+        clip_id: &str,
+        active_take_id: Option<&str>,
+    ) -> Option<(Arc<Vec<f32>>, Option<Arc<Vec<f32>>>)> {
+        self.rendered.get(clip_id)?.iter().find_map(|c| {
+            take_identity_matches(c.take_id.as_deref(), active_take_id)
+                .then(|| (c.pcm.clone(), c.breath.clone()))
         })
-        .map(|(_, v)| v)?;
-    Some(entry.pcm_stereo.clone())
+    }
+
+    /// 该 clip 最近一次成功的 Tension 渲染。
+    pub fn latest_tension(
+        &self,
+        clip_id: &str,
+        active_take_id: Option<&str>,
+    ) -> Option<Arc<Vec<f32>>> {
+        self.tension.get(clip_id)?.iter().find_map(|c| {
+            take_identity_matches(c.take_id.as_deref(), active_take_id).then(|| c.pcm.clone())
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::compute_rendered_clip_hash;
+    use super::{
+        compute_rendered_clip_hash, global_rendered_clip_cache, RenderedClipCacheEntry,
+        RenderedClipCacheKey, RenderedFallbackIndex,
+    };
+    use std::sync::{Arc, Mutex};
+
+    /// 触碰全局整 clip 渲染缓存的用例必须串行：cargo test 默认并行跑用例。
+    static FALLBACK_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    /// 批量垫音索引必须与旧的"逐次扫描"语义一致：LRU 顺序下第一个
+    /// `clip_id` + take 身份都匹配的条目。
+    ///
+    /// 重点锁住"take 过滤发生在**查询时**"这一点：索引在构建期保留了同一
+    /// `clip_id` 的全部候选。若误把 take 过滤提前到构建期、或只保留 LRU 首个，
+    /// 换了 Take 的 clip 就会拿到**旧 Take 的渲染结果**当垫音 —— 那正是
+    /// `rendered_take_id` 这个字段存在的原因（undo 回退场景）。
+    #[test]
+    fn fallback_index_filters_by_take_at_query_time() {
+        let _guard = FALLBACK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let clear = || {
+            global_rendered_clip_cache()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
+        };
+        clear(); // 隔离：全局缓存是进程级的
+
+        let entry = |tag: f32, take: &str| RenderedClipCacheEntry {
+            pcm_stereo: Arc::new(vec![tag, tag]),
+            breath_noise_stereo: None,
+            frames: 1,
+            sample_rate: 44_100,
+            rendered_take_id: Some(take.to_string()),
+        };
+
+        {
+            let mut cache = global_rendered_clip_cache()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            // 先插 take-A（较早 → LRU 顺序靠后）
+            cache.insert(
+                RenderedClipCacheKey {
+                    clip_id: "c1".to_string(),
+                    param_hash: 1,
+                },
+                entry(1.0, "take-A"),
+            );
+            // 再插 take-B（较新 → LRU 顺序靠前）
+            cache.insert(
+                RenderedClipCacheKey {
+                    clip_id: "c1".to_string(),
+                    param_hash: 2,
+                },
+                entry(2.0, "take-B"),
+            );
+        }
+
+        let index = RenderedFallbackIndex::build();
+
+        // 查 take-A：必须命中 take-A，尽管它在 LRU 上靠后。
+        let (pcm_a, _) = index
+            .latest_rendered("c1", Some("take-A"))
+            .expect("take-A entry must be found");
+        assert!(
+            (pcm_a[0] - 1.0).abs() < 1e-6,
+            "take-A query returned the wrong take: {}",
+            pcm_a[0]
+        );
+
+        // 查 take-B：命中 take-B。
+        let (pcm_b, _) = index
+            .latest_rendered("c1", Some("take-B"))
+            .expect("take-B entry must be found");
+        assert!(
+            (pcm_b[0] - 2.0).abs() < 1e-6,
+            "take-B query returned the wrong take: {}",
+            pcm_b[0]
+        );
+
+        // 宽松语义（任一方未知即放行）保持不变 → 取 LRU 首个，即 take-B。
+        let (pcm_any, _) = index
+            .latest_rendered("c1", None)
+            .expect("lenient lookup must hit");
+        assert!(
+            (pcm_any[0] - 2.0).abs() < 1e-6,
+            "expected the LRU-first entry, got {}",
+            pcm_any[0]
+        );
+
+        // 未知 clip 不得命中。
+        assert!(index.latest_rendered("nope", None).is_none());
+        assert!(index.latest_tension("c1", None).is_none());
+
+        clear(); // 清理，避免污染其它用例
+    }
+
 
     #[test]
     fn rendered_clip_hash_changes_when_formant_morph_changes() {
