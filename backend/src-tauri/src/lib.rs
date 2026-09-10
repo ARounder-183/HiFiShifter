@@ -292,6 +292,17 @@ pub fn run() {
             // 将 app_handle 传递给 audio engine worker，使其能向前端推送事件。
             state.audio_engine.set_app_handle(app.handle().clone());
 
+            // ── 模型会话后台预热（绝不阻塞 UI 线程）────────────────────────
+            // 会话构建 + 首次推理烟测在 GPU（DirectML）下需数秒（实测开启
+            // DirectML 时启动到可交互 ~4s，CPU 仅 ~1s）。若这些工作发生在 UI
+            // 线程 / 前端初始化命令 / 引擎 worker / 快照构建上，前端初始化与
+            // 全部 IPC 都会被阻塞。这里只**派发**后台预热线程：UI 立即可交互，
+            // 三个模型的会话在后台并行/串行构建，首个渲染或播放到来时通常已
+            // 就绪（可用性查询 is_available 为非阻塞乐观语义，不触发构建）。
+            crate::nsf_hifigan_onnx::ensure_background_prewarm();
+            crate::fcpe_onnx::ensure_background_prewarm();
+            crate::hnsep_onnx::ensure_background_prewarm();
+
             // Prefer the OS-level app cache dir so peaks persist across runs.
             let base = app
                 .path()

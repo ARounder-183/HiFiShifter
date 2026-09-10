@@ -1129,36 +1129,65 @@ impl NsfHifiganOnnx {
     }
 }
 
-static PROBE: OnceLock<Mutex<Option<Result<(), String>>>> = OnceLock::new();
+/// 后台预热结果：None = 尚未尝试/进行中；Some(Ok) = 就绪；Some(Err) = 失败。
+/// `is_available()` 的非阻塞依据。
+static PREWARM: OnceLock<Mutex<Option<Result<(), String>>>> = OnceLock::new();
+static PREWARM_STARTED: AtomicBool = AtomicBool::new(false);
 static LOGGED_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
     static TLS_SESSION: RefCell<Option<Result<NsfHifiganOnnx, String>>> = RefCell::new(None);
 }
 
-fn probe() -> Result<(), String> {
-    let mutex = PROBE.get_or_init(|| Mutex::new(None));
-    let mut guard = mutex
-        .lock()
-        .map_err(|e| format!("PROBE lock poisoned: {e}"))?;
-    if let Some(ref res) = *guard {
-        return res.clone();
+/// 幂等地启动一次后台会话预热（**绝不阻塞**调用线程）。
+///
+/// `is_available()` 与启动流程用它预热：会话构建 + 烟测可能耗时数秒
+/// （DirectML 首次推理 1.5s+，CPU 仅数十毫秒），绝不能发生在 UI 线程 /
+/// 前端初始化命令 / 引擎 worker / 快照构建上 —— 实测 GPU 设备下启动会被
+/// 阻塞约 4 秒、期间前端无法交互。
+pub fn ensure_background_prewarm() {
+    if PREWARM_STARTED.swap(true, Ordering::AcqRel) {
+        return;
     }
-    let res = get_or_init_shared_session().map(|_| ());
-    *guard = Some(res.clone());
-    res
+    let _ = std::thread::Builder::new()
+        .name("ort-prewarm-nsf-hifigan".to_string())
+        .spawn(|| {
+            let res = get_or_init_shared_session().map(|_| ());
+            *PREWARM
+                .get_or_init(|| Mutex::new(None))
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(res);
+        });
 }
 
+/// 已明确判定不可用时的错误信息（"尚未尝试"不算不可用）。
+fn confirmed_unavailable() -> Option<String> {
+    let guard = PREWARM
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    match guard.as_ref() {
+        Some(Err(e)) => Some(e.clone()),
+        _ => None,
+    }
+}
+
+/// **非阻塞**可用性查询：绝不构建会话（构建交给后台预热 / 显式加载路径）。
+///
+/// 尚未预热完成时返回 true（乐观）—— 调用方在 false 时会**跳过处理器渲染**
+///（产出未处理音频）或跳过分离/分析，乐观是安全侧；真实失败会在首次实际
+/// 使用（load / 预热完成）时暴露并缓存为 false。
 pub fn is_available() -> bool {
-    match probe() {
-        Ok(()) => true,
-        Err(e) => {
+    ensure_background_prewarm();
+    match confirmed_unavailable() {
+        Some(e) => {
             let debug = std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1");
             if debug && !LOGGED_UNAVAILABLE.swap(true, Ordering::Relaxed) {
                 log::warn!("nsf_hifigan_onnx: unavailable: {e}");
             }
             false
         }
+        None => true,
     }
 }
 
@@ -1168,10 +1197,7 @@ pub fn compiled() -> bool {
 }
 
 pub fn model_load_error() -> Option<String> {
-    match probe() {
-        Ok(()) => None,
-        Err(e) => Some(e),
-    }
+    confirmed_unavailable()
 }
 
 pub fn ep_choice() -> String {
@@ -1297,8 +1323,10 @@ pub fn infer_pitch_edit_chunked_optimized(
     if mono_pcm.is_empty() {
         return Ok(vec![]);
     }
-    if let Err(e) = probe() {
-        return Err(e.clone());
+    // 非阻塞可用性检查：真正的会话构建由下方 TLS_SESSION 加载完成
+    //（在该调用线程上按需构建，不在 UI/命令/快照构建路径上同步构建）。
+    if !is_available() {
+        return Err("nsf_hifigan: model unavailable".to_string());
     }
 
     TLS_SESSION.with(|cell| {
@@ -1819,8 +1847,10 @@ pub fn infer_pitch_edit_mono_mel_stretch(
     midi_at_time: impl Fn(f64) -> f64,
     formant_shift_at_time: impl Fn(f64) -> f32,
 ) -> Result<Vec<f32>, String> {
-    if let Err(e) = probe() {
-        return Err(e.clone());
+    // 非阻塞可用性检查：真正的会话构建由下方 TLS_SESSION 加载完成
+    //（在该调用线程上按需构建，不在 UI/命令/快照构建路径上同步构建）。
+    if !is_available() {
+        return Err("nsf_hifigan: model unavailable".to_string());
     }
 
     TLS_SESSION.with(|cell| {

@@ -10,7 +10,6 @@ static ORT_INIT: OnceLock<Result<(), String>> = OnceLock::new();
 static SHARED_SESSION: OnceLock<Mutex<Option<Arc<Mutex<Session>>>>> = OnceLock::new();
 /// Cached EP name selected at session build time (for diagnostic reporting).
 static SELECTED_EP: OnceLock<String> = OnceLock::new();
-static PROBE: OnceLock<Result<(), String>> = OnceLock::new();
 static LOGGED_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
 
 const HNSEP_MODEL_SR: u32 = 44_100;
@@ -208,19 +207,57 @@ pub fn update_ort_ep(_choice: &str, _device_id: Option<i32>) {
         .ok();
 }
 
-fn probe() -> &'static Result<(), String> {
-    PROBE.get_or_init(|| get_or_init_shared_session().map(|_| ()))
+/// 后台预热结果：None = 尚未尝试/进行中；Some(Ok) = 就绪；Some(Err) = 失败。
+/// `is_available()` 的非阻塞依据。
+static PREWARM: OnceLock<Mutex<Option<Result<(), String>>>> = OnceLock::new();
+static PREWARM_STARTED: AtomicBool = AtomicBool::new(false);
+
+/// 幂等地启动一次后台会话预热（**绝不阻塞**调用线程）。
+///
+/// `is_available()` 与启动流程用它预热：会话构建 + 烟测可能耗时数秒
+/// （GPU EP 的首次推理尤其慢），绝不能发生在 UI 线程 / 前端初始化命令 /
+/// 引擎 worker / 快照构建上 —— 那会阻塞前端初始化与全部 IPC。
+pub fn ensure_background_prewarm() {
+    if PREWARM_STARTED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("ort-prewarm-hnsep".to_string())
+        .spawn(|| {
+            let res = get_or_init_shared_session().map(|_| ());
+            *PREWARM
+                .get_or_init(|| Mutex::new(None))
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(res);
+        });
 }
 
+/// 已明确判定不可用时的错误信息（"尚未尝试"不算不可用）。
+fn confirmed_unavailable() -> Option<String> {
+    let guard = PREWARM
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    match guard.as_ref() {
+        Some(Err(e)) => Some(e.clone()),
+        _ => None,
+    }
+}
+
+/// **非阻塞**可用性查询：绝不构建会话（构建交给后台预热 / 显式加载路径）。
+///
+/// 尚未预热完成时返回 true（乐观）—— 调用方在 false 时会跳过处理器/分离/
+/// 分析路径，乐观是安全侧；真实失败会在首次实际使用或预热完成时暴露并缓存。
 pub fn is_available() -> bool {
-    match probe() {
-        Ok(()) => true,
-        Err(e) => {
+    ensure_background_prewarm();
+    match confirmed_unavailable() {
+        Some(e) => {
             if debug_enabled() && !LOGGED_UNAVAILABLE.swap(true, Ordering::Relaxed) {
                 log::warn!("hnsep_onnx: unavailable: {e}");
             }
             false
         }
+        None => true,
     }
 }
 
@@ -358,8 +395,10 @@ pub fn infer_harmonic_noise_mono(
     audio_mono: &[f32],
     sample_rate: u32,
 ) -> Result<(Arc<Vec<f32>>, Arc<Vec<f32>>), String> {
-    if let Err(e) = probe() {
-        return Err(e.clone());
+    // 非阻塞可用性检查：真正的会话构建由下方加载路径完成（在该调用线程上
+    // 按需构建，不在 UI/命令/快照构建路径上同步构建）。
+    if !is_available() {
+        return Err("hnsep: model unavailable".to_string());
     }
 
     let audio_len = audio_mono.len();
