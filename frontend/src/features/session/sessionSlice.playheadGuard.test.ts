@@ -997,9 +997,10 @@ test("features/session/sessionSlice.playheadGuard.test.ts repeated play while pl
         "no-op must not touch the position report",
     );
     assertEqual(next.playheadSec, 42.5, "no-op must not move the playhead");
+    // playbackAnchorSec 是 session 顶层字段（不是 runtime）。
     assertEqual(
-        next.runtime.playbackAnchorSec,
-        waiting.runtime.playbackAnchorSec,
+        next.playbackAnchorSec,
+        waiting.playbackAnchorSec,
         "no-op must not rewrite the playback anchor",
     );
 });
