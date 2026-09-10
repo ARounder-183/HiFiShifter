@@ -10,6 +10,7 @@ import { settingsApi } from "./services/api/settings";
 import { fileBrowserApi } from "./services/api/fileBrowser";
 import { IS_LINUX } from "./utils/platform";
 import { clipboardErrorKey } from "./utils/clipboardError";
+import { reportFrontendError } from "./services/frontendErrorLog";
 import {
     closeVocalShifterSkippedFilesDialog,
     closeReaperSkippedFilesDialog,
@@ -93,6 +94,14 @@ import {
     startRecordingFlow,
     stopRecordingFlow,
 } from "./features/recording/recordingSlice";
+
+/**
+ * 渲染进行多久之后才在状态栏展开进度条与取消按钮。
+ *
+ * 后台预渲染常常几百毫秒就完成，若立即插入控件会让状态栏反复闪动；
+ * 只有"确实在耗时间"的渲染才展开，同时保证长渲染一定有可见的取消入口。
+ */
+const RENDER_CONTROLS_REVEAL_DELAY_MS = 3000;
 
 const statusKey: Record<string, string> = {
     Ready: "status_ready",
@@ -1038,12 +1047,37 @@ function AppInner() {
     const renderingTarget = useAppSelector((state) => state.session.playbackRenderingTarget);
     const renderingBlocking = useAppSelector((state) => state.session.playbackBlockingRenderActive);
     const [renderingProgress, setRenderingProgress] = useState<number | null>(null);
+    // 渲染进行到多久之后才展开进度条与取消入口。
+    // 后台预渲染常常几百毫秒就结束，若一上来就插入控件会让状态栏闪烁；
+    // 因此只有"确实在耗时间"的渲染才展开（见 P2-1）。
+    const [renderingLongRunning, setRenderingLongRunning] = useState(false);
+    useEffect(() => {
+        if (!renderingActive) {
+            setRenderingLongRunning(false);
+            return;
+        }
+        const id = window.setTimeout(
+            () => setRenderingLongRunning(true),
+            RENDER_CONTROLS_REVEAL_DELAY_MS,
+        );
+        return () => window.clearTimeout(id);
+    }, [renderingActive]);
     const rendering = {
         active: renderingActive,
         progress: renderingProgress,
         target: renderingTarget,
         blocking: renderingBlocking,
     };
+
+    // 只有后台预渲染提供取消接口：前台阻塞式预渲染属于"起播"流程的一部分，
+    // 取消它需要与传输状态机协调，此处不做（见 P2-1）。
+    const canCancelRendering =
+        renderingActive && renderingTarget === "background" && !renderingBlocking;
+    const handleCancelRendering = useCallback(() => {
+        void coreApi.cancelBackgroundRender().catch((err: unknown) => {
+            reportFrontendError("cancelBackgroundRender failed", err);
+        });
+    }, []);
 
     const [stretching, setStretching] = useState<{
         active: boolean;
@@ -3877,20 +3911,68 @@ function AppInner() {
                         </span>
                     ) : null}
                     {rendering.active ? (
-                        <span
-                            className="shrink-0 rounded px-1 py-0 text-xs font-medium"
-                            style={{
-                                background: "var(--accent-3)",
-                                color: "var(--accent-11)",
-                                fontSize: "11px",
-                                lineHeight: "16px",
-                            }}
-                        >
-                            {t("rendering")}
-                            {rendering.progress != null
-                                ? ` ${Math.round(rendering.progress * 100)}%`
-                                : ""}
-                        </span>
+                        <Flex align="center" gap="1" className="shrink-0">
+                            <span
+                                className="shrink-0 rounded px-1 py-0 text-xs font-medium"
+                                style={{
+                                    background: "var(--accent-3)",
+                                    color: "var(--accent-11)",
+                                    fontSize: "11px",
+                                    lineHeight: "16px",
+                                }}
+                            >
+                                {t("rendering")}
+                                {rendering.progress != null
+                                    ? ` ${Math.round(rendering.progress * 100)}%`
+                                    : ""}
+                            </span>
+                            {renderingLongRunning ? (
+                                <span
+                                    className="shrink-0 overflow-hidden rounded-full"
+                                    style={{
+                                        width: "64px",
+                                        height: "4px",
+                                        background: "var(--gray-a4)",
+                                    }}
+                                    role="progressbar"
+                                    aria-valuemin={0}
+                                    aria-valuemax={100}
+                                    aria-valuenow={
+                                        rendering.progress != null
+                                            ? Math.round(rendering.progress * 100)
+                                            : undefined
+                                    }
+                                >
+                                    <span
+                                        className="block h-full rounded-full"
+                                        style={{
+                                            width: `${Math.round((rendering.progress ?? 0) * 100)}%`,
+                                            background: "var(--accent-9)",
+                                            transition: "width 150ms linear",
+                                        }}
+                                    />
+                                </span>
+                            ) : null}
+                            {canCancelRendering ? (
+                                <button
+                                    type="button"
+                                    onClick={handleCancelRendering}
+                                    title={t("cancel")}
+                                    aria-label={t("cancel")}
+                                    className="shrink-0 rounded px-1 py-0 text-xs font-medium"
+                                    style={{
+                                        fontSize: "11px",
+                                        lineHeight: "16px",
+                                        color: "var(--accent-11)",
+                                        background: "transparent",
+                                        border: "1px solid var(--accent-6)",
+                                        cursor: "pointer",
+                                    }}
+                                >
+                                    {t("cancel")}
+                                </button>
+                            ) : null}
+                        </Flex>
                     ) : null}
                     <Text size="1" color={error ? "red" : "gray"} className="truncate">
                         {errorText}
