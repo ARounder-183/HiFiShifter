@@ -1,4 +1,5 @@
 import { PitchSnapSettingsDialog } from "./PitchSnapSettingsDialog";
+import { BreathSeparationDialog } from "./BreathSeparationDialog";
 import React, {
     type CSSProperties,
     useCallback,
@@ -51,7 +52,7 @@ import { resolveRootTrackId } from "../../features/session/trackUtils";
 import { useAppTheme } from "../../theme/AppThemeProvider";
 import { getWaveformColors } from "../../theme/waveformColors";
 import type { ProcessorParamDescriptor } from "../../types/api";
-import { paramsApi } from "../../services/api/params";
+import { paramsApi, type BreathSeparationWorkload } from "../../services/api/params";
 import { coreApi } from "../../services/api/core";
 import { webApi } from "../../services/webviewApi";
 import type { ParamFramesPayload } from "../../types/api";
@@ -1550,6 +1551,10 @@ export const PianoRollPanel: React.FC = () => {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [rootTrack?.pitchAnalysisAlgo, rootTrackId]);
 
+    // 开启气声分离前的确认（P2-5）：null = 无待确认项。
+    const [breathConfirmWorkload, setBreathConfirmWorkload] =
+        useState<BreathSeparationWorkload | null>(null);
+
     const handleStaticParamChange = useCallback(
         async (paramId: string, value: number) => {
             if (!rootTrackId) return;
@@ -1569,6 +1574,29 @@ export const PianoRollPanel: React.FC = () => {
         },
         [rootTrackId],
     );
+
+    /**
+     * 请求开启气声分离：先取工作量统计，需要时弹确认框。
+     *
+     * **失败即放行**：这个查询只用于"提前告知"，拿不到就按旧行为直接开启 ——
+     * 一个纯信息性的检查不该成为功能的单点故障。真正的失败会在实际使用时经
+     * `render_warning` 上报（见 P0-5）。
+     */
+    const requestBreathEnable = useCallback(async () => {
+        if (!rootTrackId) return;
+        try {
+            const workload = await paramsApi.getBreathSeparationWorkload(rootTrackId);
+            // 无音频块时没有工作量可言，不必打扰用户。
+            if (!workload.ok || (workload.clipCount ?? 0) === 0) {
+                await handleStaticParamChange("breath_enabled", 1);
+                return;
+            }
+            setBreathConfirmWorkload(workload);
+        } catch (err) {
+            console.error("[requestBreathEnable] workload query failed:", err);
+            await handleStaticParamChange("breath_enabled", 1);
+        }
+    }, [rootTrackId, handleStaticParamChange]);
 
     const getProcessorParamLabel = useCallback(
         (param: ProcessorParamDescriptor) => {
@@ -4897,6 +4925,18 @@ export const PianoRollPanel: React.FC = () => {
 
                 {/* Pitch Snap 设置弹窗 */}
                 <PitchSnapSettingsDialog open={pitchSnapOpen} onOpenChange={setPitchSnapOpen} />
+                {/* 气声分离工作量确认（P2-5） */}
+                <BreathSeparationDialog
+                    open={breathConfirmWorkload !== null}
+                    workload={breathConfirmWorkload}
+                    onOpenChange={(open) => {
+                        if (!open) setBreathConfirmWorkload(null);
+                    }}
+                    onConfirm={() => {
+                        setBreathConfirmWorkload(null);
+                        void handleStaticParamChange("breath_enabled", 1);
+                    }}
+                />
                 <TimelineDisplaySettingsDialog
                     open={timeDisplaySettingsOpen}
                     onOpenChange={setTimeDisplaySettingsOpen}
@@ -5158,10 +5198,12 @@ export const PianoRollPanel: React.FC = () => {
                                         }`}
                                         onClick={(e) => {
                                             e.stopPropagation();
-                                            void handleStaticParamChange(
-                                                "breath_enabled",
-                                                breathOn ? 0 : 1,
-                                            );
+                                            if (breathOn) {
+                                                // 关闭不产生新工作，无需确认。
+                                                void handleStaticParamChange("breath_enabled", 0);
+                                                return;
+                                            }
+                                            void requestBreathEnable();
                                         }}
                                     >
                                         <BreathAirIcon off={!breathOn} />

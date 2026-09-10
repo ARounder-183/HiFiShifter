@@ -1296,6 +1296,15 @@ pub fn restore_param_frames(
     params::restore_param_frames(state, track_id, param, start_frame, frame_count, checkpoint)
 }
 
+/// 开启气声分离前的工作量统计（只读，不触发推理）。见 P2-5。
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_breath_separation_workload(
+    state: State<'_, AppState>,
+    track_id: String,
+) -> serde_json::Value {
+    params::get_breath_separation_workload(state, track_id)
+}
+
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_static_param(
     state: State<'_, AppState>,

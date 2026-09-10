@@ -11,6 +11,20 @@ import {
     paramFramesBinaryToArrays,
 } from "../../components/layout/pianoRoll/paramFramesBinaryCodec";
 
+/** `get_breath_separation_workload` 的返回体（见 P2-5）。 */
+export interface BreathSeparationWorkload {
+    ok: boolean;
+    /** 模型是否可用。**乐观**判断：预热未完成时也为 true。 */
+    available?: boolean;
+    /** 该轨道上的音频块数量（首次开启时的上界）。 */
+    clipCount?: number;
+    /** 这些音频块的总时长（秒）。 */
+    totalDurationSec?: number;
+    /** 当前是否已开启（已开启时用户是在关闭它，无需确认）。 */
+    alreadyEnabled?: boolean;
+    error?: string;
+}
+
 export const paramsApi = {
     /**
      * 取参数曲线段。
@@ -96,6 +110,15 @@ export const paramsApi = {
 
     setStaticParam: (trackId: string, param: string, value: number, checkpoint?: boolean) =>
         invoke<{ ok: boolean }>("set_static_param", trackId, param, value, checkpoint),
+
+    /**
+     * 开启气声分离前的工作量统计（只读，不触发推理）。见 P2-5。
+     *
+     * 用于在用户按下气声开关**之前**告知"需要对几个音频块做分离"，并给出一条
+     * 退路 —— 首次分离是逐块整段神经网络推理，表现为长时间无反应。
+     */
+    getBreathSeparationWorkload: (trackId: string) =>
+        invoke<BreathSeparationWorkload>("get_breath_separation_workload", trackId),
 
     pasteVocalShifterClipboard: (
         selectionStartFrame?: number,

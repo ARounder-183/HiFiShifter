@@ -153,6 +153,11 @@ test("services/invoke.test.ts scripted checks", async () => {
         "import_media_files_as_takes mapping",
     );
     assertEqual(
+        buildTauriArgs("get_breath_separation_workload", ["track-1"]),
+        { trackId: "track-1" },
+        "get_breath_separation_workload mapping",
+    );
+    assertEqual(
         buildTauriArgs("export_diagnostics", ["C:/out/diagnostics.zip"]),
         { outputPath: "C:/out/diagnostics.zip" },
         "export_diagnostics mapping",

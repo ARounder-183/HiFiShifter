@@ -117,6 +117,9 @@ type BuildArgsResult = Record<string, unknown> | undefined | { __unwired: true }
 export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult {
     // 注意：Tauri invoke uses a named-argument object; pywebview uses positional args.
     switch (method) {
+        case "get_breath_separation_workload":
+            return { trackId: args[0] };
+
         case "set_transport": {
             const o: Record<string, unknown> = {};
             if (args[0] !== undefined) o.playheadSec = args[0];

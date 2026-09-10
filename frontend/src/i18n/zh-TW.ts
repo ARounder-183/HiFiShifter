@@ -177,6 +177,15 @@ export const zhTW = {
     loading: "載入中...",
     rendering: "算繪中...",
     synthesizing_current_clip: "正在算繪播放頭所在的音訊區塊...",
+    breath_enable_confirm_title: "開啟氣聲分離？",
+    breath_enable_confirm_body:
+        "此軌道有 {count} 個音訊區塊（共約 {minutes} 分鐘音訊）需在首次開啟時做諧波/雜訊分離。每個音訊區塊整段處理一次，因此可能耗時較長。",
+    breath_enable_confirm_cached_note:
+        "分離結果按音訊區塊快取，每個區塊只需付一次代價，不會在每次播放時重複。",
+    breath_enable_confirm_unavailable:
+        "目前氣聲分離模型無法使用。開啟後這些音訊區塊會算繪失敗並保持靜音。",
+    breath_enable_confirm_ok: "開啟",
+    breath_enable_confirm_ok_anyway: "仍然開啟",
     render_warning_decode_failed: "某個音訊檔案無法讀取，使用它的音訊區塊會保持靜音。",
     render_warning_clip_failed: "某個音訊區塊處理失敗，會保持靜音。",
     render_warning_gpu_disabled:

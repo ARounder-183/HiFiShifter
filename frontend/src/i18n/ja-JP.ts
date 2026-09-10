@@ -186,6 +186,15 @@ export const jaJP = {
     loading: "読み込み中...",
     rendering: "レンダリング中...",
     synthesizing_current_clip: "再生ヘッド上のクリップを合成しています...",
+    breath_enable_confirm_title: "ブレス分離を有効にしますか？",
+    breath_enable_confirm_body:
+        "このトラックには {count} 個のクリップ（約 {minutes} 分の音声）があり、初回はハーモニック/ノイズ分離が必要です。各クリップを一括で処理するため、時間がかかる場合があります。",
+    breath_enable_confirm_cached_note:
+        "分離結果はクリップ単位でキャッシュされるため、このコストはクリップごとに一度だけです。",
+    breath_enable_confirm_unavailable:
+        "分離モデルは現在利用できません。有効にするとこれらのクリップはレンダリングに失敗し、無音になります。",
+    breath_enable_confirm_ok: "有効にする",
+    breath_enable_confirm_ok_anyway: "それでも有効にする",
     render_warning_decode_failed:
         "音声ファイルを読み込めませんでした。これを使うクリップは無音になります。",
     render_warning_clip_failed: "クリップの処理に失敗しました。このクリップは無音になります。",

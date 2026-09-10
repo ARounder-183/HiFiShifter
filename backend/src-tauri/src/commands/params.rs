@@ -616,6 +616,52 @@ pub(super) fn restore_param_frames(
     serde_json::json!({"ok": true})
 }
 
+/// 统计"开启气声分离"的工作量，供前端在用户**真正开启之前**给出预期（见 P2-5）。
+///
+/// 为什么需要：气声分离（HNSEP）对**每个片段整段**做一次神经网络推理，首次开启
+/// 时表现为"长时间没有任何反应"。本命令不触发任何计算，只做只读统计，让前端能
+/// 在用户按下开关前把工作量与风险讲清楚，并提供"算了，不开"的退路。
+///
+/// 两点如实说明：
+/// - 无法廉价预判"哪些片段已有分离缓存" —— 缓存键含音频内容，取内容就要解码。
+///   因此 `clipCount` 是**该轨道上的全部片段**，即首次开启的上界。
+/// - `available` 是**乐观**判断（预热未完成时返回 true，见 `hnsep_onnx::is_available`）。
+///   真正的失败会在首次使用时经 `render_warning` 上报给用户（见 P0-5）。
+pub(super) fn get_breath_separation_workload(
+    state: State<'_, AppState>,
+    track_id: String,
+) -> serde_json::Value {
+    let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+
+    let Some(root) = tl.resolve_root_track_id(&track_id) else {
+        return serde_json::json!({"ok": false, "error": "track not found"});
+    };
+
+    // 处理器按 root track 生效，因此统计该 root 下的全部片段。
+    let (clip_count, total_sec) = tl
+        .clips
+        .iter()
+        .filter(|c| tl.resolve_root_track_id(&c.track_id).as_deref() == Some(root.as_str()))
+        .fold((0usize, 0.0f64), |(n, sec), c| {
+            (n + 1, sec + c.length_sec.max(0.0))
+        });
+
+    // 已开启时用户是在**关闭**它，不产生新工作 —— 前端据此跳过确认框。
+    let already_enabled = tl
+        .params_by_root_track
+        .get(&root)
+        .map(|e| crate::pitch_editing::extra_param_enabled(&e.extra_params, "breath_enabled"))
+        .unwrap_or(false);
+
+    serde_json::json!({
+        "ok": true,
+        "available": crate::hnsep_onnx::is_available(),
+        "clipCount": clip_count,
+        "totalDurationSec": total_sec,
+        "alreadyEnabled": already_enabled,
+    })
+}
+
 pub(super) fn get_static_param(
     state: State<'_, AppState>,
     track_id: String,

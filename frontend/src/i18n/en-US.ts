@@ -269,6 +269,15 @@ export const enUS = {
     loading: "Loading...",
     rendering: "Rendering...",
     synthesizing_current_clip: "Synthesizing the clip under the playhead...",
+    breath_enable_confirm_title: "Enable breath separation?",
+    breath_enable_confirm_body:
+        "This track has {count} audio clip(s) (about {minutes} min of audio) that need harmonic/noise separation the first time. Each clip is processed in one pass, so this can take a while.",
+    breath_enable_confirm_cached_note:
+        "Separation results are cached per clip, so this cost is paid once per clip - not on every playback.",
+    breath_enable_confirm_unavailable:
+        "The separation model is currently unavailable. Enabling breath will make these clips fail to render and stay silent.",
+    breath_enable_confirm_ok: "Enable",
+    breath_enable_confirm_ok_anyway: "Enable anyway",
     render_warning_decode_failed:
         "An audio file could not be read, so clips using it will stay silent.",
     render_warning_clip_failed: "A clip failed to process and will stay silent.",

@@ -263,6 +263,15 @@ export const koKR = {
     loading: "로딩 중...",
     rendering: "렌더링 중...",
     synthesizing_current_clip: "인디케이터 위치의 클립을 합성하는 중...",
+    breath_enable_confirm_title: "브레스 분리를 사용할까요?",
+    breath_enable_confirm_body:
+        "이 트랙에는 {count}개의 클립(약 {minutes}분 분량)이 있으며, 처음에는 하모닉/노이즈 분리가 필요합니다. 각 클립을 한 번에 처리하므로 시간이 걸릴 수 있습니다.",
+    breath_enable_confirm_cached_note:
+        "분리 결과는 클립별로 캐시되므로 이 비용은 클립당 한 번만 발생합니다.",
+    breath_enable_confirm_unavailable:
+        "분리 모델을 현재 사용할 수 없습니다. 사용하면 이 클립들은 렌더링에 실패하고 무음이 됩니다.",
+    breath_enable_confirm_ok: "사용",
+    breath_enable_confirm_ok_anyway: "그래도 사용",
     render_warning_decode_failed:
         "오디오 파일을 읽을 수 없어, 이를 사용하는 클립은 무음으로 유지됩니다.",
     render_warning_clip_failed: "클립 처리에 실패하여 해당 클립은 무음으로 유지됩니다.",

@@ -646,6 +646,7 @@ pub fn run() {
             commands::add_clip,
             commands::create_clips_bulk,
             commands::get_static_param,
+            commands::get_breath_separation_workload,
             commands::set_static_param,
             commands::remove_clip,
             commands::remove_clips,

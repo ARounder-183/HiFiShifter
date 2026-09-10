@@ -176,6 +176,15 @@ export const zhCN = {
     loading: "加载中...",
     rendering: "渲染中...",
     synthesizing_current_clip: "正在合成播放头所在的音频块...",
+    breath_enable_confirm_title: "开启气声分离？",
+    breath_enable_confirm_body:
+        "该轨道有 {count} 个音频块（共约 {minutes} 分钟音频）需在首次开启时做谐波/噪声分离。每个音频块整段处理一次，因此可能耗时较长。",
+    breath_enable_confirm_cached_note:
+        "分离结果按音频块缓存，每个块只需付一次代价，不会在每次播放时重复。",
+    breath_enable_confirm_unavailable:
+        "当前气声分离模型不可用。开启后这些音频块会渲染失败并保持静音。",
+    breath_enable_confirm_ok: "开启",
+    breath_enable_confirm_ok_anyway: "仍然开启",
     render_warning_decode_failed: "某个音频文件无法读取，使用它的音频块会保持静音。",
     render_warning_clip_failed: "某个音频块处理失败，会保持静音。",
     render_warning_gpu_disabled:
