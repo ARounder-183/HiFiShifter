@@ -873,6 +873,57 @@ fn create_vslib_placeholder() {
     }
 }
 
+/// DirectML.dll 的合理最小体积。
+///
+/// `ort-sys` 用 `cargo:rustc-link-lib=DirectML` 建立了**加载期**导入，因此
+/// Windows 加载器在进程启动时就必须成功解析 `DirectML.dll`。若该文件是
+/// 0 字节（实测 `copy-dylibs` 偶发只写出空文件），可执行文件会在启动阶段
+/// 直接失败（退出码 `0xC0000020`），表现为"测试/程序跑不起来"。
+const DIRECTML_MIN_VALID_BYTES: u64 = 1 << 20; // 1 MiB
+
+/// 文件存在且体积合理，才认为 DirectML.dll 可用。
+fn is_usable_directml(path: &std::path::Path) -> bool {
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && m.len() >= DIRECTML_MIN_VALID_BYTES)
+        .unwrap_or(false)
+}
+
+/// 在 ORT 预编译缓存中找回可用的 DirectML.dll：
+/// `%LOCALAPPDATA%\ort.pyke.io\dfbin\<target-triple>\<hash>\DirectML.dll`
+///
+/// 同一 triple 下可能有多个 hash 目录（不同特性组合），取体积最大的一份。
+fn find_cached_directml() -> Option<std::path::PathBuf> {
+    let local = std::env::var_os("LOCALAPPDATA")?;
+    let triple = std::env::var("TARGET").ok()?;
+    let triple_dir = std::path::PathBuf::from(local)
+        .join("ort.pyke.io")
+        .join("dfbin")
+        .join(triple);
+
+    let mut best: Option<(u64, std::path::PathBuf)> = None;
+    for entry in std::fs::read_dir(&triple_dir).ok()?.flatten() {
+        let candidate = entry.path().join("DirectML.dll");
+        if let Ok(md) = std::fs::metadata(&candidate) {
+            if md.is_file()
+                && md.len() >= DIRECTML_MIN_VALID_BYTES
+                && best.as_ref().map(|(len, _)| md.len() > *len).unwrap_or(true)
+            {
+                best = Some((md.len(), candidate));
+            }
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
+/// 先整读再整写，避免再次产生半截/空文件。
+fn copy_whole_file(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    let bytes = std::fs::read(src)?;
+    if let Some(parent) = dst.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(dst, &bytes)
+}
+
 /// Copy DirectML.dll from the ORT build output (placed by ort-sys copy-dylibs)
 /// to the resources directory so Tauri can validate and bundle it into the
 /// NSIS installer. DirectML.dll is loaded dynamically by ONNX Runtime, so
@@ -894,13 +945,53 @@ fn copy_directml_dll() {
     let target_dir = Path::new(&out_dir).ancestors().nth(3).unwrap();
     let dll_src = target_dir.join("DirectML.dll");
 
-    if !dll_src.exists() {
-        println!(
-            "cargo:warning=[ort] DirectML.dll not found at {}",
-            dll_src.display()
-        );
-        return;
+    // `deps/` 与 profile 目录都需要：cargo test 生成的测试二进制位于
+    // `target/<profile>/deps/`，Windows 加载器从**可执行文件所在目录**解析
+    // 加载期导入，因此两处都必须有可用副本。
+    let runtime_copies = [dll_src.clone(), target_dir.join("deps").join("DirectML.dll")];
+
+    // ── 自愈 ────────────────────────────────────────────────────────────────
+    // 实测 ort-sys 的 copy-dylibs 会偶发只写出 0 字节的 DirectML.dll。此时
+    // 任何链接了 DirectML 导入表的二进制（含测试二进制）都无法启动，且错误
+    // 表现为退出码 0xC0000020，难以定位到根因。这里从 ORT 预编译缓存取回
+    // 真品补齐 —— 只在文件缺失/过小时才写，避免与 rerun-if-changed 形成重建循环。
+    if !is_usable_directml(&dll_src) {
+        match find_cached_directml() {
+            Some(cached) => {
+                for dst in &runtime_copies {
+                    if let Err(e) = copy_whole_file(&cached, dst) {
+                        println!(
+                            "cargo:warning=[ort] failed to restore DirectML.dll at {}: {}",
+                            dst.display(),
+                            e
+                        );
+                    }
+                }
+                println!(
+                    "cargo:warning=[ort] DirectML.dll at {} was missing/empty — restored from ORT cache ({})",
+                    dll_src.display(),
+                    cached.display()
+                );
+            }
+            None => {
+                println!(
+                    "cargo:warning=[ort] DirectML.dll is missing or empty at {} and no usable copy was found in %LOCALAPPDATA%\\ort.pyke.io\\dfbin — \
+                     test binaries and the app will fail to start until it is restored",
+                    dll_src.display()
+                );
+                return;
+            }
+        }
+    } else {
+        // 可用时也确保 deps/ 有副本（ort-sys 不一定写到这里）。
+        let deps_dll = &runtime_copies[1];
+        if !is_usable_directml(deps_dll) {
+            let _ = copy_whole_file(&dll_src, deps_dll);
+        }
     }
+
+    // 让 cargo 在 DLL 被替换/清空时重新执行本脚本（内容未变则不会触发）。
+    println!("cargo:rerun-if-changed={}", dll_src.display());
 
     let resource_dir = Path::new("resources");
     let _ = std::fs::create_dir_all(resource_dir);
