@@ -667,20 +667,59 @@ pub fn drop_shared_session() {
 }
 
 /// 初始化（或获取已有的）全局 Session。
+///
+/// ★ 构建流程的关键约束：**容器锁绝不跨构建持有**。会话构建是秒级操作
+/// （DirectML shader 预编译、CoreML 图编译），且可能因驱动问题挂起 ——
+/// 旧实现持容器锁构建，导致构建期间设备切换（`update_ort_ep`）、其他渲染
+/// 线程、乃至关机清理全部卡死（实测：设备切换后渲染进度永久卡在 0%，
+/// 退出时 `could not acquire SHARED_SESSION lock at shutdown`）。
+///
+/// 正确流程：容器锁快速检查 → **释放容器锁** → 全局构建锁内构建
+/// （与 FCPE / HNSEP 的构建串行化，避免并发 D3D12 初始化在驱动层死锁）
+/// → 容器锁写回。构建前后比对 EP 设置代数：构建期间用户再次切换设备时
+/// 丢弃陈旧结果并按当前设置重建（最多重试 3 次）。
 fn get_or_init_shared_session() -> Result<Arc<Mutex<Session>>, String> {
     let mutex = SHARED_SESSION.get_or_init(|| Mutex::new(None));
-    let mut guard = mutex
+    // 快路径：已有会话直接克隆返回。
+    if let Some(session) = mutex
         .lock()
-        .map_err(|e| format!("SHARED_SESSION lock poisoned: {e}"))?;
-    if let Some(ref session) = *guard {
-        return Ok(Arc::clone(session));
+        .map_err(|e| format!("SHARED_SESSION lock poisoned: {e}"))?
+        .clone()
+    {
+        return Ok(session);
     }
-    ensure_ort_init()?;
-    let (onnx_path, _cfg_path) = resolve_model_paths()?;
-    let session = build_session_with_ep(&onnx_path)?;
-    let arc = Arc::new(Mutex::new(session));
-    *guard = Some(Arc::clone(&arc));
-    Ok(arc)
+
+    let _build_guard = crate::vocoder_ort_session::session_build_lock()
+        .lock()
+        .map_err(|e| format!("session build lock poisoned: {e}"))?;
+    // 双重检查：等构建锁期间其他线程（如设备切换的异步预热）可能已完成构建。
+    if let Some(session) = mutex
+        .lock()
+        .map_err(|e| format!("SHARED_SESSION lock poisoned: {e}"))?
+        .clone()
+    {
+        return Ok(session);
+    }
+
+    // 构建期间用户再次切换设备（EP 设置代数推进）会让本次构建结果过时 ——
+    // 丢弃并按当前设置重建，最多 3 次。
+    for _ in 0..3 {
+        let generation_before = crate::vocoder_ort_session::ep_settings_generation();
+        ensure_ort_init()?;
+        let (onnx_path, _cfg_path) = resolve_model_paths()?;
+        let session = build_session_with_ep(&onnx_path)?;
+        if crate::vocoder_ort_session::ep_settings_generation() != generation_before {
+            log::warn!("[nsf_hifigan] inference device changed during session build — rebuilding with the new EP");
+            continue;
+        }
+        let arc = Arc::new(Mutex::new(session));
+        mutex
+            .lock()
+            .map_err(|e| format!("SHARED_SESSION lock poisoned: {e}"))?
+            .replace(arc.clone());
+        return Ok(arc);
+    }
+    Err("inference device kept changing during session build".to_string())
 }
 
 pub fn update_ort_ep(choice: &str, device_id: Option<i32>) {
@@ -704,6 +743,19 @@ pub fn update_ort_ep(choice: &str, device_id: Option<i32>) {
     // 清空 Active EP：会话是惰性重建的，在下一次渲染真正把新会话建起来之前
     // 不能继续上报旧 EP（那正是菜单里"显示 GPU 但实际在跑 CPU"的原因）。
     set_active_ep("unknown");
+
+    // 异步预热：立即在后台用新 EP 重建会话。构建可能耗时数秒（DML shader
+    // 预编译 / CoreML 图编译）甚至因驱动问题失败 —— 预热把它移出渲染热路径，
+    // 渲染线程只需等构建锁（且双重检查后直接复用预热结果，不再重复构建）。
+    // 失败仅记录日志：下一次渲染请求的 load 会再次尝试构建。
+    std::thread::Builder::new()
+        .name("ort-session-prewarm-vocoder".into())
+        .spawn(|| {
+            if let Err(e) = get_or_init_shared_session() {
+                log::warn!("[nsf_hifigan] session pre-warm failed: {e}");
+            }
+        })
+        .ok();
 }
 
 pub struct NsfHifiganOnnx {

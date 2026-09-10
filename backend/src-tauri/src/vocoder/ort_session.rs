@@ -25,6 +25,7 @@ use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
 use serde::Serialize;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 /// Mel-frame length used by the post-creation GPU smoke test.
@@ -120,21 +121,59 @@ static RUNTIME_EP_OVERRIDE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 /// Takes precedence over the `HIFISHIFTER_DML_DEVICE_ID` env var.
 static RUNTIME_DML_DEVICE_ID: OnceLock<Mutex<Option<i32>>> = OnceLock::new();
 
+/// EP 设置代数：`set_runtime_ep_override` / `set_runtime_dml_device_id` 每次
+/// 实际变更取值时递增。
+///
+/// 会话构建是秒级操作 —— 构建期间用户再次切换设备时，构建结果就是旧
+/// EP / 旧设备的陈旧会话。构建方在构建前后各读一次该值即可检测并丢弃
+/// 陈旧结果（见各模块 `get_or_init_shared_session`）。
+static EP_SETTINGS_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// 当前 EP 设置代数。
+pub(crate) fn ep_settings_generation() -> u64 {
+    EP_SETTINGS_GENERATION.load(Ordering::Acquire)
+}
+
 /// Set the runtime EP override. Pass `None` to clear the override.
 pub fn set_runtime_ep_override(ep: Option<String>) {
-    if let Ok(mut guard) = RUNTIME_EP_OVERRIDE.get_or_init(|| Mutex::new(None)).lock() {
+    let mut guard = RUNTIME_EP_OVERRIDE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if guard.as_deref() != ep.as_deref() {
+        EP_SETTINGS_GENERATION.fetch_add(1, Ordering::AcqRel);
         *guard = ep;
     }
 }
 
 /// Set the runtime DirectML device ID override. Pass `None` to clear.
 pub fn set_runtime_dml_device_id(device_id: Option<i32>) {
-    if let Ok(mut guard) = RUNTIME_DML_DEVICE_ID
+    let mut guard = RUNTIME_DML_DEVICE_ID
         .get_or_init(|| Mutex::new(None))
         .lock()
-    {
+        .unwrap_or_else(|e| e.into_inner());
+    if *guard != device_id {
+        EP_SETTINGS_GENERATION.fetch_add(1, Ordering::AcqRel);
         *guard = device_id;
     }
+}
+
+/// 全局会话构建串行锁：三个 ONNX 模块（Vocoder / FCPE / HNSEP）的会话
+/// 重建共用。
+///
+/// DirectML 会话创建涉及 D3D12 设备与命令队列的初始化。两个线程并发创建
+/// DML 会话（设备切换时 Vocoder 的渲染线程重建与 FCPE 的 pitch 分析线程
+/// TLS 重载会同时触发）可能在驱动层互相死锁 —— 实测表现为渲染进度永久
+/// 卡在 0%，且应用退出时无法清理会话（日志：
+/// `could not acquire SHARED_SESSION lock at shutdown`）。
+///
+/// ★ 该锁只保护"构建"本身；**绝不允许**在持有它的情况下再去锁各模块的
+/// 会话容器（容器锁的持有时间必须保持在微秒级，否则设备切换与关机清理
+/// 会被构建阻塞）。各模块的构建流程：容器锁快速检查 → 本锁内构建（容器
+/// 锁已释放）→ 容器锁写回。
+pub(crate) fn session_build_lock() -> &'static Mutex<()> {
+    static BUILD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    BUILD_LOCK.get_or_init(|| Mutex::new(()))
 }
 
 /// Resolve the DirectML device ID to use, in priority order:

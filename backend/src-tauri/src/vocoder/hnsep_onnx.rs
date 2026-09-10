@@ -115,18 +115,46 @@ pub fn selected_ep_name() -> Option<&'static str> {
 
 fn get_or_init_shared_session() -> Result<Arc<Mutex<Session>>, String> {
     let mutex = SHARED_SESSION.get_or_init(|| Mutex::new(None));
-    let mut guard = mutex
+    // 快路径：已有会话直接克隆返回。
+    if let Some(session) = mutex
         .lock()
-        .map_err(|e| format!("SHARED_SESSION lock poisoned: {e}"))?;
-    if let Some(ref session) = *guard {
-        return Ok(Arc::clone(session));
+        .map_err(|e| format!("SHARED_SESSION lock poisoned: {e}"))?
+        .clone()
+    {
+        return Ok(session);
     }
-    ensure_ort_init()?;
-    let onnx_path = resolve_model_path()?;
-    let session = build_session_with_ep(&onnx_path)?;
-    let arc = Arc::new(Mutex::new(session));
-    *guard = Some(Arc::clone(&arc));
-    Ok(arc)
+    // 慢路径：构建在全局构建锁内进行（与 Vocoder / FCPE 串行化，避免并发
+    // D3D12 初始化在驱动层死锁），且**不持有容器锁** —— 构建是秒级操作，
+    // 持容器锁构建会让设备切换与关机清理全部卡死。
+    let _build_guard = crate::vocoder_ort_session::session_build_lock()
+        .lock()
+        .map_err(|e| format!("session build lock poisoned: {e}"))?;
+    // 双重检查：等锁期间其他线程（如设备切换的异步预热）可能已完成构建。
+    if let Some(session) = mutex
+        .lock()
+        .map_err(|e| format!("SHARED_SESSION lock poisoned: {e}"))?
+        .clone()
+    {
+        return Ok(session);
+    }
+    // 构建期间 EP 设置再次变化（用户连续切换设备）→ 丢弃陈旧结果并重建。
+    for _ in 0..3 {
+        let generation_before = crate::vocoder_ort_session::ep_settings_generation();
+        ensure_ort_init()?;
+        let onnx_path = resolve_model_path()?;
+        let session = build_session_with_ep(&onnx_path)?;
+        if crate::vocoder_ort_session::ep_settings_generation() != generation_before {
+            log::warn!("[hnsep] inference device changed during session build — rebuilding with the new EP");
+            continue;
+        }
+        let arc = Arc::new(Mutex::new(session));
+        mutex
+            .lock()
+            .map_err(|e| format!("SHARED_SESSION lock poisoned: {e}"))?
+            .replace(arc.clone());
+        return Ok(arc);
+    }
+    Err("inference device kept changing during session build".to_string())
 }
 
 /// Drop the shared session to release GPU/CPU memory. Called on app exit.
@@ -154,6 +182,15 @@ pub fn update_ort_ep(_choice: &str, _device_id: Option<i32>) {
             *guard = None;
         }
     }
+    // 异步预热：立即在后台用新 EP 重建会话，把秒级构建移出渲染热路径。
+    std::thread::Builder::new()
+        .name("ort-session-prewarm-hnsep".into())
+        .spawn(|| {
+            if let Err(e) = get_or_init_shared_session() {
+                log::warn!("[hnsep] session pre-warm failed: {e}");
+            }
+        })
+        .ok();
 }
 
 fn probe() -> &'static Result<(), String> {
