@@ -171,10 +171,10 @@ textarea {
     font-family: inherit;
 }
 
-:where(button, [role="button"], .rt-BaseButton):focus-visible {
-    outline: 2px solid color-mix(in oklab, var(--qt-highlight) 72%, white 28%);
-    outline-offset: 1px;
-    box-shadow: 0 0 0 4px color-mix(in oklab, var(--qt-highlight) 24%, transparent);
+.rt-BaseButton:focus-visible,
+:where(button, [role="button"]):focus-visible {
+    outline: none;
+    box-shadow: none;
 }
 
 :where(input, textarea, select, .rt-TextFieldInput, .rt-SelectTrigger):focus-visible {
