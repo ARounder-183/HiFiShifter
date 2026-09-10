@@ -953,7 +953,16 @@ fn smoke_test_gpu_session(
     );
     let (tx, rx) = std::sync::mpsc::channel();
     let timeout = smoke_test_timeout(ep_name);
-    let run_thread = std::thread::spawn(move || {
+    // ★ 绝不 join 此线程（历史致命缺陷，已定位到确切位置）：
+    // 线程把结果与会话经 channel 送出后即可结束，调用方无需 join 也能拿到
+    // 全部数据。而实测 ORT/DirectML 推理线程的**退出清理**（TLS/线程本地
+    // 分配器、D3D12 每线程状态）会偶发挂起 —— 一旦 join，构建线程就永久
+    // 阻塞在退出清理上，进而永久持有全局会话构建锁：其他模块的构建、渲染
+    // pass 的全部 Clip、乃至关机清理全部卡死（日志表现为渲染进度永久 0%，
+    // 且烟测超时/禁用日志都不出现，因为线程根本没走到超时分支）。
+    // 线程句柄在此丢弃（分离），其退出由 OS 处理；即便退出清理挂起，泄漏的
+    // 也只是一个已无用的线程（会话已移交调用方）。
+    let _run_thread = std::thread::spawn(move || {
         // Run inside a block so the returned SessionOutputs (which borrow
         // the session) are dropped before we move the session back.
         let result = {
@@ -969,7 +978,6 @@ fn smoke_test_gpu_session(
                 "ort_session[{role:?}]: smoke stage=inference_returned elapsed_ms={}",
                 smoke_started.elapsed().as_millis()
             );
-            let _ = run_thread.join();
             match result {
                 Ok(_) => {
                     // 成功用例：info 而非 error —— EP 功能正常是健康状态，
