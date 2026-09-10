@@ -3014,11 +3014,16 @@ function AppInner() {
     useEffect(() => installFocusSurfaceTracking(), []);
 
     useEffect(() => {
-        if (!runtimeIsPlaying) return;
-        // Keep playhead following backend audio clock.
-        // 用 in-flight guard 防止轮询请求堆积；并适度降频以降低 Redux/React 压力。
-        // Increase playhead sync frequency to ~30Hz for smoother playhead updates
-        const intervalMs = 33;
+        // ★ 常驻轮询（自愈）：播放中 ~30Hz；未播放时低频（400ms）作看门狗。
+        //
+        // 旧实现在未播放时直接 return（不建 interval），而前端 `isPlaying` 只是
+        // 引擎状态的**镜像**：任何一次误翻转（竞态采样的迟到响应、刷新、外部
+        // 命令）都会让轮询彻底停摆 —— 前端**再也无法自愈**，于是出现"引擎确实
+        // 在播放、音频在响，但播放光标永久冻结"，并且按空格被误判为"未播放"
+        // 而重新播放（把传输层 seek 回播放头，音频从头开始）。低频看门狗使镜像
+        // 在 ≤~400ms 内自我纠正：首个纠正采样即翻转 isPlaying、恢复 30Hz 与
+        // 光标推进。
+        const intervalMs = runtimeIsPlaying ? 33 : 400;
         const id = window.setInterval(() => {
             // 阻塞式前台预渲染（target="original"）阶段后端还未真正进入 playing，
             // 若此时同步会把前端"准备播放"状态误判为停止，导致 stop 锚点丢失。

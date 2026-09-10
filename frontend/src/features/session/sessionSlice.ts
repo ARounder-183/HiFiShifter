@@ -4019,14 +4019,23 @@ const sessionSlice = createSlice({
                 // 上游被拦截）：清除标志。首个前进采样同时携带新位置与时延
                 // 外推，视觉插值以新鲜锚点从起播位置自然恢复推进。
                 state.runtime.playbackWaitingForRender = false;
-                state.runtime.playbackPositionSec = nextPositionSec;
                 state.runtime.playbackDurationSec = nextDurationSec;
 
-                if (nextIsPlaying || nextplayheadSec !== state.playheadSec) {
-                    state.playheadSec = nextplayheadSec;
-                    // 记录采样时刻：视觉插值据此把外推直线锚定在该时刻
-                    // （而非 React 提交时刻），使采样值与锚定时刻严格配对。
-                    state.playheadSampledAtMs = sampledNowMs;
+                // ★ 光标写入规则：播放中采样照常驱动；停止态采样**仅当引擎给出
+                // > 0 的冻结点**（自然结束 / 冻结在真实位置）时才对齐光标 ——
+                // handle_stop 会把引擎位置归零，若把该 0 应用进来会把用户光标
+                // 拽到工程开头（停止时的光标定位由 stop 路径的 stopped_at /
+                // 锚点回写负责）。
+                // 该规则同时使"常驻低频看门狗轮询"（见 App.tsx）安全：未播放时
+                // 采样通常读到 0，只用于纠正 isPlaying 镜像，不触碰光标。
+                if (nextIsPlaying || nextplayheadSec > 0) {
+                    state.runtime.playbackPositionSec = nextPositionSec;
+                    if (nextplayheadSec !== state.playheadSec) {
+                        state.playheadSec = nextplayheadSec;
+                        // 记录采样时刻：视觉插值据此把外推直线锚定在该时刻
+                        // （而非 React 提交时刻），使采样值与锚定时刻严格配对。
+                        state.playheadSampledAtMs = sampledNowMs;
+                    }
                 }
                 if (!nextIsPlaying) {
                     state.playbackClipId = null;

@@ -172,14 +172,13 @@ export const playOriginal = createAsyncThunk<PlayOriginalResult, void>(
             return { ok: true, clipId: null, anchorSec, noop: true };
         }
 
-        // Ensure backend transport is in sync before starting playback.
-        // set_transport 与 play_original 作为单个原子序列入链（见
-        // transportInvokeChain）：两者之间插入的 stop_audio 会把引擎停在新播放
-        // 的起始位置上，前端却按"已播放"处理。
-        const result = await enqueueTransportCommand(async () => {
-            await webApi.setTransport({ playheadSec: anchorSec });
-            return webApi.playOriginal(0);
-        });
+        // ★ 不再前置 set_transport：后端 `play_original` 自身就按引擎时间线的
+        // 播放头 seek（等价且原子），前置的 set_transport 是**多余的独立 seek**：
+        // 当引擎其实已在播放（前端镜像误判为未播放、或 thunk 早于镜像修正而
+        // 执行）时，这次 seek 会把传输层拽回播放头 —— 音频"从头重新开始"，
+        // 而后端的幂等 no-op 已无意义（seek 发生在它之前）。移除后，重复触发
+        // 真正成为完全 no-op（后端幂等兜底），光标不再被拽回。
+        const result = await enqueueTransportCommand(() => webApi.playOriginal(0));
         return {
             ...result,
             clipId: null,
