@@ -1836,7 +1836,8 @@ fn render_background_pass(
         // `f_infer` 无需环境变量即可见：它是 P1-2 唯一决定变量，默认输出能省掉
         // 一次"要开日志复现才拿得到"的往返（见 render_profile 模块说明）。
         log::warn!(
-            "[bg_render] complete: {} clips, {} hit, {} miss, {} ok, {} fail in {:.2}s (inference {:.2}ms x{}, f_infer={:.3})",
+            "[bg_render] complete: {} clips, {} hit, {} miss, {} ok, {} fail in {:.2}s \
+             (inference {:.2}ms x{}, f_infer={:.3}; chunked_clips={} multi_chunk_clips={} chunks_total={} multi_chunk_fraction={:.3})",
             total,
             cache_hit_count,
             cache_miss_count,
@@ -1845,7 +1846,11 @@ fn render_background_pass(
             pass_elapsed.as_secs_f64(),
             profile.inference_ms,
             profile.inference_runs,
-            profile.inference_fraction
+            profile.inference_fraction,
+            profile.chunked_path_clips,
+            profile.clips_with_multiple_chunks,
+            profile.chunks_total,
+            profile.multi_chunk_fraction
         );
 
         // 旧代数线程完成时不得清理新一轮渲染的全局状态。

@@ -1492,6 +1492,10 @@ pub fn infer_pitch_edit_chunked_optimized(
         }
 
         let total_chunks = (t + CHUNK_MAX_FRAMES - 1) / CHUNK_MAX_FRAMES;
+        // 采集分块分布：P0-4 的收益完全取决于"是否真有 clip 被切成多块"（见
+        // render_profile）。仅在 CHUNK_MAX_FRAMES 路径记录，mel-stretch 路径
+        // 另有自己的按秒分块常量，混入会污染统计。
+        crate::render_profile::record_chunking(total_chunks);
         let processed_before = cached_chunks.len();
         debug_eprintln!(
             "[nsf_hifigan] chunked_opt: t={} chunks={} cached={} infer={}",

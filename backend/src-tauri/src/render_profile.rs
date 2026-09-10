@@ -31,6 +31,21 @@ static INFERENCE_MICROS: AtomicU64 = AtomicU64::new(0);
 /// 本轮累计的 `session.run` 次数（用于区分"单次很慢"与"次数很多"）。
 static INFERENCE_RUNS: AtomicU64 = AtomicU64::new(0);
 
+/// 本轮进入 `CHUNK_MAX_FRAMES` 分块路径的 clip 数。
+///
+/// 采集它的目的（回答 §7 非阻塞问题 5 / 支撑 P0-4 的取舍）：P0-4「取消检查点
+/// 下沉到 chunk 边界」的收益完全取决于**有多少 clip 真的被切成多个分块**。
+/// 此前该结论是**推断**出来的（`CHUNK_MAX_FRAMES = 4096` 帧 ≈ 47.5 s，而
+/// README 推荐短切片工作流 → 多数 clip 应只有 1 块）。有了这个计数，"多数如此"
+/// 就从推断变成可核验的事实，取舍不必再靠论证站住。
+static CHUNKED_PATH_CLIPS: AtomicU64 = AtomicU64::new(0);
+
+/// 上述 clip 中分块数 > 1 的数量。它 > 0 时，P0-4 才可能有收益。
+static CLIPS_WITH_MULTIPLE_CHUNKS: AtomicU64 = AtomicU64::new(0);
+
+/// 本轮分块总数（含每块的重推理）。
+static CHUNKS_TOTAL: AtomicU64 = AtomicU64::new(0);
+
 /// 最近一次完整渲染轮次的画像，供诊断命令读取（无需解析日志）。
 static LAST_PASS: Mutex<Option<RenderPassProfile>> = Mutex::new(None);
 
@@ -45,6 +60,14 @@ pub struct RenderPassProfile {
     pub total_ms: f64,
     /// `inference_ms / total_ms`，即方案中的 `f_infer`。
     pub inference_fraction: f64,
+    /// 进入 `CHUNK_MAX_FRAMES` 分块路径的 clip 数。
+    pub chunked_path_clips: u64,
+    /// 其中被切成多个分块的 clip 数（P0-4 收益的必要条件）。
+    pub clips_with_multiple_chunks: u64,
+    /// 分块总数。
+    pub chunks_total: u64,
+    /// `clips_with_multiple_chunks / chunked_path_clips`；无样本时为 0。
+    pub multi_chunk_fraction: f64,
 }
 
 /// 记录一次 ORT 会话执行耗时。**只应在真正的 `session.run` 调用点使用。**
@@ -57,6 +80,21 @@ pub(crate) fn record_inference(elapsed: Duration) {
     INFERENCE_RUNS.fetch_add(1, Ordering::Relaxed);
 }
 
+/// 记录一次分块路径调用的分块数（每个 clip 一次）。
+///
+/// 只应由 `nsf_hifigan_onnx` 的 `CHUNK_MAX_FRAMES` 路径调用 —— mel-stretch 路径
+/// 按秒分块、由另一个常量控制，混在一起会让统计失去意义。
+///
+/// 无 onnx 构建下没有声码器分块路径，因此没有调用点（结构性，非遗漏）。
+#[cfg_attr(not(feature = "onnx"), allow(dead_code))]
+pub(crate) fn record_chunking(chunks: usize) {
+    CHUNKED_PATH_CLIPS.fetch_add(1, Ordering::Relaxed);
+    CHUNKS_TOTAL.fetch_add(chunks as u64, Ordering::Relaxed);
+    if chunks > 1 {
+        CLIPS_WITH_MULTIPLE_CHUNKS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 /// 开始新一轮渲染：归零累计器。
 ///
 /// 必须在渲染主循环入口调用，否则上一轮（可能因取消而中止）的残留会污染本轮
@@ -64,6 +102,9 @@ pub(crate) fn record_inference(elapsed: Duration) {
 pub(crate) fn reset() {
     INFERENCE_MICROS.store(0, Ordering::Relaxed);
     INFERENCE_RUNS.store(0, Ordering::Relaxed);
+    CHUNKED_PATH_CLIPS.store(0, Ordering::Relaxed);
+    CLIPS_WITH_MULTIPLE_CHUNKS.store(0, Ordering::Relaxed);
+    CHUNKS_TOTAL.store(0, Ordering::Relaxed);
 }
 
 /// 一轮渲染结束：用渲染循环提供的总耗时定格画像，并返回它。
@@ -75,6 +116,9 @@ pub(crate) fn finish_pass(total: Duration) -> RenderPassProfile {
     let total_ms = total.as_secs_f64() * 1000.0;
     let inference_ms = inference_us as f64 / 1000.0;
 
+    let chunked_clips = CHUNKED_PATH_CLIPS.load(Ordering::Relaxed);
+    let multi_chunk_clips = CLIPS_WITH_MULTIPLE_CHUNKS.load(Ordering::Relaxed);
+
     let profile = RenderPassProfile {
         inference_ms,
         inference_runs: INFERENCE_RUNS.load(Ordering::Relaxed),
@@ -82,6 +126,14 @@ pub(crate) fn finish_pass(total: Duration) -> RenderPassProfile {
         // 总耗时为 0（极短渲染 / 测试）时比值无意义，按 0 处理而不是 NaN。
         inference_fraction: if total_ms > 0.0 {
             (inference_ms / total_ms).clamp(0.0, 1.0)
+        } else {
+            0.0
+        },
+        chunked_path_clips: chunked_clips,
+        clips_with_multiple_chunks: multi_chunk_clips,
+        chunks_total: CHUNKS_TOTAL.load(Ordering::Relaxed),
+        multi_chunk_fraction: if chunked_clips > 0 {
+            multi_chunk_clips as f64 / chunked_clips as f64
         } else {
             0.0
         },
@@ -101,6 +153,30 @@ pub(crate) fn last_pass() -> Option<RenderPassProfile> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 分块统计：区分"全部单块"与"存在多块" —— 前者直接否掉 P0-4 的收益前提。
+    #[test]
+    fn chunking_statistics_distinguish_single_from_multi_chunk() {
+        reset();
+        // 3 个 clip：两个单块、一个两块。
+        record_chunking(1);
+        record_chunking(2);
+        record_chunking(1);
+
+        let profile = finish_pass(Duration::from_millis(100));
+        assert_eq!(profile.chunked_path_clips, 3);
+        assert_eq!(profile.clips_with_multiple_chunks, 1);
+        assert_eq!(profile.chunks_total, 4);
+        assert!((profile.multi_chunk_fraction - 1.0 / 3.0).abs() < 1e-9);
+
+        // 全部单块 → 比例为 0 → P0-4 无收益（这正是本计数的用途）。
+        reset();
+        record_chunking(1);
+        record_chunking(1);
+        let profile = finish_pass(Duration::from_millis(100));
+        assert_eq!(profile.clips_with_multiple_chunks, 0);
+        assert_eq!(profile.multi_chunk_fraction, 0.0);
+    }
 
     /// 累计 → 定格 → 比值 的完整链路，以及总耗时为 0 时的降级。
     #[test]
