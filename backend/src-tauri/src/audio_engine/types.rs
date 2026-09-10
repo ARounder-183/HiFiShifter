@@ -70,8 +70,15 @@ impl ResampledStereo {
 #[derive(Debug, Clone)]
 pub(crate) struct EngineClip {
     pub(crate) clip_id: String,
-    #[allow(dead_code)]
     pub(crate) track_id: String,
+
+    /// 该 clip 所属轨道在 [`EngineSnapshot::track_ids`] 中的下标。
+    ///
+    /// 由 `build_snapshot` 预计算，供实时回调**直接索引**电平槽位。
+    /// 实时回调中不能做字符串比较（每块 × 每个 clip 一次 `position()` 会随
+    /// 轨数上升吃掉块预算），因此必须在这里算好（见 P1-6）。
+    /// `usize::MAX` 表示无对应轨道（该 clip 不计电平）。
+    pub(crate) meter_slot: usize,
 
     pub(crate) start_frame: u64,
     pub(crate) length_frames: u64,
@@ -144,7 +151,18 @@ pub(crate) struct EngineSnapshot {
     pub(crate) sample_rate: u32,
     pub(crate) duration_frames: u64,
     pub(crate) track_ids: Arc<Vec<String>>,
+    /// 按 `start_frame` **升序**排列的片段。
+    ///
+    /// 这个不变量是实时混音做区间裁剪的前提：`mix_snapshot_clips_into_scratch`
+    /// 用 `partition_point` 二分出可能相交的起点，并在 `start_frame >= pos1`
+    /// 时提前结束，从而避免每块遍历整个时间线（见 P1-6）。
+    /// 修改 `build_snapshot` 时务必保持排序。
     pub(crate) clips: Arc<Vec<EngineClip>>,
+    /// 所有片段中最长的 `length_frames`。
+    ///
+    /// 用于把"与 [pos0, pos1) 相交"的必要条件写成可二分的形式：
+    /// `start_frame >= pos0.saturating_sub(max_clip_frames)`。
+    pub(crate) max_clip_frames: u64,
 }
 
 impl EngineSnapshot {
@@ -155,6 +173,7 @@ impl EngineSnapshot {
             duration_frames: 0,
             track_ids: Arc::new(vec![]),
             clips: Arc::new(vec![]),
+            max_clip_frames: 0,
         }
     }
 }

@@ -158,7 +158,9 @@ impl AudioEngine {
         let meter_shutdown_for_thread = meter_shutdown.clone();
         // Lock-free per-track peak handoff between the audio callback and the
         // meter thread (see mix::TrackMeterBus).
-        let meter_bus = Arc::new(TrackMeterBus::with_capacity(64));
+        let meter_bus = Arc::new(TrackMeterBus::with_capacity(
+            crate::audio_engine::mix::MAX_METER_TRACKS,
+        ));
         let meter_bus_for_meter = meter_bus.clone();
 
         // 节拍器：命令线程写配置/响点表，音频回调无锁读取（见 metronome.rs）。
@@ -2033,6 +2035,7 @@ mod tests {
             duration_frames: 0,
             track_ids: Arc::new(vec![]),
             clips: Arc::new(vec![]),
+            max_clip_frames: 0,
         }));
         let is_playing = Arc::new(AtomicBool::new(false));
         let play_start_wait = Arc::new(AtomicBool::new(false));

@@ -49,6 +49,14 @@ impl TrackMeterScratch {
     }
 }
 
+/// 电平总线的最大轨道数。
+///
+/// 此前硬编码为 64，导致轨道数超过 64 的工程从第 65 轨起电平与削波指示
+/// **永久为 0 且没有任何提示**（见 A7）。改为一个足够大的固定上界：
+/// 每轨仅一个 `AtomicU32`，1024 轨也只占 4 KB，因此"一次给足"优于
+/// "动态扩容"（后者需要实时回调侧分配，不可接受）。
+pub(crate) const MAX_METER_TRACKS: usize = 1024;
+
 /// Lock-free handoff of per-track block peaks from the audio callback to
 /// the meter thread. The RT side only writes fixed atomic slots (no locks,
 /// no allocation); the meter thread polls `generation` and publishes the
@@ -291,10 +299,25 @@ pub(crate) fn mix_snapshot_clips_into_scratch(
     let mut meter = meter;
     let has_meter = meter.is_some();
 
-    for clip in snap.clips.iter() {
+    // ── 区间裁剪（见 P1-6）────────────────────────────────────────────────
+    // `snap.clips` 按 `start_frame` 升序，且任一片段长度 ≤ `max_clip_frames`。
+    // 因此与 [pos0, pos1) 相交的片段必满足
+    //   start_frame >= pos0 - max_clip_frames   且   start_frame < pos1
+    // 前者可用 `partition_point` 二分，后者可用有序性提前 `break`。
+    // 这把"每块遍历整条时间线"降为"每块只遍历与窗口相交的片段"。
+    let lower_bound = pos0.saturating_sub(snap.max_clip_frames);
+    let first_candidate = snap
+        .clips
+        .partition_point(|clip| clip.start_frame < lower_bound);
+
+    for clip in snap.clips[first_candidate..].iter() {
         let clip_start = clip.start_frame;
+        // 有序性：后续片段的 start_frame 只会更大，不可能再与窗口相交。
+        if clip_start >= pos1 {
+            break;
+        }
         let clip_end = clip.start_frame.saturating_add(clip.length_frames);
-        if clip_end <= pos0 || clip_start >= pos1 {
+        if clip_end <= pos0 {
             continue;
         }
 
@@ -304,10 +327,13 @@ pub(crate) fn mix_snapshot_clips_into_scratch(
             continue;
         }
 
-        // Meter slot lookup happens once per clip (not per frame); it only
-        // costs a few short string compares against snap.track_ids.
+        // 电平槽位：由 `build_snapshot` 预计算在 `EngineClip::meter_slot` 上。
+        // 此前这里每块每个 clip 都做一次 `track_ids.iter().position()` 字符串
+        // 比较，开销随轨数上升并直接吃掉块预算（见 P1-6）。
+        // `usize::MAX` = 无对应轨道。
         let meter_slot = if has_meter {
-            snap.track_ids.iter().position(|id| id == &clip.track_id)
+            let slot = clip.meter_slot;
+            (slot != usize::MAX && slot < MAX_METER_TRACKS).then_some(slot)
         } else {
             None
         };
@@ -926,8 +952,10 @@ pub(crate) fn render_callback_u16(
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_mix_automation, sample_automation_curve};
-    use crate::audio_engine::types::{EngineClip, ResampledStereo};
+    use super::{
+        apply_mix_automation, mix_snapshot_clips_into_scratch, sample_automation_curve,
+    };
+    use crate::audio_engine::types::{EngineClip, EngineSnapshot, ResampledStereo};
     use std::sync::Arc;
 
     fn clip_with_curves(volume_curve: Option<Vec<f32>>) -> EngineClip {
@@ -935,6 +963,8 @@ mod tests {
         EngineClip {
             clip_id: "clip-a".to_string(),
             track_id: "track-a".to_string(),
+            // 单轨夹具：槽位 0。
+            meter_slot: 0,
             start_frame: 0,
             length_frames: 4,
             src: ResampledStereo {
@@ -996,5 +1026,133 @@ mod tests {
         assert!((at(220) - 1.0).abs() < 0.05, "got {}", at(220));
         // 曲线末尾之后保持末值（不回落到 default）
         assert!((at(44_100) - 4.0).abs() < 1e-6, "got {}", at(44_100));
+    }
+
+    // ─── 区间裁剪（P1-6）───────────────────────────────────────────────────
+
+    /// 内容恒定的片段：每个样本都等于 `value`，便于用电平反推"谁被混进来了"。
+    fn const_clip(id: &str, start: u64, len: u64, value: f32) -> EngineClip {
+        const SRC_FRAMES: usize = 256;
+        let pcm = Arc::new(vec![value; SRC_FRAMES * 2]);
+        EngineClip {
+            clip_id: id.to_string(),
+            track_id: "t".to_string(),
+            meter_slot: 0,
+            start_frame: start,
+            length_frames: len,
+            src: ResampledStereo {
+                sample_rate: 44_100,
+                frames: SRC_FRAMES,
+                pcm,
+            },
+            src_start_frame: 0,
+            src_end_frame: SRC_FRAMES as u64,
+            reversed: false,
+            playback_rate: 1.0,
+            local_src_offset_frames: 0,
+            repeat: false,
+            loop_anchor_frame: None,
+            fade_in_frames: 0,
+            fade_out_frames: 0,
+            fade_in_lut: None,
+            fade_out_lut: None,
+            gain: 1.0,
+            rendered_pcm: None,
+            breath_noise_pcm: None,
+            breath_curve: None,
+            breath_curve_frame_period_ms: 5.0,
+            volume_curve: None,
+            volume_curve_frame_period_ms: 5.0,
+            pan_curve: None,
+            pan_curve_frame_period_ms: 5.0,
+            needs_synthesis: false,
+        }
+    }
+
+    fn snapshot_of(clips: Vec<EngineClip>, max_clip_frames: u64) -> EngineSnapshot {
+        EngineSnapshot {
+            bpm: 120.0,
+            sample_rate: 44_100,
+            duration_frames: 1000,
+            track_ids: Arc::new(vec!["t".to_string()]),
+            clips: Arc::new(clips),
+            max_clip_frames,
+        }
+    }
+
+    #[test]
+    fn interval_culling_mixes_only_overlapping_clips() {
+        // 三种位置关系：完全在窗口之前 / 与窗口相交 / 完全在窗口之后。
+        // 裁剪写错时两个方向都会被这个断言抓住：
+        //   - 漏掉相交片段 → 输出为 0（静音）
+        //   - 误纳入前后片段 → 输出电平高于 2.0
+        // 片段按 start_frame 升序（build_snapshot 保证的不变量）。
+        let snap = snapshot_of(
+            vec![
+                const_clip("before", 0, 10, 1.0),
+                const_clip("mid", 30, 10, 2.0),
+                const_clip("after", 100, 10, 3.0),
+            ],
+            10,
+        );
+
+        let frames = 5usize;
+        let mut scratch = vec![0.0f32; frames * 2];
+        // 窗口 [32, 37) 完全落在 mid 的 [30, 40) 内。
+        mix_snapshot_clips_into_scratch(frames, &snap, 32, 37, &mut scratch, None);
+
+        for f in 0..frames {
+            assert!(
+                (scratch[f * 2] - 2.0).abs() < 1e-6,
+                "frame {f} left = {} (expected mid-only 2.0)",
+                scratch[f * 2]
+            );
+            assert!(
+                (scratch[f * 2 + 1] - 2.0).abs() < 1e-6,
+                "frame {f} right = {}",
+                scratch[f * 2 + 1]
+            );
+        }
+    }
+
+    #[test]
+    fn interval_culling_still_mixes_clips_overlapping_the_window_start() {
+        // 窗口左边界落在片段内部：二分下界必须回退 max_clip_frames，
+        // 否则会把"起点早于窗口但仍在发声"的片段整段丢掉。
+        let snap = snapshot_of(vec![const_clip("long", 0, 100, 1.5)], 100);
+        let frames = 4usize;
+        let mut scratch = vec![0.0f32; frames * 2];
+        // 窗口 [50, 54)：片段起点 0 远早于窗口，但仍在发声。
+        mix_snapshot_clips_into_scratch(frames, &snap, 50, 54, &mut scratch, None);
+        for f in 0..frames {
+            assert!(
+                (scratch[f * 2] - 1.5).abs() < 1e-6,
+                "frame {f} = {} (clip starting before the window must still sound)",
+                scratch[f * 2]
+            );
+        }
+    }
+
+    #[test]
+    fn interval_culling_yields_silence_when_window_is_empty_of_clips() {
+        // 窗口落在所有片段之间的空隙：必须完全静音，且不能因为提前 break
+        // 而误伤（此处 after 片段位于窗口之后，正是 break 触发的路径）。
+        //
+        // 注意契约：`mix_snapshot_clips_into_scratch` 是**累加**语义 ——
+        // 调用方（`mix_into_scratch_stereo`）负责先把 scratch 清零。因此这里
+        // 也先清零，再断言没有任何片段写入内容。
+        let snap = snapshot_of(
+            vec![
+                const_clip("before", 0, 10, 1.0),
+                const_clip("after", 100, 10, 3.0),
+            ],
+            10,
+        );
+        let frames = 4usize;
+        let mut scratch = vec![0.0f32; frames * 2];
+        mix_snapshot_clips_into_scratch(frames, &snap, 50, 54, &mut scratch, None);
+        for (i, s) in scratch.iter().enumerate() {
+            assert!(*s == 0.0, "sample {i} = {s}, expected silence");
+        }
     }
 }

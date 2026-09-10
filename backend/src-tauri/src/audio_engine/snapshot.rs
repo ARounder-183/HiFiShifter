@@ -916,6 +916,8 @@ pub(crate) fn build_snapshot(
         clips_out.push(EngineClip {
             clip_id: clip.id.clone(),
             track_id: clip.track_id.clone(),
+            // 先置无槽位；track_ids 建立后统一回填（见下方回填段与 P1-6）。
+            meter_slot: usize::MAX,
             start_frame,
             length_frames,
             src: src_render,
@@ -985,12 +987,46 @@ pub(crate) fn build_snapshot(
         }
     }
 
+    // 回填电平槽位（见 P1-6）。
+    //
+    // 放在 track_ids 建立之后统一回填，而不是在 clip 构建循环里推算：
+    // `track_ids` 的顺序取决于 clips 按 start_frame 排序后的首次出现顺序，
+    // 在循环内推算会引入顺序耦合。这里用一次性 HashMap 建表，复杂度 O(n)。
+    if track_ids.len() > crate::audio_engine::mix::MAX_METER_TRACKS {
+        log::warn!(
+            "AudioEngine: {} tracks exceed the meter bus capacity ({}); tracks beyond the limit will not report levels",
+            track_ids.len(),
+            crate::audio_engine::mix::MAX_METER_TRACKS
+        );
+    }
+    {
+        let slot_of: std::collections::HashMap<&str, usize> = track_ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (id.as_str(), i))
+            .collect();
+        for clip in clips_out.iter_mut() {
+            clip.meter_slot = slot_of
+                .get(clip.track_id.as_str())
+                .copied()
+                .unwrap_or(usize::MAX);
+        }
+    }
+
+    // 最长片段长度：实时混音据此二分出可能相交的片段起点（见 P1-6）。
+    let max_clip_frames = clips_out
+        .iter()
+        .map(|c| c.length_frames)
+        .max()
+        .unwrap_or(0);
+
     EngineSnapshot {
         bpm,
         sample_rate: out_rate,
         duration_frames,
         track_ids: Arc::new(track_ids),
         clips: Arc::new(clips_out),
+        max_clip_frames,
     }
 }
 
@@ -1155,9 +1191,12 @@ pub(crate) fn build_snapshot_for_file(
         sample_rate: out_rate,
         duration_frames: length_frames,
         track_ids: Arc::new(vec!["__file_preview__".to_string()]),
+        max_clip_frames: length_frames,
         clips: Arc::new(vec![EngineClip {
             clip_id: "__file_preview__".to_string(),
             track_id: "__file_preview__".to_string(),
+            // 预览快照只有一条轨道，槽位固定为 0。
+            meter_slot: 0,
             start_frame: 0,
             length_frames,
             src,
