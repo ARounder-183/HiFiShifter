@@ -199,40 +199,6 @@ pub struct PitchOrigAnalysisProgressEvent {
     pub total_clips: u32,
 }
 
-#[allow(dead_code)]
-pub(crate) fn resample_curve_linear(values: &[f32], out_len: usize) -> Vec<f32> {
-    if out_len == 0 {
-        return vec![];
-    }
-    if values.is_empty() {
-        return vec![0.0; out_len];
-    }
-    if values.len() == out_len {
-        return values.to_vec();
-    }
-    if values.len() == 1 {
-        return vec![values[0]; out_len];
-    }
-    if out_len == 1 {
-        return vec![values[0]];
-    }
-
-    let in_len = values.len();
-    let scale = (in_len - 1) as f64 / (out_len - 1) as f64;
-
-    // 使用迭代器直接分配并写入，消灭 vec![0.0] 造成的额外 memset
-    (0..out_len)
-        .map(|of| {
-            let t_in = (of as f64) * scale;
-            let i0 = t_in.floor() as usize;
-            let i1 = (i0 + 1).min(in_len - 1);
-            let frac = (t_in - (i0 as f64)) as f32;
-            let a = values[i0];
-            let b = values[i1];
-            a + (b - a) * frac
-        })
-        .collect()
-}
 
 // Task 3.6: PitchProgressPayload for frontend API
 #[derive(Debug, Clone, Serialize)]
