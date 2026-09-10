@@ -145,20 +145,46 @@ export const syncPlaybackState = createAsyncThunk(
     },
 );
 
-export const playOriginal = createAsyncThunk("session/playOriginal", async (_, { getState }) => {
-    const state = getState() as { session: SessionState };
-    const anchorSec = state.session.playheadSec;
-    // Ensure backend transport is in sync before starting playback.
-    // set_transport 与 play_original 作为单个原子序列入链（见
-    // transportInvokeChain）：两者之间插入的 stop_audio 会把引擎停在新播放
-    // 的起始位置上，前端却按"已播放"处理。
-    const result = await enqueueTransportCommand(async () => {
-        await webApi.setTransport({ playheadSec: anchorSec });
-        return webApi.playOriginal(0);
-    });
-    return {
-        ...result,
-        clipId: null,
-        anchorSec,
-    };
-});
+/** play_original 的返回形状：`noop` 标记"已在播放、完全未动作"的重复触发。 */
+export type PlayOriginalResult = {
+    ok: boolean;
+    clipId: string | null;
+    anchorSec: number;
+    noop?: boolean;
+    playing?: string;
+    start_sec?: number;
+};
+
+export const playOriginal = createAsyncThunk<PlayOriginalResult, void>(
+    "session/playOriginal",
+    async (_, { getState }) => {
+        const state = getState() as { session: SessionState };
+        const anchorSec = state.session.playheadSec;
+
+        // ★ 已在播放（含"渲染中原地等待"）→ 完全 no-op：不 seek、不调用后端。
+        // 下方 set_transport 会把引擎传输层拉回播放头；任何重复触发（播放按钮 +
+        // 快捷键、双击、按住自动重复、UI 重试）都会借此反复拽回传输层 —— 表现
+        // 正是"音频在放但播放光标不动（被反复拽回起点）"与"重复播放/叠音"。
+        // 后端 play_original 虽已幂等，但 seek 发生在其之前，必须在源头拦截。
+        // noop 标记让 fulfilled reducer 跳过对新播放会话的状态重置（等待标志/
+        // 位置报告/纪元），保持等待期的光标冻结不被破坏。
+        if (state.session.runtime.isPlaying) {
+            return { ok: true, clipId: null, anchorSec, noop: true };
+        }
+
+        // Ensure backend transport is in sync before starting playback.
+        // set_transport 与 play_original 作为单个原子序列入链（见
+        // transportInvokeChain）：两者之间插入的 stop_audio 会把引擎停在新播放
+        // 的起始位置上，前端却按"已播放"处理。
+        const result = await enqueueTransportCommand(async () => {
+            await webApi.setTransport({ playheadSec: anchorSec });
+            return webApi.playOriginal(0);
+        });
+        return {
+            ...result,
+            clipId: null,
+            anchorSec,
+            noop: false,
+        };
+    },
+);

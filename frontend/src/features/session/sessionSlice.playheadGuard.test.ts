@@ -953,6 +953,58 @@ test("features/session/sessionSlice.playheadGuard.test.ts transport waits in pla
 });
 
 /**
+ * 重复的"播放"触发必须是完全 no-op（thunk 已在播放时提前返回，未 seek、
+ * 未调用后端）：fulfilled 带 `noop` 标记时不得重置任何传输状态
+ *（等待标志 / 位置报告 / 播放头），否则等待期的光标冻结会被解除。
+ */
+test("features/session/sessionSlice.playheadGuard.test.ts repeated play while playing is a transport no-op", async () => {
+    function assertEqual(actual: unknown, expected: unknown, label: string): void {
+        if (actual !== expected) {
+            throw new Error(`${label}: expected ${String(expected)}, received ${String(actual)}`);
+        }
+    }
+
+    const base = reducer(undefined, { type: "@@INIT" }) as any;
+    const waiting = {
+        ...base,
+        playheadSec: 42.5,
+        runtime: {
+            ...base.runtime,
+            isPlaying: true,
+            playbackWaitingForRender: true,
+            playbackPositionSec: 0,
+        },
+    };
+
+    const next = reducer(
+        waiting,
+        playOriginal.fulfilled(
+            { ok: true, clipId: null, anchorSec: 7.25, noop: true },
+            "req",
+            undefined,
+        ),
+    );
+
+    assertEqual(next.runtime.isPlaying, true, "no-op keeps the playing state");
+    assertEqual(
+        next.runtime.playbackWaitingForRender,
+        true,
+        "no-op must not clear the waiting flag",
+    );
+    assertEqual(
+        next.runtime.playbackPositionSec,
+        0,
+        "no-op must not touch the position report",
+    );
+    assertEqual(next.playheadSec, 42.5, "no-op must not move the playhead");
+    assertEqual(
+        next.runtime.playbackAnchorSec,
+        waiting.runtime.playbackAnchorSec,
+        "no-op must not rewrite the playback anchor",
+    );
+});
+
+/**
  * Case A 进入等待（播放途中推进到未渲染 Clip 开头）：进入等待前
  * playbackPositionSec 停留在前进采样值（>0）。等待采样必须归零它 ——
  * 否则 isTransportAdvancing 代理保持 true，视觉插值 RAF 以 1x 从冻结前

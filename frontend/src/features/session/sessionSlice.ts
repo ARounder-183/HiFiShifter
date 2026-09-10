@@ -3772,7 +3772,15 @@ const sessionSlice = createSlice({
                     ok?: boolean;
                     clipId?: string | null;
                     anchorSec?: number;
+                    noop?: boolean;
                 };
+                // 已在播放时的重复"播放"触发：thunk 已完全 no-op（未 seek、
+                // 未调用后端）——不得重置任何传输状态（等待标志 / 位置报告 /
+                // 纪元），否则会解除等待期的光标冻结并造成跳变。
+                if (payload.noop) {
+                    state.lastResult = action.payload;
+                    return;
+                }
                 const ok = Boolean(payload.ok);
                 state.runtime.isPlaying = ok;
                 state.runtime.playbackTarget = ok ? "original" : null;
