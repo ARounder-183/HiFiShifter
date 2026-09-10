@@ -690,10 +690,25 @@ fn get_or_init_shared_session() -> Result<Arc<Mutex<Session>>, String> {
         return Ok(session);
     }
 
-    // ★ 不在此处持有外层构建锁：会话创建的串行化在 ort_session 的**创建锁**
-    // 内完成（锁只包围 builder → commit）；烟测在创建锁之外执行，因此挂起的
-    // 烟测不会阻塞其他模块的构建。重复构建由"插入时优先复用已存在的会话"
-    // 与上方快路径消解。
+    // ★ 全局单飞锁：同一时刻全局只允许一次会话构建（创建 + 烟测整体）。
+    // DirectML 的设备创建与首次推理都不能与其他 DML 操作并发 —— 两种并发
+    // 都会在驱动层挂起（见 ort_session::session_build_lock 的说明）。同一
+    // 模块的第二个到达者在此等待，构建完成后经下方的双重检查直接复用结果，
+    // 因此**不会出现同一模块并发构建**。
+    // 挂起由烟测超时兜底：持有者最多持锁一个 SMOKE_TEST_TIMEOUT
+    // （DirectML 10s），随后 DirectML 被禁用、等待者立即以 CPU 继续 ——
+    // 等待有界，绝不永久卡死。
+    let _build_flight = crate::vocoder_ort_session::session_build_lock()
+        .lock()
+        .map_err(|e| format!("session build lock poisoned: {e}"))?;
+    // 双重检查：等待期间其他线程（设备切换的异步预热）可能已完成构建。
+    if let Some(session) = mutex
+        .lock()
+        .map_err(|e| format!("SHARED_SESSION lock poisoned: {e}"))?
+        .clone()
+    {
+        return Ok(session);
+    }
 
     // 构建期间用户再次切换设备（EP 设置代数推进）会让本次构建结果过时 ——
     // 丢弃并按当前设置重建，最多 3 次。
