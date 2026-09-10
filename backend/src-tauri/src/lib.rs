@@ -53,6 +53,9 @@ mod resample;
 // 主总线动态处理（软削波），实时与离线共用。详见 `audio/master_bus.rs`。
 #[path = "audio/master_bus.rs"]
 mod master_bus;
+// mel 帧数的解析计算（供分块缓存预判使用，见 P1-5）。
+#[path = "audio/mel_frames.rs"]
+mod mel_frames;
 #[path = "audio/encode/mod.rs"]
 mod encode;
 #[path = "audio/silence_detect.rs"]

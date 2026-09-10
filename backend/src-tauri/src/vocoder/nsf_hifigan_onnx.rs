@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
+// mel 帧数的解析计算（未被 onnx 特性门控，其数值契约有独立单元测试覆盖）。
+use crate::mel_frames::predicted_mel_frames;
+
 static ORT_INIT: OnceLock<Result<(), String>> = OnceLock::new();
 
 #[derive(Debug)]
@@ -580,12 +583,20 @@ fn midi_to_hz(midi: f64) -> f32 {
     }
 }
 
+/// 线性插值重采样（单调）。
+///
+/// **降采样必须抗混叠**：声码器输出为 44.1 kHz，当目标采样率低于该值时
+/// （例如导出到较低采样率）线性插值会把高频折叠进可听带。降采样改走
+/// `crate::resample` 的带限实现；升采样保持线性（无混叠且更快）。
 fn linear_resample_mono(input: &[f32], in_rate: u32, out_rate: u32) -> Vec<f32> {
     if input.is_empty() {
         return vec![];
     }
     if in_rate == out_rate {
         return input.to_vec();
+    }
+    if out_rate < in_rate {
+        return crate::resample::resample_mono(input, in_rate, out_rate);
     }
     if input.len() < 2 {
         return input.to_vec();
@@ -609,6 +620,7 @@ fn linear_resample_mono(input: &[f32], in_rate: u32, out_rate: u32) -> Vec<f32> 
         .collect()
 }
 
+/// `linear_resample_mono` 的缓冲复用版本（见上方的抗混叠说明）。
 fn linear_resample_mono_into(input: &[f32], in_rate: u32, out_rate: u32, out: &mut Vec<f32>) {
     out.clear();
     if input.is_empty() {
@@ -617,6 +629,11 @@ fn linear_resample_mono_into(input: &[f32], in_rate: u32, out_rate: u32, out: &m
 
     if in_rate == out_rate || input.len() < 2 {
         out.extend_from_slice(input);
+        return;
+    }
+
+    if out_rate < in_rate {
+        out.extend_from_slice(&crate::resample::resample_mono(input, in_rate, out_rate));
         return;
     }
 
@@ -634,6 +651,50 @@ fn linear_resample_mono_into(input: &[f32], in_rate: u32, out_rate: u32, out: &m
         let b = input[i1];
         a + (b - a) * frac
     }));
+}
+
+/// 把分块波形按 `frame_off × hop` 拼接到输出，再重采样回目标采样率并对齐长度。
+///
+/// 抽出为独立函数，是为了让「全命中快路径」（跳过特征提取）与常规路径
+/// 共用**完全相同**的拼接 / 重采样 / 尾部收尾逻辑 —— 否则两条路径可能产出
+/// 长度或边界处理不一致的结果。
+fn stitch_chunks_to_output(
+    chunks: &[(usize, Vec<f32>)],
+    t: usize,
+    hop: usize,
+    model_sr: u32,
+    sample_rate: u32,
+    target_len: usize,
+) -> Vec<f32> {
+    // 输出长度 = 重建内容真实长度（t×hop）。mel 提取的尾部窗损失使
+    // t×hop < 输入长度；尾部对齐（含斜坡收尾）由下方统一完成。
+    let total_samples = t.saturating_mul(hop).max(1);
+    let mut out = vec![0.0f32; total_samples];
+
+    for (fi, wf) in chunks {
+        let base_out = fi * hop;
+        for (i, &sample) in wf.iter().enumerate() {
+            let g = base_out + i;
+            if g < out.len() {
+                out[g] = sample;
+            }
+        }
+    }
+
+    let mut out = if model_sr == sample_rate {
+        out
+    } else {
+        linear_resample_mono(&out, model_sr, sample_rate)
+    };
+
+    // 对齐到输入长度。mel 提取的尾部窗损失（最后不足一帧 hop 的内容没有帧
+    // 覆盖）使重建内容比输入短 1~2 帧（模型 hop），裸 resize 补零 / truncate
+    // 会在"内容末端 ↔ 补零"交界留下单帧硬切 —— 淡出增益在淡出区前段仍接近
+    // 1 时即末尾 Click（与 mel stretch 路径同根因）。修复：对齐边界处做
+    // ~2 帧 hop 的线性收尾，让内容平滑落到 0。
+    let ramp_samples = tail_ramp_samples(hop, model_sr, sample_rate);
+    smooth_tail_then_align(&mut out, target_len, ramp_samples);
+    out
 }
 
 /// 进程级全局共享的 ORT Session 容器。
@@ -883,14 +944,15 @@ impl NsfHifiganOnnx {
 
         let n_freqs = n_fft / 2 + 1;
 
+        // 帧数与 `predicted_mel_frames` 共用同一公式（单一实现），
+        // 使调用方可以用音频长度在付出 STFT 之前预判分块边界。
+        let n_frames = predicted_mel_frames(audio.len(), win_size, hop);
+
         if y.len() < win_size {
             // 空音频：返回全零（经 log 压缩后为 ln(1e-9)）的 mel 矩阵。
-            let n_frames = 1usize;
             let fill = dynamic_range_compression_ln(0.0);
             return Ok(vec![fill; self.cfg.num_mels * n_frames]);
         }
-
-        let n_frames = 1 + (y.len().saturating_sub(win_size)) / hop;
 
         // 将所有帧的幅度谱累积为矩阵 mag_matrix: [n_freqs, n_frames]，
         // 然后用一次矩阵乘法替代双重循环，利用 SIMD 自动向量化。
@@ -1350,24 +1412,94 @@ pub fn infer_pitch_edit_chunked_optimized(
 
         let model_sr = sess.cfg.sampling_rate;
         let hop = sess.cfg.hop_size;
+        let n_mels = sess.cfg.num_mels;
+        let win_size = sess.cfg.win_size;
 
-        // 1. 重采样到模型采样率，提取完整 mel
-        let mut mel_full = if sample_rate == model_sr {
-            sess.mel_from_audio_fast(mono_pcm)?
+        // 1. 先重采样到模型采样率（若需要）。
+        //    重采样是 O(n) 且只做一次；而 STFT + mel 矩阵乘法是重 CPU 且分配
+        //    巨大。把重采样单独提前，只为拿到**精确长度**，从而可以解析求出
+        //    帧数、进而预判分块边界（见下面的「全命中」快路径）。
+        let needs_resample = sample_rate != model_sr;
+        let mut resample_buf = if needs_resample {
+            let mut buf = std::mem::take(&mut sess.audio_resample_buf);
+            linear_resample_mono_into(mono_pcm, sample_rate, model_sr, &mut buf);
+            buf
         } else {
-            let mut resample_buf = std::mem::take(&mut sess.audio_resample_buf);
-            linear_resample_mono_into(mono_pcm, sample_rate, model_sr, &mut resample_buf);
-            let mel = sess.mel_from_audio_fast(&resample_buf);
-            sess.audio_resample_buf = resample_buf;
-            mel?
+            Vec::new()
+        };
+        let model_audio: &[f32] = if needs_resample {
+            resample_buf.as_slice()
+        } else {
+            mono_pcm
         };
 
-        let t = mel_full.len() / sess.cfg.num_mels;
-        if t == 0 {
+        // 2. 解析求出 mel 帧数（与 mel_from_audio_fast 共用同一公式）。
+        let t_pred = predicted_mel_frames(model_audio.len(), win_size, hop);
+        if t_pred == 0 {
+            if needs_resample {
+                sess.audio_resample_buf = std::mem::take(&mut resample_buf);
+            }
             return Ok(vec![0.0; mono_pcm.len()]);
         }
 
-        // 2. 构建 F0 + 共振峰偏移
+        // 3. 「全命中」快路径（见 P1-5）。
+        //    分块边界只由 t 决定，因此可以在**付出 STFT + mel 之前**判断
+        //    所有 chunk 是否都已在缓存中。典型命中场景：只改了 trim / loop /
+        //    边距等仅影响外层 hash 的参数 —— 此时 mel / f0 / 共振峰构造全部
+        //    可以跳过。
+        {
+            let mut all_cached: Vec<(usize, Vec<f32>)> = Vec::new();
+            let mut frame_off = 0usize;
+            let mut complete = true;
+            while frame_off < t_pred {
+                let chunk_end = (frame_off + CHUNK_MAX_FRAMES).min(t_pred);
+                match chunk_cache_get(frame_off, chunk_end) {
+                    Some(wf) => all_cached.push((frame_off, wf)),
+                    None => {
+                        complete = false;
+                        break;
+                    }
+                }
+                frame_off = chunk_end;
+            }
+            if complete {
+                debug_eprintln!(
+                    "[nsf_hifigan] chunked_opt: FULL CACHE HIT t={} chunks={} — skip mel/f0/formant extraction",
+                    t_pred,
+                    (t_pred + CHUNK_MAX_FRAMES - 1) / CHUNK_MAX_FRAMES
+                );
+                emit_chunk_progress(1.0);
+                if needs_resample {
+                    sess.audio_resample_buf = std::mem::take(&mut resample_buf);
+                }
+                return Ok(stitch_chunks_to_output(
+                    &all_cached,
+                    t_pred,
+                    hop,
+                    model_sr,
+                    sample_rate,
+                    mono_pcm.len(),
+                ));
+            }
+        }
+
+        // 4. 未全命中：提取完整 mel（与先前行为一致）。
+        let mut mel_full = sess.mel_from_audio_fast(model_audio)?;
+        if needs_resample {
+            // 归还重采样缓冲，供后续调用复用（take 保留其分配）。
+            sess.audio_resample_buf = std::mem::take(&mut resample_buf);
+        }
+
+        let t = mel_full.len() / n_mels;
+        if t == 0 {
+            return Ok(vec![0.0; mono_pcm.len()]);
+        }
+        debug_assert_eq!(
+            t, t_pred,
+            "predicted mel frame count diverged from actual mel extraction"
+        );
+
+        // 5. 构建 F0 + 共振峰偏移
         let hop_sec = (hop as f64) / (model_sr.max(1) as f64);
         let f0_full: Vec<f32> = (0..t)
             .map(|i| {
@@ -1376,7 +1508,7 @@ pub fn infer_pitch_edit_chunked_optimized(
             })
             .collect();
 
-        // 3. 应用共振峰偏移（原地修改 mel_full）
+        // 应用共振峰偏移（原地修改 mel_full）
         let formant_shifts: Vec<f32> = (0..t)
             .map(|i| {
                 let abs_t = start_sec + (i as f64) * hop_sec;
@@ -1387,7 +1519,7 @@ pub fn infer_pitch_edit_chunked_optimized(
         if has_formant_shift {
             shift_mel_formant(
                 &mut mel_full,
-                sess.cfg.num_mels,
+                n_mels,
                 t,
                 &formant_shifts,
                 sess.cfg.fmin,
@@ -1395,14 +1527,11 @@ pub fn infer_pitch_edit_chunked_optimized(
             );
         }
 
-        // 4. 分块迭代 — 批量推理：收集所有未命中缓存的 chunk，一次 GPU 调用处理
-        // 输出长度 = 重建内容真实长度（t×hop）。mel 提取的尾部窗损失使
-        // t×hop < 输入长度；尾部对齐（含斜坡收尾）在步骤 5 统一完成，
-        // 若此处直接按输入长度初始化并留零，会预先制造"内容↔零"缺口。
-        let total_samples = t.saturating_mul(hop).max(1);
-        let mut out = vec![0.0f32; total_samples];
+        // 6. 分块迭代 — 批量推理：收集所有未命中缓存的 chunk，一次 GPU 调用处理。
+        //    拼接 / 重采样 / 尾部对齐统一由 `stitch_chunks_to_output` 完成
+        //    （与「全命中快路径」共用，见步骤 3）。
 
-        // 4a. 分离已缓存和需要推理的 chunk
+        // 6a. 分离已缓存和需要推理的 chunk
         let mut cached_chunks: Vec<(usize, Vec<f32>)> = Vec::new();
         let mut needs_inference: Vec<usize> = Vec::new();
 
@@ -1432,7 +1561,7 @@ pub fn infer_pitch_edit_chunked_optimized(
             emit_chunk_progress(cached_chunks.len() as f64 / total_chunks as f64);
         }
 
-        // 4b. 批量推理需要推理的 chunk
+        // 6b. 批量推理需要推理的 chunk
         if !needs_inference.is_empty() {
             let batch_items: Vec<(Vec<f32>, Vec<f32>, usize)> = needs_inference
                 .iter()
@@ -1467,35 +1596,17 @@ pub fn infer_pitch_edit_chunked_optimized(
             }
         }
 
-        // 4c. 按帧偏移排序并合并到输出
+        // 6c. 排序后交给共用的拼接 / 重采样 / 尾部对齐实现
+        //（与"全命中快路径"共用，保证两条路径产出完全一致）。
         cached_chunks.sort_by_key(|&(fi, _)| fi);
-        for (fi, wf) in &cached_chunks {
-            let base_out = fi * hop;
-            for (i, &sample) in wf.iter().enumerate() {
-                let g = base_out + i;
-                if g < out.len() {
-                    out[g] = sample;
-                }
-            }
-        }
-
-        // 5. 重采样回原始采样率
-        let mut out = if model_sr == sample_rate {
-            out
-        } else {
-            linear_resample_mono(&out, model_sr, sample_rate)
-        };
-
-        // 对齐到输入长度。mel 提取的尾部窗损失（最后不足一帧 hop 的内容
-        // 没有帧覆盖）使重建内容比输入短 1~2 帧（模型 hop），裸 resize 补
-        // 零 / truncate 会在"内容末端 ↔ 补零"交界留下单帧硬切 —— 淡出增益
-        // 在淡出区前段仍接近 1 时即末尾 Click（与 mel stretch 路径同根因）。
-        // 修复：对齐边界处做 ~2 帧 hop 的线性收尾，让内容平滑落到 0。
-        let target = mono_pcm.len();
-        let ramp_samples = tail_ramp_samples(hop, model_sr, sample_rate);
-        smooth_tail_then_align(&mut out, target, ramp_samples);
-
-        Ok(out)
+        Ok(stitch_chunks_to_output(
+            &cached_chunks,
+            t,
+            hop,
+            model_sr,
+            sample_rate,
+            mono_pcm.len(),
+        ))
     })
 }
 
