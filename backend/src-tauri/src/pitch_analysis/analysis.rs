@@ -380,7 +380,7 @@ fn analyze_clip_with_cache(
     // 全量分析策略：分析完整源音频，trim/rate 在组装阶段处理
     // Resample 全量 PCM 到 44100 Hz
     let segment =
-        crate::mixdown::linear_resample_interleaved(&pcm, in_channels_usize, in_rate, 44100);
+        crate::resample::resample_interleaved(&pcm, in_channels_usize, in_rate, 44100);
     let seg_frames = segment.len() / in_channels_usize;
     if seg_frames < 2 {
         return Err("Resampled audio too short".to_string());
@@ -1444,7 +1444,7 @@ pub(crate) fn compute_pitch_curve(job: &PitchJob, mut on_progress: impl FnMut(f3
 
         // Resample to analysis rate (44100) and convert to mono.
         // Loop 模式的倒放方向已由回绕索引体现，不再整体反转。
-        let mut segment = crate::mixdown::linear_resample_interleaved(
+        let mut segment = crate::resample::resample_interleaved(
             &segment,
             in_channels_usize,
             in_rate,

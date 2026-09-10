@@ -358,7 +358,7 @@ pub fn compute_formant_cache_entry_for_clip(
 
     let segment = &pcm[(src_i0 * in_channels_usize)..(src_i1 * in_channels_usize)];
     let mut segment =
-        crate::mixdown::linear_resample_interleaved(segment, in_channels_usize, in_rate, out_rate);
+        crate::resample::resample_interleaved(segment, in_channels_usize, in_rate, out_rate);
 
     if clip.reversed && !loop_mode {
         // 注意：此处尚未转为立体声，通道数仍是源文件的实际通道数。

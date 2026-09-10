@@ -741,6 +741,15 @@ pub(crate) fn render_callback_f32(
         meter_bus.publish_block(&meter_scratch.track_peaks, block.snapshot.track_ids.len());
     }
 
+    // 主总线软削波（见 audio/master_bus.rs）。在此就地处理 stereo scratch，
+    // 与离线导出走同一份实现，保证监听与导出结果一致。
+    crate::master_bus::apply_soft_clip_prefix(
+        scratch,
+        frames * 2,
+        crate::master_bus::soft_clip_enabled(),
+        crate::master_bus::soft_clip_knee(),
+    );
+
     for f in 0..frames {
         let l = clamp11(scratch[f * 2]);
         let r = clamp11(scratch[f * 2 + 1]);
@@ -809,6 +818,14 @@ pub(crate) fn render_callback_i16(
         // publishes zeros here — do NOT reset again or real peaks are lost.
         meter_bus.publish_block(&meter_scratch.track_peaks, block.snapshot.track_ids.len());
     }
+
+    // 主总线软削波（与离线导出共用，见 audio/master_bus.rs）。
+    crate::master_bus::apply_soft_clip_prefix(
+        scratch,
+        frames * 2,
+        crate::master_bus::soft_clip_enabled(),
+        crate::master_bus::soft_clip_knee(),
+    );
 
     for f in 0..frames {
         let l = clamp11(scratch[f * 2]);
@@ -881,6 +898,14 @@ pub(crate) fn render_callback_u16(
         // publishes zeros here — do NOT reset again or real peaks are lost.
         meter_bus.publish_block(&meter_scratch.track_peaks, block.snapshot.track_ids.len());
     }
+
+    // 主总线软削波（与离线导出共用，见 audio/master_bus.rs）。
+    crate::master_bus::apply_soft_clip_prefix(
+        scratch,
+        frames * 2,
+        crate::master_bus::soft_clip_enabled(),
+        crate::master_bus::soft_clip_knee(),
+    );
 
     for f in 0..frames {
         let l = clamp11(scratch[f * 2]);

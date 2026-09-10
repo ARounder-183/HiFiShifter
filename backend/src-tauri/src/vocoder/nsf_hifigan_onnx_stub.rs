@@ -131,3 +131,6 @@ pub fn infer_pitch_edit_chunked_optimized(
 ) -> Result<Vec<f32>, String> {
     Ok(mono_pcm.to_vec())
 }
+
+/// 与 onnx 变体同名：无 onnx 构建下没有会话需要预热，作空实现保持接口一致。
+pub fn ensure_background_prewarm() {}

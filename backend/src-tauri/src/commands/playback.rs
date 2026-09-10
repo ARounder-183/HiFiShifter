@@ -571,7 +571,7 @@ fn render_single_clip(
     };
 
     let mut segment =
-        crate::mixdown::linear_resample_interleaved(&segment, in_channels_usize, in_rate, out_rate);
+        crate::resample::resample_interleaved(&segment, in_channels_usize, in_rate, out_rate);
 
     // Loop 模式的倒放方向已由回绕索引体现，不再整体反转。
     if !loop_mode && clip.reversed {

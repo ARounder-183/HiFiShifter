@@ -16,8 +16,8 @@
 
 use super::traits::{RenderContext, Renderer, RendererCapabilities};
 use super::utils::{clip_midi_at_time, edit_midi_at_time_or_none};
+use crate::audio_engine::byte_budget_cache::ByteBudgetCache;
 use crate::state::SynthPipelineKind;
-use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
 // ─── 分块缓存（独立于 SynthClipCache，靠 hash 比对自然失效）───────────────────
@@ -27,31 +27,74 @@ pub struct ChunkCacheEntry {
     pub waveform: Vec<f32>,
 }
 
-static CHUNK_CACHE: OnceLock<Mutex<HashMap<(String, usize), ChunkCacheEntry>>> = OnceLock::new();
+/// 分块缓存的 key：`(clip_id, mel_start)`。
+pub type ChunkCacheKey = (String, usize);
 
-pub fn global_chunk_cache_ref() -> &'static Mutex<HashMap<(String, usize), ChunkCacheEntry>> {
-    CHUNK_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+/// 分块缓存。
+///
+/// **必须是有界缓存**：单个 chunk 的波形可达 4096 mel 帧 × hop 512 × 4 B
+/// ≈ 8 MiB，此前用无界 `HashMap` 会在长会话中单调增长直至 OOM（见 P0-3）。
+/// 现在与其它 PCM 缓存一致，走字节预算 LRU；条目容量作为兜底上限，
+/// 实际由字节预算主导淘汰。
+static CHUNK_CACHE: OnceLock<Mutex<ByteBudgetCache<ChunkCacheKey, ChunkCacheEntry>>> =
+    OnceLock::new();
+
+/// 分块缓存的条目容量兜底上限。
+///
+/// 取值远大于字节预算允许的条目数，因此正常情况下不会成为约束；
+/// 仅用于防御"单个 chunk 极小导致条目数失控"的极端情况。
+const CHUNK_CACHE_MAX_ENTRIES: usize = 1024;
+
+/// 单个条目的固定簿记开销（key 字符串 + 结构体字段）。
+const CHUNK_ENTRY_OVERHEAD_BYTES: u64 = 96;
+
+/// 分块缓存的字节预算。
+///
+/// 默认取统一音频缓存预算的 1/4（默认配置下约 256 MiB ≈ 30 个满尺寸 chunk，
+/// 覆盖约 23 分钟音频）；可用 `HIFISHIFTER_CHUNK_CACHE_MB` 单独覆盖。
+fn chunk_cache_budget_bytes() -> u64 {
+    if let Some(mb) = std::env::var("HIFISHIFTER_CHUNK_CACHE_MB")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|v| *v > 0)
+    {
+        return mb.saturating_mul(1024 * 1024);
+    }
+    crate::audio_engine::byte_budget_cache::env_cache_budget_bytes() / 4
+}
+
+/// 获取进程级分块缓存。
+pub fn global_chunk_cache() -> &'static Mutex<ByteBudgetCache<ChunkCacheKey, ChunkCacheEntry>> {
+    CHUNK_CACHE.get_or_init(|| {
+        Mutex::new(ByteBudgetCache::new(
+            CHUNK_CACHE_MAX_ENTRIES,
+            chunk_cache_budget_bytes(),
+        ))
+    })
+}
+
+/// 单个 chunk 波形占用的字节数（含固定簿记开销）。
+fn chunk_entry_bytes(waveform: &[f32]) -> u64 {
+    (waveform.len() as u64)
+        .saturating_mul(std::mem::size_of::<f32>() as u64)
+        .saturating_add(CHUNK_ENTRY_OVERHEAD_BYTES)
 }
 
 /// 使指定 clip_id 的所有 chunk 推理缓存失效。
 /// 当源文件被替换时调用，避免 HiFiGAN 推理复用旧文件的输出。
 pub fn invalidate_chunk_cache_for_clip(clip_id: &str) {
-    if let Ok(mut cache) = global_chunk_cache_ref().lock() {
-        let keys: Vec<(String, usize)> = cache
-            .keys()
-            .filter(|(id, _)| id == clip_id)
-            .cloned()
-            .collect();
-        for k in &keys {
-            cache.remove(k);
-        }
-        if !keys.is_empty() {
-            log::warn!(
-                "[hifigan:cache] invalidated {} chunk(s) for clip_id={}",
-                keys.len(),
-                clip_id
-            );
-        }
+    let mut cache = global_chunk_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let before = cache.len();
+    cache.invalidate_where(|(id, _)| id == clip_id);
+    let removed = before.saturating_sub(cache.len());
+    if removed > 0 {
+        log::warn!(
+            "[hifigan:cache] invalidated {} chunk(s) for clip_id={}",
+            removed,
+            clip_id
+        );
     }
 }
 
@@ -266,9 +309,7 @@ impl HiFiGanRenderer {
                 );
                 let cache_key = (clip_id.clone(), mel_start);
 
-                let mut cache = global_chunk_cache_ref()
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
+                let mut cache = global_chunk_cache().lock().unwrap_or_else(|e| e.into_inner());
                 match cache.get(&cache_key) {
                     Some(entry) if entry.param_hash == hash => {
                         chunk_debug(&format!(
@@ -277,11 +318,11 @@ impl HiFiGanRenderer {
                         Some(entry.waveform.clone())
                     }
                     Some(entry) => {
+                        let cached_hash = entry.param_hash;
                         chunk_debug(&format!(
-                            "  chunk [{mel_start}..{mel_end}) STALE (cached={:016x} current={hash:016x})",
-                            entry.param_hash,
+                            "  chunk [{mel_start}..{mel_end}) STALE (cached={cached_hash:016x} current={hash:016x})",
                         ));
-                        cache.remove(&cache_key);
+                        cache.pop(&cache_key);
                         None
                     }
                     None => {
@@ -310,15 +351,15 @@ impl HiFiGanRenderer {
                     wf.len(),
                 ));
 
-                let mut cache = global_chunk_cache_ref()
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
+                let mut cache = global_chunk_cache().lock().unwrap_or_else(|e| e.into_inner());
+                let weight = chunk_entry_bytes(&wf);
                 cache.insert(
                     cache_key,
                     ChunkCacheEntry {
                         param_hash: hash,
                         waveform: wf,
                     },
+                    weight,
                 );
             },
         )?;

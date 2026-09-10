@@ -21,3 +21,6 @@ pub fn infer_f0_hz(
 pub fn drop_shared_session() {}
 
 pub fn update_ort_ep(_choice: &str, _device_id: Option<i32>) {}
+
+/// 与 onnx 变体同名：无 onnx 构建下没有会话需要预热，作空实现保持接口一致。
+pub fn ensure_background_prewarm() {}

@@ -95,49 +95,9 @@ fn sample_automation_curve_at_sec(
     a + (b - a) * frac
 }
 
-pub(crate) fn linear_resample_interleaved(
-    input: &[f32],
-    channels: usize,
-    in_rate: u32,
-    out_rate: u32,
-) -> Vec<f32> {
-    if input.is_empty() || channels == 0 {
-        return vec![];
-    }
-    if in_rate == out_rate {
-        return input.to_vec();
-    }
-
-    let in_frames = input.len() / channels;
-    if in_frames < 2 {
-        return input.to_vec();
-    }
-
-    let ratio = out_rate as f64 / in_rate as f64;
-    let out_frames = ((in_frames as f64) * ratio).round().max(1.0) as usize;
-    let mut out = vec![0.0f32; out_frames * channels];
-
-    for of in 0..out_frames {
-        let t_in = (of as f64) / ratio;
-        let mut i0 = t_in as usize; //  向下取整
-        let frac = (t_in - (i0 as f64)) as f32;
-        i0 = i0.min(in_frames - 1); //  限制上限即可
-        let i1 = (i0 + 1).min(in_frames - 1);
-
-        // 提取乘法基址到声道循环外部
-        let base0 = i0 * channels;
-        let base1 = i1 * channels;
-        let out_base = of * channels;
-
-        for ch in 0..channels {
-            let a = input[base0 + ch];
-            let b = input[base1 + ch];
-            out[out_base + ch] = a + (b - a) * frac;
-        }
-    }
-
-    out
-}
+// 采样率转换已统一到 `crate::resample`（带限 / 抗混叠）。
+// 原先此处有一份与本文件逐字重复、且无抗混叠的 `linear_resample_interleaved`，
+// 已删除（见 P0-1）。调用点改用 `crate::resample::resample_interleaved`。
 
 pub(crate) fn reverse_interleaved_frames(samples: &mut [f32], channels: usize) {
     if channels == 0 {
@@ -610,7 +570,7 @@ pub fn render_mixdown_interleaved(
         };
 
         let mut segment =
-            linear_resample_interleaved(&segment, in_channels_usize, in_rate, out_rate);
+            crate::resample::resample_interleaved(&segment, in_channels_usize, in_rate, out_rate);
 
         // Loop 模式的倒放方向已由回绕索引体现，不再整体反转。
         if !loop_mode && clip.reversed {
@@ -990,6 +950,16 @@ pub fn render_mixdown_interleaved(
         }
     }
 
+    // ── 主总线软削波 ─────────────────────────────────────────────────────
+    // 与实时混音共用同一实现与同一开关（`crate::master_bus`），保证"听到的"
+    // 与"导出的"经过完全相同的总线处理。此前主混音是裸求和、仅在编码前做
+    // 硬截断（见 P0-2）。
+    let bus_stats = crate::master_bus::apply_soft_clip_with_stats(
+        &mut mix,
+        crate::master_bus::soft_clip_enabled(),
+        crate::master_bus::soft_clip_knee(),
+    );
+
     if debug {
         let mut max_abs = 0.0f32;
         for &v in &mix {
@@ -999,12 +969,16 @@ pub fn render_mixdown_interleaved(
             }
         }
         log::warn!(
-            "mixdown: rendered window start_sec={:.3} end_sec={:.3} sr={} frames={} max_abs={:.6} clips_considered={} clips_decoded={} clips_mixed={}",
+            "mixdown: rendered window start_sec={:.3} end_sec={:.3} sr={} frames={} max_abs={:.6} bus_peak={:.6} bus_limited_samples={} soft_clip={} knee={:.3} clips_considered={} clips_decoded={} clips_mixed={}",
             start_sec,
             end_sec,
             out_rate,
             out_frames,
             max_abs,
+            bus_stats.peak,
+            bus_stats.limited_samples,
+            crate::master_bus::soft_clip_enabled(),
+            crate::master_bus::soft_clip_knee(),
             clips_considered,
             clips_decoded,
             clips_mixed

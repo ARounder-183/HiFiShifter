@@ -34,3 +34,6 @@ pub fn infer_noise_mono(
 ) -> Result<std::sync::Arc<Vec<f32>>, String> {
     Err("onnx feature disabled".to_string())
 }
+
+/// 与 onnx 变体同名：无 onnx 构建下没有会话需要预热，作空实现保持接口一致。
+pub fn ensure_background_prewarm() {}

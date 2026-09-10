@@ -4,44 +4,9 @@ use std::sync::{Arc, Mutex};
 use super::resource_manager::DecodeCache;
 use super::types::ResampledStereo;
 
-pub(crate) fn linear_resample_interleaved(
-    input: &[f32],
-    channels: usize,
-    in_rate: u32,
-    out_rate: u32,
-) -> Vec<f32> {
-    if input.is_empty() || channels == 0 {
-        return vec![];
-    }
-    if in_rate == out_rate {
-        return input.to_vec();
-    }
-
-    let in_frames = input.len() / channels;
-    if in_frames < 2 {
-        return input.to_vec();
-    }
-
-    let ratio = out_rate as f64 / in_rate as f64;
-    let out_frames = ((in_frames as f64) * ratio).round().max(1.0) as usize;
-    let mut out = vec![0.0f32; out_frames * channels];
-
-    for of in 0..out_frames {
-        let t_in = (of as f64) / ratio;
-        let i0 = t_in.floor() as isize;
-        let frac = (t_in - (i0 as f64)) as f32;
-        let i0 = i0.clamp(0, (in_frames - 1) as isize) as usize;
-        let i1 = (i0 + 1).min(in_frames - 1);
-
-        for ch in 0..channels {
-            let a = input[i0 * channels + ch];
-            let b = input[i1 * channels + ch];
-            out[of * channels + ch] = a + (b - a) * frac;
-        }
-    }
-
-    out
-}
+// 采样率转换统一走 `crate::resample`（带限 / 抗混叠）。
+// 这里保留一个别名，避免调用点写成两套名字。
+pub(crate) use crate::resample::resample_interleaved as linear_resample_interleaved;
 
 pub(crate) fn is_audio_path(path: &Path) -> bool {
     crate::media::is_media_extension(path)

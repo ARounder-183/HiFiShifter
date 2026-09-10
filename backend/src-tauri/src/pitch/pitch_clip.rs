@@ -684,7 +684,7 @@ pub fn compute_clip_pitch_midi(
     if in_frames < 2 {
         return None;
     }
-    let analysis_pcm = crate::mixdown::linear_resample_interleaved(
+    let analysis_pcm = crate::resample::resample_interleaved(
         &pcm,
         in_channels_usize,
         in_rate,

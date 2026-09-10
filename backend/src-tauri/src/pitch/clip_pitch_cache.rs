@@ -14,7 +14,12 @@ use std::time::SystemTime;
 
 /// Version number for cache format. Increment this when the cache key format
 /// or analysis algorithm changes to invalidate old cache entries.
-pub const CACHE_FORMAT_VERSION: u32 = 2;
+///
+/// v3：采样率转换改为带限（抗混叠）实现（`crate::resample`）。对任何非
+/// 44.1 kHz 的源文件（如 48 kHz），音高分析的输入 PCM 不再含混叠分量，
+/// 分析结果因此改变 —— 必须作废旧缓存，否则用户会听到/看到由旧重采样器
+/// 算出的音高曲线。
+pub const CACHE_FORMAT_VERSION: u32 = 3;
 
 /// Default maximum number of cached clip pitch curves
 pub const DEFAULT_CACHE_CAPACITY: usize = 100;

@@ -47,6 +47,12 @@ mod launch_args;
 mod media;
 #[path = "audio/mixdown.rs"]
 mod mixdown;
+// 全项目唯一的采样率转换入口（带限 / 抗混叠）。详见 `audio/resample.rs`。
+#[path = "audio/resample.rs"]
+mod resample;
+// 主总线动态处理（软削波），实时与离线共用。详见 `audio/master_bus.rs`。
+#[path = "audio/master_bus.rs"]
+mod master_bus;
 #[path = "audio/encode/mod.rs"]
 mod encode;
 #[path = "audio/silence_detect.rs"]

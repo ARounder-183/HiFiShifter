@@ -145,9 +145,18 @@ pub fn hann_window(len: usize) -> Vec<f32> {
 ///
 /// Uses pre-computed inverse ratio (multiply instead of divide in the hot loop)
 /// and chunked processing to enable auto-vectorization by LLVM.
+///
+/// **降采样分支必须带抗混叠**：本函数被 FCPE（44.1k → 16k）与 HNSEP
+/// （→ 44.1k）用作模型输入重采样，降采样时高频会折叠到基频附近并干扰
+/// F0 / 谐噪分离。因此 `out_rate < in_rate` 时改走 `crate::resample`
+/// 的带限实现；升采样与等采样率仍走下面的向量化线性路径
+/// （升采样不产生混叠，且该路径明显更快）。
 pub fn linear_resample_mono(input: &[f32], in_rate: u32, out_rate: u32) -> Vec<f32> {
     if input.is_empty() || in_rate == 0 || out_rate == 0 || in_rate == out_rate {
         return input.to_vec();
+    }
+    if out_rate < in_rate {
+        return crate::resample::resample_mono(input, in_rate, out_rate);
     }
     if input.len() < 2 {
         return input.to_vec();

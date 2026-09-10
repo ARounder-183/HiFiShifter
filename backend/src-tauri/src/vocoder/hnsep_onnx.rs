@@ -318,10 +318,9 @@ pub fn ensure_cache_capacity(min_capacity: usize) {
 
 /// 清空全部谐波/噪声分离缓存。
 ///
-/// 缓存 key 是 `clip_id+采样率+样本数` 的单向哈希，无法按 clip 反查剔除；
-/// 而多 Take 切换后同一 clip_id 会对应不同源内容（等长 Take 尤其会命中
-/// 旧 Take 的 stem，造成气声路径串音）。Take 切换/增删属于低频用户操作，
-/// 直接整体清空、由后续渲染重建是正确且代价最小的失效策略。
+/// 自 v1.1（P0-6）起缓存 key **包含音频内容摘要**，因此等长不同 Take 不会再
+/// 命中彼此的 stem —— 本函数不再是正确性的必要条件，仅作为内存回收 /
+/// 工程切换时的清理手段保留（HNSEP 结果重建代价较高，故不作过度清理）。
 pub fn clear_separation_cache() {
     let mut cache = global_cache().lock().unwrap_or_else(|e| e.into_inner());
     let cleared = cache.len();
@@ -331,29 +330,36 @@ pub fn clear_separation_cache() {
     }
 }
 
-/// Compute a clip-level cache key using only identity fields (not audio content).
+#[inline]
+fn fnv1a_update(mut h: u64, bytes: &[u8]) -> u64 {
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(1099511628211u64);
+    }
+    h
+}
+
+/// Compute a clip-level cache key.
 ///
-/// Uses FNV-1a 64-bit for low overhead. The key is based on `clip_id` + `sample_rate` +
-/// `audio_len`, which is sufficient for per-clip HNSEP separation caching — two calls
-/// for the same clip with the same clipped audio length will produce the same separation
-/// output, regardless of which segment is being rendered.
-fn separation_cache_key(clip_id: &str, sample_rate: u32, audio_len: usize) -> u64 {
-    // FNV-1a 64-bit initial value
+/// 组成：`clip_id` + `sample_rate` + `audio_len` + **音频内容摘要**。
+///
+/// 为什么必须包含内容摘要：仅用 `clip_id` 的 key 无法区分**同一 clip 的多个
+/// Take**。当两个 Take 长度恰好相同时，后一个 Take 会命中前一个 Take 的
+/// 分离结果，导致气声/张力路径串音。此前靠"切换 Take 时整体清空缓存"规避，
+/// 但那只是约定级防护，任何新增的绕行编辑路径都会破坏它（见 P0-6）。
+///
+/// 开销：FNV-1a 对每个样本 4 字节做一次乘加，数分钟 mono 音频约 10^7 次
+/// 操作（十毫秒量级），相对 HNSEP 推理本身可忽略。
+fn separation_cache_key(clip_id: &str, sample_rate: u32, audio: &[f32]) -> u64 {
+    // FNV-1a 64-bit
     let mut h: u64 = 14695981039346656037u64;
-
-    for &b in clip_id.as_bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(1099511628211u64);
+    h = fnv1a_update(h, clip_id.as_bytes());
+    h = fnv1a_update(h, &sample_rate.to_le_bytes());
+    h = fnv1a_update(h, &(audio.len() as u64).to_le_bytes());
+    for &s in audio {
+        // 用位模式而非数值：需要区分任何不同的浮点表示。
+        h = fnv1a_update(h, &s.to_bits().to_le_bytes());
     }
-    for &b in &sample_rate.to_le_bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(1099511628211u64);
-    }
-    for &b in &(audio_len as u64).to_le_bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(1099511628211u64);
-    }
-
     h
 }
 
@@ -380,11 +386,11 @@ pub fn infer_noise_mono(
 pub fn cache_separation(
     clip_id: &str,
     sample_rate: u32,
-    audio_len: usize,
+    audio_mono: &[f32],
     harmonic: Arc<Vec<f32>>,
     noise: Arc<Vec<f32>>,
 ) {
-    let cache_key = separation_cache_key(clip_id, sample_rate, audio_len);
+    let cache_key = separation_cache_key(clip_id, sample_rate, audio_mono);
     let entry = HnsepCacheEntry { harmonic, noise };
     let mut cache = global_cache().lock().unwrap_or_else(|e| e.into_inner());
     cache.put(cache_key, entry);
@@ -402,7 +408,7 @@ pub fn infer_harmonic_noise_mono(
     }
 
     let audio_len = audio_mono.len();
-    let cache_key = separation_cache_key(clip_id, sample_rate, audio_len);
+    let cache_key = separation_cache_key(clip_id, sample_rate, audio_mono);
     {
         let mut cache = global_cache()
             .lock()
