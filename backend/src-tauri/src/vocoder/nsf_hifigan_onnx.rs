@@ -51,6 +51,13 @@ fn run_session_once(
                 .1
                 .try_extract_tensor::<f32>()
                 .map_err(|e| format!("ort output type mismatch: {e}"))?;
+            // 空输出必须显式失败：历史上"输入被 ORT 拒绝"曾表现为**静默产出
+            // 空波形**，用户只听到无声片段而日志无异常（见 P1-9）。
+            if data.is_empty() {
+                return Err(format!(
+                    "onnx returned an empty waveform for {t} mel frames"
+                ));
+            }
             Ok(data.to_vec())
         })();
         let _ = tx.send(result);
@@ -848,37 +855,13 @@ pub struct NsfHifiganOnnx {
     session: Arc<Mutex<Session>>,
     /// 标记当前实例是在哪个 Epoch 加载的。用于检测重新加载。
     epoch: usize,
-    /// True when the ORT session's batch dimension is pinned to 1
-    /// (DirectML session builder overrides batch=1; CoreML also pins batch=1).
-    /// When true, batched tensors with B>1 are invalid and must run sequentially.
-    batch_pinned_to_one: bool,
 }
 
-/// Detect whether the current ONNX session has its batch dimension pinned to 1.
-///
-/// DirectML sessions are built with `.with_dimension_override("batch", 1)` to
-/// avoid dynamic-shape GPU shaders, so they cannot accept a batched input with
-/// B>1. CoreML sessions are likewise pinned to batch=1. CPU/WebGPU sessions
-/// usually keep the model's dynamic batch dimension and can run real batches.
-fn session_batch_pinned_to_one(session: &Arc<Mutex<Session>>) -> bool {
-    let Ok(guard) = session.lock() else {
-        // If we cannot inspect the session, prefer the safe sequential path.
-        return true;
-    };
-
-    let mut has_fixed_batch = false;
-    let mut has_dynamic_batch = false;
-    for input in guard.inputs() {
-        if let ort::value::ValueType::Tensor { shape, .. } = input.dtype() {
-            match shape.first().copied() {
-                Some(1) => has_fixed_batch = true,
-                Some(-1) => has_dynamic_batch = true,
-                _ => {}
-            }
-        }
-    }
-    has_fixed_batch && !has_dynamic_batch
-}
+// 关于 batch 维度：DirectML 会话以 `.with_dimension_override("batch", 1)` 构建
+// （另有 CoreML 同样钉死 batch=1），因此 B>1 张量会被 ORT 直接拒绝。历史上此处
+// 有一个 `session_batch_pinned_to_one()` 探测器，用于在批处理路径上回退为逐条
+// 推理；批处理路径已被移除（见 `run_models_sequential` 的设计说明），探测器随之
+// 删除。若将来重新引入跨分块合批，必须同时恢复该探测并把"输入被拒"升级为硬错误。
 
 impl NsfHifiganOnnx {
     fn load() -> Result<Self, String> {
@@ -906,8 +889,6 @@ impl NsfHifiganOnnx {
         let fft = planner.plan_fft_forward(cfg.n_fft);
         let fft_buf: Vec<Complex32> = vec![Complex32::new(0.0, 0.0); cfg.n_fft];
 
-        let batch_pinned_to_one = session_batch_pinned_to_one(&session);
-
         Ok(Self {
             cfg,
             mel_fb_matrix,
@@ -917,7 +898,6 @@ impl NsfHifiganOnnx {
             pad_buf: Vec::new(),
             audio_resample_buf: Vec::new(),
             session,
-            batch_pinned_to_one,
             epoch: current_epoch,
         })
     }
@@ -1100,95 +1080,58 @@ impl NsfHifiganOnnx {
         }
     }
 
-    /// Each item is (mel_vec, f0_vec, t) where t is the mel frame count.
-    /// Returns Vec of output waveforms, each trimmed to its original expected length.
-    fn run_model_batch(
+    /// 对每个分块**依次**执行推理，返回各自的波形。
+    ///
+    /// 每个 item 为 `(mel_vec, f0_vec, t)`，`t` 为该分块的 mel 帧数。
+    ///
+    /// # 为什么不做批处理（移除旧实现的理由）
+    ///
+    /// 旧实现会把长度相同的分块打包成 `B > 1` 张量做一次调用。经核实该路径在
+    /// 真实工程中**几乎不可达**，且带有"静默产出空音频"的事故面：
+    ///
+    /// 1. **长度必须完全相等**。分块由 `CHUNK_MAX_FRAMES` 上限切分，最后一块
+    ///    通常更短；真正能合批的条件是 `t % CHUNK_MAX_FRAMES == 0`。
+    /// 2. **零填充会改变音质**。模型的 f0 源生成子图作用于整条时间轴，把短块
+    ///    零填充到长块长度会改变**有效区**的音频（实测 rel_l2 恶化约 8%，
+    ///    CPU 与 CoreML 一致，属模型特性）。
+    /// 3. **DirectML / CoreML 把 batch 钉死为 1**，B>1 张量被 ORT 直接拒绝
+    ///    （历史现象：`Got 6 Expected: 1`，而调用方**静默产出空音频**）。
+    ///
+    /// 三者叠加后，合批既触发不了、又会改变音质、还要额外维护"输入被拒"的
+    /// 失败分支。统一走逐分块顺序推理后，分块数依然很少（4096 帧 ≈ 47 s），
+    /// 调用开销可忽略，而正确性只依赖一条路径（见 P1-9）。
+    fn run_models_sequential(
         &mut self,
         items: &[(Vec<f32>, Vec<f32>, usize)],
     ) -> Result<Vec<Vec<f32>>, String> {
-        if items.is_empty() {
-            return Ok(vec![]);
-        }
-        if items.len() == 1 {
-            let (mel, f0, t) = &items[0];
-            return self.run_model(mel.clone(), f0.clone(), *t).map(|v| vec![v]);
-        }
-        let n = items.len();
-        // Every item is zero-padded up to the longest one so the batch shares
-        // a single rectangular tensor; results are trimmed back afterwards.
-        let max_t = items.iter().map(|(_, _, t)| *t).max().unwrap_or(1);
-
-        // Batched inference is only exact when no item needs padding.  The
-        // model's f0 source-generator subgraph runs across the whole time
-        // axis, so feeding a chunk zero-padded to a longer length changes the
-        // audio in the *valid* region too (measured rel_l2 up to ~8% for a
-        // 256-frame chunk padded to 1024 — and identically on CPU and CoreML,
-        // so this is a property of the model, not of the execution provider).
-        // Items of unequal length therefore run one at a time, which is also
-        // what DirectML requires because its builder pins batch=1.
-        let uniform_length = items.iter().all(|(_, _, t)| *t == max_t);
-        if self.batch_pinned_to_one || !uniform_length {
-            let mut results = Vec::with_capacity(items.len());
-            for (mel, f0, t) in items {
-                results.push(self.run_model(mel.clone(), f0.clone(), *t)?);
-            }
-            return Ok(results);
-        }
-
-        let n_mels = self.cfg.num_mels;
-        let hop = self.cfg.hop_size;
-
-        // Build batched mel [B, n_mels, max_t] and f0 [B, max_t], zero-padded
-        let mut mel_batch = vec![0.0f32; n * n_mels * max_t];
-        let mut f0_batch = vec![0.0f32; n * max_t];
-        let mut out_lengths = Vec::with_capacity(n);
-
-        for (i, (mel, f0, t)) in items.iter().enumerate() {
-            // mel is (n_mels, t) column-major
-            for m in 0..n_mels {
-                let src_offset = m * t;
-                let dst_offset = (i * n_mels + m) * max_t;
-                mel_batch[dst_offset..dst_offset + t]
-                    .copy_from_slice(&mel[src_offset..src_offset + t]);
-            }
-            f0_batch[i * max_t..i * max_t + t].copy_from_slice(f0);
-            out_lengths.push(t * hop);
-        }
-
-        let mel_tensor = Tensor::from_array(([n, n_mels, max_t], mel_batch.into_boxed_slice()))
-            .map_err(|e| format!("build batched mel tensor failed: {e}"))?;
-        let f0_tensor = Tensor::from_array(([n, max_t], f0_batch.into_boxed_slice()))
-            .map_err(|e| format!("build batched f0 tensor failed: {e}"))?;
-
-        let all_output: Vec<f32> = {
-            let mut session_guard = self
-                .session
-                .lock()
-                .map_err(|e| format!("ort session lock poisoned: {e}"))?;
-            let outputs = session_guard
-                .run(ort::inputs![mel_tensor, f0_tensor])
-                .map_err(|e| format!("ort batch run failed: {e}"))?;
-            let output0 = outputs
-                .into_iter()
-                .next()
-                .ok_or_else(|| "onnx returned no outputs".to_string())?;
-            let (_shape, data) = output0
-                .1
-                .try_extract_tensor::<f32>()
-                .map_err(|e| format!("ort output type mismatch: {e}"))?;
-            data.to_vec()
-        };
-
-        // Split batched output back into per-clip results
-        let max_out_t = max_t * hop;
-        let mut results = Vec::with_capacity(n);
-        for (i, &expected_len) in out_lengths.iter().enumerate() {
-            let start = i * max_out_t;
-            let end = (start + expected_len).min(all_output.len());
-            results.push(all_output[start..end].to_vec());
+        let mut results = Vec::with_capacity(items.len());
+        for (mel, f0, t) in items {
+            results.push(self.run_model(mel.clone(), f0.clone(), *t)?);
         }
         Ok(results)
     }
+}
+
+/// 校验分块推理结果合法。
+///
+/// - **空波形直接报错**：这是历史上"输入被 ORT 拒绝 → 静默无声"的表现形态，
+///   绝不能被当作"该分块是静音"放过（见 P1-9）。
+/// - **长度不足告警**：`stitch_chunks_to_output` 会按 `frame_off × hop` 写入，
+///   偏短的结果会在拼接处留下零值缺口，属应当被看见的异常。
+fn ensure_chunk_waveform_ok(wf: &[f32], chunk_t: usize, hop: usize) -> Result<(), String> {
+    if wf.is_empty() {
+        return Err(format!(
+            "nsf_hifigan: chunk inference produced an empty waveform (chunk_t={chunk_t}, hop={hop})"
+        ));
+    }
+    let expected = chunk_t.saturating_mul(hop);
+    if expected > 0 && wf.len() < expected {
+        log::warn!(
+            "[nsf_hifigan] chunk waveform shorter than expected: got {} samples, expected {expected} (chunk_t={chunk_t}, hop={hop}) — a zero gap will appear at the stitch point",
+            wf.len()
+        );
+    }
+    Ok(())
 }
 
 /// 后台预热结果：None = 尚未尝试/进行中；Some(Ok) = 就绪；Some(Err) = 失败。
@@ -1579,17 +1522,20 @@ pub fn infer_pitch_edit_chunked_optimized(
                 })
                 .collect();
 
-            let t_batch = std::time::Instant::now();
-            let batch_results = sess.run_model_batch(&batch_items)?;
+            let t_infer = std::time::Instant::now();
+            let chunk_results = sess.run_models_sequential(&batch_items)?;
             debug_eprintln!(
-                "[nsf_hifigan] chunked_opt: batch_gpu={}ms for {} chunks",
-                t_batch.elapsed().as_millis(),
-                batch_results.len()
+                "[nsf_hifigan] chunked_opt: inference={}ms for {} chunks (sequential)",
+                t_infer.elapsed().as_millis(),
+                chunk_results.len()
             );
 
-            for (i, wf) in batch_results.into_iter().enumerate() {
+            for (i, wf) in chunk_results.into_iter().enumerate() {
                 let fi = needs_inference[i];
                 let chunk_end = (fi + CHUNK_MAX_FRAMES).min(t);
+                // 空输出必须报错、长度不足必须告警 —— 绝不能让"静默无声"
+                // 从这里溜进拼接与缓存（见 P1-9 与 ensure_chunk_waveform_ok）。
+                ensure_chunk_waveform_ok(&wf, chunk_end - fi, hop)?;
                 chunk_cache_put(fi, chunk_end, wf.clone());
                 cached_chunks.push((fi, wf));
                 emit_chunk_progress((processed_before + i + 1) as f64 / total_chunks as f64);
