@@ -63,6 +63,17 @@ impl FormantCache {
     pub fn invalidate(&mut self, clip_id: &str) {
         self.inner.invalidate_where(|k| k.clip_id == clip_id);
     }
+
+    /// 当前条目数（供缓存失效编排统计与诊断展示）。
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// 占用字节数（诊断展示用）。
+    #[allow(dead_code)]
+    pub fn total_bytes(&self) -> u64 {
+        self.inner.total_bytes()
+    }
 }
 
 static GLOBAL_FORMANT_CACHE: OnceLock<Mutex<FormantCache>> = OnceLock::new();

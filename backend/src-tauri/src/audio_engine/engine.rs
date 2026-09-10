@@ -1162,8 +1162,6 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
             if render_shape_changed {
                 // 片段源范围/轨道归属/速率/长度等变化后，旧渲染结果不可安全复用。
                 crate::synth_clip_cache::invalidate_clip_all_caches(&clip.id);
-                // 同时使 formant 缓存失效（formant 缓存按 clip_id + source_path 双重 key）
-                crate::formant_cache::invalidate_formant_cache_for_clip(&clip.id);
                 any_cache_invalidated = true;
             } else if pitch_changed {
                 // 仅 pitch 曲线变化时保留最近一次完整渲染，允许短时无缝垫音。

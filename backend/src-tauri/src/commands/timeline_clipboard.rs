@@ -258,7 +258,6 @@ fn paste_fragment(
                 .unwrap_or(false)
             {
                 crate::synth_clip_cache::invalidate_clip_all_caches(&clip.id);
-                crate::formant_cache::invalidate_formant_cache_for_clip(&clip.id);
             }
         }
         state.audio_engine.update_timeline(tl.clone());

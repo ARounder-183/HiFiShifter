@@ -971,7 +971,6 @@ pub(super) fn set_clips_state_bulk(
 
 fn invalidate_take_related_caches(clip_id: &str) {
     crate::synth_clip_cache::invalidate_clip_all_caches(clip_id);
-    crate::formant_cache::invalidate_formant_cache_for_clip(clip_id);
     if let Ok(mut mgr) = crate::clip_rendering_state::global_clip_rendering_state().lock() {
         mgr.remove_state(clip_id);
     }

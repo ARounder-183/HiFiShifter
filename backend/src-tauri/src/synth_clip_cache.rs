@@ -448,11 +448,13 @@ pub fn lookup_pending_rendered_key(clip_id: &str) -> Option<RenderedClipCacheKey
 }
 
 /// 清除单个 clip 的 pending rendered key。
-pub fn remove_pending_rendered_key(clip_id: &str) {
+///
+/// 返回是否确有条目被移除（供缓存失效编排统计，见 `cache_registry`）。
+pub fn remove_pending_rendered_key(clip_id: &str) -> bool {
     let mut map = global_pending_rendered_keys()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    map.remove(clip_id);
+    map.remove(clip_id).is_some()
 }
 
 /// 清空所有 pending rendered keys（播放停止或新一轮渲染开始时调用）。
@@ -891,104 +893,30 @@ pub fn global_breath_noise_cache() -> &'static Mutex<BreathNoiseCache> {
     })
 }
 
-/// 使指定 clip 的所有渲染缓存失效（SynthClipCache + RenderedClipCache + TensionRenderedClipCache + BreathNoiseCache）。
+/// 使指定 clip 的所有渲染缓存失效。
 ///
-/// 此函数应在 pitch_edit 或其他影响合成的参数发生变化时调用，
-/// 确保旧的预渲染结果不会被错误复用。
+/// 覆盖范围由 `cache_registry::REGISTRY` 中声明 `POLICY_HARD` 的条目决定
+/// （当前：SynthClipCache、RenderedClipCache、TensionRenderedClipCache、
+/// BreathNoiseCache、FormantCache、HiFiGAN 分块缓存，以及 pending rendered key）。
+///
+/// 此函数应在源范围 / 轨道归属 / 速率 / 长度 / 源文件等**结构性**变化时调用，
+/// 确保旧的预渲染结果不会被错误复用。仅音高曲线变化请改用
+/// [`invalidate_clip_for_pitch_edit`]（保留整 clip 渲染以支持无缝垫音）。
 ///
 /// # 诊断
 /// 会打印诊断日志帮助调试缓存失效相关问题。
 pub fn invalidate_clip_all_caches(clip_id: &str) {
-    // 0. 同步移除该 clip 的 pending rendered key —— 这是 key 映射**唯一**的
-    // 失效点：快照的 rendered_pcm 解析依赖 "key → 缓存条目"，key 必须在该
-    // clip 的渲染失效时同步移除，否则快照会经旧 key 命中陈旧 PCM。
-    // （旧实现在每轮渲染开始时 `clear_pending_rendered_keys()` 一刀切清空
-    //  所有 key —— 那会让等待中的传输层在重建快照时把**已渲染**的 clip 视为
-    //  未渲染而重新静音冻结；渲染重启风暴下形成"播放→静音冻结"的持续闪烁，
-    //  表现为音频断续、播放光标近乎不动。按需移除没有这个问题。）
-    crate::synth_clip_cache::remove_pending_rendered_key(clip_id);
-
-    // 1. SynthClipCache 失效（per-segment 合成缓存）
-    {
-        let mut cache = global_synth_clip_cache()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let before = cache.len();
-        cache.invalidate(clip_id);
-        if cache.len() < before {
-            debug_eprintln!(
-                "[cache:invalidate] clip_id={} SynthClipCache invalidated",
-                clip_id
-            );
-        }
-    }
-
-    // 2. RenderedClipCache 失效（整 Clip 预渲染缓存）
-    {
-        let mut cache = global_rendered_clip_cache()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let before = cache.len();
-        cache.invalidate(clip_id);
-        if cache.len() < before {
-            debug_eprintln!(
-                "[cache:invalidate] clip_id={} RenderedClipCache invalidated (had {} entries)",
-                clip_id,
-                before
-            );
-        }
-    }
-
-    // 3. TensionRenderedClipCache 失效（HiFiGAN tension 专用缓存）
-    {
-        let mut cache = global_tension_rendered_clip_cache()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let before = cache.len();
-        cache.invalidate(clip_id);
-        if cache.len() < before {
-            debug_eprintln!(
-                "[cache:invalidate] clip_id={} TensionRenderedClipCache invalidated",
-                clip_id
-            );
-        }
-    }
-
-    // 4. BreathNoiseCache 失效（Breath Noise 独立缓存）
-    {
-        let mut cache = global_breath_noise_cache()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let before = cache.len();
-        cache.invalidate(clip_id);
-        if cache.len() < before {
-            debug_eprintln!(
-                "[cache:invalidate] clip_id={} BreathNoiseCache invalidated",
-                clip_id
-            );
-        }
-    }
-
-    // 5. pending_rendered_keys 清除（渲染线程正在处理的 clip）
-    {
-        let mut map = global_pending_rendered_keys()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if map.remove(clip_id).is_some() {
-            debug_eprintln!(
-                "[cache:invalidate] clip_id={} pending_rendered_key removed",
-                clip_id
-            );
-        }
-    }
-
-    // 6. HiFiGAN 推理 chunk 缓存失效（按 clip_id 索引）
-    //    当源文件被替换后，旧的推理输出不再有效，必须使 chunk 缓存失效。
-    crate::renderer::hifigan::invalidate_chunk_cache_for_clip(clip_id);
+    // 全部走注册表（见 `cache_registry`）：新增缓存只需在 `REGISTRY` 里加一行，
+    // 不再需要回到本函数补一段、也不需要调用方手工配对。
+    //
+    // 历史教训：`FormantCache` 因为没并入这里，只能靠调用方在每个该失效的地方
+    // 手工调用一次配对；实际有 4 处配对、6 处遗漏，同一操作走不同命令会得到
+    // 不同的失效覆盖（见 P3-2）。
+    let (touched, removed) =
+        crate::cache_registry::invalidate_clip(clip_id, crate::cache_registry::POLICY_HARD);
 
     debug_eprintln!(
-        "[cache:invalidate] clip_id={} all caches invalidated",
-        clip_id
+        "[cache:invalidate] clip_id={clip_id} all caches invalidated (caches_touched={touched} entries_removed={removed})"
     );
 }
 
@@ -1005,27 +933,14 @@ pub fn invalidate_clip_all_caches(clip_id: &str) {
 ///    异步组装 pitch_orig/pitch_edit 的场景），播放时据此产生的“假失效”不应摧毁
 ///    已经按当前参数渲染好的缓存；否则首次播放会整段静音、气声缺失，第二次播放才恢复。
 pub fn invalidate_clip_for_pitch_edit(clip_id: &str) {
-    // 同上：pitch 参数已变，旧 key 必须移除（否则快照经旧 key 命中旧 PCM）。
-    crate::synth_clip_cache::remove_pending_rendered_key(clip_id);
+    let (touched, removed) = crate::cache_registry::invalidate_clip(
+        clip_id,
+        crate::cache_registry::POLICY_PITCH_EDIT,
+    );
 
     debug_eprintln!(
-        "[cache:invalidate] clip_id={clip_id} pitch_edit invalidated (synth + pending keys cleared, rendered cache kept)"
+        "[cache:invalidate] clip_id={clip_id} pitch_edit invalidated (caches_touched={touched} entries_removed={removed}, rendered cache kept)"
     );
-    // 1. SynthClipCache 失效
-    {
-        let mut cache = global_synth_clip_cache()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        cache.invalidate(clip_id);
-    }
-    // 2. pending_rendered_keys 清除
-    {
-        let mut map = global_pending_rendered_keys()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        map.remove(clip_id);
-    }
-    // 注意：不要失效 RenderedClipCache，原因见上方文档注释。
 }
 
 /// 垫音身份校验：条目与当前 Clip 的 active take 都已知时必须一致。

@@ -70,6 +70,8 @@ mod pitch_editing;
 #[path = "pitch/pitch_progress.rs"]
 mod pitch_progress;
 mod recording;
+// 统一缓存注册表与失效编排（见 P3-2）。
+mod cache_registry;
 // 渲染/推理层"用户可见告警"的单一出口（见 P0-5）。
 mod render_warning;
 mod renderer;
