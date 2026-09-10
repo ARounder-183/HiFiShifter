@@ -1531,6 +1531,27 @@ pub fn log_frontend_error(message: String, detail: Option<String>) -> serde_json
     diagnostics::log_frontend_error(message, detail)
 }
 
+/// 各音频缓存的当前占用 + 主总线设置（诊断 / 设置界面展示用）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_audio_cache_stats() -> serde_json::Value {
+    diagnostics::get_audio_cache_stats()
+}
+
+/// 读取主总线软削波设置。
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_master_bus_settings() -> serde_json::Value {
+    diagnostics::get_master_bus_settings()
+}
+
+/// 设置主总线软削波（开关 / 膝值）。返回实际生效值。
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_master_bus_settings(
+    soft_clip_enabled: Option<bool>,
+    soft_clip_knee: Option<f32>,
+) -> serde_json::Value {
+    diagnostics::set_master_bus_settings(soft_clip_enabled, soft_clip_knee)
+}
+
 // ===================== pitch_progress =====================
 
 #[tauri::command(rename_all = "camelCase")]

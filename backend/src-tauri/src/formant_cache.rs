@@ -229,8 +229,11 @@ pub fn get_or_compute_formant_analysis(
         }
     }
 
-    let (in_rate, in_channels, pcm) =
-        crate::audio_utils::decode_audio_f32_interleaved(Path::new(source_path))?;
+    // 走进程级解码缓存（见 P1-3）：共振峰预计算与渲染/导出常访问同一源。
+    let decoded = crate::audio_utils::decode_audio_cached_interleaved(Path::new(source_path))?;
+    let in_rate = decoded.sample_rate;
+    let in_channels = decoded.channels;
+    let pcm = decoded.pcm.clone();
     let ch = (in_channels as usize).max(1);
     let frames = pcm.len() / ch;
     if frames < 2 {
@@ -314,8 +317,11 @@ pub fn compute_formant_cache_entry_for_clip(
         .as_ref()
         .ok_or_else(|| "clip_has_no_source_path".to_string())?;
 
-    let (in_rate, in_channels, pcm) =
-        crate::audio_utils::decode_audio_f32_interleaved(Path::new(source_path))?;
+    // 走进程级解码缓存（见 P1-3）：共振峰预计算与渲染/导出常访问同一源。
+    let decoded = crate::audio_utils::decode_audio_cached_interleaved(Path::new(source_path))?;
+    let in_rate = decoded.sample_rate;
+    let in_channels = decoded.channels;
+    let pcm = decoded.pcm.clone();
     let in_channels_usize = in_channels as usize;
     let in_frames = pcm.len() / in_channels_usize;
     if in_frames < 2 {

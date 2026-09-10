@@ -677,8 +677,11 @@ pub fn compute_clip_pitch_midi(
     // 缓存中存的是全量源音频的 MIDI 曲线，不含 trim/rate 处理。
     // trim 截取 + rate 拉伸在推送/组装阶段按需执行。
     let source_path = clip.source_path.as_deref()?;
-    let (in_rate, in_channels, pcm) =
-        crate::audio_utils::decode_audio_f32_interleaved(Path::new(source_path)).ok()?;
+    let decoded =
+        crate::audio_utils::decode_audio_cached_interleaved(Path::new(source_path)).ok()?;
+    let in_rate = decoded.sample_rate;
+    let in_channels = decoded.channels;
+    let pcm = decoded.pcm.clone();
     let in_channels_usize = (in_channels as usize).max(1);
     let in_frames = pcm.len() / in_channels_usize;
     if in_frames < 2 {

@@ -212,3 +212,68 @@ pub(super) fn log_frontend_error(message: String, detail: Option<String>) -> ser
     }
     serde_json::json!({ "ok": true })
 }
+
+// ===================== audio runtime stats / master bus =====================
+
+/// 各进程级音频缓存的当前占用（条目数 + 字节），用于诊断与设置界面展示。
+///
+/// 这些缓存各自的预算互相独立（见 P1-7 的后续工作：统一预算），
+/// 因此这里只**报告实际占用**，不做任何裁决。
+pub(super) fn get_audio_cache_stats() -> serde_json::Value {
+    let (source_entries, source_bytes) = crate::audio_utils::source_cache_stats();
+
+    let (chunk_entries, chunk_bytes) = crate::renderer::hifigan::global_chunk_cache()
+        .lock()
+        .map(|c| (c.len(), c.total_bytes()))
+        .unwrap_or((0, 0));
+
+    let (rendered_entries, rendered_bytes) =
+        crate::synth_clip_cache::global_rendered_clip_cache()
+            .lock()
+            .map(|c| (c.len(), c.total_bytes()))
+            .unwrap_or((0, 0));
+
+    serde_json::json!({
+        "ok": true,
+        "totalBudgetBytes": crate::audio_engine::byte_budget_cache::env_cache_budget_bytes(),
+        "source": { "entries": source_entries, "bytes": source_bytes },
+        "chunk": { "entries": chunk_entries, "bytes": chunk_bytes },
+        "renderedClip": { "entries": rendered_entries, "bytes": rendered_bytes },
+        "masterBus": {
+            "softClipEnabled": crate::master_bus::soft_clip_enabled(),
+            "softClipKnee": crate::master_bus::soft_clip_knee(),
+        },
+    })
+}
+
+/// 读取主总线软削波设置。
+pub(super) fn get_master_bus_settings() -> serde_json::Value {
+    serde_json::json!({
+        "ok": true,
+        "softClipEnabled": crate::master_bus::soft_clip_enabled(),
+        "softClipKnee": crate::master_bus::soft_clip_knee(),
+    })
+}
+
+/// 设置主总线软削波开关 / 膝值（运行时生效；持久化见 P1-7 的后续工作）。
+///
+/// 返回**实际生效**的值（膝值会被钳制到合法范围）。
+pub(super) fn set_master_bus_settings(
+    soft_clip_enabled: Option<bool>,
+    soft_clip_knee: Option<f32>,
+) -> serde_json::Value {
+    if let Some(enabled) = soft_clip_enabled {
+        crate::master_bus::set_soft_clip_enabled(enabled);
+    }
+    if let Some(knee) = soft_clip_knee {
+        crate::master_bus::set_soft_clip_knee(knee);
+    }
+    let enabled = crate::master_bus::soft_clip_enabled();
+    let knee = crate::master_bus::soft_clip_knee();
+    log::warn!("[master_bus] soft clip set: enabled={enabled} knee={knee:.3}");
+    serde_json::json!({
+        "ok": true,
+        "softClipEnabled": enabled,
+        "softClipKnee": knee,
+    })
+}

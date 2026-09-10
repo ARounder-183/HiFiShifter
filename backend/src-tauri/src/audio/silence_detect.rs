@@ -76,7 +76,11 @@ pub(crate) fn analyze_take_silence(
         1.0
     };
 
-    let (sample_rate, channels, pcm) = crate::audio_utils::decode_audio_f32_interleaved(Path::new(source_path))?;
+    // 走进程级解码缓存（见 P1-3）。
+    let decoded = crate::audio_utils::decode_audio_cached_interleaved(Path::new(source_path))?;
+    let sample_rate = decoded.sample_rate;
+    let channels = decoded.channels;
+    let pcm = decoded.pcm.clone();
     let channels = channels.max(1) as usize;
     let frames = pcm.len() / channels;
     if frames == 0 || sample_rate == 0 {

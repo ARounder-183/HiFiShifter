@@ -485,9 +485,13 @@ fn render_single_clip(
         clip.length_sec
     );
 
-    // 1. 解码源文件
-    let (in_rate, in_channels, pcm) =
-        crate::audio_utils::decode_audio_f32_interleaved(std::path::Path::new(source_path))?;
+    // 1. 解码源文件（走进程级解码缓存：同一源被多个 clip 引用、或同一 clip
+    //    被反复编辑时不再重复读盘 + 解码，见 P1-3）。
+    let decoded =
+        crate::audio_utils::decode_audio_cached_interleaved(std::path::Path::new(source_path))?;
+    let in_rate = decoded.sample_rate;
+    let in_channels = decoded.channels;
+    let pcm = decoded.pcm.clone();
     let in_channels_usize = in_channels as usize;
     let in_frames = pcm.len() / in_channels_usize;
     if in_frames < 2 {

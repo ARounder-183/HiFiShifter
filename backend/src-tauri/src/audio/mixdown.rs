@@ -441,19 +441,28 @@ pub fn render_mixdown_interleaved(
         };
 
         // Decode audio (WAV fast-path; otherwise Symphonia).
-        let (in_rate, in_channels, pcm) =
-            match crate::audio_utils::decode_audio_f32_interleaved(Path::new(source_path)) {
-                Ok(v) => v,
-                Err(e) => {
-                    if debug {
-                        log::error!(
-                            "mixdown: decode failed; clip_id={} track_id={} path={} err={}",
-                            clip.id, clip.track_id, source_path, e
-                        );
-                    }
-                    continue;
+        // 走进程级解码缓存：导出遍历全部 clip 时，同一源文件通常被多个 clip
+        // 引用，缓存后只解码一次（见 P1-3）。
+        let decoded = match crate::audio_utils::decode_audio_cached_interleaved(Path::new(
+            source_path,
+        )) {
+            Ok(v) => v,
+            Err(e) => {
+                if debug {
+                    log::error!(
+                        "mixdown: decode failed; clip_id={} track_id={} path={} err={}",
+                        clip.id,
+                        clip.track_id,
+                        source_path,
+                        e
+                    );
                 }
-            };
+                continue;
+            }
+        };
+        let in_rate = decoded.sample_rate;
+        let in_channels = decoded.channels;
+        let pcm = decoded.pcm.clone();
 
         clips_decoded = clips_decoded.saturating_add(1);
 

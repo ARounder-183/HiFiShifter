@@ -366,10 +366,12 @@ fn analyze_clip_with_cache(
         }
     }
 
-    // Decode audio
-    let (in_rate, in_channels, pcm) =
-        crate::audio_utils::decode_audio_f32_interleaved(Path::new(source_path))
-            .map_err(|e| format!("Failed to decode audio: {}", e))?;
+    // Decode audio (进程级解码缓存，见 P1-3)
+    let decoded = crate::audio_utils::decode_audio_cached_interleaved(Path::new(source_path))
+        .map_err(|e| format!("Failed to decode audio: {}", e))?;
+    let in_rate = decoded.sample_rate;
+    let in_channels = decoded.channels;
+    let pcm = decoded.pcm.clone();
 
     let in_channels_usize = (in_channels as usize).max(1);
     let in_frames = pcm.len() / in_channels_usize;
@@ -1365,12 +1367,15 @@ pub(crate) fn compute_pitch_curve(job: &PitchJob, mut on_progress: impl FnMut(f3
         }
         let clip_end_sec = clip_start_sec + clip_timeline_len_sec;
 
-        // Decode audio.
-        let (in_rate, in_channels, pcm) =
-            match crate::audio_utils::decode_audio_f32_interleaved(Path::new(source_path)) {
+        // Decode audio (进程级解码缓存，见 P1-3).
+        let decoded =
+            match crate::audio_utils::decode_audio_cached_interleaved(Path::new(source_path)) {
                 Ok(v) => v,
                 Err(_) => continue,
             };
+        let in_rate = decoded.sample_rate;
+        let in_channels = decoded.channels;
+        let pcm = decoded.pcm.clone();
         let in_channels_usize = (in_channels as usize).max(1);
         let in_frames = pcm.len() / in_channels_usize;
         if in_frames < 2 {
