@@ -6,6 +6,10 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+// 自动化曲线采样统一走 `automation`（见 P3-1 / D1）：本模块以**绝对秒**为位置
+// 单位，别名让既有调用点保持不变。
+use crate::automation::sample_curve_at_sec as sample_automation_curve_at_sec;
+
 // ─── 导出格式与质量预设 ────────────────────────────────────────────────────────
 
 /// 质量预设，区分实时预览和最终导出场景。
@@ -67,33 +71,6 @@ fn clamp11(x: f32) -> f32 {
 }
 
 /// 在 mixdown 中采样自动化曲线（与 mix.rs 中的 sample_automation_curve 逻辑一致）。
-fn sample_automation_curve_at_sec(
-    curve: Option<&[f32]>,
-    abs_sec: f64,
-    frame_period_ms: f64,
-    default_value: f32,
-) -> f32 {
-    let Some(curve) = curve else {
-        return default_value;
-    };
-    if curve.is_empty() {
-        return default_value;
-    }
-    let fp = frame_period_ms.max(0.1);
-    let idx_f = (abs_sec.max(0.0) * 1000.0) / fp;
-    if !idx_f.is_finite() {
-        return default_value;
-    }
-    let last = curve.len().saturating_sub(1);
-    let i0 = (idx_f as usize).min(last);
-    let i1 = (i0 + 1).min(last);
-    // 越界时 i0 已钳到末位，frac 会发散：必须钳制，保持“持有末值”语义，
-    // 与实时引擎 mix.rs 的采样器一致（否则导出音量随超出时长线性爆表）。
-    let frac = ((idx_f - i0 as f64) as f32).clamp(0.0, 1.0);
-    let a = curve.get(i0).copied().unwrap_or(default_value);
-    let b = curve.get(i1).copied().unwrap_or(a);
-    a + (b - a) * frac
-}
 
 // 采样率转换已统一到 `crate::resample`（带限 / 抗混叠）。
 // 原先此处有一份与本文件逐字重复、且无抗混叠的 `linear_resample_interleaved`，

@@ -9,6 +9,10 @@ use super::types::EngineClip;
 use super::types::EngineSnapshot;
 use super::util::clamp11;
 
+// 自动化曲线采样统一走 `automation`（见 P3-1 / D1）：本模块以**帧**为位置单位，
+// 别名让既有调用点与测试保持不变，同时消除与 `mixdown.rs` 的重复实现。
+use crate::automation::sample_curve_at_frame as sample_automation_curve;
+
 const SNAPSHOT_XFADE_FRAMES: usize = 256;
 
 /// Unsigned 16-bit silence level (0x8000), keeping the waveform centered.
@@ -124,33 +128,6 @@ impl TrackMeterBus {
     }
 }
 
-fn sample_automation_curve(
-    curve: Option<&[f32]>,
-    abs_frame: u64,
-    sample_rate: u32,
-    frame_period_ms: f64,
-    default_value: f32,
-) -> f32 {
-    let Some(curve) = curve else {
-        return default_value;
-    };
-    if curve.is_empty() {
-        return default_value;
-    }
-
-    let fp = frame_period_ms.max(0.1);
-    let abs_sec = abs_frame as f64 / sample_rate.max(1) as f64;
-    let idx_f = (abs_sec * 1000.0) / fp;
-    if !idx_f.is_finite() {
-        return default_value;
-    }
-    let i0 = (idx_f.floor().max(0.0) as usize).min(curve.len().saturating_sub(1));
-    let i1 = (i0 + 1).min(curve.len().saturating_sub(1));
-    let frac = (idx_f - i0 as f64).clamp(0.0, 1.0) as f32;
-    let a = curve.get(i0).copied().unwrap_or(default_value);
-    let b = curve.get(i1).copied().unwrap_or(a);
-    a + (b - a) * frac
-}
 
 /// 线性平衡式声像：center 保持两声道均为 1.0，硬左/硬右时关闭对侧声道。
 #[inline]
