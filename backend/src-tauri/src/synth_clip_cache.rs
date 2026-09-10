@@ -899,6 +899,15 @@ pub fn global_breath_noise_cache() -> &'static Mutex<BreathNoiseCache> {
 /// # 诊断
 /// 会打印诊断日志帮助调试缓存失效相关问题。
 pub fn invalidate_clip_all_caches(clip_id: &str) {
+    // 0. 同步移除该 clip 的 pending rendered key —— 这是 key 映射**唯一**的
+    // 失效点：快照的 rendered_pcm 解析依赖 "key → 缓存条目"，key 必须在该
+    // clip 的渲染失效时同步移除，否则快照会经旧 key 命中陈旧 PCM。
+    // （旧实现在每轮渲染开始时 `clear_pending_rendered_keys()` 一刀切清空
+    //  所有 key —— 那会让等待中的传输层在重建快照时把**已渲染**的 clip 视为
+    //  未渲染而重新静音冻结；渲染重启风暴下形成"播放→静音冻结"的持续闪烁，
+    //  表现为音频断续、播放光标近乎不动。按需移除没有这个问题。）
+    crate::synth_clip_cache::remove_pending_rendered_key(clip_id);
+
     // 1. SynthClipCache 失效（per-segment 合成缓存）
     {
         let mut cache = global_synth_clip_cache()
@@ -996,6 +1005,9 @@ pub fn invalidate_clip_all_caches(clip_id: &str) {
 ///    异步组装 pitch_orig/pitch_edit 的场景），播放时据此产生的“假失效”不应摧毁
 ///    已经按当前参数渲染好的缓存；否则首次播放会整段静音、气声缺失，第二次播放才恢复。
 pub fn invalidate_clip_for_pitch_edit(clip_id: &str) {
+    // 同上：pitch 参数已变，旧 key 必须移除（否则快照经旧 key 命中旧 PCM）。
+    crate::synth_clip_cache::remove_pending_rendered_key(clip_id);
+
     debug_eprintln!(
         "[cache:invalidate] clip_id={clip_id} pitch_edit invalidated (synth + pending keys cleared, rendered cache kept)"
     );

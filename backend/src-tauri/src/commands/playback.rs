@@ -1291,8 +1291,14 @@ fn start_background_render_inner(
         render_timeline_version
     );
 
-    // 清空上次的 pending_rendered_keys
-    crate::synth_clip_cache::clear_pending_rendered_keys();
+    // ★ 不在此处清空 pending_rendered_keys。
+    // 旧实现每轮渲染开始一刀切清空全部 key，而快照的 rendered_pcm 解析依赖
+    // "key → 缓存条目"：清空后任何快照重建都会把**已渲染**的 clip 视为未渲染，
+    // 正在播放的传输层因此被重新静音冻结；渲染重启风暴（项目分批加载 /
+    // 连续编辑）下形成"播放→静音冻结"的持续闪烁 —— 表现为音频断续、播放
+    // 光标近乎原地停留。key 现在在**渲染失效**处按需移除
+    //（invalidate_clip_all_caches / invalidate_clip_for_pitch_edit），语义精确，
+    // 且跨轮持久，播放连续性不再被渲染重启打断。
 
     // 动态扩容缓存
     {

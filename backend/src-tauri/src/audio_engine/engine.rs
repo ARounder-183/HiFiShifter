@@ -184,6 +184,12 @@ impl AudioEngine {
             let meter_shutdown = meter_shutdown_for_thread.clone();
             let snapshot_for_meter = snapshot_for_thread.clone();
             let meter_bus = meter_bus_for_meter.clone();
+            // 传输层心跳所需的原子量（只读观测，用于让日志能验证"播放是否在推进、
+            // 是否反复进入等待"——光标是否应当前进由此可判定）。
+            let hb_is_playing = is_playing_thread.clone();
+            let hb_position = position_frames_thread.clone();
+            let hb_waiting = play_start_wait_thread.clone();
+            let hb_sample_rate = sample_rate_thread.clone();
             thread::spawn(move || {
                 // stderr logging, map rebuilds and event emission all live on
                 // this thread so the audio callback stays lock-free.
@@ -199,6 +205,8 @@ impl AudioEngine {
                 // 上一次记录的等待位置（去重等待日志：回调每个块都上报，
                 // 同一位置只记一次；位置变化 / 新一轮等待重新记录）。
                 let mut last_wait_log_pos = u64::MAX;
+                // 传输层心跳计时（见下方 heartbeat）。
+                let mut last_transport_heartbeat = Instant::now();
                 // 总线最后一次前进的时刻（播放中每块都前进）。
                 let mut last_bus_advance = Instant::now();
                 loop {
@@ -217,6 +225,25 @@ impl AudioEngine {
                         );
                     }
                     last_wait_log_pos = transport_wait_pos;
+
+                    // ── 传输层心跳（每 5s，仅播放/等待期间）──────────────────
+                    // 排查"音频在响但光标不动"时唯一可靠的观测：能直接看出
+                    // 播放是否在推进、是否在反复进入原地等待（音频被静音冻结）。
+                    if last_transport_heartbeat.elapsed() >= Duration::from_secs(5) {
+                        let playing = hb_is_playing.load(Ordering::Relaxed);
+                        let waiting = hb_waiting.load(Ordering::Relaxed);
+                        if playing || waiting {
+                            let sr = hb_sample_rate.load(Ordering::Relaxed).max(1) as f64;
+                            let pos = hb_position.load(Ordering::Relaxed) as f64 / sr;
+                            log::warn!(
+                                "[transport] heartbeat pos={:.2}s playing={} waiting={}",
+                                pos,
+                                playing,
+                                waiting
+                            );
+                        }
+                        last_transport_heartbeat = Instant::now();
+                    }
                     let pending_pos = meter_bus.take_pending_pos();
                     if debug_pending && pending_pos > 0 {
                         let snap = snapshot_for_meter.load_full();
@@ -983,8 +1010,9 @@ fn handle_stop(s: &mut EngineWorkerState) {
     s.position_frames.store(0, Ordering::Relaxed);
     *s.last_play_file = None;
     idle_track_meter_state(s.meter_state, s.meter_generation);
-    // 播放停止时清空渲染线程传递的 cache_key 映射
-    crate::synth_clip_cache::clear_pending_rendered_keys();
+    // ★ 不再在停止时清空 pending_rendered_keys：key 在渲染失效处按需移除
+    //（见 invalidate_clip_all_caches），始终与缓存条目一致；清空只会让下一次
+    // 播放的首个快照把已渲染 clip 判为未渲染 —— 无谓的"起播即静音等待"。
 }
 
 fn handle_seek_sec(s: &mut EngineWorkerState, sec: f64) {
