@@ -678,7 +678,7 @@ fn render_single_clip(
         .max(0.0) as usize
         + 2;
 
-    let render_variant = |clip_variant: &crate::state::Clip| {
+    let render_variant = |clip_variant: &crate::state::Clip| -> Result<Vec<f32>, String> {
         let mut rendered = segment.clone();
         log::warn!(
             "[render] stage=processor_begin clip_id={} elapsed_ms={}",
@@ -703,7 +703,15 @@ fn render_single_clip(
             }
             Ok(false) => {}
             Err(e) => {
-                log::error!("[pitch_edit] clip_id={} ERROR: {e}", &clip_variant.id);
+                // ★ 处理器失败绝不能降级为"未处理的原始音频"：旧实现只打日志，
+                // 于是 rendered 保持 source 原始内容，随后被当作渲染结果写入
+                // 缓存并播放 —— 用户听到"完全没有任何算法参数的音频"，且该错误
+                // 结果会被长期缓存。这里返回错误：本次 Clip 渲染失败、不写缓存，
+                // 传输层继续原地等待，后续请求会重试（会话恢复后即成功）。
+                return Err(format!(
+                    "pitch processor failed for clip_id={}: {e}",
+                    clip_variant.id
+                ));
             }
         }
 
@@ -723,7 +731,7 @@ fn render_single_clip(
             rendered.resize(clip_stereo_len, 0.0);
         }
 
-        rendered
+        Ok(rendered)
     };
 
     if !breath_enabled {
@@ -731,7 +739,7 @@ fn render_single_clip(
             return Err(BG_RENDER_CANCELLED_ERR.to_string());
         }
         return Ok(RenderedClipOutput {
-            rendered_stereo: render_variant(clip),
+            rendered_stereo: render_variant(clip)?,
             breath_noise_stereo: None,
         });
     }
@@ -836,7 +844,7 @@ fn render_single_clip(
         if cancel.is_cancelled() {
             return Err(BG_RENDER_CANCELLED_ERR.to_string());
         }
-        let harmonic_only = render_variant(&harmonic_only_clip);
+        let harmonic_only = render_variant(&harmonic_only_clip)?;
 
         if harmonic_only.len() == cached_noise_arc.len() {
             // 长度严格一致：放心复用缓存
@@ -890,7 +898,7 @@ fn render_single_clip(
         .collect();
 
     // Step 2: Pre-populate HNSEP cache by doing separation once.
-    // This ensures the subsequent render_variant(harmonic_only) hits the cache
+    // This ensures the subsequent render_variant(harmonic_only)? hits the cache
     // and only runs HiFiGAN, skipping HNSEP.
     if cancel.is_cancelled() {
         return Err(BG_RENDER_CANCELLED_ERR.to_string());
@@ -910,7 +918,7 @@ fn render_single_clip(
                 clip.id
             );
             return Ok(RenderedClipOutput {
-                rendered_stereo: render_variant(clip),
+                rendered_stereo: render_variant(clip)?,
                 breath_noise_stereo: None,
             });
         }
@@ -925,7 +933,7 @@ fn render_single_clip(
     if cancel.is_cancelled() {
         return Err(BG_RENDER_CANCELLED_ERR.to_string());
     }
-    let harmonic_only = render_variant(&harmonic_only_clip);
+    let harmonic_only = render_variant(&harmonic_only_clip)?;
 
     // Step 4: Convert noise mono to stereo, matching harmonic_only length
     let out_len = harmonic_only.len();

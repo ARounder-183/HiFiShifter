@@ -223,8 +223,9 @@ pub fn set_runtime_dml_device_id(device_id: Option<i32>) {
     }
 }
 
-/// 全局会话构建**单飞锁**：三个 ONNX 模块（Vocoder / FCPE / HNSEP）共用，
-/// 同一时刻**全局只允许一次会话构建**（创建 + 烟测整体）。
+/// 全局会话构建**单飞**语义（三个 ONNX 模块 Vocoder / FCPE / HNSEP 共用，
+/// 同一时刻全局只允许一次会话构建：创建 + 烟测整体），实现见
+/// [`acquire_session_build_lock`] 的**可抢占租约**。
 ///
 /// 为什么必须全局单飞：DirectML 的 D3D12 设备创建与首次推理都不能与其他
 /// DML 操作并发 —— 实测两种致命并发都会在驱动层挂起（渲染进度永久卡 0%）：
@@ -238,10 +239,6 @@ pub fn set_runtime_dml_device_id(device_id: Option<i32>) {
 /// ★ 纪律：持有本锁期间**绝不允许**再去锁各模块的会话容器（容器锁的持有
 /// 时间必须保持在微秒级）。各模块流程：容器锁快速检查（随即释放）→ 本锁
 /// 内构建 + 烟测 → 容器锁写回。
-pub(crate) fn session_build_lock() -> &'static Mutex<()> {
-    static BUILD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    BUILD_LOCK.get_or_init(|| Mutex::new(()))
-}
 
 /// 有界地获取全局单飞锁（供各模块 `get_or_init_shared_session` 使用）。
 ///
@@ -250,19 +247,86 @@ pub(crate) fn session_build_lock() -> &'static Mutex<()> {
 /// 加载失败 → 该 Clip 失败 → **渲染 pass 继续推进**（而不是整条链停摆），
 /// 下一次请求会重试。等待期间每 5s 打印一次警告，使日志能直接指出"卡在
 /// 会话构建锁上"。
-pub(crate) fn acquire_session_build_lock(timeout: std::time::Duration) -> Result<std::sync::MutexGuard<'static, ()>, String> {
-    let lock = session_build_lock();
+/// 会话构建租约：持有者票据（0 = 空闲）。票据高位为取得时刻（Unix 毫秒）。
+///
+/// 为什么不是 `Mutex`：实测存在构建线程**永久卡死**的情形（ORT/DirectML 在
+/// 驱动层挂起，任何超时都无法打断它）。`Mutex` 一旦被这样的线程持有，全应用
+/// 的会话构建与渲染线程都会永久阻塞 —— 表现为渲染进度永远卡在 0%。租约式
+/// 锁允许后续请求在持有者远超租约后**抢占**并记录日志，使应用总能恢复。
+static BUILD_LEASE: OnceLock<AtomicU64> = OnceLock::new();
+static LEASE_SEQ: AtomicU64 = AtomicU64::new(1);
+
+/// 持有者超过该时长仍未释放即视为卡死，可被抢占。
+const LEASE_STEAL_AFTER: std::time::Duration = std::time::Duration::from_secs(90);
+
+fn lease() -> &'static AtomicU64 {
+    BUILD_LEASE.get_or_init(|| AtomicU64::new(0))
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn make_ticket() -> u64 {
+    ((now_ms() & 0x0000_FFFF_FFFF_FFFF) << 16) | (LEASE_SEQ.fetch_add(1, Ordering::Relaxed) & 0xFFFF)
+}
+
+fn ticket_ms(ticket: u64) -> u64 {
+    ticket >> 16
+}
+
+/// 会话构建租约守卫：`Drop` 时释放。
+pub(crate) struct SessionBuildLease {
+    ticket: u64,
+}
+
+impl Drop for SessionBuildLease {
+    fn drop(&mut self) {
+        let _ = lease().compare_exchange(self.ticket, 0, Ordering::AcqRel, Ordering::Acquire);
+    }
+}
+
+/// 有界地获取全局会话构建租约（供各模块 `get_or_init_shared_session` 使用）。
+///
+/// - 等待每 5s 打一次警告（日志可直接指认"卡在会话构建锁上"）；
+/// - 超过 `timeout` 返回 Err，调用方的会话加载失败 → 该 Clip 失败 →
+///   **渲染 pass 继续推进**（而不是整条链停摆），下次请求会重试；
+/// - 持有者超过 `LEASE_STEAL_AFTER` 未释放 → **抢占**（ERROR 日志），
+///   保证应用不会因一个卡死的构建而永久失去渲染能力。
+pub(crate) fn acquire_session_build_lock(
+    timeout: std::time::Duration,
+) -> Result<SessionBuildLease, String> {
     let started = std::time::Instant::now();
     let mut next_log = std::time::Duration::from_secs(5);
     loop {
-        if let Ok(guard) = lock.try_lock() {
-            if started.elapsed() > std::time::Duration::from_secs(1) {
-                log::warn!(
-                    "ort_session: acquired the global session build lock after {:?} (a build was in progress)",
-                    started.elapsed()
-                );
+        let ticket = make_ticket();
+        match lease().compare_exchange(0, ticket, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => {
+                if started.elapsed() > std::time::Duration::from_secs(1) {
+                    log::warn!(
+                        "ort_session: acquired the global session build lock after {:?} (a build was in progress)",
+                        started.elapsed()
+                    );
+                }
+                return Ok(SessionBuildLease { ticket });
             }
-            return Ok(guard);
+            Err(current) => {
+                let held_ms = now_ms().saturating_sub(ticket_ms(current));
+                if held_ms > LEASE_STEAL_AFTER.as_millis() as u64 {
+                    log::error!(
+                        "ort_session: session build lock has been held for {} ms (> {:?}) — the holder is stuck; \
+                         stealing the lock so session builds can proceed",
+                        held_ms,
+                        LEASE_STEAL_AFTER
+                    );
+                    // 抢占；若恰好被释放/被他人抢占，下一轮重试即可。
+                    let _ = lease().compare_exchange(current, ticket, Ordering::AcqRel, Ordering::Acquire);
+                    continue;
+                }
+            }
         }
         if started.elapsed() >= timeout {
             log::error!(
@@ -808,6 +872,11 @@ fn smoke_test_gpu_session(
 ) -> Result<Session, String> {
     use ort::value::{Tensor, ValueType};
 
+    // 分步日志：烟测若卡住（历史上曾永久持有全局构建锁 → 渲染永久卡 0%），
+    // 这些标记能直接指出卡在哪一步。
+    let smoke_started = std::time::Instant::now();
+    log::warn!("ort_session[{role:?}]: smoke stage=begin ep={ep_name}");
+
     // Collect f32 tensor input metadata first so the `session` borrow ends
     // before the session is moved into the helper thread below.
     let mut plans: Vec<(String, Vec<usize>)> = Vec::new();
@@ -843,6 +912,11 @@ fn smoke_test_gpu_session(
             .collect();
         plans.push((input.name().to_string(), test_shape));
     }
+    log::warn!(
+        "ort_session[{role:?}]: smoke stage=inputs_planned count={} elapsed_ms={}",
+        plans.len(),
+        smoke_started.elapsed().as_millis()
+    );
     let mut input_pairs: Vec<(String, ort::value::Value)> = Vec::with_capacity(plans.len());
     for (name, test_shape) in plans {
         let total: usize = test_shape.iter().product::<usize>().max(1);
@@ -873,6 +947,10 @@ fn smoke_test_gpu_session(
     // DirectML 同理：设备切换后新建的 DML 会话偶发首次推理挂起。超时后
     // 除本次回退外，还会把 DirectML 标记为本进程不可用（见 disable_directml），
     // 使后续构建（strict 回退尝试、其他模型、后续切换）立即走 CPU。
+    log::warn!(
+        "ort_session[{role:?}]: smoke stage=tensors_ready elapsed_ms={} — spawning inference thread",
+        smoke_started.elapsed().as_millis()
+    );
     let (tx, rx) = std::sync::mpsc::channel();
     let timeout = smoke_test_timeout(ep_name);
     let run_thread = std::thread::spawn(move || {
@@ -887,6 +965,10 @@ fn smoke_test_gpu_session(
 
     match rx.recv_timeout(timeout) {
         Ok((result, session)) => {
+            log::warn!(
+                "ort_session[{role:?}]: smoke stage=inference_returned elapsed_ms={}",
+                smoke_started.elapsed().as_millis()
+            );
             let _ = run_thread.join();
             match result {
                 Ok(_) => {
@@ -901,6 +983,10 @@ fn smoke_test_gpu_session(
             }
         }
         Err(_) => {
+            log::error!(
+                "ort_session[{role:?}]: smoke stage=timeout elapsed_ms={} (inference did not return within {timeout:?})",
+                smoke_started.elapsed().as_millis()
+            );
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
             disable_coreml(&format!(
                 "{ep_name} smoke test exceeded {timeout:?} (first inference hung)"
