@@ -31,6 +31,8 @@ const THROTTLE_MAX_ENTRIES: usize = 256;
 
 /// 告警类别（前端可用于区分展示方式）。
 pub(crate) const KIND_DECODE_FAILED: &str = "decode_failed";
+/// GPU 执行提供者被禁用。仅 onnx 构建会产生（无 onnx 时没有 GPU EP 可禁用）。
+#[cfg_attr(not(feature = "onnx"), allow(dead_code))]
 pub(crate) const KIND_GPU_DISABLED: &str = "gpu_disabled";
 pub(crate) const KIND_CLIP_RENDER_FAILED: &str = "clip_render_failed";
 

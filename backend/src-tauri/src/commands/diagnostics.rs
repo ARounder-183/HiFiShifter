@@ -120,6 +120,11 @@ fn build_system_info(state: &State<'_, AppState>) -> serde_json::Value {
         },
         "gpuDevices": super::onnx_status::get_gpu_devices(),
         "dmlAdapters": super::onnx_status::get_dml_adapters(),
+        // 最近一次完整渲染轮次的耗时画像。选它进诊断包的原因：`f_infer`
+        // （推理耗时占比）是 §7 的**阻塞级**待测项，也是 P1-2 收益的唯一决定
+        // 变量 —— 让它在用户随手导出的诊断包里就有，省掉"先复现、再开日志"。
+        // 从未完成过任何一轮渲染时为 null。
+        "renderProfile": crate::render_profile::last_pass(),
     })
 }
 

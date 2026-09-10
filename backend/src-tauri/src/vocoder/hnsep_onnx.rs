@@ -440,9 +440,11 @@ pub fn infer_harmonic_noise_mono(
         let mut session_guard = session
             .lock()
             .map_err(|e| format!("hnsep ort session lock poisoned: {e}"))?;
-        let outputs = session_guard
-            .run(ort::inputs![waveform_tensor])
-            .map_err(|e| format!("hnsep ort run failed: {e}"))?;
+        // 同上：气声分离同样计入推理耗时（它属于渲染链的一部分）。
+        let infer_started_at = std::time::Instant::now();
+        let run_result = session_guard.run(ort::inputs![waveform_tensor]);
+        crate::render_profile::record_inference(infer_started_at.elapsed());
+        let outputs = run_result.map_err(|e| format!("hnsep ort run failed: {e}"))?;
         if outputs.len() < 2 {
             return Err("hnsep ort returned fewer than 2 outputs".to_string());
         }

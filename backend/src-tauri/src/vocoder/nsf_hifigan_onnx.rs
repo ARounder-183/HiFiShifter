@@ -40,9 +40,11 @@ fn run_session_once(
             let mut session_guard = sess
                 .lock()
                 .map_err(|e| format!("ort session lock poisoned: {e}"))?;
-            let outputs = session_guard
-                .run(ort::inputs![mel_tensor, f0_tensor])
-                .map_err(|e| format!("ort run failed: {e}"))?;
+            // 计时真正的会话执行，供 render_profile 统计 f_infer（见该模块说明）。
+            let infer_started_at = std::time::Instant::now();
+            let run_result = session_guard.run(ort::inputs![mel_tensor, f0_tensor]);
+            crate::render_profile::record_inference(infer_started_at.elapsed());
+            let outputs = run_result.map_err(|e| format!("ort run failed: {e}"))?;
             let output0 = outputs
                 .into_iter()
                 .next()

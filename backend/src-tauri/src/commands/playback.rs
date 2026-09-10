@@ -1482,6 +1482,10 @@ fn render_background_pass(
             == Some("1");
         let started_at = std::time::Instant::now();
 
+        // 归零推理耗时画像：分母是本轮的，分子也必须只含本轮 —— 否则被取消的
+        // 上一轮残留会让 f_infer 虚高（见 render_profile 模块说明）。
+        crate::render_profile::reset();
+
         let mut rendered_count = 0u32;
         let mut cache_hit_count = 0u32;
         let mut cache_miss_count = 0u32;
@@ -1807,9 +1811,14 @@ fn render_background_pass(
         // 不在此处调用 engine.update_timeline，以避免触发 handle_update_timeline
         // 中的 auto-trigger 形成反馈循环。
 
+        // 定格本轮画像：分母用与下方 complete 日志相同的墙钟时间，保证
+        // `f_infer` 与使用者从日志里手算的结果一致（见 §7 阻塞级问题 1）。
+        let pass_elapsed = started_at.elapsed();
+        let profile = crate::render_profile::finish_pass(pass_elapsed);
+
         if cache_log {
             log::warn!(
-                "[bg_render][cache] DONE total={} hit={} miss={} rendered_ok={} rendered_fail={} cache_probe_ms={:.2} render_ms={:.2} tension_ms={:.2} total_ms={:.2}",
+                "[bg_render][cache] DONE total={} hit={} miss={} rendered_ok={} rendered_fail={} cache_probe_ms={:.2} render_ms={:.2} tension_ms={:.2} inference_ms={:.2} inference_runs={} f_infer={:.3} total_ms={:.2}",
                 total,
                 cache_hit_count,
                 cache_miss_count,
@@ -1818,17 +1827,25 @@ fn render_background_pass(
                 cache_probe_elapsed.as_secs_f64() * 1000.0,
                 render_elapsed.as_secs_f64() * 1000.0,
                 tension_elapsed.as_secs_f64() * 1000.0,
-                started_at.elapsed().as_secs_f64() * 1000.0
+                profile.inference_ms,
+                profile.inference_runs,
+                profile.inference_fraction,
+                profile.total_ms
             );
         }
+        // `f_infer` 无需环境变量即可见：它是 P1-2 唯一决定变量，默认输出能省掉
+        // 一次"要开日志复现才拿得到"的往返（见 render_profile 模块说明）。
         log::warn!(
-            "[bg_render] complete: {} clips, {} hit, {} miss, {} ok, {} fail in {:.2}s",
+            "[bg_render] complete: {} clips, {} hit, {} miss, {} ok, {} fail in {:.2}s (inference {:.2}ms x{}, f_infer={:.3})",
             total,
             cache_hit_count,
             cache_miss_count,
             render_success_count,
             render_failed_count,
-            started_at.elapsed().as_secs_f64()
+            pass_elapsed.as_secs_f64(),
+            profile.inference_ms,
+            profile.inference_runs,
+            profile.inference_fraction
         );
 
         // 旧代数线程完成时不得清理新一轮渲染的全局状态。

@@ -75,6 +75,8 @@ mod pitch_progress;
 mod recording;
 // 统一缓存注册表与失效编排（见 P3-2）。
 mod cache_registry;
+// 渲染耗时画像：分离推理耗时以回答 §7 的 f_infer（P1-2 的唯一决定变量）。
+mod render_profile;
 // 渲染/推理层"用户可见告警"的单一出口（见 P0-5）。
 mod render_warning;
 mod renderer;
