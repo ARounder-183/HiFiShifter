@@ -39,12 +39,13 @@ pub(crate) static AUTO_BG_RENDER_ENABLED: std::sync::atomic::AtomicBool =
 /// `audio_engine/engine.rs` 的缓存失效处理设置此标志以中断旧渲染线程。
 ///
 /// ★ 生命周期契约：置位与清除必须成对出现，否则标志会永久粘滞。
-///   - 置位：**只能**通过 `commands::render_cancel::request_global_cancel()`
-///     （它会同时推进纪元）。调用点有 `cancel_background_render`
+///   - 置位：统一通过 `commands::render_cancel::request_global_cancel()`
+///     （单一入口，便于审计成对性）。调用点有 `cancel_background_render`
 ///     （仅当确实有后台渲染在跑），以及后台渲染循环的重启静默窗口晋升
 ///     （`request_bg_render_restart` 记录的重启请求挂起超过窗口后，由渲染
-///     线程在 clip 边界调用）。请**不要**直接 `store(true, ..)`，那样纪元
-///     不推进，新轮次会把它当历史残留忽略。
+///     线程在 clip 边界调用）。请**不要**直接 `store(true, ..)`。
+///     "新轮次不受历史残留影响"由 `BG_RENDER_GENERATION` 代数守卫负责，
+///     见 `render_cancel.rs` 顶部说明。
 ///   - 清除：`start_background_render` 开头、后台渲染各条退出分支，
 ///     以及 `request_background_render` 的 disabled 分支（兜底）。
 ///
@@ -97,7 +98,7 @@ fn bg_render_restart_request_is_stale(last_requested_at_ms: u64, now_ms: u64) ->
 ///
 /// 不立即取消在途渲染：仅置位重启标志并刷新请求时间戳。渲染循环在 clip
 /// 边界发现请求挂起超过静默窗口后，才通过
-/// `render_cancel::request_global_cancel()`（推进纪元）升级为实际取消，
+/// `render_cancel::request_global_cancel()` 升级为实际取消，
 /// 退出线程随后自动启动新一轮渲染。
 ///
 /// 失效风暴期间时间戳被持续刷新，当前轮不会被反复打断；每轮完成后由退出
@@ -1528,8 +1529,8 @@ fn render_background_pass(
                     now_millis(),
                 )
             {
-                // 走 request_global_cancel 而非直接置位：需要推进纪元
-                //（见 BG_RENDER_CANCEL 的生命周期契约）。
+                // 走 request_global_cancel 而非直接置位：置位只有这一个入口，
+                // 便于审计"置位与清除成对"的生命周期契约（见 BG_RENDER_CANCEL）。
                 crate::commands::render_cancel::request_global_cancel();
             }
             // 检查取消标志（用户在渲染中重新编辑参数时会设置）
@@ -1959,7 +1960,7 @@ pub(super) fn cancel_background_render(app: Option<&tauri::AppHandle>) -> serde_
     let was_active = BG_RENDER_ACTIVE.swap(false, Ordering::AcqRel);
     if was_active {
         // 让正在运行的渲染循环在下一个 clip 边界立刻退出，而不是继续把旧工程
-        // 渲染完。走 request_global_cancel 以同时推进纪元（见 render_cancel.rs）。
+        // 渲染完。走 request_global_cancel 以保持单一置位入口（见 render_cancel.rs）。
         crate::commands::render_cancel::request_global_cancel();
     } else {
         // ★ 没有任何后台渲染在跑时，绝不能留下取消信号。
