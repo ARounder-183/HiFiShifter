@@ -175,6 +175,7 @@ export const zhCN = {
     action_refresh: "刷新",
     loading: "加载中...",
     rendering: "渲染中...",
+    synthesizing_current_clip: "正在合成播放头所在的音频块...",
     render_warning_decode_failed: "某个音频文件无法读取，使用它的音频块会保持静音。",
     render_warning_clip_failed: "某个音频块处理失败，会保持静音。",
     render_warning_gpu_disabled:

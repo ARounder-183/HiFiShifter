@@ -176,6 +176,7 @@ export const zhTW = {
     action_refresh: "重新整理",
     loading: "載入中...",
     rendering: "算繪中...",
+    synthesizing_current_clip: "正在算繪播放頭所在的音訊區塊...",
     render_warning_decode_failed: "某個音訊檔案無法讀取，使用它的音訊區塊會保持靜音。",
     render_warning_clip_failed: "某個音訊區塊處理失敗，會保持靜音。",
     render_warning_gpu_disabled:

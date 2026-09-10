@@ -268,6 +268,7 @@ export const enUS = {
     action_refresh: "Refresh",
     loading: "Loading...",
     rendering: "Rendering...",
+    synthesizing_current_clip: "Synthesizing the clip under the playhead...",
     render_warning_decode_failed:
         "An audio file could not be read, so clips using it will stay silent.",
     render_warning_clip_failed: "A clip failed to process and will stay silent.",

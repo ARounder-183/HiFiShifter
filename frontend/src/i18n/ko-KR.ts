@@ -262,6 +262,7 @@ export const koKR = {
     action_refresh: "새로고침",
     loading: "로딩 중...",
     rendering: "렌더링 중...",
+    synthesizing_current_clip: "인디케이터 위치의 클립을 합성하는 중...",
     render_warning_decode_failed:
         "오디오 파일을 읽을 수 없어, 이를 사용하는 클립은 무음으로 유지됩니다.",
     render_warning_clip_failed: "클립 처리에 실패하여 해당 클립은 무음으로 유지됩니다.",

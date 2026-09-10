@@ -1065,6 +1065,12 @@ function AppInner() {
     const renderingActive = useAppSelector((state) => state.session.playbackRenderingActive);
     const renderingTarget = useAppSelector((state) => state.session.playbackRenderingTarget);
     const renderingBlocking = useAppSelector((state) => state.session.playbackBlockingRenderActive);
+    // 播放期间的"原地等待渲染"：播放头冻结、输出静音，直到覆盖该位置的片段
+    // 渲染完成。此前它只用于冻结光标外推（TrackList/TimelinePanel），用户看到
+    // 的却是"播放突然没声了也能动"的困惑 —— 这里把它变成一句明确的提示（见 P2-2）。
+    const playbackWaitingForRender = useAppSelector(
+        (state) => state.session.runtime.playbackWaitingForRender,
+    );
     const [renderingProgress, setRenderingProgress] = useState<number | null>(null);
     // 渲染/推理层告警（解码失败、片段处理失败、GPU 被禁用）。
     // 这些失败此前对用户完全不可见：只表现为"某段没声音"或"突然变慢"（见 P0-5）。
@@ -3978,6 +3984,19 @@ function AppInner() {
                             }}
                         >
                             {t("loading")}
+                        </span>
+                    ) : null}
+                    {playbackWaitingForRender ? (
+                        <span
+                            className="shrink-0 rounded px-1 py-0 text-xs font-medium"
+                            style={{
+                                background: "var(--accent-3)",
+                                color: "var(--accent-11)",
+                                fontSize: "11px",
+                                lineHeight: "16px",
+                            }}
+                        >
+                            {t("synthesizing_current_clip")}
                         </span>
                     ) : null}
                     {rendering.active ? (

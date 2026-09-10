@@ -185,6 +185,7 @@ export const jaJP = {
     action_refresh: "更新",
     loading: "読み込み中...",
     rendering: "レンダリング中...",
+    synthesizing_current_clip: "再生ヘッド上のクリップを合成しています...",
     render_warning_decode_failed:
         "音声ファイルを読み込めませんでした。これを使うクリップは無音になります。",
     render_warning_clip_failed: "クリップの処理に失敗しました。このクリップは無音になります。",
