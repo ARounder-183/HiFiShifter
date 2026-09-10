@@ -597,49 +597,27 @@ fn mix_into_scratch_stereo(
     let current_ready =
         render_snapshot_window(frames, &snap, pos0, pos1, scratch, Some(&mut *meter));
 
-    let bg_render =
-        crate::commands::playback::BG_RENDER_ACTIVE.load(std::sync::atomic::Ordering::Relaxed);
-
-    // 就绪块即"未在等待"：所有推进路径（正常播放 / xfade 混合 / 陈旧内容
-    // 播放）都经过这里或下方分支清除标志。
-    if current_ready {
-        play_start_wait.store(false, Ordering::Relaxed);
-    }
-
-    if !current_ready && bg_render {
-        // ── 原地等待渲染（Case A + Case B 统一）──
-        // Case B：起播位置落在未渲染 Clip（一个或多个）内；Case A：播放途中
-        // 光标推进到未渲染 Clip 开头。两种情况统一处理：保持 is_playing=true、
-        // 位置不推进、静音输出，直到后台渲染完成并重建快照后自动开始/继续
-        // 播放 —— 等价于"关闭后台预渲染时先渲染完再起播"的体验，但渲染已在
-        // 后台运行，无需阻塞、无需用户手动重按播放。
-        //
-        // 等待期间不播放旧快照的陈旧内容（丢弃 xfade 来源），与"静音等待"
-        // 语义一致；解除等待后从新快照干净起播。pending 窗口的 scratch 在
-        // render_snapshot_window 内已是全零。
+    // ── 原地等待渲染（Case A + Case B 统一）──────────────────────────────
+    // 引擎快照是唯一真相，本回调是其**纯函数**：
+    //   - 窗口未就绪（覆盖该位置的 Clip 尚在渲染）→ 冻结：保持 is_playing、
+    //     不推进位置、静音输出（pending 窗口的 scratch 已是全零），并丢弃
+    //     xfade 来源，等待期间绝不播放编辑前的陈旧内容；
+    //   - 窗口就绪 → 正常推进并出声。
+    // 因此等待的解除无需任何主动信号：渲染线程把结果发布给引擎
+    // （`RenderedClipsChanged`）→ worker 换入新快照 → 本判定在下一个音频块
+    // 自动通过，播放随之开始/继续 —— 既等价于"关闭后台预渲染时先渲染完再
+    // 起播"，又无需阻塞、无需用户手动重按播放。
+    if !current_ready {
+        play_start_wait.store(true, Ordering::Relaxed);
         transition.fade_from_snapshot = None;
         transition.fade_remaining_frames = 0;
-        play_start_wait.store(true, Ordering::Relaxed);
-        // stderr I/O must stay off the RT thread: report via the meter thread.
+        // stderr I/O must stay off the RT thread: report via the meter thread
+        // (diagnostics only — the resume is driven by the render threads).
         bus.transport_wait_pos.store(pos0, Ordering::Relaxed);
+        bus.pending_pos.store(pos0, Ordering::Relaxed);
         return Some(BlockRender { snapshot: snap });
     }
-
-    if !current_ready {
-        // 后台预渲染未激活但窗口未就绪（罕见兜底：bg 关闭时起播窗口不应有
-        // 未渲染 clip，如 play_original 的 snapshot_has_pending 分支）：维持
-        // 既有行为 —— 无陈旧内容时静音停留（不推进、不暂停）；有陈旧内容时
-        // 落入下方 xfade/陈旧播放路径继续出声。静音停留同样置等待标志并
-        // 上报等待位置：meter 线程的代数脏检查据此解除等待（与 bg 激活时
-        // 同一套机制）。
-        if transition.fade_from_snapshot.is_none() {
-            play_start_wait.store(true, Ordering::Relaxed);
-            bus.transport_wait_pos.store(pos0, Ordering::Relaxed);
-            // Debug aid: report the pending clip via the meter thread as well.
-            bus.pending_pos.store(pos0, Ordering::Relaxed);
-            return Some(BlockRender { snapshot: snap });
-        }
-    }
+    play_start_wait.store(false, Ordering::Relaxed);
 
     // 本块是否有实际出声：节拍器与实际出声的块同步叠加
     // （自动暂停 / 未播放的静音路径不响节拍器）。

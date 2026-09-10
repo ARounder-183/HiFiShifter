@@ -460,8 +460,21 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
                     crate::commands::render_cancel::ForegroundRenderCancel::register();
                 let cancel_token = foreground_cancel.token();
 
-                // 逐 clip 预渲染，全部完成后再开始播放
-                for clip_render_info in &clips_to_render {
+                // 逐 clip 预渲染，全部完成后再开始播放。
+                // 顺序与后台预渲染**共用同一套择优逻辑**（见
+                // `select_next_render_index`）：按实时播放位置/播放光标动态
+                // 取下一个，位于播放位置及其之后的 clip 优先；正在渲染的
+                // clip 不会被打断，重排序只作用于尚未开始的条目。
+                // 是否启用后台预渲染只影响"渲染何时启动"，渲染本身的行为一致。
+                let mut done = vec![false; clips_to_render.len()];
+                loop {
+                    let next_index = select_next_render_index(&clips_to_render, &done, &app);
+                    let Some(index) = next_index else {
+                        break;
+                    };
+                    done[index] = true;
+                    let clip_render_info = &clips_to_render[index];
+
                     if rendered_count % 32 == 0 {
                         let sig_check_started_at = std::time::Instant::now();
                         let changed = timeline_version_from_app(&app) != render_timeline_version;
@@ -555,7 +568,6 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
                                         .lock()
                                         .unwrap_or_else(|e| e.into_inner());
                                 cache.insert(clip_render_info.cache_key.clone(), entry.clone());
-                                crate::synth_clip_cache::bump_render_cache_generation();
                                 crate::synth_clip_cache::register_pending_rendered_key(
                                     &clip_render_info.clip.id,
                                     clip_render_info.cache_key.clone(),
@@ -646,6 +658,10 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
                     }
 
                     rendered_count += 1;
+
+                    // 本 clip 处理完毕 → 推送刷新引擎快照（与后台渲染同一套
+                    // 逻辑，见 `AudioEngine::refresh_rendered_snapshot`）。
+                    engine.refresh_rendered_snapshot();
                 }
 
                 if cancelled {
@@ -1941,7 +1957,72 @@ fn start_background_render_inner(app: tauri::AppHandle, render_generation: u64) 
     serde_json::json!({"ok": true, "rendering": total})
 }
 
+/// 当前"播放关注点"（秒）：后台渲染据此为待渲染队列重排序。
+///
+/// - 引擎正在播放 → 实时传输位置（音频时钟），即用户**正在听 / 即将听到**
+///   的位置；
+/// - 未播放 → 时间线播放光标（用户当前定位处），即用户**最可能马上播放**
+///   的位置。
+///
+/// 这样无论用户是在播放中等待，还是把光标停在工程中部再触发渲染，紧邻该
+/// 位置的 clip 都会被优先渲染。
+fn playback_priority_sec(app: &tauri::AppHandle) -> f64 {
+    let state = app.state::<AppState>();
+    let engine = state.audio_engine.clone();
+    let sr = engine.sample_rate_hz().max(1) as f64;
+    if engine.is_playing() {
+        (engine.position_frames() as f64 / sr).max(0.0)
+    } else {
+        match state.timeline.lock() {
+            Ok(tl) => tl.playhead_sec.max(0.0),
+            Err(poisoned) => poisoned.into_inner().playhead_sec.max(0.0),
+        }
+    }
+}
+
+/// 渲染优先级键：`(是否位于播放关注点之后, clip 起点)`，字典序升序。
+///
+/// - 组 0：**覆盖**关注点（正在听的 clip）或位于其之后（即将听到）；组内按
+///   时间线起点升序 —— 覆盖当前位置的 clip 起点最小，因此最优先；
+/// - 组 1：位于关注点之前的 clip（用户已听过 / 光标已越过），最后再渲染。
+fn render_priority_key(start_sec: f64, length_sec: f64, anchor_sec: f64) -> (u8, f64) {
+    let start = start_sec.max(0.0);
+    let end = start + length_sec.max(0.0);
+    let relevant = end > anchor_sec;
+    (if relevant { 0 } else { 1 }, start)
+}
+
+/// 从**尚未开始**的条目中按实时播放位置择优取下一个待渲染 clip 的下标；
+/// 无剩余条目时返回 `None`。
+///
+/// 只在 clip 边界（上一次渲染已完成 / 命中缓存）调用，因此正在进行的渲染
+/// 永远不会被打断 —— 重排序只影响"接下来渲染谁"。
+fn select_next_render_index(
+    clips_to_render: &[ClipRenderInfo],
+    done: &[bool],
+    app: &tauri::AppHandle,
+) -> Option<usize> {
+    let anchor_sec = playback_priority_sec(app);
+    clips_to_render
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !done.get(*index).copied().unwrap_or(true))
+        .min_by(|(_, a), (_, b)| {
+            let ka = render_priority_key(a.clip.start_sec, a.clip.length_sec, anchor_sec);
+            let kb = render_priority_key(b.clip.start_sec, b.clip.length_sec, anchor_sec);
+            match ka.0.cmp(&kb.0) {
+                std::cmp::Ordering::Equal => ka.1.total_cmp(&kb.1),
+                other => other,
+            }
+        })
+        .map(|(index, _)| index)
+}
+
 /// 后台渲染单轮主循环（在渲染线程上执行；由调用方负责 panic 隔离）。
+///
+/// 本轮渲染**不按固定顺序遍历**：每个 clip 边界都按实时播放位置动态择优
+/// （见 [`select_next_render_index`]），使光标位置及其之后的 clip 优先渲染。
+/// 已在渲染中的 clip 不会被打断 —— 重排序只作用于尚未开始的条目。
 #[allow(clippy::too_many_arguments)]
 fn render_background_pass(
     app: tauri::AppHandle,
@@ -1979,7 +2060,18 @@ fn render_background_pass(
         // 中断本轮并触发重启（见 audio_engine/engine.rs 的失效处理）。
         let cancel_token = crate::commands::render_cancel::RenderCancelToken::background();
 
-        for clip_render_info in clips_to_render {
+        // 待渲染队列的完成情况：按"实时播放位置"动态择优取下一个 clip
+        // （见 `select_next_render_index`），已开始的渲染不会被打断 ——
+        // 重新排序只作用于**尚未开始**的条目。
+        let mut done = vec![false; clips_to_render.len()];
+        loop {
+            let next_index = select_next_render_index(clips_to_render, &done, &app);
+            let Some(index) = next_index else {
+                break;
+            };
+            done[index] = true;
+            let clip_render_info = &clips_to_render[index];
+
             // 方案 A：重启请求静默窗口 —— 请求挂起超过窗口才升级为实际取消。
             // 失效风暴（工程加载 / 连续编辑）期间时间戳被持续刷新、当前轮
             // 不被打断；单次编辑最多延迟一个窗口重启。
@@ -2007,6 +2099,7 @@ fn render_background_pass(
                 let state = app.state::<AppState>();
                 let changed =
                     state.timeline_version.load(Ordering::Acquire) != render_timeline_version;
+                drop(state);
                 if changed {
                     cancelled = true;
                     break;
@@ -2092,7 +2185,6 @@ fn render_background_pass(
                             .lock()
                             .unwrap_or_else(|e| e.into_inner());
                         cache.insert(clip_render_info.cache_key.clone(), entry.clone());
-                        crate::synth_clip_cache::bump_render_cache_generation();
                         crate::synth_clip_cache::register_pending_rendered_key(
                             &clip_render_info.clip.id,
                             clip_render_info.cache_key.clone(),
@@ -2101,13 +2193,9 @@ fn render_background_pass(
 
                         base_entry = Some(entry);
                         render_success_count += 1;
-                        // 等待解除由 meter 线程统一驱动：快照携带渲染缓存代数，
-                        // meter 线程在等待期间发现"快照代数落后于缓存代数"即
-                        // 请求 worker 重建快照（见 engine.rs meter 循环与
-                        // synth_clip_cache::RENDERED_CLIP_CACHE_GENERATION）。
-                        // 不在此处触发重建：插入发生时光标可能尚未到达等待点
-                        //（标志未置位会被跳过），渲染线程退出后更无后续插入——
-                        // 两条路径都会让等待永久悬空。
+                        // 每个 clip 处理完毕后由循环末尾统一推送刷新
+                        //（refresh_rendered_snapshot），等待中的传输层据此
+                        // 恢复播放 —— 推送模型，无轮询、无版本号比对。
                     }
                     Err(e) => {
                         if e == BG_RENDER_CANCELLED_ERR {
@@ -2188,6 +2276,16 @@ fn render_background_pass(
             }
 
             rendered_count += 1;
+
+            // 本 clip 处理完毕（命中缓存或新渲染入库）→ 推送刷新引擎快照。
+            // 这是"原地等待渲染"解除的唯一入口（见
+            // `AudioEngine::refresh_rendered_snapshot`）：产出者主动发布，
+            // 无需轮询 / 版本号比对 / 等待状态上报，等待中的传输层会在下一个
+            // 音频块自动重新判定就绪性并继续播放。
+            {
+                let engine = app.state::<AppState>().audio_engine.clone();
+                engine.refresh_rendered_snapshot();
+            }
         }
 
         if cancelled {
@@ -2414,7 +2512,47 @@ pub(super) fn cancel_background_render(app: Option<&tauri::AppHandle>) -> serde_
 
 #[cfg(test)]
 mod tests {
-    use super::{bg_render_restart_request_is_stale, should_follow_up_render, BG_RENDER_RESTART_QUIET_WINDOW_MS};
+    use super::{
+        bg_render_restart_request_is_stale, render_priority_key, should_follow_up_render,
+        BG_RENDER_RESTART_QUIET_WINDOW_MS,
+    };
+
+    /// 渲染优先级：覆盖播放关注点的 clip 最优先，其后是位于关注点之后的
+    /// clip（按时间线顺序），最后是关注点之前的 clip。前后台渲染共用此逻辑。
+    #[test]
+    fn render_priority_favours_clips_at_and_after_the_play_position() {
+        // 播放关注点在 30s。
+        let anchor = 30.0;
+
+        // 覆盖关注点（20s~40s）。
+        let covering = render_priority_key(20.0, 20.0, anchor);
+        // 位于关注点之后（35s~45s）。
+        let after = render_priority_key(35.0, 10.0, anchor);
+        // 位于关注点之前（0s~10s）。
+        let before = render_priority_key(0.0, 10.0, anchor);
+
+        assert_eq!(covering.0, 0, "a clip covering the play position is top priority");
+        assert_eq!(after.0, 0, "clips after the play position are relevant");
+        assert_eq!(before.0, 1, "clips before the play position are deferred");
+
+        assert!(
+            covering < after,
+            "the clip being listened to precedes later clips"
+        );
+        assert!(after < before, "relevant clips precede already-passed clips");
+
+        // 关注点之后的两个 clip：时间线靠前者优先。
+        let near = render_priority_key(31.0, 5.0, anchor);
+        let far = render_priority_key(60.0, 5.0, anchor);
+        assert!(near < far, "among upcoming clips the nearest one wins");
+
+        // 边界：clip 恰好在关注点处结束（10s~30s）→ 已听过，延后。
+        assert_eq!(
+            render_priority_key(10.0, 20.0, anchor).0,
+            1,
+            "a clip ending exactly at the play position is not relevant"
+        );
+    }
 
     #[test]
     fn bg_render_follow_up_requires_progress() {

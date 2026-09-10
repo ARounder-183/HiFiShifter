@@ -184,10 +184,13 @@ impl AudioEngine {
             let meter_shutdown = meter_shutdown_for_thread.clone();
             let snapshot_for_meter = snapshot_for_thread.clone();
             let meter_bus = meter_bus_for_meter.clone();
-            let tx_for_meter = tx.clone();
             thread::spawn(move || {
                 // stderr logging, map rebuilds and event emission all live on
                 // this thread so the audio callback stays lock-free.
+                //
+                // 本线程**只做观测**（日志 / 电平发布）：等待的解除由渲染线程
+                // 推送 `RenderedClipsChanged` 驱动，不依赖此处的采样或判定，
+                // 因而没有任何观测窗口或时序竞态。
                 let debug_pending =
                     std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1");
                 let mut last_bus_generation = u64::MAX;
@@ -205,26 +208,13 @@ impl AudioEngine {
                     thread::sleep(Duration::from_millis(33));
 
                     // Drain RT-side reports and log them here, not in the callback.
+                    // 仅用于诊断：等待中的音频回调每块上报一次冻结位置。
                     let transport_wait_pos = meter_bus.take_transport_wait_pos();
-                    if transport_wait_pos > 0 {
-                        // ── 原地等待渲染的解除检查 ──────────────────────────
-                        // 快照携带构建时刻的渲染缓存代数；落后于当前缓存代数
-                        // 说明有新渲染结果尚未反映进快照（等待期间插入 /
-                        // 插入发生在等待开始之前皆覆盖）→ 请求 worker 重建
-                        // 快照。重建后新快照代数追平，检查自然停止 —— 精确
-                        // 触发、无轮询重建风暴。解除延迟 ≤ 一个 meter 周期
-                        // （33ms），等待中的音频本就静音，无感知。
-                        let snap = snapshot_for_meter.load_full();
-                        let cache_gen = crate::synth_clip_cache::render_cache_generation();
-                        if snap.render_cache_generation != cache_gen {
-                            let _ = tx_for_meter.send(EngineCommand::RebuildSnapshot);
-                        }
-                        if transport_wait_pos != last_wait_log_pos {
-                            log::warn!(
-                                "[mix] transport waiting for render at pos={} (snapshot gen={} cache gen={}) — staying frozen until ready",
-                                transport_wait_pos, snap.render_cache_generation, cache_gen
-                            );
-                        }
+                    if transport_wait_pos > 0 && transport_wait_pos != last_wait_log_pos {
+                        log::warn!(
+                            "[mix] transport waiting for render at pos={} — frozen until the covering clips are ready",
+                            transport_wait_pos
+                        );
                     }
                     last_wait_log_pos = transport_wait_pos;
                     let pending_pos = meter_bus.take_pending_pos();
@@ -713,8 +703,8 @@ impl AudioEngine {
                             EngineCommand::UpdateTimeline(tl) => {
                                 handle_update_timeline(&mut state, tl)
                             }
-                            EngineCommand::RebuildSnapshot => {
-                                handle_rebuild_snapshot(&mut state)
+                            EngineCommand::RenderedClipsChanged => {
+                                handle_rendered_clips_changed(&mut state)
                             }
                             EngineCommand::BeginPlayIntent => {
                                 handle_begin_play_intent(&mut state)
@@ -881,6 +871,15 @@ impl AudioEngine {
             sample_rate: sr,
         }
     }
+
+    /// 渲染线程在完成一个 Clip 的渲染（或命中缓存并注册 key）后调用：
+    /// 通知 worker 换入反映最新渲染结果的快照。
+    ///
+    /// 这是"原地等待渲染"解除的唯一入口 —— 由**产出者**主动推送，
+    /// 无需任何轮询、版本号比对或等待状态上报。
+    pub fn refresh_rendered_snapshot(&self) {
+        let _ = self.tx.send(EngineCommand::RenderedClipsChanged);
+    }
 }
 
 // ─── Worker 状态结构体 ────────────────────────────────────────────────────────
@@ -1011,12 +1010,17 @@ fn handle_begin_play_intent(s: &mut EngineWorkerState) {
     *s.stopped_since_play = false;
 }
 
-/// 最小快照重建：仅从 last_timeline 重建并换入快照，**不**执行
-/// handle_update_timeline 的播放暂停判定与 pitch 分析调度副作用 ——
-/// 它由后台渲染线程在"起点等待渲染"期间每个 clip 入库后高频调用，
-/// 必须保持幂等且轻量。等待中的音频回调借助新快照观察到就绪的
-/// rendered_pcm，解除等待并自动开始播放。
-fn handle_rebuild_snapshot(s: &mut EngineWorkerState) {
+/// 渲染结果已变更 → 按当前 last_timeline 重建快照并换入。
+///
+/// 这是"原地等待渲染"得以解除的唯一机制（见
+/// [`EngineCommand::RenderedClipsChanged`]）：
+/// 渲染线程每处理完一个 Clip 就推送一次，worker 换入包含最新 rendered_pcm
+/// 的快照；音频回调在下一个块重新判定窗口就绪性 —— 就绪即自动开始/继续播放。
+///
+/// 刻意保持**最小路径**：不执行 `handle_update_timeline` 的播放暂停判定与
+/// pitch 分析调度副作用 —— 本命令在渲染 pass 期间会被高频发送（每 Clip 一次），
+/// 必须幂等、无副作用、无反馈循环。
+fn handle_rendered_clips_changed(s: &mut EngineWorkerState) {
     let Some(tl) = s.last_timeline.clone() else {
         return;
     };
@@ -2061,7 +2065,6 @@ mod tests {
             duration_frames: 0,
             track_ids: Arc::new(vec![]),
             clips: Arc::new(vec![]),
-            render_cache_generation: 0,
         }));
         let is_playing = Arc::new(AtomicBool::new(false));
         let play_start_wait = Arc::new(AtomicBool::new(false));
@@ -2216,6 +2219,81 @@ mod tests {
         assert!(
             is_playing.load(std::sync::atomic::Ordering::Relaxed),
             "an explicit play after the stop re-arms the completion path"
+        );
+    }
+
+    /// 渲染结果推送（`RenderedClipsChanged`）必须换入新快照 —— 这是"原地
+    /// 等待渲染"解除的唯一机制：产出者发布 → worker 换入包含最新 rendered_pcm
+    /// 的快照 → 音频回调下一块自动重新判定就绪性并继续播放。
+    #[test]
+    fn rendered_clips_changed_swaps_in_a_fresh_snapshot() {
+        update_runtime_stretch_settings(UserStretchAlgorithm::Signalsmith, false, None, None);
+
+        let timeline = make_plain_stretch_timeline();
+        let (engine_tx, _engine_rx) = mpsc::channel::<EngineCommand>();
+        let (stretch_tx, _stretch_rx) = mpsc::channel();
+
+        let resources = ResourceManager::new(engine_tx.clone());
+        let cache = resources.cache().clone();
+        let stretch_cache = Arc::new(Mutex::new(ByteBudgetCache::new(8, u64::MAX)));
+        let stretch_inflight = Arc::new(Mutex::new(HashSet::new()));
+        let snapshot = Arc::new(ArcSwap::from_pointee(EngineSnapshot::empty(44_100)));
+        let is_playing = Arc::new(AtomicBool::new(false));
+        let play_start_wait = Arc::new(AtomicBool::new(false));
+        let target = Arc::new(Mutex::new(None));
+        let base_frames = Arc::new(AtomicU64::new(0));
+        let position_frames = Arc::new(AtomicU64::new(0));
+        let duration_frames = Arc::new(AtomicU64::new(0));
+        let meter_state = Arc::new(Mutex::new(HashMap::new()));
+        let meter_generation = Arc::new(AtomicU64::new(0));
+        let mut last_timeline = Some(timeline.clone());
+        let mut last_play_file = None;
+        let mut stopped_since_play = false;
+
+        let mut worker = EngineWorkerState {
+            sr: 44_100,
+            is_playing: &is_playing,
+            play_start_wait: &play_start_wait,
+            target: &target,
+            base_frames: &base_frames,
+            position_frames: &position_frames,
+            duration_frames: &duration_frames,
+            snapshot: &snapshot,
+            cache: &cache,
+            stretch_cache: &stretch_cache,
+            stretch_inflight: &stretch_inflight,
+            stretch_tx: &stretch_tx,
+            resources: &resources,
+            tx: &engine_tx,
+            last_timeline: &mut last_timeline,
+            last_play_file: &mut last_play_file,
+            app_handle: None,
+            meter_state: &meter_state,
+            meter_generation: &meter_generation,
+            stopped_since_play: &mut stopped_since_play,
+        };
+
+        // 建立基线快照（模拟播放命令的 update_timeline）。
+        handle_update_timeline(&mut worker, timeline.clone());
+        let before = snapshot.load_full();
+        let before_ptr = Arc::as_ptr(&before) as usize;
+
+        // 渲染线程推送 → 快照必须被替换（等待中的传输层据此恢复播放）。
+        handle_rendered_clips_changed(&mut worker);
+        let after = snapshot.load_full();
+        let after_ptr = Arc::as_ptr(&after) as usize;
+        assert_ne!(
+            before_ptr, after_ptr,
+            "a render result push must swap in a freshly built snapshot"
+        );
+
+        // 无时间线时是安全的空操作（不崩溃、不替换快照）。
+        *worker.last_timeline = None;
+        handle_rendered_clips_changed(&mut worker);
+        assert_eq!(
+            Arc::as_ptr(&snapshot.load_full()) as usize,
+            after_ptr,
+            "without a timeline the refresh is a no-op"
         );
     }
 }

@@ -145,11 +145,6 @@ pub(crate) struct EngineSnapshot {
     pub(crate) duration_frames: u64,
     pub(crate) track_ids: Arc<Vec<String>>,
     pub(crate) clips: Arc<Vec<EngineClip>>,
-    /// 构建本快照时的渲染 Clip 缓存代数（见
-    /// `synth_clip_cache::RENDERED_CLIP_CACHE_GENERATION`）。"原地等待渲染"
-    /// 期间，meter 线程比对快照代数与当前缓存代数：落后即说明有新渲染结果
-    /// 尚未反映进快照 → 请求重建以解除等待。
-    pub(crate) render_cache_generation: u64,
 }
 
 impl EngineSnapshot {
@@ -160,7 +155,6 @@ impl EngineSnapshot {
             duration_frames: 0,
             track_ids: Arc::new(vec![]),
             clips: Arc::new(vec![]),
-            render_cache_generation: 0,
         }
     }
 }
@@ -207,11 +201,15 @@ pub(crate) enum EngineCommand {
     SetMetronomeSchedule {
         clicks: Arc<Vec<crate::audio_engine::metronome::MetronomeClick>>,
     },
-    /// 按当前 last_timeline 重建快照（最小路径）。**发送方是 meter 线程**：
-    /// "原地等待渲染"期间它比对快照携带的渲染缓存代数与当前缓存代数，
-    /// 落后即发送本命令 —— 等待中的音频回调只能通过新快照观察到刚入库的
-    /// rendered_pcm，从而解除等待并自动开始/继续播放。
-    RebuildSnapshot,
+    /// 渲染结果已变更（**发送方是渲染线程**）：每处理完一个 Clip（写入缓存
+    /// 或命中缓存并注册 key）后立即发送，worker 据此按当前 last_timeline
+    /// 重建快照。
+    ///
+    /// 这是"原地等待渲染"解除的**唯一**机制，取代了此前依赖
+    /// RT 上报 → 观察线程轮询比对 → 触发重建的被动链（任一环节漏掉都会让
+    /// 等待永久悬空）。推送模型下：产出者发布 → worker 换入新快照 → RT
+    /// 回调下一块自动重新判定（就绪即前进），不存在观测窗口与时序竞态。
+    RenderedClipsChanged,
     /// 用户发起了新的播放请求（play_original 入口处发送）。
     ///
     /// 复位 `stopped_since_play`：完成命令的停止意图判定以"自**本次播放
