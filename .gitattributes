@@ -1,0 +1,91 @@
+# Line ending policy
+#
+# Background: this repository previously had no .gitattributes at all, so line
+# endings depended entirely on each developer's core.autocrlf. On Windows,
+# autocrlf=true writes checked-out files as CRLF, while Prettier (endOfLine
+# defaults to "lf"), Unix scripts, and CI (ubuntu-latest) all work with LF.
+# The same code therefore ended up with different line endings per machine:
+#   - `npm run format:check` failed wholesale on Windows (the content was in
+#     fact fully compliant);
+#   - line-ending noise leaked into diffs, making real changes hard to spot.
+#
+# Policy: LF everywhere, both in the repository and in the working tree
+# (`eol=lf` constrains the blob and the checkout alike). Only Windows
+# command-line native formats use CRLF.
+#
+# Why LF rather than CRLF:
+#   1. Every blob already in Git is LF (including .sh / .bat). Switching to
+#      CRLF would rewrite the entire repository; choosing LF costs zero blob
+#      changes and merely brings the working tree back in line.
+#   2. *.sh must be LF -- a CRLF shebang makes Linux/macOS fail with
+#      "bad interpreter". `eol=lf` prevents this by construction instead of by
+#      convention.
+#   3. CI (frontend build/tests) runs on ubuntu-latest, so LF matches CI.
+#
+# Note: the eol setting in `.gitattributes` takes precedence over
+# core.autocrlf, so Windows users do not need to change their global config
+# for this file to take effect.
+
+# Default: detect text files automatically and normalize them to LF
+* text=auto eol=lf
+
+# -- CRLF exceptions --------------------------------------------------------
+# Windows batch files are traditionally CRLF. Pure LF is not parsed entirely
+# consistently across cmd.exe versions (especially for edge syntax such as
+# goto/call and parenthesized blocks), and .bat files only ever run on Windows
+# and never enter the Linux/CI flow -- so following the platform convention and
+# using CRLF is the safest choice.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# -- Explicitly declared as text (avoid binary heuristic misdetection) ------
+# These extensions all contain UTF-8 text, but an individual file could be
+# misdetected as binary by text=auto (e.g. due to a missing newline or high-bit
+# characters), which would make it silently skip line-ending normalization.
+*.ts    text eol=lf
+*.tsx   text eol=lf
+*.js    text eol=lf
+*.mjs   text eol=lf
+*.cjs   text eol=lf
+*.json  text eol=lf
+*.css   text eol=lf
+*.html  text eol=lf
+*.md    text eol=lf
+*.rs    text eol=lf
+*.toml  text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.sh    text eol=lf
+*.ps1   text eol=lf
+*.py    text eol=lf
+
+# -- Binary: no line-ending conversion whatsoever ---------------------------
+# Marking these explicitly keeps Git from mistaking binary content for text and
+# corrupting it.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.icns binary
+*.webp binary
+*.svg  text eol=lf
+*.onnx binary
+*.pt   binary
+*.bin  binary
+*.dll  binary
+*.so   binary
+*.dylib binary
+*.a    binary
+*.lib  binary
+*.exe  binary
+*.zip  binary
+*.7z   binary
+*.gz   binary
+*.wav  binary
+*.mp3  binary
+*.flac binary
+*.ttf  binary
+*.otf  binary
+*.woff binary
+*.woff2 binary
