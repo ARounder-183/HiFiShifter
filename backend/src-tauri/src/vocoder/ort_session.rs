@@ -243,6 +243,47 @@ pub(crate) fn session_build_lock() -> &'static Mutex<()> {
     BUILD_LOCK.get_or_init(|| Mutex::new(()))
 }
 
+/// 有界地获取全局单飞锁（供各模块 `get_or_init_shared_session` 使用）。
+///
+/// 无限等待是危险的：若持有者的构建/烟测挂起（驱动层），所有渲染线程都会
+/// 永久阻塞 —— 表现为渲染进度永久卡在 0%。超时后返回 Err，调用方的会话
+/// 加载失败 → 该 Clip 失败 → **渲染 pass 继续推进**（而不是整条链停摆），
+/// 下一次请求会重试。等待期间每 5s 打印一次警告，使日志能直接指出"卡在
+/// 会话构建锁上"。
+pub(crate) fn acquire_session_build_lock(timeout: std::time::Duration) -> Result<std::sync::MutexGuard<'static, ()>, String> {
+    let lock = session_build_lock();
+    let started = std::time::Instant::now();
+    let mut next_log = std::time::Duration::from_secs(5);
+    loop {
+        if let Ok(guard) = lock.try_lock() {
+            if started.elapsed() > std::time::Duration::from_secs(1) {
+                log::warn!(
+                    "ort_session: acquired the global session build lock after {:?} (a build was in progress)",
+                    started.elapsed()
+                );
+            }
+            return Ok(guard);
+        }
+        if started.elapsed() >= timeout {
+            log::error!(
+                "ort_session: could not acquire the global session build lock within {timeout:?}; \
+                 another session build appears to be stuck. Failing this request so rendering can continue."
+            );
+            return Err(format!(
+                "session build lock busy for {timeout:?} (another build appears stuck)"
+            ));
+        }
+        if started.elapsed() >= next_log {
+            log::warn!(
+                "ort_session: waiting for the global session build lock ({:?} elapsed) — another build is in progress",
+                started.elapsed()
+            );
+            next_log += std::time::Duration::from_secs(5);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 /// Resolve the DirectML device ID to use, in priority order:
 /// 1. Runtime override (set via UI/settings)
 /// 2. `HIFISHIFTER_DML_DEVICE_ID` env var

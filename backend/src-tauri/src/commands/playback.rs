@@ -453,6 +453,15 @@ fn render_single_clip(
 
     let debug = std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1");
 
+    // 阶段日志：渲染进度永久卡 0% 时，日志要能直接指出卡在哪一步。
+    let stage_started = std::time::Instant::now();
+    log::warn!(
+        "[render] stage=begin clip_id={} rate={:.6} len_sec={:.3}",
+        clip.id,
+        clip.playback_rate,
+        clip.length_sec
+    );
+
     // 1. 解码源文件
     let (in_rate, in_channels, pcm) =
         crate::audio_utils::decode_audio_f32_interleaved(std::path::Path::new(source_path))?;
@@ -671,6 +680,11 @@ fn render_single_clip(
 
     let render_variant = |clip_variant: &crate::state::Clip| {
         let mut rendered = segment.clone();
+        log::warn!(
+            "[render] stage=processor_begin clip_id={} elapsed_ms={}",
+            clip_variant.id,
+            stage_started.elapsed().as_millis()
+        );
         match crate::pitch_editing::maybe_apply_pitch_edit_to_clip_segment(
             timeline,
             clip_variant,
@@ -883,6 +897,11 @@ fn render_single_clip(
     }
     // HNSEP 分离失败（模型缺失/推理错误）时降级为非 breath 渲染：外层已因
     // 气声跳过外部拉伸，硬错误会让整条 clip 无声等待，比"没有气声"严重得多。
+    log::warn!(
+        "[render] stage=hnsep_begin clip_id={} elapsed_ms={}",
+        clip.id,
+        stage_started.elapsed().as_millis()
+    );
     let noise_mono = match crate::hnsep_onnx::infer_noise_mono(&clip.id, &mono, out_rate) {
         Ok(noise) => noise,
         Err(e) => {
@@ -1450,6 +1469,14 @@ fn render_background_pass(
             };
             done[index] = true;
             let clip_render_info = &clips_to_render[index];
+            let clip_started_at = std::time::Instant::now();
+            log::warn!(
+                "[bg_render] clip {}/{} begin clip_id={} start_sec={:.3}",
+                rendered_count + 1,
+                total,
+                clip_render_info.clip.id,
+                clip_render_info.clip.start_sec
+            );
 
             // 方案 A：重启请求静默窗口 —— 请求挂起超过窗口才升级为实际取消。
             // 失效风暴（工程加载 / 连续编辑）期间时间戳被持续刷新、当前轮
@@ -1660,6 +1687,13 @@ fn render_background_pass(
             }
 
             rendered_count += 1;
+            log::warn!(
+                "[bg_render] clip {}/{} done clip_id={} elapsed_ms={}",
+                rendered_count,
+                total,
+                clip_render_info.clip.id,
+                clip_started_at.elapsed().as_millis()
+            );
 
             // 本 clip 处理完毕（命中缓存或新渲染入库）→ 推送刷新引擎快照。
             // 这是"原地等待渲染"解除的唯一入口（见

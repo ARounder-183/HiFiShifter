@@ -134,9 +134,11 @@ fn get_or_init_shared_session() -> Result<Arc<Mutex<Session>>, String> {
     // 挂起由烟测超时兜底：持有者最多持锁一个 SMOKE_TEST_TIMEOUT
     // （DirectML 10s），随后 DirectML 被禁用、等待者立即以 CPU 继续 ——
     // 等待有界，绝不永久卡死。
-    let _build_flight = crate::vocoder_ort_session::session_build_lock()
-        .lock()
-        .map_err(|e| format!("session build lock poisoned: {e}"))?;
+    // 有界等待（20s）：持有者的构建挂起时不再让渲染线程永久阻塞 ——
+    // 超时返回 Err，本次会话加载失败 → 该 Clip 失败但 pass 继续推进。
+    let _build_flight = crate::vocoder_ort_session::acquire_session_build_lock(
+        std::time::Duration::from_secs(20),
+    )?;
     // 双重检查：等待期间其他线程（设备切换的异步预热）可能已完成构建。
     if let Some(session) = mutex
         .lock()
