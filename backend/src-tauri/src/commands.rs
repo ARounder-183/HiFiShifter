@@ -73,6 +73,41 @@ use tauri::{Manager, State, Window};
 // This is used by the window close handler (crate-internal), not a tauri command.
 // pub(crate) use project::save_project_to_path_inner;
 
+// ===================== 重型命令的 async 包装（P2-3）=====================
+//
+// 本文件顶部模块说明与项目注释均确认：同步命令在**主线程**上运行，会冻结整个 UI。
+// 下列命令涉及工程解析、媒体解码、RPP/VSP 解析、MIDI 导入等秒级以上操作，因此统一
+// 按 `export_audio_advanced` 的既有范式包装为 async + `spawn_blocking`。
+//
+// 注意传入的参数类型：
+// - 生命周期型注入参数（`State<'_, _>`）不能跨 await，因此改为接收 `AppHandle`，
+//   在阻塞闭包内部用 `app.state()` 取回。
+// - `Window` 是 Send 的句柄，可直接移入闭包；其 UI 操作（如 `set_title`）内部会
+//   切回主线程执行，因此不违反"UI 只能主线程操作"。
+
+/// 空/失败的时间线载荷：用于 async 命令 join 失败（阻塞任务 panic）时的回退。
+///
+/// 与既有 `import_audio_item` / `import_audio_bytes` 内联构造保持一致，
+/// 抽取出来避免同一形状在多处各写一遍。
+fn empty_timeline_payload(error: &str) -> crate::models::TimelineStatePayload {
+    crate::models::TimelineStatePayload {
+        ok: false,
+        tracks: Vec::new(),
+        clips: Vec::new(),
+        created_clip_ids: Some(Vec::new()),
+        created_track_ids: None,
+        selected_track_id: None,
+        selected_clip_id: None,
+        bpm: 120.0,
+        playhead_sec: 0.0,
+        project_sec: None,
+        project: None,
+        missing_files: Some(vec![error.to_string()]),
+        disabled_group_ids: Vec::new(),
+        tempo_map: None,
+    }
+}
+
 // ===================== core =====================
 
 #[tauri::command(rename_all = "camelCase")]
@@ -177,13 +212,30 @@ pub fn open_project_dialog() -> serde_json::Value {
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn open_project(
-    state: State<'_, AppState>,
+pub async fn open_project(
+    app: tauri::AppHandle,
     window: Window,
     project_path: String,
     force: Option<bool>,
 ) -> crate::models::OpenProjectPayload {
-    project::open_project(state, window, project_path, force)
+    // 工程解析（MessagePack/JSON）+ 可能触发的全量分析，大工程可达秒级。
+    let app_for_fallback = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        project::open_project(state, window, project_path, force)
+    })
+    .await
+    .unwrap_or_else(|error| {
+        // join 失败（阻塞任务 panic）：保留当前时间线展示，只把错误带出去。
+        let state: State<'_, AppState> = app_for_fallback.state();
+        crate::models::OpenProjectPayload {
+            timeline: core::get_timeline_state_from_ref(state.inner()),
+            error: Some(format!("open project task failed: {error}")),
+            project_version_too_new: None,
+            project_file_version: None,
+            current_project_file_version: None,
+        }
+    })
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -586,22 +638,7 @@ pub async fn import_audio_item(
         )
     })
     .await
-    .unwrap_or_else(|error| crate::models::TimelineStatePayload {
-        ok: false,
-        tracks: Vec::new(),
-        clips: Vec::new(),
-        created_clip_ids: Some(Vec::new()),
-        created_track_ids: None,
-        selected_track_id: None,
-        selected_clip_id: None,
-        bpm: 120.0,
-        playhead_sec: 0.0,
-        project_sec: None,
-        project: None,
-        missing_files: Some(vec![format!("import task failed: {error}")]),
-        disabled_group_ids: Vec::new(),
-        tempo_map: None,
-    })
+    .unwrap_or_else(|error| empty_timeline_payload(&format!("import task failed: {error}")))
 }
 #[tauri::command(rename_all = "camelCase")]
 pub async fn import_audio_bytes(
@@ -617,22 +654,7 @@ pub async fn import_audio_bytes(
         timeline::import_audio_bytes(state, file_name, base64_data, track_id, start_sec)
     })
     .await
-    .unwrap_or_else(|error| crate::models::TimelineStatePayload {
-        ok: false,
-        tracks: Vec::new(),
-        clips: Vec::new(),
-        created_clip_ids: Some(Vec::new()),
-        created_track_ids: None,
-        selected_track_id: None,
-        selected_clip_id: None,
-        bpm: 120.0,
-        playhead_sec: 0.0,
-        project_sec: None,
-        project: None,
-        missing_files: Some(vec![format!("import task failed: {error}")]),
-        disabled_group_ids: Vec::new(),
-        tempo_map: None,
-    })
+    .unwrap_or_else(|error| empty_timeline_payload(&format!("import task failed: {error}")))
 }
 #[tauri::command(rename_all = "camelCase")]
 pub fn add_track(
@@ -938,24 +960,36 @@ pub fn set_clip_take_reversed(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn add_clip_take_from_media(
-    state: State<'_, AppState>,
+pub async fn add_clip_take_from_media(
+    app: tauri::AppHandle,
     clip_id: String,
     source_path: String,
     name: Option<String>,
     checkpoint: Option<bool>,
 ) -> crate::models::TimelineStatePayload {
-    timeline::add_clip_take_from_media(state, clip_id, source_path, name, checkpoint)
+    // 需要解码新 Take 的媒体文件。
+    tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        timeline::add_clip_take_from_media(state, clip_id, source_path, name, checkpoint)
+    })
+    .await
+    .unwrap_or_else(|error| empty_timeline_payload(&format!("add take task failed: {error}")))
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn import_media_files_as_takes(
-    state: State<'_, AppState>,
+pub async fn import_media_files_as_takes(
+    app: tauri::AppHandle,
     paths: Vec<String>,
     track_id: Option<String>,
     start_sec: Option<f64>,
 ) -> crate::models::TimelineStatePayload {
-    timeline::import_media_files_as_takes(state, paths, track_id, start_sec)
+    // 每个媒体文件都要解码（可能还有重采样）；多选大文件时是秒级操作。
+    tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        timeline::import_media_files_as_takes(state, paths, track_id, start_sec)
+    })
+    .await
+    .unwrap_or_else(|error| empty_timeline_payload(&format!("import task failed: {error}")))
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1100,19 +1134,29 @@ pub fn toggle_group_disabled(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn convert_clips_to_pitch_reference(
-    state: State<'_, AppState>,
+pub async fn convert_clips_to_pitch_reference(
+    app: tauri::AppHandle,
     clip_ids: Vec<String>,
 ) -> crate::models::TimelineStatePayload {
-    timeline::convert_clips_to_pitch_reference(state, clip_ids)
+    tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        timeline::convert_clips_to_pitch_reference(state, clip_ids)
+    })
+    .await
+    .unwrap_or_else(|error| empty_timeline_payload(&format!("convert to pitch reference task failed: {error}")))
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn update_pitch_reference(
-    state: State<'_, AppState>,
+pub async fn update_pitch_reference(
+    app: tauri::AppHandle,
     clip_ids: Vec<String>,
 ) -> crate::models::TimelineStatePayload {
-    timeline::update_pitch_reference(state, clip_ids)
+    tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        timeline::update_pitch_reference(state, clip_ids)
+    })
+    .await
+    .unwrap_or_else(|error| empty_timeline_payload(&format!("update pitch reference task failed: {error}")))
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1643,27 +1687,39 @@ pub fn open_vocalshifter_dialog() -> serde_json::Value {
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn import_vocalshifter_project(
-    state: State<'_, AppState>,
+pub async fn import_vocalshifter_project(
+    app: tauri::AppHandle,
     window: Window,
     vsp_path: String,
 ) -> serde_json::Value {
-    vocalshifter::import_vocalshifter_project(state.inner(), &window, vsp_path)
+    // VSP 工程解析 + 媒体探测。
+    tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        vocalshifter::import_vocalshifter_project(state.inner(), &window, vsp_path)
+    })
+    .await
+    .unwrap_or_else(|error| serde_json::json!({ "ok": false, "error": format!("import vocalshifter task failed: {error}") }))
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn paste_vocalshifter_clipboard(
-    state: State<'_, AppState>,
+pub async fn paste_vocalshifter_clipboard(
+    app: tauri::AppHandle,
     selection_start_frame: Option<usize>,
     selection_max_frames: Option<usize>,
     active_param: Option<String>,
 ) -> serde_json::Value {
-    vocalshifter_clipboard::paste_vocalshifter_clipboard(
-        state.inner(),
-        selection_start_frame,
-        selection_max_frames,
-        active_param,
-    )
+    // 剪贴板 VSP 解析 + 媒体探测。
+    tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        vocalshifter_clipboard::paste_vocalshifter_clipboard(
+            state.inner(),
+            selection_start_frame,
+            selection_max_frames,
+            active_param,
+        )
+    })
+    .await
+    .unwrap_or_else(|error| serde_json::json!({ "ok": false, "error": format!("paste vocalshifter task failed: {error}") }))
 }
 
 // ===================== reaper =====================
@@ -1674,25 +1730,37 @@ pub fn open_reaper_dialog() -> serde_json::Value {
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn import_reaper_project(
-    state: State<'_, AppState>,
+pub async fn import_reaper_project(
+    app: tauri::AppHandle,
     window: Window,
     rpp_path: String,
 ) -> serde_json::Value {
-    reaper::import_reaper_project(state.inner(), &window, rpp_path)
+    // RPP 解析（reaper_parser 单文件 2000+ 行）+ 媒体探测。
+    tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        reaper::import_reaper_project(state.inner(), &window, rpp_path)
+    })
+    .await
+    .unwrap_or_else(|error| serde_json::json!({ "ok": false, "error": format!("import reaper task failed: {error}") }))
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn paste_reaper_clipboard(
-    state: State<'_, AppState>,
+pub async fn paste_reaper_clipboard(
+    app: tauri::AppHandle,
     selection_start_frame: Option<usize>,
     selection_max_frames: Option<usize>,
 ) -> serde_json::Value {
-    reaper_clipboard::paste_reaper_clipboard(
-        state.inner(),
-        selection_start_frame,
-        selection_max_frames,
-    )
+    // 剪贴板 RPP 解析 + 媒体探测。
+    tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        reaper_clipboard::paste_reaper_clipboard(
+            state.inner(),
+            selection_start_frame,
+            selection_max_frames,
+        )
+    })
+    .await
+    .unwrap_or_else(|error| serde_json::json!({ "ok": false, "error": format!("paste reaper task failed: {error}") }))
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1734,8 +1802,8 @@ pub fn read_midi_clipboard_to_memory(state: State<'_, AppState>) -> serde_json::
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn import_midi_to_pitch(
-    state: State<'_, AppState>,
+pub async fn import_midi_to_pitch(
+    app: tauri::AppHandle,
     midi_path: String,
     track_indices: Vec<usize>,
     selection_start_frame: Option<usize>,
@@ -1747,19 +1815,25 @@ pub fn import_midi_to_pitch(
     clipboard_guid: Option<String>,
     close_leading_gap: Option<bool>,
 ) -> serde_json::Value {
-    midi::import_midi_to_pitch(
-        state.inner(),
-        midi_path,
-        track_indices,
-        selection_start_frame,
-        selection_max_frames,
-        fill_gaps,
-        note_bpm_mode,
-        specified_bpm,
-        import_midi_bpm_as_project,
-        clipboard_guid,
-        close_leading_gap,
-    )
+    // MIDI 解析 + 可能触发的音高分析调度。
+    tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        midi::import_midi_to_pitch(
+            state.inner(),
+            midi_path,
+            track_indices,
+            selection_start_frame,
+            selection_max_frames,
+            fill_gaps,
+            note_bpm_mode,
+            specified_bpm,
+            import_midi_bpm_as_project,
+            clipboard_guid,
+            close_leading_gap,
+        )
+    })
+    .await
+    .unwrap_or_else(|error| serde_json::json!({ "ok": false, "error": format!("import midi task failed: {error}") }))
 }
 
 #[tauri::command(rename_all = "camelCase")]
