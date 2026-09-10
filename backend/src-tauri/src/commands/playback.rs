@@ -1659,6 +1659,14 @@ fn render_background_pass(
                             e
                         );
                         render_failed_count += 1;
+                        // 该 clip 会一直保持未渲染（播放时静音等待），而前端此前
+                        // 完全消费不到 `ClipRenderingState::Failed`，用户只看到
+                        // "这段没声音"。这里补一条用户可见告警（见 P0-5）。
+                        crate::render_warning::warn(
+                            crate::render_warning::KIND_CLIP_RENDER_FAILED,
+                            "A clip failed to render and will stay silent",
+                            Some(&format!("clip_id={} err={e}", clip_render_info.clip.id)),
+                        );
                         if let Ok(mut state_mgr) =
                             crate::clip_rendering_state::global_clip_rendering_state().lock()
                         {

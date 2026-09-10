@@ -268,6 +268,11 @@ export const enUS = {
     action_refresh: "Refresh",
     loading: "Loading...",
     rendering: "Rendering...",
+    render_warning_decode_failed:
+        "An audio file could not be read, so clips using it will stay silent.",
+    render_warning_clip_failed: "A clip failed to process and will stay silent.",
+    render_warning_gpu_disabled:
+        "GPU acceleration was turned off after a driver error; rendering now runs on CPU. Restart the app to retry.",
     pitch_analyzing: "Analyzing pitch...",
     pitch_analyzing_preparing: "Preparing...",
     playhead: "Playhead",

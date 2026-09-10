@@ -102,6 +102,12 @@ pub(crate) fn disable_directml(reason: &str) {
             "ort_session: disabling DirectML EP for this process: {reason}. \
              Rendering continues on CPU; restart the app to retry GPU."
         );
+        // 用户会直观感到"突然变慢"，但此前只有日志知道原因 —— 必须让它可见（P0-5 / A12）。
+        crate::render_warning::warn(
+            crate::render_warning::KIND_GPU_DISABLED,
+            "GPU acceleration was disabled after a driver error; rendering now runs on CPU. Restart the app to retry the GPU.",
+            Some(reason),
+        );
     }
     DIRECTML_DISABLED
         .get_or_init(|| std::sync::atomic::AtomicBool::new(false))
@@ -117,6 +123,14 @@ fn coreml_disabled() -> bool {
 
 pub(crate) fn disable_coreml(reason: &str) {
     log::warn!("ort_session: disabling CoreML EP for this process: {reason}");
+    // 与 DirectML 同理：GPU 被禁用要让用户看得见（见 P0-5 / A12）。
+    // 注意：不能在此调用 `coreml_disabled()` —— 该函数只在 macOS ARM 下定义。
+    // 重复调用由 `render_warning` 的节流兜住。
+    crate::render_warning::warn(
+        crate::render_warning::KIND_GPU_DISABLED,
+        "GPU acceleration was disabled after an inference timeout; rendering now runs on CPU. Restart the app to retry the GPU.",
+        Some(reason),
+    );
     COREML_DISABLED
         .get_or_init(|| std::sync::atomic::AtomicBool::new(false))
         .store(true, std::sync::atomic::Ordering::Relaxed);

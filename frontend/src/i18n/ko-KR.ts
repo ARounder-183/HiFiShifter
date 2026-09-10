@@ -262,6 +262,11 @@ export const koKR = {
     action_refresh: "새로고침",
     loading: "로딩 중...",
     rendering: "렌더링 중...",
+    render_warning_decode_failed:
+        "오디오 파일을 읽을 수 없어, 이를 사용하는 클립은 무음으로 유지됩니다.",
+    render_warning_clip_failed: "클립 처리에 실패하여 해당 클립은 무음으로 유지됩니다.",
+    render_warning_gpu_disabled:
+        "드라이버 오류로 GPU 가속을 껐습니다. 현재 CPU로 렌더링합니다. 앱을 다시 시작하면 재시도합니다.",
     pitch_analyzing: "피치 분석 중...",
     pitch_analyzing_preparing: "준비 중...",
     playhead: "인디케이터",

@@ -185,6 +185,11 @@ export const jaJP = {
     action_refresh: "更新",
     loading: "読み込み中...",
     rendering: "レンダリング中...",
+    render_warning_decode_failed:
+        "音声ファイルを読み込めませんでした。これを使うクリップは無音になります。",
+    render_warning_clip_failed: "クリップの処理に失敗しました。このクリップは無音になります。",
+    render_warning_gpu_disabled:
+        "ドライバーエラーのため GPU 加速を無効にしました。CPU でレンダリングします。再起動すると再試行できます。",
     pitch_analyzing: "ピッチを分析中...",
     pitch_analyzing_preparing: "準備中...",
     playhead: "再生ヘッド",

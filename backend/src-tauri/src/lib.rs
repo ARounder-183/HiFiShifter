@@ -70,6 +70,8 @@ mod pitch_editing;
 #[path = "pitch/pitch_progress.rs"]
 mod pitch_progress;
 mod recording;
+// 渲染/推理层"用户可见告警"的单一出口（见 P0-5）。
+mod render_warning;
 mod renderer;
 mod synth_clip_cache;
 
@@ -297,6 +299,10 @@ pub fn run() {
 
             // Expose app handle for background workers.
             let _ = state.app_handle.set(app.handle().clone());
+
+            // 渲染/推理层的告警出口（engine worker / vocoder / 导出路径都不在
+            // 命令上下文里，拿不到 State，因此这里登记一个进程级句柄）。见 P0-5。
+            render_warning::install(app.handle().clone());
 
             // 将 app_handle 传递给 audio engine worker，使其能向前端推送事件。
             state.audio_engine.set_app_handle(app.handle().clone());

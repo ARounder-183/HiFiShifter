@@ -103,6 +103,25 @@ import {
  */
 const RENDER_CONTROLS_REVEAL_DELAY_MS = 3000;
 
+/**
+ * 渲染告警在状态栏停留多久后自动消失。
+ *
+ * 告警是"事后通知"而非阻塞式错误，长期占位会挤掉真正的状态文本；
+ * 用户也可以在它消失前点击关闭（见 P0-5）。
+ */
+const RENDER_WARNING_VISIBLE_MS = 15000;
+
+/**
+ * 后端 `render_warning` 的 `kind` → 本地化文案。
+ *
+ * 未知 kind 退回通用文案，避免后端新增类别时前端显示空白。
+ */
+const RENDER_WARNING_KEY: Record<string, MessageKey> = {
+    decode_failed: "render_warning_decode_failed",
+    clip_render_failed: "render_warning_clip_failed",
+    gpu_disabled: "render_warning_gpu_disabled",
+};
+
 const statusKey: Record<string, string> = {
     Ready: "status_ready",
     Failed: "status_failed",
@@ -1047,6 +1066,57 @@ function AppInner() {
     const renderingTarget = useAppSelector((state) => state.session.playbackRenderingTarget);
     const renderingBlocking = useAppSelector((state) => state.session.playbackBlockingRenderActive);
     const [renderingProgress, setRenderingProgress] = useState<number | null>(null);
+    // 渲染/推理层告警（解码失败、片段处理失败、GPU 被禁用）。
+    // 这些失败此前对用户完全不可见：只表现为"某段没声音"或"突然变慢"（见 P0-5）。
+    const [renderWarning, setRenderWarning] = useState<{
+        kind: string;
+        detail: string | null;
+    } | null>(null);
+    useEffect(() => {
+        let disposed = false;
+        let unlisten: null | (() => void) = null;
+        let clearTimer: number | null = null;
+
+        async function setup() {
+            try {
+                const mod = await import("@tauri-apps/api/event");
+                unlisten = await mod.listen(
+                    "render_warning",
+                    (event: {
+                        payload?: { kind?: string; detail?: string | null };
+                    }) => {
+                        if (disposed) return;
+                        const payload = event?.payload ?? {};
+                        const kind = typeof payload.kind === "string" ? payload.kind : "";
+                        if (!kind) return;
+                        setRenderWarning({
+                            kind,
+                            detail: typeof payload.detail === "string" ? payload.detail : null,
+                        });
+                        if (clearTimer != null) window.clearTimeout(clearTimer);
+                        clearTimer = window.setTimeout(() => {
+                            if (!disposed) setRenderWarning(null);
+                        }, RENDER_WARNING_VISIBLE_MS);
+                    },
+                );
+                // cleanup 可能发生在 await resolve 之前：已卸载则立即反注册，
+                // 否则该监听器会泄漏（StrictMode 双挂载时尤其明显）。
+                if (disposed) {
+                    unlisten();
+                    unlisten = null;
+                }
+            } catch {
+                // Safe no-op for non-Tauri builds.
+            }
+        }
+
+        void setup();
+        return () => {
+            disposed = true;
+            if (clearTimer != null) window.clearTimeout(clearTimer);
+            if (unlisten) unlisten();
+        };
+    }, []);
     // 渲染进行到多久之后才展开进度条与取消入口。
     // 后台预渲染常常几百毫秒就结束，若一上来就插入控件会让状态栏闪烁；
     // 因此只有"确实在耗时间"的渲染才展开（见 P2-1）。
@@ -3972,6 +4042,43 @@ function AppInner() {
                                     {t("cancel")}
                                 </button>
                             ) : null}
+                        </Flex>
+                    ) : null}
+                    {renderWarning ? (
+                        <Flex align="center" gap="1" className="shrink-0 min-w-0">
+                            <span
+                                className="truncate rounded px-1 py-0 text-xs font-medium"
+                                style={{
+                                    background: "var(--amber-3)",
+                                    color: "var(--amber-11)",
+                                    fontSize: "11px",
+                                    lineHeight: "16px",
+                                    maxWidth: "420px",
+                                }}
+                                title={renderWarning.detail ?? undefined}
+                            >
+                                {t(
+                                    RENDER_WARNING_KEY[renderWarning.kind] ??
+                                        "render_warning_clip_failed",
+                                )}
+                            </span>
+                            <button
+                                type="button"
+                                onClick={() => setRenderWarning(null)}
+                                title={t("close")}
+                                aria-label={t("close")}
+                                className="shrink-0 rounded px-1 py-0 text-xs font-medium"
+                                style={{
+                                    fontSize: "11px",
+                                    lineHeight: "16px",
+                                    color: "var(--amber-11)",
+                                    background: "transparent",
+                                    border: "1px solid var(--amber-6)",
+                                    cursor: "pointer",
+                                }}
+                            >
+                                ×
+                            </button>
                         </Flex>
                     ) : null}
                     <Text size="1" color={error ? "red" : "gray"} className="truncate">

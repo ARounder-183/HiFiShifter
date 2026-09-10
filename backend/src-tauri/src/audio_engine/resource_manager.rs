@@ -57,12 +57,22 @@ impl ResourceManager {
                         .is_some();
 
                     // 直接使用布尔值判断，消除系统调用
-                    if !ok && debug_commands {
-                        log::error!(
-                            "AudioEngine: ResourceManager decode failed: path={} out_rate={} ",
-                            path.display(),
-                            out_rate
+                    if !ok {
+                        // 解码失败是**永久性的**：不会再有 AudioReady，该 clip 会
+                        // 一直缺席（用户只听到"莫名无声"）。因此必须让用户看见，
+                        // 而不是只留一行 debug 日志（见 P0-5 / A6）。
+                        crate::render_warning::warn(
+                            crate::render_warning::KIND_DECODE_FAILED,
+                            "Failed to decode an audio source; clips using it will stay silent",
+                            Some(&format!("{} @ {} Hz", path.display(), out_rate)),
                         );
+                        if debug_commands {
+                            log::error!(
+                                "AudioEngine: ResourceManager decode failed: path={} out_rate={} ",
+                                path.display(),
+                                out_rate
+                            );
+                        }
                     }
 
                     if let Ok(mut s) = inflight_for_worker.lock() {

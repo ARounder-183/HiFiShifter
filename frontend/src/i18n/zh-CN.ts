@@ -175,6 +175,10 @@ export const zhCN = {
     action_refresh: "刷新",
     loading: "加载中...",
     rendering: "渲染中...",
+    render_warning_decode_failed: "某个音频文件无法读取，使用它的音频块会保持静音。",
+    render_warning_clip_failed: "某个音频块处理失败，会保持静音。",
+    render_warning_gpu_disabled:
+        "因驱动异常已停用 GPU 加速，当前使用 CPU 渲染。重启应用可重试。",
     pitch_analyzing: "正在分析音高...",
     pitch_analyzing_preparing: "正在准备...",
     playhead: "播放头",

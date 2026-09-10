@@ -448,6 +448,14 @@ pub fn render_mixdown_interleaved(
         )) {
             Ok(v) => v,
             Err(e) => {
+                // 导出会**跳过**这个片段（continue），最终产物里它整段消失。
+                // 此前只写 debug 日志，用户拿到一个"少了东西"的文件却不知道为什么
+                // —— 这里补一条用户可见告警（见 P0-5）。
+                crate::render_warning::warn(
+                    crate::render_warning::KIND_DECODE_FAILED,
+                    "A clip was skipped during export because its source could not be decoded",
+                    Some(&format!("clip_id={} path={} err={e}", clip.id, source_path)),
+                );
                 if debug {
                     log::error!(
                         "mixdown: decode failed; clip_id={} track_id={} path={} err={}",

@@ -176,6 +176,10 @@ export const zhTW = {
     action_refresh: "重新整理",
     loading: "載入中...",
     rendering: "算繪中...",
+    render_warning_decode_failed: "某個音訊檔案無法讀取，使用它的音訊區塊會保持靜音。",
+    render_warning_clip_failed: "某個音訊區塊處理失敗，會保持靜音。",
+    render_warning_gpu_disabled:
+        "因驅動異常已停用 GPU 加速，目前使用 CPU 算繪。重新啟動應用程式可重試。",
     pitch_analyzing: "正在分析音高...",
     pitch_analyzing_preparing: "正在準備...",
     playhead: "播放頭",
