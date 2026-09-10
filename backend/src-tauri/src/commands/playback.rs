@@ -121,13 +121,6 @@ pub(crate) static BG_RENDER_GENERATION: std::sync::atomic::AtomicU64 =
 /// `render_single_clip` 内部检测到后台渲染取消时返回的错误标记。
 const BG_RENDER_CANCELLED_ERR: &str = "bg_render_cancelled";
 
-fn timeline_version_from_app(app: &tauri::AppHandle) -> u64 {
-    let state = app.state::<AppState>();
-    state
-        .timeline_version
-        .load(std::sync::atomic::Ordering::Acquire)
-}
-
 /// 一轮后台渲染结束后是否应该“补一轮”。
 ///
 /// 补轮的目的是：第一轮可能因为音高分析尚未完成而跳过了部分 clip，
@@ -173,18 +166,11 @@ fn is_clip_pitch_analysis_ready(
 pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde_json::Value {
     guard_json_command("play_original", || {
         log::warn!("[play_original] called start_sec={start_sec}");
-        // clone 与版本号必须在同一把锁的作用域内读取：分离读取时，并发
-        // checkpoint（先解锁后 bump 版本）会让旧 timeline 配上新版本号，
-        // 后台渲染误以为自己是最新的，把过期状态写回引擎。
-        let (timeline, render_timeline_version) = {
-            let guard = match state.timeline.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            let version = state
-                .timeline_version
-                .load(std::sync::atomic::Ordering::Acquire);
-            (guard.clone(), version)
+        // 在同一把锁的作用域内克隆时间线：分离读取时，并发 checkpoint
+        // （先解锁后 bump 版本）会让旧 timeline 配上新版本号。
+        let timeline = match state.timeline.lock() {
+            Ok(g) => g.clone(),
+            Err(p) => p.into_inner().clone(),
         };
         let bpm = timeline.bpm;
         let playhead_sec = timeline.playhead_sec;
@@ -193,671 +179,39 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
         }
         let start_sec = playhead_sec.max(0.0) + start_sec.max(0.0);
 
-        // 记录新的播放请求：复位引擎的停止意图标志。前台预渲染路径的
-        // set_playing(true) 只发生在渲染完成时 —— 若不在请求时复位，用户
-        // 此前任何一次停止（哪怕只是暂停）都会让渲染完成被永久拒绝
-        // （渲染完毕后完全无法播放）。必须先于渲染线程派生入队，使命令
-        // 顺序为 请求 → （渲染窗口内的用户停止）→ 完成。
-        state.audio_engine.begin_play_intent();
-
-        // 节拍器：每次播放启动都按当前工程/设置重建响点表（保证与实际
-        // 出声内容一致），并同步配置（应用启动后可能尚未同步过）。
-        sync_metronome_config(&state);
-        refresh_metronome_schedule(&state);
-
-        // ── 后台预渲染激活时：立即进入播放流程，不等待渲染 ──────────────
-        // 起播窗口未就绪时传输层原地等待（音频回调静音冻结，渲染完成自动
-        // 起播），已就绪窗口则正常出声。
-        let bg_render = BG_RENDER_ACTIVE.load(std::sync::atomic::Ordering::Relaxed);
-        if bg_render {
-            log::warn!(
-                "[play_original] background render active — playing immediately (non-blocking)"
-            );
-            // 更新引擎 snapshot，让已渲染完成的 clip 立即可用
-            state.audio_engine.seek_sec(start_sec);
-            state.audio_engine.update_timeline(timeline);
-            state.audio_engine.set_playing(true, Some("original"));
-            return serde_json::json!({
-                "ok": true,
-                "playing": "original",
-                "start_sec": start_sec,
-                "background_render_active": true
-            });
-        }
-
+        // ── 渲染需求评估（与后台预渲染开关无关）─────────────────────────────
+        // 开关只决定渲染的**触发时机**：启用 = 编辑即渲染（播放时通常已就绪）；
+        // 关闭 = 播放时按需渲染。渲染途中的播放行为（原地等待 + 就绪自动播放）
+        // 两者完全一致：音频回调遇到未就绪窗口即冻结，渲染线程发布结果后
+        // 自动开始 / 继续播放。
         let clips_needing_render =
             collect_clips_needing_render(&timeline, state.audio_engine.sample_rate_hz());
         let need_prerender = !clips_needing_render.is_empty();
+        let snapshot_has_pending = state.audio_engine.snapshot_has_pending_clips();
         log::warn!(
-            "[play_original] clips_needing_render={} need_prerender={} timeline_version={}",
+            "[play_original] clips_needing_render={} need_prerender={} snapshot_has_pending={}",
             clips_needing_render.len(),
             need_prerender,
-            render_timeline_version
+            snapshot_has_pending
         );
 
-        // Check if the engine's current snapshot has clips awaiting synthesis
-        // (rendered_pcm=None, needs_synthesis=true).  This can happen when
-        // pitch_edit data was just invalidated but collect_clips_needing_render
-        // returned empty because user_modified hadn't propagated yet.
-        let snapshot_has_pending = state.audio_engine.snapshot_has_pending_clips();
-
-        if !need_prerender && !snapshot_has_pending {
-            // 无 pitch edit：直接走实时 clip mixing（零延迟）
-            state.audio_engine.seek_sec(start_sec);
-            state.audio_engine.update_timeline(timeline);
-            state.audio_engine.set_playing(true, Some("original"));
-            return serde_json::json!({"ok": true, "playing": "original", "start_sec": start_sec});
+        // 需要渲染但当前没有渲染 pass 在跑（后台预渲染关闭时的常态）→
+        // 按需启动一轮：本次播放需要这些 Clip 的结果。已在运行的 pass 无需
+        // 动作 —— 其待渲染列表本就覆盖当前所有待渲染 Clip。
+        if need_prerender && !BG_RENDER_ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
+            if let Some(app) = state.app_handle.get() {
+                ensure_render_pass_running(app);
+            }
         }
 
-        if !need_prerender && snapshot_has_pending {
-            // 快照中的 pending 合成来自旧 update_timeline 的一次性滞后
-            //（collect_clips_needing_render 基于当前时间线已返回空）。
-            // update_timeline 会按当前时间线重建快照，pending 随之消除；
-            // 直接播放即可。旧实现在此发出 active=true 的渲染事件却没有任何
-            // 路径把它关闭 —— 前端拒采窗口永久卡死（光标冻结 + 假播放态）。
-            log::warn!("[play_original] clips_needing_render=0 but snapshot has pending synthesis — rebuilding snapshot and playing");
-            state.audio_engine.seek_sec(start_sec);
-            state.audio_engine.update_timeline(timeline);
-            state.audio_engine.set_playing(true, Some("original"));
-            return serde_json::json!({"ok": true, "playing": "original", "start_sec": start_sec});
-        }
-
-        // ── 有 pitch edit：Clip 级增量预渲染 + 实时混音 ──────────────────────────
-        // 后台线程按时间线顺序逐 clip 渲染，渲染完成后开始播放；
-        // 播放过程中继续后台渲染后续 clip，音频回调遇到未合成 clip 时
-        // 原地等待（位置冻结、静音输出，渲染完成后自动继续）。
-        //
-        // 提前把引擎位置对齐到本次播放起点：渲染窗口内 get_playback_state
-        // 报告的就是真实的"将要播放的位置"（而非上一场播放/停止的陈旧残留）；
-        // 完成路径因此不再强制回跳到起始点 —— 渲染窗口内的用户 seek 得以保留。
+        // ── 立即武装传输层 ─────────────────────────────────────────────────────
+        // 覆盖起播窗口的 Clip 尚未就绪时，音频回调进入原地等待（保持播放态、
+        // 位置冻结、静音输出）；渲染线程每完成一个 Clip 都会推送刷新引擎
+        // 快照，等待随之解除并自动开始播放。
         state.audio_engine.seek_sec(start_sec);
-        if let Some(app) = state.app_handle.get().cloned() {
-            let engine = state.audio_engine.clone();
-            let tl_for_render = timeline.clone();
-            let render_start_sec = start_sec;
-            // 改法 D：确保 engine_sr 已被 worker 线程 store 为实际采样率。
-            // AudioEngine::new() 初始化 AtomicU32 为 44100，worker spawn 后才 store 实际值。
-            // 若 engine_sr 仍为初始值 44100 且系统实际为 48000，
-            // 则 hash 中的 frame 计算会与 build_snapshot 不一致。
-            // 这里在 spawn 内部短暂等待，确保 worker 已就绪。
-            let engine_for_sr = state.audio_engine.clone();
-
-            std::thread::spawn(move || {
-                // ★ panic 隔离：渲染循环中的 panic（native 推理库、缓存锁等）
-                // 不得吞掉收尾工作 —— 否则 "playback_rendering_state" 的
-                // active=false 完成事件永不发出，前端拒采窗口永久卡死
-                // （轮询停摆 + 假播放态 = 渲染后完全无法播放的另一种形态）。
-                // panic 时清掉 chunk 进度回调（残留回调会在后续渲染中继续
-                // 发射 active=true 的 original 事件，重新粘住拒采窗口）并
-                // 补发完成事件。正常路径的收尾 emit 由循环体自己负责，
-                // 此处不重复发送。
-                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let cache_log = std::env::var("HIFISHIFTER_RENDER_CACHE_LOG")
-                        .ok()
-                        .as_deref()
-                        == Some("1");
-                    let play_started_at = std::time::Instant::now();
-
-                    // 等待 engine worker 就绪（最多 200ms，通常 <5ms 即可）。
-                    // 用显式的 worker_ready 标志：真实输出设备就是 44100 时，
-                    // “sample_rate 值变化”永远不发生 —— 旧轮询会把 44.1kHz 设备
-                    // 的每次播放固定拖慢 200ms。
-                    if !engine_for_sr.worker_ready() {
-                        for _ in 0..40 {
-                            std::thread::sleep(std::time::Duration::from_millis(5));
-                            if engine_for_sr.worker_ready() {
-                                break;
-                            }
-                        }
-                    }
-                    let engine_sr = engine_for_sr.sample_rate_hz();
-                    log::warn!(
-                        "[play_original] engine_sr={} (used for hash computation)",
-                        engine_sr
-                    );
-                    let rendering_state_active = true;
-
-                    // Set up chunk-level progress callback for granular UI updates
-                    let app_for_progress = app.clone();
-                    crate::nsf_hifigan_onnx::set_chunk_progress_callback(Some(Box::new(
-                        move |progress: f64| {
-                            let _ = app_for_progress.emit(
-                                "playback_rendering_state",
-                                PlaybackRenderingStateEvent {
-                                    active: true,
-                                    progress: Some(progress),
-                                    target: Some("original".to_string()),
-                                },
-                            );
-                        },
-                    )));
-
-                    let _ = app.emit(
-                        "playback_rendering_state",
-                        PlaybackRenderingStateEvent {
-                            active: true,
-                            progress: Some(0.0),
-                            target: Some("original".to_string()),
-                        },
-                    );
-
-                    // 收集需要预渲染的 clip 列表，按时间线顺序排序
-                    let collect_started_at = std::time::Instant::now();
-                    let mut clips_to_render =
-                        collect_clips_needing_render(&tl_for_render, engine_sr);
-                    clips_to_render.sort_by(|a, b| a.clip.start_sec.total_cmp(&b.clip.start_sec));
-                    let collect_elapsed = collect_started_at.elapsed();
-
-                    let ready_filter_started_at = std::time::Instant::now();
-                    clips_to_render
-                        .retain(|info| is_clip_pitch_analysis_ready(&tl_for_render, &info.clip));
-                    let ready_filter_elapsed = ready_filter_started_at.elapsed();
-
-                    clips_to_render.sort_by(|a, b| a.clip.start_sec.total_cmp(&b.clip.start_sec));
-
-                    if cache_log {
-                        log::warn!(
-                        "[play_original][cache] prerender_targets={} engine_sr={} collect_ms={:.2} ready_filter_ms={:.2}",
-                        clips_to_render.len(),
-                        engine_sr,
-                        collect_elapsed.as_secs_f64() * 1000.0,
-                        ready_filter_elapsed.as_secs_f64() * 1000.0
-                    );
-                    }
-
-                    // 防呆：当 pitch_edit_user_modified 为 true 但当前时间线中并没有任何 clip
-                    // 在播放窗口内需要 pitch edit（例如用户把所有点都清空为 0），
-                    // 则无需进入预渲染路径，直接播放即可。
-                    if clips_to_render.is_empty() {
-                        if timeline_version_from_app(&app) != render_timeline_version {
-                            let _ = app.emit(
-                                "playback_rendering_state",
-                                PlaybackRenderingStateEvent {
-                                    active: false,
-                                    progress: Some(1.0),
-                                    target: Some("original".to_string()),
-                                },
-                            );
-                            return;
-                        }
-                        engine.seek_sec(render_start_sec);
-                        engine.update_timeline(tl_for_render);
-                        engine.set_playing(true, Some("original"));
-
-                        let _ = app.emit(
-                            "playback_rendering_state",
-                            PlaybackRenderingStateEvent {
-                                active: false,
-                                progress: Some(1.0),
-                                target: Some("original".to_string()),
-                            },
-                        );
-                        return;
-                    }
-
-                    // 新一轮渲染开始，清空上次的 pending_rendered_keys
-                    crate::synth_clip_cache::clear_pending_rendered_keys();
-
-                    // 预渲染批次保护：按本轮 clip 数动态扩容缓存，
-                    // 避免同一轮中早先渲染好的条目被后续插入提前淘汰。
-                    {
-                        let mut rendered_cache =
-                            crate::synth_clip_cache::global_rendered_clip_cache()
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner());
-                        let required = rendered_cache.len().saturating_add(clips_to_render.len());
-                        rendered_cache.ensure_capacity(required);
-                    }
-                    {
-                        let mut tension_cache =
-                            crate::synth_clip_cache::global_tension_rendered_clip_cache()
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner());
-                        let required = clips_to_render.len().max(1);
-                        tension_cache.ensure_capacity(required);
-                    }
-                    // 动态扩容 HNSEP 分离缓存：确保容量 >= 本轮 clip 数 + 余量，
-                    // 避免大量切片场景下 LRU 驱逐导致重复执行 HNSEP 推理。
-                    {
-                        let breath_clips = clips_to_render.len();
-                        // 预留 25% 余量，至少 128
-                        let required = (breath_clips + breath_clips / 4).max(128);
-                        crate::hnsep_onnx::ensure_cache_capacity(required);
-                    }
-                    // 动态扩容 Breath Noise 独立缓存：确保容量 >= 本轮 clip 数，
-                    // 使 formant 编辑时可复用已缓存的 noise stem，避免重复 HNSEP 推理。
-                    {
-                        let mut breath_noise_cache =
-                            crate::synth_clip_cache::global_breath_noise_cache()
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner());
-                        let required = clips_to_render.len().max(1);
-                        breath_noise_cache.ensure_capacity(required);
-                    }
-
-                    let total = clips_to_render.len().max(1);
-
-                    crate::nsf_hifigan_onnx::reset_chunk_progress(total);
-
-                    let mut rendered_count = 0u32;
-                    let mut cache_hit_count = 0u32;
-                    let mut cache_miss_count = 0u32;
-                    let mut render_success_count = 0u32;
-                    let mut render_failed_count = 0u32;
-                    let mut cache_probe_elapsed = std::time::Duration::ZERO;
-                    let mut render_elapsed = std::time::Duration::ZERO;
-                    let mut tension_elapsed = std::time::Duration::ZERO;
-                    let mut timeline_sig_check_elapsed = std::time::Duration::ZERO;
-                    let mut any_error = false;
-                    let mut cancelled = false;
-                    let mut pending_clip_ids_written: std::collections::HashSet<String> =
-                        std::collections::HashSet::new();
-
-                    // ★ 本轮前台渲染使用私有的取消令牌，而不是全局 `BG_RENDER_CANCEL`。
-                    // 全局标志由 `cancel_background_render`（新建/打开工程时必被调用）
-                    // 无条件置位，却只在后台预渲染的路径上清除；若后台预渲染未启用，
-                    // 它会永久保持为 true，使本轮渲染在解码后的第一个检查点就"失败"。
-                    // 控制块是 RAII 的：提前 return / panic 都会自动从登记表注销。
-                    let foreground_cancel =
-                        crate::commands::render_cancel::ForegroundRenderCancel::register();
-                    let cancel_token = foreground_cancel.token();
-
-                    // 逐 clip 预渲染，全部完成后再开始播放。
-                    // 顺序与后台预渲染**共用同一套择优逻辑**（见
-                    // `select_next_render_index`）：按实时播放位置/播放光标动态
-                    // 取下一个，位于播放位置及其之后的 clip 优先；正在渲染的
-                    // clip 不会被打断，重排序只作用于尚未开始的条目。
-                    // 是否启用后台预渲染只影响"渲染何时启动"，渲染本身的行为一致。
-                    let mut done = vec![false; clips_to_render.len()];
-                    loop {
-                        let next_index = select_next_render_index(&clips_to_render, &done, &app);
-                        let Some(index) = next_index else {
-                            break;
-                        };
-                        done[index] = true;
-                        let clip_render_info = &clips_to_render[index];
-
-                        if rendered_count % 32 == 0 {
-                            let sig_check_started_at = std::time::Instant::now();
-                            let changed =
-                                timeline_version_from_app(&app) != render_timeline_version;
-                            timeline_sig_check_elapsed += sig_check_started_at.elapsed();
-                            if changed {
-                                cancelled = true;
-                                break;
-                            }
-                        }
-
-                        let cache_probe_started_at = std::time::Instant::now();
-                        let mut base_entry = {
-                            let mut cache = crate::synth_clip_cache::global_rendered_clip_cache()
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner());
-                            cache.get(&clip_render_info.cache_key).cloned()
-                        };
-                        cache_probe_elapsed += cache_probe_started_at.elapsed();
-
-                        // 由于上面已经通过 retain 过滤过了，这里直接放行
-                        if base_entry.is_some() {
-                            cache_hit_count += 1;
-                            if cache_log {
-                                log::warn!(
-                                    "[play_original][cache] HIT clip_id={} hash={:#018x}",
-                                    clip_render_info.clip.id,
-                                    clip_render_info.cache_key.param_hash
-                                );
-                            }
-                            crate::synth_clip_cache::register_pending_rendered_key(
-                                &clip_render_info.clip.id,
-                                clip_render_info.cache_key.clone(),
-                            );
-                            pending_clip_ids_written.insert(clip_render_info.clip.id.clone());
-                        }
-
-                        if base_entry.is_none() {
-                            cache_miss_count += 1;
-                            if cache_log {
-                                log::warn!(
-                                    "[play_original][cache] MISS clip_id={} hash={:#018x}",
-                                    clip_render_info.clip.id,
-                                    clip_render_info.cache_key.param_hash
-                                );
-                            }
-                            if let Ok(mut state_mgr) =
-                                crate::clip_rendering_state::global_clip_rendering_state().lock()
-                            {
-                                state_mgr.set_state(
-                                    &clip_render_info.clip.id,
-                                    crate::clip_rendering_state::ClipRenderingState::Rendering,
-                                    0.0,
-                                    None,
-                                );
-                            }
-
-                            let render_started_at = std::time::Instant::now();
-                            match render_single_clip(
-                                &tl_for_render,
-                                &clip_render_info.clip,
-                                clip_render_info.sr,
-                                &cancel_token,
-                            ) {
-                                Ok(rendered) => {
-                                    // render_single_clip 涵盖解码、resample、可选 stretch、pitch processor。
-                                    render_elapsed += render_started_at.elapsed();
-                                    let stereo_pcm = rendered.rendered_stereo;
-                                    if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref()
-                                        == Some("1")
-                                    {
-                                        let nonzero =
-                                            stereo_pcm.iter().filter(|&&v| v.abs() > 1e-6).count();
-                                        log::warn!(
-                        "[play_original] clip rendered: id={} pcm_len={} nonzero={} hash={:#018x}",
-                        clip_render_info.clip.id, stereo_pcm.len(), nonzero,
-                        clip_render_info.cache_key.param_hash
-                    );
-                                    }
-                                    let frames = (stereo_pcm.len() / 2) as u64;
-                                    let entry = crate::synth_clip_cache::RenderedClipCacheEntry {
-                                        pcm_stereo: std::sync::Arc::new(stereo_pcm),
-                                        breath_noise_stereo: rendered
-                                            .breath_noise_stereo
-                                            .map(std::sync::Arc::new),
-                                        frames,
-                                        sample_rate: clip_render_info.sr,
-                                        rendered_take_id: clip_render_info
-                                            .clip
-                                            .active_take_id
-                                            .clone(),
-                                    };
-
-                                    // 现在存入缓存
-                                    let mut cache =
-                                        crate::synth_clip_cache::global_rendered_clip_cache()
-                                            .lock()
-                                            .unwrap_or_else(|e| e.into_inner());
-                                    cache.insert(clip_render_info.cache_key.clone(), entry.clone());
-                                    crate::synth_clip_cache::register_pending_rendered_key(
-                                        &clip_render_info.clip.id,
-                                        clip_render_info.cache_key.clone(),
-                                    );
-                                    pending_clip_ids_written
-                                        .insert(clip_render_info.clip.id.clone());
-
-                                    base_entry = Some(entry);
-                                    render_success_count += 1;
-                                }
-                                Err(e) => {
-                                    render_elapsed += render_started_at.elapsed();
-                                    // 主动取消（工程切换 / 新建工程）≠ 渲染失败。
-                                    // 之前把它算进 any_error，会让整轮降级为"播放原声"，
-                                    // 掩盖真正的失败原因；这里改为按"本轮作废"处理，
-                                    // 与时间线版本变更走同一条退出路径。
-                                    if e == BG_RENDER_CANCELLED_ERR {
-                                        log::warn!(
-                                        "play_original: render cancelled at clip_id={} (project switch)",
-                                        clip_render_info.clip.id
-                                    );
-                                        cancelled = true;
-                                        break;
-                                    }
-                                    log::error!(
-                                        "play_original: clip render failed: clip_id={} err={}",
-                                        clip_render_info.clip.id,
-                                        e
-                                    );
-                                    any_error = true;
-                                    render_failed_count += 1;
-                                    if let Ok(mut state_mgr) =
-                                        crate::clip_rendering_state::global_clip_rendering_state()
-                                            .lock()
-                                    {
-                                        state_mgr.set_state(
-                                            &clip_render_info.clip.id,
-                                            crate::clip_rendering_state::ClipRenderingState::Failed,
-                                            0.0,
-                                            Some(e.clone()),
-                                        );
-                                    }
-                                }
-                            }
-                        }
-
-                        if let Some(base_entry) = base_entry.as_ref() {
-                            let tension_started_at = std::time::Instant::now();
-                            match ensure_hifigan_tension_cache(
-                                &tl_for_render,
-                                &clip_render_info.clip,
-                                clip_render_info.sr,
-                                clip_render_info.cache_key.param_hash,
-                                base_entry.pcm_stereo.as_slice(),
-                            ) {
-                                Ok((_, _tension_generated)) => {
-                                    tension_elapsed += tension_started_at.elapsed();
-                                    if let Ok(mut state_mgr) =
-                                        crate::clip_rendering_state::global_clip_rendering_state()
-                                            .lock()
-                                    {
-                                        state_mgr.set_state(
-                                            &clip_render_info.clip.id,
-                                            crate::clip_rendering_state::ClipRenderingState::Ready,
-                                            1.0,
-                                            None,
-                                        );
-                                    }
-                                }
-                                Err(e) => {
-                                    tension_elapsed += tension_started_at.elapsed();
-                                    log::error!(
-                                        "play_original: tension render failed: clip_id={} err={}",
-                                        clip_render_info.clip.id,
-                                        e
-                                    );
-                                    any_error = true;
-                                    if let Ok(mut state_mgr) =
-                                        crate::clip_rendering_state::global_clip_rendering_state()
-                                            .lock()
-                                    {
-                                        state_mgr.set_state(
-                                            &clip_render_info.clip.id,
-                                            crate::clip_rendering_state::ClipRenderingState::Failed,
-                                            0.0,
-                                            Some(e.clone()),
-                                        );
-                                    }
-                                }
-                            }
-                        }
-
-                        rendered_count += 1;
-
-                        // 本 clip 处理完毕 → 推送刷新引擎快照（与后台渲染同一套
-                        // 逻辑，见 `AudioEngine::refresh_rendered_snapshot`）。
-                        engine.refresh_rendered_snapshot();
-                    }
-
-                    if cancelled {
-                        crate::nsf_hifigan_onnx::set_chunk_progress_callback(None);
-                        if cache_log {
-                            log::warn!(
-                            "[play_original][cache] CANCELLED total={} hit={} miss={} rendered_ok={} rendered_fail={} cache_probe_ms={:.2} render_ms={:.2} tension_ms={:.2} total_ms={:.2}",
-                            clips_to_render.len(),
-                            cache_hit_count,
-                            cache_miss_count,
-                            render_success_count,
-                            render_failed_count,
-                            cache_probe_elapsed.as_secs_f64() * 1000.0,
-                            render_elapsed.as_secs_f64() * 1000.0,
-                            tension_elapsed.as_secs_f64() * 1000.0,
-                            play_started_at.elapsed().as_secs_f64() * 1000.0
-                        );
-                        }
-                        for clip_id in pending_clip_ids_written {
-                            crate::synth_clip_cache::remove_pending_rendered_key(&clip_id);
-                        }
-                        if rendering_state_active {
-                            let _ = app.emit(
-                                "playback_rendering_state",
-                                PlaybackRenderingStateEvent {
-                                    active: false,
-                                    progress: Some(1.0),
-                                    target: Some("original".to_string()),
-                                },
-                            );
-                        }
-                        return;
-                    }
-
-                    // 所有 clip 渲染完成（或已尝试），开始播放
-                    // 若有渲染失败，snapshot 中对应 clip 会有 needs_synthesis=true、rendered_pcm=None，
-                    // 音频回调会陷入 has_pending_clip=true 的永久静音等待。
-                    // 解决方案：渲染失败时降级为播放原始音频（等同于无 pitch edit 路径）。
-                    if any_error {
-                        if cache_log {
-                            log::error!(
-                            "[play_original][cache] ERROR total={} hit={} miss={} rendered_ok={} rendered_fail={} cache_probe_ms={:.2} render_ms={:.2} tension_ms={:.2} total_ms={:.2}",
-                            clips_to_render.len(),
-                            cache_hit_count,
-                            cache_miss_count,
-                            render_success_count,
-                            render_failed_count,
-                            cache_probe_elapsed.as_secs_f64() * 1000.0,
-                            render_elapsed.as_secs_f64() * 1000.0,
-                            tension_elapsed.as_secs_f64() * 1000.0,
-                            play_started_at.elapsed().as_secs_f64() * 1000.0
-                        );
-                        }
-                        log::error!("[play_original] rendering had errors, falling back to original audio playback");
-                        // 推送失败通知
-                        if rendering_state_active {
-                            let _ = app.emit(
-                                "playback_rendering_state",
-                                PlaybackRenderingStateEvent {
-                                    active: false,
-                                    progress: Some(1.0),
-                                    target: Some("original".to_string()),
-                                },
-                            );
-                        }
-                        // 降级：直接播放——audio engine 会使用源 PCM，不经过 rendered_pcm 路径
-                        // 注意：此时 engine 中没有该 clip 的 rendered_pcm，
-                        //   build_snapshot 在找不到缓存时会设 needs_synthesis=true, rendered_pcm=None。
-                        //   这会导致 has_pending_clip=true → 静音。
-                        //   因此改用 update_timeline 但不传 pitch edit 标记的 timeline（无此机制），
-                        //   最简单的降级是：直接 seek + play，让 audio engine 用原始 PCM 播放
-                        //   （此时 pitch_edit_user_modified 仍为 true，engine 仍会尝试查找 rendered_pcm
-                        //    并找不到，因此改为 stop 旧播放状态并提示用户）。
-                        engine.stop();
-                        return;
-                    }
-
-                    if timeline_version_from_app(&app) != render_timeline_version {
-                        if cache_log {
-                            log::warn!(
-                            "[play_original][cache] ABORTED_BY_TIMELINE_CHANGE total={} hit={} miss={} rendered_ok={} rendered_fail={} cache_probe_ms={:.2} render_ms={:.2} tension_ms={:.2} total_ms={:.2}",
-                            clips_to_render.len(),
-                            cache_hit_count,
-                            cache_miss_count,
-                            render_success_count,
-                            render_failed_count,
-                            cache_probe_elapsed.as_secs_f64() * 1000.0,
-                            render_elapsed.as_secs_f64() * 1000.0,
-                            tension_elapsed.as_secs_f64() * 1000.0,
-                            play_started_at.elapsed().as_secs_f64() * 1000.0
-                        );
-                        }
-                        for clip_id in pending_clip_ids_written {
-                            crate::synth_clip_cache::remove_pending_rendered_key(&clip_id);
-                        }
-                        if rendering_state_active {
-                            let _ = app.emit(
-                                "playback_rendering_state",
-                                PlaybackRenderingStateEvent {
-                                    active: false,
-                                    progress: Some(1.0),
-                                    target: Some("original".to_string()),
-                                },
-                            );
-                        }
-                        return;
-                    }
-
-                    let update_started_at = std::time::Instant::now();
-                    crate::nsf_hifigan_onnx::set_chunk_progress_callback(None);
-                    // 渲染完成：应用时间线；仅当用户未在渲染期间按过停止时才进入
-                    // 播放。旧实现无条件 seek + set_playing(true)，用户在渲染窗口
-                    // （后台预渲染负载下可达数秒）内按 Stop 后，播放仍会被"复活"，
-                    // 光标跳回播放起点 —— 反复播放/停止时跳变的根源之一。
-                    // 停止意图由 worker 内的 stopped_since_play 标志原子判定
-                    // （见 handle_complete_prerender_and_play），与停止命令的到达
-                    // 时序无关。播放起始位置已在命令层提前 seek，完成路径不再
-                    // 回跳，渲染窗口内的用户 seek 也得以保留。
-                    log::warn!(
-                    "[play_original] prerender complete start_sec={render_start_sec} — applying snapshot (resumes only if not stopped)"
-                );
-                    engine.complete_prerender_and_play(tl_for_render);
-                    let update_elapsed = update_started_at.elapsed();
-
-                    log::warn!(
-                    "[play_original][timing] total={} hit={} miss={} collect_ms={:.2} ready_filter_ms={:.2} sig_check_ms={:.2} cache_probe_ms={:.2} render_ms={:.2} tension_ms={:.2} update_timeline_ms={:.2} total_ms={:.2}",
-                    clips_to_render.len(),
-                    cache_hit_count,
-                    cache_miss_count,
-                    collect_elapsed.as_secs_f64() * 1000.0,
-                    ready_filter_elapsed.as_secs_f64() * 1000.0,
-                    timeline_sig_check_elapsed.as_secs_f64() * 1000.0,
-                    cache_probe_elapsed.as_secs_f64() * 1000.0,
-                    render_elapsed.as_secs_f64() * 1000.0,
-                    tension_elapsed.as_secs_f64() * 1000.0,
-                    update_elapsed.as_secs_f64() * 1000.0,
-                    play_started_at.elapsed().as_secs_f64() * 1000.0,
-                );
-
-                    if cache_log {
-                        log::warn!(
-                        "[play_original][cache] SUMMARY total={} hit={} miss={} rendered_ok={} rendered_fail={} cache_probe_ms={:.2} render_ms={:.2} tension_ms={:.2} update_timeline_ms={:.2} total_ms={:.2}",
-                        clips_to_render.len(),
-                        cache_hit_count,
-                        cache_miss_count,
-                        render_success_count,
-                        render_failed_count,
-                        cache_probe_elapsed.as_secs_f64() * 1000.0,
-                        render_elapsed.as_secs_f64() * 1000.0,
-                        tension_elapsed.as_secs_f64() * 1000.0,
-                        update_elapsed.as_secs_f64() * 1000.0,
-                        play_started_at.elapsed().as_secs_f64() * 1000.0
-                    );
-                    }
-
-                    // 推送渲染完成
-                    if rendering_state_active {
-                        let _ = app.emit(
-                            "playback_rendering_state",
-                            PlaybackRenderingStateEvent {
-                                active: false,
-                                progress: Some(1.0),
-                                target: Some("original".to_string()),
-                            },
-                        );
-                    }
-                }));
-                if outcome.is_err() {
-                    log::error!(
-                        "[play_original] render thread panicked; clearing progress callback and emitting rendering-done"
-                    );
-                    crate::nsf_hifigan_onnx::set_chunk_progress_callback(None);
-                    let _ = app.emit(
-                        "playback_rendering_state",
-                        PlaybackRenderingStateEvent {
-                            active: false,
-                            progress: Some(1.0),
-                            target: Some("original".to_string()),
-                        },
-                    );
-                }
-            });
-        }
-
-        serde_json::json!({"ok": true, "playing": "original", "start_sec": start_sec, "prerendering": true})
+        state.audio_engine.update_timeline(timeline);
+        state.audio_engine.set_playing(true, Some("original"));
+        serde_json::json!({"ok": true, "playing": "original", "start_sec": start_sec})
     })
 }
 
@@ -2452,6 +1806,26 @@ fn render_background_pass(
 /// `start_background_render` 内部会锁定 `state.timeline`，而本函数常被
 /// “已经持有时间线锁”的调用方使用（如 `set_timeline_tempo_map` 的音阶
 /// 变化分支）。std Mutex 不可重入，若在调用方线程上同步启动渲染，
+/// 播放命令的按需渲染：**无论后台预渲染开关如何**，确保一轮渲染正在运行
+/// （本次播放需要待渲染 Clip 的结果）。
+///
+/// 开关只决定"编辑是否自动触发渲染"；播放触发的渲染是传输层"原地等待 +
+/// 就绪自动播放"契约的必要条件。已在运行的 pass 无需动作 —— 其待渲染
+/// 列表本就覆盖当前所有待渲染 Clip；其后的缓存失效会经
+/// `handle_update_timeline` 触发合流重启。
+pub(crate) fn ensure_render_pass_running(app: &tauri::AppHandle) {
+    use std::sync::atomic::Ordering;
+    if BG_RENDER_ACTIVE.load(Ordering::Relaxed) {
+        return;
+    }
+    // A fresh render request supersedes any stale restart marker.
+    BG_RENDER_RESTART_NEEDED.store(false, Ordering::Release);
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let _ = start_background_render(app);
+    });
+}
+
 /// 调用方会自我死锁 —— 命令线程永久阻塞，整个应用进入“未响应”。
 /// 因此这里把真正的启动工作转移到新线程：本函数只做原子的状态检查与
 /// 标记（无锁），渲染启动线程会等待时间线锁自然释放后再开始收集。
@@ -2516,9 +1890,6 @@ pub(super) fn cancel_background_render(app: Option<&tauri::AppHandle>) -> serde_
         // 因此这里必须主动复位，而不是简单地不置位。
         BG_RENDER_CANCEL.store(false, Ordering::Release);
     }
-    // 前台预渲染不再读取全局标志，需要显式通知它们退出，
-    // 否则切工程时正在跑的 `play_original` 轮次无法及时中断。
-    crate::commands::render_cancel::cancel_all_foreground();
     // 清除重启标记，避免取消后被错误地按旧渲染状态自动重启。
     BG_RENDER_RESTART_NEEDED.store(false, Ordering::Release);
     BG_RENDER_PITCH_PENDING.store(false, Ordering::Release);
