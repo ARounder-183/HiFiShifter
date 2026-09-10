@@ -326,6 +326,14 @@ pub struct UiSettings {
     #[serde(default)]
     pub silence_detect_options: SilenceDetectSettings,
 
+    // ── 主总线（Master bus）── 见 `audio/master_bus.rs` 与 P0-2
+    /// 主总线软削波开关。关闭后退回"裸求和 + 末端硬截断"的旧行为。
+    #[serde(default = "default_true")]
+    pub master_soft_clip_enabled: bool,
+    /// 主总线软削波膝值：|x| ≤ knee 线性通过。会被钳制到合法范围。
+    #[serde(default = "default_master_soft_clip_knee")]
+    pub master_soft_clip_knee: f32,
+
     #[serde(default)]
     pub quick_search_auto_normalize: bool,
     #[serde(default)]
@@ -793,6 +801,10 @@ impl Default for ExportSettings {
 fn default_true() -> bool {
     true
 }
+/// 主总线软削波膝值的默认值，与 `audio/master_bus.rs` 的常量保持单一来源。
+fn default_master_soft_clip_knee() -> f32 {
+    crate::master_bus::DEFAULT_SOFT_CLIP_KNEE
+}
 fn default_pitch_snap_unit() -> String {
     "semitone".to_string()
 }
@@ -929,6 +941,8 @@ impl Default for UiSettings {
             metronome_accent: true,
             metronome_sound: default_metronome_sound(),
             silence_detect_options: SilenceDetectSettings::default(),
+            master_soft_clip_enabled: true,
+            master_soft_clip_knee: default_master_soft_clip_knee(),
             quick_search_auto_normalize: false,
             visible_reference_root_track_ids: Vec::new(),
             default_stretch_algorithm: UserStretchAlgorithm::default(),

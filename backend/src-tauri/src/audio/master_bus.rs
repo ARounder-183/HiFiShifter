@@ -58,6 +58,9 @@ static MASTER_SOFT_CLIP_KNEE_BITS: AtomicU32 =
 
 /// 环境变量读取一次的初始化标记（避免每次查询都做字符串解析）。
 static ENV_APPLIED: AtomicBool = AtomicBool::new(false);
+/// 环境变量是否显式指定了对应旋钮（显式指定视为硬覆盖，优先级高于用户设置）。
+static ENV_SPECIFIED_ENABLED: AtomicBool = AtomicBool::new(false);
+static ENV_SPECIFIED_KNEE: AtomicBool = AtomicBool::new(false);
 
 /// 应用一次环境变量覆盖（幂等）。
 ///
@@ -71,16 +74,34 @@ fn apply_env_once() {
         let v = v.trim();
         if v == "0" || v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("off") {
             MASTER_SOFT_CLIP_ENABLED.store(false, Ordering::Relaxed);
+            ENV_SPECIFIED_ENABLED.store(true, Ordering::Relaxed);
         } else if v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("on") {
             MASTER_SOFT_CLIP_ENABLED.store(true, Ordering::Relaxed);
+            ENV_SPECIFIED_ENABLED.store(true, Ordering::Relaxed);
         }
     }
     if let Ok(v) = std::env::var("HIFISHIFTER_MASTER_SOFT_CLIP_KNEE") {
         if let Ok(k) = v.trim().parse::<f32>() {
             if k.is_finite() {
                 set_soft_clip_knee(k);
+                ENV_SPECIFIED_KNEE.store(true, Ordering::Relaxed);
             }
         }
+    }
+}
+
+/// 应用持久化的用户设置。
+///
+/// 与 `HIFISHIFTER_MASTER_SOFT_CLIP{,_KNEE}` 的关系：环境变量是**硬覆盖**
+/// （面向排障/支持场景），显式设置过的旋钮不会被用户设置覆盖回去。
+/// 未设置环境变量时，用户设置即为生效值。
+pub(crate) fn apply_user_settings(enabled: bool, knee: f32) {
+    apply_env_once();
+    if !ENV_SPECIFIED_ENABLED.load(Ordering::Relaxed) {
+        set_soft_clip_enabled(enabled);
+    }
+    if !ENV_SPECIFIED_KNEE.load(Ordering::Relaxed) {
+        set_soft_clip_knee(knee);
     }
 }
 
@@ -312,6 +333,33 @@ mod tests {
         assert_eq!(set_soft_clip_knee(-1.0), MIN_SOFT_CLIP_KNEE);
         assert_eq!(set_soft_clip_knee(f32::NAN), DEFAULT_SOFT_CLIP_KNEE);
         set_soft_clip_knee(original);
+    }
+
+    #[test]
+    fn apply_user_settings_updates_runtime_values_when_env_absent() {
+        // 环境变量是硬覆盖：未设置时用户设置应生效。本模块的状态是进程级的，
+        // 因此测试结束必须还原，避免影响其它用例。
+        let original_enabled = soft_clip_enabled();
+        let original_knee = soft_clip_knee();
+
+        apply_user_settings(false, 0.5);
+        if std::env::var("HIFISHIFTER_MASTER_SOFT_CLIP").is_err() {
+            assert!(!soft_clip_enabled(), "user setting should disable soft clip");
+        }
+        if std::env::var("HIFISHIFTER_MASTER_SOFT_CLIP_KNEE").is_err() {
+            assert!(
+                (soft_clip_knee() - 0.5).abs() < 1e-6,
+                "user setting should set the knee, got {}",
+                soft_clip_knee()
+            );
+        }
+
+        // 越界的持久化值也必须被钳制（磁盘上的设置可能来自旧版本或被手改）。
+        apply_user_settings(true, 99.0);
+        assert!(soft_clip_knee() <= MAX_SOFT_CLIP_KNEE);
+
+        set_soft_clip_enabled(original_enabled);
+        set_soft_clip_knee(original_knee);
     }
 
     /// 计算 `y` 在整数次谐波上（相对 F0）的幅度，第 h 次谐波为 `amps[h-1]`。

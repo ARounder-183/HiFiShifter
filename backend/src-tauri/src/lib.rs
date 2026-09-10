@@ -352,6 +352,12 @@ pub fn run() {
                 let ui = crate::config::load_ui_settings(cfg_dir);
                 crate::config::set_loop_new_clips_default(ui.loop_new_clips);
                 crate::config::set_sync_edits_across_takes(ui.sync_edits_across_takes);
+                // 主总线软削波同样在启动即生效：导出/播放可能在
+                // get_ui_settings 之前发生（见 P0-2）。
+                crate::master_bus::apply_user_settings(
+                    ui.master_soft_clip_enabled,
+                    ui.master_soft_clip_knee,
+                );
             }
 
             // 尝试恢复上次运行时保存的窗口状态（非强制性）

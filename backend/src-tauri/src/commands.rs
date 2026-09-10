@@ -1537,21 +1537,6 @@ pub fn get_audio_cache_stats() -> serde_json::Value {
     diagnostics::get_audio_cache_stats()
 }
 
-/// 读取主总线软削波设置。
-#[tauri::command(rename_all = "camelCase")]
-pub fn get_master_bus_settings() -> serde_json::Value {
-    diagnostics::get_master_bus_settings()
-}
-
-/// 设置主总线软削波（开关 / 膝值）。返回实际生效值。
-#[tauri::command(rename_all = "camelCase")]
-pub fn set_master_bus_settings(
-    soft_clip_enabled: Option<bool>,
-    soft_clip_knee: Option<f32>,
-) -> serde_json::Value {
-    diagnostics::set_master_bus_settings(soft_clip_enabled, soft_clip_knee)
-}
-
 // ===================== pitch_progress =====================
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1866,4 +1851,20 @@ pub fn save_ui_settings(
     settings: serde_json::Value,
 ) -> serde_json::Value {
     ui_settings::save_ui_settings(state, settings)
+}
+
+/// 读取主总线软削波设置（运行时生效值）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_master_bus_settings() -> serde_json::Value {
+    ui_settings::get_master_bus_settings()
+}
+
+/// 设置主总线软削波：同时落盘与生效，返回实际生效值。
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_master_bus_settings(
+    state: State<'_, AppState>,
+    soft_clip_enabled: Option<bool>,
+    soft_clip_knee: Option<f32>,
+) -> serde_json::Value {
+    ui_settings::set_master_bus_settings(state, soft_clip_enabled, soft_clip_knee)
 }

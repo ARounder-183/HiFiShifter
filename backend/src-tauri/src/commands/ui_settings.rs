@@ -64,9 +64,49 @@ pub(super) fn get_ui_settings(state: State<'_, AppState>) -> UiSettings {
     // Sync "loop for new clips" default (used by importers / legacy project migration)
     crate::config::set_loop_new_clips_default(settings.loop_new_clips);
     crate::config::set_sync_edits_across_takes(settings.sync_edits_across_takes);
+    // 主总线软削波（P0-2）：让持久化设置成为进程生效值。
+    crate::master_bus::apply_user_settings(
+        settings.master_soft_clip_enabled,
+        settings.master_soft_clip_knee,
+    );
     // 刷新进程内缓存，供拖拽热路径（ripple/split 选项）无盘读取
     state.store_ui_settings_cache(&settings);
     settings
+}
+
+/// 读取主总线软削波设置（运行时生效值）。
+pub(super) fn get_master_bus_settings() -> serde_json::Value {
+    serde_json::json!({
+        "ok": true,
+        "softClipEnabled": crate::master_bus::soft_clip_enabled(),
+        "softClipKnee": crate::master_bus::soft_clip_knee(),
+    })
+}
+
+/// 设置主总线软削波：**同时**写入持久化设置与运行时开关。
+///
+/// 之所以两者都做：只改运行时会随重启丢失（用户会认为设置没保存）；只改
+/// 持久化则本次会话不生效。返回实际生效值（膝值经钳制）。
+pub(super) fn set_master_bus_settings(
+    state: State<'_, AppState>,
+    soft_clip_enabled: Option<bool>,
+    soft_clip_knee: Option<f32>,
+) -> serde_json::Value {
+    let mut patch = serde_json::Map::new();
+    if let Some(enabled) = soft_clip_enabled {
+        patch.insert("masterSoftClipEnabled".to_string(), serde_json::json!(enabled));
+    }
+    if let Some(knee) = soft_clip_knee {
+        // 先用同一套钳制规则归一化，避免把越界值写进磁盘。
+        let clamped = crate::master_bus::set_soft_clip_knee(knee);
+        patch.insert("masterSoftClipKnee".to_string(), serde_json::json!(clamped));
+    }
+    if !patch.is_empty() {
+        // 复用 save_ui_settings 的"部分 JSON 合并 + 落盘 + 应用"逻辑，
+        // 保证与前端设置页保存走同一条路径、不会互相覆盖字段。
+        save_ui_settings(state, serde_json::Value::Object(patch));
+    }
+    get_master_bus_settings()
 }
 
 pub(super) fn save_ui_settings(
@@ -134,6 +174,11 @@ pub(super) fn save_ui_settings(
     );
     crate::config::set_loop_new_clips_default(settings.loop_new_clips);
     crate::config::set_sync_edits_across_takes(settings.sync_edits_across_takes);
+    // 主总线软削波（P0-2）：保存即生效，无需重启。
+    crate::master_bus::apply_user_settings(
+        settings.master_soft_clip_enabled,
+        settings.master_soft_clip_knee,
+    );
 
     // Both fields matter: changing only the DirectML device ID must also
     // rebuild the sessions, otherwise the new device is silently ignored.
