@@ -35,9 +35,11 @@ In the menu `Options → Inference Device`, you can select `Auto`, `CPU`, or `GP
 - **macOS**: WebKit is provided by the system, no extra installation is required.
 - **Linux**: Requires WebKitGTK. Most major distributions (e.g., Ubuntu, Fedora, Arch Linux) include it by default. If you see a missing component error, use your package manager to install `webkit2gtk` (e.g., `sudo apt install webkit2gtk`). Refer to your distribution's documentation for specifics.
 
+On Windows, HiFiShifter disables the browser shortcuts that WebView2 normally intercepts (such as `Ctrl + F`, `Ctrl + P`, `F5`, and `Ctrl` with `+` / `-` for page zoom), so those key combinations reach HiFiShifter normally and never interrupt your editing.
+
 ## 2. Menu
 
-The `File` menu allows you to open and save HiFiShifter project files, as well as import media files (audio or video), import Reaper projects (`.rpp`), import VocalShifter projects (`.vshp` or `.vsp`), import MIDI files, and export audio.
+The `File` menu allows you to open and save HiFiShifter project files, as well as import media files (audio or video), import Reaper projects (`.rpp`), import VocalShifter projects (`.vshp` or `.vsp`), import MIDI files, and export audio. Audio export supports three formats — `wav`, `mp3`, and `flac`. See the [Export Audio](#6-export-audio) section for details.
 
 HiFiShifter project files have the extensions `.hshp` or `.hsp`. Additionally, `Save As` supports saving the project as a plain text `json` file, or packaging the current project together with all used media files into an archive zip `.zip`.
 
@@ -62,6 +64,12 @@ The automatic backup feature allows you to configure backups for your project fi
 
 HiFiShifter's structured copy/paste is stored in the system clipboard, so it supports cross-process copy and paste.
 
+Copy, cut, and paste automatically act on whatever you are currently working with — there is no mode to switch manually:
+
+- When the timeline has focus and clips are selected, `Ctrl + C` / `Ctrl + X` / `Ctrl + V` operate on clips.
+- When the Parameter Editor has focus and a parameter curve segment is selected, the same three shortcuts operate on that curve. In that context `Ctrl + X` is `Cut Parameter Frames`: it copies the selected curve to the clipboard and clears it so you can paste it elsewhere. `BackSpace` (initialize) simply resets the selection to its default state and does not touch the clipboard.
+- Pasting also inspects the actual clipboard contents, so even if you switch tracks in between, parameter curves are still pasted onto the correct track.
+
 - Select clips in the timeline and press `Ctrl + C` (or right-click `Copy`), then press `Ctrl + V` (or right-click empty track space and select `Paste`) in another process's project to paste the clips along with their parameter curves.
 - When you copy clips in HiFiShifter, the data is also serialized to the Reaper clipboard, so you can press `Ctrl + V` in Reaper to paste it. Clips without a usable source file are skipped.
 - `Edit → Paste as New Tracks` (`Ctrl + Alt + V`): force-creates new root-track groups using the source hierarchy.
@@ -70,6 +78,8 @@ HiFiShifter's structured copy/paste is stored in the system clipboard, so it sup
     - Item data: Imports as audio clips in HiFiShifter, preserving tuning data from Reaper (overall tuning and pitch envelopes alike).
     - Track data: Imports tracks along with their items as tracks and audio clips in HiFiShifter, preserving track groups.
     - MIDI note data: After exporting note data from other DAWs (Reaper, FL Studio, etc.) to the clipboard as MIDI note data, use the `Select` tool in the Parameter Editor to select a pitch curve segment in HiFiShifter, then you can import the clipboard MIDI note data into that segment. For a detailed introduction to MIDI import, see the [Pitch Reference Clip](#6-pitch-reference-clip) section.
+
+- **Reaper Envelopes**: Whether you import a Reaper project (`.rpp`), paste Reaper clipboard data, or copy content from HiFiShifter back into Reaper, Reaper take envelopes and track envelopes (volume, pan, mute) are carried along and converted to or from the matching HiFiShifter parameter curves. Note that pitch envelopes are only exported when the root track of the corresponding track group has Compose (`C`) enabled, which keeps the exported data consistent with what you actually hear.
 
 - **Paste VocalShifter Clipboard Data**: After you copy parameter curves, audio clips, or tracks in VocalShifter or VocalShifter LE, this function quickly imports the VocalShifter clipboard data into HiFiShifter.
     - Parameter curve data: After selecting a parameter curve segment with the `Select` tool in the Parameter Editor, you can import VocalShifter clipboard parameter curve data into that segment.
@@ -85,8 +95,8 @@ The `View` menu contains options related to the interface display:
 - `Tempo Map`: Show or hide the Tempo Map row (enabled by default; the row is not shown when the project has no Tempo Map data).
 - `Show all takes (when room)`: Toggle the expanded display of multi-take clips.
 - `Time Display`: Lets you choose the primary/secondary time units of the timeline ruler and open `Timeline Display Settings...`.
-- `Theme: Dark / Light`: Switch the current theme.
-- `Appearance Settings...`: Open the appearance settings window.
+- `Theme: Auto / Dark / Light`: Switch the current theme. With `Auto`, HiFiShifter follows your operating system's light/dark appearance and switches automatically (this is the default).
+- `Appearance Settings...`: Open the appearance settings window. It now closes together with the main window.
 
 The `Options` menu allows you to modify various settings of HiFiShifter:
 
@@ -114,17 +124,21 @@ The track view is one of HiFiShifter's core features, allowing you to crop, spli
 
 For view navigation, drag the middle mouse button (hold the scroll wheel) to pan. Horizontal/vertical zoom or scrolling can be done by holding modifiers like `Ctrl`, `Alt`, `Shift` while scrolling the mouse wheel. These modifiers can be adjusted in the shortcut settings.
 
+If you move the pointer over a scrollbar at the edge of the view and then scroll the wheel, only that scrollbar's axis scrolls (vertical bar = up/down, horizontal bar = left/right) instead of triggering zoom. Hold the zoom modifier (default `Alt`) at the same time and the wheel zooms that axis instead: the vertical bar zooms track height, the horizontal bar zooms the timeline, both anchored at the pointer.
+
 Common shortcuts:
 
 > **macOS users**: `Ctrl` below corresponds to `Command (⌘)` and `Alt` to `Option (⌥)`.
 
 - `Space`: Play / Pause (does not return to start)
 - `Enter`: Play / Stop (returns to start)
+- `M`: Toggle the metronome
 - `S`: Split
 - `G`: Group
 - `U`: Ungroup
 - `T`: Cycle to the next Take (`Shift + T`: previous)
 - `Ctrl + C`: Copy (also writes REAPERMedia data, so it can be pasted directly in REAPER)
+- `Ctrl + X`: Cut
 - `Ctrl + V`: Paste
 - `Ctrl + Alt + V`: Paste as New Tracks
 - `Ctrl + Z`: Undo
@@ -132,10 +146,13 @@ Common shortcuts:
 - `Ctrl + A`: Select All
 
 - `Delete`: Delete audio clip
-- `-` / `=`: Shift parameter curve down/up for selected clips
+- `-` / `=`: Shift parameter curve down/up for selected clips (hold `Shift` for a large step, `Ctrl` for a fine step)
 - Modifier `Alt`: Hold while dragging clip start/end to stretch the clip; drag the middle of the clip to slip-edit (internal content offset)
 - Modifier `Shift`: Hold to temporarily toggle snap
 - Modifier `Ctrl`: Hold while dragging a clip to copy it
+- Modifier `Alt + Shift`: Hold and drag vertically on a clip to shift the pitch of the whole clip; the pitch curve in the Parameter Editor follows in real time so you can see the result while dragging
+
+Double-clicking a clip in the timeline selects all parameter frames within that clip's range and moves the copy/cut focus to the Parameter Editor, which makes it quick to process an entire clip at once.
 
 The small circle at the top-left of a clip is a volume adjustment knob, the `M` button can mute that clip individually, and the `F` button can open that clip's formant editing menu. The left and right edges of a clip allow adjusting fade-in/fade-out envelope lengths.
 
@@ -162,6 +179,7 @@ Track view toolbar buttons:
 - `Time Sig.`: Sets the project time signature.
 - `Grid`: Set the grid spacing for the project.
 - `Base Scale`: Adjust the global base scale setting for the project, supports custom scales. The scale function is mainly used with `Pitch Snap` and other pitch-related adjustments.
+- `Metronome`: Provides a click reference during playback. Left-click to toggle it on/off; right-click opens volume, subdivision, timbre and other settings. See the [Metronome](#metronome) section for details.
 - `Stop` button and `Play / Pause` button: Control playback.
 - `Record`: Allows recording on the currently selected track. Right-click to set the recording source and device, or open the detailed recording settings.
 - `File Browser`: Open the HiFiShifter file browser window.
@@ -268,9 +286,63 @@ HiFiShifter supports a project-level Tempo Map that lets you define different BP
 - Editing points: double-click a point label on the Tempo Map row to modify the BPM, time signature and scale. The label turns into an inline text box where you can directly type text such as `120 4/4 - C / Am`. Right-clicking a label opens the `Tempo Map Point` edit window directly.
 - Follow the previous time signature / scale: each point's time signature can be set to `Follow Previous Time Signature` and its scale to `Follow Previous Scale`.
 - Initial point as the project record: the project's global BPM, time signature (numerator and denominator) and scale are recorded at the initial point at position 0, displayed on the Tempo Map row as text such as `120 4/4 - C / Am`.
-- Grid and ruler: when a Tempo Map exists, ruler ticks, bar/beat labels and the background grid re-align at every point and are computed per segment according to each segment's tempo and time signature.
+- Grid and ruler: when a Tempo Map exists, ruler ticks, bar/beat labels and the background grid re-align at every point and are computed per segment according to each segment's tempo and time signature. In addition, the time value is always shown at every Tempo Map change point, so you can read off directly where each change occurs.
 - Scale integration: scale changes in the Tempo Map affect pitch snapping (scale mode), scale highlighting, the `Project Scale` option of degree transposition / quantization / mean quantization, and the degree-difference rendering of child tracks.
 - Import: when importing MIDI as a Pitch Reference Clip, you can enable `Import as Tempo Map` in the import dialog and separately choose whether to import tempo, time signature and scale; importing a REAPER project (.rpp) automatically imports its project-level tempo and time-signature changes.
+
+### Clip Rate and Gain Badges
+
+Every clip shows two badges on the right side of its title bar: `Rate` (e.g. `1.50x`) and `Gain` (e.g. `+3.0 dB`). Because of them, the two most common adjustments never require opening a dialog.
+
+- Double-click a badge to type a value in place. Press `Enter` to confirm or `Esc` to cancel; clicking anywhere outside the clip also saves the value.
+- While a badge is in edit mode, scrolling the mouse wheel steps the value: rate changes by 0.1 and gain by 0.5 dB. Hold the `Fine Adjust` modifier (default `Ctrl`, `Command` on macOS) for finer steps — 0.01 for rate and 0.1 dB for gain.
+- The volume knob at the top-left of the clip still works as before: drag it up or down, and double-click it to return to 0 dB.
+- The badges hide themselves automatically when the clip is too narrow; increase the track height or zoom in horizontally and they reappear.
+
+Right-clicking the rate badge (or choosing `Edit Playback Rate…` in the clip context menu) opens a lightweight popover for cases where you need BPM conversion or batch editing:
+
+- `Stretch Factor`, `Old BPM`, and `New BPM` are linked and always satisfy "factor = new BPM ÷ old BPM". For example, if the material is 120 BPM and you want 140 BPM, just set `New BPM` to 140 and the factor becomes about 1.167 automatically; editing the factor or the old BPM recalculates the others the same way.
+- The `Duration` field lets you type a target length directly, and the factor is derived from it. Input is very permissive — you do not have to match the displayed format. For example `1.2` (seconds), `0:01.5` (hours:minutes:seconds), `1.2.500` (bar.beat.subdivision), and `1.2/16` (with grid) are all accepted, and a comma can be used as the decimal separator.
+- `Auto-adjust clip length to the new rate` (on by default): the clip length changes together with the rate — the familiar "change speed and pitch together" behavior. Turning it off keeps the current length and only changes playback rate and pitch.
+- When several clips are selected, a note at the bottom of the popover tells you how many clips will be affected, and the change applies to all of them at once.
+
+### Silence Detection
+
+`Silence Detection` automatically finds the silent parts of your clips and removes them in bulk, saving you from splitting and deleting them one by one. Select one or more clips, right-click, and choose `Silence Detection…`.
+
+The dialog previews the result as soon as it opens: detected silent ranges are highlighted in red on the clips, and the footer reports how many ranges were found and their total length. Changing a parameter re-runs the analysis immediately. Nothing is actually modified until you press `Apply`, and the whole operation can be undone.
+
+- `Method`: `RMS (energy)` (default) judges by average loudness and suits most material; `Peak` looks only at the instantaneous maximum level, which helps with gaps that contain occasional clicks.
+- `Threshold (dBFS)`: content below this level counts as silence; the default is `-50`. Higher values mark more material as silent.
+- `Adaptive threshold (noise floor + 6 dB)`: when enabled, HiFiShifter estimates the noise floor for you instead of requiring manual tuning.
+- `Min Silence (ms)`: quiet stretches shorter than this are left alone; the default is `120`. Lower it to cut more finely.
+- `Min Sound (ms, 0 = off)`: sounds shorter than this that are surrounded by silence are removed along with it. Off by default.
+- `Padding (ms)`: keeps a little extra inside each cut so you do not clip the start or end of a word; the default is `10`.
+- `Cut Fade (ms)`: adds a tiny fade at both sides of each cut to avoid clicks; the default is `5`.
+- `Action`:
+    - `Cut and close gaps` (default): removes the silence and shifts everything after it forward, making the timeline more compact.
+    - `Cut only (keep gaps)`: removes the silence but leaves the original time gap, useful if you want to rearrange things manually afterwards.
+    - `Split only`: splits at the silence boundaries without deleting anything, for when you want to handle each piece yourself.
+- `Delete fully silent clips`: removes clips that are silent from start to finish (on by default).
+- `Detect all takes (union)`: merges the silent ranges of all takes of the same clip before processing, so silence does not reappear after switching takes.
+
+Double-clicking a parameter row in the dialog resets that parameter to its default value.
+
+### Close Gaps
+
+Right-click an empty area of a track and choose `Close Gaps` to move every clip after the clicked position on that track forward, removing the empty space between them so they sit end to end. Content before the clicked position stays where it is. If the track has no clips after the clicked position, the menu item is disabled.
+
+### Metronome
+
+The metronome gives you a steady click reference while playing, which helps when checking rhythm, singing along, or verifying tempo changes.
+
+- Toggling: click the metronome button next to the BPM readout in the main toolbar. The default shortcut is `M`.
+- Right-click the metronome button to open its settings:
+    - `Volume`: metronome level. Besides dragging, it also responds to the mouse wheel; hold the `Fine Adjust` modifier (default `Ctrl`, `Command` on macOS) for finer steps.
+    - `Subdivision`: controls click density. `Follow Grid` (default) clicks at the current grid subdivision, so a `1/8` grid gives one click per half beat, and dotted and triplet grids are followed too; `Beat Only` clicks once per beat according to the BPM; `Bar Start Only` clicks only on the first beat of each bar, which is the sparsest option.
+    - `Sound`: choose between `Click` (default), `Woodblock`, and `Beep`.
+    - `Accent Downbeats`: when enabled, the first beat of each bar is louder so the meter is easy to hear.
+- When the project has a Tempo Map, the metronome follows every BPM change point automatically, so the clicks never drift out of sync with the music.
 
 ## 4. File Browser
 
@@ -325,17 +397,29 @@ The Select tool allows you to select a segment of a parameter curve, drag it, or
 Common shortcuts:
 
 - `Ctrl + C`: Copy
+- `Ctrl + X`: Cut Parameter Frames (copies the selected curve to the clipboard and clears it, so you can paste it elsewhere)
 - `Ctrl + V`: Paste
 - `Ctrl + Z`: Undo
 - `Ctrl + Y`: Redo (`⌘ + ⇧ + Z` on macOS)
 - `Ctrl + A`: Select All
 
-- `BackSpace`: Initialize
-- `[` / `]`: Shift parameter curve down/up within the selection
+- `BackSpace`: Initialize (resets the selection to its default state; does not touch the clipboard)
+- `-` / `=`: Shift the whole parameter curve of the current clip down/up
+- `[` / `]`: Shift the parameter curve down/up within the selection
+
+Of these two shifting shortcuts, `-` / `=` move the entire curve across the clip's range, while `[` / `]` move only the currently selected segment. Both support three step sizes, so you can go from coarse to fine in one pass:
+
+| Step                 | Clip Range                | Selection Range           | Pitch Step             |
+| -------------------- | ------------------------- | ------------------------- | ---------------------- |
+| Default              | `-` / `=`                 | `[` / `]`                 | ±1 semitone            |
+| Large (with `Shift`) | `Shift + -` / `Shift + =` | `Shift + [` / `Shift + ]` | ±12 semitones (octave) |
+| Fine (with `Ctrl`)   | `Ctrl + -` / `Ctrl + =`   | `Ctrl + [` / `Ctrl + ]`   | ±1 cent                |
+
+Holding a shortcut down performs one step immediately, then repeats continuously after a short pause, which is handy for nudging a curve into place. Parameters other than pitch use equivalent three-level steps (roughly 2.5% of range by default, 12.5% large, 0.25% fine). All of these can be remapped in the `Parameter Editor` group of `Options -> Keyboard Shortcuts...` (`Ctrl` corresponds to `Command` on macOS).
 
 Left-drag on a selected curve to move it vertically, horizontally, or freely, depending on the `Drag Direction` setting. While left-dragging, press the right button to quickly toggle drag direction.
 
-Right-drag on a selected curve to adjust its amplitude: drag up to increase amplitude, down to decrease. For the pitch parameter, amplitude adjustment preserves the note contour and intervals — only the amplitude of vibrato and other fine detail is scaled.
+Right-drag on a selected curve to adjust its amplitude: drag up to increase amplitude, down to decrease, all the way to fully flattened. For the pitch parameter, amplitude adjustment only strengthens or weakens vibrato and other fine detail — the overall note contour and intervals are preserved, so the pitch is never "lifted" as a whole. The result is previewed live while you drag.
 
 Right-click in the parameter editor to open a context menu with operations such as `Initialize`, `Transpose by Cents`, `Transpose by Degrees`, `Set To`, `Average`, `Smooth`, `Add Vibrato`, `Quantize`, `Mean Quantize`, etc.
 
@@ -431,16 +515,42 @@ Additional convenient features of the parameter editor:
 - `Reference Track Group`: When the parameter is `Pitch`, lets you choose other tracks and display pitch curves from other track groups as references in the pitch editor.
 - `Import MIDI`: Allows you to select a MIDI file and import notes from one or more tracks as a pitch curve.
 
+### 8. Smoothing
+
+After selecting a region with the Select tool, right-click and choose `Smooth…` (default shortcut `Ctrl + M`) to calm down a jittery parameter curve.
+
+- `Smoothness`: a continuous slider from 0 to 100%; higher means smoother. The default is 50%.
+- Smoothing takes the curve on both sides of the selection into account, so no abrupt step appears at the selection edges. The edge transition width is fixed in time, so it does not widen as the selection grows, and repeated editing does not accumulate distortion outside the selection.
+- The `Quantize` and `Mean Quantize` dialogs offer the same `Smoothness` slider, letting you smooth while you quantize pitch.
+
+For a quick flatten, you can also hold the right button inside a selection and drag downward: the lower you drag, the smoother it gets, with live preview.
+
 ## 6. Export Audio
 
-After completing all edits, use the `Export Audio` function in the `File` menu to export the HiFiShifter project as a wav audio file.
+After completing all edits, use the `Export Audio` function in the `File` menu to export the HiFiShifter project as an audio file.
 
 Parameters:
 
+- `Output Format`: `WAV` / `MP3` / `FLAC`.
+    - `WAV`: uncompressed and lossless, with the widest compatibility and the largest file size. Choose it when you plan to keep editing in other software.
+    - `FLAC`: losslessly compressed — identical quality to WAV but a noticeably smaller file. Choose it for long-term lossless archiving.
+    - `MP3`: lossy and the smallest, supported by virtually every device and player. Choose it for sharing, uploading, or making rough mixes.
+    - Switching format automatically updates the extension of the output filename and of the per-track naming template.
 - `Export Type`: `Project` / `Separated Tracks`.
 - `Time Range`: `All` / `Custom`. Custom allows setting start and end seconds.
-- `Sample Rate`: Set the sample rate of the output WAV.
-- `Bit Depth`: Set the bit depth of the output WAV.
+- `Sample Rate`: Set the output sample rate. All three formats support it, but MP3 only accepts fixed steps between 8 kHz and 48 kHz (for example 44100 or 48000 Hz). If you pick a rate MP3 does not support, HiFiShifter silently switches to the nearest supported one and tells you.
+- `Bit Depth`: Set the output bit depth. WAV supports 16 / 24 / 32-bit float, and FLAC supports 16 / 24-bit. MP3 has no bit-depth option — it always encodes at an effective 16-bit precision internally, so there is no need to worry about bit depth for MP3.
+- `Encoder Settings`: only shown for MP3 and FLAC; used to balance quality against file size.
+    - MP3:
+        - `Encoding Mode`: `VBR (quality first)` allocates bitrate according to content complexity, giving smaller files at a similar listening experience — a good default; `CBR (constant bitrate)` keeps the bitrate fixed, making file size easier to predict.
+        - `Bitrate`: available with `CBR`, from 8 to 320 kbps. Higher means better quality and a larger file.
+        - `VBR Quality`: available with `VBR`, from q0 (about 245 kbps) to q9 (about 65 kbps). The default q2 is already very good.
+        - `Metadata (ID3 Tags)`: `Title`, `Artist`, `Album`, and `Comment` are written into the MP3 file; leave them blank to skip.
+    - FLAC:
+        - `Compression Level`: 0 to 8. `0` is the fastest with slightly larger files; `8` gives the smallest files but is the slowest; the default is `5`. Compression level affects file size and encoding time only, never the audio quality, so the default is usually fine.
+    - Common:
+        - `Dither`: adds a tiny amount of noise when reducing bit depth to improve perceived quality; choose `Off` or `TPDF`. It only applies to integer bit depths (16 / 24-bit); most users can leave it `Off`.
+        - `Channels`: `Stereo` keeps the original left/right channels; `Mono Downmix` mixes both channels into mono.
 - `Output Folder`: Set the output folder. Supported placeholders:
     - `<ProjectFolder>`: The folder containing the current project. If the project has not been saved, defaults to the `Documents` folder.
     - `<ProjectName>`: The current project's filename without extension.
@@ -460,10 +570,13 @@ Parameters:
     - If you check a track that is originally muted, it will be exported regardless of mute state.
     - If you check a root track of a track group, the entire group is exported as a single audio file, and the exported audio excludes data from muted child tracks.
     - If you check a child track, it will be exported regardless of its own or its root track's mute state.
+    - The `Exclude Muted` button only affects the targets you have currently checked: it unchecks the muted ones among them and leaves everything you did not check untouched. So you can hand-pick first, then use it to strip out the muted items in one go.
 
 While typing a file path, you can click the `Placeholder` buttons to quickly insert the corresponding text.
 
 All file path strings support time format strings like `%Y-%m-%d-%H-%M-%S`. If you want to include a literal `%` in the output path, use `%%` to escape it.
+
+Select clips and choose `Quick Export` from the context menu to export just those clips from a small window. It also offers `WAV` / `MP3` / `FLAC`, but does not ask for encoder settings — it reuses the settings you saved in the `Export Audio` dialog.
 
 ## 7. Recording
 
