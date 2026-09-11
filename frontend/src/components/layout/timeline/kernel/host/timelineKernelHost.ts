@@ -201,6 +201,15 @@ export interface TimelineKernelHostArgs {
      */
     readonly onVisibleRowsChange?: (firstRow: number, rowCount: number) => void;
     /**
+     * 水平滚动位置的**量化**提交（每跨过 `SCROLL_COMMIT_STEP_PX` 一次）。
+     *
+     * 为什么需要它：标尺的刻度由 React 按当前视口范围计算（`timelineTicks` 依赖
+     * `scrollLeft` / `pxPerSec`），内核只写标尺内容层的 transform 是不够的——
+     * 不更新 state 时标尺的**刻度范围**始终停留在初始视口，滚动后刻度消失。
+     * 量化提交（而不是每帧）保证 React 不进滚动热路径，与旧实现的约定一致。
+     */
+    readonly onScrollLeftCommit?: (scrollLeftPx: number) => void;
+    /**
      * 交互回调：内核只做**命中与手势**，编辑语义（Redux action / 后端 thunk）
      * 一律交回 React 侧，避免 runtime 直接依赖 store。
      */
@@ -379,6 +388,14 @@ const VERTICAL_OVERSCAN_ROWS = 2;
 /** 自绘滚动条厚度（CSS px），与视图中的 thumb 容器一致。 */
 const SCROLLBAR_SIZE_PX = 8;
 
+/**
+ * 水平滚动向 React 量化提交的步长（CSS px）。
+ *
+ * 与旧实现的 `REACT_SCROLL_STEP_PX` 取同一量级：步长越小，标尺越跟手，但 React
+ * 重渲染越频繁；256px 在"标尺刻度不会明显滞后"与"滚动帧不进 React"之间取平衡。
+ */
+const SCROLL_COMMIT_STEP_PX = 256;
+
 /** 键盘单步滚动量（CSS px）。 */
 const KEYBOARD_STEP_PX = 60;
 
@@ -468,6 +485,52 @@ function clampNumber(value: number, min: number, max: number): number {
     return Math.min(max, Math.max(min, value));
 }
 
+/** 已解析的主题色缓存（键 = CSS 颜色原值）。 */
+const themeRgbaCache = new Map<string, Rgba>();
+
+/**
+ * 用浏览器把任意 CSS 颜色归一化为 `rgb()/rgba()`。
+ *
+ * 特殊说明：借 `getComputedStyle` 而不是自己写解析器——CSS 颜色格式太多
+ * （hex 3/4/6/8 位、`rgb()` 空格/逗号两种语法、颜色关键字、`color()` 函数），
+ * 浏览器已经实现了全部规则且与主题变量的取值方式一致。
+ *
+ * @param css CSS 颜色字符串。
+ * @returns 归一化后的字符串；浏览器不可用或解析失败时原样返回。
+ */
+function normalizeCssColor(css: string): string {
+    if (typeof document === "undefined") return css;
+    const probe = document.createElement("span");
+    probe.style.color = css;
+    probe.style.display = "none";
+    document.body.appendChild(probe);
+    const computed = getComputedStyle(probe).color;
+    probe.remove();
+    return computed.length > 0 ? computed : css;
+}
+
+/**
+ * 把主题变量解析为 RGBA（支持任意 CSS 颜色格式）。
+ *
+ * 【为什么不能直接用 parseRgbaColor】它只认 `rgb()/rgba()` 两种写法，其他格式
+ * （hex / 颜色关键字）会被解析成**不透明洋红**——这是既有实现的故意设计，用来在
+ * 真机上暴露"漏解析"。但自定义主题常用 hex 定义颜色，直接套用会让网格线、行分界线
+ * 全部变成刺眼的洋红。这里先借浏览器归一化，再交给同一个解析器，并按值缓存
+ * （`getComputedStyle` 会触发样式重算，不能进每帧路径）。
+ *
+ * @param name 主题变量名（如 `--qt-graph-grid-weak`）。
+ * @param fallback 变量缺失时的回退值（必须是 `rgb()/rgba()` 写法）。
+ * @returns RGBA 四元组。
+ */
+function resolveThemeRgba(name: string, fallback: string): Rgba {
+    const raw = resolveThemeColor(name, fallback);
+    const cached = themeRgbaCache.get(raw);
+    if (cached !== undefined) return cached;
+    const parsed = parseRgbaColor(normalizeCssColor(raw));
+    themeRgbaCache.set(raw, parsed);
+    return parsed;
+}
+
 /**
  * 判断 DOM 写入值是否需要提交（值去重）。
  *
@@ -500,7 +563,8 @@ function shouldWrite(next: number, previous: number, epsilon = 0.01): boolean {
  */
 export function createTimelineKernelHost(args: TimelineKernelHostArgs): TimelineKernelHost {
     const { container, canvas, hScrollbarThumb, vScrollbarThumb, data, sync } = args;
-    const { onRowHeightChange, onZoomChange, onVisibleRowsChange, interactions } = args;
+    const { onRowHeightChange, onZoomChange, onVisibleRowsChange, onScrollLeftCommit, interactions } =
+        args;
 
     const glCanvas = createGlCanvas(canvas);
     if (!glCanvas) throw new Error("WebGL2 不可用");
@@ -712,12 +776,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             windowWidthPx: windowWidth,
             contentBottomPx: d.tracks.length * view.rowHeight,
             dpr: axis.dpr,
-            weakRgba: parseRgbaColor(
-                resolveThemeColor("--qt-graph-grid-weak", "rgba(255,255,255,0.1)"),
-            ),
-            strongRgba: parseRgbaColor(
-                resolveThemeColor("--qt-graph-grid-strong", "rgba(255,255,255,0.22)"),
-            ),
+            weakRgba: resolveThemeRgba("--qt-graph-grid-weak", "rgba(255,255,255,0.1)"),
+            strongRgba: resolveThemeRgba("--qt-graph-grid-strong", "rgba(255,255,255,0.22)"),
         });
 
         // 轨道行分界线：旧实现由 Canvas2D 逐行画 `--qt-border`；位置必须与左侧
@@ -729,7 +789,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             windowLeftPx: windowLeft,
             windowWidthPx: windowWidth,
             dpr: axis.dpr,
-            rgba: parseRgbaColor(resolveThemeColor("--qt-border", "rgba(148,163,184,0.22)")),
+            rgba: resolveThemeRgba("--qt-border", "rgba(148,163,184,0.22)"),
         });
 
         // clip 几何：复用既有稀疏模型（窗口裁剪 + 内容坐标投影）。
@@ -908,6 +968,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     /** 上一次通知 React 的可见行窗口（去重：同窗口不重复回调）。 */
     let lastVisibleFirstRow = -1;
     let lastVisibleRowCount = -1;
+    /** 上一次量化提交给 React 的水平滚动位置（NaN = 从未提交）。 */
+    let lastCommittedScrollLeft = Number.NaN;
 
     /**
      * 独立画布图层（波形等）：内核在视口提交后按 order 调用其 paint。
@@ -1066,6 +1128,15 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         // 细节层与 GL 层同帧平移：两层共用同一个内容坐标窗口，滚动时一起移动。
         positionDetailLayer(view);
         syncDom(view);
+
+        // 水平滚动量化提交：标尺的**刻度范围**由 React 按 scrollLeft 计算，
+        // 只写内容层 transform 会让刻度停留在初始视口（滚动后刻度消失）。
+        if (onScrollLeftCommit !== undefined) {
+            if (shouldWrite(view.scrollLeft, lastCommittedScrollLeft, SCROLL_COMMIT_STEP_PX)) {
+                lastCommittedScrollLeft = view.scrollLeft;
+                onScrollLeftCommit(view.scrollLeft);
+            }
+        }
 
         const playheadSec = data().playheadSec;
         const playheadMoved = playheadSec !== lastDrawnPlayheadSec;

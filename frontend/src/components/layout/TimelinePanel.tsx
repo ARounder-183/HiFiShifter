@@ -2244,6 +2244,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 onRowHeightChange={setRowHeight}
                                 initialPxPerSec={pxPerSec}
                                 onPxPerSecChange={setPxPerSec}
+                                onScrollLeftCommit={setScrollLeftState}
                                 getPlayheadSec={getVisualPlayheadSec}
                                 rulerContentRef={rulerContentRef}
                                 trackListScrollerRef={trackListScrollRef}

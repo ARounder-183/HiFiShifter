@@ -48,6 +48,13 @@ export interface TimelineKernelViewProps {
     readonly initialPxPerSec: number;
     /** 水平缩放变化（内核为真值源），用于驱动标尺刻度等 React 侧派生量。 */
     readonly onPxPerSecChange: (pxPerSec: number) => void;
+    /**
+     * 水平滚动位置的量化提交（每 256px 一次）。
+     *
+     * 标尺的**刻度范围**由 React 按 `scrollLeft` 计算（`timelineTicks`），内核只写
+     * 标尺内容层的 transform 会让刻度停留在初始视口——滚动后刻度消失。
+     */
+    readonly onScrollLeftCommit?: (scrollLeftPx: number) => void;
     /** 播放头位置读取（工程秒）：取视觉插值后的实时值，避免播放时滞后。 */
     readonly getPlayheadSec: () => number;
     /** 标尺内容层（宿主在 rAF 内写 transform 跟随水平滚动）。 */
@@ -83,6 +90,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         rulerPlayheadLineRef,
         hostRef,
         interactions,
+        onScrollLeftCommit,
     } = props;
 
     const containerRef = React.useRef<HTMLDivElement | null>(null);
@@ -186,6 +194,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         onPxPerSecChange,
         getPlayheadSec,
         onVisibleRowsChange: handleVisibleRowsChange,
+        onScrollLeftCommit,
     });
     // eslint-disable-next-line react-hooks/refs -- 回调镜像：同上
     callbacksRef.current = {
@@ -193,6 +202,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         onPxPerSecChange,
         getPlayheadSec,
         onVisibleRowsChange: handleVisibleRowsChange,
+        onScrollLeftCommit,
     };
 
     // 交互回调镜像：同上（面板用 useCallback 提供，但引用仍可能在依赖变化时更新）。
@@ -299,6 +309,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                 onVisibleRowsChange: (firstRow, rowCount) =>
                     callbacksRef.current.onVisibleRowsChange(firstRow, rowCount),
                 interactions: stableInteractions,
+                onScrollLeftCommit: (px) => callbacksRef.current.onScrollLeftCommit?.(px),
             });
         } catch (error) {
             setFatal(error instanceof Error ? error.message : String(error));
