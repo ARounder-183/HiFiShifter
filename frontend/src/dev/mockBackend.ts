@@ -347,6 +347,28 @@ function buildHandlers(): Record<string, (...args: unknown[]) => unknown> {
  *
  * @returns 无返回值。
  */
+/**
+ * 记录写操作的入参（截断深拷贝）到 `window.__mockArgs`。
+ *
+ * 用途：调几何相关手势（trim / 拖拽）时需要核对**实际提交的数值**——截图只能看
+ * 趋势，方向与数值必须读参数。只记 `set_ / move_ / update_ / save_` 前缀的方法，
+ * 避免把只读查询的参数也堆进来。
+ *
+ * @param method 被调用的后端方法名。
+ * @param args 位置参数。
+ */
+function recordWriteArgs(method: string, args: unknown[]): void {
+    if (!/^(set_|move_|update_|save_)/.test(method) || args.length === 0) return;
+    const holder = window as unknown as { __mockArgs?: Record<string, unknown> };
+    const record = holder.__mockArgs ?? {};
+    try {
+        record[method] = JSON.parse(JSON.stringify(args[0]));
+    } catch {
+        record[method] = String(args[0]);
+    }
+    holder.__mockArgs = record;
+}
+
 export function installMockBackend(): void {
     const handlers = buildHandlers();
     /** 调用轨迹（调试用：`window.__mockCalls` 可读出被调用的方法顺序）。 */
@@ -366,13 +388,14 @@ export function installMockBackend(): void {
             if (existing !== undefined) {
                 return (...args: unknown[]) => {
                     calls.push(property);
+                    recordWriteArgs(property, args);
                     return existing(...args);
                 };
             }
             // 未实现的方法：返回一个恒为 `{ ok: true }` 的假实现。
             return (...args: unknown[]) => {
                 calls.push(`${property}(fallback)`);
-                void args;
+                recordWriteArgs(property, args);
                 return { ok: true };
             };
         },

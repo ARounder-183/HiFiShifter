@@ -60,6 +60,8 @@ import {
     moveClipStart,
     moveClipTrack,
     checkpointHistory,
+    setClipLength,
+    setClipSourceRange,
 } from "../../features/session/sessionSlice";
 import { batch } from "react-redux";
 import { moveClipsRemote } from "../../features/session/thunks/timelineThunks";
@@ -1202,6 +1204,108 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         [dispatch],
     );
 
+    /** 内核 trim：按下时的原始几何（把相对位移换算为绝对值，并支持回滚）。 */
+    const kernelTrimOriginRef = React.useRef<{
+        clipId: string;
+        startSec: number;
+        lengthSec: number;
+        sourceStartSec: number;
+        sourceEndSec: number;
+    } | null>(null);
+
+    /**
+     * 内核 trim 预览：写乐观几何。
+     *
+     * 源区间必须同步改：左边缘 trim 改 `sourceStartSec`、右边缘改 `sourceEndSec`——
+     * 只改 `lengthSec` 会让音频内容被拉伸（波形与音频对不上），而 trim 的语义是
+     * **裁切**（内容不滑动）。
+     */
+    const handleKernelTrimPreview = React.useCallback(
+        (args: {
+            clipId: string;
+            edge: "left" | "right";
+            startSec: number;
+            lengthSec: number;
+            deltaSec: number;
+        }) => {
+            if (kernelTrimOriginRef.current?.clipId !== args.clipId) {
+                const clip = sessionRef.current.clips.find((item) => item.id === args.clipId);
+                if (clip === undefined) return;
+                kernelTrimOriginRef.current = {
+                    clipId: clip.id,
+                    startSec: clip.startSec,
+                    lengthSec: clip.lengthSec,
+                    sourceStartSec: clip.sourceStartSec,
+                    sourceEndSec: clip.sourceEndSec,
+                };
+            }
+            const origin = kernelTrimOriginRef.current;
+            if (origin === null) return;
+            batch(() => {
+                dispatch(moveClipStart({ clipId: args.clipId, startSec: args.startSec }));
+                dispatch(setClipLength({ clipId: args.clipId, lengthSec: args.lengthSec }));
+                if (args.edge === "left") {
+                    dispatch(
+                        setClipSourceRange({
+                            clipId: args.clipId,
+                            sourceStartSec: origin.sourceStartSec + args.deltaSec,
+                        }),
+                    );
+                } else {
+                    dispatch(
+                        setClipSourceRange({
+                            clipId: args.clipId,
+                            sourceEndSec: origin.sourceEndSec + args.deltaSec,
+                        }),
+                    );
+                }
+            });
+        },
+        [dispatch, sessionRef],
+    );
+
+    /** 内核 trim 收尾：提交或回滚（取消时三个字段一起还原）。 */
+    const handleKernelTrimCommit = React.useCallback(
+        (args: {
+            clipId: string;
+            edge: "left" | "right";
+            startSec: number;
+            lengthSec: number;
+            cancelled: boolean;
+        }) => {
+            const origin = kernelTrimOriginRef.current;
+            kernelTrimOriginRef.current = null;
+            if (origin === null) return;
+            if (args.cancelled) {
+                batch(() => {
+                    dispatch(moveClipStart({ clipId: origin.clipId, startSec: origin.startSec }));
+                    dispatch(setClipLength({ clipId: origin.clipId, lengthSec: origin.lengthSec }));
+                    dispatch(
+                        setClipSourceRange({
+                            clipId: origin.clipId,
+                            sourceStartSec: origin.sourceStartSec,
+                            sourceEndSec: origin.sourceEndSec,
+                        }),
+                    );
+                });
+                return;
+            }
+            dispatch(checkpointHistory());
+            void dispatch(
+                setClipsStateBulkRemote({
+                    updates: [
+                        {
+                            clipId: args.clipId,
+                            startSec: args.startSec,
+                            lengthSec: args.lengthSec,
+                        },
+                    ],
+                }),
+            );
+        },
+        [dispatch],
+    );
+
     /** 内核交互回调集合（引用稳定：内核创建时取一次）。 */
     const kernelInteractions = React.useMemo(
         () => ({
@@ -1209,12 +1313,16 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             onSelectClip: handleKernelSelectClip,
             onDragPreview: handleKernelDragPreview,
             onDragCommit: handleKernelDragCommit,
+            onTrimPreview: handleKernelTrimPreview,
+            onTrimCommit: handleKernelTrimCommit,
         }),
         [
             handleKernelSeek,
             handleKernelSelectClip,
             handleKernelDragPreview,
             handleKernelDragCommit,
+            handleKernelTrimPreview,
+            handleKernelTrimCommit,
         ],
     );
 

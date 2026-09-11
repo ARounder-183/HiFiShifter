@@ -60,8 +60,13 @@ import {
     MIN_PX_PER_SEC,
     MIN_ROW_HEIGHT,
 } from "../../constants";
-import { hitTest, type HitTestClip } from "../interaction/hitTest";
-import { resolveDragDelta, resolveTargetTrackIndex } from "../interaction/dragGeometry";
+import { hitTest, type ClipHitRegion, type HitTestClip } from "../interaction/hitTest";
+import {
+    resolveDragDelta,
+    resolveTargetTrackIndex,
+    resolveTrimEdge,
+    type TrimEdge,
+} from "../interaction/dragGeometry";
 import { createGlCanvas } from "../gl/glContext";
 import { CLIP_INSTANCE_FLOATS, writeFlatInstance } from "../gl/instanceLayout";
 import { createSdfBoxProgram } from "../gl/sdfBoxProgram";
@@ -236,6 +241,31 @@ export interface TimelineKernelInteractions {
         readonly clipId: string;
         readonly deltaSec: number;
         readonly targetTrackId: string;
+        readonly cancelled: boolean;
+    }) => void;
+    /**
+     * trim 预览（拖拽左右边缘时每帧回调，已按值去重）。
+     *
+     * @param args 新的起始时间与长度（已钳制）；`deltaSec` 是实际生效的变化量
+     *   （左边缘 = `startSec` 的变化、右边缘 = `lengthSec` 的变化）。
+     */
+    readonly onTrimPreview?: (args: {
+        readonly clipId: string;
+        readonly edge: TrimEdge;
+        readonly startSec: number;
+        readonly lengthSec: number;
+        readonly deltaSec: number;
+    }) => void;
+    /**
+     * trim 结束。
+     *
+     * @param args 最终几何；`cancelled = true` 时调用方应回滚。
+     */
+    readonly onTrimCommit?: (args: {
+        readonly clipId: string;
+        readonly edge: TrimEdge;
+        readonly startSec: number;
+        readonly lengthSec: number;
         readonly cancelled: boolean;
     }) => void;
 }
@@ -1168,6 +1198,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
               startClientX: number;
               startClientY: number;
               clipId: string;
+              /** 命中分区：决定超过阈值后升级为拖拽（body/header）还是 trim（边缘）。 */
+              region: ClipHitRegion;
               /** 按下时的内容坐标（用于换算拖拽位移）。 */
               startContentX: number;
               startContentY: number;
@@ -1175,6 +1207,19 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
               originStartSec: number;
               originTrackId: string;
               lengthSec: number;
+          }
+        | {
+              kind: "clip-trim";
+              clipId: string;
+              edge: TrimEdge;
+              startContentX: number;
+              originStartSec: number;
+              originLengthSec: number;
+              /** 最近一次派发的实际变化量（去重）。 */
+              lastDeltaSec: number;
+              /** 最近一次派发的新几何（收尾时直接提交，避免重算）。 */
+              lastStartSec: number;
+              lastLengthSec: number;
           }
         | {
               kind: "clip-drag";
@@ -1193,6 +1238,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
 
     /** 点击 / 拖拽的位移阈值（CSS px）。 */
     const DRAG_THRESHOLD_PX = 4;
+
+    /** trim 允许的最小 clip 长度（秒）：再短会难以命中与选中。 */
+    const MIN_CLIP_LENGTH_SEC = 0.05;
 
     /**
      * 把视口内坐标换算为命中结果（内容坐标下的轨道 + clip）。
@@ -1272,6 +1320,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 startClientX: event.clientX,
                 startClientY: event.clientY,
                 clipId: hit.clip.id,
+                region: hit.region,
                 startContentX: view.scrollLeft + (event.clientX - rect.left),
                 startContentY: view.scrollTop + (event.clientY - rect.top),
                 originStartSec: hit.clip.startSec,
@@ -1299,7 +1348,23 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             const dx = event.clientX - gesture.startClientX;
             const dy = event.clientY - gesture.startClientY;
             if (dx * dx + dy * dy < DRAG_THRESHOLD_PX * DRAG_THRESHOLD_PX) return;
-            // 超过阈值：从「待选中」升级为拖拽（用按下时记下的几何做基准）。
+            // 超过阈值：按按下时的命中分区升级——边缘 → trim，其余 → 拖拽移动。
+            const isEdge = gesture.region === "left-edge" || gesture.region === "right-edge";
+            if (isEdge) {
+                gesture = {
+                    kind: "clip-trim",
+                    clipId: gesture.clipId,
+                    edge: gesture.region === "left-edge" ? "left" : "right",
+                    startContentX: gesture.startContentX,
+                    originStartSec: gesture.originStartSec,
+                    originLengthSec: gesture.lengthSec,
+                    lastDeltaSec: Number.NaN,
+                    lastStartSec: gesture.originStartSec,
+                    lastLengthSec: gesture.lengthSec,
+                };
+                applyTrimPreview(event);
+                return;
+            }
             gesture = {
                 kind: "clip-drag",
                 clipId: gesture.clipId,
@@ -1314,9 +1379,49 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             applyDragPreview(event);
             return;
         }
+        if (gesture.kind === "clip-trim") {
+            applyTrimPreview(event);
+            return;
+        }
         if (gesture.kind === "clip-drag") {
             applyDragPreview(event);
         }
+    }
+
+    /**
+     * 计算并派发一次 trim 预览（拖拽边缘期间每帧调用）。
+     *
+     * 流程：内容坐标位移 → `resolveTrimEdge`（新起始时间 + 新长度 + 边界/最小长度
+     * 钳制）→ 与上次值比较去重 → 回调。
+     *
+     * @param event 指针事件。
+     * @returns 无返回值。
+     */
+    function applyTrimPreview(event: PointerEvent): void {
+        if (gesture.kind !== "clip-trim") return;
+        const rect = container.getBoundingClientRect();
+        const view = scroll.get();
+        const contentX = view.scrollLeft + (event.clientX - rect.left);
+        const result = resolveTrimEdge({
+            edge: gesture.edge,
+            deltaContentXPx: contentX - gesture.startContentX,
+            pxPerSec: view.pxPerSec,
+            startSec: gesture.originStartSec,
+            lengthSec: gesture.originLengthSec,
+            projectSec: Math.max(0, data().projectSec),
+            minLengthSec: MIN_CLIP_LENGTH_SEC,
+        });
+        if (result.deltaSec === gesture.lastDeltaSec) return;
+        gesture.lastDeltaSec = result.deltaSec;
+        gesture.lastStartSec = result.startSec;
+        gesture.lastLengthSec = result.lengthSec;
+        interactions?.onTrimPreview?.({
+            clipId: gesture.clipId,
+            edge: gesture.edge,
+            startSec: result.startSec,
+            lengthSec: result.lengthSec,
+            deltaSec: result.deltaSec,
+        });
     }
 
     /**
@@ -1374,6 +1479,15 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 clipId: gesture.clipId,
                 deltaSec: gesture.lastDeltaSec,
                 targetTrackId: gesture.lastTargetTrackId,
+                cancelled,
+            });
+        }
+        if (gesture.kind === "clip-trim") {
+            interactions?.onTrimCommit?.({
+                clipId: gesture.clipId,
+                edge: gesture.edge,
+                startSec: gesture.lastStartSec,
+                lengthSec: gesture.lastLengthSec,
                 cancelled,
             });
         }
@@ -1541,16 +1655,29 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 scroll.setScrollLeft(view.scrollLeft + KEYBOARD_STEP_PX);
                 break;
             case "Escape": {
-                // 拖拽中按 Esc = 取消：回调 cancelled 让调用方回滚乐观位置。
-                if (gesture.kind !== "clip-drag") break;
-                event.preventDefault();
-                interactions?.onDragCommit?.({
-                    clipId: gesture.clipId,
-                    deltaSec: gesture.lastDeltaSec,
-                    targetTrackId: gesture.lastTargetTrackId,
-                    cancelled: true,
-                });
-                gesture = { kind: "none" };
+                // 拖拽 / trim 中按 Esc = 取消：回调 cancelled 让调用方回滚乐观值。
+                if (gesture.kind === "clip-drag") {
+                    event.preventDefault();
+                    interactions?.onDragCommit?.({
+                        clipId: gesture.clipId,
+                        deltaSec: gesture.lastDeltaSec,
+                        targetTrackId: gesture.lastTargetTrackId,
+                        cancelled: true,
+                    });
+                    gesture = { kind: "none" };
+                    break;
+                }
+                if (gesture.kind === "clip-trim") {
+                    event.preventDefault();
+                    interactions?.onTrimCommit?.({
+                        clipId: gesture.clipId,
+                        edge: gesture.edge,
+                        startSec: gesture.lastStartSec,
+                        lengthSec: gesture.lastLengthSec,
+                        cancelled: true,
+                    });
+                    gesture = { kind: "none" };
+                }
                 break;
             }
             default:
