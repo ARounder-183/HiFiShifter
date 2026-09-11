@@ -184,6 +184,8 @@ function clamp(value: number, min: number, max: number): number {
  * 作用：滚动位置经缩放换算后必然带浮点噪声，严格 `!==` 会把 1e-13 级差异当成
  * 「状态变化」，导致渲染循环空转。
  *
+ * @param a 待比较值。
+ * @param b 待比较值。
  * @returns 两值差异小于 EPSILON 时为 true（视为未变化）。
  */
 function nearlyEqual(a: number, b: number): boolean {

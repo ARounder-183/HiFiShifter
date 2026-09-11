@@ -54,11 +54,21 @@ describe("scrollKernel", () => {
         expect(anchorSecAfter).toBeCloseTo(anchorSecBefore, 6);
     });
 
-    it("缩放后 scrollLeft 仍被钳制", () => {
+    it("缩放后 scrollLeft 仍被钳制（下界）", () => {
         const k = makeKernel();
-        k.setScrollLeft(0);
-        k.setZoom(1000, 0);
+        // 锚点在视口右侧、缩放变小 → 反算值 = 5 × 10 − 200 = −150，必须钳到 0。
+        // 若实现漏掉钳制，此断言会读到 −150 而失败（保证断言有判别力）。
+        k.setScrollLeft(300);
+        k.setZoom(10, 200);
         expect(k.get().scrollLeft).toBe(0);
+    });
+
+    it("缩放后 scrollLeft 仍被钳制（上界）", () => {
+        const k = makeKernel();
+        // 内容末端、缩放变小 → 反算值 = 992 × 1 = 992，超过新上限 200，必须钳到 200。
+        k.setScrollLeft(1000 * 100 - 800);
+        k.setZoom(1, 0);
+        expect(k.get().scrollLeft).toBe(1000 * 1 - 800);
     });
 
     it("状态变化通知订阅者，未变化不通知", () => {
