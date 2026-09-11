@@ -56,9 +56,11 @@ import { noteFadeLinePointerDown } from "../../hooks/fadeLineClickGesture";
 import { effectiveFadeSec, hitClipFadeTarget } from "../interaction/fadeTargets";
 import type { FadeContextSide } from "../../FadeContextMenu";
 import { hitOverlapControl } from "../interaction/overlapControls";
+import { hitInactiveTakeLane } from "../../takeLanes";
 import { resolveHorizontalWheelZoom } from "../../runtime/timelineScrollRange";
 import { resolveTimelineMinPxPerSec } from "../../runtime/timelineZoomBounds";
 import {
+    CLIP_BODY_PADDING_Y,
     CLIP_HEADER_HEIGHT,
     DEFAULT_PX_PER_SEC,
     DEFAULT_ROW_HEIGHT,
@@ -155,6 +157,13 @@ export interface TimelineKernelData {
     readonly silenceSegmentsByClipId?: Readonly<
         Record<string, ReadonlyArray<readonly [number, number]>>
     >;
+    /**
+     * 是否平铺显示全部 Take（`session.showAllTakes`）。
+     *
+     * 多 Take 的 lane 布局（分界线 + 点击切换）与波形面共用同一套 `takeLanes`
+     * 数学；关闭时每个 clip 只显示活跃 Take（与旧实现一致）。
+     */
+    readonly showAllTakes: boolean;
     /**
      * 激活 / 禁用的分组 id。
      *
@@ -643,6 +652,15 @@ export interface TimelineKernelInteractions {
         readonly primary: FadeContextSide;
         readonly secondary: FadeContextSide | null;
     }) => void;
+    /**
+     * 单击 inactive take lane → 切换该 clip 的活跃 Take。
+     *
+     * 触发条件与旧实现同源：无修饰键、且**未超过拖拽阈值**（拖动仍是移动 clip）。
+     *
+     * @param clipId 目标 clip。@param takeId 目标 Take。
+     * @param sec 按下位置对应的工程时间（暂停时把播放光标带到这里，播放中忽略）。
+     */
+    readonly onActivateTake?: (clipId: string, takeId: string, sec: number) => void;
 }
 
 /** 宿主句柄。 */
@@ -1248,6 +1266,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             silenceSegmentsByClipId: d.silenceSegmentsByClipId as
                 | Record<string, ReadonlyArray<readonly [number, number]>>
                 | undefined,
+            // 多 Take lane 分界线：与波形面 / 点击命中同一套 takeLanes 数学。
+            showAllTakes: d.showAllTakes,
         });
 
         const clipResult = clipBuilder.build({
@@ -1868,6 +1888,16 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                * 与旧实现的「延后判定用户意图」一致：拖动 = 改长度，未拖动 = 循环。
                */
               cycleHeld?: boolean;
+              /**
+               * 按下时命中的 inactive take lane（多 Take 平铺）。
+               *
+               * 与旧实现同源：命中只在「无修饰键、无拖动的单击」下生效——拖拽仍走
+               * 正常移动流程（`onDragPreview`），编辑修饰键（Alt / Shift / Ctrl）
+               * 优先。收尾时若仍未超过阈值 → 切换该 clip 的活跃 Take。
+               */
+              inactiveTakeId: string | null;
+              /** 按下时指针的工程时间（切换 Take 时把播放光标带到这里）。 */
+              pressSec: number;
           }
         | {
               kind: "clip-fade";
@@ -2546,6 +2576,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                     hit.region === "snap-offset-handle"
                         ? Math.max(0, Number(hit.clip.snapOffsetSec) || 0)
                         : 0,
+                inactiveTakeId: resolveInactiveTakeIdAtPress(hit, event),
+                pressSec: hit.sec,
             };
         } else {
             gesture = { kind: "seek" };
@@ -3062,6 +3094,15 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             } else {
                 interactions?.onSelectClip?.(gesture.clipId, event.ctrlKey || event.metaKey);
             }
+            // inactive take lane 上的单击：切换该 clip 的活跃 Take（旧实现还会在
+            // 暂停 / 停止时把播放光标带到点击位置——由面板按播放状态决定）。
+            if (gesture.inactiveTakeId !== null) {
+                interactions?.onActivateTake?.(
+                    gesture.clipId,
+                    gesture.inactiveTakeId,
+                    gesture.pressSec,
+                );
+            }
         }
         if (gesture.kind !== "none") {
             try {
@@ -3213,6 +3254,41 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             trackId,
             sec: hit.sec,
         });
+    }
+
+    /**
+     * 按下时解析命中的 inactive take lane（多 Take 平铺）。
+     *
+     * 流程：只接管「body 分区 + 无修饰键」的按下（与旧实现 `ClipItem` 的
+     * `!altKeyDown && !doShiftRangeSelect && !doCtrlToggleOnly` 同源——拖拽仍走正常
+     * 移动流程，编辑修饰键优先）→ 用与波形 / DOM 命中同一套 `takeLanes` 数学
+     * 判定指针落在哪条非活跃 lane 上。
+     *
+     * @param hit 命中结果。@param event 指针事件（取修饰键与指针位置）。
+     * @returns 命中的 take id；未命中或条件不满足时为 null。
+     */
+    function resolveInactiveTakeIdAtPress(
+        hit: {
+            readonly clip: HitTestClip;
+            readonly region: ClipHitRegion;
+            readonly localY: number;
+        },
+        event: PointerEvent,
+    ): string | null {
+        if (hit.region !== "body") return null;
+        if (event.altKey || event.shiftKey || event.ctrlKey || event.metaKey) return null;
+        const clip = data().clips.find((item) => item.id === hit.clip.id);
+        if (clip === undefined) return null;
+        const rowHeight = scroll.get().rowHeight;
+        const bodyHeightPx = Math.max(1, rowHeight - CLIP_BODY_PADDING_Y - CLIP_HEADER_HEIGHT);
+        return (
+            hitInactiveTakeLane(
+                clip,
+                data().showAllTakes,
+                bodyHeightPx,
+                hit.localY - CLIP_HEADER_HEIGHT,
+            )?.takeId ?? null
+        );
     }
 
     /**

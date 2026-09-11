@@ -173,6 +173,8 @@ export function drawTimelineCanvas(
             leadingOverlapPx?: number;
             /** 静音检测预览区段（像素，相对 clip 左缘）：半透明红色覆盖。 */
             silenceSpansPx?: Array<{ leftPx: number; widthPx: number }>;
+            /** 多 Take lane 分界线的 y 偏移（相对 body 顶部，CSS px）。 */
+            takeLaneSeparatorOffsetsPx?: number[];
         }>;
         /** 轨道横向分界线（延伸到工程末尾之后）。 */
         rowGuides?: {
@@ -982,6 +984,8 @@ export function drawTimelineCanvas(
         width: number;
         height: number;
     }> = [];
+    /** 多 Take lane 分界线（同样在最后一遍落笔，避免被后续批次的块面盖掉）。 */
+    const takeLaneSeparators: Array<{ left: number; top: number; width: number }> = [];
 
     for (const clip of args.clips) {
         const item = prepareClip(clip);
@@ -997,6 +1001,15 @@ export function drawTimelineCanvas(
                 });
             }
         }
+        if (clip.takeLaneSeparatorOffsetsPx !== undefined) {
+            for (const offset of clip.takeLaneSeparatorOffsetsPx) {
+                takeLaneSeparators.push({
+                    left: item.left,
+                    top: item.bodyTop + offset,
+                    width: item.width,
+                });
+            }
+        }
     }
     flushBatch();
 
@@ -1008,6 +1021,19 @@ export function drawTimelineCanvas(
         ctx.fillStyle = "rgba(239, 68, 68, 0.3)";
         for (const rect of silenceOverlays) {
             ctx.fillRect(rect.left, rect.top, rect.width, rect.height);
+        }
+        ctx.restore();
+    }
+
+    if (takeLaneSeparators.length > 0) {
+        // 多 Take lane 分界线：亮色块上一律深色分线（白线在彩色块上看不见），
+        // 与旧实现 `ClipItem` 的分隔线同源。首条 lane 的顶边即 header 边界，
+        // 已由模型侧 `slice(1)` 排除。
+        ctx.save();
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = "rgba(0, 0, 0, 0.18)";
+        for (const line of takeLaneSeparators) {
+            ctx.fillRect(line.left, line.top, line.width, 1);
         }
         ctx.restore();
     }

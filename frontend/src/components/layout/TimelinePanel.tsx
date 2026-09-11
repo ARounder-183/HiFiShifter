@@ -2979,6 +2979,22 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     );
 
     /**
+     * 内核单击 inactive take lane：切换活跃 Take（复用旧实现的提交入口）。
+     *
+     * 与旧实现同源：暂停 / 停止时还会把播放光标带到点击位置（播放中不打断当前
+     * 播放位置），切换本身走 `setClipActiveTakeRemote`（含后端落库与撤销步）。
+     */
+    const handleKernelActivateTake = React.useCallback(
+        (clipId: string, takeId: string, sec: number) => {
+            if (!timelineRuntimeIsPlaying) {
+                void dispatch(seekPlayhead(sec));
+            }
+            activateTrackLaneTake(clipId, takeId);
+        },
+        [activateTrackLaneTake, dispatch, timelineRuntimeIsPlaying],
+    );
+
+    /**
      * 内核双击 clip：请求参数编辑器按 clip 起止范围创建选区。
      *
      * 与旧实现（`ClipItem` 的双击分支）同源：关闭右键菜单 → 派发
@@ -3422,6 +3438,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             onBoxSelectCommit: handleKernelBoxSelectCommit,
             onContextMenu: handleKernelContextMenu,
             onFadeContextMenu: handleKernelFadeContextMenu,
+            onActivateTake: handleKernelActivateTake,
         }),
         [
             handleKernelSeek,
@@ -4398,6 +4415,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 activeGroupIds={kernelActiveGroupIds}
                                 disabledGroupIds={disabledGroupIds}
                                 silenceSegmentsByClipId={silencePreviewSegments ?? undefined}
+                                showAllTakes={s.showAllTakes}
                                 inlineEdit={kernelInlineEditProp}
                                 snapHighlight={{
                                     pxPerSec,

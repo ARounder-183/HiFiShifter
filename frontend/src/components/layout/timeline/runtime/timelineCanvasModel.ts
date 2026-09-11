@@ -17,7 +17,8 @@
  */
 
 import { CLIP_BODY_PADDING_Y, CLIP_HEADER_HEIGHT } from "../constants.js";
-import { clipDisplayName } from "../../../../features/session/sessionTypes";
+import { clipDisplayName, type ClipInfo } from "../../../../features/session/sessionTypes";
+import { resolveTakeLaneLayouts } from "../takeLanes";
 import {
     durationToWidthPx,
     secToContentPx,
@@ -34,7 +35,13 @@ type SparseRenderClip = {
     gain: number;
     playbackRate: number;
     muted: boolean;
-    takes?: Array<{ id: string; name: string }>;
+    /**
+     * Take 集合。
+     *
+     * `sourcePath` 参与 lane 布局判定（只有音频 take 建 lane，见 `takeLanes`），
+     * 因此这里必须保留——只声明 id / name 会让多 Take clip 在模型侧退化成单 Take。
+     */
+    takes?: Array<{ id: string; name: string; sourcePath?: string }>;
     activeTakeId?: string;
     midiNoteCount?: number;
     groupId?: string;
@@ -94,6 +101,14 @@ export type TimelineCanvasClipModel = {
      * 相邻 clip 上）。空数组与缺省等价（不绘制）。
      */
     silenceSpansPx?: Array<{ leftPx: number; widthPx: number }>;
+    /**
+     * 多 Take lane 分界线的 y 偏移（相对 **body 顶部**，CSS px）。
+     *
+     * 首条 lane 的顶边就是 header 边界，因此不含 0（`slice(1)`）。布局与波形面 /
+     * 点击命中同源（`takeLanes.resolveTakeLaneLayouts`）——两处各算一份会让
+     * 分界线与波形 lane 错位。空数组与缺省等价（不绘制）。
+     */
+    takeLaneSeparatorOffsetsPx?: number[];
 };
 
 /**
@@ -132,6 +147,34 @@ function buildSilenceSpansPx(args: {
         });
     }
     return spans.length > 0 ? spans : undefined;
+}
+
+/**
+ * 多 Take lane 分界线偏移（相对 body 顶部，CSS px）。
+ *
+ * 流程：直接复用 `takeLanes.resolveTakeLaneLayouts`（与波形面 / 点击命中共用同一
+ * 套数学）→ 去掉首条（其顶边即 header 边界）→ 取各 lane 的 `top`。
+ *
+ * 特殊说明：模型侧的 clip 是 `ClipInfo` 的结构子集，字段语义一致；布局只用到
+ * takes / activeTakeId，因此这里的窄化是安全的（多出的字段被忽略）。
+ *
+ * @param args.clip 稀疏 clip（实际来自 `ClipInfo`）。
+ * @param args.showAllTakes 是否平铺全部 Take。
+ * @param args.bodyHeightPx clip body 的像素高度（决定能否容纳 lane）。
+ * @returns 分界线偏移；单 Take / 空间不足时为 undefined。
+ */
+function buildTakeLaneSeparatorOffsets(args: {
+    clip: SparseRenderClip;
+    showAllTakes: boolean;
+    bodyHeightPx: number;
+}): number[] | undefined {
+    const layouts = resolveTakeLaneLayouts(
+        args.clip as unknown as ClipInfo,
+        args.showAllTakes,
+        args.bodyHeightPx,
+    );
+    if (layouts === null || layouts.length <= 1) return undefined;
+    return layouts.slice(1).map((lane) => lane.top);
 }
 
 /**
@@ -183,6 +226,13 @@ export function buildSparseClipRenderModel(args: {
      * 由细节层画成半透明红色。
      */
     silenceSegmentsByClipId?: Record<string, ReadonlyArray<readonly [number, number]>>;
+    /**
+     * 是否平铺显示全部 Take（`session.showAllTakes`）。
+     *
+     * 关闭时每个 clip 只画活跃 Take 的波形（波形面自行消费同一设置），lane 分界线
+     * 也随之消失。缺省 false（与「不传即不画」的保守默认一致）。
+     */
+    showAllTakes?: boolean;
 }): {
     drawClips: TimelineCanvasClipModel[];
     overlayClipIdsByTrackId: Record<string, string[]>;
@@ -321,6 +371,14 @@ export function buildSparseClipRenderModel(args: {
                 clipStartSec: clip.startSec,
                 clipLengthSec: clip.lengthSec,
                 segments: args.silenceSegmentsByClipId?.[clip.id],
+            }),
+            takeLaneSeparatorOffsetsPx: buildTakeLaneSeparatorOffsets({
+                clip,
+                showAllTakes: args.showAllTakes === true,
+                bodyHeightPx: Math.max(
+                    1,
+                    args.rowHeight - CLIP_BODY_PADDING_Y - CLIP_HEADER_HEIGHT,
+                ),
             }),
         })),
     );

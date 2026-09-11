@@ -247,8 +247,25 @@ function buildMockTimeline(): Record<string, unknown> {
                 // header 布局（隐藏增益旋钮与共振峰徽标），浏览器里就验证不到
                 // 音频 clip 的完整控件。
                 ...(trackIndex === 2 && index === clipCount - 1 ? { midi_note_count: 8 } : {}),
-                takes: [],
-                active_take_id: undefined,
+                // 多 Take：轨道 0 的首个 clip 平铺两条 Take（其余保持单 Take）——
+                // 内核的 lane 分界线绘制与「点击 inactive lane 切换活跃 Take」
+                // 需要多 Take 数据才能验证。
+                takes:
+                    trackIndex === 0 && index === 0
+                        ? [
+                              {
+                                  id: `${trackId}-take-1`,
+                                  name: "Take 1",
+                                  source_path: `/mock/audio-${trackIndex + 1}.wav`,
+                              },
+                              {
+                                  id: `${trackId}-take-2`,
+                                  name: "Take 2",
+                                  source_path: `/mock/audio-${trackIndex + 1}-alt.wav`,
+                              },
+                          ]
+                        : [],
+                active_take_id: trackIndex === 0 && index === 0 ? `${trackId}-take-1` : undefined,
             });
             cursor += lengthSec + gapSec;
         }
@@ -430,7 +447,10 @@ function buildHandlers(): Record<string, (...args: unknown[]) => unknown> {
  */
 function recordWriteArgs(method: string, args: unknown[]): void {
     if (!/^(set_|move_|update_|save_)/.test(method) || args.length === 0) return;
-    const holder = window as unknown as { __mockArgs?: Record<string, unknown> };
+    const holder = window as unknown as {
+        __mockArgs?: Record<string, unknown>;
+        __mockArgsAll?: Record<string, unknown[]>;
+    };
     const record = holder.__mockArgs ?? {};
     try {
         record[method] = JSON.parse(JSON.stringify(args[0]));
@@ -438,6 +458,15 @@ function recordWriteArgs(method: string, args: unknown[]): void {
         record[method] = String(args[0]);
     }
     holder.__mockArgs = record;
+    // 完整位置参数（`__mockArgs` 只记第一个参数，多参数命令——如
+    // `set_clip_active_take(clipId, takeId, checkpoint)`——无法只靠它核对）。
+    const all = holder.__mockArgsAll ?? {};
+    try {
+        all[method] = JSON.parse(JSON.stringify(args)) as unknown[];
+    } catch {
+        all[method] = args.map((arg) => String(arg));
+    }
+    holder.__mockArgsAll = all;
 }
 
 export function installMockBackend(): void {

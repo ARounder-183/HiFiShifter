@@ -116,6 +116,13 @@ export interface TimelineKernelViewProps {
         Record<string, ReadonlyArray<readonly [number, number]>>
     >;
     /**
+     * 是否平铺显示全部 Take（`session.showAllTakes`）。
+     *
+     * 影响多 Take 的 lane 命中（分界线绘制由波形面与模型各自消费同一份设置）；
+     * 缺省 true（与 session 默认值一致）。
+     */
+    readonly showAllTakes?: boolean;
+    /**
      * 内核态行内编辑（重命名 / 增益 / 速率）。
      *
      * 由面板提供：面板持有编辑状态与提交语义（值的格式化与解析是领域知识——
@@ -222,6 +229,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         activeGroupIds,
         disabledGroupIds,
         silenceSegmentsByClipId,
+        showAllTakes,
         onScrollLeftCommit,
         onViewportWidthChange,
     } = props;
@@ -314,6 +322,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         activeGroupIds: activeGroupIds ?? [],
         disabledGroupIds: disabledGroupIds ?? [],
         silenceSegmentsByClipId,
+        showAllTakes: showAllTakes ?? true,
     });
 
     // 数据镜像：渲染期写 ref，宿主在 rAF 内读取（避免宿主订阅 React 状态）。
@@ -403,6 +412,8 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
             onBoxSelectCommit: (args) => interactionsRef.current?.onBoxSelectCommit?.(args),
             onContextMenu: (args) => interactionsRef.current?.onContextMenu?.(args),
             onFadeContextMenu: (request) => interactionsRef.current?.onFadeContextMenu?.(request),
+            onActivateTake: (clipId, takeId, sec) =>
+                interactionsRef.current?.onActivateTake?.(clipId, takeId, sec),
         }),
         [],
     );
@@ -581,6 +592,8 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         disabledGroupIds,
         // 静音检测预览：改变细节层的红色覆盖层（检测对话框实时写入）。
         silenceSegmentsByClipId,
+        // 多 Take 平铺开关：改变 lane 分界线。
+        showAllTakes,
     ]);
 
     return (
