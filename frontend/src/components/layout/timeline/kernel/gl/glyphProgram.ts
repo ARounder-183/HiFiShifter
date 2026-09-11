@@ -22,6 +22,9 @@
  *    `tex.a × color` —— 颜色完全由实例决定，同一字形可复用于不同颜色文本。
  * 3. 预乘 alpha 输出 + `blendFunc(ONE, ONE_MINUS_SRC_ALPHA)`，与 sdf-box 一致；
  *    混合状态在每次 draw 前设置（program 各自负责，避免跨 program 状态泄漏）。
+ * 4. **页边长一致性**：`uploadAtlas` 的 `sizePx` 必须等于 `buildGlyphQuads` 的
+ *    `atlasPageSizePx`（唯一来源是 `GlyphRasterizer.pageSizePx()`）；不一致时 uv 会
+ *    整体偏移、采样到邻居字形（乱码），因此这里直接抛错而不是静默接受。
  */
 
 import { resolveBufferFloats } from "./instanceBuffer";
@@ -97,7 +100,8 @@ export interface GlyphProgram {
      * 上传（或更新）图集纹理。
      *
      * @param data 图集像素数据（RGBA，长度 = sizePx × sizePx × 4）。
-     * @param sizePx 图集边长（物理像素）。
+     * @param sizePx 图集边长（物理像素），必须与 `buildGlyphQuads` 的 `atlasPageSizePx`
+     *               一致（见文件头约束 4）。
      */
     uploadAtlas(data: Uint8ClampedArray, sizePx: number): void;
     /**
@@ -127,166 +131,194 @@ export interface GlyphProgram {
  * @returns program 句柄；创建失败时抛错（调用方捕获后回退）。
  */
 export function createGlyphProgram(gl: WebGL2RenderingContext): GlyphProgram {
-    const vertex = compile(gl, gl.VERTEX_SHADER, VERTEX_SHADER);
-    const fragment = compile(gl, gl.FRAGMENT_SHADER, FRAGMENT_SHADER);
-    const program = gl.createProgram();
-    if (!program) throw new Error("Unable to create glyph program");
-    gl.attachShader(program, vertex);
-    gl.attachShader(program, fragment);
-    gl.linkProgram(program);
-    gl.deleteShader(vertex);
-    gl.deleteShader(fragment);
-    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-        const message = gl.getProgramInfoLog(program) ?? "Unknown glyph link error";
-        gl.deleteProgram(program);
-        throw new Error(message);
-    }
-
-    const resolutionLocation = gl.getUniformLocation(program, "u_resolution");
-    const originLocation = gl.getUniformLocation(program, "u_viewOrigin");
-    const atlasLocation = gl.getUniformLocation(program, "u_atlas");
-    if (!resolutionLocation || !originLocation || !atlasLocation) {
-        gl.deleteProgram(program);
-        throw new Error("glyph uniforms are missing");
-    }
-
-    const vao = gl.createVertexArray();
-    const unitBuffer = gl.createBuffer();
-    const instanceBuffer = gl.createBuffer();
-    const texture = gl.createTexture();
-    if (!vao || !unitBuffer || !instanceBuffer || !texture) {
-        gl.deleteProgram(program);
-        throw new Error("Unable to create glyph buffers");
-    }
-
+    let vertex: WebGLShader | null = null;
+    let fragment: WebGLShader | null = null;
+    let program: WebGLProgram | null = null;
+    let vao: WebGLVertexArrayObject | null = null;
+    let unitBuffer: WebGLBuffer | null = null;
+    let instanceBuffer: WebGLBuffer | null = null;
+    let texture: WebGLTexture | null = null;
     let instanceCapacityFloats = 0;
     let uploadedCount = 0;
     let quadScratch = new Float32Array(0);
     let atlasSizePx = 0;
 
-    /** 绑定实例属性（size 个连续 location）。 */
-    function bindInstanceAttrib(name: string, size: number, offsetFloats: number): void {
-        const location = gl.getAttribLocation(program, name);
-        if (location < 0) return;
-        gl.enableVertexAttribArray(location);
-        gl.vertexAttribPointer(
-            location,
-            size,
-            gl.FLOAT,
-            false,
-            INSTANCE_STRIDE_BYTES,
-            offsetFloats * 4,
-        );
-        gl.vertexAttribDivisor(location, 1);
-    }
+    try {
+        vertex = compile(gl, gl.VERTEX_SHADER, VERTEX_SHADER);
+        fragment = compile(gl, gl.FRAGMENT_SHADER, FRAGMENT_SHADER);
+        program = gl.createProgram();
+        if (!program) throw new Error("Unable to create glyph program");
+        gl.attachShader(program, vertex);
+        gl.attachShader(program, fragment);
+        gl.linkProgram(program);
+        if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+            throw new Error(gl.getProgramInfoLog(program) ?? "Unknown glyph link error");
+        }
+        gl.deleteShader(vertex);
+        gl.deleteShader(fragment);
+        vertex = null;
+        fragment = null;
 
-    gl.bindVertexArray(vao);
-    gl.bindBuffer(gl.ARRAY_BUFFER, unitBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, UNIT_QUAD, gl.STATIC_DRAW);
-    const unitLocation = gl.getAttribLocation(program, "a_unit");
-    if (unitLocation >= 0) {
+        const resolutionLocation = gl.getUniformLocation(program, "u_resolution");
+        const originLocation = gl.getUniformLocation(program, "u_viewOrigin");
+        const atlasLocation = gl.getUniformLocation(program, "u_atlas");
+        if (!resolutionLocation || !originLocation || !atlasLocation) {
+            throw new Error("glyph uniforms are missing");
+        }
+
+        vao = gl.createVertexArray();
+        unitBuffer = gl.createBuffer();
+        instanceBuffer = gl.createBuffer();
+        texture = gl.createTexture();
+        if (!vao || !unitBuffer || !instanceBuffer || !texture) {
+            throw new Error("Unable to create glyph buffers");
+        }
+
+        /** 绑定实例属性（size 个连续 location）；缺失即抛错。 */
+        function bindInstanceAttrib(name: string, size: number, offsetFloats: number): void {
+            const location = gl!.getAttribLocation(program!, name);
+            if (location < 0) throw new Error(`glyph attribute is missing: ${name}`);
+            gl!.enableVertexAttribArray(location);
+            gl!.vertexAttribPointer(
+                location,
+                size,
+                gl!.FLOAT,
+                false,
+                INSTANCE_STRIDE_BYTES,
+                offsetFloats * 4,
+            );
+            gl!.vertexAttribDivisor(location, 1);
+        }
+
+        gl.bindVertexArray(vao);
+        gl.bindBuffer(gl.ARRAY_BUFFER, unitBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, UNIT_QUAD, gl.STATIC_DRAW);
+        const unitLocation = gl.getAttribLocation(program, "a_unit");
+        if (unitLocation < 0) throw new Error("glyph attribute is missing: a_unit");
         gl.enableVertexAttribArray(unitLocation);
         gl.vertexAttribPointer(unitLocation, 2, gl.FLOAT, false, 0, 0);
         gl.vertexAttribDivisor(unitLocation, 0);
-    }
 
-    gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuffer);
-    bindInstanceAttrib("i_rect", 4, OFF_RECT);
-    bindInstanceAttrib("i_uv", 4, OFF_UV);
-    bindInstanceAttrib("i_color", 4, OFF_COLOR);
-    gl.bindVertexArray(null);
+        gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuffer);
+        bindInstanceAttrib("i_rect", 4, OFF_RECT);
+        bindInstanceAttrib("i_uv", 4, OFF_UV);
+        bindInstanceAttrib("i_color", 4, OFF_COLOR);
+        gl.bindVertexArray(null);
 
-    // 纹理参数：字形图集按 1:1 采样，必须用 NEAREST（LINEAR 会在边缘混入邻居字形）。
-    gl.bindTexture(gl.TEXTURE_2D, texture);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-
-    /** 设置绘制状态（program / VAO / uniform / 混合）。 */
-    function prepareDraw(target: GlRasterTarget, viewOriginX: number, viewOriginY: number): void {
-        gl.useProgram(program);
-        gl.bindVertexArray(vao);
-        gl.enable(gl.BLEND);
-        gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-        gl.activeTexture(gl.TEXTURE0);
+        // 纹理参数：字形图集按 1:1 采样，必须用 NEAREST（LINEAR 会在边缘混入邻居字形）。
         gl.bindTexture(gl.TEXTURE_2D, texture);
-        gl.uniform1i(atlasLocation, 0);
-        gl.uniform2f(resolutionLocation, target.cssWidthPx, target.cssHeightPx);
-        gl.uniform2f(originLocation, viewOriginX, viewOriginY);
-    }
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
 
-    return {
-        uploadAtlas(data, sizePx) {
-            if (!Number.isFinite(sizePx) || sizePx <= 0) return;
-            atlasSizePx = sizePx;
-            gl.bindTexture(gl.TEXTURE_2D, texture);
-            gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-            gl.texImage2D(
-                gl.TEXTURE_2D,
-                0,
-                gl.RGBA,
-                sizePx,
-                sizePx,
-                0,
-                gl.RGBA,
-                gl.UNSIGNED_BYTE,
-                new Uint8Array(data.buffer, data.byteOffset, data.byteLength),
-            );
-        },
+        /** 设置绘制状态（program / VAO / uniform / 混合 / 纹理）。 */
+        function prepareDraw(
+            target: GlRasterTarget,
+            viewOriginX: number,
+            viewOriginY: number,
+        ): void {
+            gl!.useProgram(program!);
+            gl!.bindVertexArray(vao);
+            gl!.enable(gl!.BLEND);
+            gl!.blendFunc(gl!.ONE, gl!.ONE_MINUS_SRC_ALPHA);
+            gl!.activeTexture(gl!.TEXTURE0);
+            gl!.bindTexture(gl!.TEXTURE_2D, texture);
+            gl!.uniform1i(atlasLocation, 0);
+            gl!.uniform2f(resolutionLocation, target.cssWidthPx, target.cssHeightPx);
+            gl!.uniform2f(originLocation, viewOriginX, viewOriginY);
+        }
 
-        render(quads, target, viewOriginX, viewOriginY) {
-            const count = quads.length;
-            if (count <= 0 || atlasSizePx <= 0) {
-                uploadedCount = 0;
-                return;
-            }
-            const needed = count * GLYPH_INSTANCE_FLOATS;
-            const capacity = resolveBufferFloats(instanceCapacityFloats, needed);
-            if (quadScratch.length < capacity) quadScratch = new Float32Array(capacity);
-            if (capacity !== instanceCapacityFloats) {
+        const handle: GlyphProgram = {
+            uploadAtlas(data, sizePx) {
+                if (!Number.isFinite(sizePx) || sizePx <= 0) return;
+                const size = Math.floor(sizePx);
+                if (atlasSizePx > 0 && size !== atlasSizePx) {
+                    // uv 由页边长换算，换页尺寸会让既有四边形全部错位（见文件头约束 4）。
+                    throw new Error(
+                        `glyph atlas size changed: ${atlasSizePx} -> ${size}（需重建 program）`,
+                    );
+                }
+                atlasSizePx = size;
+                gl.bindTexture(gl.TEXTURE_2D, texture);
+                gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+                gl.texImage2D(
+                    gl.TEXTURE_2D,
+                    0,
+                    gl.RGBA,
+                    size,
+                    size,
+                    0,
+                    gl.RGBA,
+                    gl.UNSIGNED_BYTE,
+                    new Uint8Array(data.buffer, data.byteOffset, data.byteLength),
+                );
+            },
+
+            render(quads, target, viewOriginX, viewOriginY) {
+                const count = quads.length;
+                if (count <= 0 || atlasSizePx <= 0) {
+                    uploadedCount = 0;
+                    return;
+                }
+                const needed = count * GLYPH_INSTANCE_FLOATS;
+                const capacity = resolveBufferFloats(instanceCapacityFloats, needed);
+                if (quadScratch.length < capacity) quadScratch = new Float32Array(capacity);
+                if (capacity !== instanceCapacityFloats) {
+                    gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuffer);
+                    gl.bufferData(gl.ARRAY_BUFFER, capacity * 4, gl.DYNAMIC_DRAW);
+                    instanceCapacityFloats = capacity;
+                }
+                for (let index = 0; index < count; index += 1) {
+                    const quad = quads[index];
+                    const base = index * GLYPH_INSTANCE_FLOATS;
+                    quadScratch[base + OFF_RECT] = quad.x;
+                    quadScratch[base + OFF_RECT + 1] = quad.y;
+                    quadScratch[base + OFF_RECT + 2] = quad.w;
+                    quadScratch[base + OFF_RECT + 3] = quad.h;
+                    quadScratch[base + OFF_UV] = quad.u0;
+                    quadScratch[base + OFF_UV + 1] = quad.v0;
+                    quadScratch[base + OFF_UV + 2] = quad.u1;
+                    quadScratch[base + OFF_UV + 3] = quad.v1;
+                    quadScratch[base + OFF_COLOR] = quad.rgba[0];
+                    quadScratch[base + OFF_COLOR + 1] = quad.rgba[1];
+                    quadScratch[base + OFF_COLOR + 2] = quad.rgba[2];
+                    quadScratch[base + OFF_COLOR + 3] = quad.rgba[3];
+                }
                 gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuffer);
-                gl.bufferData(gl.ARRAY_BUFFER, capacity * 4, gl.DYNAMIC_DRAW);
-                instanceCapacityFloats = capacity;
-            }
-            for (let index = 0; index < count; index += 1) {
-                const quad = quads[index];
-                const base = index * GLYPH_INSTANCE_FLOATS;
-                quadScratch[base + OFF_RECT] = quad.x;
-                quadScratch[base + OFF_RECT + 1] = quad.y;
-                quadScratch[base + OFF_RECT + 2] = quad.w;
-                quadScratch[base + OFF_RECT + 3] = quad.h;
-                quadScratch[base + OFF_UV] = quad.u0;
-                quadScratch[base + OFF_UV + 1] = quad.v0;
-                quadScratch[base + OFF_UV + 2] = quad.u1;
-                quadScratch[base + OFF_UV + 3] = quad.v1;
-                quadScratch[base + OFF_COLOR] = quad.rgba[0];
-                quadScratch[base + OFF_COLOR + 1] = quad.rgba[1];
-                quadScratch[base + OFF_COLOR + 2] = quad.rgba[2];
-                quadScratch[base + OFF_COLOR + 3] = quad.rgba[3];
-            }
-            gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuffer);
-            gl.bufferSubData(gl.ARRAY_BUFFER, 0, quadScratch, 0, needed);
-            uploadedCount = count;
-            prepareDraw(target, viewOriginX, viewOriginY);
-            gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, count);
-        },
+                gl.bufferSubData(gl.ARRAY_BUFFER, 0, quadScratch, 0, needed);
+                uploadedCount = count;
+                prepareDraw(target, viewOriginX, viewOriginY);
+                gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, count);
+            },
 
-        repaint(target, viewOriginX, viewOriginY) {
-            if (uploadedCount <= 0 || atlasSizePx <= 0) return;
-            prepareDraw(target, viewOriginX, viewOriginY);
-            gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, uploadedCount);
-        },
+            repaint(target, viewOriginX, viewOriginY) {
+                if (uploadedCount <= 0 || atlasSizePx <= 0) return;
+                prepareDraw(target, viewOriginX, viewOriginY);
+                gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, uploadedCount);
+            },
 
-        dispose() {
-            gl.deleteBuffer(unitBuffer);
-            gl.deleteBuffer(instanceBuffer);
-            gl.deleteVertexArray(vao);
-            gl.deleteTexture(texture);
-            gl.deleteProgram(program);
-            instanceCapacityFloats = 0;
-            uploadedCount = 0;
-            atlasSizePx = 0;
-        },
-    };
+            dispose() {
+                gl.deleteBuffer(unitBuffer);
+                gl.deleteBuffer(instanceBuffer);
+                gl.deleteVertexArray(vao);
+                gl.deleteTexture(texture);
+                gl.deleteProgram(program);
+                instanceCapacityFloats = 0;
+                uploadedCount = 0;
+                atlasSizePx = 0;
+            },
+        };
+        return handle;
+    } catch (error) {
+        // 失败路径：逆序释放已创建对象，避免重试时累积显存泄漏。
+        if (vertex) gl.deleteShader(vertex);
+        if (fragment) gl.deleteShader(fragment);
+        if (unitBuffer) gl.deleteBuffer(unitBuffer);
+        if (instanceBuffer) gl.deleteBuffer(instanceBuffer);
+        if (vao) gl.deleteVertexArray(vao);
+        if (texture) gl.deleteTexture(texture);
+        if (program) gl.deleteProgram(program);
+        throw error;
+    }
 }

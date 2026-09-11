@@ -108,4 +108,44 @@ describe("clipInstances", () => {
         const result = build([]);
         expect(result.count).toBe(0);
     });
+
+    it("分隔缝容差边界：0.4px 命中、0.6px 不命中", () => {
+        const hit = build([
+            makeClip({ id: "a", leftPx: 0, widthPx: 100 }),
+            makeClip({ id: "b", leftPx: 100.4, widthPx: 100 }),
+        ]);
+        expect(seamWidthOf(hit.instances, 0)).toBeGreaterThan(0);
+
+        const miss = build([
+            makeClip({ id: "a", leftPx: 0, widthPx: 100 }),
+            makeClip({ id: "b", leftPx: 100.6, widthPx: 100 }),
+        ]);
+        expect(seamWidthOf(miss.instances, 0)).toBe(0);
+    });
+
+    it("BOX 实例的 mode 槽为 0（与 sdf-box program 的 BOX 模式约定一致）", () => {
+        const result = build([makeClip()]);
+        // OFF_MODE = 24：非 0 会被着色器当作平面矩形，块面将失去圆角与分区着色。
+        expect(result.instances[24]).toBe(0);
+    });
+
+    it("实例缓冲按倍增策略增长（复用容量策略）", () => {
+        const builder = createClipInstanceBuilder();
+        const small = builder.build({
+            clips: [makeClip()],
+            darkMode: false,
+            seamColor: "rgb(31, 31, 31)",
+        });
+        const smallLength = small.instances.length;
+        const large = builder.build({
+            clips: Array.from({ length: 8 }, (_unused, index) =>
+                makeClip({ id: `clip-${index}`, leftPx: index * 200 }),
+            ),
+            darkMode: false,
+            seamColor: "rgb(31, 31, 31)",
+        });
+        expect(large.count).toBe(8);
+        expect(large.instances.length).toBeGreaterThanOrEqual(8 * CLIP_INSTANCE_FLOATS);
+        expect(large.instances.length).toBeGreaterThan(smallLength);
+    });
 });

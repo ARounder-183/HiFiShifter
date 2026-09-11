@@ -29,8 +29,11 @@ import { createGlyphAtlas, type AtlasSlot } from "./glyphAtlas";
  * 行高系数：槽位高度 = 字号 × 该系数。
  *
  * 取 1.2（常规排版行高）：字形上下的升部 / 降部都在槽位内，避免被截断。
+ *
+ * 特殊说明：调用方构造字形四边形时的 `heightPx` **必须**等于
+ * `字号 × 本系数`，否则字形会被纵向拉伸 / 压扁（见 `gl/glyphQuads` 的 heightPx 文档）。
  */
-const LINE_HEIGHT_RATIO = 1.2;
+export const GLYPH_LINE_HEIGHT_RATIO = 1.2;
 
 /** 光栅化器构造参数。 */
 export interface GlyphRasterizerOptions {
@@ -100,9 +103,40 @@ function scaleFontKey(fontKey: string, scale: number): string {
 }
 
 /**
+ * 归一化光栅化器构造参数（纯函数，供构造与单测共用）。
+ *
+ * 规则：
+ * - `pageSizePx`：有限且 >= 16 时向下取整，否则回退 16。**NaN 必须显式判有限性**：
+ *   `Math.max(16, Math.floor(NaN))` 仍是 NaN，会让 `canvas.width = NaN` 进而让 2D
+ *   上下文创建失败、`acquire` 永远返回 null（静默无文字）；
+ * - `maxPages`：有限且 >= 1 时向下取整，否则回退 1；
+ * - `dpr`：有限且 > 0 时原样，否则回退 1。
+ *
+ * @param options 原始构造参数。
+ * @returns 归一化参数（可直接用于 canvas 尺寸与图集分配）。
+ */
+export function resolveGlyphRasterizerParams(options: GlyphRasterizerOptions): {
+    pageSizePx: number;
+    maxPages: number;
+    dpr: number;
+} {
+    return {
+        pageSizePx:
+            Number.isFinite(options.pageSizePx) && options.pageSizePx >= 16
+                ? Math.floor(options.pageSizePx)
+                : 16,
+        maxPages:
+            Number.isFinite(options.maxPages) && options.maxPages >= 1
+                ? Math.floor(options.maxPages)
+                : 1,
+        dpr: Number.isFinite(options.dpr) && options.dpr > 0 ? options.dpr : 1,
+    };
+}
+
+/**
  * 创建字形光栅化器。
  *
- * 流程：建图集分配器与测量画布 → `acquire` 时按 `(字符, 字体)` 查缓存，
+ * 流程：归一化参数 → 建图集分配器与测量画布 → `acquire` 时按 `(字符, 字体)` 查缓存，
  * 未命中则申请槽位、按 dpr 光栅化到对应页并标记脏页。
  *
  * 特殊说明：无 DOM 环境（node 单测）返回 null——调用方据此跳过文字渲染而不是崩溃。
@@ -113,12 +147,11 @@ function scaleFontKey(fontKey: string, scale: number): string {
 export function createGlyphRasterizer(options: GlyphRasterizerOptions): GlyphRasterizer | null {
     if (typeof document === "undefined") return null;
 
-    const pageSize = Math.max(16, Math.floor(options.pageSizePx));
-    const dpr = Number.isFinite(options.dpr) && options.dpr > 0 ? options.dpr : 1;
+    const { pageSizePx: pageSize, maxPages, dpr } = resolveGlyphRasterizerParams(options);
     const atlas = createGlyphAtlas({
         pageSizePx: pageSize,
         paddingPx: 1,
-        maxPages: options.maxPages,
+        maxPages,
     });
 
     const pageContexts: CanvasRenderingContext2D[] = [];
@@ -171,7 +204,7 @@ export function createGlyphRasterizer(options: GlyphRasterizerOptions): GlyphRas
 
             const fontSizeCss = parseFontSizePx(fontKey);
             const slotWidth = Math.max(1, Math.ceil(measure(char, fontKey) * dpr));
-            const slotHeight = Math.max(1, Math.ceil(fontSizeCss * LINE_HEIGHT_RATIO * dpr));
+            const slotHeight = Math.max(1, Math.ceil(fontSizeCss * GLYPH_LINE_HEIGHT_RATIO * dpr));
             const slot = atlas.allocate(slotWidth, slotHeight);
             if (slot === null) return null;
 

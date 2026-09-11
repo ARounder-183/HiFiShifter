@@ -79,6 +79,12 @@ export function createGlCanvas(canvas: HTMLCanvasElement): GlCanvasHandle | null
             // 整个绘制状态（缓冲被清空），无谓写入会丢掉同帧已上传的实例数据。
             if (canvas.width !== target.physicalWidthPx) canvas.width = target.physicalWidthPx;
             if (canvas.height !== target.physicalHeightPx) canvas.height = target.physicalHeightPx;
+            // 与既有 rasterize 契约一致：显式写 CSS 尺寸。否则 `<canvas>` 无样式时
+            // 会按 width/height 属性当 CSS 尺寸显示，整块画布被放大 dpr 倍。
+            const styleWidth = `${cssWidthPx}px`;
+            const styleHeight = `${cssHeightPx}px`;
+            if (canvas.style.width !== styleWidth) canvas.style.width = styleWidth;
+            if (canvas.style.height !== styleHeight) canvas.style.height = styleHeight;
             gl.viewport(0, 0, target.physicalWidthPx, target.physicalHeightPx);
             return target;
         },

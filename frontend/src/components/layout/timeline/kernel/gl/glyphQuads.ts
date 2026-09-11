@@ -55,7 +55,13 @@ export interface GlyphQuadArgs {
     readonly originX: number;
     /** 文本顶部 y（内容坐标 CSS px）。 */
     readonly originY: number;
-    /** 字形四边形高度（CSS px）。 */
+    /**
+     * 字形四边形高度（CSS px）。
+     *
+     * 特殊说明：**必须等于 `字号 × GLYPH_LINE_HEIGHT_RATIO`**（光栅化槽位高度按该
+     * 系数生成，uv 覆盖整个槽位）。不等时字形会被纵向拉伸 / 压扁——观感是"发虚"
+     * 而非"错位"，很难归因，因此这条等式是跨模块契约。
+     */
     readonly heightPx: number;
     /** 图集单页边长（与槽位坐标同单位）。 */
     readonly atlasPageSizePx: number;

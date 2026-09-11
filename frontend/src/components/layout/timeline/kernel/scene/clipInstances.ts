@@ -31,6 +31,7 @@
 
 import { buildClipBodyInstance, CLIP_INSTANCE_FLOATS } from "../../runtime/timelineClipGlRenderer";
 import { buildTimelineClipVisualStyle } from "../../runtime/timelineCanvasStyle";
+import { resolveBufferFloats } from "../gl/instanceBuffer";
 
 /**
  * 参与实例构建的最小 clip 字段集。
@@ -69,15 +70,26 @@ export interface ClipInstanceArgs {
     readonly activeGroupIds?: ReadonlySet<string>;
     /** 禁用编组 id 列表。 */
     readonly disabledGroupIds?: readonly string[];
-    /** 泳道底色（相邻 clip 之间的分隔缝颜色）。 */
+    /**
+     * 泳道底色（相邻 clip 之间的分隔缝颜色）。
+     *
+     * 格式约束：只接受 `rgb(...)` / `rgba(...)` 文本——底层 `parseRgbaColor` 只解析
+     * 该格式，其他写法（hex / 颜色关键字）会被解析成不透明洋红（既有实现的故意设计，
+     * 便于真机发现漏解析）。
+     */
     readonly seamColor: string;
 }
 
 /** 构建结果：实例缓冲 + 有效实例数。 */
 export interface ClipInstances {
-    /** 实例缓冲（长度为 `count × CLIP_INSTANCE_FLOATS` 的有效前缀）。 */
+    /**
+     * 实例缓冲（内部复用缓冲，**长度大于等于有效实例数**）。
+     *
+     * 特殊说明：实例数只能用 `count`，**禁止**用 `instances.length` 推断——
+     * 复用缓冲会保留上一帧的尾部数据，按长度绘制会画出陈旧实例。
+     */
     readonly instances: Float32Array;
-    /** 有效实例数。 */
+    /** 有效实例数（唯一可信的实例计数）。 */
     readonly count: number;
 }
 
@@ -164,11 +176,10 @@ export function createClipInstanceBuilder(): ClipInstanceBuilder {
             const clips = args.clips;
             const count = clips.length;
             const needed = count * CLIP_INSTANCE_FLOATS;
-            if (buffer.length < needed) {
-                // 倍增而非精确分配：滚动/缩放过程中窗口内 clip 数会小幅波动，
-                // 每次精确分配会让 GC 压力回到"每帧一次大分配"。
-                buffer = new Float32Array(Math.max(needed, buffer.length * 2));
-            }
+            // 容量策略与 GL 层共用同一实现（倍增而非精确分配）：滚动 / 缩放过程中
+            // 窗口内 clip 数会小幅波动，每次精确分配会让 GC 压力回到热路径上。
+            const capacity = resolveBufferFloats(buffer.length, needed);
+            if (capacity !== buffer.length) buffer = new Float32Array(capacity);
 
             const seamClipIds = computeSeamClipIds(clips);
             for (let index = 0; index < count; index += 1) {

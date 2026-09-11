@@ -24,9 +24,15 @@ export interface GlRasterTarget {
     readonly physicalWidthPx: number;
     /** 画布物理高（= `canvas.height`）。 */
     readonly physicalHeightPx: number;
-    /** 绘制坐标系宽（CSS px，= 物理宽 / dpr），供 `u_resolution`。 */
+    /**
+     * 绘制坐标系宽（= 物理宽 / dpr），供 `u_resolution`。
+     *
+     * 特殊说明：这是**回算值**，不等于入参的 CSS 宽度（非整数尺寸下会差最多
+     * `0.5 / dpr`）。**不要**用它回写 `canvas.style.width`——那会引入亚像素漂移；
+     * 回写样式请使用原始入参。
+     */
     readonly cssWidthPx: number;
-    /** 绘制坐标系高（CSS px，= 物理高 / dpr），供 `u_resolution`。 */
+    /** 绘制坐标系高（= 物理高 / dpr），供 `u_resolution`；与 cssWidthPx 同为回算值。 */
     readonly cssHeightPx: number;
     /** 生效的 DPR（非法输入已回退为 1）。 */
     readonly dpr: number;
