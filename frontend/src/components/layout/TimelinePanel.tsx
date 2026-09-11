@@ -1538,11 +1538,32 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         [dispatch, sessionRef, setContextMenu, setTrackAreaMenu],
     );
 
+    /**
+     * 内核双击 clip：请求参数编辑器按 clip 起止范围创建选区。
+     *
+     * 与旧实现（`ClipItem` 的双击分支）同源：关闭右键菜单 → 派发
+     * `hifi:editOp/selectClipParamRange`，交互焦点随之切到参数编辑器侧。
+     * 用 window 事件而不是直接调 store：参数编辑器在另一棵子树里监听它，
+     * 这条契约与渲染模式无关（内核 / 旧实现共用同一入口）。
+     */
+    const handleKernelDoubleClickClip = React.useCallback(
+        (clipId: string) => {
+            clearContextMenu();
+            window.dispatchEvent(
+                new CustomEvent("hifi:editOp", {
+                    detail: { op: "selectClipParamRange", clipId },
+                }),
+            );
+        },
+        [clearContextMenu],
+    );
+
     /** 内核交互回调集合（引用稳定：内核创建时取一次）。 */
     const kernelInteractions = React.useMemo(
         () => ({
             onSeek: handleKernelSeek,
             onSelectClip: handleKernelSelectClip,
+            onDoubleClickClip: handleKernelDoubleClickClip,
             onDragPreview: handleKernelDragPreview,
             onDragCommit: handleKernelDragCommit,
             onTrimPreview: handleKernelTrimPreview,
@@ -2933,27 +2954,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                             contentHeight={contentHeight}
                                         />
 
-                                        {s.clipFormantToolWindow.open && activeFormantToolClip ? (
-                                            <ClipFormantToolWindow
-                                                clip={activeFormantToolClip}
-                                                status={
-                                                    s.clipFormantStatus[activeFormantToolClip.id] ??
-                                                    "ready"
-                                                }
-                                                x={s.clipFormantToolWindow.x}
-                                                y={s.clipFormantToolWindow.y}
-                                                onCommit={commitTrackLaneFormantMorph}
-                                                onMove={(x, y) =>
-                                                    dispatch(
-                                                        setClipFormantToolWindowPosition({ x, y }),
-                                                    )
-                                                }
-                                                onClose={() =>
-                                                    dispatch(closeClipFormantToolWindow())
-                                                }
-                                            />
-                                        ) : null}
-
                                         {/* Playhead 已移入 TimelineSurface sticky 层：与网格/Clip/
                                 波形在同一滚动事件内更新，避免 DOM 原生层与 sticky 层错帧。 */}
                                     </div>
@@ -3024,6 +3024,23 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                             </TimelineScrollArea>
                         </>
                     )}
+
+                    {/* 共振峰工具窗口：`fixed` 定位（视口坐标），与渲染模式无关。
+                        原先它随旧子树一起被包在内核开关内，内核模式下右键
+                        「共振峰变形」后窗口不出现——这里移到开关之外，两种模式共用。 */}
+                    {s.clipFormantToolWindow.open && activeFormantToolClip ? (
+                        <ClipFormantToolWindow
+                            clip={activeFormantToolClip}
+                            status={s.clipFormantStatus[activeFormantToolClip.id] ?? "ready"}
+                            x={s.clipFormantToolWindow.x}
+                            y={s.clipFormantToolWindow.y}
+                            onCommit={commitTrackLaneFormantMorph}
+                            onMove={(x, y) =>
+                                dispatch(setClipFormantToolWindowPosition({ x, y }))
+                            }
+                            onClose={() => dispatch(closeClipFormantToolWindow())}
+                        />
+                    ) : null}
 
                     {/* 导入模式选择菜单 */}
                     {importModeMenu && (

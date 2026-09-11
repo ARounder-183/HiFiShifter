@@ -248,6 +248,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
             onSeek: (sec, commit) => interactionsRef.current?.onSeek?.(sec, commit),
             onSelectClip: (clipId, additive) =>
                 interactionsRef.current?.onSelectClip?.(clipId, additive),
+            onDoubleClickClip: (clipId) => interactionsRef.current?.onDoubleClickClip?.(clipId),
             onDragPreview: (args) => interactionsRef.current?.onDragPreview?.(args),
             onDragCommit: (args) => interactionsRef.current?.onDragCommit?.(args),
             onTrimPreview: (args) => interactionsRef.current?.onTrimPreview?.(args),
@@ -448,12 +449,25 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                     width: wholeDevicePxLength(1, readDevicePixelRatio()),
                 }}
             />
-            {/* 自绘滚动条：thumb 的几何由宿主每帧写入（见 updateScrollbars）。 */}
-            <div className="absolute right-0 top-0 bottom-0 w-2 bg-black/5">
-                <div ref={vThumbRef} className="absolute left-0 w-full rounded bg-black/30" />
+            {/* 自绘滚动条：thumb 的几何由宿主每帧写入（见 updateScrollbars）。
+                样式对齐旧实现（`.custom-scrollbar` 上的原生滚动条）：
+                - thumb 取 `--qt-scrollbar-thumb`（浅色 #b4bac7 / 深色 #555555），
+                  而不是固定的半透明黑——后者在浅色主题下几乎看不见；
+                - 轨道**透明**（旧实现是 `scrollbar-color: … transparent`），
+                  加底色会在时间轴上多出一条灰带；
+                - 8px 宽 + 胶囊圆角，对应 macOS 的 overlay thin 滚动条
+                  （旧实现的原生滚动条不占布局，这里用绝对定位叠加，行为等价）。 */}
+            <div className="absolute right-0 top-0 bottom-0 w-2">
+                <div
+                    ref={vThumbRef}
+                    className="absolute left-0 w-full rounded-full bg-[var(--qt-scrollbar-thumb)]"
+                />
             </div>
-            <div className="absolute bottom-0 left-0 right-0 h-2 bg-black/5">
-                <div ref={hThumbRef} className="absolute top-0 h-full rounded bg-black/30" />
+            <div className="absolute bottom-0 left-0 right-0 h-2">
+                <div
+                    ref={hThumbRef}
+                    className="absolute top-0 h-full rounded-full bg-[var(--qt-scrollbar-thumb)]"
+                />
             </div>
             {fatal !== null ? (
                 <div className="absolute inset-0 flex items-center justify-center text-sm text-red-500">

@@ -253,6 +253,14 @@ export interface TimelineKernelInteractions {
      */
     readonly onSelectClip?: (clipId: string, additive: boolean) => void;
     /**
+     * 双击 clip（第二次按下命中，且两次之间未发生拖拽）。
+     *
+     * 旧实现语义：请求参数编辑器按 clip 起止范围创建选区，并把交互焦点切到
+     * 参数编辑器（见 `ClipItem` 的 `hifi:editOp/selectClipParamRange`）。
+     * 内核只负责识别手势，事件派发与焦点切换由面板完成。
+     */
+    readonly onDoubleClickClip?: (clipId: string) => void;
+    /**
      * 拖拽预览（拖拽期间每帧回调，**不经 React 渲染**）。
      *
      * 语义：调用方据此写入**乐观位置**（Redux）。内核不做独立的 ghost 图层——
@@ -1457,6 +1465,24 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     /** 点击 / 拖拽的位移阈值（CSS px）。 */
     const DRAG_THRESHOLD_PX = 4;
 
+    /**
+     * 双击判定参数（与旧实现 `ClipItem` 完全一致）。
+     *
+     * 用手动判定而不是原生 `dblclick`：clip 的 `pointerdown` 会 `preventDefault`，
+     * 原生 dblclick 不可靠；且第一次按下后若发生拖拽，待定记录必须失效，否则
+     * "拖拽后落点回位"会被误判成双击。
+     */
+    const DOUBLE_CLICK_MOVE_PX = 6;
+    const DOUBLE_CLICK_INTERVAL_MS = 500;
+
+    /** 上一次左键按下（clip 命中时记录，用于双击判定）。 */
+    let lastClipPress: {
+        pointerId: number;
+        clientX: number;
+        clientY: number;
+        time: number;
+    } | null = null;
+
     /** trim 允许的最小 clip 长度（秒）：再短会难以命中与选中。 */
     const MIN_CLIP_LENGTH_SEC = 0.05;
 
@@ -1643,6 +1669,29 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     function startPrimaryGesture(event: PointerEvent): void {
         const hit = hitAt(event.clientX, event.clientY);
         if (hit.kind === "clip") {
+            // 双击判定（参数与旧实现 `ClipItem` 一致）：命中后请求参数编辑器按
+            // clip 起止范围创建选区，**不**进入选中 / 拖拽手势（旧实现同样在
+            // 第二次按下时拦截并 return）。第一次按下只记待定，若随后发生拖拽，
+            // 待定记录会在手势升级时失效（见 onGesturePointerMove）。
+            const previousPress = lastClipPress;
+            const isDoubleClick =
+                previousPress != null &&
+                previousPress.pointerId === event.pointerId &&
+                Math.abs(previousPress.clientX - event.clientX) <= DOUBLE_CLICK_MOVE_PX &&
+                Math.abs(previousPress.clientY - event.clientY) <= DOUBLE_CLICK_MOVE_PX &&
+                performance.now() - previousPress.time <= DOUBLE_CLICK_INTERVAL_MS;
+            lastClipPress = isDoubleClick
+                ? null
+                : {
+                      pointerId: event.pointerId,
+                      clientX: event.clientX,
+                      clientY: event.clientY,
+                      time: performance.now(),
+                  };
+            if (isDoubleClick) {
+                interactions?.onDoubleClickClip?.(hit.clip.id);
+                return;
+            }
             const rect = container.getBoundingClientRect();
             const view = scroll.get();
             // 淡变角需要当前的淡变长度：命中索引只带几何字段，这里按 region
@@ -1744,6 +1793,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             const dx = event.clientX - gesture.startClientX;
             const dy = event.clientY - gesture.startClientY;
             if (dx * dx + dy * dy < DRAG_THRESHOLD_PX * DRAG_THRESHOLD_PX) return;
+            // 发生拖拽 → 双击待定记录失效：否则"拖拽后落点回位"（第二次按下
+            // 恰好落在首次按下附近）会被误判成双击（旧实现同样在拖拽分支清空）。
+            lastClipPress = null;
             // 超过阈值：按按下时的命中分区升级——淡变角 → fade、边缘 → trim、
             // 其余 → 拖拽移动。淡变角与边缘在水平方向重叠，命中层已按竖直方向
             // 切分（见 hitTest 的 ClipHitRegion 注释），这里只需按 region 分派。
