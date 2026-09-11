@@ -1088,6 +1088,21 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
      */
     const kernelHostRef = React.useRef<TimelineKernelHost | null>(null);
 
+    /**
+     * 拖入几何用的水平滚动量（模式无关）。
+     *
+     * 内核模式下时间轴是**自绘滚动**，DOM 容器的 scrollLeft 恒为 0——真值在内核
+     * 宿主里。旧模式仍取容器自身的 scrollLeft。
+     *
+     * @param el 事件目标容器（旧模式下即滚动容器）。
+     * @returns 当前水平滚动量（CSS px）。
+     */
+    function dragScrollLeftOf(el: HTMLElement): number {
+        const host = kernelHostRef.current;
+        if (host !== null) return host.getViewport().scrollLeft;
+        return el.scrollLeft;
+    }
+
     /** 内核 seek 的待提交位置与 rAF 句柄（拖拽期间按帧节流，松手立即提交）。 */
     const kernelSeekPendingRef = React.useRef<number | null>(null);
     const kernelSeekRafRef = React.useRef<number | null>(null);
@@ -2713,6 +2728,140 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         />
     );
 
+    const handleTimelineDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+        const dt = e.dataTransfer;
+        const tauriPath = tauriDraggedPathRef.current;
+        const hasDomFile = Boolean(dt?.files && dt.files.length > 0);
+        const isTauri = Boolean((window as unknown as { __TAURI__?: unknown }).__TAURI__);
+        if (!isTauri && !hasFileDrag(dt) && !hasDomFile && !tauriPath) return;
+        e.preventDefault();
+        const info = extractLocalFilePath(dt);
+        const el = e.currentTarget as HTMLDivElement;
+        const bounds = el.getBoundingClientRect();
+        const beat = beatFromClientX(e.clientX, bounds, dragScrollLeftOf(el));
+        const trackId = trackIdFromClientY(e.clientY);
+        const path = info?.path || tauriPath || "";
+        const fileName =
+            info?.name ||
+            (tauriPath
+                ? String(tauriPath.split(/[\\/]/).pop() ?? tauriPath)
+                : hasDomFile
+                  ? String(dt?.files?.[0]?.name ?? "Audio")
+                  : "Audio");
+        const dragAction = detectExternalPathAction(path);
+        if (path && dragAction !== "importAudio" && dragAction !== "importMidi") {
+            setDropPreview(null);
+            return;
+        }
+        if (dragAction === "importMidi") {
+            // MIDI 文件使用默认时长显示 drop preview
+            setDropPreview({
+                path,
+                fileName,
+                trackId,
+                startSec: beat,
+                durationSec: 2,
+            });
+        } else {
+            if (path) {
+                ensureDropPreviewDuration(path);
+            }
+            setDropPreview({
+                path,
+                fileName,
+                trackId,
+                startSec: beat,
+                durationSec: 0,
+            });
+        }
+    };
+
+    const handleTimelineDrop = (e: React.DragEvent<HTMLDivElement>) => {
+        const dt = e.dataTransfer;
+        const tauriPath = tauriDraggedPathRef.current;
+        const lastTauriDropPath = tauriLastDropPathRef.current;
+        const hasDomFile = Boolean(dt?.files && dt.files.length > 0);
+        const isTauri = Boolean((window as unknown as { __TAURI__?: unknown }).__TAURI__);
+        if (!isTauri && !hasFileDrag(dt) && !hasDomFile && !tauriPath) return;
+        e.preventDefault();
+
+        if (isTauri && Date.now() - (tauriDropHandledAtRef.current || 0) < 500) {
+            setDropPreview(null);
+            return;
+        }
+
+        const info = extractLocalFilePath(dt);
+        const el = e.currentTarget as HTMLDivElement;
+        const bounds = el.getBoundingClientRect();
+        const beat = beatFromClientX(e.clientX, bounds, dragScrollLeftOf(el));
+        const trackId = trackIdFromClientY(e.clientY);
+        setDropPreview(null);
+        const resolvedPath = info?.path || lastTauriDropPath || tauriPath;
+        if (resolvedPath) {
+            tauriDraggedPathRef.current = null;
+            tauriLastDropPathRef.current = null;
+            const actionKind = detectExternalPathAction(resolvedPath);
+            if (actionKind === "importMidi") {
+                onMidiClipPathChange(resolvedPath);
+                onMidiClipStartSecChange(beat);
+                onMidiClipTrackIdChange(trackId);
+                onMidiClipDialogOpenChange(true);
+                return;
+            }
+            if (actionKind && actionKind !== "importAudio") {
+                emitExternalFileAction(actionKind, resolvedPath);
+                return;
+            }
+            void dispatch(
+                importAudioAtPosition({
+                    audioPath: resolvedPath,
+                    trackId,
+                    startSec: beat,
+                }),
+            );
+            return;
+        }
+
+        if (isTauri) {
+            window.setTimeout(() => {
+                const p = tauriLastDropPathRef.current || tauriDraggedPathRef.current;
+                if (!p) return;
+                tauriDraggedPathRef.current = null;
+                tauriLastDropPathRef.current = null;
+                const actionKind = detectExternalPathAction(p);
+                if (actionKind === "importMidi") {
+                    onMidiClipPathChange(p);
+                    onMidiClipStartSecChange(beat);
+                    onMidiClipTrackIdChange(trackId);
+                    onMidiClipDialogOpenChange(true);
+                    return;
+                }
+                if (actionKind && actionKind !== "importAudio") {
+                    emitExternalFileAction(actionKind, p);
+                    return;
+                }
+                void dispatch(
+                    importAudioAtPosition({
+                        audioPath: p,
+                        trackId,
+                        startSec: beat,
+                    }),
+                );
+            }, 0);
+        }
+
+        const fallbackFile = dt.files?.[0] ?? null;
+        if (fallbackFile) {
+            void dispatch(
+                importAudioFileAtPosition({
+                    file: fallbackFile,
+                    trackId,
+                    startSec: beat,
+                }),
+            );
+        }
+    };
+
     return (
         <Profiler
             id="TimelinePanel"
@@ -2836,6 +2985,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                               contentHeight,
                                           }
                                 }
+                                onDragOver={handleTimelineDragOver}
+                                onDrop={handleTimelineDrop}
                             />
                         </>
                     ) : (
@@ -2962,60 +3113,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                     });
                                 }}
                                 onPointerDown={onSelectionRectPointerDown}
-                                onDragOver={(e) => {
-                                    const dt = e.dataTransfer;
-                                    const tauriPath = tauriDraggedPathRef.current;
-                                    const hasDomFile = Boolean(dt?.files && dt.files.length > 0);
-                                    const isTauri = Boolean(
-                                        (window as unknown as { __TAURI__?: unknown }).__TAURI__,
-                                    );
-                                    if (!isTauri && !hasFileDrag(dt) && !hasDomFile && !tauriPath)
-                                        return;
-                                    e.preventDefault();
-                                    const info = extractLocalFilePath(dt);
-                                    const el = e.currentTarget as HTMLDivElement;
-                                    const bounds = el.getBoundingClientRect();
-                                    const beat = beatFromClientX(e.clientX, bounds, el.scrollLeft);
-                                    const trackId = trackIdFromClientY(e.clientY);
-                                    const path = info?.path || tauriPath || "";
-                                    const fileName =
-                                        info?.name ||
-                                        (tauriPath
-                                            ? String(tauriPath.split(/[\\/]/).pop() ?? tauriPath)
-                                            : hasDomFile
-                                              ? String(dt?.files?.[0]?.name ?? "Audio")
-                                              : "Audio");
-                                    const dragAction = detectExternalPathAction(path);
-                                    if (
-                                        path &&
-                                        dragAction !== "importAudio" &&
-                                        dragAction !== "importMidi"
-                                    ) {
-                                        setDropPreview(null);
-                                        return;
-                                    }
-                                    if (dragAction === "importMidi") {
-                                        // MIDI 文件使用默认时长显示 drop preview
-                                        setDropPreview({
-                                            path,
-                                            fileName,
-                                            trackId,
-                                            startSec: beat,
-                                            durationSec: 2,
-                                        });
-                                    } else {
-                                        if (path) {
-                                            ensureDropPreviewDuration(path);
-                                        }
-                                        setDropPreview({
-                                            path,
-                                            fileName,
-                                            trackId,
-                                            startSec: beat,
-                                            durationSec: 0,
-                                        });
-                                    }
-                                }}
+                                onDragOver={handleTimelineDragOver}
                                 onDragLeave={(e) => {
                                     const related = e.relatedTarget as Node | null;
                                     if (
@@ -3025,100 +3123,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                         return;
                                     setDropPreview(null);
                                 }}
-                                onDrop={(e) => {
-                                    const dt = e.dataTransfer;
-                                    const tauriPath = tauriDraggedPathRef.current;
-                                    const lastTauriDropPath = tauriLastDropPathRef.current;
-                                    const hasDomFile = Boolean(dt?.files && dt.files.length > 0);
-                                    const isTauri = Boolean(
-                                        (window as unknown as { __TAURI__?: unknown }).__TAURI__,
-                                    );
-                                    if (!isTauri && !hasFileDrag(dt) && !hasDomFile && !tauriPath)
-                                        return;
-                                    e.preventDefault();
-
-                                    if (
-                                        isTauri &&
-                                        Date.now() - (tauriDropHandledAtRef.current || 0) < 500
-                                    ) {
-                                        setDropPreview(null);
-                                        return;
-                                    }
-
-                                    const info = extractLocalFilePath(dt);
-                                    const el = e.currentTarget as HTMLDivElement;
-                                    const bounds = el.getBoundingClientRect();
-                                    const beat = beatFromClientX(e.clientX, bounds, el.scrollLeft);
-                                    const trackId = trackIdFromClientY(e.clientY);
-                                    setDropPreview(null);
-                                    const resolvedPath =
-                                        info?.path || lastTauriDropPath || tauriPath;
-                                    if (resolvedPath) {
-                                        tauriDraggedPathRef.current = null;
-                                        tauriLastDropPathRef.current = null;
-                                        const actionKind = detectExternalPathAction(resolvedPath);
-                                        if (actionKind === "importMidi") {
-                                            onMidiClipPathChange(resolvedPath);
-                                            onMidiClipStartSecChange(beat);
-                                            onMidiClipTrackIdChange(trackId);
-                                            onMidiClipDialogOpenChange(true);
-                                            return;
-                                        }
-                                        if (actionKind && actionKind !== "importAudio") {
-                                            emitExternalFileAction(actionKind, resolvedPath);
-                                            return;
-                                        }
-                                        void dispatch(
-                                            importAudioAtPosition({
-                                                audioPath: resolvedPath,
-                                                trackId,
-                                                startSec: beat,
-                                            }),
-                                        );
-                                        return;
-                                    }
-
-                                    if (isTauri) {
-                                        window.setTimeout(() => {
-                                            const p =
-                                                tauriLastDropPathRef.current ||
-                                                tauriDraggedPathRef.current;
-                                            if (!p) return;
-                                            tauriDraggedPathRef.current = null;
-                                            tauriLastDropPathRef.current = null;
-                                            const actionKind = detectExternalPathAction(p);
-                                            if (actionKind === "importMidi") {
-                                                onMidiClipPathChange(p);
-                                                onMidiClipStartSecChange(beat);
-                                                onMidiClipTrackIdChange(trackId);
-                                                onMidiClipDialogOpenChange(true);
-                                                return;
-                                            }
-                                            if (actionKind && actionKind !== "importAudio") {
-                                                emitExternalFileAction(actionKind, p);
-                                                return;
-                                            }
-                                            void dispatch(
-                                                importAudioAtPosition({
-                                                    audioPath: p,
-                                                    trackId,
-                                                    startSec: beat,
-                                                }),
-                                            );
-                                        }, 0);
-                                    }
-
-                                    const fallbackFile = dt.files?.[0] ?? null;
-                                    if (fallbackFile) {
-                                        void dispatch(
-                                            importAudioFileAtPosition({
-                                                file: fallbackFile,
-                                                trackId,
-                                                startSec: beat,
-                                            }),
-                                        );
-                                    }
-                                }}
+                                onDrop={handleTimelineDrop}
                                 onPointerDownCapture={(e) => {
                                     const scroller = scrollRef.current;
                                     if (

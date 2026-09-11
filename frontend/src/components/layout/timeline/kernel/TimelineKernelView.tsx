@@ -131,6 +131,17 @@ export interface TimelineKernelViewProps {
         readonly contentHeight: number;
     };
     /**
+     * 素材拖入（由面板提供）。
+     *
+     * 【为什么挂在内核容器上】旧实现的 `onDragOver` / `onDrop` 挂在
+     * `TimelineScrollArea` 上，而内核模式下该组件不挂载——拖入会走浏览器默认
+     * 行为（打开文件）。处理器内部用 `e.currentTarget` 的 bounds 算落点，因此
+     * **必须挂在真正承载时间轴的容器上**，不能挪到含标尺的外层（会整体偏移一个
+     * 标尺高度，落点算到错误轨道）。
+     */
+    readonly onDragOver?: React.DragEventHandler<HTMLDivElement>;
+    readonly onDrop?: React.DragEventHandler<HTMLDivElement>;
+    /**
      * copy 拖拽的 ghost 预览（缺省不渲染该层）。
      *
      * 【为什么内核需要一个独立图层】移动语义下"乐观位置"就够——内核重建几何时
@@ -171,6 +182,8 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         interactions,
         snapHighlight,
         ghost,
+        onDragOver,
+        onDrop,
         inlineEdit,
         activeGroupIds,
         disabledGroupIds,
@@ -513,6 +526,8 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
             tabIndex={0}
             data-hs-timeline-kernel="1"
             className="relative flex-1 overflow-hidden bg-qt-graph-bg outline-none"
+            onDragOver={onDragOver}
+            onDrop={onDrop}
         >
             <canvas ref={canvasRef} className="pointer-events-none absolute inset-0" />
             {/* 波形层：独立 WebGL2 画布，由内核视口源驱动（滚动帧只更新 uniform）。
