@@ -21,11 +21,23 @@
  * - 独立性：Spike 期间不引用 `runtime/` 下任何模块，也不依赖 React；本模块是纯 TS
  *   状态容器，可在任意环境（含测试）构造。
  *
+ * 【水平上限语义（与既有实现对齐）】
+ * maxScrollLeft() = **工程宽度**（不是「工程宽 − 视口宽」），与既有
+ * `runtime/timelineScrollRange.resolveTimelineScrollRange` 的语义一致：允许把工程右端
+ * 滚到视口左缘，使「以指针 / 播放头为锚点」的缩放在任意缩放下都能成立，且上限随缩放
+ * **连续变化**、不会在「工程宽 = 视口宽」处骤降产生跳变。竖直方向无此需求，沿用标准
+ * 语义「内容高 − 视口高」。
+ *
+ * 【生命周期】
+ * 内核持有滚动状态，必须**长生命周期创建一次**（宿主用 ref / 模块级持有），
+ * 不得随 React 渲染重建，否则滚动位置会静默归零。
+ *
  * 【强制约束（评审检查项）】
  * 1. 钳制只在本文件做一次；外部不得再钳制，也不得依赖「写入后回读被修正的值」。
+ *    外部边界（宿主尺寸 / 工程时长 / 轨道数）变化后，宿主必须调用 reclamp()。
  * 2. get() 返回的引用在字段未变化时保持稳定（冻结对象 + 变更时整体替换）：下游每帧
  *    读取不产生分配，且可用引用比较判定「视口是否变化」。
- * 3. 只有状态真正变化才通知订阅者（1e-6 容差），滚轮亚像素噪声不得触发空重绘。
+ * 3. 只有状态真正变化才通知订阅者；滚轮亚像素噪声不得触发空重绘。
  */
 
 /**
@@ -36,8 +48,16 @@
  */
 const DEFAULT_MIN_PX_PER_SEC = 1e-9;
 
-/** 状态变化判定容差：差异小于此值视为未变化，不通知订阅者（滤掉滚轮亚像素噪声）。 */
-const EPSILON = 1e-6;
+/** 滚动位置（px）的变化判定容差：差异小于此值视为未变化（滤掉滚轮亚像素噪声）。 */
+const SCROLL_EPSILON_PX = 1e-6;
+
+/**
+ * pxPerSec 的变化判定容差（相对比例）。
+ *
+ * 必须用**相对**容差而非绝对容差：pxPerSec 跨度大（生产区间约 0.5–8000），
+ * 绝对容差在极小缩放下会把真实的缩放步进误判为「未变化」，导致缩放卡死。
+ */
+const ZOOM_EPSILON_RATIO = 1e-9;
 
 /**
  * 时间轴视口状态：渲染与命中测试共用的唯一一份视口真值。
@@ -61,6 +81,13 @@ export interface TimelineViewportState {
  *
  * 尺寸类参数一律以**函数**注入而非快照：工程数据与宿主尺寸在运行时变化频繁，
  * 函数形式让内核无需订阅外部事件即可读到最新值（避免「忘记同步」类缺陷）。
+ *
+ * 【注入契约（硬性，宿主必须满足）】
+ * 这些 getter 会在每次写入与读取路径被调用，因此：
+ * - 必须 **O(1) 且不触发同步布局**：`viewportHeightPx` 请使用 ResizeObserver 缓存的
+ *   尺寸，**不要**直接读 `clientHeight`（会强制样式重算，单次可达 0.1–1ms，
+ *   直接吃掉帧预算）；
+ * - `projectSec` / `trackCount` 请使用 memo 后的派生值，不要每次遍历全部 clip。
  */
 export interface ScrollKernelOptions {
     /** 初始水平缩放（每秒像素数），构造时会被夹到 [minPxPerSec, maxPxPerSec]。 */
@@ -71,7 +98,13 @@ export interface ScrollKernelOptions {
     projectSec: () => number;
     /** 轨道总数，用于算内容高度。 */
     trackCount: () => number;
-    viewportWidthPx: () => number;
+    /**
+     * 宿主视口高度（CSS px），用于竖直滚动上限（内容高 − 视口高）。
+     *
+     * 特殊说明：水平方向**不需要**视口宽——水平上限 = 工程宽度（见文件头
+     * 「水平上限语义」），这是与既有 `resolveTimelineScrollRange` 对齐的结果，
+     * 因此本接口不接收 `viewportWidthPx`。
+     */
     viewportHeightPx: () => number;
     /** pxPerSec 下限，缺省 1e-9。 */
     minPxPerSec?: number;
@@ -152,9 +185,10 @@ export interface ScrollKernel {
     contentHeightPx(): number;
 
     /**
-     * 水平滚动上限 = max(0, 内容宽 − 视口宽)。
+     * 水平滚动上限 = **工程宽度**（见文件头「水平上限语义」）。
      *
-     * @returns 上限（CSS px）；内容不足一屏时为 0（不允许把内容滚出视口）。
+     * @returns 上限（CSS px）；允许把工程右端滚到视口左缘，故工程不足一屏时上限
+     *          仍为工程宽度（不为 0）。
      */
     maxScrollLeft(): number;
 
@@ -164,6 +198,18 @@ export interface ScrollKernel {
      * @returns 上限（CSS px）；轨道不足一屏时为 0。
      */
     maxScrollTop(): number;
+
+    /**
+     * 按当前外部边界重新钳制两轴滚动位置。
+     *
+     * 特殊说明：钳制只在写入时发生（约束 1），因此宿主尺寸变化（resize）、
+     * 工程变短（删 clip）或轨道变少（删轨）之后，已提交的 scrollLeft / scrollTop
+     * 可能超出新的上限。宿主**必须**在这些时机调用本方法；内部经 commit 提交，
+     * 位置真正变化时会正常通知订阅者。
+     *
+     * @returns 无返回值；若位置未越界则不产生任何状态变化与通知。
+     */
+    reclamp(): void;
 }
 
 /**
@@ -179,17 +225,31 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 /**
- * 浮点容差比较。
+ * 滚动位置（px）的浮点容差比较。
  *
  * 作用：滚动位置经缩放换算后必然带浮点噪声，严格 `!==` 会把 1e-13 级差异当成
  * 「状态变化」，导致渲染循环空转。
  *
  * @param a 待比较值。
  * @param b 待比较值。
- * @returns 两值差异小于 EPSILON 时为 true（视为未变化）。
+ * @returns 两值差异小于 SCROLL_EPSILON_PX 时为 true（视为未变化）。
  */
 function nearlyEqual(a: number, b: number): boolean {
-    return Math.abs(a - b) < EPSILON;
+    return Math.abs(a - b) < SCROLL_EPSILON_PX;
+}
+
+/**
+ * pxPerSec 的浮点容差比较（相对容差）。
+ *
+ * 作用：与滚动位置不同，pxPerSec 是"比例"量——必须按相对比例判定，否则在极小
+ * 缩放下会把真实的缩放步进误判为未变化（见 ZOOM_EPSILON_RATIO 注释）。
+ *
+ * @param a 待比较值。
+ * @param b 待比较值。
+ * @returns 相对差异不超过 ZOOM_EPSILON_RATIO 时为 true（视为未变化）。
+ */
+function zoomEquals(a: number, b: number): boolean {
+    return Math.abs(a - b) <= ZOOM_EPSILON_RATIO * Math.max(1, Math.abs(a), Math.abs(b));
 }
 
 /**
@@ -241,17 +301,11 @@ export function createScrollKernel(options: ScrollKernelOptions): ScrollKernel {
     const listeners = new Set<() => void>();
 
     /**
-     * 读取宿主视口宽度。
+     * 读取宿主视口高度。
      *
-     * @returns 量测宽度（CSS px）；未量测 / 非法值按 0 处理，使上限退化为「可整屏滚出」，
-     *          不会因为宿主尺寸尚未就绪而把内容卡死在 0 位置。
+     * @returns 量测高度（CSS px）；未量测 / 非法值按 0 处理，使竖直上限退化为
+     *          「可整屏滚出」，不会因为宿主尺寸尚未就绪而把内容卡死在 0 位置。
      */
-    function viewportWidth(): number {
-        const width = options.viewportWidthPx();
-        return Number.isFinite(width) ? Math.max(0, width) : 0;
-    }
-
-    /** 读取宿主视口高度（CSS px），非法值按 0 处理（同 viewportWidth）。 */
     function viewportHeight(): number {
         const height = options.viewportHeightPx();
         return Number.isFinite(height) ? Math.max(0, height) : 0;
@@ -282,14 +336,17 @@ export function createScrollKernel(options: ScrollKernelOptions): ScrollKernel {
     /**
      * 计算指定缩放下的水平滚动上限。
      *
-     * 规则：上限 = 内容宽 − 视口宽，且不小于 0——内容不足一屏时上限为 0，
-     * 不允许把内容滚出视口（缩放锚点不会因此被「钉」在工程边界之外）。
+     * 规则：上限 = **工程宽度**（不是「工程宽 − 视口宽」），与既有
+     * `resolveTimelineScrollRange` 的语义一致（见文件头「水平上限语义」）：
+     * - 工程比视口小时，允许把工程右端滚到视口左缘，缩放锚点不会被卡死；
+     * - 工程比视口大时，允许继续向工程右侧的空余区域滚动；
+     * - 公式在「工程宽 = 视口宽」处连续，缩放时不会出现上限骤降导致的跳变。
      *
      * @param pxPerSec 目标缩放。
-     * @returns 水平滚动上限（CSS px，>= 0）。
+     * @returns 水平滚动上限（CSS px，>= 0，等于工程宽度）。
      */
     function maxScrollLeftFor(pxPerSec: number): number {
-        return Math.max(0, contentWidthFor(pxPerSec) - viewportWidth());
+        return contentWidthFor(pxPerSec);
     }
 
     /**
@@ -335,7 +392,8 @@ export function createScrollKernel(options: ScrollKernelOptions): ScrollKernel {
         if (
             nearlyEqual(scrollLeft, prev.scrollLeft) &&
             nearlyEqual(scrollTop, prev.scrollTop) &&
-            nearlyEqual(pxPerSec, prev.pxPerSec) &&
+            // pxPerSec 是比例量，必须用相对容差（见 zoomEquals 注释）。
+            zoomEquals(pxPerSec, prev.pxPerSec) &&
             nearlyEqual(rowHeight, prev.rowHeight)
         ) {
             return;
@@ -397,6 +455,15 @@ export function createScrollKernel(options: ScrollKernelOptions): ScrollKernel {
 
         maxScrollTop() {
             return maxScrollTopFor(state.rowHeight);
+        },
+
+        reclamp() {
+            // 外部边界（resize / 工程变短 / 删轨）变化后，已提交的位置可能越界；
+            // 用当前边界重算并提交，位置真正变化时经 commit 正常通知订阅者。
+            commit({
+                scrollLeft: clamp(state.scrollLeft, 0, maxScrollLeftFor(state.pxPerSec)),
+                scrollTop: clamp(state.scrollTop, 0, maxScrollTopFor(state.rowHeight)),
+            });
         },
     };
 }
