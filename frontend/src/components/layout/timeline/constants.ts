@@ -53,6 +53,14 @@ export function fadeCornerReservePx(bodyHeightPx: number): number {
 export const NEW_TRACK_SENTINEL = "__hs_new_track__";
 
 /**
+ * Clip 的最小长度（秒）。
+ *
+ * 裁切 / 拉伸的下限：单一事实来源——旧实现、渲染内核与面板提交都取它，
+ * 两处各写一份会让「拖到极限时的停位」在两个渲染模式下差一点点。
+ */
+export const MIN_CLIP_LENGTH_SEC = 0.05;
+
+/**
  * 音量旋钮竖直拖拽的换算：每像素多少 dB。
  *
  * 单一事实来源：旧实现 `useEditDrag` 与渲染内核的旋钮手势共用它——两处各写一份

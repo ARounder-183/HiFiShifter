@@ -126,13 +126,32 @@
 - 验证：拖动 40px → gain 0.3162（-10dB）；双击 → 1.0；单击徽标 inputs=0；
   双击徽标 inputs=1（值 "0"）
 
-### 未完成（下一批，均需先做「逻辑抽取」）
+### C-1 拉伸（已完成 stretch 部分）
+
+- **抽取**（先做，避免两份语义）：
+  - `hooks/stretchGroup.ts` 新增 `computeClipStretch`（单 clip 拉伸几何：对侧边缘固定、
+    速率反算与钳制、**用钳制后的速率回算长度**、淡变与 SnapOffset 比例缩放）+ 12 条单测；
+    `scaleSnapOffsetForStretch` 从 `useEditDrag` 迁入（单一来源）
+  - 新增 `hooks/stretchParams.ts`：`stretchLinkedParams` / `stretchTrackLinkedParams`
+    从 `useEditDrag` 抽出（旧实现与内核共用「锁定参数线时的曲线时域映射」）
+  - `MIN_CLIP_LENGTH_SEC` 提到 `timeline/constants.ts`（宿主 + 面板同源）
+- **内核接入**：边缘手势在**按下时**按 `modifier.clipStretch`（Alt）定模式（裁切 / 拉伸），
+  预览写五个字段（起点 / 长度 / 速率 / 两侧淡变 / SnapOffset），提交走
+  `setClipsStateBulkRemote`，落库后二次写回速率并在 `lockParamLinesEnabled` 时映射参数线；
+  取消路径五个字段一起回滚
+- **顺带修复（既有缺陷）**：内核裁切提交原先只发 `startSec/lengthSec`，**漏了源区间**
+  → 后端按旧源区间重新解释内容（波形与音频对不上）。已补 `sourceStartSec/sourceEndSec`
+- 验证：Alt+右缘 +100px → `length 4.667 / rate 0.857 / fadeIn 0.7`（左缘固定 2.0）；
+  Alt+左缘 +50px → `start 2.333 / length 3.667 / rate 1.0909`（**右缘固定 6.0**）；
+  无 Alt 对照 → 只改 `length` 与 `sourceEndSec`、速率不变
+
+### 未完成（下一批）
 
 | 任务 | 内容 | 前置工作 |
 |---|---|---|
-| C-1 | `Alt` 拖边缘 = stretch（`modifier.clipStretch`）；`Alt` 拖 body = slip（`modifier.clipSlipEdit`） | **必须先抽取**：stretch 的领域逻辑目前深度耦合在 `useEditDrag`（`drag.stretchGroup` / 速率两阶段写回 / snap offset 比例缩放 / 参数线时域映射，散落在 470–800、1475、1713、1865、1960 等 20+ 处）。按 `copyClipsFromDrag` 的先例抽成共享函数，再让内核手势调用（否则会产生第二份拉伸语义）。slip 逻辑相对独立（`useSlipDrag`），可同批抽取 |
+| C-1b | `Alt` 拖 **body** = slip（`modifier.clipSlipEdit`，调整 clip 内部偏移） | 需按 `useSlipDrag` 的语义实现：长度不变、只平移源区间，并处理 loop 边界与「源素材时长」钳制；建议同批把 `useSlipDrag` 的领域逻辑抽成共享函数 |
 | C-2 | `Alt+Shift` 竖直拖 clip = 调该 clip 音高（`modifier.clipPitchDrag`） | **必须先抽取**：`useClipPitchDrag`（369 行）自带拖拽状态、tooltip 与「根轨道需 composeEnabled + 有音高分析算法」的前置校验；内核需要的是同一份「竖直位移 → cents → 参数线写入」逻辑 |
-| C-6 | trim / fade / snap offset 的**多选批量**（B-2 残留） | 拖拽移动已覆盖多选与编组；trim/fade 需按旧实现 `useEditDrag` 的 `supportsGroupExpansion`（fade 不展开组）逐 clip 应用 |
+| C-6 | trim / fade / snap offset 的**多选批量**（B-2 残留）；trim/fade 的自动交叉淡化预览 | 拖拽移动已覆盖多选与编组；trim/fade 需按旧实现 `useEditDrag` 的 `supportsGroupExpansion`（fade 不展开组）逐 clip 应用 |
 
 ---
 

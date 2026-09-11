@@ -76,12 +76,12 @@ import {
 } from "../../../../utils/snapHighlight";
 import type { SnapObjectKind, SnapResult } from "../../../../utils/timelineSnapping";
 import type { SnapTimelineOpts } from "./useTimelineState";
-import { paramsApi } from "../../../../services/api";
 import { webApi } from "../../../../services/webviewApi";
 import {
     buildStretchGroupState,
     computeStretchGroupUpdate,
     scaleClipFadesForStretch,
+    scaleSnapOffsetForStretch,
     type StretchGroupState,
 } from "./stretchGroup";
 import {
@@ -107,16 +107,6 @@ import { CLIP_GAIN_DRAG_DB_PER_PX } from "../constants";
  * 基准偏移 —— 逐帧读实时值再乘本帧比例会跨帧复合，呈超线性增长。
  * offset=0 时保持 0。
  */
-function scaleSnapOffsetForStretch(
-    baseOffsetSec: number | undefined,
-    totalRatio: number,
-    nextLengthSec: number,
-): number {
-    const base = Number(baseOffsetSec) || 0;
-    if (!(base > 0)) return 0;
-    const safeRatio = Number.isFinite(totalRatio) && totalRatio > 0 ? totalRatio : 1;
-    return clamp(base * safeRatio, 0, Math.max(0, nextLengthSec));
-}
 
 /**
  * Loop（循环源）：把源域数值归一化到 [0, 媒体时长)。
@@ -145,52 +135,15 @@ function wrapIntoMediaDomain(
     return v;
 }
 
-type StretchRangeMapping = {
-    oldStartSec: number;
-    oldLengthSec: number;
-    newStartSec: number;
-    newLengthSec: number;
-};
-
 /**
- * 拉伸后对参数线进行时域映射（拉伸或压缩）。
- *
- * 映射由后端 `stretch_track_linked_params` 一次性完成：pitch（用户编辑过时）、
- * tension 以及该根轨道上所有已存在的自动化曲线（volume/气声/子轨道偏移等，
- * 无论参数是否在 UI 中激活或有数据）。旧的前端实现只映射 pitch+tension，
- * 导致其余参数线在拉伸后遗留在旧位置，剪辑新范围内表现为被初始化。
+ * 拉伸后的参数线时域映射：与渲染内核共用同一份实现（见 `stretchParams`）。
+ * 本文件只保留调用点，避免两条渲染路径在「锁定参数线」下出现不同曲线位置。
  */
-async function stretchLinkedParams(
-    trackId: string,
-    oldStartSec: number,
-    oldLengthSec: number,
-    newStartSec: number,
-    newLengthSec: number,
-): Promise<void> {
-    if (
-        Math.abs(oldLengthSec - newLengthSec) < 1e-6 &&
-        Math.abs(oldStartSec - newStartSec) < 1e-6
-    ) {
-        return;
-    }
-    await stretchTrackLinkedParams(trackId, [
-        { oldStartSec, oldLengthSec, newStartSec, newLengthSec },
-    ]);
-}
-
-/**
- * Stretch parameter lines for several clips on the same root track as one
- * batch. The backend writes all new ranges first, then restores old-range
- * parts not covered by any new range, so neighbouring clips cannot erase
- * each other's freshly written values.
- */
-async function stretchTrackLinkedParams(
-    trackId: string,
-    mappings: StretchRangeMapping[],
-): Promise<void> {
-    if (mappings.length === 0) return;
-    await paramsApi.stretchTrackLinkedParams(trackId, mappings, false);
-}
+import {
+    stretchLinkedParams,
+    stretchTrackLinkedParams,
+    type StretchRangeMapping,
+} from "./stretchParams";
 
 /**
  * 曲率拖拽：把指针时间/客户 Y 映射到曲线归一化坐标。

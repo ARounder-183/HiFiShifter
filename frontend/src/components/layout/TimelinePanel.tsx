@@ -48,6 +48,7 @@ import {
     setClipsStateBulkRemote,
     setClipFades,
     setClipGain,
+    setClipPlaybackRate,
     setClipActiveTakeRemote,
     glueClipsRemote,
     convertClipsToPitchReferenceRemote,
@@ -161,7 +162,9 @@ import { computeEffectiveSnap } from "../../utils/timelineSnapping";
 import { store } from "../../app/store";
 import { applyBulkGainDeltaDb } from "./timeline/hooks/bulkClipEdit";
 import { advanceFineAxisDrag, type FineAxisDragState } from "./timeline/fineAxisDrag";
-import { CLIP_GAIN_DRAG_DB_PER_PX } from "./timeline/constants";
+import { CLIP_GAIN_DRAG_DB_PER_PX, MIN_CLIP_LENGTH_SEC } from "./timeline/constants";
+import { computeClipStretch } from "./timeline/hooks/stretchGroup";
+import { stretchLinkedParams } from "./timeline/hooks/stretchParams";
 import { useTimelineClipActions } from "./timeline/hooks/useTimelineClipActions";
 import { useTimelineEventHandlers } from "./timeline/hooks/useTimelineEventHandlers";
 import { useSnapOffsetDrag } from "./timeline/hooks/useSnapOffsetDrag";
@@ -514,6 +517,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         verticalZoomKb,
         paramFineAdjustKb,
         slipEditKb,
+        stretchKbRef,
         pitchDragKb,
         noSnapKb,
         copyDragKb,
@@ -1597,7 +1601,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         [dispatch, s.autoCrossfadeEnabled, sessionRef, setMultiSelectedClipIds],
     );
 
-    /** 内核 trim：按下时的原始几何（把相对位移换算为绝对值，并支持回滚）。 */
+    /** 内核 trim / stretch：按下时的原始几何（把相对位移换算为绝对值，并支持回滚）。 */
     const kernelTrimOriginRef = React.useRef<{
         clipId: string;
         startSec: number;
@@ -1605,6 +1609,19 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         trackId: string;
         sourceStartSec: number;
         sourceEndSec: number;
+        /**
+         * 本次边缘手势的模式。
+         *
+         * `Alt`（`modifier.clipStretch`）按住 = **拉伸**（改播放速率、内容不被裁掉），
+         * 否则 = **裁切**（改源区间）。模式在**按下时**定死，拖拽中途按/松 Alt 不切换
+         * ——与旧实现一致（旧实现由 `altPressed` 在 pointerdown 时快照）。
+         */
+        mode: "trim" | "stretch";
+        /** 拉伸所需的按下时基准（裁切模式不使用）。 */
+        basePlaybackRate: number;
+        baseFadeInSec: number;
+        baseFadeOutSec: number;
+        baseSnapOffsetSec: number;
     } | null>(null);
 
     /**
@@ -1633,6 +1650,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     trackId: clip.trackId,
                     sourceStartSec: clip.sourceStartSec,
                     sourceEndSec: clip.sourceEndSec,
+                    // Alt 按住 = 拉伸（与旧实现 `modifier.clipStretch` 同源）。
+                    mode: isModifierActive(stretchKbRef.current, args.modifiers)
+                        ? "stretch"
+                        : "trim",
+                    basePlaybackRate: Number(clip.clipPlaybackRate ?? 1) || 1,
+                    baseFadeInSec: Number(clip.fadeInSec) || 0,
+                    baseFadeOutSec: Number(clip.fadeOutSec) || 0,
+                    baseSnapOffsetSec: Math.max(0, Number(clip.snapOffsetSec) || 0),
                 };
             }
             const origin = kernelTrimOriginRef.current;
@@ -1643,6 +1668,65 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 s.snapEnabled,
                 isModifierActive(noSnapKb, args.modifiers),
             );
+
+            if (origin.mode === "stretch") {
+                // Alt + 拖边缘 = **拉伸**：对侧边缘固定、改播放速率（内容不被裁掉）。
+                // 被吸附对象是**正在拖的那条边**（左缘 / 右缘），与裁切一致；
+                // 几何换算复用与旧实现共用的 `computeClipStretch`（含速率钳制、
+                // 用钳制后速率回算长度、淡变与 SnapOffset 的比例缩放）。
+                const rawEdgeSec =
+                    args.edge === "left" ? args.startSec : args.startSec + args.lengthSec;
+                const edgeSec = snapActive
+                    ? snapTimelineDetailed(rawEdgeSec, "clip", {
+                          originSec:
+                              args.edge === "left"
+                                  ? origin.startSec
+                                  : origin.startSec + origin.lengthSec,
+                          anchorTrackId: origin.trackId,
+                          excludeClipIds: new Set([args.clipId]),
+                          highlight: {
+                              sources: [{ trackId: origin.trackId, clipId: args.clipId }],
+                          },
+                      }).sec
+                    : rawEdgeSec;
+                if (!snapActive) clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+                const result = computeClipStretch({
+                    edge: args.edge === "left" ? "stretch_left" : "stretch_right",
+                    pointerSec: edgeSec,
+                    baseStartSec: origin.startSec,
+                    baseLengthSec: origin.lengthSec,
+                    basePlaybackRate: origin.basePlaybackRate,
+                    baseFadeInSec: origin.baseFadeInSec,
+                    baseFadeOutSec: origin.baseFadeOutSec,
+                    baseSnapOffsetSec: origin.baseSnapOffsetSec,
+                    minLengthSec: MIN_CLIP_LENGTH_SEC,
+                });
+                batch(() => {
+                    dispatch(moveClipStart({ clipId: args.clipId, startSec: result.startSec }));
+                    dispatch(setClipLength({ clipId: args.clipId, lengthSec: result.lengthSec }));
+                    dispatch(
+                        setClipPlaybackRate({
+                            clipId: args.clipId,
+                            clipPlaybackRate: result.clipPlaybackRate,
+                        }),
+                    );
+                    dispatch(
+                        setClipFades({
+                            clipId: args.clipId,
+                            fadeInSec: result.fadeInSec,
+                            fadeOutSec: result.fadeOutSec,
+                        }),
+                    );
+                    dispatch(
+                        setClipSnapOffset({
+                            clipId: args.clipId,
+                            snapOffsetSec: result.snapOffsetSec,
+                        }),
+                    );
+                });
+                return;
+            }
+
             // 吸附：左边缘吸**起点**、右边缘吸**右端**——两者吸附的对象不同，
             // 统一吸起点会让右边缘 trim 落在错误的位置。
             let nextStart = args.startSec;
@@ -1699,10 +1783,20 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 }
             });
         },
-        [dispatch, sessionRef, s.snapEnabled, noSnapKb, snapTimelineDetailed],
+        [
+            dispatch,
+            sessionRef,
+            s.snapEnabled,
+            noSnapKb,
+            snapTimelineDetailed,
+            stretchKbRef,
+            setClipFades,
+            setClipPlaybackRate,
+            setClipSnapOffset,
+        ],
     );
 
-    /** 内核 trim 收尾：提交或回滚（取消时三个字段一起还原）。 */
+    /** 内核 trim / stretch 收尾：提交或回滚。 */
     /**
      * 内核吸附偏移手势是否已真正开始。
      *
@@ -1813,6 +1907,86 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             if (origin === null) return;
             // 手势结束：清掉吸附高亮（与拖拽收尾同源）。
             clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+
+            if (origin.mode === "stretch") {
+                // 拉伸收尾：回滚 / 提交都作用于**五个字段**（起点、长度、速率、
+                // 两侧淡变、吸附偏移）——只还原其中一部分会让预览与落库分叉。
+                if (args.cancelled) {
+                    batch(() => {
+                        dispatch(
+                            moveClipStart({ clipId: origin.clipId, startSec: origin.startSec }),
+                        );
+                        dispatch(
+                            setClipLength({ clipId: origin.clipId, lengthSec: origin.lengthSec }),
+                        );
+                        dispatch(
+                            setClipPlaybackRate({
+                                clipId: origin.clipId,
+                                clipPlaybackRate: origin.basePlaybackRate,
+                            }),
+                        );
+                        dispatch(
+                            setClipFades({
+                                clipId: origin.clipId,
+                                fadeInSec: origin.baseFadeInSec,
+                                fadeOutSec: origin.baseFadeOutSec,
+                            }),
+                        );
+                        dispatch(
+                            setClipSnapOffset({
+                                clipId: origin.clipId,
+                                snapOffsetSec: origin.baseSnapOffsetSec,
+                            }),
+                        );
+                    });
+                    return;
+                }
+                dispatch(checkpointHistory());
+                // 提交值取 Redux 当前值（预览已写入钳制后的结果）——用基准 + 位移
+                // 重算会绕开速率钳制与长度回算，表现为"预览到上限、落库却超出"。
+                const clip = sessionRef.current.clips.find((item) => item.id === origin.clipId);
+                const next = {
+                    clipId: origin.clipId,
+                    startSec: clip?.startSec ?? origin.startSec,
+                    lengthSec: clip?.lengthSec ?? origin.lengthSec,
+                    clipPlaybackRate:
+                        Number(clip?.clipPlaybackRate ?? origin.basePlaybackRate) || 1,
+                    fadeInSec: Number(clip?.fadeInSec ?? origin.baseFadeInSec) || 0,
+                    fadeOutSec: Number(clip?.fadeOutSec ?? origin.baseFadeOutSec) || 0,
+                    snapOffsetSec: Math.max(
+                        0,
+                        Number(clip?.snapOffsetSec ?? origin.baseSnapOffsetSec) || 0,
+                    ),
+                };
+                const persist = dispatch(setClipsStateBulkRemote({ updates: [next] })).unwrap();
+                void (async () => {
+                    try {
+                        await persist;
+                    } finally {
+                        // 速率二次写回：后端可能按自身计算覆盖速率，前端计算值才是
+                        // 权威（与旧实现 `reapplyRates` 同源）。
+                        dispatch(
+                            setClipPlaybackRate({
+                                clipId: origin.clipId,
+                                clipPlaybackRate: next.clipPlaybackRate,
+                            }),
+                        );
+                        // 锁定参数线：把该轨道的曲线从旧时间范围映射到新范围
+                        // （与旧实现同源，复用抽出的 `stretchLinkedParams`）。
+                        if (sessionRef.current.lockParamLinesEnabled) {
+                            await stretchLinkedParams(
+                                origin.trackId,
+                                origin.startSec,
+                                origin.lengthSec,
+                                next.startSec,
+                                next.lengthSec,
+                            );
+                        }
+                    }
+                })().catch(() => undefined);
+                return;
+            }
+
             if (args.cancelled) {
                 batch(() => {
                     dispatch(moveClipStart({ clipId: origin.clipId, startSec: origin.startSec }));
@@ -1837,6 +2011,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                             clipId: args.clipId,
                             startSec: clip?.startSec ?? args.startSec,
                             lengthSec: clip?.lengthSec ?? args.lengthSec,
+                            // 裁切必须同时提交**源区间**：只改长度会让后端按旧源区间
+                            // 重新解释内容（波形与音频都会对不上）。预览阶段已同步改
+                            // 过源区间，这里取 Redux 当前值即可。
+                            sourceStartSec: clip?.sourceStartSec,
+                            sourceEndSec: clip?.sourceEndSec,
                         },
                     ],
                 }),

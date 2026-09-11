@@ -63,6 +63,7 @@ import {
     DEFAULT_ROW_HEIGHT,
     MAX_PX_PER_SEC,
     MAX_ROW_HEIGHT,
+    MIN_CLIP_LENGTH_SEC,
     MIN_PX_PER_SEC,
     MIN_ROW_HEIGHT,
 } from "../../constants";
@@ -1935,7 +1936,6 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     } | null = null;
 
     /** trim 允许的最小 clip 长度（秒）：再短会难以命中与选中。 */
-    const MIN_CLIP_LENGTH_SEC = 0.05;
 
     /** 框选阈值（CSS px）：与旧实现 `TIMELINE_SELECTION_DRAG_THRESHOLD_PX` 一致。 */
     const BOX_SELECT_THRESHOLD_PX = 5;
