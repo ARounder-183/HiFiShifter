@@ -1130,6 +1130,41 @@ DOM 拖入的差异处理、`dropPreview` 的 duration 来源（是否已在拖�
 
 ---
 
+#### ⚠️ D-1 实施前发现的计划缺口（2026-09-11，需先决策）
+
+**结论：D-1 的"落库"不是一次 thunk 调用，而是一段约 40 行的编排。**
+（`useClipDrag.ts:846-885`）
+
+```
+initialById → targetTrackIdByClipId → trackMapping
+  → trackMode（same_track / explicit_mapping）
+  → buildDuplicateClipsBulkPayload({ sourceClipIds, deltaSec, copyLinkedParams,
+                                     applyAutoCrossfade, trackMode, renameCopies })
+  → duplicateClipsBulkRemote(...) → createdClipIds
+  → setMultiSelectedClipIds(created) + selectClipRemote(created[0])
+  → 播放光标定位到副本中最靠前的起点
+```
+
+**问题**：这段逻辑目前**只存在于 `useClipDrag` 内部**（事件驱动、依赖 `drag` 局部状态）。
+内核的 `clip-drag` 手势走 `onDragPreview` / `onDragCommit`，拿不到 `drag`，因此要么：
+
+- **方案 A（抽取共享函数）**：把 846-885 抽成
+  `copyClipsFromDrag({ sourceClipIds, initialById, deltaSec, targetTrackIdByClipId, ... })`，
+  旧 hook 与内核面板都调用它。**优点**：单一事实来源，行为天然一致（这正是本次迁移
+  反复强调的原则）。**代价**：要动旧实现的收尾路径，需一次回归验证。
+- **方案 B（内核侧重实现）**：在面板的 `handleKernelDragCommit` 里按同样步骤再写一遍。
+  **优点**：不碰旧实现。**代价**：**两份复制语义**——正是本计划一直在避免的模式
+  （见 `snapTimelineDetailed` 的 `highlight` 漏传、`moveSnapOffsetSec: 0` 两次教训）。
+
+**建议方案 A**（与既有迁移原则一致）。**决策后再实施 D-1。**
+
+**D-1 还需补的前置**：宿主 `clip-drag` 需携带 `copyMode`（复用
+`resolveClipDragCopyMode`，含"拖拽中允许从 false 变 true、不允许反向"的既有语义），
+并在 `onDragPreview` / `onDragCommit` 上透出——否则内核模式下 ⌘+拖拽会**移动**原 clip
+（用户预期是复制），属于**数据语义错误**，不只是缺视觉。
+
+---
+
 ## 执行顺序与提交粒度
 
 | 顺序 | 任务 | 产出 | 提交 |
