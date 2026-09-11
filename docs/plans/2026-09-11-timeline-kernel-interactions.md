@@ -1125,6 +1125,35 @@ clip 边缘（最优先）→ 淡化包络线 / 边缘竖线 → 交叉点抓手
 - **D-3**：`rowTopForTrackId` 这类"轨道 → 行顶"的换算，内核已有同源实现
   （`trackIndex × rowHeight`），应复用而不是另写。
 
+#### D-2 实施边界（2026-09-11 已核实）
+
+| 事实 | 位置 |
+|---|---|
+| 内核分支在 `2806-2844` 结束（`<TimelineScrollArea` 在 `2845`，属 **else 分支**） | `TimelinePanel.tsx` |
+| `onDragOver`（约 63 行）/ `onDrop`（约 94 行）挂在 `TimelineScrollArea` 上，**共约 157 行** | `2965` / `3028-3121` |
+| 几何依赖 `e.currentTarget` 当滚动容器用（`el.scrollLeft`） | `2976-2978` |
+| 还依赖 `trackIdFromClientY`（非局部 const）、`extractLocalFilePath`、`detectExternalPathAction`、`hasFileDrag`、`tauriDraggedPathRef`、`importModeMenu` | — |
+
+**⚠️ 不要把两个 JSX 属性直接挪到共同父容器**（`2799` 的 `Flex`）：该容器**包含标尺**，
+而旧实现里 `e.currentTarget` 是标尺**下方**的滚动区——`clientY - bounds.top` 会整体
+偏移一个标尺高度，落点算到错误轨道。
+
+**正确做法（三步缺一不可）**
+1. 把两个内联箭头函数抽成具名回调 `handleTimelineDragOver` / `handleTimelineDrop`
+   （逐行等价，否则内核分支引用不到）
+2. 滚动量改**模式无关**：内核取 `kernelHostRef.current?.getViewport().scrollLeft`，
+   旧模式取 `el.scrollLeft`。面板已有 `scrollLeft` state（内核经 `onScrollLeftCommit`
+   回灌），所以可行。**同时核对 `trackIdFromClientY` 的几何依赖**是否也绑在旧 scroller 上
+3. 给 `TimelineKernelView` 加 `onDragOver` / `onDrop` props 并挂到**内核容器**上
+   （这样 `e.currentTarget` 的 bounds 才正确）
+
+**附带**：`dropPreview` 的渲染同样在旧分支内、用内容坐标 → 迁到内核内容坐标层，
+**复用 D-1 的机制，且容器必须常驻**（D-1 踩过的坑：宿主在挂载时一次性抓 ref 快照，
+按需挂载会让它在需要平移时仍是 null）。
+
+**验证**：`KERNEL=0` 与 `KERNEL=1` 分别拖入音频 / MIDI，确认落点与预览一致；
+并覆盖 `importModeMenu` 与 Tauri 两条路径（否则会**静默失效**）。
+
 **待确认（实施前需再读一次代码）**：`importModeMenu` 的完整分支条件、Tauri 拖入与
 DOM 拖入的差异处理、`dropPreview` 的 duration 来源（是否已在拖入时解析音频头）。
 
