@@ -42,8 +42,8 @@ const INSTANCE_STRIDE_BYTES = GLYPH_INSTANCE_FLOATS * 4;
 
 const VERTEX_SHADER = `#version 300 es
 in vec2 a_unit;
-in float i_rect[4];
-in float i_uv[4];
+in vec4 i_rect;          // x, y, w, h（打包 vec4）
+in vec4 i_uv;            // u0, v0, u1, v1（打包 vec4）
 in vec4 i_color;
 
 uniform vec2 u_resolution;
@@ -53,12 +53,12 @@ out vec2 v_uv;
 out vec4 v_color;
 
 void main() {
-    vec2 pos = vec2(i_rect[0], i_rect[1]) + a_unit * vec2(i_rect[2], i_rect[3]);
+    vec2 pos = i_rect.xy + a_unit * i_rect.zw;
     vec2 screen = pos - u_viewOrigin;
     vec2 zeroToOne = screen / u_resolution;
     gl_Position = vec4(zeroToOne.x * 2.0 - 1.0, -(zeroToOne.y * 2.0 - 1.0), 0.0, 1.0);
 
-    v_uv = vec2(i_uv[0], i_uv[1]) + a_unit * vec2(i_uv[2] - i_uv[0], i_uv[3] - i_uv[1]);
+    v_uv = i_uv.xy + a_unit * (i_uv.zw - i_uv.xy);
     v_color = i_color;
 }`;
 

@@ -18,10 +18,12 @@
  * - 下游：`renderLoop` 在 rAF 内调用 `render` / `repaint`。
  *
  * 【设计约束（与既有 runtime/timelineClipGlRenderer 的一致性）】
- * 1. 着色器源码与实例布局（25 float/实例，偏移见 OFF_* 常量）**与既有 GL 渲染器
- *    逐字一致**（含注释）：Spike 阶段复制而非共享，避免改动生产代码；后续阶段 1
- *    合并为单一来源。若既有布局 / 着色器变更，本文件与 `scene/clipInstances.test.ts`
- *    的布局断言会同时失败，提示同步（比静默漂移安全）。
+ * 1. 实例布局（25 float/实例，偏移见 OFF_* 常量）与既有 GL 渲染器一致；着色器以既有
+ *    实现为蓝本，但**已修正一处 GLSL ES 3.00 违规**：顶点输入不能声明为数组
+ *    （`in float i_rect[4]`），改为 `in vec4 i_rect` 打包——macOS 的 ANGLE/Metal 后端
+ *    会直接拒绝编译（`cannot declare arrays of this qualifier`），使整个 program
+ *    创建失败。既有实现存在同一问题（失败后被上层 catch 静默回退 Canvas2D），
+ *    阶段 1 合并为单一来源时须一并修正。
  * 2. 滚动帧只调用 `repaint()`：实例缓冲**不重新上传**，只更新 `u_viewOrigin`
  *    uniform——这是"滚动零重绘"在 GL 层的落点。
  * 3. `u_resolution` 用光栅化目标回算的绘制坐标系尺寸（见 glRaster），保证坐标与
@@ -51,7 +53,7 @@ const INSTANCE_STRIDE_BYTES = CLIP_INSTANCE_FLOATS * 4;
 
 const VERTEX_SHADER = `#version 300 es
 in vec2 a_unit;          // 单位四边形 [0,1]×[0,1]
-in float i_rect[4];      // x, y, w, h
+in vec4 i_rect;          // x, y, w, h（打包 vec4）
 in float i_radius;
 in float i_headerH;
 in vec4 i_bodyColor;
@@ -82,16 +84,16 @@ out float v_mode;
 void main() {
     // 平面矩形不外扩（它就是精确的矩形）；圆角盒才需要为描边预留边界。
     float pad = i_mode > 0.5 ? 0.0 : max(i_borderWidth * 0.5, 1.0);
-    vec2 center = vec2(i_rect[0] + i_rect[2] * 0.5, i_rect[1] + i_rect[3] * 0.5);
-    vec2 halfSize = vec2(i_rect[2] * 0.5 + pad, i_rect[3] * 0.5 + pad);
+    vec2 center = vec2(i_rect.x + i_rect.z * 0.5, i_rect.y + i_rect.w * 0.5);
+    vec2 halfSize = vec2(i_rect.z * 0.5 + pad, i_rect.w * 0.5 + pad);
     vec2 pos = center + (a_unit - 0.5) * 2.0 * halfSize;
 
     vec2 screen = pos - u_viewOrigin;
     vec2 zeroToOne = screen / u_resolution;
     gl_Position = vec4(zeroToOne.x * 2.0 - 1.0, -(zeroToOne.y * 2.0 - 1.0), 0.0, 1.0);
 
-    v_local = pos - vec2(i_rect[0], i_rect[1]);
-    v_half = vec2(i_rect[2] * 0.5, i_rect[3] * 0.5);
+    v_local = pos - vec2(i_rect.x, i_rect.y);
+    v_half = vec2(i_rect.z * 0.5, i_rect.w * 0.5);
     v_radius = i_radius;
     v_headerH = i_headerH;
     v_bodyColor = i_bodyColor;

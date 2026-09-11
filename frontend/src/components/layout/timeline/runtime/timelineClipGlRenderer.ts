@@ -297,7 +297,9 @@ const SEAM_WIDTH_PX = 0.5;
 
 const VERTEX_SHADER = `#version 300 es
 in vec2 a_unit;          // 单位四边形 [0,1]×[0,1]
-in float i_rect[4];      // x, y, w, h
+// GLSL ES 3.00 禁止顶点输入声明为数组（macOS 的 ANGLE/Metal 后端直接拒绝编译：
+// "cannot declare arrays of this qualifier"），故 x/y/w/h 打包为 vec4。
+in vec4 i_rect;          // x, y, w, h
 in float i_radius;
 in float i_headerH;
 in vec4 i_bodyColor;
@@ -328,16 +330,16 @@ out float v_mode;
 void main() {
     // 平面矩形不外扩（它就是精确的矩形）；圆角盒才需要为描边预留边界。
     float pad = i_mode > 0.5 ? 0.0 : max(i_borderWidth * 0.5, 1.0);
-    vec2 center = vec2(i_rect[0] + i_rect[2] * 0.5, i_rect[1] + i_rect[3] * 0.5);
-    vec2 halfSize = vec2(i_rect[2] * 0.5 + pad, i_rect[3] * 0.5 + pad);
+    vec2 center = vec2(i_rect.x + i_rect.z * 0.5, i_rect.y + i_rect.w * 0.5);
+    vec2 halfSize = vec2(i_rect.z * 0.5 + pad, i_rect.w * 0.5 + pad);
     vec2 pos = center + (a_unit - 0.5) * 2.0 * halfSize;
 
     vec2 screen = pos - u_viewOrigin;
     vec2 zeroToOne = screen / u_resolution;
     gl_Position = vec4(zeroToOne.x * 2.0 - 1.0, -(zeroToOne.y * 2.0 - 1.0), 0.0, 1.0);
 
-    v_local = pos - vec2(i_rect[0], i_rect[1]);
-    v_half = vec2(i_rect[2] * 0.5, i_rect[3] * 0.5);
+    v_local = pos - vec2(i_rect.x, i_rect.y);
+    v_half = vec2(i_rect.z * 0.5, i_rect.w * 0.5);
     v_radius = i_radius;
     v_headerH = i_headerH;
     v_bodyColor = i_bodyColor;
