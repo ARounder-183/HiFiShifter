@@ -80,7 +80,7 @@ export interface ClipInstanceArgs {
     readonly seamColor: string;
 }
 
-/** 构建结果：实例缓冲 + 有效实例数。 */
+/** 构建结果：实例缓冲 + 有效实例数 + 文字颜色。 */
 export interface ClipInstances {
     /**
      * 实例缓冲（内部复用缓冲，**长度大于等于有效实例数**）。
@@ -91,6 +91,14 @@ export interface ClipInstances {
     readonly instances: Float32Array;
     /** 有效实例数（唯一可信的实例计数）。 */
     readonly count: number;
+    /**
+     * 每个 clip 的文字颜色（CSS 颜色串，与入参 `clips` 同序、长度为 `count`）。
+     *
+     * 特殊说明：文字颜色必须取样式模块的 `textFill` 而不是按主题硬编码——
+     * 块面色随轨道色变化（浅色块面配深色字），硬编码会让某些轨道上的文字对比度不足。
+     * 数组为**复用缓冲**（长度每帧重置），调用方须在下次 `build()` 前消费完毕。
+     */
+    readonly textFills: readonly string[];
 }
 
 /** clip 实例构建器（持有可复用缓冲）。 */
@@ -170,6 +178,8 @@ function computeSeamClipIds(clips: readonly ClipInstanceClip[]): Set<string> {
  */
 export function createClipInstanceBuilder(): ClipInstanceBuilder {
     let buffer = new Float32Array(0);
+    // 文字色复用数组（每帧 length 归零后重新填充）：避免重建帧的额外分配。
+    const textFills: string[] = [];
 
     return {
         build(args) {
@@ -182,6 +192,7 @@ export function createClipInstanceBuilder(): ClipInstanceBuilder {
             if (capacity !== buffer.length) buffer = new Float32Array(capacity);
 
             const seamClipIds = computeSeamClipIds(clips);
+            textFills.length = 0;
             for (let index = 0; index < count; index += 1) {
                 const clip = clips[index];
                 const isGroupActive =
@@ -211,9 +222,10 @@ export function createClipInstanceBuilder(): ClipInstanceBuilder {
                     style,
                     seamClipIds.has(clip.id) ? args.seamColor : null,
                 );
+                textFills.push(style.textFill);
             }
 
-            return { instances: buffer, count };
+            return { instances: buffer, count, textFills };
         },
     };
 }

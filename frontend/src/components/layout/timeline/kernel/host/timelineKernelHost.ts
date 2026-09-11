@@ -32,6 +32,7 @@ import type { ClipInfo, TrackInfo } from "../../../../../features/session/sessio
 import { buildTimelineTicks, type TimelineTick } from "../../runtime/buildTimelineTicks";
 import { createTimelineAxis, type TimelineAxis } from "../../runtime/timelineAxis";
 import { buildSparseClipRenderModel } from "../../runtime/timelineCanvasModel";
+import { parseRgbaColor } from "../../runtime/timelineClipGlRenderer";
 import { resolveFontFamily } from "../../runtime/timelineCanvasStyle";
 import { createGlyphLayout } from "../glyph/glyphLayout";
 import { createGlyphRasterizer, GLYPH_LINE_HEIGHT_RATIO } from "../glyph/glyphRasterizer";
@@ -338,11 +339,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
 
         // 文字：clip 名称（超宽截断由布局器完成）。
         const fontKey = `${CLIP_NAME_FONT_SIZE_PX}px ${resolveFontFamily()}`;
-        const textRgba: readonly [number, number, number, number] = d.darkMode
-            ? [0.93, 0.96, 1, 0.95]
-            : [0.12, 0.16, 0.22, 0.95];
         const quads: GlyphQuad[] = [];
-        for (const clip of model.drawClips) {
+        for (let index = 0; index < model.drawClips.length; index += 1) {
+            const clip = model.drawClips[index];
             const maxWidth = clip.widthPx - CLIP_NAME_PADDING_X_PX * 2;
             if (maxWidth <= 0 || clip.name.length === 0) continue;
             const run = glyphLayout.layout(clip.name, fontKey, maxWidth);
@@ -355,7 +354,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                     heightPx: CLIP_NAME_FONT_SIZE_PX * GLYPH_LINE_HEIGHT_RATIO,
                     atlasPageSizePx: rasterizer?.pageSizePx() ?? 1,
                     resolveSlot: (char) => rasterizer?.acquire(char, fontKey) ?? null,
-                    rgba: textRgba,
+                    // 文字色取样式模块算出的 textFill（跟随轨道色 / 主题）：硬编码按
+                    // 主题取白/黑会在浅色块面上产生对比度不足（既有实现同样用 textFill）。
+                    rgba: parseRgbaColor(clipResult.textFills[index] ?? "#ffffff"),
                 }),
             );
         }

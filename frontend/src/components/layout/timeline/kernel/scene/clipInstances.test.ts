@@ -129,6 +129,13 @@ describe("clipInstances", () => {
         expect(result.instances[24]).toBe(0);
     });
 
+    it("输出每个 clip 的文字色（长度与 clip 数一致，供文字层使用）", () => {
+        const result = build([makeClip({ id: "a" }), makeClip({ id: "b", leftPx: 200 })]);
+        expect(result.textFills).toHaveLength(2);
+        // 样式模块产出 rgba(...) 文本；文字层用 parseRgbaColor 解析。
+        expect(result.textFills[0]).toMatch(/^rgba?\(/);
+    });
+
     it("实例缓冲按倍增策略增长（复用容量策略）", () => {
         const builder = createClipInstanceBuilder();
         const small = builder.build({
