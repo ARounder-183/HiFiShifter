@@ -44,6 +44,10 @@ const logs = [];
 page.on("console", (msg) => {
     const type = msg.type();
     if (type === "error" || type === "warning") logs.push(`[${type}] ${msg.text()}`);
+    // 诊断日志（前缀过滤）：排查渲染问题时需要看应用内部的 log 输出。
+    else if (type === "log" && /waveform-debug|kernel-debug/.test(msg.text())) {
+        logs.push(`[log] ${msg.text()}`);
+    }
 });
 page.on("pageerror", (err) => logs.push(`[pageerror] ${String(err)}`));
 
@@ -97,6 +101,13 @@ for (const action of actions) {
         case "shot": {
             await page.screenshot({ path: action.path });
             console.log("SHOT:", action.path);
+            break;
+        }
+        case "shotElement": {
+            // 截取单个元素（用于观察某个 canvas 自身的绘制内容）。
+            const locator = page.locator(action.selector).first();
+            await locator.screenshot({ path: action.path });
+            console.log("SHOT-ELEMENT:", action.path);
             break;
         }
         case "eval": {

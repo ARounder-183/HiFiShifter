@@ -34,6 +34,129 @@ const MOCK_BPM = 120;
 /** 轨道配色（与生产默认调色板同量级，便于视觉对比）。 */
 const TRACK_COLORS = ["#4b8fd1", "#5fb27a", "#d19a4b", "#c25f8f", "#7a6fd1", "#4bb0b0"];
 
+// ── 假波形数据 ────────────────────────────────────────────────────────
+// 波形走 `get_waveform_mipmap_binary` 返回的 Base64 二进制（协议见
+// `utils/waveformBinaryCodec`：20B header "WFPK" + min f32[] + max f32[]）。
+// 这里按同一协议合成随机但有「音频感」的包络，使浏览器里也能验证波形层的
+// 渲染、级别切换与滚动复用。
+
+/** 假波形源采样率（与 clip 的 source_sample_rate 一致）。 */
+const MOCK_WAVEFORM_SAMPLE_RATE = 44100;
+
+/** 假波形源时长（秒）：覆盖最长 clip。 */
+const MOCK_WAVEFORM_DURATION_SEC = 30;
+
+/**
+ * 三个 mipmap 级别的除数因子。
+ *
+ * 与 `waveformMipmapStore` 的级别阈值对齐（`SPP_THRESHOLDS = [512, 1024]`，
+ * `spp = sampleRate / pxPerSec`）：默认缩放下 spp ≈ 300–450 → 命中 L0，
+ * 因此 L0 取 512 既贴合真实数据量级，又让点数为「时长 × 采样率 / 512」——
+ * 30 秒仅 2584 点（约 20KB），浏览器里生成与传输都无压力。
+ */
+const MOCK_DIVISION_FACTORS = [512, 1024, 2048] as const;
+
+/**
+ * 合成一段「像音频」的 min/max 包络。
+ *
+ * 结构：慢速乐句包络（段落强弱）× 中频音符起伏 × 高频细节毛刺 + 微小直流偏移。
+ * 用线性同余伪随机（确定性，不引入依赖）：同一路径每次生成一致，不同路径形状不同。
+ *
+ * @param peakCount 峰值点数量。
+ * @param seed 随机种子。
+ * @returns min / max 数组（值域 [-1, 1]）。
+ */
+function buildMockPeaks(peakCount: number, seed: number): {
+    min: Float32Array;
+    max: Float32Array;
+} {
+    const min = new Float32Array(peakCount);
+    const max = new Float32Array(peakCount);
+    let state = (seed * 2654435761) >>> 0;
+    const random = () => {
+        state = (state * 1664525 + 1013904223) >>> 0;
+        return state / 0xffffffff;
+    };
+    for (let index = 0; index < peakCount; index += 1) {
+        const t = peakCount <= 1 ? 0 : index / (peakCount - 1);
+        const phrase = 0.35 + 0.5 * Math.abs(Math.sin(t * Math.PI * 4 + seed));
+        const note = 0.75 + 0.25 * Math.sin(t * Math.PI * 60 + seed * 2);
+        const detail = 0.85 + 0.15 * random();
+        const amplitude = Math.min(1, phrase * note * detail);
+        const center = (random() - 0.5) * 0.06;
+        max[index] = Math.min(1, Math.max(-1, center + amplitude));
+        min[index] = Math.min(1, Math.max(-1, center - amplitude * (0.85 + random() * 0.3)));
+    }
+    return { min, max };
+}
+
+/**
+ * 把 peaks 编码为后端协议一致的 Base64 字符串。
+ *
+ * 协议：`[magic "WFPK" 4B][sample_rate u32][division_factor u32][peak_count u32]
+ * [level u32][min f32 × n][max f32 × n]`，全部小端。
+ *
+ * @param args 级别、除数因子与 peaks。
+ * @returns Base64 编码的二进制。
+ */
+function encodeWaveformMipmap(args: {
+    level: number;
+    divisionFactor: number;
+    min: Float32Array;
+    max: Float32Array;
+}): string {
+    const peakCount = args.min.length;
+    const buffer = new ArrayBuffer(20 + peakCount * 8);
+    const view = new DataView(buffer);
+    view.setUint8(0, 0x57); // W
+    view.setUint8(1, 0x46); // F
+    view.setUint8(2, 0x50); // P
+    view.setUint8(3, 0x4b); // K
+    view.setUint32(4, MOCK_WAVEFORM_SAMPLE_RATE, true);
+    view.setUint32(8, args.divisionFactor, true);
+    view.setUint32(12, peakCount, true);
+    view.setUint32(16, args.level, true);
+    new Float32Array(buffer, 20, peakCount).set(args.min);
+    new Float32Array(buffer, 20 + peakCount * 4, peakCount).set(args.max);
+
+    // Base64：分块拼接（一次展开过多参数会爆栈）。
+    const bytes = new Uint8Array(buffer);
+    let binary = "";
+    const CHUNK = 8192;
+    for (let offset = 0; offset < bytes.length; offset += CHUNK) {
+        binary += String.fromCharCode(...bytes.subarray(offset, offset + CHUNK));
+    }
+    return btoa(binary);
+}
+
+/** 已生成的波形（按源路径缓存：同一文件重复请求不重复合成）。 */
+const mockWaveformCache = new Map<string, [string, string, string]>();
+
+/**
+ * 取得某个源路径的三级波形（懒生成 + 缓存）。
+ *
+ * @param sourcePath 源文件路径（clip 的 source_path）。
+ * @returns `[L0, L1, L2]` 的 Base64 数组。
+ */
+function getMockWaveformLevels(sourcePath: string): [string, string, string] {
+    const cached = mockWaveformCache.get(sourcePath);
+    if (cached !== undefined) return cached;
+    let seed = 0;
+    for (let index = 0; index < sourcePath.length; index += 1) {
+        seed = (seed * 31 + sourcePath.charCodeAt(index)) >>> 0;
+    }
+    const levels = MOCK_DIVISION_FACTORS.map((divisionFactor, level) => {
+        const peakCount = Math.max(
+            1,
+            Math.floor((MOCK_WAVEFORM_DURATION_SEC * MOCK_WAVEFORM_SAMPLE_RATE) / divisionFactor),
+        );
+        const { min, max } = buildMockPeaks(peakCount, seed + level * 7);
+        return encodeWaveformMipmap({ level, divisionFactor, min, max });
+    }) as [string, string, string];
+    mockWaveformCache.set(sourcePath, levels);
+    return levels;
+}
+
 /**
  * 构造假的时间轴状态。
  *
@@ -166,7 +289,42 @@ function buildHandlers(): Record<string, (...args: unknown[]) => unknown> {
         get_gpu_devices: () => ({ ok: true, devices: [] }),
         get_onnx_status: () => ({ ok: true, available: false }),
         get_dml_adapters: () => ({ ok: true, adapters: [] }),
-        get_waveform_manifest: () => ({ ok: true, entries: [], items: [] }),
+        // ── 波形（假数据）────────────────────────────────────────────
+        get_waveform_mipmap_binary: (...args: unknown[]) => {
+            const sourcePath = String(args[0] ?? "");
+            const level = Number(args[1] ?? 0);
+            const levels = getMockWaveformLevels(sourcePath);
+            return levels[level] ?? "";
+        },
+        batch_get_waveform_mipmap: (...args: unknown[]) => {
+            const paths = Array.isArray(args[0]) ? (args[0] as unknown[]) : [];
+            const out: Record<string, [string, string, string]> = {};
+            for (const path of paths) {
+                const key = String(path);
+                out[key] = getMockWaveformLevels(key);
+            }
+            return out;
+        },
+        preload_waveform_mipmap: () => ({ ok: true }),
+        get_waveform_manifest: (...args: unknown[]) => {
+            const sourcePath = String(args[0] ?? "");
+            const totalFrames = MOCK_WAVEFORM_DURATION_SEC * MOCK_WAVEFORM_SAMPLE_RATE;
+            return {
+                sourcePath,
+                revision: "mock-1",
+                sampleRate: MOCK_WAVEFORM_SAMPLE_RATE,
+                totalFrames,
+                channels: 1,
+                durationSec: MOCK_WAVEFORM_DURATION_SEC,
+                tilePeaks: 0,
+                levels: MOCK_DIVISION_FACTORS.map((divisionFactor, level) => ({
+                    level,
+                    divisionFactor,
+                    peakCount: Math.floor(totalFrames / divisionFactor),
+                    tileCount: 0,
+                })),
+            };
+        },
         set_transport: () => ({ ok: true }),
         set_project_length: () => ({ ok: true }),
         select_clip: () => ({ ok: true }),
