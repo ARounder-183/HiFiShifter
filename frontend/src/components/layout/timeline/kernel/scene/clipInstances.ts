@@ -29,10 +29,7 @@
  *    兜底，此处**仍走 GL 画块面**（仅缺少外圈描边），差异记录在 Spike 报告中。
  */
 
-import {
-    buildClipBodyInstance,
-    CLIP_INSTANCE_FLOATS,
-} from "../../runtime/timelineClipGlRenderer";
+import { buildClipBodyInstance, CLIP_INSTANCE_FLOATS } from "../../runtime/timelineClipGlRenderer";
 import { buildTimelineClipVisualStyle } from "../../runtime/timelineCanvasStyle";
 
 /**
@@ -179,7 +176,8 @@ export function createClipInstanceBuilder(): ClipInstanceBuilder {
                 const isGroupActive =
                     clip.groupId != null && args.activeGroupIds?.has(clip.groupId) === true;
                 const isGroupDisabled =
-                    clip.groupId != null && (args.disabledGroupIds?.includes(clip.groupId) ?? false);
+                    clip.groupId != null &&
+                    (args.disabledGroupIds?.includes(clip.groupId) ?? false);
                 const style = buildTimelineClipVisualStyle({
                     widthPx: Math.max(1, clip.widthPx),
                     trackColor: clip.trackColor,

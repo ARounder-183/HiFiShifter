@@ -61,10 +61,7 @@ function build(clips: ClipInstanceClip[]) {
 
 describe("clipInstances", () => {
     it("实例数 = clip 数，缓冲容量足够", () => {
-        const result = build([
-            makeClip({ id: "a" }),
-            makeClip({ id: "b", leftPx: 200 }),
-        ]);
+        const result = build([makeClip({ id: "a" }), makeClip({ id: "b", leftPx: 200 })]);
         expect(result.count).toBe(2);
         expect(result.instances.length).toBeGreaterThanOrEqual(2 * CLIP_INSTANCE_FLOATS);
     });
