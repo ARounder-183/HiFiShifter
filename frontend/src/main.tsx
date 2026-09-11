@@ -17,6 +17,13 @@ import { installGlobalErrorReporting } from "./services/frontendErrorLog";
 // 全局兜底：未捕获异常 / 未处理的 Promise rejection 回传到后端统一日志。
 installGlobalErrorReporting();
 
+// dev-only 后端替身：URL 带 `?mock=1` 时在渲染前安装假后端，使前端可在纯浏览器
+// 里独立运行（本工程默认依赖 pywebview / Tauri 后端）。生产构建不打包该模块。
+if (import.meta.env.DEV && new URLSearchParams(window.location.search).has("mock")) {
+    const { installMockBackend } = await import("./dev/mockBackend");
+    installMockBackend();
+}
+
 /** 进程级全局手势基建：自愈式修饰键跟踪（淡化曲率等 modifierOnly 键位）。 */
 function GlobalGestureServices() {
     useEffect(() => initModifierWatcher() ?? undefined, []);

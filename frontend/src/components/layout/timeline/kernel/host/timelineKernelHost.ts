@@ -2,51 +2,73 @@
  * 时间轴渲染内核 · Spike 宿主（命令式运行时）
  *
  * 【主要内容】
- * 把内核各模块装配成一个可运行的宿主：创建 WebGL2 上下文与两个 program、字形图集
- * 与布局器、滚动内核与渲染循环；绑定 wheel / 滚动条拖拽 / 键盘输入；在 rAF 内按层序
- * 绘制「网格 → clip 块面 → 文字」；并在内容 / 缩放变化时重建几何。
+ * 把内核各模块装配成一个可运行的宿主：创建 WebGL2 上下文、滚动内核与渲染循环；
+ * 绑定 wheel / 中键平移 / 滚动条拖拽 / 键盘输入；在 rAF 内按层序绘制
+ * 「网格 → 轨道行分界线 → clip 块面」（一次 draw call）并同步细节层、
+ * 播放头、标尺与轨道头；在内容 / 缩放 / 行高变化时重建几何。
  *
  * 【作用】
- * 这是「自绘滚动 + 单 WebGL2」的最小可运行验证载体：
- * - 没有任何随原生滚动移动的 DOM 内容层 → 不需要同帧同步提交，渲染完全由 rAF 调度；
- * - 几何以内容坐标常驻 GPU → 滚动帧只更新 `u_viewOrigin`（`repaint`，零重建）。
- * 真机用它跑 PERF 场景，验证帧率与手感，作为是否推进阶段 1 的决策依据。
+ * 这是「自绘滚动 + 单 WebGL2」的运行时载体：
+ * - 没有任何随原生滚动移动的 DOM **内容**层 → 不需要同帧同步提交，渲染完全由 rAF 调度；
+ * - 块面几何以内容坐标常驻 GPU → 滚动帧只更新 `u_viewOrigin`（`repaint`，零重建）；
+ * - clip 细节（旋钮 / 徽标 / 标签 / 淡变曲线 / 吸附三角）由 Canvas2D 覆盖层承担，
+ *   同样采用「内容坐标 + 窗口平移」策略，滚动在窗口余量内只移动画布、不重绘。
  *
  * 【与其他模块的关系】
- * - 上游：React 外壳（`TimelineKernelSpikeView`）提供 DOM 节点与数据镜像。
- * - 复用（Spike 的明确例外）：`runtime/timelineAxis`（坐标投影）、
- *   `runtime/buildTimelineTicks`（刻度）、`runtime/timelineCanvasModel`（clip 几何）、
- *   `runtime/timelineCanvasStyle`（样式 / 字体）。
- * - 独立性：纯 TS（无 React）；GL 资源与事件监听在 `dispose` 中全部释放。
+ * - 上游：React 外壳（`TimelineKernelView`）提供 DOM 节点与数据镜像。
+ * - 复用：`runtime/timelineAxis`（坐标投影）、`runtime/buildTimelineTicks`（刻度）、
+ *   `runtime/timelineCanvasModel`（clip 几何）、`runtime/timelineCanvasStyle`（样式 / 字体）、
+ *   `runtime/timelineCanvasRenderer`（细节层绘制）、`runtime/timelineScrollRange`（缩放解析）。
+ * - 独立性：纯 TS（无 React）；GL 资源、事件监听与细节画布在 `dispose` 中全部释放。
  *
- * 【Spike 已知简化（记录于 Spike 报告）】
- * 1. 只画网格 / clip 块面 / clip 名称文字；细节层（旋钮 / 徽标 / fade 曲线 / 波形 /
- *    播放头 / 标尺 / 轨道头）尚未接入。
- * 2. 字形图集单页（`maxPages: 1`）；页满后新字形不再生成（跳过绘制）。
- * 3. 主题色取固定前景色，未接入主题变量。
- * 4. clip 数据直接来自 session（字段结构与 `buildSparseClipRenderModel` 的入参兼容），
- *    未接入选区 / 悬停 / 重叠等交互态。
+ * 【坐标系约定（评审检查项）】
+ * - 块面实例与细节层绘制**都用内容坐标**；前者靠 `u_viewOrigin` uniform 平移，
+ *   后者靠画布元素的 `left/top` 平移，两者共用同一个窗口原点，滚动时不会分离。
+ * - 标尺播放头位于标尺内容层内（用内容坐标 `left`）；轨道区播放头位于内核视口
+ *   容器内（用视口坐标 `translateX`）。混用会导致双重计滚动或粘屏。
+ *
+ * 【尚未接入】
+ * 波形层与命中测试（交互）仍在旧实现中；标尺与左侧轨道头保留 DOM，由本宿主
+ * 在 rAF 内同步（见 `syncDom`）。
  */
 
 import type { ClipInfo, TrackInfo } from "../../../../../features/session/sessionTypes";
+import {
+    isModifierActive,
+    isNoneBinding,
+} from "../../../../../features/keybindings/keybindingsSlice";
+import type { Keybinding } from "../../../../../features/keybindings/types";
+import { getTimelineWheelAction, type ScrollbarZone } from "../../../wheelGesture";
 import { buildTimelineTicks, type TimelineTick } from "../../runtime/buildTimelineTicks";
 import { createTimelineAxis, type TimelineAxis } from "../../runtime/timelineAxis";
 import { buildSparseClipRenderModel } from "../../runtime/timelineCanvasModel";
-import { parseRgbaColor } from "../../runtime/timelineClipGlRenderer";
-import { resolveFontFamily } from "../../runtime/timelineCanvasStyle";
-import { createGlyphLayout } from "../glyph/glyphLayout";
-import { createGlyphRasterizer, GLYPH_LINE_HEIGHT_RATIO } from "../glyph/glyphRasterizer";
+import { drawTimelineCanvas } from "../../runtime/timelineCanvasRenderer";
+import { clearCanvasPhysical, rasterize } from "../../runtime/canvasRaster";
+import {
+    parseRgbaColor,
+    type GlClipBodySink,
+} from "../../runtime/timelineClipGlRenderer";
+import { resolveFontFamily, resolveThemeColor } from "../../runtime/timelineCanvasStyle";
+import { resolveHorizontalWheelZoom } from "../../runtime/timelineScrollRange";
+import { resolveTimelineMinPxPerSec } from "../../runtime/timelineZoomBounds";
+import {
+    DEFAULT_PX_PER_SEC,
+    DEFAULT_ROW_HEIGHT,
+    MAX_PX_PER_SEC,
+    MAX_ROW_HEIGHT,
+    MIN_PX_PER_SEC,
+    MIN_ROW_HEIGHT,
+} from "../../constants";
 import { createGlCanvas } from "../gl/glContext";
-import { buildGlyphQuads, type GlyphQuad } from "../gl/glyphQuads";
-import { createGlyphProgram, type GlyphProgram } from "../gl/glyphProgram";
 import { CLIP_INSTANCE_FLOATS, writeFlatInstance } from "../gl/instanceLayout";
-import { createSdfBoxProgram, type SdfBoxProgram } from "../gl/sdfBoxProgram";
+import { createSdfBoxProgram } from "../gl/sdfBoxProgram";
 import { computeScrollbar, scrollDeltaFromThumbDrag } from "../input/scrollbars";
 import { normalizeWheelDelta } from "../input/normalizeWheel";
 import { createRenderLoop } from "../renderLoop";
 import { createClipInstanceBuilder } from "../scene/clipInstances";
 import { buildGridInstances } from "../scene/gridInstances";
-import { createScrollKernel } from "../scrollKernel";
+import type { FlatInstance, Rgba } from "../scene/instanceTypes";
+import { createScrollKernel, type TimelineViewportState } from "../scrollKernel";
 
 /** `buildTimelineTicks` 的入参类型（用于让数据镜像的字段类型自动对齐）。 */
 type BuildTicksArgs = Parameters<typeof buildTimelineTicks>[0];
@@ -65,6 +87,56 @@ export interface TimelineKernelData {
     readonly secondaryTimeUnit: BuildTicksArgs["secondaryUnit"];
     readonly minLabelSpacingPx: number;
     readonly tempoMap: BuildTicksArgs["tempoMap"];
+    /**
+     * 单条轨道高度（CSS px）。
+     *
+     * 必须与左侧轨道头同源（`constants.ts` 的 rowHeight 状态）：内核独立取值会让
+     * 左右两列的行错位——轨道头第 N 行与轨道区第 N 行不在同一水平线上。
+     */
+    readonly rowHeight: number;
+    /** 播放头位置（工程秒），由内核在 rAF 内读取。 */
+    readonly playheadSec: number;
+    /**
+     * 滚轮手势相关的键位绑定（与旧实现同一套 keybinding 体系）。
+     *
+     * 滚轮语义完全由绑定决定，不能写死修饰键：时间轴默认「无修饰键滚轮 =
+     * 水平缩放」（`modifier.horizontalZoom` 是 none-binding，在无修饰键时命中）、
+     * Shift = 水平滚动、Alt = 垂直滚动；悬停自绘滚动条时滚轮只作用于该轴，
+     * 按住 `modifier.scrollbarZoom`（默认 Alt）改为该轴缩放。用户可在
+     * 键位设置里改绑（触摸板 / REAPER / Vegas 预设各不相同），写死会让
+     * 「滚轮缩放 / 滚动」在非默认预设下全部失效。
+     */
+    readonly keybindings: {
+        readonly horizontalZoom: Keybinding | null;
+        readonly verticalZoom: Keybinding | null;
+        readonly scrollHorizontal: Keybinding | null;
+        readonly scrollVertical: Keybinding | null;
+        readonly scrollbarZoom: Keybinding | null;
+    };
+    /** 水平缩放是否以播放头为锚点（`playheadZoomEnabled`）。 */
+    readonly playheadZoomEnabled: boolean;
+    /** 初始水平缩放（CSS px/秒）：仅用于首次创建滚动内核。 */
+    readonly initialPxPerSec: number;
+}
+
+/**
+ * 与内核视口联动的外部 DOM（全部在 rAF 内命令式更新，**不经 React**）。
+ *
+ * 【为什么是 DOM 而不是自绘】
+ * 标尺（含 Tempo Map 行）与左侧轨道头是重交互、低频变化的 DOM 子树：把它们搬进
+ * canvas 等于重写 Tempo 旗帜拖拽、内联编辑、右键菜单与电平表，收益极低。这里只把
+ * 它们**跟随内核视口**的部分收敛为「每帧一次 transform / scrollTop 写入」——一次
+ * 样式写入的成本与图层数量无关，不构成滚动瓶颈，同时天然与旧实现视觉一致。
+ */
+export interface TimelineKernelDomSync {
+    /** 标尺内容层：写 `translateX(-scrollLeft)` 跟随水平滚动。 */
+    readonly rulerContent?: HTMLElement | null;
+    /** 轨道头滚动容器：写 `scrollTop` 跟随纵向滚动。 */
+    readonly trackListScroller?: HTMLElement | null;
+    /** 轨道区播放头竖线：写 `translateX` 跟随视口与播放位置。 */
+    readonly playheadLine?: HTMLElement | null;
+    /** 标尺播放头竖线（与轨道区播放头同步）。 */
+    readonly rulerPlayheadLine?: HTMLElement | null;
 }
 
 /** 宿主构造参数。 */
@@ -79,12 +151,72 @@ export interface TimelineKernelHostArgs {
     readonly vScrollbarThumb: HTMLElement;
     /** 数据镜像读取函数（每帧调用，避免 React 与 runtime 相互持有）。 */
     readonly data: () => TimelineKernelData;
+    /** 需要跟随视口的外部 DOM（标尺 / 轨道头 / 播放头）。 */
+    readonly sync?: TimelineKernelDomSync;
+    /**
+     * 播放头位置读取（工程秒）。
+     *
+     * 用函数注入而不是值：播放头在播放中逐帧变化，值注入会迫使 React 每帧重渲染；
+     * 内核在 rAF 内直接读视觉位置（既有实现同样用视觉插值 ref 驱动）。
+     */
+    readonly playheadSec?: () => number;
+    /**
+     * 竖直缩放请求：内核算出新行高后回调，由 React 写入行高状态。
+     *
+     * 行高的真值源在 React（左侧轨道头与内核必须同源），内核只负责手势解析与
+     * 锚点换算，不能自行改行高——否则两侧会各持一个行高并立刻错位。
+     */
+    readonly onRowHeightChange?: (rowHeightPx: number) => void;
+    /**
+     * 水平缩放变化：内核为**真值源**，回调用于驱动 React 侧的派生量
+     * （标尺刻度 / 内容宽度）。缩放是低频手势（每个滚轮事件一次），
+     * 回调频率不会构成渲染压力。
+     */
+    readonly onZoomChange?: (pxPerSec: number) => void;
+    /**
+     * 可见轨道行窗口变化（低频：每滚过一行触发一次）。
+     *
+     * 供需要按「可见行」构建数据的 React 侧图层使用（例如波形面的 scene rows：
+     * 每行都要投影一次并触发 peaks 预加载，全量构建代价与轨道数成正比）。
+     * 竖直滚动在同一行窗口内不会触发。
+     */
+    readonly onVisibleRowsChange?: (firstRow: number, rowCount: number) => void;
 }
 
 /** 宿主句柄。 */
 export interface TimelineKernelHost {
     /** 标记场景需要重建（内容 / 缩放 / 主题变化后调用）。 */
     invalidateScene(): void;
+    /**
+     * 外部请求纵向滚动（左侧轨道头滚动时调用）。
+     *
+     * 特殊说明：写入后由内核统一钳制并标脏，外部不得自行计算上限
+     * （钳制只在 `ScrollKernel` 内做一次）。
+     */
+    setScrollTop(px: number): void;
+    /** 读取当前视口状态（供外部低频读取，例如保存 / 调试）。 */
+    getViewport(): { scrollLeft: number; scrollTop: number; pxPerSec: number };
+    /**
+     * 读取当前坐标投影（内容坐标 ↔ 视口坐标）。
+     *
+     * 供需要与内核视口同步的**独立画布**图层使用（例如波形面：它自带 WebGL2
+     * 上下文与几何缓存，只需要一个与内核同源的 axis 即可零重建跟随滚动）。
+     */
+    getAxis(): TimelineAxis;
+    /**
+     * 注册独立画布图层：内核在每次视口提交（滚动 / 缩放 / 重建）后按 order 调用其 paint。
+     *
+     * 特殊说明：只在**视口变化或几何重建**时调用，播放头移动这类纯 DOM 更新不触发
+     * —— 图层自身的复用判定（如波形面的 `canReuse`）会决定是重绘还是只改 uniform。
+     *
+     * @param layer 图层（name 用于去重，paint 接收当前 axis）。
+     * @param order 绘制顺序（小的先画）。
+     * @returns 注销函数。
+     */
+    registerViewportLayer(
+        layer: { name: string; paint: (axis: TimelineAxis) => void },
+        order: number,
+    ): () => void;
     /** 释放全部资源与事件监听。 */
     dispose(): void;
 }
@@ -95,28 +227,71 @@ const HORIZONTAL_MARGIN_PX = 512;
 /** 竖直 overscan 行数：轨道窗口上下各多建若干行。 */
 const VERTICAL_OVERSCAN_ROWS = 2;
 
-/** clip 名称字号（CSS px）。 */
-const CLIP_NAME_FONT_SIZE_PX = 11;
-
-/** clip 名称内边距（CSS px）。 */
-const CLIP_NAME_PADDING_X_PX = 4;
-const CLIP_NAME_PADDING_Y_PX = 2;
-
-/** 缩放上下限（与生产常量同量级）。 */
-const MIN_PX_PER_SEC = 0.5;
-const MAX_PX_PER_SEC = 8000;
-
-/** 初始缩放与行高。 */
-const INITIAL_PX_PER_SEC = 100;
-const INITIAL_ROW_HEIGHT = 80;
+/** 自绘滚动条厚度（CSS px），与视图中的 thumb 容器一致。 */
+const SCROLLBAR_SIZE_PX = 8;
 
 /** 键盘单步滚动量（CSS px）。 */
 const KEYBOARD_STEP_PX = 60;
+
+/** 滚轮缩放的每步倍率（与旧实现一致：向上放大 1.1、向下缩小 0.9）。 */
+const WHEEL_ZOOM_IN_FACTOR = 1.1;
+const WHEEL_ZOOM_OUT_FACTOR = 0.9;
+
+/**
+ * 细节层的 GL 块面接收器：**什么都不画**。
+ *
+ * 作用：`drawTimelineCanvas` 在收到 `glBodies` 时会跳过 Canvas2D 块面绘制，只画
+ * 细节（旋钮 / 徽标 / 文字 / 淡变曲线 / 吸附三角）。内核的块面由 GL 层负责，
+ * 因此这里传一个空实现，让细节层专注于细节——两层叠加后与旧实现逐像素等价。
+ */
+const NOOP_GL_BODY_SINK: GlClipBodySink = {
+    render: () => undefined,
+};
 
 /** 全局帧率探针的最小接口（`dev/frameProfiler` 通过 globalThis 挂载）。 */
 interface FrameProfilerLike {
     recordLayer(name: string, ms: number): void;
     recordCommit(ms: number): void;
+}
+
+/**
+ * 构建轨道行分界线实例（相邻轨道之间的 1 物理像素横线）。
+ *
+ * 流程：从 `firstRow` 起逐行产出「行底边」横线，覆盖整行宽度。
+ *
+ * 特殊说明：
+ * - 位置与左侧轨道头的行边框同源（行 i 的底边 = (i+1) × rowHeight），两侧
+ *   行线必须在同一水平线上，否则左右两列看起来是错开的；
+ * - 线宽按**物理像素**折算并吸附栅格（与网格线同一策略），否则分数 DPR 下
+ *   会出现"有的行线粗、有的细"；
+ * - 纵坐标用 `(row + 1) × rowHeight` 而不是累加，避免浮点误差逐行累积。
+ *
+ * @param args 构建参数（行窗口、行高、横向窗口、DPR、颜色）。
+ * @returns 行分界线实例数组。
+ */
+function buildRowBorderInstances(args: {
+    readonly firstRow: number;
+    readonly rowCount: number;
+    readonly rowHeight: number;
+    readonly windowLeftPx: number;
+    readonly windowWidthPx: number;
+    readonly dpr: number;
+    readonly rgba: Rgba;
+}): FlatInstance[] {
+    const out: FlatInstance[] = [];
+    const rowHeight = Math.max(1, args.rowHeight);
+    const lineHeight = 1 / Math.max(1, args.dpr);
+    for (let index = 0; index < args.rowCount; index += 1) {
+        const bottomPx = (args.firstRow + index + 1) * rowHeight;
+        out.push({
+            x: args.windowLeftPx,
+            y: Math.round(bottomPx * args.dpr) / args.dpr - lineHeight,
+            w: args.windowWidthPx,
+            h: lineHeight,
+            rgba: args.rgba,
+        });
+    }
+    return out;
 }
 
 /**
@@ -132,30 +307,33 @@ function readFrameProfiler(): FrameProfilerLike | undefined {
 }
 
 /**
- * 创建两个 GL program；任一失败时释放已创建的资源后抛错。
+ * 数值夹取。
  *
- * 特殊说明：React StrictMode 双挂载与 HMR 会反复"创建 → 销毁 → 再创建"，
- * 失败路径若不释放，program / buffer 会在每次重试中累积（context 本身按
- * `glContext` 的说明保留复用，不在此释放）。
- *
- * @param gl 内核 WebGL2 上下文。
- * @returns 两个 program 句柄。
+ * @param value 待夹取值。
+ * @param min 下界。
+ * @param max 上界。
+ * @returns 夹取结果；`value` 非有限值时返回 `min`。
  */
-function createKernelPrograms(gl: WebGL2RenderingContext): {
-    sdfBox: SdfBoxProgram;
-    glyphProgram: GlyphProgram;
-} {
-    let sdfBox: SdfBoxProgram | null = null;
-    let glyphProgram: GlyphProgram | null = null;
-    try {
-        sdfBox = createSdfBoxProgram(gl);
-        glyphProgram = createGlyphProgram(gl);
-    } catch (error) {
-        sdfBox?.dispose();
-        glyphProgram?.dispose();
-        throw error;
-    }
-    return { sdfBox, glyphProgram };
+function clampNumber(value: number, min: number, max: number): number {
+    if (!Number.isFinite(value)) return min;
+    return Math.min(max, Math.max(min, value));
+}
+
+/**
+ * 判断 DOM 写入值是否需要提交（值去重）。
+ *
+ * 【为什么用取反写法】去重变量以 `NaN` 表示「从未写入」，而 `NaN > eps` 恒为
+ * **false**：直接写 `Math.abs(next - prev) > eps` 会把**首次**写入判定为
+ * 「无需写入」而跳过，表现为标尺 / 播放头 / 细节层在第一次交互前完全不动
+ * （后续也永远追不上，因为 `last` 一直是 NaN）。取反写法让 NaN 走「需要写入」分支。
+ *
+ * @param next 本次要写入的值。
+ * @param previous 上一次写入的值（NaN = 从未写入）。
+ * @param epsilon 视为「无变化」的最大差值。
+ * @returns 需要写入时为 true。
+ */
+function shouldWrite(next: number, previous: number, epsilon = 0.01): boolean {
+    return !(Math.abs(next - previous) <= epsilon);
 }
 
 /**
@@ -172,27 +350,105 @@ function createKernelPrograms(gl: WebGL2RenderingContext): {
  * @returns 宿主句柄；调用方须在卸载时 `dispose()`。
  */
 export function createTimelineKernelHost(args: TimelineKernelHostArgs): TimelineKernelHost {
-    const { container, canvas, hScrollbarThumb, vScrollbarThumb, data } = args;
+    const { container, canvas, hScrollbarThumb, vScrollbarThumb, data, sync } = args;
+    const { onRowHeightChange, onZoomChange, onVisibleRowsChange } = args;
 
     const glCanvas = createGlCanvas(canvas);
     if (!glCanvas) throw new Error("WebGL2 不可用");
     const gl = glCanvas.gl;
-    const { sdfBox, glyphProgram } = createKernelPrograms(gl);
+    const sdfBox = createSdfBoxProgram(gl);
 
     const readDpr = () => window.devicePixelRatio || 1;
-    const rasterizer = createGlyphRasterizer({ pageSizePx: 2048, maxPages: 1, dpr: readDpr() });
-    const glyphLayout = createGlyphLayout(
-        (text, fontKey) => rasterizer?.measure(text, fontKey) ?? 0,
-    );
     const clipBuilder = createClipInstanceBuilder();
+
+    // ── 细节层（Canvas2D 覆盖层）─────────────────────────────────────
+    // clip 细节（增益旋钮 / 徽标 / 名称与数值标签 / 淡变曲线 / 吸附三角）是逐 clip
+    // 的路径与文字绘制：放 GL 需要自建字形图集与曲线三角化，收益与风险不成比例。
+    // 这里保留既有 Canvas2D 渲染器（`drawTimelineCanvas`，传空 GL sink 即只画细节），
+    // 并把它放在「内容坐标 + 窗口平移」的画布上——滚动在窗口余量内**只更新画布
+    // 位置、不重绘**，与 GL 层共用同一套「滚动零重绘」策略。
+    const detailCanvas = document.createElement("canvas");
+    detailCanvas.style.position = "absolute";
+    detailCanvas.style.left = "0px";
+    detailCanvas.style.top = "0px";
+    detailCanvas.style.pointerEvents = "none";
+    // 层序：GL 块面（画布 0）→ 波形（独立画布，由 React 挂载）→ 细节（2）→ 播放头（20）。
+    detailCanvas.style.zIndex = "2";
+    container.appendChild(detailCanvas);
+    const detailCtx = detailCanvas.getContext("2d");
+
+    /** 细节层窗口（内容坐标）：与 GL 几何窗口一致，滚动在余量内不重绘。 */
+    let detailWindowStartX = 0;
+    let detailWindowStartY = 0;
+    let detailWindowWidth = 0;
+    let detailWindowHeight = 0;
+    let detailDrawClips: Parameters<typeof drawTimelineCanvas>[1]["clips"] = [];
+    let detailRowGuides: Parameters<typeof drawTimelineCanvas>[1]["rowGuides"];
+    let lastDetailLeft = Number.NaN;
+    let lastDetailTop = Number.NaN;
+
+    /**
+     * 重绘细节层（仅在几何重建时调用）。
+     *
+     * 流程：按窗口尺寸光栅化 → 设 DPR 变换 → 清屏 → 平移到窗口原点 →
+     * 用**内容坐标**调用既有 Canvas2D 渲染器（传空 GL sink，只画细节）。
+     *
+     * 特殊说明：`drawTimelineCanvas` 内部会自行清屏且用 save/restore 包裹，
+     * 不会破坏这里设置的 DPR 变换与平移。
+     *
+     * @returns 无返回值；细节上下文不可用时静默跳过（不影响块面与网格）。
+     */
+    function redrawDetails(): void {
+        if (detailCtx === null) return;
+        if (detailWindowWidth <= 0 || detailWindowHeight <= 0) return;
+        const target = rasterize(detailCanvas, detailWindowWidth, detailWindowHeight, readDpr());
+        detailCtx.setTransform(target.dpr, 0, 0, target.dpr, 0, 0);
+        clearCanvasPhysical(detailCtx, target);
+        detailCtx.translate(-detailWindowStartX, -detailWindowStartY);
+        drawTimelineCanvas(detailCtx, {
+            width: target.cssWidthPx,
+            height: target.cssHeightPx,
+            clips: detailDrawClips,
+            fontFamily: resolveFontFamily(),
+            rowGuides: detailRowGuides,
+            viewportLeft: detailWindowStartX,
+            viewportTopPx: detailWindowStartY,
+            darkMode: data().darkMode,
+            glBodies: NOOP_GL_BODY_SINK,
+            originXPx: detailWindowStartX,
+            originYPx: detailWindowStartY,
+        });
+    }
+
+    /**
+     * 把细节层平移到当前视口（滚动帧只做这一步，零重绘）。
+     *
+     * @param view 当前视口状态。
+     * @returns 无返回值。
+     */
+    function positionDetailLayer(view: TimelineViewportState): void {
+        const left = detailWindowStartX - view.scrollLeft;
+        const top = detailWindowStartY - view.scrollTop;
+        if (shouldWrite(left, lastDetailLeft)) {
+            lastDetailLeft = left;
+            detailCanvas.style.left = `${left}px`;
+        }
+        if (shouldWrite(top, lastDetailTop)) {
+            lastDetailTop = top;
+            detailCanvas.style.top = `${top}px`;
+        }
+    }
 
     // 尺寸镜像：由 ResizeObserver 维护，供滚动内核与光栅化读取（O(1)，不触发布局）。
     let viewportWidthPx = Math.max(1, container.clientWidth);
     let viewportHeightPx = Math.max(1, container.clientHeight);
 
     const scroll = createScrollKernel({
-        pxPerSec: INITIAL_PX_PER_SEC,
-        rowHeight: INITIAL_ROW_HEIGHT,
+        // 初始缩放取 React 侧恢复的持久化值（旧实现从 localStorage 恢复，
+        // 内核直接用固定值会让用户每次启动都回到默认缩放）。
+        pxPerSec: clampNumber(data().initialPxPerSec, MIN_PX_PER_SEC, MAX_PX_PER_SEC) || DEFAULT_PX_PER_SEC,
+        // 行高与左侧轨道头同源（data().rowHeight），否则左右两列行错位。
+        rowHeight: Math.max(1, data().rowHeight || DEFAULT_ROW_HEIGHT),
         projectSec: () => Math.max(0, data().projectSec),
         trackCount: () => data().tracks.length,
         viewportHeightPx: () => viewportHeightPx,
@@ -203,12 +459,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     // ── 场景缓存（内容坐标常驻；滚动在余量内不重建）─────────────────────
     let combinedInstances = new Float32Array(0);
     let combinedCount = 0;
-    let glyphQuads: GlyphQuad[] = [];
     let sceneDirty = true;
     /** 实例是否已上传 GPU：true 时滚动帧走 `repaint`（零上传）。 */
     let sceneUploaded = false;
-    /** 字形实例是否已上传 GPU（同上）。 */
-    let glyphsUploaded = false;
     let builtPxPerSec = Number.NaN;
     let builtScrollLeftPx = Number.NaN;
     let builtScrollTopPx = Number.NaN;
@@ -220,6 +473,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     let builtGrid = "";
     let builtBpm = -1;
     let builtBeatsPerBar = -1;
+    let builtRowHeight = -1;
 
     /** 组装当前 axis（内容坐标投影）。 */
     function currentAxis(): TimelineAxis {
@@ -247,7 +501,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             builtProjectSec !== d.projectSec ||
             builtGrid !== d.grid ||
             builtBpm !== d.bpm ||
-            builtBeatsPerBar !== d.beatsPerBar
+            builtBeatsPerBar !== d.beatsPerBar ||
+            // 行高变化会改变所有行的内容坐标（分界线 / clip 位置），必须重建。
+            builtRowHeight !== d.rowHeight
         );
     }
 
@@ -281,14 +537,32 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             tempoMap: d.tempoMap,
         });
 
+        // 配色与旧实现同源（`--qt-graph-grid-weak` / `strong`）：硬编码按主题取
+        // 灰会让浅色主题的网格几乎不可见（真实弱线是 rgba(74,88,112,0.3)）。
         const gridInstances = buildGridInstances({
             ticks,
             windowLeftPx: windowLeft,
             windowWidthPx: windowWidth,
             contentBottomPx: d.tracks.length * view.rowHeight,
             dpr: axis.dpr,
-            weakRgba: d.darkMode ? [1, 1, 1, 0.08] : [0, 0, 0, 0.06],
-            strongRgba: d.darkMode ? [1, 1, 1, 0.16] : [0, 0, 0, 0.12],
+            weakRgba: parseRgbaColor(
+                resolveThemeColor("--qt-graph-grid-weak", "rgba(255,255,255,0.1)"),
+            ),
+            strongRgba: parseRgbaColor(
+                resolveThemeColor("--qt-graph-grid-strong", "rgba(255,255,255,0.22)"),
+            ),
+        });
+
+        // 轨道行分界线：旧实现由 Canvas2D 逐行画 `--qt-border`；位置必须与左侧
+        // 轨道头的行边框一致，否则左右两列看起来是错开的。
+        const rowBorders = buildRowBorderInstances({
+            firstRow,
+            rowCount: Math.max(0, lastRow - firstRow),
+            rowHeight: view.rowHeight,
+            windowLeftPx: windowLeft,
+            windowWidthPx: windowWidth,
+            dpr: axis.dpr,
+            rgba: parseRgbaColor(resolveThemeColor("--qt-border", "rgba(148,163,184,0.22)")),
         });
 
         // clip 几何：复用既有稀疏模型（窗口裁剪 + 内容坐标投影）。
@@ -324,52 +598,22 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             seamColor: d.darkMode ? "rgb(31, 31, 31)" : "rgb(237, 240, 245)",
         });
 
-        // 合并：网格实例在前、clip 实例在后（同一 draw call 内的层叠顺序）。
+        // 合并：网格 → 行分界线 → clip（同一 draw call 内的层叠顺序，后者覆盖前者）。
         const gridCount = gridInstances.length;
-        const needed = (gridCount + clipResult.count) * CLIP_INSTANCE_FLOATS;
+        const borderCount = rowBorders.length;
+        const needed = (gridCount + borderCount + clipResult.count) * CLIP_INSTANCE_FLOATS;
         if (combinedInstances.length < needed) combinedInstances = new Float32Array(needed);
         for (let index = 0; index < gridCount; index += 1) {
             writeFlatInstance(combinedInstances, index, gridInstances[index]);
         }
+        for (let index = 0; index < borderCount; index += 1) {
+            writeFlatInstance(combinedInstances, gridCount + index, rowBorders[index]);
+        }
         combinedInstances.set(
             clipResult.instances.subarray(0, clipResult.count * CLIP_INSTANCE_FLOATS),
-            gridCount * CLIP_INSTANCE_FLOATS,
+            (gridCount + borderCount) * CLIP_INSTANCE_FLOATS,
         );
-        combinedCount = gridCount + clipResult.count;
-
-        // 文字：clip 名称（超宽截断由布局器完成）。
-        const fontKey = `${CLIP_NAME_FONT_SIZE_PX}px ${resolveFontFamily()}`;
-        const quads: GlyphQuad[] = [];
-        for (let index = 0; index < model.drawClips.length; index += 1) {
-            const clip = model.drawClips[index];
-            const maxWidth = clip.widthPx - CLIP_NAME_PADDING_X_PX * 2;
-            if (maxWidth <= 0 || clip.name.length === 0) continue;
-            const run = glyphLayout.layout(clip.name, fontKey, maxWidth);
-            if (run.glyphs.length === 0) continue;
-            quads.push(
-                ...buildGlyphQuads({
-                    glyphs: run.glyphs,
-                    originX: clip.leftPx + CLIP_NAME_PADDING_X_PX,
-                    originY: clip.topPx + CLIP_NAME_PADDING_Y_PX,
-                    heightPx: CLIP_NAME_FONT_SIZE_PX * GLYPH_LINE_HEIGHT_RATIO,
-                    atlasPageSizePx: rasterizer?.pageSizePx() ?? 1,
-                    resolveSlot: (char) => rasterizer?.acquire(char, fontKey) ?? null,
-                    // 文字色取样式模块算出的 textFill（跟随轨道色 / 主题）：硬编码按
-                    // 主题取白/黑会在浅色块面上产生对比度不足（既有实现同样用 textFill）。
-                    rgba: parseRgbaColor(clipResult.textFills[index] ?? "#ffffff"),
-                }),
-            );
-        }
-        glyphQuads = quads;
-
-        // 新字形写入图集后按页上传纹理。
-        const dirtyPages = rasterizer?.consumeDirtyPages() ?? [];
-        if (rasterizer !== null && dirtyPages.length > 0) {
-            for (const page of dirtyPages) {
-                const pixels = rasterizer.readPage(page);
-                if (pixels !== null) glyphProgram.uploadAtlas(pixels, rasterizer.pageSizePx());
-            }
-        }
+        combinedCount = gridCount + borderCount + clipResult.count;
 
         builtPxPerSec = view.pxPerSec;
         builtScrollLeftPx = view.scrollLeft;
@@ -381,9 +625,33 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         builtGrid = d.grid;
         builtBpm = d.bpm;
         builtBeatsPerBar = d.beatsPerBar;
+        builtRowHeight = d.rowHeight;
+        // 细节层窗口：与 GL 几何窗口完全一致（同一批 drawClips、同一内容坐标
+        // 范围），因此两层在滚动时一起平移，不会出现细节与块面错位。
+        detailWindowStartX = windowLeft;
+        detailWindowStartY = firstRow * view.rowHeight;
+        detailWindowWidth = windowWidth;
+        detailWindowHeight = Math.max(1, (lastRow - firstRow) * view.rowHeight);
+        detailDrawClips = model.drawClips;
+        detailRowGuides = {
+            startTrackIndex: firstRow,
+            rowCount: Math.max(0, lastRow - firstRow),
+            rowHeight: view.rowHeight,
+            contentBottomPx: d.tracks.length * view.rowHeight,
+        };
+        redrawDetails();
+        positionDetailLayer(view);
+
+        // 可见行窗口变化：低频通知 React 侧（波形 scene rows 按行构建）。
+        const rowCount = Math.max(0, lastRow - firstRow);
+        if (lastVisibleFirstRow !== firstRow || lastVisibleRowCount !== rowCount) {
+            lastVisibleFirstRow = firstRow;
+            lastVisibleRowCount = rowCount;
+            onVisibleRowsChange?.(firstRow, rowCount);
+        }
+
         // 几何已重建 → 需要重新上传 GPU（下一帧走 render 而不是 repaint）。
         sceneUploaded = false;
-        glyphsUploaded = false;
         sceneDirty = false;
     }
 
@@ -397,7 +665,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      *
      * 特殊说明：余量内的纯滚动不重建——这正是"滚动零重绘"的实现点。
      */
-    function ensureScene(axis: TimelineAxis): void {
+    function ensureScene(axis: TimelineAxis): boolean {
         const view = scroll.get();
         const d = data();
         const needsRebuild =
@@ -407,7 +675,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             sceneContentChanged(d) ||
             Math.abs(view.scrollLeft - builtScrollLeftPx) > HORIZONTAL_MARGIN_PX ||
             Math.abs(view.scrollTop - builtScrollTopPx) > view.rowHeight * VERTICAL_OVERSCAN_ROWS;
-        if (needsRebuild) rebuildInstances(axis);
+        if (!needsRebuild) return false;
+        rebuildInstances(axis);
+        return true;
     }
 
     // 滚动条 DOM 写入去重：几何取整后未变化时不写 style（避免每帧触发样式重算）。
@@ -450,6 +720,94 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         }
     }
 
+    // ── 外部 DOM 同步（标尺 / 轨道头 / 播放头）─────────────────────────
+    // 全部在 rAF 内命令式写入并做值去重：一次样式写入的成本与内容规模无关，
+    // 但重复写同一个值会白白触发样式重算，因此只在跨过阈值时写。
+    let lastRulerTranslateX = Number.NaN;
+    let lastTrackListScrollTop = Number.NaN;
+    let lastPlayheadViewportX = Number.NaN;
+    let lastPlayheadContentX = Number.NaN;
+    /** 上一次绘制的视口（引用比较：`ScrollKernel.get()` 的引用在未变化时稳定）。 */
+    let lastDrawnView: TimelineViewportState | null = null;
+    /** 上一次绘制的播放头位置（秒），用于判断是否需要继续自驱动。 */
+    let lastDrawnPlayheadSec = Number.NaN;
+    /** 上一次通知 React 的可见行窗口（去重：同窗口不重复回调）。 */
+    let lastVisibleFirstRow = -1;
+    let lastVisibleRowCount = -1;
+
+    /**
+     * 独立画布图层（波形等）：内核在视口提交后按 order 调用其 paint。
+     *
+     * 这些图层自带渲染上下文与几何缓存，只需要一个与内核同源的 axis——把它们
+     * 并入内核 GL 上下文等于重写其几何与峰值管线，收益与风险都不成比例。
+     */
+    const viewportLayers: Array<{
+        name: string;
+        paint: (axis: TimelineAxis) => void;
+        order: number;
+    }> = [];
+
+    /**
+     * 把内核视口同步到外部 DOM。
+     *
+     * 流程：
+     * 1. 标尺内容层：`translateX(-scrollLeft)`（标尺刻度以内容坐标布局，靠平移跟随）；
+     * 2. 轨道头滚动容器：写 `scrollTop`（与内核纵向滚动一致，保证左右行对齐）；
+     * 3. 播放头竖线（轨道区 + 标尺）：`playheadSec × pxPerSec − scrollLeft`，
+     *    即**视口坐标**（元素位于视口容器内，不随内容滚动）。
+     *
+     * 特殊说明：轨道头写入 `scrollTop` 会触发其 scroll 事件，若外部把该事件无条件
+     * 回灌内核就会形成"内核 → DOM → 内核"的循环。两侧都按 0.5px 容差短路
+     * （见 `setScrollTop` 与调用方），因此循环在第一次写入后即收敛。
+     *
+     * @param view 当前视口状态。
+     */
+    function syncDom(view: TimelineViewportState): void {
+        if (sync === undefined) return;
+
+        const ruler = sync.rulerContent;
+        if (ruler != null) {
+            const translateX = -view.scrollLeft;
+            if (shouldWrite(translateX, lastRulerTranslateX)) {
+                lastRulerTranslateX = translateX;
+                ruler.style.transform = `translateX(${translateX}px)`;
+            }
+        }
+
+        const trackList = sync.trackListScroller;
+        if (trackList != null) {
+            // 容差 0.5px：与调用方的回灌判定同量级，避免「内核 → DOM → 内核」循环。
+            if (shouldWrite(view.scrollTop, lastTrackListScrollTop, 0.5)) {
+                lastTrackListScrollTop = view.scrollTop;
+                trackList.scrollTop = view.scrollTop;
+            }
+        }
+
+        // 播放头：两个元素的**定位坐标系不同**，不能共用同一个值。
+        // - 标尺播放头位于标尺内容层内 → 用内容坐标 `left`（随内容层的
+        //   translateX(-scrollLeft) 自动跟随滚动）；
+        // - 轨道区播放头位于内核视口容器内 → 用视口坐标 `translateX`
+        //   （滚动时必须重算，否则会粘在屏幕上不跟内容走）。
+        const playheadContentX = data().playheadSec * view.pxPerSec;
+        const playheadViewportX = playheadContentX - view.scrollLeft;
+        if (
+            shouldWrite(playheadContentX, lastPlayheadContentX) ||
+            shouldWrite(playheadViewportX, lastPlayheadViewportX)
+        ) {
+            lastPlayheadContentX = playheadContentX;
+            lastPlayheadViewportX = playheadViewportX;
+            // 设备像素吸附：分数 DPR 下不吸附会让线宽在 1↔2 物理像素间跳动。
+            const dpr = readDpr();
+            const snappedContentX = Math.round(playheadContentX * dpr) / dpr;
+            if (sync.rulerPlayheadLine != null) {
+                sync.rulerPlayheadLine.style.left = `${snappedContentX}px`;
+            }
+            if (sync.playheadLine != null) {
+                sync.playheadLine.style.transform = `translateX(${snappedContentX - view.scrollLeft}px)`;
+            }
+        }
+    }
+
     /**
      * 绘制一帧：清屏 → 网格 + clip（一次 draw call）→ 文字。
      *
@@ -464,33 +822,46 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         const profiler = readFrameProfiler();
         const startMs = profiler === undefined ? 0 : performance.now();
         const view = scroll.get();
-        const target = glCanvas!.resize(viewportWidthPx, viewportHeightPx, readDpr());
-        glCanvas!.clear();
         const axis = currentAxis();
-        ensureScene(axis);
-        if (combinedCount > 0) {
-            if (sceneUploaded) {
-                sdfBox.repaint(target, view.scrollLeft, view.scrollTop);
-            } else {
-                sdfBox.render(
-                    combinedInstances,
-                    combinedCount,
-                    target,
-                    view.scrollLeft,
-                    view.scrollTop,
-                );
-                sceneUploaded = true;
+        const rebuilt = ensureScene(axis);
+        const viewChanged = lastDrawnView !== view;
+        lastDrawnView = view;
+
+        // GL 只在「视口变化」或「几何重建」时提交：播放头移动这类纯 DOM 更新
+        // 不需要重绘 canvas（播放中的每帧成本因此退化为几次样式写入）。
+        if (viewChanged || rebuilt) {
+            const target = glCanvas!.resize(viewportWidthPx, viewportHeightPx, readDpr());
+            glCanvas!.clear();
+            if (combinedCount > 0) {
+                if (sceneUploaded) {
+                    sdfBox.repaint(target, view.scrollLeft, view.scrollTop);
+                } else {
+                    sdfBox.render(
+                        combinedInstances,
+                        combinedCount,
+                        target,
+                        view.scrollLeft,
+                        view.scrollTop,
+                    );
+                    sceneUploaded = true;
+                }
             }
+            // 独立画布图层（波形）：与 GL 同帧提交，避免两层在滚动时分离。
+            // 它们内部自行判定重绘 / 复用（波形的平移帧只更新 uniform）。
+            for (const layer of viewportLayers) layer.paint(axis);
         }
-        if (glyphQuads.length > 0) {
-            if (glyphsUploaded) {
-                glyphProgram.repaint(target, view.scrollLeft, view.scrollTop);
-            } else {
-                glyphProgram.render(glyphQuads, target, view.scrollLeft, view.scrollTop);
-                glyphsUploaded = true;
-            }
-        }
+
         updateScrollbars();
+        // 细节层与 GL 层同帧平移：两层共用同一个内容坐标窗口，滚动时一起移动。
+        positionDetailLayer(view);
+        syncDom(view);
+
+        const playheadSec = data().playheadSec;
+        const playheadMoved = playheadSec !== lastDrawnPlayheadSec;
+        lastDrawnPlayheadSec = playheadSec;
+        // 播放中播放头逐帧移动：继续自驱动；停止后位置不再变化，循环自然收敛。
+        if (playheadMoved) loop.invalidate();
+
         if (profiler !== undefined) {
             const elapsedMs = performance.now() - startMs;
             // 内核只有一层绘制，图层耗时即整次提交耗时。
@@ -503,24 +874,239 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     loop.start();
     const unsubscribeScroll = scroll.subscribe(() => loop.invalidate());
 
-    // ── 输入：wheel（滚动 / Ctrl 缩放）───────────────────────────────
+    // ── 输入：wheel（滚动 / 缩放，规则与旧实现同源）──────────────────
+    /**
+     * 判断指针是否悬停在自绘滚动条上。
+     *
+     * 规则：竖直条占右侧 `SCROLLBAR_SIZE_PX` 宽，水平条占底部同样高；右下角
+     * 交叠处归竖直（与既有 `nativeScrollbarZoneAt` 的判定顺序一致）。
+     *
+     * @param clientX 指针视口坐标 X。
+     * @param clientY 指针视口坐标 Y。
+     * @param rect 宿主容器的视口矩形。
+     * @returns 命中的滚动条轴；未命中为 null。
+     */
+    function scrollbarZoneAt(clientX: number, clientY: number, rect: DOMRect): ScrollbarZone | null {
+        if (
+            clientX < rect.left ||
+            clientX > rect.right ||
+            clientY < rect.top ||
+            clientY > rect.bottom
+        ) {
+            return null;
+        }
+        if (clientX > rect.right - SCROLLBAR_SIZE_PX) return "vertical";
+        if (clientY > rect.bottom - SCROLLBAR_SIZE_PX) return "horizontal";
+        return null;
+    }
+
+    /**
+     * 解析并执行滚轮手势。
+     *
+     * 流程（与 `TimelineScrollArea` 的旧实现逐条对齐）：
+     * 1. 悬停滚动条 → 滚轮只归属该轴（无修饰键 = 该轴滚动，`scrollbarZoom` = 该轴缩放），
+     *    优先于一切全局绑定；
+     * 2. 否则按 keybinding 判定四类请求（none-binding 在**无修饰键**时命中）；
+     * 3. `getTimelineWheelAction` 把请求 + delta 主轴映射为具体动作；
+     * 4. 滚动类动作直接改视口；缩放类动作走 `resolveHorizontalWheelZoom`
+     *    （含播放头锚点与上下限）或行高缩放（锚点 = 指针下的行位置不变）。
+     *
+     * @param event 原生 wheel 事件。
+     * @returns 无返回值。
+     */
     function onWheel(event: WheelEvent): void {
         const rect = container.getBoundingClientRect();
+        const d = data();
+        const kb = d.keybindings;
+        const noModifierPressed =
+            !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey;
+        const isWheelBindingRequested = (binding: Keybinding | null): boolean => {
+            // 未提供绑定的动作 = 未请求；none-binding 表示"无修饰键滚轮"。
+            if (binding == null) return false;
+            if (isNoneBinding(binding)) return noModifierPressed;
+            return isModifierActive(binding, event);
+        };
+
+        const scrollbarZone = scrollbarZoneAt(event.clientX, event.clientY, rect);
+        const scrollbarZoomRequested =
+            scrollbarZone != null &&
+            kb.scrollbarZoom != null &&
+            !isNoneBinding(kb.scrollbarZoom) &&
+            isModifierActive(kb.scrollbarZoom, event);
+
+        const horizontalScrollRequested =
+            scrollbarZone === "horizontal" && !scrollbarZoomRequested
+                ? true
+                : scrollbarZone == null && isWheelBindingRequested(kb.scrollHorizontal);
+        const verticalScrollRequested =
+            scrollbarZone === "vertical" && !scrollbarZoomRequested
+                ? true
+                : scrollbarZone == null && isWheelBindingRequested(kb.scrollVertical);
+        const horizontalZoomRequested =
+            scrollbarZone == null
+                ? isWheelBindingRequested(kb.horizontalZoom)
+                : scrollbarZone === "horizontal" && scrollbarZoomRequested;
+        const verticalZoomRequested =
+            scrollbarZone == null
+                ? isWheelBindingRequested(kb.verticalZoom)
+                : scrollbarZone === "vertical" && scrollbarZoomRequested;
+
+        const action = getTimelineWheelAction({
+            deltaX: event.deltaX,
+            deltaY: event.deltaY,
+            horizontalScrollRequested,
+            verticalScrollRequested,
+            verticalZoomRequested,
+            horizontalZoomRequested,
+        });
+
         const ctx = { lineHeightPx: 16, pageHeightPx: Math.max(1, rect.height) };
         const deltaY = normalizeWheelDelta(event.deltaY, event.deltaMode, ctx);
         const deltaX = normalizeWheelDelta(event.deltaX, event.deltaMode, ctx);
-        event.preventDefault();
-        if (event.ctrlKey || event.metaKey) {
-            const factor = deltaY < 0 ? 1.1 : 0.9;
-            const view = scroll.get();
-            scroll.setZoom(view.pxPerSec * factor, event.clientX - rect.left);
+        const view = scroll.get();
+
+        if (action === "free-scroll") {
+            event.preventDefault();
+            scroll.setScrollLeft(view.scrollLeft + deltaX);
+            scroll.setScrollTop(view.scrollTop + deltaY);
             return;
         }
-        const view = scroll.get();
-        if (Math.abs(deltaX) > 0.01) scroll.setScrollLeft(view.scrollLeft + deltaX);
-        if (Math.abs(deltaY) > 0.01) scroll.setScrollTop(view.scrollTop + deltaY);
+
+        if (action === "horizontal-scroll") {
+            event.preventDefault();
+            // 触摸板横向双指用 deltaX；鼠标滚轮只有 deltaY，回退到它。
+            const horizontalDelta = Math.abs(event.deltaX) > 0.5 ? deltaX : deltaY;
+            scroll.setScrollLeft(view.scrollLeft + horizontalDelta);
+            return;
+        }
+
+        if (action === "vertical-scroll") {
+            event.preventDefault();
+            scroll.setScrollTop(view.scrollTop + deltaY);
+            return;
+        }
+
+        if (action === "native") {
+            // 内核没有原生滚动容器，"native" 等价于双轴自由滚动。
+            event.preventDefault();
+            scroll.setScrollLeft(view.scrollLeft + deltaX);
+            scroll.setScrollTop(view.scrollTop + deltaY);
+            return;
+        }
+
+        event.preventDefault();
+        const factor = event.deltaY < 0 ? WHEEL_ZOOM_IN_FACTOR : WHEEL_ZOOM_OUT_FACTOR;
+
+        if (action === "vertical-zoom") {
+            const baseRowHeight = Math.max(1, view.rowHeight);
+            const pointerY = clampNumber(event.clientY - rect.top, 0, Math.max(1, rect.height));
+            // 锚点：指针下的行位置（行单位）保持不变。
+            const rowUnitAtPointer = (view.scrollTop + pointerY) / baseRowHeight;
+            const nextRowHeight = Math.round(
+                clampNumber(baseRowHeight * factor, MIN_ROW_HEIGHT, MAX_ROW_HEIGHT),
+            );
+            if (nextRowHeight === baseRowHeight) return;
+            onRowHeightChange?.(nextRowHeight);
+            scroll.setScrollTop(rowUnitAtPointer * nextRowHeight - pointerY);
+            return;
+        }
+
+        const totalSec = Math.max(0, d.projectSec);
+        const minPxPerSec = resolveTimelineMinPxPerSec({
+            baseMinPxPerSec: MIN_PX_PER_SEC,
+            projectSec: totalSec,
+            viewportWidthPx,
+        });
+        const zoom = resolveHorizontalWheelZoom({
+            factor,
+            basePxPerSec: view.pxPerSec,
+            baseScrollLeft: view.scrollLeft,
+            totalSec,
+            viewportWidth: viewportWidthPx,
+            playheadZoomEnabled: d.playheadZoomEnabled,
+            playheadSec: d.playheadSec,
+            anchorScreenX: event.clientX - rect.left,
+            minPxPerSec,
+            maxPxPerSec: MAX_PX_PER_SEC,
+        });
+        if (zoom === null) return;
+        scroll.setZoom(zoom.nextPxPerSec, event.clientX - rect.left);
+        scroll.setScrollLeft(zoom.nextScrollLeft);
+        onZoomChange?.(zoom.nextPxPerSec);
     }
     container.addEventListener("wheel", onWheel, { passive: false });
+
+    // ── 输入：中键平移 ───────────────────────────────────────────────
+    // 与旧实现一致：仅鼠标中键（pointerType === "mouse"）、按下期间抓取指针，
+    // 位移按 1:1 反向映射到滚动位置（抓取内容而不是"推视口"的手感）。
+    let panPointerId: number | null = null;
+    let panStartX = 0;
+    let panStartY = 0;
+    let panStartScrollLeft = 0;
+    let panStartScrollTop = 0;
+
+    /** 判断事件目标是否为可编辑元素（输入框内的中键不应触发平移）。 */
+    function isEditableTarget(target: EventTarget | null): boolean {
+        const element = target as HTMLElement | null;
+        if (element == null) return false;
+        const tag = element.tagName;
+        return (
+            tag === "INPUT" ||
+            tag === "TEXTAREA" ||
+            tag === "SELECT" ||
+            element.isContentEditable === true
+        );
+    }
+
+    function onMiddlePointerDown(event: PointerEvent): void {
+        if (event.button !== 1) return;
+        if (event.pointerType !== "mouse") return;
+        if (isEditableTarget(event.target)) return;
+        event.preventDefault();
+        const view = scroll.get();
+        panPointerId = event.pointerId;
+        panStartX = event.clientX;
+        panStartY = event.clientY;
+        panStartScrollLeft = view.scrollLeft;
+        panStartScrollTop = view.scrollTop;
+        document.body.style.cursor = "grabbing";
+        document.body.style.userSelect = "none";
+        try {
+            container.setPointerCapture(event.pointerId);
+        } catch {
+            // 指针捕获失败不影响手势（window 上的 move 监听仍会收到事件）。
+        }
+    }
+
+    function onPanPointerMove(event: PointerEvent): void {
+        if (panPointerId === null || event.pointerId !== panPointerId) return;
+        scroll.setScrollLeft(panStartScrollLeft - (event.clientX - panStartX));
+        scroll.setScrollTop(panStartScrollTop - (event.clientY - panStartY));
+    }
+
+    function endPan(event?: PointerEvent): void {
+        if (panPointerId === null) return;
+        if (event !== undefined && event.pointerId !== panPointerId) return;
+        try {
+            container.releasePointerCapture(panPointerId);
+        } catch {
+            // 已释放 / 未捕获：忽略。
+        }
+        panPointerId = null;
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+    }
+
+    /** 中键的 auxclick（抬起）与浏览器"自动滚动"：内核自绘滚动，必须全部吞掉。 */
+    function onAuxClick(event: MouseEvent): void {
+        if (event.button === 1) event.preventDefault();
+    }
+
+    container.addEventListener("pointerdown", onMiddlePointerDown);
+    container.addEventListener("auxclick", onAuxClick);
+    window.addEventListener("pointermove", onPanPointerMove);
+    window.addEventListener("pointerup", endPan);
+    window.addEventListener("pointercancel", endPan);
 
     // ── 输入：滚动条拖拽 ─────────────────────────────────────────────
     let dragAxis: "x" | "y" | null = null;
@@ -645,20 +1231,53 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             loop.invalidate();
         },
 
+        setScrollTop(px: number) {
+            // 由 ScrollKernel 统一钳制；值未变化时不会通知订阅者（因此不会空重绘）。
+            scroll.setScrollTop(px);
+        },
+
+        getViewport() {
+            const view = scroll.get();
+            return {
+                scrollLeft: view.scrollLeft,
+                scrollTop: view.scrollTop,
+                pxPerSec: view.pxPerSec,
+            };
+        },
+
+        getAxis() {
+            return currentAxis();
+        },
+
+        registerViewportLayer(layer, order) {
+            viewportLayers.push({ name: layer.name, paint: layer.paint, order });
+            viewportLayers.sort((a, b) => a.order - b.order);
+            return () => {
+                const index = viewportLayers.findIndex((item) => item.name === layer.name);
+                if (index >= 0) viewportLayers.splice(index, 1);
+            };
+        },
+
         dispose() {
             unsubscribeScroll();
             loop.stop();
             resizeObserver.disconnect();
             container.removeEventListener("wheel", onWheel);
             container.removeEventListener("keydown", onKeyDown);
+            container.removeEventListener("pointerdown", onMiddlePointerDown);
+            container.removeEventListener("auxclick", onAuxClick);
             hScrollbarThumb.removeEventListener("pointerdown", onHDown);
             vScrollbarThumb.removeEventListener("pointerdown", onVDown);
             window.removeEventListener("pointermove", onPointerMove);
             window.removeEventListener("pointerup", onPointerUp);
+            window.removeEventListener("pointermove", onPanPointerMove);
+            window.removeEventListener("pointerup", endPan);
+            window.removeEventListener("pointercancel", endPan);
             window.removeEventListener("resize", onWindowResize);
-            rasterizer?.dispose();
+            // 平移中途卸载：光标 / 选择态是写在 body 上的全局状态，必须复原。
+            endPan();
+            detailCanvas.remove();
             sdfBox.dispose();
-            glyphProgram.dispose();
             glCanvas.dispose();
         },
     };

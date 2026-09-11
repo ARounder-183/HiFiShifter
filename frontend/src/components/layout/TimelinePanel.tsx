@@ -99,7 +99,8 @@ import { SnapHighlightLayer } from "./timeline/SnapHighlightLayer";
 import { SNAP_HIGHLIGHT_GROUP, clearSnapHighlights } from "../../utils/snapHighlight";
 import type { TempoMap } from "../../utils/tempoMap";
 import { isTimelineKernelEnabled } from "./timeline/kernel/featureFlag";
-import { TimelineKernelSpikeView } from "./timeline/kernel/TimelineKernelSpikeView";
+import { TimelineKernelView } from "./timeline/kernel/TimelineKernelView";
+import type { TimelineKernelHost } from "./timeline/kernel/host/timelineKernelHost";
 
 /**
  * 时间轴渲染内核（Spike）开关：模块加载时读一次。
@@ -1058,6 +1059,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             },
         });
 
+    /**
+     * 内核宿主句柄（仅内核模式下非空）。
+     *
+     * 用途：把「轨道头滚动」这类外部意图转发给内核（`setScrollTop`），以及让
+     * 标尺点击 seek 等需要「当前水平滚动位置」的逻辑在两种模式下共用一份取值。
+     */
+    const kernelHostRef = React.useRef<TimelineKernelHost | null>(null);
+
     // ── 4. 全局事件监听 ─────────────────────────────────────
     useTimelineEventHandlers({
         dispatch,
@@ -1380,6 +1389,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     );
     const handleTrackListScrollTopChange = React.useCallback(
         (scrollTop: number) => {
+            // 内核模式：把轨道头的滚动意图转发给内核（由内核统一钳制与标脏；
+            // 内核回写轨道头时带 0.5px 容差，因此不会形成来回循环）。
+            const host = kernelHostRef.current;
+            if (host != null) {
+                if (Math.abs(host.getViewport().scrollTop - scrollTop) < 0.5) return;
+                host.setScrollTop(scrollTop);
+                return;
+            }
             const timelineScroller = scrollRef.current;
             if (!timelineScroller) return;
             if (Math.abs(timelineScroller.scrollTop - scrollTop) < 0.5) return;
@@ -1595,6 +1612,124 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         )}px`;
     }, [pxPerSec, s.playheadSec, scrollLeft, playheadRef, scrollRef, visualPlayheadSecRef]);
 
+    /**
+     * 标尺节点（内核模式与旧模式共用同一实例）。
+     *
+     * 标尺是重交互、低频变化的 DOM 子树（刻度标签 / Tempo Map 旗帜拖拽 / 内联编辑 /
+     * 右键菜单），搬进 canvas 等于整体重写且收益极低。让两种渲染模式共用它，视觉与
+     * 交互天然与旧实现一致；内核只把「跟随水平滚动」的部分收敛为 rAF 内一次
+     * transform 写入（见 kernel host 的 syncDom）。
+     */
+    const timeRulerNode = (
+        // playheadSec 传提交值（而非渲染期读 ref）：视觉插值由 playheadLineRef /
+        // playheadHeadRef 命令式驱动；React 仅在该值真正变化时重写 style.left，
+        // 写入的是最新提交位置而非陈旧值。
+        //
+        // 标尺不消费实时滚动位置：刻度与可见范围都按量化的 `rulerScrollLeft` 生成
+        // （缓冲已保证覆盖视口），这样滚动期间 `TimeRulerMarks` 的 memo 不会失效，
+        // 整棵刻度子树不必每帧重渲染。内核模式下水平滚动由内核在 rAF 内直接写
+        // 内容层 transform（不经 React），这条量化约定依然成立。
+        <TimeRuler
+            scrollLeft={rulerScrollLeft}
+            ticks={timelineTicks}
+            pxPerSec={pxPerSec}
+            viewportWidth={viewportWidth}
+            playheadSec={s.playheadSec}
+            playheadLineRef={rulerPlayheadLineRef}
+            playheadHeadRef={rulerPlayheadHeadRef}
+            contentRef={rulerContentRef}
+            timeContext={timeContext}
+            primaryUnit={s.primaryTimeUnit}
+            secondaryUnit={s.secondaryTimeUnit}
+            onPrimaryUnitChange={handlePrimaryUnitChange}
+            onSecondaryUnitChange={handleSecondaryUnitChange}
+            onOpenSettings={() => setTimeDisplaySettingsOpen(true)}
+            onCopyPlayheadTime={() => void handleCopyPlayheadTime()}
+            t={t as (key: string) => string}
+            tempoMap={s.tempoMap}
+            tempoMapVisible={s.tempoMapVisible}
+            projectSec={dynamicProjectSec}
+            grid={s.grid}
+            snapEnabled={s.snapEnabled}
+            timelineSnap={s.timelineSnap}
+            projectScale={projectScale}
+            projectScaleName={
+                s.project.useCustomScale
+                    ? (s.project.customScale?.name ?? undefined)
+                    : undefined
+            }
+            fallbackDenominator={s.project.timeSignatureDenominator}
+            customScalePresets={s.customScalePresets}
+            onTempoMapChange={handleTempoMapChange}
+            onTempoMapCommit={handleTempoMapCommit}
+            onMouseDown={(e) => {
+                if (e.button !== 0) return;
+                // 水平滚动位置：旧模式取原生 scroller，内核模式取内核视口
+                // （两种模式互斥挂载，但取值的「实时性」必须一致——拖拽期间
+                // 滚动位置可能被自动滚动改变，因此每次换算都重新读）。
+                const readScrollLeft = (): number | null => {
+                    const scroller = scrollRef.current;
+                    if (scroller != null) return scroller.scrollLeft;
+                    const host = kernelHostRef.current;
+                    return host != null ? host.getViewport().scrollLeft : null;
+                };
+                if (readScrollLeft() === null) return;
+                const ruler = e.currentTarget as HTMLDivElement;
+                let moved = false;
+                let lastClientX = e.clientX;
+                let lastSec = 0;
+
+                const updateAt = (clientX: number, commit: boolean): number =>
+                    setPlayheadFromClientX(
+                        clientX,
+                        ruler.getBoundingClientRect(),
+                        readScrollLeft() ?? 0,
+                        commit,
+                    );
+
+                // 标尺没有其他编辑操作需要区分，按下时立即提交一次 seek。
+                lastSec = updateAt(e.clientX, true);
+
+                const onMove = (ev: MouseEvent) => {
+                    moved = true;
+                    lastClientX = ev.clientX;
+                    lastSec = updateAt(ev.clientX, false);
+                };
+
+                // 失焦取消：切屏期间 mouseup 不送达本窗口，blur 时以
+                // 最后一次已知位置收尾（提交 seek + 清吸附高亮），
+                // 防止监听器泄漏：否则下次点击会被旧的 onEnd 消费。
+                const finish = () => {
+                    unregisterAbort();
+                    window.removeEventListener("mousemove", onMove, true);
+                    window.removeEventListener("mouseup", onEnd, true);
+                    window.removeEventListener("mouseleave", onEnd, true);
+                    if (!moved) {
+                        // 未拖动的单击不会发布高亮；仍兜底清除一次，
+                        // 防止此前异常中断手势的残留。
+                        clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+                        return;
+                    }
+                    lastSec = updateAt(lastClientX, false);
+                    void dispatch(seekPlayhead(lastSec));
+                    // 最后一步 update 仍会发布一次吸附高亮，必须在其后
+                    // 清除：否则拖拽标尺后网格吸附的竖线会冻结在画面上，
+                    // 且任何单击跳转都不再清理它。
+                    clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+                };
+                const onEnd = (ev: MouseEvent) => {
+                    lastClientX = ev.clientX;
+                    finish();
+                };
+                const unregisterAbort = registerDragAbort(finish);
+
+                window.addEventListener("mousemove", onMove, true);
+                window.addEventListener("mouseup", onEnd, true);
+                window.addEventListener("mouseleave", onEnd, true);
+            }}
+        />
+    );
+
     return (
         <Profiler
             id="TimelinePanel"
@@ -1679,113 +1814,30 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
 
                 {/* Timeline View (Right) */}
                 <Flex direction="column" className="flex-1 relative overflow-hidden bg-qt-graph-bg">
-                    {/* Spike：新渲染内核（自绘滚动 + 单 WebGL2）**替换**整个时间轴区域。
-                        开关默认关闭（见 featureFlag）。开启时旧子树完全不挂载——这是
-                        性能验证的前提：两套渲染同时跑会让帧率数据失去意义（旧架构的
-                        clip-body / waveform / grid 图层仍会每帧重绘，且其同步提交
-                        与 React 量化提交照旧执行）。Spike 只验证渲染与滚动，不接管交互。 */}
+                    {/* 新渲染内核（自绘滚动 + 单 WebGL2）替换**轨道区**。
+                        标尺（`timeRulerNode`）与左侧轨道头保留 DOM：它们重交互、低频
+                        变化，搬进 canvas 等于重写 Tempo 旗帜拖拽与电平表，收益极低；
+                        内核只把「跟随视口」的部分收敛为 rAF 内一次 transform / scrollTop
+                        写入。轨道区（网格 / clip / 波形 / 交互）才是滚动瓶颈，由内核自绘。
+                        开关默认关闭（见 featureFlag），两套渲染不会同时挂载。 */}
                     {TIMELINE_KERNEL_ENABLED ? (
-                        <TimelineKernelSpikeView />
+                        <>
+                            {timeRulerNode}
+                            <TimelineKernelView
+                                rowHeight={rowHeight}
+                                onRowHeightChange={setRowHeight}
+                                initialPxPerSec={pxPerSec}
+                                onPxPerSecChange={setPxPerSec}
+                                getPlayheadSec={getVisualPlayheadSec}
+                                rulerContentRef={rulerContentRef}
+                                trackListScrollerRef={trackListScrollRef}
+                                rulerPlayheadLineRef={rulerPlayheadLineRef}
+                                hostRef={kernelHostRef}
+                            />
+                        </>
                     ) : (
                         <>
-                            {/* playheadSec 传提交值（而非渲染期读 ref）：视觉插值由
-                    playheadLineRef/playheadHeadRef 命令式驱动；React 仅在该值
-                    真正变化时重写 style.left，写入的是最新提交位置而非陈旧值。 */}
-                            {/* 标尺不消费实时滚动位置：刻度与可见范围都按量化的
-                    `rulerScrollLeft` 生成（缓冲已保证覆盖视口），这样滚动期间
-                    `TimeRulerMarks` 的 memo 不会失效，整棵刻度子树不必每帧重渲染。 */}
-                            <TimeRuler
-                                scrollLeft={rulerScrollLeft}
-                                ticks={timelineTicks}
-                                pxPerSec={pxPerSec}
-                                viewportWidth={viewportWidth}
-                                playheadSec={s.playheadSec}
-                                playheadLineRef={rulerPlayheadLineRef}
-                                playheadHeadRef={rulerPlayheadHeadRef}
-                                contentRef={rulerContentRef}
-                                timeContext={timeContext}
-                                primaryUnit={s.primaryTimeUnit}
-                                secondaryUnit={s.secondaryTimeUnit}
-                                onPrimaryUnitChange={handlePrimaryUnitChange}
-                                onSecondaryUnitChange={handleSecondaryUnitChange}
-                                onOpenSettings={() => setTimeDisplaySettingsOpen(true)}
-                                onCopyPlayheadTime={() => void handleCopyPlayheadTime()}
-                                t={t as (key: string) => string}
-                                tempoMap={s.tempoMap}
-                                tempoMapVisible={s.tempoMapVisible}
-                                projectSec={dynamicProjectSec}
-                                grid={s.grid}
-                                snapEnabled={s.snapEnabled}
-                                timelineSnap={s.timelineSnap}
-                                projectScale={projectScale}
-                                projectScaleName={
-                                    s.project.useCustomScale
-                                        ? (s.project.customScale?.name ?? undefined)
-                                        : undefined
-                                }
-                                fallbackDenominator={s.project.timeSignatureDenominator}
-                                customScalePresets={s.customScalePresets}
-                                onTempoMapChange={handleTempoMapChange}
-                                onTempoMapCommit={handleTempoMapCommit}
-                                onMouseDown={(e) => {
-                                    if (e.button !== 0) return;
-                                    const scroller = scrollRef.current;
-                                    if (!scroller) return;
-                                    const ruler = e.currentTarget as HTMLDivElement;
-                                    let moved = false;
-                                    let lastClientX = e.clientX;
-                                    let lastSec = 0;
-
-                                    const updateAt = (clientX: number, commit: boolean): number =>
-                                        setPlayheadFromClientX(
-                                            clientX,
-                                            ruler.getBoundingClientRect(),
-                                            scroller.scrollLeft,
-                                            commit,
-                                        );
-
-                                    // 标尺没有其他编辑操作需要区分，按下时立即提交一次 seek。
-                                    lastSec = updateAt(e.clientX, true);
-
-                                    const onMove = (ev: MouseEvent) => {
-                                        moved = true;
-                                        lastClientX = ev.clientX;
-                                        lastSec = updateAt(ev.clientX, false);
-                                    };
-
-                                    // 失焦取消：切屏期间 mouseup 不送达本窗口，blur 时以
-                                    // 最后一次已知位置收尾（提交 seek + 清吸附高亮），
-                                    // 防止监听器泄漏：否则下次点击会被旧的 onEnd 消费。
-                                    const finish = () => {
-                                        unregisterAbort();
-                                        window.removeEventListener("mousemove", onMove, true);
-                                        window.removeEventListener("mouseup", onEnd, true);
-                                        window.removeEventListener("mouseleave", onEnd, true);
-                                        if (!moved) {
-                                            // 未拖动的单击不会发布高亮；仍兜底清除一次，
-                                            // 防止此前异常中断手势的残留。
-                                            clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
-                                            return;
-                                        }
-                                        lastSec = updateAt(lastClientX, false);
-                                        void dispatch(seekPlayhead(lastSec));
-                                        // 最后一步 update 仍会发布一次吸附高亮，必须在其后
-                                        // 清除：否则拖拽标尺后网格吸附的竖线会冻结在画面上，
-                                        // 且任何单击跳转都不再清理它。
-                                        clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
-                                    };
-                                    const onEnd = (ev: MouseEvent) => {
-                                        lastClientX = ev.clientX;
-                                        finish();
-                                    };
-                                    const unregisterAbort = registerDragAbort(finish);
-
-                                    window.addEventListener("mousemove", onMove, true);
-                                    window.addEventListener("mouseup", onEnd, true);
-                                    window.addEventListener("mouseleave", onEnd, true);
-                                }}
-                            />
-
+                            {timeRulerNode}
                             {/* Tracks Area */}
                             <TimelineScrollArea
                                 scrollRef={scrollRef}
