@@ -112,6 +112,24 @@ const INITIAL_ROW_HEIGHT = 80;
 /** 键盘单步滚动量（CSS px）。 */
 const KEYBOARD_STEP_PX = 60;
 
+/** 全局帧率探针的最小接口（`dev/frameProfiler` 通过 globalThis 挂载）。 */
+interface FrameProfilerLike {
+    recordLayer(name: string, ms: number): void;
+    recordCommit(ms: number): void;
+}
+
+/**
+ * 读取全局帧率探针。
+ *
+ * 特殊说明：每帧读取而不是创建时缓存——探针可在运行时开关（localStorage + 按钮），
+ * 缓存会让"中途开启"失效；未启用时只是一次属性查找。
+ *
+ * @returns 探针实例；未启用时为 undefined。
+ */
+function readFrameProfiler(): FrameProfilerLike | undefined {
+    return (globalThis as unknown as { __hfsFrameProfiler?: FrameProfilerLike }).__hfsFrameProfiler;
+}
+
 /**
  * 创建内核宿主。
  *
@@ -160,10 +178,21 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     let combinedCount = 0;
     let glyphQuads: GlyphQuad[] = [];
     let sceneDirty = true;
+    /** 实例是否已上传 GPU：true 时滚动帧走 `repaint`（零上传）。 */
+    let sceneUploaded = false;
+    /** 字形实例是否已上传 GPU（同上）。 */
+    let glyphsUploaded = false;
     let builtPxPerSec = Number.NaN;
     let builtScrollLeftPx = Number.NaN;
+    let builtScrollTopPx = Number.NaN;
     let builtDarkMode = !data().darkMode;
-    let builtSignature = "";
+    // 内容变更判定用引用比较（Redux/Immer 不变时引用稳定），避免每帧字符串签名分配。
+    let builtClipsRef: readonly ClipInfo[] | null = null;
+    let builtTracksRef: readonly TrackInfo[] | null = null;
+    let builtProjectSec = -1;
+    let builtGrid = "";
+    let builtBpm = -1;
+    let builtBeatsPerBar = -1;
 
     /** 组装当前 axis（内容坐标投影）。 */
     function currentAxis(): TimelineAxis {
@@ -177,9 +206,22 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         });
     }
 
-    /** 场景签名：内容 / 主题变化时快速失效（避免逐字段比较）。 */
-    function sceneSignature(d: TimelineKernelData): string {
-        return `${d.clips.length}|${d.tracks.length}|${d.projectSec}|${d.grid}|${d.bpm}|${d.beatsPerBar}`;
+    /**
+     * 场景内容是否变化。
+     *
+     * 用**引用比较**（Redux/Immer 在未变更时保持引用稳定）而不是字段值比较：
+     * clip 拖动 / 编辑只改元素内容、不改数组长度，按长度比较会漏掉重建；
+     * 引用比较既准确又零分配（不拼字符串）。
+     */
+    function sceneContentChanged(d: TimelineKernelData): boolean {
+        return (
+            builtClipsRef !== d.clips ||
+            builtTracksRef !== d.tracks ||
+            builtProjectSec !== d.projectSec ||
+            builtGrid !== d.grid ||
+            builtBpm !== d.bpm ||
+            builtBeatsPerBar !== d.beatsPerBar
+        );
     }
 
     /** 重建网格 + clip 实例（写入同一个合并缓冲：网格在前、clip 在后）。 */
@@ -304,12 +346,30 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
 
         builtPxPerSec = view.pxPerSec;
         builtScrollLeftPx = view.scrollLeft;
+        builtScrollTopPx = view.scrollTop;
         builtDarkMode = d.darkMode;
-        builtSignature = sceneSignature(d);
+        builtClipsRef = d.clips;
+        builtTracksRef = d.tracks;
+        builtProjectSec = d.projectSec;
+        builtGrid = d.grid;
+        builtBpm = d.bpm;
+        builtBeatsPerBar = d.beatsPerBar;
+        // 几何已重建 → 需要重新上传 GPU（下一帧走 render 而不是 repaint）。
+        sceneUploaded = false;
+        glyphsUploaded = false;
         sceneDirty = false;
     }
 
-    /** 判断是否需要重建几何。 */
+    /**
+     * 判断是否需要重建几何。
+     *
+     * 触发条件（任一成立即重建）：
+     * - 显式标脏 / 缩放变化 / 主题变化 / 内容引用变化；
+     * - 水平滚动超出横向余量；
+     * - **竖直滚动超出 overscan 行**（轨道窗口按 scrollTop 构建，不重建会缺行）。
+     *
+     * 特殊说明：余量内的纯滚动不重建——这正是"滚动零重绘"的实现点。
+     */
     function ensureScene(axis: TimelineAxis): void {
         const view = scroll.get();
         const d = data();
@@ -317,12 +377,17 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             sceneDirty ||
             builtPxPerSec !== view.pxPerSec ||
             builtDarkMode !== d.darkMode ||
-            builtSignature !== sceneSignature(d) ||
-            Math.abs(view.scrollLeft - builtScrollLeftPx) > HORIZONTAL_MARGIN_PX;
+            sceneContentChanged(d) ||
+            Math.abs(view.scrollLeft - builtScrollLeftPx) > HORIZONTAL_MARGIN_PX ||
+            Math.abs(view.scrollTop - builtScrollTopPx) > view.rowHeight * VERTICAL_OVERSCAN_ROWS;
         if (needsRebuild) rebuildInstances(axis);
     }
 
-    /** 更新自绘滚动条 thumb 的几何（每帧一次）。 */
+    // 滚动条 DOM 写入去重：几何取整后未变化时不写 style（避免每帧触发样式重算）。
+    let lastHorizontalThumbKey = "";
+    let lastVerticalThumbKey = "";
+
+    /** 更新自绘滚动条 thumb 的几何（每帧一次，值变化才写 DOM）。 */
     function updateScrollbars(): void {
         const view = scroll.get();
         const horizontal = computeScrollbar({
@@ -331,9 +396,15 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             scrollPx: view.scrollLeft,
             maxScrollPx: scroll.maxScrollLeft(),
         });
-        hScrollbarThumb.style.width = `${Math.max(0, horizontal.thumbLengthPx)}px`;
-        hScrollbarThumb.style.transform = `translateX(${Math.max(0, horizontal.thumbStartPx)}px)`;
-        hScrollbarThumb.style.display = horizontal.scrollable ? "block" : "none";
+        const horizontalKey = `${horizontal.scrollable ? 1 : 0}|${Math.round(
+            horizontal.thumbLengthPx,
+        )}|${Math.round(horizontal.thumbStartPx)}`;
+        if (horizontalKey !== lastHorizontalThumbKey) {
+            lastHorizontalThumbKey = horizontalKey;
+            hScrollbarThumb.style.width = `${Math.max(0, horizontal.thumbLengthPx)}px`;
+            hScrollbarThumb.style.transform = `translateX(${Math.max(0, horizontal.thumbStartPx)}px)`;
+            hScrollbarThumb.style.display = horizontal.scrollable ? "block" : "none";
+        }
 
         const vertical = computeScrollbar({
             contentSizePx: data().tracks.length * view.rowHeight,
@@ -341,31 +412,64 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             scrollPx: view.scrollTop,
             maxScrollPx: scroll.maxScrollTop(),
         });
-        vScrollbarThumb.style.height = `${Math.max(0, vertical.thumbLengthPx)}px`;
-        vScrollbarThumb.style.transform = `translateY(${Math.max(0, vertical.thumbStartPx)}px)`;
-        vScrollbarThumb.style.display = vertical.scrollable ? "block" : "none";
+        const verticalKey = `${vertical.scrollable ? 1 : 0}|${Math.round(
+            vertical.thumbLengthPx,
+        )}|${Math.round(vertical.thumbStartPx)}`;
+        if (verticalKey !== lastVerticalThumbKey) {
+            lastVerticalThumbKey = verticalKey;
+            vScrollbarThumb.style.height = `${Math.max(0, vertical.thumbLengthPx)}px`;
+            vScrollbarThumb.style.transform = `translateY(${Math.max(0, vertical.thumbStartPx)}px)`;
+            vScrollbarThumb.style.display = vertical.scrollable ? "block" : "none";
+        }
     }
 
-    /** 绘制一帧：清屏 → 网格 + clip（一次 draw call）→ 文字。 */
+    /**
+     * 绘制一帧：清屏 → 网格 + clip（一次 draw call）→ 文字。
+     *
+     * 特殊说明（性能关键）：滚动帧走 `repaint`——实例缓冲已在 GPU 上，只更新
+     * `u_viewOrigin` uniform 后重发 draw call，**不上传任何顶点数据**；只有几何
+     * 重建后的第一帧才 `render`（上传）。这是"滚动零重绘"的最后一环。
+     *
+     * 帧耗时经全局帧率探针（`__hfsFrameProfiler`，见 dev/frameProfiler）上报为
+     * `kernel-draw` 图层，便于与既有实现同面板对比；探针未启用时只有一次属性查找。
+     */
     function draw(): void {
+        const profiler = readFrameProfiler();
+        const startMs = profiler === undefined ? 0 : performance.now();
         const view = scroll.get();
         const target = glCanvas!.resize(viewportWidthPx, viewportHeightPx, readDpr());
         glCanvas!.clear();
         const axis = currentAxis();
         ensureScene(axis);
         if (combinedCount > 0) {
-            sdfBox.render(
-                combinedInstances,
-                combinedCount,
-                target,
-                view.scrollLeft,
-                view.scrollTop,
-            );
+            if (sceneUploaded) {
+                sdfBox.repaint(target, view.scrollLeft, view.scrollTop);
+            } else {
+                sdfBox.render(
+                    combinedInstances,
+                    combinedCount,
+                    target,
+                    view.scrollLeft,
+                    view.scrollTop,
+                );
+                sceneUploaded = true;
+            }
         }
         if (glyphQuads.length > 0) {
-            glyphProgram.render(glyphQuads, target, view.scrollLeft, view.scrollTop);
+            if (glyphsUploaded) {
+                glyphProgram.repaint(target, view.scrollLeft, view.scrollTop);
+            } else {
+                glyphProgram.render(glyphQuads, target, view.scrollLeft, view.scrollTop);
+                glyphsUploaded = true;
+            }
         }
         updateScrollbars();
+        if (profiler !== undefined) {
+            const elapsedMs = performance.now() - startMs;
+            // 内核只有一层绘制，图层耗时即整次提交耗时。
+            profiler.recordLayer("kernel-draw", elapsedMs);
+            profiler.recordCommit(elapsedMs);
+        }
     }
 
     const loop = createRenderLoop({ draw });
