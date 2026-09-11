@@ -686,7 +686,11 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
             return { startSec: args[0] };
 
         case "begin_undo_group":
-            return undefined;
+            // 可选 label（语言无关的操作 key）：批量导入等场景给出更准确的名字。
+            return args[0] === undefined ? undefined : { label: args[0] };
+
+        case "set_history_position":
+            return { position: args[0] };
 
         case "end_undo_group":
             return undefined;

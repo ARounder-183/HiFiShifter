@@ -450,7 +450,7 @@ export function useTimelineClipActions(
             // 批量归一化 = 单个撤销步：undo group 内一次 bulk 提交
             //（逐个 setClipStateRemote 会产生 N 步撤销 + N 次中间快照）。
             void (async () => {
-                await webApi.beginUndoGroup();
+                await webApi.beginUndoGroup("edit_clip");
                 try {
                     await dispatch(
                         setClipsStateBulkRemote({

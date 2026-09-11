@@ -144,22 +144,32 @@ pub fn redo_timeline(state: State<'_, AppState>) -> crate::models::TimelineState
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn begin_undo_group(state: State<'_, AppState>) -> crate::models::TimelineStatePayload {
-    state.begin_undo_group()
+pub fn begin_undo_group(
+    state: State<'_, AppState>,
+    label: Option<String>,
+) -> crate::models::TimelineStatePayload {
+    state.begin_undo_group(label)
 }
 
-/// 撤销/重做可用性（栈深度）。
+/// 跳到「操作记录」中的第 `position` 个状态（双击条目）。
+///
+/// 与撤销/重做共用同一入口：越界或原地不动时返回 `ok = false`，
+/// 前端静默跳过、界面零变化。
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_history_position(
+    state: State<'_, AppState>,
+    position: usize,
+) -> crate::models::TimelineStatePayload {
+    state.set_history_position(position)
+}
+
+/// 「操作记录」+ 撤销/重做可用性。
 ///
 /// 前端挂载时同步一次；此后由 `history_state` 事件（打点 / 清空历史 /
-/// 撤销 / 重做都会广播）保持实时，无需轮询。
+/// 撤销 / 重做 / 跳转都会广播）保持实时，无需轮询。
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_history_state(state: State<'_, AppState>) -> serde_json::Value {
-    let (undo_depth, redo_depth) = state.history_depths();
-    serde_json::json!({
-        "ok": true,
-        "undoDepth": undo_depth,
-        "redoDepth": redo_depth,
-    })
+    state.history_state_json()
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1086,7 +1096,7 @@ pub fn group_clips(
     clip_ids: Vec<String>,
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-    state.checkpoint_timeline(&tl);
+    state.checkpoint_timeline(&tl, crate::state::HistoryOp::GroupClips);
     tl.group_clips(&clip_ids);
     let payload = tl.to_payload();
     drop(tl);
@@ -1099,7 +1109,7 @@ pub fn ungroup_clips(
     clip_ids: Vec<String>,
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-    state.checkpoint_timeline(&tl);
+    state.checkpoint_timeline(&tl, crate::state::HistoryOp::UngroupClips);
     tl.ungroup_clips(&clip_ids);
     let payload = tl.to_payload();
     drop(tl);
@@ -1112,7 +1122,7 @@ pub fn toggle_group_disabled(
     group_id: String,
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-    state.checkpoint_timeline(&tl);
+    state.checkpoint_timeline(&tl, crate::state::HistoryOp::ToggleGroupDisabled);
     tl.toggle_group_disabled(&group_id);
     let payload = tl.to_payload();
     drop(tl);

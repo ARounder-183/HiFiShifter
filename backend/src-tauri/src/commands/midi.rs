@@ -379,7 +379,7 @@ pub(super) fn import_midi_to_pitch(
     tl.ensure_params_for_root(&root_track_id);
     let frame_period_ms = tl.frame_period_ms().max(0.1);
 
-    state.checkpoint_timeline(&tl);
+    state.checkpoint_timeline(&tl, crate::state::HistoryOp::ImportMidi);
 
     let Some(entry) = tl.params_by_root_track.get_mut(&root_track_id) else {
         midi_log(format!(
@@ -669,7 +669,7 @@ pub(super) fn import_midi_as_clip(
             None => tl.tempo_map.is_some(),
         };
         if will_change {
-            state.checkpoint_timeline(&tl);
+            state.checkpoint_timeline(&tl, crate::state::HistoryOp::ImportMidi);
         }
 
         // 无变化分支把 0 位置点的音阶（调号）应用到工程时可能改变工程音阶；
@@ -816,7 +816,7 @@ pub(super) fn import_midi_as_clip(
             })
         };
 
-        state.checkpoint_timeline(&tl);
+        state.checkpoint_timeline(&tl, crate::state::HistoryOp::ImportMidi);
 
         let clip_id = tl.add_clip(
             track_id,
@@ -881,7 +881,7 @@ pub(super) fn import_midi_as_clip(
             return error_payload("no_notes_in_track");
         }
 
-        state.checkpoint_timeline(&tl);
+        state.checkpoint_timeline(&tl, crate::state::HistoryOp::ImportMidi);
 
         let mut created_clip_ids: Vec<String> = vec![];
         let mut created_track_ids: Vec<String> = vec![];
@@ -1185,7 +1185,7 @@ pub(super) fn replace_midi_clip_data(
         })
     };
 
-    state.checkpoint_timeline(&tl);
+    state.checkpoint_timeline(&tl, crate::state::HistoryOp::EditMidi);
 
     // 找到目标 clip 并替换其 MIDI 数据
     if let Some(clip) = tl.clips.iter_mut().find(|c| c.id == clip_id) {

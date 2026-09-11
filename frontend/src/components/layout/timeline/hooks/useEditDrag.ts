@@ -494,17 +494,17 @@ export function useEditDrag(deps: {
         // backend undo group up front so the single checkpoint is the pre-drag value;
         // otherwise the final bulk write would checkpoint after the previews already
         // changed the backend, and undo would bounce back to the post-drag value.
-        const gainUndoGroupPromise = type === "gain" ? webApi.beginUndoGroup() : null;
+        const gainUndoGroupPromise = type === "gain" ? webApi.beginUndoGroup("edit_clip") : null;
 
         // Fade drag（fade_in / fade_out）同理：拖动过程中节流写入多次后端，
         // 若各自独立生成 undo entry 会导致“撤销一次只撤销一半、需要按多次”。
         // 用一个 undo group 把整个 fade 拖拽包成单次撤销步。
         const fadeUndoGroupPromise =
-            type === "fade_in" || type === "fade_out" ? webApi.beginUndoGroup() : null;
+            type === "fade_in" || type === "fade_out" ? webApi.beginUndoGroup("edit_clip") : null;
 
         // 交叉点拖拽同样把两个 clip 的修改并入同一个撤销步。
         const crossfadeUndoGroupPromise =
-            type === "crossfade_edges" ? webApi.beginUndoGroup() : null;
+            type === "crossfade_edges" ? webApi.beginUndoGroup("edit_clip") : null;
 
         // 波纹（自动跟进）实时预览：拖拽开始时快照“后续跟随剪辑”的初始位置。
         // 区域语义与后端一致：原点 = 被编辑剪辑的最早起点；作用域轨道 = 全部被编辑

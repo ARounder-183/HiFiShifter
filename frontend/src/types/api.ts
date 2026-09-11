@@ -255,11 +255,29 @@ export interface TimelineResult {
     redo_depth?: number;
 }
 
-/** `get_history_state`：撤销 / 重做可用性（栈深度）。 */
+/** 「操作记录」中的一条状态（`history_state` 事件 / `get_history_state`）。 */
+export interface HistoryRecordSummary {
+    /**
+     * 产生该状态的操作 key（前端按 `history_op_<label>` 本地化）；
+     * `null` = 初始状态（「初始化状态」行）。
+     */
+    label: string | null;
+    /** 该状态形成时刻（Unix 毫秒）。 */
+    atMs: number;
+}
+
+/**
+ * 撤销/重做可用性 + 「操作记录」。
+ *
+ * `position` 即当前所处状态下标，同时也是可撤销步数（`undoDepth`）；
+ * `records` 覆盖全部状态（含当前位置之后的重做部分与初始状态行）。
+ */
 export interface HistoryStateResult {
     ok: boolean;
+    position: number;
     undoDepth: number;
     redoDepth: number;
+    records: HistoryRecordSummary[];
 }
 
 export interface TrackSummaryResult {

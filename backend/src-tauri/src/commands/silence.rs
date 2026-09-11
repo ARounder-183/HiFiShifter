@@ -242,7 +242,7 @@ pub(super) fn remove_clip_silence(
 
     // 3) 一次检查点内完成全部几何变换。
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-    state.checkpoint_timeline(&tl);
+    state.checkpoint_timeline(&tl, crate::state::HistoryOp::DeleteSilence);
     let outcome = tl.apply_silence_removal(
         &per_clip,
         action,

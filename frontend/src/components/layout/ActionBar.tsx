@@ -17,6 +17,7 @@ import {
     PlayIcon,
     StopIcon,
 } from "@radix-ui/react-icons";
+import { UndoHistoryPanel } from "./UndoHistoryPanel";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { shallowEqual } from "react-redux";
 import type { RootState } from "../../app/store";
@@ -46,6 +47,8 @@ import {
     setProjectBaseScaleRemote,
     setProjectCustomScaleRemote,
     setTempoMap,
+    undoRemote,
+    redoRemote,
 } from "../../features/session/sessionSlice";
 import { setTempoMapRemote } from "../../features/session/thunks/tempoMapThunks";
 import { updateMetronome } from "../../features/session/thunks/transportThunks";
@@ -67,7 +70,11 @@ import {
 import { SCALE_KEYS, SCALE_LABELS, type ScaleLike } from "../../utils/musicalScales";
 import { applySelectWheelChange } from "../../utils/selectWheel";
 import { useWheelScrollGuard } from "../../utils/useWheelScrollGuard";
-import { isModifierActive, selectKeybinding } from "../../features/keybindings/keybindingsSlice";
+import {
+    formatKeybinding,
+    isModifierActive,
+    selectKeybinding,
+} from "../../features/keybindings/keybindingsSlice";
 import { toggleVisible } from "../../features/fileBrowser/fileBrowserSlice";
 import { toggleNotebookVisible } from "../../features/notebook/notebookSlice";
 import {
@@ -106,11 +113,54 @@ function MetronomeIcon() {
     );
 }
 
+/** 撤销图标：钩形弧线箭头（左向），DAW 惯用造型（Lucide undo-2）。 */
+function UndoIcon() {
+    return (
+        <svg
+            width="15"
+            height="15"
+            viewBox="0 0 24 24"
+            fill="none"
+            aria-hidden="true"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+        >
+            <path d="M9 14 4 9l5-5" />
+            <path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5a5.5 5.5 0 0 1-5.5 5.5H11" />
+        </svg>
+    );
+}
+
+/** 重做图标：撤销的镜像（右向钩形，Lucide redo-2）。 */
+function RedoIcon() {
+    return (
+        <svg
+            width="15"
+            height="15"
+            viewBox="0 0 24 24"
+            fill="none"
+            aria-hidden="true"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+        >
+            <path d="m15 14 5-5-5-5" />
+            <path d="M20 9H9.5A5.5 5.5 0 0 0 4 14.5A5.5 5.5 0 0 0 9.5 20H13" />
+        </svg>
+    );
+}
+
 /** ActionBar 实际消费的 session 字段子集（配合 shallowEqual 阻断播放轮询的重渲染）。
  *  新增消费字段时必须同步补充到这里。 */
 const selectActionBarSession = (state: RootState) => {
     const session = state.session;
     return {
+        // 撤销/重做按钮的可用性（后端 history_state 事件驱动的镜像）
+        historyRedoDepth: session.historyRedoDepth,
+        historyUndoDepth: session.historyUndoDepth,
         autoCrossfadeEnabled: session.autoCrossfadeEnabled,
         autoScrollEnabled: session.autoScrollEnabled,
         beats: session.beats,
@@ -163,6 +213,29 @@ export function ActionBar() {
     const recordingMenuRef = useRef<HTMLDivElement | null>(null);
     const [metronomeMenuPos, setMetronomeMenuPos] = useState<{ x: number; y: number } | null>(null);
     const metronomeMenuRef = useRef<HTMLDivElement | null>(null);
+    // 「操作记录」窗口：右键撤销/重做按钮打开（非模态，不影响轨道编辑）。
+    const [historyPanelOpen, setHistoryPanelOpen] = useState(false);
+    const [historyPanelAnchor, setHistoryPanelAnchor] = useState<DOMRect | null>(null);
+    const undoButtonRef = useRef<HTMLButtonElement | null>(null);
+    const openHistoryPanel = useCallback(() => {
+        setHistoryPanelAnchor(undoButtonRef.current?.getBoundingClientRect() ?? null);
+        setHistoryPanelOpen(true);
+    }, []);
+    const closeHistoryPanel = useCallback(() => setHistoryPanelOpen(false), []);
+    // 「编辑」菜单的「操作记录」项经事件打开（面板由本组件持有并渲染）。
+    useEffect(() => {
+        const open = () => openHistoryPanel();
+        window.addEventListener("hifi:open-undo-history", open as EventListener);
+        return () =>
+            window.removeEventListener("hifi:open-undo-history", open as EventListener);
+    }, [openHistoryPanel]);
+    // 按钮 tooltip 里的快捷键提示（跟随用户在快捷键设置中的自定义绑定）。
+    const undoShortcutKb = useAppSelector((state: RootState) =>
+        selectKeybinding(state, "edit.undo"),
+    );
+    const redoShortcutKb = useAppSelector((state: RootState) =>
+        selectKeybinding(state, "edit.redo"),
+    );
     // 滚轮守卫：节拍器音量滑块滚轮步进时不触发默认滚动
     // （React onWheel 的 preventDefault 是 passive no-op，见 useWheelScrollGuard）。
     const metronomeVolumeWheelGuard = useWheelScrollGuard<HTMLInputElement>();
@@ -526,7 +599,7 @@ export function ActionBar() {
                         <div
                             ref={metronomeMenuRef}
                             data-hs-context-menu
-                            className="fixed z-50 min-w-[200px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
+                            className="fixed z-[600] min-w-[200px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
                             style={{ left: metronomeMenuPos.x, top: metronomeMenuPos.y }}
                         >
                             <div className="px-3 py-1 text-[11px] uppercase tracking-wide text-qt-text-muted">
@@ -1095,7 +1168,7 @@ export function ActionBar() {
                         <div
                             ref={recordingMenuRef}
                             data-hs-context-menu
-                            className="fixed z-50 min-w-[220px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
+                            className="fixed z-[600] min-w-[220px] rounded border border-qt-border bg-qt-window text-qt-text shadow-lg py-1"
                             style={{ left: recordingMenuPos.x, top: recordingMenuPos.y }}
                         >
                             <div className="px-3 py-1 text-[11px] uppercase tracking-wide text-qt-text-muted">
@@ -1334,6 +1407,47 @@ export function ActionBar() {
                         {recordingErrorMessage(recording.error)}
                     </Text>
                 ) : null}
+            </Flex>
+
+            <Separator orientation="vertical" size="2" />
+
+            {/* ── 撤销 / 重做 ──────────────────────────────────────────
+                独立成组、两侧以分隔线与其他按钮隔开；右键打开「操作记录」
+                （非模态浮动窗口，打开期间照常编辑轨道，条目实时刷新）。 */}
+            <Flex gap="1" className="shrink-0">
+                <IconButton
+                    ref={undoButtonRef}
+                    size="1"
+                    variant="ghost"
+                    disabled={s.historyUndoDepth <= 0}
+                    tabIndex={-1}
+                    data-tooltip={`${t("menu_undo")} (${formatKeybinding(undoShortcutKb, "")})`}
+                    onClick={() => {
+                        void dispatch(undoRemote());
+                    }}
+                    onContextMenu={(event) => {
+                        event.preventDefault();
+                        openHistoryPanel();
+                    }}
+                >
+                    <UndoIcon />
+                </IconButton>
+                <IconButton
+                    size="1"
+                    variant="ghost"
+                    disabled={s.historyRedoDepth <= 0}
+                    tabIndex={-1}
+                    data-tooltip={`${t("menu_redo")} (${formatKeybinding(redoShortcutKb, "")})`}
+                    onClick={() => {
+                        void dispatch(redoRemote());
+                    }}
+                    onContextMenu={(event) => {
+                        event.preventDefault();
+                        openHistoryPanel();
+                    }}
+                >
+                    <RedoIcon />
+                </IconButton>
             </Flex>
 
             <Separator orientation="vertical" size="2" />
@@ -1702,6 +1816,11 @@ export function ActionBar() {
                     open={snapSettingsOpen}
                     onOpenChange={setSnapSettingsOpen}
                 />
+            )}
+
+            {/* 「操作记录」：非模态浮动窗口（portal 到 body，不受工具栏裁剪） */}
+            {historyPanelOpen && (
+                <UndoHistoryPanel anchorRect={historyPanelAnchor} onClose={closeHistoryPanel} />
             )}
 
             {/* Snap Context Menu removed: right-click opens the settings dialog above. */}

@@ -1239,7 +1239,7 @@ pub(super) fn set_project_base_scale(
         // 否则该 Tempo Map 变化无法撤销（与 set_timeline_tempo_map 的
         // “工程影响性变化先 checkpoint”约定一致）。
         if tl.tempo_map.is_some() {
-            state.checkpoint_timeline(&tl);
+            state.checkpoint_timeline(&tl, crate::state::HistoryOp::EditProjectSettings);
         }
         tl.project_scale_notes = base_scale_notes(&normalized);
         // 初始点即工程基准记录：工程音阶变化同步到 Tempo Map 初始点。
@@ -1301,7 +1301,7 @@ pub(super) fn set_project_custom_scale(
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
         // 与 set_project_base_scale 一致：Tempo Map 初始点会被改写，先打撤销快照。
         if tl.tempo_map.is_some() {
-            state.checkpoint_timeline(&tl);
+            state.checkpoint_timeline(&tl, crate::state::HistoryOp::EditProjectSettings);
         }
         tl.project_scale_notes = normalized.notes.clone();
         // 初始点即工程基准记录：工程音阶变化同步到 Tempo Map 初始点。
@@ -1363,7 +1363,7 @@ pub(super) fn set_project_timeline_settings(
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
         // 初始点会被改写：先打撤销快照（工程影响性变化，与上面两个命令一致）。
         if tl.tempo_map.is_some() {
-            state.checkpoint_timeline(&tl);
+            state.checkpoint_timeline(&tl, crate::state::HistoryOp::EditProjectSettings);
         }
         if let Some(points) = tl.tempo_map.as_mut() {
             if let Some(first) = points.first_mut() {

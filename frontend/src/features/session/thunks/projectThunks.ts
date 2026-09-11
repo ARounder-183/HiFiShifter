@@ -33,6 +33,19 @@ export const redoRemote = createAsyncThunk("session/redoRemote", async () => {
     return webApi.redoTimeline();
 });
 
+/**
+ * 跳到「操作记录」中的第 `position` 个状态（窗口双击条目 / 点击跳转按钮）。
+ *
+ * 与撤销/重做共用后端入口：越界或原地不动时后端回 `ok = false`，前端静默
+ * 跳过（不套用任何快照，界面零变化）。
+ */
+export const setHistoryPositionRemote = createAsyncThunk(
+    "session/setHistoryPositionRemote",
+    async (position: number) => {
+        return webApi.setHistoryPosition(position);
+    },
+);
+
 /** 新建工程的初始轨道（Main）为灰色：后端 TimelineState::default 直接
  * 创建灰色初始轨道（见 backend state.rs），此处无需再覆盖快照。 */
 export const newProjectRemote = createAsyncThunk("session/newProjectRemote", async () => {

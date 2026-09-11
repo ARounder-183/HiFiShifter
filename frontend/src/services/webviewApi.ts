@@ -54,6 +54,7 @@ export const webApi = {
     beginUndoGroup: timelineApi.beginUndoGroup,
     endUndoGroup: timelineApi.endUndoGroup,
     getHistoryState: timelineApi.getHistoryState,
+    setHistoryPosition: timelineApi.setHistoryPosition,
 
     // Project
     getProjectMeta: projectApi.getProjectMeta,

@@ -350,7 +350,7 @@ pub(super) fn paste_reaper_clipboard(
         .collect();
 
     // 应用到 AppState
-    state.begin_undo_group();
+    state.begin_undo_group(Some(crate::state::HistoryOp::PasteObjects.key().to_string()));
     {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
 

@@ -183,7 +183,7 @@ export const importAudioAtPosition = createAsyncThunk(
     ) => {
         dispatch(setAudioPathAction(payload.audioPath));
 
-        await webApi.beginUndoGroup();
+        await webApi.beginUndoGroup("import_media");
         try {
             let targetTrackId: string | undefined;
             if (payload.trackId === null) {
@@ -321,7 +321,7 @@ export const importAudioFileAtPosition = createAsyncThunk(
         payload: { file: File; trackId?: string | null; startSec?: number },
         { dispatch, rejectWithValue, getState },
     ) => {
-        await webApi.beginUndoGroup();
+        await webApi.beginUndoGroup("import_media");
         try {
             let targetTrackId: string | undefined;
             if (payload.trackId === null) {
@@ -437,7 +437,7 @@ export const importMultipleAudioAtPosition = createAsyncThunk(
         // Create a single undo checkpoint for the entire batch
         dispatch(checkpointHistory());
 
-        await webApi.beginUndoGroup();
+        await webApi.beginUndoGroup("import_media");
         try {
             const beforeClipIds = new Set(
                 (getState() as { session: SessionState }).session.clips.map((c) => c.id),
@@ -805,7 +805,7 @@ export const importMidiAsClip = createAsyncThunk(
         },
         { dispatch, rejectWithValue, getState },
     ) => {
-        await webApi.beginUndoGroup();
+        await webApi.beginUndoGroup("import_vocalshifter");
         try {
             // 必须在发起导入前捕获现有 clip id 集合（契约见 openVocalShifterFromDialog）：
             // await 期间其他 thunk 的 fulfilled 可能已把新 clip 写进 state，

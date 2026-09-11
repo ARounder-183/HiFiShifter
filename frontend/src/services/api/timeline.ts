@@ -57,10 +57,17 @@ export const timelineApi = {
     redoTimeline: () => invoke<TimelineResult>("redo_timeline"),
 
     // Undo grouping: all commands between begin/end share a single undo entry
-    beginUndoGroup: () => invoke<TimelineResult>("begin_undo_group"),
+    beginUndoGroup: (label?: string) =>
+        label === undefined
+            ? invoke<TimelineResult>("begin_undo_group")
+            : invoke<TimelineResult>("begin_undo_group", label),
     endUndoGroup: () => invoke<{ ok: boolean }>("end_undo_group"),
 
-    /** 撤销/重做可用性（栈深度）：挂载时同步一次，此后由 history_state 事件驱动。 */
+    /** 跳到「操作记录」中的某个状态（双击条目）。 */
+    setHistoryPosition: (position: number) =>
+        invoke<TimelineResult>("set_history_position", position),
+
+    /** 撤销/重做可用性 + 操作记录：挂载时同步一次，此后由 history_state 事件驱动。 */
     getHistoryState: () => invoke<HistoryStateResult>("get_history_state"),
 
     getTimelineState: () => invoke<TimelineResult>("get_timeline_state"),

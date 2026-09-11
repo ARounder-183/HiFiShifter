@@ -200,7 +200,7 @@ pub(super) fn import_audio_bytes(
     }
 
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-    state.checkpoint_timeline(&tl);
+    state.checkpoint_timeline(&tl, crate::state::HistoryOp::ImportMedia);
     let resolved_track_id: Option<String> = match track_id {
         None => None,
         Some(Some(id)) => Some(id),
@@ -276,7 +276,7 @@ pub(super) fn import_audio_item(
     }
 
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-    state.checkpoint_timeline(&tl);
+    state.checkpoint_timeline(&tl, crate::state::HistoryOp::ImportMedia);
     let resolved_track_id: Option<String> = match track_id {
         None => None,
         Some(Some(id)) => Some(id),
@@ -299,7 +299,7 @@ pub(super) fn add_track(
     index: Option<usize>,
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-    state.checkpoint_timeline(&tl);
+    state.checkpoint_timeline(&tl, crate::state::HistoryOp::AddTrack);
     tl.add_track(name, parent_track_id, index);
     state.audio_engine.update_timeline(tl.clone());
     let mut payload = tl.to_payload();
@@ -312,7 +312,7 @@ pub(super) fn remove_track(
     track_id: String,
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-    state.checkpoint_timeline(&tl);
+    state.checkpoint_timeline(&tl, crate::state::HistoryOp::RemoveTrack);
 
     // 删除前：BFS 收集将被删除的轨道 ID 及其关联的 clip ID，用于后续清理全局缓存。
     let (clip_ids_to_clean, root_track_ids_to_clean) = {
@@ -384,7 +384,7 @@ pub(super) fn duplicate_track(
     target_index: Option<usize>,
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-    state.checkpoint_timeline(&tl);
+    state.checkpoint_timeline(&tl, crate::state::HistoryOp::DuplicateTrack);
     // 以 targetIndex 是否存在作为“复制拖动”放置语义的开关：
     // - Some(index)：克隆子树移动到指定位置。注意 parentTrackId 为 null
     //   （serde 反序列化为 None）代表根层级，是完全合法的放置目标，
@@ -409,7 +409,7 @@ pub(super) fn move_track(
     parent_track_id: Option<String>,
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-    state.checkpoint_timeline(&tl);
+    state.checkpoint_timeline(&tl, crate::state::HistoryOp::MoveTrack);
     tl.move_track(&track_id, target_index, parent_track_id);
     state.audio_engine.update_timeline(tl.clone());
     let mut payload = tl.to_payload();
@@ -429,7 +429,7 @@ pub(super) fn set_track_state(
     name: Option<String>,
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-    state.checkpoint_timeline(&tl);
+    state.checkpoint_timeline(&tl, crate::state::HistoryOp::EditTrack);
     let algo = pitch_analysis_algo.as_deref().map(|s| match s {
         "world_dll" | "world" => crate::state::PitchAnalysisAlgo::WorldDll,
         "nsf_hifigan_onnx" | "nsf_hifigan" | "onnx" => {
@@ -472,7 +472,7 @@ pub(super) fn set_project_length(
     project_sec: f64,
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-    state.checkpoint_timeline(&tl);
+    state.checkpoint_timeline(&tl, crate::state::HistoryOp::EditProjectLength);
     tl.set_project_length(project_sec);
     state.audio_engine.update_timeline(tl.clone());
     let mut payload = tl.to_payload();
@@ -489,7 +489,7 @@ pub(super) fn add_clip(
     source_path: Option<String>,
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-    state.checkpoint_timeline(&tl);
+    state.checkpoint_timeline(&tl, crate::state::HistoryOp::AddClip);
     tl.add_clip(track_id, name, start_sec, length_sec, source_path);
     state.audio_engine.update_timeline(tl.clone());
     let mut payload = tl.to_payload();
@@ -502,7 +502,7 @@ pub(super) fn create_clips_bulk(
     payload: crate::state::CreateClipsBulkPayload,
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-    state.checkpoint_timeline(&tl);
+    state.checkpoint_timeline(&tl, crate::state::HistoryOp::AddClip);
     let created_clip_ids = tl.create_clips_bulk(&payload);
     state.audio_engine.update_timeline(tl.clone());
     let mut timeline_payload = tl.to_payload();
@@ -526,7 +526,7 @@ pub(super) fn remove_clips(
         crate::formant_cache::cancel_formant_rebuild_generation(clip_id);
     }
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-    state.checkpoint_timeline(&tl);
+    state.checkpoint_timeline(&tl, crate::state::HistoryOp::RemoveClip);
 
     // 波纹编辑：删除前的被删除剪辑信息（用于计算平移量与轨道归属）。
     let (ripple_mode, ripple_link) = ripple_settings(&state);
@@ -611,7 +611,7 @@ pub(super) fn move_clips(
     let move_linked_params = move_linked_params.unwrap_or(false);
     let payload = {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-        state.checkpoint_timeline(&tl);
+        state.checkpoint_timeline(&tl, crate::state::HistoryOp::MoveClip);
 
         // 波纹编辑：记录被编辑剪辑的移动前状态（起点 / 右边缘 / 原轨道）。
         let (ripple_mode, ripple_link) = ripple_settings(&state);
@@ -730,7 +730,7 @@ pub(super) fn apply_clip_linked_params(
     linked_params: crate::state::LinkedParamCurvesPayload,
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-    state.checkpoint_timeline(&tl);
+    state.checkpoint_timeline(&tl, crate::state::HistoryOp::ApplyLinkedParams);
     tl.apply_linked_params_to_clip(&clip_id, &linked_params);
     state.audio_engine.update_timeline(tl.clone());
     let mut payload = tl.to_payload();
@@ -773,7 +773,7 @@ pub(super) fn set_clip_state(
     // 这在 undo group 内进行多次操作时很有用
     let do_checkpoint = checkpoint.unwrap_or(true);
     if do_checkpoint {
-        state.checkpoint_timeline(&tl);
+        state.checkpoint_timeline(&tl, crate::state::HistoryOp::EditClip);
     }
     tl.patch_clip_state(
         &clip_id,
@@ -873,7 +873,7 @@ pub(super) fn set_clips_state_bulk(
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     if checkpoint.unwrap_or(true) {
-        state.checkpoint_timeline(&tl);
+        state.checkpoint_timeline(&tl, crate::state::HistoryOp::EditClip);
     }
     // 波纹编辑（自动跟进，防御性）：批量更新可能携带起点/长度（尺寸）变更时生效。
     // 前端当前的 set_clips_state_bulk 只传 gain/muted/fades，不会触发；该路径用于覆盖
@@ -1053,7 +1053,7 @@ pub(super) fn set_clip_active_take(
         }
     }
     if checkpoint.unwrap_or(true) {
-        state.checkpoint_timeline(&tl);
+        state.checkpoint_timeline(&tl, crate::state::HistoryOp::TakeSwitch);
     }
     let track_id = {
         let clip = tl
@@ -1098,7 +1098,7 @@ pub(super) fn cycle_clip_takes(
         .any(|c| target_ids.contains(c.id.as_str()) && c.takes.len() > 1);
     // 全部目标都是单 take 时为 no-op：不写 checkpoint、不刷引擎。
     if will_change && checkpoint.unwrap_or(true) {
-        state.checkpoint_timeline(&tl);
+        state.checkpoint_timeline(&tl, crate::state::HistoryOp::TakeSwitch);
     }
     let mut changed: Vec<(String, String)> = Vec::new();
     for clip in &mut tl.clips {
@@ -1145,7 +1145,7 @@ pub(super) fn pack_clips_into_takes(
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     if checkpoint.unwrap_or(true) {
-        state.checkpoint_timeline(&tl);
+        state.checkpoint_timeline(&tl, crate::state::HistoryOp::TakePack);
     }
     let created = tl.pack_clips_into_takes(&clip_ids);
     let Some(clip_id) = created else {
@@ -1180,7 +1180,7 @@ pub(super) fn explode_clip_takes(
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     if checkpoint.unwrap_or(true) {
-        state.checkpoint_timeline(&tl);
+        state.checkpoint_timeline(&tl, crate::state::HistoryOp::TakeExplode);
     }
     let created = tl.explode_clip_takes(&clip_id);
     for id in &created {
@@ -1230,7 +1230,7 @@ pub(super) fn duplicate_clip_take(
         }
     }
     if checkpoint.unwrap_or(true) {
-        state.checkpoint_timeline(&tl);
+        state.checkpoint_timeline(&tl, crate::state::HistoryOp::TakeDuplicate);
     }
     if let Some(clip) = tl.clips.iter_mut().find(|c| c.id == clip_id) {
         let source = clip
@@ -1278,7 +1278,7 @@ pub(super) fn remove_clip_take(
         }
     };
     if checkpoint.unwrap_or(true) {
-        state.checkpoint_timeline(&tl);
+        state.checkpoint_timeline(&tl, crate::state::HistoryOp::TakeRemove);
     }
     if let Some(clip) = tl.clips.iter_mut().find(|c| c.id == clip_id) {
         // 校验已通过，唯一可能失败的是并发竞争；忽略其返回值安全。
@@ -1328,7 +1328,7 @@ pub(super) fn rename_clip_take(
         }
     }
     if checkpoint.unwrap_or(true) {
-        state.checkpoint_timeline(&tl);
+        state.checkpoint_timeline(&tl, crate::state::HistoryOp::TakeRename);
     }
     if let Some(clip) = tl.clips.iter_mut().find(|c| c.id == clip_id) {
         let _ = clip.rename_take(&take_id, &name);
@@ -1364,7 +1364,7 @@ pub(super) fn set_clip_take_reversed(
         }
     }
     if checkpoint.unwrap_or(true) {
-        state.checkpoint_timeline(&tl);
+        state.checkpoint_timeline(&tl, crate::state::HistoryOp::TakeReverse);
     }
     let flipped_active = tl
         .set_clip_take_reversed(&clip_id, &take_id, reversed)
@@ -1424,7 +1424,7 @@ pub(super) fn add_clip_take_from_media(
         );
     };
     if checkpoint.unwrap_or(true) {
-        state.checkpoint_timeline(&tl);
+        state.checkpoint_timeline(&tl, crate::state::HistoryOp::TakeAddMedia);
     }
 
     let duration_sec = info.duration_sec;
@@ -1543,7 +1543,7 @@ pub(super) fn import_media_files_as_takes(
 
     // checkpoint 在任何变更（含可能的新建轨道）之前：撤销应把本次导入
     // 产生的一切（clip + 自动新建的 track）一并回退。
-    state.checkpoint_timeline(&tl);
+    state.checkpoint_timeline(&tl, crate::state::HistoryOp::ImportMedia);
 
     let target_track_id = track_id
         .filter(|id| tl.tracks.iter().any(|t| t.id == *id))
@@ -1634,7 +1634,7 @@ pub(super) fn duplicate_clips_bulk(
     payload: crate::state::DuplicateClipsBulkPayload,
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-    state.checkpoint_timeline(&tl);
+    state.checkpoint_timeline(&tl, crate::state::HistoryOp::DuplicateClips);
     let created_clip_ids = tl.duplicate_clips_bulk(&payload);
     state.audio_engine.update_timeline(tl.clone());
     let mut timeline_payload = tl.to_payload();
@@ -1650,7 +1650,7 @@ pub(super) fn replace_clip_source(
     replace_same_source: Option<bool>,
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-    state.checkpoint_timeline(&tl);
+    state.checkpoint_timeline(&tl, crate::state::HistoryOp::ReplaceClipSource);
 
     // 收集被替换 clip 的旧源路径
     let old_paths: Vec<String> = tl
@@ -1898,7 +1898,7 @@ pub(super) fn split_clip(
     split_sec: f64,
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-    state.checkpoint_timeline(&tl);
+    state.checkpoint_timeline(&tl, crate::state::HistoryOp::SplitClip);
     let root_track_id = tl
         .clips
         .iter()
@@ -1931,7 +1931,7 @@ pub(super) fn split_clips_at(
     split_sec: f64,
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-    state.checkpoint_timeline(&tl);
+    state.checkpoint_timeline(&tl, crate::state::HistoryOp::SplitClip);
     let root_ids: Vec<String> = clip_ids
         .iter()
         .filter_map(|cid| tl.clips.iter().find(|c| c.id == *cid))
@@ -1986,7 +1986,7 @@ pub(super) fn close_track_gaps(
         payload.project = Some(state.project_meta_payload());
         return payload;
     }
-    state.checkpoint_timeline(&tl);
+    state.checkpoint_timeline(&tl, crate::state::HistoryOp::CloseGaps);
     let (_, link) = ripple_settings(&state);
     tl.move_clips(&moves, link);
     let root_id = tl.resolve_root_track_id(&track_id);
@@ -2051,7 +2051,7 @@ pub(super) fn glue_clips(
     clip_ids: Vec<String>,
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-    state.checkpoint_timeline(&tl);
+    state.checkpoint_timeline(&tl, crate::state::HistoryOp::GlueClip);
     // Collect root track IDs before gluing
     let root_ids: Vec<String> = clip_ids
         .iter()
@@ -2086,7 +2086,7 @@ pub(super) fn convert_clips_to_pitch_reference(
     clip_ids: Vec<String>,
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-    state.checkpoint_timeline(&tl);
+    state.checkpoint_timeline(&tl, crate::state::HistoryOp::PitchReference);
     // 收集 root track IDs 用于后续 pitch 分析调度
     let root_ids: Vec<String> = clip_ids
         .iter()
@@ -2116,7 +2116,7 @@ pub(super) fn update_pitch_reference(
     clip_ids: Vec<String>,
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-    state.checkpoint_timeline(&tl);
+    state.checkpoint_timeline(&tl, crate::state::HistoryOp::PitchReference);
     // 收集 root track IDs 用于后续 pitch 分析调度
     let root_ids: Vec<String> = clip_ids
         .iter()
@@ -2238,7 +2238,7 @@ pub(super) fn set_timeline_tempo_map(
         return payload;
     }
 
-    state.checkpoint_timeline(&tl);
+    state.checkpoint_timeline(&tl, crate::state::HistoryOp::EditTempo);
     *tl = incoming;
 
     // 同步工程基准 BPM / 拍号 / 音阶（与 0 位置点一致，初始点即工程基准记录）。

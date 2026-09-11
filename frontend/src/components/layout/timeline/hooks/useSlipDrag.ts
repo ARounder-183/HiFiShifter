@@ -385,7 +385,7 @@ export function useSlipDrag(deps: {
                     : Promise.resolve();
             } else {
                 persistPromise = (async () => {
-                    await webApi.beginUndoGroup();
+                    await webApi.beginUndoGroup("edit_clip");
                     try {
                         const persistPromises = patches.map((patch) =>
                             dispatch(

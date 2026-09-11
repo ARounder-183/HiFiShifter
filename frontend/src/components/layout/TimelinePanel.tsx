@@ -838,7 +838,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             // 交叉点双列循环 = 一次手势：开 undo group 把两侧循环合并为
             // 单个撤销步（否则两笔 checkpoint:true 会变成两个撤销步）。
             void (async () => {
-                await webApi.beginUndoGroup();
+                await webApi.beginUndoGroup("edit_clip");
                 try {
                     for (const side of sides) {
                         cycleOneFade(side.clipId, side.isOut ? "out" : "in", false);

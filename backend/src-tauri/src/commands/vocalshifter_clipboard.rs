@@ -62,7 +62,7 @@ fn paste_clb_pitch_data(
     tl.ensure_params_for_root(&root_track_id);
     let frame_period_ms = tl.frame_period_ms().max(0.1);
 
-    state.checkpoint_timeline(&tl);
+    state.checkpoint_timeline(&tl, crate::state::HistoryOp::ParamPaste);
 
     let param_name = match active_param.unwrap_or("pitch") {
         // 旧版 NSF-HiFiGAN 专有参数名：按共通音量参数处理。
@@ -420,7 +420,7 @@ fn paste_vsp_project(state: &AppState, path: &std::path::Path) -> serde_json::Va
     // 应用到 AppState
     {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-        state.checkpoint_timeline(&tl);
+        state.checkpoint_timeline(&tl, crate::state::HistoryOp::ImportVocalShifter);
 
         // 导入轨道合并（order 置为"现有根级数量"）+ 重写同级序号
         // （共用入口见 append_imported_tracks）。

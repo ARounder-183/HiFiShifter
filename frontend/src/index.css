@@ -227,6 +227,32 @@ textarea {
     backdrop-filter: blur(2px);
 }
 
+/*
+ * 层级约定（高 → 低）：
+ *   快速搜索                99998 / 99999
+ *   导入模式等全屏选择菜单     9999
+ *   模态弹窗（Dialog）       1000  —— 打开时独占交互，盖过「操作记录」面板与菜单
+ *   右键 / 上下文菜单等       999
+ *   工具栏右键菜单            600
+ *   「操作记录」面板          500   —— 高于时间轴瞬态元素（选区框 z-40、握把 z-60 之外的内容）
+ *   时间轴瞬态元素            ≤ 60
+ *
+ * Radix 的 Dialog / 菜单 portal 本身不带 z-index（靠 DOM 顺序决定层级），
+ * 而「操作记录」是常驻浮层（z-500），不显式分层就会挡住后打开的弹窗与菜单。
+ * 弹层与弹窗同用 1000 时靠 DOM 顺序：后打开的（如弹窗内的下拉）在上。
+ */
+.rt-DialogOverlay,
+.rt-DialogContent {
+    z-index: 1000 !important;
+}
+
+.rt-DropdownMenuContent,
+.rt-SelectContent,
+.rt-ContextMenuContent,
+.rt-PopoverContent {
+    z-index: 1000 !important;
+}
+
 .rt-DialogContent,
 .rt-DropdownMenuContent,
 .rt-SelectContent,

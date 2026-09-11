@@ -9,7 +9,7 @@ use crate::models::{
 use crate::project::CustomScale;
 use crate::time_stretch::UserStretchAlgorithm;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use uuid::Uuid;
@@ -1620,10 +1620,163 @@ fn default_next_track_order() -> i32 {
 
 const MAX_UNDO_HISTORY: usize = 100;
 
+/// 一次可撤销操作的类型（「操作记录」窗口的条目描述）。
+///
+/// 历史里只存语言无关的 key，由前端按 `history_op_<key>` 本地化 ——
+/// 后端不持有 UI 文案，与工程文件、设备信息同一原则。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryOp {
+    // ── 音频块 ──
+    ImportMedia,
+    AddClip,
+    RemoveClip,
+    MoveClip,
+    EditClip,
+    ReplaceClipSource,
+    SplitClip,
+    GlueClip,
+    CloseGaps,
+    PitchReference,
+    DuplicateClips,
+    ApplyLinkedParams,
+    GroupClips,
+    UngroupClips,
+    ToggleGroupDisabled,
+    PasteObjects,
+    DeleteSilence,
+    // ── Take ──
+    TakeSwitch,
+    TakePack,
+    TakeExplode,
+    TakeDuplicate,
+    TakeRemove,
+    TakeRename,
+    TakeReverse,
+    TakeAddMedia,
+    // ── 轨道 ──
+    AddTrack,
+    RemoveTrack,
+    DuplicateTrack,
+    MoveTrack,
+    EditTrack,
+    // ── 工程 ──
+    EditProjectLength,
+    EditTempo,
+    EditProjectSettings,
+    ImportProject,
+    // ── 参数 / MIDI ──
+    ParamCurve,
+    ParamRestore,
+    ParamStatic,
+    ParamStretch,
+    ParamPaste,
+    ImportMidi,
+    EditMidi,
+    ImportVocalShifter,
+    // ── 其它 ──
+    Recording,
+    /// 批量操作（`begin_undo_group` 包裹的一组命令）。
+    Batch,
+}
+
+impl HistoryOp {
+    /// 语言无关的操作 key（前端按 `history_op_<key>` 本地化）。
+    pub fn key(self) -> &'static str {
+        match self {
+            HistoryOp::ImportMedia => "import_media",
+            HistoryOp::AddClip => "add_clip",
+            HistoryOp::RemoveClip => "remove_clip",
+            HistoryOp::MoveClip => "move_clip",
+            HistoryOp::EditClip => "edit_clip",
+            HistoryOp::ReplaceClipSource => "replace_clip_source",
+            HistoryOp::SplitClip => "split_clip",
+            HistoryOp::GlueClip => "glue_clip",
+            HistoryOp::CloseGaps => "close_gaps",
+            HistoryOp::PitchReference => "pitch_reference",
+            HistoryOp::DuplicateClips => "duplicate_clips",
+            HistoryOp::ApplyLinkedParams => "apply_linked_params",
+            HistoryOp::GroupClips => "group_clips",
+            HistoryOp::UngroupClips => "ungroup_clips",
+            HistoryOp::ToggleGroupDisabled => "toggle_group_disabled",
+            HistoryOp::PasteObjects => "paste_objects",
+            HistoryOp::DeleteSilence => "delete_silence",
+            HistoryOp::TakeSwitch => "take_switch",
+            HistoryOp::TakePack => "take_pack",
+            HistoryOp::TakeExplode => "take_explode",
+            HistoryOp::TakeDuplicate => "take_duplicate",
+            HistoryOp::TakeRemove => "take_remove",
+            HistoryOp::TakeRename => "take_rename",
+            HistoryOp::TakeReverse => "take_reverse",
+            HistoryOp::TakeAddMedia => "take_add_media",
+            HistoryOp::AddTrack => "add_track",
+            HistoryOp::RemoveTrack => "remove_track",
+            HistoryOp::DuplicateTrack => "duplicate_track",
+            HistoryOp::MoveTrack => "move_track",
+            HistoryOp::EditTrack => "edit_track",
+            HistoryOp::EditProjectLength => "edit_project_length",
+            HistoryOp::EditTempo => "edit_tempo",
+            HistoryOp::EditProjectSettings => "edit_project_settings",
+            HistoryOp::ImportProject => "import_project",
+            HistoryOp::ParamCurve => "param_curve",
+            HistoryOp::ParamRestore => "param_restore",
+            HistoryOp::ParamStatic => "param_static",
+            HistoryOp::ParamStretch => "param_stretch",
+            HistoryOp::ParamPaste => "param_paste",
+            HistoryOp::ImportMidi => "import_midi",
+            HistoryOp::EditMidi => "edit_midi",
+            HistoryOp::ImportVocalShifter => "import_vocalshifter",
+            HistoryOp::Recording => "recording",
+            HistoryOp::Batch => "batch",
+        }
+    }
+}
+
+/// 「操作记录」中的一条状态。
+#[derive(Debug, Clone)]
+pub struct HistoryRecord {
+    /// 产生该状态的操作 key；`None` = 初始状态（「初始化状态」行）。
+    pub label: Option<String>,
+    /// 该状态形成时刻（Unix 毫秒）。
+    pub at_ms: u64,
+    /// 该状态快照。
+    ///
+    /// `None` = 尚未补齐：只有**当前所处位置**的记录允许为空 —— 那一刻它
+    /// 就是实时时间线本身，无需再克隆一份；离开该位置（打点 / 跳转）时用
+    /// 实时时间线补齐。其余位置的记录必然持有快照。
+    pub state: Option<TimelineState>,
+}
+
+/// 撤销历史：一条线性的「状态链」+ 当前位置。
+///
+/// 取代旧的双栈（undo / redo）模型：旧模型回答不了「第 k 步是什么状态」
+/// （任意跳转）与「每一步叫什么、发生在何时」（操作记录窗口）这两个问题。
+/// 单链 + 下标的模型让撤销、重做与任意跳转共用同一入口
+/// （`set_history_position`），新操作只需在当前位置之后追加；
+/// 当前位置之后的剩余记录天然就是「可重做」的部分。
 #[derive(Debug, Clone, Default)]
 pub struct TimelineHistory {
-    pub undo: VecDeque<TimelineState>,
-    pub redo: Vec<TimelineState>,
+    /// `records[0]` = 初始状态；`records[i]` = 第 i 步操作之后的状态。
+    pub records: Vec<HistoryRecord>,
+    /// 当前所处下标（`records[position]` 即当前状态）。
+    pub position: usize,
+    /// 历史起点时刻（新建 / 打开工程清空历史时记录）：初始状态行的时间。
+    pub started_at_ms: u64,
+}
+
+/// 由历史结构读出（可撤销步数, 可重做步数）。
+fn history_depths_of(h: &TimelineHistory) -> (usize, usize) {
+    (
+        h.position,
+        h.records.len().saturating_sub(1).saturating_sub(h.position),
+    )
+}
+
+/// 当前时刻（Unix 毫秒），用于「操作记录」的时间列。
+fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 #[derive(Debug, Clone)]
@@ -2986,7 +3139,17 @@ impl AppState {
         }
     }
 
-    pub fn checkpoint_timeline(&self, snapshot: &TimelineState) {
+    /// 打一个撤销点：把当前时间线状态登记为新的「第 N 步之后的状态」。
+    ///
+    /// 必须在**修改时间线之前**调用：`snapshot` 即该操作执行前的实时时间线。
+    /// 同一次用户操作只打一次点（`begin_undo_group` 包裹的批量操作只在组首
+    /// 打点，见 `suppress_checkpoints`）。
+    pub fn checkpoint_timeline(&self, snapshot: &TimelineState, op: HistoryOp) {
+        self.push_checkpoint(snapshot, op.key().to_string());
+    }
+
+    /// 打点的公共实现（`op` 为语言无关的操作 key，见 HistoryOp）。
+    fn push_checkpoint(&self, snapshot: &TimelineState, label: String) {
         // When suppress_checkpoints is active (inside an undo group),
         // skip pushing to the undo stack so multiple operations become
         // a single undo entry.
@@ -2994,48 +3157,67 @@ impl AppState {
             .suppress_checkpoints
             .load(std::sync::atomic::Ordering::Acquire)
         {
-            // Still mark project dirty
-            let (name, was_clean) = {
-                let mut p = self.project.lock().unwrap_or_else(|e| e.into_inner());
-                let was_clean = !p.dirty;
-                p.dirty = true;
-                (p.name.clone(), was_clean)
-            };
-            if was_clean {
-                if let Some(handle) = self.app_handle.get() {
-                    use tauri::Manager;
-                    if let Some(win) = handle.get_webview_window("main") {
-                        let title = format!("HiFiShifter - {}*", name);
-                        let _ = win.set_title(&title);
-                    }
-                }
-            }
+            self.mark_project_dirty_and_retitle();
             return;
         }
-        let mut h = self
-            .timeline_history
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        h.undo.push_back(snapshot.clone());
-        if h.undo.len() > MAX_UNDO_HISTORY {
-            h.undo.pop_front();
+        let now = now_unix_ms();
+        {
+            let mut h = self
+                .timeline_history
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if h.started_at_ms == 0 {
+                h.started_at_ms = now;
+            }
+            let started_at_ms = h.started_at_ms;
+            if h.records.is_empty() {
+                // 初始状态行：此刻的实时状态就是第 0 个状态（工程打开 /
+                // 新建之后、第一次编辑之前）。
+                h.records.push(HistoryRecord {
+                    label: None,
+                    at_ms: started_at_ms,
+                    state: Some(snapshot.clone()),
+                });
+                h.position = 0;
+            } else {
+                let position = h.position;
+                // 新操作丢弃当前位置之后的分支（旧 redo 栈）。
+                h.records.truncate(position + 1);
+                // 当前位置的记录是占位（None）：用实时时间线补齐 —— 它此刻
+                // 正是这个状态本身，之后跳回该位置要靠这份快照。
+                if let Some(current) = h.records.get_mut(position) {
+                    current.state = Some(snapshot.clone());
+                }
+            }
+            // 追加这一步：label/at 描述紧随其后的操作，快照留待下一次
+            // 打点或跳转时补齐（届时它就是实时时间线本身）。
+            h.records.push(HistoryRecord {
+                label: Some(label),
+                at_ms: now,
+                state: None,
+            });
+            h.position = h.records.len() - 1;
+            // 上限：丢最旧的状态（当前位置随之左移）。
+            while h.records.len() > MAX_UNDO_HISTORY + 1 {
+                h.records.remove(0);
+                h.position = h.position.saturating_sub(1);
+            }
         }
-        h.redo.clear();
-        drop(h);
 
         self.bump_timeline_version();
-        // 深度变化广播（新打点会清空重做栈）：前端据此立即刷新「撤销/重做」
-        // 菜单项的可用性，无需等待下一次轮询。
+        // 历史变化广播：前端「操作记录」窗口与撤销/重做可用性据此实时刷新。
         self.emit_history_state();
+        self.mark_project_dirty_and_retitle();
+    }
 
+    /// 标记工程已修改，并在首次变脏时更新窗口标题（添加 * 号）。
+    fn mark_project_dirty_and_retitle(&self) {
         let (name, was_clean) = {
             let mut p = self.project.lock().unwrap_or_else(|e| e.into_inner());
             let was_clean = !p.dirty;
             p.dirty = true;
             (p.name.clone(), was_clean)
         };
-
-        // 仅在首次变脏时更新窗口标题（添加 * 号）
         if was_clean {
             if let Some(handle) = self.app_handle.get() {
                 use tauri::Manager;
@@ -3053,48 +3235,96 @@ impl AppState {
                 .timeline_history
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            h.undo.clear();
-            h.redo.clear();
+            h.records.clear();
+            h.position = 0;
+            h.started_at_ms = now_unix_ms();
         }
-        // 新工程 / 打开工程：历史已清空，广播深度归零。
+        // 新工程 / 打开工程：历史已清空，广播新的「操作记录」。
         self.emit_history_state();
     }
 
-    /// 当前撤销/重做栈深度（「撤销 / 重做」可用性判定的权威来源）。
+    /// 当前撤销/重做步数（「撤销 / 重做」可用性判定的权威来源）。
     pub fn history_depths(&self) -> (usize, usize) {
         let h = self
             .timeline_history
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        (h.undo.len(), h.redo.len())
+        history_depths_of(&h)
     }
 
-    /// 向前端广播历史状态（撤销/重做栈深度）。
+    /// 当前所处历史位置（= 已应用的步数）。
+    pub fn history_position(&self) -> usize {
+        let h = self
+            .timeline_history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        h.position
+    }
+
+    /// 「操作记录」载荷：当前位置 + 状态链（每条只带语言无关的 key 与时刻）。
     ///
-    /// 打点、清空历史、撤销/重做之后调用：前端镜像由此保持实时，菜单项
-    /// 的置灰与快捷键的前置判断都不需要额外轮询。
+    /// 历史为空（新建 / 打开工程后尚无编辑）时补一条「初始化状态」行，
+    /// 保证窗口始终有内容可看。
+    pub fn history_state_json(&self) -> serde_json::Value {
+        let h = self
+            .timeline_history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (undo_depth, redo_depth) = history_depths_of(&h);
+        // started_at_ms == 0（进程启动后既未清空历史也未打点）时用当前时刻，
+        // 避免「初始化状态」行显示 1970 年。
+        let started_at_ms = if h.started_at_ms == 0 {
+            now_unix_ms()
+        } else {
+            h.started_at_ms
+        };
+        let records: Vec<serde_json::Value> = if h.records.is_empty() {
+            vec![serde_json::json!({ "label": null, "atMs": started_at_ms })]
+        } else {
+            h.records
+                .iter()
+                .map(|record| {
+                    serde_json::json!({
+                        "label": record.label,
+                        "atMs": record.at_ms,
+                    })
+                })
+                .collect()
+        };
+        serde_json::json!({
+            "ok": true,
+            "position": h.position,
+            "undoDepth": undo_depth,
+            "redoDepth": redo_depth,
+            "records": records,
+        })
+    }
+
+    /// 向前端广播「操作记录」与撤销/重做可用性。
+    ///
+    /// 打点、清空历史、撤销/重做、跳转之后调用：窗口与按钮由此实时刷新，
+    /// 不需要额外轮询。
     pub fn emit_history_state(&self) {
         let Some(handle) = self.app_handle.get() else {
             return;
         };
-        let (undo_depth, redo_depth) = self.history_depths();
         use tauri::Emitter;
-        let _ = handle.emit(
-            "history_state",
-            serde_json::json!({
-                "undoDepth": undo_depth,
-                "redoDepth": redo_depth,
-            }),
-        );
+        let _ = handle.emit("history_state", self.history_state_json());
     }
 
     /// Begin an undo group: push the current state once and suppress further checkpoints.
-    pub fn begin_undo_group(&self) -> TimelineStatePayload {
+    ///
+    /// `label` 由调用方给出（语言无关的 key，前端本地化）：批量导入等场景
+    /// 能给出比「批量操作」更准确的名字；缺省用 HistoryOp::Batch。
+    pub fn begin_undo_group(&self, label: Option<String>) -> TimelineStatePayload {
         let tl = self.timeline.lock().unwrap_or_else(|e| e.into_inner());
         // Force a checkpoint even if suppress was already active (defensive)
         self.suppress_checkpoints
             .store(false, std::sync::atomic::Ordering::Release);
-        self.checkpoint_timeline(&tl);
+        self.push_checkpoint(
+            &tl,
+            label.unwrap_or_else(|| HistoryOp::Batch.key().to_string()),
+        );
         self.suppress_checkpoints
             .store(true, std::sync::atomic::Ordering::Release);
         let mut payload = tl.to_payload();
@@ -3112,28 +3342,61 @@ impl AppState {
         serde_json::json!({ "ok": true })
     }
 
+    /// 撤销一步（跳到当前位置之前）。
     pub fn undo_timeline(&self) -> TimelineStatePayload {
+        let target = self.history_position().saturating_sub(1);
+        self.set_history_position(target)
+    }
+
+    /// 重做一步（跳到当前位置之后）。
+    pub fn redo_timeline(&self) -> TimelineStatePayload {
+        let target = self.history_position().saturating_add(1);
+        self.set_history_position(target)
+    }
+
+    /// 跳到历史中的第 `target` 个状态（「操作记录」窗口双击 / 撤销 / 重做
+    /// 共用此入口）。
+    ///
+    /// 越界或原地不动时返回 `ok = false`：前端不套用任何快照，界面零刷新
+    /// 零变更（与空栈撤销/重做的语义一致）；载荷仍带回权威的历史状态，
+    /// 前端可借机纠正可能落后的镜像。
+    pub fn set_history_position(&self, target: usize) -> TimelineStatePayload {
         let mut tl = self.timeline.lock().unwrap_or_else(|e| e.into_inner());
         let mut h = self
             .timeline_history
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let Some(prev) = h.undo.pop_back() else {
+        if target >= h.records.len() || target == h.position {
+            let (undo_depth, redo_depth) = history_depths_of(&h);
+            drop(h);
             let mut payload = tl.to_payload();
             payload.project = Some(self.project_meta_payload());
-            // 无步可撤销：ok = false 让前端静默跳过 —— 不套用任何快照，
-            // 界面不发生任何刷新或变更，也不弹任何提示。深度照常带回，
-            // 前端可借这一次响应把可能落后的镜像纠正回来。
             payload.ok = false;
-            payload.undo_depth = Some(h.undo.len());
-            payload.redo_depth = Some(h.redo.len());
+            payload.undo_depth = Some(undo_depth);
+            payload.redo_depth = Some(redo_depth);
+            return payload;
+        }
+        // 离开当前位置：先用实时时间线补齐该位置的快照，之后跳回才有依据。
+        let current_position = h.position;
+        if let Some(current) = h.records.get_mut(current_position) {
+            current.state = Some(tl.clone());
+        }
+        let Some(next_state) = h.records.get(target).and_then(|r| r.state.clone()) else {
+            // 目标记录尚未补齐（理论上不可达：非当前位置的记录在离开时即已
+            // 补齐）。宁可原地不动，也不套用一个不完整的状态。
+            let (undo_depth, redo_depth) = history_depths_of(&h);
+            drop(h);
+            let mut payload = tl.to_payload();
+            payload.project = Some(self.project_meta_payload());
+            payload.ok = false;
+            payload.undo_depth = Some(undo_depth);
+            payload.redo_depth = Some(redo_depth);
             return payload;
         };
         let scale_before = tl.render_scale_signature();
-        let current = std::mem::replace(&mut *tl, prev);
-        h.redo.push(current);
-        let undo_depth = h.undo.len();
-        let redo_depth = h.redo.len();
+        *tl = next_state;
+        h.position = target;
+        let (undo_depth, redo_depth) = history_depths_of(&h);
         drop(h);
         self.bump_timeline_version();
         self.emit_history_state();
@@ -3143,46 +3406,7 @@ impl AppState {
         // set_clip_active_take 命令路径的失效策略一致。
         crate::hnsep_onnx::clear_separation_cache();
         // 恢复的时间线快照可能带有 Tempo Map 初始点（工程基准记录）：
-        // 同步工程 BPM/拍号/音阶，避免撤销后工程记录与 Tempo Map 分叉。
-        {
-            let mut p = self.project.lock().unwrap_or_else(|e| e.into_inner());
-            self.sync_project_record_from_tempo_map(&mut tl, &mut p);
-        }
-        self.audio_engine.update_timeline(tl.clone());
-        self.invalidate_render_caches_if_scale_changed(&tl, &scale_before);
-        let mut payload = tl.to_payload();
-        payload.project = Some(self.project_meta_payload());
-        payload.undo_depth = Some(undo_depth);
-        payload.redo_depth = Some(redo_depth);
-        payload
-    }
-
-    pub fn redo_timeline(&self) -> TimelineStatePayload {
-        let mut tl = self.timeline.lock().unwrap_or_else(|e| e.into_inner());
-        let mut h = self
-            .timeline_history
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let Some(next) = h.redo.pop() else {
-            let mut payload = tl.to_payload();
-            payload.project = Some(self.project_meta_payload());
-            // 无步可重做：同 undo_timeline 的空栈分支 —— ok = false 静默跳过。
-            payload.ok = false;
-            payload.undo_depth = Some(h.undo.len());
-            payload.redo_depth = Some(h.redo.len());
-            return payload;
-        };
-        let scale_before = tl.render_scale_signature();
-        let current = std::mem::replace(&mut *tl, next);
-        h.undo.push_back(current);
-        let undo_depth = h.undo.len();
-        let redo_depth = h.redo.len();
-        drop(h);
-        self.bump_timeline_version();
-        self.emit_history_state();
-        // 与 undo_timeline 一致：active take 可能随快照回退，须清分离缓存。
-        crate::hnsep_onnx::clear_separation_cache();
-        // 与 undo_timeline 一致：重做后同步工程基准记录。
+        // 同步工程 BPM/拍号/音阶，避免回退后工程记录与 Tempo Map 分叉。
         {
             let mut p = self.project.lock().unwrap_or_else(|e| e.into_inner());
             self.sync_project_record_from_tempo_map(&mut tl, &mut p);

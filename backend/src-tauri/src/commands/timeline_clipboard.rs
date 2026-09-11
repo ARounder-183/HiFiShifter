@@ -233,7 +233,7 @@ fn paste_fragment(
 ) -> serde_json::Value {
     let result = {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-        state.checkpoint_timeline(&tl);
+        state.checkpoint_timeline(&tl, crate::state::HistoryOp::PasteObjects);
         let playhead_sec = tl.playhead_sec.max(0.0);
         let track_placement = paste_placement(mode.as_deref());
         let merge = match merge_project_fragment(

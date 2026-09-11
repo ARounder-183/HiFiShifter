@@ -384,7 +384,7 @@ pub(super) fn set_param_frames(
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     let do_checkpoint = checkpoint.unwrap_or(true);
     if do_checkpoint {
-        state.checkpoint_timeline(&tl);
+        state.checkpoint_timeline(&tl, crate::state::HistoryOp::ParamCurve);
     }
 
     let Some(root) = tl.resolve_root_track_id(&track_id) else {
@@ -536,7 +536,7 @@ pub(super) fn restore_param_frames(
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     let do_checkpoint = checkpoint.unwrap_or(true);
     if do_checkpoint {
-        state.checkpoint_timeline(&tl);
+        state.checkpoint_timeline(&tl, crate::state::HistoryOp::ParamRestore);
     }
 
     let Some(root) = tl.resolve_root_track_id(&track_id) else {
@@ -666,7 +666,7 @@ pub(super) fn set_static_param(
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     let do_checkpoint = checkpoint.unwrap_or(true);
     if do_checkpoint {
-        state.checkpoint_timeline(&tl);
+        state.checkpoint_timeline(&tl, crate::state::HistoryOp::ParamStatic);
     }
 
     let Some(root) = tl.resolve_root_track_id(&track_id) else {
@@ -700,7 +700,7 @@ pub(super) fn stretch_track_linked_params(
 ) -> serde_json::Value {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     if checkpoint.unwrap_or(false) {
-        state.checkpoint_timeline(&tl);
+        state.checkpoint_timeline(&tl, crate::state::HistoryOp::ParamStretch);
     }
 
     let Some(root) = tl.resolve_root_track_id(&track_id) else {

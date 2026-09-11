@@ -558,6 +558,7 @@ pub fn run() {
             commands::begin_undo_group,
             commands::end_undo_group,
             commands::get_history_state,
+            commands::set_history_position,
             commands::get_project_meta,
             commands::new_project,
             commands::open_project_dialog,

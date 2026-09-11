@@ -444,7 +444,7 @@ export function useClipDrag(deps: {
                     dispatch(beginInteraction());
                     // Begin backend undo group so that move_clip + auto-crossfade
                     // share a single backend undo entry.
-                    void webApi.beginUndoGroup();
+                    void webApi.beginUndoGroup("move_clip");
                     // 记录已进入移动事务：中途切换复制模式后收尾仍要释放。
                     drag.beganMoveTransaction = true;
                 }
@@ -788,7 +788,7 @@ export function useClipDrag(deps: {
                     dispatch(checkpointHistory());
                     void (async () => {
                         // Begin backend undo group for copy-drag + auto-crossfade
-                        await webApi.beginUndoGroup();
+                        await webApi.beginUndoGroup("duplicate_clips");
                         try {
                             const targetTrackIdByClipId = new Map<string, string>();
                             if (dropToNewTrack) {

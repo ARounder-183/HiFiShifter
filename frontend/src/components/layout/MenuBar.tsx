@@ -643,6 +643,14 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                             {shortcutLabel("edit.redo")}
                         </div>
                     </DropdownMenu.Item>
+                    {/* 「操作记录」窗口：非模态浮动面板（经事件交由 ActionBar 打开） */}
+                    <DropdownMenu.Item
+                        onSelect={() =>
+                            window.dispatchEvent(new CustomEvent("hifi:open-undo-history"))
+                        }
+                    >
+                        {tAny("undo_history_title")}
+                    </DropdownMenu.Item>
                     <DropdownMenu.Separator />
                     {/* 剪贴板：剪切 / 复制 */}
                     <DropdownMenu.Item onSelect={() => dispatchEditOp("cut")}>

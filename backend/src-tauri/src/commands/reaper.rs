@@ -54,7 +54,7 @@ pub(super) fn import_reaper_project(
     };
 
     // 应用到 AppState —— 合并到现有工程（不替换）
-    state.begin_undo_group();
+    state.begin_undo_group(Some(crate::state::HistoryOp::ImportProject.key().to_string()));
     {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
 

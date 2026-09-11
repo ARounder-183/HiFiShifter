@@ -1,5 +1,6 @@
 import { createSlice, type PayloadAction } from "@reduxjs/toolkit";
 import type {
+    HistoryRecordSummary,
     TimelineClip,
     TimelineClipTake,
     TimelineState,
@@ -90,6 +91,7 @@ import {
     saveProjectAsRemote,
     saveProjectRemote,
     saveProjectToPathRemote,
+    setHistoryPositionRemote,
     setProjectBaseScaleRemote,
     setProjectCustomScaleRemote,
     setProjectStretchSettingsRemote,
@@ -632,6 +634,14 @@ export interface SessionState {
 
     /** 重做栈深度镜像。0 = 无可重做。 */
     historyRedoDepth: number;
+
+    /**
+     * 「操作记录」条目（后端权威：`history_state` 事件同步）。
+     *
+     * 下标即历史位置：`records[historyUndoDepth]` 是当前状态；其后的条目是
+     * 可重做的部分；`records[0]` 是初始状态行。
+     */
+    historyRecords: HistoryRecordSummary[];
 
     /**
      * 「参数编辑器边缘拉伸」登记的历史步骤（仅该手势写入，见
@@ -2077,6 +2087,7 @@ const initialState: SessionState = {
     _latestHistoryOpRequestId: null,
     historyUndoDepth: 0,
     historyRedoDepth: 0,
+    historyRecords: [],
     paramSelectionSteps: [],
     pendingParamSelectionRestore: null,
     _paramSelectionRestoreSeq: 0,
@@ -2157,9 +2168,43 @@ function requestParamSelectionRestore(
     };
 }
 
+/**
+ * 撤销「产生位置 `stepPosition` 的那一步」时恢复的选区（仅拉伸步骤登记）。
+ *
+ * 注意必须按**步骤**匹配而不是按落点位置：撤销一个与拉伸无关的操作时，
+ * 即使落点恰好是某个拉伸步骤之后的状态，也不得动用户当前的选区。
+ */
+function restoreParamSelectionForUndoStep(state: SessionState, stepPosition: number): void {
+    const step = state.paramSelectionSteps.find((entry) => entry.position === stepPosition);
+    if (step) requestParamSelectionRestore(state, step.before);
+}
+
+/** 重做「产生位置 `stepPosition` 的那一步」时恢复的选区。 */
+function restoreParamSelectionForRedoStep(state: SessionState, stepPosition: number): void {
+    const step = state.paramSelectionSteps.find((entry) => entry.position === stepPosition);
+    if (step) requestParamSelectionRestore(state, step.after);
+}
+
+/**
+ * 跳转到位置 `position` 时恢复的选区（「操作记录」窗口双击）。
+ *
+ * 跳转语义是「回到那个状态」：该位置若有登记步骤则取其 `after`（该步完成
+ * 后的样子），否则看下一步骤的 `before`（即跳到某一步之前的状态）。
+ */
+function restoreParamSelectionForPosition(state: SessionState, position: number): void {
+    const afterStep = state.paramSelectionSteps.find((step) => step.position === position);
+    if (afterStep) {
+        requestParamSelectionRestore(state, afterStep.after);
+        return;
+    }
+    const beforeStep = state.paramSelectionSteps.find((step) => step.position === position + 1);
+    if (beforeStep) requestParamSelectionRestore(state, beforeStep.before);
+}
+
 export {
     undoRemote,
     redoRemote,
+    setHistoryPositionRemote,
     newProjectRemote,
     openProjectFromDialog,
     openProjectFromPath,
@@ -2294,12 +2339,23 @@ const sessionSlice = createSlice({
             state.trackMeters = {};
         },
         /**
-         * 同步撤销/重做栈深度（`history_state` 后端事件 / 挂载时的
-         * get_history_state / 撤销·重做响应）。深度为 0 时对应的菜单项置灰、
+         * 同步「操作记录」与撤销/重做可用性（`history_state` 后端事件 /
+         * 挂载时的 get_history_state）。深度为 0 时对应的菜单项置灰、
          * 快捷键静默失败。
          */
-        setHistoryDepths(state, action: PayloadAction<{ undoDepth: number; redoDepth: number }>) {
+        setHistoryState(
+            state,
+            action: PayloadAction<{
+                undoDepth: number;
+                redoDepth: number;
+                records?: HistoryRecordSummary[];
+            }>,
+        ) {
             applyHistoryDepths(state, action.payload.undoDepth, action.payload.redoDepth);
+            const records = action.payload.records;
+            if (Array.isArray(records)) {
+                state.historyRecords = records;
+            }
         },
         /**
          * 登记「参数编辑器边缘拉伸」步骤的选区（撤销/重做该步时恢复）。
@@ -4260,11 +4316,9 @@ const sessionSlice = createSlice({
                         ? payloadRedoDepth
                         : state.historyRedoDepth + 1,
                 );
-                // 这一步是「参数编辑器边缘拉伸」时，恢复拉伸前的选区。
-                const selectionStep = state.paramSelectionSteps.find(
-                    (step) => step.position === depthBefore,
-                );
-                if (selectionStep) requestParamSelectionRestore(state, selectionStep.before);
+                // 被撤销的正是「产生 depthBefore 的那一步」：若是拉伸步骤，
+                // 一并恢复拉伸前的选区。
+                restoreParamSelectionForUndoStep(state, depthBefore);
                 // 撤销把时间线（含 playhead_sec）整体回退到上一个检查点：快照里
                 // 的 playhead_sec 就是该状态形成时的播放光标位置，也是回退之后
                 // 一切以光标为锚点的编辑操作（粘贴/分割/录音起点等）在后端的
@@ -4331,11 +4385,9 @@ const sessionSlice = createSlice({
                     // 重做是沿原分支前进（不是丢弃分支）：当前位置上的步骤保留。
                     { preserveStepAtCurrentPosition: true },
                 );
-                // 这一步是「参数编辑器边缘拉伸」时，恢复拉伸后的选区。
-                const selectionStep = state.paramSelectionSteps.find(
-                    (step) => step.position === depthBefore + 1,
-                );
-                if (selectionStep) requestParamSelectionRestore(state, selectionStep.after);
+                // 被重做的正是「产生 depthBefore + 1 的那一步」：若是拉伸步骤，
+                // 一并恢复拉伸后的选区。
+                restoreParamSelectionForRedoStep(state, depthBefore + 1);
                 // 与 undoRemote.fulfilled 对称：重做恢复的时间线快照携带的
                 // playhead_sec 是该状态（被撤销暂存时）的光标位置，即重做后
                 // 后端的实际操作点 —— 采纳它，视觉光标与实际编辑点保持一致。
@@ -4356,6 +4408,58 @@ const sessionSlice = createSlice({
 
             .addCase(redoRemote.rejected, (state, action) => {
                 // 同 undoRemote.rejected：无乐观本地变更需要回滚。
+                if (state._latestHistoryOpRequestId !== action.meta.requestId) return;
+            })
+
+            .addCase(setHistoryPositionRemote.pending, (state, action) => {
+                // 「操作记录」跳转与撤销/重做同源：以后端快照为唯一权威，
+                // pending 阶段不做任何本地回放。
+                state._latestHistoryOpRequestId = action.meta.requestId;
+                state._latestEditRequestId = null;
+            })
+
+            .addCase(setHistoryPositionRemote.fulfilled, (state, action) => {
+                if (state._latestHistoryOpRequestId !== action.meta.requestId) return;
+                const payload = action.payload as {
+                    ok?: boolean;
+                    undo_depth?: number;
+                    redo_depth?: number;
+                } & TimelineState;
+                const payloadUndoDepth = Number(payload.undo_depth);
+                const payloadRedoDepth = Number(payload.redo_depth);
+                // 越界 / 原地不动（后端 ok = false）：静默跳过，界面零变化。
+                if (!payload.ok) {
+                    if (Number.isFinite(payloadUndoDepth) && Number.isFinite(payloadRedoDepth)) {
+                        applyHistoryDepths(state, payloadUndoDepth, payloadRedoDepth);
+                    }
+                    return;
+                }
+                applyHistoryDepths(
+                    state,
+                    Number.isFinite(payloadUndoDepth) ? payloadUndoDepth : state.historyUndoDepth,
+                    Number.isFinite(payloadRedoDepth) ? payloadRedoDepth : state.historyRedoDepth,
+                    // 跳转只是在既有历史里移动位置，不丢弃任何分支步骤。
+                    { preserveStepAtCurrentPosition: true },
+                );
+                restoreParamSelectionForPosition(state, state.historyUndoDepth);
+                // 与撤销/重做一致：快照携带的 playhead_sec 即该状态形成时的
+                // 光标位置（该状态下的实际操作点），播放中由传输层所有。
+                const prevPlayheadSec = state.playheadSec;
+                applyTimelineState(state, payload, {
+                    force: true,
+                    preserveProjectNotes: false,
+                    adoptPlayhead: !state.runtime.isPlaying,
+                });
+                if (
+                    !state.runtime.isPlaying &&
+                    Math.abs(state.playheadSec - prevPlayheadSec) > PLAYHEAD_MOVE_EPS_SEC
+                ) {
+                    state.pendingPlayheadRevealSec = state.playheadSec;
+                }
+            })
+
+            .addCase(setHistoryPositionRemote.rejected, (state, action) => {
+                // 无乐观本地变更需要回滚（同撤销/重做）。
                 if (state._latestHistoryOpRequestId !== action.meta.requestId) return;
             })
 
@@ -5844,7 +5948,7 @@ export const {
     setTrackName,
     setTrackMeters,
     clearTrackMeters,
-    setHistoryDepths,
+    setHistoryState,
     recordParamSelectionStretchStep,
     checkpointHistory,
     applyTimelinePayload,

@@ -132,7 +132,7 @@ export function useClipPitchDrag(deps: {
             let undoGroupPromise: Promise<unknown> | null = null;
             const ensureUndoGroup = (): Promise<unknown> => {
                 if (!undoGroupPromise) {
-                    undoGroupPromise = webApi.beginUndoGroup();
+                    undoGroupPromise = webApi.beginUndoGroup("param_curve");
                 }
                 return undoGroupPromise;
             };

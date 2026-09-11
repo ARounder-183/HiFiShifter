@@ -118,7 +118,7 @@ pub(super) fn set_transport(
     if let Some(v) = bpm {
         if v.is_finite() && v > 0.0 {
             // BPM is project-affecting: checkpoint for undo.
-            state.checkpoint_timeline(&tl);
+            state.checkpoint_timeline(&tl, crate::state::HistoryOp::EditTempo);
             // 与 Tempo Map 规范化/前端 clampBpm 一致：钳制到 10-960，
             // 否则这里可直接把 Tempo Map 初始点 BPM 写出合法范围。
             let clamped = v.clamp(10.0, 960.0);
