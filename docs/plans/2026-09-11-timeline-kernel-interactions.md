@@ -1047,22 +1047,52 @@ clip 边缘（最优先）→ 淡化包络线 / 边缘竖线 → 交叉点抓手
 - **B-3**：交叉点抓手（需新的「同时移动双方边缘」手势）
 - **B-4**：淡变形状循环点击（Ctrl/可配置修饰键 + 单击）与双击重置曲率
 
-### Phase C：snap offset 三角手柄拖拽
-- 旧实现：`hooks/useSnapOffsetDrag.ts`；几何常量 `snapOffsetHandleXPx` /
-  `SNAP_OFFSET_HANDLE_SIZE_PX=9` / `SNAP_OFFSET_HIT_HEIGHT_PX=12`（命中区贴行底）
-- 已知要点：阈值 2px 后 `checkpointHistory()`；拖拽中 `snapTimelineDetailed(rawAbs, "clip", { highlight: { sources: [...] } })` 单点吸附；收尾 `setClipStateRemote({ snapOffsetSec })`；零位移单击不做远端写入
-- 待调研：与 `fade-in-corner` / `left-edge` 的优先级（旧实现命中区在行底，与二者纵向错开）
+### Phase C：snap offset 三角手柄拖拽 —— 调研结论（2026-09-11）
+
+**几何（单一事实来源：`ClipItem.tsx` 的命中握把 + `constants.ts`）**
+
+`SnapOffset` 是 clip 固有属性（秒，相对 clip 起点，与倒放无关）。手柄命中区是一个
+**贴行底的透明矩形**（三角视觉由轨道级 Canvas 绘制）：
+
+| 项 | 值 |
+|---|---|
+| 锚点 | `absolute bottom-0` → clip 局部 `y ∈ [clipHeight − 12, clipHeight]` |
+| 高度 | `SNAP_OFFSET_HIT_HEIGHT_PX = 12` |
+| 左缘 | `min(max(−4, snapOffsetHandleXPx(offset, pxPerSec) − 1), max(−4, width − 9))` |
+| 宽度 | `SNAP_OFFSET_HANDLE_SIZE_PX + 3 = 12` |
+| 三角 x | `snapOffsetHandleXPx(offset, pxPerSec) = offset > 0 ? offset × pxPerSec : 0`（**不钳制**，越界由绘制端裁剪） |
+
+**优先级（旧实现由 z-index 决定，内核必须显式排序）**
+
+`z-70` snap 手柄 > `z-65` 淡变角（横帽 22×14 @ `y=CLIP_HEADER_HEIGHT`；竖条 6px 宽，
+下沿到 `fadeCornerReservePx(bodyH) = max(14, round(bodyH/3))`）> `z-60` 左右边缘
+（全高）。→ **内核里 snap 手柄必须是最高优先级的 clip 分区**，在淡变角之前判定。
+
+**状态机（`hooks/useSnapOffsetDrag.ts`）**
+
+1. 按下：仅左键；`dispatch(beginInteraction())`；记 `baseOffset = clamp(snapOffsetSec, 0, clipLen)`、
+   `clipStart`、`clipLen`、`anchorTrackId = clip.trackId`、`startPointerSec`
+2. 位移阈值 **2px**（水平）后才 `dispatch(checkpointHistory())` —— **零位移单击不产生 undo 步**
+3. 拖拽中：`rawAbs = clipStart + baseOffset + (pointerSec − startPointerSec)`；
+   吸附开启时 `snapTimelineDetailed(rawAbs, "clip", { originSec: clipStart + baseOffset,
+   anchorTrackId, excludeClipIds: {clipId}, highlight: { sources: [{trackId, clipId}] } })`
+   —— 即**手柄的绝对时间线位置**作为被吸附对象（单点吸附），高亮 = 手柄所在行的亮条；
+   吸附关闭时 `clearSnapHighlights`。落库前 `clamp(next, 0, clipLen)`
+4. 收尾：清高亮；未越阈值 → 只 `endInteraction()`（**不写后端**）；否则
+   `setClipStateRemote({ clipId, snapOffsetSec, checkpoint: true })` → `endInteraction()`
+5. 全程 `beginSnapGesture()` / `endSnapGesture()` 包裹；失焦经 `registerDragAbort` 收尾
+
+**内核实施增量**
+- **C-1**：`hitTest` 新增 `snap-offset-handle` 分区（最高优先级）+ `HitTestClip` 补
+  `snapOffsetSec`；需要 `pxPerSec` / `clipHeightPx`（后者已在 `hitTest` 内算出）
+- **C-2**：宿主新增 `snap-offset-drag` 手势 + `onSnapOffsetPreview` / `onSnapOffsetCommit`
+  回调（**只给几何位移，吸附与落库交回面板**——与 `onDragPreview` 同一架构约定）
+- **C-3**：面板接回调，复用 `useSnapOffsetDrag` 的语义（阈值 / 吸附 / 单笔后端写入）
 
 ### Phase D：ghost 预览（copy 拖拽）与素材拖入
 - 旧实现：`ghostDrag`（`TimelinePanel.tsx:1657`）、`dropPreview`（`TimelinePanel.tsx:2961`，在内核开关内的旧分支里）、拖入的 drag&drop 处理在 `TimelineScrollArea` 内
 - 待调研：copy 模式的触发修饰键、ghost 的坐标与样式、素材拖入的 `dragover`/`drop` 契约（含 `importModeMenu` 分支）
 - 预期产出：内核态 ghost 层（内容坐标 + rAF 平移，与 `SnapHighlightLayer` 同模式）+ 拖入处理迁到内核视口
-
-### Phase C：snap offset 三角手柄拖拽
-- 旧实现：`frontend/src/components/layout/timeline/hooks/useSnapOffsetDrag.ts`
-- 已知要点：阈值 2px 后 `checkpointHistory()`；拖拽中 `snapTimelineDetailed(rawAbs, "clip", { highlight: { sources: [...] } })` 单点吸附；收尾 `setClipStateRemote({ snapOffsetSec })`；零位移单击不做远端写入
-- 待调研：手柄在 clip 上的**几何位置**（旧实现是"左下角三角"），以及它在 `hitTest` 里与 `fade-in-corner` / `left-edge` 的优先级
-- 预期产出：`hitTest` 新增 `snap-offset-handle` 分区 + host 手势 + 面板回调
 
 ### Phase D：ghost 预览（copy 拖拽）与素材拖入
 - 旧实现：`ghostDrag`（`TimelinePanel.tsx:1657`）、`dropPreview`（`TimelinePanel.tsx:2961`，在内核开关内的旧分支里）、拖入的 drag&drop 处理在 `TimelineScrollArea` 内

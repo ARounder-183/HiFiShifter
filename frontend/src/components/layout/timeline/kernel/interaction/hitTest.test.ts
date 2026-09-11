@@ -193,3 +193,103 @@ describe("hitTest · clip 内局部坐标", () => {
         expect(result.localY).toBeCloseTo(15, 5);
     });
 });
+
+describe("hitTest · SnapOffset 三角手柄", () => {
+    // 几何前提（与 constants / ClipItem 的命中握把一致）：
+    // rowHeight = 80 → clipHeight = 78 → 手柄带 y ∈ [66, 78]
+    // pxPerSec = 100 → a1（1s..3s）clipLeft = 100、clipWidth = 200
+    const HANDLE_Y = 70;
+
+    it("偏移为 0 时命中贴左缘的手柄", () => {
+        // snapOffsetHandleXPx(0, 100) = 0 → left = min(max(−4, −1), 191) = −1
+        // 握把 x ∈ [−1, 11]（clip 内），可达部分 [0, 11] → localX = 5 命中
+        const result = hitTest(
+            makeArgs({ contentX: 105, contentY: HANDLE_Y }),
+        );
+        expect(result.kind).toBe("clip");
+        if (result.kind !== "clip") return;
+        expect(result.region).toBe("snap-offset-handle");
+    });
+
+    it("手柄优先于左边缘（旧实现 z-70 > z-60）", () => {
+        // 同一位置在无手柄时是 left-edge（localX = 5 ≤ edgeWidth 6）：
+        // 先确认基线，再确认手柄把它抢过来了。
+        const baseline = hitTest(
+            makeArgs({
+                contentX: 105,
+                contentY: HANDLE_Y,
+                clipsByTrack: new Map([
+                    [
+                        "A",
+                        [
+                            { id: "a1", trackId: "A", startSec: 1, lengthSec: 2, snapOffsetSec: 1 },
+                        ],
+                    ],
+                    ["B", []],
+                ]),
+            }),
+        );
+        expect(baseline.kind).toBe("clip");
+        if (baseline.kind !== "clip") return;
+        // 偏移 1s → 三角 x = 100px，握把已移开左缘 → 落回 left-edge
+        expect(baseline.region).toBe("left-edge");
+
+        const withHandle = hitTest(makeArgs({ contentX: 105, contentY: HANDLE_Y }));
+        expect(withHandle.kind).toBe("clip");
+        if (withHandle.kind !== "clip") return;
+        expect(withHandle.region).toBe("snap-offset-handle");
+    });
+
+    it("手柄带以外不命中（回落到边缘 / body）", () => {
+        // y = 60 < 66：在手柄带之上
+        const result = hitTest(makeArgs({ contentX: 105, contentY: 60 }));
+        expect(result.kind).toBe("clip");
+        if (result.kind !== "clip") return;
+        expect(result.region).not.toBe("snap-offset-handle");
+    });
+
+    it("三角 x 跟随偏移值（偏移 1s → 手柄移到 +100px）", () => {
+        const result = hitTest(
+            makeArgs({
+                contentX: 205,
+                contentY: HANDLE_Y,
+                clipsByTrack: new Map([
+                    [
+                        "A",
+                        [
+                            { id: "a1", trackId: "A", startSec: 1, lengthSec: 2, snapOffsetSec: 1 },
+                        ],
+                    ],
+                    ["B", []],
+                ]),
+            }),
+        );
+        expect(result.kind).toBe("clip");
+        if (result.kind !== "clip") return;
+        expect(result.region).toBe("snap-offset-handle");
+        expect(result.localX).toBeCloseTo(105, 5);
+    });
+
+    it("偏移超出 clip 宽度时握把收敛在 clip 内（不吞掉相邻 clip）", () => {
+        // 偏移 5s → 三角 x = 500px，但 left 被钳到 clipWidth − 9 = 191
+        // → 握把 x ∈ [191, 203]；contentX = 295 → localX = 195 命中
+        const result = hitTest(
+            makeArgs({
+                contentX: 295,
+                contentY: HANDLE_Y,
+                clipsByTrack: new Map([
+                    [
+                        "A",
+                        [
+                            { id: "a1", trackId: "A", startSec: 1, lengthSec: 2, snapOffsetSec: 5 },
+                        ],
+                    ],
+                    ["B", []],
+                ]),
+            }),
+        );
+        expect(result.kind).toBe("clip");
+        if (result.kind !== "clip") return;
+        expect(result.region).toBe("snap-offset-handle");
+    });
+});

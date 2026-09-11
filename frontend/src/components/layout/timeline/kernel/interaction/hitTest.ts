@@ -22,7 +22,13 @@
  *    两个 clip 在交界处只命中右侧那个，与旧实现的 DOM 层叠顺序一致。
  */
 
-import { FADE_CORNER_CAP_WIDTH_PX, fadeCornerReservePx } from "../../constants";
+import {
+    FADE_CORNER_CAP_WIDTH_PX,
+    SNAP_OFFSET_HANDLE_SIZE_PX,
+    SNAP_OFFSET_HIT_HEIGHT_PX,
+    fadeCornerReservePx,
+    snapOffsetHandleXPx,
+} from "../../constants";
 
 /** 左右边缘的默认命中宽度（CSS px）。与 `FADE_CORNER_EDGE_WIDTH_PX` 同量级。 */
 const DEFAULT_EDGE_WIDTH_PX = 6;
@@ -63,6 +69,13 @@ export interface HitTestClip {
     readonly autoFadeOutSec?: number;
     readonly fadeOutShape?: number;
     readonly fadeOutDir?: number;
+    /**
+     * 吸附偏移（秒，相对 clip 起点）。
+     *
+     * `hitTest` **会**消费它——snap offset 三角手柄的命中区左缘跟随该值
+     * （与绘制端共用 `snapOffsetHandleXPx`）。缺省按 0 处理（手柄贴左缘）。
+     */
+    readonly snapOffsetSec?: number;
 }
 
 /** 命中测试所需的轨道最小字段集（顺序即纵向排列顺序）。 */
@@ -73,8 +86,11 @@ export interface HitTestTrack {
 /**
  * clip 内的命中分区。
  *
- * 判定优先级：**淡变角 → trim 边缘 → header → body**。
+ * 判定优先级：**snap offset 手柄 → 淡变角 → trim 边缘 → header → body**。
  *
+ * - snap offset 手柄最高：旧实现里它 `z-70`，高于淡变角（`z-65`）与左右边缘
+ *   （`z-60`）——握把贴在行底，若不先判就会被淡变角 / 边缘抢走（表现为
+ *   "三角拖不动"）。
  * - 淡变角（`fade-in-corner` / `fade-out-corner`）与 trim 边缘在水平方向**重叠**
  *   （都贴着左右边缘），靠**竖直方向切分**：body 顶部 `fadeCornerReservePx` 高度内
  *   归淡变角，其下归 trim——与既有 `constants.fadeCornerReservePx` 的几何切分一致。
@@ -88,6 +104,8 @@ export type ClipHitRegion =
     | "right-edge"
     | "fade-in-corner"
     | "fade-out-corner"
+    /** SnapOffset 三角手柄（贴行底的 12×12 握把，左缘跟随偏移值）。 */
+    | "snap-offset-handle"
     /**
      * 交叉淡化交点抓手。
      *
@@ -235,6 +253,33 @@ export function hitTest(args: HitTestArgs): HitResult {
     const inCornerBand = localBodyY >= 0 && localBodyY < reservePx;
     const nearLeftCorner = args.contentX - clipLeftPx <= FADE_CORNER_CAP_WIDTH_PX;
     const nearRightCorner = clipRightPx - args.contentX <= FADE_CORNER_CAP_WIDTH_PX;
+    const localX = args.contentX - clipLeftPx;
+
+    // ── SnapOffset 三角手柄：最高优先级（见 ClipHitRegion 注释）──
+    // 几何与旧实现的命中握把逐项对齐：贴行底 `SNAP_OFFSET_HIT_HEIGHT_PX` 高、
+    // 宽 `SNAP_OFFSET_HANDLE_SIZE_PX + 3`，左缘 = min(max(−4, 三角 x − 1),
+    // max(−4, 宽度 − 9))。左缘允许为负（三角贴左缘时握把略微外扩），但 clip 命中
+    // 本身要求 `localX ≥ 0`，可达部分自然收敛在 `[0, …]`。
+    const snapHandleLeft = Math.min(
+        Math.max(-4, snapOffsetHandleXPx(clip.snapOffsetSec, safePxPerSec) - 1),
+        Math.max(-4, clipWidthPx - SNAP_OFFSET_HANDLE_SIZE_PX),
+    );
+    const snapHandleWidth = SNAP_OFFSET_HANDLE_SIZE_PX + 3;
+    if (
+        localY >= clipHeightPx - SNAP_OFFSET_HIT_HEIGHT_PX &&
+        localX >= snapHandleLeft &&
+        localX <= snapHandleLeft + snapHandleWidth
+    ) {
+        return {
+            kind: "clip",
+            clip,
+            region: "snap-offset-handle",
+            sec,
+            trackIndex,
+            localX,
+            localY,
+        };
+    }
 
     let region: ClipHitRegion;
     if (inCornerBand && nearLeftCorner) {
@@ -255,7 +300,7 @@ export function hitTest(args: HitTestArgs): HitResult {
         region,
         sec,
         trackIndex,
-        localX: args.contentX - clipLeftPx,
+        localX,
         localY,
     };
 }
