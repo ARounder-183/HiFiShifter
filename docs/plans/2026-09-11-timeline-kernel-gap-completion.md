@@ -185,11 +185,25 @@
 - 验证：Alt+Shift 竖直拖 → `get_param_frames` + 多次 `set_param_frames`、
   **无 `move_clips`**（拦截生效）；无修饰键水平拖 → `move_clips`（拦截不误触发）✓
 
+### C-6b trim / fade 的自动交叉淡化（已实现，**mock 无法验证**）
+
+- 按下时快照：`xfadeClipIds`（= 参与者）、`initialCrossfadeSides`
+  （`computeInitialCrossfadeSides`）、`editSides`（**按拖拽的边缘 / 侧限定可调整侧**——
+  裁切左缘只允许自动调整 `fadeIn`，右缘只允许 `fadeOut`；淡变同理）。
+- 预览：裁切 / 拉伸 / 淡变的每个预览分支末尾调
+  `previewAutoCrossfade(store.getState().session, ids, dispatch, affectedSides, editSides)`。
+- 收尾：提交落库后按开关走 `applyAutoCrossfade`（`affectedSides` + `editSides`）或
+  `applyDetachedAutoCrossfadeClears`；取消路径按已还原几何重算预览（回到按下时关系）。
+- **验证受限（已尝试 A/B）**：mock 下裁切提交只观察到 `set_clips_state_bulk`，没有
+  `set_clip_state`（自动淡化写回）。用 KERNEL=0 做对照时**旧实现的拖拽没有命中边缘**
+  （只产生 `select_clip`），因此对照无效。判断为 **mock 限制**（批量提交的 fulfilled
+  把 mock 的 `{ok:true}` 当 TimelineState 应用后，自动淡化字段/重叠关系已不完整），
+  **需真机确认**。
+
 ### 未完成（下一批）
 
 | 任务 | 内容 | 说明 |
 |---|---|---|
-| C-6b | trim / fade 拖拽期间的**自动交叉淡化预览**（旧实现 `previewAutoCrossfadeNow()`），以及收尾的 `applyAutoCrossfade` | 拖拽移动已有（B 批）；trim/fade 尚缺 |
 | C-7 | **组拉伸**（多选 + `Alt` 拖边缘）：旧实现用 `buildStretchGroupState` / `computeStretchGroupUpdate` 做整组等比缩放 | 纯函数已在 `stretchGroup.ts`；内核当前只拉伸被拖的那一个 |
 | C-8 | slip 的 **loop 边界吸附**（`loopSnapThresholdSec`） | 仅 loop 开启且窗口跨素材边界时影响落点 |
 | D | 淡化专属右键菜单 + 淡变 tooltip、多 Take、静音检测预览、拖到空白新建轨道 | — |

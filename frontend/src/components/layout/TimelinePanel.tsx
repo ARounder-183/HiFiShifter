@@ -1769,6 +1769,17 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 playbackRate: number;
             }
         >;
+        /**
+         * 自动交叉淡化：受影响 clip（= 参与者）与编辑前每侧重叠关系、可调整侧。
+         *
+         * 与旧实现 `useEditDrag` 同源：`initialCrossfadeSides` 记录编辑前的重叠关系
+         * （用于「拖开时只清自动、保留手动 fade」），`editSides` 限定本次编辑**允许
+         * 自动调整**的侧（裁切左缘只动 fadeIn，右缘只动 fadeOut）——否则裁切左缘会
+         * 顺带改掉右缘与邻居的交叉淡化。
+         */
+        xfadeClipIds: string[];
+        initialCrossfadeSides: ReturnType<typeof computeInitialCrossfadeSides>;
+        editSides: Record<string, { fadeIn: boolean; fadeOut: boolean }>;
     } | null>(null);
 
     /**
@@ -1836,6 +1847,15 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         playbackRate: Number(item.playbackRate ?? 1) || 1,
                     });
                 }
+                // 自动交叉淡化：受影响集合 = 参与者；可调整侧按拖拽的边缘决定。
+                const xfadeClipIds = participants.map((participant) => participant.clipId);
+                const editSides: Record<string, { fadeIn: boolean; fadeOut: boolean }> = {};
+                for (const id of xfadeClipIds) {
+                    editSides[id] =
+                        args.edge === "left"
+                            ? { fadeIn: true, fadeOut: false }
+                            : { fadeIn: false, fadeOut: true };
+                }
                 kernelTrimOriginRef.current = {
                     clipId: clip.id,
                     startSec: clip.startSec,
@@ -1843,6 +1863,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     trackId: clip.trackId,
                     sourceStartSec: clip.sourceStartSec,
                     sourceEndSec: clip.sourceEndSec,
+                    xfadeClipIds,
+                    initialCrossfadeSides: computeInitialCrossfadeSides(
+                        session.clips,
+                        xfadeClipIds,
+                    ),
+                    editSides,
                     // Alt 按住 = 拉伸（与旧实现 `modifier.clipStretch` 同源）。
                     mode: isModifierActive(stretchKbRef.current, args.modifiers)
                         ? "stretch"
@@ -1919,6 +1945,16 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         }),
                     );
                 });
+                // 自动交叉淡化实时预览（拉伸改变重叠 → 自动 fade 随之变化）。
+                if (s.autoCrossfadeEnabled) {
+                    previewAutoCrossfade(
+                        store.getState().session,
+                        origin.xfadeClipIds,
+                        dispatch,
+                        origin.initialCrossfadeSides,
+                        origin.editSides,
+                    );
+                }
                 return;
             }
 
@@ -2021,10 +2057,22 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     }
                 }
             });
+            // 自动交叉淡化实时预览：裁切改变重叠 → 按当前乐观位置重算自动 fade。
+            // `editSides` 限定只动本次拖拽的那一侧（裁切左缘不得改右缘的交叉淡化）。
+            if (s.autoCrossfadeEnabled) {
+                previewAutoCrossfade(
+                    store.getState().session,
+                    origin.xfadeClipIds,
+                    dispatch,
+                    origin.initialCrossfadeSides,
+                    origin.editSides,
+                );
+            }
         },
         [
             dispatch,
             sessionRef,
+            s.autoCrossfadeEnabled,
             s.snapEnabled,
             noSnapKb,
             snapTimelineDetailed,
@@ -2245,6 +2293,16 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         );
                     }
                 });
+                // 自动交叉淡化也要回到按下时的重叠关系（按已还原的几何重算即可）。
+                if (s.autoCrossfadeEnabled) {
+                    previewAutoCrossfade(
+                        store.getState().session,
+                        origin.xfadeClipIds,
+                        dispatch,
+                        origin.initialCrossfadeSides,
+                        origin.editSides,
+                    );
+                }
                 return;
             }
             dispatch(checkpointHistory());
@@ -2267,9 +2325,32 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 ];
             });
             if (updates.length === 0) return;
-            void dispatch(setClipsStateBulkRemote({ updates }));
+            const persist = dispatch(setClipsStateBulkRemote({ updates })).unwrap();
+            void (async () => {
+                try {
+                    await persist;
+                } finally {
+                    // 自动交叉淡化：按落库后的重叠关系写回自动 fade（开关关闭时只清理
+                    // 「已脱离重叠」的自动值，保证分离后手动 fade 能恢复显示）。
+                    const latest = sessionRef.current;
+                    if (s.autoCrossfadeEnabled) {
+                        await applyAutoCrossfade(latest, origin.xfadeClipIds, dispatch, {
+                            affectedSides: origin.initialCrossfadeSides,
+                            editSides: origin.editSides,
+                        });
+                    } else {
+                        await applyDetachedAutoCrossfadeClears(
+                            latest,
+                            origin.xfadeClipIds,
+                            dispatch,
+                            origin.initialCrossfadeSides,
+                            origin.editSides,
+                        );
+                    }
+                }
+            })().catch(() => undefined);
         },
-        [dispatch, sessionRef],
+        [dispatch, sessionRef, s.autoCrossfadeEnabled],
     );
 
     /** 内核淡变角：按下时的原始值（用于回滚）。 */
@@ -2286,6 +2367,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         participants: KernelEditParticipant[];
         /** 各参与者的按下时基准（回滚与批量换算用）。 */
         baseById: Map<string, { fadeInSec: number; fadeOutSec: number; lengthSec: number }>;
+        /** 自动交叉淡化：受影响集合 / 编辑前重叠关系 / 可调整侧（与裁切同源）。 */
+        xfadeClipIds: string[];
+        initialCrossfadeSides: ReturnType<typeof computeInitialCrossfadeSides>;
+        editSides: Record<string, { fadeIn: boolean; fadeOut: boolean }>;
     } | null>(null);
 
     /** 内核淡变角预览：只改对应一侧的淡变长度（另一侧保持不变）。 */
@@ -2320,12 +2405,28 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         lengthSec: Math.max(0, Number(item.lengthSec) || 0),
                     });
                 }
+                // 自动交叉淡化：受影响集合 = 参与者；可调整侧 = 本次拖拽的那一侧
+                // （拖淡入只允许自动调整 fadeIn）。
+                const xfadeClipIds = participants.map((participant) => participant.clipId);
+                const editSides: Record<string, { fadeIn: boolean; fadeOut: boolean }> = {};
+                for (const id of xfadeClipIds) {
+                    editSides[id] =
+                        args.side === "in"
+                            ? { fadeIn: true, fadeOut: false }
+                            : { fadeIn: false, fadeOut: true };
+                }
                 kernelFadeOriginRef.current = {
                     clipId: clip.id,
                     fadeInSec: clip.fadeInSec,
                     fadeOutSec: clip.fadeOutSec,
                     participants,
                     baseById,
+                    xfadeClipIds,
+                    initialCrossfadeSides: computeInitialCrossfadeSides(
+                        session.clips,
+                        xfadeClipIds,
+                    ),
+                    editSides,
                 };
             }
             const origin = kernelFadeOriginRef.current;
@@ -2347,8 +2448,18 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             batch(() => {
                 for (const update of updates) dispatch(setClipFades(update));
             });
+            // 自动交叉淡化实时预览（手动淡化变化会与自动值互相切换显示）。
+            if (s.autoCrossfadeEnabled) {
+                previewAutoCrossfade(
+                    store.getState().session,
+                    origin.xfadeClipIds,
+                    dispatch,
+                    origin.initialCrossfadeSides,
+                    origin.editSides,
+                );
+            }
         },
-        [dispatch, multiSelectedClipIds, sessionRef],
+        [dispatch, multiSelectedClipIds, sessionRef, s.autoCrossfadeEnabled],
     );
 
     /** 内核淡变角收尾：提交或回滚（取消时两侧一起还原）。 */
@@ -2370,6 +2481,15 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         );
                     }
                 });
+                if (s.autoCrossfadeEnabled) {
+                    previewAutoCrossfade(
+                        store.getState().session,
+                        origin.xfadeClipIds,
+                        dispatch,
+                        origin.initialCrossfadeSides,
+                        origin.editSides,
+                    );
+                }
                 return;
             }
             dispatch(checkpointHistory());
@@ -2385,9 +2505,32 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 ];
             });
             if (updates.length === 0) return;
-            void dispatch(setClipsStateBulkRemote({ updates }));
+            const persist = dispatch(setClipsStateBulkRemote({ updates })).unwrap();
+            void (async () => {
+                try {
+                    await persist;
+                } finally {
+                    // 自动交叉淡化：手动淡化变化后按最新重叠关系写回自动值
+                    // （开关关闭时只清理「已脱离重叠」的自动值）。
+                    const latest = sessionRef.current;
+                    if (s.autoCrossfadeEnabled) {
+                        await applyAutoCrossfade(latest, origin.xfadeClipIds, dispatch, {
+                            affectedSides: origin.initialCrossfadeSides,
+                            editSides: origin.editSides,
+                        });
+                    } else {
+                        await applyDetachedAutoCrossfadeClears(
+                            latest,
+                            origin.xfadeClipIds,
+                            dispatch,
+                            origin.initialCrossfadeSides,
+                            origin.editSides,
+                        );
+                    }
+                }
+            })().catch(() => undefined);
         },
-        [dispatch, sessionRef],
+        [dispatch, sessionRef, s.autoCrossfadeEnabled],
     );
 
     /** 内核框选：拖动前的选择快照（合并与回滚的基准）。 */
