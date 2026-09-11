@@ -130,16 +130,31 @@ window.__hsPerf?.generate?.("400");   // 10 轨 × 40 clip
 | 滚动条拖拽 | 目视 | thumb 是否跟手、有无抖动 |
 | 文字质量 | 与关闭 flag 的截图对比 | clip 名称是否清晰、有无串字 |
 
-### 5.3 待填数据
+### 5.3 实测数据（macOS，dev 构建）
+
+采集方式：PERF 面板的 `profiler: on` 帧率浮层（应用内绘制，不依赖 devtools）。
 
 | 指标 | 目标 | 实测 |
 |---|---|---|
-| 滚动帧几何重建次数 | 0（余量内） | 待填 |
-| 滚动帧 p95 耗时 | < 2ms | 待填 |
-| 滚动帧率 | 稳定 60fps | 待填 |
-| 缩放手势帧率 | ≥ 55fps | 待填 |
-| 触摸板手感 | 可接受 | 待填 |
-| 文字质量 | 与既有实现可比 | 待填 |
+| 图层数 | 只应有 kernel-draw | ✅ 仅 `kernel-draw`（旧图层 clip-body / waveform / grid-40 / legacy-listener 全部消失） |
+| 滚动帧率 | 稳定 60fps | ✅ **FPS 59** |
+| 帧间隔 | ~16.7ms | ✅ frame p50 17.0 / p95 18.0ms |
+| 内核绘制耗时 | < 2ms | ✅ p50 **1.0ms** / p95 **3.0ms**（p95 含重建帧） |
+| React 提交 | 低频 | ✅ commit p50 0.0 / p95 0.0ms |
+| 缩放手势帧率 | ≥ 55fps | 待补充 |
+| 触摸板手感 | 可接受 | 待补充 |
+| 文字质量 | 与既有实现可比 | 已修正文字色（改用样式模块 `textFill`），待复看 |
+
+**对照（同一场景、修复前）**：两套渲染叠加时 FPS 43 / frame p95 178ms / clip-body p50 5ms。
+修复「替换式接入 + 滚动 repaint」后达到上述数据，说明"滚动零重绘"路径生效。
+
+### 5.4 真机过程中修复的三个阻塞（均已提交）
+
+| # | 现象 | 根因 | 修复 |
+|---|---|---|---|
+| 1 | 帧率与旧架构一致（43 FPS） | 接入为"覆盖式"，旧子树仍挂载并每帧重绘 | 改为**替换式**（flag 开时不挂载旧子树） |
+| 2 | `cannot declare arrays of this qualifier` | 着色器用 `in float i_rect[4]`，**GLSL ES 3.00 禁止顶点输入为数组**（macOS ANGLE/Metal 严格拒绝）；该写法源自既有 `timelineClipGlRenderer`，**既有 GL clip 体在 macOS 上一直静默回退 Canvas2D** | 两处改为 `in vec4 i_rect` 打包（含生产代码） |
+| 3 | `Unable to create sdf-box shader` | `dispose()` 调用了 `loseContext()`；而**一个 canvas 只能有一个 WebGL context**，丢失后再 `getContext` 返回同一个已丢失的 context → StrictMode 双挂载第二次 `createShader` 返回 null | dispose 不再丢 context（只释放 program/buffer），并堵住创建失败路径的资源泄漏 |
 
 ---
 
