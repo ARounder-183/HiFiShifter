@@ -127,7 +127,11 @@ export function resolveTrimEdge(args: TrimEdgeArgs): TrimEdgeResult {
         const rightEdge = startSec + lengthSec;
         const maxStart = Math.max(0, rightEdge - minLengthSec);
         const nextStart = Math.min(maxStart, Math.max(0, startSec + rawDelta));
-        return { startSec: nextStart, lengthSec: rightEdge - nextStart, deltaSec: nextStart - startSec };
+        return {
+            startSec: nextStart,
+            lengthSec: rightEdge - nextStart,
+            deltaSec: nextStart - startSec,
+        };
     }
 
     // 右边缘：左端固定，长度受「工程末端 − 起点」与最小长度双向约束。

@@ -44,19 +44,13 @@ import { createTimelineAxis, type TimelineAxis } from "../../runtime/timelineAxi
 import { buildSparseClipRenderModel } from "../../runtime/timelineCanvasModel";
 import { drawTimelineCanvas } from "../../runtime/timelineCanvasRenderer";
 import { clearCanvasPhysical, rasterize } from "../../runtime/canvasRaster";
-import {
-    parseRgbaColor,
-    type GlClipBodySink,
-} from "../../runtime/timelineClipGlRenderer";
+import { parseRgbaColor, type GlClipBodySink } from "../../runtime/timelineClipGlRenderer";
 import {
     buildTimelineClipVisualStyle,
     resolveFontFamily,
     resolveThemeColor,
 } from "../../runtime/timelineCanvasStyle";
-import {
-    hitClipHeaderControl,
-    type ClipHeaderControl,
-} from "../interaction/clipHeaderControls";
+import { hitClipHeaderControl, type ClipHeaderControl } from "../interaction/clipHeaderControls";
 import { resolveHorizontalWheelZoom } from "../../runtime/timelineScrollRange";
 import { resolveTimelineMinPxPerSec } from "../../runtime/timelineZoomBounds";
 import {
@@ -77,11 +71,7 @@ import {
     type FadeSide,
     type TrimEdge,
 } from "../interaction/dragGeometry";
-import {
-    clipIntersectsBox,
-    resolveBoxBounds,
-    type BoxBounds,
-} from "../interaction/boxSelection";
+import { clipIntersectsBox, resolveBoxBounds, type BoxBounds } from "../interaction/boxSelection";
 import { createGlCanvas } from "../gl/glContext";
 import { CLIP_INSTANCE_FLOATS, writeFlatInstance } from "../gl/instanceLayout";
 import { createSdfBoxProgram } from "../gl/sdfBoxProgram";
@@ -466,7 +456,11 @@ export interface TimelineKernelHost {
     getClipHeaderAnchor(
         clipId: string,
         field: "name" | "gain" | "rate",
-    ): { readonly contentLeftPx: number; readonly contentTopPx: number; readonly widthPx: number } | null;
+    ): {
+        readonly contentLeftPx: number;
+        readonly contentTopPx: number;
+        readonly widthPx: number;
+    } | null;
     /**
      * 调试用：报告某屏幕坐标的命中结果与 header 控件判定。
      *
@@ -477,7 +471,10 @@ export interface TimelineKernelHost {
      * @param clientX 屏幕坐标 x。@param clientY 屏幕坐标 y。
      * @returns 命中分区、clip 局部坐标与控件判定（无命中时相应字段缺省）。
      */
-    debugHitAt(clientX: number, clientY: number): {
+    debugHitAt(
+        clientX: number,
+        clientY: number,
+    ): {
         readonly kind: string;
         readonly region?: string;
         readonly control?: string;
@@ -802,7 +799,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     const scroll = createScrollKernel({
         // 初始缩放取 React 侧恢复的持久化值（旧实现从 localStorage 恢复，
         // 内核直接用固定值会让用户每次启动都回到默认缩放）。
-        pxPerSec: clampNumber(data().initialPxPerSec, MIN_PX_PER_SEC, MAX_PX_PER_SEC) || DEFAULT_PX_PER_SEC,
+        pxPerSec:
+            clampNumber(data().initialPxPerSec, MIN_PX_PER_SEC, MAX_PX_PER_SEC) ||
+            DEFAULT_PX_PER_SEC,
         // 行高与左侧轨道头同源（data().rowHeight），否则左右两列行错位。
         rowHeight: Math.max(1, data().rowHeight || DEFAULT_ROW_HEIGHT),
         projectSec: () => Math.max(0, data().projectSec),
@@ -1329,7 +1328,11 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      * @param rect 宿主容器的视口矩形。
      * @returns 命中的滚动条轴；未命中为 null。
      */
-    function scrollbarZoneAt(clientX: number, clientY: number, rect: DOMRect): ScrollbarZone | null {
+    function scrollbarZoneAt(
+        clientX: number,
+        clientY: number,
+        rect: DOMRect,
+    ): ScrollbarZone | null {
         if (
             clientX < rect.left ||
             clientX > rect.right ||
@@ -1799,8 +1802,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         return buildTimelineClipVisualStyle({
             widthPx: clipWidthPx,
             trackColor: track?.color,
-            selected:
-                d.selectedClipId === clip.id || d.multiSelectedClipIds.includes(clip.id),
+            selected: d.selectedClipId === clip.id || d.multiSelectedClipIds.includes(clip.id),
             muted: clip.muted === true,
             gain: clip.gain ?? 0,
             playbackRate: clip.playbackRate ?? 1,
@@ -2176,7 +2178,10 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             trackIndex >= 0
                 ? (d.tracks[trackIndex]?.id ?? gesture.originTrackId)
                 : gesture.originTrackId;
-        if (delta.deltaSec === gesture.lastDeltaSec && targetTrackId === gesture.lastTargetTrackId) {
+        if (
+            delta.deltaSec === gesture.lastDeltaSec &&
+            targetTrackId === gesture.lastTargetTrackId
+        ) {
             return;
         }
         gesture.lastDeltaSec = delta.deltaSec;
@@ -2586,7 +2591,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             const rowTopPx = rowIndex * view.rowHeight;
             if (field === "name") {
                 const left = clipLeftPx + style.leadingControlsWidth;
-                const available = clipWidthPx - style.leadingControlsWidth - style.trailingReservePx;
+                const available =
+                    clipWidthPx - style.leadingControlsWidth - style.trailingReservePx;
                 return {
                     contentLeftPx: left,
                     contentTopPx: rowTopPx,
@@ -2602,11 +2608,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             }
             return {
                 contentLeftPx:
-                    clipLeftPx +
-                    clipWidthPx -
-                    style.gainLabelWidth -
-                    style.rateLabelWidth -
-                    14,
+                    clipLeftPx + clipWidthPx - style.gainLabelWidth - style.rateLabelWidth - 14,
                 contentTopPx: rowTopPx,
                 widthPx: 72,
             };

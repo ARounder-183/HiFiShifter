@@ -388,8 +388,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                     callbacksRef.current.onVisibleRowsChange(firstRow, rowCount),
                 interactions: stableInteractions,
                 onScrollLeftCommit: (px) => callbacksRef.current.onScrollLeftCommit?.(px),
-                onViewportWidthChange: (px) =>
-                    callbacksRef.current.onViewportWidthChange?.(px),
+                onViewportWidthChange: (px) => callbacksRef.current.onViewportWidthChange?.(px),
             });
         } catch (error) {
             setFatal(error instanceof Error ? error.message : String(error));

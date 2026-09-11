@@ -137,9 +137,7 @@ describe("hitClipHeaderControl", () => {
     it("clip 太窄时名称区退化为 null（不误判为名称）", () => {
         const style = makeStyle({ showGainLabel: false, showPlaybackRate: false });
         // nameLeft = 102 但 nameRight = 80 − 60 + 4 = 24 → 名称区无效
-        expect(
-            hitClipHeaderControl({ localX: 100, localY: 9, clipWidthPx: 80, style }),
-        ).toBe(null);
+        expect(hitClipHeaderControl({ localX: 100, localY: 9, clipWidthPx: 80, style })).toBe(null);
     });
 
     it("纵向超出 header 高度时不命中任何控件", () => {

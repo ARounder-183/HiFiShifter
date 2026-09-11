@@ -52,75 +52,80 @@ export interface KernelClipInlineEditorProps {
  * @param ref 浮层根元素的 ref（外部据此在 rAF 内写 `left` / `top`）。
  * @returns 输入框元素。
  */
-export const KernelClipInlineEditor = React.forwardRef<
-    HTMLDivElement,
-    KernelClipInlineEditorProps
->(function KernelClipInlineEditor(props, ref) {
-    const { initialValue, widthPx = 0, inputMode = "text", placeholder, onCommit, onCancel } =
-        props;
-    const [value, setValue] = React.useState(initialValue);
-    const inputRef = React.useRef<HTMLInputElement | null>(null);
-    /**
-     * 是否已收尾。
-     *
-     * 失焦与 Enter / Esc 都可能触发收尾，且失焦会在元素被移除时再次触发——
-     * 用 ref 做幂等守卫，避免同一次编辑提交两遍（表现为后端收到两笔相同写入，
-     * 撤销栈里多出一个空步）。
-     */
-    const settledRef = React.useRef(false);
+export const KernelClipInlineEditor = React.forwardRef<HTMLDivElement, KernelClipInlineEditorProps>(
+    function KernelClipInlineEditor(props, ref) {
+        const {
+            initialValue,
+            widthPx = 0,
+            inputMode = "text",
+            placeholder,
+            onCommit,
+            onCancel,
+        } = props;
+        const [value, setValue] = React.useState(initialValue);
+        const inputRef = React.useRef<HTMLInputElement | null>(null);
+        /**
+         * 是否已收尾。
+         *
+         * 失焦与 Enter / Esc 都可能触发收尾，且失焦会在元素被移除时再次触发——
+         * 用 ref 做幂等守卫，避免同一次编辑提交两遍（表现为后端收到两笔相同写入，
+         * 撤销栈里多出一个空步）。
+         */
+        const settledRef = React.useRef(false);
 
-    React.useLayoutEffect(() => {
-        const input = inputRef.current;
-        if (input === null) return;
-        input.focus();
-        input.select();
-    }, []);
+        React.useLayoutEffect(() => {
+            const input = inputRef.current;
+            if (input === null) return;
+            input.focus();
+            input.select();
+        }, []);
 
-    /** 收尾（幂等）：提交或取消。 */
-    const settle = React.useCallback(
-        (commit: boolean) => {
-            if (settledRef.current) return;
-            settledRef.current = true;
-            if (commit) onCommit(value);
-            else onCancel();
-        },
-        [onCancel, onCommit, value],
-    );
+        /** 收尾（幂等）：提交或取消。 */
+        const settle = React.useCallback(
+            (commit: boolean) => {
+                if (settledRef.current) return;
+                settledRef.current = true;
+                if (commit) onCommit(value);
+                else onCancel();
+            },
+            [onCancel, onCommit, value],
+        );
 
-    return (
-        <div
-            ref={ref}
-            data-hs-kernel-inline-editor="1"
-            className="absolute z-30"
-            style={{ left: 0, top: 0, width: widthPx > 0 ? widthPx : 160 }}
-        >
-            <input
-                ref={inputRef}
-                value={value}
-                inputMode={inputMode === "decimal" ? "decimal" : "text"}
-                placeholder={placeholder}
-                className="w-full rounded-sm border border-qt-highlight bg-qt-window px-1.5 py-0.5 text-[11px] text-qt-text outline-none"
-                onChange={(event) => setValue(event.target.value)}
-                onPointerDown={(event) => {
-                    // 输入框内的按下不得触发时间轴手势（否则会开始一次拖拽 / seek）。
-                    event.stopPropagation();
-                }}
-                onKeyDown={(event) => {
-                    // 快捷键不得外泄到时间轴的键盘处理（Delete / 空格等会误触发）。
-                    event.stopPropagation();
-                    if (event.key === "Enter") {
-                        event.preventDefault();
-                        settle(true);
-                    } else if (event.key === "Escape") {
-                        event.preventDefault();
-                        settle(false);
-                    }
-                }}
-                onBlur={() => {
-                    // 值未变化时视为取消：避免一次「点开又点走」产生无意义的远端写入。
-                    settle(value !== initialValue);
-                }}
-            />
-        </div>
-    );
-});
+        return (
+            <div
+                ref={ref}
+                data-hs-kernel-inline-editor="1"
+                className="absolute z-30"
+                style={{ left: 0, top: 0, width: widthPx > 0 ? widthPx : 160 }}
+            >
+                <input
+                    ref={inputRef}
+                    value={value}
+                    inputMode={inputMode === "decimal" ? "decimal" : "text"}
+                    placeholder={placeholder}
+                    className="w-full rounded-sm border border-qt-highlight bg-qt-window px-1.5 py-0.5 text-[11px] text-qt-text outline-none"
+                    onChange={(event) => setValue(event.target.value)}
+                    onPointerDown={(event) => {
+                        // 输入框内的按下不得触发时间轴手势（否则会开始一次拖拽 / seek）。
+                        event.stopPropagation();
+                    }}
+                    onKeyDown={(event) => {
+                        // 快捷键不得外泄到时间轴的键盘处理（Delete / 空格等会误触发）。
+                        event.stopPropagation();
+                        if (event.key === "Enter") {
+                            event.preventDefault();
+                            settle(true);
+                        } else if (event.key === "Escape") {
+                            event.preventDefault();
+                            settle(false);
+                        }
+                    }}
+                    onBlur={() => {
+                        // 值未变化时视为取消：避免一次「点开又点走」产生无意义的远端写入。
+                        settle(value !== initialValue);
+                    }}
+                />
+            </div>
+        );
+    },
+);

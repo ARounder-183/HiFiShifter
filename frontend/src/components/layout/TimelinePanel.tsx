@@ -1210,12 +1210,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
      * 位置，与后端分叉（旧实现同样在取消分支显式回滚）。
      */
     const handleKernelDragCommit = React.useCallback(
-        (args: {
-            clipId: string;
-            deltaSec: number;
-            targetTrackId: string;
-            cancelled: boolean;
-        }) => {
+        (args: { clipId: string; deltaSec: number; targetTrackId: string; cancelled: boolean }) => {
             const origin = kernelDragOriginRef.current;
             kernelDragOriginRef.current = null;
             if (origin === null) return;
@@ -1238,7 +1233,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     moves: [
                         {
                             clipId: args.clipId,
-                            startSec: clip?.startSec ?? Math.max(0, origin.startSec + args.deltaSec),
+                            startSec:
+                                clip?.startSec ?? Math.max(0, origin.startSec + args.deltaSec),
                             trackId: args.targetTrackId,
                         },
                     ],
@@ -1680,12 +1676,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             },
             onCancel: (): void => setKernelInlineEdit(null),
         };
-    }, [
-        kernelInlineEdit,
-        commitTrackLaneRename,
-        commitTrackLaneRate,
-        commitTrackLaneGain,
-    ]);
+    }, [kernelInlineEdit, commitTrackLaneRename, commitTrackLaneRate, commitTrackLaneGain]);
 
     /** 内核交互回调集合（引用稳定：内核创建时取一次）。 */
     const kernelInteractions = React.useMemo(
@@ -3182,9 +3173,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                             x={s.clipFormantToolWindow.x}
                             y={s.clipFormantToolWindow.y}
                             onCommit={commitTrackLaneFormantMorph}
-                            onMove={(x, y) =>
-                                dispatch(setClipFormantToolWindowPosition({ x, y }))
-                            }
+                            onMove={(x, y) => dispatch(setClipFormantToolWindowPosition({ x, y }))}
                             onClose={() => dispatch(closeClipFormantToolWindow())}
                         />
                     ) : null}

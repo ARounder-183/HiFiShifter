@@ -316,9 +316,7 @@ export function createScrollKernel(options: ScrollKernelOptions): ScrollKernel {
      */
     function readMinPxPerSec(): number {
         const raw =
-            typeof options.minPxPerSec === "function"
-                ? options.minPxPerSec()
-                : options.minPxPerSec;
+            typeof options.minPxPerSec === "function" ? options.minPxPerSec() : options.minPxPerSec;
         return Number.isFinite(raw)
             ? Math.max(DEFAULT_MIN_PX_PER_SEC, raw as number)
             : DEFAULT_MIN_PX_PER_SEC;
@@ -331,9 +329,7 @@ export function createScrollKernel(options: ScrollKernelOptions): ScrollKernel {
      */
     function readMaxPxPerSec(): number {
         const raw =
-            typeof options.maxPxPerSec === "function"
-                ? options.maxPxPerSec()
-                : options.maxPxPerSec;
+            typeof options.maxPxPerSec === "function" ? options.maxPxPerSec() : options.maxPxPerSec;
         const min = readMinPxPerSec();
         return Number.isFinite(raw) ? Math.max(min, raw as number) : Number.POSITIVE_INFINITY;
     }
