@@ -232,7 +232,15 @@ function buildMockTimeline(): Record<string, unknown> {
                 auto_fade_in_sec: overlaps && !isFirst ? 0.8 : 0,
                 auto_fade_out_sec: overlaps && !isLast ? 0.8 : 0,
                 snap_offset_sec: index === 1 ? 0.25 : 0,
-                group_id: trackIndex === 3 && index === 1 ? "group-a" : undefined,
+                // 编组覆盖两条轨道（轨道 4 与轨道 5 的首个 clip 同属 group-a）：
+                // 只有单成员编组时无法验证「同组联动」——拖动一个成员必须带动
+                // 另一个，是内核参与集合展开的关键回归点。
+                group_id:
+                    (trackIndex === 3 && index === 0) ||
+                    (trackIndex === 4 && index === 0) ||
+                    (trackIndex === 3 && index === 1)
+                        ? "group-a"
+                        : undefined,
                 // `midi_note_count` **只在 MIDI clip 上出现**（前端以
                 // `midiNoteCount != null` 判定，0 也算 MIDI）。音频 clip 必须省略该
                 // 字段：写成 0 会让它们被判成 MIDI clip，从而走 pitch 分支的

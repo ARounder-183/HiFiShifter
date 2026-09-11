@@ -141,6 +141,24 @@ import {
     createTimelineViewportAccess,
     type TimelineViewportAccess,
 } from "./timeline/hooks/timelineViewportAccess";
+import {
+    applyKernelEditDelta,
+    resolveKernelEditParticipants,
+    type KernelEditParticipant,
+} from "./timeline/hooks/kernelEditSet";
+import {
+    applyRippleFollowerShift,
+    buildRippleFollowers,
+    type RippleFollowerMap,
+} from "../../features/session/ripplePreview";
+import {
+    applyAutoCrossfade,
+    applyDetachedAutoCrossfadeClears,
+    computeInitialCrossfadeSides,
+    previewAutoCrossfade,
+} from "./timeline/hooks/autoCrossfade";
+import { computeEffectiveSnap } from "../../utils/timelineSnapping";
+import { store } from "../../app/store";
 import { useTimelineClipActions } from "./timeline/hooks/useTimelineClipActions";
 import { useTimelineEventHandlers } from "./timeline/hooks/useTimelineEventHandlers";
 import { useSnapOffsetDrag } from "./timeline/hooks/useSnapOffsetDrag";
@@ -1252,6 +1270,23 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
          * 不会把已经"复制"的意图退回成"移动"，避免松手瞬间语义反转）。
          */
         copyMode: boolean;
+        /**
+         * 本次拖拽实际作用于的全部 clip（含锚点）。
+         *
+         * 由「多选集合 + 编组展开」在按下时解析一次（见 `kernelEditSet`）：
+         * 内核只回调锚点位移，不展开就会出现「选中多个只动一个」「同组不联动」。
+         */
+        participants: KernelEditParticipant[];
+        /** 锚点初始轨道序号：把内核给的 `targetTrackId` 换成轨道偏移量。 */
+        anchorTrackIndex: number;
+        /** 最近一次预览生效的**共享位移**（已含吸附与左边界钳制）——提交时用它。 */
+        lastDeltaStartSec: number;
+        /** 波纹跟随集（乐观预览；提交后的权威结果由后端计算）。 */
+        rippleFollowers: RippleFollowerMap;
+        /** 自动交叉淡化：受本次编辑影响的 clip（参与者 + 波纹跟随）。 */
+        editedXfadeClipIds: string[];
+        /** 自动交叉淡化：编辑前每侧的既有重叠关系（拖开时只清自动、保留手动 fade）。 */
+        initialCrossfadeSides: ReturnType<typeof computeInitialCrossfadeSides>;
     } | null>(null);
 
     /**
@@ -1269,8 +1304,35 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             modifiers: { ctrlKey: boolean; shiftKey: boolean; altKey: boolean; metaKey: boolean };
         }) => {
             if (kernelDragOriginRef.current?.clipId !== args.clipId) {
-                const clip = sessionRef.current.clips.find((item) => item.id === args.clipId);
+                const session = sessionRef.current;
+                const clip = session.clips.find((item) => item.id === args.clipId);
                 if (clip === undefined) return;
+                const trackIds = session.tracks.map((track) => track.id);
+                // 参与集合：多选集合 + 编组展开（与旧实现 `useClipDrag` 同源）。
+                // 不展开时「选中多个只移动一个」「同组不联动」——属数据语义错误。
+                const participants = resolveKernelEditParticipants({
+                    anchorClipId: clip.id,
+                    multiSelectedClipIds,
+                    clips: session.clips,
+                    trackIds,
+                    ignoreGrouping: session.ignoreGrouping,
+                    disabledGroupIds: session.disabledGroupIds,
+                    expandGroups: true,
+                });
+                if (participants.length === 0) return;
+                const rippleFollowers = buildRippleFollowers(
+                    session.clips,
+                    new Set(participants.map((item) => item.clipId)),
+                    Math.min(...participants.map((item) => item.startSec)),
+                    session.rippleMode,
+                    new Set(participants.map((item) => item.trackId)),
+                );
+                const editedXfadeClipIds = Array.from(
+                    new Set<string>([
+                        ...participants.map((item) => item.clipId),
+                        ...Object.keys(rippleFollowers),
+                    ]),
+                );
                 kernelDragOriginRef.current = {
                     clipId: clip.id,
                     startSec: clip.startSec,
@@ -1278,6 +1340,15 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     trackId: clip.trackId,
                     snapOffsetSec: Math.max(0, Number(clip.snapOffsetSec) || 0),
                     copyMode: false,
+                    participants,
+                    anchorTrackIndex: trackIds.indexOf(clip.trackId),
+                    lastDeltaStartSec: 0,
+                    rippleFollowers,
+                    editedXfadeClipIds,
+                    initialCrossfadeSides: computeInitialCrossfadeSides(
+                        session.clips,
+                        editedXfadeClipIds,
+                    ),
                 };
             }
             const origin = kernelDragOriginRef.current;
@@ -1289,6 +1360,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 ctrlKey: args.modifiers.ctrlKey,
                 modifierActive: isModifierActive(copyDragKb, args.modifiers),
             });
+            // 免吸附修饰键（默认 Shift）把吸附总开关临时取反——与旧实现同一函数，
+            // 拖拽中途按下/松开即时生效。
+            const snapActive = computeEffectiveSnap(
+                s.snapEnabled,
+                isModifierActive(noSnapKb, args.modifiers),
+            );
             const rawStart = Math.max(0, origin.startSec + args.deltaSec);
             // 吸附：复用旧实现的 snapTimelineDetailed（多源候选 + 取更近者），
             // 内核只给几何位移，吸附规则不在内核里重写。
@@ -1296,11 +1373,13 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             // `highlight` 必须传：吸附高亮的**发布与清除**都由该函数按此选项统一
             // 处理（见 useTimelineState.snapTimelineDetailed）。不传时吸附本身仍
             // 生效、位置也对，但完全没有视觉反馈——表现为"吸附没生效"。
-            const nextStart = s.snapEnabled
+            // `excludeClipIds` 必须覆盖**全部参与者**：整组一起移动时，组内其他
+            // clip 不应成为自己的吸附目标。
+            const nextStart = snapActive
                 ? snapTimelineDetailed(rawStart, "clip", {
                       originSec: origin.startSec,
                       anchorTrackId: args.targetTrackId,
-                      excludeClipIds: new Set([args.clipId]),
+                      excludeClipIds: new Set(origin.participants.map((item) => item.clipId)),
                       moveLengthSec: origin.lengthSec,
                       moveSnapOffsetSec: origin.snapOffsetSec,
                       highlight: {
@@ -1310,25 +1389,67 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 : rawStart;
             // 吸附被关闭（拖拽中切开关 / 按住临时取反键）：高亮必须清掉，
             // 否则会残留上一次的吸附提示（旧实现同样在 else 分支清除）。
-            if (!s.snapEnabled) clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+            if (!snapActive) clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+            const trackIds = sessionRef.current.tracks.map((track) => track.id);
+            const targetTrackIndex = trackIds.indexOf(args.targetTrackId);
+            const deltaTrack =
+                targetTrackIndex >= 0 && origin.anchorTrackIndex >= 0
+                    ? targetTrackIndex - origin.anchorTrackIndex
+                    : 0;
+            const { moves, deltaStartSec } = applyKernelEditDelta({
+                participants: origin.participants,
+                deltaStartSec: nextStart - origin.startSec,
+                deltaTrack,
+                trackIds,
+            });
+            origin.lastDeltaStartSec = deltaStartSec;
             if (origin.copyMode) {
-                // copy：**原 clip 不动**，只更新 ghost（内容坐标）。
-                setKernelGhost([
-                    {
-                        key: args.clipId,
-                        leftPx: nextStart * pxPerSec,
-                        widthPx: Math.max(1, origin.lengthSec * pxPerSec),
-                        trackId: args.targetTrackId,
-                    },
-                ]);
+                // copy：**原 clip 不动**，只更新 ghost（整组，内容坐标）。
+                setKernelGhost(
+                    origin.participants.map((participant, index) => ({
+                        key: participant.clipId,
+                        leftPx: moves[index].startSec * pxPerSec,
+                        widthPx: Math.max(1, participant.lengthSec * pxPerSec),
+                        trackId: moves[index].trackId,
+                    })),
+                );
+                // 复制不移动原片：波纹跟随集恢复原位（覆盖「拖拽中途切到复制」的残留预览）。
+                applyRippleFollowerShift(dispatch, origin.rippleFollowers, 0);
                 return;
             }
             batch(() => {
-                dispatch(moveClipStart({ clipId: args.clipId, startSec: nextStart }));
-                dispatch(moveClipTrack({ clipId: args.clipId, trackId: args.targetTrackId }));
+                for (const move of moves) {
+                    dispatch(moveClipStart({ clipId: move.clipId, startSec: move.startSec }));
+                    dispatch(moveClipTrack({ clipId: move.clipId, trackId: move.trackId }));
+                }
+                // 波纹（自动跟进）实时预览：后续 clip 随拖拽同步平移，位移取
+                // **钳制后的共享位移**（否则左边界处会与参与者错位）。
+                applyRippleFollowerShift(dispatch, origin.rippleFollowers, deltaStartSec);
             });
+            // 自动交叉淡化实时预览：按当前（乐观）位置重算重叠并更新自动 fade。
+            // 必须用 `store.getState().session`（同步新鲜）而不是 sessionRef——
+            // react-redux 的 batch 会延迟订阅回调，batch 内 sessionRef 仍是上一帧
+            // 位置，会让"拖开瞬间"的预览滞留最后一帧自动淡化长度。
+            if (s.autoCrossfadeEnabled) {
+                previewAutoCrossfade(
+                    store.getState().session,
+                    origin.editedXfadeClipIds,
+                    dispatch,
+                    origin.initialCrossfadeSides,
+                );
+            }
         },
-        [copyDragKb, dispatch, pxPerSec, s.snapEnabled, sessionRef, snapTimelineDetailed],
+        [
+            copyDragKb,
+            dispatch,
+            multiSelectedClipIds,
+            noSnapKb,
+            pxPerSec,
+            s.autoCrossfadeEnabled,
+            s.snapEnabled,
+            sessionRef,
+            snapTimelineDetailed,
+        ],
     );
 
     /**
@@ -1355,17 +1476,23 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 setKernelGhost(null);
                 // copy 模式下原 clip 从未被移动：既不需要回滚，也不走 move 提交。
                 if (args.cancelled) return;
-                // 落库复用抽出的共享函数（与旧实现**同一份**复制语义）。
+                // 落库复用抽出的共享函数（与旧实现**同一份**复制语义）：
+                // 参与集合整体复制，目标轨按各自初始序号 + 同一偏移量解析。
+                const trackIds = sessionRef.current.tracks.map((track) => track.id);
                 void copyClipsFromDrag({
-                    sourceClipIds: [origin.clipId],
-                    initialById: {
-                        [origin.clipId]: {
-                            startSec: origin.startSec,
-                            trackId: origin.trackId,
-                        },
-                    },
-                    initialTrackIndexById: {},
-                    deltaSec: args.deltaSec,
+                    sourceClipIds: origin.participants.map((item) => item.clipId),
+                    initialById: Object.fromEntries(
+                        origin.participants.map((item) => [
+                            item.clipId,
+                            { startSec: item.startSec, trackId: item.trackId },
+                        ]),
+                    ),
+                    initialTrackIndexById: Object.fromEntries(
+                        origin.participants.map((item) => [item.clipId, item.trackIndex]),
+                    ),
+                    // 用**吸附后**的共享位移，与 ghost 预览的位置一致
+                    // （用内核原始位移会绕开吸附，表现为"预览吸附、落库不吸附"）。
+                    deltaSec: origin.lastDeltaStartSec,
                     // 内核拖拽的落点始终是已有轨道（`resolveTargetTrackIndex` 越界时
                     // 回落原轨），因此不涉及建新轨。
                     dropToNewTrack: false,
@@ -1376,8 +1503,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     dispatch,
                     sessionRef,
                     setMultiSelectedClipIds,
-                    // 目标轨由内核给（它做了落点换算），不走偏移解析。
-                    resolveTrackIdByOffset: () => args.targetTrackId,
+                    // 每个参与者按各自初始轨道序号 + 同一偏移量解析目标轨。
+                    resolveTrackIdByOffset: (clipId) => {
+                        const participant = origin.participants.find(
+                            (item) => item.clipId === clipId,
+                        );
+                        if (participant === undefined || participant.trackIndex < 0) return null;
+                        return trackIds[participant.trackIndex] ?? null;
+                    },
                     maybeSelectTargetTrack: () => undefined,
                     createNewTracksForDrop: async () => [],
                     createNewTrackForDrop: async () => null,
@@ -1386,29 +1519,61 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             }
             if (args.cancelled) {
                 batch(() => {
-                    dispatch(moveClipStart({ clipId: origin.clipId, startSec: origin.startSec }));
-                    dispatch(moveClipTrack({ clipId: origin.clipId, trackId: origin.trackId }));
+                    for (const participant of origin.participants) {
+                        dispatch(
+                            moveClipStart({
+                                clipId: participant.clipId,
+                                startSec: participant.startSec,
+                            }),
+                        );
+                        dispatch(
+                            moveClipTrack({
+                                clipId: participant.clipId,
+                                trackId: participant.trackId,
+                            }),
+                        );
+                    }
                 });
+                // 波纹跟随集恢复原位（预览期间已被平移）。
+                applyRippleFollowerShift(dispatch, origin.rippleFollowers, 0);
                 return;
             }
             dispatch(checkpointHistory());
             // 提交值取 Redux 里的当前值（预览已写入**吸附后**的结果）——
             // 用 origin + 内核原始位移会绕开吸附，导致"预览吸附、提交不吸附"。
-            const clip = sessionRef.current.clips.find((item) => item.id === args.clipId);
-            void dispatch(
-                moveClipsRemote({
-                    moves: [
-                        {
-                            clipId: args.clipId,
-                            startSec:
-                                clip?.startSec ?? Math.max(0, origin.startSec + args.deltaSec),
-                            trackId: args.targetTrackId,
-                        },
-                    ],
-                }),
-            );
+            const session = sessionRef.current;
+            const moves = origin.participants.map((participant) => {
+                const clip = session.clips.find((item) => item.id === participant.clipId);
+                return {
+                    clipId: participant.clipId,
+                    startSec: clip?.startSec ?? participant.startSec,
+                    trackId: clip?.trackId ?? participant.trackId,
+                };
+            });
+            const movePromise = dispatch(moveClipsRemote({ moves })).unwrap();
+            void (async () => {
+                try {
+                    await movePromise;
+                } finally {
+                    // 自动交叉淡化：按移动后的新重叠关系写回自动 fade；开关关闭时
+                    // 只清理「已脱离重叠」的自动值（保证分离后手动 fade 能恢复显示）。
+                    const latest = sessionRef.current;
+                    if (s.autoCrossfadeEnabled) {
+                        await applyAutoCrossfade(latest, origin.editedXfadeClipIds, dispatch, {
+                            affectedSides: origin.initialCrossfadeSides,
+                        });
+                    } else {
+                        await applyDetachedAutoCrossfadeClears(
+                            latest,
+                            origin.editedXfadeClipIds,
+                            dispatch,
+                            origin.initialCrossfadeSides,
+                        );
+                    }
+                }
+            })().catch(() => undefined);
         },
-        [dispatch, sessionRef],
+        [dispatch, s.autoCrossfadeEnabled, sessionRef, setMultiSelectedClipIds],
     );
 
     /** 内核 trim：按下时的原始几何（把相对位移换算为绝对值，并支持回滚）。 */
@@ -1435,6 +1600,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             startSec: number;
             lengthSec: number;
             deltaSec: number;
+            modifiers: { ctrlKey: boolean; shiftKey: boolean; altKey: boolean; metaKey: boolean };
         }) => {
             if (kernelTrimOriginRef.current?.clipId !== args.clipId) {
                 const clip = sessionRef.current.clips.find((item) => item.id === args.clipId);
@@ -1451,12 +1617,17 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             const origin = kernelTrimOriginRef.current;
             if (origin === null) return;
 
+            // 免吸附修饰键（默认 Shift）临时取反吸附总开关（与旧实现同一函数）。
+            const snapActive = computeEffectiveSnap(
+                s.snapEnabled,
+                isModifierActive(noSnapKb, args.modifiers),
+            );
             // 吸附：左边缘吸**起点**、右边缘吸**右端**——两者吸附的对象不同，
             // 统一吸起点会让右边缘 trim 落在错误的位置。
             let nextStart = args.startSec;
             let nextLength = args.lengthSec;
             let deltaSec = args.deltaSec;
-            if (s.snapEnabled) {
+            if (snapActive) {
                 const snapArgs = {
                     originSec: origin.startSec,
                     anchorTrackId: origin.trackId,
@@ -1507,7 +1678,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 }
             });
         },
-        [dispatch, sessionRef, s.snapEnabled, snapTimelineDetailed],
+        [dispatch, sessionRef, s.snapEnabled, noSnapKb, snapTimelineDetailed],
     );
 
     /** 内核 trim 收尾：提交或回滚（取消时三个字段一起还原）。 */
@@ -1525,12 +1696,13 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
      *
      * 被吸附对象是**手柄的绝对时间线位置**（`clipStart + offset`）——不是 clip 起点；
      * 高亮发布为该 clip 所在行的亮条。落库前把偏移钳制到 `[0, clip 长度]`。
-     *
-     * 说明：与内核既有的拖拽 / trim 预览一致，这里只读 `s.snapEnabled`，不处理
-     * 「拖拽中按住免吸附修饰键」——那是内核所有手势共有的缺口，应统一补。
      */
     const handleKernelSnapOffsetPreview = React.useCallback(
-        (args: { clipId: string; rawOffsetSec: number }) => {
+        (args: {
+            clipId: string;
+            rawOffsetSec: number;
+            modifiers: { ctrlKey: boolean; shiftKey: boolean; altKey: boolean; metaKey: boolean };
+        }) => {
             const clip = sessionRef.current.clips.find((item) => item.id === args.clipId);
             if (clip === undefined) return;
             const clipStart = Number(clip.startSec) || 0;
@@ -1543,7 +1715,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 beginSnapGesture();
             }
             const rawAbs = clipStart + args.rawOffsetSec;
-            const nextAbs = s.snapEnabled
+            // 免吸附修饰键（默认 Shift）临时取反吸附总开关（与旧实现同一函数）。
+            const snapActive = computeEffectiveSnap(
+                s.snapEnabled,
+                isModifierActive(noSnapKb, args.modifiers),
+            );
+            const nextAbs = snapActive
                 ? snapTimelineDetailed(rawAbs, "clip", {
                       originSec: clipStart + (Number(clip.snapOffsetSec) || 0),
                       anchorTrackId: clip.trackId,
@@ -1553,7 +1730,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                       },
                   }).sec
                 : rawAbs;
-            if (!s.snapEnabled) clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+            if (!snapActive) clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
             dispatch(
                 setClipSnapOffset({
                     clipId: args.clipId,
@@ -1561,7 +1738,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 }),
             );
         },
-        [dispatch, s.snapEnabled, snapTimelineDetailed],
+        [dispatch, noSnapKb, s.snapEnabled, snapTimelineDetailed],
     );
 
     /**

@@ -55,19 +55,38 @@
 
 ---
 
-## 批次 B：数据语义（P0-5 ~ P0-7）
+## 批次 B：数据语义（P0-5 ~ P0-7）—— 已完成（`feat(timeline-kernel): multi-clip/group/ripple drag semantics`）
 
-### B-1 免吸附修饰键（P0-5）
-- 宿主已透出 `modifiers`；面板侧统一 `effectiveSnap = s.snapEnabled !== noSnapHeld`（复用 `computeEffectiveSnap`）
-- 覆盖：`handleKernelDragPreview`、`handleKernelTrimPreview`、`handleKernelFadePreview`、`handleKernelSnapOffsetPreview`
+### B-1 免吸附修饰键（P0-5）✅
+- 宿主：`onTrimPreview` / `onFadePreview` / `onSnapOffsetPreview` 补 `modifiers` 快照
+- 面板：拖拽 / trim / snap offset 预览统一 `computeEffectiveSnap(s.snapEnabled, isModifierActive(noSnapKb, mods))`
+- **淡变角不参与吸附**（旧实现 `useEditDrag` 的 `shouldSnap` 只覆盖 trim/stretch，已逐字核对），
+  故淡变预览不加吸附；`modifiers` 为后续「Alt 调曲率」预留
 
-### B-2 多选 / 编组联动拖动（P0-6）
-- 面板按下时展开参与集合：`multiSelectedClipIds`（命中项在其中时）+ `expandClipIdsWithGroups`（`ignoreGrouping` 时不展开）
-- 预览/提交按集合批量（`setClipsStateBulkRemote` / `moveClipsRemote` 多元素）
-- trim / fade 同样按集合（`useEditDrag` 的规则：fade_in/fade_out/gain 不展开组）
+### B-2 多选 / 编组联动拖动（P0-6）✅
+- 新增纯函数模块 `hooks/kernelEditSet.ts`（15 条单测）：
+  `resolveKernelEditParticipants`（多选 + 编组展开 + `ignoreGrouping` / `disabledGroupIds`）、
+  `applyKernelEditDelta`（共享位移先按 `-minStart` 钳制以**保持整组间距**，跨轨按各自初始序号 + 同一偏移量）
+- 面板：拖拽 origin 快照参与集合；预览/提交整组批量（`moveClipsRemote` 多元素）；
+  copy 模式 ghost 整组渲染、落库走 `copyClipsFromDrag`（每成员按各自轨道解析目标轨）
+- **仍未做**：trim / fade / snap offset 的**多选批量**（拖拽移动已覆盖多选与编组；
+  trim 目前仍是单 clip，属已知残留）
 
-### B-3 波纹编辑（P0-7）
-- 预览/提交阶段复用 `buildRippleFollowers` + `applyRippleFollowerShift`
+### B-3 波纹编辑（P0-7）✅
+- 拖拽开始时 `buildRippleFollowers`（origin = 参与者最早起点、`session.rippleMode`）；
+  预览按**钳制后的共享位移** `applyRippleFollowerShift`；copy 模式与取消路径恢复原位
+- 提交后的权威波纹仍由后端计算（与旧实现同源）
+
+### B-4（本轮新发现并修复）框选后弹出右键菜单、吞掉下一次左键 ✅
+- **现象**：右键拖拽框选后画面上仍弹出 clip 菜单，随后的左键拖拽完全无效
+- **根因**：macOS / 部分 Chromium 在右键**按下**时就触发 `contextmenu`，而框选是否成立要等指针
+  移动超过阈值才知道——「框选成立后吞掉一次 contextmenu」的写法永远晚了一步
+- **修复**：右键交互期间一律 `preventDefault + stopPropagation` 并记住位置；松手时
+  框选成立 → 丢弃；未成立（右键单击）→ 在该位置**补发**菜单（与旧实现
+  `useTimelineSelectionRect` 的重放语义一致）；`suppressNextContextMenu` 改为在下一次
+  `pointerdown` 清除，兼容「松手后才触发 contextmenu」的平台
+- **同批修复**：内核拖拽提交后补 `applyAutoCrossfade` / `applyDetachedAutoCrossfadeClears`
+  （旧实现有、内核缺失——拖拽落库后自动交叉淡化不生效）
 
 ---
 

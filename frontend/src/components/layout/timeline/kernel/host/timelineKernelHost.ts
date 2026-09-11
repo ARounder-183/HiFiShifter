@@ -440,7 +440,9 @@ export interface TimelineKernelInteractions {
      * trim 预览（拖拽左右边缘时每帧回调，已按值去重）。
      *
      * @param args 新的起始时间与长度（已钳制）；`deltaSec` 是实际生效的变化量
-     *   （左边缘 = `startSec` 的变化、右边缘 = `lengthSec` 的变化）。
+     *   （左边缘 = `startSec` 的变化、右边缘 = `lengthSec` 的变化）；
+     *   `modifiers` 是当帧修饰键快照（供面板做「免吸附」这类按键语义——内核
+     *   不解释按键含义，见 `onDragPreview` 的同款约定）。
      */
     readonly onTrimPreview?: (args: {
         readonly clipId: string;
@@ -448,6 +450,7 @@ export interface TimelineKernelInteractions {
         readonly startSec: number;
         readonly lengthSec: number;
         readonly deltaSec: number;
+        readonly modifiers: KernelDragModifiers;
     }) => void;
     /**
      * trim 结束。
@@ -462,11 +465,6 @@ export interface TimelineKernelInteractions {
         readonly cancelled: boolean;
     }) => void;
     /**
-     * 淡变角预览（拖拽角部时每帧回调，已按值去重）。
-     *
-     * @param args 新的淡变长度（已钳制到 `[0, clip 长度]`）。
-     */
-    /**
      * 吸附偏移拖拽预览（拖拽期间每次位移回调，已按值去重）。
      *
      * 【为什么只给几何】吸附规则（网格 / 其他 clip 边缘与偏移 / 播放光标）与
@@ -474,11 +472,13 @@ export interface TimelineKernelInteractions {
      * `onDragPreview` 同一架构约定：内核只做手势，语义交回面板。
      *
      * @param args `rawOffsetSec` 是**未吸附**的目标偏移，可能为负或超过 clip
-     *             长度；调用方负责吸附与钳制后再写入。
+     *             长度；调用方负责吸附与钳制后再写入。`modifiers` 为当帧修饰键
+     *             快照（免吸附判定用）。
      */
     readonly onSnapOffsetPreview?: (args: {
         readonly clipId: string;
         readonly rawOffsetSec: number;
+        readonly modifiers: KernelDragModifiers;
     }) => void;
     /**
      * 吸附偏移拖拽结束。
@@ -493,11 +493,18 @@ export interface TimelineKernelInteractions {
         readonly cancelled: boolean;
         readonly changed: boolean;
     }) => void;
+    /**
+     * 淡变角预览（拖拽角部时每帧回调，已按值去重）。
+     *
+     * @param args 新的淡变长度（已钳制到 `[0, clip 长度]`）；`modifiers` 为当帧
+     *   修饰键快照（免吸附判定用）。
+     */
     readonly onFadePreview?: (args: {
         readonly clipId: string;
         readonly side: FadeSide;
         readonly fadeSec: number;
         readonly deltaSec: number;
+        readonly modifiers: KernelDragModifiers;
     }) => void;
     /**
      * 淡变角结束。
@@ -1852,6 +1859,12 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      * 弹出右键菜单（与刚完成的框选操作冲突）。
      */
     let suppressNextContextMenu = false;
+    /**
+     * 「待框选」手势期间被抑制的 contextmenu 位置。
+     *
+     * 松手时若框选**未成立**（右键单击）则在该位置补发菜单；若框选成立则丢弃。
+     */
+    let pendingContextMenu: { clientX: number; clientY: number } | null = null;
 
     /**
      * 把视口内坐标换算为命中结果（内容坐标下的轨道 + clip）。
@@ -1990,6 +2003,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      * 光标与选区操作不能被时间轴手势吞掉。
      */
     function onPointerDown(event: PointerEvent): void {
+        // 新的指针交互开始：上一次右键交互遗留的「吞掉下一次 contextmenu」标记
+        // 必须失效，否则会误吞这一次交互真正需要的菜单。
+        suppressNextContextMenu = false;
         if (isEditableTarget(event.target)) return;
         if (event.button === 1) {
             if (event.pointerType !== "mouse") return;
@@ -2557,6 +2573,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             startSec: result.startSec,
             lengthSec: result.lengthSec,
             deltaSec: result.deltaSec,
+            modifiers: dragModifiersOf(event),
         });
     }
 
@@ -2617,6 +2634,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             side: gesture.side,
             fadeSec: result.fadeSec,
             deltaSec: result.deltaSec,
+            modifiers: dragModifiersOf(event),
         });
     }
 
@@ -2637,7 +2655,11 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         const rawOffsetSec = gesture.originOffsetSec + deltaSec;
         if (rawOffsetSec === gesture.lastOffsetSec) return;
         gesture.lastOffsetSec = rawOffsetSec;
-        interactions?.onSnapOffsetPreview?.({ clipId: gesture.clipId, rawOffsetSec });
+        interactions?.onSnapOffsetPreview?.({
+            clipId: gesture.clipId,
+            rawOffsetSec,
+            modifiers: dragModifiersOf(event),
+        });
     }
 
     /**
@@ -2758,8 +2780,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             });
         }
         if (gesture.kind === "box-select") {
+            const boxActive = gesture.active;
             // 未超过阈值（右键单击）不提交：交给 contextmenu 弹菜单。
-            if (gesture.active) {
+            if (boxActive) {
                 interactions?.onBoxSelectCommit?.({
                     clipIds: gesture.lastClipIds,
                     additive: gesture.additive,
@@ -2767,6 +2790,18 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 });
             }
             boxSelectEl.style.display = "none";
+            // 菜单延迟到松手判定（见 `onContextMenu` 的说明）：
+            // - 框选成立 → 丢弃按下时被抑制的菜单，并吞掉紧随的那一次 contextmenu
+            //   （兼容「松手后才触发 contextmenu」的平台）；
+            // - 框选未成立（右键单击）→ 在按下位置补发菜单（旧实现同一语义）。
+            const pending = pendingContextMenu;
+            pendingContextMenu = null;
+            if (boxActive) {
+                suppressNextContextMenu = true;
+            } else if (pending !== null && !cancelled) {
+                suppressNextContextMenu = true;
+                dispatchContextMenuAt(pending.clientX, pending.clientY);
+            }
         }
         if (gesture.kind === "pending-select" && !cancelled) {
             if (gesture.region === "snap-offset-handle") {
@@ -2863,13 +2898,42 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      * 会弹出右键菜单（与刚完成的框选操作冲突）。
      */
     function onContextMenu(event: MouseEvent): void {
+        // 右键交互（待框选）尚未结束：菜单要等**松手**才决定是否弹出。
+        //
+        // 【为什么不能在这里直接弹】macOS / 部分 Chromium 平台在右键**按下**时就
+        // 触发 contextmenu，而框选是否成立要等指针移动超过阈值才知道。按下即弹的
+        // 后果是：框选确实完成了，但菜单也已经挂在画面上（且它的 backdrop 会吞掉
+        // 下一次左键——表现为"框选之后拖不动 clip"）。旧实现同样把右键单击的菜单
+        // 延迟到松手重放（见 `useTimelineSelectionRect`）。
+        if (gesture.kind === "box-select") {
+            event.preventDefault();
+            event.stopPropagation();
+            pendingContextMenu = { clientX: event.clientX, clientY: event.clientY };
+            return;
+        }
         if (suppressNextContextMenu) {
             event.preventDefault();
+            event.stopPropagation();
             suppressNextContextMenu = false;
             return;
         }
         event.preventDefault();
-        const hit = hitAt(event.clientX, event.clientY);
+        dispatchContextMenuAt(event.clientX, event.clientY);
+    }
+
+    /**
+     * 在指定屏幕位置派发通用右键菜单（命中解析 + 速率标签优先）。
+     *
+     * 流程：命中测试 → 速率角标优先（旧实现同样在速率角标上拦截右键）→
+     * 收集指针处的 clip 列表 → 交给面板的 `onContextMenu`。
+     *
+     * 特殊说明：被「待框选」手势抑制的 contextmenu 会在松手且**未发生框选**时
+     * 由本函数补发（位置取按下时的指针位置），语义与右键单击一致。
+     *
+     * @param clientX 指针视口坐标 X。@param clientY 指针视口坐标 Y。
+     */
+    function dispatchContextMenuAt(clientX: number, clientY: number): void {
+        const hit = hitAt(clientX, clientY);
         // 速率标签右键 → 速率高级编辑（BPM 换算对话框），优先于通用右键菜单
         // （旧实现同样在速率角标上拦截右键）。其余位置仍走通用菜单。
         if (
@@ -2877,14 +2941,14 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             interactions?.onRateBadgeMenu !== undefined &&
             resolveHeaderControl(hit) === "rate-label"
         ) {
-            interactions.onRateBadgeMenu(hit.clip.id, event.clientX, event.clientY);
+            interactions.onRateBadgeMenu(hit.clip.id, clientX, clientY);
             return;
         }
         if (interactions?.onContextMenu === undefined) return;
         const trackId = hit.kind === "clip" ? hit.clip.trackId : hit.trackId;
         interactions.onContextMenu({
-            clientX: event.clientX,
-            clientY: event.clientY,
+            clientX,
+            clientY,
             clipIds: trackId === null ? [] : clipsAtPointer(trackId, hit.sec),
             trackId,
             sec: hit.sec,
