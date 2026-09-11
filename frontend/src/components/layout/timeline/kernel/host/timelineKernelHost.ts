@@ -692,7 +692,15 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         projectSec: () => Math.max(0, data().projectSec),
         trackCount: () => data().tracks.length,
         viewportHeightPx: () => viewportHeightPx,
-        minPxPerSec: MIN_PX_PER_SEC,
+        // 下限必须与滚轮缩放解析（resolveHorizontalWheelZoom 的 minPxPerSec）
+        // **同源且动态**：工程短于视口时解析会允许缩到 0.5，若内核仍按固定常量
+        // 钳制，就会出现「标尺能缩得更小而网格缩不动」。
+        minPxPerSec: () =>
+            resolveTimelineMinPxPerSec({
+                baseMinPxPerSec: MIN_PX_PER_SEC,
+                projectSec: data().projectSec,
+                viewportWidthPx,
+            }),
         maxPxPerSec: MAX_PX_PER_SEC,
     });
 
@@ -1327,9 +1335,11 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             maxPxPerSec: MAX_PX_PER_SEC,
         });
         if (zoom === null) return;
-        scroll.setZoom(zoom.nextPxPerSec, event.clientX - rect.left);
+        // 用**实际生效值**回调 React：下限随工程长度变化，钳制可能改变请求值；
+        // 直接回传请求值会让标尺（React 侧派生量）与网格（内核真值）分叉。
+        const appliedPxPerSec = scroll.setZoom(zoom.nextPxPerSec, event.clientX - rect.left);
         scroll.setScrollLeft(zoom.nextScrollLeft);
-        onZoomChange?.(zoom.nextPxPerSec);
+        onZoomChange?.(appliedPxPerSec);
     }
     container.addEventListener("wheel", onWheel, { passive: false });
 

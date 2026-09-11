@@ -330,6 +330,12 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         }
         localHostRef.current = host;
         if (hostRef !== undefined) hostRef.current = host;
+        // dev-only 调试出口：浏览器里读取内核视口真值（缩放 / 滚动 / 投影），
+        // 用于核对「标尺（React 派生量）与网格（内核真值）是否一致」这类问题。
+        // 生产构建不挂载（`import.meta.env.DEV` 为 false 时整段被裁剪）。
+        if (import.meta.env.DEV) {
+            (window as unknown as { __hfsKernel?: TimelineKernelHost }).__hfsKernel = host;
+        }
         // 宿主就绪后再挂载波形层：它需要内核视口源（见 kernelViewportSource）。
         setWaveformAxis(host.getAxis());
         setHostReady(true);

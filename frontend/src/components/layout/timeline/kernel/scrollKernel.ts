@@ -106,10 +106,16 @@ export interface ScrollKernelOptions {
      * 因此本接口不接收 `viewportWidthPx`。
      */
     viewportHeightPx: () => number;
-    /** pxPerSec 下限，缺省 1e-9。 */
-    minPxPerSec?: number;
-    /** pxPerSec 上限，缺省 +Infinity。 */
-    maxPxPerSec?: number;
+    /**
+     * pxPerSec 下限，缺省 1e-9。
+     *
+     * 支持函数形式：下限随**工程长度与视口宽度**变化（工程短于视口时允许缩得更小），
+     * 必须与滚轮缩放解析所用的 `resolveTimelineMinPxPerSec` 同源——冻结成常量会让
+     * 内核钳制与解析结果不一致（标尺能缩得比网格更小）。
+     */
+    minPxPerSec?: number | (() => number);
+    /** pxPerSec 上限，缺省 +Infinity；同样支持函数形式。 */
+    maxPxPerSec?: number | (() => number);
 }
 
 /** 滚动内核公开 API（输入层写、渲染层读、订阅者标脏）。 */
@@ -156,8 +162,11 @@ export interface ScrollKernel {
      *
      * @param pxPerSec 目标缩放（每秒像素数），非法值忽略。
      * @param anchorScreenX 锚点在视口内的水平位置（CSS px）。
+     * @returns **实际生效**的 pxPerSec（可能因下限 / 上限钳制而与入参不同）。
+     *          调用方必须用它同步 React 侧派生量（标尺刻度 / 内容宽度），
+     *          否则会显示成未钳制的请求值。
      */
-    setZoom(pxPerSec: number, anchorScreenX: number): void;
+    setZoom(pxPerSec: number, anchorScreenX: number): number;
 
     /**
      * 订阅状态变化。
@@ -295,18 +304,45 @@ function sanitizePxPerSec(value: number, min: number, max: number): number {
  * @returns 内核实例；钳制与通知去重均已在内部完成。
  */
 export function createScrollKernel(options: ScrollKernelOptions): ScrollKernel {
-    const minPxPerSec = Number.isFinite(options.minPxPerSec)
-        ? Math.max(DEFAULT_MIN_PX_PER_SEC, options.minPxPerSec as number)
-        : DEFAULT_MIN_PX_PER_SEC;
-    const maxPxPerSec = Number.isFinite(options.maxPxPerSec)
-        ? Math.max(minPxPerSec, options.maxPxPerSec as number)
-        : Number.POSITIVE_INFINITY;
+    /**
+     * 读取缩放下限。
+     *
+     * 特殊说明：下限**不是常量**——它随工程长度与视口宽度变化（见
+     * `resolveTimelineMinPxPerSec`：工程短于视口时允许缩到 0.5，否则用基础下限）。
+     * 若在这里冻结成常量，内核的钳制就会与滚轮缩放解析所用的下限不一致，
+     * 表现为「标尺能缩得更小而网格缩不动」。因此支持函数形式，每次读取现算。
+     *
+     * @returns 当前下限（CSS px/秒）。
+     */
+    function readMinPxPerSec(): number {
+        const raw =
+            typeof options.minPxPerSec === "function"
+                ? options.minPxPerSec()
+                : options.minPxPerSec;
+        return Number.isFinite(raw)
+            ? Math.max(DEFAULT_MIN_PX_PER_SEC, raw as number)
+            : DEFAULT_MIN_PX_PER_SEC;
+    }
+
+    /**
+     * 读取缩放上限（与下限同源的惰性解析，保证上限恒不低于下限）。
+     *
+     * @returns 当前上限（CSS px/秒）。
+     */
+    function readMaxPxPerSec(): number {
+        const raw =
+            typeof options.maxPxPerSec === "function"
+                ? options.maxPxPerSec()
+                : options.maxPxPerSec;
+        const min = readMinPxPerSec();
+        return Number.isFinite(raw) ? Math.max(min, raw as number) : Number.POSITIVE_INFINITY;
+    }
 
     // 视口真值：冻结对象 + 变更时整体替换（约束 2）。
     let state: TimelineViewportState = Object.freeze({
         scrollLeft: 0,
         scrollTop: 0,
-        pxPerSec: sanitizePxPerSec(options.pxPerSec, minPxPerSec, maxPxPerSec),
+        pxPerSec: sanitizePxPerSec(options.pxPerSec, readMinPxPerSec(), readMaxPxPerSec()),
         rowHeight: Number.isFinite(options.rowHeight) ? Math.max(0, options.rowHeight) : 0,
     });
 
@@ -432,8 +468,9 @@ export function createScrollKernel(options: ScrollKernelOptions): ScrollKernel {
         },
 
         setZoom(pxPerSec, anchorScreenX) {
-            if (!Number.isFinite(pxPerSec)) return;
-            const nextPxPerSec = sanitizePxPerSec(pxPerSec, minPxPerSec, maxPxPerSec);
+            // 非法值：不改变状态，但仍返回当前真值（调用方据此同步派生量）。
+            if (!Number.isFinite(pxPerSec)) return state.pxPerSec;
+            const nextPxPerSec = sanitizePxPerSec(pxPerSec, readMinPxPerSec(), readMaxPxPerSec());
             const anchorX = Number.isFinite(anchorScreenX) ? anchorScreenX : 0;
             // 锚点不变式：缩放前后，视口内 anchorX 处对应的工程时间必须相等。
             // 这里刻意不夹取 anchorX（指针可在视口外），否则锚点会被钉在边缘。
@@ -444,6 +481,10 @@ export function createScrollKernel(options: ScrollKernelOptions): ScrollKernel {
                 maxScrollLeftFor(nextPxPerSec),
             );
             commit({ pxPerSec: nextPxPerSec, scrollLeft: nextScrollLeft });
+            // 返回**实际生效**值：钳制可能改变请求值（下限随工程长度变化），
+            // 调用方必须用这个值同步 React 侧派生量，否则标尺会显示成未钳制的
+            // 请求值（表现为「标尺能缩得比网格更小」）。
+            return nextPxPerSec;
         },
 
         subscribe(listener) {

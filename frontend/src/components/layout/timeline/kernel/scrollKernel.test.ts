@@ -105,7 +105,31 @@ describe("scrollKernel", () => {
     });
 
     describe("状态与通知契约", () => {
-        it("设置行高后内容高度与竖直上限同步更新", () => {
+        it("下限支持函数形式：钳制随返回值实时变化", () => {
+        // 下限随工程长度 / 视口宽度变化（见 resolveTimelineMinPxPerSec）：
+        // 冻结成常量会让内核钳制与滚轮解析不一致。
+        let min = 10;
+        const k = makeKernel({ minPxPerSec: () => min });
+        expect(k.setZoom(1, 0)).toBe(10);
+        min = 0.5;
+        expect(k.setZoom(1, 0)).toBe(1);
+    });
+
+    it("setZoom 返回实际生效值（被上下限钳制时）", () => {
+        const k = makeKernel({ minPxPerSec: 5, maxPxPerSec: 100 });
+        expect(k.setZoom(1, 0)).toBe(5);
+        expect(k.setZoom(1000, 0)).toBe(100);
+        expect(k.setZoom(50, 0)).toBe(50);
+    });
+
+    it("非法 pxPerSec 时 setZoom 返回当前值且不改变状态", () => {
+        const k = makeKernel({ minPxPerSec: 5 });
+        k.setZoom(50, 0);
+        expect(k.setZoom(Number.NaN, 0)).toBe(50);
+        expect(k.get().pxPerSec).toBe(50);
+    });
+
+    it("设置行高后内容高度与竖直上限同步更新", () => {
         const k = makeKernel();
         // 10 轨 × 80 = 800；视口高 400 → 上限 400
         expect(k.contentHeightPx()).toBe(800);
