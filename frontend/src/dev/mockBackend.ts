@@ -66,7 +66,10 @@ const MOCK_DIVISION_FACTORS = [512, 1024, 2048] as const;
  * @param seed 随机种子。
  * @returns min / max 数组（值域 [-1, 1]）。
  */
-function buildMockPeaks(peakCount: number, seed: number): {
+function buildMockPeaks(
+    peakCount: number,
+    seed: number,
+): {
     min: Float32Array;
     max: Float32Array;
 } {
@@ -184,6 +187,13 @@ function buildMockTimeline(): Record<string, unknown> {
     for (let trackIndex = 0; trackIndex < tracks.length; trackIndex += 1) {
         const trackId = tracks[trackIndex].id;
         const clipCount = 3 + (trackIndex % 3);
+        /**
+         * 轨道 0 刻意做成**重叠 + 交叉淡化**，用于验证内核的重叠区交互
+         * （前一个 clip 的右缘 / 淡出控件在重叠区内是否可达）。
+         * 其余轨道保持 0.5s 间隔，覆盖「不重叠」这条常规路径。
+         */
+        const overlaps = trackIndex === 0;
+        const gapSec = overlaps ? -0.8 : 0.5;
         let cursor = 2 + trackIndex * 1.5;
         for (let index = 0; index < clipCount; index += 1) {
             const lengthSec = 4 + ((index * 3 + trackIndex) % 9);
@@ -217,8 +227,10 @@ function buildMockTimeline(): Record<string, unknown> {
                 fade_out_shape: (trackIndex + 3) % 7,
                 fade_in_dir: trackIndex % 3 === 0 ? -0.5 : 0,
                 fade_out_dir: trackIndex % 3 === 1 ? 0.4 : 0,
-                auto_fade_in_sec: 0,
-                auto_fade_out_sec: 0,
+                // 重叠轨道用自动交叉淡化覆盖重叠长度（与真实工程一致：重叠处
+                // 通常就是交叉淡化），从而在重叠区内产生淡入 / 淡出控件。
+                auto_fade_in_sec: overlaps && !isFirst ? 0.8 : 0,
+                auto_fade_out_sec: overlaps && !isLast ? 0.8 : 0,
                 snap_offset_sec: index === 1 ? 0.25 : 0,
                 group_id: trackIndex === 3 && index === 1 ? "group-a" : undefined,
                 // `midi_note_count` **只在 MIDI clip 上出现**（前端以
@@ -230,7 +242,7 @@ function buildMockTimeline(): Record<string, unknown> {
                 takes: [],
                 active_take_id: undefined,
             });
-            cursor += lengthSec + 0.5;
+            cursor += lengthSec + gapSec;
         }
     }
 

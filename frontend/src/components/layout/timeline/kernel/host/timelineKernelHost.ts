@@ -51,6 +51,7 @@ import {
     resolveThemeColor,
 } from "../../runtime/timelineCanvasStyle";
 import { hitClipHeaderControl, type ClipHeaderControl } from "../interaction/clipHeaderControls";
+import { hitOverlapControl } from "../interaction/overlapControls";
 import { resolveHorizontalWheelZoom } from "../../runtime/timelineScrollRange";
 import { resolveTimelineMinPxPerSec } from "../../runtime/timelineZoomBounds";
 import {
@@ -1153,6 +1154,14 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 name: clip.name,
                 groupId: clip.groupId,
                 isMidiClip: clip.midiNoteCount != null,
+                fadeInSec: clip.fadeInSec,
+                autoFadeInSec: clip.autoFadeInSec,
+                fadeInShape: clip.fadeInShape,
+                fadeInDir: clip.fadeInDir,
+                fadeOutSec: clip.fadeOutSec,
+                autoFadeOutSec: clip.autoFadeOutSec,
+                fadeOutShape: clip.fadeOutShape,
+                fadeOutDir: clip.fadeOutDir,
             });
         }
         for (const list of map.values()) list.sort((a, b) => a.startSec - b.startSec);
@@ -1617,15 +1626,55 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         const rect = container.getBoundingClientRect();
         const view = scroll.get();
         ensureHitIndex();
-        return hitTest({
-            contentX: view.scrollLeft + (clientX - rect.left),
-            contentY: view.scrollTop + (clientY - rect.top),
+        const contentX = view.scrollLeft + (clientX - rect.left);
+        const contentY = view.scrollTop + (clientY - rect.top);
+        const hit = hitTest({
+            contentX,
+            contentY,
             pxPerSec: view.pxPerSec,
             rowHeight: view.rowHeight,
             tracks: hitTracks,
             clipsByTrack: hitClipsByTrack,
             headerHeightPx: CLIP_HEADER_HEIGHT,
         });
+        if (hit.kind !== "clip") return hit;
+
+        // ── 重叠区按位置改写 ──
+        // 二分取到的是「最后一个 startSec <= sec」的 clip，在重叠区里永远是**后
+        // 一个**；前一个 clip 的右缘与淡出控件因此完全不可达。这里按旧实现
+        // `OverlapEditLayer` 的位置规则改写命中结果（见 overlapControls 文件头）。
+        const track = hitTracks[hit.trackIndex];
+        if (track === undefined) return hit;
+        const trackClips = hitClipsByTrack.get(track.id);
+        if (trackClips === undefined || trackClips.length < 2) return hit;
+        const overlap = hitOverlapControl({
+            clips: trackClips,
+            contentX,
+            localY: hit.localY,
+            pxPerSec: view.pxPerSec,
+            rowHeight: view.rowHeight,
+        });
+        if (overlap === null) return hit;
+
+        const target = trackClips.find((item) => item.id === overlap.clipId);
+        if (target === undefined) return hit;
+        const region: ClipHitRegion =
+            overlap.kind === "clip-left-edge"
+                ? "left-edge"
+                : overlap.kind === "clip-right-edge"
+                  ? "right-edge"
+                  : overlap.fadeSide === "out"
+                    ? "fade-out-corner"
+                    : "fade-in-corner";
+        return {
+            kind: "clip",
+            clip: target,
+            region,
+            sec: hit.sec,
+            trackIndex: hit.trackIndex,
+            localX: contentX - target.startSec * view.pxPerSec,
+            localY: hit.localY,
+        };
     }
 
     /**

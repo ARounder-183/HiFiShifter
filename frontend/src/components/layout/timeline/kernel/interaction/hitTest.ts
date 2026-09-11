@@ -49,6 +49,20 @@ export interface HitTestClip {
     readonly groupId?: string;
     /** 是否为 MIDI clip（`isPitchAdjustment`：会隐藏部分 header 控件）。 */
     readonly isMidiClip?: boolean;
+    /**
+     * 淡变参数。
+     *
+     * `hitTest` 同样不消费它们，只透传给重叠区解析（`overlapControls`）：包络线的
+     * 位置由长度决定、走向由形状与方向决定，缺任一项都会让命中区与绘制区错位。
+     */
+    readonly fadeInSec?: number;
+    readonly autoFadeInSec?: number;
+    readonly fadeInShape?: number;
+    readonly fadeInDir?: number;
+    readonly fadeOutSec?: number;
+    readonly autoFadeOutSec?: number;
+    readonly fadeOutShape?: number;
+    readonly fadeOutDir?: number;
 }
 
 /** 命中测试所需的轨道最小字段集（顺序即纵向排列顺序）。 */

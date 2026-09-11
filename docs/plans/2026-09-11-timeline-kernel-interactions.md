@@ -1007,10 +1007,56 @@ git add -A frontend/src/components/layout && git commit -m "test(timeline-kernel
 
 以下三项各自需要先做**只读调研**（旧实现的具体几何与状态机），调研结论写进新计划后再实施。本计划不臆测其实现细节。
 
-### Phase B：`OverlapEditLayer` 等价物
-- 旧实现：`frontend/src/components/layout/timeline/OverlapEditLayer.tsx`（在 `TrackLane.tsx:877` 内挂载，内核模式下不挂载）
-- 待调研：交叉区抓手的几何判定（与 `FadeHitLayer` 的层叠关系）、淡变形状循环点击的命中区、交叉淡变循环点击的命中区
-- 预期产出：`kernel/interaction/overlapControls.ts` + host 分派 + 面板回调
+### Phase B：`OverlapEditLayer` 等价物 —— 调研结论（2026-09-11）
+
+**旧实现模型**（`OverlapEditLayer.tsx`，814 行，DOM 层 `z-[200]`，在 `TrackLane` 内挂载）：
+它在每一对**重叠 clip** 之间按**位置**提供双方的控件，用一个独立的 DOM 层解决
+「同一段屏幕空间同时属于两个 clip」的层叠问题。对每对 (earlier, later)：
+
+| 区域 | 控件 | 归属 | 几何 |
+|---|---|---|---|
+| 重叠区**左缘** | 左边缘（trim/stretch） | later | 10px 宽、**整行高** |
+| 重叠区**右缘** | 右边缘（trim/stretch） | earlier | 10px 宽、**整行高** |
+| 重叠区内 later 的淡入部分 | 包络线小块 + 区域右缘竖条 | later | `buildFadeHitTargets`，裁剪到重叠区 |
+| 重叠区内 earlier 的淡出部分 | 包络线小块 + 区域左缘竖条 | earlier | 同上 |
+| later 的 snap offset 三角 | 吸附偏移手柄 | later | `snapOffsetHandleXPx` + 9×12 |
+| 两条包络线交点 | 交叉点抓手（16px） | 双方 | `computeCrossfadeGripPoint`（二分求真实曲线交点） |
+
+**判定优先级**（由 DOM 层叠顺序保证，**后 push 的在上**，因此内核要反序判定）：
+clip 边缘（最优先）→ 淡化包络线 / 边缘竖线 → 交叉点抓手 / snap offset。
+
+**淡变有效长度**：`autoFadeInSec > 0 ? autoFadeInSec : fadeInSec`（自动交叉淡化覆盖手动）。
+
+**可直接复用的纯函数**（已确认）：
+- `buildFadeHitTargets`（`fadeHitTargets.ts`）：输入 clip 几何 + 淡变参数，输出
+  包络线小块（12px，沿弧长采样）与区域边缘竖条（6px），支持 `clipXFrom/clipXTo`
+  裁剪到重叠区。**几何与绘制端 `drawFadeCurveStroke` 完全一致**。
+- `computeCrossfadeGripPoint` / `fadeGainSigned`（`reaperFade.ts`）
+- `snapOffsetHandleXPx`（`constants.ts`）
+
+**内核的实际缺口（关键结论）**：内核的 `hitTest` 用二分取「最后一个 `startSec <= sec`」，
+在重叠区里**永远是 later**。因此：
+- later 的左边缘**可达**（它在重叠区左缘）✓
+- **earlier 的右边缘与淡出控件完全不可达** ✗ ← 这是本阶段要解决的核心问题
+
+**实施增量**（按价值排序）：
+- **B-1**：`kernel/interaction/overlapControls.ts` —— 把「按位置解析」搬进纯函数，
+  内核在通用命中之后用它改写命中结果（把 earlier 的右缘 / 淡出还给用户）
+- **B-2**：淡变包络线 / 边缘竖线的拖拽（复用 `buildFadeHitTargets`，映射到既有
+  `clip-fade` 手势）
+- **B-3**：交叉点抓手（需新的「同时移动双方边缘」手势）
+- **B-4**：淡变形状循环点击（Ctrl/可配置修饰键 + 单击）与双击重置曲率
+
+### Phase C：snap offset 三角手柄拖拽
+- 旧实现：`hooks/useSnapOffsetDrag.ts`；几何常量 `snapOffsetHandleXPx` /
+  `SNAP_OFFSET_HANDLE_SIZE_PX=9` / `SNAP_OFFSET_HIT_HEIGHT_PX=12`（命中区贴行底）
+- 已知要点：阈值 2px 后 `checkpointHistory()`；拖拽中 `snapTimelineDetailed(rawAbs, "clip", { highlight: { sources: [...] } })` 单点吸附；收尾 `setClipStateRemote({ snapOffsetSec })`；零位移单击不做远端写入
+- 待调研：与 `fade-in-corner` / `left-edge` 的优先级（旧实现命中区在行底，与二者纵向错开）
+
+### Phase D：ghost 预览（copy 拖拽）与素材拖入
+- 旧实现：`ghostDrag`（`TimelinePanel.tsx:1657`）、`dropPreview`（`TimelinePanel.tsx:2961`，在内核开关内的旧分支里）、拖入的 drag&drop 处理在 `TimelineScrollArea` 内
+- 待调研：copy 模式的触发修饰键、ghost 的坐标与样式、素材拖入的 `dragover`/`drop` 契约（含 `importModeMenu` 分支）
+- 预期产出：内核态 ghost 层（内容坐标 + rAF 平移，与 `SnapHighlightLayer` 同模式）+ 拖入处理迁到内核视口
 
 ### Phase C：snap offset 三角手柄拖拽
 - 旧实现：`frontend/src/components/layout/timeline/hooks/useSnapOffsetDrag.ts`
