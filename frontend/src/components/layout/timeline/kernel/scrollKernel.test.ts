@@ -105,7 +105,36 @@ describe("scrollKernel", () => {
     });
 
     describe("状态与通知契约", () => {
-        it("状态变化通知订阅者，未变化不通知", () => {
+        it("设置行高后内容高度与竖直上限同步更新", () => {
+        const k = makeKernel();
+        // 10 轨 × 80 = 800；视口高 400 → 上限 400
+        expect(k.contentHeightPx()).toBe(800);
+        expect(k.maxScrollTop()).toBe(400);
+        k.setRowHeight(120);
+        expect(k.get().rowHeight).toBe(120);
+        expect(k.contentHeightPx()).toBe(1200);
+        expect(k.maxScrollTop()).toBe(800);
+    });
+
+    it("行高变矮时竖直位置被重新钳制", () => {
+        const k = makeKernel();
+        k.setScrollTop(400);
+        // 行高减半：内容高 400，视口高 400 → 上限 0，位置必须回到 0。
+        k.setRowHeight(40);
+        expect(k.get().scrollTop).toBe(0);
+    });
+
+    it("行高同值写入不通知订阅者", () => {
+        const k = makeKernel();
+        const spy = vi.fn();
+        k.subscribe(spy);
+        k.setRowHeight(80);
+        expect(spy).not.toHaveBeenCalled();
+        k.setRowHeight(96);
+        expect(spy).toHaveBeenCalledTimes(1);
+    });
+
+    it("状态变化通知订阅者，未变化不通知", () => {
             const k = makeKernel();
             const spy = vi.fn();
             k.subscribe(spy);

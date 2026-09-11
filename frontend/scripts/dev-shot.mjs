@@ -54,9 +54,15 @@ for (const action of actions) {
     switch (action.type) {
         case "wheel": {
             await page.mouse.move(action.x, action.y);
-            if (action.ctrl) await page.keyboard.down("Control");
+            // 修饰键按 playwright 的键名传入（macOS 上主修饰键是 "Meta"）。
+            const held = [];
+            if (action.ctrl) held.push("Control");
+            if (action.meta) held.push("Meta");
+            if (action.alt) held.push("Alt");
+            if (action.shift) held.push("Shift");
+            for (const key of held) await page.keyboard.down(key);
             await page.mouse.wheel(action.deltaX ?? 0, action.deltaY ?? 0);
-            if (action.ctrl) await page.keyboard.up("Control");
+            for (const key of held) await page.keyboard.up(key);
             break;
         }
         case "drag": {

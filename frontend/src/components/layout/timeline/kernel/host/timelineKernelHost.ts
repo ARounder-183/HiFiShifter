@@ -708,6 +708,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     function ensureScene(axis: TimelineAxis): boolean {
         const view = scroll.get();
         const d = data();
+        // 行高的真值源在 React（左侧轨道头与内核必须同源）：竖直缩放后把新行高
+        // 同步给滚动内核，否则内容高度与竖直钳制仍按旧行高计算。
+        scroll.setRowHeight(d.rowHeight);
         const needsRebuild =
             sceneDirty ||
             builtPxPerSec !== view.pxPerSec ||

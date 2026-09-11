@@ -200,6 +200,18 @@ export interface ScrollKernel {
     maxScrollTop(): number;
 
     /**
+     * 设置行高（竖直缩放）。
+     *
+     * 特殊说明：行高由 React 侧持有（左侧轨道头与内核必须同源），内核只接收
+     * 结果。行高变化会改变内容高度，因此内部顺带按新边界重新钳制 `scrollTop`
+     * （否则轨道变矮后可能停留在越界位置，画面出现空白）。
+     *
+     * @param px 新行高（CSS px）；非有限值或与当前值几乎相同时不做任何变更。
+     * @returns 无返回值；值真正变化时经 commit 通知订阅者。
+     */
+    setRowHeight(px: number): void;
+
+    /**
      * 按当前外部边界重新钳制两轴滚动位置。
      *
      * 特殊说明：钳制只在写入时发生（约束 1），因此宿主尺寸变化（resize）、
@@ -455,6 +467,16 @@ export function createScrollKernel(options: ScrollKernelOptions): ScrollKernel {
 
         maxScrollTop() {
             return maxScrollTopFor(state.rowHeight);
+        },
+
+        setRowHeight(px: number) {
+            const next = Number.isFinite(px) ? Math.max(1, px) : state.rowHeight;
+            if (nearlyEqual(next, state.rowHeight)) return;
+            // 行高变化改变内容高度 → 顺带重新钳制竖直位置（见接口注释）。
+            commit({
+                rowHeight: next,
+                scrollTop: clamp(state.scrollTop, 0, maxScrollTopFor(next)),
+            });
         },
 
         reclamp() {
