@@ -191,6 +191,13 @@ export interface TimelineKernelDomSync {
      * 不动，没有"乐观位置"可依赖，因此必须有这一层。
      */
     readonly ghostContent?: HTMLElement | null;
+    /**
+     * 素材拖入预览的内容层：与 `ghostContent` 同一机制（内容坐标 + 整层平移）。
+     *
+     * 旧实现把它渲染在 `TrackLane` 内（内核模式下不挂载），几何用内容坐标
+     * （`startSec × pxPerSec`），因此迁过来后同样需要这一层。
+     */
+    readonly dropPreviewContent?: HTMLElement | null;
 }
 
 /** 宿主构造参数。 */
@@ -1218,6 +1225,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     let lastSnapTransform = "";
     /** copy ghost 内容层的整层变换（去重方式同上）。 */
     let lastGhostTransform = "";
+    /** 拖入预览内容层的整层变换（去重方式同上）。 */
+    let lastDropPreviewTransform = "";
     /** 上一次绘制的视口（引用比较：`ScrollKernel.get()` 的引用在未变化时稳定）。 */
     let lastDrawnView: TimelineViewportState | null = null;
     /** 上一次绘制的播放头位置（秒），用于判断是否需要继续自驱动。 */
@@ -1351,6 +1360,16 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             if (transform !== lastGhostTransform) {
                 lastGhostTransform = transform;
                 ghostContent.style.transform = transform;
+            }
+        }
+
+        // 拖入预览内容层：同上。
+        const dropPreviewContent = sync.dropPreviewContent;
+        if (dropPreviewContent != null) {
+            const transform = `translate(${-view.scrollLeft}px, ${-view.scrollTop}px)`;
+            if (transform !== lastDropPreviewTransform) {
+                lastDropPreviewTransform = transform;
+                dropPreviewContent.style.transform = transform;
             }
         }
 

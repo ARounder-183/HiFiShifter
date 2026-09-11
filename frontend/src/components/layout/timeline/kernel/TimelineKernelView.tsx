@@ -139,6 +139,22 @@ export interface TimelineKernelViewProps {
      * **必须挂在真正承载时间轴的容器上**，不能挪到含标尺的外层（会整体偏移一个
      * 标尺高度，落点算到错误轨道）。
      */
+    /**
+     * 素材拖入预览（缺省不渲染；拖入期间由面板给出）。
+     *
+     * 几何为**内容坐标**（与旧实现一致：`startSec × pxPerSec`），由宿主整层平移
+     * 跟随视口。纵向位置按 `rowHeight` 换算（面板没有行高）。
+     */
+    readonly dropPreview?: {
+        /** 内容坐标左缘。 */
+        readonly leftPx: number;
+        /** 内容坐标宽度（`durationSec × pxPerSec`）。 */
+        readonly widthPx: number;
+        readonly trackId: string;
+        readonly fileName: string;
+        readonly contentWidth: number;
+        readonly contentHeight: number;
+    };
     readonly onDragOver?: React.DragEventHandler<HTMLDivElement>;
     readonly onDrop?: React.DragEventHandler<HTMLDivElement>;
     /**
@@ -182,6 +198,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         interactions,
         snapHighlight,
         ghost,
+        dropPreview,
         onDragOver,
         onDrop,
         inlineEdit,
@@ -200,6 +217,8 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
     const snapContentRef = React.useRef<HTMLDivElement | null>(null);
     /** copy ghost 内容层容器（同上）。 */
     const ghostContentRef = React.useRef<HTMLDivElement | null>(null);
+    /** 拖入预览内容层容器（同上）。 */
+    const dropPreviewContentRef = React.useRef<HTMLDivElement | null>(null);
     /** 行内编辑浮层根元素（位置与宽度都由宿主在 rAF 内写入）。 */
     const inlineEditorRef = React.useRef<HTMLDivElement | null>(null);
     const localHostRef = React.useRef<TimelineKernelHost | null>(null);
@@ -438,6 +457,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                     rulerPlayheadLine: rulerPlayheadLineRef?.current ?? null,
                     snapHighlightContent: snapContentRef.current,
                     ghostContent: ghostContentRef.current,
+                    dropPreviewContent: dropPreviewContentRef.current,
                 },
                 onRowHeightChange: (px) => callbacksRef.current.onRowHeightChange(px),
                 onZoomChange: (pxPerSec) => callbacksRef.current.onPxPerSecChange(pxPerSec),
@@ -608,6 +628,39 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                         </div>
                     );
                 })}
+            </div>
+            {/* 素材拖入预览：与 ghost 同一机制（内容坐标 + 宿主整层平移）。
+                容器同样**常驻**——原因见上。 */}
+            <div
+                ref={dropPreviewContentRef}
+                data-hs-drop-preview="1"
+                className="pointer-events-none absolute left-0 top-0 z-[5] overflow-hidden"
+                style={{
+                    width: dropPreview?.contentWidth ?? 0,
+                    height: dropPreview?.contentHeight ?? 0,
+                }}
+            >
+                {dropPreview === undefined
+                    ? null
+                    : (() => {
+                          const trackIndex = tracks.findIndex((t) => t.id === dropPreview.trackId);
+                          if (trackIndex < 0) return null;
+                          return (
+                              <div
+                                  className="absolute flex items-center overflow-hidden rounded border border-dashed border-qt-accent/70 bg-qt-accent/15 px-1"
+                                  style={{
+                                      left: dropPreview.leftPx,
+                                      top: trackIndex * rowHeight + 8,
+                                      width: Math.max(1, dropPreview.widthPx),
+                                      height: Math.max(1, rowHeight - 16),
+                                  }}
+                              >
+                                  <span className="truncate text-[10px] text-qt-text">
+                                      {dropPreview.fileName}
+                                  </span>
+                              </div>
+                          );
+                      })()}
             </div>
             {/* 行内编辑浮层（重命名 / 增益 / 速率）：旧实现由 ClipHeader 的 DOM
                 输入框承担，内核模式下 clip 是自绘的，必须自备输入框。位置由宿主

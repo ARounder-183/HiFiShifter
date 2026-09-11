@@ -2985,6 +2985,24 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                               contentHeight,
                                           }
                                 }
+                                dropPreview={
+                                    dropPreview === null || dropPreview.trackId === null
+                                        ? undefined
+                                        : {
+                                              leftPx: Math.max(0, dropPreview.startSec * pxPerSec),
+                                              widthPx: Math.max(
+                                                  1,
+                                                  pxPerSec *
+                                                      (dropPreview.durationSec > 0
+                                                          ? dropPreview.durationSec
+                                                          : 1),
+                                              ),
+                                              trackId: dropPreview.trackId,
+                                              fileName: dropPreview.fileName,
+                                              contentWidth: timelineScrollRange.paddedContentWidth,
+                                              contentHeight,
+                                          }
+                                }
                                 onDragOver={handleTimelineDragOver}
                                 onDrop={handleTimelineDrop}
                             />
