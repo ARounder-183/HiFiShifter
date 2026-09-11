@@ -111,14 +111,28 @@
 **未验证（mock 限制）**：禁用状态的实际视觉切换依赖后端返回的 `disabled_group_ids`
 （mock 的 fallback 不返回 TimelineState），需真机确认。
 
-### 未完成（下一批）
+### C-3 增益旋钮（已完成，提交 `feat(timeline-kernel): gain knob drag and double-click reset`）
 
-| 任务 | 内容 | 说明 |
+- 新内核手势 `gain-drag`：旋钮**竖直拖动调值**（3px 起手阈值，旧实现语义）；
+  单击不再进编辑；双击 → `onGainReset` → `commitTrackLaneGain(clipId, 0)`
+- 面板换算与旧实现同源：`deltaDb = ΔY × CLIP_GAIN_DRAG_DB_PER_PX`（常量提到
+  `timeline/constants.ts` 作为单一来源）、`advanceFineAxisDrag` 处理精细修饰键、
+  `applyBulkGainDeltaDb` 钳制 ±12dB、提交 `setClipsStateBulkRemote`（读乐观值）
+- 徽标改为**双击**进行内编辑（手册语义）；单击只走选中/拖拽
+- Esc / pointercancel 回滚到按下时增益
+- **踩坑（重要）**：旋钮分支**不能**自己做双击判定——外层 clip 分支已把
+  `lastClipPress` 覆写成"本次按下"，自判必然恒为双击（表现为"每次按旋钮都把增益
+  重置成 0dB"）。直接复用外层的 `isDoubleClick`。
+- 验证：拖动 40px → gain 0.3162（-10dB）；双击 → 1.0；单击徽标 inputs=0；
+  双击徽标 inputs=1（值 "0"）
+
+### 未完成（下一批，均需先做「逻辑抽取」）
+
+| 任务 | 内容 | 前置工作 |
 |---|---|---|
-| C-1 | `Alt` 拖边缘 = stretch（`modifier.clipStretch`）；`Alt` 拖 body = slip（`modifier.clipSlipEdit`） | 需新增内核手势分支 + 复用 `useEditDrag` 的 stretch 数学与 `useSlipDrag` 语义 |
-| C-2 | `Alt+Shift` 竖直拖 clip = 调该 clip 音高（`modifier.clipPitchDrag`） | 需新增竖直手势 + 复用 `useClipPitchDrag` |
-| C-3 | 增益旋钮拖动调值 + 双击重置 0 dB；徽标改为**双击**进输入（与手册一致） | 需新增 `gain-drag` 手势（`deltaDb = ΔY × CLIP_GAIN_DRAG_DB_PER_PX`，钳制 ±12dB，复用 `applyBulkGainDeltaDb`） |
-| C-6 | trim / fade / snap offset 的**多选批量**（B-2 残留） | 拖拽移动已覆盖多选与编组 |
+| C-1 | `Alt` 拖边缘 = stretch（`modifier.clipStretch`）；`Alt` 拖 body = slip（`modifier.clipSlipEdit`） | **必须先抽取**：stretch 的领域逻辑目前深度耦合在 `useEditDrag`（`drag.stretchGroup` / 速率两阶段写回 / snap offset 比例缩放 / 参数线时域映射，散落在 470–800、1475、1713、1865、1960 等 20+ 处）。按 `copyClipsFromDrag` 的先例抽成共享函数，再让内核手势调用（否则会产生第二份拉伸语义）。slip 逻辑相对独立（`useSlipDrag`），可同批抽取 |
+| C-2 | `Alt+Shift` 竖直拖 clip = 调该 clip 音高（`modifier.clipPitchDrag`） | **必须先抽取**：`useClipPitchDrag`（369 行）自带拖拽状态、tooltip 与「根轨道需 composeEnabled + 有音高分析算法」的前置校验；内核需要的是同一份「竖直位移 → cents → 参数线写入」逻辑 |
+| C-6 | trim / fade / snap offset 的**多选批量**（B-2 残留） | 拖拽移动已覆盖多选与编组；trim/fade 需按旧实现 `useEditDrag` 的 `supportsGroupExpansion`（fade 不展开组）逐 clip 应用 |
 
 ---
 
