@@ -30,29 +30,15 @@
  *    WebGL 的 BLEND 默认关闭，不设置会让半透明色块变成实色、层叠顺序失效。
  */
 
-import { CLIP_INSTANCE_FLOATS } from "../../runtime/timelineClipGlRenderer";
 import type { GlRasterTarget } from "./glRaster";
 import { resolveBufferFloats } from "./instanceBuffer";
+import { CLIP_INSTANCE_FLOATS, CLIP_INSTANCE_OFFSETS } from "./instanceLayout";
 
-// ── 实例布局偏移（float 下标；与 runtime/timelineClipGlRenderer 的 OFF_* 一致）──────
-
-const OFF_RECT = 0; // 4 floats: x, y, w, h
-const OFF_RADIUS = 4;
-const OFF_HEADER_H = 5;
-const OFF_BODY_RGBA = 6; // 4 floats
-const OFF_HEADER_RGBA = 10; // 4 floats
-const OFF_BORDER_RGBA = 14; // 4 floats
-const OFF_BORDER_WIDTH = 18;
-const OFF_OVERLAP_PX = 19;
-const OFF_SEAM = 20;
-const OFF_SEAM_RGB = 21; // 3 floats
-const OFF_MODE = 24;
+/** 字段偏移：单一来源见 `instanceLayout`（该文件声明了与既有实现的一致性约束）。 */
+const OFF = CLIP_INSTANCE_OFFSETS;
 
 /** 单实例字节步长。 */
 const INSTANCE_STRIDE_BYTES = CLIP_INSTANCE_FLOATS * 4;
-
-/** 平面矩形模式（与 `buildGuideInstance` / `buildGridInstances` 的写入端一致）。 */
-export const INSTANCE_MODE_FLAT = 1;
 
 // ── 着色器 ───────────────────────────────────────────────────────────
 // 顶点：单位四边形按实例矩形展开（含描边与分隔缝的外扩余量）。
@@ -313,17 +299,17 @@ export function createSdfBoxProgram(gl: WebGL2RenderingContext): SdfBoxProgram {
         gl.vertexAttribDivisor(unitLocation, 0);
 
         gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuffer);
-        bindInstanceAttrib("i_rect", 4, OFF_RECT);
-        bindInstanceAttrib("i_radius", 1, OFF_RADIUS);
-        bindInstanceAttrib("i_headerH", 1, OFF_HEADER_H);
-        bindInstanceAttrib("i_bodyColor", 4, OFF_BODY_RGBA);
-        bindInstanceAttrib("i_headerColor", 4, OFF_HEADER_RGBA);
-        bindInstanceAttrib("i_borderColor", 4, OFF_BORDER_RGBA);
-        bindInstanceAttrib("i_borderWidth", 1, OFF_BORDER_WIDTH);
-        bindInstanceAttrib("i_overlapPx", 1, OFF_OVERLAP_PX);
-        bindInstanceAttrib("i_seamW", 1, OFF_SEAM);
-        bindInstanceAttrib("i_seamColor", 3, OFF_SEAM_RGB);
-        bindInstanceAttrib("i_mode", 1, OFF_MODE);
+        bindInstanceAttrib("i_rect", 4, OFF.rect);
+        bindInstanceAttrib("i_radius", 1, OFF.radius);
+        bindInstanceAttrib("i_headerH", 1, OFF.headerH);
+        bindInstanceAttrib("i_bodyColor", 4, OFF.bodyRgba);
+        bindInstanceAttrib("i_headerColor", 4, OFF.headerRgba);
+        bindInstanceAttrib("i_borderColor", 4, OFF.borderRgba);
+        bindInstanceAttrib("i_borderWidth", 1, OFF.borderWidth);
+        bindInstanceAttrib("i_overlapPx", 1, OFF.overlapPx);
+        bindInstanceAttrib("i_seamW", 1, OFF.seam);
+        bindInstanceAttrib("i_seamColor", 3, OFF.seamRgb);
+        bindInstanceAttrib("i_mode", 1, OFF.mode);
 
         gl.bindVertexArray(null);
 

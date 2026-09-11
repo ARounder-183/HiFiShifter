@@ -8,6 +8,10 @@
  * - useTimelineEventHandlers→ 全局事件监听
  *
  * 此文件只保留：JSX 渲染 + 胶水 + 拖拽 hooks 桥接
+ *
+ * 【Spike 开关】`TIMELINE_KERNEL_ENABLED`（localStorage `hifishifter.timelineKernel`）
+ * 开启时，在时间轴区域额外渲染 `TimelineKernelSpikeView`（新渲染内核，覆盖式）；
+ * 默认关闭，既有实现完全不受影响。
  */
 import React, { useMemo, Profiler } from "react";
 import { Flex, Dialog, Button, Text } from "@radix-ui/themes";
@@ -94,6 +98,16 @@ import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeline";
 import { SnapHighlightLayer } from "./timeline/SnapHighlightLayer";
 import { SNAP_HIGHLIGHT_GROUP, clearSnapHighlights } from "../../utils/snapHighlight";
 import type { TempoMap } from "../../utils/tempoMap";
+import { isTimelineKernelEnabled } from "./timeline/kernel/featureFlag";
+import { TimelineKernelSpikeView } from "./timeline/kernel/TimelineKernelSpikeView";
+
+/**
+ * 时间轴渲染内核（Spike）开关：模块加载时读一次。
+ *
+ * 开启后时间轴区域由新内核（自绘滚动 + 单 WebGL2）覆盖渲染；关闭时完全走既有实现。
+ * 切换需刷新页面（与既有 dev 开关行为一致）。见 `timeline/kernel/featureFlag`。
+ */
+const TIMELINE_KERNEL_ENABLED = isTimelineKernelEnabled();
 import type { ScaleLike } from "../../utils/musicalScales";
 import { TimelineDisplaySettingsDialog } from "./TimelineDisplaySettingsDialog";
 import { resolveTimelineScrollRange } from "./timeline/runtime/timelineScrollRange";
@@ -1664,6 +1678,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
 
                 {/* Timeline View (Right) */}
                 <Flex direction="column" className="flex-1 relative overflow-hidden bg-qt-graph-bg">
+                    {/* Spike：新渲染内核（自绘滚动 + 单 WebGL2）覆盖整个时间轴区域。
+                        开关默认关闭（见 featureFlag）；开启时既有子树仍在下方渲染，
+                        但被内核视图（absolute inset-0 z-30）完全覆盖——Spike 只验证
+                        渲染与滚动，不接管交互。 */}
+                    {TIMELINE_KERNEL_ENABLED ? <TimelineKernelSpikeView /> : null}
                     {/* playheadSec 传提交值（而非渲染期读 ref）：视觉插值由
                     playheadLineRef/playheadHeadRef 命令式驱动；React 仅在该值
                     真正变化时重写 style.left，写入的是最新提交位置而非陈旧值。 */}
