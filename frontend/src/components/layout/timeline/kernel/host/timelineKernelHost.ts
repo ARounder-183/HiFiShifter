@@ -48,7 +48,15 @@ import {
     parseRgbaColor,
     type GlClipBodySink,
 } from "../../runtime/timelineClipGlRenderer";
-import { resolveFontFamily, resolveThemeColor } from "../../runtime/timelineCanvasStyle";
+import {
+    buildTimelineClipVisualStyle,
+    resolveFontFamily,
+    resolveThemeColor,
+} from "../../runtime/timelineCanvasStyle";
+import {
+    hitClipHeaderControl,
+    type ClipHeaderControl,
+} from "../interaction/clipHeaderControls";
 import { resolveHorizontalWheelZoom } from "../../runtime/timelineScrollRange";
 import { resolveTimelineMinPxPerSec } from "../../runtime/timelineZoomBounds";
 import {
@@ -136,6 +144,15 @@ export interface TimelineKernelData {
     readonly selectedClipId: string | null;
     /** 多选集合（与 `selectedClipId` 一起决定描边 / 高亮）。 */
     readonly multiSelectedClipIds: readonly string[];
+    /**
+     * 激活 / 禁用的分组 id。
+     *
+     * 供 header 控件级命中构造 `buildTimelineClipVisualStyle`：分组的激活 / 禁用
+     * 状态会改变链徽标的可见性与配色，而**可见性决定偏移量**（静音徽标的 x 依赖
+     * 链徽标是否显示）——不传会让命中区与绘制区错位。
+     */
+    readonly activeGroupIds: readonly string[];
+    readonly disabledGroupIds: readonly string[];
 }
 
 /**
@@ -260,6 +277,54 @@ export interface TimelineKernelInteractions {
      * 内核只负责识别手势，事件派发与焦点切换由面板完成。
      */
     readonly onDoubleClickClip?: (clipId: string) => void;
+    /**
+     * 切换 clip 静音（单击 header 的静音徽标）。
+     *
+     * @param clipId 目标 clip。
+     * @param nextMuted 目标状态（取反后的值，与旧实现一致：旧实现传 `!clip.muted`）。
+     */
+    readonly onToggleClipMute?: (clipId: string, nextMuted: boolean) => void;
+    /**
+     * 打开共振峰工具窗口（单击 header 的 F 徽标）。
+     *
+     * @param clipId 目标 clip。
+     * @param screenX 浮窗锚点的视口坐标 x（旧实现取按钮右缘 + 12）。
+     * @param screenY 浮窗锚点的视口坐标 y（旧实现取按钮上缘）。
+     */
+    readonly onOpenClipFormant?: (clipId: string, screenX: number, screenY: number) => void;
+    /**
+     * 开始行内编辑 clip 的增益 / 速率（单击对应标签或增益旋钮）。
+     *
+     * @param clipId 目标 clip。
+     * @param field 编辑字段。
+     * @param screenX 输入框锚点的视口坐标。
+     * @param screenY 输入框锚点的视口坐标。
+     */
+    readonly onBadgeEditStart?: (
+        clipId: string,
+        field: "gain" | "rate",
+        screenX: number,
+        screenY: number,
+    ) => void;
+    /**
+     * 打开速率高级编辑（**右键**速率标签）。
+     *
+     * @param clipId 目标 clip。
+     * @param screenX 菜单锚点的视口坐标。
+     * @param screenY 菜单锚点的视口坐标。
+     */
+    readonly onRateBadgeMenu?: (clipId: string, screenX: number, screenY: number) => void;
+    /**
+     * 请求进入 clip 重命名（**双击名称区**）。
+     *
+     * 与 `onDoubleClickClip`（双击其他区域 → 参数编辑器选区）互斥：名称区优先。
+     * 旧实现里名称区的处理器会 `stopPropagation`，两者天然不会同时触发。
+     *
+     * @param clipId 目标 clip。
+     * @param screenX 输入框锚点的视口坐标。
+     * @param screenY 输入框锚点的视口坐标。
+     */
+    readonly onRenameClipStart?: (clipId: string, screenX: number, screenY: number) => void;
     /**
      * 拖拽预览（拖拽期间每帧回调，**不经 React 渲染**）。
      *
@@ -388,6 +453,25 @@ export interface TimelineKernelHost {
      * 上下文与几何缓存，只需要一个与内核同源的 axis 即可零重建跟随滚动）。
      */
     getAxis(): TimelineAxis;
+    /**
+     * 调试用：报告某屏幕坐标的命中结果与 header 控件判定。
+     *
+     * 【为什么放进公开句柄】内核是自绘的，命中区无法从 DOM 观察。排查「点不准」
+     * 类问题（命中区与绘制区错位、控件分派未触发）必须能读到几何判定的中间结果，
+     * 否则只能靠反复试点击猜坐标。配合 `window.__hfsKernel` 使用。
+     *
+     * @param clientX 屏幕坐标 x。@param clientY 屏幕坐标 y。
+     * @returns 命中分区、clip 局部坐标与控件判定（无命中时相应字段缺省）。
+     */
+    debugHitAt(clientX: number, clientY: number): {
+        readonly kind: string;
+        readonly region?: string;
+        readonly control?: string;
+        readonly clipId?: string;
+        readonly localX?: number;
+        readonly localY?: number;
+        readonly sec?: number;
+    };
     /**
      * 注册独立画布图层：内核在每次视口提交（滚动 / 缩放 / 重建）后按 order 调用其 paint。
      *
@@ -1048,6 +1132,14 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 trackId: clip.trackId,
                 startSec: clip.startSec,
                 lengthSec: clip.lengthSec,
+                // 以下字段 `hitTest` 本身不消费，只做透传：header 控件级命中需要
+                // 它们构造 `buildTimelineClipVisualStyle`（与绘制端同一份样式）。
+                muted: clip.muted,
+                gain: clip.gain,
+                playbackRate: clip.playbackRate,
+                name: clip.name,
+                groupId: clip.groupId,
+                isMidiClip: clip.midiNoteCount != null,
             });
         }
         for (const list of map.values()) list.sort((a, b) => a.startSec - b.startSec);
@@ -1666,6 +1758,68 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     }
 
     /** 左键按下：命中 clip → 待选中/待拖拽；命中空白 → 立即 seek 并进入拖拽 seek。 */
+    /**
+     * 判定指针落在 clip header 的哪个控件上。
+     *
+     * 流程：按 clip 几何与业务字段构造 `buildTimelineClipVisualStyle`（**与绘制端
+     * 同一个函数、同一组参数**）→ 交给 `hitClipHeaderControl` 做控件级命中。
+     *
+     * 特殊说明：必须传 `activeGroupIds` / `disabledGroupIds` / `isMidiClip`——它们
+     * 改变 header 控件的**可见性**，而可见性决定偏移量（静音徽标的 x 依赖链徽标
+     * 是否显示）。漏传会让命中区整体偏移，表现为"点静音点到了链"。
+     *
+     * @param hit `hitTest` 的 clip 命中结果（已含 `localX` / `localY`）。
+     * @returns 命中的控件；非 header 分区或未命中控件时为 null。
+     */
+    function resolveHeaderControl(hit: {
+        readonly clip: HitTestClip;
+        readonly region: ClipHitRegion;
+        readonly localX: number;
+        readonly localY: number;
+    }): ClipHeaderControl {
+        if (hit.region !== "header") return null;
+        const d = data();
+        const view = scroll.get();
+        const clipWidthPx = Math.max(1, hit.clip.lengthSec * view.pxPerSec);
+        const track = d.tracks.find((item) => item.id === hit.clip.trackId);
+        const style = buildTimelineClipVisualStyle({
+            widthPx: clipWidthPx,
+            trackColor: track?.color,
+            selected:
+                d.selectedClipId === hit.clip.id ||
+                d.multiSelectedClipIds.includes(hit.clip.id),
+            muted: hit.clip.muted === true,
+            gain: hit.clip.gain ?? 0,
+            playbackRate: hit.clip.playbackRate ?? 1,
+            name: hit.clip.name ?? "",
+            fontFamily: resolveFontFamily(),
+            isPitchAdjustment: hit.clip.isMidiClip === true,
+            groupId: hit.clip.groupId,
+            isGroupActive:
+                hit.clip.groupId != null && d.activeGroupIds.includes(hit.clip.groupId),
+            isGroupDisabled:
+                hit.clip.groupId != null && d.disabledGroupIds.includes(hit.clip.groupId),
+            darkMode: d.darkMode,
+        });
+        return hitClipHeaderControl({
+            localX: hit.localX,
+            localY: hit.localY,
+            clipWidthPx,
+            style,
+            headerHeightPx: CLIP_HEADER_HEIGHT,
+        });
+    }
+
+    /**
+     * 把视口内坐标换算为屏幕坐标（供浮层 / 输入框锚点使用）。
+     *
+     * @param clientX 指针视口坐标 x。@param clientY 指针视口坐标 y。
+     * @returns 与指针同位置的屏幕坐标（浮层需要的是 `clientX/Y`，直接透传）。
+     */
+    function screenAnchor(clientX: number, clientY: number): { x: number; y: number } {
+        return { x: clientX, y: clientY };
+    }
+
     function startPrimaryGesture(event: PointerEvent): void {
         const hit = hitAt(event.clientX, event.clientY);
         if (hit.kind === "clip") {
@@ -1689,9 +1843,43 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                       time: performance.now(),
                   };
             if (isDoubleClick) {
-                interactions?.onDoubleClickClip?.(hit.clip.id);
+                // 名称区双击 → 重命名；其他区域双击 → 参数编辑器选区。
+                // （旧实现里名称区处理器会 stopPropagation，两者天然互斥。）
+                const anchor = screenAnchor(event.clientX, event.clientY);
+                if (resolveHeaderControl(hit) === "name") {
+                    interactions?.onRenameClipStart?.(hit.clip.id, anchor.x, anchor.y);
+                } else {
+                    interactions?.onDoubleClickClip?.(hit.clip.id);
+                }
                 return;
             }
+
+            // ── header 控件级分派 ──
+            // 位于双击判定之后：双击优先级更高（名称区双击进入重命名，而不是
+            // 触发一次"开始编辑"再被双击覆盖）。
+            const control = resolveHeaderControl(hit);
+            if (control !== null) {
+                const anchor = screenAnchor(event.clientX, event.clientY);
+                if (control === "mute") {
+                    interactions?.onToggleClipMute?.(hit.clip.id, hit.clip.muted !== true);
+                    return;
+                }
+                if (control === "formant") {
+                    interactions?.onOpenClipFormant?.(hit.clip.id, anchor.x, anchor.y);
+                    return;
+                }
+                if (control === "gain-knob" || control === "gain-label") {
+                    interactions?.onBadgeEditStart?.(hit.clip.id, "gain", anchor.x, anchor.y);
+                    return;
+                }
+                if (control === "rate-label") {
+                    interactions?.onBadgeEditStart?.(hit.clip.id, "rate", anchor.x, anchor.y);
+                    return;
+                }
+                // `name`：单击仍走选中 / 拖拽（只有双击才重命名），继续往下走。
+                // `chain`：分组交互本期未接（需单独调研旧实现的分组语义）。
+            }
+
             const rect = container.getBoundingClientRect();
             const view = scroll.get();
             // 淡变角需要当前的淡变长度：命中索引只带几何字段，这里按 region
@@ -2089,9 +2277,19 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             suppressNextContextMenu = false;
             return;
         }
-        if (interactions?.onContextMenu === undefined) return;
         event.preventDefault();
         const hit = hitAt(event.clientX, event.clientY);
+        // 速率标签右键 → 速率高级编辑（BPM 换算对话框），优先于通用右键菜单
+        // （旧实现同样在速率角标上拦截右键）。其余位置仍走通用菜单。
+        if (
+            hit.kind === "clip" &&
+            interactions?.onRateBadgeMenu !== undefined &&
+            resolveHeaderControl(hit) === "rate-label"
+        ) {
+            interactions.onRateBadgeMenu(hit.clip.id, event.clientX, event.clientY);
+            return;
+        }
+        if (interactions?.onContextMenu === undefined) return;
         const trackId = hit.kind === "clip" ? hit.clip.trackId : hit.trackId;
         interactions.onContextMenu({
             clientX: event.clientX,
@@ -2326,6 +2524,22 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
 
         getAxis() {
             return currentAxis();
+        },
+
+        debugHitAt(clientX: number, clientY: number) {
+            const hit = hitAt(clientX, clientY);
+            if (hit.kind !== "clip") {
+                return { kind: hit.kind, sec: hit.sec };
+            }
+            return {
+                kind: hit.kind,
+                region: hit.region,
+                control: resolveHeaderControl(hit) ?? undefined,
+                clipId: hit.clip.id,
+                localX: hit.localX,
+                localY: hit.localY,
+                sec: hit.sec,
+            };
         },
 
         registerViewportLayer(layer, order) {

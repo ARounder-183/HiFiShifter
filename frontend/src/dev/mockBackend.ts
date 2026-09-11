@@ -221,7 +221,12 @@ function buildMockTimeline(): Record<string, unknown> {
                 auto_fade_out_sec: 0,
                 snap_offset_sec: index === 1 ? 0.25 : 0,
                 group_id: trackIndex === 3 && index === 1 ? "group-a" : undefined,
-                midi_note_count: 0,
+                // `midi_note_count` **只在 MIDI clip 上出现**（前端以
+                // `midiNoteCount != null` 判定，0 也算 MIDI）。音频 clip 必须省略该
+                // 字段：写成 0 会让它们被判成 MIDI clip，从而走 pitch 分支的
+                // header 布局（隐藏增益旋钮与共振峰徽标），浏览器里就验证不到
+                // 音频 clip 的完整控件。
+                ...(trackIndex === 2 && index === clipCount - 1 ? { midi_note_count: 8 } : {}),
                 takes: [],
                 active_take_id: undefined,
             });

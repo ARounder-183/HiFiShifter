@@ -96,6 +96,15 @@ export interface TimelineKernelViewProps {
      * `pxPerSec` / 行高 / 轨道列表都取自 React 侧（与面板同源）：拖拽期间缩放与
      * 行高是低频操作，不需要内核在 rAF 内写。
      */
+    /**
+     * 激活 / 禁用的分组 id（header 控件命中需要）。
+     *
+     * 分组状态会改变链徽标的**可见性**，而可见性决定后续徽标的 x 偏移——不传会让
+     * 命中区与绘制区错位（表现为「点静音点到了链」）。由面板传入：面板是分组语义
+     * 的唯一持有者（激活集合由选中态派生）。
+     */
+    readonly activeGroupIds?: readonly string[];
+    readonly disabledGroupIds?: readonly string[];
     readonly snapHighlight?: {
         /** 当前水平缩放（CSS px/秒）。 */
         readonly pxPerSec: number;
@@ -119,6 +128,8 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         hostRef,
         interactions,
         snapHighlight,
+        activeGroupIds,
+        disabledGroupIds,
         onScrollLeftCommit,
         onViewportWidthChange,
     } = props;
@@ -197,6 +208,8 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         initialPxPerSec,
         selectedClipId,
         multiSelectedClipIds,
+        activeGroupIds: activeGroupIds ?? [],
+        disabledGroupIds: disabledGroupIds ?? [],
     });
 
     // 数据镜像：渲染期写 ref，宿主在 rAF 内读取（避免宿主订阅 React 状态）。
@@ -249,6 +262,16 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
             onSelectClip: (clipId, additive) =>
                 interactionsRef.current?.onSelectClip?.(clipId, additive),
             onDoubleClickClip: (clipId) => interactionsRef.current?.onDoubleClickClip?.(clipId),
+            onToggleClipMute: (clipId, nextMuted) =>
+                interactionsRef.current?.onToggleClipMute?.(clipId, nextMuted),
+            onOpenClipFormant: (clipId, screenX, screenY) =>
+                interactionsRef.current?.onOpenClipFormant?.(clipId, screenX, screenY),
+            onBadgeEditStart: (clipId, field, screenX, screenY) =>
+                interactionsRef.current?.onBadgeEditStart?.(clipId, field, screenX, screenY),
+            onRateBadgeMenu: (clipId, screenX, screenY) =>
+                interactionsRef.current?.onRateBadgeMenu?.(clipId, screenX, screenY),
+            onRenameClipStart: (clipId, screenX, screenY) =>
+                interactionsRef.current?.onRenameClipStart?.(clipId, screenX, screenY),
             onDragPreview: (args) => interactionsRef.current?.onDragPreview?.(args),
             onDragCommit: (args) => interactionsRef.current?.onDragCommit?.(args),
             onTrimPreview: (args) => interactionsRef.current?.onTrimPreview?.(args),

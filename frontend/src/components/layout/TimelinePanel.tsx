@@ -27,6 +27,7 @@ import { createPortal } from "react-dom";
 import {
     addTrackRemote,
     closeClipFormantToolWindow,
+    openClipFormantToolWindow,
     duplicateTrackRemote,
     removeTrackRemote,
     selectTrackRemote,
@@ -1558,12 +1559,56 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         [clearContextMenu],
     );
 
+    /**
+     * 内核静音切换：复用旧实现的处理器（内部含乐观更新、分组联动与远端提交）。
+     */
+    const handleKernelToggleClipMute = React.useCallback(
+        (clipId: string, nextMuted: boolean) => {
+            toggleTrackLaneClipMuted(clipId, nextMuted);
+        },
+        [toggleTrackLaneClipMuted],
+    );
+
+    /**
+     * 内核打开共振峰工具窗口：锚点用内核给的指针屏幕坐标。
+     *
+     * 旧实现取按钮右缘 +12 / 上缘（见 `ClipFormantButton`）；内核模式下指针就在
+     * 徽标上，直接用指针位置等价且更简单（浮窗自身会钳制到视口内）。
+     */
+    const handleKernelOpenClipFormant = React.useCallback(
+        (clipId: string, screenX: number, screenY: number) => {
+            dispatch(
+                openClipFormantToolWindow({
+                    clipId,
+                    anchor: { x: Math.round(screenX + 12), y: Math.round(screenY) },
+                }),
+            );
+        },
+        [dispatch],
+    );
+
+    /**
+     * 内核速率高级编辑（右键速率标签）：复用既有 `ClipRateEditorDialog`。
+     *
+     * 该对话框渲染在内核开关之外（见文件末尾），两种渲染模式共用，此前只是缺入口。
+     */
+    const handleKernelRateBadgeMenu = React.useCallback(
+        (clipId: string, screenX: number, screenY: number) => {
+            setRateEditorClipId(clipId);
+            setRateEditorPosition({ x: screenX, y: screenY });
+        },
+        [],
+    );
+
     /** 内核交互回调集合（引用稳定：内核创建时取一次）。 */
     const kernelInteractions = React.useMemo(
         () => ({
             onSeek: handleKernelSeek,
             onSelectClip: handleKernelSelectClip,
             onDoubleClickClip: handleKernelDoubleClickClip,
+            onToggleClipMute: handleKernelToggleClipMute,
+            onOpenClipFormant: handleKernelOpenClipFormant,
+            onRateBadgeMenu: handleKernelRateBadgeMenu,
             onDragPreview: handleKernelDragPreview,
             onDragCommit: handleKernelDragCommit,
             onTrimPreview: handleKernelTrimPreview,
@@ -2034,6 +2079,16 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         }
         return ids.size > 0 ? ids : undefined;
     }, [multiSelectedClipIds, clipById, s.selectedClipId, disabledGroupIds]);
+    /**
+     * 内核用分组数组。
+     *
+     * `activeGroupIds` 是派生的 `Set`，内核侧要数组；这里转一次并保持引用稳定，
+     * 避免每次渲染都产生新数组（数据镜像引用抖动会让宿主每帧判定「内容已变」）。
+     */
+    const kernelActiveGroupIds = React.useMemo(
+        () => (activeGroupIds === undefined ? [] : Array.from(activeGroupIds)),
+        [activeGroupIds],
+    );
     // 全图层共享的统一坐标投影：网格 / 标尺 / clip 体 / 波形 / 播放头都从这里
     // 取位置与缩放，任何图层都不许再自行执行 `sec * pxPerSec`（历史错位根因）。
     // 用 useMemo 缓存引用，否则下游 React.memo 会因新对象引用而每帧失效。
@@ -2356,6 +2411,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 rulerPlayheadLineRef={rulerPlayheadLineRef}
                                 hostRef={kernelHostRef}
                                 interactions={kernelInteractions}
+                                activeGroupIds={kernelActiveGroupIds}
+                                disabledGroupIds={disabledGroupIds}
                                 snapHighlight={{
                                     pxPerSec,
                                     contentWidth: timelineScrollRange.paddedContentWidth,

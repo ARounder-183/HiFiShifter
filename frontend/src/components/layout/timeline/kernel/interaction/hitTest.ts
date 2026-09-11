@@ -27,12 +27,28 @@ import { FADE_CORNER_CAP_WIDTH_PX, fadeCornerReservePx } from "../../constants";
 /** 左右边缘的默认命中宽度（CSS px）。与 `FADE_CORNER_EDGE_WIDTH_PX` 同量级。 */
 const DEFAULT_EDGE_WIDTH_PX = 6;
 
-/** 命中测试所需的 clip 最小字段集。 */
+/**
+ * 命中测试所需的 clip 字段集。
+ *
+ * 除几何字段外还带若干**业务字段**：`hitTest` 自身不消费它们，只做透传——调用方
+ * （宿主）需要用它们构造 `buildTimelineClipVisualStyle` 来判定 header 控件。
+ * 全部可选：只关心几何的调用方与既有测试无需补齐。
+ */
 export interface HitTestClip {
     readonly id: string;
     readonly trackId: string;
     readonly startSec: number;
     readonly lengthSec: number;
+    /** 是否静音（影响 header 的静音徽标配色与样式）。 */
+    readonly muted?: boolean;
+    /** 线性增益（样式解析内部换算为 dB）。 */
+    readonly gain?: number;
+    readonly playbackRate?: number;
+    readonly name?: string;
+    /** 分组 id（决定链徽标是否显示，进而决定静音徽标的 x 偏移）。 */
+    readonly groupId?: string;
+    /** 是否为 MIDI clip（`isPitchAdjustment`：会隐藏部分 header 控件）。 */
+    readonly isMidiClip?: boolean;
 }
 
 /** 命中测试所需的轨道最小字段集（顺序即纵向排列顺序）。 */
