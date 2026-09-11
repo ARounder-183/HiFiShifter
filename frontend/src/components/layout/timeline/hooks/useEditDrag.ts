@@ -98,8 +98,8 @@ import {
     type RippleFollowerMap,
     type RippleMode,
 } from "../../../../features/session/ripplePreview";
-
-const CLIP_GAIN_DRAG_DB_PER_PX = 0.25;
+// 换算常量与渲染内核的旋钮手势共用（单一来源，见 constants 的说明）。
+import { CLIP_GAIN_DRAG_DB_PER_PX } from "../constants";
 
 /**
  * 拉伸同步 SnapOffset：偏移点标记 Clip 内容中的位置，随长度按**总比例**

@@ -348,6 +348,36 @@ export interface TimelineKernelInteractions {
         screenY: number,
     ) => void;
     /**
+     * 音量旋钮拖拽预览（按住旋钮上下拖动时每帧回调，已按值去重）。
+     *
+     * 【为什么只给位移】dB 换算（`CLIP_GAIN_DRAG_DB_PER_PX`）、精细调整修饰键、
+     * ±12dB 钳制与批量应用都在面板侧——与 `onDragPreview` 同一架构约定。
+     *
+     * @param args `deltaYPx` 是相对按下点的竖直位移（向下为正，未乘任何系数）。
+     */
+    readonly onGainDragPreview?: (args: {
+        readonly clipId: string;
+        readonly deltaYPx: number;
+        readonly modifiers: KernelDragModifiers;
+    }) => void;
+    /**
+     * 音量旋钮拖拽结束。
+     *
+     * @param args `changed = false` 表示未越起手阈值的单击——调用方**不应**写后端；
+     *   `cancelled = true`（Esc / pointercancel）时应回滚到按下时的增益。
+     */
+    readonly onGainDragCommit?: (args: {
+        readonly clipId: string;
+        readonly changed: boolean;
+        readonly cancelled: boolean;
+    }) => void;
+    /**
+     * 双击音量旋钮 = 恢复 0 dB（手册：「双击恢复为 0 dB」）。
+     *
+     * @param clipId 目标 clip。
+     */
+    readonly onGainReset?: (clipId: string) => void;
+    /**
      * 打开速率高级编辑（**右键**速率标签）。
      *
      * @param clipId 目标 clip。
@@ -1858,11 +1888,33 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
               lastDeltaSec: number;
               lastTargetTrackId: string;
           }
+        | {
+              kind: "gain-drag";
+              clipId: string;
+              startClientX: number;
+              startClientY: number;
+              /** 最近一次派发的竖直位移（CSS px，向下为正）。 */
+              lastDeltaY: number;
+              /**
+               * 是否已越过起手阈值。
+               *
+               * 旧实现的音量旋钮有 3px 起手阈值：阈值内的按下/抬起是**单击**，
+               * 不产生任何编辑（只有拖动才改增益）。收尾据此决定是否提交。
+               */
+              started: boolean;
+          }
         | { kind: "seek" };
     let gesture: Gesture = { kind: "none" };
 
     /** 点击 / 拖拽的位移阈值（CSS px）。 */
     const DRAG_THRESHOLD_PX = 4;
+
+    /**
+     * 音量旋钮的起手阈值（CSS px）。
+     *
+     * 与旧实现 `ClipHeader` 一致（3px）：阈值内的按下/抬起是单击，不产生任何编辑。
+     */
+    const GAIN_DRAG_THRESHOLD_PX = 3;
 
     /**
      * 双击判定参数（与旧实现 `ClipItem` 完全一致）。
@@ -2301,7 +2353,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             }
 
             if (isDoubleClick) {
-                // 名称区双击 → 重命名；其他区域双击 → 参数编辑器选区。
+                // 名称区双击 → 重命名；旋钮双击 → 重置 0 dB；增益 / 速率徽标双击 →
+                // 行内编辑；其他区域双击 → 参数编辑器选区。
                 // （旧实现里名称区处理器会 stopPropagation，两者天然互斥。）
                 //
                 // 阻止默认动作：否则浏览器会把焦点移到被点击的容器上，而重命名输入框
@@ -2309,8 +2362,20 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 // 会把这次编辑当作"点开又点走"立刻取消。
                 event.preventDefault();
                 const anchor = screenAnchor(event.clientX, event.clientY);
-                if (resolveHeaderControl(hit) === "name") {
+                const control = resolveHeaderControl(hit);
+                if (control === "name") {
                     interactions?.onRenameClipStart?.(hit.clip.id, anchor.x, anchor.y);
+                } else if (control === "gain-knob") {
+                    // 双击旋钮 = 恢复 0 dB（手册：「双击恢复为 0 dB」）。
+                    interactions?.onGainReset?.(hit.clip.id);
+                } else if (control === "gain-label" || control === "rate-label") {
+                    // 双击徽标 = 原地输入数值（手册：「双击徽标即可在原位置输入数值」）。
+                    interactions?.onBadgeEditStart?.(
+                        hit.clip.id,
+                        control === "gain-label" ? "gain" : "rate",
+                        anchor.x,
+                        anchor.y,
+                    );
                 } else {
                     interactions?.onDoubleClickClip?.(hit.clip.id);
                 }
@@ -2336,14 +2401,27 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                     interactions?.onOpenClipFormant?.(hit.clip.id, anchor.x, anchor.y);
                     return;
                 }
-                if (control === "gain-knob" || control === "gain-label") {
-                    interactions?.onBadgeEditStart?.(hit.clip.id, "gain", anchor.x, anchor.y);
+                if (control === "gain-knob") {
+                    // 音量旋钮 = **拖动调值**（旧实现 3px 起手阈值），双击重置 0 dB。
+                    // 单击不做任何事（手册：「音量旋钮依然可以直接上下拖动，双击恢复为
+                    // 0 dB」；数值输入在**徽标**上）。
+                    //
+                    // 双击不需要在这里判定：旋钮属于 clip 命中，双击记录由上方
+                    // `lastClipPress` 统一维护，双击分支（`isDoubleClick`）已按
+                    // `control === "gain-knob"` 派发 `onGainReset`。这里若再判一次，
+                    // 读到的会是**本次**按下（上方刚写过），永远判成双击。
+                    gesture = {
+                        kind: "gain-drag",
+                        clipId: hit.clip.id,
+                        startClientX: event.clientX,
+                        startClientY: event.clientY,
+                        lastDeltaY: 0,
+                        started: false,
+                    };
                     return;
                 }
-                if (control === "rate-label") {
-                    interactions?.onBadgeEditStart?.(hit.clip.id, "rate", anchor.x, anchor.y);
-                    return;
-                }
+                // 增益 / 速率徽标：单击不进入编辑（手册：「双击徽标即可在原位置输入
+                // 数值」），因此这里只放行——继续往下走选中 / 拖拽，双击在双击分支处理。
                 if (control === "chain") {
                     // 锁链徽标：临时禁用 / 启用该编组的联动编辑（旧实现
                     // `ClipHeader` 的 `onToggleGroupDisabled`，作用于整个组而非单个 clip）。
@@ -2579,6 +2657,10 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             applyFadePreview(event);
             return;
         }
+        if (gesture.kind === "gain-drag") {
+            applyGainPreview(event);
+            return;
+        }
         if (gesture.kind === "crossfade-grip") {
             applyCrossfadeGripPreview(event);
             return;
@@ -2682,6 +2764,36 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             side: gesture.side,
             fadeSec: result.fadeSec,
             deltaSec: result.deltaSec,
+            modifiers: dragModifiersOf(event),
+        });
+    }
+
+    /**
+     * 计算并派发一次音量旋钮拖拽预览（拖拽期间每帧调用）。
+     *
+     * 流程：先判起手阈值（3px，与旧实现一致）→ 取**相对按下点**的竖直位移 →
+     * 与上次值比较去重 → 回调。
+     *
+     * 特殊说明：内核只给竖直位移（CSS px）——dB 换算（`CLIP_GAIN_DRAG_DB_PER_PX`）、
+     * 精细调整修饰键、±12dB 钳制与批量应用都在面板侧（与「内核只做几何」的既有分工一致）。
+     *
+     * @param event 指针事件。
+     * @returns 无返回值。
+     */
+    function applyGainPreview(event: PointerEvent): void {
+        if (gesture.kind !== "gain-drag") return;
+        if (!gesture.started) {
+            const dx = event.clientX - gesture.startClientX;
+            const dy = event.clientY - gesture.startClientY;
+            if (dx * dx + dy * dy < GAIN_DRAG_THRESHOLD_PX * GAIN_DRAG_THRESHOLD_PX) return;
+            gesture.started = true;
+        }
+        const deltaY = event.clientY - gesture.startClientY;
+        if (deltaY === gesture.lastDeltaY) return;
+        gesture.lastDeltaY = deltaY;
+        interactions?.onGainDragPreview?.({
+            clipId: gesture.clipId,
+            deltaYPx: deltaY,
             modifiers: dragModifiersOf(event),
         });
     }
@@ -2807,6 +2919,15 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 clipId: gesture.clipId,
                 side: gesture.side,
                 fadeSec: gesture.lastFadeSec,
+                cancelled,
+            });
+        }
+        if (gesture.kind === "gain-drag") {
+            interactions?.onGainDragCommit?.({
+                clipId: gesture.clipId,
+                // `changed = false` 表示未越起手阈值的单击——调用方不应提交
+                // （旧实现同样只在真正拖动后才写增益）。
+                changed: gesture.started,
                 cancelled,
             });
         }
@@ -3164,6 +3285,17 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                         clipId: gesture.clipId,
                         side: gesture.side,
                         fadeSec: gesture.lastFadeSec,
+                        cancelled: true,
+                    });
+                    gesture = { kind: "none" };
+                    break;
+                }
+                if (gesture.kind === "gain-drag") {
+                    // 音量旋钮拖拽中按 Esc：回滚到按下时的增益（未起手时无副作用）。
+                    event.preventDefault();
+                    interactions?.onGainDragCommit?.({
+                        clipId: gesture.clipId,
+                        changed: gesture.started,
                         cancelled: true,
                     });
                     gesture = { kind: "none" };

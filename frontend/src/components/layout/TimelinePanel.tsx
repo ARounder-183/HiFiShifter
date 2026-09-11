@@ -47,6 +47,7 @@ import {
     setClipStateRemote,
     setClipsStateBulkRemote,
     setClipFades,
+    setClipGain,
     setClipActiveTakeRemote,
     glueClipsRemote,
     convertClipsToPitchReferenceRemote,
@@ -158,6 +159,9 @@ import {
 } from "./timeline/hooks/autoCrossfade";
 import { computeEffectiveSnap } from "../../utils/timelineSnapping";
 import { store } from "../../app/store";
+import { applyBulkGainDeltaDb } from "./timeline/hooks/bulkClipEdit";
+import { advanceFineAxisDrag, type FineAxisDragState } from "./timeline/fineAxisDrag";
+import { CLIP_GAIN_DRAG_DB_PER_PX } from "./timeline/constants";
 import { useTimelineClipActions } from "./timeline/hooks/useTimelineClipActions";
 import { useTimelineEventHandlers } from "./timeline/hooks/useTimelineEventHandlers";
 import { useSnapOffsetDrag } from "./timeline/hooks/useSnapOffsetDrag";
@@ -2051,6 +2055,128 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     );
 
     /**
+     * 内核音量旋钮拖拽：按下时的基准（参与集合 + 各自增益 + 精细调整轴向状态）。
+     *
+     * 特殊说明：参与集合是**多选集合**，不展开编组——旧实现 `useEditDrag` 的
+     * `supportsGroupExpansion` 明确排除 gain（增益拖拽只作用于选中的 clip）。
+     */
+    const kernelGainOriginRef = React.useRef<{
+        clipId: string;
+        clipIds: string[];
+        baseGainById: Map<string, number>;
+        fineAxis: FineAxisDragState;
+    } | null>(null);
+
+    /**
+     * 内核音量旋钮预览：竖直位移 → dB → 逐 clip 钳制 ±12dB 写乐观值。
+     *
+     * 与旧实现同源：`deltaDb = 位移 × CLIP_GAIN_DRAG_DB_PER_PX`（向上拖 = 增益变大），
+     * 精细调整修饰键经 `advanceFineAxisDrag` 减速，钳制与换算复用 `applyBulkGainDeltaDb`。
+     */
+    const handleKernelGainDragPreview = React.useCallback(
+        (args: {
+            clipId: string;
+            deltaYPx: number;
+            modifiers: { ctrlKey: boolean; shiftKey: boolean; altKey: boolean; metaKey: boolean };
+        }) => {
+            if (kernelGainOriginRef.current?.clipId !== args.clipId) {
+                const session = sessionRef.current;
+                const participants = resolveKernelEditParticipants({
+                    anchorClipId: args.clipId,
+                    multiSelectedClipIds,
+                    clips: session.clips,
+                    trackIds: session.tracks.map((track) => track.id),
+                    ignoreGrouping: session.ignoreGrouping,
+                    disabledGroupIds: session.disabledGroupIds,
+                    // 增益拖拽不展开编组（旧实现 supportsGroupExpansion 排除 gain）。
+                    expandGroups: false,
+                });
+                if (participants.length === 0) return;
+                kernelGainOriginRef.current = {
+                    clipId: args.clipId,
+                    clipIds: participants.map((participant) => participant.clipId),
+                    baseGainById: new Map(
+                        participants.map((participant) => {
+                            const clip = session.clips.find(
+                                (item) => item.id === participant.clipId,
+                            );
+                            return [participant.clipId, Number(clip?.gain ?? 1) || 1] as const;
+                        }),
+                    ),
+                    // 轴向状态以「相对按下点的位移」为 raw：状态内部只比较增量，
+                    // 因此不需要绝对 clientY。
+                    fineAxis: { raw: 0, adjusted: 0, fineActive: false },
+                };
+            }
+            const origin = kernelGainOriginRef.current;
+            if (origin === null) return;
+            const adjustedY = advanceFineAxisDrag(
+                origin.fineAxis,
+                args.deltaYPx,
+                isModifierActive(paramFineAdjustKb, args.modifiers),
+            );
+            const updates = applyBulkGainDeltaDb({
+                clipIds: origin.clipIds,
+                clipsById: new Map(
+                    [...origin.baseGainById].map(([clipId, gain]) => [clipId, { gain }]),
+                ),
+                deltaDb: -adjustedY * CLIP_GAIN_DRAG_DB_PER_PX,
+                minDb: -12,
+                maxDb: 12,
+            });
+            batch(() => {
+                for (const update of updates) dispatch(setClipGain(update));
+            });
+        },
+        [dispatch, multiSelectedClipIds, paramFineAdjustKb, sessionRef],
+    );
+
+    /**
+     * 内核音量旋钮收尾：提交或回滚。
+     *
+     * 特殊说明：未越起手阈值的单击（`changed = false`）**不写后端**——旧实现同样
+     * 只在真正拖动后才落库（单击不产生 undo 步）。
+     */
+    const handleKernelGainDragCommit = React.useCallback(
+        (args: { clipId: string; changed: boolean; cancelled: boolean }) => {
+            const origin = kernelGainOriginRef.current;
+            kernelGainOriginRef.current = null;
+            if (origin === null || !args.changed) return;
+            if (args.cancelled) {
+                batch(() => {
+                    for (const [clipId, gain] of origin.baseGainById) {
+                        dispatch(setClipGain({ clipId, gain }));
+                    }
+                });
+                return;
+            }
+            dispatch(checkpointHistory());
+            // 提交值取 Redux 当前值（预览已写入钳制后的结果）——用基准 + 位移重算
+            // 会绕开钳制，表现为"预览到 ±12dB 上限、落库却超出"。
+            const session = sessionRef.current;
+            void dispatch(
+                setClipsStateBulkRemote({
+                    updates: origin.clipIds.map((clipId) => ({
+                        clipId,
+                        gain:
+                            Number(session.clips.find((item) => item.id === clipId)?.gain ?? 1) ||
+                            1,
+                    })),
+                }),
+            );
+        },
+        [dispatch, sessionRef],
+    );
+
+    /** 内核双击旋钮 → 恢复 0 dB（复用旧实现的增益提交入口，含乐观更新与落库）。 */
+    const handleKernelGainReset = React.useCallback(
+        (clipId: string) => {
+            commitTrackLaneGain(clipId, 0);
+        },
+        [commitTrackLaneGain],
+    );
+
+    /**
      * 内核态行内编辑状态（重命名 / 增益 / 速率）。
      *
      * 值的格式化与解析都留在面板（领域知识：增益是 dB、速率有 `x` / `%` 前缀）；
@@ -2274,6 +2400,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             onRateBadgeMenu: handleKernelRateBadgeMenu,
             onRenameClipStart: handleKernelRenameClipStart,
             onBadgeEditStart: handleKernelBadgeEditStart,
+            onGainDragPreview: handleKernelGainDragPreview,
+            onGainDragCommit: handleKernelGainDragCommit,
+            onGainReset: handleKernelGainReset,
             onCrossfadeGripPreview: handleKernelCrossfadeGripPreview,
             onCrossfadeGripCommit: handleKernelCrossfadeGripCommit,
             onFadeShapeCycle: handleFadeShapeCycleClick,
