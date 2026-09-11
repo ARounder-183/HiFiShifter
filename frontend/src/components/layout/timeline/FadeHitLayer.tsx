@@ -20,6 +20,7 @@ import { registerDragAbort } from "./gestureFocusGuard";
 import { isNoneBinding } from "../../../features/keybindings/keybindingsSlice";
 import type { Keybinding } from "../../../features/keybindings/types";
 import { buildFadeHitTargets } from "./fadeHitTargets";
+import { isFadeShapeCycleModifierHeld } from "./fadeShapeCycle";
 import {
     buildSingleFadeInfoContent,
     buildSingleFadeInfoText,
@@ -191,7 +192,7 @@ export const FadeHitLayer = React.memo(function FadeHitLayer({
                                 onShapeCycleClick &&
                                 shapeCycleKb != null &&
                                 !isNoneBinding(shapeCycleKb) &&
-                                cycleModifierHeld(shapeCycleKb, e.nativeEvent);
+                                isFadeShapeCycleModifierHeld(shapeCycleKb, e.nativeEvent);
                             if (isLine && cycleHeld) {
                                 e.preventDefault();
                                 e.stopPropagation();
@@ -274,18 +275,3 @@ export const FadeHitLayer = React.memo(function FadeHitLayer({
         </>
     );
 });
-
-/**
- * pointerdown 现场判定循环修饰键是否按下。按下瞬间的事件本身是最可靠
- * 的信号源；modifierWatcher 在手势全程持续自愈全局快照供后续帧使用。
- */
-function cycleModifierHeld(kb: Keybinding, event: PointerEvent): boolean {
-    const requiredCtrl = kb.modifierOnly === true && kb.key === "control" ? true : Boolean(kb.ctrl);
-    const requiredAlt = kb.modifierOnly === true && kb.key === "alt" ? true : Boolean(kb.alt);
-    const requiredShift = kb.modifierOnly === true && kb.key === "shift" ? true : Boolean(kb.shift);
-    return (
-        (!requiredCtrl || event.ctrlKey || event.metaKey) &&
-        (!requiredAlt || event.altKey) &&
-        (!requiredShift || event.shiftKey)
-    );
-}

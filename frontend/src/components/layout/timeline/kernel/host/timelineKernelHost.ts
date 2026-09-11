@@ -51,6 +51,8 @@ import {
     resolveThemeColor,
 } from "../../runtime/timelineCanvasStyle";
 import { hitClipHeaderControl, type ClipHeaderControl } from "../interaction/clipHeaderControls";
+import { isFadeShapeCycleModifierHeld } from "../../fadeShapeCycle";
+import { noteFadeLinePointerDown } from "../../hooks/fadeLineClickGesture";
 import { hitClipFadeTarget } from "../interaction/fadeTargets";
 import { hitOverlapControl } from "../interaction/overlapControls";
 import { resolveHorizontalWheelZoom } from "../../runtime/timelineScrollRange";
@@ -127,6 +129,12 @@ export interface TimelineKernelData {
         readonly scrollHorizontal: Keybinding | null;
         readonly scrollVertical: Keybinding | null;
         readonly scrollbarZoom: Keybinding | null;
+        /**
+         * 淡变形状循环（`modifier.fadeShapeCycleClick`）。
+         *
+         * 修饰键 + 单击包络线 = 循环切换形状并重置曲率；拖动超过阈值仍是改长度。
+         */
+        readonly fadeShapeCycle: Keybinding | null;
     };
     /** 水平缩放是否以播放头为锚点（`playheadZoomEnabled`）。 */
     readonly playheadZoomEnabled: boolean;
@@ -341,6 +349,25 @@ export interface TimelineKernelInteractions {
         readonly deltaSec: number;
         readonly cancelled: boolean;
     }) => void;
+    /**
+     * 淡变形状循环（循环修饰键 + 单击包络线，未拖动）。
+     *
+     * @param clipId 目标 clip。
+     * @param side 淡入还是淡出。
+     */
+    readonly onFadeShapeCycle?: (clipId: string, side: "in" | "out") => void;
+    /**
+     * 交叉点抓手上的循环点击：同时切换两侧的形状。
+     *
+     * @param sides 两侧（前一个 clip 的淡出 + 后一个 clip 的淡入）。
+     */
+    readonly onCrossfadeCycle?: (sides: Array<{ clipId: string; isOut: boolean }>) => void;
+    /**
+     * 重置淡变曲率（双击包络线本体 / 交叉点抓手）。
+     *
+     * @param sides 需要重置的侧。
+     */
+    readonly onResetFadeCurvature?: (sides: Array<{ clipId: string; isOut: boolean }>) => void;
     /**
      * 拖拽预览（拖拽期间每帧回调，**不经 React 渲染**）。
      *
@@ -1561,6 +1588,13 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                * clip（重叠区里二分的自然结果），而抓手需要同时操作两侧。
                */
               partnerClipId?: string;
+              /**
+               * 按下时循环修饰键是否按住（仅淡变控件与交叉点抓手会置位）。
+               *
+               * 收尾时若仍未升级（= 未超过拖拽阈值）→ 视为「循环点击」而不是选中，
+               * 与旧实现的「延后判定用户意图」一致：拖动 = 改长度，未拖动 = 循环。
+               */
+              cycleHeld?: boolean;
           }
         | {
               kind: "clip-fade";
@@ -1706,7 +1740,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             // `hitTest` 内判过——旧实现的优先级是「clip 边缘 > 淡变边缘线 > 包络线」，
             // 把淡变放在边缘之后正好吻合。
             if (hit.region === "body") {
-                const side = hitClipFadeTarget({
+                const fade = hitClipFadeTarget({
                     clip: hit.clip,
                     clipLeftPx: hit.clip.startSec * view.pxPerSec,
                     clipWidthPx: Math.max(1, hit.clip.lengthSec * view.pxPerSec),
@@ -1715,15 +1749,16 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                     pxPerSec: view.pxPerSec,
                     rowHeight: view.rowHeight,
                 });
-                if (side !== null) {
+                if (fade !== null) {
                     return {
                         kind: "clip",
                         clip: hit.clip,
-                        region: side === "out" ? "fade-out-corner" : "fade-in-corner",
+                        region: fade.side === "out" ? "fade-out-corner" : "fade-in-corner",
                         sec: hit.sec,
                         trackIndex: hit.trackIndex,
                         localX: hit.localX,
                         localY: hit.localY,
+                        fadeIsLine: fade.kind === "line",
                     };
                 }
             }
@@ -1754,6 +1789,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             localX: contentX - target.startSec * view.pxPerSec,
             localY: hit.localY,
             partnerClipId: overlap.partnerClipId,
+            fadeIsLine: overlap.fadeIsLine,
         };
     }
 
@@ -1910,7 +1946,15 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      * `hitTest` 的原始结果 + 重叠区解析补充的字段（`partnerClipId` 只在交叉点
      * 抓手上出现：抓手需要同时知道两侧的 clip）。
      */
-    type KernelHit = ReturnType<typeof hitTest> & { readonly partnerClipId?: string };
+    type KernelHit = ReturnType<typeof hitTest> & {
+        readonly partnerClipId?: string;
+        /**
+         * 淡变命中是否为包络线本体（`false` = 区域边缘竖线）。
+         *
+         * 双击重置曲率只对本体生效（旧实现 `zone.line` / `isLine` 同义）。
+         */
+        readonly fadeIsLine?: boolean;
+    };
 
     /**
      * 判定指针落在 clip header 的哪个控件上。
@@ -2004,6 +2048,44 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                       clientY: event.clientY,
                       time: performance.now(),
                   };
+            // ── 淡变包络线 / 交叉点抓手的双击 = 重置曲率 ──
+            // 用旧实现同一套判定（时间窗 + 目标键，见 `fadeLineClickGesture`）：
+            // 位置无关——包络线很细，用户两次点击很难落在同一像素上，按位置判双击
+            // 会经常失效。循环修饰键按住时循环优先，双击让位（与旧实现一致）。
+            const fadeCycleHeld = isFadeShapeCycleModifierHeld(
+                data().keybindings.fadeShapeCycle,
+                event,
+            );
+            if (
+                hit.region === "fade-in-corner" ||
+                hit.region === "fade-out-corner" ||
+                hit.region === "crossfade-grip"
+            ) {
+                const isGrip = hit.region === "crossfade-grip";
+                const pressKey = isGrip
+                    ? `${hit.clip.id}:${hit.partnerClipId ?? ""}:grip`
+                    : `${hit.clip.id}:${hit.region}`;
+                if (!fadeCycleHeld && noteFadeLinePointerDown(pressKey) === "double") {
+                    // 抓手 = 同时重置两侧；包络线**本体** = 只重置该侧；
+                    // 区域边缘竖线不参与（旧实现的 `zone.line` 门槛）。
+                    const sides = isGrip
+                        ? hit.partnerClipId === undefined
+                            ? null
+                            : [
+                                  { clipId: hit.partnerClipId, isOut: true },
+                                  { clipId: hit.clip.id, isOut: false },
+                              ]
+                        : hit.fadeIsLine === true
+                          ? [{ clipId: hit.clip.id, isOut: hit.region === "fade-out-corner" }]
+                          : null;
+                    if (sides !== null) {
+                        event.preventDefault();
+                        interactions?.onResetFadeCurvature?.(sides);
+                        return;
+                    }
+                }
+            }
+
             if (isDoubleClick) {
                 // 名称区双击 → 重命名；其他区域双击 → 参数编辑器选区。
                 // （旧实现里名称区处理器会 stopPropagation，两者天然互斥。）
@@ -2073,6 +2155,12 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 clipId: hit.clip.id,
                 region: hit.region,
                 partnerClipId: hit.partnerClipId,
+                // 循环修饰键只在淡变控件 / 抓手上起作用（其他分区的单击语义不变）。
+                cycleHeld:
+                    fadeCycleHeld &&
+                    (hit.region === "fade-in-corner" ||
+                        hit.region === "fade-out-corner" ||
+                        hit.region === "crossfade-grip"),
                 startContentX: view.scrollLeft + (event.clientX - rect.left),
                 startContentY: view.scrollTop + (event.clientY - rect.top),
                 originStartSec: hit.clip.startSec,
@@ -2437,7 +2525,25 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             boxSelectEl.style.display = "none";
         }
         if (gesture.kind === "pending-select" && !cancelled) {
-            interactions?.onSelectClip?.(gesture.clipId, event.ctrlKey || event.metaKey);
+            if (gesture.cycleHeld === true) {
+                // 循环修饰键 + 未超过拖拽阈值（= 单击）→ 切换淡变形状。
+                // 不派发选中：循环点击是编辑操作，不是选择操作（旧实现同样不选中）。
+                if (gesture.region === "crossfade-grip") {
+                    if (gesture.partnerClipId !== undefined) {
+                        interactions?.onCrossfadeCycle?.([
+                            { clipId: gesture.partnerClipId, isOut: true },
+                            { clipId: gesture.clipId, isOut: false },
+                        ]);
+                    }
+                } else {
+                    interactions?.onFadeShapeCycle?.(
+                        gesture.clipId,
+                        gesture.region === "fade-out-corner" ? "out" : "in",
+                    );
+                }
+            } else {
+                interactions?.onSelectClip?.(gesture.clipId, event.ctrlKey || event.metaKey);
+            }
         }
         if (gesture.kind !== "none") {
             try {

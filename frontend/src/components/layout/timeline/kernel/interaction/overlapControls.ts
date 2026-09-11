@@ -49,6 +49,12 @@ export interface OverlapControlHit {
     /** 淡变控件所属的一侧；clip 边缘命中时缺省。 */
     readonly fadeSide?: "in" | "out";
     /**
+     * 淡变命中是否为**包络线本体**（false = 区域边缘竖线）。
+     *
+     * 双击重置曲率只对本体生效（旧实现 `zone.line` 同义），因此这个区分必须保留。
+     */
+    readonly fadeIsLine?: boolean;
+    /**
      * 交叉点抓手的另一侧 clip（`clipId` 为**后一个** clip，这里为前一个）。
      * 仅 `kind === "crossfade-grip"` 时有值。
      */
@@ -141,7 +147,7 @@ export function hitOverlapControl(args: OverlapControlArgs): OverlapControlHit |
             if (overlapEndPx - overlapStartPx <= 0.5) continue;
 
             // 1) 后一个 clip 的淡入（只取重叠区内部分）。
-            const laterSide = hitClipFadeTarget({
+            const laterFade = hitClipFadeTarget({
                 clip: later,
                 clipLeftPx: laterStartPx,
                 clipWidthPx: laterEndPx - laterStartPx,
@@ -152,12 +158,17 @@ export function hitOverlapControl(args: OverlapControlArgs): OverlapControlHit |
                 clipXFrom: overlapStartPx,
                 clipXTo: overlapEndPx,
             });
-            if (laterSide !== null) {
-                result = { kind: "fade", clipId: later.id, fadeSide: laterSide };
+            if (laterFade !== null) {
+                result = {
+                    kind: "fade",
+                    clipId: later.id,
+                    fadeSide: laterFade.side,
+                    fadeIsLine: laterFade.kind === "line",
+                };
             }
 
             // 2) 前一个 clip 的淡出（只取重叠区内部分）。
-            const earlierSide = hitClipFadeTarget({
+            const earlierFade = hitClipFadeTarget({
                 clip: earlier,
                 clipLeftPx: earlierStartPx,
                 clipWidthPx: earlierEndPx - earlierStartPx,
@@ -168,8 +179,13 @@ export function hitOverlapControl(args: OverlapControlArgs): OverlapControlHit |
                 clipXFrom: overlapStartPx,
                 clipXTo: overlapEndPx,
             });
-            if (earlierSide !== null) {
-                result = { kind: "fade", clipId: earlier.id, fadeSide: earlierSide };
+            if (earlierFade !== null) {
+                result = {
+                    kind: "fade",
+                    clipId: earlier.id,
+                    fadeSide: earlierFade.side,
+                    fadeIsLine: earlierFade.kind === "line",
+                };
             }
 
             // 3) clip 边缘（覆盖上面的淡变判定）：整行高、以边界为中心。

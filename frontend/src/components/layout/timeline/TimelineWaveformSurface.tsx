@@ -47,7 +47,10 @@ export const TimelineWaveformSurface = React.memo(function TimelineWaveformSurfa
     viewportSource?: {
         getAxis(): import("./runtime/timelineAxis.js").TimelineAxis;
         register(
-            layer: { name: string; paint: (axis: import("./runtime/timelineAxis.js").TimelineAxis) => void },
+            layer: {
+                name: string;
+                paint: (axis: import("./runtime/timelineAxis.js").TimelineAxis) => void;
+            },
             order: number,
         ): () => void;
     };

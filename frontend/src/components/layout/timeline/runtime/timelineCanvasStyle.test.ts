@@ -229,10 +229,7 @@ test("buildTimelineClipVisualStyle exposes label pixel widths", () => {
 
     // 宽度随文本变长而增大（确认测量真的用了当前标签文案）。
     const longer = buildTimelineClipVisualStyle({ ...base, gain: -11.5 });
-    assert(
-        longer.gainLabelWidth > style.gainLabelWidth,
-        "增益文案变长时 gainLabelWidth 应增大",
-    );
+    assert(longer.gainLabelWidth > style.gainLabelWidth, "增益文案变长时 gainLabelWidth 应增大");
 
     // 窄 clip 隐藏标签时宽度归零（与 trailingReservePx 的既有语义一致）。
     const narrow = buildTimelineClipVisualStyle({ ...base, widthPx: 40 });

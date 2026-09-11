@@ -200,6 +200,10 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
     const scrollbarZoomKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.scrollbarZoom"),
     );
+    // 淡变形状循环：修饰键 + 单击包络线切换形状（拖动仍是改长度）。
+    const fadeShapeCycleKb = useAppSelector((state) =>
+        selectKeybinding(state, "modifier.fadeShapeCycleClick"),
+    );
     const { mode } = useAppTheme();
 
     const buildData = (): TimelineKernelData => ({
@@ -222,6 +226,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
             scrollHorizontal: scrollHorizontalKb,
             scrollVertical: scrollVerticalKb,
             scrollbarZoom: scrollbarZoomKb,
+            fadeShapeCycle: fadeShapeCycleKb,
         },
         playheadZoomEnabled,
         initialPxPerSec,
@@ -294,6 +299,10 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
             onCrossfadeGripPreview: (args) =>
                 interactionsRef.current?.onCrossfadeGripPreview?.(args),
             onCrossfadeGripCommit: (args) => interactionsRef.current?.onCrossfadeGripCommit?.(args),
+            onFadeShapeCycle: (clipId, side) =>
+                interactionsRef.current?.onFadeShapeCycle?.(clipId, side),
+            onCrossfadeCycle: (sides) => interactionsRef.current?.onCrossfadeCycle?.(sides),
+            onResetFadeCurvature: (sides) => interactionsRef.current?.onResetFadeCurvature?.(sides),
             onDragPreview: (args) => interactionsRef.current?.onDragPreview?.(args),
             onDragCommit: (args) => interactionsRef.current?.onDragCommit?.(args),
             onTrimPreview: (args) => interactionsRef.current?.onTrimPreview?.(args),

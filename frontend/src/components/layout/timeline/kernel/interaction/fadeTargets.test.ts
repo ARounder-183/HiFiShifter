@@ -27,8 +27,14 @@ function firstLineCenter(clip: FadeTargetClip, side: "in" | "out", clipLeftPx = 
         fadeOutShape: clip.fadeOutShape ?? 0,
         fadeOutDir: clip.fadeOutDir ?? 0,
     });
-    const line = targets.find((target) => target.kind === "line" && target.type === `fade_${side}`);
-    if (line === undefined) throw new Error(`未生成 ${side} 侧包络线命中块`);
+    // 刻意取**离区域边缘竖线最远**的那一端采样点：边缘竖线在层叠上高于包络线，
+    // 落在两者重叠处的点会（正确地）判为 `edge`，而这里要验的是"本体命中"。
+    // 淡入的边缘竖线在右侧 → 取最左；淡出的在左侧 → 取最右。
+    const lines = targets.filter(
+        (target) => target.kind === "line" && target.type === `fade_${side}`,
+    );
+    if (lines.length === 0) throw new Error(`未生成 ${side} 侧包络线命中块`);
+    const line = side === "in" ? lines[0] : lines[lines.length - 1];
     return { x: line.left + line.width / 2, y: line.top + line.height / 2 };
 }
 
@@ -61,18 +67,48 @@ describe("hitClipFadeTarget", () => {
         expect(hitClipFadeTarget({ ...base, clip: {}, contentX: 50, localY: 40 })).toBe(null);
     });
 
-    it("命中淡入包络线 → 返回 in", () => {
+    it("命中淡入包络线 → 返回 in，且标记为包络线本体", () => {
         const clip: FadeTargetClip = { fadeInSec: 1 };
         const point = firstLineCenter(clip, "in");
-        expect(hitClipFadeTarget({ ...base, clip, contentX: point.x, localY: point.y })).toBe("in");
+        expect(hitClipFadeTarget({ ...base, clip, contentX: point.x, localY: point.y })).toEqual({
+            side: "in",
+            kind: "line",
+        });
     });
 
-    it("命中淡出包络线 → 返回 out", () => {
+    it("命中淡出包络线 → 返回 out，且标记为包络线本体", () => {
         const clip: FadeTargetClip = { fadeOutSec: 1 };
         const point = firstLineCenter(clip, "out");
-        expect(hitClipFadeTarget({ ...base, clip, contentX: point.x, localY: point.y })).toBe(
-            "out",
-        );
+        expect(hitClipFadeTarget({ ...base, clip, contentX: point.x, localY: point.y })).toEqual({
+            side: "out",
+            kind: "line",
+        });
+    });
+
+    it("命中区域边缘竖线 → kind 为 edge（双击重置曲率只对本体生效）", () => {
+        const clip: FadeTargetClip = { fadeInSec: 1 };
+        const targets = buildFadeHitTargets({
+            clipLeftPx: 0,
+            clipWidthPx: 400,
+            bodyTop: BODY_TOP,
+            bodyHeight: BODY_HEIGHT,
+            fadeInPx: 100,
+            fadeOutPx: 0,
+            fadeInShape: 0,
+            fadeInDir: 0,
+            fadeOutShape: 0,
+            fadeOutDir: 0,
+        });
+        const edge = targets.find((target) => target.kind === "edge");
+        if (edge === undefined) throw new Error("未生成边缘竖线命中条");
+        expect(
+            hitClipFadeTarget({
+                ...base,
+                clip,
+                contentX: edge.left + edge.width / 2,
+                localY: edge.top + edge.height / 2,
+            })?.kind,
+        ).toBe("edge");
     });
 
     it("远离包络线时不命中（body 中间）", () => {
@@ -85,7 +121,9 @@ describe("hitClipFadeTarget", () => {
     it("自动交叉淡化覆盖手动值：手动为 0 时仍可命中", () => {
         const clip: FadeTargetClip = { fadeInSec: 0, autoFadeInSec: 1 };
         const point = firstLineCenter(clip, "in");
-        expect(hitClipFadeTarget({ ...base, clip, contentX: point.x, localY: point.y })).toBe("in");
+        expect(hitClipFadeTarget({ ...base, clip, contentX: point.x, localY: point.y })?.side).toBe(
+            "in",
+        );
     });
 
     it("clipXFrom / clipXTo 裁剪生效（重叠区解析依赖它）", () => {

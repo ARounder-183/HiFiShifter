@@ -104,6 +104,16 @@ for (const action of actions) {
             await page.keyboard.press(action.key);
             break;
         }
+        case "keyDown": {
+            // 与 click / down / up 组合可表达「按住修饰键再点击」这类手势
+            // （wheel 动作自带修饰键参数，但鼠标点击没有）。
+            await page.keyboard.down(action.key);
+            break;
+        }
+        case "keyUp": {
+            await page.keyboard.up(action.key);
+            break;
+        }
         case "type": {
             // 向当前聚焦元素输入文本（行内编辑 / 重命名这类验证需要真实键入，
             // 直接改 DOM 值不会触发 React 的受控更新）。

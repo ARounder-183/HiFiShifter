@@ -74,12 +74,24 @@ export interface ClipFadeTargetArgs {
 }
 
 /**
+ * 淡变命中结果。
+ *
+ * `kind` 必须保留「包络线本体 / 区域边缘竖线」的区分：**双击重置曲率只对本体生效**
+ * （旧实现 `OverlapEditLayer` 的 `zone.line` 与 `FadeHitLayer` 的 `isLine` 都以此为
+ * 门槛）。少了它，用户在边缘竖线上双击会意外重置曲率。
+ */
+export interface ClipFadeTargetHit {
+    readonly side: "in" | "out";
+    readonly kind: "line" | "edge";
+}
+
+/**
  * 判定点是否落在该 clip 的淡变命中区内。
  *
  * @param args 见 `ClipFadeTargetArgs`。
- * @returns 命中的一侧（`"in"` / `"out"`）；未命中为 null。
+ * @returns 命中的一侧与命中类型；未命中为 null。
  */
-export function hitClipFadeTarget(args: ClipFadeTargetArgs): "in" | "out" | null {
+export function hitClipFadeTarget(args: ClipFadeTargetArgs): ClipFadeTargetHit | null {
     const pxPerSec = Number.isFinite(args.pxPerSec) ? Math.max(1e-9, args.pxPerSec) : 1e-9;
     const rowHeight = Number.isFinite(args.rowHeight) ? Math.max(1, args.rowHeight) : 1;
     const bodyTop = CLIP_HEADER_HEIGHT;
@@ -107,7 +119,7 @@ export function hitClipFadeTarget(args: ClipFadeTargetArgs): "in" | "out" | null
         clipXTo: args.clipXTo,
     });
 
-    let hitSide: "in" | "out" | null = null;
+    let hit: ClipFadeTargetHit | null = null;
     for (const target of targets) {
         if (
             args.contentX >= target.left &&
@@ -115,8 +127,11 @@ export function hitClipFadeTarget(args: ClipFadeTargetArgs): "in" | "out" | null
             args.localY >= target.top &&
             args.localY <= target.top + target.height
         ) {
-            hitSide = target.type === "fade_in" ? "in" : "out";
+            hit = {
+                side: target.type === "fade_in" ? "in" : "out",
+                kind: target.kind,
+            };
         }
     }
-    return hitSide;
+    return hit;
 }

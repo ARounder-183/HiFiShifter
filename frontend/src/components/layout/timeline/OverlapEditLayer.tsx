@@ -32,6 +32,7 @@ import {
 } from "./constants";
 import { buildFadeHitTargets } from "./fadeHitTargets";
 import { computeCrossfadeGripPoint } from "./crossfadeGrip";
+import { isFadeShapeCycleModifierHeld } from "./fadeShapeCycle";
 import { modifierWatcher } from "./hooks/modifierWatcher";
 import {
     buildCrossfadeGripInfoContent,
@@ -108,21 +109,6 @@ type EditZone = {
     /** 是否为包络线本体命中（区别于区域边缘竖线）：双击重置仅对它生效。 */
     line?: boolean;
 };
-
-/**
- * pointerdown 现场判定循环修饰键是否按下（按下瞬间的事件本身是最可靠
- * 信号源；与 FadeHitLayer.cycleModifierHeld 同一套子集匹配规则）。
- */
-function cycleModifierHeld(kb: Keybinding, event: PointerEvent): boolean {
-    const requiredCtrl = kb.modifierOnly === true && kb.key === "control" ? true : Boolean(kb.ctrl);
-    const requiredAlt = kb.modifierOnly === true && kb.key === "alt" ? true : Boolean(kb.alt);
-    const requiredShift = kb.modifierOnly === true && kb.key === "shift" ? true : Boolean(kb.shift);
-    return (
-        (!requiredCtrl || event.ctrlKey || event.metaKey) &&
-        (!requiredAlt || event.altKey) &&
-        (!requiredShift || event.shiftKey)
-    );
-}
 
 export const OverlapEditLayer = React.memo(function OverlapEditLayer({
     trackClips,
@@ -599,7 +585,7 @@ export const OverlapEditLayer = React.memo(function OverlapEditLayer({
                             e.button === 0 &&
                             shapeCycleKb != null &&
                             !isNoneBinding(shapeCycleKb) &&
-                            cycleModifierHeld(shapeCycleKb, e.nativeEvent);
+                            isFadeShapeCycleModifierHeld(shapeCycleKb, e.nativeEvent);
                         if (cycleHeld && zone.type !== "snap_offset") {
                             startDeferredEdit(e, zone.clipId, zone.type, zone.partnerClipId, () => {
                                 if (zone.crossfadeSides) {

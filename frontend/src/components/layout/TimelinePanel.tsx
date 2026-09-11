@@ -107,6 +107,7 @@ import { timeRulerHeightPx } from "./timeline/rulerHeight";
 import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeline";
 import { SnapHighlightLayer } from "./timeline/SnapHighlightLayer";
 import { formatEditNumber, gainToDb } from "./timeline/math";
+import { requestResetFadeCurvature } from "./timeline/fadeContextMenuBus";
 import { parsePlaybackRateInput } from "./timeline/runtime/timelineCanvasStyle";
 import { SNAP_HIGHLIGHT_GROUP, clearSnapHighlights } from "../../utils/snapHighlight";
 import type { TempoMap } from "../../utils/tempoMap";
@@ -1823,6 +1824,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             onBadgeEditStart: handleKernelBadgeEditStart,
             onCrossfadeGripPreview: handleKernelCrossfadeGripPreview,
             onCrossfadeGripCommit: handleKernelCrossfadeGripCommit,
+            onFadeShapeCycle: handleFadeShapeCycleClick,
+            onCrossfadeCycle: handleCrossfadeCycleClick,
+            // 重置曲率走既有总线（旧实现同样经它派发）：消费者在淡变相关的 hook 里，
+            // 这条契约与渲染模式无关。内核只给「哪些侧」，请求包络由这里组装。
+            onResetFadeCurvature: (sides: Array<{ clipId: string; isOut: boolean }>) =>
+                requestResetFadeCurvature({ sides }),
             onDragPreview: handleKernelDragPreview,
             onDragCommit: handleKernelDragCommit,
             onTrimPreview: handleKernelTrimPreview,
