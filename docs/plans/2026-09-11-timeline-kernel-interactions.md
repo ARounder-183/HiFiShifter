@@ -1158,6 +1158,66 @@ initialById → targetTrackIdByClipId → trackMapping
 
 **建议方案 A**（与既有迁移原则一致）。**决策后再实施 D-1。**
 
+#### ✅ 决策：方案 A（用户确认）
+
+**抽取设计（已读完全部 180 行后钉死，`useClipDrag.ts:746-925`）**
+
+**边界**：从 `if (drag.copyMode) {` 起，到自动交叉淡化写回结束。**不含**前面
+"拖拽中途从移动切到复制"的回滚段（746-780）——那段是 `useClipDrag` 的状态机收尾
+（`beganMoveTransaction` / `rippleFollowers` / `initialAutoFadeById`），只对"同一次手势
+里从移动变成复制"有意义，内核手势没有这个中间态。
+
+**新文件**：`frontend/src/components/layout/timeline/hooks/copyClipsFromDrag.ts`
+
+```ts
+export interface CopyClipsFromDragDeps {
+    /** 参与复制的 clip（已过滤掉已被删除的）。 */
+    readonly sourceClipIds: readonly string[];
+    /** 各 clip 的初始位置与轨道。 */
+    readonly initialById: Readonly<Record<string, { startSec: number; trackId: string }>>;
+    /** 初始轨道序号（跨轨新轨道时用）。 */
+    readonly initialTrackIndexById: Readonly<Record<string, number>>;
+    /** 水平位移（秒）。 */
+    readonly deltaSec: number;
+    /** 落点是否为新轨道。 */
+    readonly dropToNewTrack: boolean;
+    /** 垂直偏移（轨数）。 */
+    readonly trackOffset: number;
+    readonly allowTrackMove: boolean;
+    readonly hasMixedTrackSelection: boolean;
+    /** 依赖注入（便于单测与两种调用方共用）。 */
+    readonly dispatch: AppDispatch;
+    readonly sessionRef: React.RefObject<SessionState>;
+    readonly resolveTrackIdByOffset: (clipId: string) => string | null;
+    readonly computeSelectedTrackSpan: typeof computeSelectedTrackSpan;
+    readonly createNewTracksForDrop: (span: number) => Promise<string[]>;
+    readonly createNewTrackForDrop: () => Promise<string | null>;
+    readonly maybeSelectTargetTrack: (trackId: string) => void;
+    readonly autoCrossfadeEnabled: boolean;
+}
+
+export async function copyClipsFromDrag(deps: CopyClipsFromDragDeps): Promise<void>;
+```
+
+**职责（保持逐行等价，不顺手改语义）**
+1. `webApi.beginUndoGroup()` 包裹
+2. 解析 `targetTrackIdByClipId`：新轨道（混合选择 → 按 span 建多轨；否则单轨）
+   / 普通落点（`allowTrackMove && trackOffset !== 0` → `resolveTrackIdByOffset`）
+3. `maybeSelectTargetTrack(首个目标轨)`
+4. `trackMapping` → `trackMode`（`same_track` / `explicit_mapping`）
+5. `buildDuplicateClipsBulkPayload` → `duplicateClipsBulkRemote`
+6. `createdClipIds` → `setMultiSelectedClipIds` + `selectClipRemote(created[0])`
+7. 播放光标定位到副本中最靠前的起点
+8. `autoCrossfadeEnabled` 时 `computeAutoCrossfadeFromPayload` → `setClipAutoFades` +
+   `webApi.setClipState({ checkpoint: false })`
+
+**调用方**
+- 旧实现：`useClipDrag` 的收尾分支改为 `void copyClipsFromDrag({...})`（删掉原 180 行）
+- 内核：面板 `handleKernelDragCommit` 在 `copyMode` 时调用同一个函数
+
+**验证**：抽取后必须**先跑旧实现的回归**（⌘+拖拽复制、跨轨复制、拖到空白处建新轨、
+自动交叉淡化），确认行为与抽取前一致，再接内核侧。
+
 **D-1 还需补的前置**：宿主 `clip-drag` 需携带 `copyMode`（复用
 `resolveClipDragCopyMode`，含"拖拽中允许从 false 变 true、不允许反向"的既有语义），
 并在 `onDragPreview` / `onDragCommit` 上透出——否则内核模式下 ⌘+拖拽会**移动**原 clip
