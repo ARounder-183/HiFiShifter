@@ -2196,6 +2196,13 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     function updateHoverCursor(event: PointerEvent): void {
         if (gesture.kind !== "none" || panPointerId !== null) return;
         const hit = hitAt(event.clientX, event.clientY);
+        // 默认分区（body / header）**不设抓取光标**。
+        //
+        // 旧实现的 clip 本体（`ClipItem` 根元素）与 header（名称 / 徽标）都没有
+        // cursor 类，只有边缘与淡变手柄设了 resize —— 继承下来就是 default。
+        // 给整块 clip 挂 `grab` 会让「可拖拽」这一个提示盖过其它更具体的语义
+        // （header 上的静音 / 共振峰按钮、名称、增益速率标签各有自己的交互），
+        // 既与旧实现不一致，也让用户看不出哪些位置是可点的控件。
         let cursor = "default";
         if (hit.kind === "clip") {
             switch (hit.region) {
@@ -2210,7 +2217,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                     cursor = "nesw-resize";
                     break;
                 default:
-                    cursor = "grab";
+                    // body / header / 重叠区控件：保持 default（见上方说明）。
                     break;
             }
         }

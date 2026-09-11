@@ -56,6 +56,13 @@ await page.waitForTimeout(waitMs);
 
 for (const action of actions) {
     switch (action.type) {
+        case "goto": {
+            // 二次导航：用于「先写 localStorage 再重新加载」这类需要重跑模块初始化
+            // 的验证（模块级开关只在加载时读一次，改完必须刷新才生效）。
+            await page.goto(action.url, { waitUntil: "domcontentloaded" });
+            await page.waitForTimeout(action.ms ?? 2500);
+            break;
+        }
         case "wheel": {
             await page.mouse.move(action.x, action.y);
             // 修饰键按 playwright 的键名传入（macOS 上主修饰键是 "Meta"）。
