@@ -19,22 +19,49 @@
  * - 独立性：不依赖 DOM / React；刻度以结构化最小接口（`GridTickLike`）接收，
  *   与 `TimelineTick` 结构兼容但无编译期耦合。
  *
- * 【设计约束】
+ * 【设计约束（与旧实现对齐，评审检查项）】
  * 1. 竖直方向恒为 `[0, contentBottomPx]`，**不按视口裁剪**：裁剪会让几何随滚动变化，
  *    破坏「滚动零重建」。屏幕外部分由 GPU 光栅化裁剪，成本可忽略。
- * 2. 线宽按**物理像素**折算：弱线 1 物理像素、强线 2 物理像素。分数 DPR 下若按
- *    CSS 像素取整，会出现"同一批线粗细不一"的观感问题。
- * 3. 矩形左缘对齐物理像素栅格（`round(x × dpr) / dpr`）：线与物理像素一一对应，
- *    不会因落点相位被抗锯齿摊成两条灰线。
+ * 2. 线宽按 **CSS 像素**（弱 1 / 强 2），与旧实现 SVG 的 `strokeWidth` 同源。
+ *    **不要**改成物理像素——Retina（dpr=2）下会只有旧实现的一半粗，观感明显偏细。
+ * 3. **居中**语义：矩形左缘 = `x − 宽/2`，对应旧实现 SVG 的居中描边（`crispEdges`）。
+ *    左缘仍吸附设备像素栅格（`round(left × dpr) / dpr`），保证线宽恒为整数物理像素。
+ * 4. 颜色之外再叠一层整体透明度（旧实现 SVG 的 `opacity` 属性，默认 0.9）：
+ *    只取颜色 alpha 会略亮。
  */
 
 import type { FlatInstance, Rgba } from "./instanceTypes";
 
-/** 弱网格线的物理像素宽度。 */
-const WEAK_LINE_PHYSICAL_PX = 1;
+/**
+ * 弱网格线的宽度（**CSS 像素**）。
+ *
+ * 与旧实现 SVG 的 `strokeWidth={1}` 一致：线宽以 CSS 像素定义，物理宽度由 DPR
+ * 决定。内核曾按「1 物理像素」实现，在 Retina（dpr=2）上只有旧实现的一半粗，
+ * 观感明显偏细——网格线宽必须跟旧实现同源。
+ */
+const WEAK_LINE_CSS_PX = 1;
 
-/** 强网格线（小节线）的物理像素宽度。 */
-const STRONG_LINE_PHYSICAL_PX = 2;
+/** 强网格线（小节线）的宽度（CSS 像素，对应旧实现 `strokeWidth={2}`）。 */
+const STRONG_LINE_CSS_PX = 2;
+
+/**
+ * 线条整体透明度。
+ *
+ * 旧实现 SVG 在颜色之外还有一层 `opacity={lineOpacity}`（默认 0.9），与颜色自身的
+ * alpha 相乘。内核只取颜色 alpha 会略亮，观感与旧实现不一致。
+ */
+const GRID_LINE_OPACITY = 0.9;
+
+/**
+ * 把 RGBA 的 alpha 再乘一层整体透明度。
+ *
+ * @param rgba 原始颜色。
+ * @param opacity 整体透明度（0..1）。
+ * @returns 应用后的颜色。
+ */
+function applyOpacity(rgba: Rgba, opacity: number): Rgba {
+    return [rgba[0], rgba[1], rgba[2], rgba[3] * opacity];
+}
 
 /**
  * 窗口外放容差（CSS px）。
@@ -106,14 +133,16 @@ export function buildGridInstances(args: GridInstanceArgs): FlatInstance[] {
         if (x < windowLeft - WINDOW_SLACK_PX || x > windowRight + WINDOW_SLACK_PX) continue;
 
         const strong = tick.isStrongGridLine === true;
-        const physicalWidth = strong ? STRONG_LINE_PHYSICAL_PX : WEAK_LINE_PHYSICAL_PX;
+        const cssWidth = strong ? STRONG_LINE_CSS_PX : WEAK_LINE_CSS_PX;
+        // 居中描边（与旧实现 SVG 的 stroke 语义一致）：矩形左缘 = 中心 − 半宽。
+        // 吸附仍按设备像素栅格，保证线宽恒为整数物理像素、不因落点相位变虚。
+        const left = x - cssWidth / 2;
         out.push({
-            // 左缘吸附物理像素栅格：线宽恒为整数物理像素，不因落点相位变粗变虚。
-            x: Math.round(x * dpr) / dpr,
+            x: Math.round(left * dpr) / dpr,
             y: 0,
-            w: physicalWidth / dpr,
+            w: cssWidth,
             h: contentBottom,
-            rgba: strong ? args.strongRgba : args.weakRgba,
+            rgba: applyOpacity(strong ? args.strongRgba : args.weakRgba, GRID_LINE_OPACITY),
         });
     }
     return out;
