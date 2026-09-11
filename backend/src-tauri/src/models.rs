@@ -375,6 +375,19 @@ pub struct TimelineStatePayload {
     /// Tempo Map（None = 无 Tempo Map）。始终序列化该字段，保证前端能区分“无 Tempo Map”。
     #[serde(default)]
     pub tempo_map: Option<Vec<TempoPointPayload>>,
+
+    /// 撤销栈深度（当前可撤销的步数）。
+    ///
+    /// 仅由与历史直接相关的响应填充：`undo_timeline` / `redo_timeline` /
+    /// `begin_undo_group` / `get_history_state`。其余命令保持 `None`，前端
+    /// 沿用最近一次已知值；深度变化另有 `history_state` 事件广播（每次
+    /// 打点 / 清空历史都会发出），前端据此置灰「撤销 / 重做」菜单项。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub undo_depth: Option<usize>,
+
+    /// 重做栈深度（当前可重做的步数）。语义同 `undo_depth`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redo_depth: Option<usize>,
 }
 
 /// `open_project` 的返回载荷。

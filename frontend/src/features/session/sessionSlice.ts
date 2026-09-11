@@ -314,6 +314,25 @@ type ClipFormantToolWindowState = {
     hasMoved: boolean;
 };
 
+/** 参数编辑器选区快照（beat 单位；仅「边缘拉伸」手势登记，见 ParamSelectionStep）。 */
+export type ParamSelectionSnapshot = Array<{ startBeat: number; endBeat: number }>;
+
+/**
+ * 「参数编辑器边缘拉伸」这一步的选区记录。
+ *
+ * 只有该手势会把选区写入撤销历史：撤销这一步时恢复 `before`，重做时恢复
+ * `after`。其它任何选区变化（框选、追加/取消段、全选、双击 Clip…）都不登记，
+ * 撤销/重做因此不会去动用户手动调整过的选区。
+ */
+export interface ParamSelectionStep {
+    /** 步骤完成后的历史位置（= 该步落地后的撤销栈深度）。 */
+    position: number;
+    /** 拉伸前的选区（撤销该步时恢复；null = 当时无选区）。 */
+    before: ParamSelectionSnapshot | null;
+    /** 拉伸后的选区（重做该步时恢复）。 */
+    after: ParamSelectionSnapshot | null;
+}
+
 export interface SessionState {
     toolMode: ToolMode;
     toolModeGroup: ToolModeGroup;
@@ -604,6 +623,33 @@ export interface SessionState {
      * 响应，防止旧快照以 force 覆盖新状态（与 seekPlayhead 的乱序防护同理）。
      */
     _latestHistoryOpRequestId: string | null;
+
+    /**
+     * 撤销栈深度镜像（后端权威：`history_state` 事件 / 撤销·重做响应同步）。
+     * 0 = 无可撤销 —— 菜单项置灰、快捷键静默失败都以此为准。
+     */
+    historyUndoDepth: number;
+
+    /** 重做栈深度镜像。0 = 无可重做。 */
+    historyRedoDepth: number;
+
+    /**
+     * 「参数编辑器边缘拉伸」登记的历史步骤（仅该手势写入，见
+     * ParamSelectionStep）：撤销/重做到该步时恢复对应选区。
+     */
+    paramSelectionSteps: ParamSelectionStep[];
+
+    /**
+     * 待参数编辑器消费的选区恢复请求（撤销/重做命中拉伸步骤时登记）。
+     * requestId 单调递增，消费方按 id 幂等应用一次即可（无需回写清除）。
+     */
+    pendingParamSelectionRestore: {
+        requestId: number;
+        selection: ParamSelectionSnapshot | null;
+    } | null;
+
+    /** 选区恢复请求序号（单调递增）。 */
+    _paramSelectionRestoreSeq: number;
 
     /**
      * 最近一次**编辑类**请求的 requestId（setClipState / bulk / move 族）。
@@ -2029,10 +2075,87 @@ const initialState: SessionState = {
     saveVersionConflictDialog: null,
     _interactionLockCount: 0,
     _latestHistoryOpRequestId: null,
+    historyUndoDepth: 0,
+    historyRedoDepth: 0,
+    paramSelectionSteps: [],
+    pendingParamSelectionRestore: null,
+    _paramSelectionRestoreSeq: 0,
     _latestEditRequestId: null,
     _transportEpoch: 0,
     _stopInterruptedPlayback: false,
 };
+
+// ── 撤销/重做：深度镜像与「拉伸步骤」选区记录 ────────────────────────
+
+/** 归一化选区快照（深拷贝 + 丢弃非有限值；无有效段 → null）。 */
+function toParamSelectionSnapshot(
+    selection: readonly { startBeat: number; endBeat: number }[] | null | undefined,
+): ParamSelectionSnapshot | null {
+    if (!selection || selection.length === 0) return null;
+    const cleaned = selection
+        .filter((range) => Number.isFinite(range.startBeat) && Number.isFinite(range.endBeat))
+        .map((range) => ({ startBeat: range.startBeat, endBeat: range.endBeat }));
+    return cleaned.length > 0 ? cleaned : null;
+}
+
+/**
+ * 同步撤销/重做栈深度镜像（后端广播 / 撤销·重做响应）。
+ *
+ * 同时清理被丢弃分支上的选区步骤：
+ * - 重做栈被新检查点清空（深度前进且 redo 归零）= 旧分支已丢弃，位在当前
+ *   位置及其后的旧步骤全部作废（除非调用方声明这是重做自身的前进，见
+ *   options.preserveStepAtCurrentPosition）；
+ * - 深度归零（新建 / 打开工程清空历史）= 步骤全部作废。
+ * 撤销（深度回落、redo 增长）保留步骤，供重做时恢复选区。
+ */
+function applyHistoryDepths(
+    state: SessionState,
+    undoDepth: number,
+    redoDepth: number,
+    options?: {
+        /**
+         * 位置前进且重做栈归零时保留「当前位置」上的步骤。
+         *
+         * 重做自身也会清空重做栈（弹出最后一步），但它是沿原分支前进、
+         * 步骤依然有效；新检查点造成的清空则是丢弃旧分支，位在其上的旧
+         * 步骤必须作废。二者只能由调用方（撤销/重做响应 vs 事件广播）区分。
+         */
+        preserveStepAtCurrentPosition?: boolean;
+    },
+): void {
+    const nextUndo = Math.max(0, Math.floor(Number(undoDepth) || 0));
+    const nextRedo = Math.max(0, Math.floor(Number(redoDepth) || 0));
+    const branchDiscarded =
+        state.historyRedoDepth > 0 &&
+        nextRedo === 0 &&
+        nextUndo > state.historyUndoDepth;
+    const historyReset = nextUndo === 0 && nextRedo === 0;
+    state.historyUndoDepth = nextUndo;
+    state.historyRedoDepth = nextRedo;
+    if (state.paramSelectionSteps.length === 0) return;
+    if (historyReset) {
+        state.paramSelectionSteps = [];
+        return;
+    }
+    if (branchDiscarded) {
+        const keepPosition = options?.preserveStepAtCurrentPosition ? nextUndo : nextUndo - 1;
+        state.paramSelectionSteps = state.paramSelectionSteps.filter(
+            (step) => step.position <= keepPosition,
+        );
+    }
+}
+
+/** 登记一次选区恢复请求（requestId 单调，消费方按 id 幂等应用一次）。 */
+function requestParamSelectionRestore(
+    state: SessionState,
+    selection: ParamSelectionSnapshot | null,
+): void {
+    state._paramSelectionRestoreSeq = (Number(state._paramSelectionRestoreSeq) || 0) + 1;
+    state.pendingParamSelectionRestore = {
+        requestId: state._paramSelectionRestoreSeq,
+        selection: selection ? selection.map((range) => ({ ...range })) : null,
+    };
+}
 
 export {
     undoRemote,
@@ -2169,6 +2292,45 @@ const sessionSlice = createSlice({
         },
         clearTrackMeters(state) {
             state.trackMeters = {};
+        },
+        /**
+         * 同步撤销/重做栈深度（`history_state` 后端事件 / 挂载时的
+         * get_history_state / 撤销·重做响应）。深度为 0 时对应的菜单项置灰、
+         * 快捷键静默失败。
+         */
+        setHistoryDepths(state, action: PayloadAction<{ undoDepth: number; redoDepth: number }>) {
+            applyHistoryDepths(state, action.payload.undoDepth, action.payload.redoDepth);
+        },
+        /**
+         * 登记「参数编辑器边缘拉伸」步骤的选区（撤销/重做该步时恢复）。
+         *
+         * `positionBefore` = 拉伸开始时的撤销栈深度；该手势的曲线回写固定只打
+         * 一个检查点（uploadFullResCurve 首块写入），因此步骤位置 = 起始深度 + 1。
+         * 新检查点会清空重做分支：位在其后的旧步骤在此一并清除。
+         */
+        recordParamSelectionStretchStep(
+            state,
+            action: PayloadAction<{
+                positionBefore: number;
+                before: ParamSelectionSnapshot | null;
+                after: ParamSelectionSnapshot | null;
+            }>,
+        ) {
+            const positionBefore = Math.max(
+                0,
+                Math.floor(Number(action.payload.positionBefore) || 0),
+            );
+            const step: ParamSelectionStep = {
+                position: positionBefore + 1,
+                before: toParamSelectionSnapshot(action.payload.before),
+                after: toParamSelectionSnapshot(action.payload.after),
+            };
+            const kept = state.paramSelectionSteps.filter(
+                (entry) => entry.position !== step.position && entry.position <= step.position,
+            );
+            kept.push(step);
+            kept.sort((a, b) => a.position - b.position);
+            state.paramSelectionSteps = kept;
         },
         checkpointHistory(state) {
             // 撤销/重做由后端权威管理（undo_timeline / redo_timeline 返回完整
@@ -4073,8 +4235,36 @@ const sessionSlice = createSlice({
                 if (state._latestHistoryOpRequestId !== action.meta.requestId) return;
                 const payload = action.payload as {
                     ok?: boolean;
+                    undo_depth?: number;
+                    redo_depth?: number;
                 } & TimelineState;
-                if (!payload.ok) return;
+                const payloadUndoDepth = Number(payload.undo_depth);
+                const payloadRedoDepth = Number(payload.redo_depth);
+                // 空栈（后端 ok = false）：这一步撤销并不存在 —— 不套用任何快照，
+                // 界面零刷新零变更（否则用户会误以为撤销已执行），仅把响应带回的
+                // 权威深度同步进镜像。
+                if (!payload.ok) {
+                    if (Number.isFinite(payloadUndoDepth) && Number.isFinite(payloadRedoDepth)) {
+                        applyHistoryDepths(state, payloadUndoDepth, payloadRedoDepth);
+                    }
+                    return;
+                }
+                // 撤销前的位置：被撤销的正是「产生该位置」的那一步。
+                const depthBefore = state.historyUndoDepth;
+                applyHistoryDepths(
+                    state,
+                    Number.isFinite(payloadUndoDepth)
+                        ? payloadUndoDepth
+                        : Math.max(0, depthBefore - 1),
+                    Number.isFinite(payloadRedoDepth)
+                        ? payloadRedoDepth
+                        : state.historyRedoDepth + 1,
+                );
+                // 这一步是「参数编辑器边缘拉伸」时，恢复拉伸前的选区。
+                const selectionStep = state.paramSelectionSteps.find(
+                    (step) => step.position === depthBefore,
+                );
+                if (selectionStep) requestParamSelectionRestore(state, selectionStep.before);
                 // 撤销把时间线（含 playhead_sec）整体回退到上一个检查点：快照里
                 // 的 playhead_sec 就是该状态形成时的播放光标位置，也是回退之后
                 // 一切以光标为锚点的编辑操作（粘贴/分割/录音起点等）在后端的
@@ -4118,8 +4308,34 @@ const sessionSlice = createSlice({
                 if (state._latestHistoryOpRequestId !== action.meta.requestId) return;
                 const payload = action.payload as {
                     ok?: boolean;
+                    undo_depth?: number;
+                    redo_depth?: number;
                 } & TimelineState;
-                if (!payload.ok) return;
+                const payloadUndoDepth = Number(payload.undo_depth);
+                const payloadRedoDepth = Number(payload.redo_depth);
+                // 空栈（后端 ok = false）：同 undoRemote.fulfilled —— 静默跳过。
+                if (!payload.ok) {
+                    if (Number.isFinite(payloadUndoDepth) && Number.isFinite(payloadRedoDepth)) {
+                        applyHistoryDepths(state, payloadUndoDepth, payloadRedoDepth);
+                    }
+                    return;
+                }
+                // 重做前的位置：被重做的正是「产生下一位置」的那一步。
+                const depthBefore = state.historyUndoDepth;
+                applyHistoryDepths(
+                    state,
+                    Number.isFinite(payloadUndoDepth) ? payloadUndoDepth : depthBefore + 1,
+                    Number.isFinite(payloadRedoDepth)
+                        ? payloadRedoDepth
+                        : Math.max(0, state.historyRedoDepth - 1),
+                    // 重做是沿原分支前进（不是丢弃分支）：当前位置上的步骤保留。
+                    { preserveStepAtCurrentPosition: true },
+                );
+                // 这一步是「参数编辑器边缘拉伸」时，恢复拉伸后的选区。
+                const selectionStep = state.paramSelectionSteps.find(
+                    (step) => step.position === depthBefore + 1,
+                );
+                if (selectionStep) requestParamSelectionRestore(state, selectionStep.after);
                 // 与 undoRemote.fulfilled 对称：重做恢复的时间线快照携带的
                 // playhead_sec 是该状态（被撤销暂存时）的光标位置，即重做后
                 // 后端的实际操作点 —— 采纳它，视觉光标与实际编辑点保持一致。
@@ -5628,6 +5844,8 @@ export const {
     setTrackName,
     setTrackMeters,
     clearTrackMeters,
+    setHistoryDepths,
+    recordParamSelectionStretchStep,
     checkpointHistory,
     applyTimelinePayload,
     setToolMode,

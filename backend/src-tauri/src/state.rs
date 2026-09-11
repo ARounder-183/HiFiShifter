@@ -3024,6 +3024,9 @@ impl AppState {
         drop(h);
 
         self.bump_timeline_version();
+        // 深度变化广播（新打点会清空重做栈）：前端据此立即刷新「撤销/重做」
+        // 菜单项的可用性，无需等待下一次轮询。
+        self.emit_history_state();
 
         let (name, was_clean) = {
             let mut p = self.project.lock().unwrap_or_else(|e| e.into_inner());
@@ -3045,12 +3048,44 @@ impl AppState {
     }
 
     pub fn clear_history(&self) {
-        let mut h = self
+        {
+            let mut h = self
+                .timeline_history
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            h.undo.clear();
+            h.redo.clear();
+        }
+        // 新工程 / 打开工程：历史已清空，广播深度归零。
+        self.emit_history_state();
+    }
+
+    /// 当前撤销/重做栈深度（「撤销 / 重做」可用性判定的权威来源）。
+    pub fn history_depths(&self) -> (usize, usize) {
+        let h = self
             .timeline_history
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        h.undo.clear();
-        h.redo.clear();
+        (h.undo.len(), h.redo.len())
+    }
+
+    /// 向前端广播历史状态（撤销/重做栈深度）。
+    ///
+    /// 打点、清空历史、撤销/重做之后调用：前端镜像由此保持实时，菜单项
+    /// 的置灰与快捷键的前置判断都不需要额外轮询。
+    pub fn emit_history_state(&self) {
+        let Some(handle) = self.app_handle.get() else {
+            return;
+        };
+        let (undo_depth, redo_depth) = self.history_depths();
+        use tauri::Emitter;
+        let _ = handle.emit(
+            "history_state",
+            serde_json::json!({
+                "undoDepth": undo_depth,
+                "redoDepth": redo_depth,
+            }),
+        );
     }
 
     /// Begin an undo group: push the current state once and suppress further checkpoints.
@@ -3064,6 +3099,9 @@ impl AppState {
             .store(true, std::sync::atomic::Ordering::Release);
         let mut payload = tl.to_payload();
         payload.project = Some(self.project_meta_payload());
+        let (undo_depth, redo_depth) = self.history_depths();
+        payload.undo_depth = Some(undo_depth);
+        payload.redo_depth = Some(redo_depth);
         payload
     }
 
@@ -3083,13 +3121,22 @@ impl AppState {
         let Some(prev) = h.undo.pop_back() else {
             let mut payload = tl.to_payload();
             payload.project = Some(self.project_meta_payload());
+            // 无步可撤销：ok = false 让前端静默跳过 —— 不套用任何快照，
+            // 界面不发生任何刷新或变更，也不弹任何提示。深度照常带回，
+            // 前端可借这一次响应把可能落后的镜像纠正回来。
+            payload.ok = false;
+            payload.undo_depth = Some(h.undo.len());
+            payload.redo_depth = Some(h.redo.len());
             return payload;
         };
         let scale_before = tl.render_scale_signature();
         let current = std::mem::replace(&mut *tl, prev);
         h.redo.push(current);
+        let undo_depth = h.undo.len();
+        let redo_depth = h.redo.len();
         drop(h);
         self.bump_timeline_version();
+        self.emit_history_state();
         // 恢复的快照可能改变 clip 的 active take：hnsep 分离缓存键只含
         // clip_id+采样率+样本数，等长 Take 会命中彼此的 harmonic/noise
         // stem（气声路径串音）。撤销/重做属低频操作，整体清空与
@@ -3105,6 +3152,8 @@ impl AppState {
         self.invalidate_render_caches_if_scale_changed(&tl, &scale_before);
         let mut payload = tl.to_payload();
         payload.project = Some(self.project_meta_payload());
+        payload.undo_depth = Some(undo_depth);
+        payload.redo_depth = Some(redo_depth);
         payload
     }
 
@@ -3117,13 +3166,20 @@ impl AppState {
         let Some(next) = h.redo.pop() else {
             let mut payload = tl.to_payload();
             payload.project = Some(self.project_meta_payload());
+            // 无步可重做：同 undo_timeline 的空栈分支 —— ok = false 静默跳过。
+            payload.ok = false;
+            payload.undo_depth = Some(h.undo.len());
+            payload.redo_depth = Some(h.redo.len());
             return payload;
         };
         let scale_before = tl.render_scale_signature();
         let current = std::mem::replace(&mut *tl, next);
         h.undo.push_back(current);
+        let undo_depth = h.undo.len();
+        let redo_depth = h.redo.len();
         drop(h);
         self.bump_timeline_version();
+        self.emit_history_state();
         // 与 undo_timeline 一致：active take 可能随快照回退，须清分离缓存。
         crate::hnsep_onnx::clear_separation_cache();
         // 与 undo_timeline 一致：重做后同步工程基准记录。
@@ -3135,6 +3191,8 @@ impl AppState {
         self.invalidate_render_caches_if_scale_changed(&tl, &scale_before);
         let mut payload = tl.to_payload();
         payload.project = Some(self.project_meta_payload());
+        payload.undo_depth = Some(undo_depth);
+        payload.redo_depth = Some(redo_depth);
         payload
     }
 
@@ -6571,6 +6629,10 @@ impl TimelineState {
                 ids.sort();
                 ids
             },
+            // 历史深度由命令层按需填充（见 AppState::history_depths）：
+            // TimelineState 本身不持有历史，通用载荷保持 None。
+            undo_depth: None,
+            redo_depth: None,
         }
     }
 
@@ -6656,6 +6718,10 @@ impl TimelineState {
                 ids.sort();
                 ids
             },
+            // 历史深度由命令层按需填充（见 AppState::history_depths）：
+            // TimelineState 本身不持有历史，通用载荷保持 None。
+            undo_depth: None,
+            redo_depth: None,
         }
     }
 

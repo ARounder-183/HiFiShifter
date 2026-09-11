@@ -1,4 +1,5 @@
 import type {
+    HistoryStateResult,
     TimelineResult,
     TrackSummaryResult,
     TempoMapPayload,
@@ -58,6 +59,9 @@ export const timelineApi = {
     // Undo grouping: all commands between begin/end share a single undo entry
     beginUndoGroup: () => invoke<TimelineResult>("begin_undo_group"),
     endUndoGroup: () => invoke<{ ok: boolean }>("end_undo_group"),
+
+    /** 撤销/重做可用性（栈深度）：挂载时同步一次，此后由 history_state 事件驱动。 */
+    getHistoryState: () => invoke<HistoryStateResult>("get_history_state"),
 
     getTimelineState: () => invoke<TimelineResult>("get_timeline_state"),
 

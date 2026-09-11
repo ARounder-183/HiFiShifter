@@ -10,7 +10,11 @@ import { useCallback, useEffect, useRef } from "react";
 import type { ParamFramesPayload } from "../../../types/api";
 import type { AppDispatch } from "../../../app/store";
 import { paramsApi } from "../../../services/api";
-import { seekPlayhead, setplayheadSec } from "../../../features/session/sessionSlice";
+import {
+    recordParamSelectionStretchStep,
+    seekPlayhead,
+    setplayheadSec,
+} from "../../../features/session/sessionSlice";
 import { clamp, MAX_PX_PER_SEC, MIN_PX_PER_SEC } from "../timeline";
 import type {
     ParamMorphOverlay,
@@ -270,6 +274,11 @@ export function usePianoRollInteractions(args: {
     onCycleDragDirection?: (tool: "select" | "draw" | "vibrato") => void;
     /** 拖拽期间切换拖动方向的快捷键（触控板用户替代「拖拽中右键」） */
     cycleDragDirectionKb?: Keybinding;
+    /**
+     * 撤销栈深度读取器（后端权威镜像）。仅「边缘拉伸」手势在提交成功后
+     * 用它登记选区步骤（撤销/重做恢复对应选区），其余操作不消费。
+     */
+    getHistoryPosition?: () => number;
     /** 选区拖拽时边缘平滑度（0-100%） */
     edgeSmoothnessPercent?: number;
     /** 选择拖拽/绘制进行中时，用于临时切换吸附按钮视觉 */
@@ -356,6 +365,7 @@ export function usePianoRollInteractions(args: {
         dragDirection,
         onCycleDragDirection,
         cycleDragDirectionKb,
+        getHistoryPosition,
         edgeSmoothnessPercent,
         onPitchSnapGestureActiveChange,
         onMorphOverlayChange,
@@ -2318,6 +2328,13 @@ export function usePianoRollInteractions(args: {
                         // 重建（只替换被拉伸的那一段），因此归一化合并不会造成
                         // 「越拉越偏」的下标漂移。
                         const stretchBaseSelection = sel;
+                        // 撤销历史：这是唯一会把「选区变化」写进历史的操作 ——
+                        // 撤销恢复拉伸前的选区，重做恢复拉伸后的选区。位置取自
+                        // 后端深度镜像，该手势的回写固定只打一个检查点。
+                        const selectionBeforeStretch = stretchBaseSelection.map((range) => ({
+                            ...range,
+                        }));
+                        const historyPositionBeforeStretch = getHistoryPosition?.() ?? 0;
                         let stretchABeat = aBeat;
                         let stretchBBeat = bBeat;
 
@@ -2640,6 +2657,11 @@ export function usePianoRollInteractions(args: {
                             // 当连续帧写入（旧实现在 stride>1 时时间压缩 +
                             // 覆盖未选帧，见 selectionEditData.expandStrideSampledDense）。
                             const expanded = expandStrideSampledDense(built.dense, stride);
+                            // 拉伸后的选区（本轮手势的最终形态）：与拉伸前的快照
+                            // 一起登记为该历史步骤的选区。
+                            const selectionAfterStretch = selectionRef.current
+                                ? selectionRef.current.map((range) => ({ ...range }))
+                                : null;
                             void (async () => {
                                 try {
                                     await uploadFullResCurve({
@@ -2648,6 +2670,16 @@ export function usePianoRollInteractions(args: {
                                         startFrame: built.overallMinFrame,
                                         values: expanded,
                                     });
+                                    // 回写成功（已打检查点）后才登记：撤销这一步会
+                                    // 恢复拉伸前的选区，重做恢复拉伸后的选区；
+                                    // 其它任何选区变化都不进历史。
+                                    dispatch(
+                                        recordParamSelectionStretchStep({
+                                            positionBefore: historyPositionBeforeStretch,
+                                            before: selectionBeforeStretch,
+                                            after: selectionAfterStretch,
+                                        }),
+                                    );
                                 } catch (err) {
                                     console.error(
                                         "[pianoRoll] stretch-edge commit failed",
@@ -4033,6 +4065,7 @@ export function usePianoRollInteractions(args: {
             liveEditActiveRef,
             onContextMenu,
             onCycleDragDirection,
+            getHistoryPosition,
             installDragDirectionKeyCycler,
             paramStretchKb,
             snapDrawValue,

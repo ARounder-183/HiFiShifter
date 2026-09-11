@@ -29,6 +29,8 @@ fn error_payload(error: &str) -> crate::models::TimelineStatePayload {
         missing_files: Some(vec![error.to_string()]),
         disabled_group_ids: vec![],
         tempo_map: None,
+        undo_depth: None,
+        redo_depth: None,
     }
 }
 

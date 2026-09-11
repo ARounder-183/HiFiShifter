@@ -148,6 +148,20 @@ pub fn begin_undo_group(state: State<'_, AppState>) -> crate::models::TimelineSt
     state.begin_undo_group()
 }
 
+/// 撤销/重做可用性（栈深度）。
+///
+/// 前端挂载时同步一次；此后由 `history_state` 事件（打点 / 清空历史 /
+/// 撤销 / 重做都会广播）保持实时，无需轮询。
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_history_state(state: State<'_, AppState>) -> serde_json::Value {
+    let (undo_depth, redo_depth) = state.history_depths();
+    serde_json::json!({
+        "ok": true,
+        "undoDepth": undo_depth,
+        "redoDepth": redo_depth,
+    })
+}
+
 #[tauri::command(rename_all = "camelCase")]
 pub fn end_undo_group(state: State<'_, AppState>) -> serde_json::Value {
     state.end_undo_group()
@@ -603,6 +617,8 @@ pub async fn import_audio_item(
         missing_files: Some(vec![format!("import task failed: {error}")]),
         disabled_group_ids: Vec::new(),
         tempo_map: None,
+        undo_depth: None,
+        redo_depth: None,
     })
 }
 #[tauri::command(rename_all = "camelCase")]
@@ -634,6 +650,8 @@ pub async fn import_audio_bytes(
         missing_files: Some(vec![format!("import task failed: {error}")]),
         disabled_group_ids: Vec::new(),
         tempo_map: None,
+        undo_depth: None,
+        redo_depth: None,
     })
 }
 #[tauri::command(rename_all = "camelCase")]

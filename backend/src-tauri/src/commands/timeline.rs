@@ -1012,6 +1012,8 @@ fn take_error_payload_with_missing(
         },
         disabled_group_ids: vec![],
         tempo_map: None,
+        undo_depth: None,
+        redo_depth: None,
     };
     payload.project = Some(state.project_meta_payload());
     payload

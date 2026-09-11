@@ -130,6 +130,8 @@ const selectMenuBarSession = (state: RootState) => {
         defaultStretchAlgorithm: session.defaultStretchAlgorithm,
         edgeSmoothnessPercent: session.edgeSmoothnessPercent,
         editParam: session.editParam,
+        historyRedoDepth: session.historyRedoDepth,
+        historyUndoDepth: session.historyUndoDepth,
         multiSelectedClipIds: session.multiSelectedClipIds,
         ortDeviceId: session.ortDeviceId,
         ortEp: session.ortEp,
@@ -621,13 +623,21 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     <span>{t("menu_edit")}</span>
                 </DropdownMenu.Trigger>
                 <DropdownMenu.Content variant="soft" color="gray">
-                    <DropdownMenu.Item onSelect={() => void dispatch(undoRemote())}>
+                    {/* 无可撤销/可重做状态时置灰（不发请求、不刷新界面）：
+                        深度镜像由后端 history_state 广播实时维护。 */}
+                    <DropdownMenu.Item
+                        disabled={s.historyUndoDepth <= 0}
+                        onSelect={() => void dispatch(undoRemote())}
+                    >
                         {t("menu_undo")}{" "}
                         <div className="ml-auto pl-4 text-xs text-qt-text-muted">
                             {shortcutLabel("edit.undo")}
                         </div>
                     </DropdownMenu.Item>
-                    <DropdownMenu.Item onSelect={() => void dispatch(redoRemote())}>
+                    <DropdownMenu.Item
+                        disabled={s.historyRedoDepth <= 0}
+                        onSelect={() => void dispatch(redoRemote())}
+                    >
                         {t("menu_redo")}{" "}
                         <div className="ml-auto pl-4 text-xs text-qt-text-muted">
                             {shortcutLabel("edit.redo")}

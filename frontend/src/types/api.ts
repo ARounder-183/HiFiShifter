@@ -226,7 +226,8 @@ export interface RemoveSilenceResult {
 }
 
 export interface TimelineResult {
-    ok: true;
+    /** 撤销/重做遇到空栈时后端返回 `false`：前端不套用任何快照（静默失败）。 */
+    ok: boolean;
     tracks: TimelineTrack[];
     clips: TimelineClip[];
     created_clip_ids?: string[];
@@ -245,6 +246,20 @@ export interface TimelineResult {
     project_version_too_new?: boolean;
     project_file_version?: number;
     current_project_file_version?: number;
+    /**
+     * 撤销 / 重做栈深度。只有与历史直接相关的响应（撤销 / 重做 /
+     * begin_undo_group / get_history_state）携带；其余命令为 undefined，
+     * 前端沿用最近一次已知值（深度变化另有 `history_state` 事件广播）。
+     */
+    undo_depth?: number;
+    redo_depth?: number;
+}
+
+/** `get_history_state`：撤销 / 重做可用性（栈深度）。 */
+export interface HistoryStateResult {
+    ok: boolean;
+    undoDepth: number;
+    redoDepth: number;
 }
 
 export interface TrackSummaryResult {

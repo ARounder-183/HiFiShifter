@@ -557,6 +557,7 @@ pub fn run() {
             commands::redo_timeline,
             commands::begin_undo_group,
             commands::end_undo_group,
+            commands::get_history_state,
             commands::get_project_meta,
             commands::new_project,
             commands::open_project_dialog,
