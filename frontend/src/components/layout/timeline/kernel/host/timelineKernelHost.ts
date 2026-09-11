@@ -53,7 +53,8 @@ import {
 import { hitClipHeaderControl, type ClipHeaderControl } from "../interaction/clipHeaderControls";
 import { isFadeShapeCycleModifierHeld } from "../../fadeShapeCycle";
 import { noteFadeLinePointerDown } from "../../hooks/fadeLineClickGesture";
-import { hitClipFadeTarget } from "../interaction/fadeTargets";
+import { effectiveFadeSec, hitClipFadeTarget } from "../interaction/fadeTargets";
+import type { FadeContextSide } from "../../FadeContextMenu";
 import { hitOverlapControl } from "../interaction/overlapControls";
 import { resolveHorizontalWheelZoom } from "../../runtime/timelineScrollRange";
 import { resolveTimelineMinPxPerSec } from "../../runtime/timelineZoomBounds";
@@ -614,6 +615,24 @@ export interface TimelineKernelInteractions {
         readonly trackId: string | null;
         /** 指针处的工程时间（秒）：轨道区菜单的"在此处新建"等操作需要它。 */
         readonly sec: number;
+    }) => void;
+    /**
+     * 淡变包络 / 交叉点抓手的**专属右键菜单**请求。
+     *
+     * 【为什么单独一条通道】旧实现里淡变菜单由三层 DOM 命中块
+     * （`ClipItem` 角部、`FadeHitLayer`、`OverlapEditLayer`）各自发起，它们在内核
+     * 模式下都不挂载；而菜单宿主（`FadeContextMenuHost`）挂在面板上、经全局总线
+     * 接收请求——因此内核只负责命中解析与载荷构造，不直接弹菜单。
+     *
+     * @param request `primary` 是右键命中的那一侧包络；交叉点抓手时
+     *   `primary` = 前一个 clip 的淡出、`secondary` = 后一个 clip 的淡入
+     *   （与旧实现 `crossfadeSides.out / .in` 的列序一致）。
+     */
+    readonly onFadeContextMenu?: (request: {
+        readonly clientX: number;
+        readonly clientY: number;
+        readonly primary: FadeContextSide;
+        readonly secondary: FadeContextSide | null;
     }) => void;
 }
 
@@ -3138,6 +3157,30 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      */
     function dispatchContextMenuAt(clientX: number, clientY: number): void {
         const hit = hitAt(clientX, clientY);
+        // 淡变包络 / 交叉点抓手右键 → **淡变专属菜单**（曲率、形状、长度、重置…），
+        // 优先于 clip 通用菜单。旧实现由 `FadeHitLayer` / `OverlapEditLayer`
+        // 这两层 DOM 命中块拦截，内核模式下它们不挂载——必须在这里补。
+        if (
+            hit.kind === "clip" &&
+            interactions?.onFadeContextMenu !== undefined &&
+            (hit.region === "fade-in-corner" ||
+                hit.region === "fade-out-corner" ||
+                hit.region === "crossfade-grip")
+        ) {
+            const isGrip = hit.region === "crossfade-grip";
+            // 抓手 = 双侧：primary 是**前一个** clip 的淡出、secondary 是后一个的淡入
+            //（与旧实现 `crossfadeSides.out / .in` 的列序一致）。
+            const primary = isGrip
+                ? hit.partnerClipId === undefined
+                    ? null
+                    : fadeSideAt(hit.partnerClipId, true)
+                : fadeSideAt(hit.clip.id, hit.region === "fade-out-corner");
+            const secondary = isGrip ? fadeSideAt(hit.clip.id, false) : null;
+            if (primary !== null) {
+                interactions.onFadeContextMenu({ clientX, clientY, primary, secondary });
+                return;
+            }
+        }
         // 速率标签右键 → 速率高级编辑（BPM 换算对话框），优先于通用右键菜单
         // （旧实现同样在速率角标上拦截右键）。其余位置仍走通用菜单。
         if (
@@ -3157,6 +3200,32 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             trackId,
             sec: hit.sec,
         });
+    }
+
+    /**
+     * 构造淡变专属菜单的单侧载荷（形状 / 方向 / 生效长度）。
+     *
+     * 特殊说明：长度取**生效值**（自动交叉淡化 > 0 时覆盖手动值），与绘制端和旧实现
+     * `OverlapEditLayer.effectiveFadeInSec` 同一规则——菜单里显示的必须是画面上真正
+     * 生效的那个长度，否则会出现「菜单写 0.8s、包络线却是 1.2s」。
+     *
+     * @param clipId 目标 clip。
+     * @param isOut true = 淡出侧，false = 淡入侧。
+     * @returns 载荷；clip 已不存在时为 null（调用方退化为不弹菜单）。
+     */
+    function fadeSideAt(clipId: string, isOut: boolean): FadeContextSide | null {
+        const clip = data().clips.find((item) => item.id === clipId);
+        if (clip === undefined) return null;
+        return {
+            clipId,
+            isOut,
+            shape: (isOut ? clip.fadeOutShape : clip.fadeInShape) ?? 0,
+            dir: (isOut ? clip.fadeOutDir : clip.fadeInDir) ?? 0,
+            lengthSec: effectiveFadeSec(
+                isOut ? clip.fadeOutSec : clip.fadeInSec,
+                isOut ? clip.autoFadeOutSec : clip.autoFadeInSec,
+            ),
+        };
     }
 
     /**

@@ -26,6 +26,10 @@ import { normalizedTrackColorCss } from "./timeline/runtime/timelineCanvasStyle"
 import { defaultFadeDirFor, FADE_PRESETS } from "./timeline/reaperFade";
 import type { FadeLengthFormatContext } from "./timeline/fadeTooltipText";
 import { FadeContextMenuHost } from "./timeline/FadeContextMenuHost";
+import {
+    requestOpenFadeContextMenu,
+    type FadeContextMenuRequest,
+} from "./timeline/fadeContextMenuBus";
 import { createPortal } from "react-dom";
 import {
     addTrackRemote,
@@ -2952,6 +2956,22 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     );
 
     /**
+     * 内核淡变专属右键菜单：转发到全局总线（菜单宿主挂在面板上）。
+     *
+     * 复用旧实现的 `requestOpenFadeContextMenu`——载荷类型与语义完全一致，因此
+     * 曲率滑块 / 形状 / 长度 / 重置等菜单项在内核模式下与旧实现同源。
+     * 通用 clip 菜单要显式关掉（旧实现里两者互斥：右键落点只属于其中一方）。
+     */
+    const handleKernelFadeContextMenu = React.useCallback(
+        (request: FadeContextMenuRequest) => {
+            setContextMenu(null);
+            setTrackAreaMenu(null);
+            requestOpenFadeContextMenu(request);
+        },
+        [setContextMenu, setTrackAreaMenu],
+    );
+
+    /**
      * 内核双击 clip：请求参数编辑器按 clip 起止范围创建选区。
      *
      * 与旧实现（`ClipItem` 的双击分支）同源：关闭右键菜单 → 派发
@@ -3394,6 +3414,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             onBoxSelectPreview: handleKernelBoxSelectPreview,
             onBoxSelectCommit: handleKernelBoxSelectCommit,
             onContextMenu: handleKernelContextMenu,
+            onFadeContextMenu: handleKernelFadeContextMenu,
         }),
         [
             handleKernelSeek,
