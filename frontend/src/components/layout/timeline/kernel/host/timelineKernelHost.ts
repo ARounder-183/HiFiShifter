@@ -183,6 +183,14 @@ export interface TimelineKernelDomSync {
      * 一次 transform，因此拖拽期间每帧重渲染的高亮层不会因滚动而重排。
      */
     readonly snapHighlightContent?: HTMLElement | null;
+    /**
+     * copy 拖拽 ghost 的内容层：整层写 `translate(-scrollLeft, -scrollTop)`。
+     *
+     * 与 `snapHighlightContent` 同一机制（内容坐标 + 整层平移）——ghost 的位置由
+     * 面板按内容坐标算好，滚动时只平移容器，**层内不重排**。copy 模式下原 clip
+     * 不动，没有"乐观位置"可依赖，因此必须有这一层。
+     */
+    readonly ghostContent?: HTMLElement | null;
 }
 
 /** 宿主构造参数。 */
@@ -253,6 +261,19 @@ export interface TimelineKernelHostArgs {
 }
 
 /** 内核交互回调集合。 */
+/**
+ * 拖拽期间的修饰键快照。
+ *
+ * 形状与 `isModifierActive` 的 `event` 参数一致，因此调用方可以把它直接喂给
+ * `isModifierActive(kb, modifiers)`，无需伪造 DOM 事件。
+ */
+export interface KernelDragModifiers {
+    readonly ctrlKey: boolean;
+    readonly shiftKey: boolean;
+    readonly altKey: boolean;
+    readonly metaKey: boolean;
+}
+
 export interface TimelineKernelInteractions {
     /**
      * 请求跳转播放头（点击或拖拽空白 / 标尺）。
@@ -371,9 +392,13 @@ export interface TimelineKernelInteractions {
     /**
      * 拖拽预览（拖拽期间每帧回调，**不经 React 渲染**）。
      *
-     * 语义：调用方据此写入**乐观位置**（Redux）。内核不做独立的 ghost 图层——
-     * 乐观更新会改变 `clips` 引用，内核在下一帧重建几何时把 clip 画在新位置，
+     * 语义：调用方据此写入**乐观位置**（Redux）。移动语义下内核不做独立的 ghost
+     * 图层——乐观更新会改变 `clips` 引用，内核在下一帧重建几何时把 clip 画在新位置，
      * 视觉上即"跟着指针走"。这样只有一份位置真值，不会出现 ghost 与实体分叉。
+     *
+     * **copy 模式例外**：原 clip 不动，因此没有"乐观位置"可依赖，必须由调用方给出
+     * ghost（见 `TimelineKernelView` 的 `ghost` prop）。判定归调用方（键位绑定在
+     * 面板侧），内核只透传 `modifiers` 快照。
      *
      * @param args 目标位置（已含边界钳制）；`targetTrackId` 为落点轨道。
      */
@@ -381,6 +406,14 @@ export interface TimelineKernelInteractions {
         readonly clipId: string;
         readonly deltaSec: number;
         readonly targetTrackId: string;
+        /**
+         * 修饰键快照。
+         *
+         * 【为什么由内核给、而不是面板自己读事件】拖拽期间没有 DOM 事件穿过面板，
+         * 面板拿不到当前修饰键。内核只做**快照透传**——「哪个键是复制」由键位绑定
+         * 决定（`resolveClipDragCopyMode`），那是面板侧的配置，内核不解释。
+         */
+        readonly modifiers: KernelDragModifiers;
     }) => void;
     /**
      * 拖拽结束。
@@ -393,6 +426,8 @@ export interface TimelineKernelInteractions {
         readonly deltaSec: number;
         readonly targetTrackId: string;
         readonly cancelled: boolean;
+        /** 收尾时的修饰键快照（见 `onDragPreview`）。 */
+        readonly modifiers: KernelDragModifiers;
     }) => void;
     /**
      * trim 预览（拖拽左右边缘时每帧回调，已按值去重）。
@@ -1181,6 +1216,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     let lastPlayheadContentX = Number.NaN;
     /** 吸附高亮内容层的整层变换（字符串去重：同时含两轴）。 */
     let lastSnapTransform = "";
+    /** copy ghost 内容层的整层变换（去重方式同上）。 */
+    let lastGhostTransform = "";
     /** 上一次绘制的视口（引用比较：`ScrollKernel.get()` 的引用在未变化时稳定）。 */
     let lastDrawnView: TimelineViewportState | null = null;
     /** 上一次绘制的播放头位置（秒），用于判断是否需要继续自驱动。 */
@@ -1304,6 +1341,16 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             if (transform !== lastSnapTransform) {
                 lastSnapTransform = transform;
                 snapContent.style.transform = transform;
+            }
+        }
+
+        // copy ghost 内容层：与吸附高亮同一机制（内容坐标 + 整层平移）。
+        const ghostContent = sync.ghostContent;
+        if (ghostContent != null) {
+            const transform = `translate(${-view.scrollLeft}px, ${-view.scrollTop}px)`;
+            if (transform !== lastGhostTransform) {
+                lastGhostTransform = transform;
+                ghostContent.style.transform = transform;
             }
         }
 
@@ -2538,6 +2585,26 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      * @param event 指针事件。
      * @returns 无返回值。
      */
+    /**
+     * 取修饰键快照（指针 / 键盘事件都带这四个字段）。
+     *
+     * @param event 事件。
+     * @returns 快照，形状与 `isModifierActive` 的 `event` 参数一致。
+     */
+    function dragModifiersOf(event: {
+        ctrlKey: boolean;
+        shiftKey: boolean;
+        altKey: boolean;
+        metaKey: boolean;
+    }): KernelDragModifiers {
+        return {
+            ctrlKey: event.ctrlKey,
+            shiftKey: event.shiftKey,
+            altKey: event.altKey,
+            metaKey: event.metaKey,
+        };
+    }
+
     function applyDragPreview(event: PointerEvent): void {
         if (gesture.kind !== "clip-drag") return;
         const rect = container.getBoundingClientRect();
@@ -2569,6 +2636,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             clipId: gesture.clipId,
             deltaSec: delta.deltaSec,
             targetTrackId,
+            modifiers: dragModifiersOf(event),
         });
     }
 
@@ -2585,6 +2653,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 deltaSec: gesture.lastDeltaSec,
                 targetTrackId: gesture.lastTargetTrackId,
                 cancelled,
+                modifiers: dragModifiersOf(event),
             });
         }
         if (gesture.kind === "clip-trim") {
@@ -2893,6 +2962,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                         deltaSec: gesture.lastDeltaSec,
                         targetTrackId: gesture.lastTargetTrackId,
                         cancelled: true,
+                        modifiers: dragModifiersOf(event),
                     });
                     gesture = { kind: "none" };
                     break;

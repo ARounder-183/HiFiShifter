@@ -31,6 +31,7 @@ import { selectKeybinding } from "../../../../features/keybindings/keybindingsSl
 import { readDevicePixelRatio, wholeDevicePxLength } from "../../../../utils/devicePixelLine";
 import type { ClipInfo } from "../../../../features/session/sessionTypes";
 import { SnapHighlightLayer } from "../SnapHighlightLayer";
+import { CLIP_BODY_PADDING_Y, CLIP_HEADER_HEIGHT } from "../constants";
 import { KernelClipInlineEditor } from "./KernelClipInlineEditor";
 import { createTimelineAxis, type TimelineAxis } from "../runtime/timelineAxis";
 import { TimelineWaveformSurface } from "../TimelineWaveformSurface";
@@ -129,6 +130,31 @@ export interface TimelineKernelViewProps {
         /** 内容层高度（全部轨道总高）。 */
         readonly contentHeight: number;
     };
+    /**
+     * copy 拖拽的 ghost 预览（缺省不渲染该层）。
+     *
+     * 【为什么内核需要一个独立图层】移动语义下"乐观位置"就够——内核重建几何时
+     * 把 clip 画到新位置即可。但 copy 模式下**原 clip 不动**，没有乐观位置可依赖，
+     * 必须由面板给出 ghost。
+     *
+     * 【坐标系】与 `snapHighlight` 同一机制：层内元素用**内容坐标**布局，宿主在
+     * rAF 内整层 `translate(-scrollLeft, -scrollTop)`（见 `TimelineKernelDomSync.ghostContent`）。
+     * 背景色由面板算好传入（`color-mix` 的轨道色归一化在面板侧，内核不重复该逻辑）。
+     */
+    readonly ghost?: {
+        readonly items: readonly {
+            /** React key。 */
+            readonly key: string;
+            /** 内容坐标左缘（= 目标起始时间 × pxPerSec）。 */
+            readonly leftPx: number;
+            /** 内容坐标宽度（= clip 长度 × pxPerSec）。 */
+            readonly widthPx: number;
+            /** 落点轨道：纵向位置由视图按 `rowHeight` 换算（面板没有行高）。 */
+            readonly trackId: string;
+        }[];
+        readonly contentWidth: number;
+        readonly contentHeight: number;
+    };
 }
 
 export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => {
@@ -144,6 +170,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         hostRef,
         interactions,
         snapHighlight,
+        ghost,
         inlineEdit,
         activeGroupIds,
         disabledGroupIds,
@@ -158,6 +185,8 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
     const playheadLineRef = React.useRef<HTMLDivElement | null>(null);
     /** 吸附高亮内容层容器（宿主在 rAF 内整层平移，跟随视口）。 */
     const snapContentRef = React.useRef<HTMLDivElement | null>(null);
+    /** copy ghost 内容层容器（同上）。 */
+    const ghostContentRef = React.useRef<HTMLDivElement | null>(null);
     /** 行内编辑浮层根元素（位置与宽度都由宿主在 rAF 内写入）。 */
     const inlineEditorRef = React.useRef<HTMLDivElement | null>(null);
     const localHostRef = React.useRef<TimelineKernelHost | null>(null);
@@ -299,8 +328,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
             onCrossfadeGripPreview: (args) =>
                 interactionsRef.current?.onCrossfadeGripPreview?.(args),
             onCrossfadeGripCommit: (args) => interactionsRef.current?.onCrossfadeGripCommit?.(args),
-            onSnapOffsetPreview: (args) =>
-                interactionsRef.current?.onSnapOffsetPreview?.(args),
+            onSnapOffsetPreview: (args) => interactionsRef.current?.onSnapOffsetPreview?.(args),
             onSnapOffsetCommit: (args) => interactionsRef.current?.onSnapOffsetCommit?.(args),
             onFadeShapeCycle: (clipId, side) =>
                 interactionsRef.current?.onFadeShapeCycle?.(clipId, side),
@@ -396,6 +424,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                     playheadLine: playheadLineRef?.current ?? null,
                     rulerPlayheadLine: rulerPlayheadLineRef?.current ?? null,
                     snapHighlightContent: snapContentRef.current,
+                    ghostContent: ghostContentRef.current,
                 },
                 onRowHeightChange: (px) => callbacksRef.current.onRowHeightChange(px),
                 onZoomChange: (pxPerSec) => callbacksRef.current.onPxPerSecChange(pxPerSec),
@@ -525,6 +554,46 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                     />
                 </div>
             ) : null}
+            {/* copy 拖拽 ghost：内容坐标系，由宿主整层 translate 跟随视口。
+                移动语义下内核靠"乐观位置"显示，copy 语义下原 clip 不动，
+                必须靠这一层——否则 ⌘+拖拽期间画面毫无反馈。 */}
+            {/* 容器**常驻**（无 ghost 时为空）：宿主在挂载时一次性抓取 ref 快照，
+                按需挂载会让它在需要平移时仍是 null——表现为"ghost 不随滚动走"。 */}
+            <div
+                ref={ghostContentRef}
+                data-hs-ghost-content="1"
+                className="pointer-events-none absolute left-0 top-0 z-[4] overflow-hidden"
+                style={{
+                    width: ghost?.contentWidth ?? 0,
+                    height: ghost?.contentHeight ?? 0,
+                }}
+            >
+                {(ghost?.items ?? []).map((item) => {
+                    const trackIndex = tracks.findIndex((t) => t.id === item.trackId);
+                    if (trackIndex < 0) return null;
+                    return (
+                        <div
+                            key={item.key}
+                            className="absolute opacity-50"
+                            style={{
+                                left: item.leftPx,
+                                top: trackIndex * rowHeight,
+                                width: item.widthPx,
+                                height: Math.max(1, rowHeight - CLIP_BODY_PADDING_Y),
+                            }}
+                        >
+                            <div
+                                className="absolute left-0 right-0 top-0 bg-[var(--qt-clip-bg)]"
+                                style={{ height: CLIP_HEADER_HEIGHT }}
+                            />
+                            <div
+                                className="absolute left-0 right-0 bottom-0 border border-dashed border-black/40 bg-[var(--qt-clip-bg)]"
+                                style={{ top: CLIP_HEADER_HEIGHT }}
+                            />
+                        </div>
+                    );
+                })}
+            </div>
             {/* 行内编辑浮层（重命名 / 增益 / 速率）：旧实现由 ClipHeader 的 DOM
                 输入框承担，内核模式下 clip 是自绘的，必须自备输入框。位置由宿主
                 在 rAF 内写入（内容坐标 − 滚动量），避免滚动时抖动或丢焦点。 */}

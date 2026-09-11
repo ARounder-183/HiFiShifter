@@ -19,7 +19,9 @@ import { useI18n } from "../../i18n/I18nProvider";
 import { useAppTheme } from "../../theme/AppThemeProvider";
 import { useAppSelector } from "../../app/hooks";
 import { shallowEqual } from "react-redux";
-import { selectKeybinding } from "../../features/keybindings/keybindingsSlice";
+import { isModifierActive, selectKeybinding } from "../../features/keybindings/keybindingsSlice";
+import { resolveClipDragCopyMode } from "./timeline/hooks/clipDragCopyMode";
+import { copyClipsFromDrag } from "./timeline/hooks/copyClipsFromDrag";
 import { defaultFadeDirFor, FADE_PRESETS } from "./timeline/reaperFade";
 import type { FadeLengthFormatContext } from "./timeline/fadeTooltipText";
 import { FadeContextMenuHost } from "./timeline/FadeContextMenuHost";
@@ -1141,6 +1143,20 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     );
 
     /** 内核拖拽：按下时的原始位置（把相对位移换算为绝对位置，并支持回滚）。 */
+    /**
+     * copy 拖拽的 ghost 预览（内容坐标）。
+     *
+     * 移动语义下内核靠"乐观位置"显示，copy 语义下原 clip 不动，必须有这一层——
+     * 否则 ⌘+拖拽期间画面毫无反馈。纵向位置由内核视图按 `rowHeight` 换算
+     * （面板没有行高），这里只给内容坐标的左缘与宽度。
+     */
+    const [kernelGhost, setKernelGhost] = React.useState<Array<{
+        key: string;
+        leftPx: number;
+        widthPx: number;
+        trackId: string;
+    }> | null>(null);
+
     const kernelDragOriginRef = React.useRef<{
         clipId: string;
         startSec: number;
@@ -1154,6 +1170,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
          * `startSec` 已被改写，但 `snapOffsetSec` 是 clip 的固有属性，拖拽中不变。
          */
         snapOffsetSec: number;
+        /**
+         * 本次拖拽是否已进入 copy 模式。
+         *
+         * **单向**：false → true 允许（拖拽中途按下复制键），true → false 不允许
+         * （与旧实现 `resolveClipDragCopyMode` 的既有语义一致——中途松开复制键
+         * 不会把已经"复制"的意图退回成"移动"，避免松手瞬间语义反转）。
+         */
+        copyMode: boolean;
     } | null>(null);
 
     /**
@@ -1164,7 +1188,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
      * （表现为 clip 越拖越快）。
      */
     const handleKernelDragPreview = React.useCallback(
-        (args: { clipId: string; deltaSec: number; targetTrackId: string }) => {
+        (args: {
+            clipId: string;
+            deltaSec: number;
+            targetTrackId: string;
+            modifiers: { ctrlKey: boolean; shiftKey: boolean; altKey: boolean; metaKey: boolean };
+        }) => {
             if (kernelDragOriginRef.current?.clipId !== args.clipId) {
                 const clip = sessionRef.current.clips.find((item) => item.id === args.clipId);
                 if (clip === undefined) return;
@@ -1174,10 +1203,18 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     lengthSec: clip.lengthSec,
                     trackId: clip.trackId,
                     snapOffsetSec: Math.max(0, Number(clip.snapOffsetSec) || 0),
+                    copyMode: false,
                 };
             }
             const origin = kernelDragOriginRef.current;
             if (origin === null) return;
+            // copy 模式判定：复用旧实现的函数（含"已配置绑定为准 + 非 macOS 的 Ctrl
+            // 回退"）。**单向**——一旦进入 copy 就不再退回移动，避免松手瞬间语义反转。
+            origin.copyMode = resolveClipDragCopyMode({
+                existingCopyMode: origin.copyMode,
+                ctrlKey: args.modifiers.ctrlKey,
+                modifierActive: isModifierActive(copyDragKb, args.modifiers),
+            });
             const rawStart = Math.max(0, origin.startSec + args.deltaSec);
             // 吸附：复用旧实现的 snapTimelineDetailed（多源候选 + 取更近者），
             // 内核只给几何位移，吸附规则不在内核里重写。
@@ -1200,12 +1237,24 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             // 吸附被关闭（拖拽中切开关 / 按住临时取反键）：高亮必须清掉，
             // 否则会残留上一次的吸附提示（旧实现同样在 else 分支清除）。
             if (!s.snapEnabled) clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+            if (origin.copyMode) {
+                // copy：**原 clip 不动**，只更新 ghost（内容坐标）。
+                setKernelGhost([
+                    {
+                        key: args.clipId,
+                        leftPx: nextStart * pxPerSec,
+                        widthPx: Math.max(1, origin.lengthSec * pxPerSec),
+                        trackId: args.targetTrackId,
+                    },
+                ]);
+                return;
+            }
             batch(() => {
                 dispatch(moveClipStart({ clipId: args.clipId, startSec: nextStart }));
                 dispatch(moveClipTrack({ clipId: args.clipId, trackId: args.targetTrackId }));
             });
         },
-        [dispatch, sessionRef, s.snapEnabled, snapTimelineDetailed],
+        [copyDragKb, dispatch, pxPerSec, s.snapEnabled, sessionRef, snapTimelineDetailed],
     );
 
     /**
@@ -1215,13 +1264,52 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
      * 位置，与后端分叉（旧实现同样在取消分支显式回滚）。
      */
     const handleKernelDragCommit = React.useCallback(
-        (args: { clipId: string; deltaSec: number; targetTrackId: string; cancelled: boolean }) => {
+        (args: {
+            clipId: string;
+            deltaSec: number;
+            targetTrackId: string;
+            cancelled: boolean;
+            modifiers: { ctrlKey: boolean; shiftKey: boolean; altKey: boolean; metaKey: boolean };
+        }) => {
             const origin = kernelDragOriginRef.current;
             kernelDragOriginRef.current = null;
             if (origin === null) return;
             // 手势结束：清掉吸附高亮（旧实现同样在收尾清除，否则最后一次的
             // 吸附提示会一直挂在画面上）。
             clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+            if (origin.copyMode) {
+                setKernelGhost(null);
+                // copy 模式下原 clip 从未被移动：既不需要回滚，也不走 move 提交。
+                if (args.cancelled) return;
+                // 落库复用抽出的共享函数（与旧实现**同一份**复制语义）。
+                void copyClipsFromDrag({
+                    sourceClipIds: [origin.clipId],
+                    initialById: {
+                        [origin.clipId]: {
+                            startSec: origin.startSec,
+                            trackId: origin.trackId,
+                        },
+                    },
+                    initialTrackIndexById: {},
+                    deltaSec: args.deltaSec,
+                    // 内核拖拽的落点始终是已有轨道（`resolveTargetTrackIndex` 越界时
+                    // 回落原轨），因此不涉及建新轨。
+                    dropToNewTrack: false,
+                    trackOffset: 0,
+                    allowTrackMove: true,
+                    hasMixedTrackSelection: false,
+                    autoCrossfadeEnabled: s.autoCrossfadeEnabled,
+                    dispatch,
+                    sessionRef,
+                    setMultiSelectedClipIds,
+                    // 目标轨由内核给（它做了落点换算），不走偏移解析。
+                    resolveTrackIdByOffset: () => args.targetTrackId,
+                    maybeSelectTargetTrack: () => undefined,
+                    createNewTracksForDrop: async () => [],
+                    createNewTrackForDrop: async () => null,
+                }).catch(() => undefined);
+                return;
+            }
             if (args.cancelled) {
                 batch(() => {
                     dispatch(moveClipStart({ clipId: origin.clipId, startSec: origin.startSec }));
@@ -1425,10 +1513,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             void dispatch(
                 setClipStateRemote({
                     clipId: args.clipId,
-                    snapOffsetSec: Math.min(
-                        Math.max(Number(clip?.snapOffsetSec) || 0, 0),
-                        clipLen,
-                    ),
+                    snapOffsetSec: Math.min(Math.max(Number(clip?.snapOffsetSec) || 0, 0), clipLen),
                     checkpoint: true,
                 }),
             )
@@ -2742,6 +2827,15 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                     contentWidth: timelineScrollRange.paddedContentWidth,
                                     contentHeight,
                                 }}
+                                ghost={
+                                    kernelGhost === null
+                                        ? undefined
+                                        : {
+                                              items: kernelGhost,
+                                              contentWidth: timelineScrollRange.paddedContentWidth,
+                                              contentHeight,
+                                          }
+                                }
                             />
                         </>
                     ) : (
