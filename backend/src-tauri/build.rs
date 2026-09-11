@@ -284,6 +284,7 @@ fn build_world_static() {
     // 显式给 /std:c++14 行为不变、警告消失。
     if world.get_compiler().is_like_msvc() {
         world.flag("/std:c++14");
+        world.flag("/utf-8");
     } else {
         world.flag("-std=c++11");
     }
@@ -374,6 +375,7 @@ fn build_signalsmith_stretch() {
         build.define("NOMINMAX", None);
         // 启用优化以提升 number-crunching 性能（即使在 Debug 模式下）
         build.flag("/O2");
+        build.flag("/utf-8");
     } else {
         build.flag("-std=c++14");
         if !cfg!(target_os = "windows") {
