@@ -31,6 +31,7 @@ import { selectKeybinding } from "../../../../features/keybindings/keybindingsSl
 import { readDevicePixelRatio, wholeDevicePxLength } from "../../../../utils/devicePixelLine";
 import type { ClipInfo } from "../../../../features/session/sessionTypes";
 import { SnapHighlightLayer } from "../SnapHighlightLayer";
+import { KernelClipInlineEditor } from "./KernelClipInlineEditor";
 import { createTimelineAxis, type TimelineAxis } from "../runtime/timelineAxis";
 import { TimelineWaveformSurface } from "../TimelineWaveformSurface";
 import {
@@ -105,6 +106,21 @@ export interface TimelineKernelViewProps {
      */
     readonly activeGroupIds?: readonly string[];
     readonly disabledGroupIds?: readonly string[];
+    /**
+     * 内核态行内编辑（重命名 / 增益 / 速率）。
+     *
+     * 由面板提供：面板持有编辑状态与提交语义（值的格式化与解析是领域知识——
+     * 增益是 dB、速率有 `x` / `%` 前缀，不属于输入框）。视图只负责把它定位到
+     * clip header 上，并在滚动时随视口更新位置。
+     */
+    readonly inlineEdit?: {
+        readonly clipId: string;
+        readonly field: "name" | "gain" | "rate";
+        readonly initialValue: string;
+        readonly inputMode?: "text" | "decimal";
+        readonly onCommit: (value: string) => void;
+        readonly onCancel: () => void;
+    } | null;
     readonly snapHighlight?: {
         /** 当前水平缩放（CSS px/秒）。 */
         readonly pxPerSec: number;
@@ -128,6 +144,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         hostRef,
         interactions,
         snapHighlight,
+        inlineEdit,
         activeGroupIds,
         disabledGroupIds,
         onScrollLeftCommit,
@@ -141,6 +158,8 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
     const playheadLineRef = React.useRef<HTMLDivElement | null>(null);
     /** 吸附高亮内容层容器（宿主在 rAF 内整层平移，跟随视口）。 */
     const snapContentRef = React.useRef<HTMLDivElement | null>(null);
+    /** 行内编辑浮层根元素（位置与宽度都由宿主在 rAF 内写入）。 */
+    const inlineEditorRef = React.useRef<HTMLDivElement | null>(null);
     const localHostRef = React.useRef<TimelineKernelHost | null>(null);
     const [fatal, setFatal] = React.useState<string | null>(null);
     /** 宿主是否已创建：波形层依赖内核视口源，必须等宿主就绪后再挂载。 */
@@ -397,6 +416,36 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
+    /**
+     * 行内编辑浮层：定位到 clip header 上，并随视口更新位置。
+     *
+     * 位置由宿主在 rAF 内命令式写入（复用视口图层注册）——用 React state 每帧
+     * 更新会让输入框在滚动时抖动，甚至因重渲染丢失焦点与已输入内容。
+     */
+    React.useEffect(() => {
+        if (inlineEdit == null) return;
+        const host = localHostRef.current;
+        if (host == null) return;
+        const anchor = host.getClipHeaderAnchor(inlineEdit.clipId, inlineEdit.field);
+        if (anchor == null) return;
+        const reposition = (axis: TimelineAxis): void => {
+            const el = inlineEditorRef.current;
+            if (el == null) return;
+            // 宽度与位置一起写：把宽度留给 React state 会让「挂载」与「拿到宽度」
+            // 分成两次渲染，切换编辑目标时出现"状态已更新但浮层没出现"的空档。
+            el.style.width = `${anchor.widthPx}px`;
+            el.style.left = `${anchor.contentLeftPx - axis.scrollLeftPx}px`;
+            el.style.top = `${anchor.contentTopPx - axis.scrollTopPx}px`;
+        };
+        // 首帧立即写一次：浮层刚挂载，不能等下一次视口提交才定位。
+        reposition(host.getAxis());
+        const unregister = host.registerViewportLayer(
+            { name: "inline-editor", paint: reposition },
+            100,
+        );
+        return unregister;
+    }, [inlineEdit]);
+
     // 低频数据变化 → 场景重建（几何 / 主题 / 网格参数 / 行高）。
     React.useEffect(() => {
         localHostRef.current?.invalidateScene();
@@ -461,6 +510,19 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                         contentHeight={snapHighlight.contentHeight}
                     />
                 </div>
+            ) : null}
+            {/* 行内编辑浮层（重命名 / 增益 / 速率）：旧实现由 ClipHeader 的 DOM
+                输入框承担，内核模式下 clip 是自绘的，必须自备输入框。位置由宿主
+                在 rAF 内写入（内容坐标 − 滚动量），避免滚动时抖动或丢焦点。 */}
+            {inlineEdit != null ? (
+                <KernelClipInlineEditor
+                    ref={inlineEditorRef}
+                    key={`${inlineEdit.clipId}:${inlineEdit.field}`}
+                    initialValue={inlineEdit.initialValue}
+                    inputMode={inlineEdit.inputMode}
+                    onCommit={inlineEdit.onCommit}
+                    onCancel={inlineEdit.onCancel}
+                />
             ) : null}
             {/* 轨道区播放头：位置由宿主在 rAF 内写 translateX（视口坐标）；
                 线宽按物理像素取整，与旧实现同为恒 1 物理像素。 */}

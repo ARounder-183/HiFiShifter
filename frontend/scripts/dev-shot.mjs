@@ -104,6 +104,12 @@ for (const action of actions) {
             await page.keyboard.press(action.key);
             break;
         }
+        case "type": {
+            // 向当前聚焦元素输入文本（行内编辑 / 重命名这类验证需要真实键入，
+            // 直接改 DOM 值不会触发 React 的受控更新）。
+            await page.keyboard.type(action.text ?? "", { delay: action.delay ?? 10 });
+            break;
+        }
         case "wait": {
             await page.waitForTimeout(action.ms ?? 300);
             break;

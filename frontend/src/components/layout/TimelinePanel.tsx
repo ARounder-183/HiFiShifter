@@ -106,6 +106,8 @@ import {
 import { timeRulerHeightPx } from "./timeline/rulerHeight";
 import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeline";
 import { SnapHighlightLayer } from "./timeline/SnapHighlightLayer";
+import { formatEditNumber, gainToDb } from "./timeline/math";
+import { parsePlaybackRateInput } from "./timeline/runtime/timelineCanvasStyle";
 import { SNAP_HIGHLIGHT_GROUP, clearSnapHighlights } from "../../utils/snapHighlight";
 import type { TempoMap } from "../../utils/tempoMap";
 import { isTimelineKernelEnabled } from "./timeline/kernel/featureFlag";
@@ -1600,6 +1602,91 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         [],
     );
 
+    /**
+     * 内核态行内编辑状态（重命名 / 增益 / 速率）。
+     *
+     * 值的格式化与解析都留在面板（领域知识：增益是 dB、速率有 `x` / `%` 前缀）；
+     * 内核视图只负责把输入框定位到 clip header 上。
+     */
+    const [kernelInlineEdit, setKernelInlineEdit] = React.useState<{
+        clipId: string;
+        field: "name" | "gain" | "rate";
+        initialValue: string;
+        inputMode: "text" | "decimal";
+    } | null>(null);
+
+    /** 内核双击名称区 → 进入重命名。 */
+    const handleKernelRenameClipStart = React.useCallback((clipId: string) => {
+        const clip = sessionRef.current.clips.find((item) => item.id === clipId);
+        if (clip === undefined) return;
+        setKernelInlineEdit({
+            clipId,
+            field: "name",
+            initialValue: clip.name,
+            inputMode: "text",
+        });
+    }, []);
+
+    /**
+     * 内核单击增益 / 速率标签 → 进入行内编辑。
+     *
+     * 初值取法与旧实现 `ClipHeader` 完全一致：速率用 `formatEditNumber(playbackRate)`、
+     * 增益用钳制到 ±12dB 后的 `formatEditNumber`（编辑态必须保留精度，不能用展示级取整）。
+     */
+    const handleKernelBadgeEditStart = React.useCallback(
+        (clipId: string, field: "gain" | "rate") => {
+            const clip = sessionRef.current.clips.find((item) => item.id === clipId);
+            if (clip === undefined) return;
+            const initialValue =
+                field === "rate"
+                    ? formatEditNumber(clip.playbackRate)
+                    : formatEditNumber(Math.min(12, Math.max(-12, gainToDb(clip.gain))));
+            setKernelInlineEdit({ clipId, field, initialValue, inputMode: "decimal" });
+        },
+        [],
+    );
+
+    /**
+     * 行内编辑的提交 / 取消（引用随编辑目标变化）。
+     *
+     * 解析失败一律按「取消」处理：旧实现同样在解析失败时静默放弃，而不是写入
+     * 一个兜底值——后者会让用户的一次误输入变成一次真实的状态变更。
+     */
+    const kernelInlineEditProp = React.useMemo(() => {
+        if (kernelInlineEdit === null) return null;
+        const { clipId, field, initialValue, inputMode } = kernelInlineEdit;
+        return {
+            clipId,
+            field,
+            initialValue,
+            inputMode,
+            onCommit: (raw: string): void => {
+                setKernelInlineEdit(null);
+                if (field === "name") {
+                    const trimmed = raw.trim();
+                    if (trimmed.length === 0) return;
+                    commitTrackLaneRename(clipId, trimmed);
+                    return;
+                }
+                if (field === "rate") {
+                    const parsed = parsePlaybackRateInput(raw);
+                    if (parsed == null) return;
+                    commitTrackLaneRate(clipId, { rate: parsed });
+                    return;
+                }
+                const parsed = Number.parseFloat(raw);
+                if (!Number.isFinite(parsed)) return;
+                commitTrackLaneGain(clipId, parsed);
+            },
+            onCancel: (): void => setKernelInlineEdit(null),
+        };
+    }, [
+        kernelInlineEdit,
+        commitTrackLaneRename,
+        commitTrackLaneRate,
+        commitTrackLaneGain,
+    ]);
+
     /** 内核交互回调集合（引用稳定：内核创建时取一次）。 */
     const kernelInteractions = React.useMemo(
         () => ({
@@ -1609,6 +1696,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             onToggleClipMute: handleKernelToggleClipMute,
             onOpenClipFormant: handleKernelOpenClipFormant,
             onRateBadgeMenu: handleKernelRateBadgeMenu,
+            onRenameClipStart: handleKernelRenameClipStart,
+            onBadgeEditStart: handleKernelBadgeEditStart,
             onDragPreview: handleKernelDragPreview,
             onDragCommit: handleKernelDragCommit,
             onTrimPreview: handleKernelTrimPreview,
@@ -2413,6 +2502,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 interactions={kernelInteractions}
                                 activeGroupIds={kernelActiveGroupIds}
                                 disabledGroupIds={disabledGroupIds}
+                                inlineEdit={kernelInlineEditProp}
                                 snapHighlight={{
                                     pxPerSec,
                                     contentWidth: timelineScrollRange.paddedContentWidth,

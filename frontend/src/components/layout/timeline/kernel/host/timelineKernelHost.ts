@@ -454,6 +454,20 @@ export interface TimelineKernelHost {
      */
     getAxis(): TimelineAxis;
     /**
+     * 读取 clip header 上某控件的锚点（**内容坐标** + 建议宽度）。
+     *
+     * 供内核态行内编辑浮层定位输入框。返回内容坐标而不是屏幕坐标：浮层需要随
+     * 滚动更新位置，只有拿到内容坐标才能与视口量（`scrollLeft/Top`）相减重算。
+     *
+     * @param clipId 目标 clip。
+     * @param field 编辑字段（决定锚点落在名称区还是标签处）。
+     * @returns 锚点；clip 或轨道不存在时为 null。
+     */
+    getClipHeaderAnchor(
+        clipId: string,
+        field: "name" | "gain" | "rate",
+    ): { readonly contentLeftPx: number; readonly contentTopPx: number; readonly widthPx: number } | null;
+    /**
      * 调试用：报告某屏幕坐标的命中结果与 header 控件判定。
      *
      * 【为什么放进公开句柄】内核是自绘的，命中区无法从 DOM 观察。排查「点不准」
@@ -1771,6 +1785,35 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      * @param hit `hitTest` 的 clip 命中结果（已含 `localX` / `localY`）。
      * @returns 命中的控件；非 header 分区或未命中控件时为 null。
      */
+    /**
+     * clip 视觉样式的返回类型。
+     *
+     * 从函数推导而不是手写接口：字段会随绘制端演进而增删，手写副本迟早漏字段，
+     * 而漏掉的往往正是命中端需要的那一个。
+     */
+    type ClipHeaderStyle = ReturnType<typeof buildTimelineClipVisualStyle>;
+
+    function buildHeaderStyle(clip: HitTestClip, clipWidthPx: number): ClipHeaderStyle {
+        const d = data();
+        const track = d.tracks.find((item) => item.id === clip.trackId);
+        return buildTimelineClipVisualStyle({
+            widthPx: clipWidthPx,
+            trackColor: track?.color,
+            selected:
+                d.selectedClipId === clip.id || d.multiSelectedClipIds.includes(clip.id),
+            muted: clip.muted === true,
+            gain: clip.gain ?? 0,
+            playbackRate: clip.playbackRate ?? 1,
+            name: clip.name ?? "",
+            fontFamily: resolveFontFamily(),
+            isPitchAdjustment: clip.isMidiClip === true,
+            groupId: clip.groupId,
+            isGroupActive: clip.groupId != null && d.activeGroupIds.includes(clip.groupId),
+            isGroupDisabled: clip.groupId != null && d.disabledGroupIds.includes(clip.groupId),
+            darkMode: d.darkMode,
+        });
+    }
+
     function resolveHeaderControl(hit: {
         readonly clip: HitTestClip;
         readonly region: ClipHitRegion;
@@ -1778,29 +1821,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         readonly localY: number;
     }): ClipHeaderControl {
         if (hit.region !== "header") return null;
-        const d = data();
         const view = scroll.get();
         const clipWidthPx = Math.max(1, hit.clip.lengthSec * view.pxPerSec);
-        const track = d.tracks.find((item) => item.id === hit.clip.trackId);
-        const style = buildTimelineClipVisualStyle({
-            widthPx: clipWidthPx,
-            trackColor: track?.color,
-            selected:
-                d.selectedClipId === hit.clip.id ||
-                d.multiSelectedClipIds.includes(hit.clip.id),
-            muted: hit.clip.muted === true,
-            gain: hit.clip.gain ?? 0,
-            playbackRate: hit.clip.playbackRate ?? 1,
-            name: hit.clip.name ?? "",
-            fontFamily: resolveFontFamily(),
-            isPitchAdjustment: hit.clip.isMidiClip === true,
-            groupId: hit.clip.groupId,
-            isGroupActive:
-                hit.clip.groupId != null && d.activeGroupIds.includes(hit.clip.groupId),
-            isGroupDisabled:
-                hit.clip.groupId != null && d.disabledGroupIds.includes(hit.clip.groupId),
-            darkMode: d.darkMode,
-        });
+        const style = buildHeaderStyle(hit.clip, clipWidthPx);
         return hitClipHeaderControl({
             localX: hit.localX,
             localY: hit.localY,
@@ -1845,6 +1868,11 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             if (isDoubleClick) {
                 // 名称区双击 → 重命名；其他区域双击 → 参数编辑器选区。
                 // （旧实现里名称区处理器会 stopPropagation，两者天然互斥。）
+                //
+                // 阻止默认动作：否则浏览器会把焦点移到被点击的容器上，而重命名输入框
+                // 是在本次 pointerdown 内同步挂载的——刚聚焦就被夺走焦点，其 onBlur
+                // 会把这次编辑当作"点开又点走"立刻取消。
+                event.preventDefault();
                 const anchor = screenAnchor(event.clientX, event.clientY);
                 if (resolveHeaderControl(hit) === "name") {
                     interactions?.onRenameClipStart?.(hit.clip.id, anchor.x, anchor.y);
@@ -1859,6 +1887,11 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             // 触发一次"开始编辑"再被双击覆盖）。
             const control = resolveHeaderControl(hit);
             if (control !== null) {
+                // 阻止默认动作（焦点转移）：行内编辑输入框是在本次 pointerdown 内
+                // 同步挂载并自动聚焦的，浏览器随后把焦点移到容器会让它立刻失焦，
+                // 表现为"点了标签但输入框一闪即消"。`name` 不消费（要继续走选中 /
+                // 拖拽），因此只对真正被消费的控件生效。
+                if (control !== "name") event.preventDefault();
                 const anchor = screenAnchor(event.clientX, event.clientY);
                 if (control === "mute") {
                     interactions?.onToggleClipMute?.(hit.clip.id, hit.clip.muted !== true);
@@ -2524,6 +2557,59 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
 
         getAxis() {
             return currentAxis();
+        },
+
+        getClipHeaderAnchor(clipId, field) {
+            const d = data();
+            const clip = d.clips.find((item) => item.id === clipId);
+            if (clip === undefined) return null;
+            const rowIndex = d.tracks.findIndex((item) => item.id === clip.trackId);
+            if (rowIndex < 0) return null;
+            const view = scroll.get();
+            const clipWidthPx = Math.max(1, clip.lengthSec * view.pxPerSec);
+            const style = buildHeaderStyle(
+                {
+                    id: clip.id,
+                    trackId: clip.trackId,
+                    startSec: clip.startSec,
+                    lengthSec: clip.lengthSec,
+                    muted: clip.muted,
+                    gain: clip.gain,
+                    playbackRate: clip.playbackRate,
+                    name: clip.name,
+                    groupId: clip.groupId,
+                    isMidiClip: clip.midiNoteCount != null,
+                },
+                clipWidthPx,
+            );
+            const clipLeftPx = clip.startSec * view.pxPerSec;
+            const rowTopPx = rowIndex * view.rowHeight;
+            if (field === "name") {
+                const left = clipLeftPx + style.leadingControlsWidth;
+                const available = clipWidthPx - style.leadingControlsWidth - style.trailingReservePx;
+                return {
+                    contentLeftPx: left,
+                    contentTopPx: rowTopPx,
+                    widthPx: Math.max(60, Math.min(240, available)),
+                };
+            }
+            if (field === "gain") {
+                return {
+                    contentLeftPx: clipLeftPx + clipWidthPx - style.gainLabelWidth - 6,
+                    contentTopPx: rowTopPx,
+                    widthPx: 72,
+                };
+            }
+            return {
+                contentLeftPx:
+                    clipLeftPx +
+                    clipWidthPx -
+                    style.gainLabelWidth -
+                    style.rateLabelWidth -
+                    14,
+                contentTopPx: rowTopPx,
+                widthPx: 72,
+            };
         },
 
         debugHitAt(clientX: number, clientY: number) {
