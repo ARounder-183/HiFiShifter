@@ -204,6 +204,8 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
             onSeek: (sec, commit) => interactionsRef.current?.onSeek?.(sec, commit),
             onSelectClip: (clipId, additive) =>
                 interactionsRef.current?.onSelectClip?.(clipId, additive),
+            onDragPreview: (args) => interactionsRef.current?.onDragPreview?.(args),
+            onDragCommit: (args) => interactionsRef.current?.onDragCommit?.(args),
         }),
         [],
     );

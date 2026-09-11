@@ -57,7 +57,12 @@ import {
     setTrackVolume,
     setPendingPlayheadReveal,
     setSelectedClip,
+    moveClipStart,
+    moveClipTrack,
+    checkpointHistory,
 } from "../../features/session/sessionSlice";
+import { batch } from "react-redux";
+import { moveClipsRemote } from "../../features/session/thunks/timelineThunks";
 import { setTempoMapRemote } from "../../features/session/thunks/tempoMapThunks";
 
 import { NEW_TRACK_SENTINEL, useClipDrag } from "./timeline/hooks/useClipDrag";
@@ -1122,10 +1127,95 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         [dispatch, setMultiSelectedClipIds],
     );
 
+    /** 内核拖拽：按下时的原始位置（把相对位移换算为绝对位置，并支持回滚）。 */
+    const kernelDragOriginRef = React.useRef<{
+        clipId: string;
+        startSec: number;
+        trackId: string;
+    } | null>(null);
+
+    /**
+     * 内核拖拽预览：写乐观位置（拖拽期间每帧，内核已按值去重）。
+     *
+     * 特殊说明：内核回调的是**相对按下位置的位移**，而 Redux 里该 clip 的位置
+     * 在上一次预览时已被改写——必须用按下时记下的原始位置换算，否则位移会逐帧叠加
+     * （表现为 clip 越拖越快）。
+     */
+    const handleKernelDragPreview = React.useCallback(
+        (args: { clipId: string; deltaSec: number; targetTrackId: string }) => {
+            if (kernelDragOriginRef.current?.clipId !== args.clipId) {
+                const clip = sessionRef.current.clips.find((item) => item.id === args.clipId);
+                if (clip === undefined) return;
+                kernelDragOriginRef.current = {
+                    clipId: clip.id,
+                    startSec: clip.startSec,
+                    trackId: clip.trackId,
+                };
+            }
+            const origin = kernelDragOriginRef.current;
+            if (origin === null) return;
+            const nextStart = Math.max(0, origin.startSec + args.deltaSec);
+            batch(() => {
+                dispatch(moveClipStart({ clipId: args.clipId, startSec: nextStart }));
+                dispatch(moveClipTrack({ clipId: args.clipId, trackId: args.targetTrackId }));
+            });
+        },
+        [dispatch, sessionRef],
+    );
+
+    /**
+     * 内核拖拽收尾：提交或回滚。
+     *
+     * 取消路径（Esc / pointercancel）必须把乐观位置还原——否则 Redux 会停在半途
+     * 位置，与后端分叉（旧实现同样在取消分支显式回滚）。
+     */
+    const handleKernelDragCommit = React.useCallback(
+        (args: {
+            clipId: string;
+            deltaSec: number;
+            targetTrackId: string;
+            cancelled: boolean;
+        }) => {
+            const origin = kernelDragOriginRef.current;
+            kernelDragOriginRef.current = null;
+            if (origin === null) return;
+            if (args.cancelled) {
+                batch(() => {
+                    dispatch(moveClipStart({ clipId: origin.clipId, startSec: origin.startSec }));
+                    dispatch(moveClipTrack({ clipId: origin.clipId, trackId: origin.trackId }));
+                });
+                return;
+            }
+            dispatch(checkpointHistory());
+            void dispatch(
+                moveClipsRemote({
+                    moves: [
+                        {
+                            clipId: args.clipId,
+                            startSec: Math.max(0, origin.startSec + args.deltaSec),
+                            trackId: args.targetTrackId,
+                        },
+                    ],
+                }),
+            );
+        },
+        [dispatch],
+    );
+
     /** 内核交互回调集合（引用稳定：内核创建时取一次）。 */
     const kernelInteractions = React.useMemo(
-        () => ({ onSeek: handleKernelSeek, onSelectClip: handleKernelSelectClip }),
-        [handleKernelSeek, handleKernelSelectClip],
+        () => ({
+            onSeek: handleKernelSeek,
+            onSelectClip: handleKernelSelectClip,
+            onDragPreview: handleKernelDragPreview,
+            onDragCommit: handleKernelDragCommit,
+        }),
+        [
+            handleKernelSeek,
+            handleKernelSelectClip,
+            handleKernelDragPreview,
+            handleKernelDragCommit,
+        ],
     );
 
     // ── 4. 全局事件监听 ─────────────────────────────────────

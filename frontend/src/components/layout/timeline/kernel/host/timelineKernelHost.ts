@@ -61,6 +61,7 @@ import {
     MIN_ROW_HEIGHT,
 } from "../../constants";
 import { hitTest, type HitTestClip } from "../interaction/hitTest";
+import { resolveDragDelta, resolveTargetTrackIndex } from "../interaction/dragGeometry";
 import { createGlCanvas } from "../gl/glContext";
 import { CLIP_INSTANCE_FLOATS, writeFlatInstance } from "../gl/instanceLayout";
 import { createSdfBoxProgram } from "../gl/sdfBoxProgram";
@@ -211,6 +212,32 @@ export interface TimelineKernelInteractions {
      * @param additive true = 按住多选修饰键（Ctrl / ⌘），应切换而非替换选择。
      */
     readonly onSelectClip?: (clipId: string, additive: boolean) => void;
+    /**
+     * 拖拽预览（拖拽期间每帧回调，**不经 React 渲染**）。
+     *
+     * 语义：调用方据此写入**乐观位置**（Redux）。内核不做独立的 ghost 图层——
+     * 乐观更新会改变 `clips` 引用，内核在下一帧重建几何时把 clip 画在新位置，
+     * 视觉上即"跟着指针走"。这样只有一份位置真值，不会出现 ghost 与实体分叉。
+     *
+     * @param args 目标位置（已含边界钳制）；`targetTrackId` 为落点轨道。
+     */
+    readonly onDragPreview?: (args: {
+        readonly clipId: string;
+        readonly deltaSec: number;
+        readonly targetTrackId: string;
+    }) => void;
+    /**
+     * 拖拽结束。
+     *
+     * @param args 最终位置；`cancelled = true`（Esc / pointercancel / 卸载）
+     *   表示调用方应回滚到按下时的位置，而不是提交。
+     */
+    readonly onDragCommit?: (args: {
+        readonly clipId: string;
+        readonly deltaSec: number;
+        readonly targetTrackId: string;
+        readonly cancelled: boolean;
+    }) => void;
 }
 
 /** 宿主句柄。 */
@@ -1136,7 +1163,31 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      */
     type Gesture =
         | { kind: "none" }
-        | { kind: "pending-select"; startClientX: number; startClientY: number; clipId: string }
+        | {
+              kind: "pending-select";
+              startClientX: number;
+              startClientY: number;
+              clipId: string;
+              /** 按下时的内容坐标（用于换算拖拽位移）。 */
+              startContentX: number;
+              startContentY: number;
+              /** 按下时 clip 的几何（换算 delta 与跨轨的基准）。 */
+              originStartSec: number;
+              originTrackId: string;
+              lengthSec: number;
+          }
+        | {
+              kind: "clip-drag";
+              clipId: string;
+              startContentX: number;
+              startContentY: number;
+              originStartSec: number;
+              originTrackId: string;
+              lengthSec: number;
+              /** 最近一次派发的预览值（去重：同值不重复回调，避免空重建）。 */
+              lastDeltaSec: number;
+              lastTargetTrackId: string;
+          }
         | { kind: "seek" };
     let gesture: Gesture = { kind: "none" };
 
@@ -1210,15 +1261,22 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         startPrimaryGesture(event);
     }
 
-    /** 左键按下：命中 clip → 待选中；命中空白 → 立即 seek 并进入拖拽 seek。 */
+    /** 左键按下：命中 clip → 待选中/待拖拽；命中空白 → 立即 seek 并进入拖拽 seek。 */
     function startPrimaryGesture(event: PointerEvent): void {
         const hit = hitAt(event.clientX, event.clientY);
         if (hit.kind === "clip") {
+            const rect = container.getBoundingClientRect();
+            const view = scroll.get();
             gesture = {
                 kind: "pending-select",
                 startClientX: event.clientX,
                 startClientY: event.clientY,
                 clipId: hit.clip.id,
+                startContentX: view.scrollLeft + (event.clientX - rect.left),
+                startContentY: view.scrollTop + (event.clientY - rect.top),
+                originStartSec: hit.clip.startSec,
+                originTrackId: hit.clip.trackId,
+                lengthSec: hit.clip.lengthSec,
             };
         } else {
             gesture = { kind: "seek" };
@@ -1240,17 +1298,86 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         if (gesture.kind === "pending-select") {
             const dx = event.clientX - gesture.startClientX;
             const dy = event.clientY - gesture.startClientY;
-            if (dx * dx + dy * dy >= DRAG_THRESHOLD_PX * DRAG_THRESHOLD_PX) {
-                // 超过阈值：本期内核尚未接管 clip 拖拽编辑，先结束手势避免误选
-                // （拖拽编辑迁移后，这里改为进入 move / trim 手势）。
-                gesture = { kind: "none" };
-            }
+            if (dx * dx + dy * dy < DRAG_THRESHOLD_PX * DRAG_THRESHOLD_PX) return;
+            // 超过阈值：从「待选中」升级为拖拽（用按下时记下的几何做基准）。
+            gesture = {
+                kind: "clip-drag",
+                clipId: gesture.clipId,
+                startContentX: gesture.startContentX,
+                startContentY: gesture.startContentY,
+                originStartSec: gesture.originStartSec,
+                originTrackId: gesture.originTrackId,
+                lengthSec: gesture.lengthSec,
+                lastDeltaSec: 0,
+                lastTargetTrackId: gesture.originTrackId,
+            };
+            applyDragPreview(event);
+            return;
+        }
+        if (gesture.kind === "clip-drag") {
+            applyDragPreview(event);
         }
     }
 
-    /** 左键手势收尾：待选中态提交选中，并清理指针捕获。 */
-    function onGesturePointerUp(event: PointerEvent): void {
-        if (gesture.kind === "pending-select") {
+    /**
+     * 计算并派发一次拖拽预览（拖拽期间每帧调用）。
+     *
+     * 流程：内容坐标位移 → `resolveDragDelta`（时间位移 + 边界钳制）→
+     * `resolveTargetTrackIndex`（落点轨道）→ 与上次值比较去重 → 回调。
+     *
+     * 特殊说明：去重是必要的——调用方每次预览都写 Redux，而 Redux 变更会触发
+     * 内核重建几何；不去重时指针静止也会持续重建。
+     *
+     * @param event 指针事件。
+     * @returns 无返回值。
+     */
+    function applyDragPreview(event: PointerEvent): void {
+        if (gesture.kind !== "clip-drag") return;
+        const rect = container.getBoundingClientRect();
+        const view = scroll.get();
+        const d = data();
+        const contentX = view.scrollLeft + (event.clientX - rect.left);
+        const contentY = view.scrollTop + (event.clientY - rect.top);
+        const delta = resolveDragDelta({
+            deltaContentXPx: contentX - gesture.startContentX,
+            pxPerSec: view.pxPerSec,
+            startSec: gesture.originStartSec,
+            lengthSec: gesture.lengthSec,
+            projectSec: Math.max(0, d.projectSec),
+        });
+        const trackIndex = resolveTargetTrackIndex(contentY, view.rowHeight, d.tracks.length);
+        const targetTrackId =
+            trackIndex >= 0
+                ? (d.tracks[trackIndex]?.id ?? gesture.originTrackId)
+                : gesture.originTrackId;
+        if (delta.deltaSec === gesture.lastDeltaSec && targetTrackId === gesture.lastTargetTrackId) {
+            return;
+        }
+        gesture.lastDeltaSec = delta.deltaSec;
+        gesture.lastTargetTrackId = targetTrackId;
+        interactions?.onDragPreview?.({
+            clipId: gesture.clipId,
+            deltaSec: delta.deltaSec,
+            targetTrackId,
+        });
+    }
+
+    /**
+     * 左键手势收尾。
+     *
+     * @param event 指针事件。
+     * @param cancelled true = 取消（pointercancel / 卸载）：拖拽应回滚而不提交。
+     */
+    function onGesturePointerUp(event: PointerEvent, cancelled = false): void {
+        if (gesture.kind === "clip-drag") {
+            interactions?.onDragCommit?.({
+                clipId: gesture.clipId,
+                deltaSec: gesture.lastDeltaSec,
+                targetTrackId: gesture.lastTargetTrackId,
+                cancelled,
+            });
+        }
+        if (gesture.kind === "pending-select" && !cancelled) {
             interactions?.onSelectClip?.(gesture.clipId, event.ctrlKey || event.metaKey);
         }
         if (gesture.kind !== "none") {
@@ -1261,6 +1388,16 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             }
             gesture = { kind: "none" };
         }
+    }
+
+    /**
+     * 指针取消（系统抢占 / 触摸中断 / 浏览器手势接管）：按取消处理。
+     *
+     * 与 `pointerup` 分开注册的原因：取消路径必须让调用方**回滚**乐观位置，
+     * 而正常抬起要提交——两者语义相反，共用一个入口会漏掉取消分支。
+     */
+    function onGesturePointerCancel(event: PointerEvent): void {
+        onGesturePointerUp(event, true);
     }
 
     /** 中键平移的按下处理（抓取式：记录起点与当时的滚动位置）。 */
@@ -1312,7 +1449,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     window.addEventListener("pointerup", endPan);
     window.addEventListener("pointercancel", endPan);
     window.addEventListener("pointerup", onGesturePointerUp);
-    window.addEventListener("pointercancel", onGesturePointerUp);
+    window.addEventListener("pointercancel", onGesturePointerCancel);
 
     // ── 输入：滚动条拖拽 ─────────────────────────────────────────────
     let dragAxis: "x" | "y" | null = null;
@@ -1403,6 +1540,19 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 event.preventDefault();
                 scroll.setScrollLeft(view.scrollLeft + KEYBOARD_STEP_PX);
                 break;
+            case "Escape": {
+                // 拖拽中按 Esc = 取消：回调 cancelled 让调用方回滚乐观位置。
+                if (gesture.kind !== "clip-drag") break;
+                event.preventDefault();
+                interactions?.onDragCommit?.({
+                    clipId: gesture.clipId,
+                    deltaSec: gesture.lastDeltaSec,
+                    targetTrackId: gesture.lastTargetTrackId,
+                    cancelled: true,
+                });
+                gesture = { kind: "none" };
+                break;
+            }
             default:
                 break;
         }
@@ -1474,7 +1624,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             container.removeEventListener("auxclick", onAuxClick);
             window.removeEventListener("pointermove", onGesturePointerMove);
             window.removeEventListener("pointerup", onGesturePointerUp);
-            window.removeEventListener("pointercancel", onGesturePointerUp);
+            window.removeEventListener("pointercancel", onGesturePointerCancel);
             hScrollbarThumb.removeEventListener("pointerdown", onHDown);
             vScrollbarThumb.removeEventListener("pointerdown", onVDown);
             window.removeEventListener("pointermove", onPointerMove);
