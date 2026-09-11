@@ -1678,6 +1678,138 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         };
     }, [kernelInlineEdit, commitTrackLaneRename, commitTrackLaneRate, commitTrackLaneGain]);
 
+    /** 内核交叉点抓手：拖拽起点的两侧几何（换算位移与取消回滚）。 */
+    const kernelCrossfadeOriginRef = React.useRef<{
+        earlierClipId: string;
+        laterClipId: string;
+        earlierStartSec: number;
+        earlierLengthSec: number;
+        laterStartSec: number;
+        laterLengthSec: number;
+    } | null>(null);
+
+    /**
+     * 内核交叉点抓手预览：同时移动双方边缘。
+     *
+     * 语义（与旧实现 `crossfade_edges` 一致）：前一个 clip 的**右缘**与后一个
+     * clip 的**左缘**按同一位移移动 → 重叠长度不变（手动 / 自动淡变长度都不受影响）。
+     * - earlier：起点不动，长度 `+= delta`（右缘随之移动）
+     * - later：起点 `+= delta`，长度 `-= delta`（左缘移动、右缘不动）
+     *
+     * 位移钳制到 `[-earlierLength, laterLength]`：越界会让任一侧长度为负。
+     */
+    const handleKernelCrossfadeGripPreview = React.useCallback(
+        (args: { earlierClipId: string; laterClipId: string; deltaSec: number }) => {
+            const clips = sessionRef.current.clips;
+            const earlier = clips.find((item) => item.id === args.earlierClipId);
+            const later = clips.find((item) => item.id === args.laterClipId);
+            if (earlier === undefined || later === undefined) return;
+            if (kernelCrossfadeOriginRef.current?.earlierClipId !== args.earlierClipId) {
+                kernelCrossfadeOriginRef.current = {
+                    earlierClipId: earlier.id,
+                    laterClipId: later.id,
+                    earlierStartSec: earlier.startSec,
+                    earlierLengthSec: earlier.lengthSec,
+                    laterStartSec: later.startSec,
+                    laterLengthSec: later.lengthSec,
+                };
+            }
+            const origin = kernelCrossfadeOriginRef.current;
+            if (origin === null) return;
+            const delta = Math.min(
+                origin.laterLengthSec,
+                Math.max(-origin.earlierLengthSec, args.deltaSec),
+            );
+            batch(() => {
+                dispatch(
+                    setClipLength({
+                        clipId: origin.earlierClipId,
+                        lengthSec: Math.max(0, origin.earlierLengthSec + delta),
+                    }),
+                );
+                dispatch(
+                    moveClipStart({
+                        clipId: origin.laterClipId,
+                        startSec: Math.max(0, origin.laterStartSec + delta),
+                    }),
+                );
+                dispatch(
+                    setClipLength({
+                        clipId: origin.laterClipId,
+                        lengthSec: Math.max(0, origin.laterLengthSec - delta),
+                    }),
+                );
+            });
+        },
+        [dispatch, sessionRef],
+    );
+
+    /**
+     * 内核交叉点抓手收尾：取消则回滚两侧，否则提交。
+     *
+     * 与拖拽 / trim 同源——**提交值取 Redux 当前值**（预览已写入钳制后的结果），
+     * 用 origin + 位移重算会绕开钳制，表现为「松手后跳回越界位置」。
+     */
+    const handleKernelCrossfadeGripCommit = React.useCallback(
+        (args: {
+            earlierClipId: string;
+            laterClipId: string;
+            deltaSec: number;
+            cancelled: boolean;
+        }) => {
+            const origin = kernelCrossfadeOriginRef.current;
+            kernelCrossfadeOriginRef.current = null;
+            if (origin === null) return;
+            if (args.cancelled) {
+                batch(() => {
+                    dispatch(
+                        moveClipStart({
+                            clipId: origin.earlierClipId,
+                            startSec: origin.earlierStartSec,
+                        }),
+                    );
+                    dispatch(
+                        setClipLength({
+                            clipId: origin.earlierClipId,
+                            lengthSec: origin.earlierLengthSec,
+                        }),
+                    );
+                    dispatch(
+                        moveClipStart({
+                            clipId: origin.laterClipId,
+                            startSec: origin.laterStartSec,
+                        }),
+                    );
+                    dispatch(
+                        setClipLength({
+                            clipId: origin.laterClipId,
+                            lengthSec: origin.laterLengthSec,
+                        }),
+                    );
+                });
+                return;
+            }
+            const clips = sessionRef.current.clips;
+            const earlier = clips.find((item) => item.id === origin.earlierClipId);
+            const later = clips.find((item) => item.id === origin.laterClipId);
+            if (earlier === undefined || later === undefined) return;
+            dispatch(checkpointHistory());
+            void dispatch(
+                setClipsStateBulkRemote({
+                    updates: [
+                        { clipId: earlier.id, lengthSec: earlier.lengthSec },
+                        {
+                            clipId: later.id,
+                            startSec: later.startSec,
+                            lengthSec: later.lengthSec,
+                        },
+                    ],
+                }),
+            );
+        },
+        [dispatch, sessionRef],
+    );
+
     /** 内核交互回调集合（引用稳定：内核创建时取一次）。 */
     const kernelInteractions = React.useMemo(
         () => ({
@@ -1689,6 +1821,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             onRateBadgeMenu: handleKernelRateBadgeMenu,
             onRenameClipStart: handleKernelRenameClipStart,
             onBadgeEditStart: handleKernelBadgeEditStart,
+            onCrossfadeGripPreview: handleKernelCrossfadeGripPreview,
+            onCrossfadeGripCommit: handleKernelCrossfadeGripCommit,
             onDragPreview: handleKernelDragPreview,
             onDragCommit: handleKernelDragCommit,
             onTrimPreview: handleKernelTrimPreview,

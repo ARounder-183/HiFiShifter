@@ -31,7 +31,7 @@ import {
     snapOffsetHandleXPx,
 } from "./constants";
 import { buildFadeHitTargets } from "./fadeHitTargets";
-import { fadeGainSigned } from "./reaperFade";
+import { computeCrossfadeGripPoint } from "./crossfadeGrip";
 import { modifierWatcher } from "./hooks/modifierWatcher";
 import {
     buildCrossfadeGripInfoContent,
@@ -72,94 +72,6 @@ function effectiveFadeInSec(clip: ClipInfo): number {
 }
 function effectiveFadeOutSec(clip: ClipInfo): number {
     return (clip.autoFadeOutSec ?? 0) > 0 ? (clip.autoFadeOutSec ?? 0) : (clip.fadeOutSec ?? 0);
-}
-
-/**
- * 计算两条“真实淡入淡出包络曲线”（非直线近似）在重叠区内的交点。
- *
- * 画布上用 fadeCurveGain 绘制的是曲线（sine/exponential/scurve 等），
- * 直接用两端点连线求交点会在 Y 轴明显偏离视觉交叉点。这里用二分法
- * 精确求解两条单调曲线的交点，使交叉点手柄正好落在用户看到的交叉处。
- *
- * @returns 交点坐标；若两条曲线在重叠淡化区间内不相交则返回 null。
- */
-function computeCrossfadeGripPoint(args: {
-    /** 前一个 clip 的右边缘 X（px，时间轴坐标）。 */
-    earlierEndPx: number;
-    /** 前一个 clip 淡出包络的像素宽度。 */
-    earlierFadePx: number;
-    earlierShape: number;
-    earlierDir: number;
-    /** 后一个 clip 的左边缘 X（px，时间轴坐标）。 */
-    laterStartPx: number;
-    /** 后一个 clip 淡入包络的像素宽度。 */
-    laterFadePx: number;
-    laterShape: number;
-    laterDir: number;
-    bodyTop: number;
-    bodyHeight: number;
-}): { x: number; y: number } | null {
-    const {
-        earlierEndPx,
-        earlierFadePx,
-        earlierShape,
-        earlierDir,
-        laterStartPx,
-        laterFadePx,
-        laterShape,
-        laterDir,
-        bodyTop,
-        bodyHeight,
-    } = args;
-    const earlierLeftPx = earlierEndPx - earlierFadePx;
-    const laterRightPx = laterStartPx + laterFadePx;
-    const lo = Math.max(earlierLeftPx, laterStartPx);
-    const hi = Math.min(earlierEndPx, laterRightPx);
-    if (hi - lo <= 0.01 || earlierFadePx <= 0 || laterFadePx <= 0) return null;
-
-    // 两条曲线在重叠淡化区的 X 区间单调：A 淡出 y 随 x 增大而增大，
-    // B 淡入 y 随 x 增大而减小，因此 yA-yB 严格单调 → 二分求零点。
-    const yDiff = (x: number): number => {
-        const tA = (x - earlierLeftPx) / earlierFadePx;
-        const gainA = fadeGainSigned(earlierShape, earlierDir, "out", tA);
-        const yA = bodyTop + bodyHeight * (1 - gainA);
-        const tB = (x - laterStartPx) / laterFadePx;
-        const gainB = fadeGainSigned(laterShape, laterDir, "in", tB);
-        const yB = bodyTop + bodyHeight * (1 - gainB);
-        return yA - yB;
-    };
-
-    let low = lo;
-    let high = hi;
-    const fLow = yDiff(low);
-    const fHigh = yDiff(high);
-
-    // 不相交：视觉交叉点在两个淡化区之外，不显示手柄。
-    if (fLow * fHigh > 0) {
-        return null;
-    }
-
-    for (let i = 0; i < 40; i += 1) {
-        const mid = (low + high) / 2;
-        const fMid = yDiff(mid);
-        if (Math.abs(fMid) < 1e-3) {
-            low = high = mid;
-            break;
-        }
-        if (fLow * fMid < 0) {
-            high = mid;
-        } else {
-            low = mid;
-        }
-    }
-
-    const x = (low + high) / 2;
-    const tA = (x - earlierLeftPx) / earlierFadePx;
-    const gainA = fadeGainSigned(earlierShape, earlierDir, "out", tA);
-    return {
-        x,
-        y: bodyTop + bodyHeight * (1 - gainA),
-    };
 }
 
 type CrossfadeSides = { out: FadeContextSideLike; in: FadeContextSideLike };

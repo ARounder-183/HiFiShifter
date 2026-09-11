@@ -27,7 +27,9 @@
  * 逐像素一致）；clip 边缘宽度与旧实现的 `clipEdgeWidthPx` 一致（10px）。
  */
 
-import { hitClipFadeTarget, type FadeTargetClip } from "./fadeTargets";
+import { CLIP_BODY_PADDING_Y, CLIP_HEADER_HEIGHT } from "../../constants";
+import { computeCrossfadeGripPoint } from "../../crossfadeGrip";
+import { effectiveFadeSec, hitClipFadeTarget, type FadeTargetClip } from "./fadeTargets";
 
 /** 重叠区内可命中的控件类型。 */
 export type OverlapControlKind =
@@ -35,7 +37,9 @@ export type OverlapControlKind =
     | "clip-left-edge"
     | "clip-right-edge"
     /** 淡变控件；具体是淡入还是淡出看 `fadeSide`。 */
-    | "fade";
+    | "fade"
+    /** 交叉淡化交点抓手：拖动它同时移动双方边缘。 */
+    | "crossfade-grip";
 
 /** 重叠区控件命中结果。 */
 export interface OverlapControlHit {
@@ -44,6 +48,11 @@ export interface OverlapControlHit {
     readonly clipId: string;
     /** 淡变控件所属的一侧；clip 边缘命中时缺省。 */
     readonly fadeSide?: "in" | "out";
+    /**
+     * 交叉点抓手的另一侧 clip（`clipId` 为**后一个** clip，这里为前一个）。
+     * 仅 `kind === "crossfade-grip"` 时有值。
+     */
+    readonly partnerClipId?: string;
 }
 
 /**
@@ -73,6 +82,9 @@ export interface OverlapControlArgs {
 
 /** clip 边缘命中带宽度（与旧实现 `OverlapEditLayer` 的 `clipEdgeWidthPx` 同源）。 */
 const DEFAULT_EDGE_WIDTH_PX = 10;
+
+/** 交叉点抓手的命中方框边长（与旧实现的 `gripSize = 16` 同源）。 */
+const GRIP_HIT_SIZE_PX = 16;
 
 /**
  * 解析重叠区内的控件命中。
@@ -160,12 +172,43 @@ export function hitOverlapControl(args: OverlapControlArgs): OverlapControlHit |
                 result = { kind: "fade", clipId: earlier.id, fadeSide: earlierSide };
             }
 
-            // 3) clip 边缘（最优先，覆盖上面的淡变判定）：整行高、以边界为中心。
+            // 3) clip 边缘（覆盖上面的淡变判定）：整行高、以边界为中心。
             if (Math.abs(contentX - laterStartPx) <= edgeWidthPx / 2) {
                 result = { kind: "clip-left-edge", clipId: later.id };
             }
             if (Math.abs(contentX - earlierEndPx) <= edgeWidthPx / 2) {
                 result = { kind: "clip-right-edge", clipId: earlier.id };
+            }
+
+            // 4) 交叉点抓手（**最高优先级**）：旧实现给它显式 `zIndex: 400`，注释
+            //    写明「交叉点手柄应高于所有淡入淡出/边缘控件」。抓手的圆心就是两条
+            //    真实包络曲线的交点，因此它天然落在两条包络线的命中块之上——不特殊
+            //    提权的话，用户想抓抓手却总是抓到某一条曲线。
+            // 前一个 clip 参与交叉的是**淡出**，后一个参与的是**淡入**。
+            const earlierFadePx =
+                effectiveFadeSec(earlier.fadeOutSec, earlier.autoFadeOutSec) * pxPerSec;
+            const laterFadePx = effectiveFadeSec(later.fadeInSec, later.autoFadeInSec) * pxPerSec;
+            const grip = computeCrossfadeGripPoint({
+                earlierEndPx,
+                earlierFadePx,
+                earlierShape: earlier.fadeOutShape ?? 0,
+                earlierDir: earlier.fadeOutDir ?? 0,
+                laterStartPx,
+                laterFadePx,
+                laterShape: later.fadeInShape ?? 0,
+                laterDir: later.fadeInDir ?? 0,
+                bodyTop: CLIP_HEADER_HEIGHT,
+                bodyHeight: Math.max(1, rowHeight - CLIP_BODY_PADDING_Y - CLIP_HEADER_HEIGHT),
+            });
+            if (grip !== null) {
+                const half = GRIP_HIT_SIZE_PX / 2;
+                if (Math.abs(contentX - grip.x) <= half && Math.abs(localY - grip.y) <= half) {
+                    result = {
+                        kind: "crossfade-grip",
+                        clipId: later.id,
+                        partnerClipId: earlier.id,
+                    };
+                }
             }
         }
     }

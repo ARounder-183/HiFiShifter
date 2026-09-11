@@ -318,6 +318,30 @@ export interface TimelineKernelInteractions {
      */
     readonly onRenameClipStart?: (clipId: string, screenX: number, screenY: number) => void;
     /**
+     * 交叉点抓手拖拽预览（拖拽期间每帧，**不经 React 渲染**）。
+     *
+     * 语义：同时把前一个 clip 的右缘与后一个 clip 的左缘按同一位移移动，重叠长度
+     * 不变（旧实现 `crossfade_edges`）。调用方据此写入两个 clip 的乐观几何。
+     *
+     * @param args 两侧 clip 与本次位移（秒）。
+     */
+    readonly onCrossfadeGripPreview?: (args: {
+        readonly earlierClipId: string;
+        readonly laterClipId: string;
+        readonly deltaSec: number;
+    }) => void;
+    /**
+     * 交叉点抓手收尾。
+     *
+     * @param args 两侧 clip、最终位移与是否取消（Esc / pointercancel）。
+     */
+    readonly onCrossfadeGripCommit?: (args: {
+        readonly earlierClipId: string;
+        readonly laterClipId: string;
+        readonly deltaSec: number;
+        readonly cancelled: boolean;
+    }) => void;
+    /**
      * 拖拽预览（拖拽期间每帧回调，**不经 React 渲染**）。
      *
      * 语义：调用方据此写入**乐观位置**（Redux）。内核不做独立的 ghost 图层——
@@ -1530,6 +1554,13 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
               lengthSec: number;
               /** 按下时的淡变长度（按 region 取对应侧；非淡变角为 0）。 */
               originFadeSec: number;
+              /**
+               * 交叉点抓手的前一个 clip id。
+               *
+               * 仅 `region === "crossfade-grip"` 时有值：命中结果只给出后一个
+               * clip（重叠区里二分的自然结果），而抓手需要同时操作两侧。
+               */
+              partnerClipId?: string;
           }
         | {
               kind: "clip-fade";
@@ -1540,6 +1571,16 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
               lengthSec: number;
               lastDeltaSec: number;
               lastFadeSec: number;
+          }
+        | {
+              kind: "crossfade-grip";
+              /** 前一个 clip：右缘随拖拽移动。 */
+              earlierClipId: string;
+              /** 后一个 clip：左缘随拖拽移动。 */
+              laterClipId: string;
+              startContentX: number;
+              /** 上一次预览的位移（去重：相同位移不重复派发）。 */
+              lastDeltaSec: number;
           }
         | {
               kind: "box-select";
@@ -1623,7 +1664,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      * @param clientY 指针视口坐标 Y。
      * @returns 命中结果。
      */
-    function hitAt(clientX: number, clientY: number): ReturnType<typeof hitTest> {
+    function hitAt(clientX: number, clientY: number): KernelHit {
         const rect = container.getBoundingClientRect();
         const view = scroll.get();
         ensureHitIndex();
@@ -1696,9 +1737,11 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 ? "left-edge"
                 : overlap.kind === "clip-right-edge"
                   ? "right-edge"
-                  : overlap.fadeSide === "out"
-                    ? "fade-out-corner"
-                    : "fade-in-corner";
+                  : overlap.kind === "crossfade-grip"
+                    ? "crossfade-grip"
+                    : overlap.fadeSide === "out"
+                      ? "fade-out-corner"
+                      : "fade-in-corner";
         // 说明：淡变命中（`kind === "fade"`）映射到既有角部区域，复用同一条
         // `clip-fade` 手势——包络线拖拽与角部拖拽在旧实现里是同一个语义（调长度），
         // 只是抓取位置不同。
@@ -1710,6 +1753,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             trackIndex: hit.trackIndex,
             localX: contentX - target.startSec * view.pxPerSec,
             localY: hit.localY,
+            partnerClipId: overlap.partnerClipId,
         };
     }
 
@@ -1860,6 +1904,14 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     }
 
     /** 左键按下：命中 clip → 待选中/待拖拽；命中空白 → 立即 seek 并进入拖拽 seek。 */
+    /**
+     * 内核命中结果。
+     *
+     * `hitTest` 的原始结果 + 重叠区解析补充的字段（`partnerClipId` 只在交叉点
+     * 抓手上出现：抓手需要同时知道两侧的 clip）。
+     */
+    type KernelHit = ReturnType<typeof hitTest> & { readonly partnerClipId?: string };
+
     /**
      * 判定指针落在 clip header 的哪个控件上。
      *
@@ -2020,6 +2072,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 startClientY: event.clientY,
                 clipId: hit.clip.id,
                 region: hit.region,
+                partnerClipId: hit.partnerClipId,
                 startContentX: view.scrollLeft + (event.clientX - rect.left),
                 startContentY: view.scrollTop + (event.clientY - rect.top),
                 originStartSec: hit.clip.startSec,
@@ -2086,6 +2139,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             container.style.cursor = "ew-resize";
         } else if (gesture.kind === "clip-fade") {
             container.style.cursor = gesture.side === "in" ? "nwse-resize" : "nesw-resize";
+        } else if (gesture.kind === "crossfade-grip") {
+            // 抓手是水平移动双方边缘，光标与旧实现的 crossfade_edges 一致。
+            container.style.cursor = "ew-resize";
         } else if (gesture.kind === "box-select") {
             container.style.cursor = "crosshair";
         }
@@ -2104,6 +2160,25 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             // 发生拖拽 → 双击待定记录失效：否则"拖拽后落点回位"（第二次按下
             // 恰好落在首次按下附近）会被误判成双击（旧实现同样在拖拽分支清空）。
             lastClipPress = null;
+            // 交叉点抓手最先判：它在重叠区里优先级最高（旧实现给抓手显式
+            // zIndex 400，注释写明「应高于所有淡入淡出/边缘控件」）。
+            if (gesture.region === "crossfade-grip") {
+                if (gesture.partnerClipId === undefined) {
+                    // 理论上不会发生（region 由重叠解析连同 partner 一起给出）；
+                    // 真出现就放弃这次手势，而不是拿单个 clip 去移动双方边缘。
+                    gesture = { kind: "none" };
+                    return;
+                }
+                gesture = {
+                    kind: "crossfade-grip",
+                    earlierClipId: gesture.partnerClipId,
+                    laterClipId: gesture.clipId,
+                    startContentX: gesture.startContentX,
+                    lastDeltaSec: Number.NaN,
+                };
+                applyCrossfadeGripPreview(event);
+                return;
+            }
             // 超过阈值：按按下时的命中分区升级——淡变角 → fade、边缘 → trim、
             // 其余 → 拖拽移动。淡变角与边缘在水平方向重叠，命中层已按竖直方向
             // 切分（见 hitTest 的 ClipHitRegion 注释），这里只需按 region 分派。
@@ -2159,6 +2234,10 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             applyFadePreview(event);
             return;
         }
+        if (gesture.kind === "crossfade-grip") {
+            applyCrossfadeGripPreview(event);
+            return;
+        }
         if (gesture.kind === "clip-drag") {
             applyDragPreview(event);
         }
@@ -2209,6 +2288,34 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      * @param event 指针事件。
      * @returns 无返回值。
      */
+    /**
+     * 交叉点抓手的拖拽预览。
+     *
+     * 语义（与旧实现 `crossfade_edges` 一致）：拖动抓手 = 同时把前一个 clip 的
+     * 右缘与后一个 clip 的左缘按**同一位移**移动，因此重叠长度不变（手动 /
+     * 自动淡变长度都不受影响）。
+     *
+     * 内核只给位移，具体几何（谁的长度加减多少）由面板按预览原点换算——与
+     * trim / fade 同一条分工。
+     *
+     * @param event 指针事件。
+     * @returns 无返回值。
+     */
+    function applyCrossfadeGripPreview(event: PointerEvent): void {
+        if (gesture.kind !== "crossfade-grip") return;
+        const rect = container.getBoundingClientRect();
+        const view = scroll.get();
+        const contentX = view.scrollLeft + (event.clientX - rect.left);
+        const deltaSec = (contentX - gesture.startContentX) / Math.max(1e-9, view.pxPerSec);
+        if (deltaSec === gesture.lastDeltaSec) return;
+        gesture.lastDeltaSec = deltaSec;
+        interactions?.onCrossfadeGripPreview?.({
+            earlierClipId: gesture.earlierClipId,
+            laterClipId: gesture.laterClipId,
+            deltaSec,
+        });
+    }
+
     function applyFadePreview(event: PointerEvent): void {
         if (gesture.kind !== "clip-fade") return;
         const rect = container.getBoundingClientRect();
@@ -2307,6 +2414,14 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 clipId: gesture.clipId,
                 side: gesture.side,
                 fadeSec: gesture.lastFadeSec,
+                cancelled,
+            });
+        }
+        if (gesture.kind === "crossfade-grip") {
+            interactions?.onCrossfadeGripCommit?.({
+                earlierClipId: gesture.earlierClipId,
+                laterClipId: gesture.laterClipId,
+                deltaSec: gesture.lastDeltaSec,
                 cancelled,
             });
         }

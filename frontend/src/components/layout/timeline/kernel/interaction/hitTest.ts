@@ -87,7 +87,16 @@ export type ClipHitRegion =
     | "left-edge"
     | "right-edge"
     | "fade-in-corner"
-    | "fade-out-corner";
+    | "fade-out-corner"
+    /**
+     * 交叉淡化交点抓手。
+     *
+     * `hitTest` 自身**不产生**这个分区——它由重叠区解析
+     * （`overlapControls`）在重叠区里按位置改写命中结果时给出。列在这里是为了
+     * 让「命中分区」保持单一类型：宿主的指针手势状态机按 region 分派，多一条
+     * 隐式通道就会多一处漏判。
+     */
+    | "crossfade-grip";
 
 /** 命中结果。 */
 export type HitResult =

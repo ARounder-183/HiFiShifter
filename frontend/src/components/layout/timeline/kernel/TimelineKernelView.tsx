@@ -291,6 +291,9 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                 interactionsRef.current?.onRateBadgeMenu?.(clipId, screenX, screenY),
             onRenameClipStart: (clipId, screenX, screenY) =>
                 interactionsRef.current?.onRenameClipStart?.(clipId, screenX, screenY),
+            onCrossfadeGripPreview: (args) =>
+                interactionsRef.current?.onCrossfadeGripPreview?.(args),
+            onCrossfadeGripCommit: (args) => interactionsRef.current?.onCrossfadeGripCommit?.(args),
             onDragPreview: (args) => interactionsRef.current?.onDragPreview?.(args),
             onDragCommit: (args) => interactionsRef.current?.onDragCommit?.(args),
             onTrimPreview: (args) => interactionsRef.current?.onTrimPreview?.(args),
