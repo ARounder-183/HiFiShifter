@@ -566,6 +566,13 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
             ref={containerRef}
             tabIndex={0}
             data-hs-timeline-kernel="1"
+            /* `data-timeline-scroller`：旧实现挂在原生滚动容器上，被
+               `measureTimelineViewportOffsetPx()`（参数编辑器同步的左右偏移测量）与
+               参数编辑器的 ResizeObserver 当作「时间轴轨道区视口元素」查询。
+               内核模式下该容器不存在，不回填这个标记会让同步偏移恒为 0
+               （两个面板的网格线无法按同一屏幕位置对齐）。此处语义相同：
+               它是轨道区的视口元素（只是滚动由内核自绘而非浏览器维护）。 */
+            data-timeline-scroller
             className="relative flex-1 overflow-hidden bg-qt-graph-bg outline-none"
             onDragOver={onDragOver}
             onDrop={onDrop}

@@ -556,8 +556,56 @@ export interface TimelineKernelHost {
      * （钳制只在 `ScrollKernel` 内做一次）。
      */
     setScrollTop(px: number): void;
-    /** 读取当前视口状态（供外部低频读取，例如保存 / 调试）。 */
-    getViewport(): { scrollLeft: number; scrollTop: number; pxPerSec: number };
+    /**
+     * 外部请求横向滚动（自动滚屏 / 聚焦播放光标 / 参数编辑器同步）。
+     *
+     * 特殊说明：与 `setScrollTop` 同一约定——钳制只在 `ScrollKernel` 内做一次；
+     * 调用方若需要「浏览器实际接受的值」语义，请在写入后回读 `getViewport()`。
+     */
+    setScrollLeft(px: number): void;
+    /**
+     * 原子地设置缩放与横向滚动位置（键盘缩放 / 视图同步）。
+     *
+     * 特殊说明：两个字段必须一次提交，否则会出现「用旧上限钳制新缩放」的中间态
+     * （缩放放大时横向位置会被错误地卡在旧上限）。pxPerSec 真正变化时会回调
+     * `onZoomChange`，调用方无需自己同步 React 侧派生量。
+     *
+     * @param next 需要覆盖的字段；未给出的沿用当前值。
+     * @returns 提交后的真值（已钳制）。
+     */
+    setViewport(next: { pxPerSec?: number; scrollLeft?: number }): {
+        scrollLeft: number;
+        pxPerSec: number;
+    };
+    /**
+     * 读取宿主容器的视口矩形（client 坐标）。
+     *
+     * 供「clientX/clientY → 工程时间 / 轨道」的换算使用（素材拖入落点、右键命中）。
+     * 旧实现对应的是原生 scroller 的 `getBoundingClientRect()`；自绘滚动后容器
+     * 仍是同一个 DOM（内核容器），但滚动量不再由浏览器维护，必须与
+     * `getViewport()` 的 scrollLeft/Top 配套使用。
+     *
+     * 特殊说明：本方法会触发布局读取，只允许在**低频事件**（拖放 / 右键）中调用，
+     * 不得进入每帧路径。
+     *
+     * @returns 容器矩形；容器已卸载时为 null。
+     */
+    getContainerRect(): DOMRect | null;
+    /**
+     * 读取当前视口状态（供外部低频读取，例如保存 / 调试）。
+     *
+     * `viewportWidth` / `viewportHeight` 是 `ResizeObserver` 缓存的量测值
+     * （O(1)、不触发布局），供外部换算「视口宽度」（自动滚屏 / 缩放锚点 /
+     * 拖入落点）——**不要**改用 `getContainerRect()`，那会在每帧路径上强制
+     * 样式重算。
+     */
+    getViewport(): {
+        scrollLeft: number;
+        scrollTop: number;
+        pxPerSec: number;
+        viewportWidth: number;
+        viewportHeight: number;
+    };
     /**
      * 读取当前坐标投影（内容坐标 ↔ 视口坐标）。
      *
@@ -3057,12 +3105,31 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             scroll.setScrollTop(px);
         },
 
+        setScrollLeft(px: number) {
+            scroll.setScrollLeft(px);
+        },
+
+        setViewport(next: { pxPerSec?: number; scrollLeft?: number }) {
+            const beforePxPerSec = scroll.get().pxPerSec;
+            const applied = scroll.setViewport(next);
+            // 缩放真值源在内核：变化时必须回调 React 侧派生量（标尺刻度 / 内容宽度），
+            // 否则「网格已缩放、标尺还在旧刻度」。
+            if (applied.pxPerSec !== beforePxPerSec) onZoomChange?.(applied.pxPerSec);
+            return { scrollLeft: applied.scrollLeft, pxPerSec: applied.pxPerSec };
+        },
+
+        getContainerRect() {
+            return container.getBoundingClientRect();
+        },
+
         getViewport() {
             const view = scroll.get();
             return {
                 scrollLeft: view.scrollLeft,
                 scrollTop: view.scrollTop,
                 pxPerSec: view.pxPerSec,
+                viewportWidth: viewportWidthPx,
+                viewportHeight: viewportHeightPx,
             };
         },
 

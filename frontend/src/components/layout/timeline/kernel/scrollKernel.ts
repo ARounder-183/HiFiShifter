@@ -169,6 +169,22 @@ export interface ScrollKernel {
     setZoom(pxPerSec: number, anchorScreenX: number): number;
 
     /**
+     * 原子地设置缩放与水平滚动位置（外部命令式视口写入）。
+     *
+     * 【为什么需要它】旧实现里「键盘缩放 / 聚焦播放光标 / 自动滚屏 / 参数编辑器同步」
+     * 都是「先算出目标 pxPerSec 与目标 scrollLeft，再一起落到原生 scroller」。自绘
+     * 滚动后这条路径必须能一次性提交两个字段，否则会出现「先用旧上限钳制新缩放」
+     * 的中间态（与 setZoom 的注释同因）。
+     *
+     * 流程：解析候选 pxPerSec（缺省沿用当前，非法回退下限）→ 用**目标 pxPerSec**
+     * 对应的上限钳制候选 scrollLeft（缺省沿用当前）→ 一次 commit（变化才通知）。
+     *
+     * @param next 需要覆盖的字段；未给出的字段沿用当前值。
+     * @returns 提交后的视口状态（已钳制真值）；未发生变化时返回同一引用。
+     */
+    setViewport(next: { pxPerSec?: number; scrollLeft?: number }): TimelineViewportState;
+
+    /**
      * 订阅状态变化。
      *
      * 特殊说明：派发是**同步**的（渲染在 rAF 内，输入→标脏必须同帧完成）；
@@ -481,6 +497,24 @@ export function createScrollKernel(options: ScrollKernelOptions): ScrollKernel {
             // 调用方必须用这个值同步 React 侧派生量，否则标尺会显示成未钳制的
             // 请求值（表现为「标尺能缩得比网格更小」）。
             return nextPxPerSec;
+        },
+
+        setViewport(next) {
+            const prev = state;
+            const nextPxPerSec =
+                next.pxPerSec === undefined
+                    ? prev.pxPerSec
+                    : sanitizePxPerSec(next.pxPerSec, readMinPxPerSec(), readMaxPxPerSec());
+            // 非有限值沿用当前值：外部（React 侧派生量）偶尔会传出 NaN，直接 clamp
+            // 会把 NaN 写进状态并污染后续所有换算。
+            const nextScrollLeft = Number.isFinite(next.scrollLeft)
+                ? (next.scrollLeft as number)
+                : prev.scrollLeft;
+            commit({
+                pxPerSec: nextPxPerSec,
+                scrollLeft: clamp(nextScrollLeft, 0, maxScrollLeftFor(nextPxPerSec)),
+            });
+            return state;
         },
 
         subscribe(listener) {

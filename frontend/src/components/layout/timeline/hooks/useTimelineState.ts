@@ -34,6 +34,8 @@ import { selectKeybinding } from "../../../../features/keybindings/keybindingsSl
 import type { Keybinding } from "../../../../features/keybindings/types";
 import { getDynamicProjectSec } from "../../../../features/session/projectBoundary";
 import { applyNativeScrollLeft } from "../runtime/nativeScrollApply";
+import type { TimelineKernelHost } from "../kernel/host/timelineKernelHost";
+import { createTimelineViewportAccess } from "./timelineViewportAccess";
 import {
     DEFAULT_PX_PER_SEC,
     DEFAULT_ROW_HEIGHT,
@@ -283,7 +285,21 @@ export interface TimelineStateResult {
 }
 
 // ── Hook 实现 ────────────────────────────────────────────────────
-export function useTimelineState(): TimelineStateResult {
+/**
+ * `useTimelineState` 的可选入参。
+ *
+ * 【为什么需要 kernelHostRef】
+ * 「参数编辑器视图同步」需要把共享视口的写入**落地到时间轴视口**。旧实现直接写
+ * 原生 scroller；渲染内核模式下没有原生 scroller（视口真值在 `ScrollKernel`），
+ * 若不注入宿主句柄，同步的落地分支会在第一步 return——表现为「开启同步后
+ * 内核不跟随参数编辑器」。
+ */
+export interface UseTimelineStateArgs {
+    /** 内核宿主句柄引用（仅内核模式下非空）。 */
+    readonly kernelHostRef?: React.MutableRefObject<TimelineKernelHost | null>;
+}
+
+export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineStateResult {
     const dispatch = useAppDispatch();
     const s = useAppSelector(
         (state: RootState) => ({
@@ -337,6 +353,22 @@ export function useTimelineState(): TimelineStateResult {
     const rulerPlayheadLineRef = useRef<HTMLDivElement | null>(null);
     const rulerPlayheadHeadRef = useRef<HTMLDivElement | null>(null);
     const scrollLeftRef = useRef(0);
+
+    /**
+     * 模式无关的视口访问器（参数编辑器同步的落地入口）。
+     *
+     * 内核模式下 `scrollRef.current` 为 null，视口真值在注入的宿主里；访问器让
+     * 「写视口」这件事不必在本模块里再判断一次模式。
+     *
+     * 特殊说明：`kernelHostRef` 缺省时用一个内部空 ref 占位（旧模式 / 测试环境），
+     * 此时访问器退化为纯原生 scroller 实现，行为与改动前完全一致。
+     */
+    const fallbackKernelHostRef = useRef<TimelineKernelHost | null>(null);
+    const kernelHostRef = args.kernelHostRef ?? fallbackKernelHostRef;
+    const viewportAccess = useMemo(
+        () => createTimelineViewportAccess({ scrollRef, kernelHostRef }),
+        [kernelHostRef],
+    );
     /** 最近一次真正提交给 React 的 scrollLeft（量化基准）。 */
     const reactCommittedScrollLeftRef = useRef(0);
     const scrollStateRafRef = useRef<number | null>(null);
@@ -571,6 +603,16 @@ export function useTimelineState(): TimelineStateResult {
             // scroller（DOM 内容层随之移动），再走完整同步链（标尺/bus/共享
             // 视口回写被 applying 标志抑制），两个面板严丝合缝。任何经
             // state/layoutEffect 的延迟都会让时间轴比参数编辑器慢一帧以上。
+            if (kernelHostRef.current !== null) {
+                // 内核模式：没有原生 scroller 可写，视口真值在 ScrollKernel。
+                // 一次原子提交（缩放 + 横向位置），用**目标** pxPerSec 算上限；
+                // applying 标志抑制回灌，避免两个面板形成反馈环。
+                timelineSyncApplyingRef.current = true;
+                const applied = viewportAccess.setZoomAndScroll(store.pxPerSec, store.scrollLeft);
+                syncScrollLeft(applied.scrollLeft);
+                timelineSyncApplyingRef.current = false;
+                return;
+            }
             if (scroller && Math.abs(store.pxPerSec - pxPerSecRef.current) <= 1e-9) {
                 timelineSyncApplyingRef.current = true;
                 const applied = applyNativeScrollLeft(scroller, store.scrollLeft);
@@ -616,6 +658,12 @@ export function useTimelineState(): TimelineStateResult {
     useLayoutEffect(() => {
         const pending = pendingTimelineSyncViewportRef.current;
         if (!pending || !s.paramEditorSyncTimeline) return;
+        // 内核模式：apply() 已用 setZoomAndScroll 一次原子提交，不存在「等 React
+        // state 落地后再写 scroller」的两段式需求——直接清掉待处理项。
+        if (kernelHostRef.current !== null) {
+            pendingTimelineSyncViewportRef.current = null;
+            return;
+        }
         if (Math.abs(pxPerSec - pending.pxPerSec) > 1e-9) return;
         if (Math.abs(scrollLeft - pending.scrollLeft) > 0.5) return;
 
@@ -627,7 +675,7 @@ export function useTimelineState(): TimelineStateResult {
         const applied = applyNativeScrollLeft(scroller, pending.scrollLeft);
         syncScrollLeft(applied);
         timelineSyncApplyingRef.current = false;
-    }, [pxPerSec, scrollLeft, s.paramEditorSyncTimeline, syncScrollLeft]);
+    }, [pxPerSec, scrollLeft, s.paramEditorSyncTimeline, syncScrollLeft, kernelHostRef]);
 
     // ── keyboard zoom layout effect ──────────────────────────
     useLayoutEffect(() => {

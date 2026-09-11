@@ -216,4 +216,54 @@ describe("scrollKernel", () => {
             expect(spy).not.toHaveBeenCalled();
         });
     });
+
+    describe("setViewport（原子提交缩放 + 滚动）", () => {
+        it("同时改缩放与滚动只通知一次（同一帧只标脏一次）", () => {
+            const k = makeKernel();
+            const spy = vi.fn();
+            k.subscribe(spy);
+            k.setViewport({ pxPerSec: 200, scrollLeft: 1234 });
+            expect(spy).toHaveBeenCalledTimes(1);
+            expect(k.get().pxPerSec).toBe(200);
+            expect(k.get().scrollLeft).toBe(1234);
+        });
+
+        it("scrollLeft 用**目标** pxPerSec 的上限钳制（不是旧上限）", () => {
+            const k = makeKernel();
+            k.setScrollLeft(10);
+            // 目标缩放放大 10 倍 → 上限 = 1000s × 1000px/s = 1e6；旧上限只有 1e5。
+            // 若实现先用旧 pxPerSec 算上限，123456 会被错钳到 100000。
+            k.setViewport({ pxPerSec: 1000, scrollLeft: 123456 });
+            expect(k.get().scrollLeft).toBe(123456);
+        });
+
+        it("缺省字段沿用当前值", () => {
+            const k = makeKernel();
+            k.setScrollLeft(300);
+            k.setViewport({ pxPerSec: 200 });
+            expect(k.get().scrollLeft).toBe(300);
+            expect(k.get().pxPerSec).toBe(200);
+        });
+
+        it("非法 scrollLeft 沿用当前值（NaN 不得写进状态）", () => {
+            const k = makeKernel();
+            k.setScrollLeft(300);
+            k.setViewport({ scrollLeft: Number.NaN });
+            expect(k.get().scrollLeft).toBe(300);
+        });
+
+        it("非法 pxPerSec 回退到下限（不写 NaN）", () => {
+            const k = makeKernel({ minPxPerSec: 5 });
+            k.setViewport({ pxPerSec: Number.POSITIVE_INFINITY });
+            expect(k.get().pxPerSec).toBe(5);
+        });
+
+        it("返回值是提交后的真值；同值提交不换引用", () => {
+            const k = makeKernel();
+            const next = k.setViewport({ pxPerSec: 200, scrollLeft: 400 });
+            expect(next.pxPerSec).toBe(200);
+            expect(next.scrollLeft).toBe(400);
+            expect(k.setViewport({ pxPerSec: 200, scrollLeft: 400 })).toBe(next);
+        });
+    });
 });

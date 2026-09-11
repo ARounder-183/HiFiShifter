@@ -133,11 +133,14 @@ const TIMELINE_KERNEL_ENABLED = isTimelineKernelEnabled();
 import type { ScaleLike } from "../../utils/musicalScales";
 import { TimelineDisplaySettingsDialog } from "./TimelineDisplaySettingsDialog";
 import { resolveTimelineScrollRange } from "./timeline/runtime/timelineScrollRange";
-import { applyNativeScrollLeft } from "./timeline/runtime/nativeScrollApply";
 
 // ── 拆分出的 hooks ──────────────────────────────────────────
 import { useTimelineState } from "./timeline/hooks/useTimelineState";
 import { useTimelineDragDrop } from "./timeline/hooks/useTimelineDragDrop";
+import {
+    createTimelineViewportAccess,
+    type TimelineViewportAccess,
+} from "./timeline/hooks/timelineViewportAccess";
 import { useTimelineClipActions } from "./timeline/hooks/useTimelineClipActions";
 import { useTimelineEventHandlers } from "./timeline/hooks/useTimelineEventHandlers";
 import { useSnapOffsetDrag } from "./timeline/hooks/useSnapOffsetDrag";
@@ -163,7 +166,14 @@ const TimelineTransportBridge = React.memo(function TimelineTransportBridge(prop
     playheadRef: React.MutableRefObject<HTMLDivElement | null>;
     rulerPlayheadLineRef: React.MutableRefObject<HTMLDivElement | null>;
     rulerPlayheadHeadRef: React.MutableRefObject<HTMLDivElement | null>;
-    scrollRef: React.MutableRefObject<HTMLDivElement | null>;
+    /**
+     * 模式无关的视口访问器。
+     *
+     * 自动滚屏与播放头定位都需要「视口宽度 + 当前横向滚动量」，内核模式下这些
+     * 量由 `ScrollKernel` 持有（DOM 容器的 scrollLeft 恒为 0），因此不能再直接读
+     * 原生 scroller。
+     */
+    viewport: TimelineViewportAccess;
     /** 接收每帧视觉插值播放头（秒），供缩放锚点等命令式读取（与绘制同源）。 */
     visualPlayheadRef: React.MutableRefObject<number>;
     syncScrollLeft: (next: number) => void;
@@ -175,7 +185,7 @@ const TimelineTransportBridge = React.memo(function TimelineTransportBridge(prop
         playheadRef,
         rulerPlayheadLineRef,
         rulerPlayheadHeadRef,
-        scrollRef,
+        viewport,
         visualPlayheadRef,
         syncScrollLeft,
         autoScrollEnabled,
@@ -218,21 +228,16 @@ const TimelineTransportBridge = React.memo(function TimelineTransportBridge(prop
                 // 会在"视觉位置"与"同步位置"之间跳动（自动滚屏抽搐的根因）。
                 // 滚动先行、播放头定位收尾，最终写入获胜。
                 if (autoScrollEnabled && transport.isPlaying) {
-                    const scroller = scrollRef.current;
-                    if (scroller) {
-                        const next = computeAutoFollowScrollLeft({
-                            playheadSec: visualPlayheadSec,
-                            pxPerSec: pxPerSecRef.current,
-                            viewportWidth: scroller.clientWidth,
-                            contentWidth: projectSec * pxPerSecRef.current,
-                        });
-                        if (Math.abs(scroller.scrollLeft - next) > 0.5) {
-                            // 写后回读浏览器实际接受的偏移再广播：跟随滚动接近
-                            // 工程右端时请求值可能被钳制，画布层必须与原生 DOM
-                            // 层使用同一偏移。
-                            const applied = applyNativeScrollLeft(scroller, next);
-                            syncScrollLeft(applied);
-                        }
+                    const next = computeAutoFollowScrollLeft({
+                        playheadSec: visualPlayheadSec,
+                        pxPerSec: pxPerSecRef.current,
+                        viewportWidth: viewport.getViewportWidth(),
+                        contentWidth: projectSec * pxPerSecRef.current,
+                    });
+                    if (Math.abs(viewport.getScrollLeft() - next) > 0.5) {
+                        // 写后回读实际生效值再广播：跟随滚动接近工程右端时请求值
+                        // 可能被载体钳制，跟随视口的图层必须与真实视口同源。
+                        syncScrollLeft(viewport.setScrollLeft(next));
                     }
                 }
 
@@ -243,8 +248,7 @@ const TimelineTransportBridge = React.memo(function TimelineTransportBridge(prop
                 // 与 React 渲染侧（TimelineSurface / TimeRulerPlayhead）同一
                 // 吸附函数，命令式与声明式两条路径逐设备像素一致。
                 const dpr = readDevicePixelRatio();
-                const scroller = scrollRef.current;
-                const screenLeft = playheadLeftPx - (scroller?.scrollLeft ?? 0);
+                const screenLeft = playheadLeftPx - viewport.getScrollLeft();
                 if (playheadRef.current) {
                     playheadRef.current.style.left = `${snapToDevicePx(screenLeft, dpr)}px`;
                 }
@@ -261,7 +265,7 @@ const TimelineTransportBridge = React.memo(function TimelineTransportBridge(prop
                 playheadRef,
                 rulerPlayheadHeadRef,
                 rulerPlayheadLineRef,
-                scrollRef,
+                viewport,
                 syncScrollLeft,
                 transport.isPlaying,
                 projectSec,
@@ -410,7 +414,18 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     } | null>(null);
 
     // ── 1. State / refs / viewport / scroll / 坐标转换 ──────
-    const state = useTimelineState();
+    /**
+     * 内核宿主句柄（仅内核模式下非空）。
+     *
+     * 用途：把「轨道头滚动」这类外部意图转发给内核（`setScrollTop`），以及让
+     * 标尺点击 seek / 拖入落点 / 参数编辑器同步等需要「当前视口」的逻辑在两种
+     * 模式下共用一份取值。
+     *
+     * 特殊说明：必须在 `useTimelineState()` **之前**声明——该 hook 需要它来
+     * 落地「参数编辑器视图同步」（内核模式没有原生 scroller 可写）。
+     */
+    const kernelHostRef = React.useRef<TimelineKernelHost | null>(null);
+    const state = useTimelineState({ kernelHostRef });
     // 视觉插值播放头的共享读取点：bridge 的 onFrame 每帧写入（与绘制同源），
     // 缩放锚点与提交后纠正读取同一值——播放中缩放不得以 33Hz 轮询的 store
     // 滞后值锚定，否则播放头会跳变 δ·Δpx（δ = 轮询间隔内的插值领先量）。
@@ -506,6 +521,61 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         keyboardZoomPendingRef,
     } = state;
 
+    /**
+     * 模式无关的视口访问器。
+     *
+     * 内核模式下旧滚动容器不挂载（`scrollRef.current === null`），凡是「读/写视口」
+     * 的逻辑（拖入落点、自动滚屏、键盘缩放、聚焦光标、参数编辑器同步）都必须经它，
+     * 而不是各自判断模式。
+     *
+     * 特殊说明：引用必须**稳定**——下游 hook 把它作为 effect 依赖，随渲染重建会
+     * 导致事件监听反复重注册。因此惰性创建一次并缓存。
+     */
+    const viewportAccessRef = React.useRef<TimelineViewportAccess | null>(null);
+    if (viewportAccessRef.current === null) {
+        viewportAccessRef.current = createTimelineViewportAccess({ scrollRef, kernelHostRef });
+    }
+    const viewportAccess = viewportAccessRef.current;
+
+    /**
+     * clientY → 轨道 id（模式无关）。
+     *
+     * 旧实现读原生 scroller 的 `scrollTop`；内核模式下容器不再滚动（真值在宿主里），
+     * 必须改用「容器矩形 + 宿主缓存的 scrollTop」。
+     *
+     * 特殊说明：内核分支只在宿主存在时生效——旧模式下宿主为 null，直接委托给
+     * `trackIdFromClientY`（它读原生 scroller），因此本函数可以安全地同时服务两种模式。
+     */
+    const resolveTrackIdAtClientY = React.useCallback(
+        (clientY: number): string | null => {
+            const host = kernelHostRef.current;
+            if (host === null) return trackIdFromClientY(clientY);
+            const rect = host.getContainerRect();
+            if (rect === null) return null;
+            const y = clientY - rect.top + host.getViewport().scrollTop;
+            const idx = Math.floor(y / rowHeight);
+            const tracks = sessionRef.current.tracks;
+            if (idx < 0 || idx >= tracks.length) return null;
+            return tracks[idx]?.id ?? null;
+        },
+        [rowHeight, sessionRef, trackIdFromClientY],
+    );
+
+    /**
+     * 内核水平滚动提交（每跨过 256px 一次）。
+     *
+     * 走旧实现的同一条通知链（`syncScrollLeft`）：更新 React state（标尺刻度
+     * 窗口）**并**把视口写入 `timelineViewportSync`（参数编辑器同步的写侧）。
+     * 若直接传 `setScrollLeftState`，同步写侧会被漏掉——表现为「内核滚动时
+     * 参数编辑器不跟随」。
+     */
+    const handleKernelScrollLeftCommit = React.useCallback(
+        (next: number) => {
+            syncScrollLeft(next);
+        },
+        [syncScrollLeft],
+    );
+
     /** 竖直量化步长：overscan(4 行) 缓冲的一半，滞后永不越出 overscan 窗口。 */
     const scrollTopStepPx = Math.max(1, Math.round(rowHeight * 2));
     const commitTimelineScrollTop = React.useCallback(
@@ -555,15 +625,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     const pendingPlayheadRevealSec = s.pendingPlayheadRevealSec;
     React.useLayoutEffect(() => {
         if (pendingPlayheadRevealSec == null) return;
-        const scroller = scrollRef.current;
-        if (!scroller) {
-            dispatch(setPendingPlayheadReveal(null));
-            return;
-        }
         // 仅当新光标位置不在可视范围内时才滚动（需求语义：画面内不扰动视图）。
+        // 视口来源必须模式无关：内核模式下旧滚动容器不挂载，若在这里早退会
+        // **静默丢弃**聚焦请求（表现为「粘贴后视图不跟随」）。
         const x = Math.max(0, pendingPlayheadRevealSec) * pxPerSec;
-        const left = scroller.scrollLeft;
-        const right = left + scroller.clientWidth;
+        const left = viewportAccess.getScrollLeft();
+        const right = left + viewportAccess.getViewportWidth();
         if (x >= left && x <= right) {
             dispatch(setPendingPlayheadReveal(null));
             return;
@@ -573,16 +640,15 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             pxPerSec,
             contentWidth: dynamicProjectSec * pxPerSec,
         });
-        if (Math.abs(scroller.scrollLeft - next) > 0.5) {
-            const applied = applyNativeScrollLeft(scroller, next);
-            syncScrollLeft(applied);
+        if (Math.abs(viewportAccess.getScrollLeft() - next) > 0.5) {
+            syncScrollLeft(viewportAccess.setScrollLeft(next));
         }
         dispatch(setPendingPlayheadReveal(null));
     }, [
         pendingPlayheadRevealSec,
         pxPerSec,
         dynamicProjectSec,
-        scrollRef,
+        viewportAccess,
         syncScrollLeft,
         dispatch,
     ]);
@@ -1055,7 +1121,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     const { tauriDraggedPathRef, tauriLastDropPathRef, tauriDropHandledAtRef } =
         useTimelineDragDrop({
             dispatch,
-            scrollRef,
+            viewport: viewportAccess,
             sessionRef,
             pxPerSecRef,
             rowHeightRef,
@@ -1063,7 +1129,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             pendingDropDurationPathRef,
             beatFromClientX,
             snapTimeline,
-            trackIdFromClientY,
+            trackIdFromClientY: resolveTrackIdAtClientY,
             rowTopForTrackId,
             setDropPreview,
             ensureDropPreviewDuration,
@@ -1080,14 +1146,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 onMidiClipDialogOpenChange(true);
             },
         });
-
-    /**
-     * 内核宿主句柄（仅内核模式下非空）。
-     *
-     * 用途：把「轨道头滚动」这类外部意图转发给内核（`setScrollTop`），以及让
-     * 标尺点击 seek 等需要「当前水平滚动位置」的逻辑在两种模式下共用一份取值。
-     */
-    const kernelHostRef = React.useRef<TimelineKernelHost | null>(null);
 
     /**
      * 拖入几何用的水平滚动量（模式无关）。
@@ -2064,6 +2122,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         sessionRef,
         getPlayheadSec: getVisualPlayheadSec,
         scrollRef,
+        viewport: viewportAccess,
         trackListScrollRef,
         pxPerSecRef,
         viewportWidthRef,
@@ -2740,7 +2799,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         const el = e.currentTarget as HTMLDivElement;
         const bounds = el.getBoundingClientRect();
         const beat = beatFromClientX(e.clientX, bounds, dragScrollLeftOf(el));
-        const trackId = trackIdFromClientY(e.clientY);
+        const trackId = resolveTrackIdAtClientY(e.clientY);
         const path = info?.path || tauriPath || "";
         const fileName =
             info?.name ||
@@ -2795,7 +2854,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         const el = e.currentTarget as HTMLDivElement;
         const bounds = el.getBoundingClientRect();
         const beat = beatFromClientX(e.clientX, bounds, dragScrollLeftOf(el));
-        const trackId = trackIdFromClientY(e.clientY);
+        const trackId = resolveTrackIdAtClientY(e.clientY);
         setDropPreview(null);
         const resolvedPath = info?.path || lastTauriDropPath || tauriPath;
         if (resolvedPath) {
@@ -2961,7 +3020,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 onRowHeightChange={setRowHeight}
                                 initialPxPerSec={pxPerSec}
                                 onPxPerSecChange={setPxPerSec}
-                                onScrollLeftCommit={setScrollLeftState}
+                                onScrollLeftCommit={handleKernelScrollLeftCommit}
                                 onViewportWidthChange={setViewportWidth}
                                 getPlayheadSec={getVisualPlayheadSec}
                                 rulerContentRef={rulerContentRef}
@@ -4128,7 +4187,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         playheadRef={playheadRef}
                         rulerPlayheadLineRef={rulerPlayheadLineRef}
                         rulerPlayheadHeadRef={rulerPlayheadHeadRef}
-                        scrollRef={scrollRef}
+                        viewport={viewportAccess}
                         visualPlayheadRef={visualPlayheadSecRef}
                         syncScrollLeft={syncScrollLeft}
                         autoScrollEnabled={s.autoScrollEnabled}

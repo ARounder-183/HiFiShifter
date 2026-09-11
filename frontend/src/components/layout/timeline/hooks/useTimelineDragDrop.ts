@@ -5,6 +5,12 @@
  * - Tauri onDragDropEvent（enter / over / leave / drop）
  * - hifi-file-drag 自定义事件（文件浏览器面板）
  * - tauriDraggedPathRef / tauriLastDropPathRef / tauriDropHandledAtRef 管理
+ *
+ * 【视口来源必须模式无关】
+ * 落点换算需要「容器矩形 + 横向滚动量」。旧实现直接读原生 scroller，但渲染内核
+ * 模式下旧容器不挂载（`scrollRef.current === null`），会让**所有**拖入路径静默
+ * 失效（落点回退到播放头、预览消失）。因此本 hook 只接受
+ * `TimelineViewportAccess`，由它内部区分「原生 scroller / 内核自绘滚动」。
  */
 import { useEffect, useRef } from "react";
 import type { AppDispatch } from "../../../../app/store";
@@ -17,10 +23,17 @@ import { emitExternalFileAction } from "../../../../features/session/projectOpen
 import { detectExternalPathAction, findFirstExternalPathAction } from "../";
 import { SNAP_HIGHLIGHT_GROUP, clearSnapHighlights } from "../../../../utils/snapHighlight";
 import type { SnapTimelineFn } from "./useTimelineState";
+import type { TimelineViewportAccess } from "./timelineViewportAccess";
 
 export interface UseTimelineDragDropArgs {
     dispatch: AppDispatch;
-    scrollRef: React.MutableRefObject<HTMLDivElement | null>;
+    /**
+     * 模式无关的视口访问器（原生 scroller 或渲染内核）。
+     *
+     * 必须**引用稳定**（面板用 ref / useMemo 构造）：本 hook 的事件监听只在挂载
+     * 时注册一次，监听回调内现读 ref，不依赖该对象的身份变化。
+     */
+    viewport: TimelineViewportAccess;
     sessionRef: React.MutableRefObject<RootState["session"]>;
     pxPerSecRef: React.MutableRefObject<number>;
     rowHeightRef: React.MutableRefObject<number>;
@@ -72,7 +85,7 @@ export interface UseTimelineDragDropResult {
 export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineDragDropResult {
     const {
         dispatch,
-        scrollRef,
+        viewport,
         sessionRef,
         pxPerSecRef,
         dropPreviewRef,
@@ -139,8 +152,7 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                         });
                     }
 
-                    const scroller = scrollRef.current;
-                    const bounds = scroller?.getBoundingClientRect() ?? null;
+                    const bounds = viewport.getRect();
                     const pos = (payload?.position ?? payload?.pos ?? payload?.cursorPosition) as
                         | { x?: number; y?: number }
                         | undefined;
@@ -150,8 +162,8 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                     const fallbackBeat = sessionRef.current.playheadSec ?? 0;
                     const trackId = clientY !== undefined ? trackIdFromClientY(clientY) : null;
                     const rawBeat =
-                        clientX !== undefined && bounds && scroller
-                            ? beatFromClientX(clientX, bounds, scroller.scrollLeft)
+                        clientX !== undefined && bounds
+                            ? beatFromClientX(clientX, bounds, viewport.getScrollLeft())
                             : fallbackBeat;
                     const beat =
                         snapTimeline && sessionRef.current.timelineSnap.enabled
@@ -367,11 +379,10 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
             };
             if (!detail) return;
 
-            const scroller = scrollRef.current;
-            const bounds = scroller?.getBoundingClientRect() ?? null;
+            const bounds = viewport.getRect();
 
             const isOverTimeline =
-                bounds &&
+                bounds !== null &&
                 detail.clientX >= bounds.left &&
                 detail.clientX <= bounds.right &&
                 detail.clientY >= bounds.top &&
@@ -397,8 +408,12 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
 
             // 移动时的 DOM 直通与重绘拦截
             if (detail.type === "move" || detail.type === "start") {
-                if (isOverTimeline && scroller) {
-                    const rawBeat = beatFromClientX(detail.clientX, bounds!, scroller.scrollLeft);
+                if (isOverTimeline) {
+                    const rawBeat = beatFromClientX(
+                        detail.clientX,
+                        bounds!,
+                        viewport.getScrollLeft(),
+                    );
                     const trackId = trackIdFromClientY(detail.clientY);
                     const beat = snapDropBeat(rawBeat, trackId);
                     const path = detail.filePath;
@@ -440,8 +455,12 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
 
             if (detail.type === "drop") {
                 setDropPreview(null);
-                if (isOverTimeline && scroller) {
-                    const rawBeat = beatFromClientX(detail.clientX, bounds!, scroller.scrollLeft);
+                if (isOverTimeline) {
+                    const rawBeat = beatFromClientX(
+                        detail.clientX,
+                        bounds!,
+                        viewport.getScrollLeft(),
+                    );
                     const trackId = trackIdFromClientY(detail.clientY);
                     const beat = snapDropBeat(rawBeat, trackId);
                     const filePaths: string[] = detail.filePaths;

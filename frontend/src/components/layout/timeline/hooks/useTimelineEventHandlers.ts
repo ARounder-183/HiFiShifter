@@ -9,9 +9,15 @@
  * - hifi:nudgePlayhead（播放头微移）
  * - hifi:zoomTimelineFocus（聚焦缩放）
  * - context menu dismiss（pointerdown 外部关闭）
- * - auto-scroll（播放时保持播放头可见）
  * - hifi:focusCursor（滚动到播放头中心；粘贴后的聚焦由
  *   pendingPlayheadRevealSec + TimelinePanel useLayoutEffect 驱动）
+ *
+ * 【视口来源必须模式无关】
+ * 本模块的缩放与聚焦都要「读当前视口 + 写横向滚动」。渲染内核模式下旧滚动容器
+ * 不挂载（`scrollRef.current === null`），因此统一经 `TimelineViewportAccess`：
+ * 读走 `getScrollLeft/getViewportWidth`，写走 `setScrollLeft`（两种模式通用）；
+ * 只有「缩放落地」需要区分模式（旧模式必须先提交 React state 重排内容宽度，
+ * 内核模式可一次原子提交）。
  */
 import { useEffect } from "react";
 import { flushSync } from "react-dom";
@@ -29,12 +35,12 @@ import {
 import { beginHoldRepeat, selectMergedKeybindings } from "../../../../features/keybindings";
 import { getActiveSurface } from "../../../../features/uiFocus/focusSurface";
 import { resolveHorizontalWheelZoom } from "../runtime/timelineScrollRange";
-import { applyNativeScrollLeft } from "../runtime/nativeScrollApply";
 import { gridStepBeats, MIN_PX_PER_SEC, MAX_PX_PER_SEC } from "../";
 import { computeFocusCursorScrollLeft } from "../../../../utils/autoFollowScroll";
 import { resolveTimelineMinPxPerSec } from "../runtime/timelineZoomBounds";
 import { getDynamicProjectSec } from "../../../../features/session/projectBoundary";
 import { expandClipIdsWithGroups } from "./useGroupExpansion";
+import type { TimelineViewportAccess } from "./timelineViewportAccess";
 
 // ── Args 类型 ─────────────────────────────────────────────────
 export interface UseTimelineEventHandlersArgs {
@@ -47,6 +53,13 @@ export interface UseTimelineEventHandlersArgs {
      */
     getPlayheadSec?: () => number;
     scrollRef: React.MutableRefObject<HTMLDivElement | null>;
+    /**
+     * 模式无关的视口访问器（原生 scroller 或渲染内核）。
+     *
+     * 缩放与聚焦都需要它：内核模式下 `scrollRef.current` 为 null，直接读会在
+     * 第一步就 return（表现为「快捷键缩放/聚焦无反应」）。
+     */
+    viewport: TimelineViewportAccess;
     trackListScrollRef: React.MutableRefObject<HTMLDivElement | null>;
     pxPerSecRef: React.MutableRefObject<number>;
     viewportWidthRef: React.MutableRefObject<number>;
@@ -118,6 +131,7 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
         sessionRef,
         getPlayheadSec,
         scrollRef,
+        viewport,
         trackListScrollRef,
         pxPerSecRef,
         keyboardZoomPendingRef,
@@ -367,8 +381,14 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
             const factor = Number((e as CustomEvent<{ factor?: number }>).detail?.factor ?? 1);
             if (!Number.isFinite(factor) || factor <= 0) return;
 
-            const scroller = scrollRef.current;
-            if (!scroller) return;
+            // 视口来源模式无关：内核模式没有原生 scroller，真值在 ScrollKernel 里。
+            const kernelMode = viewport.isKernel();
+            const scroller = kernelMode ? null : scrollRef.current;
+            if (!kernelMode && !scroller) return;
+            const baseScrollLeft = kernelMode ? viewport.getScrollLeft() : scroller!.scrollLeft;
+            const viewportWidthPx = kernelMode
+                ? viewport.getViewportWidth()
+                : scroller!.clientWidth;
 
             // 实时工程长度：本监听的依赖刻意不含 dynamicProjectSec（工程变化
             // 不重建监听），闭包值是挂载时的快照——工程变长后缩放上限仍钳在
@@ -378,9 +398,9 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
             const zoom = resolveHorizontalWheelZoom({
                 factor,
                 basePxPerSec: pxPerSecRef.current,
-                baseScrollLeft: scroller.scrollLeft,
+                baseScrollLeft,
                 totalSec,
-                viewportWidth: scroller.clientWidth,
+                viewportWidth: viewportWidthPx,
                 playheadZoomEnabled: true,
                 playheadSec: getPlayheadSec
                     ? getPlayheadSec()
@@ -389,11 +409,22 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
                 minPxPerSec: resolveTimelineMinPxPerSec({
                     baseMinPxPerSec: MIN_PX_PER_SEC,
                     projectSec: totalSec,
-                    viewportWidthPx: scroller.clientWidth,
+                    viewportWidthPx,
                 }),
                 maxPxPerSec: MAX_PX_PER_SEC,
             });
             if (!zoom) return;
+
+            if (kernelMode) {
+                // 内核模式：缩放与横向位置一次原子提交（用**目标** pxPerSec 算上限，
+                // 避免「用旧上限钳制新缩放」）。pxPerSec 变化由内核回调
+                // onZoomChange → setPxPerSec 同步 React 派生量；这里再显式提交一次
+                // scrollLeft state，让标尺刻度窗口立即跟上（同值提交会被 React 跳过）。
+                const applied = viewport.setZoomAndScroll(zoom.nextPxPerSec, zoom.nextScrollLeft);
+                setPxPerSec(applied.pxPerSec);
+                commitScrollLeftState(applied.scrollLeft);
+                return;
+            }
 
             keyboardZoomPendingRef.current = {
                 nextScale: zoom.nextPxPerSec,
@@ -422,6 +453,7 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
         scrollRef,
         sessionRef,
         setPxPerSec,
+        viewport,
     ]);
 
     // ── Context menu dismiss ─────────────────────────────────
@@ -446,8 +478,6 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
         // 模型”（= 工程宽度）：光标接近工程末尾时也必须能正确进入画面，
         // 而不是被“工程宽 − 视口宽”的旧上限卡在画面右缘。
         function handler() {
-            const scroller = scrollRef.current;
-            if (!scroller) return;
             const next = computeFocusCursorScrollLeft({
                 playheadSec: getPlayheadSec
                     ? getPlayheadSec()
@@ -457,12 +487,12 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
                 // store 订阅内同步更新），不依赖渲染期闭包。
                 contentWidth: getDynamicProjectSec(sessionRef.current.clips) * pxPerSec,
             });
-            // 写后回读浏览器实际接受的偏移再广播：请求值可能被钳制/量化/锚定
-            // 修正，sticky 画布层必须与原生 DOM 层使用同一偏移。
-            const applied = applyNativeScrollLeft(scroller, next);
-            syncScrollLeft(applied);
+            // 写后回读**实际生效值**再广播：请求值可能被钳制/量化/锚定修正
+            // （旧实现经浏览器回读，内核经 ScrollKernel 回读），跟随视口的图层
+            // 必须与真实视口使用同一偏移。
+            syncScrollLeft(viewport.setScrollLeft(next));
         }
         window.addEventListener("hifi:focusCursor", handler);
         return () => window.removeEventListener("hifi:focusCursor", handler);
-    }, [getPlayheadSec, pxPerSec, sessionRef, syncScrollLeft, scrollRef]);
+    }, [getPlayheadSec, pxPerSec, sessionRef, syncScrollLeft, viewport]);
 }
