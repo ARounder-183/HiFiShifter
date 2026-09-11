@@ -486,6 +486,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         ensureDropPreviewDuration,
         getDropPreviewWidthPx,
         snapTimeline,
+        snapTimelineDetailed,
         isEditableTarget,
         isPointerOnNativeScrollbar,
         startPanPointer,
@@ -1135,6 +1136,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     const kernelDragOriginRef = React.useRef<{
         clipId: string;
         startSec: number;
+        lengthSec: number;
         trackId: string;
     } | null>(null);
 
@@ -1153,18 +1155,30 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 kernelDragOriginRef.current = {
                     clipId: clip.id,
                     startSec: clip.startSec,
+                    lengthSec: clip.lengthSec,
                     trackId: clip.trackId,
                 };
             }
             const origin = kernelDragOriginRef.current;
             if (origin === null) return;
-            const nextStart = Math.max(0, origin.startSec + args.deltaSec);
+            const rawStart = Math.max(0, origin.startSec + args.deltaSec);
+            // 吸附：复用旧实现的 snapTimelineDetailed（多源候选 + 取更近者），
+            // 内核只给几何位移，吸附规则不在内核里重写。
+            const nextStart = s.snapEnabled
+                ? snapTimelineDetailed(rawStart, "clip", {
+                      originSec: origin.startSec,
+                      anchorTrackId: args.targetTrackId,
+                      excludeClipIds: new Set([args.clipId]),
+                      moveLengthSec: origin.lengthSec,
+                      moveSnapOffsetSec: 0,
+                  }).sec
+                : rawStart;
             batch(() => {
                 dispatch(moveClipStart({ clipId: args.clipId, startSec: nextStart }));
                 dispatch(moveClipTrack({ clipId: args.clipId, trackId: args.targetTrackId }));
             });
         },
-        [dispatch, sessionRef],
+        [dispatch, sessionRef, s.snapEnabled, snapTimelineDetailed],
     );
 
     /**
@@ -1191,19 +1205,22 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 return;
             }
             dispatch(checkpointHistory());
+            // 提交值取 Redux 里的当前值（预览已写入**吸附后**的结果）——
+            // 用 origin + 内核原始位移会绕开吸附，导致"预览吸附、提交不吸附"。
+            const clip = sessionRef.current.clips.find((item) => item.id === args.clipId);
             void dispatch(
                 moveClipsRemote({
                     moves: [
                         {
                             clipId: args.clipId,
-                            startSec: Math.max(0, origin.startSec + args.deltaSec),
+                            startSec: clip?.startSec ?? Math.max(0, origin.startSec + args.deltaSec),
                             trackId: args.targetTrackId,
                         },
                     ],
                 }),
             );
         },
-        [dispatch],
+        [dispatch, sessionRef],
     );
 
     /** 内核 trim：按下时的原始几何（把相对位移换算为绝对值，并支持回滚）。 */
@@ -1211,6 +1228,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         clipId: string;
         startSec: number;
         lengthSec: number;
+        trackId: string;
         sourceStartSec: number;
         sourceEndSec: number;
     } | null>(null);
@@ -1237,33 +1255,63 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     clipId: clip.id,
                     startSec: clip.startSec,
                     lengthSec: clip.lengthSec,
+                    trackId: clip.trackId,
                     sourceStartSec: clip.sourceStartSec,
                     sourceEndSec: clip.sourceEndSec,
                 };
             }
             const origin = kernelTrimOriginRef.current;
             if (origin === null) return;
+
+            // 吸附：左边缘吸**起点**、右边缘吸**右端**——两者吸附的对象不同，
+            // 统一吸起点会让右边缘 trim 落在错误的位置。
+            let nextStart = args.startSec;
+            let nextLength = args.lengthSec;
+            let deltaSec = args.deltaSec;
+            if (s.snapEnabled) {
+                const snapArgs = {
+                    originSec: origin.startSec,
+                    anchorTrackId: origin.trackId,
+                    excludeClipIds: new Set([args.clipId]),
+                    moveLengthSec: args.lengthSec,
+                    moveSnapOffsetSec: 0,
+                } as const;
+                if (args.edge === "left") {
+                    nextStart = snapTimelineDetailed(args.startSec, "clip", snapArgs).sec;
+                    nextLength = origin.startSec + origin.lengthSec - nextStart;
+                    deltaSec = nextStart - origin.startSec;
+                } else {
+                    const snappedRight = snapTimelineDetailed(
+                        args.startSec + args.lengthSec,
+                        "clip",
+                        snapArgs,
+                    ).sec;
+                    nextLength = Math.max(0, snappedRight - args.startSec);
+                    deltaSec = nextLength - origin.lengthSec;
+                }
+            }
+
             batch(() => {
-                dispatch(moveClipStart({ clipId: args.clipId, startSec: args.startSec }));
-                dispatch(setClipLength({ clipId: args.clipId, lengthSec: args.lengthSec }));
+                dispatch(moveClipStart({ clipId: args.clipId, startSec: nextStart }));
+                dispatch(setClipLength({ clipId: args.clipId, lengthSec: nextLength }));
                 if (args.edge === "left") {
                     dispatch(
                         setClipSourceRange({
                             clipId: args.clipId,
-                            sourceStartSec: origin.sourceStartSec + args.deltaSec,
+                            sourceStartSec: origin.sourceStartSec + deltaSec,
                         }),
                     );
                 } else {
                     dispatch(
                         setClipSourceRange({
                             clipId: args.clipId,
-                            sourceEndSec: origin.sourceEndSec + args.deltaSec,
+                            sourceEndSec: origin.sourceEndSec + deltaSec,
                         }),
                     );
                 }
             });
         },
-        [dispatch, sessionRef],
+        [dispatch, sessionRef, s.snapEnabled, snapTimelineDetailed],
     );
 
     /** 内核 trim 收尾：提交或回滚（取消时三个字段一起还原）。 */
@@ -1293,19 +1341,21 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 return;
             }
             dispatch(checkpointHistory());
+            // 同拖拽：提交值取 Redux 当前值（预览已写入吸附后的结果）。
+            const clip = sessionRef.current.clips.find((item) => item.id === args.clipId);
             void dispatch(
                 setClipsStateBulkRemote({
                     updates: [
                         {
                             clipId: args.clipId,
-                            startSec: args.startSec,
-                            lengthSec: args.lengthSec,
+                            startSec: clip?.startSec ?? args.startSec,
+                            lengthSec: clip?.lengthSec ?? args.lengthSec,
                         },
                     ],
                 }),
             );
         },
-        [dispatch],
+        [dispatch, sessionRef],
     );
 
     /** 内核淡变角：按下时的原始值（用于回滚）。 */

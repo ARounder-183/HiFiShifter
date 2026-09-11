@@ -1652,8 +1652,52 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         }
     }
 
+    /**
+     * 悬停光标：按命中分区设置（取值与旧实现一致）。
+     *
+     * 特殊说明：只在**无手势**时更新——手势期间的光标由 `onGesturePointerMove`
+     * 按手势类型设置，否则普通移动会把手势光标覆盖掉（表现为"拖拽时又变回箭头"）。
+     *
+     * @param event 指针事件。
+     * @returns 无返回值。
+     */
+    function updateHoverCursor(event: PointerEvent): void {
+        if (gesture.kind !== "none" || panPointerId !== null) return;
+        const hit = hitAt(event.clientX, event.clientY);
+        let cursor = "default";
+        if (hit.kind === "clip") {
+            switch (hit.region) {
+                case "left-edge":
+                case "right-edge":
+                    cursor = "ew-resize";
+                    break;
+                case "fade-in-corner":
+                    cursor = "nwse-resize";
+                    break;
+                case "fade-out-corner":
+                    cursor = "nesw-resize";
+                    break;
+                default:
+                    cursor = "grab";
+                    break;
+            }
+        }
+        if (container.style.cursor !== cursor) container.style.cursor = cursor;
+    }
+
     /** 左键手势的移动处理（中键平移由 onPanPointerMove 单独负责）。 */
     function onGesturePointerMove(event: PointerEvent): void {
+        // 手势光标（与旧实现取值一致）：拖拽 grab→grabbing、trim/fade 用 resize、
+        // 框选用 crosshair。
+        if (gesture.kind === "clip-drag") {
+            container.style.cursor = "grabbing";
+        } else if (gesture.kind === "clip-trim") {
+            container.style.cursor = "ew-resize";
+        } else if (gesture.kind === "clip-fade") {
+            container.style.cursor = gesture.side === "in" ? "nwse-resize" : "nesw-resize";
+        } else if (gesture.kind === "box-select") {
+            container.style.cursor = "crosshair";
+        }
         if (gesture.kind === "seek") {
             interactions?.onSeek?.(secAt(event.clientX), false);
             return;
@@ -1890,6 +1934,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 // 已释放 / 未捕获：忽略。
             }
             gesture = { kind: "none" };
+            // 交回悬停逻辑（下一次 pointermove 会按命中分区重设）。
+            container.style.cursor = "";
         }
     }
 
@@ -1993,9 +2039,16 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         return result;
     }
 
+    /** 指针离开轨道区：清掉自定义光标，交回默认值。 */
+    function onPointerLeave(): void {
+        if (gesture.kind === "none" && panPointerId === null) container.style.cursor = "";
+    }
+
     container.addEventListener("pointerdown", onPointerDown);
     container.addEventListener("auxclick", onAuxClick);
     container.addEventListener("contextmenu", onContextMenu);
+    container.addEventListener("pointermove", updateHoverCursor);
+    container.addEventListener("pointerleave", onPointerLeave);
     window.addEventListener("pointermove", onPanPointerMove);
     window.addEventListener("pointermove", onGesturePointerMove);
     window.addEventListener("pointerup", endPan);
@@ -2207,6 +2260,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             container.removeEventListener("pointerdown", onPointerDown);
             container.removeEventListener("auxclick", onAuxClick);
             container.removeEventListener("contextmenu", onContextMenu);
+            container.removeEventListener("pointermove", updateHoverCursor);
+            container.removeEventListener("pointerleave", onPointerLeave);
             boxSelectEl.remove();
             window.removeEventListener("pointermove", onGesturePointerMove);
             window.removeEventListener("pointerup", onGesturePointerUp);
