@@ -156,6 +156,16 @@ export interface TimelineKernelDomSync {
     readonly playheadLine?: HTMLElement | null;
     /** 标尺播放头竖线（与轨道区播放头同步）。 */
     readonly rulerPlayheadLine?: HTMLElement | null;
+    /**
+     * 吸附高亮内容层（`SnapHighlightLayer` 的容器）：整层写
+     * `translate(-scrollLeft, -scrollTop)`。
+     *
+     * 【为什么是"内容层 + 整层平移"】吸附竖线在组件内部用**内容坐标**布局
+     * （`marker.sec × pxPerSec`，与旧实现一致——旧实现把它放在原生滚动的内容层里
+     * 靠滚动平移）。内核自绘滚动后没有内容层，这里补一个：层内布局不变，滚动只写
+     * 一次 transform，因此拖拽期间每帧重渲染的高亮层不会因滚动而重排。
+     */
+    readonly snapHighlightContent?: HTMLElement | null;
 }
 
 /** 宿主构造参数。 */
@@ -984,6 +994,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     let lastTrackListScrollTop = Number.NaN;
     let lastPlayheadViewportX = Number.NaN;
     let lastPlayheadContentX = Number.NaN;
+    /** 吸附高亮内容层的整层变换（字符串去重：同时含两轴）。 */
+    let lastSnapTransform = "";
     /** 上一次绘制的视口（引用比较：`ScrollKernel.get()` 的引用在未变化时稳定）。 */
     let lastDrawnView: TimelineViewportState | null = null;
     /** 上一次绘制的播放头位置（秒），用于判断是否需要继续自驱动。 */
@@ -1076,6 +1088,18 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             if (shouldWrite(view.scrollTop, lastTrackListScrollTop, 0.5)) {
                 lastTrackListScrollTop = view.scrollTop;
                 trackList.scrollTop = view.scrollTop;
+            }
+        }
+
+        // 吸附高亮内容层：整层平移（内容坐标 → 视口坐标）。
+        // 与细节层同一策略——层内元素全用内容坐标布局，滚动只写一次 transform。
+        // 用字符串去重（同时含两轴，天然规避 NaN 初值问题）。
+        const snapContent = sync.snapHighlightContent;
+        if (snapContent != null) {
+            const transform = `translate(${-view.scrollLeft}px, ${-view.scrollTop}px)`;
+            if (transform !== lastSnapTransform) {
+                lastSnapTransform = transform;
+                snapContent.style.transform = transform;
             }
         }
 

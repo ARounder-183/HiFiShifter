@@ -30,6 +30,7 @@ import { useAppTheme } from "../../../../theme/AppThemeProvider";
 import { selectKeybinding } from "../../../../features/keybindings/keybindingsSlice";
 import { readDevicePixelRatio, wholeDevicePxLength } from "../../../../utils/devicePixelLine";
 import type { ClipInfo } from "../../../../features/session/sessionTypes";
+import { SnapHighlightLayer } from "../SnapHighlightLayer";
 import { createTimelineAxis, type TimelineAxis } from "../runtime/timelineAxis";
 import { TimelineWaveformSurface } from "../TimelineWaveformSurface";
 import {
@@ -84,6 +85,25 @@ export interface TimelineKernelViewProps {
      * 引用须稳定（用 `useCallback`）：内核在创建时取一次，引用抖动不会生效。
      */
     readonly interactions?: TimelineKernelInteractions;
+    /**
+     * 吸附高亮层的上下文（缺省不渲染该层）。
+     *
+     * 层内元素用**内容坐标**布局（与旧实现一致：吸附竖线是 `marker.sec × pxPerSec`），
+     * 由宿主整层平移跟随视口（见 `TimelineKernelDomSync.snapHighlightContent`）。
+     * 旧实现靠原生滚动平移它，内核自绘滚动后必须显式补上这一层平移，否则
+     * 吸附高亮要么不显示（挂在旧分支里），要么位置不随滚动。
+     *
+     * `pxPerSec` / 行高 / 轨道列表都取自 React 侧（与面板同源）：拖拽期间缩放与
+     * 行高是低频操作，不需要内核在 rAF 内写。
+     */
+    readonly snapHighlight?: {
+        /** 当前水平缩放（CSS px/秒）。 */
+        readonly pxPerSec: number;
+        /** 内容层宽度（含右侧虚拟延伸，与旧实现同源）。 */
+        readonly contentWidth: number;
+        /** 内容层高度（全部轨道总高）。 */
+        readonly contentHeight: number;
+    };
 }
 
 export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => {
@@ -98,6 +118,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         rulerPlayheadLineRef,
         hostRef,
         interactions,
+        snapHighlight,
         onScrollLeftCommit,
         onViewportWidthChange,
     } = props;
@@ -107,6 +128,8 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
     const hThumbRef = React.useRef<HTMLDivElement | null>(null);
     const vThumbRef = React.useRef<HTMLDivElement | null>(null);
     const playheadLineRef = React.useRef<HTMLDivElement | null>(null);
+    /** 吸附高亮内容层容器（宿主在 rAF 内整层平移，跟随视口）。 */
+    const snapContentRef = React.useRef<HTMLDivElement | null>(null);
     const localHostRef = React.useRef<TimelineKernelHost | null>(null);
     const [fatal, setFatal] = React.useState<string | null>(null);
     /** 宿主是否已创建：波形层依赖内核视口源，必须等宿主就绪后再挂载。 */
@@ -314,6 +337,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                     trackListScroller: trackListScrollerRef?.current ?? null,
                     playheadLine: playheadLineRef?.current ?? null,
                     rulerPlayheadLine: rulerPlayheadLineRef?.current ?? null,
+                    snapHighlightContent: snapContentRef.current,
                 },
                 onRowHeightChange: (px) => callbacksRef.current.onRowHeightChange(px),
                 onZoomChange: (pxPerSec) => callbacksRef.current.onPxPerSecChange(pxPerSec),
@@ -388,6 +412,29 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                         heightPx={viewportSize.height}
                         axis={waveformAxis}
                         viewportSource={kernelViewportSource}
+                    />
+                </div>
+            ) : null}
+            {/* 吸附高亮层：内容坐标系（层内元素用 `marker.sec × pxPerSec` 布局），
+                由宿主整层 translate 跟随视口。旧实现靠原生滚动平移它，内核自绘
+                滚动后必须显式补上，否则该层要么不挂载、要么位置不随滚动。
+                注意：transform 会创建 stacking context，因此容器需显式 z-index
+                （层内部的 z-[13] 只在容器内生效）。 */}
+            {snapHighlight !== undefined ? (
+                <div
+                    ref={snapContentRef}
+                    data-hs-snap-content="1"
+                    className="pointer-events-none absolute left-0 top-0 z-[3] overflow-hidden"
+                    style={{
+                        width: snapHighlight.contentWidth,
+                        height: snapHighlight.contentHeight,
+                    }}
+                >
+                    <SnapHighlightLayer
+                        pxPerSec={snapHighlight.pxPerSec}
+                        rowHeight={rowHeight}
+                        tracks={tracks}
+                        contentHeight={snapHighlight.contentHeight}
                     />
                 </div>
             ) : null}

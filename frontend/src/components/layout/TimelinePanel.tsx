@@ -1138,6 +1138,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         startSec: number;
         lengthSec: number;
         trackId: string;
+        /**
+         * clip 自身的吸附偏移点（秒）。
+         *
+         * 多源吸附把「起点 / 终点 / 自身吸附偏移点」同时作为被吸附对象（旧实现
+         * `useClipDrag` 同源）。必须随 origin 一起记下：预览期间 Redux 里的
+         * `startSec` 已被改写，但 `snapOffsetSec` 是 clip 的固有属性，拖拽中不变。
+         */
+        snapOffsetSec: number;
     } | null>(null);
 
     /**
@@ -1157,6 +1165,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     startSec: clip.startSec,
                     lengthSec: clip.lengthSec,
                     trackId: clip.trackId,
+                    snapOffsetSec: Math.max(0, Number(clip.snapOffsetSec) || 0),
                 };
             }
             const origin = kernelDragOriginRef.current;
@@ -1164,15 +1173,25 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             const rawStart = Math.max(0, origin.startSec + args.deltaSec);
             // 吸附：复用旧实现的 snapTimelineDetailed（多源候选 + 取更近者），
             // 内核只给几何位移，吸附规则不在内核里重写。
+            //
+            // `highlight` 必须传：吸附高亮的**发布与清除**都由该函数按此选项统一
+            // 处理（见 useTimelineState.snapTimelineDetailed）。不传时吸附本身仍
+            // 生效、位置也对，但完全没有视觉反馈——表现为"吸附没生效"。
             const nextStart = s.snapEnabled
                 ? snapTimelineDetailed(rawStart, "clip", {
                       originSec: origin.startSec,
                       anchorTrackId: args.targetTrackId,
                       excludeClipIds: new Set([args.clipId]),
                       moveLengthSec: origin.lengthSec,
-                      moveSnapOffsetSec: 0,
+                      moveSnapOffsetSec: origin.snapOffsetSec,
+                      highlight: {
+                          sources: [{ trackId: args.targetTrackId, clipId: args.clipId }],
+                      },
                   }).sec
                 : rawStart;
+            // 吸附被关闭（拖拽中切开关 / 按住临时取反键）：高亮必须清掉，
+            // 否则会残留上一次的吸附提示（旧实现同样在 else 分支清除）。
+            if (!s.snapEnabled) clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
             batch(() => {
                 dispatch(moveClipStart({ clipId: args.clipId, startSec: nextStart }));
                 dispatch(moveClipTrack({ clipId: args.clipId, trackId: args.targetTrackId }));
@@ -1197,6 +1216,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             const origin = kernelDragOriginRef.current;
             kernelDragOriginRef.current = null;
             if (origin === null) return;
+            // 手势结束：清掉吸附高亮（旧实现同样在收尾清除，否则最后一次的
+            // 吸附提示会一直挂在画面上）。
+            clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
             if (args.cancelled) {
                 batch(() => {
                     dispatch(moveClipStart({ clipId: origin.clipId, startSec: origin.startSec }));
@@ -1275,7 +1297,13 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     excludeClipIds: new Set([args.clipId]),
                     moveLengthSec: args.lengthSec,
                     moveSnapOffsetSec: 0,
-                } as const;
+                    // `highlight` 必须传：吸附高亮的发布 / 清除由
+                    // snapTimelineDetailed 按此选项统一处理，不传则 trim 有吸附
+                    // 但没有任何视觉反馈。
+                    highlight: {
+                        sources: [{ trackId: origin.trackId, clipId: args.clipId }],
+                    },
+                };
                 if (args.edge === "left") {
                     nextStart = snapTimelineDetailed(args.startSec, "clip", snapArgs).sec;
                     nextLength = origin.startSec + origin.lengthSec - nextStart;
@@ -1289,6 +1317,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     nextLength = Math.max(0, snappedRight - args.startSec);
                     deltaSec = nextLength - origin.lengthSec;
                 }
+            } else {
+                clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
             }
 
             batch(() => {
@@ -1326,6 +1356,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             const origin = kernelTrimOriginRef.current;
             kernelTrimOriginRef.current = null;
             if (origin === null) return;
+            // 手势结束：清掉吸附高亮（与拖拽收尾同源）。
+            clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
             if (args.cancelled) {
                 batch(() => {
                     dispatch(moveClipStart({ clipId: origin.clipId, startSec: origin.startSec }));
@@ -2303,6 +2335,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 rulerPlayheadLineRef={rulerPlayheadLineRef}
                                 hostRef={kernelHostRef}
                                 interactions={kernelInteractions}
+                                snapHighlight={{
+                                    pxPerSec,
+                                    contentWidth: timelineScrollRange.paddedContentWidth,
+                                    contentHeight,
+                                }}
                             />
                         </>
                     ) : (
