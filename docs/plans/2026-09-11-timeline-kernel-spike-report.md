@@ -104,11 +104,15 @@
 
 ### 5.1 步骤
 
-```bash
-# 1. 启动开发环境
-cd frontend && npm run dev
+> **必须在桌面应用里验证**：前端依赖 pywebview 后端（`get_ui_settings` 等），
+> 纯浏览器（`cd frontend && npm run dev`）会因 "Python API not available" 报错，
+> 应用本身跑不起来。
 
-# 2. 在浏览器控制台开启内核（然后刷新页面）
+```bash
+# 1. 启动桌面应用开发模式（会自动拉起 Vite dev server 并打开桌面窗口）
+cd backend/src-tauri && cargo tauri dev
+
+# 2. 在应用窗口的开发者控制台开启内核（然后刷新）
 localStorage.setItem("hifishifter.timelineKernel", "1"); location.reload();
 
 # 3. 生成性能工程（PERF 面板右下角，或控制台）
