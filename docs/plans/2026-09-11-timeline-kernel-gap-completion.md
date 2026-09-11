@@ -244,7 +244,7 @@
 
 | 任务 | 内容 | 说明 |
 |---|---|---|
-| D | 淡化专属右键菜单 + 淡变 tooltip、多 Take、静音检测预览、拖到空白新建轨道 | — |
+| D | 淡化专属右键菜单 ✅ / 多 Take ✅ / 静音检测预览 ✅；**剩**淡变 tooltip（D-1b）、拖到空白新建轨道（D-4） | 见下方批次 D 各节 |
 | E | 多选修饰键走键位绑定 + Shift 范围选择、Esc 覆盖抓手/snap/框选、滚动条 track 点击跳转、Vertical Lock、陈旧注释与 `glyph/*` 死代码 | — |
 | 残留 | 裁切 / 拉伸的**波纹跟随预览**（旧实现 `computeRegionRightEdgeDelta` + `applyRippleFollowerShift`；内核目前只在拖拽移动时做波纹） | 本轮新发现，未实现 |
 
@@ -252,12 +252,56 @@
 
 ## 批次 D：大件（P1-5 ~ P1-8）
 
-| 任务 | 内容 |
-|---|---|
-| D-1 | 淡化专属右键菜单（`requestOpenFadeContextMenu`）+ 淡变悬停 tooltip |
-| D-2 | 多 Take：lane 分界线绘制 + 点击 inactive lane 切换活跃 Take |
-| D-3 | 静音检测红色预览层（内容坐标层） |
-| D-4 | 拖到轨道区下方新建轨道（ghost + 落库） |
+### D-1 淡变专属右键菜单（已完成）
+
+- **根因**：菜单由三层 DOM 命中块发起（`ClipItem` 角部 / `FadeHitLayer` /
+  `OverlapEditLayer`），内核模式下它们都不挂载；菜单宿主 `FadeContextMenuHost`
+  本身在两种模式下都已挂载（走全局总线），缺的只是「谁发起」。
+- 宿主 `dispatchContextMenuAt` 先解析淡变角 / 交叉点抓手 → 构造载荷
+  （形状 / 方向 / **生效长度**：自动交叉淡化覆盖手动值，与绘制端同源）→
+  `onFadeContextMenu` → 面板转发 `requestOpenFadeContextMenu`（并先关掉通用菜单）。
+- 抓手 = 双列：`primary` 是**前一个** clip 的淡出、`secondary` 是后一个的淡入
+  （与旧实现 `crossfadeSides.out / .in` 列序一致）。
+- 验证：右键淡变线 → 「淡入 -0.50 淡化曲率…」；右键交叉点 → 「淡出 +0.00 / 淡入 -0.50」✓
+
+### D-2 多 Take（已完成）
+
+- 模型：clip 新增 `takeLaneSeparatorOffsetsPx`，由**共享**的
+  `takeLanes.resolveTakeLaneLayouts` 推出（与波形面 / 旧命中同一套数学）；
+  `SparseRenderClip.takes` 必须保留 `sourcePath`（lane 布局按它筛选音频 take）。
+- 渲染：分界线与静音覆盖层同一遍最后落笔（1px 深色，全 clip 宽，首条 lane 不画）。
+- 命中：clip body 上**无修饰键**的按下解析 inactive lane，收尾未超过阈值时切换
+  （拖动仍是移动、编辑修饰键优先——旧实现语义）；面板走 `setClipActiveTakeRemote`
+  并在**非播放**时把播放光标带到点击位置。
+- 验证：分界线在 bodyTop+30 处（alpha 46 = 0.18）且横向恰好等于 clip 宽度；
+  点击 lane 1 → `set_clip_active_take(clip-1, take-2)` + seek；再点 lane 0 → 切回 ✓
+
+### D-3 静音检测红色预览层（已完成）
+
+- 数据链：`session.silencePreviewSegments` → 内核数据 → 模型
+  `silenceSpansPx`（clip 内相对像素，**防御性钳制**到 clip 本体）。
+- 渲染：**单独一遍最后落笔**。踩坑：原先在各自 clip 的细节阶段画，重叠区里后一个
+  clip 的块面属于后续批次（前导重叠触发 `barrier`），会把先画的盖掉——实测只有
+  第一段可见。
+- **脏标记教训复现**：新增可视输入必须同时进 `TimelineKernelView` 的场景重建依赖
+  数组，否则「数据变了但画面不动」。
+- 验证：两段红色恰好落在 450–630 / 780–870 px（clip 起点 2s、150px/s）；mock 里
+  故意越界的第三段**没有**画到 clip 之外 ✓
+
+### D-4 拖到轨道区下方新建轨道（**未做**）
+
+- 旧实现路径较厚：`computeSelectedTrackSpan`（混合轨道选择跨多轨时按 span 建轨）+
+  `buildDropToNewTrackMoves` + `createNewTrackForDrop(s)`，且移动与 copy 两条分支
+  各有一套。
+- 内核侧需先给出「落在最后一条轨道之下」的哨兵（当前 `resolveTargetTrackIndex`
+  钳制到 `[0, trackCount-1]`），面板再按单轨 / 跨轨分别建轨并落库。
+- **建议下一轮单独做**：需要新的内核哨兵 + ghost 预览 + 建轨事务，不宜与其它项混批。
+
+### D-1b 淡变悬停 tooltip（**未做**）
+
+- 内核目前**完全没有** hover / tooltip 基础设施（grep 无命中）；旧实现靠
+  `publishFadeRichTooltip` + `data-tooltip` 挂在 DOM 命中块上。
+- 需要先决定内核的 tooltip 方案（指针位置浮层 + 富内容发布），属独立小特性。
 
 ---
 
