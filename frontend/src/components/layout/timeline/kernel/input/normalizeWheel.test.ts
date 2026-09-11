@@ -48,6 +48,13 @@ describe("normalizeWheelDelta", () => {
         expect(normalizeWheelDelta(1, 1, { lineHeightPx: 0, pageHeightPx: 0 })).toBe(16);
         expect(normalizeWheelDelta(1, 2, { lineHeightPx: 0, pageHeightPx: Number.NaN })).toBe(800);
     });
+
+    it("使用调用方提供的上下文（与回退默认不同值时也成立）", () => {
+        // 若实现把行高 / 页高写死为回退默认（16 / 800），本用例会失败。
+        const ctx = { lineHeightPx: 20, pageHeightPx: 500 };
+        expect(normalizeWheelDelta(3, 1, ctx)).toBe(60);
+        expect(normalizeWheelDelta(1, 2, ctx)).toBe(500);
+    });
 });
 
 describe("readWheelPixels", () => {

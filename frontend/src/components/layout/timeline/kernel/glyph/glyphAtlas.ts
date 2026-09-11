@@ -47,9 +47,9 @@ export interface AtlasSlot {
     readonly x: number;
     /** 槽位左上角 y（页内坐标）。 */
     readonly y: number;
-    /** 槽位宽度（等于请求宽度，不含 padding）。 */
+    /** 槽位宽度（请求宽度向上取整到整数像素；不含 padding）。 */
     readonly w: number;
-    /** 槽位高度（等于请求高度，不含 padding）。 */
+    /** 槽位高度（请求高度向上取整到整数像素；不含 padding）。 */
     readonly h: number;
 }
 
@@ -90,6 +90,10 @@ interface Page {
 /**
  * 读取一个正整数参数，非法值回退到默认。
  *
+ * 特殊说明：构造参数非法时**静默回退**而非抛错——图集在渲染热路径上创建，
+ * 抛错会让整条时间线消失；回退到最小可用值（1 页 / 1px 边长）只会让分配更快
+ * 失败，故障点可见且可控。
+ *
  * @param value 候选值。
  * @param fallback 回退值（调用方保证合法）。
  * @returns 有限且 >= 1 的整数。
@@ -112,9 +116,10 @@ function resolvePositiveInt(value: number, fallback: number): number {
  */
 export function createGlyphAtlas(options: GlyphAtlasOptions): GlyphAtlas {
     const pageSize = resolvePositiveInt(options.pageSizePx, 1);
-    const padding = Number.isFinite(options.paddingPx) && options.paddingPx > 0
-        ? Math.floor(options.paddingPx)
-        : 0;
+    const padding =
+        Number.isFinite(options.paddingPx) && options.paddingPx > 0
+            ? Math.floor(options.paddingPx)
+            : 0;
     const maxPages = resolvePositiveInt(options.maxPages, 1);
 
     const pages: Page[] = [];
@@ -135,7 +140,12 @@ export function createGlyphAtlas(options: GlyphAtlasOptions): GlyphAtlas {
      * @param h 高度。
      * @returns 槽位或 null（本页放不下）。
      */
-    function tryAllocateInPage(page: Page, pageIndex: number, w: number, h: number): AtlasSlot | null {
+    function tryAllocateInPage(
+        page: Page,
+        pageIndex: number,
+        w: number,
+        h: number,
+    ): AtlasSlot | null {
         const current = page.shelves[page.shelves.length - 1];
         if (current !== undefined && current.height >= h && current.cursorX + w <= pageSize) {
             const slot: AtlasSlot = { page: pageIndex, x: current.cursorX, y: current.y, w, h };

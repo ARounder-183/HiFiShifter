@@ -82,4 +82,45 @@ describe("glyphAtlas", () => {
         expect(atlas.allocate(10, -1)).toBeNull();
         expect(atlas.allocate(Number.NaN, 10)).toBeNull();
     });
+
+    it("起新货架时保留纵向 padding", () => {
+        const atlas = createGlyphAtlas({ pageSizePx: 64, paddingPx: 4, maxPages: 1 });
+        const a = atlas.allocate(10, 20) as AtlasSlot;
+        const b = atlas.allocate(10, 30) as AtlasSlot;
+        // 若 nextShelfY 漏加 padding，这里会得到 20（而不是 >= 24）。
+        expect(b.y - (a.y + a.h)).toBeGreaterThanOrEqual(4);
+    });
+
+    it("货架 x 溢出时换到新货架（而非新页）", () => {
+        const atlas = createGlyphAtlas({ pageSizePx: 24, paddingPx: 0, maxPages: 1 });
+        const a = atlas.allocate(20, 10) as AtlasSlot;
+        const b = atlas.allocate(20, 10) as AtlasSlot;
+        expect(a.page).toBe(0);
+        expect(b.page).toBe(0);
+        expect(b.y).toBeGreaterThan(a.y);
+        expect(disjoint(a, b)).toBe(true);
+    });
+
+    it("页数达上限后仍可复用已有页的空位", () => {
+        const atlas = createGlyphAtlas({ pageSizePx: 32, paddingPx: 0, maxPages: 1 });
+        const first = atlas.allocate(10, 10) as AtlasSlot;
+        const second = atlas.allocate(10, 10) as AtlasSlot;
+        // 若实现改成「pages.length >= maxPages 就立刻返回 null」，本用例会拿到 null。
+        expect(second.page).toBe(first.page);
+        expect(atlas.pageCount()).toBe(1);
+    });
+
+    it("小数尺寸向上取整到整数像素", () => {
+        const atlas = createGlyphAtlas({ pageSizePx: 64, paddingPx: 0, maxPages: 1 });
+        const slot = atlas.allocate(10.5, 10.2) as AtlasSlot;
+        expect(slot.w).toBe(11);
+        expect(slot.h).toBe(11);
+    });
+
+    it("非法构造参数回退到最小可用值（不抛错）", () => {
+        const atlas = createGlyphAtlas({ pageSizePx: 0, paddingPx: -1, maxPages: 0 });
+        // pageSize / maxPages 回退为 1，padding 回退为 0：1×1 图集只放得下一个 1×1。
+        expect(atlas.allocate(1, 1)).not.toBeNull();
+        expect(atlas.allocate(1, 1)).toBeNull();
+    });
 });

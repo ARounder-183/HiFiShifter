@@ -70,8 +70,8 @@ describe("glyphLayout", () => {
     });
 
     it("不同字体不共用缓存", () => {
-        const measure = vi.fn((text: string, fontKey: string) =>
-            text.length * (fontKey === "big" ? 20 : 10),
+        const measure = vi.fn(
+            (text: string, fontKey: string) => text.length * (fontKey === "big" ? 20 : 10),
         );
         const layout = createGlyphLayout(measure);
         expect(layout.layout("a", "small", 100).width).toBe(10);
@@ -84,6 +84,32 @@ describe("glyphLayout", () => {
         const run = layout.layout("abc", "12px sans", 100);
         expect(run.glyphs.map((g) => g.x)).toEqual([0, 0, 0]);
         expect(run.width).toBe(0);
+        expect(run.truncated).toBe(false);
+    });
+
+    it("按 Unicode 码点切分（代理对不拆开）", () => {
+        const layout = createGlyphLayout(measureStub(10));
+        const run = layout.layout("😀a", "12px sans", 100);
+        // 码元切分实现会得到 3 个字形（代理对被拆开），码点切分得到 2 个。
+        expect(run.glyphs.map((g) => g.char)).toEqual(["😀", "a"]);
+        // 桩按 text.length 计宽，代理对长度为 2 → 20px。
+        expect(run.glyphs[0].width).toBe(20);
+    });
+
+    it("宽度恰好等于上限时不截断（off-by-one 边界）", () => {
+        const layout = createGlyphLayout(measureStub(10));
+        const run = layout.layout("abc", "12px sans", 30);
+        // 若截断判定写成 `>=`，这里会退化成 ["a", "…"]。
+        expect(run.glyphs.map((g) => g.char)).toEqual(["a", "b", "c"]);
+        expect(run.width).toBe(30);
+        expect(run.truncated).toBe(false);
+    });
+
+    it("Infinity 上限视为不限制宽度", () => {
+        const layout = createGlyphLayout(measureStub(10));
+        const run = layout.layout("abcdef", "12px sans", Number.POSITIVE_INFINITY);
+        expect(run.glyphs).toHaveLength(6);
+        expect(run.width).toBe(60);
         expect(run.truncated).toBe(false);
     });
 });

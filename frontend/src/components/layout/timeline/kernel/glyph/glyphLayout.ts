@@ -64,7 +64,8 @@ export interface GlyphLayout {
      *
      * @param text 原始文本。
      * @param fontKey 字体标识（生产环境为 `"<fontSize>px <family>"`，可含 dpr）。
-     * @param maxWidthPx 可用宽度上限（CSS px）。
+     * @param maxWidthPx 可用宽度上限（CSS px）。`Infinity` 表示不限制宽度（完整布局）；
+     *                   `NaN` / 负值 / `-Infinity` 按 0 处理（无可绘制空间）。
      * @returns 布局结果；宽度恒不超过上限。
      */
     layout(text: string, fontKey: string, maxWidthPx: number): GlyphRun;
@@ -112,7 +113,14 @@ export function createGlyphLayout(measure: TextMeasure): GlyphLayout {
 
     return {
         layout(text, fontKey, maxWidthPx) {
-            const limit = Number.isFinite(maxWidthPx) ? Math.max(0, maxWidthPx) : 0;
+            // `Infinity` 是调用方表达「不限制宽度」的合法值（例如容器宽度尚未量出），
+            // 必须走完整布局；只有 NaN / 负值 / -Infinity 才视为「无可绘制空间」。
+            const limit =
+                maxWidthPx === Number.POSITIVE_INFINITY
+                    ? Number.POSITIVE_INFINITY
+                    : Number.isFinite(maxWidthPx)
+                      ? Math.max(0, maxWidthPx)
+                      : 0;
             const glyphs: LayoutGlyph[] = [];
             let x = 0;
             let truncated = false;
