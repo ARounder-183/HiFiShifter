@@ -164,3 +164,32 @@ describe("hitTest", () => {
         expect(result.clip.id).toBe("a1");
     });
 });
+
+describe("hitTest · clip 内局部坐标", () => {
+    it("返回以 clip 左上角为原点的局部坐标（供 header 控件级命中复用）", () => {
+        // a1 起点 1s、pxPerSec 100 → clipLeft = 100px；contentX = 200 → localX = 100
+        const result = hitTest(makeArgs({ contentX: 200, contentY: 40 }));
+        expect(result.kind).toBe("clip");
+        if (result.kind !== "clip") return;
+        expect(result.localX).toBeCloseTo(100, 5);
+        expect(result.localY).toBeCloseTo(40, 5);
+    });
+
+    it("跨行命中时局部 y 以该行顶边为原点", () => {
+        // 行 1（B 轨）：contentY = 95 → localY = 95 − 80 = 15
+        const result = hitTest(
+            makeArgs({
+                contentX: 200,
+                contentY: 95,
+                clipsByTrack: new Map([
+                    ["A", []],
+                    ["B", [{ id: "b1", trackId: "B", startSec: 1, lengthSec: 2 }]],
+                ]),
+            }),
+        );
+        expect(result.kind).toBe("clip");
+        if (result.kind !== "clip") return;
+        expect(result.localX).toBeCloseTo(100, 5);
+        expect(result.localY).toBeCloseTo(15, 5);
+    });
+});

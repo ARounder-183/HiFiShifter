@@ -78,6 +78,16 @@ export type HitResult =
           readonly region: ClipHitRegion;
           readonly sec: number;
           readonly trackIndex: number;
+          /**
+           * clip 内相对 x（以 clip **左边缘**为 0，CSS px）。
+           *
+           * 供 header 控件级命中复用（见 `clipHeaderControls`）：控件的位置常量
+           * 以 clip 左上角为原点，这里直接给出同一坐标系的值，调用方无需重算
+           * ——两处各算一次是位置漂移的常见来源。
+           */
+          readonly localX: number;
+          /** clip 内相对 y（以该 clip **顶边**为 0，CSS px）。 */
+          readonly localY: number;
       };
 
 /** 命中测试参数。 */
@@ -200,5 +210,13 @@ export function hitTest(args: HitTestArgs): HitResult {
         region = localY < headerHeightPx ? "header" : "body";
     }
 
-    return { kind: "clip", clip, region, sec, trackIndex };
+    return {
+        kind: "clip",
+        clip,
+        region,
+        sec,
+        trackIndex,
+        localX: args.contentX - clipLeftPx,
+        localY,
+    };
 }
