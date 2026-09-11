@@ -111,6 +111,46 @@ describe("hitTest", () => {
         expect(result.region).toBe("body");
     });
 
+    it("命中淡变角（body 顶部、贴左边缘）", () => {
+        // a1 = [1,3) → 内容 100..300；行高 96、header 18 → body 高 76，
+        // 保留区 = max(14, round(76/3)) = 25。y=23 → body 顶部 5px（角部带内）。
+        const result = hitTest(makeArgs({ contentX: 105, contentY: 23 }));
+        expect(result.kind).toBe("clip");
+        if (result.kind !== "clip") return;
+        expect(result.region).toBe("fade-in-corner");
+    });
+
+    it("命中淡变角（body 顶部、贴右边缘）", () => {
+        const result = hitTest(makeArgs({ contentX: 295, contentY: 23 }));
+        expect(result.kind).toBe("clip");
+        if (result.kind !== "clip") return;
+        expect(result.region).toBe("fade-out-corner");
+    });
+
+    it("body 深处贴左边缘 → trim 而非淡变角（按竖直方向切分）", () => {
+        // 注意 makeArgs 的 rowHeight = 80（不是 96）：y 必须留在第 0 轨内。
+        // body 高 = 80 − 2 − 18 = 60 → 保留区 = max(14, 20) = 20；y=60 → body 内 42px。
+        const result = hitTest(makeArgs({ contentX: 105, contentY: 60 }));
+        expect(result.kind).toBe("clip");
+        if (result.kind !== "clip") return;
+        expect(result.region).toBe("left-edge");
+    });
+
+    it("header 内且不贴边缘 → header（角部只在 body 顶部）", () => {
+        // x=120 距左边缘 20px：不触发 trim 边缘（6px），且 y 在 header 内（角部带之外）。
+        const result = hitTest(makeArgs({ contentX: 120, contentY: 5 }));
+        expect(result.kind).toBe("clip");
+        if (result.kind !== "clip") return;
+        expect(result.region).toBe("header");
+    });
+
+    it("header 内贴边缘 → 仍判边缘（边缘优先于 header）", () => {
+        const result = hitTest(makeArgs({ contentX: 105, contentY: 5 }));
+        expect(result.kind).toBe("clip");
+        if (result.kind !== "clip") return;
+        expect(result.region).toBe("left-edge");
+    });
+
     it("时间换算按 pxPerSec，且负数钳制到 0", () => {
         const result = hitTest(makeArgs({ contentX: -50, contentY: 40 }));
         expect(result.sec).toBe(0);

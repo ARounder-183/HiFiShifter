@@ -208,6 +208,8 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
             onDragCommit: (args) => interactionsRef.current?.onDragCommit?.(args),
             onTrimPreview: (args) => interactionsRef.current?.onTrimPreview?.(args),
             onTrimCommit: (args) => interactionsRef.current?.onTrimCommit?.(args),
+            onFadePreview: (args) => interactionsRef.current?.onFadePreview?.(args),
+            onFadeCommit: (args) => interactionsRef.current?.onFadeCommit?.(args),
         }),
         [],
     );

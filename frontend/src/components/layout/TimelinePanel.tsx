@@ -1306,6 +1306,66 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         [dispatch],
     );
 
+    /** 内核淡变角：按下时的原始值（用于回滚）。 */
+    const kernelFadeOriginRef = React.useRef<{
+        clipId: string;
+        fadeInSec: number;
+        fadeOutSec: number;
+    } | null>(null);
+
+    /** 内核淡变角预览：只改对应一侧的淡变长度（另一侧保持不变）。 */
+    const handleKernelFadePreview = React.useCallback(
+        (args: { clipId: string; side: "in" | "out"; fadeSec: number; deltaSec: number }) => {
+            if (kernelFadeOriginRef.current?.clipId !== args.clipId) {
+                const clip = sessionRef.current.clips.find((item) => item.id === args.clipId);
+                if (clip === undefined) return;
+                kernelFadeOriginRef.current = {
+                    clipId: clip.id,
+                    fadeInSec: clip.fadeInSec,
+                    fadeOutSec: clip.fadeOutSec,
+                };
+            }
+            dispatch(
+                setClipFades(
+                    args.side === "in"
+                        ? { clipId: args.clipId, fadeInSec: args.fadeSec }
+                        : { clipId: args.clipId, fadeOutSec: args.fadeSec },
+                ),
+            );
+        },
+        [dispatch, sessionRef],
+    );
+
+    /** 内核淡变角收尾：提交或回滚（取消时两侧一起还原）。 */
+    const handleKernelFadeCommit = React.useCallback(
+        (args: { clipId: string; side: "in" | "out"; fadeSec: number; cancelled: boolean }) => {
+            const origin = kernelFadeOriginRef.current;
+            kernelFadeOriginRef.current = null;
+            if (origin === null) return;
+            if (args.cancelled) {
+                dispatch(
+                    setClipFades({
+                        clipId: origin.clipId,
+                        fadeInSec: origin.fadeInSec,
+                        fadeOutSec: origin.fadeOutSec,
+                    }),
+                );
+                return;
+            }
+            dispatch(checkpointHistory());
+            void dispatch(
+                setClipsStateBulkRemote({
+                    updates: [
+                        args.side === "in"
+                            ? { clipId: args.clipId, fadeInSec: args.fadeSec }
+                            : { clipId: args.clipId, fadeOutSec: args.fadeSec },
+                    ],
+                }),
+            );
+        },
+        [dispatch],
+    );
+
     /** 内核交互回调集合（引用稳定：内核创建时取一次）。 */
     const kernelInteractions = React.useMemo(
         () => ({
@@ -1315,6 +1375,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             onDragCommit: handleKernelDragCommit,
             onTrimPreview: handleKernelTrimPreview,
             onTrimCommit: handleKernelTrimCommit,
+            onFadePreview: handleKernelFadePreview,
+            onFadeCommit: handleKernelFadeCommit,
         }),
         [
             handleKernelSeek,
@@ -1323,6 +1385,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             handleKernelDragCommit,
             handleKernelTrimPreview,
             handleKernelTrimCommit,
+            handleKernelFadePreview,
+            handleKernelFadeCommit,
         ],
     );
 

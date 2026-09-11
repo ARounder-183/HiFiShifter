@@ -22,6 +22,8 @@
  *    两个 clip 在交界处只命中右侧那个，与旧实现的 DOM 层叠顺序一致。
  */
 
+import { FADE_CORNER_CAP_WIDTH_PX, fadeCornerReservePx } from "../../constants";
+
 /** 左右边缘的默认命中宽度（CSS px）。与 `FADE_CORNER_EDGE_WIDTH_PX` 同量级。 */
 const DEFAULT_EDGE_WIDTH_PX = 6;
 
@@ -41,11 +43,21 @@ export interface HitTestTrack {
 /**
  * clip 内的命中分区。
  *
- * 边缘分区（`left-edge` / `right-edge`）供 trim 手势使用；它们**优先于**
- * header / body 判定——边缘是"窄条"，若让 header 先判，靠上的边缘会被 header 抢走，
- * 表现为"顶部的 trim 手柄点不动"。
+ * 判定优先级：**淡变角 → trim 边缘 → header → body**。
+ *
+ * - 淡变角（`fade-in-corner` / `fade-out-corner`）与 trim 边缘在水平方向**重叠**
+ *   （都贴着左右边缘），靠**竖直方向切分**：body 顶部 `fadeCornerReservePx` 高度内
+ *   归淡变角，其下归 trim——与既有 `constants.fadeCornerReservePx` 的几何切分一致。
+ * - 边缘优先于 header / body：边缘是"窄条"，若让 header 先判，靠上的手柄会被
+ *   header 抢走（表现为"顶部的 trim 手柄点不动"）。
  */
-export type ClipHitRegion = "header" | "body" | "left-edge" | "right-edge";
+export type ClipHitRegion =
+    | "header"
+    | "body"
+    | "left-edge"
+    | "right-edge"
+    | "fade-in-corner"
+    | "fade-out-corner";
 
 /** 命中结果。 */
 export type HitResult =
@@ -164,8 +176,23 @@ export function hitTest(args: HitTestArgs): HitResult {
         : DEFAULT_EDGE_WIDTH_PX;
     const edgeWidthPx = Math.min(rawEdgeWidthPx, clipWidthPx / 3);
 
+    // 淡变角与 trim 边缘在水平方向重叠，靠**竖直方向**切分（见 ClipHitRegion 注释）：
+    // body 顶部 `fadeCornerReservePx` 高度内、且水平落在角部横帽宽度内 → 淡变角。
+    // clip 高度按「行高 − 上下 padding」近似（绘制端同样留 1px 边距）。
+    const clipHeightPx = Math.max(1, rowHeight - 2);
+    const bodyHeightPx = Math.max(1, clipHeightPx - headerHeightPx);
+    const reservePx = fadeCornerReservePx(bodyHeightPx);
+    const localBodyY = localY - headerHeightPx;
+    const inCornerBand = localBodyY >= 0 && localBodyY < reservePx;
+    const nearLeftCorner = args.contentX - clipLeftPx <= FADE_CORNER_CAP_WIDTH_PX;
+    const nearRightCorner = clipRightPx - args.contentX <= FADE_CORNER_CAP_WIDTH_PX;
+
     let region: ClipHitRegion;
-    if (args.contentX - clipLeftPx <= edgeWidthPx) {
+    if (inCornerBand && nearLeftCorner) {
+        region = "fade-in-corner";
+    } else if (inCornerBand && nearRightCorner) {
+        region = "fade-out-corner";
+    } else if (args.contentX - clipLeftPx <= edgeWidthPx) {
         region = "left-edge";
     } else if (clipRightPx - args.contentX <= edgeWidthPx) {
         region = "right-edge";

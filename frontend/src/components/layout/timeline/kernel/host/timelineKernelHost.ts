@@ -63,8 +63,10 @@ import {
 import { hitTest, type ClipHitRegion, type HitTestClip } from "../interaction/hitTest";
 import {
     resolveDragDelta,
+    resolveFadeDrag,
     resolveTargetTrackIndex,
     resolveTrimEdge,
+    type FadeSide,
     type TrimEdge,
 } from "../interaction/dragGeometry";
 import { createGlCanvas } from "../gl/glContext";
@@ -266,6 +268,28 @@ export interface TimelineKernelInteractions {
         readonly edge: TrimEdge;
         readonly startSec: number;
         readonly lengthSec: number;
+        readonly cancelled: boolean;
+    }) => void;
+    /**
+     * 淡变角预览（拖拽角部时每帧回调，已按值去重）。
+     *
+     * @param args 新的淡变长度（已钳制到 `[0, clip 长度]`）。
+     */
+    readonly onFadePreview?: (args: {
+        readonly clipId: string;
+        readonly side: FadeSide;
+        readonly fadeSec: number;
+        readonly deltaSec: number;
+    }) => void;
+    /**
+     * 淡变角结束。
+     *
+     * @param args 最终长度；`cancelled = true` 时调用方应回滚。
+     */
+    readonly onFadeCommit?: (args: {
+        readonly clipId: string;
+        readonly side: FadeSide;
+        readonly fadeSec: number;
         readonly cancelled: boolean;
     }) => void;
 }
@@ -1207,6 +1231,18 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
               originStartSec: number;
               originTrackId: string;
               lengthSec: number;
+              /** 按下时的淡变长度（按 region 取对应侧；非淡变角为 0）。 */
+              originFadeSec: number;
+          }
+        | {
+              kind: "clip-fade";
+              clipId: string;
+              side: FadeSide;
+              startContentX: number;
+              originFadeSec: number;
+              lengthSec: number;
+              lastDeltaSec: number;
+              lastFadeSec: number;
           }
         | {
               kind: "clip-trim";
@@ -1315,6 +1351,18 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         if (hit.kind === "clip") {
             const rect = container.getBoundingClientRect();
             const view = scroll.get();
+            // 淡变角需要当前的淡变长度：命中索引只带几何字段，这里按 region
+            // 决定取哪一侧，避免把手势升级时的分支判断散落到多处。
+            const fadeSide: FadeSide | null =
+                hit.region === "fade-in-corner"
+                    ? "in"
+                    : hit.region === "fade-out-corner"
+                      ? "out"
+                      : null;
+            const clipInfo =
+                fadeSide === null
+                    ? undefined
+                    : data().clips.find((item) => item.id === hit.clip.id);
             gesture = {
                 kind: "pending-select",
                 startClientX: event.clientX,
@@ -1326,6 +1374,12 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 originStartSec: hit.clip.startSec,
                 originTrackId: hit.clip.trackId,
                 lengthSec: hit.clip.lengthSec,
+                originFadeSec:
+                    fadeSide === "in"
+                        ? (clipInfo?.fadeInSec ?? 0)
+                        : fadeSide === "out"
+                          ? (clipInfo?.fadeOutSec ?? 0)
+                          : 0,
             };
         } else {
             gesture = { kind: "seek" };
@@ -1348,7 +1402,23 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             const dx = event.clientX - gesture.startClientX;
             const dy = event.clientY - gesture.startClientY;
             if (dx * dx + dy * dy < DRAG_THRESHOLD_PX * DRAG_THRESHOLD_PX) return;
-            // 超过阈值：按按下时的命中分区升级——边缘 → trim，其余 → 拖拽移动。
+            // 超过阈值：按按下时的命中分区升级——淡变角 → fade、边缘 → trim、
+            // 其余 → 拖拽移动。淡变角与边缘在水平方向重叠，命中层已按竖直方向
+            // 切分（见 hitTest 的 ClipHitRegion 注释），这里只需按 region 分派。
+            if (gesture.region === "fade-in-corner" || gesture.region === "fade-out-corner") {
+                gesture = {
+                    kind: "clip-fade",
+                    clipId: gesture.clipId,
+                    side: gesture.region === "fade-in-corner" ? "in" : "out",
+                    startContentX: gesture.startContentX,
+                    originFadeSec: gesture.originFadeSec,
+                    lengthSec: gesture.lengthSec,
+                    lastDeltaSec: Number.NaN,
+                    lastFadeSec: gesture.originFadeSec,
+                };
+                applyFadePreview(event);
+                return;
+            }
             const isEdge = gesture.region === "left-edge" || gesture.region === "right-edge";
             if (isEdge) {
                 gesture = {
@@ -1381,6 +1451,10 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         }
         if (gesture.kind === "clip-trim") {
             applyTrimPreview(event);
+            return;
+        }
+        if (gesture.kind === "clip-fade") {
+            applyFadePreview(event);
             return;
         }
         if (gesture.kind === "clip-drag") {
@@ -1420,6 +1494,38 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             edge: gesture.edge,
             startSec: result.startSec,
             lengthSec: result.lengthSec,
+            deltaSec: result.deltaSec,
+        });
+    }
+
+    /**
+     * 计算并派发一次淡变角预览（拖拽角部期间每帧调用）。
+     *
+     * 流程：内容坐标位移 → `resolveFadeDrag`（方向按侧翻转 + 钳制到 clip 长度）
+     * → 与上次值比较去重 → 回调。
+     *
+     * @param event 指针事件。
+     * @returns 无返回值。
+     */
+    function applyFadePreview(event: PointerEvent): void {
+        if (gesture.kind !== "clip-fade") return;
+        const rect = container.getBoundingClientRect();
+        const view = scroll.get();
+        const contentX = view.scrollLeft + (event.clientX - rect.left);
+        const result = resolveFadeDrag({
+            side: gesture.side,
+            deltaContentXPx: contentX - gesture.startContentX,
+            pxPerSec: view.pxPerSec,
+            currentSec: gesture.originFadeSec,
+            lengthSec: gesture.lengthSec,
+        });
+        if (result.deltaSec === gesture.lastDeltaSec) return;
+        gesture.lastDeltaSec = result.deltaSec;
+        gesture.lastFadeSec = result.fadeSec;
+        interactions?.onFadePreview?.({
+            clipId: gesture.clipId,
+            side: gesture.side,
+            fadeSec: result.fadeSec,
             deltaSec: result.deltaSec,
         });
     }
@@ -1488,6 +1594,14 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 edge: gesture.edge,
                 startSec: gesture.lastStartSec,
                 lengthSec: gesture.lastLengthSec,
+                cancelled,
+            });
+        }
+        if (gesture.kind === "clip-fade") {
+            interactions?.onFadeCommit?.({
+                clipId: gesture.clipId,
+                side: gesture.side,
+                fadeSec: gesture.lastFadeSec,
                 cancelled,
             });
         }
@@ -1674,6 +1788,17 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                         edge: gesture.edge,
                         startSec: gesture.lastStartSec,
                         lengthSec: gesture.lastLengthSec,
+                        cancelled: true,
+                    });
+                    gesture = { kind: "none" };
+                    break;
+                }
+                if (gesture.kind === "clip-fade") {
+                    event.preventDefault();
+                    interactions?.onFadeCommit?.({
+                        clipId: gesture.clipId,
+                        side: gesture.side,
+                        fadeSec: gesture.lastFadeSec,
                         cancelled: true,
                     });
                     gesture = { kind: "none" };

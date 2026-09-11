@@ -136,6 +136,53 @@ export function resolveTrimEdge(args: TrimEdgeArgs): TrimEdgeResult {
     return { startSec, lengthSec: nextLength, deltaSec: nextLength - lengthSec };
 }
 
+/** 淡变的侧。 */
+export type FadeSide = "in" | "out";
+
+/** 淡变角拖拽参数。 */
+export interface FadeDragArgs {
+    readonly side: FadeSide;
+    /** 指针相对按下位置的水平位移（内容坐标 CSS px，右为正）。 */
+    readonly deltaContentXPx: number;
+    readonly pxPerSec: number;
+    /** 按下时的淡变长度（秒）。 */
+    readonly currentSec: number;
+    /** clip 长度（秒）：淡变不能长于 clip 本身。 */
+    readonly lengthSec: number;
+}
+
+/** 淡变角拖拽结果。 */
+export interface FadeDragResult {
+    /** 新的淡变长度（秒）。 */
+    readonly fadeSec: number;
+    /** 实际生效的变化量（秒）。 */
+    readonly deltaSec: number;
+}
+
+/**
+ * 把淡变角拖拽位移换算为新的淡变长度。
+ *
+ * 方向约定（与既有实现一致）：
+ * - **淡入角**（clip 左边缘）：向右拖 = 变长、向左拖 = 变短；
+ * - **淡出角**（clip 右边缘）：向左拖 = 变长、向右拖 = 变短。
+ *
+ * 两者都钳制到 `[0, lengthSec]`——淡变长于 clip 没有意义，且会让绘制端的
+ * 曲线超出矩形。
+ *
+ * @param args 换算参数。
+ * @returns 新的淡变长度与实际变化量。
+ */
+export function resolveFadeDrag(args: FadeDragArgs): FadeDragResult {
+    const pxPerSec = Number.isFinite(args.pxPerSec) && args.pxPerSec > 0 ? args.pxPerSec : 0;
+    const rawDelta = pxPerSec > 0 ? args.deltaContentXPx / pxPerSec : 0;
+    const lengthSec = Number.isFinite(args.lengthSec) ? Math.max(0, args.lengthSec) : 0;
+    const baseSec = Number.isFinite(args.currentSec) ? Math.max(0, args.currentSec) : 0;
+    // 淡出角的"向外"方向与淡入相反（在右边缘向左拖才是变长）。
+    const signedDelta = args.side === "in" ? rawDelta : -rawDelta;
+    const fadeSec = Math.min(lengthSec, Math.max(0, baseSec + signedDelta));
+    return { fadeSec, deltaSec: fadeSec - baseSec };
+}
+
 /**
  * 把内容坐标的纵向位置换算为目标轨道下标。
  *

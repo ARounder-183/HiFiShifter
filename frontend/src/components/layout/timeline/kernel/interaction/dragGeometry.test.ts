@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { resolveDragDelta, resolveTargetTrackIndex, resolveTrimEdge } from "./dragGeometry";
+import {
+    resolveDragDelta,
+    resolveFadeDrag,
+    resolveTargetTrackIndex,
+    resolveTrimEdge,
+} from "./dragGeometry";
 
 describe("resolveDragDelta", () => {
     it("按 pxPerSec 把水平位移换算为秒", () => {
@@ -110,6 +115,42 @@ describe("resolveTrimEdge", () => {
     it("右边缘延长不越过工程末端", () => {
         const out = resolveTrimEdge({ ...base, edge: "right", deltaContentXPx: 100000 });
         expect(out.startSec + out.lengthSec).toBeCloseTo(60, 6);
+    });
+});
+
+describe("resolveFadeDrag", () => {
+    const base = { pxPerSec: 100, currentSec: 0.5, lengthSec: 4 } as const;
+
+    it("淡入角向右拖 = 变长", () => {
+        const out = resolveFadeDrag({ ...base, side: "in", deltaContentXPx: 100 });
+        expect(out.fadeSec).toBeCloseTo(1.5, 6);
+        expect(out.deltaSec).toBeCloseTo(1, 6);
+    });
+
+    it("淡入角向左拖 = 变短，且不小于 0", () => {
+        const out = resolveFadeDrag({ ...base, side: "in", deltaContentXPx: -1000 });
+        expect(out.fadeSec).toBe(0);
+    });
+
+    it("淡出角向左拖 = 变长（方向与淡入相反）", () => {
+        const out = resolveFadeDrag({ ...base, side: "out", deltaContentXPx: -100 });
+        expect(out.fadeSec).toBeCloseTo(1.5, 6);
+    });
+
+    it("淡出角向右拖 = 变短", () => {
+        const out = resolveFadeDrag({ ...base, side: "out", deltaContentXPx: 100 });
+        expect(out.fadeSec).toBe(0);
+    });
+
+    it("淡变不长于 clip 本身", () => {
+        const out = resolveFadeDrag({ ...base, side: "in", deltaContentXPx: 100000 });
+        expect(out.fadeSec).toBe(4);
+    });
+
+    it("pxPerSec 非法时不产生 NaN", () => {
+        const out = resolveFadeDrag({ ...base, side: "in", deltaContentXPx: 100, pxPerSec: 0 });
+        expect(Number.isFinite(out.fadeSec)).toBe(true);
+        expect(out.fadeSec).toBeCloseTo(0.5, 6);
     });
 });
 
