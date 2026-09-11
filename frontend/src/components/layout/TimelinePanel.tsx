@@ -63,7 +63,11 @@ import {
     checkpointHistory,
     setClipLength,
     setClipSourceRange,
+    setClipSnapOffset,
+    beginInteraction,
+    endInteraction,
 } from "../../features/session/sessionSlice";
+import { beginSnapGesture, endSnapGesture } from "../../utils/timelineSnapping";
 import { batch } from "react-redux";
 import { moveClipsRemote } from "../../features/session/thunks/timelineThunks";
 import { computeTimelineRectSelection } from "./timeline/useTimelineSelectionRect";
@@ -1345,6 +1349,100 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     );
 
     /** 内核 trim 收尾：提交或回滚（取消时三个字段一起还原）。 */
+    /**
+     * 内核吸附偏移手势是否已真正开始。
+     *
+     * 预览回调每帧触发，但 `beginInteraction` / `checkpointHistory` /
+     * `beginSnapGesture` 只能做一次——用这个 ref 去重，同时给收尾一个
+     * 「零位移单击」的判据（旧实现用 `drag.checkpointed`）。
+     */
+    const kernelSnapOffsetActiveRef = React.useRef(false);
+
+    /**
+     * 内核吸附偏移预览：与旧实现 `useSnapOffsetDrag` 同源。
+     *
+     * 被吸附对象是**手柄的绝对时间线位置**（`clipStart + offset`）——不是 clip 起点；
+     * 高亮发布为该 clip 所在行的亮条。落库前把偏移钳制到 `[0, clip 长度]`。
+     *
+     * 说明：与内核既有的拖拽 / trim 预览一致，这里只读 `s.snapEnabled`，不处理
+     * 「拖拽中按住免吸附修饰键」——那是内核所有手势共有的缺口，应统一补。
+     */
+    const handleKernelSnapOffsetPreview = React.useCallback(
+        (args: { clipId: string; rawOffsetSec: number }) => {
+            const clip = sessionRef.current.clips.find((item) => item.id === args.clipId);
+            if (clip === undefined) return;
+            const clipStart = Number(clip.startSec) || 0;
+            const clipLen = Math.max(0, Number(clip.lengthSec) || 0);
+            if (!kernelSnapOffsetActiveRef.current) {
+                // 首次真实位移：交互锁 + undo 检查点 + 吸附手势一起开。
+                kernelSnapOffsetActiveRef.current = true;
+                dispatch(beginInteraction());
+                dispatch(checkpointHistory());
+                beginSnapGesture();
+            }
+            const rawAbs = clipStart + args.rawOffsetSec;
+            const nextAbs = s.snapEnabled
+                ? snapTimelineDetailed(rawAbs, "clip", {
+                      originSec: clipStart + (Number(clip.snapOffsetSec) || 0),
+                      anchorTrackId: clip.trackId,
+                      excludeClipIds: new Set([args.clipId]),
+                      highlight: {
+                          sources: [{ trackId: clip.trackId, clipId: args.clipId }],
+                      },
+                  }).sec
+                : rawAbs;
+            if (!s.snapEnabled) clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+            dispatch(
+                setClipSnapOffset({
+                    clipId: args.clipId,
+                    snapOffsetSec: Math.min(Math.max(nextAbs - clipStart, 0), clipLen),
+                }),
+            );
+        },
+        [dispatch, s.snapEnabled, snapTimelineDetailed],
+    );
+
+    /**
+     * 内核吸附偏移收尾。
+     *
+     * 零位移单击**不写后端**（与旧实现一致：单击不产生 undo 步）；真实拖拽则
+     * 一次性持久化当前乐观值（`checkpoint: true` → 整次拖拽恰好一个撤销步）。
+     */
+    const handleKernelSnapOffsetCommit = React.useCallback(
+        (args: { clipId: string; cancelled: boolean; changed: boolean }) => {
+            const wasActive = kernelSnapOffsetActiveRef.current;
+            kernelSnapOffsetActiveRef.current = false;
+            clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+            // 手势从未真正开始（零位移单击）：begin* 都没调用过，不能 end*。
+            if (!wasActive) return;
+            endSnapGesture();
+            if (args.cancelled || !args.changed) {
+                dispatch(endInteraction());
+                return;
+            }
+            const clip = sessionRef.current.clips.find((item) => item.id === args.clipId);
+            const clipLen = Math.max(0, Number(clip?.lengthSec) || 0);
+            void dispatch(
+                setClipStateRemote({
+                    clipId: args.clipId,
+                    snapOffsetSec: Math.min(
+                        Math.max(Number(clip?.snapOffsetSec) || 0, 0),
+                        clipLen,
+                    ),
+                    checkpoint: true,
+                }),
+            )
+                .unwrap()
+                .catch(() => {
+                    // 失败不产生 unhandled rejection；交互锁仍需释放。
+                })
+                .finally(() => {
+                    dispatch(endInteraction());
+                });
+        },
+        [dispatch],
+    );
+
     const handleKernelTrimCommit = React.useCallback(
         (args: {
             clipId: string;
@@ -1836,6 +1934,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             onTrimCommit: handleKernelTrimCommit,
             onFadePreview: handleKernelFadePreview,
             onFadeCommit: handleKernelFadeCommit,
+            onSnapOffsetPreview: handleKernelSnapOffsetPreview,
+            onSnapOffsetCommit: handleKernelSnapOffsetCommit,
             onBoxSelectPreview: handleKernelBoxSelectPreview,
             onBoxSelectCommit: handleKernelBoxSelectCommit,
             onContextMenu: handleKernelContextMenu,
@@ -1849,6 +1949,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             handleKernelTrimCommit,
             handleKernelFadePreview,
             handleKernelFadeCommit,
+            handleKernelSnapOffsetPreview,
+            handleKernelSnapOffsetCommit,
             handleKernelBoxSelectPreview,
             handleKernelBoxSelectCommit,
             handleKernelContextMenu,

@@ -299,6 +299,9 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
             onCrossfadeGripPreview: (args) =>
                 interactionsRef.current?.onCrossfadeGripPreview?.(args),
             onCrossfadeGripCommit: (args) => interactionsRef.current?.onCrossfadeGripCommit?.(args),
+            onSnapOffsetPreview: (args) =>
+                interactionsRef.current?.onSnapOffsetPreview?.(args),
+            onSnapOffsetCommit: (args) => interactionsRef.current?.onSnapOffsetCommit?.(args),
             onFadeShapeCycle: (clipId, side) =>
                 interactionsRef.current?.onFadeShapeCycle?.(clipId, side),
             onCrossfadeCycle: (sides) => interactionsRef.current?.onCrossfadeCycle?.(sides),

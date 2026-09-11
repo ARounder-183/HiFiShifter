@@ -424,6 +424,33 @@ export interface TimelineKernelInteractions {
      *
      * @param args 新的淡变长度（已钳制到 `[0, clip 长度]`）。
      */
+    /**
+     * 吸附偏移拖拽预览（拖拽期间每次位移回调，已按值去重）。
+     *
+     * 【为什么只给几何】吸附规则（网格 / 其他 clip 边缘与偏移 / 播放光标）与
+     * 高亮发布都在面板侧（`snapTimelineDetailed`）。内核不复制这套规则——与
+     * `onDragPreview` 同一架构约定：内核只做手势，语义交回面板。
+     *
+     * @param args `rawOffsetSec` 是**未吸附**的目标偏移，可能为负或超过 clip
+     *             长度；调用方负责吸附与钳制后再写入。
+     */
+    readonly onSnapOffsetPreview?: (args: {
+        readonly clipId: string;
+        readonly rawOffsetSec: number;
+    }) => void;
+    /**
+     * 吸附偏移拖拽结束。
+     *
+     * @param args `cancelled = true` 时调用方应回滚；`changed = false` 表示
+     *             零位移单击——调用方**不应**写后端（与旧实现同一语义：单击不
+     *             产生 undo 步）。最终值由调用方从自身状态读取（拖拽期间已乐观
+     *             收敛），内核不代传，避免两份"最终值"。
+     */
+    readonly onSnapOffsetCommit?: (args: {
+        readonly clipId: string;
+        readonly cancelled: boolean;
+        readonly changed: boolean;
+    }) => void;
     readonly onFadePreview?: (args: {
         readonly clipId: string;
         readonly side: FadeSide;
@@ -1198,6 +1225,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 trackId: clip.trackId,
                 startSec: clip.startSec,
                 lengthSec: clip.lengthSec,
+                // 吸附偏移：**`hitTest` 会消费它**（SnapOffset 手柄的命中区左缘
+                // 跟随该值），与下方纯透传的业务字段不同，必须随几何一起更新。
+                snapOffsetSec: clip.snapOffsetSec,
                 // 以下字段 `hitTest` 本身不消费，只做透传：header 控件级命中需要
                 // 它们构造 `buildTimelineClipVisualStyle`（与绘制端同一份样式）。
                 muted: clip.muted,
@@ -1581,6 +1611,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
               lengthSec: number;
               /** 按下时的淡变长度（按 region 取对应侧；非淡变角为 0）。 */
               originFadeSec: number;
+              /** 按下时的吸附偏移（秒；非 snap 手柄为 0）。 */
+              originSnapOffsetSec: number;
               /**
                * 交叉点抓手的前一个 clip id。
                *
@@ -1615,6 +1647,22 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
               startContentX: number;
               /** 上一次预览的位移（去重：相同位移不重复派发）。 */
               lastDeltaSec: number;
+          }
+        | {
+              kind: "snap-offset-drag";
+              clipId: string;
+              startContentX: number;
+              /** 按下时的吸附偏移（秒）。 */
+              originOffsetSec: number;
+              /** clip 长度（面板用它钳制；内核只给几何）。 */
+              lengthSec: number;
+              /**
+               * 最近一次派发的**未吸附**偏移（去重）。
+               *
+               * 初值 `NaN`：收尾时据此判断是否发生过真实位移——零位移单击
+               * 不应写后端（与旧实现 `checkpointed` 标志同一语义）。
+               */
+              lastOffsetSec: number;
           }
         | {
               kind: "box-select";
@@ -2172,6 +2220,12 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                         : fadeSide === "out"
                           ? (clipInfo?.fadeOutSec ?? 0)
                           : 0,
+                // 吸附偏移直接取命中索引里的值（与 hitTest 判定手柄位置用的是
+                // 同一份数据，不另查一次 `data().clips`——两份来源迟早漂移）。
+                originSnapOffsetSec:
+                    hit.region === "snap-offset-handle"
+                        ? Math.max(0, Number(hit.clip.snapOffsetSec) || 0)
+                        : 0,
             };
         } else {
             gesture = { kind: "seek" };
@@ -2215,6 +2269,10 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                     break;
                 case "fade-out-corner":
                     cursor = "nesw-resize";
+                    break;
+                case "snap-offset-handle":
+                    // 与旧实现的握把一致（`ClipItem` 的 SnapOffset 命中区）。
+                    cursor = "ew-resize";
                     break;
                 default:
                     // body / header / 重叠区控件：保持 default（见上方说明）。
@@ -2272,6 +2330,20 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                     lastDeltaSec: Number.NaN,
                 };
                 applyCrossfadeGripPreview(event);
+                return;
+            }
+            // SnapOffset 手柄：优先级仅次于交叉点抓手（旧实现 z-400 抓手 >
+            // z-70 手柄 > z-65 淡变角 > z-60 边缘）。
+            if (gesture.region === "snap-offset-handle") {
+                gesture = {
+                    kind: "snap-offset-drag",
+                    clipId: gesture.clipId,
+                    startContentX: gesture.startContentX,
+                    originOffsetSec: gesture.originSnapOffsetSec,
+                    lengthSec: gesture.lengthSec,
+                    lastOffsetSec: Number.NaN,
+                };
+                applySnapOffsetPreview(event);
                 return;
             }
             // 超过阈值：按按下时的命中分区升级——淡变角 → fade、边缘 → trim、
@@ -2435,6 +2507,26 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     }
 
     /**
+     * 计算并派发一次吸附偏移预览（拖拽期间每帧调用）。
+     *
+     * 与旧实现同源：位移按 `pxPerSec` 换算为秒，叠加在按下时的偏移上。**不在此处
+     * 吸附、也不钳制**——吸附引擎与边界都在面板侧（见 `onSnapOffsetPreview`）。
+     *
+     * @param event 指针事件。
+     */
+    function applySnapOffsetPreview(event: PointerEvent): void {
+        if (gesture.kind !== "snap-offset-drag") return;
+        const rect = container.getBoundingClientRect();
+        const view = scroll.get();
+        const contentX = view.scrollLeft + (event.clientX - rect.left);
+        const deltaSec = (contentX - gesture.startContentX) / Math.max(1e-9, view.pxPerSec);
+        const rawOffsetSec = gesture.originOffsetSec + deltaSec;
+        if (rawOffsetSec === gesture.lastOffsetSec) return;
+        gesture.lastOffsetSec = rawOffsetSec;
+        interactions?.onSnapOffsetPreview?.({ clipId: gesture.clipId, rawOffsetSec });
+    }
+
+    /**
      * 计算并派发一次拖拽预览（拖拽期间每帧调用）。
      *
      * 流程：内容坐标位移 → `resolveDragDelta`（时间位移 + 边界钳制）→
@@ -2520,6 +2612,15 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 cancelled,
             });
         }
+        if (gesture.kind === "snap-offset-drag") {
+            interactions?.onSnapOffsetCommit?.({
+                clipId: gesture.clipId,
+                cancelled,
+                // 零位移单击：`lastOffsetSec` 从未被赋值（NaN）→ 未发生真实位移。
+                // 与旧实现一致：单击不写后端、不产生 undo 步。
+                changed: Number.isFinite(gesture.lastOffsetSec),
+            });
+        }
         if (gesture.kind === "box-select") {
             // 未超过阈值（右键单击）不提交：交给 contextmenu 弹菜单。
             if (gesture.active) {
@@ -2532,7 +2633,10 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             boxSelectEl.style.display = "none";
         }
         if (gesture.kind === "pending-select" && !cancelled) {
-            if (gesture.cycleHeld === true) {
+            if (gesture.region === "snap-offset-handle") {
+                // 手柄上的单击**不改选中**：旧实现的握把在 pointerdown 里
+                // `stopPropagation`，点击不会落到 clip 上——只有拖动才有意义。
+            } else if (gesture.cycleHeld === true) {
                 // 循环修饰键 + 未超过拖拽阈值（= 单击）→ 切换淡变形状。
                 // 不派发选中：循环点击是编辑操作，不是选择操作（旧实现同样不选中）。
                 if (gesture.region === "crossfade-grip") {
