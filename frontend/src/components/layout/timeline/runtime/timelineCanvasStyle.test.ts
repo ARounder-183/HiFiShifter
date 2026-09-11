@@ -204,3 +204,37 @@ test("parsePlaybackRateInput rejects invalid input", () => {
     check("0", "zero");
     check("NaN", "NaN literal");
 });
+
+test("buildTimelineClipVisualStyle exposes label pixel widths", () => {
+    function assert(condition: boolean, label: string): void {
+        if (!condition) throw new Error(label);
+    }
+    const base = {
+        widthPx: 300,
+        trackColor: "#ff7a00",
+        selected: false,
+        muted: false,
+        gain: 0,
+        playbackRate: 1,
+        name: "Take 1",
+    };
+
+    // 命中测试（clipHeaderControls）需要标签像素宽度：必须由样式解析统一给出，
+    // 否则命中端会另写一份测量，与绘制端随时间漂移。
+    const style = buildTimelineClipVisualStyle(base);
+    assert(typeof style.gainLabelWidth === "number", "gainLabelWidth 应为数字");
+    assert(style.gainLabelWidth > 0, "gainLabelWidth 应大于 0");
+    assert(typeof style.rateLabelWidth === "number", "rateLabelWidth 应为数字");
+    assert(style.rateLabelWidth > 0, "速率 = 1 时 rateLabelWidth 仍应大于 0");
+
+    // 宽度随文本变长而增大（确认测量真的用了当前标签文案）。
+    const longer = buildTimelineClipVisualStyle({ ...base, gain: -11.5 });
+    assert(
+        longer.gainLabelWidth > style.gainLabelWidth,
+        "增益文案变长时 gainLabelWidth 应增大",
+    );
+
+    // 窄 clip 隐藏标签时宽度归零（与 trailingReservePx 的既有语义一致）。
+    const narrow = buildTimelineClipVisualStyle({ ...base, widthPx: 40 });
+    assert(narrow.gainLabelWidth === 0, "标签不可见时 gainLabelWidth 应为 0");
+});

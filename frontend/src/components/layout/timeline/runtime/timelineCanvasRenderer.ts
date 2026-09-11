@@ -708,11 +708,12 @@ export function drawTimelineCanvas(
             ctx.fillStyle = style.textFill;
             ctx.font = `10px ${fontFamily}`;
             ctx.textBaseline = "middle";
-            const metrics = ctx.measureText(style.gainLabel);
-            const gainX = clipLeft + clipWidth - metrics.width - 6;
+            // 宽度取自样式解析（而非现场 measureText）：命中端
+            // （`clipHeaderControls`）消费同一个值来划标签命中区，两处必须是
+            // 同一份数据，否则「看到的」与「可点的」会漂移。
+            const gainX = clipLeft + clipWidth - style.gainLabelWidth - 6;
             if (style.showPlaybackRate) {
-                const rateMetrics = ctx.measureText(style.playbackRateLabel);
-                const rateX = gainX - rateMetrics.width - 8;
+                const rateX = gainX - style.rateLabelWidth - 8;
                 ctx.fillText(style.playbackRateLabel, rateX, clipTop + 9);
             }
             ctx.fillText(style.gainLabel, gainX, clipTop + 9);
