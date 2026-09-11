@@ -165,6 +165,7 @@ import { advanceFineAxisDrag, type FineAxisDragState } from "./timeline/fineAxis
 import { CLIP_GAIN_DRAG_DB_PER_PX, MIN_CLIP_LENGTH_SEC } from "./timeline/constants";
 import { computeClipStretch } from "./timeline/hooks/stretchGroup";
 import { stretchLinkedParams } from "./timeline/hooks/stretchParams";
+import { computeSlipWindow } from "./timeline/hooks/slipWindow";
 import { useTimelineClipActions } from "./timeline/hooks/useTimelineClipActions";
 import { useTimelineEventHandlers } from "./timeline/hooks/useTimelineEventHandlers";
 import { useSnapOffsetDrag } from "./timeline/hooks/useSnapOffsetDrag";
@@ -1312,6 +1313,24 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         editedXfadeClipIds: string[];
         /** 自动交叉淡化：编辑前每侧的既有重叠关系（拖开时只清自动、保留手动 fade）。 */
         initialCrossfadeSides: ReturnType<typeof computeInitialCrossfadeSides>;
+        /**
+         * 本次拖拽是否为 **slip**（`Alt` + 拖 clip 中部 = 调整内部偏移）。
+         *
+         * 语义与移动 / 复制完全不同：时间轴位置与长度都不变，只平移源窗口。
+         * 在**按下时**定死（与旧实现 `startSlipDrag` 的独立手势一致）。
+         */
+        slipMode: boolean;
+        /** slip：已应用的累计位移（换算增量用，避免逐帧叠加导致越拖越快）。 */
+        appliedSlipSec: number;
+        /** slip：每个参与者按下时的源窗口（取消时回滚）。 */
+        baseSourceById: Map<string, { sourceStartSec: number; sourceEndSec: number }>;
+        /**
+         * slip：最近一次分发的源窗口。
+         *
+         * 提交用它而**不回读 Redux**——与旧实现 `lastById` 同源（防并发更新 /
+         * 历史归一化把交互数学结果污染）。
+         */
+        lastSourceById: Map<string, { sourceStartSec: number; sourceEndSec: number }>;
     } | null>(null);
 
     /**
@@ -1365,6 +1384,23 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     trackId: clip.trackId,
                     snapOffsetSec: Math.max(0, Number(clip.snapOffsetSec) || 0),
                     copyMode: false,
+                    slipMode: isModifierActive(slipEditKb, args.modifiers),
+                    appliedSlipSec: 0,
+                    baseSourceById: new Map(
+                        participants.map((participant) => {
+                            const item = session.clips.find(
+                                (candidate) => candidate.id === participant.clipId,
+                            );
+                            return [
+                                participant.clipId,
+                                {
+                                    sourceStartSec: Number(item?.sourceStartSec ?? 0) || 0,
+                                    sourceEndSec: Number(item?.sourceEndSec ?? 0) || 0,
+                                },
+                            ] as const;
+                        }),
+                    ),
+                    lastSourceById: new Map(),
                     participants,
                     anchorTrackIndex: trackIds.indexOf(clip.trackId),
                     lastDeltaStartSec: 0,
@@ -1378,6 +1414,43 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             }
             const origin = kernelDragOriginRef.current;
             if (origin === null) return;
+            // copy 模式判定：复用旧实现的函数（含"已配置绑定为准 + 非 macOS 的 Ctrl
+            // 回退"）。**单向**——一旦进入 copy 就不再退回移动，避免松手瞬间语义反转。
+            if (origin.slipMode) {
+                // Alt + 拖 clip 中部 = **slip**（调整内部偏移）：时间轴位置与长度
+                // 都不变，只平移源窗口。逐帧按**增量**应用（用当前 Redux 值 + 增量
+                // 换算），避免累计位移被重复施加导致越拖越快。
+                const dApplied = args.deltaSec - origin.appliedSlipSec;
+                if (Math.abs(dApplied) < 1e-12) return;
+                origin.appliedSlipSec = args.deltaSec;
+                const updates: Array<{
+                    clipId: string;
+                    sourceStartSec: number;
+                    sourceEndSec: number;
+                }> = [];
+                for (const participant of origin.participants) {
+                    const clip = sessionRef.current.clips.find(
+                        (item) => item.id === participant.clipId,
+                    );
+                    if (clip === undefined) continue;
+                    const next = computeSlipWindow(clip, dApplied);
+                    if (next === null) continue;
+                    origin.lastSourceById.set(participant.clipId, next);
+                    updates.push({ clipId: participant.clipId, ...next });
+                }
+                batch(() => {
+                    for (const update of updates) {
+                        dispatch(
+                            setClipSourceRange({
+                                clipId: update.clipId,
+                                sourceStartSec: update.sourceStartSec,
+                                sourceEndSec: update.sourceEndSec,
+                            }),
+                        );
+                    }
+                });
+                return;
+            }
             // copy 模式判定：复用旧实现的函数（含"已配置绑定为准 + 非 macOS 的 Ctrl
             // 回退"）。**单向**——一旦进入 copy 就不再退回移动，避免松手瞬间语义反转。
             origin.copyMode = resolveClipDragCopyMode({
@@ -1497,6 +1570,39 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             // 手势结束：清掉吸附高亮（旧实现同样在收尾清除，否则最后一次的
             // 吸附提示会一直挂在画面上）。
             clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+
+            if (origin.slipMode) {
+                if (args.cancelled) {
+                    batch(() => {
+                        for (const [clipId, base] of origin.baseSourceById) {
+                            dispatch(
+                                setClipSourceRange({
+                                    clipId,
+                                    sourceStartSec: base.sourceStartSec,
+                                    sourceEndSec: base.sourceEndSec,
+                                }),
+                            );
+                        }
+                    });
+                    return;
+                }
+                // 零位移（未越过阈值 / 拖回原位）：不写后端（旧实现同样不置 dirty）。
+                if (origin.lastSourceById.size === 0) return;
+                dispatch(checkpointHistory());
+                // 用**交互数学结果**提交（不回读 Redux——防并发更新 / 历史归一化
+                // 把窗口值污染，与旧实现 `lastById` 同源）。
+                void dispatch(
+                    setClipsStateBulkRemote({
+                        updates: [...origin.lastSourceById].map(([clipId, window]) => ({
+                            clipId,
+                            sourceStartSec: window.sourceStartSec,
+                            sourceEndSec: window.sourceEndSec,
+                        })),
+                    }),
+                );
+                return;
+            }
+
             if (origin.copyMode) {
                 setKernelGhost(null);
                 // copy 模式下原 clip 从未被移动：既不需要回滚，也不走 move 提交。

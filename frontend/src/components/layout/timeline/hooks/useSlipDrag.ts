@@ -11,7 +11,6 @@ import {
 } from "../../../../features/session/sessionSlice";
 import { setClipStateRemote } from "../../../../features/session/thunks/timelineThunks";
 import { webApi } from "../../../../services/webviewApi";
-import { resolveClipContentDurationSec } from "../../../../utils/loopRender";
 import {
     loopSnapThresholdSec,
     nearestBoundarySnapOffsetSec,
@@ -76,30 +75,11 @@ export type SlipDragState = {
     lastById: Record<string, { sourceStartSec: number; sourceEndSec: number }>;
 };
 
-/** 从 SessionState 的 ClipInfo 提取 Slip 所需字段。 */
-function readClip(c: SessionState["clips"][number]) {
-    const playbackRate = Number(c.playbackRate ?? 1) || 1;
-    const sourceStartSec = Number(c.sourceStartSec ?? 0) || 0;
-    const sourceEndSec = Number(c.sourceEndSec ?? 0) || 0;
-    const isContentBearing = !!c.sourcePath || !!(c.midiNoteData && c.midiNoteData.length > 0);
-    const contentDurSec = resolveClipContentDurationSec({
-        sourcePath: c.sourcePath,
-        midiNoteData: c.midiNoteData ?? null,
-        durationFrames: c.durationFrames,
-        sourceSampleRate: c.sourceSampleRate,
-        durationSec: c.durationSec,
-    });
-    return {
-        playbackRate: playbackRate > 0 && Number.isFinite(playbackRate) ? playbackRate : 1,
-        sourceStartSec,
-        sourceEndSec,
-        lengthSec: Math.max(0, Number(c.lengthSec ?? 0) || 0),
-        reversed: !!c.reversed,
-        loopEnabled: !!c.loopEnabled,
-        isContentBearing,
-        contentDurSec,
-    };
-}
+/**
+ * slip 的几何与字段提取统一放在 `slipWindow`（旧实现与渲染内核共用一份，
+ * 避免倒放 / 循环 / 非内容承载这几条分支在两个渲染模式下分叉）。
+ */
+import { computeSlipWindow, readSlipClip as readClip } from "./slipWindow";
 
 export function useSlipDrag(deps: {
     scrollRef: React.RefObject<HTMLDivElement | null>;
@@ -130,40 +110,6 @@ export function useSlipDrag(deps: {
     } = deps;
 
     const slipDragRef = useRef<SlipDragState | null>(null);
-
-    /** 对单个 clip 应用窗口平移增量（读取当前真实状态，返回结果窗口）。 */
-    function computeShiftedWindow(
-        id: string,
-        deltaBeat: number,
-    ): { sourceStartSec: number; sourceEndSec: number } | null {
-        const c = sessionRef.current.clips.find((x) => x.id === id);
-        if (!c) return null;
-        const v = readClip(c);
-        // 方向语义：倒放的播放时间轴是镜像的，源窗口必须沿指针反方向平移。
-        const dir = v.reversed ? -1 : 1;
-        const deltaSrcSec = deltaBeat * v.playbackRate * dir;
-        let nextSourceStart = v.sourceStartSec + deltaSrcSec;
-        let nextSourceEnd = v.sourceEndSec + deltaSrcSec;
-
-        if (v.loopEnabled) {
-            // Loop（循环源）：窗口两端对内容时长取模环绕（floor_mod），与
-            // 渲染/引擎的回绕映射一致；音高参考块的 D = 音符内容范围。
-            if (v.contentDurSec != null && v.contentDurSec > 1e-9) {
-                const mediaDur = v.contentDurSec;
-                nextSourceStart = ((nextSourceStart % mediaDur) + mediaDur) % mediaDur;
-                nextSourceEnd = ((nextSourceEnd % mediaDur) + mediaDur) % mediaDur;
-            }
-            // 内容时长未知：保持平移，避免卡死。
-        } else if (v.isContentBearing && !v.reversed) {
-            // 非 Loop 正放：派生窗口模型 —— 终点 = 起点 + len·rate；
-            // 越出媒体的部分渲染静音（前导/尾部对称无界）。
-            nextSourceEnd = nextSourceStart + v.lengthSec * v.playbackRate;
-        } else {
-            // 非 Loop 倒放：source_end 是反向锚点，跨度可合法大于 len·rate
-            //（延伸产生的静音区）。只做整体平移，保持跨度不变。
-        }
-        return { sourceStartSec: nextSourceStart, sourceEndSec: nextSourceEnd };
-    }
 
     function startSlipDrag(e: React.PointerEvent<HTMLDivElement>, clipId: string) {
         if (e.button !== 0) return;
@@ -314,7 +260,9 @@ export function useSlipDrag(deps: {
             drag.appliedTotal = desiredTotal;
 
             for (const id of drag.clipIds) {
-                const next = computeShiftedWindow(id, dApplied);
+                const clip = sessionRef.current.clips.find((item) => item.id === id);
+                if (clip === undefined) continue;
+                const next = computeSlipWindow(clip, dApplied);
                 if (!next) continue;
                 drag.lastById[id] = next;
                 dispatch(

@@ -145,11 +145,24 @@
   Alt+左缘 +50px → `start 2.333 / length 3.667 / rate 1.0909`（**右缘固定 6.0**）；
   无 Alt 对照 → 只改 `length` 与 `sourceEndSec`、速率不变
 
+### C-1b slip（已完成）
+
+- **抽取**：新增 `hooks/slipWindow.ts`（`computeSlipWindow` + `readSlipClip`），
+  把 `useSlipDrag` 的源窗口平移几何（倒放方向反转 / loop 取模环绕 / 非 Loop 正放的
+  派生窗口 / 其余保持跨度）抽成共享纯函数，`useSlipDrag` 改为引用。
+- **内核接入**：`clip-drag` 在按下时若 `modifier.clipSlipEdit`（Alt）按住则进入 slip 模式
+  （优先于 copy）；逐帧按**增量**应用（用当前 Redux 值 + 增量，避免累计位移重复施加）；
+  提交用交互数学结果（`lastSourceById`，不回读 Redux，与旧实现 `lastById` 同源）；
+  零位移不写后端；取消回滚到按下时源窗口。
+- **已知差异（记录）**：未实现旧实现的「loop 边界吸附」（只在 loop 开启且窗口跨过
+  素材边界时影响落点），其余分支逐条对齐。
+- 验证：Alt+拖 body +100px → `{sourceStartSec: 0.6667, sourceEndSec: 4.6667}`（只有源窗口变）；
+  反向 −100px → `{-0.6667, 3.3333}`（允许越出媒体＝渲染静音）；无 Alt 对照 → `move_clips` ✓
+
 ### 未完成（下一批）
 
 | 任务 | 内容 | 前置工作 |
 |---|---|---|
-| C-1b | `Alt` 拖 **body** = slip（`modifier.clipSlipEdit`，调整 clip 内部偏移） | 需按 `useSlipDrag` 的语义实现：长度不变、只平移源区间，并处理 loop 边界与「源素材时长」钳制；建议同批把 `useSlipDrag` 的领域逻辑抽成共享函数 |
 | C-2 | `Alt+Shift` 竖直拖 clip = 调该 clip 音高（`modifier.clipPitchDrag`） | **必须先抽取**：`useClipPitchDrag`（369 行）自带拖拽状态、tooltip 与「根轨道需 composeEnabled + 有音高分析算法」的前置校验；内核需要的是同一份「竖直位移 → cents → 参数线写入」逻辑 |
 | C-6 | trim / fade / snap offset 的**多选批量**（B-2 残留）；trim/fade 的自动交叉淡化预览 | 拖拽移动已覆盖多选与编组；trim/fade 需按旧实现 `useEditDrag` 的 `supportsGroupExpansion`（fade 不展开组）逐 clip 应用 |
 
