@@ -531,7 +531,15 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         return unregister;
     }, [inlineEdit]);
 
-    // 低频数据变化 → 场景重建（几何 / 主题 / 网格参数 / 行高）。
+    // 低频数据变化 → 场景重建（几何 / 主题 / 网格参数 / 行高 / **选中态**）。
+    //
+    // ⚠️ 这个依赖数组是「场景重建」的**唯一触发器**：宿主的绘制走脏标记
+    // （`sceneDirty` + renderLoop 的 `dirty`），数据变了但没进这里，画面就**不会
+    // 重绘**——表现为「状态明明变了，却看不到任何变化」（点击 clip 选不中的根因）。
+    //
+    // 因此凡是**影响 clip 外观**的数据都必须列在这里。已知会影响外观的：
+    // - `selectedClipId` / `multiSelectedClipIds`：选中描边（白 2px）
+    // - `activeGroupIds` / `disabledGroupIds`：编组激活的金色描边
     React.useEffect(() => {
         localHostRef.current?.invalidateScene();
     }, [
@@ -547,6 +555,10 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         tempoMap,
         mode,
         rowHeight,
+        selectedClipId,
+        multiSelectedClipIds,
+        activeGroupIds,
+        disabledGroupIds,
     ]);
 
     return (
