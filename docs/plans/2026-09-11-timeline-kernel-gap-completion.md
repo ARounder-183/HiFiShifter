@@ -200,14 +200,53 @@
   把 mock 的 `{ok:true}` 当 TimelineState 应用后，自动淡化字段/重叠关系已不完整），
   **需真机确认**。
 
+### C-7 组拉伸（已完成）
+
+- 参与集合：**裁切与拉伸统一**为「多选 + 编组展开」（旧实现 `supportsGroupExpansion`
+  对 trim / stretch 都展开，只排除 fade / gain）——原先拉伸分支硬编码「仅锚点」。
+- 组状态由纯函数判定：`buildStretchGroupState`（选区 ≥ 2 且**锚点位于选区边界**，
+  否则返回 null → 退化为单 clip 拉伸）；预览走 `computeStretchGroupUpdate`
+  （整组等比缩放 + 各成员速率反算钳制 + 淡变与 SnapOffset 按比例缩放）。
+- 吸附的 `excludeClipIds` 改为**整组**（旧实现排除 `selectedClipIds`）：组内其他成员
+  随本次拉伸一起移动，不应成为自己的吸附目标。
+- 提交：整组一次 `setClipsStateBulkRemote`；落库后二次写回非 1 的速率；锁定参数线时
+  按**根轨道**聚合成员的时域映射（`stretchTrackLinkedParams`）并 `bumpParamsEpoch`；
+  取消路径五个字段整组回滚。
+- **顺带补齐**：单 clip 拉伸的提交原先**漏了自动交叉淡化写回**（旧实现
+  `shouldApplyAutoCrossfade` 覆盖 stretch）——现已与裁切同源。
+- 验证（读实际提交参数）：
+  - 框选 clip-1 + clip-2（锚点 clip-1 为选区最左）+ `Alt` 拖左缘 −100px →
+    `set_clips_state_bulk` **两条**：clip-1 `start 1.3333 / length 4.2614 / rate 0.9387 /
+    fadeIn 0.6392`，clip-2 `start 4.7425 / length 7.4575 / rate 1.4080 /
+    snapOffset 0.2663`（= 0.25 × 1.0654）✓ 与手算逐项一致
+  - 对照 A（未框选）：只 1 条 `length 4.6667 / rate 0.8571`（单 clip 拉伸）✓
+  - 对照 B（框选但锚点**不在**选区边界：拖 clip-1 右缘）：只 1 条，左缘固定 2.0 ✓
+
+### C-8 slip 的 loop / 内容边界吸附（已完成）
+
+- 新增 `slipWindow.toBoundarySnapClip`：媒体边界吸附视图（内容时长 D 的解析规则
+  「帧数/采样率 → durationSec → 音高参考块覆盖值」的**单一来源**），
+  `useSlipDrag` 改为引用它（原先自己拼一份快照）。
+- 内核 slip 预览：命中候选时把**累计位移**替换为吸附值，再以「目标累计 − 已应用累计」
+  驱动增量（与旧实现同一算法，仅位移正负号约定相反）；发布 / 清除循环节专用高亮
+  （只亮**真正对齐**的那一侧，用 `slipBoundaryAlignedSides`）。
+- 参与条件与旧实现逐条对齐：`(isContentBearing || loopEnabled) &&
+  snapClipsToSourceMedia && effectiveSnap && snapDistancePx > 0`。
+- 验证（A/B 读实际提交参数，`Alt` 拖 body +599px = 3.99333s，候选 −4 距 0.00667s）：
+  - 吸附开 → `sourceStartSec 4 / sourceEndSec 8`（**被吸附**，精确落在候选上）✓
+  - 吸附总开关关 → `sourceStartSec 3.99333 / sourceEndSec 7.99333`（未吸附）✓
+  - 注：`Alt+Shift` 不能用作免吸附对照——那是 `clipPitchDrag`（C-2 的委托拦截），
+    因此改用工具栏「吸附」总开关做对照。
+- **未覆盖**：loop 分支（`loopEnabled` 的 mod-D 相位族）在 mock 工程里没有 loop Clip，
+  需真机或后续给 mock 增加 loop 素材后复测；非 loop 的有限候选族已验证。
+
 ### 未完成（下一批）
 
 | 任务 | 内容 | 说明 |
 |---|---|---|
-| C-7 | **组拉伸**（多选 + `Alt` 拖边缘）：旧实现用 `buildStretchGroupState` / `computeStretchGroupUpdate` 做整组等比缩放 | 纯函数已在 `stretchGroup.ts`；内核当前只拉伸被拖的那一个 |
-| C-8 | slip 的 **loop 边界吸附**（`loopSnapThresholdSec`） | 仅 loop 开启且窗口跨素材边界时影响落点 |
 | D | 淡化专属右键菜单 + 淡变 tooltip、多 Take、静音检测预览、拖到空白新建轨道 | — |
 | E | 多选修饰键走键位绑定 + Shift 范围选择、Esc 覆盖抓手/snap/框选、滚动条 track 点击跳转、Vertical Lock、陈旧注释与 `glyph/*` 死代码 | — |
+| 残留 | 裁切 / 拉伸的**波纹跟随预览**（旧实现 `computeRegionRightEdgeDelta` + `applyRippleFollowerShift`；内核目前只在拖拽移动时做波纹） | 本轮新发现，未实现 |
 
 ---
 

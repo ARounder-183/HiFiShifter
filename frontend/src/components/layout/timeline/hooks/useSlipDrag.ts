@@ -79,7 +79,7 @@ export type SlipDragState = {
  * slip 的几何与字段提取统一放在 `slipWindow`（旧实现与渲染内核共用一份，
  * 避免倒放 / 循环 / 非内容承载这几条分支在两个渲染模式下分叉）。
  */
-import { computeSlipWindow, readSlipClip as readClip } from "./slipWindow";
+import { computeSlipWindow, toBoundarySnapClip } from "./slipWindow";
 
 export function useSlipDrag(deps: {
     scrollRef: React.RefObject<HTMLDivElement | null>;
@@ -139,7 +139,9 @@ export function useSlipDrag(deps: {
                   sessionRef.current.disabledGroupIds,
               );
 
-        const anchorRead = readClip(anchor);
+        // 媒体边界吸附视图与渲染内核共用 `toBoundarySnapClip`（内容时长 D 的解析
+        // 规则单一来源，含吸附参与条件 `isContentBearing`）。
+        const anchorBoundary = toBoundarySnapClip(anchor);
         slipDragRef.current = {
             pointerId: e.pointerId,
             anchorClipId: clipId,
@@ -147,16 +149,16 @@ export function useSlipDrag(deps: {
             startPointerBeat: beatAtPointer,
             appliedTotal: 0,
             anchorSnapshot: {
-                loopEnabled: anchorRead.loopEnabled,
-                reversed: anchorRead.reversed,
-                sourceStartSec: anchorRead.sourceStartSec,
-                sourceEndSec: anchorRead.sourceEndSec,
-                playbackRate: anchorRead.playbackRate,
-                lengthSec: anchorRead.lengthSec,
-                durationFrames: anchor.durationFrames ?? null,
-                sourceSampleRate: anchor.sourceSampleRate ?? null,
-                contentDurationSec: anchorRead.contentDurSec,
-                isContentBearing: anchorRead.isContentBearing,
+                loopEnabled: anchorBoundary.loopEnabled,
+                reversed: anchorBoundary.reversed,
+                sourceStartSec: anchorBoundary.sourceStartSec,
+                sourceEndSec: anchorBoundary.sourceEndSec,
+                playbackRate: anchorBoundary.playbackRate,
+                lengthSec: anchorBoundary.lengthSec,
+                durationFrames: anchorBoundary.durationFrames ?? null,
+                sourceSampleRate: anchorBoundary.sourceSampleRate ?? null,
+                contentDurationSec: anchorBoundary.contentDurationSec ?? null,
+                isContentBearing: anchorBoundary.isContentBearing,
             },
             lastById: {},
         };

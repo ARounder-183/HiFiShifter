@@ -28,6 +28,7 @@
 
 import type { SessionState } from "../../../../features/session/sessionSlice";
 import { resolveClipContentDurationSec } from "../../../../utils/loopRender";
+import type { BoundarySnapClip } from "../../../../utils/loopSnap";
 
 /** slip 计算所需的 clip 视图（从 ClipInfo 提取，缺省值已归一化）。 */
 export interface SlipClipView {
@@ -65,6 +66,42 @@ export function readSlipClip(clip: SessionState["clips"][number]): SlipClipView 
             sourceSampleRate: clip.sourceSampleRate,
             durationSec: clip.durationSec,
         }),
+    };
+}
+
+/**
+ * 把 clip 转成「媒体边界吸附」视图（`nearestBoundarySnapOffsetSec` /
+ * `slipBoundaryAlignedSides` 的入参）。
+ *
+ * 【为什么需要它】loop 边界吸附的候选族与「内容时长 D」的解析规则必须与
+ * 波形/引擎一致：`D` 优先取 `durationFrames / sourceSampleRate`，回退
+ * `durationSec`，音高参考块等无源媒体 Clip 走 `resolveClipContentDurationSec`
+ * 的覆盖值。旧实现（`useSlipDrag`）与渲染内核各写一份会让两处对「D 是多少」
+ * 产生分叉——症状只在 loop Clip 跨媒体边界时出现，极难归因。
+ *
+ * 特殊说明：吸附候选族只依赖**按下时**的几何（平移不变），因此调用方应在
+ * 手势开始时快照一次，不要逐帧重建。
+ *
+ * @param clip 目标 clip（来自 `session.clips`）。
+ * @returns 吸附函数所需的归一化视图 + `isContentBearing`（吸附参与条件之一：
+ *   无源媒体的空 Clip 不参与边界吸附）。
+ */
+export function toBoundarySnapClip(
+    clip: SessionState["clips"][number],
+): BoundarySnapClip & { readonly isContentBearing: boolean } {
+    const v = readSlipClip(clip);
+    return {
+        loopEnabled: v.loopEnabled,
+        reversed: v.reversed,
+        sourceStartSec: v.sourceStartSec,
+        sourceEndSec: v.sourceEndSec,
+        playbackRate: v.playbackRate,
+        lengthSec: v.lengthSec,
+        durationFrames: clip.durationFrames ?? null,
+        sourceSampleRate: clip.sourceSampleRate ?? null,
+        durationSec: clip.durationSec ?? null,
+        contentDurationSec: v.contentDurSec,
+        isContentBearing: v.isContentBearing,
     };
 }
 

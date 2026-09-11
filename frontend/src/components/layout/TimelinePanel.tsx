@@ -65,6 +65,7 @@ import {
     moveClipStart,
     moveClipTrack,
     checkpointHistory,
+    bumpParamsEpoch,
     setClipLength,
     setClipSourceRange,
     setClipSnapOffset,
@@ -117,7 +118,17 @@ import { SnapHighlightLayer } from "./timeline/SnapHighlightLayer";
 import { formatEditNumber, gainToDb } from "./timeline/math";
 import { requestResetFadeCurvature } from "./timeline/fadeContextMenuBus";
 import { parsePlaybackRateInput } from "./timeline/runtime/timelineCanvasStyle";
-import { SNAP_HIGHLIGHT_GROUP, clearSnapHighlights } from "../../utils/snapHighlight";
+import {
+    SNAP_HIGHLIGHT_GROUP,
+    buildLoopBoundaryHighlightEntry,
+    clearSnapHighlights,
+    publishSnapHighlights,
+} from "../../utils/snapHighlight";
+import {
+    loopSnapThresholdSec,
+    nearestBoundarySnapOffsetSec,
+    slipBoundaryAlignedSides,
+} from "../../utils/loopSnap";
 import type { TempoMap } from "../../utils/tempoMap";
 import { isTimelineKernelEnabled } from "./timeline/kernel/featureFlag";
 import { TimelineKernelView } from "./timeline/kernel/TimelineKernelView";
@@ -163,9 +174,19 @@ import { store } from "../../app/store";
 import { applyBulkFadeValue, applyBulkGainDeltaDb } from "./timeline/hooks/bulkClipEdit";
 import { advanceFineAxisDrag, type FineAxisDragState } from "./timeline/fineAxisDrag";
 import { CLIP_GAIN_DRAG_DB_PER_PX, MIN_CLIP_LENGTH_SEC } from "./timeline/constants";
-import { computeClipStretch } from "./timeline/hooks/stretchGroup";
-import { stretchLinkedParams } from "./timeline/hooks/stretchParams";
-import { computeSlipWindow } from "./timeline/hooks/slipWindow";
+import {
+    buildStretchGroupState,
+    computeClipStretch,
+    computeStretchGroupUpdate,
+    scaleSnapOffsetForStretch,
+    type StretchGroupState,
+} from "./timeline/hooks/stretchGroup";
+import {
+    stretchLinkedParams,
+    stretchTrackLinkedParams,
+    type StretchRangeMapping,
+} from "./timeline/hooks/stretchParams";
+import { computeSlipWindow, toBoundarySnapClip } from "./timeline/hooks/slipWindow";
 import { useTimelineClipActions } from "./timeline/hooks/useTimelineClipActions";
 import { useTimelineEventHandlers } from "./timeline/hooks/useTimelineEventHandlers";
 import { useSnapOffsetDrag } from "./timeline/hooks/useSnapOffsetDrag";
@@ -1346,6 +1367,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         /** slip：每个参与者按下时的源窗口（取消时回滚）。 */
         baseSourceById: Map<string, { sourceStartSec: number; sourceEndSec: number }>;
         /**
+         * slip：锚 clip 按下时的「媒体边界吸附」视图。
+         *
+         * 候选族只依赖初始几何（平移不变），因此按下时快照一次即可（与旧实现
+         * `useSlipDrag` 的 `anchorSnapshot` 同源）；内容时长 D 的解析规则由
+         * `toBoundarySnapClip` 与旧实现共用。
+         */
+        slipAnchor: ReturnType<typeof toBoundarySnapClip>;
+        /**
          * slip：最近一次分发的源窗口。
          *
          * 提交用它而**不回读 Redux**——与旧实现 `lastById` 同源（防并发更新 /
@@ -1406,6 +1435,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     snapOffsetSec: Math.max(0, Number(clip.snapOffsetSec) || 0),
                     copyMode: false,
                     slipMode: isModifierActive(slipEditKb, args.modifiers),
+                    slipAnchor: toBoundarySnapClip(clip),
                     appliedSlipSec: 0,
                     baseSourceById: new Map(
                         participants.map((participant) => {
@@ -1441,9 +1471,76 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 // Alt + 拖 clip 中部 = **slip**（调整内部偏移）：时间轴位置与长度
                 // 都不变，只平移源窗口。逐帧按**增量**应用（用当前 Redux 值 + 增量
                 // 换算），避免累计位移被重复施加导致越拖越快。
-                const dApplied = args.deltaSec - origin.appliedSlipSec;
+                //
+                // ── 循环节 / 内容边界吸附（拖拽全程生效）──────────────────
+                // 属于常规吸附体系：受吸附总开关与「拖动时切换吸附」修饰键（XOR）
+                // 控制，且需在吸附设置中启用「Clip 边缘吸附到源素材首尾」。命中时
+                // 把**累计位移**替换为吸附值，再以「目标累计 − 已应用累计」驱动增量
+                // （与旧实现 `useSlipDrag` 同一算法，只是位移正负号约定相反）。
+                const timelineSnap = sessionRef.current.timelineSnap;
+                let desiredTotal = args.deltaSec;
+                {
+                    const anchor = origin.slipAnchor;
+                    const snapActive = computeEffectiveSnap(
+                        s.snapEnabled,
+                        isModifierActive(noSnapKb, args.modifiers),
+                    );
+                    if (
+                        (anchor.isContentBearing || anchor.loopEnabled) &&
+                        timelineSnap.snapClipsToSourceMedia &&
+                        snapActive &&
+                        timelineSnap.snapDistancePx > 0
+                    ) {
+                        // 内核约定正 = 向右拖；旧实现约定正 = 向左拖（起点指针 − 当前
+                        // 指针），故取反号换算到同一 X 域。
+                        const dir = anchor.reversed ? -1 : 1;
+                        const rawWindowShift = -desiredTotal * dir;
+                        const snappedW = nearestBoundarySnapOffsetSec(
+                            anchor,
+                            "slip",
+                            rawWindowShift,
+                        );
+                        if (
+                            snappedW != null &&
+                            Math.abs(snappedW - rawWindowShift) <=
+                                loopSnapThresholdSec(timelineSnap.snapDistancePx, pxPerSec) + 1e-12
+                        ) {
+                            desiredTotal = -snappedW * dir;
+                            // 循环节命中：只高亮**真正对齐**的那一侧（媒体边界恰好
+                            // 落在 Clip 起点 → 亮起点；落在终点 → 亮终点；len·r 恰为
+                            // 整周期等两侧同时对齐才两缘同亮）。
+                            const anchorClip = sessionRef.current.clips.find(
+                                (item) => item.id === origin.clipId,
+                            );
+                            if (anchorClip !== undefined) {
+                                const aligned = slipBoundaryAlignedSides(anchor, snappedW);
+                                const clipStartSec = Math.max(0, Number(anchorClip.startSec) || 0);
+                                const clipLen = Math.max(0, Number(anchorClip.lengthSec) || 0);
+                                const secs: number[] = [];
+                                if (aligned.start) secs.push(clipStartSec);
+                                if (aligned.end) secs.push(clipStartSec + clipLen);
+                                if (secs.length > 0) {
+                                    publishSnapHighlights(SNAP_HIGHLIGHT_GROUP, [
+                                        buildLoopBoundaryHighlightEntry({
+                                            secs,
+                                            trackId: anchorClip.trackId,
+                                            clipId: origin.clipId,
+                                        }),
+                                    ]);
+                                } else {
+                                    clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+                                }
+                            }
+                        } else {
+                            clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+                        }
+                    } else {
+                        clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+                    }
+                }
+                const dApplied = desiredTotal - origin.appliedSlipSec;
                 if (Math.abs(dApplied) < 1e-12) return;
-                origin.appliedSlipSec = args.deltaSec;
+                origin.appliedSlipSec = desiredTotal;
                 const updates: Array<{
                     clipId: string;
                     sourceStartSec: number;
@@ -1750,13 +1847,23 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         baseFadeOutSec: number;
         baseSnapOffsetSec: number;
         /**
-         * 本次裁切作用于的全部 clip（多选集合 + 编组展开）。
+         * 本次边缘手势作用于的全部 clip（多选集合 + 编组展开）。
          *
-         * 旧实现 `useEditDrag` 的 `supportsGroupExpansion` 对 trim 展开编组、
-         * 对 fade / gain 不展开——拉伸（Alt）只作用于被拖的那一个（组拉伸需要
-         * `buildStretchGroupState` 的整组缩放语义，本批未做）。
+         * 旧实现 `useEditDrag` 的 `supportsGroupExpansion` 对 trim 与 stretch 都
+         * 展开编组（只排除 fade / gain）；裁切按**锚点位移**逐 clip 换算，拉伸则
+         * 走下方的 `stretchGroup` 整组等比缩放。
          */
         participants: KernelEditParticipant[];
+        /**
+         * 组拉伸：多选 + 编组展开后的整组缩放状态（不满足条件时为 null）。
+         *
+         * 旧实现用 `buildStretchGroupState` 判定「锚点是否位于选区边界」：只有锚点
+         * 是选区最左（拖左缘）/ 最右（拖右缘）的成员时才做整组等比缩放，否则退化
+         * 为单 clip 拉伸——判定与几何都在纯函数里，内核不重复实现。
+         */
+        stretchGroup: StretchGroupState | null;
+        /** 组拉伸：各成员按下时的吸附偏移（随长度比例缩放；提交与回滚共用）。 */
+        stretchBaseSnapOffsetById: Map<string, number>;
         /** 各参与者的按下时几何（裁切按**锚点位移**逐 clip 换算）。 */
         baseById: Map<
             string,
@@ -1802,28 +1909,38 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 const session = sessionRef.current;
                 const clip = session.clips.find((item) => item.id === args.clipId);
                 if (clip === undefined) return;
-                // 参与集合：裁切 = 多选 + 编组展开；拉伸 = 仅锚点（组拉伸未实现）。
+                // 参与集合：裁切与拉伸都是「多选 + 编组展开」（旧实现
+                // supportsGroupExpansion 覆盖 trim / stretch，只排除 fade / gain）。
                 const stretchMode = isModifierActive(stretchKbRef.current, args.modifiers);
-                const participants = stretchMode
-                    ? resolveKernelEditParticipants({
-                          anchorClipId: clip.id,
-                          multiSelectedClipIds: [],
+                const participants = resolveKernelEditParticipants({
+                    anchorClipId: clip.id,
+                    multiSelectedClipIds,
+                    clips: session.clips,
+                    trackIds: session.tracks.map((track) => track.id),
+                    ignoreGrouping: session.ignoreGrouping,
+                    disabledGroupIds: session.disabledGroupIds,
+                    expandGroups: true,
+                });
+                // 组拉伸：锚点位于选区边界时才成立（纯函数判定，含「选区不足两个
+                // 成员 → null」）；不成立时退化为单 clip 拉伸。
+                const stretchGroup = stretchMode
+                    ? buildStretchGroupState({
                           clips: session.clips,
-                          trackIds: session.tracks.map((track) => track.id),
-                          ignoreGrouping: true,
-                          disabledGroupIds: [],
-                          expandGroups: false,
+                          selectedClipIds: participants.map((item) => item.clipId),
+                          anchorClipId: clip.id,
+                          edge: args.edge === "left" ? "stretch_left" : "stretch_right",
                       })
-                    : resolveKernelEditParticipants({
-                          anchorClipId: clip.id,
-                          multiSelectedClipIds,
-                          clips: session.clips,
-                          trackIds: session.tracks.map((track) => track.id),
-                          ignoreGrouping: session.ignoreGrouping,
-                          disabledGroupIds: session.disabledGroupIds,
-                          // 裁切展开编组（旧实现 supportsGroupExpansion 覆盖 trim）。
-                          expandGroups: true,
-                      });
+                    : null;
+                const stretchBaseSnapOffsetById = new Map<string, number>();
+                if (stretchGroup !== null) {
+                    for (const clipId of stretchGroup.clipIds) {
+                        const item = session.clips.find((candidate) => candidate.id === clipId);
+                        stretchBaseSnapOffsetById.set(
+                            clipId,
+                            Math.max(0, Number(item?.snapOffsetSec) || 0),
+                        );
+                    }
+                }
                 const baseById = new Map<
                     string,
                     {
@@ -1870,14 +1987,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     ),
                     editSides,
                     // Alt 按住 = 拉伸（与旧实现 `modifier.clipStretch` 同源）。
-                    mode: isModifierActive(stretchKbRef.current, args.modifiers)
-                        ? "stretch"
-                        : "trim",
+                    mode: stretchMode ? "stretch" : "trim",
                     basePlaybackRate: Number(clip.clipPlaybackRate ?? 1) || 1,
                     baseFadeInSec: Number(clip.fadeInSec) || 0,
                     baseFadeOutSec: Number(clip.fadeOutSec) || 0,
                     baseSnapOffsetSec: Math.max(0, Number(clip.snapOffsetSec) || 0),
                     participants,
+                    stretchGroup,
+                    stretchBaseSnapOffsetById,
                     baseById,
                 };
             }
@@ -1893,8 +2010,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             if (origin.mode === "stretch") {
                 // Alt + 拖边缘 = **拉伸**：对侧边缘固定、改播放速率（内容不被裁掉）。
                 // 被吸附对象是**正在拖的那条边**（左缘 / 右缘），与裁切一致；
-                // 几何换算复用与旧实现共用的 `computeClipStretch`（含速率钳制、
-                // 用钳制后速率回算长度、淡变与 SnapOffset 的比例缩放）。
+                // 几何换算复用与旧实现共用的纯函数（单 clip 用 `computeClipStretch`、
+                // 组拉伸用 `computeStretchGroupUpdate`，都含速率钳制与比例缩放）。
                 const rawEdgeSec =
                     args.edge === "left" ? args.startSec : args.startSec + args.lengthSec;
                 const edgeSec = snapActive
@@ -1904,13 +2021,72 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                   ? origin.startSec
                                   : origin.startSec + origin.lengthSec,
                           anchorTrackId: origin.trackId,
-                          excludeClipIds: new Set([args.clipId]),
+                          // 排除**整组**（旧实现排除 `selectedClipIds`）：组内其他
+                          // 成员随本次拉伸一起移动，不应成为自己的吸附目标。
+                          excludeClipIds: new Set(origin.stretchGroup?.clipIds ?? [args.clipId]),
                           highlight: {
                               sources: [{ trackId: origin.trackId, clipId: args.clipId }],
                           },
                       }).sec
                     : rawEdgeSec;
                 if (!snapActive) clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+                if (origin.stretchGroup !== null) {
+                    // 组拉伸：整组等比缩放（对侧整组边界固定，成员按相对位置缩放，
+                    // 各自速率反算并钳制、淡变与 SnapOffset 按比例缩放）。
+                    const group = origin.stretchGroup;
+                    const update = computeStretchGroupUpdate({
+                        group,
+                        edge: args.edge === "left" ? "stretch_left" : "stretch_right",
+                        pointerSec: edgeSec,
+                    });
+                    batch(() => {
+                        for (const clipId of group.clipIds) {
+                            const next = update.byId[clipId];
+                            if (next === undefined) continue;
+                            dispatch(moveClipStart({ clipId, startSec: next.startSec }));
+                            dispatch(setClipLength({ clipId, lengthSec: next.lengthSec }));
+                            dispatch(
+                                setClipPlaybackRate({
+                                    clipId,
+                                    clipPlaybackRate: next.clipPlaybackRate,
+                                }),
+                            );
+                            dispatch(
+                                setClipFades({
+                                    clipId,
+                                    fadeInSec: next.fadeInSec,
+                                    fadeOutSec: next.fadeOutSec,
+                                }),
+                            );
+                            const initial = group.initialById[clipId];
+                            if (initial !== undefined) {
+                                // SnapOffset 随成员长度按「总比例 × 基准偏移」缩放
+                                //（基准 = 按下时快照，禁止逐帧复合）。
+                                const ratio = next.lengthSec / Math.max(1e-6, initial.lengthSec);
+                                dispatch(
+                                    setClipSnapOffset({
+                                        clipId,
+                                        snapOffsetSec: scaleSnapOffsetForStretch(
+                                            origin.stretchBaseSnapOffsetById.get(clipId),
+                                            ratio,
+                                            next.lengthSec,
+                                        ),
+                                    }),
+                                );
+                            }
+                        }
+                    });
+                    if (s.autoCrossfadeEnabled) {
+                        previewAutoCrossfade(
+                            store.getState().session,
+                            origin.xfadeClipIds,
+                            dispatch,
+                            origin.initialCrossfadeSides,
+                            origin.editSides,
+                        );
+                    }
+                    return;
+                }
                 const result = computeClipStretch({
                     edge: args.edge === "left" ? "stretch_left" : "stretch_right",
                     pointerSec: edgeSec,
@@ -2201,6 +2377,142 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             if (origin.mode === "stretch") {
                 // 拉伸收尾：回滚 / 提交都作用于**五个字段**（起点、长度、速率、
                 // 两侧淡变、吸附偏移）——只还原其中一部分会让预览与落库分叉。
+                if (origin.stretchGroup !== null) {
+                    // ── 组拉伸：整组成员一起回滚 / 提交 ─────────────────────
+                    const group = origin.stretchGroup;
+                    if (args.cancelled) {
+                        batch(() => {
+                            for (const clipId of group.clipIds) {
+                                const initial = group.initialById[clipId];
+                                if (initial === undefined) continue;
+                                dispatch(moveClipStart({ clipId, startSec: initial.startSec }));
+                                dispatch(setClipLength({ clipId, lengthSec: initial.lengthSec }));
+                                dispatch(
+                                    setClipPlaybackRate({
+                                        clipId,
+                                        clipPlaybackRate: initial.clipPlaybackRate,
+                                    }),
+                                );
+                                dispatch(
+                                    setClipFades({
+                                        clipId,
+                                        fadeInSec: initial.fadeInSec,
+                                        fadeOutSec: initial.fadeOutSec,
+                                    }),
+                                );
+                                dispatch(
+                                    setClipSnapOffset({
+                                        clipId,
+                                        snapOffsetSec:
+                                            origin.stretchBaseSnapOffsetById.get(clipId) ?? 0,
+                                    }),
+                                );
+                            }
+                        });
+                        // 自动交叉淡化回到按下时的重叠关系（按已还原的几何重算）。
+                        if (s.autoCrossfadeEnabled) {
+                            previewAutoCrossfade(
+                                store.getState().session,
+                                origin.xfadeClipIds,
+                                dispatch,
+                                origin.initialCrossfadeSides,
+                                origin.editSides,
+                            );
+                        }
+                        return;
+                    }
+                    dispatch(checkpointHistory());
+                    // 提交值取 Redux 当前值（预览已写入钳制后的结果）。
+                    const groupSession = sessionRef.current;
+                    const updates = group.clipIds.flatMap((clipId) => {
+                        const clip = groupSession.clips.find((item) => item.id === clipId);
+                        if (clip === undefined) return [];
+                        return [
+                            {
+                                clipId,
+                                startSec: clip.startSec,
+                                lengthSec: clip.lengthSec,
+                                clipPlaybackRate: Number(clip.clipPlaybackRate ?? 1) || 1,
+                                fadeInSec: Number(clip.fadeInSec) || 0,
+                                fadeOutSec: Number(clip.fadeOutSec) || 0,
+                                snapOffsetSec: Math.max(0, Number(clip.snapOffsetSec) || 0),
+                            },
+                        ];
+                    });
+                    if (updates.length === 0) return;
+                    const groupPersist = dispatch(setClipsStateBulkRemote({ updates })).unwrap();
+                    void (async () => {
+                        try {
+                            await groupPersist;
+                        } finally {
+                            // 速率二次写回：后端可能按自身计算覆盖速率，前端计算值
+                            // 才是权威（与旧实现 `reapplyRates` 同源，只回写非 1 的成员）。
+                            for (const update of updates) {
+                                if (update.clipPlaybackRate === 1) continue;
+                                dispatch(
+                                    setClipPlaybackRate({
+                                        clipId: update.clipId,
+                                        clipPlaybackRate: update.clipPlaybackRate,
+                                    }),
+                                );
+                            }
+                            // 锁定参数线：按**根轨道**聚合成员的时域映射，一次请求
+                            // 完成该轨道的曲线映射（与旧实现同源）。
+                            if (sessionRef.current.lockParamLinesEnabled) {
+                                const mappingsByRootTrack = new Map<
+                                    string,
+                                    StretchRangeMapping[]
+                                >();
+                                for (const clipId of group.clipIds) {
+                                    const initial = group.initialById[clipId];
+                                    const now = sessionRef.current.clips.find(
+                                        (item) => item.id === clipId,
+                                    );
+                                    if (initial === undefined || now === undefined) continue;
+                                    const rootTrackId = resolveRootTrackId(
+                                        sessionRef.current.tracks,
+                                        now.trackId,
+                                    );
+                                    if (rootTrackId === null || rootTrackId === undefined) {
+                                        continue;
+                                    }
+                                    const mappings = mappingsByRootTrack.get(rootTrackId) ?? [];
+                                    mappings.push({
+                                        oldStartSec: initial.startSec,
+                                        oldLengthSec: initial.lengthSec,
+                                        newStartSec: now.startSec,
+                                        newLengthSec: now.lengthSec,
+                                    });
+                                    mappingsByRootTrack.set(rootTrackId, mappings);
+                                }
+                                await Promise.allSettled(
+                                    Array.from(mappingsByRootTrack, ([trackId, mappings]) =>
+                                        stretchTrackLinkedParams(trackId, mappings),
+                                    ),
+                                );
+                                dispatch(bumpParamsEpoch());
+                            }
+                            // 自动交叉淡化：按落库后的重叠关系写回自动 fade（开关
+                            // 关闭时只清理「已脱离重叠」的自动值）。
+                            const latest = sessionRef.current;
+                            if (s.autoCrossfadeEnabled) {
+                                await applyAutoCrossfade(latest, origin.xfadeClipIds, dispatch, {
+                                    affectedSides: origin.initialCrossfadeSides,
+                                    editSides: origin.editSides,
+                                });
+                            } else {
+                                await applyDetachedAutoCrossfadeClears(
+                                    latest,
+                                    origin.xfadeClipIds,
+                                    dispatch,
+                                    origin.initialCrossfadeSides,
+                                    origin.editSides,
+                                );
+                            }
+                        }
+                    })().catch(() => undefined);
+                    return;
+                }
                 if (args.cancelled) {
                     batch(() => {
                         dispatch(
@@ -2270,6 +2582,24 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 origin.lengthSec,
                                 next.startSec,
                                 next.lengthSec,
+                            );
+                        }
+                        // 自动交叉淡化：拉伸改变重叠 → 按落库后的关系写回自动 fade
+                        //（旧实现 `shouldApplyAutoCrossfade` 覆盖 stretch，开关关闭时
+                        // 只清理「已脱离重叠」的自动值）。
+                        const latest = sessionRef.current;
+                        if (s.autoCrossfadeEnabled) {
+                            await applyAutoCrossfade(latest, origin.xfadeClipIds, dispatch, {
+                                affectedSides: origin.initialCrossfadeSides,
+                                editSides: origin.editSides,
+                            });
+                        } else {
+                            await applyDetachedAutoCrossfadeClears(
+                                latest,
+                                origin.xfadeClipIds,
+                                dispatch,
+                                origin.initialCrossfadeSides,
+                                origin.editSides,
                             );
                         }
                     }
