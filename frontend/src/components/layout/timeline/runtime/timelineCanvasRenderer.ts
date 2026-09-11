@@ -171,6 +171,8 @@ export function drawTimelineCanvas(
             snapOffsetPx?: number;
             /** 前导重叠区宽度（像素，从左缘起算）。>0 时上 clip 在该区域半透。 */
             leadingOverlapPx?: number;
+            /** 静音检测预览区段（像素，相对 clip 左缘）：半透明红色覆盖。 */
+            silenceSpansPx?: Array<{ leftPx: number; widthPx: number }>;
         }>;
         /** 轨道横向分界线（延伸到工程末尾之后）。 */
         rowGuides?: {
@@ -967,10 +969,46 @@ export function drawTimelineCanvas(
         pending.length = 0;
     }
 
+    /**
+     * 静音检测预览的红色覆盖矩形（内容坐标），在**所有** clip 绘制完成后统一落笔。
+     *
+     * 【为什么单独一遍】红色层必须压在全部块面之上。重叠区里后一个 clip 的块面
+     * 可能属于**后续批次**（`barrier` 由前导重叠 / 半透块面触发），若在各 clip 的
+     * 细节阶段就画，先画的会被后画的块面盖掉——实测表现为「只有一部分静音区可见」。
+     */
+    const silenceOverlays: Array<{
+        left: number;
+        top: number;
+        width: number;
+        height: number;
+    }> = [];
+
     for (const clip of args.clips) {
         const item = prepareClip(clip);
         if (item.barrier) flushBatch();
         pending.push(item);
+        if (clip.silenceSpansPx !== undefined) {
+            for (const span of clip.silenceSpansPx) {
+                silenceOverlays.push({
+                    left: item.left + span.leftPx,
+                    top: item.bodyTop,
+                    width: span.widthPx,
+                    height: item.bodyHeight,
+                });
+            }
+        }
     }
     flushBatch();
+
+    if (silenceOverlays.length > 0) {
+        // 与旧实现 `ClipItem` 的红色覆盖层同源：半透明红，覆盖 clip 的 body 区
+        // （不含 header，避免盖住名称 / 徽标等可交互标记）。
+        ctx.save();
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = "rgba(239, 68, 68, 0.3)";
+        for (const rect of silenceOverlays) {
+            ctx.fillRect(rect.left, rect.top, rect.width, rect.height);
+        }
+        ctx.restore();
+    }
 }

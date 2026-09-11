@@ -295,6 +295,52 @@ function buildHandlers(): Record<string, (...args: unknown[]) => unknown> {
             gpuBackend: "CPU",
         }),
         get_timeline_state: () => timeline,
+        /**
+         * 静音检测（干跑）：返回**固定几何**的假静音区。
+         *
+         * 真实后端做的是能量分析（浏览器里无法复现），而内核的「静音预览红色覆盖层」
+         * 只消费区域几何——给固定区域即可在 mock 下验证绘制与钳制路径。
+         * 区域取每个 clip 的中段 30% 与后段 15%（全部落在 clip 本体之内）。
+         */
+        analyze_clip_silence: (...args: unknown[]) => {
+            const clipIds = Array.isArray(args[0]) ? (args[0] as unknown[]).map(String) : [];
+            const clips = (timeline.clips ?? []) as Array<Record<string, unknown>>;
+            const reports = clipIds.flatMap((clipId) => {
+                const clip = clips.find((item) => item.id === clipId);
+                if (clip === undefined) return [];
+                const startSec = Number(clip.start_sec) || 0;
+                const lengthSec = Number(clip.length_sec) || 0;
+                const regions = [
+                    {
+                        startSec: startSec + lengthSec * 0.25,
+                        endSec: startSec + lengthSec * 0.55,
+                    },
+                    {
+                        startSec: startSec + lengthSec * 0.8,
+                        endSec: startSec + lengthSec * 0.95,
+                    },
+                    // 第三段**故意越界**（后端区域越过 clip 末端）：用于验证渲染端
+                    // 把区间钳制在 clip 本体内——不钳制会把红色画到相邻 clip 上。
+                    {
+                        startSec: startSec + lengthSec * 1.05,
+                        endSec: startSec + lengthSec * 1.2,
+                    },
+                ];
+                return [
+                    {
+                        clipId,
+                        ok: true,
+                        fullySilent: false,
+                        totalSilentSec: regions.reduce(
+                            (sum, region) => sum + (region.endSec - region.startSec),
+                            0,
+                        ),
+                        regions,
+                    },
+                ];
+            });
+            return { ok: true, reports };
+        },
         get_playback_state: () => ({
             ok: true,
             is_playing: false,

@@ -147,6 +147,15 @@ export interface TimelineKernelData {
     /** 多选集合（与 `selectedClipId` 一起决定描边 / 高亮）。 */
     readonly multiSelectedClipIds: readonly string[];
     /**
+     * 静音检测预览区段（`session.silencePreviewSegments`）。
+     *
+     * 键 = clip id，值 = **工程秒**的 `[起, 止]` 区间数组。细节层按半透明红色
+     * 覆盖绘制（与旧实现 `ClipItem` 的红色层同源）；缺省 = 无预览。
+     */
+    readonly silenceSegmentsByClipId?: Readonly<
+        Record<string, ReadonlyArray<readonly [number, number]>>
+    >;
+    /**
      * 激活 / 禁用的分组 id。
      *
      * 供 header 控件级命中构造 `buildTimelineClipVisualStyle`：分组的激活 / 禁用
@@ -1235,6 +1244,10 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             // 编组状态参与两件事：overlay 展开（激活编组的成员一并进 DOM 覆盖层）
             // 与样式（锁链徽标配色）。漏传会让"点锁链禁用联动"没有任何视觉反馈。
             disabledGroupIds: [...d.disabledGroupIds],
+            // 静音检测预览：由细节层画半透明红色（旧实现是 ClipItem 内的 DOM 层）。
+            silenceSegmentsByClipId: d.silenceSegmentsByClipId as
+                | Record<string, ReadonlyArray<readonly [number, number]>>
+                | undefined,
         });
 
         const clipResult = clipBuilder.build({

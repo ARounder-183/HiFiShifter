@@ -413,6 +413,13 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     const tAny = t as (key: string) => string;
     const ignoreGrouping = useAppSelector((state) => state.session.ignoreGrouping);
     const disabledGroupIds = useAppSelector((state) => state.session.disabledGroupIds);
+    /**
+     * 静音检测预览区段（内核模式用）。
+     *
+     * 由静音检测对话框实时写入；内核把它画成半透明红色覆盖层。`TimelineSessionSlice`
+     * 不含该字段，因此在这里单独选择（与旧实现 `ClipItem` 的取值方式一致）。
+     */
+    const silencePreviewSegments = useAppSelector((state) => state.session.silencePreviewSegments);
     // 双击名称的第一次点击会把播放头移动到点击位置，第二次点击可能落在播放头线上。
     // 记录名称区域的第一次点击，让播放头在短时间内收到同位置点击时转而进入重命名。
     const renameClickCandidateRef = React.useRef<ClipRenameClickCandidate | null>(null);
@@ -4390,6 +4397,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 interactions={kernelInteractions}
                                 activeGroupIds={kernelActiveGroupIds}
                                 disabledGroupIds={disabledGroupIds}
+                                silenceSegmentsByClipId={silencePreviewSegments ?? undefined}
                                 inlineEdit={kernelInlineEditProp}
                                 snapHighlight={{
                                     pxPerSec,

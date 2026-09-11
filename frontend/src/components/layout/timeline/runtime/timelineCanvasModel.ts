@@ -86,7 +86,53 @@ export type TimelineCanvasClipModel = {
      * `drawTimelineCanvas` 却能读到它——类型与实际不符，补上声明。
      */
     leadingOverlapPx?: number;
+    /**
+     * 静音检测预览区段（像素，相对 clip 左缘）。
+     *
+     * 与旧实现 `ClipItem` 的红色覆盖层同源：后端给出的是**工程秒**区间，这里按
+     * `axis` 投影为像素并**钳制到 clip 本体**（后端区域越过末端时不得把红色画到
+     * 相邻 clip 上）。空数组与缺省等价（不绘制）。
+     */
+    silenceSpansPx?: Array<{ leftPx: number; widthPx: number }>;
 };
+
+/**
+ * 静音检测预览区段 → clip 内的相对像素区间。
+ *
+ * 流程：逐个区间取与 clip 本体的交集（**防御性钳制**：后端区域越过 clip 末端时
+ * 不得把红色画到相邻 clip 上，与旧实现 `ClipItem` 的钳制同源）→ 投影为相对像素。
+ *
+ * 特殊说明：只保留长度 > 0 的区间；全部无效时返回 undefined（而非空数组），
+ * 让绘制端用一次 `!== undefined` 判断跳过。
+ *
+ * @param args.axis 统一坐标投影。
+ * @param args.clipStartSec clip 起点（工程秒）。
+ * @param args.clipLengthSec clip 长度（秒）。
+ * @param args.segments 该 clip 的静音区间（工程秒）。
+ * @returns 相对 clip 左缘的像素区间；无有效区间时为 undefined。
+ */
+function buildSilenceSpansPx(args: {
+    axis: TimelineAxis;
+    clipStartSec: number;
+    clipLengthSec: number;
+    segments?: ReadonlyArray<readonly [number, number]>;
+}): Array<{ leftPx: number; widthPx: number }> | undefined {
+    const segments = args.segments;
+    if (segments === undefined || segments.length === 0) return undefined;
+    const clipStartSec = Number(args.clipStartSec) || 0;
+    const clipEndSec = clipStartSec + Math.max(0, Number(args.clipLengthSec) || 0);
+    const spans: Array<{ leftPx: number; widthPx: number }> = [];
+    for (const segment of segments) {
+        const startSec = Math.max(Number(segment[0]) || 0, clipStartSec);
+        const endSec = Math.min(Number(segment[1]) || 0, clipEndSec);
+        if (!(endSec > startSec)) continue;
+        spans.push({
+            leftPx: secToSpanPx(args.axis, startSec - clipStartSec),
+            widthPx: Math.max(1, secToSpanPx(args.axis, endSec - startSec)),
+        });
+    }
+    return spans.length > 0 ? spans : undefined;
+}
 
 /**
  * 构建 clip 体画布的稀疏渲染模型。
@@ -130,6 +176,13 @@ export function buildSparseClipRenderModel(args: {
      * 否则两层不透明色块会"叠加"成脏色。
      */
     leadingOverlapSecByClipId?: Record<string, number>;
+    /**
+     * 静音检测预览区段：clip id → 工程秒的 `[起, 止]` 区间数组。
+     *
+     * 来源是 `session.silencePreviewSegments`（静音检测对话框的实时预览），
+     * 由细节层画成半透明红色。
+     */
+    silenceSegmentsByClipId?: Record<string, ReadonlyArray<readonly [number, number]>>;
 }): {
     drawClips: TimelineCanvasClipModel[];
     overlayClipIdsByTrackId: Record<string, string[]>;
@@ -263,6 +316,12 @@ export function buildSparseClipRenderModel(args: {
                 args.axis,
                 args.leadingOverlapSecByClipId?.[clip.id] ?? 0,
             ),
+            silenceSpansPx: buildSilenceSpansPx({
+                axis: args.axis,
+                clipStartSec: clip.startSec,
+                clipLengthSec: clip.lengthSec,
+                segments: args.silenceSegmentsByClipId?.[clip.id],
+            }),
         })),
     );
 
