@@ -52,6 +52,7 @@ import { resolveFontFamily, resolveThemeColor } from "../../runtime/timelineCanv
 import { resolveHorizontalWheelZoom } from "../../runtime/timelineScrollRange";
 import { resolveTimelineMinPxPerSec } from "../../runtime/timelineZoomBounds";
 import {
+    CLIP_HEADER_HEIGHT,
     DEFAULT_PX_PER_SEC,
     DEFAULT_ROW_HEIGHT,
     MAX_PX_PER_SEC,
@@ -59,6 +60,7 @@ import {
     MIN_PX_PER_SEC,
     MIN_ROW_HEIGHT,
 } from "../../constants";
+import { hitTest, type HitTestClip } from "../interaction/hitTest";
 import { createGlCanvas } from "../gl/glContext";
 import { CLIP_INSTANCE_FLOATS, writeFlatInstance } from "../gl/instanceLayout";
 import { createSdfBoxProgram } from "../gl/sdfBoxProgram";
@@ -117,6 +119,10 @@ export interface TimelineKernelData {
     readonly playheadZoomEnabled: boolean;
     /** 初始水平缩放（CSS px/秒）：仅用于首次创建滚动内核。 */
     readonly initialPxPerSec: number;
+    /** 单选焦点 clip（选中样式与旧实现同源，由样式模块消费）。 */
+    readonly selectedClipId: string | null;
+    /** 多选集合（与 `selectedClipId` 一起决定描边 / 高亮）。 */
+    readonly multiSelectedClipIds: readonly string[];
 }
 
 /**
@@ -181,6 +187,30 @@ export interface TimelineKernelHostArgs {
      * 竖直滚动在同一行窗口内不会触发。
      */
     readonly onVisibleRowsChange?: (firstRow: number, rowCount: number) => void;
+    /**
+     * 交互回调：内核只做**命中与手势**，编辑语义（Redux action / 后端 thunk）
+     * 一律交回 React 侧，避免 runtime 直接依赖 store。
+     */
+    readonly interactions?: TimelineKernelInteractions;
+}
+
+/** 内核交互回调集合。 */
+export interface TimelineKernelInteractions {
+    /**
+     * 请求跳转播放头（点击或拖拽空白 / 标尺）。
+     *
+     * @param sec 目标时间（秒，已钳制到 >= 0）。
+     * @param commit true = 单击或手势结束（应提交后端）；false = 拖拽中的预览。
+     */
+    readonly onSeek?: (sec: number, commit: boolean) => void;
+    /**
+     * 选中 clip。
+     *
+     * @param clipId 目标 clip；null 表示清空选择（点击空白时不会触发——空白
+     *   点击按旧实现语义只 seek，不清空选择）。
+     * @param additive true = 按住多选修饰键（Ctrl / ⌘），应切换而非替换选择。
+     */
+    readonly onSelectClip?: (clipId: string, additive: boolean) => void;
 }
 
 /** 宿主句柄。 */
@@ -351,7 +381,7 @@ function shouldWrite(next: number, previous: number, epsilon = 0.01): boolean {
  */
 export function createTimelineKernelHost(args: TimelineKernelHostArgs): TimelineKernelHost {
     const { container, canvas, hScrollbarThumb, vScrollbarThumb, data, sync } = args;
-    const { onRowHeightChange, onZoomChange, onVisibleRowsChange } = args;
+    const { onRowHeightChange, onZoomChange, onVisibleRowsChange, interactions } = args;
 
     const glCanvas = createGlCanvas(canvas);
     if (!glCanvas) throw new Error("WebGL2 不可用");
@@ -474,6 +504,10 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     let builtBpm = -1;
     let builtBeatsPerBar = -1;
     let builtRowHeight = -1;
+    // 选中态影响 clip 描边 / 高亮样式，变化时必须重建（用引用比较：Immer 未变更
+    // 时数组引用稳定）。初值用 undefined 与「未选中（null）」区分。
+    let builtSelectedClipId: string | null | undefined = undefined;
+    let builtMultiSelectedRef: readonly string[] | null = null;
 
     /** 组装当前 axis（内容坐标投影）。 */
     function currentAxis(): TimelineAxis {
@@ -503,7 +537,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             builtBpm !== d.bpm ||
             builtBeatsPerBar !== d.beatsPerBar ||
             // 行高变化会改变所有行的内容坐标（分界线 / clip 位置），必须重建。
-            builtRowHeight !== d.rowHeight
+            builtRowHeight !== d.rowHeight ||
+            builtSelectedClipId !== d.selectedClipId ||
+            builtMultiSelectedRef !== d.multiSelectedClipIds
         );
     }
 
@@ -586,8 +622,10 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             visibleTrackClipsById: clipsByTrackId as never,
             axis,
             rowHeight: view.rowHeight,
-            selectedClipId: null,
-            multiSelectedClipIds: [],
+            // 选中态来自数据镜像：内核不持有选中真值，只消费（与旧实现同一套
+            // 样式模块，选中描边 / 高亮因此逐像素一致）。
+            selectedClipId: d.selectedClipId,
+            multiSelectedClipIds: [...d.multiSelectedClipIds],
             renamingClipId: null,
         });
 
@@ -626,6 +664,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         builtBpm = d.bpm;
         builtBeatsPerBar = d.beatsPerBar;
         builtRowHeight = d.rowHeight;
+        builtSelectedClipId = d.selectedClipId;
+        builtMultiSelectedRef = d.multiSelectedClipIds;
         // 细节层窗口：与 GL 几何窗口完全一致（同一批 drawClips、同一内容坐标
         // 范围），因此两层在滚动时一起平移，不会出现细节与块面错位。
         detailWindowStartX = windowLeft;
@@ -746,6 +786,43 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         paint: (axis: TimelineAxis) => void;
         order: number;
     }> = [];
+
+    // ── 命中索引（内容变化时重建）───────────────────────────────────
+    // 命中必须覆盖**全部** clip，而不是几何窗口内的可见子集——窗口外的 clip
+    // 在滚动回来之前仍需能被点击命中。索引按轨道分桶、桶内按 startSec 升序
+    // （命中测试用二分定位候选）。
+    let hitClipsByTrack = new Map<string, HitTestClip[]>();
+    let hitTracks: readonly TrackInfo[] = [];
+    let hitClipsRef: readonly ClipInfo[] | null = null;
+    let hitTracksRef: readonly TrackInfo[] | null = null;
+
+    /** 重建命中索引（按 clip / 轨道引用变化判定，避免滚动重建时白做）。 */
+    function rebuildHitIndex(): void {
+        const d = data();
+        const map = new Map<string, HitTestClip[]>();
+        for (const track of d.tracks) map.set(track.id, []);
+        for (const clip of d.clips) {
+            const list = map.get(clip.trackId);
+            if (list === undefined) continue;
+            list.push({
+                id: clip.id,
+                trackId: clip.trackId,
+                startSec: clip.startSec,
+                lengthSec: clip.lengthSec,
+            });
+        }
+        for (const list of map.values()) list.sort((a, b) => a.startSec - b.startSec);
+        hitClipsByTrack = map;
+        hitTracks = d.tracks;
+        hitClipsRef = d.clips;
+        hitTracksRef = d.tracks;
+    }
+
+    /** 按需刷新命中索引（引用比较：Redux/Immer 未变更时引用稳定）。 */
+    function ensureHitIndex(): void {
+        const d = data();
+        if (hitClipsRef !== d.clips || hitTracksRef !== d.tracks) rebuildHitIndex();
+    }
 
     /**
      * 把内核视口同步到外部 DOM。
@@ -1045,6 +1122,61 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     let panStartScrollLeft = 0;
     let panStartScrollTop = 0;
 
+    // ── 输入：左键手势（选中 / seek）─────────────────────────────────
+    /**
+     * 手势状态（同一时刻只有一个）。
+     *
+     * - `pending-select`：按下时命中 clip，等待「抬起（选中）」或「超过位移阈值
+     *   （拖拽）」二选一——用阈值区分点击与拖拽是 DAW 的通用手感，避免手抖把
+     *   一次点击判成拖拽。
+     * - `seek`：按下时命中空白，立即 seek 并在拖拽中持续 seek。
+     */
+    type Gesture =
+        | { kind: "none" }
+        | { kind: "pending-select"; startClientX: number; startClientY: number; clipId: string }
+        | { kind: "seek" };
+    let gesture: Gesture = { kind: "none" };
+
+    /** 点击 / 拖拽的位移阈值（CSS px）。 */
+    const DRAG_THRESHOLD_PX = 4;
+
+    /**
+     * 把视口内坐标换算为命中结果（内容坐标下的轨道 + clip）。
+     *
+     * @param clientX 指针视口坐标 X。
+     * @param clientY 指针视口坐标 Y。
+     * @returns 命中结果。
+     */
+    function hitAt(clientX: number, clientY: number): ReturnType<typeof hitTest> {
+        const rect = container.getBoundingClientRect();
+        const view = scroll.get();
+        ensureHitIndex();
+        return hitTest({
+            contentX: view.scrollLeft + (clientX - rect.left),
+            contentY: view.scrollTop + (clientY - rect.top),
+            pxPerSec: view.pxPerSec,
+            rowHeight: view.rowHeight,
+            tracks: hitTracks,
+            clipsByTrack: hitClipsByTrack,
+            headerHeightPx: CLIP_HEADER_HEIGHT,
+        });
+    }
+
+    /**
+     * 把视口内坐标换算为工程时间。
+     *
+     * @param clientX 指针视口坐标 X。
+     * @returns 工程时间（秒，已钳制到 >= 0）。
+     */
+    function secAt(clientX: number): number {
+        const rect = container.getBoundingClientRect();
+        const view = scroll.get();
+        return Math.max(
+            0,
+            (view.scrollLeft + (clientX - rect.left)) / Math.max(1e-9, view.pxPerSec),
+        );
+    }
+
     /** 判断事件目标是否为可编辑元素（输入框内的中键不应触发平移）。 */
     function isEditableTarget(target: EventTarget | null): boolean {
         const element = target as HTMLElement | null;
@@ -1058,10 +1190,78 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         );
     }
 
-    function onMiddlePointerDown(event: PointerEvent): void {
-        if (event.button !== 1) return;
-        if (event.pointerType !== "mouse") return;
+    /**
+     * 指针按下总入口：按按钮分派到中键平移 / 左键手势。
+     *
+     * 特殊说明：可编辑元素（输入框等）内的按下必须放行——重命名输入框的文本
+     * 光标与选区操作不能被时间轴手势吞掉。
+     */
+    function onPointerDown(event: PointerEvent): void {
         if (isEditableTarget(event.target)) return;
+        if (event.button === 1) {
+            if (event.pointerType !== "mouse") return;
+            startMiddlePan(event);
+            return;
+        }
+        if (event.button !== 0) return;
+        startPrimaryGesture(event);
+    }
+
+    /** 左键按下：命中 clip → 待选中；命中空白 → 立即 seek 并进入拖拽 seek。 */
+    function startPrimaryGesture(event: PointerEvent): void {
+        const hit = hitAt(event.clientX, event.clientY);
+        if (hit.kind === "clip") {
+            gesture = {
+                kind: "pending-select",
+                startClientX: event.clientX,
+                startClientY: event.clientY,
+                clipId: hit.clip.id,
+            };
+        } else {
+            gesture = { kind: "seek" };
+            interactions?.onSeek?.(hit.sec, true);
+        }
+        try {
+            container.setPointerCapture(event.pointerId);
+        } catch {
+            // 捕获失败不影响手势（window 上的 move 监听仍会收到事件）。
+        }
+    }
+
+    /** 左键手势的移动处理（中键平移由 onPanPointerMove 单独负责）。 */
+    function onGesturePointerMove(event: PointerEvent): void {
+        if (gesture.kind === "seek") {
+            interactions?.onSeek?.(secAt(event.clientX), false);
+            return;
+        }
+        if (gesture.kind === "pending-select") {
+            const dx = event.clientX - gesture.startClientX;
+            const dy = event.clientY - gesture.startClientY;
+            if (dx * dx + dy * dy >= DRAG_THRESHOLD_PX * DRAG_THRESHOLD_PX) {
+                // 超过阈值：本期内核尚未接管 clip 拖拽编辑，先结束手势避免误选
+                // （拖拽编辑迁移后，这里改为进入 move / trim 手势）。
+                gesture = { kind: "none" };
+            }
+        }
+    }
+
+    /** 左键手势收尾：待选中态提交选中，并清理指针捕获。 */
+    function onGesturePointerUp(event: PointerEvent): void {
+        if (gesture.kind === "pending-select") {
+            interactions?.onSelectClip?.(gesture.clipId, event.ctrlKey || event.metaKey);
+        }
+        if (gesture.kind !== "none") {
+            try {
+                container.releasePointerCapture(event.pointerId);
+            } catch {
+                // 已释放 / 未捕获：忽略。
+            }
+            gesture = { kind: "none" };
+        }
+    }
+
+    /** 中键平移的按下处理（抓取式：记录起点与当时的滚动位置）。 */
+    function startMiddlePan(event: PointerEvent): void {
         event.preventDefault();
         const view = scroll.get();
         panPointerId = event.pointerId;
@@ -1102,11 +1302,14 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         if (event.button === 1) event.preventDefault();
     }
 
-    container.addEventListener("pointerdown", onMiddlePointerDown);
+    container.addEventListener("pointerdown", onPointerDown);
     container.addEventListener("auxclick", onAuxClick);
     window.addEventListener("pointermove", onPanPointerMove);
+    window.addEventListener("pointermove", onGesturePointerMove);
     window.addEventListener("pointerup", endPan);
     window.addEventListener("pointercancel", endPan);
+    window.addEventListener("pointerup", onGesturePointerUp);
+    window.addEventListener("pointercancel", onGesturePointerUp);
 
     // ── 输入：滚动条拖拽 ─────────────────────────────────────────────
     let dragAxis: "x" | "y" | null = null;
@@ -1264,8 +1467,11 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             resizeObserver.disconnect();
             container.removeEventListener("wheel", onWheel);
             container.removeEventListener("keydown", onKeyDown);
-            container.removeEventListener("pointerdown", onMiddlePointerDown);
+            container.removeEventListener("pointerdown", onPointerDown);
             container.removeEventListener("auxclick", onAuxClick);
+            window.removeEventListener("pointermove", onGesturePointerMove);
+            window.removeEventListener("pointerup", onGesturePointerUp);
+            window.removeEventListener("pointercancel", onGesturePointerUp);
             hScrollbarThumb.removeEventListener("pointerdown", onHDown);
             vScrollbarThumb.removeEventListener("pointerdown", onVDown);
             window.removeEventListener("pointermove", onPointerMove);

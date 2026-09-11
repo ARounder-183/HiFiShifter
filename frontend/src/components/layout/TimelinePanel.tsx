@@ -56,6 +56,7 @@ import {
     setTrackName,
     setTrackVolume,
     setPendingPlayheadReveal,
+    setSelectedClip,
 } from "../../features/session/sessionSlice";
 import { setTempoMapRemote } from "../../features/session/thunks/tempoMapThunks";
 
@@ -1067,6 +1068,68 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
      */
     const kernelHostRef = React.useRef<TimelineKernelHost | null>(null);
 
+    /** 内核 seek 的待提交位置与 rAF 句柄（拖拽期间按帧节流，松手立即提交）。 */
+    const kernelSeekPendingRef = React.useRef<number | null>(null);
+    const kernelSeekRafRef = React.useRef<number | null>(null);
+
+    /**
+     * 内核 seek 回调：单击或拖拽空白处跳转播放头。
+     *
+     * 拖拽帧以 rAF 节流提交（内核按 rAF 频率回调），避免每个指针事件都打一次
+     * 后端 seek；松手（commit）时取消待提交帧并立即提交最终位置，保证落点精确。
+     */
+    const handleKernelSeek = React.useCallback(
+        (sec: number, commit: boolean) => {
+            kernelSeekPendingRef.current = sec;
+            if (commit) {
+                if (kernelSeekRafRef.current != null) {
+                    cancelAnimationFrame(kernelSeekRafRef.current);
+                    kernelSeekRafRef.current = null;
+                }
+                kernelSeekPendingRef.current = null;
+                void dispatch(seekPlayhead(sec));
+                return;
+            }
+            if (kernelSeekRafRef.current != null) return;
+            kernelSeekRafRef.current = requestAnimationFrame(() => {
+                kernelSeekRafRef.current = null;
+                const target = kernelSeekPendingRef.current;
+                if (target == null) return;
+                kernelSeekPendingRef.current = null;
+                void dispatch(seekPlayhead(target));
+            });
+        },
+        [dispatch],
+    );
+
+    /**
+     * 内核选中回调：点击 clip 选中。
+     *
+     * 多选修饰键（Ctrl / ⌘）切换集合成员；否则单选并同步焦点 clip
+     * （焦点 clip 驱动参数编辑器的编辑目标，必须与多选集合一起更新）。
+     */
+    const handleKernelSelectClip = React.useCallback(
+        (clipId: string, additive: boolean) => {
+            if (additive) {
+                setMultiSelectedClipIds((prev) =>
+                    prev.includes(clipId)
+                        ? prev.filter((id) => id !== clipId)
+                        : [...prev, clipId],
+                );
+                return;
+            }
+            setMultiSelectedClipIds([clipId]);
+            dispatch(setSelectedClip(clipId));
+        },
+        [dispatch, setMultiSelectedClipIds],
+    );
+
+    /** 内核交互回调集合（引用稳定：内核创建时取一次）。 */
+    const kernelInteractions = React.useMemo(
+        () => ({ onSeek: handleKernelSeek, onSelectClip: handleKernelSelectClip }),
+        [handleKernelSeek, handleKernelSelectClip],
+    );
+
     // ── 4. 全局事件监听 ─────────────────────────────────────
     useTimelineEventHandlers({
         dispatch,
@@ -1833,6 +1896,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 trackListScrollerRef={trackListScrollRef}
                                 rulerPlayheadLineRef={rulerPlayheadLineRef}
                                 hostRef={kernelHostRef}
+                                interactions={kernelInteractions}
                             />
                         </>
                     ) : (

@@ -36,6 +36,7 @@ import {
     createTimelineKernelHost,
     type TimelineKernelData,
     type TimelineKernelHost,
+    type TimelineKernelInteractions,
 } from "./host/timelineKernelHost";
 
 export interface TimelineKernelViewProps {
@@ -62,6 +63,12 @@ export interface TimelineKernelViewProps {
     readonly rulerPlayheadLineRef?: React.MutableRefObject<HTMLElement | null>;
     /** 宿主句柄出口：面板用它把「轨道头滚动」等外部意图转发给内核。 */
     readonly hostRef?: React.MutableRefObject<TimelineKernelHost | null>;
+    /**
+     * 交互回调（内核只做命中与手势，编辑语义交回面板 / Redux）。
+     *
+     * 引用须稳定（用 `useCallback`）：内核在创建时取一次，引用抖动不会生效。
+     */
+    readonly interactions?: TimelineKernelInteractions;
 }
 
 export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => {
@@ -75,6 +82,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         trackListScrollerRef,
         rulerPlayheadLineRef,
         hostRef,
+        interactions,
     } = props;
 
     const containerRef = React.useRef<HTMLDivElement | null>(null);
@@ -103,6 +111,8 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
     const minLabelSpacingPx = useAppSelector((state) => state.session.rulerLabelSpacingPx);
     const tempoMap = useAppSelector((state) => state.session.tempoMap);
     const playheadZoomEnabled = useAppSelector((state) => state.session.playheadZoomEnabled);
+    const selectedClipId = useAppSelector((state) => state.session.selectedClipId);
+    const multiSelectedClipIds = useAppSelector((state) => state.session.multiSelectedClipIds);
     const horizontalZoomKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.horizontalZoom"),
     );
@@ -145,6 +155,8 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         },
         playheadZoomEnabled,
         initialPxPerSec,
+        selectedClipId,
+        multiSelectedClipIds,
     });
 
     // 数据镜像：渲染期写 ref，宿主在 rAF 内读取（避免宿主订阅 React 状态）。
@@ -182,6 +194,19 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         getPlayheadSec,
         onVisibleRowsChange: handleVisibleRowsChange,
     };
+
+    // 交互回调镜像：同上（面板用 useCallback 提供，但引用仍可能在依赖变化时更新）。
+    const interactionsRef = React.useRef<TimelineKernelInteractions | undefined>(interactions);
+    // eslint-disable-next-line react-hooks/refs -- 回调镜像：同上
+    interactionsRef.current = interactions;
+    const stableInteractions = React.useMemo<TimelineKernelInteractions>(
+        () => ({
+            onSeek: (sec, commit) => interactionsRef.current?.onSeek?.(sec, commit),
+            onSelectClip: (clipId, additive) =>
+                interactionsRef.current?.onSelectClip?.(clipId, additive),
+        }),
+        [],
+    );
 
     /**
      * 内核视口源适配器（供波形面订阅）。
@@ -264,6 +289,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                 onZoomChange: (pxPerSec) => callbacksRef.current.onPxPerSecChange(pxPerSec),
                 onVisibleRowsChange: (firstRow, rowCount) =>
                     callbacksRef.current.onVisibleRowsChange(firstRow, rowCount),
+                interactions: stableInteractions,
             });
         } catch (error) {
             setFatal(error instanceof Error ? error.message : String(error));
