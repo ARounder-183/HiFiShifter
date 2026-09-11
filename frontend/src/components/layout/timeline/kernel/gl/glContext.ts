@@ -40,7 +40,13 @@ export interface GlCanvasHandle {
     resize(cssWidthPx: number, cssHeightPx: number, dpr: number): GlRasterTarget;
     /** 以透明清屏（每帧绘制的第一步）。 */
     clear(): void;
-    /** 释放上下文（主动 `loseContext`，让浏览器尽快回收显存）。 */
+    /**
+     * 释放句柄。
+     *
+     * 特殊说明：**不**主动丢失上下文（原因见实现处注释）——一个 canvas 只能有
+     * 一个 WebGL context，丢失后无法重建，会破坏 StrictMode 双挂载 / HMR 的
+     * "销毁后立即重新挂载"模式。
+     */
     dispose(): void;
 }
 
@@ -95,7 +101,16 @@ export function createGlCanvas(canvas: HTMLCanvasElement): GlCanvasHandle | null
         },
 
         dispose() {
-            gl.getExtension("WEBGL_lose_context")?.loseContext();
+            // 刻意**不**调用 `WEBGL_lose_context.loseContext()`。
+            //
+            // 规范约束：一个 canvas 只能有一个 WebGL context；`loseContext()` 之后对
+            // 同一 canvas 再 `getContext("webgl2")` 会返回**同一个已丢失的 context**
+            // （而不是新建）。React StrictMode 的双挂载与 HMR 重新挂载恰好是
+            // "dispose 后立即重建"的模式，loseContext 会让第二次挂载拿到已丢失的
+            // context，表现为 `createShader` 返回 null（"Unable to create shader"）。
+            //
+            // 真正的 GPU 资源（program / buffer / texture）由各 program 的 dispose
+            // 释放；context 本身随 canvas 被 GC 回收，无需手动丢失。
         },
     };
 }

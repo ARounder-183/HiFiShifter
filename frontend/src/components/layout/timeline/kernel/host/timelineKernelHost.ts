@@ -37,9 +37,9 @@ import { createGlyphLayout } from "../glyph/glyphLayout";
 import { createGlyphRasterizer, GLYPH_LINE_HEIGHT_RATIO } from "../glyph/glyphRasterizer";
 import { createGlCanvas } from "../gl/glContext";
 import { buildGlyphQuads, type GlyphQuad } from "../gl/glyphQuads";
-import { createGlyphProgram } from "../gl/glyphProgram";
+import { createGlyphProgram, type GlyphProgram } from "../gl/glyphProgram";
 import { CLIP_INSTANCE_FLOATS, writeFlatInstance } from "../gl/instanceLayout";
-import { createSdfBoxProgram } from "../gl/sdfBoxProgram";
+import { createSdfBoxProgram, type SdfBoxProgram } from "../gl/sdfBoxProgram";
 import { computeScrollbar, scrollDeltaFromThumbDrag } from "../input/scrollbars";
 import { normalizeWheelDelta } from "../input/normalizeWheel";
 import { createRenderLoop } from "../renderLoop";
@@ -131,6 +131,33 @@ function readFrameProfiler(): FrameProfilerLike | undefined {
 }
 
 /**
+ * 创建两个 GL program；任一失败时释放已创建的资源后抛错。
+ *
+ * 特殊说明：React StrictMode 双挂载与 HMR 会反复"创建 → 销毁 → 再创建"，
+ * 失败路径若不释放，program / buffer 会在每次重试中累积（context 本身按
+ * `glContext` 的说明保留复用，不在此释放）。
+ *
+ * @param gl 内核 WebGL2 上下文。
+ * @returns 两个 program 句柄。
+ */
+function createKernelPrograms(gl: WebGL2RenderingContext): {
+    sdfBox: SdfBoxProgram;
+    glyphProgram: GlyphProgram;
+} {
+    let sdfBox: SdfBoxProgram | null = null;
+    let glyphProgram: GlyphProgram | null = null;
+    try {
+        sdfBox = createSdfBoxProgram(gl);
+        glyphProgram = createGlyphProgram(gl);
+    } catch (error) {
+        sdfBox?.dispose();
+        glyphProgram?.dispose();
+        throw error;
+    }
+    return { sdfBox, glyphProgram };
+}
+
+/**
  * 创建内核宿主。
  *
  * 流程：
@@ -149,8 +176,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     const glCanvas = createGlCanvas(canvas);
     if (!glCanvas) throw new Error("WebGL2 不可用");
     const gl = glCanvas.gl;
-    const sdfBox = createSdfBoxProgram(gl);
-    const glyphProgram = createGlyphProgram(gl);
+    const { sdfBox, glyphProgram } = createKernelPrograms(gl);
 
     const readDpr = () => window.devicePixelRatio || 1;
     const rasterizer = createGlyphRasterizer({ pageSizePx: 2048, maxPages: 1, dpr: readDpr() });
