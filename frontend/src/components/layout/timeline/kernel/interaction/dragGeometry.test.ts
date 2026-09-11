@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { resolveDragDelta, resolveTargetTrackIndex } from "./dragGeometry";
+import { resolveDragDelta, resolveTargetTrackIndex, resolveTrimEdge } from "./dragGeometry";
 
 describe("resolveDragDelta", () => {
     it("按 pxPerSec 把水平位移换算为秒", () => {
@@ -60,6 +60,56 @@ describe("resolveDragDelta", () => {
             projectSec: 60,
         });
         expect(out.startSec).toBe(0);
+    });
+});
+
+describe("resolveTrimEdge", () => {
+    const base = {
+        deltaContentXPx: 0,
+        pxPerSec: 100,
+        startSec: 10,
+        lengthSec: 4,
+        projectSec: 60,
+        minLengthSec: 0.1,
+    } as const;
+
+    it("左边缘向右拖 = 裁短，右端固定", () => {
+        const out = resolveTrimEdge({ ...base, edge: "left", deltaContentXPx: 100 });
+        expect(out.startSec).toBeCloseTo(11, 6);
+        expect(out.lengthSec).toBeCloseTo(3, 6);
+        expect(out.startSec + out.lengthSec).toBeCloseTo(14, 6);
+        expect(out.deltaSec).toBeCloseTo(1, 6);
+    });
+
+    it("左边缘向左拖 = 延长（受起点 0 约束）", () => {
+        const out = resolveTrimEdge({ ...base, edge: "left", deltaContentXPx: -100 });
+        expect(out.startSec).toBeCloseTo(9, 6);
+        expect(out.lengthSec).toBeCloseTo(5, 6);
+        expect(out.deltaSec).toBeCloseTo(-1, 6);
+    });
+
+    it("左边缘拖过起点时钳制到 0，右端仍固定", () => {
+        const out = resolveTrimEdge({ ...base, edge: "left", deltaContentXPx: -5000 });
+        expect(out.startSec).toBe(0);
+        expect(out.startSec + out.lengthSec).toBeCloseTo(14, 6);
+    });
+
+    it("右边缘向右拖 = 延长（受工程末端约束）", () => {
+        const out = resolveTrimEdge({ ...base, edge: "right", deltaContentXPx: 100 });
+        expect(out.startSec).toBeCloseTo(10, 6);
+        expect(out.lengthSec).toBeCloseTo(5, 6);
+        expect(out.deltaSec).toBeCloseTo(1, 6);
+    });
+
+    it("右边缘向左拖 = 裁短，但不小于最小长度", () => {
+        const out = resolveTrimEdge({ ...base, edge: "right", deltaContentXPx: -100000 });
+        expect(out.lengthSec).toBeCloseTo(0.1, 6);
+        expect(out.startSec).toBeCloseTo(10, 6);
+    });
+
+    it("右边缘延长不越过工程末端", () => {
+        const out = resolveTrimEdge({ ...base, edge: "right", deltaContentXPx: 100000 });
+        expect(out.startSec + out.lengthSec).toBeCloseTo(60, 6);
     });
 });
 

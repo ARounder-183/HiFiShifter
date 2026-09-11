@@ -74,6 +74,43 @@ describe("hitTest", () => {
         expect(result.trackIndex).toBe(-1);
     });
 
+    it("命中左边缘（trim 手柄）", () => {
+        // a1 = [1,3) → 内容坐标 100..300；x=102 落在左边缘（默认 6px 内）
+        const result = hitTest(makeArgs({ contentX: 102, contentY: 40 }));
+        expect(result.kind).toBe("clip");
+        if (result.kind !== "clip") return;
+        expect(result.region).toBe("left-edge");
+    });
+
+    it("命中右边缘（trim 手柄）", () => {
+        const result = hitTest(makeArgs({ contentX: 298, contentY: 40 }));
+        expect(result.kind).toBe("clip");
+        if (result.kind !== "clip") return;
+        expect(result.region).toBe("right-edge");
+    });
+
+    it("边缘优先于 header 分区（顶部的 trim 手柄不能被 header 抢走）", () => {
+        const result = hitTest(makeArgs({ contentX: 102, contentY: 5 }));
+        expect(result.kind).toBe("clip");
+        if (result.kind !== "clip") return;
+        expect(result.region).toBe("left-edge");
+    });
+
+    it("极短 clip 的边缘宽度收敛到 1/3，body 仍可命中", () => {
+        // 0.06s × 100px/s = 6px 宽 → 边缘收敛到 2px
+        const args = makeArgs({
+            contentY: 40,
+            clipsByTrack: new Map([
+                ["A", [{ id: "tiny", trackId: "A", startSec: 0, lengthSec: 0.06 }]],
+                ["B", []],
+            ]),
+        });
+        const result = hitTest({ ...args, contentX: 3 });
+        expect(result.kind).toBe("clip");
+        if (result.kind !== "clip") return;
+        expect(result.region).toBe("body");
+    });
+
     it("时间换算按 pxPerSec，且负数钳制到 0", () => {
         const result = hitTest(makeArgs({ contentX: -50, contentY: 40 }));
         expect(result.sec).toBe(0);

@@ -22,6 +22,9 @@
  *    两个 clip 在交界处只命中右侧那个，与旧实现的 DOM 层叠顺序一致。
  */
 
+/** 左右边缘的默认命中宽度（CSS px）。与 `FADE_CORNER_EDGE_WIDTH_PX` 同量级。 */
+const DEFAULT_EDGE_WIDTH_PX = 6;
+
 /** 命中测试所需的 clip 最小字段集。 */
 export interface HitTestClip {
     readonly id: string;
@@ -35,8 +38,14 @@ export interface HitTestTrack {
     readonly id: string;
 }
 
-/** clip 内的命中分区。 */
-export type ClipHitRegion = "header" | "body";
+/**
+ * clip 内的命中分区。
+ *
+ * 边缘分区（`left-edge` / `right-edge`）供 trim 手势使用；它们**优先于**
+ * header / body 判定——边缘是"窄条"，若让 header 先判，靠上的边缘会被 header 抢走，
+ * 表现为"顶部的 trim 手柄点不动"。
+ */
+export type ClipHitRegion = "header" | "body" | "left-edge" | "right-edge";
 
 /** 命中结果。 */
 export type HitResult =
@@ -73,6 +82,13 @@ export interface HitTestArgs {
     readonly clipsByTrack: ReadonlyMap<string, readonly HitTestClip[]>;
     /** clip header 高度（CSS px），用于区分 header / body 分区。 */
     readonly headerHeightPx: number;
+    /**
+     * 左右边缘的命中宽度（CSS px，内容坐标）。缺省 6。
+     *
+     * 与既有 `FADE_CORNER_EDGE_WIDTH_PX` 同量级：trim 手柄必须够宽才好点中，
+     * 又不能宽到把短 clip 的整个 body 吞掉（因此判定时还会按 clip 宽度收敛）。
+     */
+    readonly edgeWidthPx?: number;
 }
 
 /**
@@ -137,11 +153,25 @@ export function hitTest(args: HitTestArgs): HitResult {
     const headerHeightPx = Number.isFinite(args.headerHeightPx)
         ? Math.max(0, args.headerHeightPx)
         : 0;
-    return {
-        kind: "clip",
-        clip,
-        region: localY < headerHeightPx ? "header" : "body",
-        sec,
-        trackIndex,
-    };
+
+    // 边缘优先于 header / body（见 ClipHitRegion 注释）。边缘宽度按 clip 宽度
+    // 收敛到 1/3：极短 clip 不能整块都算边缘，否则 body 区域消失、拖不动。
+    const clipLeftPx = clip.startSec * safePxPerSec;
+    const clipRightPx = (clip.startSec + clip.lengthSec) * safePxPerSec;
+    const clipWidthPx = Math.max(1, clipRightPx - clipLeftPx);
+    const rawEdgeWidthPx = Number.isFinite(args.edgeWidthPx)
+        ? Math.max(0, args.edgeWidthPx as number)
+        : DEFAULT_EDGE_WIDTH_PX;
+    const edgeWidthPx = Math.min(rawEdgeWidthPx, clipWidthPx / 3);
+
+    let region: ClipHitRegion;
+    if (args.contentX - clipLeftPx <= edgeWidthPx) {
+        region = "left-edge";
+    } else if (clipRightPx - args.contentX <= edgeWidthPx) {
+        region = "right-edge";
+    } else {
+        region = localY < headerHeightPx ? "header" : "body";
+    }
+
+    return { kind: "clip", clip, region, sec, trackIndex };
 }

@@ -64,6 +64,78 @@ export function resolveDragDelta(args: DragDeltaArgs): DragDeltaResult {
     return { startSec, deltaSec: startSec - baseStart };
 }
 
+/** trim 的边。 */
+export type TrimEdge = "left" | "right";
+
+/** trim 换算参数。 */
+export interface TrimEdgeArgs {
+    /** 拖动的边。 */
+    readonly edge: TrimEdge;
+    /** 指针相对按下位置的水平位移（内容坐标 CSS px，右为正）。 */
+    readonly deltaContentXPx: number;
+    readonly pxPerSec: number;
+    /** clip 按下时的起始时间（秒）。 */
+    readonly startSec: number;
+    /** clip 按下时的长度（秒）。 */
+    readonly lengthSec: number;
+    /** 工程总时长（秒）。 */
+    readonly projectSec: number;
+    /** 允许的最小长度（秒）：防止裁到 0 长度而无法再选中。 */
+    readonly minLengthSec: number;
+}
+
+/** trim 换算结果。 */
+export interface TrimEdgeResult {
+    /** 新的起始时间（秒）。 */
+    readonly startSec: number;
+    /** 新的长度（秒）。 */
+    readonly lengthSec: number;
+    /**
+     * 实际生效的变化量（秒）。
+     *
+     * 特殊说明：左边缘拖动改的是 `startSec`、右边缘改的是 `lengthSec`，
+     * 调用方据此决定把哪个值写进乐观态——用同一个字段表达可避免调用方
+     * 自己判断边缘类型而写错分支。
+     */
+    readonly deltaSec: number;
+}
+
+/**
+ * 把边缘拖拽位移换算为 clip 的新起始时间与长度。
+ *
+ * 规则：
+ * - **左边缘**：右端固定（`startSec + lengthSec` 不变），拖右 = 裁短、拖左 = 延长；
+ * - **右边缘**：左端固定，拖右 = 延长、拖左 = 裁短；
+ * - 两个方向都保证长度 >= `minLengthSec`，且不越出 `[0, projectSec]`。
+ *
+ * @param args 换算参数。
+ * @returns 新的起始时间、长度与实际变化量。
+ */
+export function resolveTrimEdge(args: TrimEdgeArgs): TrimEdgeResult {
+    const pxPerSec = Number.isFinite(args.pxPerSec) && args.pxPerSec > 0 ? args.pxPerSec : 0;
+    const rawDelta = pxPerSec > 0 ? args.deltaContentXPx / pxPerSec : 0;
+    const minLengthSec =
+        Number.isFinite(args.minLengthSec) && args.minLengthSec > 0 ? args.minLengthSec : 1e-6;
+    const projectSec = Number.isFinite(args.projectSec) ? Math.max(0, args.projectSec) : 0;
+    const startSec = Number.isFinite(args.startSec) ? Math.max(0, args.startSec) : 0;
+    const lengthSec = Number.isFinite(args.lengthSec)
+        ? Math.max(minLengthSec, args.lengthSec)
+        : minLengthSec;
+
+    if (args.edge === "left") {
+        // 右端固定：newStart + newLength = 原右端。
+        const rightEdge = startSec + lengthSec;
+        const maxStart = Math.max(0, rightEdge - minLengthSec);
+        const nextStart = Math.min(maxStart, Math.max(0, startSec + rawDelta));
+        return { startSec: nextStart, lengthSec: rightEdge - nextStart, deltaSec: nextStart - startSec };
+    }
+
+    // 右边缘：左端固定，长度受「工程末端 − 起点」与最小长度双向约束。
+    const maxLength = Math.max(minLengthSec, projectSec - startSec);
+    const nextLength = Math.min(maxLength, Math.max(minLengthSec, lengthSec + rawDelta));
+    return { startSec, lengthSec: nextLength, deltaSec: nextLength - lengthSec };
+}
+
 /**
  * 把内容坐标的纵向位置换算为目标轨道下标。
  *
