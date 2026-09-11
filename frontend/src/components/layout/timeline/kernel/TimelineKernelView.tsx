@@ -178,6 +178,15 @@ export interface TimelineKernelViewProps {
             readonly widthPx: number;
             /** 落点轨道：纵向位置由视图按 `rowHeight` 换算（面板没有行高）。 */
             readonly trackId: string;
+            /**
+             * 已算好的 CSS 背景（header 条 / body 区）。
+             *
+             * 由面板给出而不是视图算：轨道色归一化（`normalizedTrackColorCss`）
+             * 需要 `darkMode`，那是面板的渲染模式状态；视图重复这套配色逻辑
+             * 迟早与真实 clip 分叉。
+             */
+            readonly headerBackground: string;
+            readonly bodyBackground: string;
         }[];
         readonly contentWidth: number;
         readonly contentHeight: number;
@@ -618,12 +627,18 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                             }}
                         >
                             <div
-                                className="absolute left-0 right-0 top-0 bg-[var(--qt-clip-bg)]"
-                                style={{ height: CLIP_HEADER_HEIGHT }}
+                                className="absolute left-0 right-0 top-0"
+                                style={{
+                                    height: CLIP_HEADER_HEIGHT,
+                                    backgroundColor: item.headerBackground,
+                                }}
                             />
                             <div
-                                className="absolute left-0 right-0 bottom-0 border border-dashed border-black/40 bg-[var(--qt-clip-bg)]"
-                                style={{ top: CLIP_HEADER_HEIGHT }}
+                                className="absolute left-0 right-0 bottom-0 border border-dashed border-black/40"
+                                style={{
+                                    top: CLIP_HEADER_HEIGHT,
+                                    backgroundColor: item.bodyBackground,
+                                }}
                             />
                         </div>
                     );

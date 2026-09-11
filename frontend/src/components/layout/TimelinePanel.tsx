@@ -22,6 +22,7 @@ import { shallowEqual } from "react-redux";
 import { isModifierActive, selectKeybinding } from "../../features/keybindings/keybindingsSlice";
 import { resolveClipDragCopyMode } from "./timeline/hooks/clipDragCopyMode";
 import { copyClipsFromDrag } from "./timeline/hooks/copyClipsFromDrag";
+import { normalizedTrackColorCss } from "./timeline/runtime/timelineCanvasStyle";
 import { defaultFadeDirFor, FADE_PRESETS } from "./timeline/reaperFade";
 import type { FadeLengthFormatContext } from "./timeline/fadeTooltipText";
 import { FadeContextMenuHost } from "./timeline/FadeContextMenuHost";
@@ -2980,7 +2981,31 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                     kernelGhost === null
                                         ? undefined
                                         : {
-                                              items: kernelGhost,
+                                              // ghost 的轨道着色与真实 clip 同源（旧实现
+                                              // 用 color-mix + 归一化轨道色）。
+                                              items: kernelGhost.map((item) => {
+                                                  const trackColor =
+                                                      s.tracks.find((t) => t.id === item.trackId)
+                                                          ?.color || undefined;
+                                                  const tint =
+                                                      trackColor === undefined
+                                                          ? null
+                                                          : normalizedTrackColorCss(
+                                                                trackColor,
+                                                                darkMode,
+                                                            );
+                                                  return {
+                                                      ...item,
+                                                      headerBackground:
+                                                          tint === null
+                                                              ? "var(--qt-clip-bg)"
+                                                              : `color-mix(in oklab, var(--qt-clip-bg) 40%, ${tint} 60%)`,
+                                                      bodyBackground:
+                                                          tint === null
+                                                              ? "var(--qt-clip-bg)"
+                                                              : `color-mix(in oklab, var(--qt-clip-bg) 45%, ${tint} 55%)`,
+                                                  };
+                                              }),
                                               contentWidth: timelineScrollRange.paddedContentWidth,
                                               contentHeight,
                                           }
