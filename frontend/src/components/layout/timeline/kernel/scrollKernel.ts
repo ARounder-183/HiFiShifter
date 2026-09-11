@@ -4,8 +4,8 @@
  * 【主要内容】
  * 持有新内核唯一的视口真值（scrollLeft / scrollTop / pxPerSec / rowHeight），并提供
  * 两个写入入口：直接滚动（setScrollLeft / setScrollTop）与锚点缩放（setZoom）。
- * 内容尺寸不缓存，而是每次读取时经注入的 projectSec / trackCount / viewportWidthPx /
- * viewportHeightPx 现算——增删轨道、改工程时长、宿主 resize 都无需重建内核。
+ * 内容尺寸不缓存，而是每次读取时经注入的 projectSec / trackCount / viewportHeightPx
+ * 现算——增删轨道、改工程时长、宿主 resize 都无需重建内核。
  *
  * 【作用】
  * 自绘滚动取代原生 scroller 后，滚动位置不再由浏览器维护，边界必须由内核自己负责。
@@ -148,11 +148,11 @@ export interface ScrollKernel {
      * 2. 由「锚点下的工程时间不变」反算新 scrollLeft：
      *    `anchorSec = (scrollLeft + anchorScreenX) / 旧pxPerSec`，
      *    `新scrollLeft = anchorSec × 新pxPerSec − anchorScreenX`；
-     * 3. 用**新 pxPerSec**算出的上限钳制 scrollLeft（上限 = projectSec × pxPerSec − 视口宽）；
+     * 3. 用**新 pxPerSec**算出的上限钳制 scrollLeft（上限 = 工程宽度，见文件头「水平上限语义」）；
      * 4. pxPerSec 与 scrollLeft 一并提交，变化才通知。
      *
-     * 特殊说明：anchorScreenX 允许落在视口之外（指针移出宿主、拖拽缩放），
-     * 故不夹取到 [0, viewportWidth]，否则锚点会被钉在视口边缘造成缩放漂移。
+     * 特殊说明：anchorScreenX 允许落在宿主视口之外（指针移出宿主、拖拽缩放），
+     * 故不夹取到屏幕范围 [0, 视口宽)，否则锚点会被钉在视口边缘造成缩放漂移。
      *
      * @param pxPerSec 目标缩放（每秒像素数），非法值忽略。
      * @param anchorScreenX 锚点在视口内的水平位置（CSS px）。
@@ -377,7 +377,7 @@ export function createScrollKernel(options: ScrollKernelOptions): ScrollKernel {
      * 不通知）→ 否则整体替换冻结状态并通知订阅者。
      *
      * 特殊说明：候选值必须**已钳制**，本函数不做钳制。因为水平上限依赖 pxPerSec
-     * （上限 = projectSec × pxPerSec − 视口宽），setZoom 需要先用目标 pxPerSec 算上限，
+     * （上限 = 工程宽度 = projectSec × pxPerSec），setZoom 需要先用目标 pxPerSec 算上限，
      * 再把两个字段一起提交，避免出现「用旧上限钳制新缩放」的中间态。
      *
      * @param next 需要覆盖的字段；未给出的字段沿用当前值。

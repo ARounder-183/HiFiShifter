@@ -20,6 +20,15 @@
 - Create: `frontend/src/components/layout/timeline/kernel/scrollKernel.ts`
 - Test: `frontend/src/components/layout/timeline/kernel/scrollKernel.test.ts`
 
+> **实施修正（以 `kernel/scrollKernel.ts` 最终实现为准）**：
+> 1. 水平上限语义为「**工程宽度**」（允许把工程右端滚到视口左缘），与既有
+>    `runtime/timelineScrollRange.resolveTimelineScrollRange` 对齐——保证缩放锚点在任意
+>    缩放下成立、上限随缩放连续无跳变；竖直上限为「内容高 − 视口高」。
+> 2. 因此接口**不含** `viewportWidthPx`（只保留 `viewportHeightPx`），并新增
+>    `reclamp()`（外部边界变化后由宿主调用，重新钳制两轴）。
+> 3. 容差拆为 `SCROLL_EPSILON_PX`（位置）与 `ZOOM_EPSILON_RATIO`（pxPerSec 相对容差）。
+> 4. 下方测试示例为原始草案，最终测试共 14 条，见 `scrollKernel.test.ts`。
+
 **Step 1: 写失败测试**
 
 ```ts
