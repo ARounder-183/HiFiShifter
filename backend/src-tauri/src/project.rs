@@ -513,6 +513,70 @@ pub fn resolve_source_paths_on_open(
     (tl, missing_files.into_iter().collect())
 }
 
+/// 把**刚反序列化**出来的 `TimelineState` 整理成可投入会话使用的形态。
+///
+/// 磁盘形态（工程文件 / `-UNDO` 伴生文件）与运行时形态并不等价：
+/// - `Clip` 上的媒体字段（`source_path` / `duration_frames` /
+///   `source_sample_rate` / 内容指纹 / 波形预览…）是 active take 的**内存
+///   投影**，以 `#[serde(skip_serializing)]` 省略，权威数据只在 `takes` 里；
+/// - `source_file_mtime` / `source_file_size` 等运行时元数据是 `#[serde(skip)]`；
+/// - `project_scale_notes`、空参数记录等派生/可重建数据在保存时会精简掉。
+///
+/// 因此任何「反序列化后直接用」的路径都必须走这里统一物化：**少了
+/// `normalize_clip_takes()` 这一步，恢复出来的 Clip 就只有时间位置、没有
+/// 音频**（典型症状：读取 `-UNDO` 后撤销，Clip 里的音频内容被清空）。
+///
+/// 工程打开与操作记录恢复共用此函数，避免两条恢复路径各自演化而漂移。
+pub fn finalize_timeline_for_session(
+    timeline: crate::state::TimelineState,
+    project_path: &Path,
+    project_file_version: u32,
+) -> (crate::state::TimelineState, Vec<String>) {
+    let (mut tl, missing_files) = resolve_source_paths_on_open(timeline, project_path);
+
+    // 旧工程兼容迁移（仅 v3 及更早）：source_end_sec == 0.0 曾表示"到源文件
+    // 末尾"，新语义要求它是真实的结束时间，此处自动修正为 duration_sec 或
+    // length_sec。v4+ 工程的 se 恒为真实坐标，不得改写。
+    if project_file_version < 4 {
+        for clip in &mut tl.clips {
+            if clip.source_end_sec == 0.0 {
+                clip.source_end_sec = clip.duration_sec.unwrap_or(clip.length_sec);
+            }
+        }
+    }
+    // v4 迁移：v3 及更早的工程 Clip 不携带 loop_enabled，按当前"为新的音频块
+    // 启用循环"设置作为这些既有**音频** Clip 的 Loop 属性。
+    if project_file_version < 4 {
+        let default_loop = crate::config::loop_new_clips_default();
+        for clip in &mut tl.clips {
+            if clip.source_path.is_some() {
+                clip.loop_enabled = default_loop;
+            }
+        }
+    }
+    // 非 Loop 存储窗口规范化（对**所有版本**生效）+ take 窗口自愈。
+    for clip in &mut tl.clips {
+        crate::state::normalize_nonloop_source_window(clip);
+        crate::state::normalize_nonloop_all_take_windows(clip);
+    }
+    // 上面的规范化改的是 active take 内存投影：先写回 Take 权威数据。
+    tl.sync_clip_takes_from_flat();
+    // 再由 Take 物化回 Clip 投影（补齐 duration_frames / source_sample_rate /
+    // 指纹 / 波形等被序列化省略的字段），并顺带完成旧 Fade 字段迁移。
+    tl.normalize_clip_takes();
+    tl.migrate_legacy_common_param_curves();
+    // 归一化轨道顺序（Vec 顺序 == 显示顺序）与 Tempo Map（排序/钳制/补 0 点）。
+    tl.normalize_track_vec();
+    tl.normalize_tempo_map();
+    // 运行时文件元数据（外部文件变更检测）：不落盘，按当前磁盘补算。
+    for clip in &mut tl.clips {
+        crate::state::TimelineState::populate_clip_file_metadata(clip);
+    }
+    tl.sync_clip_takes_from_flat();
+
+    (tl, missing_files)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -550,6 +614,36 @@ mod tests {
             params.tension_edit = vec![0.0f32; 6400];
         }
         tl
+    }
+
+    #[test]
+    fn finalize_restores_clip_audio_metadata_dropped_by_serialization() {
+        // 复现「读取 -UNDO 后撤销 → Clip 里的音频内容被清空」的根因：
+        // `Clip` 的媒体字段只是 active take 的内存投影，序列化时被
+        // `skip_serializing` 省略；权威数据只在 `takes` 里。任何反序列化后
+        // 直接使用（不做 normalize）的恢复路径都会得到「有位置没音频」的 Clip。
+        let tl = timeline_with_clip_and_zero_curves();
+        let round_tripped: TimelineState =
+            serde_json::from_slice(&serde_json::to_vec(&tl).expect("serialize"))
+                .expect("deserialize");
+        assert_eq!(
+            round_tripped.clips[0].takes.len(),
+            1,
+            "take 是媒体字段的权威来源"
+        );
+        assert!(
+            round_tripped.clips[0].source_path.is_none(),
+            "磁盘形态不应携带 active take 投影"
+        );
+
+        let (finalized, _missing) =
+            finalize_timeline_for_session(round_tripped, Path::new("C:/proj/test.hshp"), 4);
+        let clip = &finalized.clips[0];
+        assert!(
+            clip.source_path.is_some(),
+            "finalize 必须把音频源路径物化回 Clip"
+        );
+        assert_eq!(clip.source_path, clip.takes[0].source_path);
     }
 
     #[test]

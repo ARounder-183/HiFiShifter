@@ -62,6 +62,8 @@ mod timeline;
 mod timeline_clipboard;
 #[path = "commands/ui_settings.rs"]
 mod ui_settings;
+#[path = "commands/undo_history_file.rs"]
+pub(crate) mod undo_history_file;
 #[path = "commands/vocalshifter.rs"]
 mod vocalshifter;
 #[path = "commands/vocalshifter_clipboard.rs"]

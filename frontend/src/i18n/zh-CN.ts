@@ -1391,6 +1391,7 @@ export const zhCN = {
     undo_history_jump: "跳转到该状态",
     undo_history_current: "当前状态",
     undo_history_count: "共 {count} 条记录（最多保留 100 条）",
+    undo_history_save_with_project: "与工程一起保存操作历史记录（到 -UNDO 文件）",
     history_op_initial: "初始化状态",
     history_op_import_media: "导入媒体",
     history_op_add_clip: "新建音频块",

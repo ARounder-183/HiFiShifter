@@ -59,6 +59,11 @@ export interface UiSettings {
         syncAllTakes?: boolean;
     };
     quickSearchAutoNormalize?: boolean;
+    /**
+     * 保存工程时把「操作记录」一并写入 `<工程文件名（含扩展名）>-UNDO`。
+     * 无论是否开启，打开工程时都会尝试读取伴生文件。
+     */
+    saveUndoHistoryWithProject?: boolean;
     visibleReferenceRootTrackIds?: string[];
     defaultStretchAlgorithm?: StretchAlgorithmOption;
     defaultHifiganMelStretch?: boolean;

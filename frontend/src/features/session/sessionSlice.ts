@@ -441,6 +441,13 @@ export interface SessionState {
     silenceDetectOptions: SilenceDetectSettings;
     /** 快速搜索放置音频时自动规格化 */
     quickSearchAutoNormalizeEnabled: boolean;
+    /**
+     * 保存工程时把「操作记录」一并写入 `<工程文件名（含扩展名）>-UNDO`。
+     *
+     * 默认关闭（记录含完整时间线快照，体积随操作数增长）；无论是否开启，
+     * 打开工程时后端都会尝试读取伴生文件（静默失败即无历史）。
+     */
+    saveUndoHistoryWithProject: boolean;
     /** PianoRoll 中显示的其他 root track 参考线 */
     visibleReferenceRootTrackIds: string[];
     /** 全局默认外部拉伸算法 */
@@ -1978,6 +1985,7 @@ const initialState: SessionState = {
     silencePreviewSegments: null,
     silenceDetectOptions: { ...SILENCE_DETECT_DEFAULTS },
     quickSearchAutoNormalizeEnabled: false,
+    saveUndoHistoryWithProject: false,
     visibleReferenceRootTrackIds: [],
     defaultStretchAlgorithm: "signalsmith",
     defaultHifiganMelStretch: true,
@@ -2612,6 +2620,9 @@ const sessionSlice = createSlice({
         },
         toggleQuickSearchAutoNormalize(state) {
             state.quickSearchAutoNormalizeEnabled = !state.quickSearchAutoNormalizeEnabled;
+        },
+        setSaveUndoHistoryWithProject(state, action: PayloadAction<boolean>) {
+            state.saveUndoHistoryWithProject = Boolean(action.payload);
         },
         setDefaultStretchAlgorithm(state, action: PayloadAction<StretchAlgorithmOption>) {
             state.defaultStretchAlgorithm = action.payload;
@@ -3430,6 +3441,8 @@ const sessionSlice = createSlice({
                 }
                 if (s.quickSearchAutoNormalize != null)
                     state.quickSearchAutoNormalizeEnabled = Boolean(s.quickSearchAutoNormalize);
+                if (s.saveUndoHistoryWithProject != null)
+                    state.saveUndoHistoryWithProject = Boolean(s.saveUndoHistoryWithProject);
                 if (Array.isArray(s.visibleReferenceRootTrackIds)) {
                     state.visibleReferenceRootTrackIds = s.visibleReferenceRootTrackIds
                         .filter((id: unknown): id is string => typeof id === "string")
@@ -6012,6 +6025,7 @@ export const {
     setSilencePreview,
     setSilenceDetectOptions,
     toggleQuickSearchAutoNormalize,
+    setSaveUndoHistoryWithProject,
     setDefaultStretchAlgorithm,
     setDefaultHifiganMelStretch,
     setOrtEp,

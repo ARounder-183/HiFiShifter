@@ -1437,6 +1437,7 @@ export const jaJP = {
     undo_history_jump: "この状態へ移動",
     undo_history_current: "現在の状態",
     undo_history_count: "全 {count} 件（最大 100 件を保持）",
+    undo_history_save_with_project: "プロジェクトと一緒に操作記録を保存（-UNDO ファイル）",
     history_op_initial: "初期状態",
     history_op_import_media: "メディアをインポート",
     history_op_add_clip: "クリップを追加",

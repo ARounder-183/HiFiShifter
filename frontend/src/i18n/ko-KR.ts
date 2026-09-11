@@ -1414,6 +1414,7 @@ export const koKR = {
     undo_history_jump: "이 상태로 이동",
     undo_history_current: "현재 상태",
     undo_history_count: "총 {count}개 (최대 100개 보관)",
+    undo_history_save_with_project: "프로젝트와 함께 작업 기록 저장(-UNDO 파일)",
     history_op_initial: "초기 상태",
     history_op_import_media: "미디어 가져오기",
     history_op_add_clip: "클립 추가",

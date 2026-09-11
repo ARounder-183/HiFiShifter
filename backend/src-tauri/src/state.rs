@@ -1771,8 +1771,9 @@ fn history_depths_of(h: &TimelineHistory) -> (usize, usize) {
     )
 }
 
-/// 当前时刻（Unix 毫秒），用于「操作记录」的时间列。
-fn now_unix_ms() -> u64 {
+/// 当前时刻（Unix 毫秒，UTC 基准），用于「操作记录」的时间列与 `-UNDO`
+/// 伴生文件。展示端的时区转换只在前端做。
+pub fn now_unix_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)

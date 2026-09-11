@@ -114,6 +114,7 @@ export const enUS = {
     undo_history_jump: "Jump to this state",
     undo_history_current: "Current state",
     undo_history_count: "{count} entries (up to 100 kept)",
+    undo_history_save_with_project: "Save operation history with the project (-UNDO file)",
     history_op_initial: "Initial state",
     history_op_import_media: "Import media",
     history_op_add_clip: "Add clip",

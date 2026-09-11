@@ -1,6 +1,6 @@
 use crate::project::{
-    load_project_file, prepare_timeline_for_project_save, project_name_from_path,
-    read_project_file_version, resolve_source_paths_on_open, serialize_project_file_for_path,
+    finalize_timeline_for_session, load_project_file, prepare_timeline_for_project_save,
+    project_name_from_path, read_project_file_version, serialize_project_file_for_path,
     CustomScale, ProjectFile, CURRENT_PROJECT_FILE_VERSION,
 };
 use crate::state::AppState;
@@ -588,6 +588,14 @@ fn save_project_archive_to_zip_inner(
     }
 
     let bytes = serialize_project_file_for_path(&pf, Path::new(&project_entry_name))?;
+    // 操作记录：与内嵌工程文件同级（`<工程名>.hshp-UNDO`），一并打进压缩包
+    // （设置关闭 / 无历史时为 None，静默跳过）。
+    let undo_entry_name = format!(
+        "{project_entry_name}{}",
+        crate::commands::undo_history_file::UNDO_FILE_SUFFIX
+    );
+    used_zip_paths.insert(undo_entry_name.clone());
+    let undo_bytes = crate::commands::undo_history_file::serialize_undo_history(state);
 
     // 为了保证保存的原子性，先写入临时文件，成功后再重命名为最终路径。
     let tmp_path = {
@@ -610,6 +618,13 @@ fn save_project_archive_to_zip_inner(
             .map_err(|e| e.to_string())?;
         zip.write_all(&bytes).map_err(|e| e.to_string())?;
 
+        // 操作记录条目：与上面的工程文件同级，属于同一个归档。
+        if let Some(undo_bytes) = undo_bytes.as_ref() {
+            zip.start_file(undo_entry_name.clone(), crate::zip_util::options_now())
+                .map_err(|e| e.to_string())?;
+            zip.write_all(undo_bytes).map_err(|e| e.to_string())?;
+        }
+
         let mut written_entries = std::collections::HashSet::<String>::new();
         for (source_path, zip_entry) in &source_to_entry {
             if !written_entries.insert(zip_entry.clone()) {
@@ -631,6 +646,9 @@ fn save_project_archive_to_zip_inner(
             project_name,
             Local::now().format("%Y%m%d_%H%M%S")
         );
+        if undo_bytes.is_some() {
+            archive_logs.push(format!("Embedded undo history: {}", undo_entry_name));
+        }
         archive_logs.push(format!(
             "Archive completed at {}",
             Local::now().format("%Y-%m-%d %H:%M:%S")
@@ -923,44 +941,12 @@ pub(super) fn open_project(
         };
     };
 
-    let (resolved_timeline, missing_files) = resolve_source_paths_on_open(pf.timeline, &path);
-    pf.timeline = resolved_timeline;
-    // 旧项目兼容迁移（仅 v3 及更早）：source_end_sec == 0.0 曾表示"到源文件
-    // 末尾"，新语义要求它是真实的结束时间，此处自动修正为 duration_sec 或
-    // length_sec。v4+ 工程的 se 恒为真实坐标（可为 0/负值，如倒放静音段），
-    // 不得改写。
-    if pf.version < 4 {
-        for clip in &mut pf.timeline.clips {
-            if clip.source_end_sec == 0.0 {
-                clip.source_end_sec = clip.duration_sec.unwrap_or(clip.length_sec);
-            }
-        }
-    }
-    // v4 迁移：v3 及更早的工程 Clip 不携带 loop_enabled（Loop / 循环源）字段，
-    // 按当前"为新的音频块启用循环"设置作为这些既有**音频** Clip 的 Loop 属性；
-    // 绝不改动已显式携带该字段的 v4+ 工程。
-    // 纯 MIDI / 音高参考块（无源媒体路径）不参与 Loop 迁移 —— 与各格式导入器
-    // 显式创建 `loop_enabled=false` 的 MIDI 块约定保持一致（REAPER 的 LOOP
-    // 语义只作用于音频 item）。
-    if pf.version < 4 {
-        let default_loop = crate::config::loop_new_clips_default();
-        for clip in &mut pf.timeline.clips {
-            if clip.source_path.is_some() {
-                clip.loop_enabled = default_loop;
-            }
-        }
-    }
-    // 非 Loop 存储窗口规范化（对**所有版本**生效）：使存储字段 == 消费
-    // 窗口（正放 se:=ss+len·r；倒放 ss:=se−len·r），与消费端派生值一致、
-    // 功能零变化 —— 用于自愈历史版本写入的陈旧/发散源窗口。
-    // 同一不变式也应用到全部 take（组合速率口径），避免 inactive take 的
-    // 陈旧窗口流向前端 take-lane 显示与 REAPER 导出。
-    for clip in &mut pf.timeline.clips {
-        crate::state::normalize_nonloop_source_window(clip);
-        crate::state::normalize_nonloop_all_take_windows(clip);
-    }
-    // 迁移/规范化都发生在 active take 内存投影上，写回 Take 权威数据。
-    pf.timeline.sync_clip_takes_from_flat();
+    // 反序列化 → 会话可用：解析源路径、物化 active take 投影（音频元数据）、
+    // 补齐运行时文件元数据、完成版本迁移。工程打开与 `-UNDO` 读取共用同一
+    // 套规则（见 finalize_timeline_for_session），避免两条恢复路径漂移。
+    let (finalized_timeline, missing_files) =
+        finalize_timeline_for_session(pf.timeline, &path, pf.version);
+    pf.timeline = finalized_timeline;
 
     // 打开工程时清除所有渲染缓存，确保旧的预渲染结果不会影响新的播放。
     // 这是修复"音高分析未完成时播放导致音高编辑不生效"问题的关键步骤。
@@ -1011,6 +997,9 @@ pub(super) fn open_project(
         .and_then(|points| points.first())
         .map(|first| (first.numerator, first.denominator));
     state.clear_history();
+    // 无论「保存操作记录」设置是否开启都尝试读取：存在伴生文件就恢复历史
+    // （后缀大小写不敏感），读不到则静默保持「无历史」。
+    let _ = crate::commands::undo_history_file::load_undo_history(state.inner(), &path);
     {
         let mut p = state.project.lock().unwrap_or_else(|e| e.into_inner());
         p.name = project_name_from_path(&path);
@@ -1179,6 +1168,8 @@ pub(super) fn save_project_to_path(
     if is_zip_path(&path) {
         match save_project_archive_to_zip_inner(state.inner(), &path) {
             Ok(timeline) => {
+                // 操作记录随归档一起打包：写在压缩包内、与内嵌工程文件同级
+                // （`<工程名>.hshp-UNDO`），不再另存到压缩包外面。
                 return serde_json::json!({
                     "ok": true,
                     "canceled": false,
@@ -1195,6 +1186,8 @@ pub(super) fn save_project_to_path(
 
     match save_project_to_path_inner(state.inner(), &window, project_path.clone()) {
         Ok(timeline) => {
+            // 工程写成功后带出操作记录（设置未开启 / 写入失败都静默）。
+            let _ = crate::commands::undo_history_file::save_undo_history(state.inner(), &path);
             serde_json::json!({"ok": true, "canceled": false, "path": project_path, "timeline": timeline })
         }
         Err(e) => serde_json::json!({"ok": false, "error": e}),
@@ -1435,4 +1428,52 @@ pub(super) fn set_project_stretch_settings(
         crate::commands::playback::request_background_render(handle);
     }
     serde_json::json!({ "ok": true, "project": state.project_meta_payload() })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::save_project_archive_to_zip_inner;
+    use crate::state::{AppState, HistoryOp};
+
+    #[test]
+    fn zip_archive_embeds_undo_history_next_to_the_project_file() {
+        // 另存为 zip 时，操作记录必须打进压缩包内、与内嵌工程文件同级
+        // （`<工程名>.hshp-UNDO`），而不是留在压缩包外面。
+        let state = AppState::default();
+        let mut settings = crate::config::UiSettings::default();
+        settings.save_undo_history_with_project = true;
+        state.store_ui_settings_cache(&settings);
+        {
+            let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+            state.checkpoint_timeline(&tl, HistoryOp::AddClip);
+        }
+
+        let dir = std::env::temp_dir().join(format!(
+            "hifishifter_zip_undo_test_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let zip_path = dir.join("My Song.zip");
+        save_project_archive_to_zip_inner(&state, &zip_path).expect("archive save");
+
+        let file = std::fs::File::open(&zip_path).expect("open zip");
+        let mut archive = zip::ZipArchive::new(file).expect("zip archive");
+        let names: Vec<String> = (0..archive.len())
+            .filter_map(|index| archive.by_index(index).ok().map(|e| e.name().to_string()))
+            .collect();
+        assert!(
+            names.iter().any(|name| name == "My Song.hshp"),
+            "内嵌工程文件应在压缩包根: {names:?}"
+        );
+        assert!(
+            names.iter().any(|name| name == "My Song.hshp-UNDO"),
+            "操作记录应与内嵌工程文件同级: {names:?}"
+        );
+        assert!(
+            !zip_path.with_file_name("My Song.zip-UNDO").exists(),
+            "压缩包外不应再另存一份操作记录"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

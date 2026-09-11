@@ -1393,6 +1393,7 @@ export const zhTW = {
     undo_history_jump: "跳轉到該狀態",
     undo_history_current: "目前狀態",
     undo_history_count: "共 {count} 筆記錄（最多保留 100 筆）",
+    undo_history_save_with_project: "與專案一起儲存操作記錄（到 -UNDO 檔案）",
     history_op_initial: "初始狀態",
     history_op_import_media: "匯入媒體",
     history_op_add_clip: "新增音訊塊",

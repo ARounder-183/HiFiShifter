@@ -6,7 +6,11 @@ import { shallowEqual } from "react-redux";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import type { RootState } from "../../app/store";
 import { useI18n } from "../../i18n/I18nProvider";
-import { setHistoryPositionRemote } from "../../features/session/sessionSlice";
+import {
+    persistUiSettings,
+    setHistoryPositionRemote,
+    setSaveUndoHistoryWithProject,
+} from "../../features/session/sessionSlice";
 
 /**
  * 「操作记录」窗口（REAPER Undo History 风格）。
@@ -200,8 +204,21 @@ export const UndoHistoryPanel: React.FC<{
                 })}
             </div>
 
-            <div className="shrink-0 border-t border-qt-border px-3 py-1 text-[10px] text-qt-text-muted">
-                {countText}
+            <div className="shrink-0 border-t border-qt-border px-3 py-1">
+                {/* 与工程一起保存：写入 `<工程文件名（含扩展名）>-UNDO`；
+                    无论是否勾选，打开工程时都会尝试读取伴生文件。 */}
+                <label className="flex cursor-pointer items-center gap-2 select-none">
+                    <input
+                        type="checkbox"
+                        checked={s.saveUndoHistoryWithProject}
+                        onChange={(event) => {
+                            dispatch(setSaveUndoHistoryWithProject(event.target.checked));
+                            void dispatch(persistUiSettings());
+                        }}
+                    />
+                    <span className="text-[11px]">{tAny("undo_history_save_with_project")}</span>
+                </label>
+                <div className="mt-0.5 text-[10px] text-qt-text-muted">{countText}</div>
             </div>
         </div>,
         document.body,
@@ -212,6 +229,7 @@ export const UndoHistoryPanel: React.FC<{
 const selectHistoryPanelState = (state: RootState) => ({
     records: state.session.historyRecords,
     position: state.session.historyUndoDepth,
+    saveUndoHistoryWithProject: state.session.saveUndoHistoryWithProject,
 });
 
 /** 初始位置：锚点（撤销/重做按钮）下方；无锚点时贴近左上角。 */
