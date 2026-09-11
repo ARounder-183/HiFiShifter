@@ -45,7 +45,8 @@ export const SnapHighlightLayer: React.FC<{
     /** 有序轨道列表（决定行的 y 坐标）。 */
     tracks: ReadonlyArray<{ id: string }>;
     contentHeight: number;
-}> = ({ pxPerSec, rowHeight, tracks, contentHeight }) => {
+    viewportHeightPx?: number;
+}> = ({ pxPerSec, rowHeight, tracks, contentHeight, viewportHeightPx = 0 }) => {
     const snapshot = useSyncExternalStore(subscribeSnapHighlight, getSnapHighlightSnapshot);
     // 设置开关（吸附/网格设置 → 吸附总开关 → "显示吸附竖线高亮"）：
     // 关闭时整层不渲染。发布侧照常工作（开销可忽略），重新开启后下一次
@@ -63,9 +64,14 @@ export const SnapHighlightLayer: React.FC<{
 
     const safeRowHeight = Math.max(1, rowHeight);
     const safePxPerSec = Math.max(1e-9, pxPerSec);
+    // 本层铺到「内容 ∪ 可视区」的并集高度：通栏竖线才能一路画到时间轴底部。
+    const layerHeightPx = Math.max(contentHeight, viewportHeightPx);
 
     return (
-        <div className="absolute inset-0 pointer-events-none z-[13] overflow-hidden">
+        <div
+            className="absolute top-0 left-0 pointer-events-none z-[13] overflow-hidden"
+            style={{ width: "100%", height: layerHeightPx }}
+        >
             {snapshot.entries.map((entry) => (
                 <SnapEntryGroup
                     key={entry.id}
@@ -75,6 +81,7 @@ export const SnapHighlightLayer: React.FC<{
                     rowIndexById={rowIndexById}
                     trackCount={tracks.length}
                     contentHeight={contentHeight}
+                    layerHeightPx={layerHeightPx}
                 />
             ))}
         </div>
@@ -88,14 +95,16 @@ const SnapEntryGroup: React.FC<{
     rowIndexById: Map<string, number>;
     trackCount: number;
     contentHeight: number;
-}> = ({ entry, pxPerSec, rowHeight, rowIndexById, trackCount, contentHeight }) => {
+    /** 通栏竖线的纵向终点（= max(内容高度, 可视区高度)，见 SnapHighlightLayer）。 */
+    layerHeightPx: number;
+}> = ({ entry, pxPerSec, rowHeight, rowIndexById, trackCount, contentHeight, layerHeightPx }) => {
     // 光晕只适合暗底：浅色主题下吸附线/亮条用无光晕的纯色。
     const { mode: themeMode } = useAppTheme();
     const darkMode = themeMode === "dark";
     if (entry.markers.length === 0) return null;
 
     // ── 计算连线的纵向范围 ──
-    // 任一 marker 无 trackId（网格/光标/采样率/未知轨道）→ 通栏；
+    // 任一 marker 无 trackId（网格/播放光标/采样率/未知轨道）→ 通栏到底；
     // 否则取所有 marker 所在行的并集：吸附对象行 ∪ 被吸附对象行。
     let fullHeight = false;
     let minTop = Number.POSITIVE_INFINITY;
@@ -118,7 +127,9 @@ const SnapEntryGroup: React.FC<{
         maxBottom = Math.max(maxBottom, (idx + 1) * rowHeight);
     }
     const rangeTop = fullHeight ? 0 : Math.max(0, minTop);
-    const rangeBottom = fullHeight ? contentHeight : Math.min(contentHeight, maxBottom);
+    // 通栏竖线（含播放光标吸附）延伸到时间轴可视区底部；行级连线仍以内容
+    // 高度为界（轨道总高）。
+    const rangeBottom = fullHeight ? layerHeightPx : Math.min(contentHeight, maxBottom);
     const rangeHeight = Math.max(0, rangeBottom - rangeTop);
     const color = KIND_COLOR_VAR[entry.kind];
 

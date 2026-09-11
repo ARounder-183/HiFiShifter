@@ -353,6 +353,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     // 轨道头底部按此留出同高占位（bottomGutterHeightPx），保证轨道头与
     // 时间轴区域的竖直滚动范围严格一致。
     const [horizontalScrollbarGutterPx, setHorizontalScrollbarGutterPx] = React.useState(0);
+    const [timelineViewportHeightPx, setTimelineViewportHeightPx] = React.useState(0);
     const [quickExportDialog, setQuickExportDialog] = React.useState<{
         open: boolean;
         clipIds: string[];
@@ -497,6 +498,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         if (!scroller) return;
         const measure = () => {
             setHorizontalScrollbarGutterPx(scroller.offsetHeight - scroller.clientHeight);
+            setTimelineViewportHeightPx(scroller.clientHeight || 0);
         };
         measure();
         if (typeof ResizeObserver !== "undefined") {
@@ -2297,14 +2299,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                     })}
                                 </div>
 
-                                {/* 吸附竖线高亮层：拖拽手势中高亮吸附对象与被吸附对象 */}
-                                <SnapHighlightLayer
-                                    pxPerSec={pxPerSec}
-                                    rowHeight={rowHeight}
-                                    tracks={s.tracks}
-                                    contentHeight={contentHeight}
-                                />
-
                                 {s.clipFormantToolWindow.open && activeFormantToolClip ? (
                                     <ClipFormantToolWindow
                                         clip={activeFormantToolClip}
@@ -2324,6 +2318,19 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 {/* Playhead 已移入 TimelineSurface sticky 层：与网格/Clip/
                                 波形在同一滚动事件内更新，避免 DOM 原生层与 sticky 层错帧。 */}
                             </div>
+
+                            {/* 吸附竖线高亮层：拖拽手势中高亮吸附对象与被吸附对象。
+                            渲染在内容层**之外**（同一坐标原点），不受内容层
+                            overflow-hidden 的内容高度裁剪：网格/光标等通栏竖线
+                            因此能与播放光标一样延伸到时间轴可视区底部，而不是
+                            止步于最后一条轨道的底边。 */}
+                            <SnapHighlightLayer
+                                pxPerSec={pxPerSec}
+                                rowHeight={rowHeight}
+                                tracks={s.tracks}
+                                contentHeight={contentHeight}
+                                viewportHeightPx={timelineViewportHeightPx}
+                            />
 
                             {/* Drop preview (ghost item)。
                             渲染在外层 padded 容器内（同一坐标原点）：预览宽度超出
@@ -2362,6 +2369,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                     rowHeight={rowHeight}
                                     widthPx={Math.max(1, Math.ceil(viewportWidth))}
                                     heightPx={visibleTrackCanvasHeight}
+                                    // 播放光标独立于轨道总高度：始终延伸到时间轴
+                                    // 可视区底部（首次测量前退回可见轨道高度）。
+                                    playheadHeightPx={Math.max(
+                                        timelineViewportHeightPx,
+                                        visibleTrackCanvasHeight,
+                                    )}
                                     topPx={0}
                                     axis={timelineAxis}
                                     playheadSec={s.playheadSec}

@@ -132,7 +132,7 @@ Common shortcuts:
 
 - `Space`: Play / Pause (does not return to start)
 - `Enter`: Play / Stop (returns to start)
-- `M`: Toggle the metronome
+- `K`: Toggle the metronome
 - `S`: Split
 - `G`: Group
 - `U`: Ungroup
@@ -338,7 +338,7 @@ Right-click an empty area of a track and choose `Close Gaps` to move every clip 
 
 The metronome gives you a steady click reference while playing, which helps when checking rhythm, singing along, or verifying tempo changes.
 
-- Toggling: click the metronome button next to the BPM readout in the main toolbar. The default shortcut is `M`.
+- Toggling: click the metronome button next to the BPM readout in the main toolbar. The default shortcut is `K`.
 - Right-click the metronome button to open its settings:
     - `Volume`: metronome level. Besides dragging, it also responds to the mouse wheel; hold the `Fine Adjust` modifier (default `Ctrl`, `Command` on macOS) for finer steps.
     - `Subdivision`: controls click density. `Follow Grid` (default) clicks at the current grid subdivision, so a `1/8` grid gives one click per half beat, and dotted and triplet grids are followed too; `Beat Only` clicks once per beat according to the BPM; `Bar Start Only` clicks only on the first beat of each bar, which is the sparsest option.
@@ -419,7 +419,7 @@ Of these two shifting shortcuts, `-` / `=` move the entire curve across the clip
 
 Holding a shortcut down performs one step immediately, then repeats continuously after a short pause, which is handy for nudging a curve into place. Parameters other than pitch use equivalent three-level steps (roughly 2.5% of range by default, 12.5% large, 0.25% fine). All of these can be remapped in the `Parameter Editor` group of `Options -> Keyboard Shortcuts...` (`Ctrl` corresponds to `Command` on macOS).
 
-Left-drag on a selected curve to move it vertically, horizontally, or freely, depending on the `Drag Direction` setting. While left-dragging, press the right button to quickly toggle drag direction.
+Left-drag on a selected curve to move it vertically, horizontally, or freely, depending on the `Drag Direction` setting. While left-dragging, press the right button (or the `D` key) to quickly toggle drag direction.
 
 Right-drag on a selected curve to adjust its amplitude: drag up to increase amplitude, down to decrease, all the way to fully flattened. For the pitch parameter, amplitude adjustment only strengthens or weakens vibrato and other fine detail — the overall note contour and intervals are preserved, so the pitch is never "lifted" as a whole. The result is previewed live while you drag.
 
@@ -435,7 +435,7 @@ Hold the Multi-Range Select modifier (default `Ctrl`, `Command` on macOS; config
 
 The Draw tool allows you to draw parameter curves.
 
-Left-drag to draw freely or horizontally, depending on the `Drag Direction` setting. While left-dragging, press the right button to quickly toggle drag direction.
+Left-drag to draw freely or horizontally, depending on the `Drag Direction` setting. While left-dragging, press the right button (or the `D` key) to quickly toggle drag direction.
 
 Right-drag resets the current curve.
 
@@ -443,7 +443,7 @@ Right-drag resets the current curve.
 
 Right-click the Draw tool button to switch to the Line/Vibrato tool. This tool allows you to draw straight lines or vibrato.
 
-Left-drag to draw a straight line freely or horizontally, depending on the `Drag Direction` setting. While left-dragging, press the right button to quickly toggle drag direction.
+Left-drag to draw a straight line freely or horizontally, depending on the `Drag Direction` setting. While left-dragging, press the right button (or the `D` key) to quickly toggle drag direction.
 
 While left-dragging, scroll the mouse wheel to superimpose a horizontal sine wave; scrolling adjusts the amplitude. Hold `Alt` while scrolling to adjust frequency. Hold the `Param Fine Adjust` modifier (default `Ctrl`) to fine-tune while scrolling.
 

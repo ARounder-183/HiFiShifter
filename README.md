@@ -114,6 +114,7 @@ VocalShifter 提供的算法库。
 | 纵向缩放（参数轴，参数面板）   | Ctrl + 鼠标滚轮（参数面板内）     |
 | 播放/暂停                      | Space（空格）                     |
 | 播放/停止                      | Enter                             |
+| 开关节拍器                     | K                                 |
 | 撤销/重做                      | Ctrl + Z / Ctrl + Y               |
 | 新建工程                       | Ctrl + N                          |
 | 打开工程                       | Ctrl + Shift + O                  |

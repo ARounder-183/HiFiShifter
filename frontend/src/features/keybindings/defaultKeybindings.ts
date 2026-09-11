@@ -16,7 +16,8 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     // 播放控制
     "playback.toggle": { key: "space" },
     "playback.stop": { key: "enter" }, // 停止并回到本次播放起点
-    "playback.metronome": { key: "m" }, // 节拍器开关
+    // 节拍器开关：默认 `K`（对齐 Logic Pro 的节拍器键位惯例），不占用 `M`、`R`。
+    "playback.metronome": { key: "k" },
     "recording.toggle": { key: "r", ctrl: true },
     "playback.focusCursor": { key: "'" }, // 聚焦播放光标
     "playback.seekLeft": { key: "arrowleft" },
@@ -65,6 +66,9 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     "track.delete": { key: "delete", ctrl: true },
     "track.selectUp": { key: "arrowup" },
     "track.selectDown": { key: "arrowdown" },
+    // 静音/独奏默认不占键位，用户可在快捷键设置中自行绑定。
+    "track.toggleMute": { key: "__none__" },
+    "track.toggleSolo": { key: "__none__" },
 
     // Clip 操作
     "clip.delete": { key: "delete" },
@@ -104,6 +108,10 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     "pianoRoll.vibratoDragAmplitudeDecrease": { key: "arrowdown" },
     "pianoRoll.vibratoDragFrequencyIncrease": { key: "arrowleft" },
     "pianoRoll.vibratoDragFrequencyDecrease": { key: "arrowright" },
+    // 拖动方向循环切换：默认 `D`（Direction）。除切换设置外，左键拖拽参数线
+    // 期间按下同一键可即时切换本次拖拽的方向 —— 触控板用户无法在按住左键
+    // 的同时按下右键，这条键位是「右键拖拽中切换方向」的等价替代。
+    "pianoRoll.cycleDragDirection": { key: "d" },
 
     // 修饰键行为
     // 多选切换默认为主修饰键（Windows: Ctrl / macOS: ⌘），对齐文件管理器
@@ -325,6 +333,8 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
     },
     "track.selectUp": { labelKey: "kb_track_select_up", group: "project" },
     "track.selectDown": { labelKey: "kb_track_select_down", group: "project" },
+    "track.toggleMute": { labelKey: "kb_track_toggle_mute", group: "project" },
+    "track.toggleSolo": { labelKey: "kb_track_toggle_solo", group: "project" },
 
     "clip.delete": { labelKey: "kb_clip_delete", group: "clip" },
     "clip.copy": { labelKey: "kb_clip_copy", group: "clip" },
@@ -419,6 +429,10 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
         labelKey: "kb_pianoroll_vibrato_drag_freq_decrease",
         group: "pianoRoll",
         scopedContext: "pianoRollVibratoDrag",
+    },
+    "pianoRoll.cycleDragDirection": {
+        labelKey: "kb_pianoroll_cycle_drag_direction",
+        group: "pianoRoll",
     },
 
     // ── 修饰键 · 音频块选择与拖拽（时间轴） ────────────────────

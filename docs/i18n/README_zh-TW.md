@@ -114,6 +114,7 @@ VocalShifter 提供的演算法庫。
 | 縱向縮放（參數軸，參數面板）   | Ctrl + 滑鼠滾輪（參數面板內）     |
 | 播放/暫停                      | Space（空格鍵）                   |
 | 播放/停止                      | Enter                             |
+| 開關節拍器                     | K                                 |
 | 復原/重做                      | Ctrl + Z / Ctrl + Y               |
 | 新建專案                       | Ctrl + N                          |
 | 開啟專案                       | Ctrl + Shift + O                  |

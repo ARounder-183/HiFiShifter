@@ -189,6 +189,7 @@ import type {
     ValueViewport,
 } from "./pianoRoll/types";
 import {
+    formatKeybinding,
     selectKeybinding,
     selectMergedKeybindings,
 } from "../../features/keybindings/keybindingsSlice";
@@ -623,6 +624,10 @@ export const PianoRollPanel: React.FC = () => {
     );
     const vibratoDragFrequencyDecreaseKb = useAppSelector((state) =>
         selectKeybinding(state, "pianoRoll.vibratoDragFrequencyDecrease"),
+    );
+    // 拖动方向循环切换键：拖拽进行中按下可即时切换本次拖拽方向（触控板替代右键）。
+    const cycleDragDirectionKb = useAppSelector((state) =>
+        selectKeybinding(state, "pianoRoll.cycleDragDirection"),
     );
     const mergedKeybindings = useAppSelector(selectMergedKeybindings);
     // 是否按住切换吸附的修饰键（临时切换吸附时用于高亮显示）
@@ -2919,6 +2924,7 @@ export const PianoRollPanel: React.FC = () => {
         vibratoDragAmplitudeDecreaseKb,
         vibratoDragFrequencyIncreaseKb,
         vibratoDragFrequencyDecreaseKb,
+        cycleDragDirectionKb,
         paramFineAdjustKb,
         onContextMenu: useCallback((x: number, y: number) => {
             setCtxMenu({ x, y });
@@ -4708,7 +4714,11 @@ export const PianoRollPanel: React.FC = () => {
                             size="1"
                             color="gray"
                             variant={activeDragDirection === "free" ? "ghost" : "solid"}
-                            data-tooltip={`${tAny("drag_direction")}: ${tAny(activeDragDirection === "free" ? "drag_direction_free" : activeDragDirection === "x-only" ? "drag_direction_x_only" : "drag_direction_y_only")}`}
+                            data-tooltip={`${tAny("drag_direction")}: ${tAny(activeDragDirection === "free" ? "drag_direction_free" : activeDragDirection === "x-only" ? "drag_direction_x_only" : "drag_direction_y_only")}${
+                                isNoneBinding(cycleDragDirectionKb)
+                                    ? ""
+                                    : ` (${formatKeybinding(cycleDragDirectionKb, "")})`
+                            }`}
                             tabIndex={-1}
                             onClick={() => {
                                 dispatch(cycleDragDirection(activeDragDirectionTool));

@@ -22,7 +22,10 @@ import type {
 } from "./types";
 import type { MutableRefObject as MutRef } from "react";
 import { isModifierActive, isNoneBinding } from "../../../features/keybindings/keybindingsSlice";
-import { matchesKeybinding } from "../../../features/keybindings/useKeybindings";
+import {
+    matchesKeybinding,
+    matchesKeybindingAllowingFineModifier,
+} from "../../../features/keybindings/useKeybindings";
 import { ACTION_META } from "../../../features/keybindings/defaultKeybindings";
 import type { Keybinding } from "../../../features/keybindings/types";
 import type { KeybindingMap, ActionId } from "../../../features/keybindings/types";
@@ -265,6 +268,8 @@ export function usePianoRollInteractions(args: {
     dragDirection?: "free" | "x-only" | "y-only";
     /** 切换拖动方向的回调 */
     onCycleDragDirection?: (tool: "select" | "draw" | "vibrato") => void;
+    /** 拖拽期间切换拖动方向的快捷键（触控板用户替代「拖拽中右键」） */
+    cycleDragDirectionKb?: Keybinding;
     /** 选区拖拽时边缘平滑度（0-100%） */
     edgeSmoothnessPercent?: number;
     /** 选择拖拽/绘制进行中时，用于临时切换吸附按钮视觉 */
@@ -350,6 +355,7 @@ export function usePianoRollInteractions(args: {
         onEditAction,
         dragDirection,
         onCycleDragDirection,
+        cycleDragDirectionKb,
         edgeSmoothnessPercent,
         onPitchSnapGestureActiveChange,
         onMorphOverlayChange,
@@ -579,6 +585,8 @@ export function usePianoRollInteractions(args: {
     });
     const activePointerGestureEndRef = useRef<(() => void) | null>(null);
     const VIBRATO_DRAG_CAPTURE_ATTR = "data-piano-roll-vibrato-drag-active";
+    /** 参数线拖拽进行中标记：全局快捷键为「拖动方向切换」键放行（见安装器）。 */
+    const PARAM_DRAG_ATTR = "data-piano-roll-param-drag-active";
 
     const setVibratoDragCaptureActive = useCallback(
         (active: boolean) => {
@@ -606,6 +614,40 @@ export function usePianoRollInteractions(args: {
             activePointerGestureEndRef.current = null;
         }
     }, []);
+
+    /**
+     * 拖拽期间按下「拖动方向」快捷键 → 切换本次拖拽方向（触控板替代右键）。
+     *
+     * 安装时置位 `PARAM_DRAG_ATTR`：全局 useKeybindings 检测到该属性后对
+     * 本键放行（不消费、不派发），由这里唯一处理 —— 与拖拽中右键完全同义
+     * （切换本次拖拽方向 + 循环持久化设置）。若不做这层放行，同一按键会先
+     * 被全局派发一次（重复步进），并且叠按「精细调整」修饰键时还会撞上
+     * Ctrl+D 的克隆轨道兜底。
+     *
+     * 允许叠按「精细调整」修饰键：拖拽中按下 Ctrl 表示微调，不应屏蔽切换。
+     */
+    const installDragDirectionKeyCycler = useCallback(
+        (cycleLocalDragDir: () => void) => {
+            const kb = cycleDragDirectionKb;
+            if (!kb || isNoneBinding(kb)) {
+                return () => {};
+            }
+            document.body.setAttribute(PARAM_DRAG_ATTR, "true");
+            const onKeyDown = (e: globalThis.KeyboardEvent) => {
+                if (e.repeat) return;
+                if (!matchesKeybindingAllowingFineModifier(e, kb, paramFineAdjustKb)) return;
+                e.preventDefault();
+                e.stopPropagation();
+                cycleLocalDragDir();
+            };
+            window.addEventListener("keydown", onKeyDown, true);
+            return () => {
+                window.removeEventListener("keydown", onKeyDown, true);
+                document.body.removeAttribute(PARAM_DRAG_ATTR);
+            };
+        },
+        [PARAM_DRAG_ATTR, cycleDragDirectionKb, paramFineAdjustKb],
+    );
 
     useEffect(() => {
         const endActiveGesture = () => {
@@ -3294,6 +3336,7 @@ export function usePianoRollInteractions(args: {
                                     window.removeEventListener("pointermove", onMove);
                                     window.removeEventListener("pointerup", onUp);
                                     window.removeEventListener("pointercancel", onUp);
+                                    disposeDragDirKey();
                                     disposeFineAdjustedPointerState(finePointerState);
                                     clearActivePointerGestureEnd(onUp);
                                     // 取消挂起的预览帧：松手后由提交路径以全分辨率
@@ -3468,12 +3511,7 @@ export function usePianoRollInteractions(args: {
                                     ev.preventDefault();
                                     ev.stopImmediatePropagation();
                                 };
-                                const onMouseDownDuringDrag = (ev: globalThis.MouseEvent) => {
-                                    if (ev.button !== 2) return;
-                                    // 仅在左键拖拽进行中时，右键才切换拖拽方向。
-                                    if ((ev.buttons & 1) !== 1) return;
-                                    ev.preventDefault();
-                                    ev.stopPropagation();
+                                const cycleSelectDragDir = () => {
                                     const order: Array<"free" | "x-only" | "y-only"> = [
                                         "free",
                                         "x-only",
@@ -3484,6 +3522,17 @@ export function usePianoRollInteractions(args: {
                                     // Also cycle the global setting
                                     if (onCycleDragDirection) onCycleDragDirection("select");
                                 };
+                                const onMouseDownDuringDrag = (ev: globalThis.MouseEvent) => {
+                                    if (ev.button !== 2) return;
+                                    // 仅在左键拖拽进行中时，右键才切换拖拽方向。
+                                    if ((ev.buttons & 1) !== 1) return;
+                                    ev.preventDefault();
+                                    ev.stopPropagation();
+                                    cycleSelectDragDir();
+                                };
+                                // 触控板替代：拖拽中按下快捷键与右键同义。
+                                const disposeDragDirKey =
+                                    installDragDirectionKeyCycler(cycleSelectDragDir);
 
                                 window.addEventListener("pointermove", onMove);
                                 window.addEventListener("pointerup", onUp);
@@ -3709,6 +3758,7 @@ export function usePianoRollInteractions(args: {
                     if (isOwnStroke) {
                         strokeRef.current = null;
                     }
+                    disposeDragDirKey();
                     disposeFineAdjustedPointerState(finePointerState);
                     window.removeEventListener("pointermove", onMove);
                     window.removeEventListener("pointerup", onUp);
@@ -3755,6 +3805,13 @@ export function usePianoRollInteractions(args: {
                     ev.preventDefault();
                     ev.stopImmediatePropagation();
                 };
+                const cycleLineDragDir = () => {
+                    if (!canCycleDragDirection) return;
+                    currentDragDir = currentDragDir === "free" ? "x-only" : "free";
+                    if (onCycleDragDirection) {
+                        onCycleDragDirection(isVibratoTool ? "vibrato" : "draw");
+                    }
+                };
                 const onMouseDownDuringDraw = (ev: globalThis.MouseEvent) => {
                     if (ev.button !== 2) return;
                     if (!canCycleDragDirection) return;
@@ -3762,11 +3819,10 @@ export function usePianoRollInteractions(args: {
                     if ((ev.buttons & 1) !== 1) return;
                     ev.preventDefault();
                     ev.stopPropagation();
-                    currentDragDir = currentDragDir === "free" ? "x-only" : "free";
-                    if (onCycleDragDirection) {
-                        onCycleDragDirection(isVibratoTool ? "vibrato" : "draw");
-                    }
+                    cycleLineDragDir();
                 };
+                // 触控板替代：拖拽中按下快捷键与右键同义。
+                const disposeDragDirKey = installDragDirectionKeyCycler(cycleLineDragDir);
 
                 window.addEventListener("pointermove", onMove);
                 window.addEventListener("pointerup", onUp);
@@ -3852,6 +3908,7 @@ export function usePianoRollInteractions(args: {
                         vibratoStateRef.current = null;
                         setVibratoDragCaptureActive(false);
                     }
+                    disposeDragDirKey();
                     disposeFineAdjustedPointerState(finePointerState);
                     window.removeEventListener("pointermove", onMove);
                     window.removeEventListener("pointerup", onUp);
@@ -3878,6 +3935,13 @@ export function usePianoRollInteractions(args: {
                     ev.preventDefault();
                     ev.stopImmediatePropagation();
                 };
+                const cycleFreehandDragDir = () => {
+                    if (!canCycleDragDirection) return;
+                    currentDragDir = currentDragDir === "free" ? "x-only" : "free";
+                    if (onCycleDragDirection) {
+                        onCycleDragDirection("draw");
+                    }
+                };
                 const onMouseDownDuringDraw = (ev: globalThis.MouseEvent) => {
                     if (ev.button !== 2) return;
                     if (!canCycleDragDirection) return;
@@ -3885,11 +3949,10 @@ export function usePianoRollInteractions(args: {
                     if ((ev.buttons & 1) !== 1) return;
                     ev.preventDefault();
                     ev.stopPropagation();
-                    currentDragDir = currentDragDir === "free" ? "x-only" : "free";
-                    if (onCycleDragDirection) {
-                        onCycleDragDirection("draw");
-                    }
+                    cycleFreehandDragDir();
                 };
+                // 触控板替代：拖拽中按下快捷键与右键同义。
+                const disposeDragDirKey = installDragDirectionKeyCycler(cycleFreehandDragDir);
 
                 window.addEventListener("pointermove", onMove);
                 window.addEventListener("pointerup", onUp);
@@ -3970,6 +4033,7 @@ export function usePianoRollInteractions(args: {
             liveEditActiveRef,
             onContextMenu,
             onCycleDragDirection,
+            installDragDirectionKeyCycler,
             paramStretchKb,
             snapDrawValue,
         ],

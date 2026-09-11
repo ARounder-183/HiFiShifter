@@ -49,6 +49,8 @@ export type ActionId =
     | "track.delete" // 删除选中轨道
     | "track.selectUp" // 选择上一条轨道
     | "track.selectDown" // 选择下一条轨道
+    | "track.toggleMute" // 静音/取消静音选中轨道
+    | "track.toggleSolo" // 独奏/取消独奏选中轨道
     // Clip 操作
     | "clip.delete" // 删除选中 clip
     | "clip.copy" // 复制 clip
@@ -80,6 +82,7 @@ export type ActionId =
     | "pianoRoll.vibratoDragAmplitudeDecrease" // 直线/颤音拖拽时减小振幅
     | "pianoRoll.vibratoDragFrequencyIncrease" // 直线/颤音拖拽时增大频率
     | "pianoRoll.vibratoDragFrequencyDecrease" // 直线/颤音拖拽时减小频率
+    | "pianoRoll.cycleDragDirection" // 循环切换当前工具的拖动方向（拖拽中同样生效）
     // 模式切换
     | "mode.toggle" // 模式切换（正向）
     | "mode.selectTool" // 切换到选择工具

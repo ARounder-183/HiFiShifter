@@ -114,6 +114,7 @@ Because the official DLL only supports file I/O, processing takes longer compare
 | Vertical zoom (parameter axis)      | Ctrl + Mouse wheel (in parameter panel) |
 | Play / Pause                        | Space                                   |
 | Play / Stop                         | Enter                                   |
+| Toggle Metronome                    | K                                       |
 | Undo / Redo                         | Ctrl + Z / Ctrl + Y                     |
 | New Project                         | Ctrl + N                                |
 | Open Project                        | Ctrl + Shift + O                        |

@@ -45,6 +45,9 @@ import {
     duplicateTrackRemote,
     removeTrackRemote,
     replaceClipSourceRemote,
+    setTrackStateRemote,
+    cycleDragDirection,
+    persistUiSettings,
 } from "./features/session/sessionSlice";
 import { useI18n } from "./i18n/I18nProvider";
 import { useClipPitchDataListener } from "./hooks/useClipPitchDataListener";
@@ -2679,6 +2682,40 @@ function AppInner() {
                         }),
                     );
                     break;
+                case "track.toggleMute": {
+                    // 默认无键位：由用户在快捷键设置中自行绑定。作用于当前
+                    // 选中轨道（与轨道头 M 按钮同一后端命令）。
+                    const ss = store.getState().session;
+                    const trackId = ss.selectedTrackId;
+                    const track = trackId ? ss.tracks.find((t) => t.id === trackId) : null;
+                    if (!track) break;
+                    void dispatch(setTrackStateRemote({ trackId: track.id, muted: !track.muted }));
+                    break;
+                }
+                case "track.toggleSolo": {
+                    const ss = store.getState().session;
+                    const trackId = ss.selectedTrackId;
+                    const track = trackId ? ss.tracks.find((t) => t.id === trackId) : null;
+                    if (!track) break;
+                    void dispatch(setTrackStateRemote({ trackId: track.id, solo: !track.solo }));
+                    break;
+                }
+                case "pianoRoll.cycleDragDirection": {
+                    // 循环切换当前活动工具的拖动方向（与工具栏方向按钮同源）。
+                    // 左键拖拽参数线期间按下同一键时，参数编辑器内的本地监听会
+                    // 同步切换本次拖拽的方向 —— 触控板用户的「右键切换」替代。
+                    const ss = store.getState().session;
+                    const currentDrawTool = ss.drawToolMode === "line" ? "vibrato" : ss.drawToolMode;
+                    const tool =
+                        ss.toolMode === "select"
+                            ? ("select" as const)
+                            : currentDrawTool === "draw"
+                              ? ("draw" as const)
+                              : ("vibrato" as const);
+                    dispatch(cycleDragDirection(tool));
+                    void dispatch(persistUiSettings());
+                    break;
+                }
                 case "pianoRoll.shiftParamUp":
                 case "pianoRoll.shiftParamDown":
                 case "pianoRoll.shiftParamUpLarge":

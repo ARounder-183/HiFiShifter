@@ -35,6 +35,12 @@ export const TimelineSurface = React.memo(function TimelineSurface(props: {
     rowHeight: number;
     widthPx: number;
     heightPx: number;
+    /**
+     * 播放光标竖线的渲染高度（可选）。缺省回退到 `heightPx`（可见轨道总高）。
+     * 时间轴传入可视区高度，使光标始终延伸到时间轴底部，而不是被已有轨道
+     * 总高度截断。
+     */
+    playheadHeightPx?: number;
     topPx: number;
     /** 统一坐标投影：全部子层位置与缩放的唯一来源。 */
     axis: TimelineAxis;
@@ -162,7 +168,9 @@ export const TimelineSurface = React.memo(function TimelineSurface(props: {
                 className="absolute bg-qt-playhead z-20 pointer-events-none"
                 style={{
                     top: props.topPx,
-                    height: props.heightPx,
+                    // 光标高度与画布层解耦：延伸到时间轴可视区底部（见
+                    // playheadHeightPx 注释），不再随轨道数量截断。
+                    height: props.playheadHeightPx ?? props.heightPx,
                     // 播放头设备像素对齐（与 56238d45 网格修复同法）：位置吸附
                     // 到设备像素边界、宽度取整物理像素。否则分数 DPR 下落点
                     // 相位随播放/滚动变化，1 物理像素与 2 物理像素交替 —— 即
