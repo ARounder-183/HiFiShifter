@@ -159,12 +159,41 @@
 - 验证：Alt+拖 body +100px → `{sourceStartSec: 0.6667, sourceEndSec: 4.6667}`（只有源窗口变）；
   反向 −100px → `{-0.6667, 3.3333}`（允许越出媒体＝渲染静音）；无 Alt 对照 → `move_clips` ✓
 
+### C-6 多选 trim / fade（已完成）
+
+- **裁切多选**：按下时解析参与集合（多选 + **编组展开**，与旧实现 `useEditDrag` 的
+  `supportsGroupExpansion` 对 trim 展开一致）；预览以**锚点位移**为基准逐 clip 换算
+  （源位移 = 时间轴位移 × **各自播放速率**），提交全部参与者、取消全部回滚。
+- **淡变多选**：参与集合**不展开编组**（旧实现排除 fade / gain）；应用的是**同一个淡变
+  长度值**（`applyBulkFadeValue`，各自按长度钳制）而不是同一增量；提交 / 取消同样覆盖全部。
+- **踩坑（重要）**：参与集合在按下时解析，回调必须把 `multiSelectedClipIds` 放进依赖数组——
+  漏掉时闭包停在挂载时的空选择，表现为「框选多个后仍只裁切一个」。
+- **顺带修复**：锚点的源位移原先漏乘播放速率（rate ≠ 1 时源域与时间轴不同步）。
+- 验证：框选 2 clip 后拖 clip-1 右缘 +100px → 两个 update（clip-1 `length 4.667`；
+  clip-2 速率 1.5 → `length 7.667 / sourceEnd 8`，源位移按速率折算 ✓）；
+  框选后拖淡入角 +100px → 两个 clip 都是 `fadeInSec 1.2667`（同值语义）✓
+
+### C-2 clip 音高拖拽（已完成，走「委托」路线）
+
+- 内核新增 `onClipPointerDownIntercept`：clip 左键按下时先问面板是否接管；
+  面板在 `modifier.clipPitchDrag`（Alt+Shift）按住时构造最小鸭子类型事件，
+  **整体交给旧实现的 `useClipPitchDrag`**（自带 window 监听 / 参数帧预览 /
+  undo group / 收尾 / tooltip 发布）。
+- **为什么不重写**：该手势是一台带异步状态机的完整实现（先取基准帧 → 节流写预览 →
+  收尾提交或回滚）；内核侧重写会产生第二份音高语义，而 tooltip 浮层本就由面板渲染、
+  与渲染模式无关。这比 C-1/C-1b 的「先抽取」更彻底：**零重复**。
+- 验证：Alt+Shift 竖直拖 → `get_param_frames` + 多次 `set_param_frames`、
+  **无 `move_clips`**（拦截生效）；无修饰键水平拖 → `move_clips`（拦截不误触发）✓
+
 ### 未完成（下一批）
 
-| 任务 | 内容 | 前置工作 |
+| 任务 | 内容 | 说明 |
 |---|---|---|
-| C-2 | `Alt+Shift` 竖直拖 clip = 调该 clip 音高（`modifier.clipPitchDrag`） | **必须先抽取**：`useClipPitchDrag`（369 行）自带拖拽状态、tooltip 与「根轨道需 composeEnabled + 有音高分析算法」的前置校验；内核需要的是同一份「竖直位移 → cents → 参数线写入」逻辑 |
-| C-6 | trim / fade / snap offset 的**多选批量**（B-2 残留）；trim/fade 的自动交叉淡化预览 | 拖拽移动已覆盖多选与编组；trim/fade 需按旧实现 `useEditDrag` 的 `supportsGroupExpansion`（fade 不展开组）逐 clip 应用 |
+| C-6b | trim / fade 拖拽期间的**自动交叉淡化预览**（旧实现 `previewAutoCrossfadeNow()`），以及收尾的 `applyAutoCrossfade` | 拖拽移动已有（B 批）；trim/fade 尚缺 |
+| C-7 | **组拉伸**（多选 + `Alt` 拖边缘）：旧实现用 `buildStretchGroupState` / `computeStretchGroupUpdate` 做整组等比缩放 | 纯函数已在 `stretchGroup.ts`；内核当前只拉伸被拖的那一个 |
+| C-8 | slip 的 **loop 边界吸附**（`loopSnapThresholdSec`） | 仅 loop 开启且窗口跨素材边界时影响落点 |
+| D | 淡化专属右键菜单 + 淡变 tooltip、多 Take、静音检测预览、拖到空白新建轨道 | — |
+| E | 多选修饰键走键位绑定 + Shift 范围选择、Esc 覆盖抓手/snap/框选、滚动条 track 点击跳转、Vertical Lock、陈旧注释与 `glyph/*` 死代码 | — |
 
 ---
 

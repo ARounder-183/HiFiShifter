@@ -160,7 +160,7 @@ import {
 } from "./timeline/hooks/autoCrossfade";
 import { computeEffectiveSnap } from "../../utils/timelineSnapping";
 import { store } from "../../app/store";
-import { applyBulkGainDeltaDb } from "./timeline/hooks/bulkClipEdit";
+import { applyBulkFadeValue, applyBulkGainDeltaDb } from "./timeline/hooks/bulkClipEdit";
 import { advanceFineAxisDrag, type FineAxisDragState } from "./timeline/fineAxisDrag";
 import { CLIP_GAIN_DRAG_DB_PER_PX, MIN_CLIP_LENGTH_SEC } from "./timeline/constants";
 import { computeClipStretch } from "./timeline/hooks/stretchGroup";
@@ -450,6 +450,27 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
      * 落地「参数编辑器视图同步」（内核模式没有原生 scroller 可写）。
      */
     const kernelHostRef = React.useRef<TimelineKernelHost | null>(null);
+
+    /**
+     * 「clip 左键按下拦截」句柄（内核在启动自己的手势之前调用）。
+     *
+     * 【为什么用 ref 中转】拦截需要复用旧实现的 `useClipPitchDrag`（它在面板里
+     * 于渲染流程的**后段**才实例化），而内核交互对象在**前段**构建。用 ref 中转
+     * 既避免把 hook 调用提前（改动面大），也不产生 TDZ。
+     *
+     * @returns true = 面板已接管，内核不得再启动自己的手势。
+     */
+    const kernelClipInterceptRef = React.useRef<
+        | ((args: {
+              clipId: string;
+              clientX: number;
+              clientY: number;
+              pointerId: number;
+              modifiers: { ctrlKey: boolean; shiftKey: boolean; altKey: boolean; metaKey: boolean };
+              container: HTMLElement;
+          }) => boolean)
+        | null
+    >(null);
     const state = useTimelineState({ kernelHostRef });
     // 视觉插值播放头的共享读取点：bridge 的 onFrame 每帧写入（与绘制同源），
     // 缩放锚点与提交后纠正读取同一值——播放中缩放不得以 33Hz 轮询的 store
@@ -1728,6 +1749,26 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         baseFadeInSec: number;
         baseFadeOutSec: number;
         baseSnapOffsetSec: number;
+        /**
+         * 本次裁切作用于的全部 clip（多选集合 + 编组展开）。
+         *
+         * 旧实现 `useEditDrag` 的 `supportsGroupExpansion` 对 trim 展开编组、
+         * 对 fade / gain 不展开——拉伸（Alt）只作用于被拖的那一个（组拉伸需要
+         * `buildStretchGroupState` 的整组缩放语义，本批未做）。
+         */
+        participants: KernelEditParticipant[];
+        /** 各参与者的按下时几何（裁切按**锚点位移**逐 clip 换算）。 */
+        baseById: Map<
+            string,
+            {
+                startSec: number;
+                lengthSec: number;
+                sourceStartSec: number;
+                sourceEndSec: number;
+                /** 该 clip 的播放速率：源位移 = 时间轴位移 × 速率。 */
+                playbackRate: number;
+            }
+        >;
     } | null>(null);
 
     /**
@@ -1747,8 +1788,54 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             modifiers: { ctrlKey: boolean; shiftKey: boolean; altKey: boolean; metaKey: boolean };
         }) => {
             if (kernelTrimOriginRef.current?.clipId !== args.clipId) {
-                const clip = sessionRef.current.clips.find((item) => item.id === args.clipId);
+                const session = sessionRef.current;
+                const clip = session.clips.find((item) => item.id === args.clipId);
                 if (clip === undefined) return;
+                // 参与集合：裁切 = 多选 + 编组展开；拉伸 = 仅锚点（组拉伸未实现）。
+                const stretchMode = isModifierActive(stretchKbRef.current, args.modifiers);
+                const participants = stretchMode
+                    ? resolveKernelEditParticipants({
+                          anchorClipId: clip.id,
+                          multiSelectedClipIds: [],
+                          clips: session.clips,
+                          trackIds: session.tracks.map((track) => track.id),
+                          ignoreGrouping: true,
+                          disabledGroupIds: [],
+                          expandGroups: false,
+                      })
+                    : resolveKernelEditParticipants({
+                          anchorClipId: clip.id,
+                          multiSelectedClipIds,
+                          clips: session.clips,
+                          trackIds: session.tracks.map((track) => track.id),
+                          ignoreGrouping: session.ignoreGrouping,
+                          disabledGroupIds: session.disabledGroupIds,
+                          // 裁切展开编组（旧实现 supportsGroupExpansion 覆盖 trim）。
+                          expandGroups: true,
+                      });
+                const baseById = new Map<
+                    string,
+                    {
+                        startSec: number;
+                        lengthSec: number;
+                        sourceStartSec: number;
+                        sourceEndSec: number;
+                        playbackRate: number;
+                    }
+                >();
+                for (const participant of participants) {
+                    const item = session.clips.find(
+                        (candidate) => candidate.id === participant.clipId,
+                    );
+                    if (item === undefined) continue;
+                    baseById.set(participant.clipId, {
+                        startSec: Number(item.startSec) || 0,
+                        lengthSec: Math.max(0, Number(item.lengthSec) || 0),
+                        sourceStartSec: Number(item.sourceStartSec ?? 0) || 0,
+                        sourceEndSec: Number(item.sourceEndSec ?? 0) || 0,
+                        playbackRate: Number(item.playbackRate ?? 1) || 1,
+                    });
+                }
                 kernelTrimOriginRef.current = {
                     clipId: clip.id,
                     startSec: clip.startSec,
@@ -1764,6 +1851,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     baseFadeInSec: Number(clip.fadeInSec) || 0,
                     baseFadeOutSec: Number(clip.fadeOutSec) || 0,
                     baseSnapOffsetSec: Math.max(0, Number(clip.snapOffsetSec) || 0),
+                    participants,
+                    baseById,
                 };
             }
             const origin = kernelTrimOriginRef.current;
@@ -1872,20 +1961,64 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             batch(() => {
                 dispatch(moveClipStart({ clipId: args.clipId, startSec: nextStart }));
                 dispatch(setClipLength({ clipId: args.clipId, lengthSec: nextLength }));
+                // 源位移 = 时间轴位移 × 该 clip 的播放速率（rate ≠ 1 时源域与时间轴
+                // 不同步；旧实现同样按 rate 折算）。
+                const anchorSourceDelta = deltaSec * origin.basePlaybackRate;
                 if (args.edge === "left") {
                     dispatch(
                         setClipSourceRange({
                             clipId: args.clipId,
-                            sourceStartSec: origin.sourceStartSec + deltaSec,
+                            sourceStartSec: origin.sourceStartSec + anchorSourceDelta,
                         }),
                     );
                 } else {
                     dispatch(
                         setClipSourceRange({
                             clipId: args.clipId,
-                            sourceEndSec: origin.sourceEndSec + deltaSec,
+                            sourceEndSec: origin.sourceEndSec + anchorSourceDelta,
                         }),
                     );
+                }
+                // 多选批量：其余参与者按**锚点位移**（deltaSec）逐 clip 换算——与旧实现
+                // `useEditDrag` 同源（以锚点的实际位移为基准，不是各自重新吸附）。
+                for (const participant of origin.participants) {
+                    if (participant.clipId === args.clipId) continue;
+                    const base = origin.baseById.get(participant.clipId);
+                    if (base === undefined) continue;
+                    const sourceDelta = deltaSec * base.playbackRate;
+                    if (args.edge === "left") {
+                        dispatch(
+                            moveClipStart({
+                                clipId: participant.clipId,
+                                startSec: base.startSec + deltaSec,
+                            }),
+                        );
+                        dispatch(
+                            setClipLength({
+                                clipId: participant.clipId,
+                                lengthSec: Math.max(MIN_CLIP_LENGTH_SEC, base.lengthSec - deltaSec),
+                            }),
+                        );
+                        dispatch(
+                            setClipSourceRange({
+                                clipId: participant.clipId,
+                                sourceStartSec: base.sourceStartSec + sourceDelta,
+                            }),
+                        );
+                    } else {
+                        dispatch(
+                            setClipLength({
+                                clipId: participant.clipId,
+                                lengthSec: Math.max(MIN_CLIP_LENGTH_SEC, base.lengthSec + deltaSec),
+                            }),
+                        );
+                        dispatch(
+                            setClipSourceRange({
+                                clipId: participant.clipId,
+                                sourceEndSec: base.sourceEndSec + sourceDelta,
+                            }),
+                        );
+                    }
                 }
             });
         },
@@ -1896,6 +2029,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             noSnapKb,
             snapTimelineDetailed,
             stretchKbRef,
+            // 参与集合在按下时解析，必须读到**最新**的多选集合：漏这个依赖会让
+            // 回调闭包停在挂载时的空选择上（表现为"框选多个后仍只裁切一个"）。
+            multiSelectedClipIds,
             setClipFades,
             setClipPlaybackRate,
             setClipSnapOffset,
@@ -2094,38 +2230,44 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             }
 
             if (args.cancelled) {
+                // 取消：**全部参与者**一起还原（多选裁切只还原锚点会让其余 clip
+                // 停在半途位置，与后端分叉）。
                 batch(() => {
-                    dispatch(moveClipStart({ clipId: origin.clipId, startSec: origin.startSec }));
-                    dispatch(setClipLength({ clipId: origin.clipId, lengthSec: origin.lengthSec }));
-                    dispatch(
-                        setClipSourceRange({
-                            clipId: origin.clipId,
-                            sourceStartSec: origin.sourceStartSec,
-                            sourceEndSec: origin.sourceEndSec,
-                        }),
-                    );
+                    for (const [clipId, base] of origin.baseById) {
+                        dispatch(moveClipStart({ clipId, startSec: base.startSec }));
+                        dispatch(setClipLength({ clipId, lengthSec: base.lengthSec }));
+                        dispatch(
+                            setClipSourceRange({
+                                clipId,
+                                sourceStartSec: base.sourceStartSec,
+                                sourceEndSec: base.sourceEndSec,
+                            }),
+                        );
+                    }
                 });
                 return;
             }
             dispatch(checkpointHistory());
             // 同拖拽：提交值取 Redux 当前值（预览已写入吸附后的结果）。
-            const clip = sessionRef.current.clips.find((item) => item.id === args.clipId);
-            void dispatch(
-                setClipsStateBulkRemote({
-                    updates: [
-                        {
-                            clipId: args.clipId,
-                            startSec: clip?.startSec ?? args.startSec,
-                            lengthSec: clip?.lengthSec ?? args.lengthSec,
-                            // 裁切必须同时提交**源区间**：只改长度会让后端按旧源区间
-                            // 重新解释内容（波形与音频都会对不上）。预览阶段已同步改
-                            // 过源区间，这里取 Redux 当前值即可。
-                            sourceStartSec: clip?.sourceStartSec,
-                            sourceEndSec: clip?.sourceEndSec,
-                        },
-                    ],
-                }),
-            );
+            const session = sessionRef.current;
+            const updates = origin.participants.flatMap((participant) => {
+                const clip = session.clips.find((item) => item.id === participant.clipId);
+                if (clip === undefined) return [];
+                return [
+                    {
+                        clipId: participant.clipId,
+                        startSec: clip.startSec,
+                        lengthSec: clip.lengthSec,
+                        // 裁切必须同时提交**源区间**：只改长度会让后端按旧源区间
+                        // 重新解释内容（波形与音频都会对不上）。预览阶段已同步改过
+                        // 源区间，这里取 Redux 当前值即可。
+                        sourceStartSec: clip.sourceStartSec,
+                        sourceEndSec: clip.sourceEndSec,
+                    },
+                ];
+            });
+            if (updates.length === 0) return;
+            void dispatch(setClipsStateBulkRemote({ updates }));
         },
         [dispatch, sessionRef],
     );
@@ -2135,29 +2277,78 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         clipId: string;
         fadeInSec: number;
         fadeOutSec: number;
+        /**
+         * 本次淡变作用于的全部 clip（多选集合）。
+         *
+         * 旧实现 `useEditDrag` 的 `supportsGroupExpansion` **排除 fade**——
+         * 淡变拖拽不展开编组，只作用于选中的 clip。
+         */
+        participants: KernelEditParticipant[];
+        /** 各参与者的按下时基准（回滚与批量换算用）。 */
+        baseById: Map<string, { fadeInSec: number; fadeOutSec: number; lengthSec: number }>;
     } | null>(null);
 
     /** 内核淡变角预览：只改对应一侧的淡变长度（另一侧保持不变）。 */
     const handleKernelFadePreview = React.useCallback(
         (args: { clipId: string; side: "in" | "out"; fadeSec: number; deltaSec: number }) => {
             if (kernelFadeOriginRef.current?.clipId !== args.clipId) {
-                const clip = sessionRef.current.clips.find((item) => item.id === args.clipId);
+                const session = sessionRef.current;
+                const clip = session.clips.find((item) => item.id === args.clipId);
                 if (clip === undefined) return;
+                // 不展开编组（旧实现 supportsGroupExpansion 排除 fade）。
+                const participants = resolveKernelEditParticipants({
+                    anchorClipId: clip.id,
+                    multiSelectedClipIds,
+                    clips: session.clips,
+                    trackIds: session.tracks.map((track) => track.id),
+                    ignoreGrouping: session.ignoreGrouping,
+                    disabledGroupIds: session.disabledGroupIds,
+                    expandGroups: false,
+                });
+                const baseById = new Map<
+                    string,
+                    { fadeInSec: number; fadeOutSec: number; lengthSec: number }
+                >();
+                for (const participant of participants) {
+                    const item = session.clips.find(
+                        (candidate) => candidate.id === participant.clipId,
+                    );
+                    if (item === undefined) continue;
+                    baseById.set(participant.clipId, {
+                        fadeInSec: Number(item.fadeInSec) || 0,
+                        fadeOutSec: Number(item.fadeOutSec) || 0,
+                        lengthSec: Math.max(0, Number(item.lengthSec) || 0),
+                    });
+                }
                 kernelFadeOriginRef.current = {
                     clipId: clip.id,
                     fadeInSec: clip.fadeInSec,
                     fadeOutSec: clip.fadeOutSec,
+                    participants,
+                    baseById,
                 };
             }
-            dispatch(
-                setClipFades(
-                    args.side === "in"
-                        ? { clipId: args.clipId, fadeInSec: args.fadeSec }
-                        : { clipId: args.clipId, fadeOutSec: args.fadeSec },
+            const origin = kernelFadeOriginRef.current;
+            if (origin === null) return;
+            // 多选批量：**同一个淡变长度值**应用到全部参与者（各自按自身长度钳制），
+            // 与旧实现 `applyBulkFadeValue` 同源（不是"同一增量"）。
+            const target = args.side === "in" ? "fadeInSec" : "fadeOutSec";
+            const updates = applyBulkFadeValue({
+                clipIds: origin.participants.map((participant) => participant.clipId),
+                clipsById: new Map(
+                    [...origin.baseById].map(([clipId, base]) => [
+                        clipId,
+                        { lengthSec: base.lengthSec },
+                    ]),
                 ),
-            );
+                target,
+                nextValue: args.fadeSec,
+            });
+            batch(() => {
+                for (const update of updates) dispatch(setClipFades(update));
+            });
         },
-        [dispatch, sessionRef],
+        [dispatch, multiSelectedClipIds, sessionRef],
     );
 
     /** 内核淡变角收尾：提交或回滚（取消时两侧一起还原）。 */
@@ -2167,27 +2358,36 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             kernelFadeOriginRef.current = null;
             if (origin === null) return;
             if (args.cancelled) {
-                dispatch(
-                    setClipFades({
-                        clipId: origin.clipId,
-                        fadeInSec: origin.fadeInSec,
-                        fadeOutSec: origin.fadeOutSec,
-                    }),
-                );
+                // 取消：全部参与者一起还原（多选淡变只还原锚点会让其余 clip 留在半途）。
+                batch(() => {
+                    for (const [clipId, base] of origin.baseById) {
+                        dispatch(
+                            setClipFades({
+                                clipId,
+                                fadeInSec: base.fadeInSec,
+                                fadeOutSec: base.fadeOutSec,
+                            }),
+                        );
+                    }
+                });
                 return;
             }
             dispatch(checkpointHistory());
-            void dispatch(
-                setClipsStateBulkRemote({
-                    updates: [
-                        args.side === "in"
-                            ? { clipId: args.clipId, fadeInSec: args.fadeSec }
-                            : { clipId: args.clipId, fadeOutSec: args.fadeSec },
-                    ],
-                }),
-            );
+            // 提交值取 Redux 当前值（预览已写入按各自长度钳制后的结果）。
+            const session = sessionRef.current;
+            const updates = origin.participants.flatMap((participant) => {
+                const clip = session.clips.find((item) => item.id === participant.clipId);
+                if (clip === undefined) return [];
+                return [
+                    args.side === "in"
+                        ? { clipId: participant.clipId, fadeInSec: clip.fadeInSec }
+                        : { clipId: participant.clipId, fadeOutSec: clip.fadeOutSec },
+                ];
+            });
+            if (updates.length === 0) return;
+            void dispatch(setClipsStateBulkRemote({ updates }));
         },
-        [dispatch],
+        [dispatch, sessionRef],
     );
 
     /** 内核框选：拖动前的选择快照（合并与回滚的基准）。 */
@@ -2685,6 +2885,20 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             onRateBadgeMenu: handleKernelRateBadgeMenu,
             onRenameClipStart: handleKernelRenameClipStart,
             onBadgeEditStart: handleKernelBadgeEditStart,
+            // 拦截经 ref 中转：面板的接管实现（音高拖拽）在渲染后段才实例化。
+            onClipPointerDownIntercept: (args: {
+                clipId: string;
+                clientX: number;
+                clientY: number;
+                pointerId: number;
+                modifiers: {
+                    ctrlKey: boolean;
+                    shiftKey: boolean;
+                    altKey: boolean;
+                    metaKey: boolean;
+                };
+                container: HTMLElement;
+            }) => kernelClipInterceptRef.current?.(args) ?? false,
             onGainDragPreview: handleKernelGainDragPreview,
             onGainDragCommit: handleKernelGainDragCommit,
             onGainReset: handleKernelGainReset,
@@ -2809,6 +3023,49 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         fineAdjustKb: paramFineAdjustKb,
         formatDragTooltip: formatClipPitchDragTooltip,
     });
+
+    /**
+     * 内核 clip 左键按下拦截：`Alt + Shift`（`modifier.clipPitchDrag`）按住时
+     * 把这次手势**整体交给旧实现的 `useClipPitchDrag`**。
+     *
+     * 【为什么委托而不是重写】该手势是一台带异步状态机的完整实现：先取基准参数帧、
+     * 逐帧节流写后端预览、undo group 惰性开启、收尾提交 / 回滚、tooltip 发布。
+     * 内核侧重写会产生第二份音高语义；委托则天然与旧实现一致（tooltip 浮层也已
+     * 由面板渲染，与渲染模式无关）。
+     *
+     * 特殊说明：旧 hook 需要「React 合成事件」形态的入参（只用 button / pointerId /
+     * clientX / clientY / preventDefault / stopPropagation / currentTarget），因此这里
+     * 构造一个最小鸭子类型对象（与旧 `ClipHeader` 调用 `startEditDrag` 的手法一致）。
+     */
+    const handleKernelClipPointerDownIntercept = React.useCallback(
+        (args: {
+            clipId: string;
+            clientX: number;
+            clientY: number;
+            pointerId: number;
+            modifiers: { ctrlKey: boolean; shiftKey: boolean; altKey: boolean; metaKey: boolean };
+            container: HTMLElement;
+        }): boolean => {
+            if (!isModifierActive(pitchDragKb, args.modifiers)) return false;
+            const clip = sessionRef.current.clips.find((item) => item.id === args.clipId);
+            if (clip === undefined) return false;
+            startClipPitchDrag(
+                {
+                    button: 0,
+                    pointerId: args.pointerId,
+                    clientX: args.clientX,
+                    clientY: args.clientY,
+                    preventDefault: () => undefined,
+                    stopPropagation: () => undefined,
+                    currentTarget: args.container,
+                } as unknown as React.PointerEvent<HTMLDivElement>,
+                args.clipId,
+            );
+            return true;
+        },
+        [pitchDragKb, sessionRef, startClipPitchDrag],
+    );
+    kernelClipInterceptRef.current = handleKernelClipPointerDownIntercept;
 
     const {
         startClipDrag: _startClipDragInner,

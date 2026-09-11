@@ -303,6 +303,27 @@ export interface TimelineKernelInteractions {
      */
     readonly onSelectClip?: (clipId: string, additive: boolean) => void;
     /**
+     * clip 左键按下拦截（在**任何**内核手势判定之前回调）。
+     *
+     * 【用途】把「修饰键 + 竖直拖 = 调音高」这类**由面板自持状态机**的手势整体
+     * 交回面板——它复用旧实现的 `useClipPitchDrag`（自带 window 监听、参数帧预览、
+     * undo group 与收尾），内核只负责识别「按在了 clip 上」并提供几何。
+     *
+     * 特殊说明：返回 true 表示已接管，内核**不得**再启动选中 / 拖拽 / 控件分派。
+     *
+     * @param args 命中 clip、指针几何、修饰键快照与内核容器（供接管方做 pointer
+     *   capture 或坐标换算）。
+     * @returns true = 面板已接管本次按下。
+     */
+    readonly onClipPointerDownIntercept?: (args: {
+        readonly clipId: string;
+        readonly clientX: number;
+        readonly clientY: number;
+        readonly pointerId: number;
+        readonly modifiers: KernelDragModifiers;
+        readonly container: HTMLElement;
+    }) => boolean;
+    /**
      * 双击 clip（第二次按下命中，且两次之间未发生拖拽）。
      *
      * 旧实现语义：请求参数编辑器按 clip 起止范围创建选区，并把交互焦点切到
@@ -2295,6 +2316,20 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     function startPrimaryGesture(event: PointerEvent): void {
         const hit = hitAt(event.clientX, event.clientY);
         if (hit.kind === "clip") {
+            // 面板可在此整体接管（例如 `Alt + Shift` 竖直拖 = 调音高，复用旧实现的
+            // 状态机）。返回 true 时内核不启动任何自己的手势。
+            if (
+                interactions?.onClipPointerDownIntercept?.({
+                    clipId: hit.clip.id,
+                    clientX: event.clientX,
+                    clientY: event.clientY,
+                    pointerId: event.pointerId,
+                    modifiers: dragModifiersOf(event),
+                    container,
+                }) === true
+            ) {
+                return;
+            }
             // 双击判定（参数与旧实现 `ClipItem` 一致）：命中后请求参数编辑器按
             // clip 起止范围创建选区，**不**进入选中 / 拖拽手势（旧实现同样在
             // 第二次按下时拦截并 return）。第一次按下只记待定，若随后发生拖拽，

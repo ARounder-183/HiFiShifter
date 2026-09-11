@@ -365,6 +365,8 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                 interactionsRef.current?.onToggleGroupDisabled?.(groupId),
             onBadgeEditStart: (clipId, field, screenX, screenY) =>
                 interactionsRef.current?.onBadgeEditStart?.(clipId, field, screenX, screenY),
+            onClipPointerDownIntercept: (args) =>
+                interactionsRef.current?.onClipPointerDownIntercept?.(args) ?? false,
             onGainDragPreview: (args) => interactionsRef.current?.onGainDragPreview?.(args),
             onGainDragCommit: (args) => interactionsRef.current?.onGainDragCommit?.(args),
             onGainReset: (clipId) => interactionsRef.current?.onGainReset?.(clipId),
