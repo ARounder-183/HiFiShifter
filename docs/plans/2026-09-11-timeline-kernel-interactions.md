@@ -1089,15 +1089,44 @@ clip 边缘（最优先）→ 淡化包络线 / 边缘竖线 → 交叉点抓手
   回调（**只给几何位移，吸附与落库交回面板**——与 `onDragPreview` 同一架构约定）
 - **C-3**：面板接回调，复用 `useSnapOffsetDrag` 的语义（阈值 / 吸附 / 单笔后端写入）
 
-### Phase D：ghost 预览（copy 拖拽）与素材拖入
-- 旧实现：`ghostDrag`（`TimelinePanel.tsx:1657`）、`dropPreview`（`TimelinePanel.tsx:2961`，在内核开关内的旧分支里）、拖入的 drag&drop 处理在 `TimelineScrollArea` 内
-- 待调研：copy 模式的触发修饰键、ghost 的坐标与样式、素材拖入的 `dragover`/`drop` 契约（含 `importModeMenu` 分支）
-- 预期产出：内核态 ghost 层（内容坐标 + rAF 平移，与 `SnapHighlightLayer` 同模式）+ 拖入处理迁到内核视口
+### Phase D：ghost 预览（copy 拖拽）与素材拖入 —— 调研结论（2026-09-11）
 
-### Phase D：ghost 预览（copy 拖拽）与素材拖入
-- 旧实现：`ghostDrag`（`TimelinePanel.tsx:1657`）、`dropPreview`（`TimelinePanel.tsx:2961`，在内核开关内的旧分支里）、拖入的 drag&drop 处理在 `TimelineScrollArea` 内
-- 待调研：copy 模式的触发修饰键、ghost 的坐标与样式、素材拖入的 `dragover`/`drop` 契约（含 `importModeMenu` 分支）
-- 预期产出：内核态 ghost 层（内容坐标 + rAF 平移，与 `SnapHighlightLayer` 同模式）+ 拖入处理迁到内核视口
+**D-1：ghost 预览（copy 拖拽）**
+
+| 项 | 事实 |
+|---|---|
+| 触发 | `resolveClipDragCopyMode({ existingCopyMode, ctrlKey, modifierActive })`（`hooks/clipDragCopyMode.ts`）：**已配置的复制绑定为准**，非 macOS 额外保留 Ctrl 回退（macOS 上 ctrl 字段映射到 Command） |
+| 状态 | `ghostDrag` 在 `useClipDrag.ts`（`useState`，550 行 set、645/663 行清）；只在 `copyMode` 时更新——**原 clip 不动，只更新 ghost 位置** |
+| 字段 | `{ deltaSec, targetTrackId, targetTrackOffset, allowTrackMove, clipIds, initialById }`，带去重（同值不重复 setState） |
+| 渲染 | 作为 `TrackLane` 的 prop 传入 → **位于内核开关的旧分支内**，内核模式下不渲染 |
+| 几何 | `startSec = max(0, initialById[clipId].startSec + deltaSec)`（**内容坐标**） |
+
+**D-2：素材拖入（`dropPreview` + drag&drop）**
+
+| 项 | 事实 |
+|---|---|
+| 渲染 | `TimelinePanel` 旧分支内（`TrackLane` 里），`dropPreview` 来自 hook，`dropPreviewRef` 供命令式写位置 |
+| 几何 | `left = max(0, dropPreview.startSec × pxPerSec)`、`top = rowTopForTrackId(dropPreview.trackId) + 8` → **内容坐标** |
+| 尺寸 | 宽度 `pxPerSec × dropPreview.durationSec`（`durationSec > 0` 时） |
+| 事件 | `onDragOver` / `onDrop` 挂在 **`TimelineScrollArea`** 上（旧分支内）；用 `tauriDraggedPathRef` 处理 Tauri 文件拖入，并区分 `dataTransfer.files` |
+| 分支 | 落点后经 `importModeMenu` 分支（导入模式选择菜单） |
+
+**内核实施增量（按依赖排序）**
+
+- **D-1**：内核态 ghost 层。与 `SnapHighlightLayer` **同一模式**——内容坐标容器 +
+  宿主 rAF 整层 `translate(-scrollLeft, -scrollTop)`（宿主已有 `snapHighlightContent`
+  这条通道，可复用同一机制再挂一层）。手势侧：`clip-drag` 增加 copyMode 判定
+  （复用 `resolveClipDragCopyMode`，宿主需读修饰键状态），copyMode 下不发
+  `onDragPreview` 的"移动"语义而是"ghost 位置"语义。
+- **D-2**：拖入处理迁到内核视口。`dropPreview` 同样是内容坐标 → 同一容器模式；
+  `onDragOver`/`onDrop` 需挂到内核容器上（旧实现挂在 `TimelineScrollArea`，
+  内核模式下该组件不挂载）。**注意**：`importModeMenu` 分支与 Tauri 路径要一并迁移，
+  否则拖入会静默失效。
+- **D-3**：`rowTopForTrackId` 这类"轨道 → 行顶"的换算，内核已有同源实现
+  （`trackIndex × rowHeight`），应复用而不是另写。
+
+**待确认（实施前需再读一次代码）**：`importModeMenu` 的完整分支条件、Tauri 拖入与
+DOM 拖入的差异处理、`dropPreview` 的 duration 来源（是否已在拖入时解析音频头）。
 
 ---
 
