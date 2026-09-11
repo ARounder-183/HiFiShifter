@@ -200,6 +200,20 @@ export function drawTimelineCanvas(
          */
         glBodies?: GlClipBodySink | null;
         /**
+         * 编组激活时**只画描边、不画块面**（供「细节层位于波形之上」的调用方使用）。
+         *
+         * 【为什么需要】编组激活的 clip 默认会退回 Canvas2D 画整块（块面 + 深金外圈
+         * 描边），因为外圈描边伸出矩形 2px、超出 GL 渲染器的单矩形模型。旧实现的
+         * 块面画布在波形**之下**，所以块面不会遮住波形；渲染内核的细节层在波形
+         * **之上**，若照旧画块面就会把该 clip 的波形盖掉。
+         *
+         * 置 true 时：块面仍由 GL 承担（`useGl` 不再被编组激活否决），Canvas2D 只补
+         * 那一圈描边——视觉与旧实现等价（描边只在 clip 边缘，不与波形重叠）。
+         *
+         * @default false
+         */
+        groupOutlineOverGl?: boolean;
+        /**
          * 视口左上角的**内容坐标**（CSS 像素）。
          *
          * Canvas2D 路径靠 `ctx.translate` 实现，GL 路径没有这个变换，必须
@@ -555,7 +569,10 @@ export function drawTimelineCanvas(
             isGroupActive,
             isGroupDisabled,
             hasSeam,
-            useGl: args.glBodies != null && !isGroupActive,
+            // 编组激活的 clip 默认退回 Canvas2D（外圈描边超出 GL 的单矩形模型）；
+            // 细节层在波形之上时改用「只补描边」模式，块面仍由 GL 承担（见
+            // `groupOutlineOverGl` 的说明）。
+            useGl: args.glBodies != null && (!isGroupActive || args.groupOutlineOverGl === true),
             fills,
             strokes,
             // 屏障：前导重叠会盖住前一个 clip；编组外圈描边会伸出自身矩形

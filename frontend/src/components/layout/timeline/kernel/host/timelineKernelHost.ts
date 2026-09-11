@@ -287,13 +287,17 @@ export interface TimelineKernelInteractions {
      *
      * @param sec 目标时间（秒，已钳制到 >= 0）。
      * @param commit true = 单击或手势结束（应提交后端）；false = 拖拽中的预览。
+     * @param trackId 点击空白时指针所在轨道（拖拽预览帧与标尺来源不带）。
+     *   供面板实现「空白点击」的完整语义：清空 clip 选中 + 按
+     *   `允许时间轴点击切换轨道` 切换当前轨道（旧实现 `TimelinePanel` 的
+     *   pointerdown 捕获分支）。**不参与 seek 本身**。
      */
-    readonly onSeek?: (sec: number, commit: boolean) => void;
+    readonly onSeek?: (sec: number, commit: boolean, trackId?: string | null) => void;
     /**
      * 选中 clip。
      *
-     * @param clipId 目标 clip；null 表示清空选择（点击空白时不会触发——空白
-     *   点击按旧实现语义只 seek，不清空选择）。
+     * @param clipId 目标 clip；null 表示清空选择（点击空白走 `onSeek` 的
+     *   `trackId` 参数，不经这里）。
      * @param additive true = 按住多选修饰键（Ctrl / ⌘），应切换而非替换选择。
      */
     readonly onSelectClip?: (clipId: string, additive: boolean) => void;
@@ -320,6 +324,15 @@ export interface TimelineKernelInteractions {
      * @param screenY 浮窗锚点的视口坐标 y（旧实现取按钮上缘）。
      */
     readonly onOpenClipFormant?: (clipId: string, screenX: number, screenY: number) => void;
+    /**
+     * 临时禁用 / 启用编组的联动编辑（单击 header 的锁链徽标）。
+     *
+     * 特殊说明：作用于**整个编组**（不是单个 clip）——面板复用既有的
+     * `toggleGroupDisabled`，与旧实现同一份语义。
+     *
+     * @param groupId 目标编组。
+     */
+    readonly onToggleGroupDisabled?: (groupId: string) => void;
     /**
      * 开始行内编辑 clip 的增益 / 速率（单击对应标签或增益旋钮）。
      *
@@ -913,6 +926,16 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     let detailWindowWidth = 0;
     let detailWindowHeight = 0;
     let detailDrawClips: Parameters<typeof drawTimelineCanvas>[1]["clips"] = [];
+    /**
+     * 细节层用的编组状态（与几何同一次重建时更新）。
+     *
+     * 【为什么必须传】`drawTimelineCanvas` 需要它才能画出：
+     * - 编组激活的**深金外圈描边**（`activeGroupIds`）；
+     * - 锁链徽标的「已禁用联动」配色（`disabledGroupIds`）。
+     * 不传时描边与徽标状态永远停在"未激活 / 未禁用"——表现为「点了锁链没有任何反馈」。
+     */
+    let detailActiveGroupIds: ReadonlySet<string> = new Set<string>();
+    let detailDisabledGroupIds: readonly string[] = [];
     let detailRowGuides: Parameters<typeof drawTimelineCanvas>[1]["rowGuides"];
     let lastDetailLeft = Number.NaN;
     let lastDetailTop = Number.NaN;
@@ -945,6 +968,11 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             viewportTopPx: detailWindowStartY,
             darkMode: data().darkMode,
             glBodies: NOOP_GL_BODY_SINK,
+            // 编组状态：描边与锁链徽标配色都由它决定（见 `detailActiveGroupIds`）。
+            activeGroupIds: detailActiveGroupIds as Set<string>,
+            disabledGroupIds: [...detailDisabledGroupIds],
+            // 块面归 GL（细节层在波形之上，画块面会盖住波形）；这里只补那一圈描边。
+            groupOutlineOverGl: true,
             originXPx: detailWindowStartX,
             originYPx: detailWindowStartY,
         });
@@ -1133,6 +1161,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             selectedClipId: d.selectedClipId,
             multiSelectedClipIds: [...d.multiSelectedClipIds],
             renamingClipId: null,
+            // 编组状态参与两件事：overlay 展开（激活编组的成员一并进 DOM 覆盖层）
+            // 与样式（锁链徽标配色）。漏传会让"点锁链禁用联动"没有任何视觉反馈。
+            disabledGroupIds: [...d.disabledGroupIds],
         });
 
         const clipResult = clipBuilder.build({
@@ -1140,6 +1171,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             darkMode: d.darkMode,
             fontFamily: resolveFontFamily(),
             seamColor: d.darkMode ? "rgb(31, 31, 31)" : "rgb(237, 240, 245)",
+            // 编组状态进 GL 样式：激活编组的块面描边/徽标配色与旧实现同源。
+            activeGroupIds: model.activeGroupIds,
+            disabledGroupIds: [...d.disabledGroupIds],
         });
 
         // 合并：网格 → 行分界线 → clip（同一 draw call 内的层叠顺序，后者覆盖前者）。
@@ -1179,6 +1213,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         detailWindowWidth = windowWidth;
         detailWindowHeight = Math.max(1, (lastRow - firstRow) * view.rowHeight);
         detailDrawClips = model.drawClips;
+        detailActiveGroupIds = model.activeGroupIds;
+        detailDisabledGroupIds = d.disabledGroupIds;
         detailRowGuides = {
             startTrackIndex: firstRow,
             rowCount: Math.max(0, lastRow - firstRow),
@@ -2308,8 +2344,17 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                     interactions?.onBadgeEditStart?.(hit.clip.id, "rate", anchor.x, anchor.y);
                     return;
                 }
+                if (control === "chain") {
+                    // 锁链徽标：临时禁用 / 启用该编组的联动编辑（旧实现
+                    // `ClipHeader` 的 `onToggleGroupDisabled`，作用于整个组而非单个 clip）。
+                    const groupId = data().clips.find((item) => item.id === hit.clip.id)?.groupId;
+                    if (groupId != null && groupId !== "") {
+                        interactions?.onToggleGroupDisabled?.(groupId);
+                        return;
+                    }
+                    // 无组可切换（理论不可达：徽标只在有组时可见）→ 落到选中 / 拖拽。
+                }
                 // `name`：单击仍走选中 / 拖拽（只有双击才重命名），继续往下走。
-                // `chain`：分组交互本期未接（需单独调研旧实现的分组语义）。
             }
 
             const rect = container.getBoundingClientRect();
@@ -2359,7 +2404,10 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             };
         } else {
             gesture = { kind: "seek" };
-            interactions?.onSeek?.(hit.sec, true);
+            // 空白按下：连同**指针所在轨道**一起交给面板——「清空选中 + 按设置
+            // 切换当前轨道」是旧实现 pointerdown 捕获分支的语义，不能在面板侧
+            // 从 sec 反推（轨道要靠 clientY 换算）。
+            interactions?.onSeek?.(hit.sec, true, hit.trackId);
         }
         try {
             container.setPointerCapture(event.pointerId);

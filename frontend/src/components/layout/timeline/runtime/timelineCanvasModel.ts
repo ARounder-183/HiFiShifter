@@ -133,6 +133,12 @@ export function buildSparseClipRenderModel(args: {
 }): {
     drawClips: TimelineCanvasClipModel[];
     overlayClipIdsByTrackId: Record<string, string[]>;
+    /**
+     * 本次模型里「激活的编组」集合（由选中集合 + `disabledGroupIds` 推出）。
+     *
+     * 供绘制端画编组外圈描边、GL 侧算样式——调用方不应自行重算，否则两处判据会分叉。
+     */
+    activeGroupIds: Set<string>;
 } {
     const overlayClipIds = new Set<string>();
     if (args.renamingClipId) {
@@ -151,8 +157,12 @@ export function buildSparseClipRenderModel(args: {
 
     // Expand overlay to include all clips that share a group with any overlay clip,
     // unless the group is disabled.
+    //
+    // 集合提到外层：调用方（渲染内核）还需要它来画「编组激活的深金外圈描边」
+    // （`drawTimelineCanvas` 的 `activeGroupIds`）与 GL 侧样式。在这里重算一份
+    // 会让描边与 overlay 展开的判据分叉。
+    const activeGroupIds = new Set<string>();
     {
-        const activeGroupIds = new Set<string>();
         for (const trackClips of Object.values(args.visibleTrackClipsById)) {
             for (const clip of trackClips) {
                 if (
@@ -268,5 +278,6 @@ export function buildSparseClipRenderModel(args: {
     return {
         drawClips,
         overlayClipIdsByTrackId,
+        activeGroupIds,
     };
 }

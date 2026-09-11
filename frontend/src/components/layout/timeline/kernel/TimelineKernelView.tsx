@@ -352,7 +352,8 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
     interactionsRef.current = interactions;
     const stableInteractions = React.useMemo<TimelineKernelInteractions>(
         () => ({
-            onSeek: (sec, commit) => interactionsRef.current?.onSeek?.(sec, commit),
+            onSeek: (sec, commit, trackId) =>
+                interactionsRef.current?.onSeek?.(sec, commit, trackId),
             onSelectClip: (clipId, additive) =>
                 interactionsRef.current?.onSelectClip?.(clipId, additive),
             onDoubleClickClip: (clipId) => interactionsRef.current?.onDoubleClickClip?.(clipId),
@@ -360,6 +361,8 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                 interactionsRef.current?.onToggleClipMute?.(clipId, nextMuted),
             onOpenClipFormant: (clipId, screenX, screenY) =>
                 interactionsRef.current?.onOpenClipFormant?.(clipId, screenX, screenY),
+            onToggleGroupDisabled: (groupId) =>
+                interactionsRef.current?.onToggleGroupDisabled?.(groupId),
             onBadgeEditStart: (clipId, field, screenX, screenY) =>
                 interactionsRef.current?.onBadgeEditStart?.(clipId, field, screenX, screenY),
             onRateBadgeMenu: (clipId, screenX, screenY) =>

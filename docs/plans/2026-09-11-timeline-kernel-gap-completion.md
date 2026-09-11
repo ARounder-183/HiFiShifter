@@ -90,15 +90,35 @@
 
 ---
 
-## 批次 C：手册对齐（P1-1 ~ P1-4、P1-9）
+## 批次 C：手册对齐（P1-1 ~ P1-4、P1-9）—— 部分完成
 
-| 任务 | 内容 |
-|---|---|
-| C-1 | `Alt` 拖边缘 = stretch（`modifier.clipStretch`）；`Alt` 拖 body = slip（`modifier.clipSlipEdit`） |
-| C-2 | `Alt+Shift` 竖直拖 clip = 调该 clip 音高（`modifier.clipPitchDrag`） |
-| C-3 | 增益旋钮拖动调值 + 双击重置 0 dB（单击改为双击进输入，与手册一致） |
-| C-4 | 分组锁链徽标点击（`onToggleGroupDisabled`）+ 编组激活金色描边 |
-| C-5 | 空白点击清空选择 + 按设置点击切轨 |
+### 已完成
+
+| 任务 | 内容 | 验证 |
+|---|---|---|
+| C-4a | 分组锁链徽标点击 → `onToggleGroupDisabled`（复用旧实现 `toggleGroupDisabled`） | 点击命中 `control: chain`；后端 `toggle_group_disabled` 调用 ✓ |
+| C-4b | 编组激活的**深金外圈描边** + 锁链徽标「已禁用」配色 | 细节画布金色像素 0 → **930** ✓ |
+| C-5 | 空白点击清空选择 + 按 `允许时间轴点击切换轨道` 切轨；点击 clip 改走旧实现的 `selectTrackLaneClipRemote`（含 `selected_clip` 落库与点击切轨） | 点击 clip → `select_clip`；点击空白 → `select_track` ✓ |
+
+**C-4b 的根因（重要）**：编组状态（`activeGroupIds` / `disabledGroupIds`）从未进入渲染内核的
+渲染模型与 GL 实例构建器——旧实现的 `buildSparseClipRenderModel` 会算 `activeGroupIds` 但
+不返回、`drawTimelineCanvas` 与 `clipInstances.build` 的编组参数没人传，于是描边恒不绘制、
+徽标恒为「未禁用」。修复：模型返回 `activeGroupIds`；宿主把编组状态同时传给模型、GL 构建器
+与细节层。
+**同时新增** `drawTimelineCanvas` 的 `groupOutlineOverGl` 选项：细节层位于波形**之上**，
+若照旧画整块会把波形盖掉——该模式让块面仍归 GL，Canvas2D 只补那一圈描边。
+
+**未验证（mock 限制）**：禁用状态的实际视觉切换依赖后端返回的 `disabled_group_ids`
+（mock 的 fallback 不返回 TimelineState），需真机确认。
+
+### 未完成（下一批）
+
+| 任务 | 内容 | 说明 |
+|---|---|---|
+| C-1 | `Alt` 拖边缘 = stretch（`modifier.clipStretch`）；`Alt` 拖 body = slip（`modifier.clipSlipEdit`） | 需新增内核手势分支 + 复用 `useEditDrag` 的 stretch 数学与 `useSlipDrag` 语义 |
+| C-2 | `Alt+Shift` 竖直拖 clip = 调该 clip 音高（`modifier.clipPitchDrag`） | 需新增竖直手势 + 复用 `useClipPitchDrag` |
+| C-3 | 增益旋钮拖动调值 + 双击重置 0 dB；徽标改为**双击**进输入（与手册一致） | 需新增 `gain-drag` 手势（`deltaDb = ΔY × CLIP_GAIN_DRAG_DB_PER_PX`，钳制 ±12dB，复用 `applyBulkGainDeltaDb`） |
+| C-6 | trim / fade / snap offset 的**多选批量**（B-2 残留） | 拖拽移动已覆盖多选与编组 |
 
 ---
 

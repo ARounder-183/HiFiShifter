@@ -60,7 +60,6 @@ import {
     setTrackName,
     setTrackVolume,
     setPendingPlayheadReveal,
-    setSelectedClip,
     moveClipStart,
     moveClipTrack,
     checkpointHistory,
@@ -1191,7 +1190,21 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
      * 后端 seek；松手（commit）时取消待提交帧并立即提交最终位置，保证落点精确。
      */
     const handleKernelSeek = React.useCallback(
-        (sec: number, commit: boolean) => {
+        (sec: number, commit: boolean, trackId?: string | null) => {
+            if (commit) {
+                // 空白点击的选中语义（与旧实现 pointerdown 捕获分支同源）：
+                // 1) 清空 clip 选中——但**保留轨道焦点**（空白点击是"取消 clip
+                //    目标"，不是"切换轨道目标"）；
+                // 2) 按「允许时间轴点击切换轨道」把当前轨道切到点击所在轨道。
+                deselectAllTrackLaneClips();
+                if (
+                    trackId != null &&
+                    sessionRef.current.paramEditorTimelineClickSelectTrackEnabled &&
+                    trackId !== sessionRef.current.selectedTrackId
+                ) {
+                    void dispatch(selectTrackRemote(trackId));
+                }
+            }
             kernelSeekPendingRef.current = sec;
             if (commit) {
                 if (kernelSeekRafRef.current != null) {
@@ -1211,7 +1224,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 void dispatch(seekPlayhead(target));
             });
         },
-        [dispatch],
+        [deselectAllTrackLaneClips, dispatch, sessionRef],
     );
 
     /**
@@ -1219,19 +1232,23 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
      *
      * 多选修饰键（Ctrl / ⌘）切换集合成员；否则单选并同步焦点 clip
      * （焦点 clip 驱动参数编辑器的编辑目标，必须与多选集合一起更新）。
+     *
+     * 特殊说明：两个分支都**复用旧实现的选中入口**而不是自己拼状态——
+     * `selectTrackLaneClipRemote` / `toggleTrackLaneCtrlSelection` 还负责
+     * 「点击 clip 切轨」（手册：「点击时间轴中的音频块或空白区域会自动切换当前
+     * 轨道」，受 `允许时间轴点击切换轨道` 控制）与后端 `selected_clip` 落库。
+     * 内核只识别手势，这些语义不在内核侧重写。
      */
     const handleKernelSelectClip = React.useCallback(
         (clipId: string, additive: boolean) => {
             if (additive) {
-                setMultiSelectedClipIds((prev) =>
-                    prev.includes(clipId) ? prev.filter((id) => id !== clipId) : [...prev, clipId],
-                );
+                toggleTrackLaneCtrlSelection(clipId);
                 return;
             }
             setMultiSelectedClipIds([clipId]);
-            dispatch(setSelectedClip(clipId));
+            selectTrackLaneClipRemote(clipId);
         },
-        [dispatch, setMultiSelectedClipIds],
+        [selectTrackLaneClipRemote, setMultiSelectedClipIds, toggleTrackLaneCtrlSelection],
     );
 
     /** 内核拖拽：按下时的原始位置（把相对位移换算为绝对位置，并支持回滚）。 */
@@ -2252,6 +2269,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             onSelectClip: handleKernelSelectClip,
             onDoubleClickClip: handleKernelDoubleClickClip,
             onToggleClipMute: handleKernelToggleClipMute,
+            onToggleGroupDisabled: handleToggleGroupDisabled,
             onOpenClipFormant: handleKernelOpenClipFormant,
             onRateBadgeMenu: handleKernelRateBadgeMenu,
             onRenameClipStart: handleKernelRenameClipStart,
