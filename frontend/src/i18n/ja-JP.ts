@@ -769,6 +769,8 @@ export const jaJP = {
         "キャンバス水平ズーム（タイムライン / ピアノロール / 鍵盤ホイール）",
     kb_modifier_pr_vzoom: "キャンバス垂直ズーム（タイムライン / ピアノロールホイール）",
     kb_modifier_param_morph: "パラメータ形状変形（押しながら選択範囲内のアンカーをドラッグ）",
+    kb_modifier_clip_range_to_param_selection:
+        "クリップ範囲をパラメーター選択範囲に追加（押しながらクリップをダブルクリック／再度で解除）",
     kb_modifier_param_multi_select:
         "複数選択範囲（押しながらドラッグで範囲を追加、既存の範囲を押しながらクリックで解除）",
     kb_modifier_param_fine_adjust:
@@ -1145,6 +1147,8 @@ export const jaJP = {
     kb_edit_quantize: "クオンタイズ",
     kb_edit_mean_quantize: "平均クオンタイズ",
     kb_edit_paste_tracks: "新しいトラックとしてペースト",
+    kb_edit_add_clips_to_param_selection: "選択クリップの範囲をパラメーター選択範囲に追加",
+    kb_edit_remove_clips_from_param_selection: "選択クリップの範囲をパラメーター選択範囲から削除",
     kb_edit_paste_vocalshifter: "VocalShifter クリップボードをペースト",
 
     // スクロール修飾キーバインド
@@ -1296,6 +1300,8 @@ export const jaJP = {
     ctx_convert_to_pitch_ref: "音高リファレンスクリップに変換",
     ctx_update_pitch_ref: "音高を更新",
     ctx_export_midi: "MIDIとしてエクスポート",
+    ctx_add_to_param_selection: "範囲をパラメーター選択範囲に追加",
+    ctx_remove_from_param_selection: "範囲をパラメーター選択範囲から削除",
     menu_save_as_pitch_ref: "音高リファレンスクリップとして保存",
     menu_export_midi: "MIDIとしてエクスポート",
 

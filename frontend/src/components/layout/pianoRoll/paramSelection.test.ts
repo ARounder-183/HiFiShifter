@@ -10,9 +10,12 @@ import {
     removeRangeAtBeat,
     selectionBoundingRange,
     selectionContainsBeat,
+    selectionCoversRange,
     selectionFromBeatRange,
     selectionTotalBeats,
     shiftSelectionRanges,
+    subtractBeatRange,
+    toggleBeatRange,
 } from "./paramSelection.js";
 
 /**
@@ -163,12 +166,81 @@ test("components/layout/pianoRoll/paramSelection.test.ts scripted checks", async
     assertEqual(removeRangeAtBeat(null, 0.5), null, "remove from null");
 
     // ── 命中查询 ────────────────────────────────────────────────────────
-    assertEqual(rangeIndexAtBeat(twoRanges, 0.5), 0, "index first");
-    assertEqual(rangeIndexAtBeat(twoRanges, 1.5), -1, "index in gap");
+    assertEqual(rangeIndexAtBeat(twoRanges, 0.5), 0, "index first");    assertEqual(rangeIndexAtBeat(twoRanges, 1.5), -1, "index in gap");
     assertEqual(rangeIndexAtBeat(twoRanges, 2.5), 1, "index second");
     assertEqual(rangeIndexAtBeat(null, 1), -1, "index null");
     assertEqual(selectionContainsBeat(twoRanges, 3), true, "contains end");
     assertEqual(selectionContainsBeat(twoRanges, 1.2), false, "contains gap");
+
+    // ── 覆盖判定 / 区间相减 / 切换（时间轴「修饰键 + 双击音频块」语义）──────
+    // 覆盖：要求连续覆盖整个区间（断层不算覆盖）
+    assertEqual(selectionCoversRange(twoRanges, 0, 3), false, "covers: gap is not coverage");
+    assertEqual(selectionCoversRange(twoRanges, 0, 1), true, "covers: first range");
+    assertEqual(selectionCoversRange(twoRanges, 0, 0.5), true, "covers: sub-range");
+    assertEqual(selectionCoversRange(twoRanges, 0.5, 2.5), false, "covers: spanning gap");
+    assertEqual(selectionCoversRange(twoRanges, 3, 4), false, "covers: beyond end");
+    assertEqual(selectionCoversRange(null, 0, 1), false, "covers: null");
+    // 相邻段合并后仍视为覆盖（归一化保证不出现相邻段，此处传入未归一化输入）
+    assertEqual(
+        selectionCoversRange(
+            [
+                { startBeat: 0, endBeat: 1 },
+                { startBeat: 1, endBeat: 2 },
+            ],
+            0,
+            2,
+        ),
+        true,
+        "covers: touching ranges",
+    );
+
+    // 相减：中间挖洞 → 一段切成两段（断层即数据）
+    assertJson(
+        subtractBeatRange([{ startBeat: 0, endBeat: 3 }], 1, 2),
+        [
+            { startBeat: 0, endBeat: 1 },
+            { startBeat: 2, endBeat: 3 },
+        ],
+        "subtract: splits into two",
+    );
+    // 相减：挖掉整段 → 空选区
+    assertEqual(subtractBeatRange([{ startBeat: 0, endBeat: 1 }], 0, 1), null, "subtract: whole");
+    // 相减：无重叠 → 原样（内容相同）
+    assertJson(subtractBeatRange(twoRanges, 5, 6), twoRanges, "subtract: no overlap");
+    // 相减：仅端点相接不构成重叠
+    assertJson(subtractBeatRange(twoRanges, 1, 2), twoRanges, "subtract: touching endpoints");
+    // 相减：挖掉跨段 + 空洞的一段 → 只吃掉真正重叠的部分
+    assertJson(
+        subtractBeatRange(twoRanges, 0.5, 2.5),
+        [
+            { startBeat: 0, endBeat: 0.5 },
+            { startBeat: 2.5, endBeat: 3 },
+        ],
+        "subtract: spans gap",
+    );
+    assertEqual(subtractBeatRange(null, 0, 1), null, "subtract: null");
+
+    // 切换：未覆盖 → 并入；已覆盖 → 挖掉（连按两次回到原状）
+    assertJson(toggleBeatRange(null, 0, 1), [{ startBeat: 0, endBeat: 1 }], "toggle: add");
+    assertJson(
+        toggleBeatRange([{ startBeat: 0, endBeat: 1 }], 2, 3),
+        [
+            { startBeat: 0, endBeat: 1 },
+            { startBeat: 2, endBeat: 3 },
+        ],
+        "toggle: append second range",
+    );
+    assertJson(
+        toggleBeatRange([{ startBeat: 0, endBeat: 1 }], 0, 1),
+        null,
+        "toggle: removes a covered clip range",
+    );
+    // 部分覆盖 → 视为追加（不是挖掉）：避免把已有片段切碎
+    assertJson(
+        toggleBeatRange([{ startBeat: 0, endBeat: 1 }], 0.5, 2),
+        [{ startBeat: 0, endBeat: 2 }],
+        "toggle: partial overlap appends",
+    );
 
     // ── 汇总 ────────────────────────────────────────────────────────────
     assertEqual(selectionTotalBeats(twoRanges), 2, "total beats skips gap");

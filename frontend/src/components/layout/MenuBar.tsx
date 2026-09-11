@@ -682,6 +682,24 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                             {shortcutLabel("edit.deselect")}
                         </div>
                     </DropdownMenu.Item>
+                    <DropdownMenu.Separator />
+                    {/* 音频块范围 → 参数编辑器选区（批量入口）。标签直接复用
+                        快捷键设置里的动作名：菜单与设置面板共用同一份文案，
+                        避免两处翻译漂移。 */}
+                    <DropdownMenu.Item onSelect={() => dispatchEditOp("addClipsToParamSelection")}>
+                        {tAny("kb_edit_add_clips_to_param_selection")}{" "}
+                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                            {shortcutLabel("edit.addClipsToParamSelection")}
+                        </div>
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item
+                        onSelect={() => dispatchEditOp("removeClipsFromParamSelection")}
+                    >
+                        {tAny("kb_edit_remove_clips_from_param_selection")}{" "}
+                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                            {shortcutLabel("edit.removeClipsFromParamSelection")}
+                        </div>
+                    </DropdownMenu.Item>
                 </DropdownMenu.Content>
             </DropdownMenu.Root>
 

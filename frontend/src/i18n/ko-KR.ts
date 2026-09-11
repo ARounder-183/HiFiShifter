@@ -837,6 +837,8 @@ export const koKR = {
     kb_modifier_horizontal_zoom: "캔버스 수평 줌 (타임라인 / 피아노 롤 / 피아노 키 휠)",
     kb_modifier_pr_vzoom: "캔버스 수직 줌 (타임라인 / 피아노 롤 휠)",
     kb_modifier_param_morph: "파라미터 형태 변형 (누른 채 선택 영역 내 앵커 드래그)",
+    kb_modifier_clip_range_to_param_selection:
+        "클립 범위를 파라미터 선택 범위에 추가 (클립을 누른 채 더블 클릭, 다시 하면 해제)",
     kb_modifier_param_multi_select:
         "다중 선택 범위 (누른 채 드래그로 범위 추가, 기존 범위를 누른 채 클릭하면 해당 범위 해제)",
     kb_modifier_param_fine_adjust:
@@ -1212,6 +1214,8 @@ export const koKR = {
     kb_edit_quantize: "퀀타이즈",
     kb_edit_mean_quantize: "평균 퀀타이즈",
     kb_edit_paste_tracks: "새 트랙으로 붙여넣기",
+    kb_edit_add_clips_to_param_selection: "선택한 클립 범위를 파라미터 선택 범위에 추가",
+    kb_edit_remove_clips_from_param_selection: "선택한 클립 범위를 파라미터 선택 범위에서 제거",
     kb_edit_paste_vocalshifter: "VocalShifter 클립보드 붙여넣기",
 
     // 스크롤 수정 키바인딩
@@ -1277,6 +1281,8 @@ export const koKR = {
     ctx_convert_to_pitch_ref: "음높이 참조 클립으로 변환",
     ctx_update_pitch_ref: "음높이 업데이트",
     ctx_export_midi: "MIDI로 내보내기",
+    ctx_add_to_param_selection: "범위를 파라미터 선택 범위에 추가",
+    ctx_remove_from_param_selection: "범위를 파라미터 선택 범위에서 제거",
     menu_save_as_pitch_ref: "음높이 참조 클립으로 저장",
     menu_export_midi: "MIDI로 내보내기",
 

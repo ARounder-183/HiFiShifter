@@ -2447,6 +2447,19 @@ function AppInner() {
                     }
                     return;
                 }
+                if (
+                    editOp === "addClipsToParamSelection" ||
+                    editOp === "removeClipsFromParamSelection"
+                ) {
+                    // 音频块范围 → 参数编辑器选区：消费端**只有**参数编辑器，
+                    // 因此不按活动表面裁决 —— 焦点在时间轴上时按快捷键同样生效。
+                    // 选中了哪些音频块由消费端从 session 读取（选区是权威来源），
+                    // 与右键菜单传 clipIds 的路径共用同一实现。
+                    window.dispatchEvent(
+                        new CustomEvent("hifi:editOp", { detail: { op: editOp } }),
+                    );
+                    return;
+                }
                 const channel = resolveEditOpRoute(
                     getActiveSurface(),
                     editOp,

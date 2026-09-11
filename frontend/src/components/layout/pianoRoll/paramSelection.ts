@@ -111,9 +111,79 @@ export function removeRangeAtBeat(
     );
 }
 
+/**
+ * 选区是否**完整覆盖** [aBeat, bBeat]。
+ *
+ * 用于「切换式」手势的判定：覆盖了才挖掉，否则并入 —— 这样同一个手势
+ * 连按两次能回到原状（心形自反），而不是第二次把一个片段切碎。
+ * 段升序且互不相交，因此一次线性扫描即可：一旦出现空洞即未覆盖。
+ */
+export function selectionCoversRange(
+    selection: ParamSelection | null,
+    aBeat: number,
+    bBeat: number,
+): boolean {
+    if (!selection || selection.length === 0) return false;
+    const a = Math.min(aBeat, bBeat);
+    const b = Math.max(aBeat, bBeat);
+    if (!Number.isFinite(a) || !Number.isFinite(b)) return false;
+
+    let coveredUntil = a;
+    for (const range of selection) {
+        if (range.endBeat < coveredUntil) continue;
+        if (range.startBeat > coveredUntil) return false; // 空洞
+        if (range.endBeat > coveredUntil) coveredUntil = range.endBeat;
+        if (coveredUntil >= b) return true;
+    }
+    return coveredUntil >= b;
+}
+
+/**
+ * 区间相减：从选区中挖掉 [aBeat, bBeat]。
+ *
+ * 结果仍归一化 —— 挖掉中间一小段会把原来的段切成两段，这正是「取消某个
+ * 片段」应有的形态（断层即数据，不合并）。无重叠时原样返回（新数组）。
+ */
+export function subtractBeatRange(
+    selection: ParamSelection | null,
+    aBeat: number,
+    bBeat: number,
+): ParamSelection | null {
+    if (!selection || selection.length === 0) return null;
+    const a = Math.min(aBeat, bBeat);
+    const b = Math.max(aBeat, bBeat);
+    if (!Number.isFinite(a) || !Number.isFinite(b) || b <= a) return normalizeSelection(selection);
+
+    const out: BeatRange[] = [];
+    for (const range of selection) {
+        // 无重叠（含仅端点相接：相接不构成重叠）
+        if (range.endBeat <= a || range.startBeat >= b) {
+            out.push({ startBeat: range.startBeat, endBeat: range.endBeat });
+            continue;
+        }
+        if (range.startBeat < a) out.push({ startBeat: range.startBeat, endBeat: a });
+        if (range.endBeat > b) out.push({ startBeat: b, endBeat: range.endBeat });
+    }
+    return normalizeSelection(out);
+}
+
+/**
+ * 切换：已完整覆盖 [aBeat, bBeat] 则挖掉该区间，否则并入。
+ *
+ * 时间轴的「修饰键 + 双击音频块」手势即此语义：同一个块再点一次即撤销。
+ */
+export function toggleBeatRange(
+    selection: ParamSelection | null,
+    aBeat: number,
+    bBeat: number,
+): ParamSelection | null {
+    return selectionCoversRange(selection, aBeat, bBeat)
+        ? subtractBeatRange(selection, aBeat, bBeat)
+        : addBeatRange(selection, aBeat, bBeat);
+}
+
 /** `beat` 落在第几段（-1 = 不在任何段内）。 */
-export function rangeIndexAtBeat(selection: ParamSelection | null, beat: number): number {
-    if (!selection || !Number.isFinite(beat)) return -1;
+export function rangeIndexAtBeat(selection: ParamSelection | null, beat: number): number {    if (!selection || !Number.isFinite(beat)) return -1;
     for (let i = 0; i < selection.length; i += 1) {
         const range = selection[i];
         if (beat >= range.startBeat && beat <= range.endBeat) return i;

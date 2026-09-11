@@ -98,6 +98,7 @@ export const ClipItem = React.memo(function ClipItem({
     fadeShapeCycleKb = null,
     multiSelectToggleKb = DEFAULT_KEYBINDINGS["modifier.clipMultiSelectToggle"],
     rangeSelectKb = DEFAULT_KEYBINDINGS["modifier.clipRangeSelect"],
+    clipRangeToParamKb = DEFAULT_KEYBINDINGS["modifier.clipRangeToParamSelection"],
     pitchDragKb = DEFAULT_KEYBINDINGS["modifier.clipPitchDrag"],
     onClipPitchDragStart,
     onFadeShapeCycleClick,
@@ -193,6 +194,8 @@ export const ClipItem = React.memo(function ClipItem({
     multiSelectToggleKb?: Keybinding;
     /** modifier.clipRangeSelect 绑定（按住并点击范围选择） */
     rangeSelectKb?: Keybinding;
+    /** modifier.clipRangeToParamSelection 绑定（按住并双击：把该块范围加入/移出参数选区） */
+    clipRangeToParamKb?: Keybinding;
     /** modifier.clipPitchDrag 绑定（按住并垂直拖拽波形调整音高） */
     pitchDragKb?: Keybinding;
     /** 音高拖拽手势入口（useClipPitchDrag 提供） */
@@ -562,9 +565,17 @@ export const ClipItem = React.memo(function ClipItem({
                     e.preventDefault();
                     e.stopPropagation();
                     clearContextMenu();
+                    // 多选修饰键（默认 Alt，与时间轴的选择类修饰键互不冲突：
+                    // Ctrl=多选切换/复制拖动、Shift=范围选择，Alt 在该层是空的）
+                    // 时改为「切换」语义：该块范围已完整覆盖则挖掉，否则并入。
+                    const toggleRange = isModifierActive(clipRangeToParamKb, e.nativeEvent);
                     window.dispatchEvent(
                         new CustomEvent("hifi:editOp", {
-                            detail: { op: "selectClipParamRange", clipId: clip.id },
+                            detail: {
+                                op: "selectClipParamRange",
+                                clipId: clip.id,
+                                mode: toggleRange ? "toggle" : "replace",
+                            },
                         }),
                     );
                     return;

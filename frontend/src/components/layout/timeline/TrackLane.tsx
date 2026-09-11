@@ -183,6 +183,8 @@ type TrackLaneProps = {
     multiSelectToggleKb?: Keybinding;
     /** modifier.clipRangeSelect 绑定（按住并点击范围选择） */
     rangeSelectKb?: Keybinding;
+    /** modifier.clipRangeToParamSelection 绑定（按住并双击：把该块范围加入/移出参数选区） */
+    clipRangeToParamKb?: Keybinding;
     /** modifier.clipPitchDrag 绑定（按住并垂直拖拽波形调整音高） */
     pitchDragKb?: Keybinding;
     /** 音高拖拽手势入口（useClipPitchDrag 提供） */
@@ -213,6 +215,7 @@ export const TrackLane = React.memo(
             fadeShapeCycleKb = null,
             multiSelectToggleKb = DEFAULT_KEYBINDINGS["modifier.clipMultiSelectToggle"],
             rangeSelectKb = DEFAULT_KEYBINDINGS["modifier.clipRangeSelect"],
+            clipRangeToParamKb = DEFAULT_KEYBINDINGS["modifier.clipRangeToParamSelection"],
             pitchDragKb = DEFAULT_KEYBINDINGS["modifier.clipPitchDrag"],
             onClipPitchDragStart,
             fadeLengthFormatCtx,
@@ -866,6 +869,7 @@ export const TrackLane = React.memo(
                             fadeShapeCycleKb={fadeShapeCycleKb}
                             multiSelectToggleKb={multiSelectToggleKb}
                             rangeSelectKb={rangeSelectKb}
+                            clipRangeToParamKb={clipRangeToParamKb}
                             pitchDragKb={pitchDragKb}
                             onClipPitchDragStart={onClipPitchDragStart}
                             onFadeShapeCycleClick={onFadeShapeCycleClick}
@@ -997,6 +1001,7 @@ export const TrackLane = React.memo(
             prev.fadeShapeCycleKb === next.fadeShapeCycleKb &&
             prev.multiSelectToggleKb === next.multiSelectToggleKb &&
             prev.rangeSelectKb === next.rangeSelectKb &&
+            prev.clipRangeToParamKb === next.clipRangeToParamKb &&
             prev.pitchDragKb === next.pitchDragKb &&
             prev.onClipPitchDragStart === next.onClipPitchDragStart
             // viewportStartSec / viewportEndSec are consumed by TimelineWaveformSurface via the viewport bus

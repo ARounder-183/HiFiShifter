@@ -840,6 +840,8 @@ export const enUS = {
         "Canvas Horizontal Zoom (timeline / piano roll / piano keys wheel)",
     kb_modifier_pr_vzoom: "Canvas Vertical Zoom (timeline / piano roll wheel)",
     kb_modifier_param_morph: "Param Morph (hold and drag curve anchors inside selection)",
+    kb_modifier_clip_range_to_param_selection:
+        "Add Clip Range to Param Selection (hold + double-click a clip; again to remove)",
     kb_modifier_param_multi_select:
         "Multi-Range Select (hold + drag to add a range; hold + click an existing range to remove it)",
     kb_modifier_param_fine_adjust:
@@ -1216,6 +1218,10 @@ export const enUS = {
     kb_edit_quantize: "Quantize",
     kb_edit_mean_quantize: "Mean Quantize",
     kb_edit_paste_tracks: "Paste as New Tracks",
+    kb_edit_add_clips_to_param_selection:
+        "Add Selected Clips' Ranges to the Parameter Selection",
+    kb_edit_remove_clips_from_param_selection:
+        "Remove Selected Clips' Ranges from the Parameter Selection",
     kb_edit_paste_vocalshifter: "Paste VocalShifter Clipboard",
 
     // Scroll modifier keybindings
@@ -1366,6 +1372,8 @@ export const enUS = {
     ctx_convert_to_pitch_ref: "Convert to Pitch Reference Clip",
     ctx_update_pitch_ref: "Update Pitch Reference",
     ctx_export_midi: "Export as MIDI",
+    ctx_add_to_param_selection: "Add Range to Parameter Selection",
+    ctx_remove_from_param_selection: "Remove Range from Parameter Selection",
     menu_save_as_pitch_ref: "Save as Pitch Reference Clip",
     menu_export_midi: "Export as MIDI",
 

@@ -120,9 +120,13 @@ import {
     type SelectionEditExtension,
 } from "./pianoRoll/selectionEditApply";
 import {
+    addBeatRange,
     beatRangesToFrameRanges,
+    normalizeSelection,
     selectionBoundingRange,
     selectionFromBeatRange,
+    subtractBeatRange,
+    toggleBeatRange,
     type FrameRange,
     type ParamSelection,
 } from "./pianoRoll/paramSelection";
@@ -3345,18 +3349,77 @@ export const PianoRollPanel: React.FC = () => {
             }
 
             // 双击 Clip（无拖拽，ClipItem 派发）：按 Clip 起止范围在参数编辑器
-            // 内创建选区（**替换**为单段），并把交互焦点切到参数编辑器侧 ——
+            // 内创建选区，并把交互焦点切到参数编辑器侧 ——
             // 复制/剪切路由（resolveCopyCutRoute 依据 selectionContext，经由下方
             // selectionUi 同步派发 setParamSelectionActive 标记）与活动表面
             // （focusSurface，外来源粘贴兜底等）随之指向参数编辑器。
+            //
+            // mode（来自时间轴的双击手势）：
+            //   - "replace"（缺省）：替换为该块范围，与旧行为逐字一致；
+            //   - "add"：把该块范围并入（重叠/相接自动合并）；
+            //   - "toggle"：该块范围已被完整覆盖则挖掉，否则并入 —— 同一个块
+            //     连按两次回到原状（`modifier.clipRangeToParamSelection` 手势）。
             if (op === "selectClipParamRange") {
                 const clipId = typeof data?.clipId === "string" ? data.clipId : "";
                 const clip = store.getState().session.clips.find((entry) => entry.id === clipId);
                 if (!clip) return;
                 const aBeat = Math.max(0, clip.startSec / secPerBeat);
                 const bBeat = Math.max(0, (clip.startSec + clip.lengthSec) / secPerBeat);
-                selectionRef.current = selectionFromBeatRange(aBeat, bBeat);
+                const rawMode = typeof data?.mode === "string" ? data.mode : "replace";
+                const mode: "replace" | "add" | "toggle" =
+                    rawMode === "add" || rawMode === "toggle" ? rawMode : "replace";
+                selectionRef.current =
+                    mode === "add"
+                        ? addBeatRange(selectionRef.current, aBeat, bBeat)
+                        : mode === "toggle"
+                          ? toggleBeatRange(selectionRef.current, aBeat, bBeat)
+                          : selectionFromBeatRange(aBeat, bBeat);
                 setSelectionUi(selectionRef.current);
+                setActiveSurfaceExplicit("pianoRoll");
+                invalidate();
+                return;
+            }
+
+            // 音频块范围 → 参数编辑器选区（批量入口；单个音频块的双击手势见
+            // selectClipParamRange 的 add/toggle 模式）。
+            //
+            // 只取**当前参数编辑器所属根轨道组**内的音频块：参数编辑器一次只
+            // 展示一条根轨道的参数，跨轨道的块范围对它没有意义（静默忽略，避免
+            // 用户以为"加进去了"）。多段求并/相减交给 paramSelection 归一化
+            // （相邻自动合并；相减可能把一段切成两段 —— 断层即数据）。
+            if (op === "addClipsToParamSelection" || op === "removeClipsFromParamSelection") {
+                const session = store.getState().session;
+                const requestedIds = Array.isArray(data?.clipIds)
+                    ? (data.clipIds as unknown[]).filter(
+                          (id): id is string => typeof id === "string",
+                      )
+                    : session.multiSelectedClipIds.length > 0
+                      ? session.multiSelectedClipIds
+                      : session.selectedClipId
+                        ? [session.selectedClipId]
+                        : [];
+                const ranges: Array<{ startBeat: number; endBeat: number }> = [];
+                for (const id of requestedIds) {
+                    const clip = session.clips.find((entry) => entry.id === id);
+                    if (!clip) continue;
+                    if (resolveRootTrackId(session.tracks, clip.trackId) !== rootTrackId) continue;
+                    ranges.push({
+                        startBeat: Math.max(0, clip.startSec / secPerBeat),
+                        endBeat: Math.max(0, (clip.startSec + clip.lengthSec) / secPerBeat),
+                    });
+                }
+                if (ranges.length === 0) return;
+
+                let next: ParamSelection | null = selectionRef.current;
+                if (op === "addClipsToParamSelection") {
+                    next = normalizeSelection([...(next ?? []), ...ranges]);
+                } else {
+                    for (const range of ranges) {
+                        next = subtractBeatRange(next, range.startBeat, range.endBeat);
+                    }
+                }
+                selectionRef.current = next;
+                setSelectionUi(next);
                 setActiveSurfaceExplicit("pianoRoll");
                 invalidate();
                 return;

@@ -750,6 +750,8 @@ export const zhCN = {
     kb_modifier_horizontal_zoom: "画布水平缩放（时间轴 / 钢琴卷帘 / 琴键区滚轮）",
     kb_modifier_pr_vzoom: "画布竖直缩放（时间轴 / 钢琴卷帘滚轮）",
     kb_modifier_param_morph: "参数形变（按住并在选区内拖动曲线锚点）",
+    kb_modifier_clip_range_to_param_selection:
+        "音频块范围加入参数选区（按住双击音频块；再点一次取消该块范围）",
     kb_modifier_param_multi_select:
         "多选区（按住拖动追加一段选区；按住点击已有选区段则取消该段）",
     kb_modifier_param_fine_adjust: "精细调整（按住：滑杆 / 输入框滚轮 / 增益拖拽 / 颤音滚轮）",
@@ -1110,6 +1112,8 @@ export const zhCN = {
     kb_edit_quantize: "量化",
     kb_edit_mean_quantize: "均值量化",
     kb_edit_paste_tracks: "作为新轨道组粘贴",
+    kb_edit_add_clips_to_param_selection: "把选中音频块的范围加入参数选区",
+    kb_edit_remove_clips_from_param_selection: "从参数选区中移除选中音频块的范围",
     kb_edit_paste_vocalshifter: "粘贴 VocalShifter 剪贴板",
 
     // Scroll modifier keybindings
@@ -1259,6 +1263,8 @@ export const zhCN = {
     ctx_convert_to_pitch_ref: "转换为音高参考块",
     ctx_update_pitch_ref: "更新音高",
     ctx_export_midi: "导出为 MIDI",
+    ctx_add_to_param_selection: "范围加入参数选区",
+    ctx_remove_from_param_selection: "范围移出参数选区",
     menu_save_as_pitch_ref: "保存为音高参考块",
     menu_export_midi: "导出为 MIDI",
 

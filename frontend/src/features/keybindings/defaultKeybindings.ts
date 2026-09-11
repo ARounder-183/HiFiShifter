@@ -40,6 +40,12 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     "edit.meanQuantize": { key: "q", ctrl: true },
     "edit.pasteVocalShifter": { key: "v", shift: true },
     "edit.pasteTracks": { key: "v", ctrl: true, alt: true },
+    // 音频块范围 → 参数编辑器选区（批量入口；手势见 modifier.clipRangeToParamSelection）。
+    // Ctrl+Shift+A 与 Ctrl+A（全选音频块）成对，语义即「把选中的音频块范围也纳入
+    // 参数编辑器选区」；只作用于当前参数编辑器所属根轨道组内的音频块。
+    "edit.addClipsToParamSelection": { key: "a", ctrl: true, shift: true },
+    // 反向操作默认不占键位（手势已覆盖单个音频块的取消场景）
+    "edit.removeClipsFromParamSelection": { key: "__none__" },
 
     // 工程
     "project.new": { key: "n", ctrl: true },
@@ -129,6 +135,12 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
         modifierOnly: true,
         ctrl: true,
     },
+    // 按住并双击音频块：把该块范围并入参数编辑器选区（再点一次取消）。
+    // 默认 Alt —— 时间轴的选择类修饰键已被占用（Ctrl=多选切换/复制拖动、
+    // Shift=范围选择/临时关吸附），而 Alt 在时间轴上只有拖拽语义
+    // （slip/拉伸/淡化曲率），点击层是空的（见 clipSelectionModifiers：
+    // 物理 Alt 按下时会绕过两个选择修饰键，点击退回普通选择预备）。
+    "modifier.clipRangeToParamSelection": { key: "alt", modifierOnly: true, alt: true },
     // 淡化包络曲率：对齐 REAPER “Alt 拖动调整张力”惯例；Alt 在
     // 包络线/交叉点目标上无其他绑定，语义干净。
     "modifier.fadeCurvatureDrag": { key: "alt", modifierOnly: true, alt: true },
@@ -266,6 +278,14 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
     },
     "edit.pasteTracks": {
         labelKey: "kb_edit_paste_tracks",
+        group: "edit",
+    },
+    "edit.addClipsToParamSelection": {
+        labelKey: "kb_edit_add_clips_to_param_selection",
+        group: "edit",
+    },
+    "edit.removeClipsFromParamSelection": {
+        labelKey: "kb_edit_remove_clips_from_param_selection",
         group: "edit",
     },
 
@@ -482,6 +502,18 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
         //   按键时多选会完全失效。
         // 与之不同目标的场景（时间轴 clip.select、滚轮场景）不列入，避免误报。
         conflictScenes: ["roll.select", "roll.paramDrag", "roll.paramEdge"],
+    },
+    "modifier.clipRangeToParamSelection": {
+        labelKey: "kb_modifier_clip_range_to_param_selection",
+        // 分组按**交互场景**划分（修饰键作用于音频块上的双击），效果落在参数
+        // 编辑器选区上 —— 与「参数编辑器内的多选修饰键」是一对概念，二者在
+        // 设置面板中各自处于自己表面的分组下。
+        group: "modClip",
+        modifierOperationType: "click",
+        // 只在「音频块双击」这一场景生效：与 clip.select（Ctrl/Shift 点击多选）
+        // 目标同名不同手势，故不列入；与时间轴 Alt 拖拽系（slip/拉伸/曲率）
+        // 手势类型不同，也不构成冲突。
+        conflictScenes: ["clip.rangeToParamSelect"],
     },
     "modifier.vibratoAmplitudeAdjust": {
         labelKey: "kb_modifier_vibrato_amplitude_adjust",

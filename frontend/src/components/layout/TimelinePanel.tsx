@@ -764,6 +764,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     const clipRangeSelectKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.clipRangeSelect"),
     );
+    // 音频块范围 → 参数编辑器选区（按住并双击音频块）
+    const clipRangeToParamKb = useAppSelector((state) =>
+        selectKeybinding(state, "modifier.clipRangeToParamSelection"),
+    );
     /**
      * 单侧循环到下一个形状并重置默认曲率。
      *
@@ -2258,6 +2262,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                                 fadeShapeCycleKb={fadeShapeCycleKb}
                                                 multiSelectToggleKb={clipMultiSelectToggleKb}
                                                 rangeSelectKb={clipRangeSelectKb}
+                                                clipRangeToParamKb={clipRangeToParamKb}
                                                 pitchDragKb={pitchDragKb}
                                                 onClipPitchDragStart={startClipPitchDrag}
                                                 fadeLengthFormatCtx={fadeLengthFormatCtx}
@@ -2674,6 +2679,31 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                       onExportMidi={(ids) => {
                                           setContextMenu(null);
                                           void handleExportMidi(ids);
+                                      }}
+                                      onAddToParamSelection={(ids) => {
+                                          // 批量入口：把所选音频块的时间范围并入
+                                          // 参数编辑器选区（隐藏菜单由 PianoRollPanel
+                                          // 消费，按当前根轨道组过滤，见 handleEditOp）。
+                                          setContextMenu(null);
+                                          window.dispatchEvent(
+                                              new CustomEvent("hifi:editOp", {
+                                                  detail: {
+                                                      op: "addClipsToParamSelection",
+                                                      clipIds: ids,
+                                                  },
+                                              }),
+                                          );
+                                      }}
+                                      onRemoveFromParamSelection={(ids) => {
+                                          setContextMenu(null);
+                                          window.dispatchEvent(
+                                              new CustomEvent("hifi:editOp", {
+                                                  detail: {
+                                                      op: "removeClipsFromParamSelection",
+                                                      clipIds: ids,
+                                                  },
+                                              }),
+                                          );
                                       }}
                                       onFadeShapeChange={(clipId, target, shape) => {
                                           // 切换形状必须重置曲率（REAPER 语义：各形状的
