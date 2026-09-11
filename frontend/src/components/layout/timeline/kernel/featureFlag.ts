@@ -22,14 +22,25 @@ export const TIMELINE_KERNEL_FLAG_KEY = "hifishifter.timelineKernel";
 /**
  * 是否启用时间轴渲染内核（Spike）。
  *
- * @returns 显式写入 `"1"` 时为 true；读取失败（隐私模式）或未设置时为 false。
+ * 规则（按优先级）：
+ * 1. 显式写入 `"0"` → 关闭（逃生门，出问题时一键退回既有实现）；
+ * 2. 显式写入 `"1"` → 开启；
+ * 3. 未显式设置 → **dev 环境默认开启**（便于真机验证），生产构建默认关闭
+ *    （Spike 尚未接入标尺 / 波形 / 交互，不能作为发布默认路径）。
+ *
+ * 特殊说明：macOS 上 Tauri 的 devtools 不易打开，因此验证不依赖控制台——
+ * dev 环境的 PERF 悬浮面板提供了切换按钮（见 `dev/perfProject`），切换后自动刷新。
+ *
+ * @returns 当前是否启用内核。
  */
 export function isTimelineKernelEnabled(): boolean {
     try {
-        return localStorage.getItem(TIMELINE_KERNEL_FLAG_KEY) === "1";
+        const override = localStorage.getItem(TIMELINE_KERNEL_FLAG_KEY);
+        if (override === "0") return false;
+        if (override === "1") return true;
+        return import.meta.env.DEV;
     } catch {
-        // 读不到 localStorage 时按默认关闭处理：新内核是实验路径，
-        // 环境异常时不应意外启用。
+        // 读不到 localStorage（隐私模式）时按默认关闭处理，避免意外启用。
         return false;
     }
 }

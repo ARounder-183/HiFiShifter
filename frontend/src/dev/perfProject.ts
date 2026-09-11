@@ -33,6 +33,10 @@ import type { TimelineClip, TimelineState, TimelineTrack } from "../types/api";
 import { waveformMipmapStore } from "../utils/waveformMipmapStore";
 import { startFrameProfiler, stopFrameProfiler } from "./frameProfiler";
 import { PERF_GL_CLIP_BODIES_KEY } from "../components/layout/timeline/runtime/timelineClipGlRenderer.js";
+import {
+    isTimelineKernelEnabled,
+    TIMELINE_KERNEL_FLAG_KEY,
+} from "../components/layout/timeline/kernel/featureFlag";
 import { createSyntheticPeakSource, type SyntheticPeakSource } from "../waveform/perfFixtures";
 
 /** 合成源路径前缀：被本模块短路、绝不打到后端。 */
@@ -426,6 +430,17 @@ function mountPerfPanel(): void {
         glToggle.textContent = `GL clip: ${next === "1" ? "on" : "off"}`;
         window.dispatchEvent(new Event(PERF_GL_CLIP_BODIES_KEY));
         status.textContent = `GL clip bodies ${next === "1" ? "ON" : "OFF"}`;
+    });
+
+    // ── 时间轴内核开关（Spike）────────────────────────────────────
+    // 默认：dev 环境开启、生产关闭（见 featureFlag）。该开关在 TimelinePanel
+    // 模块加载时读取，因此切换后需要刷新页面才能生效（按钮直接 reload）。
+    const kernelEnabled = (): boolean => isTimelineKernelEnabled();
+    makeButton(`kernel: ${kernelEnabled() ? "on" : "off"}`, () => {
+        const next = kernelEnabled() ? "0" : "1";
+        localStorage.setItem(TIMELINE_KERNEL_FLAG_KEY, next);
+        status.textContent = `时间轴内核 ${next === "1" ? "ON" : "OFF"}，刷新中…`;
+        location.reload();
     });
 
     // ── 帧率探针开关 ────────────────────────────

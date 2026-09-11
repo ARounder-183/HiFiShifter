@@ -104,8 +104,9 @@ import { TimelineKernelSpikeView } from "./timeline/kernel/TimelineKernelSpikeVi
 /**
  * 时间轴渲染内核（Spike）开关：模块加载时读一次。
  *
- * 开启后时间轴区域由新内核（自绘滚动 + 单 WebGL2）覆盖渲染；关闭时完全走既有实现。
- * 切换需刷新页面（与既有 dev 开关行为一致）。见 `timeline/kernel/featureFlag`。
+ * 开启后时间轴区域由新内核（自绘滚动 + 单 WebGL2）**替换**渲染；关闭时完全走既有实现。
+ * 默认值：dev 环境开启、生产关闭（见 `timeline/kernel/featureFlag`）；切换需刷新页面
+ * （dev 环境的 PERF 悬浮面板有切换按钮，切换后自动刷新）。
  */
 const TIMELINE_KERNEL_ENABLED = isTimelineKernelEnabled();
 import type { ScaleLike } from "../../utils/musicalScales";
