@@ -55,6 +55,14 @@ export interface TimelineKernelViewProps {
      * 标尺内容层的 transform 会让刻度停留在初始视口——滚动后刻度消失。
      */
     readonly onScrollLeftCommit?: (scrollLeftPx: number) => void;
+    /**
+     * 视口宽度回写（尺寸变化时一次）。
+     *
+     * 标尺的刻度窗口按 `[scrollLeft, scrollLeft + viewportWidth]` 计算；内核模式下
+     * 旧的滚动容器不存在，其 ResizeObserver 不会触发——不回写时窗口宽度停在初始值，
+     * 标尺只显示得出前面一段刻度。
+     */
+    readonly onViewportWidthChange?: (widthPx: number) => void;
     /** 播放头位置读取（工程秒）：取视觉插值后的实时值，避免播放时滞后。 */
     readonly getPlayheadSec: () => number;
     /** 标尺内容层（宿主在 rAF 内写 transform 跟随水平滚动）。 */
@@ -91,6 +99,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         hostRef,
         interactions,
         onScrollLeftCommit,
+        onViewportWidthChange,
     } = props;
 
     const containerRef = React.useRef<HTMLDivElement | null>(null);
@@ -195,6 +204,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         getPlayheadSec,
         onVisibleRowsChange: handleVisibleRowsChange,
         onScrollLeftCommit,
+        onViewportWidthChange,
     });
     // eslint-disable-next-line react-hooks/refs -- 回调镜像：同上
     callbacksRef.current = {
@@ -203,6 +213,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         getPlayheadSec,
         onVisibleRowsChange: handleVisibleRowsChange,
         onScrollLeftCommit,
+        onViewportWidthChange,
     };
 
     // 交互回调镜像：同上（面板用 useCallback 提供，但引用仍可能在依赖变化时更新）。
@@ -310,6 +321,8 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                     callbacksRef.current.onVisibleRowsChange(firstRow, rowCount),
                 interactions: stableInteractions,
                 onScrollLeftCommit: (px) => callbacksRef.current.onScrollLeftCommit?.(px),
+                onViewportWidthChange: (px) =>
+                    callbacksRef.current.onViewportWidthChange?.(px),
             });
         } catch (error) {
             setFatal(error instanceof Error ? error.message : String(error));

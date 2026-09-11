@@ -210,6 +210,15 @@ export interface TimelineKernelHostArgs {
      */
     readonly onScrollLeftCommit?: (scrollLeftPx: number) => void;
     /**
+     * 视口宽度变化（尺寸变化时一次）。
+     *
+     * 与 `onScrollLeftCommit` 同因：标尺的刻度范围由 React 按
+     * `[scrollLeft, scrollLeft + viewportWidth]` 计算。旧实现的宽度来自滚动容器的
+     * ResizeObserver，内核模式下那个容器不存在——不回写时窗口宽度停在初始值
+     * （表现为标尺只显示得出前面一段刻度）。
+     */
+    readonly onViewportWidthChange?: (widthPx: number) => void;
+    /**
      * 交互回调：内核只做**命中与手势**，编辑语义（Redux action / 后端 thunk）
      * 一律交回 React 侧，避免 runtime 直接依赖 store。
      */
@@ -563,8 +572,14 @@ function shouldWrite(next: number, previous: number, epsilon = 0.01): boolean {
  */
 export function createTimelineKernelHost(args: TimelineKernelHostArgs): TimelineKernelHost {
     const { container, canvas, hScrollbarThumb, vScrollbarThumb, data, sync } = args;
-    const { onRowHeightChange, onZoomChange, onVisibleRowsChange, onScrollLeftCommit, interactions } =
-        args;
+    const {
+        onRowHeightChange,
+        onZoomChange,
+        onVisibleRowsChange,
+        onScrollLeftCommit,
+        onViewportWidthChange,
+        interactions,
+    } = args;
 
     const glCanvas = createGlCanvas(canvas);
     if (!glCanvas) throw new Error("WebGL2 不可用");
@@ -2122,16 +2137,24 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
 
     // ── 尺寸与 DPR 变化 ──────────────────────────────────────────────
     const resizeObserver = new ResizeObserver((entries) => {
+        let widthChanged = false;
         for (const entry of entries) {
-            viewportWidthPx = Math.max(1, entry.contentRect.width);
+            const nextWidth = Math.max(1, entry.contentRect.width);
+            if (nextWidth !== viewportWidthPx) widthChanged = true;
+            viewportWidthPx = nextWidth;
             viewportHeightPx = Math.max(1, entry.contentRect.height);
         }
+        // 宽度变化会改变标尺的刻度窗口（React 侧按它算 ticks）。
+        if (widthChanged) onViewportWidthChange?.(viewportWidthPx);
         // 外部边界变化后必须重新钳制（见 ScrollKernel 的约束 1）。
         scroll.reclamp();
         sceneDirty = true;
         loop.invalidate();
     });
     resizeObserver.observe(container);
+    // 初始宽度回写：ResizeObserver 的首次回调是异步的，而标尺在首帧就需要正确的
+    // 刻度窗口（否则首屏标尺只画得出前一段）。
+    onViewportWidthChange?.(viewportWidthPx);
 
     function onWindowResize(): void {
         sceneDirty = true;

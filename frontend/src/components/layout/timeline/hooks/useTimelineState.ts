@@ -235,6 +235,8 @@ export interface TimelineStateResult {
 
     // Functions
     setScrollLeftState: React.Dispatch<React.SetStateAction<number>>;
+    /** 视口宽度写入（内核模式下由内核回写，见 `setViewportWidth` 的说明）。 */
+    setViewportWidth: React.Dispatch<React.SetStateAction<number>>;
     syncScrollLeft: (next: number) => void;
     /** 竖直轴同帧提交：更新 scrollTopPxRef 并同步广播视口总线。 */
     syncScrollTop: (next: number) => void;
@@ -1250,6 +1252,14 @@ export function useTimelineState(): TimelineStateResult {
         pxPerSec,
         setPxPerSec,
         viewportWidth,
+        /**
+         * 视口宽度写入。
+         *
+         * 旧实现由滚动容器的 ResizeObserver 驱动；内核模式下滚动容器不存在，
+         * 需要由内核把它测量到的宽度写回来（否则 `timelineTicks` 的窗口宽度
+         * 停留在初始值，标尺只画得出前一段刻度）。
+         */
+        setViewportWidth,
         rowHeight,
         setRowHeight,
         altPressed,
