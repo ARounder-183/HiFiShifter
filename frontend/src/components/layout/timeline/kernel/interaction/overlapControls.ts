@@ -23,16 +23,19 @@
  * 2. 淡变包络线 / 区域边缘竖线其次。
  *
  * 【几何来源】
- * 淡变命中区直接复用旧实现的 `buildFadeHitTargets`（它保证与绘制端
- * `drawFadeCurveStroke` 逐像素一致）；clip 边缘宽度与旧实现的 `clipEdgeWidthPx`
- * 一致（10px）。
+ * 淡变命中区复用 `fadeTargets`（内部走旧实现的 `buildFadeHitTargets`，与绘制端
+ * 逐像素一致）；clip 边缘宽度与旧实现的 `clipEdgeWidthPx` 一致（10px）。
  */
 
-import { CLIP_BODY_PADDING_Y, CLIP_HEADER_HEIGHT } from "../../constants";
-import { buildFadeHitTargets } from "../../fadeHitTargets";
+import { hitClipFadeTarget, type FadeTargetClip } from "./fadeTargets";
 
 /** 重叠区内可命中的控件类型。 */
-export type OverlapControlKind = "clip-left-edge" | "clip-right-edge" | "fade-line" | "fade-edge";
+export type OverlapControlKind =
+    /** clip 边缘（归属 `clipId` 的那个 clip）。 */
+    | "clip-left-edge"
+    | "clip-right-edge"
+    /** 淡变控件；具体是淡入还是淡出看 `fadeSide`。 */
+    | "fade";
 
 /** 重叠区控件命中结果。 */
 export interface OverlapControlHit {
@@ -44,36 +47,19 @@ export interface OverlapControlHit {
 }
 
 /**
- * 重叠解析所需的 clip 字段集（比 `HitTestClip` 多出淡变参数）。
+ * 重叠解析所需的 clip 字段集。
  *
- * 全部字段都参与几何计算，缺一不可——淡变长度决定包络线的位置，形状与方向
- * 决定曲线的走向（曲线命中块是沿真实曲线采样的，不是直线）。
+ * 几何字段必填，淡变参数沿用 `FadeTargetClip` 的可选语义（未设过淡变即为 0）。
  */
-export interface OverlapClip {
+export interface OverlapClip extends FadeTargetClip {
     readonly id: string;
     readonly startSec: number;
     readonly lengthSec: number;
-    /**
-     * 淡变参数（全部可选）。
-     *
-     * 刻意可选：数据模型里这些字段本来就允许缺省（未设过淡变的 clip），写成必填
-     * 只会迫使每个调用方补零，反而掩盖"这个 clip 到底有没有淡变"。
-     * 缺省一律按 0 处理（长度 0 = 无淡变，形状 0 / 方向 0 = 线性）。
-     */
-    readonly fadeInSec?: number;
-    /** 自动交叉淡化长度（秒）：> 0 时覆盖手动值（与绘制端一致）。 */
-    readonly autoFadeInSec?: number;
-    readonly fadeInShape?: number;
-    readonly fadeInDir?: number;
-    readonly fadeOutSec?: number;
-    readonly autoFadeOutSec?: number;
-    readonly fadeOutShape?: number;
-    readonly fadeOutDir?: number;
 }
 
 /** 命中参数。 */
 export interface OverlapControlArgs {
-    /** 该轨道内的 clip（顺序无关，内部按 startSec 自行配对）。 */
+    /** 该轨道内的 clip（顺序无关，内部自行配对）。 */
     readonly clips: readonly OverlapClip[];
     /** 指针的内容坐标 x（CSS px）。 */
     readonly contentX: number;
@@ -87,68 +73,6 @@ export interface OverlapControlArgs {
 
 /** clip 边缘命中带宽度（与旧实现 `OverlapEditLayer` 的 `clipEdgeWidthPx` 同源）。 */
 const DEFAULT_EDGE_WIDTH_PX = 10;
-
-/**
- * 淡变有效长度：自动交叉淡化（> 0 时）覆盖手动淡变（与绘制端 / 旧实现一致）。
- *
- * @param manual 手动淡变长度（秒）。
- * @param auto 自动交叉淡化长度（秒）。
- * @returns 生效的淡变长度（秒）。
- */
-function effectiveFadeSec(manual: number | undefined, auto: number | undefined): number {
-    const autoSec = typeof auto === "number" && Number.isFinite(auto) && auto > 0 ? auto : 0;
-    if (autoSec > 0) return autoSec;
-    return typeof manual === "number" && Number.isFinite(manual) && manual > 0 ? manual : 0;
-}
-
-/**
- * 判定点是否落在该 clip 的淡变命中区内。
- *
- * @param args clip 几何、淡变参数、重叠区范围与指针坐标。
- * @returns 命中时为 `"line"`（包络线）或 `"edge"`（区域边缘竖线）；未命中为 null。
- */
-function hitFadeTargets(args: {
-    readonly clip: OverlapClip;
-    readonly side: "in" | "out";
-    readonly clipLeftPx: number;
-    readonly clipWidthPx: number;
-    readonly fadePx: number;
-    readonly bodyTop: number;
-    readonly bodyHeight: number;
-    readonly overlapStartPx: number;
-    readonly overlapEndPx: number;
-    readonly contentX: number;
-    readonly localY: number;
-}): "line" | "edge" | null {
-    const isIn = args.side === "in";
-    const targets = buildFadeHitTargets({
-        clipLeftPx: args.clipLeftPx,
-        clipWidthPx: args.clipWidthPx,
-        bodyTop: args.bodyTop,
-        bodyHeight: args.bodyHeight,
-        fadeInPx: isIn ? args.fadePx : 0,
-        fadeOutPx: isIn ? 0 : args.fadePx,
-        fadeInShape: isIn ? (args.clip.fadeInShape ?? 0) : 0,
-        fadeInDir: isIn ? (args.clip.fadeInDir ?? 0) : 0,
-        fadeOutShape: isIn ? 0 : (args.clip.fadeOutShape ?? 0),
-        fadeOutDir: isIn ? 0 : (args.clip.fadeOutDir ?? 0),
-        // 只保留重叠区内的部分：重叠区外由 clip 自身的命中分区负责（那里不会
-        // 出现"同一段空间属于两个 clip"的歧义）。
-        clipXFrom: args.overlapStartPx,
-        clipXTo: args.overlapEndPx,
-    });
-    for (const target of targets) {
-        if (
-            args.contentX >= target.left &&
-            args.contentX <= target.left + target.width &&
-            args.localY >= target.top &&
-            args.localY <= target.top + target.height
-        ) {
-            return target.kind;
-        }
-    }
-    return null;
-}
 
 /**
  * 解析重叠区内的控件命中。
@@ -180,9 +104,6 @@ export function hitOverlapControl(args: OverlapControlArgs): OverlapControlHit |
     // 少于两个 clip 覆盖该点 → 不存在重叠区。
     if (containing.length < 2) return null;
 
-    const bodyTop = CLIP_HEADER_HEIGHT;
-    const bodyHeight = Math.max(1, rowHeight - CLIP_BODY_PADDING_Y - CLIP_HEADER_HEIGHT);
-
     let result: OverlapControlHit | null = null;
 
     for (let i = 0; i < containing.length; i += 1) {
@@ -208,53 +129,35 @@ export function hitOverlapControl(args: OverlapControlArgs): OverlapControlHit |
             if (overlapEndPx - overlapStartPx <= 0.5) continue;
 
             // 1) 后一个 clip 的淡入（只取重叠区内部分）。
-            const laterFadeInSec = effectiveFadeSec(later.fadeInSec, later.autoFadeInSec);
-            if (laterFadeInSec > 0) {
-                const kind = hitFadeTargets({
-                    clip: later,
-                    side: "in",
-                    clipLeftPx: laterStartPx,
-                    clipWidthPx: laterEndPx - laterStartPx,
-                    fadePx: laterFadeInSec * pxPerSec,
-                    bodyTop,
-                    bodyHeight,
-                    overlapStartPx,
-                    overlapEndPx,
-                    contentX,
-                    localY,
-                });
-                if (kind !== null) {
-                    result = {
-                        kind: kind === "line" ? "fade-line" : "fade-edge",
-                        clipId: later.id,
-                        fadeSide: "in",
-                    };
-                }
+            const laterSide = hitClipFadeTarget({
+                clip: later,
+                clipLeftPx: laterStartPx,
+                clipWidthPx: laterEndPx - laterStartPx,
+                contentX,
+                localY,
+                pxPerSec,
+                rowHeight,
+                clipXFrom: overlapStartPx,
+                clipXTo: overlapEndPx,
+            });
+            if (laterSide !== null) {
+                result = { kind: "fade", clipId: later.id, fadeSide: laterSide };
             }
 
             // 2) 前一个 clip 的淡出（只取重叠区内部分）。
-            const earlierFadeOutSec = effectiveFadeSec(earlier.fadeOutSec, earlier.autoFadeOutSec);
-            if (earlierFadeOutSec > 0) {
-                const kind = hitFadeTargets({
-                    clip: earlier,
-                    side: "out",
-                    clipLeftPx: earlierStartPx,
-                    clipWidthPx: earlierEndPx - earlierStartPx,
-                    fadePx: earlierFadeOutSec * pxPerSec,
-                    bodyTop,
-                    bodyHeight,
-                    overlapStartPx,
-                    overlapEndPx,
-                    contentX,
-                    localY,
-                });
-                if (kind !== null) {
-                    result = {
-                        kind: kind === "line" ? "fade-line" : "fade-edge",
-                        clipId: earlier.id,
-                        fadeSide: "out",
-                    };
-                }
+            const earlierSide = hitClipFadeTarget({
+                clip: earlier,
+                clipLeftPx: earlierStartPx,
+                clipWidthPx: earlierEndPx - earlierStartPx,
+                contentX,
+                localY,
+                pxPerSec,
+                rowHeight,
+                clipXFrom: overlapStartPx,
+                clipXTo: overlapEndPx,
+            });
+            if (earlierSide !== null) {
+                result = { kind: "fade", clipId: earlier.id, fadeSide: earlierSide };
             }
 
             // 3) clip 边缘（最优先，覆盖上面的淡变判定）：整行高、以边界为中心。

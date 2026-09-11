@@ -51,6 +51,7 @@ import {
     resolveThemeColor,
 } from "../../runtime/timelineCanvasStyle";
 import { hitClipHeaderControl, type ClipHeaderControl } from "../interaction/clipHeaderControls";
+import { hitClipFadeTarget } from "../interaction/fadeTargets";
 import { hitOverlapControl } from "../interaction/overlapControls";
 import { resolveHorizontalWheelZoom } from "../../runtime/timelineScrollRange";
 import { resolveTimelineMinPxPerSec } from "../../runtime/timelineZoomBounds";
@@ -1654,7 +1655,39 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             pxPerSec: view.pxPerSec,
             rowHeight: view.rowHeight,
         });
-        if (overlap === null) return hit;
+        if (overlap === null) {
+            // ── 淡变包络线 / 区域边缘竖线（非重叠情形）──
+            // 旧实现由 `ClipItem` 内的 `FadeHitLayer` 提供「画线即控件」，沿包络线
+            // 任意位置都能抓住调长度；内核原先只有角部小方块能抓，长淡变的曲线
+            // 中段完全抓不到。
+            //
+            // 只在 `body` 分区检查：header 有自己的控件；clip 边缘与角部已在
+            // `hitTest` 内判过——旧实现的优先级是「clip 边缘 > 淡变边缘线 > 包络线」，
+            // 把淡变放在边缘之后正好吻合。
+            if (hit.region === "body") {
+                const side = hitClipFadeTarget({
+                    clip: hit.clip,
+                    clipLeftPx: hit.clip.startSec * view.pxPerSec,
+                    clipWidthPx: Math.max(1, hit.clip.lengthSec * view.pxPerSec),
+                    contentX,
+                    localY: hit.localY,
+                    pxPerSec: view.pxPerSec,
+                    rowHeight: view.rowHeight,
+                });
+                if (side !== null) {
+                    return {
+                        kind: "clip",
+                        clip: hit.clip,
+                        region: side === "out" ? "fade-out-corner" : "fade-in-corner",
+                        sec: hit.sec,
+                        trackIndex: hit.trackIndex,
+                        localX: hit.localX,
+                        localY: hit.localY,
+                    };
+                }
+            }
+            return hit;
+        }
 
         const target = trackClips.find((item) => item.id === overlap.clipId);
         if (target === undefined) return hit;
@@ -1666,6 +1699,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                   : overlap.fadeSide === "out"
                     ? "fade-out-corner"
                     : "fade-in-corner";
+        // 说明：淡变命中（`kind === "fade"`）映射到既有角部区域，复用同一条
+        // `clip-fade` 手势——包络线拖拽与角部拖拽在旧实现里是同一个语义（调长度），
+        // 只是抓取位置不同。
         return {
             kind: "clip",
             clip: target,
