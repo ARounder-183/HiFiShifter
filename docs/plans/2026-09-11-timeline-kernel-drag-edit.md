@@ -369,6 +369,30 @@ Expected: clip 水平移动且落到下一条轨道；`window.__mockCalls` 中�
 4. `npx tsc -b --noEmit` 通过；`npx vitest run` 无新增失败。
 5. 浏览器 mock 端到端验证通过（截图 + `__mockCalls`）。
 
+## 执行记录（2026-09-11，全部完成）
+
+| 任务 | 提交 | 验证 |
+|---|---|---|
+| Task 1 拖拽几何换算 | `25fcf4ec` | 9 条单测通过（含左右越界、clip 比工程长、非法 pxPerSec、非法行高） |
+| Task 2 手势 + ghost | `c98c7acd` | 浏览器拖拽：clip 右移并跨轨，细节层（名称 / M 徽标 / 速率标签 / fade 曲线）完整跟随 |
+| Task 3 React 提交 | `c98c7acd` | `move_clip` 调用 1 次；全量 433 passed / 2 failed（预先存在） |
+| Task 4 取消路径 | `c98c7acd` | 拖拽中按 Esc：`move_clip` 调用 **0 次**，clip 回到原位 |
+
+**实施中的两处偏差（均优于计划）**：
+
+1. **不做独立 ghost 图层**。计划里给了「GL 追加实例 / 细节层额外 clip 列表」两条路，实际发现
+   两者都不必要：调用方写乐观位置 → Redux `clips` 引用变化 → 内核重建几何时把 clip 画在新位置，
+   视觉上即"跟着指针走"。**只有一份位置真值**，不存在 ghost 与实体分叉的可能，也省掉一个图层。
+2. **`resolveTargetTrackIndex` 一并实现**（计划里只在 Task 2 的实现提示里提到）：纵向 → 目标
+   轨道下标的换算与钳制是纯函数，与 `resolveDragDelta` 同属"几何"，放在一起更好测。
+
+**新增调试能力**：`dev-shot.mjs` 支持分离的 `down` / `up` 动作，可表达「拖拽中途按键」这类
+手势（原 `drag` 动作是一次性 down→move→up，无法插入中间步骤）。
+
+**踩坑记录**：拖拽预览必须用**按下时的原始位置** + 相对位移换算。若直接用
+`clip.startSec + deltaSec`，由于上一次预览已改写 Redux 中的位置，位移会逐帧叠加
+（表现为 clip 越拖越快）。内核回调的是相对位移，面板侧用 `kernelDragOriginRef` 记录基准。
+
 ## 后续任务（本计划外）
 
 - trim（左右边缘裁短/延长）、fade 角拖拽（复用本计划的 ghost + 提交骨架，手势换成边缘命中）

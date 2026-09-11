@@ -86,6 +86,16 @@ for (const action of actions) {
             await page.mouse.click(action.x, action.y, { button: action.button ?? "left" });
             break;
         }
+        case "down": {
+            // 与 move / key / up 组合可表达「拖拽中途按键」这类手势（drag 动作
+            // 是一次性完成 down→move→up，无法插入中间步骤）。
+            await page.mouse.down({ button: action.button ?? "left" });
+            break;
+        }
+        case "up": {
+            await page.mouse.up({ button: action.button ?? "left" });
+            break;
+        }
         case "move": {
             await page.mouse.move(action.x, action.y);
             break;
