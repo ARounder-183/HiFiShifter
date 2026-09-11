@@ -69,6 +69,11 @@ import {
     type FadeSide,
     type TrimEdge,
 } from "../interaction/dragGeometry";
+import {
+    clipIntersectsBox,
+    resolveBoxBounds,
+    type BoxBounds,
+} from "../interaction/boxSelection";
 import { createGlCanvas } from "../gl/glContext";
 import { CLIP_INSTANCE_FLOATS, writeFlatInstance } from "../gl/instanceLayout";
 import { createSdfBoxProgram } from "../gl/sdfBoxProgram";
@@ -292,6 +297,22 @@ export interface TimelineKernelInteractions {
         readonly fadeSec: number;
         readonly cancelled: boolean;
     }) => void;
+    /**
+     * 框选预览（右键拖拽期间，命中集合变化时才回调）。
+     *
+     * @param args 框内的 clip id 列表与多选修饰键状态；合并语义（是否保留原选择）
+     *   由调用方复用既有 `computeTimelineRectSelection` 决定。
+     */
+    readonly onBoxSelectPreview?: (args: {
+        readonly clipIds: readonly string[];
+        readonly additive: boolean;
+    }) => void;
+    /** 框选结束（`cancelled = true` 时调用方应恢复拖动前的选择）。 */
+    readonly onBoxSelectCommit?: (args: {
+        readonly clipIds: readonly string[];
+        readonly additive: boolean;
+        readonly cancelled: boolean;
+    }) => void;
 }
 
 /** 宿主句柄。 */
@@ -487,6 +508,18 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     detailCanvas.style.zIndex = "2";
     container.appendChild(detailCanvas);
     const detailCtx = detailCanvas.getContext("2d");
+
+    // ── 框选矩形（DOM 虚线框）──────────────────────────────────────
+    // 用 DOM 而不是 canvas 绘制：虚线框是瞬态 chrome，DOM 的 border-dashed 与主题
+    // 变量天然一致；它只在拖拽期间可见，且位置每帧只写 4 个属性。
+    const boxSelectEl = document.createElement("div");
+    boxSelectEl.style.position = "absolute";
+    boxSelectEl.style.pointerEvents = "none";
+    boxSelectEl.style.display = "none";
+    boxSelectEl.style.zIndex = "15";
+    boxSelectEl.style.border = "1px dashed var(--qt-highlight, #3b82f6)";
+    boxSelectEl.style.backgroundColor = "rgba(59, 130, 246, 0.12)";
+    container.appendChild(boxSelectEl);
 
     /** 细节层窗口（内容坐标）：与 GL 几何窗口一致，滚动在余量内不重绘。 */
     let detailWindowStartX = 0;
@@ -1245,6 +1278,18 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
               lastFadeSec: number;
           }
         | {
+              kind: "box-select";
+              startClientX: number;
+              startClientY: number;
+              startContentX: number;
+              startContentY: number;
+              additive: boolean;
+              /** 是否已超过阈值（未超过时不显示框，避免右键单击闪一下）。 */
+              active: boolean;
+              /** 最近一次命中的 clip 集合（去重：同集合不重复回调）。 */
+              lastClipIds: readonly string[];
+          }
+        | {
               kind: "clip-trim";
               clipId: string;
               edge: TrimEdge;
@@ -1277,6 +1322,17 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
 
     /** trim 允许的最小 clip 长度（秒）：再短会难以命中与选中。 */
     const MIN_CLIP_LENGTH_SEC = 0.05;
+
+    /** 框选阈值（CSS px）：与旧实现 `TIMELINE_SELECTION_DRAG_THRESHOLD_PX` 一致。 */
+    const BOX_SELECT_THRESHOLD_PX = 5;
+
+    /**
+     * 是否需要抑制下一次 `contextmenu`。
+     *
+     * 右键按下即进入「待框选」，若不做抑制，框选松手时浏览器会补发 contextmenu
+     * 弹出右键菜单（与刚完成的框选操作冲突）。
+     */
+    let suppressNextContextMenu = false;
 
     /**
      * 把视口内坐标换算为命中结果（内容坐标下的轨道 + clip）。
@@ -1341,8 +1397,109 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             startMiddlePan(event);
             return;
         }
+        if (event.button === 2) {
+            // 右键按下进入「待框选」：未超过阈值时让 contextmenu 正常弹菜单，
+            // 超过阈值才真正开始框选（与旧实现一致）。
+            const rect = container.getBoundingClientRect();
+            const view = scroll.get();
+            gesture = {
+                kind: "box-select",
+                startClientX: event.clientX,
+                startClientY: event.clientY,
+                startContentX: view.scrollLeft + (event.clientX - rect.left),
+                startContentY: view.scrollTop + (event.clientY - rect.top),
+                additive: event.ctrlKey || event.metaKey,
+                active: false,
+                lastClipIds: [],
+            };
+            return;
+        }
         if (event.button !== 0) return;
         startPrimaryGesture(event);
+    }
+
+    /**
+     * 收集落在框内的 clip id（内容坐标矩形相交）。
+     *
+     * 特殊说明：遍历**全部** clip 而不是几何窗口内的子集——窗口外的 clip 同样
+     * 可能落在框内（框可以拖出可视区）。
+     *
+     * @param box 规范化后的内容坐标矩形。
+     * @param view 当前视口。
+     * @returns 命中的 clip id 列表。
+     */
+    function collectClipsInBox(box: BoxBounds, view: TimelineViewportState): string[] {
+        ensureHitIndex();
+        const trackIndexById = new Map<string, number>();
+        for (let index = 0; index < hitTracks.length; index += 1) {
+            trackIndexById.set(hitTracks[index].id, index);
+        }
+        const result: string[] = [];
+        for (const clip of data().clips) {
+            const trackIndex = trackIndexById.get(clip.trackId);
+            if (trackIndex === undefined) continue;
+            if (
+                clipIntersectsBox({
+                    box,
+                    clipStartSec: clip.startSec,
+                    clipLengthSec: clip.lengthSec,
+                    trackIndex,
+                    pxPerSec: view.pxPerSec,
+                    rowHeight: view.rowHeight,
+                })
+            ) {
+                result.push(clip.id);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * 驱动框选（右键拖拽期间每帧调用）。
+     *
+     * 流程：阈值判定（未超过不显示框）→ 规范化矩形 → 更新 DOM 框（视口坐标）
+     * → 收集命中集合 → 按集合去重后回调。
+     *
+     * @param event 指针事件。
+     * @returns 无返回值。
+     */
+    function applyBoxSelect(event: PointerEvent): void {
+        if (gesture.kind !== "box-select") return;
+        const dx = event.clientX - gesture.startClientX;
+        const dy = event.clientY - gesture.startClientY;
+        if (!gesture.active) {
+            if (dx * dx + dy * dy < BOX_SELECT_THRESHOLD_PX * BOX_SELECT_THRESHOLD_PX) return;
+            gesture.active = true;
+            // 拖拽已成立：抑制随后的 contextmenu（否则松手会弹右键菜单）。
+            suppressNextContextMenu = true;
+        }
+        const rect = container.getBoundingClientRect();
+        const view = scroll.get();
+        const box = resolveBoxBounds(
+            gesture.startContentX,
+            gesture.startContentY,
+            view.scrollLeft + (event.clientX - rect.left),
+            view.scrollTop + (event.clientY - rect.top),
+        );
+        boxSelectEl.style.display = "block";
+        boxSelectEl.style.left = `${box.left - view.scrollLeft}px`;
+        boxSelectEl.style.top = `${box.top - view.scrollTop}px`;
+        boxSelectEl.style.width = `${Math.max(0, box.right - box.left)}px`;
+        boxSelectEl.style.height = `${Math.max(0, box.bottom - box.top)}px`;
+
+        const ids = collectClipsInBox(box, view);
+        if (ids.length === gesture.lastClipIds.length) {
+            let same = true;
+            for (let index = 0; index < ids.length; index += 1) {
+                if (ids[index] !== gesture.lastClipIds[index]) {
+                    same = false;
+                    break;
+                }
+            }
+            if (same) return;
+        }
+        gesture.lastClipIds = ids;
+        interactions?.onBoxSelectPreview?.({ clipIds: ids, additive: gesture.additive });
     }
 
     /** 左键按下：命中 clip → 待选中/待拖拽；命中空白 → 立即 seek 并进入拖拽 seek。 */
@@ -1396,6 +1553,10 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     function onGesturePointerMove(event: PointerEvent): void {
         if (gesture.kind === "seek") {
             interactions?.onSeek?.(secAt(event.clientX), false);
+            return;
+        }
+        if (gesture.kind === "box-select") {
+            applyBoxSelect(event);
             return;
         }
         if (gesture.kind === "pending-select") {
@@ -1605,6 +1766,17 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 cancelled,
             });
         }
+        if (gesture.kind === "box-select") {
+            // 未超过阈值（右键单击）不提交：交给 contextmenu 弹菜单。
+            if (gesture.active) {
+                interactions?.onBoxSelectCommit?.({
+                    clipIds: gesture.lastClipIds,
+                    additive: gesture.additive,
+                    cancelled,
+                });
+            }
+            boxSelectEl.style.display = "none";
+        }
         if (gesture.kind === "pending-select" && !cancelled) {
             interactions?.onSelectClip?.(gesture.clipId, event.ctrlKey || event.metaKey);
         }
@@ -1670,8 +1842,21 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         if (event.button === 1) event.preventDefault();
     }
 
+    /**
+     * 框选拖拽结束后抑制一次右键菜单。
+     *
+     * 右键按下即进入「待框选」，若不做抑制，框选松手时浏览器补发的 contextmenu
+     * 会弹出右键菜单（与刚完成的框选操作冲突）。
+     */
+    function onContextMenu(event: MouseEvent): void {
+        if (!suppressNextContextMenu) return;
+        event.preventDefault();
+        suppressNextContextMenu = false;
+    }
+
     container.addEventListener("pointerdown", onPointerDown);
     container.addEventListener("auxclick", onAuxClick);
+    container.addEventListener("contextmenu", onContextMenu);
     window.addEventListener("pointermove", onPanPointerMove);
     window.addEventListener("pointermove", onGesturePointerMove);
     window.addEventListener("pointerup", endPan);
@@ -1874,6 +2059,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             container.removeEventListener("keydown", onKeyDown);
             container.removeEventListener("pointerdown", onPointerDown);
             container.removeEventListener("auxclick", onAuxClick);
+            container.removeEventListener("contextmenu", onContextMenu);
+            boxSelectEl.remove();
             window.removeEventListener("pointermove", onGesturePointerMove);
             window.removeEventListener("pointerup", onGesturePointerUp);
             window.removeEventListener("pointercancel", onGesturePointerCancel);

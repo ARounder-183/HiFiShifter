@@ -65,6 +65,7 @@ import {
 } from "../../features/session/sessionSlice";
 import { batch } from "react-redux";
 import { moveClipsRemote } from "../../features/session/thunks/timelineThunks";
+import { computeTimelineRectSelection } from "./timeline/useTimelineSelectionRect";
 import { setTempoMapRemote } from "../../features/session/thunks/tempoMapThunks";
 
 import { NEW_TRACK_SENTINEL, useClipDrag } from "./timeline/hooks/useClipDrag";
@@ -1366,6 +1367,52 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         [dispatch],
     );
 
+    /** 内核框选：拖动前的选择快照（合并与回滚的基准）。 */
+    const kernelBoxSelectOriginRef = React.useRef<string[] | null>(null);
+    const multiSelectedIdsRef = React.useRef<string[]>([]);
+    // eslint-disable-next-line react-hooks/refs -- 选择镜像：框选手势需在回调里读最新值
+    multiSelectedIdsRef.current = multiSelectedClipIds;
+
+    /**
+     * 内核框选预览：复用既有合并语义。
+     *
+     * 合并规则（是否保留原有选择、主修饰键切换）由
+     * `computeTimelineRectSelection` 决定——两处各写一份会让「按修饰键框选」
+     * 的行为在两种渲染模式下分叉。
+     */
+    const handleKernelBoxSelectPreview = React.useCallback(
+        (args: { clipIds: readonly string[]; additive: boolean }) => {
+            if (kernelBoxSelectOriginRef.current === null) {
+                kernelBoxSelectOriginRef.current = [...multiSelectedIdsRef.current];
+            }
+            setMultiSelectedClipIds(
+                computeTimelineRectSelection({
+                    selectionBeforeDrag: kernelBoxSelectOriginRef.current,
+                    selectedInRect: [...args.clipIds],
+                    primaryModifierPressedAtStart: args.additive,
+                }),
+            );
+        },
+        [setMultiSelectedClipIds],
+    );
+
+    /** 内核框选收尾：取消时恢复拖动前的选择。 */
+    const handleKernelBoxSelectCommit = React.useCallback(
+        (args: { clipIds: readonly string[]; additive: boolean; cancelled: boolean }) => {
+            const origin = kernelBoxSelectOriginRef.current;
+            kernelBoxSelectOriginRef.current = null;
+            if (args.cancelled) {
+                if (origin !== null) setMultiSelectedClipIds(origin);
+                return;
+            }
+            // 预览已写入最终选择；这里只补「框内为空且非叠加」应清空选择的语义。
+            if (args.clipIds.length === 0 && !args.additive) {
+                setMultiSelectedClipIds([]);
+            }
+        },
+        [setMultiSelectedClipIds],
+    );
+
     /** 内核交互回调集合（引用稳定：内核创建时取一次）。 */
     const kernelInteractions = React.useMemo(
         () => ({
@@ -1377,6 +1424,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             onTrimCommit: handleKernelTrimCommit,
             onFadePreview: handleKernelFadePreview,
             onFadeCommit: handleKernelFadeCommit,
+            onBoxSelectPreview: handleKernelBoxSelectPreview,
+            onBoxSelectCommit: handleKernelBoxSelectCommit,
         }),
         [
             handleKernelSeek,
@@ -1387,6 +1436,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             handleKernelTrimCommit,
             handleKernelFadePreview,
             handleKernelFadeCommit,
+            handleKernelBoxSelectPreview,
+            handleKernelBoxSelectCommit,
         ],
     );
 
