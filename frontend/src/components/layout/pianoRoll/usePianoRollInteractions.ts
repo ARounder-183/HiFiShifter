@@ -56,13 +56,26 @@ import {
     smoothCurveGaussian,
 } from "./paramSmoothing";
 import {
-    buildSelectionDragDense,
+    buildMultiRangeEditPlan,
     expandStrideSampledDense,
     fetchFullResCurve,
+    planSelectionEditWindows,
     readPvRange,
-    selectionDragRange,
     uploadFullResCurve,
+    uploadFullResCurveSegments,
 } from "./selectionEditData";
+import {
+    addBeatRange,
+    beatRangesToInclusiveSpans,
+    normalizeSelection,
+    rangeIndexAtBeat,
+    removeRangeAtBeat,
+    selectionContainsBeat,
+    selectionFromBeatRange,
+    shiftSelectionRanges,
+    type FrameSpan,
+    type ParamSelection,
+} from "./paramSelection";
 import {
     computeVibratoDragAdjustment,
     resolveVibratoDragKeyboardAdjustment,
@@ -80,6 +93,21 @@ import {
 } from "../timeline/runtime/timelineAxis.js";
 
 type CanvasCursor = "default" | "crosshair" | "grab" | "grabbing" | "ew-resize";
+
+/**
+ * pv（可能被降采样）的逐帧读取器。
+ *
+ * 只用于**即时预览**：pv 是显示数据（低缩放下按画布宽度降采样），拿去回写会
+ * 覆盖全分辨率曲线，因此提交路径必须另取全分辨率数据。预览与提交共用同一套
+ * 变换函数（见 selectionEditData），所以两者结果一致。
+ */
+function makePvValueSource(pv: ParamViewSegment): (frame: number) => number {
+    const step = Math.max(1, Math.floor(pv.stride));
+    return (frame: number) => {
+        const idx = Math.round((frame - pv.startFrame) / step);
+        return idx >= 0 && idx < pv.edit.length ? pv.edit[idx] : 0;
+    };
+}
 
 export function usePianoRollInteractions(args: {
     dispatch: AppDispatch;
@@ -112,9 +140,10 @@ export function usePianoRollInteractions(args: {
     canvasRef: MutableRefObject<HTMLCanvasElement | null>;
     viewSizeRef: MutableRefObject<{ w: number; h: number }>;
 
-    selectionRef: MutableRefObject<{ aBeat: number; bBeat: number } | null>;
-    selectionUi?: { aBeat: number; bBeat: number } | null;
-    setSelectionUi: (next: { aBeat: number; bBeat: number } | null) => void;
+    /** 多选区（升序、互不相交、相邻已合并；null = 无选区） */
+    selectionRef: MutableRefObject<ParamSelection | null>;
+    selectionUi?: ParamSelection | null;
+    setSelectionUi: (next: ParamSelection | null) => void;
     setCanvasCursor: (next: CanvasCursor) => void;
 
     strokeRef: MutableRefObject<{
@@ -176,6 +205,8 @@ export function usePianoRollInteractions(args: {
     scrollbarZoomKb: Keybinding;
     /** modifier.paramMorph 绑定 */
     paramMorphKb: Keybinding;
+    /** modifier.paramMultiSelect 绑定（按住拖动追加选区段 / 点击取消该段） */
+    paramMultiSelectKb: Keybinding;
     /** modifier.paramFineAdjust 绑定 */
     paramFineAdjustKb: Keybinding;
     /** modifier.clipStretch 绑定（选择工具参数拉伸） */
@@ -238,8 +269,8 @@ export function usePianoRollInteractions(args: {
     edgeSmoothnessPercent?: number;
     /** 选择拖拽/绘制进行中时，用于临时切换吸附按钮视觉 */
     onPitchSnapGestureActiveChange?: (active: boolean) => void;
-    /** 形变控制线变化回调（null 表示隐藏） */
-    onMorphOverlayChange?: (next: ParamMorphOverlay | null) => void;
+    /** 形变控制线变化回调（null 表示隐藏；多选区时每段一条） */
+    onMorphOverlayChange?: (next: ParamMorphOverlay[] | null) => void;
     /** 当前参数值域（用于振幅滚轮步进自适应） */
     currentParamRange?: { min: number; max: number };
 }) {
@@ -292,6 +323,7 @@ export function usePianoRollInteractions(args: {
         scrollVerticalKb,
         scrollbarZoomKb,
         paramMorphKb,
+        paramMultiSelectKb,
         paramFineAdjustKb,
         paramStretchKb,
         vibratoAmplitudeAdjustKb,
@@ -470,9 +502,55 @@ export function usePianoRollInteractions(args: {
         [edgeSmoothnessPercent, paramViewRef],
     );
 
-    const morphOverlayRef = useRef<ParamMorphOverlay | null>(null);
+    /**
+     * 多段提交前的统一取数：按计划的写入窗口逐窗取**全分辨率**基准曲线，
+     * 返回可直接喂给 buildMultiRangeEditPlan 的 `sourceAt`。
+     *
+     * 窗口内未被任何选区段覆盖的帧由基准值填充 —— 与旧单段提交路径
+     * （selectionDragRange + 全分辨率取数）语义逐帧一致。
+     */
+    const fetchCommitBaseSource = useCallback(
+        async (input: {
+            trackId: string;
+            param: ParamName;
+            ranges: readonly FrameSpan[];
+            frameDelta: number;
+            edgeHalfSpanAt: (rangeIndex: number) => number;
+            paramView: ParamViewSegment | null;
+        }): Promise<(frame: number) => number> => {
+            const windows = planSelectionEditWindows({
+                ranges: input.ranges,
+                frameDelta: input.frameDelta,
+                edgeHalfSpanAt: input.edgeHalfSpanAt,
+            });
+            const curves = await Promise.all(
+                windows.map((window) =>
+                    fetchFullResCurve({
+                        trackId: input.trackId,
+                        param: input.param,
+                        startFrame: window.startFrame,
+                        endFrame: window.endFrame,
+                        paramView: input.paramView,
+                    }),
+                ),
+            );
+            return (frame: number) => {
+                for (let i = 0; i < windows.length; i += 1) {
+                    const window = windows[i];
+                    if (frame < window.startFrame || frame > window.endFrame) continue;
+                    return Number(curves[i]?.values[frame - window.startFrame]) || 0;
+                }
+                return 0;
+            };
+        },
+        [],
+    );
+
+    const morphOverlayRef = useRef<ParamMorphOverlay[] | null>(null);
     const morphDragRef = useRef<{
         pointerId: number;
+        /** 命中的控制线在 overlay 数组中的下标（多选区每段一条） */
+        overlayIndex: number;
         pointKind: "left" | "mid1" | "mid2" | "right";
     } | null>(null);
     const morphModifierDownRef = useRef(false);
@@ -551,7 +629,7 @@ export function usePianoRollInteractions(args: {
     }, []);
 
     const setMorphOverlay = useCallback(
-        (next: ParamMorphOverlay | null) => {
+        (next: ParamMorphOverlay[] | null) => {
             morphOverlayRef.current = next;
             onMorphOverlayChange?.(next);
             invalidate();
@@ -559,60 +637,72 @@ export function usePianoRollInteractions(args: {
         [invalidate, onMorphOverlayChange],
     );
 
-    const buildMorphOverlayFromSelection = useCallback((): ParamMorphOverlay | null => {
+    /**
+     * 由当前选区构建形变控制线：**每段一条**（每段各自计算基准线与四个控制点），
+     * 断层不参与形变。无有效段时返回 null（null 而非空数组，调用方以
+     * `!morphOverlayRef.current` 判断"尚未构建"）。
+     */
+    const buildMorphOverlaysFromSelection = useCallback((): ParamMorphOverlay[] | null => {
         const sel = selectionRef.current;
         const pv = paramViewRef.current;
-        if (!sel || !pv || pv.edit.length === 0) return null;
-
-        const aBeat = Math.min(sel.aBeat, sel.bBeat);
-        const bBeat = Math.max(sel.aBeat, sel.bBeat);
-        if (!Number.isFinite(aBeat) || !Number.isFinite(bBeat) || bBeat <= aBeat) return null;
+        if (!sel || sel.length === 0 || !pv || pv.edit.length === 0) return null;
 
         const fp = Math.max(1e-6, pv.framePeriodMs);
         const stride = Math.max(1, pv.stride);
-        const selStartFrameRaw = Math.max(0, Math.floor((aBeat * secPerBeat * 1000) / fp));
-        const selEndFrameRaw = Math.max(
-            selStartFrameRaw,
-            Math.ceil((bBeat * secPerBeat * 1000) / fp),
-        );
-        const selStartIdx = clamp(
-            Math.round((selStartFrameRaw - pv.startFrame) / stride),
-            0,
-            pv.edit.length - 1,
-        );
-        const selEndIdx = clamp(
-            Math.round((selEndFrameRaw - pv.startFrame) / stride),
-            selStartIdx,
-            pv.edit.length - 1,
-        );
-        const baselineValues = pv.edit.slice(selStartIdx, selEndIdx + 1);
-        if (baselineValues.length === 0) return null;
+        const overlays: ParamMorphOverlay[] = [];
 
-        const valid =
-            editParam === "pitch" ? baselineValues.filter((v) => Number(v) !== 0) : baselineValues;
-        const meanValue =
-            valid.length > 0
-                ? valid.reduce((sum, v) => sum + (Number(v) || 0), 0) / valid.length
-                : 0;
+        for (const range of sel) {
+            const aBeat = range.startBeat;
+            const bBeat = range.endBeat;
+            if (!Number.isFinite(aBeat) || !Number.isFinite(bBeat) || bBeat <= aBeat) continue;
 
-        const selectionStartFrame = pv.startFrame + selStartIdx * stride;
-        const selectionEndFrame = pv.startFrame + selEndIdx * stride;
-        const span = Math.max(0, selectionEndFrame - selectionStartFrame);
-        const p1 = Math.round(selectionStartFrame + span / 3);
-        const p2 = Math.round(selectionStartFrame + (span * 2) / 3);
+            const selStartFrameRaw = Math.max(0, Math.floor((aBeat * secPerBeat * 1000) / fp));
+            const selEndFrameRaw = Math.max(
+                selStartFrameRaw,
+                Math.ceil((bBeat * secPerBeat * 1000) / fp),
+            );
+            const selStartIdx = clamp(
+                Math.round((selStartFrameRaw - pv.startFrame) / stride),
+                0,
+                pv.edit.length - 1,
+            );
+            const selEndIdx = clamp(
+                Math.round((selEndFrameRaw - pv.startFrame) / stride),
+                selStartIdx,
+                pv.edit.length - 1,
+            );
+            const baselineValues = pv.edit.slice(selStartIdx, selEndIdx + 1);
+            if (baselineValues.length === 0) continue;
 
-        return {
-            selectionStartFrame,
-            selectionEndFrame,
-            meanValue,
-            baselineValues,
-            points: [
-                { kind: "left", frame: selectionStartFrame, value: meanValue },
-                { kind: "mid1", frame: p1, value: meanValue },
-                { kind: "mid2", frame: p2, value: meanValue },
-                { kind: "right", frame: selectionEndFrame, value: meanValue },
-            ],
-        };
+            const valid =
+                editParam === "pitch"
+                    ? baselineValues.filter((v) => Number(v) !== 0)
+                    : baselineValues;
+            const meanValue =
+                valid.length > 0
+                    ? valid.reduce((sum, v) => sum + (Number(v) || 0), 0) / valid.length
+                    : 0;
+
+            const selectionStartFrame = pv.startFrame + selStartIdx * stride;
+            const selectionEndFrame = pv.startFrame + selEndIdx * stride;
+            const span = Math.max(0, selectionEndFrame - selectionStartFrame);
+            const p1 = Math.round(selectionStartFrame + span / 3);
+            const p2 = Math.round(selectionStartFrame + (span * 2) / 3);
+
+            overlays.push({
+                selectionStartFrame,
+                selectionEndFrame,
+                meanValue,
+                baselineValues,
+                points: [
+                    { kind: "left", frame: selectionStartFrame, value: meanValue },
+                    { kind: "mid1", frame: p1, value: meanValue },
+                    { kind: "mid2", frame: p2, value: meanValue },
+                    { kind: "right", frame: selectionEndFrame, value: meanValue },
+                ],
+            });
+        }
+        return overlays.length > 0 ? overlays : null;
     }, [editParam, paramViewRef, secPerBeat, selectionRef]);
 
     const buildMorphDense = useCallback(
@@ -654,19 +744,21 @@ export function usePianoRollInteractions(args: {
     );
 
     const applyMorphOverlayPreview = useCallback(
-        (overlay: ParamMorphOverlay) => {
+        (overlays: ParamMorphOverlay[]) => {
             const pv = paramViewRef.current;
             if (!pv) return;
             ensureLiveEditBase(pv);
-            const packed = buildMorphDense(overlay, pv.stride);
-            applyDenseToLiveEdit(
-                pv,
-                packed.startFrame,
-                packed.dense,
-                packed.startFrame,
-                packed.endFrame,
-                "draw",
-            );
+            for (const overlay of overlays) {
+                const packed = buildMorphDense(overlay, pv.stride);
+                applyDenseToLiveEdit(
+                    pv,
+                    packed.startFrame,
+                    packed.dense,
+                    packed.startFrame,
+                    packed.endFrame,
+                    "draw",
+                );
+            }
         },
         [applyDenseToLiveEdit, buildMorphDense, ensureLiveEditBase, paramViewRef],
     );
@@ -789,13 +881,13 @@ export function usePianoRollInteractions(args: {
     );
 
     const updateSelectionUi = useCallback(
-        (next: { aBeat: number; bBeat: number } | null) => {
+        (next: ParamSelection | null) => {
             setSelectionUi(next);
             if (morphModifierDownRef.current && !morphDragRef.current) {
-                setMorphOverlay(buildMorphOverlayFromSelection());
+                setMorphOverlay(buildMorphOverlaysFromSelection());
             }
         },
-        [buildMorphOverlayFromSelection, setMorphOverlay, setSelectionUi],
+        [buildMorphOverlaysFromSelection, setMorphOverlay, setSelectionUi],
     );
 
     const buildVibratoDense = useCallback(
@@ -934,7 +1026,7 @@ export function usePianoRollInteractions(args: {
             }
 
             if (!morphOverlayRef.current) {
-                setMorphOverlay(buildMorphOverlayFromSelection());
+                setMorphOverlay(buildMorphOverlaysFromSelection());
             }
         };
 
@@ -962,7 +1054,7 @@ export function usePianoRollInteractions(args: {
             window.removeEventListener("blur", onBlur);
         };
     }, [
-        buildMorphOverlayFromSelection,
+        buildMorphOverlaysFromSelection,
         liveEditActiveRef,
         liveEditOverrideRef,
         panRef,
@@ -976,8 +1068,8 @@ export function usePianoRollInteractions(args: {
         if (!selectionUi) return;
         if (toolMode !== "select") return;
         if (!morphModifierDownRef.current || morphDragRef.current) return;
-        setMorphOverlay(buildMorphOverlayFromSelection());
-    }, [buildMorphOverlayFromSelection, selectionUi, setMorphOverlay, toolMode]);
+        setMorphOverlay(buildMorphOverlaysFromSelection());
+    }, [buildMorphOverlaysFromSelection, selectionUi, setMorphOverlay, toolMode]);
 
     // Track last pointer position and synthesize pointermove on key changes
     useEffect(() => {
@@ -1614,35 +1706,54 @@ export function usePianoRollInteractions(args: {
         (clientX: number, clientY: number): boolean => {
             if (toolMode !== "select") return false;
             const sel = selectionRef.current;
-            if (!sel) return false;
+            if (!sel || sel.length === 0) return false;
 
-            const beat = pointerBeat(clientX);
-            const aBeat = Math.min(sel.aBeat, sel.bBeat);
-            const bBeat = Math.max(sel.aBeat, sel.bBeat);
-            if (beat < aBeat || beat > bBeat) return false;
+            // 多选区：落在**任一段**内且靠近曲线即可拖动（拖动会带起所有段）
+            if (!selectionContainsBeat(sel, pointerBeat(clientX))) return false;
 
             return getCurveValueNearPointer(clientX, clientY) != null;
         },
         [toolMode, selectionRef, pointerBeat, getCurveValueNearPointer],
     );
 
-    const isPointerNearStretchSelectionEdge = useCallback(
-        (e: ReactPointerEvent<HTMLCanvasElement>): boolean => {
-            if (toolMode !== "select") return false;
-            if (!isModifierActive(paramStretchKb, e.nativeEvent)) return false;
+    /**
+     * 边缘拉伸命中：在 Alt（modifier.clipStretch）按下时，找**最近**的选区段边缘。
+     * 多选区下返回被命中的段号 + 哪一侧 —— 拉伸只作用于那一段，其余段不动。
+     */
+    const findStretchSelectionEdge = useCallback(
+        (e: ReactPointerEvent<HTMLCanvasElement>): { rangeIndex: number; edge: "left" | "right" } | null => {
+            if (toolMode !== "select") return null;
+            if (!isModifierActive(paramStretchKb, e.nativeEvent)) return null;
             const sel = selectionRef.current;
             const canvas = canvasRef.current;
-            if (!sel || !canvas) return false;
-            const aBeat = Math.min(sel.aBeat, sel.bBeat);
-            const bBeat = Math.max(sel.aBeat, sel.bBeat);
+            if (!sel || sel.length === 0 || !canvas) return null;
             const rect = canvas.getBoundingClientRect();
-            const leftX = beatToViewportPx(aBeat);
-            const rightX = beatToViewportPx(bBeat);
             const localX = e.clientX - rect.left;
             const edgeHitPx = 8;
-            return Math.abs(localX - leftX) <= edgeHitPx || Math.abs(localX - rightX) <= edgeHitPx;
+            let best: { rangeIndex: number; edge: "left" | "right" } | null = null;
+            let bestDistance = Number.POSITIVE_INFINITY;
+            for (let i = 0; i < sel.length; i += 1) {
+                const leftX = beatToViewportPx(sel[i].startBeat);
+                const rightX = beatToViewportPx(sel[i].endBeat);
+                const leftDistance = Math.abs(localX - leftX);
+                const rightDistance = Math.abs(localX - rightX);
+                if (leftDistance <= edgeHitPx && leftDistance < bestDistance) {
+                    best = { rangeIndex: i, edge: "left" };
+                    bestDistance = leftDistance;
+                }
+                if (rightDistance <= edgeHitPx && rightDistance < bestDistance) {
+                    best = { rangeIndex: i, edge: "right" };
+                    bestDistance = rightDistance;
+                }
+            }
+            return best;
         },
         [toolMode, paramStretchKb, selectionRef, canvasRef, beatToViewportPx],
+    );
+
+    const isPointerNearStretchSelectionEdge = useCallback(
+        (e: ReactPointerEvent<HTMLCanvasElement>): boolean => findStretchSelectionEdge(e) !== null,
+        [findStretchSelectionEdge],
     );
 
     const onCanvasPointerMove = useCallback(
@@ -1690,6 +1801,15 @@ export function usePianoRollInteractions(args: {
                 setCanvasCursor("ew-resize");
                 return;
             }
+            // 多选修饰键按下时提示"可框选/可切换段"（Alt 拉伸更具体，优先）
+            if (
+                toolMode === "select" &&
+                !isModifierActive(paramStretchKb, e.nativeEvent) &&
+                isModifierActive(paramMultiSelectKb, e.nativeEvent)
+            ) {
+                setCanvasCursor("crosshair");
+                return;
+            }
             if (isPointerNearDraggableSelection(e.clientX, e.clientY)) {
                 setCanvasCursor("grab");
                 return;
@@ -1712,6 +1832,8 @@ export function usePianoRollInteractions(args: {
             strokeRef,
             isPointerNearStretchSelectionEdge,
             isPointerNearDraggableSelection,
+            paramStretchKb,
+            paramMultiSelectKb,
             setCanvasCursor,
             getDefaultCanvasCursor,
             pointerSec,
@@ -1844,27 +1966,38 @@ export function usePianoRollInteractions(args: {
                 const existingMorph = morphOverlayRef.current;
                 const pvForMorph = paramViewRef.current;
                 const canvas = canvasRef.current;
-                if (existingMorph && pvForMorph && canvas) {
+                if (existingMorph && existingMorph.length > 0 && pvForMorph && canvas) {
                     const rect = canvas.getBoundingClientRect();
                     const h = Math.max(1, rect.height || viewSizeRef.current.h || 1);
                     const fp = Math.max(1e-6, pvForMorph.framePeriodMs);
                     const stride = Math.max(1, pvForMorph.stride);
-                    const hit = existingMorph.points.find((p) => {
-                        const sec = (p.frame * fp) / 1000;
-                        const x = secToViewportPx(axisFromRefs(), sec);
-                        const mapped = editParam === "pitch" ? p.value + 0.5 : p.value;
-                        const y = valueToY(editParam, mapped, h);
-                        return (
-                            Math.abs(e.clientX - rect.left - x) <= 8 &&
-                            Math.abs(e.clientY - rect.top - y) <= 8
-                        );
-                    });
+                    // 多选区：控制线每段一条，命中取距离最近的一个控制点
+                    let hit: { overlayIndex: number; point: ParamMorphOverlay["points"][number] } | null =
+                        null;
+                    let hitDistance = Number.POSITIVE_INFINITY;
+                    for (let i = 0; i < existingMorph.length; i += 1) {
+                        for (const point of existingMorph[i].points) {
+                            const sec = (point.frame * fp) / 1000;
+                            const x = secToViewportPx(axisFromRefs(), sec);
+                            const mapped = editParam === "pitch" ? point.value + 0.5 : point.value;
+                            const y = valueToY(editParam, mapped, h);
+                            const dx = Math.abs(e.clientX - rect.left - x);
+                            const dy = Math.abs(e.clientY - rect.top - y);
+                            if (dx > 8 || dy > 8) continue;
+                            const distance = dx + dy;
+                            if (distance < hitDistance) {
+                                hitDistance = distance;
+                                hit = { overlayIndex: i, point };
+                            }
+                        }
+                    }
 
                     if (hit && e.button === 0) {
                         e.preventDefault();
                         morphDragRef.current = {
                             pointerId: e.pointerId,
-                            pointKind: hit.kind,
+                            overlayIndex: hit.overlayIndex,
+                            pointKind: hit.point.kind,
                         };
                         setCanvasCursor("grabbing");
                         ensureLiveEditBase(pvForMorph);
@@ -1879,7 +2012,7 @@ export function usePianoRollInteractions(args: {
                             onParamValuePreviewChange?.({
                                 clientX: e.clientX,
                                 clientY: e.clientY,
-                                value: hit.value,
+                                value: hit.point.value,
                             });
                         }
 
@@ -1894,9 +2027,11 @@ export function usePianoRollInteractions(args: {
                             if (!drag || drag.pointerId !== e.pointerId || !overlayNow || !pvNow) {
                                 return;
                             }
+                            const target = overlayNow[drag.overlayIndex];
+                            if (!target) return;
                             const adjusted = getFineAdjustedPointerPosition(finePointerState, ev);
 
-                            const nextPoints = overlayNow.points.map((pt) => {
+                            const nextPoints = target.points.map((pt) => {
                                 if (pt.kind !== drag.pointKind) return pt;
                                 const newValue = pointerValue(adjusted.clientY);
                                 if (pt.kind === "left" || pt.kind === "right") {
@@ -1910,8 +2045,8 @@ export function usePianoRollInteractions(args: {
                                 );
                                 const clampedFrame = clamp(
                                     rawFrame,
-                                    overlayNow.selectionStartFrame,
-                                    overlayNow.selectionEndFrame,
+                                    target.selectionStartFrame,
+                                    target.selectionEndFrame,
                                 );
                                 return {
                                     ...pt,
@@ -1920,12 +2055,15 @@ export function usePianoRollInteractions(args: {
                                 };
                             });
 
-                            const nextOverlay: ParamMorphOverlay = {
-                                ...overlayNow,
-                                points: nextPoints,
-                            };
-                            setMorphOverlay(nextOverlay);
-                            applyMorphOverlayPreview(nextOverlay);
+                            // 只替换被拖动的那条控制线（其余段的控制线保持不动）
+                            const nextOverlays: ParamMorphOverlay[] = overlayNow.map(
+                                (overlay, index) =>
+                                    index === drag.overlayIndex
+                                        ? { ...overlay, points: nextPoints }
+                                        : overlay,
+                            );
+                            setMorphOverlay(nextOverlays);
+                            applyMorphOverlayPreview(nextOverlays);
 
                             if (paramValuePopupEnabled) {
                                 const movedPoint = nextPoints.find(
@@ -1955,26 +2093,39 @@ export function usePianoRollInteractions(args: {
                                 return;
                             }
 
-                            const packed = buildMorphDense(overlayNow, stride);
+                            // 每段各自的控制线 → 逐段 dense；整次提交一个撤销点。
+                            // 回写必须逐帧：buildMorphDense 产出的是 pv 步距采样
+                            // （dense[k] ↔ startFrame + k×stride），把 stride 间隔
+                            // 采样当连续帧写回会造成时间压缩 + 覆盖未选帧
+                            // （stride=1 时原样返回，零开销）。
+                            const packedPerOverlay = overlayNow.map((overlay) => {
+                                const packed = buildMorphDense(overlay, stride);
+                                return {
+                                    startFrame: packed.startFrame,
+                                    values: expandStrideSampledDense(packed.dense, stride),
+                                };
+                            });
 
                             const nextEdit = pvNow.edit.slice();
-                            for (let i = 0; i < packed.dense.length; i += 1) {
-                                const frame = packed.startFrame + i * stride;
-                                const idx = Math.round((frame - pvNow.startFrame) / stride);
-                                if (idx >= 0 && idx < nextEdit.length) {
-                                    nextEdit[idx] = packed.dense[i];
+                            const pvStepUp = Math.max(1, Math.floor(pvNow.stride));
+                            for (const packed of packedPerOverlay) {
+                                for (let i = 0; i < packed.values.length; i += 1) {
+                                    const globalIdx = Math.round(
+                                        (packed.startFrame + i - pvNow.startFrame) / pvStepUp,
+                                    );
+                                    if (globalIdx >= 0 && globalIdx < nextEdit.length) {
+                                        nextEdit[globalIdx] = packed.values[i];
+                                    }
                                 }
                             }
                             setParamView({ ...pvNow, edit: nextEdit });
 
                             void (async () => {
-                                await paramsApi.setParamFrames(
-                                    rootTrackId,
-                                    editParam,
-                                    packed.startFrame,
-                                    packed.dense,
-                                    true,
-                                );
+                                await uploadFullResCurveSegments({
+                                    trackId: rootTrackId,
+                                    param: editParam,
+                                    segments: packedPerOverlay,
+                                });
                                 liveEditOverrideRef.current = null;
                                 if (liveEditActiveRef) liveEditActiveRef.current = false;
                                 bumpRefreshToken();
@@ -1983,7 +2134,7 @@ export function usePianoRollInteractions(args: {
                             if (morphModifierDownRef.current) {
                                 // 保持调整点位置不变；baselineValues 是进入形变模式时一次性捕获的，
                                 // 每次拖拽提交都在同一基准线上施加"总偏移"，不重置。
-                                // 只有松开修饰键再重新按下时，才会调用 buildMorphOverlayFromSelection 重置。
+                                // 只有松开修饰键再重新按下时，才会调用 buildMorphOverlaysFromSelection 重置。
                             } else {
                                 setMorphOverlay(null);
                             }
@@ -2001,373 +2152,484 @@ export function usePianoRollInteractions(args: {
                 const b = pointerBeat(e.clientX);
                 const sel = selectionRef.current;
 
-                // 如果已有选区，且鼠标在选区范围内且靠近曲线，则进入拖拽曲线模式
-                if (sel) {
-                    const aBeat = Math.min(sel.aBeat, sel.bBeat);
-                    const bBeat = Math.max(sel.aBeat, sel.bBeat);
+                // 选区构建的拍坐标换算（普通框选与多选追加共用）。
+                // 允许自动滚动时有 32px 边缘触发区，且夹在 [0, 工程时长] 内。
+                const maxSelectableBeat = Math.max(
+                    0,
+                    dynamicProjectSec / Math.max(1e-9, secPerBeat),
+                );
+                const clampSelectionBeat = (beat: number) => clamp(beat, 0, maxSelectableBeat);
+                const selectionBeatFromClientX = (clientX: number, allowAutoScroll: boolean) => {
+                    const scroller = scrollerRef.current;
+                    if (!scroller) {
+                        return clampSelectionBeat(pointerBeat(clientX));
+                    }
 
-                    if (isModifierActive(paramStretchKb, e.nativeEvent)) {
-                        const canvas = canvasRef.current;
-                        if (canvas) {
-                            const rect = canvas.getBoundingClientRect();
-                            const leftX = beatToViewportPx(aBeat);
-                            const rightX = beatToViewportPx(bBeat);
-                            const localX = e.clientX - rect.left;
-                            const EDGE_HIT_PX = 8;
-                            const hitLeft = Math.abs(localX - leftX) <= EDGE_HIT_PX;
-                            const hitRight = Math.abs(localX - rightX) <= EDGE_HIT_PX;
-                            const edgeKind: "left" | "right" | null = hitLeft
-                                ? "left"
-                                : hitRight
-                                  ? "right"
-                                  : null;
+                    const bounds = scroller.getBoundingClientRect();
+                    const edgePx = 32;
+                    const maxStepPx = 18;
 
-                            if (edgeKind) {
-                                const pv = paramViewRef.current;
-                                if (!pv || pv.edit.length === 0) return;
-                                const fp = Math.max(1e-6, pv.framePeriodMs);
-                                const stride = Math.max(1, pv.stride);
-                                const oldStartFrame = Math.max(
-                                    0,
-                                    Math.floor((aBeat * secPerBeat * 1000) / fp),
-                                );
-                                const oldEndFrame = Math.max(
-                                    oldStartFrame,
-                                    Math.ceil((bBeat * secPerBeat * 1000) / fp),
-                                );
-                                const oldStartIdx = clamp(
-                                    Math.round((oldStartFrame - pv.startFrame) / stride),
-                                    0,
-                                    pv.edit.length - 1,
-                                );
-                                const oldEndIdx = clamp(
-                                    Math.round((oldEndFrame - pv.startFrame) / stride),
-                                    oldStartIdx,
-                                    pv.edit.length - 1,
-                                );
-                                const oldValues = pv.edit.slice(oldStartIdx, oldEndIdx + 1);
-                                if (oldValues.length <= 0) return;
+                    if (allowAutoScroll) {
+                        let deltaPx = 0;
+                        if (clientX < bounds.left + edgePx) {
+                            const ratio = (bounds.left + edgePx - clientX) / edgePx;
+                            deltaPx = -clamp(ratio, 0, 1.5) * maxStepPx;
+                        } else if (clientX > bounds.right - edgePx) {
+                            const ratio = (clientX - (bounds.right - edgePx)) / edgePx;
+                            deltaPx = clamp(ratio, 0, 1.5) * maxStepPx;
+                        }
 
-                                const pid = e.pointerId;
-                                (e.currentTarget as HTMLCanvasElement).setPointerCapture(pid);
-                                setCanvasCursor("ew-resize");
-                                ensureLiveEditBase(pv);
-                                if (liveEditActiveRef) liveEditActiveRef.current = true;
-                                const finePointerState = createFineAdjustedPointerState(
-                                    e.nativeEvent,
-                                    e.currentTarget as HTMLCanvasElement,
-                                );
-
-                                const buildDense = (
-                                    pvNow: ParamViewSegment,
-                                    nextABeat: number,
-                                    nextBBeat: number,
-                                ) => {
-                                    const nextStartFrame = Math.max(
-                                        0,
-                                        Math.floor((nextABeat * secPerBeat * 1000) / fp),
-                                    );
-                                    const nextEndFrame = Math.max(
-                                        nextStartFrame,
-                                        Math.ceil((nextBBeat * secPerBeat * 1000) / fp),
-                                    );
-                                    const nextStartIdx = clamp(
-                                        Math.round((nextStartFrame - pvNow.startFrame) / stride),
-                                        0,
-                                        pvNow.edit.length - 1,
-                                    );
-                                    const nextEndIdx = clamp(
-                                        Math.round((nextEndFrame - pvNow.startFrame) / stride),
-                                        nextStartIdx,
-                                        pvNow.edit.length - 1,
-                                    );
-                                    const nextLen = nextEndIdx - nextStartIdx + 1;
-                                    if (nextLen <= 0) return null;
-
-                                    // 平滑度 → 毫秒定标的过渡带半宽（dense 索引）
-                                    const edgeHalfSpanIdx = edgeHalfSpanForIndices(nextLen, stride);
-                                    const extraEdgeFrames = Math.ceil(edgeHalfSpanIdx) * stride;
-                                    const overallMinFrame = Math.max(
-                                        0,
-                                        Math.min(oldStartFrame, nextStartFrame) - extraEdgeFrames,
-                                    );
-                                    const overallMaxFrame =
-                                        Math.max(oldEndFrame, nextEndFrame) + extraEdgeFrames;
-                                    const overallLen =
-                                        Math.floor((overallMaxFrame - overallMinFrame) / stride) +
-                                        1;
-                                    const dense = new Array<number>(overallLen);
-                                    for (let i = 0; i < overallLen; i += 1) {
-                                        const frame = overallMinFrame + i * stride;
-                                        const idx = Math.round((frame - pvNow.startFrame) / stride);
-                                        dense[i] =
-                                            idx >= 0 && idx < pvNow.edit.length
-                                                ? pvNow.edit[idx]
-                                                : 0;
-                                    }
-                                    const denseBefore = dense.slice();
-
-                                    const newValues = new Array<number>(nextLen);
-                                    for (let i = 0; i < nextLen; i += 1) {
-                                        const t = nextLen > 1 ? i / (nextLen - 1) : 0;
-                                        const srcF = t * (oldValues.length - 1);
-                                        const lo = Math.floor(srcF);
-                                        const hi = Math.min(lo + 1, oldValues.length - 1);
-                                        const frac = srcF - lo;
-                                        const loVal = Number(oldValues[lo] ?? 0);
-                                        const hiVal = Number(oldValues[hi] ?? 0);
-                                        if (editParam === "pitch" && loVal === 0 && hiVal === 0) {
-                                            newValues[i] = 0;
-                                        } else {
-                                            newValues[i] = loVal + (hiVal - loVal) * frac;
-                                        }
-                                    }
-
-                                    for (let i = 0; i < nextLen; i += 1) {
-                                        const frame = nextStartFrame + i * stride;
-                                        const dIdx = Math.round((frame - overallMinFrame) / stride);
-                                        if (dIdx >= 0 && dIdx < dense.length) {
-                                            dense[dIdx] = newValues[i];
-                                        }
-                                    }
-
-                                    const sampleOutsideValue = (
-                                        srcFrame: number,
-                                        fallback: number,
-                                    ) => {
-                                        const srcIdx = Math.round(
-                                            (srcFrame - pvNow.startFrame) / stride,
-                                        );
-                                        if (srcIdx >= 0 && srcIdx < pvNow.edit.length) {
-                                            return pvNow.edit[srcIdx];
-                                        }
-                                        return fallback;
-                                    };
-
-                                    const maxOutsideWindow = Math.max(
-                                        1,
-                                        Math.round(oldValues.length * 0.2),
-                                    );
-                                    const smoothRatio =
-                                        clamp(Number(edgeSmoothnessPercent) || 0, 0, 100) / 100;
-                                    const outsideWindowLen = Math.max(
-                                        1,
-                                        Math.round(maxOutsideWindow * smoothRatio),
-                                    );
-
-                                    // 缩短时，用原选区内侧一小段值回填被腾空区域。
-                                    // smoothness=0 时 outsideWindowLen=1，相当于边缘值沿边界内侧延展。
-                                    if (nextStartFrame > oldStartFrame) {
-                                        const fillLen = Math.floor(
-                                            (nextStartFrame - oldStartFrame) / stride,
-                                        );
-                                        for (let i = 0; i < fillLen; i += 1) {
-                                            const targetFrame = oldStartFrame + i * stride;
-                                            const targetIdx = Math.round(
-                                                (targetFrame - overallMinFrame) / stride,
-                                            );
-                                            const srcWindowPos =
-                                                fillLen > 1
-                                                    ? Math.round(
-                                                          (i / (fillLen - 1)) *
-                                                              (outsideWindowLen - 1),
-                                                      )
-                                                    : 0;
-                                            const srcFrame = oldStartFrame + srcWindowPos * stride;
-                                            if (targetIdx >= 0 && targetIdx < dense.length) {
-                                                dense[targetIdx] = sampleOutsideValue(
-                                                    srcFrame,
-                                                    dense[targetIdx],
-                                                );
-                                            }
-                                        }
-                                    }
-                                    if (nextEndFrame < oldEndFrame) {
-                                        const fillLen = Math.floor(
-                                            (oldEndFrame - nextEndFrame) / stride,
-                                        );
-                                        for (let i = 0; i < fillLen; i += 1) {
-                                            const targetFrame = nextEndFrame + (i + 1) * stride;
-                                            const targetIdx = Math.round(
-                                                (targetFrame - overallMinFrame) / stride,
-                                            );
-                                            const srcWindowPos =
-                                                fillLen > 1
-                                                    ? Math.round(
-                                                          (i / (fillLen - 1)) *
-                                                              (outsideWindowLen - 1),
-                                                      )
-                                                    : 0;
-                                            const srcFrame = oldEndFrame - srcWindowPos * stride;
-                                            if (targetIdx >= 0 && targetIdx < dense.length) {
-                                                dense[targetIdx] = sampleOutsideValue(
-                                                    srcFrame,
-                                                    dense[targetIdx],
-                                                );
-                                            }
-                                        }
-                                    }
-
-                                    const movedStartDenseIdx = Math.round(
-                                        (nextStartFrame - overallMinFrame) / stride,
-                                    );
-                                    blendDenseEdges(
-                                        dense,
-                                        denseBefore,
-                                        movedStartDenseIdx,
-                                        nextLen,
-                                        edgeHalfSpanIdx,
-                                    );
-
-                                    return {
-                                        dense,
-                                        overallMinFrame,
-                                        overallMaxFrame,
-                                        nextABeat,
-                                        nextBBeat,
-                                    };
-                                };
-
-                                const minBeatSpan = Math.max(
-                                    1e-6,
-                                    (stride * fp) / 1000 / secPerBeat,
-                                );
-
-                                // 预览重算 rAF 合帧：dense 重建 + 整份 live 拷贝 +
-                                // React setState 都是 O(n)，pointermove 在高刷鼠标上
-                                // 可达数百 Hz，逐事件执行长选区会卡顿；与左键选区
-                                // 拖动路径同模式，一帧至多重算一次。
-                                let previewRafId: number | null = null;
-                                let queuedCursorBeat: number | null = null;
-                                const runPreviewStep = () => {
-                                    const cursorBeat = queuedCursorBeat;
-                                    if (cursorBeat == null) return;
-                                    queuedCursorBeat = null;
-                                    const pvNow = paramViewRef.current;
-                                    if (!pvNow) return;
-                                    const nextABeat =
-                                        edgeKind === "left"
-                                            ? clamp(cursorBeat, 0, bBeat - minBeatSpan)
-                                            : aBeat;
-                                    const nextBBeat =
-                                        edgeKind === "right"
-                                            ? Math.max(aBeat + minBeatSpan, cursorBeat)
-                                            : bBeat;
-                                    const built = buildDense(pvNow, nextABeat, nextBBeat);
-                                    if (!built) return;
-                                    applyDenseToLiveEdit(
-                                        pvNow,
-                                        built.overallMinFrame,
-                                        built.dense,
-                                        built.overallMinFrame,
-                                        built.overallMaxFrame,
-                                        "draw",
-                                    );
-                                    selectionRef.current = {
-                                        aBeat: built.nextABeat,
-                                        bBeat: built.nextBBeat,
-                                    };
-                                    updateSelectionUi(selectionRef.current);
-                                    invalidate();
-                                };
-
-                                const onMove = (ev: globalThis.PointerEvent) => {
-                                    if ((ev.buttons & 1) !== 1) {
-                                        onUp();
-                                        return;
-                                    }
-                                    const adjusted = getFineAdjustedPointerPosition(
-                                        finePointerState,
-                                        ev,
-                                    );
-                                    queuedCursorBeat = pointerBeat(adjusted.clientX);
-                                    if (previewRafId == null) {
-                                        previewRafId = requestAnimationFrame(() => {
-                                            previewRafId = null;
-                                            runPreviewStep();
-                                        });
-                                    }
-                                };
-
-                                const onUp = () => {
-                                    window.removeEventListener("pointermove", onMove);
-                                    window.removeEventListener("pointerup", onUp);
-                                    window.removeEventListener("pointercancel", onUp);
-                                    disposeFineAdjustedPointerState(finePointerState);
-                                    clearActivePointerGestureEnd(onUp);
-                                    // 取消挂起的预览帧：松手后的提交路径负责重建。
-                                    if (previewRafId != null) {
-                                        cancelAnimationFrame(previewRafId);
-                                        previewRafId = null;
-                                    }
-                                    queuedCursorBeat = null;
-
-                                    const pvNow = paramViewRef.current;
-                                    const selNow = selectionRef.current;
-                                    if (!pvNow || !selNow || !rootTrackId) {
-                                        setCanvasCursor("default");
-                                        return;
-                                    }
-                                    const nextABeat = Math.min(selNow.aBeat, selNow.bBeat);
-                                    const nextBBeat = Math.max(selNow.aBeat, selNow.bBeat);
-                                    const built = buildDense(pvNow, nextABeat, nextBBeat);
-                                    if (!built) {
-                                        setCanvasCursor("default");
-                                        return;
-                                    }
-
-                                    const nextEdit = pvNow.edit.slice();
-                                    for (let i = 0; i < built.dense.length; i += 1) {
-                                        const frame = built.overallMinFrame + i * stride;
-                                        const idx = Math.round((frame - pvNow.startFrame) / stride);
-                                        if (idx >= 0 && idx < nextEdit.length) {
-                                            nextEdit[idx] = built.dense[i];
-                                        }
-                                    }
-                                    setParamView({ ...pvNow, edit: nextEdit });
-                                    liveEditOverrideRef.current = null;
-
-                                    // 全分辨率无损提交（与右拖 / 选区拖拽同一范式）：
-                                    // buildDense 产生的是 pv 步距采样（dense[k] ↔
-                                    // overallMinFrame + k×stride）；按渲染同款线性插值
-                                    // 展开为逐帧值后分块回写 —— 绝不把 stride 间隔采样
-                                    // 当连续帧写入（旧实现在 stride>1 时时间压缩 +
-                                    // 覆盖未选帧，见 selectionEditData.expandStrideSampledDense）。
-                                    const expanded = expandStrideSampledDense(built.dense, stride);
-                                    void (async () => {
-                                        try {
-                                            await uploadFullResCurve({
-                                                trackId: rootTrackId,
-                                                param: editParam,
-                                                startFrame: built.overallMinFrame,
-                                                values: expanded,
-                                            });
-                                        } catch (err) {
-                                            console.error(
-                                                "[pianoRoll] stretch-edge commit failed",
-                                                err,
-                                            );
-                                        } finally {
-                                            if (liveEditActiveRef) {
-                                                liveEditActiveRef.current = false;
-                                            }
-                                            bumpRefreshToken();
-                                        }
-                                    })();
-                                    setCanvasCursor("default");
-                                    invalidate();
-                                };
-
-                                window.addEventListener("pointermove", onMove);
-                                window.addEventListener("pointerup", onUp);
-                                window.addEventListener("pointercancel", onUp);
-                                setActivePointerGestureEnd(onUp);
-                                return;
+                        if (Math.abs(deltaPx) > 0.01) {
+                            const drawingMaxScrollLeft = Math.max(
+                                0,
+                                maxSelectableBeat * Math.max(1e-9, pxPerBeatRef.current) -
+                                    scroller.clientWidth,
+                            );
+                            const nativeOffset = syncTimelineEnabled ? timelineOffsetRef.current : 0;
+                            const nativeMaxScrollLeft = drawingMaxScrollLeft + nativeOffset;
+                            const nextScrollLeft = clamp(
+                                scroller.scrollLeft + deltaPx,
+                                0,
+                                nativeMaxScrollLeft,
+                            );
+                            if (Math.abs(nextScrollLeft - scroller.scrollLeft) > 0.01) {
+                                scroller.scrollLeft = nextScrollLeft;
+                                syncScrollLeft(scroller);
                             }
                         }
                     }
 
-                    if (b >= aBeat && b <= bBeat) {
+                    const clampedClientX = clamp(clientX, bounds.left, bounds.right);
+                    const beat =
+                        (scrollLeftRef.current + (clampedClientX - bounds.left)) /
+                        Math.max(1e-9, pxPerBeatRef.current);
+                    return clampSelectionBeat(beat);
+                };
+
+                // ── 多选修饰键（默认 ⌘/Ctrl）─────────────────────────────────
+                // 拖动 = 在已有选区上**追加**一段（并集；重叠/相接自动合并）；
+                // 原地点击已有段 = 取消该段（与时间轴 ⌘+点击多选切换同源语义）。
+                //
+                // 手势优先级（高 → 低）：Alt 形变控制点（上方已 return）→
+                // Alt 边缘拉伸（下面的拉伸分支）→ **本分支** → 段内近曲线拖动
+                // （移动所有段）→ 普通框选（替换整个选区）。Alt 拉伸修饰键按下时
+                // 本分支让位，否则在选区内侧边缘处无法拉伸。
+                if (
+                    e.button === 0 &&
+                    !isModifierActive(paramStretchKb, e.nativeEvent) &&
+                    isModifierActive(paramMultiSelectKb, e.nativeEvent)
+                ) {
+                    const startBeat = selectionBeatFromClientX(e.clientX, false);
+                    const baseSelection = selectionRef.current ?? [];
+                    const hitIndex = rangeIndexAtBeat(baseSelection, startBeat);
+                    const hitExistingRange = hitIndex >= 0;
+                    const startClientX = e.clientX;
+                    let moved = false;
+
+                    (e.currentTarget as HTMLCanvasElement).setPointerCapture(e.pointerId);
+                    const onMove = (ev: globalThis.PointerEvent) => {
+                        if ((ev.buttons & 1) !== 1) {
+                            onUp();
+                            return;
+                        }
+                        // 3px 死区：区分「点击切换」与「拖动追加」，避免手抖误删段
+                        if (!moved && Math.abs(ev.clientX - startClientX) > 3) moved = true;
+                        if (!moved) return;
+                        const bb = selectionBeatFromClientX(ev.clientX, true);
+                        selectionRef.current = addBeatRange(baseSelection, startBeat, bb);
+                        updateSelectionUi(selectionRef.current);
+                        invalidate();
+                    };
+                    const onUp = () => {
+                        window.removeEventListener("pointermove", onMove);
+                        window.removeEventListener("pointerup", onUp);
+                        window.removeEventListener("pointercancel", onUp);
+                        clearActivePointerGestureEnd(onUp);
+                        if (!moved && hitExistingRange) {
+                            // 切换取消：移除被点击的那一段
+                            // （removeRangeAtBeat 已覆盖"按点击拍定位该段"的语义）
+                            selectionRef.current = removeRangeAtBeat(
+                                selectionRef.current,
+                                startBeat,
+                            );
+                            updateSelectionUi(selectionRef.current);
+                        }
+                        invalidate();
+                    };
+                    window.addEventListener("pointermove", onMove);
+                    window.addEventListener("pointerup", onUp);
+                    window.addEventListener("pointercancel", onUp);
+                    setActivePointerGestureEnd(onUp);
+                    return;
+                }
+
+                // 如果已有选区，且鼠标在选区范围内且靠近曲线，则进入拖拽曲线模式
+                if (sel) {
+                    // 边缘拉伸只作用于**被抓住的那一段**（其余段不动）；命中判定
+                    // 取所有段中最近的边缘。
+                    const stretchHit = findStretchSelectionEdge(e);
+                    if (stretchHit) {
+                        const aBeat = sel[stretchHit.rangeIndex].startBeat;
+                        const bBeat = sel[stretchHit.rangeIndex].endBeat;
+                        const edgeKind = stretchHit.edge;
+                        // pointerdown 时的选区快照：拉伸期间的选区改写都以它为基底
+                        // 重建（只替换被拉伸的那一段），因此归一化合并不会造成
+                        // 「越拉越偏」的下标漂移。
+                        const stretchBaseSelection = sel;
+                        let stretchABeat = aBeat;
+                        let stretchBBeat = bBeat;
+
+                        const pv = paramViewRef.current;
+                        if (!pv || pv.edit.length === 0) return;
+                        const fp = Math.max(1e-6, pv.framePeriodMs);
+                        const stride = Math.max(1, pv.stride);
+                        const oldStartFrame = Math.max(
+                            0,
+                            Math.floor((aBeat * secPerBeat * 1000) / fp),
+                        );
+                        const oldEndFrame = Math.max(
+                            oldStartFrame,
+                            Math.ceil((bBeat * secPerBeat * 1000) / fp),
+                        );
+                        const oldStartIdx = clamp(
+                            Math.round((oldStartFrame - pv.startFrame) / stride),
+                            0,
+                            pv.edit.length - 1,
+                        );
+                        const oldEndIdx = clamp(
+                            Math.round((oldEndFrame - pv.startFrame) / stride),
+                            oldStartIdx,
+                            pv.edit.length - 1,
+                        );
+                        const oldValues = pv.edit.slice(oldStartIdx, oldEndIdx + 1);
+                        if (oldValues.length <= 0) return;
+
+                        const pid = e.pointerId;
+                        (e.currentTarget as HTMLCanvasElement).setPointerCapture(pid);
+                        setCanvasCursor("ew-resize");
+                        ensureLiveEditBase(pv);
+                        if (liveEditActiveRef) liveEditActiveRef.current = true;
+                        const finePointerState = createFineAdjustedPointerState(
+                            e.nativeEvent,
+                            e.currentTarget as HTMLCanvasElement,
+                        );
+
+                        const buildDense = (
+                            pvNow: ParamViewSegment,
+                            nextABeat: number,
+                            nextBBeat: number,
+                        ) => {
+                            const nextStartFrame = Math.max(
+                                0,
+                                Math.floor((nextABeat * secPerBeat * 1000) / fp),
+                            );
+                            const nextEndFrame = Math.max(
+                                nextStartFrame,
+                                Math.ceil((nextBBeat * secPerBeat * 1000) / fp),
+                            );
+                            const nextStartIdx = clamp(
+                                Math.round((nextStartFrame - pvNow.startFrame) / stride),
+                                0,
+                                pvNow.edit.length - 1,
+                            );
+                            const nextEndIdx = clamp(
+                                Math.round((nextEndFrame - pvNow.startFrame) / stride),
+                                nextStartIdx,
+                                pvNow.edit.length - 1,
+                            );
+                            const nextLen = nextEndIdx - nextStartIdx + 1;
+                            if (nextLen <= 0) return null;
+
+                            // 平滑度 → 毫秒定标的过渡带半宽（dense 索引）
+                            const edgeHalfSpanIdx = edgeHalfSpanForIndices(nextLen, stride);
+                            const extraEdgeFrames = Math.ceil(edgeHalfSpanIdx) * stride;
+                            const overallMinFrame = Math.max(
+                                0,
+                                Math.min(oldStartFrame, nextStartFrame) - extraEdgeFrames,
+                            );
+                            const overallMaxFrame =
+                                Math.max(oldEndFrame, nextEndFrame) + extraEdgeFrames;
+                            const overallLen =
+                                Math.floor((overallMaxFrame - overallMinFrame) / stride) +
+                                1;
+                            const dense = new Array<number>(overallLen);
+                            for (let i = 0; i < overallLen; i += 1) {
+                                const frame = overallMinFrame + i * stride;
+                                const idx = Math.round((frame - pvNow.startFrame) / stride);
+                                dense[i] =
+                                    idx >= 0 && idx < pvNow.edit.length
+                                        ? pvNow.edit[idx]
+                                        : 0;
+                            }
+                            const denseBefore = dense.slice();
+
+                            const newValues = new Array<number>(nextLen);
+                            for (let i = 0; i < nextLen; i += 1) {
+                                const t = nextLen > 1 ? i / (nextLen - 1) : 0;
+                                const srcF = t * (oldValues.length - 1);
+                                const lo = Math.floor(srcF);
+                                const hi = Math.min(lo + 1, oldValues.length - 1);
+                                const frac = srcF - lo;
+                                const loVal = Number(oldValues[lo] ?? 0);
+                                const hiVal = Number(oldValues[hi] ?? 0);
+                                if (editParam === "pitch" && loVal === 0 && hiVal === 0) {
+                                    newValues[i] = 0;
+                                } else {
+                                    newValues[i] = loVal + (hiVal - loVal) * frac;
+                                }
+                            }
+
+                            for (let i = 0; i < nextLen; i += 1) {
+                                const frame = nextStartFrame + i * stride;
+                                const dIdx = Math.round((frame - overallMinFrame) / stride);
+                                if (dIdx >= 0 && dIdx < dense.length) {
+                                    dense[dIdx] = newValues[i];
+                                }
+                            }
+
+                            const sampleOutsideValue = (
+                                srcFrame: number,
+                                fallback: number,
+                            ) => {
+                                const srcIdx = Math.round(
+                                    (srcFrame - pvNow.startFrame) / stride,
+                                );
+                                if (srcIdx >= 0 && srcIdx < pvNow.edit.length) {
+                                    return pvNow.edit[srcIdx];
+                                }
+                                return fallback;
+                            };
+
+                            const maxOutsideWindow = Math.max(
+                                1,
+                                Math.round(oldValues.length * 0.2),
+                            );
+                            const smoothRatio =
+                                clamp(Number(edgeSmoothnessPercent) || 0, 0, 100) / 100;
+                            const outsideWindowLen = Math.max(
+                                1,
+                                Math.round(maxOutsideWindow * smoothRatio),
+                            );
+
+                            // 缩短时，用原选区内侧一小段值回填被腾空区域。
+                            // smoothness=0 时 outsideWindowLen=1，相当于边缘值沿边界内侧延展。
+                            if (nextStartFrame > oldStartFrame) {
+                                const fillLen = Math.floor(
+                                    (nextStartFrame - oldStartFrame) / stride,
+                                );
+                                for (let i = 0; i < fillLen; i += 1) {
+                                    const targetFrame = oldStartFrame + i * stride;
+                                    const targetIdx = Math.round(
+                                        (targetFrame - overallMinFrame) / stride,
+                                    );
+                                    const srcWindowPos =
+                                        fillLen > 1
+                                            ? Math.round(
+                                                  (i / (fillLen - 1)) *
+                                                      (outsideWindowLen - 1),
+                                              )
+                                            : 0;
+                                    const srcFrame = oldStartFrame + srcWindowPos * stride;
+                                    if (targetIdx >= 0 && targetIdx < dense.length) {
+                                        dense[targetIdx] = sampleOutsideValue(
+                                            srcFrame,
+                                            dense[targetIdx],
+                                        );
+                                    }
+                                }
+                            }
+                            if (nextEndFrame < oldEndFrame) {
+                                const fillLen = Math.floor(
+                                    (oldEndFrame - nextEndFrame) / stride,
+                                );
+                                for (let i = 0; i < fillLen; i += 1) {
+                                    const targetFrame = nextEndFrame + (i + 1) * stride;
+                                    const targetIdx = Math.round(
+                                        (targetFrame - overallMinFrame) / stride,
+                                    );
+                                    const srcWindowPos =
+                                        fillLen > 1
+                                            ? Math.round(
+                                                  (i / (fillLen - 1)) *
+                                                      (outsideWindowLen - 1),
+                                              )
+                                            : 0;
+                                    const srcFrame = oldEndFrame - srcWindowPos * stride;
+                                    if (targetIdx >= 0 && targetIdx < dense.length) {
+                                        dense[targetIdx] = sampleOutsideValue(
+                                            srcFrame,
+                                            dense[targetIdx],
+                                        );
+                                    }
+                                }
+                            }
+
+                            const movedStartDenseIdx = Math.round(
+                                (nextStartFrame - overallMinFrame) / stride,
+                            );
+                            blendDenseEdges(
+                                dense,
+                                denseBefore,
+                                movedStartDenseIdx,
+                                nextLen,
+                                edgeHalfSpanIdx,
+                            );
+
+                            return {
+                                dense,
+                                overallMinFrame,
+                                overallMaxFrame,
+                                nextABeat,
+                                nextBBeat,
+                            };
+                        };
+
+                        const minBeatSpan = Math.max(
+                            1e-6,
+                            (stride * fp) / 1000 / secPerBeat,
+                        );
+
+                        // 预览重算 rAF 合帧：dense 重建 + 整份 live 拷贝 +
+                        // React setState 都是 O(n)，pointermove 在高刷鼠标上
+                        // 可达数百 Hz，逐事件执行长选区会卡顿；与左键选区
+                        // 拖动路径同模式，一帧至多重算一次。
+                        let previewRafId: number | null = null;
+                        let queuedCursorBeat: number | null = null;
+                        const runPreviewStep = () => {
+                            const cursorBeat = queuedCursorBeat;
+                            if (cursorBeat == null) return;
+                            queuedCursorBeat = null;
+                            const pvNow = paramViewRef.current;
+                            if (!pvNow) return;
+                            const nextABeat =
+                                edgeKind === "left"
+                                    ? clamp(cursorBeat, 0, bBeat - minBeatSpan)
+                                    : aBeat;
+                            const nextBBeat =
+                                edgeKind === "right"
+                                    ? Math.max(aBeat + minBeatSpan, cursorBeat)
+                                    : bBeat;
+                            const built = buildDense(pvNow, nextABeat, nextBBeat);
+                            if (!built) return;
+                            stretchABeat = nextABeat;
+                            stretchBBeat = nextBBeat;
+                            applyDenseToLiveEdit(
+                                pvNow,
+                                built.overallMinFrame,
+                                built.dense,
+                                built.overallMinFrame,
+                                built.overallMaxFrame,
+                                "draw",
+                            );
+                            selectionRef.current = normalizeSelection(
+                                stretchBaseSelection.map((range, index) =>
+                                    index === stretchHit.rangeIndex
+                                        ? {
+                                              startBeat: built.nextABeat,
+                                              endBeat: built.nextBBeat,
+                                          }
+                                        : range,
+                                ),
+                            );
+                            updateSelectionUi(selectionRef.current);
+                            invalidate();
+                        };
+
+                        const onMove = (ev: globalThis.PointerEvent) => {
+                            if ((ev.buttons & 1) !== 1) {
+                                onUp();
+                                return;
+                            }
+                            const adjusted = getFineAdjustedPointerPosition(
+                                finePointerState,
+                                ev,
+                            );
+                            queuedCursorBeat = pointerBeat(adjusted.clientX);
+                            if (previewRafId == null) {
+                                previewRafId = requestAnimationFrame(() => {
+                                    previewRafId = null;
+                                    runPreviewStep();
+                                });
+                            }
+                        };
+
+                        const onUp = () => {
+                            window.removeEventListener("pointermove", onMove);
+                            window.removeEventListener("pointerup", onUp);
+                            window.removeEventListener("pointercancel", onUp);
+                            disposeFineAdjustedPointerState(finePointerState);
+                            clearActivePointerGestureEnd(onUp);
+                            // 取消挂起的预览帧：松手后的提交路径负责重建。
+                            if (previewRafId != null) {
+                                cancelAnimationFrame(previewRafId);
+                                previewRafId = null;
+                            }
+                            queuedCursorBeat = null;
+
+                            const pvNow = paramViewRef.current;
+                            if (!pvNow || !rootTrackId) {
+                                setCanvasCursor("default");
+                                return;
+                            }
+                            // 被拉伸那一段的最终边界（多选区只改这一段）
+                            const nextABeat = stretchABeat;
+                            const nextBBeat = stretchBBeat;
+                            const built = buildDense(pvNow, nextABeat, nextBBeat);
+                            if (!built) {
+                                setCanvasCursor("default");
+                                return;
+                            }
+
+                            const nextEdit = pvNow.edit.slice();
+                            for (let i = 0; i < built.dense.length; i += 1) {
+                                const frame = built.overallMinFrame + i * stride;
+                                const idx = Math.round((frame - pvNow.startFrame) / stride);
+                                if (idx >= 0 && idx < nextEdit.length) {
+                                    nextEdit[idx] = built.dense[i];
+                                }
+                            }
+                            setParamView({ ...pvNow, edit: nextEdit });
+                            liveEditOverrideRef.current = null;
+
+                            // 全分辨率无损提交（与右拖 / 选区拖拽同一范式）：
+                            // buildDense 产生的是 pv 步距采样（dense[k] ↔
+                            // overallMinFrame + k×stride）；按渲染同款线性插值
+                            // 展开为逐帧值后分块回写 —— 绝不把 stride 间隔采样
+                            // 当连续帧写入（旧实现在 stride>1 时时间压缩 +
+                            // 覆盖未选帧，见 selectionEditData.expandStrideSampledDense）。
+                            const expanded = expandStrideSampledDense(built.dense, stride);
+                            void (async () => {
+                                try {
+                                    await uploadFullResCurve({
+                                        trackId: rootTrackId,
+                                        param: editParam,
+                                        startFrame: built.overallMinFrame,
+                                        values: expanded,
+                                    });
+                                } catch (err) {
+                                    console.error(
+                                        "[pianoRoll] stretch-edge commit failed",
+                                        err,
+                                    );
+                                } finally {
+                                    if (liveEditActiveRef) {
+                                        liveEditActiveRef.current = false;
+                                    }
+                                    bumpRefreshToken();
+                                }
+                            })();
+                            setCanvasCursor("default");
+                            invalidate();
+                        };
+
+                        window.addEventListener("pointermove", onMove);
+                        window.addEventListener("pointerup", onUp);
+                        window.addEventListener("pointercancel", onUp);
+                        setActivePointerGestureEnd(onUp);
+                        return;
+                    }
+
+                    if (rangeIndexAtBeat(sel, b) !== -1) {
                         // 判断鼠标是否在曲线附近（像素距离 < 10px）
                         const pv = paramViewRef.current;
                         if (pv && pv.edit.length > 0) {
@@ -2422,22 +2684,21 @@ export function usePianoRollInteractions(args: {
                                         });
                                     }
 
-                                    const selStartSec = aBeat * secPerBeat;
-                                    const selEndSec = bBeat * secPerBeat;
-                                    const selStartFrame = Math.max(
-                                        0,
-                                        Math.floor((selStartSec * 1000) / fp),
+                                    // 多选区：每段独立取数、独立变换（断层两侧互不影响）
+                                    const rightDragSpans: FrameSpan[] = beatRangesToInclusiveSpans(
+                                        sel,
+                                        secPerBeat,
+                                        fp,
                                     );
-                                    const selEndFrame = Math.max(
-                                        0,
-                                        Math.ceil((selEndSec * 1000) / fp),
-                                    );
+                                    if (rightDragSpans.length === 0) return;
                                     // 拖拽数据与选区移动拖拽同一模式：先用 pv 近似值立即
                                     // 预览，全分辨率到位后自动替换；提交必须等全分辨率
                                     // 数据 —— 绝不把降采样值当连续帧写回后端（旧实现在
                                     // stride>1 时会把 stride 间隔采样当连续帧写入：
                                     // 时间压缩 + 覆盖未选帧，已修复）。
-                                    let origValues = readPvRange(pv, selStartFrame, selEndFrame);
+                                    let origValuesPerRange: number[][] = rightDragSpans.map((span) =>
+                                        readPvRange(pv, span.startFrame, span.endFrame),
+                                    );
                                     let lastDy = 0;
                                     let didDrag = false;
                                     // 下拖预览的 rAF 合帧状态（见 onMove）。
@@ -2447,18 +2708,20 @@ export function usePianoRollInteractions(args: {
                                     ensureLiveEditBase(pv);
                                     if (liveEditActiveRef) liveEditActiveRef.current = true;
 
-                                    const origCurvePromise = fetchFullResCurve({
-                                        trackId: rootTrackId ?? "",
-                                        param: editParam,
-                                        startFrame: selStartFrame,
-                                        endFrame: selEndFrame,
-                                        paramView: pv,
-                                    });
+                                    const origCurvePromises = rightDragSpans.map((span) =>
+                                        fetchFullResCurve({
+                                            trackId: rootTrackId ?? "",
+                                            param: editParam,
+                                            startFrame: span.startFrame,
+                                            endFrame: span.endFrame,
+                                            paramView: pv,
+                                        }),
+                                    );
                                     let dragSettled = false;
-                                    void origCurvePromise
-                                        .then((curve) => {
+                                    void Promise.all(origCurvePromises)
+                                        .then((curves) => {
                                             if (dragSettled) return;
-                                            origValues = curve.values;
+                                            origValuesPerRange = curves.map((curve) => curve.values);
                                         })
                                         .catch((err) => {
                                             // 取数失败只影响预览保真度：保持 pv 近似值，
@@ -2469,70 +2732,64 @@ export function usePianoRollInteractions(args: {
                                             );
                                         });
 
-                                    // 残差放大器的趋势按 origValues 引用缓存：每次 move
-                                    // 只做逐帧缩放，不重复高斯卷积。
-                                    let amplifier: {
-                                        src: number[];
-                                        apply: (scale: number) => number[];
-                                    } | null = null;
-                                    const getAmplifier = () => {
-                                        if (!amplifier || amplifier.src !== origValues) {
-                                            amplifier = {
-                                                src: origValues,
-                                                apply: createSelectionAmplifier(
-                                                    origValues,
-                                                    editParam,
-                                                    { framePeriodMs: fp },
-                                                ).apply,
-                                            };
+                                    // 每段自己的残差放大器：趋势按该段值数组引用缓存，
+                                    // 每次 move 只做逐帧缩放，不重复高斯卷积。
+                                    const amplifierCache = new Map<
+                                        number,
+                                        { src: number[]; apply: (scale: number) => number[] }
+                                    >();
+                                    const transformRightDragRange = (
+                                        index: number,
+                                        dy: number,
+                                    ): number[] => {
+                                        const values = origValuesPerRange[index];
+                                        if (!values || values.length === 0) return [];
+                                        if (dy >= 0) {
+                                            let cached = amplifierCache.get(index);
+                                            if (!cached || cached.src !== values) {
+                                                cached = {
+                                                    src: values,
+                                                    apply: createSelectionAmplifier(values, editParam, {
+                                                        framePeriodMs: fp,
+                                                    }).apply,
+                                                };
+                                                amplifierCache.set(index, cached);
+                                            }
+                                            return cached.apply(rightDragUpScale(dy));
                                         }
-                                        return amplifier;
+                                        return transformSelectionByRightDrag(
+                                            values,
+                                            editParam,
+                                            dy,
+                                            { framePeriodMs: fp },
+                                        );
                                     };
 
-                                    const pvSourceAt = (pvNow: ParamViewSegment) => {
-                                        const step = Math.max(1, Math.floor(pvNow.stride));
-                                        return (frame: number) => {
-                                            const idx = Math.round(
-                                                (frame - pvNow.startFrame) / step,
-                                            );
-                                            return idx >= 0 && idx < pvNow.edit.length
-                                                ? pvNow.edit[idx]
-                                                : 0;
-                                        };
-                                    };
+                                    const edgeHalfSpanForRange = (index: number) =>
+                                        edgeHalfSpanForIndices(
+                                            origValuesPerRange[index]?.length ?? 0,
+                                            1,
+                                        );
 
                                     /**
-                                     * 帧索引 dense（values[k] ↔ startFrame + k）：选区值已含
-                                     * 变换，边缘淡化在 buildSelectionDragDense 内完成。复用与
-                                     * 选区移动/提交完全相同的纯函数，任意 stride 下预览与
-                                     * 提交一致。
+                                     * 帧索引 dense 片段（values[k] ↔ startFrame + k）：
+                                     * 每段值已含变换，边缘淡化在计划内完成。复用与选区移动
+                                     * 完全相同的纯函数，任意 stride 下预览与提交一致。
                                      */
-                                    const buildRightDragDense = (
+                                    const buildRightDragPlan = (
                                         pvNow: ParamViewSegment,
-                                        selectionValues: number[],
-                                    ) => {
-                                        const selLen = selectionValues.length;
-                                        // 平滑度 → 毫秒定标的过渡带半宽（帧）
-                                        const edgeHalfSpan = edgeHalfSpanForIndices(selLen, 1);
-                                        return buildSelectionDragDense({
-                                            sourceAt: pvSourceAt(pvNow),
-                                            origValues: selectionValues,
-                                            origStartFrame: selStartFrame,
-                                            frameDelta: 0,
-                                            extraEdgeFrames: Math.max(0, Math.ceil(edgeHalfSpan)),
-                                            transform: (orig) => orig,
-                                            edgeBlend:
-                                                edgeHalfSpan > 0
-                                                    ? {
-                                                          halfSpanFrames: edgeHalfSpan,
-                                                          isEditable:
-                                                              editParam === "pitch"
-                                                                  ? editablePitchValue
-                                                                  : undefined,
-                                                      }
+                                        dy: number,
+                                    ) =>
+                                        buildMultiRangeEditPlan({
+                                            ranges: rightDragSpans,
+                                            valuesAt: (index) => transformRightDragRange(index, dy),
+                                            sourceAt: makePvValueSource(pvNow),
+                                            edgeHalfSpanAt: edgeHalfSpanForRange,
+                                            isEditable:
+                                                editParam === "pitch"
+                                                    ? editablePitchValue
                                                     : undefined,
                                         });
-                                    };
 
                                     const suppressContextMenu = (ev: Event) => {
                                         ev.preventDefault();
@@ -2577,31 +2834,20 @@ export function usePianoRollInteractions(args: {
                                                 if (queued === null) return;
                                                 const pvNow = paramViewRef.current;
                                                 if (!pvNow) return;
-                                                // 上拖：残差放大（趋势已缓存，仅逐帧缩放）；
-                                                // 下拖：高斯平滑。两者都基于 origValues 无状态重算。
-                                                const selectionValues =
-                                                    queued >= 0
-                                                        ? getAmplifier().apply(
-                                                              rightDragUpScale(queued),
-                                                          )
-                                                        : transformSelectionByRightDrag(
-                                                              origValues,
-                                                              editParam,
-                                                              queued,
-                                                              { framePeriodMs: fp },
-                                                          );
-                                                const nextApplied = buildRightDragDense(
-                                                    pvNow,
-                                                    selectionValues,
-                                                );
-                                                applyDenseToLiveEdit(
-                                                    pvNow,
-                                                    nextApplied.startFrame,
-                                                    nextApplied.values,
-                                                    nextApplied.startFrame,
-                                                    nextApplied.endFrame,
-                                                    "draw",
-                                                );
+                                                // 上拖：残差放大（各段趋势已缓存，仅逐帧
+                                                // 缩放）；下拖：高斯平滑。两者都基于各段
+                                                // 原始值无状态重算，段间互不影响。
+                                                const pieces = buildRightDragPlan(pvNow, queued);
+                                                for (const piece of pieces) {
+                                                    applyDenseToLiveEdit(
+                                                        pvNow,
+                                                        piece.startFrame,
+                                                        piece.values,
+                                                        piece.startFrame,
+                                                        piece.endFrame,
+                                                        "draw",
+                                                    );
+                                                }
                                                 invalidate();
                                             });
                                         }
@@ -2677,119 +2923,82 @@ export function usePianoRollInteractions(args: {
                                         // 刷新被永久搁置）。
                                         dragSettled = true;
                                         try {
-                                            const fullRes = await origCurvePromise;
-                                            const selLen = fullRes.values.length;
-                                            if (selLen > 0) {
-                                                const selectionValues =
-                                                    lastDy >= 0
-                                                        ? createSelectionAmplifier(
-                                                              fullRes.values,
-                                                              editParam,
-                                                              { framePeriodMs: fp },
-                                                          ).apply(rightDragUpScale(lastDy))
-                                                        : transformSelectionByRightDrag(
-                                                              fullRes.values,
-                                                              editParam,
-                                                              lastDy,
-                                                              { framePeriodMs: fp },
-                                                          );
-                                                const edgeHalfSpan = edgeHalfSpanForIndices(
-                                                    selLen,
-                                                    1,
-                                                );
-                                                const extraEdgeFrames = Math.max(
-                                                    0,
-                                                    Math.ceil(edgeHalfSpan),
-                                                );
-                                                const upRange = selectionDragRange({
-                                                    origStartFrame: selStartFrame,
-                                                    origValuesLength: selLen,
-                                                    frameDelta: 0,
-                                                    extraEdgeFrames,
-                                                });
-                                                // pv 若已以 stride=1 覆盖该范围则直接切片（零 IPC）；
-                                                // 否则分块拉取。commitBase 是拖动前的当前后端值。
-                                                const commitBase = await fetchFullResCurve({
-                                                    trackId: rootTrackId,
-                                                    param: editParam,
-                                                    startFrame: upRange.startFrame,
-                                                    endFrame: upRange.endFrame,
-                                                    paramView: pvNow,
-                                                });
-                                                const built = buildSelectionDragDense({
-                                                    sourceAt: (frame) =>
-                                                        commitBase.values[
-                                                            frame - commitBase.startFrame
-                                                        ] ?? 0,
-                                                    origValues: selectionValues,
-                                                    origStartFrame: selStartFrame,
-                                                    frameDelta: 0,
-                                                    extraEdgeFrames,
-                                                    transform: (orig) => orig,
-                                                    edgeBlend:
-                                                        edgeHalfSpan > 0
-                                                            ? {
-                                                                  halfSpanFrames: edgeHalfSpan,
-                                                                  isEditable:
-                                                                      editParam === "pitch"
-                                                                          ? editablePitchValue
-                                                                          : undefined,
-                                                              }
-                                                            : undefined,
-                                                });
-                                                const finalDense = built.values;
+                                            // 先刷新各段的全分辨率原始值（拖动开始时已发起）
+                                            const fullResCurves = await Promise.all(
+                                                origCurvePromises,
+                                            );
+                                            origValuesPerRange = fullResCurves.map(
+                                                (curve) => curve.values,
+                                            );
+                                            // 提交基准 = 计划写入窗口（含边缘淡化扩展）的
+                                            // 全分辨率数据；变换与预览同源（transformRightDragRange），
+                                            // 因此写回结果与用户看到的预览逐帧一致。
+                                            const commitSourceAt = await fetchCommitBaseSource({
+                                                trackId: rootTrackId,
+                                                param: editParam,
+                                                ranges: rightDragSpans,
+                                                frameDelta: 0,
+                                                edgeHalfSpanAt: edgeHalfSpanForRange,
+                                                paramView: pvNow,
+                                            });
+                                            const pieces = buildMultiRangeEditPlan({
+                                                ranges: rightDragSpans,
+                                                valuesAt: (index) =>
+                                                    transformRightDragRange(index, lastDy),
+                                                sourceAt: commitSourceAt,
+                                                edgeHalfSpanAt: edgeHalfSpanForRange,
+                                                isEditable:
+                                                    editParam === "pitch"
+                                                        ? editablePitchValue
+                                                        : undefined,
+                                            });
 
-                                                // 立即同步本地 paramView state（逐帧映射到 pv 的
-                                                // 采样栅格上；pv 只是显示，随后会被后端数据刷新）
-                                                const nextEdit = pvNow.edit.slice();
-                                                const pvStepUp = Math.max(
-                                                    1,
-                                                    Math.floor(pvNow.stride),
-                                                );
-                                                for (let i = 0; i < finalDense.length; i += 1) {
+                                            // 立即同步本地 paramView state（逐帧映射到 pv 的
+                                            // 采样栅格上；pv 只是显示，随后会被后端数据刷新）
+                                            const nextEdit = pvNow.edit.slice();
+                                            const pvStepUp = Math.max(1, Math.floor(pvNow.stride));
+                                            for (const piece of pieces) {
+                                                for (let i = 0; i < piece.values.length; i += 1) {
                                                     const globalIdx = Math.round(
-                                                        (built.startFrame + i - pvNow.startFrame) /
+                                                        (piece.startFrame + i - pvNow.startFrame) /
                                                             pvStepUp,
                                                     );
                                                     if (
                                                         globalIdx >= 0 &&
                                                         globalIdx < nextEdit.length
                                                     ) {
-                                                        nextEdit[globalIdx] = finalDense[i];
+                                                        nextEdit[globalIdx] = piece.values[i];
                                                     }
-                                                }
-                                                setParamView({ ...pvNow, edit: nextEdit });
-                                                liveEditOverrideRef.current = null;
-
-                                                // 分块回写：整段编辑只打一个撤销点，块之间让出
-                                                // 事件循环，超长工程也不会卡死界面。上传失败同样
-                                                // 复位 liveEdit（finally），不让覆盖层冻结。
-                                                void (async () => {
-                                                    try {
-                                                        await uploadFullResCurve({
-                                                            trackId: rootTrackId,
-                                                            param: editParam,
-                                                            startFrame: built.startFrame,
-                                                            values: finalDense,
-                                                        });
-                                                    } catch (err) {
-                                                        console.error(
-                                                            "[pianoRoll] right-drag upload failed",
-                                                            err,
-                                                        );
-                                                    } finally {
-                                                        if (liveEditActiveRef) {
-                                                            liveEditActiveRef.current = false;
-                                                        }
-                                                        bumpRefreshToken();
-                                                    }
-                                                })();
-                                            } else {
-                                                liveEditOverrideRef.current = null;
-                                                if (liveEditActiveRef) {
-                                                    liveEditActiveRef.current = false;
                                                 }
                                             }
+                                            setParamView({ ...pvNow, edit: nextEdit });
+                                            liveEditOverrideRef.current = null;
+
+                                            // 分块回写：整次编辑（含所有段）只打一个撤销点，
+                                            // 块之间让出事件循环，超长工程也不会卡死界面。
+                                            // 上传失败同样复位 liveEdit（finally），不让覆盖层冻结。
+                                            void (async () => {
+                                                try {
+                                                    await uploadFullResCurveSegments({
+                                                        trackId: rootTrackId,
+                                                        param: editParam,
+                                                        segments: pieces.map((piece) => ({
+                                                            startFrame: piece.startFrame,
+                                                            values: piece.values,
+                                                        })),
+                                                    });
+                                                } catch (err) {
+                                                    console.error(
+                                                        "[pianoRoll] right-drag upload failed",
+                                                        err,
+                                                    );
+                                                } finally {
+                                                    if (liveEditActiveRef) {
+                                                        liveEditActiveRef.current = false;
+                                                    }
+                                                    bumpRefreshToken();
+                                                }
+                                            })();
                                         } catch (err) {
                                             console.error(
                                                 "[pianoRoll] right-drag commit failed",
@@ -2818,6 +3027,7 @@ export function usePianoRollInteractions(args: {
                                 }
 
                                 // 进入拖拽选中曲线模式（支持 X+Y 双向拖拽）
+                                // 多选区语义：所有段同步移动同一 Δx/Δy，断层保持不变。
                                 setCanvasCursor("grabbing");
                                 const startMouseVal = mouseVal;
                                 const startBeat = pointerBeat(e.clientX);
@@ -2828,53 +3038,45 @@ export function usePianoRollInteractions(args: {
                                     e.currentTarget as HTMLCanvasElement,
                                 );
 
-                                // 选区帧范围 —— 注意这里**不**夹到 pv 的已加载窗口内。
-                                // 「全选」时选区覆盖整个工程，若按 pv 裁剪，后续只会改到
-                                // 显示范围内的参数，工程其余部分纹丝不动（本次修复的 bug）。
-                                const selStartSec = aBeat * secPerBeat;
-                                const selEndSec = bBeat * secPerBeat;
-                                const selStartFrame = Math.max(
-                                    0,
-                                    Math.floor((selStartSec * 1000) / fp),
+                                // 选区帧闭区间（逐段，升序互斥）—— 注意这里**不**夹到 pv 的
+                                // 已加载窗口内。「全选」时选区覆盖整个工程，若按 pv 裁剪，
+                                // 后续只会改到显示范围内的参数，工程其余部分纹丝不动。
+                                const dragSpans: FrameSpan[] = beatRangesToInclusiveSpans(
+                                    sel,
+                                    secPerBeat,
+                                    fp,
                                 );
-                                const selEndFrame = Math.max(0, Math.ceil((selEndSec * 1000) / fp));
+                                if (dragSpans.length === 0) return;
 
-                                // 取选区的全分辨率原始值。
+                                // 取各段的全分辨率原始值。
                                 // pv 在低缩放下按画布宽度做了降采样，直接拿去变换再回写
                                 // 会把全分辨率曲线覆盖掉，所以变换的输入必须是 stride=1
                                 // 的数据。pv 已以 stride=1 覆盖时零开销直接切片，行为与
                                 // 改动前一致；否则分块向后端拉取（不阻塞拖动）。
-                                const origCurvePromise = fetchFullResCurve({
-                                    trackId: rootTrackId ?? "",
-                                    param: editParam,
-                                    startFrame: selStartFrame,
-                                    endFrame: selEndFrame,
-                                    paramView: pv,
-                                });
+                                const origCurvePromises = dragSpans.map((span) =>
+                                    fetchFullResCurve({
+                                        trackId: rootTrackId ?? "",
+                                        param: editParam,
+                                        startFrame: span.startFrame,
+                                        endFrame: span.endFrame,
+                                        paramView: pv,
+                                    }),
+                                );
                                 // 先用 pv 覆盖到的部分做即时预览；全分辨率数据到位后自动
                                 // 替换，之后的每一帧预览都基于无损数据。
-                                let origValues = readPvRange(pv, selStartFrame, selEndFrame);
+                                let origValuesPerRange: number[][] = dragSpans.map((span) =>
+                                    readPvRange(pv, span.startFrame, span.endFrame),
+                                );
                                 let dragSettled = false;
-                                void origCurvePromise
-                                    .then((curve) => {
+                                void Promise.all(origCurvePromises)
+                                    .then((curves) => {
                                         if (dragSettled) return;
-                                        origValues = curve.values;
+                                        origValuesPerRange = curves.map((curve) => curve.values);
                                     })
                                     .catch(() => {
                                         // 取数失败只降级预览保真度（继续用 pv 数据预览）；
                                         // 提交路径（onUp）有自己的 try/catch 兜底。
                                     });
-
-                                // 预览取数：从 pv 读当前值（pv 可能降采样，仅用于即时反馈）。
-                                const makePvSourceAt = (src: typeof pv) => {
-                                    const step = Math.max(1, Math.floor(src.stride));
-                                    return (frame: number) => {
-                                        const idx = Math.round((frame - src.startFrame) / step);
-                                        return idx >= 0 && idx < src.edit.length
-                                            ? src.edit[idx]
-                                            : 0;
-                                    };
-                                };
 
                                 // 逐帧变换。拖动过程中 `lastValueDelta` / `lastScaleStepDelta`
                                 // 会被 onMove 更新，这里读到的是最新值。
@@ -2898,8 +3100,10 @@ export function usePianoRollInteractions(args: {
                                     return orig + lastValueDelta;
                                 };
 
-                                // Tempo Map 感知：度数差以拖动锚点帧的生效音阶计算。
-                                const dragAnchorFrame = selStartFrame;
+                                // Tempo Map 感知：度数差以拖动锚点帧（选区整体起点）的
+                                // 生效音阶计算 —— 多选区下仍以第一段起点为锚点，
+                                // 保证一次拖动只有一个锚定音阶。
+                                const dragAnchorFrame = dragSpans[0].startFrame;
                                 const dragAnchorScale =
                                     scaleAtSec?.((dragAnchorFrame * fp) / 1000) ?? projectScale;
                                 ensureLiveEditBase(pv);
@@ -2938,51 +3142,44 @@ export function usePianoRollInteractions(args: {
                                     liveEditOverrideRef.current = null;
                                     ensureLiveEditBase(pvNow);
 
-                                    // 构造覆盖原选区 + 新位置的 dense 数组（逐帧索引）。
-                                    // 预览阶段从 pv 取上下文 —— pv 只是显示数据，不会回写。
-                                    const selLen = origValues.length;
-                                    if (selLen === 0) return;
-
-                                    // 边缘平滑度：毫秒定标的过渡带半宽。预览 dense
-                                    // 是按帧索引的（sourceAt 内部消化 pv 的 stride），
-                                    // halfSpan 与 extraEdgeFrames 都以帧为单位。
-                                    const edgeHalfSpanIdx = edgeHalfSpanForIndices(selLen, 1);
-
-                                    const built = buildSelectionDragDense({
-                                        sourceAt: makePvSourceAt(pvNow),
-                                        origValues,
-                                        origStartFrame: selStartFrame,
+                                    // 多段计划：覆盖「各段原位 ∪ 落地位 ± 边缘淡化」的
+                                    // 合并窗口（逐帧索引）。预览从 pv 取上下文 —— pv 只是
+                                    // 显示数据，不会回写；提交走同一计划的另一份 sourceAt。
+                                    const pieces = buildMultiRangeEditPlan({
+                                        ranges: dragSpans,
                                         frameDelta: lastFrameDelta,
-                                        extraEdgeFrames: Math.ceil(edgeHalfSpanIdx),
-                                        transform: (orig, frame) => transformDragValue(orig, frame),
-                                        edgeBlend:
-                                            edgeHalfSpanIdx > 0
-                                                ? {
-                                                      halfSpanFrames: edgeHalfSpanIdx,
-                                                      isEditable:
-                                                          editParam === "pitch"
-                                                              ? editablePitchValue
-                                                              : undefined,
-                                                  }
-                                                : undefined,
+                                        valuesAt: (index) => origValuesPerRange[index],
+                                        sourceAt: makePvValueSource(pvNow),
+                                        transformAt: (_index, _i, sourceValue, targetFrame) =>
+                                            transformDragValue(sourceValue, targetFrame),
+                                        edgeHalfSpanAt: (index) =>
+                                            edgeHalfSpanForIndices(
+                                                origValuesPerRange[index]?.length ?? 0,
+                                                1,
+                                            ),
+                                        isEditable:
+                                            editParam === "pitch" ? editablePitchValue : undefined,
                                     });
 
-                                    applyDenseToLiveEdit(
-                                        pvNow,
-                                        built.startFrame,
-                                        built.values,
-                                        built.startFrame,
-                                        built.endFrame,
-                                        "draw",
-                                    );
+                                    for (const piece of pieces) {
+                                        applyDenseToLiveEdit(
+                                            pvNow,
+                                            piece.startFrame,
+                                            piece.values,
+                                            piece.startFrame,
+                                            piece.endFrame,
+                                            "draw",
+                                        );
+                                    }
 
-                                    // 实时更新选区位置显示
+                                    // 实时更新选区位置显示（所有段同步平移；纯平移不改变
+                                    // 段间距，故不会产生新的重叠段）
                                     const beatDeltaForSel =
                                         (lastFrameDelta * fp) / 1000 / secPerBeat;
-                                    selectionRef.current = {
-                                        aBeat: aBeat + beatDeltaForSel,
-                                        bBeat: bBeat + beatDeltaForSel,
-                                    };
+                                    selectionRef.current = shiftSelectionRanges(
+                                        sel,
+                                        beatDeltaForSel,
+                                    );
                                     updateSelectionUi(selectionRef.current);
 
                                     invalidate();
@@ -3118,83 +3315,73 @@ export function usePianoRollInteractions(args: {
                                         try {
                                             // 等待拖动开始时发起的全分辨率取数完成 —— 提交必须
                                             // 基于无损数据，不能拿降采样的 pv 值去覆盖后端。
-                                            origValues = (await origCurvePromise).values;
-                                            const selLen = origValues.length;
-                                            if (selLen > 0) {
-                                                // 边缘平滑度：毫秒定标的过渡带半宽（帧），
-                                                // 扩展 dense 范围以包含选区边界外侧上下文。
-                                                // 提交 dense 恒为 stride=1。
-                                                const edgeHalfSpanUp = edgeHalfSpanForIndices(
-                                                    selLen,
+                                            const fullResCurves = await Promise.all(
+                                                origCurvePromises,
+                                            );
+                                            origValuesPerRange = fullResCurves.map(
+                                                (curve) => curve.values,
+                                            );
+
+                                            // 边缘平滑度：毫秒定标的过渡带半宽（帧），
+                                            // 扩展写入窗口以包含各段边界外侧上下文。
+                                            // 提交 dense 恒为 stride=1。
+                                            const edgeHalfSpanForDragRange = (index: number) =>
+                                                edgeHalfSpanForIndices(
+                                                    origValuesPerRange[index]?.length ?? 0,
                                                     1,
                                                 );
-                                                const extraEdgeFramesUp = Math.ceil(edgeHalfSpanUp);
 
-                                                // 提交前把整段范围的全分辨率数据拉下来作为基底。
-                                                // 这是「回写不失真」的关键：预览用的是可能降采样的
-                                                // pv，提交必须用 stride=1 的真实曲线，否则会把
-                                                // 降采样后的值写回后端、覆盖掉原始分辨率。
-                                                const upRange = selectionDragRange({
-                                                    origStartFrame: selStartFrame,
-                                                    origValuesLength: selLen,
-                                                    frameDelta: lastFrameDelta,
-                                                    extraEdgeFrames: extraEdgeFramesUp,
-                                                });
-                                                // pv 若已以 stride=1 覆盖该范围则直接切片（零 IPC）；
-                                                // 否则分块拉取。pvNow.edit 是拖动前的值，正是回写
-                                                // 所需的「当前后端值」。
-                                                const commitBase = await fetchFullResCurve({
-                                                    trackId: rootTrackId,
-                                                    param: editParam,
-                                                    startFrame: upRange.startFrame,
-                                                    endFrame: upRange.endFrame,
-                                                    paramView: pvNow,
-                                                });
+                                            // 提交前把计划写入窗口（「各段原位 ∪ 落地位 ±
+                                            // 边缘淡化」合并后）的全分辨率数据拉下来作为基底。
+                                            // 这是「回写不失真」的关键：预览用的是可能降采样的
+                                            // pv，提交必须用 stride=1 的真实曲线，否则会把
+                                            // 降采样后的值写回后端、覆盖掉原始分辨率。
+                                            const commitSourceAt = await fetchCommitBaseSource({
+                                                trackId: rootTrackId,
+                                                param: editParam,
+                                                ranges: dragSpans,
+                                                frameDelta: lastFrameDelta,
+                                                edgeHalfSpanAt: edgeHalfSpanForDragRange,
+                                                paramView: pvNow,
+                                            });
 
-                                                const built = buildSelectionDragDense({
-                                                    sourceAt: (frame) =>
-                                                        commitBase.values[
-                                                            frame - commitBase.startFrame
-                                                        ] ?? 0,
-                                                    origValues,
-                                                    origStartFrame: selStartFrame,
-                                                    frameDelta: lastFrameDelta,
-                                                    extraEdgeFrames: extraEdgeFramesUp,
-                                                    transform: (orig, frame) =>
-                                                        transformDragValue(orig, frame),
-                                                    edgeBlend:
-                                                        edgeHalfSpanUp > 0
-                                                            ? {
-                                                                  halfSpanFrames: edgeHalfSpanUp,
-                                                                  isEditable:
-                                                                      editParam === "pitch"
-                                                                          ? editablePitchValue
-                                                                          : undefined,
-                                                              }
-                                                            : undefined,
-                                                });
-                                                const finalDense = built.values;
-                                                const overallMinFrameExt = built.startFrame;
+                                            const pieces = buildMultiRangeEditPlan({
+                                                ranges: dragSpans,
+                                                frameDelta: lastFrameDelta,
+                                                valuesAt: (index) => origValuesPerRange[index],
+                                                sourceAt: commitSourceAt,
+                                                transformAt: (_index, _i, sourceValue, targetFrame) =>
+                                                    transformDragValue(sourceValue, targetFrame),
+                                                edgeHalfSpanAt: edgeHalfSpanForDragRange,
+                                                isEditable:
+                                                    editParam === "pitch"
+                                                        ? editablePitchValue
+                                                        : undefined,
+                                            });
 
+                                            if (pieces.length > 0) {
                                                 // 立即同步更新本地 paramView state（逐帧映射到 pv 的
                                                 // 采样栅格上；pv 只是显示，随后会被后端数据刷新）
                                                 const nextEdit = pvNow.edit.slice();
-                                                const pvStepUp = Math.max(
-                                                    1,
-                                                    Math.floor(pvNow.stride),
-                                                );
-                                                for (let i = 0; i < finalDense.length; i++) {
-                                                    const globalIdx = Math.round(
-                                                        (overallMinFrameExt +
-                                                            i -
-                                                            pvNow.startFrame) /
-                                                            pvStepUp,
-                                                    );
-                                                    if (
-                                                        globalIdx >= 0 &&
-                                                        globalIdx < nextEdit.length
+                                                const pvStepUp = Math.max(1, Math.floor(pvNow.stride));
+                                                for (const piece of pieces) {
+                                                    for (
+                                                        let i = 0;
+                                                        i < piece.values.length;
+                                                        i += 1
                                                     ) {
-                                                        nextEdit[globalIdx] = finalDense[i];
+                                                        const globalIdx = Math.round(
+                                                            (piece.startFrame +
+                                                                i -
+                                                                pvNow.startFrame) /
+                                                                pvStepUp,
+                                                        );
+                                                        if (
+                                                            globalIdx >= 0 &&
+                                                            globalIdx < nextEdit.length
+                                                        ) {
+                                                            nextEdit[globalIdx] = piece.values[i];
+                                                        }
                                                     }
                                                 }
                                                 setParamView({
@@ -3203,25 +3390,28 @@ export function usePianoRollInteractions(args: {
                                                 });
                                                 liveEditOverrideRef.current = null;
 
-                                                // 确保选区位置最终正确
+                                                // 确保选区位置最终正确（多段同步平移）
                                                 const beatDeltaForSel =
                                                     (lastFrameDelta * fp) / 1000 / secPerBeat;
-                                                selectionRef.current = {
-                                                    aBeat: aBeat + beatDeltaForSel,
-                                                    bBeat: bBeat + beatDeltaForSel,
-                                                };
+                                                selectionRef.current = shiftSelectionRanges(
+                                                    sel,
+                                                    beatDeltaForSel,
+                                                );
                                                 updateSelectionUi(selectionRef.current);
 
-                                                // 分块回写：整段编辑只打一个撤销点，块之间让出
-                                                // 事件循环，超长工程也不会卡死界面。上传失败
-                                                // 同样复位 liveEdit（finally），不让覆盖层冻结。
+                                                // 分块回写：整次编辑（含所有段）只打一个撤销点，
+                                                // 块之间让出事件循环，超长工程也不会卡死界面。
+                                                // 上传失败同样复位 liveEdit（finally），不让
+                                                // 覆盖层冻结。
                                                 void (async () => {
                                                     try {
-                                                        await uploadFullResCurve({
+                                                        await uploadFullResCurveSegments({
                                                             trackId: rootTrackId,
                                                             param: editParam,
-                                                            startFrame: overallMinFrameExt,
-                                                            values: finalDense,
+                                                            segments: pieces.map((piece) => ({
+                                                                startFrame: piece.startFrame,
+                                                                values: piece.values,
+                                                            })),
                                                         });
                                                     } catch (err) {
                                                         console.error(
@@ -3311,68 +3501,12 @@ export function usePianoRollInteractions(args: {
                     }
                 }
 
-                // 默认行为：仅左键创建新选区；右键不应在 pointerdown 时清除选区
+                // 默认行为：仅左键创建新选区（**替换**整个选区为单段）；
+                // 右键不应在 pointerdown 时清除选区。
+                // 拍坐标换算 selectionBeatFromClientX 已在上方定义（与多选追加共用）。
                 if (e.button === 0) {
-                    const maxSelectableBeat = Math.max(
-                        0,
-                        dynamicProjectSec / Math.max(1e-9, secPerBeat),
-                    );
-                    const clampSelectionBeat = (beat: number) => clamp(beat, 0, maxSelectableBeat);
-
-                    const selectionBeatFromClientX = (
-                        clientX: number,
-                        allowAutoScroll: boolean,
-                    ) => {
-                        const scroller = scrollerRef.current;
-                        if (!scroller) {
-                            return clampSelectionBeat(pointerBeat(clientX));
-                        }
-
-                        const bounds = scroller.getBoundingClientRect();
-                        const edgePx = 32;
-                        const maxStepPx = 18;
-
-                        if (allowAutoScroll) {
-                            let deltaPx = 0;
-                            if (clientX < bounds.left + edgePx) {
-                                const ratio = (bounds.left + edgePx - clientX) / edgePx;
-                                deltaPx = -clamp(ratio, 0, 1.5) * maxStepPx;
-                            } else if (clientX > bounds.right - edgePx) {
-                                const ratio = (clientX - (bounds.right - edgePx)) / edgePx;
-                                deltaPx = clamp(ratio, 0, 1.5) * maxStepPx;
-                            }
-
-                            if (Math.abs(deltaPx) > 0.01) {
-                                const drawingMaxScrollLeft = Math.max(
-                                    0,
-                                    maxSelectableBeat * Math.max(1e-9, pxPerBeatRef.current) -
-                                        scroller.clientWidth,
-                                );
-                                const nativeOffset = syncTimelineEnabled
-                                    ? timelineOffsetRef.current
-                                    : 0;
-                                const nativeMaxScrollLeft = drawingMaxScrollLeft + nativeOffset;
-                                const nextScrollLeft = clamp(
-                                    scroller.scrollLeft + deltaPx,
-                                    0,
-                                    nativeMaxScrollLeft,
-                                );
-                                if (Math.abs(nextScrollLeft - scroller.scrollLeft) > 0.01) {
-                                    scroller.scrollLeft = nextScrollLeft;
-                                    syncScrollLeft(scroller);
-                                }
-                            }
-                        }
-
-                        const clampedClientX = clamp(clientX, bounds.left, bounds.right);
-                        const beat =
-                            (scrollLeftRef.current + (clampedClientX - bounds.left)) /
-                            Math.max(1e-9, pxPerBeatRef.current);
-                        return clampSelectionBeat(beat);
-                    };
-
                     const startBeat = selectionBeatFromClientX(e.clientX, false);
-                    selectionRef.current = { aBeat: startBeat, bBeat: startBeat };
+                    selectionRef.current = selectionFromBeatRange(startBeat, startBeat);
                     updateSelectionUi(selectionRef.current);
                     const pid = e.pointerId;
                     (e.currentTarget as HTMLCanvasElement).setPointerCapture(pid);
@@ -3385,13 +3519,12 @@ export function usePianoRollInteractions(args: {
                             onUp();
                             return;
                         }
+                        // 选区在拖拽途中被外部清除（如 BackSpace / 取消选择）时
+                        // 不再续建，与改造前的守卫语义一致。
                         if (selectionRef.current == null) return;
                         const adjusted = getFineAdjustedPointerPosition(finePointerState, ev);
                         const bb = selectionBeatFromClientX(adjusted.clientX, true);
-                        selectionRef.current = {
-                            aBeat: selectionRef.current.aBeat,
-                            bBeat: bb,
-                        };
+                        selectionRef.current = selectionFromBeatRange(startBeat, bb);
                         updateSelectionUi(selectionRef.current);
                         invalidate(); // 实时重绘选区
                     };
@@ -3785,12 +3918,14 @@ export function usePianoRollInteractions(args: {
             pointerSec,
             selectionRef,
             updateSelectionUi,
+            paramMultiSelectKb,
+            findStretchSelectionEdge,
+            fetchCommitBaseSource,
             paramViewRef,
             ensureLiveEditBase,
             paramView?.framePeriodMs,
             secPerBeat,
             axisFromRefs,
-            beatToViewportPx,
             pointerValue,
             strokeRef,
             applyDenseToLiveEdit,

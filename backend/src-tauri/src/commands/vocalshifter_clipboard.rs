@@ -3,9 +3,11 @@ use crate::state::AppState;
 use crate::vocalshifter_clipboard::ClipboardFileKind;
 
 use super::core::get_timeline_state_from_ref;
+use super::param_selection_window::{ParamSelectionWindow, SelectionFrameRange};
 
 pub(super) fn paste_vocalshifter_clipboard(
     state: &AppState,
+    selection_ranges: Option<Vec<SelectionFrameRange>>,
     selection_start_frame: Option<usize>,
     selection_max_frames: Option<usize>,
     active_param: Option<String>,
@@ -14,26 +16,27 @@ pub(super) fn paste_vocalshifter_clipboard(
         return serde_json::json!({"ok": false, "error": "clipboard_not_found"});
     };
 
+    let window = ParamSelectionWindow::new(
+        selection_ranges,
+        selection_start_frame,
+        selection_max_frames,
+    );
+
     match kind {
-        ClipboardFileKind::PitchData => paste_clb_pitch_data(
-            state,
-            &path,
-            selection_start_frame,
-            selection_max_frames,
-            active_param.as_deref(),
-        ),
+        ClipboardFileKind::PitchData => {
+            paste_clb_pitch_data(state, &path, &window, active_param.as_deref())
+        }
         ClipboardFileKind::Project => paste_vsp_project(state, &path),
     }
 }
 
 /// 粘贴 .clb 音高线数据到当前选中轨道的 pitch_edit。
-/// 若提供了 selection_start_frame / selection_max_frames，则将剪贴板数据对齐到选区起始帧，
-/// 超出选区范围的数据不粘贴。
+/// 若提供了选区窗口，则将剪贴板数据对齐到选区首段起点，
+/// 且只写入落在选区内（任一段）的帧 —— 断层保持原值。
 fn paste_clb_pitch_data(
     state: &AppState,
     path: &std::path::Path,
-    selection_start_frame: Option<usize>,
-    selection_max_frames: Option<usize>,
+    window: &ParamSelectionWindow,
     active_param: Option<&str>,
 ) -> serde_json::Value {
     let points = match crate::vocalshifter_clipboard::parse_clipboard_file(path) {
@@ -75,8 +78,7 @@ fn paste_clb_pitch_data(
             &root_track_id,
             &points,
             param_name,
-            selection_start_frame,
-            selection_max_frames,
+            window,
             frame_period_ms,
         );
     }
@@ -90,24 +92,23 @@ fn paste_clb_pitch_data(
         std::collections::BTreeMap::new();
 
     // 若有选区约束，计算剪贴板数据中最小时间作为偏移基准
-    let (offset_frames, max_frame_bound) = if let Some(sel_start) = selection_start_frame {
-        // 找到剪贴板中最小的 time_sec 作为基准
-        let min_time = points
-            .iter()
-            .filter(|p| p.time_sec.is_finite() && p.time_sec >= 0.0)
-            .map(|p| p.time_sec)
-            .fold(f64::MAX, f64::min);
-        let min_frame = if min_time < f64::MAX {
-            ((min_time * 1000.0) / frame_period_ms).round() as isize
-        } else {
-            0
-        };
-        // 偏移量 = 选区起始帧 - 剪贴板最小帧
-        let offset = sel_start as isize - min_frame;
-        let bound = selection_max_frames.map(|n| sel_start + n);
-        (offset, bound)
-    } else {
-        (0isize, None)
+    let offset_frames = match window.origin() {
+        Some(sel_start) => {
+            // 找到剪贴板中最小的 time_sec 作为基准
+            let min_time = points
+                .iter()
+                .filter(|p| p.time_sec.is_finite() && p.time_sec >= 0.0)
+                .map(|p| p.time_sec)
+                .fold(f64::MAX, f64::min);
+            let min_frame = if min_time < f64::MAX {
+                ((min_time * 1000.0) / frame_period_ms).round() as isize
+            } else {
+                0
+            };
+            // 偏移量 = 选区首段起始帧 - 剪贴板最小帧
+            sel_start as isize - min_frame
+        }
+        None => 0isize,
     };
 
     for point in points {
@@ -129,11 +130,9 @@ fn paste_clb_pitch_data(
             Some(v) => v,
             None => continue,
         };
-        // 超出选区范围的帧不粘贴
-        if let Some(bound) = max_frame_bound {
-            if idx >= bound {
-                continue;
-            }
+        // 超出选区范围的帧不粘贴（多选区：不落在任一段内即跳过 —— 断层保持原值）
+        if !window.allows(idx) {
+            continue;
         }
         if idx >= entry.pitch_edit.len() {
             continue;
@@ -179,6 +178,10 @@ fn paste_clb_pitch_data(
 
         let span = (idx_b - idx_a) as f32;
         for idx in (idx_a + 1)..idx_b {
+            // 断层内不补帧：跨越选区缺口的插值会把断层填平
+            if !window.allows(idx) {
+                continue;
+            }
             let t = (idx - idx_a) as f32 / span;
             let v = pitch_a + (pitch_b - pitch_a) * t;
             entry.pitch_edit[idx] = v.clamp(1.0, 127.0);
@@ -208,8 +211,7 @@ fn paste_clb_vslib_param(
     root_track_id: &str,
     points: &[crate::vocalshifter_clipboard::ClipboardPitchPoint],
     param_name: &str,
-    selection_start_frame: Option<usize>,
-    selection_max_frames: Option<usize>,
+    window: &ParamSelectionWindow,
     frame_period_ms: f64,
 ) -> serde_json::Value {
     use crate::state::PitchAnalysisAlgo;
@@ -257,23 +259,22 @@ fn paste_clb_vslib_param(
         curve.resize(total_frames, default_val);
     }
 
-    // 帧偏移计算
-    let (offset_frames, max_frame_bound) = if let Some(sel_start) = selection_start_frame {
-        let min_time = points
-            .iter()
-            .filter(|p| p.time_sec.is_finite() && p.time_sec >= 0.0)
-            .map(|p| p.time_sec)
-            .fold(f64::MAX, f64::min);
-        let min_frame = if min_time < f64::MAX {
-            ((min_time * 1000.0) / frame_period_ms).round() as isize
-        } else {
-            0
-        };
-        let offset = sel_start as isize - min_frame;
-        let bound = selection_max_frames.map(|n| sel_start + n);
-        (offset, bound)
-    } else {
-        (0isize, None)
+    // 帧偏移计算（选区首段起点为基准；无选区约束时即为整体粘贴）
+    let offset_frames = match window.origin() {
+        Some(sel_start) => {
+            let min_time = points
+                .iter()
+                .filter(|p| p.time_sec.is_finite() && p.time_sec >= 0.0)
+                .map(|p| p.time_sec)
+                .fold(f64::MAX, f64::min);
+            let min_frame = if min_time < f64::MAX {
+                ((min_time * 1000.0) / frame_period_ms).round() as isize
+            } else {
+                0
+            };
+            sel_start as isize - min_frame
+        }
+        None => 0isize,
     };
 
     // 映射剪贴板点到帧
@@ -299,10 +300,8 @@ fn paste_clb_vslib_param(
             Some(v) => v,
             None => continue,
         };
-        if let Some(bound) = max_frame_bound {
-            if idx >= bound {
-                continue;
-            }
+        if !window.allows(idx) {
+            continue;
         }
         if idx >= total_frames {
             continue;
@@ -344,6 +343,10 @@ fn paste_clb_vslib_param(
         }
         let span = (idx_b - idx_a) as f32;
         for idx in (idx_a + 1)..idx_b {
+            // 断层内不补帧：跨越选区缺口的插值会把断层填平
+            if !window.allows(idx) {
+                continue;
+            }
             let t = (idx - idx_a) as f32 / span;
             curve[idx] = val_a + (val_b - val_a) * t;
             filled += 1;

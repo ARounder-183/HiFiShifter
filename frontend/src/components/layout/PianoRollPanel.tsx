@@ -116,9 +116,23 @@ import {
     smoothContextPadFrames,
 } from "./pianoRoll/selectionTransforms";
 import {
-    applySelectionEditWithEdgeSmoothing,
+    applySelectionEditOverRanges,
     type SelectionEditExtension,
 } from "./pianoRoll/selectionEditApply";
+import {
+    beatRangesToFrameRanges,
+    selectionBoundingRange,
+    selectionFromBeatRange,
+    type FrameRange,
+    type ParamSelection,
+} from "./pianoRoll/paramSelection";
+import {
+    mapClipboardToTargetRanges,
+    toParamClipboardPayload,
+    type ParamClipboardData,
+    type ParamClipboardSegment,
+} from "./pianoRoll/paramClipboardMapping";
+import { uploadFullResCurveSegments } from "./pianoRoll/selectionEditData";
 import { editablePitchValue } from "./pianoRoll/paramSmoothing";
 import { usePianoRollData } from "./pianoRoll/usePianoRollData";
 import { useClipsPeaksForPianoRoll } from "./pianoRoll/useClipsPeaksForPianoRoll";
@@ -568,6 +582,10 @@ export const PianoRollPanel: React.FC = () => {
         selectKeybinding(state, "modifier.pianoKeysVerticalZoom"),
     );
     const paramMorphKb = useAppSelector((state) => selectKeybinding(state, "modifier.paramMorph"));
+    // 多选区修饰键（默认 ⌘/Ctrl）：按住拖动追加一段选区，按住点击取消该段
+    const paramMultiSelectKb = useAppSelector((state) =>
+        selectKeybinding(state, "modifier.paramMultiSelect"),
+    );
     const paramFineAdjustKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.paramFineAdjust"),
     );
@@ -701,11 +719,10 @@ export const PianoRollPanel: React.FC = () => {
             }
         });
     }, []);
-    // 记录打开弹窗时的选区（拍数），用于后续计算帧偏移
-    const [midiDialogSelection, setMidiDialogSelection] = useState<{
-        aBeat: number;
-        bBeat: number;
-    } | null>(null);
+    // 记录打开弹窗时的选区（拍数，多段），用于后续计算帧偏移。
+    // 注意：MIDI 导入的「选区约束」只有单个时间窗接口，因此用包围区间
+    // （首段起点 → 末段终点）—— 见 midiSelArgs。
+    const [midiDialogSelection, setMidiDialogSelection] = useState<ParamSelection | null>(null);
 
     // 右键编辑菜单状态
     const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
@@ -791,7 +808,7 @@ export const PianoRollPanel: React.FC = () => {
             midiDialogSourceRef.current = "paramEditor";
             // 快照当前选区（拍为单位）
             const sel = selectionRef.current;
-            setMidiDialogSelection(sel ? { ...sel } : null);
+            setMidiDialogSelection(sel ? sel.map((range) => ({ ...range })) : null);
             // 快照当前的 editParam 和 toolMode，保证异步加载轨道期间 selectionAvailable 不变
             midiDialogOpenParamsRef.current = {
                 editParam: s.editParam,
@@ -2258,16 +2275,14 @@ export const PianoRollPanel: React.FC = () => {
         }
     }
 
-    const selectionRef = useRef<{ aBeat: number; bBeat: number } | null>(null);
+    /** 多选区（升序、互不相交、相邻已合并的 beat 区间列表；null = 无选区） */
+    const selectionRef = useRef<ParamSelection | null>(null);
     // 记录打开 MIDI 弹窗时的 editParam / toolMode 快照，避免异步加载轨道期间 Redux 状态变化导致 selectionAvailable 跳变
     const midiDialogOpenParamsRef = useRef<{
         editParam: string;
         toolMode: string;
     }>({ editParam: "pitch", toolMode: "select" });
-    const [selectionUi, setSelectionUi] = useState<{
-        aBeat: number;
-        bBeat: number;
-    } | null>(null);
+    const [selectionUi, setSelectionUi] = useState<ParamSelection | null>(null);
     // 参数线选区存在性入仓（session.paramSelectionActive）：复制/剪切按
     // "当前选中了什么"路由时以此判定参数侧（selectionRef 的每次变更都
     // 成对经过 setSelectionUi，见 usePianoRollInteractions）。拖拽期间的
@@ -2275,7 +2290,7 @@ export const PianoRollPanel: React.FC = () => {
     useEffect(() => {
         dispatch(setParamSelectionActive(selectionUi !== null));
     }, [dispatch, selectionUi]);
-    const [paramMorphOverlay, setParamMorphOverlay] = useState<ParamMorphOverlay | null>(null);
+    const [paramMorphOverlays, setParamMorphOverlays] = useState<ParamMorphOverlay[] | null>(null);
     const [canvasCursor, setCanvasCursor] = useState<CSSProperties["cursor"]>(
         s.toolMode === "select" ? "default" : "crosshair",
     );
@@ -2296,11 +2311,11 @@ export const PianoRollPanel: React.FC = () => {
         startRectH: number;
     } | null>(null);
 
-    const clipboardRef = useRef<{
-        param: ParamName;
-        framePeriodMs: number;
-        values: number[];
-    } | null>(null);
+    /**
+     * 参数线剪贴板（多选区）：每段带**相对复制起点**的帧偏移，断层以偏移空洞
+     * 的形式保留 —— 粘贴/预览按 paramClipboardMapping 的唯一映射规则求交。
+     */
+    const clipboardRef = useRef<ParamClipboardData | null>(null);
 
     // 将 PianoRoll 加载状态同步到全局 Context（供 status bar 使用）
     const updatePianoRollStatus = usePianoRollStatusUpdate();
@@ -2475,15 +2490,13 @@ export const PianoRollPanel: React.FC = () => {
         );
     }, [dispatch, rootTrackId]);
 
-    // 计算 MIDI 导入的选区帧约束（与 pasteReaper 逻辑一致）
-    const midiSelArgs = useMemo(() => {
-        if (!midiDialogSelection) return {};
+    // 计算 MIDI 导入的多选区帧约束：与参数编辑器选区逐段一致，导入只写入
+    // 落在任一段内的帧（断层保持原值），对齐基准为首段起点。
+    const midiSelRanges = useMemo(() => {
+        if (!midiDialogSelection) return undefined;
         const fp = paramView?.framePeriodMs ?? 5;
-        const a = Math.min(midiDialogSelection.aBeat, midiDialogSelection.bBeat);
-        const b = Math.max(midiDialogSelection.aBeat, midiDialogSelection.bBeat);
-        const sf = Math.max(0, Math.floor((a * secPerBeat * 1000) / fp));
-        const fc = Math.max(1, Math.ceil(((b - a) * secPerBeat * 1000) / fp));
-        return { selectionStartFrame: sf, selectionMaxFrames: fc };
+        const ranges = beatRangesToFrameRanges(midiDialogSelection, secPerBeat, fp);
+        return ranges.length > 0 ? ranges : undefined;
     }, [midiDialogSelection, paramView?.framePeriodMs, secPerBeat]);
 
     // selection 导入模式是否可用（基于弹窗打开时的快照，避免异步加载轨道时状态变化）
@@ -2493,19 +2506,23 @@ export const PianoRollPanel: React.FC = () => {
         return p.editParam === "pitch" && p.toolMode === "select";
     }, [midiDialogSelection]);
 
-    // 将当前选区（帧范围）发布到总线，供 MenuBar 等判断“工程音阶”是否受 Tempo Map 影响。
+    // 将当前选区发布到总线，供 MenuBar 等判断“工程音阶”是否受 Tempo Map 影响。
+    // 多选区发布**包围区间**（首段起点 → 末段终点）：该提示只关心"选区覆盖的
+    // 时间跨度里有没有音阶变化点"，包围区间是它的保守上界。
     useEffect(() => {
         const sel = selectionUi;
-        if (!sel) {
+        const bounding = selectionBoundingRange(sel);
+        if (!bounding) {
             publishPianoRollSelection(null);
             return;
         }
         const fp = paramView?.framePeriodMs ?? 5;
-        const a = Math.min(sel.aBeat, sel.bBeat);
-        const b = Math.max(sel.aBeat, sel.bBeat);
         publishPianoRollSelection({
-            startFrame: Math.max(0, Math.floor((a * secPerBeat * 1000) / fp)),
-            frameCount: Math.max(1, Math.ceil(((b - a) * secPerBeat * 1000) / fp)),
+            startFrame: Math.max(0, Math.floor((bounding.startBeat * secPerBeat * 1000) / fp)),
+            frameCount: Math.max(
+                1,
+                Math.ceil(((bounding.endBeat - bounding.startBeat) * secPerBeat * 1000) / fp),
+            ),
             framePeriodMs: fp,
         });
         return () => {
@@ -2831,7 +2848,7 @@ export const PianoRollPanel: React.FC = () => {
             scaleSegments: segCache.result,
             toolMode: s.toolMode,
             snapToggleHeld: snapToggleHeld,
-            paramMorphOverlay,
+            paramMorphOverlays,
         });
     };
 
@@ -2890,6 +2907,7 @@ export const PianoRollPanel: React.FC = () => {
         scrollVerticalKb,
         scrollbarZoomKb,
         paramMorphKb,
+        paramMultiSelectKb,
         paramStretchKb: stretchKb,
         vibratoAmplitudeAdjustKb,
         vibratoFrequencyAdjustKb,
@@ -2921,7 +2939,7 @@ export const PianoRollPanel: React.FC = () => {
             [dispatch],
         ),
         edgeSmoothnessPercent: s.edgeSmoothnessPercent,
-        onMorphOverlayChange: setParamMorphOverlay,
+        onMorphOverlayChange: setParamMorphOverlays,
         currentParamRange,
         onPitchSnapGestureActiveChange: useCallback((active: boolean) => {
             setSnapGestureActive(active);
@@ -3313,8 +3331,8 @@ export const PianoRollPanel: React.FC = () => {
             if (op === "selectAll") {
                 if (s.toolMode !== "select") return;
                 const totalBeats = dynamicProjectSec / secPerBeat;
-                selectionRef.current = { aBeat: 0, bBeat: totalBeats };
-                setSelectionUi({ aBeat: 0, bBeat: totalBeats });
+                selectionRef.current = selectionFromBeatRange(0, totalBeats);
+                setSelectionUi(selectionRef.current);
                 invalidate();
                 return;
             }
@@ -3327,9 +3345,9 @@ export const PianoRollPanel: React.FC = () => {
             }
 
             // 双击 Clip（无拖拽，ClipItem 派发）：按 Clip 起止范围在参数编辑器
-            // 内创建选区，并把交互焦点切到参数编辑器侧 —— 复制/剪切路由
-            // （resolveCopyCutRoute 依据 selectionContext，经由下方 selectionUi
-            // 同步派发 setParamSelectionActive 标记）与活动表面
+            // 内创建选区（**替换**为单段），并把交互焦点切到参数编辑器侧 ——
+            // 复制/剪切路由（resolveCopyCutRoute 依据 selectionContext，经由下方
+            // selectionUi 同步派发 setParamSelectionActive 标记）与活动表面
             // （focusSurface，外来源粘贴兜底等）随之指向参数编辑器。
             if (op === "selectClipParamRange") {
                 const clipId = typeof data?.clipId === "string" ? data.clipId : "";
@@ -3337,36 +3355,24 @@ export const PianoRollPanel: React.FC = () => {
                 if (!clip) return;
                 const aBeat = Math.max(0, clip.startSec / secPerBeat);
                 const bBeat = Math.max(0, (clip.startSec + clip.lengthSec) / secPerBeat);
-                selectionRef.current = { aBeat, bBeat };
-                setSelectionUi({ aBeat, bBeat });
+                selectionRef.current = selectionFromBeatRange(aBeat, bBeat);
+                setSelectionUi(selectionRef.current);
                 setActiveSurfaceExplicit("pianoRoll");
                 invalidate();
                 return;
             }
 
             // VocalShifter clipboard paste stays a dedicated menu action
-            // (file-based clipboard), and works with or without selection.
+            // (file-based clipboard). 多选区：把全部选区段交给后端，落盘时只写
+            // 落在这些段内的帧（断层不会被填充），偏移基准为首段起点。
             if (op === "pasteVocalShifter") {
                 const sel2 = selectionRef.current;
-                let selArgs:
-                    | {
-                          selectionStartFrame?: number;
-                          selectionMaxFrames?: number;
-                      }
-                    | undefined;
-                if (sel2) {
-                    const a = Math.min(sel2.aBeat, sel2.bBeat);
-                    const b = Math.max(sel2.aBeat, sel2.bBeat);
-                    const sf = Math.max(0, Math.floor((a * secPerBeat * 1000) / fp));
-                    const fc = Math.max(1, Math.ceil(((b - a) * secPerBeat * 1000) / fp));
-                    selArgs = {
-                        selectionStartFrame: sf,
-                        selectionMaxFrames: fc,
-                    };
-                }
+                const selRanges = sel2
+                    ? beatRangesToFrameRanges(sel2, secPerBeat, fp)
+                    : [];
                 void dispatch(
                     pasteVocalShifterClipboard({
-                        ...selArgs,
+                        selectionRanges: selRanges.length > 0 ? selRanges : undefined,
                         activeParam: editParam,
                     }),
                 );
@@ -3375,7 +3381,8 @@ export const PianoRollPanel: React.FC = () => {
             }
 
             // REAPERMedia fallback used by the normal paste operation when no
-            // HiFiShifter param clipboard data is available.
+            // HiFiShifter param clipboard data is available. 多选区下这个回退只
+            // 关心"往哪里贴"，用选区包围区间（首段起点 → 末段终点）。
             const pasteReaperClipboardFallback = () => {
                 const sel2 = selectionRef.current;
                 let selArgs:
@@ -3384,11 +3391,18 @@ export const PianoRollPanel: React.FC = () => {
                           selectionMaxFrames?: number;
                       }
                     | undefined;
-                if (sel2) {
-                    const a = Math.min(sel2.aBeat, sel2.bBeat);
-                    const b = Math.max(sel2.aBeat, sel2.bBeat);
-                    const sf = Math.max(0, Math.floor((a * secPerBeat * 1000) / fp));
-                    const fc = Math.max(1, Math.ceil(((b - a) * secPerBeat * 1000) / fp));
+                const bounding = selectionBoundingRange(sel2);
+                if (bounding) {
+                    const sf = Math.max(
+                        0,
+                        Math.floor((bounding.startBeat * secPerBeat * 1000) / fp),
+                    );
+                    const fc = Math.max(
+                        1,
+                        Math.ceil(
+                            ((bounding.endBeat - bounding.startBeat) * secPerBeat * 1000) / fp,
+                        ),
+                    );
                     selArgs = {
                         selectionStartFrame: sf,
                         selectionMaxFrames: fc,
@@ -3403,7 +3417,9 @@ export const PianoRollPanel: React.FC = () => {
                             midiDialogSourceRef.current = "reaperClipboard";
                             setClipboardGuid(midiCheck.guid);
                             setMidiPath(null);
-                            setMidiDialogSelection(sel2 ? { ...sel2 } : null);
+                            setMidiDialogSelection(
+                                sel2 ? sel2.map((range) => ({ ...range })) : null,
+                            );
                             midiDialogOpenParamsRef.current = {
                                 editParam: s.editParam,
                                 toolMode: s.toolMode,
@@ -3438,28 +3454,52 @@ export const PianoRollPanel: React.FC = () => {
             }
 
             const sel = selectionRef.current;
-            if (!sel) return;
+            if (!sel || sel.length === 0) return;
             if (!pitchEnabled) return;
 
-            const aBeat = Math.min(sel.aBeat, sel.bBeat);
-            const bBeat = Math.max(sel.aBeat, sel.bBeat);
-            const startSec = aBeat * secPerBeat;
-            const durSec = Math.max(0, (bBeat - aBeat) * secPerBeat);
-            const startFrame = Math.max(0, Math.floor((startSec * 1000) / fp));
-            const frameCount = clamp(Math.ceil((durSec * 1000) / fp), 1, 200_000);
+            // 选区的帧区间集合（逐段；沿用旧单选区算式 floor(起点)/ceil(时长)，
+            // 帧域再次合并相接窗口）。全部 op 都以「每段独立」语义消费它。
+            const selFrameRanges = beatRangesToFrameRanges(sel, secPerBeat, fp);
+            if (selFrameRanges.length === 0) return;
+            const firstRange = selFrameRanges[0];
+            const startFrame = firstRange.startFrame;
+            const frameCount = firstRange.frameCount;
+
+            /**
+             * 逐段执行「取数 → 变换 → 回写」。
+             *
+             * 撤销点纪律：**整个批次只在第一个真正写入的段上打一次撤销点**
+             * （回调返回 false 表示该段未写入，撤销点顺延到下一段）。
+             *
+             * @param writeRange (段, 段号, 本次是否应打撤销点) => 是否实际写入
+             */
+            const runPerRange = async (
+                writeRange: (
+                    range: FrameRange,
+                    rangeIndex: number,
+                    isFirstWrite: boolean,
+                ) => Promise<boolean>,
+            ): Promise<boolean> => {
+                let wrote = false;
+                for (let i = 0; i < selFrameRanges.length; i += 1) {
+                    const didWrite = await writeRange(selFrameRanges[i], i, !wrote);
+                    if (didWrite) wrote = true;
+                }
+                return wrote;
+            };
 
             // 选区编辑统一入口：取数/编辑/边缘淡化/回写全部在
             // selectionEditApply 模块内完成（delta 空间交叉淡化 + 毫秒定标）。
+            // 多选区逐段独立执行，整批只打一个撤销点。
             // 平滑度解析顺序保持旧语义：对话框显式传入 → store 全局设置。
             const runSelectionEdit = async (
                 editSelection: (currentSelectionVals: number[]) => number[],
                 extension?: SelectionEditExtension,
             ) => {
-                const ok = await applySelectionEditWithEdgeSmoothing({
+                const ok = await applySelectionEditOverRanges({
+                    ranges: selFrameRanges,
                     trackId: rootTrackId,
                     param: editParam,
-                    startFrame,
-                    frameCount,
                     framePeriodMs: fp,
                     smoothnessPercent: clamp(
                         Number(
@@ -3478,28 +3518,40 @@ export const PianoRollPanel: React.FC = () => {
 
             switch (op) {
                 case "copy": {
-                    const res = await paramsApi.getParamFrames(
-                        rootTrackId,
-                        editParam,
-                        startFrame,
-                        frameCount,
-                        1,
-                    );
-                    if (!res?.ok) return;
-                    const payload = res as ParamFramesPayload;
-                    clipboardRef.current = {
-                        param: editParam,
-                        framePeriodMs: Number(payload.frame_period_ms ?? fp) || fp,
-                        values: (payload.edit ?? []).map((v) => Number(v) || 0),
-                    };
-                    try {
-                        await writeSystemClipboardObject({
-                            version: 1,
-                            kind: "param",
-                            param: editParam,
-                            framePeriodMs: Number(payload.frame_period_ms ?? fp) || fp,
-                            values: (payload.edit ?? []).map((v) => Number(v) || 0),
+                    // 逐段取全分辨率数据；段偏移 = 该段起点 − 首段起点，断层以
+                    // 偏移空洞的形式进入剪贴板（这是"不合并断层"的根本保障）。
+                    const segments: ParamClipboardSegment[] = [];
+                    let framePeriodMsFromBackend = fp;
+                    for (const range of selFrameRanges) {
+                        const res = await paramsApi.getParamFrames(
+                            rootTrackId,
+                            editParam,
+                            range.startFrame,
+                            range.frameCount,
+                            1,
+                        );
+                        if (!res?.ok) continue;
+                        const payload = res as ParamFramesPayload;
+                        if (segments.length === 0) {
+                            framePeriodMsFromBackend =
+                                Number(payload.frame_period_ms ?? fp) || fp;
+                        }
+                        const values = (payload.edit ?? []).map((v) => Number(v) || 0);
+                        if (values.length === 0) continue;
+                        segments.push({
+                            startFrame: range.startFrame - startFrame,
+                            values,
                         });
+                    }
+                    if (segments.length === 0) return;
+                    const clipboardData: ParamClipboardData = {
+                        param: editParam,
+                        framePeriodMs: framePeriodMsFromBackend,
+                        segments,
+                    };
+                    clipboardRef.current = clipboardData;
+                    try {
+                        await writeSystemClipboardObject(toParamClipboardPayload(clipboardData));
                     } catch {
                         // ignore clipboard write failures
                     }
@@ -3508,40 +3560,58 @@ export const PianoRollPanel: React.FC = () => {
                     break;
                 }
                 case "cut": {
-                    const res = await paramsApi.getParamFrames(
-                        rootTrackId,
-                        editParam,
-                        startFrame,
-                        frameCount,
-                        1,
-                    );
-                    if (!res?.ok) return;
-                    const payload = res as ParamFramesPayload;
-                    clipboardRef.current = {
-                        param: editParam,
-                        framePeriodMs: Number(payload.frame_period_ms ?? fp) || fp,
-                        values: (payload.edit ?? []).map((v) => Number(v) || 0),
-                    };
-                    try {
-                        await writeSystemClipboardObject({
-                            version: 1,
-                            kind: "param",
+                    // 复制部分与 copy 完全同构（多段 + 偏移），随后把各段恢复为
+                    // 原始值；恢复与复制在同一批次内完成，撤销一次整体回退。
+                    const segments: ParamClipboardSegment[] = [];
+                    let framePeriodMsFromBackend = fp;
+                    let restoredAny = false;
+                    for (const range of selFrameRanges) {
+                        const res = await paramsApi.getParamFrames(
+                            rootTrackId,
+                            editParam,
+                            range.startFrame,
+                            range.frameCount,
+                            1,
+                        );
+                        if (!res?.ok) continue;
+                        const payload = res as ParamFramesPayload;
+                        if (segments.length === 0) {
+                            framePeriodMsFromBackend =
+                                Number(payload.frame_period_ms ?? fp) || fp;
+                        }
+                        const values = (payload.edit ?? []).map((v) => Number(v) || 0);
+                        if (values.length > 0) {
+                            segments.push({
+                                startFrame: range.startFrame - startFrame,
+                                values,
+                            });
+                        }
+                        // 第一个真正写入的段打撤销点
+                        await paramsApi.restoreParamFrames(
+                            rootTrackId,
+                            editParam,
+                            range.startFrame,
+                            range.frameCount,
+                            !restoredAny,
+                        );
+                        restoredAny = true;
+                    }
+                    if (segments.length > 0) {
+                        const clipboardData: ParamClipboardData = {
                             param: editParam,
-                            framePeriodMs: Number(payload.frame_period_ms ?? fp) || fp,
-                            values: (payload.edit ?? []).map((v) => Number(v) || 0),
-                        });
-                    } catch {
-                        // ignore clipboard write failures
+                            framePeriodMs: framePeriodMsFromBackend,
+                            segments,
+                        };
+                        clipboardRef.current = clipboardData;
+                        try {
+                            await writeSystemClipboardObject(
+                                toParamClipboardPayload(clipboardData),
+                            );
+                        } catch {
+                            // ignore clipboard write failures
+                        }
                     }
                     invalidate();
-                    // 初始化（恢复原始值）
-                    await paramsApi.restoreParamFrames(
-                        rootTrackId,
-                        editParam,
-                        startFrame,
-                        frameCount,
-                        true,
-                    );
                     bumpRefreshToken();
                     break;
                 }
@@ -3549,14 +3619,8 @@ export const PianoRollPanel: React.FC = () => {
                     let clip = clipboardRef.current;
                     try {
                         const fromSystem = await readSystemClipboardObject("param");
-                        if (fromSystem?.kind === "param") {
-                            clip = {
-                                param: fromSystem.param,
-                                framePeriodMs: Number(fromSystem.framePeriodMs) || fp,
-                                values: Array.isArray(fromSystem.values)
-                                    ? fromSystem.values.map((v) => Number(v) || 0)
-                                    : [],
-                            };
+                        if (fromSystem) {
+                            clip = fromSystem;
                             clipboardRef.current = clip;
                         }
                     } catch {
@@ -3568,17 +3632,21 @@ export const PianoRollPanel: React.FC = () => {
                         return;
                     }
 
-                    let pasteValues: number[];
-                    if (clip.param === editParam) {
-                        pasteValues =
-                            clip.values.length > frameCount
-                                ? clip.values.slice(0, frameCount)
-                                : clip.values;
-                    } else if (
-                        clip.param === "pitch" &&
-                        (isChildPitchOffsetCentsParam(editParam) ||
-                            isChildPitchOffsetDegreesParam(editParam))
-                    ) {
+                    // 剪贴板 → 目标选区的映射（预览与粘贴同源）：交集之外不写，
+                    // 断层两侧都保持原值。
+                    const writes = mapClipboardToTargetRanges({
+                        targetRanges: selFrameRanges,
+                        clipboard: clip,
+                    });
+                    if (writes.length === 0) return;
+
+                    if (clip.param !== editParam) {
+                        // 跨参数粘贴：仅支持 pitch → 子轨音高偏移参数（逐段转换）。
+                        const canConvert =
+                            clip.param === "pitch" &&
+                            (isChildPitchOffsetCentsParam(editParam) ||
+                                isChildPitchOffsetDegreesParam(editParam));
+                        if (!canConvert) return;
                         const targetParam = parseChildPitchOffsetParam(editParam);
                         if (!targetParam) return;
                         const resolvedRootTrackId = resolveRootTrackId(
@@ -3589,46 +3657,62 @@ export const PianoRollPanel: React.FC = () => {
                             return;
                         }
 
-                        const converted = await buildChildOffsetPasteValuesHelper({
-                            tracks: s.tracks,
-                            rootTrackId,
-                            targetTrackId: targetParam.trackId,
-                            startFrame,
-                            frameCount,
-                            clipboardPitch: clip.values,
-                            mode: targetParam.mode as "cents" | "degrees",
-                            paramsApi,
-                            pitchDeltaToDegreeSteps: pitchDeltaToDegreeSteps,
-                            projectScale: effectiveProjectScale,
-                            // Tempo Map 感知：按帧时刻解析生效音阶。
-                            scaleAtFrame: (frame: number) =>
-                                projectScaleAtSec((frame * fp) / 1000) ?? effectiveProjectScale,
+                        const convertedWrites: Array<{ startFrame: number; values: number[] }> = [];
+                        for (const write of writes) {
+                            const converted = await buildChildOffsetPasteValuesHelper({
+                                tracks: s.tracks,
+                                rootTrackId,
+                                targetTrackId: targetParam.trackId,
+                                startFrame: write.startFrame,
+                                frameCount: write.values.length,
+                                clipboardPitch: write.values,
+                                mode: targetParam.mode as "cents" | "degrees",
+                                paramsApi,
+                                pitchDeltaToDegreeSteps: pitchDeltaToDegreeSteps,
+                                projectScale: effectiveProjectScale,
+                                // Tempo Map 感知：按帧时刻解析生效音阶。
+                                scaleAtFrame: (frame: number) =>
+                                    projectScaleAtSec((frame * fp) / 1000) ??
+                                    effectiveProjectScale,
+                            });
+                            if (!converted) continue;
+                            convertedWrites.push({
+                                startFrame: write.startFrame,
+                                values: converted.slice(0, write.values.length),
+                            });
+                        }
+                        if (convertedWrites.length === 0) return;
+                        await uploadFullResCurveSegments({
+                            trackId: rootTrackId,
+                            param: editParam,
+                            segments: convertedWrites,
                         });
-                        if (!converted) return;
-
-                        pasteValues = converted.slice(0, frameCount);
-                    } else {
-                        return;
+                        bumpRefreshToken();
+                        break;
                     }
 
-                    await paramsApi.setParamFrames(
-                        rootTrackId,
-                        editParam,
-                        startFrame,
-                        pasteValues,
-                        true,
-                    );
+                    await uploadFullResCurveSegments({
+                        trackId: rootTrackId,
+                        param: editParam,
+                        segments: writes.map((write) => ({
+                            startFrame: write.startFrame,
+                            values: write.values,
+                        })),
+                    });
                     bumpRefreshToken();
                     break;
                 }
                 case "initialize": {
-                    await paramsApi.restoreParamFrames(
-                        rootTrackId,
-                        editParam,
-                        startFrame,
-                        frameCount,
-                        true,
-                    );
+                    await runPerRange(async (range, _index, isFirstWrite) => {
+                        const restored = await paramsApi.restoreParamFrames(
+                            rootTrackId,
+                            editParam,
+                            range.startFrame,
+                            range.frameCount,
+                            isFirstWrite,
+                        );
+                        return Boolean(restored?.ok);
+                    });
                     bumpRefreshToken();
                     break;
                 }
@@ -3754,37 +3838,40 @@ export const PianoRollPanel: React.FC = () => {
                 case "smooth": {
                     const strength = clamp((Number(data?.strength ?? 50) || 0) / 100, 0, 1);
                     if (strength <= 0) return;
+                    const fpMs = Number(paramView?.framePeriodMs ?? fp) || fp;
                     // 多取两侧各 3σ 帧上下文：高斯平滑用真实延拓做边界，
                     // 平滑结果与选区外曲线无缝（旧实现只取选区内、边界处
-                    // 会产生新台阶）。
-                    const fpMs = Number(paramView?.framePeriodMs ?? fp) || fp;
+                    // 会产生新台阶）。多选区逐段独立取上下文与 σ。
                     const pad = smoothContextPadFrames(strength, fpMs);
-                    const ctxStart = Math.max(0, startFrame - pad);
-                    const leftLen = startFrame - ctxStart;
-                    const res = await paramsApi.getParamFrames(
-                        rootTrackId,
-                        editParam,
-                        ctxStart,
-                        leftLen + frameCount + pad,
-                        1,
-                    );
-                    if (!res?.ok) return;
-                    const payload = res as ParamFramesPayload;
-                    const all = (payload.edit ?? []).map((v) => Number(v));
-                    const vals = all.slice(leftLen, leftLen + frameCount);
-                    if (vals.length === 0) return;
-                    const result = smoothSelectionValues(vals, editParam, strength, {
-                        framePeriodMs: fpMs,
-                        leftContext: all.slice(0, leftLen),
-                        rightContext: all.slice(leftLen + frameCount),
+                    await runPerRange(async (range, _index, isFirstWrite) => {
+                        const ctxStart = Math.max(0, range.startFrame - pad);
+                        const leftLen = range.startFrame - ctxStart;
+                        const res = await paramsApi.getParamFrames(
+                            rootTrackId,
+                            editParam,
+                            ctxStart,
+                            leftLen + range.frameCount + pad,
+                            1,
+                        );
+                        if (!res?.ok) return false;
+                        const payload = res as ParamFramesPayload;
+                        const all = (payload.edit ?? []).map((v) => Number(v));
+                        const vals = all.slice(leftLen, leftLen + range.frameCount);
+                        if (vals.length === 0) return false;
+                        const result = smoothSelectionValues(vals, editParam, strength, {
+                            framePeriodMs: fpMs,
+                            leftContext: all.slice(0, leftLen),
+                            rightContext: all.slice(leftLen + range.frameCount),
+                        });
+                        const written = await paramsApi.setParamFrames(
+                            rootTrackId,
+                            editParam,
+                            range.startFrame,
+                            result,
+                            isFirstWrite,
+                        );
+                        return Boolean(written?.ok);
                     });
-                    await paramsApi.setParamFrames(
-                        rootTrackId,
-                        editParam,
-                        startFrame,
-                        result,
-                        true,
-                    );
                     bumpRefreshToken();
                     break;
                 }
@@ -3795,41 +3882,47 @@ export const PianoRollPanel: React.FC = () => {
                     const attack = Number(data?.attack ?? 50);
                     const release = Number(data?.release ?? 50);
                     const phase = Number(data?.phase ?? 0);
-                    const res = await paramsApi.getParamFrames(
-                        rootTrackId,
-                        editParam,
-                        startFrame,
-                        frameCount,
-                        1,
-                    );
-                    if (!res?.ok) return;
-                    const payload = res as ParamFramesPayload;
-                    const vals = (payload.edit ?? []).map((v) => Number(v) || 0);
-                    const fpMs = Number(payload.frame_period_ms ?? fp) || fp;
-                    const totalMs = vals.length * fpMs;
-                    const attackMs = Math.min(attack, totalMs / 2);
-                    const releaseMs = Math.min(release, totalMs / 2);
-                    // For pitch: amplitude in cents → divide by 100 to get semitones
-                    // For other params: amplitude is a raw value used directly as max deviation
-                    const isPitchVib = editParam === "pitch";
-                    const ampFactor = isPitchVib ? amplitude / 100 : amplitude;
-                    const result = vals.map((v, i) => {
-                        const tMs = i * fpMs;
-                        let env = 1;
-                        if (tMs < attackMs) env = tMs / Math.max(1, attackMs);
-                        else if (tMs > totalMs - releaseMs)
-                            env = (totalMs - tMs) / Math.max(1, releaseMs);
-                        const phaseRad = (phase * Math.PI) / 180;
-                        const vib = Math.sin((2 * Math.PI * tMs) / Math.max(1, period) + phaseRad);
-                        return v + ampFactor * env * vib;
+                    // 多选区：咬合/释放包络按**每段自身时长**定标，各段独立。
+                    await runPerRange(async (range, _index, isFirstWrite) => {
+                        const res = await paramsApi.getParamFrames(
+                            rootTrackId,
+                            editParam,
+                            range.startFrame,
+                            range.frameCount,
+                            1,
+                        );
+                        if (!res?.ok) return false;
+                        const payload = res as ParamFramesPayload;
+                        const vals = (payload.edit ?? []).map((v) => Number(v) || 0);
+                        const fpMs = Number(payload.frame_period_ms ?? fp) || fp;
+                        const totalMs = vals.length * fpMs;
+                        const attackMs = Math.min(attack, totalMs / 2);
+                        const releaseMs = Math.min(release, totalMs / 2);
+                        // For pitch: amplitude in cents → divide by 100 to get semitones
+                        // For other params: amplitude is a raw value used directly as max deviation
+                        const isPitchVib = editParam === "pitch";
+                        const ampFactor = isPitchVib ? amplitude / 100 : amplitude;
+                        const result = vals.map((v, i) => {
+                            const tMs = i * fpMs;
+                            let env = 1;
+                            if (tMs < attackMs) env = tMs / Math.max(1, attackMs);
+                            else if (tMs > totalMs - releaseMs)
+                                env = (totalMs - tMs) / Math.max(1, releaseMs);
+                            const phaseRad = (phase * Math.PI) / 180;
+                            const vib = Math.sin(
+                                (2 * Math.PI * tMs) / Math.max(1, period) + phaseRad,
+                            );
+                            return v + ampFactor * env * vib;
+                        });
+                        const written = await paramsApi.setParamFrames(
+                            rootTrackId,
+                            editParam,
+                            range.startFrame,
+                            result,
+                            isFirstWrite,
+                        );
+                        return Boolean(written?.ok);
                     });
-                    await paramsApi.setParamFrames(
-                        rootTrackId,
-                        editParam,
-                        startFrame,
-                        result,
-                        true,
-                    );
                     bumpRefreshToken();
                     break;
                 }
@@ -4056,35 +4149,55 @@ export const PianoRollPanel: React.FC = () => {
         [editParam],
     );
 
+    /**
+     * 「另存为音高参考」：每个选区段生成一个独立的 Pitch Ref clip
+     * （不合并断层 —— 合并会把缺口处也填上参考音高）。
+     */
     const handleSaveAsPitchRef = useCallback(async () => {
         const sel = selectionRef.current;
-        if (!sel || !rootTrackId) return;
-
-        const aBeat = Math.min(sel.aBeat, sel.bBeat);
-        const bBeat = Math.max(sel.aBeat, sel.bBeat);
-        const startSec = aBeat * secPerBeat;
-        const lengthSec = Math.max(0.01, (bBeat - aBeat) * secPerBeat);
+        if (!sel || sel.length === 0 || !rootTrackId) return;
 
         const fp = paramView?.framePeriodMs ?? 5;
-        const startFrame = Math.max(0, Math.floor((startSec * 1000) / fp));
-        const frameCount = Math.max(1, Math.ceil((lengthSec * 1000) / fp));
+        const selFrameRanges = beatRangesToFrameRanges(sel, secPerBeat, fp);
+        if (selFrameRanges.length === 0) return;
 
-        const res = await paramsApi.getParamFrames(rootTrackId, "pitch", startFrame, frameCount, 1);
-        if (!res?.ok || !res.edit) return;
-
-        const pitchValues: number[] = (res.edit as number[]).map((v) => Number(v) || 0);
-
-        // Convert pitch values (semitones) to MIDI note events
-        // 保留原始浮点音高值，不进行半音量化
-        const fpSec = fp / 1000;
-        const midiNoteData: Array<{
+        // 逐段取 pitch → MIDI 音符事件（与旧单选区同一转换，保留浮点音高）
+        const clipTemplates: Array<{
             startSec: number;
-            endSec: number;
-            note: number;
-            velocity: number;
-            channel: number;
+            lengthSec: number;
+            midiNoteData: Array<{
+                startSec: number;
+                endSec: number;
+                note: number;
+                velocity: number;
+                channel: number;
+            }>;
         }> = [];
-        if (pitchValues.length > 0) {
+        for (const range of selFrameRanges) {
+            const res = await paramsApi.getParamFrames(
+                rootTrackId,
+                "pitch",
+                range.startFrame,
+                range.frameCount,
+                1,
+            );
+            if (!res?.ok || !res.edit) continue;
+            const pitchValues: number[] = (res.edit as number[]).map((v) => Number(v) || 0);
+            if (pitchValues.length === 0) continue;
+
+            const startSec = (range.startFrame * fp) / 1000;
+            const lengthSec = Math.max(0.01, (pitchValues.length * fp) / 1000);
+
+            // Convert pitch values (semitones) to MIDI note events
+            // 保留原始浮点音高值，不进行半音量化
+            const fpSec = fp / 1000;
+            const midiNoteData: Array<{
+                startSec: number;
+                endSec: number;
+                note: number;
+                velocity: number;
+                channel: number;
+            }> = [];
             let segStartFrame = 0;
             let currentNote = pitchValues[0];
             for (let i = 1; i < pitchValues.length; i++) {
@@ -4108,7 +4221,9 @@ export const PianoRollPanel: React.FC = () => {
                 velocity: 100,
                 channel: 0,
             });
+            clipTemplates.push({ startSec, lengthSec, midiNoteData });
         }
+        if (clipTemplates.length === 0) return;
 
         // Determine target track: try the track above the currently selected track.
         // If no track above exists, or the above track has overlapping clips
@@ -4128,8 +4243,11 @@ export const PianoRollPanel: React.FC = () => {
             const hasOverlap = s.clips.some(
                 (c) =>
                     c.trackId === aboveTrackId &&
-                    c.startSec < startSec + lengthSec &&
-                    c.startSec + c.lengthSec > startSec,
+                    clipTemplates.some(
+                        (template) =>
+                            c.startSec < template.startSec + template.lengthSec &&
+                            c.startSec + c.lengthSec > template.startSec,
+                    ),
             );
             if (!hasOverlap) {
                 const currentTrack = s.tracks.find((t) => t.id === s.selectedTrackId);
@@ -4171,16 +4289,14 @@ export const PianoRollPanel: React.FC = () => {
 
         await dispatch(
             createClipsRemote({
-                templates: [
-                    {
-                        trackId: targetTrackId,
-                        name: "Pitch Ref",
-                        startSec,
-                        lengthSec,
-                        midiNoteData,
-                        midiFillGaps: true,
-                    },
-                ],
+                templates: clipTemplates.map((template) => ({
+                    trackId: targetTrackId as string,
+                    name: "Pitch Ref",
+                    startSec: template.startSec,
+                    lengthSec: template.lengthSec,
+                    midiNoteData: template.midiNoteData,
+                    midiFillGaps: true,
+                })),
             }),
         );
     }, [
@@ -4194,18 +4310,17 @@ export const PianoRollPanel: React.FC = () => {
         dispatch,
     ]);
 
+    /**
+     * 「导出 MIDI」：每个选区段作为一条独立的导出条目
+     * （后端按 track 条目逐条导出，断层因此不会被填上音符）。
+     */
     const handleExportMidiFromEditor = useCallback(async () => {
         if (!rootTrackId) return;
         const sel = selectionRef.current;
-        if (!sel) return;
+        if (!sel || sel.length === 0) return;
 
         const saveResult = await coreApi.pickMidiOutputPath();
         if (!saveResult.ok || saveResult.canceled || !saveResult.path) return;
-
-        const aBeat = Math.min(sel.aBeat, sel.bBeat);
-        const bBeat = Math.max(sel.aBeat, sel.bBeat);
-        const startSec = aBeat * secPerBeat;
-        const endSec = Math.max(startSec + 0.01, bBeat * secPerBeat);
 
         const selectedTrack = s.tracks.find((t) => t.id === s.selectedTrackId);
         const trackName = selectedTrack?.name ?? "Track";
@@ -4214,15 +4329,17 @@ export const PianoRollPanel: React.FC = () => {
 
         await paramsApi.exportPitchToMidi({
             outputPath: saveResult.path,
-            tracks: [
-                {
+            tracks: sel.map((range) => {
+                const startSec = range.startBeat * secPerBeat;
+                const endSec = Math.max(startSec + 0.01, range.endBeat * secPerBeat);
+                return {
                     trackId: s.selectedTrackId ?? rootTrackId,
                     rootTrackId,
                     name: trackName,
                     startSec,
                     endSec,
-                },
-            ],
+                };
+            }),
             bpm: s.bpm,
             beatsPerBar: s.project?.beatsPerBar ?? 4,
             baseScale: s.project?.baseScale ?? "C",
@@ -5532,8 +5649,7 @@ export const PianoRollPanel: React.FC = () => {
                 rootTrackComposeEnabled={rootTrack?.composeEnabled ?? true}
                 onRequestEnableCompose={handleRequestEnableCompose}
                 clipboardGuid={clipboardGuid}
-                selectionStartFrame={midiSelArgs.selectionStartFrame}
-                selectionMaxFrames={midiSelArgs.selectionMaxFrames}
+                selectionRanges={midiSelRanges}
                 onImported={handleMidiImported}
                 onImportAsClip={handleImportAsClip}
                 importPosition={importPosition}

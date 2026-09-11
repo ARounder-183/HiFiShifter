@@ -128,6 +128,7 @@ Because the official DLL only supports file I/O, processing takes longer compare
 | Cycle Take                          | T (Shift + T: previous)                 |
 | Copy Selection Curve (parameter)    | Ctrl + C (Select mode)                  |
 | Paste to Selection Start            | Ctrl + V (Select mode)                  |
+| Multi-range select (parameter)      | Ctrl + drag adds a range; Ctrl + click an existing range removes it (Select mode) |
 | Split Clip                          | S (splits selected clip at playhead)    |
 | New Track                           | Ctrl + T                                |
 | Quick Search                        | Ctrl + F                                |

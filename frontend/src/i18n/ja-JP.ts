@@ -769,6 +769,8 @@ export const jaJP = {
         "キャンバス水平ズーム（タイムライン / ピアノロール / 鍵盤ホイール）",
     kb_modifier_pr_vzoom: "キャンバス垂直ズーム（タイムライン / ピアノロールホイール）",
     kb_modifier_param_morph: "パラメータ形状変形（押しながら選択範囲内のアンカーをドラッグ）",
+    kb_modifier_param_multi_select:
+        "複数選択範囲（押しながらドラッグで範囲を追加、既存の範囲を押しながらクリックで解除）",
     kb_modifier_param_fine_adjust:
         "微調整（押しながら：スライダー / 入力欄ホイール / ゲインドラッグ / ビブラートホイール）",
     kb_modifier_vibrato_amplitude_adjust: "ビブラート振幅調整（直線/ビブラートドラッグ中ホイール）",

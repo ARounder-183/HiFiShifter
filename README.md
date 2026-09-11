@@ -128,6 +128,7 @@ VocalShifter 提供的算法库。
 | 循环切换 Take                  | T（`Shift + T` 切换上一个）       |
 | 参数面板复制选区曲线           | Ctrl + C（Select 模式）           |
 | 参数面板粘贴到选区起点         | Ctrl + V（Select 模式）           |
+| 参数面板多选区（追加 / 取消）  | Ctrl + 拖动追加、Ctrl + 点击已有段取消（Select 模式） |
 | 分割音频块                     | S（在播放头位置分割选中的音频块） |
 | 新建轨道                       | Ctrl + T                          |
 | 快速搜索                       | Ctrl + F                          |

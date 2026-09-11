@@ -18,10 +18,11 @@ interface MidiTrackSelectDialogProps {
     onOpenChange: (open: boolean) => void;
     /** MIDI 文件路径（由文件对话框选定） */
     midiPath: string | null;
-    /** 选区起始帧（与 paste_reaper_clipboard 一致） */
-    selectionStartFrame?: number;
-    /** 选区最大帧数（与 paste_reaper_clipboard 一致） */
-    selectionMaxFrames?: number;
+    /**
+     * 参数编辑器的多选区（每段 startFrame/frameCount）。
+     * 导入时音符对齐首段起点，且只写入落在任一段内的帧 —— 断层保持原值。
+     */
+    selectionRanges?: Array<{ startFrame: number; frameCount: number }>;
     /** 导入完成后的回调 */
     onImported?: (result: { notes_imported: number; frames_touched: number }) => void;
     /** 导入模式：pitchEdit（默认，写入 pitch_edit）或 clip（创建 MIDI clip）或 replaceMidi（替换已有 MIDI clip 数据） */
@@ -117,8 +118,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
     open,
     onOpenChange,
     midiPath,
-    selectionStartFrame,
-    selectionMaxFrames,
+    selectionRanges,
     onImported,
     mode = "pitchEdit",
     onImportAsClip,
@@ -471,26 +471,20 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                 return;
             }
 
-            // 根据导入位置模式计算帧偏移
+            // 根据导入位置模式计算选区约束
             let effectivePosition = importPosition;
             if (effectivePosition === "selection") {
-                if (selectionStartFrame == null || !selectionAvailable) {
+                if (selectionRanges == null || selectionRanges.length === 0 || !selectionAvailable) {
                     effectivePosition = "playhead"; // 回退
                 }
             }
-            const startFrame =
-                effectivePosition === "projectStart"
-                    ? 0
-                    : effectivePosition === "selection"
-                      ? selectionStartFrame
-                      : undefined;
-            const maxFrames = effectivePosition === "selection" ? selectionMaxFrames : undefined;
+            const rangesForImport =
+                effectivePosition === "selection" ? selectionRanges : undefined;
 
             const res = await paramsApi.importMidiToPitch(
                 midiSrc,
                 trackIndices,
-                startFrame,
-                maxFrames,
+                rangesForImport,
                 fillGaps || undefined,
                 noteBpmMode,
                 noteBpmMode === "specified" ? specifiedBpm : undefined,
@@ -525,8 +519,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
         }
     }, [
         effectivePath,
-        selectionStartFrame,
-        selectionMaxFrames,
+        selectionRanges,
         selectedTracks,
         onImported,
         onImportAsClip,
@@ -563,23 +556,16 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
         const trackIndices = selectedTracks;
         let effectivePosition = importPosition;
         if (effectivePosition === "selection") {
-            if (selectionStartFrame == null || !selectionAvailable) {
+            if (selectionRanges == null || selectionRanges.length === 0 || !selectionAvailable) {
                 effectivePosition = "playhead";
             }
         }
-        const startFrame =
-            effectivePosition === "projectStart"
-                ? 0
-                : effectivePosition === "selection"
-                  ? selectionStartFrame
-                  : undefined;
-        const maxFrames = effectivePosition === "selection" ? selectionMaxFrames : undefined;
+        const rangesForImport = effectivePosition === "selection" ? selectionRanges : undefined;
         paramsApi
             .importMidiToPitch(
                 midiSrc,
                 trackIndices,
-                startFrame,
-                maxFrames,
+                rangesForImport,
                 fillGaps || undefined,
                 noteBpmMode,
                 noteBpmMode === "specified" ? specifiedBpm : undefined,
@@ -619,8 +605,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
         effectiveClipboardGuid,
         selectedTracks,
         importPosition,
-        selectionStartFrame,
-        selectionMaxFrames,
+        selectionRanges,
         selectionAvailable,
         fillGaps,
         noteBpmMode,

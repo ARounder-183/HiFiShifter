@@ -97,15 +97,18 @@ export const paramsApi = {
     setStaticParam: (trackId: string, param: string, value: number, checkpoint?: boolean) =>
         invoke<{ ok: boolean }>("set_static_param", trackId, param, value, checkpoint),
 
+    /**
+     * 粘贴 VocalShifter 剪贴板。
+     * `selectionRanges` 为参数编辑器的多选区（每段 startFrame/frameCount）：
+     * 后端把数据对齐到**首段起点**，且只写入落在任一段内的帧（断层不填充）。
+     */
     pasteVocalShifterClipboard: (
-        selectionStartFrame?: number,
-        selectionMaxFrames?: number,
+        selectionRanges?: Array<{ startFrame: number; frameCount: number }>,
         activeParam?: string,
     ) =>
         invoke<{ ok: boolean; error?: string; updated?: number }>(
             "paste_vocalshifter_clipboard",
-            selectionStartFrame,
-            selectionMaxFrames,
+            selectionRanges,
             activeParam,
         ),
 
@@ -162,11 +165,15 @@ export const paramsApi = {
             key_signature_count?: number;
         }>("read_midi_clipboard_to_memory"),
 
+    /**
+     * 导入 MIDI 到参数线（pitch）。
+     * `selectionRanges` 为参数编辑器多选区（每段 startFrame/frameCount）：
+     * 音符对齐首段起点，且只写入落在任一段内的帧（断层保持原值）。
+     */
     importMidiToPitch: (
         midiPath: string,
         trackIndices: number[],
-        selectionStartFrame?: number,
-        selectionMaxFrames?: number,
+        selectionRanges?: Array<{ startFrame: number; frameCount: number }>,
         fillGaps?: boolean,
         noteBpmMode?: string,
         specifiedBpm?: number,
@@ -183,8 +190,7 @@ export const paramsApi = {
             "import_midi_to_pitch",
             midiPath,
             trackIndices,
-            selectionStartFrame,
-            selectionMaxFrames,
+            selectionRanges,
             fillGaps,
             noteBpmMode,
             specifiedBpm,

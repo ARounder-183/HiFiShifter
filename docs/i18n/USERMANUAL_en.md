@@ -427,6 +427,8 @@ Hold `Alt` to enter four-point editing mode for the selected curve. Similar to t
 
 Hold `Alt` and drag the edge of the selection area to stretch the parameter curve within the selection.
 
+Hold the Multi-Range Select modifier (default `Ctrl`, `Command` on macOS; configurable under `Options -> Keyboard Shortcuts`, `Param Editor` modifier group) with the Select tool to create **multiple selection ranges**: hold and drag to **add** a range (overlapping or touching ranges merge into one), or hold and click an existing range to **remove** it. The ranges are independent in time — copy, cut, paste, transpose, set-to, average, smooth, quantize, mean-quantize, amplitude adjustment, morph, dragging and edge-stretch all run **per range**, and unselected gaps are never filled, compacted or merged. For example, after copying `0-1s` and `2-3s`, selecting `0-3s` and pasting writes only `0-1s` and `2-3s`, leaving `1-2s` untouched; conversely, after copying `0-3s`, selecting `0-1s` and `2-3s` and pasting puts the first second of the clipboard into the first range and its last second into the second range, while `1-2s` is neither written nor previewed.
+
 ### 3. Draw Tool
 
 The Draw tool allows you to draw parameter curves.

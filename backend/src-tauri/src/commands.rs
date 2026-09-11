@@ -26,6 +26,8 @@ mod midi_export;
 pub(crate) use midi_export::TempoTickConverter;
 #[path = "commands/onnx_status.rs"]
 mod onnx_status;
+#[path = "commands/param_selection_window.rs"]
+pub(crate) mod param_selection_window;
 #[path = "commands/params.rs"]
 mod params;
 #[path = "commands/pitch_cache.rs"]
@@ -1645,15 +1647,22 @@ pub fn import_vocalshifter_project(
     vocalshifter::import_vocalshifter_project(state.inner(), &window, vsp_path)
 }
 
+/// 粘贴 VocalShifter 剪贴板。
+///
+/// 参数编辑器的多选区经 `selectionRanges` 传入（每段 startFrame/frameCount）：
+/// 数据对齐到**首段起点**，且只写入落在任一段内的帧 —— 断层保持原值。
+/// 旧的单窗口参数保留兼容（等价于一个选区段）。
 #[tauri::command(rename_all = "camelCase")]
 pub fn paste_vocalshifter_clipboard(
     state: State<'_, AppState>,
+    selection_ranges: Option<Vec<param_selection_window::SelectionFrameRange>>,
     selection_start_frame: Option<usize>,
     selection_max_frames: Option<usize>,
     active_param: Option<String>,
 ) -> serde_json::Value {
     vocalshifter_clipboard::paste_vocalshifter_clipboard(
         state.inner(),
+        selection_ranges,
         selection_start_frame,
         selection_max_frames,
         active_param,
@@ -1727,13 +1736,14 @@ pub fn read_midi_clipboard_to_memory(state: State<'_, AppState>) -> serde_json::
     midi::read_midi_clipboard_to_memory(state.inner())
 }
 
+/// 导入 MIDI 到参数线（pitch）。`selectionRanges` 为参数编辑器多选区：
+/// 音符对齐首段起点，且只写入落在任一段内的帧（断层保持原值）。
 #[tauri::command(rename_all = "camelCase")]
 pub fn import_midi_to_pitch(
     state: State<'_, AppState>,
     midi_path: String,
     track_indices: Vec<usize>,
-    selection_start_frame: Option<usize>,
-    selection_max_frames: Option<usize>,
+    selection_ranges: Option<Vec<param_selection_window::SelectionFrameRange>>,
     fill_gaps: Option<bool>,
     note_bpm_mode: Option<String>,
     specified_bpm: Option<f64>,
@@ -1745,8 +1755,7 @@ pub fn import_midi_to_pitch(
         state.inner(),
         midi_path,
         track_indices,
-        selection_start_frame,
-        selection_max_frames,
+        selection_ranges,
         fill_gaps,
         note_bpm_mode,
         specified_bpm,

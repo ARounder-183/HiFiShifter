@@ -503,9 +503,8 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
 
         case "paste_vocalshifter_clipboard":
             return {
-                ...(args[0] !== undefined ? { selectionStartFrame: args[0] } : {}),
-                ...(args[1] !== undefined ? { selectionMaxFrames: args[1] } : {}),
-                ...(args[2] !== undefined ? { activeParam: args[2] } : {}),
+                ...(args[0] !== undefined ? { selectionRanges: args[0] } : {}),
+                ...(args[1] !== undefined ? { activeParam: args[1] } : {}),
             };
 
         case "paste_reaper_clipboard":
@@ -630,14 +629,13 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
             return {
                 midiPath: args[0],
                 ...(args[1] !== undefined ? { trackIndices: args[1] } : {}),
-                ...(args[2] !== undefined ? { selectionStartFrame: args[2] } : {}),
-                ...(args[3] !== undefined ? { selectionMaxFrames: args[3] } : {}),
-                ...(args[4] !== undefined ? { fillGaps: args[4] } : {}),
-                ...(args[5] !== undefined ? { noteBpmMode: args[5] } : {}),
-                ...(args[6] !== undefined ? { specifiedBpm: args[6] } : {}),
-                ...(args[7] !== undefined ? { importMidiBpmAsProject: args[7] } : {}),
-                ...(args[8] != null ? { clipboardGuid: args[8] } : {}),
-                ...(args[9] !== undefined ? { closeLeadingGap: args[9] } : {}),
+                ...(args[2] !== undefined ? { selectionRanges: args[2] } : {}),
+                ...(args[3] !== undefined ? { fillGaps: args[3] } : {}),
+                ...(args[4] !== undefined ? { noteBpmMode: args[4] } : {}),
+                ...(args[5] !== undefined ? { specifiedBpm: args[5] } : {}),
+                ...(args[6] !== undefined ? { importMidiBpmAsProject: args[6] } : {}),
+                ...(args[7] != null ? { clipboardGuid: args[7] } : {}),
+                ...(args[8] !== undefined ? { closeLeadingGap: args[8] } : {}),
             };
 
         case "import_midi_as_clip":

@@ -840,6 +840,8 @@ export const enUS = {
         "Canvas Horizontal Zoom (timeline / piano roll / piano keys wheel)",
     kb_modifier_pr_vzoom: "Canvas Vertical Zoom (timeline / piano roll wheel)",
     kb_modifier_param_morph: "Param Morph (hold and drag curve anchors inside selection)",
+    kb_modifier_param_multi_select:
+        "Multi-Range Select (hold + drag to add a range; hold + click an existing range to remove it)",
     kb_modifier_param_fine_adjust:
         "Fine Adjust (hold: sliders / input wheel / gain drag / vibrato wheel)",
     kb_modifier_vibrato_amplitude_adjust: "Vibrato Amplitude (wheel during line/vibrato drag)",

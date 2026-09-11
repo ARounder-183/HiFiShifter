@@ -127,6 +127,7 @@ VocalShifter 提供的演算法庫。
 | 編組 / 解組                    | G / U                             |
 | 循環切換 Take                  | T（`Shift + T` 切換上一個）       |
 | 參數面板複製選區曲線           | Ctrl + C（Select 模式）           |
+| 參數面板多選區（追加 / 取消）  | Ctrl + 拖曳追加、Ctrl + 點擊既有段取消（Select 模式） |
 | 參數面板貼到選區起點           | Ctrl + V（Select 模式）           |
 | 分割音訊塊                     | S（在播放頭位置分割選中的音訊塊） |
 | 新建軌道                       | Ctrl + T                          |

@@ -7,6 +7,8 @@
 use crate::midi_import::{self, MidiTrackInfo};
 use crate::state::{AppState, PitchAnalysisAlgo, Track};
 
+use super::param_selection_window::{ParamSelectionWindow, SelectionFrameRange};
+
 fn midi_log(message: impl AsRef<str>) {
     log::error!("[midi_import] {}", message.as_ref());
 }
@@ -232,14 +234,13 @@ fn resolve_midi_source(
 ///
 /// 导入逻辑与 `paste_midi_clipboard_inner`（Reaper 剪贴板 Standard MIDI File）完全一致：
 /// - 使用工程 BPM 作为 Tempo 回退
-/// - 偏移量为光标位置或选区起始帧对应秒，**第一个音符对齐该偏移量**（即所有音符整体平移）
-/// - 支持选区约束（selection_start_frame / selection_max_frames）
+/// - 偏移量为光标位置或选区首段起点对应秒，**第一个音符对齐该偏移量**（即所有音符整体平移）
+/// - 支持多选区约束：只写入落在任一段内的帧，断层保持原值（见下方的掩码回滚）
 pub(super) fn import_midi_to_pitch(
     state: &AppState,
     midi_path: String,
     track_indices: Vec<usize>,
-    selection_start_frame: Option<usize>,
-    selection_max_frames: Option<usize>,
+    selection_ranges: Option<Vec<SelectionFrameRange>>,
     fill_gaps: Option<bool>,
     note_bpm_mode: Option<String>,
     specified_bpm: Option<f64>,
@@ -248,8 +249,8 @@ pub(super) fn import_midi_to_pitch(
     close_leading_gap: Option<bool>,
 ) -> serde_json::Value {
     midi_log(format!(
-        "import_midi_to_pitch: path={} clipboard_guid={:?} track_indices={:?} sel_start={:?} sel_max={:?} fill_gaps={:?} note_bpm_mode={:?} specified_bpm={:?} import_midi_bpm_as_project={:?} close_leading_gap={:?}",
-        midi_path, clipboard_guid, track_indices, selection_start_frame, selection_max_frames, fill_gaps, note_bpm_mode, specified_bpm, import_midi_bpm_as_project, close_leading_gap
+        "import_midi_to_pitch: path={} clipboard_guid={:?} track_indices={:?} selection_ranges={:?} fill_gaps={:?} note_bpm_mode={:?} specified_bpm={:?} import_midi_bpm_as_project={:?} close_leading_gap={:?}",
+        midi_path, clipboard_guid, track_indices, selection_ranges, fill_gaps, note_bpm_mode, specified_bpm, import_midi_bpm_as_project, close_leading_gap
     ));
 
     // 先短暂锁定读取 bpm / playhead 等信息；MIDI 磁盘解析放在锁外 ——
@@ -387,25 +388,36 @@ pub(super) fn import_midi_to_pitch(
     };
 
     // 计算对齐偏移量和写入范围
+    //
+    // 多选区（selection_ranges）：对齐偏移仍取**首段起点**，写入范围为末段末尾；
+    // 写完后再按窗口做一次**掩码回滚** —— 落在断层里的帧恢复导入前的值，
+    // 保证"导入不会把两段之间的缺口填上"。
     let close_gap = close_leading_gap.unwrap_or(true);
     let first_start = notes
         .iter()
         .map(|n| n.start_sec)
         .fold(f64::INFINITY, f64::min);
-    let (align_offset, clamp_range_end) = if let Some(sel_start) = selection_start_frame {
+    let selection_window = ParamSelectionWindow::new(selection_ranges.clone(), None, None);
+    let (align_offset, clamp_range_end) = if let Some(sel_start) = selection_window.origin() {
         let offset_sec = (sel_start as f64 * frame_period_ms_raw) / 1000.0;
         let ao = if close_gap {
             offset_sec - first_start
         } else {
             offset_sec
         };
-        let max_frame = sel_start + selection_max_frames.unwrap_or(usize::MAX - sel_start);
-        let cl = max_frame.min(entry.pitch_edit.len());
+        let max_frame = selection_window
+            .end_bound()
+            .unwrap_or(usize::MAX)
+            .min(entry.pitch_edit.len());
         midi_log(format!(
-            "import_midi_to_pitch: selection mode offset_sec={:.3} align_offset={:.3} clamp_len={} close_gap={}",
-            offset_sec, ao, cl, close_gap
+            "import_midi_to_pitch: selection mode offset_sec={:.3} align_offset={:.3} clamp_len={} close_gap={} multi_range={}",
+            offset_sec,
+            ao,
+            max_frame,
+            close_gap,
+            !selection_window.is_empty() && selection_ranges.is_some()
         ));
-        (ao, Some(cl))
+        (ao, Some(max_frame))
     } else {
         let ao = if close_gap {
             playhead_sec - first_start
@@ -417,6 +429,14 @@ pub(super) fn import_midi_to_pitch(
             playhead_sec, ao, close_gap
         ));
         (ao, None)
+    };
+
+    // 多选区掩码回滚用的导入前快照（仅在确实存在多段约束时才需要）
+    let mask_before: Option<Vec<f32>> = if selection_ranges.is_some() && !selection_window.is_empty()
+    {
+        Some(entry.pitch_edit.clone())
+    } else {
+        None
     };
 
     let target_slice = if let Some(clamp_len) = clamp_range_end {
@@ -461,6 +481,27 @@ pub(super) fn import_midi_to_pitch(
             if filled > 0 {
                 midi_log(format!("import_midi_to_pitch: fill_gaps filled={}", filled));
             }
+        }
+    }
+
+    // 多选区掩码回滚：断层（未选中）的帧恢复导入前的值 —— 导入同样不得
+    // 把两段之间的缺口填平（与前端"不合并断层"语义一致）。
+    if let Some(before) = mask_before {
+        let mut reverted = 0usize;
+        for idx in 0..entry.pitch_edit.len() {
+            if selection_window.allows(idx) {
+                continue;
+            }
+            if entry.pitch_edit[idx] != before[idx] {
+                entry.pitch_edit[idx] = before[idx];
+                reverted += 1;
+            }
+        }
+        if reverted > 0 {
+            midi_log(format!(
+                "import_midi_to_pitch: multi-range mask reverted frames={}",
+                reverted
+            ));
         }
     }
 

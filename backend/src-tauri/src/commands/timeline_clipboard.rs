@@ -18,6 +18,10 @@ use crate::state::AppState;
 use crate::system_clipboard::{self, ClipboardCacheEntry};
 use serde_json::json;
 
+/// 参数线载荷版本：v1 = 单段 `values`（旧），v2 = 多选区 `segments`。
+const PARAM_PAYLOAD_VERSION: u64 = 2;
+const PARAM_PAYLOAD_VERSION_LEGACY: u64 = 1;
+
 fn current_project_name(state: &AppState) -> String {
     state
         .project
@@ -137,16 +141,26 @@ fn read_fragment() -> Result<ProjectFragment, String> {
 }
 
 /// 判断槽位字节是否为参数线载荷（前端 `writeSystemClipboardObject` 写入的
-/// JSON，`version:1` + `kind:"param"`）。
+/// JSON，`kind:"param"` + 已知版本）。
+///
+/// v2 引入了多选区载荷 `segments:[{startFrame, values}]`（每段带**相对复制
+/// 起点**的帧偏移，断层以偏移空洞的形式保留）；v1 是单段 `values`。两者都是
+/// 参数线载荷，必须都被识别 —— 否则粘贴的内容路由（resolvePasteRoute）会把
+/// 参数线数据误判成外来数据而丢给 REAPER 回退。
 fn is_param_payload(bytes: &[u8]) -> bool {
-    serde_json::from_slice::<serde_json::Value>(bytes)
-        .ok()
-        .and_then(|value| {
-            let kind = value.get("kind")?.as_str()?.to_string();
-            let version = value.get("version")?.as_u64()?;
-            (kind == "param" && version == 1).then_some(kind)
-        })
-        .is_some()
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return false;
+    };
+    let Some(kind) = value.get("kind").and_then(|entry| entry.as_str()) else {
+        return false;
+    };
+    if kind != "param" {
+        return false;
+    }
+    let Some(version) = value.get("version").and_then(|entry| entry.as_u64()) else {
+        return false;
+    };
+    version == PARAM_PAYLOAD_VERSION_LEGACY || version == PARAM_PAYLOAD_VERSION
 }
 
 /// 剪贴板当前载荷类型探测（粘贴的内容路由依据，last-copy-wins）。
@@ -498,27 +512,40 @@ pub(super) fn has_timeline_clipboard() -> serde_json::Value {
 mod tests {
     use super::*;
 
-    /// 参数线载荷判别：与前端 writeSystemClipboardObject 写入的 JSON 契约一致
-    /// （version:1 + kind:"param"）。
+    /// 参数线载荷判别：与前端 writeSystemClipboardObject 写入的 JSON 契约一致。
+    /// v1 是单段 values（旧），v2 是多选区 segments —— 两者都必须识别，
+    /// 否则多选区载荷会被内容路由误判成外来数据。
     #[test]
     fn param_payload_is_recognized() {
-        let json = serde_json::json!({
+        let legacy = serde_json::json!({
             "version": 1,
             "kind": "param",
             "param": "pitch",
             "framePeriodMs": 5,
             "values": [123],
         });
-        assert!(is_param_payload(json.to_string().as_bytes()));
+        assert!(is_param_payload(legacy.to_string().as_bytes()));
+
+        let multi_range = serde_json::json!({
+            "version": 2,
+            "kind": "param",
+            "param": "pitch",
+            "framePeriodMs": 5,
+            "segments": [
+                { "startFrame": 0, "values": [1, 2] },
+                { "startFrame": 200, "values": [3] },
+            ],
+        });
+        assert!(is_param_payload(multi_range.to_string().as_bytes()));
     }
 
     #[test]
     fn non_param_payloads_are_rejected() {
-        // 其它 kind / 版本不符 / 非 JSON（如时间轴 MessagePack 载荷）都不算参数线。
+        // 其它 kind / 未知版本 / 非 JSON（如时间轴 MessagePack 载荷）都不算参数线。
         let clip_json = serde_json::json!({ "version": 1, "kind": "clip", "param": "x" });
         assert!(!is_param_payload(clip_json.to_string().as_bytes()));
-        let wrong_version = serde_json::json!({ "version": 2, "kind": "param" });
-        assert!(!is_param_payload(wrong_version.to_string().as_bytes()));
+        let unknown_version = serde_json::json!({ "version": 3, "kind": "param" });
+        assert!(!is_param_payload(unknown_version.to_string().as_bytes()));
         assert!(!is_param_payload(b"{\"kind\": \"param\"")); // 截断 JSON
         assert!(!is_param_payload(&[0x7b, 0x00, 0xff])); // 二进制
         assert!(!is_param_payload(b""));

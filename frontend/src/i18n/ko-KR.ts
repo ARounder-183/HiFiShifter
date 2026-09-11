@@ -837,6 +837,8 @@ export const koKR = {
     kb_modifier_horizontal_zoom: "캔버스 수평 줌 (타임라인 / 피아노 롤 / 피아노 키 휠)",
     kb_modifier_pr_vzoom: "캔버스 수직 줌 (타임라인 / 피아노 롤 휠)",
     kb_modifier_param_morph: "파라미터 형태 변형 (누른 채 선택 영역 내 앵커 드래그)",
+    kb_modifier_param_multi_select:
+        "다중 선택 범위 (누른 채 드래그로 범위 추가, 기존 범위를 누른 채 클릭하면 해당 범위 해제)",
     kb_modifier_param_fine_adjust:
         "미세 조정 (누른 채: 슬라이더 / 입력란 휠 / 게인 드래그 / 비브라토 휠)",
     kb_modifier_vibrato_amplitude_adjust: "비브라토 진폭 조절 (직선/비브라토 드래그 중 휠)",

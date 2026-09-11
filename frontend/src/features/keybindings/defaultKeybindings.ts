@@ -159,6 +159,10 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     "modifier.pianoKeysVerticalScroll": { key: "__none__", modifierOnly: true },
     "modifier.pianoKeysVerticalZoom": { key: "alt", modifierOnly: true, alt: true },
     "modifier.paramMorph": { key: "alt", modifierOnly: true, alt: true },
+    // 参数编辑器多选区：按住 + 拖动 = 追加一段选区，按住 + 点击已有段 = 取消该段
+    // （与时间轴 ⌘/Ctrl + 点击的多选切换同源语义）。默认主修饰键，macOS 上
+    // 由 ctrl 字段自动映射为 ⌘（见 platform.ts）。
+    "modifier.paramMultiSelect": { key: "control", modifierOnly: true, ctrl: true },
     "modifier.paramFineAdjust": { key: "control", modifierOnly: true, ctrl: true },
     "modifier.vibratoAmplitudeAdjust": { key: "__none__", modifierOnly: true },
     "modifier.vibratoFrequencyAdjust": { key: "alt", modifierOnly: true, alt: true },
@@ -465,6 +469,19 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
         group: "modParam",
         modifierOperationType: "drag",
         conflictScenes: ["roll.morph"],
+    },
+    "modifier.paramMultiSelect": {
+        labelKey: "kb_modifier_param_multi_select",
+        group: "modParam",
+        modifierOperationType: "drag",
+        // 场景声明与运行时优先级一致：
+        // - roll.select 本手势自身；
+        // - roll.paramDrag 会被本手势抢占（按住修饰键拖动不再移动曲线），
+        //   与 modifier.clipNoSnap 共用按键时互相干扰；
+        // - roll.paramEdge 会抢在本手势之前（Alt 边缘拉伸优先），两者共用
+        //   按键时多选会完全失效。
+        // 与之不同目标的场景（时间轴 clip.select、滚轮场景）不列入，避免误报。
+        conflictScenes: ["roll.select", "roll.paramDrag", "roll.paramEdge"],
     },
     "modifier.vibratoAmplitudeAdjust": {
         labelKey: "kb_modifier_vibrato_amplitude_adjust",
