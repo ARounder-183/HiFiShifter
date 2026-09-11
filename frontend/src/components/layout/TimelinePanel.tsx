@@ -1413,6 +1413,48 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         [setMultiSelectedClipIds],
     );
 
+    /**
+     * 内核右键菜单：复用既有分支（clip 菜单 / 轨道区菜单）。
+     *
+     * 与旧实现的差别只在**命中来源**：旧实现用 `trackIdFromClientY` +
+     * `beatFromClientX`（依赖原生 scroller 的 scrollLeft），内核直接给命中的
+     * 轨道与 clip 列表，菜单分支本身不变。
+     */
+    const handleKernelContextMenu = React.useCallback(
+        (args: {
+            clientX: number;
+            clientY: number;
+            clipIds: readonly string[];
+            trackId: string | null;
+            sec: number;
+        }) => {
+            setContextMenu(null);
+            setTrackAreaMenu(null);
+            if (args.trackId === null) return;
+            if (args.clipIds.length > 0) {
+                // 最上面那个（startSec 最大）作为主目标，其余作为"重叠选择"入口——
+                // 与旧实现取 `clipsHere[clipsHere.length - 1]` 一致。
+                setContextMenu({
+                    x: args.clientX,
+                    y: args.clientY,
+                    clipId: args.clipIds[args.clipIds.length - 1],
+                    overlappingClipIds: args.clipIds.length > 1 ? [...args.clipIds] : undefined,
+                });
+                return;
+            }
+            if (sessionRef.current.selectedTrackId !== args.trackId) {
+                void dispatch(selectTrackRemote(args.trackId));
+            }
+            setTrackAreaMenu({
+                x: args.clientX,
+                y: args.clientY,
+                trackId: args.trackId,
+                timeSec: args.sec,
+            });
+        },
+        [dispatch, sessionRef, setContextMenu, setTrackAreaMenu],
+    );
+
     /** 内核交互回调集合（引用稳定：内核创建时取一次）。 */
     const kernelInteractions = React.useMemo(
         () => ({
@@ -1426,6 +1468,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             onFadeCommit: handleKernelFadeCommit,
             onBoxSelectPreview: handleKernelBoxSelectPreview,
             onBoxSelectCommit: handleKernelBoxSelectCommit,
+            onContextMenu: handleKernelContextMenu,
         }),
         [
             handleKernelSeek,
@@ -1438,6 +1481,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             handleKernelFadeCommit,
             handleKernelBoxSelectPreview,
             handleKernelBoxSelectCommit,
+            handleKernelContextMenu,
         ],
     );
 

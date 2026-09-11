@@ -313,6 +313,23 @@ export interface TimelineKernelInteractions {
         readonly additive: boolean;
         readonly cancelled: boolean;
     }) => void;
+    /**
+     * 右键菜单请求（未发生框选拖拽的右键单击）。
+     *
+     * 内核模式下旧的滚动容器不渲染，其 `onContextMenu` 完全不触发——菜单需要由
+     * 内核提供**命中信息**，调用方复用既有分支（clip 菜单 / 轨道区菜单）。
+     *
+     * @param args 指针位置与命中结果；`clipIds` 是指针处该轨道上的**全部** clip
+     *   （按 startSec 升序，可能重叠），调用方据此决定是否提供"重叠选择"入口。
+     */
+    readonly onContextMenu?: (args: {
+        readonly clientX: number;
+        readonly clientY: number;
+        readonly clipIds: readonly string[];
+        readonly trackId: string | null;
+        /** 指针处的工程时间（秒）：轨道区菜单的"在此处新建"等操作需要它。 */
+        readonly sec: number;
+    }) => void;
 }
 
 /** 宿主句柄。 */
@@ -1849,9 +1866,45 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      * 会弹出右键菜单（与刚完成的框选操作冲突）。
      */
     function onContextMenu(event: MouseEvent): void {
-        if (!suppressNextContextMenu) return;
+        if (suppressNextContextMenu) {
+            event.preventDefault();
+            suppressNextContextMenu = false;
+            return;
+        }
+        if (interactions?.onContextMenu === undefined) return;
         event.preventDefault();
-        suppressNextContextMenu = false;
+        const hit = hitAt(event.clientX, event.clientY);
+        const trackId = hit.kind === "clip" ? hit.clip.trackId : hit.trackId;
+        interactions.onContextMenu({
+            clientX: event.clientX,
+            clientY: event.clientY,
+            clipIds: trackId === null ? [] : clipsAtPointer(trackId, hit.sec),
+            trackId,
+            sec: hit.sec,
+        });
+    }
+
+    /**
+     * 收集某轨道上覆盖指定时间点的全部 clip（按 startSec 升序）。
+     *
+     * 特殊说明：用**闭区间**（`sec <= 右端`）而不是命中测试的半开区间——右键菜单
+     * 要列出"指针处有哪些 clip"，相邻紧贴的两个在交界处都该出现（用户可能想选
+     * 被压住的那个）。
+     *
+     * @param trackId 轨道 id。
+     * @param sec 工程时间（秒）。
+     * @returns clip id 列表。
+     */
+    function clipsAtPointer(trackId: string, sec: number): string[] {
+        ensureHitIndex();
+        const list = hitClipsByTrack.get(trackId) ?? [];
+        const result: string[] = [];
+        for (const clip of list) {
+            if (sec >= clip.startSec && sec <= clip.startSec + clip.lengthSec) {
+                result.push(clip.id);
+            }
+        }
+        return result;
     }
 
     container.addEventListener("pointerdown", onPointerDown);
