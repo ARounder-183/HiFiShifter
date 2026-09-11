@@ -69,6 +69,25 @@ describe("buildGridInstances", () => {
         expect(at1[0].w).toBe(at2[0].w);
     });
 
+    it("同一位置的重复刻度只产出一条（避免 alpha 累积变亮）", () => {
+        // 旧实现是 SVG path（重复坐标只覆盖）；GL 逐实例绘制会让 alpha 翻倍。
+        const out = build([makeTick(100), makeTick(100)]);
+        expect(out).toHaveLength(1);
+    });
+
+    it("同一位置强弱重合时保留强线", () => {
+        const out = build([makeTick(100), makeTick(100, true)]);
+        expect(out).toHaveLength(1);
+        expect(out[0].w).toBe(2);
+        expect(out[0].rgba).toEqual([1, 1, 1, 0.2 * OPACITY]);
+    });
+
+    it("吸附后落在同一物理像素列的刻度也归并", () => {
+        // dpr=2：99.9 与 100.1 的居中左缘都吸附到 199/2 = 99.5
+        const out = build([makeTick(99.9), makeTick(100.1)]);
+        expect(out).toHaveLength(1);
+    });
+
     it("强弱线使用各自的颜色，并叠加整体透明度", () => {
         const out = build([makeTick(100), makeTick(200, true)]);
         expect(out[0].rgba).toEqual([1, 1, 1, 0.1 * OPACITY]);

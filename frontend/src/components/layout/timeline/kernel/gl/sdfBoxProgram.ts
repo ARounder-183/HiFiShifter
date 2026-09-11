@@ -133,7 +133,10 @@ float roundedBoxSdf(vec2 p, vec2 b, float r) {
 void main() {
     // 平面矩形：直接输出颜色（四边形本身就是精确矩形，无需 SDF / 分区）。
     if (v_mode > 0.5) {
-        outColor = v_borderColor;
+        // **预乘输出**：blend 用的是 (ONE, ONE_MINUS_SRC_ALPHA)，rgb 必须已乘 alpha。
+        // 输出非预乘颜色时混合式退化为 rgb + dst*(1-a)：alpha 完全失效，
+        // 0.1 的白色网格线会在深色背景上直接变成纯白（"网格线太亮"的根因）。
+        outColor = vec4(v_borderColor.rgb * v_borderColor.a, v_borderColor.a);
         return;
     }
 
@@ -164,9 +167,11 @@ void main() {
         base.rgb = mix(base.rgb, v_seamColor, seam);
     }
 
-    // 描边叠加（预乘 alpha 的混合方式与 Canvas2D 的 source-over 对齐）。
-    outColor = vec4(mix(base.rgb, v_borderColor.rgb, inBorder * v_borderColor.a),
-                    max(base.a, inBorder * v_borderColor.a));
+    // 描边叠加：先按 source-over 在**非预乘**空间求出结果色，再统一转预乘输出
+    // （见 FLAT 分支的说明；不转会让半透明描边与块面在深色背景上过亮）。
+    vec4 result = vec4(mix(base.rgb, v_borderColor.rgb, inBorder * v_borderColor.a),
+                       max(base.a, inBorder * v_borderColor.a));
+    outColor = vec4(result.rgb * result.a, result.a);
 }`;
 
 /** 单位四边形（两个三角形，6 顶点）。 */

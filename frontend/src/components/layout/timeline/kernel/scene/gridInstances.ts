@@ -127,6 +127,17 @@ export function buildGridInstances(args: GridInstanceArgs): FlatInstance[] {
     if (contentBottom <= 0) return [];
 
     const out: FlatInstance[] = [];
+    /**
+     * 同一设备像素位置归并（键 = 吸附后的物理像素列）。
+     *
+     * 【为什么必须归并】刻度数组里**同一位置可能出现多条**（主/副时间单位在小节线
+     * 处重合）。旧实现用 SVG path：重复坐标只是把同一段线描两次，`stroke` 不会
+     * 累积透明度；而 GL 是**逐实例绘制**，同一位置的半透明矩形叠两次会让 alpha
+     * 近似翻倍——这正是"网格线明显偏亮"的根因。
+     *
+     * 归并时保留**更强**的那条（强线优先），保证小节线不会退化成弱线宽度。
+     */
+    const byPosition = new Map<number, { x: number; strong: boolean }>();
     for (const tick of args.ticks) {
         const x = tick.contentPx;
         if (!Number.isFinite(x)) continue;
@@ -136,13 +147,24 @@ export function buildGridInstances(args: GridInstanceArgs): FlatInstance[] {
         const cssWidth = strong ? STRONG_LINE_CSS_PX : WEAK_LINE_CSS_PX;
         // 居中描边（与旧实现 SVG 的 stroke 语义一致）：矩形左缘 = 中心 − 半宽。
         // 吸附仍按设备像素栅格，保证线宽恒为整数物理像素、不因落点相位变虚。
-        const left = x - cssWidth / 2;
+        const snappedLeft = Math.round((x - cssWidth / 2) * dpr) / dpr;
+        // 键用**中心**位置的物理像素列，不能用左缘：强线（宽 2）与弱线（宽 1）
+        // 的左缘本就不同，用左缘作键会让本该重合的强弱线各画一条（又叠亮回去）。
+        const key = Math.round(x * dpr);
+        const existing = byPosition.get(key);
+        if (existing === undefined || (strong && !existing.strong)) {
+            byPosition.set(key, { x: snappedLeft, strong });
+        }
+    }
+
+    for (const item of byPosition.values()) {
+        const cssWidth = item.strong ? STRONG_LINE_CSS_PX : WEAK_LINE_CSS_PX;
         out.push({
-            x: Math.round(left * dpr) / dpr,
+            x: item.x,
             y: 0,
             w: cssWidth,
             h: contentBottom,
-            rgba: applyOpacity(strong ? args.strongRgba : args.weakRgba, GRID_LINE_OPACITY),
+            rgba: applyOpacity(item.strong ? args.strongRgba : args.weakRgba, GRID_LINE_OPACITY),
         });
     }
     return out;
