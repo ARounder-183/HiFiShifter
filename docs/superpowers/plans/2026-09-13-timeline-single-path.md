@@ -32,8 +32,8 @@
 | `frontend/src/components/layout/timeline/TimelineCanvasViewport.tsx` | 188 | 旧实现的 Canvas2D 视口，仅被 `TimelineSurface` + barrel |
 | `frontend/src/components/layout/timeline/BackgroundGrid.tsx` | 457 | 旧实现的网格，仅被 `TimelineSurface` + barrel |
 | `frontend/src/components/layout/timeline/ClipItem.tsx` | 945 | 旧实现的 clip DOM 组件，仅被 `TrackLane` + barrel |
-| `frontend/src/components/layout/timeline/TrackLane.tsx` | 1006 | 旧实现的轨道 DOM；**其纯函数须先拆出**（任务 4） |
-| `frontend/src/components/layout/timeline/kernel/kernelMount.ts` + `.test.ts` | — | `enabled` 维度消失后退化为伪抽象（任务 9 简化并保留测试） |
+| `frontend/src/components/layout/timeline/TrackLane.tsx` | 1006 | 旧实现的轨道 DOM；**其纯函数须先拆出**（任务 3） |
+| `frontend/src/components/layout/timeline/kernel/kernelMount.ts` + `.test.ts` | — | `enabled` 维度消失后退化为伪抽象（任务 4 步骤 8 简化并保留行为测试） |
 
 ### 新建
 | 路径 | 职责 |
@@ -49,12 +49,11 @@
 | 路径 | 改动 |
 | --- | --- |
 | `frontend/src/components/layout/TimelinePanel.tsx` | 阶段 1 改分支为无条件；阶段 2 删孤儿 state；阶段 3 删 import 与旧 JSX；阶段 4 接入失败界面 |
-| `frontend/src/components/layout/pianoRoll/kernel/host/pianoRollKernelHost.ts` | 新增 GL 失败回调；`glSceneEnabled` 语义调整（任务 6-7） |
-| `frontend/src/components/layout/PianoRollPanel.tsx` | `skip*` 由静态常量改为运行期派生（任务 7）；移除三个开关（任务 10） |
-| `frontend/src/components/layout/TimelineDisplaySettingsDialog.tsx` | 移除内核总开关（任务 10） |
-| `frontend/src/components/layout/timeline/kernel/featureFlag.ts` | 删除（任务 10） |
-| `frontend/src/dev/perfProject.ts` | 移除内核切换按钮（任务 10） |
-| `frontend/src/i18n/*.ts`（5 语言） | 移除 3 条旧文案、新增失败界面文案（任务 10-11） |
+| `frontend/src/components/layout/PianoRollPanel.tsx` | 移除三个开关（任务 4） |
+| `frontend/src/components/layout/TimelineDisplaySettingsDialog.tsx` | 移除内核总开关（任务 4） |
+| `frontend/src/components/layout/timeline/kernel/featureFlag.ts` | 删除（任务 4） |
+| `frontend/src/dev/perfProject.ts` | 移除内核切换按钮（任务 4） |
+| `frontend/src/i18n/*.ts`（5 语言） | 移除 3 条旧文案（任务 4）；新增失败界面文案（任务 5） |
 
 ---
 
@@ -562,302 +561,7 @@ TimelineCanvasViewport / BackgroundGrid / TrackLane / ClipItem，共约 3171 行
 
 ---
 
-## 任务 4：修复钢琴卷帘横向网格在 GL 失败时消失
-
-**这是写本计划时发现的既有缺陷。** 实测依据（dpr 2，`?mock=1`）：
-
-| GL 状态 | 贯穿宽度的横向网格线 | 5 个采样列的局部暗极小 |
-| --- | --- | --- |
-| 正常 | **24** | 24 / 24 / 24 / 24 / 24 |
-| WebGL2 被禁 | **0** | 0 / 0 / 0 / 0 / 0 |
-
-**根因**：`PianoRollPanel.tsx` 的 `skipGrid: PARAM_EDITOR_GL_SCENE_ENABLED` 是**模块加载期的静态常量**，而 GL 初始化在宿主构造函数里、失败发生在**运行期**（`pianoRollKernelHost.ts:456-467` 记入 `glFailureReason`）。面板从不读 `getGlStatus()`，于是 GL 失败后 Canvas2D 永久跳过网格、GL 又画不出来 → **横向音高网格彻底消失**。
-
-**Files:**
-- Modify: `frontend/src/components/layout/pianoRoll/kernel/host/pianoRollKernelHost.ts`（新增失败回调）
-- Modify: `frontend/src/components/layout/PianoRollPanel.tsx`（`skip*` 改运行期派生）
-
-- [ ] **步骤 1：写宿主的失败通知测试**
-
-宿主已有测试脚手架（`frontend/src/components/layout/pianoRoll/kernel/host/pianoRollKernelHost.test.ts` 的 `makeHost()`）。在该文件末尾追加：
-
-```ts
-describe("GL 失败通知（横向网格回退的前提）", () => {
-    it("★ glSceneEnabled 为真但 canvas 缺失时，回调必须被触发且带原因", () => {
-        // 【为什么需要这条】面板要靠这个回调把 skipGrid 从"永久跳过"改回"由
-        // Canvas2D 绘制"。没有它，GL 失败后横向音高网格会彻底消失（实测：
-        // 贯穿宽度的横向网格线从 24 条变 0 条）。
-        const failures: string[] = [];
-        const handle = makeHost({
-            glSceneEnabled: true,
-            glCanvas: null, // 模拟 WebGL2 不可用
-            onGlUnavailable: (reason) => failures.push(reason),
-        });
-        try {
-            expect(failures.length).toBe(1);
-            expect(failures[0]).toContain("WebGL2");
-        } finally {
-            handle.dispose();
-        }
-    });
-
-    it("glSceneEnabled 为假时不触发失败回调（用户主动关层，不是失败）", () => {
-        const failures: string[] = [];
-        const handle = makeHost({
-            glSceneEnabled: false,
-            glCanvas: null,
-            onGlUnavailable: (reason) => failures.push(reason),
-        });
-        try {
-            expect(failures).toEqual([]);
-        } finally {
-            handle.dispose();
-        }
-    });
-});
-```
-
-**若 `makeHost()` 不支持 `glSceneEnabled` / `glCanvas` / `onGlUnavailable` 参数**：先读该文件的 `makeHost` 定义，按其现有模式（它用桩对象满足宿主实际用到的成员）扩展这三个参数并透传给 `createPianoRollKernelHost`。`glCanvas` 传 `null` 即可（宿主对 `null` 会走失败分支）。
-
-- [ ] **步骤 2：运行测试确认失败**
-
-```bash
-cd /Users/guoqiangye/code/HiFiShifter/frontend
-npx vitest run src/components/layout/pianoRoll/kernel/host/pianoRollKernelHost.test.ts 2>&1 | tail -8
-```
-期望：FAIL —— `onGlUnavailable` 尚不存在（类型错误）或回调未被调用。
-
-- [ ] **步骤 3：给宿主加失败回调**
-
-在 `pianoRollKernelHost.ts` 的选项接口中（`glSceneEnabled` 附近，约 `:189`）新增：
-
-```ts
-    /**
-     * GL 场景层**运行期不可用**时的通知（WebGL2 上下文 / 着色器创建失败）。
-     *
-     * 【为什么必须有这个回调】面板据 `glSceneEnabled` 决定 Canvas2D 是否
-     * `skipGrid` / `skipCurves` 等——那些是**模块加载期**的静态值，而 GL 失败发生在
-     * **运行期**（构造函数里）。没有回调时，GL 失败后 Canvas2D 永久跳过这些层、
-     * GL 又画不出来，表现为**横向音高网格整片消失**（实测：贯穿宽度的横向线
-     * 从 24 条变 0 条）。面板收到本回调后应把 skip* 改为"由 Canvas2D 绘制"。
-     *
-     * 特殊说明：仅在 `glSceneEnabled === true` 且初始化**确实失败**时触发；
-     * 用户主动关闭 GL 层（`glSceneEnabled === false`）不算失败，不触发。
-     *
-     * @param reason 失败原因（面向日志与排障，可直接展示给用户）。
-     */
-    readonly onGlUnavailable?: (reason: string) => void;
-```
-
-然后在 GL 初始化失败的两个位置（现有代码在约 `:456-467`）各调用一次回调。改动前的原文是：
-
-```ts
-    if (args.glSceneEnabled === true && args.glCanvas != null) {
-        try {
-            glHandle = createGlCanvas(args.glCanvas);
-            if (glHandle === null) {
-                glFailureReason = "WebGL2 不可用";
-            } else {
-                glProgram = createSdfBoxProgram(glHandle.gl);
-            }
-        } catch (error) {
-            glHandle = null;
-            glProgram = null;
-            glFailureReason = error instanceof Error ? error.message : String(error);
-        }
-    }
-```
-
-改为（两处失败各加一次通知）：
-
-```ts
-    if (args.glSceneEnabled === true && args.glCanvas != null) {
-        try {
-            glHandle = createGlCanvas(args.glCanvas);
-            if (glHandle === null) {
-                glFailureReason = "WebGL2 不可用";
-                // 通知面板：被 GL 接管的图层必须交还 Canvas2D（见选项说明）。
-                args.onGlUnavailable?.(glFailureReason);
-            } else {
-                glProgram = createSdfBoxProgram(glHandle.gl);
-            }
-        } catch (error) {
-            glHandle = null;
-            glProgram = null;
-            glFailureReason = error instanceof Error ? error.message : String(error);
-            // 着色器编译失败同属"GL 不可用"，同样交还 Canvas2D。
-            args.onGlUnavailable?.(glFailureReason);
-        }
-    }
-```
-
-**同步更新该文件的文件头注释**：把"失败必须是软着陆"一节改为说明"软着陆由面板接管 skip*（见 `onGlUnavailable`）"。
-
-- [ ] **步骤 4：运行测试确认通过**
-
-```bash
-cd /Users/guoqiangye/code/HiFiShifter/frontend
-npx vitest run src/components/layout/pianoRoll/kernel/host/pianoRollKernelHost.test.ts 2>&1 | tail -6
-```
-期望：新增 2 项通过，原有用例不回归。
-
-- [ ] **步骤 5：面板改用运行期派生**
-
-在 `PianoRollPanel.tsx` 中新增一个 ref 记录 GL 是否不可用。先找到宿主创建处（`glSceneEnabled: PARAM_EDITOR_GL_SCENE_ENABLED,` 约 `:2288`），在其同级加入回调：
-
-```ts
-            glSceneEnabled: PARAM_EDITOR_GL_SCENE_ENABLED,
-            // GL 运行期失败时把图层交还 Canvas2D（见宿主选项说明）。用 ref 而非
-            // state：drawRef 每帧读取它，不需要触发 React 重渲染。
-            onGlUnavailable: (reason) => {
-                if (glUnavailableRef.current) return;
-                glUnavailableRef.current = true;
-                console.warn(`[PianoRollPanel] 参数编辑器 GL 层不可用（${reason}），已交还 Canvas2D 绘制`);
-                invalidate();
-            },
-```
-
-并在组件内声明该 ref（放在其他 ref 附近）：
-
-```ts
-    /**
-     * GL 场景层是否已在**运行期**失败。
-     *
-     * 【为什么需要它】`PARAM_EDITOR_GL_SCENE_ENABLED` 是模块加载期的静态开关，
-     * 而 GL 可能在该开关为真时于运行期失败（老驱动 / 远程桌面 / 上下文耗尽）。
-     * 那些被 GL 接管的图层若继续让 Canvas2D 跳过（skip*），就**没人画**了 ——
-     * 实测表现为横向音高网格整片消失（24 条 → 0 条）。
-     */
-    const glUnavailableRef = useRef(false);
-```
-
-然后把 `drawPianoRoll({...})` 调用里的 6 个 skip 参数由静态常量改为运行期表达式（约 `:3697-3710`）：
-
-```ts
-            // GL 只在**真的在出图**时接管这些图层；一旦运行期失败，交还 Canvas2D
-            // （见 glUnavailableRef 与宿主的 onGlUnavailable）。
-            skipGrid: PARAM_EDITOR_GL_SCENE_ENABLED && !glUnavailableRef.current,
-            skipKeyboardGeometry: PARAM_EDITOR_GL_SCENE_ENABLED && !glUnavailableRef.current,
-            skipAxisText: PARAM_EDITOR_GL_SCENE_ENABLED && !glUnavailableRef.current,
-            skipAxisCanvas: PARAM_EDITOR_GL_SCENE_ENABLED && !glUnavailableRef.current,
-            skipPlayhead: PARAM_EDITOR_GL_SCENE_ENABLED && !glUnavailableRef.current,
-            skipCurves: PARAM_EDITOR_CURVE_GL_ENABLED && !glUnavailableRef.current,
-            mainContentSignature:
-                PARAM_EDITOR_GL_SCENE_ENABLED && !glUnavailableRef.current
-                    ? mainContentSignature
-                    : undefined,
-```
-
-- [ ] **步骤 6：类型检查与全量测试**
-
-```bash
-cd /Users/guoqiangye/code/HiFiShifter/frontend
-npx tsc -b --noEmit 2>&1 | head -10
-npx vitest run 2>&1 | tail -4
-```
-期望：`tsc` 无输出；测试在任务 3 基础上再 +2 通过。
-
-- [ ] **步骤 7：真机验证横向网格恢复**
-
-```bash
-cd /Users/guoqiangye/code/HiFiShifter/frontend
-VW=1920 VH=1200 PROBE_INIT=/tmp/vprobe/nogl.js node scripts/dev-shot.mjs "http://127.0.0.1:5174/?mock=1" /tmp/task4-nogl.png 5000 '[
- {"type":"eval","js":"const h=window.__hsPianoRollKernel; const s=h?h.getGlStatus():null; return {glActive:s?s.active:null, glFailure:s?s.failureReason:null};"},
- {"type":"shotElement","selector":"[data-piano-roll-scroller]","path":"/tmp/task4-el.png"}
-]' 2>&1 | grep -E "^EVAL"
-```
-
-`/tmp/vprobe/nogl.js` 的内容（若不存在则创建，作用：让 `getContext("webgl2")` 返回 null）：
-
-```js
-(function () {
-  const orig = HTMLCanvasElement.prototype.getContext;
-  HTMLCanvasElement.prototype.getContext = function (type, ...rest) {
-    if (type === "webgl2" || type === "webgl" || type === "experimental-webgl") return null;
-    return orig.call(this, type, ...rest);
-  };
-})();
-```
-
-期望：`glActive:false`、`glFailure:"WebGL2 不可用"`。然后用 `read_image` 打开 `/tmp/task4-el.png`，**必须能看到横向音高网格线**（修复前只有纵向小节线）。
-
-- [ ] **步骤 8：用同一判据量化确认（修复前 0 条 → 修复后应 ≈24 条）**
-
-在 `frontend/` 下建一个临时脚本 `/tmp/measure-hlines.mjs` 并**从 `frontend/` 运行**（脚本 import `playwright-core`，从 `/tmp` 运行会 `ERR_MODULE_NOT_FOUND`）：
-
-```bash
-cd /Users/guoqiangye/code/HiFiShifter/frontend
-cp /tmp/measure-hlines.mjs ./measure-hlines.mjs && node measure-hlines.mjs /tmp/task4-el.png; rm -f measure-hlines.mjs
-```
-
-脚本内容：
-
-```js
-import { chromium } from "playwright-core";
-import { readFileSync } from "fs";
-const br = await chromium.launch({ channel: "chrome", headless: true });
-const pg = await br.newPage();
-const r = await pg.evaluate(async (b64) => {
-  const img = new Image(); img.src = "data:image/png;base64," + b64; await img.decode();
-  const c = document.createElement("canvas"); c.width = img.width; c.height = img.height;
-  const x = c.getContext("2d"); x.drawImage(img, 0, 0);
-  const all = x.getImageData(0, 0, img.width, img.height).data;
-  const W = img.width, H = img.height;
-  let bg = 0; for (let i = 0; i < 400; i++) bg += all[i*4] + all[i*4+1] + all[i*4+2];
-  bg /= 400;
-  let fullRows = 0;
-  for (let y = 0; y < H; y++) {
-    let dark = 0;
-    for (let xx = 0; xx < W; xx++) {
-      const i = (y * W + xx) * 4;
-      if (all[i] + all[i+1] + all[i+2] < bg - 24) dark++;
-    }
-    if (dark > W * 0.9) fullRows++;
-  }
-  return { W, H, horizontalLines: fullRows };
-}, readFileSync(process.argv[2]).toString("base64"));
-console.log(JSON.stringify(r));
-await br.close();
-```
-期望：`horizontalLines` 约 **24**（与 GL 正常时的 24 一致）。
-
-- [ ] **步骤 9：确认 GL 正常时行为不变**
-
-```bash
-cd /Users/guoqiangye/code/HiFiShifter/frontend
-VW=1920 VH=1200 node scripts/dev-shot.mjs "http://127.0.0.1:5174/?mock=1" /tmp/task4-ok.png 5000 '[
- {"type":"eval","js":"const s=window.__hsPianoRollKernel.getGlStatus(); return {glActive:s.active};"},
- {"type":"shotElement","selector":"[data-piano-roll-scroller]","path":"/tmp/task4-ok-el.png"}
-]' 2>&1 | grep -E "^EVAL"
-```
-期望：`glActive:true`，且 `task4-ok-el.png` 的横向线数仍约 24（不回归、不重复绘制）。
-
-- [ ] **步骤 10：提交**
-
-```bash
-cd /Users/guoqiangye/code/HiFiShifter
-git add -A
-git commit -m "fix(pianoRoll): GL 运行期失败后横向音高网格消失（skip* 是静态值）
-
-写唯一路径计划时发现：skipGrid / skipCurves 等取自模块加载期的
-PARAM_EDITOR_GL_SCENE_ENABLED，而 GL 初始化在宿主构造函数里、失败发生在运行期。
-面板从不读 getGlStatus()，于是 GL 失败后 Canvas2D 永久跳过被 GL 接管的图层、
-GL 又画不出来。
-
-实测（dpr 2，?mock=1，判据为贯穿宽度的横向网格线数）：
-- GL 正常：24 条
-- WebGL2 被禁：0 条  ← 横向音高网格整片消失
-
-修复：宿主新增 onGlUnavailable 回调（用户主动关层不触发），面板用 ref 记录并在
-每帧的 drawPianoRoll 调用处把 skip* 改为「静态开关 && !运行期失败」。用 ref 而非
-state 是因为 drawRef 每帧读取、不需要 React 重渲染。
-
-复验：WebGL2 被禁时横向线 0 → 约 24 条；GL 正常时仍为约 24 条（无重复绘制）。"
-```
-
----
-
-## 任务 5：移除四个开关与相关界面（阶段 4）
+## 任务 4：移除四个开关与相关界面（阶段 4）
 
 **Files:**
 - Delete: `frontend/src/components/layout/timeline/kernel/featureFlag.ts`、`featureFlag.test.ts`、`kernelMount.ts`、`kernelMount.test.ts`
@@ -885,7 +589,7 @@ const PARAM_EDITOR_CURVE_GL_ENABLED = PARAM_EDITOR_GL_SCENE_ENABLED && isPianoRo
    - `PARAM_EDITOR_GL_SCENE_ENABLED` 出现 13 次 → **12 处使用**
    - `PARAM_EDITOR_CURVE_GL_ENABLED` 出现 3 次 → **2 处使用**
 
-   **这些数字仅供参考**：任务 4 已改写了其中 6 处 `skip*`，且本步骤会边改边变。**以 grep 的实际输出为准**（下一条命令），不要依赖上面的计数。
+   **这些数字仅供参考**，本步骤会边改边变。**以 grep 的实际输出为准**（下一条命令），不要依赖上面的计数。
 
 用下面的命令逐个核对（**不要**用无差别全局替换，`&&` 组合的表达式要看清）：
 
@@ -899,8 +603,10 @@ grep -n "PARAM_EDITOR_KERNEL_ENABLED\|PARAM_EDITOR_GL_SCENE_ENABLED\|PARAM_EDITO
 - `if (!PARAM_EDITOR_KERNEL_ENABLED) return;` → 整句删除（恒不成立）
 - `if (PARAM_EDITOR_KERNEL_ENABLED) return;` → 整句改为 `return;`（恒成立）
 - `PARAM_EDITOR_GL_SCENE_ENABLED ? buildGridSpec() : null` → `buildGridSpec()`
-- `mainContentSignature: PARAM_EDITOR_GL_SCENE_ENABLED && !glUnavailableRef.current ? mainContentSignature : undefined`（任务 4 已改）→ 保留运行期判断，只去掉静态项：`glUnavailableRef.current ? undefined : mainContentSignature`
-- 任务 4 引入的 `skip*: PARAM_EDITOR_GL_SCENE_ENABLED && !glUnavailableRef.current` → `skip*: !glUnavailableRef.current`
+- `mainContentSignature: PARAM_EDITOR_GL_SCENE_ENABLED ? mainContentSignature : undefined` → `mainContentSignature`
+- 六个 `skip*: PARAM_EDITOR_GL_SCENE_ENABLED`（或 `PARAM_EDITOR_CURVE_GL_ENABLED`）→ `true`
+
+**关于 `skip*` 改为恒 `true` 的后果（已知并接受，勿"顺手修"）**：BL 层是唯一绘制这些图层的地方，因此 WebGL2 运行期不可用时它们无人绘制（实测横向网格线 24 → 0）。这属**已知且有意接受**的限制，见 spec §2.4：无 WebGL2 的环境下参数编辑器本就无法正常工作，补一套 Canvas2D 回退等于把已迁走的渲染层再实现一遍。**不要**为此新增回调或运行期判断。
 
 - [ ] **步骤 2：改 `usePianoRollInteractions.ts`**
 
@@ -973,7 +679,7 @@ npx tsc -b --noEmit 2>&1 | head -20
     );
 ```
 
-并把 `handleKernelUnavailable`（任务 6 步骤 8 会再次出现，以那次为准）改为：
+并把 `handleKernelUnavailable`（任务 5 步骤 8 会再次出现，以那次为准）改为：
 
 ```ts
     const handleKernelUnavailable = React.useCallback((reason: string) => {
@@ -982,13 +688,13 @@ npx tsc -b --noEmit 2>&1 | head -20
     }, []);
 ```
 
-**说明**：`kernelUnavailable` 这个标识符在本任务后不再存在；渲染判据统一写作 `isKernelAvailable(kernelUnavailableReason !== null)`（任务 6 步骤 8 会给出最终形态）。
+**说明**：`kernelUnavailable` 这个标识符在本任务后不再存在；渲染判据统一写作 `isKernelAvailable(kernelUnavailableReason !== null)`（任务 5 步骤 8 会给出最终形态）。
 
 - [ ] **步骤 8：简化 `kernelMount.ts` 并保留行为测试**
 
 `kernelMount.ts` 的 `enabled` 维度已消失，保留它会造成"含恒真参数的伪抽象"。把它替换为不引入新模块的直接判断（删除该文件），**同时**把其测试改为守护"失败必须报错而非静默空白"这一行为——通过保留一个新测试文件覆盖面板的判定逻辑。
 
-具体做法：删除 `kernelMount.ts` 与 `kernelMount.test.ts`，并在 `frontend/src/components/layout/TimelinePanel.tsx` 内联判定（步骤 7 的 `kernelAvailable`）。为保住行为守护，在任务 6 创建的 `KernelUnavailableNotice.tsx` 旁新增 `kernelAvailability.ts` + `.test.ts`：
+具体做法：删除 `kernelMount.ts` 与 `kernelMount.test.ts`，并在 `frontend/src/components/layout/TimelinePanel.tsx` 内联判定（步骤 7 的 `kernelAvailable`）。为保住行为守护，在任务 5 创建的 `KernelUnavailableNotice.tsx` 旁新增 `kernelAvailability.ts` + `.test.ts`：
 
 创建 `frontend/src/components/layout/timeline/kernel/kernelAvailability.ts`：
 
@@ -1066,7 +772,7 @@ npx tsc -b --noEmit 2>&1 | head -10
 npx vitest run 2>&1 | tail -4
 npm run build 2>&1 | tail -3
 ```
-期望：`tsc` 无输出；测试通过数比任务 4 少 25（`featureFlag.test.ts` 删除）但**失败数仍为 2**；构建成功。
+期望：`tsc` 无输出；测试通过数比任务 3 少 25（`featureFlag.test.ts` 删除）但**失败数仍为 2**；构建成功。
 
 - [ ] **步骤 10：移除 5 语言的 3 条旧文案**
 
@@ -1110,7 +816,7 @@ kernelAvailability.ts + 测试承接。
 
 ---
 
-## 任务 6：GL 失败界面
+## 任务 5：GL 失败界面
 
 **Files:**
 - Create: `frontend/src/components/layout/renderKernel/gl/glDiagnostics.ts`
@@ -1465,7 +1171,7 @@ export const KernelUnavailableNotice: React.FC<Props> = ({ reason }) => {
 
 即：**只替换条件表达式那一行与末尾的 `)}`**，中间的子元素原样保留。
 
-配套：`kernelUnavailableReason`（`string | null`）与 `handleKernelUnavailable` 已在**任务 5 步骤 7** 定义，本任务只需新增两个 import：
+配套：`kernelUnavailableReason`（`string | null`）与 `handleKernelUnavailable` 已在**任务 4 步骤 7** 定义，本任务只需新增两个 import：
 
 ```ts
 import { KernelUnavailableNotice } from "./timeline/kernel/KernelUnavailableNotice";
@@ -1530,7 +1236,7 @@ renderer/vendor 字段）。
 
 ---
 
-## 任务 7：CPU 渲染基准进仓库
+## 任务 6：CPU 渲染基准进仓库
 
 **Files:**
 - Create: `frontend/scripts/cpu-render-bench.mjs`
@@ -1691,7 +1397,7 @@ node scripts/cpu-render-bench.mjs | grep softwareRenderer
 echo "— 对照：强制 WebGL2 不可用时 kernelMounted 应为 false —"
 ```
 
-第二步对照需要临时把 `getContext("webgl2")` 置空。由于该脚本不读 `PROBE_INIT`，改为直接确认判据本身：脚本里的 `kernelMounted` 取自 `!!window.__hfsKernel`，`softwareRenderer` 取自 `WEBGL_debug_renderer_info`。若 `kernelMounted` 为 `false`（说明内核实际不可用），脚本输出的 `scroll` 数据不具代表性——此时应先去查失败界面（任务 6），而不是采信该性能数字。
+第二步对照需要临时把 `getContext("webgl2")` 置空。由于该脚本不读 `PROBE_INIT`，改为直接确认判据本身：脚本里的 `kernelMounted` 取自 `!!window.__hfsKernel`，`softwareRenderer` 取自 `WEBGL_debug_renderer_info`。若 `kernelMounted` 为 `false`（说明内核实际不可用），脚本输出的 `scroll` 数据不具代表性——此时应先去查失败界面（任务 5），而不是采信该性能数字。
 
 - [ ] **步骤 4：提交**
 
@@ -1713,7 +1419,7 @@ git commit -m "test(perf): 固化 CPU-only 渲染基准脚本
 
 ---
 
-## 任务 8：全量验收
+## 任务 7：全量验收
 
 - [ ] **步骤 1：完整验证套件**
 
@@ -1807,17 +1513,18 @@ git commit -m "chore(timeline): 唯一路径改造验收记录
 
 | spec 要求 | 对应任务 |
 | --- | --- |
-| §2.1 CPU-only 可运行 + 像素一致 | 任务 7（固化脚本）、任务 8 步骤 5 |
-| §2.2 移除四个开关与设置项、i18n、dev 切换 | 任务 5 |
-| §2.3 参数编辑器保留 Canvas2D、移除三个开关 | 任务 4（修 GL 回退）、任务 5 步骤 1-2 |
+| §2.1 CPU-only 可运行 + 像素一致 | 任务 6（固化脚本）、任务 7 步骤 5 |
+| §2.2 移除四个开关与设置项、i18n、dev 切换 | 任务 4 |
+| §2.3 参数编辑器保留 Canvas2D、移除三个开关 | 任务 4 步骤 1-2 |
+| §2.4 参数编辑器 GL 失败时不可用（已知并接受，不修） | 有意不设任务 ✓ |
 | §3.1 删除 6 个旧组件 + 旧分支 JSX | 任务 2（JSX）、任务 3 步骤 7（文件） |
 | §3.2 拆分 `computeLeadingOverlapSecByClipId` | 任务 3 步骤 1-6 |
 | §3.3 保留共享模块 | 任务 3 步骤 7 的保留清单、步骤 8 的 `tsc` 校验 |
 | §3.4 不做渲染重写 | 计划中无相关任务 ✓ |
-| §3.5 `featureFlag.test.ts` 处置 + R8 留档 | 任务 5 步骤 5、步骤 8 |
-| §4 GL 失败界面（含"拿不到型号"限制） | 任务 6 |
+| §3.5 `featureFlag.test.ts` 处置 + R8 留档 | 任务 4 步骤 5、步骤 8 |
+| §4 GL 失败界面（含"拿不到型号"限制） | 任务 5 |
 | §5 分期（先不可达再删） | 任务 1 → 2 → 3 → 5 |
-| §6 验证方式 | 任务 8 全量验收 |
-| §8 验收标准 1-7 | 任务 8 步骤 1-5 |
+| §6 验证方式 | 任务 7 全量验收 |
+| §8 验收标准 1-7 | 任务 7 步骤 1-5 |
 
-**计划阶段发现的 spec 未覆盖缺陷**：任务 4（钢琴卷帘横向网格在 GL 失败时消失）。spec §2.3 断言"参数编辑器的软着陆有价值、要保留"，但实测该软着陆**当前是坏的**——`skip*` 为模块加载期静态值，GL 运行期失败后面板不知情。已在计划中作为独立任务修复。
+**计划阶段发现、但经用户决定不修的问题**：写计划时实测发现参数编辑器在 GL 运行期失败后横向音高网格整片消失（判据：贯穿宽度的横向网格线 24 条 → 0 条），根因是 `skip*` 取自模块加载期常量而 GL 失败发生在运行期。用户明确要求**不修**（GL 失败即视为不可用），故不在计划内设任务；已作为"已知并接受的限制"记入 spec §2.4，并在任务 4 步骤 1 加了"勿顺手修"的显式说明。
