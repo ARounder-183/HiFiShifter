@@ -14,6 +14,7 @@
  *   { "type": "shot", "path": "/tmp/x.png" }
  *   { "type": "eval", "js": "return 1 + 1" }
  */
+import { readFileSync } from "node:fs";
 import { chromium } from "playwright-core";
 
 const url = process.argv[2] ?? "http://localhost:5173/?mock=1";
@@ -38,6 +39,15 @@ if (kernelFlag !== undefined) {
     await page.addInitScript((value) => {
         window.localStorage.setItem("hifishifter.timelineKernel", value);
     }, kernelFlag);
+}
+// 可选的「文档加载前注入」脚本（`PROBE_INIT` 环境变量给定文件路径）。
+//
+// 【为什么需要】有些量必须在模块求值 / 首次挂载**之前**就开始记录，事后从
+// `eval` 装探针已经错过了挂载期。典型场景：统计 window 上事件监听的 add/remove
+// 是否配平（宿主 dispose 是否漏摘），StrictMode 下挂载期是双跑，错过就测不到。
+if (process.env.PROBE_INIT) {
+    const probeSource = readFileSync(process.env.PROBE_INIT, "utf8");
+    await page.addInitScript(probeSource);
 }
 
 const logs = [];
