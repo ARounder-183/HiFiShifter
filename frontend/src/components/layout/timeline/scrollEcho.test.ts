@@ -64,6 +64,39 @@ describe("isTrackListMirrorEcho（轨道头镜像回声判定）", () => {
         expect(isTrackListMirrorEcho({ mirroredScrollTop: 0, nativeScrollTop: 0 })).toBe(true);
     });
 
+    it("★ 容差内的**非零**差异仍算回声（实测量化误差，不是罕见情形）", () => {
+        // 【为什么要单独列非零差异】上面那批用例的值全都**完全相等**（差 0），
+        // 于是"容差"本身根本没被断言：把实现里的 `<= tolerance` 改成 `<= 0`
+        // （即取消容差）后整套用例照样通过——而容差正是本模块存在的理由。
+        //
+        // 实测：原生 scrollTop 被浏览器按设备像素量化，写→读误差是**常规**且有界的，
+        // 不是注释里说的"极端二次量化"：
+        // - dpr 1 → 可达 0.5（如写 20.5 读回 21）
+        // - dpr 2 → 0.25（如写 540.694 读回 540.5、写 124.4 读回 124.5）
+        // - dpr 3 → ≈0.167
+        expect(isTrackListMirrorEcho({ mirroredScrollTop: 540.5, nativeScrollTop: 540.69 })).toBe(
+            true,
+        );
+        expect(isTrackListMirrorEcho({ mirroredScrollTop: 124.5, nativeScrollTop: 124.4 })).toBe(
+            true,
+        );
+        // dpr 1 最坏：正好 0.5，落在**闭区间**边界上（`<=` 是刻意包含的）
+        expect(isTrackListMirrorEcho({ mirroredScrollTop: 20.5, nativeScrollTop: 21 })).toBe(true);
+        // dpr 3
+        expect(isTrackListMirrorEcho({ mirroredScrollTop: 30.167, nativeScrollTop: 30 })).toBe(
+            true,
+        );
+    });
+
+    it("★ 刚超出容差的差异不判回声（容差不能被悄悄放大）", () => {
+        // 与上一条成对：判据必须有两侧。只测"内部为真"时，把容差从 0.5 放大到 100
+        // 也不会被发现，而那样会把真实的焦点滚动输入吞掉。
+        expect(isTrackListMirrorEcho({ mirroredScrollTop: 28, nativeScrollTop: 28.6 })).toBe(false);
+        expect(isTrackListMirrorEcho({ mirroredScrollTop: 20.5, nativeScrollTop: 21.1 })).toBe(
+            false,
+        );
+    });
+
     it("超出容差的差异不判回声", () => {
         expect(isTrackListMirrorEcho({ mirroredScrollTop: 28, nativeScrollTop: 29 })).toBe(false);
     });

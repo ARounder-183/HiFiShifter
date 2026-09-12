@@ -93,13 +93,25 @@ describe("shouldCommitScroll（是否提交给 React）", () => {
     });
 
     it("非法入参不提交（避免 NaN 传染进渲染）", () => {
+        // 【为什么每条都配一个有限对照】NaN 参与的比较恒为 false，所以"返回 false"
+        // 这个断言在**没有守卫**时也成立——单看它测不出守卫是否存在（变异验证：
+        // 删掉 `Number.isFinite` 守卫后原用例 9/9 照旧通过）。配上"同样的值换成有限
+        // 数就该返回 true"的对照，才能把"守卫在起作用"与"恒返回 false"区分开。
         expect(shouldCommitScroll({ committedPx: Number.NaN, nextPx: 100, stepPx: step })).toBe(
             false,
         );
+        // 对照：committed 换成有限值时应当提交（证明上面的 false 不是恒 false）
+        expect(shouldCommitScroll({ committedPx: 0, nextPx: 100, stepPx: step })).toBe(true);
+
         expect(shouldCommitScroll({ committedPx: 0, nextPx: Number.NaN, stepPx: step })).toBe(
             false,
         );
+        // 对照：next 有限时应当提交
+        expect(shouldCommitScroll({ committedPx: 0, nextPx: 96, stepPx: step })).toBe(true);
+
         expect(shouldCommitScroll({ committedPx: 0, nextPx: 100, stepPx: Number.NaN })).toBe(false);
+        // 对照：step 有限时应当提交
+        expect(shouldCommitScroll({ committedPx: 0, nextPx: 100, stepPx: 96 })).toBe(true);
     });
 
     it("位置未变时不提交", () => {

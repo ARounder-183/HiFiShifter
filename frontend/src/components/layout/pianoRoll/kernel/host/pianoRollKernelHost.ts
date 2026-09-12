@@ -92,6 +92,7 @@ import {
     gridGeometrySignature,
     keyboardGeometrySignature,
     resolveLiveGridView,
+    resolveLiveSpan,
     type LiveGridView,
 } from "../scene/gridView";
 import {
@@ -315,6 +316,15 @@ export interface PianoRollKernelHost {
          * 对照，而不必从像素反推 view（那条路会引入大量猜测）。
          */
         readonly gridSpec: PianoRollGridSpec | null;
+        /**
+         * 本帧**实际用于几何**的实时视口（`gridSpec` + 内核真值解析后的结果）。
+         *
+         * 【为什么与 `gridSpec` 并列暴露】`gridSpec` 是面板写下的 render 期快照，
+         * 而几何用的是解析后的实时值；竖向滚动 / 竖向缩放会让两者分叉，且分叉只
+         * 体现在像素上。暴露解析结果后，验证可以直接断言"几何用的是实时 span /
+         * 实时 center"，不必从像素反推（曾出现"缩放出空白带"这类问题）。
+         */
+        readonly liveView: LiveGridView | null;
     };
     /** 标脏：请求下一帧提交。 */
     invalidate(): void;
@@ -551,15 +561,24 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
     let lastGridSignature = "";
 
     /**
-     * 解析**本帧的实时视口**（竖向中心取自内核真值）。
+     * 解析**本帧的实时视口**（中心与跨度都取自实时来源，不用 render 期快照）。
      *
-     * 【为什么不能直接用 `spec.view`】那是面板在 React render 期写下的快照，而
-     * 竖向滚动的真值在内核（`scrollTop`）且**没有逐帧回写面板的通道**——拖竖向
-     * 滚动条 / 中键竖向平移 / 键盘翻页都不进 React。用快照会让中心在竖向滚动期间
-     * 恒定，几何因此永不重建（实测：内核中心 72 → 79.29，GL 画布像素逐点相同）。
+     * 【为什么不能直接用 `spec.view` 的两个字段】那是面板在 React render 期写下的
+     * 快照。而竖向的两个量都会**绕过 React** 变化：
+     * - `center`：竖向滚动的真值在内核（`scrollTop`）——拖竖向滚动条 / 中键竖向
+     *   平移 / 键盘翻页都不进 React。用快照会让中心在滚动期间恒定，几何永不重建
+     *   （实测：内核中心 72 → 79.29，GL 画布像素逐点相同）。
+     * - `span`：竖向缩放由面板改 `pitchViewRef.current.span` 后直接 `invalidate()`
+     *   （见 `setPitchView`），同样不触发渲染。用快照会让几何只按**旧的**跨度枚举
+     *   半音位置，而位置用的是实时跨度 → 只覆盖旧窗口，屏幕留下空白带
+     *   （实测 dpr 2：实时 span 24 → 42.5，而快照与实例数都不变；旧实现同手势最大
+     *   空白带 398px）。
      * 详见 `scene/gridView` 的文件头。
      *
-     * 特殊说明：`span` 仍取自快照——缩放由面板决定，内核不参与。
+     * 【span 为什么读 `valueDomain` 而不是 `spec.view`】
+     * `valueDomain` 由面板在 `syncVerticalScrollbarForViewport` 里**就地刷新**
+     * （竖向缩放 / 滚动 / 切参数都会走那里），因此它与滚动位置同一时效。两者在
+     * 构建期同源（都来自 `getCurrentViewportForScrollbar`），读它不会引入新的分叉。
      *
      * @param spec 当前网格输入；空时返回 null。
      * @returns 实时视口；无网格时为 null。
@@ -569,7 +588,12 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         return resolveLiveGridView({
             absMin: spec.absMin,
             absMax: spec.absMax,
-            span: spec.view.span,
+            // 实时跨度（见上方说明与 `resolveLiveSpan`）；`spec.view.span` 只是
+            // render 期快照，仅作镜像不可用时的兜底。
+            span: resolveLiveSpan({
+                domainSpan: data().valueDomain.span,
+                snapshotSpan: spec.view.span,
+            }),
             scrollTop: scroll.get().scrollTop,
         });
     }
@@ -1649,6 +1673,14 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                 keyboardInstanceCount: glAxisUploadedCount,
                 gridSpec: data().grid ?? null,
                 gridInstanceCount: glUploadedCount,
+                // 本帧实际用于几何的视口（**解析后**的值，不是快照）。
+                //
+                // 【为什么必须暴露解析结果】`gridSpec` 是面板写下的输入快照，
+                // 而几何用的是从它 + 内核真值解析出的实时视口。两者在竖向缩放 /
+                // 竖向滚动时会**分叉**，而分叉只体现在像素上、极难归因（曾出现
+                // "缩放后留空白带"这类问题）。有了这一项，验证可以直接断言
+                // "几何用的是实时 span"，不必从像素反推。
+                liveView: liveGridView(data().grid),
             };
         },
 

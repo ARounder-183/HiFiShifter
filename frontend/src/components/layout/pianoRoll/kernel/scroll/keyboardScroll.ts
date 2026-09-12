@@ -26,7 +26,7 @@
 /** 与 Chromium 原生翻页量对齐的视口重叠量（CSS px）。 */
 export const PAGE_SCROLL_OVERLAP_PX = 20;
 
-/** 内核竖向位置的上限（与 `PIANO_ROLL_VERTICAL_SCROLL_RANGE_PX` 同值）。 */
+/** 竖向键盘滚动的解析入参。 */
 export interface KeyboardScrollArgs {
     /** 按键名（`KeyboardEvent.key`，大小写不敏感）。 */
     readonly key: string;
@@ -34,7 +34,7 @@ export interface KeyboardScrollArgs {
     readonly scrollTopPx: number;
     /** 视口高度（CSS px），决定翻页量。 */
     readonly viewportHeightPx: number;
-    /** 竖向滚动上限（CSS px）。 */
+    /** 竖向滚动上限（CSS px；`End` 直接取它，与内核同源）。 */
     readonly maxScrollTopPx: number;
 }
 

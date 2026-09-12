@@ -98,6 +98,12 @@ export function shouldCommitScroll(args: ShouldCommitScrollArgs): boolean {
     const step = args.stepPx;
     const committed = args.committedPx;
     const next = args.nextPx;
+    // 显式守卫：语义上是"入参非法 → 不提交"，读代码时不必依赖 NaN 的比较语义。
+    //
+    // 特殊说明：**本守卫在行为上是冗余的**——`Math.abs(NaN - x) >= y` 恒为 false，
+    // 去掉它结果完全相同（变异验证：删掉后 9 项用例全部照旧通过）。保留它是把意图
+    // 写进代码；对应单测另配了"有限值应当提交"的对照，用来区分"守卫生效"与
+    // "恒返回 false"——这两种情形都会让 NaN 用例通过。
     if (!Number.isFinite(step) || !Number.isFinite(committed) || !Number.isFinite(next)) {
         return false;
     }

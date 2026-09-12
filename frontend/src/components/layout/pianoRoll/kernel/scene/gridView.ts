@@ -53,6 +53,53 @@ export interface LiveGridView {
     readonly span: number;
 }
 
+/** 「实时跨度」的取值入参。 */
+export interface LiveSpanArgs {
+    /**
+     * 值域镜像里的跨度（面板在 `syncVerticalScrollbarForViewport` 里**就地刷新**）。
+     *
+     * 这是首选来源：竖向缩放改的是面板 ref，而该镜像与滚动位置在同一处刷新，
+     * 因此它与"本帧"同时效。
+     */
+    readonly domainSpan: number;
+    /**
+     * 网格快照里的跨度（`PianoRollGridSpec.view.span`，React render 期写下）。
+     *
+     * 仅作兜底：它不是实时的（见 `resolveLiveSpan` 说明），但镜像不可用时
+     * （未初始化 / 非有限值）总得有个值，否则几何会按 NaN 枚举而整层消失。
+     */
+    readonly snapshotSpan: number;
+}
+
+/**
+ * 取本帧的**实时值域跨度**。
+ *
+ * 【为什么需要这个函数——`span` 与 `center` 走的是两条不同的过期路径】
+ * `center` 的真值在内核（`scrollTop`），用快照会"滚动时不重建几何"。
+ * `span` 的真值在面板的 ref 里，而**竖向缩放改 ref 后直接 `invalidate()`，不触发
+ * React 渲染**（见 `setPitchView`）——于是 `PianoRollGridSpec.view.span` 这个 render
+ * 期快照会停在旧值上。几何按实时跨度枚举半音、却只覆盖旧窗口，屏幕留下空白带
+ * （实测 dpr 2：实时 span 24 → 42.5 而快照与实例数都不变；旧实现同手势最大空白带
+ * 398px，内核模式曾出现同量级空白）。
+ *
+ * 【为什么优先用 `domainSpan`】面板在 `syncVerticalScrollbarForViewport` 里就地刷新
+ * `valueDomain`（竖向缩放 / 滚动 / 切参数都经过那里），它与本帧同时效；两者在构建期
+ * 同源（都取自 `getCurrentViewportForScrollbar`），因此读它不会引入新的分叉。
+ *
+ * 特殊说明：`domainSpan` 非有限值或非正时退回快照值——宁可偶尔用到略旧的跨度，
+ * 也不能让 NaN 传进几何枚举（那会让整层实例消失，比"少画几行"严重得多）。
+ *
+ * @param args 见 `LiveSpanArgs`。
+ * @returns 用于几何的跨度；两者都不可用时返回 `domainSpan` 原值（由调用方处理）。
+ */
+export function resolveLiveSpan(args: LiveSpanArgs): number {
+    const domain = args.domainSpan;
+    if (Number.isFinite(domain) && domain > 0) return domain;
+    const snapshot = args.snapshotSpan;
+    if (Number.isFinite(snapshot) && snapshot > 0) return snapshot;
+    return domain;
+}
+
 /**
  * 由内核竖向位置解析本帧视口。
  *

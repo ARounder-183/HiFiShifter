@@ -11,7 +11,12 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { gridGeometrySignature, keyboardGeometrySignature, resolveLiveGridView } from "./gridView";
+import {
+    gridGeometrySignature,
+    keyboardGeometrySignature,
+    resolveLiveGridView,
+    resolveLiveSpan,
+} from "./gridView";
 
 /** 实测基线（1920×1200 @dpr2，pitch 参数）。 */
 const PITCH = { absMin: 36, absMax: 96, span: 24 };
@@ -91,6 +96,35 @@ describe("gridGeometrySignature（网格几何内容签名）", () => {
         });
         expect(other).not.toBe(base);
     });
+
+    it("★ span 变化必须改变签名（竖向缩放回归：否则只画旧值域、留空白带）", () => {
+        // 【为什么单列一条】`center` 的同类不变量已由上一条覆盖，但 `span` 走的是
+        // **另一条**数据路径：竖向缩放由面板改 `pitchViewRef.current.span` 并
+        // `invalidate()`，**不触发 React 渲染**（见 `setPitchView`）。因此
+        // `spec.view.span` 这个 render 期快照会停在旧值上，而几何按实时 span 枚举
+        // 半音位置 → 只覆盖旧窗口，屏幕留下空白带。
+        //
+        // 实测（dpr 2，钢琴键区 Alt+滚轮连滚 3 次）：实时 span 24 → 42.5，而
+        // `gridSpec.view.span` 与 `gridInstanceCount` 都**没变**（24 / 26）；
+        // 旧实现同手势最大空白带 398px。
+        //
+        // 判据：span 变了，签名就必须变（否则几何不重建）。
+        const wider = gridGeometrySignature({
+            ...metrics,
+            view: resolveLiveGridView({ ...PITCH, span: 42.5, scrollTop: 600 }),
+        });
+        expect(wider).not.toBe(sigAt(600));
+    });
+
+    it("★ resolveLiveGridView 必须原样透传传入的 span（调用方给实时值才有效）", () => {
+        // 这条钉住"实时"的定义：解析出的 span 恒等于入参。宿主若误传快照值，
+        // 上面那条签名不变量虽然成立，实际喂进去的仍是旧值。
+        const stale = resolveLiveGridView({ ...PITCH, span: 24, scrollTop: 600 });
+        const live = resolveLiveGridView({ ...PITCH, span: 42.5, scrollTop: 600 });
+        expect(live.span).toBe(42.5);
+        expect(stale.span).toBe(24);
+        expect(live).not.toEqual(stale);
+    });
 });
 
 describe("keyboardGeometrySignature（键盘 / 数值轴几何签名）", () => {
@@ -137,5 +171,44 @@ describe("keyboardGeometrySignature（键盘 / 数值轴几何签名）", () => 
             view: resolveLiveGridView({ ...PITCH, scrollTop: 600 }),
         });
         expect(themed).not.toBe(base);
+    });
+});
+
+/**
+ * 「实时跨度」取值判定。
+ *
+ * 【为什么必须单独测这一层】竖向缩放的缺陷**不在**纯函数的算术里，而在宿主的
+ * **接线**：`liveGridView` 曾把 `span: spec.view.span`（render 期快照）喂进来。
+ * 只测 `resolveLiveGridView` 的透传性质**测不出这个 bug**——实测把宿主改回快照
+ * 取值后，本文件其余 12 项断言全部照旧通过。
+ *
+ * 因此把"取哪个 span"抽成 `resolveLiveSpan` 并在此钉住优先级，宿主的接线也就
+ * 有了可判别的守护。
+ */
+describe("resolveLiveSpan（实时跨度优先级）", () => {
+    it("★ 镜像可用时取镜像值（实时），忽略快照", () => {
+        // 实测场景：竖向缩放后实时 span 24 → 42.5，而快照仍是 24。
+        // 取快照 → 几何只按 24 枚举半音 → 屏幕留空白带。
+        expect(resolveLiveSpan({ domainSpan: 42.5, snapshotSpan: 24 })).toBe(42.5);
+    });
+
+    it("★ 镜像不可用（NaN）时退回快照值，而不是把 NaN 传下去", () => {
+        // NaN 会让整层实例属性失效、几何消失——比"少画几行"严重得多。
+        expect(resolveLiveSpan({ domainSpan: Number.NaN, snapshotSpan: 24 })).toBe(24);
+    });
+
+    it("★ 镜像非正时同样退回快照（0 / 负数不是合法跨度）", () => {
+        expect(resolveLiveSpan({ domainSpan: 0, snapshotSpan: 24 })).toBe(24);
+        expect(resolveLiveSpan({ domainSpan: -5, snapshotSpan: 24 })).toBe(24);
+    });
+
+    it("两者都不可用时原样返回镜像值（由调用方处理，不在这里造数）", () => {
+        // 刻意不返回某个"默认跨度"：那会掩盖上游的值域错误，让问题更难归因。
+        expect(resolveLiveSpan({ domainSpan: Number.NaN, snapshotSpan: Number.NaN })).toBeNaN();
+        expect(resolveLiveSpan({ domainSpan: 0, snapshotSpan: 0 })).toBe(0);
+    });
+
+    it("镜像与快照一致时结果一致（常见情形不改变行为）", () => {
+        expect(resolveLiveSpan({ domainSpan: 24, snapshotSpan: 24 })).toBe(24);
     });
 });
