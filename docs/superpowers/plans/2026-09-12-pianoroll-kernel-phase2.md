@@ -666,6 +666,101 @@ Same pattern Phase 1 used, and for the same reason: each depends on the previous
 
 ---
 
+## Phase 2 — 完成记录（Task 1–7）
+
+执行日期：与阶段 1 同一分支 `feature/timeline-unified-render-kernel`，未推送。
+开关：`hifishifter.pianoRollKernel` + `hifishifter.pianoRollKernel.gl`（两者都需为 `"1"`）。
+
+### 提交清单
+
+| 提交 | 任务 | 内容 |
+|---|---|---|
+| `bd4239af` | 1 | 字形光栅化器支持带前缀的 CSS 字体简写（`bold 9px …`） |
+| `cb74ec58` | 2 | 网格实例构建器（pitch 半音线 + 三类值域步进线） |
+| `87b875c8` | 3 | 调色板提取为共享模块 + GL 子开关 |
+| `0ef88912` | 3 | GL 网格层（含 viewport origin 与 stroke 语义修正） |
+| `e6106b02` | 4 | 键盘轴 GL 层（覆盖率修正的抗锯齿） |
+| `9651b2d6` | 5 | 数值轴刻度几何（纯函数） |
+| `c8d0dbb2` | 5 | 字形适配层接线 |
+| `54212d11` | 5 | 轴文字与刻度线搬到 GL |
+| `51e2f605` | 6 | 叠加层 + 静态缓存（播放不再重绘） |
+
+### 关键指标（浏览器实测，1920×1200 @dpr 2）
+
+**播放/重绘开销**（每帧持续 invalidate，200 帧）
+
+| 指标 | 迁移前（Canvas2D） | 迁移后（GL） |
+|---|---|---|
+| 每帧清屏次数 | **1.98** | **0.00** |
+| 曲线画布清屏次数（120 帧内） | 123 | **1** |
+| 每帧 Canvas2D 绘图调用 | **318**（stroke 10149 / fillText 4776） | **0** |
+| 帧间隔 p50 / p95 | 16.7 / 16.8 ms | 16.7 / 16.8 ms |
+
+帧间隔两者相同是**预期**的：绘制工作已被移出关键路径，帧率本就被 vsync 钉在 16.7ms。
+真正的收益是"每帧不再有 318 次 Canvas2D 调用"——这在低端设备与高分辨率下才是瓶颈。
+
+**视觉一致性**
+
+| 对比 | 差异 |
+|---|---|
+| 开关关闭 vs 迁移前基线 | **0 像素**（每次改动后复测，始终为 0） |
+| GL 开启 vs Canvas2D，静置 | 7538 px / 184352（**0.0818%**），maxdelta 214 |
+| GL 开启 vs Canvas2D，滚动到 drawing x=1200 | 7542 px（**0.0818%**），与静置一致 |
+
+残差构成：**96% 的差异像素只差 1/255**；较大差异集中在
+‑ 字形图集的亚像素量化（8px / 10px 各差 0.5 设备像素；9px 与 bold 9px **完全一致**）
+‑ 黑键渐变右缘 4px 宽的一条（9 行）
+
+### 本轮修掉的真实缺陷（全部由像素比对或等价性测试发现）
+
+1. **`bold` 字体简写解析失败**（Task 1）。`parseFontSizePx` 锚定行首，`bold 9px` 回退到
+   12；`scaleFontKey` 同时失配、未按 dpr 放大。后果是 C 音名按 12px 槽位光栅化 9px 字形。
+   实测槽高 29（应为 22）。
+2. **调色板转写错误**（Task 3）。像素比对先抓到深色 `playheadLine` 写成 0.28（应 0.25）；
+   随后的脚本化逐值比对又抓到浅色 `blackKey` 写成 `#3a3d42`（应 `#3a3a3a`）——后者是
+   单靠像素差异难以归因的。
+3. **stroke 语义差**（Task 3）。Canvas2D `stroke` 以 y 为**中心**，GL 实例矩形以 y 为
+   **上缘**，整组网格线低了半个线厚（dpr 2 下恰好 1 设备像素）。修正后差异从 1.83% 降到 0.10%。
+4. **视口原点**（Task 3）。网格横线横跨视口（Canvas2D 就是 `moveTo(0,y)`），我却传了
+   内容坐标原点，导致整组线按滚动量平移——静置时左侧 200px 空白，恰好等于同步偏移。
+5. **`parseRgbaColor` 的洋红陷阱**（Task 4）。该函数对非 `rgb()/rgba()` 输入返回**不透明
+   洋红**（刻意设计以暴露漏解析），而调色板里 `whiteKey`/`blackKey` 是 hex，整个键盘变洋红。
+6. **图层次序**（Task 4）。`axisBorder` 在 Canvas2D 里先画、随后被琴键盖住；放到上层画布后
+   浮在琴键之上（右缘 229 vs 255）。
+7. **覆盖率抗锯齿**（Task 4）。GL 矩形是硬边、按像素中心采样，而 `fillRect`/`stroke` 按
+   面积覆盖率混合。不足一个设备行的边界带会被**整条丢弃**——实测每个八度的 C 分隔线上方
+   少一整行（Canvas2D 718 行 vs GL 708 行）。修正为"对齐到设备行 + alpha 乘覆盖率"后两者相等。
+8. **渐变边界**（Task 4）。8 段近似在右边界差 60 个色阶；改为逐设备列精确取覆盖率。
+9. **`isBlackKey` 的导入链**（Task 4）。从 `render.ts` 导出会让宿主单测经 `../timeline`
+   桶文件拉进 Redux store，在 node 环境下因裸 `localStorage` 崩溃。移到无依赖的 `utils.ts`。
+10. **回退分支步长**（Task 5）。`fallback` 必须用 `niceAxisStep(span, 4)`，我误用了 cents
+    候选表，小跨度下差几个数量级（span 1e-6 时 1 个刻度 vs 5 个）。
+11. **degrees 的重复 0 标签**（Task 5）。`render.ts` **无条件**补画 0 标签；而 degrees 步长
+    是整数，视口含 0 时 0 已是普通刻度——原实现会在同一位置画两次、alpha 叠加（0.55 → 0.7975）。
+    这是常见路径，必须复刻。
+12. **清屏本身就是重绘**（Task 6）。只跳过绘制而不跳过 `clearCanvasPhysical` 时，每帧仍有
+    1.98 次清屏——实测确认"跳过绘制"不足，必须整张跳过。
+
+### 已知未覆盖项（诚实记录，未验证的不声称已验证）
+
+- **值域轴（非 pitch 参数）的浏览器端到端未验证**：`child_pitch_offset_*` 要求选中**子轨**，
+  而 mock 后端只创建扁平根轨。刻度几何与标签由 15 个单测 + 84022 次与 `render.ts` 的逐值
+  对照覆盖；GL 接线复用已端到端验证的 pitch 路径（同一 program / 同一字形适配层 / 同一坐标约定）。
+- **播放态未在 mock 下验证**：mock 的 `is_playing` 恒为 false，无法真正启动播放。改用
+  "每帧 invalidate"等价负载测量（这正是播放时面板的行为：`onFrame` 驱动重绘）。
+- **选中态与选区块拖拽未做像素比对**：选区块的 GL 绘制路径已接线，但未构造"有选区"的
+  对照截图。
+
+### 退出标准对照
+
+| 标准 | 结果 |
+|---|---|
+| 像素比对在容差内 | ✅ 0.0818%，96% 差异为 1/255；开关关闭时 0 像素 |
+| 文字质量一致 | ✅ 字形管线渲染；9px/bold 9px 完全一致，8px/10px 差 0.5 设备像素 |
+| 播放帧不再重绘曲线 | ✅ 每帧 Canvas2D 绘图调用 318 → **0**；曲线画布清屏 123 → **1** |
+| 单测全绿 | ✅ 676 passed（仅 2 个既有的 `keybindingMatch` 失败） |
+| 类型 / lint / 格式 | ✅ `tsc -b --noEmit` 干净；`eslint` 0 error |
+
 ## Self-Review
 
 **Spec coverage:** the spec's Phase 2 row lists "Grid, keyboard axis, value labels/ticks, selection, playhead, highlight bands move to GL instanced geometry; the existing glyph pipeline takes over all `fillText`. Curves stay on Canvas 2D in the detail layer." Grid → Task 2/3; highlight bands → Task 2 (scale-highlight segments); keyboard axis → Task 4; value labels/ticks → Task 5; selection + playhead → Task 6; glyph activation → Tasks 1 + 5; curves untouched → no task (correctly out of scope). The spec's exit criteria — pixel comparison within tolerance, text quality matches, playback frames no longer repaint curves — map to Tasks 4/5/6 exit checks and the Task 7 profiling.
