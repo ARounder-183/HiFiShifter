@@ -169,11 +169,20 @@ Three phases, each independently shippable, verifiable, and revertible.
 | Phase | Content | Exit criteria |
 |---|---|---|
 | **1 · Scroll/viewport kernel** | Self-drawn scrollbars (both axes, value-domain vertical preserved), `ScrollKernel` + unified axis projection, rAF frame commit. Painting stays Canvas 2D. | Scroll/zoom feel identical; timeline sync unaffected; frame rate not worse; legacy flag off == today |
-| **2 · Render kernel** | Grid, keyboard axis, value labels/ticks, selection, playhead, highlight bands move to GL instanced geometry; the existing glyph pipeline takes over all `fillText`. Curves stay on Canvas 2D in the detail layer. | Pixel comparison within tolerance; text quality matches; playback frames no longer repaint curves |
+| **2 · Render kernel** ✅ **已完成** | Grid, keyboard axis, value labels/ticks, selection, playhead, highlight bands move to GL instanced geometry; the existing glyph pipeline takes over all `fillText`. Curves stay on Canvas 2D in the detail layer. | Pixel comparison within tolerance ✅ 0.0818%（96% 差异为 1/255）；text quality matches ✅（9px/bold 9px 完全一致）；playback frames no longer repaint curves ✅ 每帧 Canvas2D 绘图调用 318 → **0**。证据见 `plans/2026-09-12-pianoroll-kernel-phase2.md` 的完成记录 |
 | **3 · Curve GL + interactions** | Polyline triangle-strip curve rendering (all curve variants); geometric hit testing + gesture state machine migration. | Curve fidelity comparison passes; every gesture regression-checked in the browser |
 
 Each phase has its own flag value (or its own flag) so a phase can be reverted without
 reverting the previous ones.
+
+**Shared-module extraction (done):** the spec's architecture section called for moving
+the modules both panels share into a neutral location. That landed as Task 8 of the
+Phase 2 plan: `components/layout/renderKernel/` now holds the GL programs, glyph
+pipeline, scroll kernel, axis projection and rasterisation contracts, with dependencies
+running `timeline` / `pianoRoll` → `renderKernel`. No re-export shims were left behind
+(nothing outside `src/` referenced the old paths and the project has no path aliases,
+so shims would have been dead code from the start); the directory README records the
+rationale and the verification gates.
 
 ## Risks
 
