@@ -30,6 +30,7 @@
  *    所有 clip 都搬到锚点所在轨道）。
  */
 
+import { NEW_TRACK_SENTINEL } from "../constants";
 import { expandClipIdsWithGroups } from "./useGroupExpansion";
 
 /** 参与集合解析所需的 clip 字段（结构化子集，便于单测构造）。 */
@@ -141,6 +142,18 @@ export function applyKernelEditDelta(args: {
     readonly deltaStartSec: number;
     readonly deltaTrack: number;
     readonly trackIds: readonly string[];
+    /**
+     * 是否拖到了**全部轨道之下**（新建轨道哨兵）。
+     *
+     * 【为什么是布尔量而不是"传哨兵 id 进来"】`NEW_TRACK_SENTINEL` 不是一个真实
+     * 轨道，`trackIds.indexOf(sentinel)` 恒为 -1；若让调用方把它混进 `trackIds`
+     * 做索引运算，末行钳制会把它当成"越界"而退回原轨。这里用显式开关表达意图：
+     * 为 true 时**所有参与者**都落到哨兵轨道（面板随后建轨并替换成真实 id）。
+     *
+     * 特殊说明：新建轨道时**不做末行钳制**——哨兵轨道在列表之外，钳到末行会退回
+     * 已有轨道，与用户的"往下拖出新轨"意图相反。
+     */
+    readonly dropToNewTrack?: boolean;
 }): {
     moves: { clipId: string; startSec: number; trackId: string }[];
     deltaStartSec: number;
@@ -158,7 +171,9 @@ export function applyKernelEditDelta(args: {
 
     const moves = args.participants.map((participant) => {
         let trackId = participant.trackId;
-        if (deltaTrack !== 0 && participant.trackIndex >= 0 && lastIndex >= 0) {
+        if (args.dropToNewTrack === true) {
+            trackId = NEW_TRACK_SENTINEL;
+        } else if (deltaTrack !== 0 && participant.trackIndex >= 0 && lastIndex >= 0) {
             const targetIndex = Math.min(
                 lastIndex,
                 Math.max(0, participant.trackIndex + deltaTrack),

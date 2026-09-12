@@ -108,11 +108,26 @@ export function toBoundarySnapClip(
 /**
  * 计算 slip 拖拽后的源窗口。
  *
+ * 【参数约定（**必须严格遵守**，曾因此出过一次"方向反了"的线上缺陷）】
+ * `deltaSec` 不是屏幕位移，而是**窗口平移量**：
+ * - **正值 = 源窗口向素材后段平移**（`sourceStartSec` / `sourceEndSec` 同时**增大**）；
+ * - 负值 = 向前段平移。
+ *
+ * ⚠️ 屏幕「向右拖」对应的是**负**窗口平移量（REAPER 语义：把内容往右推，
+ * Clip 起点露出的就是更早的素材）。因此**从屏幕位移换算时必须取反号**：
+ * - 旧实现 `useSlipDrag`：`desiredTotal = 起点指针 − 当前指针`（向右拖为负）✓
+ * - 渲染内核 `handleKernelDragPreview`：内核给的是 `deltaSec`（正 = 向右拖），
+ *   故须传 `-deltaSec`。
+ *
+ * 本函数内部只做「按约定平移 + 分支归一化」，不做任何屏幕坐标换算——把换算
+ * 留在调用方是刻意的：两边的坐标域不同（内容坐标 vs 指针坐标），混在一处
+ * 正是上次方向搞反的原因。
+ *
  * 特殊说明：调用方应传入**当前**的 clip（旧实现逐帧读取 Redux 当前值做增量平移，
  * 而不是用「按下时的基准 + 累计位移」重算——后者在拖拽中被其它编辑改写时会跳变）。
  *
  * @param clip 当前 clip（来自 session.clips）。
- * @param deltaSec 指针的水平位移（秒，正向为向右拖）。
+ * @param deltaSec 窗口平移量（秒，正 = 向素材后段平移；见上方约定）。
  * @returns 新的源窗口；输入非法时返回 null（调用方跳过该帧）。
  */
 export function computeSlipWindow(

@@ -1,22 +1,29 @@
 /**
- * 拉伸几何（./stretchGroup 的 computeClipStretch / scaleSnapOffsetForStretch）行为自检。
+ * 拉伸几何（./stretchGroup 的 computeClipStretch / scaleSnapOffsetForStretch /
+ * computeRegionRightEdgeDelta）行为自检。
  *
  * 【主要内容】
  * 1. 左右两个方向的「固定对侧边缘」语义；
  * 2. 速率反算与钳制（含"速率被钳制时长度用钳制后的速率回算"）；
  * 3. 淡变按长度比例缩放、SnapOffset 按总比例缩放并钳到新长度内；
- * 4. 最小长度与非法输入（NaN / 0 / 负值）的退化行为。
+ * 4. 最小长度与非法输入（NaN / 0 / 负值）的退化行为；
+ * 5. 波纹跟随的驱动量（区域右缘净位移）带符号、取各成员右缘的最大值。
  *
  * 【作用】这是渲染内核「Alt + 拖边缘 = 拉伸」与旧实现 `useEditDrag` 共用的唯一
  * 几何实现：一旦方向搞反（拉伸变成平移）或漏掉速率回算，画面长度会与音频时长
- * 对不上——这类缺陷在截图上不明显，必须靠断言守住。
+ * 对不上——这类缺陷在截图上不明显，必须靠断言守住。波纹驱动量同理：符号弄反
+ * 会让跟随集在"缩短"时朝反方向跑。
  *
  * 【与其他模块的关系】覆盖 `stretchGroup.ts` 的新增部分；不依赖 React / DOM。
  */
 
 import { describe, expect, it } from "vitest";
 
-import { computeClipStretch, scaleSnapOffsetForStretch } from "./stretchGroup";
+import {
+    computeClipStretch,
+    computeRegionRightEdgeDelta,
+    scaleSnapOffsetForStretch,
+} from "./stretchGroup";
 
 function base(overrides: Partial<Parameters<typeof computeClipStretch>[0]> = {}) {
     return computeClipStretch({
@@ -126,5 +133,70 @@ describe("scaleSnapOffsetForStretch", () => {
     it("非法比例退化为不缩放", () => {
         expect(scaleSnapOffsetForStretch(2, Number.NaN, 10)).toBe(2);
         expect(scaleSnapOffsetForStretch(2, 0, 10)).toBe(2);
+    });
+});
+
+describe("computeRegionRightEdgeDelta（波纹跟随的驱动量）", () => {
+    const baseById = {
+        a: { startSec: 2, lengthSec: 4 }, // 旧右缘 6
+        b: { startSec: 10, lengthSec: 4 }, // 旧右缘 14
+    };
+
+    it("取各成员右缘的最大值之差（区域右缘，不是单个 clip 的右缘）", () => {
+        // a 拉长到 8（右缘 10）、b 不动（右缘 14）→ 区域右缘仍是 14 → 位移 0。
+        // 若错用"各成员位移之和"或"锚点位移"，这里会得到 +4。
+        const delta = computeRegionRightEdgeDelta({
+            clipIds: ["a", "b"],
+            baseById,
+            clips: [
+                { id: "a", startSec: 2, lengthSec: 8 },
+                { id: "b", startSec: 10, lengthSec: 4 },
+            ],
+        });
+        expect(delta).toBeCloseTo(0, 9);
+    });
+
+    it("向右延伸为正、向左收拢为负（符号必须保留）", () => {
+        const grow = computeRegionRightEdgeDelta({
+            clipIds: ["a"],
+            baseById,
+            clips: [{ id: "a", startSec: 2, lengthSec: 6 }],
+        });
+        expect(grow).toBeCloseTo(2, 9);
+
+        const shrink = computeRegionRightEdgeDelta({
+            clipIds: ["a"],
+            baseById,
+            clips: [{ id: "a", startSec: 2, lengthSec: 2 }],
+        });
+        // 负位移绝不能被吞成 0（否则"向右有波纹、向左没有"）。
+        expect(shrink).toBeCloseTo(-2, 9);
+    });
+
+    it("只看参与者：无关 clip 的移动不影响结果", () => {
+        const delta = computeRegionRightEdgeDelta({
+            clipIds: ["a"],
+            baseById,
+            clips: [
+                { id: "a", startSec: 2, lengthSec: 4 },
+                { id: "unrelated", startSec: 10, lengthSec: 99 },
+            ],
+        });
+        expect(delta).toBeCloseTo(0, 9);
+    });
+
+    it("成员缺失 / 几何非法时退化为 0，不产生 NaN", () => {
+        expect(computeRegionRightEdgeDelta({ clipIds: ["missing"], baseById, clips: [] })).toBe(0);
+        expect(
+            computeRegionRightEdgeDelta({
+                clipIds: ["a"],
+                baseById,
+                clips: [{ id: "a", startSec: Number.NaN, lengthSec: Number.NaN }],
+            }),
+        ).toBe(0);
+    });
+
+    it("空参与者集合返回 0", () => {
+        expect(computeRegionRightEdgeDelta({ clipIds: [], baseById, clips: [] })).toBe(0);
     });
 });

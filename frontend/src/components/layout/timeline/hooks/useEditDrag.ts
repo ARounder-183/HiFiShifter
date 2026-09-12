@@ -79,6 +79,7 @@ import type { SnapTimelineOpts } from "./useTimelineState";
 import { webApi } from "../../../../services/webviewApi";
 import {
     buildStretchGroupState,
+    computeRegionRightEdgeDelta,
     computeStretchGroupUpdate,
     scaleClipFadesForStretch,
     scaleSnapOffsetForStretch,
@@ -291,27 +292,19 @@ export type EditDragState = {
 /**
  * 计算被编辑剪辑区域“当前最右缘 − 初始最右缘”的净位移（**带符号**）。
  *
- * 与后端区域化波纹一致：平移量 = 区域右缘的实际位移（含吸附、素材长度限制等
- * 约束后的真实值），确保“预览 → 提交”不跳变。
- *
- * ⚠️ 必须是带符号：拖右缘向左（缩短/截短）时位移为负，跟随剪辑要向左收拢。
- * 不能用“对 0 取 max”或“对各成员取最大正位移”的方式，否则负位移会被吞掉、
- * 向右正常而向左无实时波纹（曾为此引入 bug）。
+ * 实现已抽到 `stretchGroup.computeRegionRightEdgeDelta`（单一事实来源）——
+ * 渲染内核的裁切 / 拉伸预览要用同一份波纹驱动量，留在本文件里会导致内核
+ * 只能重写一遍（本工程已两次因"两份语义"出问题）。这里只做参数适配。
  */
-function computeRegionRightEdgeDelta(drag: EditDragState, clips: SessionState["clips"]): number {
-    let maxOldRight = Number.NEGATIVE_INFINITY;
-    let maxNewRight = Number.NEGATIVE_INFINITY;
-    for (const id of drag.selectedClipIds) {
-        const base = drag.baseByClipId[id];
-        const now = clips.find((c) => c.id === id);
-        if (!base || !now) continue;
-        maxOldRight = Math.max(maxOldRight, base.startSec + base.lengthSec);
-        maxNewRight = Math.max(maxNewRight, Number(now.startSec) + Number(now.lengthSec));
-    }
-    if (!Number.isFinite(maxOldRight) || !Number.isFinite(maxNewRight)) {
-        return 0;
-    }
-    return maxNewRight - maxOldRight;
+function computeRegionRightEdgeDeltaForDrag(
+    drag: EditDragState,
+    clips: SessionState["clips"],
+): number {
+    return computeRegionRightEdgeDelta({
+        clipIds: drag.selectedClipIds,
+        baseById: drag.baseByClipId,
+        clips,
+    });
 }
 
 export function useEditDrag(deps: {
@@ -1484,7 +1477,7 @@ export function useEditDrag(deps: {
                     });
                     // 波纹（自动跟进）实时预览：编组拉伸同样按“区域右缘净位移”实时波纹。
                     if (drag.rippleMode !== "off") {
-                        const rippleRightDelta = computeRegionRightEdgeDelta(
+                        const rippleRightDelta = computeRegionRightEdgeDeltaForDrag(
                             drag,
                             sessionRef.current.clips,
                         );
@@ -1798,7 +1791,7 @@ export function useEditDrag(deps: {
                     // 波纹（自动跟进）实时预览：以编辑区域“右缘净位移”为准
                     // （与后端区域化波纹一致，包含吸附与素材长度限制后的实际值）。
                     if (drag.rippleMode !== "off") {
-                        const rippleRightDelta = computeRegionRightEdgeDelta(
+                        const rippleRightDelta = computeRegionRightEdgeDeltaForDrag(
                             drag,
                             sessionRef.current.clips,
                         );
@@ -1856,7 +1849,7 @@ export function useEditDrag(deps: {
                     // 波纹（自动跟进）实时预览：以编辑区域“右缘净位移”为准
                     // （与后端区域化波纹一致，包含吸附与素材长度限制后的实际值）。
                     if (drag.rippleMode !== "off") {
-                        const rippleRightDelta = computeRegionRightEdgeDelta(
+                        const rippleRightDelta = computeRegionRightEdgeDeltaForDrag(
                             drag,
                             sessionRef.current.clips,
                         );

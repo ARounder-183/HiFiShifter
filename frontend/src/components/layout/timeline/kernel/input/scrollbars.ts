@@ -3,17 +3,21 @@
  *
  * 【主要内容】
  * 由「内容尺寸 / 视口尺寸 / 当前滚动位置 / 滚动上限」算出滚动条的轨道与 thumb 几何，
- * 并提供 thumb 命中测试。滚动条本体用 DOM 绘制（拖拽命中与悬停态成本最低），
- * 但几何是纯计算，单独成模块以便单测。
+ * 并提供 thumb 命中测试、thumb 拖拽位移换算与轨道点击跳转。滚动条本体用 DOM 绘制
+ * （拖拽命中与悬停态成本最低），但几何是纯计算，单独成模块以便单测。
  *
  * 【作用】
  * 自绘滚动取代原生 scroller 后，滚动条也必须自绘。几何计算里最容易出错的是两个
  * 边界：`maxScrollPx = 0`（内容不足一屏，thumb 应占满轨道且不可拖）与
  * `contentSize` 非法（除零）。本模块把这两类情况收敛成显式分支。
  *
+ * 除几何外还承担「原生滚动条的等效交互」：拖 thumb、**点轨道翻页**——旧实现用
+ * 原生滚动条时这些由浏览器提供，自绘后必须逐条补上。
+ *
  * 【与其他模块的关系】
  * - 上游：宿主视图从 `ScrollKernel` 读 `contentWidthPx()/maxScrollLeft()` 等值后调用。
- * - 下游：宿主把几何写到滚动条 DOM 的 `style`，并用 `hitTestScrollbarThumb` 判定拖拽起点。
+ * - 下游：宿主把几何写到滚动条 DOM 的 `style`，并用 `hitTestScrollbarThumb` 判定拖拽
+ *   起点、用 `scrollTargetFromTrackClick` 处理轨道点击。
  * - 独立性：纯函数，不依赖 DOM / React。
  */
 
@@ -132,6 +136,46 @@ export function scrollDeltaFromThumbDrag(
     const travel = geometry.trackLengthPx - geometry.thumbLengthPx;
     if (travel <= 0) return 0;
     return (toFinite(deltaThumbPx) / travel) * Math.max(0, toFinite(maxScrollPx));
+}
+
+/**
+ * 点击滚动条轨道（非 thumb 区域）时的目标滚动位置。
+ *
+ * 【为什么要这个函数】旧实现用**原生**滚动条，点击轨道空白由浏览器按平台默认
+ * 处理（大多数平台 = 向该方向翻一页，约一个视口；部分平台支持「点住轨道持续
+ * 滚动」）。内核自绘滚动条后必须自己补上这个语义，否则「点轨道没反应」——
+ * 用户失去除拖 thumb 与滚轮之外的第三种定位手段。
+ *
+ * 语义（与浏览器默认一致的最小集）：
+ * - thumb **之后**（下/右方）→ 当前位置 + 一页；
+ * - thumb **之前**（上/左方）→ 当前位置 − 一页；
+ * - 落在 thumb 上 → 返回 `null`（那是拖拽起点，不是跳转）；
+ * - 不可滚动 → 返回 `null`。
+ *
+ * 结果由调用方交给 `ScrollKernel` 钳制（与其它写入路径同一约定：上限不在
+ * 这里算，避免两份上限来源）。
+ *
+ * @param pointerOffsetPx 指针相对轨道起点的偏移（CSS px）。
+ * @param geometry 滚动条几何。
+ * @param currentScrollPx 当前滚动位置（CSS px）。
+ * @param pageSizePx 一页的跨度（CSS px，通常 = 视口尺寸）。
+ * @returns 目标滚动位置；不应跳转时为 null。
+ */
+export function scrollTargetFromTrackClick(
+    pointerOffsetPx: number,
+    geometry: ScrollbarGeometry,
+    currentScrollPx: number,
+    pageSizePx: number,
+): number | null {
+    if (!geometry.scrollable) return null;
+    const offset = toFinite(pointerOffsetPx);
+    const thumbEnd = geometry.thumbStartPx + geometry.thumbLengthPx;
+    if (offset >= geometry.thumbStartPx && offset <= thumbEnd) return null;
+    const page = Math.max(0, toFinite(pageSizePx));
+    if (page <= 0) return null;
+    const current = toFinite(currentScrollPx);
+    // 翻一页；`offset > thumbEnd` 即「thumb 之后」（下/右方）。
+    return offset > thumbEnd ? current + page : current - page;
 }
 
 /** 归一化数值：非法值返回 0。 */

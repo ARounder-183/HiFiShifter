@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+    isContentYBelowTracks,
     resolveDragDelta,
     resolveFadeDrag,
     resolveTargetTrackIndex,
@@ -173,5 +174,37 @@ describe("resolveTargetTrackIndex", () => {
 
     it("行高非法时退化为 1px 行高而不是除零", () => {
         expect(Number.isFinite(resolveTargetTrackIndex(100, 0, 3))).toBe(true);
+    });
+});
+
+describe("isContentYBelowTracks（拖到轨道下方 = 新建轨道哨兵）", () => {
+    it("最后一行之内（含底边前一像素）不算越界", () => {
+        // 6 行 × 96px → 内容总高 576；575 仍在最后一行内。
+        expect(isContentYBelowTracks(0, 96, 6)).toBe(false);
+        expect(isContentYBelowTracks(480, 96, 6)).toBe(false);
+        expect(isContentYBelowTracks(575, 96, 6)).toBe(false);
+    });
+
+    it("越过最后一行下边界即为越界", () => {
+        expect(isContentYBelowTracks(576, 96, 6)).toBe(true);
+        expect(isContentYBelowTracks(700, 96, 6)).toBe(true);
+    });
+
+    it("行高非整数时按行下标判定，不产生窄带误判", () => {
+        // 行高 96.5 → 6 行内容高 579；578 属于第 5 行（"看起来在行内"），
+        // 用浮点高度比较会把它判成越界，按下标比较则正确。
+        expect(isContentYBelowTracks(578, 96.5, 6)).toBe(false);
+        expect(isContentYBelowTracks(579, 96.5, 6)).toBe(true);
+    });
+
+    it("无轨道 / 负值 / 非法值不误判为越界", () => {
+        expect(isContentYBelowTracks(1000, 96, 0)).toBe(false);
+        expect(isContentYBelowTracks(-50, 96, 6)).toBe(false);
+        expect(isContentYBelowTracks(Number.NaN, 96, 6)).toBe(false);
+    });
+
+    it("行高非法时退化为 1px 行高而不是除零", () => {
+        expect(isContentYBelowTracks(100, 0, 3)).toBe(true);
+        expect(isContentYBelowTracks(Number.NaN, 0, 3)).toBe(false);
     });
 });

@@ -99,6 +99,19 @@ export interface ScrollKernelOptions {
     /** 轨道总数，用于算内容高度。 */
     trackCount: () => number;
     /**
+     * 竖直内容高度的**额外**高度（CSS px），缺省 0。
+     *
+     * 【为什么需要它】内容高度不能只用 `trackCount × rowHeight`：旧实现的滚动内容层
+     * 高 = `tracks × rowHeight + TRACK_ADD_ROW_HEIGHT`（轨道列表底部的「添加轨道」行），
+     * 左侧轨道头也按同一高度滚动。若内核只按轨道数算高，竖直上限会比轨道头**少**
+     * `TRACK_ADD_ROW_HEIGHT`——表现为「滚到底后轨道头还能继续滚、时间轴已停住」，
+     * 两侧行错位，手感上就是拖拽末段的"吸附/卡住"。
+     *
+     * 特殊说明：以**额外量**而不是绝对高度注入，是为了让内核不必知道
+     * 「添加轨道行」这个领域概念：调用方给差额，内核只做加法。
+     */
+    extraContentHeightPx?: () => number;
+    /**
      * 宿主视口高度（CSS px），用于竖直滚动上限（内容高 − 视口高）。
      *
      * 特殊说明：水平方向**不需要**视口宽——水平上限 = 工程宽度（见文件头
@@ -385,12 +398,18 @@ export function createScrollKernel(options: ScrollKernelOptions): ScrollKernel {
     /**
      * 计算指定行高下的内容高度。
      *
+     * 特殊说明：含 `extraContentHeightPx`（默认 0）——它承载「轨道列表底部的添加轨道
+     * 行」等不属于轨道行的高度。漏掉它会让竖直上限比左侧轨道头小一个该高度，
+     * 滚到底时两侧错位（见 options 里该字段的说明）。
+     *
      * @param rowHeight 行高（CSS px）。
      * @returns 内容高度（CSS px）；trackCount 非法或为负时按 0 处理。
      */
     function contentHeightFor(rowHeight: number): number {
         const count = options.trackCount();
-        return Number.isFinite(count) ? Math.max(0, count) * rowHeight : 0;
+        const rows = Number.isFinite(count) ? Math.max(0, count) * rowHeight : 0;
+        const extra = options.extraContentHeightPx?.();
+        return rows + (Number.isFinite(extra) ? Math.max(0, extra as number) : 0);
     }
 
     /**

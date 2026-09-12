@@ -16,7 +16,12 @@
 
 import { describe, expect, it } from "vitest";
 
-import { computeScrollbar, hitTestScrollbarThumb, scrollDeltaFromThumbDrag } from "./scrollbars";
+import {
+    computeScrollbar,
+    hitTestScrollbarThumb,
+    scrollDeltaFromThumbDrag,
+    scrollTargetFromTrackClick,
+} from "./scrollbars";
 
 describe("computeScrollbar", () => {
     it("可滚动时按比例计算 thumb 长度与起点", () => {
@@ -122,5 +127,60 @@ describe("scrollDeltaFromThumbDrag", () => {
             maxScrollPx: 0,
         });
         expect(scrollDeltaFromThumbDrag(50, geometry, 0)).toBe(0);
+    });
+});
+
+describe("scrollTargetFromTrackClick", () => {
+    // 内容 2000 / 视口 500 / 轨道 500 → thumb 长 125；滚到一半 → 起点 187.5，终点 312.5。
+    const geometry = computeScrollbar({
+        contentSizePx: 2000,
+        viewportSizePx: 500,
+        scrollPx: 750,
+        maxScrollPx: 1500,
+    });
+
+    it("点在 thumb 之后 → 向后翻一页", () => {
+        expect(scrollTargetFromTrackClick(400, geometry, 750, 500)).toBe(1250);
+    });
+
+    it("点在 thumb 之前 → 向前翻一页", () => {
+        expect(scrollTargetFromTrackClick(50, geometry, 750, 500)).toBe(250);
+    });
+
+    it("点在 thumb 上（含两端边界）→ 不跳转", () => {
+        // 那是拖拽起点，必须返回 null，否则一次 thumb 拖拽会被叠加一次翻页。
+        expect(scrollTargetFromTrackClick(187.5, geometry, 750, 500)).toBe(null);
+        expect(scrollTargetFromTrackClick(250, geometry, 750, 500)).toBe(null);
+        expect(scrollTargetFromTrackClick(312.5, geometry, 750, 500)).toBe(null);
+        // 紧贴两端之外的一像素即视为「轨道」：边界是闭区间，只有真正落在外侧才翻页。
+        expect(scrollTargetFromTrackClick(186, geometry, 750, 500)).toBe(250);
+        expect(scrollTargetFromTrackClick(314, geometry, 750, 500)).toBe(1250);
+    });
+
+    it("不可滚动时恒为 null", () => {
+        const flat = computeScrollbar({
+            contentSizePx: 100,
+            viewportSizePx: 500,
+            scrollPx: 0,
+            maxScrollPx: 0,
+        });
+        expect(scrollTargetFromTrackClick(400, flat, 0, 500)).toBe(null);
+    });
+
+    it("页长非法（0 / NaN / 负数）时不跳转", () => {
+        expect(scrollTargetFromTrackClick(400, geometry, 750, 0)).toBe(null);
+        expect(scrollTargetFromTrackClick(400, geometry, 750, Number.NaN)).toBe(null);
+        expect(scrollTargetFromTrackClick(400, geometry, 750, -100)).toBe(null);
+    });
+
+    it("非法指针 / 当前滚动值按 0 处理，不产生 NaN", () => {
+        expect(scrollTargetFromTrackClick(Number.NaN, geometry, 750, 500)).toBe(250);
+        const result = scrollTargetFromTrackClick(400, geometry, Number.NaN, 500);
+        expect(Number.isFinite(result as number)).toBe(true);
+    });
+
+    it("结果可能越界，由调用方（ScrollKernel）钳制", () => {
+        // 滚动已在顶部时点上方：结果 -500 —— 本函数只做算术，钳制是单一上限来源。
+        expect(scrollTargetFromTrackClick(50, geometry, 0, 500)).toBe(-500);
     });
 });

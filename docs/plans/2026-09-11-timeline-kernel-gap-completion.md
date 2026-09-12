@@ -242,11 +242,14 @@
 
 ### 未完成（下一批）
 
+> **2026-09-12 更新**：下表三项**已全部完成**（提交见下方 D-4 / D-1b / 残留波纹各节）。
+> 当前缺口清单为空——21 项缺口（P0 7 / P1 9 / P2 5）已全部关闭。
+
 | 任务 | 内容 | 说明 |
 |---|---|---|
-| D | 淡化专属右键菜单 ✅ / 多 Take ✅ / 静音检测预览 ✅；**剩**淡变 tooltip（D-1b）、拖到空白新建轨道（D-4） | 见下方批次 D 各节 |
-| E | 多选修饰键走键位绑定 + Shift 范围选择、Esc 覆盖抓手/snap/框选、滚动条 track 点击跳转、Vertical Lock、陈旧注释与 `glyph/*` 死代码 | — |
-| 残留 | 裁切 / 拉伸的**波纹跟随预览**（旧实现 `computeRegionRightEdgeDelta` + `applyRippleFollowerShift`；内核目前只在拖拽移动时做波纹） | 本轮新发现，未实现 |
+| ~~D~~ | 淡化专属右键菜单 ✅ / 多 Take ✅ / 静音检测预览 ✅ / 淡变 tooltip ✅ / 拖到空白新建轨道 ✅ | 全部完成 |
+| ~~E~~ | 多选修饰键走键位绑定 + Shift 范围选择 ✅、Esc 覆盖抓手/snap/框选 ✅、滚动条 track 点击跳转 ✅、Vertical Lock ✅、陈旧注释与 `glyph/*` 死代码 ✅ | 全部完成 |
+| ~~残留~~ | 裁切 / 拉伸的**波纹跟随预览** ✅ | 已完成 |
 
 ---
 
@@ -288,30 +291,90 @@
 - 验证：两段红色恰好落在 450–630 / 780–870 px（clip 起点 2s、150px/s）；mock 里
   故意越界的第三段**没有**画到 clip 之外 ✓
 
-### D-4 拖到轨道区下方新建轨道（**未做**）
+### D-4 拖到轨道区下方新建轨道（已完成）
 
-- 旧实现路径较厚：`computeSelectedTrackSpan`（混合轨道选择跨多轨时按 span 建轨）+
-  `buildDropToNewTrackMoves` + `createNewTrackForDrop(s)`，且移动与 copy 两条分支
-  各有一套。
-- 内核侧需先给出「落在最后一条轨道之下」的哨兵（当前 `resolveTargetTrackIndex`
-  钳制到 `[0, trackCount-1]`），面板再按单轨 / 跨轨分别建轨并落库。
-- **建议下一轮单独做**：需要新的内核哨兵 + ghost 预览 + 建轨事务，不宜与其它项混批。
+- **内核哨兵**：新增纯函数 `isContentYBelowTracks`（`kernel/interaction/dragGeometry`），
+  按**行下标整数比较**判定是否越过最后一行——用浮点内容高度比较会在末行底部留下
+  一条"看着在行内、却被判越界"的窄带。`applyDragPreview` 命中时把 `targetTrackId`
+  换成共享的 `NEW_TRACK_SENTINEL`（不区分的话 `resolveTargetTrackIndex` 会把落点
+  钳回末行，用户的"往下拖出新轨"被静默吞掉）。
+- **预览**：内核视图新增内容坐标层 `newTrackDrop`（虚线框 + 半透明 clip 预览），
+  行位置 `tracks.length × rowHeight`——哨兵轨不在 `tracks` 里，不能靠 `findIndex`
+  定位。面板按 `clip.trackId === NEW_TRACK_SENTINEL` 取乐观位置填充，宿主整层平移
+  跟随视口（与 ghost / dropPreview 同一机制）。
+- **落库**：新增共享编排 `hooks/createNewTrackForDrop.ts`（**单一事实来源**，
+  抽取理由与 `copyClipsFromDrag` 相同）——建轨 → 批量移动 → 选中新轨，新轨 id
+  按**差集**解析（取末条会在并发建轨时拿到别人的轨道）。
+- **踩坑（重要）**：回滚必须用**同步的乐观 reducer**（`moveClipStart` /
+  `moveClipTrack`），最初写成 `moveClipRemote` thunk——它是异步的，`void …` 之后
+  调用方不再等待，回滚 dispatch 可能落在渲染之后，表现为「建轨失败后 clip 停在
+  哨兵轨上、从画面里消失」（实测：mock 的 `add_track` 只回 `{ok:true}` 无轨道列表，
+  正好暴露了这条路径）。
+- 验证（`?mock=1`，临时把 mock 轨道数改为 2 以让"下方"区域进入视口，验完已还原）：
+  拖到末行之下 → 幽灵行出现（`layer.children.length === 1`）、参与者写入
+  `__hs_new_track__`；松手后 mock 无法建轨 → **回滚到 `{start 2, track track-1}`**
+  且哨兵轨上不留残骸 ✓
 
-### D-1b 淡变悬停 tooltip（**未做**）
+### D-1b 淡变悬停 tooltip（已完成）
 
-- 内核目前**完全没有** hover / tooltip 基础设施（grep 无命中）；旧实现靠
-  `publishFadeRichTooltip` + `data-tooltip` 挂在 DOM 命中块上。
-- 需要先决定内核的 tooltip 方案（指针位置浮层 + 富内容发布），属独立小特性。
+- **方案**：不新建会吞事件的浮层锚点，而是把**内核容器本身**标记为 AppTooltip 的
+  载体（`data-hs-fade-tooltip-anchor` + 空 `data-tooltip`）。容器本就是指针事件的
+  目标，复用它即可整体复用浮标的显示 / 钉住 / 随指针跟随 / 菜单打开时收起语义。
+- **踩坑（重要）**：`data-tooltip` 必须在**创建时**就置空串写上。AppTooltip 先按
+  `closest("[data-tooltip], [data-hs-rich-tooltip]")` 解析"指针下的元素"再查注册表；
+  首次悬停时若标记尚不存在，`currentElement` 为 null，随后的内容注册因"元素不等于
+  当前元素"而不刷新浮标——表现为**第一次悬停永远不显示**，移开再回来才正常。
+- **内容拼装留在面板**（形状名 i18n、长度按时间轴显示设置格式化、内联曲线图标），
+  与旧实现共用 `buildSingleFadeInfoContent` / `buildCrossfadeGripInfoContent`；
+  长度取**生效值**（自动交叉淡化优先于手动）。抓手 = 双列（前块淡出在前）。
+- **去重**：只在命中**身份**变化时回调（指针沿包络线移动会命中相邻采样块，逐帧
+  回调会让浮标内容重建、位置抖动）。
+- 验证：悬停淡入线 → 与旧实现**逐字相同**（`淡入类型：/ 长度：0.1.200 / 0:0.600 /
+  曲率：-0.50`）；悬停交叉点 → 双列（淡出 + 淡入）；移出 → 浮标消失 ✓
+
+### 残留：裁切 / 拉伸的波纹跟随预览（已完成）
+
+- **抽取**：`computeRegionRightEdgeDelta` 从 `useEditDrag` 迁入 `stretchGroup`
+  （单一事实来源，+5 条单测）：波纹驱动量 = 编辑**区域右缘**净位移（不是锚点右缘、
+  不是各成员位移之和），且**必须带符号**——负位移被吞掉会表现为"向右有波纹、向左没有"。
+- **内核接入**：`handleKernelTrimPreview` 的三个出口（单 clip 拉伸 / 组拉伸 / 裁切）
+  统一调 `applyKernelTrimRipplePreview`；快照在按下时按旧实现同源规则建
+  （原点 = 参与者最早起点、轨道集 = 参与者所在轨道）；用
+  `store.getState().session`（同步新鲜，batch 内 `sessionRef` 落后一帧）。
+- 取消路径还原跟随集原位（提交时不还原——后端权威结果写回，保留乐观位置避免回跳）。
+- 验证：`rippleMode=track` 拖右缘 +0.633s → 两个跟随 clip 同步 +0.633；Esc →
+  全部回到原位；对照 `rippleMode=off` → 跟随集不动 ✓
 
 ---
 
-## 批次 E：一致性收尾（P2）
+## 批次 E：一致性收尾（P2）—— 全部完成
 
-- E-1 多选修饰键走键位绑定 + Shift 范围选择
-- E-2 Esc 覆盖 `crossfade-grip` / `snap-offset-drag` / `box-select`
-- E-3 滚动条 track 点击跳转
-- E-4 Vertical Lock 行高亮提示
-- E-5 陈旧注释与 `glyph/*` 死代码处理
+| 任务 | 内容 | 验证 |
+|---|---|---|
+| E-1 | 多选修饰键走键位绑定（`modifier.clipMultiSelectToggle` / `clipRangeSelect`）+ Shift 范围选择 + **普通单击维护范围锚点** | ⌘ 点击 → 追加选择（与旧实现逐字相同）；Shift 点击 → 4 个 clip 范围选择（与旧实现对照一致）✓ |
+| E-2 | Esc 覆盖 `crossfade-grip` / `snap-offset-drag` / `box-select`，并补齐 snap offset 的**乐观值回滚** | 框选 3 个 → Esc → 选择回空且不弹菜单；抓手拖拽 → Esc → 双方 length/start 全回滚；snap offset 0.25→0.5967 → Esc → 0.25 且**无后端写入** ✓ |
+| E-3 | 滚动条 track 点击翻页（原生滚动条的等效交互）：新增 `scrollTargetFromTrackClick`（+7 单测） | 点 thumb 右侧 0→1664→3328，点左侧 3328→1664（每次恰好一屏）✓ |
+| E-4 | Vertical Lock：内核手势**钳零水平位移** + 行高亮 + `Vertical Lock` 徽标（配色逐值与旧实现一致） | 拖到相邻轨 → 行底 y=192 h=80、徽标显示、`startSec` 保持 2 不变而轨道改为 track-2（与旧实现对照一致）✓ |
+| E-5 | 陈旧注释（`featureFlag` / 宿主 / 视图 props / `TimelinePanel` 头注释）与 `glyph/*` 死代码判定 | 注释-only 改动（`git diff` 无非注释行）；`glyph/*` + `gl/glyphProgram` + `gl/glyphQuads` 确认零调用方（见下方说明）✓ |
+
+### E-1 / D-1b 的**共同根因（重要）**
+
+`TimelineKernelView` 的 `stableInteractions` 是一份**手工维护的回调转发清单**
+（内核创建时只取一次引用）。新增回调或新增参数若不同步加进去，宿主调用的就是
+`undefined` 或旧签名——表现为「功能完全没反应，但没有任何报错」。
+本批在 `onSelectClip` 新增参数与 `onFadeHover` 上**各踩一次**。
+现已：① 补齐全部 32 个回调；② 在清单上方写明该约束。
+另补齐 `kernelInteractions` 依赖数组漏列的 13 个回调（原先一直持有首帧闭包）。
+
+### E-5 关于 `glyph/*` 的结论（**未删除，仅判定**）
+
+`glyph/glyphAtlas` / `glyphLayout` / `glyphRasterizer` + `gl/glyphQuads` +
+`gl/glyphProgram` 共 6 个文件**确无调用方**（`glyphProgram` 零导入；其余只被彼此的
+`import type` 与自身测试引用；`timeline/index.ts` 桶文件不覆盖 `kernel/`）。
+但**内核的文字走 Canvas2D 细节层**（`drawTimelineCanvas` → `drawClipDetails` 的
+`fillText`），即该 WebGL 字形管线是"架构上被绕过"而非"待接线"。
+**本轮只清理陈旧注释、保留代码**：删除属破坏性操作且与"功能对齐"目标无关，
+建议单独决策（若要删，6 个文件连同 3 个测试一并删，无能力损失）。
 
 ---
 
@@ -319,3 +382,115 @@
 
 每批一次提交（`feat(timeline-kernel): ...` / `fix(timeline-kernel): ...`），提交前跑：
 `npx vitest run`（仅 2 条 keybindings 预先存在失败）+ `npx tsc -b --noEmit` + `npx eslint <改动目录> --quiet` + `npx prettier --check <改动目录>`。
+
+---
+
+## 追加修复（2026-09-12，用户反馈）
+
+### F-1 `Alt` + 拖拽方向反了（已修复）
+
+**现象**：`Alt` + 拖 clip 中部（slip / 内部偏移）时，素材移动方向与指针相反。
+
+**根因（坐标域混淆）**：`computeSlipWindow(clip, deltaSec)` 的 `deltaSec` 是
+**窗口平移量**（正 = 源窗口向素材后段平移），而不是屏幕位移。两个调用方分属不同域：
+
+| 调用方 | 传入的量 | 域 | 结果 |
+|---|---|---|---|
+| 旧实现 `useSlipDrag` | `起点指针 − 当前指针` | 窗口域（向右拖为**负**） | 正确 |
+| 渲染内核 `handleKernelDragPreview` | 内核回调的 `deltaSec` | **屏幕域**（正 = 向右拖） | 方向整体反过来 |
+
+内核侧的注释**误判了这一点**（原文写「只是位移正负号约定相反」，但取反只做在吸附
+分支的 `rawWindowShift` 上，**真正应用窗口的 `computeSlipWindow` 调用漏了负号**）。
+
+**修复**：内核调用改为 `computeSlipWindow(clip, -dApplied)`，并在调用点与函数头
+**双向**写明参数约定与「屏幕向右拖 = 窗口负平移」的推导。
+
+**验证**（`?mock=1`，KERNEL=1 vs KERNEL=0 逐字对照）：
+
+| 手势 | 旧实现 | 修复前（内核） | 修复后（内核） |
+|---|---|---|---|
+| Alt + 向右拖 100px | `srcStart 0 → -0.6667` | `0 → +0.6667` ❌ | `0 → -0.6667` ✓ |
+| Alt + 向左拖 100px | `0 → +0.6667` | `0 → -0.6667` ❌ | `0 → +0.6667` ✓ |
+
+单测：`slipWindow.test.ts` +9 条（方向约定、倒放镜像、速率换算、loop 环绕、
+非 loop 倒放保持跨度、屏幕域换算自证）。
+
+### F-2 `TAURI_UI_MODE=build` 下界面与 dev 差异较大（已定位：**非缺陷，设计如此**）
+
+**结论**：不是构建损坏，而是**渲染路径不同**——build 模式下内核默认关闭。
+
+**机制**：`scripts/tauri-before-dev.mjs` 的 `build` 模式跑 `npm run build` +
+`vite preview`，即加载**生产包**；而 `featureFlag.isTimelineKernelEnabled()` 在未显式
+写 `localStorage` 时返回 `import.meta.env.DEV`——生产包恒为 `false`，于是时间轴走
+**旧 DOM 实现**；dev 模式走**新渲染内核**。两者是两套渲染实现，观感不同属预期。
+
+**取证（排除"构建确实坏了"）**，1920×1200 空工程，dev vs 生产包：
+
+| 检查项 | 结果 |
+|---|---|
+| 主题变量（`--qt-*`）/ body 字体 / 字号 | **完全一致** |
+| DOM 骨架（root 子树逐行比较） | **0 处差异**（81 行全同） |
+| 计算样式（563 个共同节点 × 25 个属性） | **0 处差异** |
+| 内核画布几何（8 块 canvas 的尺寸与位置） | **完全一致** |
+| 唯一结构差异 | dev 多出 PERF 悬浮面板的 10 个节点（dev-only，预期内） |
+
+把两边**都强制 `KERNEL=1`** 后再比：计算样式 **0 差异**、结构差异仅剩 dev-only 面板。
+即「生产包本身没有渲染退化」，差异 100% 来自内核开关的默认值。
+
+**因此未改代码**，仅记录结论。若要 build 模式与 dev 观感一致，有三种选择（需决策）：
+
+1. **加显隐开关**：把 `TAURI_UI_MODE` 透传成 `VITE_*` 变量，build 模式也默认开内核
+   （改动最小，但会改变「生产默认关」的既有发布策略）；
+2. **保持现状**：把 `TAURI_UI_MODE=build` 理解为「验证旧实现 / 发布路径」，
+   dev 模式才验证内核（与当前文档定位一致）；
+3. **反转默认**：内核全环境默认开、旧实现退化为逃生门（对齐设计文档里
+   「稳定后默认开再删旧路径」的目标态；前提是新旧对齐已完成——本轮刚补完全部缺口，
+   真机回归尚未做）。
+
+**顺带发现（不影响本结论）**：生产包在无后端（纯 `vite preview`）时会打印
+`Backend invoke failed: pywebview:get_ui_settings / get_runtime_info` 并弹错误提示——
+因为生产包不安装 dev-only 的 mock 后端（`?mock=1` 被 `import.meta.env.DEV` 门控）；
+在 Tauri 里由真实后端提供这些命令，属预期行为。
+
+### F-3 纵向拖拽时间轴有「吸附感」（已修复）
+
+**现象**：纵向上拖拽时间轴时，末段感觉「卡住 / 吸附」一下。
+
+**根因（两侧竖直上限不一致，差 32px）**：竖直滚动范围由两处**各自**计算：
+
+| 位置 | 内容高度公式 | 缺少的元素 |
+|---|---|---|
+| 左侧轨道头（`TrackList` 的滚动容器） | 真实 DOM 高度，含底部「添加轨道」行 | — |
+| 渲染内核（`ScrollKernel.contentHeightFor`） | `tracks × rowHeight` | **`TRACK_ADD_ROW_HEIGHT`（32px）** |
+
+旧实现的原生滚动容器内容层用的是面板的 `contentHeight`
+（= `tracks × rowHeight + TRACK_ADD_ROW_HEIGHT`，见 `useTimelineState`），
+所以旧实现两侧**天然同源**；内核自绘滚动后只按轨道数算高，于是：
+
+- 内核竖直上限 329px，轨道头 361px（实测差值恒为 32px）；
+- 在**轨道头**里拖拽超过 329px 后，轨道头继续滚到 361，**时间轴已停住** ——
+  两侧行错位、指针还在动但内容不动，松手后视觉上"回弹/吸附"。
+
+**取证（修复前）**：在轨道头中键拖拽到底 →
+`{"finalK": 329, "finalTL": 361}`（内核与轨道头相差 32px）；
+旧实现同姿势实测 `legacyScroller.max = 361`、`trackList.max = 361`（**delta 0**，完全同步）——
+即**轨道头是正确的一方**，内核算少了。
+
+**修复**：
+1. `ScrollKernel` 新增可选 `extraContentHeightPx`（**额外量**而非绝对高度：
+   内核不必知道「添加轨道行」这个领域概念，调用方给差额）；
+2. 宿主注入 `() => TRACK_ADD_ROW_HEIGHT`；
+3. 新增宿主私有 `verticalContentSizePx()`，让**自绘滚动条**的 thumb 长度 /
+   拖拽换算 / 轨道翻页量与滚动上限同源（否则滚到底时 thumb 到不了轨道末端、
+   点轨道翻页的目标值也与实际上限不符——末段会"跳一下"）；
+4. **刻意不动**两处 `contentBottomPx = tracks × rowHeight`：那是网格线与行分界线的
+   绘制下界（添加轨道行不画网格），与滚动范围是两件事。
+
+**验证**：
+- 修复后同姿势拖拽：`{"finalK": 361, "finalTL": 361}`，逐帧日志两侧完全同步；
+- 滚到底时 thumb：`106.467 + 44.533 = 151` = 轨道全长（精确到末端）；
+- **逐行对齐**（按 Track 名称比对，排除虚拟化窗口干扰）：scrollTop = 361 时
+  Track 3/4/5/6 的实测边界与内核算出的期望边界**逐项相同**（`allAligned: true`），
+  0 / 100 / 200 位置同样对齐。
+- 单测：`scrollKernel.test.ts` +5 条（额外高度计入上限、缺省 0 行为不变、
+  非法/负值不放大上限、函数形式在 `reclamp` 后生效）。

@@ -9,9 +9,9 @@
  *
  * 此文件只保留：JSX 渲染 + 胶水 + 拖拽 hooks 桥接
  *
- * 【Spike 开关】`TIMELINE_KERNEL_ENABLED`（localStorage `hifishifter.timelineKernel`）
- * 开启时，在时间轴区域额外渲染 `TimelineKernelSpikeView`（新渲染内核，覆盖式）；
- * 默认关闭，既有实现完全不受影响。
+ * 【内核开关】`TIMELINE_KERNEL_ENABLED`（localStorage `hifishifter.timelineKernel`）
+ * 开启时，轨道区改由 `TimelineKernelView`（新渲染内核）承载，关闭时回退到既有
+ * DOM 实现；未显式设置时 dev 默认开启、生产默认关闭（见 `timeline/kernel/featureFlag`）。
  */
 import React, { useMemo, Profiler } from "react";
 import { Flex, Dialog, Button, Text } from "@radix-ui/themes";
@@ -22,9 +22,17 @@ import { shallowEqual } from "react-redux";
 import { isModifierActive, selectKeybinding } from "../../features/keybindings/keybindingsSlice";
 import { resolveClipDragCopyMode } from "./timeline/hooks/clipDragCopyMode";
 import { copyClipsFromDrag } from "./timeline/hooks/copyClipsFromDrag";
+import { createNewTrackForKernelDrop } from "./timeline/hooks/createNewTrackForDrop";
 import { normalizedTrackColorCss } from "./timeline/runtime/timelineCanvasStyle";
 import { defaultFadeDirFor, FADE_PRESETS } from "./timeline/reaperFade";
-import type { FadeLengthFormatContext } from "./timeline/fadeTooltipText";
+import {
+    buildCrossfadeGripInfoContent,
+    buildSingleFadeInfoContent,
+    publishFadeRichTooltip,
+    type FadeLabelLookup,
+    type FadeLengthFormatContext,
+} from "./timeline/fadeTooltipText";
+import { effectiveFadeSec } from "./timeline/kernel/interaction/fadeTargets";
 import { FadeContextMenuHost } from "./timeline/FadeContextMenuHost";
 import {
     requestOpenFadeContextMenu,
@@ -181,6 +189,7 @@ import { CLIP_GAIN_DRAG_DB_PER_PX, MIN_CLIP_LENGTH_SEC } from "./timeline/consta
 import {
     buildStretchGroupState,
     computeClipStretch,
+    computeRegionRightEdgeDelta,
     computeStretchGroupUpdate,
     scaleSnapOffsetForStretch,
     type StretchGroupState,
@@ -821,6 +830,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     const clipActions = useTimelineClipActions({
         sessionRef,
         scrollRef,
+        // 模式无关视口：范围选择的「点击位置 → 工程秒」换算需要它（内核模式下
+        // 原生 scroller 不存在，缺了它会退化成用 clip 起点近似）。
+        viewport: viewportAccess,
         lastClickedClipIdRef,
         lastClickedClientXRef,
         pxPerSec,
@@ -1302,15 +1314,31 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
      * 内核只识别手势，这些语义不在内核侧重写。
      */
     const handleKernelSelectClip = React.useCallback(
-        (clipId: string, additive: boolean) => {
+        (clipId: string, additive: boolean, rangeSelect?: boolean, clientX?: number) => {
+            // 范围选择（默认 Shift）：复用旧实现的范围选择语义——它自带锚点状态
+            // 与「按点击位置取时间范围」的规则，重写一份必然分叉。
+            if (rangeSelect === true) {
+                selectClipRangeByRect(clipId, undefined, clientX);
+                return;
+            }
             if (additive) {
                 toggleTrackLaneCtrlSelection(clipId);
                 return;
             }
-            setMultiSelectedClipIds([clipId]);
+            // 普通单击同样要维护范围选择的锚点与点击位置：下一次 Shift 点击要靠它们
+            // 决定范围起点。不记录时「先点 A、再 Shift 点 B」会退化成只选中 B
+            // （旧实现在 `TrackLane` 的点击收尾里做同一件事）。
+            ensureTrackLaneSelected(clipId);
+            recordLastClickPosition(clientX ?? 0);
             selectTrackLaneClipRemote(clipId);
         },
-        [selectTrackLaneClipRemote, setMultiSelectedClipIds, toggleTrackLaneCtrlSelection],
+        [
+            ensureTrackLaneSelected,
+            recordLastClickPosition,
+            selectClipRangeByRect,
+            selectTrackLaneClipRemote,
+            toggleTrackLaneCtrlSelection,
+        ],
     );
 
     /** 内核拖拽：按下时的原始位置（把相对位移换算为绝对位置，并支持回滚）。 */
@@ -1327,6 +1355,15 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         widthPx: number;
         trackId: string;
     }> | null>(null);
+
+    /**
+     * 内核拖拽是否正落在「新建轨道」哨兵上（拖到全部轨道之下）。
+     *
+     * React state 驱动幽灵行的渲染，ref 做去重（预览每帧都会给出同一个判定，
+     * 逐帧 setState 会白白重渲染整个面板）。
+     */
+    const [kernelDropToNewTrack, setKernelDropToNewTrack] = React.useState(false);
+    const kernelDropToNewTrackRef = React.useRef(false);
 
     const kernelDragOriginRef = React.useRef<{
         clipId: string;
@@ -1562,7 +1599,15 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         (item) => item.id === participant.clipId,
                     );
                     if (clip === undefined) continue;
-                    const next = computeSlipWindow(clip, dApplied);
+                    // ⚠️ **取反号**：`dApplied` 在「屏幕位移」域（内核约定正 = 向右拖），
+                    // 而 `computeSlipWindow` 要的是「窗口平移量」域（正 = 源窗口向素材
+                    // **后段**平移）。向右拖 = 把内容往右推 = 露出**更早**的素材 = 窗口
+                    // 向前段平移，故屏幕正位移对应窗口负平移。
+                    //
+                    // 旧实现 `useSlipDrag` 的 `desiredTotal = 起点指针 − 当前指针`
+                    // （向右拖为负）恰好已经是窗口域，所以它直接传即可；内核给的是
+                    // 屏幕域，漏掉这个负号会让方向整体反过来（拖右显示更晚的素材）。
+                    const next = computeSlipWindow(clip, -dApplied);
                     if (next === null) continue;
                     origin.lastSourceById.set(participant.clipId, next);
                     updates.push({ clipId: participant.clipId, ...next });
@@ -1623,11 +1668,19 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 targetTrackIndex >= 0 && origin.anchorTrackIndex >= 0
                     ? targetTrackIndex - origin.anchorTrackIndex
                     : 0;
+            // 拖到全部轨道之下 = 新建轨道哨兵：乐观位置写哨兵轨（与旧实现
+            // `moveClipTrack(NEW_TRACK_SENTINEL)` 同源），面板据此渲染幽灵行。
+            const dropToNewTrack = args.targetTrackId === NEW_TRACK_SENTINEL;
+            if (dropToNewTrack !== kernelDropToNewTrackRef.current) {
+                kernelDropToNewTrackRef.current = dropToNewTrack;
+                setKernelDropToNewTrack(dropToNewTrack);
+            }
             const { moves, deltaStartSec } = applyKernelEditDelta({
                 participants: origin.participants,
                 deltaStartSec: nextStart - origin.startSec,
                 deltaTrack,
                 trackIds,
+                dropToNewTrack,
             });
             origin.lastDeltaStartSec = deltaStartSec;
             if (origin.copyMode) {
@@ -1796,6 +1849,38 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 });
                 // 波纹跟随集恢复原位（预览期间已被平移）。
                 applyRippleFollowerShift(dispatch, origin.rippleFollowers, 0);
+                if (kernelDropToNewTrackRef.current) {
+                    kernelDropToNewTrackRef.current = false;
+                    setKernelDropToNewTrack(false);
+                }
+                return;
+            }
+            // 哨兵轨：先清掉落点标记（幽灵行随手势一起消失），再建轨并落库。
+            if (kernelDropToNewTrackRef.current) {
+                kernelDropToNewTrackRef.current = false;
+                setKernelDropToNewTrack(false);
+                dispatch(checkpointHistory());
+                void createNewTrackForKernelDrop({
+                    clipIds: origin.participants.map((item) => item.clipId),
+                    // 目标起点取**当前**（乐观、含吸附）值，与幽灵行显示的位置一致。
+                    startSecById: Object.fromEntries(
+                        origin.participants.map((item) => {
+                            const clip = sessionRef.current.clips.find(
+                                (candidate) => candidate.id === item.clipId,
+                            );
+                            return [item.clipId, clip?.startSec ?? item.startSec] as const;
+                        }),
+                    ),
+                    originTrackIdById: Object.fromEntries(
+                        origin.participants.map((item) => [item.clipId, item.trackId] as const),
+                    ),
+                    originStartSecById: Object.fromEntries(
+                        origin.participants.map((item) => [item.clipId, item.startSec] as const),
+                    ),
+                    dispatch,
+                    sessionRef,
+                    moveLinkedParams: sessionRef.current.lockParamLinesEnabled,
+                }).catch(() => undefined);
                 return;
             }
             dispatch(checkpointHistory());
@@ -1898,7 +1983,51 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         xfadeClipIds: string[];
         initialCrossfadeSides: ReturnType<typeof computeInitialCrossfadeSides>;
         editSides: Record<string, { fadeIn: boolean; fadeOut: boolean }>;
+        /**
+         * 波纹跟随集（按下时快照）。
+         *
+         * 旧实现的实时波纹覆盖 trim 与 stretch（由区域右缘净位移驱动），内核原先只在
+         * **拖拽移动**时做波纹——裁切 / 拉伸期间后续 clip 不跟随，松手才跳过去。
+         * 快照规则与旧实现同源：原点 = 参与者最早起点、轨道集 = 参与者所在轨道。
+         */
+        rippleFollowers: RippleFollowerMap;
     } | null>(null);
+
+    /**
+     * 内核裁切 / 拉伸的波纹实时预览。
+     *
+     * 流程：按当前（乐观）几何算出**编辑区域右缘净位移** → 把跟随集平移到
+     * 「初始位置 + 位移」。
+     *
+     * 特殊说明：
+     * - 位移取区域右缘而不是锚点右缘：与后端区域化波纹一致，多成员编辑时以整个
+     *   区域的最右缘为准（`computeRegionRightEdgeDelta` 是共享纯函数）；
+     * - 位移带符号，向左收拢时为负——跟随集必须跟着向左（对 0 取 max 会吞掉负位移）；
+     * - 用 `store.getState().session`（同步新鲜）：react-redux 的 batch 会延迟订阅
+     *   回调，batch 内 `sessionRef` 仍是上一帧位置。
+     *
+     * @param origin 本次边缘手势的按下时快照（含 `rippleFollowers` 与参与者几何）。
+     * @returns 无返回值。
+     */
+    const applyKernelTrimRipplePreview = React.useCallback(
+        (origin: NonNullable<typeof kernelTrimOriginRef.current>) => {
+            // `origin.baseById` 是 Map（按下时按参与者建），纯函数要 Record——
+            // 这里就地转换，避免为"一次读取"再存一份平行结构。
+            const baseById: Record<string, { startSec: number; lengthSec: number }> = {};
+            for (const [clipId, base] of origin.baseById) {
+                baseById[clipId] = { startSec: base.startSec, lengthSec: base.lengthSec };
+            }
+            const rippleRightDelta = computeRegionRightEdgeDelta({
+                clipIds: origin.participants.map((item) => item.clipId),
+                baseById,
+                clips: store.getState().session.clips,
+            });
+            // 位移为 0 时也要执行：它等价于"把跟随集恢复到初始位置"，正是取消 /
+            // 拖回原位所需要的（旧实现同样无条件调用）。
+            applyRippleFollowerShift(dispatch, origin.rippleFollowers, rippleRightDelta);
+        },
+        [dispatch, store],
+    );
 
     /**
      * 内核 trim 预览：写乐观几何。
@@ -1997,6 +2126,15 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         xfadeClipIds,
                     ),
                     editSides,
+                    // 波纹跟随集：与旧实现 `useEditDrag` 同一套快照规则（原点取
+                    // 参与者最早起点、作用轨道取参与者所在轨道）。
+                    rippleFollowers: buildRippleFollowers(
+                        session.clips,
+                        new Set(xfadeClipIds),
+                        Math.min(...participants.map((item) => item.startSec)),
+                        session.rippleMode,
+                        new Set(participants.map((item) => item.trackId)),
+                    ),
                     // Alt 按住 = 拉伸（与旧实现 `modifier.clipStretch` 同源）。
                     mode: stretchMode ? "stretch" : "trim",
                     basePlaybackRate: Number(clip.clipPlaybackRate ?? 1) || 1,
@@ -2087,6 +2225,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                             }
                         }
                     });
+                    // 波纹实时预览（组拉伸改变区域右缘 → 跟随集同步平移）。
+                    applyKernelTrimRipplePreview(origin);
                     if (s.autoCrossfadeEnabled) {
                         previewAutoCrossfade(
                             store.getState().session,
@@ -2132,6 +2272,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         }),
                     );
                 });
+                // 波纹实时预览（单 clip 拉伸改变区域右缘 → 跟随集同步平移）。
+                applyKernelTrimRipplePreview(origin);
                 // 自动交叉淡化实时预览（拉伸改变重叠 → 自动 fade 随之变化）。
                 if (s.autoCrossfadeEnabled) {
                     previewAutoCrossfade(
@@ -2244,6 +2386,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     }
                 }
             });
+            // 波纹（自动跟进）实时预览：以编辑区域**右缘净位移**为准驱动跟随集，
+            // 与旧实现 `useEditDrag` 同源（同一个纯函数）。必须在三种模式（拉伸 /
+            // 组拉伸 / 裁切）之后统一执行——只在某一个分支里做会让其余分支漏掉波纹。
+            // 用 `store.getState().session`（同步新鲜）而不是 `sessionRef`：batch 内
+            // ref 仍停在上一帧位置，会让位移滞后一帧。
+            applyKernelTrimRipplePreview(origin);
             // 自动交叉淡化实时预览：裁切改变重叠 → 按当前乐观位置重算自动 fade。
             // `editSides` 限定只动本次拖拽的那一侧（裁切左缘不得改右缘的交叉淡化）。
             if (s.autoCrossfadeEnabled) {
@@ -2284,6 +2432,17 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     const kernelSnapOffsetActiveRef = React.useRef(false);
 
     /**
+     * 内核吸附偏移手势按下时的偏移（秒），供取消路径回滚。
+     *
+     * 预览逐帧改写 `snapOffsetSec` 乐观值，取消（Esc / pointercancel）必须还原到
+     * 按下时的值——否则 Redux 停在中途位置，与后端分叉（与其它内核手势的取消
+     * 路径同一约定）。在首次真实位移时快照：那一刻的 Redux 值就是按下时的值。
+     */
+    const kernelSnapOffsetBaseRef = React.useRef<{ clipId: string; snapOffsetSec: number } | null>(
+        null,
+    );
+
+    /**
      * 内核吸附偏移预览：与旧实现 `useSnapOffsetDrag` 同源。
      *
      * 被吸附对象是**手柄的绝对时间线位置**（`clipStart + offset`）——不是 clip 起点；
@@ -2302,6 +2461,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             if (!kernelSnapOffsetActiveRef.current) {
                 // 首次真实位移：交互锁 + undo 检查点 + 吸附手势一起开。
                 kernelSnapOffsetActiveRef.current = true;
+                // 按下时的偏移快照（此刻尚未被本次手势改写）——取消路径回滚用。
+                kernelSnapOffsetBaseRef.current = {
+                    clipId: args.clipId,
+                    snapOffsetSec: Math.max(0, Number(clip.snapOffsetSec) || 0),
+                };
                 dispatch(beginInteraction());
                 dispatch(checkpointHistory());
                 beginSnapGesture();
@@ -2342,12 +2506,24 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     const handleKernelSnapOffsetCommit = React.useCallback(
         (args: { clipId: string; cancelled: boolean; changed: boolean }) => {
             const wasActive = kernelSnapOffsetActiveRef.current;
+            const base = kernelSnapOffsetBaseRef.current;
             kernelSnapOffsetActiveRef.current = false;
+            kernelSnapOffsetBaseRef.current = null;
             clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
             // 手势从未真正开始（零位移单击）：begin* 都没调用过，不能 end*。
             if (!wasActive) return;
             endSnapGesture();
             if (args.cancelled || !args.changed) {
+                // 取消：乐观值必须还原到按下时的偏移，否则 Redux 与后端分叉
+                // （与其它内核手势的取消路径同一约定）。
+                if (args.cancelled && base !== null && base.clipId === args.clipId) {
+                    dispatch(
+                        setClipSnapOffset({
+                            clipId: args.clipId,
+                            snapOffsetSec: base.snapOffsetSec,
+                        }),
+                    );
+                }
                 dispatch(endInteraction());
                 return;
             }
@@ -2384,6 +2560,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             if (origin === null) return;
             // 手势结束：清掉吸附高亮（与拖拽收尾同源）。
             clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+            // 波纹跟随集：取消时**必须还原原位**（预览期间已被平移），否则 Redux 会
+            // 停在中途位置、与后端分叉。提交时不还原——后端按权威结果写回，
+            // 前端保留的乐观位置正好避免"松手回跳再跳过去"。
+            if (args.cancelled) {
+                applyRippleFollowerShift(dispatch, origin.rippleFollowers, 0);
+            }
 
             if (origin.mode === "stretch") {
                 // 拉伸收尾：回滚 / 提交都作用于**五个字段**（起点、长度、速率、
@@ -2979,6 +3161,93 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     );
 
     /**
+     * 内核淡变悬停浮标：发布到 AppTooltip 的富内容注册表。
+     *
+     * 【为什么在面板拼装内容】提示文案（形状名 i18n、长度按时间轴显示设置格式化、
+     * 内联曲线图标）是渲染无关的领域知识，且与旧实现 `FadeHitLayer` /
+     * `OverlapEditLayer` 共用同一套 `buildSingleFadeInfoContent` /
+     * `buildCrossfadeGripInfoContent`——内核侧重写会产生第二份文案规则。
+     *
+     * 【锚点元素】内核的淡变控件是自绘的、没有 DOM，宿主因此把**内核容器本身**
+     * 标记为浮标载体（`data-hs-fade-tooltip-anchor`）：容器本就是指针事件的目标，
+     * 复用它就不需要插入任何会吞事件的浮层。面板把内容发布到它上面即可整体复用
+     * AppTooltip 的显示 / 钉住 / 随指针跟随 / 菜单抑制语义。
+     *
+     * 长度取**生效值**（自动交叉淡化优先于手动），与绘制端和右键菜单同一规则。
+     */
+    const handleKernelFadeHover = React.useCallback(
+        (
+            args: {
+                clipId: string;
+                side: "in" | "out";
+                isLine: boolean;
+                partnerClipId?: string;
+            } | null,
+        ) => {
+            const anchor =
+                typeof document === "undefined"
+                    ? null
+                    : (document.querySelector(
+                          "[data-hs-fade-tooltip-anchor]",
+                      ) as HTMLElement | null);
+            if (anchor === null) return;
+            if (args === null) {
+                // 收起：content 传 null → Provider 移除该元素的内容（浮标消失）。
+                publishFadeRichTooltip(anchor, null);
+                return;
+            }
+            const clips = sessionRef.current.clips;
+            const sideOf = (clipId: string, isOut: boolean) => {
+                const clip = clips.find((item) => item.id === clipId);
+                if (clip === undefined) return null;
+                return {
+                    shape: (isOut ? clip.fadeOutShape : clip.fadeInShape) ?? 0,
+                    dir: (isOut ? clip.fadeOutDir : clip.fadeInDir) ?? 0,
+                    lengthSec: effectiveFadeSec(
+                        isOut ? clip.fadeOutSec : clip.fadeInSec,
+                        isOut ? clip.autoFadeOutSec : clip.autoFadeInSec,
+                    ),
+                };
+            };
+            // 交叉点抓手 = 双列（前块淡出在前、后块淡入在后，与右键菜单列序一致）。
+            if (args.partnerClipId !== undefined) {
+                const earlier = sideOf(args.partnerClipId, true);
+                const later = sideOf(args.clipId, false);
+                if (earlier === null || later === null) {
+                    publishFadeRichTooltip(anchor, null);
+                    return;
+                }
+                publishFadeRichTooltip(
+                    anchor,
+                    buildCrossfadeGripInfoContent({
+                        earlier,
+                        later,
+                        formatCtx: fadeLengthFormatCtx,
+                        t: t as unknown as FadeLabelLookup,
+                    }),
+                );
+                return;
+            }
+            const isOut = args.side === "out";
+            const side = sideOf(args.clipId, isOut);
+            if (side === null) {
+                publishFadeRichTooltip(anchor, null);
+                return;
+            }
+            publishFadeRichTooltip(
+                anchor,
+                buildSingleFadeInfoContent({
+                    isOut,
+                    ...side,
+                    formatCtx: fadeLengthFormatCtx,
+                    t: t as unknown as FadeLabelLookup,
+                }),
+            );
+        },
+        [fadeLengthFormatCtx, sessionRef, t],
+    );
+
+    /**
      * 内核单击 inactive take lane：切换活跃 Take（复用旧实现的提交入口）。
      *
      * 与旧实现同源：暂停 / 停止时还会把播放光标带到点击位置（播放中不打断当前
@@ -3438,6 +3707,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             onBoxSelectCommit: handleKernelBoxSelectCommit,
             onContextMenu: handleKernelContextMenu,
             onFadeContextMenu: handleKernelFadeContextMenu,
+            onFadeHover: handleKernelFadeHover,
             onActivateTake: handleKernelActivateTake,
         }),
         [
@@ -3454,6 +3724,27 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             handleKernelBoxSelectPreview,
             handleKernelBoxSelectCommit,
             handleKernelContextMenu,
+            handleKernelFadeContextMenu,
+            handleKernelFadeHover,
+            handleKernelActivateTake,
+            handleKernelRateBadgeMenu,
+            // 下面这些回调内联在 `kernelInteractions` 里（或经局部函数转发），
+            // 原先同样漏在依赖数组外：`useMemo` 会继续持有**首帧闭包**，表现为
+            // 「改了设置 / 选择后，内核手势仍按旧值执行」。依赖数组必须与
+            // useMemo 体内引用的回调一一对应。
+            handleKernelDoubleClickClip,
+            handleKernelToggleClipMute,
+            handleToggleGroupDisabled,
+            handleKernelOpenClipFormant,
+            handleKernelRenameClipStart,
+            handleKernelBadgeEditStart,
+            handleKernelGainDragPreview,
+            handleKernelGainDragCommit,
+            handleKernelGainReset,
+            handleKernelCrossfadeGripPreview,
+            handleKernelCrossfadeGripCommit,
+            handleFadeShapeCycleClick,
+            handleCrossfadeCycleClick,
         ],
     );
 
@@ -4475,6 +4766,27 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 }
                                 onDragOver={handleTimelineDragOver}
                                 onDrop={handleTimelineDrop}
+                                newTrackDrop={
+                                    kernelDropToNewTrack
+                                        ? {
+                                              // 幽灵行里的 clip 取 Redux 里的乐观位置
+                                              // （预览已把参与者写到哨兵轨上，含吸附结果）。
+                                              items: s.clips
+                                                  .filter(
+                                                      (clip) => clip.trackId === NEW_TRACK_SENTINEL,
+                                                  )
+                                                  .map((clip) => ({
+                                                      key: clip.id,
+                                                      leftPx: Math.max(0, clip.startSec * pxPerSec),
+                                                      widthPx: Math.max(
+                                                          1,
+                                                          clip.lengthSec * pxPerSec,
+                                                      ),
+                                                  })),
+                                              contentWidth: timelineScrollRange.paddedContentWidth,
+                                          }
+                                        : undefined
+                                }
                             />
                         </>
                     ) : (

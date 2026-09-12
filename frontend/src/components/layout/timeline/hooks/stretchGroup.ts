@@ -4,6 +4,8 @@
  * 作用：
  * - 判定当前边缘拖拽是否应触发“多选整体拉伸”。
  * - 计算固定一侧（左/右）时，所有 Clip 的新 start/length/clipPlaybackRate。
+ * - 计算「被编辑区域右缘的净位移」（波纹跟随预览的驱动量，见
+ *   `computeRegionRightEdgeDelta`）——旧实现与渲染内核共用同一份，避免两套波纹语义。
  */
 import type { ClipInfo } from "../../../../features/session/sessionTypes";
 import { clamp } from "../math";
@@ -336,4 +338,45 @@ export function computeStretchGroupUpdate(params: {
         groupEndSec: nextGroupEnd,
         byId,
     };
+}
+
+/**
+ * 「被编辑区域右缘」的净位移（**带符号**，秒）。
+ *
+ * 【用途】波纹跟随预览的驱动量：把跟随集按本位移平移，用户就能在拖拽过程中看到
+ * 后续 clip 自动跟进（提交后的权威结果仍由后端计算）。
+ *
+ * 【为什么取"右缘净位移"而不是"拖拽位移"】与后端区域化波纹一致——平移量 = 区域
+ * 右缘的**实际**位移（已含吸附、素材长度限制等约束后的真值），这样"预览 → 提交"
+ * 不会跳变。取拖拽原始位移时，约束把边缘卡住后跟随集仍继续移动，松手瞬间回跳。
+ *
+ * ⚠️ 必须是**带符号**：拖右缘向左（缩短 / 截短）时位移为负，跟随剪辑要向左收拢。
+ * 不能用"对 0 取 max"或"对各成员取最大正位移"的方式，否则负位移会被吞掉、
+ * 表现为"向右正常而向左无实时波纹"（曾为此引入 bug）。
+ *
+ * @param clipIds 本次编辑的参与者（锚点 + 多选 + 编组展开后的全部成员）。
+ * @param baseById 各参与者按下时的几何（`startSec` / `lengthSec`）。
+ * @param clips 当前（乐观更新后）的 session clips。
+ * @returns 右缘净位移（秒）；无有效数据时为 0。
+ */
+export function computeRegionRightEdgeDelta(args: {
+    readonly clipIds: readonly string[];
+    readonly baseById: Readonly<Record<string, { startSec: number; lengthSec: number }>>;
+    readonly clips:
+        | readonly ClipInfo[]
+        | readonly { id: string; startSec: number; lengthSec: number }[];
+}): number {
+    let maxOldRight = Number.NEGATIVE_INFINITY;
+    let maxNewRight = Number.NEGATIVE_INFINITY;
+    for (const id of args.clipIds) {
+        const base = args.baseById[id];
+        const now = args.clips.find((clip) => clip.id === id);
+        if (!base || !now) continue;
+        maxOldRight = Math.max(maxOldRight, base.startSec + base.lengthSec);
+        maxNewRight = Math.max(maxNewRight, Number(now.startSec) + Number(now.lengthSec));
+    }
+    if (!Number.isFinite(maxOldRight) || !Number.isFinite(maxNewRight)) {
+        return 0;
+    }
+    return maxNewRight - maxOldRight;
 }

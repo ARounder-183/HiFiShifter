@@ -46,12 +46,22 @@ import { getBulkEditableClipIds } from "./bulkClipEdit";
 import { getGroupClipIds } from "./useGroupExpansion";
 import { buildBulkClipStateUpdates } from "./bulkClipRemotePayloads";
 import { computeClipNormalizationGain } from "../../../../features/session/clipNormalization";
+import type { TimelineViewportAccess } from "./timelineViewportAccess";
 
 // ── Args / Result 类型 ────────────────────────────────────────
 
 export interface UseTimelineClipActionsArgs {
     sessionRef: React.MutableRefObject<RootState["session"]>;
     scrollRef: React.MutableRefObject<HTMLDivElement | null>;
+    /**
+     * 模式无关的视口访问器（可选）。
+     *
+     * 【为什么需要】范围选择要把「点击时的 clientX」换算成工程秒，而换算依赖
+     * 视口矩形与滚动位置。内核模式下 `scrollRef.current === null`，直接读它会
+     * 退化成「用 clip 起点近似点击位置」的降级分支——表现为「Shift 点第二个
+     * clip 只选中它自己」。传入访问器后两种模式走同一条换算。
+     */
+    viewport?: TimelineViewportAccess;
     lastClickedClipIdRef: React.MutableRefObject<string | null>;
     lastClickedClientXRef: React.MutableRefObject<number | null>;
     pxPerSec: number;
@@ -206,6 +216,7 @@ export function useTimelineClipActions(
     const {
         sessionRef,
         scrollRef,
+        viewport,
         lastClickedClipIdRef,
         lastClickedClientXRef,
         pxPerSec,
@@ -617,15 +628,18 @@ export function useTimelineClipActions(
             const minTrack = Math.min(anchorTrackIndex, targetTrackIndex);
             const maxTrack = Math.max(anchorTrackIndex, targetTrackIndex);
 
-            // 使用鼠标点击位置（时间秒）构建选择矩形，避免长 clip 导致的过度选择
+            // 使用鼠标点击位置（时间秒）构建选择矩形，避免长 clip 导致的过度选择。
+            //
+            // 视口来源必须模式无关：内核模式下原生 scroller 不存在，读它会掉进
+            // 下面的降级分支（用 clip 起点近似），范围选择随之失效。
             let anchorClickSec: number;
             let targetClickSec: number;
 
-            const scroller = scrollRef.current;
+            const bounds =
+                viewport?.getRect() ?? scrollRef.current?.getBoundingClientRect() ?? null;
+            const xScroll = viewport?.getScrollLeft() ?? scrollRef.current?.scrollLeft ?? 0;
             const anchorClientX = lastClickedClientXRef.current;
-            if (scroller && anchorClientX != null && targetClientX != null) {
-                const bounds = scroller.getBoundingClientRect();
-                const xScroll = scroller.scrollLeft;
+            if (bounds !== null && anchorClientX != null && targetClientX != null) {
                 anchorClickSec = Math.max(0, (anchorClientX - bounds.left + xScroll) / pxPerSec);
                 targetClickSec = Math.max(0, (targetClientX - bounds.left + xScroll) / pxPerSec);
             } else {
@@ -664,6 +678,7 @@ export function useTimelineClipActions(
             updateRangeSelectAnchor,
             lastClickedClientXRef,
             scrollRef,
+            viewport,
         ],
     );
 

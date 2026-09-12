@@ -2,7 +2,8 @@
  * 时间轴渲染内核 · 拖拽几何换算
  *
  * 【主要内容】
- * 把「指针在内容坐标下的水平位移」换算为 clip 的新起始时间，并钳制到工程范围。
+ * 把「指针在内容坐标下的水平位移」换算为 clip 的新起始时间，并钳制到工程范围；
+ * 把纵向位置换算为目标轨道下标，并判定「是否落在全部轨道之下」（新建轨道哨兵）。
  *
  * 【作用】
  * 内核手势只负责**几何**：命中、位移换算、目标轨道判定。编辑语义（吸附、事务、
@@ -208,4 +209,31 @@ export function resolveTargetTrackIndex(
     const y = Number.isFinite(contentY) ? Math.max(0, contentY) : 0;
     const index = Math.floor(y / safeRowHeight);
     return Math.min(trackCount - 1, Math.max(0, index));
+}
+
+/**
+ * 判定纵向位置是否落在**最后一条轨道之下**（拖到空白处新建轨道的哨兵）。
+ *
+ * 【为什么需要它】`resolveTargetTrackIndex` 把越界位置钳制回最后一行——这对
+ * 「拖拽移动 / trim」是正确的（落点必须落在已有轨道上），但会**吞掉**「用户想
+ * 拖到轨道列表下方新建一条轨道」的意图。旧实现靠 `trackIdFromClientY` 返回
+ * `null` 表达这件事（`drag.lastTrackId == null` → `dropToNewTrack`）。
+ *
+ * 判定按**行下标的整数比较**而不是"y < 内容总高"：行高可能不是整数，用浮点高度
+ * 比较会在最后一行底部产生一个"看起来仍在行内、实际被判为越界"的窄带。
+ *
+ * @param contentY 指针的内容坐标 y（CSS px）。
+ * @param rowHeight 单条轨道高度（CSS px）。
+ * @param trackCount 轨道总数。
+ * @returns 是否位于全部轨道之下；无轨道时恒为 false（没有"下方"可言）。
+ */
+export function isContentYBelowTracks(
+    contentY: number,
+    rowHeight: number,
+    trackCount: number,
+): boolean {
+    if (!Number.isFinite(trackCount) || trackCount <= 0) return false;
+    const safeRowHeight = Number.isFinite(rowHeight) && rowHeight > 0 ? rowHeight : 1;
+    const y = Math.max(0, Number.isFinite(contentY) ? contentY : 0);
+    return Math.floor(y / safeRowHeight) > trackCount - 1;
 }

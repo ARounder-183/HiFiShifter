@@ -58,6 +58,45 @@ describe("scrollKernel", () => {
             expect(k.get().scrollTop).toBe(10 * 80 - 400);
         });
 
+        it("extraContentHeightPx 计入竖直上限（轨道列表底部「添加轨道」行）", () => {
+            // 与左侧轨道头的滚动高度对齐：漏掉这 32px 会让滚到底时两侧行错位，
+            // 手感上表现为拖拽末段「卡住 / 吸附」（曾实际发生）。
+            const k = makeKernel({ extraContentHeightPx: () => 32 });
+            k.setScrollTop(999999);
+            expect(k.get().scrollTop).toBe(10 * 80 + 32 - 400);
+        });
+
+        it("extraContentHeightPx 缺省为 0（其余调用方行为不变）", () => {
+            const withZero = makeKernel({ extraContentHeightPx: () => 0 });
+            const withNone = makeKernel();
+            withZero.setScrollTop(999999);
+            withNone.setScrollTop(999999);
+            expect(withZero.get().scrollTop).toBe(withNone.get().scrollTop);
+        });
+
+        it("extraContentHeightPx 非法 / 负值不放大上限（不产生 NaN）", () => {
+            for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, -100]) {
+                const k = makeKernel({ extraContentHeightPx: () => bad });
+                k.setScrollTop(999999);
+                const v = k.get().scrollTop;
+                expect(Number.isFinite(v)).toBe(true);
+                // 非法值按 0 处理 → 上限与不含额外高度时相同。
+                expect(v).toBe(10 * 80 - 400);
+            }
+        });
+
+        it("extraContentHeightPx 支持函数形式：取值变化后 reclamp 立即生效", () => {
+            let extra = 0;
+            const k = makeKernel({ extraContentHeightPx: () => extra });
+            k.setScrollTop(999999);
+            expect(k.get().scrollTop).toBe(400);
+            // 额外高度变大（例如轨道列表底部多出一行）→ 上限随之变大。
+            extra = 32;
+            k.reclamp();
+            k.setScrollTop(999999);
+            expect(k.get().scrollTop).toBe(432);
+        });
+
         it("轨道不足一屏时竖直上限为 0", () => {
             const k = makeKernel({ trackCount: () => 2 });
             k.setScrollTop(500);
