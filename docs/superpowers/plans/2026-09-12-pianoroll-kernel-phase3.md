@@ -70,6 +70,20 @@ Phase 3's real justifications are therefore: (a) eliminating per-point JS→nati
 **R5b — Polyline geometry cost at realistic scale (measured after Task 1).**
 For a 1,650-point curve (R3's realistic visible count), `buildPolylineVertices` produces **14,838 vertices / 237 KB / ~1 ms** per curve, and the same for a deliberately jumpy curve. That is 6 vertices per segment plus 3 per miter join. Four curves on screen therefore means ~1 MB of vertex data and ~4 ms of JS per frame — non-trivial, and the dominant cost of Task 4, so Task 4 must measure buffer upload size and consider a straight-join fast path. Note the join triangles are what make it 9 vertices/point rather than 6: for a **nearly straight** join the apex coincides with the segment endpoint, so the triangle could be skipped without changing the rendered result. That optimisation is deliberately **not** taken in Task 1 (fidelity first, and the epsilon needs pixel evidence), but Task 4 should measure whether it is needed.
 
+**R7 — ⛔ Curve GL was stopped: the measured head-to-head favours Canvas2D.**
+After Tasks 1–3 were built and verified, a direct comparison of the two paths on the same 1,650-point polyline (same machine, same browser, 30 runs each, measured in-page) came out against the migration:
+
+| Path | p50 | p95 |
+|---|---|---|
+| Canvas2D `stroke` (beginPath + 1649 `lineTo` + stroke) | **0.0 ms** | **0.1 ms** |
+| Our GL geometry build (`buildPolylineVertices`) | **0.2 ms** | **1.2 ms** |
+
+The GL path is **6–12× slower** at the step that replaced `stroke`, before adding the buffer upload or the draw call. Canvas2D's `stroke` is a highly optimised native path; computing miter triangles point-by-point in JS does not beat it. Combined with R5 (no frame-time headroom to reclaim: a no-curve control group shows the same p95), Phase 3's curve work had **no measurable benefit and a measured regression**.
+
+**Decision (user-approved): stop curve GL here.** Tasks 1–3 are kept as finished, tested infrastructure (pure geometry, GL program, projections — all reusable if a future case justifies them, e.g. a platform where Canvas2D is slower), but the curve layers are **not** wired to GL and no sub-flag is added. Work moves to Task 6 (gesture extraction), which has independent value.
+
+This is recorded rather than quietly dropped because the plan's own reconnaissance (R5) had already warned there was no frame-time win, and the honest conclusion is that the spec's Phase 3 curve row was justified by intuition ("GL is faster") rather than measurement. **Anyone resuming curve GL should re-run the R7 comparison first, and should test at 8+ curves and high zoom-out, where the ratio may differ** — that is the one regime where the JS-per-vertex cost could amortise against Canvas2D's per-point fill rate.
+
 **R6 — The gesture surface is a 3,875-line hook, and a safety net already exists.**
 `usePianoRollInteractions.ts` holds ~23 event entry points. `renderProjection.test.ts` already exists specifically as the "P3 pre-work snapshot" the spec asked for, comparing the legacy `timeToPixel` formula against `secToViewportPx` over random parameters — the x-projection conversion is therefore already guarded.
 
@@ -354,14 +368,19 @@ Same convention Phase 2 used, and for the same reason: each depends on the previ
 - **Return only the visible slice** (the function's contract is "points that would be drawn"), because Task 2's dash phase depends on arc length starting at the first visible point. Do not return the full curve plus an offset.
 - **Exit check:** equivalence test against a re-implementation of `drawCurveTimed`'s loop over many parameter combinations (the pattern that caught 12 defects in Phase 2).
 
-### Task 4: Curve GL layer in the host, behind a sub-flag
+### Task 4: Curve GL layer in the host, behind a sub-flag — ⛔ **不属于本轮范围（见 R7）**
+
+> 停止原因：实测 GL 几何构建比 Canvas2D `stroke` 慢 6–12 倍，且无帧时间可回收。
+> Task 1–3 的产出保留为已完成的基础设施，未接线。
+> 若将来恢复：先复跑 R7 的对照，并覆盖 8+ 条曲线与高缩放出（那里比例可能不同）。
+> 以下原始设计保留供参考。
 
 - New sub-flag `hifishifter.pianoRollKernel.curveGl`, default off (same reasoning as `.gl`).
 - Wire all 7 curve variants. Per-frame rebuild is expected and correct: scrolling/zooming changes every x, so unlike the grid there is no zero-rebuild path. Measure and record the upload cost.
 - Keep the Canvas2D curve path intact behind `skipCurves`.
 - **Exit check:** `lineTo`/`stroke` counts per frame drop to 0; pixel comparison within tolerance **with the fixture asserted** (R4).
 
-### Task 5: Pixel comparison + verification record
+### Task 5: Pixel comparison + verification record — ⛔ **不属于本轮范围（依赖 Task 4）**
 
 - Fixture-injected comparison at 2 viewports and 2 dprs, across all 7 variants (toggle each: detected, original, edited, secondary, reference, selection-highlight, clipboard).
 - Record the call-count metric and explicitly record that **frame time is not the metric** (R5), so a future reader does not mistake the absence of a frame-time win for a failed migration.
