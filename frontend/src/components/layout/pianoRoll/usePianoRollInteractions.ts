@@ -22,6 +22,7 @@ import type {
 } from "./types";
 import {
     curveValueAtPointerFrame,
+    hitTestSelectionBody,
     hitTestSelectionEdge,
     isPointerNearCurve,
 } from "./kernel/gestureHitTest";
@@ -1622,16 +1623,28 @@ export function usePianoRollInteractions(args: {
         (clientX: number, clientY: number): boolean => {
             if (toolMode !== "select") return false;
             const sel = selectionRef.current;
-            if (!sel) return false;
+            const canvas = canvasRef.current;
+            if (!sel || !canvas) return false;
 
-            const beat = pointerBeat(clientX);
             const aBeat = Math.min(sel.aBeat, sel.bBeat);
             const bBeat = Math.max(sel.aBeat, sel.bBeat);
-            if (beat < aBeat || beat > bBeat) return false;
-
-            return getCurveValueNearPointer(clientX, clientY) != null;
+            // 判定抽到 `kernel/gestureHitTest`（纯函数，有单测）。
+            //
+            // 【为什么把 beat 区间比较改成像素区间比较是等价的】原实现是
+            // `beat < aBeat || beat > bBeat`，而 `beatToViewportPx` 是
+            // `pxPerSec > 0` 下的单调线性投影，且 `pointerBeat` 正是它的逆
+            // （同一 `axisFromRefs`、同一 `rect.left`）。因此「beat 落在区间内」
+            // 与「像素落在区间内」同真同假。改用像素后，与边缘命中判定共用
+            // 同一套坐标口径，不再有两份换算。
+            const rect = canvas.getBoundingClientRect();
+            return hitTestSelectionBody({
+                leftXPx: beatToViewportPx(aBeat),
+                rightXPx: beatToViewportPx(bBeat),
+                localXPx: clientX - rect.left,
+                nearCurve: getCurveValueNearPointer(clientX, clientY) != null,
+            });
         },
-        [toolMode, selectionRef, pointerBeat, getCurveValueNearPointer],
+        [toolMode, selectionRef, canvasRef, beatToViewportPx, getCurveValueNearPointer],
     );
 
     const isPointerNearStretchSelectionEdge = useCallback(

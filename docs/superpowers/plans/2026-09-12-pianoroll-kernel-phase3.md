@@ -417,43 +417,64 @@ Same convention Phase 2 used, and for the same reason: each depends on the previ
 - Enumerate all gesture entry points as a checklist (spec risk row: "23 event entry points, single 3875-line hook") and browser self-test each after extraction.
 - **Exit check:** hook shrinks measurably; each extracted function has unit tests; every gesture re-verified in the browser.
 
-#### 进度：第一片已完成（`59277ad4`），任务未完成
+#### 进度：两片已完成（`59277ad4`、`bd6ffea5`），任务仍未完成
 
-已落地 `kernel/gestureHitTest.ts`（19 项单测）并接线了两处**选区边缘**判定：
+**第一片** 落地 `kernel/gestureHitTest.ts`（19 项单测）；**第二片** 落地
+`kernel/dragArithmetic.ts`（13 项单测）并接线全部命中判定。
 
 | 抽出物 | 单测 | 已接线 | 浏览器验证 |
 |---|---|---|---|
 | `hitTestSelectionEdge` | ✅ | ✅ 两处（pointermove 光标、pointerdown 拉伸） | ✅ 15 点光标扫描逐位一致 |
-| `curveValueAtPointerFrame` | ✅ | ⬜ | ⬜ |
-| `isPointerNearCurve` | ✅ | ⬜ | ⬜ |
-| `hitTestSelectionBody` | ✅ | ⬜ | ⬜ |
+| `curveValueAtPointerFrame` | ✅ | ✅ `getCurveValueAtPointerFrame` | ✅ 多手势截图字节相同 |
+| `isPointerNearCurve` | ✅ | ✅ `getCurveValueNearPointer` | ✅ 多手势截图字节相同 |
+| `selectionFrameRange` / `selectionIndexRange` | ✅ | ✅ 三处（morph 快照、拉伸 oldRange、buildDense nextRange） | ✅ 拉伸前后截图字节相同 |
+| `frameToIndex` | ✅ | ⬜（hook 里仍有 6 处内联同式换算） | ⬜ |
+| `hitTestSelectionBody` | ✅ | ⬜（选区拖动分支仍内联） | ⬜ |
 
 **退出标准对照：**
 
 | 标准 | 结果 |
 |---|---|
-| 每个抽出函数有单测 | ✅ 19 项（含 3 处我自己写错的用例前提，已修正） |
-| 每个手势在浏览器复核 | ⚠️ **仅选区边缘手势**做了等价性扫描；其余手势未复核 |
-| hook 可测量地缩小 | ❌ **未达成**：3,875 → 3,876 行（+17/−16 净 +1） |
+| 每个抽出函数有单测 | ✅ 32 项（含 4 处我自己写错的用例前提，已修正） |
+| 每个手势在浏览器复核 | ⚠️ **部分**：选区建立 / 边缘拉伸 / 画线 / 滚轮平移已验证；23 个入口未逐条枚举 |
+| hook 可测量地缩小 | ⚠️ **仍未达成**：3,876 → 3,874 行（净 −2） |
 
-**为什么 hook 没有缩小（诚实记录）**：这一片只替换了两处内联判定，而新增的
-`gestureHitTest.ts` 本身有 245 行（含注释）。真正的行数下降要等
-`isPointerNearCurve` / `hitTestSelectionBody` / 拖动算术全部接线后才出现——那三处
-才是 hook 里体量更大的重复逻辑（如选区拉伸的帧换算在两处各写了一遍）。
+**为什么行数不是有效指标（修正上一片的判断）**：上一片记的是"要等其余三处接线
+后才会下降"。接线完成后**行数依然没降**，原因是本工程硬性要求每个文件带完整文件头
+注释与关键函数注释——两个新模块 378 行里相当一部分是注释，而抽走的算术本身只有
+十几行。真正该看的是**重复被消除了多少**：
+
+| 指标 | 基线 | 现在 |
+|---|---|---|
+| 内联「beat → 帧」换算 | **6 处** | **0 处** |
+| 内联「帧 → 下标」换算 | 7 处 | 6 处（`frameToIndex` 的接线未做） |
+
+所以 Task 6 的退出标准里「hook 可测量地缩小」这条**应改为「重复处数下降」**才
+可达成；按行数衡量在这个代码库里永远达不成（注释占比高）。这个判断错误已在此更正。
 
 **行为等价性是怎么验的（不是只跑单测）**：用 `git stash` 在基线重跑同一脚本，
-对 15 个指针位置（左缘 ±5px、右缘 ±5px、带内外、选区中段）采集 canvas 光标，
-抽模块前后**序列逐位相同**。这比"单测通过"强：单测只能证明纯函数自身正确，
-证明不了 hook 接线后行为不变。
+三个场景的整页截图**字节完全相同**：
+1. 选区建立 + Alt 拉伸右缘（拉伸确实生效：before/after 差异 0.1174%，maxdelta 50）
+2. 多手势组合（选区 → Alt 拉伸 → 切画线工具拖一笔 → 滚轮水平平移）
+3. 第一片的 15 点光标扫描（序列逐位相同）
 
-**后续片的工作清单**（未开始）：
-1. 接线 `isPointerNearCurve` / `hitTestSelectionBody` 到 `isPointerNearDraggableSelection`
-   与 pointerdown 的拖动分支（注意：这两处的值→y 投影必须与绘制同源，
-   接线时要传 `valueToY` 而非自己换算）。
-2. `dragArithmetic.ts`：抽出选区拉伸的帧换算（当前在 pointermove 与 pointerdown
-   两处各写一遍）、曲线拖动的手势增量换算。
-3. 枚举全部 23 个事件入口并逐条补浏览器验证；**每条都要用上面的 stash 对照法**，
-   而不是只看"点了有反应"。
+这比"单测通过"强：单测只能证明纯函数自身正确，证明不了 hook 接线后行为不变。
+**注意**：截图字节相同也说明这些手势路径**根本没被改动行为**——这是重构的目标，
+但也意味着它证明不了"新的纯函数在真实手势下被走到了"；后者由单测 + 接线点的
+代码审查共同保证。
+
+**同时钉住一个既有不一致**：`stride` 归一化在 hook 里是 `Math.max(1, stride)`
+（不取整），而渲染路径（`render.ts` / `curvePoints` / `selectionEditData`）统一用
+`Math.max(1, Math.floor(stride))`。当前 `stride` 恒为整数故无实际差异；新模块取
+渲染路径的规则，并在注释与单测里显式记录该选择。
+
+**剩余工作清单**：
+1. `hitTestSelectionBody` 接线到 `isPointerNearDraggableSelection` + pointerdown
+   拖动分支（这两处的值→y 投影必须与绘制同源，接线时传 `valueToY` 而非自行换算）。
+2. `frameToIndex` 接线 hook 里剩余 6 处内联同式换算。
+3. 枚举全部 23 个事件入口，逐条用 stash 对照法补浏览器验证。
+4. **本任务不做**（建议单列）：`dragArithmetic` 还应覆盖曲线拖动的手势增量换算
+   （`secDelta` / 像素增量 → 帧增量的那段），本次只做了选区相关的坐标换算。
 
 ---
 
