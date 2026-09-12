@@ -1505,8 +1505,27 @@ git commit -m "test(perf): 固化 CPU-only 渲染基准脚本
 零引用、再 `tsc -b` 报告驱动）处理。
 
 **注意 `useDebouncedPersist.ts` 的文件头已成假注释**——它写着"当前使用者：
-TimelineScrollArea"，而该文件已删除。若暂不清理，至少应修正该注释（本仓库把陈旧
-注释视为实质缺陷）。
+TimelineScrollArea"，而该文件已删除。该注释**已在 `df430b91` 修正**（改为"当前无
+使用者"并说明原因）。其余模块若也含此类表述，清理时应一并处理——本仓库把陈旧注释
+视为实质缺陷。
+
+### 附：第二个失效的逃生门（也已修正注释，函数与按钮保留）
+
+`isGlClipBodiesEnabled()`（key `hifishifter.glClipBodies`，定义在
+`timeline/runtime/timelineClipGlRenderer.ts`）**无任何读取者**：它唯一的使用者
+`TimelineCanvasViewport` 已在阶段 3 删除。`dev/perfProject.ts` 的 `GL clip: on/off`
+按钮仍读写该 key 并派发事件，但**已无人监听**、按下不产生任何效果。
+
+与上面 7 个模块不同的是：**其宿主模块整体仍是活代码**（内核用 `GlClipBodySink`、
+`PianoRollPanel` 用 `parseRgbaColor`、`clipInstances` 用 `buildClipBodyInstance` /
+`OFF_*`），因此只能删那个函数与按钮，不能删文件。注释已在 `d3f6f516` 修正（写明
+逃生门已失效、历史用途与归属），函数与按钮留待与上面 7 个模块一并清理。
+
+**另有一个待定项**：`timeline/kernel/kernelMount.ts` + 其 8 项测试**无生产消费者**
+（`enabled` 维度随开关移除而消失）。任务 4 执行时**未删**，理由有二：其行为守护已由
+`kernelAvailability.ts` 承接；且删除会使验收命中数变 830、与任务 4 的 838 判据不符。
+**是否删除属独立决策**（若决定删除，应同时把验收计数改为 830 并说明差异），已在该
+文件头与任务 4 的提交信息中写明。
 
 ## 任务 7：全量验收
 
