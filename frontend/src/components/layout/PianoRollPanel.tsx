@@ -2344,6 +2344,13 @@ export const PianoRollPanel: React.FC = () => {
             valueToY: (value: number, heightPx: number) => valueToY(editParam, value, heightPx),
             strongRgba: toRgba(colors.pitchGridC),
             weakRgba: toRgba(colors.pitchGridOther),
+            // 文字与刻度线（阶段 2 Task 5）：GL 侧据此渲染轴标签与刻度。
+            paramName: editParam,
+            // 与传给 drawPianoRoll 的 fontFamily 同一个值（第 3268 行），
+            // 保证两种渲染模式的字形完全一致。
+            fontFamily,
+            tensionLabelRgba: toRgba(colors.tensionLabel),
+            tensionLineRgba: toRgba(colors.tensionLine),
         };
 
         // 键盘轴颜色只在音高参数下提供：非 pitch 时 GL 层据此判定"没有键盘"
@@ -2357,6 +2364,9 @@ export const PianoRollPanel: React.FC = () => {
             cSeparatorRgba: toRgba(colors.cSeparator),
             keySeparatorRgba: toRgba(colors.keySeparator),
             axisBorderRgba: toRgba(colors.axisBorder),
+            cLabelRgba: toRgba(colors.cLabel),
+            whiteKeyLabelRgba: toRgba(colors.whiteKeyLabel),
+            blackKeyLabelRgba: toRgba(colors.blackKeyLabel),
         };
     }
 
@@ -3255,8 +3265,9 @@ export const PianoRollPanel: React.FC = () => {
             // 阶段 2：GL 层接管网格时，Canvas2D 必须跳过它（两张画布叠放，
             // 都画会半透明叠加 + 亚像素重影）。GL 未启用时行为与迁移前一致。
             skipGrid: PARAM_EDITOR_GL_SCENE_ENABLED,
-            // 键盘几何归 GL；标签仍由 Canvas2D 画（Task 5 迁移标签）。
+            // 键盘几何与轴文字都归 GL（Task 4 / Task 5）。
             skipKeyboardGeometry: PARAM_EDITOR_GL_SCENE_ENABLED,
+            skipAxisText: PARAM_EDITOR_GL_SCENE_ENABLED,
             fontFamily,
             clipboardPreview: s.showClipboardPreview ? clipboardRef.current : null,
             // pitch snap visual helpers

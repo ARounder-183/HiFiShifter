@@ -87,3 +87,22 @@ export function isBlackKey(midi: number): boolean {
     const pc = ((midi % 12) + 12) % 12;
     return pc === 1 || pc === 3 || pc === 6 || pc === 8 || pc === 10;
 }
+
+/**
+ * 把 MIDI 音高格式化为音名标签（如 `C#4`）。
+ *
+ * 【为什么放在本模块】与 `isBlackKey` 同理：Canvas2D 与 GL 两条路径都要用，
+ * 且 `render.ts` 会经 `../timeline` 桶文件间接引入 Redux store，不能从那里导出
+ * 共享逻辑（会让 node 单测因裸 `localStorage` 崩溃）。
+ *
+ * 特殊说明：八度按 `floor(midi / 12) - 1` 计算（MIDI 60 = C4，即中央 C）。
+ *
+ * @param midi MIDI 音高。
+ * @returns 音名标签。
+ */
+export function midiToLabel(midi: number): string {
+    const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+    const octave = Math.floor(midi / 12) - 1;
+    const name = NOTE_NAMES[((midi % 12) + 12) % 12];
+    return `${name}${octave}`;
+}

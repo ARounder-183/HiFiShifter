@@ -88,6 +88,27 @@ export interface PianoRollGridSpec {
     readonly keySeparatorRgba?: readonly [number, number, number, number];
     /** 键盘轴右缘分隔线。 */
     readonly axisBorderRgba?: readonly [number, number, number, number];
+
+    // ── 文字（阶段 2 Task 5）─────────────────────────────────────────
+    /**
+     * 参数名（用于刻度标签的显示换算与刻度种类判定）。
+     *
+     * 特殊说明：度数参数的内部值是 degree-step 单位，标签必须经显示换算；缺省时
+     * 按内部值直接格式化。GL 侧据此选择刻度种类，**必须**与 Canvas2D 路径同一个值。
+     */
+    readonly paramName?: string;
+    /** 字体族（与 Canvas2D 路径共用同一个，避免两种模式字形不同）。 */
+    readonly fontFamily?: string;
+    /** 数值轴刻度标签颜色（`colors.tensionLabel`）。 */
+    readonly tensionLabelRgba?: readonly [number, number, number, number];
+    /** C 音名标签颜色（加粗）。 */
+    readonly cLabelRgba?: readonly [number, number, number, number];
+    /** 白键音名标签颜色。 */
+    readonly whiteKeyLabelRgba?: readonly [number, number, number, number];
+    /** 黑键音名标签颜色。 */
+    readonly blackKeyLabelRgba?: readonly [number, number, number, number];
+    /** 刻度线颜色（`colors.tensionLine`）。 */
+    readonly tensionLineRgba?: readonly [number, number, number, number];
 }
 
 /** 宿主每帧读取的数据镜像。 */

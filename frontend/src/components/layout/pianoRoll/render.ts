@@ -23,7 +23,7 @@ import {
 } from "../timeline/runtime/timelineAxis";
 import { wholeDevicePxLength } from "../../../utils/devicePixelLine";
 import { AXIS_W, PITCH_MAX_MIDI, PITCH_MIN_MIDI } from "./constants";
-import { framesToTime, isBlackKey } from "./utils";
+import { framesToTime, isBlackKey, midiToLabel } from "./utils";
 import { resolveSecondaryOverlayValues } from "./secondaryOverlaySelection";
 import { resolveScaleNotes } from "../../../utils/musicalScales";
 import type { ScaleLike } from "../../../utils/musicalScales";
@@ -79,13 +79,6 @@ function formatAxisMark(v: number, param?: ParamName): string {
     // 最多保留 4 位有效数字，去掉尾随零
     const s = parseFloat(displayValue.toPrecision(4)).toString();
     return s;
-}
-
-function midiToLabel(midi: number): string {
-    const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
-    const octave = Math.floor(midi / 12) - 1;
-    const name = NOTE_NAMES[((midi % 12) + 12) % 12];
-    return `${name}${octave}`;
 }
 
 /**
@@ -368,6 +361,17 @@ export function drawPianoRoll(args: {
      * Task 5 搬走标签后，本开关与整个循环可一并删除。
      */
     skipKeyboardGeometry?: boolean;
+    /**
+     * 跳过左侧轴的**全部文字与刻度线**（音名标签 / 数值轴刻度标签 / 刻度线）。
+     *
+     * 【为什么与 skipKeyboardGeometry 分开】键盘几何与音名标签在同一段代码里，
+     * 但迁移节奏不同：几何先上 GL（Task 4），文字随后（Task 5）。分开两个开关让
+     * 每个阶段都能独立回退，而不是"要么全 GL、要么全 Canvas2D"。
+     *
+     * 特殊说明：开启后 pitch 分支不再画音名、非 pitch 分支不再画刻度线与标签；
+     * 键体的几何跳过仍由 `skipKeyboardGeometry` 单独控制。
+     */
+    skipAxisText?: boolean;
 }) {
     const {
         axisCanvas,
@@ -396,6 +400,7 @@ export function drawPianoRoll(args: {
         fontFamily,
         skipGrid = false,
         skipKeyboardGeometry = false,
+        skipAxisText = false,
     } = args;
 
     const resolvedFontFamily = fontFamily || "sans-serif";
@@ -474,8 +479,9 @@ export function drawPianoRoll(args: {
                         }
                     }
 
-                    // 所有琴键音名标注（高度足够时）
-                    if (keyH >= 6) {
+                    // 所有琴键音名标注（高度足够时）。
+                    // 阶段 2 Task 5：GL 接管轴文字后整段跳过（见 skipAxisText 说明）。
+                    if (!skipAxisText && keyH >= 6) {
                         ctx.textBaseline = "middle";
                         const midY = top + keyH / 2;
                         if (!black) {
@@ -510,8 +516,9 @@ export function drawPianoRoll(args: {
                         ctx.lineWidth = 1;
                     }
                 }
-            } else {
-                // 非音高参数轴标签：对 child-pitch-offset 做特殊处理以配合横线（音分/度数）
+            } else if (!skipAxisText) {
+                // 非音高参数轴标签：对 child-pitch-offset 做特殊处理以配合横线（音分/度数）。
+                // 阶段 2 Task 5：GL 接管轴文字与刻度线后整段跳过。
                 const view = paramViews[editParam] ?? { center: 0.5, span: 1 };
                 const span = Math.max(1e-6, view.span);
                 const vMin = view.center - span / 2;

@@ -52,8 +52,16 @@ import {
     createScrollKernel,
     type TimelineViewportState,
 } from "../../../timeline/kernel/scrollKernel";
-import { isBlackKey } from "../../utils";
+import { isBlackKey, midiToLabel } from "../../utils";
+import {
+    createPianoRollGlyphs,
+    type PianoRollGlyphs,
+    type TextRequest,
+} from "../glyph/pianoRollGlyphs";
+import { buildAxisMarkInstances, resolveAxisKind } from "../scene/axisMarkInstances";
 import { buildKeyboardInstances } from "../scene/keyboardInstances";
+import { createGlyphProgram, type GlyphProgram } from "../../../timeline/kernel/gl/glyphProgram";
+import type { GlyphQuad } from "../../../timeline/kernel/gl/glyphQuads";
 import { createTimelineAxis, type TimelineAxis } from "../../../timeline/runtime/timelineAxis";
 import {
     buildPitchGridInstances,
@@ -417,6 +425,27 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         Number.isFinite(args.axisWidthPx) && (args.axisWidthPx as number) > 0
             ? (args.axisWidthPx as number)
             : 56;
+    // 字形层（Task 5）：与键盘共用同一块轴画布（文字画在键体/刻度线之上），
+    // 因此共用 `glAxisHandle` 的上下文，program 独立。
+    let glGlyphProgram: GlyphProgram | null = null;
+    let glGlyphs: PianoRollGlyphs | null = null;
+    if (glAxisHandle !== null) {
+        try {
+            glGlyphProgram = createGlyphProgram(glAxisHandle.gl);
+            glGlyphs = createPianoRollGlyphs({ dpr: readDevicePixelRatio() });
+            if (glGlyphs === null) {
+                glGlyphProgram = null;
+            }
+        } catch {
+            glGlyphProgram = null;
+            glGlyphs = null;
+        }
+    }
+    /** 上一帧上传过的图集页（按页增量上传，避免每帧重传整张图集）。 */
+    const uploadedAtlasPages = new Set<number>();
+    /** 本帧待绘制的文字四边形。 */
+    let glTextQuads: GlyphQuad[] = [];
+
     /** 键盘轴实例缓冲与上传状态。 */
     let glAxisInstances = new Float32Array(0);
     let glAxisUploadedCount = 0;
@@ -608,21 +637,195 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
     }
 
     /**
+     * 收集本帧要绘制的文字请求（键盘音名 + 数值轴刻度标签）。
+     *
+     * 流程：按网格种类分派 → pitch 走键盘音名（仅键高足够时）→ 其余走刻度标签与
+     * 刻度线 → 组装为 `TextRequest[]`（视口坐标，中间对齐）。
+     *
+     * 【为什么键高不足 6px 时不画音名】`render.ts:464` 有 `keyH >= 6` 的门槛：
+     * 键太矮时音名会互相重叠成一片。这是既有的可读性保护，必须保留。
+     *
+     * 【坐标约定】全部是**轴列视口坐标**（x 从轴列左缘 0 起、y 为视口 y），与键盘
+     * 几何同一套坐标，因此 GL 侧 `u_viewOrigin` 传 (0, 0)。
+     *
+     * @param spec 当前网格输入。
+     * @returns 文字请求序列；无字形渲染器时为空数组。
+     */
+    function collectAxisTextRequests(spec: PianoRollGridSpec | null | undefined): TextRequest[] {
+        if (spec === null || spec === undefined) return [];
+        const family = spec.fontFamily ?? "sans-serif";
+        const requests: TextRequest[] = [];
+
+        if (spec.kind === "pitch") {
+            const whiteRgba = spec.whiteKeyLabelRgba;
+            const blackRgba = spec.blackKeyLabelRgba;
+            const cRgba = spec.cLabelRgba;
+            if (whiteRgba === undefined || blackRgba === undefined || cRgba === undefined) {
+                return [];
+            }
+            const range = spec.absMax - spec.absMin;
+            if (!Number.isFinite(range) || range <= 0) return [];
+            const span = Math.min(Math.max(spec.view.span, 1e-6), range);
+            const min = Math.min(
+                Math.max(spec.view.center - span / 2, spec.absMin),
+                spec.absMax - span,
+            );
+            const startMidi = Math.min(Math.max(Math.floor(min), spec.absMin), spec.absMax);
+            const endMidi = Math.min(Math.max(Math.ceil(min + span), spec.absMin), spec.absMax);
+
+            for (let midi = startMidi; midi < endMidi; midi += 1) {
+                const y0 = spec.valueToY(midi, viewportHeightPx);
+                const y1 = spec.valueToY(midi + 1, viewportHeightPx);
+                const top = Math.min(y0, y1);
+                const keyH = Math.max(1, Math.max(y0, y1) - top);
+                // 与 render.ts:464 一致：键高不足 6px 时省略音名
+                if (keyH < 6) continue;
+                const black = isBlackKey(midi);
+                const pc = ((midi % 12) + 12) % 12;
+                requests.push({
+                    text: midiToLabel(midi),
+                    fontKey: black
+                        ? `8px ${family}`
+                        : pc === 0
+                          ? `bold 9px ${family}`
+                          : `9px ${family}`,
+                    // 黑键标签 x=3、白键 x=4（render.ts:488/497）
+                    x: black ? 3 : 4,
+                    y: top + keyH / 2,
+                    align: "left",
+                    baseline: "middle",
+                    rgba: black ? blackRgba : pc === 0 ? cRgba : whiteRgba,
+                });
+            }
+            return requests;
+        }
+
+        // 非音高参数：数值轴刻度标签
+        const labelRgba = spec.tensionLabelRgba;
+        if (labelRgba === undefined || spec.paramName === undefined) return [];
+        const marks = buildAxisMarkInstances({
+            kind: resolveAxisKind(spec.paramName),
+            view: spec.view,
+            heightPx: viewportHeightPx,
+            axisWidthPx,
+            dpr: readDevicePixelRatio(),
+            valueToY: spec.valueToY,
+            paramName: spec.paramName,
+        });
+        for (const mark of marks) {
+            requests.push({
+                text: mark.label,
+                fontKey: `10px ${family}`,
+                // render.ts:555 的标签锚点 x=6
+                x: 6,
+                y: mark.line.y + mark.line.h / 2 - 0.5,
+                align: "left",
+                baseline: "middle",
+                rgba: labelRgba,
+            });
+        }
+        return requests;
+    }
+
+    /**
+     * 重建数值轴刻度线几何（非音高参数）。
+     *
+     * 特殊说明：pitch 参数的轴列是键盘（由 `rebuildKeyboardGeometry` 负责），
+     * 此函数只处理数值轴；两者互斥，因此可以共用同一块轴画布与实例缓冲。
+     *
+     * @param spec 当前网格输入。
+     * @returns 刻度线实例数（供调用方决定是否上传）。
+     */
+    function rebuildAxisMarkGeometry(spec: PianoRollGridSpec | null | undefined): number {
+        if (
+            spec === null ||
+            spec === undefined ||
+            spec.kind === "pitch" ||
+            spec.paramName === undefined ||
+            spec.tensionLineRgba === undefined
+        ) {
+            return 0;
+        }
+        const marks = buildAxisMarkInstances({
+            kind: resolveAxisKind(spec.paramName),
+            view: spec.view,
+            heightPx: viewportHeightPx,
+            axisWidthPx,
+            dpr: readDevicePixelRatio(),
+            valueToY: spec.valueToY,
+            paramName: spec.paramName,
+        });
+        // `lineOnly` 的项只画标签、没有配对的分隔线（见 axisMarkInstances 的说明）
+        const lines = marks.filter((m) => !m.lineOnly);
+        const needed = lines.length * CLIP_INSTANCE_FLOATS;
+        if (glAxisInstances.length < needed) glAxisInstances = new Float32Array(needed);
+        for (let index = 0; index < lines.length; index += 1) {
+            const line = lines[index].line;
+            writeFlatInstance(glAxisInstances, index, {
+                x: line.x,
+                y: line.y,
+                w: line.w,
+                h: line.h,
+                rgba: spec.tensionLineRgba,
+            });
+        }
+        glAxisUploadedCount = lines.length;
+        glAxisGeometryUploaded = false;
+        return lines.length;
+    }
+
+    /**
      * 绘制键盘轴 GL 层。
      *
-     * 特殊说明：视口原点恒为 (0, 0)——键盘几何本就是轴列视口坐标（`valueToY`
-     * 直接给出视口 y，x 从轴列左缘起算），与网格层同一约定。
+     * 流程：尺寸同步 → 清屏 → 先画几何（键体 / 刻度线，`sdfBox` program）→
+     * 再画文字（字形 program，覆盖在几何之上）。
+     *
+     * 【已知的亚像素差异】文字位置与 Canvas2D 相差至多 **0.5 个设备像素**（纵向）。
+     * 原因是图集槽位是整数像素对齐的：字形在槽内按整数设备像素光栅化，而
+     * `middle` 基准给出的槽位顶部可能是分数设备像素，采样时无法落在半像素上。
+     * 实测 9px / bold 9px（白键与 C 音名）**完全一致**，8px（黑键音名）与 10px
+     * （刻度标签）各差 0.5 设备像素，肉眼不可见。这是图集方案的固有量化误差，
+     * 不通过"按字号查表偏移"去修——那会把像素级的栅格巧合固化成规则。
+     *
+     * 特殊说明 1：视口原点恒为 (0, 0)——键盘与刻度的几何、文字都是轴列视口坐标
+     * （`valueToY` 直接给出视口 y，x 从轴列左缘起算），与网格层同一约定。
+     *
+     * 特殊说明 2：两个 program 交替使用时必须各自重新设置绘制状态（混合 / VAO），
+     * 因为 program 的 `render` 内部会绑定自己的 VAO。此处按"几何 → 文字"固定顺序，
+     * 不交错，避免状态互相污染。
      */
     function drawGlKeyboard(): void {
-        if (glAxisHandle === null || glAxisProgram === null) return;
+        if (glAxisHandle === null) return;
         const target = glAxisHandle.resize(axisWidthPx, viewportHeightPx, readDevicePixelRatio());
         glAxisHandle.clear();
-        if (glAxisUploadedCount === 0) return;
-        if (glAxisGeometryUploaded) {
-            glAxisProgram.repaint(target, 0, 0);
-        } else {
-            glAxisProgram.render(glAxisInstances, glAxisUploadedCount, target, 0, 0);
-            glAxisGeometryUploaded = true;
+
+        // ① 几何层（键体 / 刻度线）
+        if (glAxisProgram !== null && glAxisUploadedCount > 0) {
+            if (glAxisGeometryUploaded) {
+                glAxisProgram.repaint(target, 0, 0);
+            } else {
+                glAxisProgram.render(glAxisInstances, glAxisUploadedCount, target, 0, 0);
+                glAxisGeometryUploaded = true;
+            }
+        }
+
+        // ② 文字层
+        if (glGlyphProgram !== null && glGlyphs !== null && glTextQuads.length > 0) {
+            // 按页增量上传图集：只传本帧有变更的页，避免每帧重传整张图集。
+            // 特殊说明：`uploadAtlas` 只接受单页数据（program 内部持有单张纹理），
+            // 因此多页图集时以**最后一页**为准。本面板的字符集（约 150 个字形）
+            // 远小于单页容量，实际只会有第 0 页。
+            const dirty = glGlyphs.consumeDirtyPages();
+            for (const page of dirty) {
+                const data = glGlyphs.readPage(page);
+                if (data !== null) {
+                    glGlyphProgram.uploadAtlas(data, glGlyphs.atlasPageSizePx());
+                    uploadedAtlasPages.add(page);
+                }
+            }
+            if (uploadedAtlasPages.size > 0) {
+                glGlyphProgram.render(glTextQuads, target, 0, 0);
+            }
         }
     }
 
@@ -789,13 +992,21 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             drawGlScene();
         }
 
-        // 键盘轴 GL 层：与网格共用同一份 spec，但几何与画布独立。
+        // 键盘 / 数值轴 GL 层：与网格共用同一份 spec，但几何与画布独立。
         if (glAxisProgram !== null) {
             const spec = data().grid;
             const signature = keyboardSignature(spec);
             if (signature !== lastKeyboardSignature) {
                 lastKeyboardSignature = signature;
-                rebuildKeyboardGeometry(spec);
+                // pitch 走键盘几何，其余走数值轴刻度线；两者互斥。
+                if (spec !== null && spec !== undefined && spec.kind === "pitch") {
+                    rebuildKeyboardGeometry(spec);
+                } else {
+                    rebuildAxisMarkGeometry(spec);
+                }
+                // 文字只随几何一起重建（位置由几何决定，几何没变则文字也没变）。
+                glTextQuads =
+                    glGlyphs !== null ? glGlyphs.build(collectAxisTextRequests(spec)) : [];
             }
             drawGlKeyboard();
         }
@@ -1092,6 +1303,10 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             glHandle = null;
             glAxisProgram?.dispose();
             glAxisProgram = null;
+            glGlyphProgram?.dispose();
+            glGlyphProgram = null;
+            glGlyphs?.dispose();
+            glGlyphs = null;
             glAxisHandle = null;
         },
     };
