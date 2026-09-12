@@ -79,27 +79,39 @@ export interface GlyphRasterizer {
 }
 
 /**
- * 解析字体标识中的字号（CSS px）。
+ * 解析 CSS 字体简写中的字号（CSS px）。
  *
- * @param fontKey 字体标识（`"<size>px <family>"`）。
- * @returns 字号；解析失败回退 12。
+ * 【为什么不能锚定行首】CSS 简写允许在字号前放 style / weight / stretch，
+ * 例如 `bold 9px sans-serif`（参数编辑器的 C 音名标签就是这么写的）。
+ * 原实现用 `/^(\d+(?:\.\d+)?)px/` 锚定行首，遇到 bold 前缀解析失败并回退 12，
+ * 于是槽位高度按 12px 计算、字形却按 9px 光栅化——尺寸与度量都错，且不报错。
+ * 改为只要求「数字紧跟 px」，不限定出现位置。
+ *
+ * @param fontKey 字体标识（CSS font 简写）。
+ * @returns 字号（CSS px）；解析失败回退 12（既有契约）。
  */
-function parseFontSizePx(fontKey: string): number {
-    const match = /^(\d+(?:\.\d+)?)px/.exec(fontKey.trim());
+export function parseFontSizePx(fontKey: string): number {
+    const match = /(\d+(?:\.\d+)?)px/.exec(fontKey.trim());
     return match ? Number(match[1]) : 12;
 }
 
 /**
- * 按比例缩放字体标识中的字号。
+ * 按比例缩放 CSS 字体简写中的字号，其余部分原样保留。
  *
- * @param fontKey 字体标识。
+ * 特殊说明：只替换**第一处**「数字 + px」——字体族里也可能出现数字（如
+ * `"Arial 2"`），全局替换会改错。`bold 9px X` 同样适用：第一处匹配即 `9px`。
+ *
+ * 注意：无法解析（不含 `px` 片段）时原样返回。调用方不应依赖这一兜底——
+ * 未放大的字体配合按 dpr 计算的槽位会产生错位。
+ *
+ * @param fontKey 字体标识（CSS font 简写）。
  * @param scale 缩放比例（通常为 dpr）。
- * @returns 缩放后的字体标识；解析失败时原样返回。
+ * @returns 缩放后的字体标识。
  */
-function scaleFontKey(fontKey: string, scale: number): string {
-    const match = /^(\d+(?:\.\d+)?)px\s+(.*)$/.exec(fontKey.trim());
-    if (!match) return fontKey;
-    return `${Number(match[1]) * scale}px ${match[2]}`;
+export function scaleFontKey(fontKey: string, scale: number): string {
+    return fontKey
+        .trim()
+        .replace(/(\d+(?:\.\d+)?)px/, (_match, size: string) => `${Number(size) * scale}px`);
 }
 
 /**
