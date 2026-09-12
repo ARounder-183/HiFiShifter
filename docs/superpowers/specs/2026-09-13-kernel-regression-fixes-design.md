@@ -18,7 +18,7 @@
 | --- | --- | --- | --- |
 | 1 | 修饰键 + 拖拽复制无法落到新轨道（也不能落到其他已有轨道） | 内核缺陷 | 提交路径把 `dropToNewTrack` / `trackOffset` 写死为 `false` / `0`，丢弃了预览路径已算出的落点 |
 | 2 | 点标尺后标尺播放头动、网格播放头不动 | 内核缺陷 | 播放头变化**从不**标脏内核渲染循环（循环是纯脏标记驱动，无空闲 rAF） |
-| 3 | 点本轨空白偶尔不取消选中 / 不改变播放头 | 内核缺陷（**与 #2 同源**，见 §4.3） | 空白点击的 seek 确实到达 store，但内核不重绘，用户看到的是「没反应」 |
+| 3 | 点本轨空白不取消选中 / 点空白播放头不动 | 内核缺陷（**两个独立缺陷**，见 §2.1） | (a) 内核 seek 只派发 thunk、缺乐观写，store 值压根没变；(b) `selectTrackRemote` 丢失 `applySelectedClip: false`，后端快照把刚清掉的选中复活 |
 | 4 | 参数编辑器选区框残留，拖拽时才更新 | 内核缺陷（**系统性**，见 §2.6） | 主画布内容签名的 `object → "[object Object]"` 塌缩，不同选区产生**同一签名**，缓存命中导致跳过着色 |
 | 5 | MIDI / 音高参考块内部为空 | **改造回归** | `MidiPitchTrackCanvas` 唯一挂载点（`TrackLane`）被删，组件成孤儿 |
 | 6 | 音阶高亮按钮失效 | **改造回归** | 该图层只画在 Canvas2D 的 `skipGrid` 分支里，而 `skipGrid` 恒为 `true` |
@@ -27,19 +27,47 @@
 
 ## 2. 决策记录
 
-### 2.1 为什么 #2 和 #3 合并为一条根因
+### 2.1 #3 其实是**两个独立缺陷**，且都与 #2 无关
 
-用户的原始描述把 #3 说成两个症状：「点本轨空白不取消选中」和「偶尔点空白不改变播放头」。实测（`?mock=1`，1920×1200，直接读 Redux store）表明：
+初查一度把 #3 并入 #2（以为"seek 到了但没重绘"）。**逐项实测后推翻了这个结论**：把 store 值与内核播放头元素的 `transform` 分开读数，三次点击给出：
 
-| 操作 | `selectedClipId` | `multiSelectedClipIds` | 内核播放头元素 |
-| --- | --- | --- | --- |
-| 点 clip（轨 1） | — | 1 | — |
-| 点同轨空白 | `null` | 0 | **不动** |
-| 点他轨空白 | `null` | 0 | **不动** |
+| 操作 | store `playheadSec` | 内核播放头 `transform` |
+| --- | --- | --- |
+| 点标尺（x=900） | 12.5 → **4.293** ✅ | 1875px → **1875px** ❌ 冻结 |
+| 再点标尺（x=1300） | → **6.96** ✅ | 仍 **1875px** ❌ |
+| 点轨道空白（x=600） | 6.96 → **6.96** ❌ 没变 | → **1044px** ⚠️ 反而重绘了 |
 
-即**选中清空一直是正确的**；两个症状里真正能复现的是「播放头不动」，而它的根因就是 #2：seek 已经派发（`set_transport` 可在 mock 调用轨迹里看到）并写入了 store，但内核渲染循环没有被标脏，所以自绘的轨道区播放头永不重绘。用户看到的「没反应」是**重绘缺失**，不是状态没变。
+这一张表同时证伪了两个错误假设，并分离出**两个互不相关的缺陷**：
 
-因此 #3 不再单独立项，其验收并入 #2 的验收（「点空白后播放头必须可见地移动」）。
+**(a) `#3` 的"播放头不动"＝ store 值压根没变（缺乐观写）**
+
+- 内核 seek 路径 `TimelinePanel.tsx:1213` / `:1222` **只**派发 `seekPlayhead(sec)`；
+- 标尺路径 `useTimelineState.ts:1133-1134` 派发 `dispatch(setplayheadSec(beat))` **+** `seekPlayhead(beat)`；
+- `seekPlayhead.fulfilled`（`sessionSlice.ts:5507-5520`）**只在**「前端值仍等于请求值 **且** 后端返回值与请求值差 > 0.001」时才写 `state.playheadSec`。真实后端 `commands/core.rs:115,155` 返回 `playhead_sec = v.max(0.0)`——非负请求下 `backendSec === requestedSec`，**写入被跳过**。
+
+于是 seek 到达引擎、却从不更新 UI 的播放头值。播放中之所以"偶尔"看起来生效，是 30Hz 轮询把它拉回来（`sessionSlice.ts:3975-3993` 仅在 `isPlaying` 时）。
+
+> 该 reducer 的注释写着"否则保持前端**已同步设好的** `state.playheadSec`"——即它**假定**调用方已经乐观写过。内核路径正是漏了这一步。
+>
+> 值得记一笔：`handleKernelActivateTake`（`TimelinePanel.tsx:3183`）有同样的潜在缺陷。
+
+**(b) `#3` 的"不取消选中"＝ 后端快照复活了刚清掉的选中**
+
+这是**已被修过一次、又被内核改造重新引入**的缺陷：
+
+- 空白点击的取消选中是**纯本地**的（`useTimelineClipActions.ts:803-809` → `setSelectedClipPreservingTrack(null)`），**不通知后端**，后端因此永远记着 `selected_clip_id`；
+- 若点击行 ≠ 当前轨，`TimelinePanel.tsx:1203` 派发 `selectTrackRemote(trackId)`——**纯字符串形式**；
+- `sessionSlice.ts:5586-5590` 的 `applySelectedClip` 闸门在 `typeof arg !== "object"` 时**判为真**，于是 fulfilled 用后端快照里的 `selected_clip_id` **覆盖**刚清空的选中；
+- 真实后端 `state.rs:6562` 的 `to_payload()` **总是**带 `selected_clip_id`，而 `select_track`（`state.rs:7349`）**刻意不清**它。
+
+精确条件因此是「**点击行 ≠ `selectedTrackId`**」，而不是用户描述的"本轨 vs 他轨"：留同一轨道内点击空白**总是**能清空；只有当焦点已经漂到别的轨道时，点回"选中 clip 所在的那一行"才会被复活——而焦点漂移恰恰是复活本身造成的。
+
+历史证据：`019e93ed` 的提交信息明确记录了同一根因，并在两处 DOM 调用点加了 `{applySelectedClip:false}`；随后 `464a78bb`（内核补全）把内核调用点写成纯字符串，**静默解除了该修复**。
+
+**结论**：#3 需修两处（乐观写 + `applySelectedClip`），#2 需修一处（标脏重绘）。三者可独立验证。
+
+> 另有一条**独立**观察：`handleKernelSeek` 在空白**拖拽**路径（`commit=false`）里按 rAF 节流，但 `commit=true` 的单击路径同样只派发 thunk——两条路径都缺乐观写，因此修复点覆盖两处，不只是 `:1213`。
+
 
 ### 2.2 为什么用「新增只标脏入口」而不是「把 playheadSec 加进 invalidateScene 依赖」
 
@@ -148,6 +176,29 @@
 5. `TimelinePanel.tsx`：删除孤儿 `playheadRef` 的全部写点（`:217`、`:236`、`:303-305`、`:4013-4022`、`:5056`）与 `useTimelineState.ts` 中的声明（`:155`、`:395`、`:1348`）。`scrollRef` 同理（`:606` 分支已注明"恒为 null"）——一并核实后清理，避免它们继续看起来像活写入点。
 
 **验收口径**：点标尺、点空白、播放（**自动滚屏关闭**）三条路径下，网格播放头都必须可见移动。
+
+### 3.2b 缺陷 3：两处独立修复（§2.1）
+
+这一项**不属于 #2**，必须单独改、单独验。
+
+1. **补齐乐观写**：`TimelinePanel.tsx` 的 `handleKernelSeek`（`:1190-1226`）在派发
+   `seekPlayhead(sec)` / `seekPlayhead(target)` 的**同一处**加 `dispatch(setplayheadSec(sec))`，
+   与标尺路径（`useTimelineState.ts:1133-1134`）对齐。两条分支（`commit=true` 的单击与
+   rAF 节流的拖拽帧）都要加。
+   - 顺带核对 `handleKernelActivateTake`（`:3183`）是否有同样缺陷；若有，一并修。
+2. **恢复 `applySelectedClip` 契约**：`TimelinePanel.tsx:1203` 的
+   `dispatch(selectTrackRemote(trackId))` 改为
+   `dispatch(selectTrackRemote({ trackId, applySelectedClip: false }))`。
+   - 这是恢复 `019e93ed` 明确建立的契约，不是新语义。**必须在代码注释里写明这一点**，
+     否则下一个人还会把它"简化"回纯字符串。
+   - 同时核对全仓库是否还有其它纯字符串形式的 `selectTrackRemote(` 调用点（轨道头点击 /
+     Alt+方向键切轨等）——那些路径若也期望"不恢复后端选中"，同样要改；若它们**期望**恢复，
+     则保持原样并在注释里说明区别。**不要一刀切全改**。
+3. **验证必须用"忠实桩"**：`?mock=1` 的 `select_clip` / `select_track` 是
+   `() => ({ok:true})`（`mockBackend.ts:418-419`），**不含 `selected_clip_id` 字段**，
+   而复活闸门要求 `payload.selected_clip_id !== undefined`——因此 **mock 会掩盖这个缺陷**。
+   验证时需让 `select_track` 返回带 `selected_clip_id` 的完整快照（且不清该字段，与真实后端
+   `state.rs:7349` 一致），或用真机工程验证。
 
 ### 3.3 缺陷 4：参数编辑器选区框（系统性签名修复）
 
