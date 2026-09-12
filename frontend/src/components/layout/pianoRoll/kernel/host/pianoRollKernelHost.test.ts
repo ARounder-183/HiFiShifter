@@ -58,9 +58,11 @@ function makeTarget() {
 /**
  * 造一个测试用宿主（容器 / thumb 全是记录型桩）。
  *
+ * @param options 可覆盖项；`offsetPx` 用于覆盖「同步偏移」场景（见坐标契约用例）。
  * @returns 宿主句柄、桩，以及 `flush()`（把排队的帧跑掉，使帧提交可确定性验证）。
  */
-function makeHost() {
+function makeHost(options: { offsetPx?: number } = {}) {
+    const offsetPx = options.offsetPx ?? 0;
     const container = makeTarget();
     const vThumb = makeTarget();
     const hThumb = makeTarget();
@@ -83,6 +85,7 @@ function makeHost() {
             valueDomain: { min: 0, max: 100, span: 50 },
         }),
         initialPxPerSec: 91.25,
+        horizontalOffsetPx: () => offsetPx,
         sync: {
             rulerContent: rulerContent as never,
         },
@@ -189,6 +192,63 @@ describe("createPianoRollKernelHost", () => {
         expect(t.paintedAxes.at(-1)).toBeCloseTo(300, 6);
         // 标尺内容层按绘制坐标反向平移。
         expect(t.rulerContent.style.transform).toBe("translateX(-300px)");
+        t.host.dispose();
+    });
+});
+
+/**
+ * 坐标契约：内核持有**原生坐标**（域 `[0, 内容宽 + 偏移]`），对外一律暴露
+ * **绘制坐标**（域 `[−偏移, 内容宽]`）。
+ *
+ * 【为什么单独成组】这是本阶段最容易出错、也最难在类型上发现的一处：两套坐标系
+ * 只差一个偏移量，写错时功能"看起来正常"，但同步模式下网格会与时间轴错位、
+ * 或同步留白（负的绘制坐标）无法表示。以下期望值取自浏览器实测的旧实现行为。
+ */
+describe("createPianoRollKernelHost · 坐标契约（偏移 200）", () => {
+    const OFFSET = 200;
+    /** 内容宽 = 100s × 91.25px/s。 */
+    const CONTENT_W = 100 * 91.25;
+    const VIEWPORT_W = 1864;
+
+    it("静置：原生 0 → 绘制 -偏移（= 旧实现同步留白实测值）", () => {
+        const t = makeHost({ offsetPx: OFFSET });
+        expect(t.host.getViewport().scrollLeft).toBeCloseTo(-OFFSET, 6);
+        t.host.dispose();
+    });
+
+    it("绘制域 = [-偏移, 内容宽]（两端都可表示）", () => {
+        const t = makeHost({ offsetPx: OFFSET });
+        t.host.setScrollLeft(999999);
+        expect(t.host.getViewport().scrollLeft).toBeCloseTo(CONTENT_W, 6);
+        t.host.setScrollLeft(-999999);
+        expect(t.host.getViewport().scrollLeft).toBeCloseTo(-OFFSET, 6);
+        t.host.dispose();
+    });
+
+    it("投影与视口同一口径（都是绘制坐标）", () => {
+        const t = makeHost({ offsetPx: OFFSET });
+        t.host.setScrollLeft(1200);
+        t.flush();
+        expect(t.host.getAxis().scrollLeftPx).toBeCloseTo(1200, 6);
+        expect(t.paintedAxes.at(-1)).toBeCloseTo(1200, 6);
+        t.host.dispose();
+    });
+
+    it("滚动条内容尺寸 = 原生 scrollWidth（= 内容宽 + 偏移 + 视口宽）", () => {
+        const t = makeHost({ offsetPx: OFFSET });
+        const nativeScrollWidth = CONTENT_W + OFFSET + VIEWPORT_W;
+        expect(t.host.getScrollbarGeometries().horizontal.thumbLengthPx).toBeCloseTo(
+            (VIEWPORT_W * VIEWPORT_W) / nativeScrollWidth,
+            6,
+        );
+        t.host.dispose();
+    });
+
+    it("偏移为 0 时绘制域退化为 [0, 内容宽]（未开启同步的既有调用方不受影响）", () => {
+        const t = makeHost();
+        expect(t.host.getViewport().scrollLeft).toBeCloseTo(0, 6);
+        t.host.setScrollLeft(999999);
+        expect(t.host.getViewport().scrollLeft).toBeCloseTo(CONTENT_W, 6);
         t.host.dispose();
     });
 });
