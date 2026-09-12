@@ -205,21 +205,23 @@ describe("buildPolylineVertices", () => {
     });
 
     it("miter 未超限时走 miter，超限时退化为 bevel", () => {
-        // 【用例必须按**夹角**设计，不能凭坐标直觉】
-        // Canvas2D 的 miterLimit 语义是 ratio = miter长度 / 半线宽 = 1 / sin(θ/2)：
-        //   θ=90° -> ratio 1.41（limit=2 不超限，走 miter）
-        //   θ=30° -> ratio 3.86（limit=2 超限，退化 bevel）
-        // 曾经写过一个「浅 V」用例 (0,0)-(100,0.5)-(200,0)，它其实是 0.57° 的
-        // 近直线、miter 长度仅 2.5，**永远走不到 bevel 分支**，等于没测。
+        // 【用例必须按**转角**设计，不能凭坐标直觉】
+        // Canvas2D 的 miterLimit 语义是 ratio = miter长度 / 半线宽 = 1 / cos(θ/2)，
+        // 其中 θ 是两段方向的转角：
+        //   θ=90°  -> ratio 1.414（limit=2 不超限，走 miter）
+        //   θ=150° -> ratio 3.864（limit=2 超限，退化 bevel）
+        // 曾经写过一个「浅 V」用例 (0,0)-(100,0.5)-(200,0)，它的转角只有 0.57°、
+        // ratio≈1.000，**永远走不到 bevel 分支**，等于没测。
         const rightAngle = [
             { x: 0, y: 0 },
             { x: 10, y: 0 },
             { x: 10, y: 10 },
         ];
+        // 150° 转角：从 +x 方向转到 150° 方向
         const sharpAngle = [
             { x: 0, y: 0 },
             { x: 10, y: 0 },
-            { x: 10 + Math.cos(Math.PI / 6) * 10, y: Math.sin(Math.PI / 6) * 10 },
+            { x: 10 + Math.cos((150 * Math.PI) / 180) * 10, y: Math.sin((150 * Math.PI) / 180) * 10 },
         ];
         // 用 aaPadPx: 0 隔离出**纯几何**行为，避免 AA 余量干扰 miter 断言。
         const maxAcross = (a: Float32Array) => {
@@ -237,7 +239,7 @@ describe("buildPolylineVertices", () => {
             aaPadPx: 0,
         });
         expect(maxAcross(mitered)).toBeGreaterThan(5.5); // > 半线宽 5
-        // 30° + limit 2（ratio 3.86 超限）：退化 bevel，顶点**不超过**半线宽
+        // 150° + limit 2（ratio 3.864 超限）：退化 bevel，顶点**不超过**半线宽
         const beveled = buildPolylineVertices({
             points: sharpAngle,
             lineWidth: 10,
@@ -245,7 +247,7 @@ describe("buildPolylineVertices", () => {
             aaPadPx: 0,
         });
         expect(maxAcross(beveled)).toBeLessThanOrEqual(5 + 1e-6);
-        // 同样的 30° 若放宽 limit，则应走 miter 并显著超出半线宽
+        // 同样的 150° 若放宽 limit（10 > 3.864），则应走 miter 并显著超出半线宽
         const looseLimit = buildPolylineVertices({
             points: sharpAngle,
             lineWidth: 10,
