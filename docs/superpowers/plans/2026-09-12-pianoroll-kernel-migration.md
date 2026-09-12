@@ -51,7 +51,7 @@ environment — `localStorage`, `window` and `document` are all `undefined` insi
 `globalThis.localStorage` guarded by a `typeof` check, and the test must install its own
 stub rather than assume a DOM. Do **not** write a test that touches bare `localStorage`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```ts
 /**
@@ -115,12 +115,12 @@ describe("isPianoRollKernelEnabled", () => {
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd frontend && npx vitest run featureFlag`
 Expected: FAIL — `PIANO_ROLL_KERNEL_FLAG_KEY` / `isPianoRollKernelEnabled` are not exported.
 
-- [ ] **Step 3: Implement the flag**
+- [x] **Step 3: Implement the flag**
 
 Append to `frontend/src/components/layout/timeline/kernel/featureFlag.ts`:
 
@@ -154,12 +154,12 @@ export function isPianoRollKernelEnabled(): boolean {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cd frontend && npx vitest run featureFlag`
 Expected: PASS (4 tests).
 
-- [ ] **Step 5: Verify the pre-existing timeline flag still behaves**
+- [x] **Step 5: Verify the pre-existing timeline flag still behaves**
 
 The existing `isTimelineKernelEnabled` reads bare `localStorage` inside a `try`, which is safe
 in node only because it is never imported by a test today. Confirm this task did not change its
@@ -168,7 +168,7 @@ behaviour:
 Run: `cd frontend && npx vitest run && npx tsc -b --noEmit`
 Expected: only the 2 known `keybindingMatch` failures; typecheck clean.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add frontend/src/components/layout/timeline/kernel/featureFlag.ts frontend/src/components/layout/timeline/kernel/featureFlag.test.ts
@@ -185,7 +185,7 @@ mapping functions verbatim so feel cannot drift.
 - Create: `frontend/src/components/layout/pianoRoll/kernel/scroll/verticalValueScroll.ts`
 - Test: `frontend/src/components/layout/pianoRoll/kernel/scroll/verticalValueScroll.test.ts`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```ts
 import { describe, expect, it } from "vitest";
@@ -240,12 +240,12 @@ describe("verticalValueScroll（值域 ↔ 内核像素滚动）", () => {
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd frontend && npx vitest run verticalValueScroll`
 Expected: FAIL — module not found.
 
-- [ ] **Step 3: Implement the adapter**
+- [x] **Step 3: Implement the adapter**
 
 Create `frontend/src/components/layout/pianoRoll/kernel/scroll/verticalValueScroll.ts`:
 
@@ -335,12 +335,12 @@ export function centerFromKernelScrollTop(
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cd frontend && npx vitest run verticalValueScroll`
 Expected: PASS (6 tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add frontend/src/components/layout/pianoRoll/kernel/scroll/
@@ -357,7 +357,7 @@ axis descriptors the panel needs (two axes, one of them value-domain).
 - Create: `frontend/src/components/layout/pianoRoll/kernel/scroll/scrollbarSpec.ts`
 - Test: `frontend/src/components/layout/pianoRoll/kernel/scroll/scrollbarSpec.test.ts`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```ts
 import { describe, expect, it } from "vitest";
@@ -411,12 +411,12 @@ describe("resolvePianoRollScrollbarGeometries", () => {
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd frontend && npx vitest run scrollbarSpec`
 Expected: FAIL — module not found.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Create `frontend/src/components/layout/pianoRoll/kernel/scroll/scrollbarSpec.ts`:
 
@@ -499,12 +499,12 @@ export function resolvePianoRollScrollbarGeometries(
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cd frontend && npx vitest run scrollbarSpec`
 Expected: PASS (3 tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add frontend/src/components/layout/pianoRoll/kernel/scroll/
@@ -555,7 +555,7 @@ kernel used: an adapter task, a host task, a wiring task, then a live-look verif
 **阶段 1 宿主不引入 GL**：绘制仍在面板的 Canvas2D 上，宿主不需要 WebGL2 上下文，
 因此本任务**可在 node 环境单测**（无 DOM 也能验证构造 / 销毁 / 钳制 / 值域往返）。
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 测试用「记录型桩」替掉 DOM：断言 `dispose()` 把加过的监听**逐条**摘掉（add/remove 配平）、
 重复 `dispose()` 安全、横向钳制复现实测上限、值域往返无损、滚动条几何与实测比例一致。
@@ -719,12 +719,12 @@ describe("createPianoRollKernelHost", () => {
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd frontend && npx vitest run pianoRollKernelHost`
 Expected: FAIL — module not found.
 
-- [ ] **Step 3: Implement the data mirror + host**
+- [x] **Step 3: Implement the data mirror + host**
 
 `pianoRollKernelData.ts` 只声明宿主每帧读取的数据镜像（不含逻辑）。
 
@@ -757,17 +757,17 @@ Expected: FAIL — module not found.
   按「值变化才写」的字符串 key 去重（与时间轴宿主同一写法）。
 - **不注册滚轮 / 键盘 / 中键监听**：留给 Task 7，避免本任务的退出标准被输入语义污染。
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cd frontend && npx vitest run pianoRollKernelHost`
 Expected: PASS（6 tests）。
 
-- [ ] **Step 5: Verify no regression**
+- [x] **Step 5: Verify no regression**
 
 Run: `cd frontend && npx vitest run && npx tsc -b --noEmit`
 Expected: only the 2 known `keybindingMatch` failures; typecheck clean.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add frontend/src/components/layout/pianoRoll/kernel/host/
@@ -804,6 +804,113 @@ git commit -m "feat(pianoroll-kernel): kernel host skeleton (scroll ownership + 
   record results in `docs/plans/2026-09-11-timeline-kernel-gap-completion.md` style.
 - **Exit check:** `npx vitest run` (only the 2 known failures), `npx tsc -b --noEmit`,
   `npx eslint`, `npx prettier --check` all clean.
+
+---
+
+## Phase 1 — 完成记录（已完成）
+
+**状态：** Task 1–8 全部完成，逐任务提交。开关未显式设置时**默认关闭**，因此合并后
+线上行为与迁移前完全一致；显式写 `hifishifter.pianoRollKernel = "1"` 才走内核路径。
+
+**提交序列：**
+
+| 任务 | 提交 |
+|---|---|
+| Task 1 特性开关 | `d6e613c6` |
+| Task 2 值域滚动适配 | `5cb2b3d5` |
+| Task 3 双轴滚动条几何 | `306e7589` |
+| Task 4 宿主骨架 | `571226c4`（+ 计划扩写 `ef817af1`） |
+| Task 5 面板接线 | `5b3a4724` |
+| Task 6 时间轴同步 | `70e98bbf` |
+| Task 7 输入一致性 | `57d84f31` |
+
+### 浏览器实测（本阶段的主要验收手段）
+
+测试环境：`?mock=1`、1920×1200、DPR 2、同步时间轴开启（偏移实测 200px）。
+截图比对脚本位于临时目录（不入库），逐像素比对 3840×2400。
+
+**1. 视觉一致性（flag on vs flag off，静止状态）**
+
+| 区域 | 差异像素 |
+|---|---|
+| 两条自绘滚动条矩形**之外** | **0（0.0000%）** |
+| 竖向自绘滚动条矩形内 | 8 910 |
+| 横向自绘滚动条矩形内 | 10 072 |
+| 合计 | 18 982（0.2060%） |
+
+滚动条矩形内的差异是**设计使然**：macOS 的原生 overlay 滚动条在静止时自动隐藏，
+而内核自绘条常驻显示。除此之外**逐像素一致**。
+
+**2. 回退保证（flag off vs 改动前基线）**
+
+改动前先采一次基线截图，完成后在同等条件下重采：**0 像素差异**。即开关关闭时
+行为与迁移前完全相同（这是"可一键回退"的实测依据，而非推断）。
+
+**3. 手势清单（20 项，两模式同条件跑同一脚本）**
+
+滚轮（shift / 普通 / ctrl / alt 四种变体）、PageUp / PageDown / Home / End /
+四个方向键、中键拖拽平移、横向 thumb 拖拽、横向轨道点击翻页、竖向 thumb 拖拽、
+竖向轨道点击翻页。
+
+- **完全一致：** 大部分步骤两模式逐值相同。
+- **亚像素差（0.17–0.50px）：** 原生 scroller 会把位置量化到 0.5 设备像素，内核
+  持有精确浮点值。属于浏览器行为差异，非内核缺陷。
+- **仅内核模式有位移的四项（滚动条拖拽 / 翻页）：** 旧实现的原生滚动条在静止时
+  已自动隐藏，点击落在 scroller 上因此无翻页；内核自绘条常驻，轨道真实存在。
+  这是自绘滚动带来的**能力增强**，不是回归。
+
+**4. 滚动条几何与拖拽（对照解析期望）**
+
+| 项目 | 解析期望 | 实测 |
+|---|---|---|
+| 横向 thumb 长度（原生 `scrollWidth` 口径） | 1864²/10989 = 316.18 | 316.179 |
+| 竖向 thumb 长度 | 823²/2423 = 279.54 | 279.541 |
+| 横向 thumb 拖拽 +200px | 602 + 200/1547.82×9125 = 1781.08 | 1781 |
+| 竖向 thumb 拖拽 +150px | 800 + 150/543.46×1600 = 1241.62 | 1241.5 |
+| 轨道点击翻页（竖向） | 一屏 = 823 | 823 |
+| 轨道点击翻页（横向） | 一屏 = 1864 | 1864 |
+
+**5. 竖向值域映射**
+
+内核像素 ↔ 值域中心与旧实现同源（复用 `verticalScrollMapping`），实测
+`scrollTop=1200 → center=57`，与旧公式独立复算结果一致；静止状态
+`scrollTop 533.33 / center 72` 对应旧实现的 `533.5`（量化差）。
+
+### 本阶段在浏览器比对中发现并修复的两个真实缺陷
+
+两处都**无法靠类型检查发现**，只有与旧实现逐像素比对才会暴露：
+
+1. **水平坐标域缺一段（Task 5）**：内核位置恒被钳到 `[0, max]`，而旧实现的
+   **绘制**域是 `[−偏移, 内容宽]`（含负值）——同步留白无法表示，参数编辑器网格
+   因此比时间轴少偏移那一段、整体错位 200px。修法：内核持有**原生**坐标
+   （域 `[0, 内容宽 + 偏移]`，为此给 `ScrollKernel` 增加 `extraContentWidthPx`，
+   与既有 `extraContentHeightPx` 对称），对外统一暴露绘制坐标。
+   同时修正横向 thumb 的内容尺寸口径（`maxScroll + 视口`，即原生 `scrollWidth`；
+   原先误用内容宽，thumb 偏长 20%）。
+2. **竖向初始位置被覆盖（Task 5）**：宿主创建 effect 晚于「值域 → 竖向滚动条」
+   的 layout effect，内核从 0 起步后首帧镜像回写把位置冲掉——钢琴键盘整体偏移
+   **一个八度**。修法：宿主创建时采纳容器当前的两轴原生位置。
+
+另修复 Task 6 发现的同步失效：入站同步写入目标位置后，一个仍按旧语义执行的
+`syncScrollLeft` 又从**上一帧的**原生镜像读回旧值覆盖掉它（同步从 1200 拨回 0 时
+参数编辑器不动）。内核模式下跳过该回读。
+
+### 工程化说明
+
+- **`dispose()` 的监听配平**：宿主用统一登记表（`registerListener`）保证 add/remove
+  配平；单测先断言"确实注册过"再验证配平，避免零监听时成为**空断言**。
+- **几何单一来源**：滚动条的绘制、拖拽换算、轨道翻页判定共用 `scrollbarGeometries()`，
+  避免三处各算一遍导致"画出来的 thumb 和能拖的范围不一致"。
+- **坐标系只在宿主边界换算一次**，面板与各图层统一消费绘制坐标。
+
+### 退出标准核对
+
+| 检查 | 结果 |
+|---|---|
+| `npx vitest run` | 620 passed / 2 failed（均为 `keybindingMatch` 预先存在失败） |
+| `npx tsc -b --noEmit` | 通过 |
+| `npx eslint .` | 0 error（13 warning 全部为改动前既有） |
+| `npx prettier --check` | 本阶段改动文件全部通过 |
 
 ---
 
