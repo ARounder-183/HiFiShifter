@@ -353,6 +353,17 @@ export function drawPianoRoll(args: {
     paramMorphOverlay?: ParamMorphOverlay | null;
     /** 自定义字体族，用于 canvas 文本渲染 */
     fontFamily?: string;
+    /**
+     * 跳过横向网格线的绘制（阶段 2：网格已由 GL 静态层负责）。
+     *
+     * 【为什么需要】GL 层与 Canvas2D 层是两张叠放的画布：若两边都画网格，网格会被
+     * 画两次——半透明线叠加会让颜色变深、且两条线的设备像素对齐略有差异时会出现
+     * "重影"。因此网格的归属必须是排他的：GL 开启时 Canvas2D 跳过它。
+     *
+     * 特殊说明：只跳过**网格**。曲线 / 选区 / 播放头 / 文字等仍由本函数绘制，
+     * 直到各自的迁移任务完成。这保证了迁移可以逐层进行、每步都可回退。
+     */
+    skipGrid?: boolean;
 }) {
     const {
         axisCanvas,
@@ -379,6 +390,7 @@ export function drawPianoRoll(args: {
         clipboardPreview,
         paramMorphOverlay,
         fontFamily,
+        skipGrid = false,
     } = args;
 
     const resolvedFontFamily = fontFamily || "sans-serif";
@@ -621,7 +633,10 @@ export function drawPianoRoll(args: {
     const beatToSec = Math.max(1e-9, secPerBeat);
 
     // Horizontal grid lines
-    if (editParam === "pitch") {
+    //
+    // 【阶段 2】`skipGrid` 为真时整段跳过：网格已由 GL 静态层绘制。两张画布叠放，
+    // 都画会产生半透明叠加（颜色变深）与亚像素重影，因此归属必须排他。
+    if (!skipGrid && editParam === "pitch") {
         const absMin = PITCH_MIN_MIDI;
         const absMax = PITCH_MAX_MIDI;
         const view = pitchView;

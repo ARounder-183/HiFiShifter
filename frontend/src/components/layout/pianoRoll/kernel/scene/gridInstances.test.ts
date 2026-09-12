@@ -75,8 +75,10 @@ describe("buildPitchGridInstances", () => {
             expect(item.x).toBe(0);
             expect(item.w).toBe(800); // 横向范围
             expect(item.h).toBeCloseTo(0.5, 9); // 1/dpr = 线厚
-            // 弱线的半设备像素取向：y 必须是 (round(v*2)+0.5)/2 的形式
-            expect(Math.abs((item.y * 2) % 1)).toBeCloseTo(0.5, 9);
+            // y 是矩形**上缘**：弱线厚 1 设备像素且中心对齐到 k+0.5 设备像素，
+            // 故上缘恰落在整数设备像素上（2*y 为整数）。这是「描边中心 → 上缘」
+            // 换算的结果；直接用中心值会让整条线下移半个线厚（曾实际发生）。
+            expect(Math.abs((item.y * 2) % 1)).toBeCloseTo(0, 9);
         }
     });
 
@@ -196,11 +198,12 @@ describe("buildValueGridInstances", () => {
             weakRgba: BLACK,
         });
         expect(items.length).toBeGreaterThan(0);
+        // 换算成矩形上缘后，两种取向都落在整数设备像素上——因为它们各自的
+        // 中心（弱线 k+0.5、强线 k）减去半个线厚（弱线 0.5、强线 1 设备像素）
+        // 都得到整数。因此这里断言的等价性质是"上缘在设备像素栅格上"。
         for (const item of items) {
-            const isStrong = item.rgba === WHITE;
             const frac = Math.abs((item.y * 2) % 1);
-            if (isStrong) expect(frac).toBeCloseTo(0, 9);
-            else expect(frac).toBeCloseTo(0.5, 9);
+            expect(frac).toBeCloseTo(0, 9);
         }
     });
 
@@ -328,7 +331,9 @@ describe("与 render.ts 行循环逐值等价", () => {
                     expect(built.length).toBe(legacy.length);
                     for (let i = 0; i < built.length; i += 1) {
                         expect(built[i].value).toBe(legacy[i].midi);
-                        expect(built[i].y).toBeCloseTo(legacy[i].y, 12);
+                        // legacy 给出的是**描边中心**，构建器给出**矩形上缘**：
+                        // 两者相差半个线厚，比较时换算回去。
+                        expect(built[i].y + built[i].h / 2).toBeCloseTo(legacy[i].y, 12);
                     }
                 }
             }
@@ -353,7 +358,8 @@ describe("与 render.ts 行循环逐值等价", () => {
                     expect(built.length).toBe(legacy.length);
                     for (let i = 0; i < built.length; i += 1) {
                         expect(built[i].value).toBeCloseTo(legacy[i].v, 9);
-                        expect(built[i].y).toBeCloseTo(legacy[i].y, 12);
+                        // 同上：上缘 + 半厚 == 描边中心。
+                        expect(built[i].y + built[i].h / 2).toBeCloseTo(legacy[i].y, 12);
                         expect(built[i].rgba === WHITE).toBe(legacy[i].strong);
                     }
                 }

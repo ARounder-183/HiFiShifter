@@ -186,12 +186,18 @@ import {
     centerFromVerticalScrollTop,
     verticalScrollTopFromCenter,
 } from "./pianoRoll/verticalScrollMapping";
-import { isPianoRollKernelEnabled } from "./timeline/kernel/featureFlag";
+import { isPianoRollKernelEnabled, isPianoRollGlSceneEnabled } from "./timeline/kernel/featureFlag";
 import {
     createPianoRollKernelHost,
     type PianoRollKernelHost,
 } from "./pianoRoll/kernel/host/pianoRollKernelHost";
+import type {
+    MutablePianoRollKernelData,
+    PianoRollGridSpec,
+} from "./pianoRoll/kernel/host/pianoRollKernelData";
 import { PIANO_ROLL_VERTICAL_SCROLL_RANGE_PX } from "./pianoRoll/kernel/scroll/verticalValueScroll";
+import { resolvePianoRollColors } from "./pianoRoll/colors";
+import { parseRgbaColor } from "./timeline/runtime/timelineClipGlRenderer";
 
 const NOTE_NAMES_SHARP = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 const PARAM_EDITOR_VERTICAL_SCROLL_RANGE_PX = PIANO_ROLL_VERTICAL_SCROLL_RANGE_PX;
@@ -203,6 +209,15 @@ const PARAM_EDITOR_VERTICAL_SCROLL_RANGE_PX = PIANO_ROLL_VERTICAL_SCROLL_RANGE_P
  * 未显式设置时关闭（见 `isPianoRollKernelEnabled`），因此默认行为与迁移前完全一致。
  */
 const PARAM_EDITOR_KERNEL_ENABLED = isPianoRollKernelEnabled();
+
+/**
+ * 是否启用参数编辑器 GL 场景层（阶段 2）。
+ *
+ * 特殊说明：必须与内核开关**同时**成立才有效——GL 层依赖内核提供的视口真值
+ * （`u_viewOrigin` 由内核的滚动位置驱动）。两者都关 / 只开内核时，绘制完全走
+ * Phase 1 已验证的 Canvas2D 路径。
+ */
+const PARAM_EDITOR_GL_SCENE_ENABLED = PARAM_EDITOR_KERNEL_ENABLED && isPianoRollGlSceneEnabled();
 
 /**
  * 判断数值是否值得写入 DOM（跨过容差）。
@@ -1869,9 +1884,16 @@ export const PianoRollPanel: React.FC = () => {
     // 回写也必须换算成原生坐标，否则同步模式下的读回会差一个 offset。
     const hostRef = useRef<PianoRollKernelHost | null>(null);
     /** 内核模式下的数据镜像（每次 render 更新字段，宿主每帧现读）。 */
-    const kernelDataRef = useRef({
+    /**
+     * 内核数据镜像（每次 render 更新字段，宿主每帧现读）。
+     *
+     * 特殊说明：显式标注为 `PianoRollKernelData` 而不是让它靠初始值推断——推断出的
+     * 窄类型会让后续写入 `grid`（可选字段）报错，也会漏掉字段名拼写错误。
+     */
+    const kernelDataRef = useRef<MutablePianoRollKernelData>({
         projectSec: 1,
         valueDomain: { min: 0, max: 1, span: 1 },
+        grid: null,
     });
     /** 自绘滚动条的 thumb（仅内核模式挂载）。 */
     const hScrollbarThumbRef = useRef<HTMLDivElement | null>(null);
@@ -1879,6 +1901,8 @@ export const PianoRollPanel: React.FC = () => {
     /** 自绘滚动条的**轨道**（承接「点空白翻页」，仅内核模式挂载）。 */
     const hScrollbarTrackRef = useRef<HTMLDivElement | null>(null);
     const vScrollbarTrackRef = useRef<HTMLDivElement | null>(null);
+    /** GL 静态层画布（阶段 2，仅内核 + GL 开关都开启时挂载）。 */
+    const glCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
     function pitchDeltaToDegreeSteps(
         basePitch: number,
@@ -2153,6 +2177,8 @@ export const PianoRollPanel: React.FC = () => {
             vScrollbarTrack: vScrollbarTrackRef.current ?? undefined,
             data: () => kernelDataRef.current,
             initialPxPerSec: pxPerSecRef.current,
+            glCanvas: glCanvasRef.current,
+            glSceneEnabled: PARAM_EDITOR_GL_SCENE_ENABLED,
             // 偏移经 ref 读取（同步开关与布局偏移都在运行时变化，闭包捕获会读到挂载时的旧值）。
             horizontalOffsetPx: () =>
                 paramEditorSyncTimelineRef.current ? timelineOffsetRef.current : 0,
@@ -2256,6 +2282,56 @@ export const PianoRollPanel: React.FC = () => {
     //
     // 特殊说明 3：`span` 用**当前视口**的跨度（而非值域全长）。竖向像素位置 ↔ 值域
     // 中心的映射依赖 span，用错会让滚到同一位置对应的中心值不同。
+
+    /**
+     * 构建 GL 场景层的网格输入（阶段 2）。
+     *
+     * 流程：由 `editParam` 判定网格种类 → 取值域边界与当前视口 → 解析该主题的两条
+     * 网格线颜色为数值 RGBA → 绑定 `valueToY`。
+     *
+     * 特殊说明 1：`valueToY` 传的是**面板自己的**那个函数（只绑定 `editParam`），
+     * 与 Canvas2D 路径共用同一份投影——这正是两种渲染模式网格不会错位的原因。
+     *
+     * 特殊说明 2：颜色经 `parseRgbaColor` 解析为 0..1 浮点，因为 GL 上传统一用浮点；
+     * 在渲染热路径上反复解析 CSS 字符串是纯浪费，故在镜像更新（低频）时做。
+     * 解析失败（拿到 NaN）时退回**不透明黑**——宁可颜色不对也不要上传 NaN，
+     * NaN 会让整个实例属性失效、整层消失。
+     *
+     * @returns 网格输入；GL 关闭或无法解析时返回 null（宿主按"没有网格"处理）。
+     */
+    function buildGridSpec(): PianoRollGridSpec | null {
+        const kind =
+            editParam === "pitch"
+                ? "pitch"
+                : isChildPitchOffsetCentsParam(editParam)
+                  ? "cents"
+                  : isChildPitchOffsetDegreesParam(editParam)
+                    ? "degrees"
+                    : isChildFormantOffsetCentsParam(editParam)
+                      ? "formantCents"
+                      : null;
+        if (kind === null) return null;
+
+        const bounds = getParamValueBoundsForScrollbar(editParam);
+        const view = clampViewport(editParam, getCurrentViewportForScrollbar(editParam));
+        const colors = resolvePianoRollColors(themeMode === "dark");
+        const strong = parseRgbaColor(colors.pitchGridC);
+        const weak = parseRgbaColor(colors.pitchGridOther);
+        const finite = (c: readonly number[]) => c.every((v) => Number.isFinite(v));
+        const strongRgba = finite(strong) ? strong : ([0, 0, 0, 1] as const);
+        const weakRgba = finite(weak) ? weak : ([0, 0, 0, 1] as const);
+
+        return {
+            kind,
+            view: { center: view.center, span: view.span },
+            absMin: bounds.min,
+            absMax: bounds.max,
+            valueToY: (value: number, heightPx: number) => valueToY(editParam, value, heightPx),
+            strongRgba,
+            weakRgba,
+        };
+    }
+
     useLayoutEffect(() => {
         if (!PARAM_EDITOR_KERNEL_ENABLED) return;
         const bounds = getParamValueBoundsForScrollbar(editParam);
@@ -2266,6 +2342,9 @@ export const PianoRollPanel: React.FC = () => {
             max: bounds.max,
             span: view.span,
         };
+        // GL 场景层的网格输入（阶段 2）。仅在 GL 开关开启时构建：颜色解析会创建
+        // DOM 探针（`normalizeCssColor`），未启用时不该付这份成本。
+        kernelDataRef.current.grid = PARAM_EDITOR_GL_SCENE_ENABLED ? buildGridSpec() : null;
         // pxPerSec 由面板解析后写入内核（阶段 1 不迁移缩放，见宿主文件头）。
         hostRef.current?.setPxPerSec(pxPerSec);
         // 同步偏移会改变**水平上限**（原生域 = 内容宽 + 偏移），必须按新边界重钳。
@@ -3145,6 +3224,9 @@ export const PianoRollPanel: React.FC = () => {
             referencePitchOverlays,
             detectedPitchCurves,
             isDark: themeMode === "dark",
+            // 阶段 2：GL 层接管网格时，Canvas2D 必须跳过它（两张画布叠放，
+            // 都画会半透明叠加 + 亚像素重影）。GL 未启用时行为与迁移前一致。
+            skipGrid: PARAM_EDITOR_GL_SCENE_ENABLED,
             fontFamily,
             clipboardPreview: s.showClipboardPreview ? clipboardRef.current : null,
             // pitch snap visual helpers
@@ -5804,6 +5886,22 @@ export const PianoRollPanel: React.FC = () => {
                                         pxPerSec={pxPerSec}
                                         colors={waveformColors}
                                     />
+
+                                    {/* GL 静态层（阶段 2）：网格等静态图层。
+                                        层级说明：它是**最底层**——DOM 顺序在 Canvas2D
+                                        主画布之前，且不设 z-index（Canvas2D 主画布用
+                                        `absolute inset-0` 覆盖其上）。因此 GL 层只画
+                                        静态底图，曲线 / 选区 / 播放头仍由 Canvas2D
+                                        画在上层。
+                                        仅在开关开启时挂载：未开启时不创建画布，
+                                        避免多申请一个 WebGL 上下文。 */}
+                                    {PARAM_EDITOR_GL_SCENE_ENABLED ? (
+                                        <canvas
+                                            ref={glCanvasRef}
+                                            className="absolute inset-0 pointer-events-none"
+                                            aria-hidden
+                                        />
+                                    ) : null}
 
                                     <canvas
                                         ref={canvasRef}

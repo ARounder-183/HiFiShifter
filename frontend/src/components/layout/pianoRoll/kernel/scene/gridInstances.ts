@@ -103,31 +103,54 @@ const VALUE_GRID_SPEC: Record<ValueGridKind, { step: number; strongMod: number }
 };
 
 /**
- * 弱线 / 普通线的设备像素对齐：取整到物理像素后**再加半个物理像素**。
+ * 弱线 / 普通线的**描边中心**设备像素对齐。
  *
  * 与 `render.ts:440` 的 `hairlineY` 逐字一致（注意它加的是 0.5 个**设备**像素，
- * 即 `0.5/dpr` CSS 像素——不是 0.5 个 CSS 像素）。
+ * 即 `0.5/dpr` CSS 像素——不是 0.5 个 CSS 像素）。Canvas2D 的 `stroke()` 以该值
+ * 为**线的中心**。
  *
  * @param cssY 视口 y（CSS px）。
  * @param dpr 设备像素比。
- * @returns 对齐后的 y（CSS px）。
+ * @returns 描边中心 y（CSS px）。
  */
-function hairlineY(cssY: number, dpr: number): number {
+function hairlineCenterY(cssY: number, dpr: number): number {
     return (Math.round(cssY * dpr) + 0.5) / dpr;
 }
 
 /**
- * 强线的设备像素对齐：只取整到物理像素，**不加**半像素。
+ * 强线的**描边中心**设备像素对齐：只取整到物理像素，**不加**半像素。
  *
  * 与 `render.ts:752` 一致：强线宽 2 个物理像素，偶数宽度无需半像素偏移。
  * 两种取向并存是既有行为，迁移时必须原样保留（统一它们会改变像素）。
  *
  * @param cssY 视口 y（CSS px）。
  * @param dpr 设备像素比。
- * @returns 对齐后的 y（CSS px）。
+ * @returns 描边中心 y（CSS px）。
  */
-function snapY(cssY: number, dpr: number): number {
+function strongCenterY(cssY: number, dpr: number): number {
     return Math.round(cssY * dpr) / dpr;
+}
+
+/**
+ * 把「描边中心 y」换算为 GL 实例矩形的**上缘 y**。
+ *
+ * 【这是一个必须显式处理的语义差，不是可选优化】
+ * Canvas2D 的 `stroke()` 以给定 y 为线的**中心**，实际覆盖
+ * `[y − thickness/2, y + thickness/2]`；而 GL 的实例矩形把 `y` 当作**上缘**，
+ * 覆盖 `[y, y + thickness]`。直接把 Canvas2D 的中心值喂给矩形，整条线会**下移
+ * 半个线厚**——在 dpr=2 的弱线上恰好是 1 个物理像素，表现为网格线与 Canvas2D
+ * 版本整体错开一行（实测：Canvas2D 在设备行 740、GL 在 741）。
+ *
+ * 因此发射实例前必须减去半个线厚。两者都保持"对齐到设备像素栅格"的性质：
+ * 中心落在 `k + 0.5` 个设备像素、厚度为 1 个设备像素时，上缘恰好落在整数
+ * 设备像素 `k` 上。
+ *
+ * @param centerY 描边中心 y（CSS px，已按该层取向对齐）。
+ * @param thicknessPx 线厚（CSS px）。
+ * @returns 矩形上缘 y（CSS px）。
+ */
+function rectTopFromCenter(centerY: number, thicknessPx: number): number {
+    return centerY - thicknessPx / 2;
 }
 
 /**
@@ -162,11 +185,12 @@ export function buildPitchGridInstances(args: PitchGridArgs): GridInstance[] {
     const thickness = 1 / dpr;
     const items: GridInstance[] = [];
     for (let midi = startMidi; midi <= endMidi; midi += 1) {
-        const y = hairlineY(valueToY(midi + 0.5, heightPx), dpr);
+        // 描边中心 → 矩形上缘（见 rectTopFromCenter 说明：差半个线厚）。
+        const centerY = hairlineCenterY(valueToY(midi + 0.5, heightPx), dpr);
         const pc = ((midi % 12) + 12) % 12;
         items.push({
             x: 0,
-            y,
+            y: rectTopFromCenter(centerY, thickness),
             w: viewportWidthPx,
             h: thickness,
             rgba: pc === 0 ? args.colorC : args.colorOther,
@@ -179,8 +203,8 @@ export function buildPitchGridInstances(args: PitchGridArgs): GridInstance[] {
 /**
  * 构建非音高参数的刻度线实例。
  *
- * 流程：按 `kind` 取步进与强线间隔 → 求可见值区间内的步进点 → 强线用 `snapY`
- * 与 2 倍线厚，弱线用 `hairlineY` 与 1 倍线厚。
+ * 流程：按 `kind` 取步进与强线间隔 → 求可见值区间内的步进点 → 强线用强线取向
+ * 与 2 倍线厚，弱线用弱线取向与 1 倍线厚 → 描边中心换算为矩形上缘。
  *
  * 特殊说明：`span` 按 `render.ts:743` 的 `Math.max(1e-6, …)` 取下限，因此
  * `span = 0` 会退化为**单行**（域为 `[center, center]`），而不是空数组。
@@ -205,14 +229,16 @@ export function buildValueGridInstances(args: ValueGridArgs): GridInstance[] {
     const items: GridInstance[] = [];
     for (let v = start; v <= vMax + spec.step * 0.01; v += spec.step) {
         const isStrong = Math.round(v) % spec.strongMod === 0;
-        const y = isStrong
-            ? snapY(valueToY(v, heightPx), dpr)
-            : hairlineY(valueToY(v, heightPx), dpr);
+        const thickness = isStrong ? strongThickness : weakThickness;
+        // 描边中心 → 矩形上缘（见 rectTopFromCenter 说明：差半个线厚）。
+        const centerY = isStrong
+            ? strongCenterY(valueToY(v, heightPx), dpr)
+            : hairlineCenterY(valueToY(v, heightPx), dpr);
         items.push({
             x: 0,
-            y,
+            y: rectTopFromCenter(centerY, thickness),
             w: viewportWidthPx,
-            h: isStrong ? strongThickness : weakThickness,
+            h: thickness,
             rgba: isStrong ? args.strongRgba : args.weakRgba,
             value: v,
         });

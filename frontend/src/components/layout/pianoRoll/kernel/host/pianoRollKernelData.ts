@@ -98,3 +98,15 @@ export interface PianoRollKernelData {
      */
     readonly grid?: PianoRollGridSpec | null;
 }
+
+/**
+ * 生产者侧的数据镜像（字段可写）。
+ *
+ * 【为什么需要单独一个类型】`PianoRollKernelData` 的字段全是 `readonly`——那是给
+ * **消费方**（宿主）的契约：宿主只读，不得改面板的数据。而面板是**生产方**，要逐
+ * 字段更新同一份对象（每帧新建对象会让宿主每帧拿到新引用，破坏"引用稳定"的判定）。
+ * 用 `-readonly` 映射类型从同一份声明派生，避免两个类型各写一遍而漂移。
+ */
+export type MutablePianoRollKernelData = {
+    -readonly [K in keyof PianoRollKernelData]: PianoRollKernelData[K];
+};

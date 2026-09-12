@@ -456,24 +456,26 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
      * 流程：尺寸同步 → 清屏 → 几何变化时 `render` 全量上传，否则 `repaint` 只更新
      * 视口原点。
      *
-     * 特殊说明：`viewOrigin` 用**绘制坐标**（= 视口左上角在内容坐标中的位置）。
-     * 参数编辑器目前只有水平方向有内容偏移（竖向是值域，网格 y 直接在视口坐标里
-     * 算好了），故 `viewOriginY` 传 0——网格几何的 y 已经是视口坐标，不需要竖向
-     * 平移。这一约定必须与 `rebuildGlGeometry` 里传 `heightPx = viewportHeightPx`
-     * 相配合：两者都建立在"网格 y 是视口坐标"之上。
+     * 【为什么视口原点恒为 (0, 0)】横向网格线**横跨整个视口**、与滚动位置无关
+     * （Canvas2D 路径就是 `moveTo(0, y) → lineTo(w, y)`）；竖向网格线的 y 同样是
+     * 在视口坐标里算好的（见 `rebuildGlGeometry` 传 `heightPx = viewportHeightPx`）。
+     * 因此网格几何**本就是视口坐标**，不能再减视口原点——减了会把整组线按滚动量
+     * 平移，表现为"参数编辑器左侧有一条与滚动量同宽的空白带"（实测静置时左侧
+     * 200px 没有网格线，恰好等于同步偏移量）。
      *
-     * @param view 当前视口真值（原生坐标）。
+     * 特殊说明：这**不**违反"滚动零重建"——恰恰相反：几何是视口坐标，滚动时
+     * 既不需要重建几何、也不需要改 uniform，是真正的零成本滚动。后续把曲线等
+     * **内容坐标**图层搬上 GL 时，才需要用到视口原点平移。
      */
-    function drawGlScene(view: TimelineViewportState): void {
+    function drawGlScene(): void {
         if (glHandle === null || glProgram === null) return;
         const target = glHandle.resize(viewportWidthPx, viewportHeightPx, readDevicePixelRatio());
         glHandle.clear();
         if (glUploadedCount === 0) return;
-        const originX = view.scrollLeft - horizontalOffsetPx();
         if (glGeometryUploaded) {
-            glProgram.repaint(target, originX, 0);
+            glProgram.repaint(target, 0, 0);
         } else {
-            glProgram.render(glInstances, glUploadedCount, target, originX, 0);
+            glProgram.render(glInstances, glUploadedCount, target, 0, 0);
             glGeometryUploaded = true;
         }
     }
@@ -638,7 +640,7 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                 lastGridSignature = signature;
                 rebuildGlGeometry(spec);
             }
-            drawGlScene(view);
+            drawGlScene();
         }
 
         updateScrollbars(view);
