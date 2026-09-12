@@ -41,12 +41,23 @@ import {
     scrollDeltaFromThumbDrag,
     scrollTargetFromTrackClick,
 } from "../../../timeline/kernel/input/scrollbars";
+import { createGlCanvas, type GlCanvasHandle } from "../../../timeline/kernel/gl/glContext";
+import {
+    CLIP_INSTANCE_FLOATS,
+    writeFlatInstance,
+} from "../../../timeline/kernel/gl/instanceLayout";
+import { createSdfBoxProgram, type SdfBoxProgram } from "../../../timeline/kernel/gl/sdfBoxProgram";
 import { createRenderLoop } from "../../../timeline/kernel/renderLoop";
 import {
     createScrollKernel,
     type TimelineViewportState,
 } from "../../../timeline/kernel/scrollKernel";
 import { createTimelineAxis, type TimelineAxis } from "../../../timeline/runtime/timelineAxis";
+import {
+    buildPitchGridInstances,
+    buildValueGridInstances,
+    type GridInstance,
+} from "../scene/gridInstances";
 import {
     resolvePianoRollScrollbarGeometries,
     type PianoRollScrollbarGeometries,
@@ -56,7 +67,7 @@ import {
     kernelScrollTopFromCenter,
     PIANO_ROLL_VERTICAL_SCROLL_RANGE_PX,
 } from "../scroll/verticalValueScroll";
-import type { PianoRollKernelData } from "./pianoRollKernelData";
+import type { PianoRollKernelData, PianoRollGridSpec } from "./pianoRollKernelData";
 
 /**
  * 水平滚动向 React 量化提交的步长（CSS px）。
@@ -96,6 +107,20 @@ export interface PianoRollKernelHostArgs {
     readonly data: () => PianoRollKernelData;
     /** 初始水平缩放（每秒像素数）。缩放真值仍在面板，见文件头。 */
     readonly initialPxPerSec: number;
+    /**
+     * GL 场景层画布（阶段 2）。缺省 / 传 null 时只用 Canvas2D 路径。
+     *
+     * 特殊说明：宿主**不**创建画布，只接收面板已经渲染好的 `<canvas>`。画布的
+     * 可见性、层级（z-index）与是否挂载由 React 侧决定——宿主只负责在里面画。
+     */
+    readonly glCanvas?: HTMLCanvasElement | null;
+    /**
+     * 是否启用 GL 场景层。缺省 `false`。
+     *
+     * 特殊说明：这是**运行时开关**而不是模块常量，便于测试两种路径而不必重新
+     * 导入模块（模块级常量在 dev 下还会被 HMR 缓存）。
+     */
+    readonly glSceneEnabled?: boolean;
     /**
      * 水平同步偏移（CSS px）：内容层相对绘制区原点的右移量，缺省 0。
      *
@@ -182,6 +207,22 @@ export interface PianoRollKernelHost {
      * 宿主自己的 `ResizeObserver` 处理，无需调用方关心。
      */
     reclamp(): void;
+    /**
+     * 读取 GL 场景层的运行状态（供面板提示与浏览器验证使用）。
+     *
+     * 【为什么放进公开句柄】GL 走的是"失败软着陆"策略：不可用时静默退回 Canvas2D，
+     * 面板外观完全正常。于是"GL 到底有没有生效"无法从画面上判断——必须能读到
+     * 明确状态，否则验证会误把"退回 Canvas2D"当成"GL 正常"。
+     *
+     * @returns `active` 表示 GL 已建好并在绘制；
+     *          `failureReason` 在尝试启用但失败时给出原因（未启用时为 null）；
+     *          `gridInstanceCount` 是当前上传的几何实例数（0 = 没有网格）。
+     */
+    getGlStatus(): {
+        readonly active: boolean;
+        readonly failureReason: string | null;
+        readonly gridInstanceCount: number;
+    };
     /** 标脏：请求下一帧提交。 */
     invalidate(): void;
     /** 释放全部资源（帧循环、滚动订阅、尺寸观察）。重复调用安全。 */
@@ -296,6 +337,145 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         });
         observer.observe(container);
         teardown.push(() => observer.disconnect());
+    }
+
+    // ── GL 场景层（阶段 2）──────────────────────────────────────────
+    //
+    // 【职责】把**静态**图层（网格等）画到独立画布上：几何按内容坐标构建并常驻
+    // GPU，滚动帧只更新 `u_viewOrigin`、播放帧不重绘几何。这正是阶段 2 的收益点。
+    //
+    // 【失败必须是软着陆】WebGL2 不可用（老驱动 / 远程桌面 / 上下文数超限）是
+    // 预期内的环境差异。任一步失败都只记原因并**退回 Canvas2D 路径**——绝不能让
+    // 参数编辑器变空白。因此这里不抛错，只把 `gl` 置空。
+    let glHandle: GlCanvasHandle | null = null;
+    let glProgram: SdfBoxProgram | null = null;
+    let glFailureReason: string | null = null;
+    if (args.glSceneEnabled === true && args.glCanvas != null) {
+        try {
+            glHandle = createGlCanvas(args.glCanvas);
+            if (glHandle === null) {
+                glFailureReason = "WebGL2 不可用";
+            } else {
+                glProgram = createSdfBoxProgram(glHandle.gl);
+            }
+        } catch (error) {
+            glHandle = null;
+            glProgram = null;
+            glFailureReason = error instanceof Error ? error.message : String(error);
+        }
+    }
+
+    /** GL 实例缓冲（跨帧复用，容量按需增长）。 */
+    let glInstances = new Float32Array(0);
+    /** 当前已上传到 GPU 的实例数。 */
+    let glUploadedCount = 0;
+    /** 几何是否已上传（false 时下一帧走 `render` 全量上传）。 */
+    let glGeometryUploaded = false;
+    /** 上一次构建几何用的**内容签名**（变化才重建，见 `gridSignature`）。 */
+    let lastGridSignature = "";
+
+    /**
+     * 计算网格几何的**内容签名**。
+     *
+     * 【作用】几何只在这些输入变化时才需要重建。把输入拼成字符串做比较，比逐字段
+     * 深比较便宜，也比"每帧重建"省下大量分配——网格逐行构建在 formant 参数下
+     * 可达近百个实例，每帧重建纯属浪费。
+     *
+     * 特殊说明：**不含**滚动位置与视口原点——那正是"滚动零重建"的前提。视口宽度
+     * 要含（它决定横线长度）；dpr 要含（它决定半像素取向与线厚）。
+     *
+     * @param spec 当前网格输入。
+     * @returns 内容签名；无网格时为空串。
+     */
+    function gridSignature(spec: PianoRollGridSpec | null | undefined): string {
+        if (spec == null) return "";
+        return [
+            spec.kind,
+            spec.view.center,
+            spec.view.span,
+            spec.absMin,
+            spec.absMax,
+            viewportWidthPx,
+            viewportHeightPx,
+            readDevicePixelRatio(),
+            spec.strongRgba.join(","),
+            spec.weakRgba.join(","),
+        ].join("|");
+    }
+
+    /**
+     * 按当前镜像重建网格几何并标记需要重新上传。
+     *
+     * 流程：取镜像的 grid spec → 分派到对应构建器（pitch / 值域步进）→ 写入实例缓冲。
+     *
+     * 特殊说明：构建器返回的 `GridInstance` 里 `w` 是**横向范围**、`h` 是**线厚**，
+     * 而 `writeFlatInstance` 的矩形语义就是 `(x, y, w, h)`，两者一致、无需换序。
+     *
+     * @param spec 当前网格输入；null 时清空几何。
+     */
+    function rebuildGlGeometry(spec: PianoRollGridSpec | null | undefined): void {
+        const items: GridInstance[] =
+            spec == null
+                ? []
+                : spec.kind === "pitch"
+                  ? buildPitchGridInstances({
+                        view: spec.view,
+                        absMin: spec.absMin,
+                        absMax: spec.absMax,
+                        heightPx: viewportHeightPx,
+                        viewportWidthPx,
+                        dpr: readDevicePixelRatio(),
+                        valueToY: spec.valueToY,
+                        colorC: spec.strongRgba,
+                        colorOther: spec.weakRgba,
+                    })
+                  : buildValueGridInstances({
+                        kind: spec.kind,
+                        view: spec.view,
+                        heightPx: viewportHeightPx,
+                        viewportWidthPx,
+                        dpr: readDevicePixelRatio(),
+                        valueToY: spec.valueToY,
+                        strongRgba: spec.strongRgba,
+                        weakRgba: spec.weakRgba,
+                    });
+
+        const needed = items.length * CLIP_INSTANCE_FLOATS;
+        if (glInstances.length < needed) glInstances = new Float32Array(needed);
+        for (let index = 0; index < items.length; index += 1) {
+            writeFlatInstance(glInstances, index, items[index]);
+        }
+        glUploadedCount = items.length;
+        // 标记需要重新上传：实例数据变了，不能用 `repaint`（它只改 uniform）。
+        glGeometryUploaded = false;
+    }
+
+    /**
+     * 绘制 GL 场景层。
+     *
+     * 流程：尺寸同步 → 清屏 → 几何变化时 `render` 全量上传，否则 `repaint` 只更新
+     * 视口原点。
+     *
+     * 特殊说明：`viewOrigin` 用**绘制坐标**（= 视口左上角在内容坐标中的位置）。
+     * 参数编辑器目前只有水平方向有内容偏移（竖向是值域，网格 y 直接在视口坐标里
+     * 算好了），故 `viewOriginY` 传 0——网格几何的 y 已经是视口坐标，不需要竖向
+     * 平移。这一约定必须与 `rebuildGlGeometry` 里传 `heightPx = viewportHeightPx`
+     * 相配合：两者都建立在"网格 y 是视口坐标"之上。
+     *
+     * @param view 当前视口真值（原生坐标）。
+     */
+    function drawGlScene(view: TimelineViewportState): void {
+        if (glHandle === null || glProgram === null) return;
+        const target = glHandle.resize(viewportWidthPx, viewportHeightPx, readDevicePixelRatio());
+        glHandle.clear();
+        if (glUploadedCount === 0) return;
+        const originX = view.scrollLeft - horizontalOffsetPx();
+        if (glGeometryUploaded) {
+            glProgram.repaint(target, originX, 0);
+        } else {
+            glProgram.render(glInstances, glUploadedCount, target, originX, 0);
+            glGeometryUploaded = true;
+        }
     }
 
     // ── 初始位置：采纳镜像的当前值 ───────────────────────────────────
@@ -438,9 +618,29 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
     }
 
     /** 帧提交：滚动条几何 → DOM 同步 → 面板绘制 → 量化提交。 */
+    /**
+     * 帧提交：GL 场景层 → 滚动条几何 → DOM 同步 → 面板绘制 → 量化提交。
+     *
+     * 特殊说明（顺序）：GL 层先画。它是**底层**（网格在最下面），而 Canvas2D 层
+     * 承载曲线 / 选区 / 播放头等上层内容，两者是**兄弟画布**、靠 DOM 层级叠放，
+     * 因此这里的调用顺序不影响观感；之所以先画 GL，是为了让"本帧几何是否重建"
+     * 的判定与 GL 上传发生在同一处，便于按帧归因性能。
+     */
     function draw(): void {
         if (disposed) return;
         const view = scroll.get();
+
+        // GL 几何重建：只在内容签名变化时做（滚动 / 播放不触发重建）。
+        if (glProgram !== null) {
+            const spec = data().grid;
+            const signature = gridSignature(spec);
+            if (signature !== lastGridSignature) {
+                lastGridSignature = signature;
+                rebuildGlGeometry(spec);
+            }
+            drawGlScene(view);
+        }
+
         updateScrollbars(view);
         syncDom(view);
         onFrame?.(currentAxis());
@@ -704,6 +904,14 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             scroll.reclamp();
         },
 
+        getGlStatus() {
+            return {
+                active: glProgram !== null,
+                failureReason: glFailureReason,
+                gridInstanceCount: glUploadedCount,
+            };
+        },
+
         invalidate() {
             if (disposed) return;
             loop.invalidate();
@@ -716,6 +924,11 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                 teardown[i]();
             }
             teardown.length = 0;
+            // GL 资源最后释放：program 持有 VAO / buffer / shader，漏掉会随
+            // 反复挂载（StrictMode 双挂载 / HMR）累积并最终耗尽上下文。
+            glProgram?.dispose();
+            glProgram = null;
+            glHandle = null;
         },
     };
 }

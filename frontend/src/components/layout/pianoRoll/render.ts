@@ -11,6 +11,7 @@
  */
 
 import type { ParamMorphOverlay, ParamName, ParamViewSegment, ValueViewport } from "./types";
+import { resolvePianoRollColors } from "./colors";
 import { clamp } from "../timeline";
 import { clearCanvasPhysical, rasterize } from "../timeline/runtime/canvasRaster";
 import {
@@ -382,57 +383,8 @@ export function drawPianoRoll(args: {
 
     const resolvedFontFamily = fontFamily || "sans-serif";
 
-    // 主题颜色查找表
-    const colors = isDark
-        ? {
-              // 琴键区（白键降亮一档、黑键提亮一档：在深色画布上既不刺眼也不淹没）
-              axisBorder: "rgba(255,255,255,0.08)",
-              whiteKey: "#d7dade",
-              blackKey: "#2e3136",
-              blackKeyGradient: "rgba(0,0,0,0.35)",
-              cLabel: "#3b82f6",
-              whiteKeyLabel: "rgba(60,63,70,0.75)",
-              blackKeyLabel: "rgba(220,220,220,0.80)",
-              cSeparator: "rgba(100,100,100,0.45)",
-              keySeparator: "rgba(160,160,160,0.20)",
-              tensionLabel: "rgba(255,255,255,0.55)",
-              tensionLine: "rgba(255,255,255,0.10)",
-              // 网格线
-              pitchGridC: "rgba(255,255,255,0.10)",
-              pitchGridOther: "rgba(255,255,255,0.05)",
-              // 曲线
-              origCurve: "rgba(200,200,200,0.55)",
-              editCurve: "rgba(255,255,255,0.92)",
-              selectionCurve: "rgba(100,200,255,0.95)",
-              // 叠加文字 & 播放头（画布中央的操作提示文字，需保持可读：
-              // 旧值 35% 不透明度在两套主题下都只剩 1.5-1.8:1）
-              overlayTextColor: "rgba(235,240,248,0.45)",
-              playheadLine: "rgba(255,255,255,0.25)",
-          }
-        : {
-              // 浅色主题
-              axisBorder: "rgba(0,0,0,0.10)",
-              whiteKey: "#ffffff",
-              blackKey: "#3a3a3a",
-              blackKeyGradient: "rgba(0,0,0,0.25)",
-              cLabel: "#2563eb",
-              whiteKeyLabel: "rgba(80,80,80,0.65)",
-              blackKeyLabel: "rgba(255,255,255,0.85)",
-              cSeparator: "rgba(0,0,0,0.25)",
-              keySeparator: "rgba(0,0,0,0.12)",
-              tensionLabel: "rgba(0,0,0,0.55)",
-              tensionLine: "rgba(0,0,0,0.10)",
-              // 网格线
-              pitchGridC: "rgba(0,0,0,0.12)",
-              pitchGridOther: "rgba(0,0,0,0.06)",
-              // 曲线
-              origCurve: "rgba(132,104,26,0.80)",
-              editCurve: "rgba(178,108,0,1)",
-              selectionCurve: "rgba(0,116,200,1)",
-              // 叠加文字 & 播放头（画布中央的操作提示文字，需保持可读）
-              overlayTextColor: "rgba(30,36,48,0.60)",
-              playheadLine: "rgba(0,0,0,0.20)",
-          };
+    // 主题颜色查找表（提取到 colors.ts：阶段 2 起 GL 层与 Canvas2D 层共用同一份配色）
+    const colors = resolvePianoRollColors(isDark);
 
     // 网格线设备像素对齐：分数 DPR（125%/150%）下 1px CSS 线覆盖 1~2 物理像素，
     // 随落点相位粗细不一。hairline = 1 物理像素、strong = 2 物理像素。

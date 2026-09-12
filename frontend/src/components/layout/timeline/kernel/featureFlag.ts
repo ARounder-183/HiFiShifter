@@ -74,3 +74,34 @@ export function isPianoRollKernelEnabled(): boolean {
         return false;
     }
 }
+
+/** 参数编辑器 GL 场景层开关 key（在内核开关之上再分一层）。 */
+export const PIANO_ROLL_KERNEL_GL_FLAG_KEY = "hifishifter.pianoRollKernel.gl";
+
+/**
+ * 是否启用参数编辑器的 GL 场景层（阶段 2：静态图层上 GL）。
+ *
+ * 规则：未显式设置时关闭；显式写入 `"1"` 开启。
+ *
+ * 特殊说明 1（为什么要独立于内核开关）：阶段 2 把网格 / 键盘 / 刻度 / 文字搬到
+ * WebGL2，是**逐层替换**的过程。独立开关让"某一层迁移出问题"可以只回退 GL 层，
+ * 而保留阶段 1 已经验证过的滚动内核（否则一次回退会丢掉两阶段的收益）。
+ *
+ * 特殊说明 2：本开关**不含** `isPianoRollKernelEnabled()` 的判断——两个开关各管
+ * 各的，调用方按 `内核 && GL` 组合使用。把依赖写进这里会让"内核开着但 GL 单独关"
+ * 这种合法组合无法表达。
+ *
+ * 特殊说明 3：与其它开关一样经 `globalThis.localStorage` + `typeof` 守卫读取
+ * （本工程 Vitest 跑在 node 环境，无 jsdom）。
+ *
+ * @returns 当前是否启用 GL 场景层。
+ */
+export function isPianoRollGlSceneEnabled(): boolean {
+    try {
+        const storage = globalThis.localStorage;
+        if (storage == null) return false;
+        return storage.getItem(PIANO_ROLL_KERNEL_GL_FLAG_KEY) === "1";
+    } catch {
+        return false;
+    }
+}
