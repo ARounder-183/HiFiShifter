@@ -417,40 +417,49 @@ Same convention Phase 2 used, and for the same reason: each depends on the previ
 - Enumerate all gesture entry points as a checklist (spec risk row: "23 event entry points, single 3875-line hook") and browser self-test each after extraction.
 - **Exit check:** hook shrinks measurably; each extracted function has unit tests; every gesture re-verified in the browser.
 
-#### 进度：两片已完成（`59277ad4`、`bd6ffea5`），任务仍未完成
+#### 进度：四片已完成（`59277ad4`、`bd6ffea5`、`87d5f14e`、`67172cb1`）
 
-**第一片** 落地 `kernel/gestureHitTest.ts`（19 项单测）；**第二片** 落地
-`kernel/dragArithmetic.ts`（13 项单测）并接线全部命中判定。
+**第一片** `kernel/gestureHitTest.ts`；**第二片** `kernel/dragArithmetic.ts` 的选区
+坐标换算；**第三片** 接线 `hitTestSelectionBody`；**第四片** 拖拽增量与边缘自动滚动，
+并消除第三份曲线命中判定内联副本。
 
 | 抽出物 | 单测 | 已接线 | 浏览器验证 |
 |---|---|---|---|
 | `hitTestSelectionEdge` | ✅ | ✅ 两处（pointermove 光标、pointerdown 拉伸） | ✅ 15 点光标扫描逐位一致 |
-| `curveValueAtPointerFrame` | ✅ | ✅ `getCurveValueAtPointerFrame` | ✅ 多手势截图字节相同 |
-| `isPointerNearCurve` | ✅ | ✅ `getCurveValueNearPointer` | ✅ 多手势截图字节相同 |
+| `curveValueAtPointerFrame` | ✅ | ✅ 三处（两个 getter + pointerdown 拖动分支） | ✅ 入口扫描 + 截图字节相同 |
+| `isPointerNearCurve` | ✅ | ✅ 两处（`getCurveValueNearPointer` + pointerdown） | ✅ 入口扫描 + 截图字节相同 |
 | `selectionFrameRange` / `selectionIndexRange` | ✅ | ✅ 三处（morph 快照、拉伸 oldRange、buildDense nextRange） | ✅ 拉伸前后截图字节相同 |
 | `hitTestSelectionBody` | ✅ | ✅ `isPointerNearDraggableSelection` | ✅ 拖动选区主体截图字节相同 |
+| `edgeAutoScrollDeltaPx` | ✅ | ✅ `selectionBeatFromClientX` | ✅ 入口扫描（含 bring-into-view 场景） |
+| `beatToFrameDelta` / `frameDeltaToBeat` | ✅ | ✅ 四处（拖动预览 / 提交 / 两次选区跟随） | ✅ 截图字节相同 |
 | `frameToIndex` | ✅ | ⬜ **刻意不接线**（6 处内联全在逐采样点的循环体内，见下） | — |
 
 **退出标准对照：**
 
 | 标准 | 结果 |
 |---|---|
-| 每个抽出函数有单测 | ✅ 32 项（含 4 处我自己写错的用例前提，已修正） |
+| 每个抽出函数有单测 | ✅ 45 项（含 6 处我自己写错的用例前提，已修正） |
 | 每个手势在浏览器复核 | ✅ **9 个处理器 / 27 个观测点全部覆盖**：离散字段 0 差异、连续字段 0 超差、效果断言 10/10 |
-| hook 可测量地缩小 | ❌ **未达成**：3,876 → 3,887 行（净 **+11**，见下） |
+| hook 可测量地缩小 | ❌ **未达成**：3,876 → 3,897 行（净 **+21**，见下） |
 
 **为什么行数不是有效指标（修正上一片的判断）**：上一片记的是"要等其余三处接线
-后才会下降"。接线完成后**行数依然没降**，原因是本工程硬性要求每个文件带完整文件头
-注释与关键函数注释——两个新模块 378 行里相当一部分是注释，而抽走的算术本身只有
+后才会下降"。四片做完后**行数反而更高**，原因是本工程硬性要求每个文件带完整文件头
+注释与关键函数注释——两个新模块 472 行里相当一部分是注释，而抽走的算术本身只有
 十几行。真正该看的是**重复被消除了多少**：
 
 | 指标 | 基线 | 现在 |
 |---|---|---|
 | 内联「beat → 帧」换算 | **6 处** | **0 处** |
+| 边缘自动滚动的魔法数 | 2 处（`maxStepPx` / `edgePx`） | **0 处** |
+| 曲线命中判定内联副本 | **3 份** | **0 份** |
 | 内联「帧 → 下标」换算 | 7 处 | 6 处（**刻意不接线**，见下） |
 
 所以 Task 6 的退出标准里「hook 可测量地缩小」这条**应改为「重复处数下降」**才
 可达成；按行数衡量在这个代码库里永远达不成（注释占比高）。这个判断错误已在此更正。
+
+**第四片额外消除的隐患**：曲线命中判定（帧→下标 + pitch `+0.5` 偏移 + 10px 邻域）
+此前在 hook 里**有三份独立副本**。三份各自维护「+0.5 到底加没加」正是本工程历史上
+反复出错的点（`render.ts` 与命中测试曾不一致），现在收敛到 `gestureHitTest` 一处。
 
 **为什么剩下 6 处「帧 → 下标」刻意不接线**：它们全部位于**逐采样点的 `for` 循环
 体内**（`smoothed` / `packed.dense` / `overallLen` / `built.dense` 的展开写入）。
@@ -489,11 +498,12 @@ Same convention Phase 2 used, and for the same reason: each depends on the previ
 | 离散字段全等 | tool / cursor / selActive / selStart / uuids | ✅ 0 差异 |
 | 连续字段容差 | scrollL / scrollT / playhead / kernelPx | ✅ 0 超差 |
 | **效果断言** | 10 条"该手势是否真的生效" | ✅ 10/10 |
+| **计数总和** | 所有入口的 dispatch 增量之和 | ✅ 43 = 43 |
 
 **为什么必须有第三层**：若某次重构把某个手势改成**完全没反应**，两次运行仍会
 "完全相同"，纯字段比对会漏掉；效果断言直接检查行为是否发生，补上了这个盲区。
 
-**两个测量陷阱（已解决，供后续复用）**：
+**三个测量陷阱（已解决，供后续复用）**：
 
 1. **键盘滚动是平滑动画**，固定等待采样会拿到未收敛的值。实测同一份代码重跑、
    固定等待 2s 仍有 ±4px 漂移，`PageUp`/`PageDown` 因多次累积会放大到上百像素
@@ -502,16 +512,22 @@ Same convention Phase 2 used, and for the same reason: each depends on the previ
 2. **曲线数据没有可读的 store 字段**，画线/擦除的观测量最初取错了画布
    （内核模式下曲线画在 GL 层，`data-piano-roll-canvas` 墨迹恒为 0）。改用
    **`store.dispatch` 计数增量**——与渲染后端无关，且能覆盖任何改状态的手势。
+3. **`dCount` 逐项有 ±1 抖动**：dispatch 是异步落地的，同一次手势的派发可能刚好
+   落在快照边界前后。同一份代码两次运行实测有 4 处 ±1 漂移（曾误报成"行为差异"）。
+   处理方式：逐项给 ±1 容差，**另加"总和必须相等"**——逐项容差会掩盖"整体少派发
+   一次"这类真实问题，总和断言不会。
 
 **剩余工作**：
 1. `frameToIndex` 的接线：若要接，需要先把它改成**接受已归一化的 stride**的
    轻量形式（去掉每次调用的 `Number.isFinite` 与 `Math.floor`），否则在逐采样点
    循环里不划算。当前选择是不接。
-2. **本任务不做**（建议单列）：`dragArithmetic` 还应覆盖曲线拖动的手势增量换算
-   （`secDelta` / 像素增量 → 帧增量的那段，hook 里在 `rawFrameDelta` 等处），
-   本次只做了选区相关的坐标换算。
-3. 扫描工具在 `/tmp` 下，**未入库**。若要长期复用（如后续再动手势代码），
+2. 扫描工具在 `/tmp` 下，**未入库**。若要长期复用（如后续再动手势代码），
    建议移入 `scripts/` 并作为 Task 6 的回归手段。
+3. 手势状态机本身**未迁移**：本任务抽出的是**纯算术与命中判定**（可单测、可复用的
+   部分），hook 里仍保留着指针捕获、rAF 合帧、live-edit 生命周期等有状态逻辑。
+   spec 里「gesture state machine migration」若指后者，则尚未开始，且**没有明确的
+   收益**——它不改变行为、不减少重复，只是移动代码。建议在确实需要复用（例如给
+   时间轴内核共享手势层）时再做，而不是为迁移而迁移。
 
 ---
 
