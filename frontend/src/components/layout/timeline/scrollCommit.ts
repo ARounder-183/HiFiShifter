@@ -35,8 +35,9 @@
  * 【与其他模块的关系】
  * - 上游：`TrackList` 的原生 `onScroll` 每帧拿到新的 `el.scrollTop`。
  * - 消费者：判定结果决定是否 `setListScrollTop`（驱动行窗口化）。
- * - 同源先例：`TimelinePanel` 的 `commitTimelineScrollTop` 用的是同一套
- *   「rAF + 步长」思路（那里的 overscan 更大，故步长取 2 行）。
+ * - 同源先例：`TimelinePanel` 曾有一个 `commitTimelineScrollTop` 用同一套「rAF +
+ *   步长」思路，但它只服务旧的时间线原生滚动容器，已随"渲染内核唯一路径"改造删除
+ *   （内核自持滚动真值、不再需要该量化）。此处保留记录以免后人重复推导。
  * - 独立性：纯函数，不依赖 DOM / React，可直接单测。
  */
 

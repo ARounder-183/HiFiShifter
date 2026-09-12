@@ -233,18 +233,17 @@ export interface TimelineKernelViewProps {
     /**
      * 内核**不可用**时通知面板（当前只有一种原因：WebGL2 上下文创建失败）。
      *
-     * 【为什么必须由面板接手，而不是本视图自己降级】
-     * 内核的网格与 clip 几何**只有 GL 一条渲染路径**——本视图内没有 Canvas2D
-     * 的等效绘制（旧的 `TimelineScrollArea` / `TimelineCanvasViewport` 才持有
-     * 那条路径，且它们的输入源是原生滚动容器，与内核的视口所有权不兼容）。
-     * 因此"软着陆"只能是把整棵子树**换回既有实现**，而这必须由持有分支的面板做。
+     * 【为什么必须由面板接手】
+     * 内核的网格与 clip 几何**只有 GL 一条渲染路径**——本视图内没有 Canvas2D 的等效
+     * 绘制。旧的 `TimelineScrollArea` / `TimelineCanvasViewport` 曾持有那条路径，但它们
+     * 已随"渲染内核唯一路径"改造**删除**，因此**没有可回退的第二套实现**：面板收到本
+     * 回报后渲染 `KernelUnavailableNotice`（可自助排障的失败界面），而不是切换到另一套
+     * 渲染器。
      *
-     * 【为什么不能只显示一行错误文字（这正是修复前的行为）】
-     * WebGL2 不可用（老驱动 / 远程桌面 / GPU 黑名单 / 上下文数超限）是**预期内的
-     * 环境差异**，不是程序缺陷。原先只渲染一行红字，用户看到的是**空白时间轴**
-     * ——比退回旧实现糟得多。参数编辑器内核与旧的 GL clip 层都已确立"失败必须
-     * 软着陆"的约定（见 `pianoRollKernelHost` 的同名说明），时间轴内核此前是唯一
-     * 的例外；内核改为默认开启后这个例外会直接影响生产用户。
+     * 【为什么必须显式告知用户（不能只留一行红字或静默空白）】
+     * WebGL2 不可用（老驱动 / 远程桌面 / GPU 黑名单 / 上下文数超限）是**预期内的环境
+     * 差异**，不是程序缺陷。失败界面给出原因、排查清单与可复制的诊断信息，用户才能自助
+     * 判断；这是"绝不静默降级"结论（Phase 3 计划 R8）的落地方式。
      *
      * 特殊说明：面板收到后应当把内核开关**永久置为不可用**（本次会话内），否则
      * 每次重渲染都会再挂一次内核、再失败一次。
@@ -302,7 +301,6 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
     /** 行内编辑浮层根元素（位置与宽度都由宿主在 rAF 内写入）。 */
     const inlineEditorRef = React.useRef<HTMLDivElement | null>(null);
     const localHostRef = React.useRef<TimelineKernelHost | null>(null);
-    const [fatal, setFatal] = React.useState<string | null>(null);
     /** 宿主是否已创建：波形层依赖内核视口源，必须等宿主就绪后再挂载。 */
     const [hostReady, setHostReady] = React.useState(false);
     /** 可见轨道行窗口（内核低频回调）：波形 scene rows 按行构建。 */
@@ -589,12 +587,10 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                 onViewportWidthChange: (px) => callbacksRef.current.onViewportWidthChange?.(px),
             });
         } catch (error) {
-            // 【软着陆】把整棵子树换回既有实现，而不是在本视图里显示一行错误文字。
-            // 本视图没有 Canvas2D 网格 / clip 的等效绘制（GL 是唯一路径），因此
-            // "降级"只能由持有分支的面板来做——见 `onUnavailable` 的说明。
+            // 内核没有 Canvas2D 等效绘制（GL 是唯一路径），本视图无法自行降级：
+            // 回报给面板，由它渲染失败界面（见 `onUnavailable` 的说明）。
             const reason = error instanceof Error ? error.message : String(error);
-            setFatal(reason);
-            console.warn("[TimelineKernelView] 内核不可用，退回既有渲染实现", error);
+            console.warn("[TimelineKernelView] 内核不可用，上报面板显示排障界面", error);
             callbacksRef.current.onUnavailable?.(reason);
             return;
         }
@@ -938,11 +934,6 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                     className="absolute top-0 h-full rounded-full bg-[var(--qt-scrollbar-thumb)]"
                 />
             </div>
-            {fatal !== null ? (
-                <div className="absolute inset-0 flex items-center justify-center text-sm text-red-500">
-                    {`时间轴内核不可用：${fatal}`}
-                </div>
-            ) : null}
         </div>
     );
 };
