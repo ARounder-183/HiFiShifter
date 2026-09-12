@@ -185,3 +185,97 @@ export function selectionIndexRange(args: {
     const endIdx = clampTo(rawEnd, startIdx, last);
     return { ...frames, startIdx, endIdx };
 }
+
+/** 边缘自动滚动的边缘带宽（CSS px）。 */
+export const EDGE_SCROLL_BAND_PX = 32;
+
+/** 边缘自动滚动的单帧最大步长（CSS px）。 */
+export const EDGE_SCROLL_MAX_STEP_PX = 18;
+
+/**
+ * 把「指针离画布边缘的距离」换算为每帧滚动像素。
+ *
+ * 流程：指针落在左/右边缘带内时，按「进入带宽的比例」线性加速，
+ * 比例上限 1.5（即带外仍可加速到 1.5 倍），再乘以单帧最大步长；
+ * 带外返回 0。
+ *
+ * 特殊说明 1：**方向符号**——左缘返回负值（内容向左滚 = 看到更早的时间），
+ * 右缘返回正值。与 `scrollLeft` 增大方向一致，调用方直接相加即可。
+ *
+ * 特殊说明 2：指针被 pointer capture 拖到视口外时会超出 `[left, right]`，
+ * 此时比例被 clamp 到 1.5，因此**不会**继续加速；这是刻意的上限，
+ * 否则拖得越远滚得越快，用户很难停在想看的位置。
+ *
+ * @param args 指针与画布横向边界。
+ * @returns 每帧滚动像素（左负右正）；非有限输入返回 0。
+ */
+export function edgeAutoScrollDeltaPx(args: {
+    /** 指针的视口 x（clientX）。 */
+    readonly clientX: number;
+    /** 画布左边界（getBoundingClientRect().left）。 */
+    readonly leftPx: number;
+    /** 画布右边界（getBoundingClientRect().right）。 */
+    readonly rightPx: number;
+}): number {
+    const { clientX, leftPx, rightPx } = args;
+    if (!Number.isFinite(clientX) || !Number.isFinite(leftPx) || !Number.isFinite(rightPx)) {
+        return 0;
+    }
+    if (clientX < leftPx + EDGE_SCROLL_BAND_PX) {
+        const ratio = (leftPx + EDGE_SCROLL_BAND_PX - clientX) / EDGE_SCROLL_BAND_PX;
+        return -clampTo(ratio, 0, 1.5) * EDGE_SCROLL_MAX_STEP_PX;
+    }
+    if (clientX > rightPx - EDGE_SCROLL_BAND_PX) {
+        const ratio = (clientX - (rightPx - EDGE_SCROLL_BAND_PX)) / EDGE_SCROLL_BAND_PX;
+        return clampTo(ratio, 0, 1.5) * EDGE_SCROLL_MAX_STEP_PX;
+    }
+    return 0;
+}
+
+/**
+ * 把 beat 位移换算为帧位移（曲线拖动路径）。
+ *
+ * 流程：`beatDelta × secPerBeat × 1000 / framePeriodMs`，然后**四舍五入**。
+ *
+ * 特殊说明：取整是必要的——拖动位移最终要叠加到**整数帧号**上（曲线数据按帧
+ * 索引），保留小数会在每次 pointermove 上累积舍入误差。
+ *
+ * @param args 换算参数。
+ * @returns 帧位移（整数）；非有限输入返回 0。
+ */
+export function beatToFrameDelta(args: {
+    readonly beatDelta: number;
+    readonly secPerBeat: number;
+    readonly framePeriodMs: number;
+}): number {
+    const { beatDelta, secPerBeat, framePeriodMs } = args;
+    if (!Number.isFinite(beatDelta) || !Number.isFinite(secPerBeat)) return 0;
+    if (!Number.isFinite(framePeriodMs)) return 0;
+    const v = Math.round((beatDelta * secPerBeat * 1000) / normalizeFramePeriod(framePeriodMs));
+    return Number.isFinite(v) ? v : 0;
+}
+
+/**
+ * 把帧位移换算回 beat 位移（选区位置跟随曲线拖动）。
+ *
+ * 流程：`frameDelta × framePeriodMs / 1000 / secPerBeat`，**不取整**。
+ *
+ * 【为什么不取整】返回值用于更新选区（`aBeat` / `bBeat`），它们本就是浮点；
+ * 取整会让选区位置与曲线位移不一致（曲线按整数帧移动，选区按 beat 连续移动）。
+ * 本函数与 `beatToFrameDelta` 构成往返：对整数帧输入是恒等的（有单测）。
+ *
+ * @param args 换算参数。
+ * @returns beat 位移；非有限输入返回 0。
+ */
+export function frameDeltaToBeat(args: {
+    readonly frameDelta: number;
+    readonly framePeriodMs: number;
+    readonly secPerBeat: number;
+}): number {
+    const { frameDelta, framePeriodMs, secPerBeat } = args;
+    if (!Number.isFinite(frameDelta) || !Number.isFinite(secPerBeat)) return 0;
+    if (!Number.isFinite(framePeriodMs)) return 0;
+    const v =
+        (frameDelta * normalizeFramePeriod(framePeriodMs)) / 1000 / Math.max(1e-9, secPerBeat);
+    return Number.isFinite(v) ? v : 0;
+}

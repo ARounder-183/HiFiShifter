@@ -17,7 +17,14 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { selectionFrameRange, selectionIndexRange, frameToIndex } from "./dragArithmetic";
+import {
+    beatToFrameDelta,
+    edgeAutoScrollDeltaPx,
+    frameDeltaToBeat,
+    frameToIndex,
+    selectionFrameRange,
+    selectionIndexRange,
+} from "./dragArithmetic";
 
 /**
  * 断言非空并收窄类型。
@@ -231,5 +238,126 @@ describe("frameToIndex", () => {
         expect(
             frameToIndex({ frame: 10, startFrame: 0, stride: Number.POSITIVE_INFINITY }),
         ).toBeNull();
+    });
+});
+
+/**
+ * 拖拽增量换算（曲线拖动路径）。
+ *
+ * 【为什么单独测】曲线拖动用「帧」记录位移（`lastFrameDelta`），而选区位置用
+ * 「beat」表示，两者之间**来回换算**：`beat → 帧` 用 `round`，`帧 → beat` 不再取整。
+ * 这个往返在 hook 里出现 3 次（拖动预览、拖动提交、形变路径），任一处取整方式不同
+ * 都会让"松手后选区跳一下"——偏差只有半格，肉眼难察但用户按多次会累积。
+ */
+describe("beatToFrameDelta / frameDeltaToBeat", () => {
+    it("beatDelta → 帧：乘以秒每拍与每毫秒帧数后四舍五入", () => {
+        // secPerBeat = 0.5、fp = 5ms → 100 帧/beat。
+        expect(beatToFrameDelta({ beatDelta: 1, secPerBeat: 0.5, framePeriodMs: 5 })).toBe(100);
+        // 0.004 beat → 0.4 帧 → round 0
+        expect(beatToFrameDelta({ beatDelta: 0.004, secPerBeat: 0.5, framePeriodMs: 5 })).toBe(0);
+        // 0.006 beat → 0.6 帧 → round 1
+        expect(beatToFrameDelta({ beatDelta: 0.006, secPerBeat: 0.5, framePeriodMs: 5 })).toBe(1);
+    });
+
+    it("帧 → beatDelta：不取整（保留亚帧精度，否则往返会丢信息）", () => {
+        // 100 帧 → 1 beat
+        expect(frameDeltaToBeat({ frameDelta: 100, framePeriodMs: 5, secPerBeat: 0.5 })).toBeCloseTo(
+            1,
+            12,
+        );
+        // 1 帧 → 0.01 beat（不取整才留得住）
+        expect(frameDeltaToBeat({ frameDelta: 1, framePeriodMs: 5, secPerBeat: 0.5 })).toBeCloseTo(
+            0.01,
+            12,
+        );
+    });
+
+    it("往返一致：帧 → beat → 帧 对整数帧是恒等", () => {
+        for (const frameDelta of [-250, -1, 0, 1, 37, 250]) {
+            const beat = frameDeltaToBeat({
+                frameDelta,
+                framePeriodMs: 5,
+                secPerBeat: 0.5,
+            });
+            const back = beatToFrameDelta({
+                beatDelta: beat,
+                secPerBeat: 0.5,
+                framePeriodMs: 5,
+            });
+            expect(back).toBe(frameDelta);
+        }
+    });
+
+    it("非法输入返回 0（拖拽路径对 0 是安全的空操作）", () => {
+        // 与既有内联实现一致：`Math.round(NaN)` 是 NaN，会让选区位置变成 NaN
+        // 并一路传播到绘制；显式返回 0 更安全。
+        for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+            expect(
+                beatToFrameDelta({ beatDelta: bad, secPerBeat: 0.5, framePeriodMs: 5 }),
+            ).toBe(0);
+            expect(
+                beatToFrameDelta({ beatDelta: 1, secPerBeat: bad, framePeriodMs: 5 }),
+            ).toBe(0);
+            expect(
+                beatToFrameDelta({ beatDelta: 1, secPerBeat: 0.5, framePeriodMs: bad }),
+            ).toBe(0);
+            expect(
+                frameDeltaToBeat({ frameDelta: bad, framePeriodMs: 5, secPerBeat: 0.5 }),
+            ).toBe(0);
+            expect(
+                frameDeltaToBeat({ frameDelta: 1, framePeriodMs: bad, secPerBeat: 0.5 }),
+            ).toBe(0);
+        }
+    });
+
+    it("framePeriodMs 为 0 归一为 1e-6（不产生 Infinity）", () => {
+        const v = beatToFrameDelta({ beatDelta: 1, secPerBeat: 0.5, framePeriodMs: 0 });
+        expect(Number.isFinite(v)).toBe(true);
+    });
+});
+
+/**
+ * 边缘自动滚动（框选拖到画布边缘时自动平移视图）。
+ *
+ * 【为什么抽出来】这段算术把"指针离边缘多远"映射为"每帧滚动多少像素"，
+ * 内含三处魔法数（边缘带宽 32px、单帧最大步长 18px、距离比例上限 1.5）与一次
+ * `scrollLeft` 的二次钳制。它是纯算术，但此前埋在 pointermove 闭包里，
+ * 无法单测，改动风险只能靠手拖复现。
+ */
+describe("edgeAutoScrollDeltaPx", () => {
+    const view = { leftPx: 100, rightPx: 900 };
+
+    it("远离边缘 → 0", () => {
+        expect(edgeAutoScrollDeltaPx({ clientX: 500, ...view })).toBe(0);
+        expect(edgeAutoScrollDeltaPx({ clientX: 132, ...view })).toBe(0);
+        expect(edgeAutoScrollDeltaPx({ clientX: 868, ...view })).toBe(0);
+    });
+
+    it("靠近左缘 → 负向滚动，越靠越快；到边缘时比例恰为 1", () => {
+        const half = edgeAutoScrollDeltaPx({ clientX: 116, ...view }); // 带内一半
+        const atEdge = edgeAutoScrollDeltaPx({ clientX: 100, ...view }); // 恰在边界
+        expect(half).toBeCloseTo(-9, 9); // 0.5 × 18
+        expect(atEdge).toBeCloseTo(-18, 9); // 1.0 × 18，不是 27
+        expect(atEdge).toBeLessThan(half);
+    });
+
+    it("靠近右缘 → 正向滚动，对称于左缘", () => {
+        expect(edgeAutoScrollDeltaPx({ clientX: 884, ...view })).toBeCloseTo(
+            -edgeAutoScrollDeltaPx({ clientX: 116, ...view }),
+            9,
+        );
+        expect(edgeAutoScrollDeltaPx({ clientX: 900, ...view })).toBeCloseTo(18, 9);
+    });
+
+    it("超出视口（指针已被 capture 到外面）仍取满速，不越界", () => {
+        expect(edgeAutoScrollDeltaPx({ clientX: 0, ...view })).toBeCloseTo(-27, 9);
+        expect(edgeAutoScrollDeltaPx({ clientX: 2000, ...view })).toBeCloseTo(27, 9);
+    });
+
+    it("非有限输入返回 0", () => {
+        for (const bad of [Number.NaN, Number.POSITIVE_INFINITY]) {
+            expect(edgeAutoScrollDeltaPx({ clientX: bad, ...view })).toBe(0);
+            expect(edgeAutoScrollDeltaPx({ clientX: 100, leftPx: bad, rightPx: 900 })).toBe(0);
+        }
     });
 });

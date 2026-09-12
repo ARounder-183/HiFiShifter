@@ -26,7 +26,12 @@ import {
     hitTestSelectionEdge,
     isPointerNearCurve,
 } from "./kernel/gestureHitTest";
-import { selectionIndexRange } from "./kernel/dragArithmetic";
+import {
+    beatToFrameDelta,
+    edgeAutoScrollDeltaPx,
+    frameDeltaToBeat,
+    selectionIndexRange,
+} from "./kernel/dragArithmetic";
 import type { MutableRefObject as MutRef } from "react";
 import { isModifierActive, isNoneBinding } from "../../../features/keybindings/keybindingsSlice";
 import { matchesKeybinding } from "../../../features/keybindings/useKeybindings";
@@ -2383,37 +2388,34 @@ export function usePianoRollInteractions(args: {
                         // 判断鼠标是否在曲线附近（像素距离 < 10px）
                         const pv = paramViewRef.current;
                         if (pv && pv.edit.length > 0) {
+                            // 帧 → 采样下标、pitch +0.5 偏移、10px 邻域判定全部抽到
+                            // `kernel/gestureHitTest`（纯函数，有单测）。此前这里是
+                            // 第三份内联副本——三份各自维护 "+0.5 到底加没加" 很容易分叉。
+                            const curveVal = curveValueAtPointerFrame({
+                                sec: b * secPerBeat,
+                                startFrame: pv.startFrame,
+                                stride: pv.stride,
+                                framePeriodMs: pv.framePeriodMs,
+                                values: pv.edit,
+                            });
+                            // 下面拖拽分支仍要用这两个量（选区帧范围换算 / 起点值），
+                            // 因此保留声明，只是命中判定改走纯函数。
                             const fp = pv.framePeriodMs;
-                            const sec = b * secPerBeat;
-                            const frame = Math.max(0, Math.floor((sec * 1000) / fp));
-                            const idx = Math.round(
-                                (frame - pv.startFrame) / Math.max(1, pv.stride),
-                            );
-                            const curveVal = idx >= 0 && idx < pv.edit.length ? pv.edit[idx] : null;
                             const mouseVal = pointerValue(e.clientY);
-
-                            // 使用像素距离判断是否靠近曲线，避免不同参数值域差异的影响
                             const canvas = canvasRef.current;
                             const rectH = canvas
                                 ? canvas.getBoundingClientRect().height
                                 : viewSizeRef.current.h || 1;
-                            const mouseY = canvas
-                                ? e.clientY - canvas.getBoundingClientRect().top
-                                : 0;
-                            // pitch 绘制时有 +0.5 偏移（画在琴键中心），命中检测需保持一致
-                            const mappedCurveVal =
-                                curveVal !== null
-                                    ? editParam === "pitch"
-                                        ? curveVal + 0.5
-                                        : curveVal
-                                    : null;
-                            const curveY =
-                                mappedCurveVal !== null
-                                    ? valueToY(editParam, mappedCurveVal, rectH)
-                                    : null;
-                            const HIT_THRESHOLD_PX = 10;
+                            const near = isPointerNearCurve({
+                                pointerY: canvas
+                                    ? e.clientY - canvas.getBoundingClientRect().top
+                                    : 0,
+                                param: editParam,
+                                valueToY: (v) => valueToY(editParam, v, rectH),
+                                curveValue: curveVal ?? Number.NaN,
+                            });
 
-                            if (curveY !== null && Math.abs(mouseY - curveY) < HIT_THRESHOLD_PX) {
+                            if (near) {
                                 if (e.button === 2) {
                                     e.preventDefault();
                                     const startClientY = e.clientY;
@@ -2989,8 +2991,11 @@ export function usePianoRollInteractions(args: {
                                     );
 
                                     // 实时更新选区位置显示
-                                    const beatDeltaForSel =
-                                        (lastFrameDelta * fp) / 1000 / secPerBeat;
+                                    const beatDeltaForSel = frameDeltaToBeat({
+                                        frameDelta: lastFrameDelta,
+                                        framePeriodMs: fp,
+                                        secPerBeat,
+                                    });
                                     selectionRef.current = {
                                         aBeat: aBeat + beatDeltaForSel,
                                         bBeat: bBeat + beatDeltaForSel,
@@ -3071,8 +3076,12 @@ export function usePianoRollInteractions(args: {
                                     // 计算 X 方向帧偏移
                                     const currentBeat = pointerBeat(adjusted.clientX);
                                     const beatDelta = currentBeat - startBeat;
-                                    const secDelta = beatDelta * secPerBeat;
-                                    const rawFrameDelta = Math.round((secDelta * 1000) / fp);
+                                    // beat → 帧位移：抽到 `kernel/dragArithmetic`。
+                                    const rawFrameDelta = beatToFrameDelta({
+                                        beatDelta,
+                                        secPerBeat,
+                                        framePeriodMs: fp,
+                                    });
 
                                     // 应用拖动方向限制
                                     lastValueDelta = yDragEnabled ? rawValueDelta : 0;
@@ -3216,8 +3225,11 @@ export function usePianoRollInteractions(args: {
                                                 liveEditOverrideRef.current = null;
 
                                                 // 确保选区位置最终正确
-                                                const beatDeltaForSel =
-                                                    (lastFrameDelta * fp) / 1000 / secPerBeat;
+                                                const beatDeltaForSel = frameDeltaToBeat({
+                                                    frameDelta: lastFrameDelta,
+                                                    framePeriodMs: fp,
+                                                    secPerBeat,
+                                                });
                                                 selectionRef.current = {
                                                     aBeat: aBeat + beatDeltaForSel,
                                                     bBeat: bBeat + beatDeltaForSel,
@@ -3341,18 +3353,16 @@ export function usePianoRollInteractions(args: {
                         }
 
                         const bounds = scroller.getBoundingClientRect();
-                        const edgePx = 32;
-                        const maxStepPx = 18;
 
                         if (allowAutoScroll) {
-                            let deltaPx = 0;
-                            if (clientX < bounds.left + edgePx) {
-                                const ratio = (bounds.left + edgePx - clientX) / edgePx;
-                                deltaPx = -clamp(ratio, 0, 1.5) * maxStepPx;
-                            } else if (clientX > bounds.right - edgePx) {
-                                const ratio = (clientX - (bounds.right - edgePx)) / edgePx;
-                                deltaPx = clamp(ratio, 0, 1.5) * maxStepPx;
-                            }
+                            // 边缘自动滚动的映射抽到 `kernel/dragArithmetic`
+                            // （纯函数，有单测）：含边缘带宽、单帧步长与比例上限
+                            // 三个魔法数，原来的内联版本无法单测。
+                            const deltaPx = edgeAutoScrollDeltaPx({
+                                clientX,
+                                leftPx: bounds.left,
+                                rightPx: bounds.right,
+                            });
 
                             if (Math.abs(deltaPx) > 0.01) {
                                 const drawingMaxScrollLeft = Math.max(
