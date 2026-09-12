@@ -91,26 +91,42 @@ And the same table under `--disable-gpu` gives **71.8 ms / 212.8 ms** — i.e. *
 
 **Lessons recorded:** never time a deferred Canvas2D API without forcing a flush; verify the fixture actually reaches the render path (a 3-minute curve in a mock whose clips are 12 s long proves nothing); and when a user reports jank that a synthetic benchmark does not reproduce, the benchmark is wrong until proven otherwise — not the report.
 
-**R8 — 🔴 The kernel is OFF in the build the user is actually running.**
-`backend/src-tauri/tauri.conf.json` runs `node ../scripts/tauri-before-dev.mjs` as its `beforeDevCommand`, and that script's `TAURI_UI_MODE` **defaults to `"build"`** (not `"dev"`). So a plain `tauri dev` — the normal way to run the app on Windows — does `npm run build` and serves the **production bundle**, where `import.meta.env.DEV === false`.
+**R8 — 🔴（已解决）The kernel is OFF in the build the user is actually running.**
+`backend/src-tauri/tauri.conf.json` runs `node ../scripts/tauri-before-dev.mjs` as its `beforeDevCommand`, and that script's `TAURI_UI_MODE` **defaulted to `"build"`** (not `"dev"`). So a plain `tauri dev` — the normal way to run the app on Windows — did `npm run build` and served the **production bundle**, where `import.meta.env.DEV === false`.
 
-Every kernel flag is off in that bundle:
+Every kernel flag was off in that bundle:
 
-| Flag | Default in a production build |
+| Flag | Default in a production build（当时） |
 |---|---|
 | `isTimelineKernelEnabled()` | `import.meta.env.DEV` → **false** |
-| `isPianoRollKernelEnabled()` | **false** (off even in dev, by design) |
+| `isPianoRollKernelEnabled()` | **false**（当时连 dev 也关） |
 | `isPianoRollGlSceneEnabled()` | **false** |
 | `isPianoRollCurveGlEnabled()` | **false** |
 
-**Consequence:** the jank the user reports on Windows is the **old** implementation. Phases 1–2 never ran there, and neither would Phase 3's curve work. This also explains why the user's reports and my Chromium measurements kept disagreeing: we were measuring two different renderers, and the reports were about the un-migrated one.
+**Consequence:** the jank the user reported on Windows was the **old** implementation. Phases 1–2 never ran there, and neither would Phase 3's curve work. This also explains why the user's reports and my Chromium measurements kept disagreeing: we were measuring two different renderers.
 
-**This reframes the work.** The highest-value next step is **not** more curve-GL code — it is making the kernel actually reachable in the app the user runs, then measuring there. Options, in order of preference:
-1. **Pass the mode through explicitly** so `tauri dev` runs the dev server (`TAURI_UI_MODE=dev`), or make `beforeDevCommand` use dev mode while a separate build command serves the bundle. This is what "dev" should have meant.
-2. **Invert the piano-roll defaults to follow `import.meta.env.DEV`**, matching the timeline kernel, so a dev run exercises the new path by default.
-3. Keep defaults off but surface a **visible in-app toggle** (the PERF overlay already has one for the timeline flag) so the path can be exercised on Windows without devtools.
+**✅ 已解决（两处改动，缺一不可）：**
 
-Until one of these lands, any "is the new kernel faster?" measurement on the user's machine is measuring the wrong renderer. Recorded here rather than in chat because it invalidates how the whole phase was being verified.
+1. `scripts/tauri-before-dev.mjs` 的默认模式由 `"build"` 改为 `"dev"`（文件头注释一直写的就是
+   "dev（默认）"，实现与文档不一致）。
+2. **四个开关的未显式设置默认值统一为"开启"，与构建模式无关**（不再读
+   `import.meta.env.DEV`）。仅做第 1 条不够：用户按 build 模式跑时仍然全关。
+
+**为什么最终选择"默认开启"而不是"让 tauri dev 跑 dev server"**：后者只修了开发时的入口，
+一旦真的打生产包发布，用户拿到的还是旧渲染器——内核永远无法成为默认路径。默认开启 +
+显式 `"0"` 逃生门，才能让两种模式跑同一套实现。
+
+**验证方式（不能只靠单测）**：Vitest 只在 DEV 下运行，`import.meta.env.DEV` 恒为 true，
+所以"默认开启"的断言在实现写成 `return import.meta.env.DEV` 时**照样通过**。实际用了三层：
+
+| 层 | 手段 | 能发现什么 |
+|---|---|---|
+| 运行期 | 断言未设置 → `true` | 默认值本身 |
+| **源码级** | 读 `featureFlag.ts` 源码，断言（去注释后）不含 `import.meta.env.DEV` | DEV 回落（运行期测不出） |
+| **构建产物** | `npm run build` 后检查编译结果 | 编译期替换后的真实行为 |
+
+生产包实测：四个开关编译为 `e!=="0"`（未设置 → 开启），`import.meta.env` 出现 **0 次**；
+默认输出的整页截图与显式写 `"1"` **字节完全相同**；显式写 `"0"` 时 GL 画布不再挂载（逃生门有效）。
 
 **R6 — The gesture surface is a 3,875-line hook, and a safety net already exists.**
 `usePianoRollInteractions.ts` holds ~23 event entry points. `renderProjection.test.ts` already exists specifically as the "P3 pre-work snapshot" the spec asked for, comparing the legacy `timeToPixel` formula against `secToViewportPx` over random parameters — the x-projection conversion is therefore already guarded.

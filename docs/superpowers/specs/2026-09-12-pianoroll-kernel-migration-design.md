@@ -177,6 +177,19 @@ Three phases, each independently shippable, verifiable, and revertible.
 Each phase has its own flag value (or its own flag) so a phase can be reverted without
 reverting the previous ones.
 
+**默认值状态（已变更）：** 四个开关的未显式设置默认值原为"跟随 `import.meta.env.DEV`"
+（生产构建关闭）。现统一为**开启，与构建模式无关**——内核已是默认渲染路径，不再是
+opt-in。开关只剩**逃生门**职责：显式写 `"0"` 即退回既有实现，无需重新发版。
+
+这样改的原因：`TAURI_UI_MODE=build` 跑的是生产包（`DEV === false`），默认跟随 DEV 会让
+**打包后静默退回旧渲染器**——开发时看到新实现、打包后看到旧实现。该问题实际发生过：
+Windows 上的卡顿报告全部来自旧实现，与新内核无关（详见 Phase 3 计划 R8）。
+
+验证用了三层（单测层测不出 DEV 回落）：运行期断言默认 `true`；**源码级**断言
+`featureFlag.ts` 去注释后不含 `import.meta.env.DEV`；**构建产物**检查编译结果为
+`e!=="0"` 且 `import.meta.env` 出现 0 次。浏览器端实测：默认输出的整页截图与显式写
+`"1"` **字节完全相同**；显式写 `"0"` 时 GL 画布不再挂载。
+
 **Shared-module extraction (done):** the spec's architecture section called for moving
 the modules both panels share into a neutral location. That landed as Task 8 of the
 Phase 2 plan: `components/layout/renderKernel/` now holds the GL programs, glyph

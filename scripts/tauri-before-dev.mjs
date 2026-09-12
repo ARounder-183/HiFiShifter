@@ -10,11 +10,16 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const frontendDir = resolve(__dirname, "../frontend");
-// 【默认值必须是 dev】文件头注释一直写的是 "dev（默认）"，但实现里是 `|| "build"`，
+// 【默认值必须是 dev】文件头注释一直写的是 "dev（默认）"，但实现里曾是 `|| "build"`，
 // 两者不一致。后果不只是"多跑一次构建"：`build` 模式经 `npm run build` 提供**生产
-// 包**，其中 `import.meta.env.DEV === false`，于是时间轴内核与参数编辑器内核的默认
-// 值全部为**关闭**——`tauri dev` 跑的是旧渲染实现，新内核在真机上根本没被验证到
-// （Windows 上的卡顿报告因此是旧实现的现象，见 Phase 3 计划的 R8）。
+// 包**，而当时内核开关的默认值跟随 `import.meta.env.DEV`（生产为 false），于是
+// `tauri dev` 跑的是旧渲染实现，新内核在真机上根本没被验证到（Windows 上的卡顿报告
+// 因此是旧实现的现象，见 Phase 3 计划的 R8）。
+//
+// 【现在为什么两件事都要改】内核开关的默认值已改为**与构建模式无关地开启**（见
+// `frontend/src/components/layout/timeline/kernel/featureFlag.ts`）。仅改这里不够：
+// 用户按 `TAURI_UI_MODE=build` 跑时，旧实现仍会盖过新内核。两处一起改，才能让
+// 两种模式跑同一套实现。
 //
 // 需要生产包时显式设 `TAURI_UI_MODE=build`。
 const mode = (process.env.TAURI_UI_MODE || "dev").toLowerCase();
