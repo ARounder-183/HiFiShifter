@@ -789,6 +789,13 @@ npm run build 2>&1 | tail -3
 
 在 `frontend/src/i18n/{zh-CN,zh-TW,en-US,ja-JP,ko-KR}.ts` 中删除这三个 key（它们随设置项总开关一并作废）：
 
+**这同时也是清理一处已成假的用户可见文案**：`render_kernel_enabled_desc` 当前仍写着
+「关闭后回退到既有渲染实现」（5 语言都有），而阶段 1 起渲染处条件恒真、该开关**不会**
+切回旧实现。同理 `featureFlag.ts` 的 :15/:49/:218 仍把逃生门描述为"退回既有实现"——
+该文件在步骤 5 整体删除，两处一并消失。
+
+（任务 1 的 spec 审查特意点名这两处，避免它们在分阶段改动中被漏掉。）
+
 ```
 render_kernel_enabled
 render_kernel_enabled_desc
