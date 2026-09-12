@@ -107,6 +107,8 @@ import { createClipInstanceBuilder } from "../scene/clipInstances";
 import { buildGridInstances } from "../scene/gridInstances";
 import type { FlatInstance, Rgba } from "../../../renderKernel/instanceTypes";
 import { createScrollKernel, type TimelineViewportState } from "../../../renderKernel/scrollKernel";
+// 竖向键盘翻页与参数编辑器内核**共用**同一份解析（见 onKeyDown 说明）。
+import { resolveKeyboardScrollTarget } from "../../../renderKernel/keyboardScroll";
 
 /** `buildTimelineTicks` 的入参类型（用于让数据镜像的字段类型自动对齐）。 */
 type BuildTicksArgs = Parameters<typeof buildTimelineTicks>[0];
@@ -3914,25 +3916,52 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     vScrollbarTrack?.addEventListener("pointerdown", onVTrackDown);
 
     // ── 输入：键盘滚动 ───────────────────────────────────────────────
+    /**
+     * 键盘滚动。
+     *
+     * 流程：竖向四键（PageUp / PageDown / Home / End）经共享解析器
+     * `resolveKeyboardScrollTarget` 求目标 → `scroll.setScrollTop`（内核钳制）；
+     * 横向两键（方向键）按固定步长走 `setScrollLeft`。
+     *
+     * 【为什么竖向四键走"纵向"而不是横向——与既有实现对齐】
+     * 内核模式下原生 scroller 是**被动镜像**，其原生滚动被回声判据忽略；而旧实现
+     * 下这四个键的纵向位移**正是浏览器原生滚动**提供的（实测 legacy：PageDown
+     * top 0 → 132、End top → 361，left 恒为 0）。内核早先的处理器把同样四个键
+     * 用于**横向**翻页（实测 left 0 → 1497.6、top 恒为 0），等于在用户无感的情况下
+     * 把纵向翻页**替换**掉了——这不是"新功能"，是输入回归。改为纵向后与旧实现一致。
+     *
+     * 【为什么复用 `renderKernel/keyboardScroll` 而不是再写一份】
+     * 参数编辑器内核已有同一语义的实现（同一批按键、同样"不钳制、交给内核"的约定），
+     * 且它按"视口高 − 20"计算整页位移。两份实现会各自漂移；共享一份后两个面板的
+     * 翻页行为天然一致。该解析器对不处理的键返回 null。
+     *
+     * 特殊说明 1：解析器**不钳制**，目标可能越界（PageUp 在顶部会得到负值）——这是
+     * 刻意的，内核（`ScrollKernel`）是唯一钳制点，此处再夹一次会产生第二份上限来源。
+     *
+     * 特殊说明 2：只有解析器认得的键才 `preventDefault`，其余按键继续走既有的
+     * 编辑 / 快捷键路径（与"不处理则放行"的约定一致）。
+     *
+     * 特殊说明 3：方向键的横向步进保留（不与竖向四键冲突）；但需注意方向键在
+     * 当前应用里会被上层焦点路由消费，本函数通常收不到——保留分支是为了在焦点
+     * 直达容器时仍有横向键盘滚动可用。
+     *
+     * @param event 容器的 keydown 事件。
+     */
     function onKeyDown(event: KeyboardEvent): void {
         const view = scroll.get();
+        // 竖向四键：与旧实现的浏览器原生纵向翻页语义对齐（见上方说明）。
+        const verticalTarget = resolveKeyboardScrollTarget({
+            key: event.key,
+            scrollTopPx: view.scrollTop,
+            viewportHeightPx,
+            maxScrollTopPx: scroll.maxScrollTop(),
+        });
+        if (verticalTarget !== null) {
+            event.preventDefault();
+            scroll.setScrollTop(verticalTarget);
+            return;
+        }
         switch (event.key) {
-            case "PageDown":
-                event.preventDefault();
-                scroll.setScrollLeft(view.scrollLeft + viewportWidthPx * 0.9);
-                break;
-            case "PageUp":
-                event.preventDefault();
-                scroll.setScrollLeft(view.scrollLeft - viewportWidthPx * 0.9);
-                break;
-            case "Home":
-                event.preventDefault();
-                scroll.setScrollLeft(0);
-                break;
-            case "End":
-                event.preventDefault();
-                scroll.setScrollLeft(scroll.maxScrollLeft());
-                break;
             case "ArrowLeft":
                 event.preventDefault();
                 scroll.setScrollLeft(view.scrollLeft - KEYBOARD_STEP_PX);

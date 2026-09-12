@@ -19,7 +19,7 @@
  *   曲线），但它们的**失败都是软着陆**：GL 不可用只把句柄置空、退回 Canvas2D 路径，
  *   不抛错（见「GL 场景层」一节的说明）。
  * - **输入按轴分配所有权**：滚动条 thumb 拖拽与轨道翻页、以及**竖向键盘翻页**
- *   （PageUp / PageDown / Home / End，见 `scroll/keyboardScroll`）由宿主注册监听；
+ *   （PageUp / PageDown / Home / End，见 `renderKernel/keyboardScroll`）由宿主注册监听；
  *   其余手势（滚轮、中键平移、绘制）仍在面板与 `usePianoRollInteractions`。
  *   竖向键盘之所以必须收进来：内核模式下原生 scroller 只是被动镜像，其 `scroll`
  *   事件会被面板当作回声忽略，原生滚动的那次位移就没人采纳了——四个键会彻底失效。
@@ -38,7 +38,7 @@
  * - 上游：`PianoRollPanel` 在挂载 effect 里创建并持有，卸载时 `dispose()`。
  * - 复用：`renderKernel/scrollKernel`（视口真值）、`renderLoop`（帧调度）、
  *   `renderKernel/scrollbars`（滚动条几何）、`timelineAxis`（投影）、
- *   `scene/gridView`（实时视口快照与几何签名）、`scroll/keyboardScroll`（键盘目标）。
+ *   `scene/gridView`（实时视口快照与几何签名）、`renderKernel/keyboardScroll`（键盘目标，与时间轴共用）。
  * - 下游：`onFrame` 把投影交回面板绘制（标尺 / 网格 / 画布 / 波形 / 播放头）；
  *   `onScrollTopFrame` 把竖向真值逐帧交回面板刷新其值域视口 ref。
  */
@@ -104,7 +104,7 @@ import {
     kernelScrollTopFromCenter,
     PIANO_ROLL_VERTICAL_SCROLL_RANGE_PX,
 } from "../scroll/verticalValueScroll";
-import { resolveKeyboardScrollTarget } from "../scroll/keyboardScroll";
+import { resolveKeyboardScrollTarget } from "../../../renderKernel/keyboardScroll";
 import type { PianoRollKernelData, PianoRollGridSpec } from "./pianoRollKernelData";
 
 /**

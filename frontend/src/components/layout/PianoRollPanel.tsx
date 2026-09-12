@@ -3857,7 +3857,7 @@ export const PianoRollPanel: React.FC = () => {
      *
      * 【为什么可以整条忽略，而不会漏掉输入】
      * 竖向的原生输入只有 PageUp / PageDown / Home / End 四个键。它们已由宿主接管
-     * （见 `pianoRollKernelHost.onKeyDown` 与 `scroll/keyboardScroll`），并且时间轴
+     * （见 `pianoRollKernelHost.onKeyDown` 与 `renderKernel/keyboardScroll`），并且时间轴
      * 内核早就是同一做法。滚轮 / 中键平移 / 拖自绘滚动条 / 点轨道翻页都不经原生
      * `scroll`（它们直接调内核 API），因此这个事件在内核模式下纯属回声。
      *
