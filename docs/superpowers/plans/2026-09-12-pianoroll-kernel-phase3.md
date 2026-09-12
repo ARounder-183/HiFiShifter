@@ -67,6 +67,9 @@ The control group — same scroll, **no curve at all** — shows the *same* p95.
 
 Phase 3's real justifications are therefore: (a) eliminating per-point JS→native calls, which is the part that scales with curve count and zoom-out; and (b) architectural completion — today the kernel owns everything except curves, which is a hybrid state. **The plan must not claim a frame-rate improvement it cannot measure.**
 
+**R5b — Polyline geometry cost at realistic scale (measured after Task 1).**
+For a 1,650-point curve (R3's realistic visible count), `buildPolylineVertices` produces **14,838 vertices / 237 KB / ~1 ms** per curve, and the same for a deliberately jumpy curve. That is 6 vertices per segment plus 3 per miter join. Four curves on screen therefore means ~1 MB of vertex data and ~4 ms of JS per frame — non-trivial, and the dominant cost of Task 4, so Task 4 must measure buffer upload size and consider a straight-join fast path. Note the join triangles are what make it 9 vertices/point rather than 6: for a **nearly straight** join the apex coincides with the segment endpoint, so the triangle could be skipped without changing the rendered result. That optimisation is deliberately **not** taken in Task 1 (fidelity first, and the epsilon needs pixel evidence), but Task 4 should measure whether it is needed.
+
 **R6 — The gesture surface is a 3,875-line hook, and a safety net already exists.**
 `usePianoRollInteractions.ts` holds ~23 event entry points. `renderProjection.test.ts` already exists specifically as the "P3 pre-work snapshot" the spec asked for, comparing the legacy `timeToPixel` formula against `secToViewportPx` over random parameters — the x-projection conversion is therefore already guarded.
 
