@@ -385,3 +385,55 @@ describe("buildPolylineVertices", () => {
         expect(Math.max(...alongOf(withoutIt))).toBeCloseTo(15, 9);
     });
 });
+
+/**
+ * 缓冲容量必须覆盖**全部**顶点（回归：曲线右端被硬截断）。
+ *
+ * 【缺陷现象】`maxVerts` 按「每段 6 顶点 + 每个内部顶点 3 顶点」估算，但 miter
+ * 分支实际 push **6** 个顶点（尖角要覆盖两侧：左半 + 右半各一个三角形）。
+ * `Float32Array` 的越界写入会被**静默忽略**，于是第 ~75% 之后的顶点全部丢失——
+ * 表现为曲线在右侧被硬截断（实测 20s 曲线只画到 ~15s）。
+ *
+ * 【为什么单测没抓到】容量不足只在**点数足够多、且拐角都走 miter**时才触发；
+ * 既有的用例最多几个点，远未触及上限。因此这里用大点数 + 直线（全部走 miter）
+ * 专门压这个边界。
+ *
+ * 【判据】末点对应的顶点必须存在。若缓冲不够，末点会被丢弃。
+ */
+describe("buildPolylineVertices 缓冲容量", () => {
+    it("大量点 + 全部走 miter 时，末点顶点不会被丢弃", () => {
+        // 4000 点、每点 x 递增 0.1、y 做小幅折返（保证每个内部顶点都走 miter）。
+        const n = 4000;
+        const points = Array.from({ length: n }, (_, i) => ({
+            x: i * 0.1,
+            y: 100 + Math.sin(i * 0.7) * 20,
+        }));
+        const out = buildPolylineVertices({ points, lineWidth: 2.6, miterLimit: 10 });
+
+        // 找到缓冲中的最大 x —— 必须覆盖最后一个点。
+        let maxX = -Infinity;
+        for (let i = 0; i < out.length; i += POLYLINE_FLOATS_PER_VERTEX) {
+            if (out[i] > maxX) maxX = out[i];
+        }
+        const lastX = points[points.length - 1].x;
+        // 几何外扩（半线宽+AA pad）后应略大于末点 x，绝不能小于。
+        expect(maxX).toBeGreaterThanOrEqual(lastX);
+    });
+
+    it("顶点数不超过容量公式给出的上界", () => {
+        const n = 2000;
+        const points = Array.from({ length: n }, (_, i) => ({
+            x: i * 0.5,
+            y: 50 + (i % 3) * 10,
+        }));
+        const out = buildPolylineVertices({ points, lineWidth: 2, miterLimit: 10 });
+        const verts = out.length / POLYLINE_FLOATS_PER_VERTEX;
+        // 每段 6 + 每个内部顶点 6（尖角覆盖两侧）
+        const segments = n - 1;
+        const upper = segments * 6 + (segments - 1) * 6;
+        expect(verts).toBeLessThanOrEqual(upper);
+        // 且不应恰好卡在旧公式（每内部顶点 3）的上界
+        const oldUpper = segments * 6 + (segments - 1) * 3;
+        expect(verts).toBeGreaterThan(oldUpper * 0.5);
+    });
+});

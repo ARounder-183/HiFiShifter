@@ -213,8 +213,16 @@ export function buildPolylineVertices(args: PolylineGeometryArgs): Float32Array 
     const alongAtPoint = (i: number): number =>
         alongOverride === null ? (cumulative[i] ?? 0) : (alongOverride[i] ?? 0);
 
-    // 缓冲容量：每段 6 顶点；每个内部顶点若走 miter 再加 3 顶点。
-    const maxVerts = segments.length * 6 + Math.max(0, segments.length - 1) * 3;
+    // 缓冲容量：每段 6 顶点；每个内部顶点的 miter 分支再产出 **6** 个顶点。
+    //
+    // 【为什么是 6 而不是 3——这里曾少算一半，导致曲线右端被静默截断】
+    // miter 分支要覆盖**两侧**：左半与右半各一个三角形，共 6 个顶点。
+    // 容量按 3 估算时 `vi` 会在约 75% 处越过 `maxVerts`，而 `Float32Array`
+    // 的越界写是**静默忽略**的——不报错、不抛异常，只是后半段顶点凭空消失。
+    // 表现为曲线在右侧被硬截断（实测 20s 曲线只画到约 15s，与点数无关地少 25%）。
+    //
+    // 单测用「大点数 + 全部走 miter」压这个边界（几个点的小用例根本触不到上限）。
+    const maxVerts = segments.length * 6 + Math.max(0, segments.length - 1) * 6;
     const buf = new Float32Array(maxVerts * POLYLINE_FLOATS_PER_VERTEX);
     let vi = 0;
     const push = (x: number, y: number, along: number, across: number): void => {

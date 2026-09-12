@@ -784,6 +784,7 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             });
             if (vertices.length === 0) continue;
 
+
             glCurveProgram.draw({
                 vertices,
                 vertexCount: vertices.length / 4,

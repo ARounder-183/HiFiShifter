@@ -888,13 +888,20 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                 - 外层即**轨道**：承接「点空白翻页」（原生滚动条的等效交互）。
                   宿主的 thumb 处理器 `stopPropagation`，因此到达轨道的按下必然
                   不在 thumb 上，无需二次命中判定。 */}
-            <div ref={vTrackRef} className="absolute right-0 top-0 bottom-0 w-2">
+            {/* `z-20`：滚动条必须**盖在所有内容之上**。
+                旧实现用的是**原生**滚动条——浏览器把它画在内容层之外，永远不会被
+                clip 遮住；改自绘后若不给 z-index（auto ≈ 0），就会被
+                `z-index: 2` 的 clip 细节层压在下面，clip 一滚到右缘/底缘就把
+                滚动条盖掉，且该处无法拖动。
+                取值与参数编辑器的自绘滚动条一致（那里也是 `z-20`），
+                两者观感与层级语义保持统一。 */}
+            <div ref={vTrackRef} className="absolute right-0 top-0 bottom-0 z-20 w-2">
                 <div
                     ref={vThumbRef}
                     className="absolute left-0 w-full rounded-full bg-[var(--qt-scrollbar-thumb)]"
                 />
             </div>
-            <div ref={hTrackRef} className="absolute bottom-0 left-0 right-0 h-2">
+            <div ref={hTrackRef} className="absolute bottom-0 left-0 right-0 z-20 h-2">
                 <div
                     ref={hThumbRef}
                     className="absolute top-0 h-full rounded-full bg-[var(--qt-scrollbar-thumb)]"
