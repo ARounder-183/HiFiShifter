@@ -996,6 +996,12 @@ where
             }
         }
 
+        // 上报 clip 内渲染进度（WORLD 按 6s 合成块粒度）。仅当本轮渲染 pass
+        // 注册了进度回调时生效（导出路径无回调，开销只有一次存在性检查）。
+        crate::renderer::progress::report_clip_progress(
+            chunk_end as f64 / total_frames.max(1) as f64,
+        );
+
         pos = chunk_end;
     }
 

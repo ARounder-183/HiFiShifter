@@ -20,6 +20,8 @@ pub fn drop_shared_session() {}
 
 pub fn update_ort_ep(_choice: &str, _device_id: Option<i32>) {}
 
+pub fn ensure_background_prewarm() {}
+
 pub fn ensure_cache_capacity(_min_capacity: usize) {}
 
 /// 与 onnx 变体同名：take 切换等场景的缓存失效在 stub 下为 no-op。

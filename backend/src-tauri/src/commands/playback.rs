@@ -695,16 +695,34 @@ fn render_single_clip(
         .max(1.0) as usize;
     let clip_stereo_len = clip_timeline_frames * 2;
 
-    let root_params = timeline
-        .resolve_root_track_id(&clip.track_id)
-        .and_then(|root| timeline.params_by_root_track.get(&root));
+    let clip_root = timeline.resolve_root_track_id(&clip.track_id);
+    let root_params = clip_root
+        .as_ref()
+        .and_then(|root| timeline.params_by_root_track.get(root));
     let effective_extra_params = clip
         .extra_params
         .as_ref()
         .or_else(|| root_params.map(|entry| &entry.extra_params));
-    let breath_enabled = effective_extra_params
-        .map(|params| crate::pitch_editing::extra_param_enabled(params, "breath_enabled"))
+    // 气声（HNSEP 分离 + noise stem）只由 NSF-HiGAN 渲染器消费：快照混音
+    // （renderer_id == "nsf_hifigan_onnx" 才挂 breath_curve）与
+    // track_requests_extra_processing 均按渲染器种类门控。轨道切换算法
+    // （如 HiFiGAN → WORLD）不会清空 extra_params，这里若不门控，残留的
+    // breath_enabled 会让 WORLD/vslib 渲染白跑一次 HNSEP 推理 —— 其 noise
+    // stem 在混音侧永远不会被使用（World 声码器本身也不消费气声参数）。
+    let breath_capable = clip_root
+        .as_ref()
+        .and_then(|root| timeline.tracks.iter().find(|track| &track.id == root))
+        .map(|track| {
+            matches!(
+                crate::state::SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo),
+                crate::state::SynthPipelineKind::NsfHifiganOnnx
+            )
+        })
         .unwrap_or(false);
+    let breath_enabled = breath_capable
+        && effective_extra_params
+            .map(|params| crate::pitch_editing::extra_param_enabled(params, "breath_enabled"))
+            .unwrap_or(false);
     let frame_period_ms = root_params
         .map(|entry| entry.frame_period_ms.max(0.1))
         .unwrap_or(5.0);
@@ -1338,11 +1356,13 @@ fn start_background_render_inner(
         breath_noise_cache.ensure_capacity(total.max(1));
     }
 
-    crate::nsf_hifigan_onnx::reset_chunk_progress(total);
+    // 进度追踪：clip 级进度由渲染循环推进（对所有处理器一视同仁）；HiFiGAN
+    // 推理 chunk / WORLD 合成块经 report_clip_progress 提供 clip 内细化。
+    crate::renderer::progress::reset(total);
 
     let app_for_progress = app.clone();
     let progress_generation = render_generation;
-    crate::nsf_hifigan_onnx::set_chunk_progress_callback(Some(Box::new(move |progress: f64| {
+    crate::renderer::progress::set_callback(Some(Box::new(move |progress: f64| {
         // 旧代渲染线程的进度事件不得再刷新前端状态，否则新工程渲染结束后
         // 会被迟到的旧事件重新点亮“渲染中 XX%”。
         if BG_RENDER_GENERATION.load(Ordering::Acquire) != progress_generation {
@@ -1598,11 +1618,13 @@ fn render_background_pass(
                 }
                 if !rendering_started {
                     rendering_started = true;
+                    // 首个未命中才点亮进度条（全命中不闪进度条）。此时可能已有
+                    // 若干 clip 命中缓存，直接报告真实整体进度而非硬编码 0。
                     let _ = app.emit(
                         "playback_rendering_state",
                         PlaybackRenderingStateEvent {
                             active: true,
-                            progress: Some(0.0),
+                            progress: Some(crate::renderer::progress::current_fraction()),
                             target: Some("background".to_string()),
                         },
                     );
@@ -1698,7 +1720,9 @@ fn render_background_pass(
                                 "playback_rendering_state",
                                 PlaybackRenderingStateEvent {
                                     active: true,
-                                    progress: Some(0.0),
+                                    progress: Some(
+                                        crate::renderer::progress::current_fraction(),
+                                    ),
                                     target: Some("background".to_string()),
                                 },
                             );
@@ -1736,6 +1760,20 @@ fn render_background_pass(
             }
 
             rendered_count += 1;
+            // clip 边界推进整体进度（clip 级是所有处理器的权威进度来源 ——
+            // WORLD / vslib 没有推理 chunk 回调，clip 粒度即其唯一进度）；
+            // 进度条已点亮才发射事件，缓存全命中的 pass 不闪进度条。
+            crate::renderer::progress::advance_clip();
+            if rendering_started {
+                let _ = app.emit(
+                    "playback_rendering_state",
+                    PlaybackRenderingStateEvent {
+                        active: true,
+                        progress: Some(crate::renderer::progress::current_fraction()),
+                        target: Some("background".to_string()),
+                    },
+                );
+            }
             log::warn!(
                 "[bg_render] clip {}/{} done clip_id={} elapsed_ms={}",
                 rendered_count,
@@ -1761,7 +1799,7 @@ fn render_background_pass(
             if BG_RENDER_GENERATION.load(Ordering::Acquire) != render_generation {
                 return;
             }
-            crate::nsf_hifigan_onnx::set_chunk_progress_callback(None);
+            crate::renderer::progress::set_callback(None);
             for clip_id in pending_clip_ids_written {
                 crate::synth_clip_cache::remove_pending_rendered_key(&clip_id);
             }
@@ -1835,17 +1873,23 @@ fn render_background_pass(
             return;
         }
 
-        crate::nsf_hifigan_onnx::set_chunk_progress_callback(None);
+        crate::renderer::progress::set_callback(None);
         BG_RENDER_ACTIVE.store(false, Ordering::Release);
         BG_RENDER_CANCEL.store(false, Ordering::Release);
 
         // 第一轮可能因为音高分析尚未完成而跳过了部分 clip。
         // 音高分析完成后没有新的“缓存失效”事件，因此这里主动补一轮渲染，
         // 保证用户等待后台渲染进度结束后，所有需要渲染的 clip 都真正进入缓存。
-        // ★ 补轮必须受“本轮是否有实际进展”约束（见 should_follow_up_render），
+        // ★ 补轮必须受"本轮是否有实际进展"约束（见 should_follow_up_render），
         // 否则会形成 100% CPU 的无限后台渲染循环，把整个应用拖到未响应。
+        // 触发条件与 handle_update_timeline / handle_clip_pitch_ready 的规则
+        // 一致：后台预渲染开启 → 补；关闭时仅当传输层在播放才补 —— 播放触发
+        // 的按需渲染同样依赖被跳过 clip 的结果来解除原地等待，且补轮覆盖
+        // "音高分析在本轮渲染途中完成"的窗口（此后不再有新的 ClipPitchReady
+        // 事件把请求送回来）。
+        let transport_playing = app.state::<AppState>().audio_engine.is_playing();
         if should_follow_up_render(skipped_not_ready, render_success_count)
-            && AUTO_BG_RENDER_ENABLED.load(Ordering::Relaxed)
+            && (AUTO_BG_RENDER_ENABLED.load(Ordering::Relaxed) || transport_playing)
         {
             log::warn!(
                 "[bg_render] follow-up pass needed: {} clip(s) were not pitch-ready, {} clip(s) newly rendered in this pass",

@@ -63,6 +63,8 @@ pub fn update_ort_ep(_choice: &str, _device_id: Option<i32>) {}
 
 pub fn drop_shared_session() {}
 
+pub fn ensure_background_prewarm() {}
+
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BenchmarkResults {
@@ -85,13 +87,12 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
     Err("ONNX feature not compiled".to_string())
 }
 
-pub fn set_chunk_progress_callback(_cb: Option<Box<dyn Fn(f64) + Send + Sync>>) {}
-pub fn reset_chunk_progress(_total: usize) {}
-
 // ─── 分块推理 stub（与 nsf_hifigan_onnx.rs 接口保持一致）──────────────────────
 // 注：df4e17b4 已从真实现删除无调用方的 `infer_pitch_edit_chunked`
 // （被 infer_pitch_edit_chunked_optimized / _mel_stretch 取代），stub 同步移除，
 // 两个特性变体的公共面保持一致。
+// 注：渲染进度上报已移入与特性无关的 `renderer::progress`（WORLD 等处理器
+// 共用同一通道），此处不再需要 stub。
 
 pub fn env_chunk_sec() -> f64 {
     10.0

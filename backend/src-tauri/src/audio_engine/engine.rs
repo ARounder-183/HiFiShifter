@@ -1587,15 +1587,24 @@ fn handle_clip_pitch_ready(s: &mut EngineWorkerState, clip_id: String) {
         debug_eprintln!("[engine] Snapshot stored, handle_clip_pitch_ready done");
 
         // 若此前后台预渲染因为音高分析未完成而跳过了一些 clip，
-        // 现在缓存已经就绪，补触发一次后台渲染，避免用户等待进度结束后
+        // 现在缓存已经就绪，补触发一次渲染，避免用户等待进度结束后
         // 首次播放时仍要重新渲染。
-        if crate::commands::playback::AUTO_BG_RENDER_ENABLED
-            .load(std::sync::atomic::Ordering::Relaxed)
-            && crate::commands::playback::BG_RENDER_PITCH_PENDING
-                .swap(false, std::sync::atomic::Ordering::AcqRel)
+        // 触发规则与 handle_update_timeline 的"开关启用 || 传输层播放"一致：
+        // 后台预渲染关闭时，播放触发的按需渲染同样依赖这些 clip 的结果 ——
+        // 分析完成前被跳过的 clip 若不补渲染，原地等待中的传输层会一直冻结
+        //（直到用户再按一次播放）。标志先消费再分流：无动作可做时不复原
+        // 旧标记，避免后续开启 AUTO 时被陈旧标记触发多余渲染。
+        if crate::commands::playback::BG_RENDER_PITCH_PENDING
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
         {
             if let Some(app) = s.app_handle.as_ref() {
-                let _ = crate::commands::playback::request_background_render(app);
+                let auto_enabled = crate::commands::playback::AUTO_BG_RENDER_ENABLED
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                if auto_enabled {
+                    let _ = crate::commands::playback::request_background_render(app);
+                } else if s.is_playing.load(std::sync::atomic::Ordering::Relaxed) {
+                    crate::commands::playback::ensure_render_pass_running(app);
+                }
             }
         }
     }
