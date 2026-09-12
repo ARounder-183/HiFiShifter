@@ -918,14 +918,43 @@ git commit -m "feat(pianoroll-kernel): kernel host skeleton (scroll ownership + 
   避免三处各算一遍导致"画出来的 thumb 和能拖的范围不一致"。
 - **坐标系只在宿主边界换算一次**，面板与各图层统一消费绘制坐标。
 
+### 多窗口尺寸核对（避免"只在 1920×1200 正确"）
+
+在同一会话下另测 1280×800 与 2560×1440（实测视口 1224×423 / 2504×1061）：
+
+| 视口 | nativeTop（两模式） | 竖向上限（两模式） | valueCenter | 竖向 thumb 实测/解析 |
+|---|---|---|---|---|
+| 1224×423 | 533.5 | 1600 | 72 | 88.447 / 88.447 |
+| 1864×823 | 533.5 | 1600 | 72 | 279.541 / 279.541 |
+| 2504×1061 | 533.5 | 1600 | 72 | 423.044 / 423.044 |
+
+横向 thumb 同样逐值吻合（144.765 / 316.180 / 539.171 对 1224²·(9125+vw)⁻¹ 等）。
+
+**关键不变量**：竖向上限恒为 **1600**，与视口高无关——这是「额外高度 = 1600 + 视口高」
+这一推导在任意窗口尺寸下成立的理由，也是与旧实现 1600px spacer 等价的条件。
+
+### 监听生命周期核对（StrictMode 双挂载）
+
+dev 环境启用了 `StrictMode`，因此挂载期实际经历 create→dispose→create。用
+`PROBE_INIT` 在文档加载**前**注入计数器（事后注入会读到 0/0，什么都证明不了）：
+
+| 开关 | window 拖拽监听 add / remove / 存活 |
+|---|---|
+| flag off | 27 / 14 / **13** |
+| flag on | 33 / 17 / **16** |
+
+存活数增量恰为 **3**（宿主的 pointermove / pointerup / pointercancel），与双挂载无关，
+即 `dispose()` 未泄漏监听。
+
 ### 退出标准核对
 
 | 检查 | 结果 |
 |---|---|
-| `npx vitest run` | 620 passed / 2 failed（均为 `keybindingMatch` 预先存在失败） |
+| `npx vitest run` | 622 passed / 2 failed（均为 `keybindingMatch` 预先存在失败） |
 | `npx tsc -b --noEmit` | 通过 |
 | `npx eslint .` | 0 error（13 warning 全部为改动前既有） |
 | `npx prettier --check` | 本阶段改动文件全部通过 |
+| flag off 像素回退 | 与改动前基线 **0 像素差异**（多次复核） |
 
 ---
 
