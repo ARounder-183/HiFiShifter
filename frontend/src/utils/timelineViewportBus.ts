@@ -30,7 +30,7 @@ import {
 import {
     createTimelineAxis,
     type TimelineAxis,
-} from "../components/layout/timeline/runtime/timelineAxis.js";
+} from "../components/layout/renderKernel/timelineAxis.js";
 import { createViewportBus } from "../components/layout/timeline/runtime/viewportBus.js";
 
 /** 旧式监听器的参数签名（尚未迁移到 TimelineAxis 的订阅方使用）。 */

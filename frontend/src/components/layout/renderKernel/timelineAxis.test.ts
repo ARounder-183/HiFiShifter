@@ -19,7 +19,7 @@
 
 import { test } from "vitest";
 
-import { buildSparseClipRenderModel } from "./timelineCanvasModel.js";
+import { buildSparseClipRenderModel } from "../timeline/runtime/timelineCanvasModel.js";
 import {
     contentPxToSec,
     createTimelineAxis,
@@ -35,7 +35,7 @@ import {
     viewportStartSec,
     withAxis,
 } from "./timelineAxis.js";
-import { buildWaveformScene } from "../../../../waveform/sceneBuilder.ts";
+import { buildWaveformScene } from "../../../waveform/sceneBuilder.ts";
 
 function assertEqual(actual: unknown, expected: unknown, label: string): void {
     if (actual !== expected) {

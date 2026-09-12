@@ -2,9 +2,9 @@ import React from "react";
 
 import { drawTimelineCanvas } from "./runtime/timelineCanvasRenderer";
 import { resolveFontFamily } from "./runtime/timelineCanvasStyle";
-import { clearCanvasPhysical, rasterize } from "./runtime/canvasRaster";
+import { clearCanvasPhysical, rasterize } from "../renderKernel/canvasRaster";
 import type { TimelineCanvasClipModel } from "./runtime/timelineCanvasModel";
-import type { TimelineAxis } from "./runtime/timelineAxis";
+import type { TimelineAxis } from "../renderKernel/timelineAxis";
 import { LAYER_ORDER } from "./runtime/timelineFrameCommitter";
 import { timelineViewportBus } from "../../../utils/timelineViewportBus";
 import {

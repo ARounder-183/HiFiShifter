@@ -131,6 +131,7 @@ import {
     type ParamSelection,
 } from "./pianoRoll/paramSelection";
 import {
+    clipboardPreviewSpans,
     mapClipboardToTargetRanges,
     toParamClipboardPayload,
     type ParamClipboardData,
@@ -147,7 +148,7 @@ import {
     createTimelineAxis,
     viewportEndSec,
     viewportStartSec,
-} from "./timeline/runtime/timelineAxis.js";
+} from "./renderKernel/timelineAxis.js";
 import { usePianoRollInteractions } from "./pianoRoll/usePianoRollInteractions";
 import { useLiveParamEditing } from "./pianoRoll/useLiveParamEditing";
 import { getParamShiftStep, parseParamShiftMagnitude } from "./pianoRoll/paramShiftStep";
@@ -205,9 +206,104 @@ import {
     centerFromVerticalScrollTop,
     verticalScrollTopFromCenter,
 } from "./pianoRoll/verticalScrollMapping";
+import {
+    isPianoRollCurveGlEnabled,
+    isPianoRollGlSceneEnabled,
+    isPianoRollKernelEnabled,
+} from "./timeline/kernel/featureFlag";
+import {
+    resolveClipboardPreviewColor,
+    resolveDetectedCurveColors,
+    resolveSecondaryCurveColor,
+} from "./pianoRoll/colors";
+import { resolveSecondaryOverlayValues } from "./pianoRoll/secondaryOverlaySelection";
+import { getFixedDashPattern } from "./pianoRoll/render";
+import type { PianoRollCurveLayer } from "./pianoRoll/kernel/host/pianoRollKernelData";
+import type { TimelineAxis } from "./renderKernel/timelineAxis";
+import { secToViewportPx } from "./renderKernel/timelineAxis";
+import {
+    createPianoRollKernelHost,
+    type PianoRollKernelHost,
+} from "./pianoRoll/kernel/host/pianoRollKernelHost";
+import type {
+    MutablePianoRollKernelData,
+    PianoRollGridSpec,
+} from "./pianoRoll/kernel/host/pianoRollKernelData";
+import { PIANO_ROLL_VERTICAL_SCROLL_RANGE_PX } from "./pianoRoll/kernel/scroll/verticalValueScroll";
+import { normalizeCssColor, resolvePianoRollColors } from "./pianoRoll/colors";
+import { parseRgbaColor } from "./timeline/runtime/timelineClipGlRenderer";
 
 const NOTE_NAMES_SHARP = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
-const PARAM_EDITOR_VERTICAL_SCROLL_RANGE_PX = 1600;
+const PARAM_EDITOR_VERTICAL_SCROLL_RANGE_PX = PIANO_ROLL_VERTICAL_SCROLL_RANGE_PX;
+
+/**
+ * 本面板在共享视口中的来源标识。
+ *
+ * 与时间轴的 `TIMELINE_SYNC_ORIGIN` 成对：双方发布时登记来源，订阅回调据此
+ * 跳过"自己造成的广播"（否则时间轴会把自己的值再应用一遍并回退）。
+ */
+const PIANO_ROLL_SYNC_ORIGIN = "pianoRoll";
+
+/**
+ * 是否启用参数编辑器渲染内核（阶段 1：滚动 / 视口所有权）。
+ *
+ * 在**模块加载时**读取一次（与时间轴内核同一约定）：切换开关后刷新页面生效。
+ * 未显式设置时**开启**（见 `isPianoRollKernelEnabled`）——默认值不跟随构建模式，
+ * 否则打包后会静默退回旧渲染器（Phase 3 计划 R8）。显式写 `"0"` 是逃生门，
+ * 也可在「视图 → 时间轴显示设置」用总开关一次关掉四层。
+ */
+const PARAM_EDITOR_KERNEL_ENABLED = isPianoRollKernelEnabled();
+
+/**
+ * 是否启用参数编辑器 GL 场景层（阶段 2）。
+ *
+ * 特殊说明：必须与内核开关**同时**成立才有效——GL 层依赖内核提供的视口真值
+ * （`u_viewOrigin` 由内核的滚动位置驱动）。两者都关 / 只开内核时，绘制完全走
+ * Phase 1 已验证的 Canvas2D 路径。
+ */
+const PARAM_EDITOR_GL_SCENE_ENABLED = PARAM_EDITOR_KERNEL_ENABLED && isPianoRollGlSceneEnabled();
+
+/**
+ * 是否启用参数编辑器曲线 GL 层（阶段 3）。
+ *
+ * 特殊说明：它**嵌套在** GL 场景层之内——曲线层复用主 GL 画布的上下文，没有 GL
+ * 场景层就没有曲线层。因此两个开关必须同时成立。
+ *
+ * 实测依据（Phase 3 计划 R7）：最小缩放下 3 分钟曲线约 36000 个可见点，Canvas2D
+ * 描边需 71.7ms/帧（≈14fps），GL 全路径 4.6ms（15.6×）。
+ */
+const PARAM_EDITOR_CURVE_GL_ENABLED = PARAM_EDITOR_GL_SCENE_ENABLED && isPianoRollCurveGlEnabled();
+
+/**
+ * 把 `getFixedDashPattern` 的返回值收窄为元组。
+ *
+ * 特殊说明：该函数返回 `number[]`（历史签名，也被 Canvas2D 的 `setLineDash` 消费），
+ * 而曲线图层描述符要求 `[dash, gap]` 二元组。这里做一次显式收窄而不是改它的签名——
+ * 改签名会波及 Canvas2D 路径，而那条路径是已充分验证的。长度不符时返回 null
+ * （视为实线），宁可退化也不产出非法图案。
+ *
+ * @param pattern `[dash, gap]`。
+ * @returns 二元组；长度不符时为 null。
+ */
+function toDashTuple(pattern: readonly number[]): [number, number] | null {
+    return pattern.length >= 2 ? [pattern[0], pattern[1]] : null;
+}
+
+/**
+ * 判断数值是否值得写入 DOM（跨过容差）。
+ *
+ * 【为什么要取反写法】`previous` 为 NaN（从未写入）时 `Math.abs(next - NaN) <= eps`
+ * 恒为 false，若正着写会得到「无需写入」，表现为首帧完全不写。取反让 NaN 稳定走
+ * 「需要写入」分支（与内核宿主同一写法）。
+ *
+ * @param next 本次要写入的值。
+ * @param previous 上一次写入的值（NaN = 从未写入）。
+ * @param epsilon 视为「无变化」的最大差值。
+ * @returns 需要写入时为 true。
+ */
+function shouldWriteNumber(next: number, previous: number, epsilon = 0.01): boolean {
+    return !(Math.abs(next - previous) <= epsilon);
+}
 
 /**
  * 参数编辑器工具栏的参数显示顺序排名（数值越小越靠左）。
@@ -511,8 +607,33 @@ export const PianoRollPanel: React.FC = () => {
     const getVisualPlayheadSec = useCallback(() => visualPlayheadSecRef.current, []);
     const rulerPlayheadLineRef = useRef<HTMLDivElement | null>(null);
     const rulerPlayheadHeadRef = useRef<HTMLDivElement | null>(null);
+    /**
+     * 内核宿主的稳定引用。
+     *
+     * 【为什么声明在这里】`invalidate`（紧随其后）在内核模式下要把标脏转交宿主，
+     * 因此必须在它之前声明。放在下方原来的位置会让 `invalidate` 的闭包引用一个
+     * 尚未初始化的 `const`（TDZ）——首次调用即抛 ReferenceError。
+     */
+    const hostRef = useRef<PianoRollKernelHost | null>(null);
     const drawRef = useRef<() => void>(() => {});
+    /**
+     * 请求重绘（所有会改变画面的数据/状态变更都经此入口）。
+     *
+     * 【内核模式下为什么要转交宿主】曲线层搬到 GL 后，画面由**两个**渲染循环驱动：
+     * 面板自己的 rAF（Canvas2D）与内核宿主的 rAF（GL 层）。只调度前者会让 GL 层
+     * 永远停留在旧内容上——典型症状是"曲线数据到了但屏幕上不出现，直到滚动一下
+     * 才显示"。因此内核模式下标脏一律交给宿主：宿主的帧提交里会回调 `onFrame`
+     * → `applyScrollLayers` → `drawRef.current()`，Canvas2D 与 GL 同帧一起刷新。
+     *
+     * 特殊说明：`drawRef.current()` 自身不调用 `invalidate()`，所以这条链不会自激。
+     * 宿主尚未创建（挂载前 / 卸载后）时退回面板自己的 rAF，避免丢失首次绘制。
+     */
     const invalidate = useCallback(() => {
+        const host = hostRef.current;
+        if (PARAM_EDITOR_KERNEL_ENABLED && host != null) {
+            host.invalidate();
+            return;
+        }
         if (rafRef.current != null) return;
         rafRef.current = requestAnimationFrame(() => {
             rafRef.current = null;
@@ -562,6 +683,16 @@ export const PianoRollPanel: React.FC = () => {
         [effectiveProjectScale, projectScaleAtSec, s.customScalePresets],
     );
     const editParam = s.editParam as ParamName;
+    /**
+     * `editParam` 的 ref 镜像。
+     *
+     * 【为什么需要】宿主在**挂载时创建一次**（长生命周期），其回调（`onFrame` /
+     * `onScrollTopFrame`）里无法直接读到最新的 `editParam`——闭包捕获的是挂载时的
+     * 值，切换参数后回调仍按旧参数换算视口，会出现"切了参数但竖向位置按上一个参数
+     * 映射"的错位。ref 每次渲染刷新，回调现读即最新。
+     */
+    const editParamRef = useRef<ParamName>(editParam);
+    editParamRef.current = editParam;
     // pitchSnapOpen 已在顶部工具栏 JSX 内声明和使用，无需重复声明
     // pianoRoll.copy/cut/paste 的复制/剪切/粘贴已由全局路由统一派发到
     // handleEditOp，本地不再需要键位匹配（见 useKeybindings/focusRouting）。
@@ -1070,6 +1201,15 @@ export const PianoRollPanel: React.FC = () => {
         const newScrollLeft = scrollLeftRef.current * ratio;
         const scroller = scrollerRef.current;
         if (scroller) {
+            // 内核模式：先按绘制坐标把位置交给内核（它负责换算原生坐标并镜像回写），
+            // 再走采纳路径同步 state。旧实现则直接写原生 scroller 后由 syncScrollLeft 采纳。
+            if (PARAM_EDITOR_KERNEL_ENABLED) {
+                applyHorizontalScrollPosition(newScrollLeft);
+                scrollLeftRef.current = newScrollLeft;
+                lastScrollLeftRef.current = newScrollLeft;
+                setScrollLeft(newScrollLeft);
+                return;
+            }
             scroller.scrollLeft = newScrollLeft;
             syncScrollLeft(scroller);
             return;
@@ -1110,7 +1250,8 @@ export const PianoRollPanel: React.FC = () => {
                 pxPerSecRef.current = store.pxPerSec;
                 scrollLeftRef.current = drawingScrollLeft;
                 lastScrollLeftRef.current = drawingScrollLeft;
-                scroller.scrollLeft = store.scrollLeft;
+                // 同步落地走统一载体（内核模式下即宿主；它会换算原生坐标并镜像回写）。
+                applyHorizontalScrollPosition(drawingScrollLeft);
                 applyScrollLayers(drawingScrollLeft);
                 setScrollLeft(drawingScrollLeft);
                 timelineSyncApplyingRef.current = false;
@@ -1136,10 +1277,10 @@ export const PianoRollPanel: React.FC = () => {
             pendingParamSyncViewportRef.current = null;
             horizontalZoomPendingRef.current = null;
             horizontalZoomChainRef.current = null;
-            // 禁用时移除偏移补偿：把原生滚动位置还原为绘制坐标。
+            // 禁用时移除偏移补偿：把位置还原为绘制坐标。
             if (scroller) {
                 const next = Math.max(0, scrollLeftRef.current);
-                scroller.scrollLeft = next;
+                applyHorizontalScrollPosition(next);
                 scrollLeftRef.current = next;
                 lastScrollLeftRef.current = next;
                 setScrollLeft(next);
@@ -1187,8 +1328,16 @@ export const PianoRollPanel: React.FC = () => {
         pxPerSecRef.current = pending.pxPerSec;
         pxPerBeatRef.current = pending.pxPerSec * (60 / Math.max(1e-6, s.bpm));
         scrollLeftRef.current = drawingScrollLeft;
-        scroller.scrollLeft = pending.nativeScrollLeft;
-        syncScrollLeft(scroller);
+        // `pending.nativeScrollLeft` 是共享视口的原生值；换算成绘制坐标后走统一载体
+        // （内核模式会再加回偏移，旧实现直接写原生，两者落到同一位置）。
+        applyHorizontalScrollPosition(drawingScrollLeft);
+        // 【内核模式下不能再调 syncScrollLeft】它是「读原生 scroller → 采纳为真值」的
+        // 路径，而此时原生镜像还停留在**上一帧的旧值**（本函数的写入要等内核下一帧才
+        // 回写），于是会把刚提交的目标位置又覆盖回旧值——表现为「同步从 1200 拨回 0
+        // 时参数编辑器不动」。旧实现里原生就是事实源，读回来即是刚写的值，故无此问题。
+        if (!PARAM_EDITOR_KERNEL_ENABLED) {
+            syncScrollLeft(scroller);
+        }
         applyScrollLayers(drawingScrollLeft);
         timelineSyncApplyingRef.current = false;
         // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1207,7 +1356,7 @@ export const PianoRollPanel: React.FC = () => {
         const offset = syncEnabled ? timelineOffsetRef.current : 0;
         const native = pending.nextScrollLeft;
         const next = timelineViewportNativeToState(native, offset);
-        scroller.scrollLeft = native;
+        applyHorizontalScrollPosition(next);
         if (lastScrollLeftRef.current !== next) {
             lastScrollLeftRef.current = next;
             scrollLeftRef.current = next;
@@ -1216,13 +1365,21 @@ export const PianoRollPanel: React.FC = () => {
         // 没有变化（例如光标位于左侧同步空白区时锚定在工程起点，next 仍为 -offset），
         // 也要广播缩放，否则轨道视图不会跟着缩放。
         if (syncEnabled && !timelineSyncApplyingRef.current) {
-            timelineViewportSync.setViewport({
-                scrollLeft: native,
-                pxPerSec,
-            });
+            timelineViewportSync.setViewport(
+                {
+                    scrollLeft: native,
+                    pxPerSec,
+                },
+                PIANO_ROLL_SYNC_ORIGIN,
+            );
         }
         applyScrollLayers(next);
         // 防止浏览器对原生滚动位置的钳制造成漂移：立即校正到理论值。
+        // 内核模式下由宿主的镜像回写负责校正（它每帧都会把原生位置对齐真值）。
+        if (PARAM_EDITOR_KERNEL_ENABLED) {
+            setScrollLeft(next);
+            return;
+        }
         const expectedNative = timelineViewportStateToNative(next, offset);
         if (Math.abs(scroller.scrollLeft - expectedNative) > 0.5) {
             scroller.scrollLeft = expectedNative;
@@ -1830,6 +1987,40 @@ export const PianoRollPanel: React.FC = () => {
     const rulerContentRef = useRef<HTMLDivElement | null>(null);
     const gridLayerRef = useRef<HTMLDivElement | null>(null);
 
+    // ── 渲染内核（阶段 1：滚动 / 视口所有权）────────────────────────────
+    //
+    // 【开启时所有权如何反转】旧实现把原生 scroller 的 `scrollLeft/scrollTop`
+    // 当唯一事实源，各图层靠 `syncScrollLeft` → `applyScrollLayers` 跟随。内核
+    // 模式下反过来：宿主持有真值，**原生 scroller 退化为被动镜像**——宿主每帧把
+    // 真值写回它，使尚未迁移的输入代码（中键拖拽、框选自动滚动等直接读写
+    // `scroller.scrollLeft` 的地方）读到的仍是同一份位置，行为不变。
+    //
+    /** 内核模式下的数据镜像（每次 render 更新字段，宿主每帧现读）。 */
+    /**
+     * 内核数据镜像（每次 render 更新字段，宿主每帧现读）。
+     *
+     * 特殊说明：显式标注为 `PianoRollKernelData` 而不是让它靠初始值推断——推断出的
+     * 窄类型会让后续写入 `grid`（可选字段）报错，也会漏掉字段名拼写错误。
+     */
+    const kernelDataRef = useRef<MutablePianoRollKernelData>({
+        projectSec: 1,
+        valueDomain: { min: 0, max: 1, span: 1 },
+        grid: null,
+        overlay: null,
+    });
+    /** 自绘滚动条的 thumb（仅内核模式挂载）。 */
+    const hScrollbarThumbRef = useRef<HTMLDivElement | null>(null);
+    const vScrollbarThumbRef = useRef<HTMLDivElement | null>(null);
+    /** 自绘滚动条的**轨道**（承接「点空白翻页」，仅内核模式挂载）。 */
+    const hScrollbarTrackRef = useRef<HTMLDivElement | null>(null);
+    const vScrollbarTrackRef = useRef<HTMLDivElement | null>(null);
+    /** GL 静态层画布（阶段 2，仅内核 + GL 开关都开启时挂载）。 */
+    const glCanvasRef = useRef<HTMLCanvasElement | null>(null);
+    /** 键盘轴 GL 画布（阶段 2，Task 4）。独立画布：轴列不随横向滚动移动。 */
+    const glAxisCanvasRef = useRef<HTMLCanvasElement | null>(null);
+    /** 动态叠加层 GL 画布（阶段 2，Task 6）：播放头与选区，位于曲线层之上。 */
+    const glOverlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
+
     function pitchDeltaToDegreeSteps(
         basePitch: number,
         targetPitch: number,
@@ -2000,6 +2191,47 @@ export const PianoRollPanel: React.FC = () => {
         }
     }
 
+    /**
+     * 把「绘制坐标」的水平位置提交到当前滚动载体。
+     *
+     * 【为什么要单独一个函数】面板里有若干**权威写入**点（时间轴同步、键盘缩放、
+     * 缩放事务落地、关闭同步时还原位置）：它们算出目标位置后直接落到滚动载体。
+     * 内核模式下载体是宿主（内部换算原生坐标并镜像回写），旧实现下载体是原生
+     * scroller（需自行加回偏移）。把分支收在一处，避免每调用点各写一份换算。
+     *
+     * 特殊说明：滚轮 / 自动滚屏等**增量**路径不走这里——它们仍写原生 scroller，
+     * 再由 `syncScrollLeft` 采纳进内核（见该函数注释）。
+     *
+     * @param drawingScrollLeft 目标水平位置（绘制坐标）。
+     */
+    function applyHorizontalScrollPosition(drawingScrollLeft: number): void {
+        const host = hostRef.current;
+        if (PARAM_EDITOR_KERNEL_ENABLED && host) {
+            host.setScrollLeft(drawingScrollLeft);
+            return;
+        }
+        const scroller = scrollerRef.current;
+        if (!scroller) return;
+        const offset = paramEditorSyncTimelineRef.current ? timelineOffsetRef.current : 0;
+        scroller.scrollLeft = timelineViewportStateToNative(drawingScrollLeft, offset);
+    }
+
+    /**
+     * 采纳一次水平滚动位置变化（原生 scroller → 真值）。
+     *
+     * 流程：原生坐标 → 绘制坐标 → 同步开关时推送共享视口 → 通知各图层 → 量化提交 state。
+     *
+     * 【内核模式下的语义转变（重要）】旧实现里本函数是「原生是事实源 → 各层跟随」的
+     * 唯一扩散点。内核模式下它变成**采纳点**：尚未迁移的输入代码（滚轮、中键平移、
+     * BPM 换算、自动滚屏）仍然直接写 `scroller.scrollLeft`，这里把该值收进内核
+     * （`host.setScrollLeft`），由内核完成钳制、镜像回写与帧提交。这样：
+     * - 所有既有手势**逐条保持可用**，无需在本任务里重写输入路径（Task 7 才迁移）；
+     * - 钳制与渲染真值收敛到内核一处，不会出现两套边界；
+     * - 收敛性：内核回写的值与内核当前值相同 → 不产生状态变化 → 不再触发帧，
+     *   因此「写原生 → 采纳 → 镜像回写 → 再触发 onScroll」不会形成循环。
+     *
+     * @param scroller 原生滚动容器。
+     */
     function syncScrollLeft(scroller: HTMLDivElement) {
         const syncEnabled = s.paramEditorSyncTimeline;
         const offset = syncEnabled ? timelineOffsetRef.current : 0;
@@ -2010,11 +2242,31 @@ export const PianoRollPanel: React.FC = () => {
         lastScrollLeftRef.current = next;
         scrollLeftRef.current = next;
         if (syncEnabled && !timelineSyncApplyingRef.current) {
-            // 原生滚动位置 == 共享视口值（轨道坐标），直接推送。
-            timelineViewportSync.setViewport({
-                scrollLeft: scroller.scrollLeft,
-                pxPerSec: pxPerSecRef.current,
-            });
+            // 【必须用 next（采纳值）而不是 scroller.scrollLeft（原生 DOM）】
+            //
+            // 内核模式下原生 scroller 只是**镜像**：真值在 ScrollKernel，由宿主在帧
+            // 提交时回写。直接读 DOM 会拿到**尚未回写**的旧值，于是把旧位置当成
+            // "用户滚动"推回共享视口——时间轴收到后应用旧值，位置出现回退。
+            //
+            // 实测（拖时间轴带动参数编辑器时）：共享视口序列 `10 → 20 → pianoRoll
+            // 推回 10`，时间轴内核随之从 20 退回 10。连续拖拽时每三帧回退一次
+            // （增量呈 `+30, +10, -10` 循环），即用户报告的"阶梯感/被吸附感"。
+            //
+            // `next` 是刚由原生位置换算出的绘制坐标，再换算回原生即得权威值；
+            // 与 `onUserScrollLeft` 的口径一致（后者用的是内核的绘制坐标）。
+            timelineViewportSync.setViewport(
+                {
+                    scrollLeft: timelineViewportStateToNative(next, offset),
+                    pxPerSec: pxPerSecRef.current,
+                },
+                PIANO_ROLL_SYNC_ORIGIN,
+            );
+        }
+        // 内核模式：交给内核（它会按新边界钳制、镜像回写并在下一帧提交各图层）。
+        const host = hostRef.current;
+        if (PARAM_EDITOR_KERNEL_ENABLED && host) {
+            host.setScrollLeft(next);
+            return;
         }
         applyScrollLayers(next);
         if (scrollStateRafRef.current == null) {
@@ -2025,12 +2277,300 @@ export const PianoRollPanel: React.FC = () => {
         }
     }
 
+    // ── 内核宿主：创建 / 销毁 ────────────────────────────────────────
+    //
+    // 【为什么只在挂载时创建】宿主持有滚动位置与手势状态，是长生命周期运行时
+    // 对象；随渲染重建会让滚动位置静默归零（与 `ScrollKernel` 的生命周期约束
+    // 一致）。数据经 `kernelDataRef` 流入，尺寸经宿主自己的 ResizeObserver 更新。
+    //
+    // 【两套坐标系（本任务最容易出错的地方）】
+    // 「同步时间轴视图」开启时，参数编辑器的内容层要整体右移一个偏移量（`offset`，
+    // 实测 200px），两边的网格线才能在屏幕上对齐。于是：
+    // - **原生坐标**：`[0, 内容宽 + offset]`——旧实现 `paddedContentWidth` 撑出的域；
+    // - **绘制坐标**：`[−offset, 内容宽]`——含负值，各图层（标尺/网格/画布/波形）用。
+    //
+    // 内核的位置字段恒被钳到 `[0, max]`（无法表示负值），所以内核持有**原生坐标**，
+    // 本面板消费的 `axis.scrollLeftPx` 是**绘制坐标**。换算只在宿主边界发生
+    // （见宿主 `horizontalOffsetPx`），面板这一侧不再自行换算，避免出现第三份口径。
+    useEffect(() => {
+        if (!PARAM_EDITOR_KERNEL_ENABLED) return;
+        const container = scrollerRef.current;
+        if (!container) return;
+        const hThumb = hScrollbarThumbRef.current;
+        const vThumb = vScrollbarThumbRef.current;
+        if (!hThumb || !vThumb) return;
+
+        const host = createPianoRollKernelHost({
+            container,
+            hScrollbarThumb: hThumb,
+            vScrollbarThumb: vThumb,
+            hScrollbarTrack: hScrollbarTrackRef.current ?? undefined,
+            vScrollbarTrack: vScrollbarTrackRef.current ?? undefined,
+            data: () => kernelDataRef.current,
+            initialPxPerSec: pxPerSecRef.current,
+            glCanvas: glCanvasRef.current,
+            glAxisCanvas: glAxisCanvasRef.current,
+            glOverlayCanvas: glOverlayCanvasRef.current,
+            axisWidthPx: AXIS_W,
+            glSceneEnabled: PARAM_EDITOR_GL_SCENE_ENABLED,
+            // 偏移经 ref 读取（同步开关与布局偏移都在运行时变化，闭包捕获会读到挂载时的旧值）。
+            horizontalOffsetPx: () =>
+                paramEditorSyncTimelineRef.current ? timelineOffsetRef.current : 0,
+            sync: {
+                rulerContent: rulerContentRef.current,
+                gridLayer: gridLayerRef.current,
+            },
+            // 帧提交：宿主已完成滚动条几何与标尺 / 网格的 DOM 写入，这里只做
+            // 「画布 + 波形 + 播放头」三项与旧实现同帧的提交。复用同一个
+            // `applyScrollLayers`，保证两种模式的绘制路径**逐字一致**（迁移不得
+            // 改变视觉，唯一区别是谁来触发它：旧实现是 scroll 事件，内核是 rAF）。
+            onFrame: (axis) => {
+                const drawing = axis.scrollLeftPx;
+                scrollLeftRef.current = drawing;
+                applyScrollLayers(drawing);
+                // 【为什么必须同步 lastScrollLeftRef】镜像回写会让原生 scroller 触发
+                // `scroll` 事件，进而走到 `syncScrollLeft`。把"上一次已知位置"同步成
+                // 内核真值后，该事件的 `next` 与之相等 → 立即早退，**不会**把值推回
+                // 共享视口（否则镜像回写会被误当成用户滚动，把时间轴也推着走）。
+                lastScrollLeftRef.current = drawing;
+                // 镜像回写：让尚未迁移的输入代码（中键拖拽 / 框选自动滚动）读到的
+                // 原生位置始终等于内核真值。仅在真正不一致时写，避免每帧触发样式重算。
+                const native = timelineViewportStateToNative(
+                    drawing,
+                    paramEditorSyncTimelineRef.current ? timelineOffsetRef.current : 0,
+                );
+                if (shouldWriteNumber(container.scrollLeft, native, 0.5)) {
+                    container.scrollLeft = native;
+                }
+                if (shouldWriteNumber(container.scrollTop, axis.scrollTopPx, 0.5)) {
+                    container.scrollTop = axis.scrollTopPx;
+                }
+            },
+            onScrollTopFrame: (scrollTopPx) => {
+                // 竖向逐帧上报：把内核真值**正向**写回面板的值域视口 ref。
+                //
+                // 【为什么必须有这条通道】`pitchViewRef` / `paramViewsRef` 是竖向滚动
+                // 的使用者（曲线投影、命中测试、`valueToY` 都读它们），但竖向真值在
+                // 内核且此前**没有回写通道**——面板只能靠原生 `scroll` 事件反向回写
+                // 来"猜"，而那条路正是镜像回声的来源（实测每帧把内核回退 ~7.5px，
+                // 用户报告为"上下拖经常拖不动 / 有吸附感"）。
+                //
+                // 改用正向通道后回声不再承担任何职责，可以在 `onScrollerScroll` 里
+                // 安全忽略。宿主保证本回调排在 `onFrame`（绘制）之前，因此画面与数据
+                // 同帧对齐、不会慢一拍。
+                //
+                // 只做赋值，不进 React（与横向 `onScrollLeftFrame` 同一约定）。
+                const param = editParamRef.current;
+                const current = getCurrentViewportForScrollbar(param);
+                const bounds = getParamValueBoundsForScrollbar(param);
+                const center = centerFromVerticalScrollTop({
+                    min: bounds.min,
+                    max: bounds.max,
+                    span: current.span,
+                    scrollTop: scrollTopPx,
+                    scrollRangePx: PARAM_EDITOR_VERTICAL_SCROLL_RANGE_PX,
+                });
+                if (param === "pitch") {
+                    pitchViewRef.current = { center, span: current.span };
+                } else {
+                    paramViewsRef.current = {
+                        ...paramViewsRef.current,
+                        [param]: { center, span: current.span },
+                    };
+                }
+            },
+            onScrollLeftCommit: () => {
+                // 量化提交：标尺的刻度范围由 React 按视口计算，不同步就会出现
+                // 「滚动后刻度消失」（与旧实现 `syncScrollLeft` 的收尾一致）。
+                // 注意 `px` 是**绘制坐标**（宿主对外统一口径）。
+                if (scrollStateRafRef.current == null) {
+                    scrollStateRafRef.current = requestAnimationFrame(() => {
+                        scrollStateRafRef.current = null;
+                        setScrollLeft(scrollLeftRef.current);
+                    });
+                }
+            },
+            onUserScrollLeft: (drawingScrollLeft) => {
+                // 用户手势（拖 thumb / 点轨道翻页）：与旧实现拖原生滚动条同语义——
+                // 需要把新位置推给共享视口，否则同步模式下滚动时间轴不会跟随。
+                //
+                // 【为什么不走 syncScrollLeft】那条路径依赖 `scroll` 事件，而内核的
+                // 镜像是同帧程序化写入的，事件到达时无法再区分"用户滚动"与"自身回写"。
+                // 由宿主动上报手势来源是唯一可靠判据（见 `onUserScrollLeft` 说明）。
+                scrollLeftRef.current = drawingScrollLeft;
+                lastScrollLeftRef.current = drawingScrollLeft;
+                const offset = paramEditorSyncTimelineRef.current ? timelineOffsetRef.current : 0;
+                if (paramEditorSyncTimelineRef.current && !timelineSyncApplyingRef.current) {
+                    timelineViewportSync.setViewport(
+                        {
+                            scrollLeft: timelineViewportStateToNative(drawingScrollLeft, offset),
+                            pxPerSec: pxPerSecRef.current,
+                        },
+                        PIANO_ROLL_SYNC_ORIGIN,
+                    );
+                }
+            },
+        });
+        hostRef.current = host;
+        // dev-only 调试出口：浏览器里读取内核视口真值（滚动 / 值域中心 / 滚动条
+        // 几何），用于核对「滚动条 thumb 与实际可滚范围是否一致」这类问题。
+        if (import.meta.env.DEV) {
+            (
+                window as unknown as { __hsPianoRollKernel?: PianoRollKernelHost }
+            ).__hsPianoRollKernel = host;
+        }
+        return () => {
+            hostRef.current = null;
+            if (import.meta.env.DEV) {
+                delete (window as unknown as { __hsPianoRollKernel?: PianoRollKernelHost })
+                    .__hsPianoRollKernel;
+            }
+            host.dispose();
+        };
+        // 挂载时创建一次；数据经 kernelDataRef 流入（见上方注释）。
+        //
+        // 依赖项为空是刻意的：宿主一旦重建，滚动位置与手势状态会静默归零（见
+        // `ScrollKernel` 的生命周期约束）。回调里的 `editParamRef` 与
+        // `getCurrentViewportForScrollbar` / `getParamValueBoundsForScrollbar`
+        // 都只读 ref（不读渲染期 state），因此闭包捕获的旧引用仍能取到最新值。
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
     useLayoutEffect(() => {
         const el = scrollerRef.current;
         if (!el) return;
+        // 内核模式下滚动位置由宿主持有，挂载时不得用原生值反向覆盖内核真值
+        // （那会在首帧把位置清零）。内核自己会标脏首帧。
+        if (PARAM_EDITOR_KERNEL_ENABLED) return;
         syncScrollLeft(el);
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [contentWidth, s.grid, s.beats]);
+
+    // 内核数据镜像：每次 render 更新字段（宿主每帧现读，不触发重建）。
+    //
+    // 特殊说明 1：`projectSec` 必须是**秒**而不是 `contentWidth`（像素）——宿主内部
+    // 会自行乘以 pxPerSec 得到内容宽，传像素会让内容宽度被放大 pxPerSec 倍，
+    // 横向滚动条 thumb 缩成一条线。
+    //
+    // 特殊说明 2：值域（`min/max/span`）必须与面板当前视口同源。宿主用它把像素位置
+    // 换算成值域中心；若停留在占位值，竖向换算的比例就错了——表现为钢琴键盘整体
+    // 偏移一个八度、竖向滚动条 thumb 位置也不对（曾实际发生）。
+    //
+    // 特殊说明 3：`span` 用**当前视口**的跨度（而非值域全长）。竖向像素位置 ↔ 值域
+    // 中心的映射依赖 span，用错会让滚到同一位置对应的中心值不同。
+
+    /**
+     * 构建 GL 场景层的网格输入（阶段 2）。
+     *
+     * 流程：由 `editParam` 判定网格种类 → 取值域边界与当前视口 → 解析该主题的两条
+     * 网格线颜色为数值 RGBA → 绑定 `valueToY`。
+     *
+     * 特殊说明 1：`valueToY` 传的是**面板自己的**那个函数（只绑定 `editParam`），
+     * 与 Canvas2D 路径共用同一份投影——这正是两种渲染模式网格不会错位的原因。
+     *
+     * 特殊说明 2：颜色经 `parseRgbaColor` 解析为 0..1 浮点，因为 GL 上传统一用浮点；
+     * 在渲染热路径上反复解析 CSS 字符串是纯浪费，故在镜像更新（低频）时做。
+     * 解析失败（拿到 NaN）时退回**不透明黑**——宁可颜色不对也不要上传 NaN，
+     * NaN 会让整个实例属性失效、整层消失。
+     *
+     * @returns 网格输入；GL 关闭或无法解析时返回 null（宿主按"没有网格"处理）。
+     */
+    function buildGridSpec(): PianoRollGridSpec | null {
+        // 显式标注为字面量联合：不加标注时 TS 会把嵌套三元推断成 `string`，
+        // 导致返回值无法赋给 `PianoRollGridSpec["kind"]`。
+        const kind: PianoRollGridSpec["kind"] | null =
+            editParam === "pitch"
+                ? "pitch"
+                : isChildPitchOffsetCentsParam(editParam)
+                  ? "cents"
+                  : isChildPitchOffsetDegreesParam(editParam)
+                    ? "degrees"
+                    : isChildFormantOffsetCentsParam(editParam)
+                      ? "formantCents"
+                      : null;
+        if (kind === null) return null;
+
+        const bounds = getParamValueBoundsForScrollbar(editParam);
+        const view = clampViewport(editParam, getCurrentViewportForScrollbar(editParam));
+        const colors = resolvePianoRollColors(themeMode === "dark");
+        const finite = (c: readonly number[]) => c.every((v) => Number.isFinite(v));
+        /**
+         * 解析 CSS 颜色为数值 RGBA；解析失败（NaN）时退回**不透明黑**。
+         *
+         * 特殊说明：宁可颜色不对也不要上传 NaN——NaN 会让整个实例属性失效、
+         * 整层几何消失（比"颜色错"严重得多，且更难归因）。
+         */
+        const toRgba = (css: string): [number, number, number, number] => {
+            // 必须先归一化：`parseRgbaColor` 只认 rgb()/rgba()，hex 会被解析成
+            // **不透明洋红**（故意设计，用于暴露漏解析）。本配色表的 whiteKey /
+            // blackKey 正是 hex，不归一化会让整个键盘变洋红（曾实际发生）。
+            const parsed = parseRgbaColor(normalizeCssColor(css));
+            return finite(parsed) ? parsed : [0, 0, 0, 1];
+        };
+
+        const base = {
+            kind,
+            view: { center: view.center, span: view.span },
+            absMin: bounds.min,
+            absMax: bounds.max,
+            valueToY: (value: number, heightPx: number) => valueToY(editParam, value, heightPx),
+            strongRgba: toRgba(colors.pitchGridC),
+            weakRgba: toRgba(colors.pitchGridOther),
+            // 文字与刻度线（阶段 2 Task 5）：GL 侧据此渲染轴标签与刻度。
+            paramName: editParam,
+            // 与传给 drawPianoRoll 的 fontFamily 同一个值（第 3268 行），
+            // 保证两种渲染模式的字形完全一致。
+            fontFamily,
+            tensionLabelRgba: toRgba(colors.tensionLabel),
+            tensionLineRgba: toRgba(colors.tensionLine),
+        };
+
+        // 键盘轴颜色只在音高参数下提供：非 pitch 时 GL 层据此判定"没有键盘"
+        // 并清空几何（否则切到别的参数后键盘会残留在画布上）。
+        if (kind !== "pitch") return base;
+        return {
+            ...base,
+            whiteKeyRgba: toRgba(colors.whiteKey),
+            blackKeyRgba: toRgba(colors.blackKey),
+            blackKeyGradientRgba: toRgba(colors.blackKeyGradient),
+            cSeparatorRgba: toRgba(colors.cSeparator),
+            keySeparatorRgba: toRgba(colors.keySeparator),
+            axisBorderRgba: toRgba(colors.axisBorder),
+            cLabelRgba: toRgba(colors.cLabel),
+            whiteKeyLabelRgba: toRgba(colors.whiteKeyLabel),
+            blackKeyLabelRgba: toRgba(colors.blackKeyLabel),
+        };
+    }
+
+    useLayoutEffect(() => {
+        if (!PARAM_EDITOR_KERNEL_ENABLED) return;
+        const bounds = getParamValueBoundsForScrollbar(editParam);
+        const view = clampViewport(editParam, getCurrentViewportForScrollbar(editParam));
+        kernelDataRef.current.projectSec = dynamicProjectSec;
+        kernelDataRef.current.valueDomain = {
+            min: bounds.min,
+            max: bounds.max,
+            span: view.span,
+        };
+        // GL 场景层的网格输入（阶段 2）。仅在 GL 开关开启时构建：颜色解析会创建
+        // DOM 探针（`normalizeCssColor`），未启用时不该付这份成本。
+        kernelDataRef.current.grid = PARAM_EDITOR_GL_SCENE_ENABLED ? buildGridSpec() : null;
+        // pxPerSec 由面板解析后写入内核（阶段 1 不迁移缩放，见宿主文件头）。
+        hostRef.current?.setPxPerSec(pxPerSec);
+        // 同步偏移会改变**水平上限**（原生域 = 内容宽 + 偏移），必须按新边界重钳。
+        hostRef.current?.reclamp();
+        hostRef.current?.invalidate();
+        // `pitchViewRef` / `paramViewsRef` 是 ref（变更不触发渲染），故依赖项里无法列出；
+        // 值域跨度变化由下面的显式同步点负责（`syncVerticalScrollbarForViewport`）。
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [
+        dynamicProjectSec,
+        pxPerSec,
+        editParam,
+        processorParams,
+        s.paramEditorSyncTimeline,
+        timelineOffsetPx,
+    ]);
 
     // 渲染期刷新 syncScrollLeft 引用（其函数体随每次渲染重建）。
     const syncScrollLeftRef = useRef(syncScrollLeft);
@@ -2042,7 +2582,13 @@ export const PianoRollPanel: React.FC = () => {
     // 内容层错位，表现为线条抽搐一帧；这里每帧以原生值对账，发现失步立即
     // 经 syncScrollLeft 重发（refs → bus → 标尺/网格/画布同帧），把残余
     // 错位变成被治愈的一帧。绝大多数帧只是两次数值比较，空闲开销可忽略。
+    //
+    // 【内核模式下停用】真值源已经反转（内核持有、原生是被动镜像），再由本循环
+    // 以原生值反向对账就变成**两个方向的自愈互相打架**：内核刚写镜像，本循环又
+    // 把镜像读回来当作"权威"重发一次。内核自己每帧提交、且镜像由内核回写，
+    // 因此这里的职责整体消失。
     useEffect(() => {
+        if (PARAM_EDITOR_KERNEL_ENABLED) return;
         let raf = 0;
         const reconcile = () => {
             raf = requestAnimationFrame(reconcile);
@@ -2238,12 +2784,44 @@ export const PianoRollPanel: React.FC = () => {
         );
     }
 
+    /**
+     * 把值域视口同步到竖向滚动位置（值域 → 像素）。
+     *
+     * 流程：钳制视口 → 更新内核数据镜像的值域 → 把 `center` 交给滚动载体。
+     *
+     * 特殊说明 1（内核模式）：滚动载体从原生 scroller 换成内核宿主。两者语义一致
+     * （都是 0..1600 的像素域），因此这里只换载体、不换映射——手感由
+     * `verticalScrollTopFromCenter` 单一来源保证，两个模式不会分叉。
+     * 宿主内部自带去重，故无需在这里再判一次差值。
+     *
+     * 特殊说明 2（**必须先刷新镜像的 span**）：竖向缩放（钢琴键区 alt/ctrl+滚轮）
+     * 只改 `span`，而视口存在 **ref** 里——ref 变更不触发 React 渲染，于是「内核数据
+     * 镜像」那个 effect 不会重跑，内核读到的 `valueDomain.span` 仍是旧值。此时
+     * `setValueCenter` 会按**旧 span** 反算像素位置，结果完全错位（实测：缩放后
+     * nativeTop 直接掉到 0 且再也动不了）。因此这里在提交前就地刷新镜像。
+     *
+     * @param param 参数名（决定值域边界）。
+     * @param view 目标值域视口。
+     */
     function syncVerticalScrollbarForViewport(param: ParamName, view: ValueViewport): void {
+        const clampedView = clampViewport(param, view);
+        const bounds = getParamValueBoundsForScrollbar(param);
+
+        const host = hostRef.current;
+        if (PARAM_EDITOR_KERNEL_ENABLED && host) {
+            // 就地刷新值域镜像（见特殊说明 2）。
+            kernelDataRef.current.valueDomain = {
+                min: bounds.min,
+                max: bounds.max,
+                span: clampedView.span,
+            };
+            host.setValueCenter(clampedView.center);
+            return;
+        }
+
         const scroller = scrollerRef.current;
         if (!scroller) return;
 
-        const clampedView = clampViewport(param, view);
-        const bounds = getParamValueBoundsForScrollbar(param);
         const nextTop = verticalScrollTopFromCenter({
             min: bounds.min,
             max: bounds.max,
@@ -2257,6 +2835,16 @@ export const PianoRollPanel: React.FC = () => {
         }
     }
 
+    /**
+     * 从竖向像素滚动位置反推值域视口（像素 → 值域）。
+     *
+     * 流程：取当前视口与值域边界 → 由像素位置反算中心值 → 钳制后写回视口。
+     *
+     * 特殊说明：内核对齐阶段该函数只由原生滚动条路径调用（内核模式下竖向滚动
+     * 完全由内核拥有，见 Task 7 的输入迁移）。保留它是为了不改变旧路径行为。
+     *
+     * @param scrollTop 竖向像素滚动位置（0..1600）。
+     */
     function applyViewportFromVerticalScrollbar(scrollTop: number): void {
         const param = editParam;
         const currentView = clampViewport(param, getCurrentViewportForScrollbar(param));
@@ -2800,6 +3388,260 @@ export const PianoRollPanel: React.FC = () => {
         result: ReturnType<typeof buildScaleSegments>;
     }>({ tempoMap: null, scale: null, qStart: NaN, qEnd: NaN, result: [] });
 
+    /**
+     * 组装曲线图层描述符（阶段 3：曲线 GL）。
+     *
+     * 流程：按**绘制顺序**产出 7 类图层 —— 参考线 → 检测曲线 → 副参数 → 原始曲线
+     * → 编辑曲线 → 选区高亮 → 剪贴板预览（后者在上）。顺序与 `render.ts` 的
+     * Canvas2D 调用顺序**逐项对应**，因为 GL 靠数组顺序决定层叠。
+     *
+     * 特殊说明 1：每条图层自带 `valueToY`。副参数的值域与主参数不同（音分 / 度数 /
+     * 共振峰），必须用各自的投影，否则副参数曲线会被画到错误高度——而且错得"合理"
+     * （仍在视口内），极难归因。
+     *
+     * 特殊说明 2：虚线图案一律经 `getFixedDashPattern`（按 dpr 量化），与 Canvas2D
+     * 路径同一个函数，杜绝疏密分叉。
+     *
+     * 特殊说明 3：`values` 传引用而不是副本——采样值不随滚动变化，每帧复制的成本
+     * 在长曲线上很可观。
+     *
+     * 特殊说明 4：两个需要裁剪的图层（选区高亮 / 剪贴板预览）把选区矩形同时作为
+     * `clipRect`（GL 侧走 scissor）与坐标边界。
+     *
+     * @param axis 当前投影（每帧由 drawRef 构造）。
+     * @returns 曲线图层列表（按绘制顺序）；GL 关闭时不会被调用。
+     */
+    function buildCurveLayers(axis: TimelineAxis): PianoRollCurveLayer[] {
+        const layers: PianoRollCurveLayer[] = [];
+        const isDark = themeMode === "dark";
+        // 与 Canvas2D 路径同一份配色表（`render.ts` 也调 `resolvePianoRollColors`）。
+        const colors = resolvePianoRollColors(isDark);
+        const h = viewSizeRef.current.h;
+        const project = (param: ParamName, value: number) => valueToY(param, value, h);
+
+        // ── ① 参考线（pitch 模式）────────────────────────────────────
+        if (editParam === "pitch") {
+            for (const overlay of referencePitchOverlays) {
+                const values = resolveSecondaryOverlayValues({
+                    orig: overlay.paramView.orig,
+                    edit: overlay.paramView.edit,
+                });
+                if (values.length < 2) continue;
+                layers.push({
+                    values,
+                    param: "pitch",
+                    startFrame: overlay.paramView.startFrame,
+                    stride: overlay.paramView.stride,
+                    framePeriodMs: overlay.paramView.framePeriodMs,
+                    lineWidthPx: overlay.highlighted ? 3.2 : 2.6,
+                    rgba: parseRgbaColor(normalizeCssColor(overlay.strokeColor)),
+                    dash: null,
+                    projection: "curve",
+                    valueToY: (v) => project("pitch", v),
+                });
+            }
+        }
+
+        // ── ② 检测曲线（pitch 模式，按 clip 循环调色）─────────────────
+        //
+        // 投影模式必须是 `"detected"`（不是 `"curve"`）：
+        // - 检测曲线自带**绝对起始秒** `curveStartSec`，塞进 `startFrame` 会把它丢掉，
+        //   曲线整体平移到时间轴原点；
+        // - 检测曲线的 `midi <= 0` 表示**无声帧**，必须跳过，否则相邻有声点之间会
+        //   拉出一条贯穿底部的垂直尖刺（GL 迁移后实际出现过）。
+        // 两条语义都与 `drawCurveTimed` 不同，见 `projectDetectedCurvePoints` 说明。
+        if (editParam === "pitch") {
+            const palette = resolveDetectedCurveColors(isDark);
+            detectedPitchCurves.forEach((curve, ci) => {
+                if (!curve.midiCurve || curve.midiCurve.length < 2) return;
+                layers.push({
+                    values: curve.midiCurve,
+                    param: "pitch",
+                    startFrame: 0,
+                    stride: 1,
+                    framePeriodMs: curve.framePeriodMs,
+                    lineWidthPx: 2,
+                    rgba: parseRgbaColor(normalizeCssColor(palette[ci % palette.length])),
+                    dash: null,
+                    projection: "detected",
+                    curveStartSec: curve.curveStartSec,
+                    valueToY: (v) => project("pitch", v),
+                });
+            });
+        }
+
+        // ── ③ 副参数曲线 ────────────────────────────────────────────
+        if (pitchEnabled && visibleSecondaryParamIds.length > 0) {
+            visibleSecondaryParamIds.forEach((paramId, index) => {
+                const pv = secondaryParamViews[paramId];
+                if (!pv || Math.max(pv.orig.length, pv.edit.length) < 2) return;
+                const values = resolveSecondaryOverlayValues({ orig: pv.orig, edit: pv.edit });
+                layers.push({
+                    values,
+                    param: paramId,
+                    startFrame: pv.startFrame,
+                    stride: pv.stride,
+                    framePeriodMs: pv.framePeriodMs,
+                    lineWidthPx: 2,
+                    rgba: parseRgbaColor(
+                        normalizeCssColor(resolveSecondaryCurveColor(isDark, paramId, index)),
+                    ),
+                    dash: null,
+                    projection: "curve",
+                    valueToY: (v) => valueToY(paramId as ParamName, v, h),
+                });
+            });
+        }
+
+        // ── ④⑤⑥ 主参数曲线（原始 / 编辑 / 选区高亮）─────────────────
+        const pv = pitchEnabled ? paramView : null;
+        if (pv) {
+            const editValues =
+                liveEditOverrideRef.current && liveEditOverrideRef.current.key === pv.key
+                    ? liveEditOverrideRef.current.edit
+                    : pv.edit;
+
+            if (pv.orig.length >= 2) {
+                layers.push({
+                    values: pv.orig,
+                    param: editParam,
+                    startFrame: pv.startFrame,
+                    stride: pv.stride,
+                    framePeriodMs: pv.framePeriodMs,
+                    lineWidthPx: 1.8,
+                    rgba: parseRgbaColor(normalizeCssColor(colors.origCurve)),
+                    dash: toDashTuple(getFixedDashPattern(6, 6)),
+                    projection: "curve",
+                    valueToY: (v) => project(editParam, v),
+                });
+            }
+
+            if (editValues.length >= 2) {
+                layers.push({
+                    values: editValues,
+                    param: editParam,
+                    startFrame: pv.startFrame,
+                    stride: pv.stride,
+                    framePeriodMs: pv.framePeriodMs,
+                    lineWidthPx: 2.6,
+                    rgba: parseRgbaColor(normalizeCssColor(colors.editCurve)),
+                    dash: null,
+                    projection: "curve",
+                    valueToY: (v) => project(editParam, v),
+                });
+            }
+
+            // 选区高亮：裁剪到选区矩形（与 Canvas2D 的 ctx.clip 对应）。
+            // 多段选区：每段推一层（同一曲线、各自的 clipRect）——曲线被画多次、
+            // 每次只露出该段窗口，视觉等价于 Canvas2D 的「多矩形并集 clip」。
+            const selection = selectionRef.current;
+            if (selection && selection.length > 0 && editValues.length >= 2) {
+                for (const range of selection) {
+                    const clip = selectionClipRect(axis, range);
+                    if (!clip || clip.w <= 0) continue;
+                    layers.push({
+                        values: editValues,
+                        param: editParam,
+                        startFrame: pv.startFrame,
+                        stride: pv.stride,
+                        framePeriodMs: pv.framePeriodMs,
+                        lineWidthPx: 3.6,
+                        rgba: parseRgbaColor(normalizeCssColor(colors.selectionCurve)),
+                        dash: null,
+                        projection: "curve",
+                        clipRect: clip,
+                        valueToY: (v) => project(editParam, v),
+                    });
+                }
+            }
+
+            // ── ⑦ 剪贴板预览（不同的投影语义：从落点起点按原始帧距排布）──
+            // 与 Canvas2D 路径（render.ts）共用 paramClipboardMapping 的唯一映射
+            // 规则：选区（beat）→ 帧范围 → 逐段落点 span，每段推一层。预览画的
+            // 就是粘贴会落下的数据，断层两侧的截断与 Canvas2D 路径完全一致。
+            // 时间换算用目标帧周期（粘贴按帧号落盘，用剪贴板帧周期会让预览与
+            // 结果错位，见 clipboardPreviewSpans 说明）。
+            const preview = clipboardRef.current;
+            if (preview && selection && selection.length > 0 && preview.param === editParam) {
+                const frameRanges = beatRangesToFrameRanges(
+                    selection,
+                    secPerBeat,
+                    pv.framePeriodMs,
+                );
+                const spans = clipboardPreviewSpans({
+                    targetRanges: frameRanges,
+                    clipboard: preview,
+                    targetFramePeriodMs: pv.framePeriodMs,
+                });
+                for (const span of spans) {
+                    if (span.values.length === 0) continue;
+                    const spanEndSec =
+                        span.startSec + (span.values.length * span.framePeriodMs) / 1000;
+                    const clip = secSpanClipRect(axis, span.startSec, spanEndSec);
+                    if (!clip || clip.w <= 0) continue;
+                    layers.push({
+                        values: span.values,
+                        param: editParam,
+                        startFrame: 0,
+                        stride: 1,
+                        framePeriodMs: span.framePeriodMs,
+                        lineWidthPx: 2,
+                        rgba: parseRgbaColor(
+                            normalizeCssColor(resolveClipboardPreviewColor(isDark)),
+                        ),
+                        dash: toDashTuple(getFixedDashPattern(4, 4)),
+                        projection: "clipboard",
+                        clipStartSec: span.startSec,
+                        clipEndSec: spanEndSec,
+                        clipRect: clip,
+                        valueToY: (v) => project(editParam, v),
+                    });
+                }
+            }
+        }
+
+        return layers;
+    }
+
+    /**
+     * 把秒区间换算为视口坐标的裁剪矩形。
+     *
+     * @param axis 当前投影。
+     * @param startSec 区间起点（工程秒）。
+     * @param endSec 区间终点（工程秒）。
+     * @returns 裁剪矩形；宽度为 0 时返回 null。
+     */
+    function secSpanClipRect(
+        axis: TimelineAxis,
+        startSec: number,
+        endSec: number,
+    ): { x: number; y: number; w: number; h: number } | null {
+        const x0 = secToViewportPx(axis, startSec);
+        const x1 = secToViewportPx(axis, endSec);
+        const w = x1 - x0;
+        if (!(w > 0)) return null;
+        return { x: x0, y: 0, w, h: viewSizeRef.current.h };
+    }
+
+    /**
+     * 把单段选区（beat）换算为视口坐标的裁剪矩形。
+     *
+     * @param axis 当前投影。
+     * @param range 单段选区（beat；start/end 颠倒时自动归一）。
+     * @returns 裁剪矩形；宽度为 0 时返回 null。
+     */
+    function selectionClipRect(
+        axis: TimelineAxis,
+        range: { startBeat: number; endBeat: number },
+    ): { x: number; y: number; w: number; h: number } | null {
+        const beatToSec = Math.max(1e-9, secPerBeat);
+        return secSpanClipRect(
+            axis,
+            Math.min(range.startBeat, range.endBeat) * beatToSec,
+            Math.max(range.startBeat, range.endBeat) * beatToSec,
+        );
+    }
+
     // Keep draw function always up-to-date (invalidate() is stable and calls drawRef.current()).
     drawRef.current = () => {
         // 滚动热路径的投影：用 ref 构造，因为滚动时 ref 同步更新而 React
@@ -2831,6 +3673,77 @@ export const PianoRollPanel: React.FC = () => {
                 scaleSegEndQ,
             );
         }
+        // 曲线图层（阶段 3）：每帧重建描述符列表。
+        //
+        // 【为什么要每帧构建】滚动/缩放会改变可见段与 `axis`，而 GL 侧要在绘制时
+        // 才投影；描述符里的 `values` 引用与视口无关（数据没变），因此这里的成本
+        // 只是一次浅层数组构建，不复制采样值。
+        if (PARAM_EDITOR_KERNEL_ENABLED && PARAM_EDITOR_CURVE_GL_ENABLED) {
+            kernelDataRef.current.curves = buildCurveLayers(drawAxis);
+        } else {
+            kernelDataRef.current.curves = null;
+        }
+
+        // 叠加层镜像（选区块 + 播放头）必须**每帧**更新：播放头用的是插值的
+        // 视觉值 `visualPlayheadSecRef`，它不由 React 渲染驱动（见下方注释），
+        // 因此不能在 render 期写入镜像——那样播放头会停在旧的提交值上。
+        if (PARAM_EDITOR_KERNEL_ENABLED) {
+            // 只喂播放头：选区块仍由主画布绘制（见 PianoRollOverlaySpec 说明）。
+            kernelDataRef.current.overlay = {
+                playheadSec: visualPlayheadSecRef.current,
+            };
+        }
+        /**
+         * 主画布的内容签名（阶段 2 Task 6）。
+         *
+         * 【必须包含什么】主画布上绘制的**全部输入**：
+         * - 绘图资源：各条曲线数据、参考线、检测曲线、副参数视口、morph 叠加、
+         *   剪贴板预览、选区块、live 编辑覆盖、音阶高亮（含 tempoMap 段）；
+         * - 视口：`viewSize`、`pxPerSec`、`scrollLeft`、`dpr`（滚动/缩放会改变投影）；
+         * - 主题与字体（颜色解析与文字宽度都会影响像素结果）；
+         * - `pitchAnalysisPending`（它会提前 return，改变绘制内容）。
+         *
+         * 【必须**不**包含什么】播放头位置——它已由 GL 叠加层绘制。把它编进签名会让
+         * 播放帧的签名每帧变化、缓存失效，那就退回"每帧重绘曲线"。
+         *
+         * 【为什么用引用数组 + join】大部分输入是数组/对象引用（Redux 只在内容变化时
+         * 换引用），直接比引用既快又准；数值项显式列举。漏项的代价是"该图层不再更新"，
+         * 因此这里**宁可多编**：低频变化的项一并纳入，成本只是偶尔多一次重绘。
+         */
+        const mainContentSignature = [
+            viewSize.w,
+            viewSize.h,
+            pxPerSecRef.current,
+            scrollLeftRef.current,
+            Math.round((window.devicePixelRatio || 1) * 100),
+            editParam,
+            themeMode,
+            fontFamily,
+            pitchEnabled ? 1 : 0,
+            // 数据与几何（引用比较）。刻意与传给 drawPianoRoll 的字段一一对应，
+            // 避免"签名里写了 A、实际喂给绘制的是 B"这种漂移。
+            detectedPitchCurves,
+            referencePitchOverlays,
+            secondaryParamViews,
+            visibleSecondaryParamIds,
+            paramMorphOverlays,
+            s.showClipboardPreview ? clipboardRef.current : null,
+            selectionRef.current,
+            liveEditOverrideRef.current,
+            effectiveProjectScale,
+            s.tempoMap,
+            segCache.result,
+            s.pitchSnapUnit,
+            s.scaleHighlightMode,
+            s.toolMode,
+            snapToggleHeld,
+            // 视口中心/跨度（用 ref 值，避免依赖 React 渲染时机）
+            pitchViewRef.current.center,
+            pitchViewRef.current.span,
+            paramViewsRef.current,
+            secondaryParamViews,
+        ].join("|");
+
         drawPianoRoll({
             axisCanvas: axisCanvasRef.current,
             canvas: canvasRef.current,
@@ -2859,6 +3772,22 @@ export const PianoRollPanel: React.FC = () => {
             referencePitchOverlays,
             detectedPitchCurves,
             isDark: themeMode === "dark",
+            // 阶段 2：GL 层接管网格时，Canvas2D 必须跳过它（两张画布叠放，
+            // 都画会半透明叠加 + 亚像素重影）。GL 未启用时行为与迁移前一致。
+            skipGrid: PARAM_EDITOR_GL_SCENE_ENABLED,
+            // 键盘几何与轴文字都归 GL（Task 4 / Task 5）。
+            skipKeyboardGeometry: PARAM_EDITOR_GL_SCENE_ENABLED,
+            skipAxisText: PARAM_EDITOR_GL_SCENE_ENABLED,
+            // 轴画布全部内容归 GL（Task 4/5）-> 整张跳过（含清屏）。
+            skipAxisCanvas: PARAM_EDITOR_GL_SCENE_ENABLED,
+            // 播放头归 GL 叠加层（Task 6）。**选区块不在此列**：它属于曲线之下的
+            // 图层，仍由主画布绘制（见 render.ts 的 skipPlayhead 说明）。
+            skipPlayhead: PARAM_EDITOR_GL_SCENE_ENABLED,
+            // 曲线归 GL（阶段 3）。morph 手柄不在曲线层内，仍由主画布绘制。
+            skipCurves: PARAM_EDITOR_CURVE_GL_ENABLED,
+            // 主画布内容缓存（Task 6）：签名只含**主画布自己绘制的内容**与视口，
+            // 不含播放头（它已归 GL 叠加层）——这正是播放帧能跳过曲线重绘的原因。
+            mainContentSignature: PARAM_EDITOR_GL_SCENE_ENABLED ? mainContentSignature : undefined,
             fontFamily,
             clipboardPreview: s.showClipboardPreview ? clipboardRef.current : null,
             // pitch snap visual helpers
@@ -3002,9 +3931,36 @@ export const PianoRollPanel: React.FC = () => {
     }, [paramView, refreshParamValuePreview]);
 
     const onScrollerWheelNative = interactions.onScrollerWheelNative;
+    /**
+     * 原生滚动容器的 `scroll` 事件（面板侧：竖向适配）。
+     *
+     * 【内核模式下的竖向回声必须忽略——这是"拖不动/吸附感"的根因】
+     * 内核模式里原生 scroller 只是**镜像**：宿主每帧把内核真值写回 DOM，该写入会
+     * 触发原生 `scroll` 事件，而事件不带来源。本函数原本把它当成"用户滚动了原生
+     * 容器"，于是读回一个**滞后**的位置再写回内核。
+     *
+     * 实测（拖竖向滚动条，1920×1200）：内核 `scrollTop` 已到 548.054，事件里读到的
+     * 却是上一帧镜像的 540.5，内核被**回退 7.554px**。逐帧往复，净位移被吃掉一部分
+     * 并伴随抖动——即用户报告的「上下拖经常拖不动 / 阶梯感」。
+     *
+     * 【为什么可以整条忽略，而不会漏掉输入】
+     * 竖向的原生输入只有 PageUp / PageDown / Home / End 四个键。它们已由宿主接管
+     * （见 `pianoRollKernelHost.onKeyDown` 与 `renderKernel/keyboardScroll`），并且时间轴
+     * 内核早就是同一做法。滚轮 / 中键平移 / 拖自绘滚动条 / 点轨道翻页都不经原生
+     * `scroll`（它们直接调内核 API），因此这个事件在内核模式下纯属回声。
+     *
+     * 【为什么横向不在这里一并处理】横向早已在 `interactions.onScrollerScroll` 里
+     * 按内核开关早退（见该处理函数），此处只补竖向。
+     *
+     * 特殊说明：判据用「事件值 == 上一次镜像回写的**读回值**」。浏览器会按设备像素
+     * 量化原生位置（dpr=2 时写 540.694 读回 540.5），拿请求值比较判不出来。
+     */
     const onScrollerScroll = useCallback(
         (e: React.UIEvent<HTMLDivElement>) => {
             interactions.onScrollerScroll(e);
+
+            // 内核模式：竖向由内核拥有，此处只可能收到镜像回声。
+            if (PARAM_EDITOR_KERNEL_ENABLED) return;
 
             const scroller = e.currentTarget;
             const currentView = clampViewport(editParam, getCurrentViewportForScrollbar(editParam));
@@ -5588,6 +6544,16 @@ export const PianoRollPanel: React.FC = () => {
                         className="bg-qt-window border-r border-qt-border relative"
                         style={{ width: AXIS_W, flex: 1 }}
                     >
+                        {/* 键盘轴 GL 层（阶段 2，Task 4）：铺在 Canvas2D 轴画布**下面**
+                            （DOM 顺序在前、无 z-index），只画几何；音名标签仍由
+                            Canvas2D 画在上层（Task 5 才迁标签）。 */}
+                        {PARAM_EDITOR_GL_SCENE_ENABLED ? (
+                            <canvas
+                                ref={glAxisCanvasRef}
+                                className="absolute inset-0 pointer-events-none"
+                                aria-hidden
+                            />
+                        ) : null}
                         <canvas ref={axisCanvasRef} className="absolute inset-0" />
                     </div>
                 </Flex>
@@ -5632,94 +6598,175 @@ export const PianoRollPanel: React.FC = () => {
                         }}
                     />
 
-                    <div
-                        ref={scrollerRef}
-                        className="flex-1 bg-qt-graph-bg overflow-x-scroll overflow-y-scroll relative custom-scrollbar outline-none focus:outline-none focus-visible:outline-none"
-                        data-piano-roll-scroller
-                        tabIndex={0}
-                        onAuxClick={interactions.onScrollerAuxClick}
-                        onScroll={onScrollerScroll}
-                        onContextMenu={interactions.onScrollerContextMenu}
-                        onKeyDown={interactions.onScrollerKeyDown}
-                    >
-                        {/* Sticky viewport overlay: grid + canvas do not physically scroll */}
+                    {/* 内核模式下自绘滚动条的定位容器：滚动条必须是**滚动容器之外**
+                        的兄弟节点。放在滚动容器内部会被内容一起滚走（绝对定位在滚动
+                        容器里仍随内容平移），这是自绘滚动条最经典的错位根因。 */}
+                    <div className="flex-1 min-w-0 relative">
                         <div
-                            className="sticky left-0 top-0 h-full"
-                            style={{ width: viewSize.w, overflow: "hidden", zIndex: 1 }}
+                            ref={scrollerRef}
+                            className={
+                                // 内核模式：隐藏原生滚动条（自绘条取代），但**保留
+                                // `overflow: scroll`**——原生 scroller 此时是被动镜像，
+                                // 必须保留滚动范围才能接受宿主每帧的程序化回写，也让
+                                // 尚未迁移的输入代码（中键平移等）继续可读可写。
+                                PARAM_EDITOR_KERNEL_ENABLED
+                                    ? "absolute inset-0 bg-qt-graph-bg overflow-x-scroll overflow-y-scroll hide-scrollbar outline-none focus:outline-none focus-visible:outline-none"
+                                    : "absolute inset-0 bg-qt-graph-bg overflow-x-scroll overflow-y-scroll custom-scrollbar outline-none focus:outline-none focus-visible:outline-none"
+                            }
+                            data-piano-roll-scroller
+                            tabIndex={0}
+                            onAuxClick={interactions.onScrollerAuxClick}
+                            onScroll={onScrollerScroll}
+                            onContextMenu={interactions.onScrollerContextMenu}
+                            onKeyDown={interactions.onScrollerKeyDown}
                         >
-                            <div className="relative h-full" style={{ width: viewSize.w }}>
-                                <BackgroundGrid
-                                    contentWidth={contentWidth}
-                                    contentHeight={viewSize.h}
-                                    viewportWidth={viewSize.w}
-                                    scrollLeft={scrollLeft}
-                                    pxPerBeat={pxPerBeat}
-                                    grid={s.grid}
-                                    beatsPerBar={Math.max(1, Math.round(s.beats || 4))}
-                                    visible={s.timelineSnap.gridVisible}
-                                    minSpacingPx={s.timelineSnap.gridMinSpacingPx}
-                                    swingPercent={
-                                        s.timelineSnap.swingEnabled
-                                            ? s.timelineSnap.swingPercent
-                                            : 0
-                                    }
-                                    layerRef={gridLayerRef}
-                                    ticks={timelineTicks}
-                                    sticky
-                                />
+                            {/* Sticky viewport overlay: grid + canvas do not physically scroll */}
+                            <div
+                                className="sticky left-0 top-0 h-full"
+                                style={{ width: viewSize.w, overflow: "hidden", zIndex: 1 }}
+                            >
+                                <div className="relative h-full" style={{ width: viewSize.w }}>
+                                    <BackgroundGrid
+                                        contentWidth={contentWidth}
+                                        contentHeight={viewSize.h}
+                                        viewportWidth={viewSize.w}
+                                        scrollLeft={scrollLeft}
+                                        pxPerBeat={pxPerBeat}
+                                        grid={s.grid}
+                                        beatsPerBar={Math.max(1, Math.round(s.beats || 4))}
+                                        visible={s.timelineSnap.gridVisible}
+                                        minSpacingPx={s.timelineSnap.gridMinSpacingPx}
+                                        swingPercent={
+                                            s.timelineSnap.swingEnabled
+                                                ? s.timelineSnap.swingPercent
+                                                : 0
+                                        }
+                                        layerRef={gridLayerRef}
+                                        ticks={timelineTicks}
+                                        sticky
+                                    />
 
-                                <PianoRollWaveformSurface
-                                    clips={clipPeaks}
-                                    widthPx={viewSize.w}
-                                    heightPx={viewSize.h}
-                                    scrollLeftPx={scrollLeft}
-                                    pxPerSec={pxPerSec}
-                                    colors={waveformColors}
-                                />
+                                    <PianoRollWaveformSurface
+                                        clips={clipPeaks}
+                                        widthPx={viewSize.w}
+                                        heightPx={viewSize.h}
+                                        scrollLeftPx={scrollLeft}
+                                        pxPerSec={pxPerSec}
+                                        colors={waveformColors}
+                                    />
 
-                                <canvas
-                                    ref={canvasRef}
-                                    className="absolute inset-0"
-                                    style={{ cursor: canvasCursor }}
-                                    onPointerMove={interactions.onCanvasPointerMove}
-                                    onPointerLeave={interactions.onCanvasPointerLeave}
-                                    onPointerDown={interactions.onCanvasPointerDown}
-                                />
-                                {s.showParamValuePopup &&
-                                    paramValuePreview &&
-                                    (() => {
-                                        const rect = canvasRef.current?.getBoundingClientRect();
-                                        if (!rect) return null;
-                                        return (
-                                            <div
-                                                className="absolute z-20 pointer-events-none bg-qt-panel border border-qt-border rounded px-2 py-1 text-[11px] leading-none text-qt-text"
-                                                style={{
-                                                    left: paramValuePreview.clientX - rect.left,
-                                                    top: paramValuePreview.clientY - rect.top,
-                                                    transform: "translate(0, -100%)",
-                                                    whiteSpace: "nowrap",
-                                                }}
-                                            >
-                                                {paramValuePreview.displayText ??
-                                                    formatParamValuePreview(
-                                                        paramValuePreview.value,
-                                                    )}
-                                            </div>
-                                        );
-                                    })()}
+                                    {/* GL 静态层（阶段 2）：网格等静态图层。
+                                        层级说明：它是**最底层**——DOM 顺序在 Canvas2D
+                                        主画布之前，且不设 z-index（Canvas2D 主画布用
+                                        `absolute inset-0` 覆盖其上）。因此 GL 层只画
+                                        静态底图，曲线 / 选区 / 播放头仍由 Canvas2D
+                                        画在上层。
+                                        仅在开关开启时挂载：未开启时不创建画布，
+                                        避免多申请一个 WebGL 上下文。 */}
+                                    {PARAM_EDITOR_GL_SCENE_ENABLED ? (
+                                        <canvas
+                                            ref={glCanvasRef}
+                                            data-piano-roll-gl-scene
+                                            className="absolute inset-0 pointer-events-none"
+                                            aria-hidden
+                                        />
+                                    ) : null}
+
+                                    {/* `data-piano-roll-canvas`：主曲线画布的稳定选择器。
+                                        浏览器自动化验证（scripts/dev-shot.mjs）需要按元素
+                                        截图逐像素比对曲线，而 canvas 本身没有可锚定的属性；
+                                        内核模式下页面里有多个同尺寸 canvas，按尺寸猜会命中
+                                        错误的那一个。 */}
+                                    <canvas
+                                        ref={canvasRef}
+                                        data-piano-roll-canvas
+                                        className="absolute inset-0"
+                                        style={{ cursor: canvasCursor }}
+                                        onPointerMove={interactions.onCanvasPointerMove}
+                                        onPointerLeave={interactions.onCanvasPointerLeave}
+                                        onPointerDown={interactions.onCanvasPointerDown}
+                                    />
+
+                                    {/* 动态叠加层（阶段 2，Task 6）：播放头与选区。
+                                        层序：DOM 顺序在曲线画布**之后** => 覆盖其上。
+                                        指针事件全部穿透（interactions 挂在曲线画布上），
+                                        否则会挡住参数编辑的命中测试。 */}
+                                    {PARAM_EDITOR_GL_SCENE_ENABLED ? (
+                                        <canvas
+                                            ref={glOverlayCanvasRef}
+                                            className="absolute inset-0 pointer-events-none"
+                                            aria-hidden
+                                        />
+                                    ) : null}
+                                    {s.showParamValuePopup &&
+                                        paramValuePreview &&
+                                        (() => {
+                                            const rect = canvasRef.current?.getBoundingClientRect();
+                                            if (!rect) return null;
+                                            return (
+                                                <div
+                                                    className="absolute z-20 pointer-events-none bg-qt-panel border border-qt-border rounded px-2 py-1 text-[11px] leading-none text-qt-text"
+                                                    style={{
+                                                        left: paramValuePreview.clientX - rect.left,
+                                                        top: paramValuePreview.clientY - rect.top,
+                                                        transform: "translate(0, -100%)",
+                                                        whiteSpace: "nowrap",
+                                                    }}
+                                                >
+                                                    {paramValuePreview.displayText ??
+                                                        formatParamValuePreview(
+                                                            paramValuePreview.value,
+                                                        )}
+                                                </div>
+                                            );
+                                        })()}
+                                </div>
                             </div>
+
+                            {/* Spacer：提供横向内容宽度与竖向滚动范围，实际绘制仍固定在 sticky 视口层。 */}
+                            <div
+                                className="relative"
+                                style={{
+                                    width: paddedContentWidth,
+                                    height: PARAM_EDITOR_VERTICAL_SCROLL_RANGE_PX,
+                                    pointerEvents: "none",
+                                }}
+                                aria-hidden
+                            />
                         </div>
 
-                        {/* Spacer：提供横向内容宽度与竖向滚动范围，实际绘制仍固定在 sticky 视口层。 */}
-                        <div
-                            className="relative"
-                            style={{
-                                width: paddedContentWidth,
-                                height: PARAM_EDITOR_VERTICAL_SCROLL_RANGE_PX,
-                                pointerEvents: "none",
-                            }}
-                            aria-hidden
-                        />
+                        {/* 自绘滚动条（仅内核模式）：几何由宿主每帧写入。
+                            样式对齐旧实现的原生滚动条（`.custom-scrollbar`）：
+                            - thumb 取 `--qt-scrollbar-thumb`（浅色主题下才看得见），
+                              而不是固定半透明黑；
+                            - 轨道**透明**（旧实现是 `scrollbar-color: … transparent`），
+                              加底色会多出一条灰带；
+                            - 8px 厚 + 胶囊圆角，对应 macOS 的 overlay thin 滚动条
+                              （旧实现的原生滚动条不占布局，这里绝对定位叠加，行为等价）。
+                            - 外层即**轨道**：承接「点空白翻页」。宿主的 thumb 处理器
+                              会 `stopPropagation`，因此到达轨道的按下必然不在 thumb 上。 */}
+                        {PARAM_EDITOR_KERNEL_ENABLED ? (
+                            <>
+                                <div
+                                    ref={vScrollbarTrackRef}
+                                    className="absolute right-0 top-0 bottom-0 w-2 z-20"
+                                >
+                                    <div
+                                        ref={vScrollbarThumbRef}
+                                        className="absolute left-0 w-full rounded-full bg-[var(--qt-scrollbar-thumb)]"
+                                    />
+                                </div>
+                                <div
+                                    ref={hScrollbarTrackRef}
+                                    className="absolute bottom-0 left-0 right-0 h-2 z-20"
+                                >
+                                    <div
+                                        ref={hScrollbarThumbRef}
+                                        className="absolute top-0 h-full rounded-full bg-[var(--qt-scrollbar-thumb)]"
+                                    />
+                                </div>
+                            </>
+                        ) : null}
                     </div>
                 </Flex>
             </Flex>

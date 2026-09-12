@@ -20,7 +20,7 @@
 import { test } from "vitest";
 
 import { buildTimelineTicks, RULER_LABEL_HIDDEN_GAP_PX } from "./buildTimelineTicks.js";
-import { createTimelineAxis, secToContentPx, secToViewportPx } from "./timelineAxis.js";
+import { createTimelineAxis, secToContentPx, secToViewportPx } from "../../renderKernel/timelineAxis.js";
 import type { TempoMap } from "../../../../utils/tempoMap.ts";
 
 function assertEqual(actual: unknown, expected: unknown, label: string): void {

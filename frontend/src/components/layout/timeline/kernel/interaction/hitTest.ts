@@ -1,0 +1,306 @@
+/**
+ * 时间轴渲染内核 · 命中测试
+ *
+ * 【主要内容】
+ * 把「内容坐标下的指针位置」换算为工程时间，并判定命中的轨道与 clip 分区
+ * （header / body）。
+ *
+ * 【作用】
+ * 新内核的轨道区**没有任何 DOM 内容层**，命中必须由几何计算得出。本模块是
+ * 「看到的 = 可点的」这条不变式的落点：几何常量与绘制端同源（`rowHeight`、
+ * `pxPerSec`、`CLIP_HEADER_HEIGHT`），因此不存在 DOM 命中区与 canvas 视觉漂移。
+ *
+ * 【与其他模块的关系】
+ * - 上游：内核宿主在手势开始时调用（见 `host/timelineKernelHost`）。
+ * - 下游：手势状态机据命中结果进入「选中 / 拖拽 / seek」分支。
+ * - 独立性：纯函数，无 DOM / React 依赖，可直接单测。
+ *
+ * 【设计约束】
+ * 1. 轨道内 clip 按 `startSec` **升序**（调用方保证），本模块用二分查找定位
+ *    候选 clip——轨道内 clip 数可达数百，线性扫描会进入手势热路径。
+ * 2. 命中判定使用**半开区间** `[startSec, startSec + lengthSec)`：相邻紧贴的
+ *    两个 clip 在交界处只命中右侧那个，与旧实现的 DOM 层叠顺序一致。
+ */
+
+import {
+    FADE_CORNER_CAP_WIDTH_PX,
+    SNAP_OFFSET_HANDLE_SIZE_PX,
+    SNAP_OFFSET_HIT_HEIGHT_PX,
+    fadeCornerReservePx,
+    snapOffsetHandleXPx,
+} from "../../constants";
+
+/** 左右边缘的默认命中宽度（CSS px）。与 `FADE_CORNER_EDGE_WIDTH_PX` 同量级。 */
+const DEFAULT_EDGE_WIDTH_PX = 6;
+
+/**
+ * 命中测试所需的 clip 字段集。
+ *
+ * 除几何字段外还带若干**业务字段**：`hitTest` 自身不消费它们，只做透传——调用方
+ * （宿主）需要用它们构造 `buildTimelineClipVisualStyle` 来判定 header 控件。
+ * 全部可选：只关心几何的调用方与既有测试无需补齐。
+ */
+export interface HitTestClip {
+    readonly id: string;
+    readonly trackId: string;
+    readonly startSec: number;
+    readonly lengthSec: number;
+    /** 是否静音（影响 header 的静音徽标配色与样式）。 */
+    readonly muted?: boolean;
+    /** 线性增益（样式解析内部换算为 dB）。 */
+    readonly gain?: number;
+    readonly playbackRate?: number;
+    readonly name?: string;
+    /** 分组 id（决定链徽标是否显示，进而决定静音徽标的 x 偏移）。 */
+    readonly groupId?: string;
+    /** 是否为 MIDI clip（`isPitchAdjustment`：会隐藏部分 header 控件）。 */
+    readonly isMidiClip?: boolean;
+    /**
+     * 淡变参数。
+     *
+     * `hitTest` 同样不消费它们，只透传给重叠区解析（`overlapControls`）：包络线的
+     * 位置由长度决定、走向由形状与方向决定，缺任一项都会让命中区与绘制区错位。
+     */
+    readonly fadeInSec?: number;
+    readonly autoFadeInSec?: number;
+    readonly fadeInShape?: number;
+    readonly fadeInDir?: number;
+    readonly fadeOutSec?: number;
+    readonly autoFadeOutSec?: number;
+    readonly fadeOutShape?: number;
+    readonly fadeOutDir?: number;
+    /**
+     * 吸附偏移（秒，相对 clip 起点）。
+     *
+     * `hitTest` **会**消费它——snap offset 三角手柄的命中区左缘跟随该值
+     * （与绘制端共用 `snapOffsetHandleXPx`）。缺省按 0 处理（手柄贴左缘）。
+     */
+    readonly snapOffsetSec?: number;
+}
+
+/** 命中测试所需的轨道最小字段集（顺序即纵向排列顺序）。 */
+export interface HitTestTrack {
+    readonly id: string;
+}
+
+/**
+ * clip 内的命中分区。
+ *
+ * 判定优先级：**snap offset 手柄 → 淡变角 → trim 边缘 → header → body**。
+ *
+ * - snap offset 手柄最高：旧实现里它 `z-70`，高于淡变角（`z-65`）与左右边缘
+ *   （`z-60`）——握把贴在行底，若不先判就会被淡变角 / 边缘抢走（表现为
+ *   "三角拖不动"）。
+ * - 淡变角（`fade-in-corner` / `fade-out-corner`）与 trim 边缘在水平方向**重叠**
+ *   （都贴着左右边缘），靠**竖直方向切分**：body 顶部 `fadeCornerReservePx` 高度内
+ *   归淡变角，其下归 trim——与既有 `constants.fadeCornerReservePx` 的几何切分一致。
+ * - 边缘优先于 header / body：边缘是"窄条"，若让 header 先判，靠上的手柄会被
+ *   header 抢走（表现为"顶部的 trim 手柄点不动"）。
+ */
+export type ClipHitRegion =
+    | "header"
+    | "body"
+    | "left-edge"
+    | "right-edge"
+    | "fade-in-corner"
+    | "fade-out-corner"
+    /** SnapOffset 三角手柄（贴行底的 12×12 握把，左缘跟随偏移值）。 */
+    | "snap-offset-handle"
+    /**
+     * 交叉淡化交点抓手。
+     *
+     * `hitTest` 自身**不产生**这个分区——它由重叠区解析
+     * （`overlapControls`）在重叠区里按位置改写命中结果时给出。列在这里是为了
+     * 让「命中分区」保持单一类型：宿主的指针手势状态机按 region 分派，多一条
+     * 隐式通道就会多一处漏判。
+     */
+    | "crossfade-grip";
+
+/** 命中结果。 */
+export type HitResult =
+    | {
+          /** 命中空白（轨道内无 clip，或落在轨道区之外）。 */
+          readonly kind: "empty";
+          /** 指针处的工程时间（秒，已钳制到 >= 0）。 */
+          readonly sec: number;
+          /** 命中的轨道 id；落在轨道区之外时为 null。 */
+          readonly trackId: string | null;
+          /** 命中的轨道行下标；落在轨道区之外时为 -1。 */
+          readonly trackIndex: number;
+      }
+    | {
+          /** 命中 clip。 */
+          readonly kind: "clip";
+          readonly clip: HitTestClip;
+          readonly region: ClipHitRegion;
+          readonly sec: number;
+          readonly trackIndex: number;
+          /**
+           * clip 内相对 x（以 clip **左边缘**为 0，CSS px）。
+           *
+           * 供 header 控件级命中复用（见 `clipHeaderControls`）：控件的位置常量
+           * 以 clip 左上角为原点，这里直接给出同一坐标系的值，调用方无需重算
+           * ——两处各算一次是位置漂移的常见来源。
+           */
+          readonly localX: number;
+          /** clip 内相对 y（以该 clip **顶边**为 0，CSS px）。 */
+          readonly localY: number;
+      };
+
+/** 命中测试参数。 */
+export interface HitTestArgs {
+    /** 指针的内容坐标 x（CSS px，= scrollLeft + 视口内偏移）。 */
+    readonly contentX: number;
+    /** 指针的内容坐标 y（CSS px，= scrollTop + 视口内偏移）。 */
+    readonly contentY: number;
+    readonly pxPerSec: number;
+    readonly rowHeight: number;
+    /** 轨道列表（顺序 = 纵向排列顺序）。 */
+    readonly tracks: readonly HitTestTrack[];
+    /** 按轨道 id 分桶的 clip（每桶内按 startSec 升序）。 */
+    readonly clipsByTrack: ReadonlyMap<string, readonly HitTestClip[]>;
+    /** clip header 高度（CSS px），用于区分 header / body 分区。 */
+    readonly headerHeightPx: number;
+    /**
+     * 左右边缘的命中宽度（CSS px，内容坐标）。缺省 6。
+     *
+     * 与既有 `FADE_CORNER_EDGE_WIDTH_PX` 同量级：trim 手柄必须够宽才好点中，
+     * 又不能宽到把短 clip 的整个 body 吞掉（因此判定时还会按 clip 宽度收敛）。
+     */
+    readonly edgeWidthPx?: number;
+}
+
+/**
+ * 在轨道内二分查找覆盖 `sec` 的 clip。
+ *
+ * 规则：取「最后一个 startSec <= sec」的 clip，再校验 sec 是否落在其长度内
+ * （半开区间，见文件头约束 2）。
+ *
+ * @param list 该轨道的 clip（按 startSec 升序）。
+ * @param sec 目标时间（秒）。
+ * @returns 命中的 clip；无命中时为 null。
+ */
+function findClipAt(list: readonly HitTestClip[], sec: number): HitTestClip | null {
+    if (list.length === 0) return null;
+    let low = 0;
+    let high = list.length - 1;
+    let candidate: HitTestClip | null = null;
+    while (low <= high) {
+        const mid = (low + high) >> 1;
+        const item = list[mid];
+        if (item.startSec <= sec) {
+            candidate = item;
+            low = mid + 1;
+        } else {
+            high = mid - 1;
+        }
+    }
+    if (candidate === null) return null;
+    return sec < candidate.startSec + candidate.lengthSec ? candidate : null;
+}
+
+/**
+ * 执行命中测试。
+ *
+ * 流程：内容坐标 → 工程时间 → 轨道行 → 轨道内二分 → 分区判定。
+ *
+ * 特殊说明：落在轨道区之外（`contentY < 0` 或超出最后一行）时返回 `empty` 且
+ * `trackId = null`，调用方据此区分「轨道间空白」与「工程空白」（前者不 seek）。
+ *
+ * @param args 命中参数。
+ * @returns 命中结果。
+ */
+export function hitTest(args: HitTestArgs): HitResult {
+    const safePxPerSec = Number.isFinite(args.pxPerSec) ? Math.max(1e-9, args.pxPerSec) : 1e-9;
+    const sec = Number.isFinite(args.contentX) ? Math.max(0, args.contentX / safePxPerSec) : 0;
+    const rowHeight = Number.isFinite(args.rowHeight) ? Math.max(1, args.rowHeight) : 1;
+    const trackIndex = Number.isFinite(args.contentY)
+        ? Math.floor(Math.max(0, args.contentY) / rowHeight)
+        : 0;
+
+    if (trackIndex >= args.tracks.length) {
+        return { kind: "empty", sec, trackId: null, trackIndex: -1 };
+    }
+    const track = args.tracks[trackIndex];
+    const list = args.clipsByTrack.get(track.id) ?? [];
+    const clip = findClipAt(list, sec);
+    if (clip === null) {
+        return { kind: "empty", sec, trackId: track.id, trackIndex };
+    }
+
+    const localY = Math.max(0, args.contentY) - trackIndex * rowHeight;
+    const headerHeightPx = Number.isFinite(args.headerHeightPx)
+        ? Math.max(0, args.headerHeightPx)
+        : 0;
+
+    // 边缘优先于 header / body（见 ClipHitRegion 注释）。边缘宽度按 clip 宽度
+    // 收敛到 1/3：极短 clip 不能整块都算边缘，否则 body 区域消失、拖不动。
+    const clipLeftPx = clip.startSec * safePxPerSec;
+    const clipRightPx = (clip.startSec + clip.lengthSec) * safePxPerSec;
+    const clipWidthPx = Math.max(1, clipRightPx - clipLeftPx);
+    const rawEdgeWidthPx = Number.isFinite(args.edgeWidthPx)
+        ? Math.max(0, args.edgeWidthPx as number)
+        : DEFAULT_EDGE_WIDTH_PX;
+    const edgeWidthPx = Math.min(rawEdgeWidthPx, clipWidthPx / 3);
+
+    // 淡变角与 trim 边缘在水平方向重叠，靠**竖直方向**切分（见 ClipHitRegion 注释）：
+    // body 顶部 `fadeCornerReservePx` 高度内、且水平落在角部横帽宽度内 → 淡变角。
+    // clip 高度按「行高 − 上下 padding」近似（绘制端同样留 1px 边距）。
+    const clipHeightPx = Math.max(1, rowHeight - 2);
+    const bodyHeightPx = Math.max(1, clipHeightPx - headerHeightPx);
+    const reservePx = fadeCornerReservePx(bodyHeightPx);
+    const localBodyY = localY - headerHeightPx;
+    const inCornerBand = localBodyY >= 0 && localBodyY < reservePx;
+    const nearLeftCorner = args.contentX - clipLeftPx <= FADE_CORNER_CAP_WIDTH_PX;
+    const nearRightCorner = clipRightPx - args.contentX <= FADE_CORNER_CAP_WIDTH_PX;
+    const localX = args.contentX - clipLeftPx;
+
+    // ── SnapOffset 三角手柄：最高优先级（见 ClipHitRegion 注释）──
+    // 几何与旧实现的命中握把逐项对齐：贴行底 `SNAP_OFFSET_HIT_HEIGHT_PX` 高、
+    // 宽 `SNAP_OFFSET_HANDLE_SIZE_PX + 3`，左缘 = min(max(−4, 三角 x − 1),
+    // max(−4, 宽度 − 9))。左缘允许为负（三角贴左缘时握把略微外扩），但 clip 命中
+    // 本身要求 `localX ≥ 0`，可达部分自然收敛在 `[0, …]`。
+    const snapHandleLeft = Math.min(
+        Math.max(-4, snapOffsetHandleXPx(clip.snapOffsetSec, safePxPerSec) - 1),
+        Math.max(-4, clipWidthPx - SNAP_OFFSET_HANDLE_SIZE_PX),
+    );
+    const snapHandleWidth = SNAP_OFFSET_HANDLE_SIZE_PX + 3;
+    if (
+        localY >= clipHeightPx - SNAP_OFFSET_HIT_HEIGHT_PX &&
+        localX >= snapHandleLeft &&
+        localX <= snapHandleLeft + snapHandleWidth
+    ) {
+        return {
+            kind: "clip",
+            clip,
+            region: "snap-offset-handle",
+            sec,
+            trackIndex,
+            localX,
+            localY,
+        };
+    }
+
+    let region: ClipHitRegion;
+    if (inCornerBand && nearLeftCorner) {
+        region = "fade-in-corner";
+    } else if (inCornerBand && nearRightCorner) {
+        region = "fade-out-corner";
+    } else if (args.contentX - clipLeftPx <= edgeWidthPx) {
+        region = "left-edge";
+    } else if (clipRightPx - args.contentX <= edgeWidthPx) {
+        region = "right-edge";
+    } else {
+        region = localY < headerHeightPx ? "header" : "body";
+    }
+
+    return {
+        kind: "clip",
+        clip,
+        region,
+        sec,
+        trackIndex,
+        localX,
+        localY,
+    };
+}

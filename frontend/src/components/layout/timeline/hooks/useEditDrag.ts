@@ -76,12 +76,13 @@ import {
 } from "../../../../utils/snapHighlight";
 import type { SnapObjectKind, SnapResult } from "../../../../utils/timelineSnapping";
 import type { SnapTimelineOpts } from "./useTimelineState";
-import { paramsApi } from "../../../../services/api";
 import { webApi } from "../../../../services/webviewApi";
 import {
     buildStretchGroupState,
+    computeRegionRightEdgeDelta,
     computeStretchGroupUpdate,
     scaleClipFadesForStretch,
+    scaleSnapOffsetForStretch,
     type StretchGroupState,
 } from "./stretchGroup";
 import {
@@ -98,8 +99,8 @@ import {
     type RippleFollowerMap,
     type RippleMode,
 } from "../../../../features/session/ripplePreview";
-
-const CLIP_GAIN_DRAG_DB_PER_PX = 0.25;
+// 换算常量与渲染内核的旋钮手势共用（单一来源，见 constants 的说明）。
+import { CLIP_GAIN_DRAG_DB_PER_PX } from "../constants";
 
 /**
  * 拉伸同步 SnapOffset：偏移点标记 Clip 内容中的位置，随长度按**总比例**
@@ -107,16 +108,6 @@ const CLIP_GAIN_DRAG_DB_PER_PX = 0.25;
  * 基准偏移 —— 逐帧读实时值再乘本帧比例会跨帧复合，呈超线性增长。
  * offset=0 时保持 0。
  */
-function scaleSnapOffsetForStretch(
-    baseOffsetSec: number | undefined,
-    totalRatio: number,
-    nextLengthSec: number,
-): number {
-    const base = Number(baseOffsetSec) || 0;
-    if (!(base > 0)) return 0;
-    const safeRatio = Number.isFinite(totalRatio) && totalRatio > 0 ? totalRatio : 1;
-    return clamp(base * safeRatio, 0, Math.max(0, nextLengthSec));
-}
 
 /**
  * Loop（循环源）：把源域数值归一化到 [0, 媒体时长)。
@@ -145,52 +136,15 @@ function wrapIntoMediaDomain(
     return v;
 }
 
-type StretchRangeMapping = {
-    oldStartSec: number;
-    oldLengthSec: number;
-    newStartSec: number;
-    newLengthSec: number;
-};
-
 /**
- * 拉伸后对参数线进行时域映射（拉伸或压缩）。
- *
- * 映射由后端 `stretch_track_linked_params` 一次性完成：pitch（用户编辑过时）、
- * tension 以及该根轨道上所有已存在的自动化曲线（volume/气声/子轨道偏移等，
- * 无论参数是否在 UI 中激活或有数据）。旧的前端实现只映射 pitch+tension，
- * 导致其余参数线在拉伸后遗留在旧位置，剪辑新范围内表现为被初始化。
+ * 拉伸后的参数线时域映射：与渲染内核共用同一份实现（见 `stretchParams`）。
+ * 本文件只保留调用点，避免两条渲染路径在「锁定参数线」下出现不同曲线位置。
  */
-async function stretchLinkedParams(
-    trackId: string,
-    oldStartSec: number,
-    oldLengthSec: number,
-    newStartSec: number,
-    newLengthSec: number,
-): Promise<void> {
-    if (
-        Math.abs(oldLengthSec - newLengthSec) < 1e-6 &&
-        Math.abs(oldStartSec - newStartSec) < 1e-6
-    ) {
-        return;
-    }
-    await stretchTrackLinkedParams(trackId, [
-        { oldStartSec, oldLengthSec, newStartSec, newLengthSec },
-    ]);
-}
-
-/**
- * Stretch parameter lines for several clips on the same root track as one
- * batch. The backend writes all new ranges first, then restores old-range
- * parts not covered by any new range, so neighbouring clips cannot erase
- * each other's freshly written values.
- */
-async function stretchTrackLinkedParams(
-    trackId: string,
-    mappings: StretchRangeMapping[],
-): Promise<void> {
-    if (mappings.length === 0) return;
-    await paramsApi.stretchTrackLinkedParams(trackId, mappings, false);
-}
+import {
+    stretchLinkedParams,
+    stretchTrackLinkedParams,
+    type StretchRangeMapping,
+} from "./stretchParams";
 
 /**
  * 曲率拖拽：把指针时间/客户 Y 映射到曲线归一化坐标。
@@ -338,27 +292,19 @@ export type EditDragState = {
 /**
  * 计算被编辑剪辑区域“当前最右缘 − 初始最右缘”的净位移（**带符号**）。
  *
- * 与后端区域化波纹一致：平移量 = 区域右缘的实际位移（含吸附、素材长度限制等
- * 约束后的真实值），确保“预览 → 提交”不跳变。
- *
- * ⚠️ 必须是带符号：拖右缘向左（缩短/截短）时位移为负，跟随剪辑要向左收拢。
- * 不能用“对 0 取 max”或“对各成员取最大正位移”的方式，否则负位移会被吞掉、
- * 向右正常而向左无实时波纹（曾为此引入 bug）。
+ * 实现已抽到 `stretchGroup.computeRegionRightEdgeDelta`（单一事实来源）——
+ * 渲染内核的裁切 / 拉伸预览要用同一份波纹驱动量，留在本文件里会导致内核
+ * 只能重写一遍（本工程已两次因"两份语义"出问题）。这里只做参数适配。
  */
-function computeRegionRightEdgeDelta(drag: EditDragState, clips: SessionState["clips"]): number {
-    let maxOldRight = Number.NEGATIVE_INFINITY;
-    let maxNewRight = Number.NEGATIVE_INFINITY;
-    for (const id of drag.selectedClipIds) {
-        const base = drag.baseByClipId[id];
-        const now = clips.find((c) => c.id === id);
-        if (!base || !now) continue;
-        maxOldRight = Math.max(maxOldRight, base.startSec + base.lengthSec);
-        maxNewRight = Math.max(maxNewRight, Number(now.startSec) + Number(now.lengthSec));
-    }
-    if (!Number.isFinite(maxOldRight) || !Number.isFinite(maxNewRight)) {
-        return 0;
-    }
-    return maxNewRight - maxOldRight;
+function computeRegionRightEdgeDeltaForDrag(
+    drag: EditDragState,
+    clips: SessionState["clips"],
+): number {
+    return computeRegionRightEdgeDelta({
+        clipIds: drag.selectedClipIds,
+        baseById: drag.baseByClipId,
+        clips,
+    });
 }
 
 export function useEditDrag(deps: {
@@ -1531,7 +1477,7 @@ export function useEditDrag(deps: {
                     });
                     // 波纹（自动跟进）实时预览：编组拉伸同样按“区域右缘净位移”实时波纹。
                     if (drag.rippleMode !== "off") {
-                        const rippleRightDelta = computeRegionRightEdgeDelta(
+                        const rippleRightDelta = computeRegionRightEdgeDeltaForDrag(
                             drag,
                             sessionRef.current.clips,
                         );
@@ -1845,7 +1791,7 @@ export function useEditDrag(deps: {
                     // 波纹（自动跟进）实时预览：以编辑区域“右缘净位移”为准
                     // （与后端区域化波纹一致，包含吸附与素材长度限制后的实际值）。
                     if (drag.rippleMode !== "off") {
-                        const rippleRightDelta = computeRegionRightEdgeDelta(
+                        const rippleRightDelta = computeRegionRightEdgeDeltaForDrag(
                             drag,
                             sessionRef.current.clips,
                         );
@@ -1903,7 +1849,7 @@ export function useEditDrag(deps: {
                     // 波纹（自动跟进）实时预览：以编辑区域“右缘净位移”为准
                     // （与后端区域化波纹一致，包含吸附与素材长度限制后的实际值）。
                     if (drag.rippleMode !== "off") {
-                        const rippleRightDelta = computeRegionRightEdgeDelta(
+                        const rippleRightDelta = computeRegionRightEdgeDeltaForDrag(
                             drag,
                             sessionRef.current.clips,
                         );

@@ -37,7 +37,23 @@ export const TimelineWaveformSurface = React.memo(function TimelineWaveformSurfa
     widthPx: number;
     heightPx: number;
     /** 统一坐标投影：视口起点与缩放的唯一来源。 */
-    axis: import("./runtime/timelineAxis.js").TimelineAxis;
+    axis: import("../renderKernel/timelineAxis.js").TimelineAxis;
+    /**
+     * 视口来源：缺省为时间轴总线（旧实现）。
+     *
+     * 渲染内核接管轨道区后，它有自己的视口真值源；传入内核的适配器即可让波形
+     * 与内核同帧跟随，无需让内核重写波形的几何 / 峰值管线。
+     */
+    viewportSource?: {
+        getAxis(): import("../renderKernel/timelineAxis.js").TimelineAxis;
+        register(
+            layer: {
+                name: string;
+                paint: (axis: import("../renderKernel/timelineAxis.js").TimelineAxis) => void;
+            },
+            order: number,
+        ): () => void;
+    };
 }) {
     const { mode } = useAppTheme();
     // 与 DOM 交互层（ClipItem/TrackLane）同一份持久化设置：开关切换即重建场景。
@@ -86,7 +102,7 @@ export const TimelineWaveformSurface = React.memo(function TimelineWaveformSurfa
             axis={props.axis}
             viewportTopPx={props.startTrackIndex * props.rowHeight}
             color={color}
-            viewportSource={timelineViewportBus}
+            viewportSource={props.viewportSource ?? timelineViewportBus}
         />
     );
 });

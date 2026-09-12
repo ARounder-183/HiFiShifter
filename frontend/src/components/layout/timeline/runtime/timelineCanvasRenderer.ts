@@ -171,6 +171,10 @@ export function drawTimelineCanvas(
             snapOffsetPx?: number;
             /** 前导重叠区宽度（像素，从左缘起算）。>0 时上 clip 在该区域半透。 */
             leadingOverlapPx?: number;
+            /** 静音检测预览区段（像素，相对 clip 左缘）：半透明红色覆盖。 */
+            silenceSpansPx?: Array<{ leftPx: number; widthPx: number }>;
+            /** 多 Take lane 分界线的 y 偏移（相对 body 顶部，CSS px）。 */
+            takeLaneSeparatorOffsetsPx?: number[];
         }>;
         /** 轨道横向分界线（延伸到工程末尾之后）。 */
         rowGuides?: {
@@ -199,6 +203,20 @@ export function drawTimelineCanvas(
          * 超出 GL 渲染器的单矩形模型。
          */
         glBodies?: GlClipBodySink | null;
+        /**
+         * 编组激活时**只画描边、不画块面**（供「细节层位于波形之上」的调用方使用）。
+         *
+         * 【为什么需要】编组激活的 clip 默认会退回 Canvas2D 画整块（块面 + 深金外圈
+         * 描边），因为外圈描边伸出矩形 2px、超出 GL 渲染器的单矩形模型。旧实现的
+         * 块面画布在波形**之下**，所以块面不会遮住波形；渲染内核的细节层在波形
+         * **之上**，若照旧画块面就会把该 clip 的波形盖掉。
+         *
+         * 置 true 时：块面仍由 GL 承担（`useGl` 不再被编组激活否决），Canvas2D 只补
+         * 那一圈描边——视觉与旧实现等价（描边只在 clip 边缘，不与波形重叠）。
+         *
+         * @default false
+         */
+        groupOutlineOverGl?: boolean;
         /**
          * 视口左上角的**内容坐标**（CSS 像素）。
          *
@@ -555,7 +573,10 @@ export function drawTimelineCanvas(
             isGroupActive,
             isGroupDisabled,
             hasSeam,
-            useGl: args.glBodies != null && !isGroupActive,
+            // 编组激活的 clip 默认退回 Canvas2D（外圈描边超出 GL 的单矩形模型）；
+            // 细节层在波形之上时改用「只补描边」模式，块面仍由 GL 承担（见
+            // `groupOutlineOverGl` 的说明）。
+            useGl: args.glBodies != null && (!isGroupActive || args.groupOutlineOverGl === true),
             fills,
             strokes,
             // 屏障：前导重叠会盖住前一个 clip；编组外圈描边会伸出自身矩形
@@ -708,11 +729,12 @@ export function drawTimelineCanvas(
             ctx.fillStyle = style.textFill;
             ctx.font = `10px ${fontFamily}`;
             ctx.textBaseline = "middle";
-            const metrics = ctx.measureText(style.gainLabel);
-            const gainX = clipLeft + clipWidth - metrics.width - 6;
+            // 宽度取自样式解析（而非现场 measureText）：命中端
+            // （`clipHeaderControls`）消费同一个值来划标签命中区，两处必须是
+            // 同一份数据，否则「看到的」与「可点的」会漂移。
+            const gainX = clipLeft + clipWidth - style.gainLabelWidth - 6;
             if (style.showPlaybackRate) {
-                const rateMetrics = ctx.measureText(style.playbackRateLabel);
-                const rateX = gainX - rateMetrics.width - 8;
+                const rateX = gainX - style.rateLabelWidth - 8;
                 ctx.fillText(style.playbackRateLabel, rateX, clipTop + 9);
             }
             ctx.fillText(style.gainLabel, gainX, clipTop + 9);
@@ -949,10 +971,70 @@ export function drawTimelineCanvas(
         pending.length = 0;
     }
 
+    /**
+     * 静音检测预览的红色覆盖矩形（内容坐标），在**所有** clip 绘制完成后统一落笔。
+     *
+     * 【为什么单独一遍】红色层必须压在全部块面之上。重叠区里后一个 clip 的块面
+     * 可能属于**后续批次**（`barrier` 由前导重叠 / 半透块面触发），若在各 clip 的
+     * 细节阶段就画，先画的会被后画的块面盖掉——实测表现为「只有一部分静音区可见」。
+     */
+    const silenceOverlays: Array<{
+        left: number;
+        top: number;
+        width: number;
+        height: number;
+    }> = [];
+    /** 多 Take lane 分界线（同样在最后一遍落笔，避免被后续批次的块面盖掉）。 */
+    const takeLaneSeparators: Array<{ left: number; top: number; width: number }> = [];
+
     for (const clip of args.clips) {
         const item = prepareClip(clip);
         if (item.barrier) flushBatch();
         pending.push(item);
+        if (clip.silenceSpansPx !== undefined) {
+            for (const span of clip.silenceSpansPx) {
+                silenceOverlays.push({
+                    left: item.left + span.leftPx,
+                    top: item.bodyTop,
+                    width: span.widthPx,
+                    height: item.bodyHeight,
+                });
+            }
+        }
+        if (clip.takeLaneSeparatorOffsetsPx !== undefined) {
+            for (const offset of clip.takeLaneSeparatorOffsetsPx) {
+                takeLaneSeparators.push({
+                    left: item.left,
+                    top: item.bodyTop + offset,
+                    width: item.width,
+                });
+            }
+        }
     }
     flushBatch();
+
+    if (silenceOverlays.length > 0) {
+        // 与旧实现 `ClipItem` 的红色覆盖层同源：半透明红，覆盖 clip 的 body 区
+        // （不含 header，避免盖住名称 / 徽标等可交互标记）。
+        ctx.save();
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = "rgba(239, 68, 68, 0.3)";
+        for (const rect of silenceOverlays) {
+            ctx.fillRect(rect.left, rect.top, rect.width, rect.height);
+        }
+        ctx.restore();
+    }
+
+    if (takeLaneSeparators.length > 0) {
+        // 多 Take lane 分界线：亮色块上一律深色分线（白线在彩色块上看不见），
+        // 与旧实现 `ClipItem` 的分隔线同源。首条 lane 的顶边即 header 边界，
+        // 已由模型侧 `slice(1)` 排除。
+        ctx.save();
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = "rgba(0, 0, 0, 0.18)";
+        for (const line of takeLaneSeparators) {
+            ctx.fillRect(line.left, line.top, line.width, 1);
+        }
+        ctx.restore();
+    }
 }

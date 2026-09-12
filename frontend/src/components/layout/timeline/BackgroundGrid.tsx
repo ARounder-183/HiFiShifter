@@ -3,7 +3,7 @@ import { explicitGridLinesKey } from "./gridLineKey";
 import { resolveGridLineSamplingPlan } from "./gridLineSampling";
 import { resolveGridDrawViewport } from "./gridDrawViewport";
 import { clearGridRedrawHandler, setGridRedrawHandler } from "./gridRedrawBridge";
-import type { TimelineAxis } from "./runtime/timelineAxis";
+import type { TimelineAxis } from "../renderKernel/timelineAxis";
 import type { TimelineTick } from "./runtime/buildTimelineTicks";
 import type { TimelineLayer } from "./runtime/timelineFrameCommitter";
 

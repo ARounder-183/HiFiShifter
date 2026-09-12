@@ -480,6 +480,16 @@ export function buildTimelineClipVisualStyle(args: {
     mutedAlpha: number;
     leadingControlsWidth: number;
     trailingReservePx: number;
+    /**
+     * 增益标签（如 `+0.0dB`）的像素宽度。
+     *
+     * 【为什么必须由样式解析给出】绘制端要它做右对齐，命中端（`clipHeaderControls`）
+     * 要它划标签命中区。若命中端自己再测一次，字体或测量环境变化时两份宽度会分叉
+     * ——「看到的」与「可点的」就不再一致。
+     */
+    gainLabelWidth: number;
+    /** 速率标签（如 `x1`）的像素宽度；标签不可见时为 0。 */
+    rateLabelWidth: number;
     showMuteBadge: boolean;
     showChainBadge: boolean;
     showFormantBadge: boolean;
@@ -703,6 +713,8 @@ export function buildTimelineClipVisualStyle(args: {
         mutedAlpha: 1,
         leadingControlsWidth,
         trailingReservePx,
+        gainLabelWidth,
+        rateLabelWidth,
         showMuteBadge: showMute,
         showChainBadge,
         showFormantBadge: showFormant,

@@ -17,13 +17,14 @@
  */
 
 import { CLIP_BODY_PADDING_Y, CLIP_HEADER_HEIGHT } from "../constants.js";
-import { clipDisplayName } from "../../../../features/session/sessionTypes";
+import { clipDisplayName, type ClipInfo } from "../../../../features/session/sessionTypes";
+import { resolveTakeLaneLayouts } from "../takeLanes";
 import {
     durationToWidthPx,
     secToContentPx,
     secToSpanPx,
     type TimelineAxis,
-} from "./timelineAxis.js";
+} from "../../renderKernel/timelineAxis.js";
 
 type SparseRenderClip = {
     id: string;
@@ -34,7 +35,13 @@ type SparseRenderClip = {
     gain: number;
     playbackRate: number;
     muted: boolean;
-    takes?: Array<{ id: string; name: string }>;
+    /**
+     * Take 集合。
+     *
+     * `sourcePath` 参与 lane 布局判定（只有音频 take 建 lane，见 `takeLanes`），
+     * 因此这里必须保留——只声明 id / name 会让多 Take clip 在模型侧退化成单 Take。
+     */
+    takes?: Array<{ id: string; name: string; sourcePath?: string }>;
     activeTakeId?: string;
     midiNoteCount?: number;
     groupId?: string;
@@ -86,7 +93,89 @@ export type TimelineCanvasClipModel = {
      * `drawTimelineCanvas` 却能读到它——类型与实际不符，补上声明。
      */
     leadingOverlapPx?: number;
+    /**
+     * 静音检测预览区段（像素，相对 clip 左缘）。
+     *
+     * 与旧实现 `ClipItem` 的红色覆盖层同源：后端给出的是**工程秒**区间，这里按
+     * `axis` 投影为像素并**钳制到 clip 本体**（后端区域越过末端时不得把红色画到
+     * 相邻 clip 上）。空数组与缺省等价（不绘制）。
+     */
+    silenceSpansPx?: Array<{ leftPx: number; widthPx: number }>;
+    /**
+     * 多 Take lane 分界线的 y 偏移（相对 **body 顶部**，CSS px）。
+     *
+     * 首条 lane 的顶边就是 header 边界，因此不含 0（`slice(1)`）。布局与波形面 /
+     * 点击命中同源（`takeLanes.resolveTakeLaneLayouts`）——两处各算一份会让
+     * 分界线与波形 lane 错位。空数组与缺省等价（不绘制）。
+     */
+    takeLaneSeparatorOffsetsPx?: number[];
 };
+
+/**
+ * 静音检测预览区段 → clip 内的相对像素区间。
+ *
+ * 流程：逐个区间取与 clip 本体的交集（**防御性钳制**：后端区域越过 clip 末端时
+ * 不得把红色画到相邻 clip 上，与旧实现 `ClipItem` 的钳制同源）→ 投影为相对像素。
+ *
+ * 特殊说明：只保留长度 > 0 的区间；全部无效时返回 undefined（而非空数组），
+ * 让绘制端用一次 `!== undefined` 判断跳过。
+ *
+ * @param args.axis 统一坐标投影。
+ * @param args.clipStartSec clip 起点（工程秒）。
+ * @param args.clipLengthSec clip 长度（秒）。
+ * @param args.segments 该 clip 的静音区间（工程秒）。
+ * @returns 相对 clip 左缘的像素区间；无有效区间时为 undefined。
+ */
+function buildSilenceSpansPx(args: {
+    axis: TimelineAxis;
+    clipStartSec: number;
+    clipLengthSec: number;
+    segments?: ReadonlyArray<readonly [number, number]>;
+}): Array<{ leftPx: number; widthPx: number }> | undefined {
+    const segments = args.segments;
+    if (segments === undefined || segments.length === 0) return undefined;
+    const clipStartSec = Number(args.clipStartSec) || 0;
+    const clipEndSec = clipStartSec + Math.max(0, Number(args.clipLengthSec) || 0);
+    const spans: Array<{ leftPx: number; widthPx: number }> = [];
+    for (const segment of segments) {
+        const startSec = Math.max(Number(segment[0]) || 0, clipStartSec);
+        const endSec = Math.min(Number(segment[1]) || 0, clipEndSec);
+        if (!(endSec > startSec)) continue;
+        spans.push({
+            leftPx: secToSpanPx(args.axis, startSec - clipStartSec),
+            widthPx: Math.max(1, secToSpanPx(args.axis, endSec - startSec)),
+        });
+    }
+    return spans.length > 0 ? spans : undefined;
+}
+
+/**
+ * 多 Take lane 分界线偏移（相对 body 顶部，CSS px）。
+ *
+ * 流程：直接复用 `takeLanes.resolveTakeLaneLayouts`（与波形面 / 点击命中共用同一
+ * 套数学）→ 去掉首条（其顶边即 header 边界）→ 取各 lane 的 `top`。
+ *
+ * 特殊说明：模型侧的 clip 是 `ClipInfo` 的结构子集，字段语义一致；布局只用到
+ * takes / activeTakeId，因此这里的窄化是安全的（多出的字段被忽略）。
+ *
+ * @param args.clip 稀疏 clip（实际来自 `ClipInfo`）。
+ * @param args.showAllTakes 是否平铺全部 Take。
+ * @param args.bodyHeightPx clip body 的像素高度（决定能否容纳 lane）。
+ * @returns 分界线偏移；单 Take / 空间不足时为 undefined。
+ */
+function buildTakeLaneSeparatorOffsets(args: {
+    clip: SparseRenderClip;
+    showAllTakes: boolean;
+    bodyHeightPx: number;
+}): number[] | undefined {
+    const layouts = resolveTakeLaneLayouts(
+        args.clip as unknown as ClipInfo,
+        args.showAllTakes,
+        args.bodyHeightPx,
+    );
+    if (layouts === null || layouts.length <= 1) return undefined;
+    return layouts.slice(1).map((lane) => lane.top);
+}
 
 /**
  * 构建 clip 体画布的稀疏渲染模型。
@@ -130,9 +219,29 @@ export function buildSparseClipRenderModel(args: {
      * 否则两层不透明色块会"叠加"成脏色。
      */
     leadingOverlapSecByClipId?: Record<string, number>;
+    /**
+     * 静音检测预览区段：clip id → 工程秒的 `[起, 止]` 区间数组。
+     *
+     * 来源是 `session.silencePreviewSegments`（静音检测对话框的实时预览），
+     * 由细节层画成半透明红色。
+     */
+    silenceSegmentsByClipId?: Record<string, ReadonlyArray<readonly [number, number]>>;
+    /**
+     * 是否平铺显示全部 Take（`session.showAllTakes`）。
+     *
+     * 关闭时每个 clip 只画活跃 Take 的波形（波形面自行消费同一设置），lane 分界线
+     * 也随之消失。缺省 false（与「不传即不画」的保守默认一致）。
+     */
+    showAllTakes?: boolean;
 }): {
     drawClips: TimelineCanvasClipModel[];
     overlayClipIdsByTrackId: Record<string, string[]>;
+    /**
+     * 本次模型里「激活的编组」集合（由选中集合 + `disabledGroupIds` 推出）。
+     *
+     * 供绘制端画编组外圈描边、GL 侧算样式——调用方不应自行重算，否则两处判据会分叉。
+     */
+    activeGroupIds: Set<string>;
 } {
     const overlayClipIds = new Set<string>();
     if (args.renamingClipId) {
@@ -151,8 +260,12 @@ export function buildSparseClipRenderModel(args: {
 
     // Expand overlay to include all clips that share a group with any overlay clip,
     // unless the group is disabled.
+    //
+    // 集合提到外层：调用方（渲染内核）还需要它来画「编组激活的深金外圈描边」
+    // （`drawTimelineCanvas` 的 `activeGroupIds`）与 GL 侧样式。在这里重算一份
+    // 会让描边与 overlay 展开的判据分叉。
+    const activeGroupIds = new Set<string>();
     {
-        const activeGroupIds = new Set<string>();
         for (const trackClips of Object.values(args.visibleTrackClipsById)) {
             for (const clip of trackClips) {
                 if (
@@ -253,6 +366,20 @@ export function buildSparseClipRenderModel(args: {
                 args.axis,
                 args.leadingOverlapSecByClipId?.[clip.id] ?? 0,
             ),
+            silenceSpansPx: buildSilenceSpansPx({
+                axis: args.axis,
+                clipStartSec: clip.startSec,
+                clipLengthSec: clip.lengthSec,
+                segments: args.silenceSegmentsByClipId?.[clip.id],
+            }),
+            takeLaneSeparatorOffsetsPx: buildTakeLaneSeparatorOffsets({
+                clip,
+                showAllTakes: args.showAllTakes === true,
+                bodyHeightPx: Math.max(
+                    1,
+                    args.rowHeight - CLIP_BODY_PADDING_Y - CLIP_HEADER_HEIGHT,
+                ),
+            }),
         })),
     );
 
@@ -268,5 +395,6 @@ export function buildSparseClipRenderModel(args: {
     return {
         drawClips,
         overlayClipIdsByTrackId,
+        activeGroupIds,
     };
 }

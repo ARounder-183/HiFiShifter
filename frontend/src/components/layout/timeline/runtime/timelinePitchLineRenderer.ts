@@ -36,7 +36,7 @@ import {
     viewportEndSec,
     viewportStartSec,
     type TimelineAxis,
-} from "./timelineAxis.js";
+} from "../../renderKernel/timelineAxis.js";
 
 // ========================================
 // 常量

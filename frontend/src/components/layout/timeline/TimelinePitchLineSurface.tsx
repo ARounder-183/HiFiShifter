@@ -3,8 +3,8 @@ import React from "react";
 import { useAppSelector } from "../../../app/hooks";
 import type { ClipInfo, TrackInfo } from "../../../features/session/sessionTypes";
 import { timelineViewportBus } from "../../../utils/timelineViewportBus";
-import { clearCanvasPhysical, rasterize } from "./runtime/canvasRaster";
-import type { TimelineAxis } from "./runtime/timelineAxis.js";
+import { clearCanvasPhysical, rasterize } from "../renderKernel/canvasRaster";
+import type { TimelineAxis } from "../renderKernel/timelineAxis.js";
 import { LAYER_ORDER } from "./runtime/timelineFrameCommitter";
 import { drawTrackPitchLines } from "./runtime/timelinePitchLineRenderer";
 
@@ -38,8 +38,23 @@ export const TimelinePitchLineSurface = React.memo(function TimelinePitchLineSur
     rowHeight: number;
     widthPx: number;
     heightPx: number;
+    /**
+     * 视口来源：缺省为时间轴总线（旧实现）。
+     *
+     * 渲染内核接管轨道区后，它有自己的视口真值源；传入内核的适配器即可让音高线
+     * 与内核同帧跟随（与 `TimelineWaveformSurface` 的 `viewportSource` 同一约定），
+     * 无需在内核里重写音高线的几何 / 缓存管线。
+     */
+    viewportSource?: {
+        getAxis(): TimelineAxis;
+        register(
+            layer: { name: string; paint: (axis: TimelineAxis) => void },
+            order: number,
+        ): () => void;
+    };
 }) {
     const { tracks, startTrackIndex, clipsByTrackId, rowHeight, widthPx, heightPx } = props;
+    const viewportSource = props.viewportSource ?? timelineViewportBus;
 
     // 与旧 TrackLane 内画布相同的回退数据源：后端 clip_pitch_data 推送的
     // per-clip 音高曲线 / 范围。仅低频变化（分析完成、clip 增删），不会在
@@ -80,42 +95,48 @@ export const TimelinePitchLineSurface = React.memo(function TimelinePitchLineSur
      * 流程：统一光栅化 → 按 dpr 设置变换 → 内容绝对坐标平移（水平/竖直都由
      * 视口偏移完成）→ 逐行绘制。必须同步完成（与 clip 体/波形同一帧约束）。
      *
-     * @param axis 视口投影；省略时取总线当前值（供挂载后首次绘制使用）。
+     * @param axis 视口投影；省略时取当前视口源（总线或内核适配器）的投影，
+     *   供挂载后首次绘制使用。
      */
-    const invalidate = React.useCallback((axis?: TimelineAxis) => {
-        const canvas = canvasRef.current;
-        if (!canvas) return;
-        const current = axis ?? timelineViewportBus.getAxis();
+    const invalidate = React.useCallback(
+        (axis?: TimelineAxis) => {
+            const canvas = canvasRef.current;
+            if (!canvas) return;
+            const current = axis ?? viewportSource.getAxis();
 
-        // 统一光栅化契约：与 clip 体画布 / 波形面同一套取整规则。
-        const target = rasterize(
-            canvas,
-            Math.max(1, Math.ceil(widthRef.current)),
-            Math.max(1, Math.ceil(heightRef.current)),
-            window.devicePixelRatio || 1,
-        );
+            // 统一光栅化契约：与 clip 体画布 / 波形面同一套取整规则。
+            const target = rasterize(
+                canvas,
+                Math.max(1, Math.ceil(widthRef.current)),
+                Math.max(1, Math.ceil(heightRef.current)),
+                window.devicePixelRatio || 1,
+            );
 
-        const ctx = canvas.getContext("2d");
-        if (!ctx) return;
-        ctx.setTransform(target.dpr, 0, 0, target.dpr, 0, 0);
-        clearCanvasPhysical(ctx, target);
-        ctx.translate(-current.scrollLeftPx, -current.scrollTopPx);
+            const ctx = canvas.getContext("2d");
+            if (!ctx) return;
+            ctx.setTransform(target.dpr, 0, 0, target.dpr, 0, 0);
+            clearCanvasPhysical(ctx, target);
+            ctx.translate(-current.scrollLeftPx, -current.scrollTopPx);
 
-        const clipsById = clipsByTrackIdRef.current;
-        const effectiveRowHeight = rowHeightRef.current;
-        for (let i = 0; i < tracksRef.current.length; i++) {
-            const track = tracksRef.current[i];
-            drawTrackPitchLines({
-                ctx,
-                axis: current,
-                clips: clipsById[track.id] ?? EMPTY_CLIPS,
-                rowTopPx: (startTrackIndexRef.current + i) * effectiveRowHeight,
-                rowHeight: effectiveRowHeight,
-                clipPitchCurves: clipPitchCurvesRef.current,
-                clipPitchRanges: clipPitchRangesRef.current,
-            });
-        }
-    }, []);
+            const clipsById = clipsByTrackIdRef.current;
+            const effectiveRowHeight = rowHeightRef.current;
+            for (let i = 0; i < tracksRef.current.length; i++) {
+                const track = tracksRef.current[i];
+                drawTrackPitchLines({
+                    ctx,
+                    axis: current,
+                    clips: clipsById[track.id] ?? EMPTY_CLIPS,
+                    rowTopPx: (startTrackIndexRef.current + i) * effectiveRowHeight,
+                    rowHeight: effectiveRowHeight,
+                    clipPitchCurves: clipPitchCurvesRef.current,
+                    clipPitchRanges: clipPitchRangesRef.current,
+                });
+            }
+        },
+        // viewportSource 两个来源都是稳定引用（模块单例 / 内核 useMemo 产物），
+        // 不会造成重复注册。
+        [viewportSource],
+    );
 
     // 数据/布局参数必须留在依赖里：clip 数据、音高曲线或行窗口变化时视口
     // 并没变，总线不会 emit，只有这条路径能让画布跟上。不会造成滚动帧的
@@ -137,12 +158,13 @@ export const TimelinePitchLineSurface = React.memo(function TimelinePitchLineSur
 
     React.useEffect(() => {
         // 注册到统一帧提交器：与网格 / clip 体 / 波形的绘制顺序固定，且同一
-        // 帧内重复的视口提交只触发一次重绘。
-        return timelineViewportBus.register(
+        // 帧内重复的视口提交只触发一次重绘。视口来源缺省为总线；内核模式传入
+        // 内核适配器后由内核的帧提交链驱动（与波形面同一契约）。
+        return viewportSource.register(
             { name: "pitch-line", paint: (axis) => invalidate(axis) },
             LAYER_ORDER.pitchLine,
         );
-    }, [invalidate]);
+    }, [invalidate, viewportSource]);
 
     React.useEffect(() => {
         // 浏览器缩放 / 跨屏拖动改变 devicePixelRatio：光栅化依赖 dpr，变化后

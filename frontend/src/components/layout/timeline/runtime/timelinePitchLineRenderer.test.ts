@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { ClipInfo } from "../../../../features/session/sessionTypes";
-import { createTimelineAxis, type TimelineAxis } from "./timelineAxis.js";
+import { createTimelineAxis, type TimelineAxis } from "../../renderKernel/timelineAxis.js";
 import { drawTrackPitchLines } from "./timelinePitchLineRenderer";
 
 /**
