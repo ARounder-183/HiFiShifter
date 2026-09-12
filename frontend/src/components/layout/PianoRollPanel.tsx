@@ -196,7 +196,7 @@ import type {
     PianoRollGridSpec,
 } from "./pianoRoll/kernel/host/pianoRollKernelData";
 import { PIANO_ROLL_VERTICAL_SCROLL_RANGE_PX } from "./pianoRoll/kernel/scroll/verticalValueScroll";
-import { resolvePianoRollColors } from "./pianoRoll/colors";
+import { normalizeCssColor, resolvePianoRollColors } from "./pianoRoll/colors";
 import { parseRgbaColor } from "./timeline/runtime/timelineClipGlRenderer";
 
 const NOTE_NAMES_SHARP = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
@@ -1903,6 +1903,8 @@ export const PianoRollPanel: React.FC = () => {
     const vScrollbarTrackRef = useRef<HTMLDivElement | null>(null);
     /** GL 静态层画布（阶段 2，仅内核 + GL 开关都开启时挂载）。 */
     const glCanvasRef = useRef<HTMLCanvasElement | null>(null);
+    /** 键盘轴 GL 画布（阶段 2，Task 4）。独立画布：轴列不随横向滚动移动。 */
+    const glAxisCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
     function pitchDeltaToDegreeSteps(
         basePitch: number,
@@ -2178,6 +2180,8 @@ export const PianoRollPanel: React.FC = () => {
             data: () => kernelDataRef.current,
             initialPxPerSec: pxPerSecRef.current,
             glCanvas: glCanvasRef.current,
+            glAxisCanvas: glAxisCanvasRef.current,
+            axisWidthPx: AXIS_W,
             glSceneEnabled: PARAM_EDITOR_GL_SCENE_ENABLED,
             // 偏移经 ref 读取（同步开关与布局偏移都在运行时变化，闭包捕获会读到挂载时的旧值）。
             horizontalOffsetPx: () =>
@@ -2300,7 +2304,9 @@ export const PianoRollPanel: React.FC = () => {
      * @returns 网格输入；GL 关闭或无法解析时返回 null（宿主按"没有网格"处理）。
      */
     function buildGridSpec(): PianoRollGridSpec | null {
-        const kind =
+        // 显式标注为字面量联合：不加标注时 TS 会把嵌套三元推断成 `string`，
+        // 导致返回值无法赋给 `PianoRollGridSpec["kind"]`。
+        const kind: PianoRollGridSpec["kind"] | null =
             editParam === "pitch"
                 ? "pitch"
                 : isChildPitchOffsetCentsParam(editParam)
@@ -2315,20 +2321,42 @@ export const PianoRollPanel: React.FC = () => {
         const bounds = getParamValueBoundsForScrollbar(editParam);
         const view = clampViewport(editParam, getCurrentViewportForScrollbar(editParam));
         const colors = resolvePianoRollColors(themeMode === "dark");
-        const strong = parseRgbaColor(colors.pitchGridC);
-        const weak = parseRgbaColor(colors.pitchGridOther);
         const finite = (c: readonly number[]) => c.every((v) => Number.isFinite(v));
-        const strongRgba = finite(strong) ? strong : ([0, 0, 0, 1] as const);
-        const weakRgba = finite(weak) ? weak : ([0, 0, 0, 1] as const);
+        /**
+         * 解析 CSS 颜色为数值 RGBA；解析失败（NaN）时退回**不透明黑**。
+         *
+         * 特殊说明：宁可颜色不对也不要上传 NaN——NaN 会让整个实例属性失效、
+         * 整层几何消失（比"颜色错"严重得多，且更难归因）。
+         */
+        const toRgba = (css: string): [number, number, number, number] => {
+            // 必须先归一化：`parseRgbaColor` 只认 rgb()/rgba()，hex 会被解析成
+            // **不透明洋红**（故意设计，用于暴露漏解析）。本配色表的 whiteKey /
+            // blackKey 正是 hex，不归一化会让整个键盘变洋红（曾实际发生）。
+            const parsed = parseRgbaColor(normalizeCssColor(css));
+            return finite(parsed) ? parsed : [0, 0, 0, 1];
+        };
 
-        return {
+        const base = {
             kind,
             view: { center: view.center, span: view.span },
             absMin: bounds.min,
             absMax: bounds.max,
             valueToY: (value: number, heightPx: number) => valueToY(editParam, value, heightPx),
-            strongRgba,
-            weakRgba,
+            strongRgba: toRgba(colors.pitchGridC),
+            weakRgba: toRgba(colors.pitchGridOther),
+        };
+
+        // 键盘轴颜色只在音高参数下提供：非 pitch 时 GL 层据此判定"没有键盘"
+        // 并清空几何（否则切到别的参数后键盘会残留在画布上）。
+        if (kind !== "pitch") return base;
+        return {
+            ...base,
+            whiteKeyRgba: toRgba(colors.whiteKey),
+            blackKeyRgba: toRgba(colors.blackKey),
+            blackKeyGradientRgba: toRgba(colors.blackKeyGradient),
+            cSeparatorRgba: toRgba(colors.cSeparator),
+            keySeparatorRgba: toRgba(colors.keySeparator),
+            axisBorderRgba: toRgba(colors.axisBorder),
         };
     }
 
@@ -3227,6 +3255,8 @@ export const PianoRollPanel: React.FC = () => {
             // 阶段 2：GL 层接管网格时，Canvas2D 必须跳过它（两张画布叠放，
             // 都画会半透明叠加 + 亚像素重影）。GL 未启用时行为与迁移前一致。
             skipGrid: PARAM_EDITOR_GL_SCENE_ENABLED,
+            // 键盘几何归 GL；标签仍由 Canvas2D 画（Task 5 迁移标签）。
+            skipKeyboardGeometry: PARAM_EDITOR_GL_SCENE_ENABLED,
             fontFamily,
             clipboardPreview: s.showClipboardPreview ? clipboardRef.current : null,
             // pitch snap visual helpers
@@ -5786,6 +5816,16 @@ export const PianoRollPanel: React.FC = () => {
                         className="bg-qt-window border-r border-qt-border relative"
                         style={{ width: AXIS_W, flex: 1 }}
                     >
+                        {/* 键盘轴 GL 层（阶段 2，Task 4）：铺在 Canvas2D 轴画布**下面**
+                            （DOM 顺序在前、无 z-index），只画几何；音名标签仍由
+                            Canvas2D 画在上层（Task 5 才迁标签）。 */}
+                        {PARAM_EDITOR_GL_SCENE_ENABLED ? (
+                            <canvas
+                                ref={glAxisCanvasRef}
+                                className="absolute inset-0 pointer-events-none"
+                                aria-hidden
+                            />
+                        ) : null}
                         <canvas ref={axisCanvasRef} className="absolute inset-0" />
                     </div>
                 </Flex>

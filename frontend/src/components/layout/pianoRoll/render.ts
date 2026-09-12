@@ -23,7 +23,7 @@ import {
 } from "../timeline/runtime/timelineAxis";
 import { wholeDevicePxLength } from "../../../utils/devicePixelLine";
 import { AXIS_W, PITCH_MAX_MIDI, PITCH_MIN_MIDI } from "./constants";
-import { framesToTime } from "./utils";
+import { framesToTime, isBlackKey } from "./utils";
 import { resolveSecondaryOverlayValues } from "./secondaryOverlaySelection";
 import { resolveScaleNotes } from "../../../utils/musicalScales";
 import type { ScaleLike } from "../../../utils/musicalScales";
@@ -79,11 +79,6 @@ function formatAxisMark(v: number, param?: ParamName): string {
     // 最多保留 4 位有效数字，去掉尾随零
     const s = parseFloat(displayValue.toPrecision(4)).toString();
     return s;
-}
-
-function isBlackKey(midi: number): boolean {
-    const pc = ((midi % 12) + 12) % 12;
-    return pc === 1 || pc === 3 || pc === 6 || pc === 8 || pc === 10;
 }
 
 function midiToLabel(midi: number): string {
@@ -364,6 +359,15 @@ export function drawPianoRoll(args: {
      * 直到各自的迁移任务完成。这保证了迁移可以逐层进行、每步都可回退。
      */
     skipGrid?: boolean;
+    /**
+     * 跳过钢琴键盘的**几何**绘制（键底色 / 黑键渐变 / 分隔线），保留音名标签。
+     *
+     * 【为什么只跳几何、不跳整段】键盘的几何与标签在同一个 for 循环里交替产出：
+     * 几何属阶段 2 的 Task 4（已由 GL 接管），标签属 Task 5（需 glyph 管线，尚未
+     * 迁移）。因此这一阶段必须"循环照跑、只跳过几何"——否则标签会一起消失。
+     * Task 5 搬走标签后，本开关与整个循环可一并删除。
+     */
+    skipKeyboardGeometry?: boolean;
 }) {
     const {
         axisCanvas,
@@ -391,6 +395,7 @@ export function drawPianoRoll(args: {
         paramMorphOverlay,
         fontFamily,
         skipGrid = false,
+        skipKeyboardGeometry = false,
     } = args;
 
     const resolvedFontFamily = fontFamily || "sans-serif";
@@ -417,11 +422,17 @@ export function drawPianoRoll(args: {
             // 全物理清屏：round 向上取整时 CSS 尺寸清屏会在底部遗留残影。
             clearCanvasPhysical(ctx, target);
 
-            ctx.strokeStyle = colors.axisBorder;
-            ctx.beginPath();
-            ctx.moveTo(w - 0.5, 0);
-            ctx.lineTo(w - 0.5, h);
-            ctx.stroke();
+            // 轴右缘分隔线：阶段 2 起由 GL 层绘制（作为键盘实例的**第一条**，
+            // 保持"先画线、再被琴键盖住"的既有层序）。GL 接管时必须跳过，否则
+            // 它会画在上层画布上、浮在琴键之上——实测浅色主题右缘出现一条 229 的
+            // 竖线（Canvas2D 路径里它本被不透明琴键完全遮住）。
+            if (!skipKeyboardGeometry) {
+                ctx.strokeStyle = colors.axisBorder;
+                ctx.beginPath();
+                ctx.moveTo(w - 0.5, 0);
+                ctx.lineTo(w - 0.5, h);
+                ctx.stroke();
+            }
 
             if (editParam === "pitch") {
                 const absMin = PITCH_MIN_MIDI;
@@ -442,22 +453,25 @@ export function drawPianoRoll(args: {
                     const black = isBlackKey(midi);
                     const pc = ((midi % 12) + 12) % 12;
 
-                    // 白键
-                    if (!black) {
-                        ctx.fillStyle = colors.whiteKey;
-                        ctx.fillRect(0, top, w, keyH);
-                    }
+                    // 白键 / 黑键底色 / 黑键渐变：阶段 2 起由 GL 层绘制，
+                    // 此处仅在 GL 未接管时绘制（见 skipKeyboardGeometry 说明）。
+                    if (!skipKeyboardGeometry) {
+                        if (!black) {
+                            ctx.fillStyle = colors.whiteKey;
+                            ctx.fillRect(0, top, w, keyH);
+                        }
 
-                    // 黑键：深色覆盖，宽度 72%
-                    if (black) {
-                        ctx.fillStyle = colors.blackKey;
-                        ctx.fillRect(0, top, w * 0.72, keyH);
-                        // 黑键右侧渐变边缘
-                        const grad = ctx.createLinearGradient(w * 0.62, 0, w * 0.72, 0);
-                        grad.addColorStop(0, "rgba(0,0,0,0)");
-                        grad.addColorStop(1, colors.blackKeyGradient);
-                        ctx.fillStyle = grad;
-                        ctx.fillRect(w * 0.62, top, w * 0.1, keyH);
+                        // 黑键：深色覆盖，宽度 72%
+                        if (black) {
+                            ctx.fillStyle = colors.blackKey;
+                            ctx.fillRect(0, top, w * 0.72, keyH);
+                            // 黑键右侧渐变边缘
+                            const grad = ctx.createLinearGradient(w * 0.62, 0, w * 0.72, 0);
+                            grad.addColorStop(0, "rgba(0,0,0,0)");
+                            grad.addColorStop(1, colors.blackKeyGradient);
+                            ctx.fillStyle = grad;
+                            ctx.fillRect(w * 0.62, top, w * 0.1, keyH);
+                        }
                     }
 
                     // 所有琴键音名标注（高度足够时）
@@ -485,14 +499,16 @@ export function drawPianoRoll(args: {
                         }
                     }
 
-                    // 分隔线：C 音用较深的线，其他用浅线
-                    ctx.strokeStyle = pc === 0 ? colors.cSeparator : colors.keySeparator;
-                    ctx.lineWidth = pc === 0 ? 1 : 0.5;
-                    ctx.beginPath();
-                    ctx.moveTo(0, top + 0.5);
-                    ctx.lineTo(w, top + 0.5);
-                    ctx.stroke();
-                    ctx.lineWidth = 1;
+                    // 分隔线：C 音用较深的线，其他用浅线（同上，GL 接管后跳过）
+                    if (!skipKeyboardGeometry) {
+                        ctx.strokeStyle = pc === 0 ? colors.cSeparator : colors.keySeparator;
+                        ctx.lineWidth = pc === 0 ? 1 : 0.5;
+                        ctx.beginPath();
+                        ctx.moveTo(0, top + 0.5);
+                        ctx.lineTo(w, top + 0.5);
+                        ctx.stroke();
+                        ctx.lineWidth = 1;
+                    }
                 }
             } else {
                 // 非音高参数轴标签：对 child-pitch-offset 做特殊处理以配合横线（音分/度数）

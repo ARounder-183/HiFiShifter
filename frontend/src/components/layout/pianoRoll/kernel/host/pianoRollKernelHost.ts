@@ -52,6 +52,8 @@ import {
     createScrollKernel,
     type TimelineViewportState,
 } from "../../../timeline/kernel/scrollKernel";
+import { isBlackKey } from "../../utils";
+import { buildKeyboardInstances } from "../scene/keyboardInstances";
 import { createTimelineAxis, type TimelineAxis } from "../../../timeline/runtime/timelineAxis";
 import {
     buildPitchGridInstances,
@@ -114,6 +116,22 @@ export interface PianoRollKernelHostArgs {
      * 可见性、层级（z-index）与是否挂载由 React 侧决定——宿主只负责在里面画。
      */
     readonly glCanvas?: HTMLCanvasElement | null;
+    /**
+     * 键盘轴 GL 画布（阶段 2，Task 4）。缺省 / null 时不画键盘。
+     *
+     * 【为什么需要**第二块**画布】键盘位于左侧轴列，DOM 上是主画布的**兄弟**
+     * 元素（固定 56px 宽、不随横向滚动移动），而主 GL 画布在 sticky 视口层内、
+     * 宽度等于视口宽。把键盘画在主画布上会跟着 sticky 层一起被裁切，位置也对不上。
+     * 因此键盘单独一块画布，几何坐标即"轴列视口坐标"，与 Canvas2D 的布局一一对应。
+     */
+    readonly glAxisCanvas?: HTMLCanvasElement | null;
+    /**
+     * 键盘轴宽度（CSS px）。缺省用 `AXIS_W` 的值（56）。
+     *
+     * 特殊说明：由调用方注入而不是在此硬编码——轴宽是**布局**常量，属于面板；
+     * 宿主硬编码会在轴宽调整时悄悄画错宽度。
+     */
+    readonly axisWidthPx?: number;
     /**
      * 是否启用 GL 场景层。缺省 `false`。
      *
@@ -222,6 +240,16 @@ export interface PianoRollKernelHost {
         readonly active: boolean;
         readonly failureReason: string | null;
         readonly gridInstanceCount: number;
+        /** 键盘层已上传的实例数（仅 pitch 参数非零）。 */
+        readonly keyboardInstanceCount: number;
+        /**
+         * 当前用于 GL 几何的网格输入快照（诊断用）。
+         *
+         * 【为什么暴露它】两条渲染路径必须几何一致，而"不一致"只体现在像素上、
+         * 极难归因。有了这份快照，浏览器验证可以直接复算构建器的输出并与像素
+         * 对照，而不必从像素反推 view（那条路会引入大量猜测）。
+         */
+        readonly gridSpec: PianoRollGridSpec | null;
     };
     /** 标脏：请求下一帧提交。 */
     invalidate(): void;
@@ -365,6 +393,36 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         }
     }
 
+    // 键盘轴 GL 层（Task 4）：独立画布 + 独立 program / 实例缓冲。
+    // 与主画布各自持有 program，是因为两者尺寸与绘制时机不同（轴列不随横向滚动），
+    // 共用会引入"谁负责 resize"的耦合。
+    let glAxisHandle: GlCanvasHandle | null = null;
+    let glAxisProgram: SdfBoxProgram | null = null;
+    if (args.glSceneEnabled === true && args.glAxisCanvas != null) {
+        try {
+            glAxisHandle = createGlCanvas(args.glAxisCanvas);
+            if (glAxisHandle === null) {
+                // 主画布可能已经成功；键盘单独失败时只跳过键盘，不影响网格。
+                glAxisHandle = null;
+            } else {
+                glAxisProgram = createSdfBoxProgram(glAxisHandle.gl);
+            }
+        } catch {
+            glAxisHandle = null;
+            glAxisProgram = null;
+        }
+    }
+    /** 键盘轴宽度（CSS px）。 */
+    const axisWidthPx =
+        Number.isFinite(args.axisWidthPx) && (args.axisWidthPx as number) > 0
+            ? (args.axisWidthPx as number)
+            : 56;
+    /** 键盘轴实例缓冲与上传状态。 */
+    let glAxisInstances = new Float32Array(0);
+    let glAxisUploadedCount = 0;
+    let glAxisGeometryUploaded = false;
+    let lastKeyboardSignature = "";
+
     /** GL 实例缓冲（跨帧复用，容量按需增长）。 */
     let glInstances = new Float32Array(0);
     /** 当前已上传到 GPU 的实例数。 */
@@ -477,6 +535,94 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         } else {
             glProgram.render(glInstances, glUploadedCount, target, 0, 0);
             glGeometryUploaded = true;
+        }
+    }
+
+    /**
+     * 计算键盘几何的**内容签名**（变化才重建）。
+     *
+     * 特殊说明：含轴宽与视口高——两者都直接决定键体几何；**不含**横向滚动位置
+     * （键盘不随横向滚动变化），因此横向滚动是零重建的。
+     *
+     * @param spec 当前网格输入（键盘复用它的值域信息）。
+     * @returns 内容签名；非音高参数（无键盘）时为空串。
+     */
+    function keyboardSignature(spec: PianoRollGridSpec | null | undefined): string {
+        if (spec == null || spec.kind !== "pitch") return "";
+        return [
+            spec.view.center,
+            spec.view.span,
+            spec.absMin,
+            spec.absMax,
+            viewportHeightPx,
+            axisWidthPx,
+            readDevicePixelRatio(),
+            spec.strongRgba.join(","),
+            spec.weakRgba.join(","),
+            spec.whiteKeyRgba?.join(",") ?? "",
+            spec.blackKeyRgba?.join(",") ?? "",
+            spec.blackKeyGradientRgba?.join(",") ?? "",
+            spec.cSeparatorRgba?.join(",") ?? "",
+            spec.keySeparatorRgba?.join(",") ?? "",
+            spec.axisBorderRgba?.join(",") ?? "",
+        ].join("|");
+    }
+
+    /**
+     * 重建键盘轴几何并标记需要重新上传。
+     *
+     * 特殊说明：只有**音高**参数才有键盘（其余参数画的是刻度标签），因此非 pitch
+     * 时清空几何——否则切到别的参数后键盘会残留在 GL 画布上。
+     *
+     * @param spec 当前网格输入。
+     */
+    function rebuildKeyboardGeometry(spec: PianoRollGridSpec | null | undefined): void {
+        if (spec == null || spec.kind !== "pitch" || spec.whiteKeyRgba === undefined) {
+            glAxisUploadedCount = 0;
+            glAxisGeometryUploaded = false;
+            return;
+        }
+        const items = buildKeyboardInstances({
+            view: spec.view,
+            absMin: spec.absMin,
+            absMax: spec.absMax,
+            heightPx: viewportHeightPx,
+            axisWidthPx,
+            dpr: readDevicePixelRatio(),
+            valueToY: spec.valueToY,
+            isBlackKey,
+            whiteKeyRgba: spec.whiteKeyRgba,
+            blackKeyRgba: spec.blackKeyRgba ?? spec.whiteKeyRgba,
+            blackKeyGradientRgba: spec.blackKeyGradientRgba ?? [0, 0, 0, 0],
+            cSeparatorRgba: spec.cSeparatorRgba ?? [0, 0, 0, 0],
+            keySeparatorRgba: spec.keySeparatorRgba ?? [0, 0, 0, 0],
+            axisBorderRgba: spec.axisBorderRgba ?? [0, 0, 0, 0],
+        });
+        const needed = items.length * CLIP_INSTANCE_FLOATS;
+        if (glAxisInstances.length < needed) glAxisInstances = new Float32Array(needed);
+        for (let index = 0; index < items.length; index += 1) {
+            writeFlatInstance(glAxisInstances, index, items[index]);
+        }
+        glAxisUploadedCount = items.length;
+        glAxisGeometryUploaded = false;
+    }
+
+    /**
+     * 绘制键盘轴 GL 层。
+     *
+     * 特殊说明：视口原点恒为 (0, 0)——键盘几何本就是轴列视口坐标（`valueToY`
+     * 直接给出视口 y，x 从轴列左缘起算），与网格层同一约定。
+     */
+    function drawGlKeyboard(): void {
+        if (glAxisHandle === null || glAxisProgram === null) return;
+        const target = glAxisHandle.resize(axisWidthPx, viewportHeightPx, readDevicePixelRatio());
+        glAxisHandle.clear();
+        if (glAxisUploadedCount === 0) return;
+        if (glAxisGeometryUploaded) {
+            glAxisProgram.repaint(target, 0, 0);
+        } else {
+            glAxisProgram.render(glAxisInstances, glAxisUploadedCount, target, 0, 0);
+            glAxisGeometryUploaded = true;
         }
     }
 
@@ -641,6 +787,17 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                 rebuildGlGeometry(spec);
             }
             drawGlScene();
+        }
+
+        // 键盘轴 GL 层：与网格共用同一份 spec，但几何与画布独立。
+        if (glAxisProgram !== null) {
+            const spec = data().grid;
+            const signature = keyboardSignature(spec);
+            if (signature !== lastKeyboardSignature) {
+                lastKeyboardSignature = signature;
+                rebuildKeyboardGeometry(spec);
+            }
+            drawGlKeyboard();
         }
 
         updateScrollbars(view);
@@ -910,6 +1067,8 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             return {
                 active: glProgram !== null,
                 failureReason: glFailureReason,
+                keyboardInstanceCount: glAxisUploadedCount,
+                gridSpec: data().grid ?? null,
                 gridInstanceCount: glUploadedCount,
             };
         },
@@ -931,6 +1090,9 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             glProgram?.dispose();
             glProgram = null;
             glHandle = null;
+            glAxisProgram?.dispose();
+            glAxisProgram = null;
+            glAxisHandle = null;
         },
     };
 }

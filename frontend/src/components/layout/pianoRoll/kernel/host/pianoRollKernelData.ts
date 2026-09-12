@@ -71,6 +71,23 @@ export interface PianoRollGridSpec {
     readonly strongRgba: readonly [number, number, number, number];
     /** 弱线颜色（pitch 下即其余半音的颜色）。 */
     readonly weakRgba: readonly [number, number, number, number];
+
+    // ── 键盘轴颜色（仅 pitch 参数有意义；其余参数无键盘）────────────────
+    //
+    // 特殊说明：全部可选。非音高参数不提供这些字段，GL 层据此判定"没有键盘"并
+    // 清空几何——否则切到别的参数后键盘会残留在画布上。
+    /** 白键底色。 */
+    readonly whiteKeyRgba?: readonly [number, number, number, number];
+    /** 黑键底色。 */
+    readonly blackKeyRgba?: readonly [number, number, number, number];
+    /** 黑键右缘渐变的深色端。 */
+    readonly blackKeyGradientRgba?: readonly [number, number, number, number];
+    /** C 键分隔线（强）。 */
+    readonly cSeparatorRgba?: readonly [number, number, number, number];
+    /** 其余键分隔线（弱）。 */
+    readonly keySeparatorRgba?: readonly [number, number, number, number];
+    /** 键盘轴右缘分隔线。 */
+    readonly axisBorderRgba?: readonly [number, number, number, number];
 }
 
 /** 宿主每帧读取的数据镜像。 */

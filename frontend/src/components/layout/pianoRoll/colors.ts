@@ -118,3 +118,32 @@ const LIGHT_COLORS: PianoRollColors = {
 export function resolvePianoRollColors(isDark: boolean): PianoRollColors {
     return isDark ? DARK_COLORS : LIGHT_COLORS;
 }
+
+/**
+ * 把任意 CSS 颜色写法归一化为浏览器认可的 `rgb()/rgba()` 形式。
+ *
+ * 【为什么必须先归一化】`parseRgbaColor` 只认 `rgb()/rgba()` 两种写法，其他格式
+ * （hex / 颜色关键字 / 主题变量）会被解析成**不透明洋红**——这是既有实现的故意
+ * 设计，用来在真机上把"漏解析"暴露成刺眼的洋红。而本配色表里 `whiteKey`
+ * （`#ffffff` / `#d7dade`）与 `blackKey`（`#3a3a3a` / `#2e3136`）正是 hex 写法，
+ * 直接解析会让整个键盘变成洋红（曾实际发生）。
+ *
+ * 特殊说明 1：借浏览器做归一化（挂一个游离 `span` 读 `getComputedStyle`）。这条
+ * 路径会触发样式重算，**不能进渲染热路径**——调用方必须在低频时机（镜像更新 /
+ * 主题变化）解析并按值缓存。
+ *
+ * 特殊说明 2：无 DOM 环境（node 单测）原样返回，由调用方的有限性校验兜底。
+ *
+ * @param css CSS 颜色字符串（任意写法）。
+ * @returns `rgb()/rgba()` 字符串；无 DOM 时原样返回。
+ */
+export function normalizeCssColor(css: string): string {
+    if (typeof document === "undefined") return css;
+    const probe = document.createElement("span");
+    probe.style.color = css;
+    probe.style.display = "none";
+    document.body.appendChild(probe);
+    const computed = getComputedStyle(probe).color;
+    probe.remove();
+    return computed.length > 0 ? computed : css;
+}
