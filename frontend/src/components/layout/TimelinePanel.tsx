@@ -4696,6 +4696,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 initialPxPerSec={pxPerSec}
                                 onPxPerSecChange={setPxPerSec}
                                 onScrollLeftCommit={handleKernelScrollLeftCommit}
+                                onScrollLeftFrame={state.syncScrollLeftFrame}
                                 onViewportWidthChange={setViewportWidth}
                                 getPlayheadSec={getVisualPlayheadSec}
                                 rulerContentRef={rulerContentRef}

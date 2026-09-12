@@ -131,6 +131,14 @@ type TimelineSessionSlice = Pick<
     | "tracks"
 >;
 
+/**
+ * 本面板在共享视口中的来源标识。
+ *
+ * 时间轴既发布又订阅同一份视口，订阅回调必须据此跳过自己造成的广播，
+ * 否则会形成回退型反馈环（见 `timelineViewportSync` 的 `origin` 说明）。
+ */
+const TIMELINE_SYNC_ORIGIN = "timeline";
+
 export interface TimelineStateResult {
     // Redux
     dispatch: ReturnType<typeof useAppDispatch>;
@@ -240,6 +248,8 @@ export interface TimelineStateResult {
     /** 视口宽度写入（内核模式下由内核回写，见 `setViewportWidth` 的说明）。 */
     setViewportWidth: React.Dispatch<React.SetStateAction<number>>;
     syncScrollLeft: (next: number) => void;
+    /** 逐帧水平同步（内核每帧通知）：只做跨面板同步，不做 React 对齐。 */
+    syncScrollLeftFrame: (next: number) => void;
     /** 竖直轴同帧提交：更新 scrollTopPxRef 并同步广播视口总线。 */
     syncScrollTop: (next: number) => void;
     scrollTopPxRef: React.MutableRefObject<number>;
@@ -484,10 +494,13 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
     const syncScrollLeft = React.useCallback(function syncScrollLeft(next: number) {
         scrollLeftRef.current = next;
         if (paramEditorSyncTimelineRef.current && !timelineSyncApplyingRef.current) {
-            timelineViewportSync.setViewport({
-                scrollLeft: next,
-                pxPerSec: pxPerSecRef.current,
-            });
+            timelineViewportSync.setViewport(
+                {
+                    scrollLeft: next,
+                    pxPerSec: pxPerSecRef.current,
+                },
+                TIMELINE_SYNC_ORIGIN,
+            );
         }
         if (rulerContentRef.current) {
             rulerContentRef.current.style.transform = `translateX(${-next}px)`;
@@ -531,6 +544,45 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
             });
         }
     }, []);
+
+    /**
+     * 水平滚动位置的**逐帧**同步（内核模式下由宿主每帧通知）。
+     *
+     * 【为什么需要它，以及为什么不复用 `syncScrollLeft`】
+     * `syncScrollLeft` 是"全量同步"入口，它顺带用 rAF 量化提交 React state
+     * （`REACT_SCROLL_STEP_PX`）以免滚动帧进 React。内核模式下驱动它的
+     * `onScrollLeftCommit` 又被量化到 256px（`SCROLL_COMMIT_STEP_PX`）——
+     * 那是为**标尺刻度范围**做的取舍，刻度晚 256px 更新肉眼无感。
+     *
+     * 但"推给参数编辑器"经不起这个精度：参数编辑器是独立滚动视图，滞后 256px
+     * 会表现为**先不动、然后突然跳一大段**（用户报告的"阶梯感/被吸附感"）。
+     * 实测拖时间轴 480px：内核 49 步平滑，参数编辑器只有 2 步、单次跳 260px。
+     *
+     * 因此把两件事拆开：本函数只做"写 ref + 广播共享视口"（几个赋值 + 一次
+     * emit，不进 React），可以安全逐帧调用；React 对齐仍走量化路径。
+     */
+    const syncScrollLeftFrame = React.useCallback(
+        function syncScrollLeftFrame(next: number) {
+            scrollLeftRef.current = next;
+            timelineViewportBus.emit(
+                next,
+                pxPerSecRef.current,
+                viewportWidthRef.current,
+                scrollTopPxRef.current,
+                rowHeightRef.current,
+            );
+            if (paramEditorSyncTimelineRef.current && !timelineSyncApplyingRef.current) {
+                timelineViewportSync.setViewport(
+                    {
+                        scrollLeft: next,
+                        pxPerSec: pxPerSecRef.current,
+                    },
+                    TIMELINE_SYNC_ORIGIN,
+                );
+            }
+        },
+        [],
+    );
 
     // ── syncScrollTop：竖直轴的同帧提交 ──────────────────────────
     // sticky 画布层（clip 体 / 波形面）不随滚动容器原生移动，竖直滚动时
@@ -597,6 +649,11 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
     useEffect(() => {
         if (!s.paramEditorSyncTimeline) return;
         const apply = () => {
+            // 【关键】跳过自己发布的广播：时间轴既发布又订阅，不判定来源时会把
+            // 自己刚写进去的值再应用一遍，且应用读到的常是**上一次**的值 →
+            // 位置回退（实测 10→20→10）。这是"拖拽阶梯感"的根因，详见
+            // `timelineViewportSync` 中 `origin` 的说明。
+            if (timelineViewportSync.getOrigin() === TIMELINE_SYNC_ORIGIN) return;
             const store = timelineViewportSync.get();
             const scroller = scrollRef.current;
             // 纯滚动（pxPerSec 未变）：在同一个事件帧内同步落地——先写原生
@@ -645,10 +702,13 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
     // 参数编辑器会先画出一帧未同步内容（"一闪"）再被纠正。
     useLayoutEffect(() => {
         if (s.paramEditorSyncTimeline) {
-            timelineViewportSync.setViewport({
-                scrollLeft: scrollLeftRef.current,
-                pxPerSec: pxPerSecRef.current,
-            });
+            timelineViewportSync.setViewport(
+                {
+                    scrollLeft: scrollLeftRef.current,
+                    pxPerSec: pxPerSecRef.current,
+                },
+                TIMELINE_SYNC_ORIGIN,
+            );
         }
     }, [s.paramEditorSyncTimeline]);
 
@@ -1308,6 +1368,11 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
          * 停留在初始值，标尺只画得出前一段刻度）。
          */
         setViewportWidth,
+        /**
+         * 逐帧水平同步（内核每帧通知）：只做跨面板同步，不做 React 对齐。
+         * 与 `syncScrollLeft` 的区别见其定义处说明。
+         */
+        syncScrollLeftFrame,
         rowHeight,
         setRowHeight,
         altPressed,

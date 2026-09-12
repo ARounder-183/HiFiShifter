@@ -30,6 +30,25 @@ const state: TimelineViewportState = {
  */
 let seeded = false;
 
+/**
+ * 最后一次写入的来源标识。
+ *
+ * 【为什么需要它——反馈环】两个面板都订阅同一个共享视口，而时间轴**自己也订阅**
+ * （它要把参数编辑器推来的位置应用回来）。于是时间轴每次发布后都会立刻收到自己的
+ * 回灌，再用 `setZoomAndScroll(store.scrollLeft)` 写回内核。
+ *
+ * 写入方在发布时登记来源，订阅方在回调里比对 `getOrigin()`：若来源就是自己，说明
+ * 这次广播是自己造成的，应**跳过应用**。
+ *
+ * 【不这么做会怎样（实测）】时间轴的逐帧发布与自身的回灌在同一帧内竞争，回灌读到
+ * 的是**上一次**的值 → 内核位置出现 `10 → 20 → 10` 的回退。连续拖拽时表现为
+ * 每三帧回退一次（增量呈 `+30, +10, -10` 循环），即用户报告的"阶梯感 / 被吸附感"。
+ *
+ * 注意：原先的 `timelineSyncApplyingRef` 标志只在**同步调用栈内**为真，无法覆盖
+ * 跨帧的回灌，所以它不能替代来源判定。
+ */
+let origin: string | null = null;
+
 const listeners = new Set<() => void>();
 
 function emit(): void {
@@ -53,7 +72,17 @@ export const timelineViewportSync = {
      * scrollLeft，分两次写入会让另一个视图先收到“新滚动、旧缩放”
      * 的中间状态，进而在内容宽度尚未更新时被浏览器钳制、反向写回。
      */
-    setViewport(next: Partial<TimelineViewportState>): void {
+    /**
+     * 当前写入来源（由最近一次 `setViewport` 登记）。
+     *
+     * 订阅方在回调里读取它判断"这次广播是不是我自己造成的"，见 `origin` 说明。
+     * 未登记时为 `null`（例如 `reset()` 或外部直接写入）。
+     */
+    getOrigin(): string | null {
+        return origin;
+    },
+    setViewport(next: Partial<TimelineViewportState>, from?: string): void {
+        origin = from ?? null;
         // 播种语义：拥有方已确定当前位置（即使值与模块默认一致，例如启动
         // 时恰为 scrollLeft=0 / pxPerSec=150），也要立即可被订阅方应用。
         seeded = true;
@@ -89,6 +118,7 @@ export const timelineViewportSync = {
         state.scrollLeft = 0;
         state.pxPerSec = 150;
         seeded = false;
+        origin = null;
         emit();
     },
 };

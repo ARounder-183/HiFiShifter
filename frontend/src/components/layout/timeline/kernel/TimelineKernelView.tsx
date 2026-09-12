@@ -59,6 +59,13 @@ export interface TimelineKernelViewProps {
      */
     readonly onScrollLeftCommit?: (scrollLeftPx: number) => void;
     /**
+     * 水平滚动位置的逐帧通知（跨面板同步用）。
+     *
+     * 【为什么与 `onScrollLeftCommit` 分开】后者是量化 256px 的 React 对齐
+     * 提交；把它当同步通道会让参数编辑器滞后一跳一跳（见宿主同名 option 说明）。
+     */
+    readonly onScrollLeftFrame?: (scrollLeftPx: number) => void;
+    /**
      * 视口宽度回写（尺寸变化时一次）。
      *
      * 标尺的刻度窗口按 `[scrollLeft, scrollLeft + viewportWidth]` 计算；内核模式下
@@ -249,6 +256,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         silenceSegmentsByClipId,
         showAllTakes,
         onScrollLeftCommit,
+        onScrollLeftFrame,
         onViewportWidthChange,
     } = props;
 
@@ -386,6 +394,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         getPlayheadSec,
         onVisibleRowsChange: handleVisibleRowsChange,
         onScrollLeftCommit,
+        onScrollLeftFrame,
         onViewportWidthChange,
     });
     // eslint-disable-next-line react-hooks/refs -- 回调镜像：同上
@@ -395,6 +404,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         getPlayheadSec,
         onVisibleRowsChange: handleVisibleRowsChange,
         onScrollLeftCommit,
+        onScrollLeftFrame,
         onViewportWidthChange,
     };
 
@@ -550,6 +560,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                     callbacksRef.current.onVisibleRowsChange(firstRow, rowCount),
                 interactions: stableInteractions,
                 onScrollLeftCommit: (px) => callbacksRef.current.onScrollLeftCommit?.(px),
+                onScrollLeftFrame: (px) => callbacksRef.current.onScrollLeftFrame?.(px),
                 onViewportWidthChange: (px) => callbacksRef.current.onViewportWidthChange?.(px),
             });
         } catch (error) {

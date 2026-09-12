@@ -222,6 +222,14 @@ const PARAM_EDITOR_VERTICAL_SCROLL_RANGE_PX = PIANO_ROLL_VERTICAL_SCROLL_RANGE_P
  * 在**模块加载时**读取一次（与时间轴内核同一约定）：切换开关后刷新页面生效。
  * 未显式设置时关闭（见 `isPianoRollKernelEnabled`），因此默认行为与迁移前完全一致。
  */
+/**
+ * 本面板在共享视口中的来源标识。
+ *
+ * 与时间轴的 `TIMELINE_SYNC_ORIGIN` 成对：双方发布时登记来源，订阅回调据此
+ * 跳过"自己造成的广播"（否则时间轴会把自己的值再应用一遍并回退）。
+ */
+const PIANO_ROLL_SYNC_ORIGIN = "pianoRoll";
+
 const PARAM_EDITOR_KERNEL_ENABLED = isPianoRollKernelEnabled();
 
 /**
@@ -1319,10 +1327,13 @@ export const PianoRollPanel: React.FC = () => {
         // 没有变化（例如光标位于左侧同步空白区时锚定在工程起点，next 仍为 -offset），
         // 也要广播缩放，否则轨道视图不会跟着缩放。
         if (syncEnabled && !timelineSyncApplyingRef.current) {
-            timelineViewportSync.setViewport({
-                scrollLeft: native,
-                pxPerSec,
-            });
+            timelineViewportSync.setViewport(
+                {
+                    scrollLeft: native,
+                    pxPerSec,
+                },
+                PIANO_ROLL_SYNC_ORIGIN,
+                );
         }
         applyScrollLayers(next);
         // 防止浏览器对原生滚动位置的钳制造成漂移：立即校正到理论值。
@@ -2193,11 +2204,25 @@ export const PianoRollPanel: React.FC = () => {
         lastScrollLeftRef.current = next;
         scrollLeftRef.current = next;
         if (syncEnabled && !timelineSyncApplyingRef.current) {
-            // 原生滚动位置 == 共享视口值（轨道坐标），直接推送。
-            timelineViewportSync.setViewport({
-                scrollLeft: scroller.scrollLeft,
-                pxPerSec: pxPerSecRef.current,
-            });
+            // 【必须用 next（采纳值）而不是 scroller.scrollLeft（原生 DOM）】
+            //
+            // 内核模式下原生 scroller 只是**镜像**：真值在 ScrollKernel，由宿主在帧
+            // 提交时回写。直接读 DOM 会拿到**尚未回写**的旧值，于是把旧位置当成
+            // "用户滚动"推回共享视口——时间轴收到后应用旧值，位置出现回退。
+            //
+            // 实测（拖时间轴带动参数编辑器时）：共享视口序列 `10 → 20 → pianoRoll
+            // 推回 10`，时间轴内核随之从 20 退回 10。连续拖拽时每三帧回退一次
+            // （增量呈 `+30, +10, -10` 循环），即用户报告的"阶梯感/被吸附感"。
+            //
+            // `next` 是刚由原生位置换算出的绘制坐标，再换算回原生即得权威值；
+            // 与 `onUserScrollLeft` 的口径一致（后者用的是内核的绘制坐标）。
+            timelineViewportSync.setViewport(
+                {
+                    scrollLeft: timelineViewportStateToNative(next, offset),
+                    pxPerSec: pxPerSecRef.current,
+                },
+                PIANO_ROLL_SYNC_ORIGIN,
+            );
         }
         // 内核模式：交给内核（它会按新边界钳制、镜像回写并在下一帧提交各图层）。
         const host = hostRef.current;
@@ -2305,10 +2330,13 @@ export const PianoRollPanel: React.FC = () => {
                 lastScrollLeftRef.current = drawingScrollLeft;
                 const offset = paramEditorSyncTimelineRef.current ? timelineOffsetRef.current : 0;
                 if (paramEditorSyncTimelineRef.current && !timelineSyncApplyingRef.current) {
-                    timelineViewportSync.setViewport({
-                        scrollLeft: timelineViewportStateToNative(drawingScrollLeft, offset),
-                        pxPerSec: pxPerSecRef.current,
-                    });
+                    timelineViewportSync.setViewport(
+                        {
+                            scrollLeft: timelineViewportStateToNative(drawingScrollLeft, offset),
+                            pxPerSec: pxPerSecRef.current,
+                        },
+                        PIANO_ROLL_SYNC_ORIGIN,
+                        );
                 }
             },
         });

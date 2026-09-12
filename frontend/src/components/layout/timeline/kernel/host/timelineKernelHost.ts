@@ -318,8 +318,30 @@ export interface TimelineKernelHostArgs {
      * `scrollLeft` / `pxPerSec`），内核只写标尺内容层的 transform 是不够的——
      * 不更新 state 时标尺的**刻度范围**始终停留在初始视口，滚动后刻度消失。
      * 量化提交（而不是每帧）保证 React 不进滚动热路径，与旧实现的约定一致。
+     *
+     * 特殊说明：**它只负责 React 侧的对齐，不能承载"推给参数编辑器"这类逐帧
+     * 同步**——256px 的死区会让对方滞后一跳一跳（见 `onScrollLeftFrame`）。
      */
     readonly onScrollLeftCommit?: (scrollLeftPx: number) => void;
+    /**
+     * 水平滚动位置的**逐帧**通知（每个绘制帧一次，无死区）。
+     *
+     * 【为什么必须与 `onScrollLeftCommit` 分开】两者服务的目的完全不同：
+     * - `onScrollLeftCommit` 是 **React 对齐**（标尺刻度范围），量化 256px 是
+     *   刻意的性能取舍——标尺刻度晚 256px 更新肉眼无感；
+     * - 本回调是**跨面板同步**（把水平位置推给参数编辑器）。参数编辑器是独立的
+     *   滚动视图，晚 256px 意味着它先不动、然后**突然跳 256px**，拖起来就是
+     *   "阶梯感 / 被吸附感"。
+     *
+     * 曾经的错误做法是把同步推送挂在 `onScrollLeftCommit` 上（它的实现调用了
+     * `syncScrollLeft`，而后者顺带广播共享视口）。那是**职责混用**：一个为省
+     * React 重渲染而设的量化步长，意外成了跨面板同步的精度上限。实测拖时间轴
+     * 480px：内核 49 步平滑，参数编辑器只有 2 步、单次跳 260px。
+     *
+     * 本回调每帧调用；实现只做 ref 写入 + 广播，不进 React，因此不违反
+     * "滚动帧不进 React"的约定。
+     */
+    readonly onScrollLeftFrame?: (scrollLeftPx: number) => void;
     /**
      * 视口宽度变化（尺寸变化时一次）。
      *
@@ -1078,6 +1100,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         onZoomChange,
         onVisibleRowsChange,
         onScrollLeftCommit,
+        onScrollLeftFrame,
         onViewportWidthChange,
         interactions,
     } = args;
@@ -1622,6 +1645,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     let lastVisibleRowCount = -1;
     /** 上一次量化提交给 React 的水平滚动位置（NaN = 从未提交）。 */
     let lastCommittedScrollLeft = Number.NaN;
+    /** 上一次逐帧通知的水平滚动位置（NaN = 从未通知）；用于去重，避免空转。 */
+    let lastFrameScrollLeft = Number.NaN;
 
     /**
      * 独立画布图层（波形等）：内核在视口提交后按 order 调用其 paint。
@@ -1841,6 +1866,13 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         // 细节层与 GL 层同帧平移：两层共用同一个内容坐标窗口，滚动时一起移动。
         positionDetailLayer(view);
         syncDom(view);
+
+        // 水平滚动**逐帧**通知：跨面板同步（参数编辑器）必须逐帧，不能挂在
+        // 下面那个量化提交上（256px 死区会造成"阶梯感"，见 onScrollLeftFrame）。
+        if (onScrollLeftFrame !== undefined && view.scrollLeft !== lastFrameScrollLeft) {
+            lastFrameScrollLeft = view.scrollLeft;
+            onScrollLeftFrame(view.scrollLeft);
+        }
 
         // 水平滚动量化提交：标尺的**刻度范围**由 React 按 scrollLeft 计算，
         // 只写内容层 transform 会让刻度停留在初始视口（滚动后刻度消失）。
