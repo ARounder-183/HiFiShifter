@@ -20,7 +20,12 @@ import type {
     StrokePoint,
     ValueViewport,
 } from "./types";
-import { hitTestSelectionEdge } from "./kernel/gestureHitTest";
+import {
+    curveValueAtPointerFrame,
+    hitTestSelectionEdge,
+    isPointerNearCurve,
+} from "./kernel/gestureHitTest";
+import { selectionIndexRange } from "./kernel/dragArithmetic";
 import type { MutableRefObject as MutRef } from "react";
 import { isModifierActive, isNoneBinding } from "../../../features/keybindings/keybindingsSlice";
 import { matchesKeybinding } from "../../../features/keybindings/useKeybindings";
@@ -569,23 +574,18 @@ export function usePianoRollInteractions(args: {
         const bBeat = Math.max(sel.aBeat, sel.bBeat);
         if (!Number.isFinite(aBeat) || !Number.isFinite(bBeat) || bBeat <= aBeat) return null;
 
-        const fp = Math.max(1e-6, pv.framePeriodMs);
         const stride = Math.max(1, pv.stride);
-        const selStartFrameRaw = Math.max(0, Math.floor((aBeat * secPerBeat * 1000) / fp));
-        const selEndFrameRaw = Math.max(
-            selStartFrameRaw,
-            Math.ceil((bBeat * secPerBeat * 1000) / fp),
-        );
-        const selStartIdx = clamp(
-            Math.round((selStartFrameRaw - pv.startFrame) / stride),
-            0,
-            pv.edit.length - 1,
-        );
-        const selEndIdx = clamp(
-            Math.round((selEndFrameRaw - pv.startFrame) / stride),
-            selStartIdx,
-            pv.edit.length - 1,
-        );
+        // 选区 → 帧 → 采样下标：抽到 `kernel/dragArithmetic`（纯函数，有单测）。
+        // 这段算术在 hook 里原有 3 份副本，任一处漂移都会让拉伸预览与提交错位。
+        const selRange = selectionIndexRange({
+            aBeat,
+            bBeat,
+            secPerBeat,
+            framePeriodMs: pv.framePeriodMs,
+            paramView: pv,
+        });
+        if (selRange === null) return null;
+        const { startIdx: selStartIdx, endIdx: selEndIdx } = selRange;
         const baselineValues = pv.edit.slice(selStartIdx, selEndIdx + 1);
         if (baselineValues.length === 0) return null;
 
@@ -1536,14 +1536,15 @@ export function usePianoRollInteractions(args: {
             const canvas = canvasRef.current;
             if (!pv || pv.edit.length === 0 || !canvas) return null;
 
-            const beat = pointerBeat(clientX);
-            const fp = pv.framePeriodMs;
-            const sec = beat * secPerBeat;
-            const frame = Math.max(0, Math.floor((sec * 1000) / fp));
-            const idx = Math.round((frame - pv.startFrame) / Math.max(1, pv.stride));
-            const curveVal = idx >= 0 && idx < pv.edit.length ? Number(pv.edit[idx]) : null;
-            if (curveVal == null || !Number.isFinite(curveVal)) return null;
-            return curveVal;
+            // 秒 → 帧 → 采样下标：抽到 `kernel/gestureHitTest`（纯函数，有单测）。
+            // `pointerBeat` 返回 beat，先乘 `secPerBeat` 还原为秒，与本函数入参口径一致。
+            return curveValueAtPointerFrame({
+                sec: pointerBeat(clientX) * secPerBeat,
+                startFrame: pv.startFrame,
+                stride: pv.stride,
+                framePeriodMs: pv.framePeriodMs,
+                values: pv.edit,
+            });
         },
         [paramViewRef, canvasRef, pointerBeat, secPerBeat],
     );
@@ -1557,10 +1558,16 @@ export function usePianoRollInteractions(args: {
             if (!canvas) return null;
             const rect = canvas.getBoundingClientRect();
             const rectH = rect.height || viewSizeRef.current.h || 1;
-            const mouseY = clientY - rect.top;
-            const mappedCurveVal = editParam === "pitch" ? curveVal + 0.5 : curveVal;
-            const curveY = valueToY(editParam, mappedCurveVal, rectH);
-            return Math.abs(mouseY - curveY) < 10 ? curveVal : null;
+            // 邻域判定抽到 `kernel/gestureHitTest`（纯函数，有单测）：它显式施加
+            // pitch 的 +0.5 偏移，与 render.ts 的绘制位置同源。
+            return isPointerNearCurve({
+                pointerY: clientY - rect.top,
+                param: editParam,
+                valueToY: (v) => valueToY(editParam, v, rectH),
+                curveValue: curveVal,
+            })
+                ? curveVal
+                : null;
         },
         [getCurveValueAtPointerFrame, canvasRef, viewSizeRef, editParam, valueToY],
     );
@@ -2028,24 +2035,19 @@ export function usePianoRollInteractions(args: {
                                 if (!pv || pv.edit.length === 0) return;
                                 const fp = Math.max(1e-6, pv.framePeriodMs);
                                 const stride = Math.max(1, pv.stride);
-                                const oldStartFrame = Math.max(
-                                    0,
-                                    Math.floor((aBeat * secPerBeat * 1000) / fp),
-                                );
-                                const oldEndFrame = Math.max(
-                                    oldStartFrame,
-                                    Math.ceil((bBeat * secPerBeat * 1000) / fp),
-                                );
-                                const oldStartIdx = clamp(
-                                    Math.round((oldStartFrame - pv.startFrame) / stride),
-                                    0,
-                                    pv.edit.length - 1,
-                                );
-                                const oldEndIdx = clamp(
-                                    Math.round((oldEndFrame - pv.startFrame) / stride),
-                                    oldStartIdx,
-                                    pv.edit.length - 1,
-                                );
+                                // 选区 → 帧 → 下标：抽到 `kernel/dragArithmetic`。
+                                const oldRange = selectionIndexRange({
+                                    aBeat,
+                                    bBeat,
+                                    secPerBeat,
+                                    framePeriodMs: pv.framePeriodMs,
+                                    paramView: pv,
+                                });
+                                if (oldRange === null) return;
+                                const oldStartFrame = oldRange.startFrame;
+                                const oldEndFrame = oldRange.endFrame;
+                                const oldStartIdx = oldRange.startIdx;
+                                const oldEndIdx = oldRange.endIdx;
                                 const oldValues = pv.edit.slice(oldStartIdx, oldEndIdx + 1);
                                 if (oldValues.length <= 0) return;
 
@@ -2064,24 +2066,20 @@ export function usePianoRollInteractions(args: {
                                     nextABeat: number,
                                     nextBBeat: number,
                                 ) => {
-                                    const nextStartFrame = Math.max(
-                                        0,
-                                        Math.floor((nextABeat * secPerBeat * 1000) / fp),
-                                    );
-                                    const nextEndFrame = Math.max(
-                                        nextStartFrame,
-                                        Math.ceil((nextBBeat * secPerBeat * 1000) / fp),
-                                    );
-                                    const nextStartIdx = clamp(
-                                        Math.round((nextStartFrame - pvNow.startFrame) / stride),
-                                        0,
-                                        pvNow.edit.length - 1,
-                                    );
-                                    const nextEndIdx = clamp(
-                                        Math.round((nextEndFrame - pvNow.startFrame) / stride),
-                                        nextStartIdx,
-                                        pvNow.edit.length - 1,
-                                    );
+                                    // 同样走 `kernel/dragArithmetic`：与上面的 oldRange
+                                    // 用同一份实现，保证"拖到哪"与"从哪开始"口径一致。
+                                    const nextRange = selectionIndexRange({
+                                        aBeat: nextABeat,
+                                        bBeat: nextBBeat,
+                                        secPerBeat,
+                                        framePeriodMs: pvNow.framePeriodMs,
+                                        paramView: pvNow,
+                                    });
+                                    if (nextRange === null) return null;
+                                    const nextStartFrame = nextRange.startFrame;
+                                    const nextEndFrame = nextRange.endFrame;
+                                    const nextStartIdx = nextRange.startIdx;
+                                    const nextEndIdx = nextRange.endIdx;
                                     const nextLen = nextEndIdx - nextStartIdx + 1;
                                     if (nextLen <= 0) return null;
 
