@@ -172,7 +172,7 @@ Three phases, each independently shippable, verifiable, and revertible.
 | **2 · Render kernel** ✅ **已完成** | Grid, keyboard axis, value labels/ticks, selection, playhead, highlight bands move to GL instanced geometry; the existing glyph pipeline takes over all `fillText`. Curves stay on Canvas 2D in the detail layer. | Pixel comparison within tolerance ✅ 0.0818%（96% 差异为 1/255）；text quality matches ✅（9px/bold 9px 完全一致）；playback frames no longer repaint curves ✅ 每帧 Canvas2D 绘图调用 318 → **0**。证据见 `plans/2026-09-12-pianoroll-kernel-phase2.md` 的完成记录 |
 | **3 · Curve GL + interactions** | Polyline triangle-strip curve rendering (all curve variants); geometric hit testing + gesture state machine migration. | Curve fidelity comparison passes; every gesture regression-checked in the browser |
 | ↳ **曲线 GL 部分** ✅ **已完成** | 曲线改为 GL 三角带（**实际用带距离属性的三角形**，见计划自审）；渲染层按设备像素列抽稀 | 像素保真 ✅ 同会话 A/B 差异 0.0352%，包络中位 1px；性能 ✅ longtask 30 次/2240ms → **0 次/0ms**；每帧 `lineTo` ✅ 213,955 → **0**。7 种变体中仅 3 种端到端比对（mock 限制，已记录）。证据见 `plans/2026-09-12-pianoroll-kernel-phase3.md` 的 Task 4/5 记录 |
-| ↳ **手势迁移** ⏳ **进行中** | 抽出 `gestureHitTest`（第一片完成）/ `dragArithmetic`（未开始） | **未达成**：仅选区边缘手势完成等价性验证；hook 未缩小（3,875 → 3,876 行）。进度与后续清单见同计划 Task 6 |
+| ↳ **手势迁移** ⏳ **部分完成** | 已抽出 `gestureHitTest`（32+13 项单测）与 `dragArithmetic`，并接线全部命中判定与选区坐标换算 | 浏览器复核 ✅ **9 个处理器 / 27 个观测点**：离散字段 0 差异、连续字段 0 超差、效果断言 10/10。**未达成**：「hook 可测量地缩小」按行数衡量不可达（3,876 → 3,887，新模块注释占比高），有效指标是内联 `beat→帧` 换算 **6 处 → 0 处**；曲线拖动的手势增量换算未抽出。详见计划 Task 6 |
 
 Each phase has its own flag value (or its own flag) so a phase can be reverted without
 reverting the previous ones.
