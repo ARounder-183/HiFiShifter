@@ -692,6 +692,9 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
         case "set_history_position":
             return { position: args[0] };
 
+        case "set_project_save_undo_history":
+            return { enabled: args[0] };
+
         case "end_undo_group":
             return undefined;
 

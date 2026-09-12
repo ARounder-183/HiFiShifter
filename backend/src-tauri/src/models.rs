@@ -28,6 +28,8 @@ pub struct ProjectMetaPayload {
     pub grid_size: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stretch_algorithm_override: Option<UserStretchAlgorithm>,
+    /// 保存本工程时是否一并写出 UNDO 操作记录数据（工程级开关）。
+    pub save_undo_history: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hifigan_mel_stretch_override: Option<bool>,
 }

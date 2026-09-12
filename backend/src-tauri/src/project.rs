@@ -120,6 +120,13 @@ pub struct ProjectFile {
     /// 工程级合成配置（v2 新增，旧工程反序列化时使用默认值）。
     #[serde(default, skip_serializing_if = "SynthConfig::is_default")]
     pub synth_config: SynthConfig,
+    /// 保存本工程时是否一并写出 UNDO 操作记录数据。
+    ///
+    /// 这是**工程级**开关（与「新建工程默认值」的全局设置相互独立）：
+    /// 只影响保存，打开工程时总是尝试读取 UNDO 数据。缺省（旧文件没有该
+    /// 字段）= 不写出，与全局「新建工程默认值」一致（默认关闭）。
+    #[serde(default)]
+    pub save_undo_history: bool,
 }
 
 impl ProjectFile {
@@ -144,6 +151,7 @@ impl ProjectFile {
             custom_scale: None,
             media_registry: Vec::new(),
             synth_config: SynthConfig::default(),
+            save_undo_history: false,
         }
     }
 }
@@ -163,6 +171,8 @@ fn default_time_signature_denominator() -> u32 {
 fn default_grid_size() -> String {
     "1/4".to_string()
 }
+
+
 
 // ─── 序列化 / 反序列化 ─────────────────────────────────────────────────────────
 

@@ -153,6 +153,21 @@ pub fn begin_undo_group(
     state.begin_undo_group(label)
 }
 
+/// 设置当前工程「保存时是否一并写出 UNDO 操作记录数据」（工程级开关）。
+///
+/// 全局设置（`UiSettings::save_undo_history_by_default`）只决定新工程的初值；
+/// 打开工程时总是尝试读取 UNDO 数据，与本开关无关。
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_project_save_undo_history(
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "ok": true,
+        "project": state.set_project_save_undo_history(enabled),
+    })
+}
+
 /// 跳到「操作记录」中的第 `position` 个状态（双击条目）。
 ///
 /// 与撤销/重做共用同一入口：越界或原地不动时返回 `ok = false`，

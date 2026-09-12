@@ -48,6 +48,21 @@ export const projectApi = {
             hifigan_mel_stretch_override?: boolean | null;
         }>("get_project_meta"),
 
+    /**
+     * 设置当前工程「保存时是否一并写出 UNDO 操作记录数据」（工程级开关）。
+     *
+     * 全局设置（`saveUndoHistoryByDefault`）只决定新工程的初值；打开工程时
+     * 总是尝试读取 UNDO 数据。
+     */
+    setProjectSaveUndoHistory: (enabled: boolean) =>
+        invoke<{
+            ok: boolean;
+            project?: {
+                save_undo_history?: boolean;
+                dirty?: boolean;
+            };
+        }>("set_project_save_undo_history", enabled),
+
     setProjectBaseScale: (baseScale: string) =>
         invoke<{
             ok: boolean;

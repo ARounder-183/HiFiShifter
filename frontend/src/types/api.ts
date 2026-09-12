@@ -127,6 +127,8 @@ export interface ProjectMeta {
     dirty: boolean;
     recent: string[];
     notes_markdown?: string;
+    /** 保存本工程时是否一并写出 UNDO 操作记录数据（工程级开关）。 */
+    save_undo_history?: boolean;
     base_scale?: string;
     use_custom_scale?: boolean;
     custom_scale?: {

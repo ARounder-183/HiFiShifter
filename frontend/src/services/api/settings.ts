@@ -60,10 +60,12 @@ export interface UiSettings {
     };
     quickSearchAutoNormalize?: boolean;
     /**
-     * 保存工程时把「操作记录」一并写入 `<工程文件名（含扩展名）>-UNDO`。
-     * 无论是否开启，打开工程时都会尝试读取伴生文件。
+     * **新建工程**默认是否保存 UNDO 操作记录数据（默认开启）。
+     *
+     * 保存时是否写出由工程级开关（`project.saveUndoHistory`）决定；打开工程
+     * 时总是尝试读取伴生文件。
      */
-    saveUndoHistoryWithProject?: boolean;
+    saveUndoHistoryByDefault?: boolean;
     visibleReferenceRootTrackIds?: string[];
     defaultStretchAlgorithm?: StretchAlgorithmOption;
     defaultHifiganMelStretch?: boolean;

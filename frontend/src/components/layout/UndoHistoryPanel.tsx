@@ -9,7 +9,8 @@ import { useI18n } from "../../i18n/I18nProvider";
 import {
     persistUiSettings,
     setHistoryPositionRemote,
-    setSaveUndoHistoryWithProject,
+    setProjectSaveUndoHistoryRemote,
+    setSaveUndoHistoryByDefault,
 } from "../../features/session/sessionSlice";
 
 /**
@@ -204,21 +205,34 @@ export const UndoHistoryPanel: React.FC<{
                 })}
             </div>
 
-            <div className="shrink-0 border-t border-qt-border px-3 py-1">
-                {/* 与工程一起保存：写入 `<工程文件名（含扩展名）>-UNDO`；
-                    无论是否勾选，打开工程时都会尝试读取伴生文件。 */}
+            <div className="shrink-0 space-y-1 border-t border-qt-border px-3 py-1.5">
+                {/* 工程级：保存本工程时是否写出 UNDO 数据（随工程文件持久化）。
+                    无论勾选与否，打开工程时都会尝试读取伴生文件。 */}
                 <label className="flex cursor-pointer items-center gap-2 select-none">
                     <input
                         type="checkbox"
-                        checked={s.saveUndoHistoryWithProject}
+                        checked={s.saveUndoHistory}
                         onChange={(event) => {
-                            dispatch(setSaveUndoHistoryWithProject(event.target.checked));
-                            void dispatch(persistUiSettings());
+                            void dispatch(
+                                setProjectSaveUndoHistoryRemote(event.target.checked),
+                            );
                         }}
                     />
                     <span className="text-[11px]">{tAny("undo_history_save_with_project")}</span>
                 </label>
-                <div className="mt-0.5 text-[10px] text-qt-text-muted">{countText}</div>
+                {/* 全局：新工程的默认值（默认开启）。 */}
+                <label className="flex cursor-pointer items-center gap-2 select-none">
+                    <input
+                        type="checkbox"
+                        checked={s.saveUndoHistoryByDefault}
+                        onChange={(event) => {
+                            dispatch(setSaveUndoHistoryByDefault(event.target.checked));
+                            void dispatch(persistUiSettings());
+                        }}
+                    />
+                    <span className="text-[11px]">{tAny("undo_history_save_by_default")}</span>
+                </label>
+                <div className="text-[10px] text-qt-text-muted">{countText}</div>
             </div>
         </div>,
         document.body,
@@ -229,7 +243,10 @@ export const UndoHistoryPanel: React.FC<{
 const selectHistoryPanelState = (state: RootState) => ({
     records: state.session.historyRecords,
     position: state.session.historyUndoDepth,
-    saveUndoHistoryWithProject: state.session.saveUndoHistoryWithProject,
+    /** 工程级开关：保存本工程时是否写出 UNDO 数据。 */
+    saveUndoHistory: state.session.project.saveUndoHistory,
+    /** 全局默认：新工程是否默认保存 UNDO 数据。 */
+    saveUndoHistoryByDefault: state.session.saveUndoHistoryByDefault,
 });
 
 /** 初始位置：锚点（撤销/重做按钮）下方；无锚点时贴近左上角。 */

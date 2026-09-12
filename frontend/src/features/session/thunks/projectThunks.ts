@@ -158,6 +158,22 @@ export const saveProjectToPathRemote = createAsyncThunk(
     },
 );
 
+/**
+ * 设置当前工程「保存时是否一并写出 UNDO 操作记录数据」（工程级开关）。
+ *
+ * 与全局「新建工程默认值」相互独立；打开工程时总是尝试读取 UNDO 数据。
+ */
+export const setProjectSaveUndoHistoryRemote = createAsyncThunk(
+    "session/setProjectSaveUndoHistoryRemote",
+    async (enabled: boolean, { rejectWithValue }) => {
+        const res = await webApi.setProjectSaveUndoHistory(enabled);
+        if (!res || res.ok === false) {
+            return rejectWithValue("set_project_save_undo_history_failed");
+        }
+        return res;
+    },
+);
+
 export const setProjectBaseScaleRemote = createAsyncThunk(
     "session/setProjectBaseScaleRemote",
     async (baseScale: string, { rejectWithValue }) => {

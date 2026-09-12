@@ -559,6 +559,7 @@ pub fn run() {
             commands::end_undo_group,
             commands::get_history_state,
             commands::set_history_position,
+            commands::set_project_save_undo_history,
             commands::get_project_meta,
             commands::new_project,
             commands::open_project_dialog,

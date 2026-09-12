@@ -410,6 +410,7 @@ fn build_project_file_snapshot(
         notes_markdown,
         stretch_algorithm_override,
         hifigan_mel_stretch_override,
+        save_undo_history,
     ) = {
         let p = state.project.lock().unwrap_or_else(|e| e.into_inner());
         (
@@ -426,6 +427,7 @@ fn build_project_file_snapshot(
             p.notes_markdown.clone(),
             p.stretch_algorithm_override,
             p.hifigan_mel_stretch_override,
+            p.save_undo_history,
         )
     };
 
@@ -443,6 +445,8 @@ fn build_project_file_snapshot(
     pf.notes_markdown = notes_markdown;
     pf.synth_config.stretch_algorithm_override = stretch_algorithm_override;
     pf.synth_config.hifigan_mel_stretch_override = hifigan_mel_stretch_override;
+    // 工程级开关：是否随工程保存 UNDO 数据（与全局「新建工程默认值」相互独立）。
+    pf.save_undo_history = save_undo_history;
     pf
 }
 
@@ -858,6 +862,10 @@ pub(super) fn new_project(
         p.grid_size = "1/4".to_string();
         p.stretch_algorithm_override = None;
         p.hifigan_mel_stretch_override = None;
+        // 新工程取全局默认（默认开启）；打开工程时总是尝试读取 UNDO 数据。
+        p.save_undo_history = state
+            .ui_settings_snapshot()
+            .save_undo_history_by_default;
     }
     sync_runtime_stretch_settings(state.inner());
     {
@@ -1006,6 +1014,8 @@ pub(super) fn open_project(
         p.path = Some(project_path.clone());
         p.dirty = false;
         p.notes_markdown = pf.notes_markdown;
+        // 工程级开关随文件恢复（旧文件缺字段时按默认「保存」）。
+        p.save_undo_history = pf.save_undo_history;
         p.base_scale = normalize_scale_key(&pf.base_scale);
         p.custom_scale = normalize_custom_scale(pf.custom_scale);
         p.use_custom_scale = pf.use_custom_scale && p.custom_scale.is_some();
@@ -1440,9 +1450,11 @@ mod tests {
         // 另存为 zip 时，操作记录必须打进压缩包内、与内嵌工程文件同级
         // （`<工程名>.hshp-UNDO`），而不是留在压缩包外面。
         let state = AppState::default();
-        let mut settings = crate::config::UiSettings::default();
-        settings.save_undo_history_with_project = true;
-        state.store_ui_settings_cache(&settings);
+        // 工程级开关（默认开启；显式置位以锁定语义）决定是否写出 UNDO 数据。
+        {
+            let mut p = state.project.lock().unwrap_or_else(|e| e.into_inner());
+            p.save_undo_history = true;
+        }
         {
             let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
             state.checkpoint_timeline(&tl, HistoryOp::AddClip);

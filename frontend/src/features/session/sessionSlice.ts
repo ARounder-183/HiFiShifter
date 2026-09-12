@@ -92,6 +92,7 @@ import {
     saveProjectRemote,
     saveProjectToPathRemote,
     setHistoryPositionRemote,
+    setProjectSaveUndoHistoryRemote,
     setProjectBaseScaleRemote,
     setProjectCustomScaleRemote,
     setProjectStretchSettingsRemote,
@@ -442,12 +443,12 @@ export interface SessionState {
     /** 快速搜索放置音频时自动规格化 */
     quickSearchAutoNormalizeEnabled: boolean;
     /**
-     * 保存工程时把「操作记录」一并写入 `<工程文件名（含扩展名）>-UNDO`。
+     * **新建工程**默认是否保存 UNDO 操作记录数据（全局设置的初值，默认关闭）。
      *
-     * 默认关闭（记录含完整时间线快照，体积随操作数增长）；无论是否开启，
-     * 打开工程时后端都会尝试读取伴生文件（静默失败即无历史）。
+     * 保存时是否写出 UNDO 由工程级开关（`project.saveUndoHistory`）决定；
+     * 打开工程时后端总是尝试读取伴生文件（静默失败即无历史）。
      */
-    saveUndoHistoryWithProject: boolean;
+    saveUndoHistoryByDefault: boolean;
     /** PianoRoll 中显示的其他 root track 参考线 */
     visibleReferenceRootTrackIds: string[];
     /** 全局默认外部拉伸算法 */
@@ -599,6 +600,11 @@ export interface SessionState {
         gridSize: GridSize;
         stretchAlgorithmOverride: StretchAlgorithmOption | null;
         hifiganMelStretchOverride: boolean | null;
+        /**
+         * 保存本工程时是否一并写出 UNDO 操作记录数据（工程级开关，随工程
+         * 文件持久化）。打开工程时总是尝试读取 UNDO 数据，与本开关无关。
+         */
+        saveUndoHistory: boolean;
     };
 
     busy: boolean;
@@ -1730,6 +1736,7 @@ function applyTimelineState(
               grid_size?: string;
               stretch_algorithm_override?: StretchAlgorithmOption | null;
               hifigan_mel_stretch_override?: boolean | null;
+              save_undo_history?: boolean;
           }
         | undefined;
     if (project) {
@@ -1777,6 +1784,10 @@ function applyTimelineState(
                 project.hifigan_mel_stretch_override === undefined
                     ? state.project.hifiganMelStretchOverride
                     : (project.hifigan_mel_stretch_override ?? null),
+            saveUndoHistory:
+                project.save_undo_history === undefined
+                    ? state.project.saveUndoHistory
+                    : Boolean(project.save_undo_history),
         };
         state.beats = nextBeatsPerBar;
         state.grid = nextGridSize;
@@ -1985,7 +1996,7 @@ const initialState: SessionState = {
     silencePreviewSegments: null,
     silenceDetectOptions: { ...SILENCE_DETECT_DEFAULTS },
     quickSearchAutoNormalizeEnabled: false,
-    saveUndoHistoryWithProject: false,
+    saveUndoHistoryByDefault: false,
     visibleReferenceRootTrackIds: [],
     defaultStretchAlgorithm: "signalsmith",
     defaultHifiganMelStretch: true,
@@ -2084,6 +2095,7 @@ const initialState: SessionState = {
         gridSize: "1/4",
         stretchAlgorithmOverride: null,
         hifiganMelStretchOverride: null,
+        saveUndoHistory: true,
     },
 
     busy: false,
@@ -2213,6 +2225,7 @@ export {
     undoRemote,
     redoRemote,
     setHistoryPositionRemote,
+    setProjectSaveUndoHistoryRemote,
     newProjectRemote,
     openProjectFromDialog,
     openProjectFromPath,
@@ -2621,8 +2634,8 @@ const sessionSlice = createSlice({
         toggleQuickSearchAutoNormalize(state) {
             state.quickSearchAutoNormalizeEnabled = !state.quickSearchAutoNormalizeEnabled;
         },
-        setSaveUndoHistoryWithProject(state, action: PayloadAction<boolean>) {
-            state.saveUndoHistoryWithProject = Boolean(action.payload);
+        setSaveUndoHistoryByDefault(state, action: PayloadAction<boolean>) {
+            state.saveUndoHistoryByDefault = Boolean(action.payload);
         },
         setDefaultStretchAlgorithm(state, action: PayloadAction<StretchAlgorithmOption>) {
             state.defaultStretchAlgorithm = action.payload;
@@ -3441,8 +3454,8 @@ const sessionSlice = createSlice({
                 }
                 if (s.quickSearchAutoNormalize != null)
                     state.quickSearchAutoNormalizeEnabled = Boolean(s.quickSearchAutoNormalize);
-                if (s.saveUndoHistoryWithProject != null)
-                    state.saveUndoHistoryWithProject = Boolean(s.saveUndoHistoryWithProject);
+                if (s.saveUndoHistoryByDefault != null)
+                    state.saveUndoHistoryByDefault = Boolean(s.saveUndoHistoryByDefault);
                 if (Array.isArray(s.visibleReferenceRootTrackIds)) {
                     state.visibleReferenceRootTrackIds = s.visibleReferenceRootTrackIds
                         .filter((id: unknown): id is string => typeof id === "string")
@@ -5008,6 +5021,21 @@ const sessionSlice = createSlice({
                 state.status = "Save failed";
             })
 
+            .addCase(setProjectSaveUndoHistoryRemote.fulfilled, (state, action) => {
+                const payload = action.payload as {
+                    ok?: boolean;
+                    project?: { save_undo_history?: boolean; dirty?: boolean };
+                };
+                if (!payload.ok || !payload.project) return;
+                if (payload.project.save_undo_history != null) {
+                    state.project.saveUndoHistory = Boolean(payload.project.save_undo_history);
+                }
+                if (payload.project.dirty != null) {
+                    state.project.dirty = Boolean(payload.project.dirty);
+                }
+            })
+            .addCase(setProjectSaveUndoHistoryRemote.rejected, setRejected)
+
             .addCase(setProjectBaseScaleRemote.fulfilled, (state, action) => {
                 const payload = action.payload as {
                     ok?: boolean;
@@ -6025,7 +6053,7 @@ export const {
     setSilencePreview,
     setSilenceDetectOptions,
     toggleQuickSearchAutoNormalize,
-    setSaveUndoHistoryWithProject,
+    setSaveUndoHistoryByDefault,
     setDefaultStretchAlgorithm,
     setDefaultHifiganMelStretch,
     setOrtEp,

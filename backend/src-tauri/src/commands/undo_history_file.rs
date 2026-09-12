@@ -109,7 +109,14 @@ pub fn save_undo_history(state: &AppState, project_path: &Path) -> bool {
 /// 序列化操作记录（不落盘）：工程保存写伴生文件、ZIP 归档写入压缩包内条目
 /// 共用这一段。设置未开启 / 无历史 / 序列化失败都返回 `None`。
 pub fn serialize_undo_history(state: &AppState) -> Option<Vec<u8>> {
-    if !state.ui_settings_snapshot().save_undo_history_with_project {
+    // 是否随工程保存 UNDO 数据由**工程级开关**决定（全局设置只决定新工程的
+    // 初始值）；打开工程时总是尝试读取，与本开关无关。
+    if !state
+        .project
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .save_undo_history
+    {
         return None;
     }
 
@@ -270,6 +277,50 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).expect("create temp dir");
         dir
+    }
+
+    #[test]
+    fn project_switch_controls_undo_persistence_not_the_global_default() {
+        use crate::state::{AppState, HistoryOp};
+
+        let state = AppState::default();
+        {
+            let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+            state.checkpoint_timeline(&tl, HistoryOp::AddClip);
+        }
+
+        // 工程级开关默认关闭（= 全局「新建工程默认值」的新默认）：不写出。
+        assert!(
+            super::serialize_undo_history(&state).is_none(),
+            "默认应不写出 UNDO 数据"
+        );
+
+        // 打开工程级开关 → 有历史就有内容可写。
+        state.set_project_save_undo_history(true);
+        assert!(
+            super::serialize_undo_history(&state).is_some(),
+            "工程级开关开启后应能序列化 UNDO 数据"
+        );
+
+        // 关闭工程级开关 → 不再写出 UNDO 数据。
+        state.set_project_save_undo_history(false);
+        assert!(
+            super::serialize_undo_history(&state).is_none(),
+            "工程级开关关闭后不应写出 UNDO 数据"
+        );
+
+        // 全局默认只决定新工程的初值，不影响当前工程。
+        let mut settings = crate::config::UiSettings::default();
+        settings.save_undo_history_by_default = true;
+        state.store_ui_settings_cache(&settings);
+        assert!(
+            super::serialize_undo_history(&state).is_none(),
+            "全局默认不应覆盖当前工程的开关"
+        );
+
+        // 重新打开工程级开关 → 恢复写出。
+        state.set_project_save_undo_history(true);
+        assert!(super::serialize_undo_history(&state).is_some());
     }
 
     #[test]

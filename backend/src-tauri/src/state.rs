@@ -1796,6 +1796,11 @@ pub struct ProjectState {
     pub grid_size: String,
     pub stretch_algorithm_override: Option<UserStretchAlgorithm>,
     pub hifigan_mel_stretch_override: Option<bool>,
+    /// 保存本工程时是否一并写出 UNDO 操作记录数据（工程级设置）。
+    ///
+    /// 新建工程时取全局默认（`UiSettings::save_undo_history_by_default`），
+    /// 之后由工程文件持久化；打开工程时总是尝试读取 UNDO 数据，与本开关无关。
+    pub save_undo_history: bool,
     #[allow(dead_code)]
     pub allow_close: bool,
 }
@@ -1816,6 +1821,7 @@ impl Default for ProjectState {
             grid_size: "1/4".to_string(),
             stretch_algorithm_override: None,
             hifigan_mel_stretch_override: None,
+            save_undo_history: false,
             allow_close: false,
         }
     }
@@ -3137,7 +3143,28 @@ impl AppState {
             grid_size: p.grid_size,
             stretch_algorithm_override: p.stretch_algorithm_override,
             hifigan_mel_stretch_override: p.hifigan_mel_stretch_override,
+            save_undo_history: p.save_undo_history,
         }
+    }
+
+    /// 设置当前工程的「保存时是否写出 UNDO 数据」开关（工程级设置）。
+    ///
+    /// 属于工程数据：改动会置脏并在首次变脏时刷新窗口标题，但不打撤销点
+    /// （它不是时间线内容）。返回更新后的工程元数据供前端同步。
+    pub fn set_project_save_undo_history(&self, enabled: bool) -> ProjectMetaPayload {
+        let changed = {
+            let mut p = self.project.lock().unwrap_or_else(|e| e.into_inner());
+            if p.save_undo_history == enabled {
+                false
+            } else {
+                p.save_undo_history = enabled;
+                true
+            }
+        };
+        if changed {
+            self.mark_project_dirty_and_retitle();
+        }
+        self.project_meta_payload()
     }
 
     /// 打一个撤销点：把当前时间线状态登记为新的「第 N 步之后的状态」。
