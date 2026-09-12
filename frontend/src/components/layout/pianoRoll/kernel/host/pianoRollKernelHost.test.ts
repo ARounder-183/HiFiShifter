@@ -19,27 +19,38 @@ import { describe, expect, it } from "vitest";
 import { PIANO_ROLL_VERTICAL_SCROLL_RANGE_PX } from "../scroll/verticalValueScroll";
 import { createPianoRollKernelHost } from "./pianoRollKernelHost";
 
-/** 记录型 DOM 桩：统计每个事件类型上 add / remove 的次数，并带一个可写的 `style`。 */
+/**
+ * 记录型 DOM 桩：统计每个事件类型上 add / remove 的次数、保留处理器以便手动派发，
+ * 并带一个可写的 `style`。
+ *
+ * 特殊说明：保留处理器是必要的——宿主的用户手势回调（拖 thumb）只能通过**真的**
+ * 派发 pointerdown / pointermove 来验证，仅统计 add 次数无法覆盖该路径。
+ * 同时保留"摘除后不再被调用"的语义：`removeEventListener` 会把处理器移出表。
+ */
 function makeTarget() {
     const counts = new Map<string, { added: number; removed: number }>();
+    const handlers = new Map<string, (event: never) => void>();
     return {
         style: {} as CSSStyleDeclaration,
         counts,
-        addEventListener(type: string) {
+        /** 当前仍注册着的处理器（按事件类型）。测试可直接调用以模拟派发。 */
+        handlers,
+        addEventListener(type: string, handler: (event: never) => void) {
             const entry = counts.get(type) ?? { added: 0, removed: 0 };
             entry.added += 1;
             counts.set(type, entry);
+            handlers.set(type, handler);
         },
         removeEventListener(type: string) {
             const entry = counts.get(type) ?? { added: 0, removed: 0 };
             entry.removed += 1;
             counts.set(type, entry);
+            handlers.delete(type);
         },
         /**
          * 全部类型都配平（加过几条就摘掉几条）。
          *
-         * 特殊说明：Task 4 的宿主不注册监听，故当前恒为 true；Task 7 接入输入后
-         * 本断言开始具备真实约束力（防漏摘 window 监听）。
+         * 特殊说明：断言前应先校验 `totalAdded() > 0`，否则零监听时会成为空断言。
          */
         balanced(): boolean {
             for (const entry of counts.values()) {
@@ -68,50 +79,75 @@ function makeHost(options: { offsetPx?: number } = {}) {
     const hThumb = makeTarget();
     const rulerContent = { style: {} as CSSStyleDeclaration };
     const paintedAxes: number[] = [];
+    const userScrolls: number[] = [];
     let pending: FrameRequestCallback | null = null;
     let handle = 0;
     let scrollLeftCommits = 0;
 
-    const host = createPianoRollKernelHost({
-        // node 无 DOM：桩只需满足宿主实际用到的成员（量测 + 事件 + style）。
-        container: Object.assign(container, {
-            clientWidth: 1864,
-            clientHeight: 823,
-        }) as never,
-        hScrollbarThumb: hThumb as never,
-        vScrollbarThumb: vThumb as never,
-        data: () => ({
-            projectSec: 100,
-            valueDomain: { min: 0, max: 100, span: 50 },
-        }),
-        initialPxPerSec: 91.25,
-        horizontalOffsetPx: () => offsetPx,
-        sync: {
-            rulerContent: rulerContent as never,
-        },
-        onFrame: (axis) => {
-            paintedAxes.push(axis.scrollLeftPx);
-        },
-        onScrollLeftCommit: () => {
-            scrollLeftCommits += 1;
-        },
-        // 注入帧调度：手动 flush，避免依赖 node 里不存在的 rAF。
-        requestFrame: (cb) => {
-            pending = cb;
-            handle += 1;
-            return handle;
-        },
-        cancelFrame: () => {
-            pending = null;
-        },
-    });
+    // 宿主把拖拽的移动 / 抬起挂在 window 上。node 环境没有 window，因此装一个桩并
+    // 用 try/finally 保证无论构造成功与否都还原全局，避免污染同进程的其它测试。
+    const windowStub = makeTarget();
+    const previousWindow = (globalThis as { window?: unknown }).window;
+    (globalThis as { window?: unknown }).window = windowStub;
+
+    let host: ReturnType<typeof createPianoRollKernelHost>;
+    try {
+        host = createPianoRollKernelHost({
+            // node 无 DOM：桩只需满足宿主实际用到的成员（量测 + 事件 + style）。
+            container: Object.assign(container, {
+                clientWidth: 1864,
+                clientHeight: 823,
+                scrollLeft: 0,
+                scrollTop: 0,
+            }) as never,
+            hScrollbarThumb: hThumb as never,
+            vScrollbarThumb: vThumb as never,
+            data: () => ({
+                projectSec: 100,
+                valueDomain: { min: 0, max: 100, span: 50 },
+            }),
+            initialPxPerSec: 91.25,
+            horizontalOffsetPx: () => offsetPx,
+            sync: {
+                rulerContent: rulerContent as never,
+            },
+            onFrame: (axis) => {
+                paintedAxes.push(axis.scrollLeftPx);
+            },
+            onScrollLeftCommit: () => {
+                scrollLeftCommits += 1;
+            },
+            onUserScrollLeft: (drawingScrollLeft) => {
+                userScrolls.push(drawingScrollLeft);
+            },
+            // 注入帧调度：手动 flush，避免依赖 node 里不存在的 rAF。
+            requestFrame: (cb) => {
+                pending = cb;
+                handle += 1;
+                return handle;
+            },
+            cancelFrame: () => {
+                pending = null;
+            },
+        });
+    } finally {
+        if (previousWindow === undefined) {
+            Reflect.deleteProperty(globalThis, "window");
+        } else {
+            (globalThis as { window?: unknown }).window = previousWindow;
+        }
+    }
+
     return {
         host,
         container,
         vThumb,
         hThumb,
+        /** window 桩：拖拽的 pointermove / pointerup 从这里派发。 */
+        windowHandlers: windowStub.handlers,
         rulerContent,
         paintedAxes,
+        userScrolls,
         scrollLeftCommits: () => scrollLeftCommits,
         hasPendingFrame: () => pending !== null,
         /** 跑掉当前排队的帧（上限 8 次，防止自驱动的无限循环）。 */
@@ -249,6 +285,45 @@ describe("createPianoRollKernelHost · 坐标契约（偏移 200）", () => {
         expect(t.host.getViewport().scrollLeft).toBeCloseTo(0, 6);
         t.host.setScrollLeft(999999);
         expect(t.host.getViewport().scrollLeft).toBeCloseTo(CONTENT_W, 6);
+        t.host.dispose();
+    });
+});
+
+/**
+ * 用户手势上报：`onUserScrollLeft` 只在宿主**亲自解析**的手势后触发。
+ *
+ * 【为什么单列一组】它与 `onScrollLeftCommit` 长得很像但语义完全不同：前者代表
+ * "用户想滚到这儿"（面板据此同步时间轴），后者只是"位置变了"（含宿主的镜像回写）。
+ * 混用会让镜像回写被当成用户滚动，或让滚动条拖拽漏掉同步——两者都曾实际发生。
+ */
+describe("createPianoRollKernelHost · onUserScrollLeft", () => {
+    it("命令式写入（setScrollLeft）不触发用户手势回调", () => {
+        const t = makeHost();
+        t.host.setScrollLeft(500);
+        t.flush();
+        expect(t.userScrolls).toEqual([]);
+        t.host.dispose();
+    });
+
+    it("拖横向 thumb 触发回调，且报的是**绘制坐标**（已减去偏移）", () => {
+        const t = makeHost({ offsetPx: 200 });
+        const down = t.hThumb.handlers.get("pointerdown");
+        expect(down).toBeDefined();
+        // 模拟按下（记录起点）后移动指针。
+        down?.({
+            preventDefault() {},
+            stopPropagation() {},
+            clientX: 100,
+            pointerId: 1,
+            currentTarget: { setPointerCapture() {} },
+        } as never);
+        const move = t.windowHandlers.get("pointermove");
+        expect(move).toBeDefined();
+        move?.({ clientX: 180 } as never);
+        expect(t.userScrolls.length).toBeGreaterThan(0);
+        // 偏移 200：回调给出的绘制坐标应比内核内部的原生坐标小 200。
+        const reported = t.userScrolls.at(-1) as number;
+        expect(reported).toBeCloseTo(t.host.getViewport().scrollLeft, 6);
         t.host.dispose();
     });
 });

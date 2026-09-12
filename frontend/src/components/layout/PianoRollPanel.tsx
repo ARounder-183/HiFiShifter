@@ -2197,6 +2197,23 @@ export const PianoRollPanel: React.FC = () => {
                     });
                 }
             },
+            onUserScrollLeft: (drawingScrollLeft) => {
+                // 用户手势（拖 thumb / 点轨道翻页）：与旧实现拖原生滚动条同语义——
+                // 需要把新位置推给共享视口，否则同步模式下滚动时间轴不会跟随。
+                //
+                // 【为什么不走 syncScrollLeft】那条路径依赖 `scroll` 事件，而内核的
+                // 镜像是同帧程序化写入的，事件到达时无法再区分"用户滚动"与"自身回写"。
+                // 由宿主动上报手势来源是唯一可靠判据（见 `onUserScrollLeft` 说明）。
+                scrollLeftRef.current = drawingScrollLeft;
+                lastScrollLeftRef.current = drawingScrollLeft;
+                const offset = paramEditorSyncTimelineRef.current ? timelineOffsetRef.current : 0;
+                if (paramEditorSyncTimelineRef.current && !timelineSyncApplyingRef.current) {
+                    timelineViewportSync.setViewport({
+                        scrollLeft: timelineViewportStateToNative(drawingScrollLeft, offset),
+                        pxPerSec: pxPerSecRef.current,
+                    });
+                }
+            },
         });
         hostRef.current = host;
         // dev-only 调试出口：浏览器里读取内核视口真值（滚动 / 值域中心 / 滚动条

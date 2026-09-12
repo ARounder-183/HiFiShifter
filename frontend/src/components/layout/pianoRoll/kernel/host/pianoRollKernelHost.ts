@@ -123,6 +123,21 @@ export interface PianoRollKernelHostArgs {
     readonly onFrame?: (axis: TimelineAxis) => void;
     /** 水平滚动位置的量化提交（跨步长才回调）。 */
     readonly onScrollLeftCommit?: (scrollLeftPx: number) => void;
+    /**
+     * **用户手势**改变了水平滚动位置（绘制坐标）。
+     *
+     * 【为什么必须与 `onScrollLeftCommit` 分开】宿主每帧把真值写回原生 scroller
+     * （镜像），这会触发 `scroll` 事件。面板若在该事件里把位置推给共享视口，就会把
+     * 宿主的**自身回写**误当成用户滚动；若不推送，则**滚动条拖拽 / 轨道翻页**这类
+     * 真实手势又会漏掉同步（旧实现里拖原生滚动条是会被同步的）。
+     *
+     * 两者无法靠比较数值区分（拖拽后的镜像回写与用户原生滚动值相同），因此由
+     * **来源**区分：只有宿主自己解析出的用户手势（拖 thumb、点轨道翻页）走本回调。
+     * 面板据此推送共享视口，而不必依赖 `scroll` 事件。
+     *
+     * @param drawingScrollLeft 新的水平位置（绘制坐标）。
+     */
+    readonly onUserScrollLeft?: (drawingScrollLeft: number) => void;
     /** 帧调度注入（默认 rAF；测试注入手动实现）。 */
     readonly requestFrame?: (callback: FrameRequestCallback) => number;
     /** 取消帧注入。 */
@@ -204,7 +219,7 @@ function shouldWrite(next: number, previous: number, epsilon = 0.01): boolean {
  */
 export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoRollKernelHost {
     const { container, hScrollbarThumb, vScrollbarThumb, hScrollbarTrack, vScrollbarTrack } = args;
-    const { data, sync, onFrame, onScrollLeftCommit } = args;
+    const { data, sync, onFrame, onScrollLeftCommit, onUserScrollLeft } = args;
 
     /** 待释放的资源（倒序执行；幂等由 `disposed` 保证）。 */
     const teardown: Array<() => void> = [];
@@ -314,6 +329,16 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
     let lastRulerTranslateX = Number.NaN;
     /** 上一次量化提交给 React 的水平滚动位置（NaN = 从未提交）。 */
     let lastCommittedScrollLeft = Number.NaN;
+
+    /**
+     * 通知面板：水平位置由**用户手势**改变（绘制坐标）。
+     *
+     * 特殊说明：只在拖 thumb / 点轨道翻页这类宿主亲自解析的手势后调用，绝不在
+     * 镜像回写或面板命令式写入后调用——详见 `onUserScrollLeft` 的说明。
+     */
+    function notifyUserScrollLeft(): void {
+        onUserScrollLeft?.(scroll.get().scrollLeft - horizontalOffsetPx());
+    }
 
     /**
      * 计算两条滚动条的几何（**绘制与命中的唯一几何来源**）。
@@ -484,6 +509,8 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                         scroll.maxScrollLeft(),
                     ),
             );
+            // 用户手势：拖 horizontal thumb 是真实意图，需通知面板同步共享视口。
+            notifyUserScrollLeft();
             return;
         }
         scroll.setScrollTop(
@@ -548,7 +575,11 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                     drawingScrollLeft,
                     viewportWidthPx,
                 );
-                if (target !== null) scroll.setScrollLeft(target + horizontalOffsetPx());
+                if (target !== null) {
+                    scroll.setScrollLeft(target + horizontalOffsetPx());
+                    // 用户手势：点轨道翻页同样需要同步共享视口。
+                    notifyUserScrollLeft();
+                }
                 return;
             }
             const target = scrollTargetFromTrackClick(
