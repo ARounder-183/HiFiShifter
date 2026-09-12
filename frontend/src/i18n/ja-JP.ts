@@ -979,6 +979,13 @@ export const jaJP = {
     timeline_display_settings: "タイムライン表示設定...",
     timeline_display_settings_desc:
         "ルーラーの時間単位、ラベル密度、再生ヘッド時間表示を設定します。",
+    kernel_unavailable_title: "タイムラインを描画できません（WebGL2 利用不可）",
+    kernel_unavailable_reason:
+        "ブラウザまたはシステムが WebGL2 グラフィックスコンテキストを提供しませんでした。",
+    kernel_unavailable_hints:
+        "確認項目：1. ハードウェアアクセラレーションとソフトウェアラスタライズが無効になっていないか（ブラウザ設定または起動オプション）；2. リモートデスクトップ / 仮想マシンの場合はローカルで実行してみる；3. GPU ドライバを更新する；4. グラフィックス資源を使う他のウィンドウを閉じてアプリを再起動する。",
+    kernel_unavailable_diagnostics: "診断情報をコピー",
+    kernel_unavailable_copied: "コピーしました",
     render_kernel_enabled: "新しい描画カーネルを使用（タイムライン / パラメータエディタ）",
     render_kernel_enabled_desc:
         "オフにすると従来の描画実装に戻ります。特定の GPU ドライバで表示異常が出るときの切り分け用です。",

@@ -946,6 +946,12 @@ export const zhTW = {
     time_unit_clock: "時:分:秒.毫秒",
     timeline_display_settings: "時間軸顯示設定...",
     timeline_display_settings_desc: "設定標尺時間單位、標籤密度與播放游標時間顯示。",
+    kernel_unavailable_title: "時間軸無法渲染（WebGL2 不可用）",
+    kernel_unavailable_reason: "瀏覽器或系統沒有提供 WebGL2 圖形上下文。",
+    kernel_unavailable_hints:
+        "可依次排查：1. 確認未停用硬體加速與軟體光柵（瀏覽器設定或啟動參數）；2. 若在遠端桌面 / 虛擬機中，嘗試在本機執行；3. 更新顯示卡驅動；4. 關閉其它佔用圖形資源的視窗後重新啟動應用程式。",
+    kernel_unavailable_diagnostics: "複製診斷資訊",
+    kernel_unavailable_copied: "已複製",
     render_kernel_enabled: "使用新渲染核心（時間軸 / 參數編輯器）",
     render_kernel_enabled_desc:
         "關閉後回退到既有渲染實作。用於某個顯示卡驅動下出現顯示異常時排查。",

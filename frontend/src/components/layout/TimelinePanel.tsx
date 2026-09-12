@@ -9,12 +9,20 @@
  *
  * 此文件只保留：JSX 渲染 + 胶水 + 拖拽 hooks 桥接
  *
- * 【内核开关】`TIMELINE_KERNEL_ENABLED`（localStorage `hifishifter.timelineKernel`）
- * 开启时，轨道区改由 `TimelineKernelView`（新渲染内核）承载；未显式设置时**默认开启**
- * （与构建模式无关，见 `timeline/kernel/featureFlag`）。
- * 阶段 1 起内核是**唯一**渲染路径：渲染处的条件恒真（`TIMELINE_KERNEL_ONLY`），
- * 关闭开关**不再**切回 DOM 实现，旧实现仅作为不可达代码暂留以便一行回滚，
- * 其删除由后续任务完成（见 `docs/superpowers/specs/2026-09-13-timeline-single-path-design.md`）。
+ * 【渲染路径】轨道区**恒由** `TimelineKernelView`（WebGL2 渲染内核）承载。
+ * 旧实现（原生滚动 + Canvas2D 的 `TimelineScrollArea` / `TimelineSurface` /
+ * `TrackLane` / `ClipItem` 等）已随"唯一路径"改造删除，此处**没有运行期二选一、
+ * 也没有可回退的第二条路径**。
+ *
+ * 【失败处理】WebGL2 不可用时内核视图回报失败（`handleKernelUnavailable`），本面板改
+ * 渲染 `KernelUnavailableNotice` —— 一个可自助排障的界面（原因 + 排查清单 + 可复制的
+ * 诊断信息）。实测 WebGL2 在纯 CPU 环境（含无 GPU）可用（ANGLE + SwiftShader），只有
+ * 显式禁止软件光栅一类配置才会失败。
+ *
+ * 【历史背景（勿删）】内核曾是 opt-in 且默认值跟随 `import.meta.env.DEV`，导致打包后
+ * **静默退回旧渲染器**（Phase 3 计划 R8）。结论是"绝不静默降级"：失败必须显式告知。
+ *
+ * @see docs/superpowers/specs/2026-09-13-timeline-single-path-design.md
  */
 import React, { useMemo, Profiler } from "react";
 import { Flex, Dialog, Button, Text } from "@radix-ui/themes";
@@ -22,7 +30,7 @@ import { useI18n } from "../../i18n/I18nProvider";
 import { useAppTheme } from "../../theme/AppThemeProvider";
 import { useAppSelector } from "../../app/hooks";
 import { shallowEqual } from "react-redux";
-import { isModifierActive, selectKeybinding } from "../../features/keybindings/keybindingsSlice";
+import { isModifierActive } from "../../features/keybindings/keybindingsSlice";
 import { resolveClipDragCopyMode } from "./timeline/hooks/clipDragCopyMode";
 import { copyClipsFromDrag } from "./timeline/hooks/copyClipsFromDrag";
 import { createNewTrackForKernelDrop } from "./timeline/hooks/createNewTrackForDrop";
@@ -93,9 +101,7 @@ import { moveClipsRemote } from "../../features/session/thunks/timelineThunks";
 import { computeTimelineRectSelection } from "./timeline/useTimelineSelectionRect";
 import { setTempoMapRemote } from "../../features/session/thunks/tempoMapThunks";
 
-import { NEW_TRACK_SENTINEL, useClipDrag } from "./timeline/hooks/useClipDrag";
-import { useEditDrag } from "./timeline/hooks/useEditDrag";
-import { useSlipDrag } from "./timeline/hooks/useSlipDrag";
+import { NEW_TRACK_SENTINEL } from "./timeline/hooks/useClipDrag";
 import { getBulkEditableClipIds } from "./timeline/hooks/bulkClipEdit";
 import { registerDragAbort } from "./timeline/gestureFocusGuard";
 import { getInsertBelowTargetIndex } from "./timeline/trackContextMenuPlacement";
@@ -115,12 +121,8 @@ import { MidiTrackSelectDialog } from "./MidiTrackSelectDialog";
 
 import {
     ClipContextMenu,
-    TRACK_ADD_ROW_HEIGHT,
     TrackAreaContextMenu,
-    TimelineScrollArea,
-    TimelineSurface,
     TimeRuler,
-    TrackLane,
     TrackList,
     detectExternalPathAction,
     extractLocalFilePath,
@@ -129,7 +131,6 @@ import {
 } from "./timeline";
 import { timeRulerHeightPx } from "./timeline/rulerHeight";
 import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeline";
-import { SnapHighlightLayer } from "./timeline/SnapHighlightLayer";
 import { formatEditNumber, gainToDb } from "./timeline/math";
 import { requestResetFadeCurvature } from "./timeline/fadeContextMenuBus";
 import { parsePlaybackRateInput } from "./timeline/runtime/timelineCanvasStyle";
@@ -145,51 +146,11 @@ import {
     slipBoundaryAlignedSides,
 } from "../../utils/loopSnap";
 import type { TempoMap } from "../../utils/tempoMap";
-import { isTimelineKernelEnabled } from "./timeline/kernel/featureFlag";
-import { resolveKernelMount } from "./timeline/kernel/kernelMount";
 import { TimelineKernelView } from "./timeline/kernel/TimelineKernelView";
+import { isKernelAvailable } from "./timeline/kernel/kernelAvailability";
+import { KernelUnavailableNotice } from "./timeline/kernel/KernelUnavailableNotice";
 import type { TimelineKernelHost } from "./timeline/kernel/host/timelineKernelHost";
 
-/**
- * 时间轴渲染内核开关：模块加载时读一次。
- *
- * 开启后时间轴区域由新内核（自绘滚动 + 单 WebGL2）**替换**渲染。
- * 默认值：**未显式设置时开启**（与 dev / 生产构建无关，见 `timeline/kernel/featureFlag`）
- * ——默认跟随构建模式会让打包后静默退回旧实现，这是本项目踩过的坑（Phase 3 计划 R8）。
- * 切换需刷新页面（设置界面的「时间轴显示」对话框 / dev 环境的 PERF 悬浮面板）。
- *
- * 特殊说明 1：本开关为 true **不代表内核一定能用**——WebGL2 可能创建失败（老驱动 /
- * 远程桌面 / GPU 黑名单）。那种情况下 `TimelineKernelView` 会回报不可用，面板记录原因
- * 并告警（见 `handleKernelUnavailable`）。
- *
- * 特殊说明 2（阶段 1 起）：本开关**不再**决定渲染哪棵子树——渲染条件已恒真
- * （见 `TIMELINE_KERNEL_ONLY`），因此写入 `"0"` 这个逃生门目前**不会**切回既有实现；
- * 保留它只为回滚时状态语义不变，逃生门的恢复由后续任务（失败界面 / 开关清理）决定。
- */
-const TIMELINE_KERNEL_ENABLED = isTimelineKernelEnabled();
-
-/**
- * 时间轴渲染内核是**唯一**渲染路径（阶段 1：旧分支不可达）。
- *
- * 【作用】把渲染处的三元条件由「运行期二选一」改为**恒真**，使旧实现分支在文件内
- * 保留但**不可达**。保留旧 JSX 而不立即删除，是为了让真机上万一发现内核缺能力时，
- * 回滚成本恰好是「还原一个表达式」——而不是把 500+ 行旧实现重新写回来。旧实现的
- * 删除是后续任务（阶段 2/3）的事。
- *
- * 【为什么必须写成带 `: boolean` 标注的模块常量，而不能直接写字面量 `true`】
- * 这是实测踩到的坑，不是风格偏好：直接写 `{true ? (…内核…) : (…旧实现…)}` 时，
- * TS 会把条件**折叠**为真、判定旧分支不可达，进而**放弃旧分支内部的控制流收窄**。
- * 实测后果是旧分支里 `selectionRect` / `dropPreview` 的 `null` 收窄全部失效，
- * `npx tsc -b --noEmit` 从「无输出」变成 **10 条 TS18047**（'X' is possibly 'null'），
- * 连带 `npm run build`（`tsc -b && vite build`）失败。加上 `: boolean` 标注后条件
- * 不再被折叠为字面量类型，收窄得以保留，tsc 恢复无输出；运行期取值仍恒为 true。
- *
- * 【为什么不用 `// eslint-disable` 抑制】`no-constant-condition` 只解决 eslint 报错，
- * 解决不了上面的 TS18047 收窄失效；换成本常量后 eslint 与 tsc **都不需要**任何抑制。
- *
- * @see docs/superpowers/specs/2026-09-13-timeline-single-path-design.md 阶段 1
- */
-const TIMELINE_KERNEL_ONLY: boolean = true;
 import type { ScaleLike } from "../../utils/musicalScales";
 import { TimelineDisplaySettingsDialog } from "./TimelineDisplaySettingsDialog";
 import { resolveTimelineScrollRange } from "./timeline/runtime/timelineScrollRange";
@@ -238,7 +199,6 @@ import {
 import { computeSlipWindow, toBoundarySnapClip } from "./timeline/hooks/slipWindow";
 import { useTimelineClipActions } from "./timeline/hooks/useTimelineClipActions";
 import { useTimelineEventHandlers } from "./timeline/hooks/useTimelineEventHandlers";
-import { useSnapOffsetDrag } from "./timeline/hooks/useSnapOffsetDrag";
 import { expandClipIdsWithGroups } from "./timeline/hooks/useGroupExpansion";
 import { useVisualPlayhead } from "../../hooks/useVisualPlayhead";
 import { ClipRateEditorDialog } from "./timeline/ClipRateEditorDialog";
@@ -247,15 +207,10 @@ import {
     computeFocusCursorScrollLeft,
 } from "../../utils/autoFollowScroll";
 import { readDevicePixelRatio, snapToDevicePx } from "../../utils/devicePixelLine";
-import { buildSparseClipRenderModel } from "./timeline/runtime/timelineCanvasModel";
-import { buildTimelineRenderModel } from "./timeline/runtime/timelineRenderModel";
-import { computeLeadingOverlapSecByClipId } from "./timeline/TrackLane";
-import { createTimelineAxis } from "./renderKernel/timelineAxis";
 import { resolveQuickExportClipIds } from "./timeline/quickExportSelection";
 import { isTrackListMirrorEcho } from "./timeline/scrollEcho";
 import type { ClipFormantMorph } from "../../features/session/sessionTypes";
 import { ClipFormantToolWindow } from "./timeline/clip/ClipFormantToolWindow";
-import type { ClipRenameClickCandidate } from "./timeline/clip/ClipHeader";
 
 const TimelineTransportBridge = React.memo(function TimelineTransportBridge(props: {
     pxPerSecRef: React.MutableRefObject<number>;
@@ -466,32 +421,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
      * 不含该字段，因此在这里单独选择（与旧实现 `ClipItem` 的取值方式一致）。
      */
     const silencePreviewSegments = useAppSelector((state) => state.session.silencePreviewSegments);
-    // 双击名称的第一次点击会把播放头移动到点击位置，第二次点击可能落在播放头线上。
-    // 记录名称区域的第一次点击，让播放头在短时间内收到同位置点击时转而进入重命名。
-    const renameClickCandidateRef = React.useRef<ClipRenameClickCandidate | null>(null);
-    const registerRenameClickCandidate = React.useCallback(
-        (candidate: ClipRenameClickCandidate | null) => {
-            renameClickCandidateRef.current = candidate;
-        },
-        [],
-    );
-    const [timelineScrollTop, setTimelineScrollTop] = React.useState(0);
-    // ── 竖直滚动的 React 提交量化（与水平 scrollLeft 同一套思路）──────
-    // onScroll 每帧直写 state 会让 TimelinePanel 整树重渲染（探针实测
-    // react p50 20ms，是竖直拖拽掉帧的根因）。React 里的 scrollTop 只服务
-    // 窗口化与裁剪模型，竖直 overscan 有 4 行缓冲，滞后半个缓冲以内绝对安全；
-    // sticky 画布层走视口总线命令式更新，不受滞后影响。
-    const scrollTopRafRef = React.useRef<number | null>(null);
-    const reactCommittedScrollTopRef = React.useRef(0);
-    const lastScrollTopRef = React.useRef(0);
-    React.useEffect(
-        () => () => {
-            if (scrollTopRafRef.current != null) {
-                cancelAnimationFrame(scrollTopRafRef.current);
-            }
-        },
-        [],
-    );
     // 时间轴 scroller 水平滚动条的占用高度（offsetHeight - clientHeight）。
     // 轨道头底部按此留出同高占位（bottomGutterHeightPx），保证轨道头与
     // 时间轴区域的竖直滚动范围严格一致。
@@ -530,62 +459,38 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     const kernelHostRef = React.useRef<TimelineKernelHost | null>(null);
 
     /**
-     * 内核是否已被判定为**本次会话内不可用**（WebGL2 创建失败等）。
+     * 内核运行期失败的原因（`null` = 未失败）。
      *
-     * 【为什么需要】`TIMELINE_KERNEL_ENABLED` 只表达"用户想用内核"，不表达"内核
-     * 真能用"。WebGL2 不可用（老驱动 / 远程桌面 / GPU 黑名单 / 上下文数超限）是
-     * 预期内的环境差异，必须让用户能自助排障——本阶段之前靠"退回既有实现"兜底。
+     * 【为什么需要】WebGL2 不可用（老驱动 / 远程桌面 / GPU 黑名单 / 上下文数超限）
+     * 是预期内的环境差异。内核是**唯一**渲染路径，没有回退可走，因此必须让用户能
+     * 自助排障——失败界面（`KernelUnavailableNotice`）要展示具体原因。
      *
-     * 【阶段 1 起的语义变化】渲染条件恒真，因此置位本 state **不再**切换渲染子树，
-     * 也就暂时没有兜底效果。它仍被保留（参与 `resolveKernelMount` 计算）以便后续
-     * 任务用它渲染失败界面，并让回滚时状态语义保持原样。
+     * 【为什么用 state 而不是 ref】它决定渲染内核还是失败界面，必须触发重渲染。
      *
-     * 【为什么用 state 而不是 ref】后续要据它决定渲染哪棵子树，必须触发重渲染。
-     *
-     * 【为什么置位后不再尝试】失败原因（无 GL）在会话内不会自愈，而每次重渲染都
-     * 重挂一次内核会反复失败并刷日志。要恢复只需刷新页面（与开关本身的语义一致）。
+     * 【为什么置位后不再尝试】失败原因（无 GL）在会话内不会自愈，而每次重渲染都重挂
+     * 一次内核会反复失败并刷日志。要恢复只需刷新页面。
      */
-    const [kernelUnavailable, setKernelUnavailable] = React.useState(false);
+    const [kernelUnavailableReason, setKernelUnavailableReason] = React.useState<string | null>(
+        null,
+    );
 
     /**
-     * `TimelineKernelView` 回报内核不可用：置位 state 并记录原因。
+     * `TimelineKernelView` 回报内核不可用：记录原因并告警。
      *
-     * 流程：置位 state → 控制台告警（带原因，供诊断）。
+     * 流程：记录原因（触发重渲染，切到失败界面）→ 控制台告警（带原因，供诊断）。
      *
-     * 【阶段 1 起不再切换渲染子树】内核已是唯一渲染路径，渲染条件恒真
-     * （`TIMELINE_KERNEL_ONLY`），因此本回调置位的 state **暂时不改变渲染结果**；
-     * 它仍被保留并继续告警，是为了让后续任务（失败界面）接上同一个信号，也让
-     * 回滚时状态语义不变。`kernelUnavailable` 仍参与 `resolveKernelMount` 的计算。
+     * 特殊说明 1：**没有回退**。旧实现（原生滚动 + Canvas2D）已随阶段 2/3 删除，
+     * 因此这里不会、也无法切回任何第二套渲染实现；唯一出路是失败界面 + 重启。
      *
-     * 特殊说明：用 `useCallback` 保持引用稳定——它经 props 传给内核视图，而视图
-     * 把它放进「回调镜像」ref；引用抖动虽不会重建宿主，但稳定引用更省心。
+     * 特殊说明 2：用 `useCallback` 保持引用稳定——它经 props 传给内核视图，而视图把
+     * 它放进「回调镜像」ref；引用抖动虽不会重建宿主，但稳定引用更省心。
      *
      * @param reason 失败原因（来自内核创建的 catch）。
      */
     const handleKernelUnavailable = React.useCallback((reason: string) => {
         console.warn(`[TimelinePanel] 时间轴内核不可用（${reason}），当前没有回退渲染路径`);
-        setKernelUnavailable(true);
+        setKernelUnavailableReason(reason);
     }, []);
-
-    /**
-     * 本次渲染是否走内核。
-     *
-     * 判据抽在 `resolveKernelMount`（纯函数，有单测）而不是内联在这里：本工程
-     * Vitest 跑在 node 环境、**没有任何测试引用 `.tsx`**，内联的 JSX 分支无法被
-     * 覆盖——把分支改成恒真或恒假（后者即"内核永不挂载"的回归）测试都测不出。
-     *
-     * 【阶段 1 起本值不再参与渲染】渲染处改用恒真的 `TIMELINE_KERNEL_ONLY`，因此
-     * 这个决策结果暂时**没有消费者**。它被刻意保留（而非删除）是为了让回滚仍是
-     * 「还原一个表达式」：还原渲染条件即可重新接到同一个决策上。下方 `void` 是
-     * **临时**保留标记——`tsconfig.app.json` 开了 `noUnusedLocals`，不引用会报
-     * TS6133；后续任务删除旧分支时会连同本决策与本标记一并清理。
-     */
-    const kernelMount = resolveKernelMount({
-        enabled: TIMELINE_KERNEL_ENABLED,
-        unavailable: kernelUnavailable,
-    });
-    const kernelActive = kernelMount.useKernel;
-    void kernelActive;
 
     /**
      * 「clip 左键按下拦截」句柄（内核在启动自己的手势之前调用）。
@@ -635,14 +540,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         sessionRef,
         scrollRef,
         trackListScrollRef,
-        trackGridOverlayLayerRef,
         rulerContentRef,
         rulerPlayheadLineRef,
         rulerPlayheadHeadRef,
         playheadRef,
         dropPreviewRef,
         lastClickedClipIdRef,
-        syncScrollTop,
         pxPerSecRef,
         viewportWidthRef,
         rowHeightRef,
@@ -653,7 +556,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         setViewportWidth,
         rowHeight,
         setRowHeight,
-        altPressed,
         trackVolumeUi,
 
         setTrackVolumeUi,
@@ -666,12 +568,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         dynamicProjectSec,
         timelineTicks,
         rulerScrollLeft,
-        viewportStartSec,
-        viewportEndSec,
-        scrollHorizontalKb,
-        scrollVerticalKb,
-        scrollbarZoomKb,
-        horizontalZoomKb,
         verticalZoomKb,
         paramFineAdjustKb,
         slipEditKb,
@@ -679,15 +575,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         pitchDragKb,
         noSnapKb,
         copyDragKb,
-        crossfadeGripKb,
-        fadeCurvatureKb,
         dropPreview,
         setDropPreview,
-        clipDropNewTrack,
-        setClipDropNewTrack,
         pendingDropDurationPathRef,
         syncScrollLeft,
-        setScrollLeftAction,
         setScrollLeftState,
         beatFromClientX,
         trackIdFromClientY,
@@ -696,11 +587,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         getDropPreviewWidthPx,
         snapTimeline,
         snapTimelineDetailed,
-        isEditableTarget,
-        isPointerOnNativeScrollbar,
-        startPanPointer,
         setPlayheadFromClientX,
-        startDeferredPlayheadSeek,
         keyboardZoomPendingRef,
     } = state;
 
@@ -757,25 +644,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             syncScrollLeft(next);
         },
         [syncScrollLeft],
-    );
-
-    /** 竖直量化步长：overscan(4 行) 缓冲的一半，滞后永不越出 overscan 窗口。 */
-    const scrollTopStepPx = Math.max(1, Math.round(rowHeight * 2));
-    const commitTimelineScrollTop = React.useCallback(
-        (next: number) => {
-            lastScrollTopRef.current = next;
-            if (scrollTopRafRef.current != null) return;
-            scrollTopRafRef.current = requestAnimationFrame(() => {
-                scrollTopRafRef.current = null;
-                const latest = lastScrollTopRef.current;
-                if (Math.abs(latest - reactCommittedScrollTopRef.current) < scrollTopStepPx) {
-                    return;
-                }
-                reactCommittedScrollTopRef.current = latest;
-                setTimelineScrollTop(latest);
-            });
-        },
-        [scrollTopStepPx],
     );
 
     // ── 轨道头与时间轴区域的竖直滚动对齐 ─────────────────
@@ -950,9 +818,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         setTrackAreaMenu,
         importModeMenu,
         setImportModeMenu,
-        renamingClipId,
-        selectionRect,
-        onSelectionRectPointerDown,
         clipboardAvailable,
         copyClips,
         cutClips,
@@ -964,25 +829,17 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         splitClipIdsAtPlayhead,
         splitSelectedAtPlayhead,
         selectClipRangeByRect,
-        rangeSelectAnchorClipId,
         recordLastClickPosition,
         pasteClipsAtPlayhead,
         clearContextMenu,
         ensureTrackLaneSelected,
         selectTrackLaneClipRemote,
         deselectAllTrackLaneClips,
-        openTrackLaneContextMenu,
-        seekFromTrackLaneClientX,
         toggleTrackLaneClipMuted,
         toggleTrackLaneCtrlSelection,
-        toggleTrackLaneMultiSelect,
         commitTrackLaneRename,
-        handleTrackLaneRenameDone,
         commitTrackLaneGain,
         commitTrackLaneRate,
-        editingBadge,
-        setEditingBadge,
-        handleBadgeEditDone,
     } = clipActions;
     // 右键播放速率角标 → 高级编辑浮层（BPM 换算）的目标 Clip 与锚点。
     const [rateEditorClipId, setRateEditorClipId] = React.useState<string | null>(null);
@@ -998,25 +855,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         [],
     );
 
-    // 角标行内编辑开始：镜像 renamingClipId（onRenameStart）的两参适配器。
-    const startTrackLaneBadgeEdit = React.useCallback(
-        (clipId: string, field: "rate" | "gain") => {
-            setEditingBadge({ clipId, field });
-        },
-        [setEditingBadge],
-    );
-
     // 角标行内编辑提交：按字段路由到速率（自动调整时长）/增益提交。
-    const commitTrackLaneBadgeEdit = React.useCallback(
-        (clipId: string, field: "rate" | "gain", value: number) => {
-            if (field === "rate") {
-                commitTrackLaneRate(clipId, { rate: value, autoLength: true });
-            } else {
-                commitTrackLaneGain(clipId, value);
-            }
-        },
-        [commitTrackLaneGain, commitTrackLaneRate],
-    );
     // 传给 React.memo 化的 TrackList / TrackLane 的回调必须引用稳定，
     // 否则每次 TimelinePanel 渲染（播放头提交值、滚动、修饰键）都会击穿 memo。
     const handleToggleGroupDisabled = React.useCallback(
@@ -1042,17 +881,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             void dispatch(setClipActiveTakeRemote({ clipId, takeId }));
         },
         [dispatch],
-    );
-    // 淡化曲线循环点击：Ctrl（modifier.fadeShapeCycleClick）+左键点包络线
-    // → 顺序切换到下一个预设形状，并把该侧曲率重置为新形状的默认值。
-    const fadeShapeCycleKb = useAppSelector((state) =>
-        selectKeybinding(state, "modifier.fadeShapeCycleClick"),
-    );
-    const clipMultiSelectToggleKb = useAppSelector((state) =>
-        selectKeybinding(state, "modifier.clipMultiSelectToggle"),
-    );
-    const clipRangeSelectKb = useAppSelector((state) =>
-        selectKeybinding(state, "modifier.clipRangeSelect"),
     );
     /**
      * 单侧循环到下一个形状并重置默认曲率。
@@ -3874,48 +3702,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     });
 
     // ── 5. 拖拽 hooks 桥接 ──────────────────────────────────
-    const { startEditDrag } = useEditDrag({
-        scrollRef,
-        sessionRef,
-        dispatch,
-        multiSelectedClipIds,
-        multiSelectedSet,
-        snapTimelineDetailed: state.snapTimelineDetailed,
-        beatFromClientX,
-        noSnapKb,
-        snapEnabled: s.timelineSnap.enabled,
-        timelineSnap: s.timelineSnap,
-        pxPerSec,
-        ignoreGrouping,
-        paramFineAdjustKb,
-        crossfadeGripKb,
-        fadeCurvatureKb,
-    });
-
-    const startSlipDrag = useSlipDrag({
-        scrollRef,
-        sessionRef,
-        dispatch,
-        multiSelectedClipIds,
-        multiSelectedSet,
-        beatFromClientX,
-        ignoreGrouping,
-        timelineSnap: s.timelineSnap,
-        pxPerSec,
-        noSnapKb,
-    });
-
-    // SnapOffset 三角手柄拖拽（走完整吸附引擎与竖线高亮）。
-    const startSnapOffsetDrag = useSnapOffsetDrag({
-        scrollRef,
-        sessionRef,
-        dispatch,
-        snapTimelineDetailed: state.snapTimelineDetailed,
-        beatFromClientX,
-        noSnapKb,
-        snapEnabled: s.timelineSnap.enabled,
-    });
-
     const formatClipPitchDragTooltip = React.useCallback(
         (cents: number) =>
             t("clip_pitch_drag_tooltip").replace("{delta}", formatPitchDragCents(cents)),
@@ -3971,72 +3757,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     );
     kernelClipInterceptRef.current = handleKernelClipPointerDownIntercept;
 
-    const {
-        startClipDrag: _startClipDragInner,
-        ghostDrag,
-        verticalTrackLockTrackId,
-    } = useClipDrag({
-        scrollRef,
-        sessionRef,
-        rowHeight,
-        pxPerSec,
-        multiSelectedClipIds,
-        multiSelectedSet,
-        dispatch,
-        snapTimelineDetailed: state.snapTimelineDetailed,
-        beatFromClientX,
-        trackIdFromClientY,
-        setClipDropNewTrack,
-        setMultiSelectedClipIds,
-        slipEditKb,
-        noSnapKb,
-        snapEnabled: s.timelineSnap.enabled,
-        copyDragKb,
-        multiSelectToggleKb: clipMultiSelectToggleKb,
-        rangeSelectKb: clipRangeSelectKb,
-        autoCrossfadeEnabled: s.autoCrossfadeEnabled,
-        ignoreGrouping,
-        onCtrlClick: toggleTrackLaneCtrlSelection,
-    });
-
     const clipById = useMemo(
         () => new Map(s.clips.map((clip) => [clip.id, clip] as const)),
         [s.clips],
     );
 
-    const newTrackGhostClips = useMemo(() => {
-        if (clipDropNewTrack) {
-            const moved = s.clips.filter((clip) => clip.trackId === NEW_TRACK_SENTINEL);
-            if (moved.length > 0) return moved;
-        }
-        if (!ghostDrag || ghostDrag.targetTrackId != null) {
-            return [];
-        }
-        return ghostDrag.clipIds
-            .map((clipId) => {
-                const initial = ghostDrag.initialById[clipId];
-                const clip = clipById.get(clipId);
-                if (!initial || !clip) return null;
-                return {
-                    ...clip,
-                    startSec: Math.max(0, initial.startSec + ghostDrag.deltaSec),
-                };
-            })
-            .filter((clip): clip is (typeof s.clips)[number] => clip != null);
-        // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅依赖 s.clips 粒度；加入整个 s 会在任何会话字段变化时重算（既有粒度模式）
-    }, [clipById, clipDropNewTrack, ghostDrag, s.clips]);
-
-    const startClipDrag = React.useCallback(
-        (
-            e: React.PointerEvent<HTMLDivElement>,
-            clipId: string,
-            clipstartSec: number,
-            altPressedHint?: boolean,
-        ) => {
-            _startClipDragInner(e, clipId, clipstartSec, altPressedHint, startSlipDrag);
-        },
-        [_startClipDragInner, startSlipDrag],
-    );
     const handleSelectTrack = React.useCallback(
         (trackId: string) => {
             if (sessionRef.current.selectedTrackId === trackId) {
@@ -4244,101 +3969,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         [scrollRef],
     );
 
-    const trackGridHeight = Math.max(0, contentHeight - TRACK_ADD_ROW_HEIGHT);
-    const timelineRenderModel = useMemo(
-        () =>
-            buildTimelineRenderModel({
-                tracks: s.tracks,
-                clips: s.clips,
-                viewportStartSec,
-                viewportEndSec,
-                pxPerSec,
-                rowHeight,
-                scrollTopPx: timelineScrollTop,
-                viewportHeightPx: scrollRef.current?.clientHeight ?? 0,
-            }),
-        [
-            pxPerSec,
-            rowHeight,
-            s.clips,
-            s.tracks,
-            scrollRef,
-            timelineScrollTop,
-            viewportEndSec,
-            viewportStartSec,
-        ],
-    );
-    // slice 每次渲染都会产生新引用；不缓存的话下游所有 useMemo 与
-    // 两块画布的 memo 会在每次无关更新（播放头/滚动/修饰键）时全量重算重绘。
-    const visibleTracks = React.useMemo(
-        () => s.tracks.slice(timelineRenderModel.startIndex, timelineRenderModel.endIndex + 1),
-        [s.tracks, timelineRenderModel.startIndex, timelineRenderModel.endIndex],
-    );
-    const visibleTrackClipCacheRef = React.useRef<
-        Record<
-            string,
-            {
-                clipIds: string[];
-                clips: typeof s.clips;
-            }
-        >
-    >({});
-    /** 上一次返回的 `Record<trackId, clips>`；用于在外层做引用复用。 */
-    const visibleTrackClipsByIdRef = React.useRef<Record<string, typeof s.clips>>({});
-    const visibleTrackClipsById = useMemo(() => {
-        const nextCache: typeof visibleTrackClipCacheRef.current = {};
-        const nextByTrackId = {} as Record<string, typeof s.clips>;
-
-        for (const track of visibleTracks) {
-            const clipIds = timelineRenderModel.visibleClipIdsByTrackId[track.id] ?? [];
-            const prev = visibleTrackClipCacheRef.current[track.id];
-            const canReusePrev =
-                prev != null &&
-                prev.clipIds.length === clipIds.length &&
-                clipIds.every(
-                    (clipId, index) =>
-                        prev.clipIds[index] === clipId &&
-                        prev.clips[index] === clipById.get(clipId),
-                );
-
-            const clips = canReusePrev
-                ? prev.clips
-                : (clipIds
-                      .map((clipId) => clipById.get(clipId) ?? null)
-                      .filter(
-                          (clip): clip is (typeof s.clips)[number] => clip != null,
-                      ) as typeof s.clips);
-
-            nextCache[track.id] = {
-                clipIds,
-                clips,
-            };
-            nextByTrackId[track.id] = clips;
-        }
-
-        visibleTrackClipCacheRef.current = nextCache;
-
-        // 连外层对象一起复用：各轨道的 `clips` 数组本身已是稳定引用，但若
-        // 每次都新建外层对象，下游 `TimelineWaveformSurface.rows` 与
-        // `buildSparseClipRenderModel` 的 memo 会在**每个滚动帧**失效——
-        // 视口秒窗每帧都变，导致 `visibleClipIdsByTrackId` 每次都是新数组。
-        // 那会让两块画布在总线 paint 之外又被 React 提交重绘一次（P1 要消除的
-        // 重复绘制）。轨道集合与各自的 clips 引用都没变时，直接返回旧对象。
-        const prevByTrackId = visibleTrackClipsByIdRef.current;
-        const prevKeys = Object.keys(prevByTrackId);
-        const nextKeys = Object.keys(nextByTrackId);
-        const sameShape =
-            prevKeys.length === nextKeys.length &&
-            nextKeys.every((key) => prevByTrackId[key] === nextByTrackId[key]);
-        if (sameShape) return prevByTrackId;
-        visibleTrackClipsByIdRef.current = nextByTrackId;
-        return nextByTrackId;
-        // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅类型位置引用 s.clips（缓存已按需要稳定化）；加入整个 s 会让缓存扫描随任何会话变化失效（既有模式）
-    }, [clipById, timelineRenderModel.visibleClipIdsByTrackId, visibleTracks]);
-    const selectedClipTrackId = s.selectedClipId
-        ? (clipById.get(s.selectedClipId)?.trackId ?? null)
-        : null;
-    const visibleTrackCanvasHeight = Math.max(1, visibleTracks.length * rowHeight);
     const activeGroupIds = useMemo(() => {
         const ids = new Set<string>();
         for (const cid of multiSelectedClipIds) {
@@ -4360,77 +3990,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     const kernelActiveGroupIds = React.useMemo(
         () => (activeGroupIds === undefined ? [] : Array.from(activeGroupIds)),
         [activeGroupIds],
-    );
-    // 全图层共享的统一坐标投影：网格 / 标尺 / clip 体 / 波形 / 播放头都从这里
-    // 取位置与缩放，任何图层都不许再自行执行 `sec * pxPerSec`（历史错位根因）。
-    // 用 useMemo 缓存引用，否则下游 React.memo 会因新对象引用而每帧失效。
-    const timelineAxis = useMemo(
-        () =>
-            createTimelineAxis({
-                pxPerSec,
-                scrollLeftPx: scrollLeft,
-                scrollTopPx: timelineScrollTop,
-                viewportWidthPx: Math.max(1, Math.ceil(viewportWidth)),
-                dpr: window.devicePixelRatio || 1,
-            }),
-        [pxPerSec, scrollLeft, timelineScrollTop, viewportWidth],
-    );
-    /**
-     * 「内容轴」：只含 `pxPerSec`，不含滚动。
-     *
-     * clip 体渲染模型（`buildSparseClipRenderModel`）的全部投影都落在**内容
-     * 坐标系**上——`secToContentPx` / `durationToWidthPx` / `secToSpanPx`
-     * 只消费 `pxPerSec`，`topPx` 由 `(startTrackIndex + i) * rowHeight` 得出。
-     * 因此滚动帧里模型内容**逐像素不变**，却因为 `timelineAxis` 每帧都是新
-     * 对象而被整体重建一次，进而让 `drawClips` 也是新数组、让 clip 体画布在
-     * 总线 paint 之外又被 React 提交重绘一遍。
-     *
-     * 把滚动从依赖里剥掉后，`drawClips` 的**引用**在纯滚动帧保持稳定，
-     * 这是 P1 消除重复绘制的前提。
-     */
-    const contentAxis = useMemo(
-        () => createTimelineAxis({ pxPerSec, dpr: window.devicePixelRatio || 1 }),
-        [pxPerSec],
-    );
-    const sparseClipRenderModel = useMemo(() => {
-        // 前导重叠秒数：每个 clip 的"被同轨前一个 clip 压住"部分，
-        // canvas 在该区画半透色块，让下 clip 的色块/波形透出——避免两层
-        // 不透明色块叠加成脏色。
-        const leadingOverlapSecByClipId: Record<string, number> = {};
-        for (const track of visibleTracks) {
-            const clips = visibleTrackClipsById[track.id] ?? [];
-            Object.assign(leadingOverlapSecByClipId, computeLeadingOverlapSecByClipId(clips));
-        }
-        return buildSparseClipRenderModel({
-            visibleTracks,
-            startTrackIndex: timelineRenderModel.startIndex,
-            visibleTrackClipsById,
-            axis: contentAxis,
-            rowHeight,
-            selectedClipId: s.selectedClipId,
-            multiSelectedClipIds,
-            renamingClipId,
-            disabledGroupIds,
-            leadingOverlapSecByClipId,
-        });
-    }, [
-        multiSelectedClipIds,
-        contentAxis,
-        renamingClipId,
-        rowHeight,
-        s.selectedClipId,
-        timelineRenderModel.startIndex,
-        visibleTrackClipsById,
-        visibleTracks,
-        disabledGroupIds,
-    ]);
-    const timelineCanvasModel = useMemo(
-        () => ({
-            drawClips: sparseClipRenderModel.drawClips,
-            activeGroupIds,
-            disabledGroupIds,
-        }),
-        [sparseClipRenderModel.drawClips, activeGroupIds, disabledGroupIds],
     );
     // 主题切换 → darkMode prop 变化 → clip 体画布同帧按新主题重绘配色。
     const { mode: themeMode } = useAppTheme();
@@ -4795,17 +4354,19 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
 
                 {/* Timeline View (Right) */}
                 <Flex direction="column" className="flex-1 relative overflow-hidden bg-qt-graph-bg">
-                    {/* 新渲染内核（自绘滚动 + 单 WebGL2）替换**轨道区**。
+                    {/* 新渲染内核（自绘滚动 + 单 WebGL2）渲染**轨道区**。
                         标尺（`timeRulerNode`）与左侧轨道头保留 DOM：它们重交互、低频
                         变化，搬进 canvas 等于重写 Tempo 旗帜拖拽与电平表，收益极低；
                         内核只把「跟随视口」的部分收敛为 rAF 内一次 transform / scrollTop
                         写入。轨道区（网格 / clip / 波形 / 交互）才是滚动瓶颈，由内核自绘。
-                        内核已是**唯一**渲染路径（阶段 1）：下面这个条件恒真，旧实现分支
-                        仍在文件中但**不可达**（见 `TIMELINE_KERNEL_ONLY`）。内核不可用时的
-                        回退因此**暂时失效**（`handleKernelUnavailable` 仍会置位 state 并告警），
-                        失败界面由后续任务接入——本阶段刻意保留旧分支，一旦真机发现问题，
-                        回滚成本就是还原这个表达式。 */}
-                    {TIMELINE_KERNEL_ONLY ? (
+
+                        内核是**唯一**渲染路径：旧实现（原生滚动 + Canvas2D 的
+                        `TimelineScrollArea` / `TimelineSurface` / `TrackLane` 等）已随
+                        阶段 2/3 删除，此处没有运行期二选一，也没有可回退的第二条路径。
+                        WebGL2 不可用时内核视图会回报失败，此处改渲染可自助排障的
+                        失败界面（见 `KernelUnavailableNotice` 与
+                        `timeline/kernel/kernelAvailability`）——没有回退渲染路径。 */}
+                    {isKernelAvailable(kernelUnavailableReason !== null) ? (
                         <>
                             {timeRulerNode}
                             <TimelineKernelView
@@ -4910,519 +4471,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                             />
                         </>
                     ) : (
-                        <>
-                            {timeRulerNode}
-                            {/* Tracks Area */}
-                            <TimelineScrollArea
-                                scrollRef={scrollRef}
-                                projectSec={dynamicProjectSec}
-                                pxPerSec={pxPerSec}
-                                setPxPerSec={setPxPerSec}
-                                rowHeight={rowHeight}
-                                setRowHeight={setRowHeight}
-                                setScrollLeft={setScrollLeftAction}
-                                commitScrollLeftState={setScrollLeftState}
-                                commitScrollTopState={commitTimelineScrollTop}
-                                rulerContentRef={rulerContentRef}
-                                scrollHorizontalKb={scrollHorizontalKb}
-                                scrollVerticalKb={scrollVerticalKb}
-                                scrollbarZoomKb={scrollbarZoomKb}
-                                horizontalZoomKb={horizontalZoomKb}
-                                verticalZoomKb={verticalZoomKb}
-                                getPlayheadSec={getVisualPlayheadSec}
-                                playheadZoomEnabled={s.playheadZoomEnabled}
-                                className="flex-1 bg-qt-graph-bg overflow-auto relative custom-scrollbar"
-                                data-timeline-scroller
-                                onDoubleClickCapture={(e) => {
-                                    // 时间轴非输入区域的双击只用于自定义交互，不应触发 WebView 文本选择；
-                                    // 显式声明可选择（data-hs-selectable）的区域保留原生双击行为。
-                                    if (isEditableTarget(e.target)) return;
-                                    const target = e.target as HTMLElement | null;
-                                    if (target?.closest?.("[data-hs-selectable='true']")) return;
-                                    e.preventDefault();
-                                }}
-                                onScroll={(e) => {
-                                    const el = e.currentTarget as HTMLDivElement;
-                                    // 竖直轴同帧提交：sticky 画布层（clip 体/波形面）必须在
-                                    // 绘制前拿到新 scrollTop（总线同步派发）；React state
-                                    // 只驱动窗口化等非视觉更新。
-                                    syncScrollTop(el.scrollTop);
-                                    commitTimelineScrollTop(el.scrollTop);
-                                    if (trackListScrollRef.current) {
-                                        if (
-                                            Math.abs(
-                                                trackListScrollRef.current.scrollTop - el.scrollTop,
-                                            ) >= 0.5
-                                        ) {
-                                            trackListScrollRef.current.scrollTop = el.scrollTop;
-                                        }
-                                    }
-                                }}
-                                onMouseDownCapture={(e) => {
-                                    if (e.button === 1) {
-                                        e.preventDefault();
-                                    }
-                                }}
-                                onAuxClick={(e) => {
-                                    if (e.button === 1) {
-                                        e.preventDefault();
-                                    }
-                                }}
-                                onContextMenu={(e) => {
-                                    e.preventDefault();
-                                    setContextMenu(null);
-
-                                    const target = e.target as HTMLElement | null;
-                                    if (target?.closest?.("[data-hs-context-menu='1']")) return;
-
-                                    const trackId = trackIdFromClientY(e.clientY);
-                                    if (!trackId) {
-                                        setTrackAreaMenu(null);
-                                        return;
-                                    }
-
-                                    const scroller = scrollRef.current;
-                                    const bounds = scroller?.getBoundingClientRect() ?? null;
-                                    const timeAtPointer =
-                                        bounds && scroller
-                                            ? beatFromClientX(
-                                                  e.clientX,
-                                                  bounds,
-                                                  scroller.scrollLeft,
-                                              )
-                                            : null;
-
-                                    if (timeAtPointer != null) {
-                                        const clipsHere = sessionRef.current.clips
-                                            .filter((c) => c.trackId === trackId)
-                                            .filter((c) => {
-                                                const start = Number(c.startSec ?? 0) || 0;
-                                                const end = start + (Number(c.lengthSec ?? 0) || 0);
-                                                return (
-                                                    timeAtPointer >= start && timeAtPointer <= end
-                                                );
-                                            })
-                                            .sort((a, b) => a.startSec - b.startSec);
-
-                                        if (clipsHere.length > 0) {
-                                            if (target?.closest?.("[data-hs-clip-item='1']"))
-                                                return;
-
-                                            const topClip = clipsHere[clipsHere.length - 1];
-                                            setContextMenu({
-                                                x: e.clientX,
-                                                y: e.clientY,
-                                                clipId: topClip.id,
-                                                overlappingClipIds:
-                                                    clipsHere.length > 1
-                                                        ? clipsHere.map((c) => c.id)
-                                                        : undefined,
-                                            });
-                                            return;
-                                        }
-                                    }
-
-                                    if (sessionRef.current.selectedTrackId !== trackId) {
-                                        void dispatch(selectTrackRemote(trackId));
-                                    }
-                                    setTrackAreaMenu({
-                                        x: e.clientX,
-                                        y: e.clientY,
-                                        trackId,
-                                        timeSec: timeAtPointer ?? 0,
-                                    });
-                                }}
-                                onPointerDown={onSelectionRectPointerDown}
-                                onDragOver={handleTimelineDragOver}
-                                onDragLeave={(e) => {
-                                    const related = e.relatedTarget as Node | null;
-                                    if (
-                                        related &&
-                                        (e.currentTarget as HTMLDivElement).contains(related)
-                                    )
-                                        return;
-                                    setDropPreview(null);
-                                }}
-                                onDrop={handleTimelineDrop}
-                                onPointerDownCapture={(e) => {
-                                    const scroller = scrollRef.current;
-                                    if (
-                                        scroller &&
-                                        isPointerOnNativeScrollbar(scroller, e.clientX, e.clientY)
-                                    ) {
-                                        return;
-                                    }
-                                    if (e.button === 0) {
-                                        const target = e.target as HTMLElement | null;
-                                        // 任意空白处按下即取消 clip 选中：容器捕获先于所有
-                                        // lane 处理器执行，保证"点击任意轨道的空白（含轨道区
-                                        // 下方空白）都取消选中"。clip / overlap 层 / 标尺 /
-                                        // 输入目标除外 —— 它们各自的路由决定选中的去向。
-                                        if (
-                                            !isEditableTarget(e.target) &&
-                                            !target?.closest?.(
-                                                "[data-hs-clip-item='1'],[data-hs-overlap-layer='1'],[data-hs-context-menu='1'],[data-hs-floating-menu='1']",
-                                            )
-                                        ) {
-                                            deselectAllTrackLaneClips();
-                                        }
-                                        // 在 capture 阶段直接切换轨道：不依赖后续 mousedown，
-                                        // 即使子元素在 pointerdown 里 preventDefault/停止冒泡，
-                                        // “允许时间轴点击切换轨道”也能稳定触发。
-                                        // applySelectedClip: false —— 点击切轨不得让后端把
-                                        // 该轨道记住的 selected_clip_id 恢复回来，否则刚完成
-                                        // 的空白取消选中会被异步覆盖（"点其他轨道空白不取消
-                                        // 选中"的根因）。
-                                        if (!isEditableTarget(e.target)) {
-                                            const trackId = trackIdFromClientY(e.clientY);
-                                            if (
-                                                s.paramEditorTimelineClickSelectTrackEnabled &&
-                                                trackId &&
-                                                trackId !== sessionRef.current.selectedTrackId
-                                            ) {
-                                                void dispatch(
-                                                    selectTrackRemote({
-                                                        trackId,
-                                                        applySelectedClip: false,
-                                                    }),
-                                                );
-                                            }
-                                        }
-                                        return;
-                                    }
-                                    if (e.button !== 1) return;
-                                    if (isEditableTarget(e.target)) return;
-                                    e.preventDefault();
-                                    startPanPointer(e);
-                                }}
-                                onMouseDown={(e) => {
-                                    if (e.button !== 0) return;
-                                    // 输入框/可编辑区域内的点击只负责文本光标，不应触发时间轴点击逻辑
-                                    //（尤其不能在名称编辑框中点击时跳转播放头）。
-                                    if (isEditableTarget(e.target)) return;
-                                    // Guard scrollbar interactions first — avoid clearing
-                                    // multi-selection when dragging the native scrollbar.
-                                    const scroller = scrollRef.current;
-                                    if (
-                                        scroller &&
-                                        isPointerOnNativeScrollbar(scroller, e.clientX, e.clientY)
-                                    )
-                                        return;
-                                    setContextMenu(null);
-                                    setTrackAreaMenu(null);
-                                    setMultiSelectedClipIds([]);
-                                    if (!scroller) return;
-                                    const trackId = trackIdFromClientY(e.clientY);
-                                    if (
-                                        s.paramEditorTimelineClickSelectTrackEnabled &&
-                                        trackId &&
-                                        trackId !== sessionRef.current.selectedTrackId
-                                    ) {
-                                        // 同容器捕获路径：点击切轨不恢复后端记住的选中 clip。
-                                        void dispatch(
-                                            selectTrackRemote({
-                                                trackId,
-                                                applySelectedClip: false,
-                                            }),
-                                        );
-                                    }
-                                    startDeferredPlayheadSeek({
-                                        startClientX: e.clientX,
-                                        startClientY: e.clientY,
-                                        getBounds: () => {
-                                            const cur = scrollRef.current;
-                                            return cur ? cur.getBoundingClientRect() : null;
-                                        },
-                                        getScrollLeft: () => {
-                                            const cur = scrollRef.current;
-                                            return cur ? cur.scrollLeft : scroller.scrollLeft;
-                                        },
-                                    });
-                                }}
-                            >
-                                {/* Track Lanes（外层含右侧虚拟宽度，内容层覆盖工程宽 + 视口宽） */}
-                                <div
-                                    className="relative"
-                                    style={{
-                                        width: timelineScrollRange.paddedContentWidth,
-                                        height: contentHeight,
-                                    }}
-                                >
-                                    {/* 内容层宽度 = 工程宽 + 视口宽（= paddedContentWidth）：
-                            拖拽预览 / 吸附竖线高亮 / 拖拽中的 clip 与 ghost / 选区框等
-                            瞬态 UI 不再被“严格等于工程宽”的旧内容层按工程长度裁剪 ——
-                            用户看到与操作到的轨道在可视与可操作范围内表现为无限延伸
-                            （水平滚动的 maxScrollLeft 上限是有意保留的）。 */}
-                                    <div
-                                        className="absolute top-0 left-0 overflow-hidden"
-                                        style={{
-                                            width: timelineScrollRange.paddedContentWidth,
-                                            height: contentHeight,
-                                        }}
-                                    >
-                                        {selectionRect ? (
-                                            <div
-                                                className="absolute z-40 pointer-events-none"
-                                                style={{
-                                                    left: selectionRect.x1,
-                                                    top: selectionRect.y1,
-                                                    width: Math.max(
-                                                        1,
-                                                        selectionRect.x2 - selectionRect.x1,
-                                                    ),
-                                                    height: Math.max(
-                                                        1,
-                                                        selectionRect.y2 - selectionRect.y1,
-                                                    ),
-                                                    border: "1px dashed var(--qt-highlight)",
-                                                    backgroundColor:
-                                                        "color-mix(in oklab, var(--qt-highlight) 12%, transparent)",
-                                                }}
-                                            />
-                                        ) : null}
-
-                                        {clipDropNewTrack ? (
-                                            <div
-                                                className="absolute left-0 right-0 pointer-events-none z-20"
-                                                style={{
-                                                    top: s.tracks.length * rowHeight,
-                                                    height: rowHeight,
-                                                }}
-                                            >
-                                                <div
-                                                    className="absolute inset-0"
-                                                    style={{
-                                                        border: "1px dashed var(--qt-highlight)",
-                                                        backgroundColor:
-                                                            "color-mix(in oklab, var(--qt-highlight) 10%, transparent)",
-                                                    }}
-                                                />
-                                                {newTrackGhostClips.map((clip) => (
-                                                    <div
-                                                        key={`new-track-ghost-${clip.id}`}
-                                                        className="absolute opacity-60"
-                                                        style={{
-                                                            left: Math.max(
-                                                                0,
-                                                                clip.startSec * pxPerSec,
-                                                            ),
-                                                            width: Math.max(
-                                                                1,
-                                                                clip.lengthSec * pxPerSec,
-                                                            ),
-                                                            top: 0,
-                                                            height: rowHeight - 8,
-                                                            paddingTop: 8,
-                                                        }}
-                                                    >
-                                                        <div
-                                                            className="absolute left-0 right-0 top-0 rounded-t-sm"
-                                                            style={{
-                                                                height: 18,
-                                                                backgroundColor:
-                                                                    "color-mix(in oklab, var(--qt-highlight) 55%, transparent)",
-                                                            }}
-                                                        />
-                                                        <div
-                                                            className="absolute left-0 right-0 bottom-0 rounded-sm border border-dashed border-white/70"
-                                                            style={{
-                                                                top: 18,
-                                                                backgroundColor:
-                                                                    "color-mix(in oklab, var(--qt-highlight) 20%, transparent)",
-                                                            }}
-                                                        />
-                                                    </div>
-                                                ))}
-                                            </div>
-                                        ) : null}
-
-                                        <div
-                                            className="absolute left-0 right-0"
-                                            style={{
-                                                top: timelineRenderModel.startIndex * rowHeight,
-                                            }}
-                                        >
-                                            {visibleTracks.map((track) => {
-                                                const trackClips =
-                                                    visibleTrackClipsById[track.id] ??
-                                                    ([] as typeof s.clips);
-
-                                                return (
-                                                    <TrackLane
-                                                        key={track.id}
-                                                        track={track}
-                                                        allTracks={s.tracks}
-                                                        trackClips={trackClips}
-                                                        rowHeight={rowHeight}
-                                                        pxPerSec={pxPerSec}
-                                                        bpm={s.bpm}
-                                                        viewportWidthPx={viewportWidth}
-                                                        viewportStartSec={viewportStartSec}
-                                                        viewportEndSec={viewportEndSec}
-                                                        overlayClipIds={
-                                                            sparseClipRenderModel
-                                                                .overlayClipIdsByTrackId[
-                                                                track.id
-                                                            ] ?? []
-                                                        }
-                                                        altPressed={altPressed}
-                                                        selectedClipId={
-                                                            selectedClipTrackId === track.id
-                                                                ? s.selectedClipId
-                                                                : null
-                                                        }
-                                                        multiSelectedClipIds={multiSelectedClipIds}
-                                                        multiSelectedSet={multiSelectedSet}
-                                                        trackColor={track.color || undefined}
-                                                        ensureSelected={ensureTrackLaneSelected}
-                                                        selectClipRemote={selectTrackLaneClipRemote}
-                                                        deselectAllClips={deselectAllTrackLaneClips}
-                                                        onShiftRangeSelect={selectClipRangeByRect}
-                                                        rangeSelectAnchorClipId={
-                                                            rangeSelectAnchorClipId
-                                                        }
-                                                        recordLastClickPosition={
-                                                            recordLastClickPosition
-                                                        }
-                                                        openContextMenu={openTrackLaneContextMenu}
-                                                        seekFromClientX={seekFromTrackLaneClientX}
-                                                        ghostDrag={ghostDrag}
-                                                        verticalTrackLockTrackId={
-                                                            verticalTrackLockTrackId
-                                                        }
-                                                        allClips={s.clips}
-                                                        showAllTakes={s.showAllTakes}
-                                                        onActivateTake={activateTrackLaneTake}
-                                                        fadeShapeCycleKb={fadeShapeCycleKb}
-                                                        multiSelectToggleKb={
-                                                            clipMultiSelectToggleKb
-                                                        }
-                                                        rangeSelectKb={clipRangeSelectKb}
-                                                        pitchDragKb={pitchDragKb}
-                                                        onClipPitchDragStart={startClipPitchDrag}
-                                                        fadeLengthFormatCtx={fadeLengthFormatCtx}
-                                                        onFadeShapeCycleClick={
-                                                            handleFadeShapeCycleClick
-                                                        }
-                                                        onCrossfadeCycleClick={
-                                                            handleCrossfadeCycleClick
-                                                        }
-                                                        startClipDrag={startClipDrag}
-                                                        startEditDrag={startEditDrag}
-                                                        startSnapOffsetDrag={startSnapOffsetDrag}
-                                                        toggleClipMuted={toggleTrackLaneClipMuted}
-                                                        onCtrlToggleSelect={
-                                                            toggleTrackLaneCtrlSelection
-                                                        }
-                                                        clearContextMenu={clearContextMenu}
-                                                        toggleMultiSelect={
-                                                            toggleTrackLaneMultiSelect
-                                                        }
-                                                        renamingClipId={renamingClipId}
-                                                        onRenameStart={
-                                                            clipActions.setRenamingClipId
-                                                        }
-                                                        onRenameClickCandidate={
-                                                            registerRenameClickCandidate
-                                                        }
-                                                        onRenameCommit={commitTrackLaneRename}
-                                                        onRenameDone={handleTrackLaneRenameDone}
-                                                        onGainCommit={commitTrackLaneGain}
-                                                        editingBadge={editingBadge}
-                                                        onBadgeEditStart={startTrackLaneBadgeEdit}
-                                                        onBadgeEditCommit={commitTrackLaneBadgeEdit}
-                                                        onBadgeEditDone={handleBadgeEditDone}
-                                                        onRateBadgeMenu={openRateBadgeMenu}
-                                                        onFormantMorphCommit={
-                                                            commitTrackLaneFormantMorph
-                                                        }
-                                                        activeGroupIds={activeGroupIds}
-                                                        disabledGroupIds={disabledGroupIds}
-                                                        onToggleGroupDisabled={
-                                                            handleToggleGroupDisabled
-                                                        }
-                                                    />
-                                                );
-                                            })}
-                                        </div>
-
-                                        {/* 吸附竖线高亮层：拖拽手势中高亮吸附对象与被吸附对象 */}
-                                        <SnapHighlightLayer
-                                            pxPerSec={pxPerSec}
-                                            rowHeight={rowHeight}
-                                            tracks={s.tracks}
-                                            contentHeight={contentHeight}
-                                        />
-
-                                        {/* Playhead 已移入 TimelineSurface sticky 层：与网格/Clip/
-                                波形在同一滚动事件内更新，避免 DOM 原生层与 sticky 层错帧。 */}
-                                    </div>
-
-                                    {/* Drop preview (ghost item)。
-                            渲染在外层 padded 容器内（同一坐标原点）：预览宽度超出
-                            工程右缘时仍完整显示 —— 拖入比工程剩余更长或更靠右的
-                            媒体时，预览与实际导入一样不受“工程长度”限制。 */}
-                                    {dropPreview ? (
-                                        <div
-                                            ref={dropPreviewRef}
-                                            className="absolute z-30 pointer-events-none"
-                                            style={{
-                                                left: Math.max(0, dropPreview.startSec * pxPerSec),
-                                                top: rowTopForTrackId(dropPreview.trackId) + 8,
-                                                width:
-                                                    dropPreview.durationSec > 0
-                                                        ? Math.max(
-                                                              1,
-                                                              pxPerSec * dropPreview.durationSec,
-                                                          )
-                                                        : 80,
-                                                height: rowHeight - 16,
-                                            }}
-                                        >
-                                            <div className="h-full w-full rounded-sm border border-dashed border-qt-highlight bg-[color-mix(in_oklab,var(--qt-highlight)_20%,transparent)]">
-                                                <div className="px-2 pt-1 text-[10px] text-qt-text truncate">
-                                                    {dropPreview.fileName}
-                                                </div>
-                                            </div>
-                                        </div>
-                                    ) : null}
-
-                                    {viewportWidth > 0 ? (
-                                        /* 背景网格 / Clip 体 / 波形面全部锚定在同一 sticky 视口层：
-                               滚动时三者经同一条同步链（scroll 事件内）提交位移，任一
-                               层都不允许再走 React state / rAF，否则会与其它层分裂。 */
-                                        <TimelineSurface
-                                            tracks={visibleTracks}
-                                            startTrackIndex={timelineRenderModel.startIndex}
-                                            clipsByTrackId={visibleTrackClipsById}
-                                            rowHeight={rowHeight}
-                                            widthPx={Math.max(1, Math.ceil(viewportWidth))}
-                                            heightPx={visibleTrackCanvasHeight}
-                                            topPx={0}
-                                            axis={timelineAxis}
-                                            playheadSec={s.playheadSec}
-                                            clipModel={timelineCanvasModel}
-                                            darkMode={darkMode}
-                                            contentWidth={contentWidth}
-                                            pxPerBeat={pxPerBeat}
-                                            grid={s.grid}
-                                            beatsPerBar={Math.max(1, Math.round(s.beats || 4))}
-                                            gridVisible={s.timelineSnap.gridVisible}
-                                            gridMinSpacingPx={s.timelineSnap.gridMinSpacingPx}
-                                            gridSwingPercent={
-                                                s.timelineSnap.swingEnabled
-                                                    ? s.timelineSnap.swingPercent
-                                                    : 0
-                                            }
-                                            ticks={timelineTicks}
-                                            gridBottomPx={trackGridHeight}
-                                            gridOverlayLayerRef={trackGridOverlayLayerRef}
-                                            playheadLineRef={playheadRef}
-                                        />
-                                    ) : null}
-                                </div>
-                            </TimelineScrollArea>
-                        </>
+                        <KernelUnavailableNotice reason={kernelUnavailableReason ?? "未知原因"} />
                     )}
 
                     {/* 共振峰工具窗口：`fixed` 定位（视口坐标），与渲染模式无关。

@@ -945,6 +945,12 @@ export const zhCN = {
     time_unit_clock: "时:分:秒.毫秒",
     timeline_display_settings: "时间轴显示设置...",
     timeline_display_settings_desc: "配置标尺时间单位、标签密度与播放光标时间显示。",
+    kernel_unavailable_title: "时间轴无法渲染（WebGL2 不可用）",
+    kernel_unavailable_reason: "浏览器或系统没有提供 WebGL2 图形上下文。",
+    kernel_unavailable_hints:
+        "可依次排查：1. 确认未禁用硬件加速与软件光栅（浏览器设置或启动参数）；2. 若在远程桌面 / 虚拟机中，尝试在本机运行；3. 更新显卡驱动；4. 关闭其它占用图形资源的窗口后重启应用。",
+    kernel_unavailable_diagnostics: "复制诊断信息",
+    kernel_unavailable_copied: "已复制",
     render_kernel_enabled: "使用新渲染内核（时间轴 / 参数编辑器）",
     render_kernel_enabled_desc: "关闭后回退到既有渲染实现。用于某个显卡驱动下出现显示异常时排查。",
     render_kernel_restart_required: "已保存，重启应用后生效。",

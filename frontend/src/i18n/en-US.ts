@@ -1047,6 +1047,12 @@ export const enUS = {
     timeline_display_settings: "Timeline Display Settings...",
     timeline_display_settings_desc:
         "Configure ruler time units, label density and playhead time display.",
+    kernel_unavailable_title: "Timeline cannot render (WebGL2 unavailable)",
+    kernel_unavailable_reason: "The browser or system did not provide a WebGL2 graphics context.",
+    kernel_unavailable_hints:
+        "Things to check: 1. Make sure hardware acceleration and software rasterization are not disabled (browser settings or launch flags); 2. If you are on a remote desktop or VM, try running locally; 3. Update your GPU driver; 4. Close other windows using graphics resources and restart the app.",
+    kernel_unavailable_diagnostics: "Copy diagnostics",
+    kernel_unavailable_copied: "Copied",
     render_kernel_enabled: "Use the new render kernel (timeline / parameter editor)",
     render_kernel_enabled_desc:
         "Turn off to fall back to the previous renderer. Useful when diagnosing display problems on a specific GPU driver.",
