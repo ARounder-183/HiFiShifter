@@ -23,12 +23,38 @@
  * - `URL`   目标地址，默认 `http://127.0.0.1:5174/?mock=1`（需 dev server 已运行）
  * - `STEPS` 采样帧数，默认 120
  * - `DELTA` 每帧推进的 CSS px，默认 24（`120 × 24 = 2880px`，覆盖多个视口宽）
+ * - `MODE`  仅接受 `kernel`（默认）。**已移除的 `legacy` 模式会被显式拒绝**，见下。
+ *
+ * 【为什么必须拒绝 MODE=legacy，而不是回落到内核基准】
+ * 旧实现（原生滚动 + Canvas2D）已随"渲染内核唯一路径"改造**删除**，因此不存在可对比的
+ * legacy 路径。若脚本对此静默无视、照常打印内核数据，调用者会把它当成"legacy 的数字"
+ * 去和内核比较——得到**看似有效实则错误**的结论。这比直接报错危险得多，所以这里显式
+ * 拒绝并以非零码退出（设计文档 §6 明确要求"不得静默给出错误数据"）。
  */
 import { chromium } from "playwright-core";
 
 const url = process.env.URL ?? "http://127.0.0.1:5174/?mock=1";
 const steps = Number(process.env.STEPS ?? 120);
 const delta = Number(process.env.DELTA ?? 24);
+const mode = process.env.MODE ?? "kernel";
+
+// 显式拒绝已移除的模式：静默回落到内核基准会产出"看似有效实则错误"的对比数据。
+if (mode !== "kernel") {
+    const detail =
+        mode === "legacy"
+            ? "旧实现（原生滚动 + Canvas2D）已随「渲染内核唯一路径」改造删除，不存在可对比的 legacy 路径。"
+            : `未知模式 ${JSON.stringify(mode)}；本脚本只支持 MODE=kernel。`;
+    console.error(
+        [
+            `✗ MODE=${mode} 不受支持：${detail}`,
+            "",
+            "  本脚本只测内核路径（MODE=kernel，默认）。若要对比历史数据，请查阅",
+            "  docs/superpowers/specs/2026-09-13-timeline-single-path-design.md §2.1，",
+            "  其中记录了改造前 legacy(Canvas2D) 与内核的实测对比。",
+        ].join("\n"),
+    );
+    process.exit(2);
+}
 
 const browser = await chromium.launch({
     channel: "chrome",
@@ -142,6 +168,7 @@ console.log(
     JSON.stringify(
         {
             url,
+            mode,
             steps,
             deltaPx: delta,
             gl: glInfo,
