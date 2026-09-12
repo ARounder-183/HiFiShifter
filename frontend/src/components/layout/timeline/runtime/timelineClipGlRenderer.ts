@@ -22,32 +22,33 @@
  *   `originXPx / originYPx` 给出（与波形 P2c 的 `u_viewOrigin` 同约定）。
  * - 开关：dev-only，默认关闭，见 `PERF_GL_CLIP_BODIES_KEY`。
  *
- * 【为什么默认关闭】这是一次**视觉**重写（着色器重画圆角、描边、分隔缝），
- * 离线无法验证外观；默认走既有 Canvas2D 路径，由真机 A/B 确认后再切换。
+ * 【历史（勿删）】本模块引入时是**视觉**重写（着色器重画圆角、描边、分隔缝），离线
+ * 无法验证外观，因此当时默认走既有 Canvas2D 路径、由真机 A/B 确认后再切换。
+ *
+ * 【现状】GL clip 体已是**唯一**路径（渲染内核唯一路径改造），不存在 Canvas2D 回退。
+ * 本模块除被内核使用外，还向 `PianoRollPanel` 提供 `parseRgbaColor`、向 `sceneBuilder`
+ * 提供 `buildClipBodyInstance` / `OFF_*` 布局常量——它整体仍是活代码，只有上面那个
+ * 旧逃生门 key 失效。
  */
 
 import { rasterize } from "../../renderKernel/canvasRaster.js";
 
 /**
- * 开关 key：显式置为 "0" 时关闭 GL clip 体，**其余任何值（含未设置）都开启**。
+ * 旧开关 key：**逃生门已失效**，保留仅为兼容 dev 面板与之同名的按钮。
  *
- * P3 起默认走 GL；这个 key 是给真机出问题时**一键退回**用的逃生门，而不是
- * 开关。需要关闭时在控制台执行：
+ * 【历史（勿删）】P3 起 GL clip 体成为默认路径，这个 key 曾是给真机出问题时
+ * "一键退回 Canvas2D"用的逃生门（`localStorage.setItem(…, "0"); location.reload()`）。
  *
- *     localStorage.setItem("hifishifter.glClipBodies", "0"); location.reload();
+ * 【现状】读取它的 `isGlClipBodiesEnabled()` 已**无任何调用者**：它唯一的使用者是旧
+ * 的时间线视口组件 `TimelineCanvasViewport`，该文件已随"渲染内核唯一路径"改造删除。
+ * 现在写入 `"0"` **不会**改变任何行为——GL clip 体由内核无条件使用。
+ *
+ * 【与 dev 面板的关系】`dev/perfProject.ts` 仍有一个 `GL clip: on/off` 按钮读写本 key，
+ * 但按下后不再有任何效果（它只写 key 并派发一个无人监听的事件）。该按钮与
+ * `isGlClipBodiesEnabled()` 一并属独立的死代码清理范围，见
+ * `docs/superpowers/plans/2026-09-13-timeline-single-path.md` 的「后续清理」一节。
  */
 export const PERF_GL_CLIP_BODIES_KEY = "hifishifter.glClipBodies";
-
-/** 是否启用 GL clip 体（默认开启；显式写 "0" 才关闭）。 */
-export function isGlClipBodiesEnabled(): boolean {
-    try {
-        return localStorage.getItem(PERF_GL_CLIP_BODIES_KEY) !== "0";
-    } catch {
-        // 读不到 localStorage（如隐私模式）时按默认行为走 GL；若 GL 本身
-        // 不可用，TimelineCanvasViewport 会自行退回 Canvas2D。
-        return true;
-    }
-}
 
 // ── 实例数据布局 ─────────────────────────────────────────────────────
 // 每实例 24 个 float。之所以存 RGBA 而不是字符串，是为了让 CPU 侧只做纯数值
