@@ -1,9 +1,17 @@
 /**
- * 内核拖拽落点解析单测。
+ * 内核拖拽落点解析（./kernelDropCommit）行为自检。
  *
- * 【为什么必须有这一层】#1 的根因是提交分支把 `dropToNewTrack` / `trackOffset`
- * 写死为 `false` / `0`，而预览分支用 `args.targetTrackId` 算出了真实落点。
- * 两处各写一份必然分叉（这正是缺陷本身），因此把解析收敛到本模块并在此锁定行为。
+ * 【主要内容】
+ * 1. 哨兵落点：拖到全部轨道之下 → 新建轨道标记；
+ * 2. 已有轨道落点：同轨 / 向下跨轨 / 向上跨轨（负偏移）；
+ * 3. 异常输入：落点不在轨道列表、锚点下标非法 → 一律不跨轨。
+ *
+ * 【作用】#1 的根因是提交分支把 `dropToNewTrack` / `trackOffset` 写死为
+ * `false` / `0`，而预览分支用 `args.targetTrackId` 算出了真实落点；两处各写一份
+ * 必然分叉（这正是缺陷本身）。这些断言是「幽灵预览能到新轨道/其他轨道、落库却
+ * 留在原轨」的回归护栏——一旦解析退回写死值，下游提交会静默只留在原轨。
+ *
+ * 【与其他模块的关系】覆盖 `kernelDropCommit.ts`；不依赖 React / Redux / DOM。
  */
 import { describe, expect, it } from "vitest";
 
@@ -52,8 +60,8 @@ describe("resolveKernelDropTarget", () => {
                 trackIds: ["t1", "t2", "t3"],
                 anchorTrackIndex: 2,
                 newTrackSentinel: NEW_TRACK_SENTINEL,
-            }).trackOffset,
-        ).toBe(-2);
+            }),
+        ).toEqual({ dropToNewTrack: false, trackOffset: -2, targetTrackIndex: 0 });
     });
 
     it("落点不在轨道列表里且不是哨兵：回落原轨（不跨轨）", () => {
@@ -68,13 +76,16 @@ describe("resolveKernelDropTarget", () => {
     });
 
     it("锚点下标非法（-1）：不跨轨", () => {
+        // 全对象断言（而非只断言 trackOffset）：本分支刻意让 `targetTrackIndex`
+        // 保留落点的**真实下标**，只有 `trackOffset` 归零。消费方若去读
+        // `targetTrackIndex` 就会跨轨——把它锁在测试里，逼后续改动显式面对这个选择。
         expect(
             resolveKernelDropTarget({
                 targetTrackId: "t2",
                 trackIds: ["t1", "t2"],
                 anchorTrackIndex: -1,
                 newTrackSentinel: NEW_TRACK_SENTINEL,
-            }).trackOffset,
-        ).toBe(0);
+            }),
+        ).toEqual({ dropToNewTrack: false, trackOffset: 0, targetTrackIndex: 1 });
     });
 });

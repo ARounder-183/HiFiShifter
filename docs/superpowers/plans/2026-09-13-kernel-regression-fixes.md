@@ -144,7 +144,7 @@ describe("resolveKernelDropTarget", () => {
                 anchorTrackIndex: 1,
                 newTrackSentinel: NEW_TRACK_SENTINEL,
             }),
-        ).toEqual({ dropToNewTrack: false, trackOffset: 2, targetTrackIndex: 2 });
+        ).toEqual({ dropToNewTrack: false, trackOffset: 1, targetTrackIndex: 2 });
     });
 
     it("落到原轨：trackOffset 为 0", () => {
@@ -364,6 +364,40 @@ Expected（**缺陷证据**）：`["duplicate_clips_bulk"]` —— **没有** `a
                     // 写死这两项是「幽灵能到新轨道、落库留在原轨」的根因。
                     dropToNewTrack: dropTarget.dropToNewTrack,
                     trackOffset: dropTarget.trackOffset,
+```
+
+**同时必须修 `resolveTrackIdByOffset`**（紧邻上方，约 `:1743-1750`）——否则上一步是**静默无效**：
+
+```ts
+                    // 每个参与者按各自初始轨道序号 + 同一偏移量解析目标轨。
+                    resolveTrackIdByOffset: (clipId) => {
+                        const participant = origin.participants.find(
+                            (item) => item.clipId === clipId,
+                        );
+                        if (participant === undefined || participant.trackIndex < 0) return null;
+                        return trackIds[participant.trackIndex] ?? null;
+                    },
+```
+
+替换为：
+
+```ts
+                    // 每个参与者按各自初始轨道序号 + 同一偏移量解析目标轨。
+                    //
+                    // ★ 必须加上 `trackOffset`：此前这里直接 `trackIds[participant.trackIndex]`
+                    //   返回**原轨**，即完全忽略偏移量。结果是即便上层把
+                    //   `trackOffset` 传对了，`copyClipsFromDrag` 拿到的仍是原轨 id
+                    //   —— 修复静默失效（"幽灵到了、落库还在原轨"依旧）。
+                    //   旧实现的正确语义见 `useClipDrag.ts` 的 `resolveTrackIdByOffset`：
+                    //   `targetIndex = sourceIndex + trackOffset`。
+                    //   越界（含负下标）时 `?? null` 让调用方回落到原轨。
+                    resolveTrackIdByOffset: (clipId) => {
+                        const participant = origin.participants.find(
+                            (item) => item.clipId === clipId,
+                        );
+                        if (participant === undefined || participant.trackIndex < 0) return null;
+                        return trackIds[participant.trackIndex + dropTarget.trackOffset] ?? null;
+                    },
 ```
 
 再把两个假 creator 换成真实实现（**必须与上面同时落地**：`copyClipsFromDrag.ts:137-138` 在 `dropToNewTrack` 为真而 creator 返回 null 时抛 `create_track_failed`）：
