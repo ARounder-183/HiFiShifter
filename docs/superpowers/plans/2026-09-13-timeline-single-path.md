@@ -302,7 +302,13 @@ git commit -m "refactor(timeline): 删除旧分支与孤儿 state（内核唯一
 
 ## 任务 3：拆分 `trackOverlap.ts` 并删除旧组件
 
-**本任务最容易做错的地方**：`TrackLane.tsx` 导出的 `computeLeadingOverlapSecByClipId()` 有**两个旧分支之外的消费者**——按文件名整体删除会连带删掉内核正在调用的函数。
+**本任务最容易做错的地方**：`TrackLane.tsx` 导出的 `computeLeadingOverlapSecByClipId()` **仍被使用**——按文件名整体删除会连带删掉内核正在调用的函数。
+
+**修正（实测）**：控制方初稿称它有"两个旧分支之外的消费者"（`TimelinePanel` 与
+`TimelineWaveformSurface`），这是**基于任务 2 之前的代码状态**。任务 2（`66e7c8b4`）
+已把 `TimelinePanel` 的 import **与唯一调用点**一起当作孤儿删除了，因此**实际只剩一个
+消费者**：`TimelineWaveformSurface`（内核视图 `TimelineKernelView:708` 自行挂载），
+它把结果交给 `waveform/sceneBuilder` 做重叠区的等权混合。
 
 **Files:**
 - Create: `frontend/src/components/layout/timeline/trackOverlap.ts`
@@ -421,7 +427,7 @@ npx vitest run src/components/layout/timeline/trackOverlap.test.ts 2>&1 | tail -
 import type { ClipInfo } from "../../../features/session/sessionTypes";
 
 /** clip 渲染顺序：`startSec` 升序；起点相同按 id 字典序（保证顺序稳定）。 */
-export function compareClipRenderOrder(a: ClipInfo, b: ClipInfo): number {
+function compareClipRenderOrder(a: ClipInfo, b: ClipInfo): number {
     const d = (a.startSec ?? 0) - (b.startSec ?? 0);
     if (Math.abs(d) > 1e-9) return d;
     return String(a.id).localeCompare(String(b.id));
@@ -485,18 +491,11 @@ npx vitest run src/components/layout/timeline/trackOverlap.test.ts 2>&1 | tail -
 ```
 期望：`Tests  7 passed (7)`。
 
-- [ ] **步骤 5：改两个消费者指向新模块**
+- [ ] **步骤 5：把消费者指向新模块**
 
-`TimelinePanel.tsx`：把
-```ts
-import { computeLeadingOverlapSecByClipId } from "./timeline/TrackLane";
-```
-改为
-```ts
-import { computeLeadingOverlapSecByClipId } from "./timeline/trackOverlap";
-```
-
-`TimelineWaveformSurface.tsx`：把
+**只有 `TimelineWaveformSurface.tsx` 需要改**（`TimelinePanel.tsx` 的该 import 已在
+任务 2 随孤儿 state 一并删除，若你在此处找不到它，那是**正常的**——不要凭计划去
+"补回"一个 import）。把
 ```ts
 import { computeLeadingOverlapSecByClipId } from "./TrackLane";
 ```
@@ -505,7 +504,7 @@ import { computeLeadingOverlapSecByClipId } from "./TrackLane";
 import { computeLeadingOverlapSecByClipId } from "./trackOverlap";
 ```
 
-- [ ] **步骤 6：验证两个消费者仍工作**
+- [ ] **步骤 6：验证消费者仍工作**
 
 ```bash
 cd /Users/guoqiangye/code/HiFiShifter/frontend
@@ -1471,6 +1470,30 @@ git commit -m "test(perf): 固化 CPU-only 渲染基准脚本
 ```
 
 ---
+
+## 后续清理（本计划范围外，记录以免丢失）
+
+任务 3 删除 5 个旧组件后，**另有 7 个模块失去全部引用者**（约 2469 行）。它们仍能
+编译、测试也仍通过（相关测试直接 import 它们），但已是死代码：
+
+| 模块 | 行数 | 被谁孤立 |
+| --- | --- | --- |
+| `timeline/clip/ClipHeader.tsx` | 958 | `ClipItem`（4 处）+ `TrackLane`（1 处），均已删 |
+| `timeline/OverlapEditLayer.tsx` | 712 | `TrackLane`（3）+ `ClipItem`（2） |
+| `timeline/FadeHitLayer.tsx` | 277 | `ClipItem`（3） |
+| `timeline/clip/ClipEdgeHandles.tsx` | 259 | `ClipItem`（2） |
+| `timeline/runtime/timelineHitTest.ts` | 147 | `TrackLane`（1） |
+| `hooks/useDebouncedPersist.ts` | 96 | 更早已孤立（其文件头仍称"当前使用者 TimelineScrollArea"，已成假注释） |
+| `timeline/runtime/timelineViewportDispatch.ts` | 20 | 更早已孤立 |
+
+**为什么不在本计划内删除**：任务是让渲染路径唯一化，判断依据始终是"是否仍有活引用"。
+这批模块是**删除的副产物**而非目标；一次性删 2469 行会显著扩大本次改动面与回归风险，
+且它们不影响任何行为。建议作为独立的死代码清理任务，用与任务 2 相同的办法（先确认
+零引用、再 `tsc -b` 报告驱动）处理。
+
+**注意 `useDebouncedPersist.ts` 的文件头已成假注释**——它写着"当前使用者：
+TimelineScrollArea"，而该文件已删除。若暂不清理，至少应修正该注释（本仓库把陈旧
+注释视为实质缺陷）。
 
 ## 任务 7：全量验收
 
