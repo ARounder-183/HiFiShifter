@@ -411,7 +411,6 @@ Same convention Phase 2 used, and for the same reason: each depends on the previ
 - Fixture-injected comparison at 2 viewports and 2 dprs, across all 7 variants (toggle each: detected, original, edited, secondary, reference, selection-highlight, clipboard).
 - Record the call-count metric and explicitly record that **frame time is not the metric** (R5), so a future reader does not mistake the absence of a frame-time win for a failed migration.
 - Update the spec's phase table.
-
 ### Task 6: Extract gesture logic into pure modules
 
 - Pull hit-testing (`gestureHitTest.ts`) and drag arithmetic (`dragArithmetic.ts`) out of `usePianoRollInteractions.ts`, following the `timeline/kernel/interaction/*` pattern.
@@ -437,3 +436,90 @@ Same convention Phase 2 used, and for the same reason: each depends on the previ
 4. **Gesture regression** — 23 entry points in one hook. Task 6 is last and explicitly browser-re-verified per gesture.
 
 **Honesty constraint carried into the plan:** because R5 shows no measurable frame-time win, Task 5 must record the JS→native-call metric as the benefit and state plainly that frame time was unchanged. Claiming otherwise would be unsupported by the measurements.
+
+---
+
+## Task 4 · 完成记录（曲线 GL 接线 + 渲染层抽稀）
+
+**状态：** 已完成并提交（`45abcb7c` 修复接线缺陷、`7a88e9c7` 抽稀）。
+
+### 实现过程中发现并修复的两个真实缺陷
+
+两者都只在浏览器端到端验证中暴露，单测无法覆盖：
+
+1. **帧内顺序错误**（`pianoRollKernelHost.draw`）。`drawGlCurves()` 读
+   `data().curves`，而该字段是面板在 `onFrame` → `applyScrollLayers` →
+   `drawRef.current()` 里**就地写入**的。原实现把 `onFrame` 排在曲线 GL **之后**，
+   于是曲线层永远读到上一帧的图层列表——首帧更是空数组。现象是"曲线数据已到但
+   屏幕上不出现，滚动一下才出来"，正是本阶段此前遗留的未解之谜。
+2. **标脏只喂了面板自己的 rAF**（`PianoRollPanel.invalidate`）。曲线搬到 GL 后画面
+   由两个循环驱动（面板 rAF 画 Canvas2D、宿主 rAF 画 GL），只调度前者会让 GL 层停在
+   旧内容上。现在内核模式统一转交宿主，由宿主的帧提交回调 `onFrame` 同帧刷新两层。
+
+### 抽稀是根因修复，不是微调
+
+取数侧 `stride = 1`（200 点/秒）**不可改**——编辑路径依赖全分辨率
+（`selectionEditData` 的零 IPC 快路径要求 `stride === 1`）。于是最小缩放
+（4 px/s，视口覆盖 466 秒）下视口内有 ~93,200 个采样点，却只有 3,728 个设备像素列，
+**每列 25 个点渲染在同一个像素上**。这些点全额进入几何构建：
+
+| | 点数 | 顶点数 | 每帧成本 |
+|---|---|---|---|
+| 抽稀前 | 213,595 | 1,922,315（30 MB） | **32 ms** |
+| 抽稀后 | ~22,000 | ~200,000（3 MB） | **~3 ms** |
+
+抽稀按列保留 y 的 min/max，因此**不丢包络**；`along` 取自原始序列，虚线相位不漂移。
+精度契约与单测见 `renderKernel/gl/polylineDecimation.ts`。
+
+### 实测（同一会话，唯一变量是抽稀开关）
+
+| 指标 | 旧实现（Canvas2D） | 内核 · 抽稀前 | 内核 · 抽稀后 |
+|---|---|---|---|
+| rAF 回调 p95 | 25.8 ms | 36.9 ms | **10.3 ms** |
+| 回调 >16 ms 的帧数 | 40 / 150 | 40 / 150 | **0 / 151** |
+| longtask 次数 | **30** | 1 | **0** |
+| longtask 总时长 | **2,240 ms** | 62 ms | **0 ms** |
+| 每帧 `lineTo` | 213,955 | 0 | 0 |
+
+**像素保真度（同会话 A/B，抽稀前后）**：差异 0.0352%；曲线包络中位 **1 px**、
+最大 6 px，且 3,580 列中仅 8 列中心位差 >1.5 px——**全部是 ySpan > 20 px 的近垂直
+笔画**，该度量在其上本就不稳定。
+
+**跨运行噪声底线实测为 0 像素**（同配置跑两次逐像素相同），因此上表可跨运行复现。
+
+### ⚠️ 验证中发现的既有问题（非本任务引入，未修复）
+
+**内核模式下最小缩放的竖直网格线与 Canvas2D 落在不同像素列**（实测位移 0～16
+物理像素）。定位结论：
+
+- 这是**竖线**（拍/小节网格），不是曲线；曲线包络本身与 Canvas2D 一致
+  （`only in A / only in B` 的少量列集中在近垂直段，属度量噪声）。
+- 与抽稀**无关**：GL 无抽稀与 GL 抽稀的竖线位置**逐列相同**。
+- 根因在**跨层口径**：竖网格由 DOM 层 `BackgroundGrid` 绘制并用
+  `deviceSnap = Math.round(cssX * dpr) / dpr` 吸附；而参数编辑器的网格/曲线走
+  `secToViewportPx`。两者在 `pxPerBeat = 2`（4 px/s、120 BPM）这种极小步距下，
+  取整相位差被放大到整条线错开。
+- 影响范围：仅在缩放到下限（网格步距 ≈ 2 CSS px）时可见；中高缩放步距大，差异相对
+  可忽略。**建议单列一项任务**，不要在曲线任务里顺带修改——它触及两个面板的网格
+  对齐口径。
+
+### 未覆盖项（诚实记录）
+
+- **7 种曲线变体中只有 3 种在浏览器端到端比对过**：`detected`（单条）、
+  `detected2`（两条，验证逐层叠加）、`selection`（选区）。其余 4 种
+  （original / edited / secondary / reference / clipboard）**未构造出可达场景**：
+  - `original` / `edited` 需要 `paramView` 有数据，即后端真实返回 `orig` / `edit`
+    数组。mock 的 `get_param_frames` 走兜底实现返回 `{ok:true}`，无数组；
+    本次验证通过注入合成数组绕过，但那同时会**替换掉被测的取数路径**，
+    因此不作为对"真实数据流"的证据。
+  - `secondary` / `reference` 需要选中子轨或参考轨，mock 只创建扁平根轨
+    （Phase 2 已记录的同一限制）。
+  - `clipboard` 需要剪贴板非空且有选区，面板的复制路径依赖上述 `paramView` 数据。
+  - 这 4 种的**几何与投影**由 `polylineGeometry`（13 项）、`polylineCoverage`
+    （12 项）、`curvePoints`（15 项，含两组 >10,000 / >5,000 点的旧实现等价性对照）
+    覆盖；GL 接线复用已验证的同一 program 与同一适配层。
+- **2 个视口 × 2 个 dpr 的矩阵未跑全**：本次只在 1920×1200 @ dpr 2 上比对
+  （`--force-device-scale-factor=2`）。`decimatePolylinePoints` 的 dpr 依赖有单测
+  覆盖（dpr 1/2/4 单调性），但像素级比对未在其它 dpr 下复跑。
+- **播放态仍未验证**：mock 的 `is_playing` 恒为 false（Phase 2 已记录的同一限制）。
+
