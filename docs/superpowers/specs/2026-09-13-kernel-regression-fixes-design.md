@@ -19,7 +19,7 @@
 | 1 | 修饰键 + 拖拽复制无法落到新轨道（也不能落到其他已有轨道） | 内核缺陷 | 提交路径把 `dropToNewTrack` / `trackOffset` 写死为 `false` / `0`，丢弃了预览路径已算出的落点 |
 | 2 | 点标尺后标尺播放头动、网格播放头不动 | 内核缺陷 | 播放头变化**从不**标脏内核渲染循环（循环是纯脏标记驱动，无空闲 rAF） |
 | 3 | 点本轨空白偶尔不取消选中 / 不改变播放头 | 内核缺陷（**与 #2 同源**，见 §4.3） | 空白点击的 seek 确实到达 store，但内核不重绘，用户看到的是「没反应」 |
-| 4 | 参数编辑器选区框残留，拖拽时才更新 | 内核缺陷 | 新建选区时只写 `selectionUi`，**未调用 `invalidate()`** |
+| 4 | 参数编辑器选区框残留，拖拽时才更新 | 内核缺陷（**系统性**，见 §2.6） | 主画布内容签名的 `object → "[object Object]"` 塌缩，不同选区产生**同一签名**，缓存命中导致跳过着色 |
 | 5 | MIDI / 音高参考块内部为空 | **改造回归** | `MidiPitchTrackCanvas` 唯一挂载点（`TrackLane`）被删，组件成孤儿 |
 | 6 | 音阶高亮按钮失效 | **改造回归** | 该图层只画在 Canvas2D 的 `skipGrid` 分支里，而 `skipGrid` 恒为 `true` |
 
@@ -65,12 +65,63 @@
 
 音阶高亮依赖 `projectScale` 与 `scaleSegments`，二者都是**低频**变化（改音阶 / 改 Tempo Map），但都不在 `gridGeometrySignature` 里。若只把绘制搬到 GL，切音阶后高亮不会更新——同一个漏项陷阱。因此签名必须同时纳入「音阶高亮是否开启 + 生效音阶音级集合 + 分段」。
 
-### 2.6 钢琴背景的具体观感（用户已确认）
+### 2.6 为什么 #4 是系统性缺陷而不是「少调一次 invalidate」
 
-- **只给黑键行加半透明深色带**，白键行保持原背景。理由：这是 REAPER / Logic / Ableton 的通行做法，最不干扰曲线读数；也给不出「白键带在浅色主题下与背景糊在一起」的问题。
+初查以为是"新建选区时漏调 `invalidate()`"，**这是错的**。实测（instrumented `clearRect` 计数 + A/B 隔离 confound）：
+
+- `renderLoop` 在每次 `pointermove` 都**确实**调度了帧；
+- 但主画布的 `clearRect` 计数在第二次选区全程**冻结**（12 帧 / 6 次清屏 →
+  按下、拖拽、抬起后仍是 12 / 6）。
+
+原因是**签名塌缩**：`mainContentSignature`（`PianoRollPanel.tsx:3513-3545`）用
+`[...].join("|")` 构造，而 `join` 会把每个对象/数组元素串成字面量
+`"[object Object]"`。因此：
+
+```
+[{aBeat:4.1,bBeat:6.7}].join("|")  ===  [{aBeat:40,bBeat:90}].join("|")   // true，必须为 false
+[null].join("|")                   !==  [{aBeat:1,bBeat:2}].join("|")    // null 能区分
+```
+
+**这精确解释了用户的报告**：从 `null` 开始的**第一次**选区会产生新签名（重绘，能看到框），
+而**选区 → 选区**的转换签名不变（缓存命中，旧框保留）。"只有拖拽时才更新"是因为拖过
+32px 边缘自动滚屏带会改变 `scrollLeftRef.current`——那是真正的签名原语，此时才终于
+缓存未命中。
+
+**受影响的签名项**（对象/数组，全部塌缩）：`detectedPitchCurves`、
+`referencePitchOverlays`、`secondaryParamViews`（**出现两次**）、`paramMorphOverlay`、
+`selectionRef.current`、`liveEditOverrideRef.current`、`paramViewsRef.current`。
+其中 `paramMorphOverlay` 意味着 **morph 手柄拖拽同样静默失效**（已验证：3 点 → 9 点
+签名相同）。
+
+另外两个 `join("|")` 签名（`gridView.ts:171/227`、`BackgroundGrid.tsx:252`）经逐项核对
+**只含原始值**，不受影响——因此本缺陷局限于 `PianoRollPanel`。
+
+顺带发现 `pitchAnalysisPending` 与 `overlayText` 也**不在**签名里，而该文件
+`:3504` 的注释明确要求它们必须在（前者会提前 `return` 改变绘制内容）。这两项一并在
+本次修复中补齐。
+
+### 2.7 缺陷 4 的修复方向
+
+不复用 `.join("|")`。改用**引用比较**（与 `:3530` 注释自称的"引用比较"一致）：
+
+- 签名改为 `readonly unknown[]`，与上一帧数组逐项 `Object.is` 比较；
+- 对象/数组项按**引用**参与，天然不塌缩；
+- `selectionRef` / `liveEditOverrideRef` 每次拖拽都赋**新对象**（`:3432-3435`），
+  因此引用比较仍能正确逐帧失效，而在无变化时保持惰性。
+
+同时补上 `usePianoRollInteractions.ts:3417` 的 `invalidate()`（与 `:3437` / `:3445`
+对齐），让零宽选区在按下瞬间就重绘。
+
+**新增签名项**：`pitchAnalysisPending`、`overlayText`。
+
+### 2.8 钢琴背景的具体观感（用户已确认）
+
+- **只给黑键行加半透明深色带**，白键行保持原背景。理由：这是 REAPER / Logic / Ableton 的通行做法，最不干扰曲线读数；也避开了「白键带在浅色主题下与背景糊在一起」的问题。
 - **常开，不加开关**。少一处状态与持久化。
 - **音阶高亮叠在钢琴背景之上**：钢琴背景是底层纹理（黑键/白键），音阶高亮是语义高亮（该音阶的音级），两者语义不冲突。
 - 强度取「克制的」档：深色主题 alpha ≈ 0.08，浅色主题 ≈ 0.06。用户可后续要求调整（本设计把它做成 `colors.ts` 里的具名常量，便于一处调整）。
+
+> 注意：`pitchGridOther` 在深色主题下已是 `rgba(255,255,255,0.05)`，非常接近不可见。黑键行背景带会改变网格线的**表观对比度**，因此实现后必须目视确认网格线仍清晰可辨（这是本项的验收要点之一，不是可选项）。
 
 ## 3. 实施范围（精确清单）
 
@@ -98,13 +149,30 @@
 
 **验收口径**：点标尺、点空白、播放（**自动滚屏关闭**）三条路径下，网格播放头都必须可见移动。
 
-### 3.3 缺陷 4：参数编辑器选区框
+### 3.3 缺陷 4：参数编辑器选区框（系统性签名修复）
 
-**改动点**：`frontend/src/components/layout/pianoRoll/usePianoRollInteractions.ts` 的新建选区分支（`:3356-3447`）。
+**改动点**：
 
-`selectionRef.current = {...}` + `updateSelectionUi(...)` 之后**补 `invalidate()`**——与拖拽分支（`:3437`）一致。当前 `updateSelectionUi` 只走 React state，而 `selectionRef` 是 `drawPianoRoll` 读取的真值，两者之间没有任何重绘触发（已实测：第二次按下后主画布 `toDataURL()` 与按下前**逐字节相同**）。
+1. `frontend/src/components/layout/PianoRollPanel.tsx`：把 `mainContentSignature` 从
+   `string`（`.join("|")`）改为**数组 + 逐项 `Object.is` 比较**。签名数组本身保留现有
+   项与顺序；消费端从"比较字符串"改为"比较数组"。
+2. 同文件：补上 `pitchAnalysisPending` 与 `overlayText` 两项（`:3504` 注释已要求）。
+3. `frontend/src/components/layout/pianoRoll/usePianoRollInteractions.ts:3417`：
+   新建选区分支在 `updateSelectionUi(...)` 之后补 `invalidate()`（与 `:3437` / `:3445`
+   对齐）。
+4. `frontend/src/components/layout/pianoRoll/render.ts`：`mainContentSignature` 参数类型
+   随之改为数组、缓存改为逐项比较（`mainCanvasCache` 的 `WeakMap<HTMLCanvasElement, string>`
+   改为持有上一次的数组）。
 
-同时核实 `pointerup` 分支（`:3445`）的 `invalidate()` 是否足够——若按下即选区已坍缩为零宽，抬起时的重绘同样需要在按下时就发生。
+**必须同时覆盖**：`paramMorphOverlay` 的 morph 手柄拖拽（同一塌缩缺陷，已验证 3 点 →
+9 点签名相同）。修复后必须真机确认 morph 拖拽也与手势同帧。
+
+**单测要求**（这是本工程当前**完全没有覆盖**的一层，必须补）：
+
+- 签名比较函数的纯单测：不同内容的选区对象 → 必须判为不同；同一引用 → 判为相同；
+  `null ↔ object` → 不同。
+- 一条**回归守卫**：断言两个不同选区对象的签名比较结果不为"相同"。
+  （原缺陷的正向复现：若比较实现退回 `.join("|")`，该测必须失败。）
 
 ### 3.4 缺陷 5：MIDI / 音高参考块内容
 
@@ -139,7 +207,7 @@
 4. `PianoRollPanel.tsx` 的 `buildGridSpec()`：传入背景色 RGBA。
 5. `render.ts`：`skipGrid` 分支里若也有等价绘制则删除（该分支已死，实际无需改动——实现时确认）。
 
-**不做**：不加开关（§2.6），不加持久化字段，不动 Redux。
+**不做**：不加开关（§2.8），不加持久化字段，不动 Redux。
 
 ## 4. 验证方式
 
@@ -149,7 +217,7 @@
 4. **真机渲染**（`?mock=1` + `scripts/dev-shot.mjs`），逐条对照 §1.1：
    - #1：修饰键拖到末轨之下 → 断言 mock 收到建轨请求且 `trackMode` 不是 `same_track`；拖到其他已有轨道 → 断言 `trackMode` 为 `explicit_mapping`；并断言虚线新轨行**不残留**。
    - #2：读内核播放头元素的 `style.transform`，点标尺 / 点空白 / 播放（自动滚屏**关**）三条路径都必须变化。
-   - #4：第二次按下后主画布 `toDataURL()` 必须与按下前**不同**（当前是逐字节相同）。
+   - #4：第二次按下后主画布 `toDataURL()` 必须与按下前**不同**（当前是逐字节相同）；另需验证 **morph 手柄拖拽**同帧跟随（同一塌缩缺陷）。
    - #5：MIDI clip 的 body 内必须出现折线。**注意 mock 数据不含 `midi_note_data`**，因此需要先给 mock 补上该字段（或在验证脚本里注入），否则该 clip 在 `develop` 上同样是空的——这是本次排查中一度无法视觉复现的原因。
    - #6：切换音阶高亮按钮后，GL 画布必须**不再**逐字节相同（当前实测完全相同）。
    - 钢琴背景：截图像素比对确认黑键行被压暗、白键行不变，且网格线仍可见（不被背景盖住）。
@@ -165,6 +233,8 @@
 | **#1 的建轨与落库必须原子落地** | `copyClipsFromDrag` 在 creator 返回 null 时抛错 | §3.1 第 1、4 步同一提交 |
 | **#5 迁移折线数学引入视觉漂移** | 该数学与后端 `emit_clip_pitch_data_for_clip` 逐帧对齐 | 逐字搬迁不重写；对搬出的纯函数补单测 |
 | **删除 `render.ts` 死分支时误删活代码** | `skipGrid` 分支内混有 `highlightActive` 等局部计算 | 逐项核对 args 的其余消费者（本工程已有一次同类误删教训） |
+| **主画布内容缓存无任何单测** | #4 的根因层（`mainContentSignature` / `mainCanvasCache`）当前零覆盖：无测试 import `drawPianoRoll`，也无测试引用签名 | §3.3 的单测要求是本项的强制交付物，不是可选项 |
+| **签名比较语义变更波及所有图层** | 从字符串比较改为数组比较会影响主画布的**每一个**缓存图层 | 保持签名项与顺序不变，只改比较方式；每类图层（曲线 / 选区 / morph / 剪贴板 / 音阶）逐一真机确认仍会更新 |
 | **孤儿 `playheadRef` / `scrollRef` 清理波及面** | 写点分散在两个 hook | 先删写点、跑 `tsc`（`noUnusedLocals` 会指出剩余孤儿），再删声明 |
 
 ## 6. 验收标准
