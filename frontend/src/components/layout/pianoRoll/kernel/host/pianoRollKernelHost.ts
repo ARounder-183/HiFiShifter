@@ -15,11 +15,14 @@
  * 【阶段 1 的范围（刻意很小）】
  * - **不引入 WebGL**：绘制仍由面板的 Canvas2D 完成，宿主经 `onFrame(axis)` 交回。
  *   因此本模块可在无 jsdom 的 node 环境单测（见同目录 `.test.ts`）。
- * - **不接管输入**：滚轮 / 键盘 / 中键拖拽 / 滚动条 thumb 拖拽与轨道翻页均属
- *   Task 7。宿主当前**不注册任何事件监听**，输入语义留在面板，避免本任务的验收
- *   被手势细节污染；`dispose()` 因此只释放订阅、帧循环与尺寸观察。
+ * - **输入按轴分配所有权**：滚动条 thumb 拖拽与轨道翻页、以及**竖向键盘翻页**
+ *   （PageUp / PageDown / Home / End，见 `scroll/keyboardScroll`）由宿主注册监听；
+ *   其余手势（滚轮、中键平移、绘制）仍在面板与 `usePianoRollInteractions`。
+ *   竖向键盘之所以必须收进来：内核模式下原生 scroller 只是被动镜像，其 `scroll`
+ *   事件会被面板当作回声忽略，原生滚动的那次位移就没人采纳了——四个键会彻底失效。
+ *   `dispose()` 释放全部监听、订阅、帧循环与尺寸观察。
  * - **不迁移缩放**：`pxPerSec` 由面板解析后经 `setPxPerSec` 写入；内核只据此算
- *   内容宽度与横向上限。
+ *   内容宽度与横向上限。竖向 `span` 同理，仍由面板决定。
  *
  * 【竖向为什么用「额外高度」凑出 1600】
  * 参数编辑器的竖向不是像素行而是**值域**。内核只认像素，因此把值域范围表达为
@@ -31,8 +34,10 @@
  * 【与其他模块的关系】
  * - 上游：`PianoRollPanel` 在挂载 effect 里创建并持有，卸载时 `dispose()`。
  * - 复用：`renderKernel/scrollKernel`（视口真值）、`renderLoop`（帧调度）、
- *   `renderKernel/scrollbars`（滚动条几何）、`timelineAxis`（投影）。
- * - 下游：`onFrame` 把投影交回面板绘制（标尺 / 网格 / 画布 / 波形 / 播放头）。
+ *   `renderKernel/scrollbars`（滚动条几何）、`timelineAxis`（投影）、
+ *   `scene/gridView`（实时视口快照与几何签名）、`scroll/keyboardScroll`（键盘目标）。
+ * - 下游：`onFrame` 把投影交回面板绘制（标尺 / 网格 / 画布 / 波形 / 播放头）；
+ *   `onScrollTopFrame` 把竖向真值逐帧交回面板刷新其值域视口 ref。
  */
 
 import { readDevicePixelRatio } from "../../../../../utils/devicePixelLine";
@@ -42,7 +47,10 @@ import {
     scrollTargetFromTrackClick,
 } from "../../../renderKernel/scrollbars";
 import { createGlCanvas, type GlCanvasHandle } from "../../../renderKernel/gl/glContext";
-import { createPolylineProgram, type PolylineProgram } from "../../../renderKernel/gl/polylineProgram";
+import {
+    createPolylineProgram,
+    type PolylineProgram,
+} from "../../../renderKernel/gl/polylineProgram";
 import { buildPolylineVertices } from "../../../renderKernel/gl/polylineGeometry";
 import { decimatePolylinePoints } from "../../../renderKernel/gl/polylineDecimation";
 import {
@@ -78,6 +86,12 @@ import {
     type GridInstance,
 } from "../scene/gridInstances";
 import {
+    gridGeometrySignature,
+    keyboardGeometrySignature,
+    resolveLiveGridView,
+    type LiveGridView,
+} from "../scene/gridView";
+import {
     resolvePianoRollScrollbarGeometries,
     type PianoRollScrollbarGeometries,
 } from "../scroll/scrollbarSpec";
@@ -86,6 +100,7 @@ import {
     kernelScrollTopFromCenter,
     PIANO_ROLL_VERTICAL_SCROLL_RANGE_PX,
 } from "../scroll/verticalValueScroll";
+import { resolveKeyboardScrollTarget } from "../scroll/keyboardScroll";
 import type { PianoRollKernelData, PianoRollGridSpec } from "./pianoRollKernelData";
 
 /**
@@ -210,6 +225,24 @@ export interface PianoRollKernelHostArgs {
      * @param drawingScrollLeft 新的水平位置（绘制坐标）。
      */
     readonly onUserScrollLeft?: (drawingScrollLeft: number) => void;
+    /**
+     * **竖向**滚动由内核改变时通知面板（含用户手势与键盘翻页）。
+     *
+     * 【为什么竖向要单独开一条通道】横向有 `onFrame` 逐帧回报（面板据此更新
+     * `scrollLeftRef` 并重绘），竖向却**没有**：`axis.scrollTopPx` 只喂给
+     * `applyScrollLayers` 之外的地方。于是面板持有的值域视口（`pitchViewRef` /
+     * `paramViewsRef`）在竖向滚动期间只能靠原生 `scroll` 事件 + 反向回写来"猜"，
+     * 而那条路正是镜像回声的来源（内核刚写下的位置被滞后读回并覆盖回去）。
+     *
+     * 本回调把内核的竖向真值直接交给面板，面板据此**正向**刷新自己的视口 ref。
+     * 回声因此不再承担任何职责，可以在面板侧被安全忽略。
+     *
+     * 特殊说明：每帧都可能触发；实现必须只做赋值（不进 React），与
+     * `onScrollLeftFrame` 同一约定。
+     *
+     * @param scrollTopPx 内核竖向真值（CSS px，0..1600）。
+     */
+    readonly onScrollTopFrame?: (scrollTopPx: number) => void;
     /** 帧调度注入（默认 rAF；测试注入手动实现）。 */
     readonly requestFrame?: (callback: FrameRequestCallback) => number;
     /** 取消帧注入。 */
@@ -317,7 +350,7 @@ function shouldWrite(next: number, previous: number, epsilon = 0.01): boolean {
  */
 export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoRollKernelHost {
     const { container, hScrollbarThumb, vScrollbarThumb, hScrollbarTrack, vScrollbarTrack } = args;
-    const { data, sync, onFrame, onScrollLeftCommit, onUserScrollLeft } = args;
+    const { data, sync, onFrame, onScrollLeftCommit, onUserScrollLeft, onScrollTopFrame } = args;
 
     /** 待释放的资源（倒序执行；幂等由 `disposed` 保证）。 */
     const teardown: Array<() => void> = [];
@@ -511,36 +544,65 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
     let glUploadedCount = 0;
     /** 几何是否已上传（false 时下一帧走 `render` 全量上传）。 */
     let glGeometryUploaded = false;
-    /** 上一次构建几何用的**内容签名**（变化才重建，见 `gridSignature`）。 */
+    /** 上一次构建几何用的**内容签名**（变化才重建，见 `gridGeometrySignature`）。 */
     let lastGridSignature = "";
 
     /**
-     * 计算网格几何的**内容签名**。
+     * 解析**本帧的实时视口**（竖向中心取自内核真值）。
+     *
+     * 【为什么不能直接用 `spec.view`】那是面板在 React render 期写下的快照，而
+     * 竖向滚动的真值在内核（`scrollTop`）且**没有逐帧回写面板的通道**——拖竖向
+     * 滚动条 / 中键竖向平移 / 键盘翻页都不进 React。用快照会让中心在竖向滚动期间
+     * 恒定，几何因此永不重建（实测：内核中心 72 → 79.29，GL 画布像素逐点相同）。
+     * 详见 `scene/gridView` 的文件头。
+     *
+     * 特殊说明：`span` 仍取自快照——缩放由面板决定，内核不参与。
+     *
+     * @param spec 当前网格输入；空时返回 null。
+     * @returns 实时视口；无网格时为 null。
+     */
+    function liveGridView(spec: PianoRollGridSpec | null | undefined): LiveGridView | null {
+        if (spec == null) return null;
+        return resolveLiveGridView({
+            absMin: spec.absMin,
+            absMax: spec.absMax,
+            span: spec.view.span,
+            scrollTop: scroll.get().scrollTop,
+        });
+    }
+
+    /**
+     * 计算网格几何的**内容签名**（含实时竖向中心）。
      *
      * 【作用】几何只在这些输入变化时才需要重建。把输入拼成字符串做比较，比逐字段
      * 深比较便宜，也比"每帧重建"省下大量分配——网格逐行构建在 formant 参数下
      * 可达近百个实例，每帧重建纯属浪费。
      *
-     * 特殊说明：**不含**滚动位置与视口原点——那正是"滚动零重建"的前提。视口宽度
-     * 要含（它决定横线长度）；dpr 要含（它决定半像素取向与线厚）。
+     * 【必须含实时中心】签名是"要不要重建"的唯一判据。含快照中心等于用一个在竖向
+     * 滚动期间恒定的量，重建条件退化成"只有 React 重渲染才重建"——这就是"拖竖向
+     * 滚动条网格不动"的直接原因。
+     *
+     * 特殊说明：**不含横向滚动位置**——横线横跨整个视口、竖线的 y 也已在视口坐标
+     * 里算好，因此横向滚动确实无需重建（"横向滚动零重建"成立）。视口宽高要含
+     * （分别决定横线长度与可见行数）；dpr 要含（决定半像素取向与线厚）。
      *
      * @param spec 当前网格输入。
      * @returns 内容签名；无网格时为空串。
      */
     function gridSignature(spec: PianoRollGridSpec | null | undefined): string {
-        if (spec == null) return "";
-        return [
-            spec.kind,
-            spec.view.center,
-            spec.view.span,
-            spec.absMin,
-            spec.absMax,
+        const view = liveGridView(spec);
+        if (spec == null || view === null) return "";
+        return gridGeometrySignature({
+            kind: spec.kind,
+            view,
+            absMin: spec.absMin,
+            absMax: spec.absMax,
             viewportWidthPx,
             viewportHeightPx,
-            readDevicePixelRatio(),
-            spec.strongRgba.join(","),
-            spec.weakRgba.join(","),
-        ].join("|");
+            dpr: readDevicePixelRatio(),
+            strongRgba: spec.strongRgba,
+            weakRgba: spec.weakRgba,
+        });
     }
 
     /**
@@ -554,12 +616,13 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
      * @param spec 当前网格输入；null 时清空几何。
      */
     function rebuildGlGeometry(spec: PianoRollGridSpec | null | undefined): void {
+        const view = liveGridView(spec);
         const items: GridInstance[] =
-            spec == null
+            spec == null || view === null
                 ? []
                 : spec.kind === "pitch"
                   ? buildPitchGridInstances({
-                        view: spec.view,
+                        view,
                         absMin: spec.absMin,
                         absMax: spec.absMax,
                         heightPx: viewportHeightPx,
@@ -571,7 +634,7 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                     })
                   : buildValueGridInstances({
                         kind: spec.kind,
-                        view: spec.view,
+                        view,
                         heightPx: viewportHeightPx,
                         viewportWidthPx,
                         dpr: readDevicePixelRatio(),
@@ -630,42 +693,52 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
      * @returns 内容签名；非音高参数（无键盘）时为空串。
      */
     function keyboardSignature(spec: PianoRollGridSpec | null | undefined): string {
-        if (spec == null || spec.kind !== "pitch") return "";
-        return [
-            spec.view.center,
-            spec.view.span,
-            spec.absMin,
-            spec.absMax,
+        const view = liveGridView(spec);
+        if (spec == null || view === null) return "";
+        return keyboardGeometrySignature({
+            kind: spec.kind,
+            view,
+            absMin: spec.absMin,
+            absMax: spec.absMax,
             viewportHeightPx,
             axisWidthPx,
-            readDevicePixelRatio(),
-            spec.strongRgba.join(","),
-            spec.weakRgba.join(","),
-            spec.whiteKeyRgba?.join(",") ?? "",
-            spec.blackKeyRgba?.join(",") ?? "",
-            spec.blackKeyGradientRgba?.join(",") ?? "",
-            spec.cSeparatorRgba?.join(",") ?? "",
-            spec.keySeparatorRgba?.join(",") ?? "",
-            spec.axisBorderRgba?.join(",") ?? "",
-        ].join("|");
+            dpr: readDevicePixelRatio(),
+            strongRgba: spec.strongRgba,
+            weakRgba: spec.weakRgba,
+            whiteKeyRgba: spec.whiteKeyRgba,
+            blackKeyRgba: spec.blackKeyRgba,
+            blackKeyGradientRgba: spec.blackKeyGradientRgba,
+            cSeparatorRgba: spec.cSeparatorRgba,
+            keySeparatorRgba: spec.keySeparatorRgba,
+            axisBorderRgba: spec.axisBorderRgba,
+        });
     }
 
     /**
      * 重建键盘轴几何并标记需要重新上传。
      *
-     * 特殊说明：只有**音高**参数才有键盘（其余参数画的是刻度标签），因此非 pitch
+     * 特殊说明 1：只有**音高**参数才有键盘（其余参数画的是刻度标签），因此非 pitch
      * 时清空几何——否则切到别的参数后键盘会残留在 GL 画布上。
+     *
+     * 特殊说明 2：视口走 `liveGridView`（竖向中心取自内核真值），与签名同源。
+     * 两边取不同来源会让"签名说该重建、几何却按旧视口建"，线条依旧不动。
      *
      * @param spec 当前网格输入。
      */
     function rebuildKeyboardGeometry(spec: PianoRollGridSpec | null | undefined): void {
-        if (spec == null || spec.kind !== "pitch" || spec.whiteKeyRgba === undefined) {
+        const view = liveGridView(spec);
+        if (
+            spec == null ||
+            view === null ||
+            spec.kind !== "pitch" ||
+            spec.whiteKeyRgba === undefined
+        ) {
             glAxisUploadedCount = 0;
             glAxisGeometryUploaded = false;
             return;
         }
         const items = buildKeyboardInstances({
-            view: spec.view,
+            view,
             absMin: spec.absMin,
             absMax: spec.absMax,
             heightPx: viewportHeightPx,
@@ -725,11 +798,7 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         const layers = data().curves;
         if (layers === null || layers === undefined || layers.length === 0) return;
 
-        const target = glHandle.resize(
-            viewportWidthPx,
-            viewportHeightPx,
-            readDevicePixelRatio(),
-        );
+        const target = glHandle.resize(viewportWidthPx, viewportHeightPx, readDevicePixelRatio());
         const dpr = readDevicePixelRatio();
         const axis = currentAxis();
 
@@ -783,7 +852,6 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                 alongOverride: reduced.along ?? undefined,
             });
             if (vertices.length === 0) continue;
-
 
             glCurveProgram.draw({
                 vertices,
@@ -885,6 +953,9 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
      */
     function collectAxisTextRequests(spec: PianoRollGridSpec | null | undefined): TextRequest[] {
         if (spec === null || spec === undefined) return [];
+        // 实时视口（竖向中心取自内核真值）：与几何同源，否则文字与线条会错位。
+        const view = liveGridView(spec);
+        if (view === null) return [];
         const family = spec.fontFamily ?? "sans-serif";
         const requests: TextRequest[] = [];
 
@@ -897,11 +968,8 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             }
             const range = spec.absMax - spec.absMin;
             if (!Number.isFinite(range) || range <= 0) return [];
-            const span = Math.min(Math.max(spec.view.span, 1e-6), range);
-            const min = Math.min(
-                Math.max(spec.view.center - span / 2, spec.absMin),
-                spec.absMax - span,
-            );
+            const span = Math.min(Math.max(view.span, 1e-6), range);
+            const min = Math.min(Math.max(view.center - span / 2, spec.absMin), spec.absMax - span);
             const startMidi = Math.min(Math.max(Math.floor(min), spec.absMin), spec.absMax);
             const endMidi = Math.min(Math.max(Math.ceil(min + span), spec.absMin), spec.absMax);
 
@@ -937,7 +1005,7 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         if (labelRgba === undefined || spec.paramName === undefined) return [];
         const marks = buildAxisMarkInstances({
             kind: resolveAxisKind(spec.paramName),
-            view: spec.view,
+            view,
             heightPx: viewportHeightPx,
             axisWidthPx,
             dpr: readDevicePixelRatio(),
@@ -962,16 +1030,20 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
     /**
      * 重建数值轴刻度线几何（非音高参数）。
      *
-     * 特殊说明：pitch 参数的轴列是键盘（由 `rebuildKeyboardGeometry` 负责），
+     * 特殊说明 1：pitch 参数的轴列是键盘（由 `rebuildKeyboardGeometry` 负责），
      * 此函数只处理数值轴；两者互斥，因此可以共用同一块轴画布与实例缓冲。
+     *
+     * 特殊说明 2：视口走 `liveGridView`（竖向中心取自内核真值），与签名同源。
      *
      * @param spec 当前网格输入。
      * @returns 刻度线实例数（供调用方决定是否上传）。
      */
     function rebuildAxisMarkGeometry(spec: PianoRollGridSpec | null | undefined): number {
+        const view = liveGridView(spec);
         if (
             spec === null ||
             spec === undefined ||
+            view === null ||
             spec.kind === "pitch" ||
             spec.paramName === undefined ||
             spec.tensionLineRgba === undefined
@@ -980,7 +1052,7 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         }
         const marks = buildAxisMarkInstances({
             kind: resolveAxisKind(spec.paramName),
-            view: spec.view,
+            view,
             heightPx: viewportHeightPx,
             axisWidthPx,
             dpr: readDevicePixelRatio(),
@@ -1092,6 +1164,8 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
     let lastRulerTranslateX = Number.NaN;
     /** 上一次量化提交给 React 的水平滚动位置（NaN = 从未提交）。 */
     let lastCommittedScrollLeft = Number.NaN;
+    /** 上一次逐帧上报给面板的竖向位置（NaN = 从未上报）。 */
+    let lastFrameScrollTop = Number.NaN;
 
     /**
      * 通知面板：水平位置由**用户手势**改变（绘制坐标）。
@@ -1215,6 +1289,18 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
     function draw(): void {
         if (disposed) return;
         const view = scroll.get();
+
+        // 竖向逐帧上报（见 `onScrollTopFrame` 说明）：面板据此**正向**刷新值域
+        // 视口 ref，从而不再依赖原生 `scroll` 事件的反向回写（那是镜像回声的来源）。
+        //
+        // 【必须在 onFrame 之前】面板的绘制（曲线投影 / 命中测试 / `valueToY`）读的
+        // 就是这些 ref。放在 `onFrame` 之后会让画面慢一帧，竖向拖动时表现为
+        // 「内容追着指针走但永远差一点」——与我们要修的手感问题同源。
+        // 与横向同一约定：只做赋值，不进 React。
+        if (onScrollTopFrame !== undefined && view.scrollTop !== lastFrameScrollTop) {
+            lastFrameScrollTop = view.scrollTop;
+            onScrollTopFrame(view.scrollTop);
+        }
 
         // 面板帧提交：写 DOM / Canvas2D，并**填充本帧的曲线图层描述符**。
         // 必须在曲线 GL 之前（见上方特殊说明 2）。
@@ -1427,6 +1513,34 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             makeTrackPointerDown("y") as EventListener,
         );
     }
+
+    // ── 输入：竖向键盘滚动 ───────────────────────────────────────────
+    //
+    // 【为什么必须收进内核】旧实现里 PageUp / PageDown / Home / End 是靠**浏览器
+    // 的原生滚动**生效的。内核模式下原生 scroller 只是被动镜像，其 `scroll` 事件
+    // 会被当作回声忽略（原生 scroller 只是镜像）——原生那次变化就没人采纳了，四个
+    // 键会**彻底失效**。时间轴内核早已把键盘滚动收进宿主（见
+    // `timelineKernelHost.onKeyDown`），本面板此前漏了这一条。
+    //
+    // 【为什么只处理竖向】横向的四个键在既有实现里本来就不生效（旧实现实测：
+    // PageDown/End/Home 均不改变 `scrollLeft`，只有竖向变化），迁移不得顺手改变
+    // 行为。横向键盘滚动是独立议题，不在本次范围。
+    //
+    // 特殊说明：监听挂在**容器**上而不是 window。容器带 `tabIndex`，是键盘焦点
+    // 的宿主；挂 window 会把按键从其它面板抢过来。
+    function onKeyDown(event: KeyboardEvent): void {
+        const target = resolveKeyboardScrollTarget({
+            key: event.key,
+            scrollTopPx: scroll.get().scrollTop,
+            viewportHeightPx,
+            maxScrollTopPx: scroll.maxScrollTop(),
+        });
+        if (target === null) return;
+        // 只有确实归本面板处理时才阻止默认：否则会连带吞掉浏览器的其它行为。
+        event.preventDefault();
+        scroll.setScrollTop(target);
+    }
+    registerListener(container, "keydown", onKeyDown as EventListener);
 
     const loop = createRenderLoop({
         draw,

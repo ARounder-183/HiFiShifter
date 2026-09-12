@@ -250,8 +250,7 @@ const PARAM_EDITOR_GL_SCENE_ENABLED = PARAM_EDITOR_KERNEL_ENABLED && isPianoRoll
  * 实测依据（Phase 3 计划 R7）：最小缩放下 3 分钟曲线约 36000 个可见点，Canvas2D
  * 描边需 71.7ms/帧（≈14fps），GL 全路径 4.6ms（15.6×）。
  */
-const PARAM_EDITOR_CURVE_GL_ENABLED =
-    PARAM_EDITOR_GL_SCENE_ENABLED && isPianoRollCurveGlEnabled();
+const PARAM_EDITOR_CURVE_GL_ENABLED = PARAM_EDITOR_GL_SCENE_ENABLED && isPianoRollCurveGlEnabled();
 
 /**
  * 把 `getFixedDashPattern` 的返回值收窄为元组。
@@ -662,6 +661,16 @@ export const PianoRollPanel: React.FC = () => {
         [effectiveProjectScale, projectScaleAtSec, s.customScalePresets],
     );
     const editParam = s.editParam as ParamName;
+    /**
+     * `editParam` 的 ref 镜像。
+     *
+     * 【为什么需要】宿主在**挂载时创建一次**（长生命周期），其回调（`onFrame` /
+     * `onScrollTopFrame`）里无法直接读到最新的 `editParam`——闭包捕获的是挂载时的
+     * 值，切换参数后回调仍按旧参数换算视口，会出现"切了参数但竖向位置按上一个参数
+     * 映射"的错位。ref 每次渲染刷新，回调现读即最新。
+     */
+    const editParamRef = useRef<ParamName>(editParam);
+    editParamRef.current = editParam;
     // pitchSnapOpen 已在顶部工具栏 JSX 内声明和使用，无需重复声明
     // pianoRoll.copy/cut/paste 的复制/剪切/粘贴已由全局路由统一派发到
     // handleEditOp，本地不再需要键位匹配（见 useKeybindings/focusRouting）。
@@ -1333,7 +1342,7 @@ export const PianoRollPanel: React.FC = () => {
                     pxPerSec,
                 },
                 PIANO_ROLL_SYNC_ORIGIN,
-                );
+            );
         }
         applyScrollLayers(next);
         // 防止浏览器对原生滚动位置的钳制造成漂移：立即校正到理论值。
@@ -2308,6 +2317,39 @@ export const PianoRollPanel: React.FC = () => {
                     container.scrollTop = axis.scrollTopPx;
                 }
             },
+            onScrollTopFrame: (scrollTopPx) => {
+                // 竖向逐帧上报：把内核真值**正向**写回面板的值域视口 ref。
+                //
+                // 【为什么必须有这条通道】`pitchViewRef` / `paramViewsRef` 是竖向滚动
+                // 的使用者（曲线投影、命中测试、`valueToY` 都读它们），但竖向真值在
+                // 内核且此前**没有回写通道**——面板只能靠原生 `scroll` 事件反向回写
+                // 来"猜"，而那条路正是镜像回声的来源（实测每帧把内核回退 ~7.5px，
+                // 用户报告为"上下拖经常拖不动 / 有吸附感"）。
+                //
+                // 改用正向通道后回声不再承担任何职责，可以在 `onScrollerScroll` 里
+                // 安全忽略。宿主保证本回调排在 `onFrame`（绘制）之前，因此画面与数据
+                // 同帧对齐、不会慢一拍。
+                //
+                // 只做赋值，不进 React（与横向 `onScrollLeftFrame` 同一约定）。
+                const param = editParamRef.current;
+                const current = getCurrentViewportForScrollbar(param);
+                const bounds = getParamValueBoundsForScrollbar(param);
+                const center = centerFromVerticalScrollTop({
+                    min: bounds.min,
+                    max: bounds.max,
+                    span: current.span,
+                    scrollTop: scrollTopPx,
+                    scrollRangePx: PARAM_EDITOR_VERTICAL_SCROLL_RANGE_PX,
+                });
+                if (param === "pitch") {
+                    pitchViewRef.current = { center, span: current.span };
+                } else {
+                    paramViewsRef.current = {
+                        ...paramViewsRef.current,
+                        [param]: { center, span: current.span },
+                    };
+                }
+            },
             onScrollLeftCommit: () => {
                 // 量化提交：标尺的刻度范围由 React 按视口计算，不同步就会出现
                 // 「滚动后刻度消失」（与旧实现 `syncScrollLeft` 的收尾一致）。
@@ -2336,7 +2378,7 @@ export const PianoRollPanel: React.FC = () => {
                             pxPerSec: pxPerSecRef.current,
                         },
                         PIANO_ROLL_SYNC_ORIGIN,
-                        );
+                    );
                 }
             },
         });
@@ -2357,6 +2399,12 @@ export const PianoRollPanel: React.FC = () => {
             host.dispose();
         };
         // 挂载时创建一次；数据经 kernelDataRef 流入（见上方注释）。
+        //
+        // 依赖项为空是刻意的：宿主一旦重建，滚动位置与手势状态会静默归零（见
+        // `ScrollKernel` 的生命周期约束）。回调里的 `editParamRef` 与
+        // `getCurrentViewportForScrollbar` / `getParamValueBoundsForScrollbar`
+        // 都只读 ref（不读渲染期 state），因此闭包捕获的旧引用仍能取到最新值。
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     useLayoutEffect(() => {
@@ -3466,12 +3514,7 @@ export const PianoRollPanel: React.FC = () => {
         // ── ⑦ 剪贴板预览（不同的投影语义：从选区起点按原始帧距排布）──
         const preview = clipboardRef.current;
         const selection = selectionRef.current;
-        if (
-            preview &&
-            selection &&
-            preview.param === editParam &&
-            preview.values.length > 0
-        ) {
+        if (preview && selection && preview.param === editParam && preview.values.length > 0) {
             const clip = selectionClipRect(axis, selection);
             const beatToSec = Math.max(1e-9, secPerBeat);
             if (clip && clip.w > 0) {
@@ -3798,9 +3841,36 @@ export const PianoRollPanel: React.FC = () => {
     }, [paramView, refreshParamValuePreview]);
 
     const onScrollerWheelNative = interactions.onScrollerWheelNative;
+    /**
+     * 原生滚动容器的 `scroll` 事件（面板侧：竖向适配）。
+     *
+     * 【内核模式下的竖向回声必须忽略——这是"拖不动/吸附感"的根因】
+     * 内核模式里原生 scroller 只是**镜像**：宿主每帧把内核真值写回 DOM，该写入会
+     * 触发原生 `scroll` 事件，而事件不带来源。本函数原本把它当成"用户滚动了原生
+     * 容器"，于是读回一个**滞后**的位置再写回内核。
+     *
+     * 实测（拖竖向滚动条，1920×1200）：内核 `scrollTop` 已到 548.054，事件里读到的
+     * 却是上一帧镜像的 540.5，内核被**回退 7.554px**。逐帧往复，净位移被吃掉一部分
+     * 并伴随抖动——即用户报告的「上下拖经常拖不动 / 阶梯感」。
+     *
+     * 【为什么可以整条忽略，而不会漏掉输入】
+     * 竖向的原生输入只有 PageUp / PageDown / Home / End 四个键。它们已由宿主接管
+     * （见 `pianoRollKernelHost.onKeyDown` 与 `scroll/keyboardScroll`），并且时间轴
+     * 内核早就是同一做法。滚轮 / 中键平移 / 拖自绘滚动条 / 点轨道翻页都不经原生
+     * `scroll`（它们直接调内核 API），因此这个事件在内核模式下纯属回声。
+     *
+     * 【为什么横向不在这里一并处理】横向早已在 `interactions.onScrollerScroll` 里
+     * 按内核开关早退（见该处理函数），此处只补竖向。
+     *
+     * 特殊说明：判据用「事件值 == 上一次镜像回写的**读回值**」。浏览器会按设备像素
+     * 量化原生位置（dpr=2 时写 540.694 读回 540.5），拿请求值比较判不出来。
+     */
     const onScrollerScroll = useCallback(
         (e: React.UIEvent<HTMLDivElement>) => {
             interactions.onScrollerScroll(e);
+
+            // 内核模式：竖向由内核拥有，此处只可能收到镜像回声。
+            if (PARAM_EDITOR_KERNEL_ENABLED) return;
 
             const scroller = e.currentTarget;
             const currentView = clampViewport(editParam, getCurrentViewportForScrollbar(editParam));
