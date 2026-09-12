@@ -70,25 +70,26 @@ Phase 3's real justifications are therefore: (a) eliminating per-point JS→nati
 **R5b — Polyline geometry cost at realistic scale (measured after Task 1).**
 For a 1,650-point curve (R3's realistic visible count), `buildPolylineVertices` produces **14,838 vertices / 237 KB / ~1 ms** per curve, and the same for a deliberately jumpy curve. That is 6 vertices per segment plus 3 per miter join. Four curves on screen therefore means ~1 MB of vertex data and ~4 ms of JS per frame — non-trivial, and the dominant cost of Task 4, so Task 4 must measure buffer upload size and consider a straight-join fast path. Note the join triangles are what make it 9 vertices/point rather than 6: for a **nearly straight** join the apex coincides with the segment endpoint, so the triangle could be skipped without changing the rendered result. That optimisation is deliberately **not** taken in Task 1 (fidelity first, and the epsilon needs pixel evidence), but Task 4 should measure whether it is needed.
 
-**R7 — ✅ Curve GL is worth doing; my first measurement was wrong (corrected).**
-The earlier "stop curve GL" decision in this plan was based on a measurement in **headless Chromium with GPU rasterisation**, where Canvas2D goes through Skia's GPU backend. That environment is **not** the one that matters. The app ships in **Tauri**, i.e. **WKWebView on macOS and WebView2 on Windows**, whose Canvas2D rasterises very differently. The user reports jank on Windows/WebView2 in the old implementation too, on scenes with ~1 minute and longer curves — and min zoom (`MIN_PX_PER_SEC = 4`) with a 1864 px viewport covers **466 s**, so a 1–3 minute curve is *entirely visible* and every one of its samples gets stroked.
+**R7 — ✅ Curve GL is worth doing. My first "stop" call was wrong; so was my second explanation of *why*.**
+Two corrections, both from the user pushing back, and the final numbers are platform-independent.
 
-Re-measured with `--disable-gpu` (software rasterisation, the closest approximation available here) and with `getImageData` forcing a flush so the deferred rasterisation is actually timed:
+Correction 1 — **the first measurement was invalid.** I measured in headless Chromium and concluded "Canvas2D is 6–12× faster". Two defects: `stroke()` is **deferred**, so wrapping it in `performance.now()` times queueing rather than work (all my "0.0ms"/"0.211ms" Canvas2D numbers were artefacts), and the scene never actually reached the app's data path, because the mock's clips are only 4–12 s long so the "3-minute curve" was never drawn.
 
-| Points visible | Canvas2D `stroke` | GL full path (build + upload + draw + `finish`) | Speed-up |
+Correction 2 — **the cause is not the rasterisation backend.** I then blamed WKWebView/WebView2 software rasterisation. The user pointed out the jank happens on Chromium too. Measured head-to-head, with a forced flush and at the real canvas size (3728×1646 physical, 4px stroke):
+
+| Points visible | Canvas2D | GL full path | Speed-up |
 |---|---|---|---|
-| 12,000 (1 min) | 7.8 ms | 1.6 ms | 4.9× |
-| 36,000 (3 min) | 26.5 ms | 4.5 ms | 5.9× |
-| 50,000 | **90.2 ms** | **9.2 ms** | **9.8×** |
-| 200,000 (the app's own clamp) | **433.2 ms** | **27.4 ms** | **15.8×** |
+| 12,000 (1 min) | 9.2 ms | 1.7 ms | 5.4× |
+| 36,000 (3 min) | **71.7 ms** | **4.6 ms** | **15.6×** |
+| 200,000 (app's own clamp) | 214.2 ms | 28.0 ms | 7.6× |
 
-Two further findings:
-- **The bottleneck is stroked *area*, not point count.** Decimating to ~1 point per pixel only gains 1.8×, because dozens of samples pile into the same pixel column and each still gets stroked. GL's triangle rasterisation eliminates that redundancy instead of just reducing it — which is why the gap widens with sample count.
-- **The earlier "0.0 ms"/"0.211 ms" Canvas2D numbers were measurement artefacts.** `stroke()` is deferred, so wrapping it in `performance.now()` times the queueing, not the work. Every Canvas2D figure in this plan that was not taken behind a forced flush (or behind frame time) is invalid, and R5's conclusion ("no frame-time headroom") is likewise suspect because its control group ran in the GPU-rasterised browser.
+And the same table under `--disable-gpu` gives **71.8 ms / 212.8 ms** — i.e. **identical**. The cost is Canvas2D's stroke itself, not the GPU backend, which is why it reproduces on Chromium, WebView2 and WKWebView alike. 36,000 points at 71.7 ms is ~14 fps, which matches the reported "1 minute and up it janks".
 
-**Decision (user-confirmed): resume curve GL (Tasks 4–5).** The user's real-world observation is the authority here, and the software-rasterisation numbers corroborate it. Gating note for whatever is built: the win is on software-rasterised webviews, so a per-platform flag is appropriate, and Chromium desktop should keep Canvas2D if it measures faster there.
+**The mechanism is overdraw.** At min zoom (`MIN_PX_PER_SEC = 4`) a 1864 px viewport covers **466 s**, so the whole curve is on screen and its samples pile up in the same pixel columns: 36,000 points over the curve's 720 CSS px is **25 points per column**, 200,000 is **139 per column**. Each sample is stroked independently. Decimating to ~2 points/column removes most of that (71.7 → 44.2 ms) but still strokes each surviving point; triangle rasterisation removes the redundancy rather than reducing it, hence GL's much larger win, and the gap widening with sample count.
 
-**Lesson recorded for future phases:** measure in the environment the app actually ships in (Tauri webviews), or approximate it (`--disable-gpu`); do not generalise from headless Chromium with GPU rasterisation. Also, never time a deferred Canvas2D API without a flush.
+**Decision (user-confirmed): resume curve GL (Tasks 4–5).** No platform gate is needed — the win holds on every backend measured. The earlier platform-gating idea is dropped as unnecessary.
+
+**Lessons recorded:** never time a deferred Canvas2D API without forcing a flush; verify the fixture actually reaches the render path (a 3-minute curve in a mock whose clips are 12 s long proves nothing); and when a user reports jank that a synthetic benchmark does not reproduce, the benchmark is wrong until proven otherwise — not the report.
 
 **R6 — The gesture surface is a 3,875-line hook, and a safety net already exists.**
 `usePianoRollInteractions.ts` holds ~23 event entry points. `renderProjection.test.ts` already exists specifically as the "P3 pre-work snapshot" the spec asked for, comparing the legacy `timeToPixel` formula against `secToViewportPx` over random parameters — the x-projection conversion is therefore already guarded.
@@ -376,8 +377,8 @@ Same convention Phase 2 used, and for the same reason: each depends on the previ
 
 ### Task 4: Curve GL layer in the host, behind a sub-flag
 
-> 已恢复（见 R7 修正后的测量）：软件栅格化 webview 下 GL 快 5–16 倍。
-> 接线时按平台/能力决定是否启用。
+> 已恢复（见 R7 修正后的测量）：曲线 GL 在**所有**后端都快 5–16 倍（GPU 与软件
+> 栅格化的 Canvas2D 成本相同），无需平台开关。
 
 - New sub-flag `hifishifter.pianoRollKernel.curveGl`, default off (same reasoning as `.gl`).
 - Wire all 7 curve variants. Per-frame rebuild is expected and correct: scrolling/zooming changes every x, so unlike the grid there is no zero-rebuild path. Measure and record the upload cost.
