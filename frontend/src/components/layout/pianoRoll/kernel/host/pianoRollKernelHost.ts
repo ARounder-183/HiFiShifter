@@ -42,16 +42,10 @@ import {
     scrollTargetFromTrackClick,
 } from "../../../renderKernel/scrollbars";
 import { createGlCanvas, type GlCanvasHandle } from "../../../renderKernel/gl/glContext";
-import {
-    CLIP_INSTANCE_FLOATS,
-    writeFlatInstance,
-} from "../../../renderKernel/gl/instanceLayout";
+import { CLIP_INSTANCE_FLOATS, writeFlatInstance } from "../../../renderKernel/gl/instanceLayout";
 import { createSdfBoxProgram, type SdfBoxProgram } from "../../../renderKernel/gl/sdfBoxProgram";
 import { createRenderLoop } from "../../../renderKernel/renderLoop";
-import {
-    createScrollKernel,
-    type TimelineViewportState,
-} from "../../../renderKernel/scrollKernel";
+import { createScrollKernel, type TimelineViewportState } from "../../../renderKernel/scrollKernel";
 import { isBlackKey, midiToLabel } from "../../utils";
 import {
     createPianoRollGlyphs,

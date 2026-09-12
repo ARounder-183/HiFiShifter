@@ -24,10 +24,7 @@
  * - 独立性：纯函数，不依赖 DOM / React。
  */
 
-import {
-    computeScrollbar,
-    type ScrollbarGeometry,
-} from "../../../renderKernel/scrollbars";
+import { computeScrollbar, type ScrollbarGeometry } from "../../../renderKernel/scrollbars";
 
 /** 装配入参。 */
 export interface PianoRollScrollbarArgs {
