@@ -428,16 +428,16 @@ Same convention Phase 2 used, and for the same reason: each depends on the previ
 | `curveValueAtPointerFrame` | ✅ | ✅ `getCurveValueAtPointerFrame` | ✅ 多手势截图字节相同 |
 | `isPointerNearCurve` | ✅ | ✅ `getCurveValueNearPointer` | ✅ 多手势截图字节相同 |
 | `selectionFrameRange` / `selectionIndexRange` | ✅ | ✅ 三处（morph 快照、拉伸 oldRange、buildDense nextRange） | ✅ 拉伸前后截图字节相同 |
-| `frameToIndex` | ✅ | ⬜（hook 里仍有 6 处内联同式换算） | ⬜ |
-| `hitTestSelectionBody` | ✅ | ⬜（选区拖动分支仍内联） | ⬜ |
+| `hitTestSelectionBody` | ✅ | ✅ `isPointerNearDraggableSelection` | ✅ 拖动选区主体截图字节相同 |
+| `frameToIndex` | ✅ | ⬜ **刻意不接线**（6 处内联全在逐采样点的循环体内，见下） | — |
 
 **退出标准对照：**
 
 | 标准 | 结果 |
 |---|---|
 | 每个抽出函数有单测 | ✅ 32 项（含 4 处我自己写错的用例前提，已修正） |
-| 每个手势在浏览器复核 | ⚠️ **部分**：选区建立 / 边缘拉伸 / 画线 / 滚轮平移已验证；23 个入口未逐条枚举 |
-| hook 可测量地缩小 | ⚠️ **仍未达成**：3,876 → 3,874 行（净 −2） |
+| 每个手势在浏览器复核 | ⚠️ **部分**：选区建立 / 边缘拉伸 / 拖动选区主体 / 画线 / 滚轮平移已验证；23 个入口未逐条枚举 |
+| hook 可测量地缩小 | ❌ **未达成**：3,876 → 3,887 行（净 **+11**，见下） |
 
 **为什么行数不是有效指标（修正上一片的判断）**：上一片记的是"要等其余三处接线
 后才会下降"。接线完成后**行数依然没降**，原因是本工程硬性要求每个文件带完整文件头
@@ -447,16 +447,24 @@ Same convention Phase 2 used, and for the same reason: each depends on the previ
 | 指标 | 基线 | 现在 |
 |---|---|---|
 | 内联「beat → 帧」换算 | **6 处** | **0 处** |
-| 内联「帧 → 下标」换算 | 7 处 | 6 处（`frameToIndex` 的接线未做） |
+| 内联「帧 → 下标」换算 | 7 处 | 6 处（**刻意不接线**，见下） |
 
 所以 Task 6 的退出标准里「hook 可测量地缩小」这条**应改为「重复处数下降」**才
 可达成；按行数衡量在这个代码库里永远达不成（注释占比高）。这个判断错误已在此更正。
 
+**为什么剩下 6 处「帧 → 下标」刻意不接线**：它们全部位于**逐采样点的 `for` 循环
+体内**（`smoothed` / `packed.dense` / `overallLen` / `built.dense` 的展开写入）。
+`frameToIndex` 每次调用要做 3 次 `Number.isFinite` 检查 + 一次 `Math.floor`（stride
+归一），在下标计算本就只有一次减法一次除法的热点里，这层包装的**开销超过它省下的
+重复**（这类循环在 200 点/秒 × 数秒的选区上会跑上万次）。留在内联是性能取舍，不是
+遗漏；`frameToIndex` 仍服务于非热点的调用方。
+
 **行为等价性是怎么验的（不是只跑单测）**：用 `git stash` 在基线重跑同一脚本，
-三个场景的整页截图**字节完全相同**：
+四个场景的整页截图**字节完全相同**：
 1. 选区建立 + Alt 拉伸右缘（拉伸确实生效：before/after 差异 0.1174%，maxdelta 50）
 2. 多手势组合（选区 → Alt 拉伸 → 切画线工具拖一笔 → 滚轮水平平移）
-3. 第一片的 15 点光标扫描（序列逐位相同）
+3. 拖动选区主体（选区内两个不同 y 各拖一次，覆盖命中/未命中曲线两种分支）
+4. 第一片的 15 点光标扫描（序列逐位相同）
 
 这比"单测通过"强：单测只能证明纯函数自身正确，证明不了 hook 接线后行为不变。
 **注意**：截图字节相同也说明这些手势路径**根本没被改动行为**——这是重构的目标，
@@ -469,12 +477,17 @@ Same convention Phase 2 used, and for the same reason: each depends on the previ
 渲染路径的规则，并在注释与单测里显式记录该选择。
 
 **剩余工作清单**：
-1. `hitTestSelectionBody` 接线到 `isPointerNearDraggableSelection` + pointerdown
-   拖动分支（这两处的值→y 投影必须与绘制同源，接线时传 `valueToY` 而非自行换算）。
-2. `frameToIndex` 接线 hook 里剩余 6 处内联同式换算。
-3. 枚举全部 23 个事件入口，逐条用 stash 对照法补浏览器验证。
-4. **本任务不做**（建议单列）：`dragArithmetic` 还应覆盖曲线拖动的手势增量换算
-   （`secDelta` / 像素增量 → 帧增量的那段），本次只做了选区相关的坐标换算。
+1. **枚举全部 23 个事件入口**，逐条用 stash 对照法补浏览器验证。已验 5 条
+   （选区建立 / 边缘拉伸 / 拖动选区主体 / 画线 / 滚轮平移），其余未枚举——
+   `onRulerMouseDown`、`onScrollerAuxClick`、`onScrollerScroll`、
+   `onScrollerContextMenu`、`onScrollerKeyDown`、`onScrollerWheelNative`、
+   `onCanvasPointerLeave`、`onCanvasPointerDown` 的其余分支等。
+2. `frameToIndex` 的接线：若要接，需要先把它改成**接受已归一化的 stride**的
+   轻量形式（去掉每次调用的 `Number.isFinite` 与 `Math.floor`），否则在逐采样点
+   循环里不划算。当前选择是不接。
+3. **本任务不做**（建议单列）：`dragArithmetic` 还应覆盖曲线拖动的手势增量换算
+   （`secDelta` / 像素增量 → 帧增量的那段，hook 里在 `rawFrameDelta` 等处），
+   本次只做了选区相关的坐标换算。
 
 ---
 
