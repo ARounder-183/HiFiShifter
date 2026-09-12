@@ -522,13 +522,257 @@ kernel used: an adapter task, a host task, a wiring task, then a live-look verif
 
 ### Task 4: Kernel host skeleton
 
-- Create: `pianoRoll/kernel/host/pianoRollKernelHost.ts`
-- Reuse `createScrollKernel` (pixel scrollTop; vertical max set to
-  `PIANO_ROLL_VERTICAL_SCROLL_RANGE_PX`), `createRenderLoop`, `createTimelineAxis`.
-- Host owns: container, both scrollbar thumbs/tracks, data mirror getter, DOM sync targets
-  (ruler content layer, axis column, grid layer).
-- **Exit check:** host constructs and disposes without leaking listeners; unit test asserts
-  `dispose()` unregisters every listener it added.
+**Browser-measured baseline (taken on this branch before writing the task, `?mock=1`, 1920×1200):**
+
+| 量 | 旧实现实测值 | 结论 |
+|---|---|---|
+| scroller `clientHeight` / `scrollHeight` | 823 / 2423 | 内容高 = 1600 spacer + 一个视口高 |
+| **原生最大 `scrollTop`** | **1600** | 与 `PARAM_EDITOR_VERTICAL_SCROLL_RANGE_PX` 完全相等 |
+| spacer 行内高 | `1600px` | 范围由 spacer 撑出，非布局偶然 |
+| **原生最大 `scrollLeft`** | **9125** | = 绘制内容宽（spacer = 内容宽 + 视口宽） |
+| `scrollWidth` / `clientWidth` | 10989 / 1864 | 9125 + 1864 ⇒ 上式的验证 |
+
+**这张表是 Task 4 的验收基线**：内核必须复现「竖向上限 1600、横向上限 = 内容宽」。
+两者恰好都是 `ScrollKernel` 的既有语义，因此**不需要改内核**：
+
+- 竖向：`rowHeight = 0`、`trackCount = () => 0`、
+  `extraContentHeightPx = () => RANGE + viewportHeightPx()` ⇒
+  `maxScrollTop = (RANGE + vh) − vh = RANGE`，与旧实现逐值相等；
+- 横向：`maxScrollLeft = projectSec × pxPerSec` = 内容宽，与旧实现逐值相等；
+  且「同步时间轴」开启时旧的 `paddedContentWidth` 多出的 `offset` 只影响**原生**
+  坐标，绘制坐标上限仍是内容宽 —— 内核持有的正是绘制坐标。
+
+**Files:**
+- Create: `frontend/src/components/layout/pianoRoll/kernel/host/pianoRollKernelData.ts`
+- Create: `frontend/src/components/layout/pianoRoll/kernel/host/pianoRollKernelHost.ts`
+- Test: `frontend/src/components/layout/pianoRoll/kernel/host/pianoRollKernelHost.test.ts`
+
+**范围（Task 4 只做骨架，不做输入）**：宿主自持容器、两条滚动条的 thumb / 轨道、
+量测、`ScrollKernel`、`createRenderLoop`、每帧帧提交与 `dispose`。**不**接管滚轮 /
+键盘 / 中键拖拽（那些是 Task 7）与绘制（Phase 1 绘制仍由面板的 Canvas2D 拥有，
+经 `onFrame` 回调注入）。
+
+**阶段 1 宿主不引入 GL**：绘制仍在面板的 Canvas2D 上，宿主不需要 WebGL2 上下文，
+因此本任务**可在 node 环境单测**（无 DOM 也能验证构造 / 销毁 / 钳制 / 值域往返）。
+
+- [ ] **Step 1: Write the failing test**
+
+测试用「记录型桩」替掉 DOM：断言 `dispose()` 把加过的监听**逐条**摘掉（add/remove 配平）、
+重复 `dispose()` 安全、横向钳制复现实测上限、值域往返无损、滚动条几何与实测比例一致。
+`requestFrame` 注入为「捕获回调」，由测试手动 flush，使帧提交路径可确定性验证。
+
+```ts
+/**
+ * 参数编辑器内核宿主 · 构造 / 销毁 / 钳制 / 值域往返单测。
+ *
+ * 【为什么可以在 node 环境测】阶段 1 的宿主**不碰 WebGL**（绘制仍在面板的
+ * Canvas2D 上，经回调注入），只用到很少的 DOM API，因此可以用「记录型桩」替掉
+ * 容器与滚动条元素，在无 jsdom 的 node 环境下验证生命周期与数值语义。
+ *
+ * 【本测试要钉住的核心不变量】
+ * 1. `dispose()` 摘掉自己加过的**每一条**监听（add/remove 配平）——宿主模式最
+ *    常见的缺陷就是漏摘 window 上的监听，卸载后仍持有回调；
+ * 2. 横向上限 = 内容宽、竖向上限 = 1600（浏览器实测的旧实现基线，见计划 Task 4）；
+ * 3. 值域 ↔ 像素往返无损；
+ * 4. 重复 `dispose()` 不抛错。
+ */
+import { describe, expect, it } from "vitest";
+
+import { createPianoRollKernelHost } from "./pianoRollKernelHost";
+import { PIANO_ROLL_VERTICAL_SCROLL_RANGE_PX } from "../scroll/verticalValueScroll";
+
+/** 记录型 DOM 桩：统计每个目标上 add / remove 的次数。 */
+function makeTarget() {
+    const counts = new Map<string, { added: number; removed: number }>();
+    return {
+        counts,
+        addEventListener(type: string) {
+            const entry = counts.get(type) ?? { added: 0, removed: 0 };
+            entry.added += 1;
+            counts.set(type, entry);
+        },
+        removeEventListener(type: string) {
+            const entry = counts.get(type) ?? { added: 0, removed: 0 };
+            entry.removed += 1;
+            counts.set(type, entry);
+        },
+        /** 全部类型都配平（加过几条就摘掉几条）。 */
+        balanced(): boolean {
+            for (const entry of counts.values()) {
+                if (entry.added !== entry.removed) return false;
+            }
+            return true;
+        },
+        totalAdded(): number {
+            let sum = 0;
+            for (const entry of counts.values()) sum += entry.added;
+            return sum;
+        },
+    };
+}
+
+/** 造一个测试用宿主（容器 / thumb / track 全是记录型桩）。 */
+function makeHost() {
+    const container = makeTarget();
+    const vThumb = makeTarget();
+    const hThumb = makeTarget();
+    const rulerContent = { style: {} as CSSStyleDeclaration };
+    const gridLayer = {};
+    let pending: FrameRequestCallback | null = null;
+    let handle = 0;
+    let scrollLeftCommits = 0;
+
+    const host = createPianoRollKernelHost({
+        // node 无 DOM：桩只需满足宿主实际用到的成员（量测 + 事件 + style）。
+        container: Object.assign(container, { clientWidth: 1864, clientHeight: 823 }) as never,
+        hScrollbarThumb: hThumb as never,
+        vScrollbarThumb: vThumb as never,
+        data: () => ({
+            projectSec: 100,
+            pxPerSec: 91.25,
+            valueDomain: { min: 0, max: 100, span: 50 },
+        }),
+        sync: {
+            rulerContent: rulerContent as never,
+            gridLayer: gridLayer as never,
+        },
+        onFrame: () => {},
+        onScrollLeftCommit: () => {
+            scrollLeftCommits += 1;
+        },
+        // 注入帧调度：手动 flush，避免依赖 node 里不存在的 rAF。
+        requestFrame: (cb) => {
+            pending = cb;
+            handle += 1;
+            return handle;
+        },
+        cancelFrame: () => {
+            pending = null;
+        },
+    });
+
+    return {
+        host,
+        container,
+        vThumb,
+        hThumb,
+        scrollLeftCommits: () => scrollLeftCommits,
+        /** 跑掉当前排队的帧（上限 8 次，防止自驱动的无限循环）。 */
+        flush() {
+            for (let i = 0; i < 8 && pending !== null; i += 1) {
+                const cb = pending;
+                pending = null;
+                cb(0);
+            }
+        },
+    };
+}
+
+describe("createPianoRollKernelHost", () => {
+    it("构造即注册监听，dispose 后逐条摘除（add/remove 配平）", () => {
+        const t = makeHost();
+        expect(t.container.totalAdded()).toBeGreaterThan(0);
+        t.host.dispose();
+        expect(t.container.balanced()).toBe(true);
+        expect(t.vThumb.balanced()).toBe(true);
+        expect(t.hThumb.balanced()).toBe(true);
+    });
+
+    it("重复 dispose 是安全的空操作", () => {
+        const t = makeHost();
+        t.host.dispose();
+        expect(() => t.host.dispose()).not.toThrow();
+        expect(t.container.balanced()).toBe(true);
+    });
+
+    it("横向上限 = 内容宽（旧实现实测 9125）", () => {
+        const t = makeHost();
+        t.host.setScrollLeft(999999);
+        expect(t.host.getViewport().scrollLeft).toBeCloseTo(100 * 91.25, 6);
+        t.host.dispose();
+    });
+
+    it("竖向上限 = 1600（旧实现实测值），与视口高无关", () => {
+        const t = makeHost();
+        t.host.setScrollTop(999999);
+        expect(t.host.getViewport().scrollTop).toBeCloseTo(
+            PIANO_ROLL_VERTICAL_SCROLL_RANGE_PX,
+            6,
+        );
+        t.host.dispose();
+    });
+
+    it("值域中心往返无损（内核像素 ↔ 值域）", () => {
+        const t = makeHost();
+        t.host.setValueCenter(62.5);
+        expect(t.host.getValueCenter()).toBeCloseTo(62.5, 6);
+        t.host.dispose();
+    });
+
+    it("帧提交会写 DOM 与量化回调", () => {
+        const t = makeHost();
+        t.host.setScrollLeft(300);
+        t.flush();
+        expect(t.scrollLeftCommits()).toBeGreaterThan(0);
+        t.host.dispose();
+    });
+});
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd frontend && npx vitest run pianoRollKernelHost`
+Expected: FAIL — module not found.
+
+- [ ] **Step 3: Implement the data mirror + host**
+
+`pianoRollKernelData.ts` 只声明宿主每帧读取的数据镜像（不含逻辑）。
+
+`pianoRollKernelHost.ts` 的结构（**实现细节以源文件为准，本计划不复制约 350 行代码**，
+避免同一份逻辑出现两个事实源）：
+
+- **监听登记表**：内部 `registerListener(target, type, handler)` 统一
+  `addEventListener` 并压入「摘除函数」数组；`dispose()` 倒序执行全部摘除函数并置
+  `disposed = true`。这是「add/remove 配平」这一退出标准的实现方式，也是漏摘
+  window 监听的根因治理。
+- **量测**：构造时 `Math.max(1, container.clientWidth/clientHeight)` 取初值；
+  有 `ResizeObserver` 时观察容器并在回调里更新量测 + `scroll.reclamp()`，
+  **没有时跳过**（node 单测环境无 ResizeObserver，靠注入的量测驱动）。
+- **ScrollKernel 配置**：`pxPerSec` 取初值；`projectSec: () => data().projectSec`；
+  `rowHeight: 0`、`trackCount: () => 0`、
+  `extraContentHeightPx: () => PIANO_ROLL_VERTICAL_SCROLL_RANGE_PX + viewportHeightPx()`；
+  `viewportHeightPx` 读量测值。由此竖向上限恒为 1600（见上方实测基线）。
+- **帧提交**（`createRenderLoop` 的 `draw`）：读视口 → 更新两条滚动条 thumb →
+  写 DOM 同步目标（`rulerContent.style.transform = translateX(-scrollLeft)`、
+  `invokeGridRedrawHandler(gridLayer, scrollLeft)`）→ 调用 `onFrame(axis)` 交回面板
+  （画布重绘 / 波形总线 / 播放头 DOM 仍由面板实现，行为逐字不变）→ 跨过
+  `SCROLL_COMMIT_STEP_PX` 时 `onScrollLeftCommit`。
+- **公开 API**：`setScrollLeft` / `setScrollTop` / `setViewport` / `getViewport` /
+  `getAxis` / `getValueCenter` / `setValueCenter` / `getScrollbarGeometries` /
+  `invalidate` / `dispose`。所有写入**只经 `ScrollKernel` 钳制一次**（与时间轴宿主
+  同一约定），宿主自己不算上限。
+- **值域适配**：`getValueCenter()` = `centerFromKernelScrollTop({...data().valueDomain,
+  scrollTop})`；`setValueCenter(center)` = `setScrollTop(kernelScrollTopFromCenter(...))`。
+- **滚动条几何**：复用 `resolvePianoRollScrollbarGeometries`（Task 3），thumb 样式
+  按「值变化才写」的字符串 key 去重（与时间轴宿主同一写法）。
+- **不注册滚轮 / 键盘 / 中键监听**：留给 Task 7，避免本任务的退出标准被输入语义污染。
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd frontend && npx vitest run pianoRollKernelHost`
+Expected: PASS（6 tests）。
+
+- [ ] **Step 5: Verify no regression**
+
+Run: `cd frontend && npx vitest run && npx tsc -b --noEmit`
+Expected: only the 2 known `keybindingMatch` failures; typecheck clean.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add frontend/src/components/layout/pianoRoll/kernel/host/
+git commit -m "feat(pianoroll-kernel): kernel host skeleton (scroll ownership + dispose)"
+```
 
 ### Task 5: Wire the panel behind the flag
 
