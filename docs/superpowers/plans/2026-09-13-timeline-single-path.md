@@ -273,13 +273,15 @@ npx vitest run 2>&1 | tail -4
 ```bash
 cd /Users/guoqiangye/code/HiFiShifter/frontend
 VW=1920 VH=1200 node scripts/dev-shot.mjs "http://127.0.0.1:5174/?mock=1" /tmp/task2.png 4500 '[
- {"type":"eval","js":"const h=window.__hfsKernel; return {kernel:!!h, inv:!!document.querySelector(\"[data-timeline-scroller]\")};"},
+ {"type":"eval","js":"const h=window.__hfsKernel; return {kernel:!!h, kernelAttr:!!document.querySelector(\"[data-hs-timeline-kernel]\"), legacyOverflowAuto:!!document.querySelector(\".custom-scrollbar.overflow-auto\"), trackLanes:document.querySelectorAll(\"[data-track-lane]\").length};"},
  {"type":"eval","js":"document.querySelector(\"[data-timeline-scroller]\").focus(); return 1;"},
  {"type":"key","key":"PageDown"},{"type":"wait","ms":400},
  {"type":"eval","js":"return {afterPageDown_top:+window.__hfsKernel.getViewport().scrollTop.toFixed(2)};"}
 ]' 2>&1 | grep -E "^EVAL"
 ```
-期望：`kernel:true`、`inv:true`、`afterPageDown_top:132`（不 focus 会得到 0）。
+期望：`kernel:true`、`kernelAttr:true`、`legacyOverflowAuto:false`、`afterPageDown_top:132`（不 focus 会得到 0）。
+
+**⚠️ 不要用 `[data-timeline-scroller]` 当"走的是内核"的判别信号**（初稿这么写，已实测证伪）：**两个实现都挂了该属性** —— 旧实现挂在原生滚动容器上（`TimelinePanel.tsx:4935`），内核视图也**刻意**回填了它（`TimelineKernelView.tsx:698`，因为 `measureTimelineViewportOffsetPx()` 与参数编辑器的 ResizeObserver 都按"轨道区视口元素"查询它；内核下不回填会让跨面板同步偏移恒为 0）。它在两种模式下**都**为 true，作为判别信号是假阳性。可靠的判别信号是 `[data-hs-timeline-kernel]`（内核独有）与 `.custom-scrollbar.overflow-auto`（旧实现的滚动容器）。
 
 - [ ] **步骤 7：提交**
 
