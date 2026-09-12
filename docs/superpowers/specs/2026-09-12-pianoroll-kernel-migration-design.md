@@ -1,0 +1,220 @@
+# PianoRoll Kernel Migration Design
+
+## Status
+
+Approved for implementation on branch `feature/timeline-unified-render-kernel`.
+
+This document is based on the current branch implementation (HEAD `b62c4390` plus the
+uncommitted kernel parity work). It is the follow-up to
+`docs/plans/2026-09-11-timeline-unified-render-kernel-design.md`, which explicitly listed
+the parameter editor (PianoRoll) migration as a non-goal for that phase:
+
+> 参数编辑器（PianoRoll）迁移（后续复用同一渲染内核）
+
+## Goal
+
+Migrate the parameter editor (PianoRoll) panel onto the same render-kernel architecture as
+the timeline, with **zero functional or visual loss**:
+
+- replace the native scroller with kernel-owned, self-drawn scrolling on both axes;
+- render the panel body (grid, piano keyboard axis, selection, playhead, parameter curves)
+  through the render kernel instead of per-frame Canvas 2D painting;
+- preserve every existing interaction, gesture, keyboard shortcut, and context menu;
+- keep the existing vertical **value-domain** scrolling model (center/span), not a pixel-row
+  model;
+- keep the feature-flag rollback guarantee: disabling the flag restores the current path
+  with zero impact.
+
+## Problem Statement
+
+The timeline track area has already been migrated to a self-drawn WebGL2 kernel. The
+PianoRoll panel still uses the legacy architecture:
+
+| Concern | Legacy PianoRoll | Timeline kernel |
+|---|---|---|
+| Scrolling | native `overflow-x-scroll overflow-y-scroll` + a 1600px spacer div | `ScrollKernel` owns `scrollLeft`/`scrollTop`; drawing follows via a content-coordinate window |
+| Vertical model | value-domain `center`/`span` mapped onto a fixed 1600px scroll range | pixel rows (`scrollTop`) |
+| Layer sync | `pianoRollViewportBus` → per-layer `paint` on every scroll event | single rAF frame commit; scroll frames only update a `u_viewOrigin` uniform |
+| Panel body | one 2D canvas repainted per frame (curves, grid, keys, overlay text) | GL instanced geometry + Canvas 2D detail layer |
+| Text | `ctx.fillText` (8 call sites) | Canvas 2D detail layer today; a complete GL glyph pipeline exists but is unwired |
+
+The panel body is repainted wholesale on every frame that invalidates (including playback,
+where only the playhead moves). That is the performance ceiling this migration removes.
+
+## Scope
+
+### In Scope
+
+- new `frontend/src/components/layout/pianoRoll/kernel/` subtree mirroring the timeline
+  kernel layout (`host/`, `gl/`, `scene/`, `interaction/`, `input/`);
+- self-drawn horizontal + vertical scrollbars for the parameter editor;
+- reuse of `ScrollKernel`, `createTimelineAxis`, `RenderLoop`, GL context/instance/glyph
+  modules from the timeline kernel (extracted to a shared location where needed);
+- GL rendering of: pitch/param grid, piano keyboard axis, value axis labels and ticks,
+  selection rectangles, playhead line, reference/scale highlight bands;
+- GL rendering of parameter curves (original, edited, selection overlay, secondary params,
+  detected pitch reference lines, clipboard preview) via polyline geometry;
+- activation of the existing, tested GL glyph pipeline (`glyph/*` + `gl/glyphProgram`) for
+  all text the panel currently draws with `fillText`;
+- geometric hit testing and a kernel-side gesture state machine covering every interaction
+  the panel has today;
+- a feature flag for stepwise rollout and one-click rollback.
+
+### Out of Scope
+
+- changing parameter/DSP semantics, backend protocol, or Redux state shape;
+- redesigning the panel chrome (toolbar, param pills, dialogs, popovers, dropdowns) — those
+  stay DOM;
+- the MIDI import dialog, vowel chart, and other floating windows;
+- the waveform surface already migrated by `2026-08-27-waveform-webgl-refactor-design.md`
+  (it is registered as an independent viewport layer; the kernel must keep driving it);
+- visual redesign — the target is pixel parity with the current rendering.
+
+## Key Constraints
+
+1. **Vertical scrolling keeps the value-domain model.** `center`/`span` ↔ 1600px virtual
+   range mapping (`verticalScrollMapping.ts`) is preserved verbatim; the kernel draws the
+   scrollbar and owns the drag, but the mapping arithmetic is unchanged. This avoids
+   re-tuning wheel step and drag ratio feel.
+2. **Feature flag rollback.** Disabling the flag must restore the current path exactly.
+3. **Pixel parity.** Curves, key labels, grid colors, selection styling, and overlay text
+   must match the current rendering. Any intentional deviation must be listed in the design
+   doc and confirmed.
+4. **`timelineViewportSync` must keep working.** Timeline↔parameter-editor view sync is a
+   documented feature (`useTimelineState`, `pianoRollViewportBus`); the kernel becomes
+   another consumer/producer of that same sync contract.
+
+## Architecture
+
+### Directory layout
+
+```
+pianoRoll/kernel/
+  host/pianoRollKernelHost.ts     imperative host: GL resources, rAF loop, input wiring
+  host/pianoRollKernelData.ts     data mirror consumed by the host (read per frame)
+  scroll/verticalValueScroll.ts   value-domain ↔ 1600px scroll range adapter
+  scene/                          render-model builders (pure, unit-testable)
+    gridInstances.ts              pitch/param grid + octave separators
+    keyboardInstances.ts          piano keys + key separators
+    curveGeometry.ts              polyline → triangle-strip expansion
+    selectionInstances.ts         selection rect + highlight bands
+  interaction/                    pure geometry + gesture state machine
+    hitTest.ts                    curve/selection/grid hit testing
+    gestureState.ts               gesture dispatch and lifecycle
+  gl/                             curveProgram.ts (+ reuse of timeline gl modules)
+  glyph/                          reuse timeline glyph modules (activate)
+```
+
+Shared code currently living under `timeline/kernel/` that both panels need
+(`glContext`, `instanceBuffer`, `instanceLayout`, `sdfBoxProgram`, `glyph/*`,
+`glyphProgram`, `renderLoop`, `scrollKernel`, `timelineAxis`, `canvasRaster`,
+`devicePixelLine`) moves to a neutral location (e.g. `components/layout/renderKernel/`)
+with re-export shims left behind, so the timeline kernel keeps working unchanged and the
+move is verifiable in isolation.
+
+### Frame model
+
+The kernel adopts the timeline's proven invariant set:
+
+- geometry is built in **content coordinates** and cached on the GPU;
+- a scroll frame updates only `u_viewOrigin` — no geometry rebuild, no CPU repaint;
+- rebuilds are triggered by dirty flags and by scrolling past a margin;
+- drawing and hit testing consume the **same** geometry functions ("what you see is what
+  you can click");
+- the value-domain vertical axis maps to content-space Y through one shared function used by
+  geometry, hit testing, and the scrollbar.
+
+### Curve rendering
+
+Parameter curves are continuous polylines over thousands of points, so they do not fit the
+box-instance model. The design uses **triangle-strip expansion** built on the CPU:
+
+- a pure `curveGeometry.ts` converts `(frameIndex, value)` samples into a thick-line triangle
+  strip in content coordinates, with a configurable half-width in CSS px expanded to device
+  pixels;
+- anti-aliasing comes from the same SDF-style coverage the timeline's box program uses (a
+  smooth edge band), not from MSAA, so density is controllable and consistent across
+  platforms;
+- dashed reference lines (detected pitch, clipboard preview) are emitted as segment batches
+  by the same builder — `setLineDash` semantics are reproduced by subdividing in content
+  space, which is also what keeps dashes visually fixed under zoom;
+- physical-pixel alignment reuses the timeline's `devicePixelLine` helpers so 1px lines do
+  not shimmer.
+
+This is the highest-risk part of the migration and is isolated in Phase 3 so that Phases 1
+and 2 can ship independently.
+
+## Data Flow
+
+```
+Redux session (paramView, pitchView, curves, selection, playhead)
+        │  (low-frequency mirror, read per frame by the host)
+        ▼
+pianoRollKernelHost ── builds ──▶ scene/ render models (content coordinates)
+        │                                   │
+        │                                   ▼
+        │                          GL instance/triangle buffers (uploaded on rebuild)
+        │
+   ScrollKernel (scrollLeft, vertical value-domain scrollTop)
+        │
+        └── per frame: update u_viewOrigin → single draw call per program
+                       + glyph program draw call
+                       + DOM sync (ruler, axis column, scrollbars)
+```
+
+## Rollout Plan
+
+Three phases, each independently shippable, verifiable, and revertible.
+
+| Phase | Content | Exit criteria |
+|---|---|---|
+| **1 · Scroll/viewport kernel** | Self-drawn scrollbars (both axes, value-domain vertical preserved), `ScrollKernel` + unified axis projection, rAF frame commit. Painting stays Canvas 2D. | Scroll/zoom feel identical; timeline sync unaffected; frame rate not worse; legacy flag off == today |
+| **2 · Render kernel** | Grid, keyboard axis, value labels/ticks, selection, playhead, highlight bands move to GL instanced geometry; the existing glyph pipeline takes over all `fillText`. Curves stay on Canvas 2D in the detail layer. | Pixel comparison within tolerance; text quality matches; playback frames no longer repaint curves |
+| **3 · Curve GL + interactions** | Polyline triangle-strip curve rendering (all curve variants); geometric hit testing + gesture state machine migration. | Curve fidelity comparison passes; every gesture regression-checked in the browser |
+
+Each phase has its own flag value (or its own flag) so a phase can be reverted without
+reverting the previous ones.
+
+## Risks
+
+| Risk | Impact | Mitigation |
+|---|---|---|
+| Curve GL fidelity (AA, width, dashes, pixel snapping) | Visual regression in the most visible element | Isolated in Phase 3; pure-function geometry + pixel-comparison harness; keep Canvas 2D curves as a flagged fallback until parity is proven |
+| Gesture migration surface (23 event entry points, single 3875-line hook) | Interaction regressions are subtle and numerous | Enumerate every gesture as a checklist in the plan; migrate the state machine behind the kernel only after Phase 2 lands; browser self-test each gesture |
+| Glyph atlas capacity (CJK labels, many sizes) | Missing/clipped text | Atlas is multi-page with a documented no-eviction policy; measure real label set in Phase 2 before committing |
+| Shared-module extraction breaks the timeline kernel | Regression in already-shipped work | Extraction is its own task with re-export shims and the existing timeline kernel test suite as the gate |
+| Vertical value-domain mapping drifts | Scroll feel changes subtly | Mapping stays in `verticalScrollMapping.ts` untouched; kernel consumes it, does not reimplement it |
+
+## Testing Strategy
+
+- **Pure-function unit tests** for every scene builder, the curve expansion, hit testing, and
+  the value-domain scroll adapter (mirrors the timeline kernel's approach).
+- **Invariant tests**: geometry builders and hit testing share inputs and produce consistent
+  results; a scroll frame triggers zero geometry rebuilds (spy assertion).
+- **Pixel comparison**: dev-shot screenshots of the panel in both modes, compared per phase.
+- **Browser self-test**: every gesture and shortcut exercised through `dev-shot.mjs` against
+  `?mock=1`, with A/B against the legacy path in the same session.
+- **Existing suites stay green**: `npx vitest run`, `npx tsc -b --noEmit`, `npx eslint`,
+  `npx prettier --check`.
+
+### Test environment constraint (verified on this branch)
+
+Vitest runs in the **node** environment — there is no jsdom. A probe on this branch confirmed
+`typeof localStorage`, `typeof window`, and `typeof document` are all `undefined` inside tests.
+Consequences for this migration:
+
+- any module a test imports must not reference browser globals at module-evaluation time;
+  storage access goes through `globalThis.localStorage` behind a `typeof`/null guard;
+- tests that need browser APIs install their own minimal stubs rather than assuming a DOM;
+- DOM-level verification (layout, canvas output, gestures) happens in the browser harness
+  (`dev-shot.mjs`), not in Vitest.
+
+This is why Phase 1's flag task ships with a self-contained storage stub instead of a test that
+touches bare `localStorage`.
+
+## Non-Goals
+
+- Changing audible behavior, parameter smoothing, or DSP.
+- Changing backend commands or payload shapes.
+- Migrating panel chrome (toolbars, dialogs, popovers) into the kernel.
+- Unifying the timeline and parameter-editor scroll models (they stay different by design).
