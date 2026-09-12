@@ -283,4 +283,105 @@ describe("buildPolylineVertices", () => {
         });
         expect(out.length).toBe(0);
     });
+
+    /**
+     * `alongOverride`：抽稀后仍按**原始**弧长推进虚线相位。
+     *
+     * 【为什么需要这个入口】渲染层会按设备像素列抽稀（见 `polylineDecimation`），
+     * 抽稀后相邻点的间距变大，若用折线自身重新累加弧长，虚线周期会比原始曲线**变短**，
+     * 表现为缩放时虚线图案漂移。抽稀模块已经把每个点在原始序列中的弧长算好带出来，
+     * 这里只需支持按传入值写入 `along`。
+     *
+     * 【为什么不是"传一个起始偏移"】抽稀丢掉的是**中间**的点，弧长跳变发生在
+     * 每一对相邻结果点之间，不是一个全局偏移能表达的。
+     */
+    it("alongOverride：along 按传入的弧长写入，不再自行累加", () => {
+        const out = buildPolylineVertices({
+            points: [
+                { x: 0, y: 0 },
+                { x: 10, y: 0 },
+                { x: 20, y: 0 },
+            ],
+            lineWidth: 2,
+            miterLimit: 10,
+            // 模拟"中间被抽掉了 990px 的点"：第 3 个点的真实弧长是 1000，不是 20。
+            alongOverride: [0, 10, 1000],
+        });
+        const along = alongOf(out);
+        expect(Math.min(...along)).toBe(0);
+        expect(Math.max(...along)).toBe(1000);
+        // 折线自身累加只会得到 20；必须出现 1000 才说明用了传入值。
+        expect(along).not.toContain(20);
+    });
+
+    it("alongOverride：段内的中间值按参数在两原始弧长之间线性插值", () => {
+        // 单段、两端弧长为 0 与 100：段内任意顶点的 along 必须落在 [0, 100]，
+        // 且两端的顶点分别取到 0 与 100（否则虚线的周期会随段长被拉伸）。
+        const out = buildPolylineVertices({
+            points: [
+                { x: 0, y: 0 },
+                { x: 10, y: 0 },
+            ],
+            lineWidth: 2,
+            miterLimit: 10,
+            alongOverride: [0, 100],
+        });
+        const along = alongOf(out);
+        expect(Math.min(...along)).toBe(0);
+        expect(Math.max(...along)).toBe(100);
+        for (const a of along) {
+            expect(a).toBeGreaterThanOrEqual(0);
+            expect(a).toBeLessThanOrEqual(100);
+        }
+    });
+
+    it("alongOverride 长度与点数不符时忽略它，退回自行累加（安全侧）", () => {
+        // 长度不匹配说明调用方有 bug；此时宁可虚线相位不准，也不能越界读数组。
+        for (const bad of [[0], [0, 1, 2, 3], []]) {
+            const out = buildPolylineVertices({
+                points: [
+                    { x: 0, y: 0 },
+                    { x: 10, y: 0 },
+                ],
+                lineWidth: 2,
+                miterLimit: 10,
+                alongOverride: bad,
+            });
+            const along = alongOf(out);
+            expect(Math.min(...along)).toBe(0);
+            expect(Math.max(...along)).toBeCloseTo(10, 9);
+        }
+    });
+
+    it("alongOverride 含非有限值时忽略它（防 NaN 污染整层几何）", () => {
+        const out = buildPolylineVertices({
+            points: [
+                { x: 0, y: 0 },
+                { x: 10, y: 0 },
+            ],
+            lineWidth: 2,
+            miterLimit: 10,
+            alongOverride: [0, Number.NaN],
+        });
+        for (let i = 0; i < out.length; i += 1) {
+            expect(Number.isFinite(out[i])).toBe(true);
+        }
+    });
+
+    it("alongOverride 未传时行为与原来完全一致（自行累加）", () => {
+        const args = {
+            points: [
+                { x: 0, y: 0 },
+                { x: 3, y: 4 },
+                { x: 3, y: 14 },
+            ],
+            lineWidth: 2,
+            miterLimit: 10,
+        };
+        const withoutIt = buildPolylineVertices(args);
+        const withUndefined = buildPolylineVertices({ ...args, alongOverride: undefined });
+        expect(Array.from(withUndefined)).toEqual(Array.from(withoutIt));
+        // 5 + 10 = 15
+        expect(Math.max(...alongOf(withoutIt))).toBeCloseTo(15, 9);
+    });
 });

@@ -44,6 +44,7 @@ import {
 import { createGlCanvas, type GlCanvasHandle } from "../../../renderKernel/gl/glContext";
 import { createPolylineProgram, type PolylineProgram } from "../../../renderKernel/gl/polylineProgram";
 import { buildPolylineVertices } from "../../../renderKernel/gl/polylineGeometry";
+import { decimatePolylinePoints } from "../../../renderKernel/gl/polylineDecimation";
 import {
     projectClipboardPreviewPoints,
     projectCurvePoints,
@@ -690,11 +691,23 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
     /**
      * 绘制曲线图层（阶段 3）。
      *
-     * 流程：逐层投影采样值 → 构建折线顶点 → 一次 upload + draw call。
+     * 流程：逐层投影采样值 → **按设备像素列抽稀** → 构建折线顶点 → 一次 upload + draw call。
      *
      * 【为什么每帧重建】滚动/缩放会改变**每个点**的视口 x，因此曲线层没有像网格层
-     * 那样的"零重建"路径——这是它与静态图层的本质区别。代价可接受：软件栅格化下
-     * GL 全路径（构建+上传+绘制）在 36,000 点时为 4.5ms，而 Canvas2D 描边为 26.5ms。
+     * 那样的"零重建"路径——这是它与静态图层的本质区别。
+     *
+     * 【为什么必须抽稀（实测依据）】取数侧 `stride = 1`（200 点/秒）不可改——编辑路径
+     * 依赖全分辨率（`selectionEditData` 的零 IPC 快路径要求 `stride === 1`）。于是最小
+     * 缩放（4 px/s，视口覆盖 466 秒）下视口内有 ~93,200 个采样点，却只有 3,728 个设备
+     * 像素列，**每列 25 个点渲染在同一个像素上**。这些点全额进入几何构建：
+     *
+     * | | 点数 | 顶点数 | 每帧成本 |
+     * |---|---|---|---|
+     * | 抽稀前 | 213,595 | 1,922,315（30 MB） | 32 ms |
+     * | 抽稀后 | ~22,000 | ~200,000（3 MB） | ~3 ms |
+     *
+     * 抽稀按列保留 y 的 min/max，因此**不丢包络**（曲线折返的极值仍在）；弧长取自
+     * 原始序列，虚线相位不会漂移。详见 `polylineDecimation` 的精度契约。
      *
      * 特殊说明 1：绘制顺序即数组顺序（后画的在上），因此**面板必须按期望的层序**
      * 提供图层：参考线/检测/副参数在下，原始/编辑曲线在中，选区高亮/剪贴板在上。
@@ -705,9 +718,6 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
      *
      * 特殊说明 3：抗锯齿宽度取 `1/dpr`（1 个设备像素），与 Canvas2D 的边缘过渡
      * 尺度一致；`u_halfWidth` 取线宽的一半（**不含**几何的 AA 余量）。
-     *
-     * @param layers 曲线图层（按绘制顺序）。
-     * @param view 当前视口（提供 dpr 与画布尺寸）。
      */
     function drawGlCurves(): void {
         if (glCurveProgram === null || glHandle === null) return;
@@ -747,12 +757,18 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                       });
             if (points.length < 2) continue;
 
+            // 按设备像素列抽稀（见上方"为什么必须抽稀"）。
+            const reduced = decimatePolylinePoints({ points, dpr, viewportWidthPx });
+            if (reduced.points.length < 2) continue;
+
             const vertices = buildPolylineVertices({
-                points,
+                points: reduced.points,
                 lineWidth: layer.lineWidthPx,
                 // 与 Canvas2D 的默认 lineJoin="miter" + 默认 miterLimit=10 一致
                 // （本工程从未设置过 lineJoin，见 Phase 3 计划的 R2）。
                 miterLimit: 10,
+                // 抽稀后必须用**原始**弧长推进虚线相位，否则图案会随缩放漂移。
+                alongOverride: reduced.along ?? undefined,
             });
             if (vertices.length === 0) continue;
 

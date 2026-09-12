@@ -61,6 +61,21 @@ export interface PolylineGeometryArgs {
     readonly miterLimit: number;
     /** AA 余量（CSS px）；缺省 `DEFAULT_AA_PAD_PX`，传 0 得到纯几何外沿。 */
     readonly aaPadPx?: number;
+    /**
+     * 用**外部提供的弧长**替换自行累加（长度必须与 `points` 一致）。
+     *
+     * 【为什么需要】渲染层按设备像素列抽稀曲线后（见 `polylineDecimation`），
+     * 相邻点的间距变大；若仍按抽稀后的折线自行累加，虚线周期会比原始曲线**变短**，
+     * 缩放时虚线图案会漂移。抽稀模块已把每个点在原始序列中的累积弧长算好带出，
+     * 这里按传入值写入即可。
+     *
+     * 特殊说明 1：长度不符或含非有限值时**整体忽略**（退回自行累加）。长度不符说明
+     * 调用方有 bug，此时宁可虚线相位不准，也不能越界读数组或让 NaN 污染整层几何。
+     *
+     * 特殊说明 2：段内顶点按参数在两端的原始弧长之间线性插值——这样虚线周期在
+     * 抽稀后仍然与原始曲线一致（而不是随段长被拉伸）。
+     */
+    readonly alongOverride?: readonly number[];
 }
 
 /** 内部使用：一个已归一化的段方向与法线。 */
@@ -72,7 +87,8 @@ interface Segment {
     readonly ny: number;
 }
 
-/** 判断点是否全部有限且线宽 / miter 合法。 */
+/**
+ * 判断点是否全部有限且线宽 / miter 合法。 */
 function isArgsValid(args: PolylineGeometryArgs): boolean {
     if (!(args.lineWidth > 0) || !Number.isFinite(args.lineWidth)) return false;
     if (!(args.miterLimit > 0) || !Number.isFinite(args.miterLimit)) return false;
@@ -85,22 +101,53 @@ function isArgsValid(args: PolylineGeometryArgs): boolean {
 }
 
 /**
- * 去掉相邻的重复点（距离小于 1e-9 视为重复）。
+ * 去重相邻的重复点（距离小于 1e-9 视为重复），并记录每个保留点在原序列中的下标。
  *
  * 【为什么必须去重】重复点会让段的长度为零，归一化方向时产生 `0/0 = NaN`，
  * 而 NaN 一旦写进顶点缓冲会让**整层几何失效**（不是少画一段，而是全部消失）。
  *
+ * 【为什么要带出下标】`alongOverride` 是按**原序列**下标给出的（抽稀模块算的是
+ * 原始累积弧长）。去重会改变下标，若不对应回原下标，弧长就会错位。
+ *
  * @param points 原始点序列。
- * @returns 去重后的点序列。
+ * @returns 去重后的点序列与各自的原下标。
  */
-function dedupeConsecutive(points: readonly PolylinePoint[]): PolylinePoint[] {
+function dedupeConsecutive(points: readonly PolylinePoint[]): {
+    points: PolylinePoint[];
+    indices: number[];
+} {
     const out: PolylinePoint[] = [];
-    for (const p of points) {
+    const indices: number[] = [];
+    for (let i = 0; i < points.length; i += 1) {
+        const p = points[i];
         const last = out[out.length - 1];
         if (last !== undefined && Math.hypot(p.x - last.x, p.y - last.y) < 1e-9) continue;
         out.push(p);
+        indices.push(i);
     }
-    return out;
+    return { points: out, indices };
+}
+
+/**
+ * 解析可用的 `alongOverride`：长度与**去重后**点数一致、且全为有限值。
+ *
+ * 【为什么与去重后的点数比而不是原始点数】去重后几何只按保留点构建，弧长也必须
+ * 按同一套下标给出。长度不符说明调用方没考虑去重，此时整体忽略（安全侧）。
+ *
+ * @param override 调用方传入的弧长（可能未传）。
+ * @param count 去重后的点数。
+ * @returns 可用的弧长数组；不可用时为 `null`。
+ */
+function resolveAlongOverride(
+    override: readonly number[] | undefined,
+    count: number,
+): readonly number[] | null {
+    if (override === undefined) return null;
+    if (override.length !== count) return null;
+    for (const a of override) {
+        if (!Number.isFinite(a)) return null;
+    }
+    return override;
 }
 
 /**
@@ -126,7 +173,8 @@ function dedupeConsecutive(points: readonly PolylinePoint[]): PolylinePoint[] {
  */
 export function buildPolylineVertices(args: PolylineGeometryArgs): Float32Array {
     if (!isArgsValid(args)) return new Float32Array(0);
-    const pts = dedupeConsecutive(args.points);
+    const deduped = dedupeConsecutive(args.points);
+    const pts = deduped.points;
     if (pts.length < 2) return new Float32Array(0);
 
     const pad = args.aaPadPx ?? DEFAULT_AA_PAD_PX;
@@ -144,13 +192,26 @@ export function buildPolylineVertices(args: PolylineGeometryArgs): Float32Array 
     }
     if (segments.length === 0) return new Float32Array(0);
 
-    /** 每段的累积起点弧长。 */
-    const segStart: number[] = [];
-    let acc = 0;
-    for (let i = 0; i < segments.length; i += 1) {
-        segStart.push(acc);
-        acc += Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y);
+    /**
+     * 每个顶点的弧长取值来源。
+     *
+     * 【两种模式】未提供 `alongOverride` 时按段长累加（与历史行为逐位一致，
+     * 保证"没传就完全不变"）；提供时直接用传入值。因为段的两端各自取自己在原始
+     * 曲线上的弧长，段内自然按位置线性过渡，虚线的周期不会随抽稀后的段长被拉伸。
+     */
+    const alongOverride = resolveAlongOverride(args.alongOverride, pts.length);
+
+    /** 自行累加的累积弧长（`alongOverride` 未提供时使用）。 */
+    const cumulative: number[] = [0];
+    for (let i = 0; i + 1 < pts.length; i += 1) {
+        cumulative.push(
+            cumulative[i] + Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y),
+        );
     }
+
+    /** 第 `i` 个点处的弧长。 */
+    const alongAtPoint = (i: number): number =>
+        alongOverride === null ? (cumulative[i] ?? 0) : (alongOverride[i] ?? 0);
 
     // 缓冲容量：每段 6 顶点；每个内部顶点若走 miter 再加 3 顶点。
     const maxVerts = segments.length * 6 + Math.max(0, segments.length - 1) * 3;
@@ -169,9 +230,9 @@ export function buildPolylineVertices(args: PolylineGeometryArgs): Float32Array 
         const s = segments[i];
         const a = pts[i];
         const b = pts[i + 1];
-        const a0 = segStart[i];
-        const segLen = Math.hypot(b.x - a.x, b.y - a.y);
-        const a1 = a0 + segLen;
+
+        const a0 = alongAtPoint(i);
+        const a1 = alongAtPoint(i + 1);
         // 起点两侧
         const axL = a.x + s.nx * offset;
         const ayL = a.y + s.ny * offset;
@@ -207,7 +268,8 @@ export function buildPolylineVertices(args: PolylineGeometryArgs): Float32Array 
         if (!(ratio <= args.miterLimit)) continue;
         const apexX = b.x + mx;
         const apexY = b.y + my;
-        // 尖角三角形覆盖两侧：左半（沿 s 的法线侧）与右半
+        // 尖角三角形覆盖两侧：左半（沿 s 的法线侧）与右半。
+        // 尖点位于连接点处，弧长取该点的值（`a1`）。
         push(bxL, byL, a1, offset);
         push(bxR, byR, a1, -offset);
         push(apexX, apexY, a1, offset);
