@@ -8,7 +8,7 @@ import { timelineViewportBus } from "../../../utils/timelineViewportBus";
 import { WaveformSurface } from "../../../waveform/WaveformSurface";
 import type { WaveformSceneClip, WaveformSceneRow } from "../../../waveform/sceneBuilder";
 import { CLIP_BODY_PADDING_Y, CLIP_HEADER_HEIGHT } from "./constants";
-import { computeLeadingOverlapSecByClipId } from "./TrackLane";
+import { computeLeadingOverlapSecByClipId } from "./trackOverlap";
 import { clipToSceneClip, expandClipToTakeSceneClips } from "./takeLanes";
 
 /**
@@ -21,9 +21,11 @@ import { clipToSceneClip, expandClipToTakeSceneClips } from "./takeLanes";
  * 竖直布局与多 Take lane 投影，其余一律下沉到 `WaveformSurface`。
  *
  * 【与其他模块的关系】
- * - 上游：`TimelineSurface` 传入轨道窗口与 `TimelineAxis`。
+ * - 上游：`kernel/TimelineKernelView` 传入轨道窗口与 `TimelineAxis`（内核模式下
+ *   本组件是波形层的唯一挂载点，旧 `TimelineSurface` 已随旧渲染路径删除）。
  * - 横向：多 Take 的 lane 几何复用 `takeLanes.ts`，与 DOM 命中区同源；
  *   时间↔像素换算全部由 axis 提供，本文件不做任何乘法。
+ * - 横向：clip 左侧前导重叠由 `trackOverlap.ts` 计算，供重叠区等权混合。
  * - 下游：`waveform/WaveformSurface`。
  */
 
@@ -56,7 +58,8 @@ export const TimelineWaveformSurface = React.memo(function TimelineWaveformSurfa
     };
 }) {
     const { mode } = useAppTheme();
-    // 与 DOM 交互层（ClipItem/TrackLane）同一份持久化设置：开关切换即重建场景。
+    // 与内核 clip 面（host 的 buildSparseClipRenderModel 参数）同一份持久化设置：
+    // 开关切换即重建场景。
     const showAllTakes = useAppSelector((state) => state.session.showAllTakes);
     const color = React.useMemo(() => getWaveformColors(mode, "timeline").stroke, [mode]);
     const rows = React.useMemo<WaveformSceneRow[]>(
