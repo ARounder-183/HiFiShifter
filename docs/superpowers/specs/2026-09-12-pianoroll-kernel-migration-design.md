@@ -171,6 +171,8 @@ Three phases, each independently shippable, verifiable, and revertible.
 | **1 · Scroll/viewport kernel** | Self-drawn scrollbars (both axes, value-domain vertical preserved), `ScrollKernel` + unified axis projection, rAF frame commit. Painting stays Canvas 2D. | Scroll/zoom feel identical; timeline sync unaffected; frame rate not worse; legacy flag off == today |
 | **2 · Render kernel** ✅ **已完成** | Grid, keyboard axis, value labels/ticks, selection, playhead, highlight bands move to GL instanced geometry; the existing glyph pipeline takes over all `fillText`. Curves stay on Canvas 2D in the detail layer. | Pixel comparison within tolerance ✅ 0.0818%（96% 差异为 1/255）；text quality matches ✅（9px/bold 9px 完全一致）；playback frames no longer repaint curves ✅ 每帧 Canvas2D 绘图调用 318 → **0**。证据见 `plans/2026-09-12-pianoroll-kernel-phase2.md` 的完成记录 |
 | **3 · Curve GL + interactions** | Polyline triangle-strip curve rendering (all curve variants); geometric hit testing + gesture state machine migration. | Curve fidelity comparison passes; every gesture regression-checked in the browser |
+| ↳ **曲线 GL 部分** ✅ **已完成** | 曲线改为 GL 三角带（**实际用带距离属性的三角形**，见计划自审）；渲染层按设备像素列抽稀 | 像素保真 ✅ 同会话 A/B 差异 0.0352%，包络中位 1px；性能 ✅ longtask 30 次/2240ms → **0 次/0ms**；每帧 `lineTo` ✅ 213,955 → **0**。7 种变体中仅 3 种端到端比对（mock 限制，已记录）。证据见 `plans/2026-09-12-pianoroll-kernel-phase3.md` 的 Task 4/5 记录 |
+| ↳ **手势迁移** ⏳ **进行中** | 抽出 `gestureHitTest`（第一片完成）/ `dragArithmetic`（未开始） | **未达成**：仅选区边缘手势完成等价性验证；hook 未缩小（3,875 → 3,876 行）。进度与后续清单见同计划 Task 6 |
 
 Each phase has its own flag value (or its own flag) so a phase can be reverted without
 reverting the previous ones.

@@ -417,6 +417,44 @@ Same convention Phase 2 used, and for the same reason: each depends on the previ
 - Enumerate all gesture entry points as a checklist (spec risk row: "23 event entry points, single 3875-line hook") and browser self-test each after extraction.
 - **Exit check:** hook shrinks measurably; each extracted function has unit tests; every gesture re-verified in the browser.
 
+#### 进度：第一片已完成（`59277ad4`），任务未完成
+
+已落地 `kernel/gestureHitTest.ts`（19 项单测）并接线了两处**选区边缘**判定：
+
+| 抽出物 | 单测 | 已接线 | 浏览器验证 |
+|---|---|---|---|
+| `hitTestSelectionEdge` | ✅ | ✅ 两处（pointermove 光标、pointerdown 拉伸） | ✅ 15 点光标扫描逐位一致 |
+| `curveValueAtPointerFrame` | ✅ | ⬜ | ⬜ |
+| `isPointerNearCurve` | ✅ | ⬜ | ⬜ |
+| `hitTestSelectionBody` | ✅ | ⬜ | ⬜ |
+
+**退出标准对照：**
+
+| 标准 | 结果 |
+|---|---|
+| 每个抽出函数有单测 | ✅ 19 项（含 3 处我自己写错的用例前提，已修正） |
+| 每个手势在浏览器复核 | ⚠️ **仅选区边缘手势**做了等价性扫描；其余手势未复核 |
+| hook 可测量地缩小 | ❌ **未达成**：3,875 → 3,876 行（+17/−16 净 +1） |
+
+**为什么 hook 没有缩小（诚实记录）**：这一片只替换了两处内联判定，而新增的
+`gestureHitTest.ts` 本身有 245 行（含注释）。真正的行数下降要等
+`isPointerNearCurve` / `hitTestSelectionBody` / 拖动算术全部接线后才出现——那三处
+才是 hook 里体量更大的重复逻辑（如选区拉伸的帧换算在两处各写了一遍）。
+
+**行为等价性是怎么验的（不是只跑单测）**：用 `git stash` 在基线重跑同一脚本，
+对 15 个指针位置（左缘 ±5px、右缘 ±5px、带内外、选区中段）采集 canvas 光标，
+抽模块前后**序列逐位相同**。这比"单测通过"强：单测只能证明纯函数自身正确，
+证明不了 hook 接线后行为不变。
+
+**后续片的工作清单**（未开始）：
+1. 接线 `isPointerNearCurve` / `hitTestSelectionBody` 到 `isPointerNearDraggableSelection`
+   与 pointerdown 的拖动分支（注意：这两处的值→y 投影必须与绘制同源，
+   接线时要传 `valueToY` 而非自己换算）。
+2. `dragArithmetic.ts`：抽出选区拉伸的帧换算（当前在 pointermove 与 pointerdown
+   两处各写一遍）、曲线拖动的手势增量换算。
+3. 枚举全部 23 个事件入口并逐条补浏览器验证；**每条都要用上面的 stash 对照法**，
+   而不是只看"点了有反应"。
+
 ---
 
 ## Self-Review
