@@ -1,9 +1,11 @@
 /**
- * 时间轴渲染内核 · 特性开关
+ * 渲染内核 · 特性开关
  *
  * 【主要内容】
- * 读取 `localStorage` 决定时间轴是否走新渲染内核：未显式设置时 dev 环境开启、
- * 生产构建关闭；显式写入 `"0"` / `"1"` 可强制关闭 / 开启。
+ * 读取 `localStorage` 决定各面板是否走新渲染内核。目前有两个开关：
+ * - **时间轴**：未显式设置时 dev 环境开启、生产构建关闭；
+ * - **参数编辑器（PianoRoll）**：未显式设置时**一律关闭**（连 dev 也关）。
+ * 两者都支持显式写入 `"0"` / `"1"` 强制关闭 / 开启。
  *
  * 【作用】
  * 落地策略要求「可一键回退」：内核是**仍在做新旧对齐（parity）的 opt-in 路径**，
@@ -11,7 +13,8 @@
  * 模块加载时读取一次（切换需刷新页面，与既有 dev 开关行为一致）。
  *
  * 【与其他模块的关系】
- * - 上游：`TimelinePanel` 在模块加载时读取并决定是否渲染 `TimelineKernelView`。
+ * - 上游：`TimelinePanel` 在模块加载时读取并决定是否渲染 `TimelineKernelView`；
+ *   `PianoRollPanel` 读取参数编辑器开关决定是否走内核滚动/渲染路径。
  * - 独立性：纯函数，不依赖 React。
  */
 
@@ -40,6 +43,34 @@ export function isTimelineKernelEnabled(): boolean {
         return import.meta.env.DEV;
     } catch {
         // 读不到 localStorage（隐私模式）时按默认关闭处理，避免意外启用。
+        return false;
+    }
+}
+
+/** 参数编辑器（PianoRoll）内核开关 key。 */
+export const PIANO_ROLL_KERNEL_FLAG_KEY = "hifishifter.pianoRollKernel";
+
+/**
+ * 是否启用参数编辑器渲染内核。
+ *
+ * 规则与时间轴内核**刻意不同**：未显式设置时**默认关闭**（连 dev 也关）。
+ *
+ * 特殊说明 1：时间轴内核在 dev 默认开启，是为了让真机验证不必每次改 localStorage；
+ * 参数编辑器分三个阶段落地，阶段 1 期间新路径尚不完整（绘制仍在 Canvas2D），
+ * 默认开启会让日常开发一直跑在半迁移状态。需要验证时显式写 `"1"`。
+ *
+ * 特殊说明 2：必须经 `globalThis.localStorage` + `typeof` 守卫读取，不能直接引用
+ * 裸 `localStorage`——本工程 Vitest 跑在 node 环境（无 jsdom），直接引用会让
+ * **导入该模块的任何测试**在模块求值期就抛 ReferenceError。
+ *
+ * @returns 当前是否启用参数编辑器内核。
+ */
+export function isPianoRollKernelEnabled(): boolean {
+    try {
+        const storage = globalThis.localStorage;
+        if (storage == null) return false;
+        return storage.getItem(PIANO_ROLL_KERNEL_FLAG_KEY) === "1";
+    } catch {
         return false;
     }
 }
