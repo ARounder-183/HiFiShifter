@@ -164,6 +164,13 @@ export interface PianoRollKernelData {
      * 那种"低频变化"的字段分开，避免把播放头混进需要内容签名的几何里。
      */
     readonly overlay?: PianoRollOverlaySpec | null;
+    /**
+     * 曲线图层（阶段 3）；缺省 / null 表示没有曲线。
+     *
+     * 特殊说明：与 `grid`（低频、按签名缓存）不同，本字段**每帧读取并重建几何**，
+     * 因为滚动/缩放会改变每个点的视口位置。见 `PianoRollCurveLayer` 的说明。
+     */
+    readonly curves?: PianoRollCurveLayerList | null;
 }
 
 /**
@@ -177,3 +184,74 @@ export interface PianoRollKernelData {
 export type MutablePianoRollKernelData = {
     -readonly [K in keyof PianoRollKernelData]: PianoRollKernelData[K];
 };
+
+/**
+ * 一条待绘制的曲线（阶段 3：曲线图层上 GL）。
+ *
+ * 【为什么用统一的描述符而不是 7 个专用字段】曲线有 7 类（检测 / 参考线 / 副参数 /
+ * 原始 / 编辑 / 选区高亮 / 剪贴板预览），但它们的绘制语义完全相同：**一串采样值 +
+ * 时间基准 + 描边样式 + 可选裁剪**。用统一描述符让面板把"取哪条数据、用什么颜色"
+ * 留在 React 侧（那里才知道业务语义），宿主只负责"投影 + 建几何 + 画"。
+ *
+ * 【为什么带上投影所需的原始参数而不只传点】投影要用 `axis`（每帧可能变），而
+ * `axis` 由宿主持有。传原始参数让宿主在**绘制时**才投影，避免面板跟着滚动重算。
+ */
+export interface PianoRollCurveLayer {
+    /**
+     * 采样值（pitch 为 MIDI，其余为参数内部值）。
+     *
+     * 特殊说明：调用方应传**已经可见性裁剪**的序列。宿主仍会按 `axis` 再裁一次
+     * （见 `projectCurvePoints`），但提前裁剪能显著降低每帧的遍历量——最小缩放下
+     * 视口可覆盖 466 秒，未裁剪的长曲线会有上万点。
+     */
+    readonly values: readonly number[];
+    /** 参数名（决定是否施加 pitch 的 +0.5 半音偏移）。 */
+    readonly param: string;
+    /** 首个采样值对应的帧号。 */
+    readonly startFrame: number;
+    /** 采样步长（帧）。 */
+    readonly stride: number;
+    /** 每帧时长（毫秒）。 */
+    readonly framePeriodMs: number;
+    /** 线宽（CSS px）。可为分数（既有实现用 1.8 / 2 / 2.6 / 3.2 / 3.6）。 */
+    readonly lineWidthPx: number;
+    /** 颜色（预乘前的直通 RGBA，0..1）。 */
+    readonly rgba: readonly [number, number, number, number];
+    /**
+     * 虚线图案 `[dash, gap]`（CSS px）；缺省表示实线。
+     *
+     * 特殊说明：必须由面板用与 Canvas2D 路径**同一个** `getFixedDashPattern` 取值
+     * （它按 dpr 量化），否则两种模式的虚线疏密会不同。
+     */
+    readonly dash?: readonly [number, number] | null;
+    /**
+     * 投影模式：`"curve"` 走 `drawCurveTimed` 的语义（从曲线起点按 `startFrame` +
+     * `stride` 换算）；`"clipboard"` 走剪贴板预览的语义（从选区起点按**原始帧距**
+     * 排布）。两者时间基准不同，混用会让预览整体平移。
+     */
+    readonly projection: "curve" | "clipboard";
+    /** `projection === "clipboard"` 时的选区起点（秒）。 */
+    readonly clipStartSec?: number;
+    /** `projection === "clipboard"` 时的选区终点（秒）。 */
+    readonly clipEndSec?: number;
+    /** 裁剪区（视口坐标 CSS px）；缺省不裁剪。两个需要裁剪的曲线图层用选区矩形。 */
+    readonly clipRect?: { readonly x: number; readonly y: number; readonly w: number; readonly h: number } | null;
+    /**
+     * 值 → 视口 y 的投影，**必须绑定到本图层自己的参数**。
+     *
+     * 【为什么每条曲线各带一份】副参数（`secondaryParamViews`）的值域与主参数
+     * 完全不同（例如音分 vs 度数 vs 共振峰）。若统一用 `editParam` 的投影，副参数
+     * 曲线会被画到错误的高度——而且错得很"合理"（仍在视口内），很难归因。
+     * Canvas2D 路径同样是按各自的 `param` 调用 `valueToY(param, …)`。
+     */
+    readonly valueToY: (value: number) => number;
+}
+
+/**
+ * 曲线图层集合（阶段 3）。
+ *
+ * 特殊说明：本字段**每帧可能变化**（滚动/缩放会改变可见段），因此宿主每帧读取并
+ * 重建几何——这与 `grid`（低频变化、按签名缓存）不同。软件栅格化下这个代价换来的
+ * 收益是 5–16 倍（见 Phase 3 计划的 R7）。
+ */
+export type PianoRollCurveLayerList = readonly PianoRollCurveLayer[];

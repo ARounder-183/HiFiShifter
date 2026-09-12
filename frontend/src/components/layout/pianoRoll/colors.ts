@@ -147,3 +147,59 @@ export function normalizeCssColor(css: string): string {
     probe.remove();
     return computed.length > 0 ? computed : css;
 }
+
+/**
+ * 检测曲线（后端推送的 per-clip 音高曲线）的循环调色板。
+ *
+ * 【为什么两套主题不同】浅色主题必须提高不透明度并加深，否则青绿在白底上
+ * 对比度只有约 1.4:1、几乎隐形；深色主题则要避免过亮刺眼。
+ *
+ * 【为什么琥珀色被换成玫红】琥珀是**编辑包络线**的专属色相，检测曲线占用它
+ * 会与主曲线混淆——这是既有实现刻意做的取舍，迁移时保留。
+ *
+ * @param isDark 是否深色主题。
+ * @returns 调色板（按 clip 索引循环取用）。
+ */
+export function resolveDetectedCurveColors(isDark: boolean): readonly string[] {
+    return isDark
+        ? ["rgba(80, 220, 180, 0.56)", "rgba(255, 110, 197, 0.60)", "rgba(180, 120, 255, 0.56)", "rgba(60, 180, 255, 0.56)"]
+        : ["rgba(0, 150, 118, 0.80)", "rgba(214, 44, 140, 0.75)", "rgba(124, 58, 237, 0.70)", "rgba(2, 132, 199, 0.80)"];
+}
+
+/**
+ * 副参数曲线的循环调色板。
+ *
+ * 特殊说明：`"pitch"` 这个副参数不走本表，它固定用青蓝（见
+ * `resolveSecondaryCurveColor`），以便与主参数曲线区分。
+ *
+ * @param isDark 是否深色主题。
+ * @returns 调色板（按副参数索引循环取用）。
+ */
+export function resolveSecondaryCurveColors(isDark: boolean): readonly string[] {
+    return isDark
+        ? ["rgba(100, 200, 255, 0.62)", "rgba(255, 110, 197, 0.62)", "rgba(180, 120, 255, 0.62)", "rgba(60, 200, 160, 0.62)"]
+        : ["rgba(0, 116, 200, 0.72)", "rgba(214, 44, 140, 0.72)", "rgba(124, 58, 237, 0.72)", "rgba(22, 163, 116, 0.75)"];
+}
+
+/**
+ * 取某个副参数曲线的颜色。
+ *
+ * @param isDark 是否深色主题。
+ * @param paramId 副参数 id。
+ * @param index 在副参数列表中的序号（用于循环取色）。
+ * @returns CSS 颜色。
+ */
+export function resolveSecondaryCurveColor(
+    isDark: boolean,
+    paramId: string,
+    index: number,
+): string {
+    if (paramId === "pitch") return "rgba(100, 200, 255, 0.65)";
+    const palette = resolveSecondaryCurveColors(isDark);
+    return palette[index % palette.length];
+}
+
+/** 剪贴板预览曲线的颜色（青蓝，用虚线+降不透明度与选区高亮区分）。 */
+export function resolveClipboardPreviewColor(isDark: boolean): string {
+    return isDark ? "rgba(100, 200, 255, 0.55)" : "rgba(0, 116, 200, 0.60)";
+}

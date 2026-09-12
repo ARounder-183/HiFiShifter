@@ -186,7 +186,21 @@ import {
     centerFromVerticalScrollTop,
     verticalScrollTopFromCenter,
 } from "./pianoRoll/verticalScrollMapping";
-import { isPianoRollKernelEnabled, isPianoRollGlSceneEnabled } from "./timeline/kernel/featureFlag";
+import {
+    isPianoRollCurveGlEnabled,
+    isPianoRollGlSceneEnabled,
+    isPianoRollKernelEnabled,
+} from "./timeline/kernel/featureFlag";
+import {
+    resolveClipboardPreviewColor,
+    resolveDetectedCurveColors,
+    resolveSecondaryCurveColor,
+} from "./pianoRoll/colors";
+import { resolveSecondaryOverlayValues } from "./pianoRoll/secondaryOverlaySelection";
+import { getFixedDashPattern } from "./pianoRoll/render";
+import type { PianoRollCurveLayer } from "./pianoRoll/kernel/host/pianoRollKernelData";
+import type { TimelineAxis } from "./renderKernel/timelineAxis";
+import { secToViewportPx } from "./renderKernel/timelineAxis";
 import {
     createPianoRollKernelHost,
     type PianoRollKernelHost,
@@ -218,6 +232,33 @@ const PARAM_EDITOR_KERNEL_ENABLED = isPianoRollKernelEnabled();
  * Phase 1 已验证的 Canvas2D 路径。
  */
 const PARAM_EDITOR_GL_SCENE_ENABLED = PARAM_EDITOR_KERNEL_ENABLED && isPianoRollGlSceneEnabled();
+
+/**
+ * 是否启用参数编辑器曲线 GL 层（阶段 3）。
+ *
+ * 特殊说明：它**嵌套在** GL 场景层之内——曲线层复用主 GL 画布的上下文，没有 GL
+ * 场景层就没有曲线层。因此两个开关必须同时成立。
+ *
+ * 实测依据（Phase 3 计划 R7）：最小缩放下 3 分钟曲线约 36000 个可见点，Canvas2D
+ * 描边需 71.7ms/帧（≈14fps），GL 全路径 4.6ms（15.6×）。
+ */
+const PARAM_EDITOR_CURVE_GL_ENABLED =
+    PARAM_EDITOR_GL_SCENE_ENABLED && isPianoRollCurveGlEnabled();
+
+/**
+ * 把 `getFixedDashPattern` 的返回值收窄为元组。
+ *
+ * 特殊说明：该函数返回 `number[]`（历史签名，也被 Canvas2D 的 `setLineDash` 消费），
+ * 而曲线图层描述符要求 `[dash, gap]` 二元组。这里做一次显式收窄而不是改它的签名——
+ * 改签名会波及 Canvas2D 路径，而那条路径是已充分验证的。长度不符时返回 null
+ * （视为实线），宁可退化也不产出非法图案。
+ *
+ * @param pattern `[dash, gap]`。
+ * @returns 二元组；长度不符时为 null。
+ */
+function toDashTuple(pattern: readonly number[]): [number, number] | null {
+    return pattern.length >= 2 ? [pattern[0], pattern[1]] : null;
+}
 
 /**
  * 判断数值是否值得写入 DOM（跨过容差）。
@@ -537,8 +578,33 @@ export const PianoRollPanel: React.FC = () => {
     const getVisualPlayheadSec = useCallback(() => visualPlayheadSecRef.current, []);
     const rulerPlayheadLineRef = useRef<HTMLDivElement | null>(null);
     const rulerPlayheadHeadRef = useRef<HTMLDivElement | null>(null);
+    /**
+     * 内核宿主的稳定引用。
+     *
+     * 【为什么声明在这里】`invalidate`（紧随其后）在内核模式下要把标脏转交宿主，
+     * 因此必须在它之前声明。放在下方原来的位置会让 `invalidate` 的闭包引用一个
+     * 尚未初始化的 `const`（TDZ）——首次调用即抛 ReferenceError。
+     */
+    const hostRef = useRef<PianoRollKernelHost | null>(null);
     const drawRef = useRef<() => void>(() => {});
+    /**
+     * 请求重绘（所有会改变画面的数据/状态变更都经此入口）。
+     *
+     * 【内核模式下为什么要转交宿主】曲线层搬到 GL 后，画面由**两个**渲染循环驱动：
+     * 面板自己的 rAF（Canvas2D）与内核宿主的 rAF（GL 层）。只调度前者会让 GL 层
+     * 永远停留在旧内容上——典型症状是"曲线数据到了但屏幕上不出现，直到滚动一下
+     * 才显示"。因此内核模式下标脏一律交给宿主：宿主的帧提交里会回调 `onFrame`
+     * → `applyScrollLayers` → `drawRef.current()`，Canvas2D 与 GL 同帧一起刷新。
+     *
+     * 特殊说明：`drawRef.current()` 自身不调用 `invalidate()`，所以这条链不会自激。
+     * 宿主尚未创建（挂载前 / 卸载后）时退回面板自己的 rAF，避免丢失首次绘制。
+     */
     const invalidate = useCallback(() => {
+        const host = hostRef.current;
+        if (PARAM_EDITOR_KERNEL_ENABLED && host != null) {
+            host.invalidate();
+            return;
+        }
         if (rafRef.current != null) return;
         rafRef.current = requestAnimationFrame(() => {
             rafRef.current = null;
@@ -1880,9 +1946,6 @@ export const PianoRollPanel: React.FC = () => {
     // 真值写回它，使尚未迁移的输入代码（中键拖拽、框选自动滚动等直接读写
     // `scroller.scrollLeft` 的地方）读到的仍是同一份位置，行为不变。
     //
-    // 镜像的意义：这些输入点用的是**原生坐标**（= 绘制坐标 + 同步偏移），因此
-    // 回写也必须换算成原生坐标，否则同步模式下的读回会差一个 offset。
-    const hostRef = useRef<PianoRollKernelHost | null>(null);
     /** 内核模式下的数据镜像（每次 render 更新字段，宿主每帧现读）。 */
     /**
      * 内核数据镜像（每次 render 更新字段，宿主每帧现读）。
@@ -3207,6 +3270,217 @@ export const PianoRollPanel: React.FC = () => {
         result: ReturnType<typeof buildScaleSegments>;
     }>({ tempoMap: null, scale: null, qStart: NaN, qEnd: NaN, result: [] });
 
+    /**
+     * 组装曲线图层描述符（阶段 3：曲线 GL）。
+     *
+     * 流程：按**绘制顺序**产出 7 类图层 —— 参考线 → 检测曲线 → 副参数 → 原始曲线
+     * → 编辑曲线 → 选区高亮 → 剪贴板预览（后者在上）。顺序与 `render.ts` 的
+     * Canvas2D 调用顺序**逐项对应**，因为 GL 靠数组顺序决定层叠。
+     *
+     * 特殊说明 1：每条图层自带 `valueToY`。副参数的值域与主参数不同（音分 / 度数 /
+     * 共振峰），必须用各自的投影，否则副参数曲线会被画到错误高度——而且错得"合理"
+     * （仍在视口内），极难归因。
+     *
+     * 特殊说明 2：虚线图案一律经 `getFixedDashPattern`（按 dpr 量化），与 Canvas2D
+     * 路径同一个函数，杜绝疏密分叉。
+     *
+     * 特殊说明 3：`values` 传引用而不是副本——采样值不随滚动变化，每帧复制的成本
+     * 在长曲线上很可观。
+     *
+     * 特殊说明 4：两个需要裁剪的图层（选区高亮 / 剪贴板预览）把选区矩形同时作为
+     * `clipRect`（GL 侧走 scissor）与坐标边界。
+     *
+     * @param axis 当前投影（每帧由 drawRef 构造）。
+     * @returns 曲线图层列表（按绘制顺序）；GL 关闭时不会被调用。
+     */
+    function buildCurveLayers(axis: TimelineAxis): PianoRollCurveLayer[] {
+        const layers: PianoRollCurveLayer[] = [];
+        const isDark = themeMode === "dark";
+        // 与 Canvas2D 路径同一份配色表（`render.ts` 也调 `resolvePianoRollColors`）。
+        const colors = resolvePianoRollColors(isDark);
+        const h = viewSizeRef.current.h;
+        const project = (param: ParamName, value: number) => valueToY(param, value, h);
+
+        // ── ① 参考线（pitch 模式）────────────────────────────────────
+        if (editParam === "pitch") {
+            for (const overlay of referencePitchOverlays) {
+                const values = resolveSecondaryOverlayValues({
+                    orig: overlay.paramView.orig,
+                    edit: overlay.paramView.edit,
+                });
+                if (values.length < 2) continue;
+                layers.push({
+                    values,
+                    param: "pitch",
+                    startFrame: overlay.paramView.startFrame,
+                    stride: overlay.paramView.stride,
+                    framePeriodMs: overlay.paramView.framePeriodMs,
+                    lineWidthPx: overlay.highlighted ? 3.2 : 2.6,
+                    rgba: parseRgbaColor(normalizeCssColor(overlay.strokeColor)),
+                    dash: null,
+                    projection: "curve",
+                    valueToY: (v) => project("pitch", v),
+                });
+            }
+        }
+
+        // ── ② 检测曲线（pitch 模式，按 clip 循环调色）─────────────────
+        if (editParam === "pitch") {
+            const palette = resolveDetectedCurveColors(isDark);
+            detectedPitchCurves.forEach((curve, ci) => {
+                if (!curve.midiCurve || curve.midiCurve.length < 2) return;
+                layers.push({
+                    values: curve.midiCurve,
+                    param: "pitch",
+                    startFrame: 0,
+                    stride: 1,
+                    framePeriodMs: curve.framePeriodMs,
+                    lineWidthPx: 2,
+                    rgba: parseRgbaColor(normalizeCssColor(palette[ci % palette.length])),
+                    dash: null,
+                    projection: "curve",
+                    valueToY: (v) => project("pitch", v),
+                });
+            });
+        }
+
+        // ── ③ 副参数曲线 ────────────────────────────────────────────
+        if (pitchEnabled && visibleSecondaryParamIds.length > 0) {
+            visibleSecondaryParamIds.forEach((paramId, index) => {
+                const pv = secondaryParamViews[paramId];
+                if (!pv || Math.max(pv.orig.length, pv.edit.length) < 2) return;
+                const values = resolveSecondaryOverlayValues({ orig: pv.orig, edit: pv.edit });
+                layers.push({
+                    values,
+                    param: paramId,
+                    startFrame: pv.startFrame,
+                    stride: pv.stride,
+                    framePeriodMs: pv.framePeriodMs,
+                    lineWidthPx: 2,
+                    rgba: parseRgbaColor(
+                        normalizeCssColor(resolveSecondaryCurveColor(isDark, paramId, index)),
+                    ),
+                    dash: null,
+                    projection: "curve",
+                    valueToY: (v) => valueToY(paramId as ParamName, v, h),
+                });
+            });
+        }
+
+        // ── ④⑤⑥ 主参数曲线（原始 / 编辑 / 选区高亮）─────────────────
+        const pv = pitchEnabled ? paramView : null;
+        if (pv) {
+            const editValues =
+                liveEditOverrideRef.current && liveEditOverrideRef.current.key === pv.key
+                    ? liveEditOverrideRef.current.edit
+                    : pv.edit;
+
+            if (pv.orig.length >= 2) {
+                layers.push({
+                    values: pv.orig,
+                    param: editParam,
+                    startFrame: pv.startFrame,
+                    stride: pv.stride,
+                    framePeriodMs: pv.framePeriodMs,
+                    lineWidthPx: 1.8,
+                    rgba: parseRgbaColor(normalizeCssColor(colors.origCurve)),
+                    dash: toDashTuple(getFixedDashPattern(6, 6)),
+                    projection: "curve",
+                    valueToY: (v) => project(editParam, v),
+                });
+            }
+
+            if (editValues.length >= 2) {
+                layers.push({
+                    values: editValues,
+                    param: editParam,
+                    startFrame: pv.startFrame,
+                    stride: pv.stride,
+                    framePeriodMs: pv.framePeriodMs,
+                    lineWidthPx: 2.6,
+                    rgba: parseRgbaColor(normalizeCssColor(colors.editCurve)),
+                    dash: null,
+                    projection: "curve",
+                    valueToY: (v) => project(editParam, v),
+                });
+            }
+
+            // 选区高亮：裁剪到选区矩形（与 Canvas2D 的 ctx.clip 对应）
+            const selection = selectionRef.current;
+            if (selection && editValues.length >= 2) {
+                const clip = selectionClipRect(axis, selection);
+                if (clip && clip.w > 0) {
+                    layers.push({
+                        values: editValues,
+                        param: editParam,
+                        startFrame: pv.startFrame,
+                        stride: pv.stride,
+                        framePeriodMs: pv.framePeriodMs,
+                        lineWidthPx: 3.6,
+                        rgba: parseRgbaColor(normalizeCssColor(colors.selectionCurve)),
+                        dash: null,
+                        projection: "curve",
+                        clipRect: clip,
+                        valueToY: (v) => project(editParam, v),
+                    });
+                }
+            }
+        }
+
+        // ── ⑦ 剪贴板预览（不同的投影语义：从选区起点按原始帧距排布）──
+        const preview = clipboardRef.current;
+        const selection = selectionRef.current;
+        if (
+            preview &&
+            selection &&
+            preview.param === editParam &&
+            preview.values.length > 0
+        ) {
+            const clip = selectionClipRect(axis, selection);
+            const beatToSec = Math.max(1e-9, secPerBeat);
+            if (clip && clip.w > 0) {
+                layers.push({
+                    values: preview.values,
+                    param: editParam,
+                    startFrame: 0,
+                    stride: 1,
+                    framePeriodMs: preview.framePeriodMs,
+                    lineWidthPx: 2,
+                    rgba: parseRgbaColor(normalizeCssColor(resolveClipboardPreviewColor(isDark))),
+                    dash: toDashTuple(getFixedDashPattern(4, 4)),
+                    projection: "clipboard",
+                    clipStartSec: Math.min(selection.aBeat, selection.bBeat) * beatToSec,
+                    clipEndSec: Math.max(selection.aBeat, selection.bBeat) * beatToSec,
+                    clipRect: clip,
+                    valueToY: (v) => project(editParam, v),
+                });
+            }
+        }
+
+        return layers;
+    }
+
+    /**
+     * 把选区（beat）换算为视口坐标的裁剪矩形。
+     *
+     * @param axis 当前投影。
+     * @param selection 选区（beat）。
+     * @returns 裁剪矩形；选区为空或宽度为 0 时返回 null。
+     */
+    function selectionClipRect(
+        axis: TimelineAxis,
+        selection: { aBeat: number; bBeat: number },
+    ): { x: number; y: number; w: number; h: number } | null {
+        const beatToSec = Math.max(1e-9, secPerBeat);
+        const selMin = Math.min(selection.aBeat, selection.bBeat) * beatToSec;
+        const selMax = Math.max(selection.aBeat, selection.bBeat) * beatToSec;
+        const x0 = secToViewportPx(axis, selMin);
+        const x1 = secToViewportPx(axis, selMax);
+        const w = x1 - x0;
+        if (!(w > 0)) return null;
+        return { x: x0, y: 0, w, h: viewSizeRef.current.h };
+    }
+
     // Keep draw function always up-to-date (invalidate() is stable and calls drawRef.current()).
     drawRef.current = () => {
         // 滚动热路径的投影：用 ref 构造，因为滚动时 ref 同步更新而 React
@@ -3238,6 +3512,17 @@ export const PianoRollPanel: React.FC = () => {
                 scaleSegEndQ,
             );
         }
+        // 曲线图层（阶段 3）：每帧重建描述符列表。
+        //
+        // 【为什么要每帧构建】滚动/缩放会改变可见段与 `axis`，而 GL 侧要在绘制时
+        // 才投影；描述符里的 `values` 引用与视口无关（数据没变），因此这里的成本
+        // 只是一次浅层数组构建，不复制采样值。
+        if (PARAM_EDITOR_KERNEL_ENABLED && PARAM_EDITOR_CURVE_GL_ENABLED) {
+            kernelDataRef.current.curves = buildCurveLayers(drawAxis);
+        } else {
+            kernelDataRef.current.curves = null;
+        }
+
         // 叠加层镜像（选区块 + 播放头）必须**每帧**更新：播放头用的是插值的
         // 视觉值 `visualPlayheadSecRef`，它不由 React 渲染驱动（见下方注释），
         // 因此不能在 render 期写入镜像——那样播放头会停在旧的提交值上。
@@ -3337,6 +3622,8 @@ export const PianoRollPanel: React.FC = () => {
             // 播放头归 GL 叠加层（Task 6）。**选区块不在此列**：它属于曲线之下的
             // 图层，仍由主画布绘制（见 render.ts 的 skipPlayhead 说明）。
             skipPlayhead: PARAM_EDITOR_GL_SCENE_ENABLED,
+            // 曲线归 GL（阶段 3）。morph 手柄不在曲线层内，仍由主画布绘制。
+            skipCurves: PARAM_EDITOR_CURVE_GL_ENABLED,
             // 主画布内容缓存（Task 6）：签名只含**主画布自己绘制的内容**与视口，
             // 不含播放头（它已归 GL 叠加层）——这正是播放帧能跳过曲线重绘的原因。
             mainContentSignature: PARAM_EDITOR_GL_SCENE_ENABLED ? mainContentSignature : undefined,
@@ -6021,13 +6308,20 @@ export const PianoRollPanel: React.FC = () => {
                                     {PARAM_EDITOR_GL_SCENE_ENABLED ? (
                                         <canvas
                                             ref={glCanvasRef}
+                                            data-piano-roll-gl-scene
                                             className="absolute inset-0 pointer-events-none"
                                             aria-hidden
                                         />
                                     ) : null}
 
+                                    {/* `data-piano-roll-canvas`：主曲线画布的稳定选择器。
+                                        浏览器自动化验证（scripts/dev-shot.mjs）需要按元素
+                                        截图逐像素比对曲线，而 canvas 本身没有可锚定的属性；
+                                        内核模式下页面里有多个同尺寸 canvas，按尺寸猜会命中
+                                        错误的那一个。 */}
                                     <canvas
                                         ref={canvasRef}
+                                        data-piano-roll-canvas
                                         className="absolute inset-0"
                                         style={{ cursor: canvasCursor }}
                                         onPointerMove={interactions.onCanvasPointerMove}

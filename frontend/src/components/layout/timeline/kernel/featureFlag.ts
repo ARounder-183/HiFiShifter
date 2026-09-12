@@ -2,10 +2,13 @@
  * 渲染内核 · 特性开关
  *
  * 【主要内容】
- * 读取 `localStorage` 决定各面板是否走新渲染内核。目前有两个开关：
- * - **时间轴**：未显式设置时 dev 环境开启、生产构建关闭；
- * - **参数编辑器（PianoRoll）**：未显式设置时**一律关闭**（连 dev 也关）。
- * 两者都支持显式写入 `"0"` / `"1"` 强制关闭 / 开启。
+ * 读取 `localStorage` 决定各面板是否走新渲染内核。目前有四层开关：
+ * - **时间轴** `timelineKernel`；
+ * - **参数编辑器（PianoRoll）** `pianoRollKernel`；
+ * - **参数编辑器 GL 场景层** `pianoRollKernel.gl`；
+ * - **曲线 GL 层** `pianoRollKernel.curveGl`。
+ * 四者规则统一：未显式设置时 **dev 环境开启、生产构建关闭**；显式写入
+ * `"0"` / `"1"` 可强制关闭 / 开启（逃生门，刷新页面后生效）。
  *
  * 【作用】
  * 落地策略要求「可一键回退」：内核是**仍在做新旧对齐（parity）的 opt-in 路径**，
@@ -53,11 +56,12 @@ export const PIANO_ROLL_KERNEL_FLAG_KEY = "hifishifter.pianoRollKernel";
 /**
  * 是否启用参数编辑器渲染内核。
  *
- * 规则与时间轴内核**刻意不同**：未显式设置时**默认关闭**（连 dev 也关）。
+ * 规则与时间轴内核**一致**：未显式设置时 dev 默认开启、生产构建默认关闭。
  *
- * 特殊说明 1：时间轴内核在 dev 默认开启，是为了让真机验证不必每次改 localStorage；
- * 参数编辑器分三个阶段落地，阶段 1 期间新路径尚不完整（绘制仍在 Canvas2D），
- * 默认开启会让日常开发一直跑在半迁移状态。需要验证时显式写 `"1"`。
+ * 特殊说明 1（为什么 dev 也要默认开启）：内核的价值是解决真机上的性能问题，
+ * 而真机验证只能在 dev 里做。默认关闭时 `tauri dev` 跑的一直是旧实现，
+ * 真机报告（如 Windows 上的卡顿）反映的是旧路径的现象，无法用于判断新内核
+ * 是否达标。默认开启后，关掉内核只需写 `"0"`，成本很低。
  *
  * 特殊说明 2：必须经 `globalThis.localStorage` + `typeof` 守卫读取，不能直接引用
  * 裸 `localStorage`——本工程 Vitest 跑在 node 环境（无 jsdom），直接引用会让
@@ -69,7 +73,11 @@ export function isPianoRollKernelEnabled(): boolean {
     try {
         const storage = globalThis.localStorage;
         if (storage == null) return false;
-        return storage.getItem(PIANO_ROLL_KERNEL_FLAG_KEY) === "1";
+        const override = storage.getItem(PIANO_ROLL_KERNEL_FLAG_KEY);
+        if (override === "0") return false;
+        if (override === "1") return true;
+        // 未显式设置：dev 默认开启、生产构建默认关闭（与时间轴内核同一策略）。
+        return import.meta.env.DEV;
     } catch {
         return false;
     }
@@ -81,7 +89,7 @@ export const PIANO_ROLL_KERNEL_GL_FLAG_KEY = "hifishifter.pianoRollKernel.gl";
 /**
  * 是否启用参数编辑器的 GL 场景层（阶段 2：静态图层上 GL）。
  *
- * 规则：未显式设置时关闭；显式写入 `"1"` 开启。
+ * 规则：未显式设置时跟随 `import.meta.env.DEV`；显式写入 `"0"` / `"1"` 可覆盖。
  *
  * 特殊说明 1（为什么要独立于内核开关）：阶段 2 把网格 / 键盘 / 刻度 / 文字搬到
  * WebGL2，是**逐层替换**的过程。独立开关让"某一层迁移出问题"可以只回退 GL 层，
@@ -100,7 +108,41 @@ export function isPianoRollGlSceneEnabled(): boolean {
     try {
         const storage = globalThis.localStorage;
         if (storage == null) return false;
-        return storage.getItem(PIANO_ROLL_KERNEL_GL_FLAG_KEY) === "1";
+        const override = storage.getItem(PIANO_ROLL_KERNEL_GL_FLAG_KEY);
+        if (override === "0") return false;
+        if (override === "1") return true;
+        return import.meta.env.DEV;
+    } catch {
+        return false;
+    }
+}
+
+/** 参数编辑器曲线 GL 层开关 key（在 GL 场景层之上再分一层）。 */
+export const PIANO_ROLL_CURVE_GL_FLAG_KEY = "hifishifter.pianoRollKernel.curveGl";
+
+/**
+ * 是否启用曲线 GL 层（阶段 3）。
+ *
+ * 规则：未显式设置时跟随 `import.meta.env.DEV`；显式写入 `"0"` / `"1"` 可覆盖。
+ *
+ * 特殊说明（为什么单独一层开关）：曲线与静态图层（网格/键盘/刻度）的风险完全不同
+ * ——它有 miter 连接、非整数线宽、虚线相位与裁剪，是视觉保真度最难的一层。独立开关
+ * 让"曲线迁移出问题"可以只回退曲线，保留阶段 2 已充分验证的静态层与叠加层。
+ *
+ * 实测依据（Phase 3 计划 R7）：最小缩放下 3 分钟曲线约 36000 个可见点，
+ * Canvas2D 描边需 71.7ms/帧（≈14fps），GL 全路径 4.6ms（15.6×）；该结论在 GPU 与
+ * 软件栅格化下一致，因此**不需要**按平台分别开关。
+ *
+ * @returns 当前是否启用曲线 GL 层。
+ */
+export function isPianoRollCurveGlEnabled(): boolean {
+    try {
+        const storage = globalThis.localStorage;
+        if (storage == null) return false;
+        const override = storage.getItem(PIANO_ROLL_CURVE_GL_FLAG_KEY);
+        if (override === "0") return false;
+        if (override === "1") return true;
+        return import.meta.env.DEV;
     } catch {
         return false;
     }

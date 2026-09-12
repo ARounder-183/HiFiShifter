@@ -10,7 +10,14 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const frontendDir = resolve(__dirname, "../frontend");
-const mode = (process.env.TAURI_UI_MODE || "build").toLowerCase();
+// 【默认值必须是 dev】文件头注释一直写的是 "dev（默认）"，但实现里是 `|| "build"`，
+// 两者不一致。后果不只是"多跑一次构建"：`build` 模式经 `npm run build` 提供**生产
+// 包**，其中 `import.meta.env.DEV === false`，于是时间轴内核与参数编辑器内核的默认
+// 值全部为**关闭**——`tauri dev` 跑的是旧渲染实现，新内核在真机上根本没被验证到
+// （Windows 上的卡顿报告因此是旧实现的现象，见 Phase 3 计划的 R8）。
+//
+// 需要生产包时显式设 `TAURI_UI_MODE=build`。
+const mode = (process.env.TAURI_UI_MODE || "dev").toLowerCase();
 
 function runCommand(command) {
     return new Promise((resolvePromise, rejectPromise) => {

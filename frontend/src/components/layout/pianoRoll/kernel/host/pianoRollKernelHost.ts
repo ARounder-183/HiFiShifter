@@ -42,6 +42,12 @@ import {
     scrollTargetFromTrackClick,
 } from "../../../renderKernel/scrollbars";
 import { createGlCanvas, type GlCanvasHandle } from "../../../renderKernel/gl/glContext";
+import { createPolylineProgram, type PolylineProgram } from "../../../renderKernel/gl/polylineProgram";
+import { buildPolylineVertices } from "../../../renderKernel/gl/polylineGeometry";
+import {
+    projectClipboardPreviewPoints,
+    projectCurvePoints,
+} from "../scene/curvePoints";
 import { CLIP_INSTANCE_FLOATS, writeFlatInstance } from "../../../renderKernel/gl/instanceLayout";
 import { createSdfBoxProgram, type SdfBoxProgram } from "../../../renderKernel/gl/sdfBoxProgram";
 import { createRenderLoop } from "../../../renderKernel/renderLoop";
@@ -459,6 +465,18 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
     /** 本帧待绘制的文字四边形。 */
     let glTextQuads: GlyphQuad[] = [];
 
+    // 曲线层（阶段 3）：复用**主 GL 画布**（网格/键盘之上），program 独立。
+    // 与网格共用一个上下文是有意的：曲线与网格是同一张画布的先后绘制，
+    // 共用上下文避免再多申请一个 WebGL context（上下文数量有上限）。
+    let glCurveProgram: PolylineProgram | null = null;
+    if (glHandle !== null) {
+        try {
+            glCurveProgram = createPolylineProgram(glHandle.gl);
+        } catch {
+            glCurveProgram = null;
+        }
+    }
+
     // 动态叠加层（Task 6）：独立画布 + program，位于曲线层之上。
     let glOverlayHandle: GlCanvasHandle | null = null;
     let glOverlayProgram: SdfBoxProgram | null = null;
@@ -667,6 +685,90 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         }
         glAxisUploadedCount = items.length;
         glAxisGeometryUploaded = false;
+    }
+
+    /**
+     * 绘制曲线图层（阶段 3）。
+     *
+     * 流程：逐层投影采样值 → 构建折线顶点 → 一次 upload + draw call。
+     *
+     * 【为什么每帧重建】滚动/缩放会改变**每个点**的视口 x，因此曲线层没有像网格层
+     * 那样的"零重建"路径——这是它与静态图层的本质区别。代价可接受：软件栅格化下
+     * GL 全路径（构建+上传+绘制）在 36,000 点时为 4.5ms，而 Canvas2D 描边为 26.5ms。
+     *
+     * 特殊说明 1：绘制顺序即数组顺序（后画的在上），因此**面板必须按期望的层序**
+     * 提供图层：参考线/检测/副参数在下，原始/编辑曲线在中，选区高亮/剪贴板在上。
+     * 这与 Canvas2D 路径的调用顺序一一对应。
+     *
+     * 特殊说明 2：`u_viewOrigin` 传 (0, 0)——投影函数已用 `axis.secToViewportPx`
+     * 减去了 scrollLeft，所以几何本身就是**视口坐标**，与网格/键盘层同一约定。
+     *
+     * 特殊说明 3：抗锯齿宽度取 `1/dpr`（1 个设备像素），与 Canvas2D 的边缘过渡
+     * 尺度一致；`u_halfWidth` 取线宽的一半（**不含**几何的 AA 余量）。
+     *
+     * @param layers 曲线图层（按绘制顺序）。
+     * @param view 当前视口（提供 dpr 与画布尺寸）。
+     */
+    function drawGlCurves(): void {
+        if (glCurveProgram === null || glHandle === null) return;
+        const layers = data().curves;
+        if (layers === null || layers === undefined || layers.length === 0) return;
+
+        const target = glHandle.resize(
+            viewportWidthPx,
+            viewportHeightPx,
+            readDevicePixelRatio(),
+        );
+        const dpr = readDevicePixelRatio();
+        const axis = currentAxis();
+
+        for (const layer of layers) {
+            // 每条图层用自己的投影（副参数值域与主参数不同，见 spec 说明）。
+            const valueToY = layer.valueToY;
+            const points =
+                layer.projection === "clipboard"
+                    ? projectClipboardPreviewPoints({
+                          values: layer.values,
+                          param: layer.param,
+                          framePeriodMs: layer.framePeriodMs,
+                          selStartSec: layer.clipStartSec ?? 0,
+                          selEndSec: layer.clipEndSec ?? 0,
+                          axis,
+                          valueToY,
+                      })
+                    : projectCurvePoints({
+                          values: layer.values,
+                          param: layer.param,
+                          startFrame: layer.startFrame,
+                          stride: layer.stride,
+                          framePeriodMs: layer.framePeriodMs,
+                          axis,
+                          valueToY,
+                      });
+            if (points.length < 2) continue;
+
+            const vertices = buildPolylineVertices({
+                points,
+                lineWidth: layer.lineWidthPx,
+                // 与 Canvas2D 的默认 lineJoin="miter" + 默认 miterLimit=10 一致
+                // （本工程从未设置过 lineJoin，见 Phase 3 计划的 R2）。
+                miterLimit: 10,
+            });
+            if (vertices.length === 0) continue;
+
+            glCurveProgram.draw({
+                vertices,
+                vertexCount: vertices.length / 4,
+                target,
+                viewOriginX: 0,
+                viewOriginY: 0,
+                halfWidthPx: layer.lineWidthPx / 2,
+                color: layer.rgba,
+                aaWidthPx: 1 / dpr,
+                dash: layer.dash ?? null,
+                clipRect: layer.clipRect ?? null,
+            });
+        }
     }
 
     /**
@@ -1069,18 +1171,25 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         });
     }
 
-    /** 帧提交：滚动条几何 → DOM 同步 → 面板绘制 → 量化提交。 */
     /**
-     * 帧提交：GL 场景层 → 滚动条几何 → DOM 同步 → 面板绘制 → 量化提交。
+     * 帧提交：面板绘制 → GL 场景层 → 滚动条几何 → DOM 同步 → 量化提交。
      *
-     * 特殊说明（顺序）：GL 层先画。它是**底层**（网格在最下面），而 Canvas2D 层
-     * 承载曲线 / 选区 / 播放头等上层内容，两者是**兄弟画布**、靠 DOM 层级叠放，
-     * 因此这里的调用顺序不影响观感；之所以先画 GL，是为了让"本帧几何是否重建"
-     * 的判定与 GL 上传发生在同一处，便于按帧归因性能。
+     * 特殊说明 1（GL 与 Canvas2D 的画序无关观感）：两个层是**兄弟画布**，靠 DOM
+     * 层级叠放（GL 在下、Canvas2D 在上），因此先画谁不影响最终像素。
+     *
+     * 特殊说明 2（**为什么面板绘制必须排在曲线 GL 之前**）：曲线层的数据是面板在
+     * `onFrame` → `applyScrollLayers` → `drawRef.current()` 里**就地写入**
+     * `data().curves` 的（见 `buildCurveLayers`）。若先执行 `drawGlCurves()`，
+     * 它读到的永远是**上一帧**的图层列表——首帧更是空数组，于是「刚打开时曲线
+     * 完全不显示，直到发生一次滚动才出现」。这个顺序是有数据依赖的，不能调换。
      */
     function draw(): void {
         if (disposed) return;
         const view = scroll.get();
+
+        // 面板帧提交：写 DOM / Canvas2D，并**填充本帧的曲线图层描述符**。
+        // 必须在曲线 GL 之前（见上方特殊说明 2）。
+        onFrame?.(currentAxis());
 
         // GL 几何重建：只在内容签名变化时做（滚动 / 播放不触发重建）。
         if (glProgram !== null) {
@@ -1112,6 +1221,12 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             drawGlKeyboard();
         }
 
+        // 曲线层（阶段 3）：在网格之上、播放头之下。每帧重建几何——滚动/缩放会
+        // 改变每个点的视口位置，没有零重建路径（见 drawGlCurves 说明）。
+        if (glCurveProgram !== null) {
+            drawGlCurves();
+        }
+
         // 动态叠加层（选区块 + 播放头）：每帧重建 + 绘制，但它清的是**空画布**，
         // 与曲线层无关——这正是播放帧不再重绘曲线的关键。
         if (glOverlayProgram !== null) {
@@ -1121,7 +1236,6 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
 
         updateScrollbars(view);
         syncDom(view);
-        onFrame?.(currentAxis());
 
         // 量化提交：标尺的刻度范围由 React 按视口计算，不同步就会出现「滚动后
         // 刻度消失」。按步长提交保证 React 不进滚动热路径。
@@ -1419,6 +1533,8 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             glOverlayProgram?.dispose();
             glOverlayProgram = null;
             glOverlayHandle = null;
+            glCurveProgram?.dispose();
+            glCurveProgram = null;
         },
     };
 }

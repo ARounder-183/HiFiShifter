@@ -53,8 +53,16 @@ function isPianoRollDebugEnabled(): boolean {
 
 /**
  * 返回视觉上固定像素长度的虚线参数，避免随 dpr/缩放产生样式漂移。
+ *
+ * 【为什么导出】阶段 3 起 GL 曲线层也要画虚线，**必须**与 Canvas2D 路径取同一组
+ * 数值（本函数按 dpr 量化，不同取值会让两种模式的虚线疏密不同）。导出而非复制，
+ * 是为了让"两份实现分叉"在类型层面就不可能发生。
+ *
+ * @param baseDashPx 虚线段的目标视觉长度（CSS px）。
+ * @param baseGapPx 空隙的目标视觉长度（CSS px）。
+ * @returns `[dash, gap]`（CSS px，已按 dpr 量化到整设备像素）。
  */
-function getFixedDashPattern(baseDashPx: number, baseGapPx: number): number[] {
+export function getFixedDashPattern(baseDashPx: number, baseGapPx: number): number[] {
     const dpr = Math.max(1, window.devicePixelRatio || 1);
     const toAlignedCssPx = (v: number) => Math.max(1, Math.round(v * dpr) / dpr);
     return [toAlignedCssPx(baseDashPx), toAlignedCssPx(baseGapPx)];
@@ -394,6 +402,14 @@ export function drawPianoRoll(args: {
      */
     skipPlayhead?: boolean;
     /**
+     * 跳过**曲线图层**（阶段 3：已由 GL 绘制）。
+     *
+     * 特殊说明：跳过的范围与 `PianoRollCurveLayer` 一一对应——参考线、检测曲线、
+     * 副参数、原始 / 编辑曲线、选区高亮、剪贴板预览。`paramMorphOverlay`（morph 手柄，
+     * 含 `arc`）**不**在曲线层内，仍由本函数绘制；它是编辑态叠加物而非曲线本身。
+     */
+    skipCurves?: boolean;
+    /**
      * 跳过整张轴画布（含清屏）。
      *
      * 【为什么不只是"跳过绘制"】`clearCanvasPhysical` 会让整张画布失效、必须重绘
@@ -450,6 +466,7 @@ export function drawPianoRoll(args: {
         skipKeyboardGeometry = false,
         skipAxisText = false,
         skipPlayhead = false,
+        skipCurves = false,
         skipAxisCanvas = false,
         mainContentSignature,
     } = args;
@@ -893,7 +910,13 @@ export function drawPianoRoll(args: {
         return;
     }
 
-    if (editParam === "pitch" && referencePitchOverlays && referencePitchOverlays.length > 0) {
+    // 【阶段 3】曲线归 GL 时整段跳过（见 skipCurves 说明）。
+    if (
+        !skipCurves &&
+        editParam === "pitch" &&
+        referencePitchOverlays &&
+        referencePitchOverlays.length > 0
+    ) {
         referencePitchOverlays.forEach((overlay) => {
             const values = resolveSecondaryOverlayValues({
                 orig: overlay.paramView.orig,
@@ -922,7 +945,12 @@ export function drawPianoRoll(args: {
 
     // 检测音高参考线：在 pitch 模式下，将后端推送的 per-clip 检测曲线渲染为半透明彩色参考线�?
     // 渲染在用户编辑曲线下方，不干扰主曲线的视觉层次�?
-    if (editParam === "pitch" && detectedPitchCurves && detectedPitchCurves.length > 0) {
+    if (
+        !skipCurves &&
+        editParam === "pitch" &&
+        detectedPitchCurves &&
+        detectedPitchCurves.length > 0
+    ) {
         // �?clip 时循环颜色，增强区分�?
         // 候选曲线色板：按主题给两套 —— 浅色主题提高不透明度并加深，
         // 否则在白底上几乎隐形（旧版青绿在白底仅 ~1.4:1）。
@@ -993,7 +1021,7 @@ export function drawPianoRoll(args: {
 
     // Curves
     // 副参数曲线（半透明、细线，绘制在主参数曲线下方�?
-    if (showSecondaryParam && secondaryParamIds.length > 0) {
+    if (!skipCurves && showSecondaryParam && secondaryParamIds.length > 0) {
         // 副参数曲线调色板：按主题给两套（浅色主题加深加浓，否则在白底上发飘）；
         // 琥珀成员换成玫红 —— 琥珀是编辑包络线的专属色相，避免撞色。
         const secondaryPalette = isDark
@@ -1051,7 +1079,7 @@ export function drawPianoRoll(args: {
                 ? liveEditOverride.edit
                 : paramView.edit;
 
-        if (paramView.orig.length >= 2) {
+        if (!skipCurves && paramView.orig.length >= 2) {
             // original (dashed)
             ctx.save();
             ctx.strokeStyle = colors.origCurve;
@@ -1072,7 +1100,7 @@ export function drawPianoRoll(args: {
             ctx.restore();
         }
 
-        if (editValues.length >= 2) {
+        if (!skipCurves && editValues.length >= 2) {
             // edited (solid)
             ctx.save();
             ctx.strokeStyle = colors.editCurve;
@@ -1094,7 +1122,7 @@ export function drawPianoRoll(args: {
         }
 
         // 选区内曲线高亮：在选区范围内用亮蓝色加粗重绘编辑曲线
-        if (selection && editValues.length >= 2) {
+        if (!skipCurves && selection && editValues.length >= 2) {
             const selMinBeat = Math.min(selection.aBeat, selection.bBeat);
             const selMaxBeat = Math.max(selection.aBeat, selection.bBeat);
             const selX0 = secToViewportPx(axis, selMinBeat * beatToSec);
@@ -1127,6 +1155,7 @@ export function drawPianoRoll(args: {
         // 剪贴板预览曲线：在选区范围内渲染半透明虚线预览
         // 起始点与选区起始点对齐，超出选区的部分直接裁掉（不压缩）
         if (
+            !skipCurves &&
             clipboardPreview &&
             selection &&
             clipboardPreview.param === editParam &&
