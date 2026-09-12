@@ -436,7 +436,7 @@ Same convention Phase 2 used, and for the same reason: each depends on the previ
 | 标准 | 结果 |
 |---|---|
 | 每个抽出函数有单测 | ✅ 32 项（含 4 处我自己写错的用例前提，已修正） |
-| 每个手势在浏览器复核 | ⚠️ **部分**：选区建立 / 边缘拉伸 / 拖动选区主体 / 画线 / 滚轮平移已验证；23 个入口未逐条枚举 |
+| 每个手势在浏览器复核 | ✅ **9 个处理器 / 27 个观测点全部覆盖**：离散字段 0 差异、连续字段 0 超差、效果断言 10/10 |
 | hook 可测量地缩小 | ❌ **未达成**：3,876 → 3,887 行（净 **+11**，见下） |
 
 **为什么行数不是有效指标（修正上一片的判断）**：上一片记的是"要等其余三处接线
@@ -476,18 +476,42 @@ Same convention Phase 2 used, and for the same reason: each depends on the previ
 `Math.max(1, Math.floor(stride))`。当前 `stride` 恒为整数故无实际差异；新模块取
 渲染路径的规则，并在注释与单测里显式记录该选择。
 
-**剩余工作清单**：
-1. **枚举全部 23 个事件入口**，逐条用 stash 对照法补浏览器验证。已验 5 条
-   （选区建立 / 边缘拉伸 / 拖动选区主体 / 画线 / 滚轮平移），其余未枚举——
-   `onRulerMouseDown`、`onScrollerAuxClick`、`onScrollerScroll`、
-   `onScrollerContextMenu`、`onScrollerKeyDown`、`onScrollerWheelNative`、
-   `onCanvasPointerLeave`、`onCanvasPointerDown` 的其余分支等。
-2. `frameToIndex` 的接线：若要接，需要先把它改成**接受已归一化的 stride**的
+**入口枚举与验证（已完成）**：hook 对外暴露 **9 个事件处理器**
+（`onRulerMouseDown` / `onScrollerAuxClick` / `onScrollerScroll` /
+`onScrollerContextMenu` / `onScrollerKeyDown` / `onScrollerWheelNative` /
+`onCanvasPointerMove` / `onCanvasPointerLeave` / `onCanvasPointerDown`），
+其中带分支的（滚轮修饰键、按钮、滚动条区）展开为 **27 个观测点**，全部跑通。
+
+验证方法（`/tmp/prprof/entries.mjs` + `entrycmp.py`，未入库）：
+
+| 检查层 | 内容 | 结果 |
+|---|---|---|
+| 离散字段全等 | tool / cursor / selActive / selStart / uuids | ✅ 0 差异 |
+| 连续字段容差 | scrollL / scrollT / playhead / kernelPx | ✅ 0 超差 |
+| **效果断言** | 10 条"该手势是否真的生效" | ✅ 10/10 |
+
+**为什么必须有第三层**：若某次重构把某个手势改成**完全没反应**，两次运行仍会
+"完全相同"，纯字段比对会漏掉；效果断言直接检查行为是否发生，补上了这个盲区。
+
+**两个测量陷阱（已解决，供后续复用）**：
+
+1. **键盘滚动是平滑动画**，固定等待采样会拿到未收敛的值。实测同一份代码重跑、
+   固定等待 2s 仍有 ±4px 漂移，`PageUp`/`PageDown` 因多次累积会放大到上百像素
+   （曾误报成 117px 的"差异"）。改为**轮询到 `scrollTop` 连续 10 帧不变**再采样，
+   之后同一代码两次运行差异为 **0**。
+2. **曲线数据没有可读的 store 字段**，画线/擦除的观测量最初取错了画布
+   （内核模式下曲线画在 GL 层，`data-piano-roll-canvas` 墨迹恒为 0）。改用
+   **`store.dispatch` 计数增量**——与渲染后端无关，且能覆盖任何改状态的手势。
+
+**剩余工作**：
+1. `frameToIndex` 的接线：若要接，需要先把它改成**接受已归一化的 stride**的
    轻量形式（去掉每次调用的 `Number.isFinite` 与 `Math.floor`），否则在逐采样点
    循环里不划算。当前选择是不接。
-3. **本任务不做**（建议单列）：`dragArithmetic` 还应覆盖曲线拖动的手势增量换算
+2. **本任务不做**（建议单列）：`dragArithmetic` 还应覆盖曲线拖动的手势增量换算
    （`secDelta` / 像素增量 → 帧增量的那段，hook 里在 `rawFrameDelta` 等处），
    本次只做了选区相关的坐标换算。
+3. 扫描工具在 `/tmp` 下，**未入库**。若要长期复用（如后续再动手势代码），
+   建议移入 `scripts/` 并作为 Task 6 的回归手段。
 
 ---
 
