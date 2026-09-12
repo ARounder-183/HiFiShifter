@@ -1,7 +1,7 @@
 # 时间轴渲染内核收归唯一路径 · 设计
 
 - 日期：2026-09-13
-- 状态：已确认，待实施
+- 状态：已实施（见 docs/superpowers/plans/2026-09-13-timeline-single-path.md）
 - 相关：`docs/superpowers/specs/2026-09-12-pianoroll-kernel-migration-design.md`、`docs/superpowers/plans/2026-09-12-pianoroll-kernel-phase3.md`
 
 ## 1. 背景
