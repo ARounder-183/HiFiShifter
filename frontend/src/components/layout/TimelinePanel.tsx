@@ -216,6 +216,7 @@ import { buildTimelineRenderModel } from "./timeline/runtime/timelineRenderModel
 import { computeLeadingOverlapSecByClipId } from "./timeline/TrackLane";
 import { createTimelineAxis } from "./renderKernel/timelineAxis";
 import { resolveQuickExportClipIds } from "./timeline/quickExportSelection";
+import { isTrackListMirrorEcho } from "./timeline/scrollEcho";
 import type { ClipFormantMorph } from "../../features/session/sessionTypes";
 import { ClipFormantToolWindow } from "./timeline/clip/ClipFormantToolWindow";
 import type { ClipRenameClickCandidate } from "./timeline/clip/ClipHeader";
@@ -4114,11 +4115,30 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     );
     const handleTrackListScrollTopChange = React.useCallback(
         (scrollTop: number) => {
-            // 内核模式：把轨道头的滚动意图转发给内核（由内核统一钳制与标脏；
-            // 内核回写轨道头时带 0.5px 容差，因此不会形成来回循环）。
+            // 内核模式：轨道头只是**被动镜像**，它报来的 `scrollTop` 有两种来源，
+            // 且数值上无法区分，必须靠"宿主刚写过的值"来判（见 `timeline/scrollEcho`）：
+            //
+            // 1. **镜像回声**（绝大多数）：宿主每帧写 `trackList.scrollTop`，这次写入
+            //    触发的原生 `scroll` 事件会把**滞后一帧**的值报回来。若照单全收，内核
+            //    每帧被拉回一次——实测 40 步拖拽里 19 次调用**全部**是回声、每次
+            //    `delta ≈ −9px`，即用户报告的"纵向拖起来卡卡的、像被吸附"。
+            // 2. **真实输入**：焦点在轨道头控件上时，浏览器原生 scroll-into-view
+            //    （Tab / PageDown / End）会真正改变容器位置（实测 0 → 308 / 132 / 361）。
+            //    这类必须继续回灌，否则焦点导航时轨道头会与时间轴脱节。
+            //
+            // 【为什么旧判据失效】旧实现拿事件值与**内核当前值**比（< 0.5px 即忽略）。
+            // 拖拽时内核每帧前进，而事件报的是上一帧镜像值，两者相差约 9px，因此回声
+            // 被误当成用户输入收下，形成「内核 → DOM → 内核」的回退循环。
             const host = kernelHostRef.current;
             if (host != null) {
-                if (Math.abs(host.getViewport().scrollTop - scrollTop) < 0.5) return;
+                if (
+                    isTrackListMirrorEcho({
+                        mirroredScrollTop: host.getMirroredTrackListScrollTop(),
+                        nativeScrollTop: scrollTop,
+                    })
+                ) {
+                    return;
+                }
                 host.setScrollTop(scrollTop);
                 return;
             }

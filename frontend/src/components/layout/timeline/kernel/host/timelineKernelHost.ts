@@ -795,6 +795,18 @@ export interface TimelineKernelHost {
      */
     setScrollLeft(px: number): void;
     /**
+     * 读取「宿主上一次写进轨道头容器的竖向位置」。
+     *
+     * 【为什么需要这个访问器】轨道头容器只是**被动镜像**，其原生 `scroll` 事件
+     * 既可能是本次镜像回写的回声，也可能是浏览器原生 scroll-into-view（焦点导航）
+     * 的真实输入。两者报来的都是 `el.scrollTop`，**数值本身无法区分**——必须拿
+     * "宿主刚写过的值"作基准才能判出来。写这个值的地方只有宿主（`syncDom`），
+     * 因此只能由宿主提供。判据见 `timeline/scrollEcho`。
+     *
+     * @returns 上次镜像写入值（CSS px）；从未写过时为 `NaN`。
+     */
+    getMirroredTrackListScrollTop(): number;
+    /**
      * 原子地设置缩放与横向滚动位置（键盘缩放 / 视图同步）。
      *
      * 特殊说明：两个字段必须一次提交，否则会出现「用旧上限钳制新缩放」的中间态
@@ -4079,6 +4091,10 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
 
         setScrollLeft(px: number) {
             scroll.setScrollLeft(px);
+        },
+
+        getMirroredTrackListScrollTop() {
+            return lastTrackListScrollTop;
         },
 
         setViewport(next: { pxPerSec?: number; scrollLeft?: number }) {
