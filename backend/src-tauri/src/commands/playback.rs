@@ -231,6 +231,18 @@ pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde
         // 覆盖起播窗口的 Clip 尚未就绪时，音频回调进入原地等待（保持播放态、
         // 位置冻结、静音输出）；渲染线程每完成一个 Clip 都会推送刷新引擎
         // 快照，等待随之解除并自动开始播放。
+        //
+        // ── 起播等待期垫音抑制 ────────────────────────────────────────────────
+        // 本次起播仍需渲染的 clip 整体登记"垫音抑制"：其当前渲染就绪前，快照
+        // 不得回退旧版本渲染垫音 —— 起播行为与首渲染、与后台预渲染开关完全
+        // 一致（就绪即播，未就绪诚实冻结），绝不让用户先听到上一版参数的
+        // 结果再中途切换。条目在各 clip 当前渲染命中时由 build_snapshot 逐条
+        // 解除，因此播放中段的参数编辑不受影响：那时的 miss 对应"上一版渲染
+        // == 正在播放的内容"，垫音即零中断切换。必须在 UpdateTimeline 入队前
+        // 登记，首个起播快照才会生效。
+        crate::synth_clip_cache::set_pad_suppressed_clips(
+            clips_needing_render.iter().map(|info| info.clip.id.clone()),
+        );
         state.audio_engine.seek_sec(start_sec);
         state.audio_engine.update_timeline(timeline);
         state.audio_engine.set_playing(true, Some("original"));

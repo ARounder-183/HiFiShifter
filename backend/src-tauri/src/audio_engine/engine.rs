@@ -1010,6 +1010,11 @@ fn handle_stop(s: &mut EngineWorkerState) {
     s.position_frames.store(0, Ordering::Relaxed);
     *s.last_play_file = None;
     idle_track_meter_state(s.meter_state, s.meter_generation);
+    // ★ 起播等待期的垫音抑制随播放会话结束而清空：抑制集合表达的是"本次
+    // 起播时哪些 clip 未就绪"（见 synth_clip_cache 的垫音抑制说明），跨会话
+    // 残留会让下一次播放中段的参数编辑被错误地禁止垫音。下一次 play_original
+    // 会按当时的渲染状态整体重新登记。
+    crate::synth_clip_cache::clear_pad_suppressed_clips();
     // ★ 不再在停止时清空 pending_rendered_keys：key 在渲染失效处按需移除
     //（见 invalidate_clip_all_caches），始终与缓存条目一致；清空只会让下一次
     // 播放的首个快照把已渲染 clip 判为未渲染 —— 无谓的"起播即静音等待"。
