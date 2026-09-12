@@ -2498,12 +2498,18 @@ export const PianoRollPanel: React.FC = () => {
     /**
      * 把值域视口同步到竖向滚动位置（值域 → 像素）。
      *
-     * 流程：钳制视口 → 用既有映射把 `center` 换成像素滚动位置 → 交给滚动载体。
+     * 流程：钳制视口 → 更新内核数据镜像的值域 → 把 `center` 交给滚动载体。
      *
-     * 特殊说明（内核模式）：滚动载体从原生 scroller 换成内核宿主。两者语义一致
+     * 特殊说明 1（内核模式）：滚动载体从原生 scroller 换成内核宿主。两者语义一致
      * （都是 0..1600 的像素域），因此这里只换载体、不换映射——手感由
      * `verticalScrollTopFromCenter` 单一来源保证，两个模式不会分叉。
-     * 宿主内部自带 0.75px 级别的去重，故无需在这里再判一次差值。
+     * 宿主内部自带去重，故无需在这里再判一次差值。
+     *
+     * 特殊说明 2（**必须先刷新镜像的 span**）：竖向缩放（钢琴键区 alt/ctrl+滚轮）
+     * 只改 `span`，而视口存在 **ref** 里——ref 变更不触发 React 渲染，于是「内核数据
+     * 镜像」那个 effect 不会重跑，内核读到的 `valueDomain.span` 仍是旧值。此时
+     * `setValueCenter` 会按**旧 span** 反算像素位置，结果完全错位（实测：缩放后
+     * nativeTop 直接掉到 0 且再也动不了）。因此这里在提交前就地刷新镜像。
      *
      * @param param 参数名（决定值域边界）。
      * @param view 目标值域视口。
@@ -2514,6 +2520,12 @@ export const PianoRollPanel: React.FC = () => {
 
         const host = hostRef.current;
         if (PARAM_EDITOR_KERNEL_ENABLED && host) {
+            // 就地刷新值域镜像（见特殊说明 2）。
+            kernelDataRef.current.valueDomain = {
+                min: bounds.min,
+                max: bounds.max,
+                span: clampedView.span,
+            };
             host.setValueCenter(clampedView.center);
             return;
         }
