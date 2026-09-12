@@ -20,6 +20,7 @@ import type {
     StrokePoint,
     ValueViewport,
 } from "./types";
+import { hitTestSelectionEdge } from "./kernel/gestureHitTest";
 import type { MutableRefObject as MutRef } from "react";
 import { isModifierActive, isNoneBinding } from "../../../features/keybindings/keybindingsSlice";
 import { matchesKeybinding } from "../../../features/keybindings/useKeybindings";
@@ -1636,11 +1637,15 @@ export function usePianoRollInteractions(args: {
             const aBeat = Math.min(sel.aBeat, sel.bBeat);
             const bBeat = Math.max(sel.aBeat, sel.bBeat);
             const rect = canvas.getBoundingClientRect();
-            const leftX = beatToViewportPx(aBeat);
-            const rightX = beatToViewportPx(bBeat);
-            const localX = e.clientX - rect.left;
-            const edgeHitPx = 8;
-            return Math.abs(localX - leftX) <= edgeHitPx || Math.abs(localX - rightX) <= edgeHitPx;
+            // 判定抽到 `kernel/gestureHitTest`（纯函数，有单测）；这里只负责提供
+            // 几何量：选区两缘的视口坐标 + 指针的画布局部 x。
+            return (
+                hitTestSelectionEdge({
+                    leftXPx: beatToViewportPx(aBeat),
+                    rightXPx: beatToViewportPx(bBeat),
+                    localXPx: e.clientX - rect.left,
+                }) !== null
+            );
         },
         [toolMode, paramStretchKb, selectionRef, canvasRef, beatToViewportPx],
     );
@@ -2010,17 +2015,13 @@ export function usePianoRollInteractions(args: {
                         const canvas = canvasRef.current;
                         if (canvas) {
                             const rect = canvas.getBoundingClientRect();
-                            const leftX = beatToViewportPx(aBeat);
-                            const rightX = beatToViewportPx(bBeat);
-                            const localX = e.clientX - rect.left;
-                            const EDGE_HIT_PX = 8;
-                            const hitLeft = Math.abs(localX - leftX) <= EDGE_HIT_PX;
-                            const hitRight = Math.abs(localX - rightX) <= EDGE_HIT_PX;
-                            const edgeKind: "left" | "right" | null = hitLeft
-                                ? "left"
-                                : hitRight
-                                  ? "right"
-                                  : null;
+                            // 判定抽到 `kernel/gestureHitTest`（纯函数，有单测）：
+                            // 左缘优先的规则与内联实现逐字一致。
+                            const edgeKind = hitTestSelectionEdge({
+                                leftXPx: beatToViewportPx(aBeat),
+                                rightXPx: beatToViewportPx(bBeat),
+                                localXPx: e.clientX - rect.left,
+                            });
 
                             if (edgeKind) {
                                 const pv = paramViewRef.current;
