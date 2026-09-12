@@ -1204,7 +1204,13 @@ export const PianoRollPanel: React.FC = () => {
         // `pending.nativeScrollLeft` 是共享视口的原生值；换算成绘制坐标后走统一载体
         // （内核模式会再加回偏移，旧实现直接写原生，两者落到同一位置）。
         applyHorizontalScrollPosition(drawingScrollLeft);
-        syncScrollLeft(scroller);
+        // 【内核模式下不能再调 syncScrollLeft】它是「读原生 scroller → 采纳为真值」的
+        // 路径，而此时原生镜像还停留在**上一帧的旧值**（本函数的写入要等内核下一帧才
+        // 回写），于是会把刚提交的目标位置又覆盖回旧值——表现为「同步从 1200 拨回 0
+        // 时参数编辑器不动」。旧实现里原生就是事实源，读回来即是刚写的值，故无此问题。
+        if (!PARAM_EDITOR_KERNEL_ENABLED) {
+            syncScrollLeft(scroller);
+        }
         applyScrollLayers(drawingScrollLeft);
         timelineSyncApplyingRef.current = false;
         // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2209,7 +2215,6 @@ export const PianoRollPanel: React.FC = () => {
             host.dispose();
         };
         // 挂载时创建一次；数据经 kernelDataRef 流入（见上方注释）。
-        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     useLayoutEffect(() => {
