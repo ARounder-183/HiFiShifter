@@ -115,7 +115,8 @@ VW=1920 VH=1200 node scripts/dev-shot.mjs "http://127.0.0.1:5174/?mock=1" /tmp/t
 ```bash
 cd /Users/guoqiangye/code/HiFiShifter/frontend
 VW=1920 VH=1200 node scripts/dev-shot.mjs "http://127.0.0.1:5174/?mock=1" /tmp/before-task1.png 4500 '[
- {"type":"eval","js":"const h=window.__hfsKernel; const v=h.getViewport(); return {pxPerSec:v.pxPerSec, rowHeight:v.rowHeight, scrollLeft:v.scrollLeft, scrollTop:v.scrollTop};"},
+ {"type":"eval","js":"const h=window.__hfsKernel; const v=h.getViewport(); return {pxPerSec:v.pxPerSec, scrollLeft:v.scrollLeft, scrollTop:v.scrollTop};"},
+ {"type":"eval","js":"document.querySelector(\"[data-timeline-scroller]\").focus(); return 1;"},
  {"type":"key","key":"PageDown"},{"type":"wait","ms":400},
  {"type":"eval","js":"const h=window.__hfsKernel; return {afterPageDown_top:+h.getViewport().scrollTop.toFixed(2)};"}
 ]' 2>&1 | grep -E "^EVAL"
@@ -162,12 +163,13 @@ npx vitest run 2>&1 | tail -5
 ```bash
 cd /Users/guoqiangye/code/HiFiShifter/frontend
 VW=1920 VH=1200 node scripts/dev-shot.mjs "http://127.0.0.1:5174/?mock=1" /tmp/after-task1.png 4500 '[
- {"type":"eval","js":"const h=window.__hfsKernel; const v=h.getViewport(); return {pxPerSec:v.pxPerSec, rowHeight:v.rowHeight, scrollLeft:v.scrollLeft, scrollTop:v.scrollTop};"},
+ {"type":"eval","js":"const h=window.__hfsKernel; const v=h.getViewport(); return {pxPerSec:v.pxPerSec, scrollLeft:v.scrollLeft, scrollTop:v.scrollTop};"},
+ {"type":"eval","js":"document.querySelector(\"[data-timeline-scroller]\").focus(); return 1;"},
  {"type":"key","key":"PageDown"},{"type":"wait","ms":400},
  {"type":"eval","js":"const h=window.__hfsKernel; return {afterPageDown_top:+h.getViewport().scrollTop.toFixed(2)};"}
 ]' 2>&1 | grep -E "^EVAL"
 ```
-期望：与步骤 1 的输出**逐值相同**。
+期望：与步骤 1 的输出**逐值相同**（含 `afterPageDown_top:132`；不 focus 会得到 0）。
 
 - [ ] **步骤 5：目视确认渲染正常**
 
@@ -272,11 +274,12 @@ npx vitest run 2>&1 | tail -4
 cd /Users/guoqiangye/code/HiFiShifter/frontend
 VW=1920 VH=1200 node scripts/dev-shot.mjs "http://127.0.0.1:5174/?mock=1" /tmp/task2.png 4500 '[
  {"type":"eval","js":"const h=window.__hfsKernel; return {kernel:!!h, inv:!!document.querySelector(\"[data-timeline-scroller]\")};"},
+ {"type":"eval","js":"document.querySelector(\"[data-timeline-scroller]\").focus(); return 1;"},
  {"type":"key","key":"PageDown"},{"type":"wait","ms":400},
  {"type":"eval","js":"return {afterPageDown_top:+window.__hfsKernel.getViewport().scrollTop.toFixed(2)};"}
 ]' 2>&1 | grep -E "^EVAL"
 ```
-期望：`kernel:true`、`inv:true`、`afterPageDown_top:132`。
+期望：`kernel:true`、`inv:true`、`afterPageDown_top:132`（不 focus 会得到 0）。
 
 - [ ] **步骤 7：提交**
 
@@ -538,11 +541,12 @@ cd /Users/guoqiangye/code/HiFiShifter/frontend
 npx vitest run 2>&1 | tail -4
 VW=1920 VH=1200 node scripts/dev-shot.mjs "http://127.0.0.1:5174/?mock=1" /tmp/task3.png 4500 '[
  {"type":"eval","js":"const h=window.__hfsKernel; return {kernel:!!h};"},
+ {"type":"eval","js":"document.querySelector(\"[data-timeline-scroller]\").focus(); return 1;"},
  {"type":"key","key":"PageDown"},{"type":"wait","ms":400},
  {"type":"eval","js":"return {afterPageDown_top:+window.__hfsKernel.getViewport().scrollTop.toFixed(2)};"}
 ]' 2>&1 | grep -E "^EVAL"
 ```
-期望：测试 `2 failed | 855 passed`；`kernel:true`、`afterPageDown_top:132`。
+期望：测试 `2 failed | 855 passed`；`kernel:true`、`afterPageDown_top:132`（不 focus 会得到 0）。
 
 - [ ] **步骤 10：提交**
 
@@ -1472,6 +1476,7 @@ grep -rn "hifishifter.timelineKernel\|hifishifter.pianoRollKernel" src/ 2>/dev/n
 cd /Users/guoqiangye/code/HiFiShifter/frontend
 VW=1920 VH=1200 node scripts/dev-shot.mjs "http://127.0.0.1:5174/?mock=1" /tmp/final-ok.png 5000 '[
  {"type":"eval","js":"const h=window.__hfsKernel; return {kernel:!!h, pxPerSec:h.getViewport().pxPerSec};"},
+ {"type":"eval","js":"document.querySelector(\"[data-timeline-scroller]\").focus(); return 1;"},
  {"type":"key","key":"PageDown"},{"type":"wait","ms":400},
  {"type":"eval","js":"return {pgdn_top:+window.__hfsKernel.getViewport().scrollTop.toFixed(1)};"},
  {"type":"wheel","x":1200,"y":190,"deltaY":-240},{"type":"wait","ms":500},
