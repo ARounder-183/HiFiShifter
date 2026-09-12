@@ -986,10 +986,6 @@ export const jaJP = {
         "確認項目：1. ハードウェアアクセラレーションとソフトウェアラスタライズが無効になっていないか（ブラウザ設定または起動オプション）；2. リモートデスクトップ / 仮想マシンの場合はローカルで実行してみる；3. GPU ドライバを更新する；4. グラフィックス資源を使う他のウィンドウを閉じてアプリを再起動する。",
     kernel_unavailable_diagnostics: "診断情報をコピー",
     kernel_unavailable_copied: "コピーしました",
-    render_kernel_enabled: "新しい描画カーネルを使用（タイムライン / パラメータエディタ）",
-    render_kernel_enabled_desc:
-        "オフにすると従来の描画実装に戻ります。特定の GPU ドライバで表示異常が出るときの切り分け用です。",
-    render_kernel_restart_required: "保存しました。アプリを再起動すると反映されます。",
     ruler_label_spacing: "ラベル間隔",
     show_playhead_time_in_track_header: "トラックヘッダーに再生ヘッド時間を表示",
     copy_playhead_time: "再生ヘッド時間をコピー",

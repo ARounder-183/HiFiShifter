@@ -12,7 +12,6 @@ import type { AppDispatch } from "../../../app/store";
 import { paramsApi } from "../../../services/api";
 import { seekPlayhead, setplayheadSec } from "../../../features/session/sessionSlice";
 import { clamp, MAX_PX_PER_SEC, MIN_PX_PER_SEC } from "../timeline";
-import { isPianoRollKernelEnabled } from "../timeline/kernel/featureFlag";
 import type {
     ParamMorphOverlay,
     ParamName,
@@ -1161,27 +1160,28 @@ export function usePianoRollInteractions(args: {
     /**
      * 原生滚动容器的 `scroll` 事件。
      *
-     * 【内核模式下整条忽略——这是"拖拽阶梯感"的根因】
-     * 内核模式里原生 scroller 只是**镜像**：真值在 `ScrollKernel`，由宿主在帧提交
-     * 时写回 DOM。那次回写会触发原生 `scroll` 事件，而本处理函数无法把它与"用户
-     * 真的滚了原生容器"区分——于是把内核刚写下的位置当成用户输入推回共享视口。
+     * 【本处理函数**无条件**忽略事件——这是"拖拽阶梯感"的根因所在】
+     * 内核是唯一渲染路径，原生 scroller 只是**镜像**：真值在 `ScrollKernel`，由宿主
+     * 在帧提交时写回 DOM。那次回写会触发原生 `scroll` 事件，而本处理函数无法把它与
+     * "用户真的滚了原生容器"区分——于是把内核刚写下的位置当成用户输入推回共享视口。
      * 时间轴收到后应用该值，而此时它已经前进到更远的位置 → **位置回退**。
      *
      * 实测（拖时间轴带动参数编辑器）：共享视口序列 `10 → 20 → 10`，时间轴内核随之
      * 从 20 退回 10；连续拖拽时每三帧回退一次（增量呈 `+30, +10, -10` 循环），
      * 即用户报告的"阶梯感 / 被吸附感"。
      *
-     * 【忽略它不会漏掉任何输入】内核模式下每个用户输入都有明确入口，且都在写完
-     * 原生位置后**显式**调用 `syncScrollLeft`：滚轮、中键平移、框选自动滚屏；
-     * 拖自绘滚动条则由宿主经 `onUserScrollLeft` 上报。这个事件纯属回声。
+     * 【为什么可以无条件忽略，而不会漏掉任何输入】每个用户输入都有明确入口，且都在
+     * 写完原生位置后**显式**调用 `syncScrollLeft`：滚轮、中键平移、框选自动滚屏；
+     * 拖自绘滚动条则由宿主经 `onUserScrollLeft` 上报。竖向的原生键（PageUp /
+     * PageDown / Home / End）由宿主 `onKeyDown` 接管（见 `renderKernel/keyboardScroll`）。
+     * 因此本事件**永远**只是镜像回声，没有任何一条输入依赖它。
+     *
+     * 特殊说明：参数 `e` 保留但不再读取——签名必须与 JSX 的 `onScroll` 处理器兼容，
+     * 事件对象本身也仍由 React 传入。`void e` 显式表明"有意不使用"。
      */
-    const onScrollerScroll = useCallback(
-        (e: UIEvent<HTMLDivElement>) => {
-            if (isPianoRollKernelEnabled()) return;
-            syncScrollLeft(e.currentTarget as HTMLDivElement);
-        },
-        [syncScrollLeft],
-    );
+    const onScrollerScroll = useCallback((e: UIEvent<HTMLDivElement>) => {
+        void e;
+    }, []);
 
     const onScrollerContextMenu = useCallback(
         (e: ReactMouseEvent) => {

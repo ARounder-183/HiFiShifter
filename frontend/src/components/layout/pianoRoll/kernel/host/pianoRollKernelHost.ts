@@ -16,8 +16,10 @@
  * - **阶段 1 不含 WebGL**：绘制由面板的 Canvas2D 完成，宿主经 `onFrame(axis)` 交回。
  *   因此本模块的滚动 / 视口逻辑可在无 jsdom 的 node 环境单测（见同目录 `.test.ts`）。
  *   阶段 2/3 已在本文件之上叠加 4 条 GL 管线（静态场景 / 键盘与数值轴 / 文字字形 /
- *   曲线），但它们的**失败都是软着陆**：GL 不可用只把句柄置空、退回 Canvas2D 路径，
- *   不抛错（见「GL 场景层」一节的说明）。
+ *   曲线）。**这些管线现在没有 Canvas2D 备份**——面板侧的 `skip*` 恒为 true（GL 是
+ *   这些图层的唯一绘制者），因此本文件内的"失败软着陆"只指**不抛错、只把句柄置空**
+ *   这一层；失败后那些图层无人绘制（已知并接受的限制，见
+ *   `docs/superpowers/specs/2026-09-13-timeline-single-path-design.md` §2.4）。
  * - **输入按轴分配所有权**：滚动条 thumb 拖拽与轨道翻页、以及**竖向键盘翻页**
  *   （PageUp / PageDown / Home / End，见 `renderKernel/keyboardScroll`）由宿主注册监听；
  *   其余手势（滚轮、中键平移、绘制）仍在面板与 `usePianoRollInteractions`。
@@ -181,10 +183,15 @@ export interface PianoRollKernelHostArgs {
      */
     readonly axisWidthPx?: number;
     /**
-     * 是否启用 GL 场景层。缺省 `false`。
+     * 是否启用 GL 场景层。缺省 `false`（**不传就退化为纯滚动内核**）。
      *
-     * 特殊说明：这是**运行时开关**而不是模块常量，便于测试两种路径而不必重新
+     * 特殊说明 1：这是**运行时入参**而不是模块常量，便于测试两种路径而不必重新
      * 导入模块（模块级常量在 dev 下还会被 HMR 缓存）。
+     *
+     * 特殊说明 2：生产调用方（`PianoRollPanel`）现在**恒传 `true`**——GL 已接管
+     * 网格 / 键盘 / 轴文字 / 播放头 / 曲线，面板侧的 `skip*` 也恒为 true，因此
+     * "不开 GL"在生产上已不是一种可用的组合（见设计文档 §2.4）。保留该入参是为了
+     * 让本文件仍可被单测以 `false` 覆盖纯滚动路径。
      */
     readonly glSceneEnabled?: boolean;
     /**
@@ -220,7 +227,7 @@ export interface PianoRollKernelHostArgs {
      * 【为什么必须与 `onScrollLeftCommit` 分开】宿主每帧把真值写回原生 scroller
      * （镜像），这会触发 `scroll` 事件。面板若在该事件里把位置推给共享视口，就会把
      * 宿主的**自身回写**误当成用户滚动；若不推送，则**滚动条拖拽 / 轨道翻页**这类
-     * 真实手势又会漏掉同步（旧实现里拖原生滚动条是会被同步的）。
+     * 真实手势又会漏掉同步。
      *
      * 两者无法靠比较数值区分（拖拽后的镜像回写与用户原生滚动值相同），因此由
      * **来源**区分：只有宿主自己解析出的用户手势（拖 thumb、点轨道翻页）走本回调。
@@ -294,9 +301,9 @@ export interface PianoRollKernelHost {
     /**
      * 读取 GL 场景层的运行状态（供面板提示与浏览器验证使用）。
      *
-     * 【为什么放进公开句柄】GL 走的是"失败软着陆"策略：不可用时静默退回 Canvas2D，
-     * 面板外观完全正常。于是"GL 到底有没有生效"无法从画面上判断——必须能读到
-     * 明确状态，否则验证会误把"退回 Canvas2D"当成"GL 正常"。
+     * 【为什么放进公开句柄】GL 失败时**不抛错**（只把句柄置空），面板外观不一定
+     * 立刻可辨（曲线等图层本就归 GL，网格则整片消失）。于是"GL 到底有没有生效"
+     * 必须能读到明确状态，否则验证会误把"GL 未生效"当成"GL 正常"。
      *
      * @returns `active` 表示 GL 已建好并在绘制；
      *          `failureReason` 在尝试启用但失败时给出原因（未启用时为 null）；
@@ -447,9 +454,11 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
     // 【职责】把**静态**图层（网格等）画到独立画布上：几何按内容坐标构建并常驻
     // GPU，滚动帧只更新 `u_viewOrigin`、播放帧不重绘几何。这正是阶段 2 的收益点。
     //
-    // 【失败必须是软着陆】WebGL2 不可用（老驱动 / 远程桌面 / 上下文数超限）是
-    // 预期内的环境差异。任一步失败都只记原因并**退回 Canvas2D 路径**——绝不能让
-    // 参数编辑器变空白。因此这里不抛错，只把 `gl` 置空。
+    // 【失败不抛错，只把句柄置空】WebGL2 不可用（老驱动 / 远程桌面 / 上下文数超限）
+    // 是预期内的环境差异。任一步失败都只记原因并让这些 GL 图层**无人绘制**——面板侧
+    // 的 `skip*` 恒为 true，已经没有 Canvas2D 备份可退（已知并接受的限制，
+    // 见设计文档 §2.4）。这里仍不抛错：抛错会让整个面板崩掉，而"图层缺失"至少
+    // 还能显示曲线与波形，且失败原因可经 `getGlStatus()` 读到。
     let glHandle: GlCanvasHandle | null = null;
     let glProgram: SdfBoxProgram | null = null;
     let glFailureReason: string | null = null;
@@ -1164,14 +1173,15 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
     //
     // 【为什么必须采纳】创建宿主的是 effect，而「值域 → 竖向滚动条」与「时间轴同步」
     // 两个 layout effect 都排在它**之前**执行——它们已经往原生 scroller 写过目标
-    // 位置，但那时的宿主还不存在（`hostRef.current` 仍为 null，走了旧实现分支）。
+    // 位置，但那时的宿主还不存在（`hostRef.current` 仍为 null，`applyHorizontalScrollPosition`
+    // 等入口退回直接写原生 scroller 那一支）。
     // 若内核仍从 0 起步，它的首帧镜像回写会把这些位置**覆盖掉**，表现为
     // 「钢琴键盘整体偏移一个八度（竖向回顶端）/ 横向跳回工程起点」——两者都曾在
     // 浏览器像素比对中实际出现。
     //
     // 因此这里把容器当前的两轴原生位置都收进内核。此刻值的来源有三，都应当采纳：
-    // 上述 layout effect 写入的目标值、浏览器恢复的历史滚动位置（旧实现里同样是
-    // 事实源）、以及重挂载前内核自己镜像回写的值。
+    // 上述 layout effect 写入的目标值、浏览器恢复的历史滚动位置、以及重挂载前内核
+    // 自己镜像回写的值。
     {
         const nativeLeft = container.scrollLeft;
         if (Number.isFinite(nativeLeft) && nativeLeft > 0) {

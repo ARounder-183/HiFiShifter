@@ -734,6 +734,19 @@ npx tsc -b --noEmit 2>&1 | head -20
 
 `kernelMount.ts` 的 `enabled` 维度已消失，保留它会造成"含恒真参数的伪抽象"。把它替换为不引入新模块的直接判断（删除该文件），**同时**把其测试改为守护"失败必须报错而非静默空白"这一行为——通过保留一个新测试文件覆盖面板的判定逻辑。
 
+> **实施记录（与本文的偏差，2026-09-13 阶段 4 提交）**：实际执行时**保留了
+> `kernelMount.ts` 与 `kernelMount.test.ts`**（仅修正其已成假的注释：上游改为"当前
+> 无生产调用方"、`enabled` 的语义由"用户开关"改为"调用方意愿"），未按本节删除。
+> 原因有二：
+> 1. 本节原本的处置路径已在任务 4 步骤 7 之外由 `kernelAvailability.ts` + 测试
+>    **另行承接**（该文件在阶段 4 之前就已存在），"删除以保住行为守护"的动机不再成立；
+> 2. 阶段 4 的验收判据是**通过数恰为 838**（= 阶段 3 的 863 − `featureFlag.test.ts` 的
+>    25）。`kernelMount.test.ts` 有 8 项用例，删掉会得到 830，与判据不符。
+>
+> 结论：删不删它是**独立决策**，不属于"移除开关"的任务范围。已在该文件头写明
+> "当前无生产消费者、是否删除属独立决策"，避免下一位读者误以为是遗漏。
+> 若将来决定删除，应同时把验收计数改为 830 并说明差异。
+
 具体做法：删除 `kernelMount.ts` 与 `kernelMount.test.ts`，并在 `frontend/src/components/layout/TimelinePanel.tsx` 内联判定（步骤 7 的 `kernelAvailable`）。为保住行为守护，在任务 5 创建的 `KernelUnavailableNotice.tsx` 旁新增 `kernelAvailability.ts` + `.test.ts`：
 
 创建 `frontend/src/components/layout/timeline/kernel/kernelAvailability.ts`：

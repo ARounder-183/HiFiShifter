@@ -1051,10 +1051,6 @@ export const koKR = {
         "확인 사항: 1. 하드웨어 가속과 소프트웨어 래스터화가 비활성화되지 않았는지 확인(브라우저 설정 또는 실행 옵션); 2. 원격 데스크톱 / 가상 머신이라면 로컬에서 실행해 보기; 3. GPU 드라이버 업데이트; 4. 그래픽 리소스를 사용하는 다른 창을 닫고 앱 재시작.",
     kernel_unavailable_diagnostics: "진단 정보 복사",
     kernel_unavailable_copied: "복사됨",
-    render_kernel_enabled: "새 렌더 커널 사용(타임라인 / 파라미터 편집기)",
-    render_kernel_enabled_desc:
-        "끄면 기존 렌더 구현으로 돌아갑니다. 특정 GPU 드라이버에서 표시 문제가 있을 때 확인용입니다.",
-    render_kernel_restart_required: "저장했습니다. 앱을 다시 시작하면 적용됩니다.",
     ruler_label_spacing: "라벨 간격",
     show_playhead_time_in_track_header: "트랙 헤더에 재생 헤드 시간 표시",
     copy_playhead_time: "재생 헤드 시간 복사",

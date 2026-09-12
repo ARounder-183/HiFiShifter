@@ -952,10 +952,6 @@ export const zhTW = {
         "可依次排查：1. 確認未停用硬體加速與軟體光柵（瀏覽器設定或啟動參數）；2. 若在遠端桌面 / 虛擬機中，嘗試在本機執行；3. 更新顯示卡驅動；4. 關閉其它佔用圖形資源的視窗後重新啟動應用程式。",
     kernel_unavailable_diagnostics: "複製診斷資訊",
     kernel_unavailable_copied: "已複製",
-    render_kernel_enabled: "使用新渲染核心（時間軸 / 參數編輯器）",
-    render_kernel_enabled_desc:
-        "關閉後回退到既有渲染實作。用於某個顯示卡驅動下出現顯示異常時排查。",
-    render_kernel_restart_required: "已儲存，重新啟動應用程式後生效。",
     ruler_label_spacing: "標籤間距",
     show_playhead_time_in_track_header: "在軌道標題列顯示播放游標時間",
     copy_playhead_time: "複製播放游標時間",

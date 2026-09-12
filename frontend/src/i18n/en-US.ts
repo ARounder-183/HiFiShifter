@@ -1053,10 +1053,6 @@ export const enUS = {
         "Things to check: 1. Make sure hardware acceleration and software rasterization are not disabled (browser settings or launch flags); 2. If you are on a remote desktop or VM, try running locally; 3. Update your GPU driver; 4. Close other windows using graphics resources and restart the app.",
     kernel_unavailable_diagnostics: "Copy diagnostics",
     kernel_unavailable_copied: "Copied",
-    render_kernel_enabled: "Use the new render kernel (timeline / parameter editor)",
-    render_kernel_enabled_desc:
-        "Turn off to fall back to the previous renderer. Useful when diagnosing display problems on a specific GPU driver.",
-    render_kernel_restart_required: "Saved. Restart the app to apply.",
     ruler_label_spacing: "Label Spacing",
     show_playhead_time_in_track_header: "Show playhead time in track header",
     copy_playhead_time: "Copy Playhead Time",
