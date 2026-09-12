@@ -19,7 +19,6 @@ import { OverlapEditLayer } from "./OverlapEditLayer";
 import { CLIP_HEADER_HEIGHT, CLIP_BODY_PADDING_Y } from "./constants";
 import { buildTimelineHitTestIndex, hitTestTimeline } from "./runtime/timelineHitTest";
 import { normalizedTrackColorCss } from "./runtime/timelineCanvasStyle";
-import { MidiPitchTrackCanvas } from "../../waveform/MidiPitchTrackCanvas";
 import { SNAP_HIGHLIGHT_GROUP, clearSnapHighlights } from "../../../utils/snapHighlight";
 
 function compareClipRenderOrder(a: ClipInfo, b: ClipInfo): number {
@@ -78,9 +77,6 @@ type TrackLaneProps = {
     rowHeight: number;
     pxPerSec: number;
     bpm: number;
-    viewportWidthPx: number;
-    viewportStartSec: number;
-    viewportEndSec: number;
     overlayClipIds?: string[];
 
     altPressed: boolean;
@@ -207,9 +203,6 @@ export const TrackLane = React.memo(
             trackClips,
             rowHeight,
             pxPerSec,
-            viewportWidthPx,
-            viewportStartSec,
-            viewportEndSec,
             overlayClipIds = [],
             altPressed,
             fadeShapeCycleKb = null,
@@ -289,8 +282,6 @@ export const TrackLane = React.memo(
         // ghost clip 的 color-mix 需要和时间线画布同一套主题化轨道色。
         const { mode } = useAppTheme();
         const darkMode = mode === "dark";
-        // 波形区域高度计算（与 ClipItem 一致）
-        const waveformHeight = Math.max(1, rowHeight - CLIP_BODY_PADDING_Y - CLIP_HEADER_HEIGHT);
         const [hoveredClipId, setHoveredClipId] = React.useState<string | null>(null);
         // hover 命中测试合帧的队列（scheduleHoverHitTest 定义在 hitTestLane 之后，
         // 因为依赖其回调引用）。
@@ -804,18 +795,9 @@ export const TrackLane = React.memo(
                         </div>
                     </div>
                 ) : null}
-                {/* MIDI 音高预览 Canvas：绘制 MIDI clip 的音高线 */}
-                <MidiPitchTrackCanvas
-                    clips={trackClips}
-                    trackHeight={rowHeight}
-                    waveformTop={CLIP_HEADER_HEIGHT}
-                    waveformHeight={waveformHeight}
-                    pxPerSec={pxPerSec}
-                    viewportWidthPx={viewportWidthPx}
-                    viewportStartSec={viewportStartSec}
-                    viewportEndSec={viewportEndSec}
-                    strokeWidth={1.5}
-                />
+                {/* MIDI / 音高参考 clip 的音高线由 TimelineSurface 内的
+                TimelinePitchLineSurface（sticky 层 + 统一帧提交）绘制，与波形
+                同帧同序，不再在内容层逐轨挂 canvas。 */}
                 {overlayTrackClips.map((clip) => {
                     const selected =
                         multiSelectedClipIds.length > 0
@@ -951,7 +933,6 @@ export const TrackLane = React.memo(
             prev.rowHeight === next.rowHeight &&
             prev.pxPerSec === next.pxPerSec &&
             prev.bpm === next.bpm &&
-            prev.viewportWidthPx === next.viewportWidthPx &&
             prev.altPressed === next.altPressed &&
             prev.selectedClipId === next.selectedClipId &&
             prev.multiSelectedClipIds === next.multiSelectedClipIds &&
@@ -1004,8 +985,6 @@ export const TrackLane = React.memo(
             prev.clipRangeToParamKb === next.clipRangeToParamKb &&
             prev.pitchDragKb === next.pitchDragKb &&
             prev.onClipPitchDragStart === next.onClipPitchDragStart
-            // viewportStartSec / viewportEndSec are consumed by TimelineWaveformSurface via the viewport bus
-            // after mount, so pure horizontal scroll should not force a TrackLane rerender.
         );
     },
 );

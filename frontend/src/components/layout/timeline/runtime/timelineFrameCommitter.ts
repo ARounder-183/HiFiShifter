@@ -48,14 +48,16 @@ export interface TimelineFrameCommitter {
 /**
  * 图层的固定绘制顺序。
  *
- * 顺序即层叠顺序：网格在最底，clip 体与波形居中，网格覆盖层压在波形上（弱化
- * 波形区的网格），播放头置顶。任何新增图层都必须在这里登记，避免顺序散落在
- * 各个组件里。
+ * 顺序即层叠顺序：网格在最底，clip 体与波形居中，音高线紧随波形（Pitch
+ * Reference Clip 的原始音高线压在色块与波形之上），网格覆盖层再压上（弱化
+ * 波形/音高线区的网格），播放头置顶。任何新增图层都必须在这里登记，避免
+ * 顺序散落在各个组件里。
  */
 export const LAYER_ORDER = {
     gridBack: 10,
     clipBody: 20,
     waveform: 30,
+    pitchLine: 35,
     gridOverlay: 40,
     playhead: 50,
     /** 未迁移的历史订阅方（仍用总线的旧式 listener）。 */

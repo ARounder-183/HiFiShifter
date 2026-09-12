@@ -2231,9 +2231,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                                 rowHeight={rowHeight}
                                                 pxPerSec={pxPerSec}
                                                 bpm={s.bpm}
-                                                viewportWidthPx={viewportWidth}
-                                                viewportStartSec={viewportStartSec}
-                                                viewportEndSec={viewportEndSec}
                                                 overlayClipIds={
                                                     sparseClipRenderModel.overlayClipIdsByTrackId[
                                                         track.id

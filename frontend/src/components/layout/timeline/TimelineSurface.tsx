@@ -21,6 +21,7 @@ import { timelineViewportBus } from "../../../utils/timelineViewportBus";
 import { BackgroundGrid } from "./BackgroundGrid";
 import { invokeGridRedrawHandler } from "./gridRedrawBridge";
 import { TimelineCanvasViewport } from "./TimelineCanvasViewport";
+import { TimelinePitchLineSurface } from "./TimelinePitchLineSurface";
 import { TimelineWaveformSurface } from "./TimelineWaveformSurface";
 import { secToViewportPx, type TimelineAxis } from "./runtime/timelineAxis.js";
 import { LAYER_ORDER } from "./runtime/timelineFrameCommitter.js";
@@ -140,7 +141,7 @@ export const TimelineSurface = React.memo(function TimelineSurface(props: {
                     top: props.topPx,
                     width: props.widthPx,
                     height: props.heightPx,
-                    // 显式高于 clip body 画布：波形必须绘制在色块之上。
+                    // 显式高于 clip body 画布：波形与音高线必须绘制在色块之上。
                     zIndex: 2,
                 }}
             >
@@ -152,6 +153,17 @@ export const TimelineSurface = React.memo(function TimelineSurface(props: {
                     widthPx={props.widthPx}
                     heightPx={props.heightPx}
                     axis={props.axis}
+                />
+                {/* Pitch Reference Clip 的原始音高线：与波形同一 sticky 层、
+                同一帧提交链（LAYER_ORDER.pitchLine），不再经内容层 canvas +
+                JS transform 补偿 —— 后者在合成器滚动下必然滞后一帧以上。 */}
+                <TimelinePitchLineSurface
+                    tracks={props.tracks}
+                    startTrackIndex={props.startTrackIndex}
+                    clipsByTrackId={props.clipsByTrackId}
+                    rowHeight={props.rowHeight}
+                    widthPx={props.widthPx}
+                    heightPx={props.heightPx}
                 />
             </div>
             <BackgroundGrid
