@@ -1894,6 +1894,7 @@ export const PianoRollPanel: React.FC = () => {
         projectSec: 1,
         valueDomain: { min: 0, max: 1, span: 1 },
         grid: null,
+        overlay: null,
     });
     /** 自绘滚动条的 thumb（仅内核模式挂载）。 */
     const hScrollbarThumbRef = useRef<HTMLDivElement | null>(null);
@@ -1905,6 +1906,8 @@ export const PianoRollPanel: React.FC = () => {
     const glCanvasRef = useRef<HTMLCanvasElement | null>(null);
     /** 键盘轴 GL 画布（阶段 2，Task 4）。独立画布：轴列不随横向滚动移动。 */
     const glAxisCanvasRef = useRef<HTMLCanvasElement | null>(null);
+    /** 动态叠加层 GL 画布（阶段 2，Task 6）：播放头与选区，位于曲线层之上。 */
+    const glOverlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
     function pitchDeltaToDegreeSteps(
         basePitch: number,
@@ -2181,6 +2184,7 @@ export const PianoRollPanel: React.FC = () => {
             initialPxPerSec: pxPerSecRef.current,
             glCanvas: glCanvasRef.current,
             glAxisCanvas: glAxisCanvasRef.current,
+            glOverlayCanvas: glOverlayCanvasRef.current,
             axisWidthPx: AXIS_W,
             glSceneEnabled: PARAM_EDITOR_GL_SCENE_ENABLED,
             // 偏移经 ref 读取（同步开关与布局偏移都在运行时变化，闭包捕获会读到挂载时的旧值）。
@@ -3234,6 +3238,67 @@ export const PianoRollPanel: React.FC = () => {
                 scaleSegEndQ,
             );
         }
+        // 叠加层镜像（选区块 + 播放头）必须**每帧**更新：播放头用的是插值的
+        // 视觉值 `visualPlayheadSecRef`，它不由 React 渲染驱动（见下方注释），
+        // 因此不能在 render 期写入镜像——那样播放头会停在旧的提交值上。
+        if (PARAM_EDITOR_KERNEL_ENABLED) {
+            kernelDataRef.current.overlay = {
+                playheadSec: visualPlayheadSecRef.current,
+                selection: selectionRef.current,
+                secPerBeat,
+            };
+        }
+        /**
+         * 主画布的内容签名（阶段 2 Task 6）。
+         *
+         * 【必须包含什么】主画布上绘制的**全部输入**：
+         * - 绘图资源：各条曲线数据、参考线、检测曲线、副参数视口、morph 叠加、
+         *   剪贴板预览、选区块、live 编辑覆盖、音阶高亮（含 tempoMap 段）；
+         * - 视口：`viewSize`、`pxPerSec`、`scrollLeft`、`dpr`（滚动/缩放会改变投影）；
+         * - 主题与字体（颜色解析与文字宽度都会影响像素结果）；
+         * - `pitchAnalysisPending`（它会提前 return，改变绘制内容）。
+         *
+         * 【必须**不**包含什么】播放头位置——它已由 GL 叠加层绘制。把它编进签名会让
+         * 播放帧的签名每帧变化、缓存失效，那就退回"每帧重绘曲线"。
+         *
+         * 【为什么用引用数组 + join】大部分输入是数组/对象引用（Redux 只在内容变化时
+         * 换引用），直接比引用既快又准；数值项显式列举。漏项的代价是"该图层不再更新"，
+         * 因此这里**宁可多编**：低频变化的项一并纳入，成本只是偶尔多一次重绘。
+         */
+        const mainContentSignature = [
+            viewSize.w,
+            viewSize.h,
+            pxPerSecRef.current,
+            scrollLeftRef.current,
+            Math.round((window.devicePixelRatio || 1) * 100),
+            editParam,
+            themeMode,
+            fontFamily,
+            pitchEnabled ? 1 : 0,
+            // 数据与几何（引用比较）。刻意与传给 drawPianoRoll 的字段一一对应，
+            // 避免"签名里写了 A、实际喂给绘制的是 B"这种漂移。
+            detectedPitchCurves,
+            referencePitchOverlays,
+            secondaryParamViews,
+            visibleSecondaryParamIds,
+            paramMorphOverlay,
+            s.showClipboardPreview ? clipboardRef.current : null,
+            selectionRef.current,
+            liveEditOverrideRef.current,
+            effectiveProjectScale,
+            s.tempoMap,
+            segCache.result,
+            s.pitchSnapUnit,
+            s.scaleHighlightMode,
+            s.toolMode,
+            snapToggleHeld,
+            // 视口中心/跨度（用 ref 值，避免依赖 React 渲染时机）
+            pitchViewRef.current.center,
+            pitchViewRef.current.span,
+            paramViewsRef.current,
+            secondaryParamViews,
+        ].join("|");
+
         drawPianoRoll({
             axisCanvas: axisCanvasRef.current,
             canvas: canvasRef.current,
@@ -3268,6 +3333,13 @@ export const PianoRollPanel: React.FC = () => {
             // 键盘几何与轴文字都归 GL（Task 4 / Task 5）。
             skipKeyboardGeometry: PARAM_EDITOR_GL_SCENE_ENABLED,
             skipAxisText: PARAM_EDITOR_GL_SCENE_ENABLED,
+            // 轴画布全部内容归 GL（Task 4/5）-> 整张跳过（含清屏）。
+            skipAxisCanvas: PARAM_EDITOR_GL_SCENE_ENABLED,
+            // 选区块与播放头归 GL 叠加层（Task 6）。
+            skipOverlay: PARAM_EDITOR_GL_SCENE_ENABLED,
+            // 主画布内容缓存（Task 6）：签名只含**主画布自己绘制的内容**与视口，
+            // 不含播放头（它已归 GL 叠加层）——这正是播放帧能跳过曲线重绘的原因。
+            mainContentSignature: PARAM_EDITOR_GL_SCENE_ENABLED ? mainContentSignature : undefined,
             fontFamily,
             clipboardPreview: s.showClipboardPreview ? clipboardRef.current : null,
             // pitch snap visual helpers
@@ -5962,6 +6034,18 @@ export const PianoRollPanel: React.FC = () => {
                                         onPointerLeave={interactions.onCanvasPointerLeave}
                                         onPointerDown={interactions.onCanvasPointerDown}
                                     />
+
+                                    {/* 动态叠加层（阶段 2，Task 6）：播放头与选区。
+                                        层序：DOM 顺序在曲线画布**之后** => 覆盖其上。
+                                        指针事件全部穿透（interactions 挂在曲线画布上），
+                                        否则会挡住参数编辑的命中测试。 */}
+                                    {PARAM_EDITOR_GL_SCENE_ENABLED ? (
+                                        <canvas
+                                            ref={glOverlayCanvasRef}
+                                            className="absolute inset-0 pointer-events-none"
+                                            aria-hidden
+                                        />
+                                    ) : null}
                                     {s.showParamValuePopup &&
                                         paramValuePreview &&
                                         (() => {

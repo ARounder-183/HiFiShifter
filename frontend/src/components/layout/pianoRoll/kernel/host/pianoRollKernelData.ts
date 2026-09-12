@@ -111,6 +111,38 @@ export interface PianoRollGridSpec {
     readonly tensionLineRgba?: readonly [number, number, number, number];
 }
 
+/**
+ * 动态叠加层的几何输入（阶段 2 Task 6：选区块与播放头）。
+ *
+ * 【为什么单独一层】这两者的变化时机与曲线不同：播放帧只动播放头、拖动选区只动
+ * 选区块，而曲线不变。独立叠加层让"曲线画布保持缓存、只清一块空画布"成为可能
+ * ——这正是阶段 2 消除播放重绘的关键。
+ */
+export interface PianoRollOverlaySpec {
+    /**
+     * 播放头位置（秒）；null 表示不画。
+     *
+     * 特殊说明：用**插值的视觉值**而不是 Redux 提交值（与 `render.ts:3261` 的
+     * 注释一致）——提交值滞后会让播放头与标尺错位。
+     */
+    readonly playheadSec?: number | null;
+    /**
+     * 选区（beat 单位，与 `render.ts:815-816` 一致）；null 表示无选区。
+     *
+     * 特殊说明：用 beat 而不是秒，是为了与面板其余选区逻辑同一口径；叠加层内部
+     * 按 `secPerBeat` 换算，避免调用方各自换算导致不一致。
+     */
+    readonly selection?: { readonly aBeat: number; readonly bBeat: number } | null;
+    /** 选区/播放头换算所需的拍长（秒）。 */
+    readonly secPerBeat?: number;
+    /** 选区块填充色；缺省用 `render.ts:820` 的 rgba(100,200,255,0.08)。 */
+    readonly selectionFillRgba?: readonly [number, number, number, number];
+    /** 选区边框色；缺省用 `render.ts:822` 的 rgba(100,200,255,0.30)。 */
+    readonly selectionBorderRgba?: readonly [number, number, number, number];
+    /** 播放头颜色；缺省用主题的 `playheadLine`。 */
+    readonly playheadRgba?: readonly [number, number, number, number];
+}
+
 /** 宿主每帧读取的数据镜像。 */
 export interface PianoRollKernelData {
     /**
@@ -135,6 +167,13 @@ export interface PianoRollKernelData {
      * 当作"没有网格"处理而不是报错。
      */
     readonly grid?: PianoRollGridSpec | null;
+    /**
+     * 动态叠加层输入（选区块 + 播放头）；缺省 / null 时叠加层为空。
+     *
+     * 特殊说明：这一份**每帧变化**（播放头位置），因此宿主每帧读取；与 `grid`
+     * 那种"低频变化"的字段分开，避免把播放头混进需要内容签名的几何里。
+     */
+    readonly overlay?: PianoRollOverlaySpec | null;
 }
 
 /**

@@ -62,7 +62,14 @@ import { buildAxisMarkInstances, resolveAxisKind } from "../scene/axisMarkInstan
 import { buildKeyboardInstances } from "../scene/keyboardInstances";
 import { createGlyphProgram, type GlyphProgram } from "../../../timeline/kernel/gl/glyphProgram";
 import type { GlyphQuad } from "../../../timeline/kernel/gl/glyphQuads";
-import { createTimelineAxis, type TimelineAxis } from "../../../timeline/runtime/timelineAxis";
+import {
+    createTimelineAxis,
+    secToViewportPx,
+    strokePx,
+    type TimelineAxis,
+} from "../../../timeline/runtime/timelineAxis";
+import type { FlatInstance } from "../../../timeline/kernel/scene/instanceTypes";
+import { wholeDevicePxLength } from "../../../../../utils/devicePixelLine";
 import {
     buildPitchGridInstances,
     buildValueGridInstances,
@@ -133,6 +140,18 @@ export interface PianoRollKernelHostArgs {
      * 因此键盘单独一块画布，几何坐标即"轴列视口坐标"，与 Canvas2D 的布局一一对应。
      */
     readonly glAxisCanvas?: HTMLCanvasElement | null;
+    /**
+     * 动态叠加层 GL 画布（阶段 2，Task 6）：播放头与选区。
+     *
+     * 【为什么必须是**独立的、位于曲线之上的**画布】播放帧只改播放头位置。曲线留在
+     * Canvas2D 细节层（阶段 2 不迁移曲线），若播放头也画在 Curve 画布上，每帧都得
+     * 重绘整张画布（含曲线）——那正是阶段 2 要消除的开销。把播放头放到**曲线上方的
+     * 独立 GL 画布**后：曲线画布只在内容/滚动/缩放变化时重绘，播放帧只清一块空画布
+     * + 提交 1 个实例。
+     *
+     * 层序：GL 静态层（网格/键盘/轴文字）→ Canvas2D 曲线层 → 本层（播放头/选区）。
+     */
+    readonly glOverlayCanvas?: HTMLCanvasElement | null;
     /**
      * 键盘轴宽度（CSS px）。缺省用 `AXIS_W` 的值（56）。
      *
@@ -446,6 +465,26 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
     /** 本帧待绘制的文字四边形。 */
     let glTextQuads: GlyphQuad[] = [];
 
+    // 动态叠加层（Task 6）：独立画布 + program，位于曲线层之上。
+    let glOverlayHandle: GlCanvasHandle | null = null;
+    let glOverlayProgram: SdfBoxProgram | null = null;
+    if (args.glSceneEnabled === true && args.glOverlayCanvas != null) {
+        try {
+            glOverlayHandle = createGlCanvas(args.glOverlayCanvas);
+            if (glOverlayHandle === null) {
+                glOverlayHandle = null;
+            } else {
+                glOverlayProgram = createSdfBoxProgram(glOverlayHandle.gl);
+            }
+        } catch {
+            glOverlayHandle = null;
+            glOverlayProgram = null;
+        }
+    }
+    /** 叠加层实例缓冲与上传状态。 */
+    let glOverlayInstances = new Float32Array(0);
+    let glOverlayUploadedCount = 0;
+
     /** 键盘轴实例缓冲与上传状态。 */
     let glAxisInstances = new Float32Array(0);
     let glAxisUploadedCount = 0;
@@ -634,6 +673,93 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         }
         glAxisUploadedCount = items.length;
         glAxisGeometryUploaded = false;
+    }
+
+    /**
+     * 重建动态叠加层的几何（选区块 + 播放头）。
+     *
+     * 流程：选区块（半透明填充 + 边框）→ 播放头竖线（单实例）→ 写入实例缓冲。
+     *
+     * 【为什么播放头是"一个实例"就够】播放帧只改播放头的 x：实例缓冲的其余部分
+     * （选区块）不变。因此这里按"每帧重建、但只有 2~3 个实例"来做——重建成本可以
+     * 忽略，而**画布清屏范围**从"整张曲线画布"降到"一块空画布"，这才是收益所在。
+     *
+     * 【为什么选区也放这一层】选区块是时间区间，滚动/缩放会改变它的像素位置，
+     * 但它与曲线层的内容变化时机**不同**（拖动选区时曲线不变）。放在叠加层后，
+     * 拖动选区只重绘叠加层，曲线层保持缓存。
+     *
+     * 特殊说明：坐标是**绘制坐标**（视口坐标），因此 `u_viewOrigin` 传 (0, 0)——
+     * 与网格/键盘层同一约定；`axis.secToViewportPx` 内部已减去 scrollLeft。
+     */
+    function rebuildOverlayGeometry(): void {
+        const overlay = data().overlay;
+        const axis = currentAxis();
+        const h = viewportHeightPx;
+        const items: FlatInstance[] = [];
+
+        if (overlay?.selection !== null && overlay?.selection !== undefined) {
+            const a = Math.min(overlay.selection.aBeat, overlay.selection.bBeat);
+            const b = Math.max(overlay.selection.aBeat, overlay.selection.bBeat);
+            const beatToSec = Math.max(1e-9, overlay.secPerBeat ?? 0.5);
+            const x0 = secToViewportPx(axis, a * beatToSec);
+            const x1 = secToViewportPx(axis, b * beatToSec);
+            const width = x1 - x0;
+            if (width > 0) {
+                // 填充（render.ts:820-821：rgba(100,200,255,0.08)，铺满整高）
+                items.push({
+                    x: x0,
+                    y: 0,
+                    w: width,
+                    h,
+                    rgba: overlay.selectionFillRgba ?? [100 / 255, 200 / 255, 1, 0.08],
+                });
+                // 边框（render.ts:822-823：strokeRect(x0+0.5, 0.5, w−1, h−1)，
+                // 描边以路径为中心、宽 1 -> 用 4 条矩形边表达；这里只画左右竖边，
+                // 上下边在视口边界上、与填充的上下沿重合，视觉上不可见。
+                const border = overlay.selectionBorderRgba ?? [100 / 255, 200 / 255, 1, 0.3];
+                items.push({ x: x0 + 0.5 - 0.5, y: 0.5, w: 1, h: h - 1, rgba: border });
+                items.push({ x: x0 + width - 0.5 - 0.5, y: 0.5, w: 1, h: h - 1, rgba: border });
+            }
+        }
+
+        if (overlay?.playheadSec !== null && overlay?.playheadSec !== undefined) {
+            // 与 render.ts:1148-1154 同一对齐：线宽取整物理像素，奇数宽度补半个设备像素。
+            const phWidthPx = wholeDevicePxLength(1, axis.dpr);
+            const phx = strokePx(axis, secToViewportPx(axis, overlay.playheadSec), phWidthPx);
+            items.push({
+                x: phx - phWidthPx / 2,
+                y: 0,
+                w: phWidthPx,
+                h,
+                rgba: overlay.playheadRgba ?? [0, 0, 0, 0.2],
+            });
+        }
+
+        const needed = items.length * CLIP_INSTANCE_FLOATS;
+        if (glOverlayInstances.length < needed) glOverlayInstances = new Float32Array(needed);
+        for (let index = 0; index < items.length; index += 1) {
+            writeFlatInstance(glOverlayInstances, index, items[index]);
+        }
+        glOverlayUploadedCount = items.length;
+    }
+
+    /**
+     * 绘制动态叠加层。
+     *
+     * 特殊说明：视口原点恒为 (0, 0)——几何本就是视口坐标（见
+     * `rebuildOverlayGeometry`）。每帧都重建几何：实例数只有 1~3 个，重建成本
+     * 远低于"判断是否需要重建"的复杂度；而清屏范围是**空画布**，与曲线层无关。
+     */
+    function drawGlOverlay(): void {
+        if (glOverlayHandle === null || glOverlayProgram === null) return;
+        const target = glOverlayHandle.resize(
+            viewportWidthPx,
+            viewportHeightPx,
+            readDevicePixelRatio(),
+        );
+        glOverlayHandle.clear();
+        if (glOverlayUploadedCount === 0) return;
+        glOverlayProgram.render(glOverlayInstances, glOverlayUploadedCount, target, 0, 0);
     }
 
     /**
@@ -1011,6 +1137,13 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             drawGlKeyboard();
         }
 
+        // 动态叠加层（选区块 + 播放头）：每帧重建 + 绘制，但它清的是**空画布**，
+        // 与曲线层无关——这正是播放帧不再重绘曲线的关键。
+        if (glOverlayProgram !== null) {
+            rebuildOverlayGeometry();
+            drawGlOverlay();
+        }
+
         updateScrollbars(view);
         syncDom(view);
         onFrame?.(currentAxis());
@@ -1308,6 +1441,9 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             glGlyphs?.dispose();
             glGlyphs = null;
             glAxisHandle = null;
+            glOverlayProgram?.dispose();
+            glOverlayProgram = null;
+            glOverlayHandle = null;
         },
     };
 }

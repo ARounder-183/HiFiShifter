@@ -60,6 +60,15 @@ function getFixedDashPattern(baseDashPx: number, baseGapPx: number): number[] {
     return [toAlignedCssPx(baseDashPx), toAlignedCssPx(baseGapPx)];
 }
 
+/**
+ * 主画布的内容签名缓存（阶段 2 Task 6）。
+ *
+ * 【为什么用模块级 WeakMap】缓存必须跨调用保持，但又不能阻止画布被回收：面板
+ * 重建画布（参数切换、StrictMode 双挂载、窗口尺寸变化都可能换元素）时旧画布应
+ * 当被 GC。WeakMap 以画布元素为键，正好满足这两点。
+ */
+const mainCanvasCache = new WeakMap<HTMLCanvasElement, string>();
+
 /** 为数值轴选择"好看"的刻度步长 */
 function niceAxisStep(range: number, targetCount: number): number {
     const roughStep = range / targetCount;
@@ -372,6 +381,41 @@ export function drawPianoRoll(args: {
      * 键体的几何跳过仍由 `skipKeyboardGeometry` 单独控制。
      */
     skipAxisText?: boolean;
+    /**
+     * 跳过**动态叠加层**（选区块 + 播放头）：它们已由 GL 叠加层绘制。
+     *
+     * 【为什么这两者要一起跳过】它们同属"变化时机与曲线不同"的图层（见
+     * `pianoRollKernelHost` 的 `glOverlayCanvas` 说明）。分开跳过会让播放帧仍然
+     * 需要重绘曲线层——那就失去了叠加层独立的意义。
+     */
+    skipOverlay?: boolean;
+    /**
+     * 跳过整张轴画布（含清屏）。
+     *
+     * 【为什么不只是"跳过绘制"】`clearCanvasPhysical` 会让整张画布失效、必须重绘
+     * ——即使随后什么都不画，清屏本身已经产生了重绘开销。因此接管一层时必须连
+     * **清屏**一起跳过，否则"让曲线/轴保持缓存"无从谈起。
+     *
+     * 特殊说明：轴画布上的全部内容（键体、渐变、分隔线、轴线、音名、刻度线、
+     * 刻度标签）在 GL 开启时都已由 GL 轴层绘制，因此可以整张跳过。
+     */
+    skipAxisCanvas?: boolean;
+    /**
+     * 主画布的内容签名（阶段 2 Task 6 的静态层缓存）。
+     *
+     * 【作用】主画布上的内容（曲线、参考线、音阶高亮、剪贴板预览、morph 叠加、
+     * 中央提示文字）在**播放帧并不变化**——播放只动播放头，而播放头已由 GL 叠加层
+     * 绘制。传入签名后，函数在签名未变时**跳过整张主画布的清屏与绘制**，从而让
+     * 曲线层保持缓存；签名变化时才重绘。
+     *
+     * 契约：调用方必须把"主画布绘制的全部输入"与视口（`w` / `h` / 滚动 / 缩放 /
+     * dpr）都编进签名。**漏掉任何一项都会让该层停止更新**（表现为"改了参数但画面
+     * 不动"），因此宁可多编一项也不要少编。
+     *
+     * 特殊说明：`undefined` 表示不做缓存（每帧重绘）——保持既有行为，供未迁移的
+     * 调用方与单测使用。
+     */
+    mainContentSignature?: string;
 }) {
     const {
         axisCanvas,
@@ -401,6 +445,9 @@ export function drawPianoRoll(args: {
         skipGrid = false,
         skipKeyboardGeometry = false,
         skipAxisText = false,
+        skipOverlay = false,
+        skipAxisCanvas = false,
+        mainContentSignature,
     } = args;
 
     const resolvedFontFamily = fontFamily || "sans-serif";
@@ -416,7 +463,9 @@ export function drawPianoRoll(args: {
     const strongW = 2 / dpr;
 
     // Draw axis (left labels)
-    if (axisCanvas) {
+    // 【阶段 2】`skipAxisCanvas` 为真时**整段跳过（含清屏）**：GL 轴层已接管全部
+    // 轴内容，而清屏本身就会让画布失效，只跳过绘制无法达到"保持缓存"的目的。
+    if (axisCanvas && !skipAxisCanvas) {
         const ctx = axisCanvas.getContext("2d");
         if (ctx) {
             const h = viewSize.h;
@@ -641,6 +690,13 @@ export function drawPianoRoll(args: {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
+    // 【阶段 2 Task 6】主画布内容缓存：签名未变则整张跳过（含清屏）。
+    // 缓存按**画布元素**登记（面板重建画布 / StrictMode 双挂载会换元素）。
+    if (mainContentSignature !== undefined) {
+        if (mainCanvasCache.get(canvas) === mainContentSignature) return;
+        mainCanvasCache.set(canvas, mainContentSignature);
+    }
+
     const { w, h } = viewSize;
     // 统一光栅化契约：此前这里用 Math.floor，而波形面用 Math.round，两者在
     // 半像素 DPR 下会差一整个物理像素；现在全部收敛到 rasterize()。
@@ -811,7 +867,8 @@ export function drawPianoRoll(args: {
     }
 
     // Selection (time band)
-    if (selection) {
+    // 【阶段 2 Task 6】GL 叠加层接管后整段跳过（见 skipOverlay 说明）。
+    if (!skipOverlay && selection) {
         const a = Math.min(selection.aBeat, selection.bBeat);
         const b = Math.max(selection.aBeat, selection.bBeat);
         // 选区数据是 beat 单位：先转 sec 再统一投影，不构造 pxPerBeat。
@@ -1144,12 +1201,16 @@ export function drawPianoRoll(args: {
     // 像素数随落点相位变化，就是画布版"播放时粗细不一"。
     // 修正：线宽取整物理像素；奇数物理像素宽的居中描边由 strokePx 补半个
     // 设备像素，使线体恰好覆盖整数个设备列。
-    const phWidthPx = wholeDevicePxLength(1, axis.dpr);
-    const phx = strokePx(axis, secToViewportPx(axis, playheadSec), phWidthPx);
-    ctx.strokeStyle = colors.playheadLine;
-    ctx.lineWidth = phWidthPx;
-    ctx.beginPath();
-    ctx.moveTo(phx, 0);
-    ctx.lineTo(phx, h);
-    ctx.stroke();
+    // 【阶段 2 Task 6】GL 叠加层接管后跳过（见 skipOverlay 说明）。对齐逻辑已在
+    // `pianoRollKernelHost.rebuildOverlayGeometry` 里逐字复刻，两者不可分叉。
+    if (!skipOverlay) {
+        const phWidthPx = wholeDevicePxLength(1, axis.dpr);
+        const phx = strokePx(axis, secToViewportPx(axis, playheadSec), phWidthPx);
+        ctx.strokeStyle = colors.playheadLine;
+        ctx.lineWidth = phWidthPx;
+        ctx.beginPath();
+        ctx.moveTo(phx, 0);
+        ctx.lineTo(phx, h);
+        ctx.stroke();
+    }
 }
