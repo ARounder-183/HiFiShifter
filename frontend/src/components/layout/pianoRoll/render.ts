@@ -382,13 +382,17 @@ export function drawPianoRoll(args: {
      */
     skipAxisText?: boolean;
     /**
-     * 跳过**动态叠加层**（选区块 + 播放头）：它们已由 GL 叠加层绘制。
+     * 跳过**播放头**（已由 GL 叠加层绘制）。
      *
-     * 【为什么这两者要一起跳过】它们同属"变化时机与曲线不同"的图层（见
-     * `pianoRollKernelHost` 的 `glOverlayCanvas` 说明）。分开跳过会让播放帧仍然
-     * 需要重绘曲线层——那就失去了叠加层独立的意义。
+     * 【为什么不包含选区块】播放头在 Canvas2D 路径里是**最上层**（`render.ts` 的
+     * 最后一个图层），放在曲线上方的独立叠加层里与之一致；而选区块在 Canvas2D 里
+     * 位于**曲线之下**（先画选区、再画各条曲线）。若把选区块也放到上方叠加层，
+     * 它的半透明填充与边框会**盖住曲线**——与迁移前的观感相反。
+     *
+     * 因此两者归属不同的画布：选区块留在本函数（主画布，曲线之前），
+     * 播放头交给叠加层。这也解释了为什么本开关不叫 `skipOverlay`。
      */
-    skipOverlay?: boolean;
+    skipPlayhead?: boolean;
     /**
      * 跳过整张轴画布（含清屏）。
      *
@@ -445,7 +449,7 @@ export function drawPianoRoll(args: {
         skipGrid = false,
         skipKeyboardGeometry = false,
         skipAxisText = false,
-        skipOverlay = false,
+        skipPlayhead = false,
         skipAxisCanvas = false,
         mainContentSignature,
     } = args;
@@ -867,8 +871,12 @@ export function drawPianoRoll(args: {
     }
 
     // Selection (time band)
-    // 【阶段 2 Task 6】GL 叠加层接管后整段跳过（见 skipOverlay 说明）。
-    if (!skipOverlay && selection) {
+    //
+    // 【阶段 3 修正】选区**必须画在曲线之下**：Canvas2D 的历史行为就是先画选区、
+    // 再画各条曲线（对比 `render.ts` 中本段与下方曲线段的先后），因此它的半透明
+    // 填充与边框不会遮挡曲线。阶段 2 曾把它与播放头一起搬到曲线上方的叠加层，
+    // 造成层序反转（曲线被 8% 蓝填充染色）；此处修正为留在主画布。
+    if (selection) {
         const a = Math.min(selection.aBeat, selection.bBeat);
         const b = Math.max(selection.aBeat, selection.bBeat);
         // 选区数据是 beat 单位：先转 sec 再统一投影，不构造 pxPerBeat。
@@ -1201,9 +1209,9 @@ export function drawPianoRoll(args: {
     // 像素数随落点相位变化，就是画布版"播放时粗细不一"。
     // 修正：线宽取整物理像素；奇数物理像素宽的居中描边由 strokePx 补半个
     // 设备像素，使线体恰好覆盖整数个设备列。
-    // 【阶段 2 Task 6】GL 叠加层接管后跳过（见 skipOverlay 说明）。对齐逻辑已在
+    // 【阶段 2 Task 6】GL 叠加层接管后跳过（见 skipPlayhead 说明）。对齐逻辑已在
     // `pianoRollKernelHost.rebuildOverlayGeometry` 里逐字复刻，两者不可分叉。
-    if (!skipOverlay) {
+    if (!skipPlayhead) {
         const phWidthPx = wholeDevicePxLength(1, axis.dpr);
         const phx = strokePx(axis, secToViewportPx(axis, playheadSec), phWidthPx);
         ctx.strokeStyle = colors.playheadLine;

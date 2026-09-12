@@ -112,33 +112,23 @@ export interface PianoRollGridSpec {
 }
 
 /**
- * 动态叠加层的几何输入（阶段 2 Task 6：选区块与播放头）。
+ * 播放头叠加层的几何输入（阶段 2 Task 6，阶段 3 收窄为只管播放头）。
  *
- * 【为什么单独一层】这两者的变化时机与曲线不同：播放帧只动播放头、拖动选区只动
- * 选区块，而曲线不变。独立叠加层让"曲线画布保持缓存、只清一块空画布"成为可能
- * ——这正是阶段 2 消除播放重绘的关键。
+ * 【为什么播放头要单独一层】播放帧只动播放头，而曲线不变。独立叠加层让
+ * "曲线画布保持缓存、只清一块空画布"成为可能——这是阶段 2 消除播放重绘的关键。
+ *
+ * 【为什么选区块不在这里】选区块属于**曲线之下**的图层（Canvas2D 路径先画选区、
+ * 再画曲线），而叠加层在曲线**之上**。把选区放进来会让它盖住曲线，与迁移前的
+ * 观感相反。因此选区仍由主画布绘制，见 `render.ts` 的 `skipPlayhead` 说明。
  */
 export interface PianoRollOverlaySpec {
     /**
      * 播放头位置（秒）；null 表示不画。
      *
-     * 特殊说明：用**插值的视觉值**而不是 Redux 提交值（与 `render.ts:3261` 的
-     * 注释一致）——提交值滞后会让播放头与标尺错位。
+     * 特殊说明：用**插值的视觉值**而不是 Redux 提交值（与面板 `drawRef` 的注释
+     * 一致）——提交值滞后会让播放头与标尺错位。
      */
     readonly playheadSec?: number | null;
-    /**
-     * 选区（beat 单位，与 `render.ts:815-816` 一致）；null 表示无选区。
-     *
-     * 特殊说明：用 beat 而不是秒，是为了与面板其余选区逻辑同一口径；叠加层内部
-     * 按 `secPerBeat` 换算，避免调用方各自换算导致不一致。
-     */
-    readonly selection?: { readonly aBeat: number; readonly bBeat: number } | null;
-    /** 选区/播放头换算所需的拍长（秒）。 */
-    readonly secPerBeat?: number;
-    /** 选区块填充色；缺省用 `render.ts:820` 的 rgba(100,200,255,0.08)。 */
-    readonly selectionFillRgba?: readonly [number, number, number, number];
-    /** 选区边框色；缺省用 `render.ts:822` 的 rgba(100,200,255,0.30)。 */
-    readonly selectionBorderRgba?: readonly [number, number, number, number];
     /** 播放头颜色；缺省用主题的 `playheadLine`。 */
     readonly playheadRgba?: readonly [number, number, number, number];
 }

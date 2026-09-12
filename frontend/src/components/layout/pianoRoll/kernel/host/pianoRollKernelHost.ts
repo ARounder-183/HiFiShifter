@@ -691,30 +691,11 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         const h = viewportHeightPx;
         const items: FlatInstance[] = [];
 
-        if (overlay?.selection !== null && overlay?.selection !== undefined) {
-            const a = Math.min(overlay.selection.aBeat, overlay.selection.bBeat);
-            const b = Math.max(overlay.selection.aBeat, overlay.selection.bBeat);
-            const beatToSec = Math.max(1e-9, overlay.secPerBeat ?? 0.5);
-            const x0 = secToViewportPx(axis, a * beatToSec);
-            const x1 = secToViewportPx(axis, b * beatToSec);
-            const width = x1 - x0;
-            if (width > 0) {
-                // 填充（render.ts:820-821：rgba(100,200,255,0.08)，铺满整高）
-                items.push({
-                    x: x0,
-                    y: 0,
-                    w: width,
-                    h,
-                    rgba: overlay.selectionFillRgba ?? [100 / 255, 200 / 255, 1, 0.08],
-                });
-                // 边框（render.ts:822-823：strokeRect(x0+0.5, 0.5, w−1, h−1)，
-                // 描边以路径为中心、宽 1 -> 用 4 条矩形边表达；这里只画左右竖边，
-                // 上下边在视口边界上、与填充的上下沿重合，视觉上不可见。
-                const border = overlay.selectionBorderRgba ?? [100 / 255, 200 / 255, 1, 0.3];
-                items.push({ x: x0 + 0.5 - 0.5, y: 0.5, w: 1, h: h - 1, rgba: border });
-                items.push({ x: x0 + width - 0.5 - 0.5, y: 0.5, w: 1, h: h - 1, rgba: border });
-            }
-        }
+        // 【为什么这里只有播放头，没有选区块】选区块属于**曲线之下**的图层：
+        // Canvas2D 路径先画选区、再画各条曲线。而本叠加层位于曲线**之上**，
+        // 若把选区放这里，它的半透明填充与边框会盖住曲线——与迁移前的观感相反。
+        // 阶段 2 曾把两者一起搬进来，阶段 3 修正为：选区块回主画布（`render.ts` 的
+        // `selection` 段），叠加层只保留播放头（它在 Canvas2D 里本就是最上层）。
 
         if (overlay?.playheadSec !== null && overlay?.playheadSec !== undefined) {
             // 与 render.ts:1148-1154 同一对齐：线宽取整物理像素，奇数宽度补半个设备像素。

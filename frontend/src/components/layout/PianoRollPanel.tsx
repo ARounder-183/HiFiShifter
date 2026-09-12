@@ -3242,10 +3242,9 @@ export const PianoRollPanel: React.FC = () => {
         // 视觉值 `visualPlayheadSecRef`，它不由 React 渲染驱动（见下方注释），
         // 因此不能在 render 期写入镜像——那样播放头会停在旧的提交值上。
         if (PARAM_EDITOR_KERNEL_ENABLED) {
+            // 只喂播放头：选区块仍由主画布绘制（见 PianoRollOverlaySpec 说明）。
             kernelDataRef.current.overlay = {
                 playheadSec: visualPlayheadSecRef.current,
-                selection: selectionRef.current,
-                secPerBeat,
             };
         }
         /**
@@ -3335,8 +3334,9 @@ export const PianoRollPanel: React.FC = () => {
             skipAxisText: PARAM_EDITOR_GL_SCENE_ENABLED,
             // 轴画布全部内容归 GL（Task 4/5）-> 整张跳过（含清屏）。
             skipAxisCanvas: PARAM_EDITOR_GL_SCENE_ENABLED,
-            // 选区块与播放头归 GL 叠加层（Task 6）。
-            skipOverlay: PARAM_EDITOR_GL_SCENE_ENABLED,
+            // 播放头归 GL 叠加层（Task 6）。**选区块不在此列**：它属于曲线之下的
+            // 图层，仍由主画布绘制（见 render.ts 的 skipPlayhead 说明）。
+            skipPlayhead: PARAM_EDITOR_GL_SCENE_ENABLED,
             // 主画布内容缓存（Task 6）：签名只含**主画布自己绘制的内容**与视口，
             // 不含播放头（它已归 GL 叠加层）——这正是播放帧能跳过曲线重绘的原因。
             mainContentSignature: PARAM_EDITOR_GL_SCENE_ENABLED ? mainContentSignature : undefined,
