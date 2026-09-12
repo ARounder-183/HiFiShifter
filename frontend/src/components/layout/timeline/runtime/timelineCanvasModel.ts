@@ -8,12 +8,15 @@
  * 重命名/重叠的 clip 才额外渲染 DOM 覆盖层以获得交互手柄。本文件负责这条
  * 分工的判定与几何产出。
  *
- * 【与其他模块的关系】
- * - 上游：`TimelinePanel` 在渲染期调用 `buildSparseClipRenderModel()`，结果
- *   交给 `TimelineCanvasViewport` 绘制、交给 `TrackLane` 决定 DOM 覆盖层。
+ * 【与其他模块的关系】（已按"渲染内核唯一路径"改造更新）
+ * - 上游：`timeline/kernel/host/timelineKernelHost` 在构建帧时调用
+ *   `buildSparseClipRenderModel()`，把 `drawClips` 交给
+ *   `kernel/scene/clipInstances` 转成 GL 实例。
+ *   旧消费者 `TimelineCanvasViewport`（绘制）与 `TrackLane`（决定 DOM 覆盖层）
+ *   **已随旧渲染路径删除**；`overlayClipIdsByTrackId` 因此**无生产消费者**，仅基准脚本
+ *   仍在读取（内核模式下不再有 DOM 覆盖层这一层分工）。
  * - 横向：所有时间↔像素换算一律走 `timelineAxis.ts`，本文件不得自行
  *   执行 `sec * pxPerSec`，否则会与波形、网格产生错位。
- * - 下游：`runtime/timelineCanvasRenderer.ts` 消费 `drawClips`。
  */
 
 import { CLIP_BODY_PADDING_Y, CLIP_HEADER_HEIGHT } from "../constants.js";
@@ -196,9 +199,9 @@ function buildTakeLaneSeparatorOffsets(args: {
  * @param args.visibleTrackClipsById 各轨道的可见 clip。
  * @param args.rowHeight 轨道行高（CSS 像素）。
  * @param args.selectedClipId / multiSelectedClipIds / renamingClipId /
- *        hoveredClipId / disabledGroupIds 决定 DOM 覆盖层的归属。
- * @returns `drawClips` 供 canvas 绘制；`overlayClipIdsByTrackId` 供
- *          `TrackLane` 决定哪些 clip 额外挂 DOM 交互层。
+ *        hoveredClipId / disabledGroupIds 影响选中态与可见性判定。
+ * @returns `drawClips` 供内核构建 GL 实例；`overlayClipIdsByTrackId` 是旧 DOM 覆盖层
+ *          分工的遗留产物（内核模式下无生产消费者，见文件头说明）。
  */
 export function buildSparseClipRenderModel(args: {
     visibleTracks: Array<{ id: string; color?: string }>;

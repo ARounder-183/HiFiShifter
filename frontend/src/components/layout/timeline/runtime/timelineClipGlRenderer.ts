@@ -15,20 +15,24 @@
  * 【覆盖范围】**只画块面**。旋钮 / 徽标 / 文字 / 淡变曲线 / 吸附三角仍走
  * Canvas2D 细节层（它们是逐 clip 的、且数量受尺寸门控，不是瓶颈）。
  *
- * 【与其他模块的关系】
- * - 上游：`timelineCanvasRenderer.drawTimelineCanvas` 在 GL 模式开启时调用
- *   `buildClipBodyInstance()`，并把实例交给本渲染器。
- * - 横向：坐标与 `TimelineCanvasViewport` 一致——内容绝对坐标，视口位移由
- *   `originXPx / originYPx` 给出（与波形 P2c 的 `u_viewOrigin` 同约定）。
- * - 开关：dev-only，默认关闭，见 `PERF_GL_CLIP_BODIES_KEY`。
+ * 【与其他模块的关系】（以下为**当前**状态，已按"渲染内核唯一路径"改造更新）
+ * - 上游：`timeline/kernel/scene/clipInstances.ts`（内核的 clip 实例构建器）导入
+ *   `buildClipBodyInstance` 与 `CLIP_INSTANCE_FLOATS`，把实例交给本渲染器绘制。
+ *   **不是** `timelineCanvasRenderer.drawTimelineCanvas`：那条 Canvas2D 细节层路径
+ *   在内核模式下以 `NOOP_GL_BODY_SINK` 调用（见 `timelineKernelHost`），即内核自己
+ *   就是 block 面的生产者。
+ * - 横向：坐标与内核视口一致——内容绝对坐标，视口位移由 `originXPx / originYPx`
+ *   给出（与波形 P2c 的 `u_viewOrigin` 同约定）。
+ * - 另有三个消费者共用本模块：`PianoRollPanel` 与 `timelineKernelHost` 用
+ *   `parseRgbaColor`；`clipInstances` 用 `buildClipBodyInstance` / `CLIP_INSTANCE_FLOATS`。
+ *   注意 `OFF_X/Y/W/H` 等偏移常量是**模块私有**（未导出），仅供本文件内部使用。
+ * - 开关：**无**。GL clip 体是唯一路径，不存在运行期开关或 Canvas2D 回退；文件内保留的
+ *   `PERF_GL_CLIP_BODIES_KEY` 是已失效的旧逃生门 key（见其文档块）。
  *
  * 【历史（勿删）】本模块引入时是**视觉**重写（着色器重画圆角、描边、分隔缝），离线
- * 无法验证外观，因此当时默认走既有 Canvas2D 路径、由真机 A/B 确认后再切换。
- *
- * 【现状】GL clip 体已是**唯一**路径（渲染内核唯一路径改造），不存在 Canvas2D 回退。
- * 本模块除被内核使用外，还向 `PianoRollPanel` 提供 `parseRgbaColor`、向 `sceneBuilder`
- * 提供 `buildClipBodyInstance` / `OFF_*` 布局常量——它整体仍是活代码，只有上面那个
- * 旧逃生门 key 失效。
+ * 无法验证外观，因此当时默认走既有 Canvas2D 路径、由真机 A/B 确认后再切换。旧实现
+ * （含 `TimelineCanvasViewport` / `TimelineSurface` / `drawTimelineCanvas` 的 block
+ * 面路径）已随"渲染内核唯一路径"改造删除。
  */
 
 import { rasterize } from "../../renderKernel/canvasRaster.js";

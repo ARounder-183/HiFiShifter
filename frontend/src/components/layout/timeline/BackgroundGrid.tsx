@@ -395,8 +395,9 @@ export const BackgroundGrid: React.FC<{
         contentBottomPx,
     ]);
 
-    // 用 useLayoutEffect 注册命令式重绘句柄：TimelineSurface 挂载后会在
-    // 父级 layout effect 中立即用总线快照同步一次，句柄必须已在 paint 前可用。
+    // 用 useLayoutEffect 注册命令式重绘句柄：挂载它的父级（PianoRollPanel 的网格层；
+    // 旧 TimelineSurface 已随旧渲染路径删除）会在 layout effect 中立即用总线快照同步
+    // 一次，句柄必须已在 paint 前可用。
     useLayoutEffect(() => {
         const el = resolveRefElement(layerRef);
         if (!el) return;

@@ -6,7 +6,10 @@
  * - 根据 gain / playbackRate / 名称等数据生成显示文本与字号宽度。
  *
  * 与其他模块的关系：
- * - 被 ClipHeader.tsx、timelineCanvasRenderer.ts 调用消费。
+ * - 被 `TrackList` / `TimelinePanel` / `ClipRateEditorDialog`（`measureTextWidth` /
+ *   `normalizedTrackColorCss` / `parsePlaybackRateInput`）、`kernel/scene/clipInstances`
+ *   （`buildTimelineClipVisualStyle`）与基准脚本调用消费。
+ *   旧消费者 `ClipHeader.tsx` 与 `timelineCanvasRenderer.ts` 已随旧渲染路径删除。
  * - 依赖 timelineClipHeaderVisibility.ts 决定哪些元素在当前宽度下可见。
  *
  * 维护说明：
@@ -86,10 +89,11 @@ export function measureTextWidth(text: string, fontStyle: string, fontFamily: st
  *    拿得到最新结果，又不会触发强制样式重算；
  * 2. 内联缺失时（首帧早于 provider effect）才回落到 `getComputedStyle`。
  *
- * 特殊说明：本函数在绘制热路径上每帧被调用多次（`drawTimelineCanvas` 一次、
- * `TimelineCanvasViewport` 一次）。改前一律走 `getComputedStyle`，把浏览器的
- * 样式重算拖进了每一帧。改后稳态零重算，且因为是现读内联值，不需要任何
- * 失效机制。
+ * 特殊说明：本函数在绘制热路径上每帧可能被调用多次（内核模式下由
+ * `kernel/scene/clipInstances` 逐 clip 取色）。改前一律走 `getComputedStyle`，把浏览器
+ * 的样式重算拖进了每一帧。改后稳态零重算，且因为是现读内联值，不需要任何失效机制。
+ * （原文提到 `drawTimelineCanvas` 与 `TimelineCanvasViewport` 各一次——两者均已随旧渲染
+ * 路径删除。）
  */
 export function resolveFontFamily(): string {
     if (typeof document === "undefined") return "sans-serif";

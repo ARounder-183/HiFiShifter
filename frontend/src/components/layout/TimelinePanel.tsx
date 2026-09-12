@@ -296,8 +296,8 @@ const TimelineTransportBridge = React.memo(function TimelineTransportBridge(prop
                 // 写入前吸附到设备像素边界（readDevicePixelRatio 每帧现读，
                 // 浏览器缩放/跨屏后下一帧自愈）：分数 DPR 下不吸附的落点相位
                 // 随播放连续变化，1/2 物理像素交替 —— 即"播放时粗细不一"。
-                // 与 React 渲染侧（TimelineSurface / TimeRulerPlayhead）同一
-                // 吸附函数，命令式与声明式两条路径逐设备像素一致。
+                // 与标尺播放头（TimeRulerPlayhead）同一吸附函数，命令式与声明式
+                // 两条路径逐设备像素一致（旧 TimelineSurface 侧已随旧渲染路径删除）。
                 const dpr = readDevicePixelRatio();
                 const screenLeft = playheadLeftPx - viewport.getScrollLeft();
                 if (playheadRef.current) {
@@ -613,8 +613,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
      * 旧实现读原生 scroller 的 `scrollTop`；内核模式下容器不再滚动（真值在宿主里），
      * 必须改用「容器矩形 + 宿主缓存的 scrollTop」。
      *
-     * 特殊说明：内核分支只在宿主存在时生效——旧模式下宿主为 null，直接委托给
-     * `trackIdFromClientY`（它读原生 scroller），因此本函数可以安全地同时服务两种模式。
+     * 特殊说明：宿主存在时走内核分支；宿主为 null（挂载前 / 测试环境）时委托给
+     * `trackIdFromClientY` 兜底。旧的原生 scroller 实现已随"渲染内核唯一路径"改造删除，
+     * `scrollRef` 已无 JSX 挂载点，因此这里**不是**在两种渲染模式之间做选择。
      */
     const resolveTrackIdAtClientY = React.useCallback(
         (clientY: number): string | null => {
@@ -4070,9 +4071,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             onTempoMapCommit={handleTempoMapCommit}
             onMouseDown={(e) => {
                 if (e.button !== 0) return;
-                // 水平滚动位置：旧模式取原生 scroller，内核模式取内核视口
-                // （两种模式互斥挂载，但取值的「实时性」必须一致——拖拽期间
-                // 滚动位置可能被自动滚动改变，因此每次换算都重新读）。
+                // 水平滚动位置取自内核视口。取值的「实时性」是硬要求——拖拽期间滚动
+                // 位置可能被自动滚动改变，因此每次换算都重新读，不缓存。
+                // 读滚动真值：内核宿主是唯一来源。`scrollRef` 分支保留仅为兼容历史
+                // 路径（它已无 JSX 挂载点，恒为 null）。
                 const readScrollLeft = (): number | null => {
                     const scroller = scrollRef.current;
                     if (scroller != null) return scroller.scrollLeft;

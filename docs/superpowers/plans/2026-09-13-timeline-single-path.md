@@ -1509,12 +1509,14 @@ TimelineScrollArea"，而该文件已删除。该注释**已在 `df430b91` 修�
 使用者"并说明原因）。其余模块若也含此类表述，清理时应一并处理——本仓库把陈旧注释
 视为实质缺陷。
 
-### 附：第二个失效的逃生门（也已修正注释，函数与按钮保留）
+### 附：第二个失效的逃生门（函数已删，仅 dev 按钮与 key 保留）
 
-`isGlClipBodiesEnabled()`（key `hifishifter.glClipBodies`，定义在
-`timeline/runtime/timelineClipGlRenderer.ts`）**无任何读取者**：它唯一的使用者
-`TimelineCanvasViewport` 已在阶段 3 删除。`dev/perfProject.ts` 的 `GL clip: on/off`
-按钮仍读写该 key 并派发事件，但**已无人监听**、按下不产生任何效果。
+`isGlClipBodiesEnabled()`（key `hifishifter.glClipBodies`）曾定义在
+`timeline/runtime/timelineClipGlRenderer.ts`，**无任何读取者**（唯一使用者
+`TimelineCanvasViewport` 已在阶段 3 删除）。该函数**已在 `d3f6f516` 随注释修正一并删除**
+——修正记录初稿曾误写为"函数保留"，实为已删。现在只剩 key 常量与
+`dev/perfProject.ts` 的 `GL clip: on/off` 按钮：按钮仍读写该 key 并派发事件，但
+**已无人监听**、按下不产生任何效果。
 
 与上面 7 个模块不同的是：**其宿主模块整体仍是活代码**（内核用 `GlClipBodySink`、
 `PianoRollPanel` 用 `parseRgbaColor`、`clipInstances` 用 `buildClipBodyInstance` /
@@ -1541,7 +1543,8 @@ npm run build 2>&1 | tail -3
 期望：
 - `tsc` 无输出
 - eslint `0 errors`（warning 数量与本任务前的基线一致）
-- 测试**失败数恰为 2**，且这 2 项是 `keybindingMatch.test.ts` 的既有失败；通过数 ≈ 823 + 本次新增用例（`trackOverlap` 7 + 宿主 GL 2 + `glDiagnostics` 5 + `kernelAvailability` 3 = 17），即约 **840 passed**
+- 测试**失败数恰为 2**，且这 2 项是 `keybindingMatch.test.ts` 的既有失败；通过数 ≈ 823 + 本次新增用例（**实测 +15**：`trackOverlap` 7 + `glDiagnostics` 5 +
+`kernelAvailability` 3；宿主 GL 那 2 项最终未落地）
 - 构建成功
 
 - [ ] **步骤 2：确认产物不含 `import.meta.env`（历史教训回归）**

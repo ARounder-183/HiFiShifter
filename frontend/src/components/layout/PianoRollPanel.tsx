@@ -1323,8 +1323,8 @@ export const PianoRollPanel: React.FC = () => {
                 nextScale: nextPxPerSec,
                 nextScrollLeft: nextNativeScrollLeft,
             };
-            // 与 TimelineScrollArea 相同的“一帧一次原子提交”：rAF 合并同帧
-            // 内的连续缩放事件；flushSync 把两个 state 在同一批提交中落地，
+            // 「一帧一次原子提交」：rAF 合并同帧内的连续缩放事件；
+            // flushSync 把两个 state 在同一批提交中落地，
             // DOM 内容宽度按新缩放重排后，layout effect 在同一提交内写原生
             // scrollLeft 并同帧重绘标尺/网格/画布/波形（applyScrollLayers）。
             // refs 只随 render 写入、与 state 同帧移动——绘制前所有图层拿到

@@ -40,5 +40,28 @@
 2. 任务 3 删除 5 个旧组件后新孤立的 7 个模块（约 2469 行）：
    `ClipHeader`、`OverlapEditLayer`、`FadeHitLayer`、`ClipEdgeHandles`、`timelineHitTest`、
    `useDebouncedPersist`、`timelineViewportDispatch`。已记录在计划文档「后续清理」一节。
-3. 第二个失效逃生门 `isGlClipBodiesEnabled()`（key `hifishifter.glClipBodies`）：
-   无读取者，dev 面板按钮已失效。已修正注释（`d3f6f516`），函数与按钮保留待同上清理。
+3. 第二个失效逃生门（key `hifishifter.glClipBodies`）：无读取者，dev 面板按钮已失效。
+   已修正注释并**删除该函数**（`d3f6f516`；修正记录初稿曾误写为"函数保留"）；
+   仅 dev 按钮与 key 常量保留待同上清理。
+
+## 审查期间确认的两项既有问题（非本次引入，已排除）
+
+### 1. `?mock=1` 下时间线 clip 体不显示波形
+
+**不是本次改造引入。** 判据（最终审查者提供）：加载 dev 面板的「400 clip」性能工程时
+两个面板的波形都正常渲染，且用"隐藏波形父层"对比截图证明波形层**确实是**绘制者
+（时间线 clip 体随之变平、参数编辑器保留自己的波形）。本改动范围内 `waveform/` 目录
+与 `TimelineWaveformSurface` 的挂载块**均未被修改**（该文件只改了一行 import 与注释）。
+根因在 mock fixture 的峰值数据路径。
+
+**注意**：因此上表第 9 项"渲染完整"的截图结论**不包含** mock 下的波形验证——mock 数据
+本就不画波形。若要验证波形，请用 dev 面板的性能工程。
+
+### 2. 拖动 clip 时控制台出现 `Cannot read properties of undefined (reading 'map')`
+
+**不是本次改造引入。** 控制方实测：切到改造起点 `ef0bb88c` 的源码后执行同一拖动，
+**报同样的错误**。根因是 mock 后端缺 `set_clips_state_bulk` 处理器，其 Proxy 兜底返回
+`{ ok: true }`，`applyTimelineState` 随后在无 `tracks` 的 payload 上运行
+（`sessionSlice.ts:353` 的 `mapTimelineTracks`）。
+
+影响有限：该操作仍有正确的乐观本地效果。属 mock 后端问题，与本次"唯一路径"改造无关。

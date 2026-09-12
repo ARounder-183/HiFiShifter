@@ -18,8 +18,9 @@
  *   `timelineViewportBus` / `pianoRollViewportBus` 的快照在滚动期覆盖
  *   scrollLeftPx / pxPerSec 后重建 axis。
  * - 消费方：`runtime/timelineCanvasModel.ts`（clip 几何）、
- *   `waveform/sceneBuilder.ts`（波形几何）、`TimelineSurface.tsx`（播放头），
- *   后续阶段扩展至 `BackgroundGrid` / `TimeRuler` 与 Piano Roll 主画布。
+ *   `waveform/sceneBuilder.ts`（波形几何）、`BackgroundGrid` / `TimeRuler`（标尺与网格）
+ *   与 Piano Roll 主画布（`PianoRollPanel` / `pianoRollViewportBus` 等）。
+ *   旧消费方 `TimelineSurface.tsx`（播放头）已随旧渲染路径删除，其播放头现由内核绘制。
  *
  * 【强制约束（评审检查项）】
  * 1. 任何图层不得直接读取 pxPerSec / scrollLeft 做乘法或减法，一律走本模块。

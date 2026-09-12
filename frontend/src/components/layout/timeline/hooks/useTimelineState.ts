@@ -370,8 +370,10 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
      * 内核模式下 `scrollRef.current` 为 null，视口真值在注入的宿主里；访问器让
      * 「写视口」这件事不必在本模块里再判断一次模式。
      *
-     * 特殊说明：`kernelHostRef` 缺省时用一个内部空 ref 占位（旧模式 / 测试环境），
-     * 此时访问器退化为纯原生 scroller 实现，行为与改动前完全一致。
+     * 特殊说明：`kernelHostRef` 缺省时用一个内部空 ref 占位（测试环境等宿主尚未注入
+     * 的场景），此时访问器取不到视口、返回空值。注意**旧的原生 scroller 实现已随
+     * "渲染内核唯一路径"改造删除**，`scrollRef` 已无 JSX 挂载点，因此不存在"退回原生
+     * scroller"这一条路。
      */
     const fallbackKernelHostRef = useRef<TimelineKernelHost | null>(null);
     const kernelHostRef = args.kernelHostRef ?? fallbackKernelHostRef;
@@ -509,7 +511,7 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
             (Number(sessionRef.current.playheadSec ?? 0) || 0) * pxPerSecRef.current;
         // 播放头写入统一设备像素吸附（readDevicePixelRatio 每次现读）：分数
         // DPR 下不吸附的落点相位随滚动/播放变化，线宽 1↔2 物理像素交替。
-        // 与 React 渲染侧（TimelineSurface / TimeRulerPlayhead）同一函数。
+        // 与 React 渲染侧（标尺播放头 TimeRulerPlayhead）同一吸附函数。
         const dpr = readDevicePixelRatio();
         if (playheadRef.current) {
             playheadRef.current.style.left = `${snapToDevicePx(playheadLeftPx - next, dpr)}px`;
@@ -561,28 +563,25 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
      * 因此把两件事拆开：本函数只做"写 ref + 广播共享视口"（几个赋值 + 一次
      * emit，不进 React），可以安全逐帧调用；React 对齐仍走量化路径。
      */
-    const syncScrollLeftFrame = React.useCallback(
-        function syncScrollLeftFrame(next: number) {
-            scrollLeftRef.current = next;
-            timelineViewportBus.emit(
-                next,
-                pxPerSecRef.current,
-                viewportWidthRef.current,
-                scrollTopPxRef.current,
-                rowHeightRef.current,
+    const syncScrollLeftFrame = React.useCallback(function syncScrollLeftFrame(next: number) {
+        scrollLeftRef.current = next;
+        timelineViewportBus.emit(
+            next,
+            pxPerSecRef.current,
+            viewportWidthRef.current,
+            scrollTopPxRef.current,
+            rowHeightRef.current,
+        );
+        if (paramEditorSyncTimelineRef.current && !timelineSyncApplyingRef.current) {
+            timelineViewportSync.setViewport(
+                {
+                    scrollLeft: next,
+                    pxPerSec: pxPerSecRef.current,
+                },
+                TIMELINE_SYNC_ORIGIN,
             );
-            if (paramEditorSyncTimelineRef.current && !timelineSyncApplyingRef.current) {
-                timelineViewportSync.setViewport(
-                    {
-                        scrollLeft: next,
-                        pxPerSec: pxPerSecRef.current,
-                    },
-                    TIMELINE_SYNC_ORIGIN,
-                );
-            }
-        },
-        [],
-    );
+        }
+    }, []);
 
     // ── syncScrollTop：竖直轴的同帧提交 ──────────────────────────
     // sticky 画布层（clip 体 / 波形面）不随滚动容器原生移动，竖直滚动时
