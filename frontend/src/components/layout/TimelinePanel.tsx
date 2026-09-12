@@ -10,9 +10,11 @@
  * 此文件只保留：JSX 渲染 + 胶水 + 拖拽 hooks 桥接
  *
  * 【内核开关】`TIMELINE_KERNEL_ENABLED`（localStorage `hifishifter.timelineKernel`）
- * 开启时，轨道区改由 `TimelineKernelView`（新渲染内核）承载，关闭时回退到既有
- * DOM 实现；未显式设置时**默认开启**（与构建模式无关，见 `timeline/kernel/featureFlag`）。
- * 内核不可用时（WebGL2 创建失败）自动退回既有实现并记日志，见 `handleKernelUnavailable`。
+ * 开启时，轨道区改由 `TimelineKernelView`（新渲染内核）承载；未显式设置时**默认开启**
+ * （与构建模式无关，见 `timeline/kernel/featureFlag`）。
+ * 阶段 1 起内核是**唯一**渲染路径：渲染处的条件恒真（`TIMELINE_KERNEL_ONLY`），
+ * 关闭开关**不再**切回 DOM 实现，旧实现仅作为不可达代码暂留以便一行回滚，
+ * 其删除由后续任务完成（见 `docs/superpowers/specs/2026-09-13-timeline-single-path-design.md`）。
  */
 import React, { useMemo, Profiler } from "react";
 import { Flex, Dialog, Button, Text } from "@radix-ui/themes";
@@ -151,16 +153,43 @@ import type { TimelineKernelHost } from "./timeline/kernel/host/timelineKernelHo
 /**
  * 时间轴渲染内核开关：模块加载时读一次。
  *
- * 开启后时间轴区域由新内核（自绘滚动 + 单 WebGL2）**替换**渲染；关闭时完全走既有实现。
+ * 开启后时间轴区域由新内核（自绘滚动 + 单 WebGL2）**替换**渲染。
  * 默认值：**未显式设置时开启**（与 dev / 生产构建无关，见 `timeline/kernel/featureFlag`）
  * ——默认跟随构建模式会让打包后静默退回旧实现，这是本项目踩过的坑（Phase 3 计划 R8）。
  * 切换需刷新页面（设置界面的「时间轴显示」对话框 / dev 环境的 PERF 悬浮面板）。
  *
- * 特殊说明：本开关为 true **不代表内核一定能用**——WebGL2 可能创建失败（老驱动 /
- * 远程桌面 / GPU 黑名单）。那种情况下 `TimelineKernelView` 会回报不可用，面板随即
- * 退回既有实现（见 `handleKernelUnavailable`），用户不会看到空白时间轴。
+ * 特殊说明 1：本开关为 true **不代表内核一定能用**——WebGL2 可能创建失败（老驱动 /
+ * 远程桌面 / GPU 黑名单）。那种情况下 `TimelineKernelView` 会回报不可用，面板记录原因
+ * 并告警（见 `handleKernelUnavailable`）。
+ *
+ * 特殊说明 2（阶段 1 起）：本开关**不再**决定渲染哪棵子树——渲染条件已恒真
+ * （见 `TIMELINE_KERNEL_ONLY`），因此写入 `"0"` 这个逃生门目前**不会**切回既有实现；
+ * 保留它只为回滚时状态语义不变，逃生门的恢复由后续任务（失败界面 / 开关清理）决定。
  */
 const TIMELINE_KERNEL_ENABLED = isTimelineKernelEnabled();
+
+/**
+ * 时间轴渲染内核是**唯一**渲染路径（阶段 1：旧分支不可达）。
+ *
+ * 【作用】把渲染处的三元条件由「运行期二选一」改为**恒真**，使旧实现分支在文件内
+ * 保留但**不可达**。保留旧 JSX 而不立即删除，是为了让真机上万一发现内核缺能力时，
+ * 回滚成本恰好是「还原一个表达式」——而不是把 500+ 行旧实现重新写回来。旧实现的
+ * 删除是后续任务（阶段 2/3）的事。
+ *
+ * 【为什么必须写成带 `: boolean` 标注的模块常量，而不能直接写字面量 `true`】
+ * 这是实测踩到的坑，不是风格偏好：直接写 `{true ? (…内核…) : (…旧实现…)}` 时，
+ * TS 会把条件**折叠**为真、判定旧分支不可达，进而**放弃旧分支内部的控制流收窄**。
+ * 实测后果是旧分支里 `selectionRect` / `dropPreview` 的 `null` 收窄全部失效，
+ * `npx tsc -b --noEmit` 从「无输出」变成 **10 条 TS18047**（'X' is possibly 'null'），
+ * 连带 `npm run build`（`tsc -b && vite build`）失败。加上 `: boolean` 标注后条件
+ * 不再被折叠为字面量类型，收窄得以保留，tsc 恢复无输出；运行期取值仍恒为 true。
+ *
+ * 【为什么不用 `// eslint-disable` 抑制】`no-constant-condition` 只解决 eslint 报错，
+ * 解决不了上面的 TS18047 收窄失效；换成本常量后 eslint 与 tsc **都不需要**任何抑制。
+ *
+ * @see docs/superpowers/specs/2026-09-13-timeline-single-path-design.md 阶段 1
+ */
+const TIMELINE_KERNEL_ONLY: boolean = true;
 import type { ScaleLike } from "../../utils/musicalScales";
 import { TimelineDisplaySettingsDialog } from "./TimelineDisplaySettingsDialog";
 import { resolveTimelineScrollRange } from "./timeline/runtime/timelineScrollRange";
@@ -505,9 +534,13 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
      *
      * 【为什么需要】`TIMELINE_KERNEL_ENABLED` 只表达"用户想用内核"，不表达"内核
      * 真能用"。WebGL2 不可用（老驱动 / 远程桌面 / GPU 黑名单 / 上下文数超限）是
-     * 预期内的环境差异，此时必须退回既有实现——否则用户看到的是**空白时间轴**。
+     * 预期内的环境差异，必须让用户能自助排障——本阶段之前靠"退回既有实现"兜底。
      *
-     * 【为什么用 state 而不是 ref】它决定渲染哪棵子树，必须触发重渲染。
+     * 【阶段 1 起的语义变化】渲染条件恒真，因此置位本 state **不再**切换渲染子树，
+     * 也就暂时没有兜底效果。它仍被保留（参与 `resolveKernelMount` 计算）以便后续
+     * 任务用它渲染失败界面，并让回滚时状态语义保持原样。
+     *
+     * 【为什么用 state 而不是 ref】后续要据它决定渲染哪棵子树，必须触发重渲染。
      *
      * 【为什么置位后不再尝试】失败原因（无 GL）在会话内不会自愈，而每次重渲染都
      * 重挂一次内核会反复失败并刷日志。要恢复只需刷新页面（与开关本身的语义一致）。
@@ -515,9 +548,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     const [kernelUnavailable, setKernelUnavailable] = React.useState(false);
 
     /**
-     * `TimelineKernelView` 回报内核不可用：退回既有实现并记录原因。
+     * `TimelineKernelView` 回报内核不可用：置位 state 并记录原因。
      *
-     * 流程：置位 state（切换渲染子树）→ 控制台告警（带原因，供诊断）。
+     * 流程：置位 state → 控制台告警（带原因，供诊断）。
+     *
+     * 【阶段 1 起不再切换渲染子树】内核已是唯一渲染路径，渲染条件恒真
+     * （`TIMELINE_KERNEL_ONLY`），因此本回调置位的 state **暂时不改变渲染结果**；
+     * 它仍被保留并继续告警，是为了让后续任务（失败界面）接上同一个信号，也让
+     * 回滚时状态语义不变。`kernelUnavailable` 仍参与 `resolveKernelMount` 的计算。
      *
      * 特殊说明：用 `useCallback` 保持引用稳定——它经 props 传给内核视图，而视图
      * 把它放进「回调镜像」ref；引用抖动虽不会重建宿主，但稳定引用更省心。
@@ -525,7 +563,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
      * @param reason 失败原因（来自内核创建的 catch）。
      */
     const handleKernelUnavailable = React.useCallback((reason: string) => {
-        console.warn(`[TimelinePanel] 时间轴内核不可用（${reason}），已退回既有渲染实现`);
+        console.warn(`[TimelinePanel] 时间轴内核不可用（${reason}），当前没有回退渲染路径`);
         setKernelUnavailable(true);
     }, []);
 
@@ -535,12 +573,19 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
      * 判据抽在 `resolveKernelMount`（纯函数，有单测）而不是内联在这里：本工程
      * Vitest 跑在 node 环境、**没有任何测试引用 `.tsx`**，内联的 JSX 分支无法被
      * 覆盖——把分支改成恒真或恒假（后者即"内核永不挂载"的回归）测试都测不出。
+     *
+     * 【阶段 1 起本值不再参与渲染】渲染处改用恒真的 `TIMELINE_KERNEL_ONLY`，因此
+     * 这个决策结果暂时**没有消费者**。它被刻意保留（而非删除）是为了让回滚仍是
+     * 「还原一个表达式」：还原渲染条件即可重新接到同一个决策上。下方 `void` 是
+     * **临时**保留标记——`tsconfig.app.json` 开了 `noUnusedLocals`，不引用会报
+     * TS6133；后续任务删除旧分支时会连同本决策与本标记一并清理。
      */
     const kernelMount = resolveKernelMount({
         enabled: TIMELINE_KERNEL_ENABLED,
         unavailable: kernelUnavailable,
     });
     const kernelActive = kernelMount.useKernel;
+    void kernelActive;
 
     /**
      * 「clip 左键按下拦截」句柄（内核在启动自己的手势之前调用）。
@@ -4755,10 +4800,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         变化，搬进 canvas 等于重写 Tempo 旗帜拖拽与电平表，收益极低；
                         内核只把「跟随视口」的部分收敛为 rAF 内一次 transform / scrollTop
                         写入。轨道区（网格 / clip / 波形 / 交互）才是滚动瓶颈，由内核自绘。
-                        开关**默认开启**（见 featureFlag）；两套渲染不会同时挂载。
-                        内核不可用时回退到下面的既有实现（见 handleKernelUnavailable）——
-                        WebGL2 创建失败是预期内的环境差异，不能让用户看到空白时间轴。 */}
-                    {kernelActive ? (
+                        内核已是**唯一**渲染路径（阶段 1）：下面这个条件恒真，旧实现分支
+                        仍在文件中但**不可达**（见 `TIMELINE_KERNEL_ONLY`）。内核不可用时的
+                        回退因此**暂时失效**（`handleKernelUnavailable` 仍会置位 state 并告警），
+                        失败界面由后续任务接入——本阶段刻意保留旧分支，一旦真机发现问题，
+                        回滚成本就是还原这个表达式。 */}
+                    {TIMELINE_KERNEL_ONLY ? (
                         <>
                             {timeRulerNode}
                             <TimelineKernelView
