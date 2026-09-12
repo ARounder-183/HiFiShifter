@@ -225,15 +225,25 @@ export interface PianoRollCurveLayer {
      */
     readonly dash?: readonly [number, number] | null;
     /**
-     * 投影模式：`"curve"` 走 `drawCurveTimed` 的语义（从曲线起点按 `startFrame` +
-     * `stride` 换算）；`"clipboard"` 走剪贴板预览的语义（从选区起点按**原始帧距**
-     * 排布）。两者时间基准不同，混用会让预览整体平移。
+     * 投影模式，三者时间基准各不相同，混用会让曲线整体平移或长出尖刺：
+     * - `"curve"`：走 `drawCurveTimed` 的语义（`startFrame + i × stride`）；
+     * - `"clipboard"`：剪贴板预览（从选区起点按**原始帧距**排布）；
+     * - `"detected"`：检测曲线（从 `curveStartSec` 按原始帧距排布，
+     *   **并跳过 `midi <= 0` 的无声帧**）。
      */
-    readonly projection: "curve" | "clipboard";
+    readonly projection: "curve" | "clipboard" | "detected";
     /** `projection === "clipboard"` 时的选区起点（秒）。 */
     readonly clipStartSec?: number;
     /** `projection === "clipboard"` 时的选区终点（秒）。 */
     readonly clipEndSec?: number;
+    /**
+     * `projection === "detected"` 时曲线第 0 帧对应的 timeline 绝对时间（秒）。
+     *
+     * 【为什么检测曲线不复用 `startFrame`】检测曲线来自后端推送的
+     * `clipPitchCurves`，它自带**绝对起始秒**（`curveStartSec`），没有帧号概念。
+     * 塞进 `startFrame` 需要先乘除帧周期，徒增一次换算与一处口径。
+     */
+    readonly curveStartSec?: number;
     /** 裁剪区（视口坐标 CSS px）；缺省不裁剪。两个需要裁剪的曲线图层用选区矩形。 */
     readonly clipRect?: { readonly x: number; readonly y: number; readonly w: number; readonly h: number } | null;
     /**

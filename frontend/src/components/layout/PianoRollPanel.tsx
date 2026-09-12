@@ -3325,6 +3325,13 @@ export const PianoRollPanel: React.FC = () => {
         }
 
         // ── ② 检测曲线（pitch 模式，按 clip 循环调色）─────────────────
+        //
+        // 投影模式必须是 `"detected"`（不是 `"curve"`）：
+        // - 检测曲线自带**绝对起始秒** `curveStartSec`，塞进 `startFrame` 会把它丢掉，
+        //   曲线整体平移到时间轴原点；
+        // - 检测曲线的 `midi <= 0` 表示**无声帧**，必须跳过，否则相邻有声点之间会
+        //   拉出一条贯穿底部的垂直尖刺（GL 迁移后实际出现过）。
+        // 两条语义都与 `drawCurveTimed` 不同，见 `projectDetectedCurvePoints` 说明。
         if (editParam === "pitch") {
             const palette = resolveDetectedCurveColors(isDark);
             detectedPitchCurves.forEach((curve, ci) => {
@@ -3338,7 +3345,8 @@ export const PianoRollPanel: React.FC = () => {
                     lineWidthPx: 2,
                     rgba: parseRgbaColor(normalizeCssColor(palette[ci % palette.length])),
                     dash: null,
-                    projection: "curve",
+                    projection: "detected",
+                    curveStartSec: curve.curveStartSec,
                     valueToY: (v) => project("pitch", v),
                 });
             });

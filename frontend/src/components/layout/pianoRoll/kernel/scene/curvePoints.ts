@@ -155,3 +155,72 @@ export function projectClipboardPreviewPoints(args: {
     }
     return out;
 }
+
+/**
+ * 检测曲线（`clipPitchCurves`）的专用投影。
+ *
+ * 流程（与 `render.ts:972-1010` 的检测曲线循环逐行等价）：
+ * 1. 时间基准是 `curveStartSec + (i × fp) / 1000`——**每帧按原始帧距排列**，
+ *    没有 `startFrame` / `stride` 概念（曲线自带绝对起始秒）；
+ * 2. `midi <= 0`（无声帧）**跳过**，前后有声点直接相连（保持连续性）；
+ * 3. 超过右缘 `break`，早于左缘 `continue`；
+ * 4. pitch 加 0.5 偏移，与其余曲线同源。
+ *
+ * 【为什么必须单独一个函数而不是复用 `projectCurvePoints`】
+ * 那两处差异都会造成可见缺陷：
+ * - **时间基准**：把 `startFrame: 0` 传进去会丢掉 `curveStartSec`，曲线整体平移
+ *   到时间轴原点（`curveStartSec` 非 0 的 clip 全部错位）。
+ * - **无声帧**：`projectCurvePoints` 保留所有点（对 `paramView` 是对的，那里的 0
+ *   是合法值），但检测曲线的 0 表示"无音高"。照画会得到一条从上一个有声点直落
+ *   到底部的**垂直尖刺**——GL 迁移后实际出现过（用户截图里粉/紫曲线的密集竖线）。
+ *
+ * 【为什么不加开关参数】两者的入参语义本就不同（一个收 `startFrame`/`stride`，
+ * 一个收 `curveStartSec` 且无 stride）；合并后每个调用点都要传无关参数，而
+ * `midi <= 0` 的语义只对检测曲线成立。分开后各自的可测契约更清晰。
+ *
+ * @param args 投影参数。
+ * @returns 可见的有声点序列；无有效点时为空的数组。
+ */
+export function projectDetectedCurvePoints(args: {
+    /** MIDI 音高曲线（每帧一个值，`<= 0` 表示无声）。 */
+    readonly midiCurve: readonly number[];
+    /** 曲线第 0 帧对应的 timeline 绝对时间（秒）。 */
+    readonly curveStartSec: number;
+    /** WORLD 帧周期（毫秒）。 */
+    readonly framePeriodMs: number;
+    /** 统一投影。 */
+    readonly axis: TimelineAxis;
+    /** 值 → 视口 y 的投影。 */
+    readonly valueToY: (value: number) => number;
+}): CurvePoint[] {
+    const { midiCurve, curveStartSec, framePeriodMs, axis, valueToY } = args;
+    if (midiCurve.length < 2) return [];
+    if (!Number.isFinite(curveStartSec)) return [];
+
+    const fp = Math.max(1e-6, framePeriodMs);
+
+    // 与旧实现一致：检测曲线按 **x** 判可见性（`x > w + 10` / `x < -10`），
+    // 不是按时间区间——因为它只有绝对秒、没有 `startFrame`，用时间判会多一次换算。
+    const rightLimitPx = axis.viewportWidthPx + 10;
+    const leftLimitPx = -10;
+
+    const out: CurvePoint[] = [];
+    for (let i = 0; i < midiCurve.length; i += 1) {
+        const midi = midiCurve[i];
+        // 非有限值：跳过（与旧实现 `midi == null || !isFinite(midi)` 一致）
+        if (midi == null || !Number.isFinite(midi)) continue;
+
+        const frameSec = curveStartSec + (i * fp) / 1000;
+        const x = secToViewportPx(axis, frameSec);
+        if (x > rightLimitPx) break;
+        if (x < leftLimitPx) continue;
+
+        // 无声帧：跳过但保持连续性（旧实现的 `if (midi <= 0) continue`）
+        if (midi <= 0) continue;
+
+        const y = valueToY(midi + 0.5);
+        if (!Number.isFinite(y)) continue;
+        out.push({ x, y });
+    }
+    return out;
+}

@@ -48,6 +48,7 @@ import { decimatePolylinePoints } from "../../../renderKernel/gl/polylineDecimat
 import {
     projectClipboardPreviewPoints,
     projectCurvePoints,
+    projectDetectedCurvePoints,
 } from "../scene/curvePoints";
 import { CLIP_INSTANCE_FLOATS, writeFlatInstance } from "../../../renderKernel/gl/instanceLayout";
 import { createSdfBoxProgram, type SdfBoxProgram } from "../../../renderKernel/gl/sdfBoxProgram";
@@ -735,26 +736,37 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         for (const layer of layers) {
             // 每条图层用自己的投影（副参数值域与主参数不同，见 spec 说明）。
             const valueToY = layer.valueToY;
+            // 三种投影的时间基准不同（见 `PianoRollCurveLayer.projection` 说明）：
+            // 检测曲线自带绝对起始秒且要跳无声帧，剪贴板预览锚定选区起点，
+            // 其余按 `startFrame + i × stride`。混用会造成平移或尖刺。
             const points =
-                layer.projection === "clipboard"
-                    ? projectClipboardPreviewPoints({
-                          values: layer.values,
-                          param: layer.param,
+                layer.projection === "detected"
+                    ? projectDetectedCurvePoints({
+                          midiCurve: layer.values,
+                          curveStartSec: layer.curveStartSec ?? 0,
                           framePeriodMs: layer.framePeriodMs,
-                          selStartSec: layer.clipStartSec ?? 0,
-                          selEndSec: layer.clipEndSec ?? 0,
                           axis,
                           valueToY,
                       })
-                    : projectCurvePoints({
-                          values: layer.values,
-                          param: layer.param,
-                          startFrame: layer.startFrame,
-                          stride: layer.stride,
-                          framePeriodMs: layer.framePeriodMs,
-                          axis,
-                          valueToY,
-                      });
+                    : layer.projection === "clipboard"
+                      ? projectClipboardPreviewPoints({
+                            values: layer.values,
+                            param: layer.param,
+                            framePeriodMs: layer.framePeriodMs,
+                            selStartSec: layer.clipStartSec ?? 0,
+                            selEndSec: layer.clipEndSec ?? 0,
+                            axis,
+                            valueToY,
+                        })
+                      : projectCurvePoints({
+                            values: layer.values,
+                            param: layer.param,
+                            startFrame: layer.startFrame,
+                            stride: layer.stride,
+                            framePeriodMs: layer.framePeriodMs,
+                            axis,
+                            valueToY,
+                        });
             if (points.length < 2) continue;
 
             // 按设备像素列抽稀（见上方"为什么必须抽稀"）。

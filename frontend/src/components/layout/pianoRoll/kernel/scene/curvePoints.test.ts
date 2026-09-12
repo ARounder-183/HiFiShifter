@@ -23,7 +23,11 @@ import {
     viewportStartSec,
 } from "../../../renderKernel/timelineAxis";
 import { framesToTime } from "../../utils";
-import { projectClipboardPreviewPoints, projectCurvePoints } from "./curvePoints";
+import {
+    projectClipboardPreviewPoints,
+    projectCurvePoints,
+    projectDetectedCurvePoints,
+} from "./curvePoints";
 
 /** 造一个轴（与面板一致：dpr 只影响描边对齐，不影响投影）。 */
 function makeAxis(pxPerSec = 150, scrollLeftPx = 0, viewportWidthPx = 1000) {
@@ -437,5 +441,167 @@ describe("与剪贴板预览循环逐点等价", () => {
             }
         }
         expect(compared).toBeGreaterThan(5000);
+    });
+});
+
+/**
+ * 检测曲线（`clipPitchCurves`）的专用投影。
+ *
+ * 【为什么不能复用 `projectCurvePoints`】旧实现里检测曲线有**自己的循环**
+ * （`render.ts:972-1010`），与 `drawCurveTimed` 有两处实质差异：
+ *
+ * 1. **时间基准不同**：检测曲线是 `curveStartSec + i*fp/1000`（曲线自己带绝对
+ *    起始秒），而 `drawCurveTimed` 是 `framesToTime(startFrame + i*stride, fp)`。
+ *    把 `startFrame: 0` 传给 `projectCurvePoints` 会**丢掉 `curveStartSec`**，
+ *    曲线整体平移到时间轴原点。
+ * 2. **无声帧必须跳过**：`midi <= 0` 表示该帧无音高。旧实现 `continue` 跳过它
+ *    （保持前后点的连续性），若照画会得到一条**贯穿到底部的垂直尖刺**——这是
+ *    GL 迁移后实际出现的缺陷（用户截图可见粉/紫曲线的密集竖线）。
+ *
+ * 【为什么不做成 `projectCurvePoints` 的开关】两者的入参语义不同（一个收
+ * `startFrame`/`stride`，一个收 `curveStartSec` 且无 stride），合成一个函数会让
+ * 每个调用点都要传一堆无关参数，且 `midi <= 0` 的语义只对检测曲线成立
+ * （`paramView` 的 edit 曲线里 0 是合法值，不能跳）。
+ */
+describe("projectDetectedCurvePoints", () => {
+    const axis = createTimelineAxis({ pxPerSec: 100, scrollLeftPx: 0, viewportWidthPx: 1000 });
+    const valueToY = (v: number) => 100 - v;
+
+    it("按 curveStartSec 锚定时间（不是从 0 开始）", () => {
+        // curveStartSec = 5s：第 0 个采样点应落在 x = 500（5s × 100px/s）。
+        const points = projectDetectedCurvePoints({
+            midiCurve: [60, 62, 64],
+            curveStartSec: 5,
+            framePeriodMs: 10,
+            axis,
+            valueToY,
+        });
+        expect(points.length).toBe(3);
+        expect(points[0].x).toBeCloseTo(500, 6);
+        // 帧距 10ms → 每点 1px
+        expect(points[1].x).toBeCloseTo(501, 6);
+        expect(points[2].x).toBeCloseTo(502, 6);
+    });
+
+    it("无声帧（midi <= 0）被跳过，不产生贯穿底部的尖刺", () => {
+        const points = projectDetectedCurvePoints({
+            midiCurve: [60, 0, 62, 0, 0, 64],
+            curveStartSec: 0,
+            framePeriodMs: 10,
+            axis,
+            valueToY,
+        });
+        // 只保留 3 个有声帧
+        expect(points.length).toBe(3);
+        // 被跳过的点不应以任何形式出现（尤其不能是 valueToY(0+0.5) 那个低点）
+        const silentY = valueToY(0.5);
+        for (const p of points) {
+            expect(p.y).not.toBeCloseTo(silentY, 6);
+        }
+        // 且 x 连续跳过了无声帧的位置
+        expect(points.map((p) => Math.round(p.x))).toEqual([0, 2, 5]);
+    });
+
+    it("负值同样视为无声帧（<=0 而不是 ===0）", () => {
+        const points = projectDetectedCurvePoints({
+            midiCurve: [60, -1, 62],
+            curveStartSec: 0,
+            framePeriodMs: 10,
+            axis,
+            valueToY,
+        });
+        expect(points.length).toBe(2);
+    });
+
+    it("非有限值被跳过（与旧实现的 isFinite 检查一致）", () => {
+        const points = projectDetectedCurvePoints({
+            midiCurve: [60, Number.NaN, 62, Number.POSITIVE_INFINITY, 64],
+            curveStartSec: 0,
+            framePeriodMs: 10,
+            axis,
+            valueToY,
+        });
+        expect(points.length).toBe(3);
+    });
+
+    it("pitch 加 0.5 偏移（与绘制同源）", () => {
+        const points = projectDetectedCurvePoints({
+            midiCurve: [60, 62],
+            curveStartSec: 0,
+            framePeriodMs: 10,
+            axis,
+            valueToY,
+        });
+        expect(points[0].y).toBeCloseTo(valueToY(60.5), 6);
+        expect(points[1].y).toBeCloseTo(valueToY(62.5), 6);
+    });
+
+    it("超出右缘立即 break（采样时间单调递增）", () => {
+        // 视口 1000px / 100px每秒 = 10s；帧距 100ms → 每点 10px。
+        // 右缘判定是 `x > viewportWidthPx + 10`，即 x > 1010 → 第 102 个点停。
+        const many = new Array(300).fill(60);
+        const points = projectDetectedCurvePoints({
+            midiCurve: many,
+            curveStartSec: 0,
+            framePeriodMs: 100,
+            axis,
+            valueToY,
+        });
+        expect(points[points.length - 1].x).toBeLessThanOrEqual(1010);
+        expect(points.length).toBeLessThan(300);
+    });
+
+    it("左侧不可见部分被跳过，首点从左缘附近开始", () => {
+        const scrolled = createTimelineAxis({
+            pxPerSec: 100,
+            scrollLeftPx: 500,
+            viewportWidthPx: 1000,
+        });
+        const points = projectDetectedCurvePoints({
+            midiCurve: new Array(200).fill(60),
+            curveStartSec: 0,
+            framePeriodMs: 100, // 每点 10px
+            axis: scrolled,
+            valueToY,
+        });
+        // 视口从 5s 开始（scrollLeft=500 / 100px每秒）；每点 10px。
+        // 左缘判定是 `x < -10` 才跳过（**开区间**），所以第 49 个点（x 恰为 -10，
+        // 浮点误差下 -9.999…）会被保留 —— 这与旧实现逐字一致，不是 off-by-one。
+        expect(points[0].x).toBeGreaterThanOrEqual(-10);
+        expect(points[0].x).toBeLessThan(0);
+        // 关键是它紧贴左缘（而不是把整条曲线的点都留在数组里）
+        expect(points[0].x).toBeCloseTo(-10, 6);
+    });
+
+    it("全为无声帧时返回空数组（不画任何东西）", () => {
+        const points = projectDetectedCurvePoints({
+            midiCurve: [0, 0, 0],
+            curveStartSec: 0,
+            framePeriodMs: 10,
+            axis,
+            valueToY,
+        });
+        expect(points).toEqual([]);
+    });
+
+    it("采样不足 2 点或非有限入参时返回空数组", () => {
+        expect(
+            projectDetectedCurvePoints({
+                midiCurve: [60],
+                curveStartSec: 0,
+                framePeriodMs: 10,
+                axis,
+                valueToY,
+            }),
+        ).toEqual([]);
+        expect(
+            projectDetectedCurvePoints({
+                midiCurve: [60, 62],
+                curveStartSec: Number.NaN,
+                framePeriodMs: 10,
+                axis,
+                valueToY,
+            }),
+        ).toEqual([]);
     });
 });
