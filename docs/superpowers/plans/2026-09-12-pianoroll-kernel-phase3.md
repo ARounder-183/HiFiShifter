@@ -91,6 +91,27 @@ And the same table under `--disable-gpu` gives **71.8 ms / 212.8 ms** — i.e. *
 
 **Lessons recorded:** never time a deferred Canvas2D API without forcing a flush; verify the fixture actually reaches the render path (a 3-minute curve in a mock whose clips are 12 s long proves nothing); and when a user reports jank that a synthetic benchmark does not reproduce, the benchmark is wrong until proven otherwise — not the report.
 
+**R8 — 🔴 The kernel is OFF in the build the user is actually running.**
+`backend/src-tauri/tauri.conf.json` runs `node ../scripts/tauri-before-dev.mjs` as its `beforeDevCommand`, and that script's `TAURI_UI_MODE` **defaults to `"build"`** (not `"dev"`). So a plain `tauri dev` — the normal way to run the app on Windows — does `npm run build` and serves the **production bundle**, where `import.meta.env.DEV === false`.
+
+Every kernel flag is off in that bundle:
+
+| Flag | Default in a production build |
+|---|---|
+| `isTimelineKernelEnabled()` | `import.meta.env.DEV` → **false** |
+| `isPianoRollKernelEnabled()` | **false** (off even in dev, by design) |
+| `isPianoRollGlSceneEnabled()` | **false** |
+| `isPianoRollCurveGlEnabled()` | **false** |
+
+**Consequence:** the jank the user reports on Windows is the **old** implementation. Phases 1–2 never ran there, and neither would Phase 3's curve work. This also explains why the user's reports and my Chromium measurements kept disagreeing: we were measuring two different renderers, and the reports were about the un-migrated one.
+
+**This reframes the work.** The highest-value next step is **not** more curve-GL code — it is making the kernel actually reachable in the app the user runs, then measuring there. Options, in order of preference:
+1. **Pass the mode through explicitly** so `tauri dev` runs the dev server (`TAURI_UI_MODE=dev`), or make `beforeDevCommand` use dev mode while a separate build command serves the bundle. This is what "dev" should have meant.
+2. **Invert the piano-roll defaults to follow `import.meta.env.DEV`**, matching the timeline kernel, so a dev run exercises the new path by default.
+3. Keep defaults off but surface a **visible in-app toggle** (the PERF overlay already has one for the timeline flag) so the path can be exercised on Windows without devtools.
+
+Until one of these lands, any "is the new kernel faster?" measurement on the user's machine is measuring the wrong renderer. Recorded here rather than in chat because it invalidates how the whole phase was being verified.
+
 **R6 — The gesture surface is a 3,875-line hook, and a safety net already exists.**
 `usePianoRollInteractions.ts` holds ~23 event entry points. `renderProjection.test.ts` already exists specifically as the "P3 pre-work snapshot" the spec asked for, comparing the legacy `timeToPixel` formula against `secToViewportPx` over random parameters — the x-projection conversion is therefore already guarded.
 
