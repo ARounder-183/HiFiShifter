@@ -23,7 +23,7 @@ import {
     viewportStartSec,
 } from "../../../renderKernel/timelineAxis";
 import { framesToTime } from "../../utils";
-import { projectCurvePoints } from "./curvePoints";
+import { projectClipboardPreviewPoints, projectCurvePoints } from "./curvePoints";
 
 /** 造一个轴（与面板一致：dpr 只影响描边对齐，不影响投影）。 */
 function makeAxis(pxPerSec = 150, scrollLeftPx = 0, viewportWidthPx = 1000) {
@@ -291,5 +291,151 @@ describe("与 drawCurveTimed 循环逐点等价", () => {
         }
         // 组合空间足够大，避免"看起来通过"其实是空循环
         expect(compared).toBeGreaterThan(10000);
+    });
+});
+
+/**
+ * 剪贴板预览的**专属**投影（不走 `drawCurveTimed`）。
+ *
+ * 【本组守护什么】它与普通曲线的**时间基准不同**：普通曲线从自身起点
+ * （`startFrame + i * stride`）推算，预览从**选区起点**按原始帧距排列。
+ * 若误用同一函数，预览会整体平移 `selStartSec − curveStartSec`——表现为
+ * "粘贴后预览曲线跳到别处"。
+ */
+describe("projectClipboardPreviewPoints", () => {
+    it("从选区起点按原始帧距排列（忽略 startFrame / stride）", () => {
+        const points = projectClipboardPreviewPoints({
+            values: [50, 51, 52],
+            param: "other",
+            framePeriodMs: 5, // 每点 0.005s
+            selStartSec: 10, // 从选区起点 10s 开始
+            selEndSec: 20,
+            axis: makeAxis(150, 0),
+            valueToY: (v) => v,
+        });
+        // 三点分别落在 10s / 10.005s / 10.01s -> x = 1500 / 1500.75 / 1501.5
+        expect(points.length).toBe(3);
+        expect(points[0].x).toBeCloseTo(150 * 10, 6);
+        expect(points[1].x).toBeCloseTo(150 * 10.005, 6);
+        expect(points[2].x).toBeCloseTo(150 * 10.01, 6);
+    });
+
+    it("超过选区终点即停止（不压缩、不延伸）", () => {
+        // 10 点 × 5ms = 0.05s；选区只有 0.02s -> 只保留 10s..10.02s 内的点
+        const points = projectClipboardPreviewPoints({
+            values: Array.from({ length: 10 }, (_, i) => 50 + i),
+            param: "other",
+            framePeriodMs: 5,
+            selStartSec: 10,
+            selEndSec: 10.02,
+            axis: makeAxis(150, 0),
+            valueToY: (v) => v,
+        });
+        // 10.000, 10.005, 10.010, 10.015, 10.020 -> 5 点（<= 终点）
+        expect(points.length).toBe(5);
+        expect(points[points.length - 1].x).toBeCloseTo(150 * 10.02, 6);
+    });
+
+    it("pitch 参数同样加 0.5 偏移", () => {
+        const points = projectClipboardPreviewPoints({
+            values: [60, 61],
+            param: "pitch",
+            framePeriodMs: 5,
+            selStartSec: 0,
+            selEndSec: 1,
+            axis: makeAxis(150, 0),
+            valueToY: (v) => v,
+        });
+        expect(points.map((p) => p.y)).toEqual([60.5, 61.5]);
+    });
+
+    it("不做视口裁剪（依赖选区裁剪，返回点可落在视口外）", () => {
+        // 选区在视口右侧之外；原实现不裁剪，只靠 ctx.clip 收口
+        const points = projectClipboardPreviewPoints({
+            values: [50, 51],
+            param: "other",
+            framePeriodMs: 5,
+            selStartSec: 100, // 100s * 150 = 15000px，远在 1000px 视口外
+            selEndSec: 200,
+            axis: makeAxis(150, 0),
+            valueToY: (v) => v,
+        });
+        expect(points.length).toBe(2);
+        expect(points[0].x).toBeGreaterThan(1000);
+    });
+
+    it("采样不足 2 点或选区非法时返回空数组", () => {
+        const base = {
+            param: "other",
+            framePeriodMs: 5,
+            selStartSec: 0,
+            selEndSec: 1,
+            axis: makeAxis(),
+            valueToY: (v: number) => v,
+        };
+        expect(projectClipboardPreviewPoints({ ...base, values: [] })).toEqual([]);
+        expect(projectClipboardPreviewPoints({ ...base, values: [50] })).toEqual([]);
+        // 选区反向 / 零宽
+        expect(projectClipboardPreviewPoints({ ...base, values: [50, 51], selEndSec: 0 })).toEqual(
+            [],
+        );
+    });
+});
+
+/**
+ * 剪贴板预览循环的**逐点等价**（复刻 `render.ts:1150-1170`）。
+ */
+describe("与剪贴板预览循环逐点等价", () => {
+    it("多组参数下点数与逐点坐标一致", () => {
+        let compared = 0;
+        for (const param of ["pitch", "other"]) {
+            for (const pxPerSec of [40, 150, 600]) {
+                for (const scrollLeftPx of [0, 400]) {
+                    for (const framePeriodMs of [5, 10]) {
+                        for (const selLenSec of [0.02, 0.2, 5]) {
+                            const values = Array.from(
+                                { length: 400 },
+                                (_, i) => 50 + 15 * Math.sin(i / 13),
+                            );
+                            const axis = makeAxis(pxPerSec, scrollLeftPx, 1000);
+                            const project = (v: number) => 400 * (1 - v / 100);
+                            const selStartSec = 3;
+                            const selEndSec = selStartSec + selLenSec;
+
+                            // 复刻原实现的循环
+                            const legacy: { x: number; y: number }[] = [];
+                            const fp = Math.max(1e-6, framePeriodMs);
+                            for (let i = 0; i < values.length; i += 1) {
+                                const tSec = selStartSec + (i * fp) / 1000;
+                                if (tSec > selEndSec) break;
+                                const x = secToViewportPx(axis, tSec);
+                                const mapped = param === "pitch" ? values[i] + 0.5 : values[i];
+                                legacy.push({ x, y: project(mapped) });
+                            }
+
+                            const built = projectClipboardPreviewPoints({
+                                values,
+                                param,
+                                framePeriodMs,
+                                selStartSec,
+                                selEndSec,
+                                axis,
+                                valueToY: project,
+                            });
+                            expect(
+                                built.length,
+                                `param=${param} pps=${pxPerSec} fp=${framePeriodMs} len=${selLenSec}`,
+                            ).toBe(legacy.length);
+                            for (let i = 0; i < built.length; i += 1) {
+                                expect(built[i].x).toBeCloseTo(legacy[i].x, 9);
+                                expect(built[i].y).toBeCloseTo(legacy[i].y, 9);
+                                compared += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        expect(compared).toBeGreaterThan(5000);
     });
 });

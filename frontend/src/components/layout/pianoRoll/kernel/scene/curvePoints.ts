@@ -108,3 +108,50 @@ export function projectCurvePoints(args: CurvePointsArgs): CurvePoint[] {
     }
     return out;
 }
+
+/**
+ * 剪贴板预览曲线的**专属**投影（它不走 `drawCurveTimed`）。
+ *
+ * 流程（与 `render.ts:1150-1170` 的循环逐行等价）：从**选区起点**开始，按
+ * `framePeriodMs` 的**原始帧距**依次排列每个采样值，超过选区终点即停止。
+ *
+ * 【为什么不能复用 `projectCurvePoints`】两者的时间基准不同：
+ * - 普通曲线：`framesToTime(startFrame + i * stride, fp)`，从**曲线自身起点**推算；
+ * - 剪贴板预览：`selStartSec + i * cbFp / 1000`，从**选区起点**推算，且忽略
+ *   `startFrame` / `stride`（数据是刚复制的片段，直接按原始帧距铺开）。
+ * 混用会让预览曲线整体平移 `selStartSec − curveStartSec`，即"粘贴后曲线跳到别处"。
+ *
+ * 特殊说明：本函数**不做**视口裁剪（原实现也不做）——它依赖选区裁剪，
+ * 而选区可能比视口窄。因此返回的点可能落在视口外，由 GL 侧统一裁剪。
+ *
+ * @param args 投影参数。
+ * @returns 预览点序列（视口坐标）；采样不足 2 点或选区非法时为空数组。
+ */
+export function projectClipboardPreviewPoints(args: {
+    readonly values: readonly number[];
+    readonly param: string;
+    readonly framePeriodMs: number;
+    readonly selStartSec: number;
+    readonly selEndSec: number;
+    readonly axis: TimelineAxis;
+    readonly valueToY: (value: number) => number;
+}): CurvePoint[] {
+    const { values, param, framePeriodMs, selStartSec, selEndSec, axis, valueToY } = args;
+    if (values.length < 2) return [];
+    if (!(selEndSec > selStartSec)) return [];
+    const fp = Math.max(1e-6, framePeriodMs);
+    const isPitch = param === "pitch";
+
+    const out: CurvePoint[] = [];
+    for (let i = 0; i < values.length; i += 1) {
+        // 不缩放、不套用 stride：直接按原始帧间距排列（与原实现一致）
+        const tSec = selStartSec + (i * fp) / 1000;
+        if (tSec > selEndSec) break;
+        const x = secToViewportPx(axis, tSec);
+        const rawValue = values[i] ?? 0;
+        const y = valueToY(isPitch ? rawValue + 0.5 : rawValue);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+        out.push({ x, y });
+    }
+    return out;
+}

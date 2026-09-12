@@ -29,7 +29,7 @@ These change what Phase 3 can claim, so they come first.
 | Original curve | 1042–1060 | 1.8 | **dashed** `getFixedDashPattern(6,6)` | |
 | Edited curve | 1063–1085 | 2.6 | solid | |
 | Selection-highlighted curve | 1087–1120 | 3.6 | solid | **clipped** to selection rect |
-| Clipboard preview | 1122–1150 | 1.5 | **dashed** `getFixedDashPattern(4,4)` | **clipped** to selection rect |
+| Clipboard preview | 1122–1170 | **2** | **dashed** `getFixedDashPattern(4,4)` | **clipped** to selection rect; **does not use `drawCurveTimed`** — it has its own loop anchored at `selStartSec` with raw inter-frame spacing |
 
 **R2 — Stroke semantics that the GL port must reproduce.**
 - `lineJoin` / `lineCap` are **never set anywhere** in the piano roll or `renderKernel` → Canvas2D defaults: **miter join, butt cap**, miter limit 10.
@@ -350,7 +350,7 @@ Same convention Phase 2 used, and for the same reason: each depends on the previ
 
 ### Task 3: Curve point projection (pure)
 
-- `curvePoints.ts`: `values[] + startFrame + stride + framePeriodMs + axis + valueToY` → viewport points, reproducing `drawCurveTimed`'s loop exactly, **including** the `pitch + 0.5` mapping, the `break` once past the right edge, and the `started = false; continue` prefix skip.
+- `curvePoints.ts`: two entry points, because two loops exist. `projectCurvePoints` reproduces `drawCurveTimed`'s loop exactly (**including** the `pitch + 0.5` mapping, the `break` past the right edge, and the `started = false; continue` prefix skip). `projectClipboardPreviewPoints` reproduces the clipboard branch's own loop (`render.ts:1150–1170`): anchored at `selStartSec` with **raw** inter-frame spacing (`selStartSec + i * cbFp / 1000`, no `startFrame`/`stride`), terminating at `selEndSec`.
 - **Return only the visible slice** (the function's contract is "points that would be drawn"), because Task 2's dash phase depends on arc length starting at the first visible point. Do not return the full curve plus an offset.
 - **Exit check:** equivalence test against a re-implementation of `drawCurveTimed`'s loop over many parameter combinations (the pattern that caught 12 defects in Phase 2).
 
