@@ -9,7 +9,8 @@
 `11276163`（内核改为默认渲染路径）之后，时间轴上同时存在两条完整实现：
 
 - **内核**：`TimelineKernelView` + `timelineKernelHost`，自绘滚动 + 单 WebGL2，持有视口真值。
-- **旧实现**：`TimelineScrollArea` + `TimelineSurface` + `TimelineCanvasViewport` + `BackgroundGrid` + `TrackLane`/`ClipItem`，原生滚动 + Canvas2D。
+- **旧实现**：`TimelineScrollArea` + `TimelineSurface` + `TimelineCanvasViewport` + `TrackLane`/`ClipItem`，原生滚动 + Canvas2D。
+  （注：`BackgroundGrid` 由两者**共用**——旧实现经 `TimelineSurface`，参数编辑器经 barrel 直接用，因此**不在删除范围**。）
 
 两者由 `TimelinePanel` 的一个三元表达式在运行期二选一（`:4761`），开关读 `localStorage`。
 
@@ -100,7 +101,6 @@
 | `timeline/TimelineScrollArea.tsx` | 392 | 仅被 `timeline/index.ts` 再导出 |
 | `timeline/TimelineSurface.tsx` | 183 | 仅被 `timeline/index.ts` 再导出 |
 | `timeline/TimelineCanvasViewport.tsx` | 188 | 仅被 `TimelineSurface` + `index.ts` |
-| `timeline/BackgroundGrid.tsx` | 457 | 仅被 `TimelineSurface` + `index.ts` |
 | `timeline/ClipItem.tsx` | 945 | 仅被 `TrackLane` + `index.ts` |
 | `TrackLane` **组件部分** | 见 3.2 | 仅被旧分支使用 |
 | `TimelinePanel.tsx` else 分支体 | 513（`:4866`–`:5378`） | 改为无条件渲染内核分支后不可达 |
@@ -125,6 +125,7 @@ computeLeadingOverlapSecByClipId(clips)   // TrackLane.tsx:47
 | 文件/模块 | 内核侧的引用依据 |
 | --- | --- |
 | `TimelineWaveformSurface.tsx` | `TimelineKernelView.tsx:37` 挂载 |
+| `BackgroundGrid.tsx` | **参数编辑器**（`PianoRollPanel.tsx:84` 经 barrel 导入、`:6379` 渲染、无内核守卫）。名字像旧实现，实为两用 |
 | `SnapHighlightLayer.tsx` | `TimelineKernelView.tsx:33` 挂载 |
 | `TimeRuler.tsx`（`timeRulerNode`） | 两个分支都用（`:4763` 与 `:4867`） |
 | `renderKernel/*` | 内核的共享底座（`scrollKernel`、`glContext`、`sdfBoxProgram`、`keyboardScroll` 等） |

@@ -30,7 +30,6 @@
 | `frontend/src/components/layout/timeline/TimelineScrollArea.tsx` | 392 | 旧实现的滚动容器（原生滚动），仅被 barrel 再导出 |
 | `frontend/src/components/layout/timeline/TimelineSurface.tsx` | 183 | 旧实现的绘制面，仅被 barrel 再导出 |
 | `frontend/src/components/layout/timeline/TimelineCanvasViewport.tsx` | 188 | 旧实现的 Canvas2D 视口，仅被 `TimelineSurface` + barrel |
-| `frontend/src/components/layout/timeline/BackgroundGrid.tsx` | 457 | 旧实现的网格，仅被 `TimelineSurface` + barrel |
 | `frontend/src/components/layout/timeline/ClipItem.tsx` | 945 | 旧实现的 clip DOM 组件，仅被 `TrackLane` + barrel |
 | `frontend/src/components/layout/timeline/TrackLane.tsx` | 1006 | 旧实现的轨道 DOM；**其纯函数须先拆出**（任务 3） |
 | `frontend/src/components/layout/timeline/kernel/kernelMount.ts` + `.test.ts` | — | `enabled` 维度消失后退化为伪抽象（任务 4 步骤 8 简化并保留行为测试） |
@@ -311,7 +310,8 @@ git commit -m "refactor(timeline): 删除旧分支与孤儿 state（内核唯一
 - Modify: `frontend/src/components/layout/TimelinePanel.tsx`（改 import 来源）
 - Modify: `frontend/src/components/layout/timeline/TimelineWaveformSurface.tsx`（改 import 来源）
 - Modify: `frontend/src/components/layout/timeline/index.ts`（删再导出）
-- Delete: `TrackLane.tsx`、`ClipItem.tsx`、`TimelineScrollArea.tsx`、`TimelineSurface.tsx`、`TimelineCanvasViewport.tsx`、`BackgroundGrid.tsx`
+- Delete: `TrackLane.tsx`、`ClipItem.tsx`、`TimelineScrollArea.tsx`、`TimelineSurface.tsx`、`TimelineCanvasViewport.tsx`
+  （**不含 `BackgroundGrid.tsx`** —— 参数编辑器也在用它，见步骤 7 的陷阱说明）
 
 - [ ] **步骤 1：写新模块的失败测试**
 
@@ -516,17 +516,47 @@ npx vitest run 2>&1 | tail -4
 
 - [ ] **步骤 7：删除旧组件文件与 barrel 行**
 
+**⚠️ 陷阱：`BackgroundGrid.tsx` 名字像旧实现，但它是两用的 —— 不要删。**
+`PianoRollPanel.tsx` 从 barrel 导入它（`:84`）并在 `:6379` 渲染 `<BackgroundGrid …>`，
+且**不在任何内核守卫内**（`visible={s.timelineSnap.gridVisible}`，与内核开关无关）。
+实测确认参数编辑器下网格层的 canvas 确实由它承载。删掉它参数编辑器会直接编译失败。
+
+控制方初稿把它列进了删除清单，是**错的**（当时的依据只是"仅被 TimelineSurface + barrel
+引用"——漏了 PianoRollPanel 经由 barrel 的间接引用）。这类"经 barrel 间接引用"正是
+按文件名删代码最容易踩的坑；本任务的删除清单已按真实 import 图修正。
+
+其余 5 个文件（`TrackLane` / `ClipItem` / `TimelineScrollArea` / `TimelineSurface` /
+`TimelineCanvasViewport`）经核实无其他消费者，可安全删除。
+
 ```bash
 cd /Users/guoqiangye/code/HiFiShifter
 git rm frontend/src/components/layout/timeline/TrackLane.tsx \
        frontend/src/components/layout/timeline/ClipItem.tsx \
        frontend/src/components/layout/timeline/TimelineScrollArea.tsx \
        frontend/src/components/layout/timeline/TimelineSurface.tsx \
-       frontend/src/components/layout/timeline/TimelineCanvasViewport.tsx \
-       frontend/src/components/layout/timeline/BackgroundGrid.tsx
+       frontend/src/components/layout/timeline/TimelineCanvasViewport.tsx
 ```
 
-然后打开 `frontend/src/components/layout/timeline/index.ts`，删除对上述 6 个模块的再导出行（形如 `export * from "./TrackLane";`）。**保留**其余行（`TimeRuler`、`TimelineWaveformSurface`、`SnapHighlightLayer` 等仍在用）。
+然后打开 `frontend/src/components/layout/timeline/index.ts`，删除对上述 **5** 个已删模块的再导出行。该文件当前共 22 行，需删除这 5 行：
+
+```ts
+export * from "./BackgroundGrid";        // ❌ 不删！参数编辑器在用（见上方陷阱）
+export * from "./ClipItem";              // 删
+export * from "./TimelineScrollArea";    // 删
+export * from "./TrackLane";             // 删
+export * from "./TimelineCanvasViewport";// 删
+export * from "./TimelineSurface";       // 删
+```
+
+**必须保留其余全部行**，特别是 `BackgroundGrid`（参数编辑器依赖）、`TimeRuler`、
+`TrackList`、`SnapHighlightLayer`、`TimelineWaveformSurface`、`constants`、`math` 等
+（内核与参数编辑器都在用）。
+
+**验证**：删除后 `BackgroundGrid` 的再导出行必须仍在：
+```bash
+grep -n "BackgroundGrid" src/components/layout/timeline/index.ts
+```
+期望：输出 `export * from "./BackgroundGrid";`（若为空说明误删了）。
 
 - [ ] **步骤 8：验证删除后无悬空引用**
 
@@ -558,7 +588,7 @@ git add -A
 git commit -m "refactor(timeline): 删除旧时间轴组件，拆出共享重叠计算（阶段 3）
 
 删除旧渲染路径的 6 个组件文件（TimelineScrollArea / TimelineSurface /
-TimelineCanvasViewport / BackgroundGrid / TrackLane / ClipItem，共约 3171 行）
+TimelineCanvasViewport / TrackLane / ClipItem，共约 2714 行）
 与 barrel 再导出。
 
 关键：TrackLane.tsx 导出的 computeLeadingOverlapSecByClipId 有**两个旧分支之外
@@ -1472,7 +1502,9 @@ grep -c "import\.meta\.env" dist/assets/main-*.js
 ```bash
 cd /Users/guoqiangye/code/HiFiShifter/frontend
 echo "— 旧组件文件（应为空）—"
-ls src/components/layout/timeline/{TimelineScrollArea,TimelineSurface,TimelineCanvasViewport,BackgroundGrid,TrackLane,ClipItem}.tsx 2>&1 | grep -v "No such file" || echo "  已全部删除 ✓"
+ls src/components/layout/timeline/{TimelineScrollArea,TimelineSurface,TimelineCanvasViewport,TrackLane,ClipItem}.tsx 2>&1 | grep -v "No such file" || echo "  已全部删除 ✓"
+# BackgroundGrid 必须仍在（参数编辑器依赖，误删会让参数编辑器编译失败）：
+test -f src/components/layout/timeline/BackgroundGrid.tsx && echo "  BackgroundGrid 保留 ✓" || echo "  ✗ BackgroundGrid 被误删！"
 echo "— 开关残留（应为空）—"
 grep -rn "isTimelineKernelEnabled\|isPianoRollKernelEnabled\|isPianoRollGlSceneEnabled\|isPianoRollCurveGlEnabled\|PARAM_EDITOR_KERNEL_ENABLED\|PARAM_EDITOR_GL_SCENE_ENABLED\|PARAM_EDITOR_CURVE_GL_ENABLED\|kernelActive" src/ 2>/dev/null || echo "  已全部移除 ✓"
 echo "— hifishifter.*Kernel 键残留（应为空）—"
