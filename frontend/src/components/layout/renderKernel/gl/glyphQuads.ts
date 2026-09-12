@@ -23,7 +23,7 @@
 
 import type { AtlasSlot } from "../glyph/glyphAtlas";
 import type { LayoutGlyph } from "../glyph/glyphLayout";
-import type { Rgba } from "../scene/instanceTypes";
+import type { Rgba } from "../instanceTypes";
 
 /** 一个字形四边形（内容坐标 + 归一化 uv）。 */
 export interface GlyphQuad {

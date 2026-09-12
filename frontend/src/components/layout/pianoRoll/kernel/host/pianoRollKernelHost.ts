@@ -30,8 +30,8 @@
  *
  * 【与其他模块的关系】
  * - 上游：`PianoRollPanel` 在挂载 effect 里创建并持有，卸载时 `dispose()`。
- * - 复用：`timeline/kernel/scrollKernel`（视口真值）、`renderLoop`（帧调度）、
- *   `timeline/kernel/input/scrollbars`（滚动条几何）、`timelineAxis`（投影）。
+ * - 复用：`renderKernel/scrollKernel`（视口真值）、`renderLoop`（帧调度）、
+ *   `renderKernel/scrollbars`（滚动条几何）、`timelineAxis`（投影）。
  * - 下游：`onFrame` 把投影交回面板绘制（标尺 / 网格 / 画布 / 波形 / 播放头）。
  */
 
@@ -40,18 +40,18 @@ import { invokeGridRedrawHandler } from "../../../timeline/gridRedrawBridge";
 import {
     scrollDeltaFromThumbDrag,
     scrollTargetFromTrackClick,
-} from "../../../timeline/kernel/input/scrollbars";
-import { createGlCanvas, type GlCanvasHandle } from "../../../timeline/kernel/gl/glContext";
+} from "../../../renderKernel/scrollbars";
+import { createGlCanvas, type GlCanvasHandle } from "../../../renderKernel/gl/glContext";
 import {
     CLIP_INSTANCE_FLOATS,
     writeFlatInstance,
-} from "../../../timeline/kernel/gl/instanceLayout";
-import { createSdfBoxProgram, type SdfBoxProgram } from "../../../timeline/kernel/gl/sdfBoxProgram";
-import { createRenderLoop } from "../../../timeline/kernel/renderLoop";
+} from "../../../renderKernel/gl/instanceLayout";
+import { createSdfBoxProgram, type SdfBoxProgram } from "../../../renderKernel/gl/sdfBoxProgram";
+import { createRenderLoop } from "../../../renderKernel/renderLoop";
 import {
     createScrollKernel,
     type TimelineViewportState,
-} from "../../../timeline/kernel/scrollKernel";
+} from "../../../renderKernel/scrollKernel";
 import { isBlackKey, midiToLabel } from "../../utils";
 import {
     createPianoRollGlyphs,
@@ -60,15 +60,15 @@ import {
 } from "../glyph/pianoRollGlyphs";
 import { buildAxisMarkInstances, resolveAxisKind } from "../scene/axisMarkInstances";
 import { buildKeyboardInstances } from "../scene/keyboardInstances";
-import { createGlyphProgram, type GlyphProgram } from "../../../timeline/kernel/gl/glyphProgram";
-import type { GlyphQuad } from "../../../timeline/kernel/gl/glyphQuads";
+import { createGlyphProgram, type GlyphProgram } from "../../../renderKernel/gl/glyphProgram";
+import type { GlyphQuad } from "../../../renderKernel/gl/glyphQuads";
 import {
     createTimelineAxis,
     secToViewportPx,
     strokePx,
     type TimelineAxis,
-} from "../../../timeline/runtime/timelineAxis";
-import type { FlatInstance } from "../../../timeline/kernel/scene/instanceTypes";
+} from "../../../renderKernel/timelineAxis";
+import type { FlatInstance } from "../../../renderKernel/instanceTypes";
 import { wholeDevicePxLength } from "../../../../../utils/devicePixelLine";
 import {
     buildPitchGridInstances,

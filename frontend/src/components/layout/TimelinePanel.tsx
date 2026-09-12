@@ -214,7 +214,7 @@ import { readDevicePixelRatio, snapToDevicePx } from "../../utils/devicePixelLin
 import { buildSparseClipRenderModel } from "./timeline/runtime/timelineCanvasModel";
 import { buildTimelineRenderModel } from "./timeline/runtime/timelineRenderModel";
 import { computeLeadingOverlapSecByClipId } from "./timeline/TrackLane";
-import { createTimelineAxis } from "./timeline/runtime/timelineAxis";
+import { createTimelineAxis } from "./renderKernel/timelineAxis";
 import { resolveQuickExportClipIds } from "./timeline/quickExportSelection";
 import type { ClipFormantMorph } from "../../features/session/sessionTypes";
 import { ClipFormantToolWindow } from "./timeline/clip/ClipFormantToolWindow";

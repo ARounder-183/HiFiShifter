@@ -30,7 +30,7 @@
  *    只取颜色 alpha 会略亮。
  */
 
-import type { FlatInstance, Rgba } from "./instanceTypes";
+import type { FlatInstance, Rgba } from "../../../renderKernel/instanceTypes";
 
 /**
  * 弱网格线的宽度（**CSS 像素**）。

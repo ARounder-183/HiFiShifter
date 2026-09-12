@@ -31,7 +31,7 @@
 
 import { buildClipBodyInstance, CLIP_INSTANCE_FLOATS } from "../../runtime/timelineClipGlRenderer";
 import { buildTimelineClipVisualStyle } from "../../runtime/timelineCanvasStyle";
-import { resolveBufferFloats } from "../gl/instanceBuffer";
+import { resolveBufferFloats } from "../../../renderKernel/gl/instanceBuffer";
 
 /**
  * 参与实例构建的最小 clip 字段集。

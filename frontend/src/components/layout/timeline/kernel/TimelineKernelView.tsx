@@ -33,7 +33,7 @@ import type { ClipInfo } from "../../../../features/session/sessionTypes";
 import { SnapHighlightLayer } from "../SnapHighlightLayer";
 import { CLIP_BODY_PADDING_Y, CLIP_HEADER_HEIGHT } from "../constants";
 import { KernelClipInlineEditor } from "./KernelClipInlineEditor";
-import { createTimelineAxis, type TimelineAxis } from "../runtime/timelineAxis";
+import { createTimelineAxis, type TimelineAxis } from "../../renderKernel/timelineAxis";
 import { TimelineWaveformSurface } from "../TimelineWaveformSurface";
 import {
     createTimelineKernelHost,

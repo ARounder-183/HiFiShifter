@@ -24,7 +24,7 @@ import {
     secToContentPx,
     secToSpanPx,
     type TimelineAxis,
-} from "./timelineAxis.js";
+} from "../../renderKernel/timelineAxis.js";
 
 type SparseRenderClip = {
     id: string;

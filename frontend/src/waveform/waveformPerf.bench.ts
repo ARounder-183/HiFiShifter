@@ -28,7 +28,7 @@ import { bench, describe } from "vitest";
 import {
     viewportEndSec,
     viewportStartSec,
-} from "../components/layout/timeline/runtime/timelineAxis.js";
+} from "../components/layout/renderKernel/timelineAxis.js";
 import { buildTimelinePerfScenario } from "../components/layout/timeline/runtime/timelinePerfScenario.js";
 import { buildTimelineRenderModel } from "../components/layout/timeline/runtime/timelineRenderModel.js";
 import { buildWaveformGeometry } from "./geometry.js";

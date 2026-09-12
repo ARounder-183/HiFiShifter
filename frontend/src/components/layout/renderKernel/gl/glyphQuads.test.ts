@@ -18,7 +18,7 @@ import { describe, expect, it } from "vitest";
 import type { AtlasSlot } from "../glyph/glyphAtlas";
 import type { LayoutGlyph } from "../glyph/glyphLayout";
 import { buildGlyphQuads } from "./glyphQuads";
-import type { Rgba } from "../scene/instanceTypes";
+import type { Rgba } from "../instanceTypes";
 
 const WHITE: Rgba = [1, 1, 1, 1];
 

@@ -18,7 +18,7 @@
 import { describe, expect, it } from "vitest";
 
 import { buildGridInstances, type GridTickLike } from "./gridInstances";
-import type { Rgba } from "./instanceTypes";
+import type { Rgba } from "../../../renderKernel/instanceTypes";
 
 const WEAK: Rgba = [1, 1, 1, 0.1];
 const STRONG: Rgba = [1, 1, 1, 0.2];

@@ -22,7 +22,7 @@ import { BackgroundGrid } from "./BackgroundGrid";
 import { invokeGridRedrawHandler } from "./gridRedrawBridge";
 import { TimelineCanvasViewport } from "./TimelineCanvasViewport";
 import { TimelineWaveformSurface } from "./TimelineWaveformSurface";
-import { secToViewportPx, type TimelineAxis } from "./runtime/timelineAxis.js";
+import { secToViewportPx, type TimelineAxis } from "../renderKernel/timelineAxis.js";
 import { LAYER_ORDER } from "./runtime/timelineFrameCommitter.js";
 import type { TimelineTick } from "./runtime/buildTimelineTicks.js";
 import { snapToDevicePx, wholeDevicePxLength } from "../../../utils/devicePixelLine.ts";

@@ -24,7 +24,7 @@
  * - 坐标投影一律由 `timelineAxis.ts` 构造，本文件不做任何乘法换算。
  */
 
-import { createTimelineAxis, type TimelineAxis } from "./timelineAxis.js";
+import { createTimelineAxis, type TimelineAxis } from "../../renderKernel/timelineAxis.js";
 import { resolveTimelineMinPxPerSec } from "./timelineZoomBounds.js";
 
 /**

@@ -29,7 +29,7 @@ import {
     viewportEndSec as axisViewportEndSec,
     viewportStartSec as axisViewportStartSec,
     type TimelineAxis,
-} from "../components/layout/timeline/runtime/timelineAxis.ts";
+} from "../components/layout/renderKernel/timelineAxis.ts";
 
 export interface WaveformSceneClip {
     id: string;

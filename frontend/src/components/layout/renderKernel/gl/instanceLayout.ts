@@ -17,7 +17,7 @@
  * - 独立性：纯逻辑，不依赖 WebGL / DOM，可直接单测。
  */
 
-import type { FlatInstance } from "../scene/instanceTypes";
+import type { FlatInstance } from "../instanceTypes";
 
 /** 单实例 float 数（与既有 `CLIP_INSTANCE_FLOATS` 一致）。 */
 export const CLIP_INSTANCE_FLOATS = 25;

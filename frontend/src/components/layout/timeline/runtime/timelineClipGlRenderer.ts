@@ -26,7 +26,7 @@
  * 离线无法验证外观；默认走既有 Canvas2D 路径，由真机 A/B 确认后再切换。
  */
 
-import { rasterize } from "./canvasRaster.js";
+import { rasterize } from "../../renderKernel/canvasRaster.js";
 
 /**
  * 开关 key：显式置为 "0" 时关闭 GL clip 体，**其余任何值（含未设置）都开启**。

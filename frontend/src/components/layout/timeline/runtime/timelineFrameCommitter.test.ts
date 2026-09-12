@@ -18,7 +18,7 @@
 import { test } from "vitest";
 
 import { LAYER_ORDER, createTimelineFrameCommitter } from "./timelineFrameCommitter.js";
-import { createTimelineAxis, type TimelineAxis } from "./timelineAxis.js";
+import { createTimelineAxis, type TimelineAxis } from "../../renderKernel/timelineAxis.js";
 
 function assertEqual(actual: unknown, expected: unknown, label: string): void {
     if (actual !== expected) {

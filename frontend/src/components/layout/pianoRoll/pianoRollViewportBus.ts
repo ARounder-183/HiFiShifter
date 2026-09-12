@@ -12,7 +12,7 @@
  */
 
 import { LAYER_ORDER, type TimelineLayer } from "../timeline/runtime/timelineFrameCommitter.js";
-import { createTimelineAxis, type TimelineAxis } from "../timeline/runtime/timelineAxis.js";
+import { createTimelineAxis, type TimelineAxis } from "../renderKernel/timelineAxis.js";
 import { createViewportBus } from "../timeline/runtime/viewportBus.js";
 
 /** 旧式监听器的参数签名（参数编辑器不涉及竖直滚动与行高）。 */

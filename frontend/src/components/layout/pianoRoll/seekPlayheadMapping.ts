@@ -9,11 +9,11 @@
  * `(x + scrollLeft) / pxPerSec` 而在边界处差半像素。
  *
  * 【与其他模块的关系】
- * - 依赖：`timeline/runtime/timelineAxis.ts`（唯一投影）。
+ * - 依赖：`renderKernel/timelineAxis.ts`（唯一投影）。
  * - 消费方：`usePianoRollInteractions.ts` 的 `pointerSec` 与标尺点击定位。
  */
 
-import { viewportPxToSec, type TimelineAxis } from "../timeline/runtime/timelineAxis";
+import { viewportPxToSec, type TimelineAxis } from "../renderKernel/timelineAxis";
 
 /**
  * 视口客户端 X → 工程时间（秒）。

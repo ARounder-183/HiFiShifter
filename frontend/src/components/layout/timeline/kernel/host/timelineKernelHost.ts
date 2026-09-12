@@ -46,10 +46,10 @@ import type { Keybinding } from "../../../../../features/keybindings/types";
 import { isPrimaryModifierDown } from "../../../../../utils/platform";
 import { getTimelineWheelAction, type ScrollbarZone } from "../../../wheelGesture";
 import { buildTimelineTicks, type TimelineTick } from "../../runtime/buildTimelineTicks";
-import { createTimelineAxis, type TimelineAxis } from "../../runtime/timelineAxis";
+import { createTimelineAxis, type TimelineAxis } from "../../../renderKernel/timelineAxis";
 import { buildSparseClipRenderModel } from "../../runtime/timelineCanvasModel";
 import { drawTimelineCanvas } from "../../runtime/timelineCanvasRenderer";
-import { clearCanvasPhysical, rasterize } from "../../runtime/canvasRaster";
+import { clearCanvasPhysical, rasterize } from "../../../renderKernel/canvasRaster";
 import { parseRgbaColor, type GlClipBodySink } from "../../runtime/timelineClipGlRenderer";
 import {
     buildTimelineClipVisualStyle,
@@ -93,20 +93,20 @@ import {
     computeTimelineTrackDragLock,
     computeTimelineTrackDragLockThresholdPx,
 } from "../../runtime/timelineTrackDragLock";
-import { createGlCanvas } from "../gl/glContext";
-import { CLIP_INSTANCE_FLOATS, writeFlatInstance } from "../gl/instanceLayout";
-import { createSdfBoxProgram } from "../gl/sdfBoxProgram";
+import { createGlCanvas } from "../../../renderKernel/gl/glContext";
+import { CLIP_INSTANCE_FLOATS, writeFlatInstance } from "../../../renderKernel/gl/instanceLayout";
+import { createSdfBoxProgram } from "../../../renderKernel/gl/sdfBoxProgram";
 import {
     computeScrollbar,
     scrollDeltaFromThumbDrag,
     scrollTargetFromTrackClick,
-} from "../input/scrollbars";
+} from "../../../renderKernel/scrollbars";
 import { normalizeWheelDelta } from "../input/normalizeWheel";
-import { createRenderLoop } from "../renderLoop";
+import { createRenderLoop } from "../../../renderKernel/renderLoop";
 import { createClipInstanceBuilder } from "../scene/clipInstances";
 import { buildGridInstances } from "../scene/gridInstances";
-import type { FlatInstance, Rgba } from "../scene/instanceTypes";
-import { createScrollKernel, type TimelineViewportState } from "../scrollKernel";
+import type { FlatInstance, Rgba } from "../../../renderKernel/instanceTypes";
+import { createScrollKernel, type TimelineViewportState } from "../../../renderKernel/scrollKernel";
 
 /** `buildTimelineTicks` 的入参类型（用于让数据镜像的字段类型自动对齐）。 */
 type BuildTicksArgs = Parameters<typeof buildTimelineTicks>[0];

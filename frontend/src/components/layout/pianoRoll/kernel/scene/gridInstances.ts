@@ -27,7 +27,7 @@
  * - 独立性：纯函数，不依赖 DOM / WebGL / React，可在 node 环境单测。
  */
 
-import type { Rgba } from "../../../timeline/kernel/scene/instanceTypes";
+import type { Rgba } from "../../../renderKernel/instanceTypes";
 
 /** 非音高参数的网格种类（决定步进与强线间隔）。 */
 export type ValueGridKind = "cents" | "degrees" | "formantCents";

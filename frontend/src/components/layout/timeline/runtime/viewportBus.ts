@@ -25,7 +25,7 @@ import {
     type TimelineFrameCommitter,
     type TimelineLayer,
 } from "./timelineFrameCommitter.js";
-import { withAxis, type TimelineAxis } from "./timelineAxis.js";
+import { withAxis, type TimelineAxis } from "../../renderKernel/timelineAxis.js";
 
 /** 视口总线。 */
 export interface ViewportBus {

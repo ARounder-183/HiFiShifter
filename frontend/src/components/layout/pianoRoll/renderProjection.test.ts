@@ -18,13 +18,13 @@
  *
  * 【与其他模块的关系】
  * - 被测：`pianoRoll/utils.ts` 的 `timeToPixel`（旧公式）。
- * - 基准：`timeline/runtime/timelineAxis.ts` 的 `secToViewportPx`（新投影）。
+ * - 基准：`renderKernel/timelineAxis.ts` 的 `secToViewportPx`（新投影）。
  */
 
 import { test } from "vitest";
 
 import { timeToPixel } from "./utils.js";
-import { createTimelineAxis, secToViewportPx } from "../timeline/runtime/timelineAxis.js";
+import { createTimelineAxis, secToViewportPx } from "../renderKernel/timelineAxis.js";
 
 /** 相对容差：像素坐标可达 1e7 量级，纯绝对容差在大缩放下会被机器精度淹没。 */
 const RELATIVE_TOLERANCE = 1e-9;

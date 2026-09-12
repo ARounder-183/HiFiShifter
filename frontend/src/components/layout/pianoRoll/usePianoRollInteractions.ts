@@ -77,7 +77,7 @@ import {
     createTimelineAxis,
     secToViewportPx,
     viewportPxToSec,
-} from "../timeline/runtime/timelineAxis.js";
+} from "../renderKernel/timelineAxis.js";
 
 type CanvasCursor = "default" | "crosshair" | "grab" | "grabbing" | "ew-resize";
 

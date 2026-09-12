@@ -18,7 +18,7 @@
  * - 依赖：`timelineAxis.ts` 提供的投影与 `axisEquals` 去重。
  */
 
-import { axisEquals, type TimelineAxis } from "./timelineAxis.js";
+import { axisEquals, type TimelineAxis } from "../../renderKernel/timelineAxis.js";
 
 /** 一个可参与统一帧提交的图层。 */
 export interface TimelineLayer {

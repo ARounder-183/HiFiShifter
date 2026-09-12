@@ -48,7 +48,7 @@ import {
 import type { TimelineTick } from "../runtime/buildTimelineTicks.js";
 import { buildTimelineTicks } from "../runtime/buildTimelineTicks.js";
 import { REACT_SCROLL_STEP_PX } from "../runtime/timelineRenderModel.js";
-import { createTimelineAxis } from "../runtime/timelineAxis.js";
+import { createTimelineAxis } from "../../renderKernel/timelineAxis.js";
 import {
     snapTimelinePosition,
     snapTimelineClipMove,

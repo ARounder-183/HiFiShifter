@@ -129,7 +129,7 @@ import {
     createTimelineAxis,
     viewportEndSec,
     viewportStartSec,
-} from "./timeline/runtime/timelineAxis.js";
+} from "./renderKernel/timelineAxis.js";
 import { usePianoRollInteractions } from "./pianoRoll/usePianoRollInteractions";
 import { useLiveParamEditing } from "./pianoRoll/useLiveParamEditing";
 import { getParamShiftStep, parseParamShiftMagnitude } from "./pianoRoll/paramShiftStep";

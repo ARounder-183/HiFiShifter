@@ -13,14 +13,14 @@
 import type { ParamMorphOverlay, ParamName, ParamViewSegment, ValueViewport } from "./types";
 import { resolvePianoRollColors } from "./colors";
 import { clamp } from "../timeline";
-import { clearCanvasPhysical, rasterize } from "../timeline/runtime/canvasRaster";
+import { clearCanvasPhysical, rasterize } from "../renderKernel/canvasRaster";
 import {
     secToViewportPx,
     strokePx,
     viewportEndSec,
     viewportStartSec,
     type TimelineAxis,
-} from "../timeline/runtime/timelineAxis";
+} from "../renderKernel/timelineAxis";
 import { wholeDevicePxLength } from "../../../utils/devicePixelLine";
 import { AXIS_W, PITCH_MAX_MIDI, PITCH_MIN_MIDI } from "./constants";
 import { framesToTime, isBlackKey, midiToLabel } from "./utils";

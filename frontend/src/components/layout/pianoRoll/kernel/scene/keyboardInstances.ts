@@ -24,7 +24,7 @@
  * - 独立性：纯函数，不依赖 DOM / WebGL / React。
  */
 
-import type { Rgba } from "../../../timeline/kernel/scene/instanceTypes";
+import type { Rgba } from "../../../renderKernel/instanceTypes";
 
 /**
  * 一个键盘轴矩形实例。

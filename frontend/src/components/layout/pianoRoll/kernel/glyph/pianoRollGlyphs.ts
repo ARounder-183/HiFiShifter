@@ -27,24 +27,24 @@
  *
  * 【与其他模块的关系】
  * - 上游：`pianoRollKernelHost` 在几何变化时构建文字四边形并上传。
- * - 横向：复用 `timeline/kernel/glyph/*` 与 `timeline/kernel/gl/glyphProgram`。
+ * - 横向：复用 `renderKernel/glyph/*` 与 `renderKernel/gl/glyphProgram`。
  * - 独立性：除测量 / 光栅化依赖 Canvas2D 外无 DOM 耦合；无 DOM 环境下
  *   `createPianoRollGlyphs` 返回 null，调用方跳过文字（不崩）。
  */
 
-import type { Rgba } from "../../../timeline/kernel/scene/instanceTypes";
-import type { AtlasSlot } from "../../../timeline/kernel/glyph/glyphAtlas";
+import type { Rgba } from "../../../renderKernel/instanceTypes";
+import type { AtlasSlot } from "../../../renderKernel/glyph/glyphAtlas";
 import {
     createGlyphLayout,
     type GlyphLayout,
     type GlyphRun,
-} from "../../../timeline/kernel/glyph/glyphLayout";
+} from "../../../renderKernel/glyph/glyphLayout";
 import {
     createGlyphRasterizer,
     GLYPH_LINE_HEIGHT_RATIO,
     type GlyphRasterizer,
-} from "../../../timeline/kernel/glyph/glyphRasterizer";
-import { buildGlyphQuads, type GlyphQuad } from "../../../timeline/kernel/gl/glyphQuads";
+} from "../../../renderKernel/glyph/glyphRasterizer";
+import { buildGlyphQuads, type GlyphQuad } from "../../../renderKernel/gl/glyphQuads";
 
 /** 图集单页边长（物理像素）。 */
 export const PIANO_ROLL_ATLAS_PAGE_SIZE_PX = 2048;

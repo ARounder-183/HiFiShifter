@@ -18,8 +18,8 @@
 import React from "react";
 
 import { waveformMipmapStore } from "../utils/waveformMipmapStore";
-import type { TimelineAxis } from "../components/layout/timeline/runtime/timelineAxis.ts";
-import { withAxis } from "../components/layout/timeline/runtime/timelineAxis.ts";
+import type { TimelineAxis } from "../components/layout/renderKernel/timelineAxis.ts";
+import { withAxis } from "../components/layout/renderKernel/timelineAxis.ts";
 import { LAYER_ORDER } from "../components/layout/timeline/runtime/timelineFrameCommitter.ts";
 import type { TimelineLayer } from "../components/layout/timeline/runtime/timelineFrameCommitter.ts";
 import { buildWaveformGeometry, type WaveformVertexSink } from "./geometry";

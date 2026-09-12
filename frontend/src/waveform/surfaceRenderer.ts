@@ -2,7 +2,7 @@ import type { WaveformGeometry } from "./geometry.ts";
 import {
     clearCanvasPhysical,
     rasterize,
-} from "../components/layout/timeline/runtime/canvasRaster.ts";
+} from "../components/layout/renderKernel/canvasRaster.ts";
 
 /**
  * 波形描边宽度（CSS 像素）。

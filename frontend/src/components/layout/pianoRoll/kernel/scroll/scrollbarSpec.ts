@@ -20,14 +20,14 @@
  *
  * 【与其他模块的关系】
  * - 上游：`pianoRollKernelHost` 每帧调用。
- * - 复用：`timeline/kernel/input/scrollbars`（几何与命中的单一来源）。
+ * - 复用：`renderKernel/scrollbars`（几何与命中的单一来源）。
  * - 独立性：纯函数，不依赖 DOM / React。
  */
 
 import {
     computeScrollbar,
     type ScrollbarGeometry,
-} from "../../../timeline/kernel/input/scrollbars";
+} from "../../../renderKernel/scrollbars";
 
 /** 装配入参。 */
 export interface PianoRollScrollbarArgs {

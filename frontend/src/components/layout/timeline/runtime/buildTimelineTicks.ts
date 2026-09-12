@@ -40,7 +40,7 @@ import {
     selectStrongGridBarMultiple,
     selectUniformGridStepBeats,
 } from "../gridLineSampling.ts";
-import { secToContentPx, type TimelineAxis } from "./timelineAxis.js";
+import { secToContentPx, type TimelineAxis } from "../../renderKernel/timelineAxis.js";
 
 /** 弱网格线的最大条数（与 gridLineSampling 的密度上限一致）。 */
 const MAX_WEAK_GRID_LINES = 160;

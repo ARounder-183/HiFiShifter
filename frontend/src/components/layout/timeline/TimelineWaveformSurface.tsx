@@ -37,7 +37,7 @@ export const TimelineWaveformSurface = React.memo(function TimelineWaveformSurfa
     widthPx: number;
     heightPx: number;
     /** 统一坐标投影：视口起点与缩放的唯一来源。 */
-    axis: import("./runtime/timelineAxis.js").TimelineAxis;
+    axis: import("../renderKernel/timelineAxis.js").TimelineAxis;
     /**
      * 视口来源：缺省为时间轴总线（旧实现）。
      *
@@ -45,11 +45,11 @@ export const TimelineWaveformSurface = React.memo(function TimelineWaveformSurfa
      * 与内核同帧跟随，无需让内核重写波形的几何 / 峰值管线。
      */
     viewportSource?: {
-        getAxis(): import("./runtime/timelineAxis.js").TimelineAxis;
+        getAxis(): import("../renderKernel/timelineAxis.js").TimelineAxis;
         register(
             layer: {
                 name: string;
-                paint: (axis: import("./runtime/timelineAxis.js").TimelineAxis) => void;
+                paint: (axis: import("../renderKernel/timelineAxis.js").TimelineAxis) => void;
             },
             order: number,
         ): () => void;
