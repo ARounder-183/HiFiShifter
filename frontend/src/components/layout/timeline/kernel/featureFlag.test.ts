@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import FLAG_SOURCE from "./featureFlag.ts?raw";
 
 import {
+    isKernelRenderingEnabled,
     isPianoRollCurveGlEnabled,
     isPianoRollGlSceneEnabled,
     isPianoRollKernelEnabled,
@@ -18,6 +19,7 @@ import {
     PIANO_ROLL_CURVE_GL_FLAG_KEY,
     PIANO_ROLL_KERNEL_FLAG_KEY,
     PIANO_ROLL_KERNEL_GL_FLAG_KEY,
+    setKernelRenderingEnabled,
     TIMELINE_KERNEL_FLAG_KEY,
 } from "./featureFlag";
 
@@ -46,6 +48,43 @@ function installStorage(impl: (key: string) => string | null): () => void {
     return () => {
         if (descriptor) Object.defineProperty(globalThis, "localStorage", descriptor);
         else Reflect.deleteProperty(globalThis, "localStorage");
+    };
+}
+
+/**
+ * 装一个**可写**的 localStorage 桩（内存 map）。
+ *
+ * 【为什么需要额外的桩】上面那个只有 `getItem`，够测读取；但总开关
+ * (`setKernelRenderingEnabled`) 要写四个键，必须能 `setItem` 并回读。
+ *
+ * @param initial 初始键值（用于构造"混合状态"）。
+ * @returns 卸载函数与内部 map（便于断言写入了哪些键）。
+ */
+function installWritableStorage(initial: Record<string, string> = {}): {
+    restore: () => void;
+    map: Map<string, string>;
+} {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+    const map = new Map<string, string>(Object.entries(initial));
+    Object.defineProperty(globalThis, "localStorage", {
+        value: {
+            getItem: (key: string) => (map.has(key) ? (map.get(key) as string) : null),
+            setItem: (key: string, value: string) => {
+                map.set(key, String(value));
+            },
+            removeItem: (key: string) => {
+                map.delete(key);
+            },
+        },
+        configurable: true,
+        writable: true,
+    });
+    return {
+        restore: () => {
+            if (descriptor) Object.defineProperty(globalThis, "localStorage", descriptor);
+            else Reflect.deleteProperty(globalThis, "localStorage");
+        },
+        map,
     };
 }
 
@@ -251,5 +290,86 @@ describe("isTimelineKernelEnabled", () => {
             throw new Error("denied");
         });
         expect(isTimelineKernelEnabled()).toBe(false);
+    });
+});
+
+/**
+ * 渲染内核总开关（设置界面的逃生门）。
+ *
+ * 【这两个函数的职责】原逃生门只认 `localStorage`，而打包版**没有 devtools**
+ * （`tauri` 未启用 `devtools` feature、release 下 wry 亦默认关闭），用户没有任何
+ * 入口能关掉内核——"逃生门"名不副实。设置界面的总开关就是那个入口，本组用例钉住
+ * 它的两条契约：
+ *
+ * 1. **读**是四层的「与」——任一层关闭就显示未勾选，不谎报"正在用新实现"；
+ * 2. **写**一次写全四层——只写一层会留下"时间轴退回旧实现、参数编辑器仍走内核"
+ *    的混合状态，用户与支持者都难以判断实际跑的是哪套实现。
+ */
+describe("渲染内核总开关（isKernelRenderingEnabled / setKernelRenderingEnabled）", () => {
+    let restore: (() => void) | null = null;
+    afterEach(() => {
+        restore?.();
+        restore = null;
+    });
+
+    it("四层都未设置 → 开启（与各层默认值一致）", () => {
+        const s = installWritableStorage();
+        restore = s.restore;
+        expect(isKernelRenderingEnabled()).toBe(true);
+    });
+
+    it("任一层被显式关闭 → 未开启（混合状态不谎报为开启）", () => {
+        // 逐层验证：只关一层也必须报告未开启，否则界面会显示"在用新实现"而实际
+        // 有一半走旧实现。
+        for (const key of [
+            TIMELINE_KERNEL_FLAG_KEY,
+            PIANO_ROLL_KERNEL_FLAG_KEY,
+            PIANO_ROLL_KERNEL_GL_FLAG_KEY,
+            PIANO_ROLL_CURVE_GL_FLAG_KEY,
+        ]) {
+            const s = installWritableStorage({ [key]: "0" });
+            expect(isKernelRenderingEnabled()).toBe(false);
+            s.restore();
+        }
+    });
+
+    it("★ 关闭时一次写全四层（不留混合状态）", () => {
+        const s = installWritableStorage();
+        restore = s.restore;
+        setKernelRenderingEnabled(false);
+        for (const key of [
+            TIMELINE_KERNEL_FLAG_KEY,
+            PIANO_ROLL_KERNEL_FLAG_KEY,
+            PIANO_ROLL_KERNEL_GL_FLAG_KEY,
+            PIANO_ROLL_CURVE_GL_FLAG_KEY,
+        ]) {
+            expect(s.map.get(key)).toBe("0");
+        }
+        expect(isKernelRenderingEnabled()).toBe(false);
+    });
+
+    it("★ 开启时同样写全四层（可从逃生门状态恢复）", () => {
+        const s = installWritableStorage({
+            [TIMELINE_KERNEL_FLAG_KEY]: "0",
+            [PIANO_ROLL_KERNEL_FLAG_KEY]: "0",
+        });
+        restore = s.restore;
+        expect(isKernelRenderingEnabled()).toBe(false);
+        setKernelRenderingEnabled(true);
+        expect(isKernelRenderingEnabled()).toBe(true);
+        expect(s.map.get(PIANO_ROLL_KERNEL_GL_FLAG_KEY)).toBe("1");
+        expect(s.map.get(PIANO_ROLL_CURVE_GL_FLAG_KEY)).toBe("1");
+    });
+
+    it("存储不可写时不抛异常（设置界面不应崩）", () => {
+        restore = installStorage(() => null); // 只有 getItem，没有 setItem
+        expect(() => setKernelRenderingEnabled(false)).not.toThrow();
+    });
+
+    it("存储读抛错时总开关为关闭且不抛异常", () => {
+        restore = installStorage(() => {
+            throw new Error("denied");
+        });
+        expect(isKernelRenderingEnabled()).toBe(false);
     });
 });

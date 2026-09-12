@@ -13,8 +13,11 @@
  * 这样后续阶段（GL 网格、曲线三角化）才能做到「滚动帧只改一个 uniform」。
  *
  * 【阶段 1 的范围（刻意很小）】
- * - **不引入 WebGL**：绘制仍由面板的 Canvas2D 完成，宿主经 `onFrame(axis)` 交回。
- *   因此本模块可在无 jsdom 的 node 环境单测（见同目录 `.test.ts`）。
+ * - **阶段 1 不含 WebGL**：绘制由面板的 Canvas2D 完成，宿主经 `onFrame(axis)` 交回。
+ *   因此本模块的滚动 / 视口逻辑可在无 jsdom 的 node 环境单测（见同目录 `.test.ts`）。
+ *   阶段 2/3 已在本文件之上叠加 4 条 GL 管线（静态场景 / 键盘与数值轴 / 文字字形 /
+ *   曲线），但它们的**失败都是软着陆**：GL 不可用只把句柄置空、退回 Canvas2D 路径，
+ *   不抛错（见「GL 场景层」一节的说明）。
  * - **输入按轴分配所有权**：滚动条 thumb 拖拽与轨道翻页、以及**竖向键盘翻页**
  *   （PageUp / PageDown / Home / End，见 `scroll/keyboardScroll`）由宿主注册监听；
  *   其余手势（滚轮、中键平移、绘制）仍在面板与 `usePianoRollInteractions`。

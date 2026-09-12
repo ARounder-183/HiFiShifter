@@ -11,7 +11,8 @@
  *
  * 【内核开关】`TIMELINE_KERNEL_ENABLED`（localStorage `hifishifter.timelineKernel`）
  * 开启时，轨道区改由 `TimelineKernelView`（新渲染内核）承载，关闭时回退到既有
- * DOM 实现；未显式设置时 dev 默认开启、生产默认关闭（见 `timeline/kernel/featureFlag`）。
+ * DOM 实现；未显式设置时**默认开启**（与构建模式无关，见 `timeline/kernel/featureFlag`）。
+ * 内核不可用时（WebGL2 创建失败）自动退回既有实现并记日志，见 `handleKernelUnavailable`。
  */
 import React, { useMemo, Profiler } from "react";
 import { Flex, Dialog, Button, Text } from "@radix-ui/themes";
@@ -143,15 +144,21 @@ import {
 } from "../../utils/loopSnap";
 import type { TempoMap } from "../../utils/tempoMap";
 import { isTimelineKernelEnabled } from "./timeline/kernel/featureFlag";
+import { resolveKernelMount } from "./timeline/kernel/kernelMount";
 import { TimelineKernelView } from "./timeline/kernel/TimelineKernelView";
 import type { TimelineKernelHost } from "./timeline/kernel/host/timelineKernelHost";
 
 /**
- * 时间轴渲染内核（Spike）开关：模块加载时读一次。
+ * 时间轴渲染内核开关：模块加载时读一次。
  *
  * 开启后时间轴区域由新内核（自绘滚动 + 单 WebGL2）**替换**渲染；关闭时完全走既有实现。
- * 默认值：dev 环境开启、生产关闭（见 `timeline/kernel/featureFlag`）；切换需刷新页面
- * （dev 环境的 PERF 悬浮面板有切换按钮，切换后自动刷新）。
+ * 默认值：**未显式设置时开启**（与 dev / 生产构建无关，见 `timeline/kernel/featureFlag`）
+ * ——默认跟随构建模式会让打包后静默退回旧实现，这是本项目踩过的坑（Phase 3 计划 R8）。
+ * 切换需刷新页面（设置界面的「时间轴显示」对话框 / dev 环境的 PERF 悬浮面板）。
+ *
+ * 特殊说明：本开关为 true **不代表内核一定能用**——WebGL2 可能创建失败（老驱动 /
+ * 远程桌面 / GPU 黑名单）。那种情况下 `TimelineKernelView` 会回报不可用，面板随即
+ * 退回既有实现（见 `handleKernelUnavailable`），用户不会看到空白时间轴。
  */
 const TIMELINE_KERNEL_ENABLED = isTimelineKernelEnabled();
 import type { ScaleLike } from "../../utils/musicalScales";
@@ -492,6 +499,48 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
      * 落地「参数编辑器视图同步」（内核模式没有原生 scroller 可写）。
      */
     const kernelHostRef = React.useRef<TimelineKernelHost | null>(null);
+
+    /**
+     * 内核是否已被判定为**本次会话内不可用**（WebGL2 创建失败等）。
+     *
+     * 【为什么需要】`TIMELINE_KERNEL_ENABLED` 只表达"用户想用内核"，不表达"内核
+     * 真能用"。WebGL2 不可用（老驱动 / 远程桌面 / GPU 黑名单 / 上下文数超限）是
+     * 预期内的环境差异，此时必须退回既有实现——否则用户看到的是**空白时间轴**。
+     *
+     * 【为什么用 state 而不是 ref】它决定渲染哪棵子树，必须触发重渲染。
+     *
+     * 【为什么置位后不再尝试】失败原因（无 GL）在会话内不会自愈，而每次重渲染都
+     * 重挂一次内核会反复失败并刷日志。要恢复只需刷新页面（与开关本身的语义一致）。
+     */
+    const [kernelUnavailable, setKernelUnavailable] = React.useState(false);
+
+    /**
+     * `TimelineKernelView` 回报内核不可用：退回既有实现并记录原因。
+     *
+     * 流程：置位 state（切换渲染子树）→ 控制台告警（带原因，供诊断）。
+     *
+     * 特殊说明：用 `useCallback` 保持引用稳定——它经 props 传给内核视图，而视图
+     * 把它放进「回调镜像」ref；引用抖动虽不会重建宿主，但稳定引用更省心。
+     *
+     * @param reason 失败原因（来自内核创建的 catch）。
+     */
+    const handleKernelUnavailable = React.useCallback((reason: string) => {
+        console.warn(`[TimelinePanel] 时间轴内核不可用（${reason}），已退回既有渲染实现`);
+        setKernelUnavailable(true);
+    }, []);
+
+    /**
+     * 本次渲染是否走内核。
+     *
+     * 判据抽在 `resolveKernelMount`（纯函数，有单测）而不是内联在这里：本工程
+     * Vitest 跑在 node 环境、**没有任何测试引用 `.tsx`**，内联的 JSX 分支无法被
+     * 覆盖——把分支改成恒真或恒假（后者即"内核永不挂载"的回归）测试都测不出。
+     */
+    const kernelMount = resolveKernelMount({
+        enabled: TIMELINE_KERNEL_ENABLED,
+        unavailable: kernelUnavailable,
+    });
+    const kernelActive = kernelMount.useKernel;
 
     /**
      * 「clip 左键按下拦截」句柄（内核在启动自己的手势之前调用）。
@@ -4706,8 +4755,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         变化，搬进 canvas 等于重写 Tempo 旗帜拖拽与电平表，收益极低；
                         内核只把「跟随视口」的部分收敛为 rAF 内一次 transform / scrollTop
                         写入。轨道区（网格 / clip / 波形 / 交互）才是滚动瓶颈，由内核自绘。
-                        开关默认关闭（见 featureFlag），两套渲染不会同时挂载。 */}
-                    {TIMELINE_KERNEL_ENABLED ? (
+                        开关**默认开启**（见 featureFlag）；两套渲染不会同时挂载。
+                        内核不可用时回退到下面的既有实现（见 handleKernelUnavailable）——
+                        WebGL2 创建失败是预期内的环境差异，不能让用户看到空白时间轴。 */}
+                    {kernelActive ? (
                         <>
                             {timeRulerNode}
                             <TimelineKernelView
@@ -4718,6 +4769,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 onScrollLeftCommit={handleKernelScrollLeftCommit}
                                 onScrollLeftFrame={state.syncScrollLeftFrame}
                                 onViewportWidthChange={setViewportWidth}
+                                onUnavailable={handleKernelUnavailable}
                                 getPlayheadSec={getVisualPlayheadSec}
                                 rulerContentRef={rulerContentRef}
                                 trackListScrollerRef={trackListScrollRef}

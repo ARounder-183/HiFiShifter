@@ -1044,6 +1044,10 @@ export const koKR = {
     timeline_display_settings: "타임라인 표시 설정...",
     timeline_display_settings_desc:
         "눈금자의 시간 단위, 라벨 밀도, 재생 헤드 시간 표시를 구성합니다.",
+    render_kernel_enabled: "새 렌더 커널 사용(타임라인 / 파라미터 편집기)",
+    render_kernel_enabled_desc:
+        "끄면 기존 렌더 구현으로 돌아갑니다. 특정 GPU 드라이버에서 표시 문제가 있을 때 확인용입니다.",
+    render_kernel_restart_required: "저장했습니다. 앱을 다시 시작하면 적용됩니다.",
     ruler_label_spacing: "라벨 간격",
     show_playhead_time_in_track_header: "트랙 헤더에 재생 헤드 시간 표시",
     copy_playhead_time: "재생 헤드 시간 복사",

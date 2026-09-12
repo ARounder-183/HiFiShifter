@@ -217,12 +217,6 @@ const NOTE_NAMES_SHARP = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", 
 const PARAM_EDITOR_VERTICAL_SCROLL_RANGE_PX = PIANO_ROLL_VERTICAL_SCROLL_RANGE_PX;
 
 /**
- * 是否启用参数编辑器渲染内核（阶段 1：滚动 / 视口所有权）。
- *
- * 在**模块加载时**读取一次（与时间轴内核同一约定）：切换开关后刷新页面生效。
- * 未显式设置时关闭（见 `isPianoRollKernelEnabled`），因此默认行为与迁移前完全一致。
- */
-/**
  * 本面板在共享视口中的来源标识。
  *
  * 与时间轴的 `TIMELINE_SYNC_ORIGIN` 成对：双方发布时登记来源，订阅回调据此
@@ -230,6 +224,14 @@ const PARAM_EDITOR_VERTICAL_SCROLL_RANGE_PX = PIANO_ROLL_VERTICAL_SCROLL_RANGE_P
  */
 const PIANO_ROLL_SYNC_ORIGIN = "pianoRoll";
 
+/**
+ * 是否启用参数编辑器渲染内核（阶段 1：滚动 / 视口所有权）。
+ *
+ * 在**模块加载时**读取一次（与时间轴内核同一约定）：切换开关后刷新页面生效。
+ * 未显式设置时**开启**（见 `isPianoRollKernelEnabled`）——默认值不跟随构建模式，
+ * 否则打包后会静默退回旧渲染器（Phase 3 计划 R8）。显式写 `"0"` 是逃生门，
+ * 也可在「视图 → 时间轴显示设置」用总开关一次关掉四层。
+ */
 const PARAM_EDITOR_KERNEL_ENABLED = isPianoRollKernelEnabled();
 
 /**

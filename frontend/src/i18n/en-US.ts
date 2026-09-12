@@ -1047,6 +1047,10 @@ export const enUS = {
     timeline_display_settings: "Timeline Display Settings...",
     timeline_display_settings_desc:
         "Configure ruler time units, label density and playhead time display.",
+    render_kernel_enabled: "Use the new render kernel (timeline / parameter editor)",
+    render_kernel_enabled_desc:
+        "Turn off to fall back to the previous renderer. Useful when diagnosing display problems on a specific GPU driver.",
+    render_kernel_restart_required: "Saved. Restart the app to apply.",
     ruler_label_spacing: "Label Spacing",
     show_playhead_time_in_track_header: "Show playhead time in track header",
     copy_playhead_time: "Copy Playhead Time",

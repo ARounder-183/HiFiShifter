@@ -15,6 +15,18 @@
  * ——某个平台/驱动上出问题时，显式写 `"0"` 即退回既有实现，不需要重新发版。
  * 开关值在模块加载时读取一次（切换需刷新页面，与既有 dev 开关行为一致）。
  *
+ * 【逃生门必须"够得到"——这是本文件同时提供 UI 助手的原因】
+ * 只认 `localStorage` 的逃生门在**打包版里形同虚设**：正式构建没有 devtools
+ * （`backend/src-tauri/Cargo.toml` 的 `tauri` 未启用 `devtools` feature，release 下
+ * wry 亦默认关闭），用户没有控制台可写这个键；dev 环境的 PERF 面板又被
+ * `import.meta.env.DEV` 挡住、根本不进产物。因此本文件额外导出
+ * `isKernelRenderingEnabled` / `setKernelRenderingEnabled` 作为**设置界面**的
+ * 后端，入口在「视图 → 时间轴显示设置」的总开关（见 `TimelineDisplaySettingsDialog`）。
+ * 总开关一次写全四层，避免留下"时间轴退回旧实现、参数编辑器仍走内核"的混合状态。
+ *
+ * 【为什么总开关不自动刷新页面】工程可能含未保存编辑，而本工程没有脏标记或
+ * `beforeunload` 保护，替用户决定丢弃是错的；界面只提示"重启后生效"。
+ *
  * 【为什么默认值不能再跟随 `import.meta.env.DEV`】内核的价值是解决真机上的性能
  * 问题，而 build 模式（`TAURI_UI_MODE=build`）跑的是生产包：`DEV === false` 会让
  * 全部开关默认关闭，于是**打包后悄悄退回旧渲染器**。开发时看到新实现、打包后看到
@@ -150,5 +162,68 @@ export function isPianoRollCurveGlEnabled(): boolean {
         return true;
     } catch {
         return false;
+    }
+}
+
+/**
+ * 四层开关的 key 全集（顺序无关）。
+ *
+ * 【为什么需要一份"全集"】设置界面的总开关要**一次写全四层**——只写其中一层会留下
+ * 混合状态（例如时间轴退回旧实现、参数编辑器仍走内核），出问题时用户与支持者都
+ * 难以判断当前到底跑的是哪套实现。
+ */
+export const KERNEL_FLAG_KEYS = [
+    TIMELINE_KERNEL_FLAG_KEY,
+    PIANO_ROLL_KERNEL_FLAG_KEY,
+    PIANO_ROLL_KERNEL_GL_FLAG_KEY,
+    PIANO_ROLL_CURVE_GL_FLAG_KEY,
+] as const;
+
+/**
+ * 渲染内核总开关的当前值：任一层被显式关闭即视为关闭。
+ *
+ * 【为什么用"与"而不是只看时间轴】设置界面把它显示为一个复选框，用户勾上意味着
+ * "我要用新实现"。混合状态下（部分层关闭）显示为未勾选更诚实——它确实没在跑完整
+ * 的新实现。
+ *
+ * 特殊说明：读的是**四层开关本身**，因此与真实渲染路径同源，不会出现"界面显示开启
+ * 但实际跑旧实现"的分叉。
+ *
+ * @returns 四层全部启用时为 true。
+ */
+export function isKernelRenderingEnabled(): boolean {
+    return (
+        isTimelineKernelEnabled() &&
+        isPianoRollKernelEnabled() &&
+        isPianoRollGlSceneEnabled() &&
+        isPianoRollCurveGlEnabled()
+    );
+}
+
+/**
+ * 一次写全四层开关（设置界面的总开关）。
+ *
+ * 流程：对 [`KERNEL_FLAG_KEYS`] 逐个写入 `"1"` / `"0"`。
+ *
+ * 特殊说明 1：**必须四层一起写**，理由见 `KERNEL_FLAG_KEYS` 说明。
+ *
+ * 特殊说明 2：本函数**不会**让改动立即生效——四个开关都在各面板模块加载时读取一次
+ * （见文件头），因此调用方必须在写完后提示用户**重启 / 刷新**。这里不自动
+ * `location.reload()`：工程可能含未保存编辑，而本工程没有脏标记或 `beforeunload`
+ * 保护，替用户决定丢弃是错的。
+ *
+ * 特殊说明 3：存储不可用（隐私模式 / 受限 WebView）时静默失败——调用方按"刷新后
+ * 仍为默认值"处理即可，不应让设置界面抛错。
+ *
+ * @param enabled true = 写入 `"1"`（使用内核）；false = 写入 `"0"`（退回既有实现）。
+ */
+export function setKernelRenderingEnabled(enabled: boolean): void {
+    try {
+        const value = enabled ? "1" : "0";
+        for (const key of KERNEL_FLAG_KEYS) {
+            globalThis.localStorage?.setItem(key, value);
+        }
+    } catch {
+        // 存储不可写：忽略（见特殊说明 3）。
     }
 }

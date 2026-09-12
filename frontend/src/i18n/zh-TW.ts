@@ -946,6 +946,10 @@ export const zhTW = {
     time_unit_clock: "時:分:秒.毫秒",
     timeline_display_settings: "時間軸顯示設定...",
     timeline_display_settings_desc: "設定標尺時間單位、標籤密度與播放游標時間顯示。",
+    render_kernel_enabled: "使用新渲染核心（時間軸 / 參數編輯器）",
+    render_kernel_enabled_desc:
+        "關閉後回退到既有渲染實作。用於某個顯示卡驅動下出現顯示異常時排查。",
+    render_kernel_restart_required: "已儲存，重新啟動應用程式後生效。",
     ruler_label_spacing: "標籤間距",
     show_playhead_time_in_track_header: "在軌道標題列顯示播放游標時間",
     copy_playhead_time: "複製播放游標時間",

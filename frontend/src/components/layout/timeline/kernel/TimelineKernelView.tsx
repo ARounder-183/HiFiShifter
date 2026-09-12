@@ -230,6 +230,28 @@ export interface TimelineKernelViewProps {
         readonly contentWidth: number;
         readonly contentHeight: number;
     };
+    /**
+     * 内核**不可用**时通知面板（当前只有一种原因：WebGL2 上下文创建失败）。
+     *
+     * 【为什么必须由面板接手，而不是本视图自己降级】
+     * 内核的网格与 clip 几何**只有 GL 一条渲染路径**——本视图内没有 Canvas2D
+     * 的等效绘制（旧的 `TimelineScrollArea` / `TimelineCanvasViewport` 才持有
+     * 那条路径，且它们的输入源是原生滚动容器，与内核的视口所有权不兼容）。
+     * 因此"软着陆"只能是把整棵子树**换回既有实现**，而这必须由持有分支的面板做。
+     *
+     * 【为什么不能只显示一行错误文字（这正是修复前的行为）】
+     * WebGL2 不可用（老驱动 / 远程桌面 / GPU 黑名单 / 上下文数超限）是**预期内的
+     * 环境差异**，不是程序缺陷。原先只渲染一行红字，用户看到的是**空白时间轴**
+     * ——比退回旧实现糟得多。参数编辑器内核与旧的 GL clip 层都已确立"失败必须
+     * 软着陆"的约定（见 `pianoRollKernelHost` 的同名说明），时间轴内核此前是唯一
+     * 的例外；内核改为默认开启后这个例外会直接影响生产用户。
+     *
+     * 特殊说明：面板收到后应当把内核开关**永久置为不可用**（本次会话内），否则
+     * 每次重渲染都会再挂一次内核、再失败一次。
+     *
+     * @param reason 失败原因（用于日志 / 诊断，不面向最终用户展示）。
+     */
+    readonly onUnavailable?: (reason: string) => void;
 }
 
 export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => {
@@ -258,6 +280,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         onScrollLeftCommit,
         onScrollLeftFrame,
         onViewportWidthChange,
+        onUnavailable,
     } = props;
 
     const containerRef = React.useRef<HTMLDivElement | null>(null);
@@ -396,6 +419,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         onScrollLeftCommit,
         onScrollLeftFrame,
         onViewportWidthChange,
+        onUnavailable,
     });
     // eslint-disable-next-line react-hooks/refs -- 回调镜像：同上
     callbacksRef.current = {
@@ -406,6 +430,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         onScrollLeftCommit,
         onScrollLeftFrame,
         onViewportWidthChange,
+        onUnavailable,
     };
 
     // 交互回调镜像：同上（面板用 useCallback 提供，但引用仍可能在依赖变化时更新）。
@@ -564,7 +589,13 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                 onViewportWidthChange: (px) => callbacksRef.current.onViewportWidthChange?.(px),
             });
         } catch (error) {
-            setFatal(error instanceof Error ? error.message : String(error));
+            // 【软着陆】把整棵子树换回既有实现，而不是在本视图里显示一行错误文字。
+            // 本视图没有 Canvas2D 网格 / clip 的等效绘制（GL 是唯一路径），因此
+            // "降级"只能由持有分支的面板来做——见 `onUnavailable` 的说明。
+            const reason = error instanceof Error ? error.message : String(error);
+            setFatal(reason);
+            console.warn("[TimelineKernelView] 内核不可用，退回既有渲染实现", error);
+            callbacksRef.current.onUnavailable?.(reason);
             return;
         }
         localHostRef.current = host;

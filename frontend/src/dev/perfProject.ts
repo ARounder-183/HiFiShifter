@@ -432,9 +432,11 @@ function mountPerfPanel(): void {
         status.textContent = `GL clip bodies ${next === "1" ? "ON" : "OFF"}`;
     });
 
-    // ── 时间轴内核开关（Spike）────────────────────────────────────
-    // 默认：dev 环境开启、生产关闭（见 featureFlag）。该开关在 TimelinePanel
-    // 模块加载时读取，因此切换后需要刷新页面才能生效（按钮直接 reload）。
+    // ── 时间轴内核开关（dev 快捷入口）──────────────────────────────
+    // 默认：未显式设置时**开启**（与构建模式无关，见 featureFlag）。该开关在
+    // TimelinePanel 模块加载时读取，因此切换后需要刷新页面才能生效（按钮直接 reload）。
+    // 注意：这里只切时间轴那一层；正式入口是「视图 → 时间轴显示设置」的总开关，
+    // 它一次写全四层（见 featureFlag 的 setKernelRenderingEnabled）。
     const kernelEnabled = (): boolean => isTimelineKernelEnabled();
     makeButton(`kernel: ${kernelEnabled() ? "on" : "off"}`, () => {
         const next = kernelEnabled() ? "0" : "1";
