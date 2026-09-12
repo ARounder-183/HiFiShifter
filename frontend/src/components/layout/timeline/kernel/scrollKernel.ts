@@ -112,6 +112,21 @@ export interface ScrollKernelOptions {
      */
     extraContentHeightPx?: () => number;
     /**
+     * 水平内容宽度的**额外**宽度（CSS px），缺省 0。
+     *
+     * 【为什么需要它】参数编辑器在「同步时间轴视图」开启时，内容层要整体右移一个
+     * 左右偏移量：它的绘制区比时间轴轨道区窄，只有右移才能让两边的网格线在屏幕上
+     * 对齐。旧实现把这个偏移做进 `paddedContentWidth`（`内容宽 + 视口宽 + 偏移`），
+     * 于是**原生**滚动域变成 `[0, 内容宽 + 偏移]`，而**绘制**域随之变成
+     * `[−偏移, 内容宽]`——注意绘制域含负值。
+     *
+     * 内核的水平位置恒被钳到 `[0, maxScrollLeft]`，无法表示负值。因此这里让内核
+     * 持有**原生坐标**（域 `[0, 内容宽 + 偏移]`），由宿主在产出投影 / 读视口时
+     * 减去偏移换算成绘制坐标。这样两边域的**上下界都与旧实现逐值相等**，网格不会
+     * 错位，偏移为 0 时（未开启同步）行为与既有调用方完全一致。
+     */
+    extraContentWidthPx?: () => number;
+    /**
      * 宿主视口高度（CSS px），用于竖直滚动上限（内容高 − 视口高）。
      *
      * 特殊说明：水平方向**不需要**视口宽——水平上限 = 工程宽度（见文件头
@@ -387,12 +402,18 @@ export function createScrollKernel(options: ScrollKernelOptions): ScrollKernel {
     /**
      * 计算指定缩放下的内容宽度。
      *
+     * 特殊说明：含 `extraContentWidthPx`（默认 0）——它承载参数编辑器「同步偏移」
+     * 这类不属于工程内容的宽度（见 options 里该字段的说明）。它同时抬高水平上限，
+     * 使内核坐标域与旧实现的原生域逐值相等。
+     *
      * @param pxPerSec 目标缩放（必须为内核已规范化的值）。
      * @returns 内容宽度（CSS px）；projectSec 非法或为负时按 0 处理。
      */
     function contentWidthFor(pxPerSec: number): number {
         const sec = options.projectSec();
-        return Number.isFinite(sec) ? Math.max(0, sec) * pxPerSec : 0;
+        const width = Number.isFinite(sec) ? Math.max(0, sec) * pxPerSec : 0;
+        const extra = options.extraContentWidthPx?.();
+        return width + (Number.isFinite(extra) ? Math.max(0, extra as number) : 0);
     }
 
     /**

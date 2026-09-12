@@ -33,14 +33,22 @@ import {
 export interface PianoRollScrollbarArgs {
     readonly viewportWidthPx: number;
     readonly viewportHeightPx: number;
-    /** 时间轴内容宽度（工程秒 × pxPerSec）。 */
-    readonly contentWidthPx: number;
     readonly scrollLeftPx: number;
     readonly scrollTopPx: number;
-    /** 水平滚动上限（= 内容宽度，与时间轴语义一致）。 */
+    /** 水平滚动上限（= 原生 scrollWidth − 视口宽，含同步偏移）。 */
     readonly maxScrollLeftPx: number;
     /** 竖向滚动上限（= 值域滚动范围，通常 1600）。 */
     readonly maxScrollTopPx: number;
+    /**
+     * 水平「内容尺寸」；缺省由 `maxScrollLeftPx + 视口宽` 推出（= 原生 scrollWidth）。
+     *
+     * 【为什么缺省是「上限 + 视口」而不是「内容宽」】原生的 thumb 长度是
+     * `视口² / scrollWidth`，而 `scrollWidth = 内容宽 + 视口宽`（`overflow: scroll`
+     * 的既有约定）。若把「内容宽」当成内容尺寸，thumb 会偏长——macOS 实测：
+     * 水平 thumb 应为 `1864² / 10989 = 316.18`，用内容宽算得 `1864² / 8925 = 380.77`。
+     * 竖向同理（`823² / 2423 = 279.54`，与实测一致），因此两轴统一用本条规则。
+     */
+    readonly horizontalContentSizePx?: number;
     /** 竖向「内容尺寸」= 值域范围 + 视口高度；缺省由 max + 视口高度推出。 */
     readonly verticalContentSizePx?: number;
 }
@@ -55,7 +63,11 @@ export interface PianoRollScrollbarGeometries {
  * 解析两条滚动条的几何。
  *
  * 流程：把两轴各自的「内容尺寸 / 视口尺寸 / 当前位置 / 上限」分别交给 `computeScrollbar`。
- * 竖向内容尺寸缺省时按 `maxScrollTopPx + viewportHeightPx` 推出。
+ * 内容尺寸缺省按 `上限 + 视口尺寸` 推出（= 原生 `scrollWidth`，见入参说明）。
+ *
+ * 特殊说明：位置应为**绘制坐标**；`maxScrollLeftPx` 含同步偏移（原生域口径），
+ * 两者口径不同是有意的——thumb 的比例取决于**原生** scrollWidth，而 thumb 的位置
+ * 落在**绘制**区上。详见 `pianoRollKernelHost` 的坐标说明。
  *
  * @param args 见 `PianoRollScrollbarArgs`。
  * @returns 水平与竖直滚动条几何。
@@ -65,7 +77,8 @@ export function resolvePianoRollScrollbarGeometries(
 ): PianoRollScrollbarGeometries {
     return {
         horizontal: computeScrollbar({
-            contentSizePx: args.contentWidthPx,
+            contentSizePx:
+                args.horizontalContentSizePx ?? args.maxScrollLeftPx + args.viewportWidthPx,
             viewportSizePx: args.viewportWidthPx,
             scrollPx: args.scrollLeftPx,
             maxScrollPx: args.maxScrollLeftPx,

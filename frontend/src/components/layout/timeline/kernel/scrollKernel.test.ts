@@ -97,6 +97,45 @@ describe("scrollKernel", () => {
             expect(k.get().scrollTop).toBe(432);
         });
 
+        it("extraContentWidthPx 计入水平上限（参数编辑器「同步偏移」）", () => {
+            // 旧实现把同步偏移做进 paddedContentWidth，原生水平域因此比工程宽多一个
+            // 偏移量；内核必须重现它，否则参数编辑器网格会比时间轴少偏移那一段。
+            const k = makeKernel({ extraContentWidthPx: () => 200 });
+            k.setScrollLeft(999999);
+            // 1000s × 100px/s = 100000，再加偏移 200。
+            expect(k.get().scrollLeft).toBe(1000 * 100 + 200);
+        });
+
+        it("extraContentWidthPx 缺省为 0（其余调用方行为不变）", () => {
+            const withZero = makeKernel({ extraContentWidthPx: () => 0 });
+            const withNone = makeKernel();
+            withZero.setScrollLeft(999999);
+            withNone.setScrollLeft(999999);
+            expect(withZero.get().scrollLeft).toBe(withNone.get().scrollLeft);
+        });
+
+        it("extraContentWidthPx 非法 / 负值不放大上限（不产生 NaN）", () => {
+            for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, -100]) {
+                const k = makeKernel({ extraContentWidthPx: () => bad });
+                k.setScrollLeft(999999);
+                const v = k.get().scrollLeft;
+                expect(Number.isFinite(v)).toBe(true);
+                expect(v).toBe(1000 * 100);
+            }
+        });
+
+        it("extraContentWidthPx 支持函数形式：取值变化后 reclamp 立即生效", () => {
+            let extra = 0;
+            const k = makeKernel({ extraContentWidthPx: () => extra });
+            k.setScrollLeft(999999);
+            expect(k.get().scrollLeft).toBe(100000);
+            // 同步开关打开 / 布局偏移变大 → 水平域随之变宽。
+            extra = 200;
+            k.reclamp();
+            k.setScrollLeft(999999);
+            expect(k.get().scrollLeft).toBe(100200);
+        });
+
         it("轨道不足一屏时竖直上限为 0", () => {
             const k = makeKernel({ trackCount: () => 2 });
             k.setScrollTop(500);

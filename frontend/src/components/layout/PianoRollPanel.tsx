@@ -186,9 +186,39 @@ import {
     centerFromVerticalScrollTop,
     verticalScrollTopFromCenter,
 } from "./pianoRoll/verticalScrollMapping";
+import { isPianoRollKernelEnabled } from "./timeline/kernel/featureFlag";
+import {
+    createPianoRollKernelHost,
+    type PianoRollKernelHost,
+} from "./pianoRoll/kernel/host/pianoRollKernelHost";
+import { PIANO_ROLL_VERTICAL_SCROLL_RANGE_PX } from "./pianoRoll/kernel/scroll/verticalValueScroll";
 
 const NOTE_NAMES_SHARP = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
-const PARAM_EDITOR_VERTICAL_SCROLL_RANGE_PX = 1600;
+const PARAM_EDITOR_VERTICAL_SCROLL_RANGE_PX = PIANO_ROLL_VERTICAL_SCROLL_RANGE_PX;
+
+/**
+ * 是否启用参数编辑器渲染内核（阶段 1：滚动 / 视口所有权）。
+ *
+ * 在**模块加载时**读取一次（与时间轴内核同一约定）：切换开关后刷新页面生效。
+ * 未显式设置时关闭（见 `isPianoRollKernelEnabled`），因此默认行为与迁移前完全一致。
+ */
+const PARAM_EDITOR_KERNEL_ENABLED = isPianoRollKernelEnabled();
+
+/**
+ * 判断数值是否值得写入 DOM（跨过容差）。
+ *
+ * 【为什么要取反写法】`previous` 为 NaN（从未写入）时 `Math.abs(next - NaN) <= eps`
+ * 恒为 false，若正着写会得到「无需写入」，表现为首帧完全不写。取反让 NaN 稳定走
+ * 「需要写入」分支（与内核宿主同一写法）。
+ *
+ * @param next 本次要写入的值。
+ * @param previous 上一次写入的值（NaN = 从未写入）。
+ * @param epsilon 视为「无变化」的最大差值。
+ * @returns 需要写入时为 true。
+ */
+function shouldWriteNumber(next: number, previous: number, epsilon = 0.01): boolean {
+    return !(Math.abs(next - previous) <= epsilon);
+}
 
 /**
  * 参数编辑器工具栏的参数显示顺序排名（数值越小越靠左）。
@@ -1044,6 +1074,15 @@ export const PianoRollPanel: React.FC = () => {
         const newScrollLeft = scrollLeftRef.current * ratio;
         const scroller = scrollerRef.current;
         if (scroller) {
+            // 内核模式：先按绘制坐标把位置交给内核（它负责换算原生坐标并镜像回写），
+            // 再走采纳路径同步 state。旧实现则直接写原生 scroller 后由 syncScrollLeft 采纳。
+            if (PARAM_EDITOR_KERNEL_ENABLED) {
+                applyHorizontalScrollPosition(newScrollLeft);
+                scrollLeftRef.current = newScrollLeft;
+                lastScrollLeftRef.current = newScrollLeft;
+                setScrollLeft(newScrollLeft);
+                return;
+            }
             scroller.scrollLeft = newScrollLeft;
             syncScrollLeft(scroller);
             return;
@@ -1084,7 +1123,8 @@ export const PianoRollPanel: React.FC = () => {
                 pxPerSecRef.current = store.pxPerSec;
                 scrollLeftRef.current = drawingScrollLeft;
                 lastScrollLeftRef.current = drawingScrollLeft;
-                scroller.scrollLeft = store.scrollLeft;
+                // 同步落地走统一载体（内核模式下即宿主；它会换算原生坐标并镜像回写）。
+                applyHorizontalScrollPosition(drawingScrollLeft);
                 applyScrollLayers(drawingScrollLeft);
                 setScrollLeft(drawingScrollLeft);
                 timelineSyncApplyingRef.current = false;
@@ -1110,10 +1150,10 @@ export const PianoRollPanel: React.FC = () => {
             pendingParamSyncViewportRef.current = null;
             horizontalZoomPendingRef.current = null;
             horizontalZoomChainRef.current = null;
-            // 禁用时移除偏移补偿：把原生滚动位置还原为绘制坐标。
+            // 禁用时移除偏移补偿：把位置还原为绘制坐标。
             if (scroller) {
                 const next = Math.max(0, scrollLeftRef.current);
-                scroller.scrollLeft = next;
+                applyHorizontalScrollPosition(next);
                 scrollLeftRef.current = next;
                 lastScrollLeftRef.current = next;
                 setScrollLeft(next);
@@ -1161,7 +1201,9 @@ export const PianoRollPanel: React.FC = () => {
         pxPerSecRef.current = pending.pxPerSec;
         pxPerBeatRef.current = pending.pxPerSec * (60 / Math.max(1e-6, s.bpm));
         scrollLeftRef.current = drawingScrollLeft;
-        scroller.scrollLeft = pending.nativeScrollLeft;
+        // `pending.nativeScrollLeft` 是共享视口的原生值；换算成绘制坐标后走统一载体
+        // （内核模式会再加回偏移，旧实现直接写原生，两者落到同一位置）。
+        applyHorizontalScrollPosition(drawingScrollLeft);
         syncScrollLeft(scroller);
         applyScrollLayers(drawingScrollLeft);
         timelineSyncApplyingRef.current = false;
@@ -1181,7 +1223,7 @@ export const PianoRollPanel: React.FC = () => {
         const offset = syncEnabled ? timelineOffsetRef.current : 0;
         const native = pending.nextScrollLeft;
         const next = timelineViewportNativeToState(native, offset);
-        scroller.scrollLeft = native;
+        applyHorizontalScrollPosition(next);
         if (lastScrollLeftRef.current !== next) {
             lastScrollLeftRef.current = next;
             scrollLeftRef.current = next;
@@ -1197,6 +1239,11 @@ export const PianoRollPanel: React.FC = () => {
         }
         applyScrollLayers(next);
         // 防止浏览器对原生滚动位置的钳制造成漂移：立即校正到理论值。
+        // 内核模式下由宿主的镜像回写负责校正（它每帧都会把原生位置对齐真值）。
+        if (PARAM_EDITOR_KERNEL_ENABLED) {
+            setScrollLeft(next);
+            return;
+        }
         const expectedNative = timelineViewportStateToNative(next, offset);
         if (Math.abs(scroller.scrollLeft - expectedNative) > 0.5) {
             scroller.scrollLeft = expectedNative;
@@ -1804,6 +1851,29 @@ export const PianoRollPanel: React.FC = () => {
     const rulerContentRef = useRef<HTMLDivElement | null>(null);
     const gridLayerRef = useRef<HTMLDivElement | null>(null);
 
+    // ── 渲染内核（阶段 1：滚动 / 视口所有权）────────────────────────────
+    //
+    // 【开启时所有权如何反转】旧实现把原生 scroller 的 `scrollLeft/scrollTop`
+    // 当唯一事实源，各图层靠 `syncScrollLeft` → `applyScrollLayers` 跟随。内核
+    // 模式下反过来：宿主持有真值，**原生 scroller 退化为被动镜像**——宿主每帧把
+    // 真值写回它，使尚未迁移的输入代码（中键拖拽、框选自动滚动等直接读写
+    // `scroller.scrollLeft` 的地方）读到的仍是同一份位置，行为不变。
+    //
+    // 镜像的意义：这些输入点用的是**原生坐标**（= 绘制坐标 + 同步偏移），因此
+    // 回写也必须换算成原生坐标，否则同步模式下的读回会差一个 offset。
+    const hostRef = useRef<PianoRollKernelHost | null>(null);
+    /** 内核模式下的数据镜像（每次 render 更新字段，宿主每帧现读）。 */
+    const kernelDataRef = useRef({
+        projectSec: 1,
+        valueDomain: { min: 0, max: 1, span: 1 },
+    });
+    /** 自绘滚动条的 thumb（仅内核模式挂载）。 */
+    const hScrollbarThumbRef = useRef<HTMLDivElement | null>(null);
+    const vScrollbarThumbRef = useRef<HTMLDivElement | null>(null);
+    /** 自绘滚动条的**轨道**（承接「点空白翻页」，仅内核模式挂载）。 */
+    const hScrollbarTrackRef = useRef<HTMLDivElement | null>(null);
+    const vScrollbarTrackRef = useRef<HTMLDivElement | null>(null);
+
     function pitchDeltaToDegreeSteps(
         basePitch: number,
         targetPitch: number,
@@ -1974,6 +2044,47 @@ export const PianoRollPanel: React.FC = () => {
         }
     }
 
+    /**
+     * 把「绘制坐标」的水平位置提交到当前滚动载体。
+     *
+     * 【为什么要单独一个函数】面板里有若干**权威写入**点（时间轴同步、键盘缩放、
+     * 缩放事务落地、关闭同步时还原位置）：它们算出目标位置后直接落到滚动载体。
+     * 内核模式下载体是宿主（内部换算原生坐标并镜像回写），旧实现下载体是原生
+     * scroller（需自行加回偏移）。把分支收在一处，避免每调用点各写一份换算。
+     *
+     * 特殊说明：滚轮 / 自动滚屏等**增量**路径不走这里——它们仍写原生 scroller，
+     * 再由 `syncScrollLeft` 采纳进内核（见该函数注释）。
+     *
+     * @param drawingScrollLeft 目标水平位置（绘制坐标）。
+     */
+    function applyHorizontalScrollPosition(drawingScrollLeft: number): void {
+        const host = hostRef.current;
+        if (PARAM_EDITOR_KERNEL_ENABLED && host) {
+            host.setScrollLeft(drawingScrollLeft);
+            return;
+        }
+        const scroller = scrollerRef.current;
+        if (!scroller) return;
+        const offset = paramEditorSyncTimelineRef.current ? timelineOffsetRef.current : 0;
+        scroller.scrollLeft = timelineViewportStateToNative(drawingScrollLeft, offset);
+    }
+
+    /**
+     * 采纳一次水平滚动位置变化（原生 scroller → 真值）。
+     *
+     * 流程：原生坐标 → 绘制坐标 → 同步开关时推送共享视口 → 通知各图层 → 量化提交 state。
+     *
+     * 【内核模式下的语义转变（重要）】旧实现里本函数是「原生是事实源 → 各层跟随」的
+     * 唯一扩散点。内核模式下它变成**采纳点**：尚未迁移的输入代码（滚轮、中键平移、
+     * BPM 换算、自动滚屏）仍然直接写 `scroller.scrollLeft`，这里把该值收进内核
+     * （`host.setScrollLeft`），由内核完成钳制、镜像回写与帧提交。这样：
+     * - 所有既有手势**逐条保持可用**，无需在本任务里重写输入路径（Task 7 才迁移）；
+     * - 钳制与渲染真值收敛到内核一处，不会出现两套边界；
+     * - 收敛性：内核回写的值与内核当前值相同 → 不产生状态变化 → 不再触发帧，
+     *   因此「写原生 → 采纳 → 镜像回写 → 再触发 onScroll」不会形成循环。
+     *
+     * @param scroller 原生滚动容器。
+     */
     function syncScrollLeft(scroller: HTMLDivElement) {
         const syncEnabled = s.paramEditorSyncTimeline;
         const offset = syncEnabled ? timelineOffsetRef.current : 0;
@@ -1990,6 +2101,12 @@ export const PianoRollPanel: React.FC = () => {
                 pxPerSec: pxPerSecRef.current,
             });
         }
+        // 内核模式：交给内核（它会按新边界钳制、镜像回写并在下一帧提交各图层）。
+        const host = hostRef.current;
+        if (PARAM_EDITOR_KERNEL_ENABLED && host) {
+            host.setScrollLeft(next);
+            return;
+        }
         applyScrollLayers(next);
         if (scrollStateRafRef.current == null) {
             scrollStateRafRef.current = requestAnimationFrame(() => {
@@ -1999,12 +2116,150 @@ export const PianoRollPanel: React.FC = () => {
         }
     }
 
+    // ── 内核宿主：创建 / 销毁 ────────────────────────────────────────
+    //
+    // 【为什么只在挂载时创建】宿主持有滚动位置与手势状态，是长生命周期运行时
+    // 对象；随渲染重建会让滚动位置静默归零（与 `ScrollKernel` 的生命周期约束
+    // 一致）。数据经 `kernelDataRef` 流入，尺寸经宿主自己的 ResizeObserver 更新。
+    //
+    // 【两套坐标系（本任务最容易出错的地方）】
+    // 「同步时间轴视图」开启时，参数编辑器的内容层要整体右移一个偏移量（`offset`，
+    // 实测 200px），两边的网格线才能在屏幕上对齐。于是：
+    // - **原生坐标**：`[0, 内容宽 + offset]`——旧实现 `paddedContentWidth` 撑出的域；
+    // - **绘制坐标**：`[−offset, 内容宽]`——含负值，各图层（标尺/网格/画布/波形）用。
+    //
+    // 内核的位置字段恒被钳到 `[0, max]`（无法表示负值），所以内核持有**原生坐标**，
+    // 本面板消费的 `axis.scrollLeftPx` 是**绘制坐标**。换算只在宿主边界发生
+    // （见宿主 `horizontalOffsetPx`），面板这一侧不再自行换算，避免出现第三份口径。
+    useEffect(() => {
+        if (!PARAM_EDITOR_KERNEL_ENABLED) return;
+        const container = scrollerRef.current;
+        if (!container) return;
+        const hThumb = hScrollbarThumbRef.current;
+        const vThumb = vScrollbarThumbRef.current;
+        if (!hThumb || !vThumb) return;
+
+        const host = createPianoRollKernelHost({
+            container,
+            hScrollbarThumb: hThumb,
+            vScrollbarThumb: vThumb,
+            hScrollbarTrack: hScrollbarTrackRef.current ?? undefined,
+            vScrollbarTrack: vScrollbarTrackRef.current ?? undefined,
+            data: () => kernelDataRef.current,
+            initialPxPerSec: pxPerSecRef.current,
+            // 偏移经 ref 读取（同步开关与布局偏移都在运行时变化，闭包捕获会读到挂载时的旧值）。
+            horizontalOffsetPx: () =>
+                paramEditorSyncTimelineRef.current ? timelineOffsetRef.current : 0,
+            sync: {
+                rulerContent: rulerContentRef.current,
+                gridLayer: gridLayerRef.current,
+            },
+            // 帧提交：宿主已完成滚动条几何与标尺 / 网格的 DOM 写入，这里只做
+            // 「画布 + 波形 + 播放头」三项与旧实现同帧的提交。复用同一个
+            // `applyScrollLayers`，保证两种模式的绘制路径**逐字一致**（迁移不得
+            // 改变视觉，唯一区别是谁来触发它：旧实现是 scroll 事件，内核是 rAF）。
+            onFrame: (axis) => {
+                const drawing = axis.scrollLeftPx;
+                scrollLeftRef.current = drawing;
+                applyScrollLayers(drawing);
+                // 【为什么必须同步 lastScrollLeftRef】镜像回写会让原生 scroller 触发
+                // `scroll` 事件，进而走到 `syncScrollLeft`。把"上一次已知位置"同步成
+                // 内核真值后，该事件的 `next` 与之相等 → 立即早退，**不会**把值推回
+                // 共享视口（否则镜像回写会被误当成用户滚动，把时间轴也推着走）。
+                lastScrollLeftRef.current = drawing;
+                // 镜像回写：让尚未迁移的输入代码（中键拖拽 / 框选自动滚动）读到的
+                // 原生位置始终等于内核真值。仅在真正不一致时写，避免每帧触发样式重算。
+                const native = timelineViewportStateToNative(
+                    drawing,
+                    paramEditorSyncTimelineRef.current ? timelineOffsetRef.current : 0,
+                );
+                if (shouldWriteNumber(container.scrollLeft, native, 0.5)) {
+                    container.scrollLeft = native;
+                }
+                if (shouldWriteNumber(container.scrollTop, axis.scrollTopPx, 0.5)) {
+                    container.scrollTop = axis.scrollTopPx;
+                }
+            },
+            onScrollLeftCommit: () => {
+                // 量化提交：标尺的刻度范围由 React 按视口计算，不同步就会出现
+                // 「滚动后刻度消失」（与旧实现 `syncScrollLeft` 的收尾一致）。
+                // 注意 `px` 是**绘制坐标**（宿主对外统一口径）。
+                if (scrollStateRafRef.current == null) {
+                    scrollStateRafRef.current = requestAnimationFrame(() => {
+                        scrollStateRafRef.current = null;
+                        setScrollLeft(scrollLeftRef.current);
+                    });
+                }
+            },
+        });
+        hostRef.current = host;
+        // dev-only 调试出口：浏览器里读取内核视口真值（滚动 / 值域中心 / 滚动条
+        // 几何），用于核对「滚动条 thumb 与实际可滚范围是否一致」这类问题。
+        if (import.meta.env.DEV) {
+            (
+                window as unknown as { __hsPianoRollKernel?: PianoRollKernelHost }
+            ).__hsPianoRollKernel = host;
+        }
+        return () => {
+            hostRef.current = null;
+            if (import.meta.env.DEV) {
+                delete (window as unknown as { __hsPianoRollKernel?: PianoRollKernelHost })
+                    .__hsPianoRollKernel;
+            }
+            host.dispose();
+        };
+        // 挂载时创建一次；数据经 kernelDataRef 流入（见上方注释）。
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
     useLayoutEffect(() => {
         const el = scrollerRef.current;
         if (!el) return;
+        // 内核模式下滚动位置由宿主持有，挂载时不得用原生值反向覆盖内核真值
+        // （那会在首帧把位置清零）。内核自己会标脏首帧。
+        if (PARAM_EDITOR_KERNEL_ENABLED) return;
         syncScrollLeft(el);
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [contentWidth, s.grid, s.beats]);
+
+    // 内核数据镜像：每次 render 更新字段（宿主每帧现读，不触发重建）。
+    //
+    // 特殊说明 1：`projectSec` 必须是**秒**而不是 `contentWidth`（像素）——宿主内部
+    // 会自行乘以 pxPerSec 得到内容宽，传像素会让内容宽度被放大 pxPerSec 倍，
+    // 横向滚动条 thumb 缩成一条线。
+    //
+    // 特殊说明 2：值域（`min/max/span`）必须与面板当前视口同源。宿主用它把像素位置
+    // 换算成值域中心；若停留在占位值，竖向换算的比例就错了——表现为钢琴键盘整体
+    // 偏移一个八度、竖向滚动条 thumb 位置也不对（曾实际发生）。
+    //
+    // 特殊说明 3：`span` 用**当前视口**的跨度（而非值域全长）。竖向像素位置 ↔ 值域
+    // 中心的映射依赖 span，用错会让滚到同一位置对应的中心值不同。
+    useLayoutEffect(() => {
+        if (!PARAM_EDITOR_KERNEL_ENABLED) return;
+        const bounds = getParamValueBoundsForScrollbar(editParam);
+        const view = clampViewport(editParam, getCurrentViewportForScrollbar(editParam));
+        kernelDataRef.current.projectSec = dynamicProjectSec;
+        kernelDataRef.current.valueDomain = {
+            min: bounds.min,
+            max: bounds.max,
+            span: view.span,
+        };
+        // pxPerSec 由面板解析后写入内核（阶段 1 不迁移缩放，见宿主文件头）。
+        hostRef.current?.setPxPerSec(pxPerSec);
+        // 同步偏移会改变**水平上限**（原生域 = 内容宽 + 偏移），必须按新边界重钳。
+        hostRef.current?.reclamp();
+        hostRef.current?.invalidate();
+        // `pitchViewRef` / `paramViewsRef` 是 ref（变更不触发渲染），故依赖项里无法列出；
+        // 值域跨度变化由下面的显式同步点负责（`syncVerticalScrollbarForViewport`）。
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [
+        dynamicProjectSec,
+        pxPerSec,
+        editParam,
+        processorParams,
+        s.paramEditorSyncTimeline,
+        timelineOffsetPx,
+    ]);
 
     // 渲染期刷新 syncScrollLeft 引用（其函数体随每次渲染重建）。
     const syncScrollLeftRef = useRef(syncScrollLeft);
@@ -2016,7 +2271,13 @@ export const PianoRollPanel: React.FC = () => {
     // 内容层错位，表现为线条抽搐一帧；这里每帧以原生值对账，发现失步立即
     // 经 syncScrollLeft 重发（refs → bus → 标尺/网格/画布同帧），把残余
     // 错位变成被治愈的一帧。绝大多数帧只是两次数值比较，空闲开销可忽略。
+    //
+    // 【内核模式下停用】真值源已经反转（内核持有、原生是被动镜像），再由本循环
+    // 以原生值反向对账就变成**两个方向的自愈互相打架**：内核刚写镜像，本循环又
+    // 把镜像读回来当作"权威"重发一次。内核自己每帧提交、且镜像由内核回写，
+    // 因此这里的职责整体消失。
     useEffect(() => {
+        if (PARAM_EDITOR_KERNEL_ENABLED) return;
         let raf = 0;
         const reconcile = () => {
             raf = requestAnimationFrame(reconcile);
@@ -2212,12 +2473,32 @@ export const PianoRollPanel: React.FC = () => {
         );
     }
 
+    /**
+     * 把值域视口同步到竖向滚动位置（值域 → 像素）。
+     *
+     * 流程：钳制视口 → 用既有映射把 `center` 换成像素滚动位置 → 交给滚动载体。
+     *
+     * 特殊说明（内核模式）：滚动载体从原生 scroller 换成内核宿主。两者语义一致
+     * （都是 0..1600 的像素域），因此这里只换载体、不换映射——手感由
+     * `verticalScrollTopFromCenter` 单一来源保证，两个模式不会分叉。
+     * 宿主内部自带 0.75px 级别的去重，故无需在这里再判一次差值。
+     *
+     * @param param 参数名（决定值域边界）。
+     * @param view 目标值域视口。
+     */
     function syncVerticalScrollbarForViewport(param: ParamName, view: ValueViewport): void {
+        const clampedView = clampViewport(param, view);
+        const bounds = getParamValueBoundsForScrollbar(param);
+
+        const host = hostRef.current;
+        if (PARAM_EDITOR_KERNEL_ENABLED && host) {
+            host.setValueCenter(clampedView.center);
+            return;
+        }
+
         const scroller = scrollerRef.current;
         if (!scroller) return;
 
-        const clampedView = clampViewport(param, view);
-        const bounds = getParamValueBoundsForScrollbar(param);
         const nextTop = verticalScrollTopFromCenter({
             min: bounds.min,
             max: bounds.max,
@@ -2231,6 +2512,16 @@ export const PianoRollPanel: React.FC = () => {
         }
     }
 
+    /**
+     * 从竖向像素滚动位置反推值域视口（像素 → 值域）。
+     *
+     * 流程：取当前视口与值域边界 → 由像素位置反算中心值 → 钳制后写回视口。
+     *
+     * 特殊说明：内核对齐阶段该函数只由原生滚动条路径调用（内核模式下竖向滚动
+     * 完全由内核拥有，见 Task 7 的输入迁移）。保留它是为了不改变旧路径行为。
+     *
+     * @param scrollTop 竖向像素滚动位置（0..1600）。
+     */
     function applyViewportFromVerticalScrollbar(scrollTop: number): void {
         const param = editParam;
         const currentView = clampViewport(param, getCurrentViewportForScrollbar(param));
@@ -5423,94 +5714,140 @@ export const PianoRollPanel: React.FC = () => {
                         }}
                     />
 
-                    <div
-                        ref={scrollerRef}
-                        className="flex-1 bg-qt-graph-bg overflow-x-scroll overflow-y-scroll relative custom-scrollbar outline-none focus:outline-none focus-visible:outline-none"
-                        data-piano-roll-scroller
-                        tabIndex={0}
-                        onAuxClick={interactions.onScrollerAuxClick}
-                        onScroll={onScrollerScroll}
-                        onContextMenu={interactions.onScrollerContextMenu}
-                        onKeyDown={interactions.onScrollerKeyDown}
-                    >
-                        {/* Sticky viewport overlay: grid + canvas do not physically scroll */}
+                    {/* 内核模式下自绘滚动条的定位容器：滚动条必须是**滚动容器之外**
+                        的兄弟节点。放在滚动容器内部会被内容一起滚走（绝对定位在滚动
+                        容器里仍随内容平移），这是自绘滚动条最经典的错位根因。 */}
+                    <div className="flex-1 min-w-0 relative">
                         <div
-                            className="sticky left-0 top-0 h-full"
-                            style={{ width: viewSize.w, overflow: "hidden", zIndex: 1 }}
+                            ref={scrollerRef}
+                            className={
+                                // 内核模式：隐藏原生滚动条（自绘条取代），但**保留
+                                // `overflow: scroll`**——原生 scroller 此时是被动镜像，
+                                // 必须保留滚动范围才能接受宿主每帧的程序化回写，也让
+                                // 尚未迁移的输入代码（中键平移等）继续可读可写。
+                                PARAM_EDITOR_KERNEL_ENABLED
+                                    ? "absolute inset-0 bg-qt-graph-bg overflow-x-scroll overflow-y-scroll hide-scrollbar outline-none focus:outline-none focus-visible:outline-none"
+                                    : "absolute inset-0 bg-qt-graph-bg overflow-x-scroll overflow-y-scroll custom-scrollbar outline-none focus:outline-none focus-visible:outline-none"
+                            }
+                            data-piano-roll-scroller
+                            tabIndex={0}
+                            onAuxClick={interactions.onScrollerAuxClick}
+                            onScroll={onScrollerScroll}
+                            onContextMenu={interactions.onScrollerContextMenu}
+                            onKeyDown={interactions.onScrollerKeyDown}
                         >
-                            <div className="relative h-full" style={{ width: viewSize.w }}>
-                                <BackgroundGrid
-                                    contentWidth={contentWidth}
-                                    contentHeight={viewSize.h}
-                                    viewportWidth={viewSize.w}
-                                    scrollLeft={scrollLeft}
-                                    pxPerBeat={pxPerBeat}
-                                    grid={s.grid}
-                                    beatsPerBar={Math.max(1, Math.round(s.beats || 4))}
-                                    visible={s.timelineSnap.gridVisible}
-                                    minSpacingPx={s.timelineSnap.gridMinSpacingPx}
-                                    swingPercent={
-                                        s.timelineSnap.swingEnabled
-                                            ? s.timelineSnap.swingPercent
-                                            : 0
-                                    }
-                                    layerRef={gridLayerRef}
-                                    ticks={timelineTicks}
-                                    sticky
-                                />
+                            {/* Sticky viewport overlay: grid + canvas do not physically scroll */}
+                            <div
+                                className="sticky left-0 top-0 h-full"
+                                style={{ width: viewSize.w, overflow: "hidden", zIndex: 1 }}
+                            >
+                                <div className="relative h-full" style={{ width: viewSize.w }}>
+                                    <BackgroundGrid
+                                        contentWidth={contentWidth}
+                                        contentHeight={viewSize.h}
+                                        viewportWidth={viewSize.w}
+                                        scrollLeft={scrollLeft}
+                                        pxPerBeat={pxPerBeat}
+                                        grid={s.grid}
+                                        beatsPerBar={Math.max(1, Math.round(s.beats || 4))}
+                                        visible={s.timelineSnap.gridVisible}
+                                        minSpacingPx={s.timelineSnap.gridMinSpacingPx}
+                                        swingPercent={
+                                            s.timelineSnap.swingEnabled
+                                                ? s.timelineSnap.swingPercent
+                                                : 0
+                                        }
+                                        layerRef={gridLayerRef}
+                                        ticks={timelineTicks}
+                                        sticky
+                                    />
 
-                                <PianoRollWaveformSurface
-                                    clips={clipPeaks}
-                                    widthPx={viewSize.w}
-                                    heightPx={viewSize.h}
-                                    scrollLeftPx={scrollLeft}
-                                    pxPerSec={pxPerSec}
-                                    colors={waveformColors}
-                                />
+                                    <PianoRollWaveformSurface
+                                        clips={clipPeaks}
+                                        widthPx={viewSize.w}
+                                        heightPx={viewSize.h}
+                                        scrollLeftPx={scrollLeft}
+                                        pxPerSec={pxPerSec}
+                                        colors={waveformColors}
+                                    />
 
-                                <canvas
-                                    ref={canvasRef}
-                                    className="absolute inset-0"
-                                    style={{ cursor: canvasCursor }}
-                                    onPointerMove={interactions.onCanvasPointerMove}
-                                    onPointerLeave={interactions.onCanvasPointerLeave}
-                                    onPointerDown={interactions.onCanvasPointerDown}
-                                />
-                                {s.showParamValuePopup &&
-                                    paramValuePreview &&
-                                    (() => {
-                                        const rect = canvasRef.current?.getBoundingClientRect();
-                                        if (!rect) return null;
-                                        return (
-                                            <div
-                                                className="absolute z-20 pointer-events-none bg-qt-panel border border-qt-border rounded px-2 py-1 text-[11px] leading-none text-qt-text"
-                                                style={{
-                                                    left: paramValuePreview.clientX - rect.left,
-                                                    top: paramValuePreview.clientY - rect.top,
-                                                    transform: "translate(0, -100%)",
-                                                    whiteSpace: "nowrap",
-                                                }}
-                                            >
-                                                {paramValuePreview.displayText ??
-                                                    formatParamValuePreview(
-                                                        paramValuePreview.value,
-                                                    )}
-                                            </div>
-                                        );
-                                    })()}
+                                    <canvas
+                                        ref={canvasRef}
+                                        className="absolute inset-0"
+                                        style={{ cursor: canvasCursor }}
+                                        onPointerMove={interactions.onCanvasPointerMove}
+                                        onPointerLeave={interactions.onCanvasPointerLeave}
+                                        onPointerDown={interactions.onCanvasPointerDown}
+                                    />
+                                    {s.showParamValuePopup &&
+                                        paramValuePreview &&
+                                        (() => {
+                                            const rect = canvasRef.current?.getBoundingClientRect();
+                                            if (!rect) return null;
+                                            return (
+                                                <div
+                                                    className="absolute z-20 pointer-events-none bg-qt-panel border border-qt-border rounded px-2 py-1 text-[11px] leading-none text-qt-text"
+                                                    style={{
+                                                        left: paramValuePreview.clientX - rect.left,
+                                                        top: paramValuePreview.clientY - rect.top,
+                                                        transform: "translate(0, -100%)",
+                                                        whiteSpace: "nowrap",
+                                                    }}
+                                                >
+                                                    {paramValuePreview.displayText ??
+                                                        formatParamValuePreview(
+                                                            paramValuePreview.value,
+                                                        )}
+                                                </div>
+                                            );
+                                        })()}
+                                </div>
                             </div>
+
+                            {/* Spacer：提供横向内容宽度与竖向滚动范围，实际绘制仍固定在 sticky 视口层。 */}
+                            <div
+                                className="relative"
+                                style={{
+                                    width: paddedContentWidth,
+                                    height: PARAM_EDITOR_VERTICAL_SCROLL_RANGE_PX,
+                                    pointerEvents: "none",
+                                }}
+                                aria-hidden
+                            />
                         </div>
 
-                        {/* Spacer：提供横向内容宽度与竖向滚动范围，实际绘制仍固定在 sticky 视口层。 */}
-                        <div
-                            className="relative"
-                            style={{
-                                width: paddedContentWidth,
-                                height: PARAM_EDITOR_VERTICAL_SCROLL_RANGE_PX,
-                                pointerEvents: "none",
-                            }}
-                            aria-hidden
-                        />
+                        {/* 自绘滚动条（仅内核模式）：几何由宿主每帧写入。
+                            样式对齐旧实现的原生滚动条（`.custom-scrollbar`）：
+                            - thumb 取 `--qt-scrollbar-thumb`（浅色主题下才看得见），
+                              而不是固定半透明黑；
+                            - 轨道**透明**（旧实现是 `scrollbar-color: … transparent`），
+                              加底色会多出一条灰带；
+                            - 8px 厚 + 胶囊圆角，对应 macOS 的 overlay thin 滚动条
+                              （旧实现的原生滚动条不占布局，这里绝对定位叠加，行为等价）。
+                            - 外层即**轨道**：承接「点空白翻页」。宿主的 thumb 处理器
+                              会 `stopPropagation`，因此到达轨道的按下必然不在 thumb 上。 */}
+                        {PARAM_EDITOR_KERNEL_ENABLED ? (
+                            <>
+                                <div
+                                    ref={vScrollbarTrackRef}
+                                    className="absolute right-0 top-0 bottom-0 w-2 z-20"
+                                >
+                                    <div
+                                        ref={vScrollbarThumbRef}
+                                        className="absolute left-0 w-full rounded-full bg-[var(--qt-scrollbar-thumb)]"
+                                    />
+                                </div>
+                                <div
+                                    ref={hScrollbarTrackRef}
+                                    className="absolute bottom-0 left-0 right-0 h-2 z-20"
+                                >
+                                    <div
+                                        ref={hScrollbarThumbRef}
+                                        className="absolute top-0 h-full rounded-full bg-[var(--qt-scrollbar-thumb)]"
+                                    />
+                                </div>
+                            </>
+                        ) : null}
                     </div>
                 </Flex>
             </Flex>

@@ -6,11 +6,10 @@
  * 容器与滚动条元素，在无 jsdom 的 node 环境下验证生命周期与数值语义。
  *
  * 【本测试要钉住的核心不变量】
- * 1. `dispose()` 真正释放宿主**取得的**资源：滚动订阅、帧调度、DOM 写入能力。
- *    注意 Task 4 的宿主**不注册任何输入监听**（滚轮 / 键盘 / 滚动条拖拽属 Task 7），
- *    因此这里不去断言「摘掉了监听」——那在零监听时是**空断言**。改为断言
- *    「dispose 后不再有任何帧被调度、不再写 DOM」，这在零监听下依然有真实约束力。
- *    监听登记的 add/remove 配平仍保留校验，Task 7 接入后它会自动开始生效。
+ * 1. `dispose()` 真正释放宿主**取得的**资源：滚动订阅、帧调度、事件监听。
+ *    宿主注册的监听（滚动条 thumb 的按下、拖拽的 window 移动 / 抬起）必须逐条
+ *    摘除——宿主模式最常见的缺陷就是漏摘 window 监听，卸载后仍持有回调并写 DOM。
+ *    断言前先校验「确实注册过」，避免零监听时变成**空断言**。
  * 2. 横向上限 = 内容宽、竖向上限 = 1600（浏览器实测的旧实现基线，见计划 Task 4）；
  * 3. 值域 ↔ 像素往返无损；
  * 4. 重复 `dispose()` 不抛错。
@@ -103,7 +102,6 @@ function makeHost() {
             pending = null;
         },
     });
-
     return {
         host,
         container,
@@ -143,8 +141,11 @@ describe("createPianoRollKernelHost", () => {
         expect(t.hasPendingFrame()).toBe(false);
     });
 
-    it("dispose 后监听登记仍配平（Task 7 接入输入后本断言开始生效）", () => {
+    it("dispose 后监听登记配平，且确实注册过滚动条监听（非空断言）", () => {
         const t = makeHost();
+        // 先证明断言有真实约束力：宿主确实在 thumb 上注册过 pointerdown。
+        expect(t.hThumb.totalAdded()).toBeGreaterThan(0);
+        expect(t.vThumb.totalAdded()).toBeGreaterThan(0);
         t.host.dispose();
         expect(t.container.balanced()).toBe(true);
         expect(t.vThumb.balanced()).toBe(true);
@@ -168,10 +169,7 @@ describe("createPianoRollKernelHost", () => {
     it("竖向上限 = 1600（旧实现实测值），与视口高无关", () => {
         const t = makeHost();
         t.host.setScrollTop(999999);
-        expect(t.host.getViewport().scrollTop).toBeCloseTo(
-            PIANO_ROLL_VERTICAL_SCROLL_RANGE_PX,
-            6,
-        );
+        expect(t.host.getViewport().scrollTop).toBeCloseTo(PIANO_ROLL_VERTICAL_SCROLL_RANGE_PX, 6);
         t.host.dispose();
     });
 

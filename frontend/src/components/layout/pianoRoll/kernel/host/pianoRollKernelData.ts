@@ -49,4 +49,3 @@ export interface PianoRollKernelData {
      */
     readonly valueDomain: PianoRollValueDomain;
 }
-

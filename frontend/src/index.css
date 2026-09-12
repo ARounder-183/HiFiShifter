@@ -221,6 +221,21 @@ textarea {
     -ms-overflow-style: none;
 }
 
+/* 隐藏两轴原生滚动条但**保留滚动能力**（`scrollbar-width: none` 只改渲染，
+ * 不改变可滚动范围，程序化 scrollLeft/scrollTop 与原生滚动都照常工作）。
+ *
+ * 用途：渲染内核自绘滚动条的面板（参数编辑器）。内核模式下滚动位置由内核持有，
+ * 原生滚动条只是**被动镜像**——镜像需要保留滚动范围才能接受程序化写入，但它的
+ * 滚动条本身必须隐藏，否则会与自绘滚动条重复显示。
+ * 与 `.hide-v-scrollbar` 的区别：本类同时隐藏水平与竖直。 */
+.hide-scrollbar {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+}
+.hide-scrollbar::-webkit-scrollbar {
+    display: none;
+}
+
 /* Unified popup/menu/dialog surfaces for Radix and custom panels */
 .rt-DialogOverlay {
     background: var(--qt-overlay) !important;
