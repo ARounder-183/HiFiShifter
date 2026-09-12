@@ -130,16 +130,21 @@ VW=1920 VH=1200 node scripts/dev-shot.mjs "http://127.0.0.1:5174/?mock=1" /tmp/b
                     {kernelActive ? (
 ```
 
-将其改为下面三行（用 fragment 包住，保持缩进与子元素不变）：
+将其改为下面三行（把条件替换为恒真，**保留 `?`**，否则语法非法）：
 
 ```tsx
                     {/* 内核是唯一渲染路径（旧实现已移除，见
                         docs/superpowers/specs/2026-09-13-timeline-single-path-design.md）。
                         此处不再有运行期二选一。 */}
-                    {(
+                    {/* eslint-disable-next-line no-constant-condition -- 阶段 1：条件恒真，旧分支暂留以便一行回滚（任务 2/3 删除） */}
+                    {true ? (
 ```
 
-**注意**：这一段的三元表达式以 `) : (` 分隔、以 `)}` 结束。本步骤**只改判断条件那一行**，`</>` 与 `)}` 保持原位不动 —— 旧分支 JSX 仍然留在文件里但**不可达**（任务 3 才删）。**不要**在本步骤删除 `) : (` 及其后的旧分支，否则无法单独回滚本阶段。
+**⚠️ 不要把 `{kernelActive ? (` 改成 `{(`，也不要删掉 `?`**：这段 JSX 是三元表达式，末尾还有 `) : (` 与 `)}`。删掉 `?` 会得到 `(A) : (B)`，`:` 失去配对对象 → 语法错误。（本计划初稿写的正是 `{(`，是错的；实现者改用 `{true ? (` 才对。）
+
+**为什么用 `{true ? (`**：本阶段要的是"不可达但可一行回滚"——`true ?` 保留了旧分支，回滚就是把 `true` 换回 `kernelActive`。
+
+**注意**：本步骤**只改判断条件那一行**，`</>`、`) : (` 与 `)}` 保持原位不动 —— 旧分支 JSX 仍然留在文件里但**不可达**（任务 2 才删）。**不要**在本步骤删除 `) : (` 及其后的旧分支，否则无法单独回滚本阶段。
 
 - [ ] **步骤 3：类型检查与全量测试**
 
@@ -1135,21 +1140,26 @@ export const KernelUnavailableNotice: React.FC<Props> = ({ reason }) => {
 
 在 `TimelinePanel.tsx` 的渲染处（原 `kernelActive ? (` 位置）把条件改为可用性判断。**`<TimelineKernelView>` 的既有 props 保持原样不动**（它有约 50 行 props，含 `onUnavailable={handleKernelUnavailable}`；不要重写它们，只改外层的条件表达式与新增 else 分支）：
 
-把（任务 1 改写后的形态）：
+把（任务 1 改写后的形态 —— 注意条件是恒真的 `true`，由任务 2 删除旧分支后才会变成无三元）：
 
 ```tsx
                     {/* 内核是唯一渲染路径（旧实现已移除，见
                         docs/superpowers/specs/2026-09-13-timeline-single-path-design.md）。
                         此处不再有运行期二选一。 */}
-                    {(
+                    {/* eslint-disable-next-line no-constant-condition -- 阶段 1：条件恒真，旧分支暂留以便一行回滚（任务 2/3 删除） */}
+                    {true ? (
                         <>
                             {timeRulerNode}
                             <TimelineKernelView
                                 …（既有 props 全部保留，不要改动）…
                             />
                         </>
+                    ) : (
+                        …（旧分支，任务 2 删除）…
                     )}
 ```
+
+若你执行本任务时**任务 2 已完成**（旧分支已删），则起点是 `{true ? ( … )}` 这次要变成 `{isKernelAvailable(...) ? ( … ) : (<KernelUnavailableNotice … />)}`；若任务 2 尚未执行，`true` 与旧分支都还在，同样只改条件行并在末尾补 else 分支。
 
 改为：
 
