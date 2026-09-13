@@ -394,5 +394,65 @@ test("utils/timelineSnapping.test.ts scripted checks", async () => {
         assertTrue(zeroOffset.edgeSide === "start", "zero offset keeps dual-edge behavior");
     }
 
+    // ── 调用方补充的"冻结候选"（extraCandidates）──
+    //
+    // 【为什么需要】交叉点抓手一次拖动两侧 clip，而用户想对齐的正是这两个 clip 的
+    // 边界（前块的终止位置、后块的起始位置）。那两个 clip 自己会随拖动移动，作为
+    // **实时**候选会让吸附追着自己的尾巴跑（实测反向模式：目标随指针漂移，落点比
+    // 目标偏 0.14s）。因此调用方把它们排除出实时边界，再用本字段给出按下时冻结的
+    // 边界——两者必须共用同一套距离/优先级判定。
+    {
+        const frozenCtx = (
+            extra?: TimelineSnapContext["extraCandidates"],
+        ): TimelineSnapContext => ({
+            settings: {
+                ...createDefaultTimelineSnapSettings(),
+                snapClipsToGrid: true,
+                snapClipEdges: false,
+                snapClipSnapOffset: false,
+                snapClipsToSelectionMarkersCursor: false,
+                snapClipsToSourceMedia: false,
+                snapDistancePx: 12,
+            },
+            grid: "1/4",
+            bpm: 120,
+            beatsPerBar: 4,
+            tempoMap: null,
+            pxPerSec: 100,
+            // 只有被排除的两个 clip：实时边界一个候选都不剩。
+            clips: [clips[0], clips[1]],
+            tracks: [track],
+            selectedClipIds: [],
+            playheadSec: 0,
+            object: "clip",
+            excludeClipIds: new Set([clips[0].id, clips[1].id]),
+            extraCandidates: extra,
+        });
+
+        // 无冻结候选：只有一个远离任何网格线的时间点 → 不吸附。
+        const bare = snapTimelinePosition(frozenCtx(), 5.21);
+        assertTrue(!bare.snapped, "no candidates at all → no snap");
+
+        // 给出冻结边界（前块终点 = 5.2）→ 吸附到它（网格 0.5s 距 0.21s=21px 超距）。
+        const frozen = snapTimelinePosition(
+            frozenCtx([
+                { sec: 5.2, kind: "clipEnd", priority: 21, clipId: "earlier", trackId: "t0" },
+            ]),
+            5.21,
+        );
+        assertTrue(frozen.snapped, "frozen candidate participates");
+        assertNear(frozen.sec, 5.2, "snaps to the frozen crossfade boundary");
+
+        // 冻结候选同样受吸附距离约束：超出 snapDistancePx 不生效。
+        // 取 6.2：距网格 6.0/6.5 都是 0.2s=20px、距冻结候选 1.0s=100px，均超 12px。
+        const far = snapTimelinePosition(
+            frozenCtx([
+                { sec: 5.2, kind: "clipEnd", priority: 21, clipId: "earlier", trackId: "t0" },
+            ]),
+            6.2,
+        );
+        assertTrue(!far.snapped, "frozen candidate obeys the snap distance too");
+    }
+
     void checks;
 });

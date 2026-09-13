@@ -4499,6 +4499,33 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 s.snapEnabled,
                 isModifierActive(noSnapKb, args.modifiers),
             );
+            // 【吸附目标：**冻结**的两侧边界 + 其它稳定候选】
+            //
+            // 抓手一次拖动两侧 clip，而用户真正想对齐的正是这两个 clip 的边界：
+            // 前块的**终止位置**与后块的**起始位置**。它们不能作为**实时**候选——
+            // 那两个 clip 自己随拖动移动，实时候选会让吸附追着自己的尾巴跑
+            // （实测反向模式：目标随指针漂移，落点比目标偏 0.14s）。因此：
+            // 1. 把这两个 clip 放进 `excludeClipIds`，排除它们的实时边界；
+            // 2. 用 `extraCandidates` 给出它们在**按下时**的冻结边界（拖拽起点几何，
+            //    来自手势快照 `origin`，全程不变）。
+            // 网格、其它 clip 边缘等其余候选本来就是稳定的，照常参与。
+            // 优先级沿用引擎给 clip 边缘的取值（clipStart 20 / clipEnd 21）。
+            const frozenCandidates = [
+                {
+                    sec: origin.earlier.startSec + origin.earlier.lengthSec,
+                    kind: "clipEnd" as const,
+                    priority: 21,
+                    clipId: earlier.id,
+                    trackId: earlier.trackId,
+                },
+                {
+                    sec: origin.later.startSec,
+                    kind: "clipStart" as const,
+                    priority: 20,
+                    clipId: later.id,
+                    trackId: later.trackId,
+                },
+            ];
             const snappedPointerSec = snapActive
                 ? snapTimelineDetailed(rawPointerSec, "clip", {
                       originSec: basePointerSec,
@@ -4506,6 +4533,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                       // （旧实现的 `anchorTrackId` 同为被拖 clip 的轨道）。
                       anchorTrackId: earlier.trackId,
                       excludeClipIds: new Set([earlier.id, later.id]),
+                      extraCandidates: frozenCandidates,
                       highlight: {
                           sources: [{ trackId: earlier.trackId, clipId: earlier.id }],
                       },
@@ -4574,8 +4602,21 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         }),
                     );
                 }
-                // 反向模式：两侧淡变按新重叠比例缩放（自动值写 auto、手动值写手动）。
-                for (const fade of result.fades) dispatch(setClipFades(fade));
+                // 反向模式：两侧淡变按新重叠比例缩放。
+                //
+                // 【必须分流到两个 reducer】自动交叉淡化与手动 fade 是**分离存储**的
+                // 两套字段：`computeCrossfadeGrip` 已经按"这一侧是不是 auto"分流给出
+                // 了目标字段（auto 侧给 autoFade*、手动侧给 fade*），这里必须按同一
+                // 口径派发——全都塞给 `setClipFades` 会让 auto 字段被静默丢弃，
+                // 结果是"反向拖动后 auto 淡变不再等于重叠长度"（旧实现同样是分流的）。
+                for (const fade of result.fades) {
+                    if (fade.fadeInSec !== undefined || fade.fadeOutSec !== undefined) {
+                        dispatch(setClipFades(fade));
+                    }
+                    if (fade.autoFadeInSec !== undefined || fade.autoFadeOutSec !== undefined) {
+                        dispatch(setClipAutoFades(fade));
+                    }
+                }
             });
         },
         [

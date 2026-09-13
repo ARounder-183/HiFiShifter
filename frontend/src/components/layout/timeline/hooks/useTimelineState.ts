@@ -52,6 +52,7 @@ import { createTimelineAxis } from "../../renderKernel/timelineAxis.js";
 import {
     snapTimelinePosition,
     snapTimelineClipMove,
+    type SnapCandidate,
     type SnapObjectKind,
     type SnapResult,
 } from "../../../../utils/timelineSnapping";
@@ -70,6 +71,13 @@ export interface SnapTimelineOpts {
     originSec?: number;
     anchorTrackId?: string | null;
     excludeClipIds?: ReadonlySet<string>;
+    /**
+     * 调用方补充的**冻结候选**（坐标按拖动起点算好，见 `TimelineSnapContext`）。
+     *
+     * 交叉点抓手用它给出两侧 clip 在**拖动前**的边界：这两个 clip 自己会随拖动
+     * 移动，作为实时候选会让吸附追着自己的尾巴跑。
+     */
+    extraCandidates?: readonly SnapCandidate[];
     /**
      * 拖拽移动 Clip 的长度：提供时启用**多源吸附** —— 前缘、后缘（结束
      * 位置）与自身吸附偏移点（moveSnapOffsetSec）同时作为被吸附对象参与
@@ -1110,6 +1118,7 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
                 originSec: opts?.originSec,
                 anchorTrackId: opts?.anchorTrackId ?? session.selectedTrackId,
                 excludeClipIds: opts?.excludeClipIds,
+                extraCandidates: opts?.extraCandidates,
             };
             // 多源吸附：拖拽移动 Clip 时前缘/后缘/自身吸附偏移点同时作为
             // 被吸附对象。

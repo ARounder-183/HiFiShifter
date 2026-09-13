@@ -2628,6 +2628,14 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
               startContentX: number;
               /** 上一次预览的位移（去重：相同位移不重复派发）。 */
               lastDeltaSec: number;
+              /**
+               * 上一次预览的指针 Y（视口坐标）。
+               *
+               * 【为什么必须参与去重】按住 `modifier.fadeCurvatureDrag`（默认 Alt）时
+               * 曲率由**指针 Y** 决定、X 完全不参与；只按 X 去重会让纵向拖动**只在 X
+               * 恰好变化的那几帧**才派发预览，手感就是"一顿一顿"。
+               */
+              lastClientY: number;
           }
         | {
               kind: "snap-offset-drag";
@@ -3851,6 +3859,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                     laterClipId: gesture.clipId,
                     startContentX: gesture.startContentX,
                     lastDeltaSec: Number.NaN,
+                    lastClientY: Number.NaN,
                 };
                 applyCrossfadeGripPreview(event);
                 return;
@@ -4026,8 +4035,20 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         const view = scroll.get();
         const contentX = view.scrollLeft + (event.clientX - rect.left);
         const deltaSec = (contentX - gesture.startContentX) / Math.max(1e-9, view.pxPerSec);
-        if (deltaSec === gesture.lastDeltaSec) return;
+        // 【去重键必须把「曲率模式」算进来】按 `modifier.fadeCurvatureDrag`（默认 Alt）
+        // 拖拽时改的是**曲率**：求解输入是指针的 **Y**，X 不参与。只按 X 去重会让纵向
+        // 拖动只在 X 恰好变化的那几帧才派发预览——用户报告为"拖拽一顿一顿的"。
+        const kb = data().keybindings;
+        const curvatureMode =
+            kb.fadeCurvatureDrag !== null && isModifierActive(kb.fadeCurvatureDrag, event);
+        if (
+            deltaSec === gesture.lastDeltaSec &&
+            (!curvatureMode || event.clientY === gesture.lastClientY)
+        ) {
+            return;
+        }
         gesture.lastDeltaSec = deltaSec;
+        gesture.lastClientY = event.clientY;
         interactions?.onCrossfadeGripPreview?.({
             earlierClipId: gesture.earlierClipId,
             laterClipId: gesture.laterClipId,
