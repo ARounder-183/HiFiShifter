@@ -33,7 +33,11 @@ import { shallowEqual } from "react-redux";
 import { isModifierActive } from "../../features/keybindings/keybindingsSlice";
 import { resolveClipDragCopyMode } from "./timeline/hooks/clipDragCopyMode";
 import { copyClipsFromDrag } from "./timeline/hooks/copyClipsFromDrag";
-import { createNewTrackForKernelDrop } from "./timeline/hooks/createNewTrackForDrop";
+import {
+    createNewTrackForKernelDrop,
+    createTrackIdsForDrop,
+} from "./timeline/hooks/createNewTrackForDrop";
+import { resolveKernelDropTarget } from "./timeline/hooks/kernelDropCommit";
 import { normalizedTrackColorCss } from "./timeline/runtime/timelineCanvasStyle";
 import { defaultFadeDirFor, FADE_PRESETS } from "./timeline/reaperFade";
 import {
@@ -1711,6 +1715,20 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
 
             if (origin.copyMode) {
                 setKernelGhost(null);
+                // 落点解析必须早于取消早退：取消路径同样要清掉「落到新轨」标记，
+                // 否则虚线新轨行会一直挂在画面上，且之后每一次普通移动都会被误读成
+                // 哨兵落点（`kernelDropToNewTrackRef` 的语义是"本次手势的落点"，
+                // 手势结束就必须复位——与下方 move 分支同一清理方式）。
+                const dropTarget = resolveKernelDropTarget({
+                    targetTrackId: args.targetTrackId,
+                    trackIds: sessionRef.current.tracks.map((track) => track.id),
+                    anchorTrackIndex: origin.anchorTrackIndex,
+                    newTrackSentinel: NEW_TRACK_SENTINEL,
+                });
+                if (kernelDropToNewTrackRef.current) {
+                    kernelDropToNewTrackRef.current = false;
+                    setKernelDropToNewTrack(false);
+                }
                 // copy 模式下原 clip 从未被移动：既不需要回滚，也不走 move 提交。
                 if (args.cancelled) return;
                 // 落库复用抽出的共享函数（与旧实现**同一份**复制语义）：
@@ -1730,10 +1748,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     // 用**吸附后**的共享位移，与 ghost 预览的位置一致
                     // （用内核原始位移会绕开吸附，表现为"预览吸附、落库不吸附"）。
                     deltaSec: origin.lastDeltaStartSec,
-                    // 内核拖拽的落点始终是已有轨道（`resolveTargetTrackIndex` 越界时
-                    // 回落原轨），因此不涉及建新轨。
-                    dropToNewTrack: false,
-                    trackOffset: 0,
+                    // 与预览分支同一套落点语义（预览分支内联算 `deltaTrack` /
+                    // `dropToNewTrack`）：哨兵 → 新建轨道；已有轨道 → 相对锚点的轨道
+                    // 偏移量。写死 false / 0 会让"幽灵预览能到新轨道和其他轨道、落库
+                    // 却留在原轨"，两处解析结果必须一致。
+                    dropToNewTrack: dropTarget.dropToNewTrack,
+                    trackOffset: dropTarget.trackOffset,
                     allowTrackMove: true,
                     hasMixedTrackSelection: false,
                     autoCrossfadeEnabled: s.autoCrossfadeEnabled,
@@ -1741,16 +1761,29 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     sessionRef,
                     setMultiSelectedClipIds,
                     // 每个参与者按各自初始轨道序号 + 同一偏移量解析目标轨。
+                    //
+                    // 特殊说明：这里的 id 查询**必须带上 `trackOffset`**。只写
+                    // `trackIds[participant.trackIndex]` 会永远返回原轨（偏移量为 0 时
+                    // 才恰好正确），使整个跨轨修复变成静默无效——调用方
+                    // （`copyClipsFromDrag`）此时已经按 `trackOffset !== 0` 判定过
+                    // "应该跨轨"，拿到原轨后不会报错，只会默默同轨复制。
+                    // `?? null` 保留越界回落语义：调用方在 null 时回退到 `initial.trackId`，
+                    // 与旧实现 `resolveTrackIdByOffset` 的 `targetIndex = sourceIndex + trackOffset`
+                    // 完全一致。
                     resolveTrackIdByOffset: (clipId) => {
                         const participant = origin.participants.find(
                             (item) => item.clipId === clipId,
                         );
                         if (participant === undefined || participant.trackIndex < 0) return null;
-                        return trackIds[participant.trackIndex] ?? null;
+                        return trackIds[participant.trackIndex + dropTarget.trackOffset] ?? null;
                     },
                     maybeSelectTargetTrack: () => undefined,
-                    createNewTracksForDrop: async () => [],
-                    createNewTrackForDrop: async () => null,
+                    createNewTracksForDrop: (span: number) =>
+                        createTrackIdsForDrop({ dispatch, sessionRef }, span),
+                    createNewTrackForDrop: async () => {
+                        const created = await createTrackIdsForDrop({ dispatch, sessionRef }, 1);
+                        return created[0] ?? null;
+                    },
                 }).catch(() => undefined);
                 return;
             }

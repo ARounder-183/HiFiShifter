@@ -2,8 +2,11 @@
  * createNewTrackForDrop.ts — 拖到轨道区下方「新建轨道并落库」的共享编排。
  *
  * 【主要内容】
- * 把「在轨道列表末尾新建一条轨道 → 把待落库的 clip 移到该轨 → 选中新轨」这一段
- * 编排抽成单一事实来源，供渲染内核的 `clip-drag` 手势（拖到全部轨道之下）调用。
+ * 两条建轨路径的共享编排：
+ * 1. `createNewTrackForKernelDrop`：新建一条轨道 → 把待落库的 clip 移到该轨 →
+ *    选中新轨（服务 **move** 路径：拖到全部轨道之下）。
+ * 2. `createTrackIdsForDrop`：只新建 `count` 条**空**轨道并返回其 id（服务 **copy**
+ *    路径：副本位置随后由 `duplicate_clips_bulk` 决定，建轨本身不能搬动原 clip）。
  *
  * 【作用】
  * 旧实现把这段逻辑内联在 `useClipDrag` 的 `createNewTrackForDrop` /
@@ -12,7 +15,8 @@
  * 亏（`copyClipsFromDrag` 的抽取原因与此完全相同）。
  *
  * 【与其他模块的关系】
- * - 上游：`TimelinePanel` 的内核拖拽提交分支（`targetTrackId === NEW_TRACK_SENTINEL`）。
+ * - 上游：`TimelinePanel` 的内核拖拽提交分支（`targetTrackId === NEW_TRACK_SENTINEL`）
+ *   与 `copyClipsFromDrag` 注入的 `createNewTrack(s)ForDrop` 依赖。
  * - 复用：`addTrackRemote`（后端建轨）与 `moveClipsRemote` / `moveClipRemote`
  *   （批量 / 单条移动），落库语义与旧实现一致。
  * - 独立性：不依赖 React 状态，依赖以参数注入，便于调用方复用其 `sessionRef`。
@@ -24,6 +28,8 @@
  *    不用异步 thunk。
  * 2. 新轨 id 从后端回包里**按差集**解析，而不是取"最后一条轨道"——并发建轨或
  *    后端返回顺序变化时，取末条会拿到别人的轨道。
+ * 3. copy 路径**不得**复用 `createNewTrackForKernelDrop`：后者会把原 clip 移到新轨，
+ *    与随后的复制叠加，等于把原 clip 搬走（详见 `createTrackIdsForDrop` 注释）。
  */
 
 import type React from "react";
@@ -38,6 +44,54 @@ import {
     moveClipTrack,
     selectTrackRemote,
 } from "../../../../features/session/sessionSlice";
+
+/** 纯建轨的依赖集合。 */
+export interface CreateTrackIdsDeps {
+    readonly dispatch: AppDispatch;
+    readonly sessionRef: React.RefObject<SessionState>;
+}
+
+/**
+ * 在轨道列表末尾新建 `count` 条**空**轨道，返回它们的新 id（按建轨顺序）。
+ *
+ * 流程（每条轨道）：记录建轨前的 id 集合 → `addTrackRemote` → 按**差集**解析新 id
+ * （回退到回包的 `selected_track_id`，再回退到末条）。
+ *
+ * 【为什么与 `createNewTrackForKernelDrop` 分开】后者服务 move 路径，会顺手把
+ * clip 移到新轨；copy 路径的副本位置由 `duplicate_clips_bulk` 决定，只需要空轨道。
+ * 把两者混用会让 copy 先发生一次移动，再发生一次复制 —— 原 clip 被搬走。
+ *
+ * 【为什么按差集而不是取末条】并发建轨或后端返回顺序变化时，取末条会拿到别人的
+ * 轨道（与 `createNewTrackForKernelDrop` 同一约束，见该文件头部设计约束）。
+ *
+ * @param deps 注入的 dispatch 与 sessionRef。
+ * @param count 要新建的轨道数（<= 0 时返回空数组）。
+ * @returns 新轨 id 列表；某条失败时该条被跳过（列表可能短于 `count`，调用方据此判定失败）。
+ */
+export async function createTrackIdsForDrop(
+    deps: CreateTrackIdsDeps,
+    count: number,
+): Promise<string[]> {
+    const createdIds: string[] = [];
+    for (let index = 0; index < Math.max(0, Math.floor(count)); index += 1) {
+        const before = new Set(deps.sessionRef.current.tracks.map((track) => track.id));
+        const res = (await deps
+            .dispatch(addTrackRemote({ name: undefined, parentTrackId: null }))
+            .unwrap()) as {
+            tracks?: Array<{ id?: string }>;
+            selected_track_id?: string | null;
+        };
+        const nextTracks = Array.isArray(res?.tracks) ? res.tracks : [];
+        const created = nextTracks.find((track) => !before.has(String(track?.id)));
+        const id =
+            (created && String(created.id)) ||
+            (res?.selected_track_id ? String(res.selected_track_id) : null) ||
+            (nextTracks.length > 0 ? String(nextTracks[nextTracks.length - 1]?.id) : null) ||
+            null;
+        if (id) createdIds.push(id);
+    }
+    return createdIds;
+}
 
 /** 依赖集合（全部由调用方注入，本模块不反向依赖 hook）。 */
 export interface CreateNewTrackForDropDeps {
