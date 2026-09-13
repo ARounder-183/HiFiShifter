@@ -33,6 +33,7 @@ import {
     isChildPitchOffsetDegreesParam,
     isChildFormantOffsetCentsParam,
 } from "./childPitchOffsetParams";
+import { isSameMainCanvasSignature, type MainCanvasSignature } from "./mainCanvasSignature";
 
 // 调试开关缓存：drawCurveTimed 每帧会被调用多次（主曲线 / 编辑线 / 选区叠加 /
 // 每条副参数 / 每条参考线），逐次同步读 localStorage 会拖慢绘制热路径；
@@ -74,8 +75,15 @@ export function getFixedDashPattern(baseDashPx: number, baseGapPx: number): numb
  * 【为什么用模块级 WeakMap】缓存必须跨调用保持，但又不能阻止画布被回收：面板
  * 重建画布（参数切换、StrictMode 双挂载、窗口尺寸变化都可能换元素）时旧画布应
  * 当被 GC。WeakMap 以画布元素为键，正好满足这两点。
+ *
+ * 【为什么存数组而不是字符串】签名含对象 / 数组项（选区、曲线、morph 叠加…），
+ * 必须**按引用**参与比较。此前缓存类型是 `string`，逼得调用方 `join("|")` 构造
+ * 签名，而 `join` 会把每个对象串成字面量 `"[object Object]"`：两个完全不同的
+ * 选区因此得到同一个签名，缓存命中后 `drawPianoRoll` 在清屏前就 return，旧选区
+ * 框留在画布上不消失（缺陷 #4）。改存数组 + `Object.is` 逐项比较后，对象按引用
+ * 区分，`null ↔ object` 与 `object ↔ object` 两种转换都能正确失效。
  */
-const mainCanvasCache = new WeakMap<HTMLCanvasElement, string>();
+const mainCanvasCache = new WeakMap<HTMLCanvasElement, MainCanvasSignature>();
 
 /** 为数值轴选择"好看"的刻度步长 */
 function niceAxisStep(range: number, targetCount: number): number {
@@ -439,10 +447,17 @@ export function drawPianoRoll(args: {
      * dpr）都编进签名。**漏掉任何一项都会让该层停止更新**（表现为"改了参数但画面
      * 不动"），因此宁可多编一项也不要少编。
      *
+     * 特殊说明（比较语义）：签名是一个**数组**，逐项按 `Object.is` 比较——
+     * 原始值比数值，**对象 / 数组项按引用比较，绝不做字符串化**。此前签名是字符串
+     * 并由调用方 `join("|")` 构造，`join` 会把每个对象 / 数组元素串成字面量
+     * `"[object Object]"`，于是内容完全不同的两个选区产生同一个签名；缓存命中后
+     * 本函数在清屏前就 return，**旧选区框留在画布上不消失、新框画不出来**——这就是
+     * 用户报告的缺陷 #4。详见 `mainCanvasSignature.ts`。
+     *
      * 特殊说明：`undefined` 表示不做缓存（每帧重绘）——保持既有行为，供未迁移的
      * 调用方与单测使用。
      */
-    mainContentSignature?: string;
+    mainContentSignature?: MainCanvasSignature;
 }) {
     const {
         axisCanvas,
@@ -720,8 +735,10 @@ export function drawPianoRoll(args: {
 
     // 【阶段 2 Task 6】主画布内容缓存：签名未变则整张跳过（含清屏）。
     // 缓存按**画布元素**登记（面板重建画布 / StrictMode 双挂载会换元素）。
+    // 比较按 `Object.is` 逐项进行——对象 / 数组项比引用，绝不字符串化（见
+    // `mainCanvasSignature.ts` 对缺陷 #4 的说明）。
     if (mainContentSignature !== undefined) {
-        if (mainCanvasCache.get(canvas) === mainContentSignature) return;
+        if (isSameMainCanvasSignature(mainContentSignature, mainCanvasCache.get(canvas))) return;
         mainCanvasCache.set(canvas, mainContentSignature);
     }
 

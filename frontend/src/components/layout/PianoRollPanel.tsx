@@ -104,6 +104,7 @@ import { TimelineDisplaySettingsDialog } from "./TimelineDisplaySettingsDialog";
 import { AXIS_W, PITCH_MAX_MIDI, PITCH_MIN_MIDI } from "./pianoRoll/constants";
 import { drawPianoRoll } from "./pianoRoll/render";
 import type { DetectedPitchCurve, ReferencePitchOverlay } from "./pianoRoll/render";
+import type { MainCanvasSignature } from "./pianoRoll/mainCanvasSignature";
 import {
     buildReferencePitchStrokeColor,
     cleanupVisibleReferenceRootTrackIds,
@@ -3494,23 +3495,52 @@ export const PianoRollPanel: React.FC = () => {
             playheadSec: visualPlayheadSecRef.current,
         };
         /**
+         * 主画布上绘制的中央提示文字（"音高被硬禁用"的原因）。
+         *
+         * 【为什么提取成局部变量】它同时是**签名项**与 `drawPianoRoll` 的入参。
+         * 就地写两遍表达式（此前签名里根本没有它）正是本文件反复警告的
+         * "签名里写了 A、实际喂给绘制的是 B"的漂移来源：一旦两处写法分叉，
+         * 文字就会停在旧值或漏绘。提取一次、两处共用，漂移在结构上不可能发生。
+         *
+         * 【为什么非 pitch 参数用 childPitchHardDisableReason】子音高偏移参数
+         * （cents / degrees / formant）走的是 `childPitchHardDisableReason`，
+         * 与 `pitchEnabled` 的判定分支保持一一对应（见上方 `pitchEnabled`）。
+         */
+        const overlayText = !pitchEnabled
+            ? editParam === "pitch"
+                ? pitchHardDisableReason
+                : childPitchHardDisableReason
+            : null;
+
+        /**
          * 主画布的内容签名（阶段 2 Task 6）。
          *
          * 【必须包含什么】主画布上绘制的**全部输入**：
          * - 绘图资源：各条曲线数据、参考线、检测曲线、副参数视口、morph 叠加、
-         *   剪贴板预览、选区块、live 编辑覆盖、音阶高亮（含 tempoMap 段）；
+         *   剪贴板预览、选区块、live 编辑覆盖、音阶高亮（含 tempoMap 段）、
+         *   中央提示文字 `overlayText`；
          * - 视口：`viewSize`、`pxPerSec`、`scrollLeft`、`dpr`（滚动/缩放会改变投影）；
-         * - 主题与字体（颜色解析与文字宽度都会影响像素结果）；
-         * - `pitchAnalysisPending`（它会提前 return，改变绘制内容）。
+         * - 主题与字体（颜色解析与文字宽度都会影响像素结果）。
          *
          * 【必须**不**包含什么】播放头位置——它已由 GL 叠加层绘制。把它编进签名会让
          * 播放帧的签名每帧变化、缓存失效，那就退回"每帧重绘曲线"。
          *
-         * 【为什么用引用数组 + join】大部分输入是数组/对象引用（Redux 只在内容变化时
-         * 换引用），直接比引用既快又准；数值项显式列举。漏项的代价是"该图层不再更新"，
-         * 因此这里**宁可多编**：低频变化的项一并纳入，成本只是偶尔多一次重绘。
+         * 【比较语义】这是一个**数组**，交给 `isSameMainCanvasSignature` 逐项
+         * `Object.is` 比较：**对象 / 数组项按引用参与**（Redux 只在内容变化时换引用，
+         * 比引用既快又准），原始值按数值。**绝不拼接字符串**——此前后缀是
+         * `.join("|")`，而 `join` 会把每个对象 / 数组元素串成字面量
+         * `"[object Object]"`，两个内容完全不同的选区因此得到同一个签名，缓存命中、
+         * 主画布在清屏前就 return，旧选区框留在画布上不消失（缺陷 #4，详见
+         * `pianoRoll/mainCanvasSignature.ts`）。引用比较之所以能逐帧失效，是因为
+         * 选区 / 覆盖层在变化时都被赋**新对象**，而非原地改字段。
+         *
+         * 【必须与绘制入参一一对应】下面每一项都刻意对应 `drawPianoRoll` 的某个
+         * 入参（或影响其投影的视口量），避免"签名里写了 A、实际喂给绘制的是 B"。
+         * 漏项的代价是"该图层不再更新"，因此这里**宁可多编**：低频变化的项一并纳入，
+         * 成本只是偶尔多一次重绘。最后再列一遍 `secondaryParamViews` 并非冗余——
+         * 它与 `paramViewsRef.current` 同为曲线数据源，两者都必须进签名。
          */
-        const mainContentSignature = [
+        const mainContentSignature: MainCanvasSignature = [
             viewSize.w,
             viewSize.h,
             pxPerSecRef.current,
@@ -3520,7 +3550,7 @@ export const PianoRollPanel: React.FC = () => {
             themeMode,
             fontFamily,
             pitchEnabled ? 1 : 0,
-            // 数据与几何（引用比较）。刻意与传给 drawPianoRoll 的字段一一对应，
+            // 数据与几何（按引用比较）。刻意与传给 drawPianoRoll 的字段一一对应，
             // 避免"签名里写了 A、实际喂给绘制的是 B"这种漂移。
             detectedPitchCurves,
             referencePitchOverlays,
@@ -3537,12 +3567,15 @@ export const PianoRollPanel: React.FC = () => {
             s.scaleHighlightMode,
             s.toolMode,
             snapToggleHeld,
+            // 中央提示文字：本面板传给 `drawPianoRoll` 的**唯一**字符串入参，
+            // 切换参数 / 轨道组时会变（禁用原因出现或消失）。
+            overlayText,
             // 视口中心/跨度（用 ref 值，避免依赖 React 渲染时机）
             pitchViewRef.current.center,
             pitchViewRef.current.span,
             paramViewsRef.current,
             secondaryParamViews,
-        ].join("|");
+        ];
 
         drawPianoRoll({
             axisCanvas: axisCanvasRef.current,
@@ -3556,11 +3589,8 @@ export const PianoRollPanel: React.FC = () => {
             secondaryParamViews: pitchEnabled ? secondaryParamViews : {},
             secondaryParamIds: pitchEnabled ? visibleSecondaryParamIds : [],
             showSecondaryParam: pitchEnabled && visibleSecondaryParamIds.length > 0,
-            overlayText: !pitchEnabled
-                ? editParam === "pitch"
-                    ? pitchHardDisableReason
-                    : childPitchHardDisableReason
-                : null,
+            // 与上面签名里的 `overlayText` 是**同一个变量**（不重复写表达式）。
+            overlayText,
             liveEditOverride: liveEditOverrideRef.current,
             selection: selectionRef.current,
             axis: drawAxis,

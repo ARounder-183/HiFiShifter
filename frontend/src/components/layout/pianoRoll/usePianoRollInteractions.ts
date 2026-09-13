@@ -3415,6 +3415,17 @@ export function usePianoRollInteractions(args: {
                     const startBeat = selectionBeatFromClientX(e.clientX, false);
                     selectionRef.current = { aBeat: startBeat, bBeat: startBeat };
                     updateSelectionUi(selectionRef.current);
+                    // 立即重绘：此刻新选区是**零宽**的，画布上还显示着**上一个**
+                    // 选区框（以及新位置的一条边线）。不在这里标脏，用户就会看到
+                    // "按下后旧框仍在原处不动"——直到指针移动触发下面的 onMove 才更新，
+                    // 这正是报告症状的一部分。
+                    //
+                    // 与 onMove（实时重绘选区）和 onUp（收尾重绘）保持一致：一次
+                    // 手势的三个阶段都各自标脏，任何一段缺失都会留下陈旧画面。
+                    // 【为什么光有它还不够】主画布走内容签名缓存，签名必须是
+                    // 引用比较（见 `mainCanvasSignature.ts`）——此处每次赋**新对象**，
+                    // 正是让签名变化、缓存失效的前提。
+                    invalidate();
                     const pid = e.pointerId;
                     (e.currentTarget as HTMLCanvasElement).setPointerCapture(pid);
                     const finePointerState = createFineAdjustedPointerState(
