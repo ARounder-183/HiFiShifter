@@ -44,6 +44,7 @@ import {
     moveClipTrack,
     selectTrackRemote,
 } from "../../../../features/session/sessionSlice";
+import { computeSelectedTrackSpan, type DropMoveInitial } from "./clipDropMoveUtils";
 
 /** 纯建轨的依赖集合。 */
 export interface CreateTrackIdsDeps {
@@ -114,6 +115,15 @@ export interface CreateNewTrackForDropDeps {
     readonly originTrackIdById: Readonly<Record<string, string>>;
     /** 各 clip 取消 / 失败时回滚到的原起点（秒）。 */
     readonly originStartSecById: Readonly<Record<string, number>>;
+    /**
+     * 各 clip 按下时的**轨道序号**（用于解析选区跨度）。
+     *
+     * 选区跨多条轨道时必须按跨度建同样多的新轨并让成员各自落位
+     * （旧实现 `useClipDrag` 的 `hasMixedTrackSelection` +
+     * `computeSelectedTrackSpan` + `buildDropToNewTrackMoves` 那一套）；
+     * 只建一条轨会把整组塌到同一轨。
+     */
+    readonly trackIndexById: Readonly<Record<string, number>>;
     readonly dispatch: AppDispatch;
     readonly sessionRef: React.RefObject<SessionState>;
     /** 锁定的参数线是否随 clip 一起移动。 */
@@ -121,24 +131,27 @@ export interface CreateNewTrackForDropDeps {
 }
 
 /**
- * 在轨道列表末尾新建一条轨道，并把指定 clip 全部移过去。
+ * 在轨道列表末尾新建**一条或多条**轨道，并把指定 clip 按各自落点移过去。
  *
  * 流程：
- * 1. 记录建轨前的轨道 id 集合（用于按差集解析新轨 id）；
- * 2. `addTrackRemote` 建轨；
- * 3. 解析新轨 id（差集 → 回包的 `selected_track_id` → 末条）；
+ * 1. 由参与集合的初始轨道序号解析**选区跨度**（`computeSelectedTrackSpan`）；
+ * 2. 跨多条轨道时建 `span` 条新轨（否则建 1 条）——与旧实现
+ *    `hasMixedTrackSelection` 分支同一语义；
+ * 3. 每个 clip 落到「自身来源序号 − 本组最小序号」对应的那条新轨（单轨时全部落它）；
  * 4. 批量（> 1）或单条（= 1）`move*Remote` 落库；
- * 5. 选中新轨（与旧实现 `maybeSelectTargetTrack` 同源）；
+ * 5. 选中第一条新轨（与旧实现 `maybeSelectTargetTrack(created[0])` 同源）；
  * 6. 任一步失败 → 把 clip 回滚到原轨 / 原起点。
  *
+ * 【为什么不能只建一条轨】选区跨多条轨道时只建一条会把整组塌到同一轨，
+ * 破坏成员之间的相对轨道布局——旧实现按来源跨度建轨正是为了避免这一点。
+ *
  * @param deps 见 `CreateNewTrackForDropDeps`。
- * @returns 新轨 id；失败时为 null（调用方无需再处理，回滚已在此完成）。
+ * @returns 第一条新轨的 id；失败时为 null（调用方无需再处理，回滚已在此完成）。
  */
 export async function createNewTrackForKernelDrop(
     deps: CreateNewTrackForDropDeps,
 ): Promise<string | null> {
     const { dispatch, sessionRef } = deps;
-    const before = new Set(sessionRef.current.tracks.map((track) => track.id));
     const rollback = (): void => {
         // 乐观位置在预览期已被改写：失败必须还原，否则 Redux 停在不存在的哨兵轨道上。
         //
@@ -161,46 +174,70 @@ export async function createNewTrackForKernelDrop(
     };
 
     try {
-        const response = (await dispatch(
-            addTrackRemote({ name: undefined, parentTrackId: null }),
-        ).unwrap()) as {
-            tracks?: Array<{ id?: string }>;
-            selected_track_id?: string | null;
-        };
-        const nextTracks = Array.isArray(response?.tracks) ? response.tracks : [];
-        const created = nextTracks.find((track) => !before.has(String(track?.id)));
-        const newTrackId =
-            (created && created.id != null ? String(created.id) : null) ??
-            (response?.selected_track_id != null ? String(response.selected_track_id) : null) ??
-            (nextTracks.length > 0 && nextTracks[nextTracks.length - 1]?.id != null
-                ? String(nextTracks[nextTracks.length - 1]?.id)
-                : null);
-        if (newTrackId === null) {
+        const initialById: Record<string, DropMoveInitial> = {};
+        for (const clipId of deps.clipIds) {
+            const trackId = deps.originTrackIdById[clipId];
+            if (trackId === undefined) continue;
+            initialById[clipId] = {
+                startSec: Math.max(0, deps.originStartSecById[clipId] ?? 0),
+                trackId,
+            };
+        }
+        const spanInfo = computeSelectedTrackSpan({
+            clipIds: [...deps.clipIds],
+            initialById,
+            trackIndexById: deps.trackIndexById,
+        });
+        // `span > 1` 等价于旧实现的 `hasMixedTrackSelection`（成员不在同一条轨道）。
+        const span = spanInfo !== null && spanInfo.span > 1 ? spanInfo.span : 1;
+        const created = await createTrackIdsForDrop({ dispatch, sessionRef }, span);
+        if (created.length !== span) {
             rollback();
             return null;
         }
 
-        const moves = deps.clipIds.map((clipId) => ({
-            clipId,
-            startSec: Math.max(0, Number(deps.startSecById[clipId]) || 0),
-            trackId: newTrackId,
-        }));
+        const resolveTargetTrackId = (clipId: string): string | null => {
+            const single = created[0] ?? null;
+            if (span === 1 || spanInfo === null) return single;
+            const originTrackId = deps.originTrackIdById[clipId];
+            const sourceIndex =
+                originTrackId === undefined ? Number.NaN : deps.trackIndexById[originTrackId];
+            if (!Number.isFinite(sourceIndex)) return single;
+            return created[Number(sourceIndex) - spanInfo.minTrackIndex] ?? single;
+        };
+
+        const moves: { clipId: string; startSec: number; trackId: string }[] = [];
+        for (const clipId of deps.clipIds) {
+            const trackId = resolveTargetTrackId(clipId);
+            if (trackId === null) continue;
+            moves.push({
+                clipId,
+                // 目标起点取调用方给的**当前**（乐观、含吸附）值。
+                startSec: Math.max(0, Number(deps.startSecById[clipId]) || 0),
+                trackId,
+            });
+        }
+        if (moves.length === 0) {
+            rollback();
+            return null;
+        }
+
         if (moves.length > 1) {
             await dispatch(
                 moveClipsRemote({ moves, moveLinkedParams: deps.moveLinkedParams }),
             ).unwrap();
-        } else if (moves.length === 1) {
+        } else {
             await dispatch(
                 moveClipRemote({
                     clipId: moves[0].clipId,
                     startSec: moves[0].startSec,
-                    trackId: newTrackId,
+                    trackId: moves[0].trackId,
                     moveLinkedParams: deps.moveLinkedParams,
                 }),
             ).unwrap();
         }
 
-        // 选中新轨（与旧实现 `maybeSelectTargetTrack` 同一语义）。
+        // 选中第一条新轨（与旧实现 `maybeSelectTargetTrack(created[0])` 同一语义）。
         //
         // `applySelectedClip: false` —— 这里的意图只是"把刚建的新轨设为当前轨道"，
         // 不含"恢复某条 clip 的选中"。特别注意：后端的选中记忆是**全工程唯一**的
@@ -208,10 +245,11 @@ export async function createNewTrackForKernelDrop(
         // 仍是上次 `select_clip` 记下的那条），因此**不存在**"恢复本轨上次选中的
         // clip"这种语义——纯字符串形式只会把用户此前"点空白取消选中"的结果异步复活
         // （契约与 `TimelinePanel.handleKernelSeek` 同源，见提交 019e93ed）。
-        if (sessionRef.current.selectedTrackId !== newTrackId) {
-            void dispatch(selectTrackRemote({ trackId: newTrackId, applySelectedClip: false }));
+        const primaryTrackId = created[0] ?? null;
+        if (primaryTrackId !== null && sessionRef.current.selectedTrackId !== primaryTrackId) {
+            void dispatch(selectTrackRemote({ trackId: primaryTrackId, applySelectedClip: false }));
         }
-        return newTrackId;
+        return primaryTrackId;
     } catch {
         rollback();
         return null;

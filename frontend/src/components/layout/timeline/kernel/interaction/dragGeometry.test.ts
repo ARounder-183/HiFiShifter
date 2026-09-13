@@ -14,8 +14,6 @@ describe("resolveDragDelta", () => {
             deltaContentXPx: 150,
             pxPerSec: 150,
             startSec: 10,
-            lengthSec: 4,
-            projectSec: 60,
         });
         expect(out.deltaSec).toBeCloseTo(1, 6);
         expect(out.startSec).toBeCloseTo(11, 6);
@@ -26,22 +24,18 @@ describe("resolveDragDelta", () => {
             deltaContentXPx: -3000,
             pxPerSec: 150,
             startSec: 1,
-            lengthSec: 4,
-            projectSec: 60,
         });
         expect(out.startSec).toBe(0);
         expect(out.deltaSec).toBe(-1);
     });
 
-    it("右移越界时钳制到工程末端（clip 不越出工程长度）", () => {
+    it("右移不按工程末端钳制（越界由 moveClipStart 自动扩展工程时长）", () => {
         const out = resolveDragDelta({
             deltaContentXPx: 100000,
             pxPerSec: 150,
             startSec: 10,
-            lengthSec: 4,
-            projectSec: 60,
         });
-        expect(out.startSec).toBe(56);
+        expect(out.startSec).toBeCloseTo(10 + 100000 / 150, 6);
     });
 
     it("pxPerSec 非法时不产生 NaN（退化为不位移）", () => {
@@ -49,23 +43,10 @@ describe("resolveDragDelta", () => {
             deltaContentXPx: 100,
             pxPerSec: 0,
             startSec: 5,
-            lengthSec: 2,
-            projectSec: 30,
         });
         expect(Number.isFinite(out.startSec)).toBe(true);
         expect(out.startSec).toBe(5);
         expect(out.deltaSec).toBe(0);
-    });
-
-    it("clip 比工程还长时右边界退化为 0", () => {
-        const out = resolveDragDelta({
-            deltaContentXPx: 500,
-            pxPerSec: 100,
-            startSec: 0,
-            lengthSec: 120,
-            projectSec: 60,
-        });
-        expect(out.startSec).toBe(0);
     });
 });
 
@@ -75,7 +56,6 @@ describe("resolveTrimEdge", () => {
         pxPerSec: 100,
         startSec: 10,
         lengthSec: 4,
-        projectSec: 60,
         minLengthSec: 0.1,
     } as const;
 
@@ -100,7 +80,7 @@ describe("resolveTrimEdge", () => {
         expect(out.startSec + out.lengthSec).toBeCloseTo(14, 6);
     });
 
-    it("右边缘向右拖 = 延长（受工程末端约束）", () => {
+    it("右边缘向右拖 = 延长", () => {
         const out = resolveTrimEdge({ ...base, edge: "right", deltaContentXPx: 100 });
         expect(out.startSec).toBeCloseTo(10, 6);
         expect(out.lengthSec).toBeCloseTo(5, 6);
@@ -113,9 +93,22 @@ describe("resolveTrimEdge", () => {
         expect(out.startSec).toBeCloseTo(10, 6);
     });
 
-    it("右边缘延长不越过工程末端", () => {
+    it("右边缘延长允许越出工程末端（只受防呆上界约束）", () => {
+        // 工程末端 60s 对裁切不再构成约束：右端 = 原右端(14) + 位移(1000) = 1014s。
         const out = resolveTrimEdge({ ...base, edge: "right", deltaContentXPx: 100000 });
-        expect(out.startSec + out.lengthSec).toBeCloseTo(60, 6);
+        expect(out.startSec).toBeCloseTo(10, 6);
+        expect(out.startSec + out.lengthSec).toBeCloseTo(14 + 1000, 6);
+    });
+
+    it("minLengthSec = 0 时退化为极小正数护栏（旧实现 minLen = 0）", () => {
+        const out = resolveTrimEdge({
+            ...base,
+            minLengthSec: 0,
+            edge: "right",
+            deltaContentXPx: -100000,
+        });
+        expect(out.lengthSec).toBeGreaterThan(0);
+        expect(out.lengthSec).toBeLessThan(1e-3);
     });
 });
 

@@ -80,7 +80,6 @@ import {
     DEFAULT_ROW_HEIGHT,
     MAX_PX_PER_SEC,
     MAX_ROW_HEIGHT,
-    MIN_CLIP_LENGTH_SEC,
     MIN_PX_PER_SEC,
     MIN_ROW_HEIGHT,
     NEW_TRACK_SENTINEL,
@@ -112,10 +111,7 @@ import {
 import { normalizeWheelDelta } from "../input/normalizeWheel";
 import { createRenderLoop } from "../../../renderKernel/renderLoop";
 import { createClipInstanceBuilder } from "../scene/clipInstances";
-import {
-    resolvePlayheadSec,
-    shouldRepaintForPlayhead,
-} from "../scene/playheadInvalidation";
+import { resolvePlayheadSec, shouldRepaintForPlayhead } from "../scene/playheadInvalidation";
 import { buildGridInstances } from "../scene/gridInstances";
 import type { FlatInstance, Rgba } from "../../../renderKernel/instanceTypes";
 import { createScrollKernel, type TimelineViewportState } from "../../../renderKernel/scrollKernel";
@@ -3185,7 +3181,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     /**
      * 计算并派发一次 trim 预览（拖拽边缘期间每帧调用）。
      *
-     * 流程：内容坐标位移 → `resolveTrimEdge`（新起始时间 + 新长度 + 边界/最小长度
+     * 流程：内容坐标位移 → `resolveTrimEdge`（新起始时间 + 新长度 + 最小长度
      * 钳制）→ 与上次值比较去重 → 回调。
      *
      * @param event 指针事件。
@@ -3202,8 +3198,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             pxPerSec: view.pxPerSec,
             startSec: gesture.originStartSec,
             lengthSec: gesture.originLengthSec,
-            projectSec: Math.max(0, data().projectSec),
-            minLengthSec: MIN_CLIP_LENGTH_SEC,
+            // 最小长度 0（旧实现 `useEditDrag` 的 `minLen = 0.0`，可裁到极限）；
+            // 右边界**不**钳到工程末端——越界由 `moveClipStart` 自动扩展工程时长。
+            minLengthSec: 0,
         });
         if (result.deltaSec === gesture.lastDeltaSec) return;
         gesture.lastDeltaSec = result.deltaSec;
@@ -3400,8 +3397,6 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             deltaContentXPx: contentX - gesture.startContentX,
             pxPerSec: view.pxPerSec,
             startSec: gesture.originStartSec,
-            lengthSec: gesture.lengthSec,
-            projectSec: Math.max(0, d.projectSec),
         });
         const trackIndex = resolveTargetTrackIndex(contentY, view.rowHeight, d.tracks.length);
         // 拖到**最后一条轨道之下** → 哨兵（`NEW_TRACK_SENTINEL`）：面板据此建新轨并
@@ -3878,6 +3873,10 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     window.addEventListener("pointercancel", endPan);
     window.addEventListener("pointerup", onGesturePointerUp);
     window.addEventListener("pointercancel", onGesturePointerCancel);
+    // 窗口失焦 / 页面隐藏也要中止手势（旧实现 `registerDragAbort` 的等价物）：
+    // 在别的窗口松手不会把 pointerup 送回本窗口，手势会永久停在拖拽态。
+    window.addEventListener("blur", onWindowBlur);
+    document.addEventListener("visibilitychange", onVisibilityChange);
 
     // ── 输入：滚动条拖拽 ─────────────────────────────────────────────
     let dragAxis: "x" | "y" | null = null;
@@ -4030,6 +4029,126 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      *
      * @param event 容器的 keydown 事件。
      */
+    /**
+     * 取消当前进行中的左键手势（Esc / 窗口失焦 / 页面隐藏共用一条路径）。
+     *
+     * 【为什么失焦也要走这里】旧实现的每个 DOM 手势都注册 `registerDragAbort`
+     * （window blur / visibilitychange）→ 手势**中止**而不是挂起。内核原先只监听
+     * pointerup / pointercancel：Alt+Tab 切走后在其他窗口松手，pointerup 不会回到
+     * 本窗口，手势会**永久停在拖拽态**——乐观值不回滚、交互锁与后端 undo group
+     * 也不释放，后续所有远程快照都被交互锁挡掉。这里与 Esc 共用同一套取消语义，
+     * 避免两处各写一份而产生分叉。
+     *
+     * @param mods 修饰键快照（失焦时没有事件可读，传全 false）。
+     * @returns 是否确实取消了某个手势（供调用方决定是否 `preventDefault`）。
+     */
+    function cancelActiveGesture(mods: KernelDragModifiers): boolean {
+        if (gesture.kind === "clip-drag") {
+            interactions?.onDragCommit?.({
+                clipId: gesture.clipId,
+                deltaSec: gesture.lastDeltaSec,
+                targetTrackId: gesture.lastTargetTrackId,
+                cancelled: true,
+                modifiers: mods,
+            });
+            // 取消同样要收起竖直换轨锁定的高亮（见 `onGesturePointerUp`）。
+            if (lastVerticalLockTrackId !== null) {
+                lastVerticalLockTrackId = null;
+                updateVerticalLockOverlay();
+            }
+            gesture = { kind: "none" };
+            return true;
+        }
+        if (gesture.kind === "clip-trim") {
+            interactions?.onTrimCommit?.({
+                clipId: gesture.clipId,
+                edge: gesture.edge,
+                startSec: gesture.lastStartSec,
+                lengthSec: gesture.lastLengthSec,
+                cancelled: true,
+            });
+            gesture = { kind: "none" };
+            return true;
+        }
+        if (gesture.kind === "clip-fade") {
+            interactions?.onFadeCommit?.({
+                clipId: gesture.clipId,
+                side: gesture.side,
+                fadeSec: gesture.lastFadeSec,
+                cancelled: true,
+            });
+            gesture = { kind: "none" };
+            return true;
+        }
+        if (gesture.kind === "gain-drag") {
+            // 音量旋钮拖拽中取消：回滚到按下时的增益（未起手时无副作用）。
+            interactions?.onGainDragCommit?.({
+                clipId: gesture.clipId,
+                changed: gesture.started,
+                cancelled: true,
+            });
+            gesture = { kind: "none" };
+            return true;
+        }
+        if (gesture.kind === "crossfade-grip") {
+            // 交叉点抓手拖拽中取消：回滚双方边缘（length / start 三处乐观值）。
+            interactions?.onCrossfadeGripCommit?.({
+                earlierClipId: gesture.earlierClipId,
+                laterClipId: gesture.laterClipId,
+                deltaSec: gesture.lastDeltaSec,
+                cancelled: true,
+            });
+            gesture = { kind: "none" };
+            return true;
+        }
+        if (gesture.kind === "snap-offset-drag") {
+            // `changed` 仍按「是否发生过真实位移」给出——未起手的单击无副作用，但
+            // 调用方仍需释放交互锁（它按 `wasActive` 自行判定）。
+            interactions?.onSnapOffsetCommit?.({
+                clipId: gesture.clipId,
+                cancelled: true,
+                changed: Number.isFinite(gesture.lastOffsetSec),
+            });
+            gesture = { kind: "none" };
+            return true;
+        }
+        if (gesture.kind === "box-select") {
+            // 框选取消：恢复拖动前的选择，且**不补发**被抑制的右键菜单——Esc /
+            // 失焦的语义是「放弃这次交互」，再弹菜单与之相悖。待发菜单一并丢弃，
+            // 并抑制紧随的 contextmenu（部分平台在松开右键时才触发），避免它在下
+            // 一次右键时被误重放。
+            if (gesture.active) {
+                // 未超过阈值（右键单击）时从未预览过，无需回滚。
+                interactions?.onBoxSelectCommit?.({
+                    clipIds: gesture.lastClipIds,
+                    additive: gesture.additive,
+                    cancelled: true,
+                });
+            }
+            boxSelectEl.style.display = "none";
+            pendingContextMenu = null;
+            suppressNextContextMenu = true;
+            gesture = { kind: "none" };
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * 窗口失焦 / 页面隐藏 → 中止进行中的手势（`registerDragAbort` 的等价物）。
+     *
+     * 失焦时读不到修饰键，传全 false：取消路径不会用它们做任何语义决策
+     * （copy / slip 模式在按下时已经定死）。
+     */
+    function onWindowBlur(): void {
+        cancelActiveGesture({ ctrlKey: false, shiftKey: false, altKey: false, metaKey: false });
+    }
+
+    /** 页面切到后台（切换标签 / 最小化）按失焦处理。 */
+    function onVisibilityChange(): void {
+        if (document.visibilityState === "hidden") onWindowBlur();
+    }
+
     function onKeyDown(event: KeyboardEvent): void {
         const view = scroll.get();
         // 竖向四键：与旧实现的浏览器原生纵向翻页语义对齐（见上方说明）。
@@ -4055,102 +4174,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 break;
             case "Escape": {
                 // 拖拽 / trim 中按 Esc = 取消：回调 cancelled 让调用方回滚乐观值。
-                if (gesture.kind === "clip-drag") {
+                // 取消路径与「窗口失焦 / 页面隐藏」共用（见 `cancelActiveGesture`）。
+                if (cancelActiveGesture(dragModifiersOf(event))) {
                     event.preventDefault();
-                    interactions?.onDragCommit?.({
-                        clipId: gesture.clipId,
-                        deltaSec: gesture.lastDeltaSec,
-                        targetTrackId: gesture.lastTargetTrackId,
-                        cancelled: true,
-                        modifiers: dragModifiersOf(event),
-                    });
-                    // 取消同样要收起竖直换轨锁定的高亮（见 `onGesturePointerUp`）。
-                    if (lastVerticalLockTrackId !== null) {
-                        lastVerticalLockTrackId = null;
-                        updateVerticalLockOverlay();
-                    }
-                    gesture = { kind: "none" };
-                    break;
-                }
-                if (gesture.kind === "clip-trim") {
-                    event.preventDefault();
-                    interactions?.onTrimCommit?.({
-                        clipId: gesture.clipId,
-                        edge: gesture.edge,
-                        startSec: gesture.lastStartSec,
-                        lengthSec: gesture.lastLengthSec,
-                        cancelled: true,
-                    });
-                    gesture = { kind: "none" };
-                    break;
-                }
-                if (gesture.kind === "clip-fade") {
-                    event.preventDefault();
-                    interactions?.onFadeCommit?.({
-                        clipId: gesture.clipId,
-                        side: gesture.side,
-                        fadeSec: gesture.lastFadeSec,
-                        cancelled: true,
-                    });
-                    gesture = { kind: "none" };
-                    break;
-                }
-                if (gesture.kind === "gain-drag") {
-                    // 音量旋钮拖拽中按 Esc：回滚到按下时的增益（未起手时无副作用）。
-                    event.preventDefault();
-                    interactions?.onGainDragCommit?.({
-                        clipId: gesture.clipId,
-                        changed: gesture.started,
-                        cancelled: true,
-                    });
-                    gesture = { kind: "none" };
-                    break;
-                }
-                if (gesture.kind === "crossfade-grip") {
-                    // 交叉点抓手拖拽中按 Esc：回滚双方边缘（length / start 三处乐观值）。
-                    event.preventDefault();
-                    interactions?.onCrossfadeGripCommit?.({
-                        earlierClipId: gesture.earlierClipId,
-                        laterClipId: gesture.laterClipId,
-                        deltaSec: gesture.lastDeltaSec,
-                        cancelled: true,
-                    });
-                    gesture = { kind: "none" };
-                    break;
-                }
-                if (gesture.kind === "snap-offset-drag") {
-                    // SnapOffset 手柄拖拽中按 Esc：回滚吸附偏移。`changed` 仍按
-                    // 「是否发生过真实位移」给出——未起手的单击无副作用，但调用方
-                    // 仍需释放交互锁（它按 `wasActive` 自行判定，见面板同源注释）。
-                    event.preventDefault();
-                    interactions?.onSnapOffsetCommit?.({
-                        clipId: gesture.clipId,
-                        cancelled: true,
-                        changed: Number.isFinite(gesture.lastOffsetSec),
-                    });
-                    gesture = { kind: "none" };
-                    break;
-                }
-                if (gesture.kind === "box-select") {
-                    // 框选拖拽中按 Esc：取消框选并恢复拖动前的选择。
-                    //
-                    // 特殊说明：与松手路径不同，这里**不补发**被抑制的右键菜单
-                    // ——Esc 的语义是「放弃这次交互」，再弹菜单与之相悖。同时把
-                    // 待发菜单一并丢弃，并抑制紧随的 contextmenu（部分平台在松开
-                    // 右键时才触发），避免它在下一次右键时被误重放。
-                    event.preventDefault();
-                    if (gesture.active) {
-                        // 未超过阈值（右键单击）时从未预览过，无需回滚。
-                        interactions?.onBoxSelectCommit?.({
-                            clipIds: gesture.lastClipIds,
-                            additive: gesture.additive,
-                            cancelled: true,
-                        });
-                    }
-                    boxSelectEl.style.display = "none";
-                    pendingContextMenu = null;
-                    suppressNextContextMenu = true;
-                    gesture = { kind: "none" };
                 }
                 break;
             }
@@ -4335,6 +4361,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             window.removeEventListener("pointermove", onGesturePointerMove);
             window.removeEventListener("pointerup", onGesturePointerUp);
             window.removeEventListener("pointercancel", onGesturePointerCancel);
+            window.removeEventListener("blur", onWindowBlur);
+            document.removeEventListener("visibilitychange", onVisibilityChange);
             hScrollbarThumb.removeEventListener("pointerdown", onHDown);
             vScrollbarThumb.removeEventListener("pointerdown", onVDown);
             hScrollbarTrack?.removeEventListener("pointerdown", onHTrackDown);

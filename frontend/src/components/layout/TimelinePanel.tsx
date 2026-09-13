@@ -107,7 +107,7 @@ import {
 } from "../../features/session/sessionSlice";
 import { beginSnapGesture, endSnapGesture } from "../../utils/timelineSnapping";
 import { batch } from "react-redux";
-import { moveClipsRemote } from "../../features/session/thunks/timelineThunks";
+import { moveClipRemote, moveClipsRemote } from "../../features/session/thunks/timelineThunks";
 import { computeTimelineRectSelection } from "./timeline/useTimelineSelectionRect";
 import { setTempoMapRemote } from "../../features/session/thunks/tempoMapThunks";
 
@@ -192,7 +192,7 @@ import { computeEffectiveSnap } from "../../utils/timelineSnapping";
 import { store } from "../../app/store";
 import { applyBulkFadeValue, applyBulkGainDeltaDb } from "./timeline/hooks/bulkClipEdit";
 import { advanceFineAxisDrag, type FineAxisDragState } from "./timeline/fineAxisDrag";
-import { CLIP_GAIN_DRAG_DB_PER_PX, MIN_CLIP_LENGTH_SEC } from "./timeline/constants";
+import { CLIP_GAIN_DRAG_DB_PER_PX } from "./timeline/constants";
 import {
     buildStretchGroupState,
     computeClipStretch,
@@ -1362,6 +1362,35 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     const [kernelDropToNewTrack, setKernelDropToNewTrack] = React.useState(false);
     const kernelDropToNewTrackRef = React.useRef(false);
 
+    /**
+     * 内核手势的**交互锁**（`beginInteraction` / `endInteraction` 的成对封装）。
+     *
+     * 【为什么每个手势都必须持有】`sessionSlice` 在 `_interactionLockCount > 0`
+     * 时丢弃后端回包的过期快照。手势期间若有一条 `*Remote.fulfilled` 抵达（例如
+     * 上一次点击的 `selectClipRemote`、或后端的周期性状态推送），没有这把锁它的
+     * 旧快照会**覆盖掉正在预览的乐观值**——表现为拖拽中途画面突然弹回原位。
+     * 旧实现的每个连续手势都成对调用（`useClipDrag` / `useEditDrag` /
+     * `useSlipDrag` / `useSnapOffsetDrag` 各一处），内核路径此前只有 snap offset 接了。
+     *
+     * 【为什么用 ref 去重】预览回调逐帧触发，而 begin / end 每只手势只能各一次。
+     *
+     * 【释放时机】与旧实现一致：**落库请求完成后**才释放。若在提交瞬间就释放，
+     * `endInteraction()` 到 `fulfilled` 之间会留出一个窗口，窗口内其他 in-flight
+     * thunk 的旧快照仍能把乐观值打回去（旧实现 `useClipDrag` 对此有逐字注释）。
+     * 纯取消 / 零位移的路径没有任何远程写入，直接释放。
+     */
+    const kernelGestureInteractionActiveRef = React.useRef(false);
+    const beginKernelGestureInteraction = React.useCallback((): void => {
+        if (kernelGestureInteractionActiveRef.current) return;
+        kernelGestureInteractionActiveRef.current = true;
+        dispatch(beginInteraction());
+    }, [dispatch]);
+    const endKernelGestureInteraction = React.useCallback((): void => {
+        if (!kernelGestureInteractionActiveRef.current) return;
+        kernelGestureInteractionActiveRef.current = false;
+        dispatch(endInteraction());
+    }, [dispatch]);
+
     const kernelDragOriginRef = React.useRef<{
         clipId: string;
         startSec: number;
@@ -1507,6 +1536,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         editedXfadeClipIds,
                     ),
                 };
+                // 首个真实位移帧（内核只在越过拖拽阈值后才回调预览）= 手势真正开始：
+                // 上交互锁，让手势期间抵达的后端旧快照不再覆盖乐观值。
+                beginKernelGestureInteraction();
             }
             const origin = kernelDragOriginRef.current;
             if (origin === null) return;
@@ -1717,6 +1749,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             }
         },
         [
+            beginKernelGestureInteraction,
             copyDragKb,
             dispatch,
             multiSelectedClipIds,
@@ -1763,10 +1796,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                             );
                         }
                     });
+                    endKernelGestureInteraction();
                     return;
                 }
                 // 零位移（未越过阈值 / 拖回原位）：不写后端（旧实现同样不置 dirty）。
-                if (origin.lastSourceById.size === 0) return;
+                if (origin.lastSourceById.size === 0) {
+                    endKernelGestureInteraction();
+                    return;
+                }
                 dispatch(checkpointHistory());
                 // 用**交互数学结果**提交（不回读 Redux——防并发更新 / 历史归一化
                 // 把窗口值污染，与旧实现 `lastById` 同源）。
@@ -1778,7 +1815,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                             sourceEndSec: window.sourceEndSec,
                         })),
                     }),
-                );
+                )
+                    .unwrap()
+                    .catch(() => undefined)
+                    .finally(endKernelGestureInteraction);
                 return;
             }
 
@@ -1799,7 +1839,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     setKernelDropToNewTrack(false);
                 }
                 // copy 模式下原 clip 从未被移动：既不需要回滚，也不走 move 提交。
-                if (args.cancelled) return;
+                if (args.cancelled) {
+                    endKernelGestureInteraction();
+                    return;
+                }
                 // 落库复用抽出的共享函数（与旧实现**同一份**复制语义）：
                 // 参与集合整体复制，目标轨按各自初始序号 + 同一偏移量解析。
                 const trackIds = sessionRef.current.tracks.map((track) => track.id);
@@ -1824,7 +1867,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     dropToNewTrack: dropTarget.dropToNewTrack,
                     trackOffset: dropTarget.trackOffset,
                     allowTrackMove: true,
-                    hasMixedTrackSelection: false,
+                    // 选区是否跨多条轨道（旧实现 `useClipDrag` 的
+                    // `hasMixedTrackSelection`）。只有跨轨时才按**来源轨道跨度**建同样
+                    // 多的新轨、让成员各自落位；写死 false 会让"跨轨多选拖到轨道区下方"
+                    // 把整组塌到同一条新轨上，成员之间的相对轨道布局丢失。
+                    hasMixedTrackSelection:
+                        new Set(origin.participants.map((item) => item.trackId)).size > 1,
                     autoCrossfadeEnabled: s.autoCrossfadeEnabled,
                     dispatch,
                     sessionRef,
@@ -1862,7 +1910,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         const created = await createTrackIdsForDrop({ dispatch, sessionRef }, 1);
                         return created[0] ?? null;
                     },
-                }).catch(() => undefined);
+                })
+                    .catch(() => undefined)
+                    .finally(endKernelGestureInteraction);
                 return;
             }
             if (args.cancelled) {
@@ -1888,6 +1938,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     kernelDropToNewTrackRef.current = false;
                     setKernelDropToNewTrack(false);
                 }
+                endKernelGestureInteraction();
                 return;
             }
             // 哨兵轨：先清掉落点标记（幽灵行随手势一起消失），再建轨并落库。
@@ -1912,25 +1963,59 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     originStartSecById: Object.fromEntries(
                         origin.participants.map((item) => [item.clipId, item.startSec] as const),
                     ),
+                    // 各成员的初始轨道序号：跨轨选区据此按跨度建多条新轨并各自落位
+                    // （与 copy 路径的 `hasMixedTrackSelection` / span 建轨同源）。
+                    trackIndexById: Object.fromEntries(
+                        origin.participants.map((item) => [item.clipId, item.trackIndex] as const),
+                    ),
                     dispatch,
                     sessionRef,
                     moveLinkedParams: sessionRef.current.lockParamLinesEnabled,
-                }).catch(() => undefined);
+                })
+                    .catch(() => undefined)
+                    .finally(endKernelGestureInteraction);
                 return;
             }
-            dispatch(checkpointHistory());
             // 提交值取 Redux 里的当前值（预览已写入**吸附后**的结果）——
             // 用 origin + 内核原始位移会绕开吸附，导致"预览吸附、提交不吸附"。
             const session = sessionRef.current;
-            const moves = origin.participants.map((participant) => {
-                const clip = session.clips.find((item) => item.id === participant.clipId);
-                return {
-                    clipId: participant.clipId,
-                    startSec: clip?.startSec ?? participant.startSec,
-                    trackId: clip?.trackId ?? participant.trackId,
-                };
-            });
-            const movePromise = dispatch(moveClipsRemote({ moves })).unwrap();
+            const moves = origin.participants
+                .map((participant) => {
+                    const clip = session.clips.find((item) => item.id === participant.clipId);
+                    const startSec = clip?.startSec ?? participant.startSec;
+                    const trackId = clip?.trackId ?? participant.trackId;
+                    // 零位移（拖回原位 / 未越过阈值）的成员不入提交集：旧实现
+                    // `useClipDrag` 同样以 `|Δstart| > 1e-6 || 换轨` 过滤，全员
+                    // 无变化时**整段提交都不发生**（不写后端、不置 dirty）。
+                    const changedStart = Math.abs(startSec - participant.startSec) > 1e-6;
+                    const changedTrack = trackId !== participant.trackId;
+                    if (!changedStart && !changedTrack) return null;
+                    return { clipId: participant.clipId, startSec, trackId };
+                })
+                .filter(
+                    (move): move is { clipId: string; startSec: number; trackId: string } =>
+                        move !== null,
+                );
+            if (moves.length === 0) {
+                // 全员零位移：没有任何远程写入，交互锁直接释放。
+                endKernelGestureInteraction();
+                return;
+            }
+            dispatch(checkpointHistory());
+            // 「锁定参数线」必须随移动一起透出（旧实现 `useClipDrag` 同源）：
+            // 漏传会让参数线在该开关打开时**不跟随 clip 移动**，且没有任何提示。
+            const moveLinkedParams = session.lockParamLinesEnabled;
+            const movePromise =
+                moves.length > 1
+                    ? dispatch(moveClipsRemote({ moves, moveLinkedParams })).unwrap()
+                    : dispatch(
+                          moveClipRemote({
+                              clipId: moves[0].clipId,
+                              startSec: moves[0].startSec,
+                              trackId: moves[0].trackId,
+                              moveLinkedParams,
+                          }),
+                      ).unwrap();
             void (async () => {
                 try {
                     await movePromise;
@@ -1951,9 +2036,18 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         );
                     }
                 }
-            })().catch(() => undefined);
+            })()
+                .catch(() => undefined)
+                // 交互锁在落库（含自动交叉淡化写回）完成后才释放——旧实现同一约定。
+                .finally(endKernelGestureInteraction);
         },
-        [dispatch, s.autoCrossfadeEnabled, sessionRef, setMultiSelectedClipIds],
+        [
+            dispatch,
+            endKernelGestureInteraction,
+            s.autoCrossfadeEnabled,
+            sessionRef,
+            setMultiSelectedClipIds,
+        ],
     );
 
     /** 内核 trim / stretch：按下时的原始几何（把相对位移换算为绝对值，并支持回滚）。 */
@@ -2181,6 +2275,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     stretchBaseSnapOffsetById,
                     baseById,
                 };
+                // 首个真实位移帧 = 手势开始：上交互锁（见 helper 说明）。
+                beginKernelGestureInteraction();
             }
             const origin = kernelTrimOriginRef.current;
             if (origin === null) return;
@@ -2282,7 +2378,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     baseFadeInSec: origin.baseFadeInSec,
                     baseFadeOutSec: origin.baseFadeOutSec,
                     baseSnapOffsetSec: origin.baseSnapOffsetSec,
-                    minLengthSec: MIN_CLIP_LENGTH_SEC,
+                    // 最小长度交由 `computeClipStretch` 的内部极小值护栏（`MIN_SPAN_SEC`）
+                    // 兜底——旧实现 `useEditDrag` 的拉伸同样用 `minLen = 0.0`。
                 });
                 batch(() => {
                     dispatch(moveClipStart({ clipId: args.clipId, startSec: result.startSec }));
@@ -2396,7 +2493,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         dispatch(
                             setClipLength({
                                 clipId: participant.clipId,
-                                lengthSec: Math.max(MIN_CLIP_LENGTH_SEC, base.lengthSec - deltaSec),
+                                lengthSec: Math.max(0, base.lengthSec - deltaSec),
                             }),
                         );
                         dispatch(
@@ -2409,7 +2506,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         dispatch(
                             setClipLength({
                                 clipId: participant.clipId,
-                                lengthSec: Math.max(MIN_CLIP_LENGTH_SEC, base.lengthSec + deltaSec),
+                                lengthSec: Math.max(0, base.lengthSec + deltaSec),
                             }),
                         );
                         dispatch(
@@ -2440,6 +2537,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             }
         },
         [
+            beginKernelGestureInteraction,
             dispatch,
             sessionRef,
             s.autoCrossfadeEnabled,
@@ -2501,7 +2599,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     clipId: args.clipId,
                     snapOffsetSec: Math.max(0, Number(clip.snapOffsetSec) || 0),
                 };
-                dispatch(beginInteraction());
+                beginKernelGestureInteraction();
                 dispatch(checkpointHistory());
                 beginSnapGesture();
             }
@@ -2559,7 +2657,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         }),
                     );
                 }
-                dispatch(endInteraction());
+                endKernelGestureInteraction();
                 return;
             }
             const clip = sessionRef.current.clips.find((item) => item.id === args.clipId);
@@ -2575,11 +2673,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 .catch(() => {
                     // 失败不产生 unhandled rejection；交互锁仍需释放。
                 })
-                .finally(() => {
-                    dispatch(endInteraction());
-                });
+                .finally(endKernelGestureInteraction);
         },
-        [dispatch],
+        [dispatch, endKernelGestureInteraction],
     );
 
     const handleKernelTrimCommit = React.useCallback(
@@ -2667,7 +2763,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                             },
                         ];
                     });
-                    if (updates.length === 0) return;
+                    if (updates.length === 0) {
+                        endKernelGestureInteraction();
+                        return;
+                    }
                     const groupPersist = dispatch(setClipsStateBulkRemote({ updates })).unwrap();
                     void (async () => {
                         try {
@@ -2738,7 +2837,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 );
                             }
                         }
-                    })().catch(() => undefined);
+                    })()
+                        .catch(() => undefined)
+                        .finally(endKernelGestureInteraction);
                     return;
                 }
                 if (args.cancelled) {
@@ -2769,6 +2870,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                             }),
                         );
                     });
+                    endKernelGestureInteraction();
                     return;
                 }
                 dispatch(checkpointHistory());
@@ -2831,7 +2933,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                             );
                         }
                     }
-                })().catch(() => undefined);
+                })()
+                    .catch(() => undefined)
+                    .finally(endKernelGestureInteraction);
                 return;
             }
 
@@ -2861,6 +2965,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         origin.editSides,
                     );
                 }
+                endKernelGestureInteraction();
                 return;
             }
             dispatch(checkpointHistory());
@@ -2882,7 +2987,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     },
                 ];
             });
-            if (updates.length === 0) return;
+            if (updates.length === 0) {
+                endKernelGestureInteraction();
+                return;
+            }
             const persist = dispatch(setClipsStateBulkRemote({ updates })).unwrap();
             void (async () => {
                 try {
@@ -2906,9 +3014,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         );
                     }
                 }
-            })().catch(() => undefined);
+            })()
+                .catch(() => undefined)
+                .finally(endKernelGestureInteraction);
         },
-        [dispatch, sessionRef, s.autoCrossfadeEnabled],
+        [dispatch, endKernelGestureInteraction, sessionRef, s.autoCrossfadeEnabled],
     );
 
     /** 内核淡变角：按下时的原始值（用于回滚）。 */
@@ -2986,6 +3096,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     ),
                     editSides,
                 };
+                // 首个真实位移帧 = 手势开始：上交互锁（见 helper 说明）。
+                beginKernelGestureInteraction();
             }
             const origin = kernelFadeOriginRef.current;
             if (origin === null) return;
@@ -3017,7 +3129,13 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 );
             }
         },
-        [dispatch, multiSelectedClipIds, sessionRef, s.autoCrossfadeEnabled],
+        [
+            beginKernelGestureInteraction,
+            dispatch,
+            multiSelectedClipIds,
+            sessionRef,
+            s.autoCrossfadeEnabled,
+        ],
     );
 
     /** 内核淡变角收尾：提交或回滚（取消时两侧一起还原）。 */
@@ -3048,6 +3166,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         origin.editSides,
                     );
                 }
+                endKernelGestureInteraction();
                 return;
             }
             dispatch(checkpointHistory());
@@ -3062,7 +3181,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         : { clipId: participant.clipId, fadeOutSec: clip.fadeOutSec },
                 ];
             });
-            if (updates.length === 0) return;
+            if (updates.length === 0) {
+                endKernelGestureInteraction();
+                return;
+            }
             const persist = dispatch(setClipsStateBulkRemote({ updates })).unwrap();
             void (async () => {
                 try {
@@ -3086,9 +3208,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         );
                     }
                 }
-            })().catch(() => undefined);
+            })()
+                .catch(() => undefined)
+                .finally(endKernelGestureInteraction);
         },
-        [dispatch, sessionRef, s.autoCrossfadeEnabled],
+        [dispatch, endKernelGestureInteraction, sessionRef, s.autoCrossfadeEnabled],
     );
 
     /** 内核框选：拖动前的选择快照（合并与回滚的基准）。 */
@@ -3429,6 +3553,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     // 因此不需要绝对 clientY。
                     fineAxis: { raw: 0, adjusted: 0, fineActive: false },
                 };
+                // 首个真实位移帧 = 手势开始：上交互锁（见 helper 说明）。
+                beginKernelGestureInteraction();
             }
             const origin = kernelGainOriginRef.current;
             if (origin === null) return;
@@ -3450,7 +3576,13 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 for (const update of updates) dispatch(setClipGain(update));
             });
         },
-        [dispatch, multiSelectedClipIds, paramFineAdjustKb, sessionRef],
+        [
+            beginKernelGestureInteraction,
+            dispatch,
+            multiSelectedClipIds,
+            paramFineAdjustKb,
+            sessionRef,
+        ],
     );
 
     /**
@@ -3463,13 +3595,18 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         (args: { clipId: string; changed: boolean; cancelled: boolean }) => {
             const origin = kernelGainOriginRef.current;
             kernelGainOriginRef.current = null;
-            if (origin === null || !args.changed) return;
+            // 未越起手阈值的单击（`changed = false`）没有远程写入：交互锁直接释放。
+            if (origin === null || !args.changed) {
+                endKernelGestureInteraction();
+                return;
+            }
             if (args.cancelled) {
                 batch(() => {
                     for (const [clipId, gain] of origin.baseGainById) {
                         dispatch(setClipGain({ clipId, gain }));
                     }
                 });
+                endKernelGestureInteraction();
                 return;
             }
             dispatch(checkpointHistory());
@@ -3485,9 +3622,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                             1,
                     })),
                 }),
-            );
+            )
+                .unwrap()
+                .catch(() => undefined)
+                .finally(endKernelGestureInteraction);
         },
-        [dispatch, sessionRef],
+        [dispatch, endKernelGestureInteraction, sessionRef],
     );
 
     /** 内核双击旋钮 → 恢复 0 dB（复用旧实现的增益提交入口，含乐观更新与落库）。 */
@@ -3613,6 +3753,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     laterStartSec: later.startSec,
                     laterLengthSec: later.lengthSec,
                 };
+                // 首个真实位移帧 = 手势开始：上交互锁（见 helper 说明）。
+                beginKernelGestureInteraction();
             }
             const origin = kernelCrossfadeOriginRef.current;
             if (origin === null) return;
@@ -3641,7 +3783,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 );
             });
         },
-        [dispatch, sessionRef],
+        [beginKernelGestureInteraction, dispatch, sessionRef],
     );
 
     /**
@@ -3687,12 +3829,16 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         }),
                     );
                 });
+                endKernelGestureInteraction();
                 return;
             }
             const clips = sessionRef.current.clips;
             const earlier = clips.find((item) => item.id === origin.earlierClipId);
             const later = clips.find((item) => item.id === origin.laterClipId);
-            if (earlier === undefined || later === undefined) return;
+            if (earlier === undefined || later === undefined) {
+                endKernelGestureInteraction();
+                return;
+            }
             dispatch(checkpointHistory());
             void dispatch(
                 setClipsStateBulkRemote({
@@ -3705,9 +3851,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         },
                     ],
                 }),
-            );
+            )
+                .unwrap()
+                .catch(() => undefined)
+                .finally(endKernelGestureInteraction);
         },
-        [dispatch, sessionRef],
+        [dispatch, endKernelGestureInteraction, sessionRef],
     );
 
     /** 内核交互回调集合（引用稳定：内核创建时取一次）。 */
@@ -4071,40 +4220,37 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         },
         [dispatch, sessionRef],
     );
-    const handleTrackListScrollTopChange = React.useCallback(
-        (scrollTop: number) => {
-            // 内核模式：轨道头只是**被动镜像**，它报来的 `scrollTop` 有两种来源，
-            // 且数值上无法区分，必须靠"宿主刚写过的值"来判（见 `timeline/scrollEcho`）：
-            //
-            // 1. **镜像回声**（绝大多数）：宿主每帧写 `trackList.scrollTop`，这次写入
-            //    触发的原生 `scroll` 事件会把**滞后一帧**的值报回来。若照单全收，内核
-            //    每帧被拉回一次——实测 40 步拖拽里 19 次调用**全部**是回声、每次
-            //    `delta ≈ −9px`，即用户报告的"纵向拖起来卡卡的、像被吸附"。
-            // 2. **真实输入**：焦点在轨道头控件上时，浏览器原生 scroll-into-view
-            //    （Tab / PageDown / End）会真正改变容器位置（实测 0 → 308 / 132 / 361）。
-            //    这类必须继续回灌，否则焦点导航时轨道头会与时间轴脱节。
-            //
-            // 【为什么旧判据失效】旧实现拿事件值与**内核当前值**比（< 0.5px 即忽略）。
-            // 拖拽时内核每帧前进，而事件报的是上一帧镜像值，两者相差约 9px，因此回声
-            // 被误当成用户输入收下，形成「内核 → DOM → 内核」的回退循环。
-            const host = kernelHostRef.current;
-            if (host != null) {
-                if (
-                    isTrackListMirrorEcho({
-                        mirroredScrollTop: host.getMirroredTrackListScrollTop(),
-                        nativeScrollTop: scrollTop,
-                    })
-                ) {
-                    return;
-                }
-                host.setScrollTop(scrollTop);
+    const handleTrackListScrollTopChange = React.useCallback((scrollTop: number) => {
+        // 内核模式：轨道头只是**被动镜像**，它报来的 `scrollTop` 有两种来源，
+        // 且数值上无法区分，必须靠"宿主刚写过的值"来判（见 `timeline/scrollEcho`）：
+        //
+        // 1. **镜像回声**（绝大多数）：宿主每帧写 `trackList.scrollTop`，这次写入
+        //    触发的原生 `scroll` 事件会把**滞后一帧**的值报回来。若照单全收，内核
+        //    每帧被拉回一次——实测 40 步拖拽里 19 次调用**全部**是回声、每次
+        //    `delta ≈ −9px`，即用户报告的"纵向拖起来卡卡的、像被吸附"。
+        // 2. **真实输入**：焦点在轨道头控件上时，浏览器原生 scroll-into-view
+        //    （Tab / PageDown / End）会真正改变容器位置（实测 0 → 308 / 132 / 361）。
+        //    这类必须继续回灌，否则焦点导航时轨道头会与时间轴脱节。
+        //
+        // 【为什么旧判据失效】旧实现拿事件值与**内核当前值**比（< 0.5px 即忽略）。
+        // 拖拽时内核每帧前进，而事件报的是上一帧镜像值，两者相差约 9px，因此回声
+        // 被误当成用户输入收下，形成「内核 → DOM → 内核」的回退循环。
+        const host = kernelHostRef.current;
+        if (host != null) {
+            if (
+                isTrackListMirrorEcho({
+                    mirroredScrollTop: host.getMirroredTrackListScrollTop(),
+                    nativeScrollTop: scrollTop,
+                })
+            ) {
                 return;
             }
-            // 宿主不可用（挂载前）时不回灌：旧的原生 scroller 分支已删除——
-            // `scrollRef` 无 JSX 挂载点，`scrollRef.current` 恒为 null。
-        },
-        [],
-    );
+            host.setScrollTop(scrollTop);
+            return;
+        }
+        // 宿主不可用（挂载前）时不回灌：旧的原生 scroller 分支已删除——
+        // `scrollRef` 无 JSX 挂载点，`scrollRef.current` 恒为 null。
+    }, []);
 
     const activeGroupIds = useMemo(() => {
         const ids = new Set<string>();
