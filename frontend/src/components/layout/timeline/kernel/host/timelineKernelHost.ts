@@ -97,6 +97,11 @@ import {
     type TrimEdge,
 } from "../interaction/dragGeometry";
 import { clipIntersectsBox, resolveBoxBounds, type BoxBounds } from "../interaction/boxSelection";
+// 起手选区收敛：陈旧的多选集合会让"拖一个 clip"带上整组（见该模块文件头）。
+import { shouldPrimeSelectionOnPress } from "../interaction/primeSelection";
+// 逐帧手势分派表：穷尽性由 `moveDispatch.test.ts` 守住（漏分支曾是
+// 「吸附偏移手柄拖一下就冻结」的根因，手写 if 链没有任何编译期保障）。
+import { resolveMoveDispatch } from "../interaction/moveDispatch";
 import {
     computeTimelineTrackDragLock,
     computeTimelineTrackDragLockThresholdPx,
@@ -110,6 +115,16 @@ import {
     scrollTargetFromTrackClick,
 } from "../../../renderKernel/scrollbars";
 import { normalizeWheelDelta } from "../input/normalizeWheel";
+// 拖拽边缘自动滚屏：内核自绘滚动没有浏览器兜底，缺了它 clip 拖到视口边缘就再也
+// 无法继续右移（设计文档早已承诺、此前未实现）。
+import { resolveDragEdgeScroll, shouldAutoScrollForGesture } from "../input/dragAutoScroll";
+// 缩放方向判定：**不能只看 deltaY 的符号**（`deltaY = 0` 会被判成缩小、变号噪声会
+// 逐事件翻转方向 → Windows 上表现为剧烈抖动）。见该模块文件头与回归测试。
+import {
+    createWheelZoomAccumulator,
+    resolveWheelZoomStep,
+    type WheelZoomAccumulator,
+} from "../input/wheelZoomIntent";
 import { createRenderLoop } from "../../../renderKernel/renderLoop";
 import { createClipInstanceBuilder } from "../scene/clipInstances";
 import {
@@ -1988,6 +2003,18 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
 
     // ── 输入：wheel（滚动 / 缩放，规则与旧实现同源）──────────────────
     /**
+     * 滚轮**缩放**方向的累积状态（跨事件，长生命周期）。
+     *
+     * 【为什么必须是宿主级状态】方向判定带死区，需要跨事件累积；而 `onWheel`
+     * 是逐事件回调，局部变量无法承载它。放在这里（而非模块级单例）是为了让
+     * 多个内核实例互不污染。
+     *
+     * 特殊说明：**只有缩放路径读它**——滚动路径不受死区影响（滚动本身不需要
+     * 方向判定，逐事件累加即可），否则会让滚动手感变钝。
+     */
+    const wheelZoomAccumulator: WheelZoomAccumulator = createWheelZoomAccumulator();
+
+    /**
      * 判断指针是否悬停在自绘滚动条上。
      *
      * 规则：竖直条占右侧 `SCROLLBAR_SIZE_PX` 宽，水平条占底部同样高；右下角
@@ -2111,7 +2138,21 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         }
 
         event.preventDefault();
-        const factor = event.deltaY < 0 ? WHEEL_ZOOM_IN_FACTOR : WHEEL_ZOOM_OUT_FACTOR;
+        // 缩放方向：**不能**用 `deltaY < 0 ? 1.1 : 0.9`。该写法把 `deltaY = 0`
+        // （纯横向手势 / 纵向噪声归零）判成缩小，且对 precision touchpad 的
+        // 变号小幅增量逐事件翻转方向 —— 两者都表现为"ctrl+滚轮剧烈抖动"（Windows
+        // 实测行高在同一位置 88 → 80 → 88 → 80 往复）。改走带死区的累积判定：
+        // 小幅对称噪声完全不触发，真实滚轮一格恰好一步。
+        const zoomStep = resolveWheelZoomStep({
+            accumulator: wheelZoomAccumulator,
+            // 用**归一化后**的增量：deltaMode=1/2 的浏览器（Firefox）原始值量纲不同，
+            // 直接与死区比较会让同一物理手势在不同浏览器下触发次数不同。
+            deltaX,
+            deltaY,
+        });
+        wheelZoomAccumulator.pending = zoomStep.accumulator.pending;
+        if (zoomStep.direction === 0) return;
+        const factor = zoomStep.direction < 0 ? WHEEL_ZOOM_IN_FACTOR : WHEEL_ZOOM_OUT_FACTOR;
 
         if (action === "vertical-zoom") {
             const baseRowHeight = Math.max(1, view.rowHeight);
@@ -2226,6 +2267,14 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                * Alt 旁路规则），不在这里重写一套。
                */
               selectionMods: ReturnType<typeof resolveClipSelectionModifiers>;
+              /**
+               * 按下时是否已执行过"收敛选区"（`shouldPrimeSelectionOnPress` 为真）。
+               *
+               * 与旧实现 `TrackLane` 的 `primedSelection` 同一语义：抬起且未位移时
+               * 只在其为 false 时才补一次选中，避免同一次点击**写两遍**选区
+               * （第二遍会再打一次后端 `selected_clip`，纯浪费）。
+               */
+              primedOnPress: boolean;
           }
         | {
               kind: "clip-fade";
@@ -2322,6 +2371,147 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
 
     /** 点击 / 拖拽的位移阈值（CSS px）。 */
     const DRAG_THRESHOLD_PX = 4;
+
+    // ── 拖拽边缘自动滚屏 ─────────────────────────────────────────────
+    /**
+     * 自动滚屏的持续帧循环句柄。
+     *
+     * 【为什么需要独立的 rAF，而不是挂在渲染循环上】渲染循环是**脏标记驱动**的
+     * （见 `renderKernel/renderLoop` 约束 1）：没有内容变更就不调度帧。而自动滚屏
+     * 恰恰要求"指针停在边缘不动时也持续推进视口"——指针不动 ⇒ 没有 pointermove
+     * ⇒ 没有任何标脏 ⇒ 渲染循环空闲。因此这里必须自己保持一个持续帧循环，
+     * 由"指针是否处于边缘带内"决定是否继续。
+     *
+     * 特殊说明：循环只在**拖拽手势期间**存在，手势结束立即取消（`stopDragAutoScroll`），
+     * 因此不会在空闲时占用 CPU。
+     */
+    let dragAutoScrollFrame: number | null = null;
+    /** 上一帧的时间戳（`performance.now()`），用于把速度换算为本帧步长。 */
+    let dragAutoScrollLastTs = 0;
+    /**
+     * 最近一次指针事件（自动滚屏后用**同一个事件**重放预览）。
+     *
+     * 【为什么存整个事件而不是只存 clientX】各 `apply*Preview` 还会读修饰键
+     * （`dragModifiersOf`：Ctrl/Shift/Alt/⌘ 决定 copy / slip / 免吸附等语义）。
+     * 只存坐标会让重放丢掉修饰键，表现为"滚屏那一刻修饰键忽然失效"。
+     */
+    let dragAutoScrollEvent: PointerEvent | null = null;
+
+    /**
+     * 停止拖拽边缘自动滚屏（幂等）。
+     *
+     * 手势结束 / 取消 / 卸载都必须调用：不停会让视口在手势结束后继续滑动。
+     */
+    function stopDragAutoScroll(): void {
+        if (dragAutoScrollFrame !== null) {
+            cancelAnimationFrame(dragAutoScrollFrame);
+            dragAutoScrollFrame = null;
+        }
+        dragAutoScrollLastTs = 0;
+        dragAutoScrollEvent = null;
+    }
+
+    /**
+     * 用最近一次指针事件重放一次手势预览。
+     *
+     * 【为什么需要】自动滚屏只改 `scrollLeft`，而各预览器都是从
+     * 「`scrollLeft` + 指针相对视口的偏移」算出**内容坐标**的。滚屏后不复算，
+     * clip 会停在旧内容坐标上——表现为「视口滚了、clip 没跟上」的脱节。
+     * 复用同一个事件即得到"指针在屏幕上没动、但内容坐标前移"的正确语义。
+     */
+    function replayGesturePreviewAtLastPointer(): void {
+        const event = dragAutoScrollEvent;
+        if (event === null) return;
+        dispatchMovePreview(event);
+    }
+
+    /**
+     * 按当前手势种类派发一次逐帧预览（穷尽性表驱动，见 `resolveMoveDispatch`）。
+     *
+     * @param event 指针事件（或自动滚屏时重放的最近事件）。
+     */
+    function dispatchMovePreview(event: PointerEvent): void {
+        switch (resolveMoveDispatch(gesture.kind)) {
+            case "seek":
+                interactions?.onSeek?.(secAt(event.clientX), false);
+                return;
+            case "box-select":
+                applyBoxSelect(event);
+                return;
+            case "drag":
+                applyDragPreview(event);
+                return;
+            case "trim":
+                applyTrimPreview(event);
+                return;
+            case "fade":
+                applyFadePreview(event);
+                return;
+            case "gain":
+                applyGainPreview(event);
+                return;
+            case "crossfade-grip":
+                applyCrossfadeGripPreview(event);
+                return;
+            case "snap-offset":
+                applySnapOffsetPreview(event);
+                return;
+            default:
+                return;
+        }
+    }
+
+    /**
+     * 推进一帧自动滚屏。
+     *
+     * 流程：手势已结束 → 停止 → 否则按指针位置与容器边界算本帧步长 →
+     * 有位移则 `scroll.setScrollLeft`（钳制在 ScrollKernel 内）→ 用同一指针位置
+     * 重放预览（让被拖对象跟上新内容坐标）→ 继续调度下一帧。
+     *
+     * 特殊说明：**只推进水平轴**。竖直方向的拖拽换轨由命中逻辑处理（拖到别的行），
+     * 与"想移动到更远的时间位置"不是同一意图；同时滚两轴会让跨轨拖拽变得难以控制。
+     */
+    function tickDragAutoScroll(): void {
+        dragAutoScrollFrame = null;
+        if (!shouldAutoScrollForGesture(gesture.kind)) {
+            stopDragAutoScroll();
+            return;
+        }
+        const now = performance.now();
+        const frameMs = dragAutoScrollLastTs > 0 ? now - dragAutoScrollLastTs : 1000 / 60;
+        dragAutoScrollLastTs = now;
+        const event = dragAutoScrollEvent;
+        if (event === null) {
+            stopDragAutoScroll();
+            return;
+        }
+        const rect = container.getBoundingClientRect();
+        const deltaPx = resolveDragEdgeScroll({
+            clientX: event.clientX,
+            leftPx: rect.left,
+            rightPx: rect.right,
+            frameMs,
+        });
+        if (Math.abs(deltaPx) > 0.01) {
+            const view = scroll.get();
+            scroll.setScrollLeft(view.scrollLeft + deltaPx);
+            replayGesturePreviewAtLastPointer();
+        }
+        dragAutoScrollFrame = requestAnimationFrame(tickDragAutoScroll);
+    }
+
+    /**
+     * 记录指针位置并确保自动滚屏循环在跑（拖拽手势期间每次 pointermove 调用）。
+     *
+     * @param event 指针事件。
+     */
+    function noteDragAutoScrollPointer(event: PointerEvent): void {
+        if (!shouldAutoScrollForGesture(gesture.kind)) return;
+        dragAutoScrollEvent = event;
+        if (dragAutoScrollFrame !== null) return;
+        dragAutoScrollLastTs = 0;
+        dragAutoScrollFrame = requestAnimationFrame(tickDragAutoScroll);
+    }
 
     /**
      * 音量旋钮的起手阈值（CSS px）。
@@ -2905,6 +3095,16 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 fadeSide === null
                     ? undefined
                     : data().clips.find((item) => item.id === hit.clip.id);
+            // 选择修饰键与"起手是否需要收敛选区"都在**建立手势之前**算好：
+            // 后者依赖前者，而 `gesture` 的赋值是整体替换（赋值前读 `gesture.selectionMods`
+            // 会读到上一个手势 / `none` 分支）。
+            const selectionMods = resolveSelectionMods(event);
+            const multiSelectedClipIds = data().multiSelectedClipIds;
+            const primedOnPress = shouldPrimeSelectionOnPress({
+                shouldPrimeSelection: selectionMods.shouldPrimeSelection,
+                clipInMultiSelection: multiSelectedClipIds.includes(hit.clip.id),
+                multiSelectionSize: multiSelectedClipIds.length,
+            });
             gesture = {
                 kind: "pending-select",
                 startClientX: event.clientX,
@@ -2937,8 +3137,27 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                         : 0,
                 inactiveTakeId: resolveInactiveTakeIdAtPress(hit, event),
                 pressSec: hit.sec,
-                selectionMods: resolveSelectionMods(event),
+                selectionMods,
+                primedOnPress,
             };
+            // ── 起手收敛选区（旧实现 `TrackLane.primeSelection` 的语义）──────
+            // 参与拖拽的集合来自 `multiSelectedClipIds`：只要被拖的 clip 与邻居
+            // **都在**集合里，整组就会一起移动。而集合会被**非选择动作**填成多个
+            // （多文件导入、分割、粘贴 / 复制拖拽、全选、Shift 范围选择），拖拽又
+            // 不经过"抬起才选中"，于是集合永不自愈——用户看到的是「拖一个 clip，
+            // 右边的 clip 也跟着动」，而多选描边只有 2px，根本看不出选中了多个。
+            //
+            // 旧实现在 `pointerdown` 就调用 `primeSelection` 收敛；内核重写时只
+            // 移植了"抬起且未位移才选中"，这一条被漏掉。这里补回：未按多选 / 范围
+            // 选择修饰键、且集合确实需要收敛时，**按下即收敛**。
+            //
+            // 时机必须在建立手势之后（`gesture.selectionMods` 是下面判定的来源），
+            // 且在拖拽升级之前——否则第一次 preview 已经按旧集合算过参与者了。
+            if (primedOnPress) {
+                // 复用既有选中入口（`ensureTrackLaneSelected` 会收敛集合，
+                // 并维护范围选择锚点与后端 selected_clip），不自行拼状态。
+                interactions?.onSelectClip?.(hit.clip.id, false, false, event.clientX);
+            }
         } else {
             gesture = { kind: "seek" };
             // 空白按下：连同**指针所在轨道**一起交给面板——「清空选中 + 按设置
@@ -3051,6 +3270,10 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
 
     /** 左键手势的移动处理（中键平移由 onPanPointerMove 单独负责）。 */
     function onGesturePointerMove(event: PointerEvent): void {
+        // 记录指针位置并确保边缘自动滚屏循环在跑（仅横向位置类手势，见
+        // `shouldAutoScrollForGesture`）。必须在分派**之前**调用：循环用的是
+        // 最近一次指针事件，晚记录会让本帧按旧位置判定边缘。
+        noteDragAutoScrollPointer(event);
         // 手势光标（与旧实现取值一致）：拖拽 grab→grabbing、trim/fade 用 resize、
         // 框选用 crosshair。
         if (gesture.kind === "clip-drag") {
@@ -3065,14 +3288,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         } else if (gesture.kind === "box-select") {
             container.style.cursor = "crosshair";
         }
-        if (gesture.kind === "seek") {
-            interactions?.onSeek?.(secAt(event.clientX), false);
-            return;
-        }
-        if (gesture.kind === "box-select") {
-            applyBoxSelect(event);
-            return;
-        }
+        // seek / 框选的分派**只保留在末尾的穷尽性表里**（`resolveMoveDispatch`）：
+        // 这里再判一次会让同一帧重复派发。
         if (gesture.kind === "pending-select") {
             const dx = event.clientX - gesture.startClientX;
             const dy = event.clientY - gesture.startClientY;
@@ -3161,25 +3378,14 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             applyDragPreview(event);
             return;
         }
-        if (gesture.kind === "clip-trim") {
-            applyTrimPreview(event);
-            return;
-        }
-        if (gesture.kind === "clip-fade") {
-            applyFadePreview(event);
-            return;
-        }
-        if (gesture.kind === "gain-drag") {
-            applyGainPreview(event);
-            return;
-        }
-        if (gesture.kind === "crossfade-grip") {
-            applyCrossfadeGripPreview(event);
-            return;
-        }
-        if (gesture.kind === "clip-drag") {
-            applyDragPreview(event);
-        }
+        // 已升级手势的逐帧分派走**穷尽性表**（`resolveMoveDispatch`）。
+        //
+        // 【为什么不再手写 if 链】旧实现是一串 `if (gesture.kind === …)`，没有任何
+        // 穷尽性保障：`snap-offset-drag` 就是漏掉的那一种（9 种里唯一缺失），
+        // 于是吸附偏移 ◣ 手柄的预览只在跨越 4px 阈值时发生一次、随即冻结
+        // —— 用户报告为「对齐标记无法正确的被移动」。抽表后由
+        // `moveDispatch.test.ts` 对全集做表驱动断言，漏登记会直接测试失败。
+        dispatchMovePreview(event);
     }
 
     /**
@@ -3337,7 +3543,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     /**
      * 计算并派发一次拖拽预览（拖拽期间每帧调用）。
      *
-     * 流程：内容坐标位移 → `resolveDragDelta`（时间位移 + 边界钳制）→
+     * 流程：内容坐标位移 → `resolveDragDelta`（时间位移，仅下界 0）→
      * `resolveTargetTrackIndex`（落点轨道）→ 与上次值比较去重 → 回调。
      *
      * 特殊说明：去重是必要的——调用方每次预览都写 Redux，而 Redux 变更会触发
@@ -3400,8 +3606,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             deltaContentXPx: contentX - gesture.startContentX,
             pxPerSec: view.pxPerSec,
             startSec: gesture.originStartSec,
-            lengthSec: gesture.lengthSec,
-            projectSec: Math.max(0, d.projectSec),
+            // 不传 projectSec / lengthSec：右移**不再**被工程末端钳制（该上界是
+            // 自指边界，会让自动扩展永不触发，表现为"向右拖有隐形边界"）。
+            // 工程时长增长交给面板的 moveClipStart 与后端 ensure_project_end_sec。
         });
         const trackIndex = resolveTargetTrackIndex(contentY, view.rowHeight, d.tracks.length);
         // 拖到**最后一条轨道之下** → 哨兵（`NEW_TRACK_SENTINEL`）：面板据此建新轨并
@@ -3589,6 +3796,11 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                         gesture.region === "fade-out-corner" ? "out" : "in",
                     );
                 }
+            } else if (gesture.primedOnPress) {
+                // 按下时已经收敛过选区（见 `primedOnPress` 与
+                // `shouldPrimeSelectionOnPress`）：同一次点击不再写第二遍。
+                // 与旧实现 `TrackLane` 的 `shouldPrimeSelection && !primedSelection`
+                // 守卫逐字同源。
             } else {
                 // 修饰键取自**按下时**的快照（`selectionMods`）。
                 //
@@ -3621,6 +3833,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 // 已释放 / 未捕获：忽略。
             }
             gesture = { kind: "none" };
+            // 手势结束立即停掉边缘自动滚屏：不停会让视口在松手后继续滑动，
+            // 且循环每帧都会读到已失效的手势状态。
+            stopDragAutoScroll();
             // 竖直换轨锁定的高亮属于**手势期间**的反馈：手势一结束就必须消失，
             // 否则会有一条蓝色行底/徽标永久留在画面上（旧实现靠 state 归零清除）。
             if (lastVerticalLockTrackId !== null) {
@@ -4322,6 +4537,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         dispose() {
             unsubscribeScroll();
             loop.stop();
+            // 卸载时停掉自动滚屏循环：rAF 回调持有容器与 scroll 内核的引用，
+            // 不停会在组件卸载后继续滚动并阻止相关对象被回收。
+            stopDragAutoScroll();
             resizeObserver.disconnect();
             container.removeEventListener("wheel", onWheel);
             container.removeEventListener("keydown", onKeyDown);

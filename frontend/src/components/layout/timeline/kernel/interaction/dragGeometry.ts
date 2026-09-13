@@ -18,7 +18,12 @@
  * 【设计约束】
  * 1. 钳制在**写入时一次算清**（与 `ScrollKernel` 同一约定）：调用方拿到的
  *    `startSec` 恒为合法值，不存在「先写越界值、读回被修正」的中间态。
- * 2. 右边界按「工程长度 − clip 长度」钳制：clip 不允许越出工程末端。
+ * 2. 移动（`resolveDragDelta`）**只受下界 0 约束，没有上界**：右移应能越过当前
+ *    工程末端，由 `moveClipStart` 的自动扩展与后端 `ensure_project_end_sec` 增长
+ *    工程时长。旧的「工程长度 − clip 长度」上界是自指边界（被拖 clip 自己定义上界），
+ *    会让自动扩展永不触发，表现为"向右拖有隐形边界"——见该函数注释。
+ *    trim（`resolveTrimEdge`）仍受 `projectSec` 约束：它改的是**长度**，
+ *    没有"自动扩展工程"的语义承接。
  * 3. `pxPerSec` 非法（0 / NaN / 负数）时退化为「不产生位移」而不是产生 `NaN`
  *    ——拖拽热路径上一旦出现 `NaN`，几何与命中会同时失效且难以定位。
  */
@@ -31,25 +36,37 @@ export interface DragDeltaArgs {
     readonly pxPerSec: number;
     /** clip 按下时的起始时间（秒）。 */
     readonly startSec: number;
-    /** clip 长度（秒），用于右边界钳制。 */
-    readonly lengthSec: number;
-    /** 工程总时长（秒）。 */
-    readonly projectSec: number;
 }
 
 /** 拖拽位移换算结果。 */
 export interface DragDeltaResult {
-    /** 钳制后的新起始时间（秒，恒 >= 0）。 */
+    /** 新的起始时间（秒，恒 >= 0；上界不设限，见函数注释）。 */
     readonly startSec: number;
-    /** 实际生效的时间位移（秒，已含钳制）。 */
+    /** 实际生效的时间位移（秒）。 */
     readonly deltaSec: number;
 }
 
 /**
  * 把内容坐标位移换算为新的起始时间。
  *
- * 流程：位移 → 时间位移（除以 `pxPerSec`）→ 加上原起始时间 → 钳制到
- * `[0, max(0, projectSec - lengthSec)]` → 回算实际生效的位移。
+ * 流程：位移 → 时间位移（除以 `pxPerSec`）→ 加上原起始时间 → **只受下界 0 约束**。
+ *
+ * 【为什么没有上界（去掉 `projectSec − lengthSec` 的原因）】
+ * 旧实现把结果钳到 `[0, projectSec − lengthSec]`，理由是「clip 不允许越出工程末端」。
+ * 但喂进来的 `projectSec` 并不是后端时长真值，而是
+ * `resolveScrollableProjectSec()` = `max(后端时长, 最右 clip 末端)`。当被拖的 clip
+ * **本身就是最右那个**时，上界由它自己的末端推出 —— **自指边界**：它永远无法越过，
+ * 且因为本函数保证 `startSec + lengthSec <= projectSec`，`moveClipStart` 里那段
+ * 「拖动超出边界时自动扩展工程时长」与后端的 `ensure_project_end_sec` **都变成死代码**，
+ * 边界永不增长。现场表现即「使劲向右拖会在某个位置被卡住，像有隐形边界」。
+ *
+ * 旧实现（重构前的 `useClipDrag`）**完全没有上界**（只做 `Math.max(0, …)`），
+ * 因此这是内核迁移引入的回归。去掉上界后，工程时长由既有的自动扩展路径负责增长
+ * —— 那正是它们被写出来的目的。
+ *
+ * 特殊说明：入参**刻意不含** `projectSec` / `lengthSec`。它们曾是右边界钳制的来源，
+ * 现在既无用途，留在签名里只会诱导后来者把上界加回来（缺陷复发）。去掉上界后
+ * 工程时长的增长由 `moveClipStart` 的自动扩展与 `ensure_project_end_sec` 负责。
  *
  * @param args 换算参数。
  * @returns 新起始时间与实际生效位移。
@@ -57,11 +74,8 @@ export interface DragDeltaResult {
 export function resolveDragDelta(args: DragDeltaArgs): DragDeltaResult {
     const pxPerSec = Number.isFinite(args.pxPerSec) && args.pxPerSec > 0 ? args.pxPerSec : 0;
     const rawDelta = pxPerSec > 0 ? args.deltaContentXPx / pxPerSec : 0;
-    const lengthSec = Number.isFinite(args.lengthSec) ? Math.max(0, args.lengthSec) : 0;
-    const projectSec = Number.isFinite(args.projectSec) ? Math.max(0, args.projectSec) : 0;
-    const maxStart = Math.max(0, projectSec - lengthSec);
     const baseStart = Number.isFinite(args.startSec) ? args.startSec : 0;
-    const startSec = Math.min(maxStart, Math.max(0, baseStart + rawDelta));
+    const startSec = Math.max(0, baseStart + rawDelta);
     return { startSec, deltaSec: startSec - baseStart };
 }
 

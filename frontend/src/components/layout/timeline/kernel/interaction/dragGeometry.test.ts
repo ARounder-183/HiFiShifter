@@ -14,8 +14,6 @@ describe("resolveDragDelta", () => {
             deltaContentXPx: 150,
             pxPerSec: 150,
             startSec: 10,
-            lengthSec: 4,
-            projectSec: 60,
         });
         expect(out.deltaSec).toBeCloseTo(1, 6);
         expect(out.startSec).toBeCloseTo(11, 6);
@@ -26,22 +24,39 @@ describe("resolveDragDelta", () => {
             deltaContentXPx: -3000,
             pxPerSec: 150,
             startSec: 1,
-            lengthSec: 4,
-            projectSec: 60,
         });
         expect(out.startSec).toBe(0);
         expect(out.deltaSec).toBe(-1);
     });
 
-    it("右移越界时钳制到工程末端（clip 不越出工程长度）", () => {
+    it("【回归】右移不受工程末端钳制（拖到工程末尾之外不再卡住）", () => {
+        // 缺陷形态：旧实现 `maxStart = projectSec - lengthSec` 把右移钳到工程末端。
+        // 而喂进来的 `projectSec` 是 `resolveScrollableProjectSec()`（= max(后端时长,
+        // 最右 clip 末端)）——**被拖的 clip 自己就是最右那个**时，这个上界由它自己的
+        // 末端推出，形成自指：永远无法越过，且让 `moveClipStart` 的
+        // `if (clipEnd > projectSec) projectSec = ceil(...)` 自动扩展分支永不可达。
+        // 现场表现即「使劲向右拖会在某个位置被卡住，像有隐形边界」。
         const out = resolveDragDelta({
             deltaContentXPx: 100000,
             pxPerSec: 150,
             startSec: 10,
-            lengthSec: 4,
-            projectSec: 60,
         });
-        expect(out.startSec).toBe(56);
+        expect(out.startSec).toBeGreaterThan(10);
+        expect(out.deltaSec).toBeGreaterThan(0);
+        // 允许越过工程末端，自动扩展才有机会触发。
+        expect(out.startSec + 4).toBeGreaterThan(60);
+    });
+
+    it("【回归】右移单调：位移增大则起点严格增大（无饱和平台）", () => {
+        const args = {
+            pxPerSec: 150,
+            startSec: 28,
+        } as const;
+        const a = resolveDragDelta({ ...args, deltaContentXPx: 300 });
+        const b = resolveDragDelta({ ...args, deltaContentXPx: 600 });
+        const c = resolveDragDelta({ ...args, deltaContentXPx: 3000 });
+        expect(b.startSec).toBeGreaterThan(a.startSec);
+        expect(c.startSec).toBeGreaterThan(b.startSec);
     });
 
     it("pxPerSec 非法时不产生 NaN（退化为不位移）", () => {
@@ -49,23 +64,19 @@ describe("resolveDragDelta", () => {
             deltaContentXPx: 100,
             pxPerSec: 0,
             startSec: 5,
-            lengthSec: 2,
-            projectSec: 30,
         });
         expect(Number.isFinite(out.startSec)).toBe(true);
         expect(out.startSec).toBe(5);
         expect(out.deltaSec).toBe(0);
     });
 
-    it("clip 比工程还长时右边界退化为 0", () => {
+    it("clip 比工程还长时仍可右移（上界已移除，只受下界约束）", () => {
         const out = resolveDragDelta({
             deltaContentXPx: 500,
             pxPerSec: 100,
             startSec: 0,
-            lengthSec: 120,
-            projectSec: 60,
         });
-        expect(out.startSec).toBe(0);
+        expect(out.startSec).toBeCloseTo(5, 6);
     });
 });
 
