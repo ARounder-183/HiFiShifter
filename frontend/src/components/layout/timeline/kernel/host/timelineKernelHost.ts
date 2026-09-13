@@ -17,11 +17,18 @@
  *   同样采用「内容坐标 + 窗口平移」策略，滚动在窗口余量内只移动画布、不重绘。
  *
  * 【与其他模块的关系】
- * - 上游：React 外壳（`TimelineKernelView`）提供 DOM 节点与数据镜像。
+ * - 上游：React 外壳（`TimelineKernelView`）提供 DOM 节点与数据镜像；播放头位置
+ *   另经 `args.playheadSec` getter 直连面板的视觉插值 ref（镜像滞后一次提交，
+ *   见 `readPlayheadSec`）。
  * - 复用：`runtime/timelineAxis`（坐标投影）、`runtime/buildTimelineTicks`（刻度）、
  *   `runtime/timelineCanvasModel`（clip 几何）、`runtime/timelineCanvasStyle`（样式 / 字体）、
  *   `runtime/timelineCanvasRenderer`（细节层绘制）、`runtime/timelineScrollRange`（缩放解析）。
  * - 独立性：纯 TS（无 React）；GL 资源、事件监听与细节画布在 `dispose` 中全部释放。
+ *
+ * 【两条标脏通道（勿混用）】
+ * - `invalidateScene()`：内容 / 缩放 / 主题变化 → 下一帧重建**全部** GPU 几何；
+ * - `invalidatePlayhead()`：播放头逐帧移动（60fps）→ **仅重绘**，不碰几何。
+ *   播放头若误用前者，等于每帧重传顶点缓冲，会抵消内核存在的意义。
  *
  * 【坐标系约定（评审检查项）】
  * - 块面实例与细节层绘制**都用内容坐标**；前者靠 `u_viewOrigin` uniform 平移，
@@ -104,6 +111,7 @@ import {
 import { normalizeWheelDelta } from "../input/normalizeWheel";
 import { createRenderLoop } from "../../../renderKernel/renderLoop";
 import { createClipInstanceBuilder } from "../scene/clipInstances";
+import { shouldRepaintForPlayhead } from "../scene/playheadInvalidation";
 import { buildGridInstances } from "../scene/gridInstances";
 import type { FlatInstance, Rgba } from "../../../renderKernel/instanceTypes";
 import { createScrollKernel, type TimelineViewportState } from "../../../renderKernel/scrollKernel";
@@ -782,6 +790,21 @@ export interface TimelineKernelInteractions {
 export interface TimelineKernelHost {
     /** 标记场景需要重建（内容 / 缩放 / 主题变化后调用）。 */
     invalidateScene(): void;
+    /**
+     * 请求一次**仅重绘**（不重建几何）：播放头每帧移动时调用。
+     *
+     * 【为什么必须与 `invalidateScene` 分开】`invalidateScene` 会置 `sceneDirty`，
+     * 下一帧 `ensureScene` 便重建**全部** GPU 几何并重新上传顶点缓冲。播放头在播放
+     * 中是 60fps 的逐帧动画，若走那条路等于每帧重建整个场景——正是内核（"块面几何
+     * 常驻 GPU，滚动 / 播放帧只更新 uniform 与 DOM"）要消除的成本，会直接把播放
+     * 拖垮。本入口只做一次 `loop.invalidate()`：绘制帧内 `viewChanged / rebuilt`
+     * 均为假时，GL 层不提交，代价退化为几次 `style` 写入。
+     *
+     * 【为什么外部必须主动调用】渲染循环是纯脏标记驱动的（见 `renderKernel/renderLoop`：
+     * `start()` 不绘制、无常驻 rAF），而播放头位置经数据镜像流入内核，**镜像变化
+     * 不会自动标脏**。不调用它，内核自绘的轨道区播放头就永不重绘（缺陷 #2 的根因）。
+     */
+    invalidatePlayhead(): void;
     /**
      * 外部请求纵向滚动（左侧轨道头滚动时调用）。
      *
@@ -1731,6 +1754,33 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     }
 
     /**
+     * 读取本帧的播放头位置。
+     *
+     * 流程：参数里有 `playheadSec` getter 就调用它；取到有限值即采用，否则回退
+     * 数据镜像的 `playheadSec`。
+     *
+     * 【为什么要走 getter 而不是数据镜像】`data().playheadSec` 由面板在
+     * **render 期**写入镜像对象，而视觉插值 ref 是在 `useVisualPlayhead` 的
+     * effect 里更新的——镜像因此**滞后一次提交**。用滞后值定位播放头会让它
+     * 停在上一次的位置（实测：连续两次 seek，镜像恰好差一次）。
+     * getter 直连面板的 ref，读到的是当帧真值。
+     *
+     * 特殊说明：getter 返回非有限值（NaN / Infinity）时也回退镜像——播放头位置会被
+     * 直接乘进 `style.transform`，NaN 会让整层失效且不报错。
+     * 缺省回退镜像值：宿主在无 getter 的场景（单测 / 未接线）仍要能工作。
+     *
+     * @returns 当前播放头位置（工程秒）。
+     */
+    function readPlayheadSec(): number {
+        const live = args.playheadSec;
+        if (live !== undefined) {
+            const value = live();
+            if (Number.isFinite(value)) return value;
+        }
+        return data().playheadSec;
+    }
+
+    /**
      * 把内核视口同步到外部 DOM。
      *
      * 流程：
@@ -1813,7 +1863,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         //   translateX(-scrollLeft) 自动跟随滚动）；
         // - 轨道区播放头位于内核视口容器内 → 用视口坐标 `translateX`
         //   （滚动时必须重算，否则会粘在屏幕上不跟内容走）。
-        const playheadContentX = data().playheadSec * view.pxPerSec;
+        const playheadContentX = readPlayheadSec() * view.pxPerSec;
         const playheadViewportX = playheadContentX - view.scrollLeft;
         if (
             shouldWrite(playheadContentX, lastPlayheadContentX) ||
@@ -1897,10 +1947,12 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             }
         }
 
-        const playheadSec = data().playheadSec;
-        const playheadMoved = playheadSec !== lastDrawnPlayheadSec;
+        const playheadSec = readPlayheadSec();
+        const playheadMoved = shouldRepaintForPlayhead(playheadSec, lastDrawnPlayheadSec);
         lastDrawnPlayheadSec = playheadSec;
         // 播放中播放头逐帧移动：继续自驱动；停止后位置不再变化，循环自然收敛。
+        // 判定必须是「有意义的位移」而不是严格不等：位置来自 performance.now() 外推，
+        // 浮点抖动会让严格不等在空闲时也判定为"变了"，把零成本空闲变成持续刷帧。
         if (playheadMoved) loop.invalidate();
 
         if (profiler !== undefined) {
@@ -4110,6 +4162,13 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     return {
         invalidateScene() {
             sceneDirty = true;
+            loop.invalidate();
+        },
+
+        invalidatePlayhead() {
+            // 刻意不置 sceneDirty：见接口处的说明（几何重建是 60fps 不可承受的成本）。
+            // 卸载后无需自查：`dispose` 会 `loop.stop()`，其后的 `invalidate()`
+            // 因 `running === false` 不再调度（见 renderLoop 的设计约束 3）。
             loop.invalidate();
         },
 

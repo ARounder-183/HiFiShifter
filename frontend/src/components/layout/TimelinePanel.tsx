@@ -9,6 +9,11 @@
  *
  * 此文件只保留：JSX 渲染 + 胶水 + 拖拽 hooks 桥接
  *
+ * 【播放头桥接】`TimelineTransportBridge` 逐帧写标尺播放头（React 声明式元素），
+ * 并调用 `kernelHostRef.invalidatePlayhead()` 请求内核重绘**轨道区**播放头——
+ * 后者只在宿主 `draw()` 内被写，而内核渲染循环是纯脏标记驱动的，镜像变化不会
+ * 自动标脏（不请求就永不重绘）。
+ *
  * 【渲染路径】轨道区**恒由** `TimelineKernelView`（WebGL2 渲染内核）承载。
  * 旧实现（原生滚动 + Canvas2D 的 `TimelineScrollArea` / `TimelineSurface` /
  * `TrackLane` / `ClipItem` 等）已随"唯一路径"改造删除，此处**没有运行期二选一、
@@ -218,7 +223,6 @@ import { ClipFormantToolWindow } from "./timeline/clip/ClipFormantToolWindow";
 
 const TimelineTransportBridge = React.memo(function TimelineTransportBridge(props: {
     pxPerSecRef: React.MutableRefObject<number>;
-    playheadRef: React.MutableRefObject<HTMLDivElement | null>;
     rulerPlayheadLineRef: React.MutableRefObject<HTMLDivElement | null>;
     rulerPlayheadHeadRef: React.MutableRefObject<HTMLDivElement | null>;
     /**
@@ -234,10 +238,11 @@ const TimelineTransportBridge = React.memo(function TimelineTransportBridge(prop
     syncScrollLeft: (next: number) => void;
     autoScrollEnabled: boolean;
     projectSec: number;
+    /** 请求时间轴内核重绘播放头（见 kernelHost.invalidatePlayhead 的说明）。 */
+    requestPlayheadRepaint: () => void;
 }) {
     const {
         pxPerSecRef,
-        playheadRef,
         rulerPlayheadLineRef,
         rulerPlayheadHeadRef,
         viewport,
@@ -245,6 +250,7 @@ const TimelineTransportBridge = React.memo(function TimelineTransportBridge(prop
         syncScrollLeft,
         autoScrollEnabled,
         projectSec,
+        requestPlayheadRepaint,
     } = props;
     const transport = useAppSelector(
         (state) => ({
@@ -296,28 +302,33 @@ const TimelineTransportBridge = React.memo(function TimelineTransportBridge(prop
                     }
                 }
 
-                // 播放头定位（在自动滚动之后，用最新 scrollLeft + 视觉插值）。
+                // 标尺播放头定位（在自动滚动之后，用最新的视觉插值位置）。
                 // 写入前吸附到设备像素边界（readDevicePixelRatio 每帧现读，
                 // 浏览器缩放/跨屏后下一帧自愈）：分数 DPR 下不吸附的落点相位
                 // 随播放连续变化，1/2 物理像素交替 —— 即"播放时粗细不一"。
-                // 与标尺播放头（TimeRulerPlayhead）同一吸附函数，命令式与声明式
-                // 两条路径逐设备像素一致（旧 TimelineSurface 侧已随旧渲染路径删除）。
+                // 轨道区播放头不在这里写：它由内核在 draw() 内自绘（见下方重绘请求）。
                 const dpr = readDevicePixelRatio();
-                const screenLeft = playheadLeftPx - viewport.getScrollLeft();
-                if (playheadRef.current) {
-                    playheadRef.current.style.left = `${snapToDevicePx(screenLeft, dpr)}px`;
-                }
                 if (rulerPlayheadLineRef.current) {
                     rulerPlayheadLineRef.current.style.left = `${snapToDevicePx(playheadLeftPx, dpr)}px`;
                 }
                 if (rulerPlayheadHeadRef.current) {
                     rulerPlayheadHeadRef.current.style.left = `${snapToDevicePx(playheadLeftPx, dpr)}px`;
                 }
+
+                // 请求内核重绘轨道区播放头。
+                //
+                // 【为什么必须显式请求】内核的渲染循环是纯脏标记驱动的
+                // （`renderKernel/renderLoop`：`start()` 不绘制、无常驻 rAF），而
+                // 轨道区播放头元素**只在 `draw()` 内被写**。播放头位置经数据镜像
+                // 流入内核，镜像变化本身不会标脏——不请求就永远不重绘：点标尺
+                // seek 后标尺播放头（React 声明式）动了，网格上的播放头却冻结在
+                // 旧位置（缺陷 #2 的根因）。自动滚屏开着时之所以看不到，是因为它
+                // 每帧写 scrollLeft 触发滚动订阅顺带标脏；而它默认关闭。
+                requestPlayheadRepaint();
             },
             [
                 autoScrollEnabled,
                 pxPerSecRef,
-                playheadRef,
                 rulerPlayheadHeadRef,
                 rulerPlayheadLineRef,
                 viewport,
@@ -325,6 +336,7 @@ const TimelineTransportBridge = React.memo(function TimelineTransportBridge(prop
                 transport.isPlaying,
                 projectSec,
                 visualPlayheadRef,
+                requestPlayheadRepaint,
             ],
         ),
     });
@@ -522,6 +534,18 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     // 滞后值锚定，否则播放头会跳变 δ·Δpx（δ = 轮询间隔内的插值领先量）。
     const visualPlayheadSecRef = React.useRef(0);
     const getVisualPlayheadSec = React.useCallback(() => visualPlayheadSecRef.current, []);
+    /**
+     * 请求时间轴内核重绘播放头。
+     *
+     * 【为什么走 hostRef 而不是 React state】播放头每帧都可能移动，走 React 会
+     * 把 60fps 的更新灌进渲染；这里只做一次命令式标脏。
+     *
+     * 特殊说明：**不是** `invalidateScene()`——那个会置 `sceneDirty` 并在下一帧
+     * 重建全部 GPU 几何，播放中每帧重建等于自毁性能（见宿主接口说明）。
+     */
+    const handleRequestPlayheadRepaint = React.useCallback(() => {
+        kernelHostRef.current?.invalidatePlayhead();
+    }, []);
     // 面板卸载时清空吸附竖线高亮（拖拽手势异常中断的兜底）。
     React.useEffect(() => {
         return () => {
@@ -547,13 +571,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         rulerContentRef,
         rulerPlayheadLineRef,
         rulerPlayheadHeadRef,
-        playheadRef,
         dropPreviewRef,
         lastClickedClipIdRef,
         pxPerSecRef,
         viewportWidthRef,
         rowHeightRef,
-        scrollLeft,
         pxPerSec,
         setPxPerSec,
         viewportWidth,
@@ -4004,12 +4026,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 host.setScrollTop(scrollTop);
                 return;
             }
-            const timelineScroller = scrollRef.current;
-            if (!timelineScroller) return;
-            if (Math.abs(timelineScroller.scrollTop - scrollTop) < 0.5) return;
-            timelineScroller.scrollTop = scrollTop;
+            // 宿主不可用（挂载前）时不回灌：旧的原生 scroller 分支已删除——
+            // `scrollRef` 无 JSX 挂载点，`scrollRef.current` 恒为 null。
         },
-        [scrollRef],
+        [],
     );
 
     const activeGroupIds = useMemo(() => {
@@ -4045,23 +4065,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     // JSX 渲染
     // ═════════════════════════════════════════════════════════
 
-    // scrollLeft 现在按 REACT_SCROLL_STEP_PX 量化提交，React 渲染期用
-    // `timelineAxis` 算出的播放头 left 最多滞后一个步长；而播放头的真实位置
-    // 由 useVisualPlayhead / syncScrollLeft 用**实时** scrollLeft 命令式写入。
-    // 这里在每次提交后立即用视觉插值值纠正一次，避免 React 的滞后写入把播放头
-    // 推回旧位置。仅在提交时运行（滚动中约每 256px 一次），成本可忽略。
-    // ★ 必须读视觉插值 ref 而非 s.playheadSec：后者是 33Hz 轮询的滞后值，
-    //   缩放提交帧用它写播放头，下一帧 rAF 又写视觉值——表现为缩放瞬间跳变。
-    React.useLayoutEffect(() => {
-        const scroller = scrollRef.current;
-        if (!scroller || !playheadRef.current) return;
-        const playheadLeftPx = visualPlayheadSecRef.current * pxPerSec;
-        // 与播放头其余写入点同一设备像素吸附（见 TimelineTransportBridge onFrame）。
-        playheadRef.current.style.left = `${snapToDevicePx(
-            playheadLeftPx - scroller.scrollLeft,
-            readDevicePixelRatio(),
-        )}px`;
-    }, [pxPerSec, s.playheadSec, scrollLeft, playheadRef, scrollRef, visualPlayheadSecRef]);
+    // scrollLeft 按 REACT_SCROLL_STEP_PX 量化提交，React 渲染期用 `timelineAxis`
+    // 算出的位置最多滞后一个步长。轨道区播放头由内核自绘，其重绘请求由
+    // TimelineTransportBridge 的 onFrame 逐帧发起（那里读的是视觉插值真值）；
+    // 这里不需要再纠正任何 DOM。
 
     /**
      * 标尺节点（内核模式与旧模式共用同一实例）。
@@ -4115,11 +4122,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 if (e.button !== 0) return;
                 // 水平滚动位置取自内核视口。取值的「实时性」是硬要求——拖拽期间滚动
                 // 位置可能被自动滚动改变，因此每次换算都重新读，不缓存。
-                // 读滚动真值：内核宿主是唯一来源。`scrollRef` 分支保留仅为兼容历史
-                // 路径（它已无 JSX 挂载点，恒为 null）。
+                // 读滚动真值：内核宿主是唯一来源（旧的原生 scroller 分支已删除：
+                // `scrollRef` 无 JSX 挂载点，恒为 null）。
                 const readScrollLeft = (): number | null => {
-                    const scroller = scrollRef.current;
-                    if (scroller != null) return scroller.scrollLeft;
                     const host = kernelHostRef.current;
                     return host != null ? host.getViewport().scrollLeft : null;
                 };
@@ -5095,7 +5100,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
 
                     <TimelineTransportBridge
                         pxPerSecRef={pxPerSecRef}
-                        playheadRef={playheadRef}
                         rulerPlayheadLineRef={rulerPlayheadLineRef}
                         rulerPlayheadHeadRef={rulerPlayheadHeadRef}
                         viewport={viewportAccess}
@@ -5103,6 +5107,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         syncScrollLeft={syncScrollLeft}
                         autoScrollEnabled={s.autoScrollEnabled}
                         projectSec={dynamicProjectSec}
+                        requestPlayheadRepaint={handleRequestPlayheadRepaint}
                     />
 
                     {/* 右键播放速率角标 → 高级编辑（倍率 + BPM 换算，批量应用） */}

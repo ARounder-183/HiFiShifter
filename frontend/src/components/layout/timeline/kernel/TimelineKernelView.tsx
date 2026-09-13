@@ -5,10 +5,14 @@
  * 承载新内核的 React 外壳：提供容器 / 画布 / 自绘滚动条 DOM，把 session 数据与
  * 键位绑定以「镜像 ref」形式喂给命令式宿主（`createTimelineKernelHost`），并把
  * 标尺 / 轨道头 / 播放头等**保留为 DOM** 的外部元素交给宿主在 rAF 内同步。
+ * 播放头位置另以实时 getter（`getPlayheadSec`）注入宿主：镜像滞后一次提交，
+ * 只有 getter 读得到当帧真值（见 `readPlayheadSec`）。
  *
  * 【作用】
  * React 只做三件事：提供 DOM、提供低频数据、接收低频回调（行高 / 缩放 / 场景标脏）；
  * 高频滚动、渲染、DOM 同步全部由宿主在 rAF 内完成，不经 React。
+ * 宿主句柄经 `hostRef` 外泄给面板，供播放头桥接每帧请求重绘
+ * （`invalidatePlayhead`：镜像变化不会自动标脏）。
  *
  * 【与其他模块的关系】
  * - 上游：`TimelinePanel` 在开关开启时渲染本组件（替换旧轨道区）。
@@ -567,6 +571,14 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                 hScrollbarTrack: hTrackRef.current ?? undefined,
                 vScrollbarTrack: vTrackRef.current ?? undefined,
                 data: () => dataRef.current,
+                // 播放头实时读取：宿主构造时只取一次实参，因此这里必须传**稳定**的
+                // 包装函数，内部经 callbacksRef 转发到最新的 getPlayheadSec。
+                //
+                // 【为什么不能只靠 data().playheadSec】镜像由本组件在 render 期写入，
+                // 而视觉插值 ref 是在 `useVisualPlayhead` 的 effect 里更新的——镜像
+                // 因此滞后一次提交，用它定位播放头会停在上一次的位置（实测连续两次
+                // seek，镜像恰好差一次）。getter 直连面板 ref，读到当帧真值。
+                playheadSec: () => callbacksRef.current.getPlayheadSec(),
                 sync: {
                     rulerContent: rulerContentRef?.current ?? null,
                     trackListScroller: trackListScrollerRef?.current ?? null,

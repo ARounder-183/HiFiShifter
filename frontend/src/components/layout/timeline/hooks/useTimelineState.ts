@@ -152,7 +152,6 @@ export interface TimelineStateResult {
     rulerContentRef: React.MutableRefObject<HTMLDivElement | null>;
     rulerPlayheadLineRef: React.MutableRefObject<HTMLDivElement | null>;
     rulerPlayheadHeadRef: React.MutableRefObject<HTMLDivElement | null>;
-    playheadRef: React.MutableRefObject<HTMLDivElement | null>;
     dropPreviewRef: React.MutableRefObject<HTMLDivElement | null>;
     lastClickedClipIdRef: React.MutableRefObject<string | null>;
     scrollLeftRef: React.MutableRefObject<number>;
@@ -392,7 +391,6 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
         pxPerSec: number;
     } | null>(null);
     const lastClickedClipIdRef = useRef<string | null>(null);
-    const playheadRef = useRef<HTMLDivElement | null>(null);
     const dropPreviewRef = useRef<HTMLDivElement | null>(null);
     const pendingDropDurationPathRef = useRef<string | null>(null);
 
@@ -509,13 +507,11 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
         }
         const playheadLeftPx =
             (Number(sessionRef.current.playheadSec ?? 0) || 0) * pxPerSecRef.current;
-        // 播放头写入统一设备像素吸附（readDevicePixelRatio 每次现读）：分数
+        // 标尺播放头写入统一设备像素吸附（readDevicePixelRatio 每次现读）：分数
         // DPR 下不吸附的落点相位随滚动/播放变化，线宽 1↔2 物理像素交替。
         // 与 React 渲染侧（标尺播放头 TimeRulerPlayhead）同一吸附函数。
+        // 轨道区播放头不在这里写：它由内核自绘，滚动经 scroll 订阅自行标脏。
         const dpr = readDevicePixelRatio();
-        if (playheadRef.current) {
-            playheadRef.current.style.left = `${snapToDevicePx(playheadLeftPx - next, dpr)}px`;
-        }
         if (rulerPlayheadLineRef.current) {
             rulerPlayheadLineRef.current.style.left = `${snapToDevicePx(playheadLeftPx, dpr)}px`;
         }
@@ -1134,16 +1130,10 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
                 void dispatch(seekPlayhead(beat));
                 clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
             } else {
-                // 更新 Redux state 使三角形头部（TimeRulerPlayhead）与竖线同步
+                // 更新 Redux state 使三角形头部（TimeRulerPlayhead）与竖线同步。
+                // 轨道区播放头（内核自绘）无需在此直写 DOM：位置变化经数据镜像 +
+                // 视觉插值 ref 流入内核，由桥接的每帧重绘请求驱动。
                 dispatch(setplayheadSec(beat));
-                // 同时直接操作 DOM 确保竖线无延迟跟随（设备像素吸附与其余
-                // 播放头写入点一致，避免拖拽中相位漂移造成粗细变化）。
-                if (playheadRef.current) {
-                    playheadRef.current.style.left = `${snapToDevicePx(
-                        beat * pxPerSecRef.current - scrollLeftRef.current,
-                        readDevicePixelRatio(),
-                    )}px`;
-                }
             }
             return beat;
         },
@@ -1345,7 +1335,6 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
         rulerContentRef,
         rulerPlayheadLineRef,
         rulerPlayheadHeadRef,
-        playheadRef,
         dropPreviewRef,
 
         lastClickedClipIdRef,

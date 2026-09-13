@@ -510,25 +510,40 @@ Expected: 无输出。若报 `createNewTrackForKernelDrop` 参数不匹配，按
 cd frontend && VW=1920 VH=1200 node scripts/dev-shot.mjs "http://127.0.0.1:5174/?mock=1" /tmp/t2-after.png 6000 '[
 {"type":"eval","js":"window.__c=()=>{const a=(window.__mockCalls||[]).slice();window.__mockCalls.length=0;return a.filter(x=>/add_track|duplicate/.test(x));};return \"ok\";"},
 {"type":"keyDown","key":"Meta"},
-{"type":"drag","from":[700,150],"to":[700,255],"steps":14},
+{"type":"drag","from":[700,150],"to":[700,700],"steps":18},
 {"type":"keyUp","key":"Meta"},
-{"type":"wait","ms":1200},
+{"type":"wait","ms":1500},
 {"type":"eval","js":"return {A_copy_to_NEW_track: window.__c()};"},
 {"type":"keyDown","key":"Meta"},
 {"type":"drag","from":[700,150],"to":[700,230],"steps":14},
 {"type":"keyUp","key":"Meta"},
-{"type":"wait","ms":1200},
+{"type":"wait","ms":1500},
 {"type":"eval","js":"return {B_copy_to_EXISTING_track2: window.__c()};"},
-{"type":"eval","js":"const stray=[...document.querySelectorAll(\"[data-hs-timeline-kernel] *\")].filter(e=>(e.textContent||\"\").includes(\"新轨道\"));return {C_strayNewTrackRowCount: stray.length};"}
+{"type":"eval","js":"const el=document.querySelector(\"[data-hs-new-track-content]\");return {C_newTrackRowChildren: el?el.children.length:-1};"}
 ]'
 ```
 
-Expected：
-- A：出现 `add_track`（且不是 fallback），并且 `duplicate_clips_bulk` 的 `trackMode` **不是** `same_track`；
-- B：`duplicate_clips_bulk` 的 `trackMode` 为 `explicit_mapping`；
-- C：虚线新轨行**不残留**（计数为 0）。
+> **★ 坐标修正（第一版计划写错了）**：拖到「全部轨道之下」必须用 `y=700`，不能用 `y=255`。
+> 内核容器只有 151px 高（1920×1200 下 `top=112 / bottom=263`），却承载 **6 条**轨道，
+> 因此 `rowHeight ≈ 85`，可见行只有约 2 行。哨兵判定走的是**内容坐标**
+> （`floor(contentY / rowHeight) > trackCount - 1`），而 `y=255` 对应的内容行仍落在已有
+> 轨道内 —— 实测只会得到 `same_track`。用 `y=700` 才能真正落到所有轨道之下。
+>
+> **★ 验证标记也要修正**：虚线新轨行**没有文字**（它是 CSS 虚线边框的 div），因此
+> 按"新轨道"文字探测恒为 0（假阴性）。用真实 DOM 标记 `[data-hs-new-track-content]`
+> 并数它的 `children.length`。
 
-若 A 只出现 `duplicate_clips_bulk` 而没有 `add_track`，说明 creator 仍是假实现，回 Step 2。
+Expected：
+- **A**：出现 `add_track`，且 `duplicate_clips_bulk` 的 `trackMode.kind` 为 `explicit_mapping`（映射到新轨 id），**不是** `same_track`；
+- **B**：**没有** `add_track`，且 `trackMode` 为 `explicit_mapping`（映射 `track-1 → track-2`）——这一条正是 `resolveTrackIdByOffset` 修复的证据：若偏移量仍被忽略，映射会是 `track-1 → track-1`（即 `same_track`）；
+- **C**：`C_newTrackRowChildren` 为 **0**（虚线行不残留）。
+
+**mock 的局限（必须如实记录）**：mock 后端不真正执行 `duplicate_clips_bulk`，且
+`add_track` / `duplicate_clips_bulk` 会落到 Proxy 的 `{ok:true}` 兜底——因此**看不到**
+"新轨上真的多出一个 clip"这一绝对终态。可验证的是**发出的请求载荷**（`trackMode` / 映射）
+与 DOM 标记。若要观察绝对终态，需临时给 mock 的 `add_track` 返回带 `tracks` /
+`selected_track_id` 的真实形状（新轨路径的解析依赖它），或改用真机工程。
+**不要声称验证了 mock 无法呈现的东西。**
 
 - [ ] **Step 6: 全量测试**
 
