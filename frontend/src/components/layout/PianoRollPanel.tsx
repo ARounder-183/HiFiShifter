@@ -1175,10 +1175,10 @@ export const PianoRollPanel: React.FC = () => {
     const timelineSyncApplyingRef = useRef(false);
     const timelineOffsetRef = useRef(0);
     const [timelineOffsetPx, setTimelineOffsetPx] = useState(0);
-    const pendingParamSyncViewportRef = useRef<{
-        nativeScrollLeft: number;
-        pxPerSec: number;
-    } | null>(null);
+    // 待落地的同步视口：**只记缩放**。位置在落地时直接取共享视口的当前值（权威且最新），
+    // 不再捕获快照——见下方落地 effect 的说明（捕获值 + 比对 React state 的老做法会在
+    // state 被同期写入点覆盖时静默取消落地，造成随机错位）。
+    const pendingParamSyncViewportRef = useRef<{ pxPerSec: number } | null>(null);
     const horizontalZoomPendingRef = useRef<{
         nextScale: number;
         nextScrollLeft: number;
@@ -1329,14 +1329,26 @@ export const PianoRollPanel: React.FC = () => {
             // 画出来再被纠正（启动"一闪"）。时间轴在挂载/切换的 layout
             // effect（首帧绘制前）播种，播种后 emit 会驱动本订阅应用。
             if (!timelineViewportSync.isSeeded()) return;
+            // 【跳过自己发布的广播】参数编辑器既发布又订阅，把刚发布的值再应用一遍
+            // 没有意义，却会在缩放事务中间（pending 尚未落地）把位置/缩放拉回上一份
+            // 快照——表现就是「水平缩放时波形/参数线抽搐一帧」。时间轴侧早就有同一条
+            // 来源判定（`getOrigin() === TIMELINE_SYNC_ORIGIN`），这里补齐对称的一半。
+            if (timelineViewportSync.getOrigin() === PIANO_ROLL_SYNC_ORIGIN) return;
             const store = timelineViewportSync.get();
             const offset = timelineOffsetRef.current;
             const drawingScrollLeft = timelineViewportNativeToState(store.scrollLeft, offset);
             // 纯滚动（pxPerSec 未变）：在同一个事件帧内同步落地——原生
             // scroller、标尺/网格层（applyScrollLayers）与轨道视图同帧提交，
             // 两个面板严丝合缝。state 仅作事后对齐（React 在绘制前提交）。
+            //
+            // 【判据必须取内核真值，不能取渲染期 ref】`pxPerSecRef` 在渲染期就被同步成
+            // state 的新值，而并发渲染可能"渲染了但被丢弃"：用 ref 判定会把一次**缩放**
+            // 广播误判成纯滚动（于是只应用位置、不应用缩放）；反过来也会把纯滚动误判成
+            // 缩放而走延迟落地。内核才是这台面板的视口真值（与 `resolvePanelRenderViewport`
+            // 同一约定）。
+            const kernelPxPerSec = hostRef.current?.getViewport().pxPerSec ?? pxPerSecRef.current;
             const scroller = scrollerRef.current;
-            if (scroller && Math.abs(store.pxPerSec - pxPerSecRef.current) <= 1e-9) {
+            if (scroller && Math.abs(store.pxPerSec - kernelPxPerSec) <= 1e-9) {
                 timelineSyncApplyingRef.current = true;
                 pxPerSecRef.current = store.pxPerSec;
                 scrollLeftRef.current = drawingScrollLeft;
@@ -1352,10 +1364,7 @@ export const PianoRollPanel: React.FC = () => {
             // 缩放（pxPerSec 变化）：内容宽度必须先按新 pxPerSec 重排，维持
             // “先提交 state，再由 layout effect 落地”的既有路径。
             timelineSyncApplyingRef.current = true;
-            pendingParamSyncViewportRef.current = {
-                nativeScrollLeft: store.scrollLeft,
-                pxPerSec: store.pxPerSec,
-            };
+            pendingParamSyncViewportRef.current = { pxPerSec: store.pxPerSec };
             setScrollLeft(drawingScrollLeft);
             setPxPerSec(store.pxPerSec);
             timelineSyncApplyingRef.current = false;
@@ -1390,10 +1399,7 @@ export const PianoRollPanel: React.FC = () => {
             timelineOffsetRef.current,
         );
         timelineSyncApplyingRef.current = true;
-        pendingParamSyncViewportRef.current = {
-            nativeScrollLeft: store.scrollLeft,
-            pxPerSec: store.pxPerSec,
-        };
+        pendingParamSyncViewportRef.current = { pxPerSec: store.pxPerSec };
         setScrollLeft(drawingScrollLeft);
         timelineSyncApplyingRef.current = false;
     }, [timelineOffsetPx, s.paramEditorSyncTimeline]);
@@ -1401,25 +1407,37 @@ export const PianoRollPanel: React.FC = () => {
     // 同步视口必须等内容宽度按新 pxPerSec 更新后再落到 DOM。
     // 否则设置 scroller.scrollLeft 时会被浏览器钳回旧的最大滚动位置，
     // 形成“缩放已变、滚动没变”的水平漂移。
+    //
+    // 【为什么位置取"共享视口的当前值"而不是捕获时的快照，且不再比对 React state】
+    // 这条落地路径原先要求 `React scrollLeft state` 恰好等于 pending 的目标值，否则
+    // **直接 return 把 pending 搁置**。而 state 是异步提交的：同期可能被其它写入点
+    // （量化提交的 rAF、纯滚动广播、以及参数编辑器自己发布的回声）覆盖成更旧的值，
+    // 于是这次落地被静默取消——面板停在旧位置、缩放却已生效，两个面板从此错开一段
+    // 距离（用户报告：「参数编辑器的偏移量有误」，且**随机**出现）。位置本身在共享
+    // 视口里就是权威且最新的，直接取它即可；只要该视口的**缩放**与本次 pending 一致
+    // （说明这是"同一个缩放代"的落地），落地就是对的。缩放若已被更新的广播取代，
+    // 那份广播会写下新的 pending，由它落地。
     useLayoutEffect(() => {
         const pending = pendingParamSyncViewportRef.current;
         if (!pending || !s.paramEditorSyncTimeline) return;
         if (Math.abs(pxPerSec - pending.pxPerSec) > 1e-9) return;
         if (Math.abs(timelineOffsetPx - timelineOffsetRef.current) > 0.5) return;
 
-        const offset = timelineOffsetRef.current;
-        const drawingScrollLeft = timelineViewportNativeToState(pending.nativeScrollLeft, offset);
-        if (Math.abs(scrollLeft - drawingScrollLeft) > 0.5) return;
+        const store = timelineViewportSync.get();
+        // 更新的缩放已在路上：等它自己的 pending（否则会用旧缩放的位置落地）。
+        if (Math.abs(store.pxPerSec - pending.pxPerSec) > 1e-9) return;
 
         pendingParamSyncViewportRef.current = null;
         const scroller = scrollerRef.current;
         if (!scroller) return;
 
+        const offset = timelineOffsetRef.current;
+        const drawingScrollLeft = timelineViewportNativeToState(store.scrollLeft, offset);
         timelineSyncApplyingRef.current = true;
         pxPerSecRef.current = pending.pxPerSec;
         pxPerBeatRef.current = pending.pxPerSec * (60 / Math.max(1e-6, s.bpm));
         scrollLeftRef.current = drawingScrollLeft;
-        // `pending.nativeScrollLeft` 是共享视口的原生值；换算成绘制坐标后走统一载体
+        // `store.scrollLeft` 是共享视口的原生值；换算成绘制坐标后走统一载体
         // （宿主会再加回偏移，落到与共享视口相同的位置），并在**同一任务**里把
         // DOM / Canvas2D / GL 一起提交（见 `paintNow`）。
         //
@@ -1435,8 +1453,12 @@ export const PianoRollPanel: React.FC = () => {
     useLayoutEffect(() => {
         const pending = horizontalZoomPendingRef.current;
         if (!pending) return;
-        if (Math.abs(pending.nextScale - pxPerSec) > 1e-9) return;
+        // 【先消费再判定】请求一旦"过期"就必须丢弃，不能留在 ref 里等未来某次渲染
+        // 的 state 凑巧等于它的缩放——那会用一次**旧缩放的位置**落地（旧快照的
+        // `nextScrollLeft`），并在同步模式下把它推回共享视口：两个面板一起跳到旧位置。
+        // 因此这里无条件清空，只有"当前 state 正是这次请求的缩放"才真正落地。
         horizontalZoomPendingRef.current = null;
+        if (Math.abs(pending.nextScale - pxPerSec) > 1e-9) return;
         horizontalZoomChainRef.current = null;
         const scroller = scrollerRef.current;
         if (!scroller) return;
