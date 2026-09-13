@@ -231,6 +231,7 @@ import type {
     PianoRollGridSpec,
 } from "./pianoRoll/kernel/host/pianoRollKernelData";
 import { PIANO_ROLL_VERTICAL_SCROLL_RANGE_PX } from "./pianoRoll/kernel/scroll/verticalValueScroll";
+import { resolvePanelRenderViewport } from "./pianoRoll/kernel/viewportSource";
 import { normalizeCssColor, resolvePianoRollColors } from "./pianoRoll/colors";
 import { parseRgbaColor } from "./timeline/runtime/timelineClipGlRenderer";
 
@@ -2229,12 +2230,20 @@ export const PianoRollPanel: React.FC = () => {
         // 落地）在同一帧内提交，否则滚动中会出现画布与网格的分层漂移。
         drawRef.current();
         // 波形面走同一条同步链：不能在 React state（rAF）提交后再画。
-        pianoRollViewportBus.emit(next, pxPerSecRef.current, viewSizeRef.current.w);
+        //
+        // 缩放一并取内核真值（与 `drawRef` 同一理由，见 `resolvePanelRenderViewport`）：
+        // 渲染期 ref 可能提前于内核变化，波形与其余图层就会差一个缩放。
+        const emitPxPerSec = resolvePanelRenderViewport({
+            kernelView: hostRef.current?.getViewport() ?? null,
+            refPxPerSec: pxPerSecRef.current,
+            refScrollLeftPx: scrollLeftRef.current,
+        }).pxPerSec;
+        pianoRollViewportBus.emit(next, emitPxPerSec, viewSizeRef.current.w);
         // 播放头 DOM 线并入同帧提交：缩放（pxPerSec 变化）时立即对齐新投影，
         // 避免与画布的播放头错位一帧（与 useVisualPlayhead 的 onFrame 同源）。
         // 设备像素吸附与其余播放头写入点一致（见 onFrame 注释）。
         const playheadLeftPx = snapToDevicePx(
-            visualPlayheadSecRef.current * pxPerSecRef.current,
+            visualPlayheadSecRef.current * emitPxPerSec,
             readDevicePixelRatio(),
         );
         if (rulerPlayheadLineRef.current) {
@@ -3772,11 +3781,23 @@ export const PianoRollPanel: React.FC = () => {
 
     // Keep draw function always up-to-date (invalidate() is stable and calls drawRef.current()).
     drawRef.current = () => {
-        // 滚动热路径的投影：用 ref 构造，因为滚动时 ref 同步更新而 React
-        // state 滞后一帧（渲染期的 prAxis 不能用于此处）。
+        // 滚动热路径的投影：**必须以内核视口为准**（`resolvePanelRenderViewport`）。
+        //
+        // 【为什么不能用渲染期的 refs】`pxPerSecRef` / `scrollLeftRef` 在渲染期就被同步成
+        // React state 的新值，而并发渲染允许"渲染但尚未提交"（被更高优先级更新打断并丢弃）
+        // ——那一瞬间 ref 已是新值、内核与 DOM 还是旧值。用 refs 当投影源会让面板的
+        // Canvas2D 与曲线**可见段选择**落在新视口、宿主 GL（网格 / 曲线 / 播放头）与 DOM
+        // 落在旧视口：同一屏两套视口，表现为"这些线偏移了"。时间轴的 `livePxPerSec` 是同一
+        // 约定的先例（逐帧发布一律取内核真值）。
+        const kernelView = hostRef.current?.getViewport() ?? null;
+        const viewport = resolvePanelRenderViewport({
+            kernelView,
+            refPxPerSec: pxPerSecRef.current,
+            refScrollLeftPx: scrollLeftRef.current,
+        });
         const drawAxis = createTimelineAxis({
-            pxPerSec: pxPerSecRef.current,
-            scrollLeftPx: scrollLeftRef.current,
+            pxPerSec: viewport.pxPerSec,
+            scrollLeftPx: viewport.scrollLeftPx,
             viewportWidthPx: viewSizeRef.current.w,
             dpr: window.devicePixelRatio || 1,
         });
@@ -6799,6 +6820,23 @@ export const PianoRollPanel: React.FC = () => {
                                         }
                                         layerRef={gridLayerRef}
                                         ticks={timelineTicks}
+                                        // 【必须提供视口总线：否则网格会画在滞后的偏移上】
+                                        // 不传总线时网格的绘制偏移取自 `scrollLeft` prop，而它是
+                                        // **量化提交**的 React state（256px 死区，见
+                                        // `gridDrawViewport.ts`）：参数编辑器自己的滚动（滚轮 /
+                                        // 拖 thumb / 触摸）只改内核与镜像，**不**逐帧提交 state
+                                        // ——最后一次不足 256px 的位移永远不会提交。此后任何一次
+                                        // React 重绘（例如时间轴缩放带来的 `pxPerBeat` 变化）都会
+                                        // 用这个滞后值画网格，网格就停在错误偏移上，直到下一次滚动。
+                                        // 实测（Chrome，先小幅滚动参数编辑器再滚轮缩放时间轴）：
+                                        // 网格与自身标尺相差 **59px**（基线只有 8px 的标签内缩）。
+                                        // 传总线后偏移一律取总线快照（内核真值），与标尺 / 画布 /
+                                        // 波形 / 曲线取同一份视口。
+                                        //
+                                        // 不传 `layerOrder`：参数编辑器没有统一帧提交器，注册会被
+                                        // 跳过；网格仍由 `gridRedrawBridge` 的命令式路径重绘（宿主
+                                        // 每帧调用），这里只需要「偏移取总线」这一条契约。
+                                        viewportBus={pianoRollViewportBus}
                                         sticky
                                     />
 
