@@ -127,6 +127,8 @@ export interface ProjectMeta {
     dirty: boolean;
     recent: string[];
     notes_markdown?: string;
+    /** 保存本工程时是否一并写出 UNDO 操作记录数据（工程级开关）。 */
+    save_undo_history?: boolean;
     base_scale?: string;
     use_custom_scale?: boolean;
     custom_scale?: {
@@ -226,7 +228,8 @@ export interface RemoveSilenceResult {
 }
 
 export interface TimelineResult {
-    ok: true;
+    /** 撤销/重做遇到空栈时后端返回 `false`：前端不套用任何快照（静默失败）。 */
+    ok: boolean;
     tracks: TimelineTrack[];
     clips: TimelineClip[];
     created_clip_ids?: string[];
@@ -245,6 +248,38 @@ export interface TimelineResult {
     project_version_too_new?: boolean;
     project_file_version?: number;
     current_project_file_version?: number;
+    /**
+     * 撤销 / 重做栈深度。只有与历史直接相关的响应（撤销 / 重做 /
+     * begin_undo_group / get_history_state）携带；其余命令为 undefined，
+     * 前端沿用最近一次已知值（深度变化另有 `history_state` 事件广播）。
+     */
+    undo_depth?: number;
+    redo_depth?: number;
+}
+
+/** 「操作记录」中的一条状态（`history_state` 事件 / `get_history_state`）。 */
+export interface HistoryRecordSummary {
+    /**
+     * 产生该状态的操作 key（前端按 `history_op_<label>` 本地化）；
+     * `null` = 初始状态（「初始化状态」行）。
+     */
+    label: string | null;
+    /** 该状态形成时刻（Unix 毫秒）。 */
+    atMs: number;
+}
+
+/**
+ * 撤销/重做可用性 + 「操作记录」。
+ *
+ * `position` 即当前所处状态下标，同时也是可撤销步数（`undoDepth`）；
+ * `records` 覆盖全部状态（含当前位置之后的重做部分与初始状态行）。
+ */
+export interface HistoryStateResult {
+    ok: boolean;
+    position: number;
+    undoDepth: number;
+    redoDepth: number;
+    records: HistoryRecordSummary[];
 }
 
 export interface TrackSummaryResult {

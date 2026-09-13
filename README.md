@@ -114,6 +114,7 @@ VocalShifter 提供的算法库。
 | 纵向缩放（参数轴，参数面板）   | Ctrl + 鼠标滚轮（参数面板内）     |
 | 播放/暂停                      | Space（空格）                     |
 | 播放/停止                      | Enter                             |
+| 开关节拍器                     | K                                 |
 | 撤销/重做                      | Ctrl + Z / Ctrl + Y               |
 | 新建工程                       | Ctrl + N                          |
 | 打开工程                       | Ctrl + Shift + O                  |
@@ -128,6 +129,8 @@ VocalShifter 提供的算法库。
 | 循环切换 Take                  | T（`Shift + T` 切换上一个）       |
 | 参数面板复制选区曲线           | Ctrl + C（Select 模式）           |
 | 参数面板粘贴到选区起点         | Ctrl + V（Select 模式）           |
+| 参数面板多选区（追加 / 取消）  | Ctrl + 拖动追加、Ctrl + 点击已有段取消（Select 模式） |
+| 音频块范围加入参数选区（批量） | Ctrl + Shift + A（或在音频块右键菜单中操作） |
 | 分割音频块                     | S（在播放头位置分割选中的音频块） |
 | 新建轨道                       | Ctrl + T                          |
 | 快速搜索                       | Ctrl + F                          |

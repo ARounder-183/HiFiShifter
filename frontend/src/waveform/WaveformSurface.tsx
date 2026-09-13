@@ -18,8 +18,8 @@
 import React from "react";
 
 import { waveformMipmapStore } from "../utils/waveformMipmapStore";
-import type { TimelineAxis } from "../components/layout/timeline/runtime/timelineAxis.ts";
-import { withAxis } from "../components/layout/timeline/runtime/timelineAxis.ts";
+import type { TimelineAxis } from "../components/layout/renderKernel/timelineAxis.ts";
+import { withAxis } from "../components/layout/renderKernel/timelineAxis.ts";
 import { LAYER_ORDER } from "../components/layout/timeline/runtime/timelineFrameCommitter.ts";
 import type { TimelineLayer } from "../components/layout/timeline/runtime/timelineFrameCommitter.ts";
 import { buildWaveformGeometry, type WaveformVertexSink } from "./geometry";
@@ -96,12 +96,13 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
     } | null>(null);
     const [rendererKind, setRendererKind] = React.useState<"webgl2" | "canvas2d">("webgl2");
 
-    // render 期写 ref 镜像（本仓库热路径既有模式，见 TimelineCanvasViewport）。
+    // render 期写 ref 镜像（本仓库热路径既有模式；原出处 TimelineCanvasViewport 已随
+    // 旧渲染路径删除，同一手法现仍见于 TimelineKernelView 等命令式绘制组件）。
     // 目的：`draw` 的引用必须稳定——它一旦每渲染都变，下面的 layout effect
     // 就会每帧执行，与视口总线驱动的 paint 重复画一遍。故所有 props 改从
     // ref 读取，`draw` 的依赖里只剩真正会变的东西。
     const propsRef = React.useRef(props);
-    // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制回调需在同一提交内读取最新 props（热路径既有模式，见 TimelineCanvasViewport）
+    // eslint-disable-next-line react-hooks/refs -- render 期写 ref 镜像：命令式绘制回调需在同一提交内读取最新 props（热路径既有模式）
     propsRef.current = props;
 
     const invalidate = React.useCallback(() => {

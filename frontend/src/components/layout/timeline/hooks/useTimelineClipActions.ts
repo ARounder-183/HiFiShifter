@@ -46,12 +46,22 @@ import { getBulkEditableClipIds } from "./bulkClipEdit";
 import { getGroupClipIds } from "./useGroupExpansion";
 import { buildBulkClipStateUpdates } from "./bulkClipRemotePayloads";
 import { computeClipNormalizationGain } from "../../../../features/session/clipNormalization";
+import type { TimelineViewportAccess } from "./timelineViewportAccess";
 
 // ── Args / Result 类型 ────────────────────────────────────────
 
 export interface UseTimelineClipActionsArgs {
     sessionRef: React.MutableRefObject<RootState["session"]>;
     scrollRef: React.MutableRefObject<HTMLDivElement | null>;
+    /**
+     * 模式无关的视口访问器（可选）。
+     *
+     * 【为什么需要】范围选择要把「点击时的 clientX」换算成工程秒，而换算依赖
+     * 视口矩形与滚动位置。内核模式下 `scrollRef.current === null`，直接读它会
+     * 退化成「用 clip 起点近似点击位置」的降级分支——表现为「Shift 点第二个
+     * clip 只选中它自己」。传入访问器后两种模式走同一条换算。
+     */
+    viewport?: TimelineViewportAccess;
     lastClickedClipIdRef: React.MutableRefObject<string | null>;
     lastClickedClientXRef: React.MutableRefObject<number | null>;
     pxPerSec: number;
@@ -206,6 +216,7 @@ export function useTimelineClipActions(
     const {
         sessionRef,
         scrollRef,
+        viewport,
         lastClickedClipIdRef,
         lastClickedClientXRef,
         pxPerSec,
@@ -450,7 +461,7 @@ export function useTimelineClipActions(
             // 批量归一化 = 单个撤销步：undo group 内一次 bulk 提交
             //（逐个 setClipStateRemote 会产生 N 步撤销 + N 次中间快照）。
             void (async () => {
-                await webApi.beginUndoGroup();
+                await webApi.beginUndoGroup("edit_clip");
                 try {
                     await dispatch(
                         setClipsStateBulkRemote({
@@ -617,15 +628,18 @@ export function useTimelineClipActions(
             const minTrack = Math.min(anchorTrackIndex, targetTrackIndex);
             const maxTrack = Math.max(anchorTrackIndex, targetTrackIndex);
 
-            // 使用鼠标点击位置（时间秒）构建选择矩形，避免长 clip 导致的过度选择
+            // 使用鼠标点击位置（时间秒）构建选择矩形，避免长 clip 导致的过度选择。
+            //
+            // 视口来源必须模式无关：内核模式下原生 scroller 不存在，读它会掉进
+            // 下面的降级分支（用 clip 起点近似），范围选择随之失效。
             let anchorClickSec: number;
             let targetClickSec: number;
 
-            const scroller = scrollRef.current;
+            const bounds =
+                viewport?.getRect() ?? scrollRef.current?.getBoundingClientRect() ?? null;
+            const xScroll = viewport?.getScrollLeft() ?? scrollRef.current?.scrollLeft ?? 0;
             const anchorClientX = lastClickedClientXRef.current;
-            if (scroller && anchorClientX != null && targetClientX != null) {
-                const bounds = scroller.getBoundingClientRect();
-                const xScroll = scroller.scrollLeft;
+            if (bounds !== null && anchorClientX != null && targetClientX != null) {
                 anchorClickSec = Math.max(0, (anchorClientX - bounds.left + xScroll) / pxPerSec);
                 targetClickSec = Math.max(0, (targetClientX - bounds.left + xScroll) / pxPerSec);
             } else {
@@ -664,6 +678,7 @@ export function useTimelineClipActions(
             updateRangeSelectAnchor,
             lastClickedClientXRef,
             scrollRef,
+            viewport,
         ],
     );
 
@@ -785,6 +800,11 @@ export function useTimelineClipActions(
 
     // 点击轨道空白区：清空 clip 选中（单选 + 多选）。保留轨道焦点 —— 空白点击
     // 是"取消 clip 目标"，不是"切换轨道目标"（DAW 通用约定）。
+    //
+    // 特殊说明：清空是**纯本地**的（不派发 `selectClipRemote(null)`），后端因此
+    // 一直记着旧的 `selected_clip_id`。任何随后派发的 `selectTrackRemote` 都必须带
+    // `applySelectedClip: false`，否则 fulfilled 会拿后端快照把这次清空**异步复活**
+    // ——见 `TimelinePanel.handleKernelSeek` 的契约说明（提交 019e93ed）。
     const deselectAllTrackLaneClips = React.useCallback(() => {
         if (multiSelectedClipIdsRef.current.length === 0 && !sessionRef.current.selectedClipId) {
             return;

@@ -68,46 +68,6 @@ fn reset_shared_session() {
     }
 }
 
-/// Global progress callback for chunk rendering. Set before render, cleared after.
-static CHUNK_PROGRESS_CB: OnceLock<Mutex<Option<Box<dyn Fn(f64) + Send + Sync>>>> = OnceLock::new();
-static CHUNK_PROGRESS_TOTAL: OnceLock<std::sync::atomic::AtomicUsize> = OnceLock::new();
-static CHUNK_PROGRESS_DONE: OnceLock<std::sync::atomic::AtomicUsize> = OnceLock::new();
-
-pub fn set_chunk_progress_callback(cb: Option<Box<dyn Fn(f64) + Send + Sync>>) {
-    let slot = CHUNK_PROGRESS_CB.get_or_init(|| Mutex::new(None));
-    *slot.lock().unwrap() = cb;
-}
-
-pub fn reset_chunk_progress(total: usize) {
-    CHUNK_PROGRESS_TOTAL
-        .get_or_init(|| std::sync::atomic::AtomicUsize::new(0))
-        .store(total, std::sync::atomic::Ordering::Relaxed);
-    CHUNK_PROGRESS_DONE
-        .get_or_init(|| std::sync::atomic::AtomicUsize::new(0))
-        .store(0, std::sync::atomic::Ordering::Relaxed);
-}
-
-fn emit_chunk_progress(_local: f64) {
-    let done = CHUNK_PROGRESS_DONE
-        .get()
-        .map(|a| a.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1)
-        .unwrap_or(0);
-    let total = CHUNK_PROGRESS_TOTAL
-        .get()
-        .map(|a| a.load(std::sync::atomic::Ordering::Relaxed))
-        .unwrap_or(1);
-    let progress = if total > 0 {
-        done as f64 / total as f64
-    } else {
-        0.0
-    };
-    if let Some(slot) = CHUNK_PROGRESS_CB.get() {
-        if let Some(cb) = slot.lock().unwrap().as_ref() {
-            cb(progress);
-        }
-    }
-}
-
 /// Tracks which execution provider the live session actually uses.
 ///
 /// Backed by an `RwLock` rather than a `OnceLock`: the EP can change while the
@@ -1429,7 +1389,9 @@ pub fn infer_pitch_edit_chunked_optimized(
 
         // Report progress for cached chunks
         if !cached_chunks.is_empty() {
-            emit_chunk_progress(cached_chunks.len() as f64 / total_chunks as f64);
+            crate::renderer::progress::report_clip_progress(
+                cached_chunks.len() as f64 / total_chunks as f64,
+            );
         }
 
         // 4b. 批量推理需要推理的 chunk
@@ -1463,7 +1425,9 @@ pub fn infer_pitch_edit_chunked_optimized(
                 let chunk_end = (fi + CHUNK_MAX_FRAMES).min(t);
                 chunk_cache_put(fi, chunk_end, wf.clone());
                 cached_chunks.push((fi, wf));
-                emit_chunk_progress((processed_before + i + 1) as f64 / total_chunks as f64);
+                crate::renderer::progress::report_clip_progress(
+                    (processed_before + i + 1) as f64 / total_chunks as f64,
+                );
             }
         }
 

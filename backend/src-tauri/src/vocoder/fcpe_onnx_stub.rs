@@ -21,3 +21,5 @@ pub fn infer_f0_hz(
 pub fn drop_shared_session() {}
 
 pub fn update_ort_ep(_choice: &str, _device_id: Option<i32>) {}
+
+pub fn ensure_background_prewarm() {}

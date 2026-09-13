@@ -26,6 +26,8 @@ mod midi_export;
 pub(crate) use midi_export::TempoTickConverter;
 #[path = "commands/onnx_status.rs"]
 mod onnx_status;
+#[path = "commands/param_selection_window.rs"]
+pub(crate) mod param_selection_window;
 #[path = "commands/params.rs"]
 mod params;
 #[path = "commands/pitch_cache.rs"]
@@ -60,6 +62,8 @@ mod timeline;
 mod timeline_clipboard;
 #[path = "commands/ui_settings.rs"]
 mod ui_settings;
+#[path = "commands/undo_history_file.rs"]
+pub(crate) mod undo_history_file;
 #[path = "commands/vocalshifter.rs"]
 mod vocalshifter;
 #[path = "commands/vocalshifter_clipboard.rs"]
@@ -142,8 +146,47 @@ pub fn redo_timeline(state: State<'_, AppState>) -> crate::models::TimelineState
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn begin_undo_group(state: State<'_, AppState>) -> crate::models::TimelineStatePayload {
-    state.begin_undo_group()
+pub fn begin_undo_group(
+    state: State<'_, AppState>,
+    label: Option<String>,
+) -> crate::models::TimelineStatePayload {
+    state.begin_undo_group(label)
+}
+
+/// 设置当前工程「保存时是否一并写出 UNDO 操作记录数据」（工程级开关）。
+///
+/// 全局设置（`UiSettings::save_undo_history_by_default`）只决定新工程的初值；
+/// 打开工程时总是尝试读取 UNDO 数据，与本开关无关。
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_project_save_undo_history(
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "ok": true,
+        "project": state.set_project_save_undo_history(enabled),
+    })
+}
+
+/// 跳到「操作记录」中的第 `position` 个状态（双击条目）。
+///
+/// 与撤销/重做共用同一入口：越界或原地不动时返回 `ok = false`，
+/// 前端静默跳过、界面零变化。
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_history_position(
+    state: State<'_, AppState>,
+    position: usize,
+) -> crate::models::TimelineStatePayload {
+    state.set_history_position(position)
+}
+
+/// 「操作记录」+ 撤销/重做可用性。
+///
+/// 前端挂载时同步一次；此后由 `history_state` 事件（打点 / 清空历史 /
+/// 撤销 / 重做 / 跳转都会广播）保持实时，无需轮询。
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_history_state(state: State<'_, AppState>) -> serde_json::Value {
+    state.history_state_json()
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -601,6 +644,8 @@ pub async fn import_audio_item(
         missing_files: Some(vec![format!("import task failed: {error}")]),
         disabled_group_ids: Vec::new(),
         tempo_map: None,
+        undo_depth: None,
+        redo_depth: None,
     })
 }
 #[tauri::command(rename_all = "camelCase")]
@@ -632,6 +677,8 @@ pub async fn import_audio_bytes(
         missing_files: Some(vec![format!("import task failed: {error}")]),
         disabled_group_ids: Vec::new(),
         tempo_map: None,
+        undo_depth: None,
+        redo_depth: None,
     })
 }
 #[tauri::command(rename_all = "camelCase")]
@@ -1066,7 +1113,7 @@ pub fn group_clips(
     clip_ids: Vec<String>,
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-    state.checkpoint_timeline(&tl);
+    state.checkpoint_timeline(&tl, crate::state::HistoryOp::GroupClips);
     tl.group_clips(&clip_ids);
     let payload = tl.to_payload();
     drop(tl);
@@ -1079,7 +1126,7 @@ pub fn ungroup_clips(
     clip_ids: Vec<String>,
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-    state.checkpoint_timeline(&tl);
+    state.checkpoint_timeline(&tl, crate::state::HistoryOp::UngroupClips);
     tl.ungroup_clips(&clip_ids);
     let payload = tl.to_payload();
     drop(tl);
@@ -1092,7 +1139,7 @@ pub fn toggle_group_disabled(
     group_id: String,
 ) -> crate::models::TimelineStatePayload {
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-    state.checkpoint_timeline(&tl);
+    state.checkpoint_timeline(&tl, crate::state::HistoryOp::ToggleGroupDisabled);
     tl.toggle_group_disabled(&group_id);
     let payload = tl.to_payload();
     drop(tl);
@@ -1645,15 +1692,22 @@ pub fn import_vocalshifter_project(
     vocalshifter::import_vocalshifter_project(state.inner(), &window, vsp_path)
 }
 
+/// 粘贴 VocalShifter 剪贴板。
+///
+/// 参数编辑器的多选区经 `selectionRanges` 传入（每段 startFrame/frameCount）：
+/// 数据对齐到**首段起点**，且只写入落在任一段内的帧 —— 断层保持原值。
+/// 旧的单窗口参数保留兼容（等价于一个选区段）。
 #[tauri::command(rename_all = "camelCase")]
 pub fn paste_vocalshifter_clipboard(
     state: State<'_, AppState>,
+    selection_ranges: Option<Vec<param_selection_window::SelectionFrameRange>>,
     selection_start_frame: Option<usize>,
     selection_max_frames: Option<usize>,
     active_param: Option<String>,
 ) -> serde_json::Value {
     vocalshifter_clipboard::paste_vocalshifter_clipboard(
         state.inner(),
+        selection_ranges,
         selection_start_frame,
         selection_max_frames,
         active_param,
@@ -1727,13 +1781,14 @@ pub fn read_midi_clipboard_to_memory(state: State<'_, AppState>) -> serde_json::
     midi::read_midi_clipboard_to_memory(state.inner())
 }
 
+/// 导入 MIDI 到参数线（pitch）。`selectionRanges` 为参数编辑器多选区：
+/// 音符对齐首段起点，且只写入落在任一段内的帧（断层保持原值）。
 #[tauri::command(rename_all = "camelCase")]
 pub fn import_midi_to_pitch(
     state: State<'_, AppState>,
     midi_path: String,
     track_indices: Vec<usize>,
-    selection_start_frame: Option<usize>,
-    selection_max_frames: Option<usize>,
+    selection_ranges: Option<Vec<param_selection_window::SelectionFrameRange>>,
     fill_gaps: Option<bool>,
     note_bpm_mode: Option<String>,
     specified_bpm: Option<f64>,
@@ -1745,8 +1800,7 @@ pub fn import_midi_to_pitch(
         state.inner(),
         midi_path,
         track_indices,
-        selection_start_frame,
-        selection_max_frames,
+        selection_ranges,
         fill_gaps,
         note_bpm_mode,
         specified_bpm,

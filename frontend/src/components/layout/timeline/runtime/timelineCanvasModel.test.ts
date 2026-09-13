@@ -1,7 +1,7 @@
 import { test } from "vitest";
 
 import { buildSparseClipRenderModel } from "./timelineCanvasModel.js";
-import { createTimelineAxis } from "./timelineAxis.js";
+import { createTimelineAxis } from "../../renderKernel/timelineAxis.js";
 
 test("components/layout/timeline/runtime/timelineCanvasModel.test.ts scripted checks", async () => {
     function assertEqual(actual: unknown, expected: unknown, label: string): void {

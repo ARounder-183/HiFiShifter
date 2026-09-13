@@ -221,10 +221,51 @@ textarea {
     -ms-overflow-style: none;
 }
 
+/* 隐藏两轴原生滚动条但**保留滚动能力**（`scrollbar-width: none` 只改渲染，
+ * 不改变可滚动范围，程序化 scrollLeft/scrollTop 与原生滚动都照常工作）。
+ *
+ * 用途：渲染内核自绘滚动条的面板（参数编辑器）。内核模式下滚动位置由内核持有，
+ * 原生滚动条只是**被动镜像**——镜像需要保留滚动范围才能接受程序化写入，但它的
+ * 滚动条本身必须隐藏，否则会与自绘滚动条重复显示。
+ * 与 `.hide-v-scrollbar` 的区别：本类同时隐藏水平与竖直。 */
+.hide-scrollbar {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+}
+.hide-scrollbar::-webkit-scrollbar {
+    display: none;
+}
+
 /* Unified popup/menu/dialog surfaces for Radix and custom panels */
 .rt-DialogOverlay {
     background: var(--qt-overlay) !important;
     backdrop-filter: blur(2px);
+}
+
+/*
+ * 层级约定（高 → 低）：
+ *   快速搜索                99998 / 99999
+ *   导入模式等全屏选择菜单     9999
+ *   模态弹窗（Dialog）       1000  —— 打开时独占交互，盖过「操作记录」面板与菜单
+ *   右键 / 上下文菜单等       999
+ *   工具栏右键菜单            600
+ *   「操作记录」面板          500   —— 高于时间轴瞬态元素（选区框 z-40、握把 z-60 之外的内容）
+ *   时间轴瞬态元素            ≤ 60
+ *
+ * Radix 的 Dialog / 菜单 portal 本身不带 z-index（靠 DOM 顺序决定层级），
+ * 而「操作记录」是常驻浮层（z-500），不显式分层就会挡住后打开的弹窗与菜单。
+ * 弹层与弹窗同用 1000 时靠 DOM 顺序：后打开的（如弹窗内的下拉）在上。
+ */
+.rt-DialogOverlay,
+.rt-DialogContent {
+    z-index: 1000 !important;
+}
+
+.rt-DropdownMenuContent,
+.rt-SelectContent,
+.rt-ContextMenuContent,
+.rt-PopoverContent {
+    z-index: 1000 !important;
 }
 
 .rt-DialogContent,

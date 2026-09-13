@@ -75,7 +75,7 @@ pub(super) fn import_vocalshifter_project(
     // 应用到 AppState —— 合并到现有工程（不替换）
     {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-        state.checkpoint_timeline(&tl);
+        state.checkpoint_timeline(&tl, crate::state::HistoryOp::ImportVocalShifter);
 
         // 应用工程 BPM（如果现有工程为空或导入文件自带 BPM 非默认值则采用）
         // 与 Tempo Map 规范化一致：钳制到 10-960。

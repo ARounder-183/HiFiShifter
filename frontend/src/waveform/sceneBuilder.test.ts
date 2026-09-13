@@ -1,7 +1,7 @@
 import { test } from "vitest";
 
 import { buildWaveformScene, type WaveformSceneClip } from "./sceneBuilder.ts";
-import { createTimelineAxis } from "../components/layout/timeline/runtime/timelineAxis.ts";
+import { createTimelineAxis } from "../components/layout/renderKernel/timelineAxis.ts";
 
 test("waveform/sceneBuilder.test.ts scripted checks", async () => {
     function assertEqual(actual: unknown, expected: unknown, label: string): void {

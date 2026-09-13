@@ -18,7 +18,7 @@
 import { describe, expect, it } from "vitest";
 
 import { buildTimelineTicks, TICK_WINDOW_STEP_PX } from "./buildTimelineTicks.js";
-import { createTimelineAxis } from "./timelineAxis.js";
+import { createTimelineAxis } from "../../renderKernel/timelineAxis.js";
 
 /** 复刻 `useTimelineState` 里的取刻度方式。 */
 function ticksFor(args: {

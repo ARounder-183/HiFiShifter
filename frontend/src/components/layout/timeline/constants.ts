@@ -52,6 +52,22 @@ export function fadeCornerReservePx(bodyHeightPx: number): number {
  */
 export const NEW_TRACK_SENTINEL = "__hs_new_track__";
 
+/**
+ * Clip 的最小长度（秒）。
+ *
+ * 裁切 / 拉伸的下限：单一事实来源——旧实现、渲染内核与面板提交都取它，
+ * 两处各写一份会让「拖到极限时的停位」在两个渲染模式下差一点点。
+ */
+export const MIN_CLIP_LENGTH_SEC = 0.05;
+
+/**
+ * 音量旋钮竖直拖拽的换算：每像素多少 dB。
+ *
+ * 单一事实来源：旧实现 `useEditDrag` 与渲染内核的旋钮手势共用它——两处各写一份
+ * 会让"拖同样的距离得到不同的增益"（且差异随行高/缩放看不出规律）。
+ */
+export const CLIP_GAIN_DRAG_DB_PER_PX = 0.25;
+
 /** SnapOffset 三角视觉边长（px）。 */
 export const SNAP_OFFSET_HANDLE_SIZE_PX = 9;
 /** SnapOffset 命中区高度（px，相对行底部条带）。 */

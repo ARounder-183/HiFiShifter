@@ -1,37 +1,48 @@
 /**
- * PianoRoll 渲染模块
+ * PianoRoll 渲染模块 · Canvas2D 主画布层
  *
- * 负责钢琴卷帘界面的可视化渲染，包括：
- * - 音高网格和键盘可视化
- * - 音频波形渲染
- * - 参数曲线绘制（音高、音量等）
- * - 选区、播放头等交互元素
+ * 【主要内容】
+ * 负责参数编辑器主画布上的 Canvas2D 绘制：非音高参数的刻度线、选区块、曲线图层
+ * （参考线 / 检测曲线 / 副参数 / 原始与编辑曲线 / 选区高亮 / 剪贴板预览）、morph
+ * 手柄与中央提示文字。
+ *
+ * 【作用】本模块是**残留的 Canvas2D 路径**：网格、钢琴键盘几何、轴文字、轴画布、
+ * 播放头、曲线均已迁到 GL（各自的 `skip*` 入参在生产环境恒为 `true`）。本文件只
+ * 保留尚未迁移、或作为无 GL 时回退的绘制。
+ *
+ * 【与其他模块的关系】
+ * - 上游：`PianoRollPanel.drawRef.current`（唯一生产调用方）。
+ * - 配色：`./colors`（与 GL 层共用同一份表，杜绝两种模式色值分叉）。
+ * - 坐标：`../renderKernel/timelineAxis` 的 `secToViewportPx` 是**唯一**横向投影来源。
  *
  * @module render
  */
 
 import type { ParamMorphOverlay, ParamName, ParamViewSegment, ValueViewport } from "./types";
+import type { ParamSelection } from "./paramSelection";
+import { beatRangesToFrameRanges } from "./paramSelection";
+import { clipboardPreviewSpans, type ParamClipboardData } from "./paramClipboardMapping";
+import { normalizeCssColor, resolvePianoRollColors } from "./colors";
 import { clamp } from "../timeline";
-import { clearCanvasPhysical, rasterize } from "../timeline/runtime/canvasRaster";
+import { clearCanvasPhysical, rasterize } from "../renderKernel/canvasRaster";
 import {
     secToViewportPx,
     strokePx,
     viewportEndSec,
     viewportStartSec,
     type TimelineAxis,
-} from "../timeline/runtime/timelineAxis";
+} from "../renderKernel/timelineAxis";
 import { wholeDevicePxLength } from "../../../utils/devicePixelLine";
 import { AXIS_W, PITCH_MAX_MIDI, PITCH_MIN_MIDI } from "./constants";
-import { framesToTime } from "./utils";
+import { framesToTime, isBlackKey, midiToLabel } from "./utils";
 import { resolveSecondaryOverlayValues } from "./secondaryOverlaySelection";
-import { resolveScaleNotes } from "../../../utils/musicalScales";
-import type { ScaleLike } from "../../../utils/musicalScales";
 import {
     childPitchOffsetValueToDisplay,
     isChildPitchOffsetCentsParam,
     isChildPitchOffsetDegreesParam,
     isChildFormantOffsetCentsParam,
 } from "./childPitchOffsetParams";
+import { isSameMainCanvasSignature, type MainCanvasSignature } from "./mainCanvasSignature";
 
 // 调试开关缓存：drawCurveTimed 每帧会被调用多次（主曲线 / 编辑线 / 选区叠加 /
 // 每条副参数 / 每条参考线），逐次同步读 localStorage 会拖慢绘制热路径；
@@ -52,12 +63,36 @@ function isPianoRollDebugEnabled(): boolean {
 
 /**
  * 返回视觉上固定像素长度的虚线参数，避免随 dpr/缩放产生样式漂移。
+ *
+ * 【为什么导出】阶段 3 起 GL 曲线层也要画虚线，**必须**与 Canvas2D 路径取同一组
+ * 数值（本函数按 dpr 量化，不同取值会让两种模式的虚线疏密不同）。导出而非复制，
+ * 是为了让"两份实现分叉"在类型层面就不可能发生。
+ *
+ * @param baseDashPx 虚线段的目标视觉长度（CSS px）。
+ * @param baseGapPx 空隙的目标视觉长度（CSS px）。
+ * @returns `[dash, gap]`（CSS px，已按 dpr 量化到整设备像素）。
  */
-function getFixedDashPattern(baseDashPx: number, baseGapPx: number): number[] {
+export function getFixedDashPattern(baseDashPx: number, baseGapPx: number): number[] {
     const dpr = Math.max(1, window.devicePixelRatio || 1);
     const toAlignedCssPx = (v: number) => Math.max(1, Math.round(v * dpr) / dpr);
     return [toAlignedCssPx(baseDashPx), toAlignedCssPx(baseGapPx)];
 }
+
+/**
+ * 主画布的内容签名缓存（阶段 2 Task 6）。
+ *
+ * 【为什么用模块级 WeakMap】缓存必须跨调用保持，但又不能阻止画布被回收：面板
+ * 重建画布（参数切换、StrictMode 双挂载、窗口尺寸变化都可能换元素）时旧画布应
+ * 当被 GC。WeakMap 以画布元素为键，正好满足这两点。
+ *
+ * 【为什么存数组而不是字符串】签名含对象 / 数组项（选区、曲线、morph 叠加…），
+ * 必须**按引用**参与比较。此前缓存类型是 `string`，逼得调用方 `join("|")` 构造
+ * 签名，而 `join` 会把每个对象串成字面量 `"[object Object]"`：两个完全不同的
+ * 选区因此得到同一个签名，缓存命中后 `drawPianoRoll` 在清屏前就 return，旧选区
+ * 框留在画布上不消失（缺陷 #4）。改存数组 + `Object.is` 逐项比较后，对象按引用
+ * 区分，`null ↔ object` 与 `object ↔ object` 两种转换都能正确失效。
+ */
+const mainCanvasCache = new WeakMap<HTMLCanvasElement, MainCanvasSignature>();
 
 /** 为数值轴选择"好看"的刻度步长 */
 function niceAxisStep(range: number, targetCount: number): number {
@@ -78,18 +113,6 @@ function formatAxisMark(v: number, param?: ParamName): string {
     // 最多保留 4 位有效数字，去掉尾随零
     const s = parseFloat(displayValue.toPrecision(4)).toString();
     return s;
-}
-
-function isBlackKey(midi: number): boolean {
-    const pc = ((midi % 12) + 12) % 12;
-    return pc === 1 || pc === 3 || pc === 6 || pc === 8 || pc === 10;
-}
-
-function midiToLabel(midi: number): string {
-    const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
-    const octave = Math.floor(midi / 12) - 1;
-    const name = NOTE_NAMES[((midi % 12) + 12) % 12];
-    return `${name}${octave}`;
 }
 
 /**
@@ -316,7 +339,8 @@ export function drawPianoRoll(args: {
     showSecondaryParam: boolean;
     overlayText?: string | null;
     liveEditOverride: { key: string; edit: number[] } | null;
-    selection: { aBeat: number; bBeat: number } | null;
+    /** 多选区（有序、互不相交的 beat 区间列表；null = 无选区） */
+    selection: ParamSelection | null;
     /**
      * 统一投影：本函数内**所有**时间↔像素换算的唯一来源。
      * 不再单独接收 pxPerSec / scrollLeft，避免图层各自执行 `t*p - s`。
@@ -331,27 +355,101 @@ export function drawPianoRoll(args: {
     detectedPitchCurves?: DetectedPitchCurve[];
     /** 是否为深色主题（默认 true） */
     isDark?: boolean;
-    /** 剪贴板预览数据（选区内渲染半透明预览曲线） */
-    clipboardPreview?: {
-        param: ParamName;
-        framePeriodMs: number;
-        values: number[];
-    } | null;
-    // pitch snap visual helpers
-    pitchSnapUnit?: "semitone" | "scale";
-    projectScale?: ScaleLike | null;
-    /** Tempo Map 音阶高亮分段（null = 无 Tempo Map 音阶数据，使用单音阶路径）。 */
-    scaleSegments?: Array<{
-        startSec: number;
-        endSec: number;
-        scale: ScaleLike | null;
-    }> | null;
-    toolMode?: string;
-    snapToggleHeld?: boolean;
-    scaleHighlightMode?: import("../../../features/session/sessionTypes").ScaleHighlightMode;
-    paramMorphOverlay?: ParamMorphOverlay | null;
+    /** 剪贴板数据（按「剪贴板 → 目标选区」映射渲染虚线预览；断层处不画） */
+    clipboardPreview?: ParamClipboardData | null;
+    /** 形变控制线（每个选区段一条；null = 不显示） */
+    paramMorphOverlays?: ParamMorphOverlay[] | null;
+    // 【已删除的入参】随下方"已删除的 Canvas2D 音高网格分支"一并移除（它们在
+    // 本函数里已无任何读者，留着只会让调用方以为"传了就有效"）：
+    //   `skipGrid`（网格恒由 GL 绘制）、`projectScale` / `scaleSegments` /
+    //   `scaleHighlightMode`（音阶高亮已迁到 GL 网格层）、`pitchSnapUnit` /
+    //   `toolMode` / `snapToggleHeld`（吸附与工具态的可视化从未在本函数里实现过）。
+    // 音阶高亮的新输入是 `PianoRollGridSpec.scaleNotes` / `scaleHighlightRgba`
+    // （见 `PianoRollPanel.buildGridSpec`）。
+    // 【合并说明】feature/tools 分支另加了 `paramMorphOverlay`（单数，配合其
+    // 单区间选区）；本分支的选区已统一为多区间 `ParamSelection`，形变控制线随之
+    // 为每段一条，故只保留复数形态 `paramMorphOverlays`，不并留单数副本
+    // （两个入参并存会出现"传了单数却没画"的静默失效）。
     /** 自定义字体族，用于 canvas 文本渲染 */
     fontFamily?: string;
+    /**
+     * 跳过钢琴键盘的**几何**绘制（键底色 / 黑键渐变 / 分隔线），保留音名标签。
+     *
+     * 【为什么只跳几何、不跳整段】键盘的几何与标签在同一个 for 循环里交替产出，
+     * 这里只按几何维度跳过，标签仍由本函数绘制（标签归 GL 的 glyph 管线之外的
+     * 数值轴文字由 `skipAxisText` 单独控制）。
+     */
+    skipKeyboardGeometry?: boolean;
+    /**
+     * 跳过左侧轴的**全部文字与刻度线**（音名标签 / 数值轴刻度标签 / 刻度线）。
+     *
+     * 【为什么与 skipKeyboardGeometry 分开】键盘几何与音名标签在同一段代码里，
+     * 但两者的绘制成本与归属不同，分开可以只跳其一而保留另一。
+     *
+     * 特殊说明：跳过音名后 pitch 分支不再画音名、非 pitch 分支不再画刻度线与标签；
+     * 键体的几何跳过仍由 `skipKeyboardGeometry` 单独控制。
+     */
+    skipAxisText?: boolean;
+    /**
+     * 跳过**播放头**（已由 GL 叠加层绘制）。
+     *
+     * 【为什么不包含选区块】播放头在 Canvas2D 路径里是**最上层**（`render.ts` 的
+     * 最后一个图层），放在曲线上方的独立叠加层里与之一致；而选区块在 Canvas2D 里
+     * 位于**曲线之下**（先画选区、再画各条曲线）。若把选区块也放到上方叠加层，
+     * 它的半透明填充与边框会**盖住曲线**——与迁移前的观感相反。
+     *
+     * 因此两者归属不同的画布：选区块留在本函数（主画布，曲线之前），
+     * 播放头交给叠加层。这也解释了为什么本参数不叫 `skipOverlay`。
+     */
+    skipPlayhead?: boolean;
+    /**
+     * 跳过**曲线图层**（已由 GL 绘制）。
+     *
+     * 特殊说明：跳过的范围与 `PianoRollCurveLayer` 一一对应——参考线、检测曲线、
+     * 副参数、原始 / 编辑曲线、选区高亮、剪贴板预览。`paramMorphOverlays`（morph 手柄，
+     * 含 `arc`）**不**在曲线层内，仍由本函数绘制；它是编辑态叠加物而非曲线本身。
+     *
+     * 【与 `skipAxisCanvas` 等同一约定】生产调用方恒传 `true`（曲线只有 GL 一个
+     * 绘制者），因此 GL 运行期失败时曲线无人绘制。详见设计文档 §2.4。
+     */
+    skipCurves?: boolean;
+    /**
+     * 跳过整张轴画布（含清屏）。
+     *
+     * 【为什么不只是"跳过绘制"】`clearCanvasPhysical` 会让整张画布失效、必须重绘
+     * ——即使随后什么都不画，清屏本身已经产生了重绘开销。因此接管一层时必须连
+     * **清屏**一起跳过，否则"让轴保持缓存"无从谈起。
+     *
+     * 特殊说明：轴画布上的全部内容（键体、渐变、分隔线、轴线、音名、刻度线、
+     * 刻度标签）均已由 GL 轴层绘制，因此可以整张跳过。
+     */
+    skipAxisCanvas?: boolean;
+    /**
+     * 主画布的内容签名（阶段 2 Task 6 的静态层缓存）。
+     *
+     * 【作用】主画布上的内容（曲线、参考线、剪贴板预览、morph 叠加、
+     * 中央提示文字）在**播放帧并不变化**——播放只动播放头，而播放头已由 GL 叠加层
+     * 绘制。传入签名后，函数在签名未变时**跳过整张主画布的清屏与绘制**，从而让
+     * 曲线层保持缓存；签名变化时才重绘。
+     *
+     * 特殊说明：音阶高亮**不在**主画布上（它已迁到 GL 网格层，见下方"已删除的
+     * Canvas2D 音高网格分支"），因此它不是本签名的输入。
+     *
+     * 契约：调用方必须把"主画布绘制的全部输入"与视口（`w` / `h` / 滚动 / 缩放 /
+     * dpr）都编进签名。**漏掉任何一项都会让该层停止更新**（表现为"改了参数但画面
+     * 不动"），因此宁可多编一项也不要少编。
+     *
+     * 特殊说明（比较语义）：签名是一个**数组**，逐项按 `Object.is` 比较——
+     * 原始值比数值，**对象 / 数组项按引用比较，绝不做字符串化**。此前签名是字符串
+     * 并由调用方 `join("|")` 构造，`join` 会把每个对象 / 数组元素串成字面量
+     * `"[object Object]"`，于是内容完全不同的两个选区产生同一个签名；缓存命中后
+     * 本函数在清屏前就 return，**旧选区框留在画布上不消失、新框画不出来**——这就是
+     * 用户报告的缺陷 #4。详见 `mainCanvasSignature.ts`。
+     *
+     * 特殊说明：`undefined` 表示不做缓存（每帧重绘）——保持既有行为，供未迁移的
+     * 调用方与单测使用。
+     */
+    mainContentSignature?: MainCanvasSignature;
 }) {
     const {
         axisCanvas,
@@ -376,63 +474,20 @@ export function drawPianoRoll(args: {
         detectedPitchCurves,
         isDark = true,
         clipboardPreview,
-        paramMorphOverlay,
+        paramMorphOverlays,
         fontFamily,
+        skipKeyboardGeometry = false,
+        skipAxisText = false,
+        skipPlayhead = false,
+        skipCurves = false,
+        skipAxisCanvas = false,
+        mainContentSignature,
     } = args;
 
     const resolvedFontFamily = fontFamily || "sans-serif";
 
-    // 主题颜色查找表
-    const colors = isDark
-        ? {
-              // 琴键区（白键降亮一档、黑键提亮一档：在深色画布上既不刺眼也不淹没）
-              axisBorder: "rgba(255,255,255,0.08)",
-              whiteKey: "#d7dade",
-              blackKey: "#2e3136",
-              blackKeyGradient: "rgba(0,0,0,0.35)",
-              cLabel: "#3b82f6",
-              whiteKeyLabel: "rgba(60,63,70,0.75)",
-              blackKeyLabel: "rgba(220,220,220,0.80)",
-              cSeparator: "rgba(100,100,100,0.45)",
-              keySeparator: "rgba(160,160,160,0.20)",
-              tensionLabel: "rgba(255,255,255,0.55)",
-              tensionLine: "rgba(255,255,255,0.10)",
-              // 网格线
-              pitchGridC: "rgba(255,255,255,0.10)",
-              pitchGridOther: "rgba(255,255,255,0.05)",
-              // 曲线
-              origCurve: "rgba(200,200,200,0.55)",
-              editCurve: "rgba(255,255,255,0.92)",
-              selectionCurve: "rgba(100,200,255,0.95)",
-              // 叠加文字 & 播放头（画布中央的操作提示文字，需保持可读：
-              // 旧值 35% 不透明度在两套主题下都只剩 1.5-1.8:1）
-              overlayTextColor: "rgba(235,240,248,0.45)",
-              playheadLine: "rgba(255,255,255,0.25)",
-          }
-        : {
-              // 浅色主题
-              axisBorder: "rgba(0,0,0,0.10)",
-              whiteKey: "#ffffff",
-              blackKey: "#3a3a3a",
-              blackKeyGradient: "rgba(0,0,0,0.25)",
-              cLabel: "#2563eb",
-              whiteKeyLabel: "rgba(80,80,80,0.65)",
-              blackKeyLabel: "rgba(255,255,255,0.85)",
-              cSeparator: "rgba(0,0,0,0.25)",
-              keySeparator: "rgba(0,0,0,0.12)",
-              tensionLabel: "rgba(0,0,0,0.55)",
-              tensionLine: "rgba(0,0,0,0.10)",
-              // 网格线
-              pitchGridC: "rgba(0,0,0,0.12)",
-              pitchGridOther: "rgba(0,0,0,0.06)",
-              // 曲线
-              origCurve: "rgba(132,104,26,0.80)",
-              editCurve: "rgba(178,108,0,1)",
-              selectionCurve: "rgba(0,116,200,1)",
-              // 叠加文字 & 播放头（画布中央的操作提示文字，需保持可读）
-              overlayTextColor: "rgba(30,36,48,0.60)",
-              playheadLine: "rgba(0,0,0,0.20)",
-          };
+    // 主题颜色查找表（提取到 colors.ts：阶段 2 起 GL 层与 Canvas2D 层共用同一份配色）
+    const colors = resolvePianoRollColors(isDark);
 
     // 网格线设备像素对齐：分数 DPR（125%/150%）下 1px CSS 线覆盖 1~2 物理像素，
     // 随落点相位粗细不一。hairline = 1 物理像素、strong = 2 物理像素。
@@ -442,7 +497,9 @@ export function drawPianoRoll(args: {
     const strongW = 2 / dpr;
 
     // Draw axis (left labels)
-    if (axisCanvas) {
+    // 【阶段 2】`skipAxisCanvas` 为真时**整段跳过（含清屏）**：GL 轴层已接管全部
+    // 轴内容，而清屏本身就会让画布失效，只跳过绘制无法达到"保持缓存"的目的。
+    if (axisCanvas && !skipAxisCanvas) {
         const ctx = axisCanvas.getContext("2d");
         if (ctx) {
             const h = viewSize.h;
@@ -453,11 +510,17 @@ export function drawPianoRoll(args: {
             // 全物理清屏：round 向上取整时 CSS 尺寸清屏会在底部遗留残影。
             clearCanvasPhysical(ctx, target);
 
-            ctx.strokeStyle = colors.axisBorder;
-            ctx.beginPath();
-            ctx.moveTo(w - 0.5, 0);
-            ctx.lineTo(w - 0.5, h);
-            ctx.stroke();
+            // 轴右缘分隔线：阶段 2 起由 GL 层绘制（作为键盘实例的**第一条**，
+            // 保持"先画线、再被琴键盖住"的既有层序）。GL 接管时必须跳过，否则
+            // 它会画在上层画布上、浮在琴键之上——实测浅色主题右缘出现一条 229 的
+            // 竖线（Canvas2D 路径里它本被不透明琴键完全遮住）。
+            if (!skipKeyboardGeometry) {
+                ctx.strokeStyle = colors.axisBorder;
+                ctx.beginPath();
+                ctx.moveTo(w - 0.5, 0);
+                ctx.lineTo(w - 0.5, h);
+                ctx.stroke();
+            }
 
             if (editParam === "pitch") {
                 const absMin = PITCH_MIN_MIDI;
@@ -478,26 +541,30 @@ export function drawPianoRoll(args: {
                     const black = isBlackKey(midi);
                     const pc = ((midi % 12) + 12) % 12;
 
-                    // 白键
-                    if (!black) {
-                        ctx.fillStyle = colors.whiteKey;
-                        ctx.fillRect(0, top, w, keyH);
+                    // 白键 / 黑键底色 / 黑键渐变：阶段 2 起由 GL 层绘制，
+                    // 此处仅在 GL 未接管时绘制（见 skipKeyboardGeometry 说明）。
+                    if (!skipKeyboardGeometry) {
+                        if (!black) {
+                            ctx.fillStyle = colors.whiteKey;
+                            ctx.fillRect(0, top, w, keyH);
+                        }
+
+                        // 黑键：深色覆盖，宽度 72%
+                        if (black) {
+                            ctx.fillStyle = colors.blackKey;
+                            ctx.fillRect(0, top, w * 0.72, keyH);
+                            // 黑键右侧渐变边缘
+                            const grad = ctx.createLinearGradient(w * 0.62, 0, w * 0.72, 0);
+                            grad.addColorStop(0, "rgba(0,0,0,0)");
+                            grad.addColorStop(1, colors.blackKeyGradient);
+                            ctx.fillStyle = grad;
+                            ctx.fillRect(w * 0.62, top, w * 0.1, keyH);
+                        }
                     }
 
-                    // 黑键：深色覆盖，宽度 72%
-                    if (black) {
-                        ctx.fillStyle = colors.blackKey;
-                        ctx.fillRect(0, top, w * 0.72, keyH);
-                        // 黑键右侧渐变边缘
-                        const grad = ctx.createLinearGradient(w * 0.62, 0, w * 0.72, 0);
-                        grad.addColorStop(0, "rgba(0,0,0,0)");
-                        grad.addColorStop(1, colors.blackKeyGradient);
-                        ctx.fillStyle = grad;
-                        ctx.fillRect(w * 0.62, top, w * 0.1, keyH);
-                    }
-
-                    // 所有琴键音名标注（高度足够时）
-                    if (keyH >= 6) {
+                    // 所有琴键音名标注（高度足够时）。
+                    // 阶段 2 Task 5：GL 接管轴文字后整段跳过（见 skipAxisText 说明）。
+                    if (!skipAxisText && keyH >= 6) {
                         ctx.textBaseline = "middle";
                         const midY = top + keyH / 2;
                         if (!black) {
@@ -521,17 +588,20 @@ export function drawPianoRoll(args: {
                         }
                     }
 
-                    // 分隔线：C 音用较深的线，其他用浅线
-                    ctx.strokeStyle = pc === 0 ? colors.cSeparator : colors.keySeparator;
-                    ctx.lineWidth = pc === 0 ? 1 : 0.5;
-                    ctx.beginPath();
-                    ctx.moveTo(0, top + 0.5);
-                    ctx.lineTo(w, top + 0.5);
-                    ctx.stroke();
-                    ctx.lineWidth = 1;
+                    // 分隔线：C 音用较深的线，其他用浅线（同上，GL 接管后跳过）
+                    if (!skipKeyboardGeometry) {
+                        ctx.strokeStyle = pc === 0 ? colors.cSeparator : colors.keySeparator;
+                        ctx.lineWidth = pc === 0 ? 1 : 0.5;
+                        ctx.beginPath();
+                        ctx.moveTo(0, top + 0.5);
+                        ctx.lineTo(w, top + 0.5);
+                        ctx.stroke();
+                        ctx.lineWidth = 1;
+                    }
                 }
-            } else {
-                // 非音高参数轴标签：对 child-pitch-offset 做特殊处理以配合横线（音分/度数）
+            } else if (!skipAxisText) {
+                // 非音高参数轴标签：对 child-pitch-offset 做特殊处理以配合横线（音分/度数）。
+                // 阶段 2 Task 5：GL 接管轴文字与刻度线后整段跳过。
                 const view = paramViews[editParam] ?? { center: 0.5, span: 1 };
                 const span = Math.max(1e-6, view.span);
                 const vMin = view.center - span / 2;
@@ -654,6 +724,15 @@ export function drawPianoRoll(args: {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
+    // 【阶段 2 Task 6】主画布内容缓存：签名未变则整张跳过（含清屏）。
+    // 缓存按**画布元素**登记（面板重建画布 / StrictMode 双挂载会换元素）。
+    // 比较按 `Object.is` 逐项进行——对象 / 数组项比引用，绝不字符串化（见
+    // `mainCanvasSignature.ts` 对缺陷 #4 的说明）。
+    if (mainContentSignature !== undefined) {
+        if (isSameMainCanvasSignature(mainContentSignature, mainCanvasCache.get(canvas))) return;
+        mainCanvasCache.set(canvas, mainContentSignature);
+    }
+
     const { w, h } = viewSize;
     // 统一光栅化契约：此前这里用 Math.floor，而波形面用 Math.round，两者在
     // 半像素 DPR 下会差一整个物理像素；现在全部收敛到 rasterize()。
@@ -669,76 +748,26 @@ export function drawPianoRoll(args: {
     const beatToSec = Math.max(1e-9, secPerBeat);
 
     // Horizontal grid lines
-    if (editParam === "pitch") {
-        const absMin = PITCH_MIN_MIDI;
-        const absMax = PITCH_MAX_MIDI;
-        const view = pitchView;
-        const span = clamp(view.span, 1e-6, absMax - absMin);
-        const min = clamp(view.center - span / 2, absMin, absMax - span);
-        const max = min + span;
-        const startMidi = clamp(Math.floor(min), absMin, absMax);
-        const endMidi = clamp(Math.ceil(max), absMin, absMax);
-        const highlightActive = (() => {
-            if (!args.projectScale) return false;
-            const mode = args.scaleHighlightMode ?? "off";
-            if (mode === "off") return false;
-            return mode === "always";
-        })();
-        const projectScaleNotes = args.projectScale ? resolveScaleNotes(args.projectScale) : [];
-        const scaleSegments = args.scaleSegments ?? null;
-        // 段级音阶音级只依赖段本身，与行无关：提升到行循环外只求值一次，
-        // 否则 60fps 下是 行数 × 段数 次重复的音阶解析 + 数组分配。
-        const segmentNotesList =
-            highlightActive && scaleSegments && scaleSegments.length > 0
-                ? scaleSegments.map((segment) =>
-                      segment.scale ? resolveScaleNotes(segment.scale) : null,
-                  )
-                : null;
-
-        for (let midi = startMidi; midi <= endMidi; midi += 1) {
-            const y = hairlineY(valueToY("pitch", midi + 0.5, h));
-            const pc = ((midi % 12) + 12) % 12;
-            const isScaleNote = highlightActive ? projectScaleNotes.includes(pc) : false;
-
-            const normalColor = pc === 0 ? colors.pitchGridC : colors.pitchGridOther;
-            ctx.strokeStyle = normalColor;
-            ctx.lineWidth = hairlineW;
-            ctx.beginPath();
-            ctx.moveTo(0, y);
-            ctx.lineTo(w, y);
-            ctx.stroke();
-
-            if (!highlightActive) continue;
-
-            if (segmentNotesList) {
-                // Tempo Map 路径：按时间段绘制高亮段。
-                ctx.strokeStyle = isDark ? "rgba(255,200,80,0.22)" : "rgba(200,120,20,0.22)";
-                ctx.lineWidth = 2;
-                for (let si = 0; si < scaleSegments!.length; si += 1) {
-                    const segmentNotes = segmentNotesList[si];
-                    if (!segmentNotes || !segmentNotes.includes(pc)) continue;
-                    const segment = scaleSegments![si];
-                    const x0 = secToViewportPx(axis, segment.startSec);
-                    const x1 = secToViewportPx(axis, segment.endSec);
-                    if (x1 < 0 || x0 > w) continue;
-                    ctx.beginPath();
-                    ctx.moveTo(Math.max(0, x0), y);
-                    ctx.lineTo(Math.min(w, x1), y);
-                    ctx.stroke();
-                }
-                continue;
-            }
-
-            if (isScaleNote) {
-                ctx.strokeStyle = isDark ? "rgba(255,200,80,0.22)" : "rgba(200,120,20,0.22)";
-                ctx.lineWidth = 2;
-                ctx.beginPath();
-                ctx.moveTo(0, y);
-                ctx.lineTo(w, y);
-                ctx.stroke();
-            }
-        }
-    } else if (isChildPitchOffsetCentsParam(editParam)) {
+    //
+    // 【已删除：Canvas2D 音高网格分支】该分支原先写作
+    // `if (!skipGrid && editParam === "pitch") { … }`，但生产调用方
+    // （`PianoRollPanel`）**恒传 `skipGrid: true`**——网格的唯一绘制者是 GL 静态层。
+    // 因此整段（连同其中的音阶高亮：单音阶与 Tempo Map 分段两条路径）在生产环境
+    // **不可达**，是死代码。
+    //
+    // 【为什么高亮不在这里保留一份】音阶高亮的旧实现只存在于本分支内，而本分支
+    // 恒被跳过——于是按钮改 Redux 状态、画面却什么都不画（缺陷 #6）。它已迁到 GL
+    // 网格层（`buildPitchGridInstances` 的 `scaleNotes` / `scaleHighlightRgba`），
+    // 与网格线同层同源；在此留一份 Canvas2D 副本只会制造"两个绘制者"的分叉，
+    // 而那正是本文件反复警告的类别。
+    //
+    // 【已知限制】旧分段路径依赖 `scaleSegments`（按时间段换音阶）；GL 网格几何是
+    // 视口坐标、不含时间轴，无法表达分段，因此**分段音阶高亮未迁移**，只支持单一
+    // 工程音阶。详见 `PianoRollPanel.buildGridSpec` 与 `buildPitchGridInstances`。
+    //
+    // 非音高参数的刻度线仍在此绘制（它们的网格线归 GL，但下面三个分支是
+    // Canvas2D 侧保留的回退路径，见各 `skip*` 参数的说明）。
+    if (isChildPitchOffsetCentsParam(editParam)) {
         const view = paramViews[editParam] ?? { center: 0, span: 1 };
         const span = Math.max(1e-6, view.span);
         const vMin = view.center - span / 2;
@@ -820,17 +849,22 @@ export function drawPianoRoll(args: {
         }
     }
 
-    // Selection (time band)
-    if (selection) {
-        const a = Math.min(selection.aBeat, selection.bBeat);
-        const b = Math.max(selection.aBeat, selection.bBeat);
-        // 选区数据是 beat 单位：先转 sec 再统一投影，不构造 pxPerBeat。
-        const x0 = secToViewportPx(axis, a * beatToSec);
-        const x1 = secToViewportPx(axis, b * beatToSec);
+    // Selection (time band)：多选区逐段绘制（断层处自然不画）
+    //
+    // 【阶段 3 修正】选区**必须画在曲线之下**：Canvas2D 的历史行为就是先画选区、
+    // 再画各条曲线（对比 `render.ts` 中本段与下方曲线段的先后），因此它的半透明
+    // 填充与边框不会遮挡曲线。阶段 2 曾把它与播放头一起搬到曲线上方的叠加层，
+    // 造成层序反转（曲线被 8% 蓝填充染色）；此处修正为留在主画布。
+    if (selection && selection.length > 0) {
         ctx.fillStyle = "rgba(100, 200, 255, 0.08)";
-        ctx.fillRect(x0, 0, x1 - x0, h);
         ctx.strokeStyle = "rgba(100, 200, 255, 0.30)";
-        ctx.strokeRect(x0 + 0.5, 0.5, Math.max(0, x1 - x0 - 1), h - 1);
+        for (const range of selection) {
+            // 选区数据是 beat 单位：先转 sec 再统一投影，不构造 pxPerBeat。
+            const x0 = secToViewportPx(axis, range.startBeat * beatToSec);
+            const x1 = secToViewportPx(axis, range.endBeat * beatToSec);
+            ctx.fillRect(x0, 0, x1 - x0, h);
+            ctx.strokeRect(x0 + 0.5, 0.5, Math.max(0, x1 - x0 - 1), h - 1);
+        }
     }
 
     // 若音高分析进行中，跳过曲线绘制（进度条已显示状态）
@@ -838,7 +872,13 @@ export function drawPianoRoll(args: {
         return;
     }
 
-    if (editParam === "pitch" && referencePitchOverlays && referencePitchOverlays.length > 0) {
+    // 【阶段 3】曲线归 GL 时整段跳过（见 skipCurves 说明）。
+    if (
+        !skipCurves &&
+        editParam === "pitch" &&
+        referencePitchOverlays &&
+        referencePitchOverlays.length > 0
+    ) {
         referencePitchOverlays.forEach((overlay) => {
             const values = resolveSecondaryOverlayValues({
                 orig: overlay.paramView.orig,
@@ -867,7 +907,12 @@ export function drawPianoRoll(args: {
 
     // 检测音高参考线：在 pitch 模式下，将后端推送的 per-clip 检测曲线渲染为半透明彩色参考线�?
     // 渲染在用户编辑曲线下方，不干扰主曲线的视觉层次�?
-    if (editParam === "pitch" && detectedPitchCurves && detectedPitchCurves.length > 0) {
+    if (
+        !skipCurves &&
+        editParam === "pitch" &&
+        detectedPitchCurves &&
+        detectedPitchCurves.length > 0
+    ) {
         // �?clip 时循环颜色，增强区分�?
         // 候选曲线色板：按主题给两套 —— 浅色主题提高不透明度并加深，
         // 否则在白底上几乎隐形（旧版青绿在白底仅 ~1.4:1）。
@@ -938,7 +983,7 @@ export function drawPianoRoll(args: {
 
     // Curves
     // 副参数曲线（半透明、细线，绘制在主参数曲线下方�?
-    if (showSecondaryParam && secondaryParamIds.length > 0) {
+    if (!skipCurves && showSecondaryParam && secondaryParamIds.length > 0) {
         // 副参数曲线调色板：按主题给两套（浅色主题加深加浓，否则在白底上发飘）；
         // 琥珀成员换成玫红 —— 琥珀是编辑包络线的专属色相，避免撞色。
         const secondaryPalette = isDark
@@ -996,7 +1041,7 @@ export function drawPianoRoll(args: {
                 ? liveEditOverride.edit
                 : paramView.edit;
 
-        if (paramView.orig.length >= 2) {
+        if (!skipCurves && paramView.orig.length >= 2) {
             // original (dashed)
             ctx.save();
             ctx.strokeStyle = colors.origCurve;
@@ -1017,7 +1062,7 @@ export function drawPianoRoll(args: {
             ctx.restore();
         }
 
-        if (editValues.length >= 2) {
+        if (!skipCurves && editValues.length >= 2) {
             // edited (solid)
             ctx.save();
             ctx.strokeStyle = colors.editCurve;
@@ -1038,17 +1083,16 @@ export function drawPianoRoll(args: {
             ctx.restore();
         }
 
-        // 选区内曲线高亮：在选区范围内用亮蓝色加粗重绘编辑曲线
-        if (selection && editValues.length >= 2) {
-            const selMinBeat = Math.min(selection.aBeat, selection.bBeat);
-            const selMaxBeat = Math.max(selection.aBeat, selection.bBeat);
-            const selX0 = secToViewportPx(axis, selMinBeat * beatToSec);
-            const selX1 = secToViewportPx(axis, selMaxBeat * beatToSec);
-
+        // 选区内曲线高亮：在每一段选区范围内用亮蓝色加粗重绘编辑曲线。
+        // 多段用同一条路径（nonzero 填充规则取并集）一次 clip，避免逐段重绘整条曲线。
+        if (!skipCurves && selection && selection.length > 0 && editValues.length >= 2) {
             ctx.save();
-            // 裁剪到选区范围
             ctx.beginPath();
-            ctx.rect(selX0, 0, selX1 - selX0, h);
+            for (const range of selection) {
+                const x0 = secToViewportPx(axis, range.startBeat * beatToSec);
+                const x1 = secToViewportPx(axis, range.endBeat * beatToSec);
+                ctx.rect(x0, 0, x1 - x0, h);
+            }
             ctx.clip();
 
             ctx.strokeStyle = colors.selectionCurve;
@@ -1069,69 +1113,71 @@ export function drawPianoRoll(args: {
             ctx.restore();
         }
 
-        // 剪贴板预览曲线：在选区范围内渲染半透明虚线预览
-        // 起始点与选区起始点对齐，超出选区的部分直接裁掉（不压缩）
+        // 剪贴板预览曲线：按「剪贴板 → 目标选区」映射逐段渲染半透明虚线。
+        // 与粘贴共用 paramClipboardMapping 的唯一映射规则，因此断层处不会画线
+        // （既不会压缩成连续曲线、也不会填平断层），预览即最终落盘结果。
         if (
+            !skipCurves &&
             clipboardPreview &&
             selection &&
-            clipboardPreview.param === editParam &&
-            clipboardPreview.values.length > 0
+            selection.length > 0 &&
+            clipboardPreview.param === editParam
         ) {
-            const selMinBeat = Math.min(selection.aBeat, selection.bBeat);
-            const selMaxBeat = Math.max(selection.aBeat, selection.bBeat);
-            const selStartSec = selMinBeat * beatToSec;
-            const selEndSec = selMaxBeat * beatToSec;
-
-            const cbFp = Math.max(1e-6, clipboardPreview.framePeriodMs);
-
-            const selX0 = secToViewportPx(axis, selStartSec);
-            const selX1 = secToViewportPx(axis, selEndSec);
-
-            ctx.save();
-            // 裁剪到选区范围
-            ctx.beginPath();
-            ctx.rect(selX0, 0, selX1 - selX0, h);
-            ctx.clip();
-
-            // 剪贴板预览与选区高亮同用青蓝色相（虚线+降不透明度区分），
-            // 不再占用琥珀色相 —— 琥珀属于编辑包络线本体。
-            ctx.strokeStyle = isDark ? "rgba(100, 200, 255, 0.55)" : "rgba(0, 116, 200, 0.60)";
-            ctx.lineWidth = 2;
-            ctx.setLineDash(getFixedDashPattern(4, 4));
-            ctx.beginPath();
-
-            let started = false;
-            for (let i = 0; i < clipboardPreview.values.length; i++) {
-                // 不缩放，直接按原始帧间距排列
-                const tSec = selStartSec + (i * cbFp) / 1000;
-                // 超出选区结束点则停止
-                if (tSec > selEndSec) break;
-                const x = secToViewportPx(axis, tSec);
-                const rawValue = clipboardPreview.values[i] ?? 0;
-                const mappedValue = editParam === "pitch" ? rawValue + 0.5 : rawValue;
-                const y = valueToY(editParam, mappedValue, h);
-                if (!started) {
-                    ctx.moveTo(x, y);
-                    started = true;
-                } else {
-                    ctx.lineTo(x, y);
+            const frameRanges = beatRangesToFrameRanges(
+                selection,
+                secPerBeat,
+                paramView.framePeriodMs,
+            );
+            const spans = clipboardPreviewSpans({
+                targetRanges: frameRanges,
+                clipboard: clipboardPreview,
+                targetFramePeriodMs: paramView.framePeriodMs,
+            });
+            if (spans.length > 0) {
+                ctx.save();
+                // 预览与选区高亮同用青蓝色相（虚线+降不透明度区分），
+                // 不再占用琥珀色相 —— 琥珀属于编辑包络线本体。
+                ctx.strokeStyle = isDark
+                    ? "rgba(100, 200, 255, 0.55)"
+                    : "rgba(0, 116, 200, 0.60)";
+                ctx.lineWidth = 2;
+                ctx.setLineDash(getFixedDashPattern(4, 4));
+                for (const span of spans) {
+                    const fp = Math.max(1e-6, span.framePeriodMs);
+                    ctx.beginPath();
+                    let started = false;
+                    for (let i = 0; i < span.values.length; i++) {
+                        const tSec = span.startSec + (i * fp) / 1000;
+                        const x = secToViewportPx(axis, tSec);
+                        const rawValue = span.values[i] ?? 0;
+                        const mappedValue = editParam === "pitch" ? rawValue + 0.5 : rawValue;
+                        const y = valueToY(editParam, mappedValue, h);
+                        if (!started) {
+                            ctx.moveTo(x, y);
+                            started = true;
+                        } else {
+                            ctx.lineTo(x, y);
+                        }
+                    }
+                    ctx.stroke();
                 }
+                ctx.restore();
             }
-            ctx.stroke();
-            ctx.restore();
         }
 
-        if (paramMorphOverlay) {
-            drawParamMorphOverlay({
-                ctx,
-                overlay: paramMorphOverlay,
-                editParam,
-                framePeriodMs: paramView.framePeriodMs,
-                axis,
-                h,
-                valueToY,
-                isDark,
-            });
+        if (paramMorphOverlays && paramMorphOverlays.length > 0) {
+            for (const overlay of paramMorphOverlays) {
+                drawParamMorphOverlay({
+                    ctx,
+                    overlay,
+                    editParam,
+                    framePeriodMs: paramView.framePeriodMs,
+                    axis,
+                    h,
+                    valueToY,
+                    isDark,
+                });
+            }
         }
     }
 
@@ -1154,12 +1200,22 @@ export function drawPianoRoll(args: {
     // 像素数随落点相位变化，就是画布版"播放时粗细不一"。
     // 修正：线宽取整物理像素；奇数物理像素宽的居中描边由 strokePx 补半个
     // 设备像素，使线体恰好覆盖整数个设备列。
-    const phWidthPx = wholeDevicePxLength(1, axis.dpr);
-    const phx = strokePx(axis, secToViewportPx(axis, playheadSec), phWidthPx);
-    ctx.strokeStyle = colors.playheadLine;
-    ctx.lineWidth = phWidthPx;
-    ctx.beginPath();
-    ctx.moveTo(phx, 0);
-    ctx.lineTo(phx, h);
-    ctx.stroke();
+    // 【阶段 2 Task 6】GL 叠加层接管后跳过（见 skipPlayhead 说明）。对齐逻辑已在
+    // `pianoRollKernelHost.rebuildOverlayGeometry` 里逐字复刻，两者不可分叉。
+    //
+    // 特殊说明（颜色必须归一化）：`colors.playheadLine` 是指向 `--qt-playhead` 的
+    // **CSS 变量**，而 Canvas2D 的 `strokeStyle` **不解析 `var(...)`**——赋一个非法
+    // 值会被浏览器**静默忽略**、沿用上一次的描边色（不报错，表现为播放头串色）。
+    // 本分支当前不可达（`skipPlayhead` 恒为 true），但一旦有人打开它就会踩到，
+    // 因此这里显式过一遍 `normalizeCssColor`（与 GL 侧同一个归一化函数）。
+    if (!skipPlayhead) {
+        const phWidthPx = wholeDevicePxLength(1, axis.dpr);
+        const phx = strokePx(axis, secToViewportPx(axis, playheadSec), phWidthPx);
+        ctx.strokeStyle = normalizeCssColor(colors.playheadLine);
+        ctx.lineWidth = phWidthPx;
+        ctx.beginPath();
+        ctx.moveTo(phx, 0);
+        ctx.lineTo(phx, h);
+        ctx.stroke();
+    }
 }

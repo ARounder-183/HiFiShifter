@@ -8,8 +8,11 @@
  *   getVibratoDragWheelTarget（颤音拖拽幅度/频率）。
  *
  * 与其他模块的关系：
- * - 被 PianoRollPanel.tsx、usePianoRollInteractions.ts、TimelineScrollArea.tsx 调用，
- *   将解析得到的动作分发给具体的 scroll/zoom 实现。
+ * - 被 PianoRollPanel.tsx、usePianoRollInteractions.ts 与内核宿主
+ *   `timeline/kernel/host/timelineKernelHost.ts` 调用，将解析得到的动作分发给具体的
+ *   scroll/zoom 实现。
+ *   旧调用方 `TimelineScrollArea.tsx` 已随旧渲染路径删除（内核模式下滚轮手势由内核
+ *   宿主自行解析）。
  *
  * 维护说明：
  * - "horizontal/vertical scroll request" 与 "free-scroll"（双轴自由滚动）必须明确区分；
@@ -34,7 +37,11 @@ function isLikelyDiscreteWheelStep(absDelta: number): boolean {
 }
 
 export type ParamEditorWheelAction =
-    "free-scroll" | "horizontal-scroll" | "vertical-pan" | "vertical-zoom" | "horizontal-zoom";
+    | "free-scroll"
+    | "horizontal-scroll"
+    | "vertical-pan"
+    | "vertical-zoom"
+    | "horizontal-zoom";
 
 export type TimelineWheelAction =
     | "free-scroll"

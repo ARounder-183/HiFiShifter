@@ -1,3 +1,24 @@
+/**
+ * Clip 细节层（Canvas2D）渲染器。
+ *
+ * 【主要内容】在**内容坐标**下绘制 clip 的细节，并按批次合批提交块面：
+ * 旋钮 / 徽标 / 名称 / 淡入淡出曲线 / 吸附三角 / 静音覆盖 / lane 分界线，
+ * 以及 MIDI / 音高参考块的音高折线与 "▽" 回绕标记。
+ *
+ * 【作用】内核把 clip 的**主体块面**交给 GL（`glBodies`）后，本函数仍作为
+ * Canvas2D 细节层被每帧调用（`kernel/host/timelineKernelHost.redrawDetails`）。
+ * 需要压在块面之上的内容一律走"**最后一遍落笔**"模式：收集 → 等全部块面
+ * 提交完 → 统一绘制（否则重叠区里后续批次的块面会把先画的内容盖掉）。
+ *
+ * 【与其他模块的关系】
+ * - 上游：`timelineCanvasModel.buildSparseClipRenderModel` 产出几何与可选
+ *   细节字段（`silenceSpansPx` / `takeLaneSeparatorOffsetsPx` /
+ *   `midiPitchCurvePx` / `midiLoopMarkerOffsetsPx`）。
+ * - 横向：样式一律走 `timelineCanvasStyle`；音高折线的数学走
+ *   `midiPitchCurve`；回绕标记的绘制走 `utils/loopRender.drawLoopMarkers`。
+ * - 本文件**不得**自行做时间↔像素换算（模型侧已投影；拿到的是 CSS 像素）。
+ */
+
 import {
     buildTimelineClipVisualStyle,
     CLIP_CORNER_RADIUS_PX,
@@ -12,6 +33,7 @@ import {
     type GlClipBodySink,
 } from "./timelineClipGlRenderer.js";
 import { fadeGainSigned } from "../reaperFade.js";
+import { drawLoopMarkers } from "../../../../utils/loopRender.js";
 
 function drawFadeCurveStroke(
     ctx: CanvasRenderingContext2D,
@@ -171,6 +193,25 @@ export function drawTimelineCanvas(
             snapOffsetPx?: number;
             /** 前导重叠区宽度（像素，从左缘起算）。>0 时上 clip 在该区域半透。 */
             leadingOverlapPx?: number;
+            /** 静音检测预览区段（像素，相对 clip 左缘）：半透明红色覆盖。 */
+            silenceSpansPx?: Array<{ leftPx: number; widthPx: number }>;
+            /** 多 Take lane 分界线的 y 偏移（相对 body 顶部，CSS px）。 */
+            takeLaneSeparatorOffsetsPx?: number[];
+            /**
+             * MIDI / 音高参考块的音高折线点（相对 clip 左缘 / body 顶部，CSS px）。
+             *
+             * `y = NaN` 表示**断点**（该处无音符）：绘制端在此抬起画笔起新子
+             * 路径，否则音符间的静音会被连成一条不存在的斜线。
+             */
+            midiPitchCurvePx?: Array<{ x: number; y: number }>;
+            /** 音高折线的描边色（缺省走 clip 调色板回退色）。 */
+            midiPitchStroke?: string;
+            /**
+             * Loop 回绕 / 媒体边界 "▽" 标记的 x 偏移（相对 clip 左缘，CSS px）。
+             *
+             * 已由模型侧按统一 axis 投影——绘制端拿不到 pxPerSec，不得自行换算。
+             */
+            midiLoopMarkerOffsetsPx?: number[];
         }>;
         /** 轨道横向分界线（延伸到工程末尾之后）。 */
         rowGuides?: {
@@ -199,6 +240,20 @@ export function drawTimelineCanvas(
          * 超出 GL 渲染器的单矩形模型。
          */
         glBodies?: GlClipBodySink | null;
+        /**
+         * 编组激活时**只画描边、不画块面**（供「细节层位于波形之上」的调用方使用）。
+         *
+         * 【为什么需要】编组激活的 clip 默认会退回 Canvas2D 画整块（块面 + 深金外圈
+         * 描边），因为外圈描边伸出矩形 2px、超出 GL 渲染器的单矩形模型。旧实现的
+         * 块面画布在波形**之下**，所以块面不会遮住波形；渲染内核的细节层在波形
+         * **之上**，若照旧画块面就会把该 clip 的波形盖掉。
+         *
+         * 置 true 时：块面仍由 GL 承担（`useGl` 不再被编组激活否决），Canvas2D 只补
+         * 那一圈描边——视觉与旧实现等价（描边只在 clip 边缘，不与波形重叠）。
+         *
+         * @default false
+         */
+        groupOutlineOverGl?: boolean;
         /**
          * 视口左上角的**内容坐标**（CSS 像素）。
          *
@@ -555,7 +610,10 @@ export function drawTimelineCanvas(
             isGroupActive,
             isGroupDisabled,
             hasSeam,
-            useGl: args.glBodies != null && !isGroupActive,
+            // 编组激活的 clip 默认退回 Canvas2D（外圈描边超出 GL 的单矩形模型）；
+            // 细节层在波形之上时改用「只补描边」模式，块面仍由 GL 承担（见
+            // `groupOutlineOverGl` 的说明）。
+            useGl: args.glBodies != null && (!isGroupActive || args.groupOutlineOverGl === true),
             fills,
             strokes,
             // 屏障：前导重叠会盖住前一个 clip；编组外圈描边会伸出自身矩形
@@ -708,11 +766,12 @@ export function drawTimelineCanvas(
             ctx.fillStyle = style.textFill;
             ctx.font = `10px ${fontFamily}`;
             ctx.textBaseline = "middle";
-            const metrics = ctx.measureText(style.gainLabel);
-            const gainX = clipLeft + clipWidth - metrics.width - 6;
+            // 宽度取自样式解析（而非现场 measureText）：命中端
+            // （`clipHeaderControls`）消费同一个值来划标签命中区，两处必须是
+            // 同一份数据，否则「看到的」与「可点的」会漂移。
+            const gainX = clipLeft + clipWidth - style.gainLabelWidth - 6;
             if (style.showPlaybackRate) {
-                const rateMetrics = ctx.measureText(style.playbackRateLabel);
-                const rateX = gainX - rateMetrics.width - 8;
+                const rateX = gainX - style.rateLabelWidth - 8;
                 ctx.fillText(style.playbackRateLabel, rateX, clipTop + 9);
             }
             ctx.fillText(style.gainLabel, gainX, clipTop + 9);
@@ -949,10 +1008,194 @@ export function drawTimelineCanvas(
         pending.length = 0;
     }
 
+    /**
+     * 静音检测预览的红色覆盖矩形（内容坐标），在**所有** clip 绘制完成后统一落笔。
+     *
+     * 【为什么单独一遍】红色层必须压在全部块面之上。重叠区里后一个 clip 的块面
+     * 可能属于**后续批次**（`barrier` 由前导重叠 / 半透块面触发），若在各 clip 的
+     * 细节阶段就画，先画的会被后画的块面盖掉——实测表现为「只有一部分静音区可见」。
+     */
+    const silenceOverlays: Array<{
+        left: number;
+        top: number;
+        width: number;
+        height: number;
+    }> = [];
+    /** 多 Take lane 分界线（同样在最后一遍落笔，避免被后续批次的块面盖掉）。 */
+    const takeLaneSeparators: Array<{ left: number; top: number; width: number }> = [];
+    /**
+     * MIDI / 音高参考块的音高折线与 "▽" 回绕标记（同样在**最后一遍**落笔）。
+     *
+     * 【为什么单独一遍】与静音红色覆盖同理：重叠区里后一个 clip 的块面可能属于
+     * **后续批次**，在本 clip 的细节阶段就画会被盖掉。折线又必须压在**本 clip
+     * 的 body 色块之上**，因此只能等全部块面提交后统一画。
+     *
+     * 【数据来源】模型侧 `midiPitchCurvePx`（数学来自随内核改造成为孤儿的
+     * `components/waveform/MidiPitchTrackCanvas.tsx`，已搬进 `midiPitchCurve.ts`）。
+     * 该组件唯一的挂载点 `TrackLane` 被删除后，MIDI clip 的 body 因此变成空白
+     * ——这是本次修复的功能回归点。
+     */
+    const midiPitchCurves: Array<{
+        points: Array<{ x: number; y: number }>;
+        color: string;
+        alpha: number;
+        /** 该 clip 的 body 矩形（内容坐标），用于**逐条**裁剪。 */
+        clip: { left: number; top: number; width: number; height: number };
+    }> = [];
+    /** 回绕标记：颜色 + 位置（相对 clip 左缘）+ 所属 clip 的 body 矩形。 */
+    const midiLoopMarkers: Array<{
+        xs: number[];
+        color: string;
+        /** body 顶部（内容坐标 y）：标记贴在该 clip 的 body 上缘。 */
+        top: number;
+        height: number;
+        /** 所属 clip 的左右缘（内容坐标）：标记水平方向按 clip 裁剪。 */
+        left: number;
+        right: number;
+    }> = [];
+
     for (const clip of args.clips) {
         const item = prepareClip(clip);
         if (item.barrier) flushBatch();
         pending.push(item);
+        if (clip.silenceSpansPx !== undefined) {
+            for (const span of clip.silenceSpansPx) {
+                silenceOverlays.push({
+                    left: item.left + span.leftPx,
+                    top: item.bodyTop,
+                    width: span.widthPx,
+                    height: item.bodyHeight,
+                });
+            }
+        }
+        if (clip.takeLaneSeparatorOffsetsPx !== undefined) {
+            for (const offset of clip.takeLaneSeparatorOffsetsPx) {
+                takeLaneSeparators.push({
+                    left: item.left,
+                    top: item.bodyTop + offset,
+                    width: item.width,
+                });
+            }
+        }
+        // MIDI 音高折线：点坐标相对 clip 左缘 / body 顶部，绘制时加回原点。
+        // 与静音覆盖一样，**逐条**记录裁剪矩形（一次全局裁剪只能覆盖一个 clip）。
+        if (clip.midiPitchCurvePx !== undefined && clip.midiPitchCurvePx.length >= 2) {
+            midiPitchCurves.push({
+                points: clip.midiPitchCurvePx,
+                color: clip.midiPitchStroke ?? "rgba(34, 211, 238, 0.78)",
+                // 与搬迁前 MidiPitchTrackCanvas 同一透明度语义：静音整体压暗。
+                alpha: clip.muted ? 0.4 : 0.85,
+                clip: {
+                    left: item.left,
+                    top: item.bodyTop,
+                    width: item.width,
+                    height: item.bodyHeight,
+                },
+            });
+        }
+        if (clip.midiLoopMarkerOffsetsPx !== undefined) {
+            midiLoopMarkers.push({
+                xs: clip.midiLoopMarkerOffsetsPx,
+                color: clip.midiPitchStroke ?? "rgba(34, 211, 238, 0.78)",
+                top: item.bodyTop,
+                height: item.bodyHeight,
+                left: item.left,
+                right: item.left + item.width,
+            });
+        }
     }
     flushBatch();
+
+    if (silenceOverlays.length > 0) {
+        // 与旧实现 `ClipItem` 的红色覆盖层同源：半透明红，覆盖 clip 的 body 区
+        // （不含 header，避免盖住名称 / 徽标等可交互标记）。
+        ctx.save();
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = "rgba(239, 68, 68, 0.3)";
+        for (const rect of silenceOverlays) {
+            ctx.fillRect(rect.left, rect.top, rect.width, rect.height);
+        }
+        ctx.restore();
+    }
+
+    if (takeLaneSeparators.length > 0) {
+        // 多 Take lane 分界线：亮色块上一律深色分线（白线在彩色块上看不见），
+        // 与旧实现 `ClipItem` 的分隔线同源。首条 lane 的顶边即 header 边界，
+        // 已由模型侧 `slice(1)` 排除。
+        ctx.save();
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = "rgba(0, 0, 0, 0.18)";
+        for (const line of takeLaneSeparators) {
+            ctx.fillRect(line.left, line.top, line.width, 1);
+        }
+        ctx.restore();
+    }
+
+    // ── MIDI / 音高参考块的音高折线 ──────────────────────────────────
+    // 【为什么在最后一遍】折线要压在**本 clip 的 body 色块**之上，而重叠区里
+    // 靠后的 clip 块面可能属于后续批次（见 `barrier`）；在细节阶段逐 clip 画
+    // 会被那些块面盖掉（与静音红色覆盖是同一个坑）。此处所有块面已提交完毕，
+    // 折线因此一定可见。
+    if (midiPitchCurves.length > 0) {
+        ctx.save();
+        ctx.lineJoin = "round";
+        ctx.lineCap = "round";
+        ctx.lineWidth = 1.5;
+        for (const curve of midiPitchCurves) {
+            // **逐条**裁剪：多个 clip 的折线在同一遍落笔，一次全局 clip 只能
+            // 覆盖其中一个（其余折线会溢出到相邻行）。
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(curve.clip.left, curve.clip.top, curve.clip.width, curve.clip.height);
+            ctx.clip();
+            ctx.beginPath();
+            ctx.globalAlpha = curve.alpha;
+            ctx.strokeStyle = curve.color;
+            let penDown = false;
+            for (const point of curve.points) {
+                // 点坐标相对 clip 左缘 / body 顶部，绘制时把原点加回去。
+                const x = curve.clip.left + point.x;
+                const y = curve.clip.top + point.y;
+                // NaN 的 y = 断点（该处无音符）：抬起画笔，另起子路径。
+                // 若连成一条线，音符之间的静音会被画成不存在的斜线。
+                if (Number.isNaN(y)) {
+                    penDown = false;
+                    continue;
+                }
+                if (!penDown) {
+                    ctx.moveTo(x, y);
+                    penDown = true;
+                } else {
+                    ctx.lineTo(x, y);
+                }
+            }
+            ctx.stroke();
+            ctx.restore();
+        }
+        ctx.restore();
+    }
+
+    // ── Loop 回绕 / 媒体边界 "▽" 标记 ────────────────────────────────
+    // 复用 `loopRender.drawLoopMarkers`（与波形分段边界同一套锚点数学，
+    // 见 `midiPitchCurve.resolveClipLoopMarkerOffsetsSec`）。标记位置已由模型
+    // 侧投影为相对 clip 左缘的像素，这里把原点平移到 body 左上角后再调用——
+    // 该函数以 (0,0) 为区域左上角、向下画三角。
+    if (midiLoopMarkers.length > 0) {
+        ctx.save();
+        for (const marker of midiLoopMarkers) {
+            if (marker.xs.length === 0) continue;
+            ctx.save();
+            ctx.beginPath();
+            // 水平方向裁到 clip 本体（垂直方向本就落在 body 内）。
+            ctx.rect(marker.left, marker.top, marker.right - marker.left, marker.height);
+            ctx.clip();
+            ctx.translate(marker.left, marker.top);
+            // 标记恒为不透明（与搬迁前 `MidiPitchTrackCanvas` 一致：只有折线受
+            // `muted` 压暗，回绕标记不受影响）。显式赋值以免受上游环境 alpha 影响。
+            ctx.globalAlpha = 1;
+            drawLoopMarkers(ctx, marker.xs, marker.height, marker.color);
+            ctx.restore();
+        }
+        ctx.restore();
+    }
 }

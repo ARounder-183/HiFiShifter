@@ -45,9 +45,13 @@ import {
     duplicateTrackRemote,
     removeTrackRemote,
     replaceClipSourceRemote,
+    setTrackStateRemote,
+    cycleDragDirection,
+    persistUiSettings,
 } from "./features/session/sessionSlice";
 import { useI18n } from "./i18n/I18nProvider";
 import { useClipPitchDataListener } from "./hooks/useClipPitchDataListener";
+import { useHistoryStateListener } from "./hooks/useHistoryStateListener";
 import { PitchAnalysisProvider, usePitchAnalysis } from "./contexts/PitchAnalysisContext";
 import { PianoRollStatusProvider, usePianoRollStatus } from "./contexts/PianoRollStatusContext";
 import { FileBrowserPanel } from "./components/layout/FileBrowserPanel";
@@ -776,6 +780,8 @@ function AppInner() {
     useClipPitchDataListener();
     useClipFormantStatusListener();
     useRecordingListener();
+    // 撤销/重做可用性（栈深度）镜像：菜单置灰与快捷键前置判断都读它
+    useHistoryStateListener();
 
     // 阻止浏览器默认的 Ctrl+F 搜索、右键菜单和 Alt 键
 
@@ -2447,6 +2453,19 @@ function AppInner() {
                     }
                     return;
                 }
+                if (
+                    editOp === "addClipsToParamSelection" ||
+                    editOp === "removeClipsFromParamSelection"
+                ) {
+                    // 音频块范围 → 参数编辑器选区：消费端**只有**参数编辑器，
+                    // 因此不按活动表面裁决 —— 焦点在时间轴上时按快捷键同样生效。
+                    // 选中了哪些音频块由消费端从 session 读取（选区是权威来源），
+                    // 与右键菜单传 clipIds 的路径共用同一实现。
+                    window.dispatchEvent(
+                        new CustomEvent("hifi:editOp", { detail: { op: editOp } }),
+                    );
+                    return;
+                }
                 const channel = resolveEditOpRoute(
                     getActiveSurface(),
                     editOp,
@@ -2520,24 +2539,40 @@ function AppInner() {
                     );
                     break;
                 case "edit.undo": {
+                    // 空栈时静默失败：后端回 ok=false，前端不套用任何快照 ——
+                    // 界面零刷新零变更、无任何提示（见 sessionSlice 的
+                    // undoRemote.fulfilled 空栈分支）。这里仍照常派发，绝不
+                    // 用前端镜像把撤销「挡」在门外：镜像万一滞后，被吞掉的
+                    // 是用户真实的撤销意图，而多一次空往返没有代价。
                     // 长按 Ctrl+Z = 连续撤销（每拍撤销一步；后端按消息队列
-                    // 串行处理，无需忙守卫）。
+                    // 串行处理，无需忙守卫）；深度镜像（history_state 事件）
+                    // 仅用于撤到空栈后停止长按重复。
                     const fire = () => {
+                        const hasUndoableStep = store.getState().session.historyUndoDepth > 0;
                         void dispatch(undoRemote());
-                        return true;
+                        return hasUndoableStep;
                     };
-                    fire();
-                    beginHoldRepeat(selectMergedKeybindings(store.getState())["edit.undo"], fire);
+                    if (fire()) {
+                        beginHoldRepeat(
+                            selectMergedKeybindings(store.getState())["edit.undo"],
+                            fire,
+                        );
+                    }
                     break;
                 }
                 case "edit.redo": {
-                    // 长按 Ctrl+Y = 连续重做。
+                    // 空栈时同样静默失败；长按 Ctrl+Y = 连续重做（同上）。
                     const fire = () => {
+                        const hasRedoableStep = store.getState().session.historyRedoDepth > 0;
                         void dispatch(redoRemote());
-                        return true;
+                        return hasRedoableStep;
                     };
-                    fire();
-                    beginHoldRepeat(selectMergedKeybindings(store.getState())["edit.redo"], fire);
+                    if (fire()) {
+                        beginHoldRepeat(
+                            selectMergedKeybindings(store.getState())["edit.redo"],
+                            fire,
+                        );
+                    }
                     break;
                 }
                 // edit.selectAll / edit.deselect 由顶部「编辑操作统一路由」按
@@ -2666,6 +2701,40 @@ function AppInner() {
                         }),
                     );
                     break;
+                case "track.toggleMute": {
+                    // 默认无键位：由用户在快捷键设置中自行绑定。作用于当前
+                    // 选中轨道（与轨道头 M 按钮同一后端命令）。
+                    const ss = store.getState().session;
+                    const trackId = ss.selectedTrackId;
+                    const track = trackId ? ss.tracks.find((t) => t.id === trackId) : null;
+                    if (!track) break;
+                    void dispatch(setTrackStateRemote({ trackId: track.id, muted: !track.muted }));
+                    break;
+                }
+                case "track.toggleSolo": {
+                    const ss = store.getState().session;
+                    const trackId = ss.selectedTrackId;
+                    const track = trackId ? ss.tracks.find((t) => t.id === trackId) : null;
+                    if (!track) break;
+                    void dispatch(setTrackStateRemote({ trackId: track.id, solo: !track.solo }));
+                    break;
+                }
+                case "pianoRoll.cycleDragDirection": {
+                    // 循环切换当前活动工具的拖动方向（与工具栏方向按钮同源）。
+                    // 左键拖拽参数线期间按下同一键时，参数编辑器内的本地监听会
+                    // 同步切换本次拖拽的方向 —— 触控板用户的「右键切换」替代。
+                    const ss = store.getState().session;
+                    const currentDrawTool = ss.drawToolMode === "line" ? "vibrato" : ss.drawToolMode;
+                    const tool =
+                        ss.toolMode === "select"
+                            ? ("select" as const)
+                            : currentDrawTool === "draw"
+                              ? ("draw" as const)
+                              : ("vibrato" as const);
+                    dispatch(cycleDragDirection(tool));
+                    void dispatch(persistUiSettings());
+                    break;
+                }
                 case "pianoRoll.shiftParamUp":
                 case "pianoRoll.shiftParamDown":
                 case "pianoRoll.shiftParamUpLarge":

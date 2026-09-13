@@ -109,6 +109,118 @@ test("features/session/sessionSlice.optimistic.test.ts scripted checks", async (
         assertEqual(next.selectedTrackId, "track-b", "track selection updates on pending");
     }
 
+    // ── selectTrackRemote.fulfilled 的 applySelectedClip 闸门 ────────────────
+    //
+    // 【为什么必须在这里锁住】「点击空白取消选中」是**纯本地**的（后端仍记着旧的
+    // `selected_clip_id`）。若 `selectTrackRemote` 以纯字符串派发，fulfilled 会拿
+    // 后端快照把刚清掉的选中**异步复活** —— 该缺陷真实发生过两次：`019e93ed`
+    // 修好，内核补全 `464a78bb` 在新调用点写成纯字符串又静默解除。
+    // 这两个用例是该缺陷最便宜的守卫（纯 reducer，无 DOM）。
+    {
+        // 纯字符串 = 旧行为：恢复后端记住的 clip（这正是缺陷的机制）。
+        const pendingState = reducer(
+            createState(),
+            selectTrackRemote.pending("req-track-restore", "track-b"),
+        );
+        const next = reducer(
+            { ...pendingState, selectedClipId: null },
+            selectTrackRemote.fulfilled(
+                {
+                    ok: true,
+                    // `applyTimelineTracksOnly` 会读 `timeline.tracks`（后端快照形状，
+                    // 蛇形命名）。这里给最小合法载荷，只用于让该分支可执行。
+                    tracks: [
+                        {
+                            id: "track-a",
+                            name: "Track A",
+                            muted: false,
+                            solo: false,
+                            volume: 1,
+                            compose_enabled: false,
+                            pitch_analysis_algo: "nsf_hifigan_onnx",
+                            color: "#4f7cff",
+                        },
+                        {
+                            id: "track-b",
+                            name: "Track B",
+                            muted: false,
+                            solo: false,
+                            volume: 1,
+                            compose_enabled: false,
+                            pitch_analysis_algo: "nsf_hifigan_onnx",
+                            color: "#ff7a00",
+                        },
+                    ],
+                    clips: [],
+                    bpm: 120,
+                    playhead_sec: 0,
+                    selected_track_id: "track-b",
+                    selected_clip_id: "clip-a",
+                },
+                "req-track-restore",
+                "track-b",
+            ),
+        );
+        assertEqual(
+            next.selectedClipId,
+            "clip-a",
+            "plain-string arg restores the backend-remembered clip",
+        );
+    }
+
+    {
+        // 对象形式 + applySelectedClip:false = 契约：不得恢复（保住本地清空）。
+        const pendingState = reducer(
+            createState(),
+            selectTrackRemote.pending("req-track-preserve", "track-b"),
+        );
+        const next = reducer(
+            { ...pendingState, selectedClipId: null },
+            selectTrackRemote.fulfilled(
+                {
+                    ok: true,
+                    // `applyTimelineTracksOnly` 会读 `timeline.tracks`（后端快照形状，
+                    // 蛇形命名）。这里给最小合法载荷，只用于让该分支可执行。
+                    tracks: [
+                        {
+                            id: "track-a",
+                            name: "Track A",
+                            muted: false,
+                            solo: false,
+                            volume: 1,
+                            compose_enabled: false,
+                            pitch_analysis_algo: "nsf_hifigan_onnx",
+                            color: "#4f7cff",
+                        },
+                        {
+                            id: "track-b",
+                            name: "Track B",
+                            muted: false,
+                            solo: false,
+                            volume: 1,
+                            compose_enabled: false,
+                            pitch_analysis_algo: "nsf_hifigan_onnx",
+                            color: "#ff7a00",
+                        },
+                    ],
+                    clips: [],
+                    bpm: 120,
+                    playhead_sec: 0,
+                    selected_track_id: "track-b",
+                    selected_clip_id: "clip-a",
+                },
+                "req-track-preserve",
+                { trackId: "track-b", applySelectedClip: false },
+            ),
+        );
+        assertEqual(
+            next.selectedClipId,
+            null,
+            "applySelectedClip:false keeps the local deselect",
+        );
+        assertEqual(next.selectedTrackId, "track-b", "track still switches");
+    }
+
     {
         const next = reducer(
             createState(),

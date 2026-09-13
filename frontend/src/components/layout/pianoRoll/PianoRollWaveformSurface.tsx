@@ -19,7 +19,7 @@ import React from "react";
 import { WaveformSurface } from "../../../waveform/WaveformSurface";
 import type { WaveformSceneClip, WaveformSceneRow } from "../../../waveform/sceneBuilder";
 import type { WaveformColors } from "../../../theme/waveformColors";
-import { createTimelineAxis } from "../timeline/runtime/timelineAxis.js";
+import { createTimelineAxis } from "../renderKernel/timelineAxis.js";
 import type { ClipPeaksEntry } from "./useClipsPeaksForPianoRoll";
 import { pianoRollViewportBus } from "./pianoRollViewportBus";
 

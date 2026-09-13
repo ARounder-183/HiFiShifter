@@ -1,3 +1,26 @@
+/**
+ * useClipDrag — 旧实现（DOM 事件驱动）的 Clip 拖拽状态机。
+ *
+ * 【主要内容】
+ * `startClipDrag` 的按下 / 移动 / 松手全流程：ghost 预览、跨轨与建轨落点解析、
+ * 乐观位置改写与失败回滚、复制 / slip 模式分支、自动交叉淡化收尾，以及落点轨道
+ * 的焦点跟随（`maybeSelectTargetTrack`）。
+ *
+ * 【作用】
+ * 记录了旧渲染路径的拖拽语义，内核侧的提交分支（`TimelinePanel`）与抽出的共享
+ * 编排（`copyClipsFromDrag` / `createNewTrackForDrop`）都以它为语义基准（"与旧实现
+ * 同源"）。**当前没有组件调用本 hook**：旧渲染路径已删除（见 `TimelinePanel` 头部
+ * 的"渲染路径"说明），仍在被引用的只有 `NEW_TRACK_SENTINEL` 兼容导出。
+ *
+ * 【与其他模块的关系】
+ * - 上游（历史）：已删除的 `TrackLane` / `ClipItem` 的指针事件。
+ * - 下游：`copyClipsFromDrag`、`createNewTrackForDrop`（从本文件的局部闭包中抽出，
+ *   避免出现第二份建轨 / 复制语义）。
+ * - 落点轨道切换统一传 `selectTrackRemote({ trackId, applySelectedClip: false })`：
+ *   该字段是**契约**（见 `TimelinePanel.handleKernelSeek` 的说明与提交 019e93ed），
+ *   纯字符串形式会被后端全局唯一的 `selected_clip_id` 记忆异步覆盖前端选中。
+ */
+
 import { useRef, useState } from "react";
 import { batch } from "react-redux";
 import { registerDragAbort } from "../gestureFocusGuard";
@@ -6,16 +29,12 @@ import type { SessionState } from "../../../../features/session/sessionSlice";
 import {
     addTrackRemote,
     checkpointHistory,
-    duplicateClipsBulkRemote,
     moveClipRemote,
     moveClipsRemote,
     moveClipStart,
     moveClipTrack,
-    selectClipRemote,
     setClipAutoFades,
     selectTrackRemote,
-    seekPlayhead,
-    setplayheadSec,
     beginInteraction,
     endInteraction,
 } from "../../../../features/session/sessionSlice";
@@ -25,7 +44,6 @@ import type { Keybinding } from "../../../../features/keybindings/types";
 import {
     applyAutoCrossfade,
     applyDetachedAutoCrossfadeClears,
-    computeAutoCrossfadeFromPayload,
     computeInitialCrossfadeSides,
     previewAutoCrossfade,
 } from "./autoCrossfade";
@@ -35,12 +53,12 @@ import { SNAP_HIGHLIGHT_GROUP, clearSnapHighlights } from "../../../../utils/sna
 import type { SnapTimelineOpts } from "./useTimelineState";
 import type { SnapObjectKind, SnapResult } from "../../../../utils/timelineSnapping";
 import { expandClipIdsWithGroups } from "./useGroupExpansion";
-import { buildDuplicateClipsBulkPayload } from "./bulkClipRemotePayloads";
 import {
     buildDropToNewTrackMoves,
     computeSelectedTrackSpan,
     computeTrackMoveBounds,
 } from "./clipDropMoveUtils";
+import { copyClipsFromDrag } from "./copyClipsFromDrag";
 import {
     computeTimelineTrackDragLock,
     computeTimelineTrackDragLockThresholdPx,
@@ -444,7 +462,7 @@ export function useClipDrag(deps: {
                     dispatch(beginInteraction());
                     // Begin backend undo group so that move_clip + auto-crossfade
                     // share a single backend undo entry.
-                    void webApi.beginUndoGroup();
+                    void webApi.beginUndoGroup("move_clip");
                     // 记录已进入移动事务：中途切换复制模式后收尾仍要释放。
                     drag.beganMoveTransaction = true;
                 }
@@ -656,7 +674,14 @@ export function useClipDrag(deps: {
                 if (!targetTrackId) return;
                 if (targetTrackId === drag.initialAnchorTrackId) return;
                 if (sessionRef.current.selectedTrackId === targetTrackId) return;
-                void dispatch(selectTrackRemote(targetTrackId));
+                // `applySelectedClip: false` —— 跨轨拖拽落点只决定"当前轨道跟到哪"，
+                // 选中集合属于被拖拽的 clip 本身，不该被后端**全局唯一**的
+                // `selected_clip_id` 记忆覆盖（该字段不是每轨一份，见
+                // `state.rs::select_track`，因此不存在"恢复本轨上次选中"的语义）。
+                // 契约与 `TimelinePanel.handleKernelSeek` 同源（提交 019e93ed）。
+                void dispatch(
+                    selectTrackRemote({ trackId: targetTrackId, applySelectedClip: false }),
+                );
             };
 
             // 清除 ghost 预览
@@ -778,152 +803,27 @@ export function useClipDrag(deps: {
                 }
                 applyRippleFollowerShift(dispatch, drag.rippleFollowers, 0);
                 restoreInitialAutoFades(dispatch, drag.initialAutoFadeById);
-                void (async () => {
-                    const sourceClipIds = drag.clipIds.filter((id) =>
-                        sessionRef.current.clips.some((clip) => clip.id === id),
-                    );
-                    if (sourceClipIds.length === 0) {
-                        return;
-                    }
-                    dispatch(checkpointHistory());
-                    void (async () => {
-                        // Begin backend undo group for copy-drag + auto-crossfade
-                        await webApi.beginUndoGroup();
-                        try {
-                            const targetTrackIdByClipId = new Map<string, string>();
-                            if (dropToNewTrack) {
-                                if (drag.hasMixedTrackSelection) {
-                                    const spanInfo = computeSelectedTrackSpan({
-                                        clipIds: drag.clipIds,
-                                        initialById: drag.initialById,
-                                        trackIndexById: drag.initialTrackIndexById,
-                                    });
-                                    if (!spanInfo) throw new Error("create_track_failed");
-                                    const created = await createNewTracksForDrop(spanInfo.span);
-                                    if (created.length !== spanInfo.span) {
-                                        throw new Error("create_track_failed");
-                                    }
-                                    for (const clipId of sourceClipIds) {
-                                        const initial = drag.initialById[clipId];
-                                        if (!initial) continue;
-                                        const srcIdx = drag.initialTrackIndexById[initial.trackId];
-                                        if (!Number.isFinite(srcIdx)) continue;
-                                        const offset = Number(srcIdx) - spanInfo.minTrackIndex;
-                                        const targetTrackId = created[offset];
-                                        if (targetTrackId) {
-                                            targetTrackIdByClipId.set(clipId, targetTrackId);
-                                        }
-                                    }
-                                } else {
-                                    const newTrackId = await createNewTrackForDrop();
-                                    if (!newTrackId) throw new Error("create_track_failed");
-                                    for (const clipId of sourceClipIds) {
-                                        targetTrackIdByClipId.set(clipId, newTrackId);
-                                    }
-                                }
-                            } else {
-                                for (const clipId of sourceClipIds) {
-                                    const initial = drag.initialById[clipId];
-                                    if (!initial) continue;
-                                    const targetTrackId =
-                                        drag.allowTrackMove && drag.lastTrackOffset !== 0
-                                            ? (resolveTrackIdByOffset(
-                                                  drag,
-                                                  clipId,
-                                                  drag.lastTrackOffset,
-                                              ) ?? initial.trackId)
-                                            : initial.trackId;
-                                    targetTrackIdByClipId.set(clipId, targetTrackId);
-                                }
-                            }
-
-                            const firstTargetTrackId = targetTrackIdByClipId.get(sourceClipIds[0]);
-                            if (firstTargetTrackId) {
-                                maybeSelectTargetTrack(firstTargetTrackId);
-                            }
-                            const trackMapping = new Map<string, string>();
-                            for (const clipId of sourceClipIds) {
-                                const initial = drag.initialById[clipId];
-                                const targetTrackId = targetTrackIdByClipId.get(clipId);
-                                if (!initial || !targetTrackId) continue;
-                                trackMapping.set(initial.trackId, targetTrackId);
-                            }
-                            if (trackMapping.size === 0) return;
-                            const trackMode = Array.from(trackMapping.entries()).every(
-                                ([sourceTrackId, targetTrackId]) => sourceTrackId === targetTrackId,
-                            )
-                                ? { kind: "same_track" }
-                                : {
-                                      kind: "explicit_mapping",
-                                      mapping: Object.fromEntries(trackMapping),
-                                  };
-                            const payload = await dispatch(
-                                duplicateClipsBulkRemote(
-                                    buildDuplicateClipsBulkPayload({
-                                        sourceClipIds,
-                                        deltaSec: drag.lastDeltaBeat,
-                                        copyLinkedParams: sessionRef.current.lockParamLinesEnabled,
-                                        applyAutoCrossfade: autoCrossfadeEnabled,
-                                        trackMode,
-                                        renameCopies: false,
-                                    }),
-                                ),
-                            ).unwrap();
-                            const created: string[] = payload?.createdClipIds ?? [];
-                            if (!Array.isArray(created) || created.length === 0) return;
-                            setMultiSelectedClipIds(created);
-                            void dispatch(selectClipRemote(created[0]));
-                            // 复制拖动后，将播放光标定位到目标时间点（所有副本中最靠前的起始位置）
-                            const targetStartSec = sourceClipIds.reduce((min, clipId) => {
-                                const initial = drag.initialById[clipId];
-                                if (!initial) return min;
-                                return Math.min(
-                                    min,
-                                    Math.max(0, initial.startSec + drag.lastDeltaBeat),
-                                );
-                            }, Infinity);
-                            if (Number.isFinite(targetStartSec)) {
-                                dispatch(setplayheadSec(targetStartSec));
-                                void dispatch(seekPlayhead(targetStartSec));
-                            }
-                            // 复制拖动后，尝试对新创建的 clip 应用自动交叉淡化
-                            if (autoCrossfadeEnabled) {
-                                const allClips = (payload?.clips ?? []) as Array<{
-                                    id?: string;
-                                    track_id?: string;
-                                    start_sec?: number;
-                                    length_sec?: number;
-                                    fade_in_sec?: number;
-                                    fade_out_sec?: number;
-                                }>;
-                                const fadeUpdates = computeAutoCrossfadeFromPayload(
-                                    allClips,
-                                    created,
-                                );
-                                if (fadeUpdates.length > 0) {
-                                    // 复制后的自动交叉淡化写入“自动 fade”（与手动 fade 分离）。
-                                    for (const u of fadeUpdates) {
-                                        dispatch(
-                                            setClipAutoFades({
-                                                clipId: u.clipId,
-                                                autoFadeInSec: u.autoFadeInSec,
-                                                autoFadeOutSec: u.autoFadeOutSec,
-                                            }),
-                                        );
-                                        await webApi.setClipState({
-                                            clipId: u.clipId,
-                                            autoFadeInSec: u.autoFadeInSec,
-                                            autoFadeOutSec: u.autoFadeOutSec,
-                                            checkpoint: false,
-                                        });
-                                    }
-                                }
-                            }
-                        } finally {
-                            void webApi.endUndoGroup();
-                        }
-                    })().catch(() => undefined);
-                })().catch(() => undefined);
+                // copyMode 的落库编排已抽到 `copyClipsFromDrag`（单一事实来源：
+                // 内核的 clip-drag 手势也调用同一个函数，避免两份复制语义）。
+                void copyClipsFromDrag({
+                    sourceClipIds: drag.clipIds,
+                    initialById: drag.initialById,
+                    initialTrackIndexById: drag.initialTrackIndexById,
+                    deltaSec: drag.lastDeltaBeat,
+                    dropToNewTrack,
+                    trackOffset: drag.lastTrackOffset,
+                    allowTrackMove: drag.allowTrackMove,
+                    hasMixedTrackSelection: drag.hasMixedTrackSelection,
+                    autoCrossfadeEnabled,
+                    dispatch,
+                    sessionRef,
+                    setMultiSelectedClipIds,
+                    resolveTrackIdByOffset: (clipId) =>
+                        resolveTrackIdByOffset(drag, clipId, drag.lastTrackOffset),
+                    maybeSelectTargetTrack,
+                    createNewTracksForDrop,
+                    createNewTrackForDrop,
+                }).catch(() => undefined);
             } else {
                 // 非 copyMode：交互锁在最终持久化请求完成后才释放，
                 // 避免 endInteraction() 到 fulfilled 之间的窗口内，

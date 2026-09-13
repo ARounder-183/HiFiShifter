@@ -28,7 +28,7 @@
 
 import { bench, describe } from "vitest";
 
-import { createTimelineAxis } from "./timelineAxis.js";
+import { createTimelineAxis } from "../../renderKernel/timelineAxis.js";
 import { buildSparseClipRenderModel } from "./timelineCanvasModel.js";
 import { buildTimelineRenderModel } from "./timelineRenderModel.js";
 import { buildTimelineClipVisualStyle } from "./timelineCanvasStyle.js";

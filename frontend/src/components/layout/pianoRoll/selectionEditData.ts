@@ -21,6 +21,7 @@
 import { paramsApi } from "../../../services/api";
 import type { ParamName, ParamViewSegment } from "./types";
 import { applyEdgeBlend, type EdgeShape } from "./paramSmoothing";
+import { mergeFrameWindows, type FrameSpan } from "./paramSelection";
 
 /** 单次 IPC 收发的帧数上限。约 32k 帧 ≈ 190 ms @ fp 5.8ms，单次处理不会掉帧。 */
 const CHUNK_FRAMES = 32_768;
@@ -302,3 +303,180 @@ export async function uploadFullResCurve(args: {
         await yieldToUi();
     }
 }
+
+/** 多段写入片段：`values[k]` 对应第 `startFrame + k` 帧（stride=1）。 */
+export type FullResWriteSegment = { startFrame: number; values: number[] };
+
+/**
+ * 多段逐帧回写：把若干互不相连的片段写回后端。
+ *
+ * 撤销点纪律与 uploadFullResCurve 一致并向「多次调用」推广：**整个批次只在
+ * 第一个实际写入的块上打一次撤销点**，因此多选区的一次编辑（例如跨两段的
+ * 移调、粘贴）撤销一次即可整体回退。
+ */
+export async function uploadFullResCurveSegments(args: {
+    trackId: string;
+    param: ParamName;
+    segments: readonly FullResWriteSegment[];
+    onProgress?: (doneFrames: number, totalFrames: number) => void;
+}): Promise<void> {
+    const { trackId, param, onProgress } = args;
+    const segments = args.segments.filter((segment) => segment.values.length > 0);
+    if (segments.length === 0) return;
+
+    const totalFrames = segments.reduce((sum, segment) => sum + segment.values.length, 0);
+    let isFirstChunk = true;
+    let done = 0;
+
+    for (const segment of segments) {
+        const startFrame = Math.max(0, Math.floor(segment.startFrame));
+        const values = segment.values;
+        for (let offset = 0; offset < values.length; offset += CHUNK_FRAMES) {
+            const count = Math.min(CHUNK_FRAMES, values.length - offset);
+            await paramsApi.setParamFrames(
+                trackId,
+                param,
+                startFrame + offset,
+                values.slice(offset, offset + count),
+                isFirstChunk, // 整批仅首个实际写入打撤销点
+            );
+            isFirstChunk = false;
+            done += count;
+            onProgress?.(done, totalFrames);
+            await yieldToUi();
+        }
+    }
+}
+
+/** 多段变换计划产出的写入片段（dense 逐帧索引；含边缘淡化的扩展帧）。 */
+export type MultiRangeEditPiece = FrameSpan & { values: number[] };
+
+/**
+ * 多段编辑的写入窗口：每段「原位 ∪ 落地位」± 该段边缘淡化，合并重叠窗口。
+ *
+ * 提交路径需要**先知道窗口才能取数**（取回的窗口即 sourceAt 的来源），
+ * 因此把这一步单独导出；buildMultiRangeEditPlan 内部用的是同一实现，
+ * 二者结果必然一致。
+ */
+export function planSelectionEditWindows(args: {
+    ranges: readonly FrameSpan[];
+    frameDelta?: number;
+    edgeHalfSpanAt?: (rangeIndex: number) => number;
+}): FrameSpan[] {
+    const frameDelta = Math.trunc(Number(args.frameDelta) || 0);
+    const windows: FrameSpan[] = [];
+    for (let i = 0; i < args.ranges.length; i += 1) {
+        const range = args.ranges[i];
+        const edge = Math.max(0, Math.ceil(Number(args.edgeHalfSpanAt?.(i) ?? 0) || 0));
+        const landedStart = range.startFrame + frameDelta;
+        const landedEnd = range.endFrame + frameDelta;
+        const startFrame = Math.max(0, Math.min(range.startFrame, landedStart) - edge);
+        const endFrame = Math.max(range.endFrame, landedEnd, startFrame) + edge;
+        windows.push({ startFrame, endFrame });
+    }
+    return mergeFrameWindows(windows);
+}
+
+/**
+ * 多段「选区变换」计划：对每条选区段独立施加变换，输出合并后的写入片段。
+ *
+ * 预览与提交共用本函数（唯一差别是 `sourceAt` / `valuesAt` 的数据来源：
+ * 预览读 pv、提交读全分辨率），因此**用户看到的就是最终写回的**。
+ *
+ * 语义要点：
+ *   - 每段独立：`valuesAt(i)` 是该段自己的（可已变换的）逐帧值，
+ *     `edgeHalfSpanAt(i)` 是该段自己的边缘淡化半宽 —— 断层两侧互不影响；
+ *   - 段可 X 向位移（`frameDelta`）：写入窗口 = 原位 ∪ 落地位 ± 边缘淡化，
+ *     合并重叠窗口后一次写出，缝隙帧写回基准值（等价于未改动）；
+ *   - 落地位越界（< 0 或超出）的帧自然被裁剪。
+ */
+export function buildMultiRangeEditPlan(args: {
+    /** 原始选区（闭区间，升序、互不相交） */
+    ranges: readonly FrameSpan[];
+    /** 每段落地帧偏移（纯 Y 向变换传 0） */
+    frameDelta?: number;
+    /** 取第 i 段「被变换的源值」（逐帧，长度 = 段长）；返回空则跳过该段 */
+    valuesAt: (rangeIndex: number) => readonly number[] | null | undefined;
+    /** 取某帧的基准值（填充写入窗口内未被任何段覆盖的帧） */
+    sourceAt: (frame: number) => number;
+    /** 逐帧变换：(段号, 段内下标, 源值, 落地帧) => 新值；缺省恒等 */
+    transformAt?: (
+        rangeIndex: number,
+        index: number,
+        sourceValue: number,
+        targetFrame: number,
+    ) => number;
+    /** 第 i 段的边缘淡化半宽（帧）；缺省不淡化 */
+    edgeHalfSpanAt?: (rangeIndex: number) => number;
+    /** pitch 等哨兵参数的「可编辑值」判定；缺省全部可编辑 */
+    isEditable?: (v: number) => boolean;
+    shape?: EdgeShape;
+}): MultiRangeEditPiece[] {
+    const { ranges, sourceAt, transformAt, edgeHalfSpanAt, isEditable, shape } = args;
+    const frameDelta = Math.trunc(Number(args.frameDelta) || 0);
+    if (ranges.length === 0) return [];
+
+    const edgeAt = (rangeIndex: number) =>
+        Math.max(0, Math.ceil(Number(edgeHalfSpanAt?.(rangeIndex) ?? 0) || 0));
+
+    // 1) 写入窗口（与提交路径取数用的窗口同源）。
+    const merged = planSelectionEditWindows({ ranges, frameDelta, edgeHalfSpanAt });
+
+    // 2) 用基准值铺满窗口，并留存「编辑前」副本供 delta 空间交叉淡化使用。
+    const pieces: Array<MultiRangeEditPiece & { before: number[] }> = merged.map((window) => {
+        const len = window.endFrame - window.startFrame + 1;
+        const values = new Array<number>(len);
+        for (let k = 0; k < len; k += 1) {
+            values[k] = sourceAt(window.startFrame + k);
+        }
+        return { startFrame: window.startFrame, endFrame: window.endFrame, values, before: values.slice() };
+    });
+
+    // 3) 逐段写入（升序；X 位移后段重叠时后写覆盖先写，确定性可复现）。
+    for (let i = 0; i < ranges.length; i += 1) {
+        const source = args.valuesAt(i);
+        if (!source || source.length === 0) continue;
+        const landedStart = ranges[i].startFrame + frameDelta;
+        const landedEnd = landedStart + source.length - 1;
+        for (const piece of pieces) {
+            if (piece.endFrame < landedStart || piece.startFrame > landedEnd) continue;
+            const from = Math.max(landedStart, piece.startFrame);
+            const to = Math.min(landedEnd, piece.endFrame);
+            for (let frame = from; frame <= to; frame += 1) {
+                const index = frame - landedStart;
+                const sourceValue = Number(source[index]) || 0;
+                piece.values[frame - piece.startFrame] = transformAt
+                    ? transformAt(i, index, sourceValue, frame)
+                    : sourceValue;
+            }
+        }
+    }
+
+    // 4) 逐段边缘淡化（base 为编辑前基准值；与单段路径同一 applyEdgeBlend）。
+    for (let i = 0; i < ranges.length; i += 1) {
+        const halfSpan = edgeAt(i);
+        const source = args.valuesAt(i);
+        if (halfSpan <= 0 || !source || source.length === 0) continue;
+        const landedStart = ranges[i].startFrame + frameDelta;
+        for (const piece of pieces) {
+            const editedStartIdx = Math.max(0, landedStart - piece.startFrame);
+            const editedEndIdx = Math.min(
+                piece.values.length - 1,
+                landedStart + source.length - 1 - piece.startFrame,
+            );
+            if (editedEndIdx < editedStartIdx) continue;
+            applyEdgeBlend({
+                dense: piece.values,
+                base: piece.before,
+                editedStartIdx,
+                editedLen: editedEndIdx - editedStartIdx + 1,
+                halfSpanFrames: halfSpan,
+                shape,
+                isEditable,
+            });
+        }
+    }
+
+    return pieces.map(({ startFrame, endFrame, values }) => ({ startFrame, endFrame, values }));
+}
+

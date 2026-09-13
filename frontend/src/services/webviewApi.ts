@@ -53,6 +53,8 @@ export const webApi = {
     redoTimeline: timelineApi.redoTimeline,
     beginUndoGroup: timelineApi.beginUndoGroup,
     endUndoGroup: timelineApi.endUndoGroup,
+    getHistoryState: timelineApi.getHistoryState,
+    setHistoryPosition: timelineApi.setHistoryPosition,
 
     // Project
     getProjectMeta: projectApi.getProjectMeta,
@@ -62,6 +64,7 @@ export const webApi = {
     saveProject: projectApi.saveProject,
     saveProjectAs: projectApi.saveProjectAs,
     saveProjectToPath: projectApi.saveProjectToPath,
+    setProjectSaveUndoHistory: projectApi.setProjectSaveUndoHistory,
     setProjectBaseScale: projectApi.setProjectBaseScale,
     setProjectCustomScale: projectApi.setProjectCustomScale,
     setProjectStretchSettings: projectApi.setProjectStretchSettings,

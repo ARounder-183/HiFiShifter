@@ -76,7 +76,7 @@ fn import_finished_recording(
     finished: &RecordingFinishedInfo,
 ) -> Result<TimelineStatePayload, String> {
     let mut timeline = state.timeline.lock().unwrap_or_else(|err| err.into_inner());
-    state.checkpoint_timeline(&timeline);
+    state.checkpoint_timeline(&timeline, crate::state::HistoryOp::Recording);
 
     let start_sec = finished.start_sec.max(0.0);
     let end_sec = start_sec + finished.duration_sec.max(0.0);

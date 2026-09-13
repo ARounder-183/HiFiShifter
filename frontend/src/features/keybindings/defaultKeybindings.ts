@@ -16,7 +16,8 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     // 播放控制
     "playback.toggle": { key: "space" },
     "playback.stop": { key: "enter" }, // 停止并回到本次播放起点
-    "playback.metronome": { key: "m" }, // 节拍器开关
+    // 节拍器开关：默认 `K`（对齐 Logic Pro 的节拍器键位惯例），不占用 `M`、`R`。
+    "playback.metronome": { key: "k" },
     "recording.toggle": { key: "r", ctrl: true },
     "playback.focusCursor": { key: "'" }, // 聚焦播放光标
     "playback.seekLeft": { key: "arrowleft" },
@@ -40,6 +41,12 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     "edit.meanQuantize": { key: "q", ctrl: true },
     "edit.pasteVocalShifter": { key: "v", shift: true },
     "edit.pasteTracks": { key: "v", ctrl: true, alt: true },
+    // 音频块范围 → 参数编辑器选区（批量入口；手势见 modifier.clipRangeToParamSelection）。
+    // Ctrl+Shift+A 与 Ctrl+A（全选音频块）成对，语义即「把选中的音频块范围也纳入
+    // 参数编辑器选区」；只作用于当前参数编辑器所属根轨道组内的音频块。
+    "edit.addClipsToParamSelection": { key: "a", ctrl: true, shift: true },
+    // 反向操作默认不占键位（手势已覆盖单个音频块的取消场景）
+    "edit.removeClipsFromParamSelection": { key: "__none__" },
 
     // 工程
     "project.new": { key: "n", ctrl: true },
@@ -59,6 +66,9 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     "track.delete": { key: "delete", ctrl: true },
     "track.selectUp": { key: "arrowup" },
     "track.selectDown": { key: "arrowdown" },
+    // 静音/独奏默认不占键位，用户可在快捷键设置中自行绑定。
+    "track.toggleMute": { key: "__none__" },
+    "track.toggleSolo": { key: "__none__" },
 
     // Clip 操作
     "clip.delete": { key: "delete" },
@@ -98,6 +108,10 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     "pianoRoll.vibratoDragAmplitudeDecrease": { key: "arrowdown" },
     "pianoRoll.vibratoDragFrequencyIncrease": { key: "arrowleft" },
     "pianoRoll.vibratoDragFrequencyDecrease": { key: "arrowright" },
+    // 拖动方向循环切换：默认 `D`（Direction）。除切换设置外，左键拖拽参数线
+    // 期间按下同一键可即时切换本次拖拽的方向 —— 触控板用户无法在按住左键
+    // 的同时按下右键，这条键位是「右键拖拽中切换方向」的等价替代。
+    "pianoRoll.cycleDragDirection": { key: "d" },
 
     // 修饰键行为
     // 多选切换默认为主修饰键（Windows: Ctrl / macOS: ⌘），对齐文件管理器
@@ -129,6 +143,12 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
         modifierOnly: true,
         ctrl: true,
     },
+    // 按住并双击音频块：把该块范围并入参数编辑器选区（再点一次取消）。
+    // 默认 Alt —— 时间轴的选择类修饰键已被占用（Ctrl=多选切换/复制拖动、
+    // Shift=范围选择/临时关吸附），而 Alt 在时间轴上只有拖拽语义
+    // （slip/拉伸/淡化曲率），点击层是空的（见 clipSelectionModifiers：
+    // 物理 Alt 按下时会绕过两个选择修饰键，点击退回普通选择预备）。
+    "modifier.clipRangeToParamSelection": { key: "alt", modifierOnly: true, alt: true },
     // 淡化包络曲率：对齐 REAPER “Alt 拖动调整张力”惯例；Alt 在
     // 包络线/交叉点目标上无其他绑定，语义干净。
     "modifier.fadeCurvatureDrag": { key: "alt", modifierOnly: true, alt: true },
@@ -159,6 +179,10 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     "modifier.pianoKeysVerticalScroll": { key: "__none__", modifierOnly: true },
     "modifier.pianoKeysVerticalZoom": { key: "alt", modifierOnly: true, alt: true },
     "modifier.paramMorph": { key: "alt", modifierOnly: true, alt: true },
+    // 参数编辑器多选区：按住 + 拖动 = 追加一段选区，按住 + 点击已有段 = 取消该段
+    // （与时间轴 ⌘/Ctrl + 点击的多选切换同源语义）。默认主修饰键，macOS 上
+    // 由 ctrl 字段自动映射为 ⌘（见 platform.ts）。
+    "modifier.paramMultiSelect": { key: "control", modifierOnly: true, ctrl: true },
     "modifier.paramFineAdjust": { key: "control", modifierOnly: true, ctrl: true },
     "modifier.vibratoAmplitudeAdjust": { key: "__none__", modifierOnly: true },
     "modifier.vibratoFrequencyAdjust": { key: "alt", modifierOnly: true, alt: true },
@@ -264,6 +288,14 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
         labelKey: "kb_edit_paste_tracks",
         group: "edit",
     },
+    "edit.addClipsToParamSelection": {
+        labelKey: "kb_edit_add_clips_to_param_selection",
+        group: "edit",
+    },
+    "edit.removeClipsFromParamSelection": {
+        labelKey: "kb_edit_remove_clips_from_param_selection",
+        group: "edit",
+    },
 
     "project.new": { labelKey: "kb_project_new", group: "project" },
     "project.open": { labelKey: "kb_project_open", group: "project" },
@@ -301,6 +333,8 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
     },
     "track.selectUp": { labelKey: "kb_track_select_up", group: "project" },
     "track.selectDown": { labelKey: "kb_track_select_down", group: "project" },
+    "track.toggleMute": { labelKey: "kb_track_toggle_mute", group: "project" },
+    "track.toggleSolo": { labelKey: "kb_track_toggle_solo", group: "project" },
 
     "clip.delete": { labelKey: "kb_clip_delete", group: "clip" },
     "clip.copy": { labelKey: "kb_clip_copy", group: "clip" },
@@ -396,6 +430,10 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
         group: "pianoRoll",
         scopedContext: "pianoRollVibratoDrag",
     },
+    "pianoRoll.cycleDragDirection": {
+        labelKey: "kb_pianoroll_cycle_drag_direction",
+        group: "pianoRoll",
+    },
 
     // ── 修饰键 · 音频块选择与拖拽（时间轴） ────────────────────
     "modifier.clipMultiSelectToggle": {
@@ -465,6 +503,31 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
         group: "modParam",
         modifierOperationType: "drag",
         conflictScenes: ["roll.morph"],
+    },
+    "modifier.paramMultiSelect": {
+        labelKey: "kb_modifier_param_multi_select",
+        group: "modParam",
+        modifierOperationType: "drag",
+        // 场景声明与运行时优先级一致：
+        // - roll.select 本手势自身；
+        // - roll.paramDrag 会被本手势抢占（按住修饰键拖动不再移动曲线），
+        //   与 modifier.clipNoSnap 共用按键时互相干扰；
+        // - roll.paramEdge 会抢在本手势之前（Alt 边缘拉伸优先），两者共用
+        //   按键时多选会完全失效。
+        // 与之不同目标的场景（时间轴 clip.select、滚轮场景）不列入，避免误报。
+        conflictScenes: ["roll.select", "roll.paramDrag", "roll.paramEdge"],
+    },
+    "modifier.clipRangeToParamSelection": {
+        labelKey: "kb_modifier_clip_range_to_param_selection",
+        // 分组按**交互场景**划分（修饰键作用于音频块上的双击），效果落在参数
+        // 编辑器选区上 —— 与「参数编辑器内的多选修饰键」是一对概念，二者在
+        // 设置面板中各自处于自己表面的分组下。
+        group: "modClip",
+        modifierOperationType: "click",
+        // 只在「音频块双击」这一场景生效：与 clip.select（Ctrl/Shift 点击多选）
+        // 目标同名不同手势，故不列入；与时间轴 Alt 拖拽系（slip/拉伸/曲率）
+        // 手势类型不同，也不构成冲突。
+        conflictScenes: ["clip.rangeToParamSelect"],
     },
     "modifier.vibratoAmplitudeAdjust": {
         labelKey: "kb_modifier_vibrato_amplitude_adjust",

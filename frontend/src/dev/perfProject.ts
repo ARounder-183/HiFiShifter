@@ -416,9 +416,12 @@ function mountPerfPanel(): void {
         status.textContent = `${summary.clipCount} clip · fade 0.5s`;
         applyFitZoomAndReload(summary.fitPxPerSec);
     });
-    // ── GL clip 体开关（P3）──────────────────────────────────────
-    // 默认开启；切到 "0" 即退回 Canvas2D。切换 localStorage 后派发自定义
-    // 事件，TimelineCanvasViewport 监听它即时建拆 GL 渲染器，无需刷新。
+    // ── GL clip 体开关（P3，**已失效**）────────────────────────────
+    // 【勿据此判断行为】GL clip 体已是唯一路径，本按钮现在**不会**改变任何东西：
+    // 它写入 key 并派发事件，但唯一的监听者 `TimelineCanvasViewport` 已随"渲染内核
+    // 唯一路径"改造删除，读取该 key 的 `isGlClipBodiesEnabled()` 也再无调用者。
+    // 保留按钮仅为不扩大本次改动面；与 `isGlClipBodiesEnabled()` 一并属独立的死代码
+    // 清理范围（见 docs/superpowers/plans/2026-09-13-timeline-single-path.md「后续清理」）。
     const glEnabled = (): boolean => localStorage.getItem(PERF_GL_CLIP_BODIES_KEY) !== "0";
     const glToggle = makeButton(`GL clip: ${glEnabled() ? "on" : "off"}`, () => {
         const next = glEnabled() ? "0" : "1";

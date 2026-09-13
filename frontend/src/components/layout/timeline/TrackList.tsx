@@ -24,6 +24,7 @@ import { AppTooltipBubble } from "../../AppTooltip";
 import { TempoMapCornerButton } from "./TempoMapCornerButton";
 import { formatGainDbValue } from "./math";
 import { computeVisibleTrackWindow } from "./runtime/timelineWindowing";
+import { resolveScrollCommitStepPx, shouldCommitScroll } from "./scrollCommit";
 import { normalizedTrackColorCss } from "./runtime/timelineCanvasStyle";
 import { useAppTheme } from "../../../theme/AppThemeProvider";
 
@@ -506,6 +507,14 @@ const TrackListInner: React.FC<TrackListProps> = ({
     } | null>(null);
     const trackCtxMenuRef = useRef<HTMLDivElement | null>(null);
     const [listScrollTop, setListScrollTop] = useState(0);
+    /**
+     * 上一次真正提交给 `setListScrollTop` 的位置。
+     *
+     * 【为什么要单独记一份】量化判据必须拿"上次提交值"当基准。若拿上一帧值比，
+     * 每帧的小位移永远达不到阈值，窗口化会彻底停更（见 `scrollCommit` 的单测）。
+     * 用 ref 而不是 state：它只服务于判定，不需要触发渲染。
+     */
+    const listScrollTopCommittedRef = useRef(0);
     const [listViewportHeight, setListViewportHeight] = useState(0);
 
     // 轨道右键菜单的快捷键提示（随用户在快捷键设置中的自定义绑定实时变化）。
@@ -1276,6 +1285,19 @@ const TrackListInner: React.FC<TrackListProps> = ({
         return { parentTrackId, targetIndex, mode: "reorder" };
     }
 
+    /**
+     * 行窗口化使用的 overscan 行数。
+     *
+     * 提为常量是因为它同时决定**滚动提交步长**（`listScrollCommitStepPx`）：
+     * 两者必须同源，否则步长可能超过 overscan 预算而渲染出空白行。
+     */
+    const LIST_OVERSCAN_ROWS = 2;
+    /** 滚动位置提交步长（= overscan 安全预算的一半，见 `scrollCommit`）。 */
+    const listScrollCommitStepPx = resolveScrollCommitStepPx({
+        rowHeight,
+        overscanRows: LIST_OVERSCAN_ROWS,
+    });
+
     const visibleTrackWindow = useMemo(
         () =>
             computeVisibleTrackWindow({
@@ -1283,7 +1305,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
                 rowHeight,
                 scrollTopPx: listScrollTop,
                 viewportHeightPx: listViewportHeight,
-                overscanRows: 2,
+                overscanRows: LIST_OVERSCAN_ROWS,
             }),
         [listScrollTop, listViewportHeight, rowHeight, tracks.length],
     );
@@ -1365,7 +1387,29 @@ const TrackListInner: React.FC<TrackListProps> = ({
                 className="flex-1 relative overflow-y-auto custom-scrollbar hide-v-scrollbar"
                 onScroll={(e) => {
                     const nextScrollTop = (e.currentTarget as HTMLDivElement).scrollTop;
-                    setListScrollTop(nextScrollTop);
+                    // 【为什么这里要量化】内核模式下本容器每帧都被镜像回写，
+                    // 该事件因此**每帧都触发**；若每帧都 setState，轨道头列表会每帧
+                    // 重渲染一次。实测（1920×1200，80 步拖竖向滚动条）：React 提交
+                    // 130 次、最长帧 49.9ms；阻断该事件后提交降到 1 次、最长帧 16.8ms。
+                    // 即用户报告的"改善很多但还有一点吸附感"。
+                    //
+                    // 量化是安全的：本 state 的唯一消费者是下方的
+                    // `computeVisibleTrackWindow`，它带 `overscanRows` 余量；且行元素用
+                    // `translateY(startIndex × rowHeight)` 定位，滞后只会少渲染末尾几行，
+                    // 不会错位。步长推导见 `scrollCommit` 的文件头。
+                    if (
+                        shouldCommitScroll({
+                            committedPx: listScrollTopCommittedRef.current,
+                            nextPx: nextScrollTop,
+                            stepPx: listScrollCommitStepPx,
+                        })
+                    ) {
+                        listScrollTopCommittedRef.current = nextScrollTop;
+                        setListScrollTop(nextScrollTop);
+                    }
+                    // 【必须传原值】这条是"真实原生输入"（焦点 scroll-into-view）的唯一
+                    // 通道，且上游要靠它与镜像写入值**逐值比较**来判别回声
+                    // （见 `scrollEcho`）。量化它会让判据失配。
                     onScrollTopChange?.(nextScrollTop);
                 }}
             >

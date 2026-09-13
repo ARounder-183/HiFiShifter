@@ -32,8 +32,10 @@ import { fileBrowserApi } from "../../../../services/api/fileBrowser";
 import { seekPlayhead, setplayheadSec } from "../../../../features/session/sessionSlice";
 import { selectKeybinding } from "../../../../features/keybindings/keybindingsSlice";
 import type { Keybinding } from "../../../../features/keybindings/types";
-import { getDynamicProjectSec } from "../../../../features/session/projectBoundary";
+import { resolveScrollableProjectSec } from "../../../../features/session/projectBoundary";
 import { applyNativeScrollLeft } from "../runtime/nativeScrollApply";
+import type { TimelineKernelHost } from "../kernel/host/timelineKernelHost";
+import { createTimelineViewportAccess } from "./timelineViewportAccess";
 import {
     DEFAULT_PX_PER_SEC,
     DEFAULT_ROW_HEIGHT,
@@ -46,7 +48,7 @@ import {
 import type { TimelineTick } from "../runtime/buildTimelineTicks.js";
 import { buildTimelineTicks } from "../runtime/buildTimelineTicks.js";
 import { REACT_SCROLL_STEP_PX } from "../runtime/timelineRenderModel.js";
-import { createTimelineAxis } from "../runtime/timelineAxis.js";
+import { createTimelineAxis } from "../../renderKernel/timelineAxis.js";
 import {
     snapTimelinePosition,
     snapTimelineClipMove,
@@ -116,6 +118,7 @@ type TimelineSessionSlice = Pick<
     | "pendingPlayheadRevealSec"
     | "primaryTimeUnit"
     | "project"
+    | "projectSec"
     | "secondaryTimeUnit"
     | "rulerLabelSpacingPx"
     | "showPlayheadTimeInTrackHeader"
@@ -128,6 +131,14 @@ type TimelineSessionSlice = Pick<
     | "trackMeters"
     | "tracks"
 >;
+
+/**
+ * 本面板在共享视口中的来源标识。
+ *
+ * 时间轴既发布又订阅同一份视口，订阅回调必须据此跳过自己造成的广播，
+ * 否则会形成回退型反馈环（见 `timelineViewportSync` 的 `origin` 说明）。
+ */
+const TIMELINE_SYNC_ORIGIN = "timeline";
 
 export interface TimelineStateResult {
     // Redux
@@ -142,7 +153,6 @@ export interface TimelineStateResult {
     rulerContentRef: React.MutableRefObject<HTMLDivElement | null>;
     rulerPlayheadLineRef: React.MutableRefObject<HTMLDivElement | null>;
     rulerPlayheadHeadRef: React.MutableRefObject<HTMLDivElement | null>;
-    playheadRef: React.MutableRefObject<HTMLDivElement | null>;
     dropPreviewRef: React.MutableRefObject<HTMLDivElement | null>;
     lastClickedClipIdRef: React.MutableRefObject<string | null>;
     scrollLeftRef: React.MutableRefObject<number>;
@@ -235,7 +245,11 @@ export interface TimelineStateResult {
 
     // Functions
     setScrollLeftState: React.Dispatch<React.SetStateAction<number>>;
+    /** 视口宽度写入（内核模式下由内核回写，见 `setViewportWidth` 的说明）。 */
+    setViewportWidth: React.Dispatch<React.SetStateAction<number>>;
     syncScrollLeft: (next: number) => void;
+    /** 逐帧水平同步（内核每帧通知）：只做跨面板同步，不做 React 对齐。 */
+    syncScrollLeftFrame: (next: number) => void;
     /** 竖直轴同帧提交：更新 scrollTopPxRef 并同步广播视口总线。 */
     syncScrollTop: (next: number) => void;
     scrollTopPxRef: React.MutableRefObject<number>;
@@ -281,7 +295,21 @@ export interface TimelineStateResult {
 }
 
 // ── Hook 实现 ────────────────────────────────────────────────────
-export function useTimelineState(): TimelineStateResult {
+/**
+ * `useTimelineState` 的可选入参。
+ *
+ * 【为什么需要 kernelHostRef】
+ * 「参数编辑器视图同步」需要把共享视口的写入**落地到时间轴视口**。旧实现直接写
+ * 原生 scroller；渲染内核模式下没有原生 scroller（视口真值在 `ScrollKernel`），
+ * 若不注入宿主句柄，同步的落地分支会在第一步 return——表现为「开启同步后
+ * 内核不跟随参数编辑器」。
+ */
+export interface UseTimelineStateArgs {
+    /** 内核宿主句柄引用（仅内核模式下非空）。 */
+    readonly kernelHostRef?: React.MutableRefObject<TimelineKernelHost | null>;
+}
+
+export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineStateResult {
     const dispatch = useAppDispatch();
     const s = useAppSelector(
         (state: RootState) => ({
@@ -301,6 +329,7 @@ export function useTimelineState(): TimelineStateResult {
             pendingPlayheadRevealSec: state.session.pendingPlayheadRevealSec,
             playheadZoomEnabled: state.session.playheadZoomEnabled,
             paramEditorSyncTimeline: state.session.paramEditorSyncTimeline,
+            projectSec: state.session.projectSec,
             paramEditorTimelineClickSelectTrackEnabled:
                 state.session.paramEditorTimelineClickSelectTrackEnabled,
             primaryTimeUnit: state.session.primaryTimeUnit,
@@ -335,6 +364,24 @@ export function useTimelineState(): TimelineStateResult {
     const rulerPlayheadLineRef = useRef<HTMLDivElement | null>(null);
     const rulerPlayheadHeadRef = useRef<HTMLDivElement | null>(null);
     const scrollLeftRef = useRef(0);
+
+    /**
+     * 模式无关的视口访问器（参数编辑器同步的落地入口）。
+     *
+     * 内核模式下 `scrollRef.current` 为 null，视口真值在注入的宿主里；访问器让
+     * 「写视口」这件事不必在本模块里再判断一次模式。
+     *
+     * 特殊说明：`kernelHostRef` 缺省时用一个内部空 ref 占位（测试环境等宿主尚未注入
+     * 的场景），此时访问器取不到视口、返回空值。注意**旧的原生 scroller 实现已随
+     * "渲染内核唯一路径"改造删除**，`scrollRef` 已无 JSX 挂载点，因此不存在"退回原生
+     * scroller"这一条路。
+     */
+    const fallbackKernelHostRef = useRef<TimelineKernelHost | null>(null);
+    const kernelHostRef = args.kernelHostRef ?? fallbackKernelHostRef;
+    const viewportAccess = useMemo(
+        () => createTimelineViewportAccess({ scrollRef, kernelHostRef }),
+        [kernelHostRef],
+    );
     /** 最近一次真正提交给 React 的 scrollLeft（量化基准）。 */
     const reactCommittedScrollLeftRef = useRef(0);
     const scrollStateRafRef = useRef<number | null>(null);
@@ -346,7 +393,6 @@ export function useTimelineState(): TimelineStateResult {
         pxPerSec: number;
     } | null>(null);
     const lastClickedClipIdRef = useRef<string | null>(null);
-    const playheadRef = useRef<HTMLDivElement | null>(null);
     const dropPreviewRef = useRef<HTMLDivElement | null>(null);
     const pendingDropDurationPathRef = useRef<string | null>(null);
 
@@ -450,23 +496,24 @@ export function useTimelineState(): TimelineStateResult {
     const syncScrollLeft = React.useCallback(function syncScrollLeft(next: number) {
         scrollLeftRef.current = next;
         if (paramEditorSyncTimelineRef.current && !timelineSyncApplyingRef.current) {
-            timelineViewportSync.setViewport({
-                scrollLeft: next,
-                pxPerSec: pxPerSecRef.current,
-            });
+            timelineViewportSync.setViewport(
+                {
+                    scrollLeft: next,
+                    pxPerSec: pxPerSecRef.current,
+                },
+                TIMELINE_SYNC_ORIGIN,
+            );
         }
         if (rulerContentRef.current) {
             rulerContentRef.current.style.transform = `translateX(${-next}px)`;
         }
         const playheadLeftPx =
             (Number(sessionRef.current.playheadSec ?? 0) || 0) * pxPerSecRef.current;
-        // 播放头写入统一设备像素吸附（readDevicePixelRatio 每次现读）：分数
+        // 标尺播放头写入统一设备像素吸附（readDevicePixelRatio 每次现读）：分数
         // DPR 下不吸附的落点相位随滚动/播放变化，线宽 1↔2 物理像素交替。
-        // 与 React 渲染侧（TimelineSurface / TimeRulerPlayhead）同一函数。
+        // 与 React 渲染侧（标尺播放头 TimeRulerPlayhead）同一吸附函数。
+        // 轨道区播放头不在这里写：它由内核自绘，滚动经 scroll 订阅自行标脏。
         const dpr = readDevicePixelRatio();
-        if (playheadRef.current) {
-            playheadRef.current.style.left = `${snapToDevicePx(playheadLeftPx - next, dpr)}px`;
-        }
         if (rulerPlayheadLineRef.current) {
             rulerPlayheadLineRef.current.style.left = `${snapToDevicePx(playheadLeftPx, dpr)}px`;
         }
@@ -495,6 +542,42 @@ export function useTimelineState(): TimelineStateResult {
                 reactCommittedScrollLeftRef.current = next;
                 setScrollLeft(next);
             });
+        }
+    }, []);
+
+    /**
+     * 水平滚动位置的**逐帧**同步（内核模式下由宿主每帧通知）。
+     *
+     * 【为什么需要它，以及为什么不复用 `syncScrollLeft`】
+     * `syncScrollLeft` 是"全量同步"入口，它顺带用 rAF 量化提交 React state
+     * （`REACT_SCROLL_STEP_PX`）以免滚动帧进 React。内核模式下驱动它的
+     * `onScrollLeftCommit` 又被量化到 256px（`SCROLL_COMMIT_STEP_PX`）——
+     * 那是为**标尺刻度范围**做的取舍，刻度晚 256px 更新肉眼无感。
+     *
+     * 但"推给参数编辑器"经不起这个精度：参数编辑器是独立滚动视图，滞后 256px
+     * 会表现为**先不动、然后突然跳一大段**（用户报告的"阶梯感/被吸附感"）。
+     * 实测拖时间轴 480px：内核 49 步平滑，参数编辑器只有 2 步、单次跳 260px。
+     *
+     * 因此把两件事拆开：本函数只做"写 ref + 广播共享视口"（几个赋值 + 一次
+     * emit，不进 React），可以安全逐帧调用；React 对齐仍走量化路径。
+     */
+    const syncScrollLeftFrame = React.useCallback(function syncScrollLeftFrame(next: number) {
+        scrollLeftRef.current = next;
+        timelineViewportBus.emit(
+            next,
+            pxPerSecRef.current,
+            viewportWidthRef.current,
+            scrollTopPxRef.current,
+            rowHeightRef.current,
+        );
+        if (paramEditorSyncTimelineRef.current && !timelineSyncApplyingRef.current) {
+            timelineViewportSync.setViewport(
+                {
+                    scrollLeft: next,
+                    pxPerSec: pxPerSecRef.current,
+                },
+                TIMELINE_SYNC_ORIGIN,
+            );
         }
     }, []);
 
@@ -563,12 +646,27 @@ export function useTimelineState(): TimelineStateResult {
     useEffect(() => {
         if (!s.paramEditorSyncTimeline) return;
         const apply = () => {
+            // 【关键】跳过自己发布的广播：时间轴既发布又订阅，不判定来源时会把
+            // 自己刚写进去的值再应用一遍，且应用读到的常是**上一次**的值 →
+            // 位置回退（实测 10→20→10）。这是"拖拽阶梯感"的根因，详见
+            // `timelineViewportSync` 中 `origin` 的说明。
+            if (timelineViewportSync.getOrigin() === TIMELINE_SYNC_ORIGIN) return;
             const store = timelineViewportSync.get();
             const scroller = scrollRef.current;
             // 纯滚动（pxPerSec 未变）：在同一个事件帧内同步落地——先写原生
             // scroller（DOM 内容层随之移动），再走完整同步链（标尺/bus/共享
             // 视口回写被 applying 标志抑制），两个面板严丝合缝。任何经
             // state/layoutEffect 的延迟都会让时间轴比参数编辑器慢一帧以上。
+            if (kernelHostRef.current !== null) {
+                // 内核模式：没有原生 scroller 可写，视口真值在 ScrollKernel。
+                // 一次原子提交（缩放 + 横向位置），用**目标** pxPerSec 算上限；
+                // applying 标志抑制回灌，避免两个面板形成反馈环。
+                timelineSyncApplyingRef.current = true;
+                const applied = viewportAccess.setZoomAndScroll(store.pxPerSec, store.scrollLeft);
+                syncScrollLeft(applied.scrollLeft);
+                timelineSyncApplyingRef.current = false;
+                return;
+            }
             if (scroller && Math.abs(store.pxPerSec - pxPerSecRef.current) <= 1e-9) {
                 timelineSyncApplyingRef.current = true;
                 const applied = applyNativeScrollLeft(scroller, store.scrollLeft);
@@ -601,10 +699,13 @@ export function useTimelineState(): TimelineStateResult {
     // 参数编辑器会先画出一帧未同步内容（"一闪"）再被纠正。
     useLayoutEffect(() => {
         if (s.paramEditorSyncTimeline) {
-            timelineViewportSync.setViewport({
-                scrollLeft: scrollLeftRef.current,
-                pxPerSec: pxPerSecRef.current,
-            });
+            timelineViewportSync.setViewport(
+                {
+                    scrollLeft: scrollLeftRef.current,
+                    pxPerSec: pxPerSecRef.current,
+                },
+                TIMELINE_SYNC_ORIGIN,
+            );
         }
     }, [s.paramEditorSyncTimeline]);
 
@@ -614,6 +715,12 @@ export function useTimelineState(): TimelineStateResult {
     useLayoutEffect(() => {
         const pending = pendingTimelineSyncViewportRef.current;
         if (!pending || !s.paramEditorSyncTimeline) return;
+        // 内核模式：apply() 已用 setZoomAndScroll 一次原子提交，不存在「等 React
+        // state 落地后再写 scroller」的两段式需求——直接清掉待处理项。
+        if (kernelHostRef.current !== null) {
+            pendingTimelineSyncViewportRef.current = null;
+            return;
+        }
         if (Math.abs(pxPerSec - pending.pxPerSec) > 1e-9) return;
         if (Math.abs(scrollLeft - pending.scrollLeft) > 0.5) return;
 
@@ -625,7 +732,7 @@ export function useTimelineState(): TimelineStateResult {
         const applied = applyNativeScrollLeft(scroller, pending.scrollLeft);
         syncScrollLeft(applied);
         timelineSyncApplyingRef.current = false;
-    }, [pxPerSec, scrollLeft, s.paramEditorSyncTimeline, syncScrollLeft]);
+    }, [pxPerSec, scrollLeft, s.paramEditorSyncTimeline, syncScrollLeft, kernelHostRef]);
 
     // ── keyboard zoom layout effect ──────────────────────────
     useLayoutEffect(() => {
@@ -757,7 +864,15 @@ export function useTimelineState(): TimelineStateResult {
     }, []);
 
     // ── dynamicProjectSec / contentWidth / contentHeight ─────
-    const dynamicProjectSec = useMemo(() => getDynamicProjectSec(s.clips), [s.clips]);
+    //
+    // 与参数编辑器、内核**同源**（见 `resolveScrollableProjectSec`）：标尺的可见
+    // 刻度范围、拖拽上限与内容宽都由此推出。此前只用 clip 末端，比后端权威的
+    // `projectSec` 短（实测 59.5s vs 120s），会让标尺刻度范围与内核实际可滚范围
+    // 不一致（缺陷 7 的同一根因）。
+    const dynamicProjectSec = useMemo(
+        () => resolveScrollableProjectSec(s.projectSec, s.clips),
+        [s.projectSec, s.clips],
+    );
 
     const contentWidth = useMemo(
         () => Math.max(1, Math.ceil(dynamicProjectSec * pxPerSec)),
@@ -1025,16 +1140,10 @@ export function useTimelineState(): TimelineStateResult {
                 void dispatch(seekPlayhead(beat));
                 clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
             } else {
-                // 更新 Redux state 使三角形头部（TimeRulerPlayhead）与竖线同步
+                // 更新 Redux state 使三角形头部（TimeRulerPlayhead）与竖线同步。
+                // 轨道区播放头（内核自绘）无需在此直写 DOM：位置变化经数据镜像 +
+                // 视觉插值 ref 流入内核，由桥接的每帧重绘请求驱动。
                 dispatch(setplayheadSec(beat));
-                // 同时直接操作 DOM 确保竖线无延迟跟随（设备像素吸附与其余
-                // 播放头写入点一致，避免拖拽中相位漂移造成粗细变化）。
-                if (playheadRef.current) {
-                    playheadRef.current.style.left = `${snapToDevicePx(
-                        beat * pxPerSecRef.current - scrollLeftRef.current,
-                        readDevicePixelRatio(),
-                    )}px`;
-                }
             }
             return beat;
         },
@@ -1236,7 +1345,6 @@ export function useTimelineState(): TimelineStateResult {
         rulerContentRef,
         rulerPlayheadLineRef,
         rulerPlayheadHeadRef,
-        playheadRef,
         dropPreviewRef,
 
         lastClickedClipIdRef,
@@ -1250,6 +1358,19 @@ export function useTimelineState(): TimelineStateResult {
         pxPerSec,
         setPxPerSec,
         viewportWidth,
+        /**
+         * 视口宽度写入。
+         *
+         * 旧实现由滚动容器的 ResizeObserver 驱动；内核模式下滚动容器不存在，
+         * 需要由内核把它测量到的宽度写回来（否则 `timelineTicks` 的窗口宽度
+         * 停留在初始值，标尺只画得出前一段刻度）。
+         */
+        setViewportWidth,
+        /**
+         * 逐帧水平同步（内核每帧通知）：只做跨面板同步，不做 React 对齐。
+         * 与 `syncScrollLeft` 的区别见其定义处说明。
+         */
+        syncScrollLeftFrame,
         rowHeight,
         setRowHeight,
         altPressed,
