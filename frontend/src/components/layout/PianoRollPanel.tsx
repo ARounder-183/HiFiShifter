@@ -58,6 +58,7 @@ import type { ParamFramesPayload } from "../../types/api";
 import {
     degreeInputToScaleSteps,
     isScaleKey,
+    resolveScaleNotes,
     SCALE_NOTES,
     snapToScale,
     snapToSemitone,
@@ -94,7 +95,7 @@ import { TempoMapCornerButton } from "./timeline/TempoMapCornerButton";
 import { invokeGridRedrawHandler } from "./timeline/gridRedrawBridge";
 import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeline";
 import type { TempoMap } from "../../utils/tempoMap";
-import { buildScaleSegments, effectiveScaleAtSec } from "../../utils/tempoMap";
+import { effectiveScaleAtSec } from "../../utils/tempoMap";
 import { setTempoMapRemote } from "../../features/session/thunks/tempoMapThunks";
 import { publishPianoRollSelection } from "../../utils/pianoRollSelectionBus";
 import { resolveHorizontalWheelZoom } from "./timeline/runtime/timelineScrollRange";
@@ -2375,7 +2376,8 @@ export const PianoRollPanel: React.FC = () => {
      * 构建 GL 场景层的网格输入（阶段 2）。
      *
      * 流程：由 `editParam` 判定网格种类 → 取值域边界与当前视口 → 解析该主题的两条
-     * 网格线颜色为数值 RGBA → 绑定 `valueToY`。
+     * 网格线颜色（以及钢琴背景 / 音阶高亮颜色）为数值 RGBA → 绑定 `valueToY` →
+     * pitch 下再补键盘颜色与音阶音级。
      *
      * 特殊说明 1：`valueToY` 传的是**面板自己的**那个函数（只绑定 `editParam`），
      * 与 Canvas2D 路径共用同一份投影——这正是两种渲染模式网格不会错位的原因。
@@ -2384,6 +2386,19 @@ export const PianoRollPanel: React.FC = () => {
      * 在渲染热路径上反复解析 CSS 字符串是纯浪费，故在镜像更新（低频）时做。
      * 解析失败（拿到 NaN）时退回**不透明黑**——宁可颜色不对也不要上传 NaN，
      * NaN 会让整个实例属性失效、整层消失。
+     *
+     * 特殊说明 3（音阶高亮）：条件与旧 Canvas2D 分支**逐字对齐**——`always` 模式且
+     * 存在工程音阶时才给音级集合（`off` / 无音阶时给空数组，等价于不高亮）。
+     *
+     * 【已知限制：Tempo Map 分段音阶未迁移】旧 Canvas2D 路径还支持 Tempo Map 的
+     * **分段音阶**（`buildScaleSegments`：不同时间段用不同音阶，按段画不同 x 范围）。
+     * GL 网格几何是**视口坐标且不含时间轴**——它不知道自己在哪个时间段上，无法表达
+     * 分段。要迁移需要把网格层做成时间相关（或把高亮拆成独立的时间感知图层），
+     * 超出本次改动范围。因此这里只实现**单一工程音阶**的均匀路径：有 Tempo Map
+     * 音阶变化的工程，高亮会按工程音阶（而非各段音阶）绘制。
+     *
+     * 特殊说明 4（钢琴背景）：黑键行背景带**恒开**、无开关、无持久化设置；它只是
+     * 纹理，与音阶高亮（语义）互不影响，后者在 GL 实例顺序上压在它之上。
      *
      * @returns 网格输入；GL 关闭或无法解析时返回 null（宿主按"没有网格"处理）。
      */
@@ -2440,8 +2455,20 @@ export const PianoRollPanel: React.FC = () => {
         // 键盘轴颜色只在音高参数下提供：非 pitch 时 GL 层据此判定"没有键盘"
         // 并清空几何（否则切到别的参数后键盘会残留在画布上）。
         if (kind !== "pitch") return base;
+
+        // 音阶高亮（缺陷 #6 的修复）：条件与旧 Canvas2D 分支逐字对齐——只在
+        // `always` 且有工程音阶时高亮；旧实现还支持 Tempo Map 分段音阶，GL 网格
+        // 层无法表达（见本函数特殊说明 3）。
+        const scaleNotes =
+            s.scaleHighlightMode === "always" ? resolveScaleNotes(effectiveProjectScale) : [];
+
         return {
             ...base,
+            // 钢琴背景（恒开）：黑键行背景带。GL 侧保证带子在所有网格线之前发射，
+            // 音阶强调线再压在其上。
+            blackKeyRowBandRgba: toRgba(colors.blackKeyRowBand),
+            scaleNotes,
+            scaleHighlightRgba: toRgba(colors.scaleHighlight),
             whiteKeyRgba: toRgba(colors.whiteKey),
             blackKeyRgba: toRgba(colors.blackKey),
             blackKeyGradientRgba: toRgba(colors.blackKeyGradient),
@@ -2457,9 +2484,23 @@ export const PianoRollPanel: React.FC = () => {
     /**
      * 内核数据镜像：项目时长 / 值域 / 网格输入。
      *
-     * 特殊说明：网格输入必须每次构建——它是 GL 静态层的唯一来源，而 GL 层已接管
-     * 网格（Canvas2D 侧 `skipGrid` 恒为 true）。颜色解析会创建 DOM 探针
+     * 特殊说明 1：网格输入必须每次构建——它是 GL 静态层的唯一来源（Canvas2D 侧的
+     * 音高网格分支已整体删除，网格只有 GL 一个绘制者）。颜色解析会创建 DOM 探针
      * （`normalizeCssColor`），但这是唯一路径，没有可省的余地。
+     *
+     * 特殊说明 2（**依赖项必须覆盖 buildGridSpec 读取的全部输入**）：本 effect 是
+     * 镜像里 `grid` 的**唯一**写入点，因此 `buildGridSpec` 读到的每一个输入都必须
+     * 在依赖里出现，否则该输入变化时镜像不刷新、签名不变、GL 几何不重建——症状
+     * 正是"点了按钮但画面纹丝不动"。因此除视口 / 参数外，还必须含：
+     * - `themeMode`：决定两套配色（切主题后背景带与网格线都要换色）；
+     * - `s.scaleHighlightMode`：决定音阶高亮是否产生音级集合（缺陷 #6）；
+     * - `effectiveProjectScale`：换调 / 换音阶后高亮的音级集合变化。
+     *
+     * 实测（补依赖之前）：点击「音阶高亮」按钮后 Redux 状态确实翻转（按钮 variant
+     * `ghost → solid`），但 GL 画布的像素**完全不变**——本 effect 没重跑，镜像里的
+     * `grid` 还是旧对象（连带旧签名），几何自然不重建。补上依赖后同样操作能画出
+     * 琥珀色强调线（像素级实测：变化行数 = 音阶音级数 × 每线设备像素行数，且再点
+     * 一次回到逐像素相同）。
      */
     useLayoutEffect(() => {
         const bounds = getParamValueBoundsForScrollbar(editParam);
@@ -2486,6 +2527,10 @@ export const PianoRollPanel: React.FC = () => {
         processorParams,
         s.paramEditorSyncTimeline,
         timelineOffsetPx,
+        // 见特殊说明 2：buildGridSpec 读到的主题 / 高亮 / 音阶都必须在此列出。
+        themeMode,
+        s.scaleHighlightMode,
+        effectiveProjectScale,
     ]);
 
     // 渲染期刷新 syncScrollLeft 引用（其函数体随每次渲染重建）：供只注册一次的
@@ -3226,17 +3271,15 @@ export const PianoRollPanel: React.FC = () => {
         invalidate();
     }, [s.showClipboardPreview, invalidate]);
 
-    // scaleSegments 帧间缓存：播放头 invalidate 会让画布每帧重绘，但
-    // tempoMap / 工程音阶 / 可见区间在帧间通常不变。按引用 + 0.02s 量化
-    // 区间做 key，未变时复用上帧结果，避免每帧遍历 tempo 段并分配新数组。
-    // 可见区间两侧本就各留 5s 余量，量化引入的 0.02s 漂移不会影响覆盖。
-    const scaleSegmentsCacheRef = useRef<{
-        tempoMap: unknown;
-        scale: unknown;
-        qStart: number;
-        qEnd: number;
-        result: ReturnType<typeof buildScaleSegments>;
-    }>({ tempoMap: null, scale: null, qStart: NaN, qEnd: NaN, result: [] });
+    // 【已删除：scaleSegments 帧间缓存】
+    //
+    // 它存在的唯一目的是给 `drawPianoRoll` 的 `scaleSegments` 入参供数（Tempo Map
+    // 分段音阶高亮）。该入参随 Canvas2D 音高网格分支一起删除（分支因 `skipGrid`
+    // 恒为 true 而不可达），缓存随之失去唯一读者。
+    //
+    // 【分段音阶高亮的去向】GL 网格几何是视口坐标、不含时间轴，无法表达"不同时间段
+    // 用不同音阶"，因此**分段高亮未迁移**；现在只支持单一工程音阶。见
+    // `buildGridSpec` 的说明。`s.tempoMap` 仍被自动吸附与标尺使用，未失去读者。
 
     /**
      * 组装曲线图层描述符（阶段 3：曲线 GL）。
@@ -3462,27 +3505,6 @@ export const PianoRollPanel: React.FC = () => {
             viewportWidthPx: viewSizeRef.current.w,
             dpr: window.devicePixelRatio || 1,
         });
-        const scaleSegStartQ =
-            Math.round(Math.max(0, viewportStartSec(drawAxis) - 5) / 0.02) * 0.02;
-        const scaleSegEndQ = Math.round((viewportEndSec(drawAxis) + 5) / 0.02) * 0.02;
-        const segCache = scaleSegmentsCacheRef.current;
-        if (
-            segCache.tempoMap !== s.tempoMap ||
-            segCache.scale !== effectiveProjectScale ||
-            segCache.qStart !== scaleSegStartQ ||
-            segCache.qEnd !== scaleSegEndQ
-        ) {
-            segCache.tempoMap = s.tempoMap;
-            segCache.scale = effectiveProjectScale;
-            segCache.qStart = scaleSegStartQ;
-            segCache.qEnd = scaleSegEndQ;
-            segCache.result = buildScaleSegments(
-                s.tempoMap,
-                effectiveProjectScale,
-                scaleSegStartQ,
-                scaleSegEndQ,
-            );
-        }
         // 曲线图层（阶段 3）：每帧重建描述符列表。
         //
         // 【为什么要每帧构建】滚动/缩放会改变可见段与 `axis`，而 GL 侧要在绘制时
@@ -3523,10 +3545,15 @@ export const PianoRollPanel: React.FC = () => {
          *
          * 【必须包含什么】主画布上绘制的**全部输入**：
          * - 绘图资源：各条曲线数据、参考线、检测曲线、副参数视口、morph 叠加、
-         *   剪贴板预览、选区块、live 编辑覆盖、音阶高亮（含 tempoMap 段）、
-         *   中央提示文字 `overlayText`；
+         *   剪贴板预览、选区块、live 编辑覆盖、中央提示文字 `overlayText`；
          * - 视口：`viewSize`、`pxPerSec`、`scrollLeft`、`dpr`（滚动/缩放会改变投影）；
          * - 主题与字体（颜色解析与文字宽度都会影响像素结果）。
+         *
+         * 【音阶高亮为什么不在签名里】它已迁到 **GL 网格层**（主画布不再绘制它），
+         * 其输入（音级集合 / 强调线颜色）由 `PianoRollGridSpec` 的几何签名负责。
+         * 此前这里编入的 `effectiveProjectScale` / `s.tempoMap` / `s.pitchSnapUnit` /
+         * `s.scaleHighlightMode` / `s.toolMode` / `snapToggleHeld` 都随该分支的删除
+         * 一并移除——它们对应的绘制入参已不存在，"编进来"只会让缓存无谓失效。
          *
          * 【必须**不**包含什么】播放头位置——它已由 GL 叠加层绘制。把它编进签名会让
          * 播放帧的签名每帧变化、缓存失效，那就退回"每帧重绘曲线"。
@@ -3566,17 +3593,10 @@ export const PianoRollPanel: React.FC = () => {
             s.showClipboardPreview ? clipboardRef.current : null,
             selectionRef.current,
             liveEditOverrideRef.current,
-            effectiveProjectScale,
-            s.tempoMap,
-            segCache.result,
-            s.pitchSnapUnit,
-            s.scaleHighlightMode,
-            s.toolMode,
-            snapToggleHeld,
             // 中央提示文字（"音高被硬禁用"的原因）：本面板**新增**的字符串签名项，
             // 切换参数 / 轨道组时会变（禁用原因出现或消失）。
-            // 注意 `drawPianoRoll` 另有多项字符串入参（editParam / fontFamily /
-            // toolMode 等），它们在上方各自的位置参与签名——本项并非"唯一"字符串项。
+            // 注意 `drawPianoRoll` 另有多项字符串入参（editParam / fontFamily 等），
+            // 它们在上方各自的位置参与签名——本项并非"唯一"字符串项。
             overlayText,
             // 视口中心/跨度（用 ref 值，避免依赖 React 渲染时机）
             pitchViewRef.current.center,
@@ -3610,9 +3630,9 @@ export const PianoRollPanel: React.FC = () => {
             referencePitchOverlays,
             detectedPitchCurves,
             isDark: themeMode === "dark",
-            // ── 下列六个 `skip*` 恒为 true：这些图层**只有 GL 一个绘制者** ──────
+            // ── 下列五个 `skip*` 恒为 true：这些图层**只有 GL 一个绘制者** ──────
             //
-            // 内核是唯一渲染路径，网格 / 键盘几何 / 轴文字 / 轴画布 / 播放头 / 曲线
+            // 内核是唯一渲染路径，键盘几何 / 轴文字 / 轴画布 / 播放头 / 曲线
             // 全归 GL。恒 true 意味着 Canvas2D 侧**永久跳过**这些图层。
             //
             // 【已知并接受的限制】WebGL2 在**运行期**失败时，这些图层无人绘制（实测：
@@ -3621,9 +3641,11 @@ export const PianoRollPanel: React.FC = () => {
             // 再实现一遍，收益与成本完全不成比例——用户已明确决定不修。详见设计文档
             // `docs/superpowers/specs/2026-09-13-timeline-single-path-design.md` §2.4。
             //
-            // 特殊说明：跳过的都是 **GL 已完全接管**的图层；选区块、morph 手柄等仍在
+            // 特殊说明 1：跳过的都是 **GL 已完全接管**的图层；选区块、morph 手柄等仍在
             // 下面由主画布绘制（见 render.ts 对 skipPlayhead / skipCurves 的说明）。
-            skipGrid: true,
+            //
+            // 特殊说明 2：**没有 `skipGrid`**——网格的 Canvas2D 分支已被整体删除
+            // （它原本就因本处恒传 `true` 而不可达）。音阶高亮随网格一起迁到 GL。
             skipKeyboardGeometry: true,
             skipAxisText: true,
             // 轴画布全部内容归 GL -> 整张跳过（含清屏）。
@@ -3636,15 +3658,6 @@ export const PianoRollPanel: React.FC = () => {
             mainContentSignature,
             fontFamily,
             clipboardPreview: s.showClipboardPreview ? clipboardRef.current : null,
-            // pitch snap visual helpers
-            pitchSnapUnit: s.pitchSnapUnit,
-            projectScale: effectiveProjectScale,
-            scaleHighlightMode: s.scaleHighlightMode,
-            // 可见秒区间由 axis 提供：此前这里写作 scrollLeft / pxPerSec
-            // （先除后乘），与其余图层的换算不等价。
-            scaleSegments: segCache.result,
-            toolMode: s.toolMode,
-            snapToggleHeld: snapToggleHeld,
             paramMorphOverlay,
         });
     };
@@ -6306,8 +6319,9 @@ export const PianoRollPanel: React.FC = () => {
                                         `absolute inset-0` 覆盖其上）。因此 GL 层只画
                                         静态底图，曲线 / 选区 / 播放头由 Canvas2D 与 GL
                                         叠加层画在上层。
-                                        恒挂载：GL 是网格的**唯一**绘制者（Canvas2D 侧
-                                        `skipGrid: true`），不挂就等于网格消失。 */}
+                                        恒挂载：GL 是网格的**唯一**绘制者（Canvas2D
+                                        侧的整段音高网格分支已被删除，不是"跳过"而是
+                                        不存在了），不挂就等于网格消失。 */}
                                     <canvas
                                         ref={glCanvasRef}
                                         data-piano-roll-gl-scene

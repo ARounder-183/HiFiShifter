@@ -621,6 +621,9 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
      * 特殊说明：**不含横向滚动位置**——横线横跨整个视口、竖线的 y 也已在视口坐标
      * 里算好，因此横向滚动确实无需重建（"横向滚动零重建"成立）。视口宽高要含
      * （分别决定横线长度与可见行数）；dpr 要含（决定半像素取向与线厚）。
+     * 全部颜色与音阶音级集合（`blackKeyRowBandRgba` / `scaleNotes` /
+     * `scaleHighlightRgba`）也必须含——漏掉任何一个，该图层就会在输入变化后停在
+     * 旧状态（切主题背景带不换色 / 开音阶高亮画面不动，即缺陷 #6 的同类）。
      *
      * @param spec 当前网格输入。
      * @returns 内容签名；无网格时为空串。
@@ -638,6 +641,9 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             dpr: readDevicePixelRatio(),
             strongRgba: spec.strongRgba,
             weakRgba: spec.weakRgba,
+            blackKeyRowBandRgba: spec.blackKeyRowBandRgba,
+            scaleNotes: spec.scaleNotes,
+            scaleHighlightRgba: spec.scaleHighlightRgba,
         });
     }
 
@@ -667,6 +673,9 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                         valueToY: spec.valueToY,
                         colorC: spec.strongRgba,
                         colorOther: spec.weakRgba,
+                        blackKeyRowBandRgba: spec.blackKeyRowBandRgba,
+                        scaleNotes: spec.scaleNotes,
+                        scaleHighlightRgba: spec.scaleHighlightRgba,
                     })
                   : buildValueGridInstances({
                         kind: spec.kind,

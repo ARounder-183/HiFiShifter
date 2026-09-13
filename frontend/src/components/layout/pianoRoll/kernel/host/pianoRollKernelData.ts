@@ -3,7 +3,8 @@
  *
  * 【主要内容】
  * 声明宿主每帧需要从 React 侧读取的数据形状：工程时长、当前参数的**值域视口**
- * （`min` / `max` / `span`），以及阶段 2 GL 场景层所需的网格几何输入。
+ * （`min` / `max` / `span`），以及阶段 2 GL 场景层所需的网格几何输入（含钢琴背景
+ * 的黑键行背景带与音阶高亮）。
  *
  * 【作用】
  * 宿主是长生命周期的命令式运行时对象，若直接持有 React state 或 Redux store，
@@ -71,6 +72,29 @@ export interface PianoRollGridSpec {
     readonly strongRgba: readonly [number, number, number, number];
     /** 弱线颜色（pitch 下即其余半音的颜色）。 */
     readonly weakRgba: readonly [number, number, number, number];
+
+    // ── 钢琴背景 / 音阶高亮（均仅 pitch 参数有意义）─────────────────────
+    /**
+     * 黑键行背景带的颜色（钢琴背景：只压暗黑键行，白键行保持原背景）。
+     *
+     * 特殊说明 1：缺省表示**不画背景带**。这与"给一个全透明色"是两种不同的几何
+     * 输入，签名里按 `?? ""` 区分（见 `gridGeometrySignature`）。
+     *
+     * 特殊说明 2：GL 按实例缓冲顺序合成，背景带必须由构建器排在所有网格线**之前**
+     * ——否则整行实心矩形会盖掉网格线（见 `buildPitchGridInstances`）。面板只需
+     * 提供颜色，顺序由构建器保证。
+     */
+    readonly blackKeyRowBandRgba?: readonly [number, number, number, number];
+    /**
+     * 音阶高亮的音级集合（pitch class 0..11）；缺省 / 空数组表示不高亮。
+     *
+     * 特殊说明：**只支持单一音阶**（工程音阶）。Tempo Map 的分段音阶无法在这里
+     * 表达——GL 网格几何是视口坐标、不含时间轴，不知道自己在哪个时间段上。
+     * 详见 `PianoRollPanel.buildGridSpec` 与 `buildPitchGridInstances` 的限制说明。
+     */
+    readonly scaleNotes?: readonly number[];
+    /** 音阶强调线颜色；缺省表示不画强调线。 */
+    readonly scaleHighlightRgba?: readonly [number, number, number, number];
 
     // ── 键盘轴颜色（仅 pitch 参数有意义；其余参数无键盘）────────────────
     //

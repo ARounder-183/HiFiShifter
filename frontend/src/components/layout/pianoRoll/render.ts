@@ -1,11 +1,19 @@
 /**
- * PianoRoll 渲染模块
+ * PianoRoll 渲染模块 · Canvas2D 主画布层
  *
- * 负责钢琴卷帘界面的可视化渲染，包括：
- * - 音高网格和键盘可视化
- * - 音频波形渲染
- * - 参数曲线绘制（音高、音量等）
- * - 选区、播放头等交互元素
+ * 【主要内容】
+ * 负责参数编辑器主画布上的 Canvas2D 绘制：非音高参数的刻度线、选区块、曲线图层
+ * （参考线 / 检测曲线 / 副参数 / 原始与编辑曲线 / 选区高亮 / 剪贴板预览）、morph
+ * 手柄与中央提示文字。
+ *
+ * 【作用】本模块是**残留的 Canvas2D 路径**：网格、钢琴键盘几何、轴文字、轴画布、
+ * 播放头、曲线均已迁到 GL（各自的 `skip*` 入参在生产环境恒为 `true`）。本文件只
+ * 保留尚未迁移、或作为无 GL 时回退的绘制。
+ *
+ * 【与其他模块的关系】
+ * - 上游：`PianoRollPanel.drawRef.current`（唯一生产调用方）。
+ * - 配色：`./colors`（与 GL 层共用同一份表，杜绝两种模式色值分叉）。
+ * - 坐标：`../renderKernel/timelineAxis` 的 `secToViewportPx` 是**唯一**横向投影来源。
  *
  * @module render
  */
@@ -25,8 +33,6 @@ import { wholeDevicePxLength } from "../../../utils/devicePixelLine";
 import { AXIS_W, PITCH_MAX_MIDI, PITCH_MIN_MIDI } from "./constants";
 import { framesToTime, isBlackKey, midiToLabel } from "./utils";
 import { resolveSecondaryOverlayValues } from "./secondaryOverlaySelection";
-import { resolveScaleNotes } from "../../../utils/musicalScales";
-import type { ScaleLike } from "../../../utils/musicalScales";
 import {
     childPitchOffsetValueToDisplay,
     isChildPitchOffsetCentsParam,
@@ -351,38 +357,16 @@ export function drawPianoRoll(args: {
         framePeriodMs: number;
         values: number[];
     } | null;
-    // pitch snap visual helpers
-    pitchSnapUnit?: "semitone" | "scale";
-    projectScale?: ScaleLike | null;
-    /** Tempo Map 音阶高亮分段（null = 无 Tempo Map 音阶数据，使用单音阶路径）。 */
-    scaleSegments?: Array<{
-        startSec: number;
-        endSec: number;
-        scale: ScaleLike | null;
-    }> | null;
-    toolMode?: string;
-    snapToggleHeld?: boolean;
-    scaleHighlightMode?: import("../../../features/session/sessionTypes").ScaleHighlightMode;
+    // 【已删除的入参】随下方"已删除的 Canvas2D 音高网格分支"一并移除（它们在
+    // 本函数里已无任何读者，留着只会让调用方以为"传了就有效"）：
+    //   `skipGrid`（网格恒由 GL 绘制）、`projectScale` / `scaleSegments` /
+    //   `scaleHighlightMode`（音阶高亮已迁到 GL 网格层）、`pitchSnapUnit` /
+    //   `toolMode` / `snapToggleHeld`（吸附与工具态的可视化从未在本函数里实现过）。
+    // 音阶高亮的新输入是 `PianoRollGridSpec.scaleNotes` / `scaleHighlightRgba`
+    // （见 `PianoRollPanel.buildGridSpec`）。
     paramMorphOverlay?: ParamMorphOverlay | null;
     /** 自定义字体族，用于 canvas 文本渲染 */
     fontFamily?: string;
-    /**
-     * 跳过横向网格线的绘制（网格已由 GL 静态层负责）。
-     *
-     * 【为什么需要】GL 层与 Canvas2D 层是两张叠放的画布：若两边都画网格，网格会被
-     * 画两次——半透明线叠加会让颜色变深、且两条线的设备像素对齐略有差异时会出现
-     * "重影"。因此网格的归属必须是排他的：GL 负责时 Canvas2D 必须跳过。
-     *
-     * 特殊说明 1：生产调用方（`PianoRollPanel`）**恒传 `true`**——GL 是网格的唯一
-     * 绘制者。因此 WebGL2 在运行期失败时横向音高网格无人绘制（实测 24 → 0 条）。
-     * 这是**已知并接受**的限制，不是缺陷：补一套 Canvas2D 回退等于把已迁走的渲染层
-     * 再实现一遍，收益与成本完全不成比例。详见
-     * `docs/superpowers/specs/2026-09-13-timeline-single-path-design.md` §2.4。
-     *
-     * 特殊说明 2：本参数保留为可选入参（缺省 `false`），使本函数仍可被单测以"不跳过"
-     * 覆盖 Canvas2D 全量绘制路径。
-     */
-    skipGrid?: boolean;
     /**
      * 跳过钢琴键盘的**几何**绘制（键底色 / 黑键渐变 / 分隔线），保留音名标签。
      *
@@ -420,8 +404,8 @@ export function drawPianoRoll(args: {
      * 副参数、原始 / 编辑曲线、选区高亮、剪贴板预览。`paramMorphOverlay`（morph 手柄，
      * 含 `arc`）**不**在曲线层内，仍由本函数绘制；它是编辑态叠加物而非曲线本身。
      *
-     * 【与 `skipGrid` 同一约定】生产调用方恒传 `true`（曲线只有 GL 一个绘制者），
-     * 因此 GL 运行期失败时曲线无人绘制。详见设计文档 §2.4。
+     * 【与 `skipAxisCanvas` 等同一约定】生产调用方恒传 `true`（曲线只有 GL 一个
+     * 绘制者），因此 GL 运行期失败时曲线无人绘制。详见设计文档 §2.4。
      */
     skipCurves?: boolean;
     /**
@@ -438,10 +422,13 @@ export function drawPianoRoll(args: {
     /**
      * 主画布的内容签名（阶段 2 Task 6 的静态层缓存）。
      *
-     * 【作用】主画布上的内容（曲线、参考线、音阶高亮、剪贴板预览、morph 叠加、
+     * 【作用】主画布上的内容（曲线、参考线、剪贴板预览、morph 叠加、
      * 中央提示文字）在**播放帧并不变化**——播放只动播放头，而播放头已由 GL 叠加层
      * 绘制。传入签名后，函数在签名未变时**跳过整张主画布的清屏与绘制**，从而让
      * 曲线层保持缓存；签名变化时才重绘。
+     *
+     * 特殊说明：音阶高亮**不在**主画布上（它已迁到 GL 网格层，见下方"已删除的
+     * Canvas2D 音高网格分支"），因此它不是本签名的输入。
      *
      * 契约：调用方必须把"主画布绘制的全部输入"与视口（`w` / `h` / 滚动 / 缩放 /
      * dpr）都编进签名。**漏掉任何一项都会让该层停止更新**（表现为"改了参数但画面
@@ -484,7 +471,6 @@ export function drawPianoRoll(args: {
         clipboardPreview,
         paramMorphOverlay,
         fontFamily,
-        skipGrid = false,
         skipKeyboardGeometry = false,
         skipAxisText = false,
         skipPlayhead = false,
@@ -758,78 +744,25 @@ export function drawPianoRoll(args: {
 
     // Horizontal grid lines
     //
-    // 【阶段 2】`skipGrid` 为真时整段跳过：网格已由 GL 静态层绘制。两张画布叠放，
-    // 都画会产生半透明叠加（颜色变深）与亚像素重影，因此归属必须排他。
-    if (!skipGrid && editParam === "pitch") {
-        const absMin = PITCH_MIN_MIDI;
-        const absMax = PITCH_MAX_MIDI;
-        const view = pitchView;
-        const span = clamp(view.span, 1e-6, absMax - absMin);
-        const min = clamp(view.center - span / 2, absMin, absMax - span);
-        const max = min + span;
-        const startMidi = clamp(Math.floor(min), absMin, absMax);
-        const endMidi = clamp(Math.ceil(max), absMin, absMax);
-        const highlightActive = (() => {
-            if (!args.projectScale) return false;
-            const mode = args.scaleHighlightMode ?? "off";
-            if (mode === "off") return false;
-            return mode === "always";
-        })();
-        const projectScaleNotes = args.projectScale ? resolveScaleNotes(args.projectScale) : [];
-        const scaleSegments = args.scaleSegments ?? null;
-        // 段级音阶音级只依赖段本身，与行无关：提升到行循环外只求值一次，
-        // 否则 60fps 下是 行数 × 段数 次重复的音阶解析 + 数组分配。
-        const segmentNotesList =
-            highlightActive && scaleSegments && scaleSegments.length > 0
-                ? scaleSegments.map((segment) =>
-                      segment.scale ? resolveScaleNotes(segment.scale) : null,
-                  )
-                : null;
-
-        for (let midi = startMidi; midi <= endMidi; midi += 1) {
-            const y = hairlineY(valueToY("pitch", midi + 0.5, h));
-            const pc = ((midi % 12) + 12) % 12;
-            const isScaleNote = highlightActive ? projectScaleNotes.includes(pc) : false;
-
-            const normalColor = pc === 0 ? colors.pitchGridC : colors.pitchGridOther;
-            ctx.strokeStyle = normalColor;
-            ctx.lineWidth = hairlineW;
-            ctx.beginPath();
-            ctx.moveTo(0, y);
-            ctx.lineTo(w, y);
-            ctx.stroke();
-
-            if (!highlightActive) continue;
-
-            if (segmentNotesList) {
-                // Tempo Map 路径：按时间段绘制高亮段。
-                ctx.strokeStyle = isDark ? "rgba(255,200,80,0.22)" : "rgba(200,120,20,0.22)";
-                ctx.lineWidth = 2;
-                for (let si = 0; si < scaleSegments!.length; si += 1) {
-                    const segmentNotes = segmentNotesList[si];
-                    if (!segmentNotes || !segmentNotes.includes(pc)) continue;
-                    const segment = scaleSegments![si];
-                    const x0 = secToViewportPx(axis, segment.startSec);
-                    const x1 = secToViewportPx(axis, segment.endSec);
-                    if (x1 < 0 || x0 > w) continue;
-                    ctx.beginPath();
-                    ctx.moveTo(Math.max(0, x0), y);
-                    ctx.lineTo(Math.min(w, x1), y);
-                    ctx.stroke();
-                }
-                continue;
-            }
-
-            if (isScaleNote) {
-                ctx.strokeStyle = isDark ? "rgba(255,200,80,0.22)" : "rgba(200,120,20,0.22)";
-                ctx.lineWidth = 2;
-                ctx.beginPath();
-                ctx.moveTo(0, y);
-                ctx.lineTo(w, y);
-                ctx.stroke();
-            }
-        }
-    } else if (isChildPitchOffsetCentsParam(editParam)) {
+    // 【已删除：Canvas2D 音高网格分支】该分支原先写作
+    // `if (!skipGrid && editParam === "pitch") { … }`，但生产调用方
+    // （`PianoRollPanel`）**恒传 `skipGrid: true`**——网格的唯一绘制者是 GL 静态层。
+    // 因此整段（连同其中的音阶高亮：单音阶与 Tempo Map 分段两条路径）在生产环境
+    // **不可达**，是死代码。
+    //
+    // 【为什么高亮不在这里保留一份】音阶高亮的旧实现只存在于本分支内，而本分支
+    // 恒被跳过——于是按钮改 Redux 状态、画面却什么都不画（缺陷 #6）。它已迁到 GL
+    // 网格层（`buildPitchGridInstances` 的 `scaleNotes` / `scaleHighlightRgba`），
+    // 与网格线同层同源；在此留一份 Canvas2D 副本只会制造"两个绘制者"的分叉，
+    // 而那正是本文件反复警告的类别。
+    //
+    // 【已知限制】旧分段路径依赖 `scaleSegments`（按时间段换音阶）；GL 网格几何是
+    // 视口坐标、不含时间轴，无法表达分段，因此**分段音阶高亮未迁移**，只支持单一
+    // 工程音阶。详见 `PianoRollPanel.buildGridSpec` 与 `buildPitchGridInstances`。
+    //
+    // 非音高参数的刻度线仍在此绘制（它们的网格线归 GL，但下面三个分支是
+    // Canvas2D 侧保留的回退路径，见各 `skip*` 参数的说明）。
+    if (isChildPitchOffsetCentsParam(editParam)) {
         const view = paramViews[editParam] ?? { center: 0, span: 1 };
         const span = Math.max(1e-6, view.span);
         const vMin = view.center - span / 2;

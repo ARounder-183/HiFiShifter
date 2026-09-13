@@ -2,8 +2,8 @@
  * 参数编辑器（Piano Roll）主题配色表
  *
  * 【主要内容】
- * 集中定义参数编辑器画布的全部颜色：琴键区、网格线、曲线、叠加文字与播放头，
- * 按深色 / 浅色两套主题给出。
+ * 集中定义参数编辑器画布的全部颜色：琴键区、网格线、钢琴背景（黑键行背景带）、
+ * 音阶高亮、曲线、叠加文字与播放头，按深色 / 浅色两套主题给出。
  *
  * 【作用】
  * 这些颜色此前**内联在** `render.ts` 的 `drawPianoRoll` 里。阶段 2 起同一份配色
@@ -12,8 +12,11 @@
  * 极难归因。因此提取为单一来源。
  *
  * 【与其他模块的关系】
- * - 上游：`render.ts` 的 `drawPianoRoll`（Canvas2D 路径）与 `PianoRollPanel`
- *   在构建 GL 场景层的网格输入时调用。
+ * - 上游：`render.ts` 的 `drawPianoRoll`（Canvas2D 路径，音阶高亮已迁走、只余非网格
+ *   图层）与 `PianoRollPanel` 在构建 GL 场景层的网格输入时调用。
+ * - 下游：`PianoRollPanel.buildGridSpec` 把本表的 CSS 颜色经 `parseRgbaColor` 转成
+ *   数值 RGBA，交给 `kernel/scene/gridInstances` 构建 GL 实例（含黑键行背景带与
+ *   音阶高亮强调线）。
  * - 独立性：纯函数 + 常量，不依赖 DOM / React / WebGL。
  */
 
@@ -45,6 +48,29 @@ export interface PianoRollColors {
     readonly pitchGridC: string;
     /** 音高网格：其余半音线。 */
     readonly pitchGridOther: string;
+    /**
+     * 黑键行背景带（钢琴背景：只压暗黑键行，白键行保持原背景）。
+     *
+     * 【为什么只压黑键行】这是 REAPER / Logic / Ableton 的既有惯例：黑键行加一条
+     * 半透明暗带、白键行保持原背景，正好复刻钢琴键盘的黑白交替。反过来给白键行加
+     * 亮带在浅色主题下会与底色糊在一起，反而削弱行间对比。
+     *
+     * 【为什么 alpha 这么克制】背景带是**纹理**，网格线才是要读的信息：深色主题的
+     * 弱网格线本身只有 `rgba(255,255,255,0.05)`，带子一重就会把它淹没——"网格线仍
+     * 清晰可见"是验收标准。深色 0.08 / 浅色 0.06 是"看得出行、又压不住线"的取值，
+     * 集中放在这里是为了后续调参只改一处。
+     *
+     * 特殊说明：必须是 `rgba()` 写法。`parseRgbaColor` 只认 `rgb()/rgba()`，hex 会
+     * 被解析成**不透明洋红**（故意的暴露设计，见 `normalizeCssColor` 说明）。
+     */
+    readonly blackKeyRowBand: string;
+    /**
+     * 音阶高亮：音阶音级上的强调线。
+     *
+     * 特殊说明：绘制顺序在 {@link blackKeyRowBand} **之上**——背景是纹理、高亮是
+     * 语义，语义必须压住纹理。同样必须是 `rgba()` 写法。
+     */
+    readonly scaleHighlight: string;
     /** 原始曲线（虚线）。 */
     readonly origCurve: string;
     /** 编辑后曲线（实线）。 */
@@ -74,6 +100,9 @@ const DARK_COLORS: PianoRollColors = {
     // 网格线
     pitchGridC: "rgba(255,255,255,0.10)",
     pitchGridOther: "rgba(255,255,255,0.05)",
+    // 钢琴背景 / 音阶高亮（见接口处的取值说明：alpha 必须压不住网格线）
+    blackKeyRowBand: "rgba(0,0,0,0.08)",
+    scaleHighlight: "rgba(255,200,80,0.22)",
     // 曲线
     origCurve: "rgba(200,200,200,0.55)",
     editCurve: "rgba(255,255,255,0.92)",
@@ -100,6 +129,9 @@ const LIGHT_COLORS: PianoRollColors = {
     // 网格线
     pitchGridC: "rgba(0,0,0,0.12)",
     pitchGridOther: "rgba(0,0,0,0.06)",
+    // 钢琴背景 / 音阶高亮（浅色主题的琥珀加深，否则在白底上不可读）
+    blackKeyRowBand: "rgba(0,0,0,0.06)",
+    scaleHighlight: "rgba(200,120,20,0.22)",
     // 曲线
     origCurve: "rgba(132,104,26,0.80)",
     editCurve: "rgba(178,108,0,1)",

@@ -9,6 +9,12 @@
  * 【为什么断言 w 与 h 分开】横线的 `w` 是横向范围、`h` 是线厚，两者写反会画出
  * 一条通高的竖条而不是一条线。这类转置错误在数值上都"有限且合理"，只有分开
  * 断言才能暴露。
+ *
+ * 【后两组用例守护新增图层】「钢琴背景（黑键行）」与「音阶高亮」：
+ * - 背景带必须**先于所有网格线**发射（FLAT 按缓冲顺序合成，顺序错了带子会盖掉线）；
+ * - 背景带用**行体**（`valueToY(midi+1)..valueToY(midi)`）而不是行心 `midi+0.5`；
+ * - 缺省不产带、空音级不产强调线（不改变既有行为）。
+ * 背景带用 `value < 0`（`-(midi+1)`）与网格线区分，见 `GridInstance.value`。
  */
 import { describe, expect, it } from "vitest";
 
@@ -365,5 +371,83 @@ describe("与 render.ts 行循环逐值等价", () => {
                 }
             }
         }
+    });
+});
+
+describe("钢琴背景（黑键行）", () => {
+    const band = [0, 0, 0, 0.08] as const;
+    const base = {
+        view: { center: 60, span: 12 },
+        absMin: 36,
+        absMax: 96,
+        heightPx: 100,
+        viewportWidthPx: 800,
+        dpr: 1,
+        valueToY: makeValueToY(),
+        colorC: RED,
+        colorOther: BLUE,
+    };
+
+    it("只为黑键半音产出背景带（pc ∈ {1,3,6,8,10}）", () => {
+        const items = buildPitchGridInstances({ ...base, blackKeyRowBandRgba: band });
+        const bands = items.filter((item) => item.value < 0);
+        expect(bands.length).toBeGreaterThan(0);
+        for (const item of bands) {
+            const pc = (-item.value - 1) % 12;
+            expect([1, 3, 6, 8, 10]).toContain(pc);
+        }
+    });
+
+    it("★ 背景带必须排在所有网格线之前（FLAT 按缓冲顺序合成）", () => {
+        const items = buildPitchGridInstances({ ...base, blackKeyRowBandRgba: band });
+        const lastBandIndex = items.map((i) => i.value < 0).lastIndexOf(true);
+        const firstLineIndex = items.map((i) => i.value >= 0).indexOf(true);
+        expect(lastBandIndex).toBeLessThan(firstLineIndex);
+    });
+
+    it("背景带横跨整个视口宽、高为键高（不是线厚）", () => {
+        const items = buildPitchGridInstances({ ...base, blackKeyRowBandRgba: band });
+        for (const item of items.filter((i) => i.value < 0)) {
+            expect(item.x).toBe(0);
+            expect(item.w).toBe(800);
+            expect(item.h).toBeGreaterThan(0);
+        }
+    });
+
+    it("缺省不产背景带（未提供颜色时行为不变）", () => {
+        const items = buildPitchGridInstances(base);
+        expect(items.every((item) => item.value >= 0)).toBe(true);
+    });
+});
+
+describe("音阶高亮", () => {
+    const base = {
+        view: { center: 60, span: 12 },
+        absMin: 36,
+        absMax: 96,
+        heightPx: 100,
+        viewportWidthPx: 800,
+        dpr: 1,
+        valueToY: makeValueToY(),
+        colorC: RED,
+        colorOther: BLUE,
+    };
+
+    it("音阶音级额外产出一条更粗的强调线", () => {
+        const plain = buildPitchGridInstances(base);
+        const highlighted = buildPitchGridInstances({
+            ...base,
+            scaleNotes: [0, 4, 7],
+            scaleHighlightRgba: [1, 0.78, 0.31, 0.22],
+        });
+        expect(highlighted.length).toBeGreaterThan(plain.length);
+        const emphasis = highlighted.filter((item) => item.value >= 0 && item.rgba[3] === 0.22);
+        expect(emphasis.length).toBeGreaterThan(0);
+    });
+
+    it("scaleNotes 为空 / 缺省时不产强调线", () => {
+        expect(buildPitchGridInstances(base).length).toBe(
+            buildPitchGridInstances({ ...base, scaleNotes: [] }).length,
+        );
     });
 });
