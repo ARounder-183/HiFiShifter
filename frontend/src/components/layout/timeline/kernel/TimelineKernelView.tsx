@@ -462,6 +462,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         () => ({
             onSeek: (sec, commit, trackId) =>
                 interactionsRef.current?.onSeek?.(sec, commit, trackId),
+            onSeekTo: (sec) => interactionsRef.current?.onSeekTo?.(sec),
             onSelectClip: (clipId, additive, rangeSelect, clientX) =>
                 interactionsRef.current?.onSelectClip?.(clipId, additive, rangeSelect, clientX),
             onDoubleClickClip: (clipId, mode) =>

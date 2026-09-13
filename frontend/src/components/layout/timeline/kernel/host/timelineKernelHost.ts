@@ -409,6 +409,16 @@ export interface TimelineKernelInteractions {
      */
     readonly onSeek?: (sec: number, commit: boolean, trackId?: string | null) => void;
     /**
+     * **纯**播放头落点（只移动播放头）。
+     *
+     * 与 `onSeek` 的区别是**没有**"清空选中 / 切换当前轨道"的空白点击语义：
+     * 旧实现的 clip / 边缘 / 淡变单击 seek（`seekFromClientX`）只移动播放头，
+     * 走 `onSeek` 会把刚被点中的 clip 又取消选中。
+     *
+     * @param sec 目标秒（面板侧仍会做光标吸附）。
+     */
+    readonly onSeekTo?: (sec: number) => void;
+    /**
      * 选中 clip。
      *
      * @param clipId 目标 clip；null 表示清空选择（点击空白走 `onSeek` 的
@@ -2223,6 +2233,15 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                * Alt 旁路规则），不在这里重写一套。
                */
               selectionMods: ReturnType<typeof resolveClipSelectionModifiers>;
+              /**
+               * 本次命中的分区是否由**重叠区解析**改写而来。
+               *
+               * 旧实现在重叠区里用的是另一套（更大的）拖拽阈值——见
+               * `OVERLAP_DRAG_THRESHOLD_PX` 的说明。分区名本身不足以区分
+               * （重叠区里的边缘 / 淡变会映射成与普通情形相同的 region），
+               * 因此必须显式带一个来源标记。
+               */
+              fromOverlapRegion?: boolean;
           }
         | {
               kind: "clip-fade";
@@ -2248,6 +2267,14 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
               kind: "snap-offset-drag";
               clipId: string;
               startContentX: number;
+              /**
+               * 按下时的指针视口 x（CSS px）。
+               *
+               * 起手阈值按**水平**位移判定（旧实现 `useSnapOffsetDrag` 判
+               * `|ΔclientX| >= 2`）：手柄只沿时间轴移动，纯纵向抖动不应被当成拖拽
+               * 而去写后端、留撤销步。
+               */
+              startClientX: number;
               /** 按下时的吸附偏移（秒）。 */
               originOffsetSec: number;
               /** clip 长度（面板用它钳制；内核只给几何）。 */
@@ -2319,7 +2346,14 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
 
     /** 点击 / 拖拽的位移阈值（CSS px）。 */
     const DRAG_THRESHOLD_PX = 4;
-
+    /**
+     * 重叠区内控件的拖拽阈值（CSS px）。
+     *
+     * 旧实现在重叠区里用的是**更大**的阈值：`OverlapEditLayer` 判 `dx²+dy² < 81`
+     * （9px），而 `ClipItem` / `ClipEdgeHandles` / `FadeHitLayer` 都是 `9`（3px）。
+     * 重叠区里控件彼此挤得很近，阈值太小会把"想点一下"误判成"拖动边缘/淡变"。
+     */
+    const OVERLAP_DRAG_THRESHOLD_PX = 9;
     /**
      * 音量旋钮的起手阈值（CSS px）。
      *
@@ -2479,6 +2513,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             localY: hit.localY,
             partnerClipId: overlap.partnerClipId,
             fadeIsLine: overlap.fadeIsLine,
+            fromOverlapRegion: true,
         };
     }
 
@@ -2634,8 +2669,98 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         interactions?.onBoxSelectPreview?.({ clipIds: ids, additive: gesture.additive });
     }
 
-    /** 左键按下：命中 clip → 待选中/待拖拽；命中空白 → 立即 seek 并进入拖拽 seek。 */
     /**
+     * 「按下即选中」：旧实现每个 DOM 交互层的 `pointerdown` 都会先把被点的 clip
+     * 纳入选中集合。
+     *
+     * 【为什么要在这里做】旧实现在**按下**那一刻就选中，因此"直接拖动一个未选中的
+     * clip"在松手后它是选中的。内核原先只在 pointerup 走选中逻辑，而拖动手势根本
+     * 不经过那条分支——表现为「把没选中的 clip 拖到别处，它最后还是没被选中」。
+     *
+     * 【门控分两档（与旧实现逐层对齐）】
+     * - clip 本体 / 边缘 / 淡变角（`ClipItem` / `ClipEdgeHandles`）：受
+     *   `selectionMods.shouldPrimeSelection` 门控（改绑与两键互斥规则由
+     *   `resolveClipSelectionModifiers` 统一给出，不在这里重写）；
+     * - 重叠区控件与 SnapOffset 手柄（`OverlapEditLayer`）：**不看**该标志，
+     *   只要 clip 当前不在选中集合里就纳入。
+     *
+     * @param clipId 被按下的 clip。
+     * @param region 命中分区。
+     * @param selectionMods 按下时解析的选择修饰键（null = 未解析，跳过）。
+     * @param clientX 指针视口 x（记入范围选择的锚点位置）。
+     * @param fromOverlapRegion 命中是否由重叠区解析改写而来。
+     * @returns 无返回值。
+     */
+    function primeSelectionOnPress(
+        clipId: string,
+        region: ClipHitRegion,
+        selectionMods: ReturnType<typeof resolveClipSelectionModifiers> | null,
+        clientX: number,
+        fromOverlapRegion: boolean,
+    ): void {
+        if (selectionMods === null) return;
+        const d = data();
+        const inMultiSelection =
+            d.multiSelectedClipIds.length > 0 && d.multiSelectedClipIds.includes(clipId);
+        // 与旧实现同一口径：多选非空时以"是否在多选集合内"为准，否则看单选。
+        const isSelected =
+            d.multiSelectedClipIds.length > 0 ? inMultiSelection : d.selectedClipId === clipId;
+        if (isSelected) return;
+        const ungated = fromOverlapRegion || region === "snap-offset-handle";
+        if (!ungated && !selectionMods.shouldPrimeSelection) return;
+        // `additive = false` / `rangeSelect = false` 等价于旧实现的
+        // `ensureSelected + recordLastClickPosition + selectClipRemote`。
+        interactions?.onSelectClip?.(clipId, false, false, clientX);
+    }
+
+    /**
+     * 单击（未拖动）时播放头应落到哪一秒。
+     *
+     * 旧实现里每个交互层的"单击"语义都不同，这里逐条对齐：
+     * - **clip 本体 / header**：跳到**点击位置**（`ClipItem` 的 `seekFromClientX`）；
+     * - **trim 边缘**：跳到**该边缘**（`ClipEdgeHandles` 的 `seekToEdgeClientX`）；
+     * - **淡变角 / 包络线**：跳到淡变区的**内侧边缘**——淡入 → `起点 + 淡变长度`，
+     *   淡出 → `右端 − 淡变长度`（长度取**生效**值，自动交叉淡化优先）；
+     * - **交叉点抓手**：跳到点击位置（旧实现明确"抓手仍按点击位置跳转"）；
+     * - **SnapOffset 手柄**：**不** seek（旧实现只把它纳入选中）；
+     * - 命中 inactive take lane 的单击：切换 Take，不 seek。
+     *
+     * 旧实现还在 body / header 的点击上加了一道门：按住物理 Alt 或任一**选择**
+     * 修饰键（原始标志，不是解析后的"是否生效"）时不 seek —— 那些是"我要编辑 /
+     * 多选"的意图，不该顺带把播放头挪走。
+     *
+     * @param gesture 待选中手势（携带按下时的几何与修饰键快照）。
+     * @param event 抬起事件（取点击位置）。
+     * @returns 目标秒；本次单击不应 seek 时为 null。
+     */
+    function resolveClickSeekSec(
+        gesture: Extract<Gesture, { kind: "pending-select" }>,
+        event: PointerEvent,
+    ): number | null {
+        if (gesture.region === "snap-offset-handle") return null;
+        if (gesture.inactiveTakeId !== null) return null;
+        if (gesture.region === "left-edge") return gesture.originStartSec;
+        if (gesture.region === "right-edge") {
+            return gesture.originStartSec + gesture.lengthSec;
+        }
+        if (gesture.region === "fade-in-corner" || gesture.region === "fade-out-corner") {
+            const clip = data().clips.find((item) => item.id === gesture.clipId);
+            if (clip === undefined) return null;
+            const fadeSec =
+                gesture.region === "fade-in-corner"
+                    ? effectiveFadeSec(clip.fadeInSec, clip.autoFadeInSec)
+                    : effectiveFadeSec(clip.fadeOutSec, clip.autoFadeOutSec);
+            return gesture.region === "fade-in-corner"
+                ? gesture.originStartSec + fadeSec
+                : gesture.originStartSec + gesture.lengthSec - fadeSec;
+        }
+        if (gesture.region === "crossfade-grip") return secAt(event.clientX);
+        const mods = gesture.selectionMods;
+        if (mods.altKeyDown || mods.multiSelectToggleRaw || mods.rangeSelectRaw) return null;
+        return secAt(event.clientX);
+    }
+
+    /** 左键按下：命中 clip → 待选中/待拖拽；命中空白 → 立即 seek 并进入拖拽 seek。 */ /**
      * 内核命中结果。
      *
      * `hitTest` 的原始结果 + 重叠区解析补充的字段（`partnerClipId` 只在交叉点
@@ -2649,6 +2774,14 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
          * 双击重置曲率只对本体生效（旧实现 `zone.line` / `isLine` 同义）。
          */
         readonly fadeIsLine?: boolean;
+        /**
+         * 该命中是否由**重叠区解析**改写而来（`hitOverlapControl`）。
+         *
+         * 用于选择起手阈值：旧实现在重叠区里用的是 9px，其余控件是 3px
+         * （见 `OVERLAP_DRAG_THRESHOLD_PX`）。分区名不足以区分来源——重叠区里的
+         * 边缘 / 淡变会映射成与普通情形完全相同的 region。
+         */
+        readonly fromOverlapRegion?: boolean;
     };
 
     /**
@@ -2909,6 +3042,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 clipId: hit.clip.id,
                 region: hit.region,
                 partnerClipId: hit.partnerClipId,
+                fromOverlapRegion: hit.fromOverlapRegion === true,
                 // 循环修饰键只在淡变控件 / 抓手上起作用（其他分区的单击语义不变）。
                 cycleHeld:
                     fadeCycleHeld &&
@@ -2939,6 +3073,13 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 pressSec: hit.sec,
                 selectionMods: resolveSelectionMods(event),
             };
+            primeSelectionOnPress(
+                hit.clip.id,
+                hit.region,
+                gesture.kind === "pending-select" ? gesture.selectionMods : null,
+                event.clientX,
+                hit.fromOverlapRegion === true,
+            );
         } else {
             gesture = { kind: "seek" };
             // 空白按下：连同**指针所在轨道**一起交给面板——「清空选中 + 按设置
@@ -3076,7 +3217,12 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         if (gesture.kind === "pending-select") {
             const dx = event.clientX - gesture.startClientX;
             const dy = event.clientY - gesture.startClientY;
-            if (dx * dx + dy * dy < DRAG_THRESHOLD_PX * DRAG_THRESHOLD_PX) return;
+            // 阈值按命中来源分档：重叠区内用旧实现 `OverlapEditLayer` 的 9px，
+            // 其余分区用 `ClipItem` / `ClipEdgeHandles` / `FadeHitLayer` 的 3px
+            // （内核原先一律 4px，两侧都不对）。
+            const thresholdPx =
+                gesture.fromOverlapRegion === true ? OVERLAP_DRAG_THRESHOLD_PX : DRAG_THRESHOLD_PX;
+            if (dx * dx + dy * dy < thresholdPx * thresholdPx) return;
             // 发生拖拽 → 双击待定记录失效：否则"拖拽后落点回位"（第二次按下
             // 恰好落在首次按下附近）会被误判成双击（旧实现同样在拖拽分支清空）。
             lastClipPress = null;
@@ -3106,6 +3252,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                     kind: "snap-offset-drag",
                     clipId: gesture.clipId,
                     startContentX: gesture.startContentX,
+                    startClientX: gesture.startClientX,
                     originOffsetSec: gesture.originSnapOffsetSec,
                     lengthSec: gesture.lengthSec,
                     lastOffsetSec: Number.NaN,
@@ -3324,6 +3471,15 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      */
     function applySnapOffsetPreview(event: PointerEvent): void {
         if (gesture.kind !== "snap-offset-drag") return;
+        // 起手阈值：旧实现 `useSnapOffsetDrag` 要求**水平**位移 >= 2px 才算拖拽
+        // （`lastOffsetSec` 仍为 NaN 表示尚未起手）。纯纵向移动是 no-op ——
+        // 否则上下抖一下就会写后端并留下一个撤销步。
+        if (
+            !Number.isFinite(gesture.lastOffsetSec) &&
+            Math.abs(event.clientX - gesture.startClientX) < 2
+        ) {
+            return;
+        }
         const rect = container.getBoundingClientRect();
         const view = scroll.get();
         const contentX = view.scrollLeft + (event.clientX - rect.left);
@@ -3605,6 +3761,13 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                     gesture.selectionMods.rangeSelectActive,
                     gesture.startClientX,
                 );
+                // 单击 = 同时把播放头带到该控件对应的位置（旧实现每个交互层都这么做）。
+                // 循环点击（`cycleHeld`）与 SnapOffset 手柄不进这个分支——它们的单击
+                // 不是"移动播放头"的语义。
+                const seekSec = resolveClickSeekSec(gesture, event);
+                if (seekSec !== null) {
+                    interactions?.onSeekTo?.(seekSec);
+                }
             }
             // inactive take lane 上的单击：切换该 clip 的活跃 Take（旧实现还会在
             // 暂停 / 停止时把播放光标带到点击位置——由面板按播放状态决定）。
@@ -3729,6 +3892,13 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      */
     function dispatchContextMenuAt(clientX: number, clientY: number): void {
         const hit = hitAt(clientX, clientY);
+        // 右键点 clip = **先选中它**（旧实现 `ClipItem.onContextMenu` 同源）：
+        // 多选集合里已有多个 clip 时保留整套选择，否则把右键的那个设为选中。
+        // 不这么做的话菜单里"删除 / 编组 / 复制"的作用对象会与用户的右键目标不一致
+        // ——右键的直觉就是"我要操作这个东西"。
+        if (hit.kind === "clip" && data().multiSelectedClipIds.length <= 1) {
+            interactions?.onSelectClip?.(hit.clip.id, false, false, clientX);
+        }
         // 淡变包络 / 交叉点抓手右键 → **淡变专属菜单**（曲率、形状、长度、重置…），
         // 优先于 clip 通用菜单。旧实现由 `FadeHitLayer` / `OverlapEditLayer`
         // 这两层 DOM 命中块拦截，内核模式下它们不挂载——必须在这里补。
@@ -3794,7 +3964,18 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         event: PointerEvent,
     ): string | null {
         if (hit.region !== "body") return null;
-        if (event.altKey || event.shiftKey || event.ctrlKey || event.metaKey) return null;
+        // 编辑修饰键优先于「点击切换 Take」（旧实现 `ClipItem` 同源）：物理 Alt
+        // 旁路 + **解析后**的多选 / 范围选择修饰键。不能写死物理 Ctrl/Shift/Cmd——
+        // 用户改绑选择修饰键后，写死的判定会把"选择 + 点击 lane"误当成切换 Take，
+        // 反过来也会让改绑后的选择修饰键无法在选择的同时切换 Take。
+        const selectionMods = resolveSelectionMods(event);
+        if (
+            event.altKey ||
+            selectionMods.multiSelectToggleActive ||
+            selectionMods.rangeSelectActive
+        ) {
+            return null;
+        }
         const clip = data().clips.find((item) => item.id === hit.clip.id);
         if (clip === undefined) return null;
         const rowHeight = scroll.get().rowHeight;

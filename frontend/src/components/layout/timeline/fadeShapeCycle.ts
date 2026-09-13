@@ -44,6 +44,13 @@ export function isFadeShapeCycleModifierHeld(
     event: FadeShapeCycleEventLike,
 ): boolean {
     if (kb == null) return false;
+    // 绑成「无」（`__none__`）时必须判定为**不触发**。
+    //
+    // 特殊说明：不能只靠下方的标志位判定——`modifierOnly` 为真而 `key` 是
+    // `__none__` 时，四个标志位全是 false，`(!requiredX || …)` 会全部成立，
+    // 于是**任何一次点击**都被当成"按住循环修饰键"，淡变形状会被点一下就换一次。
+    // 旧实现正是靠 `isNoneBinding(kb)` 这道前置守卫避免该行为。
+    if (kb.key === "__none__") return false;
     const modifierOnly = kb.modifierOnly === true;
     const requiredCtrl = modifierOnly && kb.key === "control" ? true : Boolean(kb.ctrl);
     const requiredAlt = modifierOnly && kb.key === "alt" ? true : Boolean(kb.alt);

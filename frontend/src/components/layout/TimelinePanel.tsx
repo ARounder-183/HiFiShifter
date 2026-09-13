@@ -1237,8 +1237,54 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
      * （`useTimelineState.setPlayheadFromClientX`：`setplayheadSec` + `seekPlayhead`
      * 成对派发）保持同一契约，两个分支都不得只派发 seek。
      */
+    /**
+     * 把请求的秒数按旧实现的「光标吸附」规则规范化（**不改状态**）。
+     *
+     * 所有播放头落点路径（标尺 / 轨道空白 / clip 点击）在旧实现里都汇入
+     * `setPlayheadFromClientX`：先 `snapTimelineDetailed(…, "cursor", …)` 吸附，
+     * 再写 `setplayheadSec` + `seekPlayhead`；`commit=true` 表示手势语境结束，
+     * 顺带清除瞬态吸附高亮。内核原先直接写**裸**秒数——标尺路径吸附、轨道空白
+     * 路径不吸附，同一个界面里两条 seek 行为不一致。
+     *
+     * @param sec 目标秒（未吸附）。
+     * @param commit true = 提交式落点（单击 / 拖拽松手），false = 拖拽中间帧。
+     * @returns 吸附后的秒。
+     */
+    const resolveKernelSeekSec = React.useCallback(
+        (sec: number, commit: boolean): number =>
+            snapTimelineDetailed(
+                sec,
+                "cursor",
+                // 高亮只在拖拽期间发布（单击跳转完全不走高亮通道），与旧实现一致。
+                commit ? undefined : { highlight: { sources: [] } },
+            ).sec,
+        [snapTimelineDetailed],
+    );
+
+    /**
+     * 纯粹的播放头落点（吸附 + 乐观写 + 高亮收口）——**不含**空白点击的
+     * 「清空选中 / 切换轨道」语义。
+     *
+     * 旧实现的 clip 单击 seek（`ClipItem` / `ClipEdgeHandles` / `FadeHitLayer`
+     * 的 `seekFromClientX`）只移动播放头；把"清空选中"混进来会让「点一下 clip
+     * 把播放头带过去」顺带取消选中，与旧实现完全相反。
+     *
+     * @param sec 目标秒。
+     * @returns 无返回值。
+     */
+    const handleKernelSeekTo = React.useCallback(
+        (sec: number): void => {
+            const target = resolveKernelSeekSec(sec, true);
+            clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+            dispatch(setplayheadSec(target));
+            void dispatch(seekPlayhead(target));
+        },
+        [dispatch, resolveKernelSeekSec],
+    );
+
     const handleKernelSeek = React.useCallback(
         (sec: number, commit: boolean, trackId?: string | null) => {
+            const target = resolveKernelSeekSec(sec, commit);
             if (commit) {
                 // 空白点击的选中语义（与旧实现 pointerdown 捕获分支同源）：
                 // 1) 清空 clip 选中——但**保留轨道焦点**（空白点击是"取消 clip
@@ -1278,30 +1324,31 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     void dispatch(selectTrackRemote({ trackId, applySelectedClip: false }));
                 }
             }
-            kernelSeekPendingRef.current = sec;
+            kernelSeekPendingRef.current = target;
             if (commit) {
                 if (kernelSeekRafRef.current != null) {
                     cancelAnimationFrame(kernelSeekRafRef.current);
                     kernelSeekRafRef.current = null;
                 }
                 kernelSeekPendingRef.current = null;
+                clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
                 // 乐观写 store：见函数头注释（缺了它 playheadSec 不会动）。
-                dispatch(setplayheadSec(sec));
-                void dispatch(seekPlayhead(sec));
+                dispatch(setplayheadSec(target));
+                void dispatch(seekPlayhead(target));
                 return;
             }
             if (kernelSeekRafRef.current != null) return;
             kernelSeekRafRef.current = requestAnimationFrame(() => {
                 kernelSeekRafRef.current = null;
-                const target = kernelSeekPendingRef.current;
-                if (target == null) return;
+                const pending = kernelSeekPendingRef.current;
+                if (pending == null) return;
                 kernelSeekPendingRef.current = null;
                 // 拖拽帧同样成对派发（否则拖拽期间 store 值滞后，仅靠轮询矫正）。
-                dispatch(setplayheadSec(target));
-                void dispatch(seekPlayhead(target));
+                dispatch(setplayheadSec(pending));
+                void dispatch(seekPlayhead(pending));
             });
         },
-        [deselectAllTrackLaneClips, dispatch, sessionRef],
+        [deselectAllTrackLaneClips, dispatch, resolveKernelSeekSec, sessionRef],
     );
 
     /**
@@ -4072,6 +4119,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     const kernelInteractions = React.useMemo(
         () => ({
             onSeek: handleKernelSeek,
+            onSeekTo: handleKernelSeekTo,
             onSelectClip: handleKernelSelectClip,
             onDoubleClickClip: handleKernelDoubleClickClip,
             onToggleClipMute: handleKernelToggleClipMute,
@@ -4122,6 +4170,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         }),
         [
             handleKernelSeek,
+            handleKernelSeekTo,
             handleKernelSelectClip,
             handleKernelDragPreview,
             handleKernelDragCommit,
