@@ -13,8 +13,10 @@
  *   - 回绕节点在 clip 局部时间 t = k·周期（k = 1, 2, …）处绘制
  *     "倒三角"标记；恰好在 clip 起点 / 终点的回绕点不绘制。
  *
- * 周期解析逻辑见 MidiPitchTrackCanvas 的 resolveLoopCycleDescriptor
- * （有源媒体 → D；无源媒体 → 窗口跨度），与音频波形画布的推导保持一致。
+ * 周期解析逻辑见 `timeline/runtime/midiPitchCurve.ts` 的
+ * `resolveLoopCycleDescriptor`（原在 `MidiPitchTrackCanvas` 中，该组件随内核
+ * 改造成为孤儿后已删除，数学搬进前者）——有源媒体 → D；无源媒体 → 窗口跨度，
+ * 与音频波形画布的推导保持一致。
  */
 
 /**
@@ -184,7 +186,8 @@ export function resolveClipContentDurationSec(clip: {
 /**
  * 在波形渲染区域内绘制回绕节点的"倒三角"标记。
  *
- * 坐标系：与 WaveformTrackCanvas / MidiPitchTrackCanvas 一致 ——
+ * 坐标系：与 WaveformTrackCanvas / MIDI 音高折线层
+ * （`timeline/runtime/midiPitchCurve.ts` + `timelineCanvasRenderer`）一致 ——
  * canvas 左边缘对应视口起点，x 单位为 CSS 像素，y 从波形区顶部开始。
  *
  * @param ctx          Canvas 2D 上下文

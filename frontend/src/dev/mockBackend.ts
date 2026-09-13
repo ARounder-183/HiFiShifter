@@ -269,7 +269,33 @@ function buildMockTimeline(): Record<string, unknown> {
                 // 字段：写成 0 会让它们被判成 MIDI clip，从而走 pitch 分支的
                 // header 布局（隐藏增益旋钮与共振峰徽标），浏览器里就验证不到
                 // 音频 clip 的完整控件。
-                ...(trackIndex === 2 && index === clipCount - 1 ? { midi_note_count: 8 } : {}),
+                //
+                // **必须同时给 `midi_note_data`**：`midi_note_count` 只决定"这是不是
+                // MIDI clip"（header 走 pitch 布局），折线内容完全来自音符数据。
+                // 此前只写 count 时该 clip 在时间线上渲染为空白 —— 与真实工程里
+                // 「音高参考块内部为空」的缺陷**视觉上无法区分**，因此这个回归
+                // 在浏览器里一直复现不出来（排查时曾因此误判为渲染层没画）。
+                //
+                // `pitch_range` 取 `0..127`（**绝对音高域**）：与后端
+                // `convert_clips_to_pitch_reference` 给音高参考块写入的值一致。
+                // 音频 clip 的 `-24..24` 是半音偏移语义，套到音高折线上会把
+                // 所有音符顶到上边距（折线被压成一条直线）。
+                ...(trackIndex === 2 && index === clipCount - 1
+                    ? {
+                          midi_note_count: 8,
+                          pitch_range: { min: 0, max: 127 },
+                          midi_note_data: [
+                              { start_sec: 0, end_sec: 0.5, note: 60, velocity: 100, channel: 0 },
+                              { start_sec: 0.5, end_sec: 1.0, note: 64, velocity: 100, channel: 0 },
+                              { start_sec: 1.0, end_sec: 1.6, note: 67, velocity: 100, channel: 0 },
+                              { start_sec: 1.6, end_sec: 2.2, note: 72, velocity: 100, channel: 0 },
+                              { start_sec: 2.2, end_sec: 2.8, note: 69, velocity: 100, channel: 0 },
+                              { start_sec: 2.8, end_sec: 3.4, note: 65, velocity: 100, channel: 0 },
+                              { start_sec: 3.4, end_sec: 4.0, note: 62, velocity: 100, channel: 0 },
+                              { start_sec: 4.0, end_sec: 4.6, note: 60, velocity: 100, channel: 0 },
+                          ],
+                      }
+                    : {}),
                 // 多 Take：轨道 0 的首个 clip 平铺两条 Take（其余保持单 Take）——
                 // 内核的 lane 分界线绘制与「点击 inactive lane 切换活跃 Take」
                 // 需要多 Take 数据才能验证。
