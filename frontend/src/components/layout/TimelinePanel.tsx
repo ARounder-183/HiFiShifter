@@ -102,6 +102,7 @@ import {
     setClipLength,
     setClipSourceRange,
     setClipSnapOffset,
+    setClipAutoFades,
     beginInteraction,
     endInteraction,
 } from "../../features/session/sessionSlice";
@@ -206,7 +207,11 @@ import {
     stretchTrackLinkedParams,
     type StretchRangeMapping,
 } from "./timeline/hooks/stretchParams";
-import { computeSlipWindow, toBoundarySnapClip } from "./timeline/hooks/slipWindow";
+import { computeSlipWindow, readSlipClip, toBoundarySnapClip } from "./timeline/hooks/slipWindow";
+import {
+    computeCrossfadeGrip,
+    type CrossfadeGripClipBase,
+} from "./timeline/hooks/crossfadeGripWindow";
 import { useTimelineClipActions } from "./timeline/hooks/useTimelineClipActions";
 import { useTimelineEventHandlers } from "./timeline/hooks/useTimelineEventHandlers";
 import { expandClipIdsWithGroups } from "./timeline/hooks/useGroupExpansion";
@@ -605,6 +610,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         verticalZoomKb,
         paramFineAdjustKb,
         slipEditKb,
+        crossfadeGripKb,
         stretchKbRef,
         pitchDragKb,
         noSnapKb,
@@ -2120,6 +2126,13 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
          * 快照规则与旧实现同源：原点 = 参与者最早起点、轨道集 = 参与者所在轨道。
          */
         rippleFollowers: RippleFollowerMap;
+        /**
+         * 循环节 / 内容边界吸附的按下时快照（`toBoundarySnapClip`）。
+         *
+         * 裁切会逐帧改写源窗口，而同余式必须基于**按下时**的源窗口 / 循环状态
+         * ——与旧实现 `useEditDrag` 用 `drag.baseByClipId` 同一约定。
+         */
+        boundaryAnchor: ReturnType<typeof toBoundarySnapClip>;
     } | null>(null);
 
     /**
@@ -2274,6 +2287,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     stretchGroup,
                     stretchBaseSnapOffsetById,
                     baseById,
+                    // 循环节 / 内容边界吸附的按下时快照（与 slip 手势同一套）：
+                    // 源窗口在裁切过程中逐帧变化，用当前值算同余式会漂移。
+                    boundaryAnchor: toBoundarySnapClip(clip),
                 };
                 // 首个真实位移帧 = 手势开始：上交互锁（见 helper 说明）。
                 beginKernelGestureInteraction();
@@ -2426,11 +2442,16 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             let deltaSec = args.deltaSec;
             if (snapActive) {
                 const snapArgs = {
-                    originSec: origin.startSec,
+                    // 被吸附对象**只有正在拖的那一条边**。旧实现 `useEditDrag` 的
+                    // trim 分支不传 `moveLengthSec` / `moveSnapOffsetSec`：多源候选
+                    // 会把「对侧边缘 / clip 自身的吸附偏移点」也当成吸附目标，
+                    // 落点因此与旧实现不同（右缘还会多出 `右缘 + 长度` 这种伪候选）。
+                    originSec:
+                        args.edge === "left" ? origin.startSec : origin.startSec + origin.lengthSec,
                     anchorTrackId: origin.trackId,
-                    excludeClipIds: new Set([args.clipId]),
-                    moveLengthSec: args.lengthSec,
-                    moveSnapOffsetSec: 0,
+                    // 排除**全部参与者**（旧实现排除 `selectedClipIds`）：整组一起
+                    // 裁切时，组内其他成员不应成为自己的吸附目标。
+                    excludeClipIds: new Set(origin.participants.map((item) => item.clipId)),
                     // `highlight` 必须传：吸附高亮的发布 / 清除由
                     // snapTimelineDetailed 按此选项统一处理，不传则 trim 有吸附
                     // 但没有任何视觉反馈。
@@ -2450,6 +2471,47 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     ).sec;
                     nextLength = Math.max(0, snappedRight - args.startSec);
                     deltaSec = nextLength - origin.lengthSec;
+                }
+
+                // ── 循环节 / 内容边界吸附（命中时**覆盖**常规网格吸附）──────
+                // 与旧实现 `useEditDrag` 同一套：属于常规吸附体系（受总开关与
+                // 「拖动时切换吸附」修饰键的 XOR 控制），并且需要在吸附设置里启用
+                // 「Clip 边缘吸附到源素材首尾」。被吸附对象是**移动边缘相对 clip
+                // 基准起点的时间线偏移**——该同余式对左右两条边同样成立，故统一处理。
+                const timelineSnap = sessionRef.current.timelineSnap;
+                if (timelineSnap.snapClipsToSourceMedia && timelineSnap.snapDistancePx > 0) {
+                    const edgeSec = args.edge === "left" ? nextStart : args.startSec + nextLength;
+                    const rawOffset = edgeSec - origin.startSec;
+                    const snappedOffset = nearestBoundarySnapOffsetSec(
+                        origin.boundaryAnchor,
+                        "edge",
+                        rawOffset,
+                    );
+                    if (
+                        snappedOffset != null &&
+                        Math.abs(snappedOffset - rawOffset) <=
+                            loopSnapThresholdSec(timelineSnap.snapDistancePx, pxPerSec) + 1e-12
+                    ) {
+                        const snappedEdgeSec = origin.startSec + snappedOffset;
+                        if (args.edge === "left") {
+                            nextStart = snappedEdgeSec;
+                            nextLength = origin.startSec + origin.lengthSec - nextStart;
+                            deltaSec = nextStart - origin.startSec;
+                        } else {
+                            nextLength = Math.max(0, snappedEdgeSec - args.startSec);
+                            deltaSec = nextLength - origin.lengthSec;
+                        }
+                        // 循环节命中：以「循环节」专用高亮**覆盖**常规吸附高亮
+                        // （同组发布即整组替换）。目标（源媒体边界的投影）与被吸附
+                        // 边重合于同一 x，行内双亮条强调。
+                        publishSnapHighlights(SNAP_HIGHLIGHT_GROUP, [
+                            buildLoopBoundaryHighlightEntry({
+                                secs: [snappedEdgeSec],
+                                trackId: origin.trackId,
+                                clipId: args.clipId,
+                            }),
+                        ]);
+                    }
                 }
             } else {
                 clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
@@ -3035,6 +3097,13 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         participants: KernelEditParticipant[];
         /** 各参与者的按下时基准（回滚与批量换算用）。 */
         baseById: Map<string, { fadeInSec: number; fadeOutSec: number; lengthSec: number }>;
+        /**
+         * 各参与者按下时的**自动交叉淡化**长度（取消时一并还原）。
+         *
+         * 预览期会把拖拽侧的自动值清零（手动 fade 必须赢过自动值，见预览处的说明），
+         * 取消就必须把它放回去——否则用户按 Esc 之后，那条自动交叉淡化会永久消失。
+         */
+        autoBaseById: Map<string, { autoFadeInSec: number; autoFadeOutSec: number }>;
         /** 自动交叉淡化：受影响集合 / 编辑前重叠关系 / 可调整侧（与裁切同源）。 */
         xfadeClipIds: string[];
         initialCrossfadeSides: ReturnType<typeof computeInitialCrossfadeSides>;
@@ -3062,11 +3131,19 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     string,
                     { fadeInSec: number; fadeOutSec: number; lengthSec: number }
                 >();
+                const autoBaseById = new Map<
+                    string,
+                    { autoFadeInSec: number; autoFadeOutSec: number }
+                >();
                 for (const participant of participants) {
                     const item = session.clips.find(
                         (candidate) => candidate.id === participant.clipId,
                     );
                     if (item === undefined) continue;
+                    autoBaseById.set(participant.clipId, {
+                        autoFadeInSec: Number(item.autoFadeInSec) || 0,
+                        autoFadeOutSec: Number(item.autoFadeOutSec) || 0,
+                    });
                     baseById.set(participant.clipId, {
                         fadeInSec: Number(item.fadeInSec) || 0,
                         fadeOutSec: Number(item.fadeOutSec) || 0,
@@ -3089,6 +3166,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     fadeOutSec: clip.fadeOutSec,
                     participants,
                     baseById,
+                    autoBaseById,
                     xfadeClipIds,
                     initialCrossfadeSides: computeInitialCrossfadeSides(
                         session.clips,
@@ -3118,24 +3196,24 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             batch(() => {
                 for (const update of updates) dispatch(setClipFades(update));
             });
-            // 自动交叉淡化实时预览（手动淡化变化会与自动值互相切换显示）。
-            if (s.autoCrossfadeEnabled) {
-                previewAutoCrossfade(
-                    store.getState().session,
-                    origin.xfadeClipIds,
-                    dispatch,
-                    origin.initialCrossfadeSides,
-                    origin.editSides,
-                );
-            }
+            // 手动拖拽淡变 = 用户手动 fade：**该侧的自动交叉淡化必须清零**。
+            //
+            // 旧实现 `useEditDrag` 的 fade 分支正是这样做的（拖拽期
+            // `setClipAutoFades({autoFade*: 0})` + 节流 remote 写 0），而**不是**
+            // 去跑 `previewAutoCrossfade`。原因是绘制端按「自动 > 0 时自动赢」取值：
+            // 若让自动值在拖拽中继续按重叠量重算，用户刚拖出来的手动长度会被立即
+            // 覆盖回自动值——表现为「拖这条包络线完全不动」。
+            batch(() => {
+                for (const participant of origin.participants) {
+                    dispatch(
+                        args.side === "in"
+                            ? setClipAutoFades({ clipId: participant.clipId, autoFadeInSec: 0 })
+                            : setClipAutoFades({ clipId: participant.clipId, autoFadeOutSec: 0 }),
+                    );
+                }
+            });
         },
-        [
-            beginKernelGestureInteraction,
-            dispatch,
-            multiSelectedClipIds,
-            sessionRef,
-            s.autoCrossfadeEnabled,
-        ],
+        [beginKernelGestureInteraction, dispatch, multiSelectedClipIds, sessionRef],
     );
 
     /** 内核淡变角收尾：提交或回滚（取消时两侧一起还原）。 */
@@ -3146,6 +3224,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             if (origin === null) return;
             if (args.cancelled) {
                 // 取消：全部参与者一起还原（多选淡变只还原锚点会让其余 clip 留在半途）。
+                // **包括自动交叉淡化**：预览期把它清零了（手动值必须赢），取消就必须
+                // 放回去，否则按一次 Esc 会让那条自动交叉淡化永久消失。
                 batch(() => {
                     for (const [clipId, base] of origin.baseById) {
                         dispatch(
@@ -3156,63 +3236,68 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                             }),
                         );
                     }
+                    for (const [clipId, auto] of origin.autoBaseById) {
+                        dispatch(
+                            setClipAutoFades({
+                                clipId,
+                                autoFadeInSec: auto.autoFadeInSec,
+                                autoFadeOutSec: auto.autoFadeOutSec,
+                            }),
+                        );
+                    }
                 });
-                if (s.autoCrossfadeEnabled) {
-                    previewAutoCrossfade(
-                        store.getState().session,
-                        origin.xfadeClipIds,
-                        dispatch,
-                        origin.initialCrossfadeSides,
-                        origin.editSides,
-                    );
-                }
                 endKernelGestureInteraction();
                 return;
             }
             dispatch(checkpointHistory());
             // 提交值取 Redux 当前值（预览已写入按各自长度钳制后的结果）。
+            //
+            // 只提交**手动长度确实被本手势改动**的参与者，并把该侧自动交叉淡化
+            // 一起写 0（自动 → 手动的转换）——与旧实现 `useEditDrag` 的 fade 分支
+            // 同一规则（它按 `lengthEdited` 过滤后逐 clip 清 auto）。
             const session = sessionRef.current;
-            const updates = origin.participants.flatMap((participant) => {
+            const updates: Array<{
+                clipId: string;
+                fadeInSec?: number;
+                fadeOutSec?: number;
+                autoFadeInSec?: number;
+                autoFadeOutSec?: number;
+            }> = [];
+            for (const participant of origin.participants) {
                 const clip = session.clips.find((item) => item.id === participant.clipId);
-                if (clip === undefined) return [];
-                return [
-                    args.side === "in"
-                        ? { clipId: participant.clipId, fadeInSec: clip.fadeInSec }
-                        : { clipId: participant.clipId, fadeOutSec: clip.fadeOutSec },
-                ];
-            });
+                if (clip === undefined) continue;
+                const base = origin.baseById.get(participant.clipId);
+                if (args.side === "in") {
+                    const manual = Number(clip.fadeInSec) || 0;
+                    if (Math.abs(manual - (base?.fadeInSec ?? 0)) <= 1e-9) continue;
+                    updates.push({
+                        clipId: participant.clipId,
+                        fadeInSec: manual,
+                        autoFadeInSec: 0,
+                    });
+                } else {
+                    const manual = Number(clip.fadeOutSec) || 0;
+                    if (Math.abs(manual - (base?.fadeOutSec ?? 0)) <= 1e-9) continue;
+                    updates.push({
+                        clipId: participant.clipId,
+                        fadeOutSec: manual,
+                        autoFadeOutSec: 0,
+                    });
+                }
+            }
             if (updates.length === 0) {
                 endKernelGestureInteraction();
                 return;
             }
-            const persist = dispatch(setClipsStateBulkRemote({ updates })).unwrap();
-            void (async () => {
-                try {
-                    await persist;
-                } finally {
-                    // 自动交叉淡化：手动淡化变化后按最新重叠关系写回自动值
-                    // （开关关闭时只清理「已脱离重叠」的自动值）。
-                    const latest = sessionRef.current;
-                    if (s.autoCrossfadeEnabled) {
-                        await applyAutoCrossfade(latest, origin.xfadeClipIds, dispatch, {
-                            affectedSides: origin.initialCrossfadeSides,
-                            editSides: origin.editSides,
-                        });
-                    } else {
-                        await applyDetachedAutoCrossfadeClears(
-                            latest,
-                            origin.xfadeClipIds,
-                            dispatch,
-                            origin.initialCrossfadeSides,
-                            origin.editSides,
-                        );
-                    }
-                }
-            })()
+            // 淡变手势**不做** `applyAutoCrossfade` 收尾：手动 fade 拖拽的结果就是
+            // 手动值 + 该侧自动清零（旧实现同样不在这里重算自动交叉淡化——重算会
+            // 立刻把手动值覆盖回自动值，等于拖拽无效）。
+            void dispatch(setClipsStateBulkRemote({ updates }))
+                .unwrap()
                 .catch(() => undefined)
                 .finally(endKernelGestureInteraction);
         },
-        [dispatch, endKernelGestureInteraction, sessionRef, s.autoCrossfadeEnabled],
+        [dispatch, endKernelGestureInteraction, sessionRef],
     );
 
     /** 内核框选：拖动前的选择快照（合并与回滚的基准）。 */
@@ -3720,70 +3805,182 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
 
     /** 内核交叉点抓手：拖拽起点的两侧几何（换算位移与取消回滚）。 */
     const kernelCrossfadeOriginRef = React.useRef<{
-        earlierClipId: string;
-        laterClipId: string;
-        earlierStartSec: number;
-        earlierLengthSec: number;
-        laterStartSec: number;
-        laterLengthSec: number;
+        /** 两侧按下时的完整几何快照（含源窗口 / 循环 / 倒放 / 媒体时长）。 */
+        earlier: CrossfadeGripClipBase;
+        later: CrossfadeGripClipBase;
+        /** 按下时的重叠长度（反向模式的淡变缩放基准）与两侧生效淡变。 */
+        baseOverlapSec: number;
+        earlierFadeOutSec: number;
+        laterFadeInSec: number;
+        earlierFadeOutAuto: boolean;
+        laterFadeInAuto: boolean;
+        /** 各 clip 按下时的全部可回滚字段（取消路径用）。 */
+        baseById: Map<
+            string,
+            {
+                startSec: number;
+                lengthSec: number;
+                sourceStartSec: number;
+                sourceEndSec: number;
+                fadeInSec: number;
+                fadeOutSec: number;
+                autoFadeInSec: number;
+                autoFadeOutSec: number;
+            }
+        >;
     } | null>(null);
 
     /**
-     * 内核交叉点抓手预览：同时移动双方边缘。
+     * 内核交叉点抓手预览。
      *
-     * 语义（与旧实现 `crossfade_edges` 一致）：前一个 clip 的**右缘**与后一个
-     * clip 的**左缘**按同一位移移动 → 重叠长度不变（手动 / 自动淡变长度都不受影响）。
-     * - earlier：起点不动，长度 `+= delta`（右缘随之移动）
-     * - later：起点 `+= delta`，长度 `-= delta`（左缘移动、右缘不动）
+     * 几何换算整体交给共享纯函数 `computeCrossfadeGrip`（与旧实现
+     * `useEditDrag` 的 `crossfade_edges` 分支同一套语义）：
+     * - **同向**（默认）：两侧边缘同向平移，重叠不变；
+     * - **反向**（按住 `modifier.crossfadeGrip`，默认 Ctrl/⌘）：两侧相向移动，
+     *   重叠变化，两侧淡变按「新重叠 / 原重叠」比例缩放。
      *
-     * 位移钳制到 `[-earlierLength, laterLength]`：越界会让任一侧长度为负。
+     * 每一侧都要按「循环 / 倒放 / 非 Loop 派生窗口」改写**源窗口**——只改长度会让
+     * 波形与音频对不上（旧实现的抓手拖拽同样维护源窗口）。
      */
     const handleKernelCrossfadeGripPreview = React.useCallback(
-        (args: { earlierClipId: string; laterClipId: string; deltaSec: number }) => {
+        (args: {
+            earlierClipId: string;
+            laterClipId: string;
+            deltaSec: number;
+            modifiers: { ctrlKey: boolean; shiftKey: boolean; altKey: boolean; metaKey: boolean };
+        }) => {
             const clips = sessionRef.current.clips;
             const earlier = clips.find((item) => item.id === args.earlierClipId);
             const later = clips.find((item) => item.id === args.laterClipId);
             if (earlier === undefined || later === undefined) return;
-            if (kernelCrossfadeOriginRef.current?.earlierClipId !== args.earlierClipId) {
+            if (kernelCrossfadeOriginRef.current?.earlier.id !== args.earlierClipId) {
+                const toBase = (clip: typeof earlier): CrossfadeGripClipBase => {
+                    const view = readSlipClip(clip);
+                    return {
+                        id: clip.id,
+                        startSec: Number(clip.startSec) || 0,
+                        lengthSec: view.lengthSec,
+                        sourceStartSec: view.sourceStartSec,
+                        sourceEndSec: view.sourceEndSec,
+                        playbackRate: view.playbackRate,
+                        loopEnabled: view.loopEnabled,
+                        reversed: view.reversed,
+                        mediaDurationSec: view.contentDurSec ?? 0,
+                    };
+                };
+                const baseById = new Map<
+                    string,
+                    {
+                        startSec: number;
+                        lengthSec: number;
+                        sourceStartSec: number;
+                        sourceEndSec: number;
+                        fadeInSec: number;
+                        fadeOutSec: number;
+                        autoFadeInSec: number;
+                        autoFadeOutSec: number;
+                    }
+                >();
+                for (const clip of [earlier, later]) {
+                    baseById.set(clip.id, {
+                        startSec: Number(clip.startSec) || 0,
+                        lengthSec: Math.max(0, Number(clip.lengthSec) || 0),
+                        sourceStartSec: Number(clip.sourceStartSec ?? 0) || 0,
+                        sourceEndSec: Number(clip.sourceEndSec ?? 0) || 0,
+                        fadeInSec: Number(clip.fadeInSec) || 0,
+                        fadeOutSec: Number(clip.fadeOutSec) || 0,
+                        autoFadeInSec: Number(clip.autoFadeInSec) || 0,
+                        autoFadeOutSec: Number(clip.autoFadeOutSec) || 0,
+                    });
+                }
                 kernelCrossfadeOriginRef.current = {
-                    earlierClipId: earlier.id,
-                    laterClipId: later.id,
-                    earlierStartSec: earlier.startSec,
-                    earlierLengthSec: earlier.lengthSec,
-                    laterStartSec: later.startSec,
-                    laterLengthSec: later.lengthSec,
+                    earlier: toBase(earlier),
+                    later: toBase(later),
+                    baseOverlapSec: Math.max(
+                        0,
+                        (Number(earlier.startSec) || 0) +
+                            (Number(earlier.lengthSec) || 0) -
+                            (Number(later.startSec) || 0),
+                    ),
+                    // 缩放基准取**生效**淡变（自动交叉淡化 > 0 时它赢）——用户看到的
+                    // 是那条包络线，按它缩放才与画面一致。
+                    earlierFadeOutSec: effectiveFadeSec(earlier.fadeOutSec, earlier.autoFadeOutSec),
+                    laterFadeInSec: effectiveFadeSec(later.fadeInSec, later.autoFadeInSec),
+                    earlierFadeOutAuto: Number(earlier.autoFadeOutSec ?? 0) > 0,
+                    laterFadeInAuto: Number(later.autoFadeInSec ?? 0) > 0,
+                    baseById,
                 };
                 // 首个真实位移帧 = 手势开始：上交互锁（见 helper 说明）。
                 beginKernelGestureInteraction();
             }
             const origin = kernelCrossfadeOriginRef.current;
             if (origin === null) return;
-            const delta = Math.min(
-                origin.laterLengthSec,
-                Math.max(-origin.earlierLengthSec, args.deltaSec),
-            );
+            const result = computeCrossfadeGrip({
+                earlier: origin.earlier,
+                later: origin.later,
+                deltaSec: args.deltaSec,
+                // 反向模式：与旧实现同源（`modifier.crossfadeGrip`）。
+                opposite: isModifierActive(crossfadeGripKb, args.modifiers),
+                baseOverlapSec: origin.baseOverlapSec,
+                earlierFadeOutSec: origin.earlierFadeOutSec,
+                laterFadeInSec: origin.laterFadeInSec,
+                earlierFadeOutAuto: origin.earlierFadeOutAuto,
+                laterFadeInAuto: origin.laterFadeInAuto,
+            });
+            if (result === null) return;
             batch(() => {
                 dispatch(
                     setClipLength({
-                        clipId: origin.earlierClipId,
-                        lengthSec: Math.max(0, origin.earlierLengthSec + delta),
+                        clipId: result.earlier.clipId,
+                        lengthSec: result.earlier.lengthSec,
                     }),
                 );
+                if (result.earlier.sourceStartSec !== undefined) {
+                    dispatch(
+                        setClipSourceRange({
+                            clipId: result.earlier.clipId,
+                            sourceStartSec: result.earlier.sourceStartSec,
+                        }),
+                    );
+                }
+                if (result.earlier.sourceEndSec !== undefined) {
+                    dispatch(
+                        setClipSourceRange({
+                            clipId: result.earlier.clipId,
+                            sourceEndSec: result.earlier.sourceEndSec,
+                        }),
+                    );
+                }
                 dispatch(
-                    moveClipStart({
-                        clipId: origin.laterClipId,
-                        startSec: Math.max(0, origin.laterStartSec + delta),
-                    }),
+                    moveClipStart({ clipId: result.later.clipId, startSec: result.later.startSec }),
                 );
                 dispatch(
                     setClipLength({
-                        clipId: origin.laterClipId,
-                        lengthSec: Math.max(0, origin.laterLengthSec - delta),
+                        clipId: result.later.clipId,
+                        lengthSec: result.later.lengthSec,
                     }),
                 );
+                if (result.later.sourceStartSec !== undefined) {
+                    dispatch(
+                        setClipSourceRange({
+                            clipId: result.later.clipId,
+                            sourceStartSec: result.later.sourceStartSec,
+                        }),
+                    );
+                }
+                if (result.later.sourceEndSec !== undefined) {
+                    dispatch(
+                        setClipSourceRange({
+                            clipId: result.later.clipId,
+                            sourceEndSec: result.later.sourceEndSec,
+                        }),
+                    );
+                }
+                // 反向模式：两侧淡变按新重叠比例缩放（自动值写 auto、手动值写手动）。
+                for (const fade of result.fades) dispatch(setClipFades(fade));
             });
         },
-        [beginKernelGestureInteraction, dispatch, sessionRef],
+        [beginKernelGestureInteraction, crossfadeGripKb, dispatch, sessionRef],
     );
 
     /**
@@ -3803,51 +4000,63 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             kernelCrossfadeOriginRef.current = null;
             if (origin === null) return;
             if (args.cancelled) {
+                // 取消：两侧**全部字段**一起还原——预览改过源窗口与淡变（反向模式），
+                // 只还原起点 / 长度会让 Redux 停在半途、与后端分叉。
                 batch(() => {
-                    dispatch(
-                        moveClipStart({
-                            clipId: origin.earlierClipId,
-                            startSec: origin.earlierStartSec,
-                        }),
-                    );
-                    dispatch(
-                        setClipLength({
-                            clipId: origin.earlierClipId,
-                            lengthSec: origin.earlierLengthSec,
-                        }),
-                    );
-                    dispatch(
-                        moveClipStart({
-                            clipId: origin.laterClipId,
-                            startSec: origin.laterStartSec,
-                        }),
-                    );
-                    dispatch(
-                        setClipLength({
-                            clipId: origin.laterClipId,
-                            lengthSec: origin.laterLengthSec,
-                        }),
-                    );
+                    for (const [clipId, base] of origin.baseById) {
+                        dispatch(moveClipStart({ clipId, startSec: base.startSec }));
+                        dispatch(setClipLength({ clipId, lengthSec: base.lengthSec }));
+                        dispatch(
+                            setClipSourceRange({
+                                clipId,
+                                sourceStartSec: base.sourceStartSec,
+                                sourceEndSec: base.sourceEndSec,
+                            }),
+                        );
+                        dispatch(
+                            setClipFades({
+                                clipId,
+                                fadeInSec: base.fadeInSec,
+                                fadeOutSec: base.fadeOutSec,
+                            }),
+                        );
+                        dispatch(
+                            setClipAutoFades({
+                                clipId,
+                                autoFadeInSec: base.autoFadeInSec,
+                                autoFadeOutSec: base.autoFadeOutSec,
+                            }),
+                        );
+                    }
                 });
                 endKernelGestureInteraction();
                 return;
             }
             const clips = sessionRef.current.clips;
-            const earlier = clips.find((item) => item.id === origin.earlierClipId);
-            const later = clips.find((item) => item.id === origin.laterClipId);
+            const earlier = clips.find((item) => item.id === origin.earlier.id);
+            const later = clips.find((item) => item.id === origin.later.id);
             if (earlier === undefined || later === undefined) {
                 endKernelGestureInteraction();
                 return;
             }
             dispatch(checkpointHistory());
+            // 源窗口必须一起提交：只写长度会让后端按旧源区间重新解释内容
+            // （波形与音频都对不上）——与裁切提交同一约束。
             void dispatch(
                 setClipsStateBulkRemote({
                     updates: [
-                        { clipId: earlier.id, lengthSec: earlier.lengthSec },
+                        {
+                            clipId: earlier.id,
+                            lengthSec: earlier.lengthSec,
+                            sourceStartSec: earlier.sourceStartSec,
+                            sourceEndSec: earlier.sourceEndSec,
+                        },
                         {
                             clipId: later.id,
                             startSec: later.startSec,
                             lengthSec: later.lengthSec,
+                            sourceStartSec: later.sourceStartSec,
+                            sourceEndSec: later.sourceEndSec,
                         },
                     ],
                 }),

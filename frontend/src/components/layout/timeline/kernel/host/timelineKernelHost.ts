@@ -554,12 +554,13 @@ export interface TimelineKernelInteractions {
      * 语义：同时把前一个 clip 的右缘与后一个 clip 的左缘按同一位移移动，重叠长度
      * 不变（旧实现 `crossfade_edges`）。调用方据此写入两个 clip 的乐观几何。
      *
-     * @param args 两侧 clip 与本次位移（秒）。
+     * @param args 两侧 clip、本次位移（秒）与修饰键快照。
      */
     readonly onCrossfadeGripPreview?: (args: {
         readonly earlierClipId: string;
         readonly laterClipId: string;
         readonly deltaSec: number;
+        readonly modifiers: KernelDragModifiers;
     }) => void;
     /**
      * 交叉点抓手收尾。
@@ -2919,11 +2920,14 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 originStartSec: hit.clip.startSec,
                 originTrackId: hit.clip.trackId,
                 lengthSec: hit.clip.lengthSec,
+                // 淡变角拖拽的**起点长度** = **生效**淡变（自动交叉淡化 > 0 时它赢），
+                // 而不是手动值。旧实现 `useEditDrag` 的 `basefadeInSec` 同源：
+                // 用户看到的是自动交叉淡化那条包络线，从它开始拖才不会"一跳到底"。
                 originFadeSec:
                     fadeSide === "in"
-                        ? (clipInfo?.fadeInSec ?? 0)
+                        ? effectiveFadeSec(clipInfo?.fadeInSec, clipInfo?.autoFadeInSec)
                         : fadeSide === "out"
-                          ? (clipInfo?.fadeOutSec ?? 0)
+                          ? effectiveFadeSec(clipInfo?.fadeOutSec, clipInfo?.autoFadeOutSec)
                           : 0,
                 // 吸附偏移直接取命中索引里的值（与 hitTest 判定手柄位置用的是
                 // 同一份数据，不另查一次 `data().clips`——两份来源迟早漂移）。
@@ -3250,6 +3254,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             earlierClipId: gesture.earlierClipId,
             laterClipId: gesture.laterClipId,
             deltaSec,
+            // 修饰键必须透出：按住 `modifier.crossfadeGrip`（默认 Ctrl/⌘）= **反向**
+            // 模式（两侧相向移动、重叠变化、淡变按比例缩放），语义与同向完全不同。
+            modifiers: dragModifiersOf(event),
         });
     }
 
