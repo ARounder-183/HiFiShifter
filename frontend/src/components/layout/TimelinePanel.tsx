@@ -1249,16 +1249,23 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     //    （`sessionSlice.ts` 的 `applySelectedClip` 闸门）；
                     // 3) 纯字符串让 `typeof arg !== "object"` 判为"要恢复"，于是刚
                     //    清掉的选中被**异步复活** —— 表现为"点空白切轨时选中没被
-                    //    取消"，且复活本身让轨道焦点漂到别处，形成后续点击的连锁失败。
+                    //    取消"。复活后的 `selectedClipId` 可能**不属于**当前轨道
+                    //    （`select_track` 刻意不清它，见 `state.rs`），于是它成为一个
+                    //    跨轨的陈旧目标，被按 `selectedClipId` 取用命令的路径直接
+                    //    读到（例如 `removeSelectedClipRemote`）。
                     //
                     // 该契约由 `019e93ed`（"blank-click deselect survives track
                     // switching"）建立，当时两处 DOM 调用点都传了
                     // `applySelectedClip: false`；内核补全提交 `464a78bb` 在新调用点
                     // 写成纯字符串，**静默解除**了该修复。修改此处前请先读这两个提交，
                     // 不要把对象形式"简化"回纯字符串。
-                    void dispatch(
-                        selectTrackRemote({ trackId, applySelectedClip: false }),
-                    );
+                    //
+                    // 特殊说明（残留风险，本闸门覆盖不到）：取消选中仍是纯本地的，
+                    // 因此任何返回**完整快照**的 `*Remote.fulfilled` 仍可能经
+                    // `applyTimelineState` 无条件写回 `selected_clip_id` 而复活它。
+                    // 那条通道是既有行为、与本闸门无关；要彻底修需另开一轮（让
+                    // `applyTimelineState` 也尊重"本地已清空"的意图）。
+                    void dispatch(selectTrackRemote({ trackId, applySelectedClip: false }));
                 }
             }
             kernelSeekPendingRef.current = sec;
@@ -3162,7 +3169,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 // `state.rs::select_track`），恢复出来的 clip 完全可能属于另一条
                 // 轨道，从而在"本地取消选中"之后被异步复活。契约与
                 // `handleKernelSeek` 的空白点击同源（019e93ed）。
-                void dispatch(selectTrackRemote({ trackId: args.trackId, applySelectedClip: false }));
+                void dispatch(
+                    selectTrackRemote({ trackId: args.trackId, applySelectedClip: false }),
+                );
             }
             setTrackAreaMenu({
                 x: args.clientX,

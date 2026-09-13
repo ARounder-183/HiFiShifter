@@ -5566,8 +5566,12 @@ const sessionSlice = createSlice({
                 state.selectedTrackId =
                     typeof action.meta.arg === "string" ? action.meta.arg : action.meta.arg.trackId;
                 // 换轨手势（轨道头 / 时间轴行 / 键盘）即参数编辑器重定向：
-                // 剪贴板上下文记为参数侧。fulfilled 恢复该轨道记住的 Clip
-                // 时不改写本标记（见 applySelectedClip 分支）。
+                // 剪贴板上下文记为参数侧。
+                //
+                // 特殊说明：换轨**不**恢复后端记住的 `selected_clip_id`——所有
+                // `selectTrackRemote` 调用点都传 `{ applySelectedClip: false }`
+                // （见 fulfilled 分支的闸门）。后端的选中记忆是全工程唯一的、
+                // 不是每轨一份，因此"恢复该轨道记住的 Clip"并非真实语义。
                 state.selectionContext = "param";
             })
 
