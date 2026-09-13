@@ -5611,7 +5611,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                           }
                                 }
                                 dropPreview={
-                                    dropPreview === null || dropPreview.trackId === null
+                                    // 【不能因为 `trackId === null` 就不渲染】`null` 表示
+                                    // 落在全部轨道之下（将新建轨道）：旧实现用
+                                    // `rowTopForTrackId(null) = tracks.length × rowHeight`
+                                    // 把预览画在**新轨道那一行**，用户能看到素材预览。
+                                    // 面板这里曾直接传 `undefined`，于是拖到下方完全没有
+                                    // 预览（`contentHeight` 已经为哨兵行留了高度，见
+                                    // `useTimelineState` 的 `dropExtraRows`）。
+                                    dropPreview === null
                                         ? undefined
                                         : {
                                               leftPx: Math.max(0, dropPreview.startSec * pxPerSec),

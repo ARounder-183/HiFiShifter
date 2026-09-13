@@ -176,7 +176,14 @@ export interface TimelineKernelViewProps {
         readonly leftPx: number;
         /** 内容坐标宽度（`durationSec × pxPerSec`）。 */
         readonly widthPx: number;
-        readonly trackId: string;
+        /**
+         * 落点轨道；`null` = 落在**全部轨道之下**（将新建轨道）。
+         *
+         * 旧实现同样允许 `null`，并用 `rowTopForTrackId(null) = tracks.length × rowHeight`
+         * 把预览画在**新轨道那一行**——拖到下方时用户能看到素材预览（新前端曾漏掉
+         * 这一支：`null` 直接不渲染，拖到下方就没有任何预览）。
+         */
+        readonly trackId: string | null;
         readonly fileName: string;
         readonly contentWidth: number;
         readonly contentHeight: number;
@@ -888,7 +895,12 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                 {dropPreview === undefined
                     ? null
                     : (() => {
-                          const trackIndex = tracks.findIndex((t) => t.id === dropPreview.trackId);
+                          // `trackId === null` = 拖到全部轨道之下 → 预览画在**新轨道行**
+                          // （`tracks.length`），与旧实现 `rowTopForTrackId(null)` 一致。
+                          const trackIndex =
+                              dropPreview.trackId === null
+                                  ? tracks.length
+                                  : tracks.findIndex((t) => t.id === dropPreview.trackId);
                           if (trackIndex < 0) return null;
                           return (
                               <div
@@ -899,7 +911,13 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                                   // 个 ref 接到这里，否则指针在一条轨道内移动时预览
                                   // 完全不动（state 的 trackId/path 都没变 → 不重渲染）。
                                   ref={dropPreviewItemRef}
-                                  className="absolute flex items-center overflow-hidden rounded border border-dashed border-qt-accent/70 bg-qt-accent/15 px-1"
+                                  // 【样式必须与旧实现逐类一致】旧实现的素材拖入预览是
+                                  // `rounded-sm` + **1px 虚线 `--qt-highlight`** 边框 +
+                                  // `color-mix(in oklab, var(--qt-highlight) 20%, transparent)`
+                                  // 底，文件名用 `px-2 pt-1 text-[10px] text-qt-text truncate`
+                                  // 顶对齐贴在左上角。这里照搬同一组类（含 `truncate` 需要
+                                  // 的块级容器，因此文件名用 div 而不是 inline 的 span）。
+                                  className="absolute overflow-hidden rounded-sm border border-dashed border-qt-highlight bg-[color-mix(in_oklab,var(--qt-highlight)_20%,transparent)]"
                                   style={{
                                       left: dropPreview.leftPx,
                                       top: trackIndex * rowHeight + 8,
@@ -907,9 +925,9 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                                       height: Math.max(1, rowHeight - 16),
                                   }}
                               >
-                                  <span className="truncate text-[10px] text-qt-text">
+                                  <div className="truncate px-2 pt-1 text-[10px] text-qt-text">
                                       {dropPreview.fileName}
-                                  </span>
+                                  </div>
                               </div>
                           );
                       })()}
