@@ -252,6 +252,50 @@ function shouldWriteNumber(next: number, previous: number, epsilon = 0.01): bool
     return !(Math.abs(next - previous) <= epsilon);
 }
 
+/** 播放头 RGBA 的解析缓存（键 = 解析后的 CSS 颜色字符串）。 */
+const playheadRgbaCache = new Map<string, [number, number, number, number]>();
+
+/**
+ * 解析参数编辑器播放头的 GL 颜色（与上方标尺同源）。
+ *
+ * 流程：按主题取配色表里的 `playheadLine`（它是指向 `--qt-playhead` 的 CSS 变量，
+ * 与时间轴标尺同一来源）→ 经 `normalizeCssColor` 借浏览器解析成 `rgb()/rgba()`
+ * → `parseRgbaColor` 转 0..1 浮点。
+ *
+ * 【为什么按「解析后的字符串」做缓存】本函数在每帧的绘制提交路径上被调用，而
+ * `normalizeCssColor` 会挂 DOM 探针读 `getComputedStyle`——裸调等于把样式重算拖进
+ * 每一帧（与 `resolveThemeColor` 的缓存理由相同）。主题或自定义主题色一变，解析
+ * 结果字符串就变，键随之变化、缓存自然失效；反之稳态下每帧命中缓存、零重算。
+ *
+ * 特殊说明 1：GL 不认 `var(...)`，所以**必须**先归一化；`parseRgbaColor` 只认
+ * `rgb()/rgba()`，直接喂变量会被解析成不透明洋红。
+ *
+ * 特殊说明 2（**为什么不能省掉这一步、让宿主兜底**）宿主在缺省时用一个硬编码
+ * `[0,0,0,0.2]`——那是迁移期的占位值，与 `--qt-playhead` 毫无关系。参数编辑器的
+ * Canvas2D 播放头已被 `skipPlayhead: true` 永久跳过，GL 是唯一绘制者，因此"不喂"
+ * 就等于"画布与标尺两个颜色"（用户报告："播放线在底下和上方标尺的颜色不一致"）。
+ *
+ * 特殊说明 3：`themeMode` 参与键（经配色表间接体现），但这里额外接收它只是为了
+ * 让调用方语义清晰——缓存键用的是解析结果，本身已包含主题信息。
+ *
+ * @param themeMode 当前主题模式（决定取哪套配色表）。
+ * @returns 归一化后的 RGBA（0..1 浮点）。
+ */
+function resolvePlayheadRgba(themeMode: "dark" | "light"): [number, number, number, number] {
+    const css = resolvePianoRollColors(themeMode === "dark").playheadLine;
+    const normalized = normalizeCssColor(css);
+    const cached = playheadRgbaCache.get(normalized);
+    if (cached !== undefined) return cached;
+    const parsed = parseRgbaColor(normalized);
+    const rgba: [number, number, number, number] = parsed.every((v) => Number.isFinite(v))
+        ? [parsed[0], parsed[1], parsed[2], parsed[3]]
+        : // 解析失败时退回与标尺同色相的实色（`--qt-playhead` 的深色默认值），
+          // 而不是透明/洋红：宁可颜色略有偏差，也不要播放头看不见。
+          [0xf0 / 255, 0x5a / 255, 0x5a / 255, 1];
+    playheadRgbaCache.set(normalized, rgba);
+    return rgba;
+}
+
 /**
  * 参数编辑器工具栏的参数显示顺序排名（数值越小越靠左）。
  * - 「音高」为核心参数，固定在最左侧（在 JSX 中单独渲染，不在此排序）；
@@ -3519,8 +3563,20 @@ export const PianoRollPanel: React.FC = () => {
         // 视觉值 `visualPlayheadSecRef`，它不由 React 渲染驱动（见下方注释），
         // 因此不能在 render 期写入镜像——那样播放头会停在旧的提交值上。
         // 只喂播放头：选区块仍由主画布绘制（见 PianoRollOverlaySpec 说明）。
+        //
+        // 【颜色必须显式喂进去，不能靠宿主兜底】宿主在 `playheadRgba` 缺省时用
+        // 一个硬编码兜底色（`[0,0,0,0.2]`），而参数编辑器的播放头在 Canvas2D 侧的
+        // 绘制已被 `skipPlayhead: true` 永久跳过——也就是说 GL 这里是**唯一**绘制者，
+        // 不喂颜色等于画布播放头与上方标尺（`--qt-playhead`）各是一套颜色。
+        // 用户报告："播放线在底下和上方标尺的颜色不一致"。
+        //
+        // 取值经 `normalizeCssColor` 归一化：GL 不认 `var(...)`，必须借浏览器把
+        // CSS 变量解析成 `rgb()/rgba()` 再交给 `parseRgbaColor`。归一化会触发样式
+        // 重算，但本块是每帧执行的——因此按解析后的字符串做一次模块级缓存，
+        // 主题切换时字符串本身会变，缓存自然失效（键就是字符串）。
         kernelDataRef.current.overlay = {
             playheadSec: visualPlayheadSecRef.current,
+            playheadRgba: resolvePlayheadRgba(themeMode),
         };
         /**
          * 主画布上绘制的中央提示文字（"音高被硬禁用"的原因）。

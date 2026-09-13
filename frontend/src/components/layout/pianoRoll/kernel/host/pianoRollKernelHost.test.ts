@@ -16,6 +16,7 @@
  */
 import { describe, expect, it } from "vitest";
 
+import { setGridRedrawHandler } from "../../../timeline/gridRedrawBridge";
 import { PIANO_ROLL_VERTICAL_SCROLL_RANGE_PX } from "../scroll/verticalValueScroll";
 import { createPianoRollKernelHost } from "./pianoRollKernelHost";
 
@@ -78,6 +79,21 @@ function makeHost(options: { offsetPx?: number } = {}) {
     const vThumb = makeTarget();
     const hThumb = makeTarget();
     const rulerContent = { style: {} as CSSStyleDeclaration };
+    /**
+     * 背景网格层桩。
+     *
+     * 【为什么必须记账而不是只断言 `style`】网格的重绘入口是
+     * `invokeGridRedrawHandler(元素, 偏移)`——它把偏移交给 `BackgroundGrid` 的
+     * 命令式绘制函数，**不写任何 DOM 属性**。若桩只提供 `style`，网格这条通道
+     * 就成了**不可观测**的：偏移传错（例如传了原生坐标而不是绘制坐标）不会有
+     * 任何断言失败。因此这里经 `setGridRedrawHandler` 注册一个记录回调，把每次
+     * 收到的偏移收进数组。
+     */
+    const gridLayer = makeTarget();
+    const gridDrawOffsets: number[] = [];
+    setGridRedrawHandler(gridLayer as never, (scrollLeftPx: number) => {
+        gridDrawOffsets.push(scrollLeftPx);
+    });
     const paintedAxes: number[] = [];
     const userScrolls: number[] = [];
     let pending: FrameRequestCallback | null = null;
@@ -110,6 +126,7 @@ function makeHost(options: { offsetPx?: number } = {}) {
             horizontalOffsetPx: () => offsetPx,
             sync: {
                 rulerContent: rulerContent as never,
+                gridLayer: gridLayer as never,
             },
             onFrame: (axis) => {
                 paintedAxes.push(axis.scrollLeftPx);
@@ -146,6 +163,8 @@ function makeHost(options: { offsetPx?: number } = {}) {
         /** window 桩：拖拽的 pointermove / pointerup 从这里派发。 */
         windowHandlers: windowStub.handlers,
         rulerContent,
+        gridLayer,
+        gridDrawOffsets,
         paintedAxes,
         userScrolls,
         scrollLeftCommits: () => scrollLeftCommits,
@@ -286,6 +305,45 @@ describe("createPianoRollKernelHost · 坐标契约（偏移 200）", () => {
         t.host.setScrollLeft(999999);
         expect(t.host.getViewport().scrollLeft).toBeCloseTo(CONTENT_W, 6);
         t.host.dispose();
+    });
+
+    /**
+     * 【本组最重要的一条】`syncDom` 的两个图层都必须收到**绘制坐标**。
+     *
+     * 【为什么这条曾经是错的、且错了很久没被发现】`syncDom` 拿的是内核视口
+     * `view.scrollLeft`——它是**原生坐标**。同一帧里，投影（`currentAxis`）、
+     * 面板回调（`onFrame`）、量化提交三处都做了 `− offset` 换算，唯独 `syncDom`
+     * 直接把原生值用掉了。于是标尺内容层平移了偏移量、网格层却按另一个坐标系绘制：
+     *
+     * - 实测（offset=200，原生 0）：标尺内容坐标 0 落在屏幕 x **256**（与时间轴
+     *   内容坐标 0 完全重合），而网格内容坐标 0 落在屏幕 x **56** —— 整整差一个
+     *   偏移量。用户看到的就是"标尺刻度和底下网格线对不齐"，且**只在开启同步后**
+     *   出现（offset 恒为 0 时两个坐标系重合，缺陷不可见）。
+     *
+     * 因此这里要求两条通道给出**同一个数**，且等于投影所用的绘制坐标。
+     */
+    it("标尺内容层与网格层收到的是同一个绘制坐标（= 原生 − 偏移）", () => {
+        const t = makeHost({ offsetPx: OFFSET });
+        t.host.setScrollLeft(1200);
+        t.flush();
+
+        // 投影（面板绘制用的那一个）是权威口径。
+        const drawing = t.host.getAxis().scrollLeftPx;
+        expect(drawing).toBeCloseTo(1200, 6);
+
+        // 标尺内容层：内容坐标布局，按绘制坐标反向平移。
+        expect(t.rulerContent.style.transform).toBe(`translateX(${-drawing}px)`);
+        // 网格层：同一次提交里也必须拿到绘制坐标，否则与标尺/画布错位。
+        expect(t.gridDrawOffsets.at(-1)).toBeCloseTo(drawing, 6);
+    });
+
+    it("偏移为 0 时两条通道与投影仍一致（回归：不得把换算写成无条件 + 偏移）", () => {
+        const t = makeHost();
+        t.host.setScrollLeft(700);
+        t.flush();
+        expect(t.host.getAxis().scrollLeftPx).toBeCloseTo(700, 6);
+        expect(t.rulerContent.style.transform).toBe("translateX(-700px)");
+        expect(t.gridDrawOffsets.at(-1)).toBeCloseTo(700, 6);
     });
 });
 

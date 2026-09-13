@@ -1286,17 +1286,35 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
     /**
      * 把视口写到需要跟随的 DOM（标尺内容层 / 背景网格）。
      *
-     * @param view 当前视口真值。
+     * 【为什么必须传绘制坐标，而不是内核视口值】
+     * `view.scrollLeft` 是**原生坐标**；而标尺刻度、网格线、画布、波形全都按
+     * **绘制坐标**（原生 − 同步偏移）布局。同一帧里 `currentAxis()`（投影）、
+     * `onFrame`（面板绘制）与量化提交三处都做了这个减法，本函数曾是**唯一**漏掉的
+     * 一处——于是标尺按绘制坐标平移、网格却按原生坐标绘制，两者整整差一个偏移量，
+     * 只在开启「同步时间轴视图」（偏移非零）时可见。
+     *
+     * 实测（偏移 200、原生 0）：标尺内容坐标 0 落在屏幕 x **256**（与时间轴内容
+     * 坐标 0 重合），网格内容坐标 0 落在屏幕 x **56**。用户报告为"标尺和底下网格线
+     * 对不齐"。
+     *
+     * 特殊说明：面板 `applyScrollLayers` 写的是**同两个图层**（宿主模式下它经
+     * `onFrame` 提交）。两者口径必须一致，否则"最后一次写入者获胜"——标尺由本函数
+     * （去重后不再写）与面板各写一次，网格由 `BackgroundGrid` 按自身 key 去重、
+     * 每次都采纳最后一次调用，口径不同就会出现"一个对一个错"。
+     *
+     * @param view 当前视口真值（原生坐标）。
      */
     function syncDom(view: TimelineViewportState): void {
+        // 绘制坐标：与 currentAxis / onFrame / 量化提交同一口径（见上方说明）。
+        const drawingScrollLeft = view.scrollLeft - horizontalOffsetPx();
         const ruler = sync?.rulerContent;
-        if (ruler != null && shouldWrite(view.scrollLeft, lastRulerTranslateX)) {
-            lastRulerTranslateX = view.scrollLeft;
-            ruler.style.transform = `translateX(${-view.scrollLeft}px)`;
+        if (ruler != null && shouldWrite(drawingScrollLeft, lastRulerTranslateX)) {
+            lastRulerTranslateX = drawingScrollLeft;
+            ruler.style.transform = `translateX(${-drawingScrollLeft}px)`;
         }
         // 网格层自带重绘节流（`BackgroundGrid` 内部判定），这里只需转交绘制坐标。
         if (sync?.gridLayer != null) {
-            invokeGridRedrawHandler(sync.gridLayer, view.scrollLeft);
+            invokeGridRedrawHandler(sync.gridLayer, drawingScrollLeft);
         }
     }
 

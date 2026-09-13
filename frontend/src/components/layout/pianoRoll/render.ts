@@ -19,7 +19,7 @@
  */
 
 import type { ParamMorphOverlay, ParamName, ParamViewSegment, ValueViewport } from "./types";
-import { resolvePianoRollColors } from "./colors";
+import { normalizeCssColor, resolvePianoRollColors } from "./colors";
 import { clamp } from "../timeline";
 import { clearCanvasPhysical, rasterize } from "../renderKernel/canvasRaster";
 import {
@@ -1197,10 +1197,16 @@ export function drawPianoRoll(args: {
     // 设备像素，使线体恰好覆盖整数个设备列。
     // 【阶段 2 Task 6】GL 叠加层接管后跳过（见 skipPlayhead 说明）。对齐逻辑已在
     // `pianoRollKernelHost.rebuildOverlayGeometry` 里逐字复刻，两者不可分叉。
+    //
+    // 特殊说明（颜色必须归一化）：`colors.playheadLine` 是指向 `--qt-playhead` 的
+    // **CSS 变量**，而 Canvas2D 的 `strokeStyle` **不解析 `var(...)`**——赋一个非法
+    // 值会被浏览器**静默忽略**、沿用上一次的描边色（不报错，表现为播放头串色）。
+    // 本分支当前不可达（`skipPlayhead` 恒为 true），但一旦有人打开它就会踩到，
+    // 因此这里显式过一遍 `normalizeCssColor`（与 GL 侧同一个归一化函数）。
     if (!skipPlayhead) {
         const phWidthPx = wholeDevicePxLength(1, axis.dpr);
         const phx = strokePx(axis, secToViewportPx(axis, playheadSec), phWidthPx);
-        ctx.strokeStyle = colors.playheadLine;
+        ctx.strokeStyle = normalizeCssColor(colors.playheadLine);
         ctx.lineWidth = phWidthPx;
         ctx.beginPath();
         ctx.moveTo(phx, 0);
