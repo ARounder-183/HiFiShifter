@@ -922,6 +922,24 @@ export interface TimelineKernelHost {
     /** 标记场景需要重建（内容 / 缩放 / 主题变化后调用）。 */
     invalidateScene(): void;
     /**
+     * **立即**提交一帧（不等待下一帧；未标脏时不做任何事）。
+     *
+     * 【为什么时间轴也需要它——「水平缩放时标尺文本闪烁」的根因】
+     * 时间轴的可见内容来自**两个来源**：
+     * - React/DOM：标尺的刻度文本（`buildTimelineTicks` 按 React 的 `pxPerSec` 布局）；
+     * - 内核：网格 / clip / 波形（GL，用内核真值）以及标尺内容层的 `translate`
+     *   （`syncDom` 每帧写入）。
+     *
+     * 缩放落地时 React 先提交——文本立刻按新缩放排好，而内核的绘制要等下一次 rAF：
+     * 被绘制出来的那一帧里**文字是新刻度、网格与 translate 还是旧刻度**，肉眼就是
+     * 「标尺文本在缩放过程中闪烁」（文字与网格错开一跳）。旧实现只有一个真值源
+     * （React state）、画布也在 React 提交后才画，两层永远同帧，所以没有这个现象。
+     *
+     * 因此**改动视口**的路径（缩放落地 / 共享视口应用）改为调用本方法：内核写入与
+     * 各图层绘制落在同一个任务里，文本与网格同帧切换。
+     */
+    paintNow(): void;
+    /**
      * 请求一次**仅重绘**（不重建几何）：播放头每帧移动时调用。
      *
      * 【为什么必须与 `invalidateScene` 分开】`invalidateScene` 会置 `sceneDirty`，
@@ -5112,6 +5130,12 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         invalidateScene() {
             sceneDirty = true;
             loop.invalidate();
+        },
+
+        paintNow() {
+            // 与 rAF 帧**同一条** `draw()`（唯一绘制路径），并取消已排队的那一帧；
+            // 未标脏时是空操作（见 `renderLoop.flush`）。
+            loop.flush();
         },
 
         invalidatePlayhead() {

@@ -698,6 +698,9 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
                 // applying 标志抑制回灌，避免两个面板形成反馈环。
                 timelineSyncApplyingRef.current = true;
                 const applied = viewportAccess.setZoomAndScroll(store.pxPerSec, store.scrollLeft);
+                // 同上：视口（可能含缩放）刚改完，立刻同任务提交一帧，避免
+                // "标尺文本已是新缩放、网格还是旧缩放"的那一帧。
+                kernelHostRef.current?.paintNow();
                 syncScrollLeft(applied.scrollLeft);
                 // 【缩放必须同时回写 React】标尺刻度、左侧轨道头与其它 React 派生量都
                 // 由 React 的 `pxPerSec` 布局；只写内核会让**轨道区按新缩放、标尺仍按

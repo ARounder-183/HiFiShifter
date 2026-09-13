@@ -742,6 +742,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         if (pending === null) return;
         pendingKernelZoomRef.current = null;
         viewportAccess.setZoomAndScroll(pending.pxPerSec, pending.scrollLeft);
+        // 【同任务把内核画出来】本提交已经把**标尺文本**按新缩放排好了（React 布局），
+        // 而网格 / clip / 波形（GL）与标尺内容层的 translate 由内核绘制。若等下一次
+        // rAF，被绘制出来的那一帧就是"新文本 + 旧网格"，缩放过程中标尺文本看起来在
+        // 闪。这里同步提交一帧，文本与网格同帧切换（与参数编辑器的 `commitViewportNow`
+        // 同一手法）。
+        kernelHostRef.current?.paintNow();
     }, [pxPerSec, viewportAccess]);
 
     // ── 轨道头与时间轴区域的竖直滚动对齐 ─────────────────
