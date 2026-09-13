@@ -1445,7 +1445,9 @@ export const PianoRollPanel: React.FC = () => {
         // 路径，而此时原生镜像还停留在**上一帧的旧值**（本函数的写入要等内核下一帧才
         // 回写），于是会把刚提交的目标位置又覆盖回旧值——表现为「同步从 1200 拨回 0
         // 时参数编辑器不动」。
-        commitViewportNow(drawingScrollLeft);
+        // 缩放与位置一起落进内核再绘制（见 `commitViewportNow`）：否则同帧绘制会用
+        // 内核的旧缩放画新位置，而 DOM 侧标尺/网格已按新缩放排好——一帧内两套缩放。
+        commitViewportNow(drawingScrollLeft, pending.pxPerSec);
         timelineSyncApplyingRef.current = false;
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [pxPerSec, scrollLeft, s.paramEditorSyncTimeline, timelineOffsetPx]);
@@ -1467,8 +1469,8 @@ export const PianoRollPanel: React.FC = () => {
         const offset = syncEnabled ? timelineOffsetRef.current : 0;
         const native = pending.nextScrollLeft;
         const next = timelineViewportNativeToState(native, offset);
-        // 缩放落地：内核写入 + 各图层**同任务**提交（见 `paintNow`）。
-        commitViewportNow(next);
+        // 缩放落地：缩放 + 位置一次原子写入内核，再同任务提交各图层（见 `commitViewportNow`）。
+        commitViewportNow(next, pending.nextScale);
         if (lastScrollLeftRef.current !== next) {
             lastScrollLeftRef.current = next;
             scrollLeftRef.current = next;
@@ -2411,21 +2413,36 @@ export const PianoRollPanel: React.FC = () => {
     /**
      * 视口提交的统一入口：内核写入 + 各图层**同任务**提交。
      *
-     * 流程：`applyHorizontalScrollPosition`（内核写入，含钳制与标脏）→ `paintNow()`
-     * （同一任务的 GL + DOM + Canvas2D 提交）。
+     * 流程：内核写入（含钳制与标脏）→ `paintNow()`（同一任务的 GL + DOM + Canvas2D 提交）。
      *
-     * 特殊说明：宿主尚未创建（挂载期）时退回 `applyScrollLayers` 直接写 DOM，与各
-     * 调用点原本的兜底语义一致。
+     * 【缩放必须与位置**一起**写入内核（否则画布层会抽搐一帧）】
+     * 只写位置时，内核仍是**旧缩放**：本函数紧接着的同帧绘制（波形 / 参数线 / 播放头 /
+     * 选区都在 GL 或 Canvas2D 上）就会用旧缩放画出新位置，而 DOM 侧的标尺 / 网格（由
+     * React 的 `pxPerSec` 驱动）已经是新缩放——一屏之内两套缩放，下一帧才被纠正。
+     * 实测（Chrome，参数编辑器内滚轮缩放，日志打在绘制前）：`kernelPps=150 targetPps=165`
+     * ——画布按 150 画、DOM 按 165 画。传 `pxPerSecAtCommit` 后内核先原子换到新缩放，
+     * 同帧绘制即与 DOM 一致（`kernelPps=165 targetPps=165`）。
+     *
+     * 特殊说明：宿主尚未创建（挂载期）时退回 `applyScrollLayers` 直接写 DOM，与各调用点
+     * 原本的兜底语义一致。
      *
      * @param drawingScrollLeft 目标水平位置（绘制坐标）。
+     * @param pxPerSecAtCommit 本次提交应生效的缩放；缺省表示缩放不变（纯滚动）。
      */
-    function commitViewportNow(drawingScrollLeft: number): void {
-        applyHorizontalScrollPosition(drawingScrollLeft);
+    function commitViewportNow(drawingScrollLeft: number, pxPerSecAtCommit?: number): void {
         const host = hostRef.current;
         if (host) {
+            if (pxPerSecAtCommit !== undefined && Number.isFinite(pxPerSecAtCommit)) {
+                // 缩放 + 位置**一次原子写入**：内核用新缩放算上限并钳制，随后同帧绘制
+                // 用的就是新缩放（见上方说明）。
+                host.setViewport({ pxPerSec: pxPerSecAtCommit, scrollLeft: drawingScrollLeft });
+            } else {
+                applyHorizontalScrollPosition(drawingScrollLeft);
+            }
             host.paintNow();
             return;
         }
+        applyHorizontalScrollPosition(drawingScrollLeft);
         applyScrollLayers(drawingScrollLeft);
     }
 
