@@ -2705,83 +2705,93 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         });
         if (hit.kind !== "clip") return hit;
 
-        // ── 重叠区按位置改写 ──
+        // ── 重叠区按位置改写（同轨 ≥ 2 个 clip 才有重叠）──
         // 二分取到的是「最后一个 startSec <= sec」的 clip，在重叠区里永远是**后
         // 一个**；前一个 clip 的右缘与淡出控件因此完全不可达。这里按旧实现
         // `OverlapEditLayer` 的位置规则改写命中结果（见 overlapControls 文件头）。
         const track = hitTracks[hit.trackIndex];
         if (track === undefined) return hit;
-        const trackClips = hitClipsByTrack.get(track.id);
-        if (trackClips === undefined || trackClips.length < 2) return hit;
-        const overlap = hitOverlapControl({
-            clips: trackClips,
-            contentX,
-            localY: hit.localY,
-            pxPerSec: view.pxPerSec,
-            rowHeight: view.rowHeight,
-        });
-        if (overlap === null) {
-            // ── 淡变包络线 / 区域边缘竖线（非重叠情形）──
-            // 旧实现由 `ClipItem` 内的 `FadeHitLayer` 提供「画线即控件」，沿包络线
-            // 任意位置都能抓住调长度；内核原先只有角部小方块能抓，长淡变的曲线
-            // 中段完全抓不到。
-            //
-            // 只在 `body` 分区检查：header 有自己的控件；clip 边缘与角部已在
-            // `hitTest` 内判过——旧实现的优先级是「clip 边缘 > 淡变边缘线 > 包络线」，
-            // 把淡变放在边缘之后正好吻合。
-            if (hit.region === "body") {
-                const fade = hitClipFadeTarget({
-                    clip: hit.clip,
-                    clipLeftPx: hit.clip.startSec * view.pxPerSec,
-                    clipWidthPx: Math.max(1, hit.clip.lengthSec * view.pxPerSec),
-                    contentX,
-                    localY: hit.localY,
-                    pxPerSec: view.pxPerSec,
-                    rowHeight: view.rowHeight,
-                });
-                if (fade !== null) {
-                    return {
-                        kind: "clip",
-                        clip: hit.clip,
-                        region: fade.side === "out" ? "fade-out-corner" : "fade-in-corner",
-                        sec: hit.sec,
-                        trackIndex: hit.trackIndex,
-                        localX: hit.localX,
-                        localY: hit.localY,
-                        fadeIsLine: fade.kind === "line",
-                    };
-                }
-            }
-            return hit;
+        const trackClips = hitClipsByTrack.get(track.id) ?? [];
+        const overlap =
+            trackClips.length >= 2
+                ? hitOverlapControl({
+                      clips: trackClips,
+                      contentX,
+                      localY: hit.localY,
+                      pxPerSec: view.pxPerSec,
+                      rowHeight: view.rowHeight,
+                  })
+                : null;
+
+        if (overlap !== null) {
+            const target = trackClips.find((item) => item.id === overlap.clipId);
+            if (target === undefined) return hit;
+            const region: ClipHitRegion =
+                overlap.kind === "clip-left-edge"
+                    ? "left-edge"
+                    : overlap.kind === "clip-right-edge"
+                      ? "right-edge"
+                      : overlap.kind === "crossfade-grip"
+                        ? "crossfade-grip"
+                        : overlap.fadeSide === "out"
+                          ? "fade-out-corner"
+                          : "fade-in-corner";
+            // 说明：淡变命中（`kind === "fade"`）映射到既有角部区域，复用同一条
+            // `clip-fade` 手势——包络线拖拽与角部拖拽在旧实现里是同一个语义（调长度），
+            // 只是抓取位置不同。
+            return {
+                kind: "clip",
+                clip: target,
+                region,
+                sec: hit.sec,
+                trackIndex: hit.trackIndex,
+                localX: contentX - target.startSec * view.pxPerSec,
+                localY: hit.localY,
+                partnerClipId: overlap.partnerClipId,
+                fadeIsLine: overlap.fadeIsLine,
+                fromOverlapRegion: true,
+            };
         }
 
-        const target = trackClips.find((item) => item.id === overlap.clipId);
-        if (target === undefined) return hit;
-        const region: ClipHitRegion =
-            overlap.kind === "clip-left-edge"
-                ? "left-edge"
-                : overlap.kind === "clip-right-edge"
-                  ? "right-edge"
-                  : overlap.kind === "crossfade-grip"
-                    ? "crossfade-grip"
-                    : overlap.fadeSide === "out"
-                      ? "fade-out-corner"
-                      : "fade-in-corner";
-        // 说明：淡变命中（`kind === "fade"`）映射到既有角部区域，复用同一条
-        // `clip-fade` 手势——包络线拖拽与角部拖拽在旧实现里是同一个语义（调长度），
-        // 只是抓取位置不同。
-        return {
-            kind: "clip",
-            clip: target,
-            region,
-            sec: hit.sec,
-            trackIndex: hit.trackIndex,
-            localX: contentX - target.startSec * view.pxPerSec,
-            localY: hit.localY,
-            partnerClipId: overlap.partnerClipId,
-            fadeIsLine: overlap.fadeIsLine,
-            fromOverlapRegion: true,
-        };
+        // ── 淡变包络线 / 区域边缘竖线（非重叠情形，**包括同轨只有 1 个 clip**）──
+        // 旧实现由 `ClipItem` 内的 `FadeHitLayer` 提供「画线即控件」，沿包络线
+        // 任意位置都能抓住调长度；内核原先只有角部小方块能抓，长淡变的曲线
+        // 中段完全抓不到。
+        //
+        // 【必须与重叠判定解耦】淡变控件是**每个 clip 各自**的（旧实现挂在
+        // `ClipItem` 内），与"同轨有几个 clip"无关；重叠判定才需要 ≥ 2 个。
+        // 曾经这里在 `trackClips.length < 2` 时直接 `return hit`，把单 clip 轨道的
+        // 淡变控件整体废掉：按在淡变曲线上会解析成 `body`（拖动 clip），右键也拿不到
+        // 淡变菜单。实测（Chrome，同轨仅 1 个 clip）：包络线中段按下的 region 是
+        // `body`，而角部小方块仍是 `fade-in-corner`——用户因此"只能碰那个小方块"。
+        //
+        // 只在 `body` 分区检查：header 有自己的控件；clip 边缘与角部已在
+        // `hitTest` 内判过——旧实现的优先级是「clip 边缘 > 淡变边缘线 > 包络线」，
+        // 把淡变放在边缘之后正好吻合。
+        if (hit.region === "body") {
+            const fade = hitClipFadeTarget({
+                clip: hit.clip,
+                clipLeftPx: hit.clip.startSec * view.pxPerSec,
+                clipWidthPx: Math.max(1, hit.clip.lengthSec * view.pxPerSec),
+                contentX,
+                localY: hit.localY,
+                pxPerSec: view.pxPerSec,
+                rowHeight: view.rowHeight,
+            });
+            if (fade !== null) {
+                return {
+                    kind: "clip",
+                    clip: hit.clip,
+                    region: fade.side === "out" ? "fade-out-corner" : "fade-in-corner",
+                    sec: hit.sec,
+                    trackIndex: hit.trackIndex,
+                    localX: hit.localX,
+                    localY: hit.localY,
+                    fadeIsLine: fade.kind === "line",
+                };
+            }
+        }
+        return hit;
     }
 
     /**
