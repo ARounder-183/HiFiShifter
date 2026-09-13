@@ -384,6 +384,13 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
     const clipRangeToParamKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.clipRangeToParamSelection"),
     );
+    // 拉伸 / 曲率修饰键：内核只用于**悬停光标**（按住 = 这个拖拽会做别的事）。
+    const clipStretchKb = useAppSelector((state) =>
+        selectKeybinding(state, "modifier.clipStretch"),
+    );
+    const fadeCurvatureKb = useAppSelector((state) =>
+        selectKeybinding(state, "modifier.fadeCurvatureDrag"),
+    );
     const { mode } = useAppTheme();
 
     const buildData = (): TimelineKernelData => ({
@@ -410,6 +417,8 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
             clipMultiSelectToggle: clipMultiSelectToggleKb,
             clipRangeSelect: clipRangeSelectKb,
             clipRangeToParamSelection: clipRangeToParamKb,
+            clipStretch: clipStretchKb,
+            fadeCurvatureDrag: fadeCurvatureKb,
         },
         playheadZoomEnabled,
         initialPxPerSec,

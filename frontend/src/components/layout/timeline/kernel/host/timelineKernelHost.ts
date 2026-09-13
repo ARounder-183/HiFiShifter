@@ -194,6 +194,20 @@ export interface TimelineKernelData {
          * slip / stretch / 淡变曲率），因此不与任何既有手势冲突。
          */
         readonly clipRangeToParamSelection: Keybinding | null;
+        /**
+         * 拉伸（`modifier.clipStretch`，默认 Alt）。
+         *
+         * **只为悬停光标**服务：按住它悬停在边缘 = 拉伸，光标应变 `col-resize`
+         * （旧实现 `ClipEdgeHandles` 的 `cursor: altPressed ? "col-resize" : "ew-resize"`）。
+         * 手势本身的模式判定在面板侧（按下时定死），内核不重复实现。
+         */
+        readonly clipStretch: Keybinding | null;
+        /**
+         * 淡变曲率拖拽（`modifier.fadeCurvatureDrag`，默认 Alt）。
+         *
+         * 同样只为悬停光标：按住它悬停在包络线上 = 调曲率，光标应为 `move`。
+         */
+        readonly fadeCurvatureDrag: Keybinding | null;
     };
     /** 水平缩放是否以播放头为锚点（`playheadZoomEnabled`）。 */
     readonly playheadZoomEnabled: boolean;
@@ -3209,23 +3223,45 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         // 既与旧实现不一致，也让用户看不出哪些位置是可点的控件。
         let cursor = "default";
         if (hit.kind === "clip") {
+            const kb = data().keybindings;
+            const headerControl = resolveHeaderControl(hit);
             switch (hit.region) {
                 case "left-edge":
                 case "right-edge":
-                    cursor = "ew-resize";
+                    // 按住拉伸修饰键 = 这条边拖出去是**拉伸**（改速率），光标因此
+                    // 换成 `col-resize`；否则是裁短 / 延长（`ew-resize`）。与旧实现
+                    // `ClipEdgeHandles` 同一取值。
+                    cursor =
+                        kb.clipStretch !== null && isModifierActive(kb.clipStretch, event)
+                            ? "col-resize"
+                            : "ew-resize";
                     break;
                 case "fade-in-corner":
-                    cursor = "nwse-resize";
+                    cursor =
+                        kb.fadeCurvatureDrag !== null &&
+                        isModifierActive(kb.fadeCurvatureDrag, event)
+                            ? "move"
+                            : "nwse-resize";
                     break;
                 case "fade-out-corner":
-                    cursor = "nesw-resize";
+                    cursor =
+                        kb.fadeCurvatureDrag !== null &&
+                        isModifierActive(kb.fadeCurvatureDrag, event)
+                            ? "move"
+                            : "nesw-resize";
                     break;
                 case "snap-offset-handle":
                     // 与旧实现的握把一致（`ClipItem` 的 SnapOffset 命中区）。
                     cursor = "ew-resize";
                     break;
                 default:
-                    // body / header / 重叠区控件：保持 default（见上方说明）。
+                    // header 控件：旋钮可竖直拖动、徽标可双击改数值——两者都有
+                    // 自己的光标（旧实现 `ClipHeader` 同源）。其余仍是 default。
+                    if (headerControl === "gain-knob") {
+                        cursor = "ns-resize";
+                    } else if (headerControl === "gain-label" || headerControl === "rate-label") {
+                        cursor = "text";
+                    }
                     break;
             }
         }

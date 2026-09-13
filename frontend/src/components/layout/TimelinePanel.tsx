@@ -232,7 +232,7 @@ import {
 import { readDevicePixelRatio, snapToDevicePx } from "../../utils/devicePixelLine";
 import { resolveQuickExportClipIds } from "./timeline/quickExportSelection";
 import { isTrackListMirrorEcho } from "./timeline/scrollEcho";
-import type { ClipFormantMorph } from "../../features/session/sessionTypes";
+import { activeClipTakeName, type ClipFormantMorph } from "../../features/session/sessionTypes";
 import { ClipFormantToolWindow } from "./timeline/clip/ClipFormantToolWindow";
 
 const TimelineTransportBridge = React.memo(function TimelineTransportBridge(props: {
@@ -3956,7 +3956,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         setKernelInlineEdit({
             clipId,
             field: "name",
-            initialValue: clip.name,
+            // 初值必须是**活动 Take 的名字**（`activeClipTakeName`），不是容器
+            // clip 的 `name`。
+            //
+            // 提交方（`commitTrackLaneRename` → `renameClipTakeRemote`）在多 Take
+            // clip 上写的是**当前 Take 的名字**：预填容器名会让"双击 + 直接回车"
+            // 把 Take 名**改成容器名**，而用户什么都没输入。旧实现 `ClipHeader`
+            // 的 `editTakeName` 同源。
+            initialValue: activeClipTakeName(clip),
             inputMode: "text",
         });
     }, []);
@@ -3998,7 +4005,13 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 setKernelInlineEdit(null);
                 if (field === "name") {
                     const trimmed = raw.trim();
-                    if (trimmed.length === 0) return;
+                    // 空输入 = 保持原名（旧实现 `ClipHeader` 的
+                    // `finalName = trimmed.length > 0 ? trimmed : editTakeName`）。
+                    // 直接 return 也等价——但必须先确认**预填值就是提交目标**
+                    // （多 Take clip 的预填是活动 Take 名，见
+                    // `handleKernelRenameClipStart`），否则"回车不变名"会变成
+                    // "回车把 Take 名改成容器名"。
+                    if (trimmed.length === 0 || trimmed === initialValue) return;
                     commitTrackLaneRename(clipId, trimmed);
                     return;
                 }
