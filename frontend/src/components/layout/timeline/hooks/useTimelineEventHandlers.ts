@@ -7,6 +7,8 @@
  *   由全局路由 focusRouting.resolveEditOpRoute 按活动编辑表面定向派发，
  *   事件名即契约，消费者不再自行判断焦点）
  * - hifi:nudgePlayhead（播放头微移）
+ * - hifi:selectAdjacentTrack（上/下切换当前轨道；换轨只改轨道焦点，不带
+ *   `applySelectedClip` 恢复后端记住的 clip 选中，见该监听内的说明）
  * - hifi:zoomTimelineFocus（聚焦缩放）
  * - context menu dismiss（pointerdown 外部关闭）
  * - hifi:focusCursor（滚动到播放头中心；粘贴后的聚焦由
@@ -300,7 +302,13 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
             const nextTrackId = tracks[nextIndex]?.id;
             if (!nextTrackId) return;
 
-            void dispatch(selectTrackRemote(nextTrackId));
+            // `applySelectedClip: false` —— Alt+方向键的全部意图是"上/下移当前轨道"
+            // （参数编辑器随之重定向），不是"恢复某条 clip 的选中"。后端的选中记忆
+            // 是**全工程唯一**的（`state.rs::select_track` 只改 `selected_track_id`），
+            // 恢复出来的 clip 可能属于另一条轨道；纯字符串形式会让
+            // `selectTrackRemote.fulfilled` 把用户刚做的"点空白取消选中"异步复活
+            // （契约见 `TimelinePanel.handleKernelSeek` 与提交 019e93ed）。
+            void dispatch(selectTrackRemote({ trackId: nextTrackId, applySelectedClip: false }));
 
             const ensureTrackVisible = (el: HTMLDivElement): number | null => {
                 const trackTop = nextIndex * rowHeight;

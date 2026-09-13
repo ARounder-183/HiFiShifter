@@ -190,8 +190,15 @@ export async function createNewTrackForKernelDrop(
         }
 
         // 选中新轨（与旧实现 `maybeSelectTargetTrack` 同一语义）。
+        //
+        // `applySelectedClip: false` —— 这里的意图只是"把刚建的新轨设为当前轨道"，
+        // 不含"恢复某条 clip 的选中"。特别注意：后端的选中记忆是**全工程唯一**的
+        // （`state.rs::select_track` 只改 `selected_track_id`，`to_payload()` 返回的
+        // 仍是上次 `select_clip` 记下的那条），因此**不存在**"恢复本轨上次选中的
+        // clip"这种语义——纯字符串形式只会把用户此前"点空白取消选中"的结果异步复活
+        // （契约与 `TimelinePanel.handleKernelSeek` 同源，见提交 019e93ed）。
         if (sessionRef.current.selectedTrackId !== newTrackId) {
-            void dispatch(selectTrackRemote(newTrackId));
+            void dispatch(selectTrackRemote({ trackId: newTrackId, applySelectedClip: false }));
         }
         return newTrackId;
     } catch {

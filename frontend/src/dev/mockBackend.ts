@@ -5,12 +5,17 @@
  * 在 `window.pywebview.api` 上安装一套假后端实现：启动路径（运行时信息 / UI 设置 /
  * 时间轴状态 / 播放状态）返回构造好的假工程数据，其余未显式实现的方法由 Proxy
  * 兜底返回 `{ ok: true }`，避免任何一次 invoke 抛错中断启动。
+ * `select_clip` / `select_track` 与 `get_timeline_state` 同形：三者都返回全量时间轴
+ * 快照，并共享一份模块级的"记住的选中"（选中 clip / 当前轨道）——这是复现
+ * 「点空白切轨时选中被后端快照复活」类缺陷的前提。
  *
  * 【作用】
  * 本项目前端依赖 pywebview / Tauri 后端（`services/invoke.ts` 的 pywebview 分支），
  * 直接 `npm run dev` 在浏览器里打开会因 `Python API not available` 而无法进入界面，
  * 使得「改渲染 / 调样式」这类纯前端工作无法在浏览器里快速迭代与截图验证。
  * 本模块提供最小可用的后端替身，让时间轴面板能在浏览器里完整渲染。
+ * 已显式实现的方法必须与真实后端的**载荷形状**保持一致：返回 `{ ok: true }` 这类
+ * 缺字段的替身会让依赖具体字段的前端分支永不触发，从而把真实缺陷掩盖成"已修好"。
  *
  * 【开启方式】
  * URL 追加 `?mock=1`（`main.tsx` 在 dev 下按该参数动态 import 本模块）。
@@ -161,10 +166,28 @@ function getMockWaveformLevels(sourcePath: string): [string, string, string] {
 }
 
 /**
+ * 假后端**记住的** clip 选中（`None` 用 `null` 表示）。
+ *
+ * 存在的理由：真实后端把选中态记在自己的 TimelineState 里，`to_payload()` **总是**
+ * 带上 `selected_clip_id`，且 `select_track` 刻意**不**清它。若 mock 不维护该字段，
+ * 前端的 `selectTrackRemote.fulfilled` 会因为载荷里没有 `selected_clip_id` 而永远
+ * 不进"恢复后端记住的选中"分支，从而**掩盖**"点空白切轨时选中被复活"的缺陷。
+ */
+let mockSelectedClipId: string | null = null;
+
+/** 假后端**记住的**轨道焦点；由 `select_track` 改写。 */
+let mockSelectedTrackId: string | null = null;
+
+/**
  * 构造假的时间轴状态。
  *
  * 数据刻意覆盖渲染器的各条视觉分支：淡入淡出（含不同形状 / 方向）、增益与速率
  * 标签、静音徽标、编组徽标、首尾相接的分隔缝、超长名称截断、多 take 展开。
+ *
+ * 特殊说明：每次调用**重新构造** tracks / clips，但 `selected_track_id` /
+ * `selected_clip_id` 取模块级的"记住值"（首次调用回落到首个轨道 / 无选中），
+ * 使 `select_clip` / `select_track` 与 `get_timeline_state` 返回同一个可变会话态
+ * ——与真实后端 `to_payload()` 的行为一致。
  *
  * @returns 与后端 `TimelineState` 结构一致的假状态。
  */
@@ -275,8 +298,8 @@ function buildMockTimeline(): Record<string, unknown> {
         ok: true,
         tracks,
         clips,
-        selected_track_id: tracks[0].id,
-        selected_clip_id: null,
+        selected_track_id: mockSelectedTrackId ?? tracks[0].id,
+        selected_clip_id: mockSelectedClipId,
         bpm: MOCK_BPM,
         playhead_sec: 12.5,
         project_sec: MOCK_PROJECT_SEC,
@@ -298,6 +321,12 @@ function buildMockTimeline(): Record<string, unknown> {
 
 /** 显式实现的 mock 方法表；未命中的方法由 Proxy 兜底。 */
 function buildHandlers(): Record<string, (...args: unknown[]) => unknown> {
+    /**
+     * 静态 clips（供 `analyze_clip_silence` 这类只读几何查询使用）。
+     *
+     * 选中态（`mockSelectedClipId` / `mockSelectedTrackId`）**不**缓存进来：
+     * 它们随 `select_clip` / `select_track` 变化，快照必须每次重建才能反映最新值。
+     */
     const timeline = buildMockTimeline();
     return {
         ping: () => ({ ok: true }),
@@ -311,7 +340,16 @@ function buildHandlers(): Record<string, (...args: unknown[]) => unknown> {
             playback_target: null,
             gpuBackend: "CPU",
         }),
-        get_timeline_state: () => timeline,
+        /**
+         * 取时间轴全量快照。
+         *
+         * 与 `select_clip` / `select_track` 返回**同一形状**：真实后端这三个命令都
+         * 返回 `to_payload()`，其中**总是**带 `selected_clip_id` /
+         * `selected_track_id`。前端的 `selectTrackRemote.fulfilled` 正是在
+         * `selected_clip_id !== undefined` 时才会用后端记住的选中覆盖前端状态，
+         * 因此 mock 若省略该字段就会**掩盖**"点空白切轨时选中被复活"的缺陷。
+         */
+        get_timeline_state: () => buildMockTimeline(),
         /**
          * 静音检测（干跑）：返回**固定几何**的假静音区。
          *
@@ -415,8 +453,38 @@ function buildHandlers(): Record<string, (...args: unknown[]) => unknown> {
         },
         set_transport: () => ({ ok: true }),
         set_project_length: () => ({ ok: true }),
-        select_clip: () => ({ ok: true }),
-        select_track: () => ({ ok: true }),
+        /**
+         * 选中 clip：记住选中并返回全量快照。
+         *
+         * 与真实后端同形（`select_clip` → `tl.select_clip(...)` → `to_payload()`）：
+         * - 传 `null` 表示清空选中（前端"点空白"用的是**本地** reducer，不会走到
+         *   这里，所以后端会一直记着旧值——这正是需要保真的语义）；
+         * - 选中一条存在的 clip 时，真实后端还会把 `selected_track_id` 跟到该
+         *   clip 所在轨道（`state.rs::select_clip`）；前端以此决定参数编辑器的
+         *   编辑目标，不保真会让"点 clip 切轨"这条路径在 mock 下失真。
+         */
+        select_clip: (...args: unknown[]) => {
+            const clipId = args[0] == null ? null : String(args[0]);
+            mockSelectedClipId = clipId;
+            if (clipId !== null) {
+                const clips = buildMockTimeline().clips as Array<Record<string, unknown>>;
+                const trackId = clips.find((clip) => clip.id === clipId)?.track_id;
+                if (trackId != null) mockSelectedTrackId = String(trackId);
+            }
+            return buildMockTimeline();
+        },
+        /**
+         * 切换当前轨道：记住轨道焦点并返回全量快照，**刻意不修改
+         * `mockSelectedClipId`**——真实后端的 `select_track` 也只改
+         * `selected_track_id`，快照里的 `selected_clip_id` 仍是上次选中的 clip。
+         * 前端 `selectTrackRemote.fulfilled` 会据此"恢复"该 clip，因此这条路径
+         * 必须能真正观察到该字段，否则缺陷不可复现。
+         */
+        select_track: (...args: unknown[]) => {
+            const trackId = args[0] == null ? null : String(args[0]);
+            if (trackId !== null) mockSelectedTrackId = trackId;
+            return buildMockTimeline();
+        },
         save_ui_settings: () => ({ ok: true }),
         begin_undo_group: () => ({ ok: true }),
         end_undo_group: () => ({ ok: true }),

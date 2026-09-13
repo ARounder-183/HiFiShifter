@@ -800,6 +800,11 @@ export function useTimelineClipActions(
 
     // 点击轨道空白区：清空 clip 选中（单选 + 多选）。保留轨道焦点 —— 空白点击
     // 是"取消 clip 目标"，不是"切换轨道目标"（DAW 通用约定）。
+    //
+    // 特殊说明：清空是**纯本地**的（不派发 `selectClipRemote(null)`），后端因此
+    // 一直记着旧的 `selected_clip_id`。任何随后派发的 `selectTrackRemote` 都必须带
+    // `applySelectedClip: false`，否则 fulfilled 会拿后端快照把这次清空**异步复活**
+    // ——见 `TimelinePanel.handleKernelSeek` 的契约说明（提交 019e93ed）。
     const deselectAllTrackLaneClips = React.useCallback(() => {
         if (multiSelectedClipIdsRef.current.length === 0 && !sessionRef.current.selectedClipId) {
             return;

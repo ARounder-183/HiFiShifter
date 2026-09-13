@@ -94,6 +94,7 @@ import {
     setTrackName,
     setTrackVolume,
     setPendingPlayheadReveal,
+    setplayheadSec,
     moveClipStart,
     moveClipTrack,
     checkpointHistory,
@@ -1215,6 +1216,16 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
      *
      * 拖拽帧以 rAF 节流提交（内核按 rAF 频率回调），避免每个指针事件都打一次
      * 后端 seek；松手（commit）时取消待提交帧并立即提交最终位置，保证落点精确。
+     *
+     * 特殊说明（**必须与 seek 一起乐观写 playheadSec**）：`seekPlayhead.fulfilled`
+     * 只在「后端返回值与请求值不同」（如被 clamp 修正）时才采纳后端值，其余情况
+     * 依赖调用方**已经**写好 `state.playheadSec`；真实后端 `set_transport` 对
+     * 非负请求原样回显（`playhead_sec = v.max(0.0)`），于是后端值恒等于请求值、
+     * 采纳分支永不命中——只派发 `seekPlayhead` 时引擎动了而 store 的
+     * `playheadSec` 纹丝不动（"点空白处播放头不跟随"的根因；播放中 30Hz 轮询
+     * 重新锚定才让它"偶尔"生效）。此处与标尺路径
+     * （`useTimelineState.setPlayheadFromClientX`：`setplayheadSec` + `seekPlayhead`
+     * 成对派发）保持同一契约，两个分支都不得只派发 seek。
      */
     const handleKernelSeek = React.useCallback(
         (sec: number, commit: boolean, trackId?: string | null) => {
@@ -1229,7 +1240,25 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     sessionRef.current.paramEditorTimelineClickSelectTrackEnabled &&
                     trackId !== sessionRef.current.selectedTrackId
                 ) {
-                    void dispatch(selectTrackRemote(trackId));
+                    // `applySelectedClip: false` 是**契约**，不是可选优化：
+                    //
+                    // 1) 上面的 `deselectAllTrackLaneClips()` 是**纯本地** reducer
+                    //    （`setSelectedClipPreservingTrack(null)`），从不通知后端，
+                    //    因此后端一直记着旧的 `selected_clip_id`；
+                    // 2) `selectTrackRemote.fulfilled` 默认拿后端快照覆盖前端选中
+                    //    （`sessionSlice.ts` 的 `applySelectedClip` 闸门）；
+                    // 3) 纯字符串让 `typeof arg !== "object"` 判为"要恢复"，于是刚
+                    //    清掉的选中被**异步复活** —— 表现为"点空白切轨时选中没被
+                    //    取消"，且复活本身让轨道焦点漂到别处，形成后续点击的连锁失败。
+                    //
+                    // 该契约由 `019e93ed`（"blank-click deselect survives track
+                    // switching"）建立，当时两处 DOM 调用点都传了
+                    // `applySelectedClip: false`；内核补全提交 `464a78bb` 在新调用点
+                    // 写成纯字符串，**静默解除**了该修复。修改此处前请先读这两个提交，
+                    // 不要把对象形式"简化"回纯字符串。
+                    void dispatch(
+                        selectTrackRemote({ trackId, applySelectedClip: false }),
+                    );
                 }
             }
             kernelSeekPendingRef.current = sec;
@@ -1239,6 +1268,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     kernelSeekRafRef.current = null;
                 }
                 kernelSeekPendingRef.current = null;
+                // 乐观写 store：见函数头注释（缺了它 playheadSec 不会动）。
+                dispatch(setplayheadSec(sec));
                 void dispatch(seekPlayhead(sec));
                 return;
             }
@@ -1248,6 +1279,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 const target = kernelSeekPendingRef.current;
                 if (target == null) return;
                 kernelSeekPendingRef.current = null;
+                // 拖拽帧同样成对派发（否则拖拽期间 store 值滞后，仅靠轮询矫正）。
+                dispatch(setplayheadSec(target));
                 void dispatch(seekPlayhead(target));
             });
         },
@@ -3123,7 +3156,13 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 return;
             }
             if (sessionRef.current.selectedTrackId !== args.trackId) {
-                void dispatch(selectTrackRemote(args.trackId));
+                // 轨道区空白右键 = "把这条轨道设为当前轨道"（随后弹粘贴/建轨菜单）：
+                // 只切焦点，不得让后端把全局记住的 `selected_clip_id` 恢复回来。
+                // 后端的选中记忆是**全工程唯一**的（不是每轨一份，见
+                // `state.rs::select_track`），恢复出来的 clip 完全可能属于另一条
+                // 轨道，从而在"本地取消选中"之后被异步复活。契约与
+                // `handleKernelSeek` 的空白点击同源（019e93ed）。
+                void dispatch(selectTrackRemote({ trackId: args.trackId, applySelectedClip: false }));
             }
             setTrackAreaMenu({
                 x: args.clientX,
@@ -3243,10 +3282,16 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
      *
      * 与旧实现同源：暂停 / 停止时还会把播放光标带到点击位置（播放中不打断当前
      * 播放位置），切换本身走 `setClipActiveTakeRemote`（含后端落库与撤销步）。
+     *
+     * 特殊说明：本回调**确实要移动播放头**，因此同样遵循「乐观写 + seek 成对派发」
+     * 契约（`setplayheadSec` 必须先于 `seekPlayhead`）——只派发 seek 时后端原样
+     * 回显请求值，`seekPlayhead.fulfilled` 的采纳分支不命中，store 的
+     * `playheadSec` 不会变（同 `handleKernelSeek` 的说明）。
      */
     const handleKernelActivateTake = React.useCallback(
         (clipId: string, takeId: string, sec: number) => {
             if (!timelineRuntimeIsPlaying) {
+                dispatch(setplayheadSec(sec));
                 void dispatch(seekPlayhead(sec));
             }
             activateTrackLaneTake(clipId, takeId);
@@ -3830,12 +3875,22 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         [s.clips],
     );
 
+    /**
+     * 轨道头左键按下：把该轨道设为当前轨道（面板 → `TrackList` 的 `onSelectTrack`）。
+     *
+     * 特殊说明：`applySelectedClip: false` —— 轨道头点击的**全部**意图就是换当前
+     * 轨道（手册：「点击左侧轨道头切换当前轨道」），不包含"恢复某条 clip 的选中"。
+     * 后端的选中记忆是**全工程唯一**的（`state.rs::select_track` 只改
+     * `selected_track_id`），恢复出来的 clip 可能属于另一条轨道，会把用户刚做完的
+     * "点空白取消选中"异步复活。实测（忠实 mock）：纯字符串形式下点轨道头会让
+     * `selectedClipId` 从 `null` 变回 `track-1-clip-1`。
+     */
     const handleSelectTrack = React.useCallback(
         (trackId: string) => {
             if (sessionRef.current.selectedTrackId === trackId) {
                 return;
             }
-            void dispatch(selectTrackRemote(trackId));
+            void dispatch(selectTrackRemote({ trackId, applySelectedClip: false }));
         },
         [dispatch, sessionRef],
     );
