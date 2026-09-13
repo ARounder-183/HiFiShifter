@@ -3,6 +3,98 @@ import type { TimelineSnapSettings } from "../../features/session/sessionTypes";
 
 export type StretchAlgorithmOption = "linear" | "signalsmith" | "soundtouch";
 
+/** 渲染缓存写入模式：即时异步 / 退出时批量 / 仅保存工程时。 */
+export type RenderCacheWriteMode = "immediate" | "onExit" | "manual";
+/** 渲染缓存位置：应用缓存目录 / 自定义目录。 */
+export type RenderCacheLocation = "system" | "custom";
+
+/**
+ * 渲染缓存设置（持久化到 app_config.json 的 `ui.renderCache`）。
+ *
+ * 渲染缓存把整 Clip 的合成结果按内容哈希落盘，使"重新打开工程"不再重新
+ * 合成未变更的片段。关闭总开关后行为与旧版本完全一致。
+ */
+export interface RenderCacheSettings {
+    /** 总开关（默认开启）。 */
+    enabled: boolean;
+    /** 磁盘占用上限（MB；0 = 不限制）。 */
+    maxSizeMb: number;
+    /** 超过 N 天未写入自动清理（0 = 不限龄）。 */
+    maxAgeDays: number;
+    /** 小于该时长的片段不落盘（秒）。 */
+    minClipSecs: number;
+    /** 单条缓存上限（MB；0 = 不限制）。 */
+    maxEntryMb: number;
+    writeMode: RenderCacheWriteMode;
+    location: RenderCacheLocation;
+    /** 自定义缓存目录（location = "custom" 时生效）。 */
+    customDir: string | null;
+    /** 读取时校验完整性（默认开启）。 */
+    verifyChecksum: boolean;
+    /** 可用磁盘空间低于该值（MB）时暂停写入（0 = 不检查）。 */
+    minFreeDiskMb: number;
+    /** 打开工程后显示命中统计（默认开启）。 */
+    showHitStats: boolean;
+}
+
+/** 渲染缓存的出厂默认值（与后端 `config::RenderCacheSettings::default` 对齐）。 */
+export const DEFAULT_RENDER_CACHE_SETTINGS: RenderCacheSettings = {
+    enabled: true,
+    maxSizeMb: 4096,
+    maxAgeDays: 90,
+    minClipSecs: 0.5,
+    maxEntryMb: 512,
+    writeMode: "immediate",
+    location: "system",
+    customDir: null,
+    verifyChecksum: true,
+    minFreeDiskMb: 512,
+    showHitStats: true,
+};
+
+/** 规范化渲染缓存设置（钳制越界值、回退非法枚举），保存前调用。 */
+export function normalizeRenderCacheSettings(input: RenderCacheSettings): RenderCacheSettings {
+    const clampInt = (value: number, min: number, max: number, fallback: number) => {
+        if (!Number.isFinite(value)) return fallback;
+        return Math.min(max, Math.max(min, Math.round(value)));
+    };
+    const minClipSecs = Number.isFinite(input.minClipSecs)
+        ? Math.min(60, Math.max(0, input.minClipSecs))
+        : DEFAULT_RENDER_CACHE_SETTINGS.minClipSecs;
+    const customDir = (input.customDir ?? "").trim();
+
+    return {
+        enabled: Boolean(input.enabled),
+        maxSizeMb: clampInt(
+            input.maxSizeMb,
+            0,
+            1024 * 1024,
+            DEFAULT_RENDER_CACHE_SETTINGS.maxSizeMb,
+        ),
+        maxAgeDays: clampInt(input.maxAgeDays, 0, 3650, DEFAULT_RENDER_CACHE_SETTINGS.maxAgeDays),
+        minClipSecs,
+        maxEntryMb: clampInt(
+            input.maxEntryMb,
+            0,
+            64 * 1024,
+            DEFAULT_RENDER_CACHE_SETTINGS.maxEntryMb,
+        ),
+        writeMode: (["immediate", "onExit", "manual"] as const).includes(input.writeMode)
+            ? input.writeMode
+            : DEFAULT_RENDER_CACHE_SETTINGS.writeMode,
+        location: input.location === "custom" ? "custom" : "system",
+        customDir: customDir.length > 0 ? customDir : null,
+        verifyChecksum: Boolean(input.verifyChecksum),
+        minFreeDiskMb: clampInt(
+            input.minFreeDiskMb,
+            0,
+            1024 * 1024,
+            DEFAULT_RENDER_CACHE_SETTINGS.minFreeDiskMb,
+        ),
+        showHitStats: Boolean(input.showHitStats),
+    };
+}
+
 export interface UiSettings {
     autoCrossfade: boolean;
     /** 空间足够时显示 Clip 内全部 Take 波形。 */
@@ -100,6 +192,8 @@ export interface UiSettings {
     loopNewClips?: boolean;
     /** 同步编辑所有 Take：内容级编辑同步到同一 Clip 的全部 Take。 */
     syncEditsAcrossTakes?: boolean;
+    /** 渲染缓存：把渲染结果落盘，重新打开工程时直接复用。 */
+    renderCache?: RenderCacheSettings;
     customScalePresets?: Array<{
         id: string;
         name: string;

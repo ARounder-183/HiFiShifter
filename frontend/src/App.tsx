@@ -104,6 +104,8 @@ const statusKey: Record<string, string> = {
     "Runtime updated": "status_runtime_updated",
     "Runtime update failed": "status_runtime_update_failed",
     "Clear waveform cache failed": "status_clear_waveform_cache_failed",
+    "Render cache cleared": "status_render_cache_cleared",
+    "Clear render cache failed": "status_clear_render_cache_failed",
     "Import canceled": "status_import_canceled",
     "Pick output canceled": "status_pick_output_canceled",
     "Output path selected": "status_output_path_selected",
@@ -415,9 +417,19 @@ function detectExternalActionKindFromPath(path: string): ExternalFileActionKind 
     return null;
 }
 
+/** 近似时长文本（用于"缓存复用节省了多久"的粗略提示）。 */
+function formatApproxDuration(ms: number): string {
+    const seconds = Math.max(0, Math.round(ms / 1000));
+    if (seconds < 60) return `${seconds} s`;
+    const minutes = Math.floor(seconds / 60);
+    const rest = seconds % 60;
+    return rest > 0 ? `${minutes} min ${rest} s` : `${minutes} min`;
+}
+
 function AppInner() {
     const dispatch = useAppDispatch();
     const { t } = useI18n();
+    const tAny = t as (key: string) => string;
     const pitchAnalysis = usePitchAnalysis();
     const pianoRollStatus = usePianoRollStatus();
 
@@ -1435,6 +1447,69 @@ function AppInner() {
             if (unlisten) unlisten();
         };
     }, [dispatch]);
+
+    // ── 渲染缓存命中反馈 ────────────────────────────────────────────────────
+    // 打开工程后的首个渲染 pass 结束时会广播命中统计；状态栏短暂展示
+    //"复用 N/M 个音频块（约省 X）"，让用户明确感知磁盘缓存真的生效了。
+    const renderCacheShowHitStats = useAppSelector(
+        (state) => state.session.renderCache.showHitStats,
+    );
+    const [renderCacheNotice, setRenderCacheNotice] = useState("");
+    useEffect(() => {
+        if (!renderCacheShowHitStats) return;
+        let disposed = false;
+        let unlisten: null | (() => void) = null;
+        let hideTimer: ReturnType<typeof setTimeout> | null = null;
+
+        async function setup() {
+            try {
+                const mod = await import("@tauri-apps/api/event");
+                unlisten = await mod.listen(
+                    "render_cache_summary",
+                    (event: {
+                        payload?: {
+                            diskHits?: number;
+                            total?: number;
+                            savedMs?: number;
+                        };
+                    }) => {
+                        if (disposed) return;
+                        const payload = event?.payload ?? {};
+                        const hits = Number(payload.diskHits ?? 0);
+                        const total = Number(payload.total ?? 0);
+                        // 没有磁盘命中就不打扰用户（首次打开工程本就无缓存）。
+                        if (!Number.isFinite(hits) || hits <= 0 || total <= 0) return;
+                        const savedMs = Number(payload.savedMs ?? 0);
+                        let text = tAny("status_render_cache_summary")
+                            .replace("{hits}", String(hits))
+                            .replace("{total}", String(total));
+                        if (Number.isFinite(savedMs) && savedMs >= 1000) {
+                            text += tAny("status_render_cache_saved_suffix").replace(
+                                "{saved}",
+                                formatApproxDuration(savedMs),
+                            );
+                        }
+                        setRenderCacheNotice(text);
+                        if (hideTimer) clearTimeout(hideTimer);
+                        hideTimer = setTimeout(() => setRenderCacheNotice(""), 15_000);
+                    },
+                );
+                if (disposed) {
+                    unlisten();
+                    unlisten = null;
+                }
+            } catch {
+                // 非 Tauri 环境（浏览器调试）无事件系统：静默跳过。
+            }
+        }
+
+        void setup();
+        return () => {
+            disposed = true;
+            if (unlisten) unlisten();
+            if (hideTimer) clearTimeout(hideTimer);
+        };
+    }, [renderCacheShowHitStats, tAny]);
 
     const runtimeRef = useRef({
         isPlaying: false,
@@ -2724,7 +2799,8 @@ function AppInner() {
                     // 左键拖拽参数线期间按下同一键时，参数编辑器内的本地监听会
                     // 同步切换本次拖拽的方向 —— 触控板用户的「右键切换」替代。
                     const ss = store.getState().session;
-                    const currentDrawTool = ss.drawToolMode === "line" ? "vibrato" : ss.drawToolMode;
+                    const currentDrawTool =
+                        ss.drawToolMode === "line" ? "vibrato" : ss.drawToolMode;
                     const tool =
                         ss.toolMode === "select"
                             ? ("select" as const)
@@ -3930,6 +4006,19 @@ function AppInner() {
                             }}
                         >
                             {pitchAnalysisText}
+                        </span>
+                    ) : null}
+                    {renderCacheNotice ? (
+                        <span
+                            className="shrink-0 rounded px-1 py-0 text-xs font-medium"
+                            style={{
+                                background: "var(--green-3)",
+                                color: "var(--green-11)",
+                                fontSize: "11px",
+                                lineHeight: "16px",
+                            }}
+                        >
+                            {renderCacheNotice}
                         </span>
                     ) : null}
                     {pianoRollStatus.dataLoading ? (

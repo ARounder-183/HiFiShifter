@@ -109,7 +109,12 @@ import {
     updateTransportBpm,
 } from "./thunks/transportThunks";
 
-import { clearWaveformCacheRemote, loadUiSettings, refreshRuntime } from "./thunks/runtimeThunks";
+import {
+    clearRenderCacheRemote,
+    clearWaveformCacheRemote,
+    loadUiSettings,
+    refreshRuntime,
+} from "./thunks/runtimeThunks";
 
 import { loadDefaultModel, loadModel } from "./thunks/modelThunks";
 
@@ -124,6 +129,11 @@ import {
     processAudio,
     synthesizeAudio,
 } from "./thunks/audioThunks";
+
+import {
+    DEFAULT_RENDER_CACHE_SETTINGS,
+    type RenderCacheSettings,
+} from "../../services/api/settings";
 
 import { SCALE_KEYS } from "../../utils/musicalScales";
 import type { ScaleLike } from "../../utils/musicalScales";
@@ -460,6 +470,8 @@ export interface SessionState {
     ortDeviceId: number | null;
     /** 后台预渲染：编辑后立即在后台渲染，无需等待播放触发 */
     autoBackgroundRender: boolean;
+    /** 渲染缓存设置：把合成结果落盘，重新打开工程时直接复用。 */
+    renderCache: RenderCacheSettings;
     /**
      * 后端"播放/预渲染"状态镜像（`playback_rendering_state` 事件）——只镜像
      * 播放轮询 reducer 需要的 active/target 两个原始值字段（变化低频，且
@@ -2004,6 +2016,7 @@ const initialState: SessionState = {
     gpuDeviceId: 0,
     ortDeviceId: null,
     autoBackgroundRender: true,
+    renderCache: { ...DEFAULT_RENDER_CACHE_SETTINGS },
     playbackRenderingActive: false,
     playbackRenderingTarget: null,
     playbackBlockingRenderActive: false,
@@ -2157,9 +2170,7 @@ function applyHistoryDepths(
     const nextUndo = Math.max(0, Math.floor(Number(undoDepth) || 0));
     const nextRedo = Math.max(0, Math.floor(Number(redoDepth) || 0));
     const branchDiscarded =
-        state.historyRedoDepth > 0 &&
-        nextRedo === 0 &&
-        nextUndo > state.historyUndoDepth;
+        state.historyRedoDepth > 0 && nextRedo === 0 && nextUndo > state.historyUndoDepth;
     const historyReset = nextUndo === 0 && nextRedo === 0;
     state.historyUndoDepth = nextUndo;
     state.historyRedoDepth = nextRedo;
@@ -2299,6 +2310,7 @@ export { setTrackStateRemote, removeSelectedClipRemote } from "./thunks/trackThu
 export {
     refreshRuntime,
     clearWaveformCacheRemote,
+    clearRenderCacheRemote,
     loadUiSettings,
     persistUiSettings,
 } from "./thunks/runtimeThunks";
@@ -2654,6 +2666,10 @@ const sessionSlice = createSlice({
         },
         toggleAutoBackgroundRender(state) {
             state.autoBackgroundRender = !state.autoBackgroundRender;
+        },
+        /** 覆盖整块渲染缓存设置（对话框保存时调用）。 */
+        setRenderCacheSettings(state, action: PayloadAction<Partial<RenderCacheSettings>>) {
+            state.renderCache = { ...state.renderCache, ...action.payload };
         },
         /** 镜像后端 `playback_rendering_state` 事件的 active/target（进度走 App 本地状态）。
          *  `blocking` 为阻塞式前台预渲染（target="original"）的独立镜像；缺省时按
@@ -3324,6 +3340,25 @@ const sessionSlice = createSlice({
             })
             .addCase(clearWaveformCacheRemote.rejected, setRejected)
 
+            .addCase(clearRenderCacheRemote.pending, (state) =>
+                setPending(state, "Clearing render cache..."),
+            )
+            .addCase(clearRenderCacheRemote.fulfilled, (state, action) => {
+                state.busy = false;
+                const payload = action.payload as {
+                    ok?: boolean;
+                    removedFiles?: number;
+                    error?: string;
+                };
+                if (payload.ok) {
+                    const n = Number(payload.removedFiles ?? 0) || 0;
+                    state.status = `Render cache cleared (${n} entries)`;
+                } else {
+                    state.status = "Clear render cache failed";
+                }
+            })
+            .addCase(clearRenderCacheRemote.rejected, setRejected)
+
             .addCase(loadUiSettings.fulfilled, (state, action) => {
                 const s = action.payload;
                 state.autoCrossfadeEnabled = s.autoCrossfade;
@@ -3486,6 +3521,12 @@ const sessionSlice = createSlice({
                 }
                 if (s.autoBackgroundRender != null) {
                     state.autoBackgroundRender = Boolean(s.autoBackgroundRender);
+                }
+                if (s.renderCache) {
+                    state.renderCache = {
+                        ...DEFAULT_RENDER_CACHE_SETTINGS,
+                        ...s.renderCache,
+                    };
                 }
                 const selectDir = s.selectDragDirection;
                 if (selectDir != null && ["free", "x-only", "y-only"].includes(selectDir)) {
@@ -6060,6 +6101,7 @@ export const {
     setGpuDeviceId,
     setOrtDeviceId,
     toggleAutoBackgroundRender,
+    setRenderCacheSettings,
     setVisibleReferenceRootTrackIds,
     toggleVisibleReferenceRootTrackId,
     setSelectedClip,

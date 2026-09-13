@@ -12,6 +12,7 @@ import {
     duplicateTrackRemote,
     refreshRuntime,
     clearWaveformCacheRemote,
+    clearRenderCacheRemote,
     persistUiSettings,
     undoRemote,
     redoRemote,
@@ -79,6 +80,7 @@ import {
 import { SCALE_LABELS } from "../../utils/musicalScales";
 import { ExportAudioDialog } from "./ExportAudioDialog";
 import { AutoBackupDialog } from "./AutoBackupDialog";
+import { RenderCacheDialog } from "./RenderCacheDialog";
 import { RecordingSettingsDialog } from "./RecordingSettingsDialog";
 import { BenchmarkDialog } from "./BenchmarkDialog";
 import { AboutDialog } from "./AboutDialog";
@@ -190,6 +192,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     const [recordingDialogOpen, setRecordingDialogOpen] = useState(false);
     const [benchmarkDialogOpen, setBenchmarkDialogOpen] = useState(false);
     const [aboutDialogOpen, setAboutDialogOpen] = useState(false);
+    const [renderCacheDialogOpen, setRenderCacheDialogOpen] = useState(false);
     const [dmlAdapters, setDmlAdapters] = useState<
         { deviceId: number; name: string; memoryMb: number }[]
     >([]);
@@ -789,6 +792,9 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     <DropdownMenu.Item onSelect={() => void dispatch(clearWaveformCacheRemote())}>
                         {t("menu_clear_waveform_cache")}
                     </DropdownMenu.Item>
+                    <DropdownMenu.Item onSelect={() => void dispatch(clearRenderCacheRemote())}>
+                        {tAny("menu_clear_render_cache")}
+                    </DropdownMenu.Item>
                     <DropdownMenu.Separator />
                     <DropdownMenu.Item
                         onSelect={() => {
@@ -1207,6 +1213,13 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
                     <DropdownMenu.Separator />
 
+                    {/* Render cache manager — above Keyboard Shortcuts */}
+                    <DropdownMenu.Item onSelect={() => setRenderCacheDialogOpen(true)}>
+                        {tAny("menu_render_cache_manager")}
+                    </DropdownMenu.Item>
+
+                    <DropdownMenu.Separator />
+
                     {/* Keyboard Shortcuts — at the bottom */}
                     <DropdownMenu.Item onSelect={() => setKbDialogOpen(true)}>
                         {t("menu_keybindings")}
@@ -1314,6 +1327,11 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 settings={autoBackupSettings}
                 onOpenChange={setAutoBackupDialogOpen}
                 onSettingsSaved={onAutoBackupSettingsSaved}
+            />
+
+            <RenderCacheDialog
+                open={renderCacheDialogOpen}
+                onOpenChange={setRenderCacheDialogOpen}
             />
 
             <RecordingSettingsDialog

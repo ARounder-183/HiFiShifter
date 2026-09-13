@@ -49,6 +49,9 @@ pub(super) fn get_ui_settings(state: State<'_, AppState>) -> UiSettings {
     };
     settings.normalize_split_transition();
     settings.normalize_time_display();
+    // 渲染缓存设置同样做规范化回读：手改坏的配置值（越界容量 / 非法枚举）
+    // 不应被前端原样展示或写回。
+    settings.render_cache = settings.render_cache.normalized();
     crate::time_stretch::update_global_stretch_defaults(
         settings.default_stretch_algorithm,
         settings.default_hifigan_mel_stretch,
@@ -64,6 +67,9 @@ pub(super) fn get_ui_settings(state: State<'_, AppState>) -> UiSettings {
     // Sync "loop for new clips" default (used by importers / legacy project migration)
     crate::config::set_loop_new_clips_default(settings.loop_new_clips);
     crate::config::set_sync_edits_across_takes(settings.sync_edits_across_takes);
+    // 同步渲染缓存配置（总开关 / 容量 / 超龄…）：应用设置是幂等的，写入或
+    // 缓存目录变化时才会触发目录准备与回收。
+    crate::render_cache::apply_settings(&settings.render_cache);
     // 刷新进程内缓存，供拖拽热路径（ripple/split 选项）无盘读取
     state.store_ui_settings_cache(&settings);
     settings
@@ -88,9 +94,10 @@ pub(super) fn save_ui_settings(
                 (&mut base, &settings_value)
             {
                 for (key, value) in patch_obj {
-                    if key == "timelineSnap" {
-                        // 嵌套设置做深度合并，避免部分保存时清空其它吸附选项。
-                        match base_obj.get_mut("timelineSnap") {
+                    if key == "timelineSnap" || key == "renderCache" {
+                        // 嵌套设置做深度合并，避免部分保存时清空其它子项
+                        // （吸附选项 / 渲染缓存的容量、超龄等）。
+                        match base_obj.get_mut(key.as_str()) {
                             Some(serde_json::Value::Object(base_nested)) => {
                                 if let serde_json::Value::Object(patch_nested) = value {
                                     for (nested_key, nested_value) in patch_nested {
@@ -117,6 +124,7 @@ pub(super) fn save_ui_settings(
 
     settings.normalize_split_transition();
     settings.normalize_time_display();
+    settings.render_cache = settings.render_cache.normalized();
     let prev_ep = prev_settings.ort_ep.clone();
 
     if let Some(dir) = state.config_dir.get() {
@@ -134,6 +142,8 @@ pub(super) fn save_ui_settings(
     );
     crate::config::set_loop_new_clips_default(settings.loop_new_clips);
     crate::config::set_sync_edits_across_takes(settings.sync_edits_across_takes);
+    // 渲染缓存配置变化（开关 / 上限 / 超龄 / 目录）→ 立即生效并触发回收。
+    crate::render_cache::apply_settings(&settings.render_cache);
 
     // Both fields matter: changing only the DirectML device ID must also
     // rebuild the sessions, otherwise the new device is silently ignored.

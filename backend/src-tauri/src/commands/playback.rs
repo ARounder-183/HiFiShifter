@@ -328,6 +328,17 @@ fn ensure_hifigan_tension_cache(
         }
     }
 
+    // 【持久化缓存读回】张力变体：内存未命中时回退磁盘（渲染线程内）。
+    if crate::render_cache::enabled() {
+        if let Some(loaded) = crate::render_cache::load_tension(&cache_key, out_rate) {
+            let mut cache = crate::synth_clip_cache::global_tension_rendered_clip_cache()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            cache.insert(cache_key.clone(), loaded);
+            return Ok((Some(cache_key), false));
+        }
+    }
+
     let tensioned = crate::hifigan_tension::apply_tension_to_stereo(
         base_pcm_stereo,
         out_rate,
@@ -344,11 +355,66 @@ fn ensure_hifigan_tension_cache(
         sample_rate: out_rate,
         rendered_take_id: clip.active_take_id.clone(),
     };
+    // 【持久化】张力变体异步落盘。
+    crate::render_cache::store_tension(&cache_key, &entry);
     let mut cache = crate::synth_clip_cache::global_tension_rendered_clip_cache()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     cache.insert(cache_key.clone(), entry);
     Ok((Some(cache_key), true))
+}
+
+/// Clip 播放速率（非法值按 1.0 处理，与实时引擎口径一致）。
+fn clip_playback_rate(clip: &crate::state::Clip) -> f64 {
+    let rate = clip.playback_rate as f64;
+    if rate.is_finite() && rate > 0.0 {
+        rate
+    } else {
+        1.0
+    }
+}
+
+/// 构造整 Clip 渲染哈希输入。
+///
+/// ★ 所有需要计算渲染缓存键的位置（收集待渲染、气声噪声键、快照回退）都必须
+/// 经由本函数：任何一处参数口径漂移都会让"写入的键"与"查询的键"不一致 ——
+/// 轻则缓存永久 miss，重则跨参数误命中。
+fn build_rendered_hash_input<'a>(
+    clip: &'a crate::state::Clip,
+    entry: &'a crate::state::TrackParamsState,
+    renderer_id: &'a str,
+    sr: u32,
+    input_pitch_curve: Option<&'a [f32]>,
+) -> crate::synth_clip_cache::RenderedClipHashInput<'a> {
+    let start_frame = (clip.start_sec.max(0.0) * sr as f64).round() as u64;
+    let end_frame =
+        start_frame + (clip.length_sec.max(0.0) * sr as f64).round().max(1.0) as u64;
+
+    crate::synth_clip_cache::RenderedClipHashInput {
+        clip_id: &clip.id,
+        source_path: clip.source_path.as_deref().unwrap_or(""),
+        source_file_mtime: clip.source_file_mtime,
+        source_file_fingerprint: clip.source_file_fingerprint,
+        active_take_id: clip.active_take_id.as_deref(),
+        renderer_id,
+        start_frame,
+        end_frame,
+        sample_rate: sr,
+        playback_rate: clip_playback_rate(clip),
+        reversed: clip.reversed,
+        loop_enabled: clip.loop_enabled,
+        source_range_q: (
+            (clip.source_start_sec * 1000.0).round() as i64,
+            (clip.source_end_sec * 1000.0).round() as i64,
+        ),
+        pitch_edit: entry.pitch_edit.as_slice(),
+        pitch_orig: Some(entry.pitch_orig.as_slice()),
+        frame_period_ms: entry.frame_period_ms.max(0.1),
+        extra_curves: &entry.extra_curves,
+        extra_params: &entry.extra_params,
+        formant_morph: clip.formant_morph.as_ref().filter(|params| params.enabled),
+        input_pitch_curve,
+    }
 }
 
 /// 收集 timeline 中所有需要预渲染的 clip。
@@ -378,9 +444,9 @@ fn collect_clips_needing_render(
         if clip.muted {
             continue;
         }
-        let Some(source_path) = clip.source_path.as_deref() else {
+        if clip.source_path.is_none() {
             continue;
-        };
+        }
 
         // 使用新的检测逻辑：检查clip是否需要pitch edit
         let clip_start_sec = clip.start_sec.max(0.0);
@@ -390,18 +456,6 @@ fn collect_clips_needing_render(
         if !needs_pitch_edit {
             continue;
         }
-
-        let playback_rate = {
-            let r = clip.playback_rate as f64;
-            if r.is_finite() && r > 0.0 {
-                r
-            } else {
-                1.0
-            }
-        };
-        let start_frame = (clip.start_sec.max(0.0) * sr as f64).round() as u64;
-        let end_frame =
-            start_frame + (clip.length_sec.max(0.0) * sr as f64).round().max(1.0) as u64;
 
         // 获取pitch edit参数
         let Some(clip_root) = timeline.resolve_root_track_id(&clip.track_id) else {
@@ -417,29 +471,10 @@ fn collect_clips_needing_render(
         };
         let kind = crate::state::SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo);
         let renderer_id = crate::renderer::get_renderer(kind).id();
-        let pitch_edit = entry.pitch_edit.as_slice();
-        let frame_period_ms = entry.frame_period_ms.max(0.1);
-        let param_hash = crate::synth_clip_cache::compute_rendered_clip_hash(
-            &clip.id,
-            source_path,
-            start_frame,
-            end_frame,
-            sr,
-            renderer_id,
-            pitch_edit,
-            frame_period_ms,
-            playback_rate,
-            &entry.extra_curves,
-            &entry.extra_params,
-            clip.formant_morph.as_ref().filter(|params| params.enabled),
-            None,
-            clip.source_file_mtime,
-            clip.loop_enabled,
-            (
-                (clip.source_start_sec * 1000.0).round() as i64,
-                (clip.source_end_sec * 1000.0).round() as i64,
-            ),
-        );
+
+        // 渲染参数哈希：与渲染线程、快照回退共用同一份输入口径。
+        let hash_input = build_rendered_hash_input(clip, entry, renderer_id, sr, None);
+        let param_hash = crate::synth_clip_cache::compute_rendered_clip_hash(&hash_input);
         let cache_key = crate::synth_clip_cache::RenderedClipCacheKey {
             clip_id: clip.id.clone(),
             param_hash,
@@ -448,7 +483,7 @@ fn collect_clips_needing_render(
         if debug {
             log::warn!(
                 "[collect_clips_needing_render] clip_id={} sr={} start_frame={} end_frame={} hash={:#018x}",
-                clip.id, sr, start_frame, end_frame, param_hash
+                clip.id, sr, hash_input.start_frame, hash_input.end_frame, param_hash
             );
         }
 
@@ -826,32 +861,9 @@ fn render_single_clip(
                 let kind =
                     crate::state::SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo);
                 let renderer_id = crate::renderer::get_renderer(kind).id();
-                let start_frame = (clip.start_sec.max(0.0) * out_rate as f64).round() as u64;
-                let end_frame = start_frame
-                    + (clip.length_sec.max(0.0) * out_rate as f64)
-                        .round()
-                        .max(1.0) as u64;
-                let source_path = clip.source_path.as_deref().unwrap_or("");
-                let param_hash = crate::synth_clip_cache::compute_breath_noise_hash(
-                    &clip.id,
-                    source_path,
-                    start_frame,
-                    end_frame,
-                    out_rate,
-                    renderer_id,
-                    &entry.pitch_edit,
-                    entry.frame_period_ms.max(0.1),
-                    playback_rate,
-                    &entry.extra_curves,
-                    &entry.extra_params,
-                    clip.formant_morph.as_ref().filter(|params| params.enabled),
-                    clip.source_file_mtime,
-                    clip.loop_enabled,
-                    (
-                        (clip.source_start_sec * 1000.0).round() as i64,
-                        (clip.source_end_sec * 1000.0).round() as i64,
-                    ),
-                );
+                let hash_input =
+                    build_rendered_hash_input(clip, entry, renderer_id, out_rate, None);
+                let param_hash = crate::synth_clip_cache::compute_breath_noise_hash(&hash_input);
                 Some(crate::synth_clip_cache::BreathNoiseCacheKey {
                     clip_id: clip.id.clone(),
                     param_hash,
@@ -873,10 +885,28 @@ fn render_single_clip(
     // 因此命中时必须验证长度严格一致；不一致则视为未命中, 走完整的双 render
     // miss 路径重新生成 noise。
     let cached_noise = breath_noise_cache_key.as_ref().and_then(|key| {
-        let mut cache = crate::synth_clip_cache::global_breath_noise_cache()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        cache.get(key).map(|entry| entry.noise_stereo.clone())
+        {
+            let mut cache = crate::synth_clip_cache::global_breath_noise_cache()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(entry) = cache.get(key) {
+                return Some(entry.noise_stereo.clone());
+            }
+        }
+        // 【持久化缓存读回】独立噪声 stem：内存未命中时回退磁盘（渲染线程内）。
+        // 命中即回填内存缓存，省掉一次 HNSEP 分离推理。
+        if !crate::render_cache::enabled() {
+            return None;
+        }
+        let loaded = crate::render_cache::load_noise(key, out_rate)?;
+        let noise = loaded.noise_stereo.clone();
+        {
+            let mut cache = crate::synth_clip_cache::global_breath_noise_cache()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            cache.insert(key.clone(), loaded);
+        }
+        Some(noise)
     });
 
     if let Some(cached_noise_arc) = cached_noise {
@@ -1026,6 +1056,8 @@ fn render_single_clip(
             frames: (breath_noise_stereo.len() / 2) as u64,
             sample_rate: out_rate,
         };
+        // 【持久化】噪声 stem 异步落盘：formant 变化时可跨会话复用，省一次 HNSEP。
+        crate::render_cache::store_noise(&key, &entry);
         let mut cache = crate::synth_clip_cache::global_breath_noise_cache()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -1514,6 +1546,9 @@ fn render_background_pass(
         let mut cache_miss_count = 0u32;
         let mut render_success_count = 0u32;
         let mut render_failed_count = 0u32;
+        // 持久化缓存（磁盘）命中数：用于"本次打开省了多少"的反馈与统计。
+        let mut disk_hit_count = 0u32;
+        let mut disk_load_elapsed = std::time::Duration::ZERO;
         let mut cache_probe_elapsed = std::time::Duration::ZERO;
         let mut render_elapsed = std::time::Duration::ZERO;
         let mut tension_elapsed = std::time::Duration::ZERO;
@@ -1607,6 +1642,53 @@ fn render_background_pass(
                 pending_clip_ids_written.insert(clip_render_info.clip.id.clone());
             }
 
+            // ── 持久化缓存读回（磁盘）──────────────────────────────────────────
+            // 内存未命中时回退磁盘：命中即回填内存缓存并注册 pending key，
+            // 本次直接跳过合成。磁盘 I/O 只允许发生在这里（渲染线程）——
+            // 音频回调与 `build_snapshot` 绝不读盘。
+            if base_entry.is_none() && crate::render_cache::enabled() {
+                let disk_started_at = std::time::Instant::now();
+                if let Some(entry) = crate::render_cache::load_rendered(
+                    &clip_render_info.cache_key,
+                    clip_render_info.sr,
+                ) {
+                    disk_load_elapsed += disk_started_at.elapsed();
+                    disk_hit_count += 1;
+                    if cache_log {
+                        log::warn!(
+                            "[bg_render][cache] DISK HIT clip_id={} hash={:#018x} load_ms={}",
+                            clip_render_info.clip.id,
+                            clip_render_info.cache_key.param_hash,
+                            disk_started_at.elapsed().as_millis()
+                        );
+                    }
+                    {
+                        let mut cache = crate::synth_clip_cache::global_rendered_clip_cache()
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        cache.insert(clip_render_info.cache_key.clone(), entry.clone());
+                    }
+                    crate::synth_clip_cache::register_pending_rendered_key(
+                        &clip_render_info.clip.id,
+                        clip_render_info.cache_key.clone(),
+                    );
+                    pending_clip_ids_written.insert(clip_render_info.clip.id.clone());
+                    if let Ok(mut state_mgr) =
+                        crate::clip_rendering_state::global_clip_rendering_state().lock()
+                    {
+                        state_mgr.set_state(
+                            &clip_render_info.clip.id,
+                            crate::clip_rendering_state::ClipRenderingState::Ready,
+                            1.0,
+                            None,
+                        );
+                    }
+                    base_entry = Some(entry);
+                } else {
+                    disk_load_elapsed += disk_started_at.elapsed();
+                }
+            }
+
             if base_entry.is_none() {
                 cache_miss_count += 1;
                 if cache_log {
@@ -1670,6 +1752,13 @@ fn render_background_pass(
                             clip_render_info.cache_key.clone(),
                         );
                         pending_clip_ids_written.insert(clip_render_info.clip.id.clone());
+
+                        // 【持久化】渲染产物异步落盘（不阻塞渲染线程）。总开关、
+                        // 片段时长下限、单条上限、磁盘保留空间等过滤在 store_* 内。
+                        crate::render_cache::store_rendered(
+                            &clip_render_info.cache_key,
+                            &entry,
+                        );
 
                         base_entry = Some(entry);
                         render_success_count += 1;
@@ -1846,27 +1935,50 @@ fn render_background_pass(
 
         if cache_log {
             log::warn!(
-                "[bg_render][cache] DONE total={} hit={} miss={} rendered_ok={} rendered_fail={} cache_probe_ms={:.2} render_ms={:.2} tension_ms={:.2} total_ms={:.2}",
+                "[bg_render][cache] DONE total={} hit={} disk_hit={} miss={} rendered_ok={} rendered_fail={} cache_probe_ms={:.2} disk_load_ms={:.2} render_ms={:.2} tension_ms={:.2} total_ms={:.2}",
                 total,
                 cache_hit_count,
+                disk_hit_count,
                 cache_miss_count,
                 render_success_count,
                 render_failed_count,
                 cache_probe_elapsed.as_secs_f64() * 1000.0,
+                disk_load_elapsed.as_secs_f64() * 1000.0,
                 render_elapsed.as_secs_f64() * 1000.0,
                 tension_elapsed.as_secs_f64() * 1000.0,
                 started_at.elapsed().as_secs_f64() * 1000.0
             );
         }
         log::warn!(
-            "[bg_render] complete: {} clips, {} hit, {} miss, {} ok, {} fail in {:.2}s",
+            "[bg_render] complete: {} clips, {} hit ({} from disk), {} miss, {} ok, {} fail in {:.2}s",
             total,
-            cache_hit_count,
+            cache_hit_count + disk_hit_count,
+            disk_hit_count,
             cache_miss_count,
             render_success_count,
             render_failed_count,
             started_at.elapsed().as_secs_f64()
         );
+
+        // 渲染缓存命中汇总：前端据此在状态栏提示"本次打开复用了多少、省了多少"。
+        // 用本轮真实渲染的平均耗时估算节省时间；全命中（无新渲染）时不估算。
+        {
+            let avg_render_ms = if render_success_count > 0 {
+                render_elapsed.as_secs_f64() * 1000.0 / render_success_count as f64
+            } else {
+                0.0
+            };
+            let _ = app.emit(
+                "render_cache_summary",
+                serde_json::json!({
+                    "diskHits": disk_hit_count,
+                    "total": total,
+                    "rendered": render_success_count,
+                    "misses": cache_miss_count,
+                    "savedMs": (avg_render_ms * disk_hit_count as f64).round() as u64,
+                }),
+            );
+        }
 
         // 旧代数线程完成时不得清理新一轮渲染的全局状态。
         if BG_RENDER_GENERATION.load(Ordering::Acquire) != render_generation {

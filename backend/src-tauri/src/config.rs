@@ -445,6 +445,9 @@ pub struct UiSettings {
     /// （源偏移、播放速率、倒放、Loop、增益）会尝试同步到同一 Clip 的其余 Take。
     #[serde(default = "default_true")]
     pub sync_edits_across_takes: bool,
+    /// 渲染缓存：把渲染结果落盘，重新打开工程时直接复用。
+    #[serde(default)]
+    pub render_cache: RenderCacheSettings,
 }
 
 /// "为新的音频块启用循环"的进程级生效值（默认 true）。
@@ -584,6 +587,137 @@ impl AutoBackupSettings {
             timed_backup_interval_sec: interval,
             timed_backup_path_template: template,
         }
+    }
+}
+
+/// 渲染缓存设置（持久化到 app_config.json）
+///
+/// 渲染缓存把整 Clip 的合成结果（含气声 stem / 张力变体）按内容哈希落盘，
+/// 使"重新打开工程"不再重新合成未变更的片段。这里的每一项都对应管理面板上的
+/// 一个可调项；容量/年龄通过 `normalized()` 钳制，损坏的配置值不会让缓存失控。
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RenderCacheSettings {
+    /// 总开关：渲染结果写入磁盘并在重新打开工程时复用（关闭后行为与旧版本一致）。
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// 磁盘占用上限（MB；0 = 不限制）。超出后按最旧优先回收到 90% 水位。
+    #[serde(default = "default_render_cache_max_size_mb")]
+    pub max_size_mb: u32,
+    /// 超过 N 天未写入的条目自动清理（0 = 不限龄）。
+    #[serde(default = "default_render_cache_max_age_days")]
+    pub max_age_days: u32,
+    /// 小于该时长的片段不落盘（秒）——避免大量碎片小文件；内存缓存不受影响。
+    #[serde(default = "default_render_cache_min_clip_secs")]
+    pub min_clip_secs: f64,
+    /// 单条缓存上限（MB；0 = 不限制），防止单个巨型片段挤掉整库。
+    #[serde(default = "default_render_cache_max_entry_mb")]
+    pub max_entry_mb: u32,
+    /// 写入模式：`"immediate"`（渲染完即异步落盘，默认）/ `"onExit"`（退出时
+    /// 批量落盘）/ `"manual"`（仅保存工程时落盘）。
+    #[serde(default = "default_render_cache_write_mode")]
+    pub write_mode: String,
+    /// 缓存位置：`"system"`（应用缓存目录，默认）/ `"custom"`（自定义目录）。
+    #[serde(default = "default_render_cache_location")]
+    pub location: String,
+    /// 自定义缓存目录（`location = "custom"` 时生效；不可写时自动回退系统目录）。
+    #[serde(default)]
+    pub custom_dir: Option<String>,
+    /// 读取时校验 payload 完整性（默认开启；关闭仅省极少 CPU，不建议）。
+    #[serde(default = "default_true")]
+    pub verify_checksum: bool,
+    /// 可用磁盘空间低于该值（MB）时暂停写入（0 = 不检查）。
+    #[serde(default = "default_render_cache_min_free_disk_mb")]
+    pub min_free_disk_mb: u32,
+    /// 打开工程后显示命中统计（默认开启）。
+    #[serde(default = "default_true")]
+    pub show_hit_stats: bool,
+}
+
+fn default_render_cache_max_size_mb() -> u32 {
+    4096
+}
+fn default_render_cache_max_age_days() -> u32 {
+    90
+}
+fn default_render_cache_min_clip_secs() -> f64 {
+    0.5
+}
+fn default_render_cache_max_entry_mb() -> u32 {
+    512
+}
+fn default_render_cache_write_mode() -> String {
+    "immediate".to_string()
+}
+fn default_render_cache_location() -> String {
+    "system".to_string()
+}
+fn default_render_cache_min_free_disk_mb() -> u32 {
+    512
+}
+
+impl Default for RenderCacheSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_size_mb: default_render_cache_max_size_mb(),
+            max_age_days: default_render_cache_max_age_days(),
+            min_clip_secs: default_render_cache_min_clip_secs(),
+            max_entry_mb: default_render_cache_max_entry_mb(),
+            write_mode: default_render_cache_write_mode(),
+            location: default_render_cache_location(),
+            custom_dir: None,
+            verify_checksum: true,
+            min_free_disk_mb: default_render_cache_min_free_disk_mb(),
+            show_hit_stats: true,
+        }
+    }
+}
+
+impl RenderCacheSettings {
+    /// 规范化：钳制数值、校验枚举字符串（非法值回退默认，避免手改配置破坏行为）。
+    pub fn normalized(&self) -> Self {
+        let mut s = self.clone();
+        s.max_size_mb = s.max_size_mb.min(1024 * 1024); // ≤ 1 TB
+        s.max_age_days = s.max_age_days.min(3650);
+        if !s.min_clip_secs.is_finite() {
+            s.min_clip_secs = default_render_cache_min_clip_secs();
+        }
+        s.min_clip_secs = s.min_clip_secs.clamp(0.0, 60.0);
+        s.max_entry_mb = s.max_entry_mb.min(64 * 1024); // ≤ 64 GB
+        s.min_free_disk_mb = s.min_free_disk_mb.min(1024 * 1024);
+        if !matches!(s.write_mode.as_str(), "immediate" | "onExit" | "manual") {
+            s.write_mode = default_render_cache_write_mode();
+        }
+        if !matches!(s.location.as_str(), "system" | "custom") {
+            s.location = default_render_cache_location();
+        }
+        s.custom_dir = s
+            .custom_dir
+            .as_ref()
+            .map(|dir| dir.trim().to_string())
+            .filter(|dir| !dir.is_empty());
+        s
+    }
+
+    /// 占用上限（字节；0 = 不限）。
+    pub fn max_size_bytes(&self) -> u64 {
+        (self.max_size_mb as u64) * 1024 * 1024
+    }
+
+    /// 超龄阈值（秒；0 = 不限）。
+    pub fn max_age_secs(&self) -> u64 {
+        (self.max_age_days as u64) * 86_400
+    }
+
+    /// 单条上限（字节；0 = 不限）。
+    pub fn max_entry_bytes(&self) -> u64 {
+        (self.max_entry_mb as u64) * 1024 * 1024
+    }
+
+    /// 磁盘保留空间（字节；0 = 不检查）。
+    pub fn min_free_disk_bytes(&self) -> u64 {
+        (self.min_free_disk_mb as u64) * 1024 * 1024
     }
 }
 
@@ -973,6 +1107,7 @@ impl Default for UiSettings {
             auto_reload_modified_media: true,
             loop_new_clips: true,
             sync_edits_across_takes: true,
+            render_cache: RenderCacheSettings::default(),
         }
     }
 }

@@ -688,7 +688,7 @@ pub(crate) fn build_snapshot(
                 } else {
                     // 回退：自行计算 hash（兼容非预渲染路径，如 AudioReady rebuild）
                     if let Some((
-                        _,
+                        pitch_orig,
                         pitch_edit,
                         frame_period_ms,
                         renderer_id,
@@ -698,26 +698,38 @@ pub(crate) fn build_snapshot(
                     )) = processor_params
                     {
                         let end_frame = start_frame.saturating_add(length_frames);
+                        // 与渲染线程 / 收集待渲染共用同一份输入口径（见
+                        // `commands::playback::build_rendered_hash_input`）：
+                        // 任何字段缺失都会让快照无法经 pending key 命中缓存。
                         let param_hash = crate::synth_clip_cache::compute_rendered_clip_hash(
-                            &clip.id,
-                            source_path,
-                            start_frame,
-                            end_frame,
-                            out_rate,
-                            renderer_id,
-                            pitch_edit,
-                            frame_period_ms,
-                            playback_rate,
-                            extra_curves,
-                            extra_params,
-                            clip.formant_morph.as_ref().filter(|params| params.enabled),
-                            None,
-                            clip.source_file_mtime,
-                            clip.loop_enabled,
-                            (
-                                (clip.source_start_sec * 1000.0).round() as i64,
-                                (clip.source_end_sec * 1000.0).round() as i64,
-                            ),
+                            &crate::synth_clip_cache::RenderedClipHashInput {
+                                clip_id: &clip.id,
+                                source_path,
+                                source_file_mtime: clip.source_file_mtime,
+                                source_file_fingerprint: clip.source_file_fingerprint,
+                                active_take_id: clip.active_take_id.as_deref(),
+                                renderer_id,
+                                start_frame,
+                                end_frame,
+                                sample_rate: out_rate,
+                                playback_rate,
+                                reversed: clip.reversed,
+                                loop_enabled: clip.loop_enabled,
+                                source_range_q: (
+                                    (clip.source_start_sec * 1000.0).round() as i64,
+                                    (clip.source_end_sec * 1000.0).round() as i64,
+                                ),
+                                pitch_edit,
+                                pitch_orig: Some(pitch_orig),
+                                frame_period_ms,
+                                extra_curves,
+                                extra_params,
+                                formant_morph: clip
+                                    .formant_morph
+                                    .as_ref()
+                                    .filter(|params| params.enabled),
+                                input_pitch_curve: None,
+                            },
                         );
                         if debug {
                             log::warn!(

@@ -786,6 +786,12 @@ pub(crate) fn save_project_to_path_inner(
     // 持久化最近工程列表
     save_recent_projects(state);
 
+    // 工程身份（缓存归属）+ "仅保存工程时落盘"模式的批量提交。
+    crate::render_cache::set_current_project_id(crate::render_cache::project_id_for_path(
+        Some(&project_path),
+    ));
+    crate::render_cache::flush_pending();
+
     Ok(get_timeline_state_from_ref(state))
 }
 
@@ -874,6 +880,8 @@ pub(super) fn new_project(
         state.audio_engine.update_timeline(tl.clone());
     }
     update_window_title(&window, "Untitled", false);
+    // 新工程无路径 → 缓存归属为"未知"（0）：不会被"清理当前工程"误删其它工程。
+    crate::render_cache::set_current_project_id(0);
     get_timeline_state(state)
 }
 
@@ -1041,6 +1049,10 @@ pub(super) fn open_project(
         }
         update_window_title(&window, &p.name, p.dirty);
     }
+    // 渲染缓存的工程归属：用于"仅清理当前工程的缓存"。
+    crate::render_cache::set_current_project_id(crate::render_cache::project_id_for_path(
+        Some(&project_path),
+    ));
     // 防御性修复旧版本工程文件可能存在的“工程音阶与 Tempo Map 初始点分叉”
     // （早期撤销路径不回写工程记录，保存的文件可能带有不一致的 base_scale）：
     // 初始点即工程基准记录，加载后以它为准同步工程记录（含 BPM/拍号/音阶）。

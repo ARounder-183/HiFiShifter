@@ -33,6 +33,11 @@ export const webApi = {
 
     clearWaveformCache: coreApi.clearWaveformCache,
 
+    // Render cache (persistent synth render cache)
+    getRenderCacheStats: coreApi.getRenderCacheStats,
+    clearRenderCache: coreApi.clearRenderCache,
+    openRenderCacheDir: coreApi.openRenderCacheDir,
+
     // Model / processing
     loadDefaultModel: coreApi.loadDefaultModel,
     loadModel: coreApi.loadModel,

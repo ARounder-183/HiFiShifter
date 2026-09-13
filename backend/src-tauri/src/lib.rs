@@ -61,6 +61,7 @@ mod pitch_editing;
 #[path = "pitch/pitch_progress.rs"]
 mod pitch_progress;
 mod recording;
+mod render_cache;
 mod renderer;
 mod synth_clip_cache;
 
@@ -318,6 +319,12 @@ pub fn run() {
             }
             let _ = hfspeaks_v2::ensure_cache_dir(&dir);
 
+            // 渲染缓存与波形缓存同源（同一用户缓存根），使"重新打开工程不再
+            // 重新合成"具备持久化落点；具体设置（开关/容量/自定义目录）在
+            // 应用 UI 设置时下发（见下方 load_ui_settings）。
+            let render_cache_base = base.join("hifishifter").join("render_cache");
+            crate::render_cache::init(render_cache_base);
+
             // 加载持久化的最近工程列表
             if let Ok(cfg_base) = app.path().app_config_dir() {
                 let cfg_dir = cfg_base.join("HiFiShifter");
@@ -337,6 +344,9 @@ pub fn run() {
                 let ui = crate::config::load_ui_settings(cfg_dir);
                 crate::config::set_loop_new_clips_default(ui.loop_new_clips);
                 crate::config::set_sync_edits_across_takes(ui.sync_edits_across_takes);
+                // 启动即同步渲染缓存配置：打开工程发生在 get_ui_settings 之前时
+                // （外部文件关联、命令行传工程路径），也必须按用户的开关/容量生效。
+                crate::render_cache::apply_settings(&ui.render_cache);
             }
 
             // 尝试恢复上次运行时保存的窗口状态（非强制性）
@@ -700,7 +710,9 @@ pub fn run() {
             commands::import_reaper_project,
             commands::paste_reaper_clipboard,
             commands::has_reaper_clipboard,
-            commands::clear_cache,
+            commands::get_render_cache_stats,
+            commands::clear_render_cache,
+            commands::open_render_cache_dir,
             commands::get_processor_params,
             commands::get_midi_tracks,
             commands::read_midi_clipboard_to_memory,
@@ -716,6 +728,12 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app_handle, event| {
             if let tauri::RunEvent::Exit = event {
+                // 退出前把渲染缓存的待写队列（`onExit` / `manual` 模式以及在途
+                // 写入）排空；带超时，磁盘异常时也不能卡住退出流程。
+                if !crate::render_cache::flush_blocking(std::time::Duration::from_secs(3)) {
+                    log::warn!("[render_cache] pending writes did not drain before exit timeout");
+                }
+
                 // Shut down audio engine: stop meter thread, send Shutdown to
                 // worker threads, and drop the channel sender so all worker
                 // threads exit their recv loops.

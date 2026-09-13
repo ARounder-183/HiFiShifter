@@ -19,6 +19,30 @@ export interface AdvancedSeparatedTarget {
     trackId: string;
 }
 
+// ── 渲染缓存（持久化合成结果）───────────────────────────────────────────────
+
+/** 清理作用域：全部 / 当前工程 / 超期 / 其它采样率。 */
+export type RenderCacheClearScope = "all" | "currentProject" | "olderThan" | "otherSampleRates";
+
+/** 渲染缓存统计（与后端 `render_cache::CacheStats` 对应）。 */
+export interface RenderCacheStats {
+    ok: boolean;
+    enabled: boolean;
+    /** 生效的缓存目录（自定义目录不可写时已回退系统目录）。 */
+    dir: string;
+    writable: boolean;
+    totalBytes: number;
+    entries: number;
+    byKind: Array<{ kind: string; entries: number; bytes: number }>;
+    /** 本次会话命中次数（内存 + 磁盘）。 */
+    sessionHits: number;
+    sessionMisses: number;
+    sessionStored: number;
+    sessionWriteErrors: number;
+    maxSizeBytes: number;
+    maxAgeDays: number;
+}
+
 /** 导出文件格式（与后端 crate::encode::OutputFormat 的 serde 小写序列化一致）。 */
 export type ExportFormat = "wav" | "mp3" | "flac";
 export type WavBitDepth = "i16" | "i24" | "f32";
@@ -28,7 +52,8 @@ export type ChannelMode = "stereo" | "mono";
 
 /** MP3 码率模式：CBR 固定码率，或 VBR 质量档（LAME/ffmpeg 式 -q:a 0..9）。 */
 export type Mp3BitrateMode =
-    { mode: "cbr"; bitrateKbps: number } | { mode: "vbr"; qualityIndex: number };
+    | { mode: "cbr"; bitrateKbps: number }
+    | { mode: "vbr"; qualityIndex: number };
 
 export interface Mp3Tags {
     title?: string | null;
@@ -170,6 +195,20 @@ export const coreApi = {
             removed_bytes: number;
             dir: string;
         }>("clear_waveform_cache"),
+
+    // ── 渲染缓存（持久化合成结果）───────────────────────────────────────────
+    /** 缓存统计：占用 / 条目 / 分类 / 本次会话命中率。 */
+    getRenderCacheStats: () => invoke<RenderCacheStats>("get_render_cache_stats"),
+    /** 清理渲染缓存（只删磁盘文件，不影响正在播放的内存缓存）。 */
+    clearRenderCache: (scope: RenderCacheClearScope, days?: number) =>
+        invoke<{ ok: boolean; removedFiles?: number; removedBytes?: number; error?: string }>(
+            "clear_render_cache",
+            scope,
+            days,
+        ),
+    /** 在系统文件管理器中打开渲染缓存目录。 */
+    openRenderCacheDir: () =>
+        invoke<{ ok: boolean; path?: string; error?: string }>("open_render_cache_dir"),
 
     // Model / processing
     loadDefaultModel: () => invoke<ModelConfigResult>("load_default_model"),

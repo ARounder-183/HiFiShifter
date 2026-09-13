@@ -698,6 +698,16 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
         case "end_undo_group":
             return undefined;
 
+        case "clear_render_cache":
+            return {
+                scope: args[0],
+                ...(args[1] !== undefined ? { days: args[1] } : {}),
+            };
+
+        case "get_render_cache_stats":
+        case "open_render_cache_dir":
+            return {};
+
         case "export_diagnostics":
             return { outputPath: args[0] };
 

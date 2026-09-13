@@ -1753,9 +1753,40 @@ pub fn has_reaper_clipboard() -> serde_json::Value {
 
 // ===================== cache =====================
 
+/// 渲染缓存统计（占用 / 条目 / 会话命中率）。
+///
+/// 需要扫描缓存目录并读取文件头，放到阻塞线程池执行，避免冻结 UI 主线程。
 #[tauri::command(rename_all = "camelCase")]
-pub fn clear_cache(state: State<'_, AppState>) -> Result<u64, String> {
-    cache::clear_cache(state)
+pub async fn get_render_cache_stats() -> serde_json::Value {
+    match tauri::async_runtime::spawn_blocking(cache::get_render_cache_stats).await {
+        Ok(value) => value,
+        Err(e) => serde_json::json!({ "ok": false, "error": format!("{e}") }),
+    }
+}
+
+/// 清理渲染缓存（`scope`：all / currentProject / olderThan / otherSampleRates）。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn clear_render_cache(
+    app: tauri::AppHandle,
+    scope: String,
+    days: Option<u32>,
+) -> serde_json::Value {
+    match tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        cache::clear_render_cache(state, scope, days)
+    })
+    .await
+    {
+        Ok(Ok(value)) => value,
+        Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
+        Err(e) => serde_json::json!({ "ok": false, "error": format!("{e}") }),
+    }
+}
+
+/// 在系统文件管理器中打开渲染缓存目录。
+#[tauri::command(rename_all = "camelCase")]
+pub fn open_render_cache_dir(app: tauri::AppHandle) -> serde_json::Value {
+    cache::open_render_cache_dir(app)
 }
 
 // ===================== processor_caps =====================
