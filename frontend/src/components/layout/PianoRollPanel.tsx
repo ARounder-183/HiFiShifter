@@ -3567,8 +3567,10 @@ export const PianoRollPanel: React.FC = () => {
             s.scaleHighlightMode,
             s.toolMode,
             snapToggleHeld,
-            // 中央提示文字：本面板传给 `drawPianoRoll` 的**唯一**字符串入参，
+            // 中央提示文字（"音高被硬禁用"的原因）：本面板**新增**的字符串签名项，
             // 切换参数 / 轨道组时会变（禁用原因出现或消失）。
+            // 注意 `drawPianoRoll` 另有多项字符串入参（editParam / fontFamily /
+            // toolMode 等），它们在上方各自的位置参与签名——本项并非"唯一"字符串项。
             overlayText,
             // 视口中心/跨度（用 ref 值，避免依赖 React 渲染时机）
             pitchViewRef.current.center,
