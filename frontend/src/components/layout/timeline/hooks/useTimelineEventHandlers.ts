@@ -310,46 +310,40 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
             // （契约见 `TimelinePanel.handleKernelSeek` 与提交 019e93ed）。
             void dispatch(selectTrackRemote({ trackId: nextTrackId, applySelectedClip: false }));
 
-            const ensureTrackVisible = (el: HTMLDivElement): number | null => {
-                const trackTop = nextIndex * rowHeight;
-                const trackBottom = trackTop + rowHeight;
-                let nextScrollTop = el.scrollTop;
-
-                if (trackTop < el.scrollTop) {
-                    nextScrollTop = trackTop;
-                } else if (trackBottom > el.scrollTop + el.clientHeight) {
-                    nextScrollTop = trackBottom - el.clientHeight;
-                }
-
-                const maxScrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
-                nextScrollTop = Math.max(0, Math.min(maxScrollTop, nextScrollTop));
-                if (Math.abs(nextScrollTop - el.scrollTop) <= 0.5) return null;
-                el.scrollTop = nextScrollTop;
-                return nextScrollTop;
-            };
-
-            const timelineScroller = scrollRef.current;
             const trackScroller = trackListScrollRef.current;
 
-            const timelineNextScrollTop = timelineScroller
-                ? ensureTrackVisible(timelineScroller)
-                : null;
-
-            if (!trackScroller) return;
-            if (timelineNextScrollTop != null) {
-                if (Math.abs(trackScroller.scrollTop - timelineNextScrollTop) > 0.5) {
-                    trackScroller.scrollTop = timelineNextScrollTop;
+            // 时间轴侧：**走模式无关的视口访问器**。旧实现直接写原生滚动容器的
+            // `scrollTop`，内核自绘滚动后 `scrollRef.current` 恒为 null——原写法会
+            // 整段跳过，只能指望"轨道头滚动 → 镜像回声 → 内核跟随"这条间接链路。
+            // 目标行是否进入视野由轨道头的滚动范围决定（两者内容高同源），因此复用
+            // 同一个期望值。
+            if (trackScroller) {
+                const desired = computeTrackVisibleScrollTop();
+                if (desired !== null) {
+                    viewport.setScrollTop(desired);
+                    if (Math.abs(trackScroller.scrollTop - desired) > 0.5) {
+                        trackScroller.scrollTop = desired;
+                    }
                 }
                 return;
             }
+            // 无轨道头（理论不可达）：退化为内核模式直接写时间轴。
+            const fallback = computeTrackVisibleScrollTop();
+            if (fallback !== null) viewport.setScrollTop(fallback);
 
-            const trackNextScrollTop = ensureTrackVisible(trackScroller);
-            if (
-                trackNextScrollTop != null &&
-                timelineScroller &&
-                Math.abs(timelineScroller.scrollTop - trackNextScrollTop) > 0.5
-            ) {
-                timelineScroller.scrollTop = trackNextScrollTop;
+            /** 计算「让目标轨道进入视野」所需的纵向位置（不区分载体）。 */
+            function computeTrackVisibleScrollTop(): number | null {
+                const trackTop = nextIndex * rowHeight;
+                const trackBottom = trackTop + rowHeight;
+                const viewportHeightPx = viewport.getViewportHeight();
+                const current = viewport.getScrollTop();
+                let next = current;
+                if (trackTop < current) {
+                    next = trackTop;
+                } else if (trackBottom > current + viewportHeightPx) {
+                    next = trackBottom - viewportHeightPx;
+                }
+                return Math.abs(next - current) > 0.5 ? next : null;
             }
         }
 

@@ -223,6 +223,7 @@ import { useTimelineClipActions } from "./timeline/hooks/useTimelineClipActions"
 import { useTimelineEventHandlers } from "./timeline/hooks/useTimelineEventHandlers";
 import { expandClipIdsWithGroups } from "./timeline/hooks/useGroupExpansion";
 import { useVisualPlayhead } from "../../hooks/useVisualPlayhead";
+import { useDebouncedPersist } from "../../hooks/useDebouncedPersist";
 import { ClipRateEditorDialog } from "./timeline/ClipRateEditorDialog";
 import {
     computeAutoFollowScrollLeft,
@@ -838,6 +839,18 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     // ── 记录最近点击的 clientX，用于 Shift 范围选择的锚点位置
     const lastClickedClientXRef = React.useRef<number | null>(null);
 
+    // ── 时间轴缩放与行高的持久化 ─────────────────────────────
+    //
+    // 旧实现由 `TimelineScrollArea`（原生滚动容器）负责写这两个键；"内核唯一路径"
+    // 改造删掉该组件时**没有把写入点接回来**，于是读取侧（`useTimelineState` 初始化
+    // 读 `hifishifter.pxPerSec` / `hifishifter.rowHeight`）一直在，但再没有人写
+    // ——表现为每次重启都回到默认缩放与行高。这里接回同一对键名与取值语义。
+    //
+    // 用防抖 hook 而不是直接 `localStorage.setItem`：滚轮缩放是高频事件，同步落盘
+    // 会与同帧的渲染 / 重绘挤在一起（见 `useDebouncedPersist` 文件头）。
+    useDebouncedPersist("hifishifter.pxPerSec", pxPerSec);
+    useDebouncedPersist("hifishifter.rowHeight", rowHeight);
+
     // ── 2. Clip 多选 + 操作回调 ─────────────────────────────
     const clipActions = useTimelineClipActions({
         sessionRef,
@@ -1351,9 +1364,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 const pending = kernelSeekPendingRef.current;
                 if (pending == null) return;
                 kernelSeekPendingRef.current = null;
-                // 拖拽帧同样成对派发（否则拖拽期间 store 值滞后，仅靠轮询矫正）。
+                // 拖拽中间帧**只写乐观位置，不打后端**：旧实现
+                // `startDeferredPlayheadSeek` 的移动分支走 `commit = false`，整段拖拽
+                // 只在松手时发一次 `seekPlayhead`（内核原先逐帧成对派发，等于按住拖动
+                // 时以 rAF 频率持续刷后端）。松手的收尾由内核补发 `commit = true`。
                 dispatch(setplayheadSec(pending));
-                void dispatch(seekPlayhead(pending));
             });
         },
         [deselectAllTrackLaneClips, dispatch, resolveKernelSeekSec, sessionRef],
@@ -5125,6 +5140,22 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 }
                                 onDragOver={handleTimelineDragOver}
                                 onDrop={handleTimelineDrop}
+                                // 拖出容器即清掉落点预览。旧实现（`TimelineScrollArea`
+                                // 的 `onDragLeave`）同源：只看 `relatedTarget` 是否仍在
+                                // 容器内——子元素之间移动也会触发 `dragleave`，不加这层
+                                // 判断会把预览抖掉。缺了它，把文件拖出时间轴后预览会一直
+                                // 挂着（没有任何后续事件会清它）。
+                                onDragLeave={(event) => {
+                                    const related = event.relatedTarget as Node | null;
+                                    if (related !== null && event.currentTarget.contains(related)) {
+                                        return;
+                                    }
+                                    setDropPreview(null);
+                                }}
+                                // 预览内层元素的 ref：`useTimelineDragDrop` 拖动期间
+                                // 直接写它的 style 移动预览（不 setState）。不接上时
+                                // 同一条轨道内移动指针预览不动（见该 prop 的说明）。
+                                dropPreviewItemRef={dropPreviewRef}
                                 newTrackDrop={
                                     kernelDropToNewTrack
                                         ? {
@@ -5322,14 +5353,18 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                   selectedIds.includes(c.id),
                               );
 
-                              const _ctxScroller = scrollRef.current;
-                              const _ctxBounds = _ctxScroller?.getBoundingClientRect();
+                              // 右键位置的工程时间：**必须**用与渲染模式无关的视口
+                              // 访问器。旧实现读原生 scroller 的 bounds + scrollLeft；
+                              // 内核模式下 `scrollRef.current` 为 null，原写法会静默退化
+                              // 成 `ctxClip.startSec`，于是"指针下有哪些重叠的淡变 clip"
+                              // 这份候选集会与旧实现不同（菜单里少/多出条目）。
+                              const _ctxBounds = viewportAccess.getRect();
                               const contextTimeSec =
-                                  _ctxBounds && _ctxScroller
+                                  _ctxBounds !== null
                                       ? beatFromClientX(
                                             contextMenu.x,
                                             _ctxBounds,
-                                            _ctxScroller.scrollLeft,
+                                            viewportAccess.getScrollLeft(),
                                         )
                                       : ctxClip.startSec;
 

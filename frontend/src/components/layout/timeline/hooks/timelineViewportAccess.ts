@@ -61,6 +61,8 @@ export interface TimelineViewportAccess {
     getScrollTop(): number;
     /** 视口宽度（CSS px）；内核模式取缓存量测值，不触发布局。 */
     getViewportWidth(): number;
+    /** 视口高度（CSS px）；内核模式取缓存量测值，不触发布局。 */
+    getViewportHeight(): number;
     /**
      * 写入横向滚动位置。
      *
@@ -68,6 +70,17 @@ export interface TimelineViewportAccess {
      * @returns 实际生效值（回读）。
      */
     setScrollLeft(px: number): number;
+    /**
+     * 写入纵向滚动位置。
+     *
+     * 用途：`Alt + ↑/↓` 切换轨道后把目标行带回视野。旧实现直接写原生滚动容器的
+     * `scrollTop`，内核自绘滚动后必须走宿主入口——原写法依赖"轨道头滚动 → 镜像
+     * 回声 → 内核跟随"的间接链路，多一层时序耦合。
+     *
+     * @param px 目标位置（可越界，由载体自行钳制）。
+     * @returns 实际生效值（回读）。
+     */
+    setScrollTop(px: number): number;
     /**
      * 原子地设置缩放与横向滚动位置（**仅内核模式**）。
      *
@@ -130,6 +143,12 @@ export function createTimelineViewportAccess(args: {
             return scrollRef.current?.clientWidth ?? 0;
         },
 
+        getViewportHeight() {
+            const host = kernelHostRef.current;
+            if (host !== null) return host.getViewport().viewportHeight;
+            return scrollRef.current?.clientHeight ?? 0;
+        },
+
         setScrollLeft(px: number) {
             const host = kernelHostRef.current;
             if (host !== null) {
@@ -139,6 +158,19 @@ export function createTimelineViewportAccess(args: {
             const scroller = scrollRef.current;
             if (scroller === null) return px;
             return applyNativeScrollLeft(scroller, px);
+        },
+
+        setScrollTop(px: number) {
+            const host = kernelHostRef.current;
+            if (host !== null) {
+                host.setScrollTop(px);
+                return host.getViewport().scrollTop;
+            }
+            const scroller = scrollRef.current;
+            if (scroller === null) return px;
+            // 旧模式：浏览器自己会把越界值夹回合法范围，写入后回读即为真值。
+            scroller.scrollTop = px;
+            return scroller.scrollTop;
         },
 
         setZoomAndScroll(pxPerSec: number, scrollLeft: number) {

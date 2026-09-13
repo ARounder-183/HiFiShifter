@@ -185,6 +185,23 @@ export interface TimelineKernelViewProps {
     readonly onDragOver?: React.DragEventHandler<HTMLDivElement>;
     readonly onDrop?: React.DragEventHandler<HTMLDivElement>;
     /**
+     * 拖出容器。
+     *
+     * 与 `onDragOver` / `onDrop` 挂在同一处：旧实现靠它在拖离时清掉落点预览，
+     * 缺了它预览会一直挂在画面上（没有任何后续事件会清它）。
+     */
+    readonly onDragLeave?: React.DragEventHandler<HTMLDivElement>;
+    /**
+     * 拖入预览**内层元素**的 ref（供调用方命令式移动）。
+     *
+     * 与 `onDragOver` / `onDrop` 同一目的：`useTimelineDragDrop` 在拖动期间用
+     * 直接写 `style` 的方式移动预览（不 setState，避免每帧重渲染整个面板）。旧实现
+     * 把这个 ref 挂在旧滚动容器渲染的元素上；内核模式下那块 DOM 不挂载，ref 恒为
+     * null，于是**同一条轨道内**移动指针时预览完全不动（state 里的 trackId / path
+     * 没变 → React 不重渲染，而命令式写入又落空）。
+     */
+    readonly dropPreviewItemRef?: React.MutableRefObject<HTMLDivElement | null>;
+    /**
      * 拖到**全部轨道之下**（新建轨道）时的幽灵行（缺省不渲染）。
      *
      * 旧实现把它画在最后一条轨道正下方（`clipDropNewTrack` 分支）：一行虚线框 +
@@ -274,6 +291,8 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         ghost,
         dropPreview,
         onDragOver,
+        onDragLeave,
+        dropPreviewItemRef,
         onDrop,
         newTrackDrop,
         inlineEdit,
@@ -641,6 +660,21 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
     }, []);
 
     /**
+     * 内容域（工程时长 / 轨道数）变化后重新钳制滚动位置。
+     *
+     * 旧实现用的是原生滚动容器：`scrollWidth/Height` 一变小，浏览器立刻把
+     * `scrollLeft/Top` 夹回合法范围。内核自持滚动状态没有这层兜底，必须在数据
+     * 变化时主动补一次——否则删轨 / 缩短工程之后视图停在越界位置（空白或错位），
+     * 直到用户下一次滚动才被纠正。
+     *
+     * 特殊说明：依赖里用**标量与长度**而不是 `clips` 数组本身——数组引用每次
+     * Redux 更新都会变，用它当依赖等于每帧 reclamp（`reclamp` 会标脏重建场景）。
+     */
+    React.useEffect(() => {
+        localHostRef.current?.reclamp();
+    }, [projectSec, tracks.length, rowHeight]);
+
+    /**
      * 行内编辑浮层：定位到 clip header 上，并随视口更新位置。
      *
      * 位置由宿主在 rAF 内命令式写入（复用视口图层注册）——用 React state 每帧
@@ -720,6 +754,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
             className="relative flex-1 overflow-hidden bg-qt-graph-bg outline-none"
             onDragOver={onDragOver}
             onDrop={onDrop}
+            onDragLeave={onDragLeave}
         >
             <canvas ref={canvasRef} className="pointer-events-none absolute inset-0" />
             {/* 波形层：独立 WebGL2 画布，由内核视口源驱动（滚动帧只更新 uniform）。
@@ -830,6 +865,13 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                           if (trackIndex < 0) return null;
                           return (
                               <div
+                                  // 命令式移动的目标：`useTimelineDragDrop` 在
+                                  // **同一轨道内**移动时只改这里的 `style`（不 setState，
+                                  // 避免每帧重渲染整个面板）。旧实现把它挂在旧滚动容器
+                                  // 渲染的元素上；内核模式下那块 DOM 不存在，必须把这
+                                  // 个 ref 接到这里，否则指针在一条轨道内移动时预览
+                                  // 完全不动（state 的 trackId/path 都没变 → 不重渲染）。
+                                  ref={dropPreviewItemRef}
                                   className="absolute flex items-center overflow-hidden rounded border border-dashed border-qt-accent/70 bg-qt-accent/15 px-1"
                                   style={{
                                       left: dropPreview.leftPx,

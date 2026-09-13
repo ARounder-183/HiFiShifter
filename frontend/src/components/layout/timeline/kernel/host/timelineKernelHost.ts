@@ -853,6 +853,14 @@ export interface TimelineKernelHost {
      */
     invalidatePlayhead(): void;
     /**
+     * 重新钳制滚动位置（工程时长 / 轨道数等**内容域**收缩后调用）。
+     *
+     * 旧实现靠浏览器原生滚动容器自动完成（`scrollWidth/Height` 变化即被夹回），
+     * 内核自持滚动状态，必须由外部在内容域变化时补这一次。少了它，删轨或缩短
+     * 工程之后视图会停在越界位置直到下一次滚动。
+     */
+    reclamp(): void;
+    /**
      * 外部请求纵向滚动（左侧轨道头滚动时调用）。
      *
      * 特殊说明：写入后由内核统一钳制并标脏，外部不得自行计算上限
@@ -1380,13 +1388,23 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         rowHeight: Math.max(1, data().rowHeight || DEFAULT_ROW_HEIGHT),
         projectSec: () => Math.max(0, data().projectSec),
         trackCount: () => data().tracks.length,
-        // 竖直内容高度 = 轨道行高之和 + 轨道列表底部的「添加轨道」行。
+        // 竖直内容高度 = 轨道行高之和 + 轨道列表底部的「添加轨道」行
+        //                + 拖到下方新建轨道时的**幽灵行**。
         //
-        // 【为什么必须加】左侧轨道头按 `contentHeight`（= 行高之和 + 该行）滚动，而
-        // 内核原先只算行高之和 → 竖直上限比轨道头少 32px。滚到底后**轨道头还能继续
-        // 滚、时间轴已停住**，两侧行错位；用户拖拽末段会感觉「卡住 / 吸附」。
-        // 旧实现的原生滚动容器内容层用的就是含该行的 `contentHeight`，两者必须同源。
-        extraContentHeightPx: () => TRACK_ADD_ROW_HEIGHT,
+        // 【为什么必须加「添加轨道」行】左侧轨道头按 `contentHeight`（= 行高之和 +
+        // 该行）滚动，而内核原先只算行高之和 → 竖直上限比轨道头少 32px。滚到底后
+        // **轨道头还能继续滚、时间轴已停住**，两侧行错位；用户拖拽末段会感觉
+        // 「卡住 / 吸附」。旧实现的原生滚动容器内容层用的就是含该行的
+        // `contentHeight`，两者必须同源。
+        //
+        // 【为什么还要加幽灵行】旧实现的 `dropExtraRows` 会把「新建轨道」预览行
+        // 也算进内容高，因此拖到轨道区下方时能滚到幽灵行完整可见。内核原先固定
+        // 只加 32px → 幽灵行的下沿有约一整行高度够不到。
+        extraContentHeightPx: () =>
+            TRACK_ADD_ROW_HEIGHT +
+            (hasNewTrackSentinelPreview()
+                ? Math.max(1, data().rowHeight || DEFAULT_ROW_HEIGHT)
+                : 0),
         viewportHeightPx: () => viewportHeightPx,
         // 下限必须与滚轮缩放解析（resolveHorizontalWheelZoom 的 minPxPerSec）
         // **同源且动态**：工程短于视口时解析会允许缩到 0.5，若内核仍按固定常量
@@ -1650,6 +1668,18 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     // 滚动条 DOM 写入去重：几何取整后未变化时不写 style（避免每帧触发样式重算）。
     let lastHorizontalThumbKey = "";
     let lastVerticalThumbKey = "";
+
+    /**
+     * 当前是否有 clip 落在「新建轨道」哨兵上（= 幽灵行正在显示）。
+     *
+     * 由面板把哨兵轨写进乐观位置来实现（`moveClipTrack(NEW_TRACK_SENTINEL)`）；
+     * 内核据此把幽灵行计入竖直内容高（见 `extraContentHeightPx`）。
+     *
+     * @returns 有哨兵 clip 时为 true。
+     */
+    function hasNewTrackSentinelPreview(): boolean {
+        return data().clips.some((clip) => clip.trackId === NEW_TRACK_SENTINEL);
+    }
 
     /**
      * 自绘滚动条的**竖直内容尺寸**（CSS px）。
@@ -2017,6 +2047,12 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      * 规则：竖直条占右侧 `SCROLLBAR_SIZE_PX` 宽，水平条占底部同样高；右下角
      * 交叠处归竖直（与既有 `nativeScrollbarZoneAt` 的判定顺序一致）。
      *
+     * 特殊说明：**该轴必须真的可以滚动**才认作悬停区。旧实现的
+     * `nativeScrollbarZoneAt` 判的是「原生滚动条是否占位」（`offsetWidth − clientWidth > 0`）
+     * ——不可滚动时压根没有滚动条，那块区域也就不该抢滚轮。内核原先无条件按右侧 /
+     * 底部 8px 判定，于是内容装得下时右边缘的滚轮会变成"什么也不做"（被吞掉），
+     * 而那里本该是正常的平移 / 缩放。
+     *
      * @param clientX 指针视口坐标 X。
      * @param clientY 指针视口坐标 Y。
      * @param rect 宿主容器的视口矩形。
@@ -2035,8 +2071,12 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         ) {
             return null;
         }
-        if (clientX > rect.right - SCROLLBAR_SIZE_PX) return "vertical";
-        if (clientY > rect.bottom - SCROLLBAR_SIZE_PX) return "horizontal";
+        if (clientX > rect.right - SCROLLBAR_SIZE_PX && scroll.maxScrollTop() > 0) {
+            return "vertical";
+        }
+        if (clientY > rect.bottom - SCROLLBAR_SIZE_PX && scroll.maxScrollLeft() > 0) {
+            return "horizontal";
+        }
         return null;
     }
 
@@ -3260,6 +3300,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             container.style.cursor = "crosshair";
         }
         if (gesture.kind === "seek") {
+            // 落下手势：只预览（`commit = false` 不写后端——见面板的说明）。
             interactions?.onSeek?.(secAt(event.clientX), false);
             return;
         }
@@ -3805,6 +3846,12 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 suppressNextContextMenu = true;
                 dispatchContextMenuAt(pending.clientX, pending.clientY);
             }
+        }
+        if (gesture.kind === "seek") {
+            // 空白区 seek 手势收尾：补发一次**提交式**落点。旧实现
+            // `startDeferredPlayheadSeek` 的 `finish()` 正是在松手时发这一次
+            // `seekPlayhead`（拖动中间帧只预览、不写后端）。
+            if (!cancelled) interactions?.onSeek?.(secAt(event.clientX), true);
         }
         if (gesture.kind === "pending-select" && !cancelled) {
             if (gesture.headerControl !== null) {
@@ -4528,6 +4575,20 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             // 刻意不置 sceneDirty：见接口处的说明（几何重建是 60fps 不可承受的成本）。
             // 卸载后无需自查：`dispose` 会 `loop.stop()`，其后的 `invalidate()`
             // 因 `running === false` 不再调度（见 renderLoop 的设计约束 3）。
+            loop.invalidate();
+        },
+
+        reclamp() {
+            // 内容域（工程时长 / 轨道数）收缩后必须重新钳制滚动位置。
+            //
+            // 【为什么必须由外部主动调用】旧实现是浏览器的原生滚动容器：`scrollWidth`
+            // / `scrollHeight` 一变，浏览器立刻把 `scrollLeft/Top` 夹回合法范围并发
+            // 一次 `scroll` 事件。内核自己持有滚动状态，没有这层自动兜底——少了这一
+            // 次钳制，删轨 / 缩短工程之后视图会停在越界位置（画面上是空白或错位），
+            // 直到用户下次滚动才被纠正。`ScrollKernel` 的契约里写明由宿主负责调用
+            // （原先只有 ResizeObserver 那一处）。
+            scroll.reclamp();
+            sceneDirty = true;
             loop.invalidate();
         },
 
