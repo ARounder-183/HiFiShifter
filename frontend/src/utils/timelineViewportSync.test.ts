@@ -1,6 +1,7 @@
 import { test } from "vitest";
 
 import {
+    resolveViewportOffsetPx,
     timelineViewportSync,
     timelineViewportNativeToState,
     timelineViewportStateToNative,
@@ -112,6 +113,39 @@ test("utils/timelineViewportSync.test.ts scripted checks", async () => {
             timelineViewportNativeToState(0, offset),
             -offset,
             "project start maps to negative drawing offset for alignment",
+        );
+    }
+
+    // 【回归】偏移测量：元素缺失必须返回 null，不能返回 0
+    //
+    // 两个面板的挂载顺序不固定（时间轴内核容器可能晚于参数编辑器出现）。若把"测不到"
+    // 当成 0，参数编辑器会丢掉整段同步位移，错位量恰好等于偏移本身（= 轨道头宽度 −
+    // 键盘列宽度），且之后没有重测时机，直到某次布局尺寸变化才恢复——表现为随机错位。
+    {
+        assertEqual(
+            resolveViewportOffsetPx({ trackLeftPx: null, paramLeftPx: 56 }),
+            null,
+            "missing track viewport is unmeasurable (null), never 0",
+        );
+        assertEqual(
+            resolveViewportOffsetPx({ trackLeftPx: 256, paramLeftPx: null }),
+            null,
+            "missing param viewport is unmeasurable (null), never 0",
+        );
+        assertEqual(
+            resolveViewportOffsetPx({ trackLeftPx: Number.NaN, paramLeftPx: 56 }),
+            null,
+            "non-finite left edge is unmeasurable (null)",
+        );
+        assertEqual(
+            resolveViewportOffsetPx({ trackLeftPx: 256, paramLeftPx: 56 }),
+            200,
+            "both viewports present: offset is the difference",
+        );
+        assertEqual(
+            resolveViewportOffsetPx({ trackLeftPx: 56, paramLeftPx: 56 }),
+            0,
+            "a genuinely measured 0 is kept as 0 (distinguishable from unmeasurable)",
         );
     }
 

@@ -1192,23 +1192,103 @@ export const PianoRollPanel: React.FC = () => {
 
     // 测量轨道时间线区与参数编辑器画布区之间的全局水平偏移，
     // 用于同步时把参数编辑器的绘制坐标与轨道视图按同一屏幕位置对齐。
+    //
+    // 【为什么必须容错 + 重试（这是一个真实缺陷的根因）】
+    // 偏移是两个视口元素左缘之差，而**两个面板的挂载顺序不固定**：时间轴的内核容器
+    // 可能晚于参数编辑器出现（面板按需挂载、WebGL 初始化、加载顺序）。元素缺失时
+    // `measureTimelineViewportOffsetPx()` 返回 `null`（旧实现返回 0，与"真的对齐"不可
+    // 区分）——若把 0 当成测量值，参数编辑器就会**丢掉整段同步位移**，错位量恰好等于
+    // 偏移本身（= 轨道头宽度 − 键盘列宽度 ≈ 轨道头区域宽度）；更糟的是那一刻观察器也
+    // 没绑上时间轴元素，之后再没有重测时机，只有恰好一次布局尺寸变化才会恢复——表现
+    // 为**随机**错位（实测复现：偏移恒为 0，两面板相差整整 200px，并持续存在）。
+    //
+    // 因此这里：测不到就保持上一次的有效值，并在后续帧重试（时间轴元素可能刚出现）；
+    // 每次重测都重新绑定观察器，元素后出现时也能补上。
     useLayoutEffect(() => {
-        const update = () => {
-            const next = measureTimelineViewportOffsetPx();
-            timelineOffsetRef.current = next;
-            setTimelineOffsetPx((prev) => (Math.abs(prev - next) < 0.5 ? prev : next));
+        /** 视口元素缺失时的重试上限（帧）；超过后退回低频轮询，避免长期每帧空转。 */
+        const RETRY_FRAMES = 120;
+        /** 低频轮询间隔（ms）。 */
+        const RETRY_INTERVAL_MS = 500;
+
+        let observer: ResizeObserver | null = null;
+        let frame: number | null = null;
+        let retryTimer: ReturnType<typeof setInterval> | null = null;
+        let stopped = false;
+
+        const stopRetry = () => {
+            if (frame !== null) {
+                cancelAnimationFrame(frame);
+                frame = null;
+            }
+            if (retryTimer !== null) {
+                clearInterval(retryTimer);
+                retryTimer = null;
+            }
         };
-        update();
-        if (typeof ResizeObserver !== "undefined") {
-            const observer = new ResizeObserver(update);
-            const scroller = scrollerRef.current;
-            if (scroller) observer.observe(scroller);
+
+        /** 把两边的视口元素（重新）挂到观察器上：元素可能后于本面板出现。 */
+        const observeViewports = () => {
+            if (typeof ResizeObserver === "undefined") return;
+            observer = observer ?? new ResizeObserver(() => measureAndApply());
+            observer.disconnect();
+            const piano = scrollerRef.current;
+            if (piano) observer.observe(piano);
             const track = document.querySelector<HTMLElement>("[data-timeline-scroller]");
             if (track) observer.observe(track);
-            return () => observer.disconnect();
+        };
+
+        /** 采用一次有效测量（并停止重试）。 */
+        const applyMeasured = (value: number) => {
+            stopRetry();
+            timelineOffsetRef.current = value;
+            setTimelineOffsetPx((prev) => (Math.abs(prev - value) < 0.5 ? prev : value));
+            observeViewports();
+        };
+
+        const scheduleRetry = () => {
+            if (stopped || frame !== null || retryTimer !== null) return;
+            let attempts = 0;
+            const tick = () => {
+                frame = null;
+                if (stopped) return;
+                const next = measureTimelineViewportOffsetPx();
+                if (next !== null) {
+                    applyMeasured(next);
+                    return;
+                }
+                observeViewports();
+                attempts += 1;
+                if (attempts >= RETRY_FRAMES) {
+                    retryTimer = setInterval(measureAndApply, RETRY_INTERVAL_MS);
+                } else {
+                    frame = requestAnimationFrame(tick);
+                }
+            };
+            frame = requestAnimationFrame(tick);
+        };
+
+        function measureAndApply(): void {
+            if (stopped) return;
+            const next = measureTimelineViewportOffsetPx();
+            if (next !== null) {
+                applyMeasured(next);
+                return;
+            }
+            // 尚不可测（视口元素未挂载）：保持上一次的有效偏移并重试——**绝不能**当成 0。
+            observeViewports();
+            scheduleRetry();
         }
-        window.addEventListener("resize", update);
-        return () => window.removeEventListener("resize", update);
+
+        measureAndApply();
+        if (typeof ResizeObserver === "undefined") {
+            window.addEventListener("resize", measureAndApply);
+        }
+        return () => {
+            stopped = true;
+            stopRetry();
+            observer?.disconnect();
+            window.removeEventListener("resize", measureAndApply);
+        };
     }, []);
 
     // BPM 变化时，按比例调 ?scrollLeft，保持视口中心点的秒数不 ?
