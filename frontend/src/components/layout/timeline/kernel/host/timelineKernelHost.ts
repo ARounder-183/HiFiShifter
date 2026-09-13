@@ -343,6 +343,22 @@ export interface TimelineKernelHostArgs {
      */
     readonly onZoomChange?: (pxPerSec: number) => void;
     /**
+     * 滚轮 / 修饰键请求变更缩放（**由 React 落地**，见 `pendingZoom` 的说明）。
+     *
+     * 与 `onZoomChange`（"内核对已生效的缩放做通知"）方向相反：这是内核**请求**
+     * React 改变缩放，React 必须在同一次提交的 layout effect 里把
+     * `{pxPerSec, scrollLeft}` 应用到内核（`setViewport`）。标尺是 DOM、用 React 的
+     * `pxPerSec` 布局，只有这样才能保证它与轨道区在同一帧切换缩放。
+     *
+     * 缺省（未提供）时**退回内核立即生效**：老调用方不会因为缺这个回调而失去缩放。
+     *
+     * @param next 目标缩放与对应的横向滚动位置（已按锚点算好）。
+     */
+    readonly onZoomRequest?: (next: {
+        readonly pxPerSec: number;
+        readonly scrollLeft: number;
+    }) => void;
+    /**
      * 可见轨道行窗口变化（低频：每滚过一行触发一次）。
      *
      * 供需要按「可见行」构建数据的 React 侧图层使用（例如波形面的 scene rows：
@@ -1242,6 +1258,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     const {
         onRowHeightChange,
         onZoomChange,
+        onZoomRequest,
         onVisibleRowsChange,
         onScrollLeftCommit,
         onScrollLeftFrame,
@@ -1531,6 +1548,19 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         if (scrollLeft === view.scrollLeft && scrollTop === view.scrollTop) return view;
         return { ...view, scrollLeft, scrollTop };
     }
+
+    /**
+     * 已请求、但 React 还没落地的缩放。
+     *
+     * 【为什么要有它】缩放经 React 落地（见 `onZoomRequest`）后，`scroll.get()` 在
+     * 落地前仍是**旧缩放**。连续滚轮时若以它为基准逐步相乘，每一步都会从同一旧值
+     * 重算，中间步进被丢掉（表现为"快速滚轮放不大"）。因此把最后一次请求记在这里，
+     * 下一步从它继续；等内核的 `pxPerSec` 追上该值（= React 已应用）即清空。
+     *
+     * 外部路径（参数编辑器同步、键盘缩放、`setViewport`）改缩放时会一并清空——
+     * 那种情况下这个累计基准已经没有意义。
+     */
+    let pendingZoom: { pxPerSec: number; scrollLeft: number } | null = null;
 
     /** 组装当前 axis（内容坐标投影）。 */
     function currentAxis(): TimelineAxis {
@@ -2308,10 +2338,17 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             projectSec: totalSec,
             viewportWidthPx,
         });
+        // 累计基准：如果有尚未被 React 落地的缩放请求，就从**它**继续算下一步
+        // （否则连续滚轮每一步都从内核的旧缩放重算，中间步进会被丢掉）。
+        if (pendingZoom !== null && Math.abs(scroll.get().pxPerSec - pendingZoom.pxPerSec) < 1e-9) {
+            // React 已把上一次请求落地 → 待定基准完成使命。
+            pendingZoom = null;
+        }
+        const zoomBase = pendingZoom ?? { pxPerSec: view.pxPerSec, scrollLeft: view.scrollLeft };
         const zoom = resolveHorizontalWheelZoom({
             factor,
-            basePxPerSec: view.pxPerSec,
-            baseScrollLeft: view.scrollLeft,
+            basePxPerSec: zoomBase.pxPerSec,
+            baseScrollLeft: zoomBase.scrollLeft,
             totalSec,
             viewportWidth: viewportWidthPx,
             playheadZoomEnabled: d.playheadZoomEnabled,
@@ -2323,11 +2360,28 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             maxPxPerSec: MAX_PX_PER_SEC,
         });
         if (zoom === null) return;
-        // 用**实际生效值**回调 React：下限随工程长度变化，钳制可能改变请求值；
-        // 直接回传请求值会让标尺（React 侧派生量）与网格（内核真值）分叉。
-        const appliedPxPerSec = scroll.setZoom(zoom.nextPxPerSec, event.clientX - rect.left);
-        scroll.setScrollLeft(zoom.nextScrollLeft);
-        onZoomChange?.(appliedPxPerSec);
+        // 缩放**不在内核侧立即生效**：标尺是 DOM、由 React 用 `pxPerSec` 布局，而
+        // 轨道区归内核；两者若不同帧切缩放，缩放过程中就会整整差一个滚轮步
+        // （约 10% 缩放，视口宽 1000px 时末端差上百像素）——即用户报告的
+        // 「标尺抽动 / 网格与标尺没对齐」。
+        //
+        // 旧实现天然一致（缩放只有 React state 一个真值源，画布也在 React 提交后
+        // 才画）。这里照旧：把**目标**交给 React，由它在同一次提交的 layout effect 里
+        // 应用到内核——于是 DOM 重排与内核缩放落在同一帧的绘制里，任何一层都不会
+        // 领先或落后另一层。
+        //
+        // 累计基准取 `pendingZoom`：React 落地之前连续滚轮时，若仍以内核（旧缩放）为
+        // 基准，每一步都会从同一个起点重算而丢掉中间步进。
+        const target = { pxPerSec: zoom.nextPxPerSec, scrollLeft: zoom.nextScrollLeft };
+        pendingZoom = target;
+        if (onZoomRequest === undefined) {
+            // 没有 React 落地通道（老调用方）：退回内核立即生效，功能不缺失。
+            const appliedPxPerSec = scroll.setZoom(target.pxPerSec, event.clientX - rect.left);
+            scroll.setScrollLeft(target.scrollLeft);
+            onZoomChange?.(appliedPxPerSec);
+            return;
+        }
+        onZoomRequest(target);
     }
     container.addEventListener("wheel", onWheel, { passive: false });
 
@@ -4798,6 +4852,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         setViewport(next: { pxPerSec?: number; scrollLeft?: number }) {
             const beforePxPerSec = scroll.get().pxPerSec;
             const applied = scroll.setViewport(next);
+            // 外部路径改了缩放 → 滚轮缩放的累计基准作废（见 `pendingZoom` 的说明）。
+            if (applied.pxPerSec !== beforePxPerSec) pendingZoom = null;
             // 缩放真值源在内核：变化时必须回调 React 侧派生量（标尺刻度 / 内容宽度），
             // 否则「网格已缩放、标尺还在旧刻度」。
             if (applied.pxPerSec !== beforePxPerSec) onZoomChange?.(applied.pxPerSec);

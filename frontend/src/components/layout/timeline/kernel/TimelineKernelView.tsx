@@ -57,6 +57,14 @@ export interface TimelineKernelViewProps {
     /** 水平缩放变化（内核为真值源），用于驱动标尺刻度等 React 侧派生量。 */
     readonly onPxPerSecChange: (pxPerSec: number) => void;
     /**
+     * 滚轮缩放请求：内核算好目标后交给 React 落地。
+     *
+     * 标尺是 DOM、由 React 用 `pxPerSec` 布局；若内核自己先切缩放，缩放过程中标尺
+     * 会整整落后一个滚轮步。实现方必须在同一次提交的 layout effect 里把这个
+     * `{pxPerSec, scrollLeft}` 应用到内核（`setViewport`），两层才会同帧切换。
+     */
+    readonly onZoomRequest?: (next: { pxPerSec: number; scrollLeft: number }) => void;
+    /**
      * 水平滚动位置的量化提交（每 256px 一次）。
      *
      * 标尺的**刻度范围**由 React 按 `scrollLeft` 计算（`timelineTicks`），内核只写
@@ -281,6 +289,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         onRowHeightChange,
         initialPxPerSec,
         onPxPerSecChange,
+        onZoomRequest,
         getPlayheadSec,
         rulerContentRef,
         trackListScrollerRef,
@@ -455,6 +464,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
     const callbacksRef = React.useRef({
         onRowHeightChange,
         onPxPerSecChange,
+        onZoomRequest,
         getPlayheadSec,
         onVisibleRowsChange: handleVisibleRowsChange,
         onScrollLeftCommit,
@@ -466,6 +476,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
     callbacksRef.current = {
         onRowHeightChange,
         onPxPerSecChange,
+        onZoomRequest,
         getPlayheadSec,
         onVisibleRowsChange: handleVisibleRowsChange,
         onScrollLeftCommit,
@@ -633,6 +644,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                 },
                 onRowHeightChange: (px) => callbacksRef.current.onRowHeightChange(px),
                 onZoomChange: (pxPerSec) => callbacksRef.current.onPxPerSecChange(pxPerSec),
+                onZoomRequest: (next) => callbacksRef.current.onZoomRequest?.(next),
                 onVisibleRowsChange: (firstRow, rowCount) =>
                     callbacksRef.current.onVisibleRowsChange(firstRow, rowCount),
                 interactions: stableInteractions,

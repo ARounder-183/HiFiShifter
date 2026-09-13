@@ -702,6 +702,45 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         [syncScrollLeft],
     );
 
+    /**
+     * 滚轮缩放的**待落地目标**（内核请求、React 落地）。
+     *
+     * 标尺是 DOM、由 React 用 `pxPerSec` 布局，轨道区归内核。内核若自己先切缩放，
+     * 缩放过程中标尺会整整落后一个滚轮步（约 10% 缩放 → 视口宽 1000px 时末端差
+     * 上百像素），就是「标尺抽动 / 网格与标尺没对齐」。旧实现没有这个问题，因为
+     * 缩放只有 React 一个真值源、画布也在 React 提交后才画。
+     *
+     * 因此这里照旧：内核只"请求"，React 用 `setPxPerSec` 触发重排，并在**同一次
+     * 提交的 layout effect** 里把缩放应用到内核——DOM 重排与内核缩放落在同一帧的
+     * 绘制中，两层不可能分叉。
+     */
+    const pendingKernelZoomRef = React.useRef<{ pxPerSec: number; scrollLeft: number } | null>(
+        null,
+    );
+    const handleKernelZoomRequest = React.useCallback(
+        (next: { pxPerSec: number; scrollLeft: number }) => {
+            if (next.pxPerSec === pxPerSec) {
+                // 缩放已在上/下限（或该步被钳制回原值）：请求退化为"位置无变化"，
+                // 直接应用一次即可。**不能**留成待落地——`setPxPerSec` 传同值不会
+                // 触发重渲染，下面的 layout effect 也就永远不会跑，请求会被搁置。
+                pendingKernelZoomRef.current = null;
+                viewportAccess.setZoomAndScroll(next.pxPerSec, next.scrollLeft);
+                return;
+            }
+            pendingKernelZoomRef.current = next;
+            // 只改缩放：位置由下面的 layout effect 与缩放**原子**应用（分两次写会让
+            // 中间那一帧出现"新缩放 + 旧位置"的错位）。
+            setPxPerSec(next.pxPerSec);
+        },
+        [pxPerSec, viewportAccess],
+    );
+    React.useLayoutEffect(() => {
+        const pending = pendingKernelZoomRef.current;
+        if (pending === null) return;
+        pendingKernelZoomRef.current = null;
+        viewportAccess.setZoomAndScroll(pending.pxPerSec, pending.scrollLeft);
+    }, [pxPerSec, viewportAccess]);
+
     // ── 轨道头与时间轴区域的竖直滚动对齐 ─────────────────
     // 右侧时间轴 scroller 常驻水平滚动条（占高 h），其竖直滚动范围因此比
     // 轨道头少 h 像素：内容同为「轨道数 × rowHeight」时，轨道头滚到底会
@@ -5329,6 +5368,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 onRowHeightChange={setRowHeight}
                                 initialPxPerSec={pxPerSec}
                                 onPxPerSecChange={setPxPerSec}
+                                onZoomRequest={handleKernelZoomRequest}
                                 onScrollLeftCommit={handleKernelScrollLeftCommit}
                                 onScrollLeftFrame={state.syncScrollLeftFrame}
                                 onViewportWidthChange={setViewportWidth}
