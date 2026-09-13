@@ -48,10 +48,7 @@ const PLAYHEAD_EPSILON_SEC = 1e-6;
  * @param mirrorSec 数据镜像里的播放头位置（秒），作为兜底。
  * @returns 本帧用于绘制与标脏判定的播放头位置（秒）。
  */
-export function resolvePlayheadSec(
-    liveSec: number | undefined,
-    mirrorSec: number,
-): number {
+export function resolvePlayheadSec(liveSec: number | undefined, mirrorSec: number): number {
     if (liveSec !== undefined && Number.isFinite(liveSec)) return liveSec;
     return mirrorSec;
 }

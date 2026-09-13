@@ -598,6 +598,26 @@ export interface TimelineKernelInteractions {
         readonly cancelled: boolean;
     }) => void;
     /**
+     * clip 上的悬停（**淡变控件除外**，那些走 `onFadeHover` 的富内容通道）。
+     *
+     * 旧实现把「名称 / 静音 / 锁链 / 速率 / 增益 / 共振峰 / SnapOffset 手柄」各自挂在
+     * DOM 元素的 `data-tooltip` 上；内核把整个轨道区自绘之后这些元素不存在，必须由
+     * 宿主把命中结果透出、面板拼装文案（与淡变浮标同一分工）。
+     *
+     * 特殊说明：**只在命中身份变化时回调**（与淡变通道同一去重口径）。指针沿 clip
+     * 边缘移动会逐帧改变局部坐标，但身份不变——逐帧回调会让浮标内容重建、位置抖动。
+     *
+     * @param args 命中信息；指针不在任何 clip 上时为 null（浮标收起）。
+     */
+    readonly onClipHover?: (
+        args: {
+            readonly clipId: string;
+            readonly region: ClipHitRegion;
+            /** 命中的 header 控件（非 header 分区时为 null）。 */
+            readonly headerControl: ClipHeaderControl | null;
+        } | null,
+    ) => void;
+    /**
      * 淡变形状循环（循环修饰键 + 单击包络线，未拖动）。
      *
      * @param clipId 目标 clip。
@@ -1436,6 +1456,14 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     let combinedInstances = new Float32Array(0);
     let combinedCount = 0;
     let sceneDirty = true;
+    /**
+     * 当前悬停的 clip（细节层的悬停提示环据此绘制）。
+     *
+     * 由悬停发布器在**身份变化**时更新（指针不换 clip 就不重绘）；悬停是纯视觉
+     * 状态，不参与命中或数据。放在场景状态一起，是为了与 `sceneDirty` 的读写
+     * 生命周期一致（都在 `ensureScene` 之前就已初始化）。
+     */
+    let hoveredClipId: string | null = null;
     /** 实例是否已上传 GPU：true 时滚动帧走 `repaint`（零上传）。 */
     let sceneUploaded = false;
     let builtPxPerSec = Number.NaN;
@@ -1569,6 +1597,10 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             selectedClipId: d.selectedClipId,
             multiSelectedClipIds: [...d.multiSelectedClipIds],
             renamingClipId: null,
+            // 悬停提示环：模型据此给「悬停且不属于任何编组」的 clip 打标，
+            // 细节层画那 1px 深色环（旧实现 `ClipItem` 的
+            // `interactionHintBoxShadow`）。
+            hoveredClipId: hoveredClipId,
             // 编组状态参与两件事：overlay 展开（激活编组的成员一并进 DOM 覆盖层）
             // 与样式（锁链徽标配色）。漏传会让"点锁链禁用联动"没有任何视觉反馈。
             disabledGroupIds: [...d.disabledGroupIds],
@@ -2482,6 +2514,16 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     let lastFadeHoverKey = "";
 
     /**
+     * 上一次发布的 **clip 浮标**身份（去重键；空串 = 当前无 clip 浮标）。
+     *
+     * 与 `lastFadeHoverKey` 同一口径：身份 = clip + 分区 + header 控件。三者的任一
+     * 变化都会换文案（例如从名称区移到旋钮），必须重发；只移动指针不换文案时不能
+     * 重发（否则浮标内容重建、位置抖动）。两条通道互斥：淡变控件命中时清 clip 浮标，
+     * 反之亦然。
+     */
+    let lastClipHoverKey = "";
+
+    /**
      * 是否需要抑制下一次 `contextmenu`。
      *
      * 右键按下即进入「待框选」，若不做抑制，框选松手时浏览器会补发 contextmenu
@@ -3284,19 +3326,51 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      * @returns 无返回值。
      */
     function publishFadeHover(hit: KernelHit, clientX: number, clientY: number): void {
-        if (interactions?.onFadeHover === undefined) return;
         const isFadeTarget =
             hit.kind === "clip" &&
             (hit.region === "fade-in-corner" ||
                 hit.region === "fade-out-corner" ||
                 hit.region === "crossfade-grip");
+
+        // ── 非淡变：按需发布 clip 浮标内容 ──
+        // 分区 + header 控件 + clip 三者共同决定文案，任一变化才重发（理由见
+        // `onClipHover` 的说明：逐帧重发会让浮标重建、位置抖动）。
+        const hoverControl = hit.kind === "clip" ? resolveHeaderControl(hit) : null;
+        const clipKey =
+            hit.kind !== "clip" ? "" : `${hit.clip.id}:${hit.region}:${hoverControl ?? ""}`;
         if (!isFadeTarget) {
             if (lastFadeHoverKey !== "") {
                 lastFadeHoverKey = "";
-                interactions.onFadeHover(null, clientX, clientY);
+                interactions?.onFadeHover?.(null, clientX, clientY);
+            }
+            if (clipKey !== lastClipHoverKey) {
+                lastClipHoverKey = clipKey;
+                // 悬停提示环：身份变化才重绘（细节层要重画那一圈描边）。
+                const nextHovered = hit.kind === "clip" ? hit.clip.id : null;
+                if (nextHovered !== hoveredClipId) {
+                    hoveredClipId = nextHovered;
+                    sceneDirty = true;
+                    loop.invalidate();
+                }
+                interactions?.onClipHover?.(
+                    hit.kind === "clip"
+                        ? {
+                              clipId: hit.clip.id,
+                              region: hit.region,
+                              headerControl: hoverControl,
+                          }
+                        : null,
+                );
             }
             return;
         }
+
+        // 淡变控件：清淡变以外的浮标，再发布淡变富内容。
+        if (lastClipHoverKey !== "") {
+            lastClipHoverKey = "";
+            interactions?.onClipHover?.(null);
+        }
+        if (interactions?.onFadeHover === undefined) return;
         const isGrip = hit.kind === "clip" && hit.region === "crossfade-grip";
         const key =
             hit.kind !== "clip"

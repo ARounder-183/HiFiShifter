@@ -59,6 +59,8 @@ import {
     type FadeLengthFormatContext,
 } from "./timeline/fadeTooltipText";
 import { effectiveFadeSec } from "./timeline/kernel/interaction/fadeTargets";
+import type { ClipHitRegion } from "./timeline/kernel/interaction/hitTest";
+import type { ClipHeaderControl } from "./timeline/kernel/interaction/clipHeaderControls";
 import { FadeContextMenuHost } from "./timeline/FadeContextMenuHost";
 import {
     requestOpenFadeContextMenu,
@@ -149,7 +151,7 @@ import {
 } from "./timeline";
 import { timeRulerHeightPx } from "./timeline/rulerHeight";
 import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeline";
-import { formatEditNumber, gainToDb } from "./timeline/math";
+import { formatEditNumber, formatGainDbValue, gainToDb } from "./timeline/math";
 import { requestResetFadeCurvature } from "./timeline/fadeContextMenuBus";
 import { parsePlaybackRateInput } from "./timeline/runtime/timelineCanvasStyle";
 import {
@@ -232,7 +234,11 @@ import {
 import { readDevicePixelRatio, snapToDevicePx } from "../../utils/devicePixelLine";
 import { resolveQuickExportClipIds } from "./timeline/quickExportSelection";
 import { isTrackListMirrorEcho } from "./timeline/scrollEcho";
-import { activeClipTakeName, type ClipFormantMorph } from "../../features/session/sessionTypes";
+import {
+    activeClipTakeName,
+    clipDisplayName,
+    type ClipFormantMorph,
+} from "../../features/session/sessionTypes";
 import { ClipFormantToolWindow } from "./timeline/clip/ClipFormantToolWindow";
 
 const TimelineTransportBridge = React.memo(function TimelineTransportBridge(props: {
@@ -3217,6 +3223,97 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         editSides: Record<string, { fadeIn: boolean; fadeOut: boolean }>;
     } | null>(null);
 
+    /**
+     * 内核 clip 悬停 → 发布浮标内容（旧实现各 `data-tooltip` 的等价物）。
+     *
+     * 与淡变浮标共用**同一个锚点**（内核容器）：旧实现把这些文案挂在各自的 DOM
+     * 元素上，内核自绘后那些元素不存在，因此必须由命中结果反推"指针下是什么控件"。
+     * 两条通道互斥（宿主保证）：淡变控件命中时走富内容通道，其余走这里。
+     *
+     * 文案与取法逐条对齐旧实现：
+     * - 名称区 → MIDI 前辍 + 显示名，或源文件路径（`clip.sourcePath`）；
+     * - 静音 → 按当前状态给「静音 / 取消静音」；
+     * - 锁链 → 按该组当前是否被禁用给「启用 / 禁用编组」；
+     * - 速率 / 增益徽标 → 各自的静态提示（数值由双击后的输入框给出）；
+     * - 共振峰 → 面板标题；
+     * - 增益旋钮 → 带**实时数值**的提示（拖动中带增量，见增益预览）；
+     * - SnapOffset 手柄 → 拖动调整提示。
+     *
+     * @param args 命中信息；不在任何 clip 上时为 null。
+     * @returns 无返回值。
+     */
+    const handleKernelClipHover = React.useCallback(
+        (
+            args: {
+                clipId: string;
+                region: ClipHitRegion;
+                headerControl: ClipHeaderControl | null;
+            } | null,
+        ) => {
+            const anchor =
+                typeof document === "undefined"
+                    ? null
+                    : (document.querySelector(
+                          "[data-hs-fade-tooltip-anchor]",
+                      ) as HTMLElement | null);
+            if (anchor === null) return;
+            if (args === null) {
+                publishFadeRichTooltip(anchor, null);
+                return;
+            }
+            const session = sessionRef.current;
+            const clip = session.clips.find((item) => item.id === args.clipId);
+            if (clip === undefined) {
+                publishFadeRichTooltip(anchor, null);
+                return;
+            }
+            const displayName = clipDisplayName(clip);
+            let text: string | null = null;
+            switch (args.headerControl) {
+                case "name":
+                    text =
+                        clip.midiNoteCount != null
+                            ? `${t("clip_type_midi_prefix")} ${displayName}`
+                            : (clip.sourcePath ?? displayName);
+                    break;
+                case "mute":
+                    text = clip.muted ? t("clip_unmute") : t("clip_mute");
+                    break;
+                case "chain": {
+                    const groupId = clip.groupId;
+                    if (groupId != null && groupId !== "") {
+                        const disabled = session.disabledGroupIds.includes(groupId);
+                        text = disabled ? t("enable_group") : t("disable_group");
+                    }
+                    break;
+                }
+                case "rate-label":
+                    text = t("clip_badge_rate_tip");
+                    break;
+                case "gain-label":
+                    text = t("clip_badge_gain_tip");
+                    break;
+                case "formant":
+                    text = t("clip_formant_title");
+                    break;
+                case "gain-knob":
+                    text = t("gain_value_tooltip").replace(
+                        "{gain}",
+                        formatGainDbValue(Math.min(12, Math.max(-12, gainToDb(clip.gain)))),
+                    );
+                    break;
+                default:
+                    // SnapOffset 手柄没有 header 控件，用分区识别。
+                    if (args.region === "snap-offset-handle") {
+                        text = t("clip_snap_offset");
+                    }
+                    break;
+            }
+            publishFadeRichTooltip(anchor, text);
+        },
+        [sessionRef, t],
+    );
+
     /** 内核淡变角预览：只改对应一侧的淡变长度（另一侧保持不变）。 */
     const handleKernelFadePreview = React.useCallback(
         (args: {
@@ -3873,6 +3970,31 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             batch(() => {
                 for (const update of updates) dispatch(setClipGain(update));
             });
+            // 拖动中的实时浮标（旧实现 `ClipHeader` 的 `gainTooltip` 拖动变体）：
+            // 普通悬停只显示当前值，拖动时还要显示**本次拖动的增量**。内容逐帧
+            // 更新——浮标的锚点仍是内核容器，AppTooltip 自己跟随指针。
+            const anchor =
+                typeof document === "undefined"
+                    ? null
+                    : (document.querySelector(
+                          "[data-hs-fade-tooltip-anchor]",
+                      ) as HTMLElement | null);
+            if (anchor !== null) {
+                const baseGain = origin.baseGainById.get(args.clipId);
+                const currentGain =
+                    sessionRef.current.clips.find((item) => item.id === args.clipId)?.gain ??
+                    baseGain ??
+                    1;
+                const clamped = Math.min(12, Math.max(-12, gainToDb(currentGain)));
+                publishFadeRichTooltip(
+                    anchor,
+                    baseGain === undefined
+                        ? t("gain_value_tooltip").replace("{gain}", formatGainDbValue(clamped))
+                        : t("gain_value_tooltip_drag")
+                              .replace("{gain}", formatGainDbValue(clamped))
+                              .replace("{delta}", formatGainDbValue(clamped - gainToDb(baseGain))),
+                );
+            }
         },
         [
             beginKernelGestureInteraction,
@@ -3880,6 +4002,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             multiSelectedClipIds,
             paramFineAdjustKb,
             sessionRef,
+            t,
         ],
     );
 
@@ -4345,6 +4468,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             onContextMenu: handleKernelContextMenu,
             onFadeContextMenu: handleKernelFadeContextMenu,
             onFadeHover: handleKernelFadeHover,
+            onClipHover: handleKernelClipHover,
             onActivateTake: handleKernelActivateTake,
         }),
         [
@@ -4364,6 +4488,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             handleKernelContextMenu,
             handleKernelFadeContextMenu,
             handleKernelFadeHover,
+            handleKernelClipHover,
             handleKernelActivateTake,
             handleKernelRateBadgeMenu,
             // 下面这些回调内联在 `kernelInteractions` 里（或经局部函数转发），

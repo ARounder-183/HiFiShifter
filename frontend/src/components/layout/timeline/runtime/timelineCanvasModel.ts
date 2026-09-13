@@ -27,7 +27,10 @@
 import { CLIP_BODY_PADDING_Y, CLIP_HEADER_HEIGHT } from "../constants.js";
 import { clipDisplayName, type ClipInfo } from "../../../../features/session/sessionTypes";
 import { resolveTakeLaneLayouts } from "../takeLanes";
-import { resolveClipContentDurationSec, resolveSourceEndSec } from "../../../../utils/loopRender.js";
+import {
+    resolveClipContentDurationSec,
+    resolveSourceEndSec,
+} from "../../../../utils/loopRender.js";
 import {
     FRAME_PERIOD_MS,
     getCachedMidiCurve,
@@ -112,6 +115,16 @@ export type TimelineCanvasClipModel = {
     fadeInDir: number;
     fadeOutDir: number;
     selected: boolean;
+    /**
+     * 是否绘制**悬停提示描边**（1px 深色环）。
+     *
+     * 旧实现给「悬停且**不属于任何编组**」的 clip 挂
+     * `boxShadow: 0 0 0 1px rgba(0,0,0,0.35)`。编组中的 clip 不画：编组本身已有
+     * 深金外圈描边，两者叠在一起会互相干扰（旧实现同源）。
+     *
+     * 可选：缺省视为 false（既有测试夹具不必逐一补齐该字段）。
+     */
+    hovered?: boolean;
     muted: boolean;
     gain: number;
     playbackRate: number;
@@ -657,6 +670,7 @@ export function buildSparseClipRenderModel(args: {
                 multiSelectedSet != null
                     ? multiSelectedSet.has(clip.id)
                     : args.selectedClipId === clip.id,
+            hovered: args.hoveredClipId === clip.id && clip.groupId == null,
             muted: clip.muted,
             gain: clip.gain,
             playbackRate: clip.playbackRate,
@@ -686,7 +700,10 @@ export function buildSparseClipRenderModel(args: {
             midiPitchCurvePx: buildMidiPitchCurvePx({
                 axis: args.axis,
                 clip,
-                bodyHeightPx: Math.max(1, args.rowHeight - CLIP_BODY_PADDING_Y - CLIP_HEADER_HEIGHT),
+                bodyHeightPx: Math.max(
+                    1,
+                    args.rowHeight - CLIP_BODY_PADDING_Y - CLIP_HEADER_HEIGHT,
+                ),
                 pitchCurve: args.clipPitchCurves?.[clip.id],
                 pitchRange: args.clipPitchRanges?.[clip.id],
             }),

@@ -533,6 +533,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
             onFadeContextMenu: (request) => interactionsRef.current?.onFadeContextMenu?.(request),
             onFadeHover: (args, clientX, clientY) =>
                 interactionsRef.current?.onFadeHover?.(args, clientX, clientY),
+            onClipHover: (args) => interactionsRef.current?.onClipHover?.(args),
             onActivateTake: (clipId, takeId, sec) =>
                 interactionsRef.current?.onActivateTake?.(clipId, takeId, sec),
         }),
