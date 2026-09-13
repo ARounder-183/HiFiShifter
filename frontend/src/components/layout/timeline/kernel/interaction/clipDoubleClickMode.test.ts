@@ -9,9 +9,7 @@ const ALT_ONLY: Keybinding = { key: "alt", modifierOnly: true, alt: true };
 /**
  * 构造修饰键快照。缺省全部为 false，避免每个用例重复写四个字段。
  */
-function mods(
-    overrides: Partial<Record<"ctrlKey" | "shiftKey" | "altKey" | "metaKey", boolean>> = {},
-) {
+function mods(overrides: Partial<Record<"ctrlKey" | "shiftKey" | "altKey" | "metaKey", boolean>> = {}) {
     return {
         ctrlKey: overrides.ctrlKey ?? false,
         shiftKey: overrides.shiftKey ?? false,

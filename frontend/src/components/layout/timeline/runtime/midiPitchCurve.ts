@@ -423,7 +423,10 @@ export function resolveClipLoopMarkerOffsetsSec(args: {
         // 直接跳到起点之后的第一个回绕点：既避免从 clip 入口逐周期空转数千次，
         // 也修复"深入长循环 clip 后标记消失"（旧实现受 guard<8192 限制）。
         const fromLocalSec = Math.max(0, Number(args.fromLocalSec ?? 0) || 0);
-        const k0 = Math.max(0, Math.ceil((fromLocalSec - headDur - 1e-6) / markerBodyDur));
+        const k0 = Math.max(
+            0,
+            Math.ceil((fromLocalSec - headDur - 1e-6) / markerBodyDur),
+        );
         for (
             let markerT = headDur + k0 * markerBodyDur;
             markerT < lengthSec - 1e-6 && markers.length < 4096;
