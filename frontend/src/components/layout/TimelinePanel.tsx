@@ -4225,6 +4225,25 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 baseDir: number;
             };
         };
+        /**
+         * 本次手势作用的两个 clip（自动交叉淡化重算 / 清理的作用集合）。
+         *
+         * 与旧实现 `useEditDrag` 的 `crossfadeClipIds` 同源：收尾要按**落库后的重叠
+         * 关系**重算自动交叉淡化，或清理"已脱离重叠"的自动值。
+         */
+        xfadeClipIds: string[];
+        /**
+         * 按下时每侧的**重叠关系**（`computeInitialCrossfadeSides` 的结果）。
+         *
+         * 分开后靠它区分"这一侧的 auto 是被本次编辑弄没的"（→清零，手动 fade 恢复
+         * 显示）与"本来就没有"。
+         */
+        initialCrossfadeSides: Record<string, { fadeIn: boolean; fadeOut: boolean }>;
+        /**
+         * 本次手势真正触碰的侧：交叉点抓手动的恰是前块的**淡出**侧与后块的
+         * **淡入**侧（旧实现 `useEditDrag` 的 `editSides` 同一口径）。
+         */
+        editSides: Record<string, { fadeIn: boolean; fadeOut: boolean }>;
         /** 各 clip 按下时的全部可回滚字段（取消路径用）。 */
         baseById: Map<
             string,
@@ -4365,6 +4384,17 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                             },
                         };
                     })(),
+                    xfadeClipIds: [earlier.id, later.id],
+                    // 自动交叉淡化（收尾重算 / 清理）所需的两份关系快照：按下时的
+                    // 重叠关系 + 本次手势触碰的侧（旧实现 `useEditDrag` 同源）。
+                    initialCrossfadeSides: computeInitialCrossfadeSides(clips, [
+                        earlier.id,
+                        later.id,
+                    ]),
+                    editSides: {
+                        [earlier.id]: { fadeIn: false, fadeOut: true },
+                        [later.id]: { fadeIn: true, fadeOut: false },
+                    },
                     baseById,
                 };
                 // 首个真实位移帧 = 手势开始：上交互锁（见 helper 说明）。
@@ -4419,10 +4449,41 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 return;
             }
 
+            // ── 吸附（`snapTimelineDetailed`，与 clip 拖拽同一套多源候选）──
+            //
+            // 旧实现把**指针时间**吸附后再换算位移（`const rawDelta = beat - drag.basePointerSec`，
+            // 其中 `beat` 是吸附后的指针时间），因此交叉点会落在网格 / 其它 clip 边缘上。
+            // 内核只给几何位移，吸附规则不在内核里重写——这里用同一个函数补回来。
+            //
+            // `pointerSec`（当前指针内容秒）与 `deltaSec` 都来自内核的同一次测量，
+            // 两者相减即按下时的指针时间（每帧恒定），无需在快照里另存一份。
+            //
+            // 免吸附修饰键（默认 Shift）临时取反吸附总开关；`highlight` 必须传，
+            // 否则吸附生效但没有视觉反馈（与 clip 拖拽的注释同一理由）。
+            const rawPointerSec = args.curveEnv.pointerSec;
+            const basePointerSec = rawPointerSec - args.deltaSec;
+            const snapActive = computeEffectiveSnap(
+                s.snapEnabled,
+                isModifierActive(noSnapKb, args.modifiers),
+            );
+            const snappedPointerSec = snapActive
+                ? snapTimelineDetailed(rawPointerSec, "clip", {
+                      originSec: basePointerSec,
+                      // 交叉点必然在**同一条轨道**内，吸附候选也就取该轨道
+                      // （旧实现的 `anchorTrackId` 同为被拖 clip 的轨道）。
+                      anchorTrackId: earlier.trackId,
+                      excludeClipIds: new Set([earlier.id, later.id]),
+                      highlight: {
+                          sources: [{ trackId: earlier.trackId, clipId: earlier.id }],
+                      },
+                  }).sec
+                : rawPointerSec;
+            if (!snapActive) clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+            const deltaSec = snappedPointerSec - basePointerSec;
             const result = computeCrossfadeGrip({
                 earlier: origin.earlier,
                 later: origin.later,
-                deltaSec: args.deltaSec,
+                deltaSec,
                 // 反向模式：与旧实现同源（`modifier.crossfadeGrip`）。
                 opposite: isModifierActive(crossfadeGripKb, args.modifiers),
                 baseOverlapSec: origin.baseOverlapSec,
@@ -4544,6 +4605,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 endKernelGestureInteraction();
                 return;
             }
+            // 提交值取 Redux 当前值（预览已写入钳制后的结果，含曲率 / 淡变 / auto）。
             const clips = sessionRef.current.clips;
             const earlier = clips.find((item) => item.id === origin.earlier.id);
             const later = clips.find((item) => item.id === origin.later.id);
@@ -4554,14 +4616,32 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             dispatch(checkpointHistory());
             // 源窗口必须一起提交：只写长度会让后端按旧源区间重新解释内容
             // （波形与音频都对不上）——与裁切提交同一约束。
-            void dispatch(
+            //
+            // 【淡变 / 曲率 / 自动交叉淡化也必须一起提交】两处由来：
+            // - 曲率拖拽（`modifier.fadeCurvatureDrag`）在拖拽期只改 Redux 的
+            //   `fadeInDir / fadeOutDir`；只提交几何会让批量 fulfilled 的整份时间线
+            //   回灌把拖拽期的曲率**丢弃**（表现为"松开鼠标后曲率没改对"）。
+            // - 反向模式按比例缩放两侧淡变（写 auto 或手动字段），同样只在 Redux 里。
+            // 旧实现 `useEditDrag` 的 `crossfade_edges` 分支正是把
+            // `fadeInSec/fadeOutSec/autoFade*/fadeInShape/fadeInDir/fadeOutShape/fadeOutDir`
+            // 随整份 patch 一并落盘（见该分支的注释），此处对齐。
+            const persist = dispatch(
                 setClipsStateBulkRemote({
                     updates: [
                         {
                             clipId: earlier.id,
+                            startSec: earlier.startSec,
                             lengthSec: earlier.lengthSec,
                             sourceStartSec: earlier.sourceStartSec,
                             sourceEndSec: earlier.sourceEndSec,
+                            fadeInSec: Number(earlier.fadeInSec) || 0,
+                            fadeOutSec: Number(earlier.fadeOutSec) || 0,
+                            autoFadeInSec: Number(earlier.autoFadeInSec) || 0,
+                            autoFadeOutSec: Number(earlier.autoFadeOutSec) || 0,
+                            fadeInShape: Number(earlier.fadeInShape) || 0,
+                            fadeInDir: Number(earlier.fadeInDir) || 0,
+                            fadeOutShape: Number(earlier.fadeOutShape) || 0,
+                            fadeOutDir: Number(earlier.fadeOutDir) || 0,
                         },
                         {
                             clipId: later.id,
@@ -4569,15 +4649,49 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                             lengthSec: later.lengthSec,
                             sourceStartSec: later.sourceStartSec,
                             sourceEndSec: later.sourceEndSec,
+                            fadeInSec: Number(later.fadeInSec) || 0,
+                            fadeOutSec: Number(later.fadeOutSec) || 0,
+                            autoFadeInSec: Number(later.autoFadeInSec) || 0,
+                            autoFadeOutSec: Number(later.autoFadeOutSec) || 0,
+                            fadeInShape: Number(later.fadeInShape) || 0,
+                            fadeInDir: Number(later.fadeInDir) || 0,
+                            fadeOutShape: Number(later.fadeOutShape) || 0,
+                            fadeOutDir: Number(later.fadeOutDir) || 0,
                         },
                     ],
                 }),
-            )
-                .unwrap()
+            ).unwrap();
+            void (async () => {
+                try {
+                    await persist;
+                } finally {
+                    // 自动交叉淡化收尾：**无条件**清理"已脱离重叠"的自动值。
+                    //
+                    // 【为什么只清理、不重算（与旧实现逐条一致）】交叉点抓手与淡变
+                    // 长度是同一件事的两种表现：反向模式在**拖拽中**就按「新重叠 /
+                    // 原重叠」把两侧淡变缩放了（`computeCrossfadeGrip` 的 fades，auto
+                    // 侧写 auto、手动侧写手动），随整份 patch 落盘；因此收尾只需要把
+                    // "因这次拖动而不再重叠"的 auto 清零——不清会让历史 auto 值永远
+                    // 盖住应恢复的手动 fade（REAPER 导入的工程尤其明显）。
+                    //
+                    // 旧实现 `useEditDrag` 也是这个口径：`shouldApplyAutoCrossfade`
+                    // 只列 trim/stretch（不含 `crossfade_edges`），交叉点拖拽落到
+                    // `runWithOptionalAutoCrossfade` 的 else 分支 = 只做 detached clears。
+                    // 开关关闭时同样必须清（"即使开关关闭也要清"是该函数的既有契约）。
+                    const latest = sessionRef.current;
+                    await applyDetachedAutoCrossfadeClears(
+                        latest,
+                        origin.xfadeClipIds,
+                        dispatch,
+                        origin.initialCrossfadeSides,
+                        origin.editSides,
+                    );
+                }
+            })()
                 .catch(() => undefined)
                 .finally(endKernelGestureInteraction);
         },
-        [dispatch, endKernelGestureInteraction, sessionRef],
+        [dispatch, endKernelGestureInteraction, sessionRef, s.autoCrossfadeEnabled],
     );
 
     /** 内核交互回调集合（引用稳定：内核创建时取一次）。 */
