@@ -18,7 +18,7 @@ vi.mock("../../../services/api", () => ({
 
 import { paramsApi } from "../../../services/api";
 import type { ParamFramesPayload } from "../../../types/api";
-import { applySelectionEditWithEdgeSmoothing } from "./selectionEditApply";
+import { applySelectionEditOverRanges, applySelectionEditWithEdgeSmoothing } from "./selectionEditApply";
 
 const mockedGet = vi.mocked(paramsApi.getParamFrames);
 const mockedSet = vi.mocked(paramsApi.setParamFrames);
@@ -165,6 +165,75 @@ describe("applySelectionEditWithEdgeSmoothing", () => {
             editSelection: (vals) => vals,
         });
         expect(ok).toBe(false);
+        expect(mockedSet).not.toHaveBeenCalled();
+    });
+});
+
+describe("applySelectionEditOverRanges（多选区：每段独立 + 单撤销点）", () => {
+    it("逐段独立取数写回，仅首段带撤销点", async () => {
+        mockedGet.mockImplementation(async (_track, _param, startFrame, frameCount) =>
+            asPayload(new Array<number>(frameCount).fill(startFrame)),
+        );
+        const ok = await applySelectionEditOverRanges({
+            trackId: "t1",
+            param: "pitch",
+            framePeriodMs: 5,
+            smoothnessPercent: 0,
+            // 断层两侧各写一次，互不影响
+            ranges: [
+                { startFrame: 10, frameCount: 5 },
+                { startFrame: 100, frameCount: 5 },
+            ],
+            editSelection: (vals) => vals.map((v) => v + 1),
+        });
+        expect(ok).toBe(true);
+        expect(mockedGet).toHaveBeenCalledWith("t1", "pitch", 10, 5, 1);
+        expect(mockedGet).toHaveBeenCalledWith("t1", "pitch", 100, 5, 1);
+        expect(mockedSet).toHaveBeenCalledTimes(2);
+        const [, , firstStart, firstWritten, firstCheckpoint] = mockedSet.mock.calls[0];
+        expect(firstStart).toBe(10);
+        expect(firstWritten).toEqual(new Array<number>(5).fill(11));
+        expect(firstCheckpoint).toBe(true);
+        const [, , secondStart, secondWritten, secondCheckpoint] = mockedSet.mock.calls[1];
+        expect(secondStart).toBe(100);
+        expect(secondWritten).toEqual(new Array<number>(5).fill(101));
+        expect(secondCheckpoint).toBe(false);
+    });
+
+    it("首段取数失败时，撤销点顺延到第一个真正写入的段", async () => {
+        let call = 0;
+        mockedGet.mockImplementation(async (_track, _param, _startFrame, frameCount) => {
+            call += 1;
+            return call === 1 ? failedPayload : asPayload(new Array<number>(frameCount).fill(60));
+        });
+        const ok = await applySelectionEditOverRanges({
+            trackId: "t1",
+            param: "pitch",
+            framePeriodMs: 5,
+            smoothnessPercent: 0,
+            ranges: [
+                { startFrame: 10, frameCount: 5 },
+                { startFrame: 100, frameCount: 5 },
+            ],
+            editSelection: (vals) => vals.map((v) => v + 1),
+        });
+        expect(ok).toBe(true);
+        expect(mockedSet).toHaveBeenCalledTimes(1);
+        expect(mockedSet.mock.calls[0][2]).toBe(100);
+        expect(mockedSet.mock.calls[0][4]).toBe(true);
+    });
+
+    it("空选区不产生任何调用", async () => {
+        const ok = await applySelectionEditOverRanges({
+            trackId: "t1",
+            param: "pitch",
+            framePeriodMs: 5,
+            smoothnessPercent: 0,
+            ranges: [],
+            editSelection: (vals) => vals,
+        });
+        expect(ok).toBe(false);
+        expect(mockedGet).not.toHaveBeenCalled();
         expect(mockedSet).not.toHaveBeenCalled();
     });
 });

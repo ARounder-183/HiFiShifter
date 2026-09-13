@@ -16,6 +16,7 @@
 import { paramsApi } from "../../../services/api";
 import type { ParamFramesPayload } from "../../../types/api";
 import type { ParamName } from "./types";
+import type { FrameRange } from "./paramSelection";
 import { applyEdgeBlend, edgeHalfSpanFramesForSelection, type EdgeShape } from "./paramSmoothing";
 
 /** 编辑延拓描述：选区外的"编辑意图"如何延展。 */
@@ -50,6 +51,12 @@ export type ApplySelectionEditArgs = {
     shape?: EdgeShape;
     /** 哨兵判定（pitch: v!==0）；返回 false 的帧不做淡化。 */
     isEditable?: (v: number) => boolean;
+    /**
+     * 是否在本段写入前打撤销点（缺省 true）。
+     * 多段批量编辑由 applySelectionEditOverRanges 只在首段置 true，
+     * 保证一次操作一个撤销点。
+     */
+    checkpoint?: boolean;
 };
 
 /**
@@ -130,6 +137,36 @@ export async function applySelectionEditWithEdgeSmoothing(
         });
     }
 
-    await paramsApi.setParamFrames(trackId, param, extStart, editedDense, true);
+    await paramsApi.setParamFrames(trackId, param, extStart, editedDense, args.checkpoint ?? true);
     return true;
+}
+
+/**
+ * 多选区版本的选区编辑：**逐段独立**执行（每段等价于一个独立的旧式选区，
+ * 断层两侧互不影响），整个批次只打一个撤销点。
+ *
+ * 「每段独立」是已确认语义：平均化取各段自己的均值、平滑化取各段自己的
+ * 高斯上下文与边界、量化取各段自己的基准，段间统计量不混合。
+ *
+ * @returns 是否至少有一段实际写回（全段取数失败时为 false）。
+ */
+export async function applySelectionEditOverRanges(
+    args: Omit<ApplySelectionEditArgs, "startFrame" | "frameCount" | "checkpoint"> & {
+        ranges: readonly FrameRange[];
+    },
+): Promise<boolean> {
+    const { ranges, ...rest } = args;
+    let wrote = false;
+    for (const range of ranges) {
+        const ok = await applySelectionEditWithEdgeSmoothing({
+            ...rest,
+            startFrame: range.startFrame,
+            frameCount: range.frameCount,
+            // 首段写入前打撤销点；此前若某段取数失败（未写回），撤销点顺延到
+            // 第一个真正写入的段，不会出现「整批无撤销点」。
+            checkpoint: !wrote,
+        });
+        if (ok) wrote = true;
+    }
+    return wrote;
 }

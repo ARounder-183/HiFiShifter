@@ -22,7 +22,7 @@
 
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::{Mutex, OnceLock};
 
@@ -461,6 +461,69 @@ pub fn clear_pending_rendered_keys() {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     map.clear();
+}
+
+// ─── 起播等待期垫音抑制（pad suppression）───────────────────────────────────────
+//
+// "垫音"指快照在当前参数渲染未命中时回退到该 clip 最近一次旧渲染（见
+// `build_snapshot` 的 seamless pad）：播放中段的参数编辑里，旧渲染正是正在
+// 播放的内容，垫音 = 编辑零中断、新渲染落地后无缝切换 —— 这是它存在的理由。
+//
+// 但**起播**时垫音是错的：用户按下播放期待听到当前参数的结果，先播一段旧
+// 版本再中途切换既出乎意料，也与"首次渲染 clip 诚实冻结"不一致。因此
+// `play_original` 武装传输层时，把本次起播仍需渲染的 clip 整体登记进本集合；
+// `build_snapshot` 对集合内的 clip 跳过垫音回退 —— 起播行为统一为"就绪即
+// 播，未就绪原地等待 + 自动恢复"，与后台预渲染开关无关。
+//
+// 生命周期：
+//   1. 登记：`play_original` 起播路径整体替换（幂等播放的早退分支不重复
+//      登记，避免改变播放中段的垫音语义）；
+//   2. 解除：`build_snapshot` 发现该 clip **当前参数**渲染命中时逐条移除
+//      —— 之后的播放中段参数编辑照常垫音；
+//   3. 清空：`handle_stop`（播放会话结束）；下一次起播整体替换登记。
+//
+// 顺序保证：登记发生在 SeekSec / UpdateTimeline / SetPlaying 入队**之前**，
+// 引擎 worker 按命令序处理，构建的首个起播快照即生效。
+
+/// 获取进程级全局垫音抑制集合。
+pub fn global_pad_suppressed_clips() -> &'static Mutex<HashSet<String>> {
+    static PAD_SUPPRESSED_CLIPS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    PAD_SUPPRESSED_CLIPS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// 起播登记：整体替换抑制集合（上次会话的残留一并清除）。
+pub fn set_pad_suppressed_clips<I>(clip_ids: I)
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut set = global_pad_suppressed_clips()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    *set = clip_ids.into_iter().collect();
+}
+
+/// `build_snapshot` 调用：该 clip 当前渲染未就绪期间是否禁止垫音。
+pub fn is_pad_suppressed(clip_id: &str) -> bool {
+    global_pad_suppressed_clips()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(clip_id)
+}
+
+/// `build_snapshot` 调用：该 clip 当前参数的渲染已就绪，解除其垫音抑制。
+pub fn remove_pad_suppressed_clip(clip_id: &str) {
+    let mut set = global_pad_suppressed_clips()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    set.remove(clip_id);
+}
+
+/// 播放会话结束：清空抑制集合（`handle_stop` 调用，下一次起播重新登记）。
+pub fn clear_pad_suppressed_clips() {
+    let mut set = global_pad_suppressed_clips()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    set.clear();
 }
 
 /// 计算整 Clip 渲染的参数哈希。

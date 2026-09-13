@@ -107,7 +107,7 @@ export async function copyClipsFromDrag(deps: CopyClipsFromDragDeps): Promise<vo
 
     dispatch(checkpointHistory());
 
-    await webApi.beginUndoGroup();
+    await webApi.beginUndoGroup("duplicate_clips");
     try {
         const targetTrackIdByClipId = new Map<string, string>();
         if (dropToNewTrack) {

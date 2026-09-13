@@ -103,7 +103,7 @@ export const FadeContextMenuHost: React.FC = () => {
     /** 首次实际提交时打开会话 undo group；已开则复用。 */
     const ensureSessionGroup = React.useCallback((): Promise<unknown> => {
         if (!sessionGroupRef.current) {
-            sessionGroupRef.current = webApi.beginUndoGroup();
+            sessionGroupRef.current = webApi.beginUndoGroup("edit_clip");
         }
         return sessionGroupRef.current;
     }, []);
@@ -178,7 +178,7 @@ export const FadeContextMenuHost: React.FC = () => {
                 // 保证"菜单外双击重置"也可单步撤销。
                 const standalone = !sessionGroupRef.current;
                 if (standalone) {
-                    sessionGroupRef.current = webApi.beginUndoGroup();
+                    sessionGroupRef.current = webApi.beginUndoGroup("edit_clip");
                 }
                 try {
                     await sessionGroupRef.current;

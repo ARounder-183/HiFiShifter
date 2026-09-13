@@ -86,8 +86,8 @@ export const pasteVocalShifterClipboard = createAsyncThunk(
     async (
         arg:
             | {
-                  selectionStartFrame?: number;
-                  selectionMaxFrames?: number;
+                  /** 参数编辑器的多选区（每段 startFrame/frameCount）；缺省 = 整体粘贴 */
+                  selectionRanges?: Array<{ startFrame: number; frameCount: number }>;
                   activeParam?: string;
               }
             | undefined,
@@ -99,8 +99,7 @@ export const pasteVocalShifterClipboard = createAsyncThunk(
             (getState() as { session: SessionState }).session.clips.map((c) => c.id),
         );
         const result = await webApi.pasteVocalShifterClipboard(
-            arg?.selectionStartFrame,
-            arg?.selectionMaxFrames,
+            arg?.selectionRanges,
             arg?.activeParam,
         );
         if (!result?.ok) {

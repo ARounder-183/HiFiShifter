@@ -123,6 +123,22 @@ export function useKeybindings(handler: KeybindingActionHandler): void {
                 }
             }
 
+            // 参数线拖拽期间，「切换拖动方向」键交由参数编辑器本地监听统一
+            // 处理（与拖拽中右键同义）。这里必须放行且不消费：
+            // - 避免同一按键既走全局派发（重复步进设置）、又在本地再切一次；
+            // - 避免叠按「精细调整」修饰键时命中其它全局兜底（如 Ctrl+D 克隆轨道）。
+            if (document.body.hasAttribute("data-piano-roll-param-drag-active")) {
+                const cycleKb = keybindingsRef.current["pianoRoll.cycleDragDirection"];
+                const fineAdjustKb = keybindingsRef.current["modifier.paramFineAdjust"];
+                if (
+                    cycleKb &&
+                    !cycleKb.modifierOnly &&
+                    matchesKeybindingAllowingFineModifier(e, cycleKb, fineAdjustKb)
+                ) {
+                    return;
+                }
+            }
+
             const domain = computeFocusDomain();
 
             const key = normalizeEventKey(e);

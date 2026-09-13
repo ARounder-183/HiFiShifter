@@ -619,40 +619,14 @@ fn mix_into_scratch_stereo(
     }
     play_start_wait.store(false, Ordering::Relaxed);
 
-    // 本块是否有实际出声：节拍器与实际出声的块同步叠加
-    // （自动暂停 / 未播放的静音路径不响节拍器）。
-    let mut metro_audible = current_ready;
+    // 到达此处 current_ready 必为 true（未就绪窗口已在上方冻结早退）。
+    // 旧实现"fade-from 快照就绪而当前快照未就绪时播陈旧内容推进"的分支随
+    // 无条件冻结的引入而不可达，已删除：等待期间绝不播放编辑前的陈旧内容。
 
     if let Some(from_snapshot) = transition.fade_from_snapshot.as_ref() {
-        let from_ready = if current_ready {
-            render_snapshot_window(frames, from_snapshot, pos0, pos1, scratch_fade_from, None)
-        } else {
-            // Output this block comes from the fade-from snapshot; meter it.
-            meter.reset(from_snapshot.track_ids.len());
-            render_snapshot_window(
-                frames,
-                from_snapshot,
-                pos0,
-                pos1,
-                scratch_fade_from,
-                Some(&mut *meter),
-            )
-        };
-
-        if from_ready && !current_ready {
-            scratch.resize(scratch_fade_from.len(), 0.0);
-            scratch.copy_from_slice(scratch_fade_from.as_slice());
-            // 该块出声来自 fade-from 快照且推进位置：节拍器随实际出声叠加，
-            // 不能因为走了这条早退分支就静音（编辑触发后台预渲染期间，
-            // 旧快照内容可持续数秒）。
-            metro_voices.mix(scratch, metro, pos0, pos1, snap.sample_rate);
-            advance_playback_position(frames, is_playing, position_frames, duration_frames);
-            // 陈旧内容推进中：音频在出声，非等待态。
-            play_start_wait.store(false, Ordering::Relaxed);
-            return Some(BlockRender { snapshot: snap });
-        }
-
-        if from_ready && current_ready && transition.fade_remaining_frames > 0 {
+        let from_ready =
+            render_snapshot_window(frames, from_snapshot, pos0, pos1, scratch_fade_from, None);
+        if from_ready && transition.fade_remaining_frames > 0 {
             // 直接就地混合，删掉极其耗时的 scratch.clone()
             blend_snapshot_windows_in_place(
                 scratch.as_mut_slice(),
@@ -661,29 +635,20 @@ fn mix_into_scratch_stereo(
             );
             transition.fade_remaining_frames =
                 transition.fade_remaining_frames.saturating_sub(frames);
-            if transition.fade_remaining_frames == 0 {
-                transition.fade_from_snapshot = None;
-            }
-        } else if current_ready {
+        }
+        if !from_ready || transition.fade_remaining_frames == 0 {
+            // fade-from 未就绪（陈旧内容绝不参与出声）或交叉淡化已完成：
+            // 结束过渡，后续块按当前快照推进。
             transition.fade_from_snapshot = None;
             transition.fade_remaining_frames = 0;
         }
-
-        if !from_ready && !current_ready {
-            // 两个快照都未就绪（后台预渲染等待期）：本块静音推进，
-            // 节拍器不得在静音上响。
-            metro_audible = false;
-        }
     }
 
-    // 节拍器叠加：仅在实际出声的块上（见 metro_audible）。
-    if metro_audible {
-        metro_voices.mix(scratch, metro, pos0, pos1, snap.sample_rate);
-    }
+    // 节拍器与实际出声的块同步叠加：未播放 / 冻结等待的静音块已在上方早退，
+    // 到达此处必然出声。
+    metro_voices.mix(scratch, metro, pos0, pos1, snap.sample_rate);
 
-    if current_ready || transition.fade_from_snapshot.is_some() {
-        advance_playback_position(frames, is_playing, position_frames, duration_frames);
-    }
+    advance_playback_position(frames, is_playing, position_frames, duration_frames);
     Some(BlockRender { snapshot: snap })
 }
 

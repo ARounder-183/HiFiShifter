@@ -444,6 +444,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     // 轨道头底部按此留出同高占位（bottomGutterHeightPx），保证轨道头与
     // 时间轴区域的竖直滚动范围严格一致。
     const [horizontalScrollbarGutterPx, setHorizontalScrollbarGutterPx] = React.useState(0);
+    // 【已删除：timelineViewportHeightPx】它只为旧实现的 `TimelineSurface` 的
+    // `playheadHeightPx` 供数（把播放光标延伸到时间轴可视区底部）。内核路径的
+    // 播放头是内核容器（视口元素）的直接子节点、恒 `top-0 bottom-0`，高度天然
+    // 等于可视区高度，无需测量——留着这个 state 只会是永不读取的死状态。
     const [quickExportDialog, setQuickExportDialog] = React.useState<{
         open: boolean;
         clipIds: string[];
@@ -981,7 +985,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             // 交叉点双列循环 = 一次手势：开 undo group 把两侧循环合并为
             // 单个撤销步（否则两笔 checkpoint:true 会变成两个撤销步）。
             void (async () => {
-                await webApi.beginUndoGroup();
+                await webApi.beginUndoGroup("edit_clip");
                 try {
                     for (const side of sides) {
                         cycleOneFade(side.clipId, side.isOut ? "out" : "in", false);
@@ -3317,11 +3321,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
      * 这条契约与渲染模式无关（内核 / 旧实现共用同一入口）。
      */
     const handleKernelDoubleClickClip = React.useCallback(
-        (clipId: string) => {
+        (clipId: string, mode: "replace" | "toggle" = "replace") => {
             clearContextMenu();
             window.dispatchEvent(
                 new CustomEvent("hifi:editOp", {
-                    detail: { op: "selectClipParamRange", clipId },
+                    // mode 缺省 replace（不传即旧行为）；按住
+                    // `modifier.clipRangeToParamSelection`（默认 Alt）双击时内核
+                    // 传 "toggle"，由参数编辑器并入 / 挖掉该块范围。
+                    detail: { op: "selectClipParamRange", clipId, mode },
                 }),
             );
         },
@@ -4900,6 +4907,31 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                       onExportMidi={(ids) => {
                                           setContextMenu(null);
                                           void handleExportMidi(ids);
+                                      }}
+                                      onAddToParamSelection={(ids) => {
+                                          // 批量入口：把所选音频块的时间范围并入
+                                          // 参数编辑器选区（隐藏菜单由 PianoRollPanel
+                                          // 消费，按当前根轨道组过滤，见 handleEditOp）。
+                                          setContextMenu(null);
+                                          window.dispatchEvent(
+                                              new CustomEvent("hifi:editOp", {
+                                                  detail: {
+                                                      op: "addClipsToParamSelection",
+                                                      clipIds: ids,
+                                                  },
+                                              }),
+                                          );
+                                      }}
+                                      onRemoveFromParamSelection={(ids) => {
+                                          setContextMenu(null);
+                                          window.dispatchEvent(
+                                              new CustomEvent("hifi:editOp", {
+                                                  detail: {
+                                                      op: "removeClipsFromParamSelection",
+                                                      clipIds: ids,
+                                                  },
+                                              }),
+                                          );
                                       }}
                                       onFadeShapeChange={(clipId, target, shape) => {
                                           // 切换形状必须重置曲率（REAPER 语义：各形状的

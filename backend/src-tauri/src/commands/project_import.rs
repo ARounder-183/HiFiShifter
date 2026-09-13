@@ -118,7 +118,7 @@ pub(super) fn import_project(
 
     let (merge_result, scale_signature_before, tempo_map_imported, tempo_map_skipped) = {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-        state.checkpoint_timeline(&tl);
+        state.checkpoint_timeline(&tl, crate::state::HistoryOp::ImportProject);
 
         let scale_signature_before = tl.render_scale_signature();
         let anchor_sec = if place_at_playhead.unwrap_or(false) {

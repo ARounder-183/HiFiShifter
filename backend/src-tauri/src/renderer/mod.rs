@@ -10,6 +10,7 @@
 pub(crate) mod chain;
 pub(crate) mod common_params;
 pub(crate) mod hifigan;
+pub(crate) mod progress;
 mod traits;
 mod utils;
 pub(crate) mod world;

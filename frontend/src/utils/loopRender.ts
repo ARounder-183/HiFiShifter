@@ -17,6 +17,11 @@
  * `resolveLoopCycleDescriptor`（原在 `MidiPitchTrackCanvas` 中，该组件随内核
  * 改造成为孤儿后已删除，数学搬进前者）——有源媒体 → D；无源媒体 → 窗口跨度，
  * 与音频波形画布的推导保持一致。
+ *
+ * 【合并说明】feature/tools 分支另有一份 `timelinePitchLineRenderer.ts` 携带
+ * 同名数学（那是它把音高线迁到独立 sticky 层时的产物）。两条实现**只能留一条**：
+ * 本分支的音高线由细节层（`timelineCanvasRenderer`）绘制，故保留
+ * `midiPitchCurve.ts`，那一份已随该分支的组件一并删除。
  */
 
 /**
@@ -186,9 +191,13 @@ export function resolveClipContentDurationSec(clip: {
 /**
  * 在波形渲染区域内绘制回绕节点的"倒三角"标记。
  *
- * 坐标系：与 WaveformTrackCanvas / MIDI 音高折线层
- * （`timeline/runtime/midiPitchCurve.ts` + `timelineCanvasRenderer`）一致 ——
- * canvas 左边缘对应视口起点，x 单位为 CSS 像素，y 从波形区顶部开始。
+ * 坐标系：x 使用调用方当前的画布坐标（内容绝对或视口局部均可，由调用方
+ * 保证与曲线同一坐标系）；y 从波形区顶部开始（调用方需自行 translate 到
+ * 波形区顶部），x 单位为 CSS 像素。
+ *
+ * 当前唯一调用方是细节层 `timeline/runtime/timelineCanvasRenderer.ts`
+ * （配合 `timeline/runtime/midiPitchCurve.ts` 求出的标记位置）：它已把画布
+ * 平移到内容绝对坐标，并把原点再平移到 clip body 左上角后调用本函数。
  *
  * @param ctx          Canvas 2D 上下文
  * @param markers      每个标记的水平位置（canvas 本地 CSS 像素）

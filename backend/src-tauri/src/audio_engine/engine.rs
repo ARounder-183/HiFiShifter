@@ -1010,6 +1010,11 @@ fn handle_stop(s: &mut EngineWorkerState) {
     s.position_frames.store(0, Ordering::Relaxed);
     *s.last_play_file = None;
     idle_track_meter_state(s.meter_state, s.meter_generation);
+    // ★ 起播等待期的垫音抑制随播放会话结束而清空：抑制集合表达的是"本次
+    // 起播时哪些 clip 未就绪"（见 synth_clip_cache 的垫音抑制说明），跨会话
+    // 残留会让下一次播放中段的参数编辑被错误地禁止垫音。下一次 play_original
+    // 会按当时的渲染状态整体重新登记。
+    crate::synth_clip_cache::clear_pad_suppressed_clips();
     // ★ 不再在停止时清空 pending_rendered_keys：key 在渲染失效处按需移除
     //（见 invalidate_clip_all_caches），始终与缓存条目一致；清空只会让下一次
     // 播放的首个快照把已渲染 clip 判为未渲染 —— 无谓的"起播即静音等待"。
@@ -1582,15 +1587,24 @@ fn handle_clip_pitch_ready(s: &mut EngineWorkerState, clip_id: String) {
         debug_eprintln!("[engine] Snapshot stored, handle_clip_pitch_ready done");
 
         // 若此前后台预渲染因为音高分析未完成而跳过了一些 clip，
-        // 现在缓存已经就绪，补触发一次后台渲染，避免用户等待进度结束后
+        // 现在缓存已经就绪，补触发一次渲染，避免用户等待进度结束后
         // 首次播放时仍要重新渲染。
-        if crate::commands::playback::AUTO_BG_RENDER_ENABLED
-            .load(std::sync::atomic::Ordering::Relaxed)
-            && crate::commands::playback::BG_RENDER_PITCH_PENDING
-                .swap(false, std::sync::atomic::Ordering::AcqRel)
+        // 触发规则与 handle_update_timeline 的"开关启用 || 传输层播放"一致：
+        // 后台预渲染关闭时，播放触发的按需渲染同样依赖这些 clip 的结果 ——
+        // 分析完成前被跳过的 clip 若不补渲染，原地等待中的传输层会一直冻结
+        //（直到用户再按一次播放）。标志先消费再分流：无动作可做时不复原
+        // 旧标记，避免后续开启 AUTO 时被陈旧标记触发多余渲染。
+        if crate::commands::playback::BG_RENDER_PITCH_PENDING
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
         {
             if let Some(app) = s.app_handle.as_ref() {
-                let _ = crate::commands::playback::request_background_render(app);
+                let auto_enabled = crate::commands::playback::AUTO_BG_RENDER_ENABLED
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                if auto_enabled {
+                    let _ = crate::commands::playback::request_background_render(app);
+                } else if s.is_playing.load(std::sync::atomic::Ordering::Relaxed) {
+                    crate::commands::playback::ensure_render_pass_running(app);
+                }
             }
         }
     }

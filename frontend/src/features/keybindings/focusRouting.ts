@@ -130,7 +130,9 @@ export type EditOp =
     | "group"
     | "ungroup"
     | "cycleTake"
-    | "cycleTakePrev";
+    | "cycleTakePrev"
+    | "addClipsToParamSelection"
+    | "removeClipsFromParamSelection";
 
 /** 事件通道即契约：hifi:editOp 只属于参数编辑器，hifi:timelineEditOp 只属于时间轴。 */
 export type EditOpChannel = "hifi:editOp" | "hifi:timelineEditOp";
@@ -158,6 +160,10 @@ export const ACTION_TO_EDIT_OP: Partial<Record<ActionId, EditOp>> = {
     "edit.selectAll": "selectAll",
     "edit.deselect": "deselect",
     "edit.pasteTracks": "pasteTracks",
+    // 音频块范围 → 参数编辑器选区：消费端固定为参数编辑器（App.tsx 中有
+    // 定向派发分支），因此不受活动表面影响 —— 焦点在时间轴上按快捷键也能用。
+    "edit.addClipsToParamSelection": "addClipsToParamSelection",
+    "edit.removeClipsFromParamSelection": "removeClipsFromParamSelection",
 };
 
 /**

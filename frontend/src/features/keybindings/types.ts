@@ -30,6 +30,8 @@ export type ActionId =
     | "edit.meanQuantize" // 均值量化
     | "edit.pasteVocalShifter" // 粘贴 VocalShifter 剪贴板
     | "edit.pasteTracks" // 作为新轨道组粘贴
+    | "edit.addClipsToParamSelection" // 把选中音频块的范围加入参数编辑器选区
+    | "edit.removeClipsFromParamSelection" // 从参数编辑器选区中移除选中音频块的范围
     // 工程
     | "project.new" // 新建工程
     | "project.open" // 打开工程
@@ -47,6 +49,8 @@ export type ActionId =
     | "track.delete" // 删除选中轨道
     | "track.selectUp" // 选择上一条轨道
     | "track.selectDown" // 选择下一条轨道
+    | "track.toggleMute" // 静音/取消静音选中轨道
+    | "track.toggleSolo" // 独奏/取消独奏选中轨道
     // Clip 操作
     | "clip.delete" // 删除选中 clip
     | "clip.copy" // 复制 clip
@@ -78,6 +82,7 @@ export type ActionId =
     | "pianoRoll.vibratoDragAmplitudeDecrease" // 直线/颤音拖拽时减小振幅
     | "pianoRoll.vibratoDragFrequencyIncrease" // 直线/颤音拖拽时增大频率
     | "pianoRoll.vibratoDragFrequencyDecrease" // 直线/颤音拖拽时减小频率
+    | "pianoRoll.cycleDragDirection" // 循环切换当前工具的拖动方向（拖拽中同样生效）
     // 模式切换
     | "mode.toggle" // 模式切换（正向）
     | "mode.selectTool" // 切换到选择工具
@@ -102,6 +107,8 @@ export type ActionId =
     | "modifier.pianoKeysVerticalScroll" // 钢琴键垂直滚动（按住+滚轮）
     | "modifier.pianoKeysVerticalZoom" // 钢琴键垂直缩放（按住+滚轮）
     | "modifier.paramMorph" // 参数编辑器形变模式（按住）
+    | "modifier.paramMultiSelect" // 参数编辑器多选区（按住拖动追加一段；按住点击已有段取消该段）
+    | "modifier.clipRangeToParamSelection" // 按住并双击音频块：把该块范围追加/移出参数编辑器选区
     | "modifier.paramFineAdjust" // 精细调整（按住）
     | "modifier.vibratoAmplitudeAdjust" // 颤音绘制时滚轮调振幅
     | "modifier.vibratoFrequencyAdjust" // 颤音绘制时滚轮调频率
@@ -140,6 +147,8 @@ export type ModifierConflictScene =
     | "clip.move"
     // 时间轴：音频块点击选择（多选切换 / 范围选择）
     | "clip.select"
+    // 时间轴：音频块双击 → 参数编辑器选区（替换 / 追加 / 取消该块范围）
+    | "clip.rangeToParamSelect"
     // 时间轴：音频块边缘 trim/stretch
     | "clip.edge"
     // 时间轴：音频块增益旋钮拖拽（微调）
@@ -152,6 +161,8 @@ export type ModifierConflictScene =
     | "tempo.ruler"
     // 钢琴卷帘：参数线拖拽（绘制/整体移动）
     | "roll.paramDrag"
+    // 钢琴卷帘：参数选区构建（框选 / 追加段 / 取消段）
+    | "roll.select"
     // 钢琴卷帘：参数形变锚点拖拽
     | "roll.morph"
     // 钢琴卷帘：参数选区边缘拉伸

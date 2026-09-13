@@ -59,6 +59,13 @@ export interface UiSettings {
         syncAllTakes?: boolean;
     };
     quickSearchAutoNormalize?: boolean;
+    /**
+     * **新建工程**默认是否保存 UNDO 操作记录数据（默认开启）。
+     *
+     * 保存时是否写出由工程级开关（`project.saveUndoHistory`）决定；打开工程
+     * 时总是尝试读取伴生文件。
+     */
+    saveUndoHistoryByDefault?: boolean;
     visibleReferenceRootTrackIds?: string[];
     defaultStretchAlgorithm?: StretchAlgorithmOption;
     defaultHifiganMelStretch?: boolean;

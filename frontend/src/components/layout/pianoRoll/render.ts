@@ -19,6 +19,9 @@
  */
 
 import type { ParamMorphOverlay, ParamName, ParamViewSegment, ValueViewport } from "./types";
+import type { ParamSelection } from "./paramSelection";
+import { beatRangesToFrameRanges } from "./paramSelection";
+import { clipboardPreviewSpans, type ParamClipboardData } from "./paramClipboardMapping";
 import { normalizeCssColor, resolvePianoRollColors } from "./colors";
 import { clamp } from "../timeline";
 import { clearCanvasPhysical, rasterize } from "../renderKernel/canvasRaster";
@@ -336,7 +339,8 @@ export function drawPianoRoll(args: {
     showSecondaryParam: boolean;
     overlayText?: string | null;
     liveEditOverride: { key: string; edit: number[] } | null;
-    selection: { aBeat: number; bBeat: number } | null;
+    /** 多选区（有序、互不相交的 beat 区间列表；null = 无选区） */
+    selection: ParamSelection | null;
     /**
      * 统一投影：本函数内**所有**时间↔像素换算的唯一来源。
      * 不再单独接收 pxPerSec / scrollLeft，避免图层各自执行 `t*p - s`。
@@ -351,12 +355,10 @@ export function drawPianoRoll(args: {
     detectedPitchCurves?: DetectedPitchCurve[];
     /** 是否为深色主题（默认 true） */
     isDark?: boolean;
-    /** 剪贴板预览数据（选区内渲染半透明预览曲线） */
-    clipboardPreview?: {
-        param: ParamName;
-        framePeriodMs: number;
-        values: number[];
-    } | null;
+    /** 剪贴板数据（按「剪贴板 → 目标选区」映射渲染虚线预览；断层处不画） */
+    clipboardPreview?: ParamClipboardData | null;
+    /** 形变控制线（每个选区段一条；null = 不显示） */
+    paramMorphOverlays?: ParamMorphOverlay[] | null;
     // 【已删除的入参】随下方"已删除的 Canvas2D 音高网格分支"一并移除（它们在
     // 本函数里已无任何读者，留着只会让调用方以为"传了就有效"）：
     //   `skipGrid`（网格恒由 GL 绘制）、`projectScale` / `scaleSegments` /
@@ -364,7 +366,10 @@ export function drawPianoRoll(args: {
     //   `toolMode` / `snapToggleHeld`（吸附与工具态的可视化从未在本函数里实现过）。
     // 音阶高亮的新输入是 `PianoRollGridSpec.scaleNotes` / `scaleHighlightRgba`
     // （见 `PianoRollPanel.buildGridSpec`）。
-    paramMorphOverlay?: ParamMorphOverlay | null;
+    // 【合并说明】feature/tools 分支另加了 `paramMorphOverlay`（单数，配合其
+    // 单区间选区）；本分支的选区已统一为多区间 `ParamSelection`，形变控制线随之
+    // 为每段一条，故只保留复数形态 `paramMorphOverlays`，不并留单数副本
+    // （两个入参并存会出现"传了单数却没画"的静默失效）。
     /** 自定义字体族，用于 canvas 文本渲染 */
     fontFamily?: string;
     /**
@@ -401,7 +406,7 @@ export function drawPianoRoll(args: {
      * 跳过**曲线图层**（已由 GL 绘制）。
      *
      * 特殊说明：跳过的范围与 `PianoRollCurveLayer` 一一对应——参考线、检测曲线、
-     * 副参数、原始 / 编辑曲线、选区高亮、剪贴板预览。`paramMorphOverlay`（morph 手柄，
+     * 副参数、原始 / 编辑曲线、选区高亮、剪贴板预览。`paramMorphOverlays`（morph 手柄，
      * 含 `arc`）**不**在曲线层内，仍由本函数绘制；它是编辑态叠加物而非曲线本身。
      *
      * 【与 `skipAxisCanvas` 等同一约定】生产调用方恒传 `true`（曲线只有 GL 一个
@@ -469,7 +474,7 @@ export function drawPianoRoll(args: {
         detectedPitchCurves,
         isDark = true,
         clipboardPreview,
-        paramMorphOverlay,
+        paramMorphOverlays,
         fontFamily,
         skipKeyboardGeometry = false,
         skipAxisText = false,
@@ -844,22 +849,22 @@ export function drawPianoRoll(args: {
         }
     }
 
-    // Selection (time band)
+    // Selection (time band)：多选区逐段绘制（断层处自然不画）
     //
     // 【阶段 3 修正】选区**必须画在曲线之下**：Canvas2D 的历史行为就是先画选区、
     // 再画各条曲线（对比 `render.ts` 中本段与下方曲线段的先后），因此它的半透明
     // 填充与边框不会遮挡曲线。阶段 2 曾把它与播放头一起搬到曲线上方的叠加层，
     // 造成层序反转（曲线被 8% 蓝填充染色）；此处修正为留在主画布。
-    if (selection) {
-        const a = Math.min(selection.aBeat, selection.bBeat);
-        const b = Math.max(selection.aBeat, selection.bBeat);
-        // 选区数据是 beat 单位：先转 sec 再统一投影，不构造 pxPerBeat。
-        const x0 = secToViewportPx(axis, a * beatToSec);
-        const x1 = secToViewportPx(axis, b * beatToSec);
+    if (selection && selection.length > 0) {
         ctx.fillStyle = "rgba(100, 200, 255, 0.08)";
-        ctx.fillRect(x0, 0, x1 - x0, h);
         ctx.strokeStyle = "rgba(100, 200, 255, 0.30)";
-        ctx.strokeRect(x0 + 0.5, 0.5, Math.max(0, x1 - x0 - 1), h - 1);
+        for (const range of selection) {
+            // 选区数据是 beat 单位：先转 sec 再统一投影，不构造 pxPerBeat。
+            const x0 = secToViewportPx(axis, range.startBeat * beatToSec);
+            const x1 = secToViewportPx(axis, range.endBeat * beatToSec);
+            ctx.fillRect(x0, 0, x1 - x0, h);
+            ctx.strokeRect(x0 + 0.5, 0.5, Math.max(0, x1 - x0 - 1), h - 1);
+        }
     }
 
     // 若音高分析进行中，跳过曲线绘制（进度条已显示状态）
@@ -1078,17 +1083,16 @@ export function drawPianoRoll(args: {
             ctx.restore();
         }
 
-        // 选区内曲线高亮：在选区范围内用亮蓝色加粗重绘编辑曲线
-        if (!skipCurves && selection && editValues.length >= 2) {
-            const selMinBeat = Math.min(selection.aBeat, selection.bBeat);
-            const selMaxBeat = Math.max(selection.aBeat, selection.bBeat);
-            const selX0 = secToViewportPx(axis, selMinBeat * beatToSec);
-            const selX1 = secToViewportPx(axis, selMaxBeat * beatToSec);
-
+        // 选区内曲线高亮：在每一段选区范围内用亮蓝色加粗重绘编辑曲线。
+        // 多段用同一条路径（nonzero 填充规则取并集）一次 clip，避免逐段重绘整条曲线。
+        if (!skipCurves && selection && selection.length > 0 && editValues.length >= 2) {
             ctx.save();
-            // 裁剪到选区范围
             ctx.beginPath();
-            ctx.rect(selX0, 0, selX1 - selX0, h);
+            for (const range of selection) {
+                const x0 = secToViewportPx(axis, range.startBeat * beatToSec);
+                const x1 = secToViewportPx(axis, range.endBeat * beatToSec);
+                ctx.rect(x0, 0, x1 - x0, h);
+            }
             ctx.clip();
 
             ctx.strokeStyle = colors.selectionCurve;
@@ -1109,70 +1113,71 @@ export function drawPianoRoll(args: {
             ctx.restore();
         }
 
-        // 剪贴板预览曲线：在选区范围内渲染半透明虚线预览
-        // 起始点与选区起始点对齐，超出选区的部分直接裁掉（不压缩）
+        // 剪贴板预览曲线：按「剪贴板 → 目标选区」映射逐段渲染半透明虚线。
+        // 与粘贴共用 paramClipboardMapping 的唯一映射规则，因此断层处不会画线
+        // （既不会压缩成连续曲线、也不会填平断层），预览即最终落盘结果。
         if (
             !skipCurves &&
             clipboardPreview &&
             selection &&
-            clipboardPreview.param === editParam &&
-            clipboardPreview.values.length > 0
+            selection.length > 0 &&
+            clipboardPreview.param === editParam
         ) {
-            const selMinBeat = Math.min(selection.aBeat, selection.bBeat);
-            const selMaxBeat = Math.max(selection.aBeat, selection.bBeat);
-            const selStartSec = selMinBeat * beatToSec;
-            const selEndSec = selMaxBeat * beatToSec;
-
-            const cbFp = Math.max(1e-6, clipboardPreview.framePeriodMs);
-
-            const selX0 = secToViewportPx(axis, selStartSec);
-            const selX1 = secToViewportPx(axis, selEndSec);
-
-            ctx.save();
-            // 裁剪到选区范围
-            ctx.beginPath();
-            ctx.rect(selX0, 0, selX1 - selX0, h);
-            ctx.clip();
-
-            // 剪贴板预览与选区高亮同用青蓝色相（虚线+降不透明度区分），
-            // 不再占用琥珀色相 —— 琥珀属于编辑包络线本体。
-            ctx.strokeStyle = isDark ? "rgba(100, 200, 255, 0.55)" : "rgba(0, 116, 200, 0.60)";
-            ctx.lineWidth = 2;
-            ctx.setLineDash(getFixedDashPattern(4, 4));
-            ctx.beginPath();
-
-            let started = false;
-            for (let i = 0; i < clipboardPreview.values.length; i++) {
-                // 不缩放，直接按原始帧间距排列
-                const tSec = selStartSec + (i * cbFp) / 1000;
-                // 超出选区结束点则停止
-                if (tSec > selEndSec) break;
-                const x = secToViewportPx(axis, tSec);
-                const rawValue = clipboardPreview.values[i] ?? 0;
-                const mappedValue = editParam === "pitch" ? rawValue + 0.5 : rawValue;
-                const y = valueToY(editParam, mappedValue, h);
-                if (!started) {
-                    ctx.moveTo(x, y);
-                    started = true;
-                } else {
-                    ctx.lineTo(x, y);
+            const frameRanges = beatRangesToFrameRanges(
+                selection,
+                secPerBeat,
+                paramView.framePeriodMs,
+            );
+            const spans = clipboardPreviewSpans({
+                targetRanges: frameRanges,
+                clipboard: clipboardPreview,
+                targetFramePeriodMs: paramView.framePeriodMs,
+            });
+            if (spans.length > 0) {
+                ctx.save();
+                // 预览与选区高亮同用青蓝色相（虚线+降不透明度区分），
+                // 不再占用琥珀色相 —— 琥珀属于编辑包络线本体。
+                ctx.strokeStyle = isDark
+                    ? "rgba(100, 200, 255, 0.55)"
+                    : "rgba(0, 116, 200, 0.60)";
+                ctx.lineWidth = 2;
+                ctx.setLineDash(getFixedDashPattern(4, 4));
+                for (const span of spans) {
+                    const fp = Math.max(1e-6, span.framePeriodMs);
+                    ctx.beginPath();
+                    let started = false;
+                    for (let i = 0; i < span.values.length; i++) {
+                        const tSec = span.startSec + (i * fp) / 1000;
+                        const x = secToViewportPx(axis, tSec);
+                        const rawValue = span.values[i] ?? 0;
+                        const mappedValue = editParam === "pitch" ? rawValue + 0.5 : rawValue;
+                        const y = valueToY(editParam, mappedValue, h);
+                        if (!started) {
+                            ctx.moveTo(x, y);
+                            started = true;
+                        } else {
+                            ctx.lineTo(x, y);
+                        }
+                    }
+                    ctx.stroke();
                 }
+                ctx.restore();
             }
-            ctx.stroke();
-            ctx.restore();
         }
 
-        if (paramMorphOverlay) {
-            drawParamMorphOverlay({
-                ctx,
-                overlay: paramMorphOverlay,
-                editParam,
-                framePeriodMs: paramView.framePeriodMs,
-                axis,
-                h,
-                valueToY,
-                isDark,
-            });
+        if (paramMorphOverlays && paramMorphOverlays.length > 0) {
+            for (const overlay of paramMorphOverlays) {
+                drawParamMorphOverlay({
+                    ctx,
+                    overlay,
+                    editParam,
+                    framePeriodMs: paramView.framePeriodMs,
+                    axis,
+                    h,
+                    valueToY,
+                    isDark,
+                });
+            }
         }
     }
 

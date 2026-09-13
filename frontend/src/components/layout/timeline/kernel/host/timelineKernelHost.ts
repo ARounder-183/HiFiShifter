@@ -64,6 +64,7 @@ import {
     resolveThemeColor,
 } from "../../runtime/timelineCanvasStyle";
 import { hitClipHeaderControl, type ClipHeaderControl } from "../interaction/clipHeaderControls";
+import { resolveClipDoubleClickMode } from "../interaction/clipDoubleClickMode";
 import { isFadeShapeCycleModifierHeld } from "../../fadeShapeCycle";
 import { noteFadeLinePointerDown } from "../../hooks/fadeLineClickGesture";
 import { effectiveFadeSec, hitClipFadeTarget } from "../interaction/fadeTargets";
@@ -183,6 +184,20 @@ export interface TimelineKernelData {
          * `selectClipRangeByRect`）。
          */
         readonly clipRangeSelect: Keybinding | null;
+        /**
+         * 音频块范围 → 参数编辑器选区（`modifier.clipRangeToParamSelection`，
+         * 默认 Alt）。
+         *
+         * 修饰键 + **双击** clip = 把该块范围并入参数编辑器选区；若该块范围已被
+         * 完整覆盖则挖掉（同一个块连按两次回到原状）。实际改选动作由
+         * `PianoRollPanel` 执行，本内核只负责判定修饰键，并把
+         * `mode: "toggle"` 随 `onDoubleClickClip` 的第二个参数传出去。
+         *
+         * 【为什么绑双击】单击已被「替换选区」占用；Ctrl 在时间轴上属于多选切换、
+         * Shift 属于范围选择，而 Alt 在**点击**层面是空的（它的绑定都是拖拽：
+         * slip / stretch / 淡变曲率），因此不与任何既有手势冲突。
+         */
+        readonly clipRangeToParamSelection: Keybinding | null;
     };
     /** 水平缩放是否以播放头为锚点（`playheadZoomEnabled`）。 */
     readonly playheadZoomEnabled: boolean;
@@ -443,8 +458,13 @@ export interface TimelineKernelInteractions {
      * 旧实现语义：请求参数编辑器按 clip 起止范围创建选区，并把交互焦点切到
      * 参数编辑器（见 `ClipItem` 的 `hifi:editOp/selectClipParamRange`）。
      * 内核只负责识别手势，事件派发与焦点切换由面板完成。
+     *
+     * @param clipId 目标 clip。
+     * @param mode 选区写入方式：缺省 `"replace"`（替换为本次范围，与旧行为逐字
+     *   一致）；按住 `keybindings.clipRangeToParamSelection`（默认 Alt）双击时为
+     *   `"toggle"`（该块范围已完整覆盖则挖掉，否则并入 —— 连按两次回到原状）。
      */
-    readonly onDoubleClickClip?: (clipId: string) => void;
+    readonly onDoubleClickClip?: (clipId: string, mode?: "replace" | "toggle") => void;
     /**
      * 切换 clip 静音（单击 header 的静音徽标）。
      *
@@ -2803,7 +2823,17 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                         anchor.y,
                     );
                 } else {
-                    interactions?.onDoubleClickClip?.(hit.clip.id);
+                    // 按住 `modifier.clipRangeToParamSelection`（默认 Alt）双击 =
+                    // 「并入 / 挖掉」该块范围（见 `PianoRollPanel` 的 toggle 分支）；
+                    // 不按修饰键仍是替换选区，与旧行为逐字一致。判定抽在纯函数里，
+                    // 见 `interaction/clipDoubleClickMode` 的说明（该手势曾被合并吞掉）。
+                    interactions?.onDoubleClickClip?.(
+                        hit.clip.id,
+                        resolveClipDoubleClickMode(
+                            data().keybindings.clipRangeToParamSelection,
+                            event,
+                        ),
+                    );
                 }
                 return;
             }

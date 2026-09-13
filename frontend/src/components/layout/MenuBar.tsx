@@ -130,6 +130,8 @@ const selectMenuBarSession = (state: RootState) => {
         defaultStretchAlgorithm: session.defaultStretchAlgorithm,
         edgeSmoothnessPercent: session.edgeSmoothnessPercent,
         editParam: session.editParam,
+        historyRedoDepth: session.historyRedoDepth,
+        historyUndoDepth: session.historyUndoDepth,
         multiSelectedClipIds: session.multiSelectedClipIds,
         ortDeviceId: session.ortDeviceId,
         ortEp: session.ortEp,
@@ -621,17 +623,33 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     <span>{t("menu_edit")}</span>
                 </DropdownMenu.Trigger>
                 <DropdownMenu.Content variant="soft" color="gray">
-                    <DropdownMenu.Item onSelect={() => void dispatch(undoRemote())}>
+                    {/* 无可撤销/可重做状态时置灰（不发请求、不刷新界面）：
+                        深度镜像由后端 history_state 广播实时维护。 */}
+                    <DropdownMenu.Item
+                        disabled={s.historyUndoDepth <= 0}
+                        onSelect={() => void dispatch(undoRemote())}
+                    >
                         {t("menu_undo")}{" "}
                         <div className="ml-auto pl-4 text-xs text-qt-text-muted">
                             {shortcutLabel("edit.undo")}
                         </div>
                     </DropdownMenu.Item>
-                    <DropdownMenu.Item onSelect={() => void dispatch(redoRemote())}>
+                    <DropdownMenu.Item
+                        disabled={s.historyRedoDepth <= 0}
+                        onSelect={() => void dispatch(redoRemote())}
+                    >
                         {t("menu_redo")}{" "}
                         <div className="ml-auto pl-4 text-xs text-qt-text-muted">
                             {shortcutLabel("edit.redo")}
                         </div>
+                    </DropdownMenu.Item>
+                    {/* 「操作记录」窗口：非模态浮动面板（经事件交由 ActionBar 打开） */}
+                    <DropdownMenu.Item
+                        onSelect={() =>
+                            window.dispatchEvent(new CustomEvent("hifi:open-undo-history"))
+                        }
+                    >
+                        {tAny("undo_history_title")}
                     </DropdownMenu.Item>
                     <DropdownMenu.Separator />
                     {/* 剪贴板：剪切 / 复制 */}
@@ -680,6 +698,24 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         {tAny("menu_deselect")}{" "}
                         <div className="ml-auto pl-4 text-xs text-qt-text-muted">
                             {shortcutLabel("edit.deselect")}
+                        </div>
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Separator />
+                    {/* 音频块范围 → 参数编辑器选区（批量入口）。标签直接复用
+                        快捷键设置里的动作名：菜单与设置面板共用同一份文案，
+                        避免两处翻译漂移。 */}
+                    <DropdownMenu.Item onSelect={() => dispatchEditOp("addClipsToParamSelection")}>
+                        {tAny("kb_edit_add_clips_to_param_selection")}{" "}
+                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                            {shortcutLabel("edit.addClipsToParamSelection")}
+                        </div>
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item
+                        onSelect={() => dispatchEditOp("removeClipsFromParamSelection")}
+                    >
+                        {tAny("kb_edit_remove_clips_from_param_selection")}{" "}
+                        <div className="ml-auto pl-4 text-xs text-qt-text-muted">
+                            {shortcutLabel("edit.removeClipsFromParamSelection")}
                         </div>
                     </DropdownMenu.Item>
                 </DropdownMenu.Content>

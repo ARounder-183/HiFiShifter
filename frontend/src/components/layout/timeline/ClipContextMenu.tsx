@@ -291,6 +291,10 @@ export const ClipContextMenu: React.FC<{
     onConvertToPitchRef?: (ids: string[]) => void;
     onUpdatePitchRef?: (ids: string[]) => void;
     onExportMidi?: (ids: string[]) => void;
+    /** 把所选 Clip 的时间范围并入参数编辑器选区（只作用于同一根轨道组）。 */
+    onAddToParamSelection?: (ids: string[]) => void;
+    /** 从参数编辑器选区中挖掉所选 Clip 的时间范围。 */
+    onRemoveFromParamSelection?: (ids: string[]) => void;
     onNormalize: (ids: string[]) => void;
     /** 打开"静音检测"对话框（多选时作用于全部所选 Clip 中含音频源者）。 */
     onSilenceDetection?: (ids: string[]) => void;
@@ -325,6 +329,8 @@ export const ClipContextMenu: React.FC<{
     onConvertToPitchRef,
     onUpdatePitchRef,
     onExportMidi,
+    onAddToParamSelection,
+    onRemoveFromParamSelection,
     onNormalize,
     onSilenceDetection,
     onToggleReverse,
@@ -364,6 +370,8 @@ export const ClipContextMenu: React.FC<{
     const ungroupShortcut = useMenuShortcut("clip.ungroup");
     const cycleTakeNextShortcut = useMenuShortcut("clip.cycleTake");
     const cycleTakePrevShortcut = useMenuShortcut("clip.cycleTakePrev");
+    const addToParamSelectionShortcut = useMenuShortcut("edit.addClipsToParamSelection");
+    const removeFromParamSelectionShortcut = useMenuShortcut("edit.removeClipsFromParamSelection");
 
     // 胶合：仅同轨且多选时可用，且不能混合音高参考块和常规音频块
     const hasMixedTypes = hasPitchAdjustment && !allPitchAdjustment;
@@ -854,6 +862,28 @@ export const ClipContextMenu: React.FC<{
                     label={t("ctx_export_midi")}
                     onClick={() => {
                         onExportMidi(ids);
+                        close();
+                    }}
+                />
+            )}
+
+            {(onAddToParamSelection || onRemoveFromParamSelection) && <Divider />}
+            {onAddToParamSelection && (
+                <MenuItem
+                    label={t("ctx_add_to_param_selection")}
+                    shortcut={addToParamSelectionShortcut}
+                    onClick={() => {
+                        onAddToParamSelection(ids);
+                        close();
+                    }}
+                />
+            )}
+            {onRemoveFromParamSelection && (
+                <MenuItem
+                    label={t("ctx_remove_from_param_selection")}
+                    shortcut={removeFromParamSelectionShortcut}
+                    onClick={() => {
+                        onRemoveFromParamSelection(ids);
                         close();
                     }}
                 />

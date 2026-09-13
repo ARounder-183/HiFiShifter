@@ -328,6 +328,13 @@ pub struct UiSettings {
 
     #[serde(default)]
     pub quick_search_auto_normalize: bool,
+    /// 新建工程默认是否保存 UNDO 操作记录数据（工程级开关的初值）。
+    ///
+    /// 只决定**新工程**的初始值：保存时是否写出 UNDO 由工程自身字段
+    /// （`ProjectFile::save_undo_history`）决定；打开工程时总是尝试读取
+    /// UNDO 数据。默认关闭（记录含完整时间线快照，按需开启）。
+    #[serde(default)]
+    pub save_undo_history_by_default: bool,
     #[serde(default)]
     pub visible_reference_root_track_ids: Vec<String>,
     #[serde(default)]
@@ -930,6 +937,7 @@ impl Default for UiSettings {
             metronome_sound: default_metronome_sound(),
             silence_detect_options: SilenceDetectSettings::default(),
             quick_search_auto_normalize: false,
+            save_undo_history_by_default: false,
             visible_reference_root_track_ids: Vec::new(),
             default_stretch_algorithm: UserStretchAlgorithm::default(),
             default_hifigan_mel_stretch: default_hifigan_mel_stretch(),

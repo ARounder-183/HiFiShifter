@@ -360,6 +360,11 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
     const clipRangeSelectKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.clipRangeSelect"),
     );
+    // 音频块范围 → 参数编辑器选区：修饰键 + 双击 block（默认 Alt）。与上面两个
+    // 同源读取，用户改绑后内核手势随之改变。
+    const clipRangeToParamKb = useAppSelector((state) =>
+        selectKeybinding(state, "modifier.clipRangeToParamSelection"),
+    );
     const { mode } = useAppTheme();
 
     const buildData = (): TimelineKernelData => ({
@@ -385,6 +390,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
             fadeShapeCycle: fadeShapeCycleKb,
             clipMultiSelectToggle: clipMultiSelectToggleKb,
             clipRangeSelect: clipRangeSelectKb,
+            clipRangeToParamSelection: clipRangeToParamKb,
         },
         playheadZoomEnabled,
         initialPxPerSec,
@@ -458,7 +464,8 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                 interactionsRef.current?.onSeek?.(sec, commit, trackId),
             onSelectClip: (clipId, additive, rangeSelect, clientX) =>
                 interactionsRef.current?.onSelectClip?.(clipId, additive, rangeSelect, clientX),
-            onDoubleClickClip: (clipId) => interactionsRef.current?.onDoubleClickClip?.(clipId),
+            onDoubleClickClip: (clipId, mode) =>
+                interactionsRef.current?.onDoubleClickClip?.(clipId, mode),
             onToggleClipMute: (clipId, nextMuted) =>
                 interactionsRef.current?.onToggleClipMute?.(clipId, nextMuted),
             onOpenClipFormant: (clipId, screenX, screenY) =>
@@ -715,7 +722,12 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         >
             <canvas ref={canvasRef} className="pointer-events-none absolute inset-0" />
             {/* 波形层：独立 WebGL2 画布，由内核视口源驱动（滚动帧只更新 uniform）。
-                位于 clip 块面之上、细节层之下（细节层由宿主创建，z-index 2）。 */}
+                位于 clip 块面之上、细节层之下（细节层由宿主创建，z-index 2）。
+                【音高线不在此层】Pitch Reference / MIDI 块的原始音高折线与环回
+                标记由细节层（`timelineCanvasRenderer`）绘制，与波形同一次内容
+                坐标提交；此处**不得**再挂一个音高线面，否则同一批 clip 会被画
+                两遍（合并 feature/tools 时其独立 sticky 音高线层即因此移除，
+                数学统一在 `runtime/midiPitchCurve.ts`）。 */}
             {hostReady && waveformAxis !== null && visibleRows.rowCount > 0 ? (
                 <div className="pointer-events-none absolute inset-0 z-[1]">
                     <TimelineWaveformSurface

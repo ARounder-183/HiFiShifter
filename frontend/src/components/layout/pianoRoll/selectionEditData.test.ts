@@ -1,10 +1,20 @@
-import { test } from "vitest";
+import { test, vi } from "vitest";
 
+vi.mock("../../../services/api", () => ({
+    paramsApi: {
+        getParamFrames: vi.fn(),
+        setParamFrames: vi.fn(),
+    },
+}));
+
+import { paramsApi } from "../../../services/api";
 import {
+    buildMultiRangeEditPlan,
     buildSelectionDragDense,
     expandStrideSampledDense,
     pvCoversFullRes,
     selectionDragRange,
+    uploadFullResCurveSegments,
 } from "./selectionEditData.js";
 import type { ParamViewSegment } from "./types";
 
@@ -168,6 +178,88 @@ test("components/layout/pianoRoll/selectionEditData.test.ts scripted checks", as
         });
         assertEqual(fromFull.values.join(","), fromPv.values.join(","), "preview == commit");
     }
+
+    // ── buildMultiRangeEditPlan：多段独立 + 断层保持原值 ──────────────────
+    {
+        // 帧号即基准值：未写入的帧应当仍是基准值（等价于未改动）
+        const plan = buildMultiRangeEditPlan({
+            ranges: [
+                { startFrame: 100, endFrame: 104 },
+                { startFrame: 200, endFrame: 204 },
+            ],
+            valuesAt: (i) => Array.from({ length: 5 }, () => (i === 0 ? 10 : 20)),
+            sourceAt: (frame) => frame,
+        });
+        // 段互不相连且无边缘淡化 → 两个独立片段，缝隙 [105,199] 完全不写
+        assertEqual(plan.length, 2, "two pieces");
+        assertEqual(plan[0].startFrame, 100, "piece0 start");
+        assertEqual(plan[0].endFrame, 104, "piece0 end");
+        assertEqual(plan[1].startFrame, 200, "piece1 start");
+        assertEqual(plan[1].values.join(","), "20,20,20,20,20", "piece1 values");
+        assertEqual(plan[0].values.join(","), "10,10,10,10,10", "piece0 values");
+    }
+    // 边缘淡化：窗口向两侧扩展，扩展帧回到基准值
+    {
+        const plan = buildMultiRangeEditPlan({
+            ranges: [{ startFrame: 100, endFrame: 104 }],
+            valuesAt: () => [10, 10, 10, 10, 10],
+            sourceAt: (frame) => frame,
+            edgeHalfSpanAt: () => 2,
+            transformAt: (_i, _index, sourceValue) => sourceValue,
+        });
+        assertEqual(plan[0].startFrame, 98, "edge-extended start");
+        assertEqual(plan[0].endFrame, 106, "edge-extended end");
+        // 扩展区的基准值仍在（淡化权重为 0 时保持不变）
+        assertEqual(plan[0].values[0], 98, "pre-edge base value preserved");
+        assertEqual(plan[0].values[plan[0].values.length - 1], 106, "post-edge base value");
+    }
+    // X 位移：写入窗口覆盖「原位 ∪ 落地位」，原位回填基准值
+    {
+        const plan = buildMultiRangeEditPlan({
+            ranges: [{ startFrame: 10, endFrame: 12 }],
+            frameDelta: 5,
+            valuesAt: () => [1, 2, 3],
+            sourceAt: (frame) => frame,
+        });
+        assertEqual(plan.length, 1, "merged into one piece");
+        assertEqual(plan[0].startFrame, 10, "moved window start");
+        assertEqual(plan[0].endFrame, 17, "moved window end");
+        // 12,13,14 是原值（未改动），15..17 是移动后的选区值
+        assertEqual(plan[0].values.join(","), "10,11,12,13,14,1,2,3", "moved values");
+    }
+    // 位移后两段落地位重叠 → 合并为一个写入片段（后写覆盖先写，确定性）
+    {
+        const plan = buildMultiRangeEditPlan({
+            ranges: [
+                { startFrame: 0, endFrame: 1 },
+                { startFrame: 4, endFrame: 5 },
+            ],
+            frameDelta: 3,
+            valuesAt: (i) => (i === 0 ? [1, 1] : [2, 2]),
+            sourceAt: (frame) => frame,
+        });
+        assertEqual(plan.length, 1, "overlapping landings merge");
+        assertEqual(plan[0].startFrame, 0, "merged start");
+        assertEqual(plan[0].endFrame, 8, "merged end");
+        // 段 1 落在 [3,4]（值 1），段 2 落在 [7,8]（值 2），其余为基准值
+        assertEqual(plan[0].values.join(","), "0,1,2,1,1,5,6,2,2", "overlap last-writer-wins");
+    }
+    // 无段可用值（例如尚未取到全分辨率数据）→ 不产生任何实际变更（窗口回填基准值）
+    {
+        const plan = buildMultiRangeEditPlan({
+            ranges: [{ startFrame: 0, endFrame: 3 }],
+            valuesAt: () => null,
+            sourceAt: (frame) => frame,
+        });
+        assertEqual(plan.length, 1, "window still materialised");
+        assertEqual(plan[0].values.join(","), "0,1,2,3", "base values untouched");
+    }
+    // 空选区
+    assertEqual(
+        buildMultiRangeEditPlan({ ranges: [], valuesAt: () => [1], sourceAt: () => 0 }).length,
+        0,
+        "empty ranges no plan",
+    );
 });
 
 /**
@@ -209,4 +301,60 @@ test("components/layout/pianoRoll/selectionEditData.test.ts expandStrideSampledD
         assertEqual(out.length, 3, "fractional stride length");
         assertEqual(out[1], 2, "fractional stride midpoint");
     }
+});
+
+/**
+ * 多段回写的「整批一个撤销点」纪律：
+ * 后端 set_param_frames 的 checkpoint 是「写入前先快照时间线」，因此一次
+ * 用户操作（可能跨多段、多块）只能有**一个** checkpoint=true —— 否则撤销
+ * 需要按多次才能回到操作前。
+ */
+test("components/layout/pianoRoll/selectionEditData.test.ts uploadFullResCurveSegments checks", async () => {
+    const mockedSet = vi.mocked(paramsApi.setParamFrames);
+    mockedSet.mockReset();
+    mockedSet.mockResolvedValue({ ok: true } as never);
+
+    // 两段：各一段，首段打撤销点、次段不打
+    mockedSet.mockClear();
+    await uploadFullResCurveSegments({
+        trackId: "t1",
+        param: "pitch",
+        segments: [
+            { startFrame: 100, values: [1, 2, 3] },
+            { startFrame: 500, values: [4, 5] },
+        ],
+    });
+    const calls = mockedSet.mock.calls;
+    if (calls.length !== 2) throw new Error(`expected 2 writes, got ${calls.length}`);
+    if (calls[0][2] !== 100 || calls[0][4] !== true) {
+        throw new Error(`first write mismatch: ${JSON.stringify(calls[0])}`);
+    }
+    if (calls[1][2] !== 500 || calls[1][4] !== false) {
+        throw new Error(`second write must not checkpoint: ${JSON.stringify(calls[1])}`);
+    }
+
+    // 单段跨块（> CHUNK_FRAMES）：仅首块 checkpoint=true
+    mockedSet.mockClear();
+    await uploadFullResCurveSegments({
+        trackId: "t1",
+        param: "pitch",
+        segments: [{ startFrame: 0, values: new Array<number>(40_000).fill(1) }],
+    });
+    const chunkCalls = mockedSet.mock.calls;
+    if (chunkCalls.length !== 2) throw new Error(`expected 2 chunks, got ${chunkCalls.length}`);
+    if (chunkCalls[0][4] !== true || chunkCalls[1][4] !== false) {
+        throw new Error("only the first chunk may checkpoint");
+    }
+    if (chunkCalls[0][3].length !== 32_768) {
+        throw new Error(`unexpected chunk size ${chunkCalls[0][3].length}`);
+    }
+
+    // 全空片段：不产生任何写入（不会白打撤销点）
+    mockedSet.mockClear();
+    await uploadFullResCurveSegments({
+        trackId: "t1",
+        param: "pitch",
+        segments: [{ startFrame: 0, values: [] }],
+    });
+    if (mockedSet.mock.calls.length !== 0) throw new Error("empty segments must not write");
 });

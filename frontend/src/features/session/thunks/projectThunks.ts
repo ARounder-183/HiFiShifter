@@ -33,6 +33,19 @@ export const redoRemote = createAsyncThunk("session/redoRemote", async () => {
     return webApi.redoTimeline();
 });
 
+/**
+ * 跳到「操作记录」中的第 `position` 个状态（窗口双击条目 / 点击跳转按钮）。
+ *
+ * 与撤销/重做共用后端入口：越界或原地不动时后端回 `ok = false`，前端静默
+ * 跳过（不套用任何快照，界面零变化）。
+ */
+export const setHistoryPositionRemote = createAsyncThunk(
+    "session/setHistoryPositionRemote",
+    async (position: number) => {
+        return webApi.setHistoryPosition(position);
+    },
+);
+
 /** 新建工程的初始轨道（Main）为灰色：后端 TimelineState::default 直接
  * 创建灰色初始轨道（见 backend state.rs），此处无需再覆盖快照。 */
 export const newProjectRemote = createAsyncThunk("session/newProjectRemote", async () => {
@@ -140,6 +153,22 @@ export const saveProjectToPathRemote = createAsyncThunk(
         const res: SaveProjectResponse = await webApi.saveProjectToPath(path, notesMarkdown, true);
         if (!res || (res as { ok?: boolean }).ok === false) {
             return rejectWithValue((res as { error?: string })?.error ?? "save_project_failed");
+        }
+        return res;
+    },
+);
+
+/**
+ * 设置当前工程「保存时是否一并写出 UNDO 操作记录数据」（工程级开关）。
+ *
+ * 与全局「新建工程默认值」相互独立；打开工程时总是尝试读取 UNDO 数据。
+ */
+export const setProjectSaveUndoHistoryRemote = createAsyncThunk(
+    "session/setProjectSaveUndoHistoryRemote",
+    async (enabled: boolean, { rejectWithValue }) => {
+        const res = await webApi.setProjectSaveUndoHistory(enabled);
+        if (!res || res.ok === false) {
+            return rejectWithValue("set_project_save_undo_history_failed");
         }
         return res;
     },
