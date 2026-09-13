@@ -4163,6 +4163,29 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         laterFadeInSec: number;
         earlierFadeOutAuto: boolean;
         laterFadeInAuto: boolean;
+        /**
+         * 曲率拖拽（`modifier.fadeCurvatureDrag` 按住）的两侧快照。
+         *
+         * 与旧实现 `useEditDrag` 的 `crossfadeCurveSides` 同源：区域以**秒**冻结
+         * （拖拽中长度不变），形状沿用该侧当前值，`baseDir` 逐帧被求解器覆写
+         * ——这样连续拖动时每一帧都从**上一帧的解**出发，手感连续且不会来回跳。
+         */
+        curveSides: {
+            a: {
+                clipId: string;
+                leftSec: number;
+                widthSec: number;
+                shape: number;
+                baseDir: number;
+            };
+            b: {
+                clipId: string;
+                leftSec: number;
+                widthSec: number;
+                shape: number;
+                baseDir: number;
+            };
+        };
         /** 各 clip 按下时的全部可回滚字段（取消路径用）。 */
         baseById: Map<
             string,
@@ -4197,6 +4220,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             laterClipId: string;
             deltaSec: number;
             modifiers: { ctrlKey: boolean; shiftKey: boolean; altKey: boolean; metaKey: boolean };
+            curveEnv: {
+                clientY: number;
+                envTopClientY: number;
+                bodyHeightPx: number;
+                pointerSec: number;
+            };
         }) => {
             const clips = sessionRef.current.clips;
             const earlier = clips.find((item) => item.id === args.earlierClipId);
@@ -4257,6 +4286,46 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     laterFadeInSec: effectiveFadeSec(later.fadeInSec, later.autoFadeInSec),
                     earlierFadeOutAuto: Number(earlier.autoFadeOutSec ?? 0) > 0,
                     laterFadeInAuto: Number(later.autoFadeInSec ?? 0) > 0,
+                    // 曲率拖拽的两侧快照：宽度取**生效**淡变并各自钳到自身长度
+                    // （旧实现 `crossfadeCurveSides` 同一取法）；前块的淡出区右端贴
+                    // 它的右缘，后块的淡入区左端贴它的起点。
+                    curveSides: (() => {
+                        const widthA = Math.max(
+                            0,
+                            Math.min(
+                                effectiveFadeSec(earlier.fadeOutSec, earlier.autoFadeOutSec),
+                                Math.max(0, Number(earlier.lengthSec) || 0),
+                            ),
+                        );
+                        const widthB = Math.max(
+                            0,
+                            Math.min(
+                                effectiveFadeSec(later.fadeInSec, later.autoFadeInSec),
+                                Math.max(0, Number(later.lengthSec) || 0),
+                            ),
+                        );
+                        return {
+                            a: {
+                                clipId: earlier.id,
+                                leftSec:
+                                    (Number(earlier.startSec) || 0) +
+                                    (Number(earlier.lengthSec) || 0) -
+                                    widthA,
+                                widthSec: widthA,
+                                shape: resolveCurvatureEditBase(Number(earlier.fadeOutShape) || 0)
+                                    .shape,
+                                baseDir: Number(earlier.fadeOutDir) || 0,
+                            },
+                            b: {
+                                clipId: later.id,
+                                leftSec: Number(later.startSec) || 0,
+                                widthSec: widthB,
+                                shape: resolveCurvatureEditBase(Number(later.fadeInShape) || 0)
+                                    .shape,
+                                baseDir: Number(later.fadeInDir) || 0,
+                            },
+                        };
+                    })(),
                     baseById,
                 };
                 // 首个真实位移帧 = 手势开始：上交互锁（见 helper 说明）。
@@ -4264,6 +4333,53 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             }
             const origin = kernelCrossfadeOriginRef.current;
             if (origin === null) return;
+
+            // ── 曲率拖拽：`modifier.fadeCurvatureDrag`（默认 Alt）按住时改**曲率** ──
+            // 与旧实现 `useEditDrag` 的 `crossfade_edges` Alt 分支同一套：交叉点上的
+            // 两条包络线**各自**解一条"经过指针点"的新曲率，边缘位置与长度都完全不动。
+            // 求解从上一帧的解出发（`baseDir` 逐帧覆写），连续拖动才平滑。
+            if (isModifierActive(fadeCurvatureKb, args.modifiers)) {
+                const sides = origin.curveSides;
+                const ptA = resolveCurvePointer(
+                    args.curveEnv,
+                    { leftSec: sides.a.leftSec, widthSec: sides.a.widthSec },
+                    args.curveEnv.pointerSec,
+                    args.curveEnv.clientY,
+                );
+                const ptB = resolveCurvePointer(
+                    args.curveEnv,
+                    { leftSec: sides.b.leftSec, widthSec: sides.b.widthSec },
+                    args.curveEnv.pointerSec,
+                    args.curveEnv.clientY,
+                );
+                if (ptA === null || ptB === null) return;
+                const dirA = solveNearestCurveDir({
+                    shape: sides.a.shape,
+                    dir: sides.a.baseDir,
+                    mode: "out",
+                    pointerX01: ptA.t,
+                    pointerY01: ptA.gain,
+                    aspectYOverX:
+                        args.curveEnv.bodyHeightPx / Math.max(1, sides.a.widthSec * pxPerSec),
+                }).dir;
+                const dirB = solveNearestCurveDir({
+                    shape: sides.b.shape,
+                    dir: sides.b.baseDir,
+                    mode: "in",
+                    pointerX01: ptB.t,
+                    pointerY01: ptB.gain,
+                    aspectYOverX:
+                        args.curveEnv.bodyHeightPx / Math.max(1, sides.b.widthSec * pxPerSec),
+                }).dir;
+                sides.a.baseDir = dirA;
+                sides.b.baseDir = dirB;
+                batch(() => {
+                    dispatch(setClipFades({ clipId: sides.a.clipId, fadeOutDir: dirA }));
+                    dispatch(setClipFades({ clipId: sides.b.clipId, fadeInDir: dirB }));
+                });
+                return;
+            }
+
             const result = computeCrossfadeGrip({
                 earlier: origin.earlier,
                 later: origin.later,
@@ -4329,7 +4445,15 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 for (const fade of result.fades) dispatch(setClipFades(fade));
             });
         },
-        [beginKernelGestureInteraction, crossfadeGripKb, dispatch, sessionRef],
+        [
+            beginKernelGestureInteraction,
+            crossfadeGripKb,
+            dispatch,
+            // 曲率分支用它把归一化 t 换算回屏幕距离权重。
+            fadeCurvatureKb,
+            pxPerSec,
+            sessionRef,
+        ],
     );
 
     /**

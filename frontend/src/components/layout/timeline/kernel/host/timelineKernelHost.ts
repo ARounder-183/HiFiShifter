@@ -117,6 +117,7 @@ import type { FlatInstance, Rgba } from "../../../renderKernel/instanceTypes";
 import { createScrollKernel, type TimelineViewportState } from "../../../renderKernel/scrollKernel";
 // 竖向键盘翻页与参数编辑器内核**共用**同一份解析（见 onKeyDown 说明）。
 import { resolveKeyboardScrollTarget } from "../../../renderKernel/keyboardScroll";
+import { snapToDevicePx } from "../../../../../utils/devicePixelLine";
 
 /** `buildTimelineTicks` 的入参类型（用于让数据镜像的字段类型自动对齐）。 */
 type BuildTicksArgs = Parameters<typeof buildTimelineTicks>[0];
@@ -585,6 +586,23 @@ export interface TimelineKernelInteractions {
         readonly laterClipId: string;
         readonly deltaSec: number;
         readonly modifiers: KernelDragModifiers;
+        /**
+         * 曲率拖拽（`modifier.fadeCurvatureDrag` 按住）所需的指针 / 行几何。
+         *
+         * 交叉点上的曲率要**同时**解两侧包络线（前块淡出 / 后块淡入），两个求解
+         * 共用同一个指针点与同一行 body 几何——与单侧淡变（`onFadePreview` 的
+         * `curveEnv`）取值方式相同。
+         */
+        readonly curveEnv: {
+            /** 指针视口 y（CSS px）。 */
+            readonly clientY: number;
+            /** 该行 body 顶边的视口 y（已含 header 高度）。 */
+            readonly envTopClientY: number;
+            /** body 高度（CSS px）。 */
+            readonly bodyHeightPx: number;
+            /** 指针所在的工程时间（秒）。 */
+            readonly pointerSec: number;
+        };
     }) => void;
     /**
      * 交叉点抓手收尾。
@@ -1483,9 +1501,52 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     let builtSelectedClipId: string | null | undefined = undefined;
     let builtMultiSelectedRef: readonly string[] | null = null;
 
+    /**
+     * 把**渲染用**的视口偏移吸附到设备像素栅格。
+     *
+     * 【为什么必须吸附】块面与网格线的几何按**内容坐标**常驻 GPU（滚动只改
+     * `u_viewOrigin`），而实例 x 已在内容坐标里按设备像素取整过
+     * （`Math.round(x * dpr) / dpr`，见 `buildGridInstances`）。若原点用**带小数的**
+     * `scrollLeft`，最终设备位置 = `取整后的内容 x − 小数原点` ——**不再落在设备像素
+     * 边界上**：1px 宽（1 物理像素）的网格线会被摊到相邻两个物理像素上，且随滚动
+     * 逐帧改变相位。表现就是"水平滚动 / 缩放时网格线抖动、忽粗忽细"（分数 DPR 的
+     * Windows 缩放下尤其明显）。
+     *
+     * 旧实现的对策正是**在视口空间吸附**：`BackgroundGrid` 画线用的是
+     * `deviceSnap(内容 x − offset)`。内核模式下几何不能跟着滚动重建（"滚动零重建"
+     * 是这套架构的根基），因此改为把**原点**吸到设备栅格——`取整(内容 x) −
+     * 取整(原点)` 仍是设备像素的整数倍，线宽恒为整数物理像素且滚动时不抖。
+     *
+     * 代价：内核层的平移量按设备像素离散（dpr=1 时 1px、dpr=2 时 0.5px），视觉上
+     * 不可辨；换来全部内核内容（网格、块面、徽标、播放头）边缘清晰且彼此绝对对齐。
+     *
+     * 特殊说明：**只有渲染**用这个吸附值。输入换算（命中、指针→时间）与滚动状态
+     * 仍用精确值——那里需要连续分辨率，且与渲染无关。
+     */
+    function snapRenderView(view: TimelineViewportState): TimelineViewportState {
+        const dpr = readDpr();
+        if (!(dpr > 0)) return view;
+        const scrollLeft = snapToDevicePx(view.scrollLeft, dpr);
+        const scrollTop = snapToDevicePx(view.scrollTop, dpr);
+        if (scrollLeft === view.scrollLeft && scrollTop === view.scrollTop) return view;
+        return { ...view, scrollLeft, scrollTop };
+    }
+
     /** 组装当前 axis（内容坐标投影）。 */
     function currentAxis(): TimelineAxis {
         const view = scroll.get();
+        return createTimelineAxis({
+            pxPerSec: view.pxPerSec,
+            scrollLeftPx: view.scrollLeft,
+            scrollTopPx: view.scrollTop,
+            viewportWidthPx,
+            dpr: readDpr(),
+        });
+    }
+
+    /** 同上，但偏移取**渲染吸附后**的值：供每帧绘制的各图层共用同一个原点。 */
+    function currentRenderAxis(): TimelineAxis {
+        const view = snapRenderView(scroll.get());
         return createTimelineAxis({
             pxPerSec: view.pxPerSec,
             scrollLeftPx: view.scrollLeft,
@@ -2015,8 +2076,12 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     function draw(): void {
         const profiler = readFrameProfiler();
         const startMs = profiler === undefined ? 0 : performance.now();
-        const view = scroll.get();
-        const axis = currentAxis();
+        // 渲染原点统一吸附到设备像素（见 `snapRenderView`）：GL 原点、各独立图层、
+        // 细节层与 DOM 同步全部用**同一个**吸附值，任何两层都不会出现亚像素相位差。
+        // `lastDrawnView` 存的也是吸附值——吸附后没变就不重绘（同一设备像素列内的
+        // 滚动不产生任何视觉变化，这正是"零重绘"要的效果）。
+        const view = snapRenderView(scroll.get());
+        const axis = currentRenderAxis();
         const rebuilt = ensureScene(axis);
         const viewChanged = lastDrawnView !== view;
         lastDrawnView = view;
@@ -3597,6 +3662,38 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      * @param event 指针事件。
      * @returns 无返回值。
      */
+    /**
+     * 曲率拖拽的几何环境：把指针 y 映射到**该行 body 内**的归一化增益（1 = 包络基线）。
+     *
+     * 行下标由 clip 的轨道解析——淡变类手势本身不携带行号（它们由 `pending-select`
+     * 升级而来，只带 region 与几何）。单侧淡变与交叉点两侧**共用**这一份环境：交叉
+     * 点的两个 clip 必在同一轨道，几何完全一致。
+     *
+     * @param clipId 目标 clip（取它所在的行）。
+     * @param event 指针事件。
+     * @param contentX 指针的内容坐标 x（用于换算 `pointerSec`）。
+     * @returns 环境；行高非法时退化为 1px body（不抛错，求解器会自行钳制 gain）。
+     */
+    function curveEnvAt(
+        clipId: string,
+        event: PointerEvent,
+        contentX: number,
+    ): { clientY: number; envTopClientY: number; bodyHeightPx: number; pointerSec: number } {
+        const rect = container.getBoundingClientRect();
+        const view = scroll.get();
+        const d = data();
+        const clip = d.clips.find((item) => item.id === clipId);
+        const trackIndex =
+            clip === undefined ? -1 : d.tracks.findIndex((track) => track.id === clip.trackId);
+        const rowTop = rect.top - view.scrollTop + Math.max(0, trackIndex) * view.rowHeight;
+        return {
+            clientY: event.clientY,
+            envTopClientY: rowTop + CLIP_HEADER_HEIGHT,
+            bodyHeightPx: Math.max(1, view.rowHeight - CLIP_BODY_PADDING_Y - CLIP_HEADER_HEIGHT),
+            pointerSec: contentX / Math.max(1e-9, view.pxPerSec),
+        };
+    }
+
     function applyCrossfadeGripPreview(event: PointerEvent): void {
         if (gesture.kind !== "crossfade-grip") return;
         const rect = container.getBoundingClientRect();
@@ -3610,8 +3707,11 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             laterClipId: gesture.laterClipId,
             deltaSec,
             // 修饰键必须透出：按住 `modifier.crossfadeGrip`（默认 Ctrl/⌘）= **反向**
-            // 模式（两侧相向移动、重叠变化、淡变按比例缩放），语义与同向完全不同。
+            // 模式（两侧相向移动、重叠变化、淡变按比例缩放），语义与同向完全不同；
+            // 按住 `modifier.fadeCurvatureDrag`（默认 Alt）= **曲率**模式（两侧包络线
+            // 各解自己的曲率，边缘位置与长度都不动）。
             modifiers: dragModifiersOf(event),
+            curveEnv: curveEnvAt(gesture.earlierClipId, event, contentX),
         });
     }
 
@@ -3637,27 +3737,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             fadeSec: result.fadeSec,
             deltaSec: result.deltaSec,
             modifiers: dragModifiersOf(event),
-            curveEnv: (() => {
-                // 曲率拖拽的几何：指针 y 映射到该行 body 内的增益（1 = 包络基线）。
-                // 行下标由 clip 的轨道解析——淡变手势本身不携带行号（它由
-                // `pending-select` 升级而来，只带 region 与几何）。
-                const d = data();
-                const clip = d.clips.find((item) => item.id === fadeClipId);
-                const trackIndex =
-                    clip === undefined
-                        ? -1
-                        : d.tracks.findIndex((track) => track.id === clip.trackId);
-                const rowTop = rect.top - view.scrollTop + Math.max(0, trackIndex) * view.rowHeight;
-                return {
-                    clientY: event.clientY,
-                    envTopClientY: rowTop + CLIP_HEADER_HEIGHT,
-                    bodyHeightPx: Math.max(
-                        1,
-                        view.rowHeight - CLIP_BODY_PADDING_Y - CLIP_HEADER_HEIGHT,
-                    ),
-                    pointerSec: contentX / Math.max(1e-9, view.pxPerSec),
-                };
-            })(),
+            curveEnv: curveEnvAt(fadeClipId, event, contentX),
         });
     }
 

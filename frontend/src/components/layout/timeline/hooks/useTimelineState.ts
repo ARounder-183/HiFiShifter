@@ -664,6 +664,16 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
                 timelineSyncApplyingRef.current = true;
                 const applied = viewportAccess.setZoomAndScroll(store.pxPerSec, store.scrollLeft);
                 syncScrollLeft(applied.scrollLeft);
+                // 【缩放必须同时回写 React】标尺刻度、左侧轨道头与其它 React 派生量都
+                // 由 React 的 `pxPerSec` 布局；只写内核会让**轨道区按新缩放、标尺仍按
+                // 旧缩放**——两个面板因此看起来"网格没对齐、标尺也没对齐"。
+                //
+                // 上面那句"纯滚动"的注释只对 pxPerSec 未变的情形成立：那时标尺的
+                // 内容布局没变，只有平移量变了（由内核每帧写 transform），确实不必
+                // 走 React。缩放变了则必须走（与下方旧 DOM 分支的 `setPxPerSec` 同源）。
+                if (Math.abs(applied.pxPerSec - pxPerSecRef.current) > 1e-9) {
+                    setPxPerSec(applied.pxPerSec);
+                }
                 timelineSyncApplyingRef.current = false;
                 return;
             }

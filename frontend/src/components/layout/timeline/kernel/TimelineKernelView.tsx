@@ -800,7 +800,11 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                     className="pointer-events-none absolute left-0 top-0 z-[3] overflow-hidden"
                     style={{
                         width: snapHighlight.contentWidth,
-                        height: snapHighlight.contentHeight,
+                        // 层高取「内容 ∪ 可视区」的并集：通栏吸附竖线（网格线 / 播放
+                        // 光标 / 采样率等无轨道归属的目标）要一路画到**轨道区底部**，
+                        // 而内容高度只到「轨道行之和 + 添加轨道行」。轨道少、视口高时
+                        // 内容高 < 视口高，只按内容高会把这层连同容器一起裁断。
+                        height: Math.max(snapHighlight.contentHeight, viewportSize.height),
                     }}
                 >
                     <SnapHighlightLayer
@@ -808,6 +812,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                         rowHeight={rowHeight}
                         tracks={tracks}
                         contentHeight={snapHighlight.contentHeight}
+                        viewportHeightPx={viewportSize.height}
                     />
                 </div>
             ) : null}
