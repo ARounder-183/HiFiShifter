@@ -30,6 +30,7 @@
 import React from "react";
 
 import { useAppSelector } from "../../../../app/hooks";
+import { resolveScrollableProjectSec } from "../../../../features/session/projectBoundary";
 import { useAppTheme } from "../../../../theme/AppThemeProvider";
 import { selectKeybinding } from "../../../../features/keybindings/keybindingsSlice";
 import { readDevicePixelRatio, wholeDevicePxLength } from "../../../../utils/devicePixelLine";
@@ -315,7 +316,11 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
 
     const tracks = useAppSelector((state) => state.session.tracks);
     const clips = useAppSelector((state) => state.session.clips);
-    const projectSec = useAppSelector((state) => state.session.projectSec);
+    // 可滚域时长必须与参数编辑器**同源**（见 `resolveScrollableProjectSec`）：
+    // 两处各取一个来源时内容宽会分叉，同步 scrollLeft 会被浏览器钳制而错位（缺陷 7）。
+    const projectSec = useAppSelector((state) =>
+        resolveScrollableProjectSec(state.session.projectSec, state.session.clips),
+    );
     const bpm = useAppSelector((state) => state.session.bpm);
     const beatsPerBar = useAppSelector((state) => state.session.beats);
     const grid = useAppSelector((state) => state.session.grid);

@@ -180,7 +180,7 @@ import { usePianoRollStatusUpdate } from "../../contexts/PianoRollStatusContext"
 import { MidiTrackSelectDialog } from "./MidiTrackSelectDialog";
 import { settingsApi } from "../../services/api/settings";
 import { EditContextMenu } from "../editDialogs/EditContextMenu";
-import { getDynamicProjectSec } from "../../features/session/projectBoundary";
+import { resolveScrollableProjectSec } from "../../features/session/projectBoundary";
 import { applySelectWheelChange } from "../../utils/selectWheel";
 import { parseCustomScaleToken } from "../../utils/scaleSelection";
 import {
@@ -1066,7 +1066,13 @@ export const PianoRollPanel: React.FC = () => {
         return buildChildPitchOffsetDegreesParam(effectiveSelectedTrackId);
     }, [effectiveSelectedTrackId, selectedIsChildTrack]);
 
-    const dynamicProjectSec = useMemo(() => getDynamicProjectSec(s.clips), [s.clips]);
+    // 可滚域时长必须与时间轴内核**同源**：两处各取一个来源时，内容宽 / 可滚上限
+    // 会分叉，共享 scrollLeft 的同步会被浏览器钳制、两边永久错位（缺陷 7）。
+    // 详见 `resolveScrollableProjectSec` 的说明。
+    const dynamicProjectSec = useMemo(
+        () => resolveScrollableProjectSec(s.projectSec, s.clips),
+        [s.projectSec, s.clips],
+    );
     const [scrollLeft, setScrollLeft] = useState(0);
     const [pxPerSec, setPxPerSec] = useState(() => {
         const stored = Number(localStorage.getItem("hifishifter.paramPxPerSec"));
