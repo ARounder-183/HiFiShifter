@@ -125,6 +125,7 @@ type TimelineSessionSlice = Pick<
     | "playheadZoomEnabled"
     | "selectedClipId"
     | "selectedTrackId"
+    | "multiSelectionIntentional"
     | "showAllTakes"
     | "tempoMap"
     | "tempoMapVisible"
@@ -218,6 +219,13 @@ export interface TimelineStateResult {
     pitchDragKb: Keybinding;
     noSnapKb: Keybinding;
     copyDragKb: Keybinding;
+    /**
+     * 多选切换修饰键（`modifier.clipMultiSelectToggle`，默认 Ctrl/⌘）。
+     *
+     * 拖拽起手的陈旧选区收敛判定需要它：该键同时是复制拖拽键，按住时要把**整组**
+     * 复制出去，因此不得收敛选区（见 `interaction/primeSelection`）。
+     */
+    clipMultiSelectToggleKb: Keybinding;
     crossfadeGripKb: Keybinding;
     fadeCurvatureKb: Keybinding;
 
@@ -339,6 +347,7 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
             secondaryTimeUnit: state.session.secondaryTimeUnit,
             selectedClipId: state.session.selectedClipId,
             selectedTrackId: state.session.selectedTrackId,
+            multiSelectionIntentional: state.session.multiSelectionIntentional,
             showPlayheadTimeInTrackHeader: state.session.showPlayheadTimeInTrackHeader,
             tempoMap: state.session.tempoMap,
             tempoMapVisible: state.session.tempoMapVisible,
@@ -828,6 +837,9 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
     );
     const noSnapKb = useAppSelector((state) => selectKeybinding(state, "modifier.clipNoSnap"));
     const copyDragKb = useAppSelector((state) => selectKeybinding(state, "modifier.clipCopyDrag"));
+    const clipMultiSelectToggleKb = useAppSelector((state) =>
+        selectKeybinding(state, "modifier.clipMultiSelectToggle"),
+    );
     const crossfadeGripKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.clipCrossfadeGrip"),
     );
@@ -1432,6 +1444,7 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
         pitchDragKb,
         noSnapKb,
         copyDragKb,
+        clipMultiSelectToggleKb,
         crossfadeGripKb,
         fadeCurvatureKb,
 

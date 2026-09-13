@@ -18,12 +18,18 @@
  * 【设计约束】
  * 1. 钳制在**写入时一次算清**（与 `ScrollKernel` 同一约定）：调用方拿到的
  *    `startSec` 恒为合法值，不存在「先写越界值、读回被修正」的中间态。
- * 2. **右边界不按工程末端钳制**（与旧实现一致）：拖动 / 裁切 / 拉伸都允许越出
- *    工程末端，工程时长由 `moveClipStart` 的自动扩展随之增长
- *    （`sessionSlice.moveClipStart`：「拖动超出边界时自动扩展工程时长」）。
- *    在这里钳到 `projectSec` 会让"把 clip 拖到工程外"这一操作整体失效，且用户
- *    看不到任何提示。上界只保留 `TRIM_MAX_LENGTH_SEC` 这个防呆值（旧实现的
- *    `clamp(…, minLen, 10_000)` 同源）。
+ * 2. 移动（`resolveDragDelta`）**只受下界 0 约束，没有上界**：右移应能越过当前
+ *    工程末端，由 `moveClipStart` 的自动扩展与后端 `ensure_project_end_sec` 增长
+ *    工程时长。旧的「工程长度 − clip 长度」上界是自指边界（被拖 clip 自己定义上界），
+ *    会让自动扩展永不触发，表现为"向右拖有隐形边界"——见该函数注释。
+ *
+ *    裁切 / 拉伸（`resolveTrimEdge`）同样**不按工程末端钳制**：它改的是**长度**，
+ *    没有"自动扩展工程"的语义承接，因此与旧实现一致，上界只保留
+ *    `TRIM_MAX_LENGTH_SEC` 这个防呆值（旧实现 `useEditDrag` 的
+ *    `clamp(…, minLen, 10_000)` 同源）；越出工程末端的部分由渲染管线按尾静音处理，
+ *    工程时长按 `resolveScrollableProjectSec`（后端时长与最右 clip 末端的较大者）
+ *    自然增长。把这里钳到 `projectSec` 会让「把 clip 裁/拉到工程外」整体失效，
+ *    且用户看不到任何提示（与"向右拖有隐形边界"同类）。
  * 3. `pxPerSec` 非法（0 / NaN / 负数）时退化为「不产生位移」而不是产生 `NaN`
  *    ——拖拽热路径上一旦出现 `NaN`，几何与命中会同时失效且难以定位。
  */
@@ -49,19 +55,33 @@ export interface DragDeltaArgs {
 
 /** 拖拽位移换算结果。 */
 export interface DragDeltaResult {
-    /** 钳制后的新起始时间（秒，恒 >= 0）。 */
+    /** 新的起始时间（秒，恒 >= 0；上界不设限，见函数注释）。 */
     readonly startSec: number;
-    /** 实际生效的时间位移（秒，已含钳制）。 */
+    /** 实际生效的时间位移（秒）。 */
     readonly deltaSec: number;
 }
 
 /**
  * 把内容坐标位移换算为新的起始时间。
  *
- * 流程：位移 → 时间位移（除以 `pxPerSec`）→ 加上原起始时间 → 钳制到 `>= 0`。
+ * 流程：位移 → 时间位移（除以 `pxPerSec`）→ 加上原起始时间 → **只受下界 0 约束**。
  *
- * 右边界**刻意不钳制**：越出工程末端时由 `moveClipStart` 自动扩展工程时长，
- * 与旧实现 `useClipDrag` 的 `Math.max(0, …)` 同源。
+ * 【为什么没有上界（去掉 `projectSec − lengthSec` 的原因）】
+ * 旧实现把结果钳到 `[0, projectSec − lengthSec]`，理由是「clip 不允许越出工程末端」。
+ * 但喂进来的 `projectSec` 并不是后端时长真值，而是
+ * `resolveScrollableProjectSec()` = `max(后端时长, 最右 clip 末端)`。当被拖的 clip
+ * **本身就是最右那个**时，上界由它自己的末端推出 —— **自指边界**：它永远无法越过，
+ * 且因为本函数保证 `startSec + lengthSec <= projectSec`，`moveClipStart` 里那段
+ * 「拖动超出边界时自动扩展工程时长」与后端的 `ensure_project_end_sec` **都变成死代码**，
+ * 边界永不增长。现场表现即「使劲向右拖会在某个位置被卡住，像有隐形边界」。
+ *
+ * 旧实现（重构前的 `useClipDrag`）**完全没有上界**（只做 `Math.max(0, …)`），
+ * 因此这是内核迁移引入的回归。去掉上界后，工程时长由既有的自动扩展路径负责增长
+ * —— 那正是它们被写出来的目的。
+ *
+ * 特殊说明：入参**刻意不含** `projectSec` / `lengthSec`。它们曾是右边界钳制的来源，
+ * 现在既无用途，留在签名里只会诱导后来者把上界加回来（缺陷复发）。去掉上界后
+ * 工程时长的增长由 `moveClipStart` 的自动扩展与 `ensure_project_end_sec` 负责。
  *
  * @param args 换算参数。
  * @returns 新起始时间与实际生效位移。

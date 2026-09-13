@@ -97,6 +97,11 @@ import {
     type TrimEdge,
 } from "../interaction/dragGeometry";
 import { clipIntersectsBox, resolveBoxBounds, type BoxBounds } from "../interaction/boxSelection";
+// （拖拽起手的选区收敛判定在面板侧，见 `interaction/primeSelection`：它需要
+// "选区来源"这一 Redux 事实，宿主不持有。）
+// 逐帧手势分派表：穷尽性由 `moveDispatch.test.ts` 守住（漏分支曾是
+// 「吸附偏移手柄拖一下就冻结」的根因，手写 if 链没有任何编译期保障）。
+import { resolveMoveDispatch } from "../interaction/moveDispatch";
 import {
     computeTimelineTrackDragLock,
     computeTimelineTrackDragLockThresholdPx,
@@ -110,6 +115,16 @@ import {
     scrollTargetFromTrackClick,
 } from "../../../renderKernel/scrollbars";
 import { normalizeWheelDelta } from "../input/normalizeWheel";
+// 拖拽边缘自动滚屏：内核自绘滚动没有浏览器兜底，缺了它 clip 拖到视口边缘就再也
+// 无法继续右移（设计文档早已承诺、此前未实现）。
+import { resolveDragEdgeScroll, shouldAutoScrollForGesture } from "../input/dragAutoScroll";
+// 缩放方向判定：**不能只看 deltaY 的符号**（`deltaY = 0` 会被判成缩小、变号噪声会
+// 逐事件翻转方向 → Windows 上表现为剧烈抖动）。见该模块文件头与回归测试。
+import {
+    createWheelZoomAccumulator,
+    resolveWheelZoomStep,
+    type WheelZoomAccumulator,
+} from "../input/wheelZoomIntent";
 import { createRenderLoop } from "../../../renderKernel/renderLoop";
 import { createClipInstanceBuilder } from "../scene/clipInstances";
 import { resolvePlayheadSec, shouldRepaintForPlayhead } from "../scene/playheadInvalidation";
@@ -1514,6 +1529,23 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     let builtBpm = -1;
     let builtBeatsPerBar = -1;
     let builtRowHeight = -1;
+    /**
+     * 上一次从 React 镜像**推入内核**的行高。
+     *
+     * 【为什么需要单独追踪——纵向缩放"跳一下"的根因】
+     * 竖直缩放分支会一次写入「新行高 + 新位置」（`setRowHeightAndScrollTop`），
+     * 但那之后 `ensureScene` 每帧还会执行 `scroll.setRowHeight(d.rowHeight)`。
+     * `d.rowHeight` 是 React 镜像，**必然滞后一帧**（要经 state 提交再回流），
+     * 于是它会把内核刚写入的新行高**改回旧值**，制造出「新位置 + 旧行高」的一帧
+     * ——实测连续放大时内核真值为
+     * `(scrollTop 223.8, rowHeight 80) → (223.8, 88) → (250.58, 88) …`，
+     * 即每步缩放多出一帧错配，画布按旧行高绘制 → 用户看到"纵向滚动了一下"。
+     *
+     * 改为**仅在镜像值真正变化时**同步：缩放期间镜像从 80 → 88 只会触发一次同步
+     * （且此时内核已是 88，是无操作），中间那一帧不再被回灌旧值。
+     * 外部驱动的行高变化（改设置 / 持久化恢复 / 轨道头缩放）仍照常同步。
+     */
+    let lastMirroredRowHeight = -1;
     // 选中态影响 clip 描边 / 高亮样式，变化时必须重建（用引用比较：Immer 未变更
     // 时数组引用稳定）。初值用 undefined 与「未选中（null）」区分。
     let builtSelectedClipId: string | null | undefined = undefined;
@@ -1788,9 +1820,13 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     function ensureScene(axis: TimelineAxis): boolean {
         const view = scroll.get();
         const d = data();
-        // 行高的真值源在 React（左侧轨道头与内核必须同源）：竖直缩放后把新行高
-        // 同步给滚动内核，否则内容高度与竖直钳制仍按旧行高计算。
-        scroll.setRowHeight(d.rowHeight);
+        // 行高的真值源在 React（左侧轨道头与内核必须同源），但**只在镜像值真正
+        // 变化时**才推入内核：每帧无条件回灌会把缩放分支刚写入的新行高改回
+        // 滞后的旧值，产生「新位置 + 旧行高」的错配帧（见 lastMirroredRowHeight）。
+        if (d.rowHeight !== lastMirroredRowHeight) {
+            lastMirroredRowHeight = d.rowHeight;
+            scroll.setRowHeight(d.rowHeight);
+        }
         const needsRebuild =
             sceneDirty ||
             builtPxPerSec !== view.pxPerSec ||
@@ -2204,9 +2240,55 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
 
     const loop = createRenderLoop({ draw });
     loop.start();
-    const unsubscribeScroll = scroll.subscribe(() => loop.invalidate());
+    /**
+     * 把轨道头容器的滚动位置**立即**镜像到内核当前位置。
+     *
+     * 【为什么不能只在绘制阶段镜像——"纵向缩放像在纵向滚动"的第二半根因】
+     * 绘制阶段的 `syncDom` 也会写 `trackList.scrollTop`，但它只在 rAF 绘制里执行。
+     * 而滚轮/键盘/拖动等输入是**同步**写滚动内核的；输入后内核只经订阅把绘制
+     * `invalidate`（排到下一帧），于是从"内核已改"到"轨道头跟上"之间隔着整整一帧。
+     * 实测（指针 x=1000，连续三次 ctrl+滚轮放大）：
+     *   kST=3.8 而 domST=0    → 画布行顶 108.2 vs 轨道头行顶 112（错位 3.8px）
+     *   kST=8.07 而 domST=4   → 103.93 vs 108（错位 4.07px）
+     *   kST=12.82 而 domST=8  → 99.18 vs 104（错位 4.82px）
+     * 每步缩放都错位一次，用户看到的就是"缩放时纵向滚动了一下"。
+     *
+     * 因此把镜像提前到**订阅回调**里：它与内核提交同一次同步调用栈，写入立即生效，
+     * 画布与轨道头在同一次合成里取到同一位置。绘制阶段的 `syncDom` 保留——它还要
+     * 处理横向平移、吸附层与 ghost 层，且其 `shouldWrite` 去重会让这里已写过的值
+     * 不再重复写。
+     *
+     * 特殊说明：容差与 `syncDom` 一致（0.5px），避免"内核 → DOM → 内核"回声循环
+     * （见 `timeline/scrollEcho` 与 `getMirroredTrackListScrollTop`）。
+     */
+    function mirrorTrackListScrollTop(): void {
+        const trackList = sync?.trackListScroller;
+        if (trackList == null) return;
+        const view = scroll.get();
+        if (shouldWrite(view.scrollTop, lastTrackListScrollTop, 0.5)) {
+            lastTrackListScrollTop = view.scrollTop;
+            trackList.scrollTop = view.scrollTop;
+        }
+    }
+
+    const unsubscribeScroll = scroll.subscribe(() => {
+        mirrorTrackListScrollTop();
+        loop.invalidate();
+    });
 
     // ── 输入：wheel（滚动 / 缩放，规则与旧实现同源）──────────────────
+    /**
+     * 滚轮**缩放**方向的累积状态（跨事件，长生命周期）。
+     *
+     * 【为什么必须是宿主级状态】方向判定带死区，需要跨事件累积；而 `onWheel`
+     * 是逐事件回调，局部变量无法承载它。放在这里（而非模块级单例）是为了让
+     * 多个内核实例互不污染。
+     *
+     * 特殊说明：**只有缩放路径读它**——滚动路径不受死区影响（滚动本身不需要
+     * 方向判定，逐事件累加即可），否则会让滚动手感变钝。
+     */
+    const wheelZoomAccumulator: WheelZoomAccumulator = createWheelZoomAccumulator();
+
     /**
      * 判断指针是否悬停在自绘滚动条上。
      *
@@ -2341,7 +2423,21 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         }
 
         event.preventDefault();
-        const factor = event.deltaY < 0 ? WHEEL_ZOOM_IN_FACTOR : WHEEL_ZOOM_OUT_FACTOR;
+        // 缩放方向：**不能**用 `deltaY < 0 ? 1.1 : 0.9`。该写法把 `deltaY = 0`
+        // （纯横向手势 / 纵向噪声归零）判成缩小，且对 precision touchpad 的
+        // 变号小幅增量逐事件翻转方向 —— 两者都表现为"ctrl+滚轮剧烈抖动"（Windows
+        // 实测行高在同一位置 88 → 80 → 88 → 80 往复）。改走带死区的累积判定：
+        // 小幅对称噪声完全不触发，真实滚轮一格恰好一步。
+        const zoomStep = resolveWheelZoomStep({
+            accumulator: wheelZoomAccumulator,
+            // 用**归一化后**的增量：deltaMode=1/2 的浏览器（Firefox）原始值量纲不同，
+            // 直接与死区比较会让同一物理手势在不同浏览器下触发次数不同。
+            deltaX,
+            deltaY,
+        });
+        wheelZoomAccumulator.pending = zoomStep.accumulator.pending;
+        if (zoomStep.direction === 0) return;
+        const factor = zoomStep.direction < 0 ? WHEEL_ZOOM_IN_FACTOR : WHEEL_ZOOM_OUT_FACTOR;
 
         if (action === "vertical-zoom") {
             const baseRowHeight = Math.max(1, view.rowHeight);
@@ -2352,8 +2448,21 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 clampNumber(baseRowHeight * factor, MIN_ROW_HEIGHT, MAX_ROW_HEIGHT),
             );
             if (nextRowHeight === baseRowHeight) return;
+            // 行高与滚动位置必须**一次**写进内核：
+            // - 行高经 `onRowHeightChange` 回 React，要等下一次提交、再经下一帧
+            //   `ensureScene` 里的 `scroll.setRowHeight(d.rowHeight)` 才进内核；
+            // - 而 `setScrollTop` 当帧就生效。
+            // 分两次写会留下一帧「新位置 + 旧行高」，该帧的锚点行位置是错的 ——
+            // 实测连续放大（80→88→97→107，指针 y=38，初始 scrollTop=200）出现
+            // 行位置 2.975 → 3.273 → 2.975 → 3.279 的**逐步振荡**，即用户报告的
+            // "纵向缩放会导致纵向滚动"。原子提交后两者同帧自洽。
+            // React 侧的 `onRowHeightChange` 仍要发（轨道头行高与内核必须同源）；
+            // 它落地时值已与内核一致，不会二次跳动。
+            scroll.setRowHeightAndScrollTop(
+                nextRowHeight,
+                rowUnitAtPointer * nextRowHeight - pointerY,
+            );
             onRowHeightChange?.(nextRowHeight);
-            scroll.setScrollTop(rowUnitAtPointer * nextRowHeight - pointerY);
             return;
         }
 
@@ -2611,6 +2720,148 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      * 重叠区里控件彼此挤得很近，阈值太小会把"想点一下"误判成"拖动边缘/淡变"。
      */
     const OVERLAP_DRAG_THRESHOLD_PX = 9;
+
+    // ── 拖拽边缘自动滚屏 ─────────────────────────────────────────────
+    /**
+     * 自动滚屏的持续帧循环句柄。
+     *
+     * 【为什么需要独立的 rAF，而不是挂在渲染循环上】渲染循环是**脏标记驱动**的
+     * （见 `renderKernel/renderLoop` 约束 1）：没有内容变更就不调度帧。而自动滚屏
+     * 恰恰要求"指针停在边缘不动时也持续推进视口"——指针不动 ⇒ 没有 pointermove
+     * ⇒ 没有任何标脏 ⇒ 渲染循环空闲。因此这里必须自己保持一个持续帧循环，
+     * 由"指针是否处于边缘带内"决定是否继续。
+     *
+     * 特殊说明：循环只在**拖拽手势期间**存在，手势结束立即取消（`stopDragAutoScroll`），
+     * 因此不会在空闲时占用 CPU。
+     */
+    let dragAutoScrollFrame: number | null = null;
+    /** 上一帧的时间戳（`performance.now()`），用于把速度换算为本帧步长。 */
+    let dragAutoScrollLastTs = 0;
+    /**
+     * 最近一次指针事件（自动滚屏后用**同一个事件**重放预览）。
+     *
+     * 【为什么存整个事件而不是只存 clientX】各 `apply*Preview` 还会读修饰键
+     * （`dragModifiersOf`：Ctrl/Shift/Alt/⌘ 决定 copy / slip / 免吸附等语义）。
+     * 只存坐标会让重放丢掉修饰键，表现为"滚屏那一刻修饰键忽然失效"。
+     */
+    let dragAutoScrollEvent: PointerEvent | null = null;
+
+    /**
+     * 停止拖拽边缘自动滚屏（幂等）。
+     *
+     * 手势结束 / 取消 / 卸载都必须调用：不停会让视口在手势结束后继续滑动。
+     */
+    function stopDragAutoScroll(): void {
+        if (dragAutoScrollFrame !== null) {
+            cancelAnimationFrame(dragAutoScrollFrame);
+            dragAutoScrollFrame = null;
+        }
+        dragAutoScrollLastTs = 0;
+        dragAutoScrollEvent = null;
+    }
+
+    /**
+     * 用最近一次指针事件重放一次手势预览。
+     *
+     * 【为什么需要】自动滚屏只改 `scrollLeft`，而各预览器都是从
+     * 「`scrollLeft` + 指针相对视口的偏移」算出**内容坐标**的。滚屏后不复算，
+     * clip 会停在旧内容坐标上——表现为「视口滚了、clip 没跟上」的脱节。
+     * 复用同一个事件即得到"指针在屏幕上没动、但内容坐标前移"的正确语义。
+     */
+    function replayGesturePreviewAtLastPointer(): void {
+        const event = dragAutoScrollEvent;
+        if (event === null) return;
+        dispatchMovePreview(event);
+    }
+
+    /**
+     * 按当前手势种类派发一次逐帧预览（穷尽性表驱动，见 `resolveMoveDispatch`）。
+     *
+     * @param event 指针事件（或自动滚屏时重放的最近事件）。
+     */
+    function dispatchMovePreview(event: PointerEvent): void {
+        switch (resolveMoveDispatch(gesture.kind)) {
+            case "seek":
+                interactions?.onSeek?.(secAt(event.clientX), false);
+                return;
+            case "box-select":
+                applyBoxSelect(event);
+                return;
+            case "drag":
+                applyDragPreview(event);
+                return;
+            case "trim":
+                applyTrimPreview(event);
+                return;
+            case "fade":
+                applyFadePreview(event);
+                return;
+            case "gain":
+                applyGainPreview(event);
+                return;
+            case "crossfade-grip":
+                applyCrossfadeGripPreview(event);
+                return;
+            case "snap-offset":
+                applySnapOffsetPreview(event);
+                return;
+            default:
+                return;
+        }
+    }
+
+    /**
+     * 推进一帧自动滚屏。
+     *
+     * 流程：手势已结束 → 停止 → 否则按指针位置与容器边界算本帧步长 →
+     * 有位移则 `scroll.setScrollLeft`（钳制在 ScrollKernel 内）→ 用同一指针位置
+     * 重放预览（让被拖对象跟上新内容坐标）→ 继续调度下一帧。
+     *
+     * 特殊说明：**只推进水平轴**。竖直方向的拖拽换轨由命中逻辑处理（拖到别的行），
+     * 与"想移动到更远的时间位置"不是同一意图；同时滚两轴会让跨轨拖拽变得难以控制。
+     */
+    function tickDragAutoScroll(): void {
+        dragAutoScrollFrame = null;
+        if (!shouldAutoScrollForGesture(gesture.kind)) {
+            stopDragAutoScroll();
+            return;
+        }
+        const now = performance.now();
+        const frameMs = dragAutoScrollLastTs > 0 ? now - dragAutoScrollLastTs : 1000 / 60;
+        dragAutoScrollLastTs = now;
+        const event = dragAutoScrollEvent;
+        if (event === null) {
+            stopDragAutoScroll();
+            return;
+        }
+        const rect = container.getBoundingClientRect();
+        const deltaPx = resolveDragEdgeScroll({
+            clientX: event.clientX,
+            leftPx: rect.left,
+            rightPx: rect.right,
+            frameMs,
+        });
+        if (Math.abs(deltaPx) > 0.01) {
+            const view = scroll.get();
+            scroll.setScrollLeft(view.scrollLeft + deltaPx);
+            replayGesturePreviewAtLastPointer();
+        }
+        dragAutoScrollFrame = requestAnimationFrame(tickDragAutoScroll);
+    }
+
+    /**
+     * 记录指针位置并确保自动滚屏循环在跑（拖拽手势期间每次 pointermove 调用）。
+     *
+     * @param event 指针事件。
+     */
+    function noteDragAutoScrollPointer(event: PointerEvent): void {
+        if (!shouldAutoScrollForGesture(gesture.kind)) return;
+        dragAutoScrollEvent = event;
+        if (dragAutoScrollFrame !== null) return;
+        dragAutoScrollLastTs = 0;
+        dragAutoScrollFrame = requestAnimationFrame(tickDragAutoScroll);
+    }
+
     /**
      * 音量旋钮的起手阈值（CSS px）。
      *
@@ -3549,6 +3800,10 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
 
     /** 左键手势的移动处理（中键平移由 onPanPointerMove 单独负责）。 */
     function onGesturePointerMove(event: PointerEvent): void {
+        // 记录指针位置并确保边缘自动滚屏循环在跑（仅横向位置类手势，见
+        // `shouldAutoScrollForGesture`）。必须在分派**之前**调用：循环用的是
+        // 最近一次指针事件，晚记录会让本帧按旧位置判定边缘。
+        noteDragAutoScrollPointer(event);
         // 手势光标（与旧实现取值一致）：拖拽 grab→grabbing、trim/fade 用 resize、
         // 框选用 crosshair。
         if (gesture.kind === "clip-drag") {
@@ -3563,15 +3818,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         } else if (gesture.kind === "box-select") {
             container.style.cursor = "crosshair";
         }
-        if (gesture.kind === "seek") {
-            // 落下手势：只预览（`commit = false` 不写后端——见面板的说明）。
-            interactions?.onSeek?.(secAt(event.clientX), false);
-            return;
-        }
-        if (gesture.kind === "box-select") {
-            applyBoxSelect(event);
-            return;
-        }
+        // seek / 框选的分派**只保留在末尾的穷尽性表里**（`resolveMoveDispatch`）：
+        // 这里再判一次会让同一帧重复派发。
         if (gesture.kind === "pending-select") {
             // 消费型 header 控件（静音 / 锁链 / 共振峰）：按下已吃掉事件，**永不升级**
             // 为拖拽（旧实现的按钮在 pointerdown 里 stopPropagation）。松开时再判定
@@ -3670,25 +3918,14 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             applyDragPreview(event);
             return;
         }
-        if (gesture.kind === "clip-trim") {
-            applyTrimPreview(event);
-            return;
-        }
-        if (gesture.kind === "clip-fade") {
-            applyFadePreview(event);
-            return;
-        }
-        if (gesture.kind === "gain-drag") {
-            applyGainPreview(event);
-            return;
-        }
-        if (gesture.kind === "crossfade-grip") {
-            applyCrossfadeGripPreview(event);
-            return;
-        }
-        if (gesture.kind === "clip-drag") {
-            applyDragPreview(event);
-        }
+        // 已升级手势的逐帧分派走**穷尽性表**（`resolveMoveDispatch`）。
+        //
+        // 【为什么不再手写 if 链】旧实现是一串 `if (gesture.kind === …)`，没有任何
+        // 穷尽性保障：`snap-offset-drag` 就是漏掉的那一种（9 种里唯一缺失），
+        // 于是吸附偏移 ◣ 手柄的预览只在跨越 4px 阈值时发生一次、随即冻结
+        // —— 用户报告为「对齐标记无法正确的被移动」。抽表后由
+        // `moveDispatch.test.ts` 对全集做表驱动断言，漏登记会直接测试失败。
+        dispatchMovePreview(event);
     }
 
     /**
@@ -3896,7 +4133,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     /**
      * 计算并派发一次拖拽预览（拖拽期间每帧调用）。
      *
-     * 流程：内容坐标位移 → `resolveDragDelta`（时间位移 + 边界钳制）→
+     * 流程：内容坐标位移 → `resolveDragDelta`（时间位移，仅下界 0）→
      * `resolveTargetTrackIndex`（落点轨道）→ 与上次值比较去重 → 回调。
      *
      * 特殊说明：去重是必要的——调用方每次预览都写 Redux，而 Redux 变更会触发
@@ -3959,6 +4196,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             deltaContentXPx: contentX - gesture.startContentX,
             pxPerSec: view.pxPerSec,
             startSec: gesture.originStartSec,
+            // 不传 projectSec / lengthSec：右移**不再**被工程末端钳制（该上界是
+            // 自指边界，会让自动扩展永不触发，表现为"向右拖有隐形边界"）。
+            // 工程时长增长交给面板的 moveClipStart 与后端 ensure_project_end_sec。
         });
         const trackIndex = resolveTargetTrackIndex(contentY, view.rowHeight, d.tracks.length);
         // 拖到**最后一条轨道之下** → 哨兵（`NEW_TRACK_SENTINEL`）：面板据此建新轨并
@@ -4226,6 +4466,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 // 已释放 / 未捕获：忽略。
             }
             gesture = { kind: "none" };
+            // 手势结束立即停掉边缘自动滚屏：不停会让视口在松手后继续滑动，
+            // 且循环每帧都会读到已失效的手势状态。
+            stopDragAutoScroll();
             // 竖直换轨锁定的高亮属于**手势期间**的反馈：手势一结束就必须消失，
             // 否则会有一条蓝色行底/徽标永久留在画面上（旧实现靠 state 归零清除）。
             if (lastVerticalLockTrackId !== null) {
@@ -4992,6 +5235,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         dispose() {
             unsubscribeScroll();
             loop.stop();
+            // 卸载时停掉自动滚屏循环：rAF 回调持有容器与 scroll 内核的引用，
+            // 不停会在组件卸载后继续滚动并阻止相关对象被回收。
+            stopDragAutoScroll();
             resizeObserver.disconnect();
             container.removeEventListener("wheel", onWheel);
             container.removeEventListener("keydown", onKeyDown);

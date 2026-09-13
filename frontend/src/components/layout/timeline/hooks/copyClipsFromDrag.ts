@@ -58,6 +58,13 @@ export interface CopyClipsFromDragDeps {
     readonly sessionRef: React.RefObject<SessionState>;
     /** 把新副本设为多选（由调用方提供，见 `useClipDrag` 的 deps）。 */
     readonly setMultiSelectedClipIds: (ids: string[]) => void;
+    /**
+     * 把新副本设为多选，并标记为**动作驱动**（非用户圈选）。
+     *
+     * 复制拖拽的副本由动作产生，用户并未表达"我要整组拖动"；标记后才能让
+     * 拖拽起手的陈旧选区收敛生效（见 `interaction/primeSelection`）。
+     */
+    readonly setMultiSelectedClipIdsFromAction: (ids: string[]) => void;
     /** 按垂直偏移解析目标轨（普通落点用）。 */
     readonly resolveTrackIdByOffset: (clipId: string) => string | null;
     readonly maybeSelectTargetTrack: (trackId: string | null) => void;
@@ -92,7 +99,7 @@ export async function copyClipsFromDrag(deps: CopyClipsFromDragDeps): Promise<vo
         allowTrackMove,
         hasMixedTrackSelection,
         autoCrossfadeEnabled,
-        setMultiSelectedClipIds,
+        setMultiSelectedClipIdsFromAction,
         resolveTrackIdByOffset,
         maybeSelectTargetTrack,
         createNewTracksForDrop,
@@ -190,7 +197,8 @@ export async function copyClipsFromDrag(deps: CopyClipsFromDragDeps): Promise<vo
 
         const created: string[] = payload?.createdClipIds ?? [];
         if (!Array.isArray(created) || created.length === 0) return;
-        setMultiSelectedClipIds(created);
+        // 复制拖拽属**动作驱动**选中（副本由动作产生，非用户圈选）。
+        setMultiSelectedClipIdsFromAction(created);
         void dispatch(selectClipRemote(created[0]));
 
         // 播放光标定位到副本中最靠前的起点。
