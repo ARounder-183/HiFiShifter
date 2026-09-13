@@ -111,7 +111,10 @@ import {
 import { normalizeWheelDelta } from "../input/normalizeWheel";
 import { createRenderLoop } from "../../../renderKernel/renderLoop";
 import { createClipInstanceBuilder } from "../scene/clipInstances";
-import { shouldRepaintForPlayhead } from "../scene/playheadInvalidation";
+import {
+    resolvePlayheadSec,
+    shouldRepaintForPlayhead,
+} from "../scene/playheadInvalidation";
 import { buildGridInstances } from "../scene/gridInstances";
 import type { FlatInstance, Rgba } from "../../../renderKernel/instanceTypes";
 import { createScrollKernel, type TimelineViewportState } from "../../../renderKernel/scrollKernel";
@@ -1773,11 +1776,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      */
     function readPlayheadSec(): number {
         const live = args.playheadSec;
-        if (live !== undefined) {
-            const value = live();
-            if (Number.isFinite(value)) return value;
-        }
-        return data().playheadSec;
+        return resolvePlayheadSec(live !== undefined ? live() : undefined, data().playheadSec);
     }
 
     /**
@@ -2121,7 +2120,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             totalSec,
             viewportWidth: viewportWidthPx,
             playheadZoomEnabled: d.playheadZoomEnabled,
-            playheadSec: d.playheadSec,
+            // 与 syncDom / draw 同一实时读取口径：镜像会滞后一次提交，用它当
+            // 缩放锚点会让"以播放头为锚"的缩放在播放时锚在旧位置上。
+            playheadSec: readPlayheadSec(),
             anchorScreenX: event.clientX - rect.left,
             minPxPerSec,
             maxPxPerSec: MAX_PX_PER_SEC,

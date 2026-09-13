@@ -279,8 +279,10 @@ const TimelineTransportBridge = React.memo(function TimelineTransportBridge(prop
         isTransportAdvancing,
         onFrame: React.useCallback(
             (visualPlayheadSec: number) => {
-                // 同步共享 ref：缩放锚点与提交后纠正读取的必须是与绘制同源的
-                // 插值播放头，否则播放中缩放会以滞后的 store 值锚定造成跳变。
+                // 同步共享 ref：缩放锚点（以播放头为锚时的锚点解析）读取的必须是
+                // 与绘制同源的插值播放头，否则播放中缩放会以滞后的 store 值锚定
+                // 造成跳变。内核宿主也经 `playheadSec` getter 读同一份真值
+                // （见 `timelineKernelHost.readPlayheadSec`）。
                 visualPlayheadRef.current = visualPlayheadSec;
                 const playheadLeftPx = visualPlayheadSec * pxPerSecRef.current;
 
@@ -530,8 +532,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     >(null);
     const state = useTimelineState({ kernelHostRef });
     // 视觉插值播放头的共享读取点：bridge 的 onFrame 每帧写入（与绘制同源），
-    // 缩放锚点与提交后纠正读取同一值——播放中缩放不得以 33Hz 轮询的 store
-    // 滞后值锚定，否则播放头会跳变 δ·Δpx（δ = 轮询间隔内的插值领先量）。
+    // 缩放锚点与内核宿主（经 `playheadSec` getter）读取同一值——播放中缩放不得
+    // 以 33Hz 轮询的 store 滞后值锚定，否则播放头会跳变 δ·Δpx（δ = 轮询间隔内的
+    // 插值领先量）。
     const visualPlayheadSecRef = React.useRef(0);
     const getVisualPlayheadSec = React.useCallback(() => visualPlayheadSecRef.current, []);
     /**
@@ -4079,9 +4082,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
      * transform 写入（见 kernel host 的 syncDom）。
      */
     const timeRulerNode = (
-        // playheadSec 传提交值（而非渲染期读 ref）：视觉插值由 playheadLineRef /
-        // playheadHeadRef 命令式驱动；React 仅在该值真正变化时重写 style.left，
-        // 写入的是最新提交位置而非陈旧值。
+        // playheadSec 传提交值（而非渲染期读 ref）：视觉插值由
+        // `rulerPlayheadLineRef` / `rulerPlayheadHeadRef` 命令式驱动；React 仅在
+        // 该值真正变化时重写 style.left，写入的是最新提交位置而非陈旧值。
         //
         // 标尺不消费实时滚动位置：刻度与可见范围都按量化的 `rulerScrollLeft` 生成
         // （缓冲已保证覆盖视口），这样滚动期间 `TimeRulerMarks` 的 memo 不会失效，
