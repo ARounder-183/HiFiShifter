@@ -742,6 +742,23 @@ export interface TimelineKernelInteractions {
         readonly fadeSec: number;
         readonly deltaSec: number;
         readonly modifiers: KernelDragModifiers;
+        /**
+         * 曲率拖拽（`modifier.fadeCurvatureDrag` 按住）所需的指针 / 行几何。
+         *
+         * 曲率要解的是「指针落在包络线上的哪一点」，因此需要指针的**视口 y** 与
+         * 该行 body 的顶边 / 高度——两者都在内核的坐标域里（面板拿不到 `rowHeight`
+         * 与行偏移）。不传时面板退化为「只按长度拖拽」。
+         */
+        readonly curveEnv: {
+            /** 指针视口 y（CSS px）。 */
+            readonly clientY: number;
+            /** 该行 body 顶边的视口 y（已含 header 高度）。 */
+            readonly envTopClientY: number;
+            /** body 高度（CSS px）。 */
+            readonly bodyHeightPx: number;
+            /** 指针所在的工程时间（秒）——曲率求解需要 x 方向的位置。 */
+            readonly pointerSec: number;
+        };
     }) => void;
     /**
      * 淡变角结束。
@@ -2242,6 +2259,16 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                * 因此必须显式带一个来源标记。
                */
               fromOverlapRegion?: boolean;
+              /**
+               * 按下时命中的 **header 消费型控件**（静音 / 锁链 / 共振峰）。
+               *
+               * 旧实现这三个是 `<button onClick>` 且 `onPointerDown` 里
+               * `stopPropagation`：按下即**吃掉**事件（不选中、不进入拖拽），动作在
+               * **松开**时才触发（按下后移出按钮即取消）。内核原先在 pointerdown 直接
+               * 派发，于是"按一下静音键再拖走"也会切换静音，且双击静音会落到参数
+               * 编辑器选区。这里改成延后到松开、并复用同一套阈值/收尾。
+               */
+              headerControl: "mute" | "chain" | "formant" | null;
           }
         | {
               kind: "clip-fade";
@@ -2859,7 +2886,20 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         if (hit.kind === "clip") {
             // 面板可在此整体接管（例如 `Alt + Shift` 竖直拖 = 调音高，复用旧实现的
             // 状态机）。返回 true 时内核不启动任何自己的手势。
+            //
+            // 特殊说明：拦截判定放在 **header 控件解析之后**——旧实现里
+            // `ClipHeader` 的按钮与 `ClipEdgeHandles` / 淡变控件 / SnapOffset 握把
+            // 都在自己的 pointerdown 里 `stopPropagation`，事件根本到不了 clip 本体，
+            // 因此 `Alt+Shift` 在**边缘**上仍是"拉伸"、在**徽标/旋钮**上仍是各自的动作。
+            // 内核原先把拦截放在所有分区判定之前，导致 `Alt+Shift` 在边缘 / 徽标上
+            // 都会变成调音高。
             if (
+                resolveHeaderControl(hit) === null &&
+                hit.region !== "left-edge" &&
+                hit.region !== "right-edge" &&
+                hit.region !== "fade-in-corner" &&
+                hit.region !== "fade-out-corner" &&
+                hit.region !== "snap-offset-handle" &&
                 interactions?.onClipPointerDownIntercept?.({
                     clipId: hit.clip.id,
                     clientX: event.clientX,
@@ -2978,15 +3018,6 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 // 表现为"点了标签但输入框一闪即消"。`name` 不消费（要继续走选中 /
                 // 拖拽），因此只对真正被消费的控件生效。
                 if (control !== "name") event.preventDefault();
-                const anchor = screenAnchor(event.clientX, event.clientY);
-                if (control === "mute") {
-                    interactions?.onToggleClipMute?.(hit.clip.id, hit.clip.muted !== true);
-                    return;
-                }
-                if (control === "formant") {
-                    interactions?.onOpenClipFormant?.(hit.clip.id, anchor.x, anchor.y);
-                    return;
-                }
                 if (control === "gain-knob") {
                     // 音量旋钮 = **拖动调值**（旧实现 3px 起手阈值），双击重置 0 dB。
                     // 单击不做任何事（手册：「音量旋钮依然可以直接上下拖动，双击恢复为
@@ -3008,15 +3039,36 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 }
                 // 增益 / 速率徽标：单击不进入编辑（手册：「双击徽标即可在原位置输入
                 // 数值」），因此这里只放行——继续往下走选中 / 拖拽，双击在双击分支处理。
-                if (control === "chain") {
-                    // 锁链徽标：临时禁用 / 启用该编组的联动编辑（旧实现
-                    // `ClipHeader` 的 `onToggleGroupDisabled`，作用于整个组而非单个 clip）。
-                    const groupId = data().clips.find((item) => item.id === hit.clip.id)?.groupId;
-                    if (groupId != null && groupId !== "") {
-                        interactions?.onToggleGroupDisabled?.(groupId);
-                        return;
+                if (control === "mute" || control === "chain" || control === "formant") {
+                    // 消费型控件：按下**吃掉**事件（不选中、不拖拽），动作延后到松开
+                    // 且指针仍在同一控件上时触发——旧实现是 `<button onClick>` 加法
+                    // `onPointerDown` 里的 `stopPropagation`。见手势类型里
+                    // `headerControl` 的说明。
+                    gesture = {
+                        kind: "pending-select",
+                        startClientX: event.clientX,
+                        startClientY: event.clientY,
+                        clipId: hit.clip.id,
+                        region: hit.region,
+                        headerControl: control,
+                        cycleHeld: false,
+                        startContentX: 0,
+                        startContentY: 0,
+                        originStartSec: hit.clip.startSec,
+                        originTrackId: hit.clip.trackId,
+                        lengthSec: hit.clip.lengthSec,
+                        originFadeSec: 0,
+                        originSnapOffsetSec: 0,
+                        inactiveTakeId: null,
+                        pressSec: hit.sec,
+                        selectionMods: resolveSelectionMods(event),
+                    };
+                    try {
+                        container.setPointerCapture(event.pointerId);
+                    } catch {
+                        // 捕获失败不影响手势（window 上的 move 监听仍会收到事件）。
                     }
-                    // 无组可切换（理论不可达：徽标只在有组时可见）→ 落到选中 / 拖拽。
+                    return;
                 }
                 // `name`：单击仍走选中 / 拖拽（只有双击才重命名），继续往下走。
             }
@@ -3043,6 +3095,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 region: hit.region,
                 partnerClipId: hit.partnerClipId,
                 fromOverlapRegion: hit.fromOverlapRegion === true,
+                headerControl: null,
                 // 循环修饰键只在淡变控件 / 抓手上起作用（其他分区的单击语义不变）。
                 cycleHeld:
                     fadeCycleHeld &&
@@ -3215,6 +3268,10 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             return;
         }
         if (gesture.kind === "pending-select") {
+            // 消费型 header 控件（静音 / 锁链 / 共振峰）：按下已吃掉事件，**永不升级**
+            // 为拖拽（旧实现的按钮在 pointerdown 里 stopPropagation）。松开时再判定
+            // 指针是否仍在同一控件上。
+            if (gesture.headerControl !== null) return;
             const dx = event.clientX - gesture.startClientX;
             const dy = event.clientY - gesture.startClientY;
             // 阈值按命中来源分档：重叠区内用旧实现 `OverlapEditLayer` 的 9px，
@@ -3422,12 +3479,34 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         if (result.deltaSec === gesture.lastDeltaSec) return;
         gesture.lastDeltaSec = result.deltaSec;
         gesture.lastFadeSec = result.fadeSec;
+        const fadeClipId = gesture.clipId;
         interactions?.onFadePreview?.({
-            clipId: gesture.clipId,
+            clipId: fadeClipId,
             side: gesture.side,
             fadeSec: result.fadeSec,
             deltaSec: result.deltaSec,
             modifiers: dragModifiersOf(event),
+            curveEnv: (() => {
+                // 曲率拖拽的几何：指针 y 映射到该行 body 内的增益（1 = 包络基线）。
+                // 行下标由 clip 的轨道解析——淡变手势本身不携带行号（它由
+                // `pending-select` 升级而来，只带 region 与几何）。
+                const d = data();
+                const clip = d.clips.find((item) => item.id === fadeClipId);
+                const trackIndex =
+                    clip === undefined
+                        ? -1
+                        : d.tracks.findIndex((track) => track.id === clip.trackId);
+                const rowTop = rect.top - view.scrollTop + Math.max(0, trackIndex) * view.rowHeight;
+                return {
+                    clientY: event.clientY,
+                    envTopClientY: rowTop + CLIP_HEADER_HEIGHT,
+                    bodyHeightPx: Math.max(
+                        1,
+                        view.rowHeight - CLIP_BODY_PADDING_Y - CLIP_HEADER_HEIGHT,
+                    ),
+                    pointerSec: contentX / Math.max(1e-9, view.pxPerSec),
+                };
+            })(),
         });
     }
 
@@ -3728,6 +3807,41 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             }
         }
         if (gesture.kind === "pending-select" && !cancelled) {
+            if (gesture.headerControl !== null) {
+                // 消费型 header 控件：松开时指针仍在**同一控件**上才触发动作——
+                // 旧实现是 `<button onClick>`，按下后移出按钮即取消（不选中、不
+                // seek、不拖拽）。这里重算一次命中分区并比对控件身份。
+                const pressedClipId = gesture.clipId;
+                const pressedControl = gesture.headerControl;
+                const release = hitAt(event.clientX, event.clientY);
+                if (
+                    release.kind === "clip" &&
+                    release.clip.id === pressedClipId &&
+                    resolveHeaderControl(release) === pressedControl
+                ) {
+                    const anchor = screenAnchor(event.clientX, event.clientY);
+                    if (pressedControl === "mute") {
+                        const muted = data().clips.find((item) => item.id === pressedClipId)?.muted;
+                        interactions?.onToggleClipMute?.(pressedClipId, muted !== true);
+                    } else if (pressedControl === "formant") {
+                        interactions?.onOpenClipFormant?.(pressedClipId, anchor.x, anchor.y);
+                    } else {
+                        const groupId = data().clips.find(
+                            (item) => item.id === pressedClipId,
+                        )?.groupId;
+                        if (groupId != null && groupId !== "") {
+                            interactions?.onToggleGroupDisabled?.(groupId);
+                        }
+                    }
+                }
+                gesture = { kind: "none" };
+                try {
+                    container.releasePointerCapture(event.pointerId);
+                } catch {
+                    // 已释放 / 未捕获：忽略。
+                }
+                return;
+            }
             if (gesture.region === "snap-offset-handle") {
                 // 手柄上的单击**不改选中**：旧实现的握把在 pointerdown 里
                 // `stopPropagation`，点击不会落到 clip 上——只有拖动才有意义。

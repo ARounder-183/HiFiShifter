@@ -27,7 +27,10 @@
 import { CLIP_BODY_PADDING_Y, CLIP_HEADER_HEIGHT } from "../constants.js";
 import { clipDisplayName, type ClipInfo } from "../../../../features/session/sessionTypes";
 import { resolveTakeLaneLayouts } from "../takeLanes";
-import { resolveClipContentDurationSec, resolveSourceEndSec } from "../../../../utils/loopRender.js";
+import {
+    resolveClipContentDurationSec,
+    resolveSourceEndSec,
+} from "../../../../utils/loopRender.js";
 import {
     FRAME_PERIOD_MS,
     getCachedMidiCurve,
@@ -686,7 +689,10 @@ export function buildSparseClipRenderModel(args: {
             midiPitchCurvePx: buildMidiPitchCurvePx({
                 axis: args.axis,
                 clip,
-                bodyHeightPx: Math.max(1, args.rowHeight - CLIP_BODY_PADDING_Y - CLIP_HEADER_HEIGHT),
+                bodyHeightPx: Math.max(
+                    1,
+                    args.rowHeight - CLIP_BODY_PADDING_Y - CLIP_HEADER_HEIGHT,
+                ),
                 pitchCurve: args.clipPitchCurves?.[clip.id],
                 pitchRange: args.clipPitchRanges?.[clip.id],
             }),
