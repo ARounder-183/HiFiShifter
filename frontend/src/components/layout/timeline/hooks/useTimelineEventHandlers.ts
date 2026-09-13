@@ -40,7 +40,7 @@ import { resolveHorizontalWheelZoom } from "../runtime/timelineScrollRange";
 import { gridStepBeats, MIN_PX_PER_SEC, MAX_PX_PER_SEC } from "../";
 import { computeFocusCursorScrollLeft } from "../../../../utils/autoFollowScroll";
 import { resolveTimelineMinPxPerSec } from "../runtime/timelineZoomBounds";
-import { getDynamicProjectSec } from "../../../../features/session/projectBoundary";
+import { resolveScrollableProjectSec } from "../../../../features/session/projectBoundary";
 import { expandClipIdsWithGroups } from "./useGroupExpansion";
 import type { TimelineViewportAccess } from "./timelineViewportAccess";
 
@@ -402,7 +402,13 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
             // 不重建监听），闭包值是挂载时的快照——工程变长后缩放上限仍钳在
             // 旧工程末端，视图无法到达当前允许的滚动范围。sessionRef 在
             // store 订阅内同步更新，事件触发时读取的必然是当前值。
-            const totalSec = getDynamicProjectSec(sessionRef.current.clips);
+            // 与视口/参数编辑器**同源**（`resolveScrollableProjectSec`）：此前用
+            // clip 末端（59.5s）而视口已改用 max(projectSec, clipEnd)（120s），
+            // 缩放上限被钳在旧末端，缩放会跳。
+            const totalSec = resolveScrollableProjectSec(
+                sessionRef.current.projectSec,
+                sessionRef.current.clips,
+            );
             const zoom = resolveHorizontalWheelZoom({
                 factor,
                 basePxPerSec: pxPerSecRef.current,
@@ -493,7 +499,17 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
                 pxPerSec,
                 // 与 zoomTimelineFocus 同源：实时读取工程长度（sessionRef 在
                 // store 订阅内同步更新），不依赖渲染期闭包。
-                contentWidth: getDynamicProjectSec(sessionRef.current.clips) * pxPerSec,
+                //
+                // ★ 必须用 `resolveScrollableProjectSec`：此处曾用 clip 末端
+                //   （59.5s），而视口已改用 max(projectSec, clipEnd)（120s）。
+                //   分叉的后果实测为**聚焦光标反而把播放头推出视野**——把视口滚到
+                //   最右（16640）后触发本命令，contentWidth 只到 8925，视口被拉回
+                //   8925 而播放头在 119s 处，落在视野之外。
+                contentWidth:
+                    resolveScrollableProjectSec(
+                        sessionRef.current.projectSec,
+                        sessionRef.current.clips,
+                    ) * pxPerSec,
             });
             // 写后回读**实际生效值**再广播：请求值可能被钳制/量化/锚定修正
             // （旧实现经浏览器回读，内核经 ScrollKernel 回读），跟随视口的图层
