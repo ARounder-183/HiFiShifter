@@ -99,7 +99,10 @@ import type { TempoMap } from "../../utils/tempoMap";
 import { effectiveScaleAtSec, buildScaleSegments } from "../../utils/tempoMap";
 import { setTempoMapRemote } from "../../features/session/thunks/tempoMapThunks";
 import { publishPianoRollSelection } from "../../utils/pianoRollSelectionBus";
-import { resolveHorizontalWheelZoom } from "./timeline/runtime/timelineScrollRange";
+import {
+    resolveHorizontalWheelZoom,
+    resolveTimelineScrollRange,
+} from "./timeline/runtime/timelineScrollRange";
 import { resolveTimelineMinPxPerSec } from "./timeline/runtime/timelineZoomBounds";
 import { TimelineDisplaySettingsDialog } from "./TimelineDisplaySettingsDialog";
 
@@ -1368,10 +1371,16 @@ export const PianoRollPanel: React.FC = () => {
         // 同步模式下手动缩放后必须把新的 pxPerSec 写回共享视口；即使滚动位置
         // 没有变化（例如光标位于左侧同步空白区时锚定在工程起点，next 仍为 -offset），
         // 也要广播缩放，否则轨道视图不会跟着缩放。
+        //
+        // 【广播的是"落地值"而不是"请求值"】`applyHorizontalScrollPosition` 已经
+        // 把目标交给内核（内核按当前边界钳制），所以这里回读一次：共享视口里只能是
+        // 两个面板都到得了的位置。广播请求值（可能越界）会让轨道视图先按自己的上限
+        // 钳回来，两个面板在工程结尾处错开一个差量。
         if (syncEnabled && !timelineSyncApplyingRef.current) {
+            const appliedDrawing = hostRef.current?.getViewport().scrollLeft ?? next;
             timelineViewportSync.setViewport(
                 {
-                    scrollLeft: native,
+                    scrollLeft: timelineViewportStateToNative(appliedDrawing, offset),
                     pxPerSec,
                 },
                 PIANO_ROLL_SYNC_ORIGIN,
@@ -1393,6 +1402,14 @@ export const PianoRollPanel: React.FC = () => {
             projectSec: dynamicProjectSec,
         };
     });
+
+    // 指定缩放下的内容宽（口径与轨道视图一致：工程宽向上取整）。缩放提交时要用
+    // **目标**缩放的内容宽来钳位置——用当前缩放算出的上限会在放大时把位置压低。
+    // 定义在缩放入口之前：`useCallback` 的依赖数组在 render 期求值，写在后面会命中 TDZ。
+    const contentWidthAt = useCallback(
+        (scale: number) => Math.max(1, Math.ceil(dynamicProjectSec * scale)),
+        [dynamicProjectSec],
+    );
 
     const queueHorizontalZoom = useCallback(
         (nextPxPerSec: number, nextNativeScrollLeft: number) => {
@@ -1438,9 +1455,22 @@ export const PianoRollPanel: React.FC = () => {
                 nextScrollLeft,
                 s.paramEditorSyncTimeline ? timelineOffsetRef.current : 0,
             );
-            queueHorizontalZoom(nextPxPerSec, nativeNextScrollLeft);
+            // 【为什么必须在这里钳一次】共享位置（原生坐标）必须落在两个面板**公共**
+            // 的可滚范围内（= `resolveTimelineScrollRange` 的上限，按**目标**缩放的
+            // 工程宽算，与轨道视图同一份口径）。不钳的话，缩放锚点可以把位置算到范围
+            // 之外：参数编辑器会广播一个自己都到不了的值，轨道视图收到后按自己的上限
+            // 钳回来 —— 两个面板在工程结尾处错开，且位置互相追赶（抖动）。
+            const range = resolveTimelineScrollRange({
+                contentWidth: contentWidthAt(nextPxPerSec),
+                viewportWidth: viewSizeRef.current.w,
+            });
+            const clampedNativeScrollLeft = Math.min(
+                range.maxScrollLeft,
+                Math.max(range.minScrollLeft, nativeNextScrollLeft),
+            );
+            queueHorizontalZoom(nextPxPerSec, clampedNativeScrollLeft);
         },
-        [s.paramEditorSyncTimeline, queueHorizontalZoom],
+        [s.paramEditorSyncTimeline, contentWidthAt, queueHorizontalZoom],
     );
 
     // 工具栏/快捷键聚焦缩放（hifi:zoomTimelineFocus）。放在 handleHorizontalZoom
@@ -1970,7 +2000,7 @@ export const PianoRollPanel: React.FC = () => {
     );
 
     const secPerBeat = 60 / Math.max(1e-6, s.bpm);
-    const contentWidth = Math.max(1, Math.ceil(dynamicProjectSec * pxPerSec));
+    const contentWidth = contentWidthAt(pxPerSec);
 
     const scrollerRef = useRef<HTMLDivElement | null>(null);
     const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -2070,11 +2100,23 @@ export const PianoRollPanel: React.FC = () => {
     const [timeDisplaySettingsOpen, setTimeDisplaySettingsOpen] = useState(false);
     // 参数编辑器的内容绘制在 sticky 视口层中，滚动范围由后面的 spacer 提供。
     // 两个子元素按垂直方向堆叠，因此 scrollWidth 取二者宽度最大值；
-    // 想让原生最大滚动位置为“工程宽 + 同步偏移”，spacer 需再加一个视口宽。
-    const paddedContentWidth = useMemo(
-        () => contentWidth + viewSize.w + (s.paramEditorSyncTimeline ? timelineOffsetPx : 0),
-        [contentWidth, viewSize.w, s.paramEditorSyncTimeline, timelineOffsetPx],
+    // 想让原生最大滚动位置为「工程宽」，spacer 需再加一个视口宽。
+    //
+    // 【不变量：与轨道视图同一份可滚范围】这里复用轨道视图的同一个函数
+    // （`resolveTimelineScrollRange`），两者都传自己的视口宽——于是两个面板的
+    // 最大滚动位置**逐值相等**（都 = 内容宽）。
+    //
+    // 【为什么同步偏移不进这里（用户报告的「工程结尾右侧空白长度不同」）】spacer 的
+    // 宽度决定原生最大滚动位置。此前同步开启时会再加一个 `timelineOffsetPx`，参数
+    // 编辑器因此比轨道视图多出一段「只有自己能滚」的空白：滚到最右时轨道视图停在
+    // 内容宽处（工程结尾落在轨道区左缘），参数编辑器却能再滚一个偏移量（工程结尾落到
+    // 轨道区左缘以左），两个面板不再对齐。偏移是**纯投影量**，只改内容画在屏幕上的
+    // 位置（见内核宿主的 `horizontalOffsetPx`），不参与可滚范围。
+    const timelineScrollRange = useMemo(
+        () => resolveTimelineScrollRange({ contentWidth, viewportWidth: viewSize.w }),
+        [contentWidth, viewSize.w],
     );
+    const paddedContentWidth = timelineScrollRange.paddedContentWidth;
 
     useLayoutEffect(() => {
         const el = scrollerRef.current;
@@ -2298,8 +2340,10 @@ export const PianoRollPanel: React.FC = () => {
     // 【两套坐标系（本任务最容易出错的地方）】
     // 「同步时间轴视图」开启时，参数编辑器的内容层要整体右移一个偏移量（`offset`，
     // 实测 200px），两边的网格线才能在屏幕上对齐。于是：
-    // - **原生坐标**：`[0, 内容宽 + offset]`——`paddedContentWidth` 撑出的域；
-    // - **绘制坐标**：`[−offset, 内容宽]`——含负值，各图层（标尺/网格/画布/波形）用。
+    // - **原生坐标**：`[0, 内容宽]`——与轨道视图**同一格式、同一范围**（同步模式下
+    //   它就是两个面板共享的那个位置，见 `horizontalOffsetPx` 的「关键不变量」）；
+    // - **绘制坐标**：`[−offset, 内容宽 − offset]`——含负值，各图层（标尺/网格/画布/
+    //   波形）用。偏移只是投影：它把内容整体右移，不扩大可滚范围。
     //
     // 内核的位置字段恒被钳到 `[0, max]`（无法表示负值），所以内核持有**原生坐标**，
     // 本面板消费的 `axis.scrollLeftPx` 是**绘制坐标**。换算只在宿主边界发生

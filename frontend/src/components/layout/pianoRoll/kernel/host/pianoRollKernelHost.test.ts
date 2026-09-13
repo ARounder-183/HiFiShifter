@@ -252,12 +252,18 @@ describe("createPianoRollKernelHost", () => {
 });
 
 /**
- * 坐标契约：内核持有**原生坐标**（域 `[0, 内容宽 + 偏移]`），对外一律暴露
- * **绘制坐标**（域 `[−偏移, 内容宽]`）。
+ * 坐标契约：内核持有**原生坐标**（域 `[0, 内容宽]`，与轨道视图逐值相等），对外
+ * 一律暴露**绘制坐标**（域 `[−偏移, 内容宽 − 偏移]`）。
  *
  * 【为什么单独成组】这是本阶段最容易出错、也最难在类型上发现的一处：两套坐标系
  * 只差一个偏移量，写错时功能"看起来正常"，但同步模式下网格会与时间轴错位、
  * 或同步留白（负的绘制坐标）无法表示。以下期望值取自浏览器实测的旧实现行为。
+ *
+ * 【为什么原生域不含偏移（2026-09-13 修正）】偏移是纯投影量。曾经把它加进
+ * `extraContentWidthPx`（域 `[0, 内容宽 + 偏移]`），参数编辑器就比轨道视图多出一段
+ * 「只有自己能滚」的空白：滚到最右时轨道视图停在内容宽处，参数编辑器还能再滚一个
+ * 偏移量 —— 两个面板在工程结尾处不再对齐。共享位置就是原生 `scrollLeft`，因此两边
+ * 的原生域必须逐值相等。
  */
 describe("createPianoRollKernelHost · 坐标契约（偏移 200）", () => {
     const OFFSET = 200;
@@ -271,13 +277,25 @@ describe("createPianoRollKernelHost · 坐标契约（偏移 200）", () => {
         t.host.dispose();
     });
 
-    it("绘制域 = [-偏移, 内容宽]（两端都可表示）", () => {
+    it("绘制域 = [-偏移, 内容宽 − 偏移]（两端都可表示）", () => {
         const t = makeHost({ offsetPx: OFFSET });
         t.host.setScrollLeft(999999);
-        expect(t.host.getViewport().scrollLeft).toBeCloseTo(CONTENT_W, 6);
+        expect(t.host.getViewport().scrollLeft).toBeCloseTo(CONTENT_W - OFFSET, 6);
         t.host.setScrollLeft(-999999);
         expect(t.host.getViewport().scrollLeft).toBeCloseTo(-OFFSET, 6);
         t.host.dispose();
+    });
+
+    it("同步偏移不改变可滚范围：原生上限恒为内容宽（与轨道视图同一上限）", () => {
+        const withOffset = makeHost({ offsetPx: OFFSET });
+        const withoutOffset = makeHost();
+        withOffset.host.setScrollLeft(999999);
+        withoutOffset.host.setScrollLeft(999999);
+        // 原生 = 绘制 + 偏移：两边都恰好停在内容宽，共享位置（原生）因此同域。
+        expect(withOffset.host.getViewport().scrollLeft + OFFSET).toBeCloseTo(CONTENT_W, 6);
+        expect(withoutOffset.host.getViewport().scrollLeft).toBeCloseTo(CONTENT_W, 6);
+        withOffset.host.dispose();
+        withoutOffset.host.dispose();
     });
 
     it("投影与视口同一口径（都是绘制坐标）", () => {
@@ -289,13 +307,22 @@ describe("createPianoRollKernelHost · 坐标契约（偏移 200）", () => {
         t.host.dispose();
     });
 
-    it("滚动条内容尺寸 = 原生 scrollWidth（= 内容宽 + 偏移 + 视口宽）", () => {
+    it("滚动条内容尺寸 = 原生 scrollWidth（= 内容宽 + 视口宽）", () => {
         const t = makeHost({ offsetPx: OFFSET });
-        const nativeScrollWidth = CONTENT_W + OFFSET + VIEWPORT_W;
+        const nativeScrollWidth = CONTENT_W + VIEWPORT_W;
         expect(t.host.getScrollbarGeometries().horizontal.thumbLengthPx).toBeCloseTo(
             (VIEWPORT_W * VIEWPORT_W) / nativeScrollWidth,
             6,
         );
+        t.host.dispose();
+    });
+
+    it("滚动条 thumb 走完全程：滚到最右时起点 = 轨道长 − thumb 长", () => {
+        const t = makeHost({ offsetPx: OFFSET });
+        const geometry = t.host.getScrollbarGeometries().horizontal;
+        t.host.setScrollLeft(999999);
+        const atEnd = t.host.getScrollbarGeometries().horizontal;
+        expect(atEnd.thumbStartPx).toBeCloseTo(geometry.trackLengthPx - atEnd.thumbLengthPx, 6);
         t.host.dispose();
     });
 

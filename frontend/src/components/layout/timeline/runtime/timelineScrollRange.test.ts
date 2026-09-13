@@ -93,6 +93,67 @@ test("components/layout/timeline/runtime/timelineScrollRange.test.ts scripted ch
         assertEqual(after.maxScrollLeft, 1001, "max just above viewport");
     }
 
+    // 【两面板不变量】同步模式下两个面板共享同一个水平位置（= 轨道视图的原生
+    // scrollLeft），因此可滚范围必须与「面板自己的视口宽」「同步偏移」都无关。
+    //
+    // 反例（2026-09-13 修正的缺陷）：参数编辑器曾把偏移做进自己的可滚范围
+    // （`[0, 内容宽 + 偏移]`），于是它比轨道视图多出一段「只有自己能滚」的空白——滚到
+    // 最右时轨道视图停在内容宽处（工程结尾落在轨道区左缘），参数编辑器还能再滚一个
+    // 偏移量（工程结尾落到轨道区左缘以左）。用户看到的就是「工程结尾右侧的额外空白
+    // 长度不同」，且两个面板在极端位置上不再对齐。
+    {
+        const PANEL_WIDTH = 1600;
+        const TRACK_HEADER_W = 240;
+        const KEYBOARD_W = 80;
+        /** 轨道视图（滚动区）宽 = 面板宽 − 轨道头。 */
+        const TIMELINE_VIEWPORT = PANEL_WIDTH - TRACK_HEADER_W;
+        /** 参数编辑器（滚动区）宽 = 面板宽 − 键盘列。 */
+        const PIANO_VIEWPORT = PANEL_WIDTH - KEYBOARD_W;
+        /** 同步偏移的定义：两个滚动区左缘之差 = 轨道头宽 − 键盘列宽（恒为正）。 */
+        const OFFSET = TRACK_HEADER_W - KEYBOARD_W;
+        const CONTENT = 2456.789;
+
+        const timeline = resolveTimelineScrollRange({
+            contentWidth: CONTENT,
+            viewportWidth: TIMELINE_VIEWPORT,
+        });
+        const piano = resolveTimelineScrollRange({
+            contentWidth: CONTENT,
+            viewportWidth: PIANO_VIEWPORT,
+        });
+        assertNear(
+            piano.maxScrollLeft,
+            timeline.maxScrollLeft,
+            "shared max scroll left is independent of the panel viewport width",
+        );
+        assertNear(piano.maxScrollLeft, CONTENT, "shared max scroll left equals the content width");
+
+        // 屏幕坐标：轨道区左缘 = 参数编辑器左缘 + 偏移。任意共享位置下，工程结尾
+        // 必须落在同一屏幕 x —— 包括各自的最右端。
+        const timelineAreaLeft = 1000;
+        const pianoAreaLeft = timelineAreaLeft - OFFSET;
+        for (const sharedScrollLeft of [0, CONTENT / 2, timeline.maxScrollLeft]) {
+            const timelineEndScreenX = timelineAreaLeft + CONTENT - sharedScrollLeft;
+            const pianoEndScreenX = pianoAreaLeft + CONTENT - (sharedScrollLeft - OFFSET);
+            assertNear(
+                pianoEndScreenX,
+                timelineEndScreenX,
+                `project end stays aligned at shared scroll ${sharedScrollLeft}`,
+            );
+        }
+
+        // 工程结尾右侧的空白长度也一致（用户可见的判据）。
+        const timelineBlank =
+            timelineAreaLeft +
+            TIMELINE_VIEWPORT -
+            (timelineAreaLeft + CONTENT - timeline.maxScrollLeft);
+        const pianoBlank =
+            pianoAreaLeft +
+            PIANO_VIEWPORT -
+            (pianoAreaLeft + CONTENT - (piano.maxScrollLeft - OFFSET));
+        assertNear(pianoBlank, timelineBlank, "trailing blank right of the project end matches");
+    }
+
     // 播放光标在画面内：保持其当前屏幕位置，不校正到鼠标
     {
         const scrollLeft = resolvePlayheadZoomScrollLeft({
