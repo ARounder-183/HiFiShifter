@@ -1260,9 +1260,10 @@ export const PianoRollPanel: React.FC = () => {
                 pxPerSecRef.current = store.pxPerSec;
                 scrollLeftRef.current = drawingScrollLeft;
                 lastScrollLeftRef.current = drawingScrollLeft;
-                // 同步落地走统一载体（宿主；它会换算原生坐标并镜像回写）。
-                applyHorizontalScrollPosition(drawingScrollLeft);
-                applyScrollLayers(drawingScrollLeft);
+                // 同步落地走统一载体（宿主；它会换算原生坐标并镜像回写），
+                // 并在**同一任务**里提交各图层（DOM / Canvas2D / GL）——否则 GL
+                // 侧的曲线 / 播放头会比标尺、网格慢一帧到几帧（见 `paintNow`）。
+                commitViewportNow(drawingScrollLeft);
                 setScrollLeft(drawingScrollLeft);
                 timelineSyncApplyingRef.current = false;
                 return;
@@ -1290,11 +1291,10 @@ export const PianoRollPanel: React.FC = () => {
             // 禁用时移除偏移补偿：把位置还原为绘制坐标。
             if (scroller) {
                 const next = Math.max(0, scrollLeftRef.current);
-                applyHorizontalScrollPosition(next);
                 scrollLeftRef.current = next;
                 lastScrollLeftRef.current = next;
+                commitViewportNow(next);
                 setScrollLeft(next);
-                applyScrollLayers(next);
             }
         };
     }, [s.paramEditorSyncTimeline]);
@@ -1339,13 +1339,14 @@ export const PianoRollPanel: React.FC = () => {
         pxPerBeatRef.current = pending.pxPerSec * (60 / Math.max(1e-6, s.bpm));
         scrollLeftRef.current = drawingScrollLeft;
         // `pending.nativeScrollLeft` 是共享视口的原生值；换算成绘制坐标后走统一载体
-        // （宿主会再加回偏移，落到与共享视口相同的位置）。
-        applyHorizontalScrollPosition(drawingScrollLeft);
+        // （宿主会再加回偏移，落到与共享视口相同的位置），并在**同一任务**里把
+        // DOM / Canvas2D / GL 一起提交（见 `paintNow`）。
+        //
         // 【这里不能再调 syncScrollLeft】它是「读原生 scroller → 采纳为真值」的
         // 路径，而此时原生镜像还停留在**上一帧的旧值**（本函数的写入要等内核下一帧才
         // 回写），于是会把刚提交的目标位置又覆盖回旧值——表现为「同步从 1200 拨回 0
         // 时参数编辑器不动」。
-        applyScrollLayers(drawingScrollLeft);
+        commitViewportNow(drawingScrollLeft);
         timelineSyncApplyingRef.current = false;
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [pxPerSec, scrollLeft, s.paramEditorSyncTimeline, timelineOffsetPx]);
@@ -1363,7 +1364,8 @@ export const PianoRollPanel: React.FC = () => {
         const offset = syncEnabled ? timelineOffsetRef.current : 0;
         const native = pending.nextScrollLeft;
         const next = timelineViewportNativeToState(native, offset);
-        applyHorizontalScrollPosition(next);
+        // 缩放落地：内核写入 + 各图层**同任务**提交（见 `paintNow`）。
+        commitViewportNow(next);
         if (lastScrollLeftRef.current !== next) {
             lastScrollLeftRef.current = next;
             scrollLeftRef.current = next;
@@ -1386,7 +1388,6 @@ export const PianoRollPanel: React.FC = () => {
                 PIANO_ROLL_SYNC_ORIGIN,
             );
         }
-        applyScrollLayers(next);
         // 原生滚动位置的钳制校正由宿主的镜像回写负责（它每帧都会把原生位置对齐真值）
         // ——不要再写原生 scroller，否则会与内核真值打架。
         setScrollLeft(next);
@@ -1536,7 +1537,10 @@ export const PianoRollPanel: React.FC = () => {
         (next: ValueViewport) => {
             pitchViewRef.current = next;
             syncVerticalScrollbarForViewport("pitch", next);
-            invalidate(); // 绕过 React 渲染，直接命令 Canvas 重绘
+            // 值域视口是**竖轴的手势提交点**：滚动条 thumb 已同步写下 DOM，曲线 /
+            // 音高键 / 数值轴（GL）必须在**同一任务**里提交，否则竖轴平移/缩放时
+            // 这些线比滚动条慢一帧到几帧（见 `paintNow`）。
+            paintNow();
         },
         // eslint-disable-next-line react-hooks/exhaustive-deps
         [invalidate],
@@ -1547,7 +1551,8 @@ export const PianoRollPanel: React.FC = () => {
         (param: string, next: ValueViewport) => {
             paramViewsRef.current = { ...paramViewsRef.current, [param]: next };
             syncVerticalScrollbarForViewport(param as ParamName, next);
-            invalidate(); // 绕过 React 渲染，直接命令 Canvas 重绘
+            // 同 `setPitchView`：竖轴的手势提交点，DOM 与 GL 必须同任务。
+            paintNow();
         },
         // eslint-disable-next-line react-hooks/exhaustive-deps
         [invalidate],
@@ -2268,6 +2273,52 @@ export const PianoRollPanel: React.FC = () => {
     }
 
     /**
+     * **立即**提交一帧（有宿主时同任务提交，否则退回标脏 rAF）。
+     *
+     * 【为什么需要它：DOM / Canvas2D 与 GL 必须落在同一个任务里】
+     * 面板的权威写入点（缩放落地、共享视口应用、值域平移/缩放）会同步写 DOM /
+     * Canvas2D。若 GL 侧（参数线 / 原始音高线 / 播放头）等下一帧才跟上，同一份视口
+     * 就被两套图层分帧呈现——用户看到的就是"这些线迟缓几帧渲染"。
+     *
+     * 实测（Chrome，参数编辑器内滚轮缩小，按帧记录两个绘制路径的 scrollLeft）：
+     * 面板在 t=6384 写下 DOM/Canvas2D，GL 到 t=6446 才用同一个值重绘（React 提交 +
+     * rAF 重新排队，慢一帧到数帧）。改用本方法后两者同任务提交，手感与旧实现
+     * （原生滚动 + 在事件里同步重绘）一致。
+     *
+     * 与 `invalidate()` 的分工：数据变更（编辑结果、主题、音阶）仍走 rAF 合并；
+     * **用户手势的视口提交**走本方法。
+     */
+    function paintNow(): void {
+        const host = hostRef.current;
+        if (host) {
+            host.paintNow();
+            return;
+        }
+        invalidate();
+    }
+
+    /**
+     * 视口提交的统一入口：内核写入 + 各图层**同任务**提交。
+     *
+     * 流程：`applyHorizontalScrollPosition`（内核写入，含钳制与标脏）→ `paintNow()`
+     * （同一任务的 GL + DOM + Canvas2D 提交）。
+     *
+     * 特殊说明：宿主尚未创建（挂载期）时退回 `applyScrollLayers` 直接写 DOM，与各
+     * 调用点原本的兜底语义一致。
+     *
+     * @param drawingScrollLeft 目标水平位置（绘制坐标）。
+     */
+    function commitViewportNow(drawingScrollLeft: number): void {
+        applyHorizontalScrollPosition(drawingScrollLeft);
+        const host = hostRef.current;
+        if (host) {
+            host.paintNow();
+            return;
+        }
+        applyScrollLayers(drawingScrollLeft);
+    }
+
+    /**
      * 采纳一次水平滚动位置变化（原生 scroller → 真值）。
      *
      * 流程：原生坐标 → 绘制坐标 → 同步开关时推送共享视口 → 通知各图层 → 量化提交 state。
@@ -2315,11 +2366,17 @@ export const PianoRollPanel: React.FC = () => {
                 PIANO_ROLL_SYNC_ORIGIN,
             );
         }
-        // 交给内核（它会按新边界钳制、镜像回写并在下一帧提交各图层）。
-        // 宿主持有真值；仅在它尚未创建（挂载期 refs 未就绪）时才走下面的直接绘制路径。
+        // 交给内核（它会按新边界钳制、镜像回写并提交各图层）。
+        //
+        // 【为什么在内核写入后立刻 `paintNow`】本函数由**原生滚动事件**驱动（触摸拖拽、
+        // 触控板惯性、中键平移、框选自动滚屏）。原生滚动发生在浏览器的渲染步骤里，而
+        // 滚轮/拖拽任务里排队的 rAF 要等**下一帧**才跑——这会让可见内容（标尺、网格、
+        // 主画布、波形、曲线、播放头）比原生滚动慢一帧。旧实现是在滚动事件里同步重绘，
+        // 因此没有这一帧差；这里用 `paintNow()`（同任务提交）恢复到同一时序。
         const host = hostRef.current;
         if (host) {
             host.setScrollLeft(next);
+            host.paintNow();
             return;
         }
         applyScrollLayers(next);
@@ -4081,6 +4138,10 @@ export const PianoRollPanel: React.FC = () => {
                 })
             ) {
                 host.setScrollTop(scroller.scrollTop);
+                // 原生滚动事件驱动的竖向滚动（触摸 / 触控板 / 焦点滚入）：
+                // 与横向同因——内核写完后必须**同任务**提交各图层，否则竖向内容
+                // （音高键 / 数值轴 / 曲线 / 播放头）比原生滚动慢一帧（见 `paintNow`）。
+                host.paintNow();
             }
         },
         [syncScrollLeft],

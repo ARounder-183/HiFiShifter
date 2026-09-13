@@ -375,6 +375,53 @@ describe("createPianoRollKernelHost · 坐标契约（偏移 200）", () => {
 });
 
 /**
+ * 同任务提交（`paintNow` 与用户手势）：面板的权威写入点、原生滚动事件与宿主自己
+ * 解析的手势都必须**不经过帧调度**就提交本帧，否则同一屏里 GL 侧（参数线 / 原始
+ * 音高线 / 播放头）会比同步写下的 DOM / Canvas2D 慢一帧到几帧。
+ *
+ * 【回归背景】实测（Chrome，参数编辑器内滚轮缩小）：面板 t=6384 写 DOM/Canvas2D，
+ * GL t=6446 才用同一个 scrollLeft 重绘。修复后两条路径的绘制落在同一时间戳。
+ */
+describe("createPianoRollKernelHost · paintNow（同任务提交）", () => {
+    it("★ paintNow 同步提交：不跑任何注入帧就已绘制新视口", () => {
+        const t = makeHost();
+        t.host.setScrollLeft(500);
+        t.host.paintNow();
+        expect(t.paintedAxes.at(-1)).toBeCloseTo(500, 6);
+        t.host.dispose();
+    });
+
+    it("paintNow 在无脏标记时不重复绘制（可安全放在高频路径上）", () => {
+        const t = makeHost();
+        t.host.setScrollLeft(500);
+        t.host.paintNow();
+        const count = t.paintedAxes.length;
+        t.host.paintNow();
+        expect(t.paintedAxes).toHaveLength(count);
+        t.host.dispose();
+    });
+
+    it("★ 拖 thumb 是用户手势：不跑帧也已提交（内容与指针同帧）", () => {
+        const t = makeHost();
+        const down = t.hThumb.handlers.get("pointerdown");
+        expect(down).toBeDefined();
+        down?.({
+            preventDefault() {},
+            stopPropagation() {},
+            clientX: 100,
+            pointerId: 1,
+            currentTarget: { setPointerCapture() {} },
+        } as never);
+        const painted = t.paintedAxes.length;
+        const move = t.windowHandlers.get("pointermove");
+        expect(move).toBeDefined();
+        move?.({ clientX: 160 } as never);
+        expect(t.paintedAxes.length).toBeGreaterThan(painted);
+        t.host.dispose();
+    });
+});
+
+/**
  * 用户手势上报：`onUserScrollLeft` 只在宿主**亲自解析**的手势后触发。
  *
  * 【为什么单列一组】它与 `onScrollLeftCommit` 长得很像但语义完全不同：前者代表

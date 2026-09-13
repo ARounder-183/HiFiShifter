@@ -343,6 +343,22 @@ export interface PianoRollKernelHost {
     };
     /** 标脏：请求下一帧提交。 */
     invalidate(): void;
+    /**
+     * **立即**提交一帧（不等待下一帧；未标脏时不做任何事）。
+     *
+     * 【为什么需要：DOM / Canvas2D 与 GL 必须落在同一个任务里】
+     * 默认的 `invalidate` 把绘制交给 rAF 合并。但面板的输入路径（缩放落地、共享视口
+     * 应用、值域平移/缩放）会在事件任务里**同步**写下 DOM / Canvas2D，此时若 GL 侧
+     * 等下一帧，同一份视口就会被两套图层分帧呈现：曲线 / 原始音高线 / 播放头比同屏的
+     * 标尺、网格、主画布慢一拍到几帧（用户报告"这些线迟缓几帧渲染"）。
+     *
+     * 实测（Chrome，参数编辑器内滚轮缩小）：面板 t=6384 写 DOM/Canvas2D，GL t=6446 才用
+     * 同一个 scrollLeft 重绘。改为本方法后两者同任务提交。
+     *
+     * 特殊说明：本方法走的是**同一条** `draw()`（唯一绘制路径），并取消已排队的那一帧
+     * ——不会重复绘制，也不会漏掉绘制内的新标脏。
+     */
+    paintNow(): void;
     /** 释放全部资源（帧循环、滚动订阅、尺寸观察）。重复调用安全。 */
     dispose(): void;
 }
@@ -1263,6 +1279,25 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
     }
 
     /**
+     * 用户手势的视口提交：上报来源 + **同任务**绘制。
+     *
+     * 【为什么手势必须同任务绘制】面板的权威写入点（缩放落地、共享视口应用、值域
+     * 平移/缩放）以及原生滚动事件路径都已改为同步提交（见 `paintNow`）。宿主自己解析
+     * 的手势（拖 thumb、点轨道翻页）若仍走 `invalidate()` 的 rAF 合并，就只剩它在
+     * 下一帧才动：同一屏里"内容 / 曲线 / 播放头"比指针慢一帧，而其他路径已经不慢。
+     * 统一成本方法后，所有用户手势都是"写内核 → 同任务提交"。
+     *
+     * 特殊说明：程序化写入（面板的数据驱动 re-clamp、镜像回写、共享视口应用）不走
+     * 这里——那些路径的绘制仍由 rAF 合并，避免把连续的数据更新变成逐次绘制。
+     *
+     * @param axis 手势作用的轴（"x" 还会上报共享视口的用户来源）。
+     */
+    function commitUserGesture(axis: "x" | "y"): void {
+        if (axis === "x") notifyUserScrollLeft();
+        loop.flush();
+    }
+
+    /**
      * 计算两条滚动条的几何（**绘制与命中的唯一几何来源**）。
      *
      * 【为什么必须是唯一来源】宿主有三处需要几何：每帧写 thumb 样式、thumb 拖拽的
@@ -1522,8 +1557,9 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                         scroll.maxScrollLeft(),
                     ),
             );
-            // 用户手势：拖 horizontal thumb 是真实意图，需通知面板同步共享视口。
-            notifyUserScrollLeft();
+            // 用户手势：拖 horizontal thumb 是真实意图，需通知面板同步共享视口；
+            // 同时同任务提交（内容 / 曲线 / 播放头与指针同帧）。
+            commitUserGesture("x");
             return;
         }
         scroll.setScrollTop(
@@ -1534,6 +1570,7 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                     scroll.maxScrollTop(),
                 ),
         );
+        commitUserGesture("y");
     }
 
     const onThumbPointerMove = (event: PointerEvent): void => {
@@ -1589,8 +1626,8 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                 );
                 if (target !== null) {
                     scroll.setScrollLeft(target);
-                    // 用户手势：点轨道翻页同样需要同步共享视口。
-                    notifyUserScrollLeft();
+                    // 用户手势：点轨道翻页同样需要同步共享视口 + 同任务提交。
+                    commitUserGesture("x");
                 }
                 return;
             }
@@ -1600,7 +1637,10 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                 view.scrollTop,
                 viewportHeightPx,
             );
-            if (target !== null) scroll.setScrollTop(target);
+            if (target !== null) {
+                scroll.setScrollTop(target);
+                commitUserGesture("y");
+            }
         };
     }
 
@@ -1765,6 +1805,11 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         invalidate() {
             if (disposed) return;
             loop.invalidate();
+        },
+
+        paintNow() {
+            if (disposed) return;
+            loop.flush();
         },
 
         dispose() {

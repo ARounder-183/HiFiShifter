@@ -127,4 +127,88 @@ describe("renderLoop", () => {
         stub.frames[1](0);
         expect(draw).toHaveBeenCalledTimes(2);
     });
+
+    /**
+     * `flush`：面板的输入路径同步写了 DOM / Canvas2D 时，GL 侧必须在**同一个任务**
+     * 里提交，否则同一份视口会被两套图层分两帧呈现。
+     */
+    it("★ flush 立即绘制，并取消已排队的帧（不留重复绘制）", () => {
+        const stub = createFrameStub();
+        const draw = vi.fn();
+        const loop = createRenderLoop({
+            draw,
+            requestFrame: stub.requestFrame,
+            cancelFrame: stub.cancelFrame,
+        });
+
+        loop.start();
+        loop.invalidate();
+        const scheduledHandle = stub.frames.length;
+        expect(draw).not.toHaveBeenCalled();
+
+        loop.flush();
+        // 同步绘制完成，且那一帧已被取消（本次绘制覆盖了它要做的全部工作）。
+        expect(draw).toHaveBeenCalledTimes(1);
+        expect(stub.cancelled).toEqual([scheduledHandle]);
+        expect(loop.isDirty()).toBe(false);
+
+        // 已取消的帧即便被浏览器调用，也不会重复绘制。
+        stub.frames[0](0);
+        expect(draw).toHaveBeenCalledTimes(1);
+    });
+
+    it("flush 在未标脏时不绘制（可安全放在高频路径上）", () => {
+        const stub = createFrameStub();
+        const draw = vi.fn();
+        const loop = createRenderLoop({
+            draw,
+            requestFrame: stub.requestFrame,
+            cancelFrame: stub.cancelFrame,
+        });
+
+        loop.start();
+        loop.flush();
+        loop.flush();
+        expect(draw).not.toHaveBeenCalled();
+        expect(stub.frames).toHaveLength(0);
+    });
+
+    it("flush 在 stop 之后不绘制（与 invalidate 同一卸载保护）", () => {
+        const stub = createFrameStub();
+        const draw = vi.fn();
+        const loop = createRenderLoop({
+            draw,
+            requestFrame: stub.requestFrame,
+            cancelFrame: stub.cancelFrame,
+        });
+
+        loop.start();
+        loop.invalidate();
+        loop.stop();
+        loop.flush();
+        expect(draw).not.toHaveBeenCalled();
+    });
+
+    it("flush 内再次标脏会调度下一帧（只吞掉本次要提交的那一帧）", () => {
+        const stub = createFrameStub();
+        const draw = vi.fn(() => {
+            if (draw.mock.calls.length === 1) loop.invalidate();
+        });
+        const loop = createRenderLoop({
+            draw,
+            requestFrame: stub.requestFrame,
+            cancelFrame: stub.cancelFrame,
+        });
+
+        loop.start();
+        loop.invalidate();
+        loop.flush();
+        expect(draw).toHaveBeenCalledTimes(1);
+        // 首次标脏那一帧被取消（本次绘制覆盖了它），绘制内的标脏重新排队。
+        // 注意 `stub.frames` 记录的是**请求过的帧**，不会因取消而缩短。
+        expect(stub.cancelled).toEqual([1]);
+        expect(stub.frames).toHaveLength(2);
+        stub.frames[1](0);
+        expect(draw).toHaveBeenCalledTimes(2);
+    });
 });
