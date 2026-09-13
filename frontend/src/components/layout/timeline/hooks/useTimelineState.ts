@@ -32,7 +32,7 @@ import { fileBrowserApi } from "../../../../services/api/fileBrowser";
 import { seekPlayhead, setplayheadSec } from "../../../../features/session/sessionSlice";
 import { selectKeybinding } from "../../../../features/keybindings/keybindingsSlice";
 import type { Keybinding } from "../../../../features/keybindings/types";
-import { getDynamicProjectSec } from "../../../../features/session/projectBoundary";
+import { resolveScrollableProjectSec } from "../../../../features/session/projectBoundary";
 import { applyNativeScrollLeft } from "../runtime/nativeScrollApply";
 import type { TimelineKernelHost } from "../kernel/host/timelineKernelHost";
 import { createTimelineViewportAccess } from "./timelineViewportAccess";
@@ -118,6 +118,7 @@ type TimelineSessionSlice = Pick<
     | "pendingPlayheadRevealSec"
     | "primaryTimeUnit"
     | "project"
+    | "projectSec"
     | "secondaryTimeUnit"
     | "rulerLabelSpacingPx"
     | "showPlayheadTimeInTrackHeader"
@@ -328,6 +329,7 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
             pendingPlayheadRevealSec: state.session.pendingPlayheadRevealSec,
             playheadZoomEnabled: state.session.playheadZoomEnabled,
             paramEditorSyncTimeline: state.session.paramEditorSyncTimeline,
+            projectSec: state.session.projectSec,
             paramEditorTimelineClickSelectTrackEnabled:
                 state.session.paramEditorTimelineClickSelectTrackEnabled,
             primaryTimeUnit: state.session.primaryTimeUnit,
@@ -862,7 +864,15 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
     }, []);
 
     // ── dynamicProjectSec / contentWidth / contentHeight ─────
-    const dynamicProjectSec = useMemo(() => getDynamicProjectSec(s.clips), [s.clips]);
+    //
+    // 与参数编辑器、内核**同源**（见 `resolveScrollableProjectSec`）：标尺的可见
+    // 刻度范围、拖拽上限与内容宽都由此推出。此前只用 clip 末端，比后端权威的
+    // `projectSec` 短（实测 59.5s vs 120s），会让标尺刻度范围与内核实际可滚范围
+    // 不一致（缺陷 7 的同一根因）。
+    const dynamicProjectSec = useMemo(
+        () => resolveScrollableProjectSec(s.projectSec, s.clips),
+        [s.projectSec, s.clips],
+    );
 
     const contentWidth = useMemo(
         () => Math.max(1, Math.ceil(dynamicProjectSec * pxPerSec)),
