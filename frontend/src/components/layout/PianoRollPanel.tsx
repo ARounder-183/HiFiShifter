@@ -3583,6 +3583,12 @@ export const PianoRollPanel: React.FC = () => {
             themeMode,
             fontFamily,
             pitchEnabled ? 1 : 0,
+            // beat → sec 的换算系数：选区框与剪贴板预览的 x 由 `beatToSec` 投影，
+            // 改 BPM 会改变它们的位置。此前它**不在**签名里，靠的是另一个巧合
+            // （`usePianoRollData` 的取数 effect 恰好也依赖 `secPerBeat` → 重取 →
+            // `secondaryParamViews` 换引用而顺带让缓存失效）。签名契约不该依赖这种
+            // 旁路，故显式纳入。
+            secPerBeat,
             // 数据与几何（按引用比较）。刻意与传给 drawPianoRoll 的字段一一对应，
             // 避免"签名里写了 A、实际喂给绘制的是 B"这种漂移。
             detectedPitchCurves,

@@ -64,9 +64,15 @@ export interface CreateTrackIdsDeps {
  * 【为什么按差集而不是取末条】并发建轨或后端返回顺序变化时，取末条会拿到别人的
  * 轨道（与 `createNewTrackForKernelDrop` 同一约束，见该文件头部设计约束）。
  *
+ * 【为什么去重】后备阶梯（差集 → `selected_track_id` → 末条）在「后端未返回新轨且
+ * `selected_track_id` 陈旧」时会解析出**同一个 id** 两次。返回重复 id 能通过调用方的
+ * 长度校验，却会把两个源轨道静默映射到同一目标轨道；故命中重复时不再入列，让长度
+ * 校验按"少了一条"失败。
+ *
  * @param deps 注入的 dispatch 与 sessionRef。
  * @param count 要新建的轨道数（<= 0 时返回空数组）。
- * @returns 新轨 id 列表；某条失败时该条被跳过（列表可能短于 `count`，调用方据此判定失败）。
+ * @returns 新轨 id 列表；某条解析失败或被去重时该条不出现（列表可能短于 `count`，
+ *          调用方据此判定失败）。
  */
 export async function createTrackIdsForDrop(
     deps: CreateTrackIdsDeps,
@@ -88,7 +94,12 @@ export async function createTrackIdsForDrop(
             (res?.selected_track_id ? String(res.selected_track_id) : null) ||
             (nextTracks.length > 0 ? String(nextTracks[nextTracks.length - 1]?.id) : null) ||
             null;
-        if (id) createdIds.push(id);
+        // 去重：后备阶梯（差集 → selected_track_id → 末条）在「后端没返回新轨、
+        // 且 selected_track_id 是陈旧值」时会**解析出同一个 id**。调用方
+        // （`copyClipsFromDrag`）只校验 `created.length !== span`，重复 id 能通过
+        // 长度校验，却会把两个源轨道静默映射到同一目标轨道。
+        // 命中重复时不再入列，让长度校验按"少了一条"失败——宁可报错也不静默错映射。
+        if (id !== null && !createdIds.includes(id)) createdIds.push(id);
     }
     return createdIds;
 }
