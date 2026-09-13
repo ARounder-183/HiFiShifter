@@ -93,6 +93,7 @@ import {
 import { timeRulerHeightPx } from "./timeline/rulerHeight";
 import { TempoMapCornerButton } from "./timeline/TempoMapCornerButton";
 import { invokeGridRedrawHandler } from "./timeline/gridRedrawBridge";
+import { isMirrorEcho } from "./timeline/scrollEcho";
 import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeline";
 import type { TempoMap } from "../../utils/tempoMap";
 import { effectiveScaleAtSec, buildScaleSegments } from "../../utils/tempoMap";
@@ -1977,6 +1978,19 @@ export const PianoRollPanel: React.FC = () => {
     const axisWrapRef = useRef<HTMLDivElement | null>(null);
     const lastScrollLeftRef = useRef<number | null>(null);
     const scrollStateRafRef = useRef<number | null>(null);
+    /**
+     * **上一次镜像写入 scroller 的原生偏移**（两轴各自记录）。
+     *
+     * 用途只有一个：判定原生 `scroll` 事件是不是镜像回写造成的**回声**
+     * （见 `timeline/scrollEcho` 的 `isMirrorEcho`）。判据必须拿"我上次写下的值"做
+     * 基准，而不是拿内核的当前值——连续滚动 / 缩放时事件报的是**上一帧**镜像的值，
+     * 与内核此刻已差一整帧位移，用它判会稳定地把回声误收成用户输入，进而把量化误差
+     * 推回共享视口，让时间轴跟着抽动。
+     *
+     * 初值 `NaN` = 从未写过 → 一律判"不是回声"（宁可多采纳一次也不吞掉首帧前的输入）。
+     */
+    const lastMirroredScrollLeftRef = useRef(Number.NaN);
+    const lastMirroredScrollTopRef = useRef(Number.NaN);
 
     const rulerContentRef = useRef<HTMLDivElement | null>(null);
     const gridLayerRef = useRef<HTMLDivElement | null>(null);
@@ -2122,6 +2136,7 @@ export const PianoRollPanel: React.FC = () => {
                         });
                         if (Math.abs(scroller.scrollLeft - next) > 0.5) {
                             scroller.scrollLeft = next;
+                            lastMirroredScrollLeftRef.current = next;
                             syncScrollLeft(scroller);
                         }
                     }
@@ -2205,7 +2220,9 @@ export const PianoRollPanel: React.FC = () => {
         const scroller = scrollerRef.current;
         if (!scroller) return;
         const offset = paramEditorSyncTimelineRef.current ? timelineOffsetRef.current : 0;
-        scroller.scrollLeft = timelineViewportStateToNative(drawingScrollLeft, offset);
+        const native = timelineViewportStateToNative(drawingScrollLeft, offset);
+        scroller.scrollLeft = native;
+        lastMirroredScrollLeftRef.current = native;
     }
 
     /**
@@ -2336,9 +2353,13 @@ export const PianoRollPanel: React.FC = () => {
                 );
                 if (shouldWriteNumber(container.scrollLeft, native, 0.5)) {
                     container.scrollLeft = native;
+                    // 记下"我写下的值"：它是判定原生 `scroll` 事件是否为回声的唯一基准
+                    // （见 `isMirrorEcho` 与镜像 ref 的说明）。
+                    lastMirroredScrollLeftRef.current = native;
                 }
                 if (shouldWriteNumber(container.scrollTop, axis.scrollTopPx, 0.5)) {
                     container.scrollTop = axis.scrollTopPx;
+                    lastMirroredScrollTopRef.current = axis.scrollTopPx;
                 }
             },
             onScrollTopFrame: (scrollTopPx) => {
@@ -2866,6 +2887,7 @@ export const PianoRollPanel: React.FC = () => {
 
         if (Math.abs(scroller.scrollTop - nextTop) > 0.75) {
             scroller.scrollTop = nextTop;
+            lastMirroredScrollTopRef.current = nextTop;
         }
     }
 
@@ -3967,8 +3989,8 @@ export const PianoRollPanel: React.FC = () => {
      * 原生滚动容器的 `scroll` 事件（面板侧的唯一入口）。
      *
      * 【绝大部分是镜像回声，但不是全部】
-     * 内核是唯一渲染路径，原生 scroller 只是**镜像**：宿主每帧把内核真值写回 DOM，
-     * 该写入会触发原生 `scroll` 事件。旧代码在这里**无条件**读回位置再写回内核，
+     * 内核是唯一渲染路径，原生 scroller 只是**镜像**：`onFrame` 每帧把内核真值写回
+     * 它，该写入会触发原生 `scroll` 事件。旧代码在这里**无条件**读回位置再写回内核，
      * 而那一刻读到的是上一帧镜像的旧值（实测内核已到 548.054、事件里读到 540.5），
      * 使内核被回退 7.554px，逐帧往复即用户报告的「上下拖经常拖不动 / 阶梯感」。
      *
@@ -3976,11 +3998,18 @@ export const PianoRollPanel: React.FC = () => {
      * 触控板惯性 / 焦点滚入视口**这三类输入只会产生原生 `scroll`，没有任何显式
      * 入口——忽略它等于这些输入完全失效（旧实现在这里读回位置正是为了它们）。
      *
-     * 【判据】把原生位置与**内核当前持有的位置**比较：相等 = 宿主刚写下的回声
-     * （忽略）；不等 = 容器自己动了（采纳）。内核的 `scrollLeft/Top` 与原生 DOM
-     * 同一坐标系（宿主初始化时直接读 `container.scrollLeft/Top`），因此无需换算。
-     * 这也解释了为什么不会重演"读到滞后值"：滞后只会发生在**写入与事件之间**，
-     * 而此时内核已经是权威值——两者相等即判定为回声。
+     * 【判据：与「上次镜像写入值」比，**不是**与「内核当前值」比】
+     * 本处理函数一度拿事件值与 `host.getViewport()`（内核**当前**值）比较。那在连续
+     * 滚动 / 缩放时必然失效：事件报的是**上一帧**写下的值，内核此刻已前进一整帧，
+     * 两者必然不等 → 回声被稳定地误收成"容器自己动了" → 采纳并（同步开启时）把它
+     * 推回共享视口。推回的还带着浏览器的设备像素量化误差（≤0.5px），于是两个面板
+     * 进入亚像素往复——即用户报告的「启用同步后滚轮缩放仍然抽动」（同步关闭时不会
+     * 推回共享视口，所以看不到）。
+     *
+     * 基准必须是**我上次写进容器的值**（`lastMirroredScroll*Ref`）：回声报的正是它
+     * （误差仅来自浏览器量化，有界），而真实输入会把容器带到别的值上。这正是
+     * `timeline/scrollEcho` 为轨道头写下的同一条结论（判来源，不判与真值的距离），
+     * 现在两个容器共用同一个纯函数。
      *
      * @param event 原生 `scroll` 事件。
      * @returns 无返回值。
@@ -3993,11 +4022,20 @@ export const PianoRollPanel: React.FC = () => {
             const scroller = event.currentTarget;
             const host = hostRef.current;
             if (host === null) return;
-            const view = host.getViewport();
-            if (Math.abs(scroller.scrollLeft - view.scrollLeft) > 0.5) {
+            if (
+                !isMirrorEcho({
+                    mirroredPx: lastMirroredScrollLeftRef.current,
+                    nativePx: scroller.scrollLeft,
+                })
+            ) {
                 syncScrollLeft(scroller);
             }
-            if (Math.abs(scroller.scrollTop - view.scrollTop) > 0.5) {
+            if (
+                !isMirrorEcho({
+                    mirroredPx: lastMirroredScrollTopRef.current,
+                    nativePx: scroller.scrollTop,
+                })
+            ) {
                 host.setScrollTop(scroller.scrollTop);
             }
         },

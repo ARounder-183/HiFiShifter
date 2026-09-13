@@ -493,13 +493,31 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
     // ── syncScrollLeft → DOM 直通 + bus ───────────────────────
     // 函数体只读 ref/bus，不依赖任何渲染期值：必须稳定引用，
     // 否则每个依赖它的 effect/prop 每次渲染都会失效重跑。
+    /**
+     * 发布到共享视口的**缩放**：与同一帧发布的位置**同源**。
+     *
+     * 【为什么不能直接用 `pxPerSecRef.current`】该 ref 在**渲染期**就被同步成 React
+     * state 的新值（为让别处的 emit 读到最新值）。而并发渲染允许"渲染但尚未提交"，
+     * 此时内核与 DOM（标尺）都还是旧缩放——若一次逐帧发布拿"帧里报来的旧位置"配上
+     * "刚渲染出的新缩放"，推给参数编辑器的就是一对**自相矛盾**的视口（新缩放 + 旧
+     * 位置），它会先按新缩放跳到错误位置、下一帧再被纠正：正是"启用同步后缩放抽动"。
+     *
+     * 内核模式取内核真值（位置与缩放同一次 `scroll.get()`，天然一致，且与已提交的
+     * DOM 一致）；无内核（旧 DOM 分支）时才退回 ref。
+     */
+    function livePxPerSec(): number {
+        const host = kernelHostRef.current;
+        if (host !== null) return host.getViewport().pxPerSec;
+        return pxPerSecRef.current;
+    }
+
     const syncScrollLeft = React.useCallback(function syncScrollLeft(next: number) {
         scrollLeftRef.current = next;
         if (paramEditorSyncTimelineRef.current && !timelineSyncApplyingRef.current) {
             timelineViewportSync.setViewport(
                 {
                     scrollLeft: next,
-                    pxPerSec: pxPerSecRef.current,
+                    pxPerSec: livePxPerSec(),
                 },
                 TIMELINE_SYNC_ORIGIN,
             );
@@ -574,7 +592,7 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
             timelineViewportSync.setViewport(
                 {
                     scrollLeft: next,
-                    pxPerSec: pxPerSecRef.current,
+                    pxPerSec: livePxPerSec(),
                 },
                 TIMELINE_SYNC_ORIGIN,
             );
@@ -712,7 +730,9 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
             timelineViewportSync.setViewport(
                 {
                     scrollLeft: scrollLeftRef.current,
-                    pxPerSec: pxPerSecRef.current,
+                    // 与逐帧发布同一口径（见 `livePxPerSec`）：配对的两项必须同源，
+                    // 否则会把"新缩放 + 旧位置"这种自相矛盾的视口推给参数编辑器。
+                    pxPerSec: livePxPerSec(),
                 },
                 TIMELINE_SYNC_ORIGIN,
             );

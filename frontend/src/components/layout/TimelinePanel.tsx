@@ -233,7 +233,7 @@ import {
 } from "../../utils/autoFollowScroll";
 import { readDevicePixelRatio, snapToDevicePx } from "../../utils/devicePixelLine";
 import { resolveQuickExportClipIds } from "./timeline/quickExportSelection";
-import { isTrackListMirrorEcho } from "./timeline/scrollEcho";
+import { isMirrorEcho } from "./timeline/scrollEcho";
 import {
     activeClipTakeName,
     clipDisplayName,
@@ -4963,9 +4963,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         const host = kernelHostRef.current;
         if (host != null) {
             if (
-                isTrackListMirrorEcho({
-                    mirroredScrollTop: host.getMirroredTrackListScrollTop(),
-                    nativeScrollTop: scrollTop,
+                isMirrorEcho({
+                    mirroredPx: host.getMirroredTrackListScrollTop(),
+                    nativePx: scrollTop,
                 })
             ) {
                 return;
