@@ -117,7 +117,11 @@ test("components/layout/pianoRoll/paramSelection.test.ts scripted checks", async
     assertJson(selectionFromBeatRange(3, 3), [{ startBeat: 3, endBeat: 3 }], "degenerate click");
 
     // ── addBeatRange ────────────────────────────────────────────────────
-    assertJson(addBeatRange(null, 0, 1), [{ startBeat: 0, endBeat: 1 }], "add to empty");
+    assertJson(
+        addBeatRange(null, 0, 1),
+        [{ startBeat: 0, endBeat: 1 }],
+        "add to empty",
+    );
     assertJson(
         addBeatRange([{ startBeat: 0, endBeat: 1 }], 2, 3),
         [
@@ -138,8 +142,16 @@ test("components/layout/pianoRoll/paramSelection.test.ts scripted checks", async
         { startBeat: 0, endBeat: 1 },
         { startBeat: 2, endBeat: 3 },
     ];
-    assertJson(removeRangeAtBeat(twoRanges, 2.5), [{ startBeat: 0, endBeat: 1 }], "remove second");
-    assertJson(removeRangeAtBeat(twoRanges, 0.5), [{ startBeat: 2, endBeat: 3 }], "remove first");
+    assertJson(
+        removeRangeAtBeat(twoRanges, 2.5),
+        [{ startBeat: 0, endBeat: 1 }],
+        "remove second",
+    );
+    assertJson(
+        removeRangeAtBeat(twoRanges, 0.5),
+        [{ startBeat: 2, endBeat: 3 }],
+        "remove first",
+    );
     // 边界命中（端点属于该段）
     assertJson(removeRangeAtBeat(twoRanges, 1), [{ startBeat: 2, endBeat: 3 }], "remove at end");
     assertJson(removeRangeAtBeat(twoRanges, 2), [{ startBeat: 0, endBeat: 1 }], "remove at start");
@@ -154,8 +166,7 @@ test("components/layout/pianoRoll/paramSelection.test.ts scripted checks", async
     assertEqual(removeRangeAtBeat(null, 0.5), null, "remove from null");
 
     // ── 命中查询 ────────────────────────────────────────────────────────
-    assertEqual(rangeIndexAtBeat(twoRanges, 0.5), 0, "index first");
-    assertEqual(rangeIndexAtBeat(twoRanges, 1.5), -1, "index in gap");
+    assertEqual(rangeIndexAtBeat(twoRanges, 0.5), 0, "index first");    assertEqual(rangeIndexAtBeat(twoRanges, 1.5), -1, "index in gap");
     assertEqual(rangeIndexAtBeat(twoRanges, 2.5), 1, "index second");
     assertEqual(rangeIndexAtBeat(null, 1), -1, "index null");
     assertEqual(selectionContainsBeat(twoRanges, 3), true, "contains end");

@@ -429,12 +429,7 @@ export function buildMultiRangeEditPlan(args: {
         for (let k = 0; k < len; k += 1) {
             values[k] = sourceAt(window.startFrame + k);
         }
-        return {
-            startFrame: window.startFrame,
-            endFrame: window.endFrame,
-            values,
-            before: values.slice(),
-        };
+        return { startFrame: window.startFrame, endFrame: window.endFrame, values, before: values.slice() };
     });
 
     // 3) 逐段写入（升序；X 位移后段重叠时后写覆盖先写，确定性可复现）。
@@ -484,3 +479,4 @@ export function buildMultiRangeEditPlan(args: {
 
     return pieces.map(({ startFrame, endFrame, values }) => ({ startFrame, endFrame, values }));
 }
+

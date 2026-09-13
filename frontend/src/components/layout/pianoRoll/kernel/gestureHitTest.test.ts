@@ -237,9 +237,9 @@ describe("isPointerNearCurve", () => {
         // pointerValue 是"参数值"，内部经 valueToY 换算；对非 pitch 两者应一致。
         const v = 70;
         const y = valueToY(v);
-        expect(isPointerNearCurve({ pointerY: y, param: "cents", valueToY, curveValue: v })).toBe(
-            true,
-        );
+        expect(
+            isPointerNearCurve({ pointerY: y, param: "cents", valueToY, curveValue: v }),
+        ).toBe(true);
         expect(
             isPointerNearCurve({ pointerValue: v, param: "cents", valueToY, curveValue: v }),
         ).toBe(true);
@@ -268,12 +268,8 @@ describe("hitTestSelectionEdge", () => {
     });
 
     it("稍超边界不命中", () => {
-        expect(
-            hitTestSelectionEdge({ ...args, localXPx: 100 - SELECTION_EDGE_HIT_PX - 1 }),
-        ).toBeNull();
-        expect(
-            hitTestSelectionEdge({ ...args, localXPx: 300 + SELECTION_EDGE_HIT_PX + 1 }),
-        ).toBeNull();
+        expect(hitTestSelectionEdge({ ...args, localXPx: 100 - SELECTION_EDGE_HIT_PX - 1 })).toBeNull();
+        expect(hitTestSelectionEdge({ ...args, localXPx: 300 + SELECTION_EDGE_HIT_PX + 1 })).toBeNull();
     });
 
     it("左右边重叠时左侧优先（与既有实现逐字一致）", () => {
@@ -292,8 +288,12 @@ describe("hitTestSelectionEdge", () => {
     });
 
     it("边界次序颠倒时自动归一（不依赖调用方排序）", () => {
-        expect(hitTestSelectionEdge({ leftXPx: 300, rightXPx: 100, localXPx: 100 })).toBe("left");
-        expect(hitTestSelectionEdge({ leftXPx: 300, rightXPx: 100, localXPx: 300 })).toBe("right");
+        expect(
+            hitTestSelectionEdge({ leftXPx: 300, rightXPx: 100, localXPx: 100 }),
+        ).toBe("left");
+        expect(
+            hitTestSelectionEdge({ leftXPx: 300, rightXPx: 100, localXPx: 300 }),
+        ).toBe("right");
     });
 
     it("非有限输入不命中", () => {
@@ -323,8 +323,8 @@ describe("hitTestSelectionBody", () => {
     });
 
     it("非有限输入不命中", () => {
-        expect(hitTestSelectionBody({ ...args, localXPx: Number.NaN, nearCurve: true })).toBe(
-            false,
-        );
+        expect(
+            hitTestSelectionBody({ ...args, localXPx: Number.NaN, nearCurve: true }),
+        ).toBe(false);
     });
 });

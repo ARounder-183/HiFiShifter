@@ -238,18 +238,8 @@ export function normalizeCssColor(css: string): string {
  */
 export function resolveDetectedCurveColors(isDark: boolean): readonly string[] {
     return isDark
-        ? [
-              "rgba(80, 220, 180, 0.56)",
-              "rgba(255, 110, 197, 0.60)",
-              "rgba(180, 120, 255, 0.56)",
-              "rgba(60, 180, 255, 0.56)",
-          ]
-        : [
-              "rgba(0, 150, 118, 0.80)",
-              "rgba(214, 44, 140, 0.75)",
-              "rgba(124, 58, 237, 0.70)",
-              "rgba(2, 132, 199, 0.80)",
-          ];
+        ? ["rgba(80, 220, 180, 0.56)", "rgba(255, 110, 197, 0.60)", "rgba(180, 120, 255, 0.56)", "rgba(60, 180, 255, 0.56)"]
+        : ["rgba(0, 150, 118, 0.80)", "rgba(214, 44, 140, 0.75)", "rgba(124, 58, 237, 0.70)", "rgba(2, 132, 199, 0.80)"];
 }
 
 /**
@@ -263,18 +253,8 @@ export function resolveDetectedCurveColors(isDark: boolean): readonly string[] {
  */
 export function resolveSecondaryCurveColors(isDark: boolean): readonly string[] {
     return isDark
-        ? [
-              "rgba(100, 200, 255, 0.62)",
-              "rgba(255, 110, 197, 0.62)",
-              "rgba(180, 120, 255, 0.62)",
-              "rgba(60, 200, 160, 0.62)",
-          ]
-        : [
-              "rgba(0, 116, 200, 0.72)",
-              "rgba(214, 44, 140, 0.72)",
-              "rgba(124, 58, 237, 0.72)",
-              "rgba(22, 163, 116, 0.75)",
-          ];
+        ? ["rgba(100, 200, 255, 0.62)", "rgba(255, 110, 197, 0.62)", "rgba(180, 120, 255, 0.62)", "rgba(60, 200, 160, 0.62)"]
+        : ["rgba(0, 116, 200, 0.72)", "rgba(214, 44, 140, 0.72)", "rgba(124, 58, 237, 0.72)", "rgba(22, 163, 116, 0.75)"];
 }
 
 /**

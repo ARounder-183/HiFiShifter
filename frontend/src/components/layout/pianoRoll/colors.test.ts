@@ -37,9 +37,7 @@ function parseHex(hex: string): [number, number, number] {
 
 /** 解析 `rgba(r,g,b,a)` / `rgb(r,g,b)` 为通道 + alpha。 */
 function parseCssColor(css: string): [number, number, number, number] {
-    const match = /rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)(?:\s*,\s*([\d.]+))?\s*\)/.exec(
-        css,
-    );
+    const match = /rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)(?:\s*,\s*([\d.]+))?\s*\)/.exec(css);
     if (!match) throw new Error(`不是可解析的颜色：${css}`);
     return [
         Number(match[1]),
