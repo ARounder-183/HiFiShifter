@@ -261,10 +261,9 @@ describe("beatToFrameDelta / frameDeltaToBeat", () => {
 
     it("帧 → beatDelta：不取整（保留亚帧精度，否则往返会丢信息）", () => {
         // 100 帧 → 1 beat
-        expect(frameDeltaToBeat({ frameDelta: 100, framePeriodMs: 5, secPerBeat: 0.5 })).toBeCloseTo(
-            1,
-            12,
-        );
+        expect(
+            frameDeltaToBeat({ frameDelta: 100, framePeriodMs: 5, secPerBeat: 0.5 }),
+        ).toBeCloseTo(1, 12);
         // 1 帧 → 0.01 beat（不取整才留得住）
         expect(frameDeltaToBeat({ frameDelta: 1, framePeriodMs: 5, secPerBeat: 0.5 })).toBeCloseTo(
             0.01,
@@ -292,21 +291,15 @@ describe("beatToFrameDelta / frameDeltaToBeat", () => {
         // 与既有内联实现一致：`Math.round(NaN)` 是 NaN，会让选区位置变成 NaN
         // 并一路传播到绘制；显式返回 0 更安全。
         for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
-            expect(
-                beatToFrameDelta({ beatDelta: bad, secPerBeat: 0.5, framePeriodMs: 5 }),
-            ).toBe(0);
-            expect(
-                beatToFrameDelta({ beatDelta: 1, secPerBeat: bad, framePeriodMs: 5 }),
-            ).toBe(0);
-            expect(
-                beatToFrameDelta({ beatDelta: 1, secPerBeat: 0.5, framePeriodMs: bad }),
-            ).toBe(0);
-            expect(
-                frameDeltaToBeat({ frameDelta: bad, framePeriodMs: 5, secPerBeat: 0.5 }),
-            ).toBe(0);
-            expect(
-                frameDeltaToBeat({ frameDelta: 1, framePeriodMs: bad, secPerBeat: 0.5 }),
-            ).toBe(0);
+            expect(beatToFrameDelta({ beatDelta: bad, secPerBeat: 0.5, framePeriodMs: 5 })).toBe(0);
+            expect(beatToFrameDelta({ beatDelta: 1, secPerBeat: bad, framePeriodMs: 5 })).toBe(0);
+            expect(beatToFrameDelta({ beatDelta: 1, secPerBeat: 0.5, framePeriodMs: bad })).toBe(0);
+            expect(frameDeltaToBeat({ frameDelta: bad, framePeriodMs: 5, secPerBeat: 0.5 })).toBe(
+                0,
+            );
+            expect(frameDeltaToBeat({ frameDelta: 1, framePeriodMs: bad, secPerBeat: 0.5 })).toBe(
+                0,
+            );
         }
     });
 

@@ -151,6 +151,19 @@ export interface GridGeometrySignatureArgs {
     readonly scaleNotes?: readonly number[] | undefined;
     /** 音阶强调线颜色；缺省表示不画强调线。 */
     readonly scaleHighlightRgba?: readonly number[] | undefined;
+    /**
+     * Tempo Map 分段音阶（已投影到视口 x）。
+     *
+     * 必须入签名：段边界是**时间锚定**的，滚动 / 缩放会改变投影后的 x 范围——
+     * 不入签名就会出现"滚动了但分段高亮没跟着动"。
+     */
+    readonly scaleSegments?:
+        | readonly {
+              readonly x0: number;
+              readonly x1: number;
+              readonly notes: readonly number[];
+          }[]
+        | undefined;
 }
 
 /**
@@ -189,6 +202,10 @@ export function gridGeometrySignature(args: GridGeometrySignatureArgs): string {
         args.weakRgba.join(","),
         args.blackKeyRowBandRgba?.join(",") ?? "",
         args.scaleNotes?.join(",") ?? "",
+        // 分段音阶：段边界（投影后的视口 x）与各段音级都要入签名。
+        args.scaleSegments
+            ?.map((segment) => `${segment.x0},${segment.x1},${segment.notes.join(".")}`)
+            .join(";") ?? "",
         args.scaleHighlightRgba?.join(",") ?? "",
     ].join("|");
 }

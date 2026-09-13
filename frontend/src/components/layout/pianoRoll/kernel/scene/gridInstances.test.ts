@@ -450,4 +450,64 @@ describe("音阶高亮", () => {
             buildPitchGridInstances({ ...base, scaleNotes: [] }).length,
         );
     });
+
+    it("分段音阶：按段各画自己那段 x 范围（不再画整宽线）", () => {
+        const items = buildPitchGridInstances({
+            ...base,
+            scaleHighlightRgba: [1, 0.78, 0.31, 0.22],
+            scaleSegments: [
+                // 段 1：C 大调三和弦音级，只覆盖视口左半。
+                { x0: 0, x1: 400, notes: [0, 4, 7] },
+                // 段 2：换成另一组音级，覆盖视口右半。
+                { x0: 400, x1: 800, notes: [2, 5, 9] },
+            ],
+        });
+        const emphasis = items.filter((item) => item.value >= 0 && item.rgba[3] === 0.22);
+        expect(emphasis.length).toBeGreaterThan(0);
+        // 每条都只覆盖半宽，且 x 落在对应段区间内。
+        for (const item of emphasis) {
+            expect(item.w).toBeLessThanOrEqual(400);
+            expect([0, 400]).toContain(item.x);
+        }
+        // 两段都真的产出了强调线（换过音阶的那段也参与）。
+        expect(emphasis.some((item) => item.x === 0)).toBe(true);
+        expect(emphasis.some((item) => item.x === 400)).toBe(true);
+    });
+
+    it("分段音阶：越界的段被裁剪到视口内", () => {
+        const items = buildPitchGridInstances({
+            ...base,
+            scaleHighlightRgba: [1, 0.78, 0.31, 0.22],
+            scaleSegments: [{ x0: -200, x1: 1200, notes: [0] }],
+        });
+        const emphasis = items.filter((item) => item.value >= 0 && item.rgba[3] === 0.22);
+        expect(emphasis.length).toBeGreaterThan(0);
+        for (const item of emphasis) {
+            expect(item.x).toBe(0);
+            expect(item.w).toBe(800);
+        }
+    });
+
+    it("分段音阶：完全在视口外的段不产强调线", () => {
+        const plain = buildPitchGridInstances(base);
+        const items = buildPitchGridInstances({
+            ...base,
+            scaleHighlightRgba: [1, 0.78, 0.31, 0.22],
+            scaleSegments: [{ x0: 900, x1: 1200, notes: [0] }],
+        });
+        expect(items.length).toBe(plain.length);
+    });
+
+    it("分段音阶优先于 scaleNotes（两者同时给出时只走分段）", () => {
+        const items = buildPitchGridInstances({
+            ...base,
+            scaleNotes: [0, 4, 7],
+            scaleHighlightRgba: [1, 0.78, 0.31, 0.22],
+            scaleSegments: [{ x0: 0, x1: 400, notes: [0] }],
+        });
+        const emphasis = items.filter((item) => item.value >= 0 && item.rgba[3] === 0.22);
+        // 只剩分段那条：没有任何整宽（800）强调线。
+        expect(emphasis.length).toBeGreaterThan(0);
+        expect(emphasis.every((item) => item.w === 400)).toBe(true);
+    });
 });

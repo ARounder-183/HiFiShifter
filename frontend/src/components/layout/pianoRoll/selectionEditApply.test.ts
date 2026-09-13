@@ -18,7 +18,10 @@ vi.mock("../../../services/api", () => ({
 
 import { paramsApi } from "../../../services/api";
 import type { ParamFramesPayload } from "../../../types/api";
-import { applySelectionEditOverRanges, applySelectionEditWithEdgeSmoothing } from "./selectionEditApply";
+import {
+    applySelectionEditOverRanges,
+    applySelectionEditWithEdgeSmoothing,
+} from "./selectionEditApply";
 
 const mockedGet = vi.mocked(paramsApi.getParamFrames);
 const mockedSet = vi.mocked(paramsApi.setParamFrames);

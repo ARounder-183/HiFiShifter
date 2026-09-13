@@ -194,10 +194,7 @@ export function mapClipboardToTargetRanges(args: {
             const from = Math.max(windowStart, segment.startFrame);
             const to = Math.min(windowEnd, segment.startFrame + segment.values.length);
             if (to <= from) continue;
-            const values = segment.values.slice(
-                from - segment.startFrame,
-                to - segment.startFrame,
-            );
+            const values = segment.values.slice(from - segment.startFrame, to - segment.startFrame);
             if (values.length === 0) continue;
             writes.push({ startFrame: origin + from, values });
         }

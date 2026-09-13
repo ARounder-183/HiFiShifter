@@ -761,9 +761,9 @@ export function drawPianoRoll(args: {
     // 与网格线同层同源；在此留一份 Canvas2D 副本只会制造"两个绘制者"的分叉，
     // 而那正是本文件反复警告的类别。
     //
-    // 【已知限制】旧分段路径依赖 `scaleSegments`（按时间段换音阶）；GL 网格几何是
-    // 视口坐标、不含时间轴，无法表达分段，因此**分段音阶高亮未迁移**，只支持单一
-    // 工程音阶。详见 `PianoRollPanel.buildGridSpec` 与 `buildPitchGridInstances`。
+    // 【分段音阶】Tempo Map 在不同时间段换音阶时，GL 侧**按段**绘制：面板把各段的
+    // 时间范围与音级写进 `PianoRollGridSpec.scaleSegments`，宿主用实时轴投影成视口 x
+    // 后交给 `buildPitchGridInstances`。本文件不参与，理由同上（单一绘制者）。
     //
     // 非音高参数的刻度线仍在此绘制（它们的网格线归 GL，但下面三个分支是
     // Canvas2D 侧保留的回退路径，见各 `skip*` 参数的说明）。
@@ -1137,9 +1137,7 @@ export function drawPianoRoll(args: {
                 ctx.save();
                 // 预览与选区高亮同用青蓝色相（虚线+降不透明度区分），
                 // 不再占用琥珀色相 —— 琥珀属于编辑包络线本体。
-                ctx.strokeStyle = isDark
-                    ? "rgba(100, 200, 255, 0.55)"
-                    : "rgba(0, 116, 200, 0.60)";
+                ctx.strokeStyle = isDark ? "rgba(100, 200, 255, 0.55)" : "rgba(0, 116, 200, 0.60)";
                 ctx.lineWidth = 2;
                 ctx.setLineDash(getFixedDashPattern(4, 4));
                 for (const span of spans) {

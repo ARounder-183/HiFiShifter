@@ -95,7 +95,7 @@ import { TempoMapCornerButton } from "./timeline/TempoMapCornerButton";
 import { invokeGridRedrawHandler } from "./timeline/gridRedrawBridge";
 import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeline";
 import type { TempoMap } from "../../utils/tempoMap";
-import { effectiveScaleAtSec } from "../../utils/tempoMap";
+import { effectiveScaleAtSec, buildScaleSegments } from "../../utils/tempoMap";
 import { setTempoMapRemote } from "../../features/session/thunks/tempoMapThunks";
 import { publishPianoRollSelection } from "../../utils/pianoRollSelectionBus";
 import { resolveHorizontalWheelZoom } from "./timeline/runtime/timelineScrollRange";
@@ -2527,11 +2527,36 @@ export const PianoRollPanel: React.FC = () => {
         // 并清空几何（否则切到别的参数后键盘会残留在画布上）。
         if (kind !== "pitch") return base;
 
-        // 音阶高亮（缺陷 #6 的修复）：条件与旧 Canvas2D 分支逐字对齐——只在
-        // `always` 且有工程音阶时高亮；旧实现还支持 Tempo Map 分段音阶，GL 网格
-        // 层无法表达（见本函数特殊说明 3）。
+        // 音阶高亮：条件与旧 Canvas2D 分支逐字对齐——只在 `always` 且有工程音阶时
+        // 高亮。两条路径：
+        // - **分段**（有 Tempo Map 且换过音阶）：每段按自己的音阶、画自己那段 x 范围。
+        //   段的时间范围在这里**投影成视口 x** 再交给 GL 层（它是纯视口坐标、不含
+        //   时间轴，见 `buildPitchGridInstances` 的说明）。
+        // - **均匀**（默认）：整宽一条线，只高亮工程音阶的音级。
+        //
+        // 范围取「可见区间 ± 5s」并按 0.02s 量化（与旧实现同一取法）：量化让滚动
+        // 在 0.02s 内不改变段边界，减少几何重建；±5s 保证视口边缘的段完整。
+        const highlightActive = s.scaleHighlightMode === "always";
+        const segStartSec = Math.round(Math.max(0, viewportStartSec(prAxis) - 5) / 0.02) * 0.02;
+        const segEndSec = Math.round((viewportEndSec(prAxis) + 5) / 0.02) * 0.02;
+        const scaleSegments = highlightActive
+            ? (buildScaleSegments(s.tempoMap, effectiveProjectScale, segStartSec, segEndSec) ?? [])
+                  .map((segment) => ({
+                      startSec: segment.startSec,
+                      endSec: segment.endSec,
+                      // 段没有自己的音阶（`null`）时退回工程音阶——与旧实现
+                      // `buildScaleSegments` 的 `current ?? projectScale` 同一口径。
+                      notes: resolveScaleNotes(segment.scale ?? effectiveProjectScale),
+                  }))
+                  .filter(
+                      (segment) => segment.notes.length > 0 && segment.endSec > segment.startSec,
+                  )
+            : [];
+        // 分段存在时不再走高亮的均匀路径（两者互斥，分段优先）。
         const scaleNotes =
-            s.scaleHighlightMode === "always" ? resolveScaleNotes(effectiveProjectScale) : [];
+            highlightActive && scaleSegments.length === 0
+                ? resolveScaleNotes(effectiveProjectScale)
+                : [];
 
         return {
             ...base,
@@ -2539,6 +2564,7 @@ export const PianoRollPanel: React.FC = () => {
             // 音阶强调线再压在其上。
             blackKeyRowBandRgba: toRgba(colors.blackKeyRowBand),
             scaleNotes,
+            scaleSegments,
             scaleHighlightRgba: toRgba(colors.scaleHighlight),
             whiteKeyRgba: toRgba(colors.whiteKey),
             blackKeyRgba: toRgba(colors.blackKey),
@@ -2602,6 +2628,8 @@ export const PianoRollPanel: React.FC = () => {
         themeMode,
         s.scaleHighlightMode,
         effectiveProjectScale,
+        // Tempo Map 分段音阶（缺陷 #6）：换 Tempo Map 会换分段。
+        s.tempoMap,
     ]);
 
     // 渲染期刷新 syncScrollLeft 引用（其函数体随每次渲染重建）：供只注册一次的
@@ -3843,10 +3871,7 @@ export const PianoRollPanel: React.FC = () => {
         setSelectionUi,
         // 撤销栈深度读取器（拉伸手势把选区登记到对应历史步骤时使用）；
         // 稳定引用，避免每次渲染都让上层的 pointerdown 回调失效重建。
-        getHistoryPosition: useCallback(
-            () => store.getState().session.historyUndoDepth,
-            [store],
-        ),
+        getHistoryPosition: useCallback(() => store.getState().session.historyUndoDepth, [store]),
         setCanvasCursor,
         strokeRef,
         panRef,
@@ -3941,25 +3966,42 @@ export const PianoRollPanel: React.FC = () => {
     /**
      * 原生滚动容器的 `scroll` 事件（面板侧的唯一入口）。
      *
-     * 【本处理函数只剩转交，面板侧的竖向适配已删除】
+     * 【绝大部分是镜像回声，但不是全部】
      * 内核是唯一渲染路径，原生 scroller 只是**镜像**：宿主每帧把内核真值写回 DOM，
-     * 该写入会触发原生 `scroll` 事件，而事件不带来源。旧代码在这里读回一个**滞后**
-     * 的位置（实测内核已到 548.054、事件里读到上一帧镜像的 540.5）再写回内核，
+     * 该写入会触发原生 `scroll` 事件。旧代码在这里**无条件**读回位置再写回内核，
+     * 而那一刻读到的是上一帧镜像的旧值（实测内核已到 548.054、事件里读到 540.5），
      * 使内核被回退 7.554px，逐帧往复即用户报告的「上下拖经常拖不动 / 阶梯感」。
-     * 那段落只有在"原生 scroller 是事实源"的旧实现下才成立，故整段删除。
      *
-     * 【为什么可以整条忽略，而不会漏掉输入】
-     * 竖向的原生输入只有 PageUp / PageDown / Home / End 四个键，它们已由宿主接管
-     * （见 `pianoRollKernelHost.onKeyDown` 与 `renderKernel/keyboardScroll`）；滚轮 /
-     * 中键平移 / 拖自绘滚动条 / 点轨道翻页都不经原生 `scroll`（直接调内核 API），
-     * 因此这个事件纯属镜像回声。转交给 `interactions.onScrollerScroll` 后由其无条件
-     * 早退（那里同时覆盖横向回声）。
+     * 但"无条件忽略"同样不对：原生容器仍是 `overflow: scroll`，**触摸拖拽 /
+     * 触控板惯性 / 焦点滚入视口**这三类输入只会产生原生 `scroll`，没有任何显式
+     * 入口——忽略它等于这些输入完全失效（旧实现在这里读回位置正是为了它们）。
+     *
+     * 【判据】把原生位置与**内核当前持有的位置**比较：相等 = 宿主刚写下的回声
+     * （忽略）；不等 = 容器自己动了（采纳）。内核的 `scrollLeft/Top` 与原生 DOM
+     * 同一坐标系（宿主初始化时直接读 `container.scrollLeft/Top`），因此无需换算。
+     * 这也解释了为什么不会重演"读到滞后值"：滞后只会发生在**写入与事件之间**，
+     * 而此时内核已经是权威值——两者相等即判定为回声。
+     *
+     * @param event 原生 `scroll` 事件。
+     * @returns 无返回值。
      */
     const onScrollerScroll = useCallback(
-        (e: React.UIEvent<HTMLDivElement>) => {
-            interactions.onScrollerScroll(e);
+        (event: React.UIEvent<HTMLDivElement>) => {
+            // 应用共享视口写入期间不采纳：那一刻原生镜像还停在上一帧的旧值
+            //（与 `timelineSyncApplyingRef` 的既有用法同一理由）。
+            if (timelineSyncApplyingRef.current) return;
+            const scroller = event.currentTarget;
+            const host = hostRef.current;
+            if (host === null) return;
+            const view = host.getViewport();
+            if (Math.abs(scroller.scrollLeft - view.scrollLeft) > 0.5) {
+                syncScrollLeft(scroller);
+            }
+            if (Math.abs(scroller.scrollTop - view.scrollTop) > 0.5) {
+                host.setScrollTop(scroller.scrollTop);
+            }
         },
-        [interactions],
+        [syncScrollLeft],
     );
     const scrollerWheelHandlerRef = useRef(onScrollerWheelNative);
 
@@ -4389,9 +4431,7 @@ export const PianoRollPanel: React.FC = () => {
             // 落在这些段内的帧（断层不会被填充），偏移基准为首段起点。
             if (op === "pasteVocalShifter") {
                 const sel2 = selectionRef.current;
-                const selRanges = sel2
-                    ? beatRangesToFrameRanges(sel2, secPerBeat, fp)
-                    : [];
+                const selRanges = sel2 ? beatRangesToFrameRanges(sel2, secPerBeat, fp) : [];
                 void dispatch(
                     pasteVocalShifterClipboard({
                         selectionRanges: selRanges.length > 0 ? selRanges : undefined,
@@ -4555,8 +4595,7 @@ export const PianoRollPanel: React.FC = () => {
                         if (!res?.ok) continue;
                         const payload = res as ParamFramesPayload;
                         if (segments.length === 0) {
-                            framePeriodMsFromBackend =
-                                Number(payload.frame_period_ms ?? fp) || fp;
+                            framePeriodMsFromBackend = Number(payload.frame_period_ms ?? fp) || fp;
                         }
                         const values = (payload.edit ?? []).map((v) => Number(v) || 0);
                         if (values.length === 0) continue;
@@ -4598,8 +4637,7 @@ export const PianoRollPanel: React.FC = () => {
                         if (!res?.ok) continue;
                         const payload = res as ParamFramesPayload;
                         if (segments.length === 0) {
-                            framePeriodMsFromBackend =
-                                Number(payload.frame_period_ms ?? fp) || fp;
+                            framePeriodMsFromBackend = Number(payload.frame_period_ms ?? fp) || fp;
                         }
                         const values = (payload.edit ?? []).map((v) => Number(v) || 0);
                         if (values.length > 0) {
@@ -4694,8 +4732,7 @@ export const PianoRollPanel: React.FC = () => {
                                 projectScale: effectiveProjectScale,
                                 // Tempo Map 感知：按帧时刻解析生效音阶。
                                 scaleAtFrame: (frame: number) =>
-                                    projectScaleAtSec((frame * fp) / 1000) ??
-                                    effectiveProjectScale,
+                                    projectScaleAtSec((frame * fp) / 1000) ?? effectiveProjectScale,
                             });
                             if (!converted) continue;
                             convertedWrites.push({

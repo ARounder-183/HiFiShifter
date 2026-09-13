@@ -93,10 +93,7 @@ export function addBeatRange(
     aBeat: number,
     bBeat: number,
 ): ParamSelection | null {
-    const next = [
-        ...(selection ?? []),
-        makeBeatRange(aBeat, bBeat),
-    ];
+    const next = [...(selection ?? []), makeBeatRange(aBeat, bBeat)];
     return normalizeSelection(next);
 }
 
@@ -183,7 +180,8 @@ export function toggleBeatRange(
 }
 
 /** `beat` 落在第几段（-1 = 不在任何段内）。 */
-export function rangeIndexAtBeat(selection: ParamSelection | null, beat: number): number {    if (!selection || !Number.isFinite(beat)) return -1;
+export function rangeIndexAtBeat(selection: ParamSelection | null, beat: number): number {
+    if (!selection || !Number.isFinite(beat)) return -1;
     for (let i = 0; i < selection.length; i += 1) {
         const range = selection[i];
         if (beat >= range.startBeat && beat <= range.endBeat) return i;

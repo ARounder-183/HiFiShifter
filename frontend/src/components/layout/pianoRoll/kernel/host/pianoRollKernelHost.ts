@@ -89,6 +89,7 @@ import {
     buildPitchGridInstances,
     buildValueGridInstances,
     type GridInstance,
+    type GridScaleSegment,
 } from "../scene/gridInstances";
 import {
     gridGeometrySignature,
@@ -643,8 +644,38 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             weakRgba: spec.weakRgba,
             blackKeyRowBandRgba: spec.blackKeyRowBandRgba,
             scaleNotes: spec.scaleNotes,
+            scaleSegments: projectScaleSegments(spec),
             scaleHighlightRgba: spec.scaleHighlightRgba,
         });
+    }
+
+    /**
+     * 把 spec 的**分段音阶**（时间域）投影成视口 x 区间。
+     *
+     * 【为什么在宿主侧投影而不是面板侧】面板的网格镜像 effect 只在低频输入变化时
+     * 重跑（其中一步是 `parseRgbaColor` 的 DOM 探针）；把 `prAxis` 加进它的依赖数组
+     * 会让**每一帧滚动**都做一次颜色解析。宿主持有实时轴（`currentAxis()`），每帧
+     * 本来就在比签名字符串——投影放这里只多几次乘法，且只重建网格层几何（曲线层
+     * 另有缓存，不受影响）。
+     *
+     * @param spec 网格输入。
+     * @returns 投影后的分段；无分段时为空数组（构建器据此退回均匀路径）。
+     */
+    function projectScaleSegments(
+        spec: PianoRollGridSpec | null | undefined,
+    ): readonly GridScaleSegment[] {
+        const segments = spec?.scaleSegments;
+        if (segments === undefined || segments.length === 0) return [];
+        const axis = currentAxis();
+        const projected: GridScaleSegment[] = [];
+        for (const segment of segments) {
+            projected.push({
+                x0: secToViewportPx(axis, segment.startSec),
+                x1: secToViewportPx(axis, segment.endSec),
+                notes: segment.notes,
+            });
+        }
+        return projected;
     }
 
     /**
@@ -675,6 +706,7 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                         colorOther: spec.weakRgba,
                         blackKeyRowBandRgba: spec.blackKeyRowBandRgba,
                         scaleNotes: spec.scaleNotes,
+                        scaleSegments: projectScaleSegments(spec),
                         scaleHighlightRgba: spec.scaleHighlightRgba,
                     })
                   : buildValueGridInstances({
