@@ -1762,20 +1762,29 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     setMultiSelectedClipIds,
                     // 每个参与者按各自初始轨道序号 + 同一偏移量解析目标轨。
                     //
-                    // 特殊说明：这里的 id 查询**必须带上 `trackOffset`**。只写
+                    // 特殊说明 1：这里的 id 查询**必须带上 `trackOffset`**。只写
                     // `trackIds[participant.trackIndex]` 会永远返回原轨（偏移量为 0 时
                     // 才恰好正确），使整个跨轨修复变成静默无效——调用方
                     // （`copyClipsFromDrag`）此时已经按 `trackOffset !== 0` 判定过
                     // "应该跨轨"，拿到原轨后不会报错，只会默默同轨复制。
-                    // `?? null` 保留越界回落语义：调用方在 null 时回退到 `initial.trackId`，
-                    // 与旧实现 `resolveTrackIdByOffset` 的 `targetIndex = sourceIndex + trackOffset`
-                    // 完全一致。
+                    //
+                    // 特殊说明 2：越界必须**夹取**到 [0, lastIndex]，与预览分支
+                    // （`applyKernelEditDelta` 的 `Math.min(lastIndex, Math.max(0, …))`）
+                    // 逐字一致。若越界时回落**原轨**，"幽灵显示到了末轨、落库却留在
+                    // 原轨"会重新出现：跨轨多选 + 偏移越界时实测预览把两个 participant
+                    // 都放到末轨，而落库把越界的那个留在原轨。
                     resolveTrackIdByOffset: (clipId) => {
                         const participant = origin.participants.find(
                             (item) => item.clipId === clipId,
                         );
                         if (participant === undefined || participant.trackIndex < 0) return null;
-                        return trackIds[participant.trackIndex + dropTarget.trackOffset] ?? null;
+                        const lastIndex = trackIds.length - 1;
+                        if (lastIndex < 0) return null;
+                        const targetIndex = Math.min(
+                            lastIndex,
+                            Math.max(0, participant.trackIndex + dropTarget.trackOffset),
+                        );
+                        return trackIds[targetIndex] ?? null;
                     },
                     maybeSelectTargetTrack: () => undefined,
                     createNewTracksForDrop: (span: number) =>
