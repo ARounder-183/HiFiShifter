@@ -192,32 +192,11 @@ describe("buildValueGridInstances", () => {
         expect(items.filter((i) => i.rgba === WHITE).length).toBe(1);
     });
 
-    it("覆盖区间与旧 Canvas2D 的 stroke 一致（上缘 = 中心 − 半厚）", () => {
-        const items = buildValueGridInstances({
-            kind: "cents",
-            view: { center: 0, span: 300 },
-            heightPx: 100,
-            viewportWidthPx: 800,
-            dpr: 2,
-            valueToY: makeValueToY(),
-            strongRgba: WHITE,
-            weakRgba: BLACK,
-        });
-        expect(items.length).toBeGreaterThan(0);
-        // 旧实现：`moveTo(0, y + 0.5)` + `lineWidth = 1 / 1.25` → 覆盖
-        // `[y + 0.5 − 线厚/2, y + 0.5 + 线厚/2]`。GL 的矩形 `y` 是上缘、高为线厚，
-        // 因此恒有「上缘 + 半厚 == y + 0.5」。位置**不**做设备像素吸附
-        // （旧实现就没有，dpr≥2 时由抗锯齿处理）。
-        for (const item of items) {
-            const thickness = item.rgba === WHITE ? 1.25 : 1;
-            expect(item.h).toBeCloseTo(thickness, 9);
-            expect(item.y + item.h / 2).toBeCloseTo(makeValueToY()(item.value, 100) + 0.5, 9);
-        }
-    });
-
-    it("线宽按 CSS 像素（1 / 1.25，与旧 render.ts 的 lineWidth 同源）", () => {
-        // 旧实现是字面 `ctx.lineWidth = isStrong ? 1.25 : 1`——**没有**除以 dpr。
-        // 内核原先按物理像素实现（1/dpr、2/dpr），dpr=2 的高分屏上比旧实现细一半。
+    it("线宽与落点都是**整数物理像素**（弱 1 个、强 2 个）", () => {
+        // 这是**有意**的统一（不是照抄旧实现）：旧 Canvas2D 在非音高分支用字面
+        // `lineWidth = 1 / 1.25` CSS px、位置 `y + 0.5`，两者都不按设备像素对齐，
+        // 在 dpr≥2 上得到的是"跨两个物理像素且位置落在分数像素上"的抗锯齿线。
+        // 内核统一到整数物理像素家族：宽度 1/dpr、2/dpr，落点吸附设备栅格。
         for (const dpr of [1, 1.25, 2, 3]) {
             const items = buildValueGridInstances({
                 kind: "cents",
@@ -229,11 +208,24 @@ describe("buildValueGridInstances", () => {
                 strongRgba: WHITE,
                 weakRgba: BLACK,
             });
-            const weak = items.find((item) => item.rgba === BLACK);
-            const strong = items.find((item) => item.rgba === WHITE);
-            expect(weak?.h).toBeCloseTo(1, 9);
-            expect(strong?.h).toBeCloseTo(1.25, 9);
-            for (const item of items) expect(item.w).toBe(800); // 横向范围不受强弱影响
+            const weak = items.filter((item) => item.rgba === BLACK);
+            const strong = items.filter((item) => item.rgba === WHITE);
+            expect(weak.length).toBeGreaterThan(0);
+            expect(strong.length).toBeGreaterThan(0);
+            for (const item of weak) {
+                expect(item.h).toBeCloseTo(1 / dpr, 9);
+                expect(item.h * dpr).toBeCloseTo(1, 9);
+            }
+            for (const item of strong) {
+                expect(item.h).toBeCloseTo(2 / dpr, 9);
+                expect(item.h * dpr).toBeCloseTo(2, 9);
+            }
+            // 上缘与下缘都落在设备像素边界上（整数物理像素 ⇔ 覆盖整数个物理像素列）。
+            for (const item of items) {
+                expect(Math.abs((item.y * dpr) % 1)).toBeCloseTo(0, 9);
+                expect(Math.abs(((item.y + item.h) * dpr) % 1)).toBeCloseTo(0, 9);
+                expect(item.w).toBe(800); // 横向范围不受强弱影响
+            }
         }
     });
 
@@ -313,15 +305,12 @@ describe("与 render.ts 行循环逐值等价", () => {
     }
 
     /**
-     * 复刻 render.ts 的 cents 行循环（非音高分支）。
+     * 复刻 render.ts 的 cents 行循环（非音高分支）的**行集合与强弱判定**。
      *
-     * ⚠️ 旧实现这两条分支的**位置约定与音高分支不同**：
-     * ```
-     * ctx.moveTo(0, y + 0.5); ctx.lineTo(w, y + 0.5);   // y = valueToY(v, h)
-     * ```
-     * 即**不做设备像素吸附**（那是 dpr=1 时代的约定）。本函数早先写成
-     * `strong ? snap : hairline`，把内核的假设当成了旧实现——那正是线宽/位置
-     * 分叉的来源（见 `gridInstances.ts` 里强线宽常量处的说明）。
+     * 只复刻旧实现的"枚举哪些行、哪条是强线"——位置**故意不复刻**：旧实现是
+     * `moveTo(0, y + 0.5)`（不按设备像素对齐，dpr≥2 上落点是分数像素），内核按
+     * 整数物理像素家族吸附落点（见 `gridInstances.ts` 非音高分支的说明）。位置
+     * 由本文件的"整数物理像素"用例单独守护。
      */
     function legacyCentsRows(center: number, spanRaw: number, h: number, dpr: number) {
         const span = Math.max(1e-6, spanRaw);
@@ -329,11 +318,12 @@ describe("与 render.ts 行循环逐值等价", () => {
         const vMax = center + span / 2;
         const step = 100;
         const start = Math.ceil(vMin / step) * step;
-        const rows: { v: number; y: number; strong: boolean }[] = [];
+        const rows: { v: number; strong: boolean }[] = [];
         for (let v = start; v <= vMax + step * 0.01; v += step) {
             const strong = Math.round(v) % 1200 === 0;
+            void h;
             void dpr;
-            rows.push({ v, y: proj(v, h) + 0.5, strong });
+            rows.push({ v, strong });
         }
         return rows;
     }
@@ -366,7 +356,7 @@ describe("与 render.ts 行循环逐值等价", () => {
         }
     });
 
-    it("cents 网格：center × span × dpr 组合下 y、强弱判定与行数完全一致", () => {
+    it("cents 网格：center × span × dpr 组合下行集合、强弱判定与行数完全一致", () => {
         for (const center of [-1200, -50, 0, 37.5, 600, 2400]) {
             for (const span of [1e-6, 100, 300, 2400]) {
                 for (const dpr of [1, 1.25, 2, 3]) {
@@ -383,9 +373,9 @@ describe("与 render.ts 行循环逐值等价", () => {
                     });
                     expect(built.length).toBe(legacy.length);
                     for (let i = 0; i < built.length; i += 1) {
+                        // 行集合与强弱判定与旧循环逐值一致；位置**不**比对（内核按
+                        // 整数物理像素吸附，见 `legacyCentsRows` 的说明）。
                         expect(built[i].value).toBeCloseTo(legacy[i].v, 9);
-                        // 同上：上缘 + 半厚 == 描边中心。
-                        expect(built[i].y + built[i].h / 2).toBeCloseTo(legacy[i].y, 12);
                         expect(built[i].rgba === WHITE).toBe(legacy[i].strong);
                     }
                 }

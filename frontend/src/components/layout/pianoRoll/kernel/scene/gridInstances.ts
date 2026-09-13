@@ -196,6 +196,21 @@ function hairlineCenterY(cssY: number, dpr: number): number {
 }
 
 /**
+ * 强线的**描边中心**设备像素对齐：只取整到物理像素，**不加**半像素。
+ *
+ * 理由：强线宽 **2 个物理像素**（偶数），中心落在设备像素边界上时正好覆盖整数两列；
+ * 再加半像素反而会把 2 像素摊到 3 列上。弱线宽 1 个物理像素（奇数）才需要半像素偏移
+ * ——见 `hairlineCenterY`。两者都是"整数物理像素"家族的成员，区别只是奇偶。
+ *
+ * @param cssY 视口 y（CSS px）。
+ * @param dpr 设备像素比。
+ * @returns 描边中心 y（CSS px）。
+ */
+function strongCenterY(cssY: number, dpr: number): number {
+    return Math.round(cssY * dpr) / dpr;
+}
+
+/**
  * 把「描边中心 y」换算为 GL 实例矩形的**上缘 y**。
  *
  * 【这是一个必须显式处理的语义差，不是可选优化】
@@ -476,29 +491,29 @@ export function buildValueGridInstances(args: ValueGridArgs): GridInstance[] {
     const vMax = view.center + span / 2;
     const start = Math.ceil(vMin / spec.step) * spec.step;
 
-    // 非音高参数的刻度线：**1 / 1.25 CSS px**，位置 = `valueToY(v) + 0.5`。
+    // 非音高参数的刻度线：**全整数物理像素**——弱线 1 个、强线 2 个物理像素，
+    // 位置按设备像素吸附（`hairlineCenterY` / `strongCenterY`）。
     //
-    // 逐字对齐旧 Canvas2D（`pianoRoll/render.ts` 的非音高分支）：
-    // ```
-    // ctx.lineWidth = isStrong ? 1.25 : 1;
-    // ctx.moveTo(0, y + 0.5); ctx.lineTo(w, y + 0.5);
-    // ```
-    // 旧实现这两处都是**字面 CSS 像素**：线宽没有除以 dpr，位置也没有按设备像素吸附
-    // （那是 dpr=1 时代的约定，高 DPR 下由浏览器的抗锯齿处理）。内核原先按"整数物理
-    // 像素"实现（`1 / dpr`、`2 / dpr` + 设备吸附），在 dpr≥2 的高分屏上比旧实现**细
-    // 一半**——用户报告的"网格线像素宽度问题"。
+    // 【这是有意的选择，不是照抄旧实现】旧 Canvas2D 在这条分支上写的是字面 CSS 像素
+    // （`ctx.lineWidth = isStrong ? 1.25 : 1`）且位置为 `y + 0.5`，**都不按设备像素
+    // 对齐**（dpr=1 时代的约定）。它在 dpr=2 上渲染出的是一条 2 物理像素宽、且落在
+    // 分数像素位置上的抗锯齿线；内核若照抄，在高分屏上会与音高网格（1 个物理像素、
+    // 严格对齐）观感割裂。
     //
-    // 换算到 GL 的矩形语义：矩形 `y` 是**上缘**、高为线厚，因此
-    // `上缘 = 中心 − 线厚 / 2`（见 `rectTopFromCenter`）。命中中心 `y + 0.5` 时：
-    // 弱线厚 1 → 上缘 = y、强线厚 1.25 → 上缘 = y − 0.125，与 Canvas2D 的覆盖区间相同。
-    const weakThickness = 1;
-    const strongThickness = 1.25;
+    // 因此这里统一到"整数物理像素"家族：线宽与落点都是整数物理像素 → 任何 DPR 下
+    // 每根线恰好 1 / 2 个物理像素、边缘不糊。代价是与旧实现的**位置**可能差半个设备
+    // 像素、线宽在 dpr≥2 上比旧实现细（旧强线 1.25 CSS px = dpr·1.25 物理像素）。
+    const weakThickness = 1 / dpr;
+    const strongThickness = 2 / dpr;
     const items: GridInstance[] = [];
     for (let v = start; v <= vMax + spec.step * 0.01; v += spec.step) {
         const isStrong = Math.round(v) % spec.strongMod === 0;
         const thickness = isStrong ? strongThickness : weakThickness;
-        // 与旧实现同源的中心：`valueToY + 0.5`，不做设备像素吸附。
-        const centerY = valueToY(v, heightPx) + 0.5;
+        // 描边中心按设备像素吸附（弱线 + 半像素、强线不加——偶数物理像素宽无需偏移，
+        // 见两个 helper 的说明），再回算矩形上缘。
+        const centerY = isStrong
+            ? strongCenterY(valueToY(v, heightPx), dpr)
+            : hairlineCenterY(valueToY(v, heightPx), dpr);
         items.push({
             x: 0,
             y: rectTopFromCenter(centerY, thickness),
