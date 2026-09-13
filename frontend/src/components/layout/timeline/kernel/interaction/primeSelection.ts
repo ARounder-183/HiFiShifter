@@ -2,72 +2,90 @@
  * 时间轴渲染内核 · 拖拽起手时的选区收敛判定
  *
  * 【主要内容】
- * `shouldPrimeSelectionOnPress()`：判断「在 clip 上按下左键」时，是否应当**先把
- * 选区收敛到这一个 clip**（旧实现 `TrackLane.primeSelection` 的语义）。
+ * `shouldCollapseStaleSelectionOnDrag()`：判断「一次左键手势升级为 clip 拖拽」时，
+ * 是否应当**忽略当前多选集合、只移动被抓住的那一个 clip**。
  *
- * 【作用：为什么需要它——这是「拖一个 clip，右边的 clip 也跟着动」的根因】
- * 参与拖拽的集合来自 `multiSelectedClipIds`（见 `kernelEditSet.resolveKernelEditParticipants`）：
- * 只要**被拖的 clip 与邻居都在多选集合里**，整组就会一起移动——这是设计语义，
- * 不是缺陷。缺陷在于**用户没有主动多选**时集合里却已经有多个成员。
+ * 【作用：为什么需要它——「拖一个 clip，右边的 clip 也跟着动」的根因】
+ * 参与拖拽的集合来自 `multiSelectedClipIds`（见
+ * `kernelEditSet.resolveKernelEditParticipants`）：只要被拖的 clip 与邻居**都在**
+ * 集合里，整组就会一起移动。问题在于集合有两种来源，而它们的用户意图完全不同：
  *
- * 旧实现（`TrackLane.tsx`，重构已删除）在 `pointerdown` 就调用 `primeSelection`：
- * 只要没按多选 / 范围选择修饰键，就立刻 `ensureSelected(clipId)`，把陈旧的
- * 多选集合收敛为单个。内核重写时**只移植了"抬起且未位移才选中"**那条路径
- * （`onGesturePointerUp` 的 `pending-select` 分支），起手时的收敛被漏掉了。
- * 后果：`multiSelectedClipIds` 只要被任何**非选择动作**填成多个（多文件导入、
- * 分割、粘贴 / 复制拖拽、全选、Shift 范围选择），此后**直接拖拽**其中任一成员
- * 都会带上其余成员——而拖拽不会经过"抬起选中"，集合永远不会自愈。
+ * 1. **用户显式选择**（框选 / 主修饰键点击 / Shift 范围选择 / 全选）——
+ *    "我要操作这几个"，此时整组移动是**正确**行为（旧实现与
+ *    `kernelEditSet.test.ts` 都定义了该语义）。
+ * 2. **动作驱动的批量填充**（多文件导入 / 打开工程 / 粘贴 / 分割 / 复制拖拽）——
+ *    只是"把新产生的东西设为当前选中"，并**不表示**用户想整组拖动。多文件导入后
+ *    同轨相邻的多个 clip 都在集合里，用户随手抓住其中一个拖，右邻就跟着走
+ *    —— 这就是用户报告的缺陷。而多选描边只有 2px（单选 1px），他看不出自己
+ *    "选中了多个"。
  *
- * 由于多选描边只有 2px（单选 1px），用户完全看不出自己"选中了多个"，
- * 于是报告为「拖一个 clip，右边的 clip 跟着动」。
+ * 因此判定必须依赖**选区来源**（`selectionIntentional`），只对来源 2 收敛。
+ * 仅凭"集合大小 > 1"收敛会砍掉来源 1 的既有功能（实测：主修饰键多选 A、B 后
+ * 直接拖 A，两个本该一起移动）；完全不收敛则来源 2 的缺陷依旧（实测：Shift +
+ * 拖拽会带上陈旧邻块）。
+ *
+ * 【为什么判定放在"升级为拖拽"而不是"按下"】
+ * 因为 Shift 是**双重绑定**，且两个绑定分属不同类型（见
+ * `features/keybindings/defaultKeybindings` 的 `modifierOperationType`）：
+ * - `modifier.clipRangeSelect`（默认 Shift）= **click** 类型：范围选择，靠
+ *   "上一次点击的锚点"，只在**点击**收尾时成立；
+ * - `modifier.clipNoSnap`（默认 Shift）= **drag** 类型：拖拽时临时关闭吸附。
+ *
+ * 若在**按下**时按 click 语义处理 Shift，会改写范围选择锚点，破坏"先点 A、
+ * 再 Shift 点 B"的既有行为；而若因 Shift 就跳过收敛，则 Shift + 拖拽会带着陈旧
+ * 集合走（实测确认）。升级为拖拽时"这是拖拽而非点击"已确定，Shift 的 click 含义
+ * 不再适用，只按 drag 语义判定即可让两条路径同时正确。
  *
  * 【与其他模块的关系】
- * - 上游：`host/timelineKernelHost` 在左键按下命中 clip 时调用。
- * - 下游：判定为 true 时宿主回调 `interactions.onSelectClip`（该回调最终走
- *   `ensureTrackLaneSelected` → 收敛集合）。
- * - 复用：修饰键语义由 `features/keybindings/clipSelectionModifiers` 提供
- *   （`shouldPrimeSelection` = 未按多选键且未按范围选择键）；本模块只负责把它与
- *   "命中是否已在选区内"合并成最终判定，避免宿主里散落分支。
- * - 独立性：纯函数，不依赖 DOM / React，可直接单测。
- *
- * 【维护说明】这条规则与「单击选中」共享同一个修饰键契约：若将来新增选择类
- * 修饰键，应改 `clipSelectionModifiers` 而不是在这里加分支。
+ * - 上游：`TimelinePanel.handleKernelDragPreview` 在建立手势 origin 时调用
+ *   （必须早于参与者集合的计算，否则第一次预览已按旧集合算过）。
+ * - 下游：命中收敛时面板直接用 `[anchorClipId]` 作为参与者种子。
+ * - 独立性：纯函数，不依赖 DOM / React / Redux，可直接单测。
  */
 
-/** 起手收敛判定入参。 */
-export interface PrimeSelectionOnPressArgs {
+/** 收敛判定入参。 */
+export interface CollapseStaleSelectionArgs {
     /**
-     * 修饰键解析结果里的"应当收敛选区"标志
-     * （= 未按多选切换键、且未按范围选择键）。
+     * 是否按住了**多选切换键**（`modifier.clipMultiSelectToggle`，默认 Ctrl/⌘）。
+     *
+     * 该键同时是复制拖拽键（`modifier.clipCopyDrag`）：按住时要把**整组**复制
+     * 出去，收敛会让副本少成员，因此不收敛。
      */
-    readonly shouldPrimeSelection: boolean;
-    /** 按下的 clip 是否已在多选集合内。 */
-    readonly clipInMultiSelection: boolean;
+    readonly multiSelectToggleActive: boolean;
+    /**
+     * 当前多选集合是否来自**用户显式选择**动作。
+     *
+     * `false` = 由导入 / 粘贴 / 分割 / 打开工程 / 复制拖拽等动作批量填充，
+     * 不代表用户想整组拖动（见文件头）。
+     */
+    readonly selectionIntentional: boolean;
     /** 当前多选集合的大小。 */
     readonly multiSelectionSize: number;
+    /** 被抓住（锚点）的 clip 是否在多选集合内。 */
+    readonly anchorInMultiSelection: boolean;
 }
 
 /**
- * 判断按下时是否需要把选区收敛到被按下的 clip。
+ * 判断拖拽起手时是否应当收敛为「只移动被抓住的那一个」。
  *
- * 流程：未按选择类修饰键（`shouldPrimeSelection`）→ 再看集合现状：
- * - 集合为空 → **无需收敛**（单选本就指向它，或首次点击由抬起路径处理）；
- * - 集合只有 1 个成员且就是它 → 无需收敛（已是目标状态）；
- * - 集合有多个成员，或该 clip 不在集合内 → **需要收敛**。
+ * 流程（任一条件不满足即不收敛）：
+ * 1. 按住多选切换键（Ctrl/⌘）→ 不收敛（复制拖拽要整组复制）；
+ * 2. 选区来自用户显式选择 → 不收敛（整组移动是既有功能）；
+ * 3. 集合 <= 1 个成员 → 不收敛（参与者本就只有它）；
+ * 4. 锚点**不在**集合内 → 不收敛（`resolveKernelEditParticipants` 已经只取锚点，
+ *    无需额外动作）；
+ * 5. 其余（集合 > 1、锚点在集合内、选区来自动作填充）→ **收敛**。
  *
- * 为什么"集合为空"返回 false：一致性与幂等性。空集合时 `selectedClipId` 才是
- * 权威（可能已指向该 clip），此时再发一次选中回调是多余的状态写入，且会打断
- * "抬起才选中"的既有路径（同一手势写两次选区）。
+ * 特殊说明：判定**不看 Shift**。Shift 的 click 语义（范围选择）与 drag 语义
+ * （免吸附）分属不同类型，拖拽路径只认后者，而后者不影响选区（见文件头）。
  *
- * 特殊说明：**不做任何钳制 / 校验**（如 clipId 是否存在）——那由调用方的命中
- * 结果保证；本函数只回答"集合是否需要收敛"。
- *
- * @param args 见 `PrimeSelectionOnPressArgs`。
+ * @param args 见 `CollapseStaleSelectionArgs`。
  * @returns 需要收敛时为 true。
  */
-export function shouldPrimeSelectionOnPress(args: PrimeSelectionOnPressArgs): boolean {
-    if (!args.shouldPrimeSelection) return false;
-    if (args.multiSelectionSize <= 0) return false;
-    if (args.multiSelectionSize === 1 && args.clipInMultiSelection) return false;
+export function shouldCollapseStaleSelectionOnDrag(args: CollapseStaleSelectionArgs): boolean {
+    if (args.multiSelectToggleActive) return false;
+    if (args.selectionIntentional) return false;
+    if (args.multiSelectionSize <= 1) return false;
+    if (!args.anchorInMultiSelection) return false;
     return true;
 }

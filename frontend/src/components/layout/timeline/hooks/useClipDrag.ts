@@ -181,6 +181,8 @@ export function useClipDrag(deps: {
     trackIdFromClientY: (clientY: number) => string | null;
     setClipDropNewTrack: (v: boolean) => void;
     setMultiSelectedClipIds: (ids: string[]) => void;
+    /** 动作驱动的多选写入（复制拖拽的副本用，见 `copyClipsFromDrag`）。 */
+    setMultiSelectedClipIdsFromAction: (ids: string[]) => void;
     /** modifier.clipSlipEdit 绑定 */
     slipEditKb: Keybinding;
     /** modifier.clipNoSnap 绑定 */
@@ -212,6 +214,7 @@ export function useClipDrag(deps: {
         trackIdFromClientY,
         setClipDropNewTrack,
         setMultiSelectedClipIds,
+        setMultiSelectedClipIdsFromAction,
         slipEditKb,
         noSnapKb,
         snapEnabled,
@@ -818,6 +821,7 @@ export function useClipDrag(deps: {
                     dispatch,
                     sessionRef,
                     setMultiSelectedClipIds,
+                    setMultiSelectedClipIdsFromAction,
                     resolveTrackIdByOffset: (clipId) =>
                         resolveTrackIdByOffset(drag, clipId, drag.lastTrackOffset),
                     maybeSelectTargetTrack,

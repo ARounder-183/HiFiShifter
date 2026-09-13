@@ -97,8 +97,8 @@ import {
     type TrimEdge,
 } from "../interaction/dragGeometry";
 import { clipIntersectsBox, resolveBoxBounds, type BoxBounds } from "../interaction/boxSelection";
-// 起手选区收敛：陈旧的多选集合会让"拖一个 clip"带上整组（见该模块文件头）。
-import { shouldPrimeSelectionOnPress } from "../interaction/primeSelection";
+// （拖拽起手的选区收敛判定在面板侧，见 `interaction/primeSelection`：它需要
+// "选区来源"这一 Redux 事实，宿主不持有。）
 // 逐帧手势分派表：穷尽性由 `moveDispatch.test.ts` 守住（漏分支曾是
 // 「吸附偏移手柄拖一下就冻结」的根因，手写 if 链没有任何编译期保障）。
 import { resolveMoveDispatch } from "../interaction/moveDispatch";
@@ -1409,6 +1409,23 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     let builtBpm = -1;
     let builtBeatsPerBar = -1;
     let builtRowHeight = -1;
+    /**
+     * 上一次从 React 镜像**推入内核**的行高。
+     *
+     * 【为什么需要单独追踪——纵向缩放"跳一下"的根因】
+     * 竖直缩放分支会一次写入「新行高 + 新位置」（`setRowHeightAndScrollTop`），
+     * 但那之后 `ensureScene` 每帧还会执行 `scroll.setRowHeight(d.rowHeight)`。
+     * `d.rowHeight` 是 React 镜像，**必然滞后一帧**（要经 state 提交再回流），
+     * 于是它会把内核刚写入的新行高**改回旧值**，制造出「新位置 + 旧行高」的一帧
+     * ——实测连续放大时内核真值为
+     * `(scrollTop 223.8, rowHeight 80) → (223.8, 88) → (250.58, 88) …`，
+     * 即每步缩放多出一帧错配，画布按旧行高绘制 → 用户看到"纵向滚动了一下"。
+     *
+     * 改为**仅在镜像值真正变化时**同步：缩放期间镜像从 80 → 88 只会触发一次同步
+     * （且此时内核已是 88，是无操作），中间那一帧不再被回灌旧值。
+     * 外部驱动的行高变化（改设置 / 持久化恢复 / 轨道头缩放）仍照常同步。
+     */
+    let lastMirroredRowHeight = -1;
     // 选中态影响 clip 描边 / 高亮样式，变化时必须重建（用引用比较：Immer 未变更
     // 时数组引用稳定）。初值用 undefined 与「未选中（null）」区分。
     let builtSelectedClipId: string | null | undefined = undefined;
@@ -1623,9 +1640,13 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     function ensureScene(axis: TimelineAxis): boolean {
         const view = scroll.get();
         const d = data();
-        // 行高的真值源在 React（左侧轨道头与内核必须同源）：竖直缩放后把新行高
-        // 同步给滚动内核，否则内容高度与竖直钳制仍按旧行高计算。
-        scroll.setRowHeight(d.rowHeight);
+        // 行高的真值源在 React（左侧轨道头与内核必须同源），但**只在镜像值真正
+        // 变化时**才推入内核：每帧无条件回灌会把缩放分支刚写入的新行高改回
+        // 滞后的旧值，产生「新位置 + 旧行高」的错配帧（见 lastMirroredRowHeight）。
+        if (d.rowHeight !== lastMirroredRowHeight) {
+            lastMirroredRowHeight = d.rowHeight;
+            scroll.setRowHeight(d.rowHeight);
+        }
         const needsRebuild =
             sceneDirty ||
             builtPxPerSec !== view.pxPerSec ||
@@ -1999,7 +2020,41 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
 
     const loop = createRenderLoop({ draw });
     loop.start();
-    const unsubscribeScroll = scroll.subscribe(() => loop.invalidate());
+    /**
+     * 把轨道头容器的滚动位置**立即**镜像到内核当前位置。
+     *
+     * 【为什么不能只在绘制阶段镜像——"纵向缩放像在纵向滚动"的第二半根因】
+     * 绘制阶段的 `syncDom` 也会写 `trackList.scrollTop`，但它只在 rAF 绘制里执行。
+     * 而滚轮/键盘/拖动等输入是**同步**写滚动内核的；输入后内核只经订阅把绘制
+     * `invalidate`（排到下一帧），于是从"内核已改"到"轨道头跟上"之间隔着整整一帧。
+     * 实测（指针 x=1000，连续三次 ctrl+滚轮放大）：
+     *   kST=3.8 而 domST=0    → 画布行顶 108.2 vs 轨道头行顶 112（错位 3.8px）
+     *   kST=8.07 而 domST=4   → 103.93 vs 108（错位 4.07px）
+     *   kST=12.82 而 domST=8  → 99.18 vs 104（错位 4.82px）
+     * 每步缩放都错位一次，用户看到的就是"缩放时纵向滚动了一下"。
+     *
+     * 因此把镜像提前到**订阅回调**里：它与内核提交同一次同步调用栈，写入立即生效，
+     * 画布与轨道头在同一次合成里取到同一位置。绘制阶段的 `syncDom` 保留——它还要
+     * 处理横向平移、吸附层与 ghost 层，且其 `shouldWrite` 去重会让这里已写过的值
+     * 不再重复写。
+     *
+     * 特殊说明：容差与 `syncDom` 一致（0.5px），避免"内核 → DOM → 内核"回声循环
+     * （见 `timeline/scrollEcho` 与 `getMirroredTrackListScrollTop`）。
+     */
+    function mirrorTrackListScrollTop(): void {
+        const trackList = sync?.trackListScroller;
+        if (trackList == null) return;
+        const view = scroll.get();
+        if (shouldWrite(view.scrollTop, lastTrackListScrollTop, 0.5)) {
+            lastTrackListScrollTop = view.scrollTop;
+            trackList.scrollTop = view.scrollTop;
+        }
+    }
+
+    const unsubscribeScroll = scroll.subscribe(() => {
+        mirrorTrackListScrollTop();
+        loop.invalidate();
+    });
 
     // ── 输入：wheel（滚动 / 缩放，规则与旧实现同源）──────────────────
     /**
@@ -2163,8 +2218,21 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 clampNumber(baseRowHeight * factor, MIN_ROW_HEIGHT, MAX_ROW_HEIGHT),
             );
             if (nextRowHeight === baseRowHeight) return;
+            // 行高与滚动位置必须**一次**写进内核：
+            // - 行高经 `onRowHeightChange` 回 React，要等下一次提交、再经下一帧
+            //   `ensureScene` 里的 `scroll.setRowHeight(d.rowHeight)` 才进内核；
+            // - 而 `setScrollTop` 当帧就生效。
+            // 分两次写会留下一帧「新位置 + 旧行高」，该帧的锚点行位置是错的 ——
+            // 实测连续放大（80→88→97→107，指针 y=38，初始 scrollTop=200）出现
+            // 行位置 2.975 → 3.273 → 2.975 → 3.279 的**逐步振荡**，即用户报告的
+            // "纵向缩放会导致纵向滚动"。原子提交后两者同帧自洽。
+            // React 侧的 `onRowHeightChange` 仍要发（轨道头行高与内核必须同源）；
+            // 它落地时值已与内核一致，不会二次跳动。
+            scroll.setRowHeightAndScrollTop(
+                nextRowHeight,
+                rowUnitAtPointer * nextRowHeight - pointerY,
+            );
             onRowHeightChange?.(nextRowHeight);
-            scroll.setScrollTop(rowUnitAtPointer * nextRowHeight - pointerY);
             return;
         }
 
@@ -2267,14 +2335,6 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                * Alt 旁路规则），不在这里重写一套。
                */
               selectionMods: ReturnType<typeof resolveClipSelectionModifiers>;
-              /**
-               * 按下时是否已执行过"收敛选区"（`shouldPrimeSelectionOnPress` 为真）。
-               *
-               * 与旧实现 `TrackLane` 的 `primedSelection` 同一语义：抬起且未位移时
-               * 只在其为 false 时才补一次选中，避免同一次点击**写两遍**选区
-               * （第二遍会再打一次后端 `selected_clip`，纯浪费）。
-               */
-              primedOnPress: boolean;
           }
         | {
               kind: "clip-fade";
@@ -3095,16 +3155,6 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 fadeSide === null
                     ? undefined
                     : data().clips.find((item) => item.id === hit.clip.id);
-            // 选择修饰键与"起手是否需要收敛选区"都在**建立手势之前**算好：
-            // 后者依赖前者，而 `gesture` 的赋值是整体替换（赋值前读 `gesture.selectionMods`
-            // 会读到上一个手势 / `none` 分支）。
-            const selectionMods = resolveSelectionMods(event);
-            const multiSelectedClipIds = data().multiSelectedClipIds;
-            const primedOnPress = shouldPrimeSelectionOnPress({
-                shouldPrimeSelection: selectionMods.shouldPrimeSelection,
-                clipInMultiSelection: multiSelectedClipIds.includes(hit.clip.id),
-                multiSelectionSize: multiSelectedClipIds.length,
-            });
             gesture = {
                 kind: "pending-select",
                 startClientX: event.clientX,
@@ -3137,27 +3187,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                         : 0,
                 inactiveTakeId: resolveInactiveTakeIdAtPress(hit, event),
                 pressSec: hit.sec,
-                selectionMods,
-                primedOnPress,
+                selectionMods: resolveSelectionMods(event),
             };
-            // ── 起手收敛选区（旧实现 `TrackLane.primeSelection` 的语义）──────
-            // 参与拖拽的集合来自 `multiSelectedClipIds`：只要被拖的 clip 与邻居
-            // **都在**集合里，整组就会一起移动。而集合会被**非选择动作**填成多个
-            // （多文件导入、分割、粘贴 / 复制拖拽、全选、Shift 范围选择），拖拽又
-            // 不经过"抬起才选中"，于是集合永不自愈——用户看到的是「拖一个 clip，
-            // 右边的 clip 也跟着动」，而多选描边只有 2px，根本看不出选中了多个。
-            //
-            // 旧实现在 `pointerdown` 就调用 `primeSelection` 收敛；内核重写时只
-            // 移植了"抬起且未位移才选中"，这一条被漏掉。这里补回：未按多选 / 范围
-            // 选择修饰键、且集合确实需要收敛时，**按下即收敛**。
-            //
-            // 时机必须在建立手势之后（`gesture.selectionMods` 是下面判定的来源），
-            // 且在拖拽升级之前——否则第一次 preview 已经按旧集合算过参与者了。
-            if (primedOnPress) {
-                // 复用既有选中入口（`ensureTrackLaneSelected` 会收敛集合，
-                // 并维护范围选择锚点与后端 selected_clip），不自行拼状态。
-                interactions?.onSelectClip?.(hit.clip.id, false, false, event.clientX);
-            }
         } else {
             gesture = { kind: "seek" };
             // 空白按下：连同**指针所在轨道**一起交给面板——「清空选中 + 按设置
@@ -3796,11 +3827,6 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                         gesture.region === "fade-out-corner" ? "out" : "in",
                     );
                 }
-            } else if (gesture.primedOnPress) {
-                // 按下时已经收敛过选区（见 `primedOnPress` 与
-                // `shouldPrimeSelectionOnPress`）：同一次点击不再写第二遍。
-                // 与旧实现 `TrackLane` 的 `shouldPrimeSelection && !primedSelection`
-                // 守卫逐字同源。
             } else {
                 // 修饰键取自**按下时**的快照（`selectionMods`）。
                 //

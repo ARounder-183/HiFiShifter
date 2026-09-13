@@ -177,6 +177,8 @@ import {
     resolveKernelEditParticipants,
     type KernelEditParticipant,
 } from "./timeline/hooks/kernelEditSet";
+// 拖拽起手的陈旧选区收敛判定（纯函数，见该模块文件头）。
+import { shouldCollapseStaleSelectionOnDrag } from "./timeline/kernel/interaction/primeSelection";
 import {
     applyRippleFollowerShift,
     buildRippleFollowers,
@@ -609,6 +611,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         pitchDragKb,
         noSnapKb,
         copyDragKb,
+        clipMultiSelectToggleKb,
         dropPreview,
         setDropPreview,
         pendingDropDurationPathRef,
@@ -847,6 +850,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         multiSelectedClipIds,
         multiSelectedSet,
         setMultiSelectedClipIds,
+        setMultiSelectedClipIdsFromAction,
         contextMenu,
         setContextMenu,
         trackAreaMenu,
@@ -1447,11 +1451,37 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 const clip = session.clips.find((item) => item.id === args.clipId);
                 if (clip === undefined) return;
                 const trackIds = session.tracks.map((track) => track.id);
+                // ── 拖拽起手：陈旧选区收敛 ────────────────────────────────
+                // 参与集合来自 `multiSelectedClipIds`：被拖的 clip 与邻居**都在**
+                // 集合里时整组一起移动。而集合可能是**动作驱动**的批量填充
+                // （多文件导入 / 打开工程 / 粘贴 / 分割 / 复制拖拽）——那不代表
+                // 用户想整组拖动：导入后同轨相邻的多个 clip 都在集合里，随手抓一个
+                // 拖，右邻就跟着走，而多选描边仅 2px 看不出来。这正是
+                // 「拖一个 clip，右边的 clip 也跟着动」的根因。
+                //
+                // 判定放在这里（而非宿主按下时）有两个原因：
+                // 1. 需要"选区来源"这一 Redux 事实（`multiSelectionIntentional`），
+                //    宿主不持有；
+                // 2. Shift 在这里只按 **drag** 语义（`clipNoSnap` 免吸附）参与判定，
+                //    不再误用其 **click** 语义（`clipRangeSelect` 范围选择）——
+                //    修复前正因按下时按 click 语义跳过收敛，Shift+拖拽会带回陈旧邻块。
+                //
+                // 必须早于 participants 计算：晚一步第一次预览就按旧集合算过了。
+                const useSingleAnchor = shouldCollapseStaleSelectionOnDrag({
+                    multiSelectToggleActive: isModifierActive(
+                        clipMultiSelectToggleKb,
+                        args.modifiers,
+                    ),
+                    selectionIntentional: s.multiSelectionIntentional,
+                    multiSelectionSize: multiSelectedClipIds.length,
+                    anchorInMultiSelection: multiSelectedClipIds.includes(clip.id),
+                });
+                const participantSeedIds = useSingleAnchor ? [clip.id] : multiSelectedClipIds;
                 // 参与集合：多选集合 + 编组展开（与旧实现 `useClipDrag` 同源）。
                 // 不展开时「选中多个只移动一个」「同组不联动」——属数据语义错误。
                 const participants = resolveKernelEditParticipants({
                     anchorClipId: clip.id,
-                    multiSelectedClipIds,
+                    multiSelectedClipIds: participantSeedIds,
                     clips: session.clips,
                     trackIds,
                     ignoreGrouping: session.ignoreGrouping,
@@ -1717,9 +1747,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             }
         },
         [
+            clipMultiSelectToggleKb,
             copyDragKb,
             dispatch,
             multiSelectedClipIds,
+            s.multiSelectionIntentional,
             noSnapKb,
             pxPerSec,
             s.autoCrossfadeEnabled,
@@ -1829,6 +1861,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     dispatch,
                     sessionRef,
                     setMultiSelectedClipIds,
+                    setMultiSelectedClipIdsFromAction,
                     // 每个参与者按各自初始轨道序号 + 同一偏移量解析目标轨。
                     //
                     // 特殊说明 1：这里的 id 查询**必须带上 `trackOffset`**。只写

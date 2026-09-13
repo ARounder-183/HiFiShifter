@@ -226,6 +226,48 @@ describe("scrollKernel", () => {
             expect(k.get().scrollTop).toBe(0);
         });
 
+        it("【回归】竖直缩放原子提交：不出现「新行高 + 旧位置」的中间态", () => {
+            // 现场：连续放大 80→88→97→107，指针 y=38，初始 scrollTop=200。
+            // 分两次写时，读侧会看到行高已更新而位置仍是旧值的那一帧，锚点行位置
+            // 实测出现 2.975 → 3.273 → 2.975 → 3.279 的逐步振荡。
+            const k = makeKernel();
+            k.setScrollTop(200);
+            const pointerY = 38;
+            const anchorRowUnit = (200 + pointerY) / 80;
+
+            const spy = vi.fn();
+            k.subscribe(spy);
+            for (const nextRowHeight of [88, 97, 107]) {
+                const base = k.get();
+                const unit = (base.scrollTop + pointerY) / base.rowHeight;
+                k.setRowHeightAndScrollTop(nextRowHeight, unit * nextRowHeight - pointerY);
+                // 每次提交后读侧必须自洽：指针下的行位置不变。
+                const after = k.get();
+                expect((after.scrollTop + pointerY) / after.rowHeight).toBeCloseTo(
+                    anchorRowUnit,
+                    6,
+                );
+            }
+            // 三次缩放只通知三次（不是六次）——两字段在同一次 commit 里落地。
+            expect(spy).toHaveBeenCalledTimes(3);
+        });
+
+        it("setRowHeightAndScrollTop 仍按新行高钳制竖直位置", () => {
+            const k = makeKernel();
+            // 行高变小 → 内容变矮 → 位置必须被钳回上限内。
+            k.setRowHeightAndScrollTop(40, 99999);
+            expect(k.get().rowHeight).toBe(40);
+            expect(k.get().scrollTop).toBe(k.maxScrollTop());
+        });
+
+        it("setRowHeightAndScrollTop 的非法入参沿用当前值", () => {
+            const k = makeKernel();
+            k.setScrollTop(100);
+            k.setRowHeightAndScrollTop(Number.NaN, Number.NaN);
+            expect(k.get().rowHeight).toBe(80);
+            expect(k.get().scrollTop).toBe(100);
+        });
+
         it("行高同值写入不通知订阅者", () => {
             const k = makeKernel();
             const spy = vi.fn();
