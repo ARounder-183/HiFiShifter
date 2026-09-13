@@ -72,6 +72,7 @@ import type { FadeContextSide } from "../../FadeContextMenu";
 import { hitOverlapControl } from "../interaction/overlapControls";
 import { hitInactiveTakeLane } from "../../takeLanes";
 import { resolveHorizontalWheelZoom } from "../../runtime/timelineScrollRange";
+import { shouldNotifySharedViewport } from "../../runtime/sharedViewportNotify";
 import { resolveTimelineMinPxPerSec } from "../../runtime/timelineZoomBounds";
 import {
     CLIP_BODY_PADDING_Y,
@@ -1898,6 +1899,17 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     let lastCommittedScrollLeft = Number.NaN;
     /** 上一次逐帧通知的水平滚动位置（NaN = 从未通知）；用于去重，避免空转。 */
     let lastFrameScrollLeft = Number.NaN;
+    /**
+     * 上一次逐帧通知的水平缩放（NaN = 从未通知）；同上，用于去重。
+     *
+     * 【为什么缩放也参与逐帧通知的去重键】共享视口是一对 `{scrollLeft, pxPerSec}`，
+     * 参数编辑器消费的是**整对**。只按位置去重时，「缩放变化但位置不变」的那一步
+     * 不会触发任何通知——共享视口停留在旧缩放，参数编辑器就停在旧缩放：两个面板
+     * 的网格/标尺从此不同缩放。这不是罕见情形：光标位于工程起点附近缩小时，锚点
+     * 位置会被钳回 0（与当前位置相同），缩小每一步都恰好落在这个分支上（放大时位置
+     * 会右移、因此"放大没事"），用户看到的就是「缩小时参数编辑器没跟着缩小」。
+     */
+    let lastFramePxPerSec = Number.NaN;
 
     /**
      * 独立画布图层（波形等）：内核在视口提交后按 order 调用其 paint。
@@ -2145,10 +2157,23 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         positionDetailLayer(view);
         syncDom(view);
 
-        // 水平滚动**逐帧**通知：跨面板同步（参数编辑器）必须逐帧，不能挂在
+        // 水平视口**逐帧**通知：跨面板同步（参数编辑器）必须逐帧，不能挂在
         // 下面那个量化提交上（256px 死区会造成"阶梯感"，见 onScrollLeftFrame）。
-        if (onScrollLeftFrame !== undefined && view.scrollLeft !== lastFrameScrollLeft) {
+        //
+        // 去重键 = `{scrollLeft, pxPerSec}` **整对**（判定见 `shouldNotifySharedViewport`）：
+        // 共享视口是一对真值，参数编辑器按整对消费。只看位置会漏掉「缩放变了、位置
+        // 没变」的步进——缩小时锚点常被钳回原位，参数编辑器因此停在旧缩放。
+        if (
+            onScrollLeftFrame !== undefined &&
+            shouldNotifySharedViewport({
+                scrollLeftPx: view.scrollLeft,
+                pxPerSec: view.pxPerSec,
+                lastScrollLeftPx: lastFrameScrollLeft,
+                lastPxPerSec: lastFramePxPerSec,
+            })
+        ) {
             lastFrameScrollLeft = view.scrollLeft;
+            lastFramePxPerSec = view.pxPerSec;
             onScrollLeftFrame(view.scrollLeft);
         }
 
