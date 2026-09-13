@@ -2254,7 +2254,50 @@ git commit -m "feat(pianoroll): 黑键行钢琴背景 + 恢复音阶高亮（GL 
 
 ---
 
-## Task 7: 端到端验收与记录
+## Task 6b: 同步时间轴视图的可滚域不一致（缺陷 7，新增）
+
+**用户报告**：打开「将参数编辑器的水平位置与缩放同步到时间轴」后完全对不上，水平拖动会抽搐。
+
+**根因（已实测定位，见 spec §3.7）**：两个面板的可滚域时长来源不同——
+
+| | 时间轴 | 参数编辑器 |
+| --- | --- | --- |
+| 来源 | `session.projectSec` | `getDynamicProjectSec(clips)` |
+| 实测 | **120 s** | **59.5 s** |
+| 内容宽 @150px/s | 18000 px | 8925 px |
+| 可滚上限 | 18000 px | 9125 px（浏览器钳制） |
+
+同步把时间轴的 `scrollLeft` 推给参数编辑器后，超出其上限的部分被浏览器钳制，
+两边永久错位；快速来回拖动时共享值在两端跳变（实测差值 7650 px）＝抽搐。
+
+**Files:**
+- Modify: `frontend/src/features/session/projectBoundary.ts`
+- Modify: `frontend/src/components/layout/PianoRollPanel.tsx`
+- Modify: `frontend/src/components/layout/timeline/kernel/TimelineKernelView.tsx`
+- Modify: `frontend/src/components/layout/timeline/hooks/useTimelineState.ts`
+
+- [x] **Step 1: 新增唯一来源** — `resolveScrollableProjectSec(projectSec, clips)`
+      取「后端权威值」与「clip 末端」的较大者，并写清为什么取大（前者覆盖工程尾留白、
+      后者覆盖 clip 乐观超出的中间态）。原 `getDynamicProjectSec` 保留并降级为内部下界。
+
+- [x] **Step 2: 三处消费者改用同一函数** — `PianoRollPanel` 的 `dynamicProjectSec`、
+      `TimelineKernelView` 喂给 `ScrollKernel` 的 `projectSec`、
+      `useTimelineState` 的标尺/内容宽 `dynamicProjectSec`
+      （第三处是修第一、二处时暴露出的**新的内部不一致**：标尺仍用 59.5s 而内核已能滚到 120s）。
+
+- [x] **Step 3: 真机验证** — 参数编辑器可滚上限 9125 → **18200**；拖到时间轴最右时
+      两侧 `scrollLeft` 均为 **18000**（差 0）；缩放三轮后差 0–1px；
+      同步 off 时参数编辑器仍可独立滚动（2000，不动时间轴），on 后重新对齐。
+
+- [x] **Step 4: 提交** — `7253c2d6`（唯一来源）+ `059f6be1`（标尺一致性）。
+
+> **未决残留**：瞬时方向反转时（一帧内把 scrollbar 从最左甩到最右）参数编辑器的
+> **原生 scroller** 会滞后一帧（共享值 18000 / 原生 0，下一帧对齐）。根因是
+> `applyHorizontalScrollPosition` 先写内核、原生 scroller 靠内核镜像回写，因此慢一帧。
+> 稳态与正常速度拖动（含 5 步递进）下差值恒为 0。记录为已知残留，不在本轮修。
+
+---
+
 
 **Files:**
 - Create: `docs/superpowers/plans/2026-09-13-kernel-regression-fixes-acceptance.md`
