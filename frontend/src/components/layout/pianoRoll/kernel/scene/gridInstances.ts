@@ -196,20 +196,6 @@ function hairlineCenterY(cssY: number, dpr: number): number {
 }
 
 /**
- * 强线的**描边中心**设备像素对齐：只取整到物理像素，**不加**半像素。
- *
- * 与 `render.ts:752` 一致：强线宽 2 个物理像素，偶数宽度无需半像素偏移。
- * 两种取向并存是既有行为，迁移时必须原样保留（统一它们会改变像素）。
- *
- * @param cssY 视口 y（CSS px）。
- * @param dpr 设备像素比。
- * @returns 描边中心 y（CSS px）。
- */
-function strongCenterY(cssY: number, dpr: number): number {
-    return Math.round(cssY * dpr) / dpr;
-}
-
-/**
  * 把「描边中心 y」换算为 GL 实例矩形的**上缘 y**。
  *
  * 【这是一个必须显式处理的语义差，不是可选优化】
@@ -354,6 +340,8 @@ export function buildPitchGridInstances(args: PitchGridArgs): GridInstance[] {
     const startMidi = Math.min(Math.max(Math.floor(min), absMin), absMax);
     const endMidi = Math.min(Math.max(Math.ceil(max), absMin), absMax);
 
+    // 普通网格线：**1 物理像素**（旧 Canvas2D 的 `hairlineW = 1 / dpr`，见
+    // `pianoRoll/render.ts`）。几何长度都是 CSS px，故这里除以 dpr。
     const thickness = 1 / dpr;
     const items: GridInstance[] = [];
 
@@ -407,7 +395,14 @@ export function buildPitchGridInstances(args: PitchGridArgs): GridInstance[] {
         (scaleSegmentSets !== null || scaleNoteSet !== null)
             ? args.scaleHighlightRgba
             : null;
-    const highlightThickness = thickness * 2;
+    // 音阶强调线的线厚：**2 CSS px**（旧 Canvas2D 在这里写的是字面 `lineWidth = 2`，
+    // 并没有像 hairline 那样除以 dpr）。
+    //
+    // 特殊说明：旧实现自身的这两处并不一致（hairline 用 `1 / dpr` 的物理像素语义、
+    // 强调线用 CSS 像素语义），因此 dpr=2 时强调线是 4 个物理像素、hairline 是 1 个。
+    // 这里**照旧实现取 2**（对齐是本次的目标）；若希望强调线也走"整数物理像素"家族，
+    // 改成 `thickness * 2` 即可。
+    const highlightThickness = 2;
 
     for (let midi = startMidi; midi <= endMidi; midi += 1) {
         // 描边中心 → 矩形上缘（见 rectTopFromCenter 说明：差半个线厚）。
@@ -481,16 +476,29 @@ export function buildValueGridInstances(args: ValueGridArgs): GridInstance[] {
     const vMax = view.center + span / 2;
     const start = Math.ceil(vMin / spec.step) * spec.step;
 
-    const weakThickness = 1 / dpr;
-    const strongThickness = 2 / dpr;
+    // 非音高参数的刻度线：**1 / 1.25 CSS px**，位置 = `valueToY(v) + 0.5`。
+    //
+    // 逐字对齐旧 Canvas2D（`pianoRoll/render.ts` 的非音高分支）：
+    // ```
+    // ctx.lineWidth = isStrong ? 1.25 : 1;
+    // ctx.moveTo(0, y + 0.5); ctx.lineTo(w, y + 0.5);
+    // ```
+    // 旧实现这两处都是**字面 CSS 像素**：线宽没有除以 dpr，位置也没有按设备像素吸附
+    // （那是 dpr=1 时代的约定，高 DPR 下由浏览器的抗锯齿处理）。内核原先按"整数物理
+    // 像素"实现（`1 / dpr`、`2 / dpr` + 设备吸附），在 dpr≥2 的高分屏上比旧实现**细
+    // 一半**——用户报告的"网格线像素宽度问题"。
+    //
+    // 换算到 GL 的矩形语义：矩形 `y` 是**上缘**、高为线厚，因此
+    // `上缘 = 中心 − 线厚 / 2`（见 `rectTopFromCenter`）。命中中心 `y + 0.5` 时：
+    // 弱线厚 1 → 上缘 = y、强线厚 1.25 → 上缘 = y − 0.125，与 Canvas2D 的覆盖区间相同。
+    const weakThickness = 1;
+    const strongThickness = 1.25;
     const items: GridInstance[] = [];
     for (let v = start; v <= vMax + spec.step * 0.01; v += spec.step) {
         const isStrong = Math.round(v) % spec.strongMod === 0;
         const thickness = isStrong ? strongThickness : weakThickness;
-        // 描边中心 → 矩形上缘（见 rectTopFromCenter 说明：差半个线厚）。
-        const centerY = isStrong
-            ? strongCenterY(valueToY(v, heightPx), dpr)
-            : hairlineCenterY(valueToY(v, heightPx), dpr);
+        // 与旧实现同源的中心：`valueToY + 0.5`，不做设备像素吸附。
+        const centerY = valueToY(v, heightPx) + 0.5;
         items.push({
             x: 0,
             y: rectTopFromCenter(centerY, thickness),

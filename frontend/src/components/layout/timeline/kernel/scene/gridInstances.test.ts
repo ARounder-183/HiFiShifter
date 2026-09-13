@@ -52,21 +52,34 @@ describe("buildGridInstances", () => {
             windowLeftPx: 150,
             windowWidthPx: 100,
         });
-        // 窗口 [150, 250]：仅 contentPx=200 命中；弱线居中 → 左缘 = 200 − 0.5。
-        expect(out.map((instance) => instance.x)).toEqual([199.5]);
+        // 窗口 [150, 250]：仅 contentPx=200 命中；弱线居中 → 左缘 = 200 − 半线宽。
+        // dpr=2 时弱线宽 = 1/2 CSS px（= 1 物理像素）→ 左缘 = 200 − 0.25 = 199.75，
+        // 再按设备像素吸附 → 200。
+        expect(out.map((instance) => instance.x)).toEqual([200]);
     });
 
-    it("强弱线按 CSS 像素区分宽度（1 / 2，与旧实现 strokeWidth 同源）", () => {
-        const out = build([makeTick(100), makeTick(200, true)]);
-        // dpr 不参与线宽：Retina 下线更粗才与旧实现观感一致。
-        expect(out[0].w).toBe(1);
-        expect(out[1].w).toBe(2);
+    it("强弱线按**物理像素**区分宽度（1 / 2，与旧实现 setAttribute 同源）", () => {
+        // 旧实现 `BackgroundGrid` 用命令式写覆盖了 JSX 上的 strokeWidth：
+        //   paths[0].setAttribute("stroke-width", String(1 / dpr));  // 弱线 = 1 物理像素
+        //   paths[1].setAttribute("stroke-width", String(2 / dpr));  // 强线 = 2 物理像素
+        // 因此几何里必须是 `物理像素 / dpr` 的 CSS px，而不是字面的 1 / 2
+        // （按 CSS 像素取会在 dpr=2 上把网格画粗一倍）。
+        const out = build([makeTick(100), makeTick(200, true)], { dpr: 2 });
+        expect(out[0].w).toBe(0.5);
+        expect(out[1].w).toBe(1);
+        // 换算回物理像素：恒为 1 / 2。
+        expect(out[0].w * 2).toBe(1);
+        expect(out[1].w * 2).toBe(2);
     });
 
-    it("线宽不随 DPR 变化（CSS 像素语义）", () => {
+    it("物理线宽不随 DPR 变化（CSS 宽度随之缩小）", () => {
+        // dpr=1：弱线 1 CSS px = 1 物理像素；dpr=3：弱线 1/3 CSS px = 1 物理像素。
         const at1 = build([makeTick(100)], { dpr: 1 });
-        const at2 = build([makeTick(100)], { dpr: 3 });
-        expect(at1[0].w).toBe(at2[0].w);
+        const at3 = build([makeTick(100)], { dpr: 3 });
+        expect(at1[0].w).toBe(1);
+        expect(at3[0].w).toBeCloseTo(1 / 3, 9);
+        expect(at1[0].w * 1).toBe(1);
+        expect(at3[0].w * 3).toBeCloseTo(1, 9);
     });
 
     it("同一位置的重复刻度只产出一条（避免 alpha 累积变亮）", () => {
@@ -78,7 +91,8 @@ describe("buildGridInstances", () => {
     it("同一位置强弱重合时保留强线", () => {
         const out = build([makeTick(100), makeTick(100, true)]);
         expect(out).toHaveLength(1);
-        expect(out[0].w).toBe(2);
+        // dpr=2：强线 2 物理像素 = 1 CSS px。
+        expect(out[0].w).toBe(1);
         expect(out[0].rgba).toEqual([1, 1, 1, 0.2 * OPACITY]);
     });
 

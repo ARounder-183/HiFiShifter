@@ -192,7 +192,7 @@ describe("buildValueGridInstances", () => {
         expect(items.filter((i) => i.rgba === WHITE).length).toBe(1);
     });
 
-    it("强线不加半像素、弱线加半像素（两种取向都必须保留）", () => {
+    it("覆盖区间与旧 Canvas2D 的 stroke 一致（上缘 = 中心 − 半厚）", () => {
         const items = buildValueGridInstances({
             kind: "cents",
             view: { center: 0, span: 300 },
@@ -204,30 +204,36 @@ describe("buildValueGridInstances", () => {
             weakRgba: BLACK,
         });
         expect(items.length).toBeGreaterThan(0);
-        // 换算成矩形上缘后，两种取向都落在整数设备像素上——因为它们各自的
-        // 中心（弱线 k+0.5、强线 k）减去半个线厚（弱线 0.5、强线 1 设备像素）
-        // 都得到整数。因此这里断言的等价性质是"上缘在设备像素栅格上"。
+        // 旧实现：`moveTo(0, y + 0.5)` + `lineWidth = 1 / 1.25` → 覆盖
+        // `[y + 0.5 − 线厚/2, y + 0.5 + 线厚/2]`。GL 的矩形 `y` 是上缘、高为线厚，
+        // 因此恒有「上缘 + 半厚 == y + 0.5」。位置**不**做设备像素吸附
+        // （旧实现就没有，dpr≥2 时由抗锯齿处理）。
         for (const item of items) {
-            const frac = Math.abs((item.y * 2) % 1);
-            expect(frac).toBeCloseTo(0, 9);
+            const thickness = item.rgba === WHITE ? 1.25 : 1;
+            expect(item.h).toBeCloseTo(thickness, 9);
+            expect(item.y + item.h / 2).toBeCloseTo(makeValueToY()(item.value, 100) + 0.5, 9);
         }
     });
 
-    it("强线线厚是弱线的两倍（2/dpr vs 1/dpr）", () => {
-        const items = buildValueGridInstances({
-            kind: "cents",
-            view: { center: 0, span: 300 },
-            heightPx: 100,
-            viewportWidthPx: 800,
-            dpr: 2,
-            valueToY: makeValueToY(),
-            strongRgba: WHITE,
-            weakRgba: BLACK,
-        });
-        for (const item of items) {
-            const expected = item.rgba === WHITE ? 1 : 0.5; // 2/dpr vs 1/dpr
-            expect(item.h).toBeCloseTo(expected, 9);
-            expect(item.w).toBe(800); // 横向范围不受强弱影响
+    it("线宽按 CSS 像素（1 / 1.25，与旧 render.ts 的 lineWidth 同源）", () => {
+        // 旧实现是字面 `ctx.lineWidth = isStrong ? 1.25 : 1`——**没有**除以 dpr。
+        // 内核原先按物理像素实现（1/dpr、2/dpr），dpr=2 的高分屏上比旧实现细一半。
+        for (const dpr of [1, 1.25, 2, 3]) {
+            const items = buildValueGridInstances({
+                kind: "cents",
+                view: { center: 0, span: 300 },
+                heightPx: 100,
+                viewportWidthPx: 800,
+                dpr,
+                valueToY: makeValueToY(),
+                strongRgba: WHITE,
+                weakRgba: BLACK,
+            });
+            const weak = items.find((item) => item.rgba === BLACK);
+            const strong = items.find((item) => item.rgba === WHITE);
+            expect(weak?.h).toBeCloseTo(1, 9);
+            expect(strong?.h).toBeCloseTo(1.25, 9);
+            for (const item of items) expect(item.w).toBe(800); // 横向范围不受强弱影响
         }
     });
 
@@ -279,13 +285,16 @@ describe("buildValueGridInstances", () => {
  * 逐行比对行数、y 与强弱判定——任何一处口径差异都会立刻失败。
  *
  * 【覆盖的边界】span 取 `1e-6`（下限退化）、6（半音级）、24（默认）、60（全域）；
- * dpr 取 1 / 1.25 / 2 / 3（含**分数 DPR**，两种半像素取向在这里才会分叉）。
+ * dpr 取 1 / 1.25 / 2 / 3（含**分数 DPR**）。
+ *
+ * 【两条分支的位置约定不同，别替它们"统一"】音高分支走 `hairlineY`（设备像素吸附
+ * + 半像素），非音高分支是 `valueToY + 0.5`（**不**吸附）——旧实现就是这样，逐值
+ * 等价要求照抄，而不是按"哪个看起来更合理"改写。
  */
 describe("与 render.ts 行循环逐值等价", () => {
     const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), hi);
     const proj = (v: number, h: number) => ((100 - v) / 100) * h;
     const hairline = (y: number, dpr: number) => (Math.round(y * dpr) + 0.5) / dpr;
-    const snap = (y: number, dpr: number) => Math.round(y * dpr) / dpr;
 
     /** 复刻 render.ts:672-740 的音高行循环。 */
     function legacyPitchRows(center: number, spanRaw: number, h: number, dpr: number) {
@@ -303,7 +312,17 @@ describe("与 render.ts 行循环逐值等价", () => {
         return rows;
     }
 
-    /** 复刻 render.ts:741-766 的 cents 行循环。 */
+    /**
+     * 复刻 render.ts 的 cents 行循环（非音高分支）。
+     *
+     * ⚠️ 旧实现这两条分支的**位置约定与音高分支不同**：
+     * ```
+     * ctx.moveTo(0, y + 0.5); ctx.lineTo(w, y + 0.5);   // y = valueToY(v, h)
+     * ```
+     * 即**不做设备像素吸附**（那是 dpr=1 时代的约定）。本函数早先写成
+     * `strong ? snap : hairline`，把内核的假设当成了旧实现——那正是线宽/位置
+     * 分叉的来源（见 `gridInstances.ts` 里强线宽常量处的说明）。
+     */
     function legacyCentsRows(center: number, spanRaw: number, h: number, dpr: number) {
         const span = Math.max(1e-6, spanRaw);
         const vMin = center - span / 2;
@@ -313,7 +332,8 @@ describe("与 render.ts 行循环逐值等价", () => {
         const rows: { v: number; y: number; strong: boolean }[] = [];
         for (let v = start; v <= vMax + step * 0.01; v += step) {
             const strong = Math.round(v) % 1200 === 0;
-            rows.push({ v, y: strong ? snap(proj(v, h), dpr) : hairline(proj(v, h), dpr), strong });
+            void dpr;
+            rows.push({ v, y: proj(v, h) + 0.5, strong });
         }
         return rows;
     }
