@@ -513,9 +513,10 @@ export interface TimelineKernelInteractions {
      * 内核只负责识别手势，事件派发与焦点切换由面板完成。
      *
      * @param clipId 目标 clip。
-     * @param mode 选区写入方式：缺省 `"replace"`（替换为本次范围，与旧行为逐字
-     *   一致）；按住 `keybindings.clipRangeToParamSelection`（默认 Alt）双击时为
-     *   `"toggle"`（该块范围已完整覆盖则挖掉，否则并入 —— 连按两次回到原状）。
+     * @param mode 选区写入方式：恒 `"replace"`（替换为本次范围，与旧行为逐字
+     *   一致）。【手势迁移（2026-09-14）】"并入 / 挖掉"（toggle）已从「按住该
+     *   修饰键左键双击」改为「按住该修饰键**右键单击**」，由右键手势 finalize
+     *   处派发（本回调不再传 `"toggle"`；参数保留以兼容既有调用方）。
      */
     readonly onDoubleClickClip?: (clipId: string, mode?: "replace" | "toggle") => void;
     /**
@@ -869,6 +870,18 @@ export interface TimelineKernelInteractions {
     readonly onBoxSelectCommit?: (args: {
         readonly clipIds: readonly string[];
         readonly additive: boolean;
+        readonly cancelled: boolean;
+    }) => void;
+    /**
+     * 按住 `modifier.clipRangeToParamSelection`（默认 Alt）的右键框选结束：
+     * 被框选的 clip 范围**并入**参数编辑器选区（不是 clip 多选）。
+     *
+     * 与单个块的右键单击（`onDoubleClickClip` 的 toggle 语义）同一修饰键：
+     * 单击 = 该块并入 / 挖掉，拖框 = 框内全部并入。`cancelled`（Esc / 失焦）时
+     * 调用方不写任何选区。
+     */
+    readonly onBoxSelectToParamSelection?: (args: {
+        readonly clipIds: readonly string[];
         readonly cancelled: boolean;
     }) => void;
     /**
@@ -2690,6 +2703,16 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
               active: boolean;
               /** 最近一次命中的 clip 集合（去重：同集合不重复回调）。 */
               lastClipIds: readonly string[];
+              /**
+               * 按下时是否按住了 `modifier.clipRangeToParamSelection`（默认 Alt）。
+               *
+               * 按住时这条右键手势**不再是 clip 多选框选**：松开（未拖动）= 把该
+               * 块范围并入 / 挖掉参数编辑器选区（取代旧的双击手势，见
+               * `clipDoubleClickMode` 的说明）；拖动 = 被框选的 clip 全部**并入**
+               * 参数选区（`onBoxSelectToParamSelection`）。按下时冻结（快照），
+               * 拖拽中途松开修饰键不改变本次手势的语义。
+               */
+              toParamSelection: boolean;
           }
         | {
               kind: "clip-trim";
@@ -3120,6 +3143,12 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             // 超过阈值才真正开始框选（与旧实现一致）。
             const rect = container.getBoundingClientRect();
             const view = scroll.get();
+            // 按住 `modifier.clipRangeToParamSelection`（默认 Alt）= 本次右键
+            // 手势改为「写入参数编辑器选区」（见手势类型里 `toParamSelection`
+            // 的说明）。按下时冻结；拖拽中的框**不显示**（它不改变 clip 选择，
+            // 显示多选框会误导）。
+            const paramRangeKb = data().keybindings.clipRangeToParamSelection;
+            const toParamSelection = paramRangeKb != null && isModifierActive(paramRangeKb, event);
             gesture = {
                 kind: "box-select",
                 startClientX: event.clientX,
@@ -3132,6 +3161,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 additive: isPrimaryModifierDown(event),
                 active: false,
                 lastClipIds: [],
+                toParamSelection,
             };
             return;
         }
@@ -3192,6 +3222,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             if (dx * dx + dy * dy < BOX_SELECT_THRESHOLD_PX * BOX_SELECT_THRESHOLD_PX) return;
             gesture.active = true;
             // 拖拽已成立：抑制随后的 contextmenu（否则松手会弹右键菜单）。
+            // 参数选区模式同样抑制——松手语义是"写入参数选区"，不是弹菜单。
             suppressNextContextMenu = true;
         }
         const rect = container.getBoundingClientRect();
@@ -3220,7 +3251,11 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             if (same) return;
         }
         gesture.lastClipIds = ids;
-        interactions?.onBoxSelectPreview?.({ clipIds: ids, additive: gesture.additive });
+        // 参数选区模式：框选预览仍照常（用户看到同一套框选反馈），但**不**派发
+        // clip 多选预览——本次手势不改变 clip 选择（见 finalize 处的说明）。
+        if (!gesture.toParamSelection) {
+            interactions?.onBoxSelectPreview?.({ clipIds: ids, additive: gesture.additive });
+        }
     }
 
     /**
@@ -3527,17 +3562,11 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                         anchor.y,
                     );
                 } else {
-                    // 按住 `modifier.clipRangeToParamSelection`（默认 Alt）双击 =
-                    // 「并入 / 挖掉」该块范围（见 `PianoRollPanel` 的 toggle 分支）；
-                    // 不按修饰键仍是替换选区，与旧行为逐字一致。判定抽在纯函数里，
-                    // 见 `interaction/clipDoubleClickMode` 的说明（该手势曾被合并吞掉）。
-                    interactions?.onDoubleClickClip?.(
-                        hit.clip.id,
-                        resolveClipDoubleClickMode(
-                            data().keybindings.clipRangeToParamSelection,
-                            event,
-                        ),
-                    );
+                    // 【手势迁移】「并入 / 挖掉」从左键双击改为 **右键单击**
+                    // （按住 `modifier.clipRangeToParamSelection`，默认
+                    // Alt）——见右键手势 finalize 处的说明；左键双击恢复为普通
+                    // 语义（替换参数选区，与旧实现一致），不再读该修饰键。
+                    interactions?.onDoubleClickClip?.(hit.clip.id, "replace");
                 }
                 return;
             }
@@ -4417,26 +4446,68 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         }
         if (gesture.kind === "box-select") {
             const boxActive = gesture.active;
-            // 未超过阈值（右键单击）不提交：交给 contextmenu 弹菜单。
-            if (boxActive) {
-                interactions?.onBoxSelectCommit?.({
-                    clipIds: gesture.lastClipIds,
-                    additive: gesture.additive,
-                    cancelled,
-                });
-            }
-            boxSelectEl.style.display = "none";
-            // 菜单延迟到松手判定（见 `onContextMenu` 的说明）：
-            // - 框选成立 → 丢弃按下时被抑制的菜单，并吞掉紧随的那一次 contextmenu
-            //   （兼容「松手后才触发 contextmenu」的平台）；
-            // - 框选未成立（右键单击）→ 在按下位置补发菜单（旧实现同一语义）。
-            const pending = pendingContextMenu;
-            pendingContextMenu = null;
-            if (boxActive) {
-                suppressNextContextMenu = true;
-            } else if (pending !== null && !cancelled) {
-                suppressNextContextMenu = true;
-                dispatchContextMenuAt(pending.clientX, pending.clientY);
+            if (gesture.toParamSelection) {
+                // ── `modifier.clipRangeToParamSelection`（默认 Alt）模式 ──
+                // 松开 = 被框选的 clip 范围**并入**参数编辑器选区（在既有参数选区
+                // 之上叠加，与"普通框选改变 clip 多选"正交：用户要的是两者同时成立，
+                // 因此 clip 选择在本次手势里原样保留，不提交也不回滚）。
+                // 未拖动（右键单击）= 单块手势：并入 / 挖掉该块范围（取代旧的双击，
+                // 见 `onDoubleClickClip` 与 `clipDoubleClickMode` 的说明）。取消 /
+                // 未拖动不写任何选区。
+                if (boxActive) {
+                    interactions?.onBoxSelectToParamSelection?.({
+                        clipIds: gesture.lastClipIds,
+                        cancelled,
+                    });
+                }
+                boxSelectEl.style.display = "none";
+                // 未拖动的单击在本平台上没有 pendingContextMenu（contextmenu 在
+                // 松手后才触发）；若有（按下即触发的平台），同样丢弃——它的语义
+                // 已被单块手势取代。
+                pendingContextMenu = null;
+                if (boxActive) {
+                    suppressNextContextMenu = true;
+                } else if (!cancelled) {
+                    // 未拖动的右键单击：吞掉菜单（本平台上 contextmenu 在松手**之后**
+                    // 触发，此时 pendingContextMenu 还未设置——见 onContextMenu 的
+                    // 事件顺序），改为单块并入 / 挖掉。命中按**松开时**的指针位置
+                    // 解析（修饰键单块手势是点击语义；正常交互下指针未移动，与按下
+                    // 时的命中一致）。`suppressNextContextMenu` 同样在这里置位：
+                    // 稍后到达的 contextmenu（松手后派发）会被 onContextMenu 吞掉。
+                    suppressNextContextMenu = true;
+                    const release = hitAt(event.clientX, event.clientY);
+                    if (release.kind === "clip") {
+                        interactions?.onDoubleClickClip?.(
+                            release.clip.id,
+                            resolveClipDoubleClickMode(
+                                data().keybindings.clipRangeToParamSelection,
+                                event,
+                            ),
+                        );
+                    }
+                }
+            } else {
+                // 未超过阈值（右键单击）不提交：交给 contextmenu 弹菜单。
+                if (boxActive) {
+                    interactions?.onBoxSelectCommit?.({
+                        clipIds: gesture.lastClipIds,
+                        additive: gesture.additive,
+                        cancelled,
+                    });
+                }
+                boxSelectEl.style.display = "none";
+                // 菜单延迟到松手判定（见 `onContextMenu` 的说明）：
+                // - 框选成立 → 丢弃按下时被抑制的菜单，并吞掉紧随的那一次 contextmenu
+                //   （兼容「松手后才触发 contextmenu」的平台）；
+                // - 框选未成立（右键单击）→ 在按下位置补发菜单（旧实现同一语义）。
+                const pending = pendingContextMenu;
+                pendingContextMenu = null;
+                if (boxActive) {
+                    suppressNextContextMenu = true;
+                } else if (pending !== null && !cancelled) {
+                    suppressNextContextMenu = true;
+                    dispatchContextMenuAt(pending.clientX, pending.clientY);
+                }
             }
         }
         if (gesture.kind === "seek") {

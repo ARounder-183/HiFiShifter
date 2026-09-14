@@ -3735,6 +3735,29 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     );
 
     /**
+     * 内核右键框选（按住 `modifier.clipRangeToParamSelection`）→ 被框选的 clip
+     * 范围**并入**参数编辑器选区。
+     *
+     * 与单个块的右键单击（`handleKernelDoubleClickClip` 的 `toggle`）同一修饰键
+     * 家族：单击 = 该块并入 / 挖掉；拖框 = 框内**全部**并入（叠加在既有参数选区
+     * 上，重叠/相接自动合并）。复用 `addClipsToParamSelection` 编辑操作——
+     * `PianoRollPanel` 的接收端已实现"只取当前根轨道组内的块 + 归一化"语义，
+     * 这里不再重写一份。
+     */
+    const handleKernelBoxSelectToParamSelection = React.useCallback(
+        (args: { clipIds: readonly string[]; cancelled: boolean }) => {
+            if (args.cancelled || args.clipIds.length === 0) return;
+            clearContextMenu();
+            window.dispatchEvent(
+                new CustomEvent("hifi:editOp", {
+                    detail: { op: "addClipsToParamSelection", clipIds: [...args.clipIds] },
+                }),
+            );
+        },
+        [clearContextMenu],
+    );
+
+    /**
      * 内核右键菜单：复用既有分支（clip 菜单 / 轨道区菜单）。
      *
      * 与旧实现的差别只在**命中来源**：旧实现用 `trackIdFromClientY` +
@@ -4822,6 +4845,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             onSnapOffsetCommit: handleKernelSnapOffsetCommit,
             onBoxSelectPreview: handleKernelBoxSelectPreview,
             onBoxSelectCommit: handleKernelBoxSelectCommit,
+            onBoxSelectToParamSelection: handleKernelBoxSelectToParamSelection,
             onContextMenu: handleKernelContextMenu,
             onFadeContextMenu: handleKernelFadeContextMenu,
             onFadeHover: handleKernelFadeHover,

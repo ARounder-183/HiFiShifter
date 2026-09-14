@@ -773,7 +773,7 @@ export const jaJP = {
     kb_modifier_pr_vzoom: "キャンバス垂直ズーム（タイムライン / ピアノロールホイール）",
     kb_modifier_param_morph: "パラメータ形状変形（押しながら選択範囲内のアンカーをドラッグ）",
     kb_modifier_clip_range_to_param_selection:
-        "クリップ範囲をパラメーター選択範囲に追加（押しながらクリップをダブルクリック／再度で解除）",
+        "クリップ範囲をパラメーター選択範囲に追加（押しながら右クリック）",
     kb_modifier_param_multi_select:
         "複数選択範囲（押しながらドラッグで範囲を追加、既存の範囲を押しながらクリックで解除）",
     kb_modifier_param_fine_adjust:

@@ -547,6 +547,8 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
             onFadeCommit: (args) => interactionsRef.current?.onFadeCommit?.(args),
             onBoxSelectPreview: (args) => interactionsRef.current?.onBoxSelectPreview?.(args),
             onBoxSelectCommit: (args) => interactionsRef.current?.onBoxSelectCommit?.(args),
+            onBoxSelectToParamSelection: (args) =>
+                interactionsRef.current?.onBoxSelectToParamSelection?.(args),
             onContextMenu: (args) => interactionsRef.current?.onContextMenu?.(args),
             onFadeContextMenu: (request) => interactionsRef.current?.onFadeContextMenu?.(request),
             onFadeHover: (args, clientX, clientY) =>
