@@ -1,3 +1,26 @@
+/**
+ * useClipDrag — 旧实现（DOM 事件驱动）的 Clip 拖拽状态机。
+ *
+ * 【主要内容】
+ * `startClipDrag` 的按下 / 移动 / 松手全流程：ghost 预览、跨轨与建轨落点解析、
+ * 乐观位置改写与失败回滚、复制 / slip 模式分支、自动交叉淡化收尾，以及落点轨道
+ * 的焦点跟随（`maybeSelectTargetTrack`）。
+ *
+ * 【作用】
+ * 记录了旧渲染路径的拖拽语义，内核侧的提交分支（`TimelinePanel`）与抽出的共享
+ * 编排（`copyClipsFromDrag` / `createNewTrackForDrop`）都以它为语义基准（"与旧实现
+ * 同源"）。**当前没有组件调用本 hook**：旧渲染路径已删除（见 `TimelinePanel` 头部
+ * 的"渲染路径"说明），仍在被引用的只有 `NEW_TRACK_SENTINEL` 兼容导出。
+ *
+ * 【与其他模块的关系】
+ * - 上游（历史）：已删除的 `TrackLane` / `ClipItem` 的指针事件。
+ * - 下游：`copyClipsFromDrag`、`createNewTrackForDrop`（从本文件的局部闭包中抽出，
+ *   避免出现第二份建轨 / 复制语义）。
+ * - 落点轨道切换统一传 `selectTrackRemote({ trackId, applySelectedClip: false })`：
+ *   该字段是**契约**（见 `TimelinePanel.handleKernelSeek` 的说明与提交 019e93ed），
+ *   纯字符串形式会被后端全局唯一的 `selected_clip_id` 记忆异步覆盖前端选中。
+ */
+
 import { useRef, useState } from "react";
 import { batch } from "react-redux";
 import { registerDragAbort } from "../gestureFocusGuard";
@@ -158,6 +181,8 @@ export function useClipDrag(deps: {
     trackIdFromClientY: (clientY: number) => string | null;
     setClipDropNewTrack: (v: boolean) => void;
     setMultiSelectedClipIds: (ids: string[]) => void;
+    /** 动作驱动的多选写入（复制拖拽的副本用，见 `copyClipsFromDrag`）。 */
+    setMultiSelectedClipIdsFromAction: (ids: string[]) => void;
     /** modifier.clipSlipEdit 绑定 */
     slipEditKb: Keybinding;
     /** modifier.clipNoSnap 绑定 */
@@ -189,6 +214,7 @@ export function useClipDrag(deps: {
         trackIdFromClientY,
         setClipDropNewTrack,
         setMultiSelectedClipIds,
+        setMultiSelectedClipIdsFromAction,
         slipEditKb,
         noSnapKb,
         snapEnabled,
@@ -651,7 +677,14 @@ export function useClipDrag(deps: {
                 if (!targetTrackId) return;
                 if (targetTrackId === drag.initialAnchorTrackId) return;
                 if (sessionRef.current.selectedTrackId === targetTrackId) return;
-                void dispatch(selectTrackRemote(targetTrackId));
+                // `applySelectedClip: false` —— 跨轨拖拽落点只决定"当前轨道跟到哪"，
+                // 选中集合属于被拖拽的 clip 本身，不该被后端**全局唯一**的
+                // `selected_clip_id` 记忆覆盖（该字段不是每轨一份，见
+                // `state.rs::select_track`，因此不存在"恢复本轨上次选中"的语义）。
+                // 契约与 `TimelinePanel.handleKernelSeek` 同源（提交 019e93ed）。
+                void dispatch(
+                    selectTrackRemote({ trackId: targetTrackId, applySelectedClip: false }),
+                );
             };
 
             // 清除 ghost 预览
@@ -788,6 +821,7 @@ export function useClipDrag(deps: {
                     dispatch,
                     sessionRef,
                     setMultiSelectedClipIds,
+                    setMultiSelectedClipIdsFromAction,
                     resolveTrackIdByOffset: (clipId) =>
                         resolveTrackIdByOffset(drag, clipId, drag.lastTrackOffset),
                     maybeSelectTargetTrack,

@@ -9,6 +9,12 @@
  * 【为什么断言 w 与 h 分开】横线的 `w` 是横向范围、`h` 是线厚，两者写反会画出
  * 一条通高的竖条而不是一条线。这类转置错误在数值上都"有限且合理"，只有分开
  * 断言才能暴露。
+ *
+ * 【后两组用例守护新增图层】「钢琴背景（黑键行）」与「音阶高亮」：
+ * - 背景带必须**先于所有网格线**发射（FLAT 按缓冲顺序合成，顺序错了带子会盖掉线）；
+ * - 背景带用**行体**（`valueToY(midi+1)..valueToY(midi)`）而不是行心 `midi+0.5`；
+ * - 缺省不产带、空音级不产强调线（不改变既有行为）。
+ * 背景带用 `value < 0`（`-(midi+1)`）与网格线区分，见 `GridInstance.value`。
  */
 import { describe, expect, it } from "vitest";
 
@@ -186,42 +192,40 @@ describe("buildValueGridInstances", () => {
         expect(items.filter((i) => i.rgba === WHITE).length).toBe(1);
     });
 
-    it("强线不加半像素、弱线加半像素（两种取向都必须保留）", () => {
-        const items = buildValueGridInstances({
-            kind: "cents",
-            view: { center: 0, span: 300 },
-            heightPx: 100,
-            viewportWidthPx: 800,
-            dpr: 2,
-            valueToY: makeValueToY(),
-            strongRgba: WHITE,
-            weakRgba: BLACK,
-        });
-        expect(items.length).toBeGreaterThan(0);
-        // 换算成矩形上缘后，两种取向都落在整数设备像素上——因为它们各自的
-        // 中心（弱线 k+0.5、强线 k）减去半个线厚（弱线 0.5、强线 1 设备像素）
-        // 都得到整数。因此这里断言的等价性质是"上缘在设备像素栅格上"。
-        for (const item of items) {
-            const frac = Math.abs((item.y * 2) % 1);
-            expect(frac).toBeCloseTo(0, 9);
-        }
-    });
-
-    it("强线线厚是弱线的两倍（2/dpr vs 1/dpr）", () => {
-        const items = buildValueGridInstances({
-            kind: "cents",
-            view: { center: 0, span: 300 },
-            heightPx: 100,
-            viewportWidthPx: 800,
-            dpr: 2,
-            valueToY: makeValueToY(),
-            strongRgba: WHITE,
-            weakRgba: BLACK,
-        });
-        for (const item of items) {
-            const expected = item.rgba === WHITE ? 1 : 0.5; // 2/dpr vs 1/dpr
-            expect(item.h).toBeCloseTo(expected, 9);
-            expect(item.w).toBe(800); // 横向范围不受强弱影响
+    it("线宽与落点都是**整数物理像素**（弱 1 个、强 2 个）", () => {
+        // 这是**有意**的统一（不是照抄旧实现）：旧 Canvas2D 在非音高分支用字面
+        // `lineWidth = 1 / 1.25` CSS px、位置 `y + 0.5`，两者都不按设备像素对齐，
+        // 在 dpr≥2 上得到的是"跨两个物理像素且位置落在分数像素上"的抗锯齿线。
+        // 内核统一到整数物理像素家族：宽度 1/dpr、2/dpr，落点吸附设备栅格。
+        for (const dpr of [1, 1.25, 2, 3]) {
+            const items = buildValueGridInstances({
+                kind: "cents",
+                view: { center: 0, span: 300 },
+                heightPx: 100,
+                viewportWidthPx: 800,
+                dpr,
+                valueToY: makeValueToY(),
+                strongRgba: WHITE,
+                weakRgba: BLACK,
+            });
+            const weak = items.filter((item) => item.rgba === BLACK);
+            const strong = items.filter((item) => item.rgba === WHITE);
+            expect(weak.length).toBeGreaterThan(0);
+            expect(strong.length).toBeGreaterThan(0);
+            for (const item of weak) {
+                expect(item.h).toBeCloseTo(1 / dpr, 9);
+                expect(item.h * dpr).toBeCloseTo(1, 9);
+            }
+            for (const item of strong) {
+                expect(item.h).toBeCloseTo(2 / dpr, 9);
+                expect(item.h * dpr).toBeCloseTo(2, 9);
+            }
+            // 上缘与下缘都落在设备像素边界上（整数物理像素 ⇔ 覆盖整数个物理像素列）。
+            for (const item of items) {
+                expect(Math.abs((item.y * dpr) % 1)).toBeCloseTo(0, 9);
+                expect(Math.abs(((item.y + item.h) * dpr) % 1)).toBeCloseTo(0, 9);
+                expect(item.w).toBe(800); // 横向范围不受强弱影响
+            }
         }
     });
 
@@ -273,13 +277,16 @@ describe("buildValueGridInstances", () => {
  * 逐行比对行数、y 与强弱判定——任何一处口径差异都会立刻失败。
  *
  * 【覆盖的边界】span 取 `1e-6`（下限退化）、6（半音级）、24（默认）、60（全域）；
- * dpr 取 1 / 1.25 / 2 / 3（含**分数 DPR**，两种半像素取向在这里才会分叉）。
+ * dpr 取 1 / 1.25 / 2 / 3（含**分数 DPR**）。
+ *
+ * 【两条分支的位置约定不同，别替它们"统一"】音高分支走 `hairlineY`（设备像素吸附
+ * + 半像素），非音高分支是 `valueToY + 0.5`（**不**吸附）——旧实现就是这样，逐值
+ * 等价要求照抄，而不是按"哪个看起来更合理"改写。
  */
 describe("与 render.ts 行循环逐值等价", () => {
     const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), hi);
     const proj = (v: number, h: number) => ((100 - v) / 100) * h;
     const hairline = (y: number, dpr: number) => (Math.round(y * dpr) + 0.5) / dpr;
-    const snap = (y: number, dpr: number) => Math.round(y * dpr) / dpr;
 
     /** 复刻 render.ts:672-740 的音高行循环。 */
     function legacyPitchRows(center: number, spanRaw: number, h: number, dpr: number) {
@@ -297,17 +304,26 @@ describe("与 render.ts 行循环逐值等价", () => {
         return rows;
     }
 
-    /** 复刻 render.ts:741-766 的 cents 行循环。 */
+    /**
+     * 复刻 render.ts 的 cents 行循环（非音高分支）的**行集合与强弱判定**。
+     *
+     * 只复刻旧实现的"枚举哪些行、哪条是强线"——位置**故意不复刻**：旧实现是
+     * `moveTo(0, y + 0.5)`（不按设备像素对齐，dpr≥2 上落点是分数像素），内核按
+     * 整数物理像素家族吸附落点（见 `gridInstances.ts` 非音高分支的说明）。位置
+     * 由本文件的"整数物理像素"用例单独守护。
+     */
     function legacyCentsRows(center: number, spanRaw: number, h: number, dpr: number) {
         const span = Math.max(1e-6, spanRaw);
         const vMin = center - span / 2;
         const vMax = center + span / 2;
         const step = 100;
         const start = Math.ceil(vMin / step) * step;
-        const rows: { v: number; y: number; strong: boolean }[] = [];
+        const rows: { v: number; strong: boolean }[] = [];
         for (let v = start; v <= vMax + step * 0.01; v += step) {
             const strong = Math.round(v) % 1200 === 0;
-            rows.push({ v, y: strong ? snap(proj(v, h), dpr) : hairline(proj(v, h), dpr), strong });
+            void h;
+            void dpr;
+            rows.push({ v, strong });
         }
         return rows;
     }
@@ -340,7 +356,7 @@ describe("与 render.ts 行循环逐值等价", () => {
         }
     });
 
-    it("cents 网格：center × span × dpr 组合下 y、强弱判定与行数完全一致", () => {
+    it("cents 网格：center × span × dpr 组合下行集合、强弱判定与行数完全一致", () => {
         for (const center of [-1200, -50, 0, 37.5, 600, 2400]) {
             for (const span of [1e-6, 100, 300, 2400]) {
                 for (const dpr of [1, 1.25, 2, 3]) {
@@ -357,13 +373,151 @@ describe("与 render.ts 行循环逐值等价", () => {
                     });
                     expect(built.length).toBe(legacy.length);
                     for (let i = 0; i < built.length; i += 1) {
+                        // 行集合与强弱判定与旧循环逐值一致；位置**不**比对（内核按
+                        // 整数物理像素吸附，见 `legacyCentsRows` 的说明）。
                         expect(built[i].value).toBeCloseTo(legacy[i].v, 9);
-                        // 同上：上缘 + 半厚 == 描边中心。
-                        expect(built[i].y + built[i].h / 2).toBeCloseTo(legacy[i].y, 12);
                         expect(built[i].rgba === WHITE).toBe(legacy[i].strong);
                     }
                 }
             }
         }
+    });
+});
+
+describe("钢琴背景（黑键行）", () => {
+    const band = [0, 0, 0, 0.08] as const;
+    const base = {
+        view: { center: 60, span: 12 },
+        absMin: 36,
+        absMax: 96,
+        heightPx: 100,
+        viewportWidthPx: 800,
+        dpr: 1,
+        valueToY: makeValueToY(),
+        colorC: RED,
+        colorOther: BLUE,
+    };
+
+    it("只为黑键半音产出背景带（pc ∈ {1,3,6,8,10}）", () => {
+        const items = buildPitchGridInstances({ ...base, blackKeyRowBandRgba: band });
+        const bands = items.filter((item) => item.value < 0);
+        expect(bands.length).toBeGreaterThan(0);
+        for (const item of bands) {
+            const pc = (-item.value - 1) % 12;
+            expect([1, 3, 6, 8, 10]).toContain(pc);
+        }
+    });
+
+    it("★ 背景带必须排在所有网格线之前（FLAT 按缓冲顺序合成）", () => {
+        const items = buildPitchGridInstances({ ...base, blackKeyRowBandRgba: band });
+        const lastBandIndex = items.map((i) => i.value < 0).lastIndexOf(true);
+        const firstLineIndex = items.map((i) => i.value >= 0).indexOf(true);
+        expect(lastBandIndex).toBeLessThan(firstLineIndex);
+    });
+
+    it("背景带横跨整个视口宽、高为键高（不是线厚）", () => {
+        const items = buildPitchGridInstances({ ...base, blackKeyRowBandRgba: band });
+        for (const item of items.filter((i) => i.value < 0)) {
+            expect(item.x).toBe(0);
+            expect(item.w).toBe(800);
+            expect(item.h).toBeGreaterThan(0);
+        }
+    });
+
+    it("缺省不产背景带（未提供颜色时行为不变）", () => {
+        const items = buildPitchGridInstances(base);
+        expect(items.every((item) => item.value >= 0)).toBe(true);
+    });
+});
+
+describe("音阶高亮", () => {
+    const base = {
+        view: { center: 60, span: 12 },
+        absMin: 36,
+        absMax: 96,
+        heightPx: 100,
+        viewportWidthPx: 800,
+        dpr: 1,
+        valueToY: makeValueToY(),
+        colorC: RED,
+        colorOther: BLUE,
+    };
+
+    it("音阶音级额外产出一条更粗的强调线", () => {
+        const plain = buildPitchGridInstances(base);
+        const highlighted = buildPitchGridInstances({
+            ...base,
+            scaleNotes: [0, 4, 7],
+            scaleHighlightRgba: [1, 0.78, 0.31, 0.22],
+        });
+        expect(highlighted.length).toBeGreaterThan(plain.length);
+        const emphasis = highlighted.filter((item) => item.value >= 0 && item.rgba[3] === 0.22);
+        expect(emphasis.length).toBeGreaterThan(0);
+    });
+
+    it("scaleNotes 为空 / 缺省时不产强调线", () => {
+        expect(buildPitchGridInstances(base).length).toBe(
+            buildPitchGridInstances({ ...base, scaleNotes: [] }).length,
+        );
+    });
+
+    it("分段音阶：按段各画自己那段 x 范围（不再画整宽线）", () => {
+        const items = buildPitchGridInstances({
+            ...base,
+            scaleHighlightRgba: [1, 0.78, 0.31, 0.22],
+            scaleSegments: [
+                // 段 1：C 大调三和弦音级，只覆盖视口左半。
+                { x0: 0, x1: 400, notes: [0, 4, 7] },
+                // 段 2：换成另一组音级，覆盖视口右半。
+                { x0: 400, x1: 800, notes: [2, 5, 9] },
+            ],
+        });
+        const emphasis = items.filter((item) => item.value >= 0 && item.rgba[3] === 0.22);
+        expect(emphasis.length).toBeGreaterThan(0);
+        // 每条都只覆盖半宽，且 x 落在对应段区间内。
+        for (const item of emphasis) {
+            expect(item.w).toBeLessThanOrEqual(400);
+            expect([0, 400]).toContain(item.x);
+        }
+        // 两段都真的产出了强调线（换过音阶的那段也参与）。
+        expect(emphasis.some((item) => item.x === 0)).toBe(true);
+        expect(emphasis.some((item) => item.x === 400)).toBe(true);
+    });
+
+    it("分段音阶：越界的段被裁剪到视口内", () => {
+        const items = buildPitchGridInstances({
+            ...base,
+            scaleHighlightRgba: [1, 0.78, 0.31, 0.22],
+            scaleSegments: [{ x0: -200, x1: 1200, notes: [0] }],
+        });
+        const emphasis = items.filter((item) => item.value >= 0 && item.rgba[3] === 0.22);
+        expect(emphasis.length).toBeGreaterThan(0);
+        for (const item of emphasis) {
+            expect(item.x).toBe(0);
+            expect(item.w).toBe(800);
+        }
+    });
+
+    it("分段音阶：完全在视口外的段不产强调线", () => {
+        const plain = buildPitchGridInstances(base);
+        const items = buildPitchGridInstances({
+            ...base,
+            scaleHighlightRgba: [1, 0.78, 0.31, 0.22],
+            scaleSegments: [{ x0: 900, x1: 1200, notes: [0] }],
+        });
+        expect(items.length).toBe(plain.length);
+    });
+
+    it("分段音阶优先于 scaleNotes（两者同时给出时只走分段）", () => {
+        const items = buildPitchGridInstances({
+            ...base,
+            scaleNotes: [0, 4, 7],
+            scaleHighlightRgba: [1, 0.78, 0.31, 0.22],
+            scaleSegments: [{ x0: 0, x1: 400, notes: [0] }],
+        });
+        const emphasis = items.filter((item) => item.value >= 0 && item.rgba[3] === 0.22);
+        // 只剩分段那条：没有任何整宽（800）强调线。
+        expect(emphasis.length).toBeGreaterThan(0);
+        expect(emphasis.every((item) => item.w === 400)).toBe(true);
     });
 });

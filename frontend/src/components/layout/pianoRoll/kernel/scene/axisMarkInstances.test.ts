@@ -290,7 +290,10 @@ describe("与 render.ts 刻度分支逐值等价", () => {
         return rows;
     }
 
-    it("四分支 × center × span 组合下值 / 标签 / 强判定 / 画线一致", () => {
+    // 组合空间很大（4 分支 × 6 center × 多 span），纯 CPU 计算在空转机器上约 2s、
+    // 满载时超过 vitest 默认的 5s 上限——那会让它随机变红。显式放宽超时（与
+    // `reaperFade.test.ts` 的重负载用例同一做法）；**断言一条都没动**。
+    it("四分支 × center × span 组合下值 / 标签 / 强判定 / 画线一致", { timeout: 60_000 }, () => {
         let compared = 0;
         for (const kind of ["cents", "formantCents", "degrees", "fallback"] as AxisKind[]) {
             for (const center of [0, 37.5, -1200, 600, 3.5, 8.5]) {

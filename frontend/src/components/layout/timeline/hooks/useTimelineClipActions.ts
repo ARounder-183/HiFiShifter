@@ -23,6 +23,7 @@ import {
     setClipsStateBulkRemote,
     setClipboardOperationFailed,
     setMultiSelectedClipIds as setMultiSelectedClipIdsAction,
+    setMultiSelectedClipIdsFromAction as setMultiSelectedClipIdsFromActionThunk,
     setSelectedClip,
     setSelectedClipPreservingTrack,
     replaceClipSourceRemote,
@@ -78,6 +79,13 @@ export interface UseTimelineClipActionsResult {
     multiSelectedClipIdsRef: React.MutableRefObject<string[]>;
     multiSelectedSetRef: React.MutableRefObject<Set<string>>;
     setMultiSelectedClipIds: (ids: string[] | ((prev: string[]) => string[])) => void;
+    /**
+     * 动作驱动的多选写入（粘贴 / 复制拖拽）。
+     *
+     * 与 `setMultiSelectedClipIds` 的差别仅在于把选区标记为**非用户显式选择**，
+     * 使拖拽起手时会收敛陈旧集合（见 `interaction/primeSelection`）。
+     */
+    setMultiSelectedClipIdsFromAction: (ids: string[]) => void;
 
     // Context menus
     contextMenu: {
@@ -261,6 +269,21 @@ export function useTimelineClipActions(
             } else {
                 dispatch(setMultiSelectedClipIdsAction(ids));
             }
+        },
+        [dispatch],
+    );
+
+    /**
+     * 动作驱动的多选写入（粘贴 / 复制拖拽等）。
+     *
+     * 与 `setMultiSelectedClipIds` 的唯一差别：它把
+     * `multiSelectionIntentional` 置为 `false`，表明这些 id 是**动作产生**的，
+     * 而非用户圈选 —— 拖拽起手时内核会据此收敛选区，避免"拖一个 clip 带上右邻"
+     * （见 `interaction/primeSelection`）。
+     */
+    const setMultiSelectedClipIdsFromAction = React.useCallback(
+        (ids: string[]) => {
+            dispatch(setMultiSelectedClipIdsFromActionThunk(ids));
         },
         [dispatch],
     );
@@ -704,7 +727,9 @@ export function useTimelineClipActions(
                             setClipboardAvailable(true);
                             const created = result.newClipIds ?? [];
                             if (created.length > 0) {
-                                setMultiSelectedClipIds(created);
+                                // 粘贴属**动作驱动**选中：用户没表达"整组拖动"，
+                                // 因此标记为非意图（拖拽起手时会被收敛）。
+                                setMultiSelectedClipIdsFromAction(created);
                                 void dispatch(selectClipRemote(created[0]));
                                 // 播放光标已由 paste thunk 同步到"新 Clip 最靠右结束位置"
                                 // （transport + 本地状态），此处无需再设置。
@@ -800,6 +825,11 @@ export function useTimelineClipActions(
 
     // 点击轨道空白区：清空 clip 选中（单选 + 多选）。保留轨道焦点 —— 空白点击
     // 是"取消 clip 目标"，不是"切换轨道目标"（DAW 通用约定）。
+    //
+    // 特殊说明：清空是**纯本地**的（不派发 `selectClipRemote(null)`），后端因此
+    // 一直记着旧的 `selected_clip_id`。任何随后派发的 `selectTrackRemote` 都必须带
+    // `applySelectedClip: false`，否则 fulfilled 会拿后端快照把这次清空**异步复活**
+    // ——见 `TimelinePanel.handleKernelSeek` 的契约说明（提交 019e93ed）。
     const deselectAllTrackLaneClips = React.useCallback(() => {
         if (multiSelectedClipIdsRef.current.length === 0 && !sessionRef.current.selectedClipId) {
             return;
@@ -1105,6 +1135,7 @@ export function useTimelineClipActions(
         multiSelectedClipIdsRef,
         multiSelectedSetRef,
         setMultiSelectedClipIds,
+        setMultiSelectedClipIdsFromAction,
 
         contextMenu,
         setContextMenu,

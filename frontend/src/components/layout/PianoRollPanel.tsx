@@ -58,6 +58,7 @@ import type { ParamFramesPayload } from "../../types/api";
 import {
     degreeInputToScaleSteps,
     isScaleKey,
+    resolveScaleNotes,
     SCALE_NOTES,
     snapToScale,
     snapToSemitone,
@@ -92,18 +93,23 @@ import {
 import { timeRulerHeightPx } from "./timeline/rulerHeight";
 import { TempoMapCornerButton } from "./timeline/TempoMapCornerButton";
 import { invokeGridRedrawHandler } from "./timeline/gridRedrawBridge";
+import { isMirrorEcho } from "./timeline/scrollEcho";
 import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeline";
 import type { TempoMap } from "../../utils/tempoMap";
-import { buildScaleSegments, effectiveScaleAtSec } from "../../utils/tempoMap";
+import { effectiveScaleAtSec, buildScaleSegments } from "../../utils/tempoMap";
 import { setTempoMapRemote } from "../../features/session/thunks/tempoMapThunks";
 import { publishPianoRollSelection } from "../../utils/pianoRollSelectionBus";
-import { resolveHorizontalWheelZoom } from "./timeline/runtime/timelineScrollRange";
+import {
+    resolveHorizontalWheelZoom,
+    resolveTimelineScrollRange,
+} from "./timeline/runtime/timelineScrollRange";
 import { resolveTimelineMinPxPerSec } from "./timeline/runtime/timelineZoomBounds";
 import { TimelineDisplaySettingsDialog } from "./TimelineDisplaySettingsDialog";
 
 import { AXIS_W, PITCH_MAX_MIDI, PITCH_MIN_MIDI } from "./pianoRoll/constants";
 import { drawPianoRoll } from "./pianoRoll/render";
 import type { DetectedPitchCurve, ReferencePitchOverlay } from "./pianoRoll/render";
+import type { MainCanvasSignature } from "./pianoRoll/mainCanvasSignature";
 import {
     buildReferencePitchStrokeColor,
     cleanupVisibleReferenceRootTrackIds,
@@ -199,18 +205,13 @@ import { usePianoRollStatusUpdate } from "../../contexts/PianoRollStatusContext"
 import { MidiTrackSelectDialog } from "./MidiTrackSelectDialog";
 import { settingsApi } from "../../services/api/settings";
 import { EditContextMenu } from "../editDialogs/EditContextMenu";
-import { getDynamicProjectSec } from "../../features/session/projectBoundary";
+import { resolveScrollableProjectSec } from "../../features/session/projectBoundary";
 import { applySelectWheelChange } from "../../utils/selectWheel";
 import { parseCustomScaleToken } from "../../utils/scaleSelection";
 import {
     centerFromVerticalScrollTop,
     verticalScrollTopFromCenter,
 } from "./pianoRoll/verticalScrollMapping";
-import {
-    isPianoRollCurveGlEnabled,
-    isPianoRollGlSceneEnabled,
-    isPianoRollKernelEnabled,
-} from "./timeline/kernel/featureFlag";
 import {
     resolveClipboardPreviewColor,
     resolveDetectedCurveColors,
@@ -230,6 +231,7 @@ import type {
     PianoRollGridSpec,
 } from "./pianoRoll/kernel/host/pianoRollKernelData";
 import { PIANO_ROLL_VERTICAL_SCROLL_RANGE_PX } from "./pianoRoll/kernel/scroll/verticalValueScroll";
+import { resolvePanelRenderViewport } from "./pianoRoll/kernel/viewportSource";
 import { normalizeCssColor, resolvePianoRollColors } from "./pianoRoll/colors";
 import { parseRgbaColor } from "./timeline/runtime/timelineClipGlRenderer";
 
@@ -243,36 +245,6 @@ const PARAM_EDITOR_VERTICAL_SCROLL_RANGE_PX = PIANO_ROLL_VERTICAL_SCROLL_RANGE_P
  * 跳过"自己造成的广播"（否则时间轴会把自己的值再应用一遍并回退）。
  */
 const PIANO_ROLL_SYNC_ORIGIN = "pianoRoll";
-
-/**
- * 是否启用参数编辑器渲染内核（阶段 1：滚动 / 视口所有权）。
- *
- * 在**模块加载时**读取一次（与时间轴内核同一约定）：切换开关后刷新页面生效。
- * 未显式设置时**开启**（见 `isPianoRollKernelEnabled`）——默认值不跟随构建模式，
- * 否则打包后会静默退回旧渲染器（Phase 3 计划 R8）。显式写 `"0"` 是逃生门，
- * 也可在「视图 → 时间轴显示设置」用总开关一次关掉四层。
- */
-const PARAM_EDITOR_KERNEL_ENABLED = isPianoRollKernelEnabled();
-
-/**
- * 是否启用参数编辑器 GL 场景层（阶段 2）。
- *
- * 特殊说明：必须与内核开关**同时**成立才有效——GL 层依赖内核提供的视口真值
- * （`u_viewOrigin` 由内核的滚动位置驱动）。两者都关 / 只开内核时，绘制完全走
- * Phase 1 已验证的 Canvas2D 路径。
- */
-const PARAM_EDITOR_GL_SCENE_ENABLED = PARAM_EDITOR_KERNEL_ENABLED && isPianoRollGlSceneEnabled();
-
-/**
- * 是否启用参数编辑器曲线 GL 层（阶段 3）。
- *
- * 特殊说明：它**嵌套在** GL 场景层之内——曲线层复用主 GL 画布的上下文，没有 GL
- * 场景层就没有曲线层。因此两个开关必须同时成立。
- *
- * 实测依据（Phase 3 计划 R7）：最小缩放下 3 分钟曲线约 36000 个可见点，Canvas2D
- * 描边需 71.7ms/帧（≈14fps），GL 全路径 4.6ms（15.6×）。
- */
-const PARAM_EDITOR_CURVE_GL_ENABLED = PARAM_EDITOR_GL_SCENE_ENABLED && isPianoRollCurveGlEnabled();
 
 /**
  * 把 `getFixedDashPattern` 的返回值收窄为元组。
@@ -303,6 +275,50 @@ function toDashTuple(pattern: readonly number[]): [number, number] | null {
  */
 function shouldWriteNumber(next: number, previous: number, epsilon = 0.01): boolean {
     return !(Math.abs(next - previous) <= epsilon);
+}
+
+/** 播放头 RGBA 的解析缓存（键 = 解析后的 CSS 颜色字符串）。 */
+const playheadRgbaCache = new Map<string, [number, number, number, number]>();
+
+/**
+ * 解析参数编辑器播放头的 GL 颜色（与上方标尺同源）。
+ *
+ * 流程：按主题取配色表里的 `playheadLine`（它是指向 `--qt-playhead` 的 CSS 变量，
+ * 与时间轴标尺同一来源）→ 经 `normalizeCssColor` 借浏览器解析成 `rgb()/rgba()`
+ * → `parseRgbaColor` 转 0..1 浮点。
+ *
+ * 【为什么按「解析后的字符串」做缓存】本函数在每帧的绘制提交路径上被调用，而
+ * `normalizeCssColor` 会挂 DOM 探针读 `getComputedStyle`——裸调等于把样式重算拖进
+ * 每一帧（与 `resolveThemeColor` 的缓存理由相同）。主题或自定义主题色一变，解析
+ * 结果字符串就变，键随之变化、缓存自然失效；反之稳态下每帧命中缓存、零重算。
+ *
+ * 特殊说明 1：GL 不认 `var(...)`，所以**必须**先归一化；`parseRgbaColor` 只认
+ * `rgb()/rgba()`，直接喂变量会被解析成不透明洋红。
+ *
+ * 特殊说明 2（**为什么不能省掉这一步、让宿主兜底**）宿主在缺省时用一个硬编码
+ * `[0,0,0,0.2]`——那是迁移期的占位值，与 `--qt-playhead` 毫无关系。参数编辑器的
+ * Canvas2D 播放头已被 `skipPlayhead: true` 永久跳过，GL 是唯一绘制者，因此"不喂"
+ * 就等于"画布与标尺两个颜色"（用户报告："播放线在底下和上方标尺的颜色不一致"）。
+ *
+ * 特殊说明 3：`themeMode` 参与键（经配色表间接体现），但这里额外接收它只是为了
+ * 让调用方语义清晰——缓存键用的是解析结果，本身已包含主题信息。
+ *
+ * @param themeMode 当前主题模式（决定取哪套配色表）。
+ * @returns 归一化后的 RGBA（0..1 浮点）。
+ */
+function resolvePlayheadRgba(themeMode: "dark" | "light"): [number, number, number, number] {
+    const css = resolvePianoRollColors(themeMode === "dark").playheadLine;
+    const normalized = normalizeCssColor(css);
+    const cached = playheadRgbaCache.get(normalized);
+    if (cached !== undefined) return cached;
+    const parsed = parseRgbaColor(normalized);
+    const rgba: [number, number, number, number] = parsed.every((v) => Number.isFinite(v))
+        ? [parsed[0], parsed[1], parsed[2], parsed[3]]
+        : // 解析失败时退回与标尺同色相的实色（`--qt-playhead` 的深色默认值），
+          // 而不是透明/洋红：宁可颜色略有偏差，也不要播放头看不见。
+          [0xf0 / 255, 0x5a / 255, 0x5a / 255, 1];
+    playheadRgbaCache.set(normalized, rgba);
+    return rgba;
 }
 
 /**
@@ -610,7 +626,7 @@ export const PianoRollPanel: React.FC = () => {
     /**
      * 内核宿主的稳定引用。
      *
-     * 【为什么声明在这里】`invalidate`（紧随其后）在内核模式下要把标脏转交宿主，
+     * 【为什么声明在这里】`invalidate`（紧随其后）要把标脏转交宿主，
      * 因此必须在它之前声明。放在下方原来的位置会让 `invalidate` 的闭包引用一个
      * 尚未初始化的 `const`（TDZ）——首次调用即抛 ReferenceError。
      */
@@ -619,10 +635,10 @@ export const PianoRollPanel: React.FC = () => {
     /**
      * 请求重绘（所有会改变画面的数据/状态变更都经此入口）。
      *
-     * 【内核模式下为什么要转交宿主】曲线层搬到 GL 后，画面由**两个**渲染循环驱动：
-     * 面板自己的 rAF（Canvas2D）与内核宿主的 rAF（GL 层）。只调度前者会让 GL 层
-     * 永远停留在旧内容上——典型症状是"曲线数据到了但屏幕上不出现，直到滚动一下
-     * 才显示"。因此内核模式下标脏一律交给宿主：宿主的帧提交里会回调 `onFrame`
+     * 【为什么要转交宿主】曲线层在 GL 上，画面由**两个**渲染循环驱动：
+     * 面板自己的 rAF（Canvas2D 细节层）与内核宿主的 rAF（GL 层）。只调度前者会让
+     * GL 层永远停留在旧内容上——典型症状是"曲线数据到了但屏幕上不出现，直到滚动
+     * 一下才显示"。因此标脏一律交给宿主：宿主的帧提交里会回调 `onFrame`
      * → `applyScrollLayers` → `drawRef.current()`，Canvas2D 与 GL 同帧一起刷新。
      *
      * 特殊说明：`drawRef.current()` 自身不调用 `invalidate()`，所以这条链不会自激。
@@ -630,7 +646,7 @@ export const PianoRollPanel: React.FC = () => {
      */
     const invalidate = useCallback(() => {
         const host = hostRef.current;
-        if (PARAM_EDITOR_KERNEL_ENABLED && host != null) {
+        if (host != null) {
             host.invalidate();
             return;
         }
@@ -1127,7 +1143,13 @@ export const PianoRollPanel: React.FC = () => {
         return buildChildPitchOffsetDegreesParam(effectiveSelectedTrackId);
     }, [effectiveSelectedTrackId, selectedIsChildTrack]);
 
-    const dynamicProjectSec = useMemo(() => getDynamicProjectSec(s.clips), [s.clips]);
+    // 可滚域时长必须与时间轴内核**同源**：两处各取一个来源时，内容宽 / 可滚上限
+    // 会分叉，共享 scrollLeft 的同步会被浏览器钳制、两边永久错位（缺陷 7）。
+    // 详见 `resolveScrollableProjectSec` 的说明。
+    const dynamicProjectSec = useMemo(
+        () => resolveScrollableProjectSec(s.projectSec, s.clips),
+        [s.projectSec, s.clips],
+    );
     const [scrollLeft, setScrollLeft] = useState(0);
     const [pxPerSec, setPxPerSec] = useState(() => {
         const stored = Number(localStorage.getItem("hifishifter.paramPxPerSec"));
@@ -1140,7 +1162,7 @@ export const PianoRollPanel: React.FC = () => {
     const scrollLeftRef = useRef(scrollLeft);
     const pxPerBeatRef = useRef(pxPerBeat);
     const pxPerSecRef = useRef(pxPerSec);
-    // 同步开关的 ref 镜像：rAF 原子提交与每帧对账循环读取最新值，避免陈旧闭包。
+    // 同步开关的 ref 镜像：rAF 原子提交与宿主帧回调读取最新值，避免陈旧闭包。
     const paramEditorSyncTimelineRef = useRef(s.paramEditorSyncTimeline);
     // 渲染期立即同步 ref，确保同步视口在 layout effect 落地时，
     // Canvas 读取到的是与标尺/网格同一帧的新缩放与滚动值。
@@ -1153,10 +1175,10 @@ export const PianoRollPanel: React.FC = () => {
     const timelineSyncApplyingRef = useRef(false);
     const timelineOffsetRef = useRef(0);
     const [timelineOffsetPx, setTimelineOffsetPx] = useState(0);
-    const pendingParamSyncViewportRef = useRef<{
-        nativeScrollLeft: number;
-        pxPerSec: number;
-    } | null>(null);
+    // 待落地的同步视口：**只记缩放**。位置在落地时直接取共享视口的当前值（权威且最新），
+    // 不再捕获快照——见下方落地 effect 的说明（捕获值 + 比对 React state 的老做法会在
+    // state 被同期写入点覆盖时静默取消落地，造成随机错位）。
+    const pendingParamSyncViewportRef = useRef<{ pxPerSec: number } | null>(null);
     const horizontalZoomPendingRef = useRef<{
         nextScale: number;
         nextScrollLeft: number;
@@ -1170,23 +1192,103 @@ export const PianoRollPanel: React.FC = () => {
 
     // 测量轨道时间线区与参数编辑器画布区之间的全局水平偏移，
     // 用于同步时把参数编辑器的绘制坐标与轨道视图按同一屏幕位置对齐。
+    //
+    // 【为什么必须容错 + 重试（这是一个真实缺陷的根因）】
+    // 偏移是两个视口元素左缘之差，而**两个面板的挂载顺序不固定**：时间轴的内核容器
+    // 可能晚于参数编辑器出现（面板按需挂载、WebGL 初始化、加载顺序）。元素缺失时
+    // `measureTimelineViewportOffsetPx()` 返回 `null`（旧实现返回 0，与"真的对齐"不可
+    // 区分）——若把 0 当成测量值，参数编辑器就会**丢掉整段同步位移**，错位量恰好等于
+    // 偏移本身（= 轨道头宽度 − 键盘列宽度 ≈ 轨道头区域宽度）；更糟的是那一刻观察器也
+    // 没绑上时间轴元素，之后再没有重测时机，只有恰好一次布局尺寸变化才会恢复——表现
+    // 为**随机**错位（实测复现：偏移恒为 0，两面板相差整整 200px，并持续存在）。
+    //
+    // 因此这里：测不到就保持上一次的有效值，并在后续帧重试（时间轴元素可能刚出现）；
+    // 每次重测都重新绑定观察器，元素后出现时也能补上。
     useLayoutEffect(() => {
-        const update = () => {
-            const next = measureTimelineViewportOffsetPx();
-            timelineOffsetRef.current = next;
-            setTimelineOffsetPx((prev) => (Math.abs(prev - next) < 0.5 ? prev : next));
+        /** 视口元素缺失时的重试上限（帧）；超过后退回低频轮询，避免长期每帧空转。 */
+        const RETRY_FRAMES = 120;
+        /** 低频轮询间隔（ms）。 */
+        const RETRY_INTERVAL_MS = 500;
+
+        let observer: ResizeObserver | null = null;
+        let frame: number | null = null;
+        let retryTimer: ReturnType<typeof setInterval> | null = null;
+        let stopped = false;
+
+        const stopRetry = () => {
+            if (frame !== null) {
+                cancelAnimationFrame(frame);
+                frame = null;
+            }
+            if (retryTimer !== null) {
+                clearInterval(retryTimer);
+                retryTimer = null;
+            }
         };
-        update();
-        if (typeof ResizeObserver !== "undefined") {
-            const observer = new ResizeObserver(update);
-            const scroller = scrollerRef.current;
-            if (scroller) observer.observe(scroller);
+
+        /** 把两边的视口元素（重新）挂到观察器上：元素可能后于本面板出现。 */
+        const observeViewports = () => {
+            if (typeof ResizeObserver === "undefined") return;
+            observer = observer ?? new ResizeObserver(() => measureAndApply());
+            observer.disconnect();
+            const piano = scrollerRef.current;
+            if (piano) observer.observe(piano);
             const track = document.querySelector<HTMLElement>("[data-timeline-scroller]");
             if (track) observer.observe(track);
-            return () => observer.disconnect();
+        };
+
+        /** 采用一次有效测量（并停止重试）。 */
+        const applyMeasured = (value: number) => {
+            stopRetry();
+            timelineOffsetRef.current = value;
+            setTimelineOffsetPx((prev) => (Math.abs(prev - value) < 0.5 ? prev : value));
+            observeViewports();
+        };
+
+        const scheduleRetry = () => {
+            if (stopped || frame !== null || retryTimer !== null) return;
+            let attempts = 0;
+            const tick = () => {
+                frame = null;
+                if (stopped) return;
+                const next = measureTimelineViewportOffsetPx();
+                if (next !== null) {
+                    applyMeasured(next);
+                    return;
+                }
+                observeViewports();
+                attempts += 1;
+                if (attempts >= RETRY_FRAMES) {
+                    retryTimer = setInterval(measureAndApply, RETRY_INTERVAL_MS);
+                } else {
+                    frame = requestAnimationFrame(tick);
+                }
+            };
+            frame = requestAnimationFrame(tick);
+        };
+
+        function measureAndApply(): void {
+            if (stopped) return;
+            const next = measureTimelineViewportOffsetPx();
+            if (next !== null) {
+                applyMeasured(next);
+                return;
+            }
+            // 尚不可测（视口元素未挂载）：保持上一次的有效偏移并重试——**绝不能**当成 0。
+            observeViewports();
+            scheduleRetry();
         }
-        window.addEventListener("resize", update);
-        return () => window.removeEventListener("resize", update);
+
+        measureAndApply();
+        if (typeof ResizeObserver === "undefined") {
+            window.addEventListener("resize", measureAndApply);
+        }
+        return () => {
+            stopped = true;
+            stopRetry();
+            observer?.disconnect();
+            window.removeEventListener("resize", measureAndApply);
+        };
     }, []);
 
     // BPM 变化时，按比例调 ?scrollLeft，保持视口中心点的秒数不 ?
@@ -1199,24 +1301,13 @@ export const PianoRollPanel: React.FC = () => {
         if (Math.abs(prevBpm - s.bpm) < 1e-9) return;
         const ratio = prevBpm / Math.max(1e-6, s.bpm);
         const newScrollLeft = scrollLeftRef.current * ratio;
-        const scroller = scrollerRef.current;
-        if (scroller) {
-            // 内核模式：先按绘制坐标把位置交给内核（它负责换算原生坐标并镜像回写），
-            // 再走采纳路径同步 state。旧实现则直接写原生 scroller 后由 syncScrollLeft 采纳。
-            if (PARAM_EDITOR_KERNEL_ENABLED) {
-                applyHorizontalScrollPosition(newScrollLeft);
-                scrollLeftRef.current = newScrollLeft;
-                lastScrollLeftRef.current = newScrollLeft;
-                setScrollLeft(newScrollLeft);
-                return;
-            }
-            scroller.scrollLeft = newScrollLeft;
-            syncScrollLeft(scroller);
-            return;
-        }
+        // 先按绘制坐标把位置交给内核（它负责换算原生坐标并镜像回写），再同步面板
+        // state。宿主尚未创建（未挂载）时 `applyHorizontalScrollPosition` 是空操作，
+        // 仍同步 state，与迁移前无宿主时的收尾一致。
+        applyHorizontalScrollPosition(newScrollLeft);
         scrollLeftRef.current = newScrollLeft;
+        lastScrollLeftRef.current = newScrollLeft;
         setScrollLeft(newScrollLeft);
-        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [s.bpm, s.paramEditorSyncTimeline]);
 
     useEffect(() => {
@@ -1238,21 +1329,34 @@ export const PianoRollPanel: React.FC = () => {
             // 画出来再被纠正（启动"一闪"）。时间轴在挂载/切换的 layout
             // effect（首帧绘制前）播种，播种后 emit 会驱动本订阅应用。
             if (!timelineViewportSync.isSeeded()) return;
+            // 【跳过自己发布的广播】参数编辑器既发布又订阅，把刚发布的值再应用一遍
+            // 没有意义，却会在缩放事务中间（pending 尚未落地）把位置/缩放拉回上一份
+            // 快照——表现就是「水平缩放时波形/参数线抽搐一帧」。时间轴侧早就有同一条
+            // 来源判定（`getOrigin() === TIMELINE_SYNC_ORIGIN`），这里补齐对称的一半。
+            if (timelineViewportSync.getOrigin() === PIANO_ROLL_SYNC_ORIGIN) return;
             const store = timelineViewportSync.get();
             const offset = timelineOffsetRef.current;
             const drawingScrollLeft = timelineViewportNativeToState(store.scrollLeft, offset);
             // 纯滚动（pxPerSec 未变）：在同一个事件帧内同步落地——原生
             // scroller、标尺/网格层（applyScrollLayers）与轨道视图同帧提交，
             // 两个面板严丝合缝。state 仅作事后对齐（React 在绘制前提交）。
+            //
+            // 【判据必须取内核真值，不能取渲染期 ref】`pxPerSecRef` 在渲染期就被同步成
+            // state 的新值，而并发渲染可能"渲染了但被丢弃"：用 ref 判定会把一次**缩放**
+            // 广播误判成纯滚动（于是只应用位置、不应用缩放）；反过来也会把纯滚动误判成
+            // 缩放而走延迟落地。内核才是这台面板的视口真值（与 `resolvePanelRenderViewport`
+            // 同一约定）。
+            const kernelPxPerSec = hostRef.current?.getViewport().pxPerSec ?? pxPerSecRef.current;
             const scroller = scrollerRef.current;
-            if (scroller && Math.abs(store.pxPerSec - pxPerSecRef.current) <= 1e-9) {
+            if (scroller && Math.abs(store.pxPerSec - kernelPxPerSec) <= 1e-9) {
                 timelineSyncApplyingRef.current = true;
                 pxPerSecRef.current = store.pxPerSec;
                 scrollLeftRef.current = drawingScrollLeft;
                 lastScrollLeftRef.current = drawingScrollLeft;
-                // 同步落地走统一载体（内核模式下即宿主；它会换算原生坐标并镜像回写）。
-                applyHorizontalScrollPosition(drawingScrollLeft);
-                applyScrollLayers(drawingScrollLeft);
+                // 同步落地走统一载体（宿主；它会换算原生坐标并镜像回写），
+                // 并在**同一任务**里提交各图层（DOM / Canvas2D / GL）——否则 GL
+                // 侧的曲线 / 播放头会比标尺、网格慢一帧到几帧（见 `paintNow`）。
+                commitViewportNow(drawingScrollLeft);
                 setScrollLeft(drawingScrollLeft);
                 timelineSyncApplyingRef.current = false;
                 return;
@@ -1260,10 +1364,7 @@ export const PianoRollPanel: React.FC = () => {
             // 缩放（pxPerSec 变化）：内容宽度必须先按新 pxPerSec 重排，维持
             // “先提交 state，再由 layout effect 落地”的既有路径。
             timelineSyncApplyingRef.current = true;
-            pendingParamSyncViewportRef.current = {
-                nativeScrollLeft: store.scrollLeft,
-                pxPerSec: store.pxPerSec,
-            };
+            pendingParamSyncViewportRef.current = { pxPerSec: store.pxPerSec };
             setScrollLeft(drawingScrollLeft);
             setPxPerSec(store.pxPerSec);
             timelineSyncApplyingRef.current = false;
@@ -1280,11 +1381,10 @@ export const PianoRollPanel: React.FC = () => {
             // 禁用时移除偏移补偿：把位置还原为绘制坐标。
             if (scroller) {
                 const next = Math.max(0, scrollLeftRef.current);
-                applyHorizontalScrollPosition(next);
                 scrollLeftRef.current = next;
                 lastScrollLeftRef.current = next;
+                commitViewportNow(next);
                 setScrollLeft(next);
-                applyScrollLayers(next);
             }
         };
     }, [s.paramEditorSyncTimeline]);
@@ -1299,10 +1399,7 @@ export const PianoRollPanel: React.FC = () => {
             timelineOffsetRef.current,
         );
         timelineSyncApplyingRef.current = true;
-        pendingParamSyncViewportRef.current = {
-            nativeScrollLeft: store.scrollLeft,
-            pxPerSec: store.pxPerSec,
-        };
+        pendingParamSyncViewportRef.current = { pxPerSec: store.pxPerSec };
         setScrollLeft(drawingScrollLeft);
         timelineSyncApplyingRef.current = false;
     }, [timelineOffsetPx, s.paramEditorSyncTimeline]);
@@ -1310,35 +1407,47 @@ export const PianoRollPanel: React.FC = () => {
     // 同步视口必须等内容宽度按新 pxPerSec 更新后再落到 DOM。
     // 否则设置 scroller.scrollLeft 时会被浏览器钳回旧的最大滚动位置，
     // 形成“缩放已变、滚动没变”的水平漂移。
+    //
+    // 【为什么位置取"共享视口的当前值"而不是捕获时的快照，且不再比对 React state】
+    // 这条落地路径原先要求 `React scrollLeft state` 恰好等于 pending 的目标值，否则
+    // **直接 return 把 pending 搁置**。而 state 是异步提交的：同期可能被其它写入点
+    // （量化提交的 rAF、纯滚动广播、以及参数编辑器自己发布的回声）覆盖成更旧的值，
+    // 于是这次落地被静默取消——面板停在旧位置、缩放却已生效，两个面板从此错开一段
+    // 距离（用户报告：「参数编辑器的偏移量有误」，且**随机**出现）。位置本身在共享
+    // 视口里就是权威且最新的，直接取它即可；只要该视口的**缩放**与本次 pending 一致
+    // （说明这是"同一个缩放代"的落地），落地就是对的。缩放若已被更新的广播取代，
+    // 那份广播会写下新的 pending，由它落地。
     useLayoutEffect(() => {
         const pending = pendingParamSyncViewportRef.current;
         if (!pending || !s.paramEditorSyncTimeline) return;
         if (Math.abs(pxPerSec - pending.pxPerSec) > 1e-9) return;
         if (Math.abs(timelineOffsetPx - timelineOffsetRef.current) > 0.5) return;
 
-        const offset = timelineOffsetRef.current;
-        const drawingScrollLeft = timelineViewportNativeToState(pending.nativeScrollLeft, offset);
-        if (Math.abs(scrollLeft - drawingScrollLeft) > 0.5) return;
+        const store = timelineViewportSync.get();
+        // 更新的缩放已在路上：等它自己的 pending（否则会用旧缩放的位置落地）。
+        if (Math.abs(store.pxPerSec - pending.pxPerSec) > 1e-9) return;
 
         pendingParamSyncViewportRef.current = null;
         const scroller = scrollerRef.current;
         if (!scroller) return;
 
+        const offset = timelineOffsetRef.current;
+        const drawingScrollLeft = timelineViewportNativeToState(store.scrollLeft, offset);
         timelineSyncApplyingRef.current = true;
         pxPerSecRef.current = pending.pxPerSec;
         pxPerBeatRef.current = pending.pxPerSec * (60 / Math.max(1e-6, s.bpm));
         scrollLeftRef.current = drawingScrollLeft;
-        // `pending.nativeScrollLeft` 是共享视口的原生值；换算成绘制坐标后走统一载体
-        // （内核模式会再加回偏移，旧实现直接写原生，两者落到同一位置）。
-        applyHorizontalScrollPosition(drawingScrollLeft);
-        // 【内核模式下不能再调 syncScrollLeft】它是「读原生 scroller → 采纳为真值」的
+        // `store.scrollLeft` 是共享视口的原生值；换算成绘制坐标后走统一载体
+        // （宿主会再加回偏移，落到与共享视口相同的位置），并在**同一任务**里把
+        // DOM / Canvas2D / GL 一起提交（见 `paintNow`）。
+        //
+        // 【这里不能再调 syncScrollLeft】它是「读原生 scroller → 采纳为真值」的
         // 路径，而此时原生镜像还停留在**上一帧的旧值**（本函数的写入要等内核下一帧才
         // 回写），于是会把刚提交的目标位置又覆盖回旧值——表现为「同步从 1200 拨回 0
-        // 时参数编辑器不动」。旧实现里原生就是事实源，读回来即是刚写的值，故无此问题。
-        if (!PARAM_EDITOR_KERNEL_ENABLED) {
-            syncScrollLeft(scroller);
-        }
-        applyScrollLayers(drawingScrollLeft);
+        // 时参数编辑器不动」。
+        // 缩放与位置一起落进内核再绘制（见 `commitViewportNow`）：否则同帧绘制会用
+        // 内核的旧缩放画新位置，而 DOM 侧标尺/网格已按新缩放排好——一帧内两套缩放。
+        commitViewportNow(drawingScrollLeft, pending.pxPerSec);
         timelineSyncApplyingRef.current = false;
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [pxPerSec, scrollLeft, s.paramEditorSyncTimeline, timelineOffsetPx]);
@@ -1346,8 +1455,12 @@ export const PianoRollPanel: React.FC = () => {
     useLayoutEffect(() => {
         const pending = horizontalZoomPendingRef.current;
         if (!pending) return;
-        if (Math.abs(pending.nextScale - pxPerSec) > 1e-9) return;
+        // 【先消费再判定】请求一旦"过期"就必须丢弃，不能留在 ref 里等未来某次渲染
+        // 的 state 凑巧等于它的缩放——那会用一次**旧缩放的位置**落地（旧快照的
+        // `nextScrollLeft`），并在同步模式下把它推回共享视口：两个面板一起跳到旧位置。
+        // 因此这里无条件清空，只有"当前 state 正是这次请求的缩放"才真正落地。
         horizontalZoomPendingRef.current = null;
+        if (Math.abs(pending.nextScale - pxPerSec) > 1e-9) return;
         horizontalZoomChainRef.current = null;
         const scroller = scrollerRef.current;
         if (!scroller) return;
@@ -1356,7 +1469,8 @@ export const PianoRollPanel: React.FC = () => {
         const offset = syncEnabled ? timelineOffsetRef.current : 0;
         const native = pending.nextScrollLeft;
         const next = timelineViewportNativeToState(native, offset);
-        applyHorizontalScrollPosition(next);
+        // 缩放落地：缩放 + 位置一次原子写入内核，再同任务提交各图层（见 `commitViewportNow`）。
+        commitViewportNow(next, pending.nextScale);
         if (lastScrollLeftRef.current !== next) {
             lastScrollLeftRef.current = next;
             scrollLeftRef.current = next;
@@ -1364,27 +1478,23 @@ export const PianoRollPanel: React.FC = () => {
         // 同步模式下手动缩放后必须把新的 pxPerSec 写回共享视口；即使滚动位置
         // 没有变化（例如光标位于左侧同步空白区时锚定在工程起点，next 仍为 -offset），
         // 也要广播缩放，否则轨道视图不会跟着缩放。
+        //
+        // 【广播的是"落地值"而不是"请求值"】`applyHorizontalScrollPosition` 已经
+        // 把目标交给内核（内核按当前边界钳制），所以这里回读一次：共享视口里只能是
+        // 两个面板都到得了的位置。广播请求值（可能越界）会让轨道视图先按自己的上限
+        // 钳回来，两个面板在工程结尾处错开一个差量。
         if (syncEnabled && !timelineSyncApplyingRef.current) {
+            const appliedDrawing = hostRef.current?.getViewport().scrollLeft ?? next;
             timelineViewportSync.setViewport(
                 {
-                    scrollLeft: native,
+                    scrollLeft: timelineViewportStateToNative(appliedDrawing, offset),
                     pxPerSec,
                 },
                 PIANO_ROLL_SYNC_ORIGIN,
             );
         }
-        applyScrollLayers(next);
-        // 防止浏览器对原生滚动位置的钳制造成漂移：立即校正到理论值。
-        // 内核模式下由宿主的镜像回写负责校正（它每帧都会把原生位置对齐真值）。
-        if (PARAM_EDITOR_KERNEL_ENABLED) {
-            setScrollLeft(next);
-            return;
-        }
-        const expectedNative = timelineViewportStateToNative(next, offset);
-        if (Math.abs(scroller.scrollLeft - expectedNative) > 0.5) {
-            scroller.scrollLeft = expectedNative;
-        }
-        // 同步更新状态：让标尺/网格与画布在同一帧对齐，消除缩放闪屏。
+        // 原生滚动位置的钳制校正由宿主的镜像回写负责（它每帧都会把原生位置对齐真值）
+        // ——不要再写原生 scroller，否则会与内核真值打架。
         setScrollLeft(next);
     }, [pxPerSec, s.paramEditorSyncTimeline]);
 
@@ -1399,6 +1509,14 @@ export const PianoRollPanel: React.FC = () => {
         };
     });
 
+    // 指定缩放下的内容宽（口径与轨道视图一致：工程宽向上取整）。缩放提交时要用
+    // **目标**缩放的内容宽来钳位置——用当前缩放算出的上限会在放大时把位置压低。
+    // 定义在缩放入口之前：`useCallback` 的依赖数组在 render 期求值，写在后面会命中 TDZ。
+    const contentWidthAt = useCallback(
+        (scale: number) => Math.max(1, Math.ceil(dynamicProjectSec * scale)),
+        [dynamicProjectSec],
+    );
+
     const queueHorizontalZoom = useCallback(
         (nextPxPerSec: number, nextNativeScrollLeft: number) => {
             // 事件内只记录缩放意图，**绝不**在提交前改写 refs/state：任何
@@ -1408,8 +1526,8 @@ export const PianoRollPanel: React.FC = () => {
                 nextScale: nextPxPerSec,
                 nextScrollLeft: nextNativeScrollLeft,
             };
-            // 与 TimelineScrollArea 相同的“一帧一次原子提交”：rAF 合并同帧
-            // 内的连续缩放事件；flushSync 把两个 state 在同一批提交中落地，
+            // 「一帧一次原子提交」：rAF 合并同帧内的连续缩放事件；
+            // flushSync 把两个 state 在同一批提交中落地，
             // DOM 内容宽度按新缩放重排后，layout effect 在同一提交内写原生
             // scrollLeft 并同帧重绘标尺/网格/画布/波形（applyScrollLayers）。
             // refs 只随 render 写入、与 state 同帧移动——绘制前所有图层拿到
@@ -1443,9 +1561,22 @@ export const PianoRollPanel: React.FC = () => {
                 nextScrollLeft,
                 s.paramEditorSyncTimeline ? timelineOffsetRef.current : 0,
             );
-            queueHorizontalZoom(nextPxPerSec, nativeNextScrollLeft);
+            // 【为什么必须在这里钳一次】共享位置（原生坐标）必须落在两个面板**公共**
+            // 的可滚范围内（= `resolveTimelineScrollRange` 的上限，按**目标**缩放的
+            // 工程宽算，与轨道视图同一份口径）。不钳的话，缩放锚点可以把位置算到范围
+            // 之外：参数编辑器会广播一个自己都到不了的值，轨道视图收到后按自己的上限
+            // 钳回来 —— 两个面板在工程结尾处错开，且位置互相追赶（抖动）。
+            const range = resolveTimelineScrollRange({
+                contentWidth: contentWidthAt(nextPxPerSec),
+                viewportWidth: viewSizeRef.current.w,
+            });
+            const clampedNativeScrollLeft = Math.min(
+                range.maxScrollLeft,
+                Math.max(range.minScrollLeft, nativeNextScrollLeft),
+            );
+            queueHorizontalZoom(nextPxPerSec, clampedNativeScrollLeft);
         },
-        [s.paramEditorSyncTimeline, queueHorizontalZoom],
+        [s.paramEditorSyncTimeline, contentWidthAt, queueHorizontalZoom],
     );
 
     // 工具栏/快捷键聚焦缩放（hifi:zoomTimelineFocus）。放在 handleHorizontalZoom
@@ -1511,7 +1642,10 @@ export const PianoRollPanel: React.FC = () => {
         (next: ValueViewport) => {
             pitchViewRef.current = next;
             syncVerticalScrollbarForViewport("pitch", next);
-            invalidate(); // 绕过 React 渲染，直接命令 Canvas 重绘
+            // 值域视口是**竖轴的手势提交点**：滚动条 thumb 已同步写下 DOM，曲线 /
+            // 音高键 / 数值轴（GL）必须在**同一任务**里提交，否则竖轴平移/缩放时
+            // 这些线比滚动条慢一帧到几帧（见 `paintNow`）。
+            paintNow();
         },
         // eslint-disable-next-line react-hooks/exhaustive-deps
         [invalidate],
@@ -1522,7 +1656,8 @@ export const PianoRollPanel: React.FC = () => {
         (param: string, next: ValueViewport) => {
             paramViewsRef.current = { ...paramViewsRef.current, [param]: next };
             syncVerticalScrollbarForViewport(param as ParamName, next);
-            invalidate(); // 绕过 React 渲染，直接命令 Canvas 重绘
+            // 同 `setPitchView`：竖轴的手势提交点，DOM 与 GL 必须同任务。
+            paintNow();
         },
         // eslint-disable-next-line react-hooks/exhaustive-deps
         [invalidate],
@@ -1975,7 +2110,7 @@ export const PianoRollPanel: React.FC = () => {
     );
 
     const secPerBeat = 60 / Math.max(1e-6, s.bpm);
-    const contentWidth = Math.max(1, Math.ceil(dynamicProjectSec * pxPerSec));
+    const contentWidth = contentWidthAt(pxPerSec);
 
     const scrollerRef = useRef<HTMLDivElement | null>(null);
     const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -1983,19 +2118,30 @@ export const PianoRollPanel: React.FC = () => {
     const axisWrapRef = useRef<HTMLDivElement | null>(null);
     const lastScrollLeftRef = useRef<number | null>(null);
     const scrollStateRafRef = useRef<number | null>(null);
+    /**
+     * **上一次镜像写入 scroller 的原生偏移**（两轴各自记录）。
+     *
+     * 用途只有一个：判定原生 `scroll` 事件是不是镜像回写造成的**回声**
+     * （见 `timeline/scrollEcho` 的 `isMirrorEcho`）。判据必须拿"我上次写下的值"做
+     * 基准，而不是拿内核的当前值——连续滚动 / 缩放时事件报的是**上一帧**镜像的值，
+     * 与内核此刻已差一整帧位移，用它判会稳定地把回声误收成用户输入，进而把量化误差
+     * 推回共享视口，让时间轴跟着抽动。
+     *
+     * 初值 `NaN` = 从未写过 → 一律判"不是回声"（宁可多采纳一次也不吞掉首帧前的输入）。
+     */
+    const lastMirroredScrollLeftRef = useRef(Number.NaN);
+    const lastMirroredScrollTopRef = useRef(Number.NaN);
 
     const rulerContentRef = useRef<HTMLDivElement | null>(null);
     const gridLayerRef = useRef<HTMLDivElement | null>(null);
 
-    // ── 渲染内核（阶段 1：滚动 / 视口所有权）────────────────────────────
+    // ── 渲染内核（滚动 / 视口所有权）────────────────────────────────────
     //
-    // 【开启时所有权如何反转】旧实现把原生 scroller 的 `scrollLeft/scrollTop`
-    // 当唯一事实源，各图层靠 `syncScrollLeft` → `applyScrollLayers` 跟随。内核
-    // 模式下反过来：宿主持有真值，**原生 scroller 退化为被动镜像**——宿主每帧把
-    // 真值写回它，使尚未迁移的输入代码（中键拖拽、框选自动滚动等直接读写
-    // `scroller.scrollLeft` 的地方）读到的仍是同一份位置，行为不变。
+    // 【所有权在谁手里】内核是唯一渲染路径，宿主持有滚动真值，**原生 scroller 只是
+    // 被动镜像**——宿主每帧把真值写回它，使尚未迁移的输入代码（中键拖拽、框选自动
+    // 滚动等直接读写 `scroller.scrollLeft` 的地方）读到的仍是同一份位置，行为不变。
+    // 各图层由宿主的帧回调 `applyScrollLayers` 驱动（取代此前的 `scroll` 事件）。
     //
-    /** 内核模式下的数据镜像（每次 render 更新字段，宿主每帧现读）。 */
     /**
      * 内核数据镜像（每次 render 更新字段，宿主每帧现读）。
      *
@@ -2008,17 +2154,17 @@ export const PianoRollPanel: React.FC = () => {
         grid: null,
         overlay: null,
     });
-    /** 自绘滚动条的 thumb（仅内核模式挂载）。 */
+    /** 自绘滚动条的 thumb（恒挂载）。 */
     const hScrollbarThumbRef = useRef<HTMLDivElement | null>(null);
     const vScrollbarThumbRef = useRef<HTMLDivElement | null>(null);
-    /** 自绘滚动条的**轨道**（承接「点空白翻页」，仅内核模式挂载）。 */
+    /** 自绘滚动条的**轨道**（承接「点空白翻页」，恒挂载）。 */
     const hScrollbarTrackRef = useRef<HTMLDivElement | null>(null);
     const vScrollbarTrackRef = useRef<HTMLDivElement | null>(null);
-    /** GL 静态层画布（阶段 2，仅内核 + GL 开关都开启时挂载）。 */
+    /** GL 静态层画布：网格 / 键盘几何，恒挂载（它是这些图层的唯一绘制者）。 */
     const glCanvasRef = useRef<HTMLCanvasElement | null>(null);
-    /** 键盘轴 GL 画布（阶段 2，Task 4）。独立画布：轴列不随横向滚动移动。 */
+    /** 键盘轴 GL 画布（阶段 2/3）：键盘几何 + 音名标签。独立画布：轴列不随横向滚动移动。 */
     const glAxisCanvasRef = useRef<HTMLCanvasElement | null>(null);
-    /** 动态叠加层 GL 画布（阶段 2，Task 6）：播放头与选区，位于曲线层之上。 */
+    /** 动态叠加层 GL 画布（阶段 2/3）：播放头，位于曲线层之上，恒挂载。 */
     const glOverlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
     function pitchDeltaToDegreeSteps(
@@ -2064,11 +2210,23 @@ export const PianoRollPanel: React.FC = () => {
     const [timeDisplaySettingsOpen, setTimeDisplaySettingsOpen] = useState(false);
     // 参数编辑器的内容绘制在 sticky 视口层中，滚动范围由后面的 spacer 提供。
     // 两个子元素按垂直方向堆叠，因此 scrollWidth 取二者宽度最大值；
-    // 想让原生最大滚动位置为“工程宽 + 同步偏移”，spacer 需再加一个视口宽。
-    const paddedContentWidth = useMemo(
-        () => contentWidth + viewSize.w + (s.paramEditorSyncTimeline ? timelineOffsetPx : 0),
-        [contentWidth, viewSize.w, s.paramEditorSyncTimeline, timelineOffsetPx],
+    // 想让原生最大滚动位置为「工程宽」，spacer 需再加一个视口宽。
+    //
+    // 【不变量：与轨道视图同一份可滚范围】这里复用轨道视图的同一个函数
+    // （`resolveTimelineScrollRange`），两者都传自己的视口宽——于是两个面板的
+    // 最大滚动位置**逐值相等**（都 = 内容宽）。
+    //
+    // 【为什么同步偏移不进这里（用户报告的「工程结尾右侧空白长度不同」）】spacer 的
+    // 宽度决定原生最大滚动位置。此前同步开启时会再加一个 `timelineOffsetPx`，参数
+    // 编辑器因此比轨道视图多出一段「只有自己能滚」的空白：滚到最右时轨道视图停在
+    // 内容宽处（工程结尾落在轨道区左缘），参数编辑器却能再滚一个偏移量（工程结尾落到
+    // 轨道区左缘以左），两个面板不再对齐。偏移是**纯投影量**，只改内容画在屏幕上的
+    // 位置（见内核宿主的 `horizontalOffsetPx`），不参与可滚范围。
+    const timelineScrollRange = useMemo(
+        () => resolveTimelineScrollRange({ contentWidth, viewportWidth: viewSize.w }),
+        [contentWidth, viewSize.w],
     );
+    const paddedContentWidth = timelineScrollRange.paddedContentWidth;
 
     useLayoutEffect(() => {
         const el = scrollerRef.current;
@@ -2130,6 +2288,7 @@ export const PianoRollPanel: React.FC = () => {
                         });
                         if (Math.abs(scroller.scrollLeft - next) > 0.5) {
                             scroller.scrollLeft = next;
+                            lastMirroredScrollLeftRef.current = next;
                             syncScrollLeft(scroller);
                         }
                     }
@@ -2175,12 +2334,20 @@ export const PianoRollPanel: React.FC = () => {
         // 落地）在同一帧内提交，否则滚动中会出现画布与网格的分层漂移。
         drawRef.current();
         // 波形面走同一条同步链：不能在 React state（rAF）提交后再画。
-        pianoRollViewportBus.emit(next, pxPerSecRef.current, viewSizeRef.current.w);
+        //
+        // 缩放一并取内核真值（与 `drawRef` 同一理由，见 `resolvePanelRenderViewport`）：
+        // 渲染期 ref 可能提前于内核变化，波形与其余图层就会差一个缩放。
+        const emitPxPerSec = resolvePanelRenderViewport({
+            kernelView: hostRef.current?.getViewport() ?? null,
+            refPxPerSec: pxPerSecRef.current,
+            refScrollLeftPx: scrollLeftRef.current,
+        }).pxPerSec;
+        pianoRollViewportBus.emit(next, emitPxPerSec, viewSizeRef.current.w);
         // 播放头 DOM 线并入同帧提交：缩放（pxPerSec 变化）时立即对齐新投影，
         // 避免与画布的播放头错位一帧（与 useVisualPlayhead 的 onFrame 同源）。
         // 设备像素吸附与其余播放头写入点一致（见 onFrame 注释）。
         const playheadLeftPx = snapToDevicePx(
-            visualPlayheadSecRef.current * pxPerSecRef.current,
+            visualPlayheadSecRef.current * emitPxPerSec,
             readDevicePixelRatio(),
         );
         if (rulerPlayheadLineRef.current) {
@@ -2195,25 +2362,88 @@ export const PianoRollPanel: React.FC = () => {
      * 把「绘制坐标」的水平位置提交到当前滚动载体。
      *
      * 【为什么要单独一个函数】面板里有若干**权威写入**点（时间轴同步、键盘缩放、
-     * 缩放事务落地、关闭同步时还原位置）：它们算出目标位置后直接落到滚动载体。
-     * 内核模式下载体是宿主（内部换算原生坐标并镜像回写），旧实现下载体是原生
-     * scroller（需自行加回偏移）。把分支收在一处，避免每调用点各写一份换算。
+     * 缩放事务落地、关闭同步时还原位置）：它们算出目标位置后直接落到滚动载体
+     * （宿主，内部换算原生坐标并镜像回写）。把换算收在一处，避免每调用点各写一份。
      *
      * 特殊说明：滚轮 / 自动滚屏等**增量**路径不走这里——它们仍写原生 scroller，
-     * 再由 `syncScrollLeft` 采纳进内核（见该函数注释）。
+     * 再由 `syncScrollLeft` 采纳进内核（见该函数注释）。宿主尚未创建（挂载期）时
+     * 退回直接写原生 scroller，与调用方原本的语义一致。
      *
      * @param drawingScrollLeft 目标水平位置（绘制坐标）。
      */
     function applyHorizontalScrollPosition(drawingScrollLeft: number): void {
         const host = hostRef.current;
-        if (PARAM_EDITOR_KERNEL_ENABLED && host) {
+        if (host) {
             host.setScrollLeft(drawingScrollLeft);
             return;
         }
         const scroller = scrollerRef.current;
         if (!scroller) return;
         const offset = paramEditorSyncTimelineRef.current ? timelineOffsetRef.current : 0;
-        scroller.scrollLeft = timelineViewportStateToNative(drawingScrollLeft, offset);
+        const native = timelineViewportStateToNative(drawingScrollLeft, offset);
+        scroller.scrollLeft = native;
+        lastMirroredScrollLeftRef.current = native;
+    }
+
+    /**
+     * **立即**提交一帧（有宿主时同任务提交，否则退回标脏 rAF）。
+     *
+     * 【为什么需要它：DOM / Canvas2D 与 GL 必须落在同一个任务里】
+     * 面板的权威写入点（缩放落地、共享视口应用、值域平移/缩放）会同步写 DOM /
+     * Canvas2D。若 GL 侧（参数线 / 原始音高线 / 播放头）等下一帧才跟上，同一份视口
+     * 就被两套图层分帧呈现——用户看到的就是"这些线迟缓几帧渲染"。
+     *
+     * 实测（Chrome，参数编辑器内滚轮缩小，按帧记录两个绘制路径的 scrollLeft）：
+     * 面板在 t=6384 写下 DOM/Canvas2D，GL 到 t=6446 才用同一个值重绘（React 提交 +
+     * rAF 重新排队，慢一帧到数帧）。改用本方法后两者同任务提交，手感与旧实现
+     * （原生滚动 + 在事件里同步重绘）一致。
+     *
+     * 与 `invalidate()` 的分工：数据变更（编辑结果、主题、音阶）仍走 rAF 合并；
+     * **用户手势的视口提交**走本方法。
+     */
+    function paintNow(): void {
+        const host = hostRef.current;
+        if (host) {
+            host.paintNow();
+            return;
+        }
+        invalidate();
+    }
+
+    /**
+     * 视口提交的统一入口：内核写入 + 各图层**同任务**提交。
+     *
+     * 流程：内核写入（含钳制与标脏）→ `paintNow()`（同一任务的 GL + DOM + Canvas2D 提交）。
+     *
+     * 【缩放必须与位置**一起**写入内核（否则画布层会抽搐一帧）】
+     * 只写位置时，内核仍是**旧缩放**：本函数紧接着的同帧绘制（波形 / 参数线 / 播放头 /
+     * 选区都在 GL 或 Canvas2D 上）就会用旧缩放画出新位置，而 DOM 侧的标尺 / 网格（由
+     * React 的 `pxPerSec` 驱动）已经是新缩放——一屏之内两套缩放，下一帧才被纠正。
+     * 实测（Chrome，参数编辑器内滚轮缩放，日志打在绘制前）：`kernelPps=150 targetPps=165`
+     * ——画布按 150 画、DOM 按 165 画。传 `pxPerSecAtCommit` 后内核先原子换到新缩放，
+     * 同帧绘制即与 DOM 一致（`kernelPps=165 targetPps=165`）。
+     *
+     * 特殊说明：宿主尚未创建（挂载期）时退回 `applyScrollLayers` 直接写 DOM，与各调用点
+     * 原本的兜底语义一致。
+     *
+     * @param drawingScrollLeft 目标水平位置（绘制坐标）。
+     * @param pxPerSecAtCommit 本次提交应生效的缩放；缺省表示缩放不变（纯滚动）。
+     */
+    function commitViewportNow(drawingScrollLeft: number, pxPerSecAtCommit?: number): void {
+        const host = hostRef.current;
+        if (host) {
+            if (pxPerSecAtCommit !== undefined && Number.isFinite(pxPerSecAtCommit)) {
+                // 缩放 + 位置**一次原子写入**：内核用新缩放算上限并钳制，随后同帧绘制
+                // 用的就是新缩放（见上方说明）。
+                host.setViewport({ pxPerSec: pxPerSecAtCommit, scrollLeft: drawingScrollLeft });
+            } else {
+                applyHorizontalScrollPosition(drawingScrollLeft);
+            }
+            host.paintNow();
+            return;
+        }
+        applyHorizontalScrollPosition(drawingScrollLeft);
+        applyScrollLayers(drawingScrollLeft);
     }
 
     /**
@@ -2221,14 +2451,16 @@ export const PianoRollPanel: React.FC = () => {
      *
      * 流程：原生坐标 → 绘制坐标 → 同步开关时推送共享视口 → 通知各图层 → 量化提交 state。
      *
-     * 【内核模式下的语义转变（重要）】旧实现里本函数是「原生是事实源 → 各层跟随」的
-     * 唯一扩散点。内核模式下它变成**采纳点**：尚未迁移的输入代码（滚轮、中键平移、
-     * BPM 换算、自动滚屏）仍然直接写 `scroller.scrollLeft`，这里把该值收进内核
-     * （`host.setScrollLeft`），由内核完成钳制、镜像回写与帧提交。这样：
+     * 【本函数的语义（重要）】内核是唯一渲染路径，它是**采纳点**：尚未迁移的输入
+     * 代码（滚轮、中键平移、自动滚屏）仍然直接写 `scroller.scrollLeft`，这里把该值
+     * 收进内核（`host.setScrollLeft`），由内核完成钳制、镜像回写与帧提交。这样：
      * - 所有既有手势**逐条保持可用**，无需在本任务里重写输入路径（Task 7 才迁移）；
      * - 钳制与渲染真值收敛到内核一处，不会出现两套边界；
      * - 收敛性：内核回写的值与内核当前值相同 → 不产生状态变化 → 不再触发帧，
      *   因此「写原生 → 采纳 → 镜像回写 → 再触发 onScroll」不会形成循环。
+     *
+     * 特殊说明：原生 scroller 的 `scroll` 事件是**纯镜像回声**，不再经本函数
+     * （见 `onScrollerScroll`）；本函数只由显式写入原生的输入路径调用。
      *
      * @param scroller 原生滚动容器。
      */
@@ -2244,7 +2476,7 @@ export const PianoRollPanel: React.FC = () => {
         if (syncEnabled && !timelineSyncApplyingRef.current) {
             // 【必须用 next（采纳值）而不是 scroller.scrollLeft（原生 DOM）】
             //
-            // 内核模式下原生 scroller 只是**镜像**：真值在 ScrollKernel，由宿主在帧
+            // 原生 scroller 只是**镜像**：真值在 ScrollKernel，由宿主在帧
             // 提交时回写。直接读 DOM 会拿到**尚未回写**的旧值，于是把旧位置当成
             // "用户滚动"推回共享视口——时间轴收到后应用旧值，位置出现回退。
             //
@@ -2262,10 +2494,17 @@ export const PianoRollPanel: React.FC = () => {
                 PIANO_ROLL_SYNC_ORIGIN,
             );
         }
-        // 内核模式：交给内核（它会按新边界钳制、镜像回写并在下一帧提交各图层）。
+        // 交给内核（它会按新边界钳制、镜像回写并提交各图层）。
+        //
+        // 【为什么在内核写入后立刻 `paintNow`】本函数由**原生滚动事件**驱动（触摸拖拽、
+        // 触控板惯性、中键平移、框选自动滚屏）。原生滚动发生在浏览器的渲染步骤里，而
+        // 滚轮/拖拽任务里排队的 rAF 要等**下一帧**才跑——这会让可见内容（标尺、网格、
+        // 主画布、波形、曲线、播放头）比原生滚动慢一帧。旧实现是在滚动事件里同步重绘，
+        // 因此没有这一帧差；这里用 `paintNow()`（同任务提交）恢复到同一时序。
         const host = hostRef.current;
-        if (PARAM_EDITOR_KERNEL_ENABLED && host) {
+        if (host) {
             host.setScrollLeft(next);
+            host.paintNow();
             return;
         }
         applyScrollLayers(next);
@@ -2286,14 +2525,15 @@ export const PianoRollPanel: React.FC = () => {
     // 【两套坐标系（本任务最容易出错的地方）】
     // 「同步时间轴视图」开启时，参数编辑器的内容层要整体右移一个偏移量（`offset`，
     // 实测 200px），两边的网格线才能在屏幕上对齐。于是：
-    // - **原生坐标**：`[0, 内容宽 + offset]`——旧实现 `paddedContentWidth` 撑出的域；
-    // - **绘制坐标**：`[−offset, 内容宽]`——含负值，各图层（标尺/网格/画布/波形）用。
+    // - **原生坐标**：`[0, 内容宽]`——与轨道视图**同一格式、同一范围**（同步模式下
+    //   它就是两个面板共享的那个位置，见 `horizontalOffsetPx` 的「关键不变量」）；
+    // - **绘制坐标**：`[−offset, 内容宽 − offset]`——含负值，各图层（标尺/网格/画布/
+    //   波形）用。偏移只是投影：它把内容整体右移，不扩大可滚范围。
     //
     // 内核的位置字段恒被钳到 `[0, max]`（无法表示负值），所以内核持有**原生坐标**，
     // 本面板消费的 `axis.scrollLeftPx` 是**绘制坐标**。换算只在宿主边界发生
     // （见宿主 `horizontalOffsetPx`），面板这一侧不再自行换算，避免出现第三份口径。
     useEffect(() => {
-        if (!PARAM_EDITOR_KERNEL_ENABLED) return;
         const container = scrollerRef.current;
         if (!container) return;
         const hThumb = hScrollbarThumbRef.current;
@@ -2312,7 +2552,9 @@ export const PianoRollPanel: React.FC = () => {
             glAxisCanvas: glAxisCanvasRef.current,
             glOverlayCanvas: glOverlayCanvasRef.current,
             axisWidthPx: AXIS_W,
-            glSceneEnabled: PARAM_EDITOR_GL_SCENE_ENABLED,
+            // GL 场景层恒开启：它是唯一渲染路径（见下方 `skip*` 的「已知并接受的
+            // 限制」说明与设计文档 §2.4）。
+            glSceneEnabled: true,
             // 偏移经 ref 读取（同步开关与布局偏移都在运行时变化，闭包捕获会读到挂载时的旧值）。
             horizontalOffsetPx: () =>
                 paramEditorSyncTimelineRef.current ? timelineOffsetRef.current : 0,
@@ -2321,17 +2563,16 @@ export const PianoRollPanel: React.FC = () => {
                 gridLayer: gridLayerRef.current,
             },
             // 帧提交：宿主已完成滚动条几何与标尺 / 网格的 DOM 写入，这里只做
-            // 「画布 + 波形 + 播放头」三项与旧实现同帧的提交。复用同一个
-            // `applyScrollLayers`，保证两种模式的绘制路径**逐字一致**（迁移不得
-            // 改变视觉，唯一区别是谁来触发它：旧实现是 scroll 事件，内核是 rAF）。
+            // 「画布 + 波形 + 播放头」三项的提交。复用 `applyScrollLayers`，
+            // 保证各图层与宿主同帧刷新。
             onFrame: (axis) => {
                 const drawing = axis.scrollLeftPx;
                 scrollLeftRef.current = drawing;
                 applyScrollLayers(drawing);
                 // 【为什么必须同步 lastScrollLeftRef】镜像回写会让原生 scroller 触发
-                // `scroll` 事件，进而走到 `syncScrollLeft`。把"上一次已知位置"同步成
-                // 内核真值后，该事件的 `next` 与之相等 → 立即早退，**不会**把值推回
-                // 共享视口（否则镜像回写会被误当成用户滚动，把时间轴也推着走）。
+                // `scroll` 事件。把"上一次已知位置"同步成内核真值后，即便有代码经
+                // `syncScrollLeft` 采纳，`next` 也与之相等 → 立即早退，**不会**把值
+                // 推回共享视口（否则镜像回写会被误当成用户滚动，把时间轴也推着走）。
                 lastScrollLeftRef.current = drawing;
                 // 镜像回写：让尚未迁移的输入代码（中键拖拽 / 框选自动滚动）读到的
                 // 原生位置始终等于内核真值。仅在真正不一致时写，避免每帧触发样式重算。
@@ -2341,9 +2582,13 @@ export const PianoRollPanel: React.FC = () => {
                 );
                 if (shouldWriteNumber(container.scrollLeft, native, 0.5)) {
                     container.scrollLeft = native;
+                    // 记下"我写下的值"：它是判定原生 `scroll` 事件是否为回声的唯一基准
+                    // （见 `isMirrorEcho` 与镜像 ref 的说明）。
+                    lastMirroredScrollLeftRef.current = native;
                 }
                 if (shouldWriteNumber(container.scrollTop, axis.scrollTopPx, 0.5)) {
                     container.scrollTop = axis.scrollTopPx;
+                    lastMirroredScrollTopRef.current = axis.scrollTopPx;
                 }
             },
             onScrollTopFrame: (scrollTopPx) => {
@@ -2381,8 +2626,7 @@ export const PianoRollPanel: React.FC = () => {
             },
             onScrollLeftCommit: () => {
                 // 量化提交：标尺的刻度范围由 React 按视口计算，不同步就会出现
-                // 「滚动后刻度消失」（与旧实现 `syncScrollLeft` 的收尾一致）。
-                // 注意 `px` 是**绘制坐标**（宿主对外统一口径）。
+                // 「滚动后刻度消失」。注意 `px` 是**绘制坐标**（宿主对外统一口径）。
                 if (scrollStateRafRef.current == null) {
                     scrollStateRafRef.current = requestAnimationFrame(() => {
                         scrollStateRafRef.current = null;
@@ -2391,12 +2635,12 @@ export const PianoRollPanel: React.FC = () => {
                 }
             },
             onUserScrollLeft: (drawingScrollLeft) => {
-                // 用户手势（拖 thumb / 点轨道翻页）：与旧实现拖原生滚动条同语义——
-                // 需要把新位置推给共享视口，否则同步模式下滚动时间轴不会跟随。
+                // 用户手势（拖 thumb / 点轨道翻页）：需要把新位置推给共享视口，
+                // 否则同步模式下滚动时间轴不会跟随。
                 //
                 // 【为什么不走 syncScrollLeft】那条路径依赖 `scroll` 事件，而内核的
                 // 镜像是同帧程序化写入的，事件到达时无法再区分"用户滚动"与"自身回写"。
-                // 由宿主动上报手势来源是唯一可靠判据（见 `onUserScrollLeft` 说明）。
+                // 由宿主主动上报手势来源是唯一可靠判据（见 `onUserScrollLeft` 说明）。
                 scrollLeftRef.current = drawingScrollLeft;
                 lastScrollLeftRef.current = drawingScrollLeft;
                 const offset = paramEditorSyncTimelineRef.current ? timelineOffsetRef.current : 0;
@@ -2436,16 +2680,6 @@ export const PianoRollPanel: React.FC = () => {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
-    useLayoutEffect(() => {
-        const el = scrollerRef.current;
-        if (!el) return;
-        // 内核模式下滚动位置由宿主持有，挂载时不得用原生值反向覆盖内核真值
-        // （那会在首帧把位置清零）。内核自己会标脏首帧。
-        if (PARAM_EDITOR_KERNEL_ENABLED) return;
-        syncScrollLeft(el);
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [contentWidth, s.grid, s.beats]);
-
     // 内核数据镜像：每次 render 更新字段（宿主每帧现读，不触发重建）。
     //
     // 特殊说明 1：`projectSec` 必须是**秒**而不是 `contentWidth`（像素）——宿主内部
@@ -2463,7 +2697,8 @@ export const PianoRollPanel: React.FC = () => {
      * 构建 GL 场景层的网格输入（阶段 2）。
      *
      * 流程：由 `editParam` 判定网格种类 → 取值域边界与当前视口 → 解析该主题的两条
-     * 网格线颜色为数值 RGBA → 绑定 `valueToY`。
+     * 网格线颜色（以及钢琴背景 / 音阶高亮颜色）为数值 RGBA → 绑定 `valueToY` →
+     * pitch 下再补键盘颜色与音阶音级。
      *
      * 特殊说明 1：`valueToY` 传的是**面板自己的**那个函数（只绑定 `editParam`），
      * 与 Canvas2D 路径共用同一份投影——这正是两种渲染模式网格不会错位的原因。
@@ -2472,6 +2707,19 @@ export const PianoRollPanel: React.FC = () => {
      * 在渲染热路径上反复解析 CSS 字符串是纯浪费，故在镜像更新（低频）时做。
      * 解析失败（拿到 NaN）时退回**不透明黑**——宁可颜色不对也不要上传 NaN，
      * NaN 会让整个实例属性失效、整层消失。
+     *
+     * 特殊说明 3（音阶高亮）：条件与旧 Canvas2D 分支**逐字对齐**——`always` 模式且
+     * 存在工程音阶时才给音级集合（`off` / 无音阶时给空数组，等价于不高亮）。
+     *
+     * 【已知限制：Tempo Map 分段音阶未迁移】旧 Canvas2D 路径还支持 Tempo Map 的
+     * **分段音阶**（`buildScaleSegments`：不同时间段用不同音阶，按段画不同 x 范围）。
+     * GL 网格几何是**视口坐标且不含时间轴**——它不知道自己在哪个时间段上，无法表达
+     * 分段。要迁移需要把网格层做成时间相关（或把高亮拆成独立的时间感知图层），
+     * 超出本次改动范围。因此这里只实现**单一工程音阶**的均匀路径：有 Tempo Map
+     * 音阶变化的工程，高亮会按工程音阶（而非各段音阶）绘制。
+     *
+     * 特殊说明 4（钢琴背景）：黑键行背景带**恒开**、无开关、无持久化设置；它只是
+     * 纹理，与音阶高亮（语义）互不影响，后者在 GL 实例顺序上压在它之上。
      *
      * @returns 网格输入；GL 关闭或无法解析时返回 null（宿主按"没有网格"处理）。
      */
@@ -2528,8 +2776,46 @@ export const PianoRollPanel: React.FC = () => {
         // 键盘轴颜色只在音高参数下提供：非 pitch 时 GL 层据此判定"没有键盘"
         // 并清空几何（否则切到别的参数后键盘会残留在画布上）。
         if (kind !== "pitch") return base;
+
+        // 音阶高亮：条件与旧 Canvas2D 分支逐字对齐——只在 `always` 且有工程音阶时
+        // 高亮。两条路径：
+        // - **分段**（有 Tempo Map 且换过音阶）：每段按自己的音阶、画自己那段 x 范围。
+        //   段的时间范围在这里**投影成视口 x** 再交给 GL 层（它是纯视口坐标、不含
+        //   时间轴，见 `buildPitchGridInstances` 的说明）。
+        // - **均匀**（默认）：整宽一条线，只高亮工程音阶的音级。
+        //
+        // 范围取「可见区间 ± 5s」并按 0.02s 量化（与旧实现同一取法）：量化让滚动
+        // 在 0.02s 内不改变段边界，减少几何重建；±5s 保证视口边缘的段完整。
+        const highlightActive = s.scaleHighlightMode === "always";
+        const segStartSec = Math.round(Math.max(0, viewportStartSec(prAxis) - 5) / 0.02) * 0.02;
+        const segEndSec = Math.round((viewportEndSec(prAxis) + 5) / 0.02) * 0.02;
+        const scaleSegments = highlightActive
+            ? (buildScaleSegments(s.tempoMap, effectiveProjectScale, segStartSec, segEndSec) ?? [])
+                  .map((segment) => ({
+                      startSec: segment.startSec,
+                      endSec: segment.endSec,
+                      // 段没有自己的音阶（`null`）时退回工程音阶——与旧实现
+                      // `buildScaleSegments` 的 `current ?? projectScale` 同一口径。
+                      notes: resolveScaleNotes(segment.scale ?? effectiveProjectScale),
+                  }))
+                  .filter(
+                      (segment) => segment.notes.length > 0 && segment.endSec > segment.startSec,
+                  )
+            : [];
+        // 分段存在时不再走高亮的均匀路径（两者互斥，分段优先）。
+        const scaleNotes =
+            highlightActive && scaleSegments.length === 0
+                ? resolveScaleNotes(effectiveProjectScale)
+                : [];
+
         return {
             ...base,
+            // 钢琴背景（恒开）：黑键行背景带。GL 侧保证带子在所有网格线之前发射，
+            // 音阶强调线再压在其上。
+            blackKeyRowBandRgba: toRgba(colors.blackKeyRowBand),
+            scaleNotes,
+            scaleSegments,
+            scaleHighlightRgba: toRgba(colors.scaleHighlight),
             whiteKeyRgba: toRgba(colors.whiteKey),
             blackKeyRgba: toRgba(colors.blackKey),
             blackKeyGradientRgba: toRgba(colors.blackKeyGradient),
@@ -2542,8 +2828,28 @@ export const PianoRollPanel: React.FC = () => {
         };
     }
 
+    /**
+     * 内核数据镜像：项目时长 / 值域 / 网格输入。
+     *
+     * 特殊说明 1：网格输入必须每次构建——它是 GL 静态层的唯一来源（Canvas2D 侧的
+     * 音高网格分支已整体删除，网格只有 GL 一个绘制者）。颜色解析会创建 DOM 探针
+     * （`normalizeCssColor`），但这是唯一路径，没有可省的余地。
+     *
+     * 特殊说明 2（**依赖项必须覆盖 buildGridSpec 读取的全部输入**）：本 effect 是
+     * 镜像里 `grid` 的**唯一**写入点，因此 `buildGridSpec` 读到的每一个输入都必须
+     * 在依赖里出现，否则该输入变化时镜像不刷新、签名不变、GL 几何不重建——症状
+     * 正是"点了按钮但画面纹丝不动"。因此除视口 / 参数外，还必须含：
+     * - `themeMode`：决定两套配色（切主题后背景带与网格线都要换色）；
+     * - `s.scaleHighlightMode`：决定音阶高亮是否产生音级集合（缺陷 #6）；
+     * - `effectiveProjectScale`：换调 / 换音阶后高亮的音级集合变化。
+     *
+     * 实测（补依赖之前）：点击「音阶高亮」按钮后 Redux 状态确实翻转（按钮 variant
+     * `ghost → solid`），但 GL 画布的像素**完全不变**——本 effect 没重跑，镜像里的
+     * `grid` 还是旧对象（连带旧签名），几何自然不重建。补上依赖后同样操作能画出
+     * 琥珀色强调线（像素级实测：变化行数 = 音阶音级数 × 每线设备像素行数，且再点
+     * 一次回到逐像素相同）。
+     */
     useLayoutEffect(() => {
-        if (!PARAM_EDITOR_KERNEL_ENABLED) return;
         const bounds = getParamValueBoundsForScrollbar(editParam);
         const view = clampViewport(editParam, getCurrentViewportForScrollbar(editParam));
         kernelDataRef.current.projectSec = dynamicProjectSec;
@@ -2552,9 +2858,7 @@ export const PianoRollPanel: React.FC = () => {
             max: bounds.max,
             span: view.span,
         };
-        // GL 场景层的网格输入（阶段 2）。仅在 GL 开关开启时构建：颜色解析会创建
-        // DOM 探针（`normalizeCssColor`），未启用时不该付这份成本。
-        kernelDataRef.current.grid = PARAM_EDITOR_GL_SCENE_ENABLED ? buildGridSpec() : null;
+        kernelDataRef.current.grid = buildGridSpec();
         // pxPerSec 由面板解析后写入内核（阶段 1 不迁移缩放，见宿主文件头）。
         hostRef.current?.setPxPerSec(pxPerSec);
         // 同步偏移会改变**水平上限**（原生域 = 内容宽 + 偏移），必须按新边界重钳。
@@ -2570,43 +2874,24 @@ export const PianoRollPanel: React.FC = () => {
         processorParams,
         s.paramEditorSyncTimeline,
         timelineOffsetPx,
+        // 见特殊说明 2：buildGridSpec 读到的主题 / 高亮 / 音阶都必须在此列出。
+        themeMode,
+        s.scaleHighlightMode,
+        effectiveProjectScale,
+        // Tempo Map 分段音阶（缺陷 #6）：换 Tempo Map 会换分段。
+        s.tempoMap,
     ]);
 
-    // 渲染期刷新 syncScrollLeft 引用（其函数体随每次渲染重建）。
+    // 渲染期刷新 syncScrollLeft 引用（其函数体随每次渲染重建）：供只注册一次的
+    // 原生 `wheel` 监听器调用，避免闭包捕获陈旧实现。
     const syncScrollLeftRef = useRef(syncScrollLeft);
     syncScrollLeftRef.current = syncScrollLeft;
 
-    // 每帧对账自愈（镜像时间轴侧 reconcile）：原生 scroller 是滚动/缩放的
-    // 唯一事实源，sticky 画布层经 refs/总线跟随。任何路径漏发/迟发了这些值
-    // （提交被浏览器钳制/量化、异常中断的缩放事务……）都会让画布与 DOM
-    // 内容层错位，表现为线条抽搐一帧；这里每帧以原生值对账，发现失步立即
-    // 经 syncScrollLeft 重发（refs → bus → 标尺/网格/画布同帧），把残余
-    // 错位变成被治愈的一帧。绝大多数帧只是两次数值比较，空闲开销可忽略。
-    //
-    // 【内核模式下停用】真值源已经反转（内核持有、原生是被动镜像），再由本循环
-    // 以原生值反向对账就变成**两个方向的自愈互相打架**：内核刚写镜像，本循环又
-    // 把镜像读回来当作"权威"重发一次。内核自己每帧提交、且镜像由内核回写，
-    // 因此这里的职责整体消失。
-    useEffect(() => {
-        if (PARAM_EDITOR_KERNEL_ENABLED) return;
-        let raf = 0;
-        const reconcile = () => {
-            raf = requestAnimationFrame(reconcile);
-            const scroller = scrollerRef.current;
-            if (!scroller) return;
-            const offset = paramEditorSyncTimelineRef.current ? timelineOffsetRef.current : 0;
-            const drawingScrollLeft = timelineViewportNativeToState(scroller.scrollLeft, offset);
-            if (
-                lastScrollLeftRef.current != null &&
-                Math.abs(lastScrollLeftRef.current - drawingScrollLeft) <= 0.25
-            ) {
-                return;
-            }
-            syncScrollLeftRef.current(scroller);
-        };
-        raf = requestAnimationFrame(reconcile);
-        return () => cancelAnimationFrame(raf);
-    }, []);
+    // 【已删除：每帧对账自愈循环】
+    // 该循环的存在前提是「原生 scroller 是滚动/缩放的唯一事实源」。内核是唯一渲染
+    // 路径后真值源反转（内核持有、原生是被动镜像），用原生值反向对账会变成两个方向
+    // 的自愈互相打架：内核刚写镜像，循环又把镜像读回来当作"权威"重发一次。内核自己
+    // 每帧提交、且镜像由内核回写，故该职责整体消失。
 
     const valueToY = useCallback((param: ParamName, v: number, h: number): number => {
         const H = Math.max(1, h);
@@ -2789,10 +3074,9 @@ export const PianoRollPanel: React.FC = () => {
      *
      * 流程：钳制视口 → 更新内核数据镜像的值域 → 把 `center` 交给滚动载体。
      *
-     * 特殊说明 1（内核模式）：滚动载体从原生 scroller 换成内核宿主。两者语义一致
-     * （都是 0..1600 的像素域），因此这里只换载体、不换映射——手感由
-     * `verticalScrollTopFromCenter` 单一来源保证，两个模式不会分叉。
-     * 宿主内部自带去重，故无需在这里再判一次差值。
+     * 特殊说明 1：滚动载体是内核宿主。像素域恒为 0..1600，映射由
+     * `verticalScrollTopFromCenter` 单一来源保证。宿主内部自带去重，故无需在这里
+     * 再判一次差值。宿主尚未创建时（挂载期）退回原生 scroller，语义一致。
      *
      * 特殊说明 2（**必须先刷新镜像的 span**）：竖向缩放（钢琴键区 alt/ctrl+滚轮）
      * 只改 `span`，而视口存在 **ref** 里——ref 变更不触发 React 渲染，于是「内核数据
@@ -2808,7 +3092,7 @@ export const PianoRollPanel: React.FC = () => {
         const bounds = getParamValueBoundsForScrollbar(param);
 
         const host = hostRef.current;
-        if (PARAM_EDITOR_KERNEL_ENABLED && host) {
+        if (host) {
             // 就地刷新值域镜像（见特殊说明 2）。
             kernelDataRef.current.valueDomain = {
                 min: bounds.min,
@@ -2832,45 +3116,19 @@ export const PianoRollPanel: React.FC = () => {
 
         if (Math.abs(scroller.scrollTop - nextTop) > 0.75) {
             scroller.scrollTop = nextTop;
+            lastMirroredScrollTopRef.current = nextTop;
         }
     }
 
     /**
-     * 从竖向像素滚动位置反推值域视口（像素 → 值域）。
+     * 【已删除：`applyViewportFromVerticalScrollbar`（像素 → 值域）】
      *
-     * 流程：取当前视口与值域边界 → 由像素位置反算中心值 → 钳制后写回视口。
-     *
-     * 特殊说明：内核对齐阶段该函数只由原生滚动条路径调用（内核模式下竖向滚动
-     * 完全由内核拥有，见 Task 7 的输入迁移）。保留它是为了不改变旧路径行为。
-     *
-     * @param scrollTop 竖向像素滚动位置（0..1600）。
+     * 它的唯一调用者是原生 `scroll` 事件里的竖向对账分支，而那段的成立前提是
+     * 「原生 scroller 是竖向事实源」。内核是唯一渲染路径后竖向由内核拥有，值域视口
+     * 由宿主的 `onScrollTopFrame` **正向**回写（见上方内核宿主创建处的说明），
+     * 反向采纳路径失去存在理由，故随分支一并删除。值域 → 像素方向仍由
+     * `syncVerticalScrollbarForViewport` 提供。
      */
-    function applyViewportFromVerticalScrollbar(scrollTop: number): void {
-        const param = editParam;
-        const currentView = clampViewport(param, getCurrentViewportForScrollbar(param));
-        const bounds = getParamValueBoundsForScrollbar(param);
-        const nextCenter = centerFromVerticalScrollTop({
-            min: bounds.min,
-            max: bounds.max,
-            span: currentView.span,
-            scrollTop,
-            scrollRangePx: PARAM_EDITOR_VERTICAL_SCROLL_RANGE_PX,
-        });
-        const nextView = clampViewport(param, {
-            span: currentView.span,
-            center: nextCenter,
-        });
-
-        if (Math.abs(nextView.center - currentView.center) <= 1e-6) {
-            return;
-        }
-
-        if (param === "pitch") {
-            setPitchView(nextView);
-        } else {
-            setParamViewport(param, nextView);
-        }
-    }
 
     /** 多选区（升序、互不相交、相邻已合并的 beat 区间列表；null = 无选区） */
     const selectionRef = useRef<ParamSelection | null>(null);
@@ -3376,17 +3634,15 @@ export const PianoRollPanel: React.FC = () => {
         invalidate();
     }, [s.showClipboardPreview, invalidate]);
 
-    // scaleSegments 帧间缓存：播放头 invalidate 会让画布每帧重绘，但
-    // tempoMap / 工程音阶 / 可见区间在帧间通常不变。按引用 + 0.02s 量化
-    // 区间做 key，未变时复用上帧结果，避免每帧遍历 tempo 段并分配新数组。
-    // 可见区间两侧本就各留 5s 余量，量化引入的 0.02s 漂移不会影响覆盖。
-    const scaleSegmentsCacheRef = useRef<{
-        tempoMap: unknown;
-        scale: unknown;
-        qStart: number;
-        qEnd: number;
-        result: ReturnType<typeof buildScaleSegments>;
-    }>({ tempoMap: null, scale: null, qStart: NaN, qEnd: NaN, result: [] });
+    // 【已删除：scaleSegments 帧间缓存】
+    //
+    // 它存在的唯一目的是给 `drawPianoRoll` 的 `scaleSegments` 入参供数（Tempo Map
+    // 分段音阶高亮）。该入参随 Canvas2D 音高网格分支一起删除（分支因 `skipGrid`
+    // 恒为 true 而不可达），缓存随之失去唯一读者。
+    //
+    // 【分段音阶高亮的去向】GL 网格几何是视口坐标、不含时间轴，无法表达"不同时间段
+    // 用不同音阶"，因此**分段高亮未迁移**；现在只支持单一工程音阶。见
+    // `buildGridSpec` 的说明。`s.tempoMap` 仍被自动吸附与标尺使用，未失去读者。
 
     /**
      * 组装曲线图层描述符（阶段 3：曲线 GL）。
@@ -3644,73 +3900,107 @@ export const PianoRollPanel: React.FC = () => {
 
     // Keep draw function always up-to-date (invalidate() is stable and calls drawRef.current()).
     drawRef.current = () => {
-        // 滚动热路径的投影：用 ref 构造，因为滚动时 ref 同步更新而 React
-        // state 滞后一帧（渲染期的 prAxis 不能用于此处）。
+        // 滚动热路径的投影：**必须以内核视口为准**（`resolvePanelRenderViewport`）。
+        //
+        // 【为什么不能用渲染期的 refs】`pxPerSecRef` / `scrollLeftRef` 在渲染期就被同步成
+        // React state 的新值，而并发渲染允许"渲染但尚未提交"（被更高优先级更新打断并丢弃）
+        // ——那一瞬间 ref 已是新值、内核与 DOM 还是旧值。用 refs 当投影源会让面板的
+        // Canvas2D 与曲线**可见段选择**落在新视口、宿主 GL（网格 / 曲线 / 播放头）与 DOM
+        // 落在旧视口：同一屏两套视口，表现为"这些线偏移了"。时间轴的 `livePxPerSec` 是同一
+        // 约定的先例（逐帧发布一律取内核真值）。
+        const kernelView = hostRef.current?.getViewport() ?? null;
+        const viewport = resolvePanelRenderViewport({
+            kernelView,
+            refPxPerSec: pxPerSecRef.current,
+            refScrollLeftPx: scrollLeftRef.current,
+        });
         const drawAxis = createTimelineAxis({
-            pxPerSec: pxPerSecRef.current,
-            scrollLeftPx: scrollLeftRef.current,
+            pxPerSec: viewport.pxPerSec,
+            scrollLeftPx: viewport.scrollLeftPx,
             viewportWidthPx: viewSizeRef.current.w,
             dpr: window.devicePixelRatio || 1,
         });
-        const scaleSegStartQ =
-            Math.round(Math.max(0, viewportStartSec(drawAxis) - 5) / 0.02) * 0.02;
-        const scaleSegEndQ = Math.round((viewportEndSec(drawAxis) + 5) / 0.02) * 0.02;
-        const segCache = scaleSegmentsCacheRef.current;
-        if (
-            segCache.tempoMap !== s.tempoMap ||
-            segCache.scale !== effectiveProjectScale ||
-            segCache.qStart !== scaleSegStartQ ||
-            segCache.qEnd !== scaleSegEndQ
-        ) {
-            segCache.tempoMap = s.tempoMap;
-            segCache.scale = effectiveProjectScale;
-            segCache.qStart = scaleSegStartQ;
-            segCache.qEnd = scaleSegEndQ;
-            segCache.result = buildScaleSegments(
-                s.tempoMap,
-                effectiveProjectScale,
-                scaleSegStartQ,
-                scaleSegEndQ,
-            );
-        }
         // 曲线图层（阶段 3）：每帧重建描述符列表。
         //
         // 【为什么要每帧构建】滚动/缩放会改变可见段与 `axis`，而 GL 侧要在绘制时
         // 才投影；描述符里的 `values` 引用与视口无关（数据没变），因此这里的成本
         // 只是一次浅层数组构建，不复制采样值。
-        if (PARAM_EDITOR_KERNEL_ENABLED && PARAM_EDITOR_CURVE_GL_ENABLED) {
-            kernelDataRef.current.curves = buildCurveLayers(drawAxis);
-        } else {
-            kernelDataRef.current.curves = null;
-        }
+        //
+        // 【必须是唯一来源】曲线已归 GL（Canvas2D 侧 `skipCurves` 恒为 true），
+        // 置 null 等于曲线无人绘制。
+        kernelDataRef.current.curves = buildCurveLayers(drawAxis);
 
-        // 叠加层镜像（选区块 + 播放头）必须**每帧**更新：播放头用的是插值的
+        // 叠加层镜像（播放头）必须**每帧**更新：播放头用的是插值的
         // 视觉值 `visualPlayheadSecRef`，它不由 React 渲染驱动（见下方注释），
         // 因此不能在 render 期写入镜像——那样播放头会停在旧的提交值上。
-        if (PARAM_EDITOR_KERNEL_ENABLED) {
-            // 只喂播放头：选区块仍由主画布绘制（见 PianoRollOverlaySpec 说明）。
-            kernelDataRef.current.overlay = {
-                playheadSec: visualPlayheadSecRef.current,
-            };
-        }
+        // 只喂播放头：选区块仍由主画布绘制（见 PianoRollOverlaySpec 说明）。
+        //
+        // 【颜色必须显式喂进去，不能靠宿主兜底】宿主在 `playheadRgba` 缺省时用
+        // 一个硬编码兜底色（`[0,0,0,0.2]`），而参数编辑器的播放头在 Canvas2D 侧的
+        // 绘制已被 `skipPlayhead: true` 永久跳过——也就是说 GL 这里是**唯一**绘制者，
+        // 不喂颜色等于画布播放头与上方标尺（`--qt-playhead`）各是一套颜色。
+        // 用户报告："播放线在底下和上方标尺的颜色不一致"。
+        //
+        // 取值经 `normalizeCssColor` 归一化：GL 不认 `var(...)`，必须借浏览器把
+        // CSS 变量解析成 `rgb()/rgba()` 再交给 `parseRgbaColor`。归一化会触发样式
+        // 重算，但本块是每帧执行的——因此按解析后的字符串做一次模块级缓存，
+        // 主题切换时字符串本身会变，缓存自然失效（键就是字符串）。
+        kernelDataRef.current.overlay = {
+            playheadSec: visualPlayheadSecRef.current,
+            playheadRgba: resolvePlayheadRgba(themeMode),
+        };
+        /**
+         * 主画布上绘制的中央提示文字（"音高被硬禁用"的原因）。
+         *
+         * 【为什么提取成局部变量】它同时是**签名项**与 `drawPianoRoll` 的入参。
+         * 就地写两遍表达式（此前签名里根本没有它）正是本文件反复警告的
+         * "签名里写了 A、实际喂给绘制的是 B"的漂移来源：一旦两处写法分叉，
+         * 文字就会停在旧值或漏绘。提取一次、两处共用，漂移在结构上不可能发生。
+         *
+         * 【为什么非 pitch 参数用 childPitchHardDisableReason】子音高偏移参数
+         * （cents / degrees / formant）走的是 `childPitchHardDisableReason`，
+         * 与 `pitchEnabled` 的判定分支保持一一对应（见上方 `pitchEnabled`）。
+         */
+        const overlayText = !pitchEnabled
+            ? editParam === "pitch"
+                ? pitchHardDisableReason
+                : childPitchHardDisableReason
+            : null;
+
         /**
          * 主画布的内容签名（阶段 2 Task 6）。
          *
          * 【必须包含什么】主画布上绘制的**全部输入**：
          * - 绘图资源：各条曲线数据、参考线、检测曲线、副参数视口、morph 叠加、
-         *   剪贴板预览、选区块、live 编辑覆盖、音阶高亮（含 tempoMap 段）；
+         *   剪贴板预览、选区块、live 编辑覆盖、中央提示文字 `overlayText`；
          * - 视口：`viewSize`、`pxPerSec`、`scrollLeft`、`dpr`（滚动/缩放会改变投影）；
-         * - 主题与字体（颜色解析与文字宽度都会影响像素结果）；
-         * - `pitchAnalysisPending`（它会提前 return，改变绘制内容）。
+         * - 主题与字体（颜色解析与文字宽度都会影响像素结果）。
+         *
+         * 【音阶高亮为什么不在签名里】它已迁到 **GL 网格层**（主画布不再绘制它），
+         * 其输入（音级集合 / 强调线颜色）由 `PianoRollGridSpec` 的几何签名负责。
+         * 此前这里编入的 `effectiveProjectScale` / `s.tempoMap` / `s.pitchSnapUnit` /
+         * `s.scaleHighlightMode` / `s.toolMode` / `snapToggleHeld` 都随该分支的删除
+         * 一并移除——它们对应的绘制入参已不存在，"编进来"只会让缓存无谓失效。
          *
          * 【必须**不**包含什么】播放头位置——它已由 GL 叠加层绘制。把它编进签名会让
          * 播放帧的签名每帧变化、缓存失效，那就退回"每帧重绘曲线"。
          *
-         * 【为什么用引用数组 + join】大部分输入是数组/对象引用（Redux 只在内容变化时
-         * 换引用），直接比引用既快又准；数值项显式列举。漏项的代价是"该图层不再更新"，
-         * 因此这里**宁可多编**：低频变化的项一并纳入，成本只是偶尔多一次重绘。
+         * 【比较语义】这是一个**数组**，交给 `isSameMainCanvasSignature` 逐项
+         * `Object.is` 比较：**对象 / 数组项按引用参与**（Redux 只在内容变化时换引用，
+         * 比引用既快又准），原始值按数值。**绝不拼接字符串**——此前后缀是
+         * `.join("|")`，而 `join` 会把每个对象 / 数组元素串成字面量
+         * `"[object Object]"`，两个内容完全不同的选区因此得到同一个签名，缓存命中、
+         * 主画布在清屏前就 return，旧选区框留在画布上不消失（缺陷 #4，详见
+         * `pianoRoll/mainCanvasSignature.ts`）。引用比较之所以能逐帧失效，是因为
+         * 选区 / 覆盖层在变化时都被赋**新对象**，而非原地改字段。
+         *
+         * 【必须与绘制入参一一对应】下面每一项都刻意对应 `drawPianoRoll` 的某个
+         * 入参（或影响其投影的视口量），避免"签名里写了 A、实际喂给绘制的是 B"。
+         * 漏项的代价是"该图层不再更新"，因此这里**宁可多编**：低频变化的项一并纳入，
+         * 成本只是偶尔多一次重绘。最后再列一遍 `secondaryParamViews` 并非冗余——
+         * 它与 `paramViewsRef.current` 同为曲线数据源，两者都必须进签名。
          */
-        const mainContentSignature = [
+        const mainContentSignature: MainCanvasSignature = [
             viewSize.w,
             viewSize.h,
             pxPerSecRef.current,
@@ -3720,7 +4010,13 @@ export const PianoRollPanel: React.FC = () => {
             themeMode,
             fontFamily,
             pitchEnabled ? 1 : 0,
-            // 数据与几何（引用比较）。刻意与传给 drawPianoRoll 的字段一一对应，
+            // beat → sec 的换算系数：选区框与剪贴板预览的 x 由 `beatToSec` 投影，
+            // 改 BPM 会改变它们的位置。此前它**不在**签名里，靠的是另一个巧合
+            // （`usePianoRollData` 的取数 effect 恰好也依赖 `secPerBeat` → 重取 →
+            // `secondaryParamViews` 换引用而顺带让缓存失效）。签名契约不该依赖这种
+            // 旁路，故显式纳入。
+            secPerBeat,
+            // 数据与几何（按引用比较）。刻意与传给 drawPianoRoll 的字段一一对应，
             // 避免"签名里写了 A、实际喂给绘制的是 B"这种漂移。
             detectedPitchCurves,
             referencePitchOverlays,
@@ -3730,19 +4026,17 @@ export const PianoRollPanel: React.FC = () => {
             s.showClipboardPreview ? clipboardRef.current : null,
             selectionRef.current,
             liveEditOverrideRef.current,
-            effectiveProjectScale,
-            s.tempoMap,
-            segCache.result,
-            s.pitchSnapUnit,
-            s.scaleHighlightMode,
-            s.toolMode,
-            snapToggleHeld,
+            // 中央提示文字（"音高被硬禁用"的原因）：本面板**新增**的字符串签名项，
+            // 切换参数 / 轨道组时会变（禁用原因出现或消失）。
+            // 注意 `drawPianoRoll` 另有多项字符串入参（editParam / fontFamily 等），
+            // 它们在上方各自的位置参与签名——本项并非"唯一"字符串项。
+            overlayText,
             // 视口中心/跨度（用 ref 值，避免依赖 React 渲染时机）
             pitchViewRef.current.center,
             pitchViewRef.current.span,
             paramViewsRef.current,
             secondaryParamViews,
-        ].join("|");
+        ];
 
         drawPianoRoll({
             axisCanvas: axisCanvasRef.current,
@@ -3756,11 +4050,8 @@ export const PianoRollPanel: React.FC = () => {
             secondaryParamViews: pitchEnabled ? secondaryParamViews : {},
             secondaryParamIds: pitchEnabled ? visibleSecondaryParamIds : [],
             showSecondaryParam: pitchEnabled && visibleSecondaryParamIds.length > 0,
-            overlayText: !pitchEnabled
-                ? editParam === "pitch"
-                    ? pitchHardDisableReason
-                    : childPitchHardDisableReason
-                : null,
+            // 与上面签名里的 `overlayText` 是**同一个变量**（不重复写表达式）。
+            overlayText,
             liveEditOverride: liveEditOverrideRef.current,
             selection: selectionRef.current,
             axis: drawAxis,
@@ -3772,33 +4063,40 @@ export const PianoRollPanel: React.FC = () => {
             referencePitchOverlays,
             detectedPitchCurves,
             isDark: themeMode === "dark",
-            // 阶段 2：GL 层接管网格时，Canvas2D 必须跳过它（两张画布叠放，
-            // 都画会半透明叠加 + 亚像素重影）。GL 未启用时行为与迁移前一致。
-            skipGrid: PARAM_EDITOR_GL_SCENE_ENABLED,
-            // 键盘几何与轴文字都归 GL（Task 4 / Task 5）。
-            skipKeyboardGeometry: PARAM_EDITOR_GL_SCENE_ENABLED,
-            skipAxisText: PARAM_EDITOR_GL_SCENE_ENABLED,
-            // 轴画布全部内容归 GL（Task 4/5）-> 整张跳过（含清屏）。
-            skipAxisCanvas: PARAM_EDITOR_GL_SCENE_ENABLED,
-            // 播放头归 GL 叠加层（Task 6）。**选区块不在此列**：它属于曲线之下的
-            // 图层，仍由主画布绘制（见 render.ts 的 skipPlayhead 说明）。
-            skipPlayhead: PARAM_EDITOR_GL_SCENE_ENABLED,
+            // ── 下列五个 `skip*` 恒为 true：这些图层**只有 GL 一个绘制者** ──────
+            //
+            // 内核是唯一渲染路径，键盘几何 / 轴文字 / 轴画布 / 播放头 / 曲线
+            // 全归 GL。恒 true 意味着 Canvas2D 侧**永久跳过**这些图层。
+            //
+            // 【已知并接受的限制】WebGL2 在**运行期**失败时，这些图层无人绘制（实测：
+            // 贯穿宽度的横向网格线 24 → 0 条，音高网格整片消失）。参数编辑器在无
+            // WebGL2 的环境下本就无法工作，补一套 Canvas2D 回退等于把已迁走的渲染层
+            // 再实现一遍，收益与成本完全不成比例——用户已明确决定不修。详见设计文档
+            // `docs/superpowers/specs/2026-09-13-timeline-single-path-design.md` §2.4。
+            //
+            // 特殊说明 1：跳过的都是 **GL 已完全接管**的图层；选区块、morph 手柄等仍在
+            // 下面由主画布绘制（见 render.ts 对 skipPlayhead / skipCurves 的说明）。
+            //
+            // 特殊说明 2：**没有 `skipGrid`**——网格的 Canvas2D 分支已被整体删除
+            // （它原本就因本处恒传 `true` 而不可达）。音阶高亮随网格一起迁到 GL。
+            skipKeyboardGeometry: true,
+            skipAxisText: true,
+            // 轴画布全部内容归 GL -> 整张跳过（含清屏）。
+            skipAxisCanvas: true,
+            skipPlayhead: true,
             // 曲线归 GL（阶段 3）。morph 手柄不在曲线层内，仍由主画布绘制。
-            skipCurves: PARAM_EDITOR_CURVE_GL_ENABLED,
+            skipCurves: true,
             // 主画布内容缓存（Task 6）：签名只含**主画布自己绘制的内容**与视口，
             // 不含播放头（它已归 GL 叠加层）——这正是播放帧能跳过曲线重绘的原因。
-            mainContentSignature: PARAM_EDITOR_GL_SCENE_ENABLED ? mainContentSignature : undefined,
+            mainContentSignature,
             fontFamily,
             clipboardPreview: s.showClipboardPreview ? clipboardRef.current : null,
-            // pitch snap visual helpers
-            pitchSnapUnit: s.pitchSnapUnit,
-            projectScale: effectiveProjectScale,
-            scaleHighlightMode: s.scaleHighlightMode,
-            // 可见秒区间由 axis 提供：此前这里写作 scrollLeft / pxPerSec
-            // （先除后乘），与其余图层的换算不等价。
-            scaleSegments: segCache.result,
-            toolMode: s.toolMode,
-            snapToggleHeld: snapToggleHeld,
+            // 形变控制线：每段选区一条（选区已统一为多区间 `ParamSelection`）。
+            // 【合并说明】feature/tools 分支此处另行传过 `pitchSnapUnit` /
+            // `projectScale` / `scaleHighlightMode` / `scaleSegments` / `toolMode` /
+            // `snapToggleHeld`——这些入参在本分支已随「Canvas2D 音高网格分支整体
+            // 删除」一并移除（网格与音阶高亮恒由 GL 绘制，见 `render.ts` 的说明），
+            // 继续传只会被 `drawPianoRoll` 静默忽略。
             paramMorphOverlays,
         });
     };
@@ -3836,10 +4134,7 @@ export const PianoRollPanel: React.FC = () => {
         setSelectionUi,
         // 撤销栈深度读取器（拉伸手势把选区登记到对应历史步骤时使用）；
         // 稳定引用，避免每次渲染都让上层的 pointerdown 回调失效重建。
-        getHistoryPosition: useCallback(
-            () => store.getState().session.historyUndoDepth,
-            [store],
-        ),
+        getHistoryPosition: useCallback(() => store.getState().session.historyUndoDepth, [store]),
         setCanvasCursor,
         strokeRef,
         panRef,
@@ -3932,56 +4227,64 @@ export const PianoRollPanel: React.FC = () => {
 
     const onScrollerWheelNative = interactions.onScrollerWheelNative;
     /**
-     * 原生滚动容器的 `scroll` 事件（面板侧：竖向适配）。
+     * 原生滚动容器的 `scroll` 事件（面板侧的唯一入口）。
      *
-     * 【内核模式下的竖向回声必须忽略——这是"拖不动/吸附感"的根因】
-     * 内核模式里原生 scroller 只是**镜像**：宿主每帧把内核真值写回 DOM，该写入会
-     * 触发原生 `scroll` 事件，而事件不带来源。本函数原本把它当成"用户滚动了原生
-     * 容器"，于是读回一个**滞后**的位置再写回内核。
+     * 【绝大部分是镜像回声，但不是全部】
+     * 内核是唯一渲染路径，原生 scroller 只是**镜像**：`onFrame` 每帧把内核真值写回
+     * 它，该写入会触发原生 `scroll` 事件。旧代码在这里**无条件**读回位置再写回内核，
+     * 而那一刻读到的是上一帧镜像的旧值（实测内核已到 548.054、事件里读到 540.5），
+     * 使内核被回退 7.554px，逐帧往复即用户报告的「上下拖经常拖不动 / 阶梯感」。
      *
-     * 实测（拖竖向滚动条，1920×1200）：内核 `scrollTop` 已到 548.054，事件里读到的
-     * 却是上一帧镜像的 540.5，内核被**回退 7.554px**。逐帧往复，净位移被吃掉一部分
-     * 并伴随抖动——即用户报告的「上下拖经常拖不动 / 阶梯感」。
+     * 但"无条件忽略"同样不对：原生容器仍是 `overflow: scroll`，**触摸拖拽 /
+     * 触控板惯性 / 焦点滚入视口**这三类输入只会产生原生 `scroll`，没有任何显式
+     * 入口——忽略它等于这些输入完全失效（旧实现在这里读回位置正是为了它们）。
      *
-     * 【为什么可以整条忽略，而不会漏掉输入】
-     * 竖向的原生输入只有 PageUp / PageDown / Home / End 四个键。它们已由宿主接管
-     * （见 `pianoRollKernelHost.onKeyDown` 与 `renderKernel/keyboardScroll`），并且时间轴
-     * 内核早就是同一做法。滚轮 / 中键平移 / 拖自绘滚动条 / 点轨道翻页都不经原生
-     * `scroll`（它们直接调内核 API），因此这个事件在内核模式下纯属回声。
+     * 【判据：与「上次镜像写入值」比，**不是**与「内核当前值」比】
+     * 本处理函数一度拿事件值与 `host.getViewport()`（内核**当前**值）比较。那在连续
+     * 滚动 / 缩放时必然失效：事件报的是**上一帧**写下的值，内核此刻已前进一整帧，
+     * 两者必然不等 → 回声被稳定地误收成"容器自己动了" → 采纳并（同步开启时）把它
+     * 推回共享视口。推回的还带着浏览器的设备像素量化误差（≤0.5px），于是两个面板
+     * 进入亚像素往复——即用户报告的「启用同步后滚轮缩放仍然抽动」（同步关闭时不会
+     * 推回共享视口，所以看不到）。
      *
-     * 【为什么横向不在这里一并处理】横向早已在 `interactions.onScrollerScroll` 里
-     * 按内核开关早退（见该处理函数），此处只补竖向。
+     * 基准必须是**我上次写进容器的值**（`lastMirroredScroll*Ref`）：回声报的正是它
+     * （误差仅来自浏览器量化，有界），而真实输入会把容器带到别的值上。这正是
+     * `timeline/scrollEcho` 为轨道头写下的同一条结论（判来源，不判与真值的距离），
+     * 现在两个容器共用同一个纯函数。
      *
-     * 特殊说明：判据用「事件值 == 上一次镜像回写的**读回值**」。浏览器会按设备像素
-     * 量化原生位置（dpr=2 时写 540.694 读回 540.5），拿请求值比较判不出来。
+     * @param event 原生 `scroll` 事件。
+     * @returns 无返回值。
      */
     const onScrollerScroll = useCallback(
-        (e: React.UIEvent<HTMLDivElement>) => {
-            interactions.onScrollerScroll(e);
-
-            // 内核模式：竖向由内核拥有，此处只可能收到镜像回声。
-            if (PARAM_EDITOR_KERNEL_ENABLED) return;
-
-            const scroller = e.currentTarget;
-            const currentView = clampViewport(editParam, getCurrentViewportForScrollbar(editParam));
-            const bounds = getParamValueBoundsForScrollbar(editParam);
-            const expectedTop = verticalScrollTopFromCenter({
-                min: bounds.min,
-                max: bounds.max,
-                span: currentView.span,
-                center: currentView.center,
-                scrollRangePx: PARAM_EDITOR_VERTICAL_SCROLL_RANGE_PX,
-            });
-
-            // 与当前视口计算出的滚动位置几乎一致时，说明是横向滚动或程序同步，不需要反向回写。
-            if (Math.abs(scroller.scrollTop - expectedTop) <= 0.75) {
-                return;
+        (event: React.UIEvent<HTMLDivElement>) => {
+            // 应用共享视口写入期间不采纳：那一刻原生镜像还停在上一帧的旧值
+            //（与 `timelineSyncApplyingRef` 的既有用法同一理由）。
+            if (timelineSyncApplyingRef.current) return;
+            const scroller = event.currentTarget;
+            const host = hostRef.current;
+            if (host === null) return;
+            if (
+                !isMirrorEcho({
+                    mirroredPx: lastMirroredScrollLeftRef.current,
+                    nativePx: scroller.scrollLeft,
+                })
+            ) {
+                syncScrollLeft(scroller);
             }
-
-            applyViewportFromVerticalScrollbar(scroller.scrollTop);
+            if (
+                !isMirrorEcho({
+                    mirroredPx: lastMirroredScrollTopRef.current,
+                    nativePx: scroller.scrollTop,
+                })
+            ) {
+                host.setScrollTop(scroller.scrollTop);
+                // 原生滚动事件驱动的竖向滚动（触摸 / 触控板 / 焦点滚入）：
+                // 与横向同因——内核写完后必须**同任务**提交各图层，否则竖向内容
+                // （音高键 / 数值轴 / 曲线 / 播放头）比原生滚动慢一帧（见 `paintNow`）。
+                host.paintNow();
+            }
         },
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-        [editParam, interactions],
+        [syncScrollLeft],
     );
     const scrollerWheelHandlerRef = useRef(onScrollerWheelNative);
 
@@ -4411,9 +4714,7 @@ export const PianoRollPanel: React.FC = () => {
             // 落在这些段内的帧（断层不会被填充），偏移基准为首段起点。
             if (op === "pasteVocalShifter") {
                 const sel2 = selectionRef.current;
-                const selRanges = sel2
-                    ? beatRangesToFrameRanges(sel2, secPerBeat, fp)
-                    : [];
+                const selRanges = sel2 ? beatRangesToFrameRanges(sel2, secPerBeat, fp) : [];
                 void dispatch(
                     pasteVocalShifterClipboard({
                         selectionRanges: selRanges.length > 0 ? selRanges : undefined,
@@ -4577,8 +4878,7 @@ export const PianoRollPanel: React.FC = () => {
                         if (!res?.ok) continue;
                         const payload = res as ParamFramesPayload;
                         if (segments.length === 0) {
-                            framePeriodMsFromBackend =
-                                Number(payload.frame_period_ms ?? fp) || fp;
+                            framePeriodMsFromBackend = Number(payload.frame_period_ms ?? fp) || fp;
                         }
                         const values = (payload.edit ?? []).map((v) => Number(v) || 0);
                         if (values.length === 0) continue;
@@ -4620,8 +4920,7 @@ export const PianoRollPanel: React.FC = () => {
                         if (!res?.ok) continue;
                         const payload = res as ParamFramesPayload;
                         if (segments.length === 0) {
-                            framePeriodMsFromBackend =
-                                Number(payload.frame_period_ms ?? fp) || fp;
+                            framePeriodMsFromBackend = Number(payload.frame_period_ms ?? fp) || fp;
                         }
                         const values = (payload.edit ?? []).map((v) => Number(v) || 0);
                         if (values.length > 0) {
@@ -4716,8 +5015,7 @@ export const PianoRollPanel: React.FC = () => {
                                 projectScale: effectiveProjectScale,
                                 // Tempo Map 感知：按帧时刻解析生效音阶。
                                 scaleAtFrame: (frame: number) =>
-                                    projectScaleAtSec((frame * fp) / 1000) ??
-                                    effectiveProjectScale,
+                                    projectScaleAtSec((frame * fp) / 1000) ?? effectiveProjectScale,
                             });
                             if (!converted) continue;
                             convertedWrites.push({
@@ -6544,16 +6842,18 @@ export const PianoRollPanel: React.FC = () => {
                         className="bg-qt-window border-r border-qt-border relative"
                         style={{ width: AXIS_W, flex: 1 }}
                     >
-                        {/* 键盘轴 GL 层（阶段 2，Task 4）：铺在 Canvas2D 轴画布**下面**
-                            （DOM 顺序在前、无 z-index），只画几何；音名标签仍由
-                            Canvas2D 画在上层（Task 5 才迁标签）。 */}
-                        {PARAM_EDITOR_GL_SCENE_ENABLED ? (
-                            <canvas
-                                ref={glAxisCanvasRef}
-                                className="absolute inset-0 pointer-events-none"
-                                aria-hidden
-                            />
-                        ) : null}
+                        {/* 键盘轴 GL 层（阶段 2/3）：铺在 Canvas2D 轴画布**下面**
+                            （DOM 顺序在前、无 z-index），画键盘几何与音名标签。
+                            下方那块 Canvas2D 轴画布仍保留在 DOM 中，但绘制已被
+                            `skipAxisCanvas: true` **整张跳过（含清屏）**——轴上一切都
+                            归 GL。宿主自己按 `axisWidthPx` 给 GL 轴画布定尺寸，不依赖
+                            这块画布，故不留它也不影响 GL；保留它只是为了不牵动
+                            `drawPianoRoll` 的入参契约（见下方 `skip*` 说明）。 */}
+                        <canvas
+                            ref={glAxisCanvasRef}
+                            className="absolute inset-0 pointer-events-none"
+                            aria-hidden
+                        />
                         <canvas ref={axisCanvasRef} className="absolute inset-0" />
                     </div>
                 </Flex>
@@ -6598,21 +6898,17 @@ export const PianoRollPanel: React.FC = () => {
                         }}
                     />
 
-                    {/* 内核模式下自绘滚动条的定位容器：滚动条必须是**滚动容器之外**
+                    {/* 自绘滚动条的定位容器：滚动条必须是**滚动容器之外**
                         的兄弟节点。放在滚动容器内部会被内容一起滚走（绝对定位在滚动
                         容器里仍随内容平移），这是自绘滚动条最经典的错位根因。 */}
                     <div className="flex-1 min-w-0 relative">
                         <div
                             ref={scrollerRef}
-                            className={
-                                // 内核模式：隐藏原生滚动条（自绘条取代），但**保留
-                                // `overflow: scroll`**——原生 scroller 此时是被动镜像，
-                                // 必须保留滚动范围才能接受宿主每帧的程序化回写，也让
-                                // 尚未迁移的输入代码（中键平移等）继续可读可写。
-                                PARAM_EDITOR_KERNEL_ENABLED
-                                    ? "absolute inset-0 bg-qt-graph-bg overflow-x-scroll overflow-y-scroll hide-scrollbar outline-none focus:outline-none focus-visible:outline-none"
-                                    : "absolute inset-0 bg-qt-graph-bg overflow-x-scroll overflow-y-scroll custom-scrollbar outline-none focus:outline-none focus-visible:outline-none"
-                            }
+                            // 隐藏原生滚动条（自绘条取代），但**保留 `overflow: scroll`**
+                            // ——原生 scroller 是被动镜像，必须保留滚动范围才能接受宿主
+                            // 每帧的程序化回写，也让尚未迁移的输入代码（中键平移等）
+                            // 继续可读可写。`.custom-scrollbar` 不再需要：原生条恒不可见。
+                            className="absolute inset-0 bg-qt-graph-bg overflow-x-scroll overflow-y-scroll hide-scrollbar outline-none focus:outline-none focus-visible:outline-none"
                             data-piano-roll-scroller
                             tabIndex={0}
                             onAuxClick={interactions.onScrollerAuxClick}
@@ -6643,6 +6939,23 @@ export const PianoRollPanel: React.FC = () => {
                                         }
                                         layerRef={gridLayerRef}
                                         ticks={timelineTicks}
+                                        // 【必须提供视口总线：否则网格会画在滞后的偏移上】
+                                        // 不传总线时网格的绘制偏移取自 `scrollLeft` prop，而它是
+                                        // **量化提交**的 React state（256px 死区，见
+                                        // `gridDrawViewport.ts`）：参数编辑器自己的滚动（滚轮 /
+                                        // 拖 thumb / 触摸）只改内核与镜像，**不**逐帧提交 state
+                                        // ——最后一次不足 256px 的位移永远不会提交。此后任何一次
+                                        // React 重绘（例如时间轴缩放带来的 `pxPerBeat` 变化）都会
+                                        // 用这个滞后值画网格，网格就停在错误偏移上，直到下一次滚动。
+                                        // 实测（Chrome，先小幅滚动参数编辑器再滚轮缩放时间轴）：
+                                        // 网格与自身标尺相差 **59px**（基线只有 8px 的标签内缩）。
+                                        // 传总线后偏移一律取总线快照（内核真值），与标尺 / 画布 /
+                                        // 波形 / 曲线取同一份视口。
+                                        //
+                                        // 不传 `layerOrder`：参数编辑器没有统一帧提交器，注册会被
+                                        // 跳过；网格仍由 `gridRedrawBridge` 的命令式路径重绘（宿主
+                                        // 每帧调用），这里只需要「偏移取总线」这一条契约。
+                                        viewportBus={pianoRollViewportBus}
                                         sticky
                                     />
 
@@ -6659,24 +6972,22 @@ export const PianoRollPanel: React.FC = () => {
                                         层级说明：它是**最底层**——DOM 顺序在 Canvas2D
                                         主画布之前，且不设 z-index（Canvas2D 主画布用
                                         `absolute inset-0` 覆盖其上）。因此 GL 层只画
-                                        静态底图，曲线 / 选区 / 播放头仍由 Canvas2D
-                                        画在上层。
-                                        仅在开关开启时挂载：未开启时不创建画布，
-                                        避免多申请一个 WebGL 上下文。 */}
-                                    {PARAM_EDITOR_GL_SCENE_ENABLED ? (
-                                        <canvas
-                                            ref={glCanvasRef}
-                                            data-piano-roll-gl-scene
-                                            className="absolute inset-0 pointer-events-none"
-                                            aria-hidden
-                                        />
-                                    ) : null}
+                                        静态底图，曲线 / 选区 / 播放头由 Canvas2D 与 GL
+                                        叠加层画在上层。
+                                        恒挂载：GL 是网格的**唯一**绘制者（Canvas2D
+                                        侧的整段音高网格分支已被删除，不是"跳过"而是
+                                        不存在了），不挂就等于网格消失。 */}
+                                    <canvas
+                                        ref={glCanvasRef}
+                                        data-piano-roll-gl-scene
+                                        className="absolute inset-0 pointer-events-none"
+                                        aria-hidden
+                                    />
 
                                     {/* `data-piano-roll-canvas`：主曲线画布的稳定选择器。
                                         浏览器自动化验证（scripts/dev-shot.mjs）需要按元素
                                         截图逐像素比对曲线，而 canvas 本身没有可锚定的属性；
-                                        内核模式下页面里有多个同尺寸 canvas，按尺寸猜会命中
-                                        错误的那一个。 */}
+                                        页面里有多个同尺寸 canvas，按尺寸猜会命中错误的那一个。 */}
                                     <canvas
                                         ref={canvasRef}
                                         data-piano-roll-canvas
@@ -6687,17 +6998,17 @@ export const PianoRollPanel: React.FC = () => {
                                         onPointerDown={interactions.onCanvasPointerDown}
                                     />
 
-                                    {/* 动态叠加层（阶段 2，Task 6）：播放头与选区。
+                                    {/* 动态叠加层（阶段 2/3）：播放头与选区。
                                         层序：DOM 顺序在曲线画布**之后** => 覆盖其上。
                                         指针事件全部穿透（interactions 挂在曲线画布上），
-                                        否则会挡住参数编辑的命中测试。 */}
-                                    {PARAM_EDITOR_GL_SCENE_ENABLED ? (
-                                        <canvas
-                                            ref={glOverlayCanvasRef}
-                                            className="absolute inset-0 pointer-events-none"
-                                            aria-hidden
-                                        />
-                                    ) : null}
+                                        否则会挡住参数编辑的命中测试。
+                                        恒挂载：播放头归 GL 叠加层（Canvas2D 侧
+                                        `skipPlayhead: true`）。 */}
+                                    <canvas
+                                        ref={glOverlayCanvasRef}
+                                        className="absolute inset-0 pointer-events-none"
+                                        aria-hidden
+                                    />
                                     {s.showParamValuePopup &&
                                         paramValuePreview &&
                                         (() => {
@@ -6735,38 +7046,35 @@ export const PianoRollPanel: React.FC = () => {
                             />
                         </div>
 
-                        {/* 自绘滚动条（仅内核模式）：几何由宿主每帧写入。
-                            样式对齐旧实现的原生滚动条（`.custom-scrollbar`）：
+                        {/* 自绘滚动条：几何由宿主每帧写入。
+                            样式对齐原生滚动条（`.custom-scrollbar`，本面板已不再使用）：
                             - thumb 取 `--qt-scrollbar-thumb`（浅色主题下才看得见），
                               而不是固定半透明黑；
-                            - 轨道**透明**（旧实现是 `scrollbar-color: … transparent`），
-                              加底色会多出一条灰带；
+                            - 轨道**透明**，加底色会多出一条灰带；
                             - 8px 厚 + 胶囊圆角，对应 macOS 的 overlay thin 滚动条
-                              （旧实现的原生滚动条不占布局，这里绝对定位叠加，行为等价）。
+                              （原生滚动条不占布局，这里绝对定位叠加，行为等价）。
                             - 外层即**轨道**：承接「点空白翻页」。宿主的 thumb 处理器
-                              会 `stopPropagation`，因此到达轨道的按下必然不在 thumb 上。 */}
-                        {PARAM_EDITOR_KERNEL_ENABLED ? (
-                            <>
-                                <div
-                                    ref={vScrollbarTrackRef}
-                                    className="absolute right-0 top-0 bottom-0 w-2 z-20"
-                                >
-                                    <div
-                                        ref={vScrollbarThumbRef}
-                                        className="absolute left-0 w-full rounded-full bg-[var(--qt-scrollbar-thumb)]"
-                                    />
-                                </div>
-                                <div
-                                    ref={hScrollbarTrackRef}
-                                    className="absolute bottom-0 left-0 right-0 h-2 z-20"
-                                >
-                                    <div
-                                        ref={hScrollbarThumbRef}
-                                        className="absolute top-0 h-full rounded-full bg-[var(--qt-scrollbar-thumb)]"
-                                    />
-                                </div>
-                            </>
-                        ) : null}
+                              会 `stopPropagation`，因此到达轨道的按下必然不在 thumb 上。
+                            恒挂载：原生滚动条已被 `.hide-scrollbar` 隐藏，自绘条是
+                            用户可见的**唯一**滚动条。 */}
+                        <div
+                            ref={vScrollbarTrackRef}
+                            className="absolute right-0 top-0 bottom-0 w-2 z-20"
+                        >
+                            <div
+                                ref={vScrollbarThumbRef}
+                                className="absolute left-0 w-full rounded-full bg-[var(--qt-scrollbar-thumb)]"
+                            />
+                        </div>
+                        <div
+                            ref={hScrollbarTrackRef}
+                            className="absolute bottom-0 left-0 right-0 h-2 z-20"
+                        >
+                            <div
+                                ref={hScrollbarThumbRef}
+                                className="absolute top-0 h-full rounded-full bg-[var(--qt-scrollbar-thumb)]"
+                            />
+                        </div>
                     </div>
                 </Flex>
             </Flex>

@@ -841,7 +841,7 @@ export const koKR = {
     kb_modifier_pr_vzoom: "캔버스 수직 줌 (타임라인 / 피아노 롤 휠)",
     kb_modifier_param_morph: "파라미터 형태 변형 (누른 채 선택 영역 내 앵커 드래그)",
     kb_modifier_clip_range_to_param_selection:
-        "클립 범위를 파라미터 선택 범위에 추가 (클립을 누른 채 더블 클릭, 다시 하면 해제)",
+        "클립 범위를 파라미터 선택 범위에 추가 (누른 채 오른쪽 클릭)",
     kb_modifier_param_multi_select:
         "다중 선택 범위 (누른 채 드래그로 범위 추가, 기존 범위를 누른 채 클릭하면 해당 범위 해제)",
     kb_modifier_param_fine_adjust:
@@ -1051,10 +1051,13 @@ export const koKR = {
     timeline_display_settings: "타임라인 표시 설정...",
     timeline_display_settings_desc:
         "눈금자의 시간 단위, 라벨 밀도, 재생 헤드 시간 표시를 구성합니다.",
-    render_kernel_enabled: "새 렌더 커널 사용(타임라인 / 파라미터 편집기)",
-    render_kernel_enabled_desc:
-        "끄면 기존 렌더 구현으로 돌아갑니다. 특정 GPU 드라이버에서 표시 문제가 있을 때 확인용입니다.",
-    render_kernel_restart_required: "저장했습니다. 앱을 다시 시작하면 적용됩니다.",
+    kernel_unavailable_title: "타임라인을 렌더링할 수 없습니다(WebGL2 사용 불가)",
+    kernel_unavailable_reason:
+        "브라우저 또는 시스템이 WebGL2 그래픽 컨텍스트를 제공하지 않았습니다.",
+    kernel_unavailable_hints:
+        "확인 사항: 1. 하드웨어 가속과 소프트웨어 래스터화가 비활성화되지 않았는지 확인(브라우저 설정 또는 실행 옵션); 2. 원격 데스크톱 / 가상 머신이라면 로컬에서 실행해 보기; 3. GPU 드라이버 업데이트; 4. 그래픽 리소스를 사용하는 다른 창을 닫고 앱 재시작.",
+    kernel_unavailable_diagnostics: "진단 정보 복사",
+    kernel_unavailable_copied: "복사됨",
     ruler_label_spacing: "라벨 간격",
     show_playhead_time_in_track_header: "트랙 헤더에 재생 헤드 시간 표시",
     copy_playhead_time: "재생 헤드 시간 복사",

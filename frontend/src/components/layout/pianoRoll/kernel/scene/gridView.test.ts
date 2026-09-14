@@ -97,6 +97,58 @@ describe("gridGeometrySignature（网格几何内容签名）", () => {
         expect(other).not.toBe(base);
     });
 
+    it("★ 黑键行背景带颜色参与签名（切主题后带子必须换色）", () => {
+        // 背景带是**整行实心矩形**，比一条线显眼得多：漏进签名就等于切主题后
+        // Canvas2D 侧全变了、而背景带还是上一个主题的 alpha / 色相，且因为签名
+        // 不变（几何不重建），它会一直保持错误颜色直到别的输入碰巧变化。
+        const base = gridGeometrySignature({
+            ...metrics,
+            blackKeyRowBandRgba: [0, 0, 0, 0.08],
+            view: resolveLiveGridView({ ...PITCH, scrollTop: 600 }),
+        });
+        const themed = gridGeometrySignature({
+            ...metrics,
+            blackKeyRowBandRgba: [0, 0, 0, 0.06],
+            view: resolveLiveGridView({ ...PITCH, scrollTop: 600 }),
+        });
+        expect(themed).not.toBe(base);
+        // 缺省（不画背景带）与"显式给出颜色"必须区分：前者根本不产带。
+        expect(sigAt(600)).not.toBe(base);
+    });
+
+    it("★ 音阶音级集合参与签名（开关音阶高亮必须重建几何）", () => {
+        // 【这条守护的是缺陷 #6】音阶高亮此前只在 Canvas2D 分支里画，而那个分支
+        // 因 `skipGrid` 恒为 true 不可达；迁到 GL 网格层后，音级集合若不进签名，
+        // 点按钮只会更新 Redux，几何永不重建——症状与修复前**逐像素相同**
+        // （实测 GL 画布 toDataURL() 前后完全一致）。
+        const off = sigAt(600);
+        const on = gridGeometrySignature({
+            ...metrics,
+            scaleNotes: [0, 4, 7],
+            scaleHighlightRgba: [1, 0.78, 0.31, 0.22],
+            view: resolveLiveGridView({ ...PITCH, scrollTop: 600 }),
+        });
+        expect(on).not.toBe(off);
+
+        // 只换音阶（换调）也必须重建：音级集合本身是几何输入。
+        const otherKey = gridGeometrySignature({
+            ...metrics,
+            scaleNotes: [2, 5, 9],
+            scaleHighlightRgba: [1, 0.78, 0.31, 0.22],
+            view: resolveLiveGridView({ ...PITCH, scrollTop: 600 }),
+        });
+        expect(otherKey).not.toBe(on);
+
+        // 空数组与缺省等价（都不产强调线）→ 签名相同，不产生无谓重建。
+        expect(
+            gridGeometrySignature({
+                ...metrics,
+                scaleNotes: [],
+                view: resolveLiveGridView({ ...PITCH, scrollTop: 600 }),
+            }),
+        ).toBe(off);
+    });
+
     it("★ span 变化必须改变签名（竖向缩放回归：否则只画旧值域、留空白带）", () => {
         // 【为什么单列一条】`center` 的同类不变量已由上一条覆盖，但 `span` 走的是
         // **另一条**数据路径：竖向缩放由面板改 `pitchViewRef.current.span` 并

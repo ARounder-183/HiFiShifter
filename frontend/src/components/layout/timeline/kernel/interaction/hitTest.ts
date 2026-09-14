@@ -23,15 +23,22 @@
  */
 
 import {
+    FADE_CORNER_CAP_HEIGHT_PX,
     FADE_CORNER_CAP_WIDTH_PX,
+    FADE_CORNER_EDGE_WIDTH_PX,
     SNAP_OFFSET_HANDLE_SIZE_PX,
     SNAP_OFFSET_HIT_HEIGHT_PX,
     fadeCornerReservePx,
     snapOffsetHandleXPx,
 } from "../../constants";
 
-/** 左右边缘的默认命中宽度（CSS px）。与 `FADE_CORNER_EDGE_WIDTH_PX` 同量级。 */
-const DEFAULT_EDGE_WIDTH_PX = 6;
+/**
+ * 左右边缘（裁短 / 延长 / 拉伸）的命中宽度（CSS px）。
+ *
+ * 旧实现 `ClipEdgeHandles` 是 `w-[10px]`：比淡变角竖条（6px）宽，因此淡变角竖条
+ * 所在的那条窄带之外、仍在 10px 内的部分**不**属于边缘——它落在 body 上。
+ */
+const EDGE_WIDTH_PX = 10;
 
 /**
  * 命中测试所需的 clip 字段集。
@@ -240,19 +247,31 @@ export function hitTest(args: HitTestArgs): HitResult {
     const clipWidthPx = Math.max(1, clipRightPx - clipLeftPx);
     const rawEdgeWidthPx = Number.isFinite(args.edgeWidthPx)
         ? Math.max(0, args.edgeWidthPx as number)
-        : DEFAULT_EDGE_WIDTH_PX;
+        : EDGE_WIDTH_PX;
     const edgeWidthPx = Math.min(rawEdgeWidthPx, clipWidthPx / 3);
 
-    // 淡变角与 trim 边缘在水平方向重叠，靠**竖直方向**切分（见 ClipHitRegion 注释）：
-    // body 顶部 `fadeCornerReservePx` 高度内、且水平落在角部横帽宽度内 → 淡变角。
-    // clip 高度按「行高 − 上下 padding」近似（绘制端同样留 1px 边距）。
+    // 淡变角与 trim 边缘在水平方向重叠，靠**竖直方向**切分——切法逐条照搬旧实现
+    // （`ClipItem` 的角控件 + `ClipEdgeHandles` 的 yStyle）：
+    //   y ∈ [header, header+14)          → 角部**横帽**（宽 22）→ 淡变
+    //   y ∈ [header+14, header+reserve)  → 角部**竖条**（宽 6）→ 淡变；其余 x 是 body
+    //   y >= header+reserve              → 边缘条（宽 10）→ 裁短 / 拉伸
+    //   y <  header                      → header 控件（**任何 x 都不是边缘**）
+    //
+    // 最后一条是曾经的回归点：内核原先让边缘在任何 y 都优先于 header，于是 header
+    // 左右两端各 6px 被裁切手势抢走——静音 / 锁链徽标与右对齐的增益 / 速率标签
+    // 在那里点不动。
     const clipHeightPx = Math.max(1, rowHeight - 2);
     const bodyHeightPx = Math.max(1, clipHeightPx - headerHeightPx);
     const reservePx = fadeCornerReservePx(bodyHeightPx);
     const localBodyY = localY - headerHeightPx;
-    const inCornerBand = localBodyY >= 0 && localBodyY < reservePx;
+    const inCapBand = localBodyY >= 0 && localBodyY < FADE_CORNER_CAP_HEIGHT_PX;
+    const inStripBand = localBodyY >= FADE_CORNER_CAP_HEIGHT_PX && localBodyY < reservePx;
+    const inEdgeBand = localBodyY >= reservePx;
     const nearLeftCorner = args.contentX - clipLeftPx <= FADE_CORNER_CAP_WIDTH_PX;
     const nearRightCorner = clipRightPx - args.contentX <= FADE_CORNER_CAP_WIDTH_PX;
+    const nearLeftStrip = args.contentX - clipLeftPx <= FADE_CORNER_EDGE_WIDTH_PX;
+    const nearRightStrip = clipRightPx - args.contentX <= FADE_CORNER_EDGE_WIDTH_PX;
+    const inHeaderBand = localY < headerHeightPx;
     const localX = args.contentX - clipLeftPx;
 
     // ── SnapOffset 三角手柄：最高优先级（见 ClipHitRegion 注释）──
@@ -282,16 +301,18 @@ export function hitTest(args: HitTestArgs): HitResult {
     }
 
     let region: ClipHitRegion;
-    if (inCornerBand && nearLeftCorner) {
+    if ((inCapBand && nearLeftCorner) || (inStripBand && nearLeftStrip)) {
         region = "fade-in-corner";
-    } else if (inCornerBand && nearRightCorner) {
+    } else if ((inCapBand && nearRightCorner) || (inStripBand && nearRightStrip)) {
         region = "fade-out-corner";
-    } else if (args.contentX - clipLeftPx <= edgeWidthPx) {
+    } else if (inHeaderBand) {
+        region = "header";
+    } else if (inEdgeBand && args.contentX - clipLeftPx <= edgeWidthPx) {
         region = "left-edge";
-    } else if (clipRightPx - args.contentX <= edgeWidthPx) {
+    } else if (inEdgeBand && clipRightPx - args.contentX <= edgeWidthPx) {
         region = "right-edge";
     } else {
-        region = localY < headerHeightPx ? "header" : "body";
+        region = "body";
     }
 
     return {

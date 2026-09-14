@@ -124,18 +124,52 @@ export const timelineViewportSync = {
 };
 
 /**
+ * 由两个视口元素的左缘算出同步偏移（纯函数，便于单测）。
+ *
+ * 【为什么"测不到"必须与"测得 0"区分开（这是一个真实缺陷的根因）】
+ * 两个面板的挂载顺序不固定：时间轴的内核容器可能晚于参数编辑器出现（面板按需挂载、
+ * WebGL 初始化、加载顺序）。此时旧实现返回 `0`，而 `0` 与"真的对齐"不可区分——偏移被
+ * 静默置 0，参数编辑器**丢掉整段同步位移**，错位量恰好等于偏移本身（= 轨道头宽度 −
+ * 键盘列宽度 ≈ 轨道头区域宽度），而且当时观察器没绑上时间轴元素，之后再没有重测时机，
+ * 只有恰好发生一次布局尺寸变化才会自己恢复——表现为**随机**错位。
+ *
+ * 因此本函数在任一元素缺失时返回 `null`（= 尚不可测），调用方保持上一次的值并重试；
+ * 只有两个元素都在时才算出一个数（哪怕是 0，那也是真实测量值）。
+ *
+ * @param args 两个视口元素的左缘坐标（缺失时为 null）。
+ * @returns 偏移（CSS px，恒为正）；元素缺失时为 null。
+ */
+export function resolveViewportOffsetPx(args: {
+    trackLeftPx: number | null;
+    paramLeftPx: number | null;
+}): number | null {
+    const track = args.trackLeftPx;
+    const param = args.paramLeftPx;
+    if (track === null || param === null) return null;
+    if (!Number.isFinite(track) || !Number.isFinite(param)) return null;
+    return track - param;
+}
+
+/**
  * 测量轨道视图时间线区域与参数编辑器绘制区域之间的全局水平偏移（像素）。
  *
  * 轨道视图左侧有“轨道头”区域，参数编辑器左侧只有较窄的钢琴卷帘/参数刻度，
  * 因此即使两者的 scrollLeft / pxPerSec 相同，网格线也不会在屏幕上垂直对齐。
  * 该偏移 = 轨道时间线区左缘 - 参数编辑器画布区左缘（恒为正）。
+ *
+ * 特殊说明：任一视口元素尚未挂载时返回 `null`（而不是 0），调用方据此保持上一次的
+ * 有效偏移并重试——见 `resolveViewportOffsetPx` 的说明。
+ *
+ * @returns 偏移（CSS px）；元素缺失 / 无 DOM 环境时为 null。
  */
-export function measureTimelineViewportOffsetPx(): number {
-    if (typeof document === "undefined") return 0;
+export function measureTimelineViewportOffsetPx(): number | null {
+    if (typeof document === "undefined") return null;
     const track = document.querySelector<HTMLElement>("[data-timeline-scroller]");
     const param = document.querySelector<HTMLElement>("[data-piano-roll-scroller]");
-    if (!track || !param) return 0;
-    return track.getBoundingClientRect().left - param.getBoundingClientRect().left;
+    return resolveViewportOffsetPx({
+        trackLeftPx: track === null ? null : track.getBoundingClientRect().left,
+        paramLeftPx: param === null ? null : param.getBoundingClientRect().left,
+    });
 }
 
 /**

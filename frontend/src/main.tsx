@@ -35,6 +35,10 @@ function GlobalGestureServices() {
 // clip 数）冷启动即全览；运行时也可用控制台 `window.__hsPerf({...})` 重生成。
 if (import.meta.env.DEV) {
     void import("./dev/perfProject").then((module) => module.installPerfProjectDevtools());
+    // dev-only 调试出口：把 store 挂到 window，便于在浏览器里读取**真实**运行期状态
+    // （选区来源标记 `multiSelectionIntentional` 这类"必须有 Redux 上下文才能验证"
+    // 的事实，从内核句柄读不到）。生产构建不挂载。
+    (window as unknown as { __hfsStore?: typeof store }).__hfsStore = store;
 }
 
 // 帧率探针不再自动挂载：它是排查滚动/缩放掉帧时的临时测量工具，瓶颈

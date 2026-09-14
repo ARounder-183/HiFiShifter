@@ -5,10 +5,14 @@
  * 承载新内核的 React 外壳：提供容器 / 画布 / 自绘滚动条 DOM，把 session 数据与
  * 键位绑定以「镜像 ref」形式喂给命令式宿主（`createTimelineKernelHost`），并把
  * 标尺 / 轨道头 / 播放头等**保留为 DOM** 的外部元素交给宿主在 rAF 内同步。
+ * 播放头位置另以实时 getter（`getPlayheadSec`）注入宿主：镜像滞后一次提交，
+ * 只有 getter 读得到当帧真值（见 `readPlayheadSec`）。
  *
  * 【作用】
  * React 只做三件事：提供 DOM、提供低频数据、接收低频回调（行高 / 缩放 / 场景标脏）；
  * 高频滚动、渲染、DOM 同步全部由宿主在 rAF 内完成，不经 React。
+ * 宿主句柄经 `hostRef` 外泄给面板，供播放头桥接每帧请求重绘
+ * （`invalidatePlayhead`：镜像变化不会自动标脏）。
  *
  * 【与其他模块的关系】
  * - 上游：`TimelinePanel` 在开关开启时渲染本组件（替换旧轨道区）。
@@ -26,6 +30,7 @@
 import React from "react";
 
 import { useAppSelector } from "../../../../app/hooks";
+import { resolveScrollableProjectSec } from "../../../../features/session/projectBoundary";
 import { useAppTheme } from "../../../../theme/AppThemeProvider";
 import { selectKeybinding } from "../../../../features/keybindings/keybindingsSlice";
 import { readDevicePixelRatio, wholeDevicePxLength } from "../../../../utils/devicePixelLine";
@@ -35,7 +40,6 @@ import { CLIP_BODY_PADDING_Y, CLIP_HEADER_HEIGHT } from "../constants";
 import { KernelClipInlineEditor } from "./KernelClipInlineEditor";
 import { createTimelineAxis, type TimelineAxis } from "../../renderKernel/timelineAxis";
 import { TimelineWaveformSurface } from "../TimelineWaveformSurface";
-import { TimelinePitchLineSurface } from "../TimelinePitchLineSurface";
 import {
     createTimelineKernelHost,
     type TimelineKernelData,
@@ -52,6 +56,14 @@ export interface TimelineKernelViewProps {
     readonly initialPxPerSec: number;
     /** 水平缩放变化（内核为真值源），用于驱动标尺刻度等 React 侧派生量。 */
     readonly onPxPerSecChange: (pxPerSec: number) => void;
+    /**
+     * 滚轮缩放请求：内核算好目标后交给 React 落地。
+     *
+     * 标尺是 DOM、由 React 用 `pxPerSec` 布局；若内核自己先切缩放，缩放过程中标尺
+     * 会整整落后一个滚轮步。实现方必须在同一次提交的 layout effect 里把这个
+     * `{pxPerSec, scrollLeft}` 应用到内核（`setViewport`），两层才会同帧切换。
+     */
+    readonly onZoomRequest?: (next: { pxPerSec: number; scrollLeft: number }) => void;
     /**
      * 水平滚动位置的量化提交（每 256px 一次）。
      *
@@ -164,7 +176,14 @@ export interface TimelineKernelViewProps {
         readonly leftPx: number;
         /** 内容坐标宽度（`durationSec × pxPerSec`）。 */
         readonly widthPx: number;
-        readonly trackId: string;
+        /**
+         * 落点轨道；`null` = 落在**全部轨道之下**（将新建轨道）。
+         *
+         * 旧实现同样允许 `null`，并用 `rowTopForTrackId(null) = tracks.length × rowHeight`
+         * 把预览画在**新轨道那一行**——拖到下方时用户能看到素材预览（新前端曾漏掉
+         * 这一支：`null` 直接不渲染，拖到下方就没有任何预览）。
+         */
+        readonly trackId: string | null;
         readonly fileName: string;
         readonly contentWidth: number;
         readonly contentHeight: number;
@@ -180,6 +199,23 @@ export interface TimelineKernelViewProps {
      */
     readonly onDragOver?: React.DragEventHandler<HTMLDivElement>;
     readonly onDrop?: React.DragEventHandler<HTMLDivElement>;
+    /**
+     * 拖出容器。
+     *
+     * 与 `onDragOver` / `onDrop` 挂在同一处：旧实现靠它在拖离时清掉落点预览，
+     * 缺了它预览会一直挂在画面上（没有任何后续事件会清它）。
+     */
+    readonly onDragLeave?: React.DragEventHandler<HTMLDivElement>;
+    /**
+     * 拖入预览**内层元素**的 ref（供调用方命令式移动）。
+     *
+     * 与 `onDragOver` / `onDrop` 同一目的：`useTimelineDragDrop` 在拖动期间用
+     * 直接写 `style` 的方式移动预览（不 setState，避免每帧重渲染整个面板）。旧实现
+     * 把这个 ref 挂在旧滚动容器渲染的元素上；内核模式下那块 DOM 不挂载，ref 恒为
+     * null，于是**同一条轨道内**移动指针时预览完全不动（state 里的 trackId / path
+     * 没变 → React 不重渲染，而命令式写入又落空）。
+     */
+    readonly dropPreviewItemRef?: React.MutableRefObject<HTMLDivElement | null>;
     /**
      * 拖到**全部轨道之下**（新建轨道）时的幽灵行（缺省不渲染）。
      *
@@ -234,18 +270,17 @@ export interface TimelineKernelViewProps {
     /**
      * 内核**不可用**时通知面板（当前只有一种原因：WebGL2 上下文创建失败）。
      *
-     * 【为什么必须由面板接手，而不是本视图自己降级】
-     * 内核的网格与 clip 几何**只有 GL 一条渲染路径**——本视图内没有 Canvas2D
-     * 的等效绘制（旧的 `TimelineScrollArea` / `TimelineCanvasViewport` 才持有
-     * 那条路径，且它们的输入源是原生滚动容器，与内核的视口所有权不兼容）。
-     * 因此"软着陆"只能是把整棵子树**换回既有实现**，而这必须由持有分支的面板做。
+     * 【为什么必须由面板接手】
+     * 内核的网格与 clip 几何**只有 GL 一条渲染路径**——本视图内没有 Canvas2D 的等效
+     * 绘制。旧的 `TimelineScrollArea` / `TimelineCanvasViewport` 曾持有那条路径，但它们
+     * 已随"渲染内核唯一路径"改造**删除**，因此**没有可回退的第二套实现**：面板收到本
+     * 回报后渲染 `KernelUnavailableNotice`（可自助排障的失败界面），而不是切换到另一套
+     * 渲染器。
      *
-     * 【为什么不能只显示一行错误文字（这正是修复前的行为）】
-     * WebGL2 不可用（老驱动 / 远程桌面 / GPU 黑名单 / 上下文数超限）是**预期内的
-     * 环境差异**，不是程序缺陷。原先只渲染一行红字，用户看到的是**空白时间轴**
-     * ——比退回旧实现糟得多。参数编辑器内核与旧的 GL clip 层都已确立"失败必须
-     * 软着陆"的约定（见 `pianoRollKernelHost` 的同名说明），时间轴内核此前是唯一
-     * 的例外；内核改为默认开启后这个例外会直接影响生产用户。
+     * 【为什么必须显式告知用户（不能只留一行红字或静默空白）】
+     * WebGL2 不可用（老驱动 / 远程桌面 / GPU 黑名单 / 上下文数超限）是**预期内的环境
+     * 差异**，不是程序缺陷。失败界面给出原因、排查清单与可复制的诊断信息，用户才能自助
+     * 判断；这是"绝不静默降级"结论（Phase 3 计划 R8）的落地方式。
      *
      * 特殊说明：面板收到后应当把内核开关**永久置为不可用**（本次会话内），否则
      * 每次重渲染都会再挂一次内核、再失败一次。
@@ -261,6 +296,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         onRowHeightChange,
         initialPxPerSec,
         onPxPerSecChange,
+        onZoomRequest,
         getPlayheadSec,
         rulerContentRef,
         trackListScrollerRef,
@@ -271,6 +307,8 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         ghost,
         dropPreview,
         onDragOver,
+        onDragLeave,
+        dropPreviewItemRef,
         onDrop,
         newTrackDrop,
         inlineEdit,
@@ -303,7 +341,6 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
     /** 行内编辑浮层根元素（位置与宽度都由宿主在 rAF 内写入）。 */
     const inlineEditorRef = React.useRef<HTMLDivElement | null>(null);
     const localHostRef = React.useRef<TimelineKernelHost | null>(null);
-    const [fatal, setFatal] = React.useState<string | null>(null);
     /** 宿主是否已创建：波形层依赖内核视口源，必须等宿主就绪后再挂载。 */
     const [hostReady, setHostReady] = React.useState(false);
     /** 可见轨道行窗口（内核低频回调）：波形 scene rows 按行构建。 */
@@ -314,7 +351,11 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
 
     const tracks = useAppSelector((state) => state.session.tracks);
     const clips = useAppSelector((state) => state.session.clips);
-    const projectSec = useAppSelector((state) => state.session.projectSec);
+    // 可滚域时长必须与参数编辑器**同源**（见 `resolveScrollableProjectSec`）：
+    // 两处各取一个来源时内容宽会分叉，同步 scrollLeft 会被浏览器钳制而错位（缺陷 7）。
+    const projectSec = useAppSelector((state) =>
+        resolveScrollableProjectSec(state.session.projectSec, state.session.clips),
+    );
     const bpm = useAppSelector((state) => state.session.bpm);
     const beatsPerBar = useAppSelector((state) => state.session.beats);
     const grid = useAppSelector((state) => state.session.grid);
@@ -354,6 +395,18 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
     const clipRangeSelectKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.clipRangeSelect"),
     );
+    // 音频块范围 → 参数编辑器选区：修饰键 + 双击 block（默认 Alt）。与上面两个
+    // 同源读取，用户改绑后内核手势随之改变。
+    const clipRangeToParamKb = useAppSelector((state) =>
+        selectKeybinding(state, "modifier.clipRangeToParamSelection"),
+    );
+    // 拉伸 / 曲率修饰键：内核只用于**悬停光标**（按住 = 这个拖拽会做别的事）。
+    const clipStretchKb = useAppSelector((state) =>
+        selectKeybinding(state, "modifier.clipStretch"),
+    );
+    const fadeCurvatureKb = useAppSelector((state) =>
+        selectKeybinding(state, "modifier.fadeCurvatureDrag"),
+    );
     const { mode } = useAppTheme();
 
     const buildData = (): TimelineKernelData => ({
@@ -379,6 +432,9 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
             fadeShapeCycle: fadeShapeCycleKb,
             clipMultiSelectToggle: clipMultiSelectToggleKb,
             clipRangeSelect: clipRangeSelectKb,
+            clipRangeToParamSelection: clipRangeToParamKb,
+            clipStretch: clipStretchKb,
+            fadeCurvatureDrag: fadeCurvatureKb,
         },
         playheadZoomEnabled,
         initialPxPerSec,
@@ -415,6 +471,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
     const callbacksRef = React.useRef({
         onRowHeightChange,
         onPxPerSecChange,
+        onZoomRequest,
         getPlayheadSec,
         onVisibleRowsChange: handleVisibleRowsChange,
         onScrollLeftCommit,
@@ -426,6 +483,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
     callbacksRef.current = {
         onRowHeightChange,
         onPxPerSecChange,
+        onZoomRequest,
         getPlayheadSec,
         onVisibleRowsChange: handleVisibleRowsChange,
         onScrollLeftCommit,
@@ -450,9 +508,11 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         () => ({
             onSeek: (sec, commit, trackId) =>
                 interactionsRef.current?.onSeek?.(sec, commit, trackId),
+            onSeekTo: (sec) => interactionsRef.current?.onSeekTo?.(sec),
             onSelectClip: (clipId, additive, rangeSelect, clientX) =>
                 interactionsRef.current?.onSelectClip?.(clipId, additive, rangeSelect, clientX),
-            onDoubleClickClip: (clipId) => interactionsRef.current?.onDoubleClickClip?.(clipId),
+            onDoubleClickClip: (clipId, mode) =>
+                interactionsRef.current?.onDoubleClickClip?.(clipId, mode),
             onToggleClipMute: (clipId, nextMuted) =>
                 interactionsRef.current?.onToggleClipMute?.(clipId, nextMuted),
             onOpenClipFormant: (clipId, screenX, screenY) =>
@@ -487,10 +547,13 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
             onFadeCommit: (args) => interactionsRef.current?.onFadeCommit?.(args),
             onBoxSelectPreview: (args) => interactionsRef.current?.onBoxSelectPreview?.(args),
             onBoxSelectCommit: (args) => interactionsRef.current?.onBoxSelectCommit?.(args),
+            onBoxSelectToParamSelection: (args) =>
+                interactionsRef.current?.onBoxSelectToParamSelection?.(args),
             onContextMenu: (args) => interactionsRef.current?.onContextMenu?.(args),
             onFadeContextMenu: (request) => interactionsRef.current?.onFadeContextMenu?.(request),
             onFadeHover: (args, clientX, clientY) =>
                 interactionsRef.current?.onFadeHover?.(args, clientX, clientY),
+            onClipHover: (args) => interactionsRef.current?.onClipHover?.(args),
             onActivateTake: (clipId, takeId, sec) =>
                 interactionsRef.current?.onActivateTake?.(clipId, takeId, sec),
         }),
@@ -570,6 +633,14 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                 hScrollbarTrack: hTrackRef.current ?? undefined,
                 vScrollbarTrack: vTrackRef.current ?? undefined,
                 data: () => dataRef.current,
+                // 播放头实时读取：宿主构造时只取一次实参，因此这里必须传**稳定**的
+                // 包装函数，内部经 callbacksRef 转发到最新的 getPlayheadSec。
+                //
+                // 【为什么不能只靠 data().playheadSec】镜像由本组件在 render 期写入，
+                // 而视觉插值 ref 是在 `useVisualPlayhead` 的 effect 里更新的——镜像
+                // 因此滞后一次提交，用它定位播放头会停在上一次的位置（实测连续两次
+                // seek，镜像恰好差一次）。getter 直连面板 ref，读到当帧真值。
+                playheadSec: () => callbacksRef.current.getPlayheadSec(),
                 sync: {
                     rulerContent: rulerContentRef?.current ?? null,
                     trackListScroller: trackListScrollerRef?.current ?? null,
@@ -582,6 +653,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                 },
                 onRowHeightChange: (px) => callbacksRef.current.onRowHeightChange(px),
                 onZoomChange: (pxPerSec) => callbacksRef.current.onPxPerSecChange(pxPerSec),
+                onZoomRequest: (next) => callbacksRef.current.onZoomRequest?.(next),
                 onVisibleRowsChange: (firstRow, rowCount) =>
                     callbacksRef.current.onVisibleRowsChange(firstRow, rowCount),
                 interactions: stableInteractions,
@@ -590,12 +662,10 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                 onViewportWidthChange: (px) => callbacksRef.current.onViewportWidthChange?.(px),
             });
         } catch (error) {
-            // 【软着陆】把整棵子树换回既有实现，而不是在本视图里显示一行错误文字。
-            // 本视图没有 Canvas2D 网格 / clip 的等效绘制（GL 是唯一路径），因此
-            // "降级"只能由持有分支的面板来做——见 `onUnavailable` 的说明。
+            // 内核没有 Canvas2D 等效绘制（GL 是唯一路径），本视图无法自行降级：
+            // 回报给面板，由它渲染失败界面（见 `onUnavailable` 的说明）。
             const reason = error instanceof Error ? error.message : String(error);
-            setFatal(reason);
-            console.warn("[TimelineKernelView] 内核不可用，退回既有渲染实现", error);
+            console.warn("[TimelineKernelView] 内核不可用，上报面板显示排障界面", error);
             callbacksRef.current.onUnavailable?.(reason);
             return;
         }
@@ -619,6 +689,21 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         // 只在挂载时创建：宿主是长生命周期运行时对象，数据经 dataRef 流入。
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
+
+    /**
+     * 内容域（工程时长 / 轨道数）变化后重新钳制滚动位置。
+     *
+     * 旧实现用的是原生滚动容器：`scrollWidth/Height` 一变小，浏览器立刻把
+     * `scrollLeft/Top` 夹回合法范围。内核自持滚动状态没有这层兜底，必须在数据
+     * 变化时主动补一次——否则删轨 / 缩短工程之后视图停在越界位置（空白或错位），
+     * 直到用户下一次滚动才被纠正。
+     *
+     * 特殊说明：依赖里用**标量与长度**而不是 `clips` 数组本身——数组引用每次
+     * Redux 更新都会变，用它当依赖等于每帧 reclamp（`reclamp` 会标脏重建场景）。
+     */
+    React.useEffect(() => {
+        localHostRef.current?.reclamp();
+    }, [projectSec, tracks.length, rowHeight]);
 
     /**
      * 行内编辑浮层：定位到 clip header 上，并随视口更新位置。
@@ -700,14 +785,16 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
             className="relative flex-1 overflow-hidden bg-qt-graph-bg outline-none"
             onDragOver={onDragOver}
             onDrop={onDrop}
+            onDragLeave={onDragLeave}
         >
             <canvas ref={canvasRef} className="pointer-events-none absolute inset-0" />
             {/* 波形层：独立 WebGL2 画布，由内核视口源驱动（滚动帧只更新 uniform）。
                 位于 clip 块面之上、细节层之下（细节层由宿主创建，z-index 2）。
-                音高线面与波形面同容器（同一坐标原点、同一视口源）：Pitch
-                Reference Clip 的原始音高线画在波形之上（DOM 顺序即层叠顺序，
-                帧内绘制顺序由 LAYER_ORDER.pitchLine 保证），滚动/缩放与波形
-                同帧提交。 */}
+                【音高线不在此层】Pitch Reference / MIDI 块的原始音高折线与环回
+                标记由细节层（`timelineCanvasRenderer`）绘制，与波形同一次内容
+                坐标提交；此处**不得**再挂一个音高线面，否则同一批 clip 会被画
+                两遍（合并 feature/tools 时其独立 sticky 音高线层即因此移除，
+                数学统一在 `runtime/midiPitchCurve.ts`）。 */}
             {hostReady && waveformAxis !== null && visibleRows.rowCount > 0 ? (
                 <div className="pointer-events-none absolute inset-0 z-[1]">
                     <TimelineWaveformSurface
@@ -718,15 +805,6 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                         widthPx={viewportSize.width}
                         heightPx={viewportSize.height}
                         axis={waveformAxis}
-                        viewportSource={kernelViewportSource}
-                    />
-                    <TimelinePitchLineSurface
-                        tracks={waveformTracks}
-                        startTrackIndex={visibleRows.firstRow}
-                        clipsByTrackId={waveformClipsByTrackId}
-                        rowHeight={rowHeight}
-                        widthPx={viewportSize.width}
-                        heightPx={viewportSize.height}
                         viewportSource={kernelViewportSource}
                     />
                 </div>
@@ -743,7 +821,11 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                     className="pointer-events-none absolute left-0 top-0 z-[3] overflow-hidden"
                     style={{
                         width: snapHighlight.contentWidth,
-                        height: snapHighlight.contentHeight,
+                        // 层高取「内容 ∪ 可视区」的并集：通栏吸附竖线（网格线 / 播放
+                        // 光标 / 采样率等无轨道归属的目标）要一路画到**轨道区底部**，
+                        // 而内容高度只到「轨道行之和 + 添加轨道行」。轨道少、视口高时
+                        // 内容高 < 视口高，只按内容高会把这层连同容器一起裁断。
+                        height: Math.max(snapHighlight.contentHeight, viewportSize.height),
                     }}
                 >
                     <SnapHighlightLayer
@@ -751,6 +833,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                         rowHeight={rowHeight}
                         tracks={tracks}
                         contentHeight={snapHighlight.contentHeight}
+                        viewportHeightPx={viewportSize.height}
                     />
                 </div>
             ) : null}
@@ -814,11 +897,29 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                 {dropPreview === undefined
                     ? null
                     : (() => {
-                          const trackIndex = tracks.findIndex((t) => t.id === dropPreview.trackId);
+                          // `trackId === null` = 拖到全部轨道之下 → 预览画在**新轨道行**
+                          // （`tracks.length`），与旧实现 `rowTopForTrackId(null)` 一致。
+                          const trackIndex =
+                              dropPreview.trackId === null
+                                  ? tracks.length
+                                  : tracks.findIndex((t) => t.id === dropPreview.trackId);
                           if (trackIndex < 0) return null;
                           return (
                               <div
-                                  className="absolute flex items-center overflow-hidden rounded border border-dashed border-qt-accent/70 bg-qt-accent/15 px-1"
+                                  // 命令式移动的目标：`useTimelineDragDrop` 在
+                                  // **同一轨道内**移动时只改这里的 `style`（不 setState，
+                                  // 避免每帧重渲染整个面板）。旧实现把它挂在旧滚动容器
+                                  // 渲染的元素上；内核模式下那块 DOM 不存在，必须把这
+                                  // 个 ref 接到这里，否则指针在一条轨道内移动时预览
+                                  // 完全不动（state 的 trackId/path 都没变 → 不重渲染）。
+                                  ref={dropPreviewItemRef}
+                                  // 【样式必须与旧实现逐类一致】旧实现的素材拖入预览是
+                                  // `rounded-sm` + **1px 虚线 `--qt-highlight`** 边框 +
+                                  // `color-mix(in oklab, var(--qt-highlight) 20%, transparent)`
+                                  // 底，文件名用 `px-2 pt-1 text-[10px] text-qt-text truncate`
+                                  // 顶对齐贴在左上角。这里照搬同一组类（含 `truncate` 需要
+                                  // 的块级容器，因此文件名用 div 而不是 inline 的 span）。
+                                  className="absolute overflow-hidden rounded-sm border border-dashed border-qt-highlight bg-[color-mix(in_oklab,var(--qt-highlight)_20%,transparent)]"
                                   style={{
                                       left: dropPreview.leftPx,
                                       top: trackIndex * rowHeight + 8,
@@ -826,9 +927,9 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                                       height: Math.max(1, rowHeight - 16),
                                   }}
                               >
-                                  <span className="truncate text-[10px] text-qt-text">
+                                  <div className="truncate px-2 pt-1 text-[10px] text-qt-text">
                                       {dropPreview.fileName}
-                                  </span>
+                                  </div>
                               </div>
                           );
                       })()}
@@ -952,11 +1053,6 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                     className="absolute top-0 h-full rounded-full bg-[var(--qt-scrollbar-thumb)]"
                 />
             </div>
-            {fatal !== null ? (
-                <div className="absolute inset-0 flex items-center justify-center text-sm text-red-500">
-                    {`时间轴内核不可用：${fatal}`}
-                </div>
-            ) : null}
         </div>
     );
 };

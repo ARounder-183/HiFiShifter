@@ -3,8 +3,8 @@
  *
  * 【主要内容】
  * 1. 参与集合：单点 / 多选 / 编组展开 / 忽略编组 / 禁用组 / 淡变不展开；
- * 2. 位移换算：起点钳到 0、逐参与者独立钳制、跨轨按各自初始序号 + 同一偏移量、
- *    轨道越界钳制；
+ * 2. 位移换算：起点钳到 0、跨轨按**整组共用的偏移量**（可用区间由选区最上/最下
+ *    两条轨道决定，越界时整组停住而不是逐成员钳制）；
  * 3. 边界：锚点不存在返回空、轨道不存在不移动轨道。
  *
  * 【作用】这些断言是「选中多个 clip 只动一个」「同组不联动」这类数据语义缺陷的
@@ -151,31 +151,50 @@ describe("applyKernelEditDelta", () => {
         expect(moves.map((m) => m.startSec)).toEqual([1.5, 0, 7.5]);
     });
 
-    it("跨轨按各自初始序号 + 同一偏移量移动", () => {
+    it("跨轨：整组共用同一个偏移量，避免成员被压到同一轨", () => {
+        // 选区占满 t1..t3：可用偏移区间为 [0, 0]（下移会顶出末行成员），
+        // 因此整组原地不动——而不是逐成员各自钳到最近合法轨道。
         const { moves } = applyKernelEditDelta({
             participants,
             deltaStartSec: 0,
             deltaTrack: 1,
             trackIds: TRACKS,
         });
-        expect(moves.map((m) => m.trackId)).toEqual(["t2", "t3", "t3"]);
+        expect(moves.map((m) => m.trackId)).toEqual(["t1", "t2", "t3"]);
     });
 
-    it("轨道越界被钳制到合法范围", () => {
-        const up = applyKernelEditDelta({
-            participants,
-            deltaStartSec: 0,
-            deltaTrack: -5,
-            trackIds: TRACKS,
+    it("跨轨：区间内的偏移整组一起套用，越界时整组停住（保持相对布局）", () => {
+        // 选区只占 t1..t2 → 可用偏移区间 [0, +1]（最上已到顶、最下还能再下移 1）。
+        const pair = resolve("a", [clip("a", "t1", 1), clip("b", "t2", 3)], {
+            multiSelectedClipIds: ["a", "b"],
         });
-        expect(up.moves.map((m) => m.trackId)).toEqual(["t1", "t1", "t1"]);
-        const down = applyKernelEditDelta({
-            participants,
-            deltaStartSec: 0,
-            deltaTrack: 5,
-            trackIds: TRACKS,
-        });
-        expect(down.moves.map((m) => m.trackId)).toEqual(["t3", "t3", "t3"]);
+        // 下移 1 条：两者一起下移，相对布局保持。
+        expect(
+            applyKernelEditDelta({
+                participants: pair,
+                deltaStartSec: 0,
+                deltaTrack: 1,
+                trackIds: TRACKS,
+            }).moves.map((m) => m.trackId),
+        ).toEqual(["t2", "t3"]);
+        // 大幅下移：整组一起停在 t2,t3（逐成员钳制会得到 t3,t3——被压扁）。
+        expect(
+            applyKernelEditDelta({
+                participants: pair,
+                deltaStartSec: 0,
+                deltaTrack: 9,
+                trackIds: TRACKS,
+            }).moves.map((m) => m.trackId),
+        ).toEqual(["t2", "t3"]);
+        // 上移：最上成员已在 t1 → 整组停住，不改轨道。
+        expect(
+            applyKernelEditDelta({
+                participants: pair,
+                deltaStartSec: 0,
+                deltaTrack: -1,
+                trackIds: TRACKS,
+            }).moves.map((m) => m.trackId),
+        ).toEqual(["t1", "t2"]);
     });
 
     it("非法位移退化为不位移", () => {

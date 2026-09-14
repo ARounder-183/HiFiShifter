@@ -138,6 +138,32 @@ export interface GridGeometrySignatureArgs {
     readonly dpr: number;
     readonly strongRgba: readonly number[];
     readonly weakRgba: readonly number[];
+    /** 黑键行背景带颜色（钢琴背景）；缺省表示不画背景带。 */
+    readonly blackKeyRowBandRgba?: readonly number[] | undefined;
+    /**
+     * 音阶高亮的音级集合（pitch class 0..11）。
+     *
+     * 特殊说明：必须是**集合内容**而不是数组引用——签名是字符串，`join` 后比较
+     * 内容；同一组音级的两个不同数组应产生同一个签名（否则每次 React 渲染都会
+     * 重建几何）。顺序不同（`[0,4,7]` vs `[7,4,0]`）会得到不同签名，代价只是
+     * 偶尔多一次重建，不影响正确性。
+     */
+    readonly scaleNotes?: readonly number[] | undefined;
+    /** 音阶强调线颜色；缺省表示不画强调线。 */
+    readonly scaleHighlightRgba?: readonly number[] | undefined;
+    /**
+     * Tempo Map 分段音阶（已投影到视口 x）。
+     *
+     * 必须入签名：段边界是**时间锚定**的，滚动 / 缩放会改变投影后的 x 范围——
+     * 不入签名就会出现"滚动了但分段高亮没跟着动"。
+     */
+    readonly scaleSegments?:
+        | readonly {
+              readonly x0: number;
+              readonly x1: number;
+              readonly notes: readonly number[];
+          }[]
+        | undefined;
 }
 
 /**
@@ -145,12 +171,18 @@ export interface GridGeometrySignatureArgs {
  *
  * 必须包含**全部决定几何的输入**：种类、视口（中心 + 跨度）、值域边界、视口尺寸
  * （决定横线的横向范围与竖线的可见区间）、dpr（决定线条按物理像素的取向与厚度）、
- * 两条颜色（决定实例的 rgba）。
+ * 以及**每一种颜色与每一组音级集合**——两条网格线颜色（`strongRgba` / `weakRgba`）、
+ * 黑键行背景带颜色（`blackKeyRowBandRgba`）、音阶高亮音级（`scaleNotes`）与强调线
+ * 颜色（`scaleHighlightRgba`）。
  *
- * 漏项的代价是"该输入变化后几何不更新"：颜色漏了 → 切主题不生效；视口尺寸漏了 →
- * 缩放窗口后网格不铺满。因此这里**宁可多编**，代价只是偶尔多一次重建。
+ * 漏项的代价是"该输入变化后几何不更新"：颜色漏了 → 切主题不生效；音级集合漏了 →
+ * 开 / 关音阶高亮画面不动；背景带颜色漏了 → 主题切换后带子仍是旧色。因此这里
+ * **宁可多编**，代价只是偶尔多一次重建。
  *
- * 特殊说明：必须是**纯字符串**且对同一输入稳定（本函数不含时间戳 / 随机量），
+ * 特殊说明 1：可选颜色 / 集合按 `?? ""` 参与——缺省与"显式给出"是两种不同的几何
+ * 输入，不能混为一谈（缺省表示不画该图层）。
+ *
+ * 特殊说明 2：必须是**纯字符串**且对同一输入稳定（本函数不含时间戳 / 随机量），
  * 否则每帧都会重建几何，滚动帧预算会被直接吃掉。
  *
  * @param args 见 `GridGeometrySignatureArgs`。
@@ -168,6 +200,13 @@ export function gridGeometrySignature(args: GridGeometrySignatureArgs): string {
         args.dpr,
         args.strongRgba.join(","),
         args.weakRgba.join(","),
+        args.blackKeyRowBandRgba?.join(",") ?? "",
+        args.scaleNotes?.join(",") ?? "",
+        // 分段音阶：段边界（投影后的视口 x）与各段音级都要入签名。
+        args.scaleSegments
+            ?.map((segment) => `${segment.x0},${segment.x1},${segment.notes.join(".")}`)
+            .join(";") ?? "",
+        args.scaleHighlightRgba?.join(",") ?? "",
     ].join("|");
 }
 

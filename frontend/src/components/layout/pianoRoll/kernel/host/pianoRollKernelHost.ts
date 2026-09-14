@@ -16,8 +16,10 @@
  * - **阶段 1 不含 WebGL**：绘制由面板的 Canvas2D 完成，宿主经 `onFrame(axis)` 交回。
  *   因此本模块的滚动 / 视口逻辑可在无 jsdom 的 node 环境单测（见同目录 `.test.ts`）。
  *   阶段 2/3 已在本文件之上叠加 4 条 GL 管线（静态场景 / 键盘与数值轴 / 文字字形 /
- *   曲线），但它们的**失败都是软着陆**：GL 不可用只把句柄置空、退回 Canvas2D 路径，
- *   不抛错（见「GL 场景层」一节的说明）。
+ *   曲线）。**这些管线现在没有 Canvas2D 备份**——面板侧的 `skip*` 恒为 true（GL 是
+ *   这些图层的唯一绘制者），因此本文件内的"失败软着陆"只指**不抛错、只把句柄置空**
+ *   这一层；失败后那些图层无人绘制（已知并接受的限制，见
+ *   `docs/superpowers/specs/2026-09-13-timeline-single-path-design.md` §2.4）。
  * - **输入按轴分配所有权**：滚动条 thumb 拖拽与轨道翻页、以及**竖向键盘翻页**
  *   （PageUp / PageDown / Home / End，见 `renderKernel/keyboardScroll`）由宿主注册监听；
  *   其余手势（滚轮、中键平移、绘制）仍在面板与 `usePianoRollInteractions`。
@@ -87,6 +89,7 @@ import {
     buildPitchGridInstances,
     buildValueGridInstances,
     type GridInstance,
+    type GridScaleSegment,
 } from "../scene/gridInstances";
 import {
     gridGeometrySignature,
@@ -181,23 +184,35 @@ export interface PianoRollKernelHostArgs {
      */
     readonly axisWidthPx?: number;
     /**
-     * 是否启用 GL 场景层。缺省 `false`。
+     * 是否启用 GL 场景层。缺省 `false`（**不传就退化为纯滚动内核**）。
      *
-     * 特殊说明：这是**运行时开关**而不是模块常量，便于测试两种路径而不必重新
+     * 特殊说明 1：这是**运行时入参**而不是模块常量，便于测试两种路径而不必重新
      * 导入模块（模块级常量在 dev 下还会被 HMR 缓存）。
+     *
+     * 特殊说明 2：生产调用方（`PianoRollPanel`）现在**恒传 `true`**——GL 已接管
+     * 网格 / 键盘 / 轴文字 / 播放头 / 曲线，面板侧的 `skip*` 也恒为 true，因此
+     * "不开 GL"在生产上已不是一种可用的组合（见设计文档 §2.4）。保留该入参是为了
+     * 让本文件仍可被单测以 `false` 覆盖纯滚动路径。
      */
     readonly glSceneEnabled?: boolean;
     /**
      * 水平同步偏移（CSS px）：内容层相对绘制区原点的右移量，缺省 0。
      *
-     * 【为什么必须注入】「同步时间轴视图」开启时，参数编辑器的绘制区比轨道区窄，
-     * 内容必须整体右移一个偏移量，两边网格线才能在屏幕上对齐。旧实现把它做进
-     * `paddedContentWidth`，于是**原生**水平域是 `[0, 内容宽 + 偏移]`，**绘制**域是
-     * `[−偏移, 内容宽]`——**含负值**。
+     * 【为什么必须注入】「同步时间轴视图」开启时，参数编辑器的绘制区比轨道区窄
+     * （少一个「轨道头 − 键盘列」的宽度差），内容必须整体右移一个偏移量，两边网格线
+     * 才能在屏幕上对齐。偏移是**纯投影量**：它只改变内容画在屏幕上的位置，不改变
+     * 可滚范围——内核的**原生**水平域恒为 `[0, 内容宽]`，与轨道视图逐值相等。
+     *
+     * 【为什么偏移不进可滚范围（关键不变量）】同步模式下两个面板共享同一个水平位置，
+     * 该位置就是轨道视图的原生 `scrollLeft`。若把偏移做进参数编辑器的可滚范围
+     * （曾经的 `[0, 内容宽 + 偏移]`），它就会比轨道视图多出一段「只有自己能滚」的
+     * 空白：滚到最右时轨道视图停在工程宽度处（工程结尾落在轨道区左缘），参数编辑器
+     * 却能再滚一个偏移量（工程结尾落到轨道区左缘以左），两个面板从此不再对齐——用户
+     * 看到的就是「工程结尾右侧的额外空白长度不同」。
      *
      * 内核的位置字段恒被钳到 `[0, max]`（无法表示负值），因此内核持有的是**原生
-     * 坐标**（域 `[0, 内容宽 + 偏移]`），偏移在本文件的两个边界各换算一次：
-     * - 产出投影 / 读视口时：`drawing = native − offset`；
+     * 坐标**（域 `[0, 内容宽]`），偏移在本文件的两个边界各换算一次：
+     * - 产出投影 / 读视口时：`drawing = native − offset`（域 `[−偏移, 内容宽 − 偏移]`）；
      * - 外部按绘制坐标写入时：`native = drawing + offset`。
      *
      * 偏移为 0（未开启同步）时两个坐标系重合，行为与既有调用方完全一致。
@@ -220,7 +235,7 @@ export interface PianoRollKernelHostArgs {
      * 【为什么必须与 `onScrollLeftCommit` 分开】宿主每帧把真值写回原生 scroller
      * （镜像），这会触发 `scroll` 事件。面板若在该事件里把位置推给共享视口，就会把
      * 宿主的**自身回写**误当成用户滚动；若不推送，则**滚动条拖拽 / 轨道翻页**这类
-     * 真实手势又会漏掉同步（旧实现里拖原生滚动条是会被同步的）。
+     * 真实手势又会漏掉同步。
      *
      * 两者无法靠比较数值区分（拖拽后的镜像回写与用户原生滚动值相同），因此由
      * **来源**区分：只有宿主自己解析出的用户手势（拖 thumb、点轨道翻页）走本回调。
@@ -294,9 +309,9 @@ export interface PianoRollKernelHost {
     /**
      * 读取 GL 场景层的运行状态（供面板提示与浏览器验证使用）。
      *
-     * 【为什么放进公开句柄】GL 走的是"失败软着陆"策略：不可用时静默退回 Canvas2D，
-     * 面板外观完全正常。于是"GL 到底有没有生效"无法从画面上判断——必须能读到
-     * 明确状态，否则验证会误把"退回 Canvas2D"当成"GL 正常"。
+     * 【为什么放进公开句柄】GL 失败时**不抛错**（只把句柄置空），面板外观不一定
+     * 立刻可辨（曲线等图层本就归 GL，网格则整片消失）。于是"GL 到底有没有生效"
+     * 必须能读到明确状态，否则验证会误把"GL 未生效"当成"GL 正常"。
      *
      * @returns `active` 表示 GL 已建好并在绘制；
      *          `failureReason` 在尝试启用但失败时给出原因（未启用时为 null）；
@@ -328,6 +343,22 @@ export interface PianoRollKernelHost {
     };
     /** 标脏：请求下一帧提交。 */
     invalidate(): void;
+    /**
+     * **立即**提交一帧（不等待下一帧；未标脏时不做任何事）。
+     *
+     * 【为什么需要：DOM / Canvas2D 与 GL 必须落在同一个任务里】
+     * 默认的 `invalidate` 把绘制交给 rAF 合并。但面板的输入路径（缩放落地、共享视口
+     * 应用、值域平移/缩放）会在事件任务里**同步**写下 DOM / Canvas2D，此时若 GL 侧
+     * 等下一帧，同一份视口就会被两套图层分帧呈现：曲线 / 原始音高线 / 播放头比同屏的
+     * 标尺、网格、主画布慢一拍到几帧（用户报告"这些线迟缓几帧渲染"）。
+     *
+     * 实测（Chrome，参数编辑器内滚轮缩小）：面板 t=6384 写 DOM/Canvas2D，GL t=6446 才用
+     * 同一个 scrollLeft 重绘。改为本方法后两者同任务提交。
+     *
+     * 特殊说明：本方法走的是**同一条** `draw()`（唯一绘制路径），并取消已排队的那一帧
+     * ——不会重复绘制，也不会漏掉绘制内的新标脏。
+     */
+    paintNow(): void;
     /** 释放全部资源（帧循环、滚动订阅、尺寸观察）。重复调用安全。 */
     dispose(): void;
 }
@@ -421,9 +452,9 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         projectSec: () => data().projectSec,
         trackCount: () => 0,
         extraContentHeightPx: verticalExtraHeightPx,
-        // 水平域 = 内容宽 + 同步偏移，与旧实现 `paddedContentWidth` 撑出的原生域一致；
-        // 内核因此持有**原生坐标**，绘制坐标在边界处减去偏移（见 args 的说明）。
-        extraContentWidthPx: horizontalOffsetPx,
+        // 水平域 = 内容宽（**不含**同步偏移，与轨道视图逐值相等）：见
+        // `horizontalOffsetPx` 的「关键不变量」——偏移是纯投影量，进了可滚范围
+        // 就会让参数编辑器比轨道视图多出一段「只有自己能滚」的空白。
         viewportHeightPx: () => viewportHeightPx,
     });
 
@@ -447,9 +478,11 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
     // 【职责】把**静态**图层（网格等）画到独立画布上：几何按内容坐标构建并常驻
     // GPU，滚动帧只更新 `u_viewOrigin`、播放帧不重绘几何。这正是阶段 2 的收益点。
     //
-    // 【失败必须是软着陆】WebGL2 不可用（老驱动 / 远程桌面 / 上下文数超限）是
-    // 预期内的环境差异。任一步失败都只记原因并**退回 Canvas2D 路径**——绝不能让
-    // 参数编辑器变空白。因此这里不抛错，只把 `gl` 置空。
+    // 【失败不抛错，只把句柄置空】WebGL2 不可用（老驱动 / 远程桌面 / 上下文数超限）
+    // 是预期内的环境差异。任一步失败都只记原因并让这些 GL 图层**无人绘制**——面板侧
+    // 的 `skip*` 恒为 true，已经没有 Canvas2D 备份可退（已知并接受的限制，
+    // 见设计文档 §2.4）。这里仍不抛错：抛错会让整个面板崩掉，而"图层缺失"至少
+    // 还能显示曲线与波形，且失败原因可经 `getGlStatus()` 读到。
     let glHandle: GlCanvasHandle | null = null;
     let glProgram: SdfBoxProgram | null = null;
     let glFailureReason: string | null = null;
@@ -612,6 +645,9 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
      * 特殊说明：**不含横向滚动位置**——横线横跨整个视口、竖线的 y 也已在视口坐标
      * 里算好，因此横向滚动确实无需重建（"横向滚动零重建"成立）。视口宽高要含
      * （分别决定横线长度与可见行数）；dpr 要含（决定半像素取向与线厚）。
+     * 全部颜色与音阶音级集合（`blackKeyRowBandRgba` / `scaleNotes` /
+     * `scaleHighlightRgba`）也必须含——漏掉任何一个，该图层就会在输入变化后停在
+     * 旧状态（切主题背景带不换色 / 开音阶高亮画面不动，即缺陷 #6 的同类）。
      *
      * @param spec 当前网格输入。
      * @returns 内容签名；无网格时为空串。
@@ -629,7 +665,40 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             dpr: readDevicePixelRatio(),
             strongRgba: spec.strongRgba,
             weakRgba: spec.weakRgba,
+            blackKeyRowBandRgba: spec.blackKeyRowBandRgba,
+            scaleNotes: spec.scaleNotes,
+            scaleSegments: projectScaleSegments(spec),
+            scaleHighlightRgba: spec.scaleHighlightRgba,
         });
+    }
+
+    /**
+     * 把 spec 的**分段音阶**（时间域）投影成视口 x 区间。
+     *
+     * 【为什么在宿主侧投影而不是面板侧】面板的网格镜像 effect 只在低频输入变化时
+     * 重跑（其中一步是 `parseRgbaColor` 的 DOM 探针）；把 `prAxis` 加进它的依赖数组
+     * 会让**每一帧滚动**都做一次颜色解析。宿主持有实时轴（`currentAxis()`），每帧
+     * 本来就在比签名字符串——投影放这里只多几次乘法，且只重建网格层几何（曲线层
+     * 另有缓存，不受影响）。
+     *
+     * @param spec 网格输入。
+     * @returns 投影后的分段；无分段时为空数组（构建器据此退回均匀路径）。
+     */
+    function projectScaleSegments(
+        spec: PianoRollGridSpec | null | undefined,
+    ): readonly GridScaleSegment[] {
+        const segments = spec?.scaleSegments;
+        if (segments === undefined || segments.length === 0) return [];
+        const axis = currentAxis();
+        const projected: GridScaleSegment[] = [];
+        for (const segment of segments) {
+            projected.push({
+                x0: secToViewportPx(axis, segment.startSec),
+                x1: secToViewportPx(axis, segment.endSec),
+                notes: segment.notes,
+            });
+        }
+        return projected;
     }
 
     /**
@@ -658,6 +727,10 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                         valueToY: spec.valueToY,
                         colorC: spec.strongRgba,
                         colorOther: spec.weakRgba,
+                        blackKeyRowBandRgba: spec.blackKeyRowBandRgba,
+                        scaleNotes: spec.scaleNotes,
+                        scaleSegments: projectScaleSegments(spec),
+                        scaleHighlightRgba: spec.scaleHighlightRgba,
                     })
                   : buildValueGridInstances({
                         kind: spec.kind,
@@ -1164,14 +1237,15 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
     //
     // 【为什么必须采纳】创建宿主的是 effect，而「值域 → 竖向滚动条」与「时间轴同步」
     // 两个 layout effect 都排在它**之前**执行——它们已经往原生 scroller 写过目标
-    // 位置，但那时的宿主还不存在（`hostRef.current` 仍为 null，走了旧实现分支）。
+    // 位置，但那时的宿主还不存在（`hostRef.current` 仍为 null，`applyHorizontalScrollPosition`
+    // 等入口退回直接写原生 scroller 那一支）。
     // 若内核仍从 0 起步，它的首帧镜像回写会把这些位置**覆盖掉**，表现为
     // 「钢琴键盘整体偏移一个八度（竖向回顶端）/ 横向跳回工程起点」——两者都曾在
     // 浏览器像素比对中实际出现。
     //
     // 因此这里把容器当前的两轴原生位置都收进内核。此刻值的来源有三，都应当采纳：
-    // 上述 layout effect 写入的目标值、浏览器恢复的历史滚动位置（旧实现里同样是
-    // 事实源）、以及重挂载前内核自己镜像回写的值。
+    // 上述 layout effect 写入的目标值、浏览器恢复的历史滚动位置、以及重挂载前内核
+    // 自己镜像回写的值。
     {
         const nativeLeft = container.scrollLeft;
         if (Number.isFinite(nativeLeft) && nativeLeft > 0) {
@@ -1205,6 +1279,25 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
     }
 
     /**
+     * 用户手势的视口提交：上报来源 + **同任务**绘制。
+     *
+     * 【为什么手势必须同任务绘制】面板的权威写入点（缩放落地、共享视口应用、值域
+     * 平移/缩放）以及原生滚动事件路径都已改为同步提交（见 `paintNow`）。宿主自己解析
+     * 的手势（拖 thumb、点轨道翻页）若仍走 `invalidate()` 的 rAF 合并，就只剩它在
+     * 下一帧才动：同一屏里"内容 / 曲线 / 播放头"比指针慢一帧，而其他路径已经不慢。
+     * 统一成本方法后，所有用户手势都是"写内核 → 同任务提交"。
+     *
+     * 特殊说明：程序化写入（面板的数据驱动 re-clamp、镜像回写、共享视口应用）不走
+     * 这里——那些路径的绘制仍由 rAF 合并，避免把连续的数据更新变成逐次绘制。
+     *
+     * @param axis 手势作用的轴（"x" 还会上报共享视口的用户来源）。
+     */
+    function commitUserGesture(axis: "x" | "y"): void {
+        if (axis === "x") notifyUserScrollLeft();
+        loop.flush();
+    }
+
+    /**
      * 计算两条滚动条的几何（**绘制与命中的唯一几何来源**）。
      *
      * 【为什么必须是唯一来源】宿主有三处需要几何：每帧写 thumb 样式、thumb 拖拽的
@@ -1212,8 +1305,11 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
      * 原生还是绘制坐标）迟早分叉，表现就是「画出来的 thumb 和能拖的范围不一致」。
      *
      * 口径（与旧实现的原生滚动条逐值对齐，见 `scrollbarSpec` 的入参说明）：
-     * - 内容尺寸 = 滚动上限 + 视口尺寸（水平即原生 `scrollWidth`，含同步偏移）；
-     * - 位置用**绘制坐标**（原生坐标减去同步偏移），因为滚动条画在绘制区上。
+     * - 内容尺寸 = 滚动上限 + 视口尺寸（水平即原生 `scrollWidth` = 内容宽 + 视口宽）；
+     * - 位置、上限都用**原生坐标**。`computeScrollbar` 的 thumb 起点是
+     *   `位置 / 上限`，两者必须同域；上限是原生域（内容宽，不含偏移），位置若减去
+     *   偏移就会让 thumb 在同步模式下永远走不到轨道末端（拖拽本身用的是增量，两域
+     *   相减抵消，因此只有起点会错——正是"能拖到但画不对"这类难查的不一致）。
      *
      * @returns 两条轴的几何；不可滚动时 `scrollable` 为 false。
      */
@@ -1222,7 +1318,7 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         return resolvePianoRollScrollbarGeometries({
             viewportWidthPx,
             viewportHeightPx,
-            scrollLeftPx: Math.max(0, view.scrollLeft - horizontalOffsetPx()),
+            scrollLeftPx: view.scrollLeft,
             scrollTopPx: view.scrollTop,
             maxScrollLeftPx: scroll.maxScrollLeft(),
             maxScrollTopPx: scroll.maxScrollTop(),
@@ -1267,17 +1363,35 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
     /**
      * 把视口写到需要跟随的 DOM（标尺内容层 / 背景网格）。
      *
-     * @param view 当前视口真值。
+     * 【为什么必须传绘制坐标，而不是内核视口值】
+     * `view.scrollLeft` 是**原生坐标**；而标尺刻度、网格线、画布、波形全都按
+     * **绘制坐标**（原生 − 同步偏移）布局。同一帧里 `currentAxis()`（投影）、
+     * `onFrame`（面板绘制）与量化提交三处都做了这个减法，本函数曾是**唯一**漏掉的
+     * 一处——于是标尺按绘制坐标平移、网格却按原生坐标绘制，两者整整差一个偏移量，
+     * 只在开启「同步时间轴视图」（偏移非零）时可见。
+     *
+     * 实测（偏移 200、原生 0）：标尺内容坐标 0 落在屏幕 x **256**（与时间轴内容
+     * 坐标 0 重合），网格内容坐标 0 落在屏幕 x **56**。用户报告为"标尺和底下网格线
+     * 对不齐"。
+     *
+     * 特殊说明：面板 `applyScrollLayers` 写的是**同两个图层**（宿主模式下它经
+     * `onFrame` 提交）。两者口径必须一致，否则"最后一次写入者获胜"——标尺由本函数
+     * （去重后不再写）与面板各写一次，网格由 `BackgroundGrid` 按自身 key 去重、
+     * 每次都采纳最后一次调用，口径不同就会出现"一个对一个错"。
+     *
+     * @param view 当前视口真值（原生坐标）。
      */
     function syncDom(view: TimelineViewportState): void {
+        // 绘制坐标：与 currentAxis / onFrame / 量化提交同一口径（见上方说明）。
+        const drawingScrollLeft = view.scrollLeft - horizontalOffsetPx();
         const ruler = sync?.rulerContent;
-        if (ruler != null && shouldWrite(view.scrollLeft, lastRulerTranslateX)) {
-            lastRulerTranslateX = view.scrollLeft;
-            ruler.style.transform = `translateX(${-view.scrollLeft}px)`;
+        if (ruler != null && shouldWrite(drawingScrollLeft, lastRulerTranslateX)) {
+            lastRulerTranslateX = drawingScrollLeft;
+            ruler.style.transform = `translateX(${-drawingScrollLeft}px)`;
         }
         // 网格层自带重绘节流（`BackgroundGrid` 内部判定），这里只需转交绘制坐标。
         if (sync?.gridLayer != null) {
-            invokeGridRedrawHandler(sync.gridLayer, view.scrollLeft);
+            invokeGridRedrawHandler(sync.gridLayer, drawingScrollLeft);
         }
     }
 
@@ -1443,8 +1557,9 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                         scroll.maxScrollLeft(),
                     ),
             );
-            // 用户手势：拖 horizontal thumb 是真实意图，需通知面板同步共享视口。
-            notifyUserScrollLeft();
+            // 用户手势：拖 horizontal thumb 是真实意图，需通知面板同步共享视口；
+            // 同时同任务提交（内容 / 曲线 / 播放头与指针同帧）。
+            commitUserGesture("x");
             return;
         }
         scroll.setScrollTop(
@@ -1455,6 +1570,7 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                     scroll.maxScrollTop(),
                 ),
         );
+        commitUserGesture("y");
     }
 
     const onThumbPointerMove = (event: PointerEvent): void => {
@@ -1486,9 +1602,9 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
      * 翻页量 = 该轴视口尺寸（浏览器的轨道翻页按整屏走）。目标值可能越界，交给
      * `ScrollKernel` 钳制（与所有写入路径同一约定）。
      *
-     * 特殊说明：几何与当前位置都必须是**绘制坐标**口径（与 `scrollbarGeometries`
+     * 特殊说明：几何与当前位置都必须是**原生坐标**口径（与 `scrollbarGeometries`
      * 同源），否则同步模式下判定用的 thumb 区间会整体偏移一个 offset，表现为
-     * 「点轨道有时候没反应」。写回时再换回原生坐标（水平轴加偏移）。
+     * 「点轨道有时候没反应」。
      *
      * @param axis 轴别。
      * @returns 事件处理器。
@@ -1502,17 +1618,16 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             const view = scroll.get();
             const geometries = scrollbarGeometries();
             if (axis === "x") {
-                const drawingScrollLeft = Math.max(0, view.scrollLeft - horizontalOffsetPx());
                 const target = scrollTargetFromTrackClick(
                     event.clientX - trackRect.left,
                     geometries.horizontal,
-                    drawingScrollLeft,
+                    view.scrollLeft,
                     viewportWidthPx,
                 );
                 if (target !== null) {
-                    scroll.setScrollLeft(target + horizontalOffsetPx());
-                    // 用户手势：点轨道翻页同样需要同步共享视口。
-                    notifyUserScrollLeft();
+                    scroll.setScrollLeft(target);
+                    // 用户手势：点轨道翻页同样需要同步共享视口 + 同任务提交。
+                    commitUserGesture("x");
                 }
                 return;
             }
@@ -1522,7 +1637,10 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                 view.scrollTop,
                 viewportHeightPx,
             );
-            if (target !== null) scroll.setScrollTop(target);
+            if (target !== null) {
+                scroll.setScrollTop(target);
+                commitUserGesture("y");
+            }
         };
     }
 
@@ -1687,6 +1805,11 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         invalidate() {
             if (disposed) return;
             loop.invalidate();
+        },
+
+        paintNow() {
+            if (disposed) return;
+            loop.flush();
         },
 
         dispose() {

@@ -754,8 +754,7 @@ export const zhTW = {
     kb_modifier_horizontal_zoom: "畫布水平縮放（時間軸 / 鋼琴捲簾 / 琴鍵區滾輪）",
     kb_modifier_pr_vzoom: "畫布垂直縮放（時間軸 / 鋼琴捲簾滾輪）",
     kb_modifier_param_morph: "參數形變（按住並在選取區內拖動曲線錨點）",
-    kb_modifier_clip_range_to_param_selection:
-        "音訊塊範圍加入參數選取區（按住雙擊音訊塊；再點一次取消該塊範圍）",
+    kb_modifier_clip_range_to_param_selection: "音訊塊範圍加入參數選取區（按住右鍵單擊音訊塊）",
     kb_modifier_param_multi_select:
         "多選取區（按住拖曳追加一段選取區；按住點擊既有選取段則取消該段）",
     kb_modifier_param_fine_adjust: "精細調整（按住：滑桿 / 輸入框滾輪 / 增益拖拽 / 顫音滾輪）",
@@ -953,10 +952,12 @@ export const zhTW = {
     time_unit_clock: "時:分:秒.毫秒",
     timeline_display_settings: "時間軸顯示設定...",
     timeline_display_settings_desc: "設定標尺時間單位、標籤密度與播放游標時間顯示。",
-    render_kernel_enabled: "使用新渲染核心（時間軸 / 參數編輯器）",
-    render_kernel_enabled_desc:
-        "關閉後回退到既有渲染實作。用於某個顯示卡驅動下出現顯示異常時排查。",
-    render_kernel_restart_required: "已儲存，重新啟動應用程式後生效。",
+    kernel_unavailable_title: "時間軸無法渲染（WebGL2 不可用）",
+    kernel_unavailable_reason: "瀏覽器或系統沒有提供 WebGL2 圖形上下文。",
+    kernel_unavailable_hints:
+        "可依次排查：1. 確認未停用硬體加速與軟體光柵（瀏覽器設定或啟動參數）；2. 若在遠端桌面 / 虛擬機中，嘗試在本機執行；3. 更新顯示卡驅動；4. 關閉其它佔用圖形資源的視窗後重新啟動應用程式。",
+    kernel_unavailable_diagnostics: "複製診斷資訊",
+    kernel_unavailable_copied: "已複製",
     ruler_label_spacing: "標籤間距",
     show_playhead_time_in_track_header: "在軌道標題列顯示播放游標時間",
     copy_playhead_time: "複製播放游標時間",

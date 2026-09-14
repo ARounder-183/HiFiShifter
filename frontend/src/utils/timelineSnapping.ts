@@ -56,6 +56,17 @@ export interface TimelineSnapContext {
     anchorTrackId?: string | null;
     /** 从候选集中排除的 clip id（通常是正在移动的 clip 自身）。 */
     excludeClipIds?: ReadonlySet<string>;
+    /**
+     * 调用方补充的**冻结候选**（坐标按拖动开始时的几何算好，不随预览变化）。
+     *
+     * 【为什么需要】有的手势会同时移动"候选来源"本身。典型是交叉点抓手：它一次
+     * 拖动两侧 clip，而用户真正想对齐的目标正是这两个 clip 的边界（前块的终止位置、
+     * 后块的起始位置）。若把这些边界当**实时**候选，拖动就在追自己的尾巴——实测
+     * 反向模式：吸附目标随指针一起漂移，最终落点比目标偏 0.14s。因此调用方把这些
+     * clip 放进 `excludeClipIds`（排除实时边界），再用本字段给出按拖动起点冻结的
+     * 边界；两者共用同一套距离 / 优先级判定与高亮发布。
+     */
+    extraCandidates?: readonly SnapCandidate[];
     /** 工程采样率；snapToProjectSampleRate 时使用，默认 48000。 */
     projectSampleRate?: number;
 }
@@ -503,6 +514,17 @@ function collectSampleRateCandidates(ctx: TimelineSnapContext, rawSec: number): 
 }
 
 /**
+ * 把调用方补充的**冻结候选**并入候选集（坐标现钳制一次，见 `extraCandidates` 说明）。
+ */
+function pushExtraCandidates(ctx: TimelineSnapContext, out: SnapCandidate[]): void {
+    const extra = ctx.extraCandidates;
+    if (extra === undefined || extra.length === 0) return;
+    for (const candidate of extra) {
+        out.push({ ...candidate, sec: clampSec(candidate.sec) });
+    }
+}
+
+/**
  * 计算 rawSec 的吸附结果。
  */
 export function snapTimelinePosition(ctx: TimelineSnapContext, rawSec: number): SnapResult {
@@ -541,6 +563,7 @@ export function snapTimelinePosition(ctx: TimelineSnapContext, rawSec: number): 
     // 三组各自独立的目标开关，不隶属于"选择/标记/光标"族：
     // 任意拖动对象在对应开关开启时都可吸附到这些候选。
     addClipEdgeCandidates(ctx, candidates);
+    pushExtraCandidates(ctx, candidates);
 
     candidates.push(...collectSampleRateCandidates(ctx, safeRaw));
 

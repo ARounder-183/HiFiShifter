@@ -3,7 +3,8 @@
  *
  * 【主要内容】
  * 声明宿主每帧需要从 React 侧读取的数据形状：工程时长、当前参数的**值域视口**
- * （`min` / `max` / `span`），以及阶段 2 GL 场景层所需的网格几何输入。
+ * （`min` / `max` / `span`），以及阶段 2 GL 场景层所需的网格几何输入（含钢琴背景
+ * 的黑键行背景带与音阶高亮）。
  *
  * 【作用】
  * 宿主是长生命周期的命令式运行时对象，若直接持有 React state 或 Redux store，
@@ -71,6 +72,43 @@ export interface PianoRollGridSpec {
     readonly strongRgba: readonly [number, number, number, number];
     /** 弱线颜色（pitch 下即其余半音的颜色）。 */
     readonly weakRgba: readonly [number, number, number, number];
+
+    // ── 钢琴背景 / 音阶高亮（均仅 pitch 参数有意义）─────────────────────
+    /**
+     * 黑键行背景带的颜色（钢琴背景：只压暗黑键行，白键行保持原背景）。
+     *
+     * 特殊说明 1：缺省表示**不画背景带**。这与"给一个全透明色"是两种不同的几何
+     * 输入，签名里按 `?? ""` 区分（见 `gridGeometrySignature`）。
+     *
+     * 特殊说明 2：GL 按实例缓冲顺序合成，背景带必须由构建器排在所有网格线**之前**
+     * ——否则整行实心矩形会盖掉网格线（见 `buildPitchGridInstances`）。面板只需
+     * 提供颜色，顺序由构建器保证。
+     */
+    readonly blackKeyRowBandRgba?: readonly [number, number, number, number];
+    /**
+     * 音阶高亮的音级集合（pitch class 0..11）；缺省 / 空数组表示不高亮。
+     *
+     * 特殊说明：只支持**单一音阶**（工程音阶）。Tempo Map 的分段音阶走下面的
+     * `scaleSegments`（面板已把各时间段投影成视口 x），两者互斥、分段优先。
+     */
+    readonly scaleNotes?: readonly number[];
+    /**
+     * Tempo Map **分段音阶**（时间域）：各时间段的起止与生效音级。
+     *
+     * 与 `scaleNotes` 互斥：给了分段就按段画（每段只高亮该段音阶），不再画整宽的
+     * 单音阶线。缺省表示没有分段。
+     *
+     * 特殊说明：这里给的是**秒**而不是像素——网格层是视口坐标，投影由宿主持有
+     * 实时轴完成（见 `projectScaleSegments` 的说明：面板侧投影会让每帧滚动都做一次
+     * 颜色解析）。
+     */
+    readonly scaleSegments?: readonly {
+        readonly startSec: number;
+        readonly endSec: number;
+        readonly notes: readonly number[];
+    }[];
+    /** 音阶强调线颜色；缺省表示不画强调线。 */
+    readonly scaleHighlightRgba?: readonly [number, number, number, number];
 
     // ── 键盘轴颜色（仅 pitch 参数有意义；其余参数无键盘）────────────────
     //
@@ -245,7 +283,12 @@ export interface PianoRollCurveLayer {
      */
     readonly curveStartSec?: number;
     /** 裁剪区（视口坐标 CSS px）；缺省不裁剪。两个需要裁剪的曲线图层用选区矩形。 */
-    readonly clipRect?: { readonly x: number; readonly y: number; readonly w: number; readonly h: number } | null;
+    readonly clipRect?: {
+        readonly x: number;
+        readonly y: number;
+        readonly w: number;
+        readonly h: number;
+    } | null;
     /**
      * 值 → 视口 y 的投影，**必须绑定到本图层自己的参数**。
      *

@@ -534,6 +534,20 @@ export interface SessionState {
     selectedClipId: string | null;
     /** 多选 clip 的 id 列表（框选 / 主修饰键 + 点击） */
     multiSelectedClipIds: string[];
+    /**
+     * 多选集合是否来自**用户显式选择**。
+     *
+     * 【为什么需要它】集合有两种来源，用户意图完全不同：
+     * - `true`（框选 / 主修饰键点击 / Shift 范围选择 / 全选）="我要操作这几个"，
+     *   拖动其中任一成员时**整组一起移动**是正确行为；
+     * - `false`（多文件导入 / 打开工程 / 粘贴 / 分割 / 复制拖拽）=只是"把新产生的
+     *   东西设为当前选中"，**不表示**想整组拖动。
+     *
+     * 时间轴内核据此决定拖拽起手是否收敛选区：不区分来源时，导入后同轨相邻的
+     * 多个 clip 都在集合里，用户随手抓一个拖，右邻就跟着走——这正是
+     * 「拖一个 clip，右边的 clip 也跟着动」的根因（多选描边仅 2px，看不出来）。
+     */
+    multiSelectionIntentional: boolean;
     /** 参数编辑器当前是否存在参数线选区（PianoRollPanel selectionUi 同步；
      *  复制/剪切路由依据之一，见 focusRouting.resolveCopyCutRoute） */
     paramSelectionActive: boolean;
@@ -1460,6 +1474,8 @@ function applySplitSelection(
         ...prevMultiSelectedClipIds.filter((id) => !splitOriginals.has(id)),
         ...rightIds,
     ];
+    // 分割把右段设为选中，属动作驱动（用户没表达"整组拖动"）。
+    state.multiSelectionIntentional = false;
     if (prevSelectedClipId && splitOriginals.has(prevSelectedClipId)) {
         const selectedIndex = argIds.indexOf(prevSelectedClipId);
         state.selectedClipId =
@@ -2049,6 +2065,7 @@ const initialState: SessionState = {
     selectedTrackId: "track_main",
     selectedClipId: null,
     multiSelectedClipIds: [],
+    multiSelectionIntentional: false,
     paramSelectionActive: false,
     selectionContext: null,
     clipAutomation: {},
@@ -2865,6 +2882,21 @@ const sessionSlice = createSlice({
         },
         setMultiSelectedClipIds(state, action: PayloadAction<string[]>) {
             state.multiSelectedClipIds = action.payload;
+            // 本 action 是**用户显式选择**的入口（框选 / 修饰键点击 / 范围选择 /
+            // 全选 / 取消选择），因此标记为有意图。
+            state.multiSelectionIntentional = true;
+            state.selectionContext = "clips";
+        },
+        /**
+         * 动作驱动的批量选中（粘贴 / 复制拖拽 / 分割 / 导入等）。
+         *
+         * 与 `setMultiSelectedClipIds` 的唯一差别是把
+         * `multiSelectionIntentional` 置为 `false`：这些动作只是"把新产生的东西
+         * 设为当前选中"，用户并未表达"我要整组拖动"，因此内核拖拽起手会收敛选区。
+         */
+        setMultiSelectedClipIdsFromAction(state, action: PayloadAction<string[]>) {
+            state.multiSelectedClipIds = action.payload;
+            state.multiSelectionIntentional = false;
             state.selectionContext = "clips";
         },
         /** 参数线选区存在性同步（PianoRollPanel 在 selectionUi 变化时派发），
@@ -3632,6 +3664,7 @@ const sessionSlice = createSlice({
                         applyTimelineState(state, payload.imported, { force: true });
                         if (payload.newClipIds && payload.newClipIds.length > 0) {
                             state.multiSelectedClipIds = payload.newClipIds;
+                        state.multiSelectionIntentional = false;
                             state.selectedClipId = payload.newClipIds[0] ?? null;
                         }
                     }
@@ -3662,6 +3695,7 @@ const sessionSlice = createSlice({
                         applyTimelineState(state, payload.imported, { force: true });
                         if (payload.newClipIds && payload.newClipIds.length > 0) {
                             state.multiSelectedClipIds = payload.newClipIds;
+                        state.multiSelectionIntentional = false;
                             state.selectedClipId = payload.newClipIds[0] ?? null;
                         }
                     }
@@ -3706,6 +3740,7 @@ const sessionSlice = createSlice({
                     if (payload.newClipIds && payload.newClipIds.length > 0) {
                         applyAutoCrossfadeInReducer(state, payload.newClipIds);
                         state.multiSelectedClipIds = payload.newClipIds;
+                        state.multiSelectionIntentional = false;
                         state.selectedClipId = payload.newClipIds[0] ?? null;
                     }
                 }
@@ -3742,6 +3777,7 @@ const sessionSlice = createSlice({
                     if (payload.newClipIds && payload.newClipIds.length > 0) {
                         applyAutoCrossfadeInReducer(state, payload.newClipIds);
                         state.multiSelectedClipIds = payload.newClipIds;
+                        state.multiSelectionIntentional = false;
                         state.selectedClipId = payload.newClipIds[0] ?? null;
                     }
                 }
@@ -3778,6 +3814,7 @@ const sessionSlice = createSlice({
                     if (payload.newClipIds && payload.newClipIds.length > 0) {
                         applyAutoCrossfadeInReducer(state, payload.newClipIds);
                         state.multiSelectedClipIds = payload.newClipIds;
+                        state.multiSelectionIntentional = false;
                         state.selectedClipId = payload.newClipIds[0] ?? null;
                     }
                 }
@@ -3817,6 +3854,7 @@ const sessionSlice = createSlice({
                     // select all imported clips
                     if (payload.newClipIds && payload.newClipIds.length > 0) {
                         state.multiSelectedClipIds = payload.newClipIds;
+                        state.multiSelectionIntentional = false;
                         state.selectedClipId = payload.newClipIds[0] ?? null;
                     }
                 }
@@ -3841,6 +3879,7 @@ const sessionSlice = createSlice({
                     applyTimelineStatePreservingPitchVisuals(state, payload.imported);
                     if (payload.newClipIds && payload.newClipIds.length > 0) {
                         state.multiSelectedClipIds = payload.newClipIds;
+                        state.multiSelectionIntentional = false;
                         state.selectedClipId = payload.newClipIds[0] ?? null;
                     }
                 }
@@ -3975,6 +4014,7 @@ const sessionSlice = createSlice({
                     applyTimelineState(state, payload as TimelineState, { force: true });
                     if (payload.newClipIds && payload.newClipIds.length > 0) {
                         state.multiSelectedClipIds = payload.newClipIds;
+                        state.multiSelectionIntentional = false;
                         state.selectedClipId = payload.newClipIds[0] ?? null;
                     }
                     // 粘贴后光标跳到所有新 Clip 中最靠右的结束位置
@@ -4015,6 +4055,7 @@ const sessionSlice = createSlice({
                     applyTimelineState(state, payload.timeline, { force: true });
                     if (payload.newClipIds && payload.newClipIds.length > 0) {
                         state.multiSelectedClipIds = payload.newClipIds;
+                        state.multiSelectionIntentional = false;
                         state.selectedClipId = payload.newClipIds[0] ?? null;
                     }
                     // 粘贴后光标跳到所有新 Clip 中最靠右的结束位置
@@ -4700,6 +4741,7 @@ const sessionSlice = createSlice({
                 const newClipIds = payload.newClipIds;
                 if (newClipIds && newClipIds.length > 0) {
                     state.multiSelectedClipIds = newClipIds;
+                    state.multiSelectionIntentional = false;
                     state.selectedClipId = newClipIds[0] ?? null;
                 }
                 state.status = "Project imported";
@@ -4737,6 +4779,7 @@ const sessionSlice = createSlice({
                 const newClipIds = payload.newClipIds;
                 if (newClipIds && newClipIds.length > 0) {
                     state.multiSelectedClipIds = newClipIds;
+                    state.multiSelectionIntentional = false;
                     state.selectedClipId = newClipIds[0] ?? null;
                 }
                 const skippedFiles = payload.skippedFiles;
@@ -4779,6 +4822,7 @@ const sessionSlice = createSlice({
                 const newClipIds = payload.newClipIds;
                 if (newClipIds && newClipIds.length > 0) {
                     state.multiSelectedClipIds = newClipIds;
+                    state.multiSelectionIntentional = false;
                     state.selectedClipId = newClipIds[0] ?? null;
                 }
                 const skippedFiles = payload.skippedFiles;
@@ -4821,6 +4865,7 @@ const sessionSlice = createSlice({
                 const newClipIds = payload.newClipIds;
                 if (newClipIds && newClipIds.length > 0) {
                     state.multiSelectedClipIds = newClipIds;
+                    state.multiSelectionIntentional = false;
                     state.selectedClipId = newClipIds[0] ?? null;
                 }
                 const skippedFiles = payload.skippedFiles;
@@ -4861,6 +4906,7 @@ const sessionSlice = createSlice({
                 const newClipIds = payload.newClipIds;
                 if (newClipIds && newClipIds.length > 0) {
                     state.multiSelectedClipIds = newClipIds;
+                    state.multiSelectionIntentional = false;
                     state.selectedClipId = newClipIds[0] ?? null;
                 }
                 const skippedFiles = payload.skippedFiles;
@@ -5316,6 +5362,7 @@ const sessionSlice = createSlice({
                 applyTimelineState(state, payload.timeline, { force: true });
                 if (payload.newClipIds && payload.newClipIds.length > 0) {
                     state.multiSelectedClipIds = payload.newClipIds;
+                        state.multiSelectionIntentional = false;
                     state.selectedClipId = payload.newClipIds[0] ?? null;
                 }
                 // 粘贴后光标跳到所有新 Clip 中最靠右的结束位置
@@ -5968,8 +6015,12 @@ const sessionSlice = createSlice({
                 state.selectedTrackId =
                     typeof action.meta.arg === "string" ? action.meta.arg : action.meta.arg.trackId;
                 // 换轨手势（轨道头 / 时间轴行 / 键盘）即参数编辑器重定向：
-                // 剪贴板上下文记为参数侧。fulfilled 恢复该轨道记住的 Clip
-                // 时不改写本标记（见 applySelectedClip 分支）。
+                // 剪贴板上下文记为参数侧。
+                //
+                // 特殊说明：换轨**不**恢复后端记住的 `selected_clip_id`——所有
+                // `selectTrackRemote` 调用点都传 `{ applySelectedClip: false }`
+                // （见 fulfilled 分支的闸门）。后端的选中记忆是全工程唯一的、
+                // 不是每轨一份，因此"恢复该轨道记住的 Clip"并非真实语义。
                 state.selectionContext = "param";
             })
 
@@ -6107,6 +6158,7 @@ export const {
     setSelectedClip,
     setSelectedClipPreservingTrack,
     setMultiSelectedClipIds,
+    setMultiSelectedClipIdsFromAction,
     setParamSelectionActive,
     setClipboardOperationFailed,
     moveClipStart,

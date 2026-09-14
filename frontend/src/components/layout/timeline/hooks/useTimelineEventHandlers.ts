@@ -7,6 +7,8 @@
  *   由全局路由 focusRouting.resolveEditOpRoute 按活动编辑表面定向派发，
  *   事件名即契约，消费者不再自行判断焦点）
  * - hifi:nudgePlayhead（播放头微移）
+ * - hifi:selectAdjacentTrack（上/下切换当前轨道；换轨只改轨道焦点，不带
+ *   `applySelectedClip` 恢复后端记住的 clip 选中，见该监听内的说明）
  * - hifi:zoomTimelineFocus（聚焦缩放）
  * - context menu dismiss（pointerdown 外部关闭）
  * - hifi:focusCursor（滚动到播放头中心；粘贴后的聚焦由
@@ -38,7 +40,7 @@ import { resolveHorizontalWheelZoom } from "../runtime/timelineScrollRange";
 import { gridStepBeats, MIN_PX_PER_SEC, MAX_PX_PER_SEC } from "../";
 import { computeFocusCursorScrollLeft } from "../../../../utils/autoFollowScroll";
 import { resolveTimelineMinPxPerSec } from "../runtime/timelineZoomBounds";
-import { getDynamicProjectSec } from "../../../../features/session/projectBoundary";
+import { resolveScrollableProjectSec } from "../../../../features/session/projectBoundary";
 import { expandClipIdsWithGroups } from "./useGroupExpansion";
 import type { TimelineViewportAccess } from "./timelineViewportAccess";
 
@@ -300,48 +302,48 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
             const nextTrackId = tracks[nextIndex]?.id;
             if (!nextTrackId) return;
 
-            void dispatch(selectTrackRemote(nextTrackId));
+            // `applySelectedClip: false` —— Alt+方向键的全部意图是"上/下移当前轨道"
+            // （参数编辑器随之重定向），不是"恢复某条 clip 的选中"。后端的选中记忆
+            // 是**全工程唯一**的（`state.rs::select_track` 只改 `selected_track_id`），
+            // 恢复出来的 clip 可能属于另一条轨道；纯字符串形式会让
+            // `selectTrackRemote.fulfilled` 把用户刚做的"点空白取消选中"异步复活
+            // （契约见 `TimelinePanel.handleKernelSeek` 与提交 019e93ed）。
+            void dispatch(selectTrackRemote({ trackId: nextTrackId, applySelectedClip: false }));
 
-            const ensureTrackVisible = (el: HTMLDivElement): number | null => {
-                const trackTop = nextIndex * rowHeight;
-                const trackBottom = trackTop + rowHeight;
-                let nextScrollTop = el.scrollTop;
-
-                if (trackTop < el.scrollTop) {
-                    nextScrollTop = trackTop;
-                } else if (trackBottom > el.scrollTop + el.clientHeight) {
-                    nextScrollTop = trackBottom - el.clientHeight;
-                }
-
-                const maxScrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
-                nextScrollTop = Math.max(0, Math.min(maxScrollTop, nextScrollTop));
-                if (Math.abs(nextScrollTop - el.scrollTop) <= 0.5) return null;
-                el.scrollTop = nextScrollTop;
-                return nextScrollTop;
-            };
-
-            const timelineScroller = scrollRef.current;
             const trackScroller = trackListScrollRef.current;
 
-            const timelineNextScrollTop = timelineScroller
-                ? ensureTrackVisible(timelineScroller)
-                : null;
-
-            if (!trackScroller) return;
-            if (timelineNextScrollTop != null) {
-                if (Math.abs(trackScroller.scrollTop - timelineNextScrollTop) > 0.5) {
-                    trackScroller.scrollTop = timelineNextScrollTop;
+            // 时间轴侧：**走模式无关的视口访问器**。旧实现直接写原生滚动容器的
+            // `scrollTop`，内核自绘滚动后 `scrollRef.current` 恒为 null——原写法会
+            // 整段跳过，只能指望"轨道头滚动 → 镜像回声 → 内核跟随"这条间接链路。
+            // 目标行是否进入视野由轨道头的滚动范围决定（两者内容高同源），因此复用
+            // 同一个期望值。
+            if (trackScroller) {
+                const desired = computeTrackVisibleScrollTop();
+                if (desired !== null) {
+                    viewport.setScrollTop(desired);
+                    if (Math.abs(trackScroller.scrollTop - desired) > 0.5) {
+                        trackScroller.scrollTop = desired;
+                    }
                 }
                 return;
             }
+            // 无轨道头（理论不可达）：退化为内核模式直接写时间轴。
+            const fallback = computeTrackVisibleScrollTop();
+            if (fallback !== null) viewport.setScrollTop(fallback);
 
-            const trackNextScrollTop = ensureTrackVisible(trackScroller);
-            if (
-                trackNextScrollTop != null &&
-                timelineScroller &&
-                Math.abs(timelineScroller.scrollTop - trackNextScrollTop) > 0.5
-            ) {
-                timelineScroller.scrollTop = trackNextScrollTop;
+            /** 计算「让目标轨道进入视野」所需的纵向位置（不区分载体）。 */
+            function computeTrackVisibleScrollTop(): number | null {
+                const trackTop = nextIndex * rowHeight;
+                const trackBottom = trackTop + rowHeight;
+                const viewportHeightPx = viewport.getViewportHeight();
+                const current = viewport.getScrollTop();
+                let next = current;
+                if (trackTop < current) {
+                    next = trackTop;
+                } else if (trackBottom > current + viewportHeightPx) {
+                    next = trackBottom - viewportHeightPx;
+                }
+                return Math.abs(next - current) > 0.5 ? next : null;
             }
         }
 
@@ -394,7 +396,13 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
             // 不重建监听），闭包值是挂载时的快照——工程变长后缩放上限仍钳在
             // 旧工程末端，视图无法到达当前允许的滚动范围。sessionRef 在
             // store 订阅内同步更新，事件触发时读取的必然是当前值。
-            const totalSec = getDynamicProjectSec(sessionRef.current.clips);
+            // 与视口/参数编辑器**同源**（`resolveScrollableProjectSec`）：此前用
+            // clip 末端（59.5s）而视口已改用 max(projectSec, clipEnd)（120s），
+            // 缩放上限被钳在旧末端，缩放会跳。
+            const totalSec = resolveScrollableProjectSec(
+                sessionRef.current.projectSec,
+                sessionRef.current.clips,
+            );
             const zoom = resolveHorizontalWheelZoom({
                 factor,
                 basePxPerSec: pxPerSecRef.current,
@@ -431,9 +439,9 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
                 nextScrollLeft: zoom.nextScrollLeft,
             };
             pxPerSecRef.current = zoom.nextPxPerSec;
-            // 原子缩放：flushSync 保证 DOM 按新缩放重排后，layout effect 在
-            // 同一绘制帧内写原生 scrollLeft 并同步重绘标尺与画布（与滚轮
-            // 缩放的 TimelineScrollArea 路径一致，避免画布先行的抽动）。
+            // 原子缩放：flushSync 保证 DOM 按新缩放重排后，layout effect 在同
+            // 一绘制帧内写滚动位置并同步重绘标尺与画布（与滚轮缩放的原子提交
+            // 语义一致，避免画布先行的抽动；旧出处 TimelineScrollArea 已删除）。
             // 同帧提交 scrollLeft state，防止窗口化把屏内 Clip 裁掉。
             flushSync(() => {
                 setPxPerSec(zoom.nextPxPerSec);
@@ -485,7 +493,17 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
                 pxPerSec,
                 // 与 zoomTimelineFocus 同源：实时读取工程长度（sessionRef 在
                 // store 订阅内同步更新），不依赖渲染期闭包。
-                contentWidth: getDynamicProjectSec(sessionRef.current.clips) * pxPerSec,
+                //
+                // ★ 必须用 `resolveScrollableProjectSec`：此处曾用 clip 末端
+                //   （59.5s），而视口已改用 max(projectSec, clipEnd)（120s）。
+                //   分叉的后果实测为**聚焦光标反而把播放头推出视野**——把视口滚到
+                //   最右（16640）后触发本命令，contentWidth 只到 8925，视口被拉回
+                //   8925 而播放头在 119s 处，落在视野之外。
+                contentWidth:
+                    resolveScrollableProjectSec(
+                        sessionRef.current.projectSec,
+                        sessionRef.current.clips,
+                    ) * pxPerSec,
             });
             // 写后回读**实际生效值**再广播：请求值可能被钳制/量化/锚定修正
             // （旧实现经浏览器回读，内核经 ScrollKernel 回读），跟随视口的图层

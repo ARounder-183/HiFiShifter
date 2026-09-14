@@ -33,16 +33,24 @@
 import type { FlatInstance, Rgba } from "../../../renderKernel/instanceTypes";
 
 /**
- * 弱网格线的宽度（**CSS 像素**）。
+ * 弱网格线的宽度（**物理像素**）。
  *
- * 与旧实现 SVG 的 `strokeWidth={1}` 一致：线宽以 CSS 像素定义，物理宽度由 DPR
- * 决定。内核曾按「1 物理像素」实现，在 Retina（dpr=2）上只有旧实现的一半粗，
- * 观感明显偏细——网格线宽必须跟旧实现同源。
+ * ⚠️ 这里**必须按物理像素**定义，再除以 dpr 换算成 CSS px。
+ *
+ * 旧实现 `BackgroundGrid` 的 JSX 上确实写着 `strokeWidth={1}`，但那只在首帧生效
+ * ——它在绘制函数里**用命令式写覆盖了该属性**：
+ * ```
+ * paths[0].setAttribute("stroke-width", String(1 / dpr));  // 弱线 = 1 物理像素
+ * paths[1].setAttribute("stroke-width", String(2 / dpr));  // 强线 = 2 物理像素
+ * ```
+ * 配合 `deviceSnap(内容 x − offset)`（视口空间吸附），任意缩放下弱线恒为 1 个物理
+ * 像素、强线恒为 2 个。内核若按 **CSS** 像素取 1 / 2，在 dpr=2 的屏幕上弱线会占
+ * 2 个物理像素、强线占 4 个——网格整体比旧实现**粗一倍**（高分屏上一眼可见）。
  */
-const WEAK_LINE_CSS_PX = 1;
+const WEAK_LINE_PHYSICAL_PX = 1;
 
-/** 强网格线（小节线）的宽度（CSS 像素，对应旧实现 `strokeWidth={2}`）。 */
-const STRONG_LINE_CSS_PX = 2;
+/** 强网格线（小节线）的宽度（物理像素，对应旧实现的 `2 / dpr`）。 */
+const STRONG_LINE_PHYSICAL_PX = 2;
 
 /**
  * 线条整体透明度。
@@ -127,6 +135,10 @@ export function buildGridInstances(args: GridInstanceArgs): FlatInstance[] {
     if (contentBottom <= 0) return [];
 
     const out: FlatInstance[] = [];
+    // 线宽：物理像素 → CSS px（见文件头对两个常量的说明）。分数 DPR 下这也是
+    // "整数物理像素"的唯一来源——几何里所有长度都是 CSS px，必须在这里折一次。
+    const weakWidthCssPx = WEAK_LINE_PHYSICAL_PX / dpr;
+    const strongWidthCssPx = STRONG_LINE_PHYSICAL_PX / dpr;
     /**
      * 同一设备像素位置归并（键 = 吸附后的物理像素列）。
      *
@@ -144,7 +156,7 @@ export function buildGridInstances(args: GridInstanceArgs): FlatInstance[] {
         if (x < windowLeft - WINDOW_SLACK_PX || x > windowRight + WINDOW_SLACK_PX) continue;
 
         const strong = tick.isStrongGridLine === true;
-        const cssWidth = strong ? STRONG_LINE_CSS_PX : WEAK_LINE_CSS_PX;
+        const cssWidth = strong ? strongWidthCssPx : weakWidthCssPx;
         // 居中描边（与旧实现 SVG 的 stroke 语义一致）：矩形左缘 = 中心 − 半宽。
         // 吸附仍按设备像素栅格，保证线宽恒为整数物理像素、不因落点相位变虚。
         const snappedLeft = Math.round((x - cssWidth / 2) * dpr) / dpr;
@@ -158,7 +170,7 @@ export function buildGridInstances(args: GridInstanceArgs): FlatInstance[] {
     }
 
     for (const item of byPosition.values()) {
-        const cssWidth = item.strong ? STRONG_LINE_CSS_PX : WEAK_LINE_CSS_PX;
+        const cssWidth = item.strong ? strongWidthCssPx : weakWidthCssPx;
         out.push({
             x: item.x,
             y: 0,

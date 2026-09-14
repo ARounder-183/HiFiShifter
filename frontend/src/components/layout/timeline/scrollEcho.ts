@@ -1,13 +1,14 @@
 /**
- * 时间轴内核 · 轨道头滚动回灌判定。
+ * 原生滚动容器的**镜像回声**判定（时间轴轨道头 + 参数编辑器 scroller 共用）。
  *
  * 【主要内容】
- * 判定「轨道头（`TrackList`）容器报来的 `scrollTop`」是否应当回灌给内核。
+ * 判定「容器报来的原生滚动偏移（`scrollLeft` / `scrollTop`）」是否只是镜像回写
+ * 造成的回声，因而不应被当成用户输入采纳（尤其不应据此推回共享视口）。
  *
  * 【作用：为什么需要它——这是纵向"卡卡的、像被吸附"的根因】
- * 内核模式下轨道头容器只是**被动镜像**：宿主 `syncDom` 每帧写
- * `trackList.scrollTop = view.scrollTop`（未量化）。这次写入会触发原生 `scroll`
- * 事件，而事件不带来源。该事件的链路是：
+ * 内核模式下原生滚动容器只是**被动镜像**：真值在内核（`ScrollKernel`），由宿主 /
+ * 面板每帧把真值写回容器的 `scrollLeft` / `scrollTop`。这次写入会触发原生 `scroll`
+ * 事件，而事件不带来源。以时间轴轨道头为例，该事件的链路是：
  *
  * ```
  * syncDom 写 trackList.scrollTop（未量化）
@@ -22,39 +23,44 @@
  * 18.65 / 37.3 / 55.95。逐帧往复即用户报告的"卡卡的、像被吸附"。
  *
  * 【为什么不能简单删掉这条链路】
- * 轨道头容器**确实**承载一类真实用户输入：焦点在轨道头内的控件上时，浏览器原生
- * 的 **scroll-into-view**（Tab / 方向键切换焦点）会改变 `el.scrollTop`。实测：
- * 聚焦最后一个控件 → `domTop` 0 → 308；PageDown → 132；End → 361。
- * 这些不经过任何 JS 转发，只能靠原生 `scroll` 事件到达。因此必须**区分来源**，
- * 而不是一刀切忽略。
+ * 原生容器**确实**承载一类不经任何 JS 的真实输入：
+ * - 轨道头：焦点在容器内的控件上时，浏览器原生 **scroll-into-view**（Tab / 方向键
+ *   切换焦点）会改变 `el.scrollTop`（实测：聚焦最后一个控件 → 0 → 308；PageDown →
+ *   132；End → 361）；
+ * - 参数编辑器 scroller：触摸拖拽、触控板惯性与焦点滚入视口同理。
+ * 这些只能靠原生 `scroll` 事件到达。因此必须**区分来源**，而不是一刀切忽略。
  *
  * 【判据：与「上次镜像写入值」比，而不是与「内核当前值」比】
- * 现有实现拿事件值和**内核当前值**比（`Math.abs(host.getViewport().scrollTop -
- * scrollTop) < 0.5`），这在拖拽时必然失效：内核每帧都在前进，事件报来的是**上一帧**
- * 镜像的值，两者相差约 9px，于是回声被当成用户输入收下。
+ * 曾经的做法是拿事件值和**内核当前值**比（`Math.abs(内核位置 - 原生位置) < 0.5`），
+ * 这在连续滚动 / 缩放时必然失效：内核每帧都在前进，事件报来的是**上一帧**镜像的
+ * 值，两者可差一整帧的位移，于是回声被当成用户输入收下。后果不止本容器抖动——
+ * 参数编辑器一旦把这种量化误差推回共享视口（`syncScrollLeft`），时间轴也会被推着
+ * 走，两个面板进入亚像素级往复（"启用同步后滚轮缩放仍然抽动"的根因）。
  *
- * 正确的比较基准是**宿主上一次写进容器的值**。回声事件报的正是那个值（浏览器按
- * 设备像素量化，通常逐值相等），而真实输入（scroll-into-view）会把容器带到**别的**
- * 值上。这与横向轴的解（`onUserScrollLeft` 的来源标记）同一思路：**判来源，不判
- * 与当前真值的距离**。
+ * 正确的比较基准是**上次写进容器的值**：回声报告的就是那个值（浏览器按设备像素
+ * 量化，误差有界），而真实输入会把容器带到**别的**值上。这与横向轴的解
+ * （`onUserScrollLeft` 的来源标记）同一思路：**判来源，不判与当前真值的距离**。
  *
  * 【与其他模块的关系】
- * - 上游：`timelineKernelHost` 提供"上一次镜像写入值"（其 `syncDom` 的去重变量）。
- * - 消费者：`TimelinePanel.handleTrackListScrollTopChange` 据此决定是否回灌内核。
+ * - 上游：镜像写入方提供「上次写入值」——时间轴是宿主（`syncDom` 的去重变量，经
+ *   `TimelineKernelHost.getMirroredTrackListScrollTop()` 暴露）；参数编辑器是面板
+ *   自身（`onFrame` 里写容器的那两行，见 `PianoRollPanel` 的镜像 ref）。
+ * - 消费者：`TimelinePanel.handleTrackListScrollTopChange`（纵向）与
+ *   `PianoRollPanel.onScrollerScroll`（两轴）。
  * - 独立性：纯函数，不依赖 DOM / React，可直接单测。
  */
 
-/** 回灌判定入参。 */
-export interface TrackListEchoArgs {
+/** 镜像回声判定入参。 */
+export interface MirrorEchoArgs {
     /**
-     * 宿主上一次镜像回写轨道头时写下的值。
+     * **上一次镜像写入容器**的值（同一轴）。
      *
      * 特殊说明：从未写过时为 `NaN`（内核尚在起步），此时一律判"不是回声"——
      * 宁可多采纳一次真实输入，也不要在首帧前把用户操作吞掉。
      */
-    readonly mirroredScrollTop: number;
-    /** 事件报来的容器当前 `scrollTop`。 */
-    readonly nativeScrollTop: number;
+    readonly mirroredPx: number;
+    /** 事件报来的容器当前偏移。 */
+    readonly nativePx: number;
     /** 视为"同一个值"的容差（CSS px）。 */
     readonly tolerancePx?: number;
 }
@@ -62,11 +68,11 @@ export interface TrackListEchoArgs {
 /**
  * 容差默认值（CSS px）。
  *
- * 取 0.5：与宿主 `syncDom` 的写入去重容差同量级。
+ * 取 0.5：与镜像写入方的去重容差同量级。
  *
  * 【为什么必须是 0.5 而不是更小——量化误差是常规情形，不是罕见情形】
- * 浏览器把原生 `scrollTop` 按设备像素量化，**写→读**的误差有界但普遍存在，且量级
- * 随 dpr 变化（均为实测）：
+ * 浏览器把原生偏移按设备像素量化，**写→读**的误差有界但普遍存在，且量级随 dpr
+ * 变化（均为实测）：
  * - dpr 1 → 最大 0.5（如写 20.5 读回 21；写 10.37 读回 10.5）
  * - dpr 2 → 最大 0.25（如写 540.694 读回 540.5；写 124.4 读回 124.5）
  * - dpr 3 → 约 0.167
@@ -84,13 +90,13 @@ export interface TrackListEchoArgs {
  * 输入会被误判为回声而吞掉（后果有界：内核仍是权威值，最多漏掉一次 ≤1px 的修正）。
  * 未按 dpr 动态调整容差，原因有二：一是尚未确认 Tauri 外壳下 dpr < 1 是否可达
  * （需要操作系统缩放低于 100%，未发现应用内浏览器缩放入口）；二是动态容差会把
- * "写入去重"（宿主侧）与"回声判定"（此处）两处口径绑在一起，改动面大于收益。
+ * "写入去重"（写入方）与"回声判定"（此处）两处口径绑在一起，改动面大于收益。
  * 若将来确认低缩放可达，应改为按设备像素量子（1/dpr）推导，而不是继续硬编码。
  */
 const DEFAULT_TOLERANCE_PX = 0.5;
 
 /**
- * 判定轨道头报来的 `scrollTop` 是否为镜像回声。
+ * 判定容器报来的原生偏移是否为镜像回声。
  *
  * 流程：从未回写过（NaN）→ 非回声；否则与上次镜像写入值比较，在容差内判为回声。
  *
@@ -100,15 +106,15 @@ const DEFAULT_TOLERANCE_PX = 0.5;
  * 特殊说明 2：本函数只回答"是否回声"，**不做钳制**。钳制由 `ScrollKernel` 统一
  * 负责（单一职责），这里再夹一次会出现两份上限来源。
  *
- * @param args 见 `TrackListEchoArgs`。
- * @returns 是镜像回声时为 true（调用方**不得**据此回灌内核）。
+ * @param args 见 `MirrorEchoArgs`。
+ * @returns 是镜像回声时为 true（调用方**不得**据此采纳为用户输入）。
  */
-export function isTrackListMirrorEcho(args: TrackListEchoArgs): boolean {
+export function isMirrorEcho(args: MirrorEchoArgs): boolean {
     const tolerance = Number.isFinite(args.tolerancePx)
         ? Math.max(0, args.tolerancePx as number)
         : DEFAULT_TOLERANCE_PX;
-    const mirrored = args.mirroredScrollTop;
-    const native = args.nativeScrollTop;
+    const mirrored = args.mirroredPx;
+    const native = args.nativePx;
     if (!Number.isFinite(mirrored) || !Number.isFinite(native)) return false;
     return Math.abs(native - mirrored) <= tolerance;
 }

@@ -16,7 +16,6 @@ import {
     setplayheadSec,
 } from "../../../features/session/sessionSlice";
 import { clamp, MAX_PX_PER_SEC, MIN_PX_PER_SEC } from "../timeline";
-import { isPianoRollKernelEnabled } from "../timeline/kernel/featureFlag";
 import type {
     ParamMorphOverlay,
     ParamName,
@@ -1304,27 +1303,18 @@ export function usePianoRollInteractions(args: {
     /**
      * 原生滚动容器的 `scroll` 事件。
      *
-     * 【内核模式下整条忽略——这是"拖拽阶梯感"的根因】
-     * 内核模式里原生 scroller 只是**镜像**：真值在 `ScrollKernel`，由宿主在帧提交
-     * 时写回 DOM。那次回写会触发原生 `scroll` 事件，而本处理函数无法把它与"用户
-     * 真的滚了原生容器"区分——于是把内核刚写下的位置当成用户输入推回共享视口。
-     * 时间轴收到后应用该值，而此时它已经前进到更远的位置 → **位置回退**。
+     * 【已移出本 hook】本处原先无条件忽略该事件（当时的结论是"每个输入都有显式
+     * 入口，事件永远只是镜像回声"）。该结论对**显式入口**成立，但原生容器仍是
+     * `overflow: scroll`：触摸拖拽 / 触控板惯性 / 焦点滚入视口只会产生原生
+     * `scroll`，在无条件忽略下这些输入完全失效。
      *
-     * 实测（拖时间轴带动参数编辑器）：共享视口序列 `10 → 20 → 10`，时间轴内核随之
-     * 从 20 退回 10；连续拖拽时每三帧回退一次（增量呈 `+30, +10, -10` 循环），
-     * 即用户报告的"阶梯感 / 被吸附感"。
-     *
-     * 【忽略它不会漏掉任何输入】内核模式下每个用户输入都有明确入口，且都在写完
-     * 原生位置后**显式**调用 `syncScrollLeft`：滚轮、中键平移、框选自动滚屏；
-     * 拖自绘滚动条则由宿主经 `onUserScrollLeft` 上报。这个事件纯属回声。
+     * 现在由面板侧 `PianoRollPanel.onScrollerScroll` 处理，判据是"原生位置与内核
+     * 当前持有的位置是否一致"（一致 = 回声，忽略；不一致 = 容器自己动了，采纳），
+     * 既消掉"阶梯感"的回退，又不丢那三类输入。该处保留了完整的根因说明。
      */
-    const onScrollerScroll = useCallback(
-        (e: UIEvent<HTMLDivElement>) => {
-            if (isPianoRollKernelEnabled()) return;
-            syncScrollLeft(e.currentTarget as HTMLDivElement);
-        },
-        [syncScrollLeft],
-    );
+    const onScrollerScroll = useCallback((e: UIEvent<HTMLDivElement>) => {
+        void e;
+    }, []);
 
     const onScrollerContextMenu = useCallback(
         (e: ReactMouseEvent) => {
@@ -1824,7 +1814,9 @@ export function usePianoRollInteractions(args: {
      * 多选区下返回被命中的段号 + 哪一侧 —— 拉伸只作用于那一段，其余段不动。
      */
     const findStretchSelectionEdge = useCallback(
-        (e: ReactPointerEvent<HTMLCanvasElement>): { rangeIndex: number; edge: "left" | "right" } | null => {
+        (
+            e: ReactPointerEvent<HTMLCanvasElement>,
+        ): { rangeIndex: number; edge: "left" | "right" } | null => {
             if (toolMode !== "select") return null;
             if (!isModifierActive(paramStretchKb, e.nativeEvent)) return null;
             const sel = selectionRef.current;
@@ -2077,8 +2069,10 @@ export function usePianoRollInteractions(args: {
                     const fp = Math.max(1e-6, pvForMorph.framePeriodMs);
                     const stride = Math.max(1, pvForMorph.stride);
                     // 多选区：控制线每段一条，命中取距离最近的一个控制点
-                    let hit: { overlayIndex: number; point: ParamMorphOverlay["points"][number] } | null =
-                        null;
+                    let hit: {
+                        overlayIndex: number;
+                        point: ParamMorphOverlay["points"][number];
+                    } | null = null;
                     let hitDistance = Number.POSITIVE_INFINITY;
                     for (let i = 0; i < existingMorph.length; i += 1) {
                         for (const point of existingMorph[i].points) {
@@ -2288,7 +2282,9 @@ export function usePianoRollInteractions(args: {
                                 maxSelectableBeat * Math.max(1e-9, pxPerBeatRef.current) -
                                     scroller.clientWidth,
                             );
-                            const nativeOffset = syncTimelineEnabled ? timelineOffsetRef.current : 0;
+                            const nativeOffset = syncTimelineEnabled
+                                ? timelineOffsetRef.current
+                                : 0;
                             const nativeMaxScrollLeft = drawingMaxScrollLeft + nativeOffset;
                             const nextScrollLeft = clamp(
                                 scroller.scrollLeft + deltaPx,
@@ -2460,16 +2456,13 @@ export function usePianoRollInteractions(args: {
                             const overallMaxFrame =
                                 Math.max(oldEndFrame, nextEndFrame) + extraEdgeFrames;
                             const overallLen =
-                                Math.floor((overallMaxFrame - overallMinFrame) / stride) +
-                                1;
+                                Math.floor((overallMaxFrame - overallMinFrame) / stride) + 1;
                             const dense = new Array<number>(overallLen);
                             for (let i = 0; i < overallLen; i += 1) {
                                 const frame = overallMinFrame + i * stride;
                                 const idx = Math.round((frame - pvNow.startFrame) / stride);
                                 dense[i] =
-                                    idx >= 0 && idx < pvNow.edit.length
-                                        ? pvNow.edit[idx]
-                                        : 0;
+                                    idx >= 0 && idx < pvNow.edit.length ? pvNow.edit[idx] : 0;
                             }
                             const denseBefore = dense.slice();
 
@@ -2497,13 +2490,8 @@ export function usePianoRollInteractions(args: {
                                 }
                             }
 
-                            const sampleOutsideValue = (
-                                srcFrame: number,
-                                fallback: number,
-                            ) => {
-                                const srcIdx = Math.round(
-                                    (srcFrame - pvNow.startFrame) / stride,
-                                );
+                            const sampleOutsideValue = (srcFrame: number, fallback: number) => {
+                                const srcIdx = Math.round((srcFrame - pvNow.startFrame) / stride);
                                 if (srcIdx >= 0 && srcIdx < pvNow.edit.length) {
                                     return pvNow.edit[srcIdx];
                                 }
@@ -2535,8 +2523,7 @@ export function usePianoRollInteractions(args: {
                                     const srcWindowPos =
                                         fillLen > 1
                                             ? Math.round(
-                                                  (i / (fillLen - 1)) *
-                                                      (outsideWindowLen - 1),
+                                                  (i / (fillLen - 1)) * (outsideWindowLen - 1),
                                               )
                                             : 0;
                                     const srcFrame = oldStartFrame + srcWindowPos * stride;
@@ -2549,9 +2536,7 @@ export function usePianoRollInteractions(args: {
                                 }
                             }
                             if (nextEndFrame < oldEndFrame) {
-                                const fillLen = Math.floor(
-                                    (oldEndFrame - nextEndFrame) / stride,
-                                );
+                                const fillLen = Math.floor((oldEndFrame - nextEndFrame) / stride);
                                 for (let i = 0; i < fillLen; i += 1) {
                                     const targetFrame = nextEndFrame + (i + 1) * stride;
                                     const targetIdx = Math.round(
@@ -2560,8 +2545,7 @@ export function usePianoRollInteractions(args: {
                                     const srcWindowPos =
                                         fillLen > 1
                                             ? Math.round(
-                                                  (i / (fillLen - 1)) *
-                                                      (outsideWindowLen - 1),
+                                                  (i / (fillLen - 1)) * (outsideWindowLen - 1),
                                               )
                                             : 0;
                                     const srcFrame = oldEndFrame - srcWindowPos * stride;
@@ -2594,10 +2578,7 @@ export function usePianoRollInteractions(args: {
                             };
                         };
 
-                        const minBeatSpan = Math.max(
-                            1e-6,
-                            (stride * fp) / 1000 / secPerBeat,
-                        );
+                        const minBeatSpan = Math.max(1e-6, (stride * fp) / 1000 / secPerBeat);
 
                         // 预览重算 rAF 合帧：dense 重建 + 整份 live 拷贝 +
                         // React setState 都是 O(n)，pointermove 在高刷鼠标上
@@ -2650,10 +2631,7 @@ export function usePianoRollInteractions(args: {
                                 onUp();
                                 return;
                             }
-                            const adjusted = getFineAdjustedPointerPosition(
-                                finePointerState,
-                                ev,
-                            );
+                            const adjusted = getFineAdjustedPointerPosition(finePointerState, ev);
                             queuedCursorBeat = pointerBeat(adjusted.clientX);
                             if (previewRafId == null) {
                                 previewRafId = requestAnimationFrame(() => {
@@ -2732,10 +2710,7 @@ export function usePianoRollInteractions(args: {
                                         }),
                                     );
                                 } catch (err) {
-                                    console.error(
-                                        "[pianoRoll] stretch-edge commit failed",
-                                        err,
-                                    );
+                                    console.error("[pianoRoll] stretch-edge commit failed", err);
                                 } finally {
                                     if (liveEditActiveRef) {
                                         liveEditActiveRef.current = false;
@@ -2818,8 +2793,8 @@ export function usePianoRollInteractions(args: {
                                     // 数据 —— 绝不把降采样值当连续帧写回后端（旧实现在
                                     // stride>1 时会把 stride 间隔采样当连续帧写入：
                                     // 时间压缩 + 覆盖未选帧，已修复）。
-                                    let origValuesPerRange: number[][] = rightDragSpans.map((span) =>
-                                        readPvRange(pv, span.startFrame, span.endFrame),
+                                    let origValuesPerRange: number[][] = rightDragSpans.map(
+                                        (span) => readPvRange(pv, span.startFrame, span.endFrame),
                                     );
                                     let lastDy = 0;
                                     let didDrag = false;
@@ -2843,7 +2818,9 @@ export function usePianoRollInteractions(args: {
                                     void Promise.all(origCurvePromises)
                                         .then((curves) => {
                                             if (dragSettled) return;
-                                            origValuesPerRange = curves.map((curve) => curve.values);
+                                            origValuesPerRange = curves.map(
+                                                (curve) => curve.values,
+                                            );
                                         })
                                         .catch((err) => {
                                             // 取数失败只影响预览保真度：保持 pv 近似值，
@@ -2871,9 +2848,13 @@ export function usePianoRollInteractions(args: {
                                             if (!cached || cached.src !== values) {
                                                 cached = {
                                                     src: values,
-                                                    apply: createSelectionAmplifier(values, editParam, {
-                                                        framePeriodMs: fp,
-                                                    }).apply,
+                                                    apply: createSelectionAmplifier(
+                                                        values,
+                                                        editParam,
+                                                        {
+                                                            framePeriodMs: fp,
+                                                        },
+                                                    ).apply,
                                                 };
                                                 amplifierCache.set(index, cached);
                                             }
@@ -3046,9 +3027,8 @@ export function usePianoRollInteractions(args: {
                                         dragSettled = true;
                                         try {
                                             // 先刷新各段的全分辨率原始值（拖动开始时已发起）
-                                            const fullResCurves = await Promise.all(
-                                                origCurvePromises,
-                                            );
+                                            const fullResCurves =
+                                                await Promise.all(origCurvePromises);
                                             origValuesPerRange = fullResCurves.map(
                                                 (curve) => curve.values,
                                             );
@@ -3445,9 +3425,8 @@ export function usePianoRollInteractions(args: {
                                         try {
                                             // 等待拖动开始时发起的全分辨率取数完成 —— 提交必须
                                             // 基于无损数据，不能拿降采样的 pv 值去覆盖后端。
-                                            const fullResCurves = await Promise.all(
-                                                origCurvePromises,
-                                            );
+                                            const fullResCurves =
+                                                await Promise.all(origCurvePromises);
                                             origValuesPerRange = fullResCurves.map(
                                                 (curve) => curve.values,
                                             );
@@ -3480,8 +3459,12 @@ export function usePianoRollInteractions(args: {
                                                 frameDelta: lastFrameDelta,
                                                 valuesAt: (index) => origValuesPerRange[index],
                                                 sourceAt: commitSourceAt,
-                                                transformAt: (_index, _i, sourceValue, targetFrame) =>
-                                                    transformDragValue(sourceValue, targetFrame),
+                                                transformAt: (
+                                                    _index,
+                                                    _i,
+                                                    sourceValue,
+                                                    targetFrame,
+                                                ) => transformDragValue(sourceValue, targetFrame),
                                                 edgeHalfSpanAt: edgeHalfSpanForDragRange,
                                                 isEditable:
                                                     editParam === "pitch"
@@ -3493,7 +3476,10 @@ export function usePianoRollInteractions(args: {
                                                 // 立即同步更新本地 paramView state（逐帧映射到 pv 的
                                                 // 采样栅格上；pv 只是显示，随后会被后端数据刷新）
                                                 const nextEdit = pvNow.edit.slice();
-                                                const pvStepUp = Math.max(1, Math.floor(pvNow.stride));
+                                                const pvStepUp = Math.max(
+                                                    1,
+                                                    Math.floor(pvNow.stride),
+                                                );
                                                 for (const piece of pieces) {
                                                     for (
                                                         let i = 0;
@@ -3647,6 +3633,17 @@ export function usePianoRollInteractions(args: {
                     const startBeat = selectionBeatFromClientX(e.clientX, false);
                     selectionRef.current = selectionFromBeatRange(startBeat, startBeat);
                     updateSelectionUi(selectionRef.current);
+                    // 立即重绘：此刻新选区是**零宽**的，画布上还显示着**上一个**
+                    // 选区框（以及新位置的一条边线）。不在这里标脏，用户就会看到
+                    // "按下后旧框仍在原处不动"——直到指针移动触发下面的 onMove 才更新，
+                    // 这正是报告症状的一部分。
+                    //
+                    // 与 onMove（实时重绘选区）和 onUp（收尾重绘）保持一致：一次
+                    // 手势的三个阶段都各自标脏，任何一段缺失都会留下陈旧画面。
+                    // 【为什么光有它还不够】主画布走内容签名缓存，签名必须是
+                    // 引用比较（见 `mainCanvasSignature.ts`）——此处每次赋**新对象**，
+                    // 正是让签名变化、缓存失效的前提。
+                    invalidate();
                     const pid = e.pointerId;
                     (e.currentTarget as HTMLCanvasElement).setPointerCapture(pid);
                     const finePointerState = createFineAdjustedPointerState(

@@ -3,15 +3,19 @@
  *
  * 【主要内容】
  * 把「读视口矩形 / 读滚动位置 / 读视口宽度 / 写横向滚动位置 / 原子写缩放+滚动」
- * 这几件与**滚动载体**强相关的操作收敛成一个模式无关的接口，内部给出两种实现：
- * - 旧实现：原生滚动容器（`scrollRef`，浏览器维护 scrollLeft）；
- * - 渲染内核：`ScrollKernel` 自绘滚动（`kernelHostRef`，内核是视口真值源）。
+ * 这几件与**滚动载体**强相关的操作收敛成一个统一接口，由 `ScrollKernel` 提供真值
+ * （`kernelHostRef`，内核是视口真值源）。
  *
  * 【作用】
- * 内核模式下旧滚动容器不挂载（`scrollRef.current === null`），而面板里大量逻辑
- * 仍按「原生 scroller 存在」编写：素材拖入落点换算、自动滚屏、聚焦播放光标、
- * 参数编辑器视图同步。这些逻辑本身与渲染方式无关，缺的只是一个可注入的视口来源。
- * 本模块让「判断当前模式」只发生一次，而不是散落在每个调用点。
+ * 面板里大量逻辑与渲染方式无关，缺的只是一个可注入的视口来源：素材拖入落点换算、
+ * 自动滚屏、聚焦播放光标、参数编辑器视图同步。本模块把「视口从哪来」收敛到一处，
+ * 而不是散落在每个调用点。
+ *
+ * 【历史（勿删）】本模块原本是**模式无关**的适配器，内部有两种实现：旧的原生滚动容器
+ * （`scrollRef`，浏览器维护 `scrollLeft`）与内核（`ScrollKernel` 自绘滚动）。旧实现已随
+ * "渲染内核唯一路径"改造删除，因此现在**只剩内核一种实现**——`scrollRef` 已无任何 JSX
+ * 挂载点（`scrollRef.current` 恒为 `null`），保留它只为不扩大本次改动面。
+ * 下方"约定"中关于「旧实现」的说明属历史记录。
  *
  * 【与其他模块的关系】
  * - 上游：`TimelinePanel` 用 `scrollRef` + `kernelHostRef` 构造一个**稳定**实例
@@ -20,11 +24,10 @@
  *   （键盘缩放 / 聚焦播放光标）、`TimelinePanel` 的自动滚屏帧回调。
  * - 依赖：`runtime/nativeScrollApply`（旧实现的写后回读）与内核宿主的公开句柄类型。
  *
- * 【约定（与既有实现一致）】
- * 1. `setScrollLeft` 返回**实际生效值**：旧实现经浏览器钳制/量化后回读；内核经
- *    `ScrollKernel` 钳制后回读。调用方不得把请求值当作已生效值使用——否则
- *    跟随视口的图层会与真实视口错位。
- * 2. 本模块**不做任何钳制**：旧实现的钳制归浏览器，内核归 `ScrollKernel`
+ * 【约定】
+ * 1. `setScrollLeft` 返回**实际生效值**：经 `ScrollKernel` 钳制后回读。调用方不得把
+ *    请求值当作已生效值使用——否则跟随视口的图层会与真实视口错位。
+ * 2. 本模块**不做任何钳制**：钳制统一归 `ScrollKernel`
  *    （见 scrollKernel 文件头的「钳制只做一次」约束）。
  * 3. `getViewportWidth` 在内核模式下取宿主缓存的量测值（O(1)、不触发布局），
  *    因此可以安全地在每帧路径（自动滚屏）里调用。
@@ -58,6 +61,8 @@ export interface TimelineViewportAccess {
     getScrollTop(): number;
     /** 视口宽度（CSS px）；内核模式取缓存量测值，不触发布局。 */
     getViewportWidth(): number;
+    /** 视口高度（CSS px）；内核模式取缓存量测值，不触发布局。 */
+    getViewportHeight(): number;
     /**
      * 写入横向滚动位置。
      *
@@ -65,6 +70,17 @@ export interface TimelineViewportAccess {
      * @returns 实际生效值（回读）。
      */
     setScrollLeft(px: number): number;
+    /**
+     * 写入纵向滚动位置。
+     *
+     * 用途：`Alt + ↑/↓` 切换轨道后把目标行带回视野。旧实现直接写原生滚动容器的
+     * `scrollTop`，内核自绘滚动后必须走宿主入口——原写法依赖"轨道头滚动 → 镜像
+     * 回声 → 内核跟随"的间接链路，多一层时序耦合。
+     *
+     * @param px 目标位置（可越界，由载体自行钳制）。
+     * @returns 实际生效值（回读）。
+     */
+    setScrollTop(px: number): number;
     /**
      * 原子地设置缩放与横向滚动位置（**仅内核模式**）。
      *
@@ -127,6 +143,12 @@ export function createTimelineViewportAccess(args: {
             return scrollRef.current?.clientWidth ?? 0;
         },
 
+        getViewportHeight() {
+            const host = kernelHostRef.current;
+            if (host !== null) return host.getViewport().viewportHeight;
+            return scrollRef.current?.clientHeight ?? 0;
+        },
+
         setScrollLeft(px: number) {
             const host = kernelHostRef.current;
             if (host !== null) {
@@ -136,6 +158,19 @@ export function createTimelineViewportAccess(args: {
             const scroller = scrollRef.current;
             if (scroller === null) return px;
             return applyNativeScrollLeft(scroller, px);
+        },
+
+        setScrollTop(px: number) {
+            const host = kernelHostRef.current;
+            if (host !== null) {
+                host.setScrollTop(px);
+                return host.getViewport().scrollTop;
+            }
+            const scroller = scrollRef.current;
+            if (scroller === null) return px;
+            // 旧模式：浏览器自己会把越界值夹回合法范围，写入后回读即为真值。
+            scroller.scrollTop = px;
+            return scroller.scrollTop;
         },
 
         setZoomAndScroll(pxPerSec: number, scrollLeft: number) {

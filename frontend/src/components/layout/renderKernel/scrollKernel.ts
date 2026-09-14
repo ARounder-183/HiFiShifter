@@ -265,6 +265,29 @@ export interface ScrollKernel {
     setRowHeight(px: number): void;
 
     /**
+     * 一次提交「行高 + 竖直滚动位置」（竖直缩放的原子事务）。
+     *
+     * 【为什么必须是原子入口——纵向缩放的"指针下内容漂移"根因】
+     * 竖直缩放要同时改两件事：行高、以及按「指针下行位置不变」算出的新
+     * `scrollTop`。若分两次写（先 `setRowHeight` 再 `setScrollTop`，或反之），
+     * 中间会存在一帧"新行高 + 旧位置"或"旧行高 + 新位置"的**不匹配状态**。
+     * 该帧的锚点行位置是错的 —— 实测（80→88→97→107 连续放大，指针 y=38，
+     * 初始 `scrollTop`=200）：行位置序列出现 `2.975 → 3.273 → 2.975 → 3.279 …`
+     * 的**逐步振荡**，用户看到的就是"缩放时纵向滚动了一下"。
+     *
+     * 本方法把两个字段放进**同一次 `commit`**（内核状态是一次整体替换的冻结对象），
+     * 读侧永远拿到自洽的一对值。
+     *
+     * 特殊说明：`scrollTop` 仍按**新行高**钳制（与 `setRowHeight` 一致），
+     * 因此内容变矮时不会停在越界位置。
+     *
+     * @param px 新行高（CSS px）；非有限值时沿用当前行高。
+     * @param scrollTop 新的竖直位置（CSS px）；非有限值时沿用当前值。
+     * @returns 无返回值；值真正变化时经 commit 通知订阅者（只通知一次）。
+     */
+    setRowHeightAndScrollTop(px: number, scrollTop: number): void;
+
+    /**
      * 按当前外部边界重新钳制两轴滚动位置。
      *
      * 特殊说明：钳制只在写入时发生（约束 1），因此宿主尺寸变化（resize）、
@@ -588,6 +611,16 @@ export function createScrollKernel(options: ScrollKernelOptions): ScrollKernel {
                 rowHeight: next,
                 scrollTop: clamp(state.scrollTop, 0, maxScrollTopFor(next)),
             });
+        },
+
+        setRowHeightAndScrollTop(px: number, scrollTop: number) {
+            const next = Number.isFinite(px) ? Math.max(1, px) : state.rowHeight;
+            const nextScrollTop = Number.isFinite(scrollTop)
+                ? clamp(scrollTop, 0, maxScrollTopFor(next))
+                : state.scrollTop;
+            // 一次 commit 提交两个字段：读侧不会观察到"新行高 + 旧位置"的中间态
+            // （纵向缩放锚点漂移的根因，见接口注释）。
+            commit({ rowHeight: next, scrollTop: nextScrollTop });
         },
 
         reclamp() {

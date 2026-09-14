@@ -89,11 +89,14 @@ describe("hitTest", () => {
         expect(result.region).toBe("right-edge");
     });
 
-    it("边缘优先于 header 分区（顶部的 trim 手柄不能被 header 抢走）", () => {
+    it("header 内**不**出现 trim 手柄（边缘条只从保留区下沿开始）", () => {
+        // 旧实现 `ClipEdgeHandles` 的 yStyle 是 top = header + 保留区、bottom = 0：
+        // header 带内没有任何边缘落点。内核原先让边缘在任何 y 都优先，于是 header
+        // 左右两端被裁切手势抢走，静音/锁链徽标在那里点不动。
         const result = hitTest(makeArgs({ contentX: 102, contentY: 5 }));
         expect(result.kind).toBe("clip");
         if (result.kind !== "clip") return;
-        expect(result.region).toBe("left-edge");
+        expect(result.region).toBe("header");
     });
 
     it("极短 clip 的边缘宽度收敛到 1/3，body 仍可命中", () => {
@@ -111,24 +114,45 @@ describe("hitTest", () => {
         expect(result.region).toBe("body");
     });
 
-    it("命中淡变角（body 顶部、贴左边缘）", () => {
-        // a1 = [1,3) → 内容 100..300；行高 96、header 18 → body 高 76，
-        // 保留区 = max(14, round(76/3)) = 25。y=23 → body 顶部 5px（角部带内）。
+    it("命中淡变角横帽（body 顶部 14px 内、贴左边缘）", () => {
+        // a1 = [1,3) → 内容 100..300；行高 80、header 18 → body 高 60，
+        // 保留区 = max(14, 20) = 20。y=23 → body 内 5px（横帽带 0..14）。
         const result = hitTest(makeArgs({ contentX: 105, contentY: 23 }));
         expect(result.kind).toBe("clip");
         if (result.kind !== "clip") return;
         expect(result.region).toBe("fade-in-corner");
     });
 
-    it("命中淡变角（body 顶部、贴右边缘）", () => {
+    it("命中淡变角横帽（body 顶部、贴右边缘）", () => {
         const result = hitTest(makeArgs({ contentX: 295, contentY: 23 }));
         expect(result.kind).toBe("clip");
         if (result.kind !== "clip") return;
         expect(result.region).toBe("fade-out-corner");
     });
 
+    it("横帽带内、超出横帽宽度 → body（角部不再是整块矩形）", () => {
+        // body 内 5px（横帽带）、距左缘 30px（> 22px 横帽宽）→ body。
+        const result = hitTest(makeArgs({ contentX: 130, contentY: 23 }));
+        expect(result.kind).toBe("clip");
+        if (result.kind !== "clip") return;
+        expect(result.region).toBe("body");
+    });
+
+    it("竖条带内：6px 内是淡变角，6..10px 是 body（不是边缘）", () => {
+        // body 内 17px ∈ [14, 20) → 竖条带；距左缘 4px ≤ 6px → 淡变角。
+        const inStrip = hitTest(makeArgs({ contentX: 104, contentY: 35 }));
+        expect(inStrip.kind).toBe("clip");
+        if (inStrip.kind !== "clip") return;
+        expect(inStrip.region).toBe("fade-in-corner");
+        // 距左缘 8px：过了 6px 竖条、又还在保留区之上 → body（旧实现的 10px 边缘条
+        // 在这一带并不存在，它从保留区下沿才开始）。
+        const pastStrip = hitTest(makeArgs({ contentX: 108, contentY: 35 }));
+        expect(pastStrip.kind).toBe("clip");
+        if (pastStrip.kind !== "clip") return;
+        expect(pastStrip.region).toBe("body");
+    });
+
     it("body 深处贴左边缘 → trim 而非淡变角（按竖直方向切分）", () => {
-        // 注意 makeArgs 的 rowHeight = 80（不是 96）：y 必须留在第 0 轨内。
         // body 高 = 80 − 2 − 18 = 60 → 保留区 = max(14, 20) = 20；y=60 → body 内 42px。
         const result = hitTest(makeArgs({ contentX: 105, contentY: 60 }));
         expect(result.kind).toBe("clip");
@@ -136,19 +160,22 @@ describe("hitTest", () => {
         expect(result.region).toBe("left-edge");
     });
 
+    it("边缘条宽 10px（旧实现 ClipEdgeHandles 的 w-[10px]）", () => {
+        const inside = hitTest(makeArgs({ contentX: 109, contentY: 60 }));
+        expect(inside.kind).toBe("clip");
+        if (inside.kind !== "clip") return;
+        expect(inside.region).toBe("left-edge");
+        const outside = hitTest(makeArgs({ contentX: 111, contentY: 60 }));
+        expect(outside.kind).toBe("clip");
+        if (outside.kind !== "clip") return;
+        expect(outside.region).toBe("body");
+    });
+
     it("header 内且不贴边缘 → header（角部只在 body 顶部）", () => {
-        // x=120 距左边缘 20px：不触发 trim 边缘（6px），且 y 在 header 内（角部带之外）。
         const result = hitTest(makeArgs({ contentX: 120, contentY: 5 }));
         expect(result.kind).toBe("clip");
         if (result.kind !== "clip") return;
         expect(result.region).toBe("header");
-    });
-
-    it("header 内贴边缘 → 仍判边缘（边缘优先于 header）", () => {
-        const result = hitTest(makeArgs({ contentX: 105, contentY: 5 }));
-        expect(result.kind).toBe("clip");
-        if (result.kind !== "clip") return;
-        expect(result.region).toBe("left-edge");
     });
 
     it("时间换算按 pxPerSec，且负数钳制到 0", () => {
@@ -203,9 +230,7 @@ describe("hitTest · SnapOffset 三角手柄", () => {
     it("偏移为 0 时命中贴左缘的手柄", () => {
         // snapOffsetHandleXPx(0, 100) = 0 → left = min(max(−4, −1), 191) = −1
         // 握把 x ∈ [−1, 11]（clip 内），可达部分 [0, 11] → localX = 5 命中
-        const result = hitTest(
-            makeArgs({ contentX: 105, contentY: HANDLE_Y }),
-        );
+        const result = hitTest(makeArgs({ contentX: 105, contentY: HANDLE_Y }));
         expect(result.kind).toBe("clip");
         if (result.kind !== "clip") return;
         expect(result.region).toBe("snap-offset-handle");
@@ -221,9 +246,7 @@ describe("hitTest · SnapOffset 三角手柄", () => {
                 clipsByTrack: new Map([
                     [
                         "A",
-                        [
-                            { id: "a1", trackId: "A", startSec: 1, lengthSec: 2, snapOffsetSec: 1 },
-                        ],
+                        [{ id: "a1", trackId: "A", startSec: 1, lengthSec: 2, snapOffsetSec: 1 }],
                     ],
                     ["B", []],
                 ]),
@@ -256,9 +279,7 @@ describe("hitTest · SnapOffset 三角手柄", () => {
                 clipsByTrack: new Map([
                     [
                         "A",
-                        [
-                            { id: "a1", trackId: "A", startSec: 1, lengthSec: 2, snapOffsetSec: 1 },
-                        ],
+                        [{ id: "a1", trackId: "A", startSec: 1, lengthSec: 2, snapOffsetSec: 1 }],
                     ],
                     ["B", []],
                 ]),
@@ -280,9 +301,7 @@ describe("hitTest · SnapOffset 三角手柄", () => {
                 clipsByTrack: new Map([
                     [
                         "A",
-                        [
-                            { id: "a1", trackId: "A", startSec: 1, lengthSec: 2, snapOffsetSec: 5 },
-                        ],
+                        [{ id: "a1", trackId: "A", startSec: 1, lengthSec: 2, snapOffsetSec: 5 }],
                     ],
                     ["B", []],
                 ]),

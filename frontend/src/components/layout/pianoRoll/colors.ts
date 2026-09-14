@@ -2,8 +2,8 @@
  * 参数编辑器（Piano Roll）主题配色表
  *
  * 【主要内容】
- * 集中定义参数编辑器画布的全部颜色：琴键区、网格线、曲线、叠加文字与播放头，
- * 按深色 / 浅色两套主题给出。
+ * 集中定义参数编辑器画布的全部颜色：琴键区、网格线、钢琴背景（黑键行背景带）、
+ * 音阶高亮、曲线、叠加文字与播放头，按深色 / 浅色两套主题给出。
  *
  * 【作用】
  * 这些颜色此前**内联在** `render.ts` 的 `drawPianoRoll` 里。阶段 2 起同一份配色
@@ -11,10 +11,21 @@
  * 各自演进"的风险——而颜色分叉的表现是"某个图层在两种模式下色值差一点点"，
  * 极难归因。因此提取为单一来源。
  *
+ * 【取值未必是字面色值：可能是 CSS 变量】{@link PLAYHEAD_COLOR_TOKEN} 是
+ * `var(--qt-playhead)`，两套主题共用——播放头必须与时间轴标尺（同一个变量）同色，
+ * 写死字面色值会让用户一改主题色两处就分叉（曾实际发生）。因此**消费方必须先
+ * 归一化**：GL 走 `parseRgbaColor(normalizeCssColor(css))`，Canvas2D 的
+ * `strokeStyle` 也必须过一遍 `normalizeCssColor`（它同样不解析 `var(...)`，
+ * 且非法值是**静默忽略**而非报错）。
+ *
  * 【与其他模块的关系】
- * - 上游：`render.ts` 的 `drawPianoRoll`（Canvas2D 路径）与 `PianoRollPanel`
- *   在构建 GL 场景层的网格输入时调用。
- * - 独立性：纯函数 + 常量，不依赖 DOM / React / WebGL。
+ * - 上游：`render.ts` 的 `drawPianoRoll`（Canvas2D 路径，音阶高亮已迁走、只余非网格
+ *   图层）与 `PianoRollPanel` 在构建 GL 场景层的网格输入时调用。
+ * - 下游：`PianoRollPanel.buildGridSpec` 把本表的 CSS 颜色经 `parseRgbaColor` 转成
+ *   数值 RGBA，交给 `kernel/scene/gridInstances` 构建 GL 实例（含黑键行背景带与
+ *   音阶高亮强调线）；`PianoRollPanel.resolvePlayheadRgba` 另取 `playheadLine` 喂给
+ *   GL 叠加层的播放头（经 `normalizeCssColor` 解析变量，带缓存）。
+ * - 独立性：纯函数 + 常量，不依赖 DOM / React / WebGL（变量只是字符串，解析由消费方负责）。
  */
 
 /** 参数编辑器画布配色。 */
@@ -45,6 +56,40 @@ export interface PianoRollColors {
     readonly pitchGridC: string;
     /** 音高网格：其余半音线。 */
     readonly pitchGridOther: string;
+    /**
+     * 黑键行背景带（钢琴背景：黑键行与白键行区分开，其余行保持原背景）。
+     *
+     * 【为什么只标黑键行】这是 REAPER / Logic / Ableton 的既有惯例：只给黑键行加一条
+     * 半透明带、白键行保持原背景，正好复刻钢琴键盘的黑白交替。反过来给白键行加带
+     * 在浅色主题下会与底色糊在一起，反而削弱行间对比。
+     *
+     * 【方向恒定：两套主题都必须**压暗**】键盘列的黑键恒比白键暗（`blackKey`
+     * `#2e3136` vs `whiteKey` `#d7dade`），背景带复刻的是同一个语义，因此方向不能
+     * 随主题翻转。曾有一版深色主题改用**提亮**（理由是"底色接近黑、压暗没有余量"），
+     * 结果黑键行比白键行更亮 —— 与键盘列**恰好相反**（用户报告："深色模式下背景的
+     * 黑键和白键的深色区域是相反的（浅色模式正常）"）。压暗在深色底上余量确实小，
+     * 但那是**选 alpha** 的问题，不是改方向能解决的。
+     *
+     * 【alpha 的取值区间：看得见，但不抢过网格线】
+     * - 下限（不得白做）：Δ带 ≥ 6。深色底 `#1f1f1f` = 31，压暗余量只有 31，
+     *   所以深色必须用明显更大的 alpha（0.25 → Δ7.75）才能达到与浅色同量级的可辨度；
+     *   早期深色版的 `rgba(0,0,0,0.08)` 只有 Δ2，肉眼几乎不可见。
+     * - 上限（网格线仍是最强对比）：Δ带 ≤ Δ最弱网格线。浅色两者同为 Δ14.3；深色
+     *   弱网格线 `rgba(255,255,255,0.05)` 是 Δ11.2，带子 Δ7.75 仍在其下。
+     *
+     * 特殊说明 1：alpha 必须克制——"网格线仍清晰可见"是验收标准。数值集中放在这里，
+     * 后续调参只改一处；方向性与上下限由 `colors.test.ts` 按主题逐个钉住。
+     * 特殊说明 2：必须是 `rgba()` 写法。`parseRgbaColor` 只认 `rgb()/rgba()`，hex 会
+     * 被解析成**不透明洋红**（故意的暴露设计，见 `normalizeCssColor` 说明）。
+     */
+    readonly blackKeyRowBand: string;
+    /**
+     * 音阶高亮：音阶音级上的强调线。
+     *
+     * 特殊说明：绘制顺序在 {@link blackKeyRowBand} **之上**——背景是纹理、高亮是
+     * 语义，语义必须压住纹理。同样必须是 `rgba()` 写法。
+     */
+    readonly scaleHighlight: string;
     /** 原始曲线（虚线）。 */
     readonly origCurve: string;
     /** 编辑后曲线（实线）。 */
@@ -53,9 +98,30 @@ export interface PianoRollColors {
     readonly selectionCurve: string;
     /** 画布中央的操作提示文字。 */
     readonly overlayTextColor: string;
-    /** 播放头竖线。 */
+    /**
+     * 播放头竖线。
+     *
+     * 【必须是 CSS 变量，不能是字面色值】参数编辑器复用时间轴那套标尺组件
+     * （`TimeRuler`），它的播放头取 `--qt-playhead`（DOM/CSS 变量，用户可在
+     * 「外观设置」里改）。画布侧的播放头若自带一套字面色值，用户一改主题色两者就
+     * **颜色不一致**（用户报告："播放线在底下和上方标尺的颜色不一致"）。
+     *
+     * 曾有一版两套主题各写各的（深色 `rgba(255,255,255,0.25)`、浅色
+     * `rgba(0,0,0,0.20)`），两个都不是 `--qt-playhead` —— 与标尺的 `#f05a5a`
+     * 毫无关系。统一为变量后，两处必然同色，且随用户的主题设置一起变。
+     *
+     * 特殊说明：GL 侧不认 `var(...)`，调用方必须先经 `normalizeCssColor` 归一化
+     * （它会用浏览器把变量解析成 `rgb()/rgba()`），再交给 `parseRgbaColor`。
+     */
     readonly playheadLine: string;
 }
+
+/**
+ * 播放头颜色 token（唯一定义处）。
+ *
+ * 指向时间轴标尺所用的同一个变量；两套主题共用，避免"两处播放头各自漂移"。
+ */
+export const PLAYHEAD_COLOR_TOKEN = "var(--qt-playhead)";
 
 /** 深色主题配色。 */
 const DARK_COLORS: PianoRollColors = {
@@ -74,6 +140,11 @@ const DARK_COLORS: PianoRollColors = {
     // 网格线
     pitchGridC: "rgba(255,255,255,0.10)",
     pitchGridOther: "rgba(255,255,255,0.05)",
+    // 钢琴背景 / 音阶高亮（见接口处的取值说明：方向恒为压暗、alpha 有上下限）
+    // 深色底接近黑（31），压暗余量小，故 alpha 明显大于浅色主题才能同样看得见
+    // （0.08 → Δ2 等于白做；0.25 → Δ7.75，且仍在弱网格线的 Δ11.2 之下）。
+    blackKeyRowBand: "rgba(0,0,0,0.25)",
+    scaleHighlight: "rgba(255,200,80,0.22)",
     // 曲线
     origCurve: "rgba(200,200,200,0.55)",
     editCurve: "rgba(255,255,255,0.92)",
@@ -81,7 +152,8 @@ const DARK_COLORS: PianoRollColors = {
     // 叠加文字 & 播放头（画布中央的操作提示文字，需保持可读：
     // 旧值 35% 不透明度在两套主题下都只剩 1.5-1.8:1）
     overlayTextColor: "rgba(235,240,248,0.45)",
-    playheadLine: "rgba(255,255,255,0.25)",
+    // 与时间轴标尺同源（见 PLAYHEAD_COLOR_TOKEN 说明），不得写字面色值。
+    playheadLine: PLAYHEAD_COLOR_TOKEN,
 };
 
 /** 浅色主题配色。 */
@@ -100,13 +172,17 @@ const LIGHT_COLORS: PianoRollColors = {
     // 网格线
     pitchGridC: "rgba(0,0,0,0.12)",
     pitchGridOther: "rgba(0,0,0,0.06)",
+    // 钢琴背景 / 音阶高亮（浅色主题的琥珀加深，否则在白底上不可读）
+    blackKeyRowBand: "rgba(0,0,0,0.06)",
+    scaleHighlight: "rgba(200,120,20,0.22)",
     // 曲线
     origCurve: "rgba(132,104,26,0.80)",
     editCurve: "rgba(178,108,0,1)",
     selectionCurve: "rgba(0,116,200,1)",
     // 叠加文字 & 播放头（画布中央的操作提示文字，需保持可读）
     overlayTextColor: "rgba(30,36,48,0.60)",
-    playheadLine: "rgba(0,0,0,0.20)",
+    // 与时间轴标尺同源（见 PLAYHEAD_COLOR_TOKEN 说明），不得写字面色值。
+    playheadLine: PLAYHEAD_COLOR_TOKEN,
 };
 
 /**

@@ -32,7 +32,7 @@ import { fileBrowserApi } from "../../../../services/api/fileBrowser";
 import { seekPlayhead, setplayheadSec } from "../../../../features/session/sessionSlice";
 import { selectKeybinding } from "../../../../features/keybindings/keybindingsSlice";
 import type { Keybinding } from "../../../../features/keybindings/types";
-import { getDynamicProjectSec } from "../../../../features/session/projectBoundary";
+import { resolveScrollableProjectSec } from "../../../../features/session/projectBoundary";
 import { applyNativeScrollLeft } from "../runtime/nativeScrollApply";
 import type { TimelineKernelHost } from "../kernel/host/timelineKernelHost";
 import { createTimelineViewportAccess } from "./timelineViewportAccess";
@@ -52,6 +52,7 @@ import { createTimelineAxis } from "../../renderKernel/timelineAxis.js";
 import {
     snapTimelinePosition,
     snapTimelineClipMove,
+    type SnapCandidate,
     type SnapObjectKind,
     type SnapResult,
 } from "../../../../utils/timelineSnapping";
@@ -70,6 +71,13 @@ export interface SnapTimelineOpts {
     originSec?: number;
     anchorTrackId?: string | null;
     excludeClipIds?: ReadonlySet<string>;
+    /**
+     * 调用方补充的**冻结候选**（坐标按拖动起点算好，见 `TimelineSnapContext`）。
+     *
+     * 交叉点抓手用它给出两侧 clip 在**拖动前**的边界：这两个 clip 自己会随拖动
+     * 移动，作为实时候选会让吸附追着自己的尾巴跑。
+     */
+    extraCandidates?: readonly SnapCandidate[];
     /**
      * 拖拽移动 Clip 的长度：提供时启用**多源吸附** —— 前缘、后缘（结束
      * 位置）与自身吸附偏移点（moveSnapOffsetSec）同时作为被吸附对象参与
@@ -118,12 +126,14 @@ type TimelineSessionSlice = Pick<
     | "pendingPlayheadRevealSec"
     | "primaryTimeUnit"
     | "project"
+    | "projectSec"
     | "secondaryTimeUnit"
     | "rulerLabelSpacingPx"
     | "showPlayheadTimeInTrackHeader"
     | "playheadZoomEnabled"
     | "selectedClipId"
     | "selectedTrackId"
+    | "multiSelectionIntentional"
     | "showAllTakes"
     | "tempoMap"
     | "tempoMapVisible"
@@ -152,7 +162,6 @@ export interface TimelineStateResult {
     rulerContentRef: React.MutableRefObject<HTMLDivElement | null>;
     rulerPlayheadLineRef: React.MutableRefObject<HTMLDivElement | null>;
     rulerPlayheadHeadRef: React.MutableRefObject<HTMLDivElement | null>;
-    playheadRef: React.MutableRefObject<HTMLDivElement | null>;
     dropPreviewRef: React.MutableRefObject<HTMLDivElement | null>;
     lastClickedClipIdRef: React.MutableRefObject<string | null>;
     scrollLeftRef: React.MutableRefObject<number>;
@@ -218,6 +227,13 @@ export interface TimelineStateResult {
     pitchDragKb: Keybinding;
     noSnapKb: Keybinding;
     copyDragKb: Keybinding;
+    /**
+     * 多选切换修饰键（`modifier.clipMultiSelectToggle`，默认 Ctrl/⌘）。
+     *
+     * 拖拽起手的陈旧选区收敛判定需要它：该键同时是复制拖拽键，按住时要把**整组**
+     * 复制出去，因此不得收敛选区（见 `interaction/primeSelection`）。
+     */
+    clipMultiSelectToggleKb: Keybinding;
     crossfadeGripKb: Keybinding;
     fadeCurvatureKb: Keybinding;
 
@@ -329,6 +345,7 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
             pendingPlayheadRevealSec: state.session.pendingPlayheadRevealSec,
             playheadZoomEnabled: state.session.playheadZoomEnabled,
             paramEditorSyncTimeline: state.session.paramEditorSyncTimeline,
+            projectSec: state.session.projectSec,
             paramEditorTimelineClickSelectTrackEnabled:
                 state.session.paramEditorTimelineClickSelectTrackEnabled,
             primaryTimeUnit: state.session.primaryTimeUnit,
@@ -338,6 +355,7 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
             secondaryTimeUnit: state.session.secondaryTimeUnit,
             selectedClipId: state.session.selectedClipId,
             selectedTrackId: state.session.selectedTrackId,
+            multiSelectionIntentional: state.session.multiSelectionIntentional,
             showPlayheadTimeInTrackHeader: state.session.showPlayheadTimeInTrackHeader,
             tempoMap: state.session.tempoMap,
             tempoMapVisible: state.session.tempoMapVisible,
@@ -370,8 +388,10 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
      * 内核模式下 `scrollRef.current` 为 null，视口真值在注入的宿主里；访问器让
      * 「写视口」这件事不必在本模块里再判断一次模式。
      *
-     * 特殊说明：`kernelHostRef` 缺省时用一个内部空 ref 占位（旧模式 / 测试环境），
-     * 此时访问器退化为纯原生 scroller 实现，行为与改动前完全一致。
+     * 特殊说明：`kernelHostRef` 缺省时用一个内部空 ref 占位（测试环境等宿主尚未注入
+     * 的场景），此时访问器取不到视口、返回空值。注意**旧的原生 scroller 实现已随
+     * "渲染内核唯一路径"改造删除**，`scrollRef` 已无 JSX 挂载点，因此不存在"退回原生
+     * scroller"这一条路。
      */
     const fallbackKernelHostRef = useRef<TimelineKernelHost | null>(null);
     const kernelHostRef = args.kernelHostRef ?? fallbackKernelHostRef;
@@ -390,7 +410,6 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
         pxPerSec: number;
     } | null>(null);
     const lastClickedClipIdRef = useRef<string | null>(null);
-    const playheadRef = useRef<HTMLDivElement | null>(null);
     const dropPreviewRef = useRef<HTMLDivElement | null>(null);
     const pendingDropDurationPathRef = useRef<string | null>(null);
 
@@ -491,13 +510,31 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
     // ── syncScrollLeft → DOM 直通 + bus ───────────────────────
     // 函数体只读 ref/bus，不依赖任何渲染期值：必须稳定引用，
     // 否则每个依赖它的 effect/prop 每次渲染都会失效重跑。
+    /**
+     * 发布到共享视口的**缩放**：与同一帧发布的位置**同源**。
+     *
+     * 【为什么不能直接用 `pxPerSecRef.current`】该 ref 在**渲染期**就被同步成 React
+     * state 的新值（为让别处的 emit 读到最新值）。而并发渲染允许"渲染但尚未提交"，
+     * 此时内核与 DOM（标尺）都还是旧缩放——若一次逐帧发布拿"帧里报来的旧位置"配上
+     * "刚渲染出的新缩放"，推给参数编辑器的就是一对**自相矛盾**的视口（新缩放 + 旧
+     * 位置），它会先按新缩放跳到错误位置、下一帧再被纠正：正是"启用同步后缩放抽动"。
+     *
+     * 内核模式取内核真值（位置与缩放同一次 `scroll.get()`，天然一致，且与已提交的
+     * DOM 一致）；无内核（旧 DOM 分支）时才退回 ref。
+     */
+    function livePxPerSec(): number {
+        const host = kernelHostRef.current;
+        if (host !== null) return host.getViewport().pxPerSec;
+        return pxPerSecRef.current;
+    }
+
     const syncScrollLeft = React.useCallback(function syncScrollLeft(next: number) {
         scrollLeftRef.current = next;
         if (paramEditorSyncTimelineRef.current && !timelineSyncApplyingRef.current) {
             timelineViewportSync.setViewport(
                 {
                     scrollLeft: next,
-                    pxPerSec: pxPerSecRef.current,
+                    pxPerSec: livePxPerSec(),
                 },
                 TIMELINE_SYNC_ORIGIN,
             );
@@ -507,13 +544,11 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
         }
         const playheadLeftPx =
             (Number(sessionRef.current.playheadSec ?? 0) || 0) * pxPerSecRef.current;
-        // 播放头写入统一设备像素吸附（readDevicePixelRatio 每次现读）：分数
+        // 标尺播放头写入统一设备像素吸附（readDevicePixelRatio 每次现读）：分数
         // DPR 下不吸附的落点相位随滚动/播放变化，线宽 1↔2 物理像素交替。
-        // 与 React 渲染侧（TimelineSurface / TimeRulerPlayhead）同一函数。
+        // 与 React 渲染侧（标尺播放头 TimeRulerPlayhead）同一吸附函数。
+        // 轨道区播放头不在这里写：它由内核自绘，滚动经 scroll 订阅自行标脏。
         const dpr = readDevicePixelRatio();
-        if (playheadRef.current) {
-            playheadRef.current.style.left = `${snapToDevicePx(playheadLeftPx - next, dpr)}px`;
-        }
         if (rulerPlayheadLineRef.current) {
             rulerPlayheadLineRef.current.style.left = `${snapToDevicePx(playheadLeftPx, dpr)}px`;
         }
@@ -561,28 +596,25 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
      * 因此把两件事拆开：本函数只做"写 ref + 广播共享视口"（几个赋值 + 一次
      * emit，不进 React），可以安全逐帧调用；React 对齐仍走量化路径。
      */
-    const syncScrollLeftFrame = React.useCallback(
-        function syncScrollLeftFrame(next: number) {
-            scrollLeftRef.current = next;
-            timelineViewportBus.emit(
-                next,
-                pxPerSecRef.current,
-                viewportWidthRef.current,
-                scrollTopPxRef.current,
-                rowHeightRef.current,
+    const syncScrollLeftFrame = React.useCallback(function syncScrollLeftFrame(next: number) {
+        scrollLeftRef.current = next;
+        timelineViewportBus.emit(
+            next,
+            pxPerSecRef.current,
+            viewportWidthRef.current,
+            scrollTopPxRef.current,
+            rowHeightRef.current,
+        );
+        if (paramEditorSyncTimelineRef.current && !timelineSyncApplyingRef.current) {
+            timelineViewportSync.setViewport(
+                {
+                    scrollLeft: next,
+                    pxPerSec: livePxPerSec(),
+                },
+                TIMELINE_SYNC_ORIGIN,
             );
-            if (paramEditorSyncTimelineRef.current && !timelineSyncApplyingRef.current) {
-                timelineViewportSync.setViewport(
-                    {
-                        scrollLeft: next,
-                        pxPerSec: pxPerSecRef.current,
-                    },
-                    TIMELINE_SYNC_ORIGIN,
-                );
-            }
-        },
-        [],
-    );
+        }
+    }, []);
 
     // ── syncScrollTop：竖直轴的同帧提交 ──────────────────────────
     // sticky 画布层（clip 体 / 波形面）不随滚动容器原生移动，竖直滚动时
@@ -666,7 +698,20 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
                 // applying 标志抑制回灌，避免两个面板形成反馈环。
                 timelineSyncApplyingRef.current = true;
                 const applied = viewportAccess.setZoomAndScroll(store.pxPerSec, store.scrollLeft);
+                // 同上：视口（可能含缩放）刚改完，立刻同任务提交一帧，避免
+                // "标尺文本已是新缩放、网格还是旧缩放"的那一帧。
+                kernelHostRef.current?.paintNow();
                 syncScrollLeft(applied.scrollLeft);
+                // 【缩放必须同时回写 React】标尺刻度、左侧轨道头与其它 React 派生量都
+                // 由 React 的 `pxPerSec` 布局；只写内核会让**轨道区按新缩放、标尺仍按
+                // 旧缩放**——两个面板因此看起来"网格没对齐、标尺也没对齐"。
+                //
+                // 上面那句"纯滚动"的注释只对 pxPerSec 未变的情形成立：那时标尺的
+                // 内容布局没变，只有平移量变了（由内核每帧写 transform），确实不必
+                // 走 React。缩放变了则必须走（与下方旧 DOM 分支的 `setPxPerSec` 同源）。
+                if (Math.abs(applied.pxPerSec - pxPerSecRef.current) > 1e-9) {
+                    setPxPerSec(applied.pxPerSec);
+                }
                 timelineSyncApplyingRef.current = false;
                 return;
             }
@@ -705,7 +750,9 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
             timelineViewportSync.setViewport(
                 {
                     scrollLeft: scrollLeftRef.current,
-                    pxPerSec: pxPerSecRef.current,
+                    // 与逐帧发布同一口径（见 `livePxPerSec`）：配对的两项必须同源，
+                    // 否则会把"新缩放 + 旧位置"这种自相矛盾的视口推给参数编辑器。
+                    pxPerSec: livePxPerSec(),
                 },
                 TIMELINE_SYNC_ORIGIN,
             );
@@ -801,6 +848,9 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
     );
     const noSnapKb = useAppSelector((state) => selectKeybinding(state, "modifier.clipNoSnap"));
     const copyDragKb = useAppSelector((state) => selectKeybinding(state, "modifier.clipCopyDrag"));
+    const clipMultiSelectToggleKb = useAppSelector((state) =>
+        selectKeybinding(state, "modifier.clipMultiSelectToggle"),
+    );
     const crossfadeGripKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.clipCrossfadeGrip"),
     );
@@ -867,7 +917,15 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
     }, []);
 
     // ── dynamicProjectSec / contentWidth / contentHeight ─────
-    const dynamicProjectSec = useMemo(() => getDynamicProjectSec(s.clips), [s.clips]);
+    //
+    // 与参数编辑器、内核**同源**（见 `resolveScrollableProjectSec`）：标尺的可见
+    // 刻度范围、拖拽上限与内容宽都由此推出。此前只用 clip 末端，比后端权威的
+    // `projectSec` 短（实测 59.5s vs 120s），会让标尺刻度范围与内核实际可滚范围
+    // 不一致（缺陷 7 的同一根因）。
+    const dynamicProjectSec = useMemo(
+        () => resolveScrollableProjectSec(s.projectSec, s.clips),
+        [s.projectSec, s.clips],
+    );
 
     const contentWidth = useMemo(
         () => Math.max(1, Math.ceil(dynamicProjectSec * pxPerSec)),
@@ -1063,6 +1121,7 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
                 originSec: opts?.originSec,
                 anchorTrackId: opts?.anchorTrackId ?? session.selectedTrackId,
                 excludeClipIds: opts?.excludeClipIds,
+                extraCandidates: opts?.extraCandidates,
             };
             // 多源吸附：拖拽移动 Clip 时前缘/后缘/自身吸附偏移点同时作为
             // 被吸附对象。
@@ -1135,16 +1194,10 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
                 void dispatch(seekPlayhead(beat));
                 clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
             } else {
-                // 更新 Redux state 使三角形头部（TimeRulerPlayhead）与竖线同步
+                // 更新 Redux state 使三角形头部（TimeRulerPlayhead）与竖线同步。
+                // 轨道区播放头（内核自绘）无需在此直写 DOM：位置变化经数据镜像 +
+                // 视觉插值 ref 流入内核，由桥接的每帧重绘请求驱动。
                 dispatch(setplayheadSec(beat));
-                // 同时直接操作 DOM 确保竖线无延迟跟随（设备像素吸附与其余
-                // 播放头写入点一致，避免拖拽中相位漂移造成粗细变化）。
-                if (playheadRef.current) {
-                    playheadRef.current.style.left = `${snapToDevicePx(
-                        beat * pxPerSecRef.current - scrollLeftRef.current,
-                        readDevicePixelRatio(),
-                    )}px`;
-                }
             }
             return beat;
         },
@@ -1346,7 +1399,6 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
         rulerContentRef,
         rulerPlayheadLineRef,
         rulerPlayheadHeadRef,
-        playheadRef,
         dropPreviewRef,
 
         lastClickedClipIdRef,
@@ -1404,6 +1456,7 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
         pitchDragKb,
         noSnapKb,
         copyDragKb,
+        clipMultiSelectToggleKb,
         crossfadeGripKb,
         fadeCurvatureKb,
 
