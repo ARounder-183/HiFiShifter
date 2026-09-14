@@ -206,6 +206,43 @@ export function solveDirAt(
 }
 
 /**
+ * 曲率拖拽的指针环境（指针 y 到「归一化增益」的换算依据）。
+ *
+ * 与 `useEditDrag` 的 `fadePointerEnv` 同源：body 顶边视口 y 是"增益 = 1"的
+ * 基线，往下 `bodyHeightPx` 处为增益 0。
+ */
+export interface FadeCurvePointerEnv {
+    readonly envTopClientY: number;
+    readonly bodyHeightPx: number;
+}
+
+/**
+ * 把指针位置换算为包络线上的归一化坐标 `(t, gain)`。
+ *
+ * @param env 指针环境（body 顶边视口 y 与 body 高度）。
+ * @param side 该侧淡变在时间轴上的位置与宽度（秒）。
+ * @param pointerSec 指针对应的工程时间（秒）。
+ * @param clientY 指针的视口 y（CSS px）。
+ * @returns `t` 为淡变区内的归一化 x、`gain` 为归一化增益；该侧宽度为 0 时返回 null。
+ */
+export function resolveCurvePointer(
+    env: FadeCurvePointerEnv,
+    side: { leftSec: number; widthSec: number },
+    pointerSec: number,
+    clientY: number,
+): { t: number; gain: number } | null {
+    if (!(side.widthSec > 1e-9)) return null;
+    // 端点各让出 0.1%：t 取到 0 或 1 时曲线端点的增益是常数，最近点求解会在
+    // 端点整段退化成"距离 = |Δy|"，手感发死。
+    const t = Math.min(0.999, Math.max(0.001, (pointerSec - side.leftSec) / side.widthSec));
+    const gain = Math.min(
+        1,
+        Math.max(0, 1 - (clientY - env.envTopClientY) / Math.max(1, env.bodyHeightPx)),
+    );
+    return { t, gain };
+}
+
+/**
  * 最近点求解器：把指针位置投影到曲线族上，返回屏幕距离最近的 (t, dir)。
  *
  * 与 {@link solveDirAt}（固定 t 的竖直反解）的本质区别：反解在"平坦带"

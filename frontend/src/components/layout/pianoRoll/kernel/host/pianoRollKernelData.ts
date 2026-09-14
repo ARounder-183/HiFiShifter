@@ -88,11 +88,25 @@ export interface PianoRollGridSpec {
     /**
      * 音阶高亮的音级集合（pitch class 0..11）；缺省 / 空数组表示不高亮。
      *
-     * 特殊说明：**只支持单一音阶**（工程音阶）。Tempo Map 的分段音阶无法在这里
-     * 表达——GL 网格几何是视口坐标、不含时间轴，不知道自己在哪个时间段上。
-     * 详见 `PianoRollPanel.buildGridSpec` 与 `buildPitchGridInstances` 的限制说明。
+     * 特殊说明：只支持**单一音阶**（工程音阶）。Tempo Map 的分段音阶走下面的
+     * `scaleSegments`（面板已把各时间段投影成视口 x），两者互斥、分段优先。
      */
     readonly scaleNotes?: readonly number[];
+    /**
+     * Tempo Map **分段音阶**（时间域）：各时间段的起止与生效音级。
+     *
+     * 与 `scaleNotes` 互斥：给了分段就按段画（每段只高亮该段音阶），不再画整宽的
+     * 单音阶线。缺省表示没有分段。
+     *
+     * 特殊说明：这里给的是**秒**而不是像素——网格层是视口坐标，投影由宿主持有
+     * 实时轴完成（见 `projectScaleSegments` 的说明：面板侧投影会让每帧滚动都做一次
+     * 颜色解析）。
+     */
+    readonly scaleSegments?: readonly {
+        readonly startSec: number;
+        readonly endSec: number;
+        readonly notes: readonly number[];
+    }[];
     /** 音阶强调线颜色；缺省表示不画强调线。 */
     readonly scaleHighlightRgba?: readonly [number, number, number, number];
 
@@ -269,7 +283,12 @@ export interface PianoRollCurveLayer {
      */
     readonly curveStartSec?: number;
     /** 裁剪区（视口坐标 CSS px）；缺省不裁剪。两个需要裁剪的曲线图层用选区矩形。 */
-    readonly clipRect?: { readonly x: number; readonly y: number; readonly w: number; readonly h: number } | null;
+    readonly clipRect?: {
+        readonly x: number;
+        readonly y: number;
+        readonly w: number;
+        readonly h: number;
+    } | null;
     /**
      * 值 → 视口 y 的投影，**必须绑定到本图层自己的参数**。
      *

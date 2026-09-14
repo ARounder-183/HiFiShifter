@@ -753,8 +753,7 @@ export const zhCN = {
     kb_modifier_horizontal_zoom: "画布水平缩放（时间轴 / 钢琴卷帘 / 琴键区滚轮）",
     kb_modifier_pr_vzoom: "画布竖直缩放（时间轴 / 钢琴卷帘滚轮）",
     kb_modifier_param_morph: "参数形变（按住并在选区内拖动曲线锚点）",
-    kb_modifier_clip_range_to_param_selection:
-        "音频块范围加入参数选区（按住双击音频块；再点一次取消该块范围）",
+    kb_modifier_clip_range_to_param_selection: "音频块范围加入参数选区（按住右键单击音频块）",
     kb_modifier_param_multi_select: "多选区（按住拖动追加一段选区；按住点击已有选区段则取消该段）",
     kb_modifier_param_fine_adjust: "精细调整（按住：滑杆 / 输入框滚轮 / 增益拖拽 / 颤音滚轮）",
     kb_modifier_vibrato_amplitude_adjust: "颤音振幅调整（直线/颤音拖拽时滚轮）",

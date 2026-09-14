@@ -127,6 +127,30 @@ export interface PitchGridArgs {
      * 在对应该半音的位置发射，而不是提前到带子那一段。
      */
     readonly scaleHighlightRgba?: Rgba | undefined;
+    /**
+     * **Tempo Map 分段音阶**：不同时间段使用不同音阶时的高亮区间。
+     *
+     * 【为什么要投影成像素再传进来】GL 网格层是**视口坐标、不含时间轴**——它不知道
+     * 自己在哪个时间段上。因此由面板用当前的 `TimelineAxis` 把每段的
+     * `[startSec, endSec]` 投影成视口 x 区间后传入；本层只负责"按段产强调线"。
+     *
+     * 【与 `scaleNotes` 的关系】两者**互斥**：给了分段就按段画（每段只高亮该段的
+     * 音级），不再画整宽的单音阶线。分段为空 / 缺省时退回 `scaleNotes` 的均匀路径。
+     *
+     * 特殊说明：`x0` / `x1` 允许越出视口，本层会按 `[0, viewportWidthPx]` 裁剪
+     * （面板投影时不做裁剪，免得两处各写一份边界）。
+     */
+    readonly scaleSegments?: readonly GridScaleSegment[] | undefined;
+}
+
+/** 一个已投影到视口坐标的音阶分段。 */
+export interface GridScaleSegment {
+    /** 段起点（视口 x，CSS px，可越界）。 */
+    readonly x0: number;
+    /** 段终点（视口 x，CSS px，可越界）。 */
+    readonly x1: number;
+    /** 该段生效音阶的音级集合（0..11）。 */
+    readonly notes: readonly number[];
 }
 
 /** 非音高参数网格构建参数。 */
@@ -174,8 +198,9 @@ function hairlineCenterY(cssY: number, dpr: number): number {
 /**
  * 强线的**描边中心**设备像素对齐：只取整到物理像素，**不加**半像素。
  *
- * 与 `render.ts:752` 一致：强线宽 2 个物理像素，偶数宽度无需半像素偏移。
- * 两种取向并存是既有行为，迁移时必须原样保留（统一它们会改变像素）。
+ * 理由：强线宽 **2 个物理像素**（偶数），中心落在设备像素边界上时正好覆盖整数两列；
+ * 再加半像素反而会把 2 像素摊到 3 列上。弱线宽 1 个物理像素（奇数）才需要半像素偏移
+ * ——见 `hairlineCenterY`。两者都是"整数物理像素"家族的成员，区别只是奇偶。
  *
  * @param cssY 视口 y（CSS px）。
  * @param dpr 设备像素比。
@@ -274,9 +299,7 @@ function buildBandInstances(args: {
             y,
             w: widthPx,
             h,
-            rgba: isPartial
-                ? [rgba[0], rgba[1], rgba[2], rgba[3] * band.coverage]
-                : rgba,
+            rgba: isPartial ? [rgba[0], rgba[1], rgba[2], rgba[3] * band.coverage] : rgba,
             value,
         });
     }
@@ -307,11 +330,13 @@ function buildBandInstances(args: {
  * `[valueToY(midi + 1), valueToY(midi)]`。两者差半个键高——把行心当行体用，带子
  * 会只覆盖半行且整体错位半个键高。
  *
- * 特殊说明 5（音阶高亮的**已知限制**）：只支持**单一音阶**（工程音阶）。旧 Canvas2D
- * 路径还支持 Tempo Map 分段（不同时间段用不同音阶），但 GL 网格几何是**视口坐标、
- * 不含时间轴**——它不知道自己在哪个时间段上，无法表达分段。要恢复分段高亮需要把
- * 网格层也做成时间相关（或另开一层按段绘制），超出本次改动范围。详见
- * `PianoRollPanel.buildGridSpec` 的说明。
+ * 特殊说明 5（音阶高亮的**两条路径**）：`scaleNotes` 走均匀路径（整宽一条线，用于
+ * 单一工程音阶）；`scaleSegments` 走分段路径（Tempo Map 在不同时间段换了音阶时，
+ * 每段**各画自己那段 x 范围**的高亮线）。两者互斥，分段优先。
+ *
+ * 分段路径要求调用方把 `[startSec, endSec]` **投影成视口 x** 再传入——本层是纯视口
+ * 坐标、不含时间轴，不知道自己在哪个时间段上（这也是它当初只支持单音阶的原因）。
+ * 投影放在面板侧（它持有 `TimelineAxis`），本层只负责按段发射。
  *
  * @param args 构建参数。
  * @returns 实例序列（绘制顺序：黑键背景带 → 网格线 → 音阶强调线）；参数非法时返回空数组。
@@ -330,6 +355,8 @@ export function buildPitchGridInstances(args: PitchGridArgs): GridInstance[] {
     const startMidi = Math.min(Math.max(Math.floor(min), absMin), absMax);
     const endMidi = Math.min(Math.max(Math.ceil(max), absMin), absMax);
 
+    // 普通网格线：**1 物理像素**（旧 Canvas2D 的 `hairlineW = 1 / dpr`，见
+    // `pianoRoll/render.ts`）。几何长度都是 CSS px，故这里除以 dpr。
     const thickness = 1 / dpr;
     const items: GridInstance[] = [];
 
@@ -369,11 +396,28 @@ export function buildPitchGridInstances(args: PitchGridArgs): GridInstance[] {
         args.scaleNotes !== undefined && args.scaleNotes.length > 0
             ? new Set(args.scaleNotes)
             : null;
+    // 分段音阶：每段带一个音级集合（逐行查询要 O(1)，不能每行线性扫数组）。
+    const scaleSegmentSets =
+        args.scaleSegments !== undefined && args.scaleSegments.length > 0
+            ? args.scaleSegments.map((segment) => ({
+                  x0: segment.x0,
+                  x1: segment.x1,
+                  notes: new Set(segment.notes),
+              }))
+            : null;
     const highlightRgba: Rgba | null =
-        scaleNoteSet !== null && args.scaleHighlightRgba !== undefined
+        args.scaleHighlightRgba !== undefined &&
+        (scaleSegmentSets !== null || scaleNoteSet !== null)
             ? args.scaleHighlightRgba
             : null;
-    const highlightThickness = thickness * 2;
+    // 音阶强调线的线厚：**2 CSS px**（旧 Canvas2D 在这里写的是字面 `lineWidth = 2`，
+    // 并没有像 hairline 那样除以 dpr）。
+    //
+    // 特殊说明：旧实现自身的这两处并不一致（hairline 用 `1 / dpr` 的物理像素语义、
+    // 强调线用 CSS 像素语义），因此 dpr=2 时强调线是 4 个物理像素、hairline 是 1 个。
+    // 这里**照旧实现取 2**（对齐是本次的目标）；若希望强调线也走"整数物理像素"家族，
+    // 改成 `thickness * 2` 即可。
+    const highlightThickness = 2;
 
     for (let midi = startMidi; midi <= endMidi; midi += 1) {
         // 描边中心 → 矩形上缘（见 rectTopFromCenter 说明：差半个线厚）。
@@ -390,15 +434,34 @@ export function buildPitchGridInstances(args: PitchGridArgs): GridInstance[] {
 
         // 音阶强调线：紧跟本行的普通线 → 压在该线**与所有背景带**之上。沿用同一个
         // 描边中心（只加粗、不换取向），与 Canvas2D 的 `lineWidth = 2` 同中心。
-        if (highlightRgba !== null && scaleNoteSet !== null && scaleNoteSet.has(pc)) {
-            items.push({
-                x: 0,
-                y: rectTopFromCenter(centerY, highlightThickness),
-                w: viewportWidthPx,
-                h: highlightThickness,
-                rgba: highlightRgba,
-                value: midi,
-            });
+        if (highlightRgba !== null) {
+            if (scaleSegmentSets !== null) {
+                // 分段音阶：**每段一条**，x 范围取该段的投影区间（按视口裁剪）。
+                // 旧 Canvas2D 路径正是逐段画不同 x 范围的高亮线。
+                for (const segment of scaleSegmentSets) {
+                    if (!segment.notes.has(pc)) continue;
+                    const x0 = Math.max(0, Math.min(viewportWidthPx, segment.x0));
+                    const x1 = Math.max(0, Math.min(viewportWidthPx, segment.x1));
+                    if (!(x1 > x0)) continue;
+                    items.push({
+                        x: x0,
+                        y: rectTopFromCenter(centerY, highlightThickness),
+                        w: x1 - x0,
+                        h: highlightThickness,
+                        rgba: highlightRgba,
+                        value: midi,
+                    });
+                }
+            } else if (scaleNoteSet !== null && scaleNoteSet.has(pc)) {
+                items.push({
+                    x: 0,
+                    y: rectTopFromCenter(centerY, highlightThickness),
+                    w: viewportWidthPx,
+                    h: highlightThickness,
+                    rgba: highlightRgba,
+                    value: midi,
+                });
+            }
         }
     }
     return items;
@@ -428,13 +491,26 @@ export function buildValueGridInstances(args: ValueGridArgs): GridInstance[] {
     const vMax = view.center + span / 2;
     const start = Math.ceil(vMin / spec.step) * spec.step;
 
+    // 非音高参数的刻度线：**全整数物理像素**——弱线 1 个、强线 2 个物理像素，
+    // 位置按设备像素吸附（`hairlineCenterY` / `strongCenterY`）。
+    //
+    // 【这是有意的选择，不是照抄旧实现】旧 Canvas2D 在这条分支上写的是字面 CSS 像素
+    // （`ctx.lineWidth = isStrong ? 1.25 : 1`）且位置为 `y + 0.5`，**都不按设备像素
+    // 对齐**（dpr=1 时代的约定）。它在 dpr=2 上渲染出的是一条 2 物理像素宽、且落在
+    // 分数像素位置上的抗锯齿线；内核若照抄，在高分屏上会与音高网格（1 个物理像素、
+    // 严格对齐）观感割裂。
+    //
+    // 因此这里统一到"整数物理像素"家族：线宽与落点都是整数物理像素 → 任何 DPR 下
+    // 每根线恰好 1 / 2 个物理像素、边缘不糊。代价是与旧实现的**位置**可能差半个设备
+    // 像素、线宽在 dpr≥2 上比旧实现细（旧强线 1.25 CSS px = dpr·1.25 物理像素）。
     const weakThickness = 1 / dpr;
     const strongThickness = 2 / dpr;
     const items: GridInstance[] = [];
     for (let v = start; v <= vMax + spec.step * 0.01; v += spec.step) {
         const isStrong = Math.round(v) % spec.strongMod === 0;
         const thickness = isStrong ? strongThickness : weakThickness;
-        // 描边中心 → 矩形上缘（见 rectTopFromCenter 说明：差半个线厚）。
+        // 描边中心按设备像素吸附（弱线 + 半像素、强线不加——偶数物理像素宽无需偏移，
+        // 见两个 helper 的说明），再回算矩形上缘。
         const centerY = isStrong
             ? strongCenterY(valueToY(v, heightPx), dpr)
             : hairlineCenterY(valueToY(v, heightPx), dpr);

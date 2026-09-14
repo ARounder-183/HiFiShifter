@@ -841,7 +841,7 @@ export const koKR = {
     kb_modifier_pr_vzoom: "캔버스 수직 줌 (타임라인 / 피아노 롤 휠)",
     kb_modifier_param_morph: "파라미터 형태 변형 (누른 채 선택 영역 내 앵커 드래그)",
     kb_modifier_clip_range_to_param_selection:
-        "클립 범위를 파라미터 선택 범위에 추가 (클립을 누른 채 더블 클릭, 다시 하면 해제)",
+        "클립 범위를 파라미터 선택 범위에 추가 (누른 채 오른쪽 클릭)",
     kb_modifier_param_multi_select:
         "다중 선택 범위 (누른 채 드래그로 범위 추가, 기존 범위를 누른 채 클릭하면 해당 범위 해제)",
     kb_modifier_param_fine_adjust:

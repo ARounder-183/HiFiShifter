@@ -22,11 +22,26 @@
  *    工程末端，由 `moveClipStart` 的自动扩展与后端 `ensure_project_end_sec` 增长
  *    工程时长。旧的「工程长度 − clip 长度」上界是自指边界（被拖 clip 自己定义上界），
  *    会让自动扩展永不触发，表现为"向右拖有隐形边界"——见该函数注释。
- *    trim（`resolveTrimEdge`）仍受 `projectSec` 约束：它改的是**长度**，
- *    没有"自动扩展工程"的语义承接。
+ *
+ *    裁切 / 拉伸（`resolveTrimEdge`）同样**不按工程末端钳制**：它改的是**长度**，
+ *    没有"自动扩展工程"的语义承接，因此与旧实现一致，上界只保留
+ *    `TRIM_MAX_LENGTH_SEC` 这个防呆值（旧实现 `useEditDrag` 的
+ *    `clamp(…, minLen, 10_000)` 同源）；越出工程末端的部分由渲染管线按尾静音处理，
+ *    工程时长按 `resolveScrollableProjectSec`（后端时长与最右 clip 末端的较大者）
+ *    自然增长。把这里钳到 `projectSec` 会让「把 clip 裁/拉到工程外」整体失效，
+ *    且用户看不到任何提示（与"向右拖有隐形边界"同类）。
  * 3. `pxPerSec` 非法（0 / NaN / 负数）时退化为「不产生位移」而不是产生 `NaN`
  *    ——拖拽热路径上一旦出现 `NaN`，几何与命中会同时失效且难以定位。
  */
+
+/**
+ * 裁切 / 拉伸允许的最大长度（秒）。
+ *
+ * 与旧实现 `useEditDrag` 的 `clamp(…, minLen, 10_000)` 同源：只是一个防呆上界
+ * （防止指针坐标异常时算出天文数字），**不是**工程末端钳制——越出工程末端是
+ * 允许的，工程时长会随之自动增长（见文件头设计约束 2）。
+ */
+export const TRIM_MAX_LENGTH_SEC = 10_000;
 
 /** 拖拽位移换算参数。 */
 export interface DragDeltaArgs {
@@ -93,9 +108,7 @@ export interface TrimEdgeArgs {
     readonly startSec: number;
     /** clip 按下时的长度（秒）。 */
     readonly lengthSec: number;
-    /** 工程总时长（秒）。 */
-    readonly projectSec: number;
-    /** 允许的最小长度（秒）：防止裁到 0 长度而无法再选中。 */
+    /** 允许的最小长度（秒）；<= 0 时退化为一个极小正数（旧实现 `minLen = 0`）。 */
     readonly minLengthSec: number;
 }
 
@@ -121,7 +134,8 @@ export interface TrimEdgeResult {
  * 规则：
  * - **左边缘**：右端固定（`startSec + lengthSec` 不变），拖右 = 裁短、拖左 = 延长；
  * - **右边缘**：左端固定，拖右 = 延长、拖左 = 裁短；
- * - 两个方向都保证长度 >= `minLengthSec`，且不越出 `[0, projectSec]`。
+ * - 两个方向都保证长度 >= `minLengthSec`；右边缘上界为 `TRIM_MAX_LENGTH_SEC`
+ *   （**不**钳到工程末端，见文件头设计约束 2）。
  *
  * @param args 换算参数。
  * @returns 新的起始时间、长度与实际变化量。
@@ -131,7 +145,6 @@ export function resolveTrimEdge(args: TrimEdgeArgs): TrimEdgeResult {
     const rawDelta = pxPerSec > 0 ? args.deltaContentXPx / pxPerSec : 0;
     const minLengthSec =
         Number.isFinite(args.minLengthSec) && args.minLengthSec > 0 ? args.minLengthSec : 1e-6;
-    const projectSec = Number.isFinite(args.projectSec) ? Math.max(0, args.projectSec) : 0;
     const startSec = Number.isFinite(args.startSec) ? Math.max(0, args.startSec) : 0;
     const lengthSec = Number.isFinite(args.lengthSec)
         ? Math.max(minLengthSec, args.lengthSec)
@@ -149,9 +162,8 @@ export function resolveTrimEdge(args: TrimEdgeArgs): TrimEdgeResult {
         };
     }
 
-    // 右边缘：左端固定，长度受「工程末端 − 起点」与最小长度双向约束。
-    const maxLength = Math.max(minLengthSec, projectSec - startSec);
-    const nextLength = Math.min(maxLength, Math.max(minLengthSec, lengthSec + rawDelta));
+    // 右边缘：左端固定，长度受最小长度与防呆上界双向约束。
+    const nextLength = Math.min(TRIM_MAX_LENGTH_SEC, Math.max(minLengthSec, lengthSec + rawDelta));
     return { startSec, lengthSec: nextLength, deltaSec: nextLength - lengthSec };
 }
 

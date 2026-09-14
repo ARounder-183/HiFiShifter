@@ -181,6 +181,8 @@ export function drawTimelineCanvas(
             fadeInDir: number;
             fadeOutDir: number;
             selected: boolean;
+            /** 是否绘制悬停提示环（见模型侧 `hovered` 的说明）。 */
+            hovered?: boolean;
             muted: boolean;
             gain: number;
             playbackRate: number;
@@ -594,6 +596,20 @@ export function drawTimelineCanvas(
             h: Math.max(0, clipHeight - 1),
             radii: [radius, radius, radius, radius],
         });
+        // 悬停提示环：1px 深色、画在矩形**外侧**（旧实现的
+        // `boxShadow: 0 0 0 1px rgba(0, 0, 0, 0.35)` 是向外扩散 1px）。
+        // `hovered` 已排除编组内的 clip（见模型侧说明）。
+        if (clip.hovered === true) {
+            strokes.push({
+                style: "rgba(0, 0, 0, 0.35)",
+                lineWidth: 1,
+                x: clipLeft - 0.5,
+                y: clipTop - 0.5,
+                w: clipWidth,
+                h: clipHeight,
+                radii: [radius, radius, radius, radius],
+            });
+        }
 
         return {
             clip,

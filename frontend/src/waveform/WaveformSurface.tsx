@@ -240,7 +240,25 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
                 // 的选级做迟滞（与 mipmap store 的 selectLevelStable 同参数）。
                 const spp = Math.max(1, Math.round(sampleRate / Math.max(1e-6, pxPerSec)));
                 const previousLevel = levelStickyRef.current;
-                const level = waveformMipmapStore.selectLevelStable(spp, previousLevel);
+                let level = waveformMipmapStore.selectLevelStable(spp, previousLevel);
+                // 【选级必须等目标级别的数据到位】
+                //
+                // 迟滞选级只看 `spp`；目标级别尚未加载时 `getBestSliceView` 会退回
+                // **另一个**级别，而那份数据覆盖的时长与本帧窗口不匹配，几何只能用上
+                // 其中一部分——波形在这一帧"缺一截 / 变稀"，数据到达后又恢复。缩放
+                // 过程中就看成一闪一闪。实测（级别 0→1 切档那一帧）：请求级别
+                // `getPeaks(...) === null`（未加载，走了 fallback）。
+                //
+                // 因此目标级别没数据时**保持上一帧的级别**（画出来的内容与 fallback 相同，
+                // 但级别不再来回跳），并借这次调用**发起该级别的加载**（`getPeaks` 对
+                // 未加载级别会触发取数，见 mipmap store 的实现）；等它真正到位再切档。
+                if (
+                    previousLevel != null &&
+                    level !== previousLevel &&
+                    waveformMipmapStore.getPeaks(sourcePath, level) === null
+                ) {
+                    level = previousLevel;
+                }
                 levelStickyRef.current = level;
                 return waveformMipmapStore.getBestSliceView(
                     sourcePath,

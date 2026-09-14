@@ -754,8 +754,7 @@ export const zhTW = {
     kb_modifier_horizontal_zoom: "畫布水平縮放（時間軸 / 鋼琴捲簾 / 琴鍵區滾輪）",
     kb_modifier_pr_vzoom: "畫布垂直縮放（時間軸 / 鋼琴捲簾滾輪）",
     kb_modifier_param_morph: "參數形變（按住並在選取區內拖動曲線錨點）",
-    kb_modifier_clip_range_to_param_selection:
-        "音訊塊範圍加入參數選取區（按住雙擊音訊塊；再點一次取消該塊範圍）",
+    kb_modifier_clip_range_to_param_selection: "音訊塊範圍加入參數選取區（按住右鍵單擊音訊塊）",
     kb_modifier_param_multi_select:
         "多選取區（按住拖曳追加一段選取區；按住點擊既有選取段則取消該段）",
     kb_modifier_param_fine_adjust: "精細調整（按住：滑桿 / 輸入框滾輪 / 增益拖拽 / 顫音滾輪）",

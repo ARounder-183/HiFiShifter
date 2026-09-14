@@ -30,7 +30,7 @@ describe("resolveDragDelta", () => {
     });
 
     it("【回归】右移不受工程末端钳制（拖到工程末尾之外不再卡住）", () => {
-        // 缺陷形态：旧实现 `maxStart = projectSec - lengthSec` 把右移钳到工程末端。
+        // 缺陷形态：旧实现 `maxStart = projectSec − lengthSec` 把右移钳到工程末端。
         // 而喂进来的 `projectSec` 是 `resolveScrollableProjectSec()`（= max(后端时长,
         // 最右 clip 末端)）——**被拖的 clip 自己就是最右那个**时，这个上界由它自己的
         // 末端推出，形成自指：永远无法越过，且让 `moveClipStart` 的
@@ -41,6 +41,8 @@ describe("resolveDragDelta", () => {
             pxPerSec: 150,
             startSec: 10,
         });
+        // 精确值：位移原样换算，没有被任何上界截断。
+        expect(out.startSec).toBeCloseTo(10 + 100000 / 150, 6);
         expect(out.startSec).toBeGreaterThan(10);
         expect(out.deltaSec).toBeGreaterThan(0);
         // 允许越过工程末端，自动扩展才有机会触发。
@@ -86,7 +88,6 @@ describe("resolveTrimEdge", () => {
         pxPerSec: 100,
         startSec: 10,
         lengthSec: 4,
-        projectSec: 60,
         minLengthSec: 0.1,
     } as const;
 
@@ -111,7 +112,7 @@ describe("resolveTrimEdge", () => {
         expect(out.startSec + out.lengthSec).toBeCloseTo(14, 6);
     });
 
-    it("右边缘向右拖 = 延长（受工程末端约束）", () => {
+    it("右边缘向右拖 = 延长", () => {
         const out = resolveTrimEdge({ ...base, edge: "right", deltaContentXPx: 100 });
         expect(out.startSec).toBeCloseTo(10, 6);
         expect(out.lengthSec).toBeCloseTo(5, 6);
@@ -124,9 +125,22 @@ describe("resolveTrimEdge", () => {
         expect(out.startSec).toBeCloseTo(10, 6);
     });
 
-    it("右边缘延长不越过工程末端", () => {
+    it("右边缘延长允许越出工程末端（只受防呆上界约束）", () => {
+        // 工程末端 60s 对裁切不再构成约束：右端 = 原右端(14) + 位移(1000) = 1014s。
         const out = resolveTrimEdge({ ...base, edge: "right", deltaContentXPx: 100000 });
-        expect(out.startSec + out.lengthSec).toBeCloseTo(60, 6);
+        expect(out.startSec).toBeCloseTo(10, 6);
+        expect(out.startSec + out.lengthSec).toBeCloseTo(14 + 1000, 6);
+    });
+
+    it("minLengthSec = 0 时退化为极小正数护栏（旧实现 minLen = 0）", () => {
+        const out = resolveTrimEdge({
+            ...base,
+            minLengthSec: 0,
+            edge: "right",
+            deltaContentXPx: -100000,
+        });
+        expect(out.lengthSec).toBeGreaterThan(0);
+        expect(out.lengthSec).toBeLessThan(1e-3);
     });
 });
 

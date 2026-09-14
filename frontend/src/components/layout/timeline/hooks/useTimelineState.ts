@@ -52,6 +52,7 @@ import { createTimelineAxis } from "../../renderKernel/timelineAxis.js";
 import {
     snapTimelinePosition,
     snapTimelineClipMove,
+    type SnapCandidate,
     type SnapObjectKind,
     type SnapResult,
 } from "../../../../utils/timelineSnapping";
@@ -70,6 +71,13 @@ export interface SnapTimelineOpts {
     originSec?: number;
     anchorTrackId?: string | null;
     excludeClipIds?: ReadonlySet<string>;
+    /**
+     * 调用方补充的**冻结候选**（坐标按拖动起点算好，见 `TimelineSnapContext`）。
+     *
+     * 交叉点抓手用它给出两侧 clip 在**拖动前**的边界：这两个 clip 自己会随拖动
+     * 移动，作为实时候选会让吸附追着自己的尾巴跑。
+     */
+    extraCandidates?: readonly SnapCandidate[];
     /**
      * 拖拽移动 Clip 的长度：提供时启用**多源吸附** —— 前缘、后缘（结束
      * 位置）与自身吸附偏移点（moveSnapOffsetSec）同时作为被吸附对象参与
@@ -502,13 +510,31 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
     // ── syncScrollLeft → DOM 直通 + bus ───────────────────────
     // 函数体只读 ref/bus，不依赖任何渲染期值：必须稳定引用，
     // 否则每个依赖它的 effect/prop 每次渲染都会失效重跑。
+    /**
+     * 发布到共享视口的**缩放**：与同一帧发布的位置**同源**。
+     *
+     * 【为什么不能直接用 `pxPerSecRef.current`】该 ref 在**渲染期**就被同步成 React
+     * state 的新值（为让别处的 emit 读到最新值）。而并发渲染允许"渲染但尚未提交"，
+     * 此时内核与 DOM（标尺）都还是旧缩放——若一次逐帧发布拿"帧里报来的旧位置"配上
+     * "刚渲染出的新缩放"，推给参数编辑器的就是一对**自相矛盾**的视口（新缩放 + 旧
+     * 位置），它会先按新缩放跳到错误位置、下一帧再被纠正：正是"启用同步后缩放抽动"。
+     *
+     * 内核模式取内核真值（位置与缩放同一次 `scroll.get()`，天然一致，且与已提交的
+     * DOM 一致）；无内核（旧 DOM 分支）时才退回 ref。
+     */
+    function livePxPerSec(): number {
+        const host = kernelHostRef.current;
+        if (host !== null) return host.getViewport().pxPerSec;
+        return pxPerSecRef.current;
+    }
+
     const syncScrollLeft = React.useCallback(function syncScrollLeft(next: number) {
         scrollLeftRef.current = next;
         if (paramEditorSyncTimelineRef.current && !timelineSyncApplyingRef.current) {
             timelineViewportSync.setViewport(
                 {
                     scrollLeft: next,
-                    pxPerSec: pxPerSecRef.current,
+                    pxPerSec: livePxPerSec(),
                 },
                 TIMELINE_SYNC_ORIGIN,
             );
@@ -583,7 +609,7 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
             timelineViewportSync.setViewport(
                 {
                     scrollLeft: next,
-                    pxPerSec: pxPerSecRef.current,
+                    pxPerSec: livePxPerSec(),
                 },
                 TIMELINE_SYNC_ORIGIN,
             );
@@ -672,7 +698,20 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
                 // applying 标志抑制回灌，避免两个面板形成反馈环。
                 timelineSyncApplyingRef.current = true;
                 const applied = viewportAccess.setZoomAndScroll(store.pxPerSec, store.scrollLeft);
+                // 同上：视口（可能含缩放）刚改完，立刻同任务提交一帧，避免
+                // "标尺文本已是新缩放、网格还是旧缩放"的那一帧。
+                kernelHostRef.current?.paintNow();
                 syncScrollLeft(applied.scrollLeft);
+                // 【缩放必须同时回写 React】标尺刻度、左侧轨道头与其它 React 派生量都
+                // 由 React 的 `pxPerSec` 布局；只写内核会让**轨道区按新缩放、标尺仍按
+                // 旧缩放**——两个面板因此看起来"网格没对齐、标尺也没对齐"。
+                //
+                // 上面那句"纯滚动"的注释只对 pxPerSec 未变的情形成立：那时标尺的
+                // 内容布局没变，只有平移量变了（由内核每帧写 transform），确实不必
+                // 走 React。缩放变了则必须走（与下方旧 DOM 分支的 `setPxPerSec` 同源）。
+                if (Math.abs(applied.pxPerSec - pxPerSecRef.current) > 1e-9) {
+                    setPxPerSec(applied.pxPerSec);
+                }
                 timelineSyncApplyingRef.current = false;
                 return;
             }
@@ -711,7 +750,9 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
             timelineViewportSync.setViewport(
                 {
                     scrollLeft: scrollLeftRef.current,
-                    pxPerSec: pxPerSecRef.current,
+                    // 与逐帧发布同一口径（见 `livePxPerSec`）：配对的两项必须同源，
+                    // 否则会把"新缩放 + 旧位置"这种自相矛盾的视口推给参数编辑器。
+                    pxPerSec: livePxPerSec(),
                 },
                 TIMELINE_SYNC_ORIGIN,
             );
@@ -1080,6 +1121,7 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
                 originSec: opts?.originSec,
                 anchorTrackId: opts?.anchorTrackId ?? session.selectedTrackId,
                 excludeClipIds: opts?.excludeClipIds,
+                extraCandidates: opts?.extraCandidates,
             };
             // 多源吸附：拖拽移动 Clip 时前缘/后缘/自身吸附偏移点同时作为
             // 被吸附对象。

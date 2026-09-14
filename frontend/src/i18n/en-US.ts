@@ -114,7 +114,8 @@ export const enUS = {
     undo_history_jump: "Jump to this state",
     undo_history_current: "Current state",
     undo_history_count: "{count} entries (up to 100 kept)",
-    undo_history_save_with_project: "Save operation history when this project is saved (-UNDO file)",
+    undo_history_save_with_project:
+        "Save operation history when this project is saved (-UNDO file)",
     undo_history_save_by_default: "New projects save operation history by default",
     history_op_initial: "Initial state",
     history_op_import_media: "Import media",
@@ -898,7 +899,7 @@ export const enUS = {
     kb_modifier_pr_vzoom: "Canvas Vertical Zoom (timeline / piano roll wheel)",
     kb_modifier_param_morph: "Param Morph (hold and drag curve anchors inside selection)",
     kb_modifier_clip_range_to_param_selection:
-        "Add Clip Range to Param Selection (hold + double-click a clip; again to remove)",
+        "Add Clip Range to Param Selection (hold + right-click a clip)",
     kb_modifier_param_multi_select:
         "Multi-Range Select (hold + drag to add a range; hold + click an existing range to remove it)",
     kb_modifier_param_fine_adjust:

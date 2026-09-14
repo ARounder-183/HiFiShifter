@@ -25,12 +25,16 @@
  *    （旧实现 `useEditDrag` 的 `supportsGroupExpansion` 明确排除 fade_in /
  *    fade_out / gain），由调用方的 `expandGroups` 决定。
  * 3. 水平钳制：起点不早于 0（`Math.max(0, …)`）。
- * 4. 跨轨：每个参与者按**各自**的初始轨道序号 + 同一个轨道偏移量移动，并钳制到
- *    `[0, 轨道数 − 1]`——与旧实现 `resolveTrackIdByOffset` 的语义一致（不是把
- *    所有 clip 都搬到锚点所在轨道）。
+ * 4. 跨轨：先按**选区最上/最下两条轨道**算出整组可用的轨道偏移区间
+ *    （`computeTrackMoveBounds`，与旧实现同一份实现），把**整组共用的那个偏移量**
+ *    钳进区间，再逐个参与者套用——每个参与者按各自的初始轨道序号 + 同一偏移量
+ *    移动。**不是**逐参与者各自钳到 `[0, 轨道数 − 1]`：那样在轨道列表两端的
+ *    越界量对每个成员不同，成员会先被挤到同一轨，整组的相对轨道布局被压扁
+ *    （旧实现靠"整组一个偏移量"保持布局）。
  */
 
 import { NEW_TRACK_SENTINEL } from "../constants";
+import { computeTrackMoveBounds, type DropMoveInitial } from "./clipDropMoveUtils";
 import { expandClipIdsWithGroups } from "./useGroupExpansion";
 
 /** 参与集合解析所需的 clip 字段（结构化子集，便于单测构造）。 */
@@ -124,11 +128,16 @@ export function resolveKernelEditParticipants(args: {
  *
  * 流程：先把**共享位移**钳制到「最靠左的参与者也不会越过 0」（`delta >= -minStart`）
  * → 逐参与者用「初始值 + 共享位移」计算（**不用上一帧结果累加**，避免逐帧漂移）
- * → 轨道按各自初始序号 + 偏移量移动并钳到合法范围。
+ * → 轨道偏移先整组钳进可用区间，再按各自初始序号 + 该偏移量移动。
  *
  * 特殊说明（为什么钳制共享位移而不是逐 clip 钳制）：旧实现先把位移钳到
  * `-minstartSec` 再逐 clip 应用，整组在左边界处**间距保持不变**。若改为逐 clip
  * 独立钳到 0，只有最左那个停在 0、其余继续左移，整组会被压缩——与旧实现分叉。
+ *
+ * 特殊说明（轨道方向同理）：轨道偏移也只能有一个——先由
+ * `computeTrackMoveBounds` 求出「选区整体还能往上/往下挪几条」，
+ * 再把整组套用同一个偏移量。逐参与者各自钳制会在列表两端把成员挤到同一轨，
+ * 破坏相对布局（与水平方向被压缩是同一类错误）。
  *
  * @param args.participants 参与集合（手势开始时的快照）。
  * @param args.deltaStartSec 锚点的水平位移（秒，已含吸附结果）。
@@ -159,7 +168,6 @@ export function applyKernelEditDelta(args: {
     deltaStartSec: number;
 } {
     const requestedDelta = Number.isFinite(args.deltaStartSec) ? args.deltaStartSec : 0;
-    const deltaTrack = Number.isFinite(args.deltaTrack) ? Math.trunc(args.deltaTrack) : 0;
     const lastIndex = args.trackIds.length - 1;
 
     // 共享位移的下界：最靠左的参与者停在 0 时对应的位移量。
@@ -169,16 +177,17 @@ export function applyKernelEditDelta(args: {
             : 0;
     const deltaStartSec = Math.max(requestedDelta, -minStart);
 
+    // 整组共用的轨道偏移量：由选区最上/最下两条轨道决定可用区间后一次性钳制
+    // （与旧实现 `useClipDrag` 的 `computeTrackMoveBounds` 同一份实现）。
+    const deltaTrack = resolveKernelTrackOffset(args.participants, args.trackIds, args.deltaTrack);
+
     const moves = args.participants.map((participant) => {
         let trackId = participant.trackId;
         if (args.dropToNewTrack === true) {
             trackId = NEW_TRACK_SENTINEL;
         } else if (deltaTrack !== 0 && participant.trackIndex >= 0 && lastIndex >= 0) {
-            const targetIndex = Math.min(
-                lastIndex,
-                Math.max(0, participant.trackIndex + deltaTrack),
-            );
-            trackId = args.trackIds[targetIndex] ?? participant.trackId;
+            // 整组同一个偏移量 → 成员之间的相对轨道布局保持不变。
+            trackId = args.trackIds[participant.trackIndex + deltaTrack] ?? participant.trackId;
         }
         return {
             clipId: participant.clipId,
@@ -188,4 +197,45 @@ export function applyKernelEditDelta(args: {
     });
 
     return { moves, deltaStartSec };
+}
+
+/**
+ * 把「相对锚点轨道的偏移量」钳进整组可用区间。
+ *
+ * 区间由选区中**最小与最大**轨道序号决定（`computeTrackMoveBounds`）：
+ * 只要整组一起上下移动，最上/最下两条轨道就是边界约束，与每个成员各自到边界的
+ * 距离无关。任一团员的轨道序号无法解析（轨道已被删除等）时返回 0——与旧实现
+ * `if (!trackBounds) allowTrackMove = false` 同源（放弃跨轨而不是产生分叉）。
+ *
+ * @param participants 参与集合。
+ * @param trackIds 当前轨道顺序。
+ * @param requestedDelta 锚点解析出的原始轨道偏移量（条数）。
+ * @returns 钳制后的整组共用偏移量。
+ */
+function resolveKernelTrackOffset(
+    participants: readonly KernelEditParticipant[],
+    trackIds: readonly string[],
+    requestedDelta: number,
+): number {
+    const delta = Number.isFinite(requestedDelta) ? Math.trunc(requestedDelta) : 0;
+    if (delta === 0 || participants.length === 0) return delta;
+    const initialById: Record<string, DropMoveInitial> = {};
+    for (const participant of participants) {
+        initialById[participant.clipId] = {
+            startSec: participant.startSec,
+            trackId: participant.trackId,
+        };
+    }
+    const trackIndexById: Record<string, number> = {};
+    trackIds.forEach((trackId, index) => {
+        trackIndexById[trackId] = index;
+    });
+    const bounds = computeTrackMoveBounds({
+        trackCount: trackIds.length,
+        clipIds: participants.map((participant) => participant.clipId),
+        initialById,
+        trackIndexById,
+    });
+    if (bounds === null) return 0;
+    return Math.max(bounds.minTrackOffset, Math.min(bounds.maxTrackOffset, delta));
 }

@@ -57,6 +57,14 @@ export interface TimelineKernelViewProps {
     /** 水平缩放变化（内核为真值源），用于驱动标尺刻度等 React 侧派生量。 */
     readonly onPxPerSecChange: (pxPerSec: number) => void;
     /**
+     * 滚轮缩放请求：内核算好目标后交给 React 落地。
+     *
+     * 标尺是 DOM、由 React 用 `pxPerSec` 布局；若内核自己先切缩放，缩放过程中标尺
+     * 会整整落后一个滚轮步。实现方必须在同一次提交的 layout effect 里把这个
+     * `{pxPerSec, scrollLeft}` 应用到内核（`setViewport`），两层才会同帧切换。
+     */
+    readonly onZoomRequest?: (next: { pxPerSec: number; scrollLeft: number }) => void;
+    /**
      * 水平滚动位置的量化提交（每 256px 一次）。
      *
      * 标尺的**刻度范围**由 React 按 `scrollLeft` 计算（`timelineTicks`），内核只写
@@ -168,7 +176,14 @@ export interface TimelineKernelViewProps {
         readonly leftPx: number;
         /** 内容坐标宽度（`durationSec × pxPerSec`）。 */
         readonly widthPx: number;
-        readonly trackId: string;
+        /**
+         * 落点轨道；`null` = 落在**全部轨道之下**（将新建轨道）。
+         *
+         * 旧实现同样允许 `null`，并用 `rowTopForTrackId(null) = tracks.length × rowHeight`
+         * 把预览画在**新轨道那一行**——拖到下方时用户能看到素材预览（新前端曾漏掉
+         * 这一支：`null` 直接不渲染，拖到下方就没有任何预览）。
+         */
+        readonly trackId: string | null;
         readonly fileName: string;
         readonly contentWidth: number;
         readonly contentHeight: number;
@@ -184,6 +199,23 @@ export interface TimelineKernelViewProps {
      */
     readonly onDragOver?: React.DragEventHandler<HTMLDivElement>;
     readonly onDrop?: React.DragEventHandler<HTMLDivElement>;
+    /**
+     * 拖出容器。
+     *
+     * 与 `onDragOver` / `onDrop` 挂在同一处：旧实现靠它在拖离时清掉落点预览，
+     * 缺了它预览会一直挂在画面上（没有任何后续事件会清它）。
+     */
+    readonly onDragLeave?: React.DragEventHandler<HTMLDivElement>;
+    /**
+     * 拖入预览**内层元素**的 ref（供调用方命令式移动）。
+     *
+     * 与 `onDragOver` / `onDrop` 同一目的：`useTimelineDragDrop` 在拖动期间用
+     * 直接写 `style` 的方式移动预览（不 setState，避免每帧重渲染整个面板）。旧实现
+     * 把这个 ref 挂在旧滚动容器渲染的元素上；内核模式下那块 DOM 不挂载，ref 恒为
+     * null，于是**同一条轨道内**移动指针时预览完全不动（state 里的 trackId / path
+     * 没变 → React 不重渲染，而命令式写入又落空）。
+     */
+    readonly dropPreviewItemRef?: React.MutableRefObject<HTMLDivElement | null>;
     /**
      * 拖到**全部轨道之下**（新建轨道）时的幽灵行（缺省不渲染）。
      *
@@ -264,6 +296,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         onRowHeightChange,
         initialPxPerSec,
         onPxPerSecChange,
+        onZoomRequest,
         getPlayheadSec,
         rulerContentRef,
         trackListScrollerRef,
@@ -274,6 +307,8 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         ghost,
         dropPreview,
         onDragOver,
+        onDragLeave,
+        dropPreviewItemRef,
         onDrop,
         newTrackDrop,
         inlineEdit,
@@ -365,6 +400,13 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
     const clipRangeToParamKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.clipRangeToParamSelection"),
     );
+    // 拉伸 / 曲率修饰键：内核只用于**悬停光标**（按住 = 这个拖拽会做别的事）。
+    const clipStretchKb = useAppSelector((state) =>
+        selectKeybinding(state, "modifier.clipStretch"),
+    );
+    const fadeCurvatureKb = useAppSelector((state) =>
+        selectKeybinding(state, "modifier.fadeCurvatureDrag"),
+    );
     const { mode } = useAppTheme();
 
     const buildData = (): TimelineKernelData => ({
@@ -391,6 +433,8 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
             clipMultiSelectToggle: clipMultiSelectToggleKb,
             clipRangeSelect: clipRangeSelectKb,
             clipRangeToParamSelection: clipRangeToParamKb,
+            clipStretch: clipStretchKb,
+            fadeCurvatureDrag: fadeCurvatureKb,
         },
         playheadZoomEnabled,
         initialPxPerSec,
@@ -427,6 +471,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
     const callbacksRef = React.useRef({
         onRowHeightChange,
         onPxPerSecChange,
+        onZoomRequest,
         getPlayheadSec,
         onVisibleRowsChange: handleVisibleRowsChange,
         onScrollLeftCommit,
@@ -438,6 +483,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
     callbacksRef.current = {
         onRowHeightChange,
         onPxPerSecChange,
+        onZoomRequest,
         getPlayheadSec,
         onVisibleRowsChange: handleVisibleRowsChange,
         onScrollLeftCommit,
@@ -462,6 +508,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         () => ({
             onSeek: (sec, commit, trackId) =>
                 interactionsRef.current?.onSeek?.(sec, commit, trackId),
+            onSeekTo: (sec) => interactionsRef.current?.onSeekTo?.(sec),
             onSelectClip: (clipId, additive, rangeSelect, clientX) =>
                 interactionsRef.current?.onSelectClip?.(clipId, additive, rangeSelect, clientX),
             onDoubleClickClip: (clipId, mode) =>
@@ -500,10 +547,13 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
             onFadeCommit: (args) => interactionsRef.current?.onFadeCommit?.(args),
             onBoxSelectPreview: (args) => interactionsRef.current?.onBoxSelectPreview?.(args),
             onBoxSelectCommit: (args) => interactionsRef.current?.onBoxSelectCommit?.(args),
+            onBoxSelectToParamSelection: (args) =>
+                interactionsRef.current?.onBoxSelectToParamSelection?.(args),
             onContextMenu: (args) => interactionsRef.current?.onContextMenu?.(args),
             onFadeContextMenu: (request) => interactionsRef.current?.onFadeContextMenu?.(request),
             onFadeHover: (args, clientX, clientY) =>
                 interactionsRef.current?.onFadeHover?.(args, clientX, clientY),
+            onClipHover: (args) => interactionsRef.current?.onClipHover?.(args),
             onActivateTake: (clipId, takeId, sec) =>
                 interactionsRef.current?.onActivateTake?.(clipId, takeId, sec),
         }),
@@ -603,6 +653,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                 },
                 onRowHeightChange: (px) => callbacksRef.current.onRowHeightChange(px),
                 onZoomChange: (pxPerSec) => callbacksRef.current.onPxPerSecChange(pxPerSec),
+                onZoomRequest: (next) => callbacksRef.current.onZoomRequest?.(next),
                 onVisibleRowsChange: (firstRow, rowCount) =>
                     callbacksRef.current.onVisibleRowsChange(firstRow, rowCount),
                 interactions: stableInteractions,
@@ -638,6 +689,21 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         // 只在挂载时创建：宿主是长生命周期运行时对象，数据经 dataRef 流入。
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
+
+    /**
+     * 内容域（工程时长 / 轨道数）变化后重新钳制滚动位置。
+     *
+     * 旧实现用的是原生滚动容器：`scrollWidth/Height` 一变小，浏览器立刻把
+     * `scrollLeft/Top` 夹回合法范围。内核自持滚动状态没有这层兜底，必须在数据
+     * 变化时主动补一次——否则删轨 / 缩短工程之后视图停在越界位置（空白或错位），
+     * 直到用户下一次滚动才被纠正。
+     *
+     * 特殊说明：依赖里用**标量与长度**而不是 `clips` 数组本身——数组引用每次
+     * Redux 更新都会变，用它当依赖等于每帧 reclamp（`reclamp` 会标脏重建场景）。
+     */
+    React.useEffect(() => {
+        localHostRef.current?.reclamp();
+    }, [projectSec, tracks.length, rowHeight]);
 
     /**
      * 行内编辑浮层：定位到 clip header 上，并随视口更新位置。
@@ -719,6 +785,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
             className="relative flex-1 overflow-hidden bg-qt-graph-bg outline-none"
             onDragOver={onDragOver}
             onDrop={onDrop}
+            onDragLeave={onDragLeave}
         >
             <canvas ref={canvasRef} className="pointer-events-none absolute inset-0" />
             {/* 波形层：独立 WebGL2 画布，由内核视口源驱动（滚动帧只更新 uniform）。
@@ -754,7 +821,11 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                     className="pointer-events-none absolute left-0 top-0 z-[3] overflow-hidden"
                     style={{
                         width: snapHighlight.contentWidth,
-                        height: snapHighlight.contentHeight,
+                        // 层高取「内容 ∪ 可视区」的并集：通栏吸附竖线（网格线 / 播放
+                        // 光标 / 采样率等无轨道归属的目标）要一路画到**轨道区底部**，
+                        // 而内容高度只到「轨道行之和 + 添加轨道行」。轨道少、视口高时
+                        // 内容高 < 视口高，只按内容高会把这层连同容器一起裁断。
+                        height: Math.max(snapHighlight.contentHeight, viewportSize.height),
                     }}
                 >
                     <SnapHighlightLayer
@@ -762,6 +833,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                         rowHeight={rowHeight}
                         tracks={tracks}
                         contentHeight={snapHighlight.contentHeight}
+                        viewportHeightPx={viewportSize.height}
                     />
                 </div>
             ) : null}
@@ -825,11 +897,29 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                 {dropPreview === undefined
                     ? null
                     : (() => {
-                          const trackIndex = tracks.findIndex((t) => t.id === dropPreview.trackId);
+                          // `trackId === null` = 拖到全部轨道之下 → 预览画在**新轨道行**
+                          // （`tracks.length`），与旧实现 `rowTopForTrackId(null)` 一致。
+                          const trackIndex =
+                              dropPreview.trackId === null
+                                  ? tracks.length
+                                  : tracks.findIndex((t) => t.id === dropPreview.trackId);
                           if (trackIndex < 0) return null;
                           return (
                               <div
-                                  className="absolute flex items-center overflow-hidden rounded border border-dashed border-qt-accent/70 bg-qt-accent/15 px-1"
+                                  // 命令式移动的目标：`useTimelineDragDrop` 在
+                                  // **同一轨道内**移动时只改这里的 `style`（不 setState，
+                                  // 避免每帧重渲染整个面板）。旧实现把它挂在旧滚动容器
+                                  // 渲染的元素上；内核模式下那块 DOM 不存在，必须把这
+                                  // 个 ref 接到这里，否则指针在一条轨道内移动时预览
+                                  // 完全不动（state 的 trackId/path 都没变 → 不重渲染）。
+                                  ref={dropPreviewItemRef}
+                                  // 【样式必须与旧实现逐类一致】旧实现的素材拖入预览是
+                                  // `rounded-sm` + **1px 虚线 `--qt-highlight`** 边框 +
+                                  // `color-mix(in oklab, var(--qt-highlight) 20%, transparent)`
+                                  // 底，文件名用 `px-2 pt-1 text-[10px] text-qt-text truncate`
+                                  // 顶对齐贴在左上角。这里照搬同一组类（含 `truncate` 需要
+                                  // 的块级容器，因此文件名用 div 而不是 inline 的 span）。
+                                  className="absolute overflow-hidden rounded-sm border border-dashed border-qt-highlight bg-[color-mix(in_oklab,var(--qt-highlight)_20%,transparent)]"
                                   style={{
                                       left: dropPreview.leftPx,
                                       top: trackIndex * rowHeight + 8,
@@ -837,9 +927,9 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                                       height: Math.max(1, rowHeight - 16),
                                   }}
                               >
-                                  <span className="truncate text-[10px] text-qt-text">
+                                  <div className="truncate px-2 pt-1 text-[10px] text-qt-text">
                                       {dropPreview.fileName}
-                                  </span>
+                                  </div>
                               </div>
                           );
                       })()}
