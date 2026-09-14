@@ -3289,7 +3289,14 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      */
     function resolveClickSeekSec(
         gesture: Extract<Gesture, { kind: "pending-select" }>,
-        event: PointerEvent,
+        event: {
+            readonly clientX: number;
+            readonly clientY: number;
+            readonly ctrlKey: boolean;
+            readonly shiftKey: boolean;
+            readonly altKey: boolean;
+            readonly metaKey: boolean;
+        },
     ): number | null {
         if (gesture.region === "snap-offset-handle") return null;
         if (gesture.inactiveTakeId !== null) return null;
@@ -4329,6 +4336,33 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      * @param cancelled true = 取消（pointercancel / 卸载）：拖拽应回滚而不提交。
      */
     function onGesturePointerUp(event: PointerEvent, cancelled = false): void {
+        finalizeActiveGesture(event, cancelled, event.pointerId);
+    }
+
+    /**
+     * 左键手势的**统一收尾**（pointerup / pointercancel / 窗口失焦共用）。
+     *
+     * 【为什么失焦必须走这里而不是取消路径】见 `onWindowBlur` 的说明：旧实现
+     * `gestureFocusGuard` 的收尾与 pointerup **完全相同**（提交当前值），取消会把
+     * 用户已完成的拖动回滚掉。pointerup 与 pointercancel 传入真实事件与各自的
+     * `cancelled`；失焦没有事件，传全 false 修饰键与零坐标（收尾不用坐标）。
+     *
+     * @param event 抬起 / 取消的真实指针事件；失焦时为形状兼容的最小对象。
+     * @param cancelled true = 回滚乐观值（pointercancel / Esc），false = 提交。
+     */
+    function finalizeActiveGesture(
+        event: {
+            readonly clientX: number;
+            readonly clientY: number;
+            readonly ctrlKey: boolean;
+            readonly shiftKey: boolean;
+            readonly altKey: boolean;
+            readonly metaKey: boolean;
+        },
+        cancelled = false,
+        /** 真实指针事件才有：失焦收尾没有，释放 pointer capture 时跳过。 */
+        pointerId: number | null = null,
+    ): void {
         if (gesture.kind === "clip-drag") {
             interactions?.onDragCommit?.({
                 clipId: gesture.clipId,
@@ -4441,7 +4475,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 }
                 gesture = { kind: "none" };
                 try {
-                    container.releasePointerCapture(event.pointerId);
+                    if (pointerId !== null) container.releasePointerCapture(pointerId);
                 } catch {
                     // 已释放 / 未捕获：忽略。
                 }
@@ -4500,7 +4534,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         }
         if (gesture.kind !== "none") {
             try {
-                container.releasePointerCapture(event.pointerId);
+                if (pointerId !== null) container.releasePointerCapture(pointerId);
             } catch {
                 // 已释放 / 未捕获：忽略。
             }
@@ -5045,13 +5079,33 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     }
 
     /**
-     * 窗口失焦 / 页面隐藏 → 中止进行中的手势（`registerDragAbort` 的等价物）。
+     * 窗口失焦 / 页面隐藏 → **提交式收尾**进行中的手势（旧 `registerDragAbort`
+     * 的等价物）。
      *
-     * 失焦时读不到修饰键，传全 false：取消路径不会用它们做任何语义决策
-     * （copy / slip 模式在按下时已经定死）。
+     * 【语义必须与旧实现一致：失焦 = 提交，不是取消】旧实现的每个 DOM 手势把
+     * "事件无关的 end()"（与 pointerup 完全相同的收尾路径）注册进
+     * `gestureFocusGuard`，失焦时统一调用——用户 Alt+Tab 切走并在窗口外松手时，
+     * 已拖出的位移**被保留**（提交当前值、关闭 undo group、归还交互锁）。
+     * 内核曾把失焦接到取消路径上：同样的操作会**回滚**用户已完成的拖动——
+     * 与旧实现相反，属于回归。
+     *
+     * 【为什么必须收尾而不能什么都不做】在别的窗口松手不会把 pointerup 送回本
+     * 窗口，手势会永久停在拖拽态：乐观值悬置、交互锁与后端 undo group 泄漏、
+     * 后续所有远程快照被交互锁挡掉（旧 `gestureFocusGuard` 文件头记录的同一问题）。
+     *
+     * 失焦没有 PointerEvent 可读：提交路径只在 copy/slip 等按下时定死语义、
+     * 收尾不读修饰键，传全 false 即可；clientX/Y 只被 seek 分支使用，而失焦
+     * 时挂起的手势不可能是 seek（见下方过滤）。
      */
     function onWindowBlur(): void {
-        cancelActiveGesture({ ctrlKey: false, shiftKey: false, altKey: false, metaKey: false });
+        finalizeActiveGesture({
+            clientX: 0,
+            clientY: 0,
+            ctrlKey: false,
+            shiftKey: false,
+            altKey: false,
+            metaKey: false,
+        });
     }
 
     /** 页面切到后台（切换标签 / 最小化）按失焦处理。 */
