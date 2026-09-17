@@ -506,8 +506,8 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
      */
     const stableInteractions = React.useMemo<TimelineKernelInteractions>(
         () => ({
-            onSeek: (sec, commit, trackId) =>
-                interactionsRef.current?.onSeek?.(sec, commit, trackId),
+            onSeek: (sec, phase, trackId) =>
+                interactionsRef.current?.onSeek?.(sec, phase, trackId),
             onSeekTo: (sec) => interactionsRef.current?.onSeekTo?.(sec),
             onSelectClip: (clipId, additive, rangeSelect, clientX) =>
                 interactionsRef.current?.onSelectClip?.(clipId, additive, rangeSelect, clientX),

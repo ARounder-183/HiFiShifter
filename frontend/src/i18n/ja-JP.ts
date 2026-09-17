@@ -759,7 +759,7 @@ export const jaJP = {
     kb_modifier_clip_range_select: "範囲選択（押しながらクリック、アンカーから拡張）",
     kb_modifier_clip_pitch_drag: "ピッチ調整（押しながらクリップ波形を上下にドラッグ）",
     kb_modifier_slip_edit: "Slip 編集（クリップ本体をドラッグ中に押す）",
-    kb_modifier_stretch: "ストレッチ（クリップ端 / 選択範囲端をドラッグ中に押す）",
+    kb_modifier_stretch: "ストレッチ（クリップ端をドラッグ中に押す）",
     kb_modifier_no_snap:
         "スナップの一時切り替え（クリップ / パラメータ線 / テンポ点ドラッグ中に押す）",
     kb_modifier_copy_drag: "コピードラッグ（クリップ本体をドラッグ中に押す）",
@@ -772,6 +772,7 @@ export const jaJP = {
         "キャンバス水平ズーム（タイムライン / ピアノロール / 鍵盤ホイール）",
     kb_modifier_pr_vzoom: "キャンバス垂直ズーム（タイムライン / ピアノロールホイール）",
     kb_modifier_param_morph: "パラメータ形状変形（押しながら選択範囲内のアンカーをドラッグ）",
+    kb_modifier_param_stretch: "選択範囲のストレッチ（選択範囲端をドラッグ中に押す）",
     kb_modifier_clip_range_to_param_selection:
         "クリップ範囲をパラメーター選択範囲に追加（押しながら右クリック）",
     kb_modifier_param_multi_select:

@@ -886,7 +886,7 @@ export const enUS = {
     kb_modifier_clip_range_select: "Range Select (hold + click clip, extends from anchor)",
     kb_modifier_clip_pitch_drag: "Pitch Adjust (hold + drag clip waveform vertically)",
     kb_modifier_slip_edit: "Slip Edit (hold while dragging clip body)",
-    kb_modifier_stretch: "Stretch (hold while dragging clip edge / param selection edge)",
+    kb_modifier_stretch: "Stretch (hold while dragging a clip edge)",
     kb_modifier_no_snap:
         "Temporarily Toggle Snap (hold while dragging clip / param line / tempo point)",
     kb_modifier_copy_drag: "Copy Drag (hold while dragging clip body)",
@@ -898,6 +898,7 @@ export const enUS = {
         "Canvas Horizontal Zoom (timeline / piano roll / piano keys wheel)",
     kb_modifier_pr_vzoom: "Canvas Vertical Zoom (timeline / piano roll wheel)",
     kb_modifier_param_morph: "Param Morph (hold and drag curve anchors inside selection)",
+    kb_modifier_param_stretch: "Stretch Param Selection (hold while dragging a selection edge)",
     kb_modifier_clip_range_to_param_selection:
         "Add Clip Range to Param Selection (hold + right-click a clip)",
     kb_modifier_param_multi_select:

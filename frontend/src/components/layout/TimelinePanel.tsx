@@ -61,6 +61,7 @@ import {
 import { effectiveFadeSec } from "./timeline/kernel/interaction/fadeTargets";
 import type { ClipHitRegion } from "./timeline/kernel/interaction/hitTest";
 import type { ClipHeaderControl } from "./timeline/kernel/interaction/clipHeaderControls";
+import { planSeekGesture, type SeekGesturePhase } from "./timeline/kernel/interaction/seekGesture";
 import { FadeContextMenuHost } from "./timeline/FadeContextMenuHost";
 import {
     requestOpenFadeContextMenu,
@@ -1359,13 +1360,21 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     );
 
     const handleKernelSeek = React.useCallback(
-        (sec: number, commit: boolean, trackId?: string | null) => {
-            const target = resolveKernelSeekSec(sec, commit);
-            if (commit) {
+        (sec: number, phase: SeekGesturePhase, trackId?: string | null) => {
+            // 播放态实时判定：必须读 store（sessionRef 在 effect 提交后才刷新，
+            // 连打播放/停止时是上一拍的值）。播放中按下与拖拽都不写播放头，
+            // 否则乐观值与 30Hz 轮询（用引擎真实播放位置覆写 playheadSec）
+            // 反复争夺同一字段，视觉插值在"硬复位"与"按采样外推"之间交替
+            // ——表现就是播放光标闪回（按下跳到指针处、下一帧又被拽回引擎位置）。
+            const isPlayingNow = Boolean(store.getState().session.runtime.isPlaying);
+            const plan = planSeekGesture(phase, isPlayingNow);
+
+            if (plan.blankClickSemantics) {
                 // 空白点击的选中语义（与旧实现 pointerdown 捕获分支同源）：
                 // 1) 清空 clip 选中——但**保留轨道焦点**（空白点击是"取消 clip
                 //    目标"，不是"切换轨道目标"）；
                 // 2) 按「允许时间轴点击切换轨道」把当前轨道切到点击所在轨道。
+                // 只在按下的那一拍执行（松手不再重复）。
                 deselectAllTrackLaneClips();
                 if (
                     trackId != null &&
@@ -1400,8 +1409,25 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     void dispatch(selectTrackRemote({ trackId, applySelectedClip: false }));
                 }
             }
+            // 播放中（`plan.playhead === "none"`）：按下与拖拽都不写播放头、也不
+            // 发布吸附高亮 —— 光标留在引擎位置，只有松手那一拍提交落点。
+            // 未播放：按下即提交、拖拽逐帧预览（吸附高亮只在拖拽期间发布），
+            // 与旧实现 `startDeferredPlayheadSeek` 完全一致。
+            if (plan.playhead === "none") {
+                if (kernelSeekRafRef.current != null) {
+                    cancelAnimationFrame(kernelSeekRafRef.current);
+                    kernelSeekRafRef.current = null;
+                }
+                kernelSeekPendingRef.current = null;
+                // 按下仍清一次高亮：旧实现的按下走提交分支顺带清理，是"上一次
+                // 手势异常中断留下高亮"的兜底。本分支不再发布高亮，但保留该清理
+                // 以保证同一不变式；拖拽帧不重复调用（无高亮可清）。
+                if (phase === "press") clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+                return;
+            }
+            const target = resolveKernelSeekSec(sec, plan.playhead === "commit");
             kernelSeekPendingRef.current = target;
-            if (commit) {
+            if (plan.playhead === "commit") {
                 if (kernelSeekRafRef.current != null) {
                     cancelAnimationFrame(kernelSeekRafRef.current);
                     kernelSeekRafRef.current = null;
@@ -1422,7 +1448,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 // 拖拽中间帧**只写乐观位置，不打后端**：旧实现
                 // `startDeferredPlayheadSeek` 的移动分支走 `commit = false`，整段拖拽
                 // 只在松手时发一次 `seekPlayhead`（内核原先逐帧成对派发，等于按住拖动
-                // 时以 rAF 频率持续刷后端）。松手的收尾由内核补发 `commit = true`。
+                // 时以 rAF 频率持续刷后端）。松手的收尾由内核补发提交式落点。
                 dispatch(setplayheadSec(pending));
             });
         },
@@ -5293,9 +5319,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 };
                 if (readScrollLeft() === null) return;
                 const ruler = e.currentTarget as HTMLDivElement;
-                let moved = false;
-                let lastClientX = e.clientX;
-                let lastSec = 0;
 
                 const updateAt = (clientX: number, commit: boolean): number =>
                     setPlayheadFromClientX(
@@ -5305,13 +5328,30 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         commit,
                     );
 
-                // 标尺没有其他编辑操作需要区分，按下时立即提交一次 seek。
-                lastSec = updateAt(e.clientX, true);
+                // 播放态实时判定（store，而非滞后的镜像）：与轨道空白区共用同一
+                // 套阶段策略（`planSeekGesture`）—— 播放中按下与拖拽都不写播放头，
+                // 只有松手才提交落点并延续播放。标尺若不共用，从标尺开始拖拽仍会
+                // 出现完全相同的闪回（按下把光标拉到指针处、下一帧被播放轮询拽回）。
+                const isPlayingNow = (): boolean =>
+                    Boolean(store.getState().session.runtime.isPlaying);
+
+                // 标尺没有其他编辑操作需要区分：未播放时按下立即提交一次 seek
+                // （既有行为）；播放中按下不写播放头，落点延后到松手那一拍。
+                const pressCommitted =
+                    planSeekGesture("press", isPlayingNow()).playhead === "commit";
+                if (pressCommitted) {
+                    updateAt(e.clientX, true);
+                }
+                let moved = false;
+                let lastClientX = e.clientX;
 
                 const onMove = (ev: MouseEvent) => {
                     moved = true;
                     lastClientX = ev.clientX;
-                    lastSec = updateAt(ev.clientX, false);
+                    // 播放中的拖拽帧不写播放头（闪回防护）。
+                    if (planSeekGesture("move", isPlayingNow()).playhead === "preview") {
+                        updateAt(ev.clientX, false);
+                    }
                 };
 
                 // 失焦取消：切屏期间 mouseup 不送达本窗口，blur 时以
@@ -5322,17 +5362,17 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     window.removeEventListener("mousemove", onMove, true);
                     window.removeEventListener("mouseup", onEnd, true);
                     window.removeEventListener("mouseleave", onEnd, true);
-                    if (!moved) {
-                        // 未拖动的单击不会发布高亮；仍兜底清除一次，
-                        // 防止此前异常中断手势的残留。
-                        clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
-                        return;
+                    // 拖拽松手提交最终落点：播放中这是**唯一**写播放头的一拍
+                    // （后端 seek 不改 is_playing —— 即"延续播放状态"）。
+                    // 未拖动的单击在未播放时已由按下那一拍提交，此处不重复提交
+                    // （重复提交是多余的一次后端 seek）。
+                    const releaseCommits =
+                        planSeekGesture("release", isPlayingNow()).playhead === "commit";
+                    if (releaseCommits && (moved || !pressCommitted)) {
+                        updateAt(lastClientX, true);
                     }
-                    lastSec = updateAt(lastClientX, false);
-                    void dispatch(seekPlayhead(lastSec));
-                    // 最后一步 update 仍会发布一次吸附高亮，必须在其后
-                    // 清除：否则拖拽标尺后网格吸附的竖线会冻结在画面上，
-                    // 且任何单击跳转都不再清理它。
+                    // 拖拽中间帧可能发布过吸附高亮，必须在此清除：否则拖拽标尺后
+                    // 网格吸附的竖线会冻结在画面上，且任何单击跳转都不再清理它。
                     clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
                 };
                 const onEnd = (ev: MouseEvent) => {

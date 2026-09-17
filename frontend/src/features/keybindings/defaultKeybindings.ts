@@ -13,9 +13,10 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     "mode.drawTool": { key: "f8" },
     "mode.lineTool": { key: "f9" },
 
-    // 播放控制
+    // 播放 / 暂停：播放中暂停（光标留在当前位置），空闲时起播。
     "playback.toggle": { key: "space" },
-    "playback.stop": { key: "enter" }, // 停止并回到本次播放起点
+    // 播放 / 停止：播放中停止并回到本次起播点；空闲时起播（与 toggle 同为起播，
+    "playback.stop": { key: "enter" },
     // 节拍器开关：默认 `K`（对齐 Logic Pro 的节拍器键位惯例），不占用 `M`、`R`。
     "playback.metronome": { key: "k" },
     "recording.toggle": { key: "r", ctrl: true },
@@ -133,7 +134,11 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
         shift: true,
     },
     "modifier.clipSlipEdit": { key: "alt", modifierOnly: true, alt: true },
+    // 轨道视图：clip 边缘拖动时从 trim 变为 stretch（改播放速率、内容不被裁掉）。
     "modifier.clipStretch": { key: "alt", modifierOnly: true, alt: true },
+    // 参数编辑器：拖动参数选区边缘时拉伸选区。与上面**分离**——两个表面各自的
+    // 拉伸语义独立可改绑（此前共用一个 action，改一处会同时改另一处）。
+    "modifier.paramStretch": { key: "alt", modifierOnly: true, alt: true },
     "modifier.clipNoSnap": { key: "shift", modifierOnly: true, shift: true },
     // macOS 上 ctrl 字段会自动映射为 Command（⌘），因此默认复制拖动为 ⌘+拖动；
     // 避免占用 Option，Option 保留给拉伸/滑动编辑等交替操作。
@@ -464,7 +469,10 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
         labelKey: "kb_modifier_stretch",
         group: "modClip",
         modifierOperationType: "drag",
-        conflictScenes: ["clip.edge", "roll.paramEdge"],
+        // 只作用于**时间轴轨道视图**的 clip 边缘 trim/stretch。参数编辑器的
+        // 选区边缘拉伸已分离为 `modifier.paramStretch`（场景 roll.paramEdge）：
+        // 两个表面各自独立改绑，互不牵连。
+        conflictScenes: ["clip.edge"],
     },
     "modifier.clipNoSnap": {
         labelKey: "kb_modifier_no_snap",
@@ -516,6 +524,19 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
         //   按键时多选会完全失效。
         // 与之不同目标的场景（时间轴 clip.select、滚轮场景）不列入，避免误报。
         conflictScenes: ["roll.select", "roll.paramDrag", "roll.paramEdge"],
+    },
+    // 参数编辑器：拖动参数选区边缘 = 拉伸选区。与时间轴的 `modifier.clipStretch`
+    // **分离**（此前共用同一个 action，改一处会同时改另一处）。默认同为 Alt，
+    // 但两个表面可各自改绑（例如 VEGAS Pro 预设下两者都是 Ctrl，用户仍可只改其中一个）。
+    "modifier.paramStretch": {
+        labelKey: "kb_modifier_param_stretch",
+        group: "modParam",
+        modifierOperationType: "drag",
+        // 只作用于参数编辑器选区边缘：与 roll.select / roll.paramDrag 的手势
+        // 目标不同（边缘 vs 内部/新建）不列入；roll.paramEdge 上
+        // `modifier.paramMultiSelect` 与之互斥（边缘拉伸优先，多选会失效），
+        // 因此共用按键时必须提示冲突。
+        conflictScenes: ["roll.paramEdge"],
     },
     "modifier.clipRangeToParamSelection": {
         labelKey: "kb_modifier_clip_range_to_param_selection",

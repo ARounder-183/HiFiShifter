@@ -93,6 +93,42 @@ describe("findConflicts — 修饰键按场景检测", () => {
     });
 });
 
+describe("findConflicts — 「拉伸」修饰键按场景分离（clip 边缘 vs 参数选区边缘）", () => {
+    it("两个拉伸修饰键在各自场景独立：共用键位不算冲突", () => {
+        // 默认两者都是 Alt，但一个作用于时间轴 clip 边缘、一个作用于参数选区边缘
+        // （不同拖拽目标）—— 与「Alt 同时用于 Slip 与淡化曲率」同源，刻意设计。
+        expect(findConflicts({}, "modifier.clipStretch", mod("alt"))).not.toContain(
+            "modifier.paramStretch",
+        );
+        expect(findConflicts({}, "modifier.paramStretch", mod("alt"))).not.toContain(
+            "modifier.clipStretch",
+        );
+    });
+
+    it("clip 边缘拉伸不再拖累参数选区（旧版共用 action 的回归锁）", () => {
+        // 拆分前 clipStretch 的 conflictScenes 含 roll.paramEdge，于是"把 clip 边缘
+        // 拉伸改到 Ctrl"会顺带判定与参数编辑器的多选修饰键冲突。拆分后它只作用于
+        // clip.edge，参数编辑器那一侧由 paramStretch 独立承担。
+        expect(findConflicts({}, "modifier.clipStretch", mod("control"))).not.toContain(
+            "modifier.paramMultiSelect",
+        );
+    });
+
+    it("参数选区边缘拉伸与参数多选区共用键位时冲突（roll.paramEdge 边缘拉伸优先）", () => {
+        // paramMultiSelect 的 conflictScenes 已声明 roll.paramEdge（边缘拉伸会抢占，
+        // 导致多选完全失效）；paramStretch 与之共用按键必须提示。
+        expect(findConflicts({}, "modifier.paramStretch", mod("control"))).toContain(
+            "modifier.paramMultiSelect",
+        );
+    });
+
+    it("参数选区边缘拉伸与参数形变是不同场景，不冲突", () => {
+        expect(findConflicts({}, "modifier.paramStretch", mod("alt"))).not.toContain(
+            "modifier.paramMorph",
+        );
+    });
+});
+
 describe("findConflicts — 键盘快捷键按作用域检测", () => {
     it("quickSearch 作用域内的绑定不与全局绑定冲突", () => {
         // quickSearch.confirm 默认 enter；playback.stop 默认也是 enter，但作用域不同

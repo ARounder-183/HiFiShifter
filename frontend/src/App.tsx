@@ -49,6 +49,7 @@ import {
     cycleDragDirection,
     persistUiSettings,
 } from "./features/session/sessionSlice";
+import { resolveTransportShortcutCommand } from "./features/session/transportShortcuts";
 import { useI18n } from "./i18n/I18nProvider";
 import { useClipPitchDataListener } from "./hooks/useClipPitchDataListener";
 import { useHistoryStateListener } from "./hooks/useHistoryStateListener";
@@ -2477,26 +2478,31 @@ function AppInner() {
                 return;
             }
             switch (actionId) {
-                case "playback.toggle": {
+                case "playback.toggle":
+                case "playback.stop": {
                     // 以 store 实时状态判定播放态：runtimeRef 在 effect 提交后才
                     // 刷新，快速连续按键（播放/停止连打）时会基于过期值对同一
                     // 状态双重派发（连按两次 Space 派发两次 play/两次 stop），
                     // 第二次会把刚建立的播放重新拉回起点（光标小跳）。
+                    //
+                    // 语义（与 DAW 惯例严格对齐，裁决表见 transportShortcuts）：
+                    // - toggle（Space）= 播放 / **暂停**：播放中暂停，光标留在当前
+                    //   播放位置；空闲时从光标起播。
+                    // - stop（Enter）= 播放 / **停止**：播放中停止，光标回到本次
+                    //   起播位置（restoreAnchor）；空闲时同样从光标起播。
+                    //
+                    // 空闲时的起播分支必须保留：`playOriginal` 已幂等（播放中调用
+                    // 为完全 no-op，见 transportThunks），所以这里不会再产生 77553e61
+                    // 要修的那种"重复触发把传输层拽回起点"——但缺了它，默认 Enter
+                    // 在空闲时什么都不做，与标签「播放 / 停止」和手册相矛盾。
                     const isPlayingNow = Boolean(store.getState().session.runtime.isPlaying);
-                    if (isPlayingNow) {
-                        void dispatch(stopAudioPlayback());
-                    } else {
+                    const command = resolveTransportShortcutCommand(actionId, isPlayingNow);
+                    if (command === "play") {
                         void dispatch(playOriginal());
-                    }
-                    break;
-                }
-                case "playback.stop": {
-                    // "停止"语义：仅在播放中时停止并回到本次起播点。
-                    // 未播放时必须是 no-op —— 旧实现在此处派发 playOriginal()，
-                    // 使"停止"键在空闲时反而启动播放（重复触发源之一）。
-                    const isPlayingNow = Boolean(store.getState().session.runtime.isPlaying);
-                    if (isPlayingNow) {
+                    } else if (command === "stop") {
                         void dispatch(stopAudioPlayback({ restoreAnchor: true }));
+                    } else {
+                        void dispatch(stopAudioPlayback());
                     }
                     break;
                 }

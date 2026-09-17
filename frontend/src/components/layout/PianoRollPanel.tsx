@@ -753,7 +753,9 @@ export const PianoRollPanel: React.FC = () => {
         dispatch(setEdgeSmoothnessPercent(next));
         void dispatch(persistUiSettings());
     });
-    const stretchKb = useAppSelector((state) => selectKeybinding(state, "modifier.clipStretch"));
+    // 参数选区边缘拉伸的修饰键。与时间轴 clip 边缘的 `modifier.clipStretch`
+    // **分离**（两个表面各自独立改绑），只用于选择工具下的选区边缘拉伸。
+    const stretchKb = useAppSelector((state) => selectKeybinding(state, "modifier.paramStretch"));
     const vibratoAmplitudeAdjustKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.vibratoAmplitudeAdjust"),
     );

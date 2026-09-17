@@ -87,6 +87,7 @@ import {
     TRACK_ADD_ROW_HEIGHT,
 } from "../../constants";
 import { hitTest, type ClipHitRegion, type HitTestClip } from "../interaction/hitTest";
+import type { SeekGesturePhase } from "../interaction/seekGesture";
 import {
     isContentYBelowTracks,
     resolveDragDelta,
@@ -448,13 +449,17 @@ export interface TimelineKernelInteractions {
      * 请求跳转播放头（点击或拖拽空白 / 标尺）。
      *
      * @param sec 目标时间（秒，已钳制到 >= 0）。
-     * @param commit true = 单击或手势结束（应提交后端）；false = 拖拽中的预览。
+     * @param phase 手势阶段：`"press"` 按下 / `"move"` 拖拽中间帧 /
+     *   `"release"` 松手收尾。**必须显式区分按下与松手**：播放状态下空白
+     *   按下与拖拽都不得写播放头（否则与 30Hz 播放轮询争夺 `playheadSec`，
+     *   表现为光标闪回），只有松手才提交落点并延续播放。调用方按阶段裁决
+     *   （`planSeekGesture`，见 `interaction/seekGesture`）。
      * @param trackId 点击空白时指针所在轨道（拖拽预览帧与标尺来源不带）。
      *   供面板实现「空白点击」的完整语义：清空 clip 选中 + 按
      *   `允许时间轴点击切换轨道` 切换当前轨道（旧实现 `TimelinePanel` 的
      *   pointerdown 捕获分支）。**不参与 seek 本身**。
      */
-    readonly onSeek?: (sec: number, commit: boolean, trackId?: string | null) => void;
+    readonly onSeek?: (sec: number, phase: SeekGesturePhase, trackId?: string | null) => void;
     /**
      * **纯**播放头落点（只移动播放头）。
      *
@@ -2831,7 +2836,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     function dispatchMovePreview(event: PointerEvent): void {
         switch (resolveMoveDispatch(gesture.kind)) {
             case "seek":
-                interactions?.onSeek?.(secAt(event.clientX), false);
+                // 拖拽中间帧：阶段交给面板裁决（播放中不写播放头）。
+                interactions?.onSeek?.(secAt(event.clientX), "move");
                 return;
             case "box-select":
                 applyBoxSelect(event);
@@ -3701,7 +3707,10 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             // 空白按下：连同**指针所在轨道**一起交给面板——「清空选中 + 按设置
             // 切换当前轨道」是旧实现 pointerdown 捕获分支的语义，不能在面板侧
             // 从 sec 反推（轨道要靠 clientY 换算）。
-            interactions?.onSeek?.(hit.sec, true, hit.trackId);
+            //
+            // 阶段是 `"press"`：播放中面板据此**不写播放头**（闪回防护），
+            // 只执行选中语义；非播放态仍按下即跳转（既有行为）。
+            interactions?.onSeek?.(hit.sec, "press", hit.trackId);
         }
         try {
             container.setPointerCapture(event.pointerId);
@@ -4514,7 +4523,12 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             // 空白区 seek 手势收尾：补发一次**提交式**落点。旧实现
             // `startDeferredPlayheadSeek` 的 `finish()` 正是在松手时发这一次
             // `seekPlayhead`（拖动中间帧只预览、不写后端）。
-            if (!cancelled) interactions?.onSeek?.(secAt(event.clientX), true);
+            //
+            // 播放中这是**唯一**会写播放头的一拍（按下与拖拽都被面板按阶段挡掉），
+            // 提交后引擎 seek 到该处且传输层保持播放 —— 即"延续播放状态"。
+            // 失焦 / 页面隐藏也走本函数（`onWindowBlur`，坐标传 0），语义与旧实现
+            // 一致地按松手提交。
+            if (!cancelled) interactions?.onSeek?.(secAt(event.clientX), "release");
         }
         if (gesture.kind === "pending-select" && !cancelled) {
             if (gesture.headerControl !== null) {

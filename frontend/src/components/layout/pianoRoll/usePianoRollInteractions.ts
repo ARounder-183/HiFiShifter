@@ -227,7 +227,7 @@ export function usePianoRollInteractions(args: {
     paramMultiSelectKb: Keybinding;
     /** modifier.paramFineAdjust 绑定 */
     paramFineAdjustKb: Keybinding;
-    /** modifier.clipStretch 绑定（选择工具参数拉伸） */
+    /** `modifier.paramStretch` 绑定（选择工具下参数选区边缘拉伸） */
     paramStretchKb: Keybinding;
     /** modifier.vibratoAmplitudeAdjust 绑定 */
     vibratoAmplitudeAdjustKb: Keybinding;
@@ -1810,8 +1810,9 @@ export function usePianoRollInteractions(args: {
     );
 
     /**
-     * 边缘拉伸命中：在 Alt（modifier.clipStretch）按下时，找**最近**的选区段边缘。
-     * 多选区下返回被命中的段号 + 哪一侧 —— 拉伸只作用于那一段，其余段不动。
+     * 边缘拉伸命中：在 `modifier.paramStretch`（默认 Alt）按下时，找**最近**的
+     * 选区段边缘。多选区下返回被命中的段号 + 哪一侧 —— 拉伸只作用于那一段，
+     * 其余段不动。
      */
     const findStretchSelectionEdge = useCallback(
         (
