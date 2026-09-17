@@ -135,6 +135,7 @@ import { createScrollKernel, type TimelineViewportState } from "../../../renderK
 // 竖向键盘翻页与参数编辑器内核**共用**同一份解析（见 onKeyDown 说明）。
 import { resolveKeyboardScrollTarget } from "../../../renderKernel/keyboardScroll";
 import { snapToDevicePx } from "../../../../../utils/devicePixelLine";
+import { isStylusLike } from "../../../../../utils/penInput";
 
 /** `buildTimelineTicks` 的入参类型（用于让数据镜像的字段类型自动对齐）。 */
 type BuildTicksArgs = Parameters<typeof buildTimelineTicks>[0];
@@ -3139,6 +3140,11 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         // 必须失效，否则会误吞这一次交互真正需要的菜单。
         suppressNextContextMenu = false;
         if (isEditableTarget(event.target)) return;
+        // 数位笔 / 触摸：不启动空白区 seek、框选与 clip 拖拽手势。
+        // pen 在感应高度即产生 pointermove，起笔压力与笔尖接触难以和"刻意
+        // 按下"区分，误拖播放头 / 误移 clip 的代价远高于收益；时间轴编辑
+        // 保留给鼠标（与中键平移仅鼠标的既有门控一致）。
+        if (isStylusLike(event)) return;
         if (event.button === 1) {
             if (event.pointerType !== "mouse") return;
             startMiddlePan(event);
@@ -4915,6 +4921,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     /** 造一个 thumb 拖拽的按下处理器。 */
     function makeThumbPointerDown(axis: "x" | "y") {
         return (event: PointerEvent) => {
+            // 数位笔 / 触摸不拖 thumb：8px 窄命中 + 无按钮校验，悬停划过或
+            // 起笔误触即劫持滚动；滚动保留给鼠标 / 滚轮 / 触控板。
+            if (isStylusLike(event)) return;
             event.preventDefault();
             event.stopPropagation();
             dragAxis = axis;
@@ -4984,6 +4993,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      */
     function makeTrackPointerDown(axis: "x" | "y") {
         return (event: PointerEvent) => {
+            // 数位笔 / 触摸不触发轨道翻页（与 thumb 同一防误触约定）。
+            if (isStylusLike(event)) return;
             event.preventDefault();
             event.stopPropagation();
             const track = event.currentTarget as HTMLElement;

@@ -61,6 +61,14 @@ import {
 import { resolveHorizontalWheelZoom } from "../timeline/runtime/timelineScrollRange";
 import { resolveTimelineMinPxPerSec } from "../timeline/runtime/timelineZoomBounds";
 import { nativeScrollbarZoneAt } from "../../../utils/nativeScrollbar";
+import {
+    coalescedEventsOf,
+    isEraserButton,
+    isLegacyMouseEventFromStylus,
+    isStylusLike,
+    PEN_ERASER_BUTTONS_MASK,
+    shouldRejectConcurrentPointer,
+} from "../../../utils/penInput";
 import { getParamEditorWheelAction, getVibratoDragWheelTarget } from "./wheelGesture";
 import {
     createSelectionAmplifier,
@@ -605,6 +613,8 @@ export function usePianoRollInteractions(args: {
         buttons: 0,
     });
     const activePointerGestureEndRef = useRef<(() => void) | null>(null);
+    /** 最近一次真实 pointermove 的设备类型：合成事件回放时复用。 */
+    const lastPointerTypeRef = useRef<string | null>(null);
     const VIBRATO_DRAG_CAPTURE_ATTR = "data-piano-roll-vibrato-drag-active";
     /** 参数线拖拽进行中标记：全局快捷键为「拖动方向切换」键放行（见安装器）。 */
     const PARAM_DRAG_ATTR = "data-piano-roll-param-drag-active";
@@ -1138,6 +1148,9 @@ export function usePianoRollInteractions(args: {
                 pointerId: ev.pointerId,
                 buttons: ev.buttons,
             };
+            // 合成事件必须携带与真实设备一致的 pointerType：否则 pen 拖拽中
+            // 改修饰键时，重放的 pointermove 会被 pen 判定逻辑当成 mouse。
+            lastPointerTypeRef.current = ev.pointerType || null;
         };
 
         const onKeyMod = (e: globalThis.KeyboardEvent) => {
@@ -1157,6 +1170,7 @@ export function usePianoRollInteractions(args: {
                     clientX: last.clientX,
                     clientY: last.clientY,
                     pointerId: st?.pointerId ?? last.pointerId ?? 1,
+                    pointerType: lastPointerTypeRef.current ?? "mouse",
                     buttons: last.buttons ?? 1,
                     bubbles: true,
                     cancelable: true,
@@ -1229,6 +1243,10 @@ export function usePianoRollInteractions(args: {
 
     const onRulerMouseDown = useCallback(
         (e: ReactMouseEvent<HTMLDivElement>) => {
+            // 数位笔 / 触摸不触发标尺 seek：pen 的兼容 mouse 事件（无
+            // pointerType）会让"悬停画线起笔"误定位播放头；悬停时间气泡
+            // （只读）不受影响。按"最近一次真实 pointer 事件"的设备类型判定。
+            if (isLegacyMouseEventFromStylus()) return;
             if (e.button !== 0) return;
             const ruler = e.currentTarget as HTMLDivElement;
             let moved = false;
@@ -1950,11 +1968,26 @@ export function usePianoRollInteractions(args: {
 
     const onCanvasPointerDown = useCallback(
         (e: ReactPointerEvent<HTMLCanvasElement>) => {
+            // 掌压拒识：笔 / 鼠标手势进行中时，触摸（书写时的手掌）按下不中止、
+            // 不接管当前手势。pen / mouse 的第二指针维持原语义（切笔尖 / 橡皮
+            // 是单手用户的正常路径）。
+            if (
+                shouldRejectConcurrentPointer(
+                    e.nativeEvent,
+                    Boolean(activePointerGestureEndRef.current),
+                )
+            ) {
+                return;
+            }
             if (activePointerGestureEndRef.current) {
                 activePointerGestureEndRef.current();
             }
 
-            if (e.button === 0 && paramEditorSeekPlayheadEnabled !== false) {
+            // 数位笔不触发「按下即 seek」：笔尖接触（button 0）与鼠标左键同值，
+            // 但画参数线的每一笔起笔都会被误当成播放头定位 —— pen 的编辑意图
+            // 全部走下方各手势分支，seek 保留给鼠标。
+            const stylusDown = isStylusLike(e.nativeEvent);
+            if (e.button === 0 && !stylusDown && paramEditorSeekPlayheadEnabled !== false) {
                 const sec = pointerSec(e.clientX);
                 dispatch(setplayheadSec(sec));
                 void dispatch(seekPlayhead(sec));
@@ -1962,6 +1995,7 @@ export function usePianoRollInteractions(args: {
 
             if (
                 e.button === 0 &&
+                !stylusDown &&
                 paramValuePopupEnabled &&
                 (toolMode === "select" || toolMode === "draw" || toolMode === "line")
             ) {
@@ -2332,6 +2366,9 @@ export function usePianoRollInteractions(args: {
                             onUp();
                             return;
                         }
+                        // 只接受本指针的 move：第二指针（掌压触摸等）的
+                        // buttons 恒为 1，不校验 pointerId 会驱动本次手势。
+                        if (ev.pointerId !== e.pointerId) return;
                         // 3px 死区：区分「点击切换」与「拖动追加」，避免手抖误删段
                         if (!moved && Math.abs(ev.clientX - startClientX) > 3) moved = true;
                         if (!moved) return;
@@ -2632,6 +2669,8 @@ export function usePianoRollInteractions(args: {
                                 onUp();
                                 return;
                             }
+                            // 只接受本指针的 move（掌压拒识的 move 侧防线）。
+                            if (ev.pointerId !== pid) return;
                             const adjusted = getFineAdjustedPointerPosition(finePointerState, ev);
                             queuedCursorBeat = pointerBeat(adjusted.clientX);
                             if (previewRafId == null) {
@@ -2905,6 +2944,8 @@ export function usePianoRollInteractions(args: {
                                             onUp(ev);
                                             return;
                                         }
+                                        // 只接受本指针的 move（掌压拒识的 move 侧防线）。
+                                        if (ev.pointerId !== pid) return;
                                         const adjusted = getFineAdjustedPointerPosition(
                                             finePointerState,
                                             ev,
@@ -3656,6 +3697,8 @@ export function usePianoRollInteractions(args: {
                             onUp();
                             return;
                         }
+                        // 只接受本指针的 move（掌压拒识的 move 侧防线）。
+                        if (ev.pointerId !== pid) return;
                         // 选区在拖拽途中被外部清除（如 BackSpace / 取消选择）时
                         // 不再续建，与改造前的守卫语义一致。
                         if (selectionRef.current == null) return;
@@ -3685,8 +3728,13 @@ export function usePianoRollInteractions(args: {
                 }
             }
 
-            const mode: StrokeMode = e.button === 2 ? "restore" : "draw";
-            if (e.button !== 0 && e.button !== 2) return;
+            // 笔尖（button 0）= 画线；鼠标右键 / pen 笔杆键（button 2）与
+            // pen 橡皮端（button 5）= 恢复（擦除回原始曲线）。橡皮端此前
+            // 不在白名单里，落笔会被静默丢弃。
+            const penEraserDown = isEraserButton(e.button, e.nativeEvent.pointerType);
+            const secondaryDown = e.button === 2 || penEraserDown;
+            const mode: StrokeMode = secondaryDown ? "restore" : "draw";
+            if (e.button !== 0 && !secondaryDown) return;
             setCanvasCursor(getDefaultCanvasCursor());
             if (
                 editParam === "pitch" ||
@@ -3741,7 +3789,9 @@ export function usePianoRollInteractions(args: {
                 // Line tool: draw a straight line from start to current pointer
                 const startFrame = frame;
                 const startValue = value;
-                const requiredButtonMask = mode === "restore" ? 2 : 1;
+                // 橡皮端（button 5）在 buttons 位掩码里是位 32，不是右键的位 2。
+                const requiredButtonMask =
+                    mode === "restore" ? (penEraserDown ? PEN_ERASER_BUTTONS_MASK : 2) : 1;
                 let currentDragDir: "free" | "x-only" =
                     dragDirection === "x-only" ? "x-only" : "free";
                 const canCycleDragDirection = e.button === 0;
@@ -3765,11 +3815,20 @@ export function usePianoRollInteractions(args: {
                     e.currentTarget as HTMLCanvasElement,
                 );
 
-                const onMove = (ev: globalThis.PointerEvent) => {
-                    if ((ev.buttons & requiredButtonMask) !== requiredButtonMask) {
-                        onUp();
-                        return;
-                    }
+                // 直线 / 颤音是「起点 → 当前点」的端点式预览：每个事件都重算
+                // 全线 dense，O(线长)。pen 高采样率下逐事件执行 = 同帧多次
+                // 全线重建；与自由绘制分支同一 rAF 合帧模式（事件入队，一帧
+                // 一消费，getCoalescedEvents 展开同帧采样）。端点式预览只需
+                // 队列里**最后一个**采样点即可得到正确结果。
+                let lineRafId: number | null = null;
+                let pendingLineEvent: globalThis.PointerEvent | null = null;
+                const processLineEvent = (ev: {
+                    clientX: number;
+                    clientY: number;
+                    ctrlKey: boolean;
+                    shiftKey: boolean;
+                    altKey: boolean;
+                }) => {
                     const st = strokeRef.current;
                     if (!st || st.pointerId !== e.pointerId) return;
                     const adjusted = getFineAdjustedPointerPosition(finePointerState, ev);
@@ -3838,11 +3897,50 @@ export function usePianoRollInteractions(args: {
                     }
                     invalidate();
                 };
+                const flushPendingLine = () => {
+                    lineRafId = null;
+                    const ev = pendingLineEvent;
+                    pendingLineEvent = null;
+                    if (ev != null) processLineEvent(ev);
+                };
+
+                const onMove = (ev: globalThis.PointerEvent) => {
+                    if ((ev.buttons & requiredButtonMask) !== requiredButtonMask) {
+                        onUp();
+                        return;
+                    }
+                    const st = strokeRef.current;
+                    if (!st || st.pointerId !== e.pointerId) return;
+                    // 端点式预览：只保留最新采样（含同帧 coalesced 末点）。
+                    const coalesced = coalescedEventsOf(ev);
+                    pendingLineEvent = coalesced[coalesced.length - 1] ?? ev;
+                    if (lineRafId == null) {
+                        lineRafId = requestAnimationFrame(flushPendingLine);
+                    }
+                };
+
+                const cancelPendingLineFrame = () => {
+                    if (lineRafId != null) {
+                        cancelAnimationFrame(lineRafId);
+                        lineRafId = null;
+                    }
+                    pendingLineEvent = null;
+                };
 
                 const onUp = () => {
                     const st = strokeRef.current;
                     const isOwnStroke = Boolean(st && st.pointerId === e.pointerId);
                     const vib = isOwnStroke ? vibratoStateRef.current : null;
+                    // 提交前先同步消费挂起的端点采样：processLineEvent 依赖
+                    // strokeRef 在位（按 pointerId 自守卫），先 flush 再清引用，
+                    // 保证 st.points 收到最后一个采样对应的端点。
+                    if (lineRafId != null) {
+                        cancelAnimationFrame(lineRafId);
+                        lineRafId = null;
+                    }
+                    const pending = pendingLineEvent;
+                    pendingLineEvent = null;
+                    if (pending != null) processLineEvent(pending);
                     if (isOwnStroke) {
                         strokeRef.current = null;
                     }
@@ -3889,6 +3987,33 @@ export function usePianoRollInteractions(args: {
                     setVibratoDragCaptureActive(false);
                 };
 
+                /**
+                 * pointercancel 收尾：**回滚**而不是提交。OS 主动取消（触摸
+                 * 接管 / 掌拒 / 笔离开感应区）意味着手势不可信，半截笔画
+                 * 不应写进后端 —— 后端从未收到数据，丢弃 live 预览层即可。
+                 */
+                const onCancel = () => {
+                    const st = strokeRef.current;
+                    const isOwnStroke = Boolean(st && st.pointerId === e.pointerId);
+                    if (isOwnStroke) {
+                        strokeRef.current = null;
+                    }
+                    cancelPendingLineFrame();
+                    vibratoStateRef.current = null;
+                    setVibratoDragCaptureActive(false);
+                    disposeDragDirKey();
+                    disposeFineAdjustedPointerState(finePointerState);
+                    window.removeEventListener("pointermove", onMove);
+                    window.removeEventListener("pointerup", onUp);
+                    window.removeEventListener("pointercancel", onCancel);
+                    window.removeEventListener("contextmenu", onContextMenuDuringDraw, true);
+                    window.removeEventListener("mousedown", onMouseDownDuringDraw, true);
+                    clearActivePointerGestureEnd(onUp);
+                    liveEditOverrideRef.current = null;
+                    if (liveEditActiveRef) liveEditActiveRef.current = false;
+                    invalidate();
+                };
+
                 const onContextMenuDuringDraw = (ev: Event) => {
                     ev.preventDefault();
                     ev.stopImmediatePropagation();
@@ -3914,13 +4039,15 @@ export function usePianoRollInteractions(args: {
 
                 window.addEventListener("pointermove", onMove);
                 window.addEventListener("pointerup", onUp);
-                window.addEventListener("pointercancel", onUp);
+                window.addEventListener("pointercancel", onCancel);
                 window.addEventListener("contextmenu", onContextMenuDuringDraw, true);
                 window.addEventListener("mousedown", onMouseDownDuringDraw, true);
                 setActivePointerGestureEnd(onUp);
             } else {
                 // Draw tool: freehand drawing with interpolation between points
-                const requiredButtonMask = mode === "restore" ? 2 : 1;
+                // 橡皮端（button 5）在 buttons 位掩码里是位 32，不是右键的位 2。
+                const requiredButtonMask =
+                    mode === "restore" ? (penEraserDown ? PEN_ERASER_BUTTONS_MASK : 2) : 1;
                 let currentDragDir: "free" | "x-only" =
                     dragDirection === "x-only" ? "x-only" : "free";
                 const canCycleDragDirection = e.button === 0;
@@ -3928,11 +4055,18 @@ export function usePianoRollInteractions(args: {
                     e.nativeEvent,
                     e.currentTarget as HTMLCanvasElement,
                 );
-                const onMove = (ev: globalThis.PointerEvent) => {
-                    if ((ev.buttons & requiredButtonMask) !== requiredButtonMask) {
-                        onUp();
-                        return;
-                    }
+                // 逐事件处理的主体从 onMove 拆出：onMove 只把事件压进待处理
+                // 队列并请求 rAF，真正的 dense 构建 + live 写入 + 重绘合帧到
+                // 每渲染帧一次。pen 采样率（133–266Hz+）高于渲染帧率，逐事件
+                // 执行 O(n) dense 分配会让同一帧内多次重算；与选区拖拽的
+                // schedulePreview 同一模式。
+                const processStrokeEvent = (ev: {
+                    clientX: number;
+                    clientY: number;
+                    ctrlKey: boolean;
+                    shiftKey: boolean;
+                    altKey: boolean;
+                }) => {
                     const st = strokeRef.current;
                     if (!st || st.pointerId !== e.pointerId) return;
                     const adjusted = getFineAdjustedPointerPosition(finePointerState, ev);
@@ -3988,9 +4122,63 @@ export function usePianoRollInteractions(args: {
                     invalidate();
                 };
 
+                // 待处理事件队列 + rAF 合帧状态。flush 后队列即清空；onUp/
+                // onCancel 里取消挂起帧（挂起的帧只能看到"队列已消费"的状态，
+                // 不取消也不会重复处理，但显式取消避免收尾后还跑一次回调）。
+                let pendingMoveEvents: globalThis.PointerEvent[] = [];
+                let strokeRafId: number | null = null;
+                const flushPendingMoves = () => {
+                    strokeRafId = null;
+                    const queue = pendingMoveEvents;
+                    pendingMoveEvents = [];
+                    for (const ev of queue) {
+                        // 同帧多点：getCoalescedEvents 展开高速运笔时一帧内
+                        // 积累的全部采样，轨迹逐点保留（不支持时回退单事件）。
+                        for (const sample of coalescedEventsOf(ev)) {
+                            processStrokeEvent(sample);
+                        }
+                    }
+                };
+
+                const onMove = (ev: globalThis.PointerEvent) => {
+                    if ((ev.buttons & requiredButtonMask) !== requiredButtonMask) {
+                        onUp();
+                        return;
+                    }
+                    const st = strokeRef.current;
+                    if (!st || st.pointerId !== e.pointerId) return;
+                    pendingMoveEvents.push(ev);
+                    if (strokeRafId == null) {
+                        strokeRafId = requestAnimationFrame(flushPendingMoves);
+                    }
+                };
+
+                const cancelPendingStrokeFrame = () => {
+                    if (strokeRafId != null) {
+                        cancelAnimationFrame(strokeRafId);
+                        strokeRafId = null;
+                    }
+                    pendingMoveEvents = [];
+                };
+
                 const onUp = () => {
                     const st = strokeRef.current;
                     const isOwnStroke = Boolean(st && st.pointerId === e.pointerId);
+                    // 提交前先同步消费挂起的采样队列：processStrokeEvent 依赖
+                    // strokeRef 仍在位（其内部按 pointerId 自守卫），必须先
+                    // flush 再清空引用，否则最后一帧内的轨迹点会丢失
+                    // （快速运笔时笔尾缺一段 ≤16ms 的点）。
+                    if (strokeRafId != null) {
+                        cancelAnimationFrame(strokeRafId);
+                        strokeRafId = null;
+                    }
+                    const queued = pendingMoveEvents;
+                    pendingMoveEvents = [];
+                    for (const ev of queued) {
+                        for (const sample of coalescedEventsOf(ev)) {
+                            processStrokeEvent(sample);
+                        }
+                    }
                     if (isOwnStroke) {
                         strokeRef.current = null;
                         vibratoStateRef.current = null;
@@ -4000,7 +4188,7 @@ export function usePianoRollInteractions(args: {
                     disposeFineAdjustedPointerState(finePointerState);
                     window.removeEventListener("pointermove", onMove);
                     window.removeEventListener("pointerup", onUp);
-                    window.removeEventListener("pointercancel", onUp);
+                    window.removeEventListener("pointercancel", onCancel);
                     window.removeEventListener("contextmenu", onContextMenuDuringDraw, true);
                     window.removeEventListener("mousedown", onMouseDownDuringDraw, true);
                     clearActivePointerGestureEnd(onUp);
@@ -4017,6 +4205,32 @@ export function usePianoRollInteractions(args: {
                         await commitStroke(st.points, st.mode);
                         await applyPostStrokeSmoothing(st.points, st.mode);
                     })();
+                };
+
+                /**
+                 * pointercancel 收尾：**回滚**而不是提交（与直线/颤音分支
+                 * 同一语义）。OS 主动取消意味着手势不可信，半截笔画不写后端。
+                 */
+                const onCancel = () => {
+                    const st = strokeRef.current;
+                    const isOwnStroke = Boolean(st && st.pointerId === e.pointerId);
+                    if (isOwnStroke) {
+                        strokeRef.current = null;
+                    }
+                    cancelPendingStrokeFrame();
+                    vibratoStateRef.current = null;
+                    setVibratoDragCaptureActive(false);
+                    disposeDragDirKey();
+                    disposeFineAdjustedPointerState(finePointerState);
+                    window.removeEventListener("pointermove", onMove);
+                    window.removeEventListener("pointerup", onUp);
+                    window.removeEventListener("pointercancel", onCancel);
+                    window.removeEventListener("contextmenu", onContextMenuDuringDraw, true);
+                    window.removeEventListener("mousedown", onMouseDownDuringDraw, true);
+                    clearActivePointerGestureEnd(onUp);
+                    liveEditOverrideRef.current = null;
+                    if (liveEditActiveRef) liveEditActiveRef.current = false;
+                    invalidate();
                 };
 
                 const onContextMenuDuringDraw = (ev: Event) => {
@@ -4044,7 +4258,7 @@ export function usePianoRollInteractions(args: {
 
                 window.addEventListener("pointermove", onMove);
                 window.addEventListener("pointerup", onUp);
-                window.addEventListener("pointercancel", onUp);
+                window.addEventListener("pointercancel", onCancel);
                 window.addEventListener("contextmenu", onContextMenuDuringDraw, true);
                 window.addEventListener("mousedown", onMouseDownDuringDraw, true);
                 setActivePointerGestureEnd(onUp);

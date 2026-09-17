@@ -206,6 +206,7 @@ import { store } from "../../app/store";
 import { applyBulkFadeValue, applyBulkGainDeltaDb } from "./timeline/hooks/bulkClipEdit";
 import { advanceFineAxisDrag, type FineAxisDragState } from "./timeline/fineAxisDrag";
 import { CLIP_GAIN_DRAG_DB_PER_PX } from "./timeline/constants";
+import { isLegacyMouseEventFromStylus } from "../../utils/penInput";
 import {
     buildStretchGroupState,
     computeClipStretch,
@@ -5308,6 +5309,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             onTempoMapChange={handleTempoMapChange}
             onTempoMapCommit={handleTempoMapCommit}
             onMouseDown={(e) => {
+                // 数位笔 / 触摸不触发标尺 seek：pen 的兼容 mouse 事件（无
+                // pointerType）会让悬停画线起笔误定位播放头。
+                if (isLegacyMouseEventFromStylus()) return;
                 if (e.button !== 0) return;
                 // 水平滚动位置取自内核视口。取值的「实时性」是硬要求——拖拽期间滚动
                 // 位置可能被自动滚动改变，因此每次换算都重新读，不缓存。

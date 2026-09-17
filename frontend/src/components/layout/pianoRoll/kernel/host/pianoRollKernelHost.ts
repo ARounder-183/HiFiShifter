@@ -46,6 +46,7 @@
  */
 
 import { readDevicePixelRatio } from "../../../../../utils/devicePixelLine";
+import { isStylusLike } from "../../../../../utils/penInput";
 import { invokeGridRedrawHandler } from "../../../timeline/gridRedrawBridge";
 import {
     scrollDeltaFromThumbDrag,
@@ -1527,6 +1528,8 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
      */
     function makeThumbPointerDown(axis: "x" | "y") {
         return (event: PointerEvent) => {
+            // 数位笔 / 触摸不拖 thumb：8px 窄命中，画线起止误触即劫持滚动。
+            if (isStylusLike(event)) return;
             event.preventDefault();
             // 阻止冒泡：轨道处理器据此判定「到达轨道的按下必然不在 thumb 上」，
             // 无需二次命中判定（与时间轴内核同一约定）。
@@ -1611,6 +1614,8 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
      */
     function makeTrackPointerDown(axis: "x" | "y") {
         return (event: PointerEvent) => {
+            // 数位笔 / 触摸不触发轨道翻页（与 thumb 同一防误触约定）。
+            if (isStylusLike(event)) return;
             event.preventDefault();
             event.stopPropagation();
             const track = event.currentTarget as HTMLElement;

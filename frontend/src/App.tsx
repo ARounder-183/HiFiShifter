@@ -9,6 +9,7 @@ import { webApi } from "./services/webviewApi";
 import { settingsApi } from "./services/api/settings";
 import { fileBrowserApi } from "./services/api/fileBrowser";
 import { IS_LINUX } from "./utils/platform";
+import { shouldSuppressHoverSideEffects } from "./utils/penInput";
 import { clipboardErrorKey } from "./utils/clipboardError";
 import {
     closeVocalShifterSkippedFilesDialog,
@@ -730,6 +731,9 @@ function AppInner() {
         }
 
         function startDrag(e: React.PointerEvent<HTMLDivElement>) {
+            // 数位笔 / 触摸不触发分割条：8px 窄条 + 按下即生效，画线起止贴近
+            // 面板边界时极易误扫；布局调整保留给鼠标。
+            if (shouldSuppressHoverSideEffects(e.nativeEvent)) return;
             if (e.button !== 0) return;
             dragRef.current = { pointerId: e.pointerId };
             setIsDragging(true);
@@ -2730,7 +2734,8 @@ function AppInner() {
                     // 左键拖拽参数线期间按下同一键时，参数编辑器内的本地监听会
                     // 同步切换本次拖拽的方向 —— 触控板用户的「右键切换」替代。
                     const ss = store.getState().session;
-                    const currentDrawTool = ss.drawToolMode === "line" ? "vibrato" : ss.drawToolMode;
+                    const currentDrawTool =
+                        ss.drawToolMode === "line" ? "vibrato" : ss.drawToolMode;
                     const tool =
                         ss.toolMode === "select"
                             ? ("select" as const)

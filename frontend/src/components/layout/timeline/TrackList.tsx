@@ -20,6 +20,7 @@ import { formatCursorTime } from "./timeFormat";
 import type { TimeFormatContext } from "./timeFormat";
 import { MAX_ROW_HEIGHT, MIN_ROW_HEIGHT, TRACK_ADD_ROW_HEIGHT } from "./constants";
 import { advanceFineAxisDrag, type FineAxisDragState } from "./fineAxisDrag";
+import { shouldSuppressHoverSideEffects } from "../../../utils/penInput";
 import { AppTooltipBubble } from "../../AppTooltip";
 import { TempoMapCornerButton } from "./TempoMapCornerButton";
 import { formatGainDbValue } from "./math";
@@ -1094,6 +1095,8 @@ const TrackListInner: React.FC<TrackListProps> = ({
         trackId: string,
         volume: number,
     ) {
+        // 数位笔 / 触摸不拖增益旋钮：零阈值按下即生效，滑动画线时极易误触。
+        if (shouldSuppressHoverSideEffects(e.nativeEvent)) return;
         e.preventDefault();
         e.stopPropagation();
         clearPendingVolumeCommit(trackId);
@@ -1475,6 +1478,11 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                         });
                                     }}
                                     onPointerDown={(e) => {
+                                        // 数位笔 / 触摸不触发轨道拖动排序 / 嵌套：
+                                        // 行高窄 + 3px 阈值，画线式滑动即重排轨道。
+                                        if (shouldSuppressHoverSideEffects(e.nativeEvent)) {
+                                            return;
+                                        }
                                         if (e.button !== 0) return;
 
                                         // If the pointer down starts on an interactive control, do not start a drag.

@@ -506,8 +506,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
      */
     const stableInteractions = React.useMemo<TimelineKernelInteractions>(
         () => ({
-            onSeek: (sec, phase, trackId) =>
-                interactionsRef.current?.onSeek?.(sec, phase, trackId),
+            onSeek: (sec, phase, trackId) => interactionsRef.current?.onSeek?.(sec, phase, trackId),
             onSeekTo: (sec) => interactionsRef.current?.onSeekTo?.(sec),
             onSelectClip: (clipId, additive, rangeSelect, clientX) =>
                 interactionsRef.current?.onSelectClip?.(clipId, additive, rangeSelect, clientX),
@@ -783,6 +782,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                它是轨道区的视口元素（只是滚动由内核自绘而非浏览器维护）。 */
             data-timeline-scroller
             className="relative flex-1 overflow-hidden bg-qt-graph-bg outline-none"
+            style={{ touchAction: "none" }}
             onDragOver={onDragOver}
             onDrop={onDrop}
             onDragLeave={onDragLeave}

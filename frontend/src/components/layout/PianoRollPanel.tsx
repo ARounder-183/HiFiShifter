@@ -6994,7 +6994,13 @@ export const PianoRollPanel: React.FC = () => {
                                         ref={canvasRef}
                                         data-piano-roll-canvas
                                         className="absolute inset-0"
-                                        style={{ cursor: canvasCursor }}
+                                        style={{
+                                            cursor: canvasCursor,
+                                            // 阻止 WebView 把笔/触摸手势截走做原生
+                                            // 滚动（会产生 pointercancel 打断笔画）。
+                                            // scroller 自身不加：触摸屏单指滚动依赖原生。
+                                            touchAction: "none",
+                                        }}
                                         onPointerMove={interactions.onCanvasPointerMove}
                                         onPointerLeave={interactions.onCanvasPointerLeave}
                                         onPointerDown={interactions.onCanvasPointerDown}

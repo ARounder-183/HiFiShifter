@@ -12,6 +12,7 @@ import { useI18n } from "../../../../i18n/I18nProvider";
 import { VowelChart } from "./VowelChart";
 import { useClipFormantEditor } from "./useClipFormantEditor";
 import { registerDragAbort } from "../gestureFocusGuard";
+import { shouldSuppressHoverSideEffects } from "../../../../utils/penInput";
 import {
     CLIP_FORMANT_ACTIVE_ATTR,
     shouldSuppressFormantToolSpaceDefault,
@@ -244,6 +245,8 @@ export const ClipFormantToolWindow: React.FC<{
                 className="cursor-grab border-b border-qt-border bg-qt-panel px-3 py-2 active:cursor-grabbing"
                 onPointerDown={(event) => {
                     if ((event.target as HTMLElement | null)?.closest("button")) return;
+                    // 数位笔 / 触摸不拖浮窗（零阈值按下即生效）。
+                    if (shouldSuppressHoverSideEffects(event.nativeEvent)) return;
                     event.preventDefault();
                     event.stopPropagation();
                     draggingRef.current = true;
