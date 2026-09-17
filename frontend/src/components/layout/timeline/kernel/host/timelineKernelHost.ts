@@ -51,6 +51,7 @@ import {
 import { resolveClipSelectionModifiers } from "../../../../../features/keybindings/clipSelectionModifiers";
 import type { Keybinding } from "../../../../../features/keybindings/types";
 import { isPrimaryModifierDown } from "../../../../../utils/platform";
+import { armRightDragContextMenuGuard } from "../../../../../utils/rightDragContextMenuGuard";
 import { getTimelineWheelAction, type ScrollbarZone } from "../../../wheelGesture";
 import { buildTimelineTicks, type TimelineTick } from "../../runtime/buildTimelineTicks";
 import { createTimelineAxis, type TimelineAxis } from "../../../renderKernel/timelineAxis";
@@ -880,11 +881,15 @@ export interface TimelineKernelInteractions {
     }) => void;
     /**
      * 按住 `modifier.clipRangeToParamSelection`（默认 Alt）的右键框选结束：
-     * 被框选的 clip 范围**并入**参数编辑器选区（不是 clip 多选）。
+     * 被框选的 clip 范围**并入**参数编辑器选区。
+     *
+     * 这是**额外**效果，不替代 clip 多选：同一次手势头还会照常派发
+     * `onBoxSelectPreview` / `onBoxSelectCommit`，因此框内 clip 同时也被纳入
+     * clip 选择（与未按住该修饰键的普通框选完全一致）。
      *
      * 与单个块的右键单击（`onDoubleClickClip` 的 toggle 语义）同一修饰键：
-     * 单击 = 该块并入 / 挖掉，拖框 = 框内全部并入。`cancelled`（Esc / 失焦）时
-     * 调用方不写任何选区。
+     * 单击 = 该块并入 / 挖掉（不改 clip 选择），拖框 = 框内全部并入 + 纳入
+     * clip 多选。`cancelled`（Esc / 失焦）时调用方不写任何选区。
      */
     readonly onBoxSelectToParamSelection?: (args: {
         readonly clipIds: readonly string[];
@@ -3156,9 +3161,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             const rect = container.getBoundingClientRect();
             const view = scroll.get();
             // 按住 `modifier.clipRangeToParamSelection`（默认 Alt）= 本次右键
-            // 手势改为「写入参数编辑器选区」（见手势类型里 `toParamSelection`
-            // 的说明）。按下时冻结；拖拽中的框**不显示**（它不改变 clip 选择，
-            // 显示多选框会误导）。
+            // 手势**额外**把被框选的 clip 范围并入参数编辑器选区（见手势类型里
+            // `toParamSelection` 的说明）。按下时冻结。框选在多选框反馈与 clip
+            // 多选上仍与普通框选完全一致，两条效果互相独立、同时成立。
             const paramRangeKb = data().keybindings.clipRangeToParamSelection;
             const toParamSelection = paramRangeKb != null && isModifierActive(paramRangeKb, event);
             gesture = {
@@ -3236,6 +3241,10 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             // 拖拽已成立：抑制随后的 contextmenu（否则松手会弹右键菜单）。
             // 参数选区模式同样抑制——松手语义是"写入参数选区"，不是弹菜单。
             suppressNextContextMenu = true;
+            // 同一个语义也要交给**全局**守卫：下面的 `suppressNextContextMenu`
+            // 只挂在轨道区容器上，若松手发生在兄弟表面（标尺 / 轨道头），
+            // 容器收不到那次 contextmenu，那时由全局守卫兜底。
+            armRightDragContextMenuGuard();
         }
         const rect = container.getBoundingClientRect();
         const view = scroll.get();
@@ -3263,11 +3272,11 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             if (same) return;
         }
         gesture.lastClipIds = ids;
-        // 参数选区模式：框选预览仍照常（用户看到同一套框选反馈），但**不**派发
-        // clip 多选预览——本次手势不改变 clip 选择（见 finalize 处的说明）。
-        if (!gesture.toParamSelection) {
-            interactions?.onBoxSelectPreview?.({ clipIds: ids, additive: gesture.additive });
-        }
+        // 框选预览一律照常派发 —— 包括按住 `modifier.clipRangeToParamSelection`
+        // 的右键框选：它除了把框内 clip 的范围并入参数选区，**同时也**把框内
+        // clip 纳入 clip 多选（与未按住该修饰键的普通框选完全一致，见 finalize
+        // 处的说明）。两条效果互相独立、同时成立。
+        interactions?.onBoxSelectPreview?.({ clipIds: ids, additive: gesture.additive });
     }
 
     /**
@@ -4463,15 +4472,25 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             const boxActive = gesture.active;
             if (gesture.toParamSelection) {
                 // ── `modifier.clipRangeToParamSelection`（默认 Alt）模式 ──
-                // 松开 = 被框选的 clip 范围**并入**参数编辑器选区（在既有参数选区
-                // 之上叠加，与"普通框选改变 clip 多选"正交：用户要的是两者同时成立，
-                // 因此 clip 选择在本次手势里原样保留，不提交也不回滚）。
+                // 拖动松手 = 被框选的 clip 范围**并入**参数编辑器选区，**同时**
+                // 把这些 clip 纳入 clip 多选 —— 与未按住该修饰键的普通框选在
+                // clip 选择上的表现完全一致（用户要求：按住修饰键只是**额外**
+                // 并入参数选区，不改变 clip 选择的行为）。
                 // 未拖动（右键单击）= 单块手势：并入 / 挖掉该块范围（取代旧的双击，
-                // 见 `onDoubleClickClip` 与 `clipDoubleClickMode` 的说明）。取消 /
-                // 未拖动不写任何选区。
+                // 见 `onDoubleClickClip` 与 `clipDoubleClickMode` 的说明）；
+                // 单击是"点击语义"，不改变 clip 选择，因此只在拖动时提交。
                 if (boxActive) {
                     interactions?.onBoxSelectToParamSelection?.({
                         clipIds: gesture.lastClipIds,
+                        cancelled,
+                    });
+                    // clip 选择的收尾必须与普通框选走同一入口：它负责释放
+                    // `kernelBoxSelectOriginRef` 基线（预览写入时的快照），并在
+                    // 取消时回滚、框内为空且非叠加时清空。漏掉它会让基线泄漏到
+                    // 下一次框选。
+                    interactions?.onBoxSelectCommit?.({
+                        clipIds: gesture.lastClipIds,
+                        additive: gesture.additive,
                         cancelled,
                     });
                 }

@@ -70,6 +70,7 @@ import {
     shouldRejectConcurrentPointer,
 } from "../../../utils/penInput";
 import { getParamEditorWheelAction, getVibratoDragWheelTarget } from "./wheelGesture";
+import { armRightDragContextMenuGuard } from "../../../utils/rightDragContextMenuGuard";
 import {
     createSelectionAmplifier,
     rightDragUpScale,
@@ -2953,6 +2954,12 @@ export function usePianoRollInteractions(args: {
                                         const dy = startClientY - adjusted.clientY;
                                         if (Math.abs(dy) >= 2) {
                                             didDrag = true;
+                                            // 本次手势在自己的阈值处确认构成拖拽：
+                                            // 显式武装收尾守卫。松手若发生在**另一个**
+                                            // 表面（标尺 / 轨道头）上，那个表面的菜单
+                                            // 会被吞掉（见守卫模块头注释）——本手势
+                                            // 自己的 window 级抑制只覆盖画布路径。
+                                            armRightDragContextMenuGuard();
                                         }
                                         lastDy = dy;
 

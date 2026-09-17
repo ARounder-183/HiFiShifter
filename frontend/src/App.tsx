@@ -51,6 +51,10 @@ import {
     persistUiSettings,
 } from "./features/session/sessionSlice";
 import { resolveTransportShortcutCommand } from "./features/session/transportShortcuts";
+import {
+    installRightDragContextMenuGuard,
+    disposeRightDragContextMenuGuard,
+} from "./utils/rightDragContextMenuGuard";
 import { useI18n } from "./i18n/I18nProvider";
 import { useClipPitchDataListener } from "./hooks/useClipPitchDataListener";
 import { useHistoryStateListener } from "./hooks/useHistoryStateListener";
@@ -982,6 +986,9 @@ function AppInner() {
             window.addEventListener("pointercancel", cancelLinuxDeferredContextMenu, true);
         }
         document.addEventListener("contextmenu", preventContextMenu, true);
+        // 右键拖拽的收尾守卫：拖拽后在**任何**表面松开右键都不弹该表面的菜单
+        // （菜单由松开位置的元素决定，而发起手势的表面范围有限——见模块头注释）。
+        installRightDragContextMenuGuard();
         document.addEventListener("selectstart", preventNativeTextSelection, true);
         document.addEventListener("pointerdown", clearNativeTextSelection, true);
         // WebKitGTK may create the selection during the drag rather than on
@@ -1005,6 +1012,7 @@ function AppInner() {
                 window.removeEventListener("pointercancel", cancelLinuxDeferredContextMenu, true);
             }
             document.removeEventListener("contextmenu", preventContextMenu, true);
+            disposeRightDragContextMenuGuard();
             document.removeEventListener("selectstart", preventNativeTextSelection, true);
             document.removeEventListener("pointerdown", clearNativeTextSelection, true);
             document.removeEventListener("mouseup", clearNativeTextSelection, true);

@@ -3765,6 +3765,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
      * 内核右键框选（按住 `modifier.clipRangeToParamSelection`）→ 被框选的 clip
      * 范围**并入**参数编辑器选区。
      *
+     * 这是**额外**效果，不替代 clip 多选：同一次手势的框选预览/收尾走的是普通
+     * 框选那条路径（`handleKernelBoxSelectPreview` / `handleKernelBoxSelectCommit`），
+     * 框内 clip 因此也照常纳入 clip 选择 —— 与未按住该修饰键的普通框选一致。
+     *
      * 与单个块的右键单击（`handleKernelDoubleClickClip` 的 `toggle`）同一修饰键
      * 家族：单击 = 该块并入 / 挖掉；拖框 = 框内**全部**并入（叠加在既有参数选区
      * 上，重叠/相接自动合并）。复用 `addClipsToParamSelection` 编辑操作——
