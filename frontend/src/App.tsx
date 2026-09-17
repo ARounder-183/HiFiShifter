@@ -92,6 +92,7 @@ import {
     type ExternalFileActionDetail,
     type ExternalFileActionKind,
 } from "./features/session/projectOpenEvents";
+import { detectExternalPathAction } from "./components/layout/timeline/dnd";
 import type { MessageKey } from "./i18n/messages";
 import type { CloseRequestedEvent } from "@tauri-apps/api/window";
 import { useAutoBackupScheduler } from "./hooks/useAutoBackupScheduler";
@@ -404,21 +405,24 @@ function mergeLatestSourceFileChanges(
     return merged;
 }
 
+/**
+ * 判定路径对应的外部文件动作种类。
+ *
+ * 【为什么不再内联一份正则】这里原先重写了与 `timeline/dnd` 完全相同的四组正则，
+ * 而且**漏掉 MIDI**——于是从启动参数 / 外部文件事件进来的 `.mid` 文件会被判为
+ * `null` 而被静默丢弃，与拖放路径的行为不一致（同一文件两种命运）。
+ * 现在直接复用 `detectExternalPathAction`：准入判据只剩一份，不可能再分叉。
+ *
+ * @param path 文件路径。
+ * @returns 动作种类；非受支持类型时为 null。
+ */
 function detectExternalActionKindFromPath(path: string): ExternalFileActionKind | null {
-    const normalized = String(path ?? "").trim();
-    if (!normalized) return null;
-    // 备份工程文件（.hshp-bak/.hsp-bak/.rpp-bak）与正本同格式，一并识别。
-    if (/\.(hshp|hsp|hshp-bak|hsp-bak|json)$/i.test(normalized)) return "openProject";
-    if (/\.(rpp|rpp-bak)$/i.test(normalized)) return "importReaper";
-    if (/\.(vshp|vsp)$/i.test(normalized)) return "importVocalShifter";
-    if (
-        /\.(wav|flac|mp3|ogg|oga|opus|aac|m4a|aif|aiff|wma|ac3|eac3|ape|wv|mp2|mpa|dts|amr|mp4|m4v|mov|mkv|webm|avi|flv|wmv|ts|mts|m2ts|vob|mpg|mpeg|3gp|3g2|ogv|rm|rmvb)$/i.test(
-            normalized,
-        )
-    ) {
-        return "importAudio";
-    }
-    return null;
+    const kind = detectExternalPathAction(path);
+    // `importMidi` 不属于本事件通道的动作集合（`ExternalFileActionKind` 没有它）：
+    // MIDI 走"导入 MIDI clip"的独立流程，而不是"打开/导入工程"。这里显式排除，
+    // 而不是用类型断言硬转——否则 MIDI 路径会被当成工程打开。
+    if (kind === null || kind === "importMidi") return null;
+    return kind;
 }
 
 function AppInner() {

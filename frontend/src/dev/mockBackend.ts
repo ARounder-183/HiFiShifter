@@ -36,6 +36,9 @@ const MOCK_PROJECT_SEC = 120;
 /** 假工程 BPM。 */
 const MOCK_BPM = 120;
 
+/** 合成参数曲线的中心值（pitch 为 MIDI）。 */
+const MOCK_PITCH_CENTER = 72;
+
 /** 轨道配色（与生产默认调色板同量级，便于视觉对比）。 */
 const TRACK_COLORS = ["#4b8fd1", "#5fb27a", "#d19a4b", "#c25f8f", "#7a6fd1", "#4bb0b0"];
 
@@ -458,6 +461,85 @@ function buildHandlers(): Record<string, (...args: unknown[]) => unknown> {
             return out;
         },
         preload_waveform_mipmap: () => ({ ok: true }),
+        /**
+         * 处理器参数清单（dev-only）。
+         *
+         * 【为什么必须有它】`getVisibleSecondaryParamIds` 依赖后端返回的处理器参数
+         * 才能列出副参数曲线。此前 mock 未实现本方法，参数编辑器里**只有主参数一条
+         * 曲线**——而"未选中的其它参数线被染色"这类缺陷的前提就是**有多条曲线**。
+         */
+        get_processor_params: () => [
+            {
+                id: "tension",
+                display_name: "Tension",
+                group: "Voice",
+                kind: {
+                    type: "automation_curve",
+                    unit: "",
+                    default_value: 0.5,
+                    min_value: 0,
+                    max_value: 1,
+                },
+            },
+            {
+                id: "breathiness",
+                display_name: "Breathiness",
+                group: "Voice",
+                kind: {
+                    type: "automation_curve",
+                    unit: "",
+                    default_value: 0.5,
+                    min_value: 0,
+                    max_value: 1,
+                },
+            },
+        ],
+        /**
+         * 参数曲线（dev-only 合成数据）。
+         *
+         * 【为什么必须有它】此前 mock 未实现本方法，Proxy 兜底返回 `{ ok: true }`
+         * ——而 `usePianoRollData` 需要 `orig` / `edit` 才能画出任何曲线。结果是
+         * **参数编辑器里根本没有曲线可看**，任何与曲线渲染相关的缺陷（例如"选区
+         * 存在时未选中的线被染色"）在浏览器里都无法复现，只能靠读代码推断。
+         * 这里合成一条有真实形态的曲线（长趋势 + 颤音 + 跳变），使曲线层与生产
+         * 环境一样被实际绘制。
+         */
+        get_param_frames: (...args: unknown[]) => {
+            const trackId = String(args[0] ?? "");
+            const param = String(args[1] ?? "pitch");
+            const startFrame = Math.max(0, Math.floor(Number(args[2] ?? 0)));
+            const frameCount = Math.max(1, Math.floor(Number(args[3] ?? 1)));
+            const stride = Math.max(1, Math.floor(Number(args[4] ?? 1)));
+            const fpMs = 5;
+            const orig: number[] = new Array(frameCount);
+            const edit: number[] = new Array(frameCount);
+            for (let i = 0; i < frameCount; i += 1) {
+                const frame = startFrame + i * stride;
+                const t = (frame * fpMs) / 1000;
+                // 长趋势 + 颤音 + 周期性跳变：让曲线有真实的拐角与折返
+                const base =
+                    MOCK_PITCH_CENTER +
+                    Math.sin(t * 0.55) * 6 +
+                    Math.sin(t * 7.9) * 0.9 +
+                    (Math.floor(t / 6) % 2 === 0 ? 0 : 4);
+                orig[i] = base;
+                edit[i] = base + Math.sin(t * 1.7) * 1.2;
+            }
+            return {
+                ok: true,
+                root_track_id: trackId,
+                param,
+                frame_period_ms: fpMs,
+                start_frame: startFrame,
+                orig,
+                edit,
+                reference_kind: "source_curve",
+                analysis_pending: false,
+                analysis_progress: 1,
+                pitch_edit_user_modified: false,
+                pitch_edit_backend_available: true,
+            };
+        },
         get_waveform_manifest: (...args: unknown[]) => {
             const sourcePath = String(args[0] ?? "");
             const totalFrames = MOCK_WAVEFORM_DURATION_SEC * MOCK_WAVEFORM_SAMPLE_RATE;

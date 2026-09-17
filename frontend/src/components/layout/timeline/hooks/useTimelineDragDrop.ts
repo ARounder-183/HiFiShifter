@@ -20,7 +20,11 @@ import {
     importMultipleAudioAtPosition,
 } from "../../../../features/session/sessionSlice";
 import { emitExternalFileAction } from "../../../../features/session/projectOpenEvents";
-import { detectExternalPathAction, findFirstExternalPathAction } from "../";
+import {
+    detectExternalPathAction,
+    isAcceptedDropPath,
+    partitionDroppedPaths,
+} from "../";
 import { SNAP_HIGHLIGHT_GROUP, clearSnapHighlights } from "../../../../utils/snapHighlight";
 import type { SnapTimelineFn } from "./useTimelineState";
 import type { TimelineViewportAccess } from "./timelineViewportAccess";
@@ -196,6 +200,9 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                             const path =
                                 primaryPath ?? tauriDraggedPathRef.current ?? prev?.path ?? null;
                             if (!path) return prev;
+                            // 准入判据：只接受媒体 / 工程（含 -bak）/ 外部工程 / MIDI。
+                            // 未知扩展名不再显示预览（此前它会一路穿透到音频导入分支）。
+                            if (!isAcceptedDropPath(path)) return null;
                             const action = detectExternalPathAction(path);
                             if (action !== "importAudio" && action !== "importMidi") {
                                 return null;
@@ -244,8 +251,34 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                         }
                         setDropPreview(null);
 
-                        const externalAction = findFirstExternalPathAction(paths);
-                        if (externalAction?.kind === "importMidi") {
+                        // ── 统一准入 + 分类（缺陷修复点）──────────────────────
+                        // 此前：只对"已知的非音频种类"特殊处理，**未知扩展名穿透**到
+                        // 音频导入默认分支；多文件更是把全部路径无差别转发，MIDI /
+                        // 工程 / 无关文件都被当成 Clip 导入。
+                        // 现在：先按 `partitionDroppedPaths` 分类，只放行白名单内的
+                        // 类型（媒体 / 工程含 -bak / 外部工程 / MIDI），其余整体丢弃。
+                        const partition = partitionDroppedPaths(paths);
+                        if (partition.rejectedPaths.length > 0 && debugDnd) {
+                            console.info(
+                                "[dnd] 已拒绝拖放（类型不在准入白名单）:",
+                                partition.rejectedPaths,
+                            );
+                        }
+
+                        // 工程文件优先：一次拖放只打开一个（打开会替换当前会话）。
+                        if (partition.projectPath !== null) {
+                            tauriDropHandledAtRef.current = Date.now();
+                            tauriDraggedPathRef.current = null;
+                            tauriLastDropPathRef.current = null;
+                            const kind = detectExternalPathAction(partition.projectPath);
+                            if (kind !== null && kind !== "importAudio" && kind !== "importMidi") {
+                                emitExternalFileAction(kind, partition.projectPath);
+                            }
+                            return;
+                        }
+
+                        const midiPath = partition.midiPaths[0] ?? null;
+                        if (midiPath !== null) {
                             tauriDropHandledAtRef.current = Date.now();
                             tauriDraggedPathRef.current = null;
                             tauriLastDropPathRef.current = null;
@@ -264,30 +297,23 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                                 clientY <= bounds.bottom;
                             if (overTimeline) {
                                 onMidiDrop?.({
-                                    midiPath: externalAction.path,
+                                    midiPath,
                                     trackId,
                                     startSec: beat,
                                 });
                             }
                             return;
                         }
-                        if (externalAction && externalAction.kind !== "importAudio") {
-                            tauriDropHandledAtRef.current = Date.now();
-                            tauriDraggedPathRef.current = null;
-                            tauriLastDropPathRef.current = null;
-                            emitExternalFileAction(externalAction.kind, externalAction.path);
-                            return;
-                        }
 
-                        // Multi-file drop
-                        if (paths.length > 1) {
+                        // 媒体文件：多个时按 "across-time" 依次铺开，单个走单文件导入。
+                        if (partition.mediaPaths.length > 1) {
                             tauriDropHandledAtRef.current = Date.now();
                             tauriDraggedPathRef.current = null;
                             tauriLastDropPathRef.current = null;
 
                             void dispatch(
                                 importMultipleAudioAtPosition({
-                                    audioPaths: paths,
+                                    audioPaths: [...partition.mediaPaths],
                                     mode: "across-time",
                                     trackId,
                                     startSec: beat,
@@ -297,28 +323,13 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                             return;
                         }
 
-                        const resolvedPath =
-                            primaryPath ||
-                            tauriDraggedPathRef.current ||
-                            tauriLastDropPathRef.current;
-                        if (resolvedPath) {
+                        // 单文件媒体：优先用准入判据通过的那一个（而不是无条件的
+                        // `primaryPath`——它可能就是已被拒绝的文件）。
+                        const resolvedPath = partition.mediaPaths[0] ?? null;
+                        if (resolvedPath !== null) {
                             tauriDropHandledAtRef.current = Date.now();
                             tauriDraggedPathRef.current = null;
                             tauriLastDropPathRef.current = null;
-                            const actionKind = detectExternalPathAction(resolvedPath);
-                            if (actionKind === "importMidi") {
-                                setDropPreview(null);
-                                onMidiDrop?.({
-                                    midiPath: resolvedPath,
-                                    trackId,
-                                    startSec: beat,
-                                });
-                                return;
-                            }
-                            if (actionKind && actionKind !== "importAudio") {
-                                emitExternalFileAction(actionKind, resolvedPath);
-                                return;
-                            }
                             void dispatch(
                                 importAudioAtPosition({
                                     audioPath: resolvedPath,
@@ -326,7 +337,14 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                                     startSec: beat,
                                 }),
                             );
+                            return;
                         }
+
+                        // 没有任何可接受的路径：明确吞掉本次 drop（不建 Clip），并
+                        // 标记已处理以免外层 HTML5 兜底再试着导入同一个文件。
+                        tauriDropHandledAtRef.current = Date.now();
+                        tauriDraggedPathRef.current = null;
+                        tauriLastDropPathRef.current = null;
                     }
                 });
 

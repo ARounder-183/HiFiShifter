@@ -150,14 +150,45 @@ export interface PianoRollGridSpec {
 }
 
 /**
- * 播放头叠加层的几何输入（阶段 2 Task 6，阶段 3 收窄为只管播放头）。
+ * GL 场景层的叠加输入：选区时间段（**在曲线之下**）。
+ *
+ * 【为什么选区块必须由 GL 场景层绘制（这是一个真实缺陷的根因）】
+ * 选区块的语义是"曲线之下的一层半透明底色"——`render.ts` 里那段注释写得很明确：
+ * 它必须先于各条曲线绘制，否则 8% 的蓝色填充会**盖住曲线**。
+ * 但曲线早已迁到 GL（`skipCurves` 恒为 true），而选区块还留在 Canvas2D 主画布上；
+ * 主画布的 DOM 顺序在 GL 场景画布**之后**，于是"后画的在上"这条浏览器规则把层序
+ * **反转**了：曲线被 8% 蓝填充染上一层，未被选中的参数线也在选区内泛蓝
+ * （用户报告："未被选择的参数线的下半部分染上了跟已选参数线一样的蓝色"）。
+ *
+ * 因此选区块必须与曲线**在同一个上下文里**按正确顺序绘制：本字段喂给 GL 场景层，
+ * 由宿主在 `drawGlCurves` **之前**发射成实例。曲线随后的描边自然覆盖其上，
+ * 与迁移前的观感逐像素一致。
+ *
+ * 【"下半部分"从何而来】被染色的曲线若其下方还有别的曲线或网格，视觉上就只剩
+ * 加粗描边的**上半部分**保持原色——用户因此描述为"下半部分被染色"。
+ */
+export interface PianoRollSelectionBandSpec {
+    /** 选区时间段（秒）；空数组表示没有选区。 */
+    readonly spansSec: readonly {
+        readonly startSec: number;
+        readonly endSec: number;
+    }[];
+    /** 半透明填充色（数值 RGBA，与 Canvas2D 路径同源）。 */
+    readonly fillRgba: readonly [number, number, number, number];
+    /** 边框色（数值 RGBA）。 */
+    readonly borderRgba: readonly [number, number, number, number];
+}
+
+/**
+ * 动态叠加层的几何输入（阶段 2 Task 6，阶段 3 收窄为只管播放头）。
  *
  * 【为什么播放头要单独一层】播放帧只动播放头，而曲线不变。独立叠加层让
  * "曲线画布保持缓存、只清一块空画布"成为可能——这是阶段 2 消除播放重绘的关键。
  *
  * 【为什么选区块不在这里】选区块属于**曲线之下**的图层（Canvas2D 路径先画选区、
  * 再画曲线），而叠加层在曲线**之上**。把选区放进来会让它盖住曲线，与迁移前的
- * 观感相反。因此选区仍由主画布绘制，见 `render.ts` 的 `skipPlayhead` 说明。
+ * 观感相反——这正是曾经的层序反转缺陷。选区改由 GL 场景层绘制，见
+ * {@link PianoRollSelectionBandSpec}。
  */
 export interface PianoRollOverlaySpec {
     /**
@@ -202,6 +233,13 @@ export interface PianoRollKernelData {
      * 那种"低频变化"的字段分开，避免把播放头混进需要内容签名的几何里。
      */
     readonly overlay?: PianoRollOverlaySpec | null;
+    /**
+     * 选区块（曲线**之下**的半透明底色）；缺省 / null 表示没有选区。
+     *
+     * 特殊说明：与 `grid`（低频、按签名缓存）不同，本字段**每帧读取**——选区
+     * 可能被拖拽改变，而滚动/缩放会改变它的视口 x。
+     */
+    readonly selectionBand?: PianoRollSelectionBandSpec | null;
     /**
      * 曲线图层（阶段 3）；缺省 / null 表示没有曲线。
      *

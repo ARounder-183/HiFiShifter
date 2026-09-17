@@ -60,4 +60,34 @@ describe("resolvePanelRenderViewport（渲染投影的视口来源）", () => {
         });
         expect(view.scrollLeftPx).toBe(-200);
     });
+
+    /**
+     * 回归：**交互路径**（框选换算 / 命中测试 / 标尺 seek）与渲染路径必须同源。
+     *
+     * 【缺陷现象】交互路径原先自建轴、直接读 `scrollLeftRef`。该 ref 在渲染期会被
+     * 256px 量化的 React state 回写，因此横向滚动后最多滞后内核 255px。于是画面上
+     * 的选区块按内核绘制、而框选起点/终点按滞后的 ref 计算，用户划定的选区整体
+     * 偏移同一距离（报告："实际产生的选区与鼠标划定的区域不一致"）。
+     *
+     * 复现特征也由本用例直接对应：先做一次水平缩放会 `flushSync` 原子对齐 state
+     * （ref == 内核 → 正常）；随后滚动只改内核、ref 逐渐滞后（开始偏移）；再缩放
+     * 一次又对齐（"恢复正常"）。
+     *
+     * 判据：给定内核真值与滞后的 refs（相差一个量化残差），解析结果必须是内核值
+     * ——渲染与交互因此落在同一视口上。
+     */
+    it("★ 交互与渲染同源：内核真值优先于量化滞后的 refs", () => {
+        // 内核已被滚轮推到 1000，而 state（以及被它回写的 ref）还停在 768
+        // ——差值 232 正是 256px 量化步长之内的残差。
+        const kernelScrollLeft = 1000;
+        const laggingRefScrollLeft = 768;
+        const view = resolvePanelRenderViewport({
+            kernelView: { pxPerSec: 150, scrollLeft: kernelScrollLeft },
+            refPxPerSec: 150,
+            refScrollLeftPx: laggingRefScrollLeft,
+        });
+        // 交互侧若用 ref，框选会偏移 232px；用内核则与画面一致。
+        expect(view.scrollLeftPx).toBe(kernelScrollLeft);
+        expect(view.scrollLeftPx).not.toBe(laggingRefScrollLeft);
+    });
 });

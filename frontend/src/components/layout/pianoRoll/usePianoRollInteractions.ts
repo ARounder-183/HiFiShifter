@@ -113,6 +113,7 @@ import {
     getSelectDragPreviewValue,
 } from "./paramValuePreviewLogic";
 import { secFromViewportClientX } from "./seekPlayheadMapping";
+import { resolvePanelRenderViewport } from "./kernel/viewportSource";
 import {
     createTimelineAxis,
     secToViewportPx,
@@ -146,6 +147,31 @@ export function usePianoRollInteractions(args: {
     scrollLeftRef: MutableRefObject<number>;
     pxPerBeatRef: MutableRefObject<number>;
     pxPerSecRef: MutableRefObject<number>;
+    /**
+     * **交互用视口的权威来源**（内核真值；宿主未挂载时返回 null）。
+     *
+     * 【为什么必须有它——这是一个真实缺陷的根因】面板的三个视口 ref 会在**渲染期**
+     * 被同步成 React state 的值，而横向滚动位置的真值在内核、state 只是**量化提交**
+     * （256px 步长，见宿主 `SCROLL_COMMIT_STEP_PX`）：滚轮 / 拖 thumb / 触摸只改内核
+     * 与镜像，最后一次不足 256px 的位移**永远不会**提交进 state。
+     *
+     * 于是同一次框选手势里出现了两套视口：
+     * - **绘制**（选区块、曲线）走内核真值（`resolvePanelRenderViewport`）；
+     * - **拍坐标换算**（起点 / 终点 / 边缘命中）走 refs，而 refs 会被那个滞后的
+     *   state 在渲染期覆盖回去。
+     *
+     * 结果：划定的选区与鼠标划过的区域相差 `内核位置 − 滞后 state`（可达 256px），
+     * 且差值随量化残差变化 → 用户报告"有可能造成偏移、随机出现"。
+     *
+     * 复现步骤也完全对得上：**先做一次水平缩放**会经 `flushSync` 原子提交 state
+     * （state == 内核，故正常）；**之后任何一次滚动**都只动内核、state 逐渐滞后，
+     * 于是开始出现偏移；**再做一次缩放**又原子对齐一次，偏移"恢复正常"。
+     *
+     * 因此交互侧的坐标换算必须与渲染侧同源：一律取内核真值，宿主不在时才退回 refs。
+     * 这与 `resolvePanelRenderViewport`（渲染侧）和时间轴的 `livePxPerSec` 是同一条
+     * 既有约定，本字段只是把它接到交互路径上。
+     */
+    getViewportTruth: () => { pxPerSec: number; scrollLeft: number } | null;
     /** 连续滚轮缩放期间暂存最新结果，下一 tick 以此为基础继续锚定。 */
     horizontalZoomChainRef: MutableRefObject<{
         nextPxPerSec: number;
@@ -318,6 +344,7 @@ export function usePianoRollInteractions(args: {
         scrollLeftRef,
         pxPerBeatRef,
         pxPerSecRef,
+        getViewportTruth,
         horizontalZoomChainRef,
         onHorizontalZoom,
         syncTimelineEnabled,
@@ -393,18 +420,30 @@ export function usePianoRollInteractions(args: {
     } = args;
 
     /**
-     * 由滚动 ref 构造当前投影。
+     * 构造当前**交互用**投影（与渲染侧共用同一个视口来源解析器）。
      *
-     * 用 ref 而非 React state：滚动事件中 ref 同步更新，state 要到下一帧才落地，
-     * 命中测试若用 state 会比画面慢一帧。
+     * 【为什么不能只用 refs（这是一个真实缺陷的根因）】refs 在渲染期被同步成 React
+     * state，而横向位置的真值在内核、state 只是 256px 步长的**量化提交**——滚动后
+     * refs 会滞后内核最多 255px。命中测试与框选换算若用 refs，就会与（按内核绘制的）
+     * 画面相差同一距离，表现为"划定的选区与鼠标划过的区域不一致"。
+     *
+     * 因此这里直接复用渲染侧那个**已被单测覆盖**的解析器（`resolvePanelRenderViewport`，
+     * 内核优先、回落 refs、NaN 安全）。复用而不是再写一遍"取内核否则取 refs"，是为了
+     * 让两条路径的取值语义在结构上不可能分叉——这正是本缺陷的教训。
      */
     const axisFromRefs = useCallback(
-        () =>
-            createTimelineAxis({
-                pxPerSec: pxPerSecRef.current,
-                scrollLeftPx: scrollLeftRef.current,
-            }),
-        [pxPerSecRef, scrollLeftRef],
+        () => {
+            const viewport = resolvePanelRenderViewport({
+                kernelView: getViewportTruth(),
+                refPxPerSec: pxPerSecRef.current,
+                refScrollLeftPx: scrollLeftRef.current,
+            });
+            return createTimelineAxis({
+                pxPerSec: viewport.pxPerSec,
+                scrollLeftPx: viewport.scrollLeftPx,
+            });
+        },
+        [getViewportTruth, pxPerSecRef, scrollLeftRef],
     );
 
     /**
@@ -1219,13 +1258,13 @@ export function usePianoRollInteractions(args: {
             return secFromViewportClientX({
                 clientX,
                 viewportLeft: rect.left,
-                axis: createTimelineAxis({
-                    pxPerSec: pxPerSecRef.current,
-                    scrollLeftPx: scrollLeftRef.current,
-                }),
+                // 与 `pointerBeat` 同源：一律走 `axisFromRefs`（内核真值的投影），
+                // 不再就地用可能滞后的 refs 另建一份轴——那会让"同一指针位置"在两条
+                // 路径上得到不同的秒数（量化残差），是框选偏移的同类根因。
+                axis: axisFromRefs(),
             });
         },
-        [canvasRef, scrollLeftRef, pxPerSecRef],
+        [canvasRef, axisFromRefs],
     );
 
     const pointerValue = useCallback(
@@ -1258,10 +1297,9 @@ export function usePianoRollInteractions(args: {
                     secFromViewportClientX({
                         clientX,
                         viewportLeft: bounds.left,
-                        axis: createTimelineAxis({
-                            pxPerSec: pxPerSecRef.current,
-                            scrollLeftPx: scrollLeftRef.current,
-                        }),
+                        // 同上：seek 的投影也必须取内核真值，否则滚动后点标尺会落到
+                        // 与画面播放头不同的位置（量化残差）。
+                        axis: axisFromRefs(),
                     }),
                     0,
                     1e12,
@@ -2300,6 +2338,8 @@ export function usePianoRollInteractions(args: {
                         return clampSelectionBeat(pointerBeat(clientX));
                     }
 
+                    // 本帧的交互投影：**与渲染侧同源**（内核真值，见 `axisFromRefs`）。
+                    const axis = axisFromRefs();
                     const bounds = scroller.getBoundingClientRect();
 
                     if (allowAutoScroll) {
@@ -2313,9 +2353,12 @@ export function usePianoRollInteractions(args: {
                         });
 
                         if (Math.abs(deltaPx) > 0.01) {
+                            // 上限必须用**同一个投影**的 pxPerSec 算（不能用可能滞后的
+                            // `pxPerBeatRef`）：否则自动滚动的可达右界与实际内容宽不一致。
+                            const pxPerBeatNow = axis.pxPerSec * Math.max(1e-9, secPerBeat);
                             const drawingMaxScrollLeft = Math.max(
                                 0,
-                                maxSelectableBeat * Math.max(1e-9, pxPerBeatRef.current) -
+                                maxSelectableBeat * Math.max(1e-9, pxPerBeatNow) -
                                     scroller.clientWidth,
                             );
                             const nativeOffset = syncTimelineEnabled
@@ -2335,9 +2378,17 @@ export function usePianoRollInteractions(args: {
                     }
 
                     const clampedClientX = clamp(clientX, bounds.left, bounds.right);
+                    // 视口 x → 秒 → 拍：一律走统一投影的逆函数，**不再**用
+                    // `(scrollLeftRef + dx) / pxPerBeatRef` 这条独立算式。
+                    //
+                    // 【为什么这条算式是缺陷根因】它读的 `scrollLeftRef` 会被渲染期的
+                    // state→ref 同步覆盖回去，而 state 是 256px 步长的量化提交，滚动后
+                    // 最多滞后内核 255px——于是框选产生的选区整体偏移同一距离，而画面上
+                    // 选区块按内核绘制，两者对不上（用户报告"实际产生的选区与鼠标划定的
+                    // 区域不一致"，且先缩放后滚动才出现）。
                     const beat =
-                        (scrollLeftRef.current + (clampedClientX - bounds.left)) /
-                        Math.max(1e-9, pxPerBeatRef.current);
+                        viewportPxToSec(axis, clampedClientX - bounds.left) /
+                        Math.max(1e-9, secPerBeat);
                     return clampSelectionBeat(beat);
                 };
 

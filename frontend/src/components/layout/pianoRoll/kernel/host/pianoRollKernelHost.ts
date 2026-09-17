@@ -58,6 +58,7 @@ import {
     type PolylineProgram,
 } from "../../../renderKernel/gl/polylineProgram";
 import { buildPolylineVertices } from "../../../renderKernel/gl/polylineGeometry";
+import { buildSelectionBandInstances } from "../scene/selectionBandInstances";
 import { decimatePolylinePoints } from "../../../renderKernel/gl/polylineDecimation";
 import {
     projectClipboardPreviewPoints,
@@ -559,6 +560,28 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         }
     }
 
+    // 选区块层：复用**主 GL 画布**，独立 program 与独立实例缓冲。
+    //
+    // 【为什么必须在这一层（这是一个真实缺陷的根因）】层序契约是「选区在曲线
+    // **之下**」，但曲线迁上 GL 后选区块仍留在 Canvas2D 主画布，而主画布的 DOM
+    // 顺序在 GL 场景画布**之后**——浏览器按"后画的在上"合成，层序被反转，8% 的
+    // 蓝填充盖到了曲线上（用户报告：未被选中的参数线在选区内泛蓝）。
+    //
+    // 【为什么独立缓冲而不是塞进网格实例】网格几何按内容签名缓存（滚动零重建），
+    // 选区每帧都变；塞进去会让"几何未变就 repaint"的优化把它冻住。
+    let glSelectionProgram: SdfBoxProgram | null = null;
+    if (glHandle !== null) {
+        try {
+            glSelectionProgram = createSdfBoxProgram(glHandle.gl);
+        } catch {
+            glSelectionProgram = null;
+        }
+    }
+    /** 选区块实例缓冲（每帧按当前选区全量重建）。 */
+    let glSelectionInstances = new Float32Array(0);
+    /** 本帧选区块的实例数（0 表示没有选区）。 */
+    let glSelectionUploadedCount = 0;
+
     // 动态叠加层（Task 6）：独立画布 + program，位于曲线层之上。
     let glOverlayHandle: GlCanvasHandle | null = null;
     let glOverlayProgram: SdfBoxProgram | null = null;
@@ -861,6 +884,48 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         }
         glAxisUploadedCount = items.length;
         glAxisGeometryUploaded = false;
+    }
+
+    /**
+     * 绘制**选区块**（在曲线之下）。
+     *
+     * 流程：读镜像的选区时间段 → 投影成视口矩形实例（整高填充 + 四条 1px 边框）
+     * → 写入实例缓冲 → 一次 `render` 上传并绘制。
+     *
+     * 【为什么必须排在 `drawGlCurves` 之前】层序契约：选区在曲线之下。GL 的
+     * `INSTANCE_MODE_FLAT` 与折线共用同一个帧缓冲，按 draw call 顺序合成，因此
+     * "先画选区、再画曲线"就得到与迁移前 Canvas2D 完全一致的层序。反过来（或让
+     * 选区块留在 Canvas2D 主画布上）会让 8% 的蓝填充盖住曲线——这正是用户报告的
+     * "未选中的参数线被染色"。
+     *
+     * 【为什么在清屏之后调用】`drawGlScene` 会 `clear()`（画布是按 draw call 顺序
+     * 累积的），因此本层必须排在它之后；`draw()` 里的调用顺序即最终层序。
+     */
+    function drawGlSelectionBand(): void {
+        if (glSelectionProgram === null || glHandle === null) return;
+        const band = data().selectionBand;
+        const axis = currentAxis();
+        glSelectionUploadedCount = 0;
+        if (band === null || band === undefined || band.spansSec.length === 0) return;
+
+        const items = buildSelectionBandInstances({
+            axis,
+            viewportHeightPx,
+            spansSec: band.spansSec,
+            fillRgba: band.fillRgba,
+            borderRgba: band.borderRgba,
+        });
+        if (items.length === 0) return;
+
+        const needed = items.length * CLIP_INSTANCE_FLOATS;
+        if (glSelectionInstances.length < needed) glSelectionInstances = new Float32Array(needed);
+        for (let index = 0; index < items.length; index += 1) {
+            writeFlatInstance(glSelectionInstances, index, items[index]);
+        }
+        glSelectionUploadedCount = items.length;
+
+        const target = glHandle.resize(viewportWidthPx, viewportHeightPx, readDevicePixelRatio());
+        glSelectionProgram.render(glSelectionInstances, glSelectionUploadedCount, target, 0, 0);
     }
 
     /**
@@ -1478,6 +1543,12 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             drawGlKeyboard();
         }
 
+        // 选区块层（**必须在曲线之前**）：它是曲线之下的半透明底色。见
+        // `drawGlSelectionBand` 与 `PianoRollSelectionBandSpec` 的层序说明。
+        if (glSelectionProgram !== null) {
+            drawGlSelectionBand();
+        }
+
         // 曲线层（阶段 3）：在网格之上、播放头之下。每帧重建几何——滚动/缩放会
         // 改变每个点的视口位置，没有零重建路径（见 drawGlCurves 说明）。
         if (glCurveProgram !== null) {
@@ -1841,6 +1912,8 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             glOverlayHandle = null;
             glCurveProgram?.dispose();
             glCurveProgram = null;
+            glSelectionProgram?.dispose();
+            glSelectionProgram = null;
         },
     };
 }

@@ -149,6 +149,8 @@ import {
     extractLocalFilePath,
     formatCursorTime,
     hasFileDrag,
+    isAcceptedDropFile,
+    isAcceptedDropPath,
 } from "./timeline";
 import { timeRulerHeightPx } from "./timeline/rulerHeight";
 import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeline";
@@ -5417,6 +5419,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                   ? String(dt?.files?.[0]?.name ?? "Audio")
                   : "Audio");
         const dragAction = detectExternalPathAction(path);
+        // 准入判据：未知扩展名**不再**显示落点预览。此前这里只挡"已知的非音频种类"，
+        // 未知类型（`dragAction === null`）会一路穿透到音频导入分支并建出 Clip。
+        if (path && !isAcceptedDropPath(path)) {
+            setDropPreview(null);
+            return;
+        }
         if (path && dragAction !== "importAudio" && dragAction !== "importMidi") {
             setDropPreview(null);
             return;
@@ -5469,6 +5477,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             tauriDraggedPathRef.current = null;
             tauriLastDropPathRef.current = null;
             const actionKind = detectExternalPathAction(resolvedPath);
+            // 准入判据（缺陷修复点）：未知扩展名不再落入下面的音频导入默认分支。
+            if (actionKind === null) return;
             if (actionKind === "importMidi") {
                 onMidiClipPathChange(resolvedPath);
                 onMidiClipStartSecChange(beat);
@@ -5476,7 +5486,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 onMidiClipDialogOpenChange(true);
                 return;
             }
-            if (actionKind && actionKind !== "importAudio") {
+            if (actionKind !== "importAudio") {
                 emitExternalFileAction(actionKind, resolvedPath);
                 return;
             }
@@ -5497,6 +5507,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 tauriDraggedPathRef.current = null;
                 tauriLastDropPathRef.current = null;
                 const actionKind = detectExternalPathAction(p);
+                // 同上的准入判据：延迟分支也必须拒绝未知类型。
+                if (actionKind === null) return;
                 if (actionKind === "importMidi") {
                     onMidiClipPathChange(p);
                     onMidiClipStartSecChange(beat);
@@ -5504,7 +5516,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     onMidiClipDialogOpenChange(true);
                     return;
                 }
-                if (actionKind && actionKind !== "importAudio") {
+                if (actionKind !== "importAudio") {
                     emitExternalFileAction(actionKind, p);
                     return;
                 }
@@ -5519,7 +5531,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         }
 
         const fallbackFile = dt.files?.[0] ?? null;
-        if (fallbackFile) {
+        // 无本地路径的兜底分支同样必须过准入判据：此前它**完全不做校验**就把任何
+        // `File` 按音频导入（后端内容嗅探会放行，于是无关文件也变成 Clip）。
+        if (fallbackFile && isAcceptedDropFile(fallbackFile)) {
             void dispatch(
                 importAudioFileAtPosition({
                     file: fallbackFile,
