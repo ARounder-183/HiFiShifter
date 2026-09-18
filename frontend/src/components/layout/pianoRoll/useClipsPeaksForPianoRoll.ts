@@ -14,6 +14,36 @@ import type { ClipInfo } from "../../../features/session/sessionTypes";
 import { resolveSourceEndSec } from "../../../utils/loopRender";
 import { waveformMipmapStore } from "../../../utils/waveformMipmapStore";
 
+/**
+ * 水平取窗余量（CSS px）。
+ *
+ * React 的 `scrollLeft` 是 256px 量化提交的（内核 `SCROLL_COMMIT_STEP_PX`），
+ * 滚动中最多滞后内核真值 255px；波形面的几何另带最多 512px 的水平余量窗口
+ * （`WaveformSurface.draw`）。取窗因此向两侧各放宽约 1.3 个视口宽，把「量化
+ * 滞后 + 几何余量」整段兜住——滚动期间波形面取到的 clip 集合**始终**覆盖当前
+ * 视口，「进入视口的 clip 波形消失、随滚动恢复、拖回去又消失」在数据源头关闭。
+ * 余量以 px 计、由可见区间的秒宽折算（见 `windowMarginSec`），随缩放自动缩放。
+ */
+const WINDOW_MARGIN_PX = 2048;
+
+/** 折算余量时假定的典型视口宽（CSS px）。仅影响余量大小，不影响正确性。 */
+const TYPICAL_VIEWPORT_W_PX = 1600;
+
+/**
+ * 水平余量的秒数：由可见区间的秒宽反推 pxPerSec 后折算。
+ *
+ * 面板传入的是**量化可见区间**（秒），而量化滞后与波形面的几何余量都以 px
+ * 发生。`visibleSpanSec × pxPerSec ≈ viewportWidthPx`（误差即量化偏差 ≤255px，
+ * 远小于余量本身），因此 `pxPerSec ≈ TYPICAL_VIEWPORT_W_PX / visibleSpanSec`，
+ * 余量秒 = `WINDOW_MARGIN_PX / pxPerSec`。区间非法时退回 0（精确窗），行为与
+ * 旧实现一致——退化只发生在不可渲染的输入上，不影响正常路径。
+ */
+function windowMarginSec(visibleStartSec: number, visibleEndSec: number): number {
+    const spanSec = visibleEndSec - visibleStartSec;
+    if (!(spanSec > 1e-9)) return 0;
+    return (spanSec * WINDOW_MARGIN_PX) / TYPICAL_VIEWPORT_W_PX;
+}
+
 /** 单个 clip 的波形数据条目（v2：interleaved 格式，与 WaveformTrackCanvas 一致） */
 export interface ClipPeaksEntry {
     /** clip ID */
@@ -64,9 +94,21 @@ export interface ClipPeaksEntry {
  * 波形数据在 render.ts 的绘制循环中通过 waveformMipmapStore.getInterleavedSlice()
  * 同步获取，与 WaveformTrackCanvas 保持相同的渲染模式。
  *
+ * React 的 `visibleStartSec / visibleEndSec` 来自 256px 量化提交的 scrollLeft，
+ * 滚动中最多滞后内核真值 255px；而波形面由视口总线（内核真值）同帧驱动。若按
+ * 可见区间精确取窗，内核刚带进视口的 clip 在「新视口 × 旧 rows」的组合帧里没有
+ * 几何——波形消失，直到 React 提交后 rows 才跟上（快速往返拖拽时反复出现，
+ * 且与「同步到时间轴」开关无关：两条滚动路径汇入同一条总线）。因此本 hook 按
+ * **放宽窗**过滤：量化可见区间向两侧各扩约 1.3 个视口宽，保证滞后帧的视口
+ * （含波形面自身 ≤512px 的几何余量）仍被 clip 集合覆盖。宽窗让单次重建多纳入
+ * 少量 clip——远离视口的会在 `buildWaveformScene` 的视口裁剪中被剔除，不产生
+ * 几何也不发起取数，成本远低于「每个滚动方向闪一次」。
+ *
+ * 【竖直方向】参数编辑器是单行（全轨道混合）视图，无竖直窗口化，无需处理。
+ *
  * @param args.clips - 当前 track 下的所有 clip
- * @param args.visibleStartSec - 可见区域起始时间（秒）
- * @param args.visibleEndSec - 可见区域结束时间（秒）
+ * @param args.visibleStartSec - 可见区域起始时间（秒，256px 量化提交）
+ * @param args.visibleEndSec - 可见区域结束时间（秒，256px 量化提交）
  * @returns ClipPeaksEntry 数组，每个 entry 对应一个可见 clip
  */
 export function useClipsPeaksForPianoRoll(args: {
@@ -112,15 +154,17 @@ export function useClipsPeaksForPianoRoll(args: {
         }
     }, [clips]);
 
-    // 构建返回值：过滤可见 clip，返回元数据
+    // 构建返回值：按放宽的水平窗口过滤可见 clip，返回元数据
     return useMemo(() => {
         // 引用 redrawTick 以便 mipmap 加载完成后重新计算
         void redrawTick;
 
+        // 水平窗口：量化可见区间向两侧各放宽（见 `WINDOW_MARGIN_PX` 的说明）。
+        const windowStartSec = visibleStartSec - windowMarginSec(visibleStartSec, visibleEndSec);
+        const windowEndSec = visibleEndSec + windowMarginSec(visibleStartSec, visibleEndSec);
+
         const visibleClips = clips.filter((clip) => {
-            return (
-                clip.startSec + clip.lengthSec > visibleStartSec && clip.startSec < visibleEndSec
-            );
+            return clip.startSec + clip.lengthSec > windowStartSec && clip.startSec < windowEndSec;
         });
 
         return visibleClips.map((clip): ClipPeaksEntry => {
