@@ -322,6 +322,14 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
                 checkpoint: args[3],
             };
 
+        case "set_clip_take_channel_mode":
+            return {
+                clipId: args[0],
+                takeId: args[1],
+                channelMode: args[2],
+                checkpoint: args[3],
+            };
+
         case "add_clip_take_from_media":
             return {
                 clipId: args[0],
@@ -549,6 +557,13 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
                 columns: args[3],
             };
 
+        case "convert_mix_param":
+            return {
+                trackId: args[0],
+                from: args[1],
+                ranges: args[2],
+            };
+
         case "get_param_frames":
             return {
                 trackId: args[0],
@@ -715,9 +730,74 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
             return { message: args[0], detail: args[1] ?? null };
 
         default:
+            // 无参命令白名单：不携带参数的命令在此统一登记（invoke 时以空
+            // args 对象调用，与无 args 调用在 Tauri 侧等价）。新命令若携带
+            // 参数，必须在上方 switch 显式登记位置参数 → 命名参数的映射，
+            // 否则 buildTauriArgs 返回 __unwired、invoke 直接 throw ——
+            // 这曾三次造成"前端乐观更新生效、后端调用从未到达"的静默分叉
+            // （take 命令族、set_clip_take_reversed、set_clip_take_channel_mode）。
+            // invoke.wiring.test.ts 会扫描全部调用点做穷举防回归。
+            if (NO_ARG_COMMANDS.has(method)) return {};
             return { __unwired: true };
     }
 }
+
+/**
+ * 无参命令白名单（不携带任何位置参数的 Tauri 命令）。
+ * 新增无参命令时在此登记；新增带参命令必须在 switch 中登记映射。
+ */
+const NO_ARG_COMMANDS: ReadonlySet<string> = new Set([
+    "cancel_background_render",
+    "cancel_export_audio",
+    "check_source_files_changed",
+    "clear_waveform_cache",
+    "clipboard_kind",
+    "close_window",
+    "consume_startup_project_path",
+    "get_about_info",
+    "get_project_meta",
+    "get_auto_backup_settings",
+    "get_dml_adapters",
+    "get_export_audio_defaults",
+    "get_gpu_devices",
+    "get_history_state",
+    "get_onnx_diagnostic",
+    "get_onnx_status",
+    "get_pitch_analysis_progress",
+    "get_playback_state",
+    "get_recording_apps",
+    "get_recording_devices",
+    "get_recording_settings",
+    "get_recording_state",
+    "get_runtime_info",
+    "get_timeline_state",
+    "get_ui_settings",
+    "has_reaper_clipboard",
+    "has_timeline_clipboard",
+    "import_project_dialog",
+    "load_default_model",
+    "new_project",
+    "open_audio_dialog",
+    "open_audio_dialog_multi",
+    "open_log_folder",
+    "open_midi_dialog",
+    "pick_output_path",
+    "open_project_dialog",
+    "open_reaper_dialog",
+    "open_vocalshifter_dialog",
+    "pick_diagnostics_output_path",
+    "pick_directory",
+    "pick_midi_output_path",
+    "ping",
+    "read_system_clipboard_object",
+    "redo_timeline",
+    "run_vocoder_benchmark",
+    "start_background_render",
+    "stop_audio",
+    "stop_recording",
+    "synthesize",
+    "undo_timeline",
+]);
 
 export async function invoke<T>(method: string, ...args: unknown[]): Promise<T> {
     const tauriInvoke = getTauriInvoke();

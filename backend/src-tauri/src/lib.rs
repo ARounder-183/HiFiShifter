@@ -32,6 +32,8 @@ mod build_git;
 mod audio_engine;
 #[path = "audio/audio_utils.rs"]
 mod audio_utils;
+#[path = "audio/channel_mode.rs"]
+pub(crate) mod channel_mode;
 #[path = "pitch/clip_pitch_cache.rs"]
 mod clip_pitch_cache;
 #[path = "pitch/clip_rendering_state.rs"]
@@ -607,8 +609,6 @@ pub fn run() {
             commands::get_waveform_mipmap_binary,
             commands::preload_waveform_mipmap,
             commands::batch_get_waveform_mipmap,
-            commands::get_waveform_manifest,
-            commands::get_waveform_tiles_binary,
             commands::import_audio_item,
             commands::import_audio_bytes,
             commands::add_track,
@@ -644,6 +644,7 @@ pub fn run() {
             commands::remove_clip_take,
             commands::rename_clip_take,
             commands::set_clip_take_reversed,
+            commands::set_clip_take_channel_mode,
             commands::add_clip_take_from_media,
             commands::import_media_files_as_takes,
             commands::duplicate_clips_bulk,

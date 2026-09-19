@@ -656,27 +656,14 @@ pub fn render_mixdown_interleaved(
             reverse_interleaved_frames(&mut segment, in_channels_usize);
         }
 
-        // Convert to stereo if needed.
-        let segment = if in_channels == 1 {
-            let frames = segment.len();
-            let mut stereo = Vec::with_capacity(frames * 2);
-            for s in segment {
-                stereo.push(s);
-                stereo.push(s);
-            }
-            stereo
-        } else if in_channels >= 2 {
-            // Use first two channels.
-            let frames = segment.len() / in_channels_usize;
-            let mut stereo = Vec::with_capacity(frames * 2);
-            for f in 0..frames {
-                stereo.push(segment[f * in_channels_usize]);
-                stereo.push(segment[f * in_channels_usize + 1]);
-            }
-            stereo
-        } else {
-            continue;
-        };
+        // 声道条件化（take 级 channel_mode 的唯一语义实现，见
+        // channel_mode::condition_take_channels）：mono 源复制为双声道、
+        // stereo 源按模式取平面/交换/下混，输出固定双声道交错。
+        let segment = crate::channel_mode::condition_take_channels(
+            &segment,
+            in_channels,
+            clip.take_channel_mode(),
+        );
         let mut segment = segment;
 
         if let Some(params) = clip.formant_morph.as_ref().filter(|params| params.enabled) {
@@ -706,6 +693,7 @@ pub fn render_mixdown_interleaved(
                 key_start_sec,
                 key_end_sec,
                 clip.reversed && !loop_mode,
+                clip.channel_mode,
                 // 离线 Loop 的处理对象是"回绕平铺 segment"（锚点起、长度为
                 // clip 消费量），与实时域的完整文件自然顺序内容不同 —— 必须
                 // 用 tiled_wrap 域判别隔离，避免两个域互相毒化缓存。
@@ -1081,6 +1069,138 @@ pub fn render_mixdown_interleaved(
 mod tests {
     use super::build_loop_tiled_segment;
     use super::*;
+
+    /// 端到端：真实立体声 WAV → decode → 窗口 → 重采样 → 声道条件化 → 混音。
+    /// 锁定"切换 Take 声道模式必须改变导出渲染结果"——这是用户报告的
+    /// "只改波形不改渲染"症状的回归防线。
+    #[test]
+    fn mixdown_honors_take_channel_mode() {
+        use crate::state::{Clip, TimelineState};
+
+        // ── 1. 写一个立体声 WAV：L ≈ 0.5 恒定，R ≈ -0.25 恒定（左右可分辨）。
+        let dir = std::env::temp_dir().join(format!("hfs_mix_mode_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav_path = dir.join("stereo.wav");
+        {
+            let spec = hound::WavSpec {
+                channels: 2,
+                sample_rate: 44100,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            };
+            let mut writer = hound::WavWriter::create(&wav_path, spec).unwrap();
+            for _ in 0..44100 {
+                writer.write_sample(16384).unwrap(); // ≈ 0.5
+                writer.write_sample(-8192).unwrap(); // ≈ -0.25
+            }
+            writer.finalize().unwrap();
+        }
+        let source_path = wav_path.to_string_lossy().to_string();
+
+        // ── 2. 组装 TimelineState：默认轨 + 单 clip，gain=1，无 fade。
+        let build_timeline = |channel_mode: i32| {
+            let mut tl = TimelineState::default();
+            let track_id = tl.tracks[0].id.clone();
+            let clip = Clip {
+                id: format!("clip_mode_{}", channel_mode),
+                group_id: None,
+                track_id,
+                name: "stereo".to_string(),
+                start_sec: 0.0,
+                length_sec: 0.5,
+                color: "#000000".to_string(),
+                takes: vec![],
+                active_take_id: None,
+                clip_playback_rate: 1.0,
+                source_path: Some(source_path.clone()),
+                source_path_relative: None,
+                duration_sec: Some(1.0),
+                duration_frames: Some(44100),
+                source_sample_rate: Some(44100),
+                source_channels: Some(2),
+                source_file_mtime: None,
+                source_file_size: None,
+                source_file_fingerprint: None,
+                waveform_preview: None,
+                pitch_range: None,
+                gain: 1.0,
+                muted: false,
+                source_start_sec: 0.0,
+                source_end_sec: 1.0,
+                playback_rate: 1.0,
+                reversed: false,
+                channel_mode,
+                loop_enabled: false,
+                snap_offset_sec: 0.0,
+                fade_in_sec: 0.0,
+                fade_out_sec: 0.0,
+                fade_in_shape: 0.0,
+                fade_out_shape: 0.0,
+                fade_in_dir: 0.0,
+                fade_out_dir: 0.0,
+                fade_in_curve: String::new(),
+                fade_out_curve: String::new(),
+                auto_fade_in_sec: 0.0,
+                auto_fade_out_sec: 0.0,
+                extra_curves: None,
+                extra_params: None,
+                formant_morph: None,
+                midi_note_data: None,
+                midi_fill_gaps: false,
+            };
+            tl.clips.push(clip);
+            tl.normalize_clip_takes();
+            tl
+        };
+
+        let render = |tl: &TimelineState| {
+            let (_rate, _ch, _dur, mix) = render_mixdown_interleaved(
+                tl,
+                MixdownOptions {
+                    sample_rate: 44100,
+                    start_sec: 0.0,
+                    end_sec: Some(0.5),
+                    stretch: crate::time_stretch::StretchAlgorithm::LinearResample,
+                    apply_pitch_edit: false,
+                    output: crate::encode::OutputSpec::wav_32f(),
+                    quality_preset: QualityPreset::Realtime,
+                    cancel_flag: None,
+                },
+            )
+            .unwrap();
+            // 取中段一帧，避开任何边缘淡化。
+            let mid = (mix.len() / 2) & !1;
+            (mix[mid], mix[mid + 1])
+        };
+
+        let (n_l, n_r) = render(&build_timeline(0));
+        assert!(
+            (n_l - 0.5).abs() < 0.02 && (n_r - (-0.25)).abs() < 0.02,
+            "Normal 应输出原始 L/R，得到 ({n_l}, {n_r})"
+        );
+
+        let (s_l, s_r) = render(&build_timeline(1));
+        assert!(
+            (s_l - (-0.25)).abs() < 0.02 && (s_r - 0.5).abs() < 0.02,
+            "Swap 应交换 L/R，得到 ({s_l}, {s_r})"
+        );
+
+        let (ml, mr) = render(&build_timeline(3));
+        assert!(
+            (ml - 0.5).abs() < 0.02 && (mr - 0.5).abs() < 0.02,
+            "MonoLeft 应双声道输出左声道，得到 ({ml}, {mr})"
+        );
+
+        let (mml, mmr) = render(&build_timeline(2));
+        assert!(
+            (mml - 0.125).abs() < 0.02 && (mmr - 0.125).abs() < 0.02,
+            "MonoMix 应双声道输出 (L+R)/2=0.125，得到 ({mml}, {mmr})"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+
 
     /// 交错 PCM：帧 i 的样本值为 [i as f32, i as f32 + 0.5]。
     fn make_pcm(frames: usize, channels: usize) -> Vec<f32> {

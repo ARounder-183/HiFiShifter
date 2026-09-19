@@ -367,6 +367,7 @@ fn build_audio_clip_take(
     let mut duration_sec = None;
     let mut duration_frames = None;
     let mut source_sample_rate = None;
+    let mut source_channels: Option<u16> = None;
     let mut pitch_range = None;
     if !raw_path.is_empty() && Path::new(&audio_path).exists() {
         if !is_audio_supported(&audio_path) {
@@ -375,6 +376,11 @@ fn build_audio_clip_take(
             duration_sec = Some(info.duration_sec);
             duration_frames = Some(info.total_frames);
             source_sample_rate = Some(info.sample_rate);
+            source_channels = if info.channels > 0 {
+                Some(info.channels)
+            } else {
+                None
+            };
             pitch_range = Some(PitchRange {
                 min: -24.0,
                 max: 24.0,
@@ -445,6 +451,9 @@ fn build_audio_clip_take(
         playback_rate: (play_rate as f32).clamp(0.1, 10.0),
         reversed: item_reversed,
         loop_enabled: item_loop,
+        channel_mode: crate::channel_mode::TakeChannelMode::from_reaper_chanmode(take.chan_mode)
+            .raw(),
+        source_channels,
         midi_note_data: None,
         midi_fill_gaps: false,
         stretch_markers: Vec::new(),
@@ -1337,6 +1346,13 @@ fn process_item(
     let duration_sec = audio_info.as_ref().map(|info| info.duration_sec);
     let duration_frames = audio_info.as_ref().map(|info| info.total_frames);
     let source_sr = audio_info.as_ref().map(|info| info.sample_rate);
+    // 源声道数（header 探针可得；0 = 未知 → None）。
+    let source_channels_hdr: Option<u16> = audio_info
+        .as_ref()
+        .map(|info| info.channels)
+        .filter(|c| *c > 0);
+    // 活跃 take 的声道模式（REAPER CHANMODE 原始值）。
+    let active_take_chan_mode = take.chan_mode;
 
     // 获取 take 参数
     let raw_play_rate = take.play_rate.first().copied().unwrap_or(1.0);
@@ -1516,6 +1532,12 @@ fn process_item(
                 playback_rate: (effective_rate as f32).clamp(0.1, 10.0),
                 clip_playback_rate: 1.0,
                 reversed: item_reversed,
+                // 活跃 take 的声道模式（REAPER CHANMODE → 本工程 0..=4）。
+                channel_mode: crate::channel_mode::TakeChannelMode::from_reaper_chanmode(
+                    take.chan_mode,
+                )
+                .raw(),
+                source_channels: source_channels_hdr,
                 loop_enabled: item_loop,
                 // REAPER SNAPOFFS = 相对 item 起点的偏移（项目时间轴秒）。
                 // 拉伸分段只落在第一段；越界钳制到段长。
@@ -1718,6 +1740,13 @@ fn process_item(
             playback_rate: (effective_rate as f32).clamp(0.1, 10.0),
             clip_playback_rate: 1.0,
             reversed: item_reversed,
+            // 活跃 take 的声道模式占位：sync_take_from_flat 会把该投影写回
+            // 活跃 take，故必须取活跃 take 的真实值而非 0。
+            channel_mode: crate::channel_mode::TakeChannelMode::from_reaper_chanmode(
+                active_take_chan_mode,
+            )
+            .raw(),
+            source_channels: source_channels_hdr,
             loop_enabled: item_loop,
             // REAPER SNAPOFFS：相对 item 起点的偏移，钳制到 Clip 长度。
             snap_offset_sec: item.snap_offs.max(0.0).min(item_length.max(0.0)),
@@ -2330,6 +2359,8 @@ fn process_midi_item(
         playback_rate: play_rate as f32,
         clip_playback_rate: 1.0,
         reversed: false,
+        channel_mode: 0,
+        source_channels: None,
         // MIDI item 没有源媒体可循环；Loop 属性保持关闭。
         loop_enabled: false,
         // REAPER SNAPOFFS：相对 item 起点的偏移，钳制到 Clip 长度。
@@ -2455,6 +2486,46 @@ mod tests {
         let (start3, end3) = compute_item_source_window_sec(&take, 10.0, Some(4.0), true, true);
         assert!(start3.abs() < 1e-9);
         assert!((end3 - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn chanmode_import_maps_standard_and_degrades_multichannel() {
+        // 标准五模式：default_take 携带 item 级 CHANMODE（解析器约定），
+        // 显式 take 携带 <TAKE> 级 CHANMODE —— build_audio_clip_take 均取
+        // `take.chan_mode` 映射。
+        let mut item = ReaperItem::default();
+        item.default_take.source = Some(wave_source("C:/missing/vocal.wav"));
+        item.default_take.chan_mode = 3; // Mono (left)
+        let (clips, _, _, _) = run_process_item(&item);
+        assert_eq!(clips[0].channel_mode, 3);
+
+        // 显式 take 自带 CHANMODE 1（swap）。
+        let mut item2 = ReaperItem::default();
+        item2.default_take.source = Some(wave_source("C:/missing/a.wav"));
+        let mut explicit = ReaperTake::default();
+        explicit.source = Some(wave_source("C:/missing/b.wav"));
+        explicit.chan_mode = 1;
+        item2.takes.push(explicit);
+        let (clips2, _, _, _) = run_process_item(&item2);
+        // 活跃 take 选择：default 有 source → idx 0。
+        assert_eq!(clips2[0].channel_mode, 0);
+        // inactive take 保留自身模式。
+        assert_eq!(clips2[0].takes[1].channel_mode, 1);
+
+        // ≥5 的多声道 mono 编码降级为 MonoMix（2）。
+        let mut item3 = ReaperItem::default();
+        item3.default_take.source = Some(wave_source("C:/missing/vocal.wav"));
+        item3.default_take.chan_mode = 5;
+        let (clips3, _, _, _) = run_process_item(&item3);
+        assert_eq!(clips3[0].channel_mode, 2);
+    }
+
+    #[test]
+    fn chanmode_export_writes_raw_value() {
+        use crate::channel_mode::TakeChannelMode;
+        for raw in 0..=4i32 {
+            assert_eq!(TakeChannelMode::to_reaper_chanmode(raw), raw);
+        }
     }
 
     #[test]

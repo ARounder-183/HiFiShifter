@@ -225,6 +225,10 @@ export interface ClipTakeInfo {
     playbackRate: number;
     reversed: boolean;
     loopEnabled: boolean;
+    /** 声道模式：0..=4 对齐 REAPER CHANMODE（0 正常 / 1 交换 / 2 混合 / 3 仅左 / 4 仅右）。 */
+    channelMode: number;
+    /** 源文件声道数（未知时缺省，由波形峰值头兜底）。 */
+    sourceChannels?: number;
     midiNoteData?: MidiNoteEvent[];
     midiFillGaps?: boolean;
 }
@@ -254,6 +258,10 @@ export interface ClipInfo {
     /** Clip 级播放倍率；playbackRate = clipPlaybackRate × activeTake.playbackRate。 */
     clipPlaybackRate?: number;
     reversed: boolean;
+    /** 声道模式（active take 投影）：0..=4 对齐 REAPER CHANMODE。 */
+    channelMode: number;
+    /** 源文件声道数（active take 投影；未知时缺省）。 */
+    sourceChannels?: number;
     /** Loop（循环源）：延伸超出源媒体区间时按周期回绕产生循环内容。 */
     loopEnabled: boolean;
     /**

@@ -87,7 +87,12 @@ impl SynthConfig {
 /// （Loop / 循环源属性）与 `Clip.snap_offset_sec`。v3 及更早的扁平 Clip
 /// 打开时迁移为单 Take，并按"为新的音频块启用循环"设置补齐 Loop
 /// （见 open_project）。
-pub const CURRENT_PROJECT_FILE_VERSION: u32 = 4;
+///
+/// v5：`ClipTake` 新增 `channel_mode`（声道模式，0..=4 对齐 REAPER
+/// CHANMODE）与 `source_channels`（源声道数）。旧工程反序列化时
+/// `channel_mode` 缺省为 0（正常）、`source_channels` 缺省为 None，
+/// `finalize_timeline_for_session` 阶段对越界值规范化 —— 无需数据搬移。
+pub const CURRENT_PROJECT_FILE_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -662,17 +667,17 @@ mod tests {
         let bytes = serialize_project_file_for_path(&pf, Path::new("test.json")).unwrap();
         let text = std::str::from_utf8(&bytes).unwrap();
         assert!(!text.contains('\n'), "JSON project should be compact");
-        assert!(text.contains("\"version\":4"));
+        assert!(text.contains("\"version\":5"));
     }
 
     #[test]
     fn project_file_version_can_be_read_without_full_timeline_parse() {
         let pf = project_file_with_clip(TimelineState::default());
         let json_bytes = serialize_project_file_for_path(&pf, Path::new("test.json")).unwrap();
-        assert_eq!(read_project_file_version(&json_bytes), Some(4));
+        assert_eq!(read_project_file_version(&json_bytes), Some(5));
 
         let msgpack_bytes = serialize_project_file_for_path(&pf, Path::new("test.hshp")).unwrap();
-        assert_eq!(read_project_file_version(&msgpack_bytes), Some(4));
+        assert_eq!(read_project_file_version(&msgpack_bytes), Some(5));
     }
 
     #[test]

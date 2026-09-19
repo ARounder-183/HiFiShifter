@@ -215,6 +215,8 @@ function toSceneClip(entry: ClipPeaksEntry): WaveformSceneClip | null {
         fadeInDir: entry.fadeInDir,
         fadeOutShape: entry.fadeOutShape,
         fadeOutDir: entry.fadeOutDir,
+        channelMode: entry.channelMode,
+        sourceChannels: entry.sourceChannels,
     };
 }
 

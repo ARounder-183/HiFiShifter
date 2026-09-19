@@ -17,7 +17,7 @@ use std::time::SystemTime;
 ///
 /// v3：分析结果新增「逐帧原声电平」（DYN 的基线）。旧条目只有音高，
 /// 若沿用会让 DYN 面板一直显示默认基线。
-pub const CACHE_FORMAT_VERSION: u32 = 3;
+pub const CACHE_FORMAT_VERSION: u32 = 4;
 
 /// Default maximum number of cached clip pitch curves
 pub const DEFAULT_CACHE_CAPACITY: usize = 100;
@@ -40,6 +40,10 @@ pub struct ClipCacheKey {
     pub f0_floor: u64,
     /// F0 ceiling frequency (Hz)
     pub f0_ceil: u64,
+    /// 声道模式（0..=4，对齐 REAPER CHANMODE）：分析输入是条件化后的有效
+    /// 单声道（MonoLeft → L、MonoRight → R、其余 → 均值），模式变化即
+    /// 分析结果变化，必须参与 key。
+    pub channel_mode: i32,
     /// Cache format version
     pub version: u32,
 }
@@ -170,6 +174,7 @@ pub fn generate_clip_cache_key(key_data: &ClipCacheKey) -> String {
     hasher.update(key_data.algo.as_bytes());
     hasher.update(&key_data.f0_floor.to_le_bytes());
     hasher.update(&key_data.f0_ceil.to_le_bytes());
+    hasher.update(&key_data.channel_mode.to_le_bytes());
 
     hasher.finalize().to_hex().to_string()
 }

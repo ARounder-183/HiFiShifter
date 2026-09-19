@@ -403,6 +403,7 @@ fn build_rendered_hash_input<'a>(
         playback_rate: clip_playback_rate(clip),
         reversed: clip.reversed,
         loop_enabled: clip.loop_enabled,
+        channel_mode: clip.channel_mode,
         source_range_q: (
             (clip.source_start_sec * 1000.0).round() as i64,
             (clip.source_end_sec * 1000.0).round() as i64,
@@ -625,23 +626,13 @@ fn render_single_clip(
         crate::mixdown::reverse_interleaved_frames(&mut segment, in_channels_usize);
     }
 
-    // 4. 转 stereo
-    let segment = if in_channels == 1 {
-        let frames = segment.len();
-        let mut stereo = Vec::with_capacity(frames * 2);
-        for sample in segment {
-            stereo.push(sample);
-            stereo.push(sample);
-        }
-        stereo
-    } else if in_channels >= 2 {
-        segment
-            .chunks_exact(in_channels_usize)
-            .flat_map(|chunk| [chunk[0], chunk[1]])
-            .collect()
-    } else {
-        return Err("unsupported channel count".to_string());
-    };
+    // 4. 声道条件化（take 级 channel_mode 的唯一语义实现，与 mixdown 一致）：
+    //    mono 源复制为双声道、stereo 源按模式取平面/交换/下混。
+    let segment = crate::channel_mode::condition_take_channels(
+        &segment,
+        in_channels,
+        clip.take_channel_mode(),
+    );
     let mut segment = segment;
 
     if cancel.is_cancelled() {
@@ -674,6 +665,7 @@ fn render_single_clip(
             key_start_sec,
             key_end_sec,
             clip.reversed && !loop_mode,
+            clip.channel_mode,
             // 离线 Loop 的处理对象是"回绕平铺 segment"，与实时域（完整文件
             // 自然顺序）不同 —— 用 tiled_wrap 域判别隔离，避免互相毒化缓存。
             loop_mode,
@@ -974,37 +966,58 @@ fn render_single_clip(
         );
     }
 
-    // Step 1: Extract mono from the (already time-stretched) stereo segment
-    let mono: Vec<f32> = segment
-        .chunks_exact(2)
-        .map(|ch| (ch[0] + ch[1]) * 0.5f32)
-        .collect();
-
-    // Step 2: Pre-populate HNSEP cache by doing separation once.
-    // This ensures the subsequent render_variant(harmonic_only)? hits the cache
-    // and only runs HiFiGAN, skipping HNSEP.
-    if cancel.is_cancelled() {
-        return Err(BG_RENDER_CANCELLED_ERR.to_string());
-    }
-    // HNSEP 分离失败（模型缺失/推理错误）时降级为非 breath 渲染：外层已因
-    // 气声跳过外部拉伸，硬错误会让整条 clip 无声等待，比"没有气声"严重得多。
-    log::warn!(
-        "[render] stage=hnsep_begin clip_id={} elapsed_ms={}",
-        clip.id,
-        stage_started.elapsed().as_millis()
-    );
-    let noise_mono = match crate::hnsep_onnx::infer_noise_mono(&clip.id, &mono, out_rate) {
-        Ok(noise) => noise,
-        Err(e) => {
-            log::warn!(
-                "render_single_clip: HNSEP failed for clip_id={}, falling back to non-breath render: {e}",
-                clip.id
-            );
-            return Ok(RenderedClipOutput {
-                rendered_stereo: render_variant(clip)?,
-                breath_noise_stereo: None,
-            });
+    // Step 1+2: 按有效声道数逐声道分离并预填 HNSEP 缓存。
+    // - 等效单声道：对 (L+R)/2 下混分离一次，缓存键 channel 0 —— 与既有
+    //   1-pass 优化完全一致（后续 render_variant 的链内分离命中缓存）。
+    // - 真立体声：L/R 平面各自分离并预填各自声道位的缓存键（链内逐声道
+    //   命中），噪声 stem 取两声道 noise 交错 —— 保证气声层也是真立体声。
+    let fanout_channels = crate::channel_mode::effective_channels(
+        clip.source_channels.unwrap_or(1).max(1),
+        clip.take_channel_mode(),
+    ) as usize;
+    let noise_planes: Vec<std::sync::Arc<Vec<f32>>> = {
+        if cancel.is_cancelled() {
+            return Err(BG_RENDER_CANCELLED_ERR.to_string());
         }
+        // HNSEP 分离失败（模型缺失/推理错误）时降级为非 breath 渲染：外层已因
+        // 气声跳过外部拉伸，硬错误会让整条 clip 无声等待，比"没有气声"严重得多。
+        log::warn!(
+            "[render] stage=hnsep_begin clip_id={} channels={fanout_channels} elapsed_ms={}",
+            clip.id,
+            stage_started.elapsed().as_millis()
+        );
+        let extract_plane = |plane: usize| -> Vec<f32> {
+            segment
+                .chunks_exact(2)
+                .map(|ch| ch[plane])
+                .collect::<Vec<f32>>()
+        };
+        let mixdown_mono: Vec<f32> = segment
+            .chunks_exact(2)
+            .map(|ch| (ch[0] + ch[1]) * 0.5f32)
+            .collect();
+        let channels_mono: Vec<Vec<f32>> = if fanout_channels <= 1 {
+            vec![mixdown_mono]
+        } else {
+            vec![extract_plane(0), extract_plane(1)]
+        };
+        let mut planes = Vec::with_capacity(channels_mono.len());
+        for (ch_idx, ch_mono) in channels_mono.iter().enumerate() {
+            match crate::hnsep_onnx::infer_noise_mono(&clip.id, ch_mono, out_rate, ch_idx as u16) {
+                Ok(noise) => planes.push(noise),
+                Err(e) => {
+                    log::warn!(
+                        "render_single_clip: HNSEP failed for clip_id={} channel={ch_idx}, falling back to non-breath render: {e}",
+                        clip.id
+                    );
+                    return Ok(RenderedClipOutput {
+                        rendered_stereo: render_variant(clip)?,
+                        breath_noise_stereo: None,
+                    });
+                }
+            }
+        }
+        planes
     };
 
     // Step 3: Render harmonic_only through ProcessorChain (HNSEP cache hits → HiFiGAN only)
@@ -1018,26 +1031,41 @@ fn render_single_clip(
     }
     let harmonic_only = render_variant(&harmonic_only_clip)?;
 
-    // Step 4: Convert noise mono to stereo, matching harmonic_only length
+    // Step 4: Convert noise stem(s) to stereo, matching harmonic_only length.
+    // 等效单声道 → 对齐后复制双声道；真立体声 → 两声道分别对齐后交错。
     let out_len = harmonic_only.len();
     let out_frames = out_len / 2;
     let noise_stereo: Vec<f32> = {
-        let noise_mono_raw = noise_mono.as_ref();
         // 时间拉伸若由处理器内部完成（mel 域），谐波输出是**时间轴**长度，
         // 而 HNSEP 的噪声 stem 仍是**源速率**长度。必须对齐后再转立体声；
         // 对齐必须用与谐波一致的拉伸算法 —— 线性重采样会把气声的谱包络
         // 按 1/rate 缩放（慢放变闷、快放混叠），听感即"气声没有被正确拉伸"。
-        let aligned = crate::renderer::chain::align_noise_stem_to_len(
-            noise_mono_raw,
-            out_rate,
-            out_frames,
-            crate::time_stretch::resolved_external_stretch_algorithm(),
-        );
+        let stretch_algo = crate::time_stretch::resolved_external_stretch_algorithm();
+        let aligned: Vec<Vec<f32>> = noise_planes
+            .iter()
+            .map(|plane| {
+                crate::renderer::chain::align_noise_stem_to_len(
+                    plane.as_slice(),
+                    out_rate,
+                    out_frames,
+                    stretch_algo,
+                )
+            })
+            .collect();
         let mut stereo = Vec::with_capacity(out_len);
-        // Duplicate each mono sample to L/R channels
-        for &s in &aligned {
-            stereo.push(s);
-            stereo.push(s);
+        if aligned.len() <= 1 {
+            // Duplicate each mono sample to L/R channels
+            if let Some(aligned_mono) = aligned.first() {
+                for &s in aligned_mono.iter().take(out_frames) {
+                    stereo.push(s);
+                    stereo.push(s);
+                }
+            }
+        } else {
+            for f in 0..out_frames {
+                stereo.push(aligned[0].get(f).copied().unwrap_or(0.0));
+                stereo.push(aligned[1].get(f).copied().unwrap_or(0.0));
+            }
         }
         // 长度兜底（重采样在极小输入下可能少一帧）
         if stereo.len() < out_len {

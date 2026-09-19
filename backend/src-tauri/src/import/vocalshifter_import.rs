@@ -604,6 +604,8 @@ fn create_midi_clip_from_file(
         playback_rate: rate as f32,
         clip_playback_rate: 1.0,
         reversed: false,
+        channel_mode: 0,
+        source_channels: None,
         // MIDI clip（音高参考块）没有源媒体可循环，Loop 保持关闭。
         loop_enabled: false,
         snap_offset_sec: 0.0,
@@ -910,6 +912,11 @@ pub fn import_vsp(data: &[u8], vsp_file_dir: &Path) -> Result<VspImportResult, S
         let duration_sec = Some(info.duration_sec);
         let duration_frames = Some(info.total_frames);
         let source_sr = Some(info.sample_rate);
+        let source_channels_hdr: Option<u16> = if info.channels > 0 {
+            Some(info.channels)
+        } else {
+            None
+        };
         let waveform_preview = Some(info.waveform_preview.clone());
 
         let source_duration_sec = info.duration_sec;
@@ -1004,6 +1011,8 @@ pub fn import_vsp(data: &[u8], vsp_file_dir: &Path) -> Result<VspImportResult, S
                     playback_rate: rate.clamp(0.1, 10.0),
                     clip_playback_rate: 1.0,
                     reversed: false,
+                    channel_mode: 0,
+                    source_channels: source_channels_hdr,
                     loop_enabled: crate::config::loop_new_clips_default(),
                     snap_offset_sec: 0.0,
                     fade_in_sec: 0.0,
@@ -1123,6 +1132,8 @@ pub fn import_vsp(data: &[u8], vsp_file_dir: &Path) -> Result<VspImportResult, S
                 playback_rate: rate.clamp(0.1, 10.0),
                 clip_playback_rate: 1.0,
                 reversed: false,
+                channel_mode: 0,
+                source_channels: source_channels_hdr,
                 loop_enabled: crate::config::loop_new_clips_default(),
                 snap_offset_sec: 0.0,
                 fade_in_sec: 0.0,
@@ -1680,6 +1691,11 @@ pub fn import_vsp_clipboard(
         let duration_sec = Some(info.duration_sec);
         let duration_frames = Some(info.total_frames);
         let source_sr = Some(info.sample_rate);
+        let source_channels_hdr: Option<u16> = if info.channels > 0 {
+            Some(info.channels)
+        } else {
+            None
+        };
         let waveform_preview = Some(info.waveform_preview.clone());
 
         let source_duration_sec = info.duration_sec;
@@ -1772,6 +1788,8 @@ pub fn import_vsp_clipboard(
                     playback_rate: rate.clamp(0.1, 10.0),
                     clip_playback_rate: 1.0,
                     reversed: false,
+                    channel_mode: 0,
+                    source_channels: source_channels_hdr,
                     loop_enabled: crate::config::loop_new_clips_default(),
                     snap_offset_sec: 0.0,
                     fade_in_sec: 0.0,
@@ -1890,6 +1908,8 @@ pub fn import_vsp_clipboard(
                 playback_rate: rate.clamp(0.1, 10.0),
                 clip_playback_rate: 1.0,
                 reversed: false,
+                channel_mode: 0,
+                source_channels: source_channels_hdr,
                 loop_enabled: crate::config::loop_new_clips_default(),
                 snap_offset_sec: 0.0,
                 fade_in_sec: 0.0,
@@ -2266,6 +2286,11 @@ fn import_vsp_clipboard_selected_tracks(
         let duration_sec = Some(info.duration_sec);
         let duration_frames = Some(info.total_frames);
         let source_sr = Some(info.sample_rate);
+        let source_channels_hdr: Option<u16> = if info.channels > 0 {
+            Some(info.channels)
+        } else {
+            None
+        };
         let waveform_preview = Some(info.waveform_preview.clone());
 
         let source_duration_sec = info.duration_sec;
@@ -2357,6 +2382,8 @@ fn import_vsp_clipboard_selected_tracks(
                     playback_rate: rate.clamp(0.1, 10.0),
                     clip_playback_rate: 1.0,
                     reversed: false,
+                    channel_mode: 0,
+                    source_channels: source_channels_hdr,
                     loop_enabled: crate::config::loop_new_clips_default(),
                     snap_offset_sec: 0.0,
                     fade_in_sec: 0.0,
@@ -2473,6 +2500,8 @@ fn import_vsp_clipboard_selected_tracks(
                 playback_rate: rate.clamp(0.1, 10.0),
                 clip_playback_rate: 1.0,
                 reversed: false,
+                channel_mode: 0,
+                source_channels: source_channels_hdr,
                 loop_enabled: crate::config::loop_new_clips_default(),
                 snap_offset_sec: 0.0,
                 fade_in_sec: 0.0,

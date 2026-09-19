@@ -1393,6 +1393,57 @@ pub(super) fn set_clip_take_reversed(
     payload
 }
 
+pub(super) fn set_clip_take_channel_mode(
+    state: State<'_, AppState>,
+    clip_id: String,
+    take_id: String,
+    channel_mode: i32,
+    checkpoint: Option<bool>,
+) -> crate::models::TimelineStatePayload {
+    let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+    // 先校验、后 checkpoint：失败路径不留“空 undo 步”。
+    {
+        let Some(clip) = tl.clips.iter().find(|c| c.id == clip_id) else {
+            drop(tl);
+            return take_error_payload(&state, format!("clip not found: {clip_id}"));
+        };
+        if clip.take(&take_id).is_none() {
+            drop(tl);
+            return take_error_payload(&state, format!("take not found: {take_id}"));
+        }
+    }
+    if checkpoint.unwrap_or(true) {
+        state.checkpoint_timeline(&tl, crate::state::HistoryOp::TakeChannelMode);
+    }
+    let active_changed = tl
+        .set_clip_take_channel_mode(&clip_id, &take_id, channel_mode)
+        .unwrap_or(false);
+    // 模式改变渲染输入语义（渲染哈希/拉伸键/formant 键均含模式），
+    // 与 reversed 同口径整体失效相关缓存。
+    invalidate_take_related_caches(&clip_id);
+    let root_track_id = tl
+        .clips
+        .iter()
+        .find(|c| c.id == clip_id)
+        .map(|c| c.track_id.clone())
+        .and_then(|t| tl.resolve_root_track_id(&t));
+    // active take 的模式改变条件化后的分析输入，需要重调度分析；
+    // inactive take 不改变当前可听内容，跳过以免无谓重算。
+    if active_changed {
+        maybe_schedule_formant_rebuild(&state, &tl, &clip_id);
+    }
+    state.audio_engine.update_timeline(tl.clone());
+    let mut payload = tl.to_payload();
+    payload.project = Some(state.project_meta_payload());
+    drop(tl);
+    if active_changed {
+        if let Some(root) = root_track_id {
+            crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root);
+        }
+    }
+    payload
+}
+
 pub(super) fn add_clip_take_from_media(
     state: State<'_, AppState>,
     clip_id: String,
@@ -1456,6 +1507,8 @@ pub(super) fn add_clip_take_from_media(
         playback_rate: 1.0,
         reversed: false,
         loop_enabled: crate::config::loop_new_clips_default(),
+        channel_mode: 0,
+        source_channels: if info.channels > 0 { Some(info.channels) } else { None },
         midi_note_data: None,
         midi_fill_gaps: false,
         stretch_markers: Vec::new(),
@@ -1523,6 +1576,8 @@ pub(super) fn import_media_files_as_takes(
             playback_rate: 1.0,
             reversed: false,
             loop_enabled: crate::config::loop_new_clips_default(),
+            channel_mode: 0,
+            source_channels: if info.channels > 0 { Some(info.channels) } else { None },
             midi_note_data: None,
             midi_fill_gaps: false,
             stretch_markers: Vec::new(),
@@ -1590,6 +1645,8 @@ pub(super) fn import_media_files_as_takes(
         playback_rate: 1.0,
         clip_playback_rate: 1.0,
         reversed: false,
+        channel_mode: 0,
+        source_channels: None,
         loop_enabled: crate::config::loop_new_clips_default(),
         snap_offset_sec: 0.0,
         fade_in_sec: 0.0,

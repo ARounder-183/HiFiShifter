@@ -19,6 +19,13 @@ import {
     parsePlaybackRateInput,
 } from "../runtime/timelineCanvasStyle";
 import { ClipFormantButton } from "./ClipFormantButton";
+import {
+    channelModeI18nKey,
+    channelModeShortLabel,
+    nextChannelMode,
+} from "../../../../utils/channelMode";
+import { useAppDispatch } from "../../../../app/hooks";
+import { setClipTakeChannelModeRemote } from "../../../../features/session/sessionSlice";
 
 export interface ClipRenameController {
     isEditing: () => boolean;
@@ -725,6 +732,12 @@ export const ClipHeader: React.FC<{
                 </button>
             )}
 
+            {/* 声道模式徽章：非"正常"时显示（音频 take 专属），点击循环切换。
+                与 Take 子菜单的循环按钮共用同一命令 —— 后端会整体失效渲染缓存。 */}
+            {showMute && clip.sourcePath && (clip.channelMode ?? 0) !== 0 && (
+                <ChannelModeBadge clip={clip} hideVisuals={hideVisuals} visualStyle={visualStyle} />
+            )}
+
             <ClipFormantButton
                 clip={clip}
                 hidden={!showFormant}
@@ -956,3 +969,60 @@ export const ClipHeader: React.FC<{
         </div>
     );
 };
+
+
+/** 声道模式徽章：显示当前模式的紧凑缩写，点击循环切换（0→1→2→3→4→0）。 */
+function ChannelModeBadge(props: {
+    clip: ClipInfo;
+    hideVisuals: boolean;
+    visualStyle: {
+        muteBadgeWidth: number;
+        muteBadgeHeight: number;
+        muteBadgeFill: string;
+        muteBadgeStroke: string;
+        muteBadgeTextFill: string;
+    };
+}) {
+    const { clip, hideVisuals, visualStyle } = props;
+    const { t } = useI18n();
+    const dispatch = useAppDispatch();
+    const mode = clip.channelMode ?? 0;
+    const sourceLabel =
+        (clip.sourceChannels ?? 0) >= 2
+            ? t("clip_channel_source_stereo")
+            : t("clip_channel_source_mono");
+    return (
+        <button
+            className="rounded flex items-center justify-center border transition-all text-[9px] font-bold tracking-tight"
+            onPointerDown={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+            }}
+            onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const takes = clip.takes ?? [];
+                const active = takes.find((entry) => entry.id === clip.activeTakeId) ?? takes[0];
+                if (!active) return;
+                dispatch(
+                    setClipTakeChannelModeRemote({
+                        clipId: clip.id,
+                        takeId: active.id,
+                        channelMode: nextChannelMode(mode),
+                    }),
+                );
+            }}
+            data-tooltip={`${sourceLabel} \u00b7 ${t(channelModeI18nKey(mode))}`}
+            style={{
+                opacity: hideVisuals ? 0 : 1,
+                width: visualStyle.muteBadgeWidth,
+                height: visualStyle.muteBadgeHeight,
+                backgroundColor: visualStyle.muteBadgeFill,
+                borderColor: "rgba(120, 200, 255, 0.85)",
+                color: "rgba(150, 215, 255, 1)",
+            }}
+        >
+            {channelModeShortLabel(mode)}
+        </button>
+    );
+}

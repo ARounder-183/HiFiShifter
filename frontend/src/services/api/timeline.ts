@@ -380,6 +380,21 @@ export const timelineApi = {
             payload.checkpoint,
         ),
 
+    setClipTakeChannelMode: (payload: {
+        clipId: string;
+        takeId: string;
+        /** 0..=4，对齐 REAPER CHANMODE（0 正常 / 1 交换 / 2 混合 / 3 仅左 / 4 仅右） */
+        channelMode: number;
+        checkpoint?: boolean;
+    }) =>
+        invoke<TimelineResult>(
+            "set_clip_take_channel_mode",
+            payload.clipId,
+            payload.takeId,
+            payload.channelMode,
+            payload.checkpoint,
+        ),
+
     addClipTakeFromMedia: (payload: {
         clipId: string;
         sourcePath: string;

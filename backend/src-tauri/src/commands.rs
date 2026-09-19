@@ -578,34 +578,6 @@ pub async fn batch_get_waveform_mipmap(
     }
 }
 
-#[tauri::command(rename_all = "camelCase")]
-pub async fn get_waveform_manifest(
-    app: tauri::AppHandle,
-    source_path: String,
-) -> Result<crate::hfspeaks_v2::WaveformManifestPayload, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let state: State<'_, AppState> = app.state();
-        waveform::get_waveform_manifest(state, source_path)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command(rename_all = "camelCase")]
-pub async fn get_waveform_tiles_binary(
-    app: tauri::AppHandle,
-    source_path: String,
-    revision: String,
-    requests: Vec<crate::hfspeaks_v2::WaveformTileRequest>,
-) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let state: State<'_, AppState> = app.state();
-        waveform::get_waveform_tiles_binary(state, source_path, revision, requests)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
 // ===================== timeline =====================
 
 #[tauri::command(rename_all = "camelCase")]
@@ -982,6 +954,17 @@ pub fn set_clip_take_reversed(
     checkpoint: Option<bool>,
 ) -> crate::models::TimelineStatePayload {
     timeline::set_clip_take_reversed(state, clip_id, take_id, reversed, checkpoint)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_clip_take_channel_mode(
+    state: State<'_, AppState>,
+    clip_id: String,
+    take_id: String,
+    channel_mode: i32,
+    checkpoint: Option<bool>,
+) -> crate::models::TimelineStatePayload {
+    timeline::set_clip_take_channel_mode(state, clip_id, take_id, channel_mode, checkpoint)
 }
 
 #[tauri::command(rename_all = "camelCase")]

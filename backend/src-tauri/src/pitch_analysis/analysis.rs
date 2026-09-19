@@ -90,6 +90,7 @@ fn build_timeline_snapshot(
                 .to_string(),
                 f0_floor: crate::clip_pitch_cache::quantize_f64(f0_floor, 10.0),
                 f0_ceil: crate::clip_pitch_cache::quantize_f64(f0_ceil, 10.0),
+                channel_mode: clip.channel_mode,
                 version: crate::clip_pitch_cache::CACHE_FORMAT_VERSION,
             };
 
@@ -337,6 +338,7 @@ fn analyze_clip_with_cache(
         algo: algo_str.to_string(),
         f0_floor: crate::clip_pitch_cache::quantize_f64(f0_floor, 10.0),
         f0_ceil: crate::clip_pitch_cache::quantize_f64(f0_ceil, 10.0),
+        channel_mode: clip.channel_mode,
         version: crate::clip_pitch_cache::CACHE_FORMAT_VERSION,
     };
 
@@ -386,11 +388,13 @@ fn analyze_clip_with_cache(
         return Err("Resampled audio too short".to_string());
     }
 
-    // Convert to mono
-    let mut mono_raw: Vec<f64> = segment
-        .chunks_exact(in_channels_usize)
-        .map(|chunk| (chunk.iter().sum::<f32>() as f64) / (in_channels_usize as f64))
-        .collect();
+    // Convert to mono：按 take 声道模式取有效单声道（MonoLeft → L、
+    // MonoRight → R、其余 → 前两声道均值），与渲染侧条件化语义一致。
+    let mut mono_raw: Vec<f64> =
+        crate::channel_mode::effective_mono(&segment, in_channels_usize as u16, clip.take_channel_mode())
+            .into_iter()
+            .map(|v| v as f64)
+            .collect();
 
     // Preprocess: remove DC and normalize
     let mut mean = 0.0f64;
@@ -523,6 +527,7 @@ fn process_single_clip(
             .to_string(),
             f0_floor: crate::clip_pitch_cache::quantize_f64(f0_floor, 10.0),
             f0_ceil: crate::clip_pitch_cache::quantize_f64(f0_ceil, 10.0),
+            channel_mode: clip.channel_mode,
             version: crate::clip_pitch_cache::CACHE_FORMAT_VERSION,
         };
         let cache_key = crate::clip_pitch_cache::generate_clip_cache_key(&key_data);
@@ -1459,10 +1464,11 @@ pub(crate) fn compute_pitch_curve(job: &PitchJob, mut on_progress: impl FnMut(f3
             continue;
         }
 
-        let mut mono_raw: Vec<f64> = segment
-            .chunks_exact(in_channels_usize)
-            .map(|chunk| (chunk.iter().sum::<f32>() as f64) / (in_channels_usize as f64))
-            .collect();
+        let mut mono_raw: Vec<f64> =
+            crate::channel_mode::effective_mono(&segment, in_channels_usize as u16, clip.take_channel_mode())
+                .into_iter()
+                .map(|v| v as f64)
+                .collect();
 
         // Preprocess: remove DC and clamp.
         let mut mean = 0.0f64;

@@ -22,15 +22,6 @@ export const waveformApi = {
     batchGetWaveformMipmap: (sourcePaths: string[]) =>
         invoke<Record<string, [string, string, string]>>("batch_get_waveform_mipmap", sourcePaths),
 
-    getWaveformManifest: (sourcePath: string) =>
-        invoke<WaveformManifestPayload>("get_waveform_manifest", sourcePath),
-
-    getWaveformTilesBinary: (
-        sourcePath: string,
-        revision: string,
-        requests: WaveformTileRequest[],
-    ) => invoke<string>("get_waveform_tiles_binary", sourcePath, revision, requests),
-
     // ============== Mix 波形 API ==============
 
     getRootMixWaveformPeaksSegment: (
@@ -62,25 +53,3 @@ export const waveformApi = {
         ),
 };
 
-export interface WaveformManifestLevelPayload {
-    level: number;
-    divisionFactor: number;
-    peakCount: number;
-    tileCount: number;
-}
-
-export interface WaveformManifestPayload {
-    sourcePath: string;
-    revision: string;
-    sampleRate: number;
-    totalFrames: number;
-    channels: number;
-    durationSec: number;
-    tilePeaks: number;
-    levels: WaveformManifestLevelPayload[];
-}
-
-export interface WaveformTileRequest {
-    level: number;
-    tileIndex: number;
-}

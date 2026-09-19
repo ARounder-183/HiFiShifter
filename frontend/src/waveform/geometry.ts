@@ -10,6 +10,13 @@ export interface WaveformPeakView {
     max: Float32Array;
     dataStartSec: number;
     dataDurationSec: number;
+    /**
+     * 有效声道数（2 时 ch1Min/ch1Max 为第二声道视图，几何层画双带波形）。
+     * 缺省 1（单带，兼容未携带声道信息的调用方）。
+     */
+    channels?: 1 | 2;
+    ch1Min?: Float32Array;
+    ch1Max?: Float32Array;
 }
 
 export interface WaveformGeometry {
@@ -23,6 +30,10 @@ export type WaveformPeakResolver = (
     sourceSampleRate: number,
     sourceStartSec: number,
     sourceDurationSec: number,
+    /** 段所属 take 的声道模式（0..=4，对齐 REAPER CHANMODE）；缺省 0。 */
+    channelMode?: number,
+    /** 源文件声道数（未知时缺省 0，由峰值数据自身的 channels 兜底）。 */
+    sourceChannels?: number,
 ) => WaveformPeakView | null;
 
 /**
@@ -229,6 +240,8 @@ export function buildWaveformGeometry(args: {
             segment.sourceSampleRate,
             segment.sourceStartSec,
             sourceDurationSec,
+            segment.channelMode,
+            segment.sourceChannels,
         );
         if (!peaks || peaks.min.length === 0 || peaks.max.length === 0) {
             complete = false;
@@ -244,6 +257,32 @@ export function buildWaveformGeometry(args: {
         const centerY = segment.screenRect.y + halfHeight;
         const sourceSecondsPerPixel = sourceDurationSec / segment.screenRect.width;
 
+        const dual = peaks.channels === 2 && peaks.ch1Min != null && peaks.ch1Max != null;
+        // 双带布局：ch0 占上半带（中心 1/4）、ch1 占下半带（中心 3/4），
+        // 各自包络以半带高度归一 —— 立体声素材一眼可辨。
+        const bands: {
+            min: Float32Array;
+            max: Float32Array;
+            centerY: number;
+            halfHeight: number;
+        }[] = dual
+            ? [
+                  {
+                      min: peaks.min,
+                      max: peaks.max,
+                      centerY: segment.screenRect.y + segment.screenRect.height / 4,
+                      halfHeight: halfHeight / 2,
+                  },
+                  {
+                      min: peaks.ch1Min as Float32Array,
+                      max: peaks.ch1Max as Float32Array,
+                      centerY: segment.screenRect.y + (segment.screenRect.height * 3) / 4,
+                      halfHeight: halfHeight / 2,
+                  },
+              ]
+            : [{ min: peaks.min, max: peaks.max, centerY, halfHeight }];
+
+        for (const band of bands) {
         for (let x = firstX; x < lastX; x += 1) {
             const t = clamp01((x + 0.5 - segment.screenRect.x) / segment.screenRect.width);
             const sourceCenterSec = segment.reversed
@@ -270,8 +309,11 @@ export function buildWaveformGeometry(args: {
             let peakMin = Number.POSITIVE_INFINITY;
             let peakMax = Number.NEGATIVE_INFINITY;
             for (let index = indexStart; index <= indexEnd; index += 1) {
-                peakMin = Math.min(peakMin, peaks.min[index] ?? 0);
-                peakMax = Math.max(peakMax, peaks.max[index] ?? 0);
+                // 采样当前带（band）的声道平面 —— 双带布局下两带分别是
+                // ch0/ch1 视图；此前误读 peaks.min/max（恒为 ch0），两条
+                // 带画出同一个左声道。
+                peakMin = Math.min(peakMin, band.min[index] ?? 0);
+                peakMax = Math.max(peakMax, band.max[index] ?? 0);
             }
             if (!Number.isFinite(peakMin) || !Number.isFinite(peakMax)) continue;
 
@@ -309,15 +351,19 @@ export function buildWaveformGeometry(args: {
             const rectBottom = rectTop + segment.screenRect.height;
             const mappedTop = amplitudeMap(peakMax, gain, timeSec);
             const mappedBottom = amplitudeMap(peakMin, gain, timeSec);
-            const yTop = Math.min(rectBottom, Math.max(rectTop, centerY - mappedTop * halfHeight));
+            const yTop = Math.min(
+                rectBottom,
+                Math.max(rectTop, band.centerY - mappedTop * band.halfHeight),
+            );
             const yBottom = Math.min(
                 rectBottom,
-                Math.max(rectTop, centerY - mappedBottom * halfHeight),
+                Math.max(rectTop, band.centerY - mappedBottom * band.halfHeight),
             );
             const alpha = colorAlpha * segment.alpha * (inactive ? INACTIVE_TAKE_COLOR_ALPHA : 1);
 
             push(x + 0.5, yTop, segmentRed, segmentGreen, segmentBlue, alpha);
             push(x + 0.5, yBottom, segmentRed, segmentGreen, segmentBlue, alpha);
+        }
         }
     }
 

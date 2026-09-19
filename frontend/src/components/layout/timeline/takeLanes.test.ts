@@ -31,6 +31,7 @@ test("timeline/takeLanes.test.ts scripted checks", async () => {
             playbackRate: 1,
             reversed: false,
             loopEnabled: false,
+            channelMode: 0,
             ...overrides,
         };
     }
@@ -50,6 +51,7 @@ test("timeline/takeLanes.test.ts scripted checks", async () => {
             playbackRate: 1,
             reversed: false,
             loopEnabled: false,
+            channelMode: 0,
             snapOffsetSec: 0,
             fadeInSec: 0,
             fadeOutSec: 0,

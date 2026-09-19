@@ -225,6 +225,22 @@ fn apply_mix_automation(clip: &EngineClip, abs_frame: u64, l: f32, r: f32) -> (f
 /// 采样 clip 在 local 帧处的原始 PCM（不含 gain/fade，但含 volume/pan 自动化）。
 /// 返回 None 表示该帧应静音（越界、leading silence 等）。
 #[inline]
+/// Take 声道模式的实时采样映射（与离线 `condition_take_channels` 语义一致）。
+/// 仅用于**源 PCM** 读取路径；Swap/MonoLeft/MonoRight 是纯平面选择，
+/// MonoMix 为每样本一次加法 —— 均为零分配。
+fn apply_take_channel_mode(left: f32, right: f32, mode: crate::channel_mode::TakeChannelMode) -> (f32, f32) {
+    match mode {
+        crate::channel_mode::TakeChannelMode::Normal => (left, right),
+        crate::channel_mode::TakeChannelMode::Swap => (right, left),
+        crate::channel_mode::TakeChannelMode::MonoMix => {
+            let v = (left + right) * 0.5;
+            (v, v)
+        }
+        crate::channel_mode::TakeChannelMode::MonoLeft => (left, left),
+        crate::channel_mode::TakeChannelMode::MonoRight => (right, right),
+    }
+}
+
 fn sample_clip_pcm(clip: &EngineClip, local: u64, local_adj: f64) -> Option<(f32, f32)> {
     let abs_frame = clip.start_frame.saturating_add(local);
     let raw = if let Some(ref rendered) = clip.rendered_pcm {
@@ -270,7 +286,11 @@ fn sample_clip_pcm(clip: &EngineClip, local: u64, local_adj: f64) -> Option<(f32
             let idx = idx_i.rem_euclid(total) as usize;
             let base = idx * 2;
             if base + 1 < clip.src.pcm.len() {
-                Some((clip.src.pcm[base], clip.src.pcm[base + 1]))
+                Some(apply_take_channel_mode(
+                    clip.src.pcm[base],
+                    clip.src.pcm[base + 1],
+                    clip.channel_mode,
+                ))
             } else {
                 None
             }
@@ -305,7 +325,11 @@ fn sample_clip_pcm(clip: &EngineClip, local: u64, local_adj: f64) -> Option<(f32
                     };
                     let idx = (looped as usize) * 2;
                     if idx + 1 < clip.src.pcm.len() {
-                        Some((clip.src.pcm[idx], clip.src.pcm[idx + 1]))
+                        Some(apply_take_channel_mode(
+                            clip.src.pcm[idx],
+                            clip.src.pcm[idx + 1],
+                            clip.channel_mode,
+                        ))
                     } else {
                         None
                     }
@@ -315,7 +339,11 @@ fn sample_clip_pcm(clip: &EngineClip, local: u64, local_adj: f64) -> Option<(f32
             } else {
                 let idx = (src_abs as usize) * 2;
                 if idx + 1 < clip.src.pcm.len() {
-                    Some((clip.src.pcm[idx], clip.src.pcm[idx + 1]))
+                    Some(apply_take_channel_mode(
+                        clip.src.pcm[idx],
+                        clip.src.pcm[idx + 1],
+                        clip.channel_mode,
+                    ))
                 } else {
                     None
                 }
@@ -916,6 +944,48 @@ mod tests {
     use crate::audio_engine::types::{EngineClip, ResampledStereo};
     use std::sync::Arc;
 
+    #[test]
+    fn sample_clip_pcm_applies_take_channel_mode() {
+        // 源 PCM：帧 i = [L=i/4, R=-i/4]（左右可分辨）。
+        let mut pcm = Vec::new();
+        for i in 0..4 {
+            let f = i as f32;
+            pcm.push(f / 4.0);
+            pcm.push(-f / 4.0);
+        }
+        let mut clip = clip_with_dyn(None, None);
+        clip.src = ResampledStereo {
+            sample_rate: 44_100,
+            frames: 4,
+            pcm: Arc::new(pcm),
+        };
+
+        // Normal：原样。
+        clip.channel_mode = crate::channel_mode::TakeChannelMode::Normal;
+        let (l, r) = super::sample_clip_pcm(&clip, 2, 2.0).unwrap();
+        assert!((l - 0.5).abs() < 1e-6 && (r - (-0.5)).abs() < 1e-6);
+
+        // Swap：平面互换。
+        clip.channel_mode = crate::channel_mode::TakeChannelMode::Swap;
+        let (l, r) = super::sample_clip_pcm(&clip, 2, 2.0).unwrap();
+        assert!((l - (-0.5)).abs() < 1e-6 && (r - 0.5).abs() < 1e-6);
+
+        // MonoLeft：左平面复制。
+        clip.channel_mode = crate::channel_mode::TakeChannelMode::MonoLeft;
+        let (l, r) = super::sample_clip_pcm(&clip, 2, 2.0).unwrap();
+        assert!((l - 0.5).abs() < 1e-6 && (r - 0.5).abs() < 1e-6);
+
+        // MonoRight：右平面复制。
+        clip.channel_mode = crate::channel_mode::TakeChannelMode::MonoRight;
+        let (l, r) = super::sample_clip_pcm(&clip, 2, 2.0).unwrap();
+        assert!((l - (-0.5)).abs() < 1e-6 && (r - (-0.5)).abs() < 1e-6);
+
+        // MonoMix：两平面均值。
+        clip.channel_mode = crate::channel_mode::TakeChannelMode::MonoMix;
+        let (l, r) = super::sample_clip_pcm(&clip, 2, 2.0).unwrap();
+        assert!(l.abs() < 1e-6 && r.abs() < 1e-6);
+    }
+
     fn clip_with_curves(volume_curve: Option<Vec<f32>>) -> EngineClip {
         let mut clip = clip_with_dyn(None, None);
         clip.volume_curve = volume_curve.map(Arc::new);
@@ -938,6 +1008,7 @@ mod tests {
             src_start_frame: 0,
             src_end_frame: 4,
             reversed: false,
+        channel_mode: crate::channel_mode::TakeChannelMode::Normal,
             playback_rate: 1.0,
             local_src_offset_frames: 0,
             repeat: false,

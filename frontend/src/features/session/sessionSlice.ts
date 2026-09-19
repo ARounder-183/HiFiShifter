@@ -32,6 +32,7 @@ import type {
 import { normalizeSplitTransitionCurve } from "./sessionTypes";
 import { SILENCE_DETECT_DEFAULTS } from "./sessionTypes";
 import { modEuclid, resolveLoopMediaDurationSec } from "../../utils/loopRender";
+import { normalizeChannelMode } from "../../utils/channelMode";
 
 import {
     addClipOnTrack,
@@ -55,6 +56,7 @@ import {
     removeClipTakeRemote,
     renameClipTakeRemote,
     setClipTakeReversedRemote,
+    setClipTakeChannelModeRemote,
     addClipTakeFromMediaRemote,
     ungroupClipsRemote,
     toggleGroupDisabledRemote,
@@ -317,7 +319,6 @@ export type {
 };
 
 type ClipColor = ClipInfo["color"];
-type WaveformPreview = number[] | { l: number[]; r: number[] };
 type StretchAlgorithmOption = "linear" | "signalsmith" | "soundtouch";
 type ClipFormantToolWindowState = {
     open: boolean;
@@ -557,7 +558,6 @@ export interface SessionState {
     selectionContext: "param" | "clips" | null;
     clipAutomation: Record<string, Record<string, AutomationPoint[]>>;
     selectedPointId: string | null;
-    clipWaveforms: Record<string, WaveformPreview>;
     clipPitchRanges: Record<string, { min: number; max: number }>;
 
     /**
@@ -1265,6 +1265,11 @@ function parseTimelineClipTake(take: TimelineClipTake): ClipTakeInfo {
         playbackRate: take.playback_rate != null ? clamp(Number(take.playback_rate), 0.1, 10) : 1,
         reversed: Boolean(take.reversed),
         loopEnabled: Boolean(take.loop_enabled),
+        channelMode: normalizeChannelMode(take.channel_mode),
+        sourceChannels:
+            Number.isFinite(Number(take.source_channels)) && Number(take.source_channels) > 0
+                ? Number(take.source_channels)
+                : undefined,
         midiNoteData: take.midi_note_data?.map((n) => ({
             startSec: n.start_sec,
             endSec: n.end_sec,
@@ -1297,6 +1302,8 @@ function parseClipTakes(clip: TimelineClip, flat: ClipInfo): ClipTakeInfo[] {
             playbackRate: clamp(flat.playbackRate / clipRate, 0.1, 10),
             reversed: flat.reversed,
             loopEnabled: flat.loopEnabled,
+            channelMode: flat.channelMode,
+            sourceChannels: flat.sourceChannels,
             midiNoteData: flat.midiNoteData,
             midiFillGaps: flat.midiFillGaps ?? false,
         },
@@ -1390,6 +1397,8 @@ function updateActiveTakeFromFlat(clip: ClipInfo): void {
     take.sourceEndSec = clip.sourceEndSec;
     take.playbackRate = clamp(clip.playbackRate / getClipRateMultiplier(clip), 0.1, 10);
     take.reversed = clip.reversed;
+    take.channelMode = clip.channelMode;
+    take.sourceChannels = clip.sourceChannels;
     take.loopEnabled = clip.loopEnabled;
     take.midiNoteData = clip.midiNoteData;
     take.midiFillGaps = clip.midiFillGaps;
@@ -1414,6 +1423,8 @@ function updateTakesFromFlatWithSync(state: SessionState, clip: ClipInfo): void 
         take.sourceEndSec = clip.sourceEndSec;
         take.playbackRate = clamp(clip.playbackRate / rateMultiplier, 0.1, 10);
         take.reversed = clip.reversed;
+        take.channelMode = clip.channelMode;
+        take.sourceChannels = clip.sourceChannels;
         take.loopEnabled = clip.loopEnabled;
     }
 }
@@ -1429,6 +1440,8 @@ function applyActiveTakeToFlat(clip: ClipInfo, take: ClipTakeInfo): void {
     clip.sourceEndSec = take.sourceEndSec;
     clip.playbackRate = getClipRateMultiplier(clip) * take.playbackRate;
     clip.reversed = take.reversed;
+    clip.channelMode = take.channelMode;
+    clip.sourceChannels = take.sourceChannels;
     clip.loopEnabled = take.loopEnabled;
     clip.midiNoteData = take.midiNoteData;
     clip.midiNoteCount = take.midiNoteData?.length;
@@ -1655,6 +1668,11 @@ function applyTimelineState(
                     : (oldClipsById.get(clip.id)?.playbackRate ?? 1),
             clipPlaybackRate: clamp(Number(clip.clip_playback_rate ?? 1) || 1, 0.1, 10),
             reversed: Boolean(clip.reversed),
+            channelMode: normalizeChannelMode(clip.channel_mode),
+            sourceChannels:
+                Number.isFinite(Number(clip.source_channels)) && Number(clip.source_channels) > 0
+                    ? Number(clip.source_channels)
+                    : undefined,
             loopEnabled: Boolean(clip.loop_enabled),
             // SnapOffset（吸附偏移）：旧工程缺失时自动补齐为 0。
             snapOffsetSec: Math.max(0, Number(clip.snap_offset_sec ?? 0) || 0),
@@ -1865,15 +1883,12 @@ function applyTimelineState(
         );
     }
 
-    const nextWaveforms: Record<string, WaveformPreview> = {};
     const nextPitchRanges: Record<string, { min: number; max: number }> = {};
     for (const clip of timeline.clips) {
         const clipId = clip.id;
-        nextWaveforms[clipId] = (clip.waveform_preview ?? []) as WaveformPreview;
         nextPitchRanges[clipId] = clip.pitch_range ?? { min: -24, max: 24 };
         ensureClipAutomation(state, clipId);
     }
-    state.clipWaveforms = nextWaveforms;
     state.clipPitchRanges = nextPitchRanges;
 
     // Any timeline refresh may change pitch analysis inputs and therefore param curves.
@@ -1893,9 +1908,6 @@ function upsertImportedClip(
     if (existing) {
         state.selectedClipId = existing.id;
         ensureClipAutomation(state, existing.id);
-        if (meta?.waveform) {
-            state.clipWaveforms[existing.id] = meta.waveform;
-        }
         if (meta?.pitchRange) {
             state.clipPitchRanges[existing.id] = meta.pitchRange;
         }
@@ -1941,6 +1953,8 @@ function upsertImportedClip(
         // 乐观创建的导入 Clip：Loop 跟随"为新的音频块启用循环"设置
         //（默认开启；后端权威载荷返回后会覆盖该值）。
         loopEnabled: state.loopNewClipsEnabled !== false,
+        channelMode: 0,
+        sourceChannels: undefined,
         snapOffsetSec: 0,
         fadeInSec: 0,
         fadeOutSec: 0,
@@ -1954,7 +1968,6 @@ function upsertImportedClip(
     state.playheadSec = startSec;
     state.selectedPointId = null;
     ensureClipAutomation(state, newClipId);
-    state.clipWaveforms[newClipId] = meta?.waveform ?? [];
     state.clipPitchRanges[newClipId] = meta?.pitchRange ?? {
         min: -24,
         max: 24,
@@ -2070,7 +2083,6 @@ const initialState: SessionState = {
     selectionContext: null,
     clipAutomation: {},
     selectedPointId: null,
-    clipWaveforms: {},
     clipPitchRanges: {},
     clipPitchCurves: {},
     clipFormantStatus: {},
@@ -2311,6 +2323,7 @@ export {
     removeClipTakeRemote,
     renameClipTakeRemote,
     setClipTakeReversedRemote,
+    setClipTakeChannelModeRemote,
     addClipTakeFromMediaRemote,
     replaceClipSourceRemote,
     replaceMidiClipDataRemote,
@@ -3112,6 +3125,8 @@ const sessionSlice = createSlice({
                 playbackRate: 1,
                 reversed: false,
                 loopEnabled: state.loopNewClipsEnabled !== false,
+                channelMode: 0,
+                sourceChannels: undefined,
                 snapOffsetSec: 0,
                 fadeInSec: 0,
                 fadeOutSec: 0,
@@ -3123,7 +3138,6 @@ const sessionSlice = createSlice({
             state.selectedClipId = newClipId;
             state.selectedTrackId = action.payload.trackId;
             ensureClipAutomation(state, newClipId);
-            state.clipWaveforms[newClipId] = [];
             state.clipPitchRanges[newClipId] = { min: -24, max: 24 };
         },
         removeSelectedClip(state) {
@@ -3134,7 +3148,6 @@ const sessionSlice = createSlice({
             markProjectDirty(state.project);
             state.clips = state.clips.filter((clip) => clip.id !== selectedId);
             delete state.clipAutomation[selectedId];
-            delete state.clipWaveforms[selectedId];
             delete state.clipPitchRanges[selectedId];
             delete state.clipPitchCurves[selectedId];
             state.selectedPointId = null;
@@ -5767,6 +5780,30 @@ const sessionSlice = createSlice({
                 applyTimelineStatePreservingPlayhead(state, payload);
             })
             .addCase(setClipTakeReversedRemote.rejected, setRejected)
+
+            .addCase(setClipTakeChannelModeRemote.pending, (state, action) => {
+                // 乐观切换单个 Take 的声道模式；active take 物化到 flat 投影，
+                // inactive take 只动自身条目（与 reversed 同模式）。
+                const clip = state.clips.find((entry) => entry.id === action.meta.arg.clipId);
+                if (!clip) return;
+                const takes = clip.takes ?? [];
+                const take = takes.find((entry) => entry.id === action.meta.arg.takeId);
+                if (!take) return;
+                take.channelMode = normalizeChannelMode(action.meta.arg.channelMode);
+                if (take.id === clip.activeTakeId) {
+                    applyActiveTakeToFlat(clip, take);
+                }
+            })
+            .addCase(setClipTakeChannelModeRemote.fulfilled, (state, action) => {
+                const payload = action.payload as { ok?: boolean } & TimelineState;
+                if (!payload.ok) {
+                    state.error = "Take channel mode rejected";
+                    state.status = "Failed";
+                    return;
+                }
+                applyTimelineStatePreservingPlayhead(state, payload);
+            })
+            .addCase(setClipTakeChannelModeRemote.rejected, setRejected)
 
             .addCase(packClipsIntoTakesRemote.rejected, setRejected)
 

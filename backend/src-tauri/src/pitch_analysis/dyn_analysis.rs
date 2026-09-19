@@ -481,6 +481,8 @@ mod tests {
             source_end_sec: len,
             playback_rate: 1.0,
             reversed: false,
+            channel_mode: 0,
+            source_channels: None,
             loop_enabled: false,
             snap_offset_sec: 0.0,
             fade_in_sec: 0.0,

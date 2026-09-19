@@ -484,7 +484,10 @@ pub(crate) fn build_snapshot(
                     crate::state::clip_playback_window_sec(clip).1
                 },
                 clip.reversed && !clip.loop_enabled,
+                clip.channel_mode,
                 // 实时域：完整文件自然顺序 / 窗口切片，绝非离线回绕平铺域。
+                // mode 参与键：离线域输入是条件化后的 stereo，本域是原始
+                // stereo，非 Normal 模式下内容不同，不能共享条目。
                 false,
                 params,
             );
@@ -730,6 +733,7 @@ pub(crate) fn build_snapshot(
                                 playback_rate,
                                 reversed: clip.reversed,
                                 loop_enabled: clip.loop_enabled,
+                                channel_mode: clip.channel_mode,
                                 source_range_q: (
                                     (clip.source_start_sec * 1000.0).round() as i64,
                                     (clip.source_end_sec * 1000.0).round() as i64,
@@ -971,6 +975,7 @@ pub(crate) fn build_snapshot(
             src: src_render,
             src_start_frame: src_start,
             src_end_frame: src_end,
+            channel_mode: clip.take_channel_mode(),
             // 非 Loop：Formant 缓冲已预反转，方向归零交给正向遍历；
             // Loop：缓冲保持自然顺序，倒放方向由 mix 的锚点回绕（anchor − f）
             // 体现 —— 此处若清零会把"倒放循环"错放成"从文件末端正向循环"。
@@ -1109,6 +1114,8 @@ mod tests {
             source_end_sec: 0.5,
             playback_rate: 1.0,
             reversed: false,
+            channel_mode: 0,
+            source_channels: None,
             loop_enabled: false,
             snap_offset_sec: 0.0,
             fade_in_sec: 0.0,
@@ -1382,6 +1389,7 @@ pub(crate) fn build_snapshot_for_file(
             src_start_frame: offset_frames,
             src_end_frame,
             reversed: false,
+            channel_mode: crate::channel_mode::TakeChannelMode::Normal,
             playback_rate: 1.0,
             local_src_offset_frames: 0,
             repeat: false,

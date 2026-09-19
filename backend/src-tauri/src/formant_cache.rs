@@ -17,6 +17,9 @@ pub struct FormantCacheKey {
     pub source_start_q: i64,
     pub source_end_q: i64,
     pub reversed: bool,
+    /// 声道模式（0..=4，对齐 REAPER CHANMODE）：formant 的输入是条件化后的
+    /// stereo segment，同一 clip 改变模式后输入内容变化，键必须随之失效。
+    pub channel_mode: i32,
     /// 缓冲域判别：`false` = 实时域（完整文件自然顺序 / 非 Loop 窗口切片，
     /// 方向可由 `reversed` 预反转）；`true` = 离线回绕平铺域（mixdown /
     /// render_single_clip 先按整文件 floor_mod 平铺再处理的 segment）。
@@ -124,6 +127,7 @@ pub fn make_formant_cache_key(
     source_start_sec: f64,
     source_end_sec: f64,
     reversed: bool,
+    channel_mode: i32,
     tiled_wrap: bool,
     params: &ClipFormantMorph,
 ) -> FormantCacheKey {
@@ -134,6 +138,7 @@ pub fn make_formant_cache_key(
         source_start_q: quantize_i64(source_start_sec, 1000.0),
         source_end_q: quantize_i64(source_end_sec, 1000.0),
         reversed,
+        channel_mode,
         tiled_wrap,
         enabled: params.enabled,
         target_f1_q: quantize_u32(params.target_f1_hz, 10.0),
@@ -399,6 +404,7 @@ pub fn compute_formant_cache_entry_for_clip(
             raw_win_end_sec
         },
         clip.reversed && !loop_mode,
+        clip.channel_mode,
         false,
         params,
     );
@@ -514,6 +520,7 @@ mod tests {
             0.0,
             1.0,
             false,
+            0,
             false,
             &ClipFormantMorph {
                 enabled: true,
@@ -529,6 +536,7 @@ mod tests {
             0.0,
             1.0,
             false,
+            0,
             false,
             &ClipFormantMorph {
                 enabled: true,
@@ -551,6 +559,7 @@ mod tests {
             0.0,
             10.0,
             false,
+            0,
             false,
             &ClipFormantMorph {
                 enabled: true,
@@ -566,6 +575,7 @@ mod tests {
             0.0,
             10.0,
             false,
+            0,
             true,
             &ClipFormantMorph {
                 enabled: true,

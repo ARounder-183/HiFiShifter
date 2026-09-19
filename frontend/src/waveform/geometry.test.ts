@@ -3,6 +3,74 @@ import { test } from "vitest";
 import { buildWaveformGeometry, parseWaveformColor } from "./geometry.ts";
 import type { WaveformScene } from "./sceneBuilder.ts";
 
+test("waveform/geometry dual-band samples each channel plane independently", () => {
+    // 回归：双带布局下两条带的逐像素采样必须各自读取本带的声道平面。
+    // 此前误读 peaks.min/max（恒为 ch0），导致两条带画出同一个左声道 ——
+    // 用户看到"双声道波形上下两条都是左声道"。
+    // 用例：ch0 满幅、ch1 静音。修复后：上带（ch0）应跨满半带高度，
+    // 下带（ch1）应收敛在自身中心线上。
+    const segment = {
+        clipId: "clip",
+        sourcePath: "/stereo.wav",
+        sourceSampleRate: 4,
+        sourceStartSec: 0,
+        sourceEndSec: 1,
+        clipLocalStartSec: 0,
+        clipLocalEndSec: 1,
+        clipTotalDurationSec: 1,
+        screenRect: { x: 0, y: 0, width: 4, height: 100 },
+        reversed: false,
+        gain: 1,
+        fadeInSec: 0,
+        fadeOutSec: 0,
+        fadeInShape: 0,
+        fadeInDir: 0,
+        fadeOutShape: 0,
+        fadeOutDir: 0,
+        alpha: 1,
+        channelMode: 0,
+        sourceChannels: 2,
+    };
+    const scene: WaveformScene = { segments: [segment], markers: [] };
+
+    const result = buildWaveformGeometry({
+        scene,
+        color: "rgba(255,255,255,1)",
+        getPeaks: () => ({
+            min: new Float32Array([-1, -1, -1, -1]),
+            max: new Float32Array([1, 1, 1, 1]),
+            dataStartSec: 0,
+            dataDurationSec: 1,
+            channels: 2,
+            ch1Min: new Float32Array([0, 0, 0, 0]),
+            ch1Max: new Float32Array([0, 0, 0, 0]),
+        }),
+    });
+
+    // 顶点布局：先 band0 的全部列（每列 2 顶点），再 band1 的全部列。
+    // 4 列 × 2 带 × 2 顶点 = 16 顶点；band0 第 0 列 = 顶点 0/1，band1 第 0 列 = 顶点 8/9。
+    const vertices = result.vertices;
+    if (vertices.length < 16 * 6) {
+        throw new Error(`expected 16 vertices (96 floats), got ${vertices.length / 6}`);
+    }
+    const yAt = (vertexIndex: number): number => vertices[vertexIndex * 6 + 1];
+    const upperTop = Math.min(yAt(0), yAt(1));
+    const upperBottom = Math.max(yAt(0), yAt(1));
+    if (Math.abs(upperTop - 0) > 1 || Math.abs(upperBottom - 50) > 1) {
+        throw new Error(
+            `upper band (ch0) should span y 0..50, got ${upperTop}..${upperBottom}`,
+        );
+    }
+    // 下带（ch1，中心 y=75、半高 25）：静音应收敛在 y≈75。
+    const lowerTop = Math.min(yAt(8), yAt(9));
+    const lowerBottom = Math.max(yAt(8), yAt(9));
+    if (Math.abs(lowerTop - 75) > 1 || Math.abs(lowerBottom - 75) > 1) {
+        throw new Error(
+            `lower band (ch1, silent) should collapse to y≈75, got ${lowerTop}..${lowerBottom}`,
+        );
+    }
+});
+
 test("waveform/geometry.test.ts scripted checks", async () => {
     function assertEqual(actual: unknown, expected: unknown, label: string): void {
         const actualJson = JSON.stringify(actual);
@@ -44,6 +112,8 @@ test("waveform/geometry.test.ts scripted checks", async () => {
                 fadeOutShape: 0,
                 fadeOutDir: 0,
                 alpha: 1,
+                channelMode: 0,
+                sourceChannels: 0,
             },
         ],
         markers: [],
@@ -219,6 +289,8 @@ test("amplitude map receives pixel-column timeline time", async () => {
                 fadeOutShape: 0,
                 fadeOutDir: 0,
                 alpha: 1,
+                channelMode: 0,
+                sourceChannels: 0,
             },
         ],
         markers: [],
@@ -284,6 +356,8 @@ test("amplitude map can vary per pixel column (dynamic gain)", async () => {
                 fadeOutShape: 0,
                 fadeOutDir: 0,
                 alpha: 1,
+                channelMode: 0,
+                sourceChannels: 0,
             },
         ],
         markers: [],

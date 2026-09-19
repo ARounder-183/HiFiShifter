@@ -165,6 +165,7 @@ impl ProcessingStage for WorldVocoderStage {
         }
         let render_ctx = RenderContext {
             mono_pcm: &input_pcm,
+            channel_index: cc.channel_index,
             sample_rate: cc.sample_rate,
             seg_start_sec: cc.seg_start_sec,
             seg_end_sec: cc.seg_end_sec,
@@ -285,6 +286,7 @@ impl ProcessingStage for HiFiGanStage {
         // ── 非 Breath 路径 ──────────────────────────────────────────────
         let render_ctx = RenderContext {
             mono_pcm: &input_pcm,
+            channel_index: cc.channel_index,
             sample_rate: cc.sample_rate,
             seg_start_sec: cc.seg_start_sec,
             seg_end_sec: cc.seg_end_sec,
@@ -329,7 +331,12 @@ impl HiFiGanStage {
         formant_curve: Option<&[f32]>,
     ) -> Result<Vec<f32>, String> {
         let (harmonic, noise) =
-            crate::hnsep_onnx::infer_harmonic_noise_mono(cc.clip_id, &input_pcm, cc.sample_rate)?;
+            crate::hnsep_onnx::infer_harmonic_noise_mono(
+                cc.clip_id,
+                &input_pcm,
+                cc.sample_rate,
+                cc.channel_index,
+            )?;
 
         // 谐波分支：有 F0（clip_midi）时走 HiFiGAN mel 拉伸/渲染；无 F0 时
         // 回退外部算法拉伸 —— 两种情况输出都是时间轴长度 out_frames。
@@ -348,6 +355,7 @@ impl HiFiGanStage {
         } else {
             let render_ctx = RenderContext {
                 mono_pcm: &harmonic,
+                channel_index: cc.channel_index,
                 sample_rate: cc.sample_rate,
                 seg_start_sec: cc.seg_start_sec,
                 seg_end_sec: cc.seg_end_sec,

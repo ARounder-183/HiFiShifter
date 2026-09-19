@@ -27,7 +27,6 @@
 //! └─ Level n: ...
 //! ```
 
-use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 
 
@@ -37,12 +36,15 @@ use std::io::{Read, Write};
 pub const MAGIC: &[u8; 4] = b"HFSP";
 
 /// 当前格式版本
-pub const VERSION: u16 = 2;
+///
+/// v3：峰值数据真正按声道存储（`min`/`max` 为 channel-major 平面拼接，
+/// 每峰值 `channels` 组极值）。v2 及更早的文件虽然头部声明了 `channels`，
+/// 但数据实际只含一组跨声道合并极值（读取端按 channels 倍增读取必然
+/// EOF 失败），本版本一并修复；VERSION 递增使旧缓存全部重建。
+pub const VERSION: u16 = 3;
 
-/// Number of min/max peak pairs in one frontend waveform tile.
-pub const WAVEFORM_TILE_PEAKS: usize = 4096;
-pub const WAVEFORM_TILE_MAGIC: &[u8; 4] = b"WFTL";
-pub const WAVEFORM_TILE_VERSION: u16 = 1;
+/// WFPK IPC 载荷格式版本（v2：28 字节头含 channels，逐声道分块）。
+pub const WFPK_FORMAT_VERSION: u32 = 2;
 
 /// 最大 mipmap 级别数
 pub const MAX_MIPMAP_LEVELS: usize = 3;
@@ -223,12 +225,19 @@ impl MipmapHeader {
 
 // ============== Mipmap 数据结构 ==============
 
-/// 单个 Mipmap 级别的峰值数据
+/// 单个 Mipmap 级别的峰值数据（v3：逐声道存储）。
+///
+/// `min`/`max` 为 **channel-major 平面拼接**：
+/// `min[ch * peak_count + p]` 为第 `ch` 声道第 `p` 个峰值的极小值。
+/// 磁盘布局 = min 全部值（按此顺序）+ max 全部值，与 [`MipmapData::write_to`]
+/// / [`MipmapData::read_from`] 一一对应。
 #[derive(Debug, Clone)]
 pub struct MipmapData {
-    /// 最小值数组 (interleaved by channel: [ch0_min, ch1_min, ...] per peak)
+    /// 声道数（数据布局的一部分）。
+    pub channels: u16,
+    /// 最小值数组（channel-major 拼接，长度 = peak_count × channels）。
     pub min: Vec<f32>,
-    /// 最大值数组
+    /// 最大值数组（channel-major 拼接，长度 = peak_count × channels）。
     pub max: Vec<f32>,
 }
 
@@ -236,23 +245,16 @@ impl MipmapData {
     /// 创建空的峰值数据
     pub fn new() -> Self {
         Self {
+            channels: 1,
             min: Vec::new(),
             max: Vec::new(),
         }
     }
 
-    /// 创建指定容量的峰值数据
-    #[allow(dead_code)]
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self {
-            min: Vec::with_capacity(capacity),
-            max: Vec::with_capacity(capacity),
-        }
-    }
-
-    /// 获取峰值数量
+    /// 每声道峰值数
     pub fn len(&self) -> usize {
-        self.min.len().min(self.max.len())
+        let ch = self.channels.max(1) as usize;
+        self.min.len().min(self.max.len()) / ch
     }
 
     /// 是否为空
@@ -261,10 +263,26 @@ impl MipmapData {
         self.len() == 0
     }
 
+    /// 指定声道的 min 切片（长度 = peak_count）。
+    pub fn channel_min(&self, channel: usize) -> &[f32] {
+        let ch = self.channels.max(1) as usize;
+        let count = self.len();
+        let start = channel.min(ch.saturating_sub(1)) * count;
+        &self.min[start..start + count]
+    }
+
+    /// 指定声道的 max 切片（长度 = peak_count）。
+    pub fn channel_max(&self, channel: usize) -> &[f32] {
+        let ch = self.channels.max(1) as usize;
+        let count = self.len();
+        let start = channel.min(ch.saturating_sub(1)) * count;
+        &self.max[start..start + count]
+    }
+
     /// 计算数据大小 (bytes)
     #[allow(dead_code)]
-    pub fn data_size(&self, channels: u16) -> usize {
-        self.len() * channels as usize * 8 // min(f32) + max(f32) = 8 bytes per channel per peak
+    pub fn data_size(&self) -> usize {
+        (self.min.len() + self.max.len()) * 4
     }
 
     /// 写入到 Writer
@@ -284,7 +302,7 @@ impl MipmapData {
         peak_count: usize,
         channels: u16,
     ) -> std::io::Result<Self> {
-        let total_values = peak_count * channels as usize;
+        let total_values = peak_count * channels.max(1) as usize;
 
         let mut min = vec![0.0f32; total_values];
         let mut max = vec![0.0f32; total_values];
@@ -303,7 +321,11 @@ impl MipmapData {
             *v = f32::from_le_bytes(buf);
         }
 
-        Ok(Self { min, max })
+        Ok(Self {
+            channels: channels.max(1),
+            min,
+            max,
+        })
     }
 }
 
@@ -404,108 +426,12 @@ impl HfsPeakFile {
 
     /// Estimated in-memory byte cost of all mipmap vectors.
     pub fn estimated_byte_size(&self) -> u64 {
-        let pairs = self
-            .mipmap_data
+        // min/max 各 (peak_count × channels) 个 f32。
+        self.mipmap_data
             .iter()
-            .map(|data| data.min.len().saturating_mul(2))
-            .sum::<usize>();
-        (pairs.saturating_mul(4)) as u64
-    }
-
-    /// Stable source revision for tile requests.
-    pub fn source_revision(source_path: &Path) -> String {
-        let canonical = source_path
-            .canonicalize()
-            .unwrap_or_else(|_| source_path.to_path_buf());
-        let (len, mtime_ns) = get_metadata_fingerprint(&canonical);
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(canonical.to_string_lossy().as_bytes());
-        hasher.update(b"\n");
-        hasher.update(&len.to_le_bytes());
-        hasher.update(&mtime_ns.to_le_bytes());
-        hasher.update(&VERSION.to_le_bytes());
-        hasher.finalize().to_hex().to_string()
-    }
-
-    /// Serialize only requested tile ranges.
-    ///
-    /// Out-of-range or invalid requests contribute no tile record. Envelope:
-    /// magic[4], version u16, tile_count u16, followed by tile records.
-    pub fn to_tile_binary(&self, requests: &[WaveformTileRequest]) -> Vec<u8> {
-        let mut records = Vec::new();
-        for request in requests.iter().take(u16::MAX as usize) {
-            let Some(level) = self.mipmap_data.get(request.level) else {
-                continue;
-            };
-            let Some(header) = self.mipmap_headers.get(request.level) else {
-                continue;
-            };
-            let peak_count = level.len();
-            let start = request
-                .tile_index
-                .checked_mul(WAVEFORM_TILE_PEAKS as u32)
-                .and_then(|v| usize::try_from(v).ok())
-                .unwrap_or(usize::MAX);
-            if start >= peak_count {
-                continue;
-            }
-            let end = (start + WAVEFORM_TILE_PEAKS).min(peak_count);
-            let count = end - start;
-
-            let mut record = Vec::with_capacity(24 + count * 2 * 4);
-            record.extend_from_slice(&(request.level as u32).to_le_bytes());
-            record.extend_from_slice(&request.tile_index.to_le_bytes());
-            record.extend_from_slice(&(start as u32).to_le_bytes());
-            record.extend_from_slice(&(count as u32).to_le_bytes());
-            record.extend_from_slice(&header.division_factor.to_le_bytes());
-            record.extend_from_slice(&self.header.sample_rate.to_le_bytes());
-            for &v in &level.min[start..end] {
-                record.extend_from_slice(&v.to_le_bytes());
-            }
-            for &v in &level.max[start..end] {
-                record.extend_from_slice(&v.to_le_bytes());
-            }
-            records.push(record);
-        }
-
-        let mut buf = Vec::with_capacity(8 + records.iter().map(Vec::len).sum::<usize>());
-        buf.extend_from_slice(WAVEFORM_TILE_MAGIC);
-        buf.extend_from_slice(&WAVEFORM_TILE_VERSION.to_le_bytes());
-        buf.extend_from_slice(&(records.len() as u16).to_le_bytes());
-        for record in records {
-            buf.extend_from_slice(&record);
-        }
-        buf
-    }
-
-    /// Manifest metadata without serializing full peak arrays.
-    pub fn to_manifest_payload(&self, source_path: &str) -> WaveformManifestPayload {
-        WaveformManifestPayload {
-            source_path: source_path.to_string(),
-            revision: Self::source_revision(std::path::Path::new(source_path)),
-            sample_rate: self.header.sample_rate,
-            total_frames: self.header.total_frames,
-            channels: self.header.channels,
-            duration_sec: if self.header.sample_rate == 0 {
-                0.0
-            } else {
-                self.header.total_frames as f64 / self.header.sample_rate as f64
-            },
-            tile_peaks: WAVEFORM_TILE_PEAKS as u32,
-            levels: self
-                .mipmap_headers
-                .iter()
-                .enumerate()
-                .map(|(level, header)| WaveformManifestLevelPayload {
-                    level: level as u32,
-                    division_factor: header.division_factor,
-                    peak_count: header.peak_count,
-                    tile_count: header
-                        .peak_count
-                        .div_ceil(WAVEFORM_TILE_PEAKS as u32),
-                })
-                .collect(),
-        }
+            .map(|data| (data.min.len() + data.max.len()) as u64)
+            .sum::<u64>()
+            .saturating_mul(4)
     }
 
     /// 将指定级别的 mipmap 数据序列化为二进制格式
@@ -532,218 +458,34 @@ impl HfsPeakFile {
 
         let data = &self.mipmap_data[level];
         let mh = &self.mipmap_headers[level];
-        let count = data.min.len();
-        let mut buf = Vec::with_capacity(20 + count * 8);
+        let count = data.len();
+        let channels = data.channels.max(1) as usize;
+        let mut buf = Vec::with_capacity(28 + count * channels * 8);
 
-        // Header (20 bytes)
+        // Header (28 bytes)
         buf.extend_from_slice(b"WFPK");
+        buf.extend_from_slice(&WFPK_FORMAT_VERSION.to_le_bytes());
         buf.extend_from_slice(&self.header.sample_rate.to_le_bytes());
         buf.extend_from_slice(&mh.division_factor.to_le_bytes());
         buf.extend_from_slice(&(count as u32).to_le_bytes());
         buf.extend_from_slice(&(level as u32).to_le_bytes());
+        buf.extend_from_slice(&(data.channels as u32).to_le_bytes());
 
-        // min data
-        for &v in &data.min {
-            buf.extend_from_slice(&v.to_le_bytes());
-        }
-        // max data
-        for &v in &data.max {
-            buf.extend_from_slice(&v.to_le_bytes());
+        // 逐声道分块：ch0_min / ch0_max / ch1_min / ch1_max …
+        for ch in 0..channels {
+            for &v in data.channel_min(ch) {
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
+            for &v in data.channel_max(ch) {
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
         }
 
         buf
     }
-
-    /// 获取指定级别的峰值数据（可选时间范围裁剪）
-    ///
-    /// # 参数
-    /// - `level`: mipmap 级别
-    /// - `start_sec`: 开始时间（秒）
-    /// - `duration_sec`: 持续时间（秒）
-    /// - `columns`: 输出列数
-    ///
-    /// # 返回
-    /// 裁剪后的峰值数据
-    #[allow(dead_code)]
-    pub fn get_peaks_segment(
-        &self,
-        level: usize,
-        start_sec: f64,
-        duration_sec: f64,
-        columns: usize,
-    ) -> PeaksSegmentResult {
-        if level >= self.mipmap_data.len() {
-            return PeaksSegmentResult {
-                ok: false,
-                min: vec![],
-                max: vec![],
-                level: 0,
-                sample_rate: 0,
-                division_factor: 0,
-                actual_start_sec: 0.0,
-                actual_duration_sec: 0.0,
-            };
-        }
-
-        let data = &self.mipmap_data[level];
-        let mh = &self.mipmap_headers[level];
-
-        if columns == 0 || !start_sec.is_finite() || !duration_sec.is_finite() {
-            return PeaksSegmentResult {
-                ok: false,
-                min: vec![],
-                max: vec![],
-                level: level as u32,
-                sample_rate: self.header.sample_rate,
-                division_factor: mh.division_factor,
-                actual_start_sec: 0.0,
-                actual_duration_sec: 0.0,
-            };
-        }
-
-        let sr = self.header.sample_rate.max(1) as f64;
-        let division_factor = mh.division_factor.max(1) as f64;
-
-        // 计算峰值索引范围
-        let start_frame = (start_sec.max(0.0) * sr).floor() as i64;
-        let frames = (duration_sec.max(0.0) * sr).ceil() as i64;
-
-        if frames <= 0 {
-            return PeaksSegmentResult {
-                ok: true,
-                min: vec![0.0; columns],
-                max: vec![0.0; columns],
-                level: level as u32,
-                sample_rate: self.header.sample_rate,
-                division_factor: mh.division_factor,
-                actual_start_sec: start_sec.max(0.0),
-                actual_duration_sec: 0.0,
-            };
-        }
-
-        // 每个峰值代表 division_factor 个采样
-        let start_peak = ((start_frame as f64) / division_factor).floor() as i64;
-        let end_peak = (((start_frame + frames) as f64) / division_factor).ceil() as i64;
-
-        let len = data.len() as i64;
-        let i0 = start_peak.max(0).min(len);
-        let i1 = end_peak.max(0).min(len);
-
-        // 计算实际覆盖的时间范围（由 floor/ceil 取整后的峰值索引决定）
-        let actual_start_sec = (i0 as f64 * division_factor) / sr;
-        let actual_duration_sec = ((i1 - i0) as f64 * division_factor) / sr;
-
-        if i1 <= i0 {
-            return PeaksSegmentResult {
-                ok: true,
-                min: vec![0.0; columns],
-                max: vec![0.0; columns],
-                level: level as u32,
-                sample_rate: self.header.sample_rate,
-                division_factor: mh.division_factor,
-                actual_start_sec,
-                actual_duration_sec: 0.0,
-            };
-        }
-
-        // 将峰值映射到输出列
-        let span = (i1 - i0).max(1) as f64;
-        let mut out_min = vec![f32::INFINITY; columns];
-        let mut out_max = vec![f32::NEG_INFINITY; columns];
-
-        for idx in i0..i1 {
-            let rel = (idx - i0) as f64;
-            let x = ((rel * columns as f64) / span).floor() as usize;
-            if x >= columns {
-                continue;
-            }
-
-            let mi = data.min[idx as usize];
-            let ma = data.max[idx as usize];
-
-            if mi < out_min[x] {
-                out_min[x] = mi;
-            }
-            if ma > out_max[x] {
-                out_max[x] = ma;
-            }
-        }
-
-        // 处理无效值
-        for i in 0..columns {
-            if !out_min[i].is_finite() {
-                out_min[i] = 0.0;
-            }
-            if !out_max[i].is_finite() {
-                out_max[i] = 0.0;
-            }
-        }
-
-        PeaksSegmentResult {
-            ok: true,
-            min: out_min,
-            max: out_max,
-            level: level as u32,
-            sample_rate: self.header.sample_rate,
-            division_factor: mh.division_factor,
-            actual_start_sec,
-            actual_duration_sec,
-        }
-    }
 }
 
 // ============== API 响应结构 ==============
-
-/// 峰值片段查询结果
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct PeaksSegmentResult {
-    /// 是否成功
-    pub ok: bool,
-    /// 最小值数组
-    pub min: Vec<f32>,
-    /// 最大值数组
-    pub max: Vec<f32>,
-    /// 使用的 mipmap 级别
-    #[serde(rename = "mipmap_level")]
-    pub level: u32,
-    /// 采样率
-    pub sample_rate: u32,
-    /// 除数因子：每个峰值代表的采样数
-    pub division_factor: u32,
-    /// 返回数据实际覆盖的起始时间（秒），由 floor/ceil 取整后的峰值索引决定
-    pub actual_start_sec: f64,
-    /// 返回数据实际覆盖的持续时间（秒），由 floor/ceil 取整后的峰值索引决定
-    pub actual_duration_sec: f64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WaveformManifestLevelPayload {
-    pub level: u32,
-    pub division_factor: u32,
-    pub peak_count: u32,
-    pub tile_count: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WaveformManifestPayload {
-    pub source_path: String,
-    pub revision: String,
-    pub sample_rate: u32,
-    pub total_frames: u64,
-    pub channels: u16,
-    pub duration_sec: f64,
-    pub tile_peaks: u32,
-    pub levels: Vec<WaveformManifestLevelPayload>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WaveformTileRequest {
-    pub level: usize,
-    pub tile_index: u32,
-}
 
 /// Byte-budgeted in-memory cache for decoded peak files.
 ///
@@ -839,23 +581,6 @@ impl WaveformPeakCache {
     }
 }
 
-/// 多级峰值查询响应
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[allow(dead_code)]
-pub struct PeaksResponse {
-    /// 是否成功
-    pub ok: bool,
-    /// 峰值数据
-    pub peaks: PeaksSegmentResult,
-    /// 采样率
-    pub sample_rate: u32,
-    /// 总时长（秒）
-    pub duration_sec: f64,
-    /// 可用的 mipmap 级别数
-    pub mipmap_levels: u32,
-}
-
 // ============== 辅助函数 ==============
 
 /// 根据采样率计算 mipmap 除数因子
@@ -874,7 +599,16 @@ pub fn calculate_division_factors(sample_rate: u32) -> Vec<u32> {
 
 use std::path::Path;
 
-/// 多级 Mipmap 峰值计算器
+/// 单个级别的逐声道累积器
+struct LevelAccumulator {
+    /// 各声道的运行 min（长度 = channels）
+    acc_min: Vec<f32>,
+    /// 各声道的运行 max（长度 = channels）
+    acc_max: Vec<f32>,
+    frame_count: usize,
+}
+
+/// 多级 Mipmap 峰值计算器（v3：逐声道）
 #[allow(dead_code)]
 pub struct MipmapPeakCalculator {
     /// 采样率
@@ -885,17 +619,22 @@ pub struct MipmapPeakCalculator {
     total_frames: u64,
     /// 各级别的除数因子
     division_factors: Vec<u32>,
-    /// 各级别的累积器 (min, max, frame_count)
-    accumulators: Vec<(f32, f32, usize)>,
+    /// 各级别的累积器
+    accumulators: Vec<LevelAccumulator>,
 }
 
 impl MipmapPeakCalculator {
     /// 创建新的计算器
     pub fn new(sample_rate: u32, channels: u16, total_frames: u64) -> Self {
         let division_factors = calculate_division_factors(sample_rate);
+        let ch = channels.max(1) as usize;
         let accumulators = division_factors
             .iter()
-            .map(|_| (f32::INFINITY, f32::NEG_INFINITY, 0usize))
+            .map(|_| LevelAccumulator {
+                acc_min: vec![f32::INFINITY; ch],
+                acc_max: vec![f32::NEG_INFINITY; ch],
+                frame_count: 0,
+            })
             .collect();
 
         Self {
@@ -910,60 +649,118 @@ impl MipmapPeakCalculator {
     /// 处理一帧数据
     ///
     /// # 参数
-    /// - `frame_values`: 各声道的采样值 (取极值后传入)
-    /// - `frame_min`: 该帧的最小值
-    /// - `frame_max`: 该帧的最大值
+    /// - `frame_min`: 各声道该帧的最小值（长度 = channels）
+    /// - `frame_max`: 各声道该帧的最大值（长度 = channels）
     /// - `output_callback`: 当某级别完成一个峰值时调用
-    pub fn process_frame<F: FnMut(usize, f32, f32)>(
+    ///   （参数为 level_idx、各声道 min 切片、各声道 max 切片）
+    pub fn process_frame<F: FnMut(usize, &[f32], &[f32])>(
         &mut self,
-        frame_min: f32,
-        frame_max: f32,
+        frame_min: &[f32],
+        frame_max: &[f32],
         output_callback: &mut F,
     ) {
-        for (level_idx, (acc_min, acc_max, frame_count)) in self.accumulators.iter_mut().enumerate()
-        {
-            // 更新累积器
-            if frame_min < *acc_min {
-                *acc_min = frame_min;
+        for (level_idx, acc) in self.accumulators.iter_mut().enumerate() {
+            // 更新累积器（逐声道）
+            for (c, &v) in frame_min.iter().enumerate() {
+                if v < acc.acc_min[c] {
+                    acc.acc_min[c] = v;
+                }
             }
-            if frame_max > *acc_max {
-                *acc_max = frame_max;
+            for (c, &v) in frame_max.iter().enumerate() {
+                if v > acc.acc_max[c] {
+                    acc.acc_max[c] = v;
+                }
             }
-            *frame_count += 1;
+            acc.frame_count += 1;
 
             // 检查是否需要输出
             let divisor = self.division_factors[level_idx] as usize;
-            if *frame_count >= divisor {
-                output_callback(
-                    level_idx,
-                    if acc_min.is_finite() { *acc_min } else { 0.0 },
-                    if acc_max.is_finite() { *acc_max } else { 0.0 },
-                );
+            if acc.frame_count >= divisor {
+                for v in acc.acc_min.iter_mut() {
+                    *v = if v.is_finite() { *v } else { 0.0 };
+                }
+                for v in acc.acc_max.iter_mut() {
+                    *v = if v.is_finite() { *v } else { 0.0 };
+                }
+                output_callback(level_idx, &acc.acc_min, &acc.acc_max);
 
                 // 重置累积器
-                *acc_min = f32::INFINITY;
-                *acc_max = f32::NEG_INFINITY;
-                *frame_count = 0;
+                for v in acc.acc_min.iter_mut() {
+                    *v = f32::INFINITY;
+                }
+                for v in acc.acc_max.iter_mut() {
+                    *v = f32::NEG_INFINITY;
+                }
+                acc.frame_count = 0;
             }
         }
     }
 
     /// 刷新剩余的累积数据
-    pub fn flush<F: FnMut(usize, f32, f32)>(&mut self, mut output_callback: F) {
-        for (level_idx, (acc_min, acc_max, frame_count)) in self.accumulators.iter_mut().enumerate()
-        {
-            if *frame_count > 0 {
-                output_callback(
-                    level_idx,
-                    if acc_min.is_finite() { *acc_min } else { 0.0 },
-                    if acc_max.is_finite() { *acc_max } else { 0.0 },
-                );
+    pub fn flush<F: FnMut(usize, &[f32], &[f32])>(&mut self, mut output_callback: F) {
+        for (level_idx, acc) in self.accumulators.iter_mut().enumerate() {
+            if acc.frame_count > 0 {
+                for v in acc.acc_min.iter_mut() {
+                    *v = if v.is_finite() { *v } else { 0.0 };
+                }
+                for v in acc.acc_max.iter_mut() {
+                    *v = if v.is_finite() { *v } else { 0.0 };
+                }
+                output_callback(level_idx, &acc.acc_min, &acc.acc_max);
 
                 // 重置
-                *acc_min = f32::INFINITY;
-                *acc_max = f32::NEG_INFINITY;
-                *frame_count = 0;
+                for v in acc.acc_min.iter_mut() {
+                    *v = f32::INFINITY;
+                }
+                for v in acc.acc_max.iter_mut() {
+                    *v = f32::NEG_INFINITY;
+                }
+                acc.frame_count = 0;
             }
+        }
+    }
+}
+
+/// 逐声道峰值输出缓冲（channel-major 存储，最终构建 [`MipmapData`]）
+struct PerChannelPeakBuffer {
+    channels: usize,
+    /// min[channel][peak]
+    min: Vec<Vec<f32>>,
+    /// max[channel][peak]
+    max: Vec<Vec<f32>>,
+}
+
+impl PerChannelPeakBuffer {
+    fn new(channels: u16) -> Self {
+        let ch = channels.max(1) as usize;
+        Self {
+            channels: ch,
+            min: (0..ch).map(|_| Vec::new()).collect(),
+            max: (0..ch).map(|_| Vec::new()).collect(),
+        }
+    }
+
+    fn push(&mut self, ch_min: &[f32], ch_max: &[f32]) {
+        for (c, &v) in ch_min.iter().enumerate().take(self.channels) {
+            self.min[c].push(v);
+        }
+        for (c, &v) in ch_max.iter().enumerate().take(self.channels) {
+            self.max[c].push(v);
+        }
+    }
+
+    fn into_mipmap_data(self) -> MipmapData {
+        let peak_count = self.min.first().map(|v| v.len()).unwrap_or(0);
+        let mut min = Vec::with_capacity(peak_count * self.channels);
+        let mut max = Vec::with_capacity(peak_count * self.channels);
+        for ch in 0..self.channels {
+            min.extend_from_slice(&self.min[ch]);
+            max.extend_from_slice(&self.max[ch]);
+        }
+        MipmapData {
+            channels: self.channels as u16,
+            min,
+            max,
         }
     }
 }
@@ -1033,10 +830,12 @@ fn compute_mipmap_peaks_hound<F: FnMut(f32)>(
     let total_frames = reader.duration() as u64;
     let sample_rate = spec.sample_rate;
 
-    // 初始化输出缓冲区
+    // 初始化输出缓冲区（逐声道）
     let division_factors = calculate_division_factors(sample_rate);
-    let mut output_buffers: Vec<Vec<(f32, f32)>> =
-        division_factors.iter().map(|_| Vec::new()).collect();
+    let mut output_buffers: Vec<PerChannelPeakBuffer> = division_factors
+        .iter()
+        .map(|_| PerChannelPeakBuffer::new(channels))
+        .collect();
 
     // 创建计算器
     let mut calculator = MipmapPeakCalculator::new(sample_rate, channels, total_frames);
@@ -1044,10 +843,10 @@ fn compute_mipmap_peaks_hound<F: FnMut(f32)>(
     // 重新打开文件读取采样数据
     let mut reader = WavReader::open(path).map_err(|e| e.to_string())?;
 
-    // 输出回调
-    let mut output_callback = |level: usize, min: f32, max: f32| {
+    // 输出回调（per-channel 切片）
+    let mut output_callback = |level: usize, min: &[f32], max: &[f32]| {
         if level < output_buffers.len() {
-            output_buffers[level].push((min, max));
+            output_buffers[level].push(min, max);
         }
     };
 
@@ -1055,18 +854,23 @@ fn compute_mipmap_peaks_hound<F: FnMut(f32)>(
     let mut frames_processed: u64 = 0;
     let progress_interval = (total_frames / 20).max(1); // 每 ~5% 报告一次
 
+    // 每帧逐声道极值暂存（复用，避免逐帧分配）
+    let ch_usize = channels.max(1) as usize;
+    let mut frame_min = vec![0.0f32; ch_usize];
+    let mut frame_max = vec![0.0f32; ch_usize];
+
     // 根据格式处理采样
     match (spec.sample_format, spec.bits_per_sample) {
         (SampleFormat::Int, 16) => {
-            let mut buf = vec![0i16; channels as usize];
+            let mut buf = vec![0i16; ch_usize];
             let mut i = 0usize;
             for s in reader.samples::<i16>() {
                 buf[i] = s.map_err(|e| e.to_string())?;
                 i += 1;
-                if i >= channels as usize {
+                if i >= ch_usize {
                     i = 0;
-                    let (ch_min, ch_max) = compute_channel_extremes_i16(&buf);
-                    calculator.process_frame(ch_min, ch_max, &mut output_callback);
+                    frame_channel_extremes_i16(&buf, &mut frame_min, &mut frame_max);
+                    calculator.process_frame(&frame_min, &frame_max, &mut output_callback);
                     frames_processed += 1;
                     if frames_processed % progress_interval == 0 {
                         if let Some(cb) = progress_cb.as_mut() {
@@ -1078,15 +882,15 @@ fn compute_mipmap_peaks_hound<F: FnMut(f32)>(
         }
         (SampleFormat::Int, 24) => {
             let denom = (1u32 << 23) as f32;
-            let mut buf = vec![0i32; channels as usize];
+            let mut buf = vec![0i32; ch_usize];
             let mut i = 0usize;
             for s in reader.samples::<i32>() {
                 buf[i] = s.map_err(|e| e.to_string())?;
                 i += 1;
-                if i >= channels as usize {
+                if i >= ch_usize {
                     i = 0;
-                    let (ch_min, ch_max) = compute_channel_extremes_i32(&buf, denom);
-                    calculator.process_frame(ch_min, ch_max, &mut output_callback);
+                    frame_channel_extremes_i32(&buf, denom, &mut frame_min, &mut frame_max);
+                    calculator.process_frame(&frame_min, &frame_max, &mut output_callback);
                     frames_processed += 1;
                     if frames_processed % progress_interval == 0 {
                         if let Some(cb) = progress_cb.as_mut() {
@@ -1097,15 +901,15 @@ fn compute_mipmap_peaks_hound<F: FnMut(f32)>(
             }
         }
         (SampleFormat::Int, 32) => {
-            let mut buf = vec![0i32; channels as usize];
+            let mut buf = vec![0i32; ch_usize];
             let mut i = 0usize;
             for s in reader.samples::<i32>() {
                 buf[i] = s.map_err(|e| e.to_string())?;
                 i += 1;
-                if i >= channels as usize {
+                if i >= ch_usize {
                     i = 0;
-                    let (ch_min, ch_max) = compute_channel_extremes_i32(&buf, i32::MAX as f32);
-                    calculator.process_frame(ch_min, ch_max, &mut output_callback);
+                    frame_channel_extremes_i32(&buf, i32::MAX as f32, &mut frame_min, &mut frame_max);
+                    calculator.process_frame(&frame_min, &frame_max, &mut output_callback);
                     frames_processed += 1;
                     if frames_processed % progress_interval == 0 {
                         if let Some(cb) = progress_cb.as_mut() {
@@ -1116,15 +920,15 @@ fn compute_mipmap_peaks_hound<F: FnMut(f32)>(
             }
         }
         (SampleFormat::Float, 32) => {
-            let mut buf = vec![0f32; channels as usize];
+            let mut buf = vec![0f32; ch_usize];
             let mut i = 0usize;
             for s in reader.samples::<f32>() {
                 buf[i] = s.map_err(|e| e.to_string())?;
                 i += 1;
-                if i >= channels as usize {
+                if i >= ch_usize {
                     i = 0;
-                    let (ch_min, ch_max) = compute_channel_extremes_f32(&buf);
-                    calculator.process_frame(ch_min, ch_max, &mut output_callback);
+                    frame_channel_extremes_f32(&buf, &mut frame_min, &mut frame_max);
+                    calculator.process_frame(&frame_min, &frame_max, &mut output_callback);
                     frames_processed += 1;
                     if frames_processed % progress_interval == 0 {
                         if let Some(cb) = progress_cb.as_mut() {
@@ -1150,11 +954,7 @@ fn compute_mipmap_peaks_hound<F: FnMut(f32)>(
     );
 
     for (level_idx, buffer) in output_buffers.into_iter().enumerate() {
-        let data = MipmapData {
-            min: buffer.iter().map(|(min, _)| *min).collect(),
-            max: buffer.iter().map(|(_, max)| *max).collect(),
-        };
-        file.add_mipmap(division_factors[level_idx], data);
+        file.add_mipmap(division_factors[level_idx], buffer.into_mipmap_data());
     }
 
     Ok(file)
@@ -1174,13 +974,15 @@ fn compute_mipmap_peaks_media<F: FnMut(f32)>(
     let total_frames = probe.total_frames;
 
     let division_factors = calculate_division_factors(sample_rate);
-    let mut output_buffers: Vec<Vec<(f32, f32)>> =
-        division_factors.iter().map(|_| Vec::new()).collect();
+    let mut output_buffers: Vec<PerChannelPeakBuffer> = division_factors
+        .iter()
+        .map(|_| PerChannelPeakBuffer::new(channels))
+        .collect();
     let mut calculator = MipmapPeakCalculator::new(sample_rate, channels, total_frames);
 
-    let mut output_callback = |level: usize, min: f32, max: f32| {
+    let mut output_callback = |level: usize, min: &[f32], max: &[f32]| {
         if level < output_buffers.len() {
-            output_buffers[level].push((min, max));
+            output_buffers[level].push(min, max);
         }
     };
 
@@ -1191,6 +993,10 @@ fn compute_mipmap_peaks_media<F: FnMut(f32)>(
         44100
     };
 
+    // 每帧逐声道极值暂存（复用，避免逐帧分配）
+    let mut frame_min = vec![0.0f32; channels.max(1) as usize];
+    let mut frame_max = vec![0.0f32; channels.max(1) as usize];
+
     crate::media::visit_media_audio_frames(
         path,
         Some(probe.audio_stream_index),
@@ -1199,14 +1005,17 @@ fn compute_mipmap_peaks_media<F: FnMut(f32)>(
             let frames = frame.len() / ch;
             for f in 0..frames {
                 let base = f * ch;
-                let mut ch_min = f32::INFINITY;
-                let mut ch_max = f32::NEG_INFINITY;
-                for c in 0..ch {
-                    let v = frame.get(base + c).copied().unwrap_or(0.0);
-                    ch_min = ch_min.min(v);
-                    ch_max = ch_max.max(v);
+                for (c, slot) in frame_min.iter_mut().enumerate() {
+                    let v = if c < ch {
+                        frame.get(base + c).copied().unwrap_or(0.0)
+                    } else {
+                        // 报告声道数少于缓冲槽位时补零，避免残留上一帧极值。
+                        0.0
+                    };
+                    *slot = v;
+                    frame_max[c] = v;
                 }
-                calculator.process_frame(ch_min, ch_max, &mut output_callback);
+                calculator.process_frame(&frame_min, &frame_max, &mut output_callback);
                 frames_processed += 1;
                 if frames_processed % progress_interval == 0 {
                     if let Some(cb) = progress_cb.as_mut() {
@@ -1235,11 +1044,7 @@ fn compute_mipmap_peaks_media<F: FnMut(f32)>(
     );
 
     for (level_idx, buffer) in output_buffers.into_iter().enumerate() {
-        let data = MipmapData {
-            min: buffer.iter().map(|(min, _)| *min).collect(),
-            max: buffer.iter().map(|(_, max)| *max).collect(),
-        };
-        file.add_mipmap(division_factors[level_idx], data);
+        file.add_mipmap(division_factors[level_idx], buffer.into_mipmap_data());
     }
 
     Ok(file)
@@ -1247,52 +1052,32 @@ fn compute_mipmap_peaks_media<F: FnMut(f32)>(
 
 // ============== 辅助函数 ==============
 
-/// 计算 i16 缓冲区的声道极值
-fn compute_channel_extremes_i16(buf: &[i16]) -> (f32, f32) {
-    let mut min = f32::INFINITY;
-    let mut max = f32::NEG_INFINITY;
-    for &x in buf {
+/// 计算 i16 帧缓冲的**逐声道**极值（v3）
+fn frame_channel_extremes_i16(buf: &[i16], out_min: &mut [f32], out_max: &mut [f32]) {
+    for (c, &x) in buf.iter().enumerate().take(out_min.len()) {
         let v = x as f32 / i16::MAX as f32;
-        if v < min {
-            min = v;
-        }
-        if v > max {
-            max = v;
-        }
+        out_min[c] = v;
+        out_max[c] = v;
     }
-    (min, max)
 }
 
-/// 计算 i32 缓冲区的声道极值
-fn compute_channel_extremes_i32(buf: &[i32], denom: f32) -> (f32, f32) {
-    let mut min = f32::INFINITY;
-    let mut max = f32::NEG_INFINITY;
-    for &x in buf {
+/// 计算 i32 帧缓冲的**逐声道**极值（v3）
+fn frame_channel_extremes_i32(buf: &[i32], denom: f32, out_min: &mut [f32], out_max: &mut [f32]) {
+    for (c, &x) in buf.iter().enumerate().take(out_min.len()) {
         let v = x as f32 / denom;
-        if v < min {
-            min = v;
-        }
-        if v > max {
-            max = v;
-        }
+        out_min[c] = v;
+        out_max[c] = v;
     }
-    (min, max)
 }
 
-/// 计算 f32 缓冲区的声道极值
-fn compute_channel_extremes_f32(buf: &[f32]) -> (f32, f32) {
-    let mut min = f32::INFINITY;
-    let mut max = f32::NEG_INFINITY;
-    for &x in buf {
-        if x < min {
-            min = x;
-        }
-        if x > max {
-            max = x;
-        }
+/// 计算 f32 帧缓冲的**逐声道**极值（v3）
+fn frame_channel_extremes_f32(buf: &[f32], out_min: &mut [f32], out_max: &mut [f32]) {
+    for (c, &v) in buf.iter().enumerate().take(out_min.len()) {
+        out_min[c] = v;
+        out_max[c] = v;
     }
-    (min, max)
 }
+
 
 // ============== 文件存储与加载 ==============
 
@@ -1664,62 +1449,12 @@ mod waveform_tile_tests {
     fn fixture() -> HfsPeakFile {
         let mut file = HfsPeakFile::new(1, 4, 5, 12, 34);
         let data = MipmapData {
+            channels: 1,
             min: vec![-1.0, -0.5, 0.0, 0.5, 1.0],
             max: vec![1.0, 0.5, 0.0, -0.5, -1.0],
         };
         file.add_mipmap(1, data);
         file
-    }
-
-    #[test]
-    fn waveform_tile_envelope_contains_only_requested_peaks() {
-        let file = fixture();
-        let bytes = file.to_tile_binary(&[WaveformTileRequest {
-            level: 0,
-            tile_index: 0,
-        }]);
-
-        assert_eq!(&bytes[0..4], WAVEFORM_TILE_MAGIC);
-        assert_eq!(u16::from_le_bytes([bytes[4], bytes[5]]), WAVEFORM_TILE_VERSION);
-        assert_eq!(u16::from_le_bytes([bytes[6], bytes[7]]), 1);
-
-        let expected_values: Vec<f32> = vec![
-            -1.0, -0.5, 0.0, 0.5, 1.0, 1.0, 0.5, 0.0, -0.5, -1.0,
-        ];
-        let offset = 8 + 24;
-        assert_eq!(bytes.len(), offset + expected_values.len() * 4);
-        for (index, expected) in expected_values.iter().enumerate() {
-            let start = offset + index * 4;
-            let raw: [u8; 4] = bytes[start..start + 4].try_into().unwrap();
-            assert_eq!(f32::from_le_bytes(raw), *expected);
-        }
-    }
-
-    #[test]
-    fn out_of_range_tile_requests_are_omitted() {
-        let file = fixture();
-        let bytes = file.to_tile_binary(&[
-            WaveformTileRequest {
-                level: 9,
-                tile_index: 0,
-            },
-            WaveformTileRequest {
-                level: 0,
-                tile_index: 2,
-            },
-        ]);
-        assert_eq!(u16::from_le_bytes([bytes[6], bytes[7]]), 0);
-        assert_eq!(bytes.len(), 8);
-    }
-
-    #[test]
-    fn manifest_reports_one_tile_for_short_file() {
-        let file = fixture();
-        let manifest = file.to_manifest_payload("/audio.wav");
-        assert_eq!(manifest.tile_peaks, 4096);
-        assert_eq!(manifest.levels.len(), 1);
-        assert_eq!(manifest.levels[0].peak_count, 5);
-        assert_eq!(manifest.levels[0].tile_count, 1);
     }
 
     #[test]
@@ -1753,5 +1488,152 @@ mod waveform_tile_tests {
         cache.clear();
         assert_eq!(cache.total_bytes(), 0);
         assert!(cache.is_empty());
+    }
+
+
+    #[test]
+    fn mipmap_data_channel_slices_and_envelope() {
+        let data = MipmapData {
+            channels: 2,
+            // channel-major：[ch0 p0, ch0 p1, ch1 p0, ch1 p1]
+            min: vec![-1.0, -0.5, -0.2, 0.0],
+            max: vec![1.0, 0.5, 0.2, 0.1],
+        };
+        assert_eq!(data.len(), 2);
+        assert_eq!(data.channel_min(0), &[-1.0, -0.5][..]);
+        assert_eq!(data.channel_min(1), &[-0.2, 0.0][..]);
+        assert_eq!(data.channel_max(0), &[1.0, 0.5][..]);
+        assert_eq!(data.channel_max(1), &[0.2, 0.1][..]);
+        assert_eq!(data.data_size(), 4 * 4 * 2);
+    }
+
+    #[test]
+    fn calculator_accumulates_per_channel() {
+        let mut calc = MipmapPeakCalculator::new(44100, 2, 16);
+        let mut buffers: Vec<PerChannelPeakBuffer> = vec![PerChannelPeakBuffer::new(2)];
+        let mut cb = |level: usize, min: &[f32], max: &[f32]| {
+            if level == 0 {
+                buffers[0].push(min, max);
+            }
+        };
+        // 2 帧一波（div=16 太大不会输出，改为直接验证 flush 输出）。
+        // 左声道递减、右声道递增，验证两声道极值互不串扰。
+        for f in 0..3u32 {
+            let l = 0.5 - f as f32 * 0.1;
+            let r = -0.5 + f as f32 * 0.1;
+            calc.process_frame(&[l, r], &[l, r], &mut cb);
+        }
+        calc.flush(&mut cb);
+        let data = buffers.pop().unwrap().into_mipmap_data();
+        assert_eq!(data.channels, 2);
+        assert_eq!(data.len(), 1);
+        // L: 0.5, 0.4, 0.3 → min 0.3 / max 0.5；R: -0.5, -0.4, -0.3 → min -0.5 / max -0.3。
+        assert_eq!(data.channel_min(0), &[0.3][..]);
+        assert_eq!(data.channel_max(0), &[0.5][..]);
+        assert_eq!(data.channel_min(1), &[-0.5][..]);
+        assert_eq!(data.channel_max(1), &[-0.3][..]);
+    }
+
+    #[test]
+    fn hsp_roundtrip_preserves_per_channel_peaks() {
+        // 回归：v2 时代写入端只写一组跨声道极值，但读取端按 channels 倍增
+        // 读取 —— 立体声文件的磁盘缓存永远读不回来。v3 起逐声道写入后
+        // save → load 必须无损往返。
+        let tmp = std::env::temp_dir().join(format!("hfs_stereo_test_{}.hsp", std::process::id()));
+        let mut file = HfsPeakFile::new(2, 44100, 4, 100, 200);
+        file.add_mipmap(
+            1,
+            MipmapData {
+                channels: 2,
+                min: vec![-1.0, -0.3, -0.5, 0.0],
+                max: vec![1.0, 0.3, 0.5, 0.1],
+            },
+        );
+        file.save(&tmp).expect("save hsp");
+
+        let loaded = HfsPeakFile::load(&tmp).expect("load hsp");
+        let _ = std::fs::remove_file(&tmp);
+
+        assert_eq!({ let c = loaded.header.channels; c }, 2);
+        assert_eq!(loaded.mipmap_data[0].channels, 2);
+        assert_eq!(loaded.mipmap_data[0].len(), 2);
+        assert_eq!(loaded.mipmap_data[0].channel_min(0), &[-1.0, -0.3][..]);
+        assert_eq!(loaded.mipmap_data[0].channel_min(1), &[-0.5, 0.0][..]);
+        assert_eq!(loaded.mipmap_data[0].channel_max(0), &[1.0, 0.3][..]);
+        assert_eq!(loaded.mipmap_data[0].channel_max(1), &[0.5, 0.1][..]);
+    }
+
+    #[test]
+    fn wfpk_v2_layout_carries_channels_and_per_channel_blocks() {
+        let mut file = HfsPeakFile::new(2, 48000, 2, 10, 20);
+        file.add_mipmap(
+            1,
+            MipmapData {
+                channels: 2,
+                min: vec![-1.0, -0.25, -0.5, -0.125],
+                max: vec![1.0, 0.25, 0.5, 0.125],
+            },
+        );
+        let bytes = file.to_binary_level(0);
+
+        assert_eq!(&bytes[0..4], b"WFPK");
+        assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), WFPK_FORMAT_VERSION);
+        assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 48000);
+        assert_eq!(u32::from_le_bytes(bytes[12..16].try_into().unwrap()), 1);
+        assert_eq!(u32::from_le_bytes(bytes[16..20].try_into().unwrap()), 2);
+        assert_eq!(u32::from_le_bytes(bytes[20..24].try_into().unwrap()), 0);
+        assert_eq!(u32::from_le_bytes(bytes[24..28].try_into().unwrap()), 2);
+
+        // ch0_min, ch0_max, ch1_min, ch1_max
+        let expect: Vec<Vec<f32>> = vec![
+            vec![-1.0, -0.25],
+            vec![1.0, 0.25],
+            vec![-0.5, -0.125],
+            vec![0.5, 0.125],
+        ];
+        let mut offset = 28;
+        for block in &expect {
+            for v in block {
+                let raw: [u8; 4] = bytes[offset..offset + 4].try_into().unwrap();
+                assert_eq!(f32::from_le_bytes(raw), *v);
+                offset += 4;
+            }
+        }
+        assert_eq!(bytes.len(), offset);
+    }
+
+    #[test]
+    fn compute_mipmap_peaks_wav_is_per_channel() {
+        // 写一个 2 声道 wav：L = 递减、R = 递增，验证逐声道峰值互不串扰。
+        let path = std::env::temp_dir().join(format!("hfs_ch_test_{}.wav", std::process::id()));
+        {
+            let spec = hound::WavSpec {
+                channels: 2,
+                sample_rate: 44100,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            };
+            let mut writer = hound::WavWriter::create(&path, spec).unwrap();
+            for f in 0..512i16 {
+                let l = 8000 - (f % 256) * 30;
+                let r = -8000 + (f % 256) * 30;
+                // hound 的 write_sample 按写入顺序交错排列声道。
+                writer.write_sample(l).unwrap();
+                writer.write_sample(r).unwrap();
+            }
+            writer.finalize().unwrap();
+        }
+
+        let file = compute_mipmap_peaks(&path).expect("compute peaks");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!({ let c = file.header.channels; c }, 2);
+        let l0 = &file.mipmap_data[0];
+        assert_eq!(l0.channels, 2);
+        // L 声道最大值应为正、R 声道最小值应为负。
+        let l_max = l0.channel_max(0).iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
+        let r_min = l0.channel_min(1).iter().fold(f32::INFINITY, |a, &b| a.min(b));
+        assert!(l_max > 0.2, "L channel max should be positive, got {l_max}");
+        assert!(r_min < -0.2, "R channel min should be negative, got {r_min}");
     }
 }

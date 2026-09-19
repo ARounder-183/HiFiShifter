@@ -56,6 +56,10 @@ export interface WaveformSceneClip {
     /** REAPER 风格淡出形状 id（语义同 fadeInShape）。 */
     fadeOutShape: number;
     fadeOutDir: number;
+    /** Take 声道模式（0..=4，对齐 REAPER CHANMODE）；缺省 0（正常/按源）。 */
+    channelMode?: number;
+    /** 源文件声道数（未知时缺省 0，由峰值数据自身的 channels 兜底）。 */
+    sourceChannels?: number;
     /** 多 Take 展开：该 lane 相对行波形带（body）顶部的竖直偏移；未设置时用行波形带。 */
     laneTopPx?: number;
     /** 多 Take 展开：该 lane 的高度；未设置时用行波形带高度。 */
@@ -99,6 +103,10 @@ export interface WaveformSceneSegment {
     fadeOutShape: number;
     fadeOutDir: number;
     alpha: number;
+    /** Take 声道模式（0..=4，对齐 REAPER CHANMODE）。 */
+    channelMode: number;
+    /** 源文件声道数（未知时 0）。 */
+    sourceChannels: number;
     /** inactive take lane：几何层据此压暗顶点颜色。 */
     inactive?: boolean;
 }
@@ -428,6 +436,8 @@ export function buildWaveformScene(args: {
                         fadeOutDir: clip.fadeOutDir ?? 0,
                         alpha:
                             localStartSec < leadingOverlapSec - 1e-9 ? baseAlpha * 0.5 : baseAlpha,
+                        channelMode: clip.channelMode ?? 0,
+                        sourceChannels: clip.sourceChannels ?? 0,
                         inactive: Boolean(clip.inactive),
                     });
                 }

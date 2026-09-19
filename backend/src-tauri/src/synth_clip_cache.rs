@@ -230,6 +230,7 @@ pub fn compute_param_hash<K, V, I>(
     start_frame: u64,
     end_frame: u64,
     sr: u32,
+    channel_index: u16,
     renderer_id: &str,
     curves: &PitchCurvesSnapshot<'_>,
     extra_curves: I,
@@ -257,6 +258,9 @@ where
     mix_bytes!(&start_frame.to_le_bytes());
     mix_bytes!(&end_frame.to_le_bytes());
     mix_bytes!(&sr.to_le_bytes());
+    // 混入声道位：逐声道扇出时同一 clip/参数会以不同输入调用多次，
+    // 缺少该值会让第二个声道命中第一个声道的缓存（立体声坍缩）。
+    mix_bytes!(&channel_index.to_le_bytes());
 
     // 混入与 clip 时间范围重叠的 pitch_edit 曲线片段
     let fp = curves.frame_period_ms.max(0.1);
@@ -538,7 +542,9 @@ pub fn clear_pad_suppressed_clips() {
 /// v2：vslib 不再把 volume/pan 烘焙进合成输出（改由 mix 阶段统一应用）。
 /// 旧缓存里这些 PCM 已含音量/声像，若沿用会与新混音层叠加成二次增益，
 /// 因此必须整体失效。
-pub const RENDER_PIPELINE_VERSION: u32 = 2;
+/// v3：声道条件化（take 级 channel_mode）与合成链逐声道扇出。旧缓存是
+/// "取左声道 → 处理 → 复制双声道"的坍缩结果，与新语义必然不同，整体失效。
+pub const RENDER_PIPELINE_VERSION: u32 = 3;
 
 /// [`compute_rendered_clip_hash`] 的输入集合。
 ///
@@ -571,6 +577,9 @@ pub struct RenderedClipHashInput<'a> {
     pub reversed: bool,
     /// 是否 Loop（循环源）。
     pub loop_enabled: bool,
+    /// 声道模式（0..=4，对齐 REAPER CHANMODE）：条件化发生在渲染输入段上，
+    /// 同一源窗口/速率下不同模式产出不同内容，必须参与哈希。
+    pub channel_mode: i32,
     /// 量化的源窗口 `(source_start_sec·1000, source_end_sec·1000)`。
     pub source_range_q: (i64, i64),
     /// 全局 pitch_edit 曲线。
@@ -613,6 +622,7 @@ pub fn compute_rendered_clip_hash(input: &RenderedClipHashInput<'_>) -> u64 {
         playback_rate,
         reversed,
         loop_enabled,
+        channel_mode,
         source_range_q,
         pitch_edit,
         pitch_orig,
@@ -677,6 +687,8 @@ pub fn compute_rendered_clip_hash(input: &RenderedClipHashInput<'_>) -> u64 {
     // Loop 回绕索引方向不同）。漏掉它会让"反转开关"直接命中旧渲染结果。
     mix_bytes!(&[u8::from(reversed)]);
     mix_bytes!(&[u8::from(loop_enabled)]);
+    // 混入 channel_mode：同窗口下 Swap/mono 系模式的条件化输出不同。
+    mix_bytes!(&channel_mode.to_le_bytes());
     mix_bytes!(&source_range_q.0.to_le_bytes());
     mix_bytes!(&source_range_q.1.to_le_bytes());
 
@@ -1245,6 +1257,7 @@ mod tests {
                 playback_rate: 1.0,
                 reversed: false,
                 loop_enabled: false,
+                channel_mode: 0,
                 source_range_q: (0, 1_000),
                 pitch_edit: &self.pitch_edit,
                 pitch_orig: Some(&self.pitch_orig),

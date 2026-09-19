@@ -51,6 +51,9 @@ export interface TimelineClipTake {
     playback_rate: number;
     reversed: boolean;
     loop_enabled: boolean;
+    /** 声道模式：0..=4 对齐 REAPER CHANMODE（0 正常 / 1 交换 / 2 混合 / 3 仅左 / 4 仅右） */
+    channel_mode?: number;
+    source_channels?: number;
     midi_note_data?: Array<{
         start_sec: number;
         end_sec: number;
@@ -89,6 +92,9 @@ export interface TimelineClip {
     /** Clip 级播放倍率；实际速率 = clip_playback_rate × active take playback_rate。 */
     clip_playback_rate?: number;
     reversed?: boolean;
+    /** 声道模式（active take 投影）：0..=4 对齐 REAPER CHANMODE。 */
+    channel_mode?: number;
+    source_channels?: number;
     /** Loop（循环源）：超出源媒体区间时按周期回绕产生循环内容。 */
     loop_enabled?: boolean;
     /** 吸附偏移（秒）：相对 Clip 起点的偏移，默认 0；旧工程缺失时补齐为 0。 */
@@ -365,20 +371,6 @@ export interface WaveformPeaksV2Payload {
     actual_start_sec: number;
     /** 返回数据实际覆盖的持续时间（秒），由后端 floor/ceil 取整后的峰值索引决定 */
     actual_duration_sec: number;
-}
-
-/** v2 波形元数据响应 */
-export interface WaveformPeaksV2MetaPayload {
-    ok: boolean;
-    sample_rate: number;
-    channels: number;
-    total_frames: number;
-    mipmap_levels: Array<{
-        level: number;
-        division_factor: number;
-        peak_count: number;
-    }>;
-    cached: boolean;
 }
 
 export type ParamReferenceKind = "source_curve" | "default_value";

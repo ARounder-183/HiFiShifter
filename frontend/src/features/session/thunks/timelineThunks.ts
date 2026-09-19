@@ -1,5 +1,6 @@
 import { createAsyncThunk } from "@reduxjs/toolkit";
 import { webApi } from "../../../services/webviewApi";
+import { fetchTimeline } from "./transportThunks";
 import type {
     TimelineState,
     SilenceDetectOptionsPayload,
@@ -399,6 +400,34 @@ export const setClipTakeReversedRemote = createAsyncThunk(
         checkpoint?: boolean;
     }) => {
         return webApi.setClipTakeReversed(payload);
+    },
+);
+
+export const setClipTakeChannelModeRemote = createAsyncThunk(
+    "session/setClipTakeChannelModeRemote",
+    async (
+        payload: {
+            clipId: string;
+            takeId: string;
+            channelMode: number;
+            checkpoint?: boolean;
+        },
+        { dispatch, rejectWithValue },
+    ) => {
+        let result: Awaited<ReturnType<typeof webApi.setClipTakeChannelMode>>;
+        try {
+            result = await webApi.setClipTakeChannelMode(payload);
+        } catch (err) {
+            // 自愈：IPC 断链（如命令漏映射）时乐观更新已生效，必须拉权威
+            // 时间线回滚，否则"波形变了、后端从未收到"的状态分叉会一直留存。
+            void dispatch(fetchTimeline());
+            throw err;
+        }
+        if (!result.ok) {
+            void dispatch(fetchTimeline());
+            return rejectWithValue(result);
+        }
+        return result;
     },
 );
 

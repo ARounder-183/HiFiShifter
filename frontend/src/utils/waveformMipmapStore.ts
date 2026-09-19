@@ -19,6 +19,7 @@
  */
 
 import { waveformApi } from "../services/api/waveform";
+import { effectiveChannels, normalizeChannelMode } from "./channelMode";
 import { decodeWaveformFromBase64, type WaveformMipmapBinary } from "./waveformBinaryCodec";
 import {
     wfDiag_poolAcquire,
@@ -82,14 +83,24 @@ const MAX_CACHE_BYTES = 192 * 1024 * 1024;
 
 /** 单级 peaks 数据 */
 export interface LevelPeaks {
-    /** 最小值数组 */
+    /**
+     * 跨声道合并包络（逐峰值取各声道 min 的最小值 / max 的最大值）。
+     * 单声道文件即原始数据；立体声文件为合并视图（兼容所有单带消费者）。
+     */
     min: Float32Array;
-    /** 最大值数组 */
     max: Float32Array;
     /** 该级别的除数因子 */
     divisionFactor: number;
     /** 采样率 */
     sampleRate: number;
+    /** 声道数（v2 协议携带；v1 数据视为 1） */
+    channels: 1 | 2;
+    /** 声道 0 的 min/max 视图（零拷贝） */
+    ch0Min: Float32Array;
+    ch0Max: Float32Array;
+    /** 声道 1 的 min/max 视图（单声道时与 ch0 同引用） */
+    ch1Min: Float32Array;
+    ch1Max: Float32Array;
 }
 
 export type WaveformMipmapLevel = 0 | 1 | 2;
@@ -574,19 +585,33 @@ class WaveformMipmapStoreImpl {
     /**
      * 获取零拷贝 min/max 视图及其实际时间边界。
      *
-     * 共享 WebGL/Canvas surface 直接消费这两个 subarray，避免每帧构造
+     * 共享 WebGL/Canvas surface 直接消费这些 subarray，避免每帧构造
      * interleaved、gain 和 downsample 中间数组。
+     *
+     * 声道语义（与后端 channel_mode 条件化一致）：
+     * - 有效声道数 = 2（stereo 源 × Normal/Swap）：返回 ch0/ch1 两个平面
+     *   视图（`channels: 2` + `ch1Min/ch1Max`）；Swap 交换两个平面的角色；
+     *   此时 `min/max` 为 ch0 平面（供单带兜底消费）。
+     * - 有效声道数 = 1（mono 源，或 MonoMix/MonoLeft/MonoRight）：返回单带
+     *   视图 —— MonoLeft 取 ch0、MonoRight 取 ch1、其余取跨声道合并包络
+     *   （MonoMix 的混合显示与合并包络在视觉上等价）。
      */
     getBestSliceView(
         sourcePath: string,
         preferredLevel: WaveformMipmapLevel,
         startSec: number,
         durationSec: number,
+        channelMode?: number,
+        sourceChannels?: number,
     ): {
         min: Float32Array;
         max: Float32Array;
         dataStartSec: number;
         dataDurationSec: number;
+        /** 有效声道数：2 时 ch1Min/ch1Max 为第二声道视图 */
+        channels: 1 | 2;
+        ch1Min?: Float32Array;
+        ch1Max?: Float32Array;
     } | null {
         let peaks = this.getPeaks(sourcePath, preferredLevel);
         if (!peaks) peaks = this.getNearestLoadedLevel(sourcePath, preferredLevel);
@@ -600,11 +625,54 @@ class WaveformMipmapStoreImpl {
         );
         if (endIdx <= startIdx) return null;
 
+        const dataStartSec = (startIdx * divisionFactor) / sampleRate;
+        const dataDurationSec = ((endIdx - startIdx) * divisionFactor) / sampleRate;
+        const effChannels = effectiveChannels(
+            sourceChannels ?? peaks.channels,
+            channelMode,
+        );
+
+        if (effChannels === 2 && peaks.channels === 2) {
+            const mode = normalizeChannelMode(channelMode);
+            // Swap 交换平面角色：主平面为右声道。
+            const [primary, secondary] =
+                mode === 1
+                    ? [peaks.ch1Min, peaks.ch0Min]
+                    : [peaks.ch0Min, peaks.ch1Min];
+            const [primaryMax, secondaryMax] =
+                mode === 1
+                    ? [peaks.ch1Max, peaks.ch0Max]
+                    : [peaks.ch0Max, peaks.ch1Max];
+            return {
+                min: primary.subarray(startIdx, endIdx),
+                max: primaryMax.subarray(startIdx, endIdx),
+                dataStartSec,
+                dataDurationSec,
+                channels: 2,
+                ch1Min: secondary.subarray(startIdx, endIdx),
+                ch1Max: secondaryMax.subarray(startIdx, endIdx),
+            };
+        }
+
+        // 等效单声道：按模式选择展示平面。
+        const mode = normalizeChannelMode(channelMode);
+        let min = peaks.min;
+        let max = peaks.max;
+        if (peaks.channels === 2) {
+            if (mode === 3) {
+                min = peaks.ch0Min;
+                max = peaks.ch0Max;
+            } else if (mode === 4) {
+                min = peaks.ch1Min;
+                max = peaks.ch1Max;
+            }
+        }
         return {
-            min: peaks.min.subarray(startIdx, endIdx),
-            max: peaks.max.subarray(startIdx, endIdx),
-            dataStartSec: (startIdx * divisionFactor) / sampleRate,
-            dataDurationSec: ((endIdx - startIdx) * divisionFactor) / sampleRate,
+            min: min.subarray(startIdx, endIdx),
+            max: max.subarray(startIdx, endIdx),
+            dataStartSec,
+            dataDurationSec,
+            channels: 1,
         };
     }
 
@@ -1134,6 +1202,11 @@ class WaveformMipmapStoreImpl {
             max: decoded.max,
             divisionFactor: decoded.divisionFactor,
             sampleRate: decoded.sampleRate,
+            channels: decoded.channels,
+            ch0Min: decoded.ch0Min,
+            ch0Max: decoded.ch0Max,
+            ch1Min: decoded.ch1Min,
+            ch1Max: decoded.ch1Max,
         };
         entry.bytes += nextBytes - previousBytes;
         this.cacheBytes += nextBytes - previousBytes;

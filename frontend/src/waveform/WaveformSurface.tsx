@@ -289,7 +289,7 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
         const geometry = buildWaveformGeometry({
             scene,
             color: props.color,
-            getPeaks: (sourcePath, sampleRate, sourceStartSec, sourceDurationSec) => {
+            getPeaks: (sourcePath, sampleRate, sourceStartSec, sourceDurationSec, channelMode, sourceChannels) => {
                 // 迟滞选级：spp 在阈值附近时 selectLevel 会在两档间来回跳变
                 // （每次跳变都拉取不同级别的 peaks → 几何反复重建）；用上一帧
                 // 的选级做迟滞（与 mipmap store 的 selectLevelStable 同参数）。
@@ -320,6 +320,8 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
                     level,
                     sourceStartSec,
                     sourceDurationSec,
+                    channelMode,
+                    sourceChannels,
                 );
             },
             sink: vertexSinkRef.current,

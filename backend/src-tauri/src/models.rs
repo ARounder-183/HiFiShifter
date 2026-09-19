@@ -76,6 +76,11 @@ pub struct TimelineClipTake {
     pub playback_rate: f32,
     pub reversed: bool,
     pub loop_enabled: bool,
+    /// 声道模式：0..=4 对齐 REAPER CHANMODE（0 正常 / 1 交换 / 2 混合 / 3 仅左 / 4 仅右）。
+    pub channel_mode: i32,
+    /// 源文件声道数（未知时 None；前端波形带数/徽章兜底用）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_channels: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub midi_note_data: Option<Vec<MidiNoteEvent>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -99,6 +104,8 @@ impl TimelineClipTake {
             playback_rate: take.playback_rate,
             reversed: take.reversed,
             loop_enabled: take.loop_enabled,
+            channel_mode: crate::channel_mode::TakeChannelMode::normalize_raw(take.channel_mode),
+            source_channels: take.source_channels,
             midi_note_data: if include_midi {
                 take.midi_note_data.clone()
             } else {
@@ -153,6 +160,11 @@ pub struct TimelineClip {
     /// Clip 级播放倍率；实际速率 = clip_playback_rate × active take playback_rate。
     pub clip_playback_rate: Option<f32>,
     pub reversed: Option<bool>,
+    /// 声道模式（active take 投影）：0..=4 对齐 REAPER CHANMODE。
+    pub channel_mode: Option<i32>,
+    /// 源文件声道数（active take 投影；未知时 None）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_channels: Option<u16>,
     /// Loop（循环源）属性：超出源媒体区间时按周期回绕产生循环内容。
     #[serde(default)]
     pub loop_enabled: bool,

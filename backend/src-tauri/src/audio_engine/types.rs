@@ -87,6 +87,11 @@ pub(crate) struct EngineClip {
     pub(crate) reversed: bool,
     pub(crate) playback_rate: f64,
 
+    /// Take 级声道模式（0..=4，对齐 REAPER CHANMODE）。
+    /// 仅作用于**源 PCM 采样路径**（`sample_clip_pcm` 的 `src` 分支）：
+    /// 合成 clip 的 `rendered_pcm` 已在渲染期条件化，不得二次施加。
+    pub(crate) channel_mode: crate::channel_mode::TakeChannelMode,
+
     // Local (timeline) frame offset applied before sampling the source.
     // Negative values mean leading silence (i.e. slip-edit past the source start).
     pub(crate) local_src_offset_frames: i64,

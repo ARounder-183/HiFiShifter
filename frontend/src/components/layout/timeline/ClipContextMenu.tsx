@@ -15,8 +15,14 @@ import {
     removeClipTakeRemote,
     renameClipTakeRemote,
     setClipActiveTakeRemote,
+    setClipTakeChannelModeRemote,
     setClipTakeReversedRemote,
 } from "../../../features/session/sessionSlice";
+import {
+    channelModeI18nKey,
+    channelModeShortLabel,
+    nextChannelMode,
+} from "../../../utils/channelMode";
 import { webApi } from "../../../services/webviewApi";
 import { sortAndFilterFadedClips } from "./clipFadeContext";
 
@@ -75,13 +81,32 @@ const TakeMenuItem: React.FC<{
     disabled?: boolean;
     reversed: boolean;
     reverseLabel: string;
+    /** 声道模式（0..=4，对齐 REAPER CHANMODE）；MIDI take 等无声道语义时省略按钮。 */
+    channelMode?: number;
+    modeLabel?: string;
+    modeTitle?: string;
     onSwitch: () => void;
     onToggleReverse: () => void;
-}> = ({ label, disabled = false, reversed, reverseLabel, onSwitch, onToggleReverse }) => (
-    <div className="relative flex items-center w-full">
+    onCycleChannelMode?: () => void;
+}> = ({
+    label,
+    disabled = false,
+    reversed,
+    reverseLabel,
+    channelMode,
+    modeLabel,
+    modeTitle,
+    onSwitch,
+    onToggleReverse,
+    onCycleChannelMode,
+}) => (
+    // 行内布局：标签 flex-1 + 尾随两个 shrink-0 按钮（flex 兄弟，绝不定
+    // 位）—— 任何语言下按钮互不重叠、不挤压标签；标签超长时 truncate
+    // 兜底（面板宽度已随内容展开，见 SubMenu 的 width:max-content）。
+    <div className="flex items-center w-full gap-1 pr-1.5">
         <button
             role="menuitem"
-            className={`px-3 py-1.5 text-left w-full text-[12px] transition-colors pr-14
+            className={`px-3 py-1.5 text-left flex-1 min-w-0 text-[12px] transition-colors rounded
                 ${disabled ? "opacity-40 cursor-default" : "hover:bg-qt-button-hover"}`}
             disabled={disabled}
             onPointerDown={(e) => e.stopPropagation()}
@@ -90,13 +115,33 @@ const TakeMenuItem: React.FC<{
                 onSwitch();
             }}
         >
-            <span>{label}</span>
+            <span className="block truncate">{label}</span>
         </button>
+        {onCycleChannelMode != null && modeLabel != null && (
+            <button
+                role="menuitem"
+                aria-label={`${modeTitle ?? modeLabel}: ${label}`}
+                title={modeTitle}
+                className={`shrink-0 px-1.5 py-0.5 text-[10px] leading-none rounded border transition-colors
+                    ${
+                        (channelMode ?? 0) !== 0
+                            ? "border-qt-highlight text-qt-highlight"
+                            : "border-qt-border text-qt-text-muted opacity-70"
+                    } hover:bg-qt-button-hover`}
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                    e.stopPropagation();
+                    onCycleChannelMode();
+                }}
+            >
+                {modeLabel}
+            </button>
+        )}
         <button
             role="menuitem"
             aria-label={`${reverseLabel}: ${label}`}
             title={reverseLabel}
-            className={`absolute right-1.5 px-1.5 py-0.5 text-[10px] leading-none rounded border transition-colors
+            className={`shrink-0 px-1.5 py-0.5 text-[10px] leading-none rounded border transition-colors
                 ${
                     reversed
                         ? "border-qt-highlight text-qt-highlight"
@@ -132,14 +177,29 @@ const SubMenu: React.FC<{
         panel.style.right = "auto";
         panel.style.top = "-5px";
         panel.style.bottom = "auto";
+        // 宽度随内容展开：绝对定位面板的宽度默认被包含块（触发项宽度）封顶，
+        // Take 行等长文本会因此换行。max-content 展开后若超出视口，按最终
+        // 锚定侧的可用空间收口 —— 行内标签以 truncate 兜底。
+        panel.style.width = "max-content";
+        panel.style.maxWidth = "none";
 
-        const rect = panel.getBoundingClientRect();
         const vw = window.innerWidth;
         const vh = window.innerHeight;
+        let rect = panel.getBoundingClientRect();
         if (rect.right > vw - 4) {
             panel.style.left = "auto";
             panel.style.right = "calc(100% - 4px)";
         }
+        rect = panel.getBoundingClientRect();
+        const anchoredLeft = panel.style.left !== "auto";
+        const availableWidth = anchoredLeft
+            ? vw - 8 - rect.left
+            : rect.right - 8;
+        if (rect.width > availableWidth) {
+            panel.style.maxWidth = `${Math.max(160, Math.floor(availableWidth))}px`;
+        }
+
+        rect = panel.getBoundingClientRect();
         if (rect.bottom > vh - 4) {
             panel.style.top = "auto";
             panel.style.bottom = "-5px";
@@ -492,6 +552,28 @@ export const ClipContextMenu: React.FC<{
                                 disabled={takes.length <= 1}
                                 reversed={Boolean(take.reversed)}
                                 reverseLabel={t("clip_take_reverse")}
+                                {...(take.sourcePath
+                                    ? {
+                                          channelMode: take.channelMode,
+                                          modeLabel: channelModeShortLabel(take.channelMode),
+                                          modeTitle: `${t("clip_take_channel_mode")}: ${t(
+                                              channelModeI18nKey(take.channelMode),
+                                          )} (${t("clip_take_channel_mode_cycle")})`,
+                                          onCycleChannelMode: () => {
+                                              // 不关闭菜单：连续切换声道无需反复
+                                              // 重开；乐观更新即时刷新按钮状态。
+                                              void dispatch(
+                                                  setClipTakeChannelModeRemote({
+                                                      clipId: clip.id,
+                                                      takeId: take.id,
+                                                      channelMode: nextChannelMode(
+                                                          take.channelMode,
+                                                      ),
+                                                  }),
+                                              );
+                                          },
+                                      }
+                                    : {})}
                                 onSwitch={() => {
                                     // 点击已激活的 take 是 no-op：跳过 dispatch，
                                     // 避免无谓的乐观切换+回滚快照+全量快照刷新。
@@ -508,6 +590,7 @@ export const ClipContextMenu: React.FC<{
                                     close();
                                 }}
                                 onToggleReverse={() => {
+                                    // 不关闭菜单：与声道按钮同口径，连续翻转。
                                     void dispatch(
                                         setClipTakeReversedRemote({
                                             clipId: clip.id,
@@ -515,7 +598,6 @@ export const ClipContextMenu: React.FC<{
                                             reversed: !take.reversed,
                                         }),
                                     );
-                                    close();
                                 }}
                             />
                         ))}

@@ -1173,6 +1173,10 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
                         || (old.playback_rate - clip.playback_rate).abs() > 1e-6
                         || old.reversed != clip.reversed
                         || old.loop_enabled != clip.loop_enabled
+                        // 声道模式改变条件化语义（渲染输入/扇出/引擎读取映射），
+                        // 与 reversed 同级 —— 不进比较会让引擎层感知不到变化，
+                        // 不触发主动重渲染（用户感知：改了模式音频没变）。
+                        || old.channel_mode != clip.channel_mode
                         || (old.length_sec - clip.length_sec).abs() > 1e-6
                         // 检测同路径文件替换：
                         // - duration_frames / source_sample_rate：文件长度或采样率变化
@@ -2064,6 +2068,8 @@ mod tests {
             source_end_sec: 1.0,
             playback_rate: 0.75,
             reversed: false,
+            channel_mode: 0,
+            source_channels: None,
             loop_enabled: false,
             snap_offset_sec: 0.0,
             fade_in_sec: 0.0,

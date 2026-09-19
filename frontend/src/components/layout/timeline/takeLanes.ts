@@ -92,6 +92,8 @@ function sceneClipProjection(clip: ClipInfo, sourcePath: string): WaveformSceneC
         fadeInDir: clip.fadeInDir ?? 0,
         fadeOutShape: Number.isFinite(clip.fadeOutShape) ? clip.fadeOutShape : 0,
         fadeOutDir: clip.fadeOutDir ?? 0,
+        channelMode: clip.channelMode ?? 0,
+        sourceChannels: clip.sourceChannels ?? 0,
     };
 }
 
@@ -139,6 +141,8 @@ export function expandClipToTakeSceneClips(
             playbackRate: Number.isFinite(rate) && rate > 0.1 ? Math.min(10, rate) : 1,
             reversed: take.reversed,
             loopEnabled: take.loopEnabled,
+            channelMode: take.channelMode ?? 0,
+            sourceChannels: take.sourceChannels ?? 0,
             laneTopPx: layout.top,
             laneHeightPx: layout.height,
             inactive: layout.inactive,

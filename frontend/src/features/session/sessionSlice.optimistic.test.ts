@@ -384,6 +384,7 @@ test("features/session/sessionSlice.optimistic.test.ts scripted checks", async (
                 playbackRate: 1,
                 reversed: false,
                 loopEnabled: false,
+                channelMode: 0,
                 midiFillGaps: false,
             },
             {
@@ -395,6 +396,7 @@ test("features/session/sessionSlice.optimistic.test.ts scripted checks", async (
                 playbackRate: 2,
                 reversed: false,
                 loopEnabled: false,
+                channelMode: 0,
                 midiFillGaps: false,
             },
         ];

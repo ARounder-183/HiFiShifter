@@ -15,6 +15,9 @@ use std::collections::HashMap;
 pub struct RenderContext<'a> {
     /// 单声道 PCM 输入（f32，已归一化）。
     pub mono_pcm: &'a [f32],
+    /// 本 PCM 所属的声道位（0 = 等效单声道/L 平面，1 = R 平面），
+    /// 参与 per-segment 推理缓存键（见 [`ClipProcessContext::channel_index`]）。
+    pub channel_index: u16,
     /// 采样率（Hz）。
     pub sample_rate: u32,
     /// 当前片段在时间轴上的起始时间（秒）。
@@ -98,6 +101,10 @@ pub trait Renderer: Send + Sync {
 pub struct ClipProcessContext<'a> {
     /// 输入单声道 PCM（f32，已归一化）。
     pub mono_pcm: &'a [f32],
+    /// 本 PCM 所属的声道位（0 = 等效单声道/L 平面，1 = R 平面）。
+    /// 逐声道扇出时同一 clip 会以不同输入调用多次处理器，内部缓存键
+    /// 必须混入该值，否则第二个声道会命中第一个声道的推理结果。
+    pub channel_index: u16,
     /// 采样率（Hz）。
     pub sample_rate: u32,
     /// Clip 在时间轴上的起点（秒），用于曲线对齐。

@@ -777,6 +777,16 @@ pub struct ClipTake {
     #[serde(default)]
     pub loop_enabled: bool,
 
+    /// 声道模式：0..=4，数值对齐 REAPER `CHANMODE`
+    /// （0=正常 1=交换左右 2=混合单声道 3=仅左 4=仅右）。
+    /// 语义实现唯一收敛在 [`crate::channel_mode`]；越界值在加载边界规范化为 0。
+    #[serde(default)]
+    pub channel_mode: i32,
+    /// 源文件声道数（导入时由 header 探针记录；`None` = 未知，渲染期由
+    /// 峰值头/解码结果回填内存投影，不强制回写工程）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_channels: Option<u16>,
+
     // ── MIDI 内容（无音频源时） ──
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub midi_note_data: Option<Vec<MidiNoteEvent>>,
@@ -832,6 +842,8 @@ impl ClipTake {
             playback_rate,
             reversed: clip.reversed,
             loop_enabled: clip.loop_enabled,
+            channel_mode: crate::channel_mode::TakeChannelMode::normalize_raw(clip.channel_mode),
+            source_channels: clip.source_channels,
             midi_note_data: clip.midi_note_data.clone(),
             midi_fill_gaps: clip.midi_fill_gaps,
             stretch_markers: Vec::new(),
@@ -863,6 +875,8 @@ impl ClipTake {
         clip.playback_rate = clip_rate * self.playback_rate;
         clip.reversed = self.reversed;
         clip.loop_enabled = self.loop_enabled;
+        clip.channel_mode = crate::channel_mode::TakeChannelMode::normalize_raw(self.channel_mode);
+        clip.source_channels = self.source_channels;
         clip.midi_note_data = self.midi_note_data.clone();
         clip.midi_fill_gaps = self.midi_fill_gaps;
     }
@@ -1156,6 +1170,13 @@ pub struct Clip {
     pub playback_rate: f32,
     #[serde(default, skip_serializing)]
     pub reversed: bool,
+    /// 声道模式（active take 投影；0..=4 对齐 REAPER CHANMODE，
+    /// 语义见 [`crate::channel_mode`]）。
+    #[serde(default, skip_serializing)]
+    pub channel_mode: i32,
+    /// 源文件声道数（active take 投影；`None` = 导入时未记录）。
+    #[serde(default, skip_serializing)]
+    pub source_channels: Option<u16>,
     /// Loop（循环源）属性，对齐 REAPER / VEGAS 的 item LOOP 语义：
     ///
     /// 启用后对**整个原始媒体文件**做模运算回绕（"循环原始音频文件"）：
@@ -1371,6 +1392,10 @@ impl Clip {
     /// 统一规范化：旧工程（无 takes）由投影生成单 Take；新工程（有 takes）
     /// 把 active take 物化到投影。任何加载/合并/构造边界都应调用。
     pub fn normalize_takes(&mut self) {
+        // 声道模式原始值先规范化（越界 → Normal），再物化投影。
+        for take in &mut self.takes {
+            take.channel_mode = crate::channel_mode::TakeChannelMode::normalize_raw(take.channel_mode);
+        }
         if self.takes.is_empty() {
             self.sync_take_from_flat();
             return;
@@ -1379,6 +1404,16 @@ impl Clip {
         let take = self.takes[idx].clone();
         self.active_take_id = Some(take.id.clone());
         take.apply_to_clip(self);
+    }
+
+    /// 活跃 take 的声道模式（takes 为空时按 Normal；不依赖投影物化）。
+    pub fn take_channel_mode(&self) -> crate::channel_mode::TakeChannelMode {
+        crate::channel_mode::TakeChannelMode::from_raw(self.channel_mode)
+    }
+
+    /// 活跃 take 的源声道数（未记录时 `None`）。
+    pub fn take_source_channels(&self) -> Option<u16> {
+        self.source_channels
     }
 
     /// 清空波形预览缓存（active 投影 + 全部 Take）。
@@ -1670,6 +1705,7 @@ pub enum HistoryOp {
     TakeRemove,
     TakeRename,
     TakeReverse,
+    TakeChannelMode,
     TakeAddMedia,
     // ── 轨道 ──
     AddTrack,
@@ -1725,6 +1761,7 @@ impl HistoryOp {
             HistoryOp::TakeRemove => "take_remove",
             HistoryOp::TakeRename => "take_rename",
             HistoryOp::TakeReverse => "take_reverse",
+            HistoryOp::TakeChannelMode => "take_channel_mode",
             HistoryOp::TakeAddMedia => "take_add_media",
             HistoryOp::AddTrack => "add_track",
             HistoryOp::RemoveTrack => "remove_track",
@@ -6868,6 +6905,8 @@ impl TimelineState {
                 playback_rate: Some(c.playback_rate),
                 clip_playback_rate: Some(c.clip_playback_rate),
                 reversed: Some(c.reversed),
+                channel_mode: Some(c.channel_mode),
+                source_channels: c.source_channels,
                 loop_enabled: c.loop_enabled,
                 snap_offset_sec: Some(c.snap_offset_sec),
                 fade_in_sec: Some(c.fade_in_sec),
@@ -6957,6 +6996,8 @@ impl TimelineState {
                 playback_rate: Some(c.playback_rate),
                 clip_playback_rate: Some(c.clip_playback_rate),
                 reversed: Some(c.reversed),
+                channel_mode: Some(c.channel_mode),
+                source_channels: c.source_channels,
                 loop_enabled: c.loop_enabled,
                 snap_offset_sec: Some(c.snap_offset_sec),
                 fade_in_sec: Some(c.fade_in_sec),
@@ -7751,6 +7792,15 @@ impl TimelineState {
                     take.source_file_fingerprint = Some(fp);
                 }
             }
+            // 源声道数回填：v5 之前的工程 take 未记录该值；header 探测
+            // O(1)（WAV 走 hound 头，其余走容器探测），仅在缺失时执行。
+            if take.source_channels.is_none() {
+                if let Some(info) = crate::audio_utils::try_read_audio_header_only(p) {
+                    if info.channels > 0 {
+                        take.source_channels = Some(info.channels);
+                    }
+                }
+            }
         }
         let take: ClipTake = clip.active_take().clone();
         take.apply_to_clip(clip);
@@ -7801,6 +7851,7 @@ impl TimelineState {
                         c.source_sample_rate,
                         c.waveform_preview.clone(),
                         c.pitch_range.clone(),
+                        c.source_channels,
                     )
                 })
         });
@@ -7817,6 +7868,7 @@ impl TimelineState {
         let mut computed_duration_frames = inherited.as_ref().and_then(|v| v.1);
         let mut computed_source_sr = inherited.as_ref().and_then(|v| v.2);
         let mut computed_waveform = inherited.as_ref().and_then(|v| v.3.clone());
+        let mut computed_source_channels: Option<u16> = inherited.as_ref().and_then(|v| v.5);
         let mut computed_mtime: Option<u64> = None;
         let mut computed_size: Option<u64> = None;
         let mut computed_fp: Option<u64> = None;
@@ -7849,6 +7901,11 @@ impl TimelineState {
                         computed_duration_frames = Some(info.total_frames);
                         computed_source_sr = Some(info.sample_rate);
                         computed_waveform = Some(info.waveform_preview);
+                        computed_source_channels = if info.channels > 0 {
+                            Some(info.channels)
+                        } else {
+                            None
+                        };
                     }
                 }
             }
@@ -7887,6 +7944,8 @@ impl TimelineState {
             playback_rate: 1.0,
             clip_playback_rate: 1.0,
             reversed: false,
+            channel_mode: 0,
+            source_channels: computed_source_channels,
             // 新 Clip 的 Loop 属性跟随"为新的音频块启用循环"设置
             //（导入/录音/MIDI-as-clip/add_clip 等所有创建路径统一生效）。
             loop_enabled: crate::config::loop_new_clips_default(),
@@ -8787,6 +8846,41 @@ impl TimelineState {
         Ok(is_active)
     }
 
+    /// 设置 Take 的声道模式（0..=4，对齐 REAPER CHANMODE）。
+    ///
+    /// 返回该 Take 是否为 active take（active 的模式改变可听内容与渲染缓存
+    /// 语义，调用方据此决定是否重调度分析/共振峰重建）。
+    pub fn set_clip_take_channel_mode(
+        &mut self,
+        clip_id: &str,
+        take_id: &str,
+        channel_mode: i32,
+    ) -> Result<bool, String> {
+        let mode = crate::channel_mode::TakeChannelMode::from_raw(channel_mode);
+        let clip = self
+            .clips
+            .iter_mut()
+            .find(|c| c.id == clip_id)
+            .ok_or_else(|| format!("clip not found: {clip_id}"))?;
+        let is_active = clip.active_take_id.as_deref() == Some(take_id);
+        if is_active {
+            // active take 以内存投影为消费权威：先物化，避免投影中的旧模式
+            // 在下方 apply_to_clip 时把新值覆盖回去。
+            clip.sync_take_from_flat();
+        }
+        let take = clip
+            .takes
+            .iter_mut()
+            .find(|t| t.id == take_id)
+            .ok_or_else(|| format!("take not found: {take_id}"))?;
+        take.channel_mode = mode.raw();
+        if is_active {
+            let take = take.clone();
+            take.apply_to_clip(clip);
+        }
+        Ok(is_active)
+    }
+
     /// 把选中的多个 Clip 聚合为一个多 Take Clip。
     ///
     /// - 结果 Clip 的时间范围为所有源 Clip 的最小起点～最大终点；
@@ -8938,6 +9032,8 @@ impl TimelineState {
             source_end_sec: length,
             playback_rate: 1.0,
             reversed: false,
+            channel_mode: 0,
+            source_channels: None,
             loop_enabled: false,
             snap_offset_sec: 0.0,
             fade_in_sec: 0.0,

@@ -79,6 +79,8 @@ pub struct WavInfo {
     pub sample_rate: u32,
     pub total_frames: u64, // 精确的frame总数
     pub duration_sec: f64, // 兼容性保留，从frames计算
+    /// 源文件声道数（0 = 未知；symphonia 兜底路径以外全可知）。
+    pub channels: u16,
     pub waveform_preview: Vec<f32>,
 }
 
@@ -99,6 +101,7 @@ pub fn try_read_wav_info(path: &Path, preview_points: usize) -> Option<WavInfo> 
         sample_rate: probe.sample_rate,
         total_frames: probe.total_frames,
         duration_sec: probe.duration_sec,
+        channels: probe.channels,
         waveform_preview: probe.waveform_preview,
     })
 }
@@ -120,6 +123,7 @@ pub fn try_read_audio_header_only(path: &Path) -> Option<WavInfo> {
         sample_rate: probe.sample_rate,
         total_frames: probe.total_frames,
         duration_sec: probe.duration_sec,
+        channels: probe.channels,
         waveform_preview: vec![],
     })
 }
@@ -146,6 +150,7 @@ fn try_read_wav_info_hound(path: &Path, preview_points: usize) -> Option<WavInfo
             sample_rate: spec.sample_rate,
             total_frames,
             duration_sec,
+            channels: spec.channels,
             waveform_preview: if preview_points == 0 { vec![] } else { preview },
         });
     }
@@ -217,6 +222,7 @@ fn try_read_wav_info_hound(path: &Path, preview_points: usize) -> Option<WavInfo
         sample_rate: spec.sample_rate,
         total_frames,
         duration_sec,
+        channels: spec.channels,
         waveform_preview: preview,
     })
 }

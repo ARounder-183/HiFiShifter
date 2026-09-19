@@ -337,7 +337,7 @@ pub fn clear_separation_cache() {
 /// `audio_len`, which is sufficient for per-clip HNSEP separation caching — two calls
 /// for the same clip with the same clipped audio length will produce the same separation
 /// output, regardless of which segment is being rendered.
-fn separation_cache_key(clip_id: &str, sample_rate: u32, audio_len: usize) -> u64 {
+fn separation_cache_key(clip_id: &str, sample_rate: u32, audio_len: usize, channel_index: u16) -> u64 {
     // FNV-1a 64-bit initial value
     let mut h: u64 = 14695981039346656037u64;
 
@@ -350,6 +350,12 @@ fn separation_cache_key(clip_id: &str, sample_rate: u32, audio_len: usize) -> u6
         h = h.wrapping_mul(1099511628211u64);
     }
     for &b in &(audio_len as u64).to_le_bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(1099511628211u64);
+    }
+    // 声道位：逐声道扇出后同一 clip 会以 L/R 两个不同输入分别分离，
+    // 键不含声道位会让第二个声道命中第一个声道的分离结果（立体声坍缩）。
+    for &b in &channel_index.to_le_bytes() {
         h ^= b as u64;
         h = h.wrapping_mul(1099511628211u64);
     }
@@ -367,8 +373,10 @@ pub fn infer_noise_mono(
     clip_id: &str,
     audio_mono: &[f32],
     sample_rate: u32,
+    channel_index: u16,
 ) -> Result<Arc<Vec<f32>>, String> {
-    infer_harmonic_noise_mono(clip_id, audio_mono, sample_rate).map(|(_, noise)| noise)
+    infer_harmonic_noise_mono(clip_id, audio_mono, sample_rate, channel_index)
+        .map(|(_, noise)| noise)
 }
 
 /// Pre-populate the HNSEP cache with a harmonic+noise pair for a given clip.
@@ -381,10 +389,11 @@ pub fn cache_separation(
     clip_id: &str,
     sample_rate: u32,
     audio_len: usize,
+    channel_index: u16,
     harmonic: Arc<Vec<f32>>,
     noise: Arc<Vec<f32>>,
 ) {
-    let cache_key = separation_cache_key(clip_id, sample_rate, audio_len);
+    let cache_key = separation_cache_key(clip_id, sample_rate, audio_len, channel_index);
     let entry = HnsepCacheEntry { harmonic, noise };
     let mut cache = global_cache().lock().unwrap_or_else(|e| e.into_inner());
     cache.put(cache_key, entry);
@@ -394,6 +403,7 @@ pub fn infer_harmonic_noise_mono(
     clip_id: &str,
     audio_mono: &[f32],
     sample_rate: u32,
+    channel_index: u16,
 ) -> Result<(Arc<Vec<f32>>, Arc<Vec<f32>>), String> {
     // 非阻塞可用性检查：真正的会话构建由下方加载路径完成（在该调用线程上
     // 按需构建，不在 UI/命令/快照构建路径上同步构建）。
@@ -402,7 +412,7 @@ pub fn infer_harmonic_noise_mono(
     }
 
     let audio_len = audio_mono.len();
-    let cache_key = separation_cache_key(clip_id, sample_rate, audio_len);
+    let cache_key = separation_cache_key(clip_id, sample_rate, audio_len, channel_index);
     {
         let mut cache = global_cache()
             .lock()
