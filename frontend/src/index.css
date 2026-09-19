@@ -381,6 +381,17 @@ textarea {
     min-width: 20px;
     padding-inline: 2px 4px;
 }
+/*
+ * 下拉角标点击后的默认焦点框：Radix 菜单关闭时会把焦点程序化还给触发按钮，
+ * 浏览器据此画出默认 outline（角标图标外一圈黑框，观感像"选中态"）。角标
+ * tabIndex=-1 不参与键盘导航（键盘焦点只会落在药丸的其他片段上），药丸的
+ * 选中态也已由 .param-pill[data-active] 表达 —— 这个焦点框纯属视觉噪音，
+ * 连 :focus 与 :focus-visible 一并移除。
+ */
+.param-pill__seg--chev:focus,
+.param-pill__seg--chev:focus-visible {
+    outline: none;
+}
 .param-pill__seg--breath {
     min-width: 22px;
     padding-inline: 3px;

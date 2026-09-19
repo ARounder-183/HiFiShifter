@@ -1394,6 +1394,10 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
      */
     function scrollbarGeometries(): PianoRollScrollbarGeometries {
         const view = scroll.get();
+        // 竖向值域：thumb 长度按「可见 span / 值域全长」的比例伸缩（原生滚动条
+        // 同构），缩放到最小（span 覆盖全长）时几何报告不可滚动 → 宿主隐藏
+        // thumb。滚动手感（scrollTop ↔ center 映射、滚轮步进）不受影响。
+        const domain = data().valueDomain;
         return resolvePianoRollScrollbarGeometries({
             viewportWidthPx,
             viewportHeightPx,
@@ -1401,6 +1405,7 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             scrollTopPx: view.scrollTop,
             maxScrollLeftPx: scroll.maxScrollLeft(),
             maxScrollTopPx: scroll.maxScrollTop(),
+            verticalValueDomain: domain,
         });
     }
 
@@ -1700,12 +1705,14 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         return (event: PointerEvent) => {
             // 数位笔 / 触摸不触发轨道翻页（与 thumb 同一防误触约定）。
             if (isStylusLike(event)) return;
-            event.preventDefault();
-            event.stopPropagation();
             const track = event.currentTarget as HTMLElement;
             const trackRect = track.getBoundingClientRect();
             const view = scroll.get();
             const geometries = scrollbarGeometries();
+            // 先算目标再决定是否吞事件：不可滚动（几何 scrollable=false）时
+            // `scrollTargetFromTrackClick` 返回 null —— 此时**不能** preventDefault /
+            // stopPropagation，否则轨道（透明、恒挂载）会在无可滚内容时依旧
+            // 劫持贴边内容的按下事件（竖向缩到最小、thumb 隐藏后尤其实际）。
             if (axis === "x") {
                 const target = scrollTargetFromTrackClick(
                     event.clientX - trackRect.left,
@@ -1713,11 +1720,12 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                     view.scrollLeft,
                     viewportWidthPx,
                 );
-                if (target !== null) {
-                    scroll.setScrollLeft(target);
-                    // 用户手势：点轨道翻页同样需要同步共享视口 + 同任务提交。
-                    commitUserGesture("x");
-                }
+                if (target === null) return;
+                event.preventDefault();
+                event.stopPropagation();
+                scroll.setScrollLeft(target);
+                // 用户手势：点轨道翻页同样需要同步共享视口 + 同任务提交。
+                commitUserGesture("x");
                 return;
             }
             const target = scrollTargetFromTrackClick(
@@ -1726,10 +1734,11 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                 view.scrollTop,
                 viewportHeightPx,
             );
-            if (target !== null) {
-                scroll.setScrollTop(target);
-                commitUserGesture("y");
-            }
+            if (target === null) return;
+            event.preventDefault();
+            event.stopPropagation();
+            scroll.setScrollTop(target);
+            commitUserGesture("y");
         };
     }
 

@@ -206,7 +206,7 @@ export function formatAxisMarkLabel(value: number, param?: string): string {
             return "0";
         }
         const ratio = parseFloat(value.toPrecision(3));
-        return `${ratio}×`;
+        return `${ratio}`;
     }
     const displayValue = param != null ? childPitchOffsetValueToDisplay(param, value) : value;
     return parseFloat(displayValue.toPrecision(4)).toString();

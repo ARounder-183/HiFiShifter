@@ -49,19 +49,71 @@ export type WaveformPeakResolver = (
  * 映射只能施加一个全局系数，画多少曲线波形都不变 —— 这正是"编辑动态时波形
  * 不按动态值重绘"的根因。
  *
- * 【对称性】钩子对 min / max 各调用一次，且两者拿到的是**同一个** `timeSec`
- * （同一像素列），因此包络的上下沿被同一个增益缩放，波形形状不会被扭曲。
+ * 【调用契约】映射按**列内增益切片**调用（见 {@link MAX_COLUMN_GAIN_SLICES}）：
+ * 每次的 `timeSec` 是该切片中心的**时间轴绝对时间**，`value` 是该切片时间窗内
+ * 的原始峰值 min/max；对同一切片的 min / max 两次调用拿到**同一个** `timeSec`
+ * （切片内增益恒定，包络上下沿同缩放，形状不失真）。峰值由此与**自身时刻**的
+ * 增益配对 —— 若整列共用列中心的一次增益，峰值高度会随水平缩放乱跳（幻峰 /
+ * 丢峰），缩放等级之间画出截然不同的波形。
+ *
+ * 【对称性】钩子对每一切片的 min / max 各调用一次，两者拿到同一个 `timeSec`。
+ *
+ * 【性能】本契约要求**逐值**调用（一列最多 32 次），而绝大多数映射其实只是
+ * 一个"该切片时刻的乘性因子"（`映射 = value × gain × F(t)`）。这类映射应额外
+ * 声明 {@link WaveformAmplitudeFactors}：几何层改为每切片求值**一次**因子、
+ * 复用到 min/max —— 既省掉一半调用，也消除逐值调用里任何可缓存的解析工作
+ * （参数面板拖动时曾在一次重建内做数万次字符串切分，见该接口的说明）。
  *
  * @param value 源文件峰值（线性，±1 满量程）。
  * @param gain clip 增益 × 淡变（线性）。
  * @param timeSec 该像素列对应的**时间轴绝对时间**（秒）。未知时为 null。
  * @returns 单位幅度（0 附近的相对量；具体量纲由调用方的映射定义）。
  */
-export type WaveformAmplitudeMap = (
-    value: number,
-    gain: number,
-    timeSec: number | null,
-) => number;
+export type WaveformAmplitudeMap = (value: number, gain: number, timeSec: number | null) => number;
+
+/**
+ * 幅度映射的**时域因子**视图（可选契约，挂在映射对象上的 `factorAt`）。
+ *
+ * 【语义】声明了 `factorAt` 即等价于承诺：
+ * `amplitudeMap(value, gain, t) ≡ value × gain × factorAt(t)`（因子为 null 的
+ * 时刻除外，见下）。几何层据此把每切片的两次逐值调用（min / max）换成**一次**
+ * 因子求值 + 两次乘法。
+ *
+ * 【为什么值得单独开一个契约】切片把每列的映射调用数从 2 次提到 32 次，而映射
+ * 实现里往往藏着与 `value` 无关、却**每次调用都要重做**的工作：
+ * - 从 live 覆盖读一次参数窗口（`key.split("|")` 这类字符串解析）；
+ * - 构造一个描述窗口的临时对象；
+ * - 逐帧曲线按时间的两次取样。
+ * 逐值调用会把这些乘以列数 × 切片数（实测 2112 列：每次重建约 6.8 万次调用，
+ * 拖动音量/动态时单帧几何重建 29.5ms —— 用户报告的卡顿）。因子路径把同一时刻
+ * 的工作收敛成一次，实测降到 1ms 以内。
+ *
+ * 【退化】`factorAt` 返回 `null` = 该时刻无法用单一乘性因子表达，几何层回落到
+ * 逐值调用 `amplitudeMap`（非乘性映射仍可正确工作，只是拿不到这次优化）。
+ *
+ * 【一致性】`factorAt` 与 `amplitudeMap` 必须来自同一实现（见
+ * `makeLoudnessAmplitudeMap`：两者共用同一个求值函数），否则两条路径会分叉。
+ */
+export interface WaveformAmplitudeFactors {
+    /**
+     * 该时刻的乘性因子 F（映射 = `value × gain × F`）。
+     *
+     * @param timeSec 时间轴绝对时间（秒）；null = 未知。
+     * @returns 有限因子；`null` = 该时刻须回落到逐值调用。
+     */
+    factorAt(timeSec: number | null): number | null;
+}
+
+/**
+ * 读取幅度映射声明的时域因子视图；未声明时返回 null（保持逐值调用契约）。
+ */
+export function readAmplitudeFactors(
+    map: WaveformAmplitudeMap | undefined,
+): WaveformAmplitudeFactors | null {
+    if (map === undefined) return null;
+    const fn = (map as WaveformAmplitudeMap & Partial<WaveformAmplitudeFactors>).factorAt;
+    return typeof fn === "function" ? (map as unknown as WaveformAmplitudeFactors) : null;
+}
 
 /**
  * 幅度映射内部数据的**修订号读者**。
@@ -82,13 +134,61 @@ export interface WaveformAmplitudeMapWithRevision {
  * 读取幅度映射的修订号；未挂载时返回 0（视为恒定，保持既有缓存行为）。
  */
 export function readAmplitudeRevision(map: WaveformAmplitudeMap | undefined): number {
-    const fn = (map as WaveformAmplitudeMap & Partial<WaveformAmplitudeMapWithRevision>)
-        ?.revision;
+    const fn = (map as WaveformAmplitudeMap & Partial<WaveformAmplitudeMapWithRevision>)?.revision;
     return typeof fn === "function" ? fn() : 0;
 }
 
 /** 缺省幅度映射：线性直投（保持所有既有调用方的行为不变）。 */
 export const linearAmplitudeMap: WaveformAmplitudeMap = (value, gain) => value * gain;
+
+/**
+ * 每列增益采样的上限（列内切片数）。
+ *
+ * 【为什么需要"列内切片"】增益链（clip 增益 × 淡变 × 音量 × 动态）是**逐时刻**
+ * 的，而一列的时间窗在粗缩放下可能横跨许多个自动化帧。若整列只用**列中心**
+ * 一次增益缩放窗口内的全部峰值，峰值就被乘上了"别的时刻"的增益：
+ * - 同一峰值在不同水平缩放等级下落入中心时刻不同的列 → 高度随缩放乱跳
+ *   （用户报告：音量/动态面板的波形"峰值高度在缩放过程中乱跳"）；
+ * - 粗缩放下一列的包络 ≠ 细缩放下它覆盖的各列包络的最大值 → 两种缩放等级
+ *   画出"截然不同的波形"（幻峰 / 丢峰）。
+ *
+ * 【切片语义】把列的峰值索引窗口等分为至多 N 切，每切用**自己的中心索引时刻**
+ * 采样增益并映射，列包络 = 各切映射结果的 max/min。索引锚定 ⇒ 每个峰值桶的
+ * 可听高度是**缩放不变量**；粗列 = 细列的逐段 max ⇒ 缩放一致（细化收敛）。
+ * N=16 时切片粒度在常见工程（3 分钟 / 全览）约等于自动化帧周期（≈5ms），
+ * 视觉上已与逐帧精确一致；同时把每列的映射调用次数封顶，极端缩放下的
+ * 每帧成本有界（≤ 列数 × N × 2 次调用）。
+ */
+const MAX_COLUMN_GAIN_SLICES = 16;
+
+// 列内增益切片的复用 scratch（模块级一次分配；buildWaveformGeometry 同步执行，
+// 无重入风险）——热路径上每列每帧新建数组会把 GC 拖进渲染关键路径。
+const sliceIndexLoScratch = new Int32Array(MAX_COLUMN_GAIN_SLICES);
+const sliceIndexHiScratch = new Int32Array(MAX_COLUMN_GAIN_SLICES);
+const sliceTimeSecScratch = new Float64Array(MAX_COLUMN_GAIN_SLICES);
+const sliceGainScratch = new Float64Array(MAX_COLUMN_GAIN_SLICES);
+
+/**
+ * 波形包络列的**设备像素宽**。
+ *
+ * 【栅格对齐契约（与 09dc9973 的网格修复同一族）】波形按「每列一条竖直包络」
+ * 绘制，列枚举在**设备像素网格**上进行：每列恰好 `round(dpr)` 个物理像素宽
+ * （dpr 非整数时向下取到 1），列边严格落在设备像素边界上。于是任何 DPR 下
+ * 线宽都是**恒定的整数物理像素**——若按 CSS 像素枚举（列宽恒 1 CSS px），
+ * dpr=1.25/1.5 这类非整数比会让列宽落在 1~2 物理像素之间随位置跳变，观感
+ * 就是"线宽一直在 1~2 之间抖动"。
+ *
+ * dpr ≥ 2 时取 `round(dpr)` 而非 1：1 物理像素的高频列在 hi-dpi 屏上覆盖
+ * 不足、观感发"浅"（WebGL LINES 时代的老问题，见 surfaceRenderer 的宽度
+ * 契约注释）；`round(dpr)` 恰好等价于旧的 1 CSS px 列宽，dpr=1/2 的画面
+ * 逐像素不变，只有非整数 dpr 从"抖动"变为"恒定"。
+ *
+ * @param dpr 设备像素比（非法值按 1 处理）。
+ * @returns 每条包络列覆盖的物理像素数。
+ */
+export function waveformColumnWidthDevicePx(dpr: number): number {
+    return Number.isFinite(dpr) && dpr > 0 ? Math.max(1, Math.round(dpr)) : 1;
+}
 
 function clamp01(value: number): number {
     return Math.min(1, Math.max(0, value));
@@ -208,6 +308,8 @@ function createVertexSink(
  * @param args.amplitudeMap 幅度映射（缺省线性直投）。见 {@link WaveformAmplitudeMap}。
  * @param args.sink 顶点写入目标；**跨帧复用可做到稳态零分配**。容量不足时
  *   内部倍增并把新缓冲写回 `sink.buffer`。省略时使用模块级兜底槽。
+ * @param args.dpr 设备像素比（缺省 1）。包络列按设备像素网格枚举（见
+ *   {@link waveformColumnWidthDevicePx}），非整数 dpr 下列宽不再抖动。
  * @returns 顶点视图（**借用 `sink.buffer`，调用方不得长期持有**——下一次
  *   构建会覆写它；生产侧只在同一次 `render()` 内使用，安全）、线段数与
  *   数据完整性标志。
@@ -218,12 +320,19 @@ export function buildWaveformGeometry(args: {
     getPeaks: WaveformPeakResolver;
     amplitudeMap?: WaveformAmplitudeMap;
     sink?: WaveformVertexSink;
+    dpr?: number;
 }): WaveformGeometry {
     const [red, green, blue, colorAlpha] = parseWaveformColor(args.color);
+    const dpr = args.dpr != null && Number.isFinite(args.dpr) && args.dpr > 0 ? args.dpr : 1;
+    const columnDeviceWidth = waveformColumnWidthDevicePx(dpr);
     const sink = args.sink ?? fallbackSink;
     const state: VertexSinkState = { buffer: sink.buffer, length: 0 };
     const push = createVertexSink(state);
     const amplitudeMap = args.amplitudeMap ?? linearAmplitudeMap;
+    // 时域因子视图（可选契约，见 WaveformAmplitudeFactors）：声明了它的映射
+    // 只需每切片求值**一次**因子，min/max 复用 —— 切片把逐值调用提到每列 32 次，
+    // 因子路径把同一时刻的解析/取样工作收敛成一次（拖动参数时的卡顿根因）。
+    const amplitudeFactors = readAmplitudeFactors(args.amplitudeMap);
     let complete = true;
 
     for (const segment of args.scene.segments) {
@@ -251,12 +360,26 @@ export function buildWaveformGeometry(args: {
         const sampleCount = Math.min(peaks.min.length, peaks.max.length);
         const dataDurationSec = Math.max(1e-12, peaks.dataDurationSec);
         const dataEndSec = peaks.dataStartSec + dataDurationSec;
-        const firstX = Math.max(0, Math.ceil(segment.screenRect.x));
-        const lastX = Math.max(firstX, Math.ceil(segment.screenRect.x + segment.screenRect.width));
+        // 列枚举在设备像素网格上（见 waveformColumnWidthDevicePx 的契约说明）：
+        // 列 k 覆盖设备像素 `[k·W, (k+1)·W)`，即 CSS `[k·W/dpr, (k+1)·W/dpr)`。
+        // 旧实现按 CSS 像素枚举、列宽恒 1 CSS px，非整数 dpr 下列的设备覆盖
+        // 在 1~2 物理像素间随位置跳变 —— 用户报告的"线宽抖动"根因。
+        const firstColumn = Math.max(
+            0,
+            Math.ceil((segment.screenRect.x * dpr) / columnDeviceWidth),
+        );
+        const lastColumn = Math.max(
+            firstColumn,
+            Math.ceil(
+                ((segment.screenRect.x + segment.screenRect.width) * dpr) / columnDeviceWidth,
+            ),
+        );
+        // 每列覆盖的时间窗（秒）：总时长 × 列宽占比。W=dpr 时与旧的
+        // 「时长 / CSS 列数」逐值相等（dpr=1/2 行为不变，见 W 的取值说明）。
+        const sourceSecondsPerColumn =
+            (sourceDurationSec * columnDeviceWidth) / (segment.screenRect.width * dpr);
         const halfHeight = segment.screenRect.height / 2;
         const centerY = segment.screenRect.y + halfHeight;
-        const sourceSecondsPerPixel = sourceDurationSec / segment.screenRect.width;
-
         const dual = peaks.channels === 2 && peaks.ch1Min != null && peaks.ch1Max != null;
         // 双带布局：ch0 占上半带（中心 1/4）、ch1 占下半带（中心 3/4），
         // 各自包络以半带高度归一 —— 立体声素材一眼可辨。
@@ -283,87 +406,151 @@ export function buildWaveformGeometry(args: {
             : [{ min: peaks.min, max: peaks.max, centerY, halfHeight }];
 
         for (const band of bands) {
-        for (let x = firstX; x < lastX; x += 1) {
-            const t = clamp01((x + 0.5 - segment.screenRect.x) / segment.screenRect.width);
-            const sourceCenterSec = segment.reversed
-                ? segment.sourceEndSec - t * sourceDurationSec
-                : segment.sourceStartSec + t * sourceDurationSec;
-            const sourceLoSec = Math.max(
-                peaks.dataStartSec,
-                sourceCenterSec - sourceSecondsPerPixel / 2,
-            );
-            const sourceHiSec = Math.min(dataEndSec, sourceCenterSec + sourceSecondsPerPixel / 2);
-            const indexStart = Math.max(
-                0,
-                Math.floor(((sourceLoSec - peaks.dataStartSec) / dataDurationSec) * sampleCount),
-            );
-            const indexEnd = Math.min(
-                sampleCount - 1,
-                Math.max(
-                    indexStart,
-                    Math.ceil(
-                        ((sourceHiSec - peaks.dataStartSec) / dataDurationSec) * sampleCount,
-                    ) - 1,
-                ),
-            );
-            let peakMin = Number.POSITIVE_INFINITY;
-            let peakMax = Number.NEGATIVE_INFINITY;
-            for (let index = indexStart; index <= indexEnd; index += 1) {
-                // 采样当前带（band）的声道平面 —— 双带布局下两带分别是
-                // ch0/ch1 视图；此前误读 peaks.min/max（恒为 ch0），两条
-                // 带画出同一个左声道。
-                peakMin = Math.min(peakMin, band.min[index] ?? 0);
-                peakMax = Math.max(peakMax, band.max[index] ?? 0);
-            }
-            if (!Number.isFinite(peakMin) || !Number.isFinite(peakMax)) continue;
-
-            const clipLocalStartSec = segment.clipLocalStartSec;
-            const localSpanSec = segment.clipLocalEndSec - segment.clipLocalStartSec;
-            const clipTimeSec = clipLocalStartSec + t * localSpanSec;
-            const gain =
-                segment.gain *
-                gainAtClipTime(
-                    clipTimeSec,
-                    segment.clipTotalDurationSec,
-                    segment.fadeInSec,
-                    segment.fadeOutSec,
-                    segment.fadeInShape,
-                    segment.fadeInDir,
-                    segment.fadeOutShape,
-                    segment.fadeOutDir,
+            for (let column = firstColumn; column < lastColumn; column += 1) {
+                // 列中心（CSS 坐标）：device 中心 = (column·W + W/2)，换回 CSS。
+                const xCss = ((column + 0.5) * columnDeviceWidth) / dpr;
+                const t = clamp01((xCss - segment.screenRect.x) / segment.screenRect.width);
+                const sourceCenterSec = segment.reversed
+                    ? segment.sourceEndSec - t * sourceDurationSec
+                    : segment.sourceStartSec + t * sourceDurationSec;
+                const sourceLoSec = Math.max(
+                    peaks.dataStartSec,
+                    sourceCenterSec - sourceSecondsPerColumn / 2,
                 );
-            // 音量增益（gain > 1）会把包络放大到波形矩形之外 —— 表现为波形
-            // "溢出" clip 上下边界（DAW 通用 bug）。与 REAPER 一致，增益放大
-            // 的显示按矩形削顶（flat-top），既保留"已削波"的视觉暗示又不越界。
-            //
-            // 幅度经 `amplitudeMap` 归一化：缺省是线性直投（与旧行为逐像素一致）；
-            // 动态面板传逐帧映射，按该像素列的**时间轴绝对时间**取动态增益。
-            //
-            // 【像素 → 时间】`t` 是该列在本段内的归一化位置（0..1，与上面取峰值
-            // 用的是同一个 `t`），乘上本段的本地时间跨度再加上 Clip 的时间轴
-            // 起点即为绝对时间。倒放时 `t` 已经是"屏幕位置"的推进方向，因此
-            // 这里直接用 `t`、不跟随 `reversed` 翻转 —— 与峰值取样的方向无关，
-            // 我们要的是"屏幕这一列对应时间轴的哪一刻"。
-            const clipStartSec = segment.clipStartSec ?? 0;
-            const timeSec = clipStartSec + clipLocalStartSec + t * localSpanSec;
+                const sourceHiSec = Math.min(
+                    dataEndSec,
+                    sourceCenterSec + sourceSecondsPerColumn / 2,
+                );
+                const indexStart = Math.max(
+                    0,
+                    Math.floor(
+                        ((sourceLoSec - peaks.dataStartSec) / dataDurationSec) * sampleCount,
+                    ),
+                );
+                const indexEnd = Math.min(
+                    sampleCount - 1,
+                    Math.max(
+                        indexStart,
+                        Math.ceil(
+                            ((sourceHiSec - peaks.dataStartSec) / dataDurationSec) * sampleCount,
+                        ) - 1,
+                    ),
+                );
+                const windowCount = indexEnd - indexStart + 1;
+                // 窗口被数据边界裁空（sourceLo 越过数据末尾）→ 与旧守卫同语义：跳过该列。
+                if (windowCount < 1) continue;
 
-            const rectTop = segment.screenRect.y;
-            const rectBottom = rectTop + segment.screenRect.height;
-            const mappedTop = amplitudeMap(peakMax, gain, timeSec);
-            const mappedBottom = amplitudeMap(peakMin, gain, timeSec);
-            const yTop = Math.min(
-                rectBottom,
-                Math.max(rectTop, band.centerY - mappedTop * band.halfHeight),
-            );
-            const yBottom = Math.min(
-                rectBottom,
-                Math.max(rectTop, band.centerY - mappedBottom * band.halfHeight),
-            );
-            const alpha = colorAlpha * segment.alpha * (inactive ? INACTIVE_TAKE_COLOR_ALPHA : 1);
+                // ── 列内增益切片 ─────────────────────────────────
+                // 【源时间 → 时间轴时刻】切片时刻按**峰值索引**反推（源锚定）：
+                // 索引 i 的源时间 = dataStartSec + ((i+0.5)/sampleCount)·数据时长，
+                // 再经 reversed / playbackRate 对应的段内归一化位置换算成时间轴
+                // 绝对时间。锚定到峰值而不是屏幕，保证"同一峰值 × 它自己时刻的
+                // 增益"在任何缩放等级下是同一个数 —— 这是缩放一致性的根基。
+                // （倒放语义与旧实现一致：t 始终是屏幕推进方向的位置。）
+                const clipStartSec = segment.clipStartSec ?? 0;
+                const localSpanSec = segment.clipLocalEndSec - segment.clipLocalStartSec;
+                const sliceCount = Math.min(windowCount, MAX_COLUMN_GAIN_SLICES);
+                for (let slice = 0; slice < sliceCount; slice += 1) {
+                    // 公平切分：边界 = floor(s·W/K)，各切恰好覆盖窗口、互不重叠，
+                    // 最后一切精确落在 indexEnd 上。
+                    const lo = indexStart + Math.floor((slice * windowCount) / sliceCount);
+                    const hi =
+                        indexStart + Math.floor(((slice + 1) * windowCount) / sliceCount) - 1;
+                    sliceIndexLoScratch[slice] = lo;
+                    sliceIndexHiScratch[slice] = hi;
+                    const centerIndex = (lo + hi) / 2;
+                    const sliceSrcSec =
+                        peaks.dataStartSec + ((centerIndex + 0.5) / sampleCount) * dataDurationSec;
+                    const sliceT = clamp01(
+                        segment.reversed
+                            ? (segment.sourceEndSec - sliceSrcSec) / sourceDurationSec
+                            : (sliceSrcSec - segment.sourceStartSec) / sourceDurationSec,
+                    );
+                    const clipTimeSec = segment.clipLocalStartSec + sliceT * localSpanSec;
+                    sliceTimeSecScratch[slice] = clipStartSec + clipTimeSec;
+                    sliceGainScratch[slice] =
+                        segment.gain *
+                        gainAtClipTime(
+                            clipTimeSec,
+                            segment.clipTotalDurationSec,
+                            segment.fadeInSec,
+                            segment.fadeOutSec,
+                            segment.fadeInShape,
+                            segment.fadeInDir,
+                            segment.fadeOutShape,
+                            segment.fadeOutDir,
+                        );
+                }
 
-            push(x + 0.5, yTop, segmentRed, segmentGreen, segmentBlue, alpha);
-            push(x + 0.5, yBottom, segmentRed, segmentGreen, segmentBlue, alpha);
-        }
+                // 音量增益（gain > 1）会把包络放大到波形矩形之外 —— 表现为波形
+                // "溢出" clip 上下边界（DAW 通用 bug）。与 REAPER 一致，增益放大
+                // 的显示按矩形削顶（flat-top），既保留"已削波"的视觉暗示又不越界。
+                //
+                // 幅度经 `amplitudeMap` 归一化：缺省是线性直投；动态/音量面板传
+                // 逐帧映射。**逐切片**映射（每切一次求值、min/max 复用同一时刻）
+                // —— 峰值与自身时刻的增益配对，见 MAX_COLUMN_GAIN_SLICES 的说明。
+                //
+                // 两条等价路径（见 WaveformAmplitudeFactors）：
+                // - 映射声明了 `factorAt`：每切片求值一次因子，min/max 各一次乘法；
+                // - 未声明：逐值调用映射（min/max 各一次，共享该切时刻）。
+                const rectTop = segment.screenRect.y;
+                const rectBottom = rectTop + segment.screenRect.height;
+                let mappedMin = Number.POSITIVE_INFINITY;
+                let mappedMax = Number.NEGATIVE_INFINITY;
+                for (let slice = 0; slice < sliceCount; slice += 1) {
+                    let rawMin = Number.POSITIVE_INFINITY;
+                    let rawMax = Number.NEGATIVE_INFINITY;
+                    for (
+                        let index = sliceIndexLoScratch[slice];
+                        index <= sliceIndexHiScratch[slice];
+                        index += 1
+                    ) {
+                        // 采样当前带（band）的声道平面 —— 双带布局下两带分别是
+                        // ch0/ch1 视图；此前误读 peaks.min/max（恒为 ch0），两条
+                        // 带画出同一个左声道。
+                        rawMin = Math.min(rawMin, band.min[index] ?? 0);
+                        rawMax = Math.max(rawMax, band.max[index] ?? 0);
+                    }
+                    if (!Number.isFinite(rawMin) || !Number.isFinite(rawMax)) continue;
+                    const gain = sliceGainScratch[slice];
+                    const timeSec = sliceTimeSecScratch[slice];
+                    let mappedSliceMax: number;
+                    let mappedSliceMin: number;
+                    const factor = amplitudeFactors?.factorAt(timeSec) ?? null;
+                    if (factor !== null) {
+                        // 乘性因子路径：一次求值、两次乘法（映射 =
+                        // value × gain × factor）。
+                        mappedSliceMax = rawMax * gain * factor;
+                        mappedSliceMin = rawMin * gain * factor;
+                    } else {
+                        mappedSliceMax = amplitudeMap(rawMax, gain, timeSec);
+                        mappedSliceMin = amplitudeMap(rawMin, gain, timeSec);
+                    }
+                    if (!Number.isFinite(mappedSliceMax) || !Number.isFinite(mappedSliceMin)) {
+                        continue;
+                    }
+                    if (mappedSliceMax > mappedMax) mappedMax = mappedSliceMax;
+                    if (mappedSliceMin < mappedMin) mappedMin = mappedSliceMin;
+                }
+                if (!Number.isFinite(mappedMin) || !Number.isFinite(mappedMax)) continue;
+
+                const yTop = Math.min(
+                    rectBottom,
+                    Math.max(rectTop, band.centerY - mappedMax * band.halfHeight),
+                );
+                const yBottom = Math.min(
+                    rectBottom,
+                    Math.max(rectTop, band.centerY - mappedMin * band.halfHeight),
+                );
+                const alpha =
+                    colorAlpha * segment.alpha * (inactive ? INACTIVE_TAKE_COLOR_ALPHA : 1);
+
+                // 列以**中心线**语义写出：渲染端按 dpr 把它展开成恰好覆盖
+                // `[column·W, (column+1)·W)` 设备像素的等宽四边形 / 描边
+                // （expandLineSegmentsToQuads / Canvas2D lineWidth，同宽契约）。
+                push(xCss, yTop, segmentRed, segmentGreen, segmentBlue, alpha);
+                push(xCss, yBottom, segmentRed, segmentGreen, segmentBlue, alpha);
+            }
         }
     }
 
@@ -375,16 +562,20 @@ export function buildWaveformGeometry(args: {
         const markerGreen = inactive ? green * INACTIVE_TAKE_RGB_SCALE : green;
         const markerBlue = inactive ? blue * INACTIVE_TAKE_RGB_SCALE : blue;
         const alpha = colorAlpha * (inactive ? INACTIVE_TAKE_COLOR_ALPHA : 1);
-        // 实心 ▽：按整像素扫描线逐行填充。旧版是 1px 空心折线，WebGL 线元
-        // 无抗锯齿，两条斜边锯齿非常明显；横线落在 x.5 上天然锐利，小尺寸
-        // 下实心标记也更易读。
-        const x = Math.round(marker.xPx) + 0.5;
-        const yTop = Math.round(marker.yPx) + 0.5;
-        const steps = Math.max(2, Math.round(size));
+        // 实心 ▽：按**设备像素**扫描线逐行填充（行高 = 包络列同款 W 物理像素、
+        // 行距与首行同走设备网格 —— 行与行无缝拼合，任何 DPR 下都不会出现
+        // "行高 1~2px 抖动"或行间缝隙）。旧版是 1px 空心折线，WebGL
+        // 线元无抗锯齿，两条斜边锯齿非常明显；横线落在设备行中心上天然锐利，
+        // 小尺寸下实心标记也更易读。
+        // x 轴与首行 y 都对齐到设备像素中心；步数按设备行数取整，dpr=1 时与
+        // 旧实现逐值相等（size CSS px 高、每行 1 设备像素）。
+        const x = (Math.round(marker.xPx * dpr) + 0.5) / dpr;
+        const firstRowDevice = Math.round(marker.yPx * dpr);
+        const steps = Math.max(2, Math.round((size * dpr) / columnDeviceWidth));
         for (let i = 0; i < steps; i += 1) {
             const hw = halfWidth * (1 - i / steps);
-            if (hw < 0.5) break;
-            const y = yTop + i;
+            if (hw < 0.5 / dpr) break;
+            const y = (firstRowDevice + i * columnDeviceWidth + 0.5) / dpr;
             push(x - hw, y, markerRed, markerGreen, markerBlue, alpha);
             push(x + hw, y, markerRed, markerGreen, markerBlue, alpha);
         }

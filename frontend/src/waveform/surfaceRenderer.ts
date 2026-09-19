@@ -1,41 +1,52 @@
 import type { WaveformGeometry } from "./geometry.ts";
-import {
-    clearCanvasPhysical,
-    rasterize,
-} from "../components/layout/renderKernel/canvasRaster.ts";
+import { waveformColumnWidthDevicePx } from "./geometry.ts";
+import { clearCanvasPhysical, rasterize } from "../components/layout/renderKernel/canvasRaster.ts";
 
 /**
- * 波形描边宽度（CSS 像素）。
+ * 把波形包络列的**设备像素宽**换算为 CSS 像素描边宽。
  *
  * 两条渲染路径的**覆盖宽度契约**：Canvas2D 回退在 `setTransform(dpr)` 下
- * `lineWidth = 1` 是 1 CSS px；WebGL 端 `gl.LINES` 的 lineWidth 被所有主流
- * 实现锁死为 1 **物理**像素，在 DPR > 1 的屏幕上每列只覆盖 `1/dpr` 的宽度，
- * 亮色块从列间缝隙透出 —— 无论波形颜色多深，观感都是"浅"。因此 WebGL 端
- * 必须把线段展开成等宽四边形（见 `expandLineSegmentsToQuads`）才能与
- * Canvas2D 的覆盖严格一致。改颜色解决不了这个问题，宽度才是根因。
+ * `lineWidth = W/dpr` 恰好是 W 物理像素；WebGL 端 `gl.LINES` 的 lineWidth 被
+ * 所有主流实现锁死为 1 **物理**像素，在 DPR > 1 的屏幕上每列只覆盖
+ * `1/dpr` 的宽度，亮色块从列间缝隙透出 —— 无论波形颜色多深，观感都是
+ * "浅"。因此 WebGL 端必须把线段展开成等宽四边形（见
+ * `expandLineSegmentsToQuads`）才能与 Canvas2D 的覆盖严格一致。改颜色解决
+ * 不了这个问题，宽度才是根因。
+ *
+ * 宽度取 `waveformColumnWidthDevicePx(dpr)`（见 geometry.ts 的栅格对齐契约）：
+ * 包络列按设备像素网格枚举、每列恰好 W 物理像素，描边宽 = `W/dpr` CSS px
+ * 时两条路径都**逐像素**落在设备网格上 —— 任何 DPR（含 1.25/1.5 这类非整数
+ * 缩放）下线宽都是恒定的整数物理像素，不再有 1~2px 抖动。
  */
-export const WAVEFORM_STROKE_WIDTH_PX = 1;
+function strokeCssWidthPx(dpr: number): number {
+    return waveformColumnWidthDevicePx(dpr) / dpr;
+}
 
 /**
  * 把逐线段顶点（每段 2 顶点 × [x, y, r, g, b, a]）展开成逐段四边形
- * （每段 6 顶点，TRIANGLES 两次绘制），沿线段法线方向各偏移 `widthPx / 2`。
+ * （每段 6 顶点，TRIANGLES 两次绘制），沿线段法线方向各偏移 `宽度/2`。
  *
- * - 竖直包络列：法线为水平 → 恰好覆盖 1 CSS px 宽的整列；
- * - 水平/斜线（take 标记）：法线为垂直/斜向 → 恒定 1 CSS px 视觉粗细；
- * - 零长度段（数字静音列）：按 1 CSS px 高的水平条带处理（Canvas2D 对
+ * - 竖直包络列：法线为水平 → 列中心 ± `W/(2·dpr)` CSS px，恰好覆盖 W 个
+ *   物理像素的整列（W 见 `waveformColumnWidthDevicePx`，几何端按同一契约
+ *   枚举列，两边逐像素咬合）；
+ * - 水平/斜线（take 标记）：法线为垂直/斜向 → 恒定 W 物理像素视觉粗细；
+ * - 零长度段（数字静音列）：按 W 物理像素高的水平条带处理（Canvas2D 对
  *   零长度描边不绘制，这里选择显示一条细线，静音段在 DAW 中可见更合理）。
  *
  * 顶点颜色：A/D 沿用起点颜色，B/C 沿用终点颜色，GPU 内插值与原 LINES 一致。
  * 返回模块级复用的 scratch 缓冲（容量按需倍增），调用方不得长期持有。
+ *
+ * @param vertices 逐线段顶点（窗口局部 CSS 坐标）。
+ * @param dpr 设备像素比（缺省 1 = 旧行为：1 CSS px 列宽）。
  */
-export function expandLineSegmentsToQuads(vertices: Float32Array): Float32Array {
+export function expandLineSegmentsToQuads(vertices: Float32Array, dpr = 1): Float32Array {
     const segmentCount = Math.floor(vertices.length / 12);
     const required = segmentCount * 36;
     if (quadScratch === null || quadScratch.length < required) {
         quadScratch = new Float32Array(Math.max(4096, required));
     }
     const out = quadScratch;
-    const half = WAVEFORM_STROKE_WIDTH_PX / 2;
+    const half = strokeCssWidthPx(dpr) / 2;
     for (let segment = 0; segment < segmentCount; segment += 1) {
         const base = segment * 12;
         const x1 = vertices[base];
@@ -119,6 +130,19 @@ export function expandLineSegmentsToQuads(vertices: Float32Array): Float32Array 
 }
 
 let quadScratch: Float32Array | null = null;
+
+/**
+ * 视口原点对齐到设备像素网格（CSS px）。
+ *
+ * 【为什么必须对齐】包络列 / 标记扫描线的边在**几何局部坐标**里已落在设备
+ * 像素边界上；平移量 `origin` 若带分数，整块波形会跨在像素之间 —— WebGL
+ * （无抗锯齿）按像素中心取样会出现取整跳动，Canvas2D（有抗锯齿）则画出
+ * 1~2px 的软边。对齐后平移是整数物理像素，列边在屏幕上依旧逐像素咬合。
+ * 误差 ≤ 0.5 物理像素，肉眼不可辨。
+ */
+function snappedOriginPx(originPx: number, dpr: number): number {
+    return Math.round(originPx * dpr) / dpr;
+}
 
 /**
  * 波形面渲染器。
@@ -276,7 +300,11 @@ export class WebGl2WaveformRenderer implements WaveformSurfaceRenderer {
         gl.clearColor(0, 0, 0, 0);
         gl.clear(gl.COLOR_BUFFER_BIT);
         gl.useProgram(this.program);
-        gl.uniform2f(this.originLocation, originXPx, originYPx);
+        gl.uniform2f(
+            this.originLocation,
+            snappedOriginPx(originXPx, dpr),
+            snappedOriginPx(originYPx, dpr),
+        );
         // u_resolution 必须传 physical/dpr：传 CSS 尺寸会让 NDC 被拉伸到
         // physical 个像素，实际缩放比变成 physical/css（≠ dpr），波形会相对
         // clip / 网格产生随窗口宽度跳动的亚像素偏移。
@@ -300,8 +328,9 @@ export class WebGl2WaveformRenderer implements WaveformSurfaceRenderer {
         gl.enable(gl.BLEND);
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
         // LINES 的 lineWidth 恒为 1 物理像素（DPR > 1 时覆盖不足，波形发浅），
-        // 改用展开后的 1 CSS px 等宽四边形，与 Canvas2D 回退路径覆盖一致。
-        const quads = expandLineSegmentsToQuads(geometry.vertices);
+        // 改用展开后的等宽四边形（宽 = waveformColumnWidthDevicePx(dpr) 物理
+        // 像素），与 Canvas2D 回退路径覆盖一致。
+        const quads = expandLineSegmentsToQuads(geometry.vertices, dpr);
         gl.bufferData(gl.ARRAY_BUFFER, quads, gl.DYNAMIC_DRAW);
         this.uploadedVertexCount = quads.length / 6;
         gl.drawArrays(gl.TRIANGLES, 0, this.uploadedVertexCount);
@@ -327,7 +356,11 @@ export class WebGl2WaveformRenderer implements WaveformSurfaceRenderer {
         gl.clearColor(0, 0, 0, 0);
         gl.clear(gl.COLOR_BUFFER_BIT);
         gl.useProgram(this.program);
-        gl.uniform2f(this.originLocation, originXPx, originYPx);
+        gl.uniform2f(
+            this.originLocation,
+            snappedOriginPx(originXPx, dpr),
+            snappedOriginPx(originYPx, dpr),
+        );
         gl.uniform2f(this.resolutionLocation, target.resolutionWidth, target.resolutionHeight);
         gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer);
         const stride = 6 * Float32Array.BYTES_PER_ELEMENT;
@@ -415,17 +448,16 @@ export class Canvas2dWaveformRenderer implements WaveformSurfaceRenderer {
         if (!back || !visible) throw new Error("Canvas 2D is unavailable");
 
         // 顶点是窗口局部坐标，视口原点即平移量（物理像素 = 局部差 × dpr）。
-        back.setTransform(
-            target.dpr,
-            0,
-            0,
-            target.dpr,
-            -originXPx * target.dpr,
-            -originYPx * target.dpr,
-        );
+        // 原点对齐到设备像素网格（见 snappedOriginPx）——否则竖直包络线跨在
+        // 物理像素之间，抗锯齿把每列画成 1~2px 的软边。
+        const originDeviceX = Math.round(originXPx * target.dpr);
+        const originDeviceY = Math.round(originYPx * target.dpr);
+        back.setTransform(target.dpr, 0, 0, target.dpr, -originDeviceX, -originDeviceY);
         // 全物理清屏：否则 back 画布底部残留行会被 drawImage 带到可见画布。
         clearCanvasPhysical(back, target);
-        back.lineWidth = 1;
+        // 描边宽与 WebGL 端同契约：包络列 = 整数物理像素宽（1 CSS px 在
+        // dpr=1.25/1.5 下会跨像素抗锯齿，是"线宽抖动"的 Canvas2D 形态）。
+        back.lineWidth = strokeCssWidthPx(target.dpr);
         // 相邻段几乎总是同一颜色（逐像素 min/max 包络）：把同色段合并进
         // 单个 path，把每帧数千次 beginPath/stroke 降为颜色变化次数级别。
         // 一条 path 上的 moveTo 天然断开子路径，语义与逐段 stroke 一致。

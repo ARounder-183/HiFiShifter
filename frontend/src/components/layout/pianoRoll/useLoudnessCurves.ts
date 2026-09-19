@@ -36,7 +36,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { paramsApi } from "../../../services/api";
 import type { ParamFramesPayload } from "../../../types/api";
-import { isDynParam } from "./paramRanges";
+import { isDynParam, VOLUME_PARAM_ID } from "./paramRanges";
 
 /** 快照全工程点数上限：40k 点 ≈ 单曲线 160KB（binary 解码后），超出按 stride 降采样。 */
 const MAX_SNAPSHOT_FRAMES = 40_000;
@@ -133,8 +133,11 @@ export function useLoudnessCurves(args: {
         const reqId = ++fetchReqIdRef.current;
         void (async () => {
             try {
-                const { rootTrackId: trackId, projectFrames: frames, framePeriodMs: fp } =
-                    inputsRef.current;
+                const {
+                    rootTrackId: trackId,
+                    projectFrames: frames,
+                    framePeriodMs: fp,
+                } = inputsRef.current;
                 if (!trackId || !(frames > 0)) return;
                 const stride = Math.max(1, Math.ceil(frames / MAX_SNAPSHOT_FRAMES));
                 const [volumeRes, dynRes] = await Promise.all([
@@ -154,9 +157,7 @@ export function useLoudnessCurves(args: {
                 if (next) {
                     next.stride = stride;
                     setSnapshot(next);
-                    setAnalysisPending(
-                        (dynRes as ParamFramesPayload).analysis_pending === true,
-                    );
+                    setAnalysisPending((dynRes as ParamFramesPayload).analysis_pending === true);
                 }
             } catch {
                 // ignore：保留上一次快照，等待下一次触发
@@ -190,13 +191,57 @@ export function useLoudnessCurves(args: {
 }
 
 /**
- * 判断 live 覆盖是否属于指定参数（`live.key` 形如
- * `v2|{trackId}|{param}|{startFrame}|{frameCount}|{stride}`）。
+ * live 覆盖 key 的解析结果。
+ *
+ * key 形如 `v2|{trackId}|{param}|{startFrame}|{frameCount}|{stride}`；`live.edit`
+ * 与发起编辑时的 paramView 窗口对齐，因此 startFrame / stride 必须从 key 里取
+ * 出来才能把 live 覆盖与快照曲线对齐采样。
  */
-export function liveOverrideMatchesParam(liveKey: string, param: "volume" | "dyn"): boolean {
+export interface LiveOverrideKeyParts {
+    /** 参数 id（key 第 2 段）。 */
+    paramId: string;
+    /** live 窗口首帧（key 第 3 段）。 */
+    startFrame: number;
+    /** live 窗口帧步长（key 第 5 段）。 */
+    stride: number;
+}
+
+/**
+ * 解析 live 覆盖的 key。
+ *
+ * 【为什么要单独导出】调用方（PianoRollPanel 的幅度映射）在几何重建的热路径上
+ * 反复取用 live 覆盖 —— 一次重建可达数万次调用。解析必须能**按覆盖对象缓存**
+ * （对象身份不变即 key 不变），而缓存的前提是解析本身是一个纯函数。
+ */
+export function parseLiveOverrideKey(liveKey: string): LiveOverrideKeyParts {
     const parts = liveKey.split("|");
     // [v2, trackId, paramId, startFrame, frameCount, stride]
-    const paramId = parts[2] ?? "";
-    if (param === "volume") return paramId === "volume";
+    return {
+        paramId: parts[2] ?? "",
+        startFrame: Number(parts[3]) || 0,
+        stride: Number(parts[5]) || 1,
+    };
+}
+
+/**
+ * 判定**已解析**的参数 id 是否属于指定参数（volume / dyn）。
+ *
+ * 【为什么要求传已解析的 id】`liveOverrideMatchesParam` 每次调用都要 split
+ * （见其说明），而本函数是热路径可用的无分配变体；参数归属规则（volume 字面量、
+ * dyn 的历史别名）仍收口在这里，不会因调用点不同而分叉。
+ */
+export function liveOverrideParamMatches(paramId: string, param: "volume" | "dyn"): boolean {
+    if (param === "volume") return paramId === VOLUME_PARAM_ID;
     return isDynParam(paramId);
+}
+
+/**
+ * 判断 live 覆盖是否属于指定参数（`live.key` 形如
+ * `v2|{trackId}|{param}|{startFrame}|{frameCount}|{stride}`）。
+ *
+ * 特殊说明：本函数内部会 `split` key 一次。几何重建的热路径请改用
+ * {@link parseLiveOverrideKey} + {@link liveOverrideParamMatches} 的缓存形式。
+ */
+export function liveOverrideMatchesParam(liveKey: string, param: "volume" | "dyn"): boolean {
+    return liveOverrideParamMatches(parseLiveOverrideKey(liveKey).paramId, param);
 }

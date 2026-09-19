@@ -19,7 +19,7 @@ import React from "react";
 import { WaveformSurface } from "../../../waveform/WaveformSurface";
 import type { WaveformSceneClip, WaveformSceneRow } from "../../../waveform/sceneBuilder";
 import type { WaveformColors } from "../../../theme/waveformColors";
-import type { WaveformAmplitudeMap } from "../../../waveform/geometry";
+import type { WaveformAmplitudeFactors, WaveformAmplitudeMap } from "../../../waveform/geometry";
 import { linearAmplitudeMap } from "../../../waveform/geometry";
 import { createTimelineAxis } from "../renderKernel/timelineAxis.js";
 import type { ClipPeaksEntry } from "./useClipsPeaksForPianoRoll";
@@ -110,6 +110,12 @@ function sampleCurveLinear(
  *
  * 【降级】动态无基线（分析未就绪）→ dynGain 恒 1，volume 仍然生效 ——
  * 绝不返回全零映射。
+ *
+ * 【时域因子视图】本映射是**纯乘性**的（与峰值 value 无关），因此除逐值调用外
+ * 还挂载 `factorAt(t)`（见 `WaveformAmplitudeFactors`）：几何层按列内切片调用
+ * 时只需每切求值**一次**因子、min/max 复用，把逐切片重复的曲线取样与 live
+ * 覆盖解析收敛成一次。两条路径共用同一个 `factorAt` —— 逐值调用就是它乘上
+ * `value × gain`，因此不可能分叉。
  */
 export function makeLoudnessAmplitudeMap(
     source: LoudnessAutomationSource,
@@ -135,23 +141,21 @@ export function makeLoudnessAmplitudeMap(
             );
             if (sampled !== null) return sampled;
         }
-        return sampleCurveLinear(
-            snapshotValues,
-            source.startFrame,
-            source.stride,
-            frameF,
-        );
+        return sampleCurveLinear(snapshotValues, source.startFrame, source.stride, frameF);
     };
 
-    const map = ((value: number, gain: number, timeSec: number | null) => {
-        const v = value * gain;
-        if (!Number.isFinite(v)) return 0;
-        if (timeSec === null || !Number.isFinite(timeSec)) {
-            // 拿不到时间（理论上不会发生）→ 退化为不施加响度自动化。
-            return v;
-        }
+    /**
+     * 时刻 → 乘性因子（volume × dynGain）。两条调用路径的唯一实现：
+     * 逐值映射（`value × gain × factorAt(t)`）与几何层的按切片因子视图。
+     *
+     * 退化情形一律返回 1（不施加响度自动化）：拿不到时间 / 时间非有限 ——
+     * 与旧实现的早退分支逐值等价。返回 `null` = 数据异常导致因子非有限，
+     * 调用方按原语义产出非有限值（几何层据此跳过该切片）。
+     */
+    const factorAt = (timeSec: number | null): number | null => {
+        if (timeSec === null || !Number.isFinite(timeSec)) return 1;
         const frameF = (timeSec * 1000) / source.framePeriodMs;
-        if (!Number.isFinite(frameF)) return v;
+        if (!Number.isFinite(frameF)) return 1;
 
         // ① 音量包络：曲线外回退 1.0（与后端越界持有末值语义一致）。
         const vol = sampleLiveOrSnapshot(live.volume(), source.volume, frameF) ?? 1.0;
@@ -182,12 +186,24 @@ export function makeLoudnessAmplitudeMap(
             }
         }
 
-        return v * vol * dynGain;
-    }) as WaveformAmplitudeMap & { revision: () => number };
+        const factor = vol * dynGain;
+        return Number.isFinite(factor) ? factor : null;
+    };
+
+    const map = ((value: number, gain: number, timeSec: number | null) => {
+        const v = value * gain;
+        if (!Number.isFinite(v)) return 0;
+        const factor = factorAt(timeSec);
+        // factor 为 null = 曲线数据异常（非有限）：与原实现「vol × dynGain 直接
+        // 相乘」同语义地产出非有限值，由几何层跳过该切片。
+        return factor === null ? Number.NaN : v * factor;
+    }) as WaveformAmplitudeMap & { revision: () => number } & WaveformAmplitudeFactors;
     // 修订号读者：几何缓存据此判定"引用未变但内部数据变了"需要重建几何。
     // 用函数而非数字：拖动时每帧变化的计数不能经过 React 状态，否则整块面板
     // 会以指针频率重渲染。
     map.revision = revision;
+    // 时域因子视图：几何层据此把每切片的 min/max 两次逐值调用换成一次求值。
+    map.factorAt = factorAt;
     return map;
 }
 

@@ -5,7 +5,7 @@ import {
     type LoudnessAutomationSource,
     type LoudnessLiveCurve,
 } from "./PianoRollWaveformSurface";
-import { readAmplitudeRevision } from "../../../waveform/geometry";
+import { readAmplitudeRevision, type WaveformAmplitudeMap } from "../../../waveform/geometry";
 
 /**
  * 构造快照：`volume` / `dynTarget` / `dynBaseline` 逐帧给定，帧周期 10ms
@@ -227,5 +227,101 @@ describe("makeLoudnessAmplitudeMap", () => {
         );
         expect(map(Number.NaN, 1, 0)).toBe(0);
         expect(map(1, Number.POSITIVE_INFINITY, 0)).toBe(0);
+    });
+});
+
+/**
+ * 时域因子视图（`factorAt`）。
+ *
+ * 【为什么单独测量】几何层在映射声明了 `factorAt` 时走快路径（每切片求值一次
+ * 因子、min/max 各一次乘法），不再逐值调用映射 —— 这是拖动音量/动态时不卡顿的
+ * 关键（一次重建最多数万次调用，逐值路径要在那里重复取样曲线与解析 live 覆盖）。
+ * 快路径必须与逐值路径**逐值等价**：同一份数据不能因为走了哪条路径而画出不同
+ * 的波形。因此这里逐点比对两者。
+ */
+describe("makeLoudnessAmplitudeMap · factor view", () => {
+    /** 取映射上挂载的因子视图（类型断言收在这里）。 */
+    function factorOf(map: WaveformAmplitudeMap): (t: number | null) => number | null {
+        const fn = (map as unknown as { factorAt?: (t: number | null) => number | null }).factorAt;
+        if (typeof fn !== "function") throw new Error("factorAt must be declared");
+        return fn;
+    }
+
+    it("★ is equivalent to the per-value map at every sampled time", () => {
+        // 音量 + 动态同时生效，并带一段 live 覆盖：两条路径必须逐点相等。
+        const live = { startFrame: 0, stride: 1, values: [0.5, 0.5, 0.25, 0.25] };
+        const map = makeLoudnessAmplitudeMap(
+            source({
+                volume: [0.8, 0.8, 0.8, 0.8, 0.8, 0.8],
+                dynTarget: [1, 2, 0.5, 0.25, 1, 1],
+                dynBaseline: [0.5, 1, 1, 0.5, 1, 1],
+            }),
+            { volume: () => live, dyn: noLive },
+            () => 0,
+        );
+        const factor = factorOf(map);
+
+        // 覆盖 timeSec 的各类取值：live 窗口内 / 窗口外、曲线端点、越界。
+        const times = [0, 0.005, 0.01, 0.015, 0.02, 0.025, 0.03, 0.04, 0.05, 1, 60];
+        for (const t of times) {
+            const perValue = map(0.4, 0.75, t);
+            const viaFactor = 0.4 * 0.75 * (factor(t) ?? Number.NaN);
+            expect(viaFactor).toBeCloseTo(perValue, 12);
+        }
+    });
+
+    it("★ matches the per-value map for non-finite times", () => {
+        // timeSec 未知（null / NaN）→ 两边都必须退化为"不施加响度自动化"。
+        const map = makeLoudnessAmplitudeMap(
+            source({ volume: [0.1], dynTarget: [4], dynBaseline: [1] }),
+            { volume: noLive, dyn: noLive },
+            () => 0,
+        );
+        const factor = factorOf(map);
+
+        expect(factor(null)).toBe(1);
+        expect(factor(Number.NaN)).toBe(1);
+        expect(map(0.5, 2, null)).toBeCloseTo(1.0, 10);
+        expect(map(0.5, 2, Number.NaN)).toBeCloseTo(1.0, 10);
+    });
+
+    it("★ reflects live edits without rebuilding the map", () => {
+        // 拖动契约：映射对象引用不变，因子视图读到的必须是**最新**的 live 值。
+        let liveValues = [1, 1];
+        const map = makeLoudnessAmplitudeMap(
+            source({ volume: [1, 1], dynBaseline: [] }),
+            { volume: () => ({ startFrame: 0, stride: 1, values: liveValues }), dyn: noLive },
+            () => 0,
+        );
+        const factor = factorOf(map);
+
+        expect(factor(0)).toBeCloseTo(1, 10);
+        liveValues = [0.25, 1];
+        expect(factor(0)).toBeCloseTo(0.25, 10);
+        // 逐值路径同步跟随（同一实现）。
+        expect(map(1, 1, 0)).toBeCloseTo(0.25, 10);
+    });
+
+    it("returns a finite factor where the per-value map is finite", () => {
+        // 动态静音（基线 0）等退化分支下因子仍须有限，否则几何层会跳过整列。
+        const map = makeLoudnessAmplitudeMap(
+            source({ volume: [1, 1], dynTarget: [0, 4], dynBaseline: [0, 0.001] }),
+            { volume: noLive, dyn: noLive },
+            () => 0,
+        );
+        const factor = factorOf(map);
+
+        expect(factor(0)).toBe(0); // 真静音：画了静音 = 静音
+        expect(factor(0.01)).toBe(1); // 噪声底帧：只拒绝放大
+    });
+
+    it("stays attached to the same map object as revision()", () => {
+        const map = makeLoudnessAmplitudeMap(
+            source({ dynBaseline: [1] }),
+            { volume: noLive, dyn: noLive },
+            () => 7,
+        );
+        expect(typeof factorOf(map)).toBe("function");
+        expect(readAmplitudeRevision(map)).toBe(7);
     });
 });

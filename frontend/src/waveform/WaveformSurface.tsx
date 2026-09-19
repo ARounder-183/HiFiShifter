@@ -101,6 +101,8 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
         pxPerSec: number;
         widthPx: number;
         heightPx: number;
+        /** 构建几何时的设备像素比：包络列按设备像素网格枚举，dpr 变了几何必须重建。 */
+        dpr: number;
         rows: readonly WaveformSceneRow[];
         color: string;
         rendererKind: "webgl2" | "canvas2d";
@@ -214,6 +216,7 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
             cache.pxPerSec === pxPerSec &&
             cache.widthPx === widthPx &&
             cache.heightPx === heightPx &&
+            cache.dpr === dpr &&
             cache.rows === props.rows &&
             cache.color === props.color &&
             cache.rendererKind === rendererKind &&
@@ -289,7 +292,14 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
         const geometry = buildWaveformGeometry({
             scene,
             color: props.color,
-            getPeaks: (sourcePath, sampleRate, sourceStartSec, sourceDurationSec, channelMode, sourceChannels) => {
+            getPeaks: (
+                sourcePath,
+                sampleRate,
+                sourceStartSec,
+                sourceDurationSec,
+                channelMode,
+                sourceChannels,
+            ) => {
                 // 迟滞选级：spp 在阈值附近时 selectLevel 会在两档间来回跳变
                 // （每次跳变都拉取不同级别的 peaks → 几何反复重建）；用上一帧
                 // 的选级做迟滞（与 mipmap store 的 selectLevelStable 同参数）。
@@ -326,6 +336,9 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
             },
             sink: vertexSinkRef.current,
             amplitudeMap: props.amplitudeMap,
+            // 包络列按设备像素网格枚举（见 waveformColumnWidthDevicePx）：
+            // 非整数 dpr 下若仍按 CSS 像素枚举，列宽会在 1~2 物理像素间抖动。
+            dpr,
         });
 
         const originXPx = scrollLeftPx - windowStartPx;
@@ -335,6 +348,7 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
                 pxPerSec,
                 widthPx,
                 heightPx,
+                dpr,
                 rows: props.rows,
                 color: props.color,
                 rendererKind: renderer.kind,

@@ -49,6 +49,18 @@ export interface PianoRollScrollbarArgs {
     readonly horizontalContentSizePx?: number;
     /** 竖向「内容尺寸」= 值域范围 + 视口高度；缺省由 max + 视口高度推出。 */
     readonly verticalContentSizePx?: number;
+    /**
+     * 竖向值域（min / max / span）。提供时 thumb 长度改为**值域占比**口径：
+     * `thumb = 轨道 × span / (max − min)`，与原生滚动条"thumb 占比 = 视口 /
+     * 内容"一致 —— 竖向缩放（span 变化）时 thumb 长度随之伸缩；span 覆盖
+     * 整个值域（缩放到最小）时不可滚动，宿主把它隐藏。缺省走「上限 + 视口」
+     * 的旧口径（thumb 长度恒定、永不隐藏）。
+     */
+    readonly verticalValueDomain?: {
+        readonly min: number;
+        readonly max: number;
+        readonly span: number;
+    };
 }
 
 /** 两条轴的几何。 */
@@ -63,6 +75,14 @@ export interface PianoRollScrollbarGeometries {
  * 流程：把两轴各自的「内容尺寸 / 视口尺寸 / 当前位置 / 上限」分别交给 `computeScrollbar`。
  * 内容尺寸缺省按 `上限 + 视口尺寸` 推出（= 原生 `scrollWidth`，见入参说明）。
  *
+ * 竖向值域口径（传入 `verticalValueDomain` 时）：thumb 长度 = `轨道 × span / range`，
+ * 起点仍按 `scrollTop / maxScrollTop`（可动中心的进度，0..1600 的既有映射不变）
+ * 在「轨道 − thumb」的行程内线性映射 —— 视觉上与原生滚动条同构（可见占比决定
+ * thumb 长度），而滚动手感（滚轮步进 / 拖拽比例、`scrollTop ↔ center` 映射）
+ * 分毫未动。实现上把「内容尺寸」表达为 `轨道 × range / span`：`computeScrollbar`
+ * 的 `ratio = 轨道 / 内容` 恰好约简为 `span / range`；`range ≤ span`（缩放到最小）
+ * 时内容不大于视口 → 不可滚动 → 宿主隐藏 thumb。
+ *
  * 特殊说明：位置与上限同为**原生坐标**（`computeScrollbar` 的 thumb 起点 = 位置 / 上限，
  * 两者必须同域）。位置若减去同步偏移，thumb 在同步模式下就永远走不到轨道末端——
  * 拖拽用的是增量（两域相减抵消）所以"能拖到"，只有画出来的起点是错的。
@@ -74,6 +94,16 @@ export interface PianoRollScrollbarGeometries {
 export function resolvePianoRollScrollbarGeometries(
     args: PianoRollScrollbarArgs,
 ): PianoRollScrollbarGeometries {
+    const domain = args.verticalValueDomain;
+    const range = domain ? domain.max - domain.min : 0;
+    const valueProportional =
+        domain != null &&
+        Number.isFinite(range) &&
+        range > 0 &&
+        Number.isFinite(domain.span) &&
+        domain.span > 0 &&
+        Number.isFinite(args.viewportHeightPx) &&
+        args.viewportHeightPx > 0;
     return {
         horizontal: computeScrollbar({
             contentSizePx:
@@ -82,12 +112,23 @@ export function resolvePianoRollScrollbarGeometries(
             scrollPx: args.scrollLeftPx,
             maxScrollPx: args.maxScrollLeftPx,
         }),
-        vertical: computeScrollbar({
-            contentSizePx:
-                args.verticalContentSizePx ?? args.maxScrollTopPx + args.viewportHeightPx,
-            viewportSizePx: args.viewportHeightPx,
-            scrollPx: args.scrollTopPx,
-            maxScrollPx: args.maxScrollTopPx,
-        }),
+        vertical: computeScrollbar(
+            valueProportional && domain
+                ? {
+                      // 内容尺寸按值域占比反推：轨道 / 内容 = span / range。
+                      // 见上方「竖向值域口径」的推导。
+                      contentSizePx: (args.viewportHeightPx * range) / domain.span,
+                      viewportSizePx: args.viewportHeightPx,
+                      scrollPx: args.scrollTopPx,
+                      maxScrollPx: args.maxScrollTopPx,
+                  }
+                : {
+                      contentSizePx:
+                          args.verticalContentSizePx ?? args.maxScrollTopPx + args.viewportHeightPx,
+                      viewportSizePx: args.viewportHeightPx,
+                      scrollPx: args.scrollTopPx,
+                      maxScrollPx: args.maxScrollTopPx,
+                  },
+        ),
     };
 }

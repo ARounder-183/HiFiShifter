@@ -467,6 +467,13 @@ function buildHandlers(): Record<string, (...args: unknown[]) => unknown> {
          * 【为什么必须有它】`getVisibleSecondaryParamIds` 依赖后端返回的处理器参数
          * 才能列出副参数曲线。此前 mock 未实现本方法，参数编辑器里**只有主参数一条
          * 曲线**——而"未选中的其它参数线被染色"这类缺陷的前提就是**有多条曲线**。
+         *
+         * 【为什么必须含 volume / pan / dyn】混音级参数是所有算法共通的
+         * （见后端 `renderer/common_params.rs` 的 `COMMON_MIX_PARAMS`），前端据此
+         * 渲染工具栏最右侧的「音量 / 动态」药丸。mock 若只给算法专有参数，音量 /
+         * 动态面板在浏览器里**根本无法进入**，而「可听结果波形」（响度映射）正是
+         * 只在这两个面板下才挂载的路径 —— 与它相关的性能与渲染缺陷都无法验证。
+         * 这里按后端同一份值域（volume 0..2、pan −1..1、dyn 0..2）列出。
          */
         get_processor_params: () => [
             {
@@ -493,6 +500,42 @@ function buildHandlers(): Record<string, (...args: unknown[]) => unknown> {
                     max_value: 1,
                 },
             },
+            {
+                id: "volume",
+                display_name: "Volume",
+                group: "Mix",
+                kind: {
+                    type: "automation_curve",
+                    unit: "×",
+                    default_value: 1.0,
+                    min_value: 0.0,
+                    max_value: 2.0,
+                },
+            },
+            {
+                id: "pan",
+                display_name: "Pan",
+                group: "Mix",
+                kind: {
+                    type: "automation_curve",
+                    unit: "",
+                    default_value: 0.0,
+                    min_value: -1.0,
+                    max_value: 1.0,
+                },
+            },
+            {
+                id: "dyn",
+                display_name: "Dynamics",
+                group: "Mix",
+                kind: {
+                    type: "automation_curve",
+                    unit: "×",
+                    default_value: 1.0,
+                    min_value: 0.0,
+                    max_value: 2.0,
+                },
+            },
         ],
         /**
          * 参数曲线（dev-only 合成数据）。
@@ -503,6 +546,12 @@ function buildHandlers(): Record<string, (...args: unknown[]) => unknown> {
          * 存在时未选中的线被染色"）在浏览器里都无法复现，只能靠读代码推断。
          * 这里合成一条有真实形态的曲线（长趋势 + 颤音 + 跳变），使曲线层与生产
          * 环境一样被实际绘制。
+         *
+         * 【混音级参数走各自的量纲】volume / pan / dyn 的值域与语义都和音高不同
+         * （见后端 `renderer/common_params.rs`）：音量是 0..2 的乘性增益、动态是
+         * 0..2 的**目标电平**（其 `orig` 是原声基线 —— 正是响度映射用来算增益的
+         * 分母）。若沿用音高曲线，音量面板会画出 −6..+10 的越界值，且动态基线为 0
+         * 会走"真静音"分支，波形的可听结果映射形同未验证。
          */
         get_param_frames: (...args: unknown[]) => {
             const trackId = String(args[0] ?? "");
@@ -516,6 +565,21 @@ function buildHandlers(): Record<string, (...args: unknown[]) => unknown> {
             for (let i = 0; i < frameCount; i += 1) {
                 const frame = startFrame + i * stride;
                 const t = (frame * fpMs) / 1000;
+                if (param === "volume") {
+                    // 0..2 的乘性音量曲线（含缓慢起伏与一小段静音）。
+                    const v = 1 + 0.45 * Math.sin(t * 0.35) + 0.15 * Math.sin(t * 2.1);
+                    orig[i] = v;
+                    edit[i] = v;
+                    continue;
+                }
+                if (param === "dyn") {
+                    // 原声基线（0.2..0.9 缓慢起伏）+ 目标电平（基线 × 0.4..1.6）。
+                    const base = 0.5 + 0.35 * Math.sin(t * 0.21) + 0.1 * Math.sin(t * 1.3);
+                    const baseline = Math.max(0.05, base);
+                    orig[i] = baseline;
+                    edit[i] = baseline * (1 + 0.6 * Math.sin(t * 0.17));
+                    continue;
+                }
                 // 长趋势 + 颤音 + 周期性跳变：让曲线有真实的拐角与折返
                 const base =
                     MOCK_PITCH_CENTER +

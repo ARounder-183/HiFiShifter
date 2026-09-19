@@ -144,10 +144,7 @@ import {
     type ParamClipboardSegment,
 } from "./pianoRoll/paramClipboardMapping";
 import { uploadFullResCurveSegments } from "./pianoRoll/selectionEditData";
-import {
-    canConvertParam,
-    planParamConversion,
-} from "./pianoRoll/paramConversion";
+import { canConvertParam, planParamConversion } from "./pianoRoll/paramConversion";
 import { editablePitchValue } from "./pianoRoll/paramSmoothing";
 import {
     DYN_DEFAULT_VIEW,
@@ -161,13 +158,12 @@ import {
 import { usePianoRollData } from "./pianoRoll/usePianoRollData";
 import { useClipsPeaksForPianoRoll } from "./pianoRoll/useClipsPeaksForPianoRoll";
 import { PianoRollWaveformSurface } from "./pianoRoll/PianoRollWaveformSurface";
+import { makeLoudnessAmplitudeMap } from "./pianoRoll/PianoRollWaveformSurface";
+import { useLoudnessCurves } from "./pianoRoll/useLoudnessCurves";
 import {
-    makeLoudnessAmplitudeMap,
-} from "./pianoRoll/PianoRollWaveformSurface";
-import {
-    liveOverrideMatchesParam,
-    useLoudnessCurves,
-} from "./pianoRoll/useLoudnessCurves";
+    createLiveOverrideReader,
+    type LiveOverrideReader,
+} from "./pianoRoll/liveLoudnessOverride";
 import { pianoRollViewportBus } from "./pianoRoll/pianoRollViewportBus";
 import { buildTimelineTicks } from "./timeline/runtime/buildTimelineTicks.js";
 import {
@@ -3336,10 +3332,7 @@ export const PianoRollPanel: React.FC = () => {
      * 整工程自适应 stride 拉取，滚动/缩放零重取（见 useLoudnessCurves）。
      */
     const loudnessFpMs = paramView?.framePeriodMs ?? 5;
-    const loudnessProjectFrames = Math.max(
-        1,
-        Math.ceil((dynamicProjectSec * 1000) / loudnessFpMs),
-    );
+    const loudnessProjectFrames = Math.max(1, Math.ceil((dynamicProjectSec * 1000) / loudnessFpMs));
     const { snapshot: loudnessSnapshot, analysisPending: loudnessAnalysisPending } =
         useLoudnessCurves({
             rootTrackId,
@@ -3349,17 +3342,28 @@ export const PianoRollPanel: React.FC = () => {
             refreshToken,
         });
 
-    /** 把 live 覆盖读成 LoudnessLiveCurve（按 key 中的参数 id 与窗口对齐）。 */
+    /**
+     * live 覆盖读取器（解析按覆盖对象身份缓存，见 `createLiveOverrideReader`）。
+     *
+     * 【为什么必须缓存】`readLiveOverrideFor` 在波形几何重建的热路径上被反复
+     * 调用 —— 几何层按列内增益切片调用幅度映射，一次重建可达数万次（实测
+     * 2112 列 × 16 切片 × 2 = 6.8 万次）。若每次询问都 `split` key 再新建视图
+     * 对象，仅字符串切分就要吃掉 ~26ms/帧 —— 用户报告的「编辑音量/动态时
+     * 卡顿」。读取器把稳态压缩成一次身份比较，零分配。
+     */
+    const liveOverrideReaderRef = useRef<LiveOverrideReader | null>(null);
+    if (liveOverrideReaderRef.current === null) {
+        liveOverrideReaderRef.current = createLiveOverrideReader();
+    }
+
+    /**
+     * 把 live 覆盖读成 LoudnessLiveCurve（按 key 中的参数 id 与窗口对齐）。
+     *
+     * 键解析与视图对象由 `createLiveOverrideReader` 按覆盖对象身份缓存。
+     */
     const readLiveOverrideFor = useCallback((param: "volume" | "dyn") => {
-        const live = liveEditOverrideRef.current;
-        if (live == null || live.edit.length === 0) return null;
-        if (!liveOverrideMatchesParam(live.key, param)) return null;
-        // key 形如 `v2|{trackId}|{param}|{startFrame}|{frameCount}|{stride}`，
-        // live.edit 与发起编辑时的 paramView 窗口对齐。
-        const parts = live.key.split("|");
-        const startFrame = Number(parts[3]) || 0;
-        const stride = Number(parts[5]) || 1;
-        return { startFrame, stride, values: live.edit };
+        return liveOverrideReaderRef.current?.read(param, liveEditOverrideRef.current) ?? null;
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- 两个 ref 都是稳定引用（reader 在下方惰性创建、live 覆盖由 useLiveParamEditing 持有并就地更新）；加入依赖不会让回调更正确，反而会在每次渲染换掉引用、使幅度映射的几何缓存键失效
     }, []);
 
     /**
@@ -3373,17 +3377,37 @@ export const PianoRollPanel: React.FC = () => {
     const loudnessWaveformRevisionRef = useRef(0);
 
     /**
-     * 强制重绘参数面板波形。
+     * 强制重绘参数面板波形（**仅当绘制中的 live 覆盖会改变波形时**）。
      *
      * 必要性：绘制中的响度曲线只写在 `liveEditOverrideRef`（ref 变更不触发
      * React 渲染），而波形面是 memo 组件 + 几何缓存，既收不到 ref 变更、
      * 也不会因 props 未变而重绘。故显式强制重绘一次：总线以同一份投影 force
      * commit，波形图层命中重绘并因修订号变化而重建几何（其余图层内容未变，
      * 开销可忽略）。
+     *
+     * 【为什么必须按参数过滤】波形画的是「可听结果」
+     * （`源峰值 × clip增益×淡化 × volume(t) × dyn增益(t)`，见
+     * `makeLoudnessAmplitudeMap`）—— 它**不依赖音高 / 共振峰 / 齿度**等参数。
+     * 而波形面的几何重建在总线驱动下是**每次全量**（`WaveformSurface.draw`：
+     * 总线驱动的 `canReuse` 恒为 false，见该函数的说明），一次重建要重算
+     * 两千余列 × 16 切片的包络。绘制音高时逐帧触发它纯属浪费 —— 一次重建
+     * 在参数面板的典型窗口下约 0.7ms（线性映射），叠加曲线自身重绘后仍会
+     * 明显抬高指针帧成本。因此这里用当前 live 覆盖的参数 id 做闸门：
+     * 只有编辑 volume / dyn 时才推进修订号并强制重绘。
+     *
+     * 【与曲线绘制的关系】曲线（选区、绘制中的参数线）由面板自己的
+     * `invalidate()` → 宿主帧提交驱动，**不经过本函数**；因此本闸门只影响波形
+     * 面，绘制音高时曲线仍然逐帧更新。
      */
     const requestWaveformRepaint = useCallback(() => {
+        // 闸门：只有编辑 volume / dyn 时波形才可能变（波形画的是可听结果，
+        // 与音高 / 共振峰等参数无关）。判定复用读取器的解析缓存，零分配。
+        if (!liveOverrideReaderRef.current?.affectsWaveform(liveEditOverrideRef.current)) {
+            return;
+        }
         loudnessWaveformRevisionRef.current += 1;
         pianoRollViewportBus.invalidate();
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- liveOverrideReaderRef 是稳定引用（惰性创建）；live 覆盖经 ref 读取，故本回调必须保持引用稳定（它进入 usePianoRollInteractions 的依赖链）
     }, []);
 
     /**
@@ -4081,7 +4105,9 @@ export const PianoRollPanel: React.FC = () => {
      * @param selection 选区（多区间，拍）；null / 空表示无选区。
      * @returns 选区块镜像；无选区时 null。
      */
-    function buildSelectionBandSpec(selection: ParamSelection | null): PianoRollSelectionBandSpec | null {
+    function buildSelectionBandSpec(
+        selection: ParamSelection | null,
+    ): PianoRollSelectionBandSpec | null {
         if (!selection || selection.length === 0) return null;
         const beatToSecAxis = Math.max(1e-9, secPerBeat);
         const colors = resolvePianoRollColors(themeMode === "dark");
@@ -4366,10 +4392,7 @@ export const PianoRollPanel: React.FC = () => {
         pxPerSecRef,
         // 交互侧坐标换算的视口真值：与渲染侧（`resolvePanelRenderViewport`）同源，
         // 避免框选 / 命中测试读到量化提交滞后的 `scrollLeftRef`。见该字段的说明。
-        getViewportTruth: useCallback(
-            () => hostRef.current?.getViewport() ?? null,
-            [],
-        ),
+        getViewportTruth: useCallback(() => hostRef.current?.getViewport() ?? null, []),
         horizontalZoomChainRef,
         onHorizontalZoom: handleHorizontalZoom,
         syncTimelineEnabled: s.paramEditorSyncTimeline,
@@ -5180,9 +5203,7 @@ export const PianoRollPanel: React.FC = () => {
                         // 粘贴路径无需任何特判 —— "未画"语义跨复制/粘贴存活。
                         const sentinels = payload.edit_sentinel;
                         const values = (payload.edit ?? []).map((v, i) =>
-                            sentinels?.[i] === true
-                                ? DYN_FOLLOW_ORIG
-                                : Number(v) || 0,
+                            sentinels?.[i] === true ? DYN_FOLLOW_ORIG : Number(v) || 0,
                         );
                         if (values.length === 0) continue;
                         segments.push({
@@ -5230,9 +5251,7 @@ export const PianoRollPanel: React.FC = () => {
                         // dyn：未画帧编码回哨兵（与 copy 同口径，见该处说明）。
                         const sentinels = payload.edit_sentinel;
                         const values = (payload.edit ?? []).map((v, i) =>
-                            sentinels?.[i] === true
-                                ? DYN_FOLLOW_ORIG
-                                : Number(v) || 0,
+                            sentinels?.[i] === true ? DYN_FOLLOW_ORIG : Number(v) || 0,
                         );
                         if (values.length > 0) {
                             segments.push({
@@ -5491,18 +5510,14 @@ export const PianoRollPanel: React.FC = () => {
                             // 档位（对齐 pitch 的 fine/normal/coarse 节奏）：
                             // fine ≈ +0.6 dB、normal = ×2（+6 dB）、coarse = ×4（+12 dB）。
                             const dynStepDelta =
-                                magnitude === "fine"
-                                    ? 0.05
-                                    : magnitude === "coarse"
-                                      ? 1.0
-                                      : 0.5;
+                                magnitude === "fine" ? 0.05 : magnitude === "coarse" ? 1.0 : 0.5;
                             const factor = dynMultiplicativeFactor(
                                 op === "shiftParamUpSelection" ? dynStepDelta : -dynStepDelta,
                             );
-                            await runSelectionEdit(
-                                (vals) => vals.map((v) => v * factor),
-                                { kind: "deltaAt", deltaAt: (_f, base) => base * (factor - 1) },
-                            );
+                            await runSelectionEdit((vals) => vals.map((v) => v * factor), {
+                                kind: "deltaAt",
+                                deltaAt: (_f, base) => base * (factor - 1),
+                            });
                             break;
                         }
                         const step = getParamShiftStep(editParam, descriptor, magnitude);
@@ -5553,10 +5568,7 @@ export const PianoRollPanel: React.FC = () => {
                         if (isDynParam(editParam)) {
                             restoreDynSentinels(
                                 result,
-                                payload.edit_sentinel?.slice(
-                                    leftLen,
-                                    leftLen + range.frameCount,
-                                ),
+                                payload.edit_sentinel?.slice(leftLen, leftLen + range.frameCount),
                             );
                         }
                         const written = await paramsApi.setParamFrames(
@@ -6966,9 +6978,7 @@ export const PianoRollPanel: React.FC = () => {
                             // 只在遇到 "volume" 时渲染这一次（"dyn" 会被跳过），
                             // 否则会得到两个内容相同的按钮。
                             if (p.id === "volume") {
-                                const hasDyn = orderedProcessorParams.some(
-                                    (q) => q.id === "dyn",
-                                );
+                                const hasDyn = orderedProcessorParams.some((q) => q.id === "dyn");
                                 const volDesc = processorParamsRef.current.find(
                                     (d) => d.id === "volume",
                                 );
@@ -7356,7 +7366,11 @@ export const PianoRollPanel: React.FC = () => {
                             // ——原生 scroller 是被动镜像，必须保留滚动范围才能接受宿主
                             // 每帧的程序化回写，也让尚未迁移的输入代码（中键平移等）
                             // 继续可读可写。`.custom-scrollbar` 不再需要：原生条恒不可见。
-                            className="absolute inset-0 bg-qt-graph-bg overflow-x-scroll overflow-y-scroll hide-scrollbar outline-none focus:outline-none focus-visible:outline-none"
+                            //
+                            // 底部预留 8px（bottom-2）：给自绘水平滚动条独占一行。滚动
+                            // 条若叠加在内容上，会挡住贴底的参数线；让 scroller 在水平
+                            // 条上方收边，二者互不重叠（竖直条同步缩短，见下方轨道）。
+                            className="absolute left-0 right-0 top-0 bottom-2 bg-qt-graph-bg overflow-x-scroll overflow-y-scroll hide-scrollbar outline-none focus:outline-none focus-visible:outline-none"
                             data-piano-roll-scroller
                             tabIndex={0}
                             onAuxClick={interactions.onScrollerAuxClick}
@@ -7506,15 +7520,17 @@ export const PianoRollPanel: React.FC = () => {
                             - thumb 取 `--qt-scrollbar-thumb`（浅色主题下才看得见），
                               而不是固定半透明黑；
                             - 轨道**透明**，加底色会多出一条灰带；
-                            - 8px 厚 + 胶囊圆角，对应 macOS 的 overlay thin 滚动条
-                              （原生滚动条不占布局，这里绝对定位叠加，行为等价）。
+                            - 8px 厚 + 胶囊圆角，对应 macOS 的 overlay thin 滚动条。
+                            - 水平条**独占一行**：scroller 已在 bottom-2 收边（见上），
+                              轨道落在预留行内，不再叠加内容；竖直条同步在 bottom-2
+                              收边，右下角让位给水平条（与原生滚动条的角落行为一致）。
                             - 外层即**轨道**：承接「点空白翻页」。宿主的 thumb 处理器
                               会 `stopPropagation`，因此到达轨道的按下必然不在 thumb 上。
                             恒挂载：原生滚动条已被 `.hide-scrollbar` 隐藏，自绘条是
                             用户可见的**唯一**滚动条。 */}
                         <div
                             ref={vScrollbarTrackRef}
-                            className="absolute right-0 top-0 bottom-0 w-2 z-20"
+                            className="absolute right-0 top-0 bottom-2 w-2 z-20"
                         >
                             <div
                                 ref={vScrollbarThumbRef}
