@@ -747,7 +747,7 @@ export const zhTW = {
     kb_modifier_clip_range_select: "範圍選取（按住並點擊音訊塊，從錨點擴展）",
     kb_modifier_clip_pitch_drag: "音高調整（按住並上下拖拽音訊塊波形）",
     kb_modifier_slip_edit: "Slip 編輯（拖動音訊塊主體時按住）",
-    kb_modifier_stretch: "拉伸（拖動音訊塊邊緣 / 參數選取區邊緣時按住）",
+    kb_modifier_stretch: "拉伸（拖動音訊塊邊緣時按住）",
     kb_modifier_no_snap: "暫時切換吸附（拖動音訊塊 / 參數線 / 速度點時按住）",
     kb_modifier_copy_drag: "複製拖動（拖動音訊塊主體時按住）",
     kb_modifier_crossfade_grip: "交叉淡化反向模式（拖動交叉點手柄時按住）",
@@ -757,6 +757,7 @@ export const zhTW = {
     kb_modifier_horizontal_zoom: "畫布水平縮放（時間軸 / 鋼琴捲簾 / 琴鍵區滾輪）",
     kb_modifier_pr_vzoom: "畫布垂直縮放（時間軸 / 鋼琴捲簾滾輪）",
     kb_modifier_param_morph: "參數形變（按住並在選取區內拖動曲線錨點）",
+    kb_modifier_param_stretch: "拉伸參數選取區（拖動選取區邊緣時按住）",
     kb_modifier_clip_range_to_param_selection: "音訊塊範圍加入參數選取區（按住右鍵單擊音訊塊）",
     kb_modifier_param_multi_select:
         "多選取區（按住拖曳追加一段選取區；按住點擊既有選取段則取消該段）",

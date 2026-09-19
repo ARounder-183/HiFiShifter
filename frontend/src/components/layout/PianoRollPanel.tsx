@@ -249,6 +249,7 @@ import {
 import type {
     MutablePianoRollKernelData,
     PianoRollGridSpec,
+    PianoRollSelectionBandSpec,
 } from "./pianoRoll/kernel/host/pianoRollKernelData";
 import { PIANO_ROLL_VERTICAL_SCROLL_RANGE_PX } from "./pianoRoll/kernel/scroll/verticalValueScroll";
 import { resolvePanelRenderViewport } from "./pianoRoll/kernel/viewportSource";
@@ -800,7 +801,9 @@ export const PianoRollPanel: React.FC = () => {
         dispatch(setEdgeSmoothnessPercent(next));
         void dispatch(persistUiSettings());
     });
-    const stretchKb = useAppSelector((state) => selectKeybinding(state, "modifier.clipStretch"));
+    // 参数选区边缘拉伸的修饰键。与时间轴 clip 边缘的 `modifier.clipStretch`
+    // **分离**（两个表面各自独立改绑），只用于选择工具下的选区边缘拉伸。
+    const stretchKb = useAppSelector((state) => selectKeybinding(state, "modifier.paramStretch"));
     const vibratoAmplitudeAdjustKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.vibratoAmplitudeAdjust"),
     );
@@ -1211,11 +1214,25 @@ export const PianoRollPanel: React.FC = () => {
     const pxPerSecRef = useRef(pxPerSec);
     // 同步开关的 ref 镜像：rAF 原子提交与宿主帧回调读取最新值，避免陈旧闭包。
     const paramEditorSyncTimelineRef = useRef(s.paramEditorSyncTimeline);
-    // 渲染期立即同步 ref，确保同步视口在 layout effect 落地时，
-    // Canvas 读取到的是与标尺/网格同一帧的新缩放与滚动值。
-    // 仅在值变化时回写 ref：渲染期的 state→ref 同步必须与被提交的状态同帧存在，
-    // 无条件覆盖会抹掉 rAF 原子提交中已落地的值（refs 只能由 render/提交写入）。
-    if (scrollLeftRef.current !== scrollLeft) scrollLeftRef.current = scrollLeft;
+    // 渲染期把 state 同步进 ref。**缩放**照旧无条件同步（它是原子提交的，state 就是
+    // 真值）；**横向位置**只在宿主尚未挂载时才同步。
+    //
+    // 【为什么位置必须有条件（这是一个真实缺陷的根因）】横向位置的真值在**内核**，
+    // 而 React state 只是 256px 步长的**量化提交**（见宿主 `SCROLL_COMMIT_STEP_PX`）：
+    // 滚轮 / 拖 thumb / 触摸 / 自动滚屏只改内核与原生镜像，state 会滞后最多 255px
+    // （最后一次不足一步的位移永不提交）。内核挂载后 `scrollLeftRef` 由 `onFrame`
+    // 每帧对齐内核真值；若无条件用 state 回写，每一次 React 重渲都会把滞后值**灌回**
+    // ref，于是"渲染按内核、交互按 refs"两套视口并存——框选出的选区因此与鼠标划过
+    // 的区域相差同一距离（用户报告"实际产生的选区与光标划定的区域不一致"，且先做
+    // 一次缩放后滚动才出现：缩放经 flushSync 原子对齐 state，滚动又让它重新滞后；
+    // 再缩放一次又对齐，于是"缩放后恢复正常"）。
+    //
+    // 宿主未挂载时（挂载期）没有内核真值，ref 必须由 state 供给，此时回写是唯一
+    // 正确行为。缩放 / pxPerBeat 与滚动无关（由 zomm 的原子提交直接写入 ref），
+    // 保持无条件同步以免影响既有缩放路径。
+    if (hostRef.current === null) {
+        if (scrollLeftRef.current !== scrollLeft) scrollLeftRef.current = scrollLeft;
+    }
     if (pxPerBeatRef.current !== pxPerBeat) pxPerBeatRef.current = pxPerBeat;
     if (pxPerSecRef.current !== pxPerSec) pxPerSecRef.current = pxPerSec;
     paramEditorSyncTimelineRef.current = s.paramEditorSyncTimeline;
@@ -2208,6 +2225,7 @@ export const PianoRollPanel: React.FC = () => {
         valueDomain: { min: 0, max: 1, span: 1 },
         grid: null,
         overlay: null,
+        selectionBand: null,
     });
     /** 自绘滚动条的 thumb（恒挂载）。 */
     const hScrollbarThumbRef = useRef<HTMLDivElement | null>(null);
@@ -4051,6 +4069,33 @@ export const PianoRollPanel: React.FC = () => {
     }
 
     /**
+     * 把选区（拍单位）组装为 GL 场景层的选区块镜像。
+     *
+     * 【为什么在这里换算拍 → 秒】宿主只认统一投影（`TimelineAxis` 以秒为单位），
+     * 而选区数据是拍。拍 → 秒依赖 BPM，属于面板的业务语义；放到宿主侧就是第三份
+     * 口径。因此本函数只做"业务单位 → 宿主的秒"，不改任何几何。
+     *
+     * 【为什么空选区返回 null 而不是空数组】两者对宿主是同一件事（清空实例），
+     * 但 null 让"没有选区"与"有选区但都在视口外"在调试时仍然可区分。
+     *
+     * @param selection 选区（多区间，拍）；null / 空表示无选区。
+     * @returns 选区块镜像；无选区时 null。
+     */
+    function buildSelectionBandSpec(selection: ParamSelection | null): PianoRollSelectionBandSpec | null {
+        if (!selection || selection.length === 0) return null;
+        const beatToSecAxis = Math.max(1e-9, secPerBeat);
+        const colors = resolvePianoRollColors(themeMode === "dark");
+        return {
+            spansSec: selection.map((range) => ({
+                startSec: range.startBeat * beatToSecAxis,
+                endSec: range.endBeat * beatToSecAxis,
+            })),
+            fillRgba: parseRgbaColor(normalizeCssColor(colors.selectionBand)),
+            borderRgba: parseRgbaColor(normalizeCssColor(colors.selectionBorder)),
+        };
+    }
+
+    /**
      * 把秒区间换算为视口坐标的裁剪矩形。
      *
      * @param axis 当前投影。
@@ -4124,7 +4169,8 @@ export const PianoRollPanel: React.FC = () => {
         // 叠加层镜像（播放头）必须**每帧**更新：播放头用的是插值的
         // 视觉值 `visualPlayheadSecRef`，它不由 React 渲染驱动（见下方注释），
         // 因此不能在 render 期写入镜像——那样播放头会停在旧的提交值上。
-        // 只喂播放头：选区块仍由主画布绘制（见 PianoRollOverlaySpec 说明）。
+        // 选区块不在这里，而是走 `selectionBand` 字段（它是曲线**之下**的一层，
+        // 由 GL 场景层在曲线之前绘制，见 `PianoRollSelectionBandSpec` 的层序说明）。
         //
         // 【颜色必须显式喂进去，不能靠宿主兜底】宿主在 `playheadRgba` 缺省时用
         // 一个硬编码兜底色（`[0,0,0,0.2]`），而参数编辑器的播放头在 Canvas2D 侧的
@@ -4140,6 +4186,9 @@ export const PianoRollPanel: React.FC = () => {
             playheadSec: visualPlayheadSecRef.current,
             playheadRgba: resolvePlayheadRgba(themeMode),
         };
+        // 选区块镜像（每帧刷新）：选区是**拍**为单位，宿主只认秒，因此这里先换算。
+        // 空选区时喂 null，宿主据此清空本帧的实例（否则旧带子会留在画布上）。
+        kernelDataRef.current.selectionBand = buildSelectionBandSpec(selectionRef.current);
         /**
          * 主画布上绘制的中央提示文字（"音高被硬禁用"的原因）。
          *
@@ -4315,6 +4364,12 @@ export const PianoRollPanel: React.FC = () => {
         scrollLeftRef,
         pxPerBeatRef,
         pxPerSecRef,
+        // 交互侧坐标换算的视口真值：与渲染侧（`resolvePanelRenderViewport`）同源，
+        // 避免框选 / 命中测试读到量化提交滞后的 `scrollLeftRef`。见该字段的说明。
+        getViewportTruth: useCallback(
+            () => hostRef.current?.getViewport() ?? null,
+            [],
+        ),
         horizontalZoomChainRef,
         onHorizontalZoom: handleHorizontalZoom,
         syncTimelineEnabled: s.paramEditorSyncTimeline,
@@ -7386,7 +7441,13 @@ export const PianoRollPanel: React.FC = () => {
                                         ref={canvasRef}
                                         data-piano-roll-canvas
                                         className="absolute inset-0"
-                                        style={{ cursor: canvasCursor }}
+                                        style={{
+                                            cursor: canvasCursor,
+                                            // 阻止 WebView 把笔/触摸手势截走做原生
+                                            // 滚动（会产生 pointercancel 打断笔画）。
+                                            // scroller 自身不加：触摸屏单指滚动依赖原生。
+                                            touchAction: "none",
+                                        }}
                                         onPointerMove={interactions.onCanvasPointerMove}
                                         onPointerLeave={interactions.onCanvasPointerLeave}
                                         onPointerDown={interactions.onCanvasPointerDown}

@@ -71,15 +71,35 @@ const AUDIO_EXTENSIONS = new Set([
     "rm",
     "rmvb",
 ]);
-/** 支持的 MIDI 文件扩展名（可拖拽导入到时间轴或参数编辑器） */
-const MIDI_EXTENSIONS = new Set(["mid", "midi"]);
+/**
+ * 支持的 MIDI 文件扩展名（可拖拽导入到时间轴或参数编辑器）。
+ *
+ * 与拖放准入（`timeline/dnd`）和后端 `SUPPORTED_MIDI_EXTS` 保持一致：`smf`
+ * （Standard MIDI File）一并支持，否则它能"被放进来"却"不能从文件浏览器拖出去"。
+ */
+const MIDI_EXTENSIONS = new Set(["mid", "midi", "smf"]);
 
 /**
- * 支持的工程文件扩展名（可拖拽导入；备份文件如 .hshp-bak 不在其中，
- * 无需高亮）。注意 FileEntry.extension 是最后一个点后的完整后缀，
- * 因此 "proj.hshp-bak" 的 extension 为 "hshp-bak"，天然不会误命中。
+ * 支持的工程文件扩展名（可拖拽导入）。
+ *
+ * 与拖放准入（`timeline/dnd`）保持**同一份白名单**：含 `-bak` 备份后缀
+ * （`.hshp-bak` / `.hsp-bak` / `.rpp-bak`）。此前这里不含备份后缀，于是同一个
+ * `.hshp-bak` 文件"拖进时间轴会被接受、从文件浏览器里却拖不动"——同一应用对同一
+ * 文件给出两种答案。
+ *
+ * 注意 FileEntry.extension 是最后一个点后的完整后缀，因此 "proj.hshp-bak" 的
+ * extension 为 "hshp-bak"、而不是 "bak"，天然不会与正本混淆。
  */
-const PROJECT_EXTENSIONS = new Set(["hshp", "hsp", "rpp", "vshp", "vsp"]);
+const PROJECT_EXTENSIONS = new Set([
+    "hshp",
+    "hsp",
+    "hshp-bak",
+    "hsp-bak",
+    "rpp",
+    "rpp-bak",
+    "vshp",
+    "vsp",
+]);
 
 const SORT_MODE_OPTIONS: SortMode[] = ["name", "date", "size"];
 

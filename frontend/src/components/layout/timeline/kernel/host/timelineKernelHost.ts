@@ -51,6 +51,7 @@ import {
 import { resolveClipSelectionModifiers } from "../../../../../features/keybindings/clipSelectionModifiers";
 import type { Keybinding } from "../../../../../features/keybindings/types";
 import { isPrimaryModifierDown } from "../../../../../utils/platform";
+import { armRightDragContextMenuGuard } from "../../../../../utils/rightDragContextMenuGuard";
 import { getTimelineWheelAction, type ScrollbarZone } from "../../../wheelGesture";
 import { buildTimelineTicks, type TimelineTick } from "../../runtime/buildTimelineTicks";
 import { createTimelineAxis, type TimelineAxis } from "../../../renderKernel/timelineAxis";
@@ -87,6 +88,7 @@ import {
     TRACK_ADD_ROW_HEIGHT,
 } from "../../constants";
 import { hitTest, type ClipHitRegion, type HitTestClip } from "../interaction/hitTest";
+import type { SeekGesturePhase } from "../interaction/seekGesture";
 import {
     isContentYBelowTracks,
     resolveDragDelta,
@@ -134,6 +136,7 @@ import { createScrollKernel, type TimelineViewportState } from "../../../renderK
 // 竖向键盘翻页与参数编辑器内核**共用**同一份解析（见 onKeyDown 说明）。
 import { resolveKeyboardScrollTarget } from "../../../renderKernel/keyboardScroll";
 import { snapToDevicePx } from "../../../../../utils/devicePixelLine";
+import { isStylusLike } from "../../../../../utils/penInput";
 
 /** `buildTimelineTicks` 的入参类型（用于让数据镜像的字段类型自动对齐）。 */
 type BuildTicksArgs = Parameters<typeof buildTimelineTicks>[0];
@@ -448,13 +451,17 @@ export interface TimelineKernelInteractions {
      * 请求跳转播放头（点击或拖拽空白 / 标尺）。
      *
      * @param sec 目标时间（秒，已钳制到 >= 0）。
-     * @param commit true = 单击或手势结束（应提交后端）；false = 拖拽中的预览。
+     * @param phase 手势阶段：`"press"` 按下 / `"move"` 拖拽中间帧 /
+     *   `"release"` 松手收尾。**必须显式区分按下与松手**：播放状态下空白
+     *   按下与拖拽都不得写播放头（否则与 30Hz 播放轮询争夺 `playheadSec`，
+     *   表现为光标闪回），只有松手才提交落点并延续播放。调用方按阶段裁决
+     *   （`planSeekGesture`，见 `interaction/seekGesture`）。
      * @param trackId 点击空白时指针所在轨道（拖拽预览帧与标尺来源不带）。
      *   供面板实现「空白点击」的完整语义：清空 clip 选中 + 按
      *   `允许时间轴点击切换轨道` 切换当前轨道（旧实现 `TimelinePanel` 的
      *   pointerdown 捕获分支）。**不参与 seek 本身**。
      */
-    readonly onSeek?: (sec: number, commit: boolean, trackId?: string | null) => void;
+    readonly onSeek?: (sec: number, phase: SeekGesturePhase, trackId?: string | null) => void;
     /**
      * **纯**播放头落点（只移动播放头）。
      *
@@ -874,11 +881,15 @@ export interface TimelineKernelInteractions {
     }) => void;
     /**
      * 按住 `modifier.clipRangeToParamSelection`（默认 Alt）的右键框选结束：
-     * 被框选的 clip 范围**并入**参数编辑器选区（不是 clip 多选）。
+     * 被框选的 clip 范围**并入**参数编辑器选区。
+     *
+     * 这是**额外**效果，不替代 clip 多选：同一次手势头还会照常派发
+     * `onBoxSelectPreview` / `onBoxSelectCommit`，因此框内 clip 同时也被纳入
+     * clip 选择（与未按住该修饰键的普通框选完全一致）。
      *
      * 与单个块的右键单击（`onDoubleClickClip` 的 toggle 语义）同一修饰键：
-     * 单击 = 该块并入 / 挖掉，拖框 = 框内全部并入。`cancelled`（Esc / 失焦）时
-     * 调用方不写任何选区。
+     * 单击 = 该块并入 / 挖掉（不改 clip 选择），拖框 = 框内全部并入 + 纳入
+     * clip 多选。`cancelled`（Esc / 失焦）时调用方不写任何选区。
      */
     readonly onBoxSelectToParamSelection?: (args: {
         readonly clipIds: readonly string[];
@@ -2831,7 +2842,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     function dispatchMovePreview(event: PointerEvent): void {
         switch (resolveMoveDispatch(gesture.kind)) {
             case "seek":
-                interactions?.onSeek?.(secAt(event.clientX), false);
+                // 拖拽中间帧：阶段交给面板裁决（播放中不写播放头）。
+                interactions?.onSeek?.(secAt(event.clientX), "move");
                 return;
             case "box-select":
                 applyBoxSelect(event);
@@ -3133,6 +3145,11 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         // 必须失效，否则会误吞这一次交互真正需要的菜单。
         suppressNextContextMenu = false;
         if (isEditableTarget(event.target)) return;
+        // 数位笔 / 触摸：不启动空白区 seek、框选与 clip 拖拽手势。
+        // pen 在感应高度即产生 pointermove，起笔压力与笔尖接触难以和"刻意
+        // 按下"区分，误拖播放头 / 误移 clip 的代价远高于收益；时间轴编辑
+        // 保留给鼠标（与中键平移仅鼠标的既有门控一致）。
+        if (isStylusLike(event)) return;
         if (event.button === 1) {
             if (event.pointerType !== "mouse") return;
             startMiddlePan(event);
@@ -3144,9 +3161,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             const rect = container.getBoundingClientRect();
             const view = scroll.get();
             // 按住 `modifier.clipRangeToParamSelection`（默认 Alt）= 本次右键
-            // 手势改为「写入参数编辑器选区」（见手势类型里 `toParamSelection`
-            // 的说明）。按下时冻结；拖拽中的框**不显示**（它不改变 clip 选择，
-            // 显示多选框会误导）。
+            // 手势**额外**把被框选的 clip 范围并入参数编辑器选区（见手势类型里
+            // `toParamSelection` 的说明）。按下时冻结。框选在多选框反馈与 clip
+            // 多选上仍与普通框选完全一致，两条效果互相独立、同时成立。
             const paramRangeKb = data().keybindings.clipRangeToParamSelection;
             const toParamSelection = paramRangeKb != null && isModifierActive(paramRangeKb, event);
             gesture = {
@@ -3224,6 +3241,10 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             // 拖拽已成立：抑制随后的 contextmenu（否则松手会弹右键菜单）。
             // 参数选区模式同样抑制——松手语义是"写入参数选区"，不是弹菜单。
             suppressNextContextMenu = true;
+            // 同一个语义也要交给**全局**守卫：下面的 `suppressNextContextMenu`
+            // 只挂在轨道区容器上，若松手发生在兄弟表面（标尺 / 轨道头），
+            // 容器收不到那次 contextmenu，那时由全局守卫兜底。
+            armRightDragContextMenuGuard();
         }
         const rect = container.getBoundingClientRect();
         const view = scroll.get();
@@ -3251,11 +3272,11 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             if (same) return;
         }
         gesture.lastClipIds = ids;
-        // 参数选区模式：框选预览仍照常（用户看到同一套框选反馈），但**不**派发
-        // clip 多选预览——本次手势不改变 clip 选择（见 finalize 处的说明）。
-        if (!gesture.toParamSelection) {
-            interactions?.onBoxSelectPreview?.({ clipIds: ids, additive: gesture.additive });
-        }
+        // 框选预览一律照常派发 —— 包括按住 `modifier.clipRangeToParamSelection`
+        // 的右键框选：它除了把框内 clip 的范围并入参数选区，**同时也**把框内
+        // clip 纳入 clip 多选（与未按住该修饰键的普通框选完全一致，见 finalize
+        // 处的说明）。两条效果互相独立、同时成立。
+        interactions?.onBoxSelectPreview?.({ clipIds: ids, additive: gesture.additive });
     }
 
     /**
@@ -3701,7 +3722,10 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             // 空白按下：连同**指针所在轨道**一起交给面板——「清空选中 + 按设置
             // 切换当前轨道」是旧实现 pointerdown 捕获分支的语义，不能在面板侧
             // 从 sec 反推（轨道要靠 clientY 换算）。
-            interactions?.onSeek?.(hit.sec, true, hit.trackId);
+            //
+            // 阶段是 `"press"`：播放中面板据此**不写播放头**（闪回防护），
+            // 只执行选中语义；非播放态仍按下即跳转（既有行为）。
+            interactions?.onSeek?.(hit.sec, "press", hit.trackId);
         }
         try {
             container.setPointerCapture(event.pointerId);
@@ -4448,15 +4472,25 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             const boxActive = gesture.active;
             if (gesture.toParamSelection) {
                 // ── `modifier.clipRangeToParamSelection`（默认 Alt）模式 ──
-                // 松开 = 被框选的 clip 范围**并入**参数编辑器选区（在既有参数选区
-                // 之上叠加，与"普通框选改变 clip 多选"正交：用户要的是两者同时成立，
-                // 因此 clip 选择在本次手势里原样保留，不提交也不回滚）。
+                // 拖动松手 = 被框选的 clip 范围**并入**参数编辑器选区，**同时**
+                // 把这些 clip 纳入 clip 多选 —— 与未按住该修饰键的普通框选在
+                // clip 选择上的表现完全一致（用户要求：按住修饰键只是**额外**
+                // 并入参数选区，不改变 clip 选择的行为）。
                 // 未拖动（右键单击）= 单块手势：并入 / 挖掉该块范围（取代旧的双击，
-                // 见 `onDoubleClickClip` 与 `clipDoubleClickMode` 的说明）。取消 /
-                // 未拖动不写任何选区。
+                // 见 `onDoubleClickClip` 与 `clipDoubleClickMode` 的说明）；
+                // 单击是"点击语义"，不改变 clip 选择，因此只在拖动时提交。
                 if (boxActive) {
                     interactions?.onBoxSelectToParamSelection?.({
                         clipIds: gesture.lastClipIds,
+                        cancelled,
+                    });
+                    // clip 选择的收尾必须与普通框选走同一入口：它负责释放
+                    // `kernelBoxSelectOriginRef` 基线（预览写入时的快照），并在
+                    // 取消时回滚、框内为空且非叠加时清空。漏掉它会让基线泄漏到
+                    // 下一次框选。
+                    interactions?.onBoxSelectCommit?.({
+                        clipIds: gesture.lastClipIds,
+                        additive: gesture.additive,
                         cancelled,
                     });
                 }
@@ -4514,7 +4548,12 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             // 空白区 seek 手势收尾：补发一次**提交式**落点。旧实现
             // `startDeferredPlayheadSeek` 的 `finish()` 正是在松手时发这一次
             // `seekPlayhead`（拖动中间帧只预览、不写后端）。
-            if (!cancelled) interactions?.onSeek?.(secAt(event.clientX), true);
+            //
+            // 播放中这是**唯一**会写播放头的一拍（按下与拖拽都被面板按阶段挡掉），
+            // 提交后引擎 seek 到该处且传输层保持播放 —— 即"延续播放状态"。
+            // 失焦 / 页面隐藏也走本函数（`onWindowBlur`，坐标传 0），语义与旧实现
+            // 一致地按松手提交。
+            if (!cancelled) interactions?.onSeek?.(secAt(event.clientX), "release");
         }
         if (gesture.kind === "pending-select" && !cancelled) {
             if (gesture.headerControl !== null) {
@@ -4901,6 +4940,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     /** 造一个 thumb 拖拽的按下处理器。 */
     function makeThumbPointerDown(axis: "x" | "y") {
         return (event: PointerEvent) => {
+            // 数位笔 / 触摸不拖 thumb：8px 窄命中 + 无按钮校验，悬停划过或
+            // 起笔误触即劫持滚动；滚动保留给鼠标 / 滚轮 / 触控板。
+            if (isStylusLike(event)) return;
             event.preventDefault();
             event.stopPropagation();
             dragAxis = axis;
@@ -4970,6 +5012,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      */
     function makeTrackPointerDown(axis: "x" | "y") {
         return (event: PointerEvent) => {
+            // 数位笔 / 触摸不触发轨道翻页（与 thumb 同一防误触约定）。
+            if (isStylusLike(event)) return;
             event.preventDefault();
             event.stopPropagation();
             const track = event.currentTarget as HTMLElement;

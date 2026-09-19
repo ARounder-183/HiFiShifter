@@ -141,10 +141,13 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
      *
      * 流程：
      * 1. 取视口快照（总线驱动时用总线快照，否则用 props.axis）；
-     * 2. **复用判定**：缩放、尺寸、行数据、颜色都没变，且视口矩形仍落在
-     *    已构建的「窗口 + 余量」之内 → 走 `repaint()`，只更新视口原点，
+     * 2. **复用判定**（仅非总线路径）：缩放、尺寸、行数据、颜色都没变，且视口
+     *    矩形仍落在已构建的「窗口 + 余量」之内 → 走 `repaint()`，只更新视口原点，
      *    不重建场景与几何（WebGL 路径退化为一次 uniform 更新 + drawArrays）；
      * 3. 否则按窗口重建场景与几何，再 `render()`。
+     *    总线驱动（`viewportSource`）时**恒走本分支**：rows 的更新由 React 量化
+     *    提交滞后于总线视口，余量窗口复用会把「几何不含刚进入视口的 clip」的旧
+     *    内容平移一整段。
      *
      * 【坐标系】几何顶点是**窗口局部坐标** = 内容坐标 − 窗口左上角。实现上
      * 不给 `buildWaveformScene` 改签名，而是传一个派生 axis：
@@ -179,10 +182,34 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
         const dpr = window.devicePixelRatio || 1;
 
         const cache = geometryCacheRef.current;
-        // 幅度映射修订号：引用不变也可能内部数据已变（动态面板的延迟取值），
+
+        // canReuse 的「视口仍落在已构建窗口内就只平移」判定，隐含假设是：
+        // 「几何覆盖的 clip 集合 ⊇ 当前视口内的 clip 集合」。这个假设在时间轴侧
+        // 成立（行窗口由内核逐帧派生，rows 引用随视口更新），但在参数编辑器侧
+        // 不成立：它的 `props.rows` 由 React 用 **256px 量化提交**的 scrollLeft
+        // 计算（SCROLL_COMMIT_STEP_PX 死区），滞后内核真值最多 255px。于是：
+        //
+        //   向左滚 → 内核把左侧 clip 拉进视口，但 rows 还是旧的（几何里没有
+        //   它）→ 视口仍在旧窗口内 → 命中 canReuse → repaint() 把没有该 clip
+        //   的旧几何原样平移上去 —— 该 clip 的波形「消失」；
+        //   满了 256px → React 提交 → rows 换引用 → 全量重建 → 波形「恢复」；
+        //   向右拖回去 → rows / 几何都还在，但视口越出旧窗口 → 不等重建，本帧
+        //   先 repaint() 旧几何 —— 波形又「消失」，松手后才恢复。
+        //
+        // 用户报告为「从右往左拖时，左侧进入的 clip 波形消失，随着拖动又恢复，
+        // 不松手往回拖又消失」，与是否开启「同步到时间轴」无关（两套滚动路径
+        // 都汇入同一总线，症状一致）。
+        //
+        // 修复：总线同步 paint 路径**始终全量重建**。这条路径的调用频率等于
+        // 视口提交频率（滚动帧 / 对账帧），重建成本可控（实测全览 ~1ms 量级），
+        // 且此时窗口按当帧视口构建，几何与 rows 的错位窗口不复存在。非总线
+        // 路径（rows / 尺寸 / 缩放由 props 驱动）保留余量窗口复用不变。
+
+        // 幅度映射修订号：引用不变也可能内部数据已变（响度映射的延迟取值），
         // 必须在复用判定之前取一次，并在重建时写入缓存。
         const amplitudeRevision = readAmplitudeRevision(props.amplitudeMap);
         const canReuse =
+            source === null &&
             cache !== null &&
             cache.pxPerSec === pxPerSec &&
             cache.widthPx === widthPx &&

@@ -4,6 +4,7 @@ import { Button, Checkbox, Dialog, Flex, Select, Text, TextField } from "@radix-
 import type { GridSize, TimelineSnapSettings } from "../../../features/session/sessionTypes";
 import type { ScaleLike } from "../../../utils/musicalScales";
 import { SCALE_KEYS, SCALE_LABELS } from "../../../utils/musicalScales";
+import { shouldSuppressHoverSideEffects } from "../../../utils/penInput";
 import type { CustomScalePreset } from "../../../utils/customScales";
 import {
     clampBpm,
@@ -1127,6 +1128,8 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
     // ── 拖拽移动变化点 ──
     const startFlagDrag = useCallback(
         (point: TempoPoint, isFirst: boolean, e: React.PointerEvent) => {
+            // 数位笔 / 触摸不拖 tempo 标志：标志 ~15px 高，零阈值按下即拖。
+            if (shouldSuppressHoverSideEffects(e.nativeEvent)) return;
             if (isFirst || e.button !== 0) return;
             e.preventDefault();
             e.stopPropagation();

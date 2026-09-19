@@ -833,7 +833,7 @@ export const koKR = {
     kb_modifier_clip_range_select: "범위 선택 (누른 채 클릭, 앵커에서 확장)",
     kb_modifier_clip_pitch_drag: "피치 조정 (누른 채 클립 웨이브폼을 수직으로 드래그)",
     kb_modifier_slip_edit: "Slip 편집 (클립 본체 드래그 중 누르기)",
-    kb_modifier_stretch: "스트레치 (클립 가장자리 / 파라미터 선택 영역 가장자리 드래그 중 누르기)",
+    kb_modifier_stretch: "스트레치 (클립 가장자리 드래그 중 누르기)",
     kb_modifier_no_snap: "스냅 일시 전환 (클립 / 파라미터 선 / 템포 포인트 드래그 중 누르기)",
     kb_modifier_copy_drag: "복사 드래그 (클립 본체 드래그 중 누르기)",
     kb_modifier_crossfade_grip: "크로스페이드 반전 모드 (크로스페이드 그립 드래그 중 누르기)",
@@ -843,6 +843,7 @@ export const koKR = {
     kb_modifier_horizontal_zoom: "캔버스 수평 줌 (타임라인 / 피아노 롤 / 피아노 키 휠)",
     kb_modifier_pr_vzoom: "캔버스 수직 줌 (타임라인 / 피아노 롤 휠)",
     kb_modifier_param_morph: "파라미터 형태 변형 (누른 채 선택 영역 내 앵커 드래그)",
+    kb_modifier_param_stretch: "파라미터 선택 영역 스트레치 (선택 영역 가장자리 드래그 중 누르기)",
     kb_modifier_clip_range_to_param_selection:
         "클립 범위를 파라미터 선택 범위에 추가 (누른 채 오른쪽 클릭)",
     kb_modifier_param_multi_select:

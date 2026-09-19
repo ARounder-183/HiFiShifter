@@ -4,6 +4,7 @@ import { Cross2Icon, EnterIcon } from "@radix-ui/react-icons";
 import { shallowEqual } from "react-redux";
 
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
+import { shouldSuppressHoverSideEffects } from "../../utils/penInput";
 import type { RootState } from "../../app/store";
 import { useI18n } from "../../i18n/I18nProvider";
 import {
@@ -52,6 +53,8 @@ export const UndoHistoryPanel: React.FC<{
 
     const onHeaderPointerDown = useCallback(
         (event: React.PointerEvent<HTMLDivElement>) => {
+            // 数位笔 / 触摸不拖浮窗：零阈值按下即生效，滑动画线时易误拖。
+            if (shouldSuppressHoverSideEffects(event.nativeEvent)) return;
             if (event.button !== 0) return;
             // 关闭按钮走自己的 onClick：这里只处理标题栏拖拽。
             if ((event.target as HTMLElement).closest("button")) return;
@@ -213,9 +216,7 @@ export const UndoHistoryPanel: React.FC<{
                         type="checkbox"
                         checked={s.saveUndoHistory}
                         onChange={(event) => {
-                            void dispatch(
-                                setProjectSaveUndoHistoryRemote(event.target.checked),
-                            );
+                            void dispatch(setProjectSaveUndoHistoryRemote(event.target.checked));
                         }}
                     />
                     <span className="text-[11px]">{tAny("undo_history_save_with_project")}</span>

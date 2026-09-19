@@ -92,7 +92,8 @@ export type ActionId =
     | "modifier.clipMultiSelectToggle" // 按住并点击音频块：切换多选（macOS 为 ⌘）
     | "modifier.clipRangeSelect" // 按住并点击音频块：从锚点范围选择
     | "modifier.clipSlipEdit" // 拖动 clip 时进入 slip edit
-    | "modifier.clipStretch" // clip 边缘拖动时从 trim 变为 stretch
+    | "modifier.clipStretch" // clip 边缘拖动时从 trim 变为 stretch（时间轴轨道视图）
+    | "modifier.paramStretch" // 参数选区边缘拖动时拉伸选区（参数编辑器；与 clip 边缘分离）
     | "modifier.clipNoSnap" // clip 移动/trim/stretch 时切换吸附
     | "modifier.clipCopyDrag" // 拖动 clip 时进入复制模式
     | "modifier.clipPitchDrag" // 按住并垂直拖拽 clip 波形：调整 Clip 范围内音高

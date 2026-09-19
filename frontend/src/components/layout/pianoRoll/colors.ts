@@ -96,6 +96,20 @@ export interface PianoRollColors {
     readonly editCurve: string;
     /** 选区内高亮曲线。 */
     readonly selectionCurve: string;
+    /**
+     * 选区块的半透明填充。
+     *
+     * 【为什么必须留在配色表里】它此前散落在 `render.ts` 的绘制代码中（两条字面
+     * `rgba(100,200,255,…)`），而选区块现在由 **GL 场景层**绘制——宿主需要一个
+     * 数值 RGBA，若在那侧再写一份字面色值就会分叉。集中在这里，Canvas2D 与 GL
+     * 两条路径共用同一个来源。
+     *
+     * 【alpha 必须很低（0.08）】选区块覆盖整个视口高度，曲线从中穿过。它比曲线
+     * **更早**合成（在曲线之下），alpha 稍大就会把下方的网格冲淡。
+     */
+    readonly selectionBand: string;
+    /** 选区块的边框（四条 1 CSS px 的边）。 */
+    readonly selectionBorder: string;
     /** 画布中央的操作提示文字。 */
     readonly overlayTextColor: string;
     /**
@@ -149,6 +163,8 @@ const DARK_COLORS: PianoRollColors = {
     origCurve: "rgba(200,200,200,0.55)",
     editCurve: "rgba(255,255,255,0.92)",
     selectionCurve: "rgba(100,200,255,0.95)",
+    selectionBand: "rgba(100, 200, 255, 0.08)",
+    selectionBorder: "rgba(100, 200, 255, 0.30)",
     // 叠加文字 & 播放头（画布中央的操作提示文字，需保持可读：
     // 旧值 35% 不透明度在两套主题下都只剩 1.5-1.8:1）
     overlayTextColor: "rgba(235,240,248,0.45)",
@@ -179,6 +195,10 @@ const LIGHT_COLORS: PianoRollColors = {
     origCurve: "rgba(132,104,26,0.80)",
     editCurve: "rgba(178,108,0,1)",
     selectionCurve: "rgba(0,116,200,1)",
+    // 选区块填充 / 边框：**两套主题同值**——迁移前就是硬编码的同一对字面量，
+    // 这里只把它挪进配色表（不顺手"优化"浅色主题的取值，那会改变现有观感）。
+    selectionBand: "rgba(100, 200, 255, 0.08)",
+    selectionBorder: "rgba(100, 200, 255, 0.30)",
     // 叠加文字 & 播放头（画布中央的操作提示文字，需保持可读）
     overlayTextColor: "rgba(30,36,48,0.60)",
     // 与时间轴标尺同源（见 PLAYHEAD_COLOR_TOKEN 说明），不得写字面色值。

@@ -63,7 +63,16 @@ import {
 import { resolveHorizontalWheelZoom } from "../timeline/runtime/timelineScrollRange";
 import { resolveTimelineMinPxPerSec } from "../timeline/runtime/timelineZoomBounds";
 import { nativeScrollbarZoneAt } from "../../../utils/nativeScrollbar";
+import {
+    coalescedEventsOf,
+    isEraserButton,
+    isLegacyMouseEventFromStylus,
+    isStylusLike,
+    PEN_ERASER_BUTTONS_MASK,
+    shouldRejectConcurrentPointer,
+} from "../../../utils/penInput";
 import { getParamEditorWheelAction, getVibratoDragWheelTarget } from "./wheelGesture";
+import { armRightDragContextMenuGuard } from "../../../utils/rightDragContextMenuGuard";
 import {
     createSelectionAmplifier,
     rightDragUpScale,
@@ -106,6 +115,7 @@ import {
     getSelectDragPreviewValue,
 } from "./paramValuePreviewLogic";
 import { secFromViewportClientX } from "./seekPlayheadMapping";
+import { resolvePanelRenderViewport } from "./kernel/viewportSource";
 import {
     createTimelineAxis,
     secToViewportPx,
@@ -139,6 +149,31 @@ export function usePianoRollInteractions(args: {
     scrollLeftRef: MutableRefObject<number>;
     pxPerBeatRef: MutableRefObject<number>;
     pxPerSecRef: MutableRefObject<number>;
+    /**
+     * **交互用视口的权威来源**（内核真值；宿主未挂载时返回 null）。
+     *
+     * 【为什么必须有它——这是一个真实缺陷的根因】面板的三个视口 ref 会在**渲染期**
+     * 被同步成 React state 的值，而横向滚动位置的真值在内核、state 只是**量化提交**
+     * （256px 步长，见宿主 `SCROLL_COMMIT_STEP_PX`）：滚轮 / 拖 thumb / 触摸只改内核
+     * 与镜像，最后一次不足 256px 的位移**永远不会**提交进 state。
+     *
+     * 于是同一次框选手势里出现了两套视口：
+     * - **绘制**（选区块、曲线）走内核真值（`resolvePanelRenderViewport`）；
+     * - **拍坐标换算**（起点 / 终点 / 边缘命中）走 refs，而 refs 会被那个滞后的
+     *   state 在渲染期覆盖回去。
+     *
+     * 结果：划定的选区与鼠标划过的区域相差 `内核位置 − 滞后 state`（可达 256px），
+     * 且差值随量化残差变化 → 用户报告"有可能造成偏移、随机出现"。
+     *
+     * 复现步骤也完全对得上：**先做一次水平缩放**会经 `flushSync` 原子提交 state
+     * （state == 内核，故正常）；**之后任何一次滚动**都只动内核、state 逐渐滞后，
+     * 于是开始出现偏移；**再做一次缩放**又原子对齐一次，偏移"恢复正常"。
+     *
+     * 因此交互侧的坐标换算必须与渲染侧同源：一律取内核真值，宿主不在时才退回 refs。
+     * 这与 `resolvePanelRenderViewport`（渲染侧）和时间轴的 `livePxPerSec` 是同一条
+     * 既有约定，本字段只是把它接到交互路径上。
+     */
+    getViewportTruth: () => { pxPerSec: number; scrollLeft: number } | null;
     /** 连续滚轮缩放期间暂存最新结果，下一 tick 以此为基础继续锚定。 */
     horizontalZoomChainRef: MutableRefObject<{
         nextPxPerSec: number;
@@ -238,7 +273,7 @@ export function usePianoRollInteractions(args: {
     paramMultiSelectKb: Keybinding;
     /** modifier.paramFineAdjust 绑定 */
     paramFineAdjustKb: Keybinding;
-    /** modifier.clipStretch 绑定（选择工具参数拉伸） */
+    /** `modifier.paramStretch` 绑定（选择工具下参数选区边缘拉伸） */
     paramStretchKb: Keybinding;
     /** modifier.vibratoAmplitudeAdjust 绑定 */
     vibratoAmplitudeAdjustKb: Keybinding;
@@ -320,6 +355,7 @@ export function usePianoRollInteractions(args: {
         scrollLeftRef,
         pxPerBeatRef,
         pxPerSecRef,
+        getViewportTruth,
         horizontalZoomChainRef,
         onHorizontalZoom,
         syncTimelineEnabled,
@@ -401,18 +437,30 @@ export function usePianoRollInteractions(args: {
     } = args;
 
     /**
-     * 由滚动 ref 构造当前投影。
+     * 构造当前**交互用**投影（与渲染侧共用同一个视口来源解析器）。
      *
-     * 用 ref 而非 React state：滚动事件中 ref 同步更新，state 要到下一帧才落地，
-     * 命中测试若用 state 会比画面慢一帧。
+     * 【为什么不能只用 refs（这是一个真实缺陷的根因）】refs 在渲染期被同步成 React
+     * state，而横向位置的真值在内核、state 只是 256px 步长的**量化提交**——滚动后
+     * refs 会滞后内核最多 255px。命中测试与框选换算若用 refs，就会与（按内核绘制的）
+     * 画面相差同一距离，表现为"划定的选区与鼠标划过的区域不一致"。
+     *
+     * 因此这里直接复用渲染侧那个**已被单测覆盖**的解析器（`resolvePanelRenderViewport`，
+     * 内核优先、回落 refs、NaN 安全）。复用而不是再写一遍"取内核否则取 refs"，是为了
+     * 让两条路径的取值语义在结构上不可能分叉——这正是本缺陷的教训。
      */
     const axisFromRefs = useCallback(
-        () =>
-            createTimelineAxis({
-                pxPerSec: pxPerSecRef.current,
-                scrollLeftPx: scrollLeftRef.current,
-            }),
-        [pxPerSecRef, scrollLeftRef],
+        () => {
+            const viewport = resolvePanelRenderViewport({
+                kernelView: getViewportTruth(),
+                refPxPerSec: pxPerSecRef.current,
+                refScrollLeftPx: scrollLeftRef.current,
+            });
+            return createTimelineAxis({
+                pxPerSec: viewport.pxPerSec,
+                scrollLeftPx: viewport.scrollLeftPx,
+            });
+        },
+        [getViewportTruth, pxPerSecRef, scrollLeftRef],
     );
 
     /**
@@ -622,6 +670,8 @@ export function usePianoRollInteractions(args: {
         buttons: 0,
     });
     const activePointerGestureEndRef = useRef<(() => void) | null>(null);
+    /** 最近一次真实 pointermove 的设备类型：合成事件回放时复用。 */
+    const lastPointerTypeRef = useRef<string | null>(null);
     const VIBRATO_DRAG_CAPTURE_ATTR = "data-piano-roll-vibrato-drag-active";
     /** 参数线拖拽进行中标记：全局快捷键为「拖动方向切换」键放行（见安装器）。 */
     const PARAM_DRAG_ATTR = "data-piano-roll-param-drag-active";
@@ -1178,6 +1228,9 @@ export function usePianoRollInteractions(args: {
                 pointerId: ev.pointerId,
                 buttons: ev.buttons,
             };
+            // 合成事件必须携带与真实设备一致的 pointerType：否则 pen 拖拽中
+            // 改修饰键时，重放的 pointermove 会被 pen 判定逻辑当成 mouse。
+            lastPointerTypeRef.current = ev.pointerType || null;
         };
 
         const onKeyMod = (e: globalThis.KeyboardEvent) => {
@@ -1197,6 +1250,7 @@ export function usePianoRollInteractions(args: {
                     clientX: last.clientX,
                     clientY: last.clientY,
                     pointerId: st?.pointerId ?? last.pointerId ?? 1,
+                    pointerType: lastPointerTypeRef.current ?? "mouse",
                     buttons: last.buttons ?? 1,
                     bubbles: true,
                     cancelable: true,
@@ -1244,13 +1298,13 @@ export function usePianoRollInteractions(args: {
             return secFromViewportClientX({
                 clientX,
                 viewportLeft: rect.left,
-                axis: createTimelineAxis({
-                    pxPerSec: pxPerSecRef.current,
-                    scrollLeftPx: scrollLeftRef.current,
-                }),
+                // 与 `pointerBeat` 同源：一律走 `axisFromRefs`（内核真值的投影），
+                // 不再就地用可能滞后的 refs 另建一份轴——那会让"同一指针位置"在两条
+                // 路径上得到不同的秒数（量化残差），是框选偏移的同类根因。
+                axis: axisFromRefs(),
             });
         },
-        [canvasRef, scrollLeftRef, pxPerSecRef],
+        [canvasRef, axisFromRefs],
     );
 
     const pointerValue = useCallback(
@@ -1269,6 +1323,10 @@ export function usePianoRollInteractions(args: {
 
     const onRulerMouseDown = useCallback(
         (e: ReactMouseEvent<HTMLDivElement>) => {
+            // 数位笔 / 触摸不触发标尺 seek：pen 的兼容 mouse 事件（无
+            // pointerType）会让"悬停画线起笔"误定位播放头；悬停时间气泡
+            // （只读）不受影响。按"最近一次真实 pointer 事件"的设备类型判定。
+            if (isLegacyMouseEventFromStylus()) return;
             if (e.button !== 0) return;
             const ruler = e.currentTarget as HTMLDivElement;
             let moved = false;
@@ -1279,10 +1337,9 @@ export function usePianoRollInteractions(args: {
                     secFromViewportClientX({
                         clientX,
                         viewportLeft: bounds.left,
-                        axis: createTimelineAxis({
-                            pxPerSec: pxPerSecRef.current,
-                            scrollLeftPx: scrollLeftRef.current,
-                        }),
+                        // 同上：seek 的投影也必须取内核真值，否则滚动后点标尺会落到
+                        // 与画面播放头不同的位置（量化残差）。
+                        axis: axisFromRefs(),
                     }),
                     0,
                     1e12,
@@ -1850,8 +1907,9 @@ export function usePianoRollInteractions(args: {
     );
 
     /**
-     * 边缘拉伸命中：在 Alt（modifier.clipStretch）按下时，找**最近**的选区段边缘。
-     * 多选区下返回被命中的段号 + 哪一侧 —— 拉伸只作用于那一段，其余段不动。
+     * 边缘拉伸命中：在 `modifier.paramStretch`（默认 Alt）按下时，找**最近**的
+     * 选区段边缘。多选区下返回被命中的段号 + 哪一侧 —— 拉伸只作用于那一段，
+     * 其余段不动。
      */
     const findStretchSelectionEdge = useCallback(
         (
@@ -1989,11 +2047,26 @@ export function usePianoRollInteractions(args: {
 
     const onCanvasPointerDown = useCallback(
         (e: ReactPointerEvent<HTMLCanvasElement>) => {
+            // 掌压拒识：笔 / 鼠标手势进行中时，触摸（书写时的手掌）按下不中止、
+            // 不接管当前手势。pen / mouse 的第二指针维持原语义（切笔尖 / 橡皮
+            // 是单手用户的正常路径）。
+            if (
+                shouldRejectConcurrentPointer(
+                    e.nativeEvent,
+                    Boolean(activePointerGestureEndRef.current),
+                )
+            ) {
+                return;
+            }
             if (activePointerGestureEndRef.current) {
                 activePointerGestureEndRef.current();
             }
 
-            if (e.button === 0 && paramEditorSeekPlayheadEnabled !== false) {
+            // 数位笔不触发「按下即 seek」：笔尖接触（button 0）与鼠标左键同值，
+            // 但画参数线的每一笔起笔都会被误当成播放头定位 —— pen 的编辑意图
+            // 全部走下方各手势分支，seek 保留给鼠标。
+            const stylusDown = isStylusLike(e.nativeEvent);
+            if (e.button === 0 && !stylusDown && paramEditorSeekPlayheadEnabled !== false) {
                 const sec = pointerSec(e.clientX);
                 dispatch(setplayheadSec(sec));
                 void dispatch(seekPlayhead(sec));
@@ -2001,6 +2074,7 @@ export function usePianoRollInteractions(args: {
 
             if (
                 e.button === 0 &&
+                !stylusDown &&
                 paramValuePopupEnabled &&
                 (toolMode === "select" || toolMode === "draw" || toolMode === "line")
             ) {
@@ -2304,6 +2378,8 @@ export function usePianoRollInteractions(args: {
                         return clampSelectionBeat(pointerBeat(clientX));
                     }
 
+                    // 本帧的交互投影：**与渲染侧同源**（内核真值，见 `axisFromRefs`）。
+                    const axis = axisFromRefs();
                     const bounds = scroller.getBoundingClientRect();
 
                     if (allowAutoScroll) {
@@ -2317,9 +2393,12 @@ export function usePianoRollInteractions(args: {
                         });
 
                         if (Math.abs(deltaPx) > 0.01) {
+                            // 上限必须用**同一个投影**的 pxPerSec 算（不能用可能滞后的
+                            // `pxPerBeatRef`）：否则自动滚动的可达右界与实际内容宽不一致。
+                            const pxPerBeatNow = axis.pxPerSec * Math.max(1e-9, secPerBeat);
                             const drawingMaxScrollLeft = Math.max(
                                 0,
-                                maxSelectableBeat * Math.max(1e-9, pxPerBeatRef.current) -
+                                maxSelectableBeat * Math.max(1e-9, pxPerBeatNow) -
                                     scroller.clientWidth,
                             );
                             const nativeOffset = syncTimelineEnabled
@@ -2339,9 +2418,17 @@ export function usePianoRollInteractions(args: {
                     }
 
                     const clampedClientX = clamp(clientX, bounds.left, bounds.right);
+                    // 视口 x → 秒 → 拍：一律走统一投影的逆函数，**不再**用
+                    // `(scrollLeftRef + dx) / pxPerBeatRef` 这条独立算式。
+                    //
+                    // 【为什么这条算式是缺陷根因】它读的 `scrollLeftRef` 会被渲染期的
+                    // state→ref 同步覆盖回去，而 state 是 256px 步长的量化提交，滚动后
+                    // 最多滞后内核 255px——于是框选产生的选区整体偏移同一距离，而画面上
+                    // 选区块按内核绘制，两者对不上（用户报告"实际产生的选区与鼠标划定的
+                    // 区域不一致"，且先缩放后滚动才出现）。
                     const beat =
-                        (scrollLeftRef.current + (clampedClientX - bounds.left)) /
-                        Math.max(1e-9, pxPerBeatRef.current);
+                        viewportPxToSec(axis, clampedClientX - bounds.left) /
+                        Math.max(1e-9, secPerBeat);
                     return clampSelectionBeat(beat);
                 };
 
@@ -2371,6 +2458,9 @@ export function usePianoRollInteractions(args: {
                             onUp();
                             return;
                         }
+                        // 只接受本指针的 move：第二指针（掌压触摸等）的
+                        // buttons 恒为 1，不校验 pointerId 会驱动本次手势。
+                        if (ev.pointerId !== e.pointerId) return;
                         // 3px 死区：区分「点击切换」与「拖动追加」，避免手抖误删段
                         if (!moved && Math.abs(ev.clientX - startClientX) > 3) moved = true;
                         if (!moved) return;
@@ -2673,6 +2763,8 @@ export function usePianoRollInteractions(args: {
                                 onUp();
                                 return;
                             }
+                            // 只接受本指针的 move（掌压拒识的 move 侧防线）。
+                            if (ev.pointerId !== pid) return;
                             const adjusted = getFineAdjustedPointerPosition(finePointerState, ev);
                             queuedCursorBeat = pointerBeat(adjusted.clientX);
                             if (previewRafId == null) {
@@ -2946,6 +3038,8 @@ export function usePianoRollInteractions(args: {
                                             onUp(ev);
                                             return;
                                         }
+                                        // 只接受本指针的 move（掌压拒识的 move 侧防线）。
+                                        if (ev.pointerId !== pid) return;
                                         const adjusted = getFineAdjustedPointerPosition(
                                             finePointerState,
                                             ev,
@@ -2953,6 +3047,12 @@ export function usePianoRollInteractions(args: {
                                         const dy = startClientY - adjusted.clientY;
                                         if (Math.abs(dy) >= 2) {
                                             didDrag = true;
+                                            // 本次手势在自己的阈值处确认构成拖拽：
+                                            // 显式武装收尾守卫。松手若发生在**另一个**
+                                            // 表面（标尺 / 轨道头）上，那个表面的菜单
+                                            // 会被吞掉（见守卫模块头注释）——本手势
+                                            // 自己的 window 级抑制只覆盖画布路径。
+                                            armRightDragContextMenuGuard();
                                         }
                                         lastDy = dy;
 
@@ -3710,6 +3810,8 @@ export function usePianoRollInteractions(args: {
                             onUp();
                             return;
                         }
+                        // 只接受本指针的 move（掌压拒识的 move 侧防线）。
+                        if (ev.pointerId !== pid) return;
                         // 选区在拖拽途中被外部清除（如 BackSpace / 取消选择）时
                         // 不再续建，与改造前的守卫语义一致。
                         if (selectionRef.current == null) return;
@@ -3739,8 +3841,13 @@ export function usePianoRollInteractions(args: {
                 }
             }
 
-            const mode: StrokeMode = e.button === 2 ? "restore" : "draw";
-            if (e.button !== 0 && e.button !== 2) return;
+            // 笔尖（button 0）= 画线；鼠标右键 / pen 笔杆键（button 2）与
+            // pen 橡皮端（button 5）= 恢复（擦除回原始曲线）。橡皮端此前
+            // 不在白名单里，落笔会被静默丢弃。
+            const penEraserDown = isEraserButton(e.button, e.nativeEvent.pointerType);
+            const secondaryDown = e.button === 2 || penEraserDown;
+            const mode: StrokeMode = secondaryDown ? "restore" : "draw";
+            if (e.button !== 0 && !secondaryDown) return;
             setCanvasCursor(getDefaultCanvasCursor());
             if (
                 editParam === "pitch" ||
@@ -3797,7 +3904,9 @@ export function usePianoRollInteractions(args: {
                 // Line tool: draw a straight line from start to current pointer
                 const startFrame = frame;
                 const startValue = value;
-                const requiredButtonMask = mode === "restore" ? 2 : 1;
+                // 橡皮端（button 5）在 buttons 位掩码里是位 32，不是右键的位 2。
+                const requiredButtonMask =
+                    mode === "restore" ? (penEraserDown ? PEN_ERASER_BUTTONS_MASK : 2) : 1;
                 let currentDragDir: "free" | "x-only" =
                     dragDirection === "x-only" ? "x-only" : "free";
                 const canCycleDragDirection = e.button === 0;
@@ -3821,11 +3930,20 @@ export function usePianoRollInteractions(args: {
                     e.currentTarget as HTMLCanvasElement,
                 );
 
-                const onMove = (ev: globalThis.PointerEvent) => {
-                    if ((ev.buttons & requiredButtonMask) !== requiredButtonMask) {
-                        onUp();
-                        return;
-                    }
+                // 直线 / 颤音是「起点 → 当前点」的端点式预览：每个事件都重算
+                // 全线 dense，O(线长)。pen 高采样率下逐事件执行 = 同帧多次
+                // 全线重建；与自由绘制分支同一 rAF 合帧模式（事件入队，一帧
+                // 一消费，getCoalescedEvents 展开同帧采样）。端点式预览只需
+                // 队列里**最后一个**采样点即可得到正确结果。
+                let lineRafId: number | null = null;
+                let pendingLineEvent: globalThis.PointerEvent | null = null;
+                const processLineEvent = (ev: {
+                    clientX: number;
+                    clientY: number;
+                    ctrlKey: boolean;
+                    shiftKey: boolean;
+                    altKey: boolean;
+                }) => {
                     const st = strokeRef.current;
                     if (!st || st.pointerId !== e.pointerId) return;
                     const adjusted = getFineAdjustedPointerPosition(finePointerState, ev);
@@ -3896,11 +4014,50 @@ export function usePianoRollInteractions(args: {
                     // 绘制中：live 覆盖只改 ref，波形面需显式重绘才能按动态值变化。
                     requestWaveformRepaint();
                 };
+                const flushPendingLine = () => {
+                    lineRafId = null;
+                    const ev = pendingLineEvent;
+                    pendingLineEvent = null;
+                    if (ev != null) processLineEvent(ev);
+                };
+
+                const onMove = (ev: globalThis.PointerEvent) => {
+                    if ((ev.buttons & requiredButtonMask) !== requiredButtonMask) {
+                        onUp();
+                        return;
+                    }
+                    const st = strokeRef.current;
+                    if (!st || st.pointerId !== e.pointerId) return;
+                    // 端点式预览：只保留最新采样（含同帧 coalesced 末点）。
+                    const coalesced = coalescedEventsOf(ev);
+                    pendingLineEvent = coalesced[coalesced.length - 1] ?? ev;
+                    if (lineRafId == null) {
+                        lineRafId = requestAnimationFrame(flushPendingLine);
+                    }
+                };
+
+                const cancelPendingLineFrame = () => {
+                    if (lineRafId != null) {
+                        cancelAnimationFrame(lineRafId);
+                        lineRafId = null;
+                    }
+                    pendingLineEvent = null;
+                };
 
                 const onUp = () => {
                     const st = strokeRef.current;
                     const isOwnStroke = Boolean(st && st.pointerId === e.pointerId);
                     const vib = isOwnStroke ? vibratoStateRef.current : null;
+                    // 提交前先同步消费挂起的端点采样：processLineEvent 依赖
+                    // strokeRef 在位（按 pointerId 自守卫），先 flush 再清引用，
+                    // 保证 st.points 收到最后一个采样对应的端点。
+                    if (lineRafId != null) {
+                        cancelAnimationFrame(lineRafId);
+                        lineRafId = null;
+                    }
+                    const pending = pendingLineEvent;
+                    pendingLineEvent = null;
+                    if (pending != null) processLineEvent(pending);
                     if (isOwnStroke) {
                         strokeRef.current = null;
                     }
@@ -3947,6 +4104,33 @@ export function usePianoRollInteractions(args: {
                     setVibratoDragCaptureActive(false);
                 };
 
+                /**
+                 * pointercancel 收尾：**回滚**而不是提交。OS 主动取消（触摸
+                 * 接管 / 掌拒 / 笔离开感应区）意味着手势不可信，半截笔画
+                 * 不应写进后端 —— 后端从未收到数据，丢弃 live 预览层即可。
+                 */
+                const onCancel = () => {
+                    const st = strokeRef.current;
+                    const isOwnStroke = Boolean(st && st.pointerId === e.pointerId);
+                    if (isOwnStroke) {
+                        strokeRef.current = null;
+                    }
+                    cancelPendingLineFrame();
+                    vibratoStateRef.current = null;
+                    setVibratoDragCaptureActive(false);
+                    disposeDragDirKey();
+                    disposeFineAdjustedPointerState(finePointerState);
+                    window.removeEventListener("pointermove", onMove);
+                    window.removeEventListener("pointerup", onUp);
+                    window.removeEventListener("pointercancel", onCancel);
+                    window.removeEventListener("contextmenu", onContextMenuDuringDraw, true);
+                    window.removeEventListener("mousedown", onMouseDownDuringDraw, true);
+                    clearActivePointerGestureEnd(onUp);
+                    liveEditOverrideRef.current = null;
+                    if (liveEditActiveRef) liveEditActiveRef.current = false;
+                    invalidate();
+                };
+
                 const onContextMenuDuringDraw = (ev: Event) => {
                     ev.preventDefault();
                     ev.stopImmediatePropagation();
@@ -3972,13 +4156,15 @@ export function usePianoRollInteractions(args: {
 
                 window.addEventListener("pointermove", onMove);
                 window.addEventListener("pointerup", onUp);
-                window.addEventListener("pointercancel", onUp);
+                window.addEventListener("pointercancel", onCancel);
                 window.addEventListener("contextmenu", onContextMenuDuringDraw, true);
                 window.addEventListener("mousedown", onMouseDownDuringDraw, true);
                 setActivePointerGestureEnd(onUp);
             } else {
                 // Draw tool: freehand drawing with interpolation between points
-                const requiredButtonMask = mode === "restore" ? 2 : 1;
+                // 橡皮端（button 5）在 buttons 位掩码里是位 32，不是右键的位 2。
+                const requiredButtonMask =
+                    mode === "restore" ? (penEraserDown ? PEN_ERASER_BUTTONS_MASK : 2) : 1;
                 let currentDragDir: "free" | "x-only" =
                     dragDirection === "x-only" ? "x-only" : "free";
                 const canCycleDragDirection = e.button === 0;
@@ -3986,11 +4172,18 @@ export function usePianoRollInteractions(args: {
                     e.nativeEvent,
                     e.currentTarget as HTMLCanvasElement,
                 );
-                const onMove = (ev: globalThis.PointerEvent) => {
-                    if ((ev.buttons & requiredButtonMask) !== requiredButtonMask) {
-                        onUp();
-                        return;
-                    }
+                // 逐事件处理的主体从 onMove 拆出：onMove 只把事件压进待处理
+                // 队列并请求 rAF，真正的 dense 构建 + live 写入 + 重绘合帧到
+                // 每渲染帧一次。pen 采样率（133–266Hz+）高于渲染帧率，逐事件
+                // 执行 O(n) dense 分配会让同一帧内多次重算；与选区拖拽的
+                // schedulePreview 同一模式。
+                const processStrokeEvent = (ev: {
+                    clientX: number;
+                    clientY: number;
+                    ctrlKey: boolean;
+                    shiftKey: boolean;
+                    altKey: boolean;
+                }) => {
                     const st = strokeRef.current;
                     if (!st || st.pointerId !== e.pointerId) return;
                     const adjusted = getFineAdjustedPointerPosition(finePointerState, ev);
@@ -4048,9 +4241,63 @@ export function usePianoRollInteractions(args: {
                     requestWaveformRepaint();
                 };
 
+                // 待处理事件队列 + rAF 合帧状态。flush 后队列即清空；onUp/
+                // onCancel 里取消挂起帧（挂起的帧只能看到"队列已消费"的状态，
+                // 不取消也不会重复处理，但显式取消避免收尾后还跑一次回调）。
+                let pendingMoveEvents: globalThis.PointerEvent[] = [];
+                let strokeRafId: number | null = null;
+                const flushPendingMoves = () => {
+                    strokeRafId = null;
+                    const queue = pendingMoveEvents;
+                    pendingMoveEvents = [];
+                    for (const ev of queue) {
+                        // 同帧多点：getCoalescedEvents 展开高速运笔时一帧内
+                        // 积累的全部采样，轨迹逐点保留（不支持时回退单事件）。
+                        for (const sample of coalescedEventsOf(ev)) {
+                            processStrokeEvent(sample);
+                        }
+                    }
+                };
+
+                const onMove = (ev: globalThis.PointerEvent) => {
+                    if ((ev.buttons & requiredButtonMask) !== requiredButtonMask) {
+                        onUp();
+                        return;
+                    }
+                    const st = strokeRef.current;
+                    if (!st || st.pointerId !== e.pointerId) return;
+                    pendingMoveEvents.push(ev);
+                    if (strokeRafId == null) {
+                        strokeRafId = requestAnimationFrame(flushPendingMoves);
+                    }
+                };
+
+                const cancelPendingStrokeFrame = () => {
+                    if (strokeRafId != null) {
+                        cancelAnimationFrame(strokeRafId);
+                        strokeRafId = null;
+                    }
+                    pendingMoveEvents = [];
+                };
+
                 const onUp = () => {
                     const st = strokeRef.current;
                     const isOwnStroke = Boolean(st && st.pointerId === e.pointerId);
+                    // 提交前先同步消费挂起的采样队列：processStrokeEvent 依赖
+                    // strokeRef 仍在位（其内部按 pointerId 自守卫），必须先
+                    // flush 再清空引用，否则最后一帧内的轨迹点会丢失
+                    // （快速运笔时笔尾缺一段 ≤16ms 的点）。
+                    if (strokeRafId != null) {
+                        cancelAnimationFrame(strokeRafId);
+                        strokeRafId = null;
+                    }
+                    const queued = pendingMoveEvents;
+                    pendingMoveEvents = [];
+                    for (const ev of queued) {
+                        for (const sample of coalescedEventsOf(ev)) {
+                            processStrokeEvent(sample);
+                        }
+                    }
                     if (isOwnStroke) {
                         strokeRef.current = null;
                         vibratoStateRef.current = null;
@@ -4060,7 +4307,7 @@ export function usePianoRollInteractions(args: {
                     disposeFineAdjustedPointerState(finePointerState);
                     window.removeEventListener("pointermove", onMove);
                     window.removeEventListener("pointerup", onUp);
-                    window.removeEventListener("pointercancel", onUp);
+                    window.removeEventListener("pointercancel", onCancel);
                     window.removeEventListener("contextmenu", onContextMenuDuringDraw, true);
                     window.removeEventListener("mousedown", onMouseDownDuringDraw, true);
                     clearActivePointerGestureEnd(onUp);
@@ -4077,6 +4324,32 @@ export function usePianoRollInteractions(args: {
                         await commitStroke(st.points, st.mode);
                         await applyPostStrokeSmoothing(st.points, st.mode);
                     })();
+                };
+
+                /**
+                 * pointercancel 收尾：**回滚**而不是提交（与直线/颤音分支
+                 * 同一语义）。OS 主动取消意味着手势不可信，半截笔画不写后端。
+                 */
+                const onCancel = () => {
+                    const st = strokeRef.current;
+                    const isOwnStroke = Boolean(st && st.pointerId === e.pointerId);
+                    if (isOwnStroke) {
+                        strokeRef.current = null;
+                    }
+                    cancelPendingStrokeFrame();
+                    vibratoStateRef.current = null;
+                    setVibratoDragCaptureActive(false);
+                    disposeDragDirKey();
+                    disposeFineAdjustedPointerState(finePointerState);
+                    window.removeEventListener("pointermove", onMove);
+                    window.removeEventListener("pointerup", onUp);
+                    window.removeEventListener("pointercancel", onCancel);
+                    window.removeEventListener("contextmenu", onContextMenuDuringDraw, true);
+                    window.removeEventListener("mousedown", onMouseDownDuringDraw, true);
+                    clearActivePointerGestureEnd(onUp);
+                    liveEditOverrideRef.current = null;
+                    if (liveEditActiveRef) liveEditActiveRef.current = false;
+                    invalidate();
                 };
 
                 const onContextMenuDuringDraw = (ev: Event) => {
@@ -4104,7 +4377,7 @@ export function usePianoRollInteractions(args: {
 
                 window.addEventListener("pointermove", onMove);
                 window.addEventListener("pointerup", onUp);
-                window.addEventListener("pointercancel", onUp);
+                window.addEventListener("pointercancel", onCancel);
                 window.addEventListener("contextmenu", onContextMenuDuringDraw, true);
                 window.addEventListener("mousedown", onMouseDownDuringDraw, true);
                 setActivePointerGestureEnd(onUp);

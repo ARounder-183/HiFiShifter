@@ -7,7 +7,11 @@ import type { ActionId, Keybinding } from "./types";
 import { createModifierOnlyBinding } from "./keybindingsSlice";
 
 export type KeybindingPresetId =
-    "spaceReturnPlayhead" | "touchpad" | "reaper" | "vegasPro" | "vocalShifter";
+    | "spaceReturnPlayhead"
+    | "touchpad"
+    | "reaper"
+    | "vegasPro"
+    | "vocalShifter";
 
 export type KeybindingPresetSelectionId = "custom" | "default" | KeybindingPresetId;
 
@@ -59,7 +63,13 @@ export const KEYBINDING_PRESETS: Record<
         "playback.stop": { key: "space" },
         "playback.focusCursor": { key: "'" },
         "modifier.clipSlipEdit": modifierBinding("alt"),
-        "modifier.clipStretch": modifierBinding("control"),
+        // 拉伸在两个表面各自独立（时间轴 clip 边缘 / 参数编辑器选区边缘）。
+        // 预设原本只设一个 `modifier.clipStretch`，两个表面都被它牵引；拆分后
+        // 两个 action 都要显式设同一键位，否则应用预设后两个表面行为不一致。
+        // REAPER 预设用 Alt（与 clipSlipEdit 同键，但 clip.move / clip.edge 是
+        // 不同拖拽目标，与 DAW 惯例一致）。
+        "modifier.clipStretch": modifierBinding("alt"),
+        "modifier.paramStretch": modifierBinding("alt"),
         "modifier.horizontalZoom": NONE_MODIFIER_BINDING,
         "modifier.pianoRollVerticalZoom": modifierBinding("control"),
         "modifier.scrollHorizontal": modifierBinding("alt"),
@@ -72,7 +82,9 @@ export const KEYBINDING_PRESETS: Record<
         "playback.stop": { key: "space" },
         "playback.focusCursor": { key: "\\" },
         "modifier.clipSlipEdit": modifierBinding("alt"),
+        // VEGAS Pro 的拉伸修饰键是 Ctrl，两个表面都设 Ctrl。
         "modifier.clipStretch": modifierBinding("control"),
+        "modifier.paramStretch": modifierBinding("control"),
         "modifier.horizontalZoom": NONE_MODIFIER_BINDING,
         "modifier.pianoRollVerticalZoom": modifierBinding("alt"),
         "modifier.scrollHorizontal": modifierBinding("shift"),

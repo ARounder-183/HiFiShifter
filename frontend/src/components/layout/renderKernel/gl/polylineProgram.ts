@@ -277,8 +277,28 @@ export function createPolylineProgram(gl: WebGL2RenderingContext): PolylineProgr
                 const sy = Math.round((args.target.cssHeightPx - (clip.y + clip.h)) * dpr);
                 const sw = Math.max(0, Math.round(clip.w * dpr));
                 const sh = Math.max(0, Math.round(clip.h * dpr));
+                // 【裁剪盒与画布不相交时必须整体跳过绘制（这是一个真实缺陷的根因）】
+                // 选区在视口左侧之外时 `clip.x × dpr` 是大负数，scissor 盒（x<0 且
+                // x+w<0）**完全落在画布外**。规范要求这种盒裁掉全部片元，但实测
+                // （Chrome/ANGLE + SwiftShader 与 D3D11 后端均复现，最小用例：
+                // `scissor(-500, 5)` + 全屏 quad → 6424 个本应被裁掉的像素铺满画布
+                // 大半）负 x 盒不会被正确裁剪，整个 quad 以错误的缩放铺开——表现即
+                // "屏外选区的高亮把画布上其它曲线的下半段染成选区蓝"。
+                // 因此这里显式判定相交：不相交直接 return（不发 draw call），
+                // 相交时再钳到画布范围内，保证送进 gl.scissor 的盒永远合法。
+                const canvasW = args.target.physicalWidthPx;
+                const canvasH = args.target.physicalHeightPx;
+                if (sx + sw <= 0 || sx >= canvasW || sy + sh <= 0 || sy >= canvasH) {
+                    // 无可见部分：本次 draw 的全部片元都应被裁掉，直接不画。
+                    gl.bindVertexArray(null);
+                    return;
+                }
+                const cx0 = Math.max(0, sx);
+                const cy0 = Math.max(0, sy);
+                const cx1 = Math.min(canvasW, sx + sw);
+                const cy1 = Math.min(canvasH, sy + sh);
                 gl.enable(gl.SCISSOR_TEST);
-                gl.scissor(sx, sy, sw, sh);
+                gl.scissor(cx0, cy0, cx1 - cx0, cy1 - cy0);
             }
 
             gl.drawArrays(gl.TRIANGLES, 0, count);

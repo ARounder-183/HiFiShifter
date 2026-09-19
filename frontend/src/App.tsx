@@ -9,6 +9,7 @@ import { webApi } from "./services/webviewApi";
 import { settingsApi } from "./services/api/settings";
 import { fileBrowserApi } from "./services/api/fileBrowser";
 import { IS_LINUX } from "./utils/platform";
+import { shouldSuppressHoverSideEffects } from "./utils/penInput";
 import { clipboardErrorKey } from "./utils/clipboardError";
 import {
     closeVocalShifterSkippedFilesDialog,
@@ -49,6 +50,11 @@ import {
     cycleDragDirection,
     persistUiSettings,
 } from "./features/session/sessionSlice";
+import { resolveTransportShortcutCommand } from "./features/session/transportShortcuts";
+import {
+    installRightDragContextMenuGuard,
+    disposeRightDragContextMenuGuard,
+} from "./utils/rightDragContextMenuGuard";
 import { useI18n } from "./i18n/I18nProvider";
 import { useClipPitchDataListener } from "./hooks/useClipPitchDataListener";
 import { useHistoryStateListener } from "./hooks/useHistoryStateListener";
@@ -86,6 +92,7 @@ import {
     type ExternalFileActionDetail,
     type ExternalFileActionKind,
 } from "./features/session/projectOpenEvents";
+import { detectExternalPathAction } from "./components/layout/timeline/dnd";
 import type { MessageKey } from "./i18n/messages";
 import type { CloseRequestedEvent } from "@tauri-apps/api/window";
 import { useAutoBackupScheduler } from "./hooks/useAutoBackupScheduler";
@@ -400,21 +407,24 @@ function mergeLatestSourceFileChanges(
     return merged;
 }
 
+/**
+ * 判定路径对应的外部文件动作种类。
+ *
+ * 【为什么不再内联一份正则】这里原先重写了与 `timeline/dnd` 完全相同的四组正则，
+ * 而且**漏掉 MIDI**——于是从启动参数 / 外部文件事件进来的 `.mid` 文件会被判为
+ * `null` 而被静默丢弃，与拖放路径的行为不一致（同一文件两种命运）。
+ * 现在直接复用 `detectExternalPathAction`：准入判据只剩一份，不可能再分叉。
+ *
+ * @param path 文件路径。
+ * @returns 动作种类；非受支持类型时为 null。
+ */
 function detectExternalActionKindFromPath(path: string): ExternalFileActionKind | null {
-    const normalized = String(path ?? "").trim();
-    if (!normalized) return null;
-    // 备份工程文件（.hshp-bak/.hsp-bak/.rpp-bak）与正本同格式，一并识别。
-    if (/\.(hshp|hsp|hshp-bak|hsp-bak|json)$/i.test(normalized)) return "openProject";
-    if (/\.(rpp|rpp-bak)$/i.test(normalized)) return "importReaper";
-    if (/\.(vshp|vsp)$/i.test(normalized)) return "importVocalShifter";
-    if (
-        /\.(wav|flac|mp3|ogg|oga|opus|aac|m4a|aif|aiff|wma|ac3|eac3|ape|wv|mp2|mpa|dts|amr|mp4|m4v|mov|mkv|webm|avi|flv|wmv|ts|mts|m2ts|vob|mpg|mpeg|3gp|3g2|ogv|rm|rmvb)$/i.test(
-            normalized,
-        )
-    ) {
-        return "importAudio";
-    }
-    return null;
+    const kind = detectExternalPathAction(path);
+    // `importMidi` 不属于本事件通道的动作集合（`ExternalFileActionKind` 没有它）：
+    // MIDI 走"导入 MIDI clip"的独立流程，而不是"打开/导入工程"。这里显式排除，
+    // 而不是用类型断言硬转——否则 MIDI 路径会被当成工程打开。
+    if (kind === null || kind === "importMidi") return null;
+    return kind;
 }
 
 /** 近似时长文本（用于"缓存复用节省了多久"的粗略提示）。 */
@@ -741,6 +751,9 @@ function AppInner() {
         }
 
         function startDrag(e: React.PointerEvent<HTMLDivElement>) {
+            // 数位笔 / 触摸不触发分割条：8px 窄条 + 按下即生效，画线起止贴近
+            // 面板边界时极易误扫；布局调整保留给鼠标。
+            if (shouldSuppressHoverSideEffects(e.nativeEvent)) return;
             if (e.button !== 0) return;
             dragRef.current = { pointerId: e.pointerId };
             setIsDragging(true);
@@ -989,6 +1002,9 @@ function AppInner() {
             window.addEventListener("pointercancel", cancelLinuxDeferredContextMenu, true);
         }
         document.addEventListener("contextmenu", preventContextMenu, true);
+        // 右键拖拽的收尾守卫：拖拽后在**任何**表面松开右键都不弹该表面的菜单
+        // （菜单由松开位置的元素决定，而发起手势的表面范围有限——见模块头注释）。
+        installRightDragContextMenuGuard();
         document.addEventListener("selectstart", preventNativeTextSelection, true);
         document.addEventListener("pointerdown", clearNativeTextSelection, true);
         // WebKitGTK may create the selection during the drag rather than on
@@ -1012,6 +1028,7 @@ function AppInner() {
                 window.removeEventListener("pointercancel", cancelLinuxDeferredContextMenu, true);
             }
             document.removeEventListener("contextmenu", preventContextMenu, true);
+            disposeRightDragContextMenuGuard();
             document.removeEventListener("selectstart", preventNativeTextSelection, true);
             document.removeEventListener("pointerdown", clearNativeTextSelection, true);
             document.removeEventListener("mouseup", clearNativeTextSelection, true);
@@ -2552,26 +2569,31 @@ function AppInner() {
                 return;
             }
             switch (actionId) {
-                case "playback.toggle": {
+                case "playback.toggle":
+                case "playback.stop": {
                     // 以 store 实时状态判定播放态：runtimeRef 在 effect 提交后才
                     // 刷新，快速连续按键（播放/停止连打）时会基于过期值对同一
                     // 状态双重派发（连按两次 Space 派发两次 play/两次 stop），
                     // 第二次会把刚建立的播放重新拉回起点（光标小跳）。
+                    //
+                    // 语义（与 DAW 惯例严格对齐，裁决表见 transportShortcuts）：
+                    // - toggle（Space）= 播放 / **暂停**：播放中暂停，光标留在当前
+                    //   播放位置；空闲时从光标起播。
+                    // - stop（Enter）= 播放 / **停止**：播放中停止，光标回到本次
+                    //   起播位置（restoreAnchor）；空闲时同样从光标起播。
+                    //
+                    // 空闲时的起播分支必须保留：`playOriginal` 已幂等（播放中调用
+                    // 为完全 no-op，见 transportThunks），所以这里不会再产生 77553e61
+                    // 要修的那种"重复触发把传输层拽回起点"——但缺了它，默认 Enter
+                    // 在空闲时什么都不做，与标签「播放 / 停止」和手册相矛盾。
                     const isPlayingNow = Boolean(store.getState().session.runtime.isPlaying);
-                    if (isPlayingNow) {
-                        void dispatch(stopAudioPlayback());
-                    } else {
+                    const command = resolveTransportShortcutCommand(actionId, isPlayingNow);
+                    if (command === "play") {
                         void dispatch(playOriginal());
-                    }
-                    break;
-                }
-                case "playback.stop": {
-                    // "停止"语义：仅在播放中时停止并回到本次起播点。
-                    // 未播放时必须是 no-op —— 旧实现在此处派发 playOriginal()，
-                    // 使"停止"键在空闲时反而启动播放（重复触发源之一）。
-                    const isPlayingNow = Boolean(store.getState().session.runtime.isPlaying);
-                    if (isPlayingNow) {
+                    } else if (command === "stop") {
                         void dispatch(stopAudioPlayback({ restoreAnchor: true }));
+                    } else {
+                        void dispatch(stopAudioPlayback());
                     }
                     break;
                 }

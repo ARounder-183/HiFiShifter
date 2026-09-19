@@ -883,23 +883,21 @@ export function drawPianoRoll(args: {
         }
     }
 
-    // Selection (time band)：多选区逐段绘制（断层处自然不画）
+    // Selection (time band)：**已迁到 GL 场景层**（见下方说明），此处不再绘制。
     //
-    // 【阶段 3 修正】选区**必须画在曲线之下**：Canvas2D 的历史行为就是先画选区、
-    // 再画各条曲线（对比 `render.ts` 中本段与下方曲线段的先后），因此它的半透明
-    // 填充与边框不会遮挡曲线。阶段 2 曾把它与播放头一起搬到曲线上方的叠加层，
-    // 造成层序反转（曲线被 8% 蓝填充染色）；此处修正为留在主画布。
-    if (selection && selection.length > 0) {
-        ctx.fillStyle = "rgba(100, 200, 255, 0.08)";
-        ctx.strokeStyle = "rgba(100, 200, 255, 0.30)";
-        for (const range of selection) {
-            // 选区数据是 beat 单位：先转 sec 再统一投影，不构造 pxPerBeat。
-            const x0 = secToViewportPx(axis, range.startBeat * beatToSec);
-            const x1 = secToViewportPx(axis, range.endBeat * beatToSec);
-            ctx.fillRect(x0, 0, x1 - x0, h);
-            ctx.strokeRect(x0 + 0.5, 0.5, Math.max(0, x1 - x0 - 1), h - 1);
-        }
-    }
+    // 【为什么必须搬走（这是一个真实缺陷的根因）】层序契约是「选区在曲线**之下**」
+    // ——本段原本就写在曲线段之前，正是这个契约的体现。但曲线已迁上 GL，主画布
+    // 与 GL 场景画布是**两张兄弟画布**：GL 场景画布的 DOM 顺序在前，主画布在后，
+    // 浏览器按"后画的在上"合成。于是留在主画布上的选区块（8% 蓝填充）实际盖在了
+    // GL 曲线之上，未被选中的参数线也在选区内泛蓝（用户报告："未被选择的参数线的
+    // 下半部分染上了跟已选参数线一样的蓝色"）。
+    //
+    // 现在选区块与曲线**在同一张 GL 画布上按正确顺序绘制**：宿主先发选区块实例、
+    // 再画曲线（见 `drawGlSelectionBand`）。这样层序不再依赖 DOM 顺序，也就不可能
+    // 再被图层迁移反转——把"两个绘制者的相对层序"消解成"一个绘制者内部的调用顺序"。
+    //
+    // 【已知并接受的限制（与其余 skip* 图层一致）】WebGL2 运行期失败时选区块无人
+    // 绘制，与本文件中键盘 / 网格 / 播放头 / 曲线的既有约定相同（见设计文档 §2.4）。
 
     // 若音高分析进行中，跳过曲线绘制（进度条已显示状态）
     if (pitchAnalysisPending) {
