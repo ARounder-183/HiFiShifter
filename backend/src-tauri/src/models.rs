@@ -525,6 +525,22 @@ pub struct ParamFramesPayload {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pitch_edit_backend_available: Option<bool>,
+
+    /// 动态（DYN）的「未画」位图（仅请求带 `with_sentinel=true` 时返回）。
+    ///
+    /// `true` = 该帧没有用户数据（哨兵 / 曲线缺失），`edit` 里是解析后的基线值。
+    /// 批量操作（平滑/量化/平均/拖拽/复制粘贴）写回时据此把未画帧**原样写回
+    /// 哨兵**，避免把"沿用原声"物化成显式目标电平（基线重分析后不再跟随）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edit_sentinel: Option<Vec<bool>>,
+
+    /// 动态（DYN）的归一化参考电平（linear，1.0 = 数字满量程）。
+    ///
+    /// 仅在 `param == "dyn"` 时返回：前端据此把源文件波形峰值投影到 DYN 面板的
+    /// 倍率纵轴上（映射 = `峰值 / reference`），使波形、原声基线与用户曲线
+    /// 共用同一坐标系。其它参数为 None。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dyn_orig_reference: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -235,20 +235,44 @@ pub(crate) fn common_pan_curve_for_clip<'a>(
     extra_curve_for_clip(entry, clip, "pan")
 }
 
-/// 该合成链路是否在 processor 内部消费 volume/pan（如 vslib 控制点）。
+/// 共通动态曲线（DYN，用户绘制的**目标电平**）。
 ///
-/// 返回 true 时，音频引擎 mix 阶段不得再次应用这两个曲线，
-/// 否则会出现二次增益/声像；未开启 Compose 时按该算法约定不生效。
-pub(crate) fn processor_bakes_common_mix_curves(kind: SynthPipelineKind) -> bool {
-    #[cfg(feature = "vslib")]
-    {
-        return matches!(kind, SynthPipelineKind::VocalShifterVslib);
+/// 曲线里可能出现 `DYN_FOLLOW_ORIG`（−1）哨兵帧，表示「该帧沿用原声电平」；
+/// 消费方必须经 [`crate::renderer::common_params::compute_dyn_gain`] 求增益，
+/// 不要直接把它当倍率相乘。
+pub(crate) fn common_dyn_curve_for_clip<'a>(
+    entry: &'a crate::state::TrackParamsState,
+    clip: &'a crate::state::Clip,
+) -> Option<&'a [f32]> {
+    extra_curve_for_clip(entry, clip, crate::renderer::common_params::DYN_PARAM_ID)
+}
+
+/// 原声电平基线（`dyn_orig`，轨道级派生数据，无 clip 级覆盖）。
+///
+/// 由后台响度分析写入 `TrackParamsState.dyn_orig`；分析未就绪时返回 None，
+/// 此时动态增益退化为 1.0（等效「沿用原声」）。
+pub(crate) fn dyn_orig_curve_for_clip<'a>(
+    entry: &'a crate::state::TrackParamsState,
+    _clip: &'a crate::state::Clip,
+) -> Option<&'a [f32]> {
+    if entry.dyn_orig.is_empty() {
+        return None;
     }
-    #[cfg(not(feature = "vslib"))]
-    {
-        let _ = kind;
-        false
-    }
+    Some(entry.dyn_orig.as_slice())
+}
+
+/// 该合成链路是否在 processor 内部消费 volume/pan。
+///
+/// **始终返回 false**：音量/声像/动态是算法无关的混音级参数，一律由音频引擎的
+/// mix 阶段应用（实时播放 `audio_engine/mix.rs`、离线导出 `audio/mixdown.rs`）。
+/// 任何处理器都不得再应用它们，否则会出现二次增益/声像。
+///
+/// 保留该函数（而非各处内联 `false`）是为了让「不存在 processor 烘焙」这一事实
+/// 有唯一的、可被搜索与断言的落点。
+#[allow(dead_code)]
+#[inline]
+pub(crate) fn processor_bakes_common_mix_curves(_kind: SynthPipelineKind) -> bool {
+    false
 }
 
 #[cfg(feature = "vslib")]
@@ -257,16 +281,11 @@ fn vslib_curve_active_for_clip(
     clip: &crate::state::Clip,
     clip_start_sec: f64,
 ) -> bool {
-    // (key, default)：volume/pan 现在与其它算法共用，但在 vslib 路径由
-    // processor 消费，因此任何非默认段都必须触发 vslib 预渲染。
-    let defaults: &[(&str, f32)] = &[
-        ("volume", 1.0),
-        ("pan", 0.0),
-        ("formant_shift_cents", 0.0),
-        ("breathiness", 0.0),
-        ("dyn_edit", 1.0),
-        ("dyn_orig", 1.0),
-    ];
+    // 只有 vslib **专有**的参数需要触发预渲染（它们由 processor 写进控制点）。
+    // volume / pan / dyn 是混音级参数，由音频引擎的 mix 阶段实时应用，
+    // 改动它们**不得**触发底层重合成 —— 这正是「拖动音量/动态即时生效」的基础，
+    // 也是把这三个参数从 vslib 控制点里搬出来要换取的核心收益。
+    let defaults: &[(&str, f32)] = &[("formant_shift_cents", 0.0), ("breathiness", 0.0)];
     defaults.iter().any(|&(key, default)| {
         let curve = extra_curve_for_clip(entry, clip, key);
         curve_differs_from_default_in_range(
@@ -745,18 +764,41 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "vslib")]
     #[test]
-    fn only_vslib_bakes_common_mix_curves_into_processor_output() {
-        assert!(processor_bakes_common_mix_curves(
-            SynthPipelineKind::VocalShifterVslib
-        ));
+    fn no_algorithm_bakes_common_mix_curves_into_processor_output() {
+        // 音量/声像/动态一律由混音层应用；任何算法都不得在处理器内部再应用一次，
+        // 否则会出现二次增益/声像（vslib 曾如此，已移除）。
         assert!(!processor_bakes_common_mix_curves(
             SynthPipelineKind::NsfHifiganOnnx
         ));
         assert!(!processor_bakes_common_mix_curves(
             SynthPipelineKind::WorldVocoder
         ));
+        #[cfg(feature = "vslib")]
+        assert!(!processor_bakes_common_mix_curves(
+            SynthPipelineKind::VocalShifterVslib
+        ));
+    }
+
+    #[test]
+    fn vslib_exposes_no_common_mix_curves_as_processor_params() {
+        // 回归护栏：共通参数只能由 `renderer::all_param_descriptors` 提供。
+        // 若某个处理器的 descriptor 列表里又出现 volume/pan/dyn，
+        // 说明有人把"混音级参数"重新塞回了算法内部（正是本次改造要消除的耦合）。
+        for kind in [
+            SynthPipelineKind::WorldVocoder,
+            SynthPipelineKind::NsfHifiganOnnx,
+        ] {
+            let own = crate::renderer::get_processor(kind).param_descriptors();
+            for d in own {
+                assert!(
+                    !crate::renderer::common_params::is_common_mix_param(d.id),
+                    "{:?} 不应再声明共通参数 {}",
+                    kind,
+                    d.id
+                );
+            }
+        }
     }
 }
 

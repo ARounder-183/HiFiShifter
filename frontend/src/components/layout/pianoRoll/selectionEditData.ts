@@ -27,7 +27,7 @@ import { mergeFrameWindows, type FrameSpan } from "./paramSelection";
 const CHUNK_FRAMES = 32_768;
 
 /** 让出事件循环，使长任务期间界面仍能响应（滚动、绘制、取消操作）。 */
-function yieldToUi(): Promise<void> {
+export function yieldToUi(): Promise<void> {
     return new Promise<void>((resolve) => {
         if (typeof requestAnimationFrame === "function") {
             requestAnimationFrame(() => resolve());

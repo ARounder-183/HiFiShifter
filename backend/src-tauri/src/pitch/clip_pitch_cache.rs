@@ -14,7 +14,10 @@ use std::time::SystemTime;
 
 /// Version number for cache format. Increment this when the cache key format
 /// or analysis algorithm changes to invalidate old cache entries.
-pub const CACHE_FORMAT_VERSION: u32 = 2;
+///
+/// v3：分析结果新增「逐帧原声电平」（DYN 的基线）。旧条目只有音高，
+/// 若沿用会让 DYN 面板一直显示默认基线。
+pub const CACHE_FORMAT_VERSION: u32 = 3;
 
 /// Default maximum number of cached clip pitch curves
 pub const DEFAULT_CACHE_CAPACITY: usize = 100;

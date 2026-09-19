@@ -56,6 +56,22 @@ export const pianoRollViewportBus = {
         return bus.register(layer, order);
     },
 
+    /**
+     * 强制重绘所有已注册图层（**投影不变也重画**）。
+     *
+     * 【为什么需要】`emit` / `patch` 会因投影相同而被帧提交器去重，但这只覆盖
+     * "视口变了"这一类画面变化。还有一类变化与投影无关 —— 例如绘制中的动态
+     * 曲线只写在 `liveEditOverrideRef`（ref 变更不触发 React 渲染），波形面是
+     * memo 组件 + 几何缓存，收不到任何通知，必须被显式告知"内容变了，按同一
+     * 投影重画一次"。
+     *
+     * 与自行 `commit(getAxis())` 的区别：本方法显式传 `force`，读的是总线当前
+     * 投影，调用方无需拼装参数，意图也更明确。
+     */
+    invalidate(): void {
+        bus.invalidate();
+    },
+
     /** 直接提交一份完整投影（绕过逐字段 patch）。 */
     commit(axis: TimelineAxis): void {
         bus.commit(axis);

@@ -5,6 +5,7 @@ import { paramsApi } from "../../../services/api";
 import { clamp } from "../timeline";
 
 import type { ParamName, ParamViewSegment } from "./types";
+import { isDynParam } from "./paramRanges";
 import { framesToTime, timeToFrame } from "./utils";
 const paramFramePeriodCache = new Map<string, number>();
 
@@ -68,6 +69,14 @@ export function usePianoRollData(args: {
     const [pitchEditBackendAvailable, setPitchEditBackendAvailable] = useState<boolean | null>(
         null,
     );
+
+    /**
+     * 动态（DYN）的归一化参考电平（linear）。null = 分析未就绪。
+     *
+     * 参数面板据此把源文件波形峰值投影到 DYN 的倍率纵轴上，使波形与曲线
+     * 波形的「可听结果」映射以它为基准之一（见 `useLoudnessCurves`）。
+     */
+    const [dynOrigReference, setDynOrigReference] = useState<number | null>(null);
 
     const [isRefreshing, setIsRefreshing] = useState(false);
     const [loadingCount, setLoadingCount] = useState(0);
@@ -155,6 +164,53 @@ export function usePianoRollData(args: {
             if (unlistenUpdated) unlistenUpdated();
         };
     }, [editParam, pitchEnabled, rootTrackId, liveEditActiveRef]);
+
+    // 监听 dyn_orig_updated 事件（动态的原声电平基线分析完成），刷新曲线。
+    //
+    // 与 pitch_orig_updated 同构：后端把基线写进 `dyn_orig` 后推送。
+    // 【对所有参数监听】波形的「可听结果」映射在**任何**参数面板都需要 dyn
+    // 基线与 volume 曲线（useLoudnessCurves），因此不能只在 dyn 面板监听 ——
+    // 否则切到音量/音高等面板时，分析完成事件无人消费、波形一直用旧基线。
+    // 绘制中仍遵守"推迟到 pointer-up"的既有保护。
+    useEffect(() => {
+        let disposed = false;
+        let unlisten: null | (() => void) = null;
+
+        async function setup() {
+            if (!rootTrackId) return;
+            try {
+                const mod = await import("@tauri-apps/api/event");
+                type DynOrigUpdatedPayload = { rootTrackId?: string };
+                unlisten = await mod.listen<DynOrigUpdatedPayload>(
+                    "dyn_orig_updated",
+                    (event) => {
+                        if (disposed) return;
+                        const payload = event.payload ?? {};
+                        if (payload?.rootTrackId && payload.rootTrackId !== rootTrackId) return;
+                        if (liveEditActiveRef.current) {
+                            pendingPitchUpdatedRefreshRef.current = true;
+                        } else {
+                            setForceParamFetchToken((x) => x + 1);
+                            setRefreshToken((x) => x + 1);
+                        }
+                    },
+                );
+                if (disposed) {
+                    unlisten();
+                    unlisten = null;
+                }
+            } catch {
+                // Safe no-op: browser/pywebview builds won't have the Tauri API.
+            }
+        }
+
+        void setup();
+
+        return () => {
+            disposed = true;
+            if (unlisten) unlisten();
+        };
+    }, [rootTrackId, liveEditActiveRef]);
 
     useEffect(() => {
         if (editParam !== "pitch") return;
@@ -564,6 +620,18 @@ export function usePianoRollData(args: {
                             typeof backendAvail === "boolean" ? backendAvail : null,
                         );
                     }
+                    // 动态面板的波形映射需要归一化参考电平（把线性峰值换算到
+                    // 与 DYN 曲线相同的倍率域）。仅 dyn 参数会带上它。
+                    //（统一可听波形改由 useLoudnessCurves 提供数据，此状态保留
+                    // 给后续需要参考电平的 UI 使用。）
+                    if (isDynParam(editParam)) {
+                        const ref = payload.dyn_orig_reference;
+                        setDynOrigReference(
+                            typeof ref === "number" && Number.isFinite(ref) && ref > 0
+                                ? ref
+                                : null,
+                        );
+                    }
                     const fpRes = Number(payload.frame_period_ms ?? fpMs) || fpMs;
                     paramFramePeriodCache.set(fpKey, fpRes);
 
@@ -967,5 +1035,7 @@ export function usePianoRollData(args: {
         isLoading,
         pitchEditUserModified,
         pitchEditBackendAvailable,
+        dynOrigReference,
+        refreshToken,
     };
 }

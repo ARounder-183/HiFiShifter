@@ -540,9 +540,10 @@ export function VibratoDialog({
     const tAny = t as (key: string) => string;
 
     const isPitch = editParam === "pitch";
-    // nsf-hifigan 气声音量参数范围为 0~2，此时默认振幅钳制为 1
-    const isBreathGain =
-        !isPitch && paramRange != null && paramRange.min === 0 && paramRange.max === 2;
+    // 气声音量（breath_gain，0..2）按原值域给小振幅；dyn 落到默认 30 ——
+    // 它在 op 侧是**深度百分比**（±30% 乘性调制，静音保持静音）。
+    // 【注意】不能按"值域 0..2"来识别 breath_gain：dyn 的值域也是 0..2。
+    const isBreathGain = editParam === "breath_gain";
     const defaultAmplitude = isPitch ? "30" : isBreathGain ? "1" : "30";
 
     const [amplitude, setAmplitude] = useState(defaultAmplitude);

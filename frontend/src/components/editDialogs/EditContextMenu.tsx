@@ -17,6 +17,13 @@ interface EditContextMenuProps {
     x: number;
     y: number;
     isPitchParam: boolean;
+    /**
+     * 当前参数是否为「音量」：为 true 时显示"转换为动态"。
+     * 音量与动态同为 0..4 的乘性增益，搬迁是纯拷贝 + 源参数归一化。
+     */
+    isVolumeParam?: boolean;
+    /** 当前参数是否为「动态」：为 true 时显示"转换为音量"。 */
+    isDynParam?: boolean;
     onClose: () => void;
     onCopy?: () => void;
     onCut?: () => void;
@@ -34,12 +41,18 @@ interface EditContextMenuProps {
     onMeanQuantize?: () => void;
     onSaveAsPitchRef?: () => void;
     onExportMidi?: () => void;
+    /** 音量 → 动态（源参数归位到 1.0）。 */
+    onConvertVolumeToDyn?: () => void;
+    /** 动态 → 音量（源参数归位到「沿用原声」）。 */
+    onConvertDynToVolume?: () => void;
 }
 
 export function EditContextMenu({
     x,
     y,
     isPitchParam,
+    isVolumeParam = false,
+    isDynParam = false,
     onClose,
     onCopy,
     onCut,
@@ -57,6 +70,8 @@ export function EditContextMenu({
     onMeanQuantize,
     onSaveAsPitchRef,
     onExportMidi,
+    onConvertVolumeToDyn,
+    onConvertDynToVolume,
 }: EditContextMenuProps) {
     const { t } = useI18n();
     const tAny = t as (key: string) => string;
@@ -177,6 +192,29 @@ export function EditContextMenu({
             {item(tAny("menu_add_vibrato"), addVibratoShortcut, closeAfter(onAddVibrato))}
             {item(tAny("menu_quantize"), quantizeShortcut, closeAfter(onQuantize))}
             {item(tAny("menu_mean_quantize"), meanQuantizeShortcut, closeAfter(onMeanQuantize))}
+            {/* 音量 ↔ 动态 互转：仅在当前参数是其一、且回调可用时显示。
+                换算（基线补偿 + 源参数归位）在后端 convert_mix_param 内完成，
+                前端只传选区 —— 转换是响度等效的，不是简单复制。 */}
+            {isVolumeParam && onConvertVolumeToDyn && (
+                <>
+                    <div className={sepClass} />
+                    {item(
+                        tAny("menu_convert_volume_to_dyn"),
+                        undefined,
+                        closeAfter(onConvertVolumeToDyn),
+                    )}
+                </>
+            )}
+            {isDynParam && onConvertDynToVolume && (
+                <>
+                    <div className={sepClass} />
+                    {item(
+                        tAny("menu_convert_dyn_to_volume"),
+                        undefined,
+                        closeAfter(onConvertDynToVolume),
+                    )}
+                </>
+            )}
             {isPitchParam && onSaveAsPitchRef && (
                 <>
                     <div className={sepClass} />

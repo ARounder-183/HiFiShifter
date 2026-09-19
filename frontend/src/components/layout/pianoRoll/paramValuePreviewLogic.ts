@@ -19,6 +19,7 @@ import {
     isChildPitchOffsetDegreesParam,
     snapChildPitchOffsetValue,
 } from "./childPitchOffsetParams";
+import { dynMultiplicativeFactor, isDynParam } from "./paramRanges";
 
 function isPitchSnapTargetParam(param: string): boolean {
     return (
@@ -46,6 +47,12 @@ export function getSelectDragPreviewValue(args: {
         pitchSnapUnit,
         projectScale,
     } = args;
+
+    // dyn 拖拽是**乘性**的（0 = 静音必须保持 0，见 paramRanges 的说明）：
+    // 弹窗显示的是"起点处的值被缩放后的结果"，而不是指针所在的线性值。
+    if (isDynParam(editParam)) {
+        return startValue * dynMultiplicativeFactor((currentValue - startValue) * fineScale);
+    }
 
     if (!effectiveSnap || !isPitchSnapTargetParam(editParam)) {
         return currentValue;

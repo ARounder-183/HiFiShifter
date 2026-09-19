@@ -789,14 +789,19 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
      * 特殊说明：含轴宽与视口高——两者都直接决定键体几何；**不含**横向滚动位置
      * （键盘不随横向滚动变化），因此横向滚动是零重建的。
      *
+     * 注意：签名在**非 pitch 参数之间也必须互不相同**（`paramName` 参与签名）。
+     * 早期版本对非 pitch 恒返回 `""`，导致 `volume → dyn` 切换时签名不变、
+     * 轴几何永不重建，上一参数的刻度被原样 repaint。
+     *
      * @param spec 当前网格输入（键盘复用它的值域信息）。
-     * @returns 内容签名；非音高参数（无键盘）时为空串。
+     * @returns 内容签名；pitch 为键盘签名，其余为数值轴签名。
      */
     function keyboardSignature(spec: PianoRollGridSpec | null | undefined): string {
         const view = liveGridView(spec);
         if (spec == null || view === null) return "";
         return keyboardGeometrySignature({
             kind: spec.kind,
+            paramName: spec.paramName,
             view,
             absMin: spec.absMin,
             absMax: spec.absMax,
@@ -1148,6 +1153,14 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             spec.paramName === undefined ||
             spec.tensionLineRgba === undefined
         ) {
+            // 必须与 `rebuildKeyboardGeometry` 的清空分支对称。
+            //
+            // 若这里只 `return 0` 而不复位计数，`drawGlKeyboard()` 会看到
+            // `glAxisUploadedCount > 0 && glAxisGeometryUploaded === true`，
+            // 于是把上一帧的 GPU 缓冲原样 repaint —— 表现为"切到非音高参数后
+            // 左侧纵轴仍残留钢琴键盘"。
+            glAxisUploadedCount = 0;
+            glAxisGeometryUploaded = false;
             return 0;
         }
         const marks = buildAxisMarkInstances({

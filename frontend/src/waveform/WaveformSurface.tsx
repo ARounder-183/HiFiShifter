@@ -22,7 +22,12 @@ import type { TimelineAxis } from "../components/layout/renderKernel/timelineAxi
 import { withAxis } from "../components/layout/renderKernel/timelineAxis.ts";
 import { LAYER_ORDER } from "../components/layout/timeline/runtime/timelineFrameCommitter.ts";
 import type { TimelineLayer } from "../components/layout/timeline/runtime/timelineFrameCommitter.ts";
-import { buildWaveformGeometry, type WaveformVertexSink } from "./geometry";
+import {
+    buildWaveformGeometry,
+    readAmplitudeRevision,
+    type WaveformAmplitudeMap,
+    type WaveformVertexSink,
+} from "./geometry";
 import { buildWaveformScene, type WaveformSceneRow } from "./sceneBuilder";
 import {
     Canvas2dWaveformRenderer,
@@ -54,6 +59,17 @@ export interface WaveformSurfaceProps {
         getAxis(): TimelineAxis;
         register(layer: TimelineLayer, order: number): () => void;
     };
+    /**
+     * 幅度映射：把线性峰值投影到本面板纵轴的量纲。
+     *
+     * 缺省（不传）为线性直投 —— 时间线与绝大多数参数面板的行为。
+     * 参数编辑器在「动态（DYN）」面板下传入 dB 映射，使波形与 DYN 曲线、
+     * 原声基线共用同一坐标系。
+     *
+     * ⚠ 该函数**参与几何缓存键**（详见 draw() 内的 canReuse 判定）：换参数
+     * 面板时必须传一个新引用，否则会复用旧映射构建的几何。
+     */
+    amplitudeMap?: WaveformAmplitudeMap;
 }
 
 export const WaveformSurface = React.memo(function WaveformSurface(props: WaveformSurfaceProps) {
@@ -88,6 +104,13 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
         rows: readonly WaveformSceneRow[];
         color: string;
         rendererKind: "webgl2" | "canvas2d";
+        /**
+         * 构建几何时使用的幅度映射。按**引用**比较：调用方每换一个面板语义
+         * 就必须传入新引用（参数编辑器用 useMemo 绑定 editParam 实现）。
+         */
+        amplitudeMap: WaveformAmplitudeMap | undefined;
+        /** 构建时的幅度映射修订号（见 `readAmplitudeRevision`）。 */
+        amplitudeRevision: number;
         /** 构建窗口的内容坐标左边界（含余量）。 */
         windowStartPx: number;
         windowEndPx: number;
@@ -156,6 +179,9 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
         const dpr = window.devicePixelRatio || 1;
 
         const cache = geometryCacheRef.current;
+        // 幅度映射修订号：引用不变也可能内部数据已变（动态面板的延迟取值），
+        // 必须在复用判定之前取一次，并在重建时写入缓存。
+        const amplitudeRevision = readAmplitudeRevision(props.amplitudeMap);
         const canReuse =
             cache !== null &&
             cache.pxPerSec === pxPerSec &&
@@ -164,6 +190,8 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
             cache.rows === props.rows &&
             cache.color === props.color &&
             cache.rendererKind === rendererKind &&
+            cache.amplitudeMap === props.amplitudeMap &&
+            cache.amplitudeRevision === amplitudeRevision &&
             // 水平：视口必须完整落在已构建的窗口内（两侧各 `marginPx` 可平移）。
             scrollLeftPx >= cache.windowStartPx &&
             scrollLeftPx + widthPx <= cache.windowEndPx &&
@@ -268,6 +296,7 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
                 );
             },
             sink: vertexSinkRef.current,
+            amplitudeMap: props.amplitudeMap,
         });
 
         const originXPx = scrollLeftPx - windowStartPx;
@@ -280,6 +309,8 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
                 rows: props.rows,
                 color: props.color,
                 rendererKind: renderer.kind,
+                amplitudeMap: props.amplitudeMap,
+                amplitudeRevision,
                 windowStartPx,
                 windowEndPx,
                 windowTopPx,
@@ -344,6 +375,11 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
             viewportTopPx: props.viewportTopPx,
             pxPerSec: props.axis.pxPerSec,
             axis: props.viewportSource ? null : props.axis,
+            // 幅度映射参与签名：参数编辑器在「动态」面板下切换参数时换引用，
+            // 必须触发一次重绘 —— 总线驱动模式下没有滚动/缩放就不会有其它
+            // 的 draw() 入口，漏掉它会让波形停留在上一参数的映射结果上
+            // （表现为"编辑动态时波形不更新"）。
+            amplitudeMap: props.amplitudeMap,
         }),
         [
             props.rows,
@@ -352,6 +388,7 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
             props.viewportTopPx,
             props.axis,
             props.viewportSource,
+            props.amplitudeMap,
         ],
     );
     const previousVisualSignatureRef = React.useRef(visualSignature);

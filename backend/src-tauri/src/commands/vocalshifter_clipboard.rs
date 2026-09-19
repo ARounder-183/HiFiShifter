@@ -223,8 +223,8 @@ fn paste_clb_vslib_param(
         .map(|t| &t.pitch_analysis_algo);
 
     let is_supported = match param_name {
-        // 共通音量/声像在 mix 阶段应用，任何算法（包括 None 的原始音频轨道）都支持。
-        "volume" | "pan" => true,
+        // 共通音量 / 声像 / 动态在 mix 阶段应用，任何算法（包括 None 的原始音频轨道）都支持。
+        "volume" | "pan" | "dyn" => true,
         "formant_shift_cents" => matches!(
             track_algo,
             Some(PitchAnalysisAlgo::VocalShifterVslib) | Some(PitchAnalysisAlgo::NsfHifiganOnnx)
@@ -243,9 +243,9 @@ fn paste_clb_vslib_param(
 
     let total_frames = entry.pitch_edit.len();
 
-    // 参数默认值
+    // 参数默认值（`dyn` 的"无数据"值是沿用原声哨兵，见下方 val 分支）
     let default_val = match param_name {
-        "volume" | "dyn_edit" | "dyn_orig" => 1.0f32,
+        "volume" | "dyn" => 1.0f32,
         _ => 0.0f32,
     };
 
@@ -318,7 +318,14 @@ fn paste_clb_vslib_param(
             }
             "volume" => point.volume as f32,
             "pan" => point.pan as f32,
-            "dyn_edit" => point.dyn_edit as f32,
+            // VS 的 DYN 是目标电平倍率（1.0 = VS 参考电平）。**已知限制**：
+            // VS 剪贴板格式只携带 dynEdit，**不带 dynOrg**（dynOrg 只存在于
+            // VS 工程文件的点数据里，见 import/vocalshifter_import.rs），因此
+            // 无法在此按 `dynEdit/dynOrg` 增益语义换算到本项目的归一化基线 ——
+            // 直写 dyn_edit，粘贴后的响度与 VS 中的响度可能存在参考电平差。
+            // 工程级导入路径无此问题（它把 dyn 增益折算进 volume，见
+            // import/vocalshifter_import.rs 的 avg_dyn 换算）。
+            "dyn" => point.dyn_edit as f32,
             "breathiness" => point.breathiness as f32,
             _ => continue,
         };
@@ -433,6 +440,15 @@ fn paste_vsp_project(state: &AppState, path: &std::path::Path) -> serde_json::Va
         }
 
         for (track_id, new_params) in &result.timeline.params_by_root_track {
+            // 该根轨道的算法（决定参数默认值的解析口径）。
+            let merge_kind = tl
+                .tracks
+                .iter()
+                .find(|t| &t.id == track_id)
+                .map(|t| {
+                    crate::state::SynthPipelineKind::from_track_algo(&t.pitch_analysis_algo)
+                })
+                .unwrap_or(crate::state::SynthPipelineKind::NsfHifiganOnnx);
             if let Some(existing) = tl.params_by_root_track.get_mut(track_id) {
                 // 轨道已有 pitch 数据 → 合并非零区域
                 if new_params.pitch_edit_user_modified {
@@ -450,10 +466,12 @@ fn paste_vsp_project(state: &AppState, path: &std::path::Path) -> serde_json::Va
                 }
                 // 合并 extra_curves：按帧覆写非默认值（与 pitch 合并方式一致）
                 for (key, new_curve) in &new_params.extra_curves {
-                    let default_val = match key.as_str() {
-                        "formant_shift_cents" | "pan" | "breathiness" => 0.0f32,
-                        _ => 1.0f32, // volume, dyn_orig, dyn_edit
-                    };
+                    // 参考值 = 「该帧无数据」的语义值：对 dyn 是沿用原声哨兵，
+                    // 而不是描述符默认值 1.0（那会压平电平）。
+                    let default_val = crate::renderer::common_params::automation_curve_pad_value(
+                        merge_kind,
+                        key,
+                    );
                     let existing_curve = existing
                         .extra_curves
                         .entry(key.clone())

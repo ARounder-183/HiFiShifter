@@ -123,11 +123,22 @@ pub(super) fn resolve_extra_curve_default_value(
     crate::renderer::automation_curve_default_value(kind, param).unwrap_or(0.0)
 }
 
+/// 参数在「无数据」时该填什么（用于区间填充、平移补位、前端请求越界帧）。
+///
+/// 与 `resolve_extra_curve_default_value` 的唯一差别是 `dyn`：它的描述符默认值
+/// 1.0 表示「压平到参考电平」（一个真实动作），而「无数据」应表达为沿用原声。
+/// 详见 `common_params::automation_curve_pad_value`。
+fn resolve_extra_curve_pad_value(kind: crate::state::SynthPipelineKind, param: &str) -> f32 {
+    crate::renderer::common_params::automation_curve_pad_value(kind, param)
+}
+
 fn resolve_param_reference_value(kind: crate::state::SynthPipelineKind, param: &str) -> f32 {
     match param {
         "pitch" => 0.0,
         "tension" => 0.0,
-        _ => resolve_extra_curve_default_value(kind, param),
+        // 写路径的参考值 = 填充值：对 `dyn` 是「沿用原声」哨兵 (−1)，而不是
+        // 描述符默认值 1.0（那会把无数据帧解释成"压平到参考电平"）。
+        _ => resolve_extra_curve_pad_value(kind, param),
     }
 }
 
@@ -142,7 +153,7 @@ fn resolve_param_reference_value_with_timeline(
 
 fn resolve_param_reference_kind(param: &str) -> crate::models::ParamReferenceKind {
     match param {
-        "pitch" => crate::models::ParamReferenceKind::SourceCurve,
+        "pitch" | "dyn" => crate::models::ParamReferenceKind::SourceCurve,
         _ => crate::models::ParamReferenceKind::DefaultValue,
     }
 }
@@ -173,6 +184,7 @@ pub(super) fn get_param_frames(
     frame_count: u32,
     stride: Option<u32>,
     binary: Option<bool>,
+    with_sentinel: Option<bool>,
 ) -> crate::models::ParamFramesPayload {
     if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
         log::warn!(
@@ -182,7 +194,7 @@ pub(super) fn get_param_frames(
     }
     // 二进制模式：orig/edit 以 Base64 单条返回，JSON 里不再展开成 number[]。
     let binary = binary.unwrap_or(false);
-    let (root, fp, entry, compose_enabled, pitch_algo, param_reference_value) = {
+    let (root, fp, entry, compose_enabled, pitch_algo, param_reference_value, param_kind) = {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
 
         let root = match tl.resolve_root_track_id(&track_id) {
@@ -202,6 +214,8 @@ pub(super) fn get_param_frames(
                     analysis_progress: None,
                     pitch_edit_user_modified: None,
                     pitch_edit_backend_available: None,
+                    dyn_orig_reference: None,
+                    edit_sentinel: None,
                 }
             }
         };
@@ -231,6 +245,7 @@ pub(super) fn get_param_frames(
             compose_enabled,
             pitch_algo,
             param_reference_value,
+            kind,
         )
     };
 
@@ -269,6 +284,8 @@ pub(super) fn get_param_frames(
             analysis_progress: None,
             pitch_edit_user_modified,
             pitch_edit_backend_available,
+            dyn_orig_reference: None,
+            edit_sentinel: None,
         };
     }
 
@@ -281,12 +298,40 @@ pub(super) fn get_param_frames(
         None
     };
 
+    // 「动态」：先把原声电平基线组装进 state（同步路径只读已算好的 per-clip 缓存），
+    // 再按普通 extra 曲线的口径读取 —— 下面是复制一份，因为 curve 需要重新读取。
+    //
+    // 前端请求 dyn 参数 == 动态面板正在显示这个轨道组。这里顺带登记该状态，
+    // 使"面板已打开但用户还没落笔"时后台也会去算原声电平（虚线基线与 dB
+    // 波形才能显示），并且**不依赖 `compose_enabled`** —— 动态是混音级参数。
+    let dyn_analysis_pending = if param == "dyn" {
+        if let Ok(mut roots) = crate::pitch_clip::dyn_panel_open_roots().lock() {
+            roots.insert(root.clone());
+        }
+        Some(crate::pitch_analysis::maybe_schedule_dyn_orig(&state, &root))
+    } else {
+        None
+    };
+    let (entry, param_reference_value) = if param == "dyn" {
+        let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        let e = tl
+            .params_by_root_track
+            .get(&root)
+            .cloned()
+            .unwrap_or_default();
+        (e, param_reference_value)
+    } else {
+        (entry, param_reference_value)
+    };
+
     let start = start_frame as usize;
     let count = (frame_count as usize).max(1);
     let step = (stride.unwrap_or(1).max(1)) as usize;
 
     let mut orig = Vec::with_capacity(count);
     let mut edit = Vec::with_capacity(count);
+    // dyn 的"未画"位图（仅 with_sentinel 时填充；其他参数恒 None）。
+    let mut edit_sentinel: Option<Vec<bool>> = None;
 
     match param.as_str() {
         "pitch" => {
@@ -313,6 +358,49 @@ pub(super) fn get_param_frames(
                 edit.push(e);
             }
         }
+        "dyn" => {
+            // 动态（DYN）：`orig` = 原声电平基线（虚线），`edit` = 用户目标电平。
+            //
+            // 曲线里的 `DYN_FOLLOW_ORIG`(−1) 哨兵在**出口**解析成真实基线值：
+            // 前端永远看不到负值，绘制/平滑/量化全都按普通 0..4 曲线处理。
+            // 分析未就绪时两条都退化为描述符默认值 1.0（此时增益恒为 1）。
+            //
+            // 【哨兵位图】批量操作（平滑/量化/平均/拖拽提交/复制粘贴）走
+            // "读-变换-写回"，若拿不到哨兵信息就会把**未画帧**物化成显式基线值
+            // ——当下听感不变，但日后基线重分析时这些帧不再跟随（响度漂移）。
+            // `with_sentinel` 请求方据此拿到逐帧"该帧是否未画"的位图，写回时
+            // 把哨兵帧原样写回哨兵（pitch 的 0 哨兵在拖拽里已有同款约定）。
+            let orig_curve = entry.dyn_orig.as_slice();
+            let user_curve = entry.extra_curves.get("dyn").map(|v| v.as_slice());
+            let fallback = resolve_extra_curve_default_value(param_kind, "dyn");
+            let want_sentinel = with_sentinel.unwrap_or(false);
+            let mut sentinels: Vec<bool> = Vec::new();
+            for i in 0..count {
+                let idx = start.saturating_add(i.saturating_mul(step));
+                let baseline = orig_curve
+                    .get(idx)
+                    .copied()
+                    .filter(|v| v.is_finite() && *v > 0.0)
+                    .unwrap_or(fallback);
+                let user = user_curve.and_then(|c| c.get(idx)).copied();
+                let is_unset = match user {
+                    Some(v) => !(v.is_finite() && v >= 0.0), // 哨兵 / 非有限
+                    None => true,                            // 曲线不存在或更短
+                };
+                if want_sentinel {
+                    sentinels.push(is_unset);
+                }
+                let resolved = match user {
+                    Some(v) if v.is_finite() && v >= 0.0 => v,
+                    _ => baseline, // 哨兵 / 缺失 → 沿用原声
+                };
+                orig.push(baseline);
+                edit.push(resolved);
+            }
+            if want_sentinel {
+                edit_sentinel = Some(sentinels);
+            }
+        }
         _ => {
             // Extra automation curve: dashed orig should stay at the processor default,
             // while solid edit reflects the user-authored curve.
@@ -326,6 +414,10 @@ pub(super) fn get_param_frames(
             }
         }
     }
+
+    // dyn 的分析待定标志：与 pitch 共用 `analysis_pending` 字段（前端只关心
+    // "这个参数是否还在后台分析"，语义一致）。
+    let analysis_pending = analysis_pending.or(dyn_analysis_pending);
 
     crate::models::ParamFramesPayload {
         ok: true,
@@ -341,6 +433,9 @@ pub(super) fn get_param_frames(
         analysis_progress: None,
         pitch_edit_user_modified,
         pitch_edit_backend_available,
+        edit_sentinel,
+        // 前端画 DYN 波形需要参考电平（把线性峰值换算成同样的倍率域）。
+        dyn_orig_reference: (param == "dyn").then_some(entry.dyn_orig_reference),
     }
 }
 /// 将 orig/edit 两组 f32 曲线编码为 Base64 二进制。
@@ -489,6 +584,31 @@ pub(super) fn set_param_frames(
                 }
                 v = vv;
             }
+            "volume" | "hifigan_volume" => {
+                // 音量：乘性增益，钳到描述符值域 0..2（±6 dB）。负值对音量无意义，
+                // 一并钳到 0（全静音）。
+                let vv = v.max(0.0).min(2.0);
+                if vv != v {
+                    clamped += 1;
+                }
+                v = vv;
+            }
+            "dyn" => {
+                // 动态：正值是目标电平（0..2 倍率），负值统一收敛到「沿用原声」
+                // 哨兵。**不允许**前端把哨兵写成 −0.7 之类的中间值 —— 只要符号
+                // 为负就是同一个语义，值本身无意义。
+                // 正值钳到描述符值域 0..2（+6 dB，见 common_params::DYN_PARAM
+                // 的值域说明）；负值统一收敛到「沿用原声」哨兵。
+                let vv = if v < 0.0 {
+                    crate::renderer::common_params::DYN_FOLLOW_ORIG
+                } else {
+                    v.clamp(0.0, 2.0)
+                };
+                if vv != v {
+                    clamped += 1;
+                }
+                v = vv;
+            }
             _ => {}
         }
 
@@ -515,12 +635,29 @@ pub(super) fn set_param_frames(
         entry.pitch_edit_user_modified = true;
     }
 
+    // 写入动态后基线的组装前提可能刚成立（例如用户第一次画了 dyn），
+    // 主动触发一次组装/调度，让用户画完就能听到正确的（而非 1.0 占位）结果。
+    let dyn_touched = param == "dyn";
+    let root_for_dyn = root.clone();
+
     if let Some(spec) = parse_child_pitch_offset_param(&param) {
         invalidate_rendered_clip_caches_for_child_track(&tl, spec.track_id);
     }
 
     // Ensure realtime playback reflects edits immediately.
     state.audio_engine.update_timeline(tl.clone());
+
+    // ★ 必须先释放上面的 timeline 锁，再调用下面这条会**再次加锁**的路径。
+    //
+    // `std::sync::Mutex` 不可重入：`entry` 借自 `tl`，因此本函数直到 return
+    // 都持有守卫；而 `maybe_schedule_dyn_orig` 内部会 `state.timeline.lock()`。
+    // 在持锁状态下调用它 = 同线程二次加锁 = 永久挂死（用户观感即"画完动态线
+    // 就崩溃"）。这也是为什么必须在锁外调用，而不是把 root 传进去。
+    drop(tl);
+
+    if dyn_touched {
+        let _ = crate::pitch_analysis::maybe_schedule_dyn_orig(&state, &root_for_dyn);
+    }
 
     serde_json::json!({"ok": true})
 }
@@ -592,6 +729,20 @@ pub(super) fn restore_param_frames(
                 entry.tension_edit[idx] = reference_value;
             }
         }
+        "dyn" => {
+            // 「初始化」对动态 = 回到原声（写哨兵），而不是写描述符默认值 1.0。
+            // 后者是把整段压平到参考电平，一个用户点"初始化"绝不想看到的响度巨变。
+            let follow = crate::renderer::common_params::DYN_FOLLOW_ORIG;
+            if let Some(curve) = entry.extra_curves.get_mut("dyn") {
+                for i in 0..count {
+                    let idx = start.saturating_add(i);
+                    if idx >= curve.len() {
+                        break;
+                    }
+                    curve[idx] = follow;
+                }
+            }
+        }
         _ => {
             let default_value = param_reference_value;
             if let Some(curve) = entry.extra_curves.get_mut(&param) {
@@ -614,6 +765,296 @@ pub(super) fn restore_param_frames(
     state.audio_engine.update_timeline(tl.clone());
 
     serde_json::json!({"ok": true})
+}
+
+// ===================== 音量 ↔ 动态 互转（混音级参数） =====================
+
+/// 互转方向（命令入参）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MixConversionDirection {
+    /// 音量 → 动态。
+    VolumeToDyn,
+    /// 动态 → 音量。
+    DynToVolume,
+}
+
+/// 一帧的互转换算（**纯函数**，正确性的唯一落点，供单测直接验证）。
+///
+/// ## 为什么要基线补偿（等效性推导）
+///
+/// 渲染的最终增益是 `out = in × volume(t) × dyn_gain(t) × …`，其中
+/// `dyn_gain = 目标电平 / 原声基线`。所以：
+///
+/// - **volume → dyn**：要满足 `1.0 × (target/orig) = v`，必须写
+///   `target = v × orig`。直接搬 `target = v` 会得到 `v/orig` —— 不等效。
+/// - **dyn → volume**：要满足 `vol = target/orig`（哨兵帧 target=orig → vol=1.0，
+///   自动正确）。直接搬 `vol = target` 同样不等效，且会把"未画"的哨兵帧
+///   物化成显式基线值，凭空改变那些帧的响度。
+///
+/// ## 保护帧的约定
+///
+/// `orig < DYN_MIN_REF` 时后端增益恒 1（绝不放大噪声底），因此反向换算写
+/// `vol = 1.0`（保持"不改变"），而不是一个巨大的 `target/orig` 商。
+/// 换算结果超出目标参数值域时按各自值域钳制 —— 钳制帧的等效性破缺是
+/// 已知的、被接受的（只发生在极端值组合下）。特别地，音量值域为 0..2
+/// （±6 dB），dyn 增益超过 ×2 的帧（把安静段提升 +6 dB 以上）转成音量后
+/// 会被钳到 2.0，响度有所回落 —— 这类帧本质上应由动态参数承载。
+///
+/// # 参数
+/// - `direction` 互转方向。
+/// - `volume_value` 该帧 volume 曲线的原始值；`None` = 该帧无数据（曲线不存在或更短）。
+/// - `dyn_raw` 该帧 dyn 曲线的原始值（**未解析哨兵**）；`None` = 无数据。
+/// - `baseline` 该帧的原声基线（`dyn_orig`，调用方保证 > 0 且有限）。
+///
+/// # 返回
+/// `(new_volume, new_dyn)` —— 两个字段都恒有值（选区内的每一帧都要么换算、
+/// 要么归位到"无变化"），由调用方原样写回。
+fn convert_mix_frame_value(
+    direction: MixConversionDirection,
+    volume_value: Option<f32>,
+    dyn_raw: Option<f32>,
+    baseline: f32,
+) -> (f32, f32) {
+    let sentinel = crate::renderer::common_params::DYN_FOLLOW_ORIG;
+    let dyn_max = 2.0_f32; // 与 dyn 描述符值域一致（0..2，+6 dB）
+    let vol_max = 2.0_f32; // 与 volume 描述符值域一致（0..2，±6 dB）
+    match direction {
+        MixConversionDirection::VolumeToDyn => {
+            // 音量归位 1.0；动态接管（有数据的帧换算，无数据的帧表达"沿用原声"）。
+            let new_dyn = match volume_value {
+                Some(v) if v.is_finite() && baseline > 0.0 => (v * baseline).clamp(0.0, dyn_max),
+                _ => sentinel,
+            };
+            (1.0, new_dyn)
+        }
+        MixConversionDirection::DynToVolume => {
+            // 动态归位哨兵（沿用原声）；音量接管。
+            let new_volume = match dyn_raw {
+                // 用户画过的帧：换算成等效音量（静音保护帧保持 1.0）。
+                Some(t) if t.is_finite() && t >= 0.0 => {
+                    if baseline >= crate::renderer::common_params::DYN_MIN_REF {
+                        (t / baseline).clamp(0.0, vol_max)
+                    } else {
+                        1.0
+                    }
+                }
+                // 哨兵 / 无数据帧：原本就是"不改变" → 音量 1.0。
+                _ => 1.0,
+            };
+            (new_volume, sentinel)
+        }
+    }
+}
+
+/// 一段选区的互转换算（纯函数）。
+///
+/// 逐帧取 `(volume, dyn_raw, baseline)` 并套用 [`convert_mix_frame_value`]；
+/// 基线越界 / 无效（`dyn_orig` 缺该帧、非有限、≤ 0）的帧**写"无变化"值**
+/// （volume=1.0、dyn=哨兵）并计入 `skipped` —— 输出与输入逐帧对齐，调用方
+/// 无需关心跳帧位置。正常情况下基线长度 = 工程帧数、选区不会越出工程末端，
+/// skipped 恒为 0；该分支只是不让异常数据错位写盘。
+///
+/// # 返回
+/// `(volume_values, dyn_values, skipped)`：前两者长度恒等于 `count`。
+fn compute_mix_conversion_range(
+    direction: MixConversionDirection,
+    volume_curve: Option<&[f32]>,
+    dyn_curve: Option<&[f32]>,
+    dyn_orig: &[f32],
+    start: usize,
+    count: usize,
+) -> (Vec<f32>, Vec<f32>, usize) {
+    let sentinel = crate::renderer::common_params::DYN_FOLLOW_ORIG;
+    let mut volume_out = Vec::with_capacity(count);
+    let mut dyn_out = Vec::with_capacity(count);
+    let mut skipped = 0usize;
+    for k in 0..count {
+        let idx = start + k;
+        let baseline = dyn_orig
+            .get(idx)
+            .copied()
+            .filter(|v| v.is_finite() && *v > 0.0);
+        match baseline {
+            Some(b) => {
+                let volume_value = volume_curve.and_then(|c| c.get(idx)).copied();
+                let dyn_raw = dyn_curve.and_then(|c| c.get(idx)).copied();
+                let (v, d) = convert_mix_frame_value(direction, volume_value, dyn_raw, b);
+                volume_out.push(v);
+                dyn_out.push(d);
+            }
+            None => {
+                // 基线缺失：保持"无变化"，绝不信占位基线换算。
+                skipped += 1;
+                volume_out.push(1.0);
+                dyn_out.push(sentinel);
+            }
+        }
+    }
+    (volume_out, dyn_out, skipped)
+}
+
+/// 音量 ↔ 动态 曲线互转命令（后端单事务）。
+///
+/// ## 为什么互转必须在后端做（前端纯搬迁方案已被证伪）
+///
+/// 1. **等效性需要基线**：`dyn_target = volume × orig` / `volume = dyn_target/orig`
+///    都要逐帧的权威基线（`TrackParamsState.dyn_orig`，全分辨率），前端拿不到
+///    （`get_param_frames` 的 edit 出口已解析哨兵，`orig` 只随窗口下发）。
+/// 2. **曲线存在性只有后端知道**：volume 曲线哪些帧"有数据"取决于
+///    `extra_curves` 的存在与长度，前端无从判断（会把无数据帧物化成显式值）。
+/// 3. **原子性**：此前前端分两次 `set_param_frames`（先写目标、再归位源），
+///    两次 `update_timeline` 之间存在"dyn 已生效而 volume 未归位"的快照窗口，
+///    播放中表现为瞬时响度突跳。本命令单次加锁、单个撤销点、单次快照提交。
+///
+/// ## 基线未就绪
+///
+/// 互转前必须保证 `dyn_orig` 已按当前时间线组装完成（key 命中）。未命中时返回
+/// `{ok:false, reason:"analysis_pending"}` 并顺带触发后台分析；前端在
+/// `dyn_orig_updated` 后重试。绝不能按占位基线（1.0）换算 —— 那会把错误永久写进曲线。
+pub(super) fn convert_mix_param(
+    state: State<'_, AppState>,
+    track_id: String,
+    from: String,
+    ranges: Vec<crate::commands::ConvertRange>,
+) -> serde_json::Value {
+    let direction = match from.as_str() {
+        "volume" => MixConversionDirection::VolumeToDyn,
+        "dyn" => MixConversionDirection::DynToVolume,
+        _ => return serde_json::json!({"ok": false, "reason": "unsupported_param"}),
+    };
+    if ranges.is_empty() {
+        return serde_json::json!({"ok": false, "reason": "empty_selection"});
+    }
+
+    let root = {
+        let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        match tl.resolve_root_track_id(&track_id) {
+            Some(id) => id,
+            None => return serde_json::json!({"ok": false, "reason": "no_root"}),
+        }
+    };
+
+    // 基线必须就绪（key 命中）。未命中则触发组装/调度后明确拒绝。
+    let analysis_pending = crate::pitch_analysis::maybe_schedule_dyn_orig(&state, &root);
+    if analysis_pending {
+        return serde_json::json!({"ok": false, "reason": "analysis_pending"});
+    }
+
+    let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+    // 整批一个撤销点：Ctrl+Z 一次回退全部选区的换算与归位。
+    state.checkpoint_timeline(&tl, crate::state::HistoryOp::ParamCurve);
+
+    let Some(entry) = tl.params_by_root_track.get_mut(&root) else {
+        return serde_json::json!({"ok": false, "reason": "params_missing"});
+    };
+
+    // volume 曲线：新键优先，旧 `hifigan_volume` 兜底读取（只读，不写旧键）。
+    let volume_snapshot: Vec<f32> = entry
+        .extra_curves
+        .get("volume")
+        .or_else(|| entry.extra_curves.get("hifigan_volume"))
+        .cloned()
+        .unwrap_or_default();
+    let dyn_snapshot: Vec<f32> = entry
+        .extra_curves
+        .get(crate::renderer::common_params::DYN_PARAM_ID)
+        .cloned()
+        .unwrap_or_default();
+    let dyn_orig_snapshot: Vec<f32> = entry.dyn_orig.clone();
+
+    let mut converted_frames = 0usize;
+    let mut skipped_frames = 0usize;
+    let mut volume_writes: Vec<(usize, Vec<f32>)> = Vec::new();
+    let mut dyn_writes: Vec<(usize, Vec<f32>)> = Vec::new();
+
+    for range in &ranges {
+        let start = range.start_frame as usize;
+        let count = (range.frame_count as usize).max(1);
+        let (volume_values, dyn_values, skipped) = compute_mix_conversion_range(
+            direction,
+            if volume_snapshot.is_empty() {
+                None
+            } else {
+                Some(volume_snapshot.as_slice())
+            },
+            if dyn_snapshot.is_empty() {
+                None
+            } else {
+                Some(dyn_snapshot.as_slice())
+            },
+            &dyn_orig_snapshot,
+            start,
+            count,
+        );
+        skipped_frames += skipped;
+        // 选区段升序到达：相邻/重叠段合并（后到覆盖先到，与前端多段写入的
+        // 确定性一致）；互不相交的段保持独立 —— **缝隙帧不写**（互转只作用于
+        // 选区，缝隙里的曲线原样保留）。
+        merge_write_segment(&mut volume_writes, start, &volume_values);
+        merge_write_segment(&mut dyn_writes, start, &dyn_values);
+        converted_frames += count - skipped;
+    }
+
+    // 写回：曲线不够长时用**该参数的"无变化"值**扩尾（volume=1.0、dyn=哨兵），
+    // 避免凭空填入"压平到参考电平"之类的真实动作。
+    for (start, values) in &volume_writes {
+        let volume_curve = entry.extra_curves.entry("volume".to_string()).or_default();
+        let needed = start + values.len();
+        if volume_curve.len() < needed {
+            volume_curve.resize(needed, 1.0);
+        }
+        for (k, v) in values.iter().enumerate() {
+            volume_curve[start + k] = *v;
+        }
+    }
+    for (start, values) in &dyn_writes {
+        let dyn_curve = entry
+            .extra_curves
+            .entry(crate::renderer::common_params::DYN_PARAM_ID.to_string())
+            .or_default();
+        let needed = start + values.len();
+        if dyn_curve.len() < needed {
+            dyn_curve.resize(needed, crate::renderer::common_params::DYN_FOLLOW_ORIG);
+        }
+        for (k, v) in values.iter().enumerate() {
+            dyn_curve[start + k] = *v;
+        }
+    }
+
+    let root_for_dyn = root.clone();
+    // Ensure realtime playback reflects the conversion immediately（单次快照提交）。
+    state.audio_engine.update_timeline(tl.clone());
+    drop(tl);
+    // dyn 曲线可能刚获得第一个非哨兵值（volume→dyn 方向），与 set_param_frames
+    // 的既有约定一致：锁外补一次组装/调度（基线已就绪时它是 no-op）。
+    let _ = crate::pitch_analysis::maybe_schedule_dyn_orig(&state, &root_for_dyn);
+
+    serde_json::json!({
+        "ok": true,
+        "convertedFrames": converted_frames,
+        "skippedFrames": skipped_frames,
+    })
+}
+
+/// 把一段写入并入写窗口列表：与最后一段**相接**（start == 旧段终点）则拼接，
+/// 否则另起新段。段列表按写入顺序逐段应用到曲线 —— 同一帧被多段覆盖时
+/// "后者胜"，行为确定。
+///
+/// 调用方保证 `start` 按升序到达（选区段升序）。选区段本就互不相交，因此
+/// 现实路径只有"相接拼接"与"新段"两种；重叠输入不发生，无需在此处理。
+fn merge_write_segment(writes: &mut Vec<(usize, Vec<f32>)>, start: usize, values: &[f32]) {
+    if values.is_empty() {
+        return;
+    }
+    if let Some(&(last_start, _)) = writes.last() {
+        let last = &mut writes.last_mut().unwrap().1;
+        let prev_end = last_start + last.len();
+        if start == prev_end {
+            last.extend_from_slice(values);
+            return;
+        }
+    }
+    writes.push((start, values.to_vec()));
 }
 
 pub(super) fn get_static_param(
@@ -712,4 +1153,172 @@ pub(super) fn stretch_track_linked_params(
     state.audio_engine.update_timeline(tl.clone());
 
     serde_json::json!({"ok": true})
+}
+
+#[cfg(test)]
+mod mix_conversion_tests {
+    use super::*;
+
+    const GAIN: fn(f32, f32) -> f32 = crate::renderer::common_params::compute_dyn_gain;
+
+    /// volume→dyn 的**最终效果等效**属性：转换前 `增益 = v`，转换后
+    /// `增益 = compute_dyn_gain(new_dyn, baseline)`，两者逐帧相等
+    /// （排除静音保护帧与钳制帧，两者在 convert_mix_frame_value 的文档中声明）。
+    #[test]
+    fn volume_to_dyn_is_effect_equivalent() {
+        let baselines = [1.0f32, 0.5, 0.25, 0.8, 0.06];
+        let volumes = [1.0f32, 0.5, 2.0, 0.0, 3.0];
+        for baseline in baselines {
+            for v in volumes {
+                let (new_volume, new_dyn) =
+                    convert_mix_frame_value(MixConversionDirection::VolumeToDyn, Some(v), None, baseline);
+                assert_eq!(new_volume, 1.0, "源音量必须归位 1.0");
+                let after = GAIN(new_dyn, baseline);
+                if v * baseline <= 2.0 {
+                    // dyn 值域内（0..2）：最终效果必须逐帧等效。
+                    assert!(
+                        (v - after).abs() < 1e-5,
+                        "v={v} baseline={baseline} → dyn={new_dyn} gain={after}"
+                    );
+                } else {
+                    // 超出 dyn 值域（v × baseline > 2 = +6 dB）：按文档化行为
+                    // 钳到 2.0 —— 等效性破缺是 convert_mix_frame_value 文档
+                    // 声明的已知边界（目标电平不允许表达"比最响段落还响 6 dB"）。
+                    assert_eq!(new_dyn, 2.0, "v={v} baseline={baseline}");
+                    assert!(after < v, "钳制帧增益必须小于原音量");
+                }
+            }
+        }
+    }
+
+    /// dyn→volume 的最终效果等效属性：转换前 `增益 = GAIN(target, baseline)`，
+    /// 转换后 `增益 = vol`。哨兵帧两端都是 1.0。
+    #[test]
+    fn dyn_to_volume_is_effect_equivalent() {
+        let baselines = [1.0f32, 0.5, 0.25, 0.8];
+        let targets = [1.0f32, 0.5, 2.0, 0.0];
+        for baseline in baselines {
+            for target in targets {
+                let (new_volume, new_dyn) =
+                    convert_mix_frame_value(MixConversionDirection::DynToVolume, None, Some(target), baseline);
+                assert_eq!(new_dyn, crate::renderer::common_params::DYN_FOLLOW_ORIG);
+                let before = GAIN(target, baseline);
+                if before <= 2.0 {
+                    // 音量值域内（0..2）：最终效果必须逐帧等效。
+                    assert!(
+                        (new_volume - before).abs() < 1e-5,
+                        "target={target} baseline={baseline} → vol={new_volume} expected {before}"
+                    );
+                } else {
+                    // 增益 > ×2（对安静段 +6 dB 以上的提升）：音量值域承载不了，
+                    // 按文档化行为钳到 2.0（响度回落 —— 这类帧应由动态承载）。
+                    assert_eq!(new_volume, 2.0, "target={target} baseline={baseline}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dyn_to_volume_follows_protection_and_clamp() {
+        // 静音保护帧：原增益恒 1 → 音量必须写 1.0（不得写巨大的商）。
+        let (vol, new_dyn) = convert_mix_frame_value(
+            MixConversionDirection::DynToVolume,
+            None,
+            Some(2.0),
+            crate::renderer::common_params::DYN_MIN_REF * 0.5,
+        );
+        assert_eq!(vol, 1.0);
+        assert_eq!(new_dyn, crate::renderer::common_params::DYN_FOLLOW_ORIG);
+
+        // 超出音量值域（0..2）：钳制到 2（等效性破缺是文档化的已知边界）。
+        let (vol, _) = convert_mix_frame_value(
+            MixConversionDirection::DynToVolume,
+            None,
+            Some(4.0),
+            crate::renderer::common_params::DYN_MIN_REF,
+        );
+        assert_eq!(vol, 2.0);
+    }
+
+    #[test]
+    fn unset_frames_stay_unset() {
+        // volume→dyn：volume 无数据的帧 → dyn 哨兵（沿用原声），绝不写 1.0
+        // （那会把"未画"物化成"压平到参考电平"）。
+        let (_, new_dyn) =
+            convert_mix_frame_value(MixConversionDirection::VolumeToDyn, None, None, 0.7);
+        assert_eq!(new_dyn, crate::renderer::common_params::DYN_FOLLOW_ORIG);
+        // dyn→volume：哨兵帧 → 音量 1.0（原语义就是"不改变"）。
+        let (new_volume, _) =
+            convert_mix_frame_value(MixConversionDirection::DynToVolume, None, Some(-1.0), 0.7);
+        assert_eq!(new_volume, 1.0);
+        let (new_volume, _) =
+            convert_mix_frame_value(MixConversionDirection::DynToVolume, None, None, 0.7);
+        assert_eq!(new_volume, 1.0);
+    }
+
+    #[test]
+    fn range_conversion_keeps_frame_alignment() {
+        // 基线只有 3 帧有效，选区 5 帧：后 2 帧写"无变化"值、计入 skipped，
+        // 输出与输入逐帧对齐（长度恒等于 count）。
+        let volume = vec![0.5f32, 1.5, 1.0, 1.0, 1.0];
+        let dyn_orig = vec![1.0f32, 0.5, 2.0];
+        let (v_out, d_out, skipped) = compute_mix_conversion_range(
+            MixConversionDirection::VolumeToDyn,
+            Some(&volume),
+            None,
+            &dyn_orig,
+            0,
+            5,
+        );
+        assert_eq!(v_out.len(), 5);
+        assert_eq!(d_out.len(), 5);
+        assert_eq!(skipped, 2);
+        // 前 3 帧按基线换算。
+        assert!((d_out[0] - 0.5).abs() < 1e-6); // 0.5 × 1.0
+        assert!((d_out[1] - 0.75).abs() < 1e-6); // 1.5 × 0.5
+        assert!((d_out[2] - 2.0).abs() < 1e-6); // 1.0 × 2.0
+        // 后 2 帧：volume 归位 1.0、dyn 哨兵。
+        assert_eq!(v_out[3], 1.0);
+        assert_eq!(d_out[3], crate::renderer::common_params::DYN_FOLLOW_ORIG);
+        assert_eq!(d_out[4], crate::renderer::common_params::DYN_FOLLOW_ORIG);
+    }
+
+    #[test]
+    fn range_conversion_dyn_to_volume_respects_sentinels() {
+        // dyn 曲线：用户只画了 [0..2)，哨兵一帧、无数据一帧。
+        let dyn_curve = vec![0.5f32, 2.0, -1.0];
+        let dyn_orig = vec![1.0f32, 0.5, 0.5];
+        let (v_out, d_out, skipped) = compute_mix_conversion_range(
+            MixConversionDirection::DynToVolume,
+            None,
+            Some(&dyn_curve),
+            &dyn_orig,
+            0,
+            3,
+        );
+        assert_eq!(skipped, 0);
+        assert!((v_out[0] - 0.5).abs() < 1e-6); // 0.5 / 1.0
+        assert_eq!(v_out[1], 2.0); // 2.0 / 0.5 = 增益 4 → 音量值域钳到 2
+        assert_eq!(v_out[2], 1.0); // 哨兵帧 → 不改变
+        for d in d_out {
+            assert_eq!(d, crate::renderer::common_params::DYN_FOLLOW_ORIG);
+        }
+    }
+
+    #[test]
+    fn merge_write_segments_adjacent_gap_and_overlap() {
+        let mut writes: Vec<(usize, Vec<f32>)> = Vec::new();
+        merge_write_segment(&mut writes, 0, &[1.0, 1.0]);
+        merge_write_segment(&mut writes, 2, &[2.0, 2.0]); // 相接 → 拼接
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0], (0, vec![1.0, 1.0, 2.0, 2.0]));
+
+        merge_write_segment(&mut writes, 10, &[3.0]); // 缝隙 → 新段（缝隙不写）
+        assert_eq!(writes.len(), 2);
+        assert_eq!(writes[1], (10, vec![3.0]));
+
+        merge_write_segment(&mut writes, 9, &[9.0, 8.0]); // 回跳（不发生）→ 新段
+        assert_eq!(writes.len(), 3);
+        assert_eq!(writes[2], (9, vec![9.0, 8.0]));
+    }
 }

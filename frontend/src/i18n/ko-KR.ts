@@ -335,6 +335,8 @@ export const koKR = {
     formant_shift_label: "포먼트 시프트",
     hifigan_volume_label: "볼륨",
     volume_label: "볼륨",
+    dyn_label: "다이내믹",
+    dyn_analysis_pending: "다이내믹스 베이스라인 분석 중…",
     pan_label: "팬",
     vslib_volume_label: "볼륨",
     vslib_synth_mode_label: "합성 모드",
@@ -350,6 +352,7 @@ export const koKR = {
     param_btn_pitch: "PIT",
     param_btn_breath: "BRE",
     param_btn_volume: "VOL",
+    param_btn_dyn: "DYN",
     param_btn_pan: "PAN",
     param_btn_formant: "FRM",
     param_btn_tension: "TEN",
@@ -1172,6 +1175,8 @@ export const koKR = {
     menu_add_vibrato: "비브라토 추가...",
     menu_quantize: "퀀타이즈...",
     menu_mean_quantize: "평균 퀀타이즈...",
+    menu_convert_volume_to_dyn: "다이내믹으로 변환",
+    menu_convert_dyn_to_volume: "볼륨으로 변환",
 
     // 센트 이조 다이얼로그
     transpose_cents_title: "센트 단위로 조바꿈",

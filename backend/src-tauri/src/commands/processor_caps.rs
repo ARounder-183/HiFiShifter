@@ -1,7 +1,10 @@
 //! 声码器参数能力查询命令。
 //!
-//! 提供 `get_processor_params(algo)` 命令，返回指定算法支持的额外参数描述符列表。
+//! 提供 `get_processor_params(algo)` 命令，返回指定算法支持的参数描述符列表。
 //! 前端据此动态渲染参数面板（Tab 标签 + 曲线编辑器）。
+//!
+//! 返回内容 = **共通混音级参数（volume / pan / dyn，与算法无关）** + 算法专有参数。
+//! 见 `renderer::all_param_descriptors`。
 
 use crate::renderer::ParamKind;
 use serde::Serialize;
@@ -35,19 +38,17 @@ pub struct ParamDescriptorDto {
 
 // ─── 命令实现 ─────────────────────────────────────────────────────────────────
 
-/// 查询指定算法的额外参数描述符列表。
+/// 查询指定算法可编辑的参数描述符列表。
 ///
 /// # 参数
 /// - `algo`：算法标识字符串，例 "world_dll"、"nsf_hifigan_onnx"、"vslib"、"none"。
 ///
 /// # 返回值
-/// 对应声码器链路所有 [`ParamDescriptor`] 的可序列化 DTO 列表。
-/// 音高面板（pitch）不在此列表中，由前端固定显示。
+/// 共通混音级参数（volume / pan / dyn）+ 该算法链路所有 [`ParamDescriptor`] 的
+/// 可序列化 DTO 列表。音高面板（pitch）不在此列表中，由前端固定显示。
 pub(super) fn get_processor_params(algo: String) -> Vec<ParamDescriptorDto> {
     let kind = algo_to_kind(&algo);
-    let processor = crate::renderer::get_processor(kind);
-    processor
-        .param_descriptors()
+    crate::renderer::all_param_descriptors(kind)
         .into_iter()
         .map(|d| ParamDescriptorDto {
             id: d.id,

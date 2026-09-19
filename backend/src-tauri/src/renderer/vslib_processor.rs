@@ -7,9 +7,10 @@
 //! - 共振峰偏移（formant_shift_cents）
 //! - 气声强度（breathiness）
 //! - 合成模式（SYNTHMODE_M / SYNTHMODE_MF / SYNTHMODE_P）
-//! - 逐控制点音量、强弱、声像曲线
+//!
+//! **不**消费音量（volume）/ 声像（pan）/ 动态（dyn）：这三者是算法无关的
+//! 混音级参数，一律由音频引擎的 mix 阶段应用（见 `renderer::common_params`）。
 
-use super::common_params::{PAN_PARAM, VOLUME_PARAM};
 use super::traits::{
     ClipProcessContext, ClipProcessor, ParamDescriptor, ParamKind, ProcessorCapabilities,
     RenderContext, Renderer, RendererCapabilities,
@@ -302,6 +303,9 @@ fn apply_head_declick_ramp(samples: &mut [f32], sample_rate: u32) {
 
 // ─── 静态参数描述符 ───────────────────────────────────────────────────────────
 
+/// 仅 vslib 专有的参数；共通混音级参数（volume / pan / dyn）**不在此处**
+/// —— 它们由 `renderer::common_params` 统一提供，并且只由音频引擎的 mix 阶段
+/// 应用（见该模块文件头）。vslib 处理器绝不再写 `VSCPINFOEX2.volume/pan`。
 static VSLIB_PARAMS: &[ParamDescriptor] = &[
     // 合成模式（按钮切换）
     ParamDescriptor {
@@ -317,10 +321,6 @@ static VSLIB_PARAMS: &[ParamDescriptor] = &[
             default_value: 1, // SYNTHMODE_MF
         },
     },
-    // 音量（AutomationCurve）—— 与其它算法使用同一个共通描述符。
-    VOLUME_PARAM,
-    // 声像（AutomationCurve）—— 与其它算法使用同一个共通描述符。
-    PAN_PARAM,
     // 共振峰偏移（AutomationCurve）
     ParamDescriptor {
         id: "formant_shift_cents",
@@ -516,9 +516,13 @@ impl ClipProcessor for VslibProcessor {
         //  合成引擎数据不一致，触发 STATUS_ACCESS_VIOLATION (0xc0000005) 崩溃。
         //  现在仅保留步骤 7 的逐控制点写入，这是官方 sample1.c 推荐的标准做法。
 
-        // ── 7. 逐控制点写入 pitch / volume / dyn_edit / pan / formant / breathiness ──
+        // ── 7. 逐控制点写入 pitch / formant / breathiness ────────────────────
         //  按官方 sample1.c 方式逐控制点写入 pitEdit + pitFlgEdit，
         //  确保音高编辑一定生效。
+        //
+        //  注意：**不写** cp2.volume / cp2.pan —— 音量/声像/动态是算法无关的
+        //  混音级参数，由音频引擎 mix 阶段应用（历史版本曾在此烘焙，导致
+        //  「未开 Compose 不生效」+「mix 阶段必须跳过」的双重特判，已移除）。
         let has_curves = ctx.extra_curves.values().any(|v| !v.is_empty());
         let has_pitch = !ctx.pitch_edit.is_empty() && ctx.frame_period_ms > 0.0;
         if (has_curves || has_pitch) && ctrl_pnt_num > 0 && ctrl_pnt_ps > 0 {
@@ -527,9 +531,6 @@ impl ClipProcessor for VslibProcessor {
             let seg_start = ctx.seg_start_sec;
             let playback_rate = ctx.playback_rate.max(1e-6);
 
-            let volume_c = ctx.extra_curves.get("volume").map(|v| v.as_slice());
-
-            let pan_c = ctx.extra_curves.get("pan").map(|v| v.as_slice());
             let formant_c = ctx
                 .extra_curves
                 .get("formant_shift_cents")
@@ -568,13 +569,6 @@ impl ClipProcessor for VslibProcessor {
                     // midi_val == 0 → 保留 vslib 分析得到的 pitEdit 和 pitFlgEdit 不变
                 }
 
-                if let Some(v) = curve_at_abs_sec(volume_c, at_abs, fp) {
-                    cp2.volume = v as f64;
-                }
-
-                if let Some(v) = curve_at_abs_sec(pan_c, at_abs, fp) {
-                    cp2.pan = v as f64;
-                }
                 if let Some(v) = curve_at_abs_sec(formant_c, at_abs, fp) {
                     // formant_shift_cents 单位与 vslib VSCPINFOEX2.formant 单位相同（cent）
                     cp2.formant = v.round() as c_int;
@@ -587,13 +581,11 @@ impl ClipProcessor for VslibProcessor {
 
                 if debug && sample_points.contains(&pnt) {
                     log::warn!(
-                        "[vslib] ctrl_pnt[{}]: abs={:.3}s pit_edit={} pit_flag={} volume={:.3} pan={:.3} formant={} breathiness={}",
+                        "[vslib] ctrl_pnt[{}]: abs={:.3}s pit_edit={} pit_flag={} formant={} breathiness={}",
                         pnt,
                         at_abs,
                         cp2.pitEdit,
                         cp2.pitFlgEdit,
-                        cp2.volume,
-                        cp2.pan,
                         cp2.formant,
                         cp2.breathiness,
                     );

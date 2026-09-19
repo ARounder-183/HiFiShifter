@@ -37,11 +37,12 @@ import { AXIS_W, PITCH_MAX_MIDI, PITCH_MIN_MIDI } from "./constants";
 import { framesToTime, isBlackKey, midiToLabel } from "./utils";
 import { resolveSecondaryOverlayValues } from "./secondaryOverlaySelection";
 import {
-    childPitchOffsetValueToDisplay,
     isChildPitchOffsetCentsParam,
     isChildPitchOffsetDegreesParam,
     isChildFormantOffsetCentsParam,
 } from "./childPitchOffsetParams";
+import { formatAxisMarkLabel } from "./kernel/scene/axisMarkInstances";
+import { isDynParam } from "./paramRanges";
 import { isSameMainCanvasSignature, type MainCanvasSignature } from "./mainCanvasSignature";
 
 // 调试开关缓存：drawCurveTimed 每帧会被调用多次（主曲线 / 编辑线 / 选区叠加 /
@@ -107,12 +108,15 @@ function niceAxisStep(range: number, targetCount: number): number {
     return nice * mag;
 }
 
-/** 格式化轴标记数值，避免浮点噪声 */
+/**
+ * 格式化轴标记数值，避免浮点噪声。
+ *
+ * 实现委托给 GL 侧共用的 `formatAxisMarkLabel`：Canvas2D 与 GL 两条渲染路径
+ * 必须产出**逐字一致**的标签（否则切换渲染后端时纵轴文字会变），因此此处
+ * 只保留签名差异，不再复制格式化逻辑。
+ */
 function formatAxisMark(v: number, param?: ParamName): string {
-    const displayValue = param != null ? childPitchOffsetValueToDisplay(param, v) : v;
-    // 最多保留 4 位有效数字，去掉尾随零
-    const s = parseFloat(displayValue.toPrecision(4)).toString();
-    return s;
+    return formatAxisMarkLabel(v, param);
 }
 
 /**
@@ -701,6 +705,36 @@ export function drawPianoRoll(args: {
                     // 确保 0 的刻度一定显示
                     const y0 = valueToY(editParam, 0, h);
                     ctx.fillText(formatAxisMark(0, editParam), 6, y0);
+                } else if (isDynParam(editParam)) {
+                    // 动态（倍率域）：步进候选与 GL 侧的 resolveAxisStep("level")
+                    // 同一套；强线落在每个整数倍率（1.0 = 0 dB、2.0 = +6 dB…）。
+                    // 【内核模式说明】本分支在 GL 接管后不可达（skipAxisCanvas
+                    // 恒为 true），保留仅为维持"两条路径逐值等价"的测试基准与
+                    // WebGL2 不可用时的最后参照。
+                    const range = vMax - vMin;
+                    const candidates = [1.0, 0.5, 0.25, 0.1, 0.05, 0.025, 0.01];
+                    let chosen = candidates[candidates.length - 1];
+                    for (const c of candidates) {
+                        const count = Math.ceil(range / c) + 1;
+                        if (count >= 5 && count <= 12) {
+                            chosen = c;
+                            break;
+                        }
+                    }
+                    const firstMark = Math.ceil((vMin - 1e-9) / chosen) * chosen;
+                    for (let m = firstMark; m <= vMax + chosen * 0.01; m += chosen) {
+                        const y = valueToY(editParam, m, h);
+                        // 强线：整倍率值（容差吸收步进累加的浮点残差），与 GL
+                        // 侧 buildAxisMarkInstances 的 level 口径逐字一致。
+                        const isStrong = Math.abs(m - Math.round(m)) < 1e-9;
+                        ctx.fillText(formatAxisMark(m, editParam), 6, y);
+                        ctx.strokeStyle = colors.tensionLine;
+                        ctx.lineWidth = isStrong ? 1.25 : 1;
+                        ctx.beginPath();
+                        ctx.moveTo(0, y + 0.5);
+                        ctx.lineTo(w, y + 0.5);
+                        ctx.stroke();
+                    }
                 } else {
                     // 回退：使用常规的“nice”步长
                     const niceStep = niceAxisStep(span, 4);

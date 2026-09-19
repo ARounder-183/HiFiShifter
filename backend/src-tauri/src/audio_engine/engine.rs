@@ -782,6 +782,18 @@ impl AudioEngine {
                     EngineCommand::ClipPitchReady { clip_id } => {
                         handle_clip_pitch_ready(&mut state, clip_id)
                     }
+                    // 动态（DYN）的后台电平分析：不受 compose_enabled 门控，
+                    // 由参数面板请求 dyn 参数时驱动（见 commands::params）。
+                    EngineCommand::ScheduleDynLevelAnalysis => {
+                        if let Some(tl) = state.last_timeline.clone() {
+                            schedule_clip_pitch_jobs(
+                                &tl,
+                                state.tx,
+                                state.app_handle.as_ref(),
+                                state.sr,
+                            );
+                        }
+                    }
                     EngineCommand::SetAppHandle { handle } => {
                         if let Ok(mut app) = meter_app_handle.lock() {
                             *app = Some(handle.clone());
@@ -847,6 +859,14 @@ impl AudioEngine {
         let _ = self.tx.send(EngineCommand::EvictSourcePath {
             path: path.to_string(),
         });
+    }
+
+    /// 请求 worker 侧提交「动态（DYN）」的后台电平分析任务。
+    ///
+    /// 与 pitch 的调度分离：动态不受 `compose_enabled` 门控，因此不能挂在
+    /// pitch 的调度时机上（那条路径在"未开启合成"时会被整体跳过）。
+    pub fn request_dyn_level_analysis(&self) {
+        let _ = self.tx.send(EngineCommand::ScheduleDynLevelAnalysis);
     }
 
     pub fn update_timeline(&self, timeline: TimelineState) {
@@ -1062,6 +1082,11 @@ fn handle_rendered_clips_changed(s: &mut EngineWorkerState) {
     idle_track_meter_state(s.meter_state, s.meter_generation);
 }
 
+/// 轨道参数变化是否会影响**底层合成输出**。
+///
+/// 共通混音级曲线（volume / pan / dyn，含旧 `hifigan_volume`）被显式排除：
+/// 它们由 mix 阶段实时应用，改动只应换入新快照，**不得**失效合成缓存、
+/// 不得触发后台重渲染 —— 否则拖动音量/动态会持续打断渲染线程并让播放卡顿。
 fn track_params_affect_render(
     old: &crate::state::TrackParamsState,
     new: &crate::state::TrackParamsState,
@@ -1070,11 +1095,29 @@ fn track_params_affect_render(
         || old.pitch_orig != new.pitch_orig
         || old.pitch_edit != new.pitch_edit
         || old.tension_edit != new.tension_edit
-        || old.extra_curves != new.extra_curves
+        || extra_curves_affect_render(&old.extra_curves, &new.extra_curves)
         || old.extra_params != new.extra_params
 }
 
+/// 比较两组 extra_curves，忽略只在混音阶段消费的共通曲线。
+fn extra_curves_affect_render(
+    old: &std::collections::HashMap<String, Vec<f32>>,
+    new: &std::collections::HashMap<String, Vec<f32>>,
+) -> bool {
+    let mut keys: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    keys.extend(old.keys().map(|k| k.as_str()));
+    keys.extend(new.keys().map(|k| k.as_str()));
+    keys.into_iter().any(|key| {
+        if crate::renderer::common_params::is_common_mix_param(key) {
+            return false;
+        }
+        old.get(key) != new.get(key)
+    })
+}
+
 fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
+    // DYN 的原声电平基线组装需要对 timeline 的可变借用（见下方"动态"段）。
+    let mut tl = tl;
     debug_eprintln!(
         "[engine] handle_update_timeline: tracks={}, clips={}",
         tl.tracks.len(),
@@ -1271,6 +1314,40 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
         .map(|old_tl| old_tl.clips.iter().map(|c| (c.id.as_str(), c)).collect())
         .unwrap_or_default();
 
+    // ── 动态（DYN）原声电平基线的组装/调度 ────────────────────────────────
+    // 动态是**混音级**参数：即使未开 Compose 也要生效，因此它的分析触发条件
+    // 与音高不同 —— 只要根轨道组存在有效的 dyn 曲线，就必须保证基线就绪
+    // （否则增益会一直退化为 1.0，用户画的曲线"没声音"）。
+    //
+    // 这里改的是即将换入的 `tl`，因此本次 snapshot 直接带上新基线；
+    // 缓存未命中时并入下面的 `needs_pitch_schedule` 一起提交后台分析。
+    //
+    // 【位置】必须在 `moved_clip_ids` 等共享借用建立之前完成对 `tl` 的可变借用。
+    let mut dyn_needs_analysis = false;
+    {
+        // 收集需要基线的根轨道：**已画过 dyn**，或**动态面板正打开**（前端登记，
+        // 见 `pitch_clip::dyn_needs_level_analysis`）。两者都不看 compose_enabled
+        // —— 动态是混音级参数，未开启合成的轨道同样要算。
+        let panel_open = match crate::pitch_clip::dyn_panel_open_roots().lock() {
+            Ok(roots) => roots.clone(),
+            Err(e) => e.into_inner().clone(),
+        };
+        let roots_using_dyn: Vec<String> = tl
+            .params_by_root_track
+            .keys()
+            .filter(|root| crate::pitch_clip::dyn_needs_level_analysis(&tl, root))
+            .cloned()
+            .chain(panel_open)
+            .collect::<std::collections::HashSet<String>>()
+            .into_iter()
+            .collect();
+        for root in roots_using_dyn {
+            if !crate::pitch_analysis::assemble_dyn_orig_for_engine(&mut tl, &root) {
+                dyn_needs_analysis = true;
+            }
+        }
+    }
+
     // ── 3. 收集需要重新推送 pitch data 的 clip ─────────────────────────────
     let moved_clip_ids: std::collections::HashSet<&str> = tl
         .clips
@@ -1354,9 +1431,9 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
         );
     }
 
-    let needs_pitch_schedule = clip_changed || track_pitch_settings_changed;
-    debug_eprintln!("[engine] Pitch schedule check: clips={}, clip_changed={}, track_changed={}, pitch_edit_changed={}, needs_schedule={}",
-        tl.clips.len(), clip_changed, track_pitch_settings_changed, track_pitch_edit_changed, needs_pitch_schedule);
+    // ── 动态（DYN）原声电平基线的组装/调度 ────────────────────────────────
+    // 实际组装已在上方（`moved_clip_ids` 建立之前）完成，此处只并入调度判定。
+    let needs_pitch_schedule = clip_changed || track_pitch_settings_changed || dyn_needs_analysis;
 
     // 预计算需要推送 pitch data 的 MIDI clip（必须在 *s.last_timeline 赋值之前，避免 borrow 冲突）
     let midi_clips_needing_emit: std::collections::HashSet<String> = tl

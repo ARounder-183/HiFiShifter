@@ -48,7 +48,7 @@ fn shift_track_params_for_merge(
         .iter()
         .map(|(key, curve)| {
             let default_value =
-                crate::renderer::automation_curve_default_value(kind, key).unwrap_or(0.0);
+                crate::renderer::common_params::automation_curve_pad_value(kind, key);
             (key.clone(), shift_curve(curve, delta_frames, default_value))
         })
         .collect();
@@ -425,7 +425,7 @@ fn apply_shifted_params_range(
     );
     for (key, curve) in entry.extra_curves.iter_mut() {
         let default_value =
-            crate::renderer::automation_curve_default_value(kind, key).unwrap_or(0.0);
+            crate::renderer::common_params::automation_curve_pad_value(kind, key);
         let src = shifted
             .extra_curves
             .get(key)
@@ -439,7 +439,7 @@ fn apply_shifted_params_range(
             continue;
         }
         let default_value =
-            crate::renderer::automation_curve_default_value(kind, key).unwrap_or(0.0);
+            crate::renderer::common_params::automation_curve_pad_value(kind, key);
         let mut curve = Vec::new();
         write_shifted_range(&mut curve, src_curve, start_frame, frame_count, default_value);
         entry.extra_curves.insert(key.clone(), curve);

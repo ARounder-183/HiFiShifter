@@ -247,6 +247,8 @@ export const zhTW = {
     formant_shift_label: "共振峰偏移",
     hifigan_volume_label: "音量",
     volume_label: "音量",
+    dyn_label: "動態",
+    dyn_analysis_pending: "動態基線分析中…",
     pan_label: "聲相",
     vslib_volume_label: "音量",
     vslib_synth_mode_label: "合成模式",
@@ -262,6 +264,7 @@ export const zhTW = {
     param_btn_pitch: "音高",
     param_btn_breath: "氣聲",
     param_btn_volume: "音量",
+    param_btn_dyn: "動態",
     param_btn_pan: "聲相",
     param_btn_formant: "共振峰",
     param_btn_tension: "張力",
@@ -1069,6 +1072,8 @@ export const zhTW = {
     menu_add_vibrato: "新增顫音...",
     menu_quantize: "量化...",
     menu_mean_quantize: "均值量化...",
+    menu_convert_volume_to_dyn: "轉換為動態",
+    menu_convert_dyn_to_volume: "轉換為音量",
 
     // 按音分移調對話框
     transpose_cents_title: "按指定音分移調",

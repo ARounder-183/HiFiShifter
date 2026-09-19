@@ -31,9 +31,10 @@ import {
     isChildPitchOffsetDegreesParam,
     isChildFormantOffsetCentsParam,
 } from "../../childPitchOffsetParams";
+import { isDynParam } from "../../paramRanges";
 
 /** 数值轴刻度的种类。 */
-export type AxisKind = "cents" | "formantCents" | "degrees" | "fallback";
+export type AxisKind = "cents" | "formantCents" | "degrees" | "level" | "fallback";
 
 /** 一条刻度线实例 + 它对应的标签文本。 */
 export interface AxisMarkInstance {
@@ -116,6 +117,23 @@ export function resolveAxisStep(
     kind: AxisKind,
     range: number,
 ): { step: number; strongMod: number } {
+    if (kind === "level") {
+        // 动态（倍率域）：候选步长按 1-2-5 序列在倍率上取值。
+        // 强线规则**不在步长里**：整倍率值（v ≈ 整数）即为强线，见
+        // buildAxisMarkInstances 的判定注释 —— 任何"每 N 个步长一条强线"的
+        // 约定都会在步长随视口变化时失效。返回的 strongMod 仅为签名兼容保留。
+        const candidates = [1.0, 0.5, 0.25, 0.1, 0.05, 0.025, 0.01];
+        let chosen = candidates[candidates.length - 1];
+        for (const c of candidates) {
+            const count = Math.ceil(range / c) + 1;
+            if (count >= 5 && count <= 12) {
+                chosen = c;
+                break;
+            }
+        }
+        return { step: chosen, strongMod: 4 };
+    }
+
     if (kind === "degrees") {
         // degrees 的度数经 childPitchOffsetValueToDisplay 换算，强刻度每 7 个内部单位。
         const candidates = [14, 7, 3, 1];
@@ -168,14 +186,28 @@ export function resolveAxisStep(
  * 与 `render.ts:79-86` 的 `formatAxisMark` 一致：先按参数的显示规则换算
  * （度数需要换算），再取 4 位有效数字并去掉尾随零。
  *
- * 特殊说明：`toPrecision(4)` 对极大 / 极小值会输出**指数记法**（如 `1e-7`），
+ * 特殊说明 1：`toPrecision(4)` 对极大 / 极小值会输出**指数记法**（如 `1e-7`），
  * 因此字形图集必须覆盖 `e`、`+`、`-` 与数字——不能假设标签只有数字和小数点。
  *
+ * 特殊说明 2：动态（DYN）的纵轴是**倍率模式**（`1.0×` = 0 dB、`0.5×` = −6 dB）：
+ * 刻度与乘性编辑手势（拖拽 ×2、± 移动 ×0.5）同一量纲，读刻度即读倍率关系。
+ *
  * @param value 内部参数值。
- * @param param 参数名（用于度数换算）；缺省时不做换算。
+ * @param param 参数名（用于度数换算 / 动态的 dB 副标签）；缺省时不做换算。
  * @returns 标签文本。
  */
 export function formatAxisMarkLabel(value: number, param?: string): string {
+    if (param != null && isDynParam(param)) {
+        // dyn 的纵轴是**倍率模式**：刻度直接标注曲线本身的量纲
+        // （1.0× = 0 dB、0.5× = −6 dB），与上下拖拽/± 移动的乘性语义
+        // （×2 / ×0.5）同一口径 —— 刻度读数就是"这几段之间的倍率关系"，
+        // 不需要用户在 dB 与倍率之间换算。0 = 静音（−∞ dB），不带 ×。
+        if (!(value > 0)) {
+            return "0";
+        }
+        const ratio = parseFloat(value.toPrecision(3));
+        return `${ratio}×`;
+    }
     const displayValue = param != null ? childPitchOffsetValueToDisplay(param, value) : value;
     return parseFloat(displayValue.toPrecision(4)).toString();
 }
@@ -190,6 +222,8 @@ export function resolveAxisKind(param: string): AxisKind {
     if (isChildPitchOffsetCentsParam(param)) return "cents";
     if (isChildFormantOffsetCentsParam(param)) return "formantCents";
     if (isChildPitchOffsetDegreesParam(param)) return "degrees";
+    // 动态面板：倍率刻度（带 dB 副标签，见 formatAxisMarkLabel）。
+    if (isDynParam(param)) return "level";
     return "fallback";
 }
 
@@ -239,7 +273,19 @@ export function buildAxisMarkInstances(
     const out: (AxisMarkInstance & { readonly lineOnly: boolean })[] = [];
     for (let v = firstMark; v <= limit; v += step) {
         const y = valueToY(v, heightPx);
-        const isStrong = Number.isFinite(strongMod) ? Math.round(v) % strongMod === 0 : false;
+        // 强线判定的两种口径（kind 决定，两套都各有存在理由）：
+        // - level：**整倍率值为强线**（`v ≈ 整数`，1e-9 容差吸收步进累加的浮点残差）。
+        //   语义上 1.0 = 0 dB、2.0 = +6 dB…每个整数倍率都是"0 dB 整点"（render.ts
+        //   的 dyn 分支注释同样如此定义）。步进随视口在 1.0..0.01 之间变化，任何
+        //   "按步数取模"的写法都只在某个特定步长下碰巧正确：span=4 时步进选 1.0，
+        //   stepIndex % 4 会让 1.0/2.0/3.0 全部漏掉强线（回归已验证）。
+        // - cents / formantCents / degrees：按**值**取模。整数域且 strongMod 整除
+        //   步长，按值判定即按序号判定，与历史 Canvas2D 逐字一致。
+        const isStrong = Number.isFinite(strongMod)
+            ? kind === "level"
+                ? Math.abs(v - Math.round(v)) < 1e-9
+                : Math.round(v) % strongMod === 0
+            : false;
         out.push({
             isStrong,
             value: v,

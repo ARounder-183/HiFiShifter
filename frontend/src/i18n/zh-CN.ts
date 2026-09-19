@@ -246,6 +246,8 @@ export const zhCN = {
     formant_shift_label: "共振峰偏移",
     hifigan_volume_label: "音量",
     volume_label: "音量",
+    dyn_label: "动态",
+    dyn_analysis_pending: "动态基线分析中…",
     pan_label: "声像",
     vslib_volume_label: "音量",
     vslib_synth_mode_label: "合成模式",
@@ -261,6 +263,7 @@ export const zhCN = {
     param_btn_pitch: "音高",
     param_btn_breath: "气声",
     param_btn_volume: "音量",
+    param_btn_dyn: "动态",
     param_btn_pan: "声像",
     param_btn_formant: "共振峰",
     param_btn_tension: "张力",
@@ -1067,6 +1070,8 @@ export const zhCN = {
     menu_add_vibrato: "添加颤音...",
     menu_quantize: "量化...",
     menu_mean_quantize: "均值量化...",
+    menu_convert_volume_to_dyn: "转换为动态",
+    menu_convert_dyn_to_volume: "转换为音量",
 
     // Transpose by cents dialog
     transpose_cents_title: "按指定音分移调",

@@ -35,6 +35,15 @@ export interface ViewportBus {
     register(layer: TimelineLayer, order: number): () => void;
     /** 直接提交一份新投影。 */
     commit(axis: TimelineAxis): void;
+    /**
+     * 强制重绘所有已注册图层（**投影不变也重画**）。
+     *
+     * 【为什么需要】`commit` / `patch` 会因投影相同而被帧提交器去重，这只覆盖
+     * "视口变了"一类变化。还有一类变化与投影无关 —— 例如绘制中的参数曲线只
+     * 写在 ref 上（不触发 React 渲染），而波形面是 memo 组件 + 几何缓存，
+     * 收不到通知，必须被显式告知"内容变了，按同一投影重画一次"。
+     */
+    invalidate(): void;
     /** 在现有投影上打补丁后提交（未给出的字段沿用旧值）。 */
     patch(next: Partial<TimelineAxis>): void;
     /** 已注册图层数，供测试与诊断使用。 */
@@ -63,6 +72,11 @@ export function createViewportBus(initial: TimelineAxis): ViewportBus {
         commit(next) {
             axis = next;
             committer.commit(axis);
+        },
+
+        invalidate() {
+            // force：绕过 axisEquals 去重，让图层按当前投影重新绘制。
+            committer.commit(axis, { force: true });
         },
 
         patch(next) {

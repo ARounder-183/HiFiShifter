@@ -213,6 +213,12 @@ export function gridGeometrySignature(args: GridGeometrySignatureArgs): string {
 /** 键盘 / 数值轴几何签名的入参（与 `PianoRollGridSpec` 的轴列字段对应）。 */
 export interface KeyboardGeometrySignatureArgs {
     readonly kind: string;
+    /**
+     * 参数标识（如 `"dyn"` / `"volume"`）。仅数值轴签名使用：同 kind 的两个参数
+     * （值域、标签格式可能不同）必须产出不同签名，否则切换时轴几何不重建。
+     * pitch 分支不需要它。
+     */
+    readonly paramName?: string | undefined;
     readonly view: LiveGridView;
     readonly absMin: number;
     readonly absMax: number;
@@ -232,9 +238,17 @@ export interface KeyboardGeometrySignatureArgs {
 /**
  * 键盘 / 数值轴几何的内容签名。
  *
- * 特殊说明 1：**非 pitch 参数返回空串**。此时轴列画的是数值刻度线而不是键盘，
- * 调用方据空串清空几何；若返回值非空会让上一位参数的键盘残留（视觉上"切参数后
- * 钢琴键还在"）。
+ * 特殊说明 1：**非 pitch 参数返回数值轴的签名，而不是空串**。
+ *
+ * 早期实现为了"非 pitch 时清空键盘"在非 pitch 分支返回 `""`，但这同时丢掉了
+ * 区分各种非 pitch 参数的能力：`volume → dyn` 这类**非 pitch 之间的切换**会得到
+ * 两个相同的空签名，于是轴几何永不重建，上一参数的刻度被原样 repaint ——
+ * 表现为"动态参数显示成了音量的标尺"。
+ *
+ * 现在非 pitch 分支带上 `kind` 与参数标识：既与 pitch 签名天然不同（pitch 分支
+ * 有自己独立的前缀），也能在各非 pitch 参数之间互相区分。清空逻辑由
+ * `rebuildKeyboardGeometry` / `rebuildAxisMarkGeometry` 各自负责，不再依赖
+ * 空串这个信号。
  *
  * 特殊说明 2：键盘配色全部可选且参与签名——缺省与"显式给出透明色"是两种不同的
  * 几何输入，不能混为一谈。
@@ -243,11 +257,28 @@ export interface KeyboardGeometrySignatureArgs {
  * `scrollLeft` 无关。把它编进来会造成无谓重建。
  *
  * @param args 见 `KeyboardGeometrySignatureArgs`。
- * @returns 内容签名；非 pitch 参数为空串。
+ * @returns 内容签名；pitch 为键盘签名，其余为数值轴签名。
  */
 export function keyboardGeometrySignature(args: KeyboardGeometrySignatureArgs): string {
-    if (args.kind !== "pitch") return "";
+    if (args.kind !== "pitch") {
+        // 数值轴：kind 决定刻度种类（cents / degrees / formantCents / level /
+        // fallback），paramName 兜住"同 kind 但不同参数"的情况（例如 volume 与
+        // dyn 都是数值轴，但值域与标签不同）。
+        return [
+            "value",
+            args.kind,
+            args.paramName ?? "",
+            args.view.center,
+            args.view.span,
+            args.absMin,
+            args.absMax,
+            args.viewportHeightPx,
+            args.axisWidthPx,
+            args.dpr,
+        ].join("|");
+    }
     return [
+        "pitch",
         args.view.center,
         args.view.span,
         args.absMin,

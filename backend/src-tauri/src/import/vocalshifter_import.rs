@@ -1222,6 +1222,9 @@ pub fn import_vsp(data: &[u8], vsp_file_dir: &Path) -> Result<VspImportResult, S
                     tension_edit: Vec::new(),
                     pitch_orig_key: None,
                     pending_pitch_offset: None,
+                    dyn_orig: Vec::new(),
+                    dyn_orig_key: None,
+                    dyn_orig_reference: 0.0,
                     extra_curves,
                     extra_params,
                 },
@@ -1435,8 +1438,6 @@ fn build_extra_curves_from_accumulators(
 ) -> std::collections::HashMap<String, Vec<f32>> {
     let mut formant_shift = vec![0.0f32; total_frames];
     let mut volume = vec![1.0f32; total_frames];
-    let mut dyn_orig = vec![1.0f32; total_frames];
-    let mut dyn_edit = vec![1.0f32; total_frames];
     let mut pan = vec![0.0f32; total_frames];
     let mut breathiness = vec![0.0f32; total_frames];
 
@@ -1450,7 +1451,13 @@ fn build_extra_curves_from_accumulators(
                 formant_shift[frame_idx] = 0.0;
             }
 
-            // 计算 DYN 合并：avg_dyn_edit / avg_dyn_orig，为 0 除法的情况回退为 1
+            // DYN 折算：VocalShifter 的 DYN 是**绝对电平倍率**，其编辑效果
+            // = 目标 / 原声；导入时把这个乘性效果折进 `volume` 曲线，
+            // 于是导入后的响度与 VocalShifter 中听到的一致。
+            //
+            // 不写 `dyn_*` 曲线：本项目的动态参数由「用户绘制的 `dyn` 目标电平
+            // + 后台分析出的原声基线」表达，语义与 VS 的 dyn 字段不同源，
+            // 直接搬运会与 volume 里的折算重复计入。
             let avg_vol = (acc.vol_sum / w) as f64;
             let avg_dyn_orig = (acc.dyn_orig_sum / w) as f64;
             let avg_dyn_edit = (acc.dyn_edit_sum / w) as f64;
@@ -1462,8 +1469,6 @@ fn build_extra_curves_from_accumulators(
             let merged_vol = (avg_vol * multiplier) as f32;
 
             volume[frame_idx] = merged_vol;
-            dyn_orig[frame_idx] = (avg_dyn_orig) as f32;
-            dyn_edit[frame_idx] = (avg_dyn_edit) as f32;
             pan[frame_idx] = (acc.pan_sum / w) as f32;
             breathiness[frame_idx] = (acc.breathiness_sum / w) as f32;
         }
@@ -1472,8 +1477,6 @@ fn build_extra_curves_from_accumulators(
     let mut curves = std::collections::HashMap::new();
     curves.insert("formant_shift_cents".to_string(), formant_shift);
     curves.insert("volume".to_string(), volume);
-    curves.insert("dyn_orig".to_string(), dyn_orig);
-    curves.insert("dyn_edit".to_string(), dyn_edit);
     curves.insert("pan".to_string(), pan);
     curves.insert("breathiness".to_string(), breathiness);
     curves
@@ -1982,6 +1985,9 @@ pub fn import_vsp_clipboard(
                     tension_edit: Vec::new(),
                     pitch_orig_key: None,
                     pending_pitch_offset: None,
+                    dyn_orig: Vec::new(),
+                    dyn_orig_key: None,
+                    dyn_orig_reference: 0.0,
                     extra_curves,
                     extra_params,
                 },
@@ -2559,6 +2565,9 @@ fn import_vsp_clipboard_selected_tracks(
                     tension_edit: Vec::new(),
                     pitch_orig_key: None,
                     pending_pitch_offset: None,
+                    dyn_orig: Vec::new(),
+                    dyn_orig_key: None,
+                    dyn_orig_reference: 0.0,
                     extra_curves,
                     extra_params,
                 },

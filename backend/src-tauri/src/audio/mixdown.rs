@@ -95,6 +95,45 @@ fn sample_automation_curve_at_sec(
     a + (b - a) * frac
 }
 
+/// 采样动态（DYN）曲线在绝对秒处的增益。
+///
+/// 与实时引擎 `audio_engine::mix::dyn_gain_at` 是**同一份语义**：曲线存在性、
+/// 基线存在性、静音保护与哨兵四条守卫，以及 `目标/原声` 的增益公式。
+/// 两侧必须同步修改 —— 导出与监听不一致是最难排查的一类问题。
+fn dyn_gain_at_sec(
+    dyn_curve: Option<&[f32]>,
+    dyn_orig_curve: Option<&[f32]>,
+    abs_sec: f64,
+    frame_period_ms: f64,
+) -> f32 {
+    // 曲线缺失 → 该轨道组没在用动态。
+    if dyn_curve.is_none_or(|c| c.is_empty()) {
+        return 1.0;
+    }
+    // 用 DYN 专用采样器（越界回落哨兵，不持有末值），与实时引擎
+    // `audio_engine::mix::dyn_gain_at` 完全同源 —— 避免导出时把最后一个
+    // 目标电平 hold 到曲线尽头而污染后续音频。
+    let target = crate::renderer::common_params::sample_dyn_curve_at_sec(
+        dyn_curve,
+        abs_sec,
+        frame_period_ms,
+    );
+    if target < 0.0 {
+        return 1.0; // 哨兵：沿用原声
+    }
+    // 基线缺失（分析未就绪）→ 1.0，绝不凭空造增益。
+    let Some(orig_curve) = dyn_orig_curve.filter(|c| !c.is_empty()) else {
+        return 1.0;
+    };
+    let orig = sample_automation_curve_at_sec(
+        Some(orig_curve),
+        abs_sec,
+        frame_period_ms,
+        crate::renderer::common_params::DYN_MIN_REF,
+    );
+    crate::renderer::common_params::compute_dyn_gain(target, orig)
+}
+
 pub(crate) fn linear_resample_interleaved(
     input: &[f32],
     channels: usize,
@@ -737,30 +776,35 @@ pub fn render_mixdown_interleaved(
             }
         }
 
-        // 提取共通 volume / pan 曲线（与 snapshot.rs 的逻辑对应）。
-        // vslib 在合成阶段通过自己的控制点消费 volume/pan，mixdown 跳过避免二次应用。
-        let (volume_curve, volume_curve_frame_period_ms, pan_curve, pan_curve_frame_period_ms) =
-            timeline
-                .resolve_root_track_id(&clip.track_id)
-                .and_then(|root| {
-                    let entry = timeline.params_by_root_track.get(&root)?;
-                    let track = timeline.tracks.iter().find(|t| t.id == root)?;
-                    let kind = crate::state::SynthPipelineKind::from_track_algo(
-                        &track.pitch_analysis_algo,
-                    );
-                    if crate::pitch_editing::processor_bakes_common_mix_curves(kind) {
-                        return None;
-                    }
-                    let volume = crate::pitch_editing::common_volume_curve_for_clip(entry, clip);
-                    let pan = crate::pitch_editing::common_pan_curve_for_clip(entry, clip);
-                    Some((
-                        volume,
-                        entry.frame_period_ms.max(0.1),
-                        pan,
-                        entry.frame_period_ms.max(0.1),
-                    ))
-                })
-                .unwrap_or((None, 5.0, None, 5.0));
+        // 提取共通 volume / pan / dyn 曲线（与 snapshot.rs 的逻辑对应）。
+        // 所有算法一律由本函数的混音阶段应用，不存在任何「处理器已烘焙」的例外。
+        let (
+            volume_curve,
+            volume_curve_frame_period_ms,
+            pan_curve,
+            pan_curve_frame_period_ms,
+            dyn_curve,
+            dyn_orig_curve,
+            dyn_curve_frame_period_ms,
+        ) = timeline
+            .resolve_root_track_id(&clip.track_id)
+            .and_then(|root| {
+                let entry = timeline.params_by_root_track.get(&root)?;
+                let volume = crate::pitch_editing::common_volume_curve_for_clip(entry, clip);
+                let pan = crate::pitch_editing::common_pan_curve_for_clip(entry, clip);
+                let dyn_curve = crate::pitch_editing::common_dyn_curve_for_clip(entry, clip);
+                let dyn_orig = crate::pitch_editing::dyn_orig_curve_for_clip(entry, clip);
+                Some((
+                    volume,
+                    entry.frame_period_ms.max(0.1),
+                    pan,
+                    entry.frame_period_ms.max(0.1),
+                    dyn_curve,
+                    dyn_orig,
+                    entry.frame_period_ms.max(0.1),
+                ))
+            })
+            .unwrap_or((None, 5.0, None, 5.0, None, None, 5.0));
 
         // Apply fades and gain (timeline-referenced)。淡化按 REAPER 形状/曲率
         // 查表求值（与实时引擎、画布渲染同一公式核心）。
@@ -838,6 +882,9 @@ pub fn render_mixdown_interleaved(
 
         let has_volume_curve = volume_curve.is_some() && !volume_curve.as_ref().unwrap().is_empty();
         let has_pan_curve = pan_curve.is_some() && !pan_curve.as_ref().unwrap().is_empty();
+        let has_dyn_curve = dyn_curve.is_some() && !dyn_curve.as_ref().unwrap().is_empty();
+        let has_dyn_orig_curve =
+            dyn_orig_curve.is_some() && !dyn_orig_curve.as_ref().unwrap().is_empty();
         // 淡出（端点锁定 + 内容耗尽收缩），语义与 audio_engine/mix.rs 一致：
         // - 末帧进度恰为 1 → 增益精确 0（防 e<1 曲线末端阶跃）；
         // - segment 越界（内容不足）时淡出区间收缩为 [E-N, L]（E=内容末端），
@@ -934,6 +981,14 @@ pub fn render_mixdown_interleaved(
                         );
                         final_g *= vol;
                     }
+                    if has_dyn_curve || has_dyn_orig_curve {
+                        final_g *= dyn_gain_at_sec(
+                            dyn_curve,
+                            dyn_orig_curve,
+                            abs_sec,
+                            dyn_curve_frame_period_ms,
+                        );
+                    }
                     let pan = if has_pan_curve {
                         sample_automation_curve_at_sec(
                             pan_curve,
@@ -970,6 +1025,14 @@ pub fn render_mixdown_interleaved(
                     1.0,
                 );
                 final_g *= vol;
+            }
+            if has_dyn_curve || has_dyn_orig_curve {
+                final_g *= dyn_gain_at_sec(
+                    dyn_curve,
+                    dyn_orig_curve,
+                    abs_sec,
+                    dyn_curve_frame_period_ms,
+                );
             }
 
             let pan = if has_pan_curve {

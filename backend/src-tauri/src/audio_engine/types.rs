@@ -131,6 +131,14 @@ pub(crate) struct EngineClip {
     pub(crate) pan_curve: Option<Arc<Vec<f32>>>,
     pub(crate) pan_curve_frame_period_ms: f64,
 
+    /// 可选的动态（DYN）目标电平曲线；与 `dyn_orig_curve` 一起在 audio callback /
+    /// mixdown 中求出逐帧增益 `目标/原声`（见 `common_params::compute_dyn_gain`）。
+    /// 曲线内的 `DYN_FOLLOW_ORIG`（−1）哨兵帧表示"沿用原声"。
+    pub(crate) dyn_curve: Option<Arc<Vec<f32>>>,
+    /// 原声电平基线（轨道级派生数据）。缺失（None 或空）时动态增益恒为 1.0。
+    pub(crate) dyn_orig_curve: Option<Arc<Vec<f32>>>,
+    pub(crate) dyn_curve_frame_period_ms: f64,
+
     /// 该 clip 是否需要 pitch 合成。
     /// - true：需要合成；若 rendered_pcm 为 None，则静音等待渲染完成。
     /// - false：无需合成；直接回退到源 PCM 播放。
@@ -185,6 +193,12 @@ pub(crate) enum EngineCommand {
     ClipPitchReady {
         clip_id: String,
     },
+    /// 请求 worker 侧为「动态（DYN）」提交后台分析任务。
+    ///
+    /// 为什么需要它：`schedule_clip_pitch_jobs` 需要 worker 持有的 sender，
+    /// 命令层拿不到；而动态是**混音级**参数，未开启合成的轨道同样需要它，
+    /// 因此不能挂在 pitch（受 compose_enabled 门控）的调度上。
+    ScheduleDynLevelAnalysis,
     /// 设置 Tauri app handle，使 engine worker 能向前端推送事件。
     SetAppHandle {
         handle: tauri::AppHandle,

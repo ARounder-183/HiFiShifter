@@ -262,6 +262,8 @@ export const jaJP = {
     formant_shift_label: "フォルマントシフト",
     hifigan_volume_label: "ボリューム",
     volume_label: "ボリューム",
+    dyn_label: "ダイナミクス",
+    dyn_analysis_pending: "ダイナミクス基線を解析中…",
     pan_label: "パン",
     vslib_volume_label: "ボリューム",
     vslib_synth_mode_label: "合成モード",
@@ -277,6 +279,7 @@ export const jaJP = {
     param_btn_pitch: "PIT",
     param_btn_breath: "BRE",
     param_btn_volume: "VOL",
+    param_btn_dyn: "DYN",
     param_btn_pan: "PAN",
     param_btn_formant: "FRM",
     param_btn_tension: "TEN",
@@ -1105,6 +1108,8 @@ export const jaJP = {
     menu_add_vibrato: "ビブラートを追加...",
     menu_quantize: "クオンタイズ...",
     menu_mean_quantize: "平均クオンタイズ...",
+    menu_convert_volume_to_dyn: "ダイナミクスに変換",
+    menu_convert_dyn_to_volume: "音量に変換",
 
     // セント移調ダイアログ
     transpose_cents_title: "セント指定で移調",

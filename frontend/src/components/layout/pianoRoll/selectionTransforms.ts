@@ -5,6 +5,7 @@ import {
     smoothCurveGaussian,
     smoothSigmaMsFromUnits,
 } from "./paramSmoothing";
+import { isDynParam } from "./paramRanges";
 
 function clamp(value: number, min: number, max: number): number {
     return Math.min(max, Math.max(min, value));
@@ -16,6 +17,25 @@ function isPitchParam(editParam: ParamName): boolean {
 
 function isEditableValue(editParam: ParamName, value: number): boolean {
     return Number.isFinite(value) && (!isPitchParam(editParam) || value !== 0);
+}
+
+/**
+ * dyn 的**几何均值**（倍率域的中心趋势；仅统计正值帧，全 0 / 空 → 0）。
+ *
+ * 【为什么不是算术均值】dyn 是倍率域（0 = 静音），乘性操作（放大/平均）
+ * 的"中心"应该是对数域的平均 —— 算术均值会被高值主导，且与乘性拖拽/
+ * 乘性 shift 的手感不一致。
+ */
+export function computeDynGeometricMean(values: number[]): number {
+    let logSum = 0;
+    let count = 0;
+    for (const value of values) {
+        if (Number.isFinite(value) && value > 0) {
+            logSum += Math.log(value);
+            count += 1;
+        }
+    }
+    return count > 0 ? Math.exp(logSum / count) : 0;
 }
 
 export function computeSelectionMean(values: number[], editParam: ParamName): number {
@@ -39,6 +59,20 @@ export function averageSelectionValues(
     const strength = clamp((Number(strengthPercent) || 0) / 100, 0, 1);
     if (strength <= 0) {
         return values.slice();
+    }
+    // dyn：几何均值 + 幂混合（`v^(1−s) × geo^s`）—— 乘性语义下静音帧
+    // （v = 0）保持 0，绝不凭空产生响度。
+    if (isDynParam(editParam)) {
+        const geo = computeDynGeometricMean(values);
+        if (geo <= 0) {
+            return values.slice();
+        }
+        return values.map((value) => {
+            if (!isEditableValue(editParam, value) || value <= 0) {
+                return value;
+            }
+            return Math.pow(value, 1 - strength) * Math.pow(geo, strength);
+        });
     }
     const mean = computeSelectionMean(values, editParam);
     return values.map((value) => {
@@ -165,7 +199,27 @@ export function createSelectionAmplifier(
             },
         };
     }
-    // 非音高（或 legacy 开关）：均值中心缩放，无需预计算
+    // dyn：围绕几何均值的**幂缩放**（`geo · (v/geo)^k`）—— 乘性语义下
+    // 静音帧（v = 0）保持 0、pivot 处不动，dB 距离被 k 放大/收缩；算术的
+    // "均值中心缩放"会把静音抬离 0（0 → mean·(1−k)），违背倍率语义。
+    if (isDynParam(editParam)) {
+        const geo = computeDynGeometricMean(values);
+        return {
+            apply: (scale: number) => {
+                const k = Math.max(0, Number(scale) || 0);
+                if (k === 1 || geo <= 0) {
+                    return values.slice();
+                }
+                return values.map((v) => {
+                    if (!isEditableValue(editParam, v) || v <= 0) {
+                        return v;
+                    }
+                    return geo * Math.pow(v / geo, k);
+                });
+            },
+        };
+    }
+    // 其余非音高参数：均值中心缩放，无需预计算
     return {
         apply: (scale: number) => scaleSelectionDeviation(values, editParam, scale),
     };
@@ -209,9 +263,26 @@ export function smoothSelectionValues(
     if (units <= 0 || values.length === 0) {
         return values.slice();
     }
+    const fpMs = Math.max(1e-6, Number(opts?.framePeriodMs) || 5);
+    const sigmaMs = smoothSigmaMsFromUnits(units);
+    // dyn：**对数域高斯** —— 正值帧在 log 空间平滑后回到倍率域（几何意义
+    // 上的平滑），0 = 真静音锚点既不参与卷积也不被改写（乘性语义下线性
+    // 高斯会把静音糊出响度：0 与相邻 0.5 平均 → 0.25）。
+    if (isDynParam(editParam)) {
+        const positive = (v: number) => Number.isFinite(v) && v > 0;
+        const toLog = (arr: number[]) => arr.map((v) => (positive(v) ? Math.log(v) : 0));
+        const smoothed = smoothCurveGaussian(toLog(values), {
+            sigmaMs,
+            framePeriodMs: fpMs,
+            valueFilter: positive,
+            leftContext: opts?.leftContext ? toLog(opts.leftContext) : undefined,
+            rightContext: opts?.rightContext ? toLog(opts.rightContext) : undefined,
+        });
+        return values.map((v, i) => (positive(v) ? Math.exp(smoothed[i]) : v));
+    }
     return smoothCurveGaussian(values, {
-        sigmaMs: smoothSigmaMsFromUnits(units),
-        framePeriodMs: Math.max(1e-6, Number(opts?.framePeriodMs) || 5),
+        sigmaMs,
+        framePeriodMs: fpMs,
         valueFilter: isPitchParam(editParam) ? (v) => Number.isFinite(v) && v !== 0 : undefined,
         leftContext: opts?.leftContext,
         rightContext: opts?.rightContext,

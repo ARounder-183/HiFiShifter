@@ -396,6 +396,8 @@ export const enUS = {
     formant_shift_label: "Formant Shift",
     hifigan_volume_label: "Volume",
     volume_label: "Volume",
+    dyn_label: "Dynamics",
+    dyn_analysis_pending: "Analyzing dynamics baseline…",
     pan_label: "Pan",
     vslib_volume_label: "Volume",
     vslib_synth_mode_label: "Synth Mode",
@@ -411,6 +413,7 @@ export const enUS = {
     param_btn_pitch: "PIT",
     param_btn_breath: "BRE",
     param_btn_volume: "VOL",
+    param_btn_dyn: "DYN",
     param_btn_pan: "PAN",
     param_btn_formant: "FRM",
     param_btn_tension: "TEN",
@@ -1230,6 +1233,8 @@ export const enUS = {
     menu_add_vibrato: "Add Vibrato...",
     menu_quantize: "Quantize...",
     menu_mean_quantize: "Mean Quantize...",
+    menu_convert_volume_to_dyn: "Convert to Dynamics",
+    menu_convert_dyn_to_volume: "Convert to Volume",
 
     // Transpose by cents dialog
     transpose_cents_title: "Transpose by Cents",

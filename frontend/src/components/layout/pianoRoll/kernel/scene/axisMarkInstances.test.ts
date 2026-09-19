@@ -137,6 +137,38 @@ describe("buildAxisMarkInstances", () => {
         }
     });
 
+    it("level 的强线按整倍率值：0.25 步进下强线恰在 0 / 1.0（0 dB 整点）", () => {
+        // 回归：此前按"值"取模（Math.round(v) % 4），0.25 步进下强线错落到
+        // 0 / 3.75 / 4 上（0.25 会因 round 归零误判强、1.0 反而不是强线）。
+        // 正确规则 = 整倍率值为强线（与 render.ts 的"0 dB 整点"注释一致）。
+        const marks = buildAxisMarkInstances({
+            ...baseArgs,
+            kind: "level",
+            view: { center: 0.5, span: 1 }, // 候选表选出步长 0.25
+            paramName: "dyn",
+        });
+        const byValue = new Map(marks.map((m) => [Number(m.value.toFixed(6)), m.isStrong]));
+        expect(byValue.get(0)).toBe(true);
+        expect(byValue.get(1)).toBe(true);
+        expect(byValue.get(0.25)).toBe(false);
+        expect(byValue.get(0.5)).toBe(false);
+        expect(byValue.get(0.75)).toBe(false);
+    });
+
+    it("level 步长退到 1.0 时（span=4）每个整倍率刻度都是强线", () => {
+        // 回归：stepIndex % 4 的写法在步长 1.0 下会把 1.0/2.0/3.0 全部漏掉。
+        const marks = buildAxisMarkInstances({
+            ...baseArgs,
+            kind: "level",
+            view: { center: 2, span: 4 }, // 候选表选出步长 1.0
+            paramName: "dyn",
+        });
+        expect(marks.length).toBe(5); // 0..4 步进 1.0
+        for (const m of marks) {
+            expect(m.isStrong).toBe(true);
+        }
+    });
+
     it("degrees 无条件补一条只画标签的 0 刻度（复刻 legacy 的重复绘制）", () => {
         // 【这是一个刻意的"不一致"，必须复刻】render.ts:611-613 无条件 fillText(0)。
         // 由于 degrees 的步长是整数、刻度序列是步长的整数倍，**视口含 0 时 0 已是
@@ -322,5 +354,67 @@ describe("与 render.ts 刻度分支逐值等价", () => {
         }
         // 组合空间足够大，避免"看起来通过"其实是空循环
         expect(compared).toBeGreaterThan(10000);
+    });
+});
+
+/**
+ * level（动态）与 Canvas2D 分支的逐值等价守护。
+ *
+ * 【为什么单独一组】上面的四分支扫描**不含 level**——这正是强刻度 bug
+ * （按值取模 vs 按步进序号）曾漏网的原因。本组原地复刻 `render.ts` 的
+ * dyn 分支（候选表 + `Math.round(m / chosen) % 4` 强线），在动态面板实际
+ * 会出现的 center × span 组合上逐刻度比对。
+ */
+describe("level 与 render.ts dyn 分支逐值等价", () => {
+    function legacyLevelMarks(center: number, span: number) {
+        const s = Math.max(1e-6, span);
+        const vMin = center - s / 2;
+        const vMax = center + s / 2;
+        const range = vMax - vMin;
+        const candidates = [1.0, 0.5, 0.25, 0.1, 0.05, 0.025, 0.01];
+        let chosen = candidates[candidates.length - 1];
+        for (const c of candidates) {
+            const count = Math.ceil(range / c) + 1;
+            if (count >= 5 && count <= 12) {
+                chosen = c;
+                break;
+            }
+        }
+        const rows: { v: number; strong: boolean; label: string }[] = [];
+        for (let m = Math.ceil((vMin - 1e-9) / chosen) * chosen; m <= vMax + chosen * 0.01; m += chosen) {
+            rows.push({
+                v: m,
+                strong: Math.abs(m - Math.round(m)) < 1e-9,
+                label: formatAxisMarkLabel(m, "dyn"),
+            });
+        }
+        return rows;
+    }
+
+    it("动态面板实际组合下值 / 标签 / 强判定一致", () => {
+        let compared = 0;
+        for (const center of [1, 2, 0.5, 1.25, 3.5, 0]) {
+            for (const span of [0.5, 1, 2, 4, 0.25, 0.75]) {
+                const legacy = legacyLevelMarks(center, span);
+                const built = buildAxisMarkInstances({
+                    kind: "level",
+                    view: { center, span },
+                    heightPx: 400,
+                    axisWidthPx: 56,
+                    dpr: 2,
+                    valueToY: makeValueToY(),
+                    paramName: "dyn",
+                });
+                expect(built.length, `center=${center} span=${span}`).toBe(legacy.length);
+                for (let i = 0; i < built.length; i += 1) {
+                    expect(built[i].value).toBeCloseTo(legacy[i].v, 9);
+                    expect(built[i].label).toBe(legacy[i].label);
+                    expect(built[i].isStrong).toBe(legacy[i].strong);
+                    compared += 1;
+                }
+            }
+        }
+        // 组合空间足够大（实测 ≈190 条刻度），避免"看起来通过"其实是空循环
+        expect(compared).toBeGreaterThan(100);
     });
 });

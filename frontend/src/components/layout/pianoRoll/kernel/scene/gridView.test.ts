@@ -202,14 +202,41 @@ describe("keyboardGeometrySignature（键盘 / 数值轴几何签名）", () => 
         expect(a).not.toBe(b);
     });
 
-    it("非 pitch 参数没有键盘 → 空签名（GL 据此清空几何）", () => {
-        expect(
-            keyboardGeometrySignature({
-                ...metrics,
-                kind: "cents",
-                view: resolveLiveGridView({ ...PITCH, scrollTop: 600 }),
-            }),
-        ).toBe("");
+    it("非 pitch 参数返回数值轴签名（与 pitch 签名不同）", () => {
+        // 历史行为是"非 pitch → 空串"：这同时让非 pitch 之间的切换签名不变，
+        // 轴几何永不重建（表现为 dyn 显示成 volume 的标尺）。现在非 pitch
+        // 有自己的签名；清空键盘由 rebuildKeyboardGeometry 的 kind 分支负责。
+        const valueSig = keyboardGeometrySignature({
+            ...metrics,
+            kind: "cents",
+            paramName: "child_pitch_offset_cents@t1",
+            view: resolveLiveGridView({ ...PITCH, scrollTop: 600 }),
+        });
+        expect(valueSig).not.toBe("");
+        // 与 pitch 键盘签名互异。
+        const pitchSig = keyboardGeometrySignature({
+            ...metrics,
+            view: resolveLiveGridView({ ...PITCH, scrollTop: 600 }),
+        });
+        expect(valueSig).not.toBe(pitchSig);
+    });
+
+    it("★ 同 kind 的不同参数之间签名必须不同（非 pitch 切换才可能重建）", () => {
+        // 回归：volume 与 dyn 都是数值轴（非 pitch），若签名只由 kind + view
+        // 组成，两者的签名相同 → 切换时轴几何不重建 → 显示上一参数的刻度。
+        const a = keyboardGeometrySignature({
+            ...metrics,
+            kind: "level",
+            paramName: "volume",
+            view: resolveLiveGridView({ ...PITCH, scrollTop: 600 }),
+        });
+        const b = keyboardGeometrySignature({
+            ...metrics,
+            kind: "level",
+            paramName: "dyn",
+            view: resolveLiveGridView({ ...PITCH, scrollTop: 600 }),
+        });
+        expect(a).not.toBe(b);
     });
 
     it("键盘配色参与签名（切主题后键体颜色必须更新）", () => {

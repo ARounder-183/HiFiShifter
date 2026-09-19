@@ -28,6 +28,7 @@ export const paramsApi = {
         frameCount: number,
         stride?: number,
         binary = true,
+        withSentinel = false,
     ) =>
         invoke<ParamFramesPayload>(
             "get_param_frames",
@@ -37,6 +38,7 @@ export const paramsApi = {
             frameCount,
             stride,
             binary,
+            withSentinel,
         ).then((res) => {
             // 在 API 层统一解码：调用方拿到的 payload 与二进制模式开启前结构一致，
             // 六处取数点无需感知传输格式。
@@ -72,6 +74,25 @@ export const paramsApi = {
             frameCount,
             checkpoint,
         ),
+
+    /**
+     * 音量 ↔ 动态 曲线互转（后端单事务）。
+     *
+     * 换算（基线补偿）与源参数归位都在后端完成：逐帧基线与曲线存在性只有
+     * 后端权威，前端不做任何算术。`ranges` 为参数编辑器的多选区。
+     * 原声基线分析未就绪时返回 `{ ok: false, reason: "analysis_pending" }`。
+     */
+    convertMixParam: (
+        trackId: string,
+        from: "volume" | "dyn",
+        ranges: Array<{ startFrame: number; frameCount: number }>,
+    ) =>
+        invoke<{
+            ok: boolean;
+            reason?: string;
+            convertedFrames?: number;
+            skippedFrames?: number;
+        }>("convert_mix_param", trackId, from, ranges),
 
     /**
      * "锁定参数线"：剪辑拉伸后把旧范围内的参数曲线时域映射到新范围。

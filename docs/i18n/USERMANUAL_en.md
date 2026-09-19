@@ -370,16 +370,19 @@ The current version of HiFiShifter supports three vocal tuning algorithms and th
     - `Breath Gain`: After enabling breath, allows adjusting the breath volume of the voice, based on the VR-hnsep model.
     - `Tension`: Adjust the tension of the voice.
     - `Volume`: Adjust the volume of the voice.
+    - `Dynamics`: Adjust the loudness of the voice.
     - `Pan`: Adjust the pan of the voice.
 - **World**: Open-source high-quality speech analysis and synthesis algorithm.
     - `Pitch`: Adjust the pitch of the voice.
     - `Volume`: Adjust the volume of the voice.
+    - `Dynamics`: Adjust the loudness of the voice.
     - `Pan`: Adjust the pan of the voice.
 - **VsLib**: Official voice analysis and synthesis library from VocalShifter. VsLib is only available on Windows x86_64.
     - `Pitch`: Adjust the pitch of the voice.
     - `Formant Shift`: Adjust the formant shift of the voice.
     - `Breathiness`: Adjust the breathiness of the voice.
     - `Volume`: Adjust the volume of the voice.
+    - `Dynamics`: Adjust the loudness of the voice.
     - `Pan`: Adjust the pan of the voice.
     - `Synth Mode`: Adjust the synthesis mode algorithm of the voice; some of the above parameters may be ineffective with a specific algorithm.
         - `Mono`: VocalShifter's M algorithm, monophonic instrument algorithm.
@@ -388,7 +391,7 @@ The current version of HiFiShifter supports three vocal tuning algorithms and th
 
 A track can only use one algorithm; if you want to use multiple algorithms, separate them into different tracks.
 
-A track group shares a single set of parameters, with child tracks inheriting parameters from the root track. Additionally, child tracks of a track group have three extra parameters — `Cents Offset`, `Degree Offset` and `Formant Offset` — for conveniently adjusting the current child track's pitch and timbre relative to the root track. Among them, `Degree Offset` uses the project's scale setting as its reference. In the parameter-editor toolbar, child `Cents Offset` / `Degree Offset` are grouped inside the `Pitch` button dropdown, and `Formant Offset` is grouped inside the `Formant Shift` button dropdown.
+A track group shares a single set of parameters, with child tracks inheriting parameters from the root track. Additionally, child tracks of a track group have three extra parameters — `Cents Offset`, `Degree Offset` and `Formant Offset` — for conveniently adjusting the current child track's pitch and timbre relative to the root track. Among them, `Degree Offset` uses the project's scale setting as its reference. In the parameter-editor toolbar, child `Cents Offset` / `Degree Offset` are grouped inside the `Pitch` button dropdown, and `Formant Offset` is grouped inside the `Formant Shift` button dropdown. `Dynamics` is grouped inside the `Volume` button dropdown.
 
 After copying a `Pitch` segment using the Select tool, you can paste it onto `Cents Offset` or `Degree Offset`, and HiFiShifter will automatically calculate and apply the appropriate offset.
 

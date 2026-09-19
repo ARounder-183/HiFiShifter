@@ -144,10 +144,30 @@ import {
     type ParamClipboardSegment,
 } from "./pianoRoll/paramClipboardMapping";
 import { uploadFullResCurveSegments } from "./pianoRoll/selectionEditData";
+import {
+    canConvertParam,
+    planParamConversion,
+} from "./pianoRoll/paramConversion";
 import { editablePitchValue } from "./pianoRoll/paramSmoothing";
+import {
+    DYN_DEFAULT_VIEW,
+    DYN_FOLLOW_ORIG,
+    DYN_VALUE_MAX,
+    dynMultiplicativeFactor,
+    isDynParam,
+    VOLUME_DEFAULT_VIEW,
+    restoreDynSentinels,
+} from "./pianoRoll/paramRanges";
 import { usePianoRollData } from "./pianoRoll/usePianoRollData";
 import { useClipsPeaksForPianoRoll } from "./pianoRoll/useClipsPeaksForPianoRoll";
 import { PianoRollWaveformSurface } from "./pianoRoll/PianoRollWaveformSurface";
+import {
+    makeLoudnessAmplitudeMap,
+} from "./pianoRoll/PianoRollWaveformSurface";
+import {
+    liveOverrideMatchesParam,
+    useLoudnessCurves,
+} from "./pianoRoll/useLoudnessCurves";
 import { pianoRollViewportBus } from "./pianoRoll/pianoRollViewportBus";
 import { buildTimelineTicks } from "./timeline/runtime/buildTimelineTicks.js";
 import {
@@ -325,12 +345,13 @@ function resolvePlayheadRgba(themeMode: "dark" | "light"): [number, number, numb
  * 参数编辑器工具栏的参数显示顺序排名（数值越小越靠左）。
  * - 「音高」为核心参数，固定在最左侧（在 JSX 中单独渲染，不在此排序）；
  * - 「音量/声像」是所有算法的共通参数，固定在最右侧；
+ * - 「动态」紧挨音量（两者共用一个药丸呈现，排序只需保证相邻）；
  * - 中间参数随算法不同而变化。
  */
 function getParamToolbarRank(paramId: string, algo: string | undefined | null): number {
     switch (algo) {
         case "nsf_hifigan_onnx":
-            // 音高、共振峰、气声音量、张力、音量、声像
+            // 音高、共振峰、气声音量、张力、音量、动态、声像
             switch (paramId) {
                 case "formant_shift_cents":
                     return 10;
@@ -340,13 +361,15 @@ function getParamToolbarRank(paramId: string, algo: string | undefined | null): 
                     return 30;
                 case "volume":
                     return 90;
+                case "dyn":
+                    return 91;
                 case "pan":
                     return 100;
                 default:
                     return 50;
             }
         case "vslib":
-            // 音高、共振峰、气声强度、音量、声像
+            // 音高、共振峰、气声强度、音量、动态、声像
             switch (paramId) {
                 case "formant_shift_cents":
                     return 10;
@@ -354,16 +377,20 @@ function getParamToolbarRank(paramId: string, algo: string | undefined | null): 
                     return 20;
                 case "volume":
                     return 90;
+                case "dyn":
+                    return 91;
                 case "pan":
                     return 100;
                 default:
                     return 50;
             }
         default:
-            // world / 其它：仅保证音量/声像在右侧，其余保持后端顺序
+            // world / 其它：仅保证音量/动态/声像在右侧，其余保持后端顺序
             switch (paramId) {
                 case "volume":
                     return 90;
+                case "dyn":
+                    return 91;
                 case "pan":
                     return 100;
                 default:
@@ -498,7 +525,19 @@ const ParamToolbarPill: React.FC<ParamToolbarPillProps> = ({
     );
 };
 
-type FormantParamButtonProps = {
+/**
+ * 「一个药丸 + 下拉切换两个参数」的通用按钮。
+ *
+ * 两个使用场景：
+ * - **共振峰**：根参数（整个轨道组）与子参数（当前子轨道的偏移）。只有在
+ *   选中子轨道时才有第二个选项，否则退化为普通药丸。
+ * - **音量 / 动态**：两个同量纲的混音级参数。两者**始终**可选，因此
+ *   `alwaysShowDropdown = true`。
+ *
+ * 下拉的样式与交互（RadioGroup + ChevronDown 段）与「音高」参数组完全一致，
+ * 保持工具栏里三组参数的观感统一。
+ */
+type ParamGroupButtonProps = {
     rootParamId: string;
     /** 按钮上的简短标签（如 FRM / 共振峰） */
     rootLabel: string;
@@ -522,9 +561,14 @@ type FormantParamButtonProps = {
     onSelectRoot: () => void;
     onSelectChild: () => void;
     onToggleSecondary: () => void;
+    /**
+     * `true` = 即使没有子参数也显示下拉（音量/动态这类"恒有两个选项"的组）。
+     * 缺省 `false`（共振峰语义：只有子轨道才有第二个选项）。
+     */
+    alwaysShowDropdown?: boolean;
 };
 
-const FormantParamButton: React.FC<FormantParamButtonProps> = ({
+const ParamGroupButton: React.FC<ParamGroupButtonProps> = ({
     rootParamId,
     rootLabel,
     rootMenuLabel,
@@ -542,11 +586,12 @@ const FormantParamButton: React.FC<FormantParamButtonProps> = ({
     onSelectRoot,
     onSelectChild,
     onToggleSecondary,
+    alwaysShowDropdown = false,
 }) => {
     const eyeMode: "main" | "on" | "off" =
         rootActive || childActive ? "main" : secondaryVisible ? "on" : "off";
 
-    if (!childParamId) {
+    if (!childParamId && !alwaysShowDropdown) {
         return (
             <ParamToolbarPill
                 label={rootLabel}
@@ -602,9 +647,11 @@ const FormantParamButton: React.FC<FormantParamButtonProps> = ({
                     <DropdownMenu.RadioItem value={rootParamId}>
                         {rootMenuLabel ?? rootLabel}
                     </DropdownMenu.RadioItem>
-                    <DropdownMenu.RadioItem value={childParamId}>
-                        {childMenuLabel ?? childLabel}
-                    </DropdownMenu.RadioItem>
+                    {childParamId ? (
+                        <DropdownMenu.RadioItem value={childParamId}>
+                            {childMenuLabel ?? childLabel}
+                        </DropdownMenu.RadioItem>
+                    ) : null}
                 </DropdownMenu.RadioGroup>
             </DropdownMenu.Content>
         </DropdownMenu.Root>
@@ -1757,7 +1804,7 @@ export const PianoRollPanel: React.FC = () => {
         if (desc?.kind.type === "automation_curve") {
             return Number(desc.kind.default_value) || 0;
         }
-        if (editParam === "volume" || editParam === "dyn_edit") {
+        if (editParam === "volume" || editParam === "dyn" || editParam === "dyn_edit") {
             return 1;
         }
         return 0;
@@ -1767,7 +1814,9 @@ export const PianoRollPanel: React.FC = () => {
         if (isChildPitchOffsetCentsParam(editParam)) return 100;
         if (isChildPitchOffsetDegreesParam(editParam)) return 0.5;
         if (isChildFormantOffsetCentsParam(editParam)) return 50;
-        if (editParam === "volume" || editParam === "dyn_edit") return 0.05;
+        if (editParam === "volume" || isDynParam(editParam)) {
+            return 0.05;
+        }
         if (editParam === "formant_shift_cents") return 50;
         if (editParam === "breath_gain" || editParam === "hifigan_tension") {
             return 0.05;
@@ -1902,6 +1951,9 @@ export const PianoRollPanel: React.FC = () => {
                 case "hifigan_volume":
                 case "volume":
                     return t("volume_label");
+                case "dyn":
+                case "dyn_edit":
+                    return t("dyn_label");
                 case "synth_mode":
                     return t("vslib_synth_mode_label");
                 case "pan":
@@ -1932,6 +1984,9 @@ export const PianoRollPanel: React.FC = () => {
                 case "volume":
                 case "vslib_volume":
                     return t("param_btn_volume");
+                case "dyn":
+                case "dyn_edit":
+                    return t("param_btn_dyn");
                 case "pan":
                     return t("param_btn_pan");
                 case "breathiness":
@@ -2726,6 +2781,15 @@ export const PianoRollPanel: React.FC = () => {
     function buildGridSpec(): PianoRollGridSpec | null {
         // 显式标注为字面量联合：不加标注时 TS 会把嵌套三元推断成 `string`，
         // 导致返回值无法赋给 `PianoRollGridSpec["kind"]`。
+        //
+        // 【fallback 分支为什么必须有】内核模式下轴画布整张归 GL（`skipAxisCanvas`
+        // 恒为 true，见下方 drawPianoRoll 调用点），这里返回 null 就意味着该参数
+        // 的左侧刻度与网格**没有任何绘制者** —— 整列空白。曾表现为：切到音量 /
+        // 声像 / 张力 / 气声等一般数值参数时左侧刻度完全消失。凡自动化曲线参数
+        // 一律给出 fallback kind（GL 的 resolveAxisKind / 签名层早已支持），
+        // 只有非曲线参数（理论上一条都不该走到这）才维持 null。
+        const descForKind = processorParamsRef.current.find((d) => d.id === editParam);
+        const isAutomationCurve = descForKind?.kind.type === "automation_curve";
         const kind: PianoRollGridSpec["kind"] | null =
             editParam === "pitch"
                 ? "pitch"
@@ -2735,7 +2799,13 @@ export const PianoRollPanel: React.FC = () => {
                     ? "degrees"
                     : isChildFormantOffsetCentsParam(editParam)
                       ? "formantCents"
-                      : null;
+                      : // 动态面板用倍率刻度（1.0× / 0.5× / 0.25×…），
+                        // 与纵轴标签的 dB 换算表配合，见 axisMarkInstances。
+                        isDynParam(editParam)
+                        ? "level"
+                        : isAutomationCurve
+                          ? "fallback"
+                          : null;
         if (kind === null) return null;
 
         const bounds = getParamValueBoundsForScrollbar(editParam);
@@ -3052,6 +3122,12 @@ export const PianoRollPanel: React.FC = () => {
                 max: desc.kind.max_value,
             };
         }
+        // `dyn_edit` 是动态的历史别名（后端描述符只有 "dyn"）。若在这里退化成
+        // {0,1}，动态面板的值域会从 0..4 塌成 0..1，网格与轴线全部按错误值域
+        // 绘制（表现为"动态显示成了音量的标尺"的另一种形态）。它与 dyn 同值域。
+        if (isDynParam(param)) {
+            return { min: 0, max: DYN_VALUE_MAX };
+        }
         return { min: 0, max: 1 };
     }
 
@@ -3062,10 +3138,20 @@ export const PianoRollPanel: React.FC = () => {
 
         const bounds = getParamValueBoundsForScrollbar(param);
         return (
-            paramViewsRef.current[param] ?? {
-                center: (bounds.min + bounds.max) / 2,
-                span: Math.max(1e-6, bounds.max - bounds.min),
-            }
+            paramViewsRef.current[param] ??
+            // 默认视口按参数语义分流（见 paramRanges 的两个常量说明）：
+            // - dyn：0..1.25，0 dB 在 80% 高度 —— 面板主体留给 −∞..0 dB 的
+            //   编辑区间（目标电平几乎不会超过 0 dB）；
+            // - volume：0..2，1.0 在中线（>1 的提升是常态操作）。
+            // 自定义过的视口（paramViewsRef 已有记录）原样尊重。
+            (isDynParam(param)
+                ? { center: DYN_DEFAULT_VIEW.center, span: DYN_DEFAULT_VIEW.span }
+                : param === "volume"
+                  ? { center: VOLUME_DEFAULT_VIEW.center, span: VOLUME_DEFAULT_VIEW.span }
+                  : {
+                        center: (bounds.min + bounds.max) / 2,
+                        span: Math.max(1e-6, bounds.max - bounds.min),
+                    })
         );
     }
 
@@ -3198,6 +3284,7 @@ export const PianoRollPanel: React.FC = () => {
         secondaryParamViews,
         referencePitchViews,
         bumpRefreshToken,
+        refreshToken,
         refreshNow,
         refreshSecondaryNow,
         notifyLiveEditEnded,
@@ -3220,6 +3307,95 @@ export const PianoRollPanel: React.FC = () => {
         invalidate,
         liveEditActiveRef,
     });
+
+    /**
+     * 波形「可听结果」映射所需的响度自动化快照（整条工程的 volume 曲线 +
+     * 动态目标/原声基线）。
+     *
+     * 【为什么独立于 paramView】波形的形变与"当前编辑哪个参数"无关 —— 用户在
+     * **任何**参数面板都要实时看到音频波形（画一笔音量/动态曲线波形立刻跟着
+     * 动）。paramView 只覆盖当前参数且随视口窗口化，撑不起这个语义；快照按
+     * 整工程自适应 stride 拉取，滚动/缩放零重取（见 useLoudnessCurves）。
+     */
+    const loudnessFpMs = paramView?.framePeriodMs ?? 5;
+    const loudnessProjectFrames = Math.max(
+        1,
+        Math.ceil((dynamicProjectSec * 1000) / loudnessFpMs),
+    );
+    const { snapshot: loudnessSnapshot, analysisPending: loudnessAnalysisPending } =
+        useLoudnessCurves({
+            rootTrackId,
+            projectFrames: loudnessProjectFrames,
+            framePeriodMs: loudnessFpMs,
+            paramsEpoch: (s as unknown as { paramsEpoch?: number }).paramsEpoch ?? 0,
+            refreshToken,
+        });
+
+    /** 把 live 覆盖读成 LoudnessLiveCurve（按 key 中的参数 id 与窗口对齐）。 */
+    const readLiveOverrideFor = useCallback((param: "volume" | "dyn") => {
+        const live = liveEditOverrideRef.current;
+        if (live == null || live.edit.length === 0) return null;
+        if (!liveOverrideMatchesParam(live.key, param)) return null;
+        // key 形如 `v2|{trackId}|{param}|{startFrame}|{frameCount}|{stride}`，
+        // live.edit 与发起编辑时的 paramView 窗口对齐。
+        const parts = live.key.split("|");
+        const startFrame = Number(parts[3]) || 0;
+        const stride = Number(parts[5]) || 1;
+        return { startFrame, stride, values: live.edit };
+    }, []);
+
+    /**
+     * 波形响度映射的修订号（ref，**不触发 React 渲染**）。
+     *
+     * 绘制中的 live 覆盖写在 ref 上，幅度映射内部用延迟取值读它，因此函数引用
+     * 不变也能产出不同结果 —— 几何缓存若只按引用比较会误判"没变"，
+     * 绘制中的曲线就画不上去。这里用 ref 累加计数、映射通过 `revision()`
+     * 惰性读取：若改成 state，拖动时每次 pointermove 都会重渲染整块面板。
+     */
+    const loudnessWaveformRevisionRef = useRef(0);
+
+    /**
+     * 强制重绘参数面板波形。
+     *
+     * 必要性：绘制中的响度曲线只写在 `liveEditOverrideRef`（ref 变更不触发
+     * React 渲染），而波形面是 memo 组件 + 几何缓存，既收不到 ref 变更、
+     * 也不会因 props 未变而重绘。故显式强制重绘一次：总线以同一份投影 force
+     * commit，波形图层命中重绘并因修订号变化而重建几何（其余图层内容未变，
+     * 开销可忽略）。
+     */
+    const requestWaveformRepaint = useCallback(() => {
+        loudnessWaveformRevisionRef.current += 1;
+        pianoRollViewportBus.invalidate();
+    }, []);
+
+    /**
+     * 参数面板波形的幅度映射（**所有参数统一**）。
+     *
+     * 把源波形画成**应用响度自动化之后的可听结果**
+     * （`源峰值 × clip增益×淡化 × volume(t) × dyn增益(t)`）：
+     * - 编辑任何参数时画一笔音量/动态曲线，波形立刻跟着起伏；
+     * - 切换参数时波形保持稳定（映射不依赖 editParam），只有曲线叠加层变化；
+     * - 音量↔动态互转前后波形逐像素不变 —— 等效性最直观的佐证。
+     *
+     * 【引用稳定性】该值参与 `WaveformSurface` 的几何缓存键，因此必须 memo：
+     * 只在快照对象真正变化时换引用。绘制中的 live 覆盖不改变本对象
+     * （延迟取值 + 修订号），由 `requestWaveformRepaint` 驱动重建。
+     *
+     * 【恒等快化】volume 恒 1 且动态无基线（未使用响度自动化的工程）时
+     * `identity = true` → 不挂映射，与时间线及既有行为逐像素一致。
+     */
+    const pianoRollAmplitudeMap = useMemo(() => {
+        if (!loudnessSnapshot || loudnessSnapshot.identity) return undefined;
+        if (loudnessSnapshot.volume.length === 0) return undefined;
+        return makeLoudnessAmplitudeMap(
+            loudnessSnapshot,
+            {
+                volume: () => readLiveOverrideFor("volume"),
+                dyn: () => readLiveOverrideFor("dyn"),
+            },
+            () => loudnessWaveformRevisionRef.current,
+        );
+    }, [loudnessSnapshot, readLiveOverrideFor]);
 
     const refreshSecondaryNowRef = useRef(refreshSecondaryNow);
     useEffect(() => {
@@ -3396,6 +3572,21 @@ export const PianoRollPanel: React.FC = () => {
         return () => {
             publishPianoRollSelection(null);
         };
+    }, [selectionUi, paramView?.framePeriodMs, secPerBeat]);
+
+    /**
+     * 当前参数选区的总帧数（0 = 无选区）。
+     *
+     * 与 `handleEditOp` 内的换算同源（`beatRangesToFrameRanges`），因此菜单项的
+     * 可用性与实际操作覆盖的范围必然一致 —— 不会出现"菜单亮着但什么都没改"。
+     */
+    const pianoRollSelectionFrameCount = useMemo(() => {
+        if (!selectionUi || selectionUi.length === 0) return 0;
+        const fp = paramView?.framePeriodMs ?? 5;
+        return beatRangesToFrameRanges(selectionUi, secPerBeat, fp).reduce(
+            (sum, range) => sum + range.frameCount,
+            0,
+        );
     }, [selectionUi, paramView?.framePeriodMs, secPerBeat]);
 
     // 获取当前 track 下的所 ?clips，用 ?per-clip 波形叠加绘制
@@ -3960,12 +4151,18 @@ export const PianoRollPanel: React.FC = () => {
          * 【为什么非 pitch 参数用 childPitchHardDisableReason】子音高偏移参数
          * （cents / degrees / formant）走的是 `childPitchHardDisableReason`，
          * 与 `pitchEnabled` 的判定分支保持一一对应（见上方 `pitchEnabled`）。
+         *
+         * 【动态基线分析中】dyn 面板的虚线基线依赖后台电平分析；未就绪时基线是
+         * 静默的 1.0 平线，用户无从知道"稍后会变"。就绪事件（dyn_orig_updated）
+         * 会刷新快照并清掉本提示（useLoudnessCurves 的 analysisPending）。
          */
         const overlayText = !pitchEnabled
             ? editParam === "pitch"
                 ? pitchHardDisableReason
                 : childPitchHardDisableReason
-            : null;
+            : isDynParam(editParam) && loudnessAnalysisPending
+              ? t("dyn_analysis_pending")
+              : null;
 
         /**
          * 主画布的内容签名（阶段 2 Task 6）。
@@ -4149,6 +4346,7 @@ export const PianoRollPanel: React.FC = () => {
         clampViewport,
         ensureLiveEditBase,
         applyDenseToLiveEdit,
+        requestWaveformRepaint,
         commitStroke,
         setParamView,
         liveEditOverrideRef,
@@ -4833,6 +5031,44 @@ export const PianoRollPanel: React.FC = () => {
                 return wrote;
             };
 
+            // 音量 ↔ 动态 曲线互转（后端单事务：基线补偿换算 + 源参数归位）。
+            //
+            // 【为什么换算在后端】两者最终增益的语义不同：volume 是乘性增益，
+            // dyn 是「目标电平 / 原声基线」。等效互转需要逐帧基线补偿
+            // （dyn_target = volume × orig、volume = target/orig），而权威基线与
+            // "曲线哪些帧有数据"只有后端知道 —— 前端只传选区（旧的前端纯搬迁
+            // 已被证伪：gain = v/orig ≠ v，且会把未画帧物化成显式基线值）。
+            //
+            // 撤销点在后端单次打点：Ctrl+Z 一次回退整个互转（含源归位）。
+            if (op === "convertVolumeToDyn" || op === "convertDynToVolume") {
+                // 菜单项只在选中 volume / dyn 时出现，但键盘/程序化触发仍要复核，
+                // 避免用一个不匹配的方向覆盖掉用户真正在编辑的参数。
+                const fromNarrowed: "volume" | "dyn" =
+                    op === "convertVolumeToDyn" ? "volume" : "dyn";
+                if (editParam !== fromNarrowed) return;
+                const plan = planParamConversion(fromNarrowed);
+                if (!plan) return;
+
+                const res = await paramsApi.convertMixParam(
+                    rootTrackId,
+                    fromNarrowed,
+                    selFrameRanges.map((range) => ({
+                        startFrame: range.startFrame,
+                        frameCount: range.frameCount,
+                    })),
+                );
+                if (!res?.ok) {
+                    // 基线分析未就绪是最常见的失败原因：保持静默（与其它操作对
+                    // not-ok 的处理一致），dyn_orig_updated 事件后用户重试即可。
+                    return;
+                }
+                bumpRefreshToken();
+                // 目标参数可能刚获得第一个非默认值（尤其动态）→ 切换显示，
+                // 让用户立刻看到互转结果而不是停在空白的源参数上。
+                dispatch(setEditParam(plan.targetParam));
+                return;
+            }
+
             // 选区编辑统一入口：取数/编辑/边缘淡化/回写全部在
             // selectionEditApply 模块内完成（delta 空间交叉淡化 + 毫秒定标）。
             // 多选区逐段独立执行，整批只打一个撤销点。
@@ -4840,6 +5076,7 @@ export const PianoRollPanel: React.FC = () => {
             const runSelectionEdit = async (
                 editSelection: (currentSelectionVals: number[]) => number[],
                 extension?: SelectionEditExtension,
+                options?: { preserveDynSentinels?: boolean },
             ) => {
                 const ok = await applySelectionEditOverRanges({
                     ranges: selFrameRanges,
@@ -4857,6 +5094,7 @@ export const PianoRollPanel: React.FC = () => {
                     editSelection,
                     extension,
                     isEditable: editParam === "pitch" ? editablePitchValue : undefined,
+                    ...options,
                 });
                 if (ok) bumpRefreshToken();
             };
@@ -4874,13 +5112,23 @@ export const PianoRollPanel: React.FC = () => {
                             range.startFrame,
                             range.frameCount,
                             1,
+                            true,
+                            isDynParam(editParam),
                         );
                         if (!res?.ok) continue;
                         const payload = res as ParamFramesPayload;
                         if (segments.length === 0) {
                             framePeriodMsFromBackend = Number(payload.frame_period_ms ?? fp) || fp;
                         }
-                        const values = (payload.edit ?? []).map((v) => Number(v) || 0);
+                        // dyn：未画帧在复制时就编码回哨兵（负值）。后端
+                        // set_param_frames 入口原样接受负值 = 沿用原声，因此
+                        // 粘贴路径无需任何特判 —— "未画"语义跨复制/粘贴存活。
+                        const sentinels = payload.edit_sentinel;
+                        const values = (payload.edit ?? []).map((v, i) =>
+                            sentinels?.[i] === true
+                                ? DYN_FOLLOW_ORIG
+                                : Number(v) || 0,
+                        );
                         if (values.length === 0) continue;
                         segments.push({
                             startFrame: range.startFrame - startFrame,
@@ -4916,13 +5164,21 @@ export const PianoRollPanel: React.FC = () => {
                             range.startFrame,
                             range.frameCount,
                             1,
+                            true,
+                            isDynParam(editParam),
                         );
                         if (!res?.ok) continue;
                         const payload = res as ParamFramesPayload;
                         if (segments.length === 0) {
                             framePeriodMsFromBackend = Number(payload.frame_period_ms ?? fp) || fp;
                         }
-                        const values = (payload.edit ?? []).map((v) => Number(v) || 0);
+                        // dyn：未画帧编码回哨兵（与 copy 同口径，见该处说明）。
+                        const sentinels = payload.edit_sentinel;
+                        const values = (payload.edit ?? []).map((v, i) =>
+                            sentinels?.[i] === true
+                                ? DYN_FOLLOW_ORIG
+                                : Number(v) || 0,
+                        );
                         if (values.length > 0) {
                             segments.push({
                                 startFrame: range.startFrame - startFrame,
@@ -5067,12 +5323,18 @@ export const PianoRollPanel: React.FC = () => {
                         startFrame,
                         frameCount,
                         1,
+                        true,
+                        isDynParam(editParam),
                     );
                     if (!res?.ok) return;
                     const payload = res as ParamFramesPayload;
                     const vals = (payload.edit ?? []).map((v) => Number(v) || 0);
                     if (vals.length === 0) return;
                     const result = averageSelectionValues(vals, editParam, strengthPercent);
+                    // dyn：未画帧写回哨兵（防止"沿用原声"被物化成显式目标电平）。
+                    if (isDynParam(editParam)) {
+                        restoreDynSentinels(result, payload.edit_sentinel);
+                    }
                     await paramsApi.setParamFrames(
                         rootTrackId,
                         editParam,
@@ -5149,6 +5411,8 @@ export const PianoRollPanel: React.FC = () => {
                                 : vals.map(() => midiNote),
                         // 选区外延拓 = 目标值本身：向目标的自然滑移
                         { kind: "editedAt", editedAt: () => midiNote },
+                        // 显式写常量：用户意图是覆盖整个选区 → 不保留未画哨兵。
+                        { preserveDynSentinels: false },
                     );
                     break;
                 }
@@ -5163,6 +5427,29 @@ export const PianoRollPanel: React.FC = () => {
                             (param) => param.id === editParam,
                         );
                         const magnitude = parseParamShiftMagnitude(data?.magnitude);
+                        // dyn 是倍率域（0 = 静音）：上下移动必须**乘性** —— 一次
+                        // ±shift = ×2^±magnitude（默认 ×2 / ×0.5 = ±6 dB），0 帧
+                        // 保持 0（线性加法会把静音推挤出响度）。选区外延拓同样按
+                        // 乘性表达：`deltaAt = base × (factor − 1)`，边缘淡化在
+                        // delta 空间里得到的就是"同一系数作用下的差值"。
+                        if (isDynParam(editParam)) {
+                            // 档位（对齐 pitch 的 fine/normal/coarse 节奏）：
+                            // fine ≈ +0.6 dB、normal = ×2（+6 dB）、coarse = ×4（+12 dB）。
+                            const dynStepDelta =
+                                magnitude === "fine"
+                                    ? 0.05
+                                    : magnitude === "coarse"
+                                      ? 1.0
+                                      : 0.5;
+                            const factor = dynMultiplicativeFactor(
+                                op === "shiftParamUpSelection" ? dynStepDelta : -dynStepDelta,
+                            );
+                            await runSelectionEdit(
+                                (vals) => vals.map((v) => v * factor),
+                                { kind: "deltaAt", deltaAt: (_f, base) => base * (factor - 1) },
+                            );
+                            break;
+                        }
                         const step = getParamShiftStep(editParam, descriptor, magnitude);
                         const delta = op === "shiftParamUpSelection" ? step : -step;
                         // 不透传 data?.edgeSmoothnessPercent：键盘路径的事件
@@ -5194,6 +5481,8 @@ export const PianoRollPanel: React.FC = () => {
                             ctxStart,
                             leftLen + range.frameCount + pad,
                             1,
+                            true,
+                            isDynParam(editParam),
                         );
                         if (!res?.ok) return false;
                         const payload = res as ParamFramesPayload;
@@ -5205,6 +5494,16 @@ export const PianoRollPanel: React.FC = () => {
                             leftContext: all.slice(0, leftLen),
                             rightContext: all.slice(leftLen + range.frameCount),
                         });
+                        // dyn：未画帧写回哨兵（防止"沿用原声"被物化成显式目标电平）。
+                        if (isDynParam(editParam)) {
+                            restoreDynSentinels(
+                                result,
+                                payload.edit_sentinel?.slice(
+                                    leftLen,
+                                    leftLen + range.frameCount,
+                                ),
+                            );
+                        }
                         const written = await paramsApi.setParamFrames(
                             rootTrackId,
                             editParam,
@@ -5232,6 +5531,8 @@ export const PianoRollPanel: React.FC = () => {
                             range.startFrame,
                             range.frameCount,
                             1,
+                            true,
+                            isDynParam(editParam),
                         );
                         if (!res?.ok) return false;
                         const payload = res as ParamFramesPayload;
@@ -5241,9 +5542,16 @@ export const PianoRollPanel: React.FC = () => {
                         const attackMs = Math.min(attack, totalMs / 2);
                         const releaseMs = Math.min(release, totalMs / 2);
                         // For pitch: amplitude in cents → divide by 100 to get semitones
+                        // For dyn: amplitude is a **depth percentage** (±N% ratio
+                        // modulation) — multiplicative so drawn silence stays silent.
                         // For other params: amplitude is a raw value used directly as max deviation
                         const isPitchVib = editParam === "pitch";
-                        const ampFactor = isPitchVib ? amplitude / 100 : amplitude;
+                        const isDynVib = isDynParam(editParam);
+                        const ampFactor = isPitchVib
+                            ? amplitude / 100
+                            : isDynVib
+                              ? amplitude / 100
+                              : amplitude;
                         const result = vals.map((v, i) => {
                             const tMs = i * fpMs;
                             let env = 1;
@@ -5254,8 +5562,17 @@ export const PianoRollPanel: React.FC = () => {
                             const vib = Math.sin(
                                 (2 * Math.PI * tMs) / Math.max(1, period) + phaseRad,
                             );
-                            return v + ampFactor * env * vib;
+                            // dyn：乘性调制（v × (1 + 深度·包络·正弦)）—— 静音帧
+                            // （v = 0）保持 0；深度 > 100% 时负半周钳到 0 = 静音。
+                            const next = isDynVib
+                                ? v * (1 + ampFactor * env * vib)
+                                : v + ampFactor * env * vib;
+                            return isDynVib ? Math.max(0, next) : next;
                         });
+                        // dyn：未画帧写回哨兵（"沿用原声"不被颤音物化）。
+                        if (isDynParam(editParam)) {
+                            restoreDynSentinels(result, payload.edit_sentinel);
+                        }
                         const written = await paramsApi.setParamFrames(
                             rootTrackId,
                             editParam,
@@ -6559,7 +6876,7 @@ export const PianoRollPanel: React.FC = () => {
                         {orderedProcessorParams.map((p) => {
                             if (p.id === "formant_shift_cents") {
                                 return (
-                                    <FormantParamButton
+                                    <ParamGroupButton
                                         key={p.id}
                                         rootParamId={p.id}
                                         rootLabel={getProcessorParamShortLabel(p)}
@@ -6588,6 +6905,82 @@ export const PianoRollPanel: React.FC = () => {
                                         onToggleSecondary={() => toggleSecondaryParam(p.id)}
                                     />
                                 );
+                            }
+
+                            // 音量 / 动态：同量纲的两个混音级参数，用一个药丸 + 下拉切换。
+                            // 只在遇到 "volume" 时渲染这一次（"dyn" 会被跳过），
+                            // 否则会得到两个内容相同的按钮。
+                            if (p.id === "volume") {
+                                const hasDyn = orderedProcessorParams.some(
+                                    (q) => q.id === "dyn",
+                                );
+                                const volDesc = processorParamsRef.current.find(
+                                    (d) => d.id === "volume",
+                                );
+                                const dynDesc = processorParamsRef.current.find(
+                                    (d) => d.id === "dyn",
+                                );
+                                const groupSecondaryVisible =
+                                    (secondaryParamVisible["volume"] ?? false) ||
+                                    (secondaryParamVisible["dyn"] ?? false);
+                                return (
+                                    <ParamGroupButton
+                                        key="volume-group"
+                                        rootParamId="volume"
+                                        rootLabel={
+                                            volDesc
+                                                ? getProcessorParamShortLabel(volDesc)
+                                                : t("param_btn_volume")
+                                        }
+                                        rootMenuLabel={t("volume_label")}
+                                        rootTooltip={t("volume_label")}
+                                        childParamId={hasDyn ? "dyn" : null}
+                                        childLabel={
+                                            dynDesc
+                                                ? getProcessorParamShortLabel(dynDesc)
+                                                : t("param_btn_dyn")
+                                        }
+                                        childMenuLabel={t("dyn_label")}
+                                        rootActive={editParam === "volume"}
+                                        childActive={editParam === "dyn"}
+                                        secondaryVisible={groupSecondaryVisible}
+                                        hideSecondaryLabel={t("hide_secondary_param")}
+                                        showSecondaryLabel={t("show_secondary_param")}
+                                        hideSecondaryTooltip={t("secondary_overlay_tooltip_hidden")}
+                                        showSecondaryTooltip={t(
+                                            "secondary_overlay_tooltip_visible",
+                                        )}
+                                        alwaysShowDropdown
+                                        onSelectRoot={() => dispatch(setEditParam("volume"))}
+                                        onSelectChild={() => {
+                                            if (hasDyn) dispatch(setEditParam("dyn"));
+                                        }}
+                                        onToggleSecondary={() => {
+                                            // 眼睛对整组生效：音量与动态的副参数叠加一起切换，
+                                            // 否则会出现"眼睛亮着但只有一条叠加线"的分裂观感。
+                                            if (groupSecondaryVisible) {
+                                                if (secondaryParamVisible["volume"]) {
+                                                    toggleSecondaryParam("volume");
+                                                }
+                                                if (secondaryParamVisible["dyn"]) {
+                                                    toggleSecondaryParam("dyn");
+                                                }
+                                            } else {
+                                                if (!secondaryParamVisible["volume"]) {
+                                                    toggleSecondaryParam("volume");
+                                                }
+                                                if (hasDyn && !secondaryParamVisible["dyn"]) {
+                                                    toggleSecondaryParam("dyn");
+                                                }
+                                            }
+                                        }}
+                                    />
+                                );
+                            }
+
+                            // dyn 已并入上面的音量组药丸，不再单独渲染。
+                            if (p.id === "dyn") {
+                                return null;
                             }
 
                             const paramActive = editParam === p.id;
@@ -6966,6 +7359,7 @@ export const PianoRollPanel: React.FC = () => {
                                         scrollLeftPx={scrollLeft}
                                         pxPerSec={pxPerSec}
                                         colors={waveformColors}
+                                        amplitudeMap={pianoRollAmplitudeMap}
                                     />
 
                                     {/* GL 静态层（阶段 2）：网格等静态图层。
@@ -7146,6 +7540,25 @@ export const PianoRollPanel: React.FC = () => {
                     onMeanQuantize={() => openEditDialog("meanQuantize")}
                     onSaveAsPitchRef={() => void handleSaveAsPitchRef()}
                     onExportMidi={() => void handleExportMidiFromEditor()}
+                    // 音量 ↔ 动态 互转：仅在有选区时可用（无选区时"整条互换"
+                    // 应由初始化表达，而不是一个会静默改全轨的菜单项）。
+                    // 帧数经 beat→frame 换算（与 handleEditOp 内的口径一致）。
+                    isVolumeParam={
+                        editParam === "volume" &&
+                        canConvertParam({
+                            editParam,
+                            selectionFrameCount: pianoRollSelectionFrameCount,
+                        })
+                    }
+                    isDynParam={
+                        editParam === "dyn" &&
+                        canConvertParam({
+                            editParam,
+                            selectionFrameCount: pianoRollSelectionFrameCount,
+                        })
+                    }
+                    onConvertVolumeToDyn={() => void handleEditOp("convertVolumeToDyn")}
+                    onConvertDynToVolume={() => void handleEditOp("convertDynToVolume")}
                 />
             )}
         </Flex>

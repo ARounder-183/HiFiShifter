@@ -78,6 +78,13 @@ export interface WaveformSceneSegment {
     sourceSampleRate: number;
     sourceStartSec: number;
     sourceEndSec: number;
+    /**
+     * 该 Clip 在**时间轴**上的起点（秒）。
+     *
+     * 作用：几何层据此把像素列换算成时间轴绝对时间（`clipStartSec + clipLocal…`），
+     * `amplitudeMap` 需要它来按时间取逐帧参数（例如动态增益）。缺省 0。
+     */
+    clipStartSec?: number;
     clipLocalStartSec: number;
     clipLocalEndSec: number;
     clipTotalDurationSec: number;
@@ -399,6 +406,9 @@ export function buildWaveformScene(args: {
                         sourceSampleRate: finitePositive(clip.sourceSampleRate ?? 44100, 44100),
                         sourceStartSec: Math.max(0, pieceSourceStartSec),
                         sourceEndSec: Math.min(mediaDurationSec, pieceSourceEndSec),
+                        // 时间轴起点：几何层据此把像素列还原成绝对时间，
+                        // 供逐帧参数（动态增益）采样使用。
+                        clipStartSec: clip.startSec,
                         clipLocalStartSec: drawnLocalStartSec,
                         clipLocalEndSec: drawnLocalEndSec,
                         clipTotalDurationSec: clip.lengthSec,

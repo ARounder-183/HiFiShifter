@@ -187,3 +187,132 @@ test("waveform/geometry.test.ts scripted checks", async () => {
         "unity gain envelope is untouched by the clamp",
     );
 });
+
+/**
+ * 逐时间幅度映射（动态面板）。
+ *
+ * 【为什么必须单测这一层】"编辑动态时波形不重绘"的根因是映射拿不到时间：
+ * 它只能施加一个全局系数，画多少曲线波形都不变。这里钉住"同一峰值在不同
+ * 时间可以映射出不同高度"，以及像素列 → 时间轴绝对时间的换算正确。
+ */
+test("amplitude map receives pixel-column timeline time", async () => {
+    const scene: WaveformScene = {
+        segments: [
+            {
+                clipId: "clip",
+                sourcePath: "/tone.wav",
+                sourceSampleRate: 4,
+                sourceStartSec: 0,
+                sourceEndSec: 1,
+                // Clip 从时间轴 10s 开始，本段覆盖它的第 0..1s。
+                clipStartSec: 10,
+                clipLocalStartSec: 0,
+                clipLocalEndSec: 1,
+                clipTotalDurationSec: 1,
+                screenRect: { x: 0, y: 0, width: 4, height: 100 },
+                reversed: false,
+                gain: 1,
+                fadeInSec: 0,
+                fadeOutSec: 0,
+                fadeInShape: 0,
+                fadeInDir: 0,
+                fadeOutShape: 0,
+                fadeOutDir: 0,
+                alpha: 1,
+            },
+        ],
+        markers: [],
+    };
+
+    const seen: number[] = [];
+    const result = buildWaveformGeometry({
+        scene,
+        color: "#ffffff",
+        getPeaks: () => ({
+            min: new Float32Array([-1, -1, -1, -1]),
+            max: new Float32Array([1, 1, 1, 1]),
+            dataStartSec: 0,
+            dataDurationSec: 1,
+        }),
+        amplitudeMap: (value, gain, timeSec) => {
+            if (timeSec !== null) seen.push(timeSec);
+            return value * gain;
+        },
+    });
+
+    // 4 列 × 2 次调用（min / max），每次拿到同一列的时间。
+    if (seen.length !== 8) {
+        throw new Error(`expected 8 samples, received ${seen.length}`);
+    }
+    // 列中心分别对应本段内的 0.125 / 0.375 / 0.625 / 0.875 秒，加 Clip 起点 10s。
+    const expected = [10.125, 10.375, 10.625, 10.875];
+    for (let i = 0; i < 4; i += 1) {
+        const got = seen[i * 2];
+        if (Math.abs(got - expected[i]) > 1e-6) {
+            throw new Error(`column ${i}: expected ${expected[i]}, received ${got}`);
+        }
+        // min 与 max 必须用同一个时间（否则包络上下沿会被不同增益缩放，形状失真）。
+        if (seen[i * 2] !== seen[i * 2 + 1]) {
+            throw new Error(`column ${i}: min/max disagree on time`);
+        }
+    }
+    if (result.lineCount !== 4) {
+        throw new Error(`expected 4 lines, received ${result.lineCount}`);
+    }
+});
+
+test("amplitude map can vary per pixel column (dynamic gain)", async () => {
+    const scene: WaveformScene = {
+        segments: [
+            {
+                clipId: "clip",
+                sourcePath: "/tone.wav",
+                sourceSampleRate: 4,
+                sourceStartSec: 0,
+                sourceEndSec: 1,
+                clipStartSec: 0,
+                clipLocalStartSec: 0,
+                clipLocalEndSec: 1,
+                clipTotalDurationSec: 1,
+                screenRect: { x: 0, y: 0, width: 4, height: 100 },
+                reversed: false,
+                gain: 1,
+                fadeInSec: 0,
+                fadeOutSec: 0,
+                fadeInShape: 0,
+                fadeInDir: 0,
+                fadeOutShape: 0,
+                fadeOutDir: 0,
+                alpha: 1,
+            },
+        ],
+        markers: [],
+    };
+
+    // 模拟动态增益：前半段 ×2，后半段 ×0.5。
+    const result = buildWaveformGeometry({
+        scene,
+        color: "#ffffff",
+        getPeaks: () => ({
+            min: new Float32Array([-0.5, -0.5, -0.5, -0.5]),
+            max: new Float32Array([0.5, 0.5, 0.5, 0.5]),
+            dataStartSec: 0,
+            dataDurationSec: 1,
+        }),
+        amplitudeMap: (value, gain, timeSec) =>
+            value * gain * (timeSec !== null && timeSec < 0.5 ? 2 : 0.5),
+    });
+
+    // 中心 50、半高 50：×2 → 峰值 0.5×2=1 → top 0；×0.5 → 0.25 → top 37.5。
+    const topOf = (col: number) => result.vertices[col * 12 + 1];
+    if (topOf(0) !== 0) {
+        throw new Error(`column 0 should be boosted to the top, received ${topOf(0)}`);
+    }
+    if (Math.abs(topOf(3) - 37.5) > 1e-6) {
+        throw new Error(`column 3 should be attenuated, received ${topOf(3)}`);
+    }
+    // 逐列不同 —— 这正是"波形按动态值重绘"的可观测判据。
+    if (topOf(0) === topOf(3)) {
+        throw new Error("columns must differ when the dynamic gain varies over time");
+    }
+});

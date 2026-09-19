@@ -1271,8 +1271,11 @@ pub fn get_param_frames(
     frame_count: u32,
     stride: Option<u32>,
     binary: Option<bool>,
+    with_sentinel: Option<bool>,
 ) -> crate::models::ParamFramesPayload {
-    params::get_param_frames(state, track_id, param, start_frame, frame_count, stride, binary)
+    params::get_param_frames(
+        state, track_id, param, start_frame, frame_count, stride, binary, with_sentinel,
+    )
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1297,6 +1300,28 @@ pub fn restore_param_frames(
     checkpoint: Option<bool>,
 ) -> serde_json::Value {
     params::restore_param_frames(state, track_id, param, start_frame, frame_count, checkpoint)
+}
+
+/// 互转选区段（`startFrame` 起共 `frameCount` 帧，与前端 FrameRange 同口径）。
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConvertRange {
+    pub start_frame: u32,
+    pub frame_count: u32,
+}
+
+/// 音量 ↔ 动态 曲线互转（后端单事务：基线补偿换算 + 源归位 + 单撤销点）。
+///
+/// 语义与正确性推导见 `commands/params.rs::convert_mix_param`。前端不做任何
+/// 换算 —— 逐帧基线与曲线存在性只有后端权威。
+#[tauri::command(rename_all = "camelCase")]
+pub fn convert_mix_param(
+    state: State<'_, AppState>,
+    track_id: String,
+    from: String,
+    ranges: Vec<ConvertRange>,
+) -> serde_json::Value {
+    params::convert_mix_param(state, track_id, from, ranges)
 }
 
 #[tauri::command(rename_all = "camelCase")]

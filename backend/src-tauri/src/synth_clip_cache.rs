@@ -534,7 +534,11 @@ pub fn clear_pad_suppressed_clips() {
 /// 后处理算法、量化口径…）都必须递增此值：它混入渲染缓存键，并在磁盘缓存
 /// 文件头中二次记录（不匹配直接判废），从而把"升级后读到旧算法的结果"
 /// 收敛为必然失效而不是偶发错播。
-pub const RENDER_PIPELINE_VERSION: u32 = 1;
+///
+/// v2：vslib 不再把 volume/pan 烘焙进合成输出（改由 mix 阶段统一应用）。
+/// 旧缓存里这些 PCM 已含音量/声像，若沿用会与新混音层叠加成二次增益，
+/// 因此必须整体失效。
+pub const RENDER_PIPELINE_VERSION: u32 = 2;
 
 /// [`compute_rendered_clip_hash`] 的输入集合。
 ///
@@ -621,18 +625,14 @@ pub fn compute_rendered_clip_hash(input: &RenderedClipHashInput<'_>) -> u64 {
 
     let mut h: u64 = 14695981039346656037u64;
 
-    fn include_rendered_extra_curve(renderer_id: &str, param_id: &str) -> bool {
-        // vslib 把全部曲线烘焙进合成输出（含共通 volume/pan），
-        // 因此这些曲线必须参与渲染缓存 key。
-        if renderer_id == "vslib" {
-            return true;
-        }
-        // 共通 volume/pan 在 mix 阶段实时应用，改变它们不应触发底层重渲染。
+    fn include_rendered_extra_curve(_renderer_id: &str, param_id: &str) -> bool {
+        // 共通 volume/pan/dyn 一律在 mix 阶段实时应用，改变它们不应触发底层重渲染。
+        // 这里没有按算法区分的分支：任何处理器都不再烘焙它们（vslib 的旧行为已移除）。
         if crate::renderer::common_params::is_common_mix_param(param_id) {
             return false;
         }
         // nsf-hifigan 的气声与张力属于渲染后处理，有独立缓存 key。
-        !(renderer_id == "nsf_hifigan_onnx"
+        !(_renderer_id == "nsf_hifigan_onnx"
             && matches!(param_id, "breath_gain" | "hifigan_tension"))
     }
 

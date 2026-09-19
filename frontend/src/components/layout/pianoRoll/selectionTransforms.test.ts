@@ -206,3 +206,49 @@ describe("averageSelectionValues / scaleSelectionDeviation（既有行为锁定�
         expect(out[1]).toBeCloseTo(61, 9);
     });
 });
+
+describe("dyn（倍率域）的乘性变换", () => {
+    it("平均：几何均值 + 幂混合，静音帧保持 0", () => {
+        // [0.2, 0.8] 的几何均值 = 0.4；strength=100% → 全部收敛到 0.4。
+        const out = averageSelectionValues([0.2, 0, 0.8], "dyn", 100);
+        expect(out[0]).toBeCloseTo(0.4, 9);
+        expect(out[1]).toBe(0); // ★ 静音不凭空产生响度
+        expect(out[2]).toBeCloseTo(0.4, 9);
+        // 部分强度：向选区几何均值（sqrt(0.2×0.4)）走一半（对数域）。
+        const geo = Math.sqrt(0.2 * 0.4);
+        const half = averageSelectionValues([0.2, 0.4], "dyn", 50);
+        expect(half[0]).toBeCloseTo(Math.pow(0.2, 0.5) * Math.pow(geo, 0.5), 9);
+        expect(half[1]).toBeCloseTo(Math.pow(0.4, 0.5) * Math.pow(geo, 0.5), 9);
+    });
+
+    it("上拖（放大）：围绕几何均值的幂缩放，静音保持 0", () => {
+        // [0.2, 0.8]，geo = 0.4；scale=2 → 0.4·(v/0.4)² ：0.2 → 0.1，0.8 → 1.6。
+        const out = transformSelectionByRightDrag([0.2, 0.8], "dyn", 25);
+        const scale = 1 + (25 * 2) / 100; // rightDragUpScale(25) = 1.5
+        void scale;
+        const geo = Math.sqrt(0.2 * 0.8);
+        const k = 1 + (25 * 2) / 100;
+        expect(out[0]).toBeCloseTo(geo * Math.pow(0.2 / geo, k), 9);
+        expect(out[1]).toBeCloseTo(geo * Math.pow(0.8 / geo, k), 9);
+        // 静音帧恒等。
+        const withSilence = transformSelectionByRightDrag([0, 0.8], "dyn", 25);
+        expect(withSilence[0]).toBe(0);
+    });
+
+    it("下拖（平滑）：对数域高斯，静音帧是锚点不被糊出响度", () => {
+        // 线性高斯会把 0 与 0.5 平均成 0.25；对数域下 0 是过滤锚点。
+        const out = transformSelectionByRightDrag([0, 0.5, 0.5], "dyn", -50, {
+            framePeriodMs: 5,
+        });
+        expect(out[0]).toBe(0); // ★ 静音保持静音
+        expect(out[1]).toBeGreaterThan(0);
+        expect(out[2]).toBeGreaterThan(0);
+        // 全正选区：对数域平滑 = 平滑后仍是正值（不产生 0 / 负值）。
+        const allPositive = transformSelectionByRightDrag([0.2, 0.5, 0.9], "dyn", -50, {
+            framePeriodMs: 5,
+        });
+        for (const v of allPositive) {
+            expect(v).toBeGreaterThan(0);
+        }
+    });
+});

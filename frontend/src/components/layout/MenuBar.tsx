@@ -89,6 +89,7 @@ import {
     isChildPitchOffsetCentsParam,
     isChildPitchOffsetDegreesParam,
 } from "./pianoRoll/childPitchOffsetParams";
+import { isDynParam } from "./pianoRoll/paramRanges";
 import type { AutoBackupSettings } from "../../services/api/project";
 // import type { VibratoParams } from "../editDialogs/EditDialogs"; // 已移除无效导入
 
@@ -249,7 +250,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             ? 60
             : isChildCentsParam || isChildDegreesParam
               ? 0
-              : s.editParam === "volume" || s.editParam === "dyn_edit"
+              : s.editParam === "volume" || isDynParam(s.editParam)
                 ? 1
                 : 0;
     const setToValueLabel = s.editParam === "pitch" ? tAny("dlg_midi_note") : tAny("dlg_value");
@@ -258,6 +259,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
         if (isChildDegreesParam) return 1;
         switch (s.editParam) {
             case "volume":
+            case "dyn":
             case "dyn_edit":
                 return 0.05;
             case "formant_shift_cents":

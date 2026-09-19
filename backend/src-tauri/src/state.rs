@@ -526,10 +526,28 @@ pub struct TrackParamsState {
     pub pending_pitch_offset: Option<Vec<f32>>,
 
     /// 自动化曲线（key = ParamDescriptor::id）。
-    /// 多数曲线是声码器专属的；`volume` / `pan` 是所有算法共通的混音参数，
-    /// 切换算法时保留同一条曲线。缺失 key = 使用参数默认值。
+    /// 多数曲线是声码器专属的；`volume` / `pan` / `dyn` 是所有算法共通的
+    /// 混音级参数，切换算法时保留同一条曲线。缺失 key = 使用参数默认值。
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub extra_curves: HashMap<String, Vec<f32>>,
+
+    /// 原声电平基线（DYN 的 `*DYN`）：逐帧原声电平，倍率域（1.0 = 分析参考电平）。
+    ///
+    /// 与 `pitch_orig` 同性质的**派生数据**：由后台响度分析从源音频算出，
+    /// 因此不落盘（打开工程后自动重建），其失效判定复用 `dyn_orig_key`。
+    #[serde(skip)]
+    pub dyn_orig: Vec<f32>,
+
+    /// 原声电平基线的缓存键（= `build_root_dyn_key`），分析完成后写入。
+    #[serde(skip)]
+    pub dyn_orig_key: Option<String>,
+
+    /// 原声电平的归一化参考（linear 幅度，1.0 = 数字满量程）。
+    ///
+    /// `dyn_orig = clip_level / reference`，前端据此把源文件波形峰值投影到
+    /// DYN 面板的 dB 纵轴上，使波形与曲线/基线共用同一坐标系。
+    #[serde(skip)]
+    pub dyn_orig_reference: f32,
 
     /// 声码器专属静态参数（key = ParamDescriptor::id，值为枚举整数转 f64）。
     /// 例："synth_mode" = 1.0（SYNTHMODE_MF）。
@@ -2012,7 +2030,7 @@ impl TimelineState {
             .iter()
             .map(|(param, curve)| {
                 let default_value =
-                    crate::renderer::automation_curve_default_value(kind, param).unwrap_or(0.0);
+                    crate::renderer::common_params::automation_curve_pad_value(kind, param);
                 (
                     param.clone(),
                     Self::curve_slice(curve, start_frame, frame_count, default_value),
@@ -2068,7 +2086,7 @@ impl TimelineState {
             .unwrap_or_else(|| entry.extra_curves.keys().cloned().collect());
         for key in keys {
             let default_value =
-                crate::renderer::automation_curve_default_value(kind, &key).unwrap_or(0.0);
+                crate::renderer::common_params::automation_curve_pad_value(kind, &key);
             let curve = entry
                 .extra_curves
                 .entry(key)
@@ -2159,7 +2177,7 @@ impl TimelineState {
         }
         for key in &all_keys {
             let default_value =
-                crate::renderer::automation_curve_default_value(kind, key).unwrap_or(0.0);
+                crate::renderer::common_params::automation_curve_pad_value(kind, key);
             let curve = entry
                 .extra_curves
                 .entry(key.clone())
@@ -2168,7 +2186,7 @@ impl TimelineState {
         }
         for (key, values) in &linked_params.extra_curves {
             let default_value =
-                crate::renderer::automation_curve_default_value(kind, key).unwrap_or(0.0);
+                crate::renderer::common_params::automation_curve_pad_value(kind, key);
             let curve = entry
                 .extra_curves
                 .entry(key.clone())
@@ -2375,7 +2393,7 @@ impl TimelineState {
             .iter()
             .map(|key| {
                 let default_value =
-                    crate::renderer::automation_curve_default_value(kind, key).unwrap_or(0.0);
+                    crate::renderer::common_params::automation_curve_pad_value(kind, key);
                 let slices = frame_mappings
                     .iter()
                     .map(|&(old_start, old_count, _, _)| {
@@ -2650,6 +2668,14 @@ impl TimelineState {
             // 已存在共通曲线时，旧键不再参与渲染，直接移除避免缓存键重复计算。
             entry.extra_curves.remove("hifigan_volume");
         }
+        // 旧 VocalShifter 导入曾把 `dyn_orig` / `dyn_edit` 两条曲线直接写进
+        // extra_curves。现在动态由 `dyn`（目标电平）+ 后台分析出的原声基线表达，
+        // 那两个旧键已无任何消费点 —— 必须删除，否则它们会继续占着
+        // `extra_curves` 的键位（污染渲染缓存键，并让参数下拉多出两个幽灵参数）。
+        // 数值本身没有丢失：导入时已按 `volume × dyn_edit/dyn_orig` 折算进
+        // `volume` 曲线，响度不变。
+        entry.extra_curves.remove("dyn_edit");
+        entry.extra_curves.remove("dyn_orig");
     }
 
     /// 工程加载/导入时执行参数迁移：
@@ -2667,6 +2693,9 @@ impl TimelineState {
                 } else {
                     curves.remove("hifigan_volume");
                 }
+                // 与轨道级同理：clip 级覆盖里的旧 dyn 键一并清除。
+                curves.remove("dyn_edit");
+                curves.remove("dyn_orig");
             }
         }
     }

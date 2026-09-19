@@ -24,6 +24,8 @@ import type {
     StrokePoint,
     ValueViewport,
 } from "./types";
+import { computeDynGeometricMean } from "./selectionTransforms";
+import { dynMultiplicativeFactor, isDynParam } from "./paramRanges";
 import {
     curveValueAtPointerFrame,
     hitTestSelectionBody,
@@ -201,6 +203,15 @@ export function usePianoRollInteractions(args: {
         mode: StrokeMode,
     ) => void;
 
+    /**
+     * 请求波形面重绘。
+     *
+     * 与 `invalidate` 的区别：波形是 memo 组件 + 几何缓存，只认投影变化；
+     * 而绘制中的 live 覆盖写在 ref 上，不触发 React 渲染，投影也没变。
+     * 因此动态曲线的实时预览必须经此入口才能反映到波形上。
+     */
+    requestWaveformRepaint: () => void;
+
     commitStroke: (points: StrokePoint[], mode: StrokeMode) => Promise<void>;
 
     /** 用于选区拖拽 onUp 时同步更新本地 paramView state（与 commitStroke 行为一致） */
@@ -338,6 +349,12 @@ export function usePianoRollInteractions(args: {
         clampViewport,
         ensureLiveEditBase,
         applyDenseToLiveEdit,
+        /**
+         * 波形面重绘入口（与 `invalidate` 不同：波形是 memo 组件 + 几何缓存，
+         * 只认投影变化，而 live 覆盖写在 ref 上不触发 React 渲染）。
+         * 绘制中的动态曲线要让它跟着动，必须经此入口。
+         */
+        requestWaveformRepaint,
         commitStroke,
         setParamView,
         liveEditOverrideRef,
@@ -736,10 +753,13 @@ export function usePianoRollInteractions(args: {
                 editParam === "pitch"
                     ? baselineValues.filter((v) => Number(v) !== 0)
                     : baselineValues;
-            const meanValue =
-                valid.length > 0
-                    ? valid.reduce((sum, v) => sum + (Number(v) || 0), 0) / valid.length
-                    : 0;
+            // dyn：控制线的 pivot 用**几何均值**（倍率域的中心趋势），应用时
+            // 按"控制值 / pivot"的比值缩放基线 —— 算术均值会把静音帧抬离 0。
+            const meanValue = isDynParam(editParam)
+                ? computeDynGeometricMean(baselineValues)
+                : valid.length > 0
+                  ? valid.reduce((sum, v) => sum + (Number(v) || 0), 0) / valid.length
+                  : 0;
 
             const selectionStartFrame = pv.startFrame + selStartIdx * stride;
             const selectionEndFrame = pv.startFrame + selEndIdx * stride;
@@ -793,6 +813,15 @@ export function usePianoRollInteractions(args: {
                     dense[i] = 0;
                     continue;
                 }
+                // dyn：乘性应用（base × 控制比值）—— 静音帧（base = 0）保持 0；
+                // 控制线在 pivot（几何均值）处 = 不改变。pivot 无效时退恒等。
+                if (isDynParam(editParam)) {
+                    dense[i] =
+                        overlay.meanValue > 0
+                            ? base * (curveValueAt(frame) / overlay.meanValue)
+                            : base;
+                    continue;
+                }
                 const delta = curveValueAt(frame) - overlay.meanValue;
                 dense[i] = base + delta;
             }
@@ -817,8 +846,16 @@ export function usePianoRollInteractions(args: {
                     "draw",
                 );
             }
+            // live 覆盖只改 ref：波形面不会自行重绘，显式请求一次。
+            requestWaveformRepaint();
         },
-        [applyDenseToLiveEdit, buildMorphDense, ensureLiveEditBase, paramViewRef],
+        [
+            applyDenseToLiveEdit,
+            buildMorphDense,
+            ensureLiveEditBase,
+            paramViewRef,
+            requestWaveformRepaint,
+        ],
     );
 
     /**
@@ -1033,6 +1070,8 @@ export function usePianoRollInteractions(args: {
                     st.mode,
                 );
                 invalidate();
+                // 同上：live 覆盖只改 ref，波形面需显式重绘。
+                requestWaveformRepaint();
             }
 
             return true;
@@ -1048,6 +1087,7 @@ export function usePianoRollInteractions(args: {
             buildVibratoDense,
             applyDenseToLiveEdit,
             invalidate,
+            requestWaveformRepaint,
         ],
     );
 
@@ -2624,6 +2664,8 @@ export function usePianoRollInteractions(args: {
                             );
                             updateSelectionUi(selectionRef.current);
                             invalidate();
+                            // live 覆盖只改 ref：音量/动态拖拽时波形面需显式重绘。
+                            requestWaveformRepaint();
                         };
 
                         const onMove = (ev: globalThis.PointerEvent) => {
@@ -2952,6 +2994,8 @@ export function usePianoRollInteractions(args: {
                                                     );
                                                 }
                                                 invalidate();
+                                                // live 覆盖只改 ref：音量/动态拖拽时波形面需显式重绘。
+                                                requestWaveformRepaint();
                                             });
                                         }
                                     };
@@ -3199,6 +3243,14 @@ export function usePianoRollInteractions(args: {
                                                   frameScale,
                                               );
                                     }
+                                    // dyn 是倍率域（0 = 静音）：拖拽必须是**乘性**的 ——
+                                    // 线性加法会把静音拖出响度（0 + Δ ≠ 0），乘性缩放
+                                    // 下 0 × 任何系数仍为 0（"无声的地方仍然无声"）。
+                                    // 位移换算见 paramRanges.dynMultiplicativeFactor
+                                    // （0.5 个值单位 = ×2，+6 dB）。
+                                    if (isDynParam(editParam)) {
+                                        return orig * dynMultiplicativeFactor(lastValueDelta);
+                                    }
                                     return orig + lastValueDelta;
                                 };
 
@@ -3288,6 +3340,9 @@ export function usePianoRollInteractions(args: {
                                     updateSelectionUi(selectionRef.current);
 
                                     invalidate();
+                                    // live 覆盖只改 ref：拖拽音量/动态时波形面需
+                                    // 显式重绘（波形 = 可听结果，须实时跟随）。
+                                    requestWaveformRepaint();
                                 };
                                 const schedulePreview = () => {
                                     previewQueued = true;
@@ -3735,6 +3790,8 @@ export function usePianoRollInteractions(args: {
             }
             (e.currentTarget as HTMLCanvasElement).setPointerCapture(e.pointerId);
             invalidate();
+            // 与 move 路径同一约定：live 覆盖不进 React，波形需显式重绘。
+            requestWaveformRepaint();
 
             if (isLineTool || isVibratoTool) {
                 // Line tool: draw a straight line from start to current pointer
@@ -3836,6 +3893,8 @@ export function usePianoRollInteractions(args: {
                         }
                     }
                     invalidate();
+                    // 绘制中：live 覆盖只改 ref，波形面需显式重绘才能按动态值变化。
+                    requestWaveformRepaint();
                 };
 
                 const onUp = () => {
@@ -3985,6 +4044,8 @@ export function usePianoRollInteractions(args: {
                         }
                     }
                     invalidate();
+                    // 同上：live 覆盖只改 ref，波形面需显式重绘。
+                    requestWaveformRepaint();
                 };
 
                 const onUp = () => {
