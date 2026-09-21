@@ -1190,24 +1190,52 @@ mod tests {
                 "{label}：未画帧增益仍应为 1，实测 {}",
                 gains[0]
             );
-            let min_gain = gains.iter().cloned().fold(f32::INFINITY, f32::min);
-            assert!(min_gain > 0.5, "{label}：不得跌落，实测最小增益 {min_gain}");
-            // 编辑收尾段不得"冲高再塌陷"（那是分子/分母下钳折点造成的：
-            // 修复前该段的增益会先多涨 ≈1.0 再在格末崩到 1）。
-            let tail: Vec<f32> = gains[220..=441].to_vec();
-            let tail_max = tail.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-            assert!(
-                tail_max <= tail[0] + 0.1,
-                "{label}：收尾不得冲高，起点 {} 峰值 {tail_max}",
-                tail[0]
-            );
-            assert!(
-                (tail[tail.len() - 1] - 1.0).abs() < 1e-3,
-                "{label}：收尾应回到未画帧的增益 1，实测 {}",
-                tail[tail.len() - 1]
-            );
             if expect_smooth {
-                // 基线正常时，相邻样本的增益变化必须极小（平滑斜坡）。
+                // 基线有内容：交界处不得跌落。
+                let min_gain = gains.iter().cloned().fold(f32::INFINITY, f32::min);
+                assert!(min_gain > 0.5, "{label}：不得跌落，实测最小增益 {min_gain}");
+            } else {
+                // 基线是静音（无内容）：**收尾那一格**应当是单调淡出到静音 ——
+                // 而不是旧的"先掉到 0 再弹回"。逐样本单调即可区分两者。
+                // （只取收尾格：起始格是编辑的起笔，本来就应当上升。）
+                let tail: Vec<f32> = gains[220..=441].to_vec();
+                // ① 不得"冲高再塌陷"：峰值只允许比起点高一个可忽略的量
+                //    （旧实现会先多涨 ≈20% 再崩，那是下钳折点的特征）。
+                let tail_max = tail.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                assert!(
+                    tail_max <= tail[0] + 0.05,
+                    "{label}：无内容收尾不得冲高，起点 {} 峰值 {tail_max}",
+                    tail[0]
+                );
+                // ② 粗粒度上必须单调不增（真正的淡出）。取每 22 个样本一点：
+                //    分母穿过下限时增益会有一个很窄的"拐点"（母数与分母同向趋零，
+                //    见 DYN_SILENCE_FLOOR 的说明，修复前就存在），但**整体形状**
+                //    必须是单调下降 —— 旧实现的"先冲高 20% 再崩"会在这里露馅。
+                let coarse: Vec<f32> = tail.iter().step_by(22).cloned().collect();
+                for pair in coarse.windows(2) {
+                    assert!(
+                        pair[1] <= pair[0] + 0.05,
+                        "{label}：无内容收尾必须整体单调淡出，实测 {} → {}",
+                        pair[0],
+                        pair[1]
+                    );
+                }
+                // ③ 末态是静音（无内容 ⇒ 不再放大噪声底）—— 见下方统一断言。
+            }
+            if expect_smooth {
+                // 基线有内容：收尾必须回到未画帧的增益 1，且相邻样本变化极小。
+                let tail: Vec<f32> = gains[220..=441].to_vec();
+                let tail_max = tail.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                assert!(
+                    tail_max <= tail[0] + 0.1,
+                    "{label}：收尾不得冲高，起点 {} 峰值 {tail_max}",
+                    tail[0]
+                );
+                assert!(
+                    (tail[tail.len() - 1] - 1.0).abs() < 1e-3,
+                    "{label}：收尾应回到未画帧的增益 1，实测 {}",
+                    tail[tail.len() - 1]
+                );
                 let max_jump = gains
                     .windows(2)
                     .map(|p| (p[1] - p[0]).abs())
@@ -1215,6 +1243,15 @@ mod tests {
                 assert!(
                     max_jump < 0.05,
                     "{label}：解析后相邻样本增益变化应极小，实测 {max_jump}"
+                );
+            } else {
+                // 基线是静音（无内容）：收尾淡出到静音 —— 末态是 0（不再放大噪声底），
+                // 整体形状单调下降（见上面的粗粒度断言）。
+                let tail: Vec<f32> = gains[220..=441].to_vec();
+                assert!(
+                    *tail.last().unwrap() < 1e-3,
+                    "{label}：无内容收尾末态应为静音，实测 {}",
+                    tail[tail.len() - 1]
                 );
             }
         }
@@ -1239,16 +1276,62 @@ mod tests {
         assert!((l - 1.0).abs() < 1e-6, "left got {l}");
     }
 
+    /// ★★ 端到端守卫（此前缺失）：**经过装配期**（`resolve_dyn_curves_for_audio`）之后，
+    /// −90 dB 原声处拉高动态仍必须不可闻。
+    ///
+    /// 为什么必须有这一条：单测若自己构造 clip（直接给原始基线），就绕过了装配期 ——
+    /// 而"装配期把基线预先下钳到下限"正好会让 `compute_dyn_gain` 的**无内容淡出**
+    /// 失效（淡出(max(原声,下限)) 恒为 1）⇒ 音频端继续 ×1000 放大噪声底，而预览端
+    /// 用原始基线算所以看起来是对的。那种分叉只有经过装配期的测试才能拦住。
     #[test]
-    fn dyn_gain_bounds_no_content_frames_instead_of_rejecting() {
-        // 无内容帧（−80 dBFS，抖动噪声量级）：增益有界（分母钳到下限），
-        // 不会无限放大 —— 但也不再是"拒绝放大返回 1"（那会造成门限处阶跃，
-        // 即近零处的随机伪影，见 DYN_SILENCE_FLOOR 的说明）。
-        let clip = clip_with_dyn(Some(vec![1.0f32]), Some(vec![0.0001f32]));
+    fn dyn_gain_stays_inaudible_at_dither_level_through_assembly() {
+        use crate::renderer::common_params::{resolve_dyn_curves_for_audio, DYN_FOLLOW_ORIG};
+
+        let dither = 10f32.powf(-90.0 / 20.0);
+        for target in [0.25f32, 0.5, 1.0] {
+            // 用户把 −90 dB 处的动态拉高：存储曲线里该帧是已画值，其余未画。
+            let stored = vec![DYN_FOLLOW_ORIG, target, DYN_FOLLOW_ORIG];
+            let baseline = vec![dither, dither, dither];
+            let r = resolve_dyn_curves_for_audio(&stored, Some(&baseline));
+            let clip = clip_with_dyn(Some(r.target), Some(r.baseline));
+            // 第 1 帧（已画）与相邻帧（未画）都要检查。
+            for frame in [0u64, 220, 441] {
+                let gain = apply_mix_automation(&clip, frame, 1.0, 1.0).0;
+                let out_db = 20.0 * (dither * gain).max(1e-12).log10();
+                assert!(
+                    out_db < -60.0,
+                    "目标 {target} / 样本 {frame}：−90 dB 处输出电平 {out_db:.1} dBFS 应低于 −60 dBFS"
+                );
+            }
+        }
+    }
+
+    /// ★ 无内容帧不得把噪声底放大成可闻嘶声（用户报告：原声 ≈ −90 dB 处拉高动态）。
+    ///
+    /// 旧实现把下限之下的增益固定为 `目标/下限`（可达 ×1000）—— 分母"界定无内容"
+    /// 的初衷是**有界**，但 −90 dB 抖动 ×500 仍会把噪声底抬到 −36 dBFS（清楚可闻）。
+    /// 现行实现按 smoothstep 淡出，输出电平随原声一并下降。
+    #[test]
+    fn dyn_gain_fades_out_contentless_noise_floor() {
+        // −90 dB（16bit 抖动量级）原声，用户把目标拉高：
+        for target in [0.25f32, 0.5, 1.0] {
+            let clip = clip_with_dyn(Some(vec![target]), Some(vec![3.162_277_7e-5]));
+            let (l, _r) = apply_mix_automation(&clip, 0, 1.0, 1.0);
+            // `l` 就是该帧的"输出电平/原声"之比乘上输入 1.0，即增益；
+            // 我们真正关心的是**输出电平** = 原声 × 增益。
+            let out_db = 20.0 * (3.162_277_7e-5 * l).max(1e-12).log10();
+            assert!(
+                out_db < -60.0,
+                "目标 {target} 时 −90 dB 处的输出电平 {out_db:.1} dBFS 应低于 −60 dBFS"
+            );
+        }
+        // 有内容处不受影响：−40 dBFS 的轻声照常兑现目标（×50 → 0.5）。
+        let quiet = 10f32.powf(-40.0 / 20.0);
+        let clip = clip_with_dyn(Some(vec![0.5]), Some(vec![quiet]));
         let (l, _r) = apply_mix_automation(&clip, 0, 1.0, 1.0);
         assert!(
-            (l - crate::renderer::common_params::DYN_MAX_GAIN).abs() < 1e-3,
-            "无内容帧的增益应恰好钳到上限，实测 {l}"
+            (l - 0.5 / quiet).abs() < 0.5,
+            "轻声处应照常放大到目标，实测增益 {l}"
         );
     }
 
@@ -1303,5 +1386,4 @@ mod tests {
         let (l, _r) = apply_mix_automation(&clip, (0.0225 * sr as f64) as u64, 1.0, 1.0);
         assert!((l - 1.0).abs() < 1e-6, "越界后不得污染，got {l}");
     }
-
 }

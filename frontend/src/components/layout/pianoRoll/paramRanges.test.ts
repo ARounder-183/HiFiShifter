@@ -115,10 +115,15 @@ describe("computeDynGain", () => {
         expect(computeDynGain(DYN_FOLLOW_ORIG, 0.5)).toBe(1); // 哨兵：沿用原声
         expect(computeDynGain(0, 0)).toBe(0); // 真静音 + 画静音 = 静音
         expect(computeDynGain(0, 0.02)).toBe(0); // 画 0 必须真静音
-        // 无内容帧（−80 dBFS）的提升：分母钳到下限 ⇒ 有界到上限（不无限放大），
-        // 而不是旧的"拒绝放大返回 1"（那会造成门限处阶跃 → 伪影）。
-        expect(computeDynGain(1, 0.0001)).toBe(DYN_MAX_GAIN);
-        expect(computeDynGain(1, 0)).toBe(DYN_MAX_GAIN);
+        // 无内容帧（低于静音下限）：分母钳到下限 ⇒ 增益**有界**，并按"无内容"
+        // 平滑淡出（不是旧的固定 ×1000 —— 那会把抖动噪声底抬成可闻嘶声，
+        // 也不是更早的"拒绝放大返回 1" —— 那会造成门限处阶跃 → 伪影）。
+        const dither = 10 ** (-80 / 20); // 1e-4
+        const gDither = computeDynGain(1, dither);
+        expect(gDither).toBeLessThan(DYN_MAX_GAIN);
+        expect(gDither).toBeGreaterThan(0);
+        expect(computeDynGain(1, 0)).toBe(0); // 真静音：无内容 → 增益 0
+        expect(computeDynGain(1, DYN_SILENCE_FLOOR)).toBeCloseTo(DYN_MAX_GAIN, 6); // 门限处不淡出
     });
 
     it("★ 增益关于原声连续（近零伪影的根因）", () => {
@@ -142,8 +147,15 @@ describe("computeDynGain", () => {
         // 下限之内衰减到一半。
         expect(computeDynGain(0.002, 0.004)).toBeCloseTo(0.5, 9);
         expect(computeDynGain(0, 0.0005)).toBe(0); // 画静音
-        // 下限之下分母恒被钳到下限 ⇒ 增益只由目标决定（无台阶）。
-        expect(computeDynGain(0.0005, 0.0005)).toBe(computeDynGain(0.0005, 0.0001));
+        // 下限之下：增益有界**且随原声平滑淡出**（无内容越彻底越小、无台阶）。
+        expect(computeDynGain(0.0005, 0.0001)).toBeLessThan(computeDynGain(0.0005, 0.0005));
+        // 连续性：原声轴上一阶上采样，相邻取值之差有界。
+        let prev = computeDynGain(0.001, 0);
+        for (let step = 1; step <= 200; step += 1) {
+            const cur = computeDynGain(0.001, (DYN_SILENCE_FLOOR * step) / 200);
+            expect(Math.abs(cur - prev)).toBeLessThan(0.01);
+            prev = cur;
+        }
         // 上限 = 从下限兑现到值域顶端；越界曲线才被它兜住。
         expect(DYN_MAX_GAIN).toBe(DYN_VALUE_MAX / DYN_SILENCE_FLOOR);
         expect(computeDynGain(1e9, DYN_SILENCE_FLOOR * 1.0001)).toBeLessThanOrEqual(DYN_MAX_GAIN);
@@ -348,5 +360,27 @@ describe("shiftDynValueForDrag（动态拖拽的完整法则）", () => {
     it("锚点拖到底：整段缩到静音（与「把锚点拖到 0」一致）", () => {
         expect(shiftDynValueForDrag(0.4, 0.5, -0.5)).toBe(0);
         expect(shiftDynValueForDrag(0.05, 0.5, -0.5)).toBe(0);
+    });
+});
+
+describe("无内容噪声底不再被放大（用户场景：原声 ≈ −90 dB 处拉高动态）", () => {
+    const DITHER = 10 ** (-90 / 20); // ≈ 3.16e-5，16bit 抖动量级
+
+    it("★ 输出电平必须低于 −60 dBFS（不可闻）", () => {
+        for (const target of [0.25, 0.5, 1]) {
+            const gain = computeDynGain(target, DITHER);
+            const outDb = 20 * Math.log10(Math.max(DITHER * gain, 1e-12));
+            expect(outDb).toBeLessThan(-60);
+        }
+    });
+
+    it("有内容处不受影响：−40 dBFS 的轻声照常兑现目标", () => {
+        const quiet = 10 ** (-40 / 20);
+        expect(computeDynGain(0.5, quiet)).toBeCloseTo(0.5 / quiet, 6);
+        // 下限之上未画帧恒为 1（未编辑区逐像素不变的前提）。
+        for (const db of [-60, -50, -30, -6]) {
+            const orig = 10 ** (db / 20);
+            expect(computeDynGain(orig, orig)).toBeCloseTo(1, 9);
+        }
     });
 });

@@ -828,6 +828,11 @@ fn convert_mix_frame_value(
     match direction {
         MixConversionDirection::VolumeToDyn => {
             // 音量归位 1.0；动态接管（有数据的帧换算，无数据的帧表达"沿用原声"）。
+            // 反解目标电平：使 `compute_dyn_gain(new_dyn, baseline) == v`。
+            // 下限之上即 `v × 基线`（精确）；下限之下增益公式含"无内容淡出"，
+            // 严格反解会要求超过值域的目标值，因此这里仍按 `v × 基线` 近似 ——
+            // 该情形下转换后该帧会更**轻**（无内容是静音，方向安全），
+            // 与 `volume_to_dyn_is_effect_equivalent` 用例声明的边界一致。
             let new_dyn = match volume_value {
                 Some(v) if v.is_finite() && baseline > 0.0 => (v * baseline).clamp(0.0, dyn_max),
                 _ => sentinel,
@@ -837,11 +842,13 @@ fn convert_mix_frame_value(
         MixConversionDirection::DynToVolume => {
             // 动态归位哨兵（沿用原声）；音量接管。
             let new_volume = match dyn_raw {
-                // 用户画过的帧：换算成等效音量。分母与 compute_dyn_gain 同款
-                // 钳到 DYN_SILENCE_FLOOR，保证互转前后的增益逐帧一致。
+                // 用户画过的帧：换算成等效音量 —— **直接取该帧的动态增益**（唯一真源
+                // 是 `compute_dyn_gain`）。此处曾自己重算 `t / max(基线, 下限)`，
+                // 一旦增益公式里加入别的因素（如"无内容淡出"）就会与音频分叉，
+                // 违背"互转前后增益逐帧一致"的承诺。
                 Some(t) if t.is_finite() && t >= 0.0 => {
-                    let denom = baseline.max(crate::renderer::common_params::DYN_SILENCE_FLOOR);
-                    (t / denom).clamp(0.0, vol_max)
+                    crate::renderer::common_params::compute_dyn_gain(t, baseline)
+                        .clamp(0.0, vol_max)
                 }
                 // 哨兵 / 无数据帧：原本就是"不改变" → 音量 1.0。
                 _ => 1.0,

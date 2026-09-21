@@ -115,15 +115,23 @@ describe("makeLoudnessAmplitudeMap", () => {
         }
     });
 
-    it("bounds no-content frames instead of rejecting amplification (continuity)", () => {
-        // 无内容帧（−80 dBFS）：分母钳到下限 ⇒ 增益有界（上限），而非旧实现的
-        // "拒绝放大返回 1"—— 后者在下限处产生阶跃，正是近零伪影的根因。
+    it("bounds no-content frames and fades them out (continuity)", () => {
+        // 无内容帧（−80 dBFS）：分母钳到下限 ⇒ 增益**有界**，并按"无内容"平滑淡出。
+        // 两个历史实现都被否掉了：固定 ×1000 会把抖动噪声底抬成可闻嘶声（−90 dB
+        // 原声 ×500 = −36 dBFS）；而更早的"低于门限就拒绝放大返回 1"会在下限处
+        // 产生阶跃（近零伪影的根因）。淡出曲线（smoothstep）在下限处**导数也连续**。
+        const baseline = 0.0001;
         const map = makeLoudnessAmplitudeMap(
-            source({ dynTarget: [1], dynBaseline: [0.0001] }),
+            source({ dynTarget: [1], dynBaseline: [baseline] }),
             { volume: noLive, dyn: noLive },
             () => 0,
         );
-        expect(map(1, 1, 0)).toBeCloseTo(DYN_MAX_GAIN, 6);
+        const gain = map(1, 1, 0);
+        expect(gain).toBeLessThan(DYN_MAX_GAIN);
+        expect(gain).toBeGreaterThan(0);
+        // 真正要保证的是**输出电平**（原声 × 增益）：远低于旧的"按目标电平放大"。
+        expect(20 * Math.log10(baseline * gain)).toBeLessThan(-50);
+        expect(20 * Math.log10(baseline * DYN_MAX_GAIN)).toBeCloseTo(-20, 0); // 旧行为对照
     });
 
     it("★ drawn silence silences the noise floor (protection never blocks attenuation)", () => {
@@ -333,7 +341,12 @@ describe("makeLoudnessAmplitudeMap · factor view", () => {
         const factor = factorOf(map);
 
         expect(factor(0)).toBe(0); // 真静音：画了静音 = 静音
-        expect(factor(0.01)).toBe(DYN_MAX_GAIN); // 无内容帧：分母钳到下限 ⇒ 有界
+        // 无内容帧：有界 + 淡出（详见上一条用例的说明）。关键是**有限** ——
+        // 非有限值会让几何层跳过整列。
+        const gain = factor(0.01);
+        expect(Number.isFinite(gain)).toBe(true);
+        expect(gain).toBeGreaterThan(0);
+        expect(gain).toBeLessThan(DYN_MAX_GAIN);
     });
 
     it("stays attached to the same map object as revision()", () => {

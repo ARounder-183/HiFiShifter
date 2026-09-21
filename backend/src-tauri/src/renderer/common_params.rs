@@ -33,11 +33,12 @@ pub(crate) const DYN_FOLLOW_ORIG: f32 = -1.0;
 ///
 /// 增益按 `目标 / max(原声, 本下限)` 求得，因此这个常数承担**两件事**：
 ///
-/// 1. **定义"无内容"的门槛**：原声低于 −60 dBFS 时视为数字抖动/极低电平噪声，
-///    分母被钳到下限 → 增益有界（`目标/下限 ≤ DYN_MAX_GAIN`），不会把噪声底
-///    放大成刺耳嘶声。它必须远低于常见内容电平：真实素材的轻声、气声、尾音
-///    普遍在 −34…−55 dBFS，门限若定在 −26 dBFS（历史值 0.05）会把它们整体
-///    误判为噪声底而完全无法提升。
+/// 1. **定义"无内容"的门槛**：原声低于 −60 dBFS 时视为数字抖动/极低电平噪声。
+///    分母被钳到下限 ⇒ 增益有界（`目标/下限 ≤ DYN_MAX_GAIN`）；**并且**由
+///    [`no_content_fade`] 按 smoothstep 淡出到静音 —— 仅有"有界"还不够：−90 dB
+///    的抖动 ×500 仍会把噪声底抬到 −36 dBFS（可闻嘶声）。它必须远低于常见内容
+///    电平：真实素材的轻声、气声、尾音普遍在 −34…−55 dBFS，门限若定在 −26 dBFS
+///    （历史值 0.05）会把它们整体误判为噪声底而完全无法提升。
 /// 2. **保证增益关于原声连续**（★ 伪影修复的关键，见下）。
 ///
 /// 【为什么必须"钳分母"而不是"拒绝放大"】历史实现写成"原声低于门限时直接返回
@@ -49,8 +50,8 @@ pub(crate) const DYN_FOLLOW_ORIG: f32 = -1.0;
 /// 两种表现都随缩放改变（缩放决定哪些帧被合并进同一列），正是用户报告的
 /// "近零处拉大动态后水平缩放出现随机伪影"。
 ///
-/// 钳分母则让增益处处连续（原声 → 0 时增益平滑趋近 `目标/下限` 这个上界，
-/// 而不是阶跃），相邻帧的抖动只带来成比例的小变化，伪影不再产生。
+/// 钳分母 + 平滑淡出则让增益处处连续：门限处既无阶跃、导数也连续（smoothstep
+/// 的两端导数为 0），相邻帧的抖动只带来成比例的小变化，伪影不再产生。
 /// 同时**语义完全保持**：`目标 ≤ 0`（画静音）在任何原声下都仍然返回 0。
 pub(crate) const DYN_SILENCE_FLOOR: f32 = 0.001;
 
@@ -253,12 +254,16 @@ pub(crate) fn sample_dyn_curve_at_sec(
 /// 语义（与 VocalShifter 的 DYN 一致）：
 /// - 目标为哨兵（负值）→ 沿用原声 → 增益 1.0；
 /// - 目标 ≤ 0（画静音）→ 0.0，**任何原声下都成立**（恒等于信号本身 ×0）；
-/// - 其余 → `目标 / max(原声, DYN_SILENCE_FLOOR)`，钳制到 `[0, DYN_MAX_GAIN]`。
+/// - 其余 → `目标 / max(原声, 下限) × 无内容淡出(原声)`，前一项钳制到
+///   `[0, DYN_MAX_GAIN]`，后一项是 [`no_content_fade`] 的 smoothstep 系数。
 ///
-/// 【为什么是"钳分母"而不是"低于门限就拒绝放大"】后者会让增益在门限处出现
-/// 无限阶跃（1 → 目标/门限），近零原声段的逐帧基线抖动会把相邻帧的显示高度
-/// 在"不可见"与"满高"之间来回切换，随缩放合并方式表现为随机伪影。钳分母使
-/// 增益关于原声**处处连续**，同时天然有界（原声 → 0 时增益 → 目标/门限 ≤ 上限）。
+/// 【两项各自的职责】
+/// - **钳分母**：让增益关于原声处处连续且**有界**（原声 → 0 时趋近 `目标/下限`
+///   这个上界，而不是"拒绝放大"那样的阶跃 —— 后者会让门限附近抖动的基线把相邻
+///   帧的增益在 1 与 1000 之间跳变，随缩放合并方式表现为随机伪影）。
+/// - **无内容淡出**：把"有界"真正变成"不可闻"。仅钳分母时 −90 dB 的抖动仍会被
+///   ×500 放大到 −36 dBFS（可闻嘶声）——下限的语义本来就是"无内容"，因此低于它
+///   的素材（不论用户把目标拉多高）都应当淡出到静音。
 /// 详见 `DYN_SILENCE_FLOOR` 的说明。
 #[inline]
 pub(crate) fn compute_dyn_gain(target: f32, orig: f32) -> f32 {
@@ -272,43 +277,69 @@ pub(crate) fn compute_dyn_gain(target: f32, orig: f32) -> f32 {
         // 画静音：恒为 0（任何原声下都真静音，包括真静音与原声未知的帧）。
         return 0.0;
     }
-    // 分母钳到下限：既界定"无内容"（增益有界，不放大噪声底），又保证增益
-    // 关于原声连续（见 DYN_SILENCE_FLOOR 的伪影说明）。
+    // 分母钳到下限：既界定"无内容"（增益有界），又保证增益关于原声连续
+    //（见 DYN_SILENCE_FLOOR 的伪影说明）。
     let denom = orig.max(DYN_SILENCE_FLOOR);
-    (target / denom).clamp(0.0, DYN_MAX_GAIN)
+    let level_targeting = (target / denom).clamp(0.0, DYN_MAX_GAIN);
+    // ★ 无内容淡出：下限**以下**的原声只是抖动噪声底（16bit 抖动 ≈ −90 dBFS），
+    // 把它按"目标电平"放大只会把噪声变成可听的嘶声 —— 实测 −90 dB 原声 + 目标
+    // 0.5 时输出达 −36 dBFS（清楚可闻）。下限的语义本来就是"无内容"，故低于它
+    // 时按 smoothstep 平滑淡出到静音。
+    level_targeting * no_content_fade(orig)
 }
 
-/// 音频路径使用的 DYN 曲线对（目标 + 分母），已消除全部"非数值"与下钳折点。
+/// 「原声是否算作**有内容**」的平滑度：静音下限之上恒 1，之下按 smoothstep 淡出到 0。
 ///
-/// 由 [`resolve_dyn_curves_for_audio`] 产出，两条曲线的帧栅格完全一致。
+/// 【为什么不是硬门限】硬门限会在门限处产生阶跃（增益 1 → 目标/门限），近零原声
+/// 段的逐帧基线抖动会让它变成随机咔哒 —— 这正是 `DYN_SILENCE_FLOOR` 当初拒绝
+/// "低于门限就不再放大"的理由。smoothstep 在门限处**导数也连续**，既压掉噪声底，
+/// 又不引入新的不连续。
+///
+/// 【为什么以原声（而非目标）为准】"有没有内容"是素材的属性，与用户画多高无关：
+/// 同一段抖动噪声底，用户拉高目标时不该变成嘶声，拉低目标时也不该变成"被压的
+/// 嘶声"。以原声判定即可让两种编辑都收敛到"静音"。
+///
+/// 【对未画帧的影响】未画帧的增益是 `原声 / max(原声, 下限)`，下限之上恰为 1；
+/// 下限之下则 < 1 —— 即"无内容处淡出到静音"。这与下限自身"界定无内容"的语义
+/// 一致（真实素材的轻声/气声/尾音普遍在 −34…−55 dBFS，都在下限之上，不受影响）。
+#[inline]
+fn no_content_fade(orig: f32) -> f32 {
+    // 0 / 负 / 非有限 → 无内容（非有限在上游已兜底为 1，此处只作防御）。
+    if !(orig > 0.0) {
+        return 0.0;
+    }
+    let x = (orig / DYN_SILENCE_FLOOR).min(1.0);
+    x * x * (3.0 - 2.0 * x)
+}
+
+/// 音频路径使用的 DYN 曲线对（目标 + 原声基线），已消除"非数值"与越界硬跳。
+///
+/// 由 [`resolve_dyn_curves_for_audio`] 产出，两条曲线帧栅格一致。
 pub(crate) struct AudioDynCurves {
-    /// 目标电平：哨兵已解析，长度 = 存储曲线长度 + 1（见下文的"末帧留一格"）。
+    /// 目标电平：哨兵已解析，长度 = 存储曲线长度 + 1（末帧留一格，见下）。
     pub(crate) target: Vec<f32>,
-    /// 分母（原声基线）：已下钳到 `DYN_SILENCE_FLOOR`，长度与存储基线相同。
+    /// 原声基线：**保持原值**（长度与存储基线相同）。⚠ 不得提前下钳 —— 见下。
     pub(crate) baseline: Vec<f32>,
 }
 
-/// 把存储形态的 DYN 曲线/基线转成**音频路径形态**，一次性消除三类增益不连续。
+/// 把存储形态的 DYN 曲线/基线转成**音频路径形态**。
 ///
 /// @param dyn_curve 存储的 DYN 曲线（可含哨兵）。
-/// @param orig_curve 原声电平基线；缺省 / 更短时按"该帧基线缺失"处理。
+/// @param orig_curve 原声电平基线；缺省 / 更短时按"该帧基线缺失"处理
+///   （与采样器一致：数组之外持有末值；整条缺失时引擎直接退回增益 1）。
 pub(crate) fn resolve_dyn_curves_for_audio(
     dyn_curve: &[f32],
     orig_curve: Option<&[f32]>,
 ) -> AudioDynCurves {
-    // 分母侧：**逐帧下钳**。采样器在数组之外持有末值，故"越界帧"的分母正是
-    // 末元素被下钳后的值 —— 与下面末帧留一格的取值同源。
+    // 与采样器同源的"该帧原声"：数组之外持有末值；无基线 → 0（引擎侧等价于增益 1）。
     let denominator_at = |i: usize| -> f32 {
         match orig_curve {
-            Some(c) if !c.is_empty() => {
-                let last = c.len() - 1;
-                c.get(i.min(last))
-                    .copied()
-                    .filter(|v| v.is_finite())
-                    .unwrap_or(DYN_SILENCE_FLOOR)
-                    .max(DYN_SILENCE_FLOOR)
-            }
-            _ => DYN_SILENCE_FLOOR,
+            Some(c) if !c.is_empty() => c
+                .get(i.min(c.len() - 1))
+                .copied()
+                .filter(|v| v.is_finite() && *v > 0.0)
+                .unwrap_or(0.0),
+            _ => 0.0,
         }
     };
 
@@ -321,19 +352,14 @@ pub(crate) fn resolve_dyn_curves_for_audio(
             target.push(denominator_at(i));
         }
     }
-    // 末帧留一格：让"编辑段收尾"有与内部交界等宽的一格过渡（见 ③）。
+    // 末帧留一格（见上文 2）。
     target.push(denominator_at(dyn_curve.len()));
 
+    // 基线**原样**交给引擎 —— 淡出判据依赖它（见上文 ⚠）。
     let baseline = match orig_curve {
         Some(c) if !c.is_empty() => c
             .iter()
-            .map(|v| {
-                if v.is_finite() {
-                    v.max(DYN_SILENCE_FLOOR)
-                } else {
-                    DYN_SILENCE_FLOOR
-                }
-            })
+            .map(|v| if v.is_finite() && *v > 0.0 { *v } else { 0.0 })
             .collect(),
         _ => Vec::new(),
     };
@@ -427,13 +453,13 @@ mod tests {
     }
 
     #[test]
-    fn dyn_gain_stays_bounded_below_the_floor() {
-        // 下限之下：分母被钳到下限 → 增益有界（不无限放大噪声底），且**不再是 1**。
-        assert_eq!(compute_dyn_gain(1.0, 0.0), DYN_MAX_GAIN);
-        assert_eq!(
-            compute_dyn_gain(1.0, DYN_SILENCE_FLOOR * 0.5),
-            DYN_MAX_GAIN
-        );
+    fn dyn_gain_stays_bounded_and_fades_below_the_floor() {
+        // 下限之下：分母被钳到下限 ⇒ 增益有界；同时按"无内容"淡出 ——
+        // 真静音（原声 0）时增益归 0（输出本来就是 0，与旧的 ×1000 等效），
+        // 抖动级原声则被显著压低（见 `no_content_fade` 与下方专门用例）。
+        assert_eq!(compute_dyn_gain(1.0, 0.0), 0.0);
+        let half_floor = compute_dyn_gain(1.0, DYN_SILENCE_FLOOR * 0.5);
+        assert!(half_floor < DYN_MAX_GAIN && half_floor > 0.0);
         // 提升被上限钳制（目标远超值域时也一样）。
         assert_eq!(
             compute_dyn_gain(DYN_MAX_GAIN * 2.0, DYN_SILENCE_FLOOR),
@@ -488,12 +514,49 @@ mod tests {
         // 下限之内的衰减照常生效（0.002 → 0.004 的一半）。
         let half = compute_dyn_gain(0.002, 0.004);
         assert!((half - 0.5).abs() < 1e-6, "got {half}");
-        // 下限之下：分母恒被钳到下限 ⇒ 增益只由目标决定（与原声的具体值无关）。
-        // 这保证了下限之下没有"相对电平"的台阶，是连续性/无伪影的直接体现。
-        let below_a = compute_dyn_gain(0.0005, 0.0005);
-        let below_b = compute_dyn_gain(0.0005, 0.0001);
-        assert_eq!(below_a, below_b);
-        assert!((below_a - 0.0005 / DYN_SILENCE_FLOOR).abs() < 1e-6);
+        // 下限之下：增益**有界**（分母钳到下限）且随原声**连续、单调**（无内容淡出）。
+        // 旧实现让增益在下限之下"只由目标决定"（与原声完全无关），从而把抖动噪声底
+        // 也按目标电平放大（−90 dB 原声 + 目标 0.5 → 输出 −36 dBFS，可闻嘶声）；
+        // 现行实现改为按 smoothstep 淡出 —— 连续性（无台阶）这一目标不变，只是
+        // 增益随原声平滑下降。
+        let below_a = compute_dyn_gain(0.001, 0.001);
+        let below_b = compute_dyn_gain(0.001, 0.0001);
+        assert!(below_b < below_a, "无内容越彻底，增益应越小");
+        // 连续性：在原声轴上一阶上采样，相邻取值的差有界（没有台阶）。
+        let mut prev = compute_dyn_gain(0.001, 0.0);
+        for step in 1..=200 {
+            let orig = DYN_SILENCE_FLOOR * (step as f32 / 200.0);
+            let cur = compute_dyn_gain(0.001, orig);
+            assert!(
+                (cur - prev).abs() < 0.01,
+                "下限附近增益出现台阶：{prev} → {cur}（原声 {orig}）"
+            );
+            prev = cur;
+        }
+    }
+
+    /// ★ 用户报告的场景：原声基线 ≈ −90 dB（16bit 抖动量级）时把动态拉高，
+    /// 不得把噪声底放大成可闻嘶声。
+    #[test]
+    fn dyn_gain_does_not_amplify_dither_level_content() {
+        let dither = 10f32.powf(-90.0 / 20.0); // ≈ 3.16e-5
+        for target in [0.25f32, 0.5, 1.0] {
+            let gain = compute_dyn_gain(target, dither);
+            let out = dither * gain; // 输出电平（峰值尺度）
+            let out_db = 20.0 * out.max(1e-12).log10();
+            assert!(
+                out_db < -60.0,
+                "目标 {target} / 原声 −90 dB：输出电平 {out_db:.1} dBFS 应低于 −60 dBFS（不可闻）"
+            );
+        }
+        // 有内容处不受影响：−40 dBFS（真实素材的轻声量级）照常兑现目标。
+        let quiet_content = 10f32.powf(-40.0 / 20.0);
+        assert!((compute_dyn_gain(0.5, quiet_content) - 0.5 / quiet_content).abs() < 1e-3);
+        // 下限之上恒等于 目标/原声（未画帧即恒 1）。
+        for db in [-60.0f32, -50.0, -30.0, -6.0] {
+            let orig = 10f32.powf(db / 20.0);
+            assert!((compute_dyn_gain(orig, orig) - 1.0).abs() < 1e-6);
+        }
     }
 
     // ── 音频路径形态的曲线解析（相邻点咔哒声的修复）─────────────────
@@ -533,18 +596,25 @@ mod tests {
     }
 
     #[test]
-    fn resolve_floors_the_denominator_to_remove_the_kink() {
-        // 分母在装配期下钳：安静帧的基线不再让"目标/分母"在格内先冲高再塌陷。
-        let curve = [0.5, DYN_FOLLOW_ORIG];
-        let orig = [0.1, 0.0];
-        let r = resolve_dyn_curves_for_audio(&curve, Some(&orig));
-        assert_eq!(r.baseline[1], DYN_SILENCE_FLOOR);
-        // 未画帧的解析值 == 同下标的分母值 ⇒ 该格内比值处处为 1 的起点。
-        assert_eq!(r.target[1], r.baseline[1]);
-        // 下钳对整帧增益逐值无损：与 `compute_dyn_gain` 内建的下钳等价。
-        assert_eq!(
-            compute_dyn_gain(0.5, r.baseline[0]),
-            compute_dyn_gain(0.5, orig[0])
+    fn resolve_keeps_the_baseline_raw_so_the_fade_can_fire() {
+        // ⚠ 分母（原声基线）必须**保持原值**：`compute_dyn_gain` 用它同时作分母与
+        // "有没有内容"的判据。曾经在这里下钳到下限，结果淡出的输入被抹平
+        //（`淡出(max(原声,下限))` 恒为 1）—— 音频端继续 ×1000 放大抖动噪声底，
+        // 而预览端用原始基线、看起来是对的。
+        let quiet = 10f32.powf(-90.0 / 20.0); // ≈ 3.16e-5
+        let r = resolve_dyn_curves_for_audio(&[0.5, DYN_FOLLOW_ORIG], Some(&[quiet, quiet]));
+        assert_eq!(r.baseline[0], quiet, "基线不得被下钳");
+        assert_eq!(r.target[1], quiet, "未画帧解析成该帧基线原值");
+        // 于是淡出真的会触发：高目标 + 抖动级原声 ⇒ 输出电平不可闻。
+        let gain = compute_dyn_gain(r.target[0], r.baseline[0]);
+        let out_db = 20.0 * (quiet * gain).max(1e-12).log10();
+        assert!(out_db < -60.0, "输出电平 {out_db:.1} dBFS 应低于 −60 dBFS");
+        // 对照：若把基线提前下钳（旧写法），淡出失效 —— 这正是那条 bug 的形状。
+        let floored_gain = compute_dyn_gain(0.5, quiet.max(DYN_SILENCE_FLOOR));
+        let floored_out_db = 20.0 * (quiet * floored_gain).max(1e-12).log10();
+        assert!(
+            floored_out_db > -40.0,
+            "对照值应当是可闻的（说明下钳确实会抹平淡出），实测 {floored_out_db:.1} dBFS"
         );
     }
 
@@ -561,10 +631,23 @@ mod tests {
                 0.0 // 采样器对无数据帧的取值；`compute_dyn_gain` 会再钳到下限。
             };
             let gain = compute_dyn_gain(r.target[0], denom);
-            assert!(
-                (gain - 1.0).abs() < 1e-6,
-                "基线 {baseline} 时未画帧增益应为 1，实测 {gain}"
-            );
+            if baseline.is_finite() && baseline >= DYN_SILENCE_FLOOR {
+                assert!(
+                    (gain - 1.0).abs() < 1e-6,
+                    "基线 {baseline} 时未画帧增益应为 1，实测 {gain}"
+                );
+            } else {
+                // 下限之下 = 无内容：未画帧也按"无内容"淡出（越接近真静音越彻底）。
+                // 注意这是**渐弱**而非硬门限：−66 dB（下限的一半）时仍有 −6 dB 的
+                // 残留增益，到 −90 dB 抖动级才基本归零（见 no_content_fade 的曲线）。
+                assert!(
+                    gain < 1.0,
+                    "基线 {baseline}（无内容）时未画帧应淡出，实测增益 {gain}"
+                );
+                if baseline == 0.0 {
+                    assert_eq!(gain, 0.0, "真静音处增益必须为 0");
+                }
+            }
         }
     }
 
@@ -572,10 +655,12 @@ mod tests {
     fn resolve_handles_missing_and_short_baseline() {
         let curve = [DYN_FOLLOW_ORIG, DYN_FOLLOW_ORIG, DYN_FOLLOW_ORIG];
         let r_none = resolve_dyn_curves_for_audio(&curve, None);
-        assert!(r_none.target.iter().all(|v| *v == DYN_SILENCE_FLOOR));
+        // 原声未知 → 解析值 0、基线为空；引擎侧据此直接退回增益 1（既有语义）。
+        assert!(r_none.target.iter().all(|v| *v == 0.0));
         assert!(r_none.baseline.is_empty());
         let r_short = resolve_dyn_curves_for_audio(&curve, Some(&[0.5]));
         assert_eq!(r_short.target[0], 0.5);
+        assert_eq!(r_short.baseline, vec![0.5]);
         // 越界帧按持有末值（与采样器一致），而不是回落到下限。
         assert_eq!(r_short.target[1], 0.5);
         assert_eq!(r_short.target[2], 0.5);

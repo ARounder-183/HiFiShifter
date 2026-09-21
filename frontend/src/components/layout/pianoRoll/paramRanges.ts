@@ -247,11 +247,15 @@ export function restoreDynSentinels(
 /**
  * 动态增益的**电平分母下限**：−60 dBFS（与后端 `DYN_SILENCE_FLOOR` 一一对应）。
  *
- * 增益按 `目标 / max(原声, 本下限)` 求得：既界定"无内容"（原声低于此值时
- * 增益有界，不会把噪声底放大成嘶声），又让增益关于原声**处处连续** ——
- * 后者是"近零原声处拉大动态 + 水平缩放出现随机伪影"的修复关键：
- * 若写成"低于门限就拒绝放大"，增益会在门限处阶跃（1 → 目标/门限），
- * 近零段的逐帧抖动会让相邻列的显示高度在"不可见"与"满高"之间随机切换。
+ * 增益按 `目标 / max(原声, 本下限) × 无内容淡出(原声)` 求得（见
+ * `computeDynGain` / `noContentFade`）：
+ * - **钳分母**：界定"无内容"（原声低于此值时增益有界）并让增益关于原声
+ *   **处处连续** —— 后者是"近零原声处拉大动态 + 水平缩放出现随机伪影"的
+ *   修复关键：若写成"低于门限就拒绝放大"，增益会在门限处阶跃，
+ *   近零段的逐帧抖动会让相邻列的显示高度在"不可见"与"满高"之间随机切换；
+ * - **无内容淡出**：仅有"有界"还不够 —— −90 dBFS 的抖动被 ×500 放大后仍达
+ *   −36 dBFS（可闻嘶声）。下限的语义本就是"无内容"，故低于它时按 smoothstep
+ *   淡出到静音（门限处导数也连续，不引入新的不连续）。
  *
  * 下限必须远低于常见内容电平：真实素材的轻声、气声、尾音普遍在 −34…−55 dBFS。
  */
@@ -285,7 +289,28 @@ export function computeDynGain(target: number, orig: number): number {
     if (target <= 0) return 0; // 画静音：任何原声下都真静音
     // 分母钳到下限：界定"无内容" + 保证增益关于原声连续（见 DYN_SILENCE_FLOOR）。
     const denom = Math.max(orig, DYN_SILENCE_FLOOR);
-    return Math.min(Math.max(target / denom, 0), DYN_MAX_GAIN);
+    const levelTargeting = Math.min(Math.max(target / denom, 0), DYN_MAX_GAIN);
+    // ★ 无内容淡出（与后端 `common_params::compute_dyn_gain` 逐分支同构）：
+    // 下限**以下**的原声只是抖动噪声底（16bit 抖动 ≈ −90 dBFS），按"目标电平"
+    // 放大只会把噪声变成可听的嘶声。下限的语义本就是"无内容"，故低于它时按
+    // smoothstep 平滑淡出到静音（在门限处导数也连续，不引入阶跃伪影）。
+    return levelTargeting * noContentFade(orig);
+}
+
+/**
+ * 「原声是否算作**有内容**」的平滑度（与后端同构）：下限之上恒 1，之下 smoothstep 淡出到 0。
+ *
+ * 【为什么以原声判定】"有没有内容"是素材的属性，与用户画多高无关 —— 同一段抖动
+ * 噪声底，拉高目标不该变嘶声，拉低目标也不该变成"被压的嘶声"。
+ *
+ * 【对未画帧】未画帧的增益是 `原声 / max(原声, 下限)`：下限之上恰为 1，之下 < 1
+ * （即"无内容处淡出到静音"，与下限"界定无内容"的语义一致）。真实素材的轻声/
+ * 气声/尾音普遍在 −34…−55 dBFS，都在下限之上，不受影响。
+ */
+function noContentFade(orig: number): number {
+    if (!(orig > 0)) return 0;
+    const x = Math.min(orig / DYN_SILENCE_FLOOR, 1);
+    return x * x * (3 - 2 * x);
 }
 
 /**
