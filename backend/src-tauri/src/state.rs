@@ -531,23 +531,21 @@ pub struct TrackParamsState {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub extra_curves: HashMap<String, Vec<f32>>,
 
-    /// 原声电平基线（DYN 的 `*DYN`）：逐帧原声电平，倍率域（1.0 = 分析参考电平）。
+    /// 原声电平基线（DYN 的 `*DYN`）：逐帧原声电平，**绝对倍率**
+    ///（1.0 = 数字满量程 = 0 dBFS，0.5 = −6 dBFS）。
     ///
     /// 与 `pitch_orig` 同性质的**派生数据**：由后台响度分析从源音频算出，
     /// 因此不落盘（打开工程后自动重建），其失效判定复用 `dyn_orig_key`。
+    ///
+    /// 【锚点必须是绝对的】基线不做任何归一化 —— 一旦除以"本组最响段落"，
+    /// 倍率就失去了绝对意义，与 DAW 电平表的读数对不上（见
+    /// `pitch_analysis/dyn_analysis.rs` 文件头）。
     #[serde(skip)]
     pub dyn_orig: Vec<f32>,
 
     /// 原声电平基线的缓存键（= `build_root_dyn_key`），分析完成后写入。
     #[serde(skip)]
     pub dyn_orig_key: Option<String>,
-
-    /// 原声电平的归一化参考（linear 幅度，1.0 = 数字满量程）。
-    ///
-    /// `dyn_orig = clip_level / reference`，前端据此把源文件波形峰值投影到
-    /// DYN 面板的 dB 纵轴上，使波形与曲线/基线共用同一坐标系。
-    #[serde(skip)]
-    pub dyn_orig_reference: f32,
 
     /// 声码器专属静态参数（key = ParamDescriptor::id，值为枚举整数转 f64）。
     /// 例："synth_mode" = 1.0（SYNTHMODE_MF）。

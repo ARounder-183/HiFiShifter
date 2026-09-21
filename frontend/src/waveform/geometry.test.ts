@@ -69,6 +69,218 @@ test("waveform/geometry dual-band samples each channel plane independently", () 
     }
 });
 
+/**
+ * ★ 近零原声幻峰回归：列包络**不得超出逐样本真值**。
+ *
+ * 【故障形态】把"原始动态值几乎接近 0"处的动态拉大后缩小视图，波形在该处
+ * 出现随机伪影（幻峰 / 空洞，随缩放位置改变）。
+ *
+ * 【根因】几何层原先把"片内最大峰值"（按**窗口**聚合）乘上"片**中心**时刻的
+ * 增益"（**点采样**）。两个口径不同，当增益在片内剧烈变化时（近零原声下
+ * `目标/max(原声,下限)` 逐帧可跨数个数量级）乘积会系统性超出真实包络，且
+ * 超出量随片宽增长 —— 一列覆盖的桶越多（缩得越小）幻峰越高。
+ *
+ * 【判据】以逐样本真值 `max|sample| × gain(该样本时刻)` 为基准：几何输出的
+ * 每一列都不得显著超过它所覆盖区间内的真值最大值。（面积/形状可以不同，
+ * 但"可听高度"不可能超过该区间内真实出现过的最大可听幅度。）
+ */
+test("near-zero dyn gain: envelope never exceeds per-sample ground truth", async () => {
+    const SR = 48000;
+    const FRAME_MS = 5;
+    const DIV = 16; // 桶粒度（L0）；窗口内桶数 ≫ 16 片上限，使上限真正生效
+    const DUR = 12;
+    const T0 = 3.5;
+    const total = Math.round(DUR * SR);
+
+    // 近零噪声尾音：每 5ms 帧一个随机幅度（10^-3.6 … 10^-2.7），帧内白噪。
+    // 帧间幅度剧烈波动 ⇒ 20ms 峰（基线）与粗略桶峰不成比例 —— 触发失配。
+    let seed = 987654321;
+    const rnd = () => {
+        seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+        return seed / 0x7fffffff;
+    };
+    const audio = new Float32Array(total);
+    const frameSamples = Math.round((FRAME_MS / 1000) * SR);
+    let amp = 0.25;
+    for (let i = 0; i < total; i += 1) {
+        const t = i / SR;
+        if (t < T0) {
+            audio[i] = 0.25 * Math.sin(2 * Math.PI * 220 * t);
+        } else {
+            const off = i - Math.round(T0 * SR);
+            if (off % frameSamples === 0) amp = Math.pow(10, -3.6 + 0.9 * rnd());
+            audio[i] = amp * (rnd() * 2 - 1);
+        }
+    }
+
+    // 基线：20ms 窗峰值、帧中心锚定（与后端 compute_frame_levels 同口径）。
+    const nFrames = Math.round((DUR * 1000) / FRAME_MS);
+    const baseline = new Float32Array(nFrames);
+    const half = Math.round(0.01 * SR);
+    for (let h = 0; h < nFrames; h += 1) {
+        const c = Math.round(((h + 0.5) * FRAME_MS * SR) / 1000);
+        let p = 1e-9;
+        for (let i = Math.max(0, c - half); i < Math.min(total, c + half); i += 1) {
+            const a = Math.abs(audio[i]);
+            if (a > p) p = a;
+        }
+        baseline[h] = p;
+    }
+
+    const FLOOR = 0.001;
+    const MAX_GAIN = 1000;
+    const gainAt = (sec: number): number => {
+        const f = (sec * 1000) / FRAME_MS;
+        const i0 = Math.max(0, Math.min(nFrames - 1, Math.floor(f)));
+        const i1 = Math.min(nFrames - 1, i0 + 1);
+        const fr = Math.min(1, Math.max(0, f - i0));
+        const b = Math.max(baseline[i0] + (baseline[i1] - baseline[i0]) * fr, FLOOR);
+        return Math.min(1 / b, MAX_GAIN);
+    };
+
+    // 幅度映射：目标 1.0 的 dyn 增益（与 paramRanges::computeDynGain 同构）。
+    const map = ((value: number, gain: number, timeSec: number | null) =>
+        timeSec === null ? value * gain : value * gain * gainAt(timeSec)) as ((
+        v: number,
+        g: number,
+        t: number | null,
+    ) => number) & { factorAt(t: number | null): number | null };
+    map.factorAt = (t) => (t === null ? 1 : gainAt(t));
+
+    // 桶峰值（div 粒度），与显示管线一致。
+    const bucketCount = Math.ceil(total / DIV);
+    const bMax = new Float32Array(bucketCount);
+    const bMin = new Float32Array(bucketCount);
+    for (let b = 0; b < bucketCount; b += 1) {
+        let mx = 0;
+        let mn = 0;
+        for (let i = b * DIV; i < Math.min(total, (b + 1) * DIV); i += 1) {
+            if (audio[i] > mx) mx = audio[i];
+            if (audio[i] < mn) mn = audio[i];
+        }
+        bMax[b] = mx;
+        bMin[b] = mn;
+    }
+
+    let observableCount = 0;
+    let totalObservableSlots = 0;
+    for (const widthPx of [600, 300, 150, 75, 40, 20]) {
+        const scene: WaveformScene = {
+            segments: [
+                {
+                    clipId: "c",
+                    sourcePath: "x.wav",
+                    sourceSampleRate: SR,
+                    sourceStartSec: 0,
+                    sourceEndSec: DUR,
+                    clipStartSec: 0,
+                    clipLocalStartSec: 0,
+                    clipLocalEndSec: DUR,
+                    clipTotalDurationSec: DUR,
+                    screenRect: { x: 0, y: 0, width: widthPx, height: 100 },
+                    reversed: false,
+                    gain: 1,
+                    fadeInSec: 0,
+                    fadeOutSec: 0,
+                    fadeInShape: 0,
+                    fadeInDir: 0,
+                    fadeOutShape: 0,
+                    fadeOutDir: 0,
+                    alpha: 1,
+                    channelMode: 0,
+                    sourceChannels: 0,
+                },
+            ],
+            markers: [],
+        };
+        const geo = buildWaveformGeometry({
+            scene,
+            color: "#fff",
+            getPeaks: () => ({ min: bMin, max: bMax, dataStartSec: 0, dataDurationSec: DUR }),
+            amplitudeMap: map,
+        });
+
+        // 逐列取出映射后的上下包络。顶点语义：上顶点 y = centerY − mappedMax·halfHeight，
+        // 下顶点 y = centerY − mappedMin·halfHeight（命中 50 / 半高 50）⇒
+        // mappedMax = (50 − yTop)/50、mappedMin = (50 − yBottom)/50。
+        // 【必须分别比较】把两者合成"高度"会掩盖单侧的幻峰（上侧越界与下侧
+        // 收缩可以互相抵消），只有逐侧比较才钉得住。
+        const cols: { max: number; min: number }[] = [];
+        for (let v = 0; v < geo.vertices.length; v += 12) {
+            const yTop = Math.min(geo.vertices[v + 1] ?? 50, geo.vertices[v + 7] ?? 50);
+            const yBottom = Math.max(geo.vertices[v + 1] ?? 50, geo.vertices[v + 7] ?? 50);
+            cols.push({ max: (50 - yTop) / 50, min: (50 - yBottom) / 50 });
+        }
+
+        // 参考口径 = **逐桶配对**，正负两侧各自求：
+        //   refMax = max over buckets( bMax[b] × gain(bucketTime) )
+        //   refMin = min over buckets( bMin[b] × gain(bucketTime) )
+        //
+        // 这是渲染语义要求的正确值：每个峰值桶只有乘上"它自己时刻"的增益才是
+        // 它真实的可听高度。几何输出恒 ≤ 该参考（切片取片内 argmax 并配以其
+        // 自身时刻增益，是参考项的一个子集；窗口 ≤ 16 桶时精确相等）——
+        // 少算是安全的（略低的包络），**多算即为幻峰**。
+        //
+        // 旧实现（片内 max × 片**中心**增益）会超过该参考，且越界量随缩放
+        // 增大：实测 20 列时达 1.88×（15/20 列越界）= 用户报告的随机伪影。
+        //
+        // 【参考窗口必须比几何窗口宽 1 桶】几何的 indexStart/indexEnd 由
+        // 浮点乘除取整得出，窗口边界处 ±1 桶的差别取决于运算顺序（本测试
+        // 重算时曾因此比几何少含一个边界桶，把几何的合法值误判为幻峰）。
+        // 向两侧各放宽一桶使参考窗口**包含**几何窗口，判据才严格成立。
+        const spc = DUR / widthPx;
+        for (let c = 0; c < cols.length; c += 1) {
+            const centerSec = ((c + 0.5) / widthPx) * DUR;
+            const loSec = Math.max(0, centerSec - spc / 2);
+            const hiSec = Math.min(DUR, centerSec + spc / 2);
+            const idxStart = Math.max(0, Math.floor((loSec / DUR) * bucketCount));
+            const idxEnd = Math.min(
+                bucketCount - 1,
+                Math.max(idxStart, Math.ceil((hiSec / DUR) * bucketCount) - 1),
+            );
+            const refStart = Math.max(0, idxStart - 1);
+            const refEnd = Math.min(bucketCount - 1, idxEnd + 1);
+            let refMax = 0;
+            let refMin = 0;
+            for (let b = refStart; b <= refEnd; b += 1) {
+                const g = gainAt(((b + 0.5) * DIV) / SR);
+                const vMax = bMax[b] * g;
+                const vMin = bMin[b] * g;
+                if (vMax > refMax) refMax = vMax;
+                if (vMin < refMin) refMin = vMin;
+            }
+            // 顶点语义（已由 probe 确认）：顶点0 上沿 = centerY − mappedMax·half、
+            // 顶点1 下沿 = centerY − mappedMin·half。故 cols[].max = mappedMax、
+            // cols[].min = mappedMin，参考按同口径钳到矩形。
+            const wantMax = Math.min(Math.max(refMax, 0), 1);
+            const wantMin = Math.max(Math.min(refMin, 0), -1);
+            // 统计"非饱和"侧：饱和侧被矩形钳到 ±1，越界不可观测。
+            if (wantMax < 1 - 1e-9) observableCount += 1;
+            if (wantMin > -1 + 1e-9) observableCount += 1;
+            totalObservableSlots += 2;
+            // 允许 2% + 1e-3 数值裕度（几何不得**超过**参考）。
+            if (cols[c].max > wantMax * 1.02 + 1e-3) {
+                throw new Error(
+                    `cols=${widthPx} 列 ${c}: 上包络 ${cols[c].max.toFixed(4)} ` +
+                        `超过逐桶参考 ${wantMax.toFixed(4)}（幻峰）`,
+                );
+            }
+            if (cols[c].min < wantMin * 1.02 - 1e-3) {
+                throw new Error(
+                    `cols=${widthPx} 列 ${c}: 下包络 ${cols[c].min.toFixed(4)} ` +
+                        `低于逐桶参考 ${wantMin.toFixed(4)}（幻峰）`,
+                );
+            }
+        }
+    }
+    // 保证本用例真的覆盖了可观测区间（否则断言会退化成"恒真"）。
+    if (observableCount < totalObservableSlots * 0.1) {
+        throw new Error(
+            `可观测（非饱和）列过少：${observableCount}/${totalObservableSlots}，用例失去判别力`,
+        );
+    }
+});
+
 test("waveform/geometry.test.ts scripted checks", async () => {
     function assertEqual(actual: unknown, expected: unknown, label: string): void {
         const actualJson = JSON.stringify(actual);

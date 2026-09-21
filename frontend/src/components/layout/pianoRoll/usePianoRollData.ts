@@ -5,7 +5,6 @@ import { paramsApi } from "../../../services/api";
 import { clamp } from "../timeline";
 
 import type { ParamName, ParamViewSegment } from "./types";
-import { isDynParam } from "./paramRanges";
 import { framesToTime, timeToFrame } from "./utils";
 const paramFramePeriodCache = new Map<string, number>();
 
@@ -70,13 +69,6 @@ export function usePianoRollData(args: {
         null,
     );
 
-    /**
-     * 动态（DYN）的归一化参考电平（linear）。null = 分析未就绪。
-     *
-     * 参数面板据此把源文件波形峰值投影到 DYN 的倍率纵轴上，使波形与曲线
-     * 波形的「可听结果」映射以它为基准之一（见 `useLoudnessCurves`）。
-     */
-    const [dynOrigReference, setDynOrigReference] = useState<number | null>(null);
 
     const [isRefreshing, setIsRefreshing] = useState(false);
     const [loadingCount, setLoadingCount] = useState(0);
@@ -620,18 +612,6 @@ export function usePianoRollData(args: {
                             typeof backendAvail === "boolean" ? backendAvail : null,
                         );
                     }
-                    // 动态面板的波形映射需要归一化参考电平（把线性峰值换算到
-                    // 与 DYN 曲线相同的倍率域）。仅 dyn 参数会带上它。
-                    //（统一可听波形改由 useLoudnessCurves 提供数据，此状态保留
-                    // 给后续需要参考电平的 UI 使用。）
-                    if (isDynParam(editParam)) {
-                        const ref = payload.dyn_orig_reference;
-                        setDynOrigReference(
-                            typeof ref === "number" && Number.isFinite(ref) && ref > 0
-                                ? ref
-                                : null,
-                        );
-                    }
                     const fpRes = Number(payload.frame_period_ms ?? fpMs) || fpMs;
                     paramFramePeriodCache.set(fpKey, fpRes);
 
@@ -1035,7 +1015,6 @@ export function usePianoRollData(args: {
         isLoading,
         pitchEditUserModified,
         pitchEditBackendAvailable,
-        dynOrigReference,
         refreshToken,
     };
 }

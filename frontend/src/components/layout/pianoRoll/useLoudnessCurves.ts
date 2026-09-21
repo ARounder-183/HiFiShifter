@@ -62,23 +62,44 @@ export interface LoudnessSnapshot {
     identity: boolean;
 }
 
-function isIdentitySnapshot(snapshot: { volume: number[]; dynBaseline: number[] }): boolean {
+/**
+ * 判定快照是否为「恒等」的（波形与线性直投逐像素等价）。
+ *
+ * 【为什么恒等判定只能看"有没有可能产生非 1 增益"】
+ * 这是**可能性**判定，不是**当前是否恰巧为 1**的判定。用户尚未在 dyn 面板
+ * 画任何一笔时，后端把哨兵解析成基线、`edit` 恒等于 `orig` —— 此时逐帧比较
+ * 会得出"增益全是 1"，但用户**正准备画第一笔**：一旦据此判定恒等、不挂映射，
+ * 波形就再也收不到 live 覆盖，实时预览直接失效（且要等提交后快照重取才恢复）。
+ * 因此只有"根本没有动态数据可用"（基线为空 ⇒ 增益恒为 1，永远不可能变化）
+ * 才算恒等 —— 与"用户还没画"是两件不同的事。
+ *
+ * 同理，volume 恒 1 也算恒等不是：那是"用户把音量包络整体画在 1.0 上"，
+ * 下一笔就能把它拖走。
+ */
+export function isIdentitySnapshot(snapshot: {
+    volume: readonly number[];
+    dynBaseline: readonly number[];
+}): boolean {
     for (let i = 0; i < snapshot.volume.length; i += 1) {
         const v = snapshot.volume[i];
         if (Number.isFinite(v) && Math.abs(v - 1.0) > 1e-4) return false;
     }
-    // 基线非空即可能产生非 1 增益（用户画过目标电平的帧）；空基线 = 增益恒 1。
+    // 基线非空 ⇒ 响度自动化数据可用（用户随时可以往里画）⇒ 必须挂映射；
+    // 空基线 = 增益恒 1，动态这一路永远不可能贡献非 1 增益。
     return snapshot.dynBaseline.length === 0;
 }
 
-function snapshotFromPayloads(
+export function snapshotFromPayloads(
     volumePayload: ParamFramesPayload,
     dynPayload: ParamFramesPayload,
     fallbackFp: number,
 ): LoudnessSnapshot | null {
     const fp = Number(dynPayload.frame_period_ms ?? fallbackFp) || fallbackFp;
     const dynTarget = (dynPayload.edit ?? []).map((v) => (Number.isFinite(v) ? v : 1.0));
-    const dynBaseline = (dynPayload.orig ?? []).filter((v) => Number.isFinite(v) && v > 0);
+    // 基线**必须保持逐帧对齐**：它是逐帧电平，0（静音）是合法且常见的值，
+    // 不能用 filter 剔除 —— 剔除会缩短数组，使后续所有帧整体错位（波形把
+    // 一段的增益画到另一段上）。只做有限性净化，长度恒等于目标曲线。
+    const dynBaseline = (dynPayload.orig ?? []).map((v) => (Number.isFinite(v) && v > 0 ? v : 0));
     // 基线与目标必须等长（同一请求的两条曲线）；长度异常时按"无基线"处理
     // —— 宁可动态增益恒 1，也不允许错位采样。
     if (dynBaseline.length !== dynTarget.length) dynBaseline.length = 0;

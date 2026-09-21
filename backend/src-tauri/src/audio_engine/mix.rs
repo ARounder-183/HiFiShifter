@@ -157,11 +157,12 @@ fn pan_gains(pan: f32) -> (f32, f32) {
 
 /// 采样动态（DYN）曲线在绝对帧处的增益。
 ///
-/// 语义：`增益 = 目标电平 / 原声电平`（两者同处倍率域），并带三类保护 ——
+/// 语义：`增益 = 目标电平 / max(原声电平, 静音下限)`（两者同处倍率域），
+/// 并带三类保护 ——
 /// - **曲线不存在** → 1.0（该轨道组根本没在用动态）；
 /// - **原声基线不存在**（分析未就绪）→ 1.0，绝不凭空造增益；
-/// - 原声落在静音门限以下 → 拒绝**放大**（1.0）；衰减/静音照常生效
-///   （见 `compute_dyn_gain`）；
+/// - 原声低于静音下限 → 分母钳到下限，增益**有界**（不放大无内容帧）；衰减/
+///   静音照常生效（见 `compute_dyn_gain`）；
 /// - 目标为 `DYN_FOLLOW_ORIG` 哨兵 → 1.0。
 ///
 /// 采样规则与 volume/pan 完全一致（`sample_automation_curve`，越界钳制到末值），
@@ -194,7 +195,11 @@ fn dyn_gain_at(clip: &EngineClip, abs_frame: u64) -> f32 {
         abs_frame,
         clip.src.sample_rate,
         clip.dyn_curve_frame_period_ms,
-        crate::renderer::common_params::DYN_MIN_REF,
+        // 0.0 = "该帧无基线数据"（与 DYN_FOLLOW_ORIG 同名不同域：这是分母侧）。
+        // 不能用 DYN_SILENCE_FLOOR：那会让"无数据帧"被当成无内容帧，于是任何
+        // 超过 −60 dBFS 的目标都被读成放大请求而被拒绝 —— 曲线在基线缺口处
+        // 会静默失效。
+        0.0,
     );
     crate::renderer::common_params::compute_dyn_gain(target, orig)
 }
@@ -1082,12 +1087,36 @@ mod tests {
         assert!((l - 4.0).abs() < 1e-6, "left got {l}");
     }
 
+    /// ★ 回归：真实素材的安静段必须被提升到**用户画的目标**（门限曾是 −26 dBFS、
+    /// 上限曾仅 ×4，两者叠加使安静段"怎么编辑都提不上去"）。
+    #[test]
+    fn dyn_gain_boosts_very_quiet_content() {
+        // −40 dBFS（0.01）画目标 −4.7 dBFS（0.582）→ 需 ×58.2，必须精确兑现。
+        let clip = clip_with_dyn(Some(vec![0.582f32]), Some(vec![0.01f32]));
+        let (l, _r) = apply_mix_automation(&clip, 0, 1.0, 1.0);
+        assert!(
+            (l - 58.2).abs() < 0.1,
+            "安静段必须被精确提升到目标（×58.2），实测 {l}"
+        );
+
+        // −55 dBFS（0.00178）→ 需 ×327，同样必须兑现（上限只是数值兜底）。
+        let clip = clip_with_dyn(Some(vec![0.582f32]), Some(vec![0.00178f32]));
+        let (l, _r) = apply_mix_automation(&clip, 0, 1.0, 1.0);
+        assert!((l - 327.0).abs() < 1.0, "实测 {l}");
+
+        // 上限的确切位置：从下限兑现到值域顶端。
+        assert_eq!(
+            crate::renderer::common_params::DYN_MAX_GAIN,
+            1.0 / crate::renderer::common_params::DYN_SILENCE_FLOOR
+        );
+    }
+
     #[test]
     fn dyn_follow_orig_sentinel_is_unity() {
         // 哨兵（负值）= 沿用原声 → 增益 1.0，即便原声很小。
         let clip = clip_with_dyn(
             Some(vec![crate::renderer::common_params::DYN_FOLLOW_ORIG]),
-            Some(vec![0.02f32]),
+            Some(vec![0.0001f32]),
         );
         let (l, _r) = apply_mix_automation(&clip, 0, 1.0, 1.0);
         assert!((l - 1.0).abs() < 1e-6, "left got {l}");
@@ -1096,17 +1125,22 @@ mod tests {
     #[test]
     fn dyn_missing_orig_curve_is_unity() {
         // 分析未就绪（无基线）时不得放大：增益必须是 1.0，而不是 目标/兜底。
-        let clip = clip_with_dyn(Some(vec![4.0f32]), None);
+        let clip = clip_with_dyn(Some(vec![1.0f32]), None);
         let (l, _r) = apply_mix_automation(&clip, 0, 1.0, 1.0);
         assert!((l - 1.0).abs() < 1e-6, "left got {l}");
     }
 
     #[test]
-    fn dyn_gain_never_amplifies_silence() {
-        // 间奏的噪声底（−60 dB 量级）绝不放大。
-        let clip = clip_with_dyn(Some(vec![4.0f32]), Some(vec![0.001f32]));
+    fn dyn_gain_bounds_no_content_frames_instead_of_rejecting() {
+        // 无内容帧（−80 dBFS，抖动噪声量级）：增益有界（分母钳到下限），
+        // 不会无限放大 —— 但也不再是"拒绝放大返回 1"（那会造成门限处阶跃，
+        // 即近零处的随机伪影，见 DYN_SILENCE_FLOOR 的说明）。
+        let clip = clip_with_dyn(Some(vec![1.0f32]), Some(vec![0.0001f32]));
         let (l, _r) = apply_mix_automation(&clip, 0, 1.0, 1.0);
-        assert!((l - 1.0).abs() < 1e-6, "left got {l}");
+        assert!(
+            (l - crate::renderer::common_params::DYN_MAX_GAIN).abs() < 1e-3,
+            "无内容帧的增益应恰好钳到上限，实测 {l}"
+        );
     }
 
     #[test]

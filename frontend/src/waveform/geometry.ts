@@ -102,6 +102,35 @@ export interface WaveformAmplitudeFactors {
      * @returns 有限因子；`null` = 该时刻须回落到逐值调用。
      */
     factorAt(timeSec: number | null): number | null;
+
+    /**
+     * **该时间窗内可达电平的上限**（可选契约，用于压制"幻峰"）。
+     *
+     * 【为什么需要】波形每列的峰值取自 mipmap 桶（粗缩放走 L2，桶宽 ≈ 85 ms），
+     * 而动态的原声基线是 20 ms 窗估计 —— **分子的窗口比分母宽**。于是
+     * `桶内最大样本`可以大于"用来求增益的那一点的原声基线"，比值 > 1；
+     * 近零原声处增益又极大（`目标/基线` 可达上限 ×1000），两者相乘就把
+     * "桶内偶然略大的样本"放大成满高幻峰。水平缩放改变桶的划分，幻峰位置
+     * 随之随机变化 —— 即用户报告的近零处伪影。
+     *
+     * 【为什么钳制是物理正确的】逐样本地看，`|x(s)| ≤ 原声基线(t_s)`，于是
+     * `输出(s) = |x(s)| × vol × 目标/基线 ≤ vol(t_s) × 目标(t_s)`。
+     * 因此本函数返回的"窗口内最大可达电平"是**真实输出的硬上界**：超过它的
+     * 显示值不可能被听到，钳掉它不会影响任何真实内容 —— 未编辑区（目标=原声，
+     * 因子恒 1）永远不会被钳到（可证：`桶峰 ≤ 窗内基线最大 ≤ 窗内目标最大`）。
+     *
+     * 【语义】返回 `max over t ∈ [start, end] of (vol(t) × 目标电平(t))`，
+     * 单位与曲线一致（绝对电平倍率）。几何层再乘上该处的 clip 增益×淡变，
+     * 得到包络的钳制边界。
+     *
+     * @param windowStartSec 窗口起点（时间轴绝对秒）。
+     * @param windowEndSec 窗口终点（时间轴绝对秒）。
+     * @returns 有限上界；无法给出时返回 null（不做钳制，保持旧行为）。
+     */
+    levelCeilingOverWindow?(
+        windowStartSec: number,
+        windowEndSec: number,
+    ): number | null;
 }
 
 /**
@@ -152,12 +181,26 @@ export const linearAmplitudeMap: WaveformAmplitudeMap = (value, gain) => value *
  * - 粗缩放下一列的包络 ≠ 细缩放下它覆盖的各列包络的最大值 → 两种缩放等级
  *   画出"截然不同的波形"（幻峰 / 丢峰）。
  *
- * 【切片语义】把列的峰值索引窗口等分为至多 N 切，每切用**自己的中心索引时刻**
- * 采样增益并映射，列包络 = 各切映射结果的 max/min。索引锚定 ⇒ 每个峰值桶的
- * 可听高度是**缩放不变量**；粗列 = 细列的逐段 max ⇒ 缩放一致（细化收敛）。
- * N=16 时切片粒度在常见工程（3 分钟 / 全览）约等于自动化帧周期（≈5ms），
- * 视觉上已与逐帧精确一致；同时把每列的映射调用次数封顶，极端缩放下的
- * 每帧成本有界（≤ 列数 × N × 2 次调用）。
+ * 【切片语义】把列的峰值索引窗口等分为至多 N 切，每切取自己的极值（max/min），
+ * 并把极值与**该极值所在桶自身时刻**的增益配对，列包络 = 各切映射结果的 max/min。
+ * 索引锚定 ⇒ 每个峰值桶的可听高度是**缩放不变量**；粗列 = 细列的逐段 max ⇒
+ * 缩放一致（细化收敛）。N=16 时切片粒度在常见工程（3 分钟 / 全览）约等于自动化
+ * 帧周期（≈5ms），视觉上已与逐帧精确一致；同时把每列的映射调用次数封顶，
+ * 极端缩放下的每帧成本有界（≤ 列数 × N × 2 次调用）。
+ *
+ * 【★ 极值必须与"它自己的时刻"配对（不能与片中心配对）】这是近零原声伪影的
+ * 修复要点。曾把"片内最大峰值"乘上"片**中心**时刻的增益"——分子是按**窗口**
+ * 聚合的（片内 N 个桶的最大值），分母却是**点采样**。两者窗口口径不同，当增益
+ * 在片内剧烈变化时（近零原声下 `目标/max(原声,下限)` 逐帧可跨数个数量级），
+ * 乘积会系统性**超出**真实包络，且超出量随片宽增长：
+ *
+ *   一列覆盖的桶越多（= 缩得越小），片越宽 → 幻峰越高。
+ *   实测（div=16、近零噪声尾音）：40 列时包络达 1.98（真值上限 1.00），
+ *   即约 2× 的幻峰；20 列时偏差达 0.974。这正是"缩小时近零处出现随机伪影"。
+ *
+ * 改为把极值锚定到它自己的桶时刻后，偏差降到 0（逐样本真值对拍）。
+ * 注意这条性质对**任何**逐时刻变化的映射都成立（音量/动态/未来参数），
+ * 不只是 dyn。
  */
 const MAX_COLUMN_GAIN_SLICES = 16;
 
@@ -165,8 +208,6 @@ const MAX_COLUMN_GAIN_SLICES = 16;
 // 无重入风险）——热路径上每列每帧新建数组会把 GC 拖进渲染关键路径。
 const sliceIndexLoScratch = new Int32Array(MAX_COLUMN_GAIN_SLICES);
 const sliceIndexHiScratch = new Int32Array(MAX_COLUMN_GAIN_SLICES);
-const sliceTimeSecScratch = new Float64Array(MAX_COLUMN_GAIN_SLICES);
-const sliceGainScratch = new Float64Array(MAX_COLUMN_GAIN_SLICES);
 
 /**
  * 波形包络列的**设备像素宽**。
@@ -217,6 +258,34 @@ export function parseWaveformColor(value: string): [number, number, number, numb
         ];
     }
     return [1, 1, 1, 1];
+}
+
+/**
+ * 由**峰值索引**换算 clip 局部时间（秒）——「该峰值自己的时刻」。
+ *
+ * 索引锚定（而非屏幕列锚定）意味着同一个峰值在任何缩放等级下都取到同一个
+ * 增益值，这是缩放一致性的根基。极值（argmin/argmax）与它的时刻必须成对使用，
+ * 见 {@link MAX_COLUMN_GAIN_SLICES} 的说明。
+ */
+function sourceIndexClipTimeSec(
+    index: number,
+    dataStartSec: number,
+    dataDurationSec: number,
+    sampleCount: number,
+    reversed: boolean,
+    sourceStartSec: number,
+    sourceEndSec: number,
+    sourceDurationSec: number,
+    clipLocalStartSec: number,
+    localSpanSec: number,
+): number {
+    const srcSec = dataStartSec + ((index + 0.5) / sampleCount) * dataDurationSec;
+    const t = clamp01(
+        reversed
+            ? (sourceEndSec - srcSec) / sourceDurationSec
+            : (srcSec - sourceStartSec) / sourceDurationSec,
+    );
+    return clipLocalStartSec + t * localSpanSec;
 }
 
 function gainAtClipTime(
@@ -333,6 +402,9 @@ export function buildWaveformGeometry(args: {
     // 只需每切片求值**一次**因子，min/max 复用 —— 切片把逐值调用提到每列 32 次，
     // 因子路径把同一时刻的解析/取样工作收敛成一次（拖动参数时的卡顿根因）。
     const amplitudeFactors = readAmplitudeFactors(args.amplitudeMap);
+    // 电平上界视图（可选契约，见 WaveformAmplitudeFactors::levelCeilingOverWindow）：
+    // 用于把"桶峰 × 因子"钳在物理可达范围内，消除近零原声处的幻峰。
+    const levelCeiling = amplitudeFactors?.levelCeilingOverWindow?.bind(amplitudeFactors);
     let complete = true;
 
     for (const segment of args.scene.segments) {
@@ -440,12 +512,13 @@ export function buildWaveformGeometry(args: {
                 // 窗口被数据边界裁空（sourceLo 越过数据末尾）→ 与旧守卫同语义：跳过该列。
                 if (windowCount < 1) continue;
 
-                // ── 列内增益切片 ─────────────────────────────────
-                // 【源时间 → 时间轴时刻】切片时刻按**峰值索引**反推（源锚定）：
-                // 索引 i 的源时间 = dataStartSec + ((i+0.5)/sampleCount)·数据时长，
-                // 再经 reversed / playbackRate 对应的段内归一化位置换算成时间轴
-                // 绝对时间。锚定到峰值而不是屏幕，保证"同一峰值 × 它自己时刻的
-                // 增益"在任何缩放等级下是同一个数 —— 这是缩放一致性的根基。
+                // ── 列内切片边界 ─────────────────────────────────
+                // 只切分索引窗口（不含任何时刻/增益计算）：极值与它**自己所在桶**
+                // 的时刻在下面的装配循环里成对求出（见 MAX_COLUMN_GAIN_SLICES
+                // 的"极值必须与自己的时刻配对"）。此前在这里按片**中心**预计算
+                // 一个时刻，装配时把"片内最大峰值"乘上它 —— 分子按窗口聚合、
+                // 分母是点采样，两者口径不同，在近零原声等增益剧变处会造出
+                // 随缩放增高的幻峰（伪影根因）。
                 // （倒放语义与旧实现一致：t 始终是屏幕推进方向的位置。）
                 const clipStartSec = segment.clipStartSec ?? 0;
                 const localSpanSec = segment.clipLocalEndSec - segment.clipLocalStartSec;
@@ -453,53 +526,68 @@ export function buildWaveformGeometry(args: {
                 for (let slice = 0; slice < sliceCount; slice += 1) {
                     // 公平切分：边界 = floor(s·W/K)，各切恰好覆盖窗口、互不重叠，
                     // 最后一切精确落在 indexEnd 上。
-                    const lo = indexStart + Math.floor((slice * windowCount) / sliceCount);
-                    const hi =
+                    sliceIndexLoScratch[slice] =
+                        indexStart + Math.floor((slice * windowCount) / sliceCount);
+                    sliceIndexHiScratch[slice] =
                         indexStart + Math.floor(((slice + 1) * windowCount) / sliceCount) - 1;
-                    sliceIndexLoScratch[slice] = lo;
-                    sliceIndexHiScratch[slice] = hi;
-                    const centerIndex = (lo + hi) / 2;
-                    const sliceSrcSec =
-                        peaks.dataStartSec + ((centerIndex + 0.5) / sampleCount) * dataDurationSec;
-                    const sliceT = clamp01(
-                        segment.reversed
-                            ? (segment.sourceEndSec - sliceSrcSec) / sourceDurationSec
-                            : (sliceSrcSec - segment.sourceStartSec) / sourceDurationSec,
-                    );
-                    const clipTimeSec = segment.clipLocalStartSec + sliceT * localSpanSec;
-                    sliceTimeSecScratch[slice] = clipStartSec + clipTimeSec;
-                    sliceGainScratch[slice] =
-                        segment.gain *
-                        gainAtClipTime(
-                            clipTimeSec,
-                            segment.clipTotalDurationSec,
-                            segment.fadeInSec,
-                            segment.fadeOutSec,
-                            segment.fadeInShape,
-                            segment.fadeInDir,
-                            segment.fadeOutShape,
-                            segment.fadeOutDir,
-                        );
                 }
+
+                // 桶索引 ↔ 时间轴绝对秒（「该峰值自己的时刻」），供极值配对使用。
+                // 索引锚定 ⇒ 同一峰值在任何缩放等级下取到同一个增益（缩放一致性）。
+                const absSecAtIndex = (index: number): number =>
+                    clipStartSec +
+                    sourceIndexClipTimeSec(
+                        index,
+                        peaks.dataStartSec,
+                        dataDurationSec,
+                        sampleCount,
+                        segment.reversed,
+                        segment.sourceStartSec,
+                        segment.sourceEndSec,
+                        sourceDurationSec,
+                        segment.clipLocalStartSec,
+                        localSpanSec,
+                    );
+
+                // 某**时间轴绝对秒**处的 clip 增益（clip 增益 × 淡变）。
+                // 传入的秒由 absSecAtIndex 产出，故减去 clipStartSec 即为
+                // gainAtClipTime 需要的 clip 局部时间。
+                const clipGainAtSec = (absSec: number): number =>
+                    segment.gain *
+                    gainAtClipTime(
+                        absSec - clipStartSec,
+                        segment.clipTotalDurationSec,
+                        segment.fadeInSec,
+                        segment.fadeOutSec,
+                        segment.fadeInShape,
+                        segment.fadeInDir,
+                        segment.fadeOutShape,
+                        segment.fadeOutDir,
+                    );
 
                 // 音量增益（gain > 1）会把包络放大到波形矩形之外 —— 表现为波形
                 // "溢出" clip 上下边界（DAW 通用 bug）。与 REAPER 一致，增益放大
                 // 的显示按矩形削顶（flat-top），既保留"已削波"的视觉暗示又不越界。
                 //
                 // 幅度经 `amplitudeMap` 归一化：缺省是线性直投；动态/音量面板传
-                // 逐帧映射。**逐切片**映射（每切一次求值、min/max 复用同一时刻）
-                // —— 峰值与自身时刻的增益配对，见 MAX_COLUMN_GAIN_SLICES 的说明。
+                // 逐帧映射。**逐切片**映射（每切一次求值、极值复用该切时刻）
+                // —— 极值与其自身时刻配对，见 MAX_COLUMN_GAIN_SLICES 的说明。
                 //
                 // 两条等价路径（见 WaveformAmplitudeFactors）：
-                // - 映射声明了 `factorAt`：每切片求值一次因子，min/max 各一次乘法；
-                // - 未声明：逐值调用映射（min/max 各一次，共享该切时刻）。
+                // - 映射声明了 `factorAt`：每切片求值因子，min/max 各一次乘法；
+                // - 未声明：逐值调用映射（min/max 各一次，各自配对自身时刻）。
                 const rectTop = segment.screenRect.y;
                 const rectBottom = rectTop + segment.screenRect.height;
                 let mappedMin = Number.POSITIVE_INFINITY;
                 let mappedMax = Number.NEGATIVE_INFINITY;
                 for (let slice = 0; slice < sliceCount; slice += 1) {
+                    // 片内**极值及其位置**：max 与 min 可能落在不同桶上，
+                    // 各自必须与自己的桶时刻配对（否则重现"分子窗口聚合 ×
+                    // 分母点采样"的失配幻峰）。
                     let rawMin = Number.POSITIVE_INFINITY;
                     let rawMax = Number.NEGATIVE_INFINITY;
+                    let argMin = sliceIndexLoScratch[slice];
+                    let argMax = sliceIndexLoScratch[slice];
                     for (
                         let index = sliceIndexLoScratch[slice];
                         index <= sliceIndexHiScratch[slice];
@@ -508,26 +596,69 @@ export function buildWaveformGeometry(args: {
                         // 采样当前带（band）的声道平面 —— 双带布局下两带分别是
                         // ch0/ch1 视图；此前误读 peaks.min/max（恒为 ch0），两条
                         // 带画出同一个左声道。
-                        rawMin = Math.min(rawMin, band.min[index] ?? 0);
-                        rawMax = Math.max(rawMax, band.max[index] ?? 0);
+                        const vMin = band.min[index] ?? 0;
+                        const vMax = band.max[index] ?? 0;
+                        if (vMax > rawMax) {
+                            rawMax = vMax;
+                            argMax = index;
+                        }
+                        if (vMin < rawMin) {
+                            rawMin = vMin;
+                            argMin = index;
+                        }
                     }
                     if (!Number.isFinite(rawMin) || !Number.isFinite(rawMax)) continue;
-                    const gain = sliceGainScratch[slice];
-                    const timeSec = sliceTimeSecScratch[slice];
+                    // 极值各自与**自身桶时刻**配对（见 MAX_COLUMN_GAIN_SLICES）。
+                    // 两者落在同一桶是常见情形（包络上下沿同源），此时只求值一次。
+                    const tMax = absSecAtIndex(argMax);
+                    const tMin = argMax === argMin ? tMax : absSecAtIndex(argMin);
+                    const gMax = clipGainAtSec(tMax);
+                    const gMin = argMax === argMin ? gMax : clipGainAtSec(tMin);
                     let mappedSliceMax: number;
                     let mappedSliceMin: number;
-                    const factor = amplitudeFactors?.factorAt(timeSec) ?? null;
-                    if (factor !== null) {
-                        // 乘性因子路径：一次求值、两次乘法（映射 =
-                        // value × gain × factor）。
-                        mappedSliceMax = rawMax * gain * factor;
-                        mappedSliceMin = rawMin * gain * factor;
+                    // 因子视图：一次求值、两次乘法（映射 = value × gain × factor）。
+                    const fMax = amplitudeFactors?.factorAt(tMax) ?? null;
+                    const fMin = argMax === argMin ? fMax : (amplitudeFactors?.factorAt(tMin) ?? null);
+                    if (fMax !== null && fMin !== null) {
+                        mappedSliceMax = rawMax * gMax * fMax;
+                        mappedSliceMin = rawMin * gMin * fMin;
                     } else {
-                        mappedSliceMax = amplitudeMap(rawMax, gain, timeSec);
-                        mappedSliceMin = amplitudeMap(rawMin, gain, timeSec);
+                        // 该时刻无法用单一乘性因子表达（非乘性映射 / 数据异常）
+                        // → 回落到逐值调用，保证非乘性映射仍正确工作。
+                        mappedSliceMax = amplitudeMap(rawMax, gMax, tMax);
+                        mappedSliceMin = amplitudeMap(rawMin, gMin, tMin);
                     }
                     if (!Number.isFinite(mappedSliceMax) || !Number.isFinite(mappedSliceMin)) {
                         continue;
+                    }
+                    // ── 物理可达上界的钳制（消除近零原声处的幻峰）──────────
+                    // 分子的峰值取自 mipmap 桶（粗缩放 L2 桶宽 ≈85ms），分母
+                    // （原声基线）是 20ms 窗 —— 窗口不一致，桶峰可大于基线，
+                    // 近零处乘上大增益即成为**不可实现**的满高幻峰（随缩放
+                    // 位置随机变化）。真实输出逐样本 ≤ `vol × 目标`，故用它
+                    // 作上界钳掉幻峰；未编辑区（目标=原声）恒不触发（见接口
+                    // levelCeilingOverWindow 的推导）。
+                    //
+                    // 上界按**本切片的桶时间窗**取（而非整列），保证"某处
+                    // 允许的高电平"不会泄漏给邻近的低电平切片。
+                    if (levelCeiling !== undefined) {
+                        // 切片首/末桶的时刻（倒放时前者大于后者，逐值函数内部
+                        // 会排序；这里只传两个端点，无需关心方向）。
+                        const ceilLevel = levelCeiling(
+                            absSecAtIndex(sliceIndexLoScratch[slice]),
+                            absSecAtIndex(sliceIndexHiScratch[slice]),
+                        );
+                        if (ceilLevel !== null && Number.isFinite(ceilLevel)) {
+                            // clip 增益×淡变随时刻变化：取两者中较大的增益作
+                            // 保守上界（钳制只用于压制越界，宁可略宽松也不
+                            // 误压合法包络）。这里用该切片的极端时刻增益。
+                            const gCeil = Math.max(gMax, gMin);
+                            const limit = ceilLevel * gCeil;
+                            if (Number.isFinite(limit)) {
+                                if (mappedSliceMax > limit) mappedSliceMax = limit;
+                                if (mappedSliceMin < -limit) mappedSliceMin = -limit;
+                            }
+                        }
                     }
                     if (mappedSliceMax > mappedMax) mappedMax = mappedSliceMax;
                     if (mappedSliceMin < mappedMin) mappedMin = mappedSliceMin;

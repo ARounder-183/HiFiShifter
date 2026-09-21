@@ -214,7 +214,6 @@ pub(super) fn get_param_frames(
                     analysis_progress: None,
                     pitch_edit_user_modified: None,
                     pitch_edit_backend_available: None,
-                    dyn_orig_reference: None,
                     edit_sentinel: None,
                 }
             }
@@ -284,7 +283,6 @@ pub(super) fn get_param_frames(
             analysis_progress: None,
             pitch_edit_user_modified,
             pitch_edit_backend_available,
-            dyn_orig_reference: None,
             edit_sentinel: None,
         };
     }
@@ -435,7 +433,6 @@ pub(super) fn get_param_frames(
         pitch_edit_backend_available,
         edit_sentinel,
         // 前端画 DYN 波形需要参考电平（把线性峰值换算成同样的倍率域）。
-        dyn_orig_reference: (param == "dyn").then_some(entry.dyn_orig_reference),
     }
 }
 /// 将 orig/edit 两组 f32 曲线编码为 Base64 二进制。
@@ -594,15 +591,19 @@ pub(super) fn set_param_frames(
                 v = vv;
             }
             "dyn" => {
-                // 动态：正值是目标电平（0..2 倍率），负值统一收敛到「沿用原声」
-                // 哨兵。**不允许**前端把哨兵写成 −0.7 之类的中间值 —— 只要符号
-                // 为负就是同一个语义，值本身无意义。
-                // 正值钳到描述符值域 0..2（+6 dB，见 common_params::DYN_PARAM
-                // 的值域说明）；负值统一收敛到「沿用原声」哨兵。
+                // 动态：正值是目标电平（0..1 倍率，见 common_params::DYN_PARAM
+                // 的值域说明）；负值统一收敛到「沿用原声」哨兵 —— **不允许**前端
+                // 把哨兵写成 −0.7 之类的中间值，只要符号为负就是同一个语义，
+                // 值本身无意义。
+                //
+                // 上界必须与描述符值域**逐字一致**（0..1）：写路径曾独立钳到 2.0，
+                // 于是前端能画出 1.0 以上的目标，而描述符、互转、轴刻度全都按
+                // 0..1 处理 —— 同一份曲线在不同路径下含义不同。边界只有描述符
+                // 一个真源，这里从它读。
                 let vv = if v < 0.0 {
                     crate::renderer::common_params::DYN_FOLLOW_ORIG
                 } else {
-                    v.clamp(0.0, 2.0)
+                    v.clamp(0.0, crate::renderer::common_params::DYN_VALUE_MAX)
                 };
                 if vv != v {
                     clamped += 1;
@@ -791,14 +792,19 @@ pub(super) enum MixConversionDirection {
 ///   自动正确）。直接搬 `vol = target` 同样不等效，且会把"未画"的哨兵帧
 ///   物化成显式基线值，凭空改变那些帧的响度。
 ///
-/// ## 保护帧的约定
+/// ## 无内容帧的约定
 ///
-/// `orig < DYN_MIN_REF` 时后端增益恒 1（绝不放大噪声底），因此反向换算写
-/// `vol = 1.0`（保持"不改变"），而不是一个巨大的 `target/orig` 商。
+/// `orig < DYN_SILENCE_FLOOR`（−60 dBFS）时后端增益恒 1（绝不放大无内容帧），
+/// 因此反向换算写 `vol = 1.0`（保持"不改变"），而不是一个巨大的 `target/orig` 商。
+/// 注意门限远低于常见内容电平 —— 真实素材的安静段（−34…−55 dBFS）照样能互转，
+/// 不会被误判成"保护帧"。
 /// 换算结果超出目标参数值域时按各自值域钳制 —— 钳制帧的等效性破缺是
-/// 已知的、被接受的（只发生在极端值组合下）。特别地，音量值域为 0..2
-/// （±6 dB），dyn 增益超过 ×2 的帧（把安静段提升 +6 dB 以上）转成音量后
-/// 会被钳到 2.0，响度有所回落 —— 这类帧本质上应由动态参数承载。
+/// 已知的、被接受的（只发生在极端值组合下）。两个方向的不对称由此而来：
+/// - dyn 值域 0..1（`> 1` 会削顶，无意义），故 **volume → dyn** 时任何
+///   `v × orig > 1`（= 目标超过 0 dBFS）都被钳到 1.0，响度回落。这类帧
+///   本质上应由音量参数承载。
+/// - 音量值域 0..2（±6 dB），故 **dyn → volume** 时把安静段提升 +6 dB 以上
+///   的帧（增益 > ×2）会被钳到 2.0。
 ///
 /// # 参数
 /// - `direction` 互转方向。
@@ -816,7 +822,8 @@ fn convert_mix_frame_value(
     baseline: f32,
 ) -> (f32, f32) {
     let sentinel = crate::renderer::common_params::DYN_FOLLOW_ORIG;
-    let dyn_max = 2.0_f32; // 与 dyn 描述符值域一致（0..2，+6 dB）
+    // 目标侧值域从描述符读（唯一真源，见 common_params::DYN_VALUE_MAX）。
+    let dyn_max = crate::renderer::common_params::DYN_VALUE_MAX;
     let vol_max = 2.0_f32; // 与 volume 描述符值域一致（0..2，±6 dB）
     match direction {
         MixConversionDirection::VolumeToDyn => {
@@ -830,13 +837,11 @@ fn convert_mix_frame_value(
         MixConversionDirection::DynToVolume => {
             // 动态归位哨兵（沿用原声）；音量接管。
             let new_volume = match dyn_raw {
-                // 用户画过的帧：换算成等效音量（静音保护帧保持 1.0）。
+                // 用户画过的帧：换算成等效音量。分母与 compute_dyn_gain 同款
+                // 钳到 DYN_SILENCE_FLOOR，保证互转前后的增益逐帧一致。
                 Some(t) if t.is_finite() && t >= 0.0 => {
-                    if baseline >= crate::renderer::common_params::DYN_MIN_REF {
-                        (t / baseline).clamp(0.0, vol_max)
-                    } else {
-                        1.0
-                    }
+                    let denom = baseline.max(crate::renderer::common_params::DYN_SILENCE_FLOOR);
+                    (t / denom).clamp(0.0, vol_max)
                 }
                 // 哨兵 / 无数据帧：原本就是"不改变" → 音量 1.0。
                 _ => 1.0,
@@ -1174,17 +1179,18 @@ mod mix_conversion_tests {
                     convert_mix_frame_value(MixConversionDirection::VolumeToDyn, Some(v), None, baseline);
                 assert_eq!(new_volume, 1.0, "源音量必须归位 1.0");
                 let after = GAIN(new_dyn, baseline);
-                if v * baseline <= 2.0 {
-                    // dyn 值域内（0..2）：最终效果必须逐帧等效。
+                if v * baseline <= 1.0 {
+                    // dyn 值域内（0..1）：最终效果必须逐帧等效。
                     assert!(
                         (v - after).abs() < 1e-5,
                         "v={v} baseline={baseline} → dyn={new_dyn} gain={after}"
                     );
                 } else {
-                    // 超出 dyn 值域（v × baseline > 2 = +6 dB）：按文档化行为
-                    // 钳到 2.0 —— 等效性破缺是 convert_mix_frame_value 文档
-                    // 声明的已知边界（目标电平不允许表达"比最响段落还响 6 dB"）。
-                    assert_eq!(new_dyn, 2.0, "v={v} baseline={baseline}");
+                    // 超出 dyn 值域（v × baseline > 1.0 = 0 dBFS）：按文档化行为
+                    // 钳到 1.0 —— 等效性破缺是 convert_mix_frame_value 文档
+                    // 声明的已知边界（目标电平不允许表达"超过满量程"，
+                    // 那在播出去之前就会被削顶）。
+                    assert_eq!(new_dyn, 1.0, "v={v} baseline={baseline}");
                     assert!(after < v, "钳制帧增益必须小于原音量");
                 }
             }
@@ -1219,25 +1225,53 @@ mod mix_conversion_tests {
     }
 
     #[test]
-    fn dyn_to_volume_follows_protection_and_clamp() {
-        // 静音保护帧：原增益恒 1 → 音量必须写 1.0（不得写巨大的商）。
+    fn dyn_to_volume_follows_floor_and_clamp() {
+        // 无内容帧（低于 −60 dBFS）：分母与 compute_dyn_gain 同款钳到下限，
+        // 故换算结果有界（而非写成 1.0 的"保护"值）。
         let (vol, new_dyn) = convert_mix_frame_value(
             MixConversionDirection::DynToVolume,
             None,
-            Some(2.0),
-            crate::renderer::common_params::DYN_MIN_REF * 0.5,
+            Some(1.0),
+            crate::renderer::common_params::DYN_SILENCE_FLOOR * 0.5,
         );
-        assert_eq!(vol, 1.0);
+        // t/下限 = 1000 → 被音量值域钳到 2。
+        assert_eq!(vol, 2.0);
         assert_eq!(new_dyn, crate::renderer::common_params::DYN_FOLLOW_ORIG);
 
-        // 超出音量值域（0..2）：钳制到 2（等效性破缺是文档化的已知边界）。
+        // 超出了值域：同样钳到 2（与 compute_dyn_gain 的增益保持一致）。
         let (vol, _) = convert_mix_frame_value(
             MixConversionDirection::DynToVolume,
             None,
-            Some(4.0),
-            crate::renderer::common_params::DYN_MIN_REF,
+            Some(1.0),
+            0.01,
         );
         assert_eq!(vol, 2.0);
+        // 与增益公式逐帧一致（互转的定义就是"等效"）。
+        let gain = crate::renderer::common_params::compute_dyn_gain(1.0, 0.01);
+        assert_eq!(vol, gain.min(2.0));
+    }
+
+    /// ★ 回归：真实素材的安静段必须能互转（门限曾是 −26 dBFS，误伤 −34…−55 dBFS）。
+    #[test]
+    fn dyn_to_volume_converts_quiet_content() {
+        // −40 dBFS 的素材画了目标 0.5 → 需 ×50，被音量值域钳到 2.0
+        //（等效性破缺属文档化边界），但**绝不能**被当成保护帧写 1.0。
+        let (vol, _) = convert_mix_frame_value(
+            MixConversionDirection::DynToVolume,
+            None,
+            Some(0.5),
+            0.01,
+        );
+        assert_eq!(vol, 2.0, "安静内容必须参与换算，而非被当作保护帧");
+
+        // 值域内的正常换算：−40 dBFS 画目标 0.01（= 原声）→ ×1。
+        let (vol, _) = convert_mix_frame_value(
+            MixConversionDirection::DynToVolume,
+            None,
+            Some(0.01),
+            0.01,
+        );
+        assert!((vol - 1.0).abs() < 1e-6, "got {vol}");
     }
 
     #[test]
@@ -1261,7 +1295,9 @@ mod mix_conversion_tests {
         // 基线只有 3 帧有效，选区 5 帧：后 2 帧写"无变化"值、计入 skipped，
         // 输出与输入逐帧对齐（长度恒等于 count）。
         let volume = vec![0.5f32, 1.5, 1.0, 1.0, 1.0];
-        let dyn_orig = vec![1.0f32, 0.5, 2.0];
+        // 基线取 0.8（0 dBFS 以下）而非 2.0 —— 后者会让 1.0 × 2.0 撞上 dyn
+        // 值域上限、被钳制，掩盖"逐帧换算"这一本测试真正要守护的性质。
+        let dyn_orig = vec![1.0f32, 0.5, 0.8];
         let (v_out, d_out, skipped) = compute_mix_conversion_range(
             MixConversionDirection::VolumeToDyn,
             Some(&volume),
@@ -1276,11 +1312,32 @@ mod mix_conversion_tests {
         // 前 3 帧按基线换算。
         assert!((d_out[0] - 0.5).abs() < 1e-6); // 0.5 × 1.0
         assert!((d_out[1] - 0.75).abs() < 1e-6); // 1.5 × 0.5
-        assert!((d_out[2] - 2.0).abs() < 1e-6); // 1.0 × 2.0
+        assert!((d_out[2] - 0.8).abs() < 1e-6); // 1.0 × 0.8
         // 后 2 帧：volume 归位 1.0、dyn 哨兵。
         assert_eq!(v_out[3], 1.0);
         assert_eq!(d_out[3], crate::renderer::common_params::DYN_FOLLOW_ORIG);
         assert_eq!(d_out[4], crate::renderer::common_params::DYN_FOLLOW_ORIG);
+    }
+
+    /// volume→dyn 超出 0 dBFS 的目标必须钳到 1.0（>1 会削顶，无意义）。
+    #[test]
+    fn volume_to_dyn_clamps_target_at_full_scale() {
+        // 把一段安静素材（0.1）抬到 1.0 需要 ×10 → 目标 1.0，正好是天花板；
+        // 再大的音量（2.0）也只能得到 1.0，不能写出削顶之外的目标电平。
+        let (_, loud) = convert_mix_frame_value(
+            MixConversionDirection::VolumeToDyn,
+            Some(10.0),
+            None,
+            0.1,
+        );
+        assert_eq!(loud, 1.0);
+        let (_, loud) =
+            convert_mix_frame_value(MixConversionDirection::VolumeToDyn, Some(2.0), None, 0.8);
+        assert_eq!(loud, 1.0, "1.6 的目标必须钳到满量程 1.0");
+        // 值域内的正常换算不受影响。
+        let (_, ok) =
+            convert_mix_frame_value(MixConversionDirection::VolumeToDyn, Some(0.5), None, 0.8);
+        assert!((ok - 0.4).abs() < 1e-6);
     }
 
     #[test]

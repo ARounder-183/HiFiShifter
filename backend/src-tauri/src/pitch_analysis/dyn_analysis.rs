@@ -1,11 +1,15 @@
-//! DYN（动态）参数的原声电平基线：组装、归一化与调度。
+//! DYN（动态）参数的原声电平基线：组装与调度。
 //!
 //! ## 语义
 //!
-//! `dyn_orig(t)` 是「本轨道组在这一时刻的原声电平」，以**倍率**表达：
-//! `1.0` = 轨道组的参考电平（0 dB），`0.5` = 低于参考 6 dB。
-//! 渲染增益由 `compute_dyn_gain(目标, 原声)` 求出，即用户绘制的是**绝对目标
-//! 电平**（与 VocalShifter 的 DYN 同量纲）。
+//! `dyn_orig(t)` 是「本轨道组在这一时刻的原声电平」，以**倍率**表达，锚点是
+//! **数字满量程**：`1.0` = 0 dBFS，`0.5` = −6 dBFS，`0` = 静音。这个锚点与
+//! DAW 的峰值电平表完全一致 —— 别处测得的 −4.7 dB 在这里就是 0.582，
+//! 不是别的数（历史实现曾对基线做"99 百分位归一化"，把 1.0 重新定义成
+//! "本组最响的段落"，于是 0.582 被读成 1.126 —— 量纲被偷偷换掉了）。
+//!
+//! 渲染增益 = `compute_dyn_gain(目标, 原声)`，即用户绘制的是**绝对目标电平**
+//! （与 VocalShifter 的 DYN 同量纲）。
 //!
 //! ## 电平的物理口径（决定「目标 1.0」意味着什么）
 //!
@@ -15,14 +19,17 @@
 //! 精确兑现，基线必须刻画**该信号在 dyn 增益作用点的电平**：
 //!
 //! ```text
-//! 每 clip：analyze_clip_pitch_and_level（一次性解码 → 全量源音频逐帧 RMS）
-//!      ↓ trim_and_resample_curve（窗口/Loop/倒放/rate 映射到 clip 可见区间）
+//! 每 clip：analyze_clip_pitch_and_level（一次性解码 → 全量源音频逐帧峰值）
+//!      ↓ map_clip_curve（窗口/Loop/倒放/rate 映射到 clip 可见区间）
 //!      ↓ audible_i(t) = level_i(t) × clip增益_i   （淡化只作纳入门限，见下）
-//! 根曲线：level(t) = sqrt(Σ audibleᵢ(t)²)   （能量域合成，与混音 RMS 同构）
-//!      ↓ 除以参考电平（99 百分位）→ dyn_orig = clamp(level / ref, 0, 4)
+//! 根曲线：level(t) = sqrt(Σ audibleᵢ(t)²)   （能量域合成）
+//!      ↓ dyn_orig = clamp(level, 0, DYN_ORIG_MAX)   ← 无归一化，绝对电平
 //! ```
 //!
-//! 两条刻意的设计决策：
+//! 三条刻意的设计决策：
+//! - **绝对锚点（不归一化）**：任何"除以本组最响段落"的归一化都会让倍率
+//!   失去绝对意义，与 DAW 数值对不上。归一化唯一的好处（曲线总落在 0..1）
+//!   远不如"画 0.582 就是 −4.7 dB"这个可验证性重要。
 //! - **含静态 clip 增益**：用户听到的响度包含它；否则 clip 增益 0.5 的轨道上
 //!   「画 1.0」实际只会得到参考电平的一半（目标语义失效），且虚线基线与波形
 //!   显示（波形含 clip 增益）不同域、无法对齐比较。
@@ -46,26 +53,21 @@
 use crate::state::{AppState, TimelineState};
 use tauri::Emitter;
 
-/// 参考电平的百分位（0..1）：取融合曲线中"最响的持续段落"作为 0 dB 基准。
+/// `dyn_orig` 的安全上限（**纯防御性**，不表达值域语义）。
 ///
-/// 用百分位而非峰值，是为了让渐强/单帧尖峰不会把整条曲线压得过小；
-/// 用百分位而非平均值，是为了让基准贴近"响的那一段"而不是"平均响度"
-/// （后者会让曲线整体偏小，用户一画就撞上限）。
-const REFERENCE_PERCENTILE: f64 = 0.99;
-
-/// `dyn_orig` 的上限（与 DYN 参数值域一致）。
-const DYN_ORIG_MAX: f32 = 4.0;
+/// 基线是绝对电平：单 clip 满量程 + 增益 4.0 已可达 4.0，多 clip 叠加更高。
+/// 这里只拦非有限/荒谬值，避免它作为**分母**时把增益推到 0 或 NaN。
+const DYN_ORIG_MAX: f32 = 8.0;
 
 /// 组装根轨道的原声电平基线（同步，全部命中 per-clip 缓存时可用）。
 ///
-/// 返回 `(curve, reference, all_cache_hit)`：
-/// - `curve`：长度 = 工程参数帧数的 `dyn_orig`（归一化到参考电平）；
-/// - `reference`：归一化用的参考电平（linear，供前端映射波形）；
+/// 返回 `(curve, all_cache_hit)`：
+/// - `curve`：长度 = 工程参数帧数的 `dyn_orig`（绝对电平，1.0 = 0 dBFS）；
 /// - `all_cache_hit`：false 表示部分 clip 尚未分析完成，`curve` 是当前可得的部分。
 pub(crate) fn assemble_dyn_orig_from_cache(
     tl: &TimelineState,
     root_track_id: &str,
-) -> (Vec<f32>, f32, bool) {
+) -> (Vec<f32>, bool) {
     let fp = tl.frame_period_ms();
     let target_frames = tl.target_param_frames(fp);
 
@@ -153,37 +155,22 @@ pub(crate) fn assemble_dyn_orig_from_cache(
         clip_contributions.push((clip_start_frame, clip_gain, audible_levels));
     }
 
-    // 能量域融合（无权重）：level(t) = sqrt(Σ (lᵢ × gainᵢ)²) —— 与混音里
-    // "dyn 增益所作用的组信号的 RMS" 同构（不相关能量叠加近似）。
+    // 能量域融合（无权重）：level(t) = sqrt(Σ (lᵢ × gainᵢ)²)
     let fused = fuse_level_energy(target_frames, clip_contributions);
 
     if !all_cache_hit && fused.iter().all(|&v| v <= 0.0) {
-        // 一点数据都没有：返回全 0（= 无基线），reference 用默认 1.0 占位。
-        return (vec![0.0; target_frames], 1.0, false);
+        // 一点数据都没有：返回全 0（= 无基线）。
+        return (vec![0.0; target_frames], false);
     }
 
-    let reference = percentile_reference(&fused, REFERENCE_PERCENTILE);
-    if !(reference.is_finite() && reference > 0.0) {
-        // 整组静音：无参考电平可归一化 → 全 0 基线（DYN 增益恒为 1）。
-        return (vec![0.0; target_frames], 0.0, all_cache_hit);
-    }
-
+    // 无归一化：`dyn_orig` 就是融合后的**绝对电平**（1.0 = 0 dBFS）。
+    // 任何"除以本组最响段落"的步骤都会让倍率失去绝对意义 —— 别处测得的
+    // −4.7 dB（0.582）会被读成另一个数（历史实现读成 1.126）。
     let curve: Vec<f32> = fused
         .iter()
-        .map(|&v| (v / reference).clamp(0.0, DYN_ORIG_MAX))
+        .map(|&v| if v.is_finite() { v.clamp(0.0, DYN_ORIG_MAX) } else { 0.0 })
         .collect();
-    (curve, reference, all_cache_hit)
-}
-
-/// 非零值的给定位百分位（用于选取参考电平）。
-fn percentile_reference(curve: &[f32], percentile: f64) -> f32 {
-    let mut finite: Vec<f32> = curve.iter().copied().filter(|v| v.is_finite() && *v > 0.0).collect();
-    if finite.is_empty() {
-        return 0.0;
-    }
-    finite.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let idx = ((finite.len() as f64) * percentile).ceil() as usize;
-    finite[idx.saturating_sub(1).min(finite.len() - 1)]
+    (curve, all_cache_hit)
 }
 
 /// 能量域融合（**纯函数**，口径的唯一落点，供单测直接验证）：
@@ -191,10 +178,12 @@ fn percentile_reference(curve: &[f32], percentile: f64) -> f32 {
 /// `level(t) = sqrt(Σ (lᵢ(t) × gainᵢ)²)`
 ///
 /// `entries` = `(clip 起始帧, clip 增益, 逐帧电平)`，不可听帧的电平传 0。
-/// 两个关键性质（见文件头"电平的物理口径"）：
+/// 三个关键性质（见文件头"电平的物理口径"）：
 /// - 静态 clip 增益**乘进**电平（目标电平语义 = 可听响度）；
 /// - 多 clip 重叠按**能量和**合成（无加权）—— 加权平均会把增益约掉、
-///   并把重叠区基线低估 √N 倍。
+///   并把重叠区基线低估 √N 倍；
+/// - 输出是**绝对电平**，不做任何归一化 —— 归一化会让倍率失去绝对意义，
+///   与 DAW 的电平表对不上（历史实现即错在这里）。
 fn fuse_level_energy(
     target_frames: usize,
     entries: Vec<(usize, f64, Vec<f32>)>,
@@ -331,13 +320,12 @@ fn assemble_and_store(tl: &mut TimelineState, root_track_id: &str) -> (bool, boo
         return (false, true);
     }
 
-    let (curve, reference, all_cache_hit) = assemble_dyn_orig_from_cache(tl, root_track_id);
+    let (curve, all_cache_hit) = assemble_dyn_orig_from_cache(tl, root_track_id);
     tl.ensure_params_for_root(root_track_id);
     let mut changed = false;
     if let Some(entry) = tl.params_by_root_track.get_mut(root_track_id) {
         changed = entry.dyn_orig != curve;
         entry.dyn_orig = curve;
-        entry.dyn_orig_reference = reference;
         // 全部命中才记 key（与音高同一策略：部分命中时下一轮继续尝试组装）。
         entry.dyn_orig_key = all_cache_hit.then(|| key.clone());
     }
@@ -408,9 +396,9 @@ pub fn assemble_dyn_orig_for_engine(tl: &mut TimelineState, root_track_id: &str)
 pub(crate) fn build_root_dyn_key(tl: &TimelineState, root_track_id: &str) -> String {
     let fp = tl.frame_period_ms().max(0.1);
     let mut hasher = blake3::Hasher::new();
-    // 【v2】融合口径变更：clip 增益乘进电平、淡化只作纳入门限（见文件头）。
+    // 【v3】基线改为**绝对电平**（不归一化）+ 逐帧峰值口径（见文件头）。
     // 旧 key 命中的基线是旧口径产物，必须整体重组一次。
-    hasher.update(b"root_dyn_orig_v2");
+    hasher.update(b"root_dyn_orig_v3");
     hasher.update(root_track_id.as_bytes());
     hasher.update(&crate::pitch_analysis::quantize_u32(fp, 1000.0).to_le_bytes());
 
@@ -512,24 +500,6 @@ mod tests {
     }
 
     #[test]
-    fn percentile_reference_uses_upper_percentile() {
-        // 10 个值：最响的 10% 是 1.0。99 百分位取到接近最大但不受单点尖峰影响。
-        let curve: Vec<f32> = vec![0.1, 0.1, 0.1, 0.1, 0.2, 0.2, 0.3, 0.4, 0.5, 1.0];
-        let r = percentile_reference(&curve, 0.99);
-        assert!((r - 1.0).abs() < 1e-6, "got {r}");
-        // 单帧尖峰不会把参考抬到极点：99 百分位仍落在次高段。
-        let curve: Vec<f32> = (0..100).map(|i| if i == 99 { 100.0 } else { 0.5 }).collect();
-        let r = percentile_reference(&curve, 0.99);
-        assert!((r - 0.5).abs() < 1e-6, "got {r}");
-    }
-
-    #[test]
-    fn percentile_reference_handles_empty_and_silent() {
-        assert_eq!(percentile_reference(&[], 0.99), 0.0);
-        assert_eq!(percentile_reference(&[0.0, 0.0, 0.0], 0.99), 0.0);
-    }
-
-    #[test]
     fn dyn_key_changes_with_clip_geometry() {
         let mut tl = TimelineState::default();
         let track = make_track("root");
@@ -591,5 +561,35 @@ mod tests {
         assert!((fused[0] - 0.5).abs() < 1e-6);
         assert!((fused[2] - 1.0).abs() < 1e-6);
         assert_eq!(fused.len(), 4);
+    }
+
+    /// ★ 量纲守护：基线必须是**绝对电平**，不得被任何归一化改写。
+    ///
+    /// 回归：历史实现把融合结果除以"99 百分位参考电平"，于是 1.0 的含义从
+    /// "0 dBFS"变成"本组最响的段落"，DAW 里 −4.7 dB（0.582）的一段被读成
+    /// 1.126 —— 用户的外部测量与 HiFiShifter 的读数对不上。
+    #[test]
+    fn fused_level_is_absolute_not_normalized() {
+        use super::fuse_level_energy;
+        // −4.7 dB 的稳态段（10^(−4.7/20) = 0.5819…）必须原样保留，
+        // 无论同组还有多响的段落存在。
+        let db = -4.7f64;
+        let level = 10f64.powf(db / 20.0) as f32;
+        assert!((level - 0.5819).abs() < 1e-3, "got {level}");
+
+        // 同组里夹一段满量程（0 dBFS）的响段：归一化实现会把 quiet 段抬到 ~1.72。
+        let fused = fuse_level_energy(
+            4,
+            vec![
+                (0usize, 1.0f64, vec![level, level, 1.0f32, 1.0f32]),
+            ],
+        );
+        assert!(
+            (fused[0] - level).abs() < 1e-6,
+            "安静段被归一化改写：{} != {}",
+            fused[0],
+            level
+        );
+        assert!((fused[2] - 1.0).abs() < 1e-6, "满量程段必须恒为 1.0");
     }
 }

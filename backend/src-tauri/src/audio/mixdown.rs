@@ -98,7 +98,7 @@ fn sample_automation_curve_at_sec(
 /// 采样动态（DYN）曲线在绝对秒处的增益。
 ///
 /// 与实时引擎 `audio_engine::mix::dyn_gain_at` 是**同一份语义**：曲线存在性、
-/// 基线存在性、静音保护与哨兵四条守卫，以及 `目标/原声` 的增益公式。
+/// 基线存在性与哨兵三条守卫，以及 `目标 / max(原声, 静音下限)` 的增益公式。
 /// 两侧必须同步修改 —— 导出与监听不一致是最难排查的一类问题。
 fn dyn_gain_at_sec(
     dyn_curve: Option<&[f32]>,
@@ -129,7 +129,9 @@ fn dyn_gain_at_sec(
         Some(orig_curve),
         abs_sec,
         frame_period_ms,
-        crate::renderer::common_params::DYN_MIN_REF,
+        // 0.0 = "该帧无基线数据"（与实时引擎 mix.rs 同源）。不能用 DYN_SILENCE_FLOOR：
+        // 那会把无数据帧当成无内容帧，使任何超过 −60 dBFS 的目标被读成放大请求而拒绝。
+        0.0,
     );
     crate::renderer::common_params::compute_dyn_gain(target, orig)
 }

@@ -398,15 +398,6 @@ export interface ParamFramesPayload {
     pitch_edit_backend_available?: boolean;
 
     /**
-     * 动态（DYN）的归一化参考电平（linear，1.0 = 数字满量程）。
-     *
-     * 仅在 `param === "dyn"` 时返回。参数编辑器据此把源文件波形峰值投影到
-     * DYN 面板的倍率纵轴上（映射 = `峰值 / dyn_orig_reference`），
-     * 使波形、原声基线与用户曲线共用同一坐标系。
-     */
-    dyn_orig_reference?: number;
-
-    /**
      * 动态（DYN）的「未画」位图（仅请求带 `withSentinel=true` 时返回）。
      *
      * `true` = 该帧没有用户数据（哨兵），`edit` 里是解析后的基线值。批量操作

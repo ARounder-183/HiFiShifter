@@ -6,6 +6,7 @@ import {
     type LoudnessLiveCurve,
 } from "./PianoRollWaveformSurface";
 import { readAmplitudeRevision, type WaveformAmplitudeMap } from "../../../waveform/geometry";
+import { DYN_MAX_GAIN, DYN_SILENCE_FLOOR, DYN_VALUE_MAX } from "./paramRanges";
 
 /**
  * 构造快照：`volume` / `dynTarget` / `dynBaseline` 逐帧给定，帧周期 10ms
@@ -99,14 +100,30 @@ describe("makeLoudnessAmplitudeMap", () => {
         expect(map(1, 1, 0)).toBeCloseTo(1, 10);
     });
 
-    it("does not amplify silence (protects the noise floor)", () => {
-        // 原声落在静音门限以下：即便目标很大也不放大。
+    it("★ boosts quiet content at any realistic level (was blocked below −26 dBFS)", () => {
+        // 回归：门限曾定在 −26 dBFS（0.05），导致轻声/气声/尾音整体提不上去。
+        // 这些电平必须都能提升（下限已降到 −60 dBFS）。
+        for (const db of [-20, -26, -34, -40, -45, -55]) {
+            const base = Math.pow(10, db / 20);
+            const map = makeLoudnessAmplitudeMap(
+                source({ dynTarget: [0.582], dynBaseline: [base] }),
+                { volume: noLive, dyn: noLive },
+                () => 0,
+            );
+            // 所需倍数很大 → 钳到上限，但**必须大于 1**（旧实现恒为 1 = 提不动）。
+            expect(map(1, 1, 0)).toBeGreaterThan(1);
+        }
+    });
+
+    it("bounds no-content frames instead of rejecting amplification (continuity)", () => {
+        // 无内容帧（−80 dBFS）：分母钳到下限 ⇒ 增益有界（上限），而非旧实现的
+        // "拒绝放大返回 1"—— 后者在下限处产生阶跃，正是近零伪影的根因。
         const map = makeLoudnessAmplitudeMap(
-            source({ dynTarget: [4], dynBaseline: [0.001] }),
+            source({ dynTarget: [1], dynBaseline: [0.0001] }),
             { volume: noLive, dyn: noLive },
             () => 0,
         );
-        expect(map(1, 1, 0)).toBeCloseTo(1, 10);
+        expect(map(1, 1, 0)).toBeCloseTo(DYN_MAX_GAIN, 6);
     });
 
     it("★ drawn silence silences the noise floor (protection never blocks attenuation)", () => {
@@ -127,21 +144,25 @@ describe("makeLoudnessAmplitudeMap", () => {
         expect(zeroBase(1, 1, 0)).toBeCloseTo(0, 10);
     });
 
-    it("clamps the dyn gain to the maximum", () => {
-        // 目标 4 / 原声 0.05 → 名义 ×80，必须钳到 ×4。
+    it("★ honors the target exactly; the clamp is only a numeric backstop", () => {
+        // 回归：上限曾仅 ×4，使 −26 dBFS（0.05）画满量程目标时只得 ×4
+        //（"画了目标却达不到"）。现在上限 = 值域顶端/下限，正常输入不可达。
         const map = makeLoudnessAmplitudeMap(
-            source({ dynTarget: [4], dynBaseline: [0.05] }),
+            source({ dynTarget: [1], dynBaseline: [0.05] }),
             { volume: noLive, dyn: noLive },
             () => 0,
         );
-        expect(map(1, 1, 0)).toBeCloseTo(4, 10);
+        expect(map(1, 1, 0)).toBeCloseTo(20, 9); // 1 / 0.05，精确兑现
+
+        // 上限只在越界曲线造成荒谬增益时兜底：它远高于任何合法目标所需的倍数。
+        expect(DYN_MAX_GAIN).toBe(DYN_VALUE_MAX / DYN_SILENCE_FLOOR);
     });
 
     it("does not extend the last value past the curve (no tail pollution)", () => {
         // 曲线只有 1 帧：其后所有时刻都必须回到"不施加增益"，
         // 而不是把末值一直 hold 下去（历史共振峰 bug 的同源教训）。
         const map = makeLoudnessAmplitudeMap(
-            source({ dynTarget: [4], dynBaseline: [1] }),
+            source({ dynTarget: [1], dynBaseline: [0.25] }),
             { volume: noLive, dyn: noLive },
             () => 0,
         );
@@ -166,28 +187,28 @@ describe("makeLoudnessAmplitudeMap", () => {
     it("respects stride when mapping time to curve index", () => {
         // stride 2：曲线每 2 个参数帧一个采样 → 帧号跨度翻倍（20ms）。
         const map = makeLoudnessAmplitudeMap(
-            source({ dynTarget: [4, 0.25], dynBaseline: [1, 1], stride: 2 }),
+            source({ dynTarget: [0.5, 0.25], dynBaseline: [1, 1], stride: 2 }),
             { volume: noLive, dyn: noLive },
             () => 0,
         );
-        expect(map(1, 1, 0)).toBeCloseTo(4, 10);
-        expect(map(1, 1, 0.02)).toBeCloseTo(0.25, 10);
+        expect(map(1, 1, 0)).toBeCloseTo(0.5, 10); // 帧 0 → ×0.5
+        expect(map(1, 1, 0.02)).toBeCloseTo(0.25, 10); // 帧 2（stride 2）→ ×0.25
     });
 
     it("blends target and baseline linearly in time", () => {
-        // 帧 0→1 之间取中点（5ms）：目标 1→3、原声 1→1 → 中点增益 2。
+        // 帧 0→1 之间取中点（5ms）：目标 1→0.5、原声 1→1 → 中点目标 0.75 → 增益 0.75。
         const map = makeLoudnessAmplitudeMap(
-            source({ dynTarget: [1, 3], dynBaseline: [1, 1] }),
+            source({ dynTarget: [1, 0.5], dynBaseline: [1, 1] }),
             { volume: noLive, dyn: noLive },
             () => 0,
         );
-        expect(map(1, 1, 0.005)).toBeCloseTo(2, 10);
+        expect(map(1, 1, 0.005)).toBeCloseTo(0.75, 10);
     });
 
     it("dyn gain stays unity when the baseline is empty (analysis pending)", () => {
         // 分析未就绪：动态不生效，volume 仍生效 —— 绝不返回全零映射。
         const map = makeLoudnessAmplitudeMap(
-            source({ volume: [0.5], dynTarget: [4], dynBaseline: [] }),
+            source({ volume: [0.5], dynTarget: [1], dynBaseline: [] }),
             { volume: noLive, dyn: noLive },
             () => 0,
         );
@@ -196,7 +217,7 @@ describe("makeLoudnessAmplitudeMap", () => {
 
     it("degenerates to linear when time is unavailable", () => {
         const map = makeLoudnessAmplitudeMap(
-            source({ volume: [0.1], dynTarget: [4], dynBaseline: [1] }),
+            source({ volume: [0.1], dynTarget: [1], dynBaseline: [0.25] }),
             { volume: noLive, dyn: noLive },
             () => 0,
         );
@@ -253,7 +274,7 @@ describe("makeLoudnessAmplitudeMap · factor view", () => {
         const map = makeLoudnessAmplitudeMap(
             source({
                 volume: [0.8, 0.8, 0.8, 0.8, 0.8, 0.8],
-                dynTarget: [1, 2, 0.5, 0.25, 1, 1],
+                dynTarget: [1, 0.9, 0.5, 0.25, 1, 1],
                 dynBaseline: [0.5, 1, 1, 0.5, 1, 1],
             }),
             { volume: () => live, dyn: noLive },
@@ -273,7 +294,7 @@ describe("makeLoudnessAmplitudeMap · factor view", () => {
     it("★ matches the per-value map for non-finite times", () => {
         // timeSec 未知（null / NaN）→ 两边都必须退化为"不施加响度自动化"。
         const map = makeLoudnessAmplitudeMap(
-            source({ volume: [0.1], dynTarget: [4], dynBaseline: [1] }),
+            source({ volume: [0.1], dynTarget: [1], dynBaseline: [0.25] }),
             { volume: noLive, dyn: noLive },
             () => 0,
         );
@@ -305,14 +326,14 @@ describe("makeLoudnessAmplitudeMap · factor view", () => {
     it("returns a finite factor where the per-value map is finite", () => {
         // 动态静音（基线 0）等退化分支下因子仍须有限，否则几何层会跳过整列。
         const map = makeLoudnessAmplitudeMap(
-            source({ volume: [1, 1], dynTarget: [0, 4], dynBaseline: [0, 0.001] }),
+            source({ volume: [1, 1], dynTarget: [0, 1], dynBaseline: [0, 0.0001] }),
             { volume: noLive, dyn: noLive },
             () => 0,
         );
         const factor = factorOf(map);
 
         expect(factor(0)).toBe(0); // 真静音：画了静音 = 静音
-        expect(factor(0.01)).toBe(1); // 噪声底帧：只拒绝放大
+        expect(factor(0.01)).toBe(DYN_MAX_GAIN); // 无内容帧：分母钳到下限 ⇒ 有界
     });
 
     it("stays attached to the same map object as revision()", () => {

@@ -23,6 +23,7 @@ import type { WaveformAmplitudeFactors, WaveformAmplitudeMap } from "../../../wa
 import { linearAmplitudeMap } from "../../../waveform/geometry";
 import { createTimelineAxis } from "../renderKernel/timelineAxis.js";
 import type { ClipPeaksEntry } from "./useClipsPeaksForPianoRoll";
+import { computeDynGain } from "./paramRanges";
 import { pianoRollViewportBus } from "./pianoRollViewportBus";
 
 /**
@@ -58,13 +59,13 @@ export interface LoudnessLiveCurve {
 }
 
 /**
- * 静音保护下限：原声低于此值时**放大**请求被拒绝（增益 1），衰减/静音请求
- * 照常生效（与后端 `DYN_MIN_REF` 一致）。
+ * 静音保护下限与增益上限：**不再在本文件内联**。
+ *
+ * 增益语义（含门限与上限）的唯一真源是 `paramRanges::computeDynGain`，
+ * 它与后端 `common_params::compute_dyn_gain` 逐分支同构。本文件曾各自
+ * 内联一份常量与公式，导致前后端口径可能分叉（用户看到"波形能提升、
+ * 实际播放不提升"）。热路径只需调用该函数（零分配）。
  */
-const DYN_MIN_REF = 0.05;
-
-/** 增益上限（与后端 `DYN_MAX_GAIN` 一致）。 */
-const DYN_MAX_GAIN = 4;
 
 /**
  * 在 `(startFrame, stride)` 对齐的曲线数组上按**绝对帧**线性插值取样。
@@ -160,10 +161,8 @@ export function makeLoudnessAmplitudeMap(
         // ① 音量包络：曲线外回退 1.0（与后端越界持有末值语义一致）。
         const vol = sampleLiveOrSnapshot(live.volume(), source.volume, frameF) ?? 1.0;
 
-        // ② 动态增益：无基线（分析未就绪）→ 1；目标为哨兵（沿用原声）→ 1；
-        //    基线低于静音门限 → 只拒绝放大（衰减/静音照常，与后端
-        //    compute_dyn_gain 同口径 —— 把曲线拉到 0 后噪声底帧也是静音）；
-        //    其余 = 目标/基线，钳制到上限。
+        // ② 动态增益：交给与后端逐分支同构的 `computeDynGain`（唯一实现）。
+        //    基线为空 = 分析未就绪 → 不施加任何增益（绝不凭空造增益）。
         let dynGain = 1;
         if (source.dynBaseline.length > 0) {
             const target = sampleLiveOrSnapshot(live.dyn(), source.dynTarget, frameF);
@@ -173,21 +172,64 @@ export function makeLoudnessAmplitudeMap(
                 source.stride,
                 frameF,
             );
-            if (target !== null && target >= 0 && base !== null) {
-                if (base <= 0) {
-                    // 真静音（分析电平 0）：画了静音 = 静音。
-                    dynGain = target <= 0 ? 0 : 1;
-                } else if (base < DYN_MIN_REF && target > base) {
-                    // 噪声底帧：只拒绝"放大"请求。
-                    dynGain = 1;
-                } else {
-                    dynGain = Math.min(Math.max(target / base, 0), DYN_MAX_GAIN);
-                }
+            if (target !== null && base !== null) {
+                dynGain = computeDynGain(target, base);
             }
         }
 
         const factor = vol * dynGain;
         return Number.isFinite(factor) ? factor : null;
+    };
+
+    /**
+     * 时间窗内可达电平的**硬上界**：`max over t∈窗 ( vol(t) × 目标电平(t) )`。
+     *
+     * 【为什么它是硬上界】逐样本地，`|x(s)| ≤ 原声基线(t_s)`（基线是该点原声
+     * 电平），故真实输出
+     *   `输出(s) = |x(s)| × vol × 目标/基线 ≤ vol(t_s) × 目标(t_s)`。
+     * 因此窗口内任何时刻的真实输出都不超过本值 —— 显示超过它的部分一定是
+     * 幻峰（来自"桶窗比分母窗宽"导致的 `桶峰 × 大增益` 越界）。
+     *
+     * 【为什么未编辑区不会被压】那里 `目标 = 原声`，本值 = `vol × max(原声)`；
+     * 而显示用的桶峰 ≤ 窗内原声基线最大 ≤ 该值 ⇒ 钳制从不生效（已实测验证）。
+     *
+     * 【降级】无动态基线（分析未就绪）时动态不生效（增益恒 1），上界退化为
+     * `max(vol)`；无音量数据时 vol 恒 1。任一曲线样本非有限即返回 null
+     * （不钳制，保持既有行为）。
+     */
+    const levelCeilingOverWindow = (
+        windowStartSec: number,
+        windowEndSec: number,
+    ): number | null => {
+        if (
+            !Number.isFinite(windowStartSec) ||
+            !Number.isFinite(windowEndSec) ||
+            !(source.framePeriodMs > 0)
+        ) {
+            return null;
+        }
+        const lo = Math.min(windowStartSec, windowEndSec);
+        const hi = Math.max(windowStartSec, windowEndSec);
+        const f0 = (lo * 1000) / source.framePeriodMs;
+        const f1 = (hi * 1000) / source.framePeriodMs;
+        if (!Number.isFinite(f0) || !Number.isFinite(f1)) return null;
+        // 动态未启用（无基线）：因子只有音量（≤2）与 bucketPeak（≤1），
+        // 显示值有界，不存在幻峰 → 不钳制（保持既有的"溢出削顶"观感）。
+        if (source.dynBaseline.length === 0) return null;
+        // 逐帧枚举窗口（帧周期 5ms，窗口最宽为 L2 桶 ≈ 85ms → 至多数十帧）。
+        const first = Math.max(0, Math.floor(f0));
+        const last = Math.ceil(f1);
+        let ceiling = 0;
+        for (let f = first; f <= last; f += 1) {
+            const vol = sampleLiveOrSnapshot(live.volume(), source.volume, f) ?? 1.0;
+            // 目标电平（哨兵已在后端出口解析成原声基线）；`≤0` = 画静音。
+            const target = sampleLiveOrSnapshot(live.dyn(), source.dynTarget, f);
+            if (target === null) continue;
+            const level = Math.max(target, 0) * Math.max(vol, 0);
+            if (!Number.isFinite(level)) return null;
+            if (level > ceiling) ceiling = level;
+        }
+        return ceiling;
     };
 
     const map = ((value: number, gain: number, timeSec: number | null) => {
@@ -204,6 +246,9 @@ export function makeLoudnessAmplitudeMap(
     map.revision = revision;
     // 时域因子视图：几何层据此把每切片的 min/max 两次逐值调用换成一次求值。
     map.factorAt = factorAt;
+    // 窗口电平上界：几何层据此把"桶峰 × 因子"钳在物理可达范围内，
+    // 消除近零原声处的幻峰（见 levelCeilingOverWindow 与接口文档）。
+    map.levelCeilingOverWindow = levelCeilingOverWindow;
     return map;
 }
 

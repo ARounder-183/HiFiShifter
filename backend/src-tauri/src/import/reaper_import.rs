@@ -1169,7 +1169,6 @@ fn convert_reaper_data(
                         pending_pitch_offset: Some(offset_frames),
                         dyn_orig: Vec::new(),
                         dyn_orig_key: None,
-                        dyn_orig_reference: 0.0,
                         extra_curves: Default::default(),
                         extra_params: Default::default(),
                     },

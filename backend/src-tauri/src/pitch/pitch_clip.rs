@@ -169,13 +169,29 @@ fn hz_to_midi(hz: f64) -> f32 {
 
 /// 逐帧原声电平分析（DYN 的 `dyn_orig` 来源）。
 ///
-/// 与静音检测（`audio/silence_detect.rs`）共用同一套已验证的口径：
-/// `HOP = 5 ms`（与参数线 `frame_period_ms` 对齐）、`窗口 = 20 ms`、RMS。
+/// 口径：`HOP = 5 ms`（与参数线 `frame_period_ms` 对齐）、`窗口 = 20 ms`、
+/// **峰值**（窗内 `max|x|`），1.0 = 数字满量程 = **0 dBFS**。
 /// 窗口以帧中心为基准、向两侧各半窗展开并在片段端点处收缩，因此
 /// 输出帧数 = `ceil(frames * 1000 / (sample_rate * fp_ms))`。
 ///
-/// 返回值是**线性幅度**（1.0 = 数字满量程），不是 dB：DYN 曲线本身就是电平
-/// 倍率，直接持有线性值可省去渲染路径上的 pow/log。
+/// ## 为什么是峰值而不是 RMS
+///
+/// DYN 面板的波形画的是**峰值包络**（波形 mipmap 的 min/max 列）。基线只有与
+/// 它同口径，"虚线 = 原声"才真的贴着未编辑的波形走，用户画一笔目标电平也才
+/// 看得见波形立刻跟到那个高度 —— 这是该参数最核心的反馈回路。RMS 口径下
+/// 波形会系统性地比曲线高出一个波峰因数（稳态正弦即 3 dB），虚线与波形、
+/// 曲线与波形都永远差着一截。
+///
+/// 增益是比值（`目标 / 原声`），因此口径只决定"1.0 是多响"，不影响的增益
+/// 正确性；取峰值即把锚点定成 DAW 峰值电平表的 0 dBFS。
+///
+/// ## 时间栅格必须由实数除法定义（不能先取整 hop）
+///
+/// 帧 `h` 的中心固定在 `h × (fp/1000) × sr` 秒处。当该值不是整数样本时
+/// （44.1 kHz + 5 ms 帧 → 220.5 样本/帧），**绝不能**先把 hop 取整再累加：
+/// `round(220.5) = 221` 会让每帧多走 0.5 样本，累积成 2.27 ms/s 的漂移 ——
+/// 30 s 处已达 68 ms（≈ "检测值比真实值左偏 0.07 s"），且随时间线性增长，
+/// 与真实音频逐帧错位。取整只发生在换算**该帧的窗口边界**这一步。
 pub(crate) fn compute_frame_levels(mono: &[f32], sample_rate: u32, frame_period_ms: f64) -> Vec<f32> {
     const WINDOW_MS: f64 = 20.0;
     let fp = frame_period_ms.max(0.1);
@@ -183,32 +199,60 @@ pub(crate) fn compute_frame_levels(mono: &[f32], sample_rate: u32, frame_period_
     if mono.is_empty() {
         return Vec::new();
     }
-    let hop_samples = ((fp / 1000.0) * sr).round().max(1.0) as usize;
+    // 实数 hop（样本/帧）：时间栅格的唯一真源，不取整。
+    let hop_samples_f = (fp / 1000.0) * sr;
     let window_samples = (((WINDOW_MS / 1000.0) * sr).round() as usize).max(1) as usize;
-    let total_hops = mono.len().div_ceil(hop_samples).max(1);
+    // 帧数 = ceil(样本数 / 实数 hop)：同样不能先把 hop 取整（否则 40 s 素材会
+    // 多算 19 帧）。减一个相对 epsilon 抵消浮点余量，避免整倍数时多出一帧。
+    let total_hops = (((mono.len() as f64) / hop_samples_f) - 1e-9)
+        .ceil()
+        .max(1.0) as usize;
 
-    let mut out = Vec::with_capacity(total_hops);
-    let mut prefix = 0.0f64;
-    // 前缀和加速：每个 hop 的窗内平方和 = O(1)。
-    let mut prefix_sums = Vec::with_capacity(mono.len() + 1);
-    prefix_sums.push(0.0f64);
+    // 窗内 max|x|：单调队列一次线性扫描（窗口随帧单调右移），
+    // 避免每帧重扫 20 ms 窗（44.1 kHz 下 882 样本 × 上万帧）。
+    let mut abs: Vec<f64> = Vec::with_capacity(mono.len());
     for &v in mono {
-        let sq = (v as f64) * (v as f64);
-        prefix += sq;
-        prefix_sums.push(prefix);
+        let a = (v as f64).abs();
+        abs.push(if a.is_finite() { a } else { 0.0 });
     }
 
+    let mut out = Vec::with_capacity(total_hops);
+    // 单调递减队列：存索引，队首 = 当前窗内最大值的索引。
+    let mut deque: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
+    let mut next_push: usize = 0;
+
     for hop in 0..total_hops {
-        let center = (hop * hop_samples) as f64 + hop_samples as f64 * 0.5;
+        // 帧中心 = hop × 实数 hop 长度：无累积取整误差（见函数头说明）。
+        let center = hop as f64 * hop_samples_f + hop_samples_f * 0.5;
         let start = (center - window_samples as f64 * 0.5).max(0.0) as usize;
         let end = ((center + window_samples as f64 * 0.5) as usize).min(mono.len());
         if end <= start {
             out.push(0.0);
             continue;
         }
-        let sum_sq = prefix_sums[end] - prefix_sums[start];
-        let rms = (sum_sq / (end - start) as f64).sqrt();
-        out.push(if rms.is_finite() { rms as f32 } else { 0.0 });
+        // 推进队列右端到 end（保持递减）。
+        while next_push < end {
+            let v = abs[next_push];
+            while let Some(&back) = deque.back() {
+                if abs[back] <= v {
+                    deque.pop_back();
+                } else {
+                    break;
+                }
+            }
+            deque.push_back(next_push);
+            next_push += 1;
+        }
+        // 弹出已滑出窗口左端的索引。
+        while let Some(&front) = deque.front() {
+            if front < start {
+                deque.pop_front();
+            } else {
+                break;
+            }
+        }
+        let peak = deque.front().map(|&i| abs[i]).unwrap_or(0.0);
+        out.push(if peak.is_finite() { peak as f32 } else { 0.0 });
     }
     out
 }
@@ -1293,8 +1337,8 @@ pub fn get_clips_for_root<'a>(tl: &'a TimelineState, root_track_id: &str) -> Vec
 #[cfg(test)]
 mod tests {
     use super::{
-        assemble_nonloop_pitch_from_window, dyn_needs_level_analysis, dyn_panel_open_roots,
-        trim_and_resample_midi,
+        assemble_nonloop_pitch_from_window, compute_frame_levels, dyn_needs_level_analysis,
+        dyn_panel_open_roots, trim_and_resample_midi,
     };
 
     /// Loop + 媒体时长未知 + 环绕窗口（start > end，split 产生）：
@@ -1337,6 +1381,120 @@ mod tests {
             let idx = (anchor + i as i64).rem_euclid(100);
             assert!((v - full[idx as usize]).abs() < 1e-6, "frame {i}");
         }
+    }
+
+    /// ★ 时间栅格不得有累积漂移（"检测值比真实值左偏 0.07 s"的回归）。
+    ///
+    /// 故障形态：若把 hop 先取整再累加（`round(220.5) = 221`），每帧多走 0.5
+    /// 样本 → 2.27 ms/s 的累积漂移：30 s 处已偏 68 ms、31 s 处偏 70 ms，
+    /// 与真实音频逐帧错位，且误差随时间**线性增长**（越长的素材越明显）。
+    ///
+    /// 判据：把一个短脉冲放在已知的时间位置，检测到的能量峰值必须落在对应
+    /// 的帧上（±1 帧容差），而不是随位置越远偏得越多。
+    #[test]
+    fn frame_levels_time_grid_has_no_cumulative_drift() {
+        let sr = 44_100u32;
+        let fp = 5.0f64;
+        let total_sec = 40.0;
+        let n = (total_sec * sr as f64) as usize;
+        let mut mono = vec![0.0f32; n];
+
+        // 在 5 s / 20 s / 35 s 三处各放一个 10 ms 的满量程脉冲。
+        let pulses = [5.0f64, 20.0, 35.0];
+        for &t in &pulses {
+            let start = (t * sr as f64) as usize;
+            for s in &mut mono[start..start + 441] {
+                *s = 1.0;
+            }
+        }
+
+        let levels = compute_frame_levels(&mono, sr, fp);
+        let expect_frames = (total_sec * 1000.0 / fp) as usize;
+        assert_eq!(levels.len(), expect_frames, "帧数应等于时长/帧周期");
+
+        let mut offsets: Vec<f64> = Vec::new();
+        for &t in &pulses {
+            let expect = (t * 1000.0 / fp) as f64; // 例：5 s → 帧 1000
+            // 电平重心（在期望帧附近的窗口内按电平加权）。
+            //
+            // 不能用"取最大值的那一帧"：20 ms 的窗比 5 ms 的帧宽，脉冲会在
+            // 相邻若干帧上形成平顶，argmax 只能反映遍历顺序，不能反映栅格。
+            // 重心是对称窗口下的无偏估计，且**若栅格有累积漂移，重心偏移会
+            // 随 t 线性增长** —— 这正是要钉住的性质。
+            let lo = ((expect - 8.0).max(0.0)) as usize;
+            let hi = ((expect + 8.0) as usize).min(levels.len() - 1);
+            let mut wsum = 0.0f64;
+            let mut wacc = 0.0f64;
+            for i in lo..=hi {
+                let w = levels[i] as f64;
+                wsum += w;
+                wacc += w * i as f64;
+            }
+            assert!(wsum > 0.0, "{t}s 处未检测到能量");
+            let centroid = wacc / wsum;
+            let offset = centroid - expect;
+            offsets.push(offset);
+            // 该帧附近必须接近满量程（脉冲未落进窗缝）。
+            let peak = levels[lo..=hi].iter().cloned().fold(0.0f32, f32::max);
+            assert!(peak > 0.9, "{t}s 处脉冲被摊薄：{peak}");
+        }
+
+        // 判据：三个相距很远的时间点上，重心偏移必须**彼此一致**。
+        // 有累积漂移时（旧实现 2.27 ms/s），5 s 与 35 s 的偏移会相差约
+        // 30 s × 2.27 ms/s / 5 ms ≈ 13.6 帧 —— 远超下面的容差。
+        let min_off = offsets.iter().cloned().fold(f64::MAX, f64::min);
+        let max_off = offsets.iter().cloned().fold(f64::MIN, f64::max);
+        assert!(
+            max_off - min_off <= 1.0,
+            "栅格存在累积漂移：各处重心偏移不一致 {:?}（极差 {} 帧）",
+            offsets,
+            max_off - min_off
+        );
+        // 且偏移本身是常数级的（帧中心的半帧语义），不是随距离增长的量。
+        assert!(
+            min_off.abs() <= 2.0 && max_off.abs() <= 2.0,
+            "重心偏移过大：{:?}",
+            offsets
+        );
+    }
+
+    /// ★ 电平口径是**峰值**且锚点为满量程（0 dBFS = 1.0）。
+    ///
+    /// 与波形显示（`max|x|` 包络）同口径，虚线基线才贴着未编辑的波形走。
+    /// RMS 口径会让同样的信号只得到 1/√2 ≈ 0.707 —— 虚线与波形永远差 3 dB。
+    #[test]
+    fn frame_levels_are_full_scale_peak() {
+        let sr = 48_000u32;
+        let fp = 5.0f64;
+        // 稳态满量程正弦（±1）→ 峰值口径应读到 1.0，而非 RMS 的 0.707。
+        let n = 4800; // 0.1 s
+        let mono: Vec<f32> = (0..n)
+            .map(|i| (2.0 * std::f64::consts::PI * 440.0 * i as f64 / sr as f64).sin() as f32)
+            .collect();
+        let levels = compute_frame_levels(&mono, sr, fp);
+        assert!(!levels.is_empty());
+        // 末尾帧窗口收缩，取中间帧判定。
+        let mid = levels.len() / 2;
+        assert!(
+            (levels[mid] - 1.0).abs() < 0.02,
+            "满量程正弦的峰值电平应≈1.0，实测 {}（RMS 口径会得到 0.707）",
+            levels[mid]
+        );
+
+        // 半幅（−6 dB）正弦 → 0.5。
+        let half: Vec<f32> = mono.iter().map(|v| v * 0.5).collect();
+        let levels = compute_frame_levels(&half, sr, fp);
+        let mid = levels.len() / 2;
+        assert!(
+            (levels[mid] - 0.5).abs() < 0.02,
+            "半幅应≈0.5，实测 {}",
+            levels[mid]
+        );
+
+        // 静音 → 0。
+        let silence = vec![0.0f32; n];
+        let levels = compute_frame_levels(&silence, sr, fp);
+        assert!(levels.iter().all(|&v| v == 0.0));
     }
 
     /// 窗口终点越过缓存末端（编辑器允许把 Clip 延伸出媒体之外）时不得越界。
