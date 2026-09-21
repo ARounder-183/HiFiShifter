@@ -52,6 +52,44 @@ export const PIANO_ROLL_ATLAS_PAGE_SIZE_PX = 2048;
 /** 图集最大页数。 */
 export const PIANO_ROLL_ATLAS_MAX_PAGES = 2;
 
+/**
+ * 以 `middle` 基准绘制一行文字时，字形槽位在锚点**下方**延伸的高度（CSS px）。
+ *
+ * 【推导】由文件头的换算关系：`originY = y − 字号 / 2`（槽位顶部），槽位高 =
+ * `字号 × GLYPH_LINE_HEIGHT_RATIO`，故槽位下缘 = `y − 字号/2 + 字号 × ratio`；
+ * 相对锚点向下的溢出即 `字号 × (ratio − 0.5)`。
+ *
+ * 【用途】给"锚点正好落在绘图区下边缘"的文字预留画布高度。数值轴最下方那条刻度
+ * 正是这种情况：`valueToY` 把值域下界映射到 `heightPx` 本身，于是标签的中线落在
+ * 绘图区下边缘，下半截会被画布边界裁掉（观感是"最下面的刻度值被挡住了"）。
+ *
+ * @param fontSizePx 字号（CSS px）。
+ * @returns 需要向下预留的高度（CSS px）；非法字号返回 0。
+ */
+export function glyphMiddleSlotDescentPx(fontSizePx: number): number {
+    if (!Number.isFinite(fontSizePx) || fontSizePx <= 0) return 0;
+    return Math.max(0, fontSizePx * GLYPH_LINE_HEIGHT_RATIO - fontSizePx / 2);
+}
+
+/** 数值轴刻度标签的字号（CSS px）。字形请求与画布预留高度必须同源。 */
+export const AXIS_TICK_LABEL_FONT_SIZE_PX = 10;
+
+/**
+ * 数值轴画布在**绘图区**（`viewportHeightPx`）下方额外预留的高度（CSS px）。
+ *
+ * 【为什么必须预留】数值轴刻度标签以 `middle` 基准锚定在 `valueToY(v, heightPx)`
+ * 上，而值域下界恰好映射到 `heightPx` 本身（`y = heightPx` 即绘图区下边缘）。
+ * 于是最下方那条刻度（通常是 `0.0`）的文字下半截正好落在画布之外、被画布边界
+ * 裁掉 —— 观感就是"最下面的刻度值文本下半部分被挡住了"。
+ *
+ * 【约束】必须 ≤ `PARAM_EDITOR_BOTTOM_BAR_PX`（面板为自绘水平滚动条预留的行高，
+ * 也就是纵轴列比滚动视口高出的那一条），否则画布会超出列被父层裁掉、问题复现。
+ * 该约束由 `axisLabelMetrics.test.ts` 钉住。
+ */
+export const AXIS_TICK_LABEL_DESCENT_PX = Math.ceil(
+    glyphMiddleSlotDescentPx(AXIS_TICK_LABEL_FONT_SIZE_PX),
+);
+
 /** 文本的水平对齐方式（对应 Canvas2D 的 `ctx.textAlign`）。 */
 export type TextAlign = "left" | "center" | "right";
 

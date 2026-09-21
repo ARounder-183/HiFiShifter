@@ -104,6 +104,28 @@ export interface WaveformAmplitudeFactors {
     factorAt(timeSec: number | null): number | null;
 
     /**
+     * **一次几何重建会查询的时间范围**（可选契约，在重建开始时调用一次）。
+     *
+     * 【为什么需要】重建按「像素列 × 列内切片」查询因子，一次典型重建 2112 列
+     * × 16 切片 = **约 3.4 万次查询**，而被查询的时刻全部落在本窗口内。实现方
+     * 据此把「与查询点无关的准备工作」提前做一次 —— 例如把曲线按帧预采样成
+     * 查表、把 live 覆盖的解析从每次查询收敛成每次重建一次。实测（拖动音量、
+     * 2624px 窗口）该准备工作把重建耗时从 ~11ms 降到 ~1.5ms 量级。
+     *
+     * 【契约】
+     * - 调用顺序：本函数先于本次重建的任何 `factorAt` / `levelCeilingOverWindow`；
+     * - 窗口只是**提示**：实现方必须保证窗口外的查询仍返回正确结果（查表
+     *   越界时内部回退到逐值求值），否则拖动中的边缘列会画错；
+     * - `windowEndSec` 可能小于 `windowStartSec`（倒放不改变时间方向，但实现
+     *   方不应假设顺序），实现方自行排序；
+     * - 可选：未实现时一切照旧（逐值求值），仅是慢一些。
+     *
+     * @param windowStartSec 本次重建会查询的最小时间（时间轴绝对秒）。
+     * @param windowEndSec 本次重建会查询的最大时间（时间轴绝对秒）。
+     */
+    beginWindow?(windowStartSec: number, windowEndSec: number): void;
+
+    /**
      * **该时间窗内可达电平的上限**（可选契约，用于压制"幻峰"）。
      *
      * 【为什么需要】波形每列的峰值取自 mipmap 桶（粗缩放走 L2，桶宽 ≈ 85 ms），
@@ -208,6 +230,13 @@ const MAX_COLUMN_GAIN_SLICES = 16;
 // 无重入风险）——热路径上每列每帧新建数组会把 GC 拖进渲染关键路径。
 const sliceIndexLoScratch = new Int32Array(MAX_COLUMN_GAIN_SLICES);
 const sliceIndexHiScratch = new Int32Array(MAX_COLUMN_GAIN_SLICES);
+// 各切片的**时间窗端点**（时间轴绝对秒），与索引 scratch 同批填好。
+// 上界钳制按切片的时间窗取（见 levelCeilingOverWindow 的调用点）；此前是在
+// 钳制处用 `absSecAtIndex(sliceLo/Hi)` 现算 —— 一次重建多出 2 × 3.4 万次
+// 十参数的求值调用。切片边界与索引同批算出即可，语义逐值不变。
+// 仅在映射声明了 `levelCeilingOverWindow` 时填充（未声明时白算一轮）。
+const sliceTimeLoScratch = new Float64Array(MAX_COLUMN_GAIN_SLICES);
+const sliceTimeHiScratch = new Float64Array(MAX_COLUMN_GAIN_SLICES);
 
 /**
  * 波形包络列的**设备像素宽**。
@@ -402,9 +431,31 @@ export function buildWaveformGeometry(args: {
     // 只需每切片求值**一次**因子，min/max 复用 —— 切片把逐值调用提到每列 32 次，
     // 因子路径把同一时刻的解析/取样工作收敛成一次（拖动参数时的卡顿根因）。
     const amplitudeFactors = readAmplitudeFactors(args.amplitudeMap);
+    // 因子求值的**单态调用**：切片循环里每列要调用 1~2 次，此处绑定一次可避免
+    // 热路径上反复走「可选链 + 联合类型判空」的分派（实测这一层分派在 3.4 万次
+    // 调用下不可忽略）。语义与 `amplitudeFactors?.factorAt(t) ?? null` 等价。
+    const factorAtFn =
+        amplitudeFactors !== null ? amplitudeFactors.factorAt.bind(amplitudeFactors) : null;
     // 电平上界视图（可选契约，见 WaveformAmplitudeFactors::levelCeilingOverWindow）：
     // 用于把"桶峰 × 因子"钳在物理可达范围内，消除近零原声处的幻峰。
     const levelCeiling = amplitudeFactors?.levelCeilingOverWindow?.bind(amplitudeFactors);
+    // 查询窗口提示：段的时间覆盖范围（见 WaveformAmplitudeFactors::beginWindow）。
+    // 几何层只会查询 `clipStartSec + [clipLocalStartSec, clipLocalEndSec]` 之内
+    // 的时刻 —— `absSecAtIndex` 的 t 被 clamp01 到 [0,1]。故窗口取各段的时间
+    // 并集即可，无需扫描屏幕矩形（trim/裁切只改变可见列，不改变可查询时刻）。
+    if (amplitudeFactors?.beginWindow !== undefined) {
+        let windowLo = Number.POSITIVE_INFINITY;
+        let windowHi = Number.NEGATIVE_INFINITY;
+        for (const segment of args.scene.segments) {
+            const segStart = (segment.clipStartSec ?? 0) + segment.clipLocalStartSec;
+            const segEnd = (segment.clipStartSec ?? 0) + segment.clipLocalEndSec;
+            if (segStart < windowLo) windowLo = segStart;
+            if (segEnd > windowHi) windowHi = segEnd;
+        }
+        if (Number.isFinite(windowLo) && Number.isFinite(windowHi)) {
+            amplitudeFactors.beginWindow(windowLo, windowHi);
+        }
+    }
     let complete = true;
 
     for (const segment of args.scene.segments) {
@@ -477,6 +528,48 @@ export function buildWaveformGeometry(args: {
               ]
             : [{ min: peaks.min, max: peaks.max, centerY, halfHeight }];
 
+        // ── 段作用域的常量与两个求值函数 ────────────────────────────────
+        // 【为什么不放在列循环里】`absSecAtIndex` / `clipGainAtSec` 只依赖段与
+        // 峰值数据，**不依赖列**。此前它们定义在列循环体内，于是每列都要新建
+        // 两个闭包（函数对象 + 捕获上下文）—— 一次典型重建 2112 列 = 4224 次
+        // 闭包分配，全部是年轻代垃圾，把 GC 拖进了渲染关键路径。提到段作用域后
+        // 一次重建只需 2 次分配，语义逐值不变。
+        const clipStartSec = segment.clipStartSec ?? 0;
+        const localSpanSec = segment.clipLocalEndSec - segment.clipLocalStartSec;
+
+        // 桶索引 ↔ 时间轴绝对秒（「该峰值自己的时刻」），供极值配对使用。
+        // 索引锚定 ⇒ 同一峰值在任何缩放等级下取到同一个增益（缩放一致性）。
+        const absSecAtIndex = (index: number): number =>
+            clipStartSec +
+            sourceIndexClipTimeSec(
+                index,
+                peaks.dataStartSec,
+                dataDurationSec,
+                sampleCount,
+                segment.reversed,
+                segment.sourceStartSec,
+                segment.sourceEndSec,
+                sourceDurationSec,
+                segment.clipLocalStartSec,
+                localSpanSec,
+            );
+
+        // 某**时间轴绝对秒**处的 clip 增益（clip 增益 × 淡变）。
+        // 传入的秒由 absSecAtIndex 产出，故减去 clipStartSec 即为
+        // gainAtClipTime 需要的 clip 局部时间。
+        const clipGainAtSec = (absSec: number): number =>
+            segment.gain *
+            gainAtClipTime(
+                absSec - clipStartSec,
+                segment.clipTotalDurationSec,
+                segment.fadeInSec,
+                segment.fadeOutSec,
+                segment.fadeInShape,
+                segment.fadeInDir,
+                segment.fadeOutShape,
+                segment.fadeOutDir,
+            );
+
         for (const band of bands) {
             for (let column = firstColumn; column < lastColumn; column += 1) {
                 // 列中心（CSS 坐标）：device 中心 = (column·W + W/2)，换回 CSS。
@@ -520,8 +613,6 @@ export function buildWaveformGeometry(args: {
                 // 分母是点采样，两者口径不同，在近零原声等增益剧变处会造出
                 // 随缩放增高的幻峰（伪影根因）。
                 // （倒放语义与旧实现一致：t 始终是屏幕推进方向的位置。）
-                const clipStartSec = segment.clipStartSec ?? 0;
-                const localSpanSec = segment.clipLocalEndSec - segment.clipLocalStartSec;
                 const sliceCount = Math.min(windowCount, MAX_COLUMN_GAIN_SLICES);
                 for (let slice = 0; slice < sliceCount; slice += 1) {
                     // 公平切分：边界 = floor(s·W/K)，各切恰好覆盖窗口、互不重叠，
@@ -530,40 +621,12 @@ export function buildWaveformGeometry(args: {
                         indexStart + Math.floor((slice * windowCount) / sliceCount);
                     sliceIndexHiScratch[slice] =
                         indexStart + Math.floor(((slice + 1) * windowCount) / sliceCount) - 1;
+                    // 上界钳制需要的时间窗端点与索引同批求出（见 scratch 的说明）。
+                    if (levelCeiling !== undefined) {
+                        sliceTimeLoScratch[slice] = absSecAtIndex(sliceIndexLoScratch[slice]);
+                        sliceTimeHiScratch[slice] = absSecAtIndex(sliceIndexHiScratch[slice]);
+                    }
                 }
-
-                // 桶索引 ↔ 时间轴绝对秒（「该峰值自己的时刻」），供极值配对使用。
-                // 索引锚定 ⇒ 同一峰值在任何缩放等级下取到同一个增益（缩放一致性）。
-                const absSecAtIndex = (index: number): number =>
-                    clipStartSec +
-                    sourceIndexClipTimeSec(
-                        index,
-                        peaks.dataStartSec,
-                        dataDurationSec,
-                        sampleCount,
-                        segment.reversed,
-                        segment.sourceStartSec,
-                        segment.sourceEndSec,
-                        sourceDurationSec,
-                        segment.clipLocalStartSec,
-                        localSpanSec,
-                    );
-
-                // 某**时间轴绝对秒**处的 clip 增益（clip 增益 × 淡变）。
-                // 传入的秒由 absSecAtIndex 产出，故减去 clipStartSec 即为
-                // gainAtClipTime 需要的 clip 局部时间。
-                const clipGainAtSec = (absSec: number): number =>
-                    segment.gain *
-                    gainAtClipTime(
-                        absSec - clipStartSec,
-                        segment.clipTotalDurationSec,
-                        segment.fadeInSec,
-                        segment.fadeOutSec,
-                        segment.fadeInShape,
-                        segment.fadeInDir,
-                        segment.fadeOutShape,
-                        segment.fadeOutDir,
-                    );
 
                 // 音量增益（gain > 1）会把包络放大到波形矩形之外 —— 表现为波形
                 // "溢出" clip 上下边界（DAW 通用 bug）。与 REAPER 一致，增益放大
@@ -617,8 +680,13 @@ export function buildWaveformGeometry(args: {
                     let mappedSliceMax: number;
                     let mappedSliceMin: number;
                     // 因子视图：一次求值、两次乘法（映射 = value × gain × factor）。
-                    const fMax = amplitudeFactors?.factorAt(tMax) ?? null;
-                    const fMin = argMax === argMin ? fMax : (amplitudeFactors?.factorAt(tMin) ?? null);
+                    const fMax = factorAtFn !== null ? factorAtFn(tMax) : null;
+                    const fMin =
+                        argMax === argMin
+                            ? fMax
+                            : factorAtFn !== null
+                              ? factorAtFn(tMin)
+                              : null;
                     if (fMax !== null && fMin !== null) {
                         mappedSliceMax = rawMax * gMax * fMax;
                         mappedSliceMin = rawMin * gMin * fMin;
@@ -643,10 +711,11 @@ export function buildWaveformGeometry(args: {
                     // 允许的高电平"不会泄漏给邻近的低电平切片。
                     if (levelCeiling !== undefined) {
                         // 切片首/末桶的时刻（倒放时前者大于后者，逐值函数内部
-                        // 会排序；这里只传两个端点，无需关心方向）。
+                        // 会排序；这里只传两个端点，无需关心方向）。端点与索引
+                        // 同批求出（切片边界循环），此处不再重算。
                         const ceilLevel = levelCeiling(
-                            absSecAtIndex(sliceIndexLoScratch[slice]),
-                            absSecAtIndex(sliceIndexHiScratch[slice]),
+                            sliceTimeLoScratch[slice] as number,
+                            sliceTimeHiScratch[slice] as number,
                         );
                         if (ceilLevel !== null && Number.isFinite(ceilLevel)) {
                             // clip 增益×淡变随时刻变化：取两者中较大的增益作

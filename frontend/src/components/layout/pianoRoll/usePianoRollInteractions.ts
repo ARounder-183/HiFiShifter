@@ -16,6 +16,7 @@ import {
     setplayheadSec,
 } from "../../../features/session/sessionSlice";
 import { clamp, MAX_PX_PER_SEC, MIN_PX_PER_SEC } from "../timeline";
+import type { LiveEditOverride } from "./useLiveParamEditing";
 import type {
     ParamMorphOverlay,
     ParamName,
@@ -25,7 +26,7 @@ import type {
     ValueViewport,
 } from "./types";
 import { computeDynGeometricMean } from "./selectionTransforms";
-import { dynMultiplicativeFactor, isDynParam } from "./paramRanges";
+import { isDynParam, shiftDynValueForDrag, shiftValueForDrag } from "./paramRanges";
 import {
     curveValueAtPointerFrame,
     hitTestSelectionBody,
@@ -239,6 +240,24 @@ export function usePianoRollInteractions(args: {
     ) => void;
 
     /**
+     * 参数**写入成功**后的收尾（面板注入）。
+     *
+     * 语义：保留 live 覆盖层（其值就是刚提交的曲线），让波形在"提交之后取的响度
+     * 快照"到达之前继续显示提交值 —— 否则波形的幅度因子会退回旧快照，出现
+     * "松手闪回旧波形、再恢复新波形"。同时记录取数序号水位以排除提交前发出的
+     * 在飞请求。失败路径仍由各 catch 硬清除覆盖层。
+     */
+    onParamCommitSucceeded: () => void;
+
+    /**
+     * 擦掉上一帧的 live 预览（回到已提交曲线的状态）。
+     *
+     * 直线 / 颤音工具的预览每帧重算整段，必须先擦掉上一帧写过的点；本入口
+     * 只还原**上一帧写过的区间**，不需要重建整份覆盖（见 useLiveParamEditing）。
+     */
+    resetLiveEditPreview: (pv: ParamViewSegment) => void;
+
+    /**
      * 请求波形面重绘。
      *
      * 与 `invalidate` 的区别：波形是 memo 组件 + 几何缓存，只认投影变化；
@@ -252,7 +271,7 @@ export function usePianoRollInteractions(args: {
     /** 用于选区拖拽 onUp 时同步更新本地 paramView state（与 commitStroke 行为一致） */
     setParamView: (next: ParamViewSegment | null) => void;
     /** 用于选区拖拽 onUp 时清除 live edit overlay */
-    liveEditOverrideRef: MutRef<{ key: string; edit: number[] } | null>;
+    liveEditOverrideRef: MutRef<LiveEditOverride | null>;
 
     /** pointer down 期间设为 true，pointer up 后由 commitStroke 包装层重置为 false。
      *  用于保护 pitch_orig_updated 事件触发的曲线刷新不覆盖正在绘制的内容。 */
@@ -385,6 +404,8 @@ export function usePianoRollInteractions(args: {
         clampViewport,
         ensureLiveEditBase,
         applyDenseToLiveEdit,
+        onParamCommitSucceeded,
+        resetLiveEditPreview,
         /**
          * 波形面重绘入口（与 `invalidate` 不同：波形是 memo 组件 + 几何缓存，
          * 只认投影变化，而 live 覆盖写在 ref 上不触发 React 渲染）。
@@ -448,20 +469,17 @@ export function usePianoRollInteractions(args: {
      * 内核优先、回落 refs、NaN 安全）。复用而不是再写一遍"取内核否则取 refs"，是为了
      * 让两条路径的取值语义在结构上不可能分叉——这正是本缺陷的教训。
      */
-    const axisFromRefs = useCallback(
-        () => {
-            const viewport = resolvePanelRenderViewport({
-                kernelView: getViewportTruth(),
-                refPxPerSec: pxPerSecRef.current,
-                refScrollLeftPx: scrollLeftRef.current,
-            });
-            return createTimelineAxis({
-                pxPerSec: viewport.pxPerSec,
-                scrollLeftPx: viewport.scrollLeftPx,
-            });
-        },
-        [getViewportTruth, pxPerSecRef, scrollLeftRef],
-    );
+    const axisFromRefs = useCallback(() => {
+        const viewport = resolvePanelRenderViewport({
+            kernelView: getViewportTruth(),
+            refPxPerSec: pxPerSecRef.current,
+            refScrollLeftPx: scrollLeftRef.current,
+        });
+        return createTimelineAxis({
+            pxPerSec: viewport.pxPerSec,
+            scrollLeftPx: viewport.scrollLeftPx,
+        });
+    }, [getViewportTruth, pxPerSecRef, scrollLeftRef]);
 
     /**
      * beat → 视口 x。
@@ -1095,8 +1113,10 @@ export function usePianoRollInteractions(args: {
             const st = strokeRef.current;
             const pvNow = paramViewRef.current;
             if (st && pvNow && st.pointerId === vib.pointerId) {
-                liveEditOverrideRef.current = null;
-                ensureLiveEditBase(pvNow);
+                // 参数变更后重画整段预览：先擦掉**上一帧写过的区间**（而不是丢弃
+                // 整份覆盖层再整份拷贝 —— 那是每帧一次 O(窗口) 的拷贝），再按新
+                // 参数写入。`applyDenseToLiveEdit` 内部会按需重建基准。
+                resetLiveEditPreview(pvNow);
                 const built = buildVibratoDense(
                     vib.startFrame,
                     vib.startValue,
@@ -1132,10 +1152,9 @@ export function usePianoRollInteractions(args: {
             currentParamRange,
             strokeRef,
             paramViewRef,
-            liveEditOverrideRef,
-            ensureLiveEditBase,
             buildVibratoDense,
             applyDenseToLiveEdit,
+            resetLiveEditPreview,
             invalidate,
             requestWaveformRepaint,
         ],
@@ -2339,7 +2358,9 @@ export function usePianoRollInteractions(args: {
                                     param: editParam,
                                     segments: packedPerOverlay,
                                 });
-                                liveEditOverrideRef.current = null;
+                                // 提交成功：保留覆盖层让波形继续显示提交值，等
+                                // 提交之后取的响度快照到达再撤下（消除松手闪屏）。
+                                onParamCommitSucceeded();
                                 if (liveEditActiveRef) liveEditActiveRef.current = false;
                                 bumpRefreshToken();
                             })();
@@ -2811,7 +2832,8 @@ export function usePianoRollInteractions(args: {
                                 }
                             }
                             setParamView({ ...pvNow, edit: nextEdit });
-                            liveEditOverrideRef.current = null;
+                            // 同上：不立刻撤下覆盖层（见 onParamCommitSucceeded）。
+                            onParamCommitSucceeded();
 
                             // 全分辨率无损提交（与右拖 / 选区拖拽同一范式）：
                             // buildDense 产生的是 pv 步距采样（dense[k] ↔
@@ -3218,7 +3240,8 @@ export function usePianoRollInteractions(args: {
                                                 }
                                             }
                                             setParamView({ ...pvNow, edit: nextEdit });
-                                            liveEditOverrideRef.current = null;
+                                            // 同上：不立刻撤下覆盖层（见 onParamCommitSucceeded）。
+                                            onParamCommitSucceeded();
 
                                             // 分块回写：整次编辑（含所有段）只打一个撤销点，
                                             // 块之间让出事件循环，超长工程也不会卡死界面。
@@ -3343,15 +3366,23 @@ export function usePianoRollInteractions(args: {
                                                   frameScale,
                                               );
                                     }
-                                    // dyn 是倍率域（0 = 静音）：拖拽必须是**乘性**的 ——
-                                    // 线性加法会把静音拖出响度（0 + Δ ≠ 0），乘性缩放
-                                    // 下 0 × 任何系数仍为 0（"无声的地方仍然无声"）。
-                                    // 位移换算见 paramRanges.dynMultiplicativeFactor
-                                    // （0.5 个值单位 = ×2，+6 dB）。
+                                    // 动态（比值域）走**锚点缩放**：系数由"被抓住
+                                    // 那条线的值"导出，使锚点位移恰好等于指针位移
+                                    // （跟手），其余点按比例缩放（倍率域相对关系保留），
+                                    // 静音 0 × k 仍为 0。锚点贴地时该函数内部退回线性
+                                    // 偏移。完整法则收在 paramRanges.shiftDynValueForDrag，
+                                    // 预览与提交共用它。
                                     if (isDynParam(editParam)) {
-                                        return orig * dynMultiplicativeFactor(lastValueDelta);
+                                        return shiftDynValueForDrag(
+                                            orig,
+                                            dynDragAnchor ?? Number.NaN,
+                                            lastValueDelta,
+                                        );
                                     }
-                                    return orig + lastValueDelta;
+                                    // 其余参数：值域内**线性偏移** —— 纵轴是线性刻度，
+                                    // `原值 + Δ` 才让被抓取的那一点停在光标下
+                                    //（见 paramRanges.shiftValueForDrag）。
+                                    return shiftValueForDrag(editParam, orig, lastValueDelta);
                                 };
 
                                 // Tempo Map 感知：度数差以拖动锚点帧（选区整体起点）的
@@ -3373,6 +3404,19 @@ export function usePianoRollInteractions(args: {
 
                                 // 用闭包变量记录最新 X/Y 偏移量
                                 let lastValueDelta = 0;
+                                /**
+                                 * 拖拽的**锚点值**：按下时指针所在帧上的曲线值
+                                 * （即"被抓住的那条线"的位置）。动态的拖拽幅度系数
+                                 * 由它导出（见 `paramRanges.dynDragScaleFactor`），
+                                 * 因此取**按下那一刻**的值、拖动过程中不变 ——
+                                 * 若跟着实时值走，系数会随拖动自身变化而自激。
+                                 *
+                                 * 命中判定已经算过这个值（`curveVal`，用于 10px 邻域
+                                 * 判定）；此处只是把它固定下来。取不到时为 null，
+                                 * 动态将退回线性偏移。
+                                 */
+                                const dynDragAnchor: number | null =
+                                    isDynParam(editParam) && curveVal !== null ? curveVal : null;
                                 let lastScaleStepDelta = 0;
                                 let useScaleDegreeTranspose = false;
                                 let lastFrameDelta = 0; // 帧偏移（整数）
@@ -3659,7 +3703,9 @@ export function usePianoRollInteractions(args: {
                                                     ...pvNow,
                                                     edit: nextEdit,
                                                 });
-                                                liveEditOverrideRef.current = null;
+                                                // 选区拖拽不走 commitStroke，这里显式收尾：
+                                                // 保留覆盖层直到"提交之后取的快照"到达。
+                                                onParamCommitSucceeded();
 
                                                 // 确保选区位置最终正确（多段同步平移）
                                                 const beatDeltaForSel = frameDeltaToBeat({
@@ -3963,9 +4009,10 @@ export function usePianoRollInteractions(args: {
 
                     const pv2 = paramViewRef.current;
                     if (pv2) {
-                        // Reset live overlay so the previous line preview doesn't leave artifacts
-                        liveEditOverrideRef.current = null;
-                        ensureLiveEditBase(pv2);
+                        // 擦掉上一帧的直线预览，避免端点往回拖时留下残影。
+                        // 只还原上一帧写过的区间（旧实现是丢弃整份覆盖再整份拷贝，
+                        // 每帧一次 O(窗口) 拷贝）。
+                        resetLiveEditPreview(pv2);
                         const minF = Math.min(startFrame, f2);
                         const maxF = Math.max(startFrame, f2);
                         if (mode === "restore") {
@@ -4237,8 +4284,9 @@ export function usePianoRollInteractions(args: {
                         }
                     }
                     invalidate();
-                    // 同上：live 覆盖只改 ref，波形面需显式重绘。
-                    requestWaveformRepaint();
+                    // live 覆盖只改 ref，波形面收不到通知 —— 重绘请求由本帧的
+                    // 处理循环末尾统一发出（见 flushPendingMoves / onUp）：
+                    // 同一帧内的全部 coalesced 采样只重绘一次。
                 };
 
                 // 待处理事件队列 + rAF 合帧状态。flush 后队列即清空；onUp/
@@ -4250,13 +4298,20 @@ export function usePianoRollInteractions(args: {
                     strokeRafId = null;
                     const queue = pendingMoveEvents;
                     pendingMoveEvents = [];
+                    let processed = false;
                     for (const ev of queue) {
                         // 同帧多点：getCoalescedEvents 展开高速运笔时一帧内
                         // 积累的全部采样，轨迹逐点保留（不支持时回退单事件）。
                         for (const sample of coalescedEventsOf(ev)) {
                             processStrokeEvent(sample);
+                            processed = true;
                         }
                     }
+                    // 波形重绘放在采样循环**之外**：一帧内的全部采样合起来只请求
+                    // 一次重绘（`requestWaveformRepaint` 自身也做帧内合并，这里
+                    // 少的是每次采样的闸门判定与修订号自增）。轨迹点仍逐采样
+                    // 累积到 `st.points`，提交保真度不变。
+                    if (processed) requestWaveformRepaint();
                 };
 
                 const onMove = (ev: globalThis.PointerEvent) => {
@@ -4293,11 +4348,15 @@ export function usePianoRollInteractions(args: {
                     }
                     const queued = pendingMoveEvents;
                     pendingMoveEvents = [];
+                    let processedQueued = false;
                     for (const ev of queued) {
                         for (const sample of coalescedEventsOf(ev)) {
                             processStrokeEvent(sample);
+                            processedQueued = true;
                         }
                     }
+                    // 末帧同样只请求一次（见 flushPendingMoves）。
+                    if (processedQueued) requestWaveformRepaint();
                     if (isOwnStroke) {
                         strokeRef.current = null;
                         vibratoStateRef.current = null;
@@ -4413,6 +4472,8 @@ export function usePianoRollInteractions(args: {
             pointerValue,
             strokeRef,
             applyDenseToLiveEdit,
+            resetLiveEditPreview,
+            onParamCommitSucceeded,
             blendDenseEdges,
             edgeHalfSpanForIndices,
             applyMorphOverlayPreview,

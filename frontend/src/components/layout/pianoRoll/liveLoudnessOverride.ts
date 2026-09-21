@@ -11,10 +11,13 @@
  * 对象）在这条路径上要花掉 ~26ms/帧，正是用户报告的「编辑音量/动态时卡顿」
  * 的根因。本模块把它收敛为：
  *
- * - **解析按覆盖对象身份缓存**：live 覆盖每次更新都写新对象
- *   （`{ key, edit }`，见 `useLiveParamEditing` 的 `applyDenseToLiveEdit`），
- *   因此「对象换了」就是「该重解析」的充要条件，用 `===` 判定（零成本）；
- * - **视图对象复用**：稳态下每次询问只做一次身份比较，零分配、零字符串操作。
+ * - **解析按覆盖对象身份缓存**：live 覆盖在**同一窗口内**是同一个对象
+ *   （`edit` 原地更新，见 `useLiveParamEditing` 的 `applyDenseToLiveEdit`），
+ *   只有换窗口才会换对象（`ensureLiveEditBase`）。因此「对象没换」就是
+ *   「key / 起帧 / 步长都没变」的充要条件，用 `===` 判定（零成本）；
+ * - **视图对象复用**：稳态下每次询问只做一次身份比较，零分配、零字符串操作；
+ * - **视图持有数组本身**（`values: live.edit`）而非快照副本，因此 `edit` 的
+ *   原地更新对采样**立即可见** —— 波形不会停在拖动起点。
  *
  * ## 语义
  *
@@ -89,9 +92,11 @@ export function createLiveOverrideReader(): LiveOverrideReader {
             return null;
         }
         if (cache === null || cache.source !== live) {
-            // 对象身份变了（新一次更新 / 新一次编辑）→ 重解析。
-            // 注意 `edit` 的**内容**是原地更新的，因此不能只比数组引用；
-            // 覆盖对象每次更新都换新（见 useLiveParamEditing），身份即版本。
+            // 对象身份变了（换了窗口 / 新一次编辑）→ 重解析。
+            // 注意 `edit` 的**内容**是原地更新的，所以这里判的**不是**内容版本：
+            // 视图的值直接引用同一个数组（见 `view.values`），内容变了采样照样
+            // 看得见；本缓存只为省掉 key 解析，而 key 在同一覆盖对象内是不变的。
+            // 即：只有在 `ensureLiveEditBase` 换了窗口（新对象）时才需要重解析。
             const parts = parseLiveOverrideKey(live.key);
             cache = {
                 source: live,

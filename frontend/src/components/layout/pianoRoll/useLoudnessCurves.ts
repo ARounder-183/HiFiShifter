@@ -32,7 +32,7 @@
  * - 后端：`get_param_frames`（binary 模式，API 层统一解码）。
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { paramsApi } from "../../../services/api";
 import type { ParamFramesPayload } from "../../../types/api";
@@ -125,11 +125,32 @@ export function useLoudnessCurves(args: {
     paramsEpoch: number;
     /** 显式刷新令牌（usePianoRollData 的 refreshToken；含 dyn_orig_updated 触发）。 */
     refreshToken: number;
-}): { snapshot: LoudnessSnapshot | null; analysisPending: boolean } {
+}): {
+    snapshot: LoudnessSnapshot | null;
+    analysisPending: boolean;
+    /**
+     * 产出当前快照的那次取数的**序号**（单调递增；每次真正发起取数都会 +1）。
+     *
+     * 【用途】提交参数后，波形要等"提交之后发起"的这次取数返回才能撤下 live
+     * 覆盖层（否则会闪回旧波形）。调用方据此判断"手上这份快照是不是提交之后取的"。
+     */
+    snapshotFetchSeq: number;
+    /**
+     * 当前**已发出**的最大取数序号（同步读取，不触发渲染）。
+     *
+     * 【为什么要"已发出的最大值"而不只看快照的序号】提交发生时可能有一次
+     * **提交之前就已发出**的在飞取数（例如原声基线分析完成触发的刷新），它的
+     * 数据里没有本次编辑。把它当成"提交后的快照"会让覆盖层提前退场、波形闪回。
+     * 提交侧只要记下这个最大值，后续只在"序号更大"的快照上收尾即可 ——
+     * 因为提交那一次取数必然在此之后发出。
+     */
+    getLatestFetchSeq: () => number;
+} {
     const { rootTrackId, projectFrames, framePeriodMs, paramsEpoch, refreshToken } = args;
 
     const [snapshot, setSnapshot] = useState<LoudnessSnapshot | null>(null);
     const [analysisPending, setAnalysisPending] = useState(false);
+    const [snapshotFetchSeq, setSnapshotFetchSeq] = useState(0);
     const fetchReqIdRef = useRef(0);
     // 「在飞合并」：取数已发出时，后续触发只标记 dirty，待本次完成后补一次
     // —— 撤销等离散变更**立即**取数（波形与参数线同批刷新，不再有 250ms
@@ -168,6 +189,7 @@ export function useLoudnessCurves(args: {
                 if (fetchReqIdRef.current !== reqId) return;
                 if (!volumeRes?.ok || !dynRes?.ok) {
                     setSnapshot(null);
+                    setSnapshotFetchSeq(reqId);
                     return;
                 }
                 const next = snapshotFromPayloads(
@@ -178,6 +200,7 @@ export function useLoudnessCurves(args: {
                 if (next) {
                     next.stride = stride;
                     setSnapshot(next);
+                    setSnapshotFetchSeq(reqId);
                     setAnalysisPending((dynRes as ParamFramesPayload).analysis_pending === true);
                 }
             } catch {
@@ -194,8 +217,9 @@ export function useLoudnessCurves(args: {
 
     useEffect(() => {
         if (!rootTrackId || !(projectFrames > 0) || !(framePeriodMs > 0)) {
-            fetchReqIdRef.current += 1;
+            const reqId = (fetchReqIdRef.current += 1);
             setSnapshot(null);
+            setSnapshotFetchSeq(reqId);
             setAnalysisPending(false);
             return;
         }
@@ -206,9 +230,15 @@ export function useLoudnessCurves(args: {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [rootTrackId, projectFrames, framePeriodMs, paramsEpoch, refreshToken]);
 
-    return { snapshot, analysisPending };
+    /**
+     * 同步读取"已发出的最大取数序号"（见返回类型说明）。
+     *
+     * 用函数而非渲染期快照：提交包装层需要在**调用后端之前**立刻取值，
+     * 而那一刻渲染还没发生。
+     */
+    const getLatestFetchSeq = useCallback(() => fetchReqIdRef.current, []);
 
-    return { snapshot, analysisPending };
+    return { snapshot, analysisPending, snapshotFetchSeq, getLatestFetchSeq };
 }
 
 /**

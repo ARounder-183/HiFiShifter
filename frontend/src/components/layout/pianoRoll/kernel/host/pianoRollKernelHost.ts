@@ -71,6 +71,8 @@ import { createRenderLoop } from "../../../renderKernel/renderLoop";
 import { createScrollKernel, type TimelineViewportState } from "../../../renderKernel/scrollKernel";
 import { isBlackKey, midiToLabel } from "../../utils";
 import {
+    AXIS_TICK_LABEL_DESCENT_PX,
+    AXIS_TICK_LABEL_FONT_SIZE_PX,
     createPianoRollGlyphs,
     type PianoRollGlyphs,
     type TextRequest,
@@ -1186,7 +1188,7 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         for (const mark of marks) {
             requests.push({
                 text: mark.label,
-                fontKey: `10px ${family}`,
+                fontKey: `${AXIS_TICK_LABEL_FONT_SIZE_PX}px ${family}`,
                 // render.ts:555 的标签锚点 x=6
                 x: 6,
                 y: mark.line.y + mark.line.h / 2 - 0.5,
@@ -1279,7 +1281,15 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
      */
     function drawGlKeyboard(): void {
         if (glAxisHandle === null) return;
-        const target = glAxisHandle.resize(axisWidthPx, viewportHeightPx, readDevicePixelRatio());
+        // 画布比绘图区高 `AXIS_TICK_LABEL_DESCENT_PX`：最下方刻度标签是
+        // `middle` 基准、锚在绘图区下边缘上，需要这点高度才画得完整
+        //（见该常量的说明）。刻度/键体的投影仍按 `viewportHeightPx` 计算，
+        // 因此它们的屏幕位置逐像素不变。
+        const target = glAxisHandle.resize(
+            axisWidthPx,
+            viewportHeightPx + AXIS_TICK_LABEL_DESCENT_PX,
+            readDevicePixelRatio(),
+        );
         glAxisHandle.clear();
 
         // ① 几何层（键体 / 刻度线）

@@ -11,6 +11,11 @@
  * ⚠ 改动此值必须同步后端常量 —— 两者不一致会导致"初始化后响度异常"。
  */
 
+import {
+    CHILD_FORMANT_OFFSET_CENTS_RANGE,
+    isChildFormantOffsetCentsParam,
+} from "./childPitchOffsetParams";
+
 /**
  * 动态（DYN）曲线的「沿用原声」哨兵值。
  *
@@ -87,27 +92,130 @@ export const VOLUME_DEFAULT_VIEW = { center: 1.0, span: 2.0 } as const;
 export const DYN_DEFAULT_VIEW = { center: 0.5, span: 1.0 } as const;
 
 /**
- * dyn 乘性拖拽的**翻倍距离**：线性等价位移 0.5 个值单位 = ×2（+6 dB）。
+ * dyn **增益档位**命令的翻倍距离：值域位移 0.5 个值单位 = ×2（+6 dB）。
  *
- * 【为什么拖拽必须是乘性的】dyn 曲线是倍率域（0 = 静音，1.0 = 0 dB），且原始
- * 素材里被静音的段落值恒为 0。线性加法拖拽会把静音拖出响度（0 + 0.2 = 0.2）；
- * 乘性拖拽（0 × 任何倍率 = 0）才符合"无声的地方仍然无声"的直觉 ——
- * 例如 ×2：原 0 → 0，原 0.2 → 0.4，原 0.5 → 1.0。
+ * 【只服务于"命令"，不用于拖拽】`dynMultiplicativeFactor` 现在唯一的调用点是
+ * `shiftParamUpSelection` / `shiftParamDownSelection` 这类**菜单/快捷键档位
+ * 命令**（一次 = ×2 / ×0.5 = ±6 dB，与 DAW 的"增益 ±6 dB"同一语义）。
  *
- * 0.5 个值单位在默认视口（0..1）下为面板高度的 50%，即拖半屏高度 = ±6 dB，
- * 与线性参数的拖拽速度感接近。
+ * 拖拽**不用**固定灵敏度：固定的 `k = 2^(Δ/0.5)` 与锚点位置无关，锚点位移
+ * `A·(k−1)` 正比于 A —— 值越小动得越少（0.05 拖半屏只到 0.1），用户观感是
+ * "不跟手"。拖拽改用由锚点导出的系数（见 {@link dynDragScaleFactor}），
+ * 仍保持乘性语义。
  */
-export const DYN_DRAG_DOUBLING_VALUE = 0.5;
+export const DYN_GAIN_STEP_DOUBLING_VALUE = 0.5;
 
 /**
- * 把线性等价的拖拽位移（值单位）换算为 dyn 的**乘性系数**。
+ * 把值域位移换算为 dyn 的**乘性系数**（供增益档位命令使用）。
  *
- * `factor = 2^(Δ / DYN_DRAG_DOUBLING_VALUE)` —— Δ=+0.5 → ×2，Δ=−0.5 → ×0.5。
+ * `factor = 2^(Δ / DYN_GAIN_STEP_DOUBLING_VALUE)` —— Δ=+0.5 → ×2，Δ=−0.5 → ×0.5。
  * 指数映射保证细调（小位移 → 接近 1 的系数）与大范围（连续翻倍）手感一致。
+ *
+ * ⚠ **不要用于拖拽**：见 {@link DYN_GAIN_STEP_DOUBLING_VALUE} 的说明。
  */
 export function dynMultiplicativeFactor(linearDelta: number): number {
     const d = Number.isFinite(linearDelta) ? linearDelta : 0;
-    return Math.pow(2, d / DYN_DRAG_DOUBLING_VALUE);
+    return Math.pow(2, d / DYN_GAIN_STEP_DOUBLING_VALUE);
+}
+
+/**
+ * 动态选区拖拽的**锚点缩放系数**：让「被抓取的那条线」恰好跟手。
+ *
+ * 【推导】设拖拽起点处被抓住的那条线的值为 `A`，指针在值域纵轴上的位移为 `Δ`。
+ * 乘性缩放把选区整体乘以 `k`，于是锚点被移动到 `A · k`。要让它跟在光标下
+ * （"跟手"），只需
+ *
+ *     A · k = A + Δ   ⟹   k = (A + Δ) / A
+ *
+ * 这个 `k` 就是**由拖拽参数线的位置决定的额外幅度逻辑**：
+ *
+ * - `k` 随锚点值 `A` 变化 —— 从很低的线（A 小）往上拖，`k` 自动变大，于是
+ *   虽然乘性缩放本身按比例施加，锚点位移仍然**逐点等于指针位移**，不再出现
+ *   "拉了半屏、线只挪一点点"；
+ * - 选区的其它点按同一 `k` 缩放，倍率域的**相对关系保留**（0.05/0.10 → 0.10/0.20）；
+ * - 静音帧（`0 × k = 0`）仍然保持静音 —— 乘性语义原有的"无声的地方仍然无声"
+ *   不变。
+ *
+ * 【为什么不是"固定灵敏度"】旧实现用 `k = 2^(Δ / 0.5)`：系数只与位移有关、
+ * 与锚点位置无关，于是锚点位移 `A · (k − 1) ∝ A` —— 值越小动得越少。本函数
+ * 把 `A` 引进系数，正是补上这一项。
+ *
+ * 【下界】`Δ ≤ −A` 时锚点已到值域底部，`k` 取 0（整段缩到静音），不再继续变负
+ * （负系数会把选区上下翻转）。这与"把锚点拖到 0"一致。
+ *
+ * @param anchorValue 拖拽起点处被抓住的那条线的值（动态值域）。
+ * @param valueDelta 指针在值域上的位移（可为负）。
+ * @returns 缩放系数；**锚点贴地**（`≤ DYN_SILENCE_FLOOR`）时返回 `null` ——
+ *   此时 `0 × k = 0` 使乘性缩放**无论如何都动不了锚点**，语义上无解，
+ *   调用方应退回值域内线性偏移（见 {@link shiftValueForDrag}）。
+ */
+export function dynDragScaleFactor(anchorValue: number, valueDelta: number): number | null {
+    if (!Number.isFinite(anchorValue) || anchorValue <= DYN_SILENCE_FLOOR) return null;
+    if (!Number.isFinite(valueDelta)) return 1;
+    return Math.max(0, (anchorValue + valueDelta) / anchorValue);
+}
+
+/**
+ * 动态选区拖拽的**逐帧结果**（完整法则，供调用方直接用）。
+ *
+ * 常规情况：以"被抓住那条线的值 `anchorValue`"为锚点做乘性缩放，锚点恰好跟手
+ * （推导见 {@link dynDragScaleFactor}）；锚点贴地（抓住的本身就是静音）时乘性
+ * 缩放对 `0` 无解，退回值域内线性偏移。
+ *
+ * 【为什么单独成一个函数】预览与提交必须逐值一致，而"系数由锚点导出 + 边界退回"
+ * 这两步合起来才是完整法则。收在这里既保证两条路径同源，也让法则本身可单测
+ * （见 paramRanges.test.ts）。
+ *
+ * @param orig 该帧原始值。
+ * @param anchorValue 拖拽起点处被抓住的那条线的值。
+ * @param valueDelta 指针在值域上的位移。
+ * @returns 该帧的新值（已钳到动态值域）。
+ */
+export function shiftDynValueForDrag(
+    orig: number,
+    anchorValue: number,
+    valueDelta: number,
+): number {
+    const scale = dynDragScaleFactor(anchorValue, valueDelta);
+    if (scale !== null) return clampParamWriteValue(DYN_PARAM_ID, orig * scale);
+    return shiftValueForDrag(DYN_PARAM_ID, orig, valueDelta);
+}
+
+/**
+ * 拖拽的**逐帧值偏移**（值域内线性偏移），然后钳到后端会接受的值域。
+ *
+ * 【谁用它】音高 / 张力 / 各偏移量这类**非比值**参数 —— 它们的"跟手"就是
+ * `原值 + Δ`；动态这种比值域参数走 {@link dynDragScaleFactor} 的锚点缩放，
+ * 只有**锚点贴地**（被抓取那条线本身是静音，乘性无解）时才退回本函数。
+ *
+ * 【为什么线性就是"跟手"】拖拽位移取自指针在**值域纵轴**上的位移（Δ = 指针值
+ * − 按下时的指针值），纵轴是线性刻度，故 `原值 + Δ` 恰好让被抓取的那一点停在
+ * 光标下（直接操纵）。
+ *
+ * 【动态走本函数的两种情况】锚点贴地时退回这里；此时是线性偏移，静音帧会
+ * 被抬起来（`0 + Δ = Δ`）——这是"线要跟着光标"与"静音保持静音"在零点的
+ * 固有冲突，线性法则下只能选前者。常规情况（锚点 > 下限）走乘性缩放，
+ * 静音保持静音。
+ *
+ * 【往下拖的边界】动态拖到 0 以下收敛到 0（"静音"），**不**套用后端写入入口的
+ * "负值 = 沿用原声哨兵"规则 —— 否则往下拖会变成"什么都不改"，与手势意图相反。
+ *
+ * @param param 参数名（决定值域）。
+ * @param orig 该帧的原始值。
+ * @param valueDelta 指针在值域上的位移（可为负）。
+ * @returns 偏移并钳制后的值。
+ */
+export function shiftValueForDrag(param: string, orig: number, valueDelta: number): number {
+    if (!Number.isFinite(orig)) return orig;
+    if (!Number.isFinite(valueDelta)) return clampParamWriteValue(param, orig);
+    const shifted = orig + valueDelta;
+    // 【拖拽的边界语义 ≠ 后端写入的边界语义】动态的负值在后端写入入口表示
+    // 「沿用原声」**哨兵**（写回未编辑帧时用），但用户把动态值**拖到 0 以下**
+    // 的意思是"这里静音" —— 若套用哨兵规则，往下拖会变成"什么都不改"，
+    // 与手势意图正好相反。故拖拽在动态上把负值收敛到值域下限 0。
+    // （拖拽的输入不会含哨兵：读回的曲线里哨兵已被后端解析成原声基线。）
+    if (isDynParam(param) && shifted < 0) return DYN_VALUE_MIN;
+    return clampParamWriteValue(param, shifted);
 }
 
 /**
@@ -178,4 +286,65 @@ export function computeDynGain(target: number, orig: number): number {
     // 分母钳到下限：界定"无内容" + 保证增益关于原声连续（见 DYN_SILENCE_FLOOR）。
     const denom = Math.max(orig, DYN_SILENCE_FLOOR);
     return Math.min(Math.max(target / denom, 0), DYN_MAX_GAIN);
+}
+
+/**
+ * 把**写回**的参数值钳制到后端会接受的值域（**与后端
+ * `commands::params::set_param_frames` 的写入分支逐条同构**）。
+ *
+ * 【为什么前端也必须钳】后端在写入口按参数语义钳制（见 Rust 侧的同名分支，
+ * 分支顺序与常量都与本函数一一对应），而前端过去对"用户输入 → 曲线值"这条
+ * 路径**完全不钳** —— 只有值域视口的 `yToValue` 顺带夹了一下**指针位置**。
+ * 于是拖拽预览可以画出后端不会接受的值：
+ *
+ * - 选区上拖时音量走 `orig + Δ`、动态走 `orig × 2^(Δ/0.5)`，两者都能跑出存储
+ *   值域（音量 0..2、动态 0..1）。参数线因为画布裁切看着"停在顶端"，但**波形**
+ *   按超出值放大（`volume × dynGain` 直接相乘），松手后后端把它们钳回来，
+ *   波形于是跳回去 —— 用户表现为"拖的时候波形超了，松手又弹回"。
+ *
+ * 修复原则：**预览值与提交值必须逐值一致**。做法不是在提交前改写数据（后端已经
+ * 钳过一次），而是在"用户输入 → live 覆盖"的写入点用同一份钳制函数，让预览从
+ * 一开始就落在后端会接受的范围内。
+ *
+ * ⚠ 非有限值不在此处理：后端对非有限值有独立的兜底语义（额外曲线取参考值、
+ * 音高/齿度取 0），前端没有等价信息（`param_reference_value` 在 Rust 侧解析），
+ * 故原样透传交由后端决定。前端各写入路径本就会先过滤非有限值。
+ *
+ * ⚠ 后端改动本组分支时**必须同步本函数**（保持顺序与常量一一对应便于核对）。
+ *
+ * @param param 参数名（可含子轨前后缀）。
+ * @param value 待写入的曲线值。
+ * @returns 钳制后的值；参数不在这组分之内时原样返回。
+ */
+export function clampParamWriteValue(param: string, value: number): number {
+    if (!Number.isFinite(value)) return value;
+    let v = value;
+    // 子轨共振峰偏移：与 `parse_child_pitch_offset_param` 的 Formant 分支同值域。
+    if (isChildFormantOffsetCentsParam(param)) {
+        v = clampTo(v, CHILD_FORMANT_OFFSET_CENTS_RANGE.min, CHILD_FORMANT_OFFSET_CENTS_RANGE.max);
+    }
+    if (param === "pitch") {
+        // 0 是"未设置"哨兵，绝不能被钳进 1..127。
+        if (v !== 0) v = clampTo(v, 1, 127);
+        return v;
+    }
+    if (param === "tension") {
+        return clampTo(v, -100, 100);
+    }
+    // 音量：乘性增益，负值对音量无意义（一并钳到 0 = 全静音）。
+    if (param === "volume" || param === "hifigan_volume") {
+        return clampTo(v, 0, 2);
+    }
+    if (isDynParam(param)) {
+        // 负值统一收敛到「沿用原声」哨兵 —— 不允许写成 −0.7 之类的中间值；
+        // 值本身无意义，只要符号为负就是同一个语义。上界与描述符值域逐字一致。
+        if (v < 0) return DYN_FOLLOW_ORIG;
+        return clampTo(v, DYN_VALUE_MIN, DYN_VALUE_MAX);
+    }
+    return v;
+}
+
+/** 局部 min/max 钳制（避免为一次钳制引入 utils 依赖）。 */
+function clampTo(value: number, min: number, max: number): number {
+    return value < min ? min : value > max ? max : value;
 }

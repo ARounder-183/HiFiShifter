@@ -7,8 +7,19 @@
  * 每帧数十毫秒的卡顿（用户报告的「编辑音量/动态时卡顿」）。本基准把三条
  * 路径钉在同一场景里对比，防止这类回归重新引入。
  *
- * 【场景】44.1kHz 源、L0 峰值密度（div=16）、150 px/s、视口 1600px + 512px
- * 余量窗口 → 2112 列 × 16 切片。
+ * 【两个场景：细缩放与粗缩放】缩放等级改变的不只是峰值密度：
+ *
+ * - **细缩放**（150 px/s，L0 密度）列最多、每列窗口最窄，是"列数 × 切片数"
+ *   主导的情形（2112 列 × 16 切片）；
+ * - **粗缩放**（6 px/s）列少、每列窗口宽，**上界钳制**的逐帧枚举窗口随之变宽
+ *   （`levelCeilingOverWindow` 的窗口 = 列宽 / 16），是另一条成本曲线 ——
+ *   查表实现若只对细缩放友好，这里会立刻暴露。
+ *
+ * 【每帧几次重建不在此处钉】"一帧内多次请求只重建一次"由绘制调度保证
+ * （`PianoRollPanel` 的 `waveformRepaintLoop` → `renderKernel/renderLoop`），
+ * 其不变量由 `renderKernel/renderLoop.test.ts`（"同一帧内多次 invalidate 只
+ * 调度一次、只绘制一次"）与 `loudnessLutEquivalence.test.ts`（查表不随查询
+ * 次数增长）覆盖。本基准只负责**单次重建**的成本。
  *
  * 【运行】`npx vitest bench src/components/layout/pianoRoll/loudnessPerf.bench.ts`
  */
@@ -24,9 +35,7 @@ import { createTimelineAxis } from "../renderKernel/timelineAxis";
 const DPR = 1;
 const VIEW_W = 1600;
 const VIEW_H = 600;
-const PX_PER_SEC = 150;
 const MARGIN = 512;
-const WINDOW_W = VIEW_W + MARGIN * 2;
 const SAMPLE_RATE = 44100;
 const DIV = 16;
 const FRAME_PERIOD_MS = 5;
@@ -71,18 +80,6 @@ const rows: WaveformSceneRow[] = [
         ],
     },
 ];
-
-const scene = buildWaveformScene({
-    axis: createTimelineAxis({
-        pxPerSec: PX_PER_SEC,
-        scrollLeftPx: -MARGIN,
-        viewportWidthPx: WINDOW_W,
-        dpr: DPR,
-    }),
-    widthPx: WINDOW_W,
-    viewportTopPx: 0,
-    rows,
-});
 
 function getPeaks(_path: string, _rate: number, startSec: number, durationSec: number) {
     const startIdx = Math.max(0, Math.floor((startSec * SAMPLE_RATE) / DIV));
@@ -137,9 +134,37 @@ const linear: WaveformAmplitudeMap = (value, gain) => value * gain;
 
 const sink = { buffer: new Float32Array(1 << 24) };
 
-function build(map: WaveformAmplitudeMap | undefined) {
+/** 按给定水平缩放构建窗口场景（同一份峰值与曲线，只改投影）。 */
+function makeScene(pxPerSec: number): {
+    windowW: number;
+    scene: ReturnType<typeof buildWaveformScene>;
+} {
+    const windowW = VIEW_W + MARGIN * 2;
+    return {
+        windowW,
+        scene: buildWaveformScene({
+            axis: createTimelineAxis({
+                pxPerSec,
+                scrollLeftPx: -MARGIN,
+                viewportWidthPx: windowW,
+                dpr: DPR,
+            }),
+            widthPx: windowW,
+            viewportTopPx: 0,
+            rows,
+        }),
+    };
+}
+
+const fine = makeScene(150);
+const coarse = makeScene(6);
+
+function build(
+    target: { windowW: number; scene: ReturnType<typeof buildWaveformScene> },
+    map: WaveformAmplitudeMap | undefined,
+) {
     return buildWaveformGeometry({
-        scene,
+        scene: target.scene,
         color: "#8fa3bf",
         getPeaks,
         amplitudeMap: map,
@@ -148,14 +173,14 @@ function build(map: WaveformAmplitudeMap | undefined) {
     });
 }
 
-const warm = build(linear);
+const warm = build(fine, linear);
 console.log(
-    `[参数编辑器波形重建] segments=${scene.segments.length} columns=${warm.lineCount} ` +
+    `[参数编辑器波形重建] segments=${fine.scene.segments.length} columns=${warm.lineCount} ` +
         `slices/column=${Math.min(
             Math.max(
                 1,
                 Math.round(
-                    ((scene.segments[0]?.sourceEndSec ?? 0) / (warm.lineCount || 1)) *
+                    ((fine.scene.segments[0]?.sourceEndSec ?? 0) / (warm.lineCount || 1)) *
                         (SAMPLE_RATE / DIV),
                 ),
             ),
@@ -165,14 +190,28 @@ console.log(
 
 describe("参数编辑器波形重建（1 行 / 2624px 窗口 / L0 / 150 px/s）", () => {
     bench("线性映射（无响度自动化）", () => {
-        build(linear);
+        build(fine, linear);
     });
 
     bench("响度映射 · 无 live 覆盖", () => {
-        build(loudnessSnapshot);
+        build(fine, loudnessSnapshot);
     });
 
     bench("响度映射 · 拖动音量（live 覆盖）", () => {
-        build(loudnessLive);
+        build(fine, loudnessLive);
+    });
+});
+
+describe("参数编辑器波形重建（粗缩放 6 px/s：列少、列内窗口宽）", () => {
+    bench("线性映射（无响度自动化）", () => {
+        build(coarse, linear);
+    });
+
+    bench("响度映射 · 无 live 覆盖", () => {
+        build(coarse, loudnessSnapshot);
+    });
+
+    bench("响度映射 · 拖动音量（live 覆盖）", () => {
+        build(coarse, loudnessLive);
     });
 });

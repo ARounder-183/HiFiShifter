@@ -19,7 +19,6 @@ import {
     isChildPitchOffsetDegreesParam,
     snapChildPitchOffsetValue,
 } from "./childPitchOffsetParams";
-import { dynMultiplicativeFactor, isDynParam } from "./paramRanges";
 
 function isPitchSnapTargetParam(param: string): boolean {
     return (
@@ -48,12 +47,14 @@ export function getSelectDragPreviewValue(args: {
         projectScale,
     } = args;
 
-    // dyn 拖拽是**乘性**的（0 = 静音必须保持 0，见 paramRanges 的说明）：
-    // 弹窗显示的是"起点处的值被缩放后的结果"，而不是指针所在的线性值。
-    if (isDynParam(editParam)) {
-        return startValue * dynMultiplicativeFactor((currentValue - startValue) * fineScale);
-    }
-
+    // 动态不再特殊：拖拽对所有参数都是**值域内线性偏移**（见
+    // paramRanges.shiftValueForDrag），且位移量就取自指针在值域纵轴上的位移。
+    // 于是"起点处的值被同样偏移后的结果"恰好等于指针当前所在的值 ——
+    // 弹窗直接显示 `currentValue` 即与实际拖拽结果一致（下方通用分支已如此）。
+    //
+    // 【曾经的写法】这里原来对 dyn 单独做乘性换算（`startValue × 2^Δ`），与
+    // 拖拽的乘性法则配套。那个组合的表现是"动态值越小、同样的指针位移带来的
+    // 变化越小"，用户观感为"不跟手"；改成线性后两侧同时简化。
     if (!effectiveSnap || !isPitchSnapTargetParam(editParam)) {
         return currentValue;
     }

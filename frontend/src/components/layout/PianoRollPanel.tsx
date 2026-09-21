@@ -106,7 +106,12 @@ import {
 import { resolveTimelineMinPxPerSec } from "./timeline/runtime/timelineZoomBounds";
 import { TimelineDisplaySettingsDialog } from "./TimelineDisplaySettingsDialog";
 
-import { AXIS_W, PITCH_MAX_MIDI, PITCH_MIN_MIDI } from "./pianoRoll/constants";
+import {
+    AXIS_W,
+    PARAM_EDITOR_BOTTOM_BAR_PX,
+    PITCH_MAX_MIDI,
+    PITCH_MIN_MIDI,
+} from "./pianoRoll/constants";
 import { drawPianoRoll } from "./pianoRoll/render";
 import type { DetectedPitchCurve, ReferencePitchOverlay } from "./pianoRoll/render";
 import type { MainCanvasSignature } from "./pianoRoll/mainCanvasSignature";
@@ -159,12 +164,14 @@ import { usePianoRollData } from "./pianoRoll/usePianoRollData";
 import { useClipsPeaksForPianoRoll } from "./pianoRoll/useClipsPeaksForPianoRoll";
 import { PianoRollWaveformSurface } from "./pianoRoll/PianoRollWaveformSurface";
 import { makeLoudnessAmplitudeMap } from "./pianoRoll/PianoRollWaveformSurface";
+import { clampParamWriteValue } from "./pianoRoll/paramRanges";
 import { useLoudnessCurves } from "./pianoRoll/useLoudnessCurves";
 import {
     createLiveOverrideReader,
     type LiveOverrideReader,
 } from "./pianoRoll/liveLoudnessOverride";
 import { pianoRollViewportBus } from "./pianoRoll/pianoRollViewportBus";
+import { createRenderLoop, type RenderLoop } from "./renderKernel/renderLoop.js";
 import { buildTimelineTicks } from "./timeline/runtime/buildTimelineTicks.js";
 import {
     createTimelineAxis,
@@ -3333,14 +3340,18 @@ export const PianoRollPanel: React.FC = () => {
      */
     const loudnessFpMs = paramView?.framePeriodMs ?? 5;
     const loudnessProjectFrames = Math.max(1, Math.ceil((dynamicProjectSec * 1000) / loudnessFpMs));
-    const { snapshot: loudnessSnapshot, analysisPending: loudnessAnalysisPending } =
-        useLoudnessCurves({
-            rootTrackId,
-            projectFrames: loudnessProjectFrames,
-            framePeriodMs: loudnessFpMs,
-            paramsEpoch: (s as unknown as { paramsEpoch?: number }).paramsEpoch ?? 0,
-            refreshToken,
-        });
+    const {
+        snapshot: loudnessSnapshot,
+        analysisPending: loudnessAnalysisPending,
+        snapshotFetchSeq: loudnessSnapshotFetchSeq,
+        getLatestFetchSeq: getLatestLoudnessFetchSeq,
+    } = useLoudnessCurves({
+        rootTrackId,
+        projectFrames: loudnessProjectFrames,
+        framePeriodMs: loudnessFpMs,
+        paramsEpoch: (s as unknown as { paramsEpoch?: number }).paramsEpoch ?? 0,
+        refreshToken,
+    });
 
     /**
      * live 覆盖读取器（解析按覆盖对象身份缓存，见 `createLiveOverrideReader`）。
@@ -3377,6 +3388,35 @@ export const PianoRollPanel: React.FC = () => {
     const loudnessWaveformRevisionRef = useRef(0);
 
     /**
+     * 波形重绘的**帧内合并**调度（与曲线层同用 `renderKernel/renderLoop` 语义）。
+     *
+     * 【为什么需要】一次全量重建要重算两千余列 × 16 切片的包络并上传数百 KB
+     * 顶点（实测典型窗口 ~2.7ms）。而绘制中的 live 覆盖在**同一帧内可能被更新
+     * 多次**：手绘工具会把一个 `pointermove` 的 coalesced 采样全部展开处理
+     * （`usePianoRollInteractions` 的 `flushPendingMoves`），高刷鼠标 / 笔一帧
+     * 可积 2~8 个采样。此前每个采样都**同步**强制提交一次全量重建 —— 单帧
+     * 8~30ms 的几何工作，正是用户报告的"编辑音量/动态时卡顿"。
+     *
+     * 改为标脏 + rAF 合并后一帧至多重建一次，且与曲线层（面板自己的
+     * `invalidate()` → 宿主 renderLoop）落在**同一帧**，两层不再错帧。
+     *
+     * 【为什么不用同帧 `flush()`】滚动路径要求同帧提交，是因为要与原生滚动的
+     * DOM 内容层对齐（见 PianoRollWaveformSurface / viewportBus 的契约）。绘制
+     * 参数曲线的路径没有随滚动移动的 DOM 层，与曲线层同帧即可。
+     */
+    const waveformRepaintLoopRef = useRef<RenderLoop | null>(null);
+    if (waveformRepaintLoopRef.current === null) {
+        waveformRepaintLoopRef.current = createRenderLoop({
+            draw: () => pianoRollViewportBus.invalidate(),
+        });
+    }
+    useEffect(() => {
+        const loop = waveformRepaintLoopRef.current;
+        loop?.start();
+        return () => loop?.stop();
+    }, []);
+
+    /**
      * 强制重绘参数面板波形（**仅当绘制中的 live 覆盖会改变波形时**）。
      *
      * 必要性：绘制中的响度曲线只写在 `liveEditOverrideRef`（ref 变更不触发
@@ -3391,9 +3431,9 @@ export const PianoRollPanel: React.FC = () => {
      * 而波形面的几何重建在总线驱动下是**每次全量**（`WaveformSurface.draw`：
      * 总线驱动的 `canReuse` 恒为 false，见该函数的说明），一次重建要重算
      * 两千余列 × 16 切片的包络。绘制音高时逐帧触发它纯属浪费 —— 一次重建
-     * 在参数面板的典型窗口下约 0.7ms（线性映射），叠加曲线自身重绘后仍会
+     * 在参数面板的典型窗口下约 2.7ms（响度映射），叠加曲线自身重绘后会
      * 明显抬高指针帧成本。因此这里用当前 live 覆盖的参数 id 做闸门：
-     * 只有编辑 volume / dyn 时才推进修订号并强制重绘。
+     * 只有编辑 volume / dyn 时才推进修订号并请求重绘。
      *
      * 【与曲线绘制的关系】曲线（选区、绘制中的参数线）由面板自己的
      * `invalidate()` → 宿主帧提交驱动，**不经过本函数**；因此本闸门只影响波形
@@ -3405,9 +3445,12 @@ export const PianoRollPanel: React.FC = () => {
         if (!liveOverrideReaderRef.current?.affectsWaveform(liveEditOverrideRef.current)) {
             return;
         }
+        // 修订号在**请求时**推进（不是绘制时）：同一帧内其它路径触发的绘制也要
+        // 看到"上次重建之后 live 覆盖变过"，否则几何缓存会误判为可复用。
         loudnessWaveformRevisionRef.current += 1;
-        pianoRollViewportBus.invalidate();
-        // eslint-disable-next-line react-hooks/exhaustive-deps -- liveOverrideReaderRef 是稳定引用（惰性创建）；live 覆盖经 ref 读取，故本回调必须保持引用稳定（它进入 usePianoRollInteractions 的依赖链）
+        // 绘制请求帧内合并：同一帧内多次请求只重绘一次（见 waveformRepaintLoop）。
+        waveformRepaintLoopRef.current?.invalidate();
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- liveOverrideReaderRef / waveformRepaintLoopRef 是稳定引用（惰性创建）；live 覆盖经 ref 读取，故本回调必须保持引用稳定（它进入 usePianoRollInteractions 的依赖链）
     }, []);
 
     /**
@@ -3694,6 +3737,9 @@ export const PianoRollPanel: React.FC = () => {
         liveEditOverrideRef,
         ensureLiveEditBase,
         applyDenseToLiveEdit,
+        resetLiveEditPreview,
+        clearCommittedLiveEditOverride,
+        markLiveEditCommitted,
         commitStroke: commitStrokeBase,
     } = useLiveParamEditing({
         rootTrackId,
@@ -3704,6 +3750,51 @@ export const PianoRollPanel: React.FC = () => {
         bumpRefreshToken,
         invalidate,
     });
+
+    /**
+     * 提交时记下的"已发出的最大取数序号"（见 `useLoudnessCurves` 的
+     * `getLatestFetchSeq` 与下方收尾 effect）。
+     */
+    const committedSettleSeqRef = useRef(0);
+
+    /**
+     * **参数写入成功**后调用：让波形在快照追上之前继续显示刚提交的值。
+     *
+     * 【做两件事】① 记下当前的取数序号水位（只有序号更大的快照才可能是提交之后
+     * 取的）；② 把 live 覆盖层标记为"已提交"—— **保留**其值而不是立刻撤下，
+     * 避免波形的幅度因子退回旧快照（"松手闪回旧波形"）。
+     *
+     * 【谁调用】面板的 `commitStroke` 包装层，以及 `usePianoRollInteractions` 里
+     * 四条**自己发起回写**的提交路径（选区拖拽 / 右键拖拽 / 直线拖拽 / morph
+     * 应用）—— 它们不经过 `commitStroke`，此前都是立刻把覆盖层置空，正是闪屏的
+     * 来源。失败路径仍走硬清除（见各自的 catch）。
+     */
+    const onParamCommitSucceeded = useCallback(() => {
+        committedSettleSeqRef.current = getLatestLoudnessFetchSeq();
+        markLiveEditCommitted();
+    }, [getLatestLoudnessFetchSeq, markLiveEditCommitted]);
+
+    /**
+     * **提交之后取得**的响度快照到位 ⇒ 撤下"已提交"的 live 覆盖层。
+     *
+     * 【为什么要等】提交成功后覆盖层不立刻撤下（见 `LiveEditOverride.committed`）：
+     * 它的值就是刚提交的曲线，而整工程快照还要走一趟 IPC。若此时撤下，波形的幅度
+     * 因子退回**旧快照**，于是"先跳回旧波形、再恢复新波形"（用户报告的松手闪屏）。
+     *
+     * 【为什么用取数序号而不是"快照换了引用"】提交发生时可能有一次**提交之前就
+     * 已发出**的在飞取数（例如原声基线分析完成触发的刷新），它的数据里没有本次
+     * 编辑。只看"引用变了"会在这份陈旧快照到达时提前收尾、照样闪一下。比较取数
+     * 序号则可以排除它：那种请求的序号 ≤ 提交时的最大值。
+     *
+     * 【为什么不会挡住撤销】撤销/重做经 `paramsEpoch`、切轨经 `rootTrackId`，
+     * 都会重新取数并带来更大的序号，因此覆盖层的存活期最多到"下一个提交后的快照
+     * 到达"，不会长期遮挡后续状态。
+     */
+    useEffect(() => {
+        if (loudnessSnapshotFetchSeq > committedSettleSeqRef.current) {
+            clearCommittedLiveEditOverride();
+        }
+    }, [loudnessSnapshotFetchSeq, clearCommittedLiveEditOverride]);
 
     // Clip 音高拖拽（修饰键 + 波形垂直拖拽）的实时预览桥：拖拽侧以节流
     // 后端预览写入修改 pitch 参数线；这里把同一音分偏移实时应用到本机
@@ -3740,13 +3831,29 @@ export const PianoRollPanel: React.FC = () => {
             if (!override || override.key !== paramView.key) return;
             const deltaSemitones = drag.cents / 100;
             const windowEndFrame = drag.startFrame + drag.frameCount;
+            // 以 paramView 的原始帧为基准重复推导（预览事件幂等，不叠加），
+            // 再走**统一的 live 写入入口**：它负责值域钳制（与后端同构）、版本号
+            // 推进与区间记账。此前这里直接改数组 —— 既不钳制（音高拖到 127 以上
+            // 时预览值与后端存下的值不一致），也不推进版本号（主画布签名与波形
+            // 几何缓存都看不到变化）。
+            const dense = new Array<number>(drag.frameCount);
             for (let i = 0; i < override.edit.length; i += 1) {
                 const frame = paramView.startFrame + i * paramView.stride;
                 if (frame < drag.startFrame || frame >= windowEndFrame) continue;
-                // 以 paramView 的原始帧为基准重复推导（预览事件幂等，不叠加）。
-                const base = paramView.edit[i] ?? 0;
-                override.edit[i] = shiftPitchValue(base, deltaSemitones);
+                dense[frame - drag.startFrame] = shiftPitchValue(
+                    paramView.edit[i] ?? 0,
+                    deltaSemitones,
+                );
             }
+            // 步长 > 1 时 dense 会有空洞：写入侧 `dense[j] ?? edit[i]` 会保留原值。
+            applyDenseToLiveEdit(
+                paramView,
+                drag.startFrame,
+                dense,
+                drag.startFrame,
+                windowEndFrame - 1,
+                "draw",
+            );
             invalidate();
         }
         function commitPitchDragPreview(e: Event) {
@@ -3758,7 +3865,11 @@ export const PianoRollPanel: React.FC = () => {
             for (let i = 0; i < nextEdit.length; i += 1) {
                 const frame = paramView.startFrame + i * paramView.stride;
                 if (frame < drag.startFrame || frame >= windowEndFrame) continue;
-                nextEdit[i] = shiftPitchValue(paramView.edit[i] ?? 0, deltaSemitones);
+                // 与后端写入值域同构地钳制，保证"本地曲线"与"随后取回的曲线"一致。
+                nextEdit[i] = clampParamWriteValue(
+                    "pitch",
+                    shiftPitchValue(paramView.edit[i] ?? 0, deltaSemitones),
+                );
             }
             setParamView({ ...paramView, edit: nextEdit });
             liveEditOverrideRef.current = null;
@@ -3778,17 +3889,23 @@ export const PianoRollPanel: React.FC = () => {
         liveEditOverrideRef,
         setParamView,
         invalidate,
+        applyDenseToLiveEdit,
     ]);
 
     // 包装 commitStroke：在 pointer-up 提交笔画后，清除 liveEditActive 状态，
     // 并触发可能被延迟 ?pitch_orig_updated 曲线刷新 ?
     const commitStroke: typeof commitStrokeBase = useCallback(
         async (points, mode) => {
+            // 收尾分工：**水位**记在这里（必须在发起写入之前 —— 提交内部会 bump
+            // 刷新令牌、立刻发起取数）；**标记已提交**由 commitStrokeBase 在成功
+            // 路径完成（失败则硬清除覆盖层）。两者合起来即 onParamCommitSucceeded
+            // 的语义，见其说明。
+            committedSettleSeqRef.current = getLatestLoudnessFetchSeq();
             await commitStrokeBase(points, mode);
             liveEditActiveRef.current = false;
             notifyLiveEditEnded();
         },
-        [commitStrokeBase, notifyLiveEditEnded],
+        [commitStrokeBase, getLatestLoudnessFetchSeq, notifyLiveEditEnded],
     );
 
     // 从 store 中的 clipPitchCurves 转换为 DetectedPitchCurve[] 供 drawPianoRoll 使用。
@@ -4264,7 +4381,8 @@ export const PianoRollPanel: React.FC = () => {
          * `"[object Object]"`，两个内容完全不同的选区因此得到同一个签名，缓存命中、
          * 主画布在清屏前就 return，旧选区框留在画布上不消失（缺陷 #4，详见
          * `pianoRoll/mainCanvasSignature.ts`）。引用比较之所以能逐帧失效，是因为
-         * 选区 / 覆盖层在变化时都被赋**新对象**，而非原地改字段。
+         * 选区在变化时被赋**新对象**；绘制中的 live 覆盖改成了原地更新，故它
+         * 不参与引用比较，而是以**显式版本号**参与（见下方签名项）。
          *
          * 【必须与绘制入参一一对应】下面每一项都刻意对应 `drawPianoRoll` 的某个
          * 入参（或影响其投影的视口量），避免"签名里写了 A、实际喂给绘制的是 B"。
@@ -4297,7 +4415,10 @@ export const PianoRollPanel: React.FC = () => {
             paramMorphOverlays,
             s.showClipboardPreview ? clipboardRef.current : null,
             selectionRef.current,
-            liveEditOverrideRef.current,
+            // 绘制中的 live 覆盖：用**显式版本号**而非对象引用参与签名。
+            // 覆盖层改为原地更新后引用不再变化，比引用即可正确失效（且"无覆盖"
+            // → 0 与"新覆盖"→ 非 0 天然可分）。见 mainCanvasSignature 的约束说明。
+            liveEditOverrideRef.current?.version ?? 0,
             // 中央提示文字（"音高被硬禁用"的原因）：本面板**新增**的字符串签名项，
             // 切换参数 / 轨道组时会变（禁用原因出现或消失）。
             // 注意 `drawPianoRoll` 另有多项字符串入参（editParam / fontFamily 等），
@@ -4424,6 +4545,8 @@ export const PianoRollPanel: React.FC = () => {
         clampViewport,
         ensureLiveEditBase,
         applyDenseToLiveEdit,
+        resetLiveEditPreview,
+        onParamCommitSucceeded,
         requestWaveformRepaint,
         commitStroke,
         setParamView,
@@ -4641,7 +4764,11 @@ export const PianoRollPanel: React.FC = () => {
             const horizontalZoomRequested = isWheelBindingRequested(horizontalZoomKb);
 
             const bounds = el.getBoundingClientRect();
-            const h = Math.max(1, bounds.height);
+            // 竖直分母必须用**绘图区**高度（`viewSize.h`），不是纵轴列的高度：
+            // 列比滚动视口高出一条自绘水平滚动条的行，且轴位图/琴键是按
+            // `viewSize.h` 投影的（见内核的 AXIS_TICK_LABEL_DESCENT_PX 说明）。
+            // 用列高会让滚轮/悬停算出的值比渲染出来的位置偏低。
+            const h = Math.max(1, viewSizeRef.current.h);
             const pointerY = clamp(e.clientY - bounds.top, 0, h);
             // t: 0=top, 1=bottom — same semantics as usePianoRollInteractions
             const t = pointerY / h;
@@ -4798,7 +4925,9 @@ export const PianoRollPanel: React.FC = () => {
         const getMidiNoteFromY = (clientY: number): number => {
             const bounds = el.getBoundingClientRect();
             const y = clientY - bounds.top;
-            const h = Math.max(1, bounds.height);
+            // 同滚轮路径：分母取绘图区高度，与琴键实例的投影同源
+            //（见内核的 AXIS_TICK_LABEL_DESCENT_PX 说明）。
+            const h = Math.max(1, viewSizeRef.current.h);
             const t = 1 - clamp(y / h, 0, 1);
             const absMin = PITCH_MIN_MIDI;
             const absMax = PITCH_MAX_MIDI;
@@ -5501,11 +5630,16 @@ export const PianoRollPanel: React.FC = () => {
                             (param) => param.id === editParam,
                         );
                         const magnitude = parseParamShiftMagnitude(data?.magnitude);
-                        // dyn 是倍率域（0 = 静音）：上下移动必须**乘性** —— 一次
-                        // ±shift = ×2^±magnitude（默认 ×2 / ×0.5 = ±6 dB），0 帧
-                        // 保持 0（线性加法会把静音推挤出响度）。选区外延拓同样按
-                        // 乘性表达：`deltaAt = base × (factor − 1)`，边缘淡化在
+                        // dyn 是倍率域（0 = 静音）：**档位命令**上下移动用乘性 ——
+                        // 一次 ±shift = ×2^±magnitude（默认 ×2 / ×0.5 = ±6 dB），
+                        // 与 DAW 的"增益 ±6 dB"同一语义；0 帧保持 0。选区外延拓同样
+                        // 按乘性表达：`deltaAt = base × (factor − 1)`，边缘淡化在
                         // delta 空间里得到的就是"同一系数作用下的差值"。
+                        //
+                        // ⚠ 拖拽**不走**这条法则：拖拽一律是值域内线性偏移，因为
+                        // 只有线性偏移能让被抓住的那一点始终停在光标下（见
+                        // `paramRanges.shiftValueForDrag`）。命令是离散的增益档位，
+                        // 不涉及"跟手"，两者语义不同、不应互相"对齐"。
                         if (isDynParam(editParam)) {
                             // 档位（对齐 pitch 的 fine/normal/coarse 节奏）：
                             // fine ≈ +0.6 dB、normal = ×2（+6 dB）、coarse = ×4（+12 dB）。
@@ -7370,7 +7504,9 @@ export const PianoRollPanel: React.FC = () => {
                             // 底部预留 8px（bottom-2）：给自绘水平滚动条独占一行。滚动
                             // 条若叠加在内容上，会挡住贴底的参数线；让 scroller 在水平
                             // 条上方收边，二者互不重叠（竖直条同步缩短，见下方轨道）。
-                            className="absolute left-0 right-0 top-0 bottom-2 bg-qt-graph-bg overflow-x-scroll overflow-y-scroll hide-scrollbar outline-none focus:outline-none focus-visible:outline-none"
+                            className="absolute left-0 right-0 top-0 bg-qt-graph-bg overflow-x-scroll overflow-y-scroll hide-scrollbar outline-none focus:outline-none focus-visible:outline-none"
+                            // 底部预留一行给自绘水平滚动条（见 PARAM_EDITOR_BOTTOM_BAR_PX）
+                            style={{ bottom: PARAM_EDITOR_BOTTOM_BAR_PX }}
                             data-piano-roll-scroller
                             tabIndex={0}
                             onAuxClick={interactions.onScrollerAuxClick}
@@ -7530,7 +7666,8 @@ export const PianoRollPanel: React.FC = () => {
                             用户可见的**唯一**滚动条。 */}
                         <div
                             ref={vScrollbarTrackRef}
-                            className="absolute right-0 top-0 bottom-2 w-2 z-20"
+                            className="absolute right-0 top-0 w-2 z-20"
+                            style={{ bottom: PARAM_EDITOR_BOTTOM_BAR_PX }}
                         >
                             <div
                                 ref={vScrollbarThumbRef}
@@ -7539,7 +7676,8 @@ export const PianoRollPanel: React.FC = () => {
                         </div>
                         <div
                             ref={hScrollbarTrackRef}
-                            className="absolute bottom-0 left-0 right-0 h-2 z-20"
+                            className="absolute bottom-0 left-0 right-0 z-20"
+                            style={{ height: PARAM_EDITOR_BOTTOM_BAR_PX }}
                         >
                             <div
                                 ref={hScrollbarThumbRef}
