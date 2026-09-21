@@ -23,7 +23,7 @@ import type { WaveformAmplitudeFactors, WaveformAmplitudeMap } from "../../../wa
 import { linearAmplitudeMap } from "../../../waveform/geometry";
 import { createTimelineAxis } from "../renderKernel/timelineAxis.js";
 import type { ClipPeaksEntry } from "./useClipsPeaksForPianoRoll";
-import { computeDynGain } from "./paramRanges";
+import { dynContentFade, dynLevelTargetingGain } from "./paramRanges";
 import { pianoRollViewportBus } from "./pianoRollViewportBus";
 
 /**
@@ -81,6 +81,14 @@ export interface LoudnessLiveCurve {
 const MAX_LUT_FRAMES = 1 << 17;
 
 /**
+ * 无内容判据（`dynContentFade`）所用原声的**平滑窗口**（毫秒）。
+ *
+ * 取 100ms —— 略宽于最粗的 mipmap 桶（L2 ≈ 85ms），使"有没有内容"的判据在整桶
+ * 内一致，从而与水平缩放无关。详见 `contentBaselineAt` 的说明。
+ */
+const CONTENT_WINDOW_MS = 100;
+
+/**
  * 查表条目的种类（`kind` 数组）。
  *
  * 用于精确复刻 `levelCeilingOverWindow` 逐帧枚举时的三分支语义：
@@ -125,6 +133,39 @@ function sampleCurveLinear(
     const a = values[i0] ?? 0;
     const b = values[i1] ?? a;
     return a + (b - a) * frac;
+}
+
+/**
+ * 某帧**物理可达的输出电平上界**：`vol × 目标 × 无内容可达系数(原声)`。
+ *
+ * 【为什么它不等于 `vol × 目标`】增益律是
+ * `增益 = 目标 / max(原声, 下限) × 无内容淡出(原声)`，而逐样本 `|x| ≤ 原声`，
+ * 于是该帧真正可达的输出电平是
+ *
+ *     |x| × 增益 ≤ 原声 × vol × 目标 / max(原声, 下限) × 淡出(原声)
+ *                = vol × 目标 × 无内容可达系数(原声)
+ *
+ * 其中系数恰是**未画帧的增益** `computeDynGain(原声, 原声)`：下限之上为 1
+ * （于是上界退化回 `vol × 目标`，与既有实现逐值一致），下限之下远小于 1
+ * —— 无内容处再怎么把目标画高也到不了那么响。
+ *
+ * 【为什么必须带上它（幻峰"满高平台"的根因）】上界钳制的用意是把"桶峰 × 大增益"
+ * 这种口径失配造成的越界压回去。但**桶峰来自宽桶（粗缩放的 L2 ≈ 85ms），而分母
+ * 原声是窄窗（20ms）估计**，两者口径不同 ⇒ `桶峰/原声` 可以远大于 1；若上界仍写
+ * `vol × 目标`，原声接近 0 处的显示值就会被"顶到 `vol × 目标`"——用户看到的不是
+ * 尖刺而是**满高平台**，且命中哪些列随水平缩放（桶的划分）变化，正是"缩到一定
+ * 程度后近零处出现随机伪影"。
+ *
+ * @param target 该帧目标电平（哨兵已在后端出口解析）。
+ * @param vol 该帧音量。
+ * @param base 该帧原声基线；NaN = 取不到（`computeDynGain` 对非有限原声返回 1，
+ *   与 `factorAt` 的兜底一致）。
+ */
+function reachableLevel(target: number, vol: number, base: number, fade: number): number {
+    // 未画帧的增益（电平对齐部分）× 与显示相同的淡出系数 —— 两者相乘即"该帧
+    // 在不放大无内容的前提下所能达到的最高电平"。
+    const contentFactor = dynLevelTargetingGain(base, base) * fade;
+    return Math.max(target, 0) * Math.max(vol, 0) * contentFactor;
 }
 
 /**
@@ -192,6 +233,52 @@ export function makeLoudnessAmplitudeMap(
     const hasBaseline = source.dynBaseline.length > 0;
 
     /**
+     * 无内容判据用的**平滑原声**（滑窗均值，O(1) 查询）。
+     *
+     * 【为什么必须平滑】波形按 mipmap 桶绘制：粗缩放命中的 L2 桶宽 ≈ 85ms，而原声
+     * 基线是 5ms 帧栅格、20ms 窗的逐帧估计 —— 在"接近 0"的段落（词间停顿、抖动
+     * 噪声底）它**逐帧抖动若干 dB**。淡出项随原声陡变，若用桶内某一帧的点采样，
+     * "桶峰"与"淡出"就来自不同时刻，同一段素材在不同缩放下（桶的划分不同）会画出
+     * 截然不同的高度 —— 用户看到的"随机的伪影"。
+     *
+     * 取 100ms（略宽于最粗的 L2 桶）的**滑窗均值**作判据：判据在整桶内一致 ⇒ 显示
+     * 与缩放无关；对抖动噪声底它给出均值（低于桶峰）⇒ 更贴近"无内容"的实情；
+     * 对真实轻声（−34…−55 dBFS，下限之上）仍在下限之上 ⇒ 淡出系数仍为 1。
+     *
+     * 用前缀和实现：一次 O(n) 构建，之后每次查询常数时间（查表路径按帧构建 LUT，
+     * 共 n 次查询，摊销后与逐帧求值同阶）。
+     */
+    const contentWindowKnots = (() => {
+        const stride = source.stride > 0 ? source.stride : 1;
+        const perKnotMs = stride * framePeriodMs;
+        return Math.max(0, Math.round(CONTENT_WINDOW_MS / 2 / Math.max(1e-6, perKnotMs)));
+    })();
+    let contentPrefix: Float64Array | null = null;
+    const contentBaselineAt = (frameF: number): number => {
+        const values = source.dynBaseline;
+        if (values.length === 0) return 0;
+        if (contentPrefix === null) {
+            const out = new Float64Array(values.length + 1);
+            for (let i = 0; i < values.length; i += 1) {
+                const v = values[i];
+                out[i + 1] = (out[i] as number) + (Number.isFinite(v) && v > 0 ? v : 0);
+            }
+            contentPrefix = out;
+        }
+        const prefix = contentPrefix;
+        const stride = source.stride > 0 ? source.stride : 1;
+        const center = Math.round((frameF - source.startFrame) / stride);
+        const lo = Math.max(0, center - contentWindowKnots);
+        const hi = Math.min(values.length - 1, center + contentWindowKnots);
+        if (hi < lo) return 0;
+        const sum = (prefix[hi + 1] as number) - (prefix[lo] as number);
+        const count = hi - lo + 1;
+        return count > 0 ? sum / count : 0;
+    };
+    /** 该帧的**无内容淡出系数**（判据用平滑原声，见上）。 */
+    const contentFadeAt = (frameF: number): number => dynContentFade(contentBaselineAt(frameF));
+
+    /**
      * 时刻 → 乘性因子（volume × dynGain）的**逐值实现**。
      *
      * 这是查表之外的原始路径，也是查表越界 / 不可插值时的回退。两条路径都在，
@@ -207,8 +294,8 @@ export function makeLoudnessAmplitudeMap(
         // ① 音量包络：曲线外回退 1.0（与后端越界持有末值语义一致）。
         const vol = sampleLiveOrSnapshot(live.volume(), source.volume, frameF) ?? 1.0;
 
-        // ② 动态增益：交给与后端逐分支同构的 `computeDynGain`（唯一实现）。
-        //    基线为空 = 分析未就绪 → 不施加任何增益（绝不凭空造增益）。
+        // ② 动态增益 = 电平对齐（点采样原声）× 无内容淡出（**平滑**原声，见
+        //    `contentBaselineAt`）。基线为空 = 分析未就绪 → 不施加增益。
         let dynGain = 1;
         if (hasBaseline) {
             const target = sampleLiveOrSnapshot(live.dyn(), source.dynTarget, frameF);
@@ -219,7 +306,7 @@ export function makeLoudnessAmplitudeMap(
                 frameF,
             );
             if (target !== null && base !== null) {
-                dynGain = computeDynGain(target, base);
+                dynGain = dynLevelTargetingGain(target, base) * contentFadeAt(frameF);
             }
         }
 
@@ -260,6 +347,8 @@ export function makeLoudnessAmplitudeMap(
     let lutLevelKind = new Uint8Array(0);
     /** 每帧每通道的来源（2 位一个通道：vol | target | base）。 */
     let lutTag = new Uint8Array(0);
+    /** 每帧的**无内容淡出系数**（判据用平滑原声；与 `factorAt` 的合成一致）。 */
+    let lutContentFade = new Float64Array(0);
     /**
      * 每**格**（相邻两帧之间）是否可安全线性插值：三个通道的来源都一致才为 1。
      *
@@ -308,6 +397,7 @@ export function makeLoudnessAmplitudeMap(
             lutLevelKind = new Uint8Array(count);
             lutTag = new Uint8Array(count);
             lutCellOk = new Uint8Array(count > 0 ? count - 1 : 0);
+            lutContentFade = new Float64Array(count);
         }
         // live 覆盖只解析一次：此前它在**每个查询点**都被重新解析（一次重建数万次）。
         const liveVolume = live.volume();
@@ -332,6 +422,7 @@ export function makeLoudnessAmplitudeMap(
             lutTarget[i] = target ?? 0;
             lutBase[i] = base ?? 0;
             lutTag[i] = volSrc | (targetSrc << 2) | (baseSrc << 4);
+            lutContentFade[i] = contentFadeAt(f);
 
             // level 表：复刻 levelCeilingOverWindow 逐帧枚举的三分支语义
             //（目标取不到 = 该帧跳过；乘积非有限 = 整体失效）。
@@ -339,7 +430,12 @@ export function makeLoudnessAmplitudeMap(
                 lutLevelKind[i] = LUT_LEVEL_SKIP;
                 lutLevel[i] = 0;
             } else {
-                const level = Math.max(target, 0) * Math.max(vol ?? 1.0, 0);
+                const level = reachableLevel(
+                    target,
+                    vol ?? 1.0,
+                    base ?? Number.NaN,
+                    contentFadeAt(f),
+                );
                 if (Number.isFinite(level)) {
                     lutLevelKind[i] = LUT_LEVEL_VALUE;
                     lutLevel[i] = level;
@@ -385,15 +481,18 @@ export function makeLoudnessAmplitudeMap(
             if (hasBaseline) {
                 const tag0 = lutTag[i0] as number;
                 // 高位 2 位 = 原声基线来源、中位 = 目标电平来源；两者都非 NONE
-                // 才与原语义一样进入 `computeDynGain`（非有限输入由它退化为 1）。
+                // 才与原语义一样求值（非有限输入由 `dynLevelTargetingGain` 退化为 1）。
                 if ((tag0 >> 2) & 3) {
                     if ((tag0 >> 4) & 3) {
                         const tA = lutTarget[i0] as number;
                         const bA = lutBase[i0] as number;
-                        dynGain = computeDynGain(
-                            tA + ((lutTarget[i1] as number) - tA) * frac,
-                            bA + ((lutBase[i1] as number) - bA) * frac,
-                        );
+                        const fA = lutContentFade[i0] as number;
+                        dynGain =
+                            dynLevelTargetingGain(
+                                tA + ((lutTarget[i1] as number) - tA) * frac,
+                                bA + ((lutBase[i1] as number) - bA) * frac,
+                            ) *
+                            (fA + ((lutContentFade[i1] as number) - fA) * frac);
                     }
                 }
             }
@@ -489,7 +588,8 @@ export function makeLoudnessAmplitudeMap(
             // 目标电平（哨兵已在后端出口解析成原声基线）；`≤0` = 画静音。
             const target = sampleLiveOrSnapshot(live.dyn(), source.dynTarget, f);
             if (target === null) continue;
-            const level = Math.max(target, 0) * Math.max(vol, 0);
+            const base = sampleCurveLinear(source.dynBaseline, source.startFrame, source.stride, f);
+            const level = reachableLevel(target, vol, base ?? Number.NaN, contentFadeAt(f));
             if (!Number.isFinite(level)) return null;
             if (level > ceiling) ceiling = level;
         }

@@ -55,6 +55,18 @@ pub(crate) const DYN_FOLLOW_ORIG: f32 = -1.0;
 /// 同时**语义完全保持**：`目标 ≤ 0`（画静音）在任何原声下都仍然返回 0。
 pub(crate) const DYN_SILENCE_FLOOR: f32 = 0.001;
 
+/// 无内容淡出的**下端点**（= 下限 × 本比值，即 −66 dBFS）。
+///
+/// 【为什么不是"从 0 一路淡出"】淡出若跨越 `[0, 下限]`，在对数轴上就是从 −∞ 到
+/// −60 dB 的整段，中点落在 −66 dB 附近 —— 而"看起来几乎是 0"的段落（线性值
+/// 0.0005 量级）正好落在中点，淡出只压掉一半，仍会把它抬到目标电平附近。
+/// 真实**有内容**素材在 −34…−55 dBFS（下限之上），与 −66…−90 dBFS 的抖动噪声底
+/// 之间有 10 dB 以上空档，故把过渡带收紧到 `[−66, −60] dBFS`：空档之下恒 0、
+/// 真实内容恒 1，两者都不受影响。
+///
+/// ⚠ 与前端 `paramRanges::DYN_CONTENT_FADE_FLOOR_RATIO` 同值，改动需同步。
+pub(crate) const DYN_FADE_FLOOR_RATIO: f32 = 0.5;
+
 /// 动态增益上限：**从绝对静音下限兑现到满量程**所需的倍数（= `1/下限`）。
 ///
 /// 【它不是独立的策略旋钮，而是 `DYN_SILENCE_FLOOR` 的推论】dyn 的语义是
@@ -308,7 +320,10 @@ fn no_content_fade(orig: f32) -> f32 {
     if !(orig > 0.0) {
         return 0.0;
     }
-    let x = (orig / DYN_SILENCE_FLOOR).min(1.0);
+    // 过渡带 = [下限×0.5, 下限] = [−66, −60] dBFS（与前端
+    // `DYN_CONTENT_FADE_FLOOR_RATIO` 同值）。理由见 `DYN_FADE_FLOOR_RATIO`。
+    let lo = DYN_SILENCE_FLOOR * DYN_FADE_FLOOR_RATIO;
+    let x = ((orig - lo) / (DYN_SILENCE_FLOOR - lo)).clamp(0.0, 1.0);
     x * x * (3.0 - 2.0 * x)
 }
 
@@ -458,8 +473,12 @@ mod tests {
         // 真静音（原声 0）时增益归 0（输出本来就是 0，与旧的 ×1000 等效），
         // 抖动级原声则被显著压低（见 `no_content_fade` 与下方专门用例）。
         assert_eq!(compute_dyn_gain(1.0, 0.0), 0.0);
-        let half_floor = compute_dyn_gain(1.0, DYN_SILENCE_FLOOR * 0.5);
-        assert!(half_floor < DYN_MAX_GAIN && half_floor > 0.0);
+        // 淡出过渡带 = [下限×0.5, 下限]（见 DYN_FADE_FLOOR_RATIO）：
+        // 带内单调递增、带宽之下恒 0、带之上（= 下限）恢复满值并受上限钳制。
+        assert_eq!(compute_dyn_gain(1.0, DYN_SILENCE_FLOOR * 0.5), 0.0);
+        let mid = compute_dyn_gain(1.0, DYN_SILENCE_FLOOR * 0.75);
+        assert!(mid > 0.0 && mid < DYN_MAX_GAIN, "带内应部分淡出，实测 {mid}");
+        assert_eq!(compute_dyn_gain(1.0, DYN_SILENCE_FLOOR), DYN_MAX_GAIN);
         // 提升被上限钳制（目标远超值域时也一样）。
         assert_eq!(
             compute_dyn_gain(DYN_MAX_GAIN * 2.0, DYN_SILENCE_FLOOR),
@@ -484,6 +503,7 @@ mod tests {
         let target = 1.0f32;
         let mut prev: Option<f32> = None;
         let mut max_jump_ratio = 0.0f32;
+        let mut max_jump_abs = 0.0f32;
         for k in 0..=2000 {
             // 从 下限×0.5 到 下限×2 密集采样（含跨越点）。
             let orig = DYN_SILENCE_FLOOR * 0.5 * (1.0 + k as f32 / 1000.0);
@@ -493,14 +513,18 @@ mod tests {
                     let ratio = (gain / p).max(p / gain);
                     max_jump_ratio = max_jump_ratio.max(ratio);
                 }
+                max_jump_abs = max_jump_abs.max((gain - p).abs());
             }
             prev = Some(gain);
         }
-        // 相邻采样步长 0.05% 原声变化 → 增益变化不应超过 ~0.2%。
+        // 【判据】步长极小 ⇒ 增益不允许出现"台阶"。淡出带宽收紧后（见
+        // `DYN_FADE_FLOOR_RATIO`）斜率变陡，故此处断言**绝对跳变有界**（相对
+        // 上限），而不是比率 —— 比率在增益趋近 0 的一侧会退化成无意义的大数。
         assert!(
-            max_jump_ratio < 1.002,
-            "增益在原声跨过下限时必须连续，实测最大相邻跳变比 {max_jump_ratio}"
+            max_jump_abs < DYN_MAX_GAIN * 0.02,
+            "增益在原声跨过下限时必须连续，实测最大相邻跳变 {max_jump_abs}（上限 {DYN_MAX_GAIN}）"
         );
+        assert!(max_jump_ratio > 0.0);
     }
 
     #[test]
@@ -528,7 +552,7 @@ mod tests {
             let orig = DYN_SILENCE_FLOOR * (step as f32 / 200.0);
             let cur = compute_dyn_gain(0.001, orig);
             assert!(
-                (cur - prev).abs() < 0.01,
+                (cur - prev).abs() < DYN_MAX_GAIN * 0.02,
                 "下限附近增益出现台阶：{prev} → {cur}（原声 {orig}）"
             );
             prev = cur;

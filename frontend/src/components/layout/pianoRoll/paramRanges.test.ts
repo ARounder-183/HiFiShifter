@@ -118,28 +118,31 @@ describe("computeDynGain", () => {
         // 无内容帧（低于静音下限）：分母钳到下限 ⇒ 增益**有界**，并按"无内容"
         // 平滑淡出（不是旧的固定 ×1000 —— 那会把抖动噪声底抬成可闻嘶声，
         // 也不是更早的"拒绝放大返回 1" —— 那会造成门限处阶跃 → 伪影）。
-        const dither = 10 ** (-80 / 20); // 1e-4
-        const gDither = computeDynGain(1, dither);
-        expect(gDither).toBeLessThan(DYN_MAX_GAIN);
-        expect(gDither).toBeGreaterThan(0);
+        // 过渡带 = [下限×0.5, 下限] = [−66, −60] dBFS（见 DYN_CONTENT_FADE_FLOOR_RATIO）：
+        // 带以下恒 0（−80 dBFS 抖动 ⇒ 完全不放大）、带内部分淡出、下限处不淡出。
+        const dither = 10 ** (-80 / 20); // 1e-4，远低于过渡带
+        expect(computeDynGain(1, dither)).toBe(0);
         expect(computeDynGain(1, 0)).toBe(0); // 真静音：无内容 → 增益 0
-        expect(computeDynGain(1, DYN_SILENCE_FLOOR)).toBeCloseTo(DYN_MAX_GAIN, 6); // 门限处不淡出
+        const inBand = computeDynGain(1, DYN_SILENCE_FLOOR * 0.75);
+        expect(inBand).toBeGreaterThan(0);
+        expect(inBand).toBeLessThan(DYN_MAX_GAIN); // 带内部分淡出
+        expect(computeDynGain(1, DYN_SILENCE_FLOOR)).toBeCloseTo(DYN_MAX_GAIN, 6); // 下限处不淡出
     });
 
     it("★ 增益关于原声连续（近零伪影的根因）", () => {
-        // 跨下限密集采样：相邻增益的相对变化必须极小。旧实现（低于下限拒绝放大）
+        // 跨过渡带密集采样：相邻增益**不允许出现台阶**。旧实现（低于下限拒绝放大）
         // 会在下限处产生 1 → 上限 的阶跃，使近零段的波形列高随机跳变。
+        // 判据用绝对跳变（相对上限）：过渡带收紧到 6 dB 后斜率变陡，比率指标在
+        // 增益趋近 0 的一侧会退化成无意义的大数。
         let prev: number | null = null;
-        let maxRatio = 0;
+        let maxJump = 0;
         for (let k = 0; k <= 2000; k += 1) {
             const orig = DYN_SILENCE_FLOOR * 0.5 * (1 + k / 1000);
             const gain = computeDynGain(1, orig);
-            if (prev !== null && prev > 0 && gain > 0) {
-                maxRatio = Math.max(maxRatio, Math.max(gain / prev, prev / gain));
-            }
+            if (prev !== null) maxJump = Math.max(maxJump, Math.abs(gain - prev));
             prev = gain;
         }
-        expect(maxRatio).toBeLessThan(1.002);
+        expect(maxJump).toBeLessThan(DYN_MAX_GAIN * 0.02);
     });
 
     it("衰减照常生效；上限只是数值兜底", () => {
@@ -147,13 +150,17 @@ describe("computeDynGain", () => {
         // 下限之内衰减到一半。
         expect(computeDynGain(0.002, 0.004)).toBeCloseTo(0.5, 9);
         expect(computeDynGain(0, 0.0005)).toBe(0); // 画静音
-        // 下限之下：增益有界**且随原声平滑淡出**（无内容越彻底越小、无台阶）。
-        expect(computeDynGain(0.0005, 0.0001)).toBeLessThan(computeDynGain(0.0005, 0.0005));
+        // 下限之下：增益有界**且随原声平滑淡出**（带内越彻底越小；带以下恒 0）。
+        expect(computeDynGain(0.0005, DYN_SILENCE_FLOOR * 0.6)).toBeLessThan(
+            computeDynGain(0.0005, DYN_SILENCE_FLOOR * 0.9),
+        );
+        expect(computeDynGain(0.0005, DYN_SILENCE_FLOOR * 0.5)).toBe(0);
         // 连续性：原声轴上一阶上采样，相邻取值之差有界。
         let prev = computeDynGain(0.001, 0);
         for (let step = 1; step <= 200; step += 1) {
             const cur = computeDynGain(0.001, (DYN_SILENCE_FLOOR * step) / 200);
-            expect(Math.abs(cur - prev)).toBeLessThan(0.01);
+            // 绝对跳变有界（相对上限）——不用比率：增益趋近 0 的一侧比率会退化。
+            expect(Math.abs(cur - prev)).toBeLessThan(DYN_MAX_GAIN * 0.02);
             prev = cur;
         }
         // 上限 = 从下限兑现到值域顶端；越界曲线才被它兜住。

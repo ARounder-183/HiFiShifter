@@ -127,8 +127,9 @@ describe("makeLoudnessAmplitudeMap", () => {
             () => 0,
         );
         const gain = map(1, 1, 0);
+        // 过渡带 = [下限×0.5, 下限]（−66…−60 dBFS）：−80 dBFS 远在其下 ⇒ 完全不放大。
+        expect(gain).toBeGreaterThanOrEqual(0);
         expect(gain).toBeLessThan(DYN_MAX_GAIN);
-        expect(gain).toBeGreaterThan(0);
         // 真正要保证的是**输出电平**（原声 × 增益）：远低于旧的"按目标电平放大"。
         expect(20 * Math.log10(baseline * gain)).toBeLessThan(-50);
         expect(20 * Math.log10(baseline * DYN_MAX_GAIN)).toBeCloseTo(-20, 0); // 旧行为对照
@@ -345,7 +346,7 @@ describe("makeLoudnessAmplitudeMap · factor view", () => {
         // 非有限值会让几何层跳过整列。
         const gain = factor(0.01);
         expect(Number.isFinite(gain)).toBe(true);
-        expect(gain).toBeGreaterThan(0);
+        expect(gain).toBeGreaterThanOrEqual(0);
         expect(gain).toBeLessThan(DYN_MAX_GAIN);
     });
 

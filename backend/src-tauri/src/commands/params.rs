@@ -1233,17 +1233,25 @@ mod mix_conversion_tests {
 
     #[test]
     fn dyn_to_volume_follows_floor_and_clamp() {
-        // 无内容帧（低于 −60 dBFS）：分母与 compute_dyn_gain 同款钳到下限，
-        // 故换算结果有界（而非写成 1.0 的"保护"值）。
-        let (vol, new_dyn) = convert_mix_frame_value(
+        // 换算结果 = 该帧的动态增益本身（`compute_dyn_gain`，唯一真源）。
+        //
+        // ⚠ 无内容（原声 ≤ 下限×0.5 = −66 dBFS）时增益已被"无内容淡出"压到 0 ——
+        // 于是换算出的音量也是 0（而不是旧的"分母钳到下限 ⇒ t/下限 = 1000 ⇒ 钳到 2"）。
+        // 这正是互转一致性的要求：把动态换成音量，听感必须不变。
+        let floor = crate::renderer::common_params::DYN_SILENCE_FLOOR;
+        let (vol, new_dyn) =
+            convert_mix_frame_value(MixConversionDirection::DynToVolume, None, Some(1.0), floor * 0.5);
+        assert_eq!(vol, 0.0, "无内容帧（−66 dBFS 以下）换算后必须仍然不放大");
+        assert_eq!(new_dyn, crate::renderer::common_params::DYN_FOLLOW_ORIG);
+
+        // 下限处（有内容的下界）：增益 = 1/下限 = 上限 ×1000 → 被音量值域钳到 2。
+        let (vol_at_floor, _) = convert_mix_frame_value(
             MixConversionDirection::DynToVolume,
             None,
             Some(1.0),
-            crate::renderer::common_params::DYN_SILENCE_FLOOR * 0.5,
+            floor,
         );
-        // t/下限 = 1000 → 被音量值域钳到 2。
-        assert_eq!(vol, 2.0);
-        assert_eq!(new_dyn, crate::renderer::common_params::DYN_FOLLOW_ORIG);
+        assert_eq!(vol_at_floor, 2.0);
 
         // 超出了值域：同样钳到 2（与 compute_dyn_gain 的增益保持一致）。
         let (vol, _) = convert_mix_frame_value(

@@ -125,12 +125,7 @@ function buildScenario(): {
     return { bMax, bMin, baseline, target, nFrames };
 }
 
-function buildMap(
-    baseline: Float32Array,
-    target: Float32Array,
-    nFrames: number,
-    volume: number,
-) {
+function buildMap(baseline: Float32Array, target: Float32Array, nFrames: number, volume: number) {
     return makeLoudnessAmplitudeMap(
         {
             startFrame: 0,
@@ -257,5 +252,103 @@ test("near-zero dyn gain: unedited regions stay pixel-identical at every zoom", 
                 );
             }
         }
+    }
+});
+
+/**
+ * 「几乎为 0 的原声」+ 大目标 + **水平缩放**：波形高度必须又低又**与缩放无关**。
+ *
+ * ## 故障形态（用户报告）
+ *
+ * 原声"几乎接近 0"的段落（线性值 0.0005 量级、肉眼即 0）把动态值拉高后，水平缩小
+ * 到一定程度，该段出现**随机伪影** —— 同一段素材在不同缩放下画出的高度截然不同。
+ *
+ * ## 根因（两件事叠加）
+ *
+ * 1. **判据的输入抖动**：波形按 mipmap 桶绘制，粗缩放命中的 L2 桶宽 ≈ 85ms；而
+ *    无内容判据（`dynContentFade`）的输入是 5ms 帧栅格、20ms 窗的逐帧原声估计，
+ *    在"接近 0"的段落逐帧抖动若干 dB。判据随原声陡变 ⇒ 桶峰（一个时刻）与判据
+ *    （另一个时刻）失配 ⇒ 命中哪些列随桶的划分（= 缩放）变化。
+ * 2. **过渡带落点**：淡出若跨越 [0, 下限]，对数轴上的中点落在 −66 dB 附近 ——
+ *    正是"看起来是 0"的量级，于是该段只被压掉一半、仍被抬到目标附近。
+ *
+ * ## 判据
+ *
+ * 对"接近 0"的段落（−66 / −80 dBFS 抖动）：任何缩放下的显示高度都必须很低，
+ * 且**各缩放之间高度差极小**（与缩放无关）；有内容的段落（下限之上）不受影响。
+ */
+test("near-zero dyn gain: displayed height must be low and zoom-independent", () => {
+    const nFrames = Math.round((DUR * 1000) / FRAME_MS);
+    const widths = [600, 300, 150, 75, 40, 20];
+
+    const scenario = (meanDb: number, spreadDb: number) => {
+        const target: number[] = new Array(nFrames).fill(0.5);
+        const baseline: number[] = new Array(nFrames);
+        let seed = 20240922;
+        const rnd = (): number => {
+            seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+            return seed / 0x7fffffff;
+        };
+        for (let i = 0; i < nFrames; i += 1) {
+            baseline[i] = Math.pow(10, (meanDb + spreadDb * (rnd() - 0.5)) / 20);
+        }
+        const total = Math.round(DUR * SR);
+        const bucketCount = Math.ceil(total / DIV);
+        const bMax = new Float32Array(bucketCount);
+        const bMin = new Float32Array(bucketCount);
+        for (let b = 0; b < bucketCount; b += 1) {
+            const f0 = Math.floor((b * DIV) / SR / (FRAME_MS / 1000));
+            const f1 = Math.min(nFrames - 1, Math.ceil(((b + 1) * DIV) / SR / (FRAME_MS / 1000)));
+            let mx = 0;
+            for (let f = Math.max(0, f0); f <= f1; f += 1) mx = Math.max(mx, baseline[f] ?? 0);
+            bMax[b] = mx;
+            bMin[b] = -mx;
+        }
+        const map = makeLoudnessAmplitudeMap(
+            {
+                startFrame: 0,
+                stride: 1,
+                framePeriodMs: FRAME_MS,
+                volume: new Float32Array(nFrames).fill(1) as unknown as number[],
+                dynTarget: target as unknown as number[],
+                dynBaseline: baseline as unknown as number[],
+            },
+            { volume: () => null, dyn: () => null },
+            () => 0,
+        );
+        return { bMax, bMin, map };
+    };
+
+    // 「几乎为 0」：−66 dBFS（线性 5e-4）与 −80 dBFS 抖动。
+    for (const [label, meanDb, spreadDb] of [
+        ["−66 dBFS ± 8", -66, 8],
+        ["−80 dBFS ± 10", -80, 10],
+    ] as Array<[string, number, number]>) {
+        const { bMax, bMin, map } = scenario(meanDb, spreadDb);
+        const maxima = widths.map((w) => Math.max(...envelopeAt(w, bMax, bMin, map)));
+        for (let i = 0; i < widths.length; i += 1) {
+            if (maxima[i] > 0.05) {
+                throw new Error(
+                    `${label} @ ${widths[i]}px：显示高度 ${maxima[i].toFixed(4)} 应远低于目标 0.5`,
+                );
+            }
+        }
+        // 与缩放无关：各缩放下最大高度之差必须极小（旧的随机伪影会在此露馅）。
+        const lo = Math.min(...maxima);
+        const hi = Math.max(...maxima);
+        // 允许 ≤ 2% 高度的缩放差异（桶/切片聚合本身带来的微小起伏），
+        // 远小于"随机伪影"时代（该段能达目标的 40% 以上）。
+        if (hi - lo > 0.02) {
+            throw new Error(
+                `${label}：显示高度随缩放变化过大（${lo.toFixed(4)}…${hi.toFixed(4)}）`,
+            );
+        }
+    }
+
+    // 有内容（下限之上，−40 dBFS）的段落仍须照常达到目标 —— 不得误压。
+    const { bMax, bMin, map } = scenario(-40, 2);
+    const contentMax = Math.max(...envelopeAt(75, bMax, bMin, map));
+    if (contentMax < 0.2) {
+        throw new Error(`下限之上的段落被过度压制：实测 ${contentMax.toFixed(4)}`);
     }
 });

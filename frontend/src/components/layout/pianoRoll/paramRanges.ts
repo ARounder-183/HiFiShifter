@@ -262,6 +262,18 @@ export function restoreDynSentinels(
 export const DYN_SILENCE_FLOOR = 0.001;
 
 /**
+ * 无内容淡出的**下端点**：下限的 0.5 倍（−66 dBFS）。
+ *
+ * 【为什么不是"从 0 一路淡出"】淡出若跨越 [0, 下限]（线上式 ⇒ 对数轴上从 −∞ 到
+ * −60 dB 的整段），中点落在 −66 dB 附近 ⇒ 而"看起来几乎是 0"的段落（线性值
+ * 0.0005 量级）正好落在中点，淡出只压掉一半、仍会把它抬高到目标电平附近（用户
+ * 报告的近零伪影）。真实的**有内容**素材在 −34…−55 dBFS（下限之上），与
+ * −66…−90 dBFS 的抖动噪声底之间有 10 dB 以上的空档 —— 故把过渡带收紧到
+ * `[−66, −60] dBFS`：空档之下的判据恒 0、真实内容恒 1，两者都不受影响。
+ */
+export const DYN_CONTENT_FADE_FLOOR_RATIO = 0.5;
+
+/**
  * 动态增益上限：**从下限兑现到值域顶端**所需的倍数（= `DYN_VALUE_MAX / 下限`）。
  *
  * 与后端 `DYN_MAX_GAIN` 同一定义 —— 它不是独立的策略旋钮，而是
@@ -275,41 +287,62 @@ export const DYN_SILENCE_FLOOR = 0.001;
 export const DYN_MAX_GAIN = DYN_VALUE_MAX / DYN_SILENCE_FLOOR;
 
 /**
- * 由「原声电平」与「目标电平」求该帧的动态增益（**与后端
- * `common_params::compute_dyn_gain` 逐分支同构**）。
+ * 动态增益的**电平对齐**部分（不含无内容淡出）：`目标 / max(原声, 下限)`，钳到上限。
  *
- * 波形预览与实际渲染必须走同一份语义，否则用户看到的与听到的会分叉 ——
- * 这里曾有一份独立的本地实现（含自己的门限常量），任何一侧调整都会让
- * 「波形演示能提升、实际播放不提升」这类问题重新出现。判定收口在此处，
- * 后端改动时**必须同步本函数**（分支结构保持一一对应便于核对）。
+ * 与 {@link dynContentFade} 相乘即 {@link computeDynGain}（唯一真源仍是那个组合；
+ * 后端 `common_params::compute_dyn_gain` 是同一份语义）。
+ *
+ * 【为什么单独导出】让**显示端**能把"淡出"的输入换成**桶级一致**的平滑原声，而
+ * 电平对齐仍用点采样原声。原因：音频逐样本求值，点采样原声就够了；而波形是按
+ * mipmap 桶绘制的（粗缩放 L2 桶 ≈ 85ms），若淡出也用桶内某一帧的点采样，那么
+ * "桶峰"与"淡出"来自**不同时刻**，而淡出随原声陡变 ⇒ 显示随缩放随机起伏
+ * （用户报告的"近零原声处缩小后出现随机伪影"）。
  */
-export function computeDynGain(target: number, orig: number): number {
+export function dynLevelTargetingGain(target: number, orig: number): number {
     if (!Number.isFinite(target) || !Number.isFinite(orig)) return 1;
     if (target < 0) return 1; // 哨兵：沿用原声
     if (target <= 0) return 0; // 画静音：任何原声下都真静音
     // 分母钳到下限：界定"无内容" + 保证增益关于原声连续（见 DYN_SILENCE_FLOOR）。
     const denom = Math.max(orig, DYN_SILENCE_FLOOR);
-    const levelTargeting = Math.min(Math.max(target / denom, 0), DYN_MAX_GAIN);
-    // ★ 无内容淡出（与后端 `common_params::compute_dyn_gain` 逐分支同构）：
-    // 下限**以下**的原声只是抖动噪声底（16bit 抖动 ≈ −90 dBFS），按"目标电平"
-    // 放大只会把噪声变成可听的嘶声。下限的语义本就是"无内容"，故低于它时按
-    // smoothstep 平滑淡出到静音（在门限处导数也连续，不引入阶跃伪影）。
-    return levelTargeting * noContentFade(orig);
+    return Math.min(Math.max(target / denom, 0), DYN_MAX_GAIN);
+}
+
+/**
+ * 动态增益（**唯一真源**）：电平对齐 × 无内容淡出。
+ *
+ * 【为什么要淡出】下限**以下**的原声只是抖动噪声底（16bit 抖动 ≈ −90 dBFS），
+ * 按"目标电平"放大只会把噪声变成可听的嘶声（实测 −90 dB 原声 + 目标 0.5 →
+ * 输出 −36 dBFS）。下限的语义本就是"无内容"，故低于它时按 smoothstep 平滑淡出到
+ * 静音（门限处导数也连续，不引入阶跃伪影 —— 这正是更早的"低于门限就拒绝放大"
+ * 被否掉的原因）。
+ *
+ * 【与后端的同构】后端 `common_params::compute_dyn_gain` 逐分支同构；后端改动时
+ * **必须同步本函数**（这是"波形演示与实际播放一致"的前提）。
+ */
+export function computeDynGain(target: number, orig: number): number {
+    return dynLevelTargetingGain(target, orig) * dynContentFade(orig);
 }
 
 /**
  * 「原声是否算作**有内容**」的平滑度（与后端同构）：下限之上恒 1，之下 smoothstep 淡出到 0。
  *
- * 【为什么以原声判定】"有没有内容"是素材的属性，与用户画多高无关 —— 同一段抖动
- * 噪声底，拉高目标不该变嘶声，拉低目标也不该变成"被压的嘶声"。
+ * 【为什么不是硬门限】硬门限会在门限处产生阶跃（增益 1 → 目标/门限），近零原声
+ * 段的逐帧基线抖动会让它变成随机咔哒 —— 这正是 `DYN_SILENCE_FLOOR` 当初拒绝
+ * "低于门限就不再放大"的理由。smoothstep 在门限处**导数也连续**。
  *
- * 【对未画帧】未画帧的增益是 `原声 / max(原声, 下限)`：下限之上恰为 1，之下 < 1
- * （即"无内容处淡出到静音"，与下限"界定无内容"的语义一致）。真实素材的轻声/
+ * 【为什么以原声（而非目标）为准】"有没有内容"是素材的属性，与用户画多高无关：
+ * 同一段抖动噪声底，拉高目标不该变嘶声，拉低目标也不该变成"被压的嘶声"。
+ *
+ * 【对未画帧】未画帧的增益是 `原声 / max(原声, 下限)`：下限之上恰为 1；下限之下
+ * < 1（"无内容处淡出到静音"，与下限"界定无内容"的语义一致）。真实素材的轻声/
  * 气声/尾音普遍在 −34…−55 dBFS，都在下限之上，不受影响。
+ *
+ * 【显示端为什么要喂它"平滑原声"】见 {@link dynLevelTargetingGain} 的说明。
  */
-function noContentFade(orig: number): number {
+export function dynContentFade(orig: number): number {
     if (!(orig > 0)) return 0;
-    const x = Math.min(orig / DYN_SILENCE_FLOOR, 1);
+    const lo = DYN_SILENCE_FLOOR * DYN_CONTENT_FADE_FLOOR_RATIO;
+    const x = Math.min(Math.max((orig - lo) / (DYN_SILENCE_FLOOR - lo), 0), 1);
     return x * x * (3 - 2 * x);
 }
 
