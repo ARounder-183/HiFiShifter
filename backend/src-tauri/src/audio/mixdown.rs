@@ -119,7 +119,9 @@ fn dyn_gain_at_sec(
         frame_period_ms,
     );
     if target < 0.0 {
-        return 1.0; // 哨兵：沿用原声
+        // 哨兵：沿用原声。**防御性兜底** —— 正常路径下曲线已在装配期解析
+        //（见 `resolve_dyn_sentinels_for_audio`），导出不该再看到哨兵。
+        return 1.0;
     }
     // 基线缺失（分析未就绪）→ 1.0，绝不凭空造增益。
     let Some(orig_curve) = dyn_orig_curve.filter(|c| !c.is_empty()) else {
@@ -774,7 +776,7 @@ pub fn render_mixdown_interleaved(
             pan_curve,
             pan_curve_frame_period_ms,
             dyn_curve,
-            dyn_orig_curve,
+            dyn_orig,
             dyn_curve_frame_period_ms,
         ) = timeline
             .resolve_root_track_id(&clip.track_id)
@@ -782,8 +784,23 @@ pub fn render_mixdown_interleaved(
                 let entry = timeline.params_by_root_track.get(&root)?;
                 let volume = crate::pitch_editing::common_volume_curve_for_clip(entry, clip);
                 let pan = crate::pitch_editing::common_pan_curve_for_clip(entry, clip);
-                let dyn_curve = crate::pitch_editing::common_dyn_curve_for_clip(entry, clip);
-                let dyn_orig = crate::pitch_editing::dyn_orig_curve_for_clip(entry, clip);
+                let dyn_orig_source = crate::pitch_editing::dyn_orig_curve_for_clip(entry, clip);
+                // 与实时引擎同一处理：解析哨兵 + 分母同款下钳 + 末帧留一格缓冲。
+                // 详见 `resolve_dyn_curves_for_audio`；导出与监听必须同源。
+                let (dyn_curve, dyn_orig) =
+                    match crate::pitch_editing::common_dyn_curve_for_clip(entry, clip) {
+                        Some(curve) => {
+                            let resolved =
+                                crate::renderer::common_params::resolve_dyn_curves_for_audio(
+                                    curve,
+                                    dyn_orig_source,
+                                );
+                            let baseline =
+                                (!resolved.baseline.is_empty()).then_some(resolved.baseline);
+                            (Some(resolved.target), baseline)
+                        }
+                        None => (None, None),
+                    };
                 Some((
                     volume,
                     entry.frame_period_ms.max(0.1),
@@ -872,9 +889,8 @@ pub fn render_mixdown_interleaved(
 
         let has_volume_curve = volume_curve.is_some() && !volume_curve.as_ref().unwrap().is_empty();
         let has_pan_curve = pan_curve.is_some() && !pan_curve.as_ref().unwrap().is_empty();
-        let has_dyn_curve = dyn_curve.is_some() && !dyn_curve.as_ref().unwrap().is_empty();
-        let has_dyn_orig_curve =
-            dyn_orig_curve.is_some() && !dyn_orig_curve.as_ref().unwrap().is_empty();
+        let has_dyn_curve = dyn_curve.as_ref().is_some_and(|c| !c.is_empty());
+        let has_dyn_orig_curve = dyn_orig.as_ref().is_some_and(|c| !c.is_empty());
         // 淡出（端点锁定 + 内容耗尽收缩），语义与 audio_engine/mix.rs 一致：
         // - 末帧进度恰为 1 → 增益精确 0（防 e<1 曲线末端阶跃）；
         // - segment 越界（内容不足）时淡出区间收缩为 [E-N, L]（E=内容末端），
@@ -973,8 +989,8 @@ pub fn render_mixdown_interleaved(
                     }
                     if has_dyn_curve || has_dyn_orig_curve {
                         final_g *= dyn_gain_at_sec(
-                            dyn_curve,
-                            dyn_orig_curve,
+                            dyn_curve.as_deref(),
+                            dyn_orig.as_deref(),
                             abs_sec,
                             dyn_curve_frame_period_ms,
                         );
@@ -1018,8 +1034,8 @@ pub fn render_mixdown_interleaved(
             }
             if has_dyn_curve || has_dyn_orig_curve {
                 final_g *= dyn_gain_at_sec(
-                    dyn_curve,
-                    dyn_orig_curve,
+                    dyn_curve.as_deref(),
+                    dyn_orig.as_deref(),
                     abs_sec,
                     dyn_curve_frame_period_ms,
                 );

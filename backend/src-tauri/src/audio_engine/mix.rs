@@ -163,7 +163,8 @@ fn pan_gains(pan: f32) -> (f32, f32) {
 /// - **原声基线不存在**（分析未就绪）→ 1.0，绝不凭空造增益；
 /// - 原声低于静音下限 → 分母钳到下限，增益**有界**（不放大无内容帧）；衰减/
 ///   静音照常生效（见 `compute_dyn_gain`）；
-/// - 目标为 `DYN_FOLLOW_ORIG` 哨兵 → 1.0。
+/// - 目标为 `DYN_FOLLOW_ORIG` 哨兵 → 1.0（**防御性兜底**：正常路径下曲线已在
+///   装配期解析（见 `resolve_dyn_sentinels_for_audio`），引擎不该再看到哨兵）。
 ///
 /// 采样规则与 volume/pan 完全一致（`sample_automation_curve`，越界钳制到末值），
 /// 保证三者在同一时间轴上对齐。
@@ -1122,6 +1123,114 @@ mod tests {
         assert!((l - 1.0).abs() < 1e-6, "left got {l}");
     }
 
+    /// ★ 相邻点交界咔哒声回归（三类不连续一起钉住）。
+    ///
+    /// 这是最常见的编辑形态（在一条连续曲线的**中途**画一段），因此交界在整条
+    /// 轨道上成对出现。引擎逐 PCM 样本在相邻帧之间线性插值，而存储形态的动态
+    /// 曲线对未画帧存的是 `DYN_FOLLOW_ORIG`（−1）哨兵 —— 一个**非数值**。把它
+    /// 交给插值会制造三类不连续（详见 `resolve_dyn_curves_for_audio`）：
+    ///
+    /// ① 穿过 0 → 掉到静音（0 = 画静音）；② 分子/分母下钳速率不一致 → 先冲高
+    /// 再塌陷；③ 曲线末尾之外回落哨兵 → 增益硬跳（用户报告的"前帧已编辑、后帧
+    /// 未编辑"就是它：动态数组的长度 = 最后写入帧 + 1，笔画结尾的下一帧即数组
+    /// 之外）。
+    ///
+    /// 未解析的曲线必须出现①的跌落（解析存在的理由）；解析后必须：不跌落、
+    /// 过交界**单调**（不得冲高再塌陷）、且正常基线下相邻样本变化极小。
+    #[test]
+    fn dyn_sentinel_boundary_must_stay_continuous() {
+        use crate::renderer::common_params::{resolve_dyn_curves_for_audio, DYN_FOLLOW_ORIG};
+
+        // 44.1 kHz + 5 ms 帧周期 ⇒ 一帧 ≈ 220.5 个样本。
+        let last_sample = 662u64;
+        let gain_at = |clip: &EngineClip, frame: u64| apply_mix_automation(clip, frame, 1.0, 1.0).0;
+        let gains_of = |stored: &[f32], baseline: &[f32]| -> Vec<f32> {
+            let r = resolve_dyn_curves_for_audio(stored, Some(baseline));
+            let clip = clip_with_dyn(Some(r.target), Some(r.baseline));
+            (0..=last_sample).map(|f| gain_at(&clip, f)).collect()
+        };
+
+        // ① 未解析（存储形态直接交给引擎）：出现"掉到静音"的跌落。
+        let raw = clip_with_dyn(Some(vec![0.5, DYN_FOLLOW_ORIG]), Some(vec![0.1, 0.1]));
+        let raw_min = (0..=last_sample)
+            .map(|f| gain_at(&raw, f))
+            .fold(f32::INFINITY, f32::min);
+        assert!(
+            raw_min < 0.05,
+            "未解析的哨兵曲线在交界处本应出现掉音跌落（这正是咔哒声的根因），实测最小增益 {raw_min}"
+        );
+
+        // ② 解析后，交界两侧都必须满足"不跌落 + 单调"。
+        // 覆盖：编辑→未编辑（正常基线）、编辑→未编辑（后帧静音）、
+        //       编辑延续到曲线末尾之外（③的场景）。
+        let cases: Vec<(&str, Vec<f32>, Vec<f32>, bool)> = vec![
+            (
+                "编辑→未编辑（正常基线）",
+                vec![DYN_FOLLOW_ORIG, 0.5, DYN_FOLLOW_ORIG],
+                vec![0.1, 0.1, 0.1],
+                true,
+            ),
+            (
+                "编辑→未编辑（后帧静音）",
+                vec![DYN_FOLLOW_ORIG, 0.5, DYN_FOLLOW_ORIG],
+                vec![0.1, 0.1, 0.0],
+                false,
+            ),
+            (
+                "编辑延到曲线末尾之外",
+                vec![DYN_FOLLOW_ORIG, 0.5],
+                vec![0.1, 0.1],
+                true,
+            ),
+        ];
+        for (label, stored, baseline, expect_smooth) in cases {
+            let gains = gains_of(&stored, &baseline);
+            assert!(
+                (gains[0] - 1.0).abs() < 1e-6,
+                "{label}：未画帧增益仍应为 1，实测 {}",
+                gains[0]
+            );
+            let min_gain = gains.iter().cloned().fold(f32::INFINITY, f32::min);
+            assert!(min_gain > 0.5, "{label}：不得跌落，实测最小增益 {min_gain}");
+            // 编辑收尾段不得"冲高再塌陷"（那是分子/分母下钳折点造成的：
+            // 修复前该段的增益会先多涨 ≈1.0 再在格末崩到 1）。
+            let tail: Vec<f32> = gains[220..=441].to_vec();
+            let tail_max = tail.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            assert!(
+                tail_max <= tail[0] + 0.1,
+                "{label}：收尾不得冲高，起点 {} 峰值 {tail_max}",
+                tail[0]
+            );
+            assert!(
+                (tail[tail.len() - 1] - 1.0).abs() < 1e-3,
+                "{label}：收尾应回到未画帧的增益 1，实测 {}",
+                tail[tail.len() - 1]
+            );
+            if expect_smooth {
+                // 基线正常时，相邻样本的增益变化必须极小（平滑斜坡）。
+                let max_jump = gains
+                    .windows(2)
+                    .map(|p| (p[1] - p[0]).abs())
+                    .fold(0.0f32, f32::max);
+                assert!(
+                    max_jump < 0.05,
+                    "{label}：解析后相邻样本增益变化应极小，实测 {max_jump}"
+                );
+            }
+        }
+
+        // ③ 末尾之外：留的那一格让"编辑收尾"有一格过渡，增益因此不再硬跳。
+        let with_tail = gains_of(&[DYN_FOLLOW_ORIG, 0.5], &[0.1, 0.1]);
+        let jumps_after_end: f32 = with_tail[441..]
+            .windows(2)
+            .map(|p| (p[1] - p[0]).abs())
+            .fold(0.0, f32::max);
+        assert!(
+            jumps_after_end < 0.05,
+            "曲线末尾之外不得出现增益硬跳，实测 {jumps_after_end}"
+        );
+    }
+
     #[test]
     fn dyn_missing_orig_curve_is_unity() {
         // 分析未就绪（无基线）时不得放大：增益必须是 1.0，而不是 目标/兜底。
@@ -1194,4 +1303,5 @@ mod tests {
         let (l, _r) = apply_mix_automation(&clip, (0.0225 * sr as f64) as u64, 1.0, 1.0);
         assert!((l - 1.0).abs() < 1e-6, "越界后不得污染，got {l}");
     }
+
 }

@@ -660,10 +660,30 @@ pub(crate) fn build_snapshot(
                     .map(|curve| std::sync::Arc::new(curve.to_vec()));
                 let pan_curve = crate::pitch_editing::common_pan_curve_for_clip(entry, clip)
                     .map(|curve| std::sync::Arc::new(curve.to_vec()));
-                let dyn_curve = crate::pitch_editing::common_dyn_curve_for_clip(entry, clip)
-                    .map(|curve| std::sync::Arc::new(curve.to_vec()));
-                let dyn_orig_curve = crate::pitch_editing::dyn_orig_curve_for_clip(entry, clip)
-                    .map(|curve| std::sync::Arc::new(curve.to_vec()));
+                let dyn_orig_source = crate::pitch_editing::dyn_orig_curve_for_clip(entry, clip);
+                // 动态曲线/基线必须转成**音频路径形态**再交给引擎：解析「沿用原声」
+                // 哨兵、并与分母同款下钳，否则逐样本插值会在"已画 ↔ 未画"的交界
+                // 制造掉音跌落、增益冲高塌陷与末尾硬跳（三种都表现为咔哒）。
+                // 详见 `resolve_dyn_curves_for_audio`。
+                let (dyn_curve, dyn_orig_curve) =
+                    match crate::pitch_editing::common_dyn_curve_for_clip(entry, clip) {
+                        Some(curve) => {
+                            let resolved =
+                                crate::renderer::common_params::resolve_dyn_curves_for_audio(
+                                    curve,
+                                    dyn_orig_source,
+                                );
+                            (
+                                Some(std::sync::Arc::new(resolved.target)),
+                                // 基线不为空时用装配期的下钳版本；为空表示分析未就绪，
+                                // 此时引擎自己会退回增益 1（保持既有语义）。
+                                (dyn_orig_source.is_some_and(|c| !c.is_empty())
+                                    && !resolved.baseline.is_empty())
+                                .then(|| std::sync::Arc::new(resolved.baseline)),
+                            )
+                        }
+                        None => (None, None),
+                    };
                 Some((
                     volume_curve,
                     frame_period_ms,

@@ -278,6 +278,69 @@ pub(crate) fn compute_dyn_gain(target: f32, orig: f32) -> f32 {
     (target / denom).clamp(0.0, DYN_MAX_GAIN)
 }
 
+/// 音频路径使用的 DYN 曲线对（目标 + 分母），已消除全部"非数值"与下钳折点。
+///
+/// 由 [`resolve_dyn_curves_for_audio`] 产出，两条曲线的帧栅格完全一致。
+pub(crate) struct AudioDynCurves {
+    /// 目标电平：哨兵已解析，长度 = 存储曲线长度 + 1（见下文的"末帧留一格"）。
+    pub(crate) target: Vec<f32>,
+    /// 分母（原声基线）：已下钳到 `DYN_SILENCE_FLOOR`，长度与存储基线相同。
+    pub(crate) baseline: Vec<f32>,
+}
+
+/// 把存储形态的 DYN 曲线/基线转成**音频路径形态**，一次性消除三类增益不连续。
+///
+/// @param dyn_curve 存储的 DYN 曲线（可含哨兵）。
+/// @param orig_curve 原声电平基线；缺省 / 更短时按"该帧基线缺失"处理。
+pub(crate) fn resolve_dyn_curves_for_audio(
+    dyn_curve: &[f32],
+    orig_curve: Option<&[f32]>,
+) -> AudioDynCurves {
+    // 分母侧：**逐帧下钳**。采样器在数组之外持有末值，故"越界帧"的分母正是
+    // 末元素被下钳后的值 —— 与下面末帧留一格的取值同源。
+    let denominator_at = |i: usize| -> f32 {
+        match orig_curve {
+            Some(c) if !c.is_empty() => {
+                let last = c.len() - 1;
+                c.get(i.min(last))
+                    .copied()
+                    .filter(|v| v.is_finite())
+                    .unwrap_or(DYN_SILENCE_FLOOR)
+                    .max(DYN_SILENCE_FLOOR)
+            }
+            _ => DYN_SILENCE_FLOOR,
+        }
+    };
+
+    let mut target = Vec::with_capacity(dyn_curve.len() + 1);
+    for (i, &value) in dyn_curve.iter().enumerate() {
+        // 与显示出口同一判定：`!(is_finite && >= 0)` = 未画（哨兵 / 缺失 / 非法）。
+        if value.is_finite() && value >= 0.0 {
+            target.push(value);
+        } else {
+            target.push(denominator_at(i));
+        }
+    }
+    // 末帧留一格：让"编辑段收尾"有与内部交界等宽的一格过渡（见 ③）。
+    target.push(denominator_at(dyn_curve.len()));
+
+    let baseline = match orig_curve {
+        Some(c) if !c.is_empty() => c
+            .iter()
+            .map(|v| {
+                if v.is_finite() {
+                    v.max(DYN_SILENCE_FLOOR)
+                } else {
+                    DYN_SILENCE_FLOOR
+                }
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+
+    AudioDynCurves { target, baseline }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -431,5 +494,103 @@ mod tests {
         let below_b = compute_dyn_gain(0.0005, 0.0001);
         assert_eq!(below_a, below_b);
         assert!((below_a - 0.0005 / DYN_SILENCE_FLOOR).abs() < 1e-6);
+    }
+
+    // ── 音频路径形态的曲线解析（相邻点咔哒声的修复）─────────────────
+
+    #[test]
+    fn resolve_keeps_edited_frames_and_resolves_unset_ones() {
+        let curve = [DYN_FOLLOW_ORIG, 0.4, DYN_FOLLOW_ORIG, 0.0];
+        let orig = [0.25, 0.25, 0.25, 0.25];
+        let r = resolve_dyn_curves_for_audio(&curve, Some(&orig));
+        // 目标长度 = 存储长度 + 1（末帧留一格缓冲，见函数说明 ③）。
+        assert_eq!(r.target.len(), curve.len() + 1);
+        assert_eq!(r.baseline.len(), orig.len());
+        // 已画帧逐值不变（含"画静音"的 0 —— 那是显式目标，不是哨兵）。
+        assert_eq!(r.target[1], 0.4);
+        assert_eq!(r.target[3], 0.0);
+        // 未画帧解析成该帧基线。
+        assert_eq!(r.target[0], 0.25);
+        assert_eq!(r.target[2], 0.25);
+        // 解析后不含负值 —— 逐样本插值不可能穿过 0。
+        assert!(r.target.iter().all(|v| *v >= 0.0));
+    }
+
+    #[test]
+    fn resolve_appends_one_frame_so_the_trailing_edge_ramps() {
+        // 末尾留的一格取"该处分母"（基线之外按持有末值处理），于是编辑段收尾
+        // 与内部交界等宽 —— 否则增益会从 T/原声 一步跳到 1（实测跳变 4.0）。
+        let curve = [DYN_FOLLOW_ORIG, 0.5];
+        let orig = [0.1, 0.1];
+        let r = resolve_dyn_curves_for_audio(&curve, Some(&orig));
+        assert_eq!(r.target.len(), 3);
+        assert_eq!(r.target[2], 0.1);
+        // 基线更短时，越界帧按持有末值（与采样器一致）：留的那一格取基线末值。
+        let r2 = resolve_dyn_curves_for_audio(&curve, Some(&[0.2]));
+        assert_eq!(r2.target[0], 0.2); // 未画帧 → 基线
+        assert_eq!(r2.target[1], 0.5); // 已画帧 → 逐值不变
+        assert_eq!(r2.target[2], 0.2); // 末帧留一格 → 该处分母（持有末值）
+    }
+
+    #[test]
+    fn resolve_floors_the_denominator_to_remove_the_kink() {
+        // 分母在装配期下钳：安静帧的基线不再让"目标/分母"在格内先冲高再塌陷。
+        let curve = [0.5, DYN_FOLLOW_ORIG];
+        let orig = [0.1, 0.0];
+        let r = resolve_dyn_curves_for_audio(&curve, Some(&orig));
+        assert_eq!(r.baseline[1], DYN_SILENCE_FLOOR);
+        // 未画帧的解析值 == 同下标的分母值 ⇒ 该格内比值处处为 1 的起点。
+        assert_eq!(r.target[1], r.baseline[1]);
+        // 下钳对整帧增益逐值无损：与 `compute_dyn_gain` 内建的下钳等价。
+        assert_eq!(
+            compute_dyn_gain(0.5, r.baseline[0]),
+            compute_dyn_gain(0.5, orig[0])
+        );
+    }
+
+    #[test]
+    fn resolve_yields_unity_gain_for_unset_frames() {
+        // 关键性质：解析**不改变**未画帧的实际增益（恒为 1），只改变插值表现。
+        for baseline in [1.0f32, 0.25, 0.0005, 0.0, f32::NAN] {
+            let curve = [DYN_FOLLOW_ORIG];
+            let orig = [baseline];
+            let r = resolve_dyn_curves_for_audio(&curve, Some(&orig));
+            let denom = if baseline.is_finite() && baseline > 0.0 {
+                baseline
+            } else {
+                0.0 // 采样器对无数据帧的取值；`compute_dyn_gain` 会再钳到下限。
+            };
+            let gain = compute_dyn_gain(r.target[0], denom);
+            assert!(
+                (gain - 1.0).abs() < 1e-6,
+                "基线 {baseline} 时未画帧增益应为 1，实测 {gain}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_handles_missing_and_short_baseline() {
+        let curve = [DYN_FOLLOW_ORIG, DYN_FOLLOW_ORIG, DYN_FOLLOW_ORIG];
+        let r_none = resolve_dyn_curves_for_audio(&curve, None);
+        assert!(r_none.target.iter().all(|v| *v == DYN_SILENCE_FLOOR));
+        assert!(r_none.baseline.is_empty());
+        let r_short = resolve_dyn_curves_for_audio(&curve, Some(&[0.5]));
+        assert_eq!(r_short.target[0], 0.5);
+        // 越界帧按持有末值（与采样器一致），而不是回落到下限。
+        assert_eq!(r_short.target[1], 0.5);
+        assert_eq!(r_short.target[2], 0.5);
+        assert_eq!(r_short.target[3], 0.5);
+    }
+
+    #[test]
+    fn resolve_treats_non_finite_as_unset() {
+        // 非有限值在采样器里会让整段插值变成 NaN（增益恒 1）—— 与"未画"同义，
+        // 故一并解析成基线，避免 NaN 污染相邻样本的斜坡。
+        let curve = [f32::NAN, f32::INFINITY, 0.3];
+        let orig = [0.2, 0.2, 0.2];
+        let r = resolve_dyn_curves_for_audio(&curve, Some(&orig));
+        assert_eq!(r.target[0], 0.2);
+        assert_eq!(r.target[1], 0.2);
+        assert_eq!(r.target[2], 0.3);
     }
 }

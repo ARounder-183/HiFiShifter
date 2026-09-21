@@ -237,9 +237,13 @@ pub(crate) fn common_pan_curve_for_clip<'a>(
 
 /// 共通动态曲线（DYN，用户绘制的**目标电平**）。
 ///
-/// 曲线里可能出现 `DYN_FOLLOW_ORIG`（−1）哨兵帧，表示「该帧沿用原声电平」；
-/// 消费方必须经 [`crate::renderer::common_params::compute_dyn_gain`] 求增益，
-/// 不要直接把它当倍率相乘。
+/// 曲线里可能出现 `DYN_FOLLOW_ORIG`（−1）哨兵帧，表示「该帧沿用原声电平」。
+///
+/// ⚠ 这里返回的是**存储形态**（含哨兵）。**音频路径**（实时引擎 / 离线导出）
+/// 在装配 clip 时必须先经
+/// [`crate::renderer::common_params::resolve_dyn_sentinels_for_audio`] 把哨兵
+/// 解析成真实目标电平 —— 逐样本插值穿过负哨兵会掉到静音（咔哒）。
+/// 显示路径在 `get_param_frames` 出口自行解析，两者语义一致。
 pub(crate) fn common_dyn_curve_for_clip<'a>(
     entry: &'a crate::state::TrackParamsState,
     clip: &'a crate::state::Clip,

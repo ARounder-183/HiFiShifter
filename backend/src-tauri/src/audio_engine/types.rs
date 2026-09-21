@@ -138,7 +138,11 @@ pub(crate) struct EngineClip {
 
     /// 可选的动态（DYN）目标电平曲线；与 `dyn_orig_curve` 一起在 audio callback /
     /// mixdown 中求出逐帧增益 `目标/原声`（见 `common_params::compute_dyn_gain`）。
-    /// 曲线内的 `DYN_FOLLOW_ORIG`（−1）哨兵帧表示"沿用原声"。
+    ///
+    /// **进入引擎前哨兵已被解析成真实目标电平**
+    /// （`common_params::resolve_dyn_sentinels_for_audio`）：引擎逐 PCM 样本在
+    /// 相邻帧之间插值，含负哨兵的曲线会在"哨兵 ↔ 已画"交界扫过 0（0 = 画静音），
+    /// 产生一帧宽的掉音跌落。解析后本曲线不再含负值，未画帧的增益仍恒为 1。
     pub(crate) dyn_curve: Option<Arc<Vec<f32>>>,
     /// 原声电平基线（轨道级派生数据）。缺失（None 或空）时动态增益恒为 1.0。
     pub(crate) dyn_orig_curve: Option<Arc<Vec<f32>>>,
