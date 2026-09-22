@@ -1550,6 +1550,7 @@ export const jaJP = {
     history_op_edit_tempo: "テンポ / テンポマップを変更",
     history_op_edit_project_settings: "プロジェクト設定を変更",
     history_op_import_project: "プロジェクトをインポート",
+    history_op_edit_notes: "ノートブックを編集",
     history_op_param_curve: "パラメータカーブを編集",
     history_op_param_restore: "パラメータカーブを初期化",
     history_op_param_static: "静的パラメータを編集",

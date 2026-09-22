@@ -1716,6 +1716,8 @@ pub enum HistoryOp {
     EditTempo,
     EditProjectSettings,
     ImportProject,
+    /// 编辑记事本（工程备注）。
+    EditNotes,
     // ── 参数 / MIDI ──
     ParamCurve,
     ParamRestore,
@@ -1770,6 +1772,7 @@ impl HistoryOp {
             HistoryOp::EditTempo => "edit_tempo",
             HistoryOp::EditProjectSettings => "edit_project_settings",
             HistoryOp::ImportProject => "import_project",
+            HistoryOp::EditNotes => "edit_notes",
             HistoryOp::ParamCurve => "param_curve",
             HistoryOp::ParamRestore => "param_restore",
             HistoryOp::ParamStatic => "param_static",
@@ -1797,6 +1800,17 @@ pub struct HistoryRecord {
     /// 就是实时时间线本身，无需再克隆一份；离开该位置（打点 / 跳转）时用
     /// 实时时间线补齐。其余位置的记录必然持有快照。
     pub state: Option<TimelineState>,
+    /// 该状态下的记事本内容。
+    ///
+    /// 记事本不在 `TimelineState` 里（它在 `ProjectState`），因此必须随快照
+    /// 一起记录，否则撤销/重做无从恢复它 —— 早期实现正是没有这层记录，
+    /// 前端只能拿"后端当前值"覆盖，于是"记事本有内容时，为任意操作执行
+    /// 撤销都会清空它"。
+    ///
+    /// **打点时补齐**：新记录的该项为 `None`，在离开该位置（下一次打点 /
+    /// 跳转）时用**当时的**记事本补齐 —— 那一刻它就是状态 N 的记事本。
+    /// 于是每一条记录都携带自己那个状态的记事本，撤销/重做只需无脑套用。
+    pub notes_markdown: Option<String>,
 }
 
 /// 撤销历史：一条线性的「状态链」+ 当前位置。
@@ -3240,8 +3254,39 @@ impl AppState {
         self.push_checkpoint(snapshot, op.key().to_string());
     }
 
-    /// 打点的公共实现（`op` 为语言无关的操作 key，见 HistoryOp）。
+    /// 当前记事本内容（`ProjectState.notes_markdown` 的读取封装）。
+    fn current_notes_markdown(&self) -> Option<String> {
+        Some(self.current_notes_value())
+    }
+
+    /// 读取当前记事本内容（空填空串）。
+    pub(crate) fn current_notes_value(&self) -> String {
+        let p = self.project.lock().unwrap_or_else(|e| e.into_inner());
+        p.notes_markdown.clone()
+    }
+
+    /// 写入记事本内容（不触碰历史，供跳转路径恢复用）。
+    fn apply_notes_markdown(&self, markdown: String) {
+        let mut p = self.project.lock().unwrap_or_else(|e| e.into_inner());
+        p.notes_markdown = markdown;
+    }
+
+    /// 打点的公共实现：与记事本无关的改动（绝大多数操作）。
     fn push_checkpoint(&self, snapshot: &TimelineState, label: String) {
+        self.push_checkpoint_with_notes(snapshot, label, None);
+    }
+
+    /// 打点的公共实现（`op` 为语言无关的操作 key，见 HistoryOp）。
+    ///
+    /// `notes_markdown`：`Some(..)` 表示**本次操作之前的记事本内容** —— 它
+    /// 就是即将被打点的那个状态（state N）的记事本，因此记在**旧记录**上。
+    /// 传 `None` 表示"用现场值补齐"，绝大多数非记事本操作走这一条。
+    fn push_checkpoint_with_notes(
+        &self,
+        snapshot: &TimelineState,
+        label: String,
+        notes_markdown: Option<String>,
+    ) {
         // When suppress_checkpoints is active (inside an undo group),
         // skip pushing to the undo stack so multiple operations become
         // a single undo entry.
@@ -3269,6 +3314,7 @@ impl AppState {
                     label: None,
                     at_ms: started_at_ms,
                     state: Some(snapshot.clone()),
+                    notes_markdown: notes_markdown.or_else(|| self.current_notes_markdown()),
                 });
                 h.position = 0;
             } else {
@@ -3277,8 +3323,17 @@ impl AppState {
                 h.records.truncate(position + 1);
                 // 当前位置的记录是占位（None）：用实时时间线补齐 —— 它此刻
                 // 正是这个状态本身，之后跳回该位置要靠这份快照。
+                //
+                // 记事本同理：本步**离开**的那个状态，其记事本内容就是即将
+                // 被这次操作改掉之前的值。显式取 `notes_markdown` 入参（记事本
+                // 编辑路径传入"编辑前"的文本）而不依赖"调用方还没写新值"的
+                // 时序 —— 后者一旦被重构打乱，撤销就会静默丢内容。
                 if let Some(current) = h.records.get_mut(position) {
                     current.state = Some(snapshot.clone());
+                    if current.notes_markdown.is_none() {
+                        current.notes_markdown =
+                            notes_markdown.or_else(|| self.current_notes_markdown());
+                    }
                 }
             }
             // 追加这一步：label/at 描述紧随其后的操作，快照留待下一次
@@ -3287,6 +3342,7 @@ impl AppState {
                 label: Some(label),
                 at_ms: now,
                 state: None,
+                notes_markdown: None,
             });
             h.position = h.records.len() - 1;
             // 上限：丢最旧的状态（当前位置随之左移）。
@@ -3434,6 +3490,64 @@ impl AppState {
         serde_json::json!({ "ok": true })
     }
 
+    /// 写入记事本内容，并保证撤销栈里始终只有**一步**「编辑记事本」。
+    ///
+    /// ## 合并规则（结构化，与时间无关）
+    ///
+    /// 历史最前沿一步的 key 就是「编辑记事本」时，本次写入**并入该步**：
+    /// 不打新点、只更新 `ProjectState.notes_markdown`。这条步的快照（时间线 +
+    /// 记事本）由既有的惰性补齐机制在下一次打点/跳转时用实时状态填上，撤销
+    /// 回它之前的那一步就是整段编辑开始前的样子。
+    ///
+    /// 只有**其它操作介入**（剪辑、参数、导入…任何会 `push_checkpoint` 的路径）
+    /// 或**历史跳转**离开前沿时，这一步才落定；之后的记事本输入再开新步。
+    ///
+    /// 【为什么不用时间窗口】早期实现靠前端 700ms 停手超时 + 失焦来"收尾"，
+    /// 用户只要停顿超过阈值（思考、看内容、切窗口查资料）就被切成新的一步，
+    /// 一场长编辑会话能产生几十上百条「编辑记事本」记录——既撤不回编辑前的
+    /// 状态，还会把真正的剪辑/参数历史挤出 `MAX_UNDO_HISTORY` 上限。结构化
+    /// 合并完全不看时间：连续写记事本=一步，被别的操作打断=另起一步，语义
+    /// 与「拖拽参数线」等手势类操作一致，且不需要前后端协商任何开窗/收尾
+    /// 时序（前端只管发文本）。
+    ///
+    /// 记事本不在时间线上，所以这一步**不**触发音频/合成层的任何失效。
+    pub fn set_notes_markdown(&self, markdown: String) {
+        // 判定"前沿是否已是记事本步"必须在打点之前：`push_checkpoint_*` 会
+        // 追加新记录，读时就分不清了。
+        let merged_into_existing = self.history_top_is_notes_edit();
+        if !merged_into_existing {
+            let before = self.current_notes_markdown();
+            let tl = self.timeline.lock().unwrap_or_else(|e| e.into_inner());
+            self.push_checkpoint_with_notes(
+                &tl,
+                HistoryOp::EditNotes.key().to_string(),
+                before,
+            );
+        }
+        let mut p = self.project.lock().unwrap_or_else(|e| e.into_inner());
+        if p.notes_markdown != markdown {
+            p.notes_markdown = markdown;
+            p.dirty = true;
+        }
+        self.emit_history_state();
+    }
+
+    /// 历史最前沿的一步是否是「编辑记事本」。
+    ///
+    /// 仅当该步**就是当前所处位置**（打点后位置恒指向它）且 label 匹配时为
+    /// 真。历史为空 / 前沿是初始状态行 / 已跳转离开（此时前沿 label 是其它
+    /// 操作或 None）均为假。
+    fn history_top_is_notes_edit(&self) -> bool {
+        let h = self
+            .timeline_history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        h.records
+            .get(h.position)
+            .and_then(|record| record.label.as_deref())
+            == Some(HistoryOp::EditNotes.key())
+    }
+
     /// 撤销一步（跳到当前位置之前）。
     pub fn undo_timeline(&self) -> TimelineStatePayload {
         let target = self.history_position().saturating_sub(1);
@@ -3472,6 +3586,11 @@ impl AppState {
         let current_position = h.position;
         if let Some(current) = h.records.get_mut(current_position) {
             current.state = Some(tl.clone());
+            // 当前位置若还不知道自己的记事本内容，此刻的现场值就是它的值 ——
+            // 之后从这里再往前跳时，记事本才能正确回到这一步的样子。
+            if current.notes_markdown.is_none() {
+                current.notes_markdown = Some(self.current_notes_value());
+            }
         }
         let Some(next_state) = h.records.get(target).and_then(|r| r.state.clone()) else {
             // 目标记录尚未补齐（理论上不可达：非当前位置的记录在离开时即已
@@ -3488,6 +3607,15 @@ impl AppState {
         let scale_before = tl.render_scale_signature();
         *tl = next_state;
         h.position = target;
+        // 记事本：跳转恢复目标记录的快照时连带恢复它记录的记事本内容
+        // （HistoryRecord.notes_markdown 在离开每一步时惰性补齐，见下）。
+        // 早期实现在每次撤销都用后端"当前值"覆盖前端，于是"记事本有内容时，
+        // 为任意操作执行撤销都会清空记事本"；改为每步各自记录后，撤销/重做
+        // 跨过记事本编辑就能正确回到该步的内容。
+        let target_notes = h.records.get(target).and_then(|r| r.notes_markdown.clone());
+        if let Some(notes) = target_notes.clone() {
+            self.apply_notes_markdown(notes);
+        }
         let (undo_depth, redo_depth) = history_depths_of(&h);
         drop(h);
         self.bump_timeline_version();
@@ -3509,6 +3637,8 @@ impl AppState {
         payload.project = Some(self.project_meta_payload());
         payload.undo_depth = Some(undo_depth);
         payload.redo_depth = Some(redo_depth);
+        // 回给前端：跨过记事本编辑则带上该步的记事本，否则留 None 让前端保留现场。
+        payload.notes_markdown = target_notes;
         payload
     }
 
@@ -3619,6 +3749,87 @@ mod tests {
     /// 无 per-test 作用域，并行测试会互相踩踏（一个测试把开关改回 true 时，
     /// 另一个正在断言“关闭同步”行为的测试就会读到错误的值）。
     static SYNC_EDITS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// 记事本必须能被撤销/重做恢复，且**与记事本无关的撤销不得清空它**。
+    ///
+    /// 回归对象 1：早期实现里记事本只存在前端、后端只在保存时看到它，于是
+    /// 「记事本有内容时，为任意操作执行撤销都会清空记事本」。
+    ///
+    /// 回归对象 2：合并曾靠前端 700ms 停手超时，长编辑会话（停顿 > 阈值）
+    /// 会产生大量「编辑记事本」记录，既撤不回编辑前状态、还会把其它操作的
+    /// 历史挤出撤销栈上限。现在合并在后端按**历史结构**进行：前沿一步就是
+    /// 「编辑记事本」时，后续写入无限并入 —— 只有其它操作介入或跳转离开
+    /// 才落定。时间完全不参与。
+    #[test]
+    fn notes_edit_is_recorded_in_history_and_kept_across_other_undos() {
+        let state = AppState::default();
+        assert_eq!(state.current_notes_value(), "");
+
+        // 一段连续输入：任意多次调用（间隔长短无关——合并不看时间）只产生
+        // **一个**撤销步。停顿用例刻意不引入 sleep：结构化合并在逻辑上就
+        // 不可能因停顿分裂，sleep 只会拖慢测试。
+        for (index, next) in ["H", "He", "Hel", "Hello, wor", "Hello, world!"]
+            .iter()
+            .enumerate()
+        {
+            state.set_notes_markdown(next.to_string());
+            let (undo_depth, _) = state.history_depths();
+            assert_eq!(undo_depth, 1, "第 {index} 次写入后仍必须只有一步");
+        }
+        assert_eq!(state.current_notes_value(), "Hello, world!");
+
+        // 再来一个**非记事本**操作：移动 clip。它必须正常落定记事本步、
+        // 另起新步 —— 这是"合并被其它操作打断"的断言。
+        {
+            let mut tl = state.timeline.lock().unwrap();
+            let track_id = tl.tracks[0].id.clone();
+            let clip_id = tl.add_clip(Some(track_id), None, Some(0.0), Some(1.0), None);
+            drop(tl);
+            let prev_sec = find_clip_start(&state.timeline.lock().unwrap(), &clip_id);
+            let mut tl = state.timeline.lock().unwrap();
+            state.checkpoint_timeline(&tl, HistoryOp::MoveClip);
+            tl.clips
+                .iter_mut()
+                .find(|clip| clip.id == clip_id)
+                .unwrap()
+                .start_sec = prev_sec + 5.0;
+        }
+        let (undo_depth, _) = state.history_depths();
+        assert_eq!(undo_depth, 2, "其它操作必须另起一步");
+
+        // 其它操作介入后，记事本输入再开**新的一步**（前一步已落定）。
+        state.set_notes_markdown("Hello, world! -- second session".to_string());
+        let (undo_depth, _) = state.history_depths();
+        assert_eq!(undo_depth, 3);
+
+        // 撤销第二次记事本会话：回到第一会话结束时的内容。
+        let payload = state.undo_timeline();
+        assert!(payload.ok);
+        assert_eq!(payload.notes_markdown, Some("Hello, world!".to_string()));
+        assert_eq!(state.current_notes_value(), "Hello, world!");
+
+        // 撤销 clip 移动：记事本原样保留（回归对象 1 的核心断言）。
+        let payload = state.undo_timeline();
+        assert!(payload.ok);
+        assert_eq!(
+            state.current_notes_value(),
+            "Hello, world!",
+            "无关操作的撤销清空了记事本 —— 回归"
+        );
+
+        // 再撤销一步 = 跨过第一段记事本编辑：恢复到编辑**开始之前**的内容。
+        // 整段长会话（5 次写入）只占这一步 —— 撤销一次即回到编辑前状态。
+        let payload = state.undo_timeline();
+        assert!(payload.ok);
+        assert_eq!(payload.notes_markdown, Some(String::new()));
+        assert_eq!(state.current_notes_value(), "");
+
+        // 重做：记事本回到编辑后的内容。
+        let payload = state.redo_timeline();
+        assert!(payload.ok);
+        assert_eq!(payload.notes_markdown, Some("Hello, world!".to_string()));
+        assert_eq!(state.current_notes_value(), "Hello, world!");
+    }
 
     fn find_clip_start(timeline: &TimelineState, clip_id: &str) -> f64 {
         timeline
@@ -6951,6 +7162,7 @@ impl TimelineState {
             // TimelineState 本身不持有历史，通用载荷保持 None。
             undo_depth: None,
             redo_depth: None,
+            notes_markdown: None,
         }
     }
 
@@ -7042,6 +7254,7 @@ impl TimelineState {
             // TimelineState 本身不持有历史，通用载荷保持 None。
             undo_depth: None,
             redo_depth: None,
+            notes_markdown: None,
         }
     }
 

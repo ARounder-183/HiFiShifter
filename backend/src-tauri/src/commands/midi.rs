@@ -31,6 +31,7 @@ fn error_payload(error: &str) -> crate::models::TimelineStatePayload {
         tempo_map: None,
         undo_depth: None,
         redo_depth: None,
+        notes_markdown: None,
     }
 }
 

@@ -462,6 +462,9 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
                 hifiganMelStretchOverride: args[1],
             };
 
+        case "set_project_notes":
+            return { notesMarkdown: args[0] };
+
         case "save_project":
             return args[0] === undefined ? undefined : { notesMarkdown: args[0] };
 

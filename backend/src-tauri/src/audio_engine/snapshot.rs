@@ -247,6 +247,9 @@ pub(crate) fn build_snapshot(
     let track_gain = compute_track_gains(&timeline.tracks);
     let tracks_by_id: HashMap<&str, &Track> =
         timeline.tracks.iter().map(|t| (t.id.as_str(), t)).collect();
+    // 生效音阶签名：必须与渲染线程的按键口径一致（它遍历 Tempo Map，故在
+    // 循环外算一次），否则快照自行算出的哈希永远对不上渲染线程写入的键。
+    let scale_signature = timeline.render_scale_signature();
 
     // 预分配内存
     let mut clips_out: Vec<EngineClip> = Vec::with_capacity(timeline.clips.len());
@@ -768,6 +771,17 @@ pub(crate) fn build_snapshot(
                                     .as_ref()
                                     .filter(|params| params.enabled),
                                 input_pitch_curve: None,
+                                // 与 `commands::playback::build_rendered_hash_input`
+                                // 同一口径：Compose 开关与生效音阶都会改变渲染输出。
+                                compose_enabled: root_track_id
+                                    .as_ref()
+                                    .and_then(|root| {
+                                        timeline.tracks.iter().find(|t| &t.id == root)
+                                    })
+                                    .map(|t| t.compose_enabled)
+                                    .unwrap_or(false),
+                                scale_signature: scale_signature.as_str(),
+                                source_file_size: clip.source_file_size,
                             },
                         );
                         if debug {
@@ -902,6 +916,7 @@ pub(crate) fn build_snapshot(
                                 fallback_pcm = crate::synth_clip_cache::get_latest_tension_rendered_pcm(
                                     &clip.id,
                                     clip.active_take_id.as_deref(),
+                                    Some(length_frames),
                                 );
                             }
 
@@ -909,6 +924,7 @@ pub(crate) fn build_snapshot(
                                 if let Some((p, b)) = crate::synth_clip_cache::get_latest_rendered_pcm(
                                     &clip.id,
                                     clip.active_take_id.as_deref(),
+                                    Some(length_frames),
                                 ) {
                                     fallback_pcm = Some(p);
                                     fallback_breath = b;

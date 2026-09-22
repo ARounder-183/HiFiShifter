@@ -402,6 +402,15 @@ pub struct TimelineStatePayload {
     /// 重做栈深度（当前可重做的步数）。语义同 `undo_depth`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redo_depth: Option<usize>,
+
+    /// 撤销/重做目标那一步的记事本内容。
+    ///
+    /// 记事本不在 `TimelineState` 里（它在 `ProjectState`），所以必须单独
+    /// 带回，否则前端无从恢复它。`None`（与记事本无关的响应）表示前端沿用
+    /// 现有值。只有 `undo_timeline` / `redo_timeline` /
+    /// `set_history_position` 会填它。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes_markdown: Option<String>,
 }
 
 /// `open_project` 的返回载荷。

@@ -1182,9 +1182,24 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
                         // - duration_frames / source_sample_rate：文件长度或采样率变化
                         // - source_file_mtime：文件修改时间变化（最可靠的检测信号，
                         //   replace_clip_sources 每次都会更新此字段，即使文件长度未变也能检测到替换）
+                        // clip 在时间轴上的位置改变同样改变渲染窗口：`start_frame`
+                        // 参与按键、且 pitch 曲线窗口随之平移。漏掉这一项会让
+                        // 移动后的精确键 miss，而 miss 又会退回"同 clip_id 的最近
+                        // 一次渲染"垫音 —— 播的正是移动前那个窗口的 PCM。
+                        || (old.start_sec - clip.start_sec).abs() > 1e-9
+                        || (old.length_sec - clip.length_sec).abs() > 1e-6
                         || old.duration_frames != clip.duration_frames
                         || old.source_sample_rate != clip.source_sample_rate
                         || old.source_file_mtime != clip.source_file_mtime
+                        || old.active_take_id != clip.active_take_id
+                        || old.source_file_fingerprint != clip.source_file_fingerprint
+                        // Clip 级覆盖率（extra_curves / extra_params）走
+                        // `unwrap_or(&track)` 的二选一语义：它的出现/消失会让
+                        // 整份 track 级参数被替换，而 track 参数本身毫无变化 ——
+                        // 不比对就会拿着旧的有效参数继续命中缓存。
+                        || old.extra_curves != clip.extra_curves
+                        || old.extra_params != clip.extra_params
+                        || old.formant_morph != clip.formant_morph
                 })
                 .unwrap_or(false);
 

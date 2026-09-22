@@ -117,6 +117,17 @@ export const projectApi = {
 
     newProject: () => invoke<TimelineResult>("new_project"),
 
+    /**
+     * 写入记事本内容：后端把它登记为撤销操作。连续写入在后端按**历史结构**
+     * 合并（前沿一步本身就是「编辑记事本」则并入，直到其它操作介入），
+     * 不依赖前端任何开窗/收尾时序。
+     */
+    setProjectNotes: (notesMarkdown: string) =>
+        invoke<{ ok: boolean; project?: { notes_markdown?: string } }>(
+            "set_project_notes",
+            notesMarkdown,
+        ),
+
     openProjectDialog: () =>
         invoke<{ ok: boolean; canceled?: boolean; path?: string }>("open_project_dialog"),
 

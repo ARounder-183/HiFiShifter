@@ -385,6 +385,8 @@ fn build_rendered_hash_input<'a>(
     renderer_id: &'a str,
     sr: u32,
     input_pitch_curve: Option<&'a [f32]>,
+    compose_enabled: bool,
+    scale_signature: &'a str,
 ) -> crate::synth_clip_cache::RenderedClipHashInput<'a> {
     let start_frame = (clip.start_sec.max(0.0) * sr as f64).round() as u64;
     let end_frame =
@@ -415,6 +417,9 @@ fn build_rendered_hash_input<'a>(
         extra_params: &entry.extra_params,
         formant_morph: clip.formant_morph.as_ref().filter(|params| params.enabled),
         input_pitch_curve,
+        compose_enabled,
+        scale_signature,
+        source_file_size: clip.source_file_size,
     }
 }
 
@@ -440,6 +445,8 @@ fn collect_clips_needing_render(
     // 预构建轨道的 O(1) 查找表，消除内部的 O(N) 线性扫描
     let tracks_by_id: std::collections::HashMap<&str, &crate::state::Track> =
         timeline.tracks.iter().map(|t| (t.id.as_str(), t)).collect();
+    // 生效音阶签名在整个收集过程中不变，只需算一次（它遍历 Tempo Map）。
+    let scale_signature = timeline.render_scale_signature();
 
     for clip in &timeline.clips {
         if clip.muted {
@@ -474,7 +481,15 @@ fn collect_clips_needing_render(
         let renderer_id = crate::renderer::get_renderer(kind).id();
 
         // 渲染参数哈希：与渲染线程、快照回退共用同一份输入口径。
-        let hash_input = build_rendered_hash_input(clip, entry, renderer_id, sr, None);
+        let hash_input = build_rendered_hash_input(
+            clip,
+            entry,
+            renderer_id,
+            sr,
+            None,
+            track.compose_enabled,
+            scale_signature.as_str(),
+        );
         let param_hash = crate::synth_clip_cache::compute_rendered_clip_hash(&hash_input);
         let cache_key = crate::synth_clip_cache::RenderedClipCacheKey {
             clip_id: clip.id.clone(),
@@ -853,8 +868,16 @@ fn render_single_clip(
                 let kind =
                     crate::state::SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo);
                 let renderer_id = crate::renderer::get_renderer(kind).id();
-                let hash_input =
-                    build_rendered_hash_input(clip, entry, renderer_id, out_rate, None);
+                let scale_signature = timeline.render_scale_signature();
+                let hash_input = build_rendered_hash_input(
+                    clip,
+                    entry,
+                    renderer_id,
+                    out_rate,
+                    None,
+                    track.compose_enabled,
+                    scale_signature.as_str(),
+                );
                 let param_hash = crate::synth_clip_cache::compute_breath_noise_hash(&hash_input);
                 Some(crate::synth_clip_cache::BreathNoiseCacheKey {
                     clip_id: clip.id.clone(),

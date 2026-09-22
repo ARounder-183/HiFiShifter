@@ -578,6 +578,7 @@ pub fn run() {
             commands::open_project,
             commands::import_project_dialog,
             commands::import_project,
+            commands::set_project_notes,
             commands::save_project,
             commands::save_project_as,
             commands::save_project_to_path,

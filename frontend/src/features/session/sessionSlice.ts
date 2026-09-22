@@ -1810,10 +1810,26 @@ function applyTimelineState(
             path: project.path === undefined ? state.project.path : (project.path ?? null),
             dirty: Boolean(project.dirty),
             recent: Array.isArray(project.recent) ? project.recent : state.project.recent,
+            // 记事本：只有**该步本身是记事本编辑**时后端才会带回文本。
+            //
+            // 早期实现在每次撤销/重做都用 `project.notes_markdown` 覆盖前端值，
+            // 而后端只在保存时才看到记事本 —— 于是"记事本有内容时为任意操作
+            // 撤销都会清空它"。现在后端在 `HistoryRecord` 上记录了每步的记事
+            // 本（`None` = 与记事本无关的一步），撤销/重做据此**只在确实跨过
+            // 记事本编辑时才改**。
+            //
+            // 不跨记事本编辑时保留前端现场值：那正是用户正在编辑的内容。
             notesMarkdown:
-                opts?.preserveProjectNotes === false
-                    ? String(project.notes_markdown ?? "")
-                    : state.project.notesMarkdown,
+                // 撤销/重做时后端在载荷顶层带回**目标那一步**的记事本内容
+                // （后端把它记在 HistoryRecord 上）。没有带回就绝不覆盖前端
+                // 现场值 —— 早期实现一律用 `project.notes_markdown` 覆盖，
+                // 而后端只在保存时看到记事本，于是"记事本有内容时为任意操作
+                // 撤销都会清空它"。
+                typeof timeline.notes_markdown === "string"
+                    ? timeline.notes_markdown
+                    : opts?.preserveProjectNotes === false
+                      ? String(project.notes_markdown ?? "")
+                      : state.project.notesMarkdown,
             baseScale: nextBaseScale,
             useCustomScale: Boolean(project.use_custom_scale),
             customScale: project.custom_scale

@@ -152,6 +152,7 @@ export const enUS = {
     history_op_edit_tempo: "Change tempo / tempo map",
     history_op_edit_project_settings: "Change project settings",
     history_op_import_project: "Import project",
+    history_op_edit_notes: "Edit notebook",
     history_op_param_curve: "Edit parameter curve",
     history_op_param_restore: "Reset parameter curve",
     history_op_param_static: "Edit static parameter",

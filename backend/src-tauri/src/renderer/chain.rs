@@ -379,9 +379,14 @@ impl HiFiGanStage {
 
         let breath_curve = cc.extra_curves.get("breath_gain").map(|v| v.as_slice());
 
-        // Fast path: if breath_gain is uniformly zero (e.g. when computing harmonic_only
-        // for BreathNoiseCache), skip noise mixing entirely and return processed_harmonic.
-        let gain_is_zero = breath_curve.map_or(true, |c| {
+        // Fast path: only when a curve is present **and** uniformly zero (e.g. when
+        // computing harmonic_only for BreathNoiseCache) can we skip noise mixing.
+        //
+        // 曲线**缺失**必须走混合路径：`breath_gain` 的描述符默认值是 1.0，未绘制
+        // 参数线即"整体使用默认增益"，而预览路径的 breath stem 也是按默认 1.0 混入
+        // 的（见 `audio_engine/mix.rs`）。此处若把缺失当成 0 直接返回谐波，导出就
+        // 会丢掉整条气声 —— 预览正常、导出无气声正是这个分支造成的。
+        let gain_is_zero = breath_curve.map_or(false, |c| {
             c.is_empty() || c.iter().all(|&v| v.abs() < f32::EPSILON)
         });
         if gain_is_zero {

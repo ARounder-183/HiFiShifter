@@ -64,6 +64,7 @@ import {
     projectClipboardPreviewPoints,
     projectCurvePoints,
     projectDetectedCurvePoints,
+    type CurvePoint,
 } from "../scene/curvePoints";
 import { CLIP_INSTANCE_FLOATS, writeFlatInstance } from "../../../renderKernel/gl/instanceLayout";
 import { createSdfBoxProgram, type SdfBoxProgram } from "../../../renderKernel/gl/sdfBoxProgram";
@@ -981,34 +982,45 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             // 三种投影的时间基准不同（见 `PianoRollCurveLayer.projection` 说明）：
             // 检测曲线自带绝对起始秒且要跳无声帧，剪贴板预览锚定选区起点，
             // 其余按 `startFrame + i × stride`。混用会造成平移或尖刺。
-            const points =
-                layer.projection === "detected"
-                    ? projectDetectedCurvePoints({
-                          midiCurve: layer.values,
-                          curveStartSec: layer.curveStartSec ?? 0,
-                          framePeriodMs: layer.framePeriodMs,
-                          axis,
-                          valueToY,
-                      })
-                    : layer.projection === "clipboard"
-                      ? projectClipboardPreviewPoints({
-                            values: layer.values,
-                            param: layer.param,
-                            framePeriodMs: layer.framePeriodMs,
-                            selStartSec: layer.clipStartSec ?? 0,
-                            selEndSec: layer.clipEndSec ?? 0,
-                            axis,
-                            valueToY,
-                        })
-                      : projectCurvePoints({
-                            values: layer.values,
-                            param: layer.param,
-                            startFrame: layer.startFrame,
-                            stride: layer.stride,
-                            framePeriodMs: layer.framePeriodMs,
-                            axis,
-                            valueToY,
-                        });
+            //
+            // 虚线相位（`dashPhasePx`）：只有 `"curve"` 投影（原始参数线是唯一
+            // 的虚线用户）由投影给出锚在**数据**上的相位 —— 相位 = 首个可见点
+            // 相对曲线起点的内容坐标距离，滚动时不变，虚线跟着内容走而不是在
+            // 屏幕上原地重排（"蠕动"）。检测/剪贴板投影的子路径起点本身就是
+            // 数据锚定的（curveStartSec / selStartSec），无需补偿。
+            let points: CurvePoint[];
+            let dashPhasePx = 0;
+            if (layer.projection === "detected") {
+                points = projectDetectedCurvePoints({
+                    midiCurve: layer.values,
+                    curveStartSec: layer.curveStartSec ?? 0,
+                    framePeriodMs: layer.framePeriodMs,
+                    axis,
+                    valueToY,
+                });
+            } else if (layer.projection === "clipboard") {
+                points = projectClipboardPreviewPoints({
+                    values: layer.values,
+                    param: layer.param,
+                    framePeriodMs: layer.framePeriodMs,
+                    selStartSec: layer.clipStartSec ?? 0,
+                    selEndSec: layer.clipEndSec ?? 0,
+                    axis,
+                    valueToY,
+                });
+            } else {
+                const projected = projectCurvePoints({
+                    values: layer.values,
+                    param: layer.param,
+                    startFrame: layer.startFrame,
+                    stride: layer.stride,
+                    framePeriodMs: layer.framePeriodMs,
+                    axis,
+                    valueToY,
+                });
+                points = projected.points;
+                dashPhasePx = projected.dashPhasePx;
+            }
             if (points.length < 2) continue;
 
             // 按设备像素列抽稀（见上方"为什么必须抽稀"）。
@@ -1036,6 +1048,7 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                 color: layer.rgba,
                 aaWidthPx: 1 / dpr,
                 dash: layer.dash ?? null,
+                dashPhasePx,
                 clipRect: layer.clipRect ?? null,
             });
         }

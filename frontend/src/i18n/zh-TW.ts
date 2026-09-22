@@ -1501,6 +1501,7 @@ export const zhTW = {
     history_op_edit_tempo: "修改速度 / 速度對應",
     history_op_edit_project_settings: "修改專案設定",
     history_op_import_project: "匯入專案",
+    history_op_edit_notes: "編輯記事本",
     history_op_param_curve: "編輯參數曲線",
     history_op_param_restore: "初始化參數曲線",
     history_op_param_static: "編輯靜態參數",

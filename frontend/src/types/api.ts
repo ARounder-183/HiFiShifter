@@ -164,6 +164,12 @@ export interface TimelineState {
     disabled_group_ids?: string[];
     /** Tempo Map 数据（null = 无 Tempo Map）。 */
     tempo_map?: TempoMapPayload;
+    /**
+     * 撤销 / 重做**跨过记事本编辑**时带回的那一步的记事本内容。
+     *
+     * 缺省 = 本次跳转与记事本无关，前端必须保留当前记事本（不得清空）。
+     */
+    notes_markdown?: string;
 }
 
 /** Tempo Map 变化点（后端 camelCase 载荷，与 `TempoPointPayload` 对应）。 */
@@ -261,6 +267,13 @@ export interface TimelineResult {
      */
     undo_depth?: number;
     redo_depth?: number;
+    /**
+     * 撤销 / 重做**跨过记事本编辑**时带回的那一步的记事本内容。
+     *
+     * 缺省（undefined）= 本次跳转与记事本无关，前端必须保留当前记事本
+     * （不得清空）；只有撤销 / 重做 / 历史跳转会带它。
+     */
+    notes_markdown?: string;
 }
 
 /** 「操作记录」中的一条状态（`history_state` 事件 / `get_history_state`）。 */

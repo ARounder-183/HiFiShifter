@@ -21,9 +21,9 @@
  *    `max|across|` 反推（见 `polylineGeometry` 文件头）。
  * 2. **抗锯齿宽度取 1 个设备像素**（`1/dpr` CSS px），与 Canvas2D 的边缘过渡
  *    尺度一致；这正是"非整数线宽（1.8 / 2.6 / 3.2 / 3.6）也要看起来一样粗"的前提。
- * 3. **虚线相位按弧长推进**，且相位从传入序列的**第一个点**起算。Canvas2D 的
- *    虚线相位从子路径起点开始，而曲线的子路径起点是**首个可见采样点**——
- *    因此调用方必须传可见点序列（见 `polylineGeometry` 特殊说明 2）。
+ * 3. **虚线相位按弧长推进**，零点由调用方经 `u_dashPhase` 给出并锚在**数据**上
+ *    （曲线起点的内容坐标距离）：横向滚动时相位不随视口变化，虚线跟着内容走。
+ *    投影层（`projectCurvePoints`）负责算这个偏移。
  * 4. 预乘 alpha 输出 + `blendFunc(ONE, ONE_MINUS_SRC_ALPHA)`，与其余 program 一致；
  *    混合状态在每次 draw 前设置（各 program 自负其责，避免跨 program 状态泄漏）。
  * 5. 裁剪用 `gl.scissor`：两个需要裁剪的曲线图层（选区高亮、剪贴板预览）的裁剪区
@@ -71,6 +71,14 @@ uniform float u_halfWidth;
 uniform float u_aaWidth;
 /** 虚线图案 [dash, gap]（CSS px）；x < 0 表示实线。 */
 uniform vec2 u_dash;
+/**
+ * 虚线相位的起始偏移（CSS px）。
+ *
+ * 必须锚在**数据**上（曲线自身的起点），而不是"当前第一个可见点"——
+ * 后者随滚动变化，会让虚线在横向滚动时原地重排（用户看到的"蠕动"）。
+ * 实线（u_dash.x < 0）时忽略。
+ */
+uniform float u_dashPhase;
 
 out vec4 outColor;
 
@@ -95,7 +103,8 @@ void main() {
     if (u_dash.x >= 0.0) {
         float rawPeriod = u_dash.x + u_dash.y;
         float period = (rawPeriod > 0.0) ? rawPeriod : 1e-6;
-        float phase = mod(v_along, period);
+        // 相位起点由调用方给出（锚在数据上），使虚线随内容滚动而不重排。
+        float phase = mod(v_along + u_dashPhase, period);
         // 有符号距离：正数表示在"墨"内、负数表示在"空隙"内，0 为边界。
         // 两侧边界都做 aa 宽的过渡，因此虚线端点也有抗锯齿（与 Canvas2D 一致）。
         float dist;
@@ -145,6 +154,14 @@ export interface PolylineDrawArgs {
      * 取值（它按 dpr 量化），否则两种模式的虚线疏密会不同。
      */
     readonly dash?: readonly [number, number] | null;
+    /**
+     * 虚线相位的起始偏移（CSS px）；缺省或实线时忽略。
+     *
+     * 由投影层给出、锚在**数据**上（可见点相对曲线起点的内容坐标距离）：
+     * 少了它，虚线相位会从"当前第一个可见点"起算，横向滚动时虚线在屏幕上
+     * 原地重排 —— 即用户看到的"蠕动"。
+     */
+    readonly dashPhasePx?: number;
     /** 矩形裁剪区（视口坐标）；缺省不裁剪。 */
     readonly clipRect?: PolylineClipRect | null;
 }
@@ -204,6 +221,7 @@ export function createPolylineProgram(gl: WebGL2RenderingContext): PolylineProgr
     const halfWidthLocation = gl.getUniformLocation(program, "u_halfWidth");
     const aaWidthLocation = gl.getUniformLocation(program, "u_aaWidth");
     const dashLocation = gl.getUniformLocation(program, "u_dash");
+    const dashPhaseLocation = gl.getUniformLocation(program, "u_dashPhase");
     const posLocation = gl.getAttribLocation(program, "a_pos");
     const metaLocation = gl.getAttribLocation(program, "a_meta");
     if (
@@ -264,6 +282,11 @@ export function createPolylineProgram(gl: WebGL2RenderingContext): PolylineProgr
             gl.uniform1f(aaWidthLocation, args.aaWidthPx);
             const dash = args.dash ?? null;
             gl.uniform2f(dashLocation, dash ? dash[0] : -1, dash ? dash[1] : 0);
+            // 相位偏移：非法值（NaN / Infinity）会让整条线的相位崩掉，显式归一到 0。
+            const dashPhase = Number.isFinite(args.dashPhasePx ?? 0)
+                ? (args.dashPhasePx ?? 0)
+                : 0;
+            gl.uniform1f(dashPhaseLocation, dashPhase);
 
             gl.enable(gl.BLEND);
             gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);

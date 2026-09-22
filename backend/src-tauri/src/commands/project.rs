@@ -1221,6 +1221,20 @@ pub(super) fn close_window(window: Window) -> serde_json::Value {
     ok_bool()
 }
 
+/// 写入记事本内容并登记为一步可撤销操作。
+///
+/// 连续写入在后端按**历史结构**合并（前沿已是「编辑记事本」步则并入，见
+/// `AppState::set_notes_markdown`），不依赖任何前端时序。记事本不在时间线
+/// 上，因此这里既不触碰音频引擎，也不返回时间线载荷 —— 只回工程元信息供
+/// 前端同步。
+pub(super) fn set_project_notes(state: State<'_, AppState>, notes_markdown: String) -> serde_json::Value {
+    state.set_notes_markdown(notes_markdown);
+    serde_json::json!({
+        "ok": true,
+        "project": state.project_meta_payload(),
+    })
+}
+
 pub(super) fn set_project_base_scale(
     state: State<'_, AppState>,
     base_scale: String,

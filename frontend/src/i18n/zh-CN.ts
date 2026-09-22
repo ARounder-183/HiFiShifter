@@ -1499,6 +1499,7 @@ export const zhCN = {
     history_op_edit_tempo: "修改速度 / 速度映射",
     history_op_edit_project_settings: "修改工程设置",
     history_op_import_project: "导入工程",
+    history_op_edit_notes: "编辑记事本",
     history_op_param_curve: "编辑参数曲线",
     history_op_param_restore: "初始化参数曲线",
     history_op_param_static: "编辑静态参数",

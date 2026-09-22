@@ -229,6 +229,15 @@ pub fn open_project(
     project::open_project(state, window, project_path, force)
 }
 
+/// 写入记事本内容并登记为一步可撤销操作（连续写入在后端按历史结构合并）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_project_notes(
+    state: State<'_, AppState>,
+    notes_markdown: String,
+) -> serde_json::Value {
+    project::set_project_notes(state, notes_markdown)
+}
+
 #[tauri::command(rename_all = "camelCase")]
 pub fn save_project(
     state: State<'_, AppState>,
@@ -618,6 +627,7 @@ pub async fn import_audio_item(
         tempo_map: None,
         undo_depth: None,
         redo_depth: None,
+        notes_markdown: None,
     })
 }
 #[tauri::command(rename_all = "camelCase")]
@@ -651,6 +661,7 @@ pub async fn import_audio_bytes(
         tempo_map: None,
         undo_depth: None,
         redo_depth: None,
+        notes_markdown: None,
     })
 }
 #[tauri::command(rename_all = "camelCase")]

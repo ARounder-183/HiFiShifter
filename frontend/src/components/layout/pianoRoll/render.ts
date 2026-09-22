@@ -80,6 +80,64 @@ export function getFixedDashPattern(baseDashPx: number, baseGapPx: number): numb
 }
 
 /**
+ * 虚线相位的起始偏移：曲线起点到**首个可见点**的前缀弧长（CSS px）。
+ *
+ * 【为什么需要它】Canvas2D 从不设置 `lineDashOffset` 时，虚线相位从子路径起点
+ * 起算；而曲线的子路径起点是**首个可见采样点**，于是相位被钉在视口左缘 ——
+ * 横向滚动时第一个可见点不断更换，虚线图案就会在屏幕上原地重排（用户看到的
+ * 就是虚线在"蠕动"）。
+ *
+ * 【为什么逐点累加欧氏距离】相邻采样点的 Δx 由两点的内容坐标之差给出
+ * （scrollLeft 相减抵消）、Δy 只依赖采样值，因此每段距离与滚动无关，前缀和
+ * 滚动时恒定 —— 这正是"虚线跟着内容走"的根据。纵向走势也占弧长，所以不能
+ * 只算水平距离；这与 GL 投影（`projectCurvePoints`）的相位口径逐段一致。
+ *
+ * @param args 与 `drawCurveTimed` 相同的时间/值参数（`valueToY` 已绑定参数与
+ *            pitch 偏移）。
+ * @returns 前缀弧长（CSS px，>= 0）；无可见点时为 0。
+ */
+export function arcLengthPrefixPx(args: {
+    values: number[];
+    startFrame: number;
+    stride: number;
+    framePeriodMs: number;
+    axis: TimelineAxis;
+    valueToY: (v: number) => number;
+}): number {
+    const { values, startFrame, stride, framePeriodMs, axis, valueToY } = args;
+    if (values.length < 2) return 0;
+    const fp = Math.max(1e-6, framePeriodMs);
+    const step = Math.max(1, Math.floor(stride));
+    const visibleStartSec = viewportStartSec(axis);
+    const visibleEndSec = viewportEndSec(axis);
+
+    let prefix = 0;
+    let phaseComplete = false;
+    let havePrev = false;
+    let prevX = 0;
+    let prevY = 0;
+    for (let i = 0; i < values.length; i += 1) {
+        const tSec = framesToTime(startFrame + i * step, fp);
+        if (tSec > visibleEndSec) break;
+        const x = secToViewportPx(axis, tSec);
+        const y = valueToY(values[i] ?? 0);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+        if (!phaseComplete) {
+            if (havePrev) {
+                prefix += Math.hypot(x - prevX, y - prevY);
+            }
+            if (tSec >= visibleStartSec) {
+                phaseComplete = true;
+            }
+        }
+        prevX = x;
+        prevY = y;
+        havePrev = true;
+    }
+    return phaseComplete ? prefix : 0;
+}
+
+/**
  * 主画布的内容签名缓存（阶段 2 Task 6）。
  *
  * 【为什么用模块级 WeakMap】缓存必须跨调用保持，但又不能阻止画布被回收：面板
@@ -141,6 +199,15 @@ function drawCurveTimed(args: {
     /** 统一投影：曲线与其它图层的唯一坐标来源。 */
     axis: TimelineAxis;
     valueToY: (param: ParamName, v: number, h: number) => number;
+    /**
+     * 虚线相位的起始偏移（CSS px）＝曲线起点到首个可见点的**前缀弧长**。
+     *
+     * 必须锚在**数据**上，否则 Canvas2D 会从不设 `lineDashOffset` 的默认值 0
+     * 起算 —— 也就是"相位从首个可见点重启"，横向滚动时虚线在屏幕上原地重排
+     * （"蠕动"）。逐采样点累加、与 GL 投影同一口径（见 `drawCurveTimed` 循环
+     * 内的累加），不是简单的水平距离：纵向走势也占弧长。
+     */
+    dashPhasePx?: number;
 }) {
     const { ctx, values, param, w, h, startFrame, stride, framePeriodMs, axis, valueToY } = args;
 
@@ -189,6 +256,7 @@ function drawCurveTimed(args: {
     let lastX = 0;
 
     ctx.beginPath();
+    let dashPhaseApplied = false;
     for (let i = 0; i < values.length; i += 1) {
         const frame = startFrame + i * step;
         const tSec = framesToTime(frame, fp);
@@ -215,6 +283,14 @@ function drawCurveTimed(args: {
         const mappedValue = param === "pitch" ? rawValue + 0.5 : rawValue;
         const y = valueToY(param, mappedValue, h);
         if (!started) {
+            // 首个可见点：把"被跳过的那一段前缀弧长"补进虚线相位，让 `mod`
+            // 的零点始终落在曲线自身起点（数据锚点），而不是跟着视口左缘。
+            // Canvas2D 的 `lineDashOffset = d` 与 GL 的 `mod(along + d)` 同义：
+            // 相位都前移 d，因此这里用**正号**，与 GL 的 `u_dashPhase` 一致。
+            if (!dashPhaseApplied && args.dashPhasePx !== undefined) {
+                ctx.lineDashOffset = args.dashPhasePx;
+                dashPhaseApplied = true;
+            }
             ctx.moveTo(x, y);
             started = true;
         } else {
@@ -1090,6 +1166,15 @@ export function drawPianoRoll(args: {
                 framePeriodMs: paramView.framePeriodMs,
                 axis,
                 valueToY,
+                // 相位锚在数据上：滚动时虚线跟着内容走，不在屏幕上重排。
+                dashPhasePx: arcLengthPrefixPx({
+                    values: paramView.orig,
+                    startFrame: paramView.startFrame,
+                    stride: paramView.stride,
+                    framePeriodMs: paramView.framePeriodMs,
+                    axis,
+                    valueToY: (v) => valueToY(editParam, editParam === "pitch" ? v + 0.5 : v, h),
+                }),
             });
             ctx.restore();
         }

@@ -544,7 +544,12 @@ pub fn clear_pad_suppressed_clips() {
 /// 因此必须整体失效。
 /// v3：声道条件化（take 级 channel_mode）与合成链逐声道扇出。旧缓存是
 /// "取左声道 → 处理 → 复制双声道"的坍缩结果，与新语义必然不同，整体失效。
-pub const RENDER_PIPELINE_VERSION: u32 = 3;
+/// v4：渲染键补齐了此前缺失的渲染输入（Compose 开关、生效音阶签名、源文件
+/// 大小、气声曲线缺失时按描述符默认 1.0 处理的语义）。这些输入此前只依赖
+/// **命令式**失效调用点传导，漏掉一个调用点就会"参数已变、仍播上一版 PCM"，
+/// 而磁盘缓存会让这种错配跨会话持续存在。纳入按键后，正确性不再依赖调用点是
+/// 否记得失效。
+pub const RENDER_PIPELINE_VERSION: u32 = 4;
 
 /// [`compute_rendered_clip_hash`] 的输入集合。
 ///
@@ -596,6 +601,24 @@ pub struct RenderedClipHashInput<'a> {
     pub formant_morph: Option<&'a crate::state::ClipFormantMorph>,
     /// 渲染输入 pitch 曲线（clip 局部时间轴）。
     pub input_pitch_curve: Option<&'a [f32]>,
+    /// 该轨道的 Compose 开关。
+    ///
+    /// `compose_enabled` 直接决定处理器链是否运行、以及外部预拉伸是否被跳过
+    /// （见 `pitch_editing::processor_should_handle_stretch`）。开着与关着产出
+    /// 的 PCM 完全不同，却从未进入按键 —— 切换开关后只能靠命令式失效点传导。
+    pub compose_enabled: bool,
+    /// 实际生效音阶的签名（工程音阶 + Tempo Map 分段音阶）。
+    ///
+    /// 子轨音高/共振峰差经音阶量化后写进渲染输入（`apply_child_pitch_offset_to_midi`
+    /// 消费 `scale_segments()`），而音阶此前完全不在按键里：改音阶只能靠四处
+    /// 命令式失效调用点覆盖，漏一处就会长期播错音高。
+    pub scale_signature: &'a str,
+    /// 源文件大小（字节）。
+    ///
+    /// `source_file_mtime` 只有整秒精度，同秒内被替换为**同大小**文件时 mtime
+    /// 可能不变；`source_file_fingerprint` 覆盖 head+tail+size，但旧工程可能
+    /// 没有该值（None 时只按 mtime 判）。补上大小可把这类"假命中"再收敛一层。
+    pub source_file_size: Option<u64>,
 }
 
 /// 计算整 Clip 渲染的参数哈希（渲染缓存键的核心）。
@@ -631,6 +654,9 @@ pub fn compute_rendered_clip_hash(input: &RenderedClipHashInput<'_>) -> u64 {
         extra_params,
         formant_morph,
         input_pitch_curve,
+        compose_enabled,
+        scale_signature,
+        source_file_size,
     } = *input;
 
     let mut h: u64 = 14695981039346656037u64;
@@ -669,6 +695,10 @@ pub fn compute_rendered_clip_hash(input: &RenderedClipHashInput<'_>) -> u64 {
         mix_bytes!(b"src_fingerprint");
         mix_bytes!(&fingerprint.to_le_bytes());
     }
+    if let Some(size) = source_file_size {
+        mix_bytes!(b"src_size");
+        mix_bytes!(&size.to_le_bytes());
+    }
     // 混入 active_take_id：同一 Clip 切换 Take（undo 回退、垫音复用等场景）后，
     // 即便源路径与窗口碰巧一致，可听内容也已不同。
     if let Some(take_id) = active_take_id {
@@ -691,6 +721,17 @@ pub fn compute_rendered_clip_hash(input: &RenderedClipHashInput<'_>) -> u64 {
     mix_bytes!(&channel_mode.to_le_bytes());
     mix_bytes!(&source_range_q.0.to_le_bytes());
     mix_bytes!(&source_range_q.1.to_le_bytes());
+    // 混入 Compose 开关：它决定处理器链是否运行以及外部预拉伸是否被跳过，
+    // 同一组曲线/参数在开与关下产出完全不同的 PCM。缺少它会让开关切换后的
+    // 旧渲染持续被命中（只在恰好有命令式失效调用点的路径上才碰巧正确）。
+    mix_bytes!(b"compose");
+    mix_bytes!(&[u8::from(compose_enabled)]);
+    // 混入生效音阶签名：子轨音高/共振峰差经音阶量化后进入渲染输入，音阶变化
+    // 必须产出不同哈希。此前它只靠四处命令式失效调用点覆盖，漏一处即长期错音高。
+    if !scale_signature.is_empty() {
+        mix_bytes!(b"scale");
+        mix_bytes!(scale_signature.as_bytes());
+    }
 
     // 混入拉伸设置：渲染输出依赖拉伸模式 —— HiFiGAN Mel Stretch 开启时由
     // 处理器在 mel 域内部拉伸，关闭时由外部算法预拉伸后以 rate=1 渲染；
@@ -1183,6 +1224,7 @@ fn take_identity_matches(entry_take: Option<&str>, active_take: Option<&str>) ->
 pub fn get_latest_rendered_pcm(
     clip_id: &str,
     active_take_id: Option<&str>,
+    expected_frames: Option<u64>,
 ) -> Option<(Arc<Vec<f32>>, Option<Arc<Vec<f32>>>)> {
     let cache = global_rendered_clip_cache()
         .lock()
@@ -1193,6 +1235,11 @@ pub fn get_latest_rendered_pcm(
         .find(|(k, v)| {
             k.clip_id == clip_id
                 && take_identity_matches(v.rendered_take_id.as_deref(), active_take_id)
+                // 长度守卫：垫音只用于"同一段音频、参数刚变"的过渡场景，此时
+                // 帧数必然一致。若帧数不同（clip 被移动/拉伸/换 Take），这条
+                // 旧渲染对应的是**另一个窗口**的内容 —— 垫上去就是把错误位置
+                // 的音频播给用户（表现为搬移后先响一下旧位置的声、再切换）。
+                && expected_frames.map_or(true, |want| v.frames == want)
         })
         .map(|(_, v)| v)?;
     Some((entry.pcm_stereo.clone(), entry.breath_noise_stereo.clone()))
@@ -1202,6 +1249,7 @@ pub fn get_latest_rendered_pcm(
 pub fn get_latest_tension_rendered_pcm(
     clip_id: &str,
     active_take_id: Option<&str>,
+    expected_frames: Option<u64>,
 ) -> Option<Arc<Vec<f32>>> {
     let cache = global_tension_rendered_clip_cache()
         .lock()
@@ -1212,6 +1260,8 @@ pub fn get_latest_tension_rendered_pcm(
         .find(|(k, v)| {
             k.clip_id == clip_id
                 && take_identity_matches(v.rendered_take_id.as_deref(), active_take_id)
+                // 与 `get_latest_rendered_pcm` 同一长度守卫理由。
+                && expected_frames.map_or(true, |want| v.frames == want)
         })
         .map(|(_, v)| v)?;
     Some(entry.pcm_stereo.clone())
@@ -1266,6 +1316,9 @@ mod tests {
                 extra_params: &self.extra_params,
                 formant_morph: self.formant_morph.as_ref(),
                 input_pitch_curve: self.input_pitch_curve.as_deref(),
+                compose_enabled: true,
+                scale_signature: "",
+                source_file_size: None,
             }
         }
 

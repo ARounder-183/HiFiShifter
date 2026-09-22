@@ -98,6 +98,29 @@ describe("dashCoverage", () => {
         }
     });
 
+    it("相位偏移等价于把 along 平移同量（虚线锚在数据上的数学根据）", () => {
+        // 投影层用 `dashPhasePx` 补偿"被视口裁掉的前缀弧长"：`along + phase`
+        // 恰好等于该点相对曲线起点的绝对弧长。因此带偏移的覆盖率必须与
+        // "直接用绝对弧长、零偏移"完全一致 —— 这保证虚线跟着内容走。
+        for (const phase of [2.5, 6, 17.25]) {
+            expect(dashCoverage(3, dash, gap, aa, phase)).toBeCloseTo(
+                dashCoverage(3 + phase, dash, gap, aa, 0),
+                9,
+            );
+            expect(dashCoverage(20.5, dash, gap, aa, phase)).toBeCloseTo(
+                dashCoverage(20.5 + phase, dash, gap, aa, 0),
+                9,
+            );
+        }
+    });
+
+    it("相位偏移为 NaN 时按 0 处理（不污染整层几何）", () => {
+        expect(dashCoverage(3, dash, gap, aa, Number.NaN)).toBeCloseTo(
+            dashCoverage(3, dash, gap, aa, 0),
+            9,
+        );
+    });
+
     it("沿一个周期遍历：覆盖率不出现负值或超过 1", () => {
         for (let a = 0; a <= dash + gap + 1; a += 0.1) {
             const c = dashCoverage(a, dash, gap, aa);

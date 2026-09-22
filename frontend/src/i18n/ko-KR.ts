@@ -1526,6 +1526,7 @@ export const koKR = {
     history_op_edit_tempo: "템포 / 템포 맵 변경",
     history_op_edit_project_settings: "프로젝트 설정 변경",
     history_op_import_project: "프로젝트 가져오기",
+    history_op_edit_notes: "노트북 편집",
     history_op_param_curve: "파라미터 곡선 편집",
     history_op_param_restore: "파라미터 곡선 초기화",
     history_op_param_static: "정적 파라미터 편집",

@@ -4,6 +4,7 @@ import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { closeNotebook, setNotebookMode } from "../../features/notebook/notebookSlice";
 import { setProjectNotesMarkdown } from "../../features/session/sessionSlice";
 import { useI18n } from "../../i18n/I18nProvider";
+import { webApi } from "../../services/webviewApi";
 import { renderMarkdownPreview } from "./notebook/markdownPreview";
 
 export function NotebookPanel() {
@@ -13,6 +14,20 @@ export function NotebookPanel() {
     const markdown = useAppSelector((state) => state.session.project.notesMarkdown);
 
     const previewHtml = useMemo(() => renderMarkdownPreview(markdown), [markdown]);
+
+    /**
+     * 记事本编辑的撤销合并由**后端按历史结构**完成：历史最前沿一步是
+     * 「编辑记事本」时，后续写入全部并入该步 —— 无论用户输入多久、停顿多长、
+     * 失焦多少次；其它操作介入后才自然另起一步。前端因此不需要任何开窗/
+     * 收尾时序（此前基于停手超时的合并把长编辑会话切成大量记录，已移除）。
+     *
+     * 输入框内的 Ctrl+Z 由 textarea 自己处理（全局快捷键监听已按可编辑目标
+     * 排除 textarea，见 `useKeybindings.isEditableTarget`），这里不做任何拦截。
+     */
+    const handleChange = (next: string) => {
+        dispatch(setProjectNotesMarkdown(next));
+        void webApi.setProjectNotes(next);
+    };
 
     return (
         <Flex className="h-full min-h-0 flex-col bg-qt-window">
@@ -56,7 +71,7 @@ export function NotebookPanel() {
                 {mode === "edit" ? (
                     <textarea
                         value={markdown}
-                        onChange={(event) => dispatch(setProjectNotesMarkdown(event.target.value))}
+                        onChange={(event) => handleChange(event.target.value)}
                         placeholder={t("notebook_placeholder")}
                         className="h-full w-full resize-none border-0 bg-qt-base px-3 py-3 text-sm text-qt-text outline-none"
                         spellCheck={false}

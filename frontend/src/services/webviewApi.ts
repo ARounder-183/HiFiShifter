@@ -74,6 +74,7 @@ export const webApi = {
     setProjectCustomScale: projectApi.setProjectCustomScale,
     setProjectStretchSettings: projectApi.setProjectStretchSettings,
     setProjectTimelineSettings: projectApi.setProjectTimelineSettings,
+    setProjectNotes: projectApi.setProjectNotes,
 
     getRecordingSettings: recordingApi.getSettings,
     saveRecordingSettings: recordingApi.saveSettings,

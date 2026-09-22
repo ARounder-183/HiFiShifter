@@ -25,9 +25,18 @@ import {
 import { framesToTime } from "../../utils";
 import {
     projectClipboardPreviewPoints,
-    projectCurvePoints,
+    projectCurvePoints as projectCurvePointsFull,
     projectDetectedCurvePoints,
+    type CurvePointsArgs,
 } from "./curvePoints";
+
+/**
+ * 旧断言只关心点序列；新的投影返回 `{ points, dashPhasePx }`。
+ * 用包装器保持既有断言可读，虚线相位的行为另有专属 describe。
+ */
+function projectCurvePoints(args: CurvePointsArgs) {
+    return projectCurvePointsFull(args).points;
+}
 
 /** 造一个轴（与面板一致：dpr 只影响描边对齐，不影响投影）。 */
 function makeAxis(pxPerSec = 150, scrollLeftPx = 0, viewportWidthPx = 1000) {
@@ -201,6 +210,88 @@ describe("projectCurvePoints", () => {
         expect(points.length).toBeGreaterThan(1);
         const dx = points[1].x - points[0].x;
         expect(dx).toBeCloseTo(150 * 0.02, 6);
+    });
+});
+
+/**
+ * 虚线相位（`dashPhasePx`）的行为契约。
+ *
+ * 【守护什么】相位必须锚在数据（曲线自身起点）上：滚动时"along + 相位"
+ * 对每个内容点保持不变，虚线跟着内容走。少了这个保证，滚动时虚线图案会
+ * 在屏幕上原地重排（用户看到虚线在"蠕动"），这正是被修复的缺陷。
+ */
+describe("projectCurvePoints 的虚线相位", () => {
+    const base = {
+        values: Array.from({ length: 2000 }, () => 50),
+        param: "pitch" as const,
+        startFrame: 0,
+        stride: 1,
+        framePeriodMs: 5,
+        valueToY: valueToY(400),
+    };
+
+    it("相位 = 曲线起点到首个可见点的弧长（水平铺开时等于内容距离）", () => {
+        // 值恒定 → 曲线水平 → 弧长 = 水平距离。滚动 300px = 2s，
+        // 曲线起点 0s → 相位应为 2s × 150px/s = 300px。
+        const { dashPhasePx } = projectCurvePointsFull({
+            ...base,
+            axis: makeAxis(150, 300),
+        });
+        expect(dashPhasePx).toBeCloseTo(300, 6);
+    });
+
+    it("纵向走势计入弧长（不是纯水平距离）", () => {
+        // 两个采样点：帧 0 在 y=0，帧 1 在 y=300（值差 50 × 6px/值），相距 5ms。
+        // 视口左缘取 0.002s（scrollLeft = 0.3px）：首点被裁掉、第二点可见
+        // → 相位 = 两点间完整弧长 = hypot(0.75, 300)，纵向段占了几乎全部。
+        const { dashPhasePx } = projectCurvePointsFull({
+            values: [0, 50],
+            param: "other",
+            startFrame: 0,
+            stride: 1,
+            framePeriodMs: 5,
+            axis: makeAxis(150, 150 * 0.002),
+            valueToY: (v) => v * 6,
+        });
+        expect(dashPhasePx).toBeCloseTo(Math.hypot(150 * 0.005, 300), 6);
+    });
+
+    it("滚动时相位增量与窗口平移严格抵消（同一内容点的有效弧长不变）", () => {
+        // 相位本身随滚动变化（= 首个可见点距曲线起点的弧长），但每个内容点的
+        // "along + 相位"不变 —— 这是虚线钉在内容上的数学表达。这里用水平曲线
+        // 验证等价的简化式：along(点) = 点x + scrollLeft，相位应精确补偿
+        // scrollLeft 的变化量。
+        const scrolled = projectCurvePointsFull({ ...base, axis: makeAxis(150, 300) });
+        const more = projectCurvePointsFull({ ...base, axis: makeAxis(150, 900) });
+        expect(scrolled.dashPhasePx).toBeCloseTo(300, 6);
+        expect(more.dashPhasePx).toBeCloseTo(900, 6);
+
+        // t=6s 的点（内容 x = 900px）：scroll=900 时 along=0，有效弧长 = 900；
+        // scroll=300 时该点是第 601 个可见点（2s..6s 共 800 个采样，弧长 = 600px
+        // 水平），有效弧长 = 600 + 300 = 900。两种滚动一致。
+        const effectiveAt900 = 0 + more.dashPhasePx;
+        const effectiveAt300 = (900 - 300) + scrolled.dashPhasePx;
+        expect(effectiveAt300).toBeCloseTo(effectiveAt900, 6);
+    });
+
+    it("视口在曲线起点之前时相位为 0（尚未走进曲线）", () => {
+        // 曲线从 2s 开始（startFrame 400 × 5ms），视口从 0s 开始。
+        const { dashPhasePx, points } = projectCurvePointsFull({
+            ...base,
+            startFrame: 400,
+            axis: makeAxis(150, 0),
+        });
+        expect(points.length).toBeGreaterThan(0);
+        expect(dashPhasePx).toBe(0);
+    });
+
+    it("无可见点时相位为 0（实线调用方忽略该值）", () => {
+        const { dashPhasePx, points } = projectCurvePointsFull({
+            ...base,
+            axis: makeAxis(150, 150 * 100),
+        });
+        expect(points).toEqual([]);
+        expect(dashPhasePx).toBe(0);
     });
 });
 

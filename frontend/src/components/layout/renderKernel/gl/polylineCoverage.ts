@@ -74,12 +74,14 @@ export function lateralCoverage(across: number, halfWidth: number, aaWidth: numb
 /**
  * 虚线覆盖率：累积弧长 `along` 处的片元被虚线"墨"覆盖的比例。
  *
- * 流程：`phase = along mod (dash + gap)` → 求该相位到最近"墨/隙边界"的有符号距离
- * → 按 `aaWidth` 做过渡。
+ * 流程：`phase = (along + dashPhase) mod (dash + gap)` → 求该相位到最近"墨/隙
+ * 边界"的有符号距离 → 按 `aaWidth` 做过渡。
  *
- * 特殊说明 1：**相位从传入序列的第一个点起算**（`along` 由调用方从 0 开始累加）。
- * Canvas2D 的虚线相位从子路径起点开始，而曲线的子路径起点是**首个可见采样点**；
- * 若调用方传整条曲线（绝对弧长），滚动时虚线会滑动。
+ * 特殊说明 1：**相位锚在`dashPhase` 上**，它由调用方按"可见点相对曲线起点
+ * 的内容坐标距离"给出 —— 即锚在**数据**上。少了它，相位就从"当前第一个
+ * 可见点"起算，横向滚动时虚线会在屏幕上原地重排（用户看到虚线在"蠕动"）。
+ * 只传可见点序列（不传整条曲线）的做法无法回避这个问题：索引 0 本身会随滚
+ * 动改变，必须显式补偿这段已被跳过的前缀弧长。
  *
  * 特殊说明 2：`dash < 0` 表示实线，直接返回 1（与着色器里 `u_dash.x < 0` 一致）。
  *
@@ -90,17 +92,25 @@ export function lateralCoverage(across: number, halfWidth: number, aaWidth: numb
  * @param dash 实线段长度（CSS px）；负值表示实线。
  * @param gap 空隙段长度（CSS px）。
  * @param aaWidth 抗锯齿过渡宽度（CSS px）。
+ * @param dashPhase 相位偏移（CSS px）；缺省 0。锚在数据上时它随滚动不变。
  * @returns 覆盖率（0..1）。
  */
-export function dashCoverage(along: number, dash: number, gap: number, aaWidth: number): Coverage {
+export function dashCoverage(
+    along: number,
+    dash: number,
+    gap: number,
+    aaWidth: number,
+    dashPhase = 0,
+): Coverage {
     if (!(dash >= 0)) return 1;
     const aa = normalizeAaWidth(aaWidth);
     // `dash + gap` 为 NaN 时同样会穿透 max，故显式判有限性。
     const rawPeriod = dash + gap;
     const period =
         Number.isFinite(rawPeriod) && rawPeriod > MIN_AA_WIDTH ? rawPeriod : MIN_AA_WIDTH;
+    const offset = Number.isFinite(dashPhase) ? dashPhase : 0;
     // 负数取模在 JS/GLSL 中都可能返回负值，统一归一到 [0, period)。
-    const phase = ((along % period) + period) % period;
+    const phase = (((along + offset) % period) + period) % period;
 
     // 有符号距离：正数在"墨"内、负数在"隙"内，0 为边界。
     let distance: number;

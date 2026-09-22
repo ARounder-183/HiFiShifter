@@ -34,6 +34,9 @@ struct UndoFileRecord {
     /// 时间线补齐，故落盘的记录通常都带快照）。
     #[serde(default)]
     state: Option<TimelineState>,
+    /// 该状态下的记事本内容；`None` = 与记事本无关的一步（见 `HistoryRecord`）。
+    #[serde(default)]
+    notes_markdown: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -138,6 +141,12 @@ pub fn serialize_undo_history(state: &AppState) -> Option<Vec<u8>> {
                 label: record.label.clone(),
                 at_ms: record.at_ms,
                 state: snapshot,
+                // 当前位置的记录尚未补齐记事本时，用现场值落盘 —— 否则
+                // 重新打开工程后第一次撤销会把记事本清空。
+                notes_markdown: record
+                    .notes_markdown
+                    .clone()
+                    .or_else(|| (index == h.position).then(|| state.current_notes_value())),
             });
         }
         (h.position, h.started_at_ms, records)
@@ -237,6 +246,7 @@ pub fn load_undo_history(state: &AppState, project_path: &Path) -> bool {
                 label: record.label,
                 at_ms: record.at_ms,
                 state,
+                notes_markdown: record.notes_markdown,
             }
         })
         .collect();
