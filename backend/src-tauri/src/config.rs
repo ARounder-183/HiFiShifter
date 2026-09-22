@@ -302,6 +302,15 @@ pub struct UiSettings {
     pub show_clipboard_preview: bool,
     #[serde(default = "default_true")]
     pub show_param_value_popup: bool,
+    /// 纵轴标尺的展示单位（参数 id → `"ratio"` / `"db"`）。
+    ///
+    /// 只对音量 / 动态这类线性幅值倍率参数有意义（`1× = 0 dB`）：同一个值既能读成
+    /// 倍率也能读成 dB，用户按习惯选择读法。空映射 = 全部按倍率（历史行为）。
+    ///
+    /// 取值合法性由前端收口（`normalizeParamAxisUnits`），后端只做透传存储 ——
+    /// 这里加一份校验会让"支持哪些参数"这个业务知识在两处各写一遍。
+    #[serde(default)]
+    pub param_axis_units: std::collections::HashMap<String, String>,
     #[serde(default = "default_true")]
     pub lock_param_lines: bool,
 
@@ -1063,6 +1072,7 @@ impl Default for UiSettings {
             param_editor_seek_playhead: true,
             show_clipboard_preview: true,
             show_param_value_popup: true,
+            param_axis_units: std::collections::HashMap::new(),
             lock_param_lines: true,
             metronome_enabled: false,
             metronome_gain: default_metronome_gain(),

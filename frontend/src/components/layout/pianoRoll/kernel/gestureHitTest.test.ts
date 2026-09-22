@@ -24,6 +24,7 @@ import { describe, expect, it } from "vitest";
 import {
     CURVE_HIT_RADIUS_PX,
     SELECTION_EDGE_HIT_PX,
+    SELECTION_EDGE_MIN_WIDTH_PX,
     curveValueAtPointerFrame,
     hitTestSelectionBody,
     hitTestSelectionEdge,
@@ -301,6 +302,28 @@ describe("hitTestSelectionEdge", () => {
             expect(hitTestSelectionEdge({ ...args, localXPx: bad })).toBeNull();
             expect(hitTestSelectionEdge({ leftXPx: bad, rightXPx: 300, localXPx: 100 })).toBeNull();
         }
+    });
+
+    it("零宽 / 亚像素选区不命中（随机单击留下的不可见选区）", () => {
+        // 单击会在点击位置留下一段 startBeat === endBeat 的选区：两条边界投影到
+        // 同一个 x，若不做宽度门槛，命中带内的任意位置都会命中"左缘"，用户就会在
+        // 什么都看不到的地方看到 ew-resize 光标。
+        const degenerate = { leftXPx: 200, rightXPx: 200 };
+        for (const localXPx of [200, 192, 208, 195, 205]) {
+            expect(hitTestSelectionEdge({ ...degenerate, localXPx })).toBeNull();
+        }
+        // 亚像素（取样点落在同一设备像素内）同样视为不可见。
+        expect(hitTestSelectionEdge({ leftXPx: 200, rightXPx: 200.4, localXPx: 200 })).toBeNull();
+        // 门槛之下的极窄选区（1px）同样不给边缘交互。
+        expect(hitTestSelectionEdge({ leftXPx: 200, rightXPx: 201, localXPx: 200 })).toBeNull();
+        // 恰好达到最小可见宽度 → 恢复命中（与既有"左缘优先"规则一致）。
+        expect(
+            hitTestSelectionEdge({
+                leftXPx: 200,
+                rightXPx: 200 + SELECTION_EDGE_MIN_WIDTH_PX,
+                localXPx: 200,
+            }),
+        ).toBe("left");
     });
 });
 

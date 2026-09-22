@@ -93,10 +93,7 @@ export function addBeatRange(
     aBeat: number,
     bBeat: number,
 ): ParamSelection | null {
-    const next = [
-        ...(selection ?? []),
-        makeBeatRange(aBeat, bBeat),
-    ];
+    const next = [...(selection ?? []), makeBeatRange(aBeat, bBeat)];
     return normalizeSelection(next);
 }
 
@@ -183,7 +180,8 @@ export function toggleBeatRange(
 }
 
 /** `beat` 落在第几段（-1 = 不在任何段内）。 */
-export function rangeIndexAtBeat(selection: ParamSelection | null, beat: number): number {    if (!selection || !Number.isFinite(beat)) return -1;
+export function rangeIndexAtBeat(selection: ParamSelection | null, beat: number): number {
+    if (!selection || !Number.isFinite(beat)) return -1;
     for (let i = 0; i < selection.length; i += 1) {
         const range = selection[i];
         if (beat >= range.startBeat && beat <= range.endBeat) return i;
@@ -209,6 +207,71 @@ export function selectionBoundingRange(selection: ParamSelection | null): BeatRa
         startBeat: selection[0].startBeat,
         endBeat: selection[selection.length - 1].endBeat,
     };
+}
+
+/**
+ * 把一段选区的**某一条边界**移到 `beat`，另一条边界不动。
+ *
+ * 【拖过对侧边界 = 交换左右】用户抓住左边界一路往右拖、越过右边界时，期望行为是
+ * "抓的那条边继续跟着手走"（此时它在右、另一条边成了左），而不是在边界处卡住 ——
+ * 于是可以拖过去、再拖回来，反复交换。
+ *
+ * 实现只需把「光标位置」与「对侧边界」两个端点交给 {@link makeBeatRange} 排序：
+ * 越过对侧时两端自然对调，既不会出现负宽度（会被归一化丢弃、手感上像选区消失），
+ * 也不需要任何"当前抓的是哪一侧"的状态。
+ *
+ * @param range 被调整的那一段（取自拖拽起点快照）。
+ * @param edge 被抓住的边界（决定哪一端是固定端）。
+ * @param beat 光标当前所在的拍位置。
+ * @returns 调整后的段（已排序，始终 `startBeat <= endBeat`）。
+ */
+export function resizeBeatRangeEdge(
+    range: BeatRange,
+    edge: "left" | "right",
+    beat: number,
+): BeatRange {
+    const opposite = edge === "left" ? range.endBeat : range.startBeat;
+    return makeBeatRange(beat, opposite);
+}
+
+/**
+ * 把"整段平移"的位移量夹到合法范围（返回**可用的位移**，不是位移后的选区）。
+ *
+ * 【为什么要夹位移而不是夹结果】逐段裁剪位移后的选区会把选区**压扁**（各段被
+ * 顶到边界上，段间距离丢失），手感上像被"吸住"。夹位移则保持选区形状不变：整段
+ * 一起停在工程两端。
+ *
+ * 【约束】位移后选区的**包围区间**仍落在 `[minBeat, maxBeat]` 内：
+ * `delta ≥ -包围起点` 且 `delta ≤ maxBeat - 包围终点`。
+ *
+ * 【选区宽于 [minBeat, maxBeat] 时】两条约束交叉（区间为空），此时原样返回
+ * `delta`：任何裁剪都必然违反另一侧的约束，自由平移比"完全卡死"更合理。
+ *
+ * 特殊说明：契约按**包围区间**定义，因此对多段选区同样成立（夹取的是整组的包围
+ * 区间）。当前调用方（参数编辑器"右键拖拽平移选段落"）每次只传入**被抓住的那一段**
+ * —— 多段选区下其余段不参与，也就不该限制本次平移的可用范围。保留包围区间的一般化
+ * 定义，是为了让"夹取"这条规则不依赖调用方传几段。
+ *
+ * @param selection 选区（其包围区间决定可用位移）。
+ * @param delta 期望位移（拍，可为负）。
+ * @param minBeat 允许的最小拍（通常是 0）。
+ * @param maxBeat 允许的最大拍（通常是工程时长）。
+ * @returns 夹取后的位移；选区为空或位移非有限值时返回 0。
+ */
+export function clampSelectionShift(
+    selection: ParamSelection | null,
+    delta: number,
+    minBeat: number,
+    maxBeat: number,
+): number {
+    if (!Number.isFinite(delta) || delta === 0) return 0;
+    const bounds = selectionBoundingRange(selection);
+    if (!bounds) return 0;
+    if (!Number.isFinite(minBeat) || !Number.isFinite(maxBeat)) return delta;
+    const lo = minBeat - bounds.startBeat;
+    const hi = maxBeat - bounds.endBeat;
+    if (hi < lo) return delta;
+    return clamp(delta, lo, hi);
 }
 
 /** 整体平移（选区拖动时随数据一起移动）；结果仍归一化（可能合并出新重叠）。 */

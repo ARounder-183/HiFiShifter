@@ -74,6 +74,7 @@ import { isBlackKey, midiToLabel } from "../../utils";
 import {
     AXIS_TICK_LABEL_DESCENT_PX,
     AXIS_TICK_LABEL_FONT_SIZE_PX,
+    axisTickLabelAnchorBounds,
     createPianoRollGlyphs,
     type PianoRollGlyphs,
     type TextRequest,
@@ -829,6 +830,7 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         return keyboardGeometrySignature({
             kind: spec.kind,
             paramName: spec.paramName,
+            axisUnit: spec.axisUnit,
             view,
             absMin: spec.absMin,
             absMax: spec.absMax,
@@ -1197,14 +1199,23 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             dpr: readDevicePixelRatio(),
             valueToY: spec.valueToY,
             paramName: spec.paramName,
+            axisUnit: spec.axisUnit,
         });
+        // 标签锚点的安全区间：值域两端映射到绘图区上下边缘，而 `middle` 基准的文字
+        // 有一半在锚点外侧，不夹取就会让最上/最下那条刻度各缺半截（见
+        // `axisTickLabelAnchorBounds` 的推导）。只夹**文字位置**，刻度线不动。
+        const labelAnchorBounds = axisTickLabelAnchorBounds(
+            AXIS_TICK_LABEL_FONT_SIZE_PX,
+            viewportHeightPx,
+        );
         for (const mark of marks) {
+            const anchorY = mark.line.y + mark.line.h / 2 - 0.5;
             requests.push({
                 text: mark.label,
                 fontKey: `${AXIS_TICK_LABEL_FONT_SIZE_PX}px ${family}`,
                 // render.ts:555 的标签锚点 x=6
                 x: 6,
-                y: mark.line.y + mark.line.h / 2 - 0.5,
+                y: Math.min(Math.max(anchorY, labelAnchorBounds.minY), labelAnchorBounds.maxY),
                 align: "left",
                 baseline: "middle",
                 rgba: labelRgba,
@@ -1252,6 +1263,7 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             dpr: readDevicePixelRatio(),
             valueToY: spec.valueToY,
             paramName: spec.paramName,
+            axisUnit: spec.axisUnit,
         });
         // `lineOnly` 的项只画标签、没有配对的分隔线（见 axisMarkInstances 的说明）
         const lines = marks.filter((m) => !m.lineOnly);

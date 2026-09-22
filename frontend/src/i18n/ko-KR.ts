@@ -1034,6 +1034,8 @@ export const koKR = {
     param_editor_timeline_click_select_track: "타임라인 클릭으로 트랙 전환",
     clipboard_preview: "클립보드 미리보기",
     param_value_popup: "파라미터 값 팝업",
+    param_axis_unit_ratio: "배율",
+    param_axis_unit_db: "dB",
     lock_param_lines: "파라미터 라인 잠금",
     edge_smoothness: "스무딩",
     edge_smoothness_short: "스무딩",

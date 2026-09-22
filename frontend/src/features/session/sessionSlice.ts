@@ -139,6 +139,13 @@ import {
 
 import { SCALE_KEYS } from "../../utils/musicalScales";
 import type { ScaleLike } from "../../utils/musicalScales";
+import {
+    nextParamAxisUnit,
+    normalizeParamAxisUnits,
+    resolveParamAxisUnit,
+    supportsParamAxisUnit,
+    type ParamAxisUnits,
+} from "../../components/layout/pianoRoll/paramAxisUnits";
 import type { CustomScalePreset } from "../../utils/customScales";
 import { sanitizeCustomScalePreset } from "../../utils/customScales";
 import type { TempoMap } from "../../utils/tempoMap";
@@ -421,6 +428,14 @@ export interface SessionState {
     showClipboardPreview: boolean;
     /** 参数线附近显示参数值浮窗 */
     showParamValuePopup: boolean;
+    /**
+     * 纵轴标尺的展示单位（参数 id → `"ratio"` | `"db"`）。
+     *
+     * 只对音量 / 动态这类**线性幅值倍率**参数有意义（`1× = 0 dB`）：同一个值既能
+     * 读成倍率也能读成 dB，用户需要按习惯切换读法。缺项 = 倍率（默认）。
+     * 换算与解析见 `components/layout/pianoRoll/paramAxisUnits`。
+     */
+    paramAxisUnits: ParamAxisUnits;
     /** 参数编辑器（选择工具）拖动方向限制 */
     selectDragDirection: DragDirection;
     /** 参数编辑器（绘制工具）拖动方向限制 */
@@ -2039,6 +2054,8 @@ const initialState: SessionState = {
     paramEditorTimelineClickSelectTrackEnabled: true,
     showClipboardPreview: true,
     showParamValuePopup: true,
+    // 空映射 = 全部参数按倍率显示（历史行为）。
+    paramAxisUnits: {},
     selectDragDirection: "y-only" as DragDirection,
     drawDragDirection: "free" as DrawDragDirection,
     lineVibratoDragDirection: "free" as DrawDragDirection,
@@ -2806,6 +2823,18 @@ const sessionSlice = createSlice({
         toggleParamValuePopup(state) {
             state.showParamValuePopup = !state.showParamValuePopup;
         },
+        /**
+         * 切换某参数纵轴标尺的展示单位（倍率 ↔ dB）。
+         *
+         * 只对支持切换的参数生效（音量 / 动态）；其余参数点击纵轴不应有任何反应，
+         * 因此这里静默忽略而不是写入无效键 —— 无效键会让持久化里堆出无意义配置。
+         */
+        toggleParamAxisUnit(state, action: PayloadAction<string>) {
+            const param = action.payload;
+            if (!supportsParamAxisUnit(param)) return;
+            const next = nextParamAxisUnit(resolveParamAxisUnit(state.paramAxisUnits, param));
+            state.paramAxisUnits = { ...state.paramAxisUnits, [param]: next };
+        },
         cycleDragDirection(state, action: PayloadAction<"select" | "draw" | "vibrato">) {
             if (action.payload === "select") {
                 const order: DragDirection[] = ["free", "x-only", "y-only"];
@@ -3514,6 +3543,8 @@ const sessionSlice = createSlice({
                     state.showClipboardPreview = s.showClipboardPreview;
                 if (s.showParamValuePopup != null)
                     state.showParamValuePopup = Boolean(s.showParamValuePopup);
+                // 纵轴单位映射：手改坏配置（未知参数 / 非法取值）在这里被过滤掉。
+                state.paramAxisUnits = normalizeParamAxisUnits(s.paramAxisUnits);
                 if (s.scaleHighlightMode != null)
                     state.scaleHighlightMode = s.scaleHighlightMode === "always" ? "always" : "off";
                 if (s.ignoreGrouping != null) state.ignoreGrouping = Boolean(s.ignoreGrouping);
@@ -6175,6 +6206,7 @@ export const {
     toggleParamEditorTimelineClickSelectTrack,
     toggleClipboardPreview,
     toggleParamValuePopup,
+    toggleParamAxisUnit,
     cycleDragDirection,
     setDragDirection,
     setEdgeSmoothnessPercent,

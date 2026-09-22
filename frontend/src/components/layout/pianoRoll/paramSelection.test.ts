@@ -4,10 +4,12 @@ import {
     addBeatRange,
     beatRangesToFrameRanges,
     beatRangesToInclusiveSpans,
+    clampSelectionShift,
     makeBeatRange,
     normalizeSelection,
     rangeIndexAtBeat,
     removeRangeAtBeat,
+    resizeBeatRangeEdge,
     selectionBoundingRange,
     selectionContainsBeat,
     selectionCoversRange,
@@ -116,12 +118,83 @@ test("components/layout/pianoRoll/paramSelection.test.ts scripted checks", async
     // 原地点击 = 退化段（沿用旧行为：仍是非空选区，占 1 帧）
     assertJson(selectionFromBeatRange(3, 3), [{ startBeat: 3, endBeat: 3 }], "degenerate click");
 
+    // ── resizeBeatRangeEdge（选区边界拖拽，含"拖过对侧 = 交换左右"）──────
+    {
+        const range = { startBeat: 10, endBeat: 20 };
+        // 常规：被抓的那条边跟着走，另一条不动。
+        assertJson(
+            resizeBeatRangeEdge(range, "left", 12),
+            { startBeat: 12, endBeat: 20 },
+            "drag left edge inward",
+        );
+        assertJson(
+            resizeBeatRangeEdge(range, "left", 5),
+            { startBeat: 5, endBeat: 20 },
+            "drag left edge outward",
+        );
+        assertJson(
+            resizeBeatRangeEdge(range, "right", 25),
+            { startBeat: 10, endBeat: 25 },
+            "drag right edge outward",
+        );
+        assertJson(
+            resizeBeatRangeEdge(range, "right", 15),
+            { startBeat: 10, endBeat: 15 },
+            "drag right edge inward",
+        );
+        // 拖过对侧边界：**交换左右**，而不是卡在对侧边界上。
+        assertJson(
+            resizeBeatRangeEdge(range, "left", 22),
+            { startBeat: 20, endBeat: 22 },
+            "drag left edge past the right edge swaps sides",
+        );
+        assertJson(
+            resizeBeatRangeEdge(range, "right", 8),
+            { startBeat: 8, endBeat: 10 },
+            "drag right edge past the left edge swaps sides",
+        );
+        // 交换可逆：越过之后再拖回来，与"从未越过"得到同一结果
+        // （固定端始终是按下时的对侧边界，因此不需要记录"当前抓哪一侧"）。
+        assertJson(
+            resizeBeatRangeEdge(range, "left", 15),
+            { startBeat: 15, endBeat: 20 },
+            "swap is reversible",
+        );
+        // 恰好压在对侧边界上 → 退化为零宽段（不会产生负宽度）。
+        assertJson(
+            resizeBeatRangeEdge(range, "left", 20),
+            { startBeat: 20, endBeat: 20 },
+            "exactly on the opposite edge degenerates",
+        );
+    }
+
+    // ── clampSelectionShift（右键整段平移选区的位移夹取）────────────────
+    {
+        const one = [{ startBeat: 10, endBeat: 20 }];
+        // 区间内原样通过。
+        assertEqual(clampSelectionShift(one, 5, 0, 100), 5, "shift within range");
+        assertEqual(clampSelectionShift(one, -5, 0, 100), -5, "shift negative within range");
+        // 夹到两端：包围区间不得越出 [0, 100]。
+        assertEqual(clampSelectionShift(one, -15, 0, 100), -10, "shift clamped at left edge");
+        assertEqual(clampSelectionShift(one, 95, 0, 100), 80, "shift clamped at right edge");
+        // 多选区按**包围区间**夹取：形状（段间距）保持不变，整段一起停住。
+        const two = [
+            { startBeat: 10, endBeat: 20 },
+            { startBeat: 30, endBeat: 40 },
+        ];
+        assertEqual(clampSelectionShift(two, -30, 0, 100), -10, "multi range clamped by bounds");
+        assertEqual(clampSelectionShift(two, 100, 0, 100), 60, "multi range right clamp");
+        // 选区本身宽于 [minBeat, maxBeat]：约束交叉 → 自由平移（不裁成压扁的形状）。
+        const wide = [{ startBeat: -5, endBeat: 200 }];
+        assertEqual(clampSelectionShift(wide, 40, 0, 100), 40, "wider-than-domain passes through");
+        // 退化输入。
+        assertEqual(clampSelectionShift(null, 5, 0, 100), 0, "null selection");
+        assertEqual(clampSelectionShift(one, Number.NaN, 0, 100), 0, "NaN delta");
+        assertEqual(clampSelectionShift(one, 5, 0, Number.NaN), 5, "NaN bound");
+    }
+
     // ── addBeatRange ────────────────────────────────────────────────────
-    assertJson(
-        addBeatRange(null, 0, 1),
-        [{ startBeat: 0, endBeat: 1 }],
-        "add to empty",
-    );
+    assertJson(addBeatRange(null, 0, 1), [{ startBeat: 0, endBeat: 1 }], "add to empty");
     assertJson(
         addBeatRange([{ startBeat: 0, endBeat: 1 }], 2, 3),
         [
@@ -142,16 +215,8 @@ test("components/layout/pianoRoll/paramSelection.test.ts scripted checks", async
         { startBeat: 0, endBeat: 1 },
         { startBeat: 2, endBeat: 3 },
     ];
-    assertJson(
-        removeRangeAtBeat(twoRanges, 2.5),
-        [{ startBeat: 0, endBeat: 1 }],
-        "remove second",
-    );
-    assertJson(
-        removeRangeAtBeat(twoRanges, 0.5),
-        [{ startBeat: 2, endBeat: 3 }],
-        "remove first",
-    );
+    assertJson(removeRangeAtBeat(twoRanges, 2.5), [{ startBeat: 0, endBeat: 1 }], "remove second");
+    assertJson(removeRangeAtBeat(twoRanges, 0.5), [{ startBeat: 2, endBeat: 3 }], "remove first");
     // 边界命中（端点属于该段）
     assertJson(removeRangeAtBeat(twoRanges, 1), [{ startBeat: 2, endBeat: 3 }], "remove at end");
     assertJson(removeRangeAtBeat(twoRanges, 2), [{ startBeat: 0, endBeat: 1 }], "remove at start");
@@ -166,7 +231,8 @@ test("components/layout/pianoRoll/paramSelection.test.ts scripted checks", async
     assertEqual(removeRangeAtBeat(null, 0.5), null, "remove from null");
 
     // ── 命中查询 ────────────────────────────────────────────────────────
-    assertEqual(rangeIndexAtBeat(twoRanges, 0.5), 0, "index first");    assertEqual(rangeIndexAtBeat(twoRanges, 1.5), -1, "index in gap");
+    assertEqual(rangeIndexAtBeat(twoRanges, 0.5), 0, "index first");
+    assertEqual(rangeIndexAtBeat(twoRanges, 1.5), -1, "index in gap");
     assertEqual(rangeIndexAtBeat(twoRanges, 2.5), 1, "index second");
     assertEqual(rangeIndexAtBeat(null, 1), -1, "index null");
     assertEqual(selectionContainsBeat(twoRanges, 3), true, "contains end");

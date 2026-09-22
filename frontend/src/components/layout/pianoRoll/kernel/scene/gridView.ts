@@ -219,6 +219,14 @@ export interface KeyboardGeometrySignatureArgs {
      * pitch 分支不需要它。
      */
     readonly paramName?: string | undefined;
+    /**
+     * 纵轴展示单位（音量 / 动态的倍率 ↔ dB）。
+     *
+     * 必须入签名：单位只换标签文本，**几何本身完全不变** —— 若不编进签名，
+     * "切换单位"这个输入就没有任何可观测的变化，轴几何与文字都不会重建，
+     * 表现为"点了切换但刻度还是旧单位"。
+     */
+    readonly axisUnit?: string | undefined;
     readonly view: LiveGridView;
     readonly absMin: number;
     readonly absMax: number;
@@ -268,6 +276,8 @@ export function keyboardGeometrySignature(args: KeyboardGeometrySignatureArgs): 
             "value",
             args.kind,
             args.paramName ?? "",
+            // 展示单位（倍率 / dB）：只改标签文本，几何不变，因此必须显式入签名。
+            args.axisUnit ?? "",
             args.view.center,
             args.view.span,
             args.absMin,

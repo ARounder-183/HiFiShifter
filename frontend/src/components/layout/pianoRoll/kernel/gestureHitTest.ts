@@ -34,6 +34,21 @@ export const CURVE_HIT_RADIUS_PX = 10;
 export const SELECTION_EDGE_HIT_PX = 8;
 
 /**
+ * 允许边缘拖拽所需的**最小选区宽度**（CSS px）。
+ *
+ * 【为什么需要】随机单击参数编辑器会留下一个**零宽**选区：框选路径在 pointerdown
+ * 时就写入一段 `startBeat === endBeat` 的选区（为了立刻抹掉上一个选区的框，见
+ * `usePianoRollInteractions` 的框选分支）。这种选区在画面上没有任何可见区域，两条
+ * "边缘"也重合在同一条线上，但边缘命中带（±8px）照样命中 —— 用户会在单击处看到
+ * `ew-resize` 光标，却找不到任何可以拖的选区，于是"光标变了但画面没东西可拖"。
+ *
+ * 阈值取 2px：低于它时填充只剩一条发丝线、两条边框几乎重合，"拖的是左缘还是右缘"
+ * 已无从分辨，边缘拖拽没有可兑现的语义。**零宽 / 亚像素选区一律不提供边缘交互**
+ * （光标与手势都不变），用户就不会在空选区上看到可拖的提示。
+ */
+export const SELECTION_EDGE_MIN_WIDTH_PX = 2;
+
+/**
  * 命中测试使用的值→视口 y 投影。
  *
  * 与绘制侧同一约定：接收参数值，返回视口坐标 y（CSS px）。
@@ -141,6 +156,10 @@ export function isPointerNearCurve(args: {
  * 特殊说明 2：边界比较用 `<=`（闭区间），让"正好拖到边缘"这一帧仍然可命中——
  * 指针事件的坐标本来就离散，开区间会让边界那一列像素失效。
  *
+ * 特殊说明 3：**窄于 {@link SELECTION_EDGE_MIN_WIDTH_PX} 的选区一律不命中**。
+ * 零宽 / 亚像素选区在画面上没有可见区域（随机单击就会留下一个），却会因为两条
+ * 边缘重合而始终落在命中带内，表现为"光标变成可拉伸、但看不到任何选区"。
+ *
  * @param args 判定参数。
  * @returns `"left"` / `"right"` / `null`（未命中边缘）。
  */
@@ -157,6 +176,8 @@ export function hitTestSelectionEdge(args: {
     if (!Number.isFinite(leftXPx) || !Number.isFinite(rightXPx)) return null;
     const left = Math.min(leftXPx, rightXPx);
     const right = Math.max(leftXPx, rightXPx);
+    // 不可见的选区（零宽 / 亚像素）没有可抓的边缘：见 SELECTION_EDGE_MIN_WIDTH_PX。
+    if (right - left < SELECTION_EDGE_MIN_WIDTH_PX) return null;
     if (Math.abs(localXPx - left) <= SELECTION_EDGE_HIT_PX) return "left";
     if (Math.abs(localXPx - right) <= SELECTION_EDGE_HIT_PX) return "right";
     return null;

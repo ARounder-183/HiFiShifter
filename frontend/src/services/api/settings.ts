@@ -132,6 +132,13 @@ export interface UiSettings {
     paramEditorSeekPlayhead?: boolean;
     showClipboardPreview: boolean;
     showParamValuePopup?: boolean;
+    /**
+     * 纵轴标尺的展示单位（参数 id → `"ratio"` | `"db"`）。
+     *
+     * 只对音量 / 动态有效（`1× = 0 dB`）：同一个线性幅值既能读成倍率也能读成 dB。
+     * 缺项 / 未知键由前端 `normalizeParamAxisUnits` 过滤（见 sessionSlice）。
+     */
+    paramAxisUnits?: Record<string, string>;
     lockParamLines?: boolean;
     metronomeEnabled?: boolean;
     metronomeGain?: number;

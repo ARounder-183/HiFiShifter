@@ -78,6 +78,7 @@ export const persistUiSettings = createAsyncThunk(
             paramEditorSeekPlayhead: s.paramEditorSeekPlayheadEnabled,
             showClipboardPreview: s.showClipboardPreview,
             showParamValuePopup: s.showParamValuePopup,
+            paramAxisUnits: s.paramAxisUnits,
             lockParamLines: s.lockParamLinesEnabled,
             metronomeEnabled: s.metronomeEnabled,
             metronomeGain: s.metronomeGain,

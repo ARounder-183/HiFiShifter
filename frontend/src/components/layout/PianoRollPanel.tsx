@@ -36,6 +36,7 @@ import {
     cycleDragDirection,
     setToolMode,
     persistUiSettings,
+    toggleParamAxisUnit,
     setParamEditorSyncTimeline,
     setPrimaryTimeUnit,
     setSecondaryTimeUnit,
@@ -165,6 +166,12 @@ import { useClipsPeaksForPianoRoll } from "./pianoRoll/useClipsPeaksForPianoRoll
 import { PianoRollWaveformSurface } from "./pianoRoll/PianoRollWaveformSurface";
 import { makeLoudnessAmplitudeMap } from "./pianoRoll/PianoRollWaveformSurface";
 import { clampParamWriteValue } from "./pianoRoll/paramRanges";
+import {
+    formatDbReadout,
+    resolveParamAxisUnit,
+    supportsParamAxisUnit,
+} from "./pianoRoll/paramAxisUnits";
+import { midiToLabel } from "./pianoRoll/utils";
 import { useLoudnessCurves } from "./pianoRoll/useLoudnessCurves";
 import {
     createLiveOverrideReader,
@@ -945,6 +952,29 @@ export const PianoRollPanel: React.FC = () => {
         value: number;
         displayText?: string;
     } | null>(null);
+    /**
+     * 纵轴标尺的悬浮读数（`弹出展示参数` 在左轴上的形态）。
+     *
+     * 【为什么与 `paramValuePreview` 分开】那个浮窗挂**曲线画布**的坐标系
+     * （`canvasRef` 的 rect），本浮窗挂轴列（`axisWrapRef` 的 rect）。两者坐标系
+     * 不同，混用会让浮窗横向偏出 56px 宽的轴列。
+     */
+    const [axisValuePreview, setAxisValuePreview] = useState<{
+        clientX: number;
+        clientY: number;
+        text: string;
+    } | null>(null);
+
+    /**
+     * 当前参数的纵轴展示单位（音量 / 动态支持倍率 ↔ dB 切换）。
+     *
+     * 一个值同时喂给三处：GL 刻度标签（经 `buildGridSpec`）、参数线悬浮浮窗
+     * （`formatParamValuePreview`）、纵轴标尺悬浮浮窗。三者必须同源，否则同一位
+     * 置会出现"刻度写 −6、浮窗写 0.501"的自相矛盾读数。
+     */
+    const editParamAxisUnit = resolveParamAxisUnit(s.paramAxisUnits, editParam);
+    /** 当前参数的左轴是否可切换展示单位（决定光标与角标）。 */
+    const axisUnitToggleAvailable = supportsParamAxisUnit(editParam);
 
     const formatParamValuePreview = useCallback(
         (value: number): string => {
@@ -964,11 +994,16 @@ export const PianoRollPanel: React.FC = () => {
                 if (Math.abs(display) >= 10) return display.toFixed(2);
                 return display.toFixed(3);
             }
+            // 音量 / 动态切到 dB 读法：1× = 0 dB（见 paramAxisUnits）。带 `dB` 后缀
+            // 与倍率读数区分——浮窗有空间写清楚单位，用户才不会把 −6 误读成倍率。
+            if (editParamAxisUnit === "db" && supportsParamAxisUnit(editParam)) {
+                return formatDbReadout(value);
+            }
             if (Math.abs(value) >= 100) return value.toFixed(1);
             if (Math.abs(value) >= 10) return value.toFixed(2);
             return value.toFixed(3);
         },
-        [editParam],
+        [editParam, editParamAxisUnit],
     );
 
     const currentDrawTool = s.drawToolMode === "line" ? "vibrato" : s.drawToolMode;
@@ -2857,6 +2892,10 @@ export const PianoRollPanel: React.FC = () => {
             weakRgba: toRgba(colors.pitchGridOther),
             // 文字与刻度线（阶段 2 Task 5）：GL 侧据此渲染轴标签与刻度。
             paramName: editParam,
+            // 纵轴展示单位（音量 / 动态的倍率 ↔ dB）。只对支持切换的参数下发，
+            // 其余参数保持缺省 —— 签名里的 `axisUnit ?? ""` 因此不会给非切换参数
+            // 附加一个无意义的常量。
+            ...(supportsParamAxisUnit(editParam) ? { axisUnit: editParamAxisUnit } : {}),
             // 与传给 drawPianoRoll 的 fontFamily 同一个值（第 3268 行），
             // 保证两种渲染模式的字形完全一致。
             fontFamily,
@@ -2969,6 +3008,9 @@ export const PianoRollPanel: React.FC = () => {
         themeMode,
         s.scaleHighlightMode,
         effectiveProjectScale,
+        // 纵轴展示单位（倍率 / dB）：同样是 buildGridSpec 的输入，漏了就是
+        // "点了切换但刻度纹丝不动"（签名不变 → GL 几何与文字都不重建）。
+        editParamAxisUnit,
         // Tempo Map 分段音阶（缺陷 #6）：换 Tempo Map 会换分段。
         s.tempoMap,
     ]);
@@ -4916,6 +4958,12 @@ export const PianoRollPanel: React.FC = () => {
 
     // Piano keys (axis) hover: play sine wave sound when pointer moves over keys
     useEffect(() => {
+        // 【只有音高参数的左轴才是钢琴卷帘】其余参数的左轴是数值刻度（音量 / 动态 /
+        // 音分…），没有"对应的音高"可发声——对着刻度按下就响是纯粹的噪声，且音量 /
+        // 动态的刻度点击另有语义（切换展示单位，见下一个 effect）。非音高时直接在
+        // 注册监听之前返回，连手势状态都不建立。
+        if (editParam !== "pitch") return;
+
         const el = axisWrapRef.current;
         if (!el) return;
 
@@ -4991,7 +5039,80 @@ export const PianoRollPanel: React.FC = () => {
             el.removeEventListener("pointerleave", onPointerLeave);
             stopNote();
         };
-    }, [pitchViewRef]);
+    }, [editParam, pitchViewRef]);
+
+    // ── 纵轴标尺：左键点击切换展示单位（音量 / 动态）──────────────────────────
+    //
+    // 「倍率 ↔ dB」只对**线性幅值倍率**参数有意义（1× = 0 dB，见 paramAxisUnits）。
+    // 其余参数的左轴单位由参数语义唯一确定（音高是音名、音分就是音分），因此支持
+    // 判定不通过时**完全不注册监听**——点击左轴保持"无操作"，而不是静默写一个
+    // 无意义的设置项。
+    //
+    // 用 `click` 而不是 pointerdown/up 自配对：`click` 只在按下与抬起都落在本元素
+    // （或本元素内的子元素）上时触发，天然排除"从轴列拖到画布"这类手势；轴列上
+    // 目前没有其它拖拽手势，因此不需要更复杂的裁决。
+    useEffect(() => {
+        const el = axisWrapRef.current;
+        if (!el) return;
+        if (!supportsParamAxisUnit(editParam)) return;
+        const onClick = (e: MouseEvent) => {
+            // 只认左键：中键留给内核的平移手势，右键留给上下文菜单。
+            if (e.button !== 0) return;
+            dispatch(toggleParamAxisUnit(editParam));
+            void dispatch(persistUiSettings());
+        };
+        el.addEventListener("click", onClick);
+        return () => el.removeEventListener("click", onClick);
+    }, [dispatch, editParam]);
+
+    // ── 纵轴标尺的悬浮读数（`弹出展示参数`）──────────────────────────────────
+    //
+    // 与曲线上的浮窗共用同一个开关（`showParamValuePopup`）。读数口径按左轴的**内容**
+    // 分两种：
+    // - 钢琴卷帘（音高）：**只给音名**（E4 / D4），不给音分 —— 左轴本来就是按琴键
+    //   分行画出来的，"E4+12" 并不指向某个键，反而会被误读成另一个音；
+    // - 数值刻度（音量 / 动态 / 音分 / 张力…）：给该 y 处的参数值，其中音量 / 动态
+    //   按纵轴展示单位读数（切 dB 时就是 dB）。
+    useEffect(() => {
+        const el = axisWrapRef.current;
+        if (!el) return;
+        if (!s.showParamValuePopup) {
+            setAxisValuePreview(null);
+            return;
+        }
+
+        const describe = (clientY: number): string => {
+            const bounds = el.getBoundingClientRect();
+            // 分母必须是**绘图区**高度（`viewSize.h`），不是轴列高度：轴列比滚动
+            // 视口高出标尺行与底部滚动条行，用列高会让读数整体偏低（与轴上滚轮
+            // 处理同一条约束，见上方 wheel effect 的说明）。
+            const h = Math.max(1, viewSizeRef.current.h);
+            const y = clamp(clientY - bounds.top, 0, h);
+            if (editParam === "pitch") {
+                // 与琴键实例同一投影：向下取整到"这一行属于哪个键"。
+                return midiToLabel(Math.floor(yToValue("pitch", y, h)));
+            }
+            return formatParamValuePreview(yToValue(editParam, y, h));
+        };
+
+        const onPointerMove = (e: PointerEvent) => {
+            const text = describe(e.clientY);
+            if (text.length === 0) {
+                setAxisValuePreview(null);
+                return;
+            }
+            setAxisValuePreview({ clientX: e.clientX, clientY: e.clientY, text });
+        };
+        const onPointerLeave = () => setAxisValuePreview(null);
+
+        el.addEventListener("pointermove", onPointerMove);
+        el.addEventListener("pointerleave", onPointerLeave);
+        return () => {
+            el.removeEventListener("pointermove", onPointerMove);
+            el.removeEventListener("pointerleave", onPointerLeave);
+            setAxisValuePreview(null);
+        };
+    }, [s.showParamValuePopup, editParam, yToValue, formatParamValuePreview]);
 
     // 选区在所有工具模式下保留并持续渲染（选区带 / 剪贴板预览在 render.ts
     // 不按工具门控）：绘制 / 直线颤音工具下不再自动清空，用户可以换轨后
@@ -7432,7 +7553,13 @@ export const PianoRollPanel: React.FC = () => {
                     <div
                         ref={axisWrapRef}
                         className="bg-qt-window border-r border-qt-border relative"
-                        style={{ width: AXIS_W, flex: 1 }}
+                        // 支持切换展示单位的参数（音量 / 动态）整列可点：光标给
+                        // pointer 作为"这里可点"的提示，否则该交互完全不可发现。
+                        style={{
+                            width: AXIS_W,
+                            flex: 1,
+                            cursor: axisUnitToggleAvailable ? "pointer" : undefined,
+                        }}
                     >
                         {/* 键盘轴 GL 层（阶段 2/3）：铺在 Canvas2D 轴画布**下面**
                             （DOM 顺序在前、无 z-index），画键盘几何与音名标签。
@@ -7447,6 +7574,43 @@ export const PianoRollPanel: React.FC = () => {
                             aria-hidden
                         />
                         <canvas ref={axisCanvasRef} className="absolute inset-0" />
+
+                        {/* 纵轴展示单位角标（仅音量 / 动态）：显示当前读数单位，同时
+                            是"点击可切换"的可见提示（整列光标为 pointer）。
+                            刻意**不**挂 onClick —— 点击会冒泡到上面的轴列处理器，
+                            再挂一个会切换两次（净效果为"点了没反应"）。 */}
+                        {axisUnitToggleAvailable ? (
+                            <div
+                                className="absolute top-0 right-0 z-10 px-1 text-[9px] leading-[14px] text-qt-text-muted"
+                                aria-hidden
+                            >
+                                {editParamAxisUnit === "db"
+                                    ? tAny("param_axis_unit_db")
+                                    : tAny("param_axis_unit_ratio")}
+                            </div>
+                        ) : null}
+
+                        {/* 纵轴浮动读数（`弹出展示参数` 的轴列形态）：挂在轴列坐标系里，
+                            底边对齐光标向上展开——与曲线浮窗同一观感。 */}
+                        {s.showParamValuePopup && axisValuePreview
+                            ? (() => {
+                                  const rect = axisWrapRef.current?.getBoundingClientRect();
+                                  if (!rect) return null;
+                                  return (
+                                      <div
+                                          className="absolute z-20 pointer-events-none bg-qt-panel border border-qt-border rounded px-2 py-1 text-[11px] leading-none text-qt-text"
+                                          style={{
+                                              left: axisValuePreview.clientX - rect.left,
+                                              top: axisValuePreview.clientY - rect.top,
+                                              transform: "translate(0, -100%)",
+                                              whiteSpace: "nowrap",
+                                          }}
+                                      >
+                                          {axisValuePreview.text}
+                                      </div>
+                                  );
+                              })()
+                            : null}
                     </div>
                 </Flex>
 

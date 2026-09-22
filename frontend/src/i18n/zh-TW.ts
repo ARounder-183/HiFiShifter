@@ -936,6 +936,8 @@ export const zhTW = {
     param_editor_timeline_click_select_track: "允許時間軸點擊切換軌道",
     clipboard_preview: "剪貼簿預覽",
     param_value_popup: "彈出顯示參數",
+    param_axis_unit_ratio: "倍率",
+    param_axis_unit_db: "dB",
     lock_param_lines: "鎖定參數線",
     edge_smoothness: "平滑度",
     edge_smoothness_short: "平滑度",

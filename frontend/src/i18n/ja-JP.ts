@@ -969,6 +969,8 @@ export const jaJP = {
     param_editor_timeline_click_select_track: "タイムラインクリックでトラックを切り替える",
     clipboard_preview: "クリップボードプレビュー",
     param_value_popup: "パラメータ値ポップアップ",
+    param_axis_unit_ratio: "倍率",
+    param_axis_unit_db: "dB",
     lock_param_lines: "パラメータ線をロック",
     edge_smoothness: "平滑度",
     edge_smoothness_short: "平滑",

@@ -138,6 +138,14 @@ export interface PianoRollGridSpec {
      * 按内部值直接格式化。GL 侧据此选择刻度种类，**必须**与 Canvas2D 路径同一个值。
      */
     readonly paramName?: string;
+    /**
+     * 纵轴展示单位（音量 / 动态：倍率 ↔ dB，见 `paramAxisUnits`）。
+     *
+     * 特殊说明：只影响数值轴**标签文本**（刻度位置不变），且必须参与轴几何签名 ——
+     * 否则切单位后签名不变，轴几何不重建，标签会停在旧单位上（症状是"点了切换但
+     * 刻度纹丝不动"）。
+     */
+    readonly axisUnit?: "ratio" | "db";
     /** 字体族（与 Canvas2D 路径共用同一个，避免两种模式字形不同）。 */
     readonly fontFamily?: string;
     /** 数值轴刻度标签颜色（`colors.tensionLabel`）。 */

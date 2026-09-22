@@ -32,6 +32,7 @@ import {
     isChildFormantOffsetCentsParam,
 } from "../../childPitchOffsetParams";
 import { isDynParam } from "../../paramRanges";
+import { formatDbLabel, supportsParamAxisUnit, type ParamAxisUnit } from "../../paramAxisUnits";
 
 /** 数值轴刻度的种类。 */
 export type AxisKind = "cents" | "formantCents" | "degrees" | "level" | "fallback";
@@ -74,6 +75,13 @@ export interface AxisMarkArgs {
      * `childPitchOffsetValueToDisplay` 换算；缺省时标签直接用内部值。
      */
     readonly paramName?: string;
+    /**
+     * 纵轴展示单位（音量 / 动态支持倍率 ↔ dB 切换，见 `paramAxisUnits`）。
+     *
+     * 缺省 = 倍率（历史行为）。只影响**标签文本**：刻度值与其在轴上的位置描述的是
+     * 数据本身，与读法无关，因此切单位不改变任何几何。
+     */
+    readonly axisUnit?: ParamAxisUnit;
 }
 
 /**
@@ -194,11 +202,24 @@ export function resolveAxisStep(
  * 1.0 恒等于数字满量程（与 DAW 峰值电平表同坐标系），因此刻度读数可以直接
  * 与其它 DAW 的电平测量对照 —— 不要引入任何"相对本组最响段落"的换算。
  *
+ * 特殊说明 3（dB 单位）：音量 / 动态支持把刻度读成 dB（`1× = 0 dB`，见
+ * `paramAxisUnits`）。切到 dB 时**刻度位置不变**，只把数字换成 `20·log10(值)` ——
+ * 刻度描述的是数据，读法不该挪动曲线。这一步发生在标签格式化的最前面：dB 读数
+ * 与倍率读数是同一量的两种写法，先换算再套各自的格式化规则才不会有第三份口径。
+ *
  * @param value 内部参数值。
- * @param param 参数名（用于度数换算 / 动态的 dB 副标签）；缺省时不做换算。
+ * @param param 参数名（用于度数换算 / 动态的倍率读数）；缺省时不做换算。
+ * @param axisUnit 纵轴展示单位（仅音量 / 动态有意义）；缺省按倍率。
  * @returns 标签文本。
  */
-export function formatAxisMarkLabel(value: number, param?: string): string {
+export function formatAxisMarkLabel(
+    value: number,
+    param?: string,
+    axisUnit?: ParamAxisUnit,
+): string {
+    if (axisUnit === "db" && param != null && supportsParamAxisUnit(param)) {
+        return formatDbLabel(value);
+    }
     if (param != null && isDynParam(param)) {
         // dyn 的纵轴是**倍率模式**：刻度直接标注曲线本身的量纲
         // （1.0× = 0 dB、0.5× = −6 dB），与上下拖拽/± 移动的乘性语义
@@ -250,7 +271,7 @@ export function resolveAxisKind(param: string): AxisKind {
 export function buildAxisMarkInstances(
     args: AxisMarkArgs,
 ): (AxisMarkInstance & { readonly lineOnly: boolean })[] {
-    const { kind, view, heightPx, axisWidthPx, dpr, valueToY, paramName } = args;
+    const { kind, view, heightPx, axisWidthPx, dpr, valueToY, paramName, axisUnit } = args;
     if (!Number.isFinite(view.span) || !Number.isFinite(view.center)) return [];
     if (!Number.isFinite(heightPx) || !Number.isFinite(axisWidthPx)) return [];
     if (!Number.isFinite(dpr) || dpr <= 0) return [];
@@ -291,7 +312,7 @@ export function buildAxisMarkInstances(
         out.push({
             isStrong,
             value: v,
-            label: formatAxisMarkLabel(v, paramName),
+            label: formatAxisMarkLabel(v, paramName, axisUnit),
             line: toLineRect(y, isStrong),
             lineOnly: false,
         });
@@ -311,7 +332,7 @@ export function buildAxisMarkInstances(
         out.push({
             isStrong: false,
             value: 0,
-            label: formatAxisMarkLabel(0, paramName),
+            label: formatAxisMarkLabel(0, paramName, axisUnit),
             line: toLineRect(valueToY(0, heightPx), false),
             lineOnly: true,
         });

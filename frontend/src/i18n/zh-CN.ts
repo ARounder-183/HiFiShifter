@@ -934,6 +934,8 @@ export const zhCN = {
     param_editor_timeline_click_select_track: "允许时间轴点击切换轨道",
     clipboard_preview: "剪贴板预览",
     param_value_popup: "弹出展示参数",
+    param_axis_unit_ratio: "倍率",
+    param_axis_unit_db: "dB",
     lock_param_lines: "锁定参数线",
     edge_smoothness: "平滑度",
     edge_smoothness_short: "平滑度",

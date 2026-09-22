@@ -32,6 +32,7 @@ import {
     hitTestSelectionBody,
     hitTestSelectionEdge,
     isPointerNearCurve,
+    SELECTION_EDGE_MIN_WIDTH_PX,
 } from "./kernel/gestureHitTest";
 import {
     beatToFrameDelta,
@@ -98,9 +99,11 @@ import {
 import {
     addBeatRange,
     beatRangesToInclusiveSpans,
+    clampSelectionShift,
     normalizeSelection,
     rangeIndexAtBeat,
     removeRangeAtBeat,
+    resizeBeatRangeEdge,
     selectionFromBeatRange,
     shiftSelectionRanges,
     type FrameSpan,
@@ -139,6 +142,22 @@ function makePvValueSource(pv: ParamViewSegment): (frame: number) => number {
         return idx >= 0 && idx < pv.edit.length ? pv.edit[idx] : 0;
     };
 }
+
+/**
+ * **数据写入型**拖动（拖动参数线 / 拉伸选区内曲线）的点击死区（CSS px，逐轴判定）。
+ *
+ * 【为什么必须有】这两条路径的收尾都会**回写后端**并打一个撤销检查点。用户只是
+ * 在参数线上点一下（或按住拉伸修饰键在边缘点一下）时，指针没有任何位移，变换结果
+ * 与原始数据逐帧相同 —— 于是"什么都没做"的一次点击会写回一份等值数据，还多出
+ * 一条按下去毫无变化的撤销记录。
+ *
+ * 【阈值为什么逐轴判定】"选择"工具的默认拖动方向是 `y-only`（见 selectDragDirection），
+ * 只判水平位移会漏掉竖直方向的手抖；取两轴较大的那个更贴合"用户到底动了没有"。
+ *
+ * 只用于**会写数据**的手势；纯选区调整（边缘调整 / 右键平移 / 框选）不写任何东西，
+ * 因此不需要死区。
+ */
+const PARAM_DRAG_DEAD_ZONE_PX = 3;
 
 export function usePianoRollInteractions(args: {
     dispatch: AppDispatch;
@@ -1929,13 +1948,24 @@ export function usePianoRollInteractions(args: {
      * 边缘拉伸命中：在 `modifier.paramStretch`（默认 Alt）按下时，找**最近**的
      * 选区段边缘。多选区下返回被命中的段号 + 哪一侧 —— 拉伸只作用于那一段，
      * 其余段不动。
+     *
+     * 【`requireModifier` 的两种用法】缺省（`true`）＝既有的"按住 Alt 拉伸"，也是
+     * 光标提示（`ew-resize`）所依据的判定；传 `false` ＝**不按任何修饰键**也能抓
+     * 边缘拖拽（用户报告的期望行为）。后者在 pointerdown 里要让位给"已选中参数线"
+     * 的拖拽，见那里的优先级说明。
      */
     const findStretchSelectionEdge = useCallback(
         (
             e: ReactPointerEvent<HTMLCanvasElement>,
+            options?: { readonly requireModifier?: boolean },
         ): { rangeIndex: number; edge: "left" | "right" } | null => {
             if (toolMode !== "select") return null;
-            if (!isModifierActive(paramStretchKb, e.nativeEvent)) return null;
+            if (
+                (options?.requireModifier ?? true) &&
+                !isModifierActive(paramStretchKb, e.nativeEvent)
+            ) {
+                return null;
+            }
             const sel = selectionRef.current;
             const canvas = canvasRef.current;
             if (!sel || sel.length === 0 || !canvas) return null;
@@ -1967,6 +1997,19 @@ export function usePianoRollInteractions(args: {
 
     const isPointerNearStretchSelectionEdge = useCallback(
         (e: ReactPointerEvent<HTMLCanvasElement>): boolean => findStretchSelectionEdge(e) !== null,
+        [findStretchSelectionEdge],
+    );
+
+    /**
+     * 无修饰键的边缘命中（不按任何修饰键、直接左键拖拽边缘即可拉伸）。
+     *
+     * 与 {@link isPointerNearStretchSelectionEdge} 分开命名：前者是"Alt 拉伸"的
+     * 提示与路径，后者是新增的直接拖拽路径，两者在 pointerdown 里的**优先级不同**
+     * （已选中的参数线要压过后者），混用一个判定会让优先级失去表达。
+     */
+    const isPointerNearSelectionEdge = useCallback(
+        (e: ReactPointerEvent<HTMLCanvasElement>): boolean =>
+            findStretchSelectionEdge(e, { requireModifier: false }) !== null,
         [findStretchSelectionEdge],
     );
 
@@ -2011,6 +2054,20 @@ export function usePianoRollInteractions(args: {
             }
 
             if (panRef.current || strokeRef.current) return;
+            // 光标提示的顺序与 pointerdown 的手势优先级**逐条对应**（否则会出现
+            // "显示可拉伸、按下却在拖曲线"的错位）：
+            //   1. **已选中的参数线** → 抓取。参数线的命中范围最窄（10px 带 + 必须
+            //      落在选区段内），而且它在画面里可能只有很短一截、很难瞄准；选区的
+            //      边缘则是两条贯穿整个高度的竖线，用户想抓边缘时会自己去对着线抓。
+            //      因此参数线的交互优先级**永远**高于选区自身（边缘 / 多选 / 平移）。
+            //   2. Alt（显式修饰键）压住边缘 → 拉伸（参数线未命中时才轮到它）；
+            //   3. 多选修饰键提示框选 / 切换段（同样让位给参数线，否则按住修饰键就
+            //      再也拖不动选区内的曲线）；
+            //   4. 无修饰键的边缘 → 调整边界。
+            if (isPointerNearDraggableSelection(e.clientX, e.clientY)) {
+                setCanvasCursor("grab");
+                return;
+            }
             if (isPointerNearStretchSelectionEdge(e)) {
                 setCanvasCursor("ew-resize");
                 return;
@@ -2024,8 +2081,8 @@ export function usePianoRollInteractions(args: {
                 setCanvasCursor("crosshair");
                 return;
             }
-            if (isPointerNearDraggableSelection(e.clientX, e.clientY)) {
-                setCanvasCursor("grab");
+            if (isPointerNearSelectionEdge(e)) {
+                setCanvasCursor("ew-resize");
                 return;
             }
             setCanvasCursor(getDefaultCanvasCursor());
@@ -2046,6 +2103,7 @@ export function usePianoRollInteractions(args: {
             strokeRef,
             isPointerNearStretchSelectionEdge,
             isPointerNearDraggableSelection,
+            isPointerNearSelectionEdge,
             paramStretchKb,
             paramMultiSelectKb,
             setCanvasCursor,
@@ -2453,16 +2511,37 @@ export function usePianoRollInteractions(args: {
                     return clampSelectionBeat(beat);
                 };
 
+                // ── 选区上的手势优先级（高 → 低，唯一定义处）──────────────────
+                //   0. Alt 形变控制点（上方已 return；控制点是画面上显式的小圆点，
+                //      命中框 8px，比参数线还窄，且只在按住修饰键时出现 → 排最高）；
+                //   1. **已选中的参数线**（落在某段内且靠近曲线）；
+                //   2. Alt + 选区边缘 → 拉伸选区内的曲线（改数据、进撤销栈）；
+                //   3. 多选修饰键 → 追加 / 切换段；
+                //   4. 无修饰键 + 边缘 → 只调整选区边界；
+                //   5. 右键 + 选区内部 → 左右平移**指针所在的那一段**（只动选区，
+                //      不动数据；多段选区下其余段不动）；
+                //   6. 普通框选（替换整个选区）。
+                //
+                // 【为什么参数线永远第一】参数线的命中范围最窄（10px 纵向带 + 必须
+                // 落在段内），而它在画面里可能只占很短一截，很难瞄准；选区边缘则是两条
+                // 贯穿整个高度的明显竖线，用户想抓边缘时会自己去找那两条线。因此**所有
+                // 选区自身的交互（边缘 / 多选 / 平移）都必须给参数线让路** —— 否则
+                // "抓选区边界处那截曲线"会被选区交互永远吃掉。
+                //
+                // 下面每一处选区交互都显式让位（`!onSelectedCurve` / 各自的修饰键
+                // 取反），因为这里的分支顺序本身就编码了优先级。
+                const onSelectedCurve = isPointerNearDraggableSelection(e.clientX, e.clientY);
+
                 // ── 多选修饰键（默认 ⌘/Ctrl）─────────────────────────────────
                 // 拖动 = 在已有选区上**追加**一段（并集；重叠/相接自动合并）；
                 // 原地点击已有段 = 取消该段（与时间轴 ⌘+点击多选切换同源语义）。
                 //
-                // 手势优先级（高 → 低）：Alt 形变控制点（上方已 return）→
-                // Alt 边缘拉伸（下面的拉伸分支）→ **本分支** → 段内近曲线拖动
-                // （移动所有段）→ 普通框选（替换整个选区）。Alt 拉伸修饰键按下时
-                // 本分支让位，否则在选区内侧边缘处无法拉伸。
+                // Alt 拉伸修饰键按下时本分支让位（见条件里的取反），否则在选区内侧
+                // 边缘处无法拉伸；指针压住**已选中的参数线**时也让位，否则按住修饰键
+                // 就再也拖不动选区内的曲线（而这正是该修饰键最不该挡住的交互）。
                 if (
                     e.button === 0 &&
+                    !onSelectedCurve &&
                     !isModifierActive(paramStretchKb, e.nativeEvent) &&
                     isModifierActive(paramMultiSelectKb, e.nativeEvent)
                 ) {
@@ -2515,9 +2594,21 @@ export function usePianoRollInteractions(args: {
 
                 // 如果已有选区，且鼠标在选区范围内且靠近曲线，则进入拖拽曲线模式
                 if (sel) {
-                    // 边缘拉伸只作用于**被抓住的那一段**（其余段不动）；命中判定
-                    // 取所有段中最近的边缘。
-                    const stretchHit = findStretchSelectionEdge(e);
+                    // 本块内四种选区交互的取舍（总表见上方"手势优先级"）：
+                    // - Alt + 边缘 = **拉伸选区内的曲线**（改参数值、进撤销栈）；
+                    // - 无修饰键 + 边缘 = **只调整选区边界**（不碰曲线、不进撤销栈）；
+                    // - 右键 + 选区内部 = **左右平移整个选区**（同样只动选区）；
+                    // - 已选中的参数线 = 拖动曲线（优先级最高，见 `onSelectedCurve`）。
+                    //
+                    // 【"拉伸"与"调整选区"是两件事】用户选定一段后想把范围改大改小，
+                    // 最直觉的做法就是抓住边缘拖 —— 那时他做的是**选区调整**，不是
+                    // 拉伸内容：所以无修饰键的边缘拖拽只改边界、不重采样选区内的曲线
+                    // 值，也不写撤销历史（否则用户按一次撤销，看到的却是"什么都没变"）。
+                    // Alt 才是"拉伸"这个显式意图。
+                    //
+                    // 边缘手势都只作用于**被抓住的那一段**（其余段不动）；命中判定取
+                    // 所有段中最近的边缘。
+                    const stretchHit = onSelectedCurve ? null : findStretchSelectionEdge(e);
                     if (stretchHit) {
                         const aBeat = sel[stretchHit.rangeIndex].startBeat;
                         const bBeat = sel[stretchHit.rangeIndex].endBeat;
@@ -2566,6 +2657,11 @@ export function usePianoRollInteractions(args: {
                         setCanvasCursor("ew-resize");
                         ensureLiveEditBase(pv);
                         if (liveEditActiveRef) liveEditActiveRef.current = true;
+                        // 点击死区（见 PARAM_DRAG_DEAD_ZONE_PX）：按住拉伸修饰键在边缘
+                        // 点一下同样不该回写等值数据、不该多打一个撤销点。
+                        const startClientX = e.clientX;
+                        const startClientY = e.clientY;
+                        let didDrag = false;
                         const finePointerState = createFineAdjustedPointerState(
                             e.nativeEvent,
                             e.currentTarget as HTMLCanvasElement,
@@ -2786,6 +2882,19 @@ export function usePianoRollInteractions(args: {
                             }
                             // 只接受本指针的 move（掌压拒识的 move 侧防线）。
                             if (ev.pointerId !== pid) return;
+                            // 点击死区：未越过阈值前不预览、不更新（画面上没有任何变化），
+                            // 松手时按"点击"处理 —— 不回写数据、不打撤销点。拉伸路径的
+                            // 收尾同样会整段回写并打检查点，没有位移时那是纯粹的噪音。
+                            if (!didDrag) {
+                                if (
+                                    Math.abs(ev.clientX - startClientX) <=
+                                        PARAM_DRAG_DEAD_ZONE_PX &&
+                                    Math.abs(ev.clientY - startClientY) <= PARAM_DRAG_DEAD_ZONE_PX
+                                ) {
+                                    return;
+                                }
+                                didDrag = true;
+                            }
                             const adjusted = getFineAdjustedPointerPosition(finePointerState, ev);
                             queuedCursorBeat = pointerBeat(adjusted.clientX);
                             if (previewRafId == null) {
@@ -2808,6 +2917,20 @@ export function usePianoRollInteractions(args: {
                                 previewRafId = null;
                             }
                             queuedCursorBeat = null;
+
+                            // 单击（未越过点击死区）：这次手势没有改动任何值 —— 丢弃
+                            // live 覆盖层并复位 active 标记后直接收尾。走提交路径会把
+                            // 与原始数据逐帧相同的变换结果整段写回，并多打一个"按下毫无
+                            // 变化"的撤销点。
+                            if (!didDrag) {
+                                liveEditOverrideRef.current = null;
+                                if (liveEditActiveRef) {
+                                    liveEditActiveRef.current = false;
+                                }
+                                setCanvasCursor("default");
+                                invalidate();
+                                return;
+                            }
 
                             const pvNow = paramViewRef.current;
                             if (!pvNow || !rootTrackId) {
@@ -2878,6 +3001,200 @@ export function usePianoRollInteractions(args: {
                             invalidate();
                         };
 
+                        window.addEventListener("pointermove", onMove);
+                        window.addEventListener("pointerup", onUp);
+                        window.addEventListener("pointercancel", onUp);
+                        setActivePointerGestureEnd(onUp);
+                        return;
+                    }
+
+                    // ── 边缘拖拽（无修饰键，左键）：只调整选区边界 ───────────────
+                    //
+                    // 与上面 Alt 拉伸的区别是**语义**：这里只挪动被抓住的那条边界，
+                    // 选区内已有的曲线值原样保留（不重采样、不写回后端），因此它既
+                    // 不需要 live 覆盖层、也不打撤销检查点 —— 撤销栈里应当只有"对参数
+                    // 的编辑"，把单纯的选区调整写进去会让"撤销"变成一次无变化的空操作。
+                    //
+                    // 让位规则：指针同时压住"已选中的参数线"时优先拖曲线（`onSelectedCurve`
+                    // 已在上方算好）；右键不参与本支（右键是"平移整个选区"，见下一段）。
+                    const selectionEdgeHit =
+                        onSelectedCurve || e.button !== 0
+                            ? null
+                            : findStretchSelectionEdge(e, { requireModifier: false });
+                    if (selectionEdgeHit) {
+                        const rangeIndex = selectionEdgeHit.rangeIndex;
+                        const edge = selectionEdgeHit.edge;
+                        // pointerdown 时的快照：拖拽期间每帧都以它重建（只替换被拖动的
+                        // 那一段）。以快照为基底而不是"当前选区"，是为了让
+                        // `normalizeSelection` 的合并/排序不会造成下标漂移 —— 交换左右
+                        // 也靠这一点保持稳定（固定端始终是"按下时的对侧边界"）。
+                        const baseSelection = sel;
+                        const pid = e.pointerId;
+                        (e.currentTarget as HTMLCanvasElement).setPointerCapture(pid);
+                        setCanvasCursor("ew-resize");
+
+                        const applyEdgeBeat = (clientX: number, allowAutoScroll: boolean) => {
+                            const beat = selectionBeatFromClientX(clientX, allowAutoScroll);
+                            selectionRef.current = normalizeSelection(
+                                baseSelection.map((range, index) =>
+                                    index === rangeIndex
+                                        ? resizeBeatRangeEdge(range, edge, beat)
+                                        : range,
+                                ),
+                            );
+                            updateSelectionUi(selectionRef.current);
+                            invalidate();
+                        };
+
+                        const onMove = (ev: globalThis.PointerEvent) => {
+                            if ((ev.buttons & 1) !== 1) {
+                                onUp();
+                                return;
+                            }
+                            // 只接受本指针的 move（掌压拒识的 move 侧防线）。
+                            if (ev.pointerId !== pid) return;
+                            applyEdgeBeat(ev.clientX, true);
+                        };
+                        const onUp = () => {
+                            window.removeEventListener("pointermove", onMove);
+                            window.removeEventListener("pointerup", onUp);
+                            window.removeEventListener("pointercancel", onUp);
+                            clearActivePointerGestureEnd(onUp);
+                            // 收尾：把被拖到**不可见宽度**的段丢掉（与"单击不留零宽
+                            // 选区"同一条规则）。判据与边缘命中同源 —— 像素宽度不足
+                            // `SELECTION_EDGE_MIN_WIDTH_PX` 的段既看不到区域，也再也
+                            // 抓不到它的边缘；留着只会留下"有光标提示、没东西可拖"
+                            // 的状态。交换左右的过程中会瞬时经过零宽，那是正常的中途
+                            // 形态，只有松手时才算数。
+                            const current = selectionRef.current;
+                            if (current) {
+                                const visible = current.filter(
+                                    (range) =>
+                                        Math.abs(
+                                            beatToViewportPx(range.endBeat) -
+                                                beatToViewportPx(range.startBeat),
+                                        ) >= SELECTION_EDGE_MIN_WIDTH_PX,
+                                );
+                                if (visible.length !== current.length) {
+                                    selectionRef.current = normalizeSelection(visible);
+                                    updateSelectionUi(selectionRef.current);
+                                }
+                            }
+                            invalidate();
+                        };
+
+                        window.addEventListener("pointermove", onMove);
+                        window.addEventListener("pointerup", onUp);
+                        window.addEventListener("pointercancel", onUp);
+                        setActivePointerGestureEnd(onUp);
+                        return;
+                    }
+
+                    // ── 右键拖拽选区内部：左右平移指针所在的那一段 ───────────────
+                    //
+                    // 与"边缘调整"（上一段）同属**选区自身的调整**：只平移边界，选区
+                    // 内的曲线值原样保留，不写后端、不进撤销栈。区别只是这里两条边界
+                    // **同时**跟着走（整段搬移），而不是只动被抓住的那一条。
+                    //
+                    // 【多段选区：只搬被抓住的那一段】平移的作用范围就是指针按下的那
+                    // 一段（`rangeIndexAtBeat` 定位），其余段纹丝不动 —— 与边缘调整
+                    // "只作用于被抓住的那一段"同一条规则。若整段一起搬，用户想只挪
+                    // 其中一段时会连带改掉全部，无法只调整局部。
+                    //
+                    // 让位规则（与全局优先级一致）：
+                    // - 指针压住已选中的参数线 → 由下面的曲线分支处理（右键在曲线上是
+                    //   形变/幅度变换，属"参数线交互"，优先级更高）；
+                    // - 形变修饰键按下 → 让位给 Alt 边缘拉伸（那段已在上方 return）。
+                    const shiftRangeIndex = rangeIndexAtBeat(sel, b);
+                    if (
+                        e.button === 2 &&
+                        !onSelectedCurve &&
+                        !isModifierActive(paramStretchKb, e.nativeEvent) &&
+                        shiftRangeIndex !== -1
+                    ) {
+                        // 平移量以「按下时指针所在拍」为基准，避免逐帧累加造成漂移。
+                        const grabBeat = selectionBeatFromClientX(e.clientX, false);
+                        // 快照：每帧都以它重建（只替换被搬动的那一段），归一化
+                        // （合并/排序）不会造成下标漂移。
+                        const baseSelection = sel;
+                        // 夹取只看**被搬动的那一段**的包围区间：其余段不参与，因此
+                        // 它们不会限制本次平移的可用范围。
+                        const startRange = sel[shiftRangeIndex];
+                        const pid = e.pointerId;
+                        (e.currentTarget as HTMLCanvasElement).setPointerCapture(pid);
+
+                        // 右键手势的收尾菜单：拖拽期间一律吞掉（否则松手会弹出上下文
+                        // 菜单）；**没拖动**时按"右键点击"处理，手工打开菜单 —— 与
+                        // 曲线上右键拖拽（形变）那一段同一套处理，见那里的注释。
+                        let didDrag = false;
+                        const startClientX = e.clientX;
+                        const suppressContextMenu = (ev: Event) => {
+                            ev.preventDefault();
+                            ev.stopImmediatePropagation();
+                        };
+                        const onMove = (ev: globalThis.PointerEvent) => {
+                            if ((ev.buttons & 2) !== 2) {
+                                onUp(ev);
+                                return;
+                            }
+                            // 只接受本指针的 move（掌压拒识的 move 侧防线）。
+                            if (ev.pointerId !== pid) return;
+                            // 3px 死区：区分「右键点击」与「右键拖拽」，手抖不该被判成
+                            // 拖拽（否则正常右键点击的菜单会被吞掉）。
+                            if (!didDrag && Math.abs(ev.clientX - startClientX) > 3) {
+                                didDrag = true;
+                                // 光标只在确认拖拽后才变（右键点击不该留下拖拽光标）。
+                                setCanvasCursor("grabbing");
+                                // 确认构成拖拽：显式武装全局守卫，松手若落在**另一个**
+                                // 表面（标尺 / 轨道头）上也能吞掉那个表面的菜单。
+                                armRightDragContextMenuGuard();
+                            }
+                            // 死区内不平移：右键**点击**（含手抖）不得挪动选区，只有
+                            // 越过死区才算"拖拽"（与多选追加 / 框选同一套语义）。
+                            if (!didDrag) return;
+                            const beat = selectionBeatFromClientX(ev.clientX, true);
+                            // 位移夹到"平移后被搬动那一段仍在 [0, 工程时长] 内"——
+                            // 段的长度不变，只让它停在两端（见 clampSelectionShift）。
+                            // 基准点永远是**按下时**的拍：死区内不累计偏移，越过死区后
+                            // 一次就对齐到真实位移（与多选追加 / 框选同一套死区语义）。
+                            const delta = clampSelectionShift(
+                                [startRange],
+                                beat - grabBeat,
+                                0,
+                                maxSelectableBeat,
+                            );
+                            // 只替换被抓住的那一段，其余段原样保留（快照为基底，
+                            // 因此归一化的合并/排序不会造成下标漂移）。
+                            selectionRef.current = normalizeSelection(
+                                baseSelection.map((range, index) =>
+                                    index === shiftRangeIndex
+                                        ? {
+                                              startBeat: range.startBeat + delta,
+                                              endBeat: range.endBeat + delta,
+                                          }
+                                        : range,
+                                ),
+                            );
+                            updateSelectionUi(selectionRef.current);
+                            invalidate();
+                        };
+                        const onUp = (ev?: globalThis.PointerEvent) => {
+                            window.removeEventListener("pointermove", onMove);
+                            window.removeEventListener("pointerup", onUp);
+                            window.removeEventListener("pointercancel", onUp);
+                            window.removeEventListener("contextmenu", suppressContextMenu, true);
+                            clearActivePointerGestureEnd(onUp);
+                            if (!didDrag) {
+                                // 右键点击（没有平移）：选区原样保留，交回菜单。
+                                if (onContextMenu && document.hasFocus() && ev) {
+                                    onContextMenu(ev.clientX, ev.clientY);
+                                }
+                            }
+                            // 只重绘：选区平移已经实时生效，**不写撤销历史、不写后端**。
+                            invalidate();
+                        };
+
+                        window.addEventListener("contextmenu", suppressContextMenu, true);
                         window.addEventListener("pointermove", onMove);
                         window.addEventListener("pointerup", onUp);
                         window.addEventListener("pointercancel", onUp);
@@ -3300,6 +3617,11 @@ export function usePianoRollInteractions(args: {
                                 setCanvasCursor("grabbing");
                                 const startMouseVal = mouseVal;
                                 const startBeat = pointerBeat(e.clientX);
+                                // 点击死区：未越过阈值前不预览、不更新，收尾时按"点击"
+                                // 处理（不回写数据、不打撤销点，见 PARAM_DRAG_DEAD_ZONE_PX）。
+                                const startClientX = e.clientX;
+                                const startClientY = e.clientY;
+                                let didDrag = false;
                                 const pid = e.pointerId;
                                 (e.currentTarget as HTMLCanvasElement).setPointerCapture(pid);
                                 const finePointerState = createFineAdjustedPointerState(
@@ -3505,6 +3827,20 @@ export function usePianoRollInteractions(args: {
                                         onUp();
                                         return;
                                     }
+                                    // 点击死区：越过阈值之前一律按"还没开始拖"处理 ——
+                                    // 不更新位移、不预览、不弹浮窗（因此画面上不会有任何
+                                    // 变化），松手时也不会回写。
+                                    if (!didDrag) {
+                                        if (
+                                            Math.abs(ev.clientX - startClientX) <=
+                                                PARAM_DRAG_DEAD_ZONE_PX &&
+                                            Math.abs(ev.clientY - startClientY) <=
+                                                PARAM_DRAG_DEAD_ZONE_PX
+                                        ) {
+                                            return;
+                                        }
+                                        didDrag = true;
+                                    }
                                     const adjusted = getFineAdjustedPointerPosition(
                                         finePointerState,
                                         ev,
@@ -3614,6 +3950,20 @@ export function usePianoRollInteractions(args: {
                                     previewQueued = false;
                                     // 标记手势结束，避免已发出的取数请求再覆写 origValues
                                     dragSettled = true;
+
+                                    // 单击（未越过点击死区）：这次手势没有改动任何值 ——
+                                    // 丢弃 live 覆盖层并复位 active 标记后直接收尾。
+                                    // 走提交路径会把变换结果整段写回后端（此处与原始数据
+                                    // 逐帧相同）并多打一个"按下毫无变化"的撤销点。
+                                    if (!didDrag) {
+                                        liveEditOverrideRef.current = null;
+                                        if (liveEditActiveRef) {
+                                            liveEditActiveRef.current = false;
+                                        }
+                                        setCanvasCursor("grab");
+                                        invalidate();
+                                        return;
+                                    }
 
                                     // 提交拖拽结果到后端
                                     const pvNow = paramViewRef.current;
@@ -3851,6 +4201,15 @@ export function usePianoRollInteractions(args: {
                         e.nativeEvent,
                         e.currentTarget as HTMLCanvasElement,
                     );
+                    // 区分"单击"与"框选"的死区（与多选追加分支同一阈值）。
+                    //
+                    // 【为什么必须区分】按下时写入的那段零宽选区只是"抹掉旧框"的
+                    // 中转形态：若用户只是点了一下（没有拖动），留着它就会变成一段
+                    // **不可见却存在**的选区 —— 画面上看不到任何区域，它却会接管
+                    // 参数选区的语义（复制/剪切的去向、边缘命中判定…），用户完全
+                    // 无从察觉。因此单击的收尾把它清掉，回到"没有选区"。
+                    const startClientX = e.clientX;
+                    let moved = false;
                     const onMove = (ev: globalThis.PointerEvent) => {
                         if ((ev.buttons & 1) !== 1) {
                             onUp();
@@ -3858,9 +4217,11 @@ export function usePianoRollInteractions(args: {
                         }
                         // 只接受本指针的 move（掌压拒识的 move 侧防线）。
                         if (ev.pointerId !== pid) return;
+                        if (!moved && Math.abs(ev.clientX - startClientX) > 3) moved = true;
                         // 选区在拖拽途中被外部清除（如 BackSpace / 取消选择）时
                         // 不再续建，与改造前的守卫语义一致。
                         if (selectionRef.current == null) return;
+                        if (!moved) return;
                         const adjusted = getFineAdjustedPointerPosition(finePointerState, ev);
                         const bb = selectionBeatFromClientX(adjusted.clientX, true);
                         selectionRef.current = selectionFromBeatRange(startBeat, bb);
@@ -3873,6 +4234,11 @@ export function usePianoRollInteractions(args: {
                         window.removeEventListener("pointercancel", onUp);
                         disposeFineAdjustedPointerState(finePointerState);
                         clearActivePointerGestureEnd(onUp);
+                        if (!moved) {
+                            // 单击（含笔/触摸的抖动）：不留零宽选区。
+                            selectionRef.current = null;
+                            updateSelectionUi(null);
+                        }
                         invalidate();
                     };
                     window.addEventListener("pointermove", onMove);
@@ -4463,6 +4829,8 @@ export function usePianoRollInteractions(args: {
             updateSelectionUi,
             paramMultiSelectKb,
             findStretchSelectionEdge,
+            isPointerNearDraggableSelection,
+            beatToViewportPx,
             fetchCommitBaseSource,
             paramViewRef,
             ensureLiveEditBase,

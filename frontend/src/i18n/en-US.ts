@@ -1093,6 +1093,8 @@ export const enUS = {
     param_editor_timeline_click_select_track: "Allow Timeline Clicks to Switch Track",
     clipboard_preview: "Clipboard Preview",
     param_value_popup: "Popup Param Values",
+    param_axis_unit_ratio: "×",
+    param_axis_unit_db: "dB",
     lock_param_lines: "Lock Param Lines",
     edge_smoothness: "Smoothness",
     edge_smoothness_short: "Smooth",
