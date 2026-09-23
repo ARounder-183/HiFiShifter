@@ -1,0 +1,690 @@
+/*
+ * 记事本样式。
+ *
+ * 全部用 `--qt-*` 语义色变量，跟随应用的明暗主题（见 index.css）。
+ *
+ * 【为什么不装 @tailwindcss/typography】旧代码里的 `prose` 类其实一直是
+ * 空规则（插件没装）。富文本编辑器的排版是"产品外观"的一部分，用自己写的
+ * 一层 CSS 才能精确对齐 qt 变量与面板密度，也不引入一个只为一个面板存在的
+ * 依赖。
+ */
+
+.hs-notebook-prose {
+    outline: none;
+    font-size: var(--hs-notebook-font-size, 13px);
+    line-height: 1.7;
+    color: var(--qt-text);
+    word-break: break-word;
+}
+
+.hs-notebook-prose > * + * {
+    margin-top: 0.6em;
+}
+
+.hs-notebook-prose h1,
+.hs-notebook-prose h2,
+.hs-notebook-prose h3,
+.hs-notebook-prose h4,
+.hs-notebook-prose h5,
+.hs-notebook-prose h6 {
+    font-weight: 600;
+    line-height: 1.35;
+    margin-top: 1.1em;
+}
+
+.hs-notebook-prose h1 {
+    font-size: 1.5em;
+}
+.hs-notebook-prose h2 {
+    font-size: 1.28em;
+}
+.hs-notebook-prose h3 {
+    font-size: 1.14em;
+}
+.hs-notebook-prose h4,
+.hs-notebook-prose h5,
+.hs-notebook-prose h6 {
+    font-size: 1em;
+    color: var(--qt-text-muted);
+}
+
+.hs-notebook-prose p {
+    margin: 0;
+}
+
+.hs-notebook-prose a {
+    color: var(--accent-11, #4f8ef7);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    cursor: pointer;
+}
+
+/* 内部链接（跳播放头 / 引用 Clip）渲染成小胶囊，与普通外链区分开。 */
+.hs-notebook-prose a[data-hifi-internal="true"] {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    padding: 0 4px;
+    border-radius: 3px;
+    background: var(--qt-subtle-1);
+    border: 1px solid var(--qt-border);
+    text-decoration: none;
+    font-variant-numeric: tabular-nums;
+}
+
+.hs-notebook-prose a[data-hifi-internal="true"]:hover {
+    background: var(--qt-hover);
+}
+
+.hs-notebook-prose ul,
+.hs-notebook-prose ol {
+    padding-left: 1.4em;
+}
+
+.hs-notebook-prose ul {
+    list-style: disc;
+}
+
+.hs-notebook-prose ol {
+    list-style: decimal;
+}
+
+.hs-notebook-prose li > p {
+    margin: 0;
+}
+
+.hs-notebook-prose blockquote {
+    margin-left: 0;
+    padding-left: 0.8em;
+    border-left: 2px solid var(--qt-border);
+    color: var(--qt-text-muted);
+}
+
+.hs-notebook-prose code {
+    font-family: var(--qt-font-mono, ui-monospace, "Cascadia Mono", Consolas, monospace);
+    font-size: 0.92em;
+    padding: 0.1em 0.3em;
+    border-radius: 3px;
+    background: var(--qt-subtle-2);
+}
+
+.hs-notebook-prose pre {
+    background: var(--qt-graph-bg, rgba(0, 0, 0, 0.25));
+    border: 1px solid var(--qt-border);
+    border-radius: 4px;
+    padding: 0.6em 0.7em;
+    overflow-x: auto;
+}
+
+.hs-notebook-prose pre code {
+    background: none;
+    padding: 0;
+    font-size: 0.9em;
+}
+
+.hs-notebook-prose hr {
+    border: none;
+    border-top: 1px solid var(--qt-border);
+    margin: 1.2em 0;
+}
+
+.hs-notebook-prose table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 0.95em;
+    /* 宽表在窄面板里横向滚动，而不是把面板撑破。 */
+    display: block;
+    overflow-x: auto;
+}
+
+.hs-notebook-prose th,
+.hs-notebook-prose td {
+    border: 1px solid var(--qt-border);
+    padding: 0.25em 0.5em;
+    text-align: left;
+    vertical-align: top;
+}
+
+.hs-notebook-prose th {
+    background: var(--qt-subtle-1);
+    font-weight: 600;
+}
+
+.hs-notebook-prose ul[data-type="taskList"] {
+    list-style: none;
+    padding-left: 0.2em;
+}
+
+.hs-notebook-prose ul[data-type="taskList"] li {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.4em;
+}
+
+.hs-notebook-prose ul[data-type="taskList"] li > label {
+    margin-top: 0.25em;
+}
+
+.hs-notebook-prose ul[data-type="taskList"] li > div {
+    flex: 1;
+    min-width: 0;
+}
+
+.hs-notebook-prose input[type="checkbox"] {
+    accent-color: var(--accent-9, #4f8ef7);
+}
+
+/* 空文档占位（TipTap Placeholder 扩展挂的 data 属性）。 */
+.hs-notebook-prose p.is-editor-empty:first-child::before,
+.hs-notebook-prose .is-empty::before {
+    content: attr(data-placeholder);
+    float: left;
+    height: 0;
+    pointer-events: none;
+    color: var(--qt-text-muted);
+}
+
+/* ── 图片 ────────────────────────────────────────────────────────────── */
+
+.hs-notebook-image-block {
+    position: relative;
+    display: block;
+    max-width: 100%;
+    margin: 0.4em 0;
+}
+
+.hs-notebook-image-block[data-selected="true"] .hs-notebook-image {
+    outline: 1px solid var(--accent-9, #4f8ef7);
+    outline-offset: 2px;
+}
+
+.hs-notebook-image {
+    display: block;
+    max-width: 100%;
+    height: auto;
+    border-radius: 3px;
+    cursor: pointer;
+}
+
+.hs-notebook-image-handle {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 8px;
+    cursor: ew-resize;
+    background: transparent;
+}
+
+.hs-notebook-image-handle-left {
+    left: -5px;
+}
+
+.hs-notebook-image-handle-right {
+    right: -5px;
+}
+
+.hs-notebook-image-handle::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 3px;
+    height: 26px;
+    margin: -13px 0 0 -1.5px;
+    border-radius: 2px;
+    background: var(--accent-9, #4f8ef7);
+}
+
+.hs-notebook-image-width-badge {
+    position: absolute;
+    right: 4px;
+    bottom: 4px;
+    padding: 0 4px;
+    border-radius: 3px;
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+    background: var(--qt-overlay, rgba(0, 0, 0, 0.6));
+    color: var(--qt-text);
+}
+
+.hs-notebook-image-missing {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 8px 10px;
+    border: 1px dashed var(--qt-warning-border);
+    border-radius: 4px;
+    background: var(--qt-warning-bg);
+    color: var(--qt-warning-text);
+    font-size: 11px;
+}
+
+.hs-notebook-image-missing-src {
+    opacity: 0.75;
+    word-break: break-all;
+    font-family: var(--qt-font-mono, ui-monospace, monospace);
+    font-size: 10px;
+}
+
+.hs-notebook-image-alt-editor {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    padding: 4px;
+    background: var(--qt-overlay, rgba(0, 0, 0, 0.7));
+    border-radius: 0 0 3px 3px;
+}
+
+.hs-notebook-image-alt-editor input {
+    width: 100%;
+    padding: 2px 6px;
+    font-size: 11px;
+    border: 1px solid var(--qt-border);
+    border-radius: 3px;
+    background: var(--qt-base);
+    color: var(--qt-text);
+    outline: none;
+}
+
+/* ── 剪贴板暂存块 ────────────────────────────────────────────────────── */
+
+.hs-notebook-clip {
+    position: relative;
+    display: block;
+    border: 1px solid var(--qt-border);
+    border-radius: 5px;
+    background: var(--qt-panel);
+    padding: 6px 8px;
+    margin: 0.5em 0;
+    font-size: 12px;
+}
+
+.hs-notebook-clip[data-selected="true"] {
+    border-color: var(--accent-9, #4f8ef7);
+}
+
+.hs-notebook-clip[data-missing="true"] {
+    border-color: var(--qt-warning-border);
+}
+
+.hs-notebook-clip-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.hs-notebook-clip-badge {
+    flex: none;
+    padding: 0 5px;
+    border-radius: 3px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    background: var(--qt-subtle-2);
+    color: var(--qt-text);
+}
+
+.hs-notebook-clip-badge-clips {
+    background: var(--accent-3, rgba(79, 142, 247, 0.25));
+    color: var(--accent-11, #4f8ef7);
+}
+.hs-notebook-clip-badge-tracks {
+    background: var(--qt-subtle-2);
+}
+.hs-notebook-clip-badge-project {
+    background: var(--qt-warning-bg);
+    color: var(--qt-warning-text);
+}
+.hs-notebook-clip-badge-param {
+    background: var(--qt-subtle-2);
+    color: var(--qt-text-muted);
+}
+
+.hs-notebook-clip-title {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 600;
+}
+
+.hs-notebook-clip-title-input {
+    flex: 1;
+    min-width: 0;
+    padding: 1px 4px;
+    font-size: 12px;
+    font-weight: 600;
+    border: 1px solid var(--qt-border);
+    border-radius: 3px;
+    background: var(--qt-base);
+    color: var(--qt-text);
+    outline: none;
+}
+
+.hs-notebook-clip-more {
+    flex: none;
+    width: 18px;
+    height: 18px;
+    line-height: 1;
+    border-radius: 3px;
+    color: var(--qt-text-muted);
+}
+
+.hs-notebook-clip-more:hover {
+    background: var(--qt-hover);
+    color: var(--qt-text);
+}
+
+.hs-notebook-clip-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 3px;
+    color: var(--qt-text-muted);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+}
+
+.hs-notebook-clip-preview {
+    margin-top: 5px;
+}
+
+.hs-notebook-sparkline,
+.hs-notebook-schematic {
+    display: block;
+    width: 100%;
+}
+
+.hs-notebook-sparkline path {
+    stroke: var(--accent-9, #4f8ef7);
+}
+
+.hs-notebook-schematic-rail {
+    stroke: var(--qt-border);
+    stroke-width: 1;
+}
+
+.hs-notebook-schematic-clip {
+    fill: var(--accent-9, #4f8ef7);
+    opacity: 0.75;
+}
+
+.hs-notebook-clip-missing {
+    margin-top: 5px;
+    padding: 3px 6px;
+    border-radius: 3px;
+    background: var(--qt-warning-bg);
+    color: var(--qt-warning-text);
+    font-size: 11px;
+}
+
+.hs-notebook-clip-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 6px;
+}
+
+.hs-notebook-clip-actions button {
+    padding: 2px 8px;
+    border: 1px solid var(--qt-border);
+    border-radius: 3px;
+    background: var(--qt-subtle-1);
+    color: var(--qt-text);
+    font-size: 11px;
+}
+
+.hs-notebook-clip-actions button:hover:not(:disabled) {
+    background: var(--qt-hover);
+}
+
+.hs-notebook-clip-actions button:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+.hs-notebook-clip-notice {
+    color: var(--qt-text-muted);
+    font-size: 11px;
+}
+
+.hs-notebook-clip-broken {
+    border-color: var(--qt-danger-border);
+    background: var(--qt-danger-bg);
+    color: var(--qt-danger-text);
+}
+
+.hs-notebook-clip-broken-body {
+    margin-top: 4px;
+    font-size: 10px;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+/* ── 工具栏 ──────────────────────────────────────────────────────────── */
+
+.hs-notebook-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 1px;
+    padding: 3px 6px;
+    border-bottom: 1px solid var(--qt-border);
+    background: var(--qt-window);
+}
+
+.hs-notebook-toolbar-group {
+    display: flex;
+    align-items: center;
+    gap: 1px;
+}
+
+.hs-notebook-toolbar-sep {
+    width: 1px;
+    height: 14px;
+    margin: 0 4px;
+    background: var(--qt-border);
+}
+
+.hs-notebook-toolbar-btn {
+    min-width: 20px;
+    height: 20px;
+    padding: 0 4px;
+    border-radius: 3px;
+    color: var(--qt-text-muted);
+    font-size: 11px;
+    line-height: 1;
+}
+
+.hs-notebook-toolbar-btn:hover {
+    background: var(--qt-hover);
+    color: var(--qt-text);
+}
+
+.hs-notebook-toolbar-btn[data-active="true"] {
+    background: var(--accent-3, rgba(79, 142, 247, 0.25));
+    color: var(--accent-11, #4f8ef7);
+}
+
+.hs-notebook-slash-menu {
+    position: fixed;
+    z-index: 900;
+    min-width: 190px;
+    max-height: 260px;
+    overflow-y: auto;
+    padding: 4px 0;
+    border: 1px solid var(--qt-border);
+    border-radius: 5px;
+    background: var(--qt-window);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+}
+
+.hs-notebook-slash-menu button {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    width: 100%;
+    padding: 3px 10px;
+    text-align: left;
+    font-size: 12px;
+    color: var(--qt-text);
+}
+
+.hs-notebook-slash-menu button:hover {
+    background: var(--qt-hover);
+}
+
+.hs-notebook-slash-hint {
+    color: var(--qt-text-muted);
+    font-family: var(--qt-font-mono, ui-monospace, monospace);
+    font-size: 10px;
+}
+
+/* ── 查找条 / 状态栏 / 设置行 ────────────────────────────────────────── */
+
+.hs-notebook-findbar {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 6px;
+    border-bottom: 1px solid var(--qt-border);
+    background: var(--qt-window);
+}
+
+.hs-notebook-findbar input {
+    min-width: 0;
+    flex: 1;
+    padding: 2px 6px;
+    border: 1px solid var(--qt-border);
+    border-radius: 3px;
+    background: var(--qt-base);
+    color: var(--qt-text);
+    font-size: 11px;
+    outline: none;
+}
+
+.hs-notebook-findbar-count {
+    flex: none;
+    color: var(--qt-text-muted);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+}
+
+.hs-notebook-status {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex: none;
+    height: 20px;
+    padding: 0 8px;
+    border-top: 1px solid var(--qt-border);
+    background: var(--qt-window);
+    color: var(--qt-text-muted);
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+}
+
+.hs-notebook-status-part {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+}
+
+.hs-notebook-setting-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 5px 0;
+}
+
+.hs-notebook-setting-label {
+    font-size: 12px;
+    color: var(--qt-text);
+}
+
+.hs-notebook-setting-hint {
+    margin-top: 2px;
+    font-size: 10px;
+    color: var(--qt-text-muted);
+}
+
+.hs-notebook-attachment-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 0;
+    border-bottom: 1px solid var(--qt-divider);
+    font-size: 11px;
+}
+
+.hs-notebook-attachment-thumb {
+    flex: none;
+    width: 32px;
+    height: 32px;
+    border-radius: 3px;
+    border: 1px solid var(--qt-border);
+    background: var(--qt-subtle-1);
+    object-fit: cover;
+}
+
+.hs-notebook-attachment-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.hs-notebook-attachment-unused {
+    color: var(--qt-warning-text);
+}
+
+/* 拖入图片时的落点提示。 */
+.hs-notebook-drop-active {
+    outline: 1px dashed var(--accent-9, #4f8ef7);
+    outline-offset: -3px;
+}
+
+/* 源码视图：等宽、软换行、与富文本视图同一内边距，切换时不跳动。 */
+.hs-notebook-source {
+    width: 100%;
+    height: 100%;
+    resize: none;
+    border: 0;
+    outline: none;
+    padding: 12px 14px;
+    background: var(--qt-base);
+    color: var(--qt-text);
+    font-family: var(--qt-font-mono, ui-monospace, "Cascadia Mono", Consolas, monospace);
+    font-size: var(--hs-notebook-source-font-size, 13px);
+    line-height: 1.6;
+    tab-size: 4;
+}
+
+.hs-notebook-source[data-wrap="false"] {
+    white-space: pre;
+    overflow-x: auto;
+}
+
+/* 停靠壳的宽度拖拽条（面板贴右边缘，向左拖变宽）。 */
+.hs-notebook-resizer {
+    flex: none;
+    width: 5px;
+    cursor: ew-resize;
+    background: transparent;
+    border-left: 1px solid var(--qt-border);
+}
+
+.hs-notebook-resizer:hover,
+.hs-notebook-resizer[data-dragging="true"] {
+    background: var(--accent-9, #4f8ef7);
+    opacity: 0.5;
+}

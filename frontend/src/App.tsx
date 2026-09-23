@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Flex, Box, Text, Dialog, Button } from "@radix-ui/themes";
 import { MenuBar } from "./components/layout/MenuBar";
 import { ActionBar } from "./components/layout/ActionBar";
@@ -61,7 +61,13 @@ import { useHistoryStateListener } from "./hooks/useHistoryStateListener";
 import { PitchAnalysisProvider, usePitchAnalysis } from "./contexts/PitchAnalysisContext";
 import { PianoRollStatusProvider, usePianoRollStatus } from "./contexts/PianoRollStatusContext";
 import { FileBrowserPanel } from "./components/layout/FileBrowserPanel";
-import { NotebookPanel } from "./components/layout/NotebookPanel";
+// 记事本按需加载：TipTap/ProseMirror/Turndown 加起来几百 KB，只有真正打开
+// 记事本时才需要 —— 静态导入会把这些全塞进首屏主包。
+const NotebookDock = lazy(() =>
+    import("./components/layout/notebook/NotebookDock").then((module) => ({
+        default: module.NotebookDock,
+    })),
+);
 import { ImportProjectDialog } from "./components/layout/ImportProjectDialog";
 import { QuickSearchPopup } from "./components/layout/QuickSearchPopup";
 import { useKeybindings } from "./features/keybindings/useKeybindings";
@@ -3968,9 +3974,9 @@ function AppInner() {
                             </div>
                         ) : null}
                         {notebookVisible ? (
-                            <div className="w-[320px] shrink-0 bg-qt-window flex flex-col">
-                                <NotebookPanel />
-                            </div>
+                            <Suspense fallback={null}>
+                                <NotebookDock />
+                            </Suspense>
                         ) : null}
                     </Flex>
                 )}

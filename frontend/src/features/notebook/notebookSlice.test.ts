@@ -16,13 +16,17 @@ test("features/notebook/notebookSlice.test.ts scripted checks", async () => {
 
     let state = reducer(undefined, { type: "@@INIT" });
     assertEqual(state.visible, false, "initial notebook visibility");
-    assertEqual(state.mode, "edit", "initial notebook mode");
+    // 默认富文本：打开记事本先看到排好版的文档，而不是 Markdown 源码。
+    assertEqual(state.mode, "rich", "initial notebook mode");
 
     state = reducer(state, toggleNotebookVisible());
     assertEqual(state.visible, true, "toggle opens notebook");
 
-    state = reducer(state, setNotebookMode("preview"));
-    assertEqual(state.mode, "preview", "can switch notebook mode");
+    state = reducer(state, setNotebookMode("source"));
+    assertEqual(state.mode, "source", "can switch to markdown source");
+
+    state = reducer(state, setNotebookMode("split"));
+    assertEqual(state.mode, "split", "can switch to split view");
 
     state = reducer(state, closeNotebook());
     assertEqual(state.visible, false, "closeNotebook hides panel");

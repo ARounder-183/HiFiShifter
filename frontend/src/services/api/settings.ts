@@ -1,4 +1,5 @@
 import { invoke } from "../invoke";
+import type { NotebookSettings } from "../../components/layout/notebook/notebookSettings";
 import type { TimelineSnapSettings } from "../../features/session/sessionTypes";
 
 export type StretchAlgorithmOption = "linear" | "signalsmith" | "soundtouch";
@@ -201,6 +202,12 @@ export interface UiSettings {
     syncEditsAcrossTakes?: boolean;
     /** 渲染缓存：把渲染结果落盘，重新打开工程时直接复用。 */
     renderCache?: RenderCacheSettings;
+    /**
+     * 记事本（Notebook）设置。可缺省 —— 旧配置文件没有这一项，
+     * 前端用 `normalizeNotebookSettings` 补默认值（见
+     * `components/layout/notebook/notebookSettings.ts`）。
+     */
+    notebook?: NotebookSettings;
     customScalePresets?: Array<{
         id: string;
         name: string;

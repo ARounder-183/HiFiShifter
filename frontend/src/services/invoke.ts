@@ -731,6 +731,48 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
         case "open_render_cache_dir":
             return {};
 
+        // ── 记事本（附件 / 剪贴板暂存 / 导出）──
+        case "notebook_put_asset":
+            return {
+                assetId: args[0],
+                kind: args[1],
+                ext: args[2],
+                mime: args[3] ?? null,
+                dataBase64: args[4],
+                meta: args[5] ?? null,
+            };
+
+        case "notebook_read_asset":
+        case "notebook_remove_asset":
+        case "notebook_asset_path":
+            return { assetId: args[0] };
+
+        case "notebook_read_file_base64":
+            return {
+                path: args[0],
+                ...(args[1] !== undefined ? { maxBytes: args[1] } : {}),
+            };
+
+        case "notebook_write_clipboard_payload":
+            return {
+                payloadBase64: args[0],
+                textSummary: args[1] ?? null,
+            };
+
+        case "notebook_export_document":
+            return {
+                suggestedName: args[0],
+                extension: args[1],
+                content: args[2],
+                imageMode: args[3] ?? null,
+            };
+
+        case "notebook_save_asset_as":
+            return {
+                assetId: args[0],
+                suggestedName: args[1] ?? null,
+            };
+
         case "export_diagnostics":
             return { outputPath: args[0] };
 
@@ -785,6 +827,11 @@ const NO_ARG_COMMANDS: ReadonlySet<string> = new Set([
     "import_project_dialog",
     "load_default_model",
     "new_project",
+    "notebook_list_assets",
+    "notebook_prune_assets",
+    "notebook_read_clipboard_image",
+    "notebook_read_clipboard_payload",
+    "seal_project_notes_history",
     "open_audio_dialog",
     "open_audio_dialog_multi",
     "open_log_folder",
