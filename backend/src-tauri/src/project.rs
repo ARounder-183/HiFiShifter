@@ -1,6 +1,7 @@
 use crate::state::{SynthPipelineKind, TimelineState};
 use crate::time_stretch::UserStretchAlgorithm;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::Component;
 use std::path::{Path, PathBuf};
 
@@ -92,7 +93,13 @@ impl SynthConfig {
 /// CHANMODE）与 `source_channels`（源声道数）。旧工程反序列化时
 /// `channel_mode` 缺省为 0（正常）、`source_channels` 缺省为 None，
 /// `finalize_timeline_for_session` 阶段对越界值规范化 —— 无需数据搬移。
-pub const CURRENT_PROJECT_FILE_VERSION: u32 = 5;
+///
+/// v6：新增 `notebook_assets`（记事本附件登记表：图片与 HiFiShifter 剪贴板
+/// 载荷）。字节落在工程旁挂目录 `<工程名>-assets/` 里，工程文件只存元数据；
+/// 旧工程反序列化时缺省为空表，正文里的 Markdown 也不含附件引用 —— 无需
+/// 数据搬移。打开旧工程时若正文里存在 `hifi-asset://` 引用而登记表为空，
+/// 图片会显示为"附件缺失"占位，不会破坏文档。
+pub const CURRENT_PROJECT_FILE_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -102,6 +109,12 @@ pub struct ProjectFile {
     /// 用户笔记；为空时省略（旧版本已容忍缺省，且空内容无可丢失信息）。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub notes_markdown: String,
+    /// 记事本附件登记表（v6 新增，旧工程缺省为空）。
+    ///
+    /// 只存元数据，字节在工程旁挂目录 `<工程名>-assets/`。用 `BTreeMap`
+    /// 而非 `HashMap`：序列化顺序稳定，工程文件在不同次保存之间可二进制比对。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub notebook_assets: BTreeMap<String, crate::notebook_assets::NotebookAsset>,
     pub timeline: TimelineState,
     /// 工程的基础音乐参数（基准音阶/拍号/网格）始终序列化。
     /// 这些参数定义工程的语义身份，不能依赖"缺省 = 默认值"的隐式规则：
@@ -147,6 +160,7 @@ impl ProjectFile {
             version: CURRENT_PROJECT_FILE_VERSION,
             name,
             notes_markdown: String::new(),
+            notebook_assets: BTreeMap::new(),
             timeline,
             base_scale,
             beats_per_bar,

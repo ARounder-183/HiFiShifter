@@ -116,6 +116,30 @@ pub(crate) fn clipboard_session<T>(
 }
 
 // ---------------------------------------------------------------------------
+// Clipboard bitmap (for the notebook image paste fallback)
+// ---------------------------------------------------------------------------
+
+/// 系统剪贴板里的一张位图，`bytes` 是原始 DIB（含 `BITMAPINFOHEADER`）。
+///
+/// 刻意不在这里编码成 PNG：后端没有图像编码依赖，而前端有浏览器的解码器
+/// （`createImageBitmap`）与画布（缩放 + 转 WebP）。把"套 BMP 文件头"这件
+/// 小事放在前端，后端只负责把原始字节读出来。
+#[derive(Clone, Debug)]
+pub struct ClipboardBitmap {
+    pub width: u32,
+    pub height: u32,
+    pub bits_per_pixel: u16,
+    pub bytes: Vec<u8>,
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn read_bitmap_dib() -> Result<Option<ClipboardBitmap>, String> {
+    // 非 Windows 平台暂不实现：macOS/Linux 的截图工具通常同时往剪贴板放
+    // 图片文件（TIFF/PNG），WebView 的 paste 事件已能拿到 `File`，无需兜底。
+    Ok(None)
+}
+
+// ---------------------------------------------------------------------------
 // Sequence-number keyed cache (for the has_* availability polls)
 // ---------------------------------------------------------------------------
 
@@ -320,6 +344,51 @@ pub fn read_bytes() -> Result<Option<Vec<u8>>, String> {
         Ok(_) => Ok(decode_text_envelope(text.trim())),
         Err(_) => Ok(None),
     }
+}
+
+/// 读系统剪贴板里的位图（Windows `CF_DIB`）。
+///
+/// 返回的是**原始 DIB**（`BITMAPINFOHEADER` + 调色板/掩码 + 像素），不是
+/// 可直接显示的图片文件。调用方（前端）在外面套一个 14 字节的 BMP 文件头即可
+/// 交给浏览器的图片解码器 —— 这样后端不需要引入图像编码库。
+///
+/// 为什么需要它：从资源管理器复制图片文件时，WebView 的 `paste` 事件里就有
+/// `File` 对象；但截图工具（Win+Shift+S）只往剪贴板放位图，此时事件里可能
+/// 什么都没有，必须由本进程直接读 `CF_DIB`。
+#[cfg(target_os = "windows")]
+pub fn read_bitmap_dib() -> Result<Option<ClipboardBitmap>, String> {
+    use clipboard_win::raw;
+
+    // `CF_DIB` 是预定义格式（id = 8），可直接按 id 访问。
+    const CF_DIB: u32 = 8;
+
+    let _guard = CLIPBOARD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _clipboard = open_clipboard_with_retry()?;
+
+    if !raw::is_format_avail(CF_DIB) {
+        return Ok(None);
+    }
+    let size = raw::size(CF_DIB).ok_or_else(|| "clipboard_empty".to_string())?;
+    let mut buf = vec![0u8; size.get()];
+    let bytes_read =
+        raw::get(CF_DIB, &mut buf).map_err(|e| format!("clipboard_bitmap_read_failed: {}", e))?;
+    buf.truncate(bytes_read);
+
+    // BITMAPINFOHEADER 至少 40 字节；不足说明不是位图，按"没有"处理。
+    if buf.len() < 40 {
+        return Ok(None);
+    }
+    let width = i32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
+    let height = i32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]);
+    let bits_per_pixel = u16::from_le_bytes([buf[14], buf[15]]);
+
+    Ok(Some(ClipboardBitmap {
+        // 高度为负表示自上而下的位图，宽度理论上恒正；取绝对值容错。
+        width: width.unsigned_abs(),
+        height: height.unsigned_abs(),
+        bits_per_pixel,
+        bytes: buf,
+    }))
 }
 
 // ---------------------------------------------------------------------------

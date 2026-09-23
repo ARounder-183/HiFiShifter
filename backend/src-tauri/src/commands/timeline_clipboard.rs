@@ -22,6 +22,23 @@ use serde_json::json;
 const PARAM_PAYLOAD_VERSION: u64 = 2;
 const PARAM_PAYLOAD_VERSION_LEGACY: u64 = 1;
 
+/// 判别字节流是否是参数线载荷，是则返回其 JSON 值。
+///
+/// 供记事本暂存块复用：暂存时只需要"是不是参数线载荷 + 摘要元数据"，
+/// 不需要参数线自己的领域解析（那是前端 `paramClipboardMapping` 的职责）。
+pub(super) fn param_payload_value(bytes: &[u8]) -> Option<serde_json::Value> {
+    let value = serde_json::from_slice::<serde_json::Value>(bytes).ok()?;
+    if value.get("kind").and_then(|entry| entry.as_str())? != "param" {
+        return None;
+    }
+    let version = value.get("version").and_then(|entry| entry.as_u64())?;
+    if version == PARAM_PAYLOAD_VERSION_LEGACY || version == PARAM_PAYLOAD_VERSION {
+        Some(value)
+    } else {
+        None
+    }
+}
+
 fn current_project_name(state: &AppState) -> String {
     state
         .project

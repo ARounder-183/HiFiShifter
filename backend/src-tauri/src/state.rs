@@ -1931,6 +1931,15 @@ pub struct ProjectState {
     pub dirty: bool,
     pub recent: Vec<String>,
     pub notes_markdown: String,
+    /// 记事本附件登记表（图片 / 剪贴板载荷）。字节在磁盘上，见
+    /// `crate::notebook_assets`。
+    pub notebook_assets: crate::notebook_assets::NotebookAssetMap,
+    /// 记事本附件的落点。`Some` = 已绑定工程旁挂目录 `<工程名>-assets`；
+    /// `None` = 工程尚未落盘，附件在 `%TEMP%/hifishifter/notebook_staging/`。
+    pub notebook_asset_dir: Option<std::path::PathBuf>,
+    /// 记事本编辑的撤销分节闸门：置位后，下一次「编辑记事本」写入不再并入
+    /// 前沿那一步，而是另起一步（由 `seal_project_notes_history` 触发）。
+    pub notes_history_sealed: bool,
     pub base_scale: String,
     pub use_custom_scale: bool,
     pub custom_scale: Option<CustomScale>,
@@ -1957,6 +1966,9 @@ impl Default for ProjectState {
             dirty: false,
             recent: Vec::new(),
             notes_markdown: String::new(),
+            notebook_assets: crate::notebook_assets::NotebookAssetMap::new(),
+            notebook_asset_dir: None,
+            notes_history_sealed: false,
             base_scale: "C".to_string(),
             use_custom_scale: false,
             custom_scale: None,
@@ -3348,6 +3360,119 @@ impl AppState {
         p.notes_markdown = markdown;
     }
 
+    // ── 记事本附件 ──────────────────────────────────────────────────────────
+
+    /// 当前记事本附件的落点：已绑定工程旁挂目录时用它，否则用暂存目录。
+    pub fn notebook_asset_dir(&self) -> Result<std::path::PathBuf, String> {
+        let bound = {
+            let p = self.project.lock().unwrap_or_else(|e| e.into_inner());
+            p.notebook_asset_dir.clone()
+        };
+        match bound {
+            Some(dir) => Ok(dir),
+            None => crate::notebook_assets::staging_dir(),
+        }
+    }
+
+    /// 把附件落点绑定到目标工程路径（保存/另存为时调用），并把暂存目录里的
+    /// 附件整体迁入旁挂目录。
+    ///
+    /// 先搬迁成功再改绑定：搬迁失败时保持原绑定，避免出现"登记表指向新目录、
+    /// 字节还留在旧目录"的悬挂状态。
+    pub fn bind_notebook_asset_dir(&self, project_path: &std::path::Path) -> Result<(), String> {
+        let target = crate::notebook_assets::asset_dir_for_project(project_path);
+        let previous = {
+            let p = self.project.lock().unwrap_or_else(|e| e.into_inner());
+            p.notebook_asset_dir.clone()
+        };
+        if previous.as_deref() == Some(target.as_path()) {
+            return Ok(());
+        }
+        let source = match previous {
+            Some(dir) => dir,
+            None => crate::notebook_assets::staging_dir()?,
+        };
+        crate::notebook_assets::migrate_dir(&source, &target)?;
+        let mut p = self.project.lock().unwrap_or_else(|e| e.into_inner());
+        p.notebook_asset_dir = Some(target);
+        Ok(())
+    }
+
+    /// 附件登记表快照。
+    pub fn notebook_assets_snapshot(&self) -> crate::notebook_assets::NotebookAssetMap {
+        self.project
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .notebook_assets
+            .clone()
+    }
+
+    /// 仍被引用的附件 id 集合：**当前正文 ∪ 全部历史记录的正文**。
+    ///
+    /// 必须并入历史：撤销/重做会把正文换成更早的版本，若只按当前正文清理，
+    /// 撤销回去的图片就会变成空白（而撤销本应无损）。历史记录里已经存了每一步
+    /// 的记事本内容（见 `HistoryRecord.notes_markdown`），直接复用。
+    pub fn notebook_referenced_ids(&self) -> std::collections::HashSet<String> {
+        let mut ids = crate::notebook_assets::referenced_asset_ids(&self.current_notes_value());
+        {
+            let h = self
+                .timeline_history
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            for record in &h.records {
+                if let Some(markdown) = &record.notes_markdown {
+                    ids.extend(crate::notebook_assets::referenced_asset_ids(markdown));
+                }
+            }
+        }
+        ids
+    }
+
+    /// 保存时的附件整理：按"仍被引用"清理登记项与磁盘文件，返回删除条数。
+    pub fn prune_notebook_assets(&self) -> usize {
+        let keep = self.notebook_referenced_ids();
+        let dir = match self.notebook_asset_dir() {
+            Ok(dir) => dir,
+            Err(_) => return 0,
+        };
+        let mut removed = 0usize;
+        {
+            let mut p = self.project.lock().unwrap_or_else(|e| e.into_inner());
+            let stale: Vec<String> = p
+                .notebook_assets
+                .iter()
+                .filter(|(id, asset)| asset.orphaned || !keep.contains(*id))
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in stale {
+                if let Some(asset) = p.notebook_assets.remove(&id) {
+                    let _ = crate::notebook_assets::remove_asset_file(&dir, &id, &asset.ext);
+                    removed += 1;
+                }
+            }
+            // 目录兜底清扫：登记表可能因跨版本/手工编辑而丢条目，但文件还在。
+            // 只保留"登记表中仍存在且仍被引用"的 id，其余文件一律删除。
+            let live: std::collections::HashSet<String> = p
+                .notebook_assets
+                .keys()
+                .filter(|id| keep.contains(*id))
+                .cloned()
+                .collect();
+            removed += crate::notebook_assets::prune_dir(&dir, &live);
+        }
+        removed
+    }
+
+    /// 清空记事本附件（新建工程时调用），并清空暂存目录。
+    pub fn reset_notebook_assets(&self) {
+        {
+            let mut p = self.project.lock().unwrap_or_else(|e| e.into_inner());
+            p.notebook_assets.clear();
+            p.notebook_asset_dir = None;
+        }
+        crate::notebook_assets::clear_staging_dir();
+    }
+
     /// 打点的公共实现：与记事本无关的改动（绝大多数操作）。
     fn push_checkpoint(&self, snapshot: &TimelineState, label: String) {
         self.push_checkpoint_with_notes(snapshot, label, None);
@@ -3613,6 +3738,22 @@ impl AppState {
             p.notes_markdown = markdown;
             p.dirty = true;
         }
+        // 分节闸门是一次性的：无论本次是否真的另起了一步，都消费掉。
+        p.notes_history_sealed = false;
+        drop(p);
+        self.emit_history_state();
+    }
+
+    /// 关闭记事本编辑的"结构性合并"窗口：下一次写入必然另起一个撤销步。
+    ///
+    /// 后端默认把连续写入并入前沿那一步（无论用户打字多久），这对纯文本
+    /// 记事本足够；富文本编辑器有自己的细粒度撤销栈，但仍需要一个"这一节
+    /// 到此为止"的显式信号 —— 切换视图模式、失焦、关闭面板、保存前调用。
+    pub fn seal_notes_history(&self) {
+        {
+            let mut p = self.project.lock().unwrap_or_else(|e| e.into_inner());
+            p.notes_history_sealed = true;
+        }
         self.emit_history_state();
     }
 
@@ -3620,8 +3761,17 @@ impl AppState {
     ///
     /// 仅当该步**就是当前所处位置**（打点后位置恒指向它）且 label 匹配时为
     /// 真。历史为空 / 前沿是初始状态行 / 已跳转离开（此时前沿 label 是其它
-    /// 操作或 None）均为假。
+    /// 操作或 None）均为假。分节闸门置位时同样为假 —— 这正是"另起一步"的
+    /// 实现方式。
     fn history_top_is_notes_edit(&self) -> bool {
+        if self
+            .project
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .notes_history_sealed
+        {
+            return false;
+        }
         let h = self
             .timeline_history
             .lock()

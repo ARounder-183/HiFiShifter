@@ -457,6 +457,17 @@ pub struct UiSettings {
     /// 渲染缓存：把渲染结果落盘，重新打开工程时直接复用。
     #[serde(default)]
     pub render_cache: RenderCacheSettings,
+    /// 记事本（Notebook）设置。
+    ///
+    /// **后端只做透传存储**：字段语义、取值合法性与默认值都在前端收口
+    /// （`components/layout/notebook/notebookSettings.ts` 的
+    /// `normalizeNotebookSettings`），理由与 `param_axis_units` 相同 ——
+    /// "支持哪些取值"属于业务知识，写两遍必然漂移。
+    ///
+    /// 用 `serde_json::Value` 而不是具体结构体还有一个实际好处：前端新增
+    /// 字段时后端不必同步改结构体，用户降级运行旧版本时未知字段也会原样保留。
+    #[serde(default)]
+    pub notebook: serde_json::Value,
 }
 
 /// "为新的音频块启用循环"的进程级生效值（默认 true）。
@@ -1118,6 +1129,7 @@ impl Default for UiSettings {
             loop_new_clips: true,
             sync_edits_across_takes: true,
             render_cache: RenderCacheSettings::default(),
+            notebook: serde_json::Value::Null,
         }
     }
 }

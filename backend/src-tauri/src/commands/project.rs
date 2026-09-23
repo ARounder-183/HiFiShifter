@@ -408,6 +408,7 @@ fn build_project_file_snapshot(
         time_signature_denominator,
         grid_size,
         notes_markdown,
+        notebook_assets,
         stretch_algorithm_override,
         hifigan_mel_stretch_override,
         save_undo_history,
@@ -425,6 +426,7 @@ fn build_project_file_snapshot(
             },
             normalize_grid_size(&p.grid_size),
             p.notes_markdown.clone(),
+            p.notebook_assets.clone(),
             p.stretch_algorithm_override,
             p.hifigan_mel_stretch_override,
             p.save_undo_history,
@@ -443,6 +445,7 @@ fn build_project_file_snapshot(
     pf.use_custom_scale = use_custom_scale && custom_scale.is_some();
     pf.custom_scale = custom_scale;
     pf.notes_markdown = notes_markdown;
+    pf.notebook_assets = notebook_assets;
     pf.synth_config.stretch_algorithm_override = stretch_algorithm_override;
     pf.synth_config.hifigan_mel_stretch_override = hifigan_mel_stretch_override;
     // 工程级开关：是否随工程保存 UNDO 数据（与全局「新建工程默认值」相互独立）。
@@ -499,6 +502,20 @@ fn save_project_archive_to_zip_inner(
     let project_name = project_name_from_path(zip_path);
     let project_entry_name = format!("{}.hshp", project_name);
     let archive_project_virtual_path = PathBuf::from(&project_entry_name);
+
+    // 归档是"交付"产物：只按正文引用清理孤儿附件，**不**改绑定 ——
+    // 绑定会指向 `<xxx>.zip-assets`，而归档里附件应落在与内嵌工程文件同名的
+    // 旁挂目录 `<工程名>.hshp-assets/`，这样解压后直接打开 .hshp 就能看到图。
+    let pruned = state.prune_notebook_assets();
+    if pruned > 0 {
+        log::info!("[notebook] 归档前清理了 {pruned} 条未引用附件");
+    }
+    let asset_folder = format!(
+        "{}{}",
+        project_entry_name,
+        crate::notebook_assets::ASSET_DIR_SUFFIX
+    );
+    let asset_entries = crate::commands::notebook::archive_asset_entries(state, &asset_folder);
 
     let mut pf = build_project_file_snapshot(state, &archive_project_virtual_path, &project_name);
 
@@ -633,8 +650,7 @@ fn save_project_archive_to_zip_inner(
         for (source_path, zip_entry) in &source_to_entry {
             if !written_entries.insert(zip_entry.clone()) {
                 continue;
-            }
-            // 使用流式写入，避免将整个文件读入内存。
+            }            // 使用流式写入，避免将整个文件读入内存。
             let mut src_file = fs::File::open(source_path).map_err(|e| e.to_string())?;
             // 保留媒体文件的修改时间等元数据（并允许 >4GiB 的大录音走 ZIP64）。
             zip.start_file(
@@ -643,6 +659,21 @@ fn save_project_archive_to_zip_inner(
             )
             .map_err(|e| e.to_string())?;
             std::io::copy(&mut src_file, &mut zip).map_err(|e| e.to_string())?;
+        }
+
+        // 记事本附件：条目名与内嵌工程文件同名的旁挂目录，解压后即可直接使用。
+        for (entry_name, source_path) in &asset_entries {
+            if !written_entries.insert(entry_name.clone()) {
+                continue;
+            }
+            let mut src_file = fs::File::open(source_path).map_err(|e| e.to_string())?;
+            zip.start_file(
+                entry_name,
+                crate::zip_util::options_for_large_source(source_path),
+            )
+            .map_err(|e| e.to_string())?;
+            std::io::copy(&mut src_file, &mut zip).map_err(|e| e.to_string())?;
+            archive_logs.push(format!("Notebook asset: {} -> {}", source_path.display(), entry_name));
         }
 
         let log_name = format!(
@@ -743,6 +774,10 @@ pub(crate) fn save_project_to_path_inner(
 ) -> Result<crate::models::TimelineStatePayload, String> {
     let path = PathBuf::from(&project_path);
     let name = project_name_from_path(&path);
+    // 记事本附件：先绑定落点（把未落盘工程的暂存附件迁进旁挂目录）并按正文
+    // 引用清理孤儿，再构建快照 —— 顺序不能反，否则登记表里还留着已被删掉的
+    // 条目，或引用了尚未迁入新目录的字节。
+    crate::commands::notebook::prepare_assets_for_save(state, &path);
     let pf = build_project_file_snapshot(state, &path, &name);
     let bytes = serialize_project_file_for_path(&pf, &path)?;
 
@@ -833,6 +868,9 @@ pub(super) fn run_timed_auto_backup(
         output_path.set_extension("hshp");
     }
 
+    // 备份写到另一个路径，因此只复制附件、不改绑定（见函数注释）。
+    crate::commands::notebook::mirror_assets_for_backup(state.inner(), &output_path);
+
     match atomic_write_project_snapshot_to_path(state.inner(), &output_path) {
         Ok(()) => serde_json::json!({
             "ok": true,
@@ -862,8 +900,8 @@ pub(super) fn new_project(
         p.dirty = false;
         p.notes_markdown = String::new();
         p.base_scale = "C".to_string();
-        p.use_custom_scale = false;
         p.custom_scale = None;
+        p.use_custom_scale = false;
         p.beats_per_bar = 4;
         p.grid_size = "1/4".to_string();
         p.stretch_algorithm_override = None;
@@ -873,6 +911,9 @@ pub(super) fn new_project(
             .ui_settings_snapshot()
             .save_undo_history_by_default;
     }
+    // 记事本附件随工程一起清空：登记表归零、落点退回暂存目录、暂存目录清空。
+    // 必须在上面的锁释放之后调用（reset 内部自己加锁）。
+    state.reset_notebook_assets();
     sync_runtime_stretch_settings(state.inner());
     {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
@@ -1049,6 +1090,12 @@ pub(super) fn open_project(
         }
         update_window_title(&window, &p.name, p.dirty);
     }
+    // 记事本附件：装载登记表并把落点绑定到本工程的旁挂目录（锁已释放）。
+    crate::commands::notebook::bind_assets_on_open(
+        state.inner(),
+        &path,
+        pf.notebook_assets.clone(),
+    );
     // 渲染缓存的工程归属：用于"仅清理当前工程的缓存"。
     crate::render_cache::set_current_project_id(crate::render_cache::project_id_for_path(
         Some(&project_path),

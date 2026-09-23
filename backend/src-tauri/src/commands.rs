@@ -24,6 +24,8 @@ mod midi;
 #[path = "commands/midi_export.rs"]
 mod midi_export;
 pub(crate) use midi_export::TempoTickConverter;
+#[path = "commands/notebook.rs"]
+mod notebook;
 #[path = "commands/onnx_status.rs"]
 mod onnx_status;
 #[path = "commands/param_selection_window.rs"]
@@ -261,6 +263,107 @@ pub fn save_project(
 ) -> serde_json::Value {
     project::save_project(state, window, notes_markdown)
 }
+
+// ===================== 记事本（附件 / 剪贴板暂存 / 导出） =====================
+
+/// 写入一条记事本附件（图片或剪贴板载荷的字节）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn notebook_put_asset(
+    state: State<'_, AppState>,
+    asset_id: String,
+    kind: String,
+    ext: String,
+    mime: Option<String>,
+    data_base64: String,
+    meta: Option<serde_json::Value>,
+) -> serde_json::Value {
+    notebook::put_asset(state, asset_id, kind, ext, mime, data_base64, meta)
+}
+
+/// 读回一条附件的字节（图片渲染走这条）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn notebook_read_asset(state: State<'_, AppState>, asset_id: String) -> serde_json::Value {
+    notebook::read_asset(state, asset_id)
+}
+
+/// 列出全部附件（附件管理器用）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn notebook_list_assets(state: State<'_, AppState>) -> serde_json::Value {
+    notebook::list_assets(state)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn notebook_remove_asset(state: State<'_, AppState>, asset_id: String) -> serde_json::Value {
+    notebook::remove_asset(state, asset_id)
+}
+
+/// 按正文引用清理孤儿附件（保存前调用）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn notebook_prune_assets(state: State<'_, AppState>) -> serde_json::Value {
+    notebook::prune_assets(state)
+}
+
+/// 附件在磁盘上的绝对路径（"在文件管理器中显示"）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn notebook_asset_path(state: State<'_, AppState>, asset_id: String) -> serde_json::Value {
+    notebook::asset_path(state, asset_id)
+}
+
+/// 把任意文件读成 base64（拖入的图片走这条）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn notebook_read_file_base64(path: String, max_bytes: Option<u64>) -> serde_json::Value {
+    notebook::read_file_base64(path, max_bytes)
+}
+
+/// 读出系统剪贴板里的 HiFiShifter 载荷（时间轴片段 / 参数线），供暂存。
+#[tauri::command(rename_all = "camelCase")]
+pub fn notebook_read_clipboard_payload() -> serde_json::Value {
+    notebook::read_clipboard_payload()
+}
+
+/// 把暂存的载荷字节原样写回系统剪贴板。
+#[tauri::command(rename_all = "camelCase")]
+pub fn notebook_write_clipboard_payload(
+    payload_base64: String,
+    text_summary: Option<String>,
+) -> serde_json::Value {
+    notebook::write_clipboard_payload(payload_base64, text_summary)
+}
+
+/// 读系统剪贴板里的位图（截图粘贴的兜底路径）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn notebook_read_clipboard_image() -> serde_json::Value {
+    notebook::read_clipboard_image()
+}
+
+/// 关闭记事本编辑的撤销合并窗口（切模式 / 失焦 / 关面板 / 保存前调用）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn seal_project_notes_history(state: State<'_, AppState>) -> serde_json::Value {
+    notebook::seal_notes_history(state)
+}
+
+/// 导出记事本正文（.md / .html），按图片模式改写附件引用。
+#[tauri::command(rename_all = "camelCase")]
+pub fn notebook_export_document(
+    state: State<'_, AppState>,
+    suggested_name: String,
+    extension: String,
+    content: String,
+    image_mode: Option<String>,
+) -> serde_json::Value {
+    notebook::export_document(state, suggested_name, extension, content, image_mode)
+}
+
+/// 把一条附件另存为独立文件。
+#[tauri::command(rename_all = "camelCase")]
+pub fn notebook_save_asset_as(
+    state: State<'_, AppState>,
+    asset_id: String,
+    suggested_name: Option<String>,
+) -> serde_json::Value {
+    notebook::save_asset_as(state, asset_id, suggested_name)
+}
+
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn save_project_as(

@@ -125,6 +125,7 @@ mod hfspeaks_v2;
 mod linux_clipboard;
 #[path = "import/midi_import.rs"]
 mod midi_import;
+mod notebook_assets;
 mod project;
 mod project_fragment;
 #[path = "import/reaper_export.rs"]
@@ -580,6 +581,19 @@ pub fn run() {
             commands::import_project_dialog,
             commands::import_project,
             commands::set_project_notes,
+            commands::seal_project_notes_history,
+            commands::notebook_put_asset,
+            commands::notebook_read_asset,
+            commands::notebook_list_assets,
+            commands::notebook_remove_asset,
+            commands::notebook_prune_assets,
+            commands::notebook_asset_path,
+            commands::notebook_read_file_base64,
+            commands::notebook_read_clipboard_payload,
+            commands::notebook_write_clipboard_payload,
+            commands::notebook_read_clipboard_image,
+            commands::notebook_export_document,
+            commands::notebook_save_asset_as,
             commands::save_project,
             commands::save_project_as,
             commands::save_project_to_path,
