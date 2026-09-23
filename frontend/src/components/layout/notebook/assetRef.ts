@@ -2,8 +2,8 @@
  * 记事本附件引用的编解码。
  *
  * Markdown 正文里用 `hifi-asset://<id>[.<ext>][#w=<px>]` 引用附件（图片），
- * 用 ```hifi-clip 围栏引用剪贴板暂存块。两种引用都只带 id，字节在工程旁挂
- * 目录里 —— 见后端 `notebook_assets` 模块的说明。
+ * 用 ```hifi-clip 围栏引用剪贴板暂存块。两种引用都只带 id，字节**内嵌在
+ * 工程文件里** —— 见后端 `notebook_assets` 模块的说明。
  *
  * 本文件只做纯字符串处理（无 DOM、无 TipTap），因此可以在 vitest 的 node
  * 环境里直接测；后端 `notebook_assets::scan_asset_refs` 是同一套语法的

@@ -744,7 +744,6 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
 
         case "notebook_read_asset":
         case "notebook_remove_asset":
-        case "notebook_asset_path":
             return { assetId: args[0] };
 
         case "notebook_read_file_base64":
@@ -764,7 +763,6 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
                 suggestedName: args[0],
                 extension: args[1],
                 content: args[2],
-                imageMode: args[3] ?? null,
             };
 
         case "notebook_save_asset_as":

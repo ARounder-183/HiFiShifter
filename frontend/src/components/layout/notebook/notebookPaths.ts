@@ -1,12 +1,12 @@
 /*
  * 路径工具（纯函数，可单测）。
  *
- * 记事本的 `link` 图片模式与"导出到旁挂目录"都要处理路径：
- * - `link`：正文里存**相对工程目录**的路径，工程和素材一起搬走仍然可用；
- * - 导出：把 `hifi-asset://` 换成 `./<名>.assets/<id>.<ext>`。
+ * 附件本身内嵌在工程文件里（`hifi-asset://`），这里只处理**用户手写**的
+ * 相对/绝对路径引用：正文里写 `![](素材/截图.png)` 时，要相对工程目录解析
+ * 成绝对路径才能读到文件。
  *
- * Windows 的盘符、反斜杠、大小写不敏感都要照顾到 —— 这里统一用正斜杠做
- * 规范形态，只在拼绝对路径时还原。
+ * Windows 的盘符、反斜杠都要照顾到 —— 这里统一用正斜杠做规范形态，只在拼
+ * 绝对路径时还原。
  */
 
 /** 把路径规范化为正斜杠形态（不做大小写转换）。 */
@@ -51,35 +51,6 @@ export function isAbsolutePath(path: string): boolean {
     );
 }
 
-/**
- * 计算 `target` 相对 `fromDir` 的相对路径。
- *
- * 不同盘符（Windows 上 `C:` → `D:`）无法表达相对路径，此时返回 null，调用方
- * 应退回"复制到旁挂目录"。
- */
-export function relativePath(fromDir: string, target: string): string | null {
-    const from = splitSegments(fromDir);
-    const to = splitSegments(target);
-
-    // 盘符（Windows）：不同盘直接放弃。
-    const fromDrive = /^[A-Za-z]:$/.exec(from[0] ?? "");
-    const toDrive = /^[A-Za-z]:$/.exec(to[0] ?? "");
-    if (fromDrive || toDrive) {
-        if (!fromDrive || !toDrive) return null;
-        if (fromDrive[0].toLowerCase() !== toDrive[0].toLowerCase()) return null;
-    }
-
-    let common = 0;
-    while (common < from.length && common < to.length && from[common] === to[common]) {
-        common += 1;
-    }
-
-    const up = from.length - common;
-    const rest = to.slice(common);
-    const parts = [...Array<string>(up).fill(".."), ...rest];
-    return parts.length === 0 ? "." : parts.join("/");
-}
-
 /** 把相对路径解析为绝对路径（`baseDir` 必须是绝对路径）。 */
 export function resolvePath(baseDir: string, relative: string): string {
     const normalized = toPosix(relative);
@@ -100,22 +71,7 @@ export function resolvePath(baseDir: string, relative: string): string {
     return joined;
 }
 
-/**
- * 把路径编码成可以放进 Markdown 链接的形式。
- *
- * 空格、`(`、`)`、`#`、`?` 都会破坏链接或引用语法，逐段做百分号编码；
- * 中文等非 ASCII 字符保留原样（Markdown 与 markdown-it 都支持，可读性更好）。
- */
-export function encodePathForMarkdown(path: string): string {
-    return toPosix(path)
-        .split("/")
-        .map((segment) =>
-            segment.replace(/[ ()#?%<>[\]\\^`{|}]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`),
-        )
-        .join("/");
-}
-
-/** `encodePathForMarkdown` 的逆操作（解码每一段）。 */
+/** 解码 Markdown 里的路径（逐段 decodeURIComponent，容错）。 */
 export function decodePathFromMarkdown(path: string): string {
     return path
         .split("/")

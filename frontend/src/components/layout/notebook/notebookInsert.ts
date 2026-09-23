@@ -6,15 +6,13 @@
  *
  * ```
  * Blob → prepareImage（解码/缩放/编码/哈希）
- *      ├─ embed  模式：src = data:...            （自包含，工程文件变大）
- *      ├─ link   模式：src = 相对工程目录的路径   （不拷贝，靠原文件活着）
- *      └─ sidecar 模式：putAsset → src = hifi-asset://<id>.<ext>
- *      → 插入 image 节点（宽度取设置里的默认值）
+ *      → putAsset（字节内嵌进工程文件的附件表）
+ *      → src = hifi-asset://<id>.<ext>
+ *      → 插入 image 节点
  * ```
  *
- * `link` 模式在"工程未落盘"或"跨盘符"时**自动退回 sidecar** —— 前者没有
- * 可作基准的目录，后者无法表达相对路径。宁可多拷一份字节，也不要写出一个
- * 指向别处、换个机器就失效的引用。
+ * 字节内嵌而不是写旁挂目录：工程自包含，拷走/分享/打包都不会丢图。代价是
+ * 工程文件变大，抵消手段在写入前（长边缩放 + WebP/JPEG 重编码 + 内容哈希去重）。
  */
 
 import type { Editor } from "@tiptap/core";
@@ -30,7 +28,7 @@ import {
     type PreparedImage,
 } from "./notebookImagePipeline";
 import { clearImageCache } from "./notebookImageCache";
-import { baseName, encodePathForMarkdown, isAbsolutePath, relativePath, toPosix } from "./notebookPaths";
+import { baseName } from "./notebookPaths";
 
 /**
  * 工具栏/斜杠菜单共用的插入动作集合。
@@ -70,7 +68,6 @@ export async function insertImageFromBlob(
     ctx: InsertContext,
     blob: Blob,
     originalName: string,
-    options?: { absolutePath?: string },
 ): Promise<InsertResult> {
     if (blob.size > ctx.settings.maxImageBytes) {
         ctx.notify?.(`图片过大（${formatBytes(blob.size)}），已超过上限`, "error");
@@ -86,7 +83,7 @@ export async function insertImageFromBlob(
         return { ok: false, reason: "unsupported" };
     }
 
-    const src = await resolveImageSrc(ctx, prepared, options?.absolutePath);
+    const src = await resolveImageSrc(ctx, prepared);
     if (!src) return { ok: false, reason: "write-failed" };
 
     insertImageNode(ctx.editor, src, originalName);
@@ -110,7 +107,7 @@ export async function insertImageFromPath(
     const blob = new Blob([toBlobPart(base64ToBlobPart(file.base64))], {
         type: file.mime ?? "image/png",
     });
-    return insertImageFromBlob(ctx, blob, baseName(absolutePath), { absolutePath });
+    return insertImageFromBlob(ctx, blob, baseName(absolutePath));
 }
 
 /** 插入 Windows 剪贴板里的位图（截图粘贴的兜底路径）。 */
@@ -133,20 +130,7 @@ export async function insertImageFromClipboardBitmap(ctx: InsertContext): Promis
 async function resolveImageSrc(
     ctx: InsertContext,
     prepared: PreparedImage,
-    absolutePath: string | undefined,
 ): Promise<string | null> {
-    const mode = ctx.settings.imageStorage;
-
-    if (mode === "embed") {
-        return `data:${prepared.mime};base64,${prepared.base64}`;
-    }
-
-    if (mode === "link" && absolutePath && ctx.projectDir && isAbsolutePath(absolutePath)) {
-        const relative = relativePath(ctx.projectDir, toPosix(absolutePath));
-        // 跨盘符时 relativePath 返回 null —— 无法表达相对引用，退回拷贝。
-        if (relative) return encodePathForMarkdown(relative);
-    }
-
     const result = await notebookApi.putAsset({
         assetId: prepared.assetId,
         kind: "image",

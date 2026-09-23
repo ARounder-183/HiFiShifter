@@ -1,36 +1,38 @@
-//! 记事本附件存储：图片与 HiFiShifter 剪贴板载荷。
+//! 记事本附件登记表：图片与 HiFiShifter 剪贴板载荷。
 //!
-//! ## 为什么需要附件而不是把字节塞进 Markdown
+//! ## 字节内嵌在工程文件里
 //!
-//! 记事本的正文是 Markdown 字符串，每次编辑都要经 IPC 写回后端并登记为
-//! 撤销步。若把图片或剪贴板载荷的字节以 base64 内嵌进正文，则**每次按键
-//! 都要搬运兆级文本**，打字会被 IPC 拖垮。因此正文只保存轻量引用
-//! （`hifi-asset://<id>.<ext>` 与 ```hifi-clip 围栏），字节落在附件目录里，
-//! 由本模块统一管理。
+//! 附件（图片、剪贴板载荷）的字节以 base64 直接存在工程文件的
+//! `notebook_assets` 表里，**不落任何旁挂目录**：
 //!
-//! ## 落点
+//! - 工程自包含：把 `.hshp` 单独拷走、发出去、放进压缩包，图片都跟着走，
+//!   不会出现"文件在、图没了"；
+//! - 没有暂存目录、没有旁挂目录迁移、没有"另存为时要复制附件"这一整套
+//!   生命周期（曾经有过：`<工程名>-assets/` 旁挂目录 + `%TEMP%` 暂存目录）；
+//! - 定时备份天然自带附件（备份写的就是工程文件本身）。
 //!
-//! - 工程已落盘：`<工程文件全名>-assets/`（与 `-UNDO` 伴生文件的命名同构，
-//!   见 `commands/undo_history_file.rs`），随工程一起搬迁；
-//! - 工程尚未落盘：`%TEMP%/hifishifter/notebook_staging/`，首次保存时整体
-//!   迁入旁挂目录。
+//! 代价是工程文件会变大。抵消手段在**写入前**：图片先按长边上限缩放、转成
+//! WebP/JPEG，并按内容哈希去重（同一张图重复拖入只存一份）。
+//!
+//! base64 而不是 msgpack 原生字节：工程文件既可能是 `.hshp`（MessagePack）
+//! 也可能是 `.json`，后者用 `Vec<u8>` 会被序列化成数字数组（体积爆炸）。
+//! base64 在两种格式里都是紧凑字符串。
 //!
 //! ## 生命周期
 //!
-//! 附件**只增不删**：会话内删除引用只是把登记项标记为 `orphaned`，真正的
-//! 文件清理发生在保存时（`prune_orphans`）。这样撤销/重做把引用恢复回来时
-//! 附件依然在，不会出现"撤销后图片变成空白"。
+//! 附件**只增不删**：删除引用（删掉正文里的图）只是让它在保存时被判为
+//! "未被引用"，真正的清理发生在保存时（`prune_unreferenced`）。这样撤销/
+//! 重做把引用恢复回来时附件仍在，不会出现"撤销后图片变成空白"。
 
 use std::collections::{BTreeMap, HashSet};
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-/// 工程旁挂附件目录后缀，与 `-UNDO` 同构。
-pub const ASSET_DIR_SUFFIX: &str = "-assets";
+/// v6 及更早版本使用的旁挂附件目录后缀。仅用于**打开旧工程时的一次性迁移**。
+pub const LEGACY_ASSET_DIR_SUFFIX: &str = "-assets";
 
-/// 附件种类。决定前端用什么 UI 呈现，也决定读取时给什么 MIME 兜底。
+/// 附件种类。决定前端用什么 UI 呈现。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NotebookAssetKind {
@@ -46,17 +48,18 @@ impl Default for NotebookAssetKind {
     }
 }
 
-/// 一条附件登记项。字节在磁盘上，这里只存元数据。
+/// 一条附件：元数据 + 字节（base64）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct NotebookAsset {
     #[serde(default)]
     pub kind: NotebookAssetKind,
-    /// 文件扩展名（不含点）。同时是磁盘文件名的后缀。
+    /// 文件扩展名（不含点）。导出/另存为时用来拼文件名。
     pub ext: String,
     /// MIME 类型，读取时直接回给前端。
     #[serde(default)]
     pub mime: String,
+    /// 解码后的字节数（不是 base64 长度），用于展示占用与上限判断。
     #[serde(default)]
     pub byte_len: u64,
     #[serde(default)]
@@ -69,12 +72,15 @@ pub struct NotebookAsset {
     /// - ClipPayload：`{ clipKind, title, clipCount, trackCount, durationSec, sourceProject, preview }`
     #[serde(default)]
     pub meta: serde_json::Value,
+    /// 字节本体（base64）。空串 = 该条目没有数据（例如 v6 旧工程迁移失败）。
+    #[serde(default)]
+    pub data: String,
 }
 
 /// 附件 id 允许的字符集：只允许字母数字与 `-` `_`。
 ///
-/// id 由前端生成（内容哈希），但要经 IPC 到达这里并参与路径拼接 ——
-/// 必须在此收口，否则 `../` 之类能逃出附件目录。
+/// id 由前端生成（内容哈希），但要经 IPC 到达这里并出现在正文里，因此必须
+/// 在此收口 —— 否则正文里一个 `../` 就能让导出路径拼到目录外。
 pub fn sanitize_asset_id(raw: &str) -> Result<String, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -92,7 +98,7 @@ pub fn sanitize_asset_id(raw: &str) -> Result<String, String> {
     Ok(trimmed.to_string())
 }
 
-/// 扩展名白名单（字符集层面的收口，避免路径拼接被注入）。
+/// 扩展名白名单（字符集层面的收口，避免拼文件名时被注入）。
 pub fn sanitize_ext(raw: &str) -> String {
     let cleaned: String = raw
         .trim()
@@ -107,150 +113,6 @@ pub fn sanitize_ext(raw: &str) -> String {
     } else {
         cleaned
     }
-}
-
-/// 工程旁挂附件目录：`<工程文件全名>-assets/`。
-pub fn asset_dir_for_project(project_path: &Path) -> PathBuf {
-    let file_name = project_path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("project");
-    project_path.with_file_name(format!("{file_name}{ASSET_DIR_SUFFIX}"))
-}
-
-/// 未落盘工程的附件暂存目录。
-pub fn staging_dir() -> Result<PathBuf, String> {
-    let dir = crate::temp_manager::hifishifter_temp_dir()?.join("notebook_staging");
-    fs::create_dir_all(&dir).map_err(|e| format!("创建记事本暂存目录失败: {e}"))?;
-    Ok(dir)
-}
-
-/// 确保目录存在。
-pub fn ensure_dir(dir: &Path) -> Result<(), String> {
-    fs::create_dir_all(dir).map_err(|e| format!("创建附件目录 {:?} 失败: {}", dir, e))
-}
-
-/// 写入一条附件的字节（覆盖同名）。
-pub fn write_asset_bytes(dir: &Path, id: &str, ext: &str, bytes: &[u8]) -> Result<PathBuf, String> {
-    let id = sanitize_asset_id(id)?;
-    let ext = sanitize_ext(ext);
-    ensure_dir(dir)?;
-    let path = dir.join(format!("{id}.{ext}"));
-    fs::write(&path, bytes).map_err(|e| format!("写入附件 {:?} 失败: {}", path, e))?;
-    Ok(path)
-}
-
-/// 读取一条附件的字节。
-pub fn read_asset_bytes(dir: &Path, id: &str, ext: &str) -> Result<Vec<u8>, String> {
-    let id = sanitize_asset_id(id)?;
-    let ext = sanitize_ext(ext);
-    let path = dir.join(format!("{id}.{ext}"));
-    fs::read(&path).map_err(|e| format!("读取附件 {:?} 失败: {}", path, e))
-}
-
-/// 删除一条附件的文件（不存在视为成功）。
-pub fn remove_asset_file(dir: &Path, id: &str, ext: &str) -> Result<(), String> {
-    let id = sanitize_asset_id(id)?;
-    let ext = sanitize_ext(ext);
-    let path = dir.join(format!("{id}.{ext}"));
-    match fs::remove_file(&path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(format!("删除附件 {:?} 失败: {}", path, e)),
-    }
-}
-
-/// 在目录中按 id 定位附件文件，返回 `(路径, 扩展名)`。
-///
-/// 登记表里的 ext 理论上就是权威，但工程文件可能被手工改动或跨版本，
-/// 因此读取时以磁盘实际内容为准兜底。
-pub fn locate_asset_file(dir: &Path, id: &str) -> Option<(PathBuf, String)> {
-    let id = sanitize_asset_id(id).ok()?;
-    let entries = fs::read_dir(dir).ok()?;
-    let prefix = format!("{id}.");
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if let Some(ext) = name.strip_prefix(&prefix) {
-            if entry.path().is_file() {
-                return Some((entry.path(), ext.to_string()));
-            }
-        }
-    }
-    None
-}
-
-/// 把 `from` 目录中的全部附件文件迁入 `to`（覆盖同名），用于首次保存时
-/// 把暂存目录里的附件搬进工程旁挂目录。
-pub fn migrate_dir(from: &Path, to: &Path) -> Result<usize, String> {
-    if from == to {
-        return Ok(0);
-    }
-    if !from.is_dir() {
-        return Ok(0);
-    }
-    ensure_dir(to)?;
-    let mut moved = 0usize;
-    for entry in fs::read_dir(from)
-        .map_err(|e| format!("读取暂存目录 {:?} 失败: {}", from, e))?
-        .flatten()
-    {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let Some(name) = path.file_name() else { continue };
-        let target = to.join(name);
-        // 先删目标再改名：Windows 上 rename 不覆盖已存在文件。
-        let _ = fs::remove_file(&target);
-        match fs::rename(&path, &target) {
-            Ok(()) => moved += 1,
-            Err(_) => {
-                // 跨卷时 rename 会失败，退回"复制 + 删除"。
-                if fs::copy(&path, &target).is_ok() {
-                    let _ = fs::remove_file(&path);
-                    moved += 1;
-                }
-            }
-        }
-    }
-    Ok(moved)
-}
-
-/// 清空暂存目录（新建/打开工程时调用，避免上一份未落盘工程的附件残留）。
-pub fn clear_staging_dir() {
-    if let Ok(dir) = staging_dir() {
-        if let Ok(entries) = fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                let _ = fs::remove_file(entry.path());
-            }
-        }
-    }
-}
-
-/// 按"仍被引用的 id 集合"清理目录，返回删除数量。
-///
-/// 与登记表的 `orphaned` 标记双管齐下：登记表负责语义（谁还被引用），
-/// 目录清理负责兜底（登记表丢了但文件还在的残渣）。
-pub fn prune_dir(dir: &Path, keep: &HashSet<String>) -> usize {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return 0;
-    };
-    let mut removed = 0usize;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().to_string();
-        let id = name.split('.').next().unwrap_or_default().to_string();
-        if keep.contains(&id) {
-            continue;
-        }
-        if fs::remove_file(&path).is_ok() {
-            removed += 1;
-        }
-    }
-    removed
 }
 
 /// 登记表的别名，避免调用点到处写完整泛型。
@@ -277,9 +139,9 @@ pub struct AssetRef {
 /// hifi-asset://<id>[.<ext>][#w=<px>]
 /// ```
 ///
-/// 手写扫描而非正则：id 与扩展名的字符集都是封闭的（见
-/// `sanitize_asset_id` / `sanitize_ext`），逐字符推进比正则更易读，也不会
-/// 因正文里的正则元字符而退化。
+/// 手写扫描而非正则：id 与扩展名的字符集都是封闭的（见 `sanitize_asset_id`
+/// / `sanitize_ext`），逐字符推进比正则更易读，也不会因正文里的正则元字符
+/// 而退化。
 pub fn scan_asset_refs(content: &str) -> Vec<AssetRef> {
     const PREFIX: &str = "hifi-asset://";
     let bytes = content.as_bytes();
@@ -365,9 +227,121 @@ pub fn referenced_asset_ids(markdown: &str) -> HashSet<String> {
     ids
 }
 
+/// 按"仍被引用"清理登记表，返回移除条数。
+pub fn prune_unreferenced(map: &mut NotebookAssetMap, keep: &HashSet<String>) -> usize {
+    let stale: Vec<String> = map
+        .iter()
+        .filter(|(id, asset)| asset.orphaned || !keep.contains(*id))
+        .map(|(id, _)| id.clone())
+        .collect();
+    for id in &stale {
+        map.remove(id);
+    }
+    stale.len()
+}
+
+/// 旧工程（v6 及更早）的旁挂附件目录：`<工程文件全名>-assets/`。
+pub fn legacy_asset_dir_for_project(project_path: &Path) -> std::path::PathBuf {
+    let file_name = project_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("project");
+    project_path.with_file_name(format!("{file_name}{LEGACY_ASSET_DIR_SUFFIX}"))
+}
+
+/// 把旧版旁挂目录里的附件读进登记表（一次性迁移），返回迁移条数。
+///
+/// 只在打开旧工程时调用：登记表里缺 `data` 的条目从同名文件补全；目录里
+/// 存在但登记表没有的文件也一并收进来（登记表丢条目时也能救回内容）。
+/// 迁移后旧目录**不再被读取**，也不主动删除 —— 删用户磁盘上的文件不是
+/// 打开工程该做的事。
+pub fn migrate_legacy_sidecar(
+    project_path: &Path,
+    map: &mut NotebookAssetMap,
+) -> usize {
+    let dir = legacy_asset_dir_for_project(project_path);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return 0;
+    };
+    let mut migrated = 0usize;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let Some((raw_id, ext)) = name.rsplit_once('.') else {
+            continue;
+        };
+        let Ok(id) = sanitize_asset_id(raw_id) else {
+            continue;
+        };
+        let ext = sanitize_ext(ext);
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        use base64::Engine as _;
+        let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+
+        match map.get_mut(&id) {
+            Some(asset) => {
+                if !asset.data.is_empty() {
+                    continue;
+                }
+                asset.data = data;
+                asset.byte_len = bytes.len() as u64;
+                if asset.ext.is_empty() {
+                    asset.ext = ext;
+                }
+                migrated += 1;
+            }
+            None => {
+                map.insert(
+                    id,
+                    NotebookAsset {
+                        kind: NotebookAssetKind::Image,
+                        ext,
+                        mime: String::new(),
+                        byte_len: bytes.len() as u64,
+                        created_at_ms: crate::state::now_unix_ms(),
+                        orphaned: false,
+                        meta: serde_json::Value::Null,
+                        data,
+                    },
+                );
+                migrated += 1;
+            }
+        }
+    }
+
+    if migrated > 0 {
+        log::info!(
+            "[notebook] 已把旧版旁挂附件目录里的 {migrated} 条附件内嵌进工程文件: {:?}",
+            dir
+        );
+    }
+    migrated
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn asset(ext: &str) -> NotebookAsset {
+        NotebookAsset {
+            kind: NotebookAssetKind::Image,
+            ext: ext.to_string(),
+            mime: "image/png".to_string(),
+            byte_len: 3,
+            created_at_ms: 0,
+            orphaned: false,
+            meta: serde_json::Value::Null,
+            data: "AAAA".to_string(),
+        }
+    }
 
     #[test]
     fn sanitize_rejects_traversal() {
@@ -406,8 +380,10 @@ mod tests {
         assert_eq!(refs[0].id, "abc123");
         assert_eq!(refs[0].ext.as_deref(), Some("webp"));
         assert_eq!(refs[0].width, Some(640));
-        // 区间必须精确覆盖引用本身，调用方靠它做拼接替换。
-        assert_eq!(&"前 ![图](hifi-asset://abc123.webp#w=640) 后"[refs[0].start..refs[0].end], "hifi-asset://abc123.webp#w=640");
+        assert_eq!(
+            &"前 ![图](hifi-asset://abc123.webp#w=640) 后"[refs[0].start..refs[0].end],
+            "hifi-asset://abc123.webp#w=640"
+        );
     }
 
     #[test]
@@ -429,8 +405,65 @@ mod tests {
     }
 
     #[test]
-    fn asset_dir_mirrors_undo_sidecar_naming() {
-        let dir = asset_dir_for_project(Path::new("/tmp/My Song.hshp"));
-        assert!(dir.to_string_lossy().ends_with("My Song.hshp-assets"));
+    fn prune_keeps_referenced_and_drops_the_rest() {
+        let mut map = NotebookAssetMap::new();
+        map.insert("keep1".into(), asset("png"));
+        map.insert("keep2".into(), asset("webp"));
+        map.insert("gone".into(), asset("png"));
+        let mut orphaned = asset("png");
+        orphaned.orphaned = true;
+        map.insert("explicit".into(), orphaned);
+
+        let keep: HashSet<String> = ["keep1", "keep2"].into_iter().map(String::from).collect();
+        let removed = prune_unreferenced(&mut map, &keep);
+        assert_eq!(removed, 2);
+        assert_eq!(map.len(), 2);
+        assert!(map.contains_key("keep1"));
+        assert!(map.contains_key("keep2"));
+    }
+
+    #[test]
+    fn asset_round_trips_through_msgpack_with_embedded_bytes() {
+        let mut map = NotebookAssetMap::new();
+        map.insert("abc".into(), asset("png"));
+        let bytes = rmp_serde::to_vec_named(&map).expect("serialize");
+        let back: NotebookAssetMap = rmp_serde::from_slice(&bytes).expect("deserialize");
+        assert_eq!(back["abc"].data, "AAAA");
+        assert_eq!(back["abc"].ext, "png");
+    }
+
+    #[test]
+    fn v6_asset_without_data_still_deserializes() {
+        // v6 的登记项没有 `data` 字段：旧工程必须能打开（内容随后由旁挂目录迁移补齐）。
+        let json = r#"{"abc":{"kind":"image","ext":"png","mime":"image/png","byte_len":3}}"#;
+        let map: NotebookAssetMap = serde_json::from_str(json).expect("deserialize v6 shape");
+        assert_eq!(map["abc"].data, "");
+        assert_eq!(map["abc"].ext, "png");
+    }
+
+    #[test]
+    fn legacy_sidecar_is_migrated_into_the_registry() {
+        let dir = std::env::temp_dir().join(format!("hs-notebook-migrate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let project_path = dir.join("Song.hshp");
+        let sidecar = legacy_asset_dir_for_project(&project_path);
+        std::fs::create_dir_all(&sidecar).expect("sidecar dir");
+        std::fs::write(sidecar.join("knownid.png"), b"png-bytes").expect("write known");
+        std::fs::write(sidecar.join("orphanid.webp"), b"webp-bytes").expect("write orphan");
+
+        let mut map = NotebookAssetMap::new();
+        let mut known = asset("png");
+        known.data = String::new();
+        known.byte_len = 0;
+        map.insert("knownid".into(), known);
+
+        let migrated = migrate_legacy_sidecar(&project_path, &mut map);
+        assert_eq!(migrated, 2, "both sidecar files should be embedded");
+        assert!(!map["knownid"].data.is_empty());
+        assert_eq!(map["knownid"].byte_len, 9);
+        assert!(map.contains_key("orphanid"), "unknown sidecar file rescued");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

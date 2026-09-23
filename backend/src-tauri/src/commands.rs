@@ -303,12 +303,6 @@ pub fn notebook_prune_assets(state: State<'_, AppState>) -> serde_json::Value {
     notebook::prune_assets(state)
 }
 
-/// 附件在磁盘上的绝对路径（"在文件管理器中显示"）。
-#[tauri::command(rename_all = "camelCase")]
-pub fn notebook_asset_path(state: State<'_, AppState>, asset_id: String) -> serde_json::Value {
-    notebook::asset_path(state, asset_id)
-}
-
 /// 把任意文件读成 base64（拖入的图片走这条）。
 #[tauri::command(rename_all = "camelCase")]
 pub fn notebook_read_file_base64(path: String, max_bytes: Option<u64>) -> serde_json::Value {
@@ -342,16 +336,15 @@ pub fn seal_project_notes_history(state: State<'_, AppState>) -> serde_json::Val
     notebook::seal_notes_history(state)
 }
 
-/// 导出记事本正文（.md / .html），按图片模式改写附件引用。
+/// 导出记事本正文（.md / .html）：图片以 data URI 内嵌，产物自包含。
 #[tauri::command(rename_all = "camelCase")]
 pub fn notebook_export_document(
     state: State<'_, AppState>,
     suggested_name: String,
     extension: String,
     content: String,
-    image_mode: Option<String>,
 ) -> serde_json::Value {
-    notebook::export_document(state, suggested_name, extension, content, image_mode)
+    notebook::export_document(state, suggested_name, extension, content)
 }
 
 /// 把一条附件另存为独立文件。

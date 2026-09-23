@@ -60,7 +60,9 @@ export function HifiClipNodeView(props: NodeViewProps) {
     const [notice, setNotice] = useState<string | null>(null);
 
     const entry = attrs ? assetIndex[attrs.id] : undefined;
-    const missing = attrs ? entry === undefined || !entry.exists : false;
+    // 内嵌模型下"条目在"就等于"内容在"；只有 v6 旧工程迁移失败的条目
+    // 会带着 hasData=false。
+    const missing = attrs ? entry === undefined || !entry.hasData : false;
 
     // `meta` 来自工程文件（`serde_json::Value`）：可能是任意 JSON —— 手改过的
     // 工程、更早/更新版本的 schema 都会到这里。只认数组/对象，其余当没有，

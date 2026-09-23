@@ -123,30 +123,10 @@ function AttachmentRow({
                 type="button"
                 className="hs-notebook-toolbar-btn"
                 title={t("notebook_attachments_save_as")}
-                disabled={!entry.exists}
+                disabled={!entry.hasData}
                 onClick={() => void notebookApi.saveAssetAs(entry.id).catch(() => {})}
             >
                 ⤓
-            </button>
-            <button
-                type="button"
-                className="hs-notebook-toolbar-btn"
-                title={t("notebook_attachments_reveal")}
-                disabled={!entry.exists}
-                onClick={() => {
-                    void (async () => {
-                        const result = await notebookApi.assetPath(entry.id);
-                        if (!result.ok || !result.path) return;
-                        try {
-                            const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
-                            await revealItemInDir(result.path);
-                        } catch {
-                            // 非 Tauri 环境忽略。
-                        }
-                    })();
-                }}
-            >
-                ⧉
             </button>
             <button
                 type="button"
@@ -243,7 +223,6 @@ export function NotebookSettingsDialog({
                 projectName || "notes",
                 extension,
                 content,
-                settings.exportImageMode,
             );
             if (result.canceled) {
                 setExportNotice(null);
@@ -336,17 +315,6 @@ export function NotebookSettingsDialog({
                     </Section>
 
                     <Section title={tAny("notebook_settings_group_image")}>
-                        <SelectRow
-                            label={tAny("notebook_setting_image_storage")}
-                            value={settings.imageStorage}
-                            options={[
-                                { value: "sidecar", label: tAny("notebook_setting_image_storage_sidecar") },
-                                { value: "embed", label: tAny("notebook_setting_image_storage_embed") },
-                                { value: "link", label: tAny("notebook_setting_image_storage_link") },
-                            ]}
-                            hint={tAny("notebook_setting_image_storage_hint")}
-                            onChange={(value) => onChange({ imageStorage: value })}
-                        />
                         <SelectRow
                             label={tAny("notebook_setting_image_max_dim")}
                             value={String(settings.imageMaxDimensionPx)}
@@ -444,15 +412,6 @@ export function NotebookSettingsDialog({
                             label={tAny("notebook_setting_clip_preview")}
                             checked={settings.clipShowPreview}
                             onChange={(value) => onChange({ clipShowPreview: value })}
-                        />
-                        <SelectRow
-                            label={tAny("notebook_setting_export_image_mode")}
-                            value={settings.exportImageMode}
-                            options={[
-                                { value: "copyFolder", label: tAny("notebook_setting_export_copy_folder") },
-                                { value: "embed", label: tAny("notebook_setting_export_embed") },
-                            ]}
-                            onChange={(value) => onChange({ exportImageMode: value })}
                         />
                     </Section>
 
@@ -560,8 +519,8 @@ function SelectRow({
 /**
  * HTML 导出：把富文本视图的 HTML 包进最小文档骨架 + 一段排版样式。
  *
- * `hifi-asset://` 引用交给后端按导出设置改写成内嵌 data URI 或旁挂目录，
- * 这里不重复实现。剪贴板暂存块的 `<div data-hifi-clip="...">` 转成
+ * `hifi-asset://` 引用交给后端改写成内嵌 data URI（导出物自包含，不生成
+ * 任何旁挂目录），这里不重复实现。剪贴板暂存块的 `<div data-hifi-clip="...">` 转成
  * `<pre><code class="language-hifi-clip">` —— 与其他 Markdown 渲染器看到
  * 的形态一致（一个代码块），外部打开时不会是一团乱码。
  */

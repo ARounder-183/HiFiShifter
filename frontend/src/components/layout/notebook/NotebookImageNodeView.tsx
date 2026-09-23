@@ -143,13 +143,6 @@ export function NotebookImageNodeView(props: NodeViewProps) {
                     void notebookApi.saveAssetAs(assetId).catch(() => {});
                 },
             });
-            items.push({
-                key: "reveal",
-                label: t("notebook_image_reveal"),
-                onSelect: () => {
-                    void revealAsset(assetId);
-                },
-            });
         }
         items.push({
             key: "width-reset",
@@ -302,13 +295,3 @@ async function transcodeToPng(blob: Blob): Promise<Blob | null> {
     }
 }
 
-async function revealAsset(assetId: string): Promise<void> {
-    const result = await notebookApi.assetPath(assetId);
-    if (!result.ok || !result.path) return;
-    try {
-        const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
-        await revealItemInDir(result.path);
-    } catch {
-        // 非 Tauri 环境（或插件不可用）时静默忽略。
-    }
-}

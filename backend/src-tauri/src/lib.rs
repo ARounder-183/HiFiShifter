@@ -587,7 +587,6 @@ pub fn run() {
             commands::notebook_list_assets,
             commands::notebook_remove_asset,
             commands::notebook_prune_assets,
-            commands::notebook_asset_path,
             commands::notebook_read_file_base64,
             commands::notebook_read_clipboard_payload,
             commands::notebook_write_clipboard_payload,

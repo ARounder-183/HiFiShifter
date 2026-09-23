@@ -4,9 +4,7 @@ import {
     baseName,
     decodePathFromMarkdown,
     dirName,
-    encodePathForMarkdown,
     isAbsolutePath,
-    relativePath,
     resolvePath,
     stemName,
     toPosix,
@@ -32,28 +30,13 @@ test("components/layout/notebook/notebookPaths.test.ts scripted checks", async (
     assertEqual(isAbsolutePath("C:\\work\\a.png"), true, "windows absolute");
     assertEqual(isAbsolutePath("素材/a.png"), false, "relative");
 
-    // 相对路径：同盘可算，跨盘放弃（Windows 上 C: → D: 无法表达）。
-    assertEqual(relativePath("C:/work/song", "C:/work/song/assets/a.png"), "assets/a.png", "same dir child");
-    assertEqual(relativePath("C:/work/song", "C:/work/ref/a.png"), "../ref/a.png", "sibling");
-    assertEqual(relativePath("C:/work/song", "D:/other/a.png"), null, "cross drive");
-    assertEqual(relativePath("/a/b", "/a/b"), ".", "identical");
-
     assertEqual(resolvePath("C:/work/song", "assets/a.png"), "C:/work/song/assets/a.png", "resolve child");
     assertEqual(resolvePath("C:/work/song", "../ref/a.png"), "C:/work/ref/a.png", "resolve parent");
     assertEqual(resolvePath("/a/b", "/abs/a.png"), "/abs/a.png", "resolve absolute passthrough");
 
-    // 空格与括号必须编码，否则 Markdown 链接语法会被截断。
-    assertEqual(
-        encodePathForMarkdown("素材/截图 (1).png"),
-        "素材/截图%20(1).png".replace("(", "%28").replace(")", "%29"),
-        "encode spaces and parens",
-    );
     assertEqual(decodePathFromMarkdown("素材/%E6%88%AA%E5%9B%BE.png"), "素材/截图.png", "decode");
-    assertEqual(
-        decodePathFromMarkdown(encodePathForMarkdown("素材/截图 (1).png")),
-        "素材/截图 (1).png",
-        "encode/decode round trip",
-    );
+    // 未编码的路径原样返回（用户手写 Markdown 时很常见）。
+    assertEqual(decodePathFromMarkdown("素材/截图.png"), "素材/截图.png", "decode raw");
 });
 
 test("components/layout/notebook/timecode.test.ts scripted checks", async () => {
@@ -78,20 +61,17 @@ test("components/layout/notebook/timecode.test.ts scripted checks", async () => 
 test("components/layout/notebook/notebookSettings.test.ts scripted checks", async () => {
     const defaults = normalizeNotebookSettings(null);
     assertEqual(defaults.defaultMode, "rich", "default mode");
-    assertEqual(defaults.imageStorage, "sidecar", "default image storage");
     assertEqual(defaults.smartPaste, true, "smart paste on by default");
 
     // 非法取值一律退回默认，避免配置被手改后炸在渲染路径上。
     const bogus = normalizeNotebookSettings({
         defaultMode: "wysiwyg" as never,
-        imageStorage: "ftp" as never,
         copyFormat: "rtf" as never,
         panelWidth: 99999,
         imageMaxDimensionPx: -5,
         historySplitIdleMs: Number.NaN,
     });
     assertEqual(bogus.defaultMode, "rich", "bogus mode");
-    assertEqual(bogus.imageStorage, "sidecar", "bogus storage");
     assertEqual(bogus.copyFormat, "markdown+html", "bogus copy format");
     assertEqual(bogus.panelWidth, NOTEBOOK_PANEL_MAX_WIDTH, "panel width clamped");
     assertEqual(bogus.imageMaxDimensionPx, 0, "negative dimension clamped to 0");

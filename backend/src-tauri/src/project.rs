@@ -95,11 +95,16 @@ impl SynthConfig {
 /// `finalize_timeline_for_session` 阶段对越界值规范化 —— 无需数据搬移。
 ///
 /// v6：新增 `notebook_assets`（记事本附件登记表：图片与 HiFiShifter 剪贴板
-/// 载荷）。字节落在工程旁挂目录 `<工程名>-assets/` 里，工程文件只存元数据；
-/// 旧工程反序列化时缺省为空表，正文里的 Markdown 也不含附件引用 —— 无需
-/// 数据搬移。打开旧工程时若正文里存在 `hifi-asset://` 引用而登记表为空，
+/// 载荷）。当时的字节落在工程旁挂目录 `<工程名>-assets/` 里，工程文件只存
+/// 元数据；打开旧工程时若正文里存在 `hifi-asset://` 引用而登记表为空，
 /// 图片会显示为"附件缺失"占位，不会破坏文档。
-pub const CURRENT_PROJECT_FILE_VERSION: u32 = 6;
+///
+/// v7：附件字节改为**内嵌在工程文件里**（`NotebookAsset.data`，base64），
+/// 不再有旁挂目录：工程自包含，拷贝/分享/打包都不会丢图，也没有暂存目录与
+/// 目录迁移这一整套生命周期。打开 v6 工程时会把旁挂目录里的文件读进登记表
+/// （见 `notebook_assets::migrate_legacy_sidecar`），随后保存即完成内嵌；
+/// v6 的登记项没有 `data` 字段，缺省为空串，反序列化不受影响。
+pub const CURRENT_PROJECT_FILE_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

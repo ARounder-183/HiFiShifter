@@ -55,10 +55,12 @@ export interface NotebookAssetEntry {
     byteLen: number;
     createdAtMs: number;
     meta: unknown;
-    exists: boolean;
+    /** 登记项里是否真的有字节（v6 旧工程迁移失败的条目为 false）。 */
+    hasData: boolean;
 }
 
 export const notebookApi = {
+    /** 写入一条附件：字节随工程文件内嵌保存。 */
     putAsset: (payload: {
         assetId: string;
         kind: "image" | "clip_payload";
@@ -89,9 +91,6 @@ export const notebookApi = {
         invoke<{ ok: boolean; removed: boolean }>("notebook_remove_asset", assetId),
 
     pruneAssets: () => invoke<{ ok: boolean; removed: number }>("notebook_prune_assets"),
-
-    assetPath: (assetId: string) =>
-        invoke<{ ok: boolean; error?: string; path?: string }>("notebook_asset_path", assetId),
 
     readFileBase64: (path: string, maxBytes?: number) =>
         invoke<{
@@ -126,20 +125,15 @@ export const notebookApi = {
     /** 关闭记事本编辑的撤销合并窗口（切模式 / 失焦 / 关面板 / 保存前）。 */
     sealNotesHistory: () => invoke<{ ok: boolean }>("seal_project_notes_history"),
 
-    exportDocument: (
-        suggestedName: string,
-        extension: "md" | "html",
-        content: string,
-        imageMode?: "copyFolder" | "embed",
-    ) =>
+    /** 导出为自包含文档（图片以 data URI 内嵌）。 */
+    exportDocument: (suggestedName: string, extension: "md" | "html", content: string) =>
         invoke<{
             ok: boolean;
             error?: string;
             canceled?: boolean;
             path?: string;
             missingAssets?: string[];
-            copiedAssets?: number;
-        }>("notebook_export_document", suggestedName, extension, content, imageMode),
+        }>("notebook_export_document", suggestedName, extension, content),
 
     saveAssetAs: (assetId: string, suggestedName?: string) =>
         invoke<{ ok: boolean; error?: string; canceled?: boolean; path?: string }>(

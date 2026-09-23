@@ -26,8 +26,6 @@ export interface NotebookSettings {
     sourceFontSize?: number;
     /** 拼写检查（项目笔记里罗马音/术语多，默认关）。 */
     spellCheck?: boolean;
-    /** 图片存储模式。 */
-    imageStorage?: "sidecar" | "embed" | "link";
     /** 图片长边上限（0 = 原图）。 */
     imageMaxDimensionPx?: number;
     /** 图片编码格式。 */
@@ -56,8 +54,6 @@ export interface NotebookSettings {
     autosaveDebounceMs?: number;
     /** 编辑停顿多久后另起一个撤销步（0 = 沿用后端的结构性合并）。 */
     historySplitIdleMs?: number;
-    /** 导出文档时的图片处理方式。 */
-    exportImageMode?: "copyFolder" | "embed";
 }
 
 export type ResolvedNotebookSettings = Required<NotebookSettings>;
@@ -71,7 +67,6 @@ export const DEFAULT_NOTEBOOK_SETTINGS: ResolvedNotebookSettings = {
     sourceWordWrap: true,
     sourceFontSize: 13,
     spellCheck: false,
-    imageStorage: "sidecar",
     imageMaxDimensionPx: 2048,
     imageFormat: "auto",
     maxImageBytes: 20 * 1024 * 1024,
@@ -86,7 +81,6 @@ export const DEFAULT_NOTEBOOK_SETTINGS: ResolvedNotebookSettings = {
     clipShowPreview: true,
     autosaveDebounceMs: 400,
     historySplitIdleMs: 0,
-    exportImageMode: "copyFolder",
 };
 
 export const NOTEBOOK_PANEL_MIN_WIDTH = 260;
@@ -133,7 +127,6 @@ export function normalizeNotebookSettings(
         sourceWordWrap: bool(raw.sourceWordWrap, d.sourceWordWrap),
         sourceFontSize: clampNumber(raw.sourceFontSize, 9, 24, d.sourceFontSize),
         spellCheck: bool(raw.spellCheck, d.spellCheck),
-        imageStorage: pickEnum(raw.imageStorage, ["sidecar", "embed", "link"] as const, d.imageStorage),
         // 0 是合法值（= 不缩放），因此下界是 0。
         imageMaxDimensionPx: clampNumber(raw.imageMaxDimensionPx, 0, 16384, d.imageMaxDimensionPx),
         imageFormat: pickEnum(
@@ -165,10 +158,5 @@ export function normalizeNotebookSettings(
         clipShowPreview: bool(raw.clipShowPreview, d.clipShowPreview),
         autosaveDebounceMs: clampNumber(raw.autosaveDebounceMs, 0, 5000, d.autosaveDebounceMs),
         historySplitIdleMs: clampNumber(raw.historySplitIdleMs, 0, 600000, d.historySplitIdleMs),
-        exportImageMode: pickEnum(
-            raw.exportImageMode,
-            ["copyFolder", "embed"] as const,
-            d.exportImageMode,
-        ),
     };
 }

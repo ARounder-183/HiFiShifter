@@ -503,19 +503,12 @@ fn save_project_archive_to_zip_inner(
     let project_entry_name = format!("{}.hshp", project_name);
     let archive_project_virtual_path = PathBuf::from(&project_entry_name);
 
-    // 归档是"交付"产物：只按正文引用清理孤儿附件，**不**改绑定 ——
-    // 绑定会指向 `<xxx>.zip-assets`，而归档里附件应落在与内嵌工程文件同名的
-    // 旁挂目录 `<工程名>.hshp-assets/`，这样解压后直接打开 .hshp 就能看到图。
+    // 归档前按正文引用清理未引用条目：附件字节内嵌在工程文件里，随内嵌的
+    // .hshp 一起进压缩包，不需要额外打包附件目录。
     let pruned = state.prune_notebook_assets();
     if pruned > 0 {
         log::info!("[notebook] 归档前清理了 {pruned} 条未引用附件");
     }
-    let asset_folder = format!(
-        "{}{}",
-        project_entry_name,
-        crate::notebook_assets::ASSET_DIR_SUFFIX
-    );
-    let asset_entries = crate::commands::notebook::archive_asset_entries(state, &asset_folder);
 
     let mut pf = build_project_file_snapshot(state, &archive_project_virtual_path, &project_name);
 
@@ -661,21 +654,6 @@ fn save_project_archive_to_zip_inner(
             std::io::copy(&mut src_file, &mut zip).map_err(|e| e.to_string())?;
         }
 
-        // 记事本附件：条目名与内嵌工程文件同名的旁挂目录，解压后即可直接使用。
-        for (entry_name, source_path) in &asset_entries {
-            if !written_entries.insert(entry_name.clone()) {
-                continue;
-            }
-            let mut src_file = fs::File::open(source_path).map_err(|e| e.to_string())?;
-            zip.start_file(
-                entry_name,
-                crate::zip_util::options_for_large_source(source_path),
-            )
-            .map_err(|e| e.to_string())?;
-            std::io::copy(&mut src_file, &mut zip).map_err(|e| e.to_string())?;
-            archive_logs.push(format!("Notebook asset: {} -> {}", source_path.display(), entry_name));
-        }
-
         let log_name = format!(
             "{}_{}.log",
             project_name,
@@ -774,10 +752,9 @@ pub(crate) fn save_project_to_path_inner(
 ) -> Result<crate::models::TimelineStatePayload, String> {
     let path = PathBuf::from(&project_path);
     let name = project_name_from_path(&path);
-    // 记事本附件：先绑定落点（把未落盘工程的暂存附件迁进旁挂目录）并按正文
-    // 引用清理孤儿，再构建快照 —— 顺序不能反，否则登记表里还留着已被删掉的
-    // 条目，或引用了尚未迁入新目录的字节。
-    crate::commands::notebook::prepare_assets_for_save(state, &path);
+    // 记事本附件：按正文引用清理未引用条目，再构建快照 —— 顺序不能反，
+    // 否则登记表里还留着已被删掉的条目（字节内嵌在工程文件里，随之一起变大）。
+    crate::commands::notebook::prepare_assets_for_save(state);
     let pf = build_project_file_snapshot(state, &path, &name);
     let bytes = serialize_project_file_for_path(&pf, &path)?;
 
@@ -867,9 +844,6 @@ pub(super) fn run_timed_auto_backup(
     if output_path.extension().is_none() {
         output_path.set_extension("hshp");
     }
-
-    // 备份写到另一个路径，因此只复制附件、不改绑定（见函数注释）。
-    crate::commands::notebook::mirror_assets_for_backup(state.inner(), &output_path);
 
     match atomic_write_project_snapshot_to_path(state.inner(), &output_path) {
         Ok(()) => serde_json::json!({

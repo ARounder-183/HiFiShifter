@@ -48,7 +48,8 @@ export interface NotebookAssetSummary {
     byteLen: number;
     createdAtMs: number;
     meta: unknown;
-    exists: boolean;
+    /** 登记项里是否真的有字节（v6 旧工程迁移失败的条目为 false）。 */
+    hasData: boolean;
 }
 
 const initialState: NotebookState = {

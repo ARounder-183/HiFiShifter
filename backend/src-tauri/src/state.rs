@@ -1931,12 +1931,11 @@ pub struct ProjectState {
     pub dirty: bool,
     pub recent: Vec<String>,
     pub notes_markdown: String,
-    /// 记事本附件登记表（图片 / 剪贴板载荷）。字节在磁盘上，见
-    /// `crate::notebook_assets`。
+    /// 记事本附件登记表（图片 / 剪贴板载荷）。
+    ///
+    /// 字节以 base64 **内嵌在工程文件里**，不再有旁挂目录 —— 见
+    /// `crate::notebook_assets` 的模块注释。
     pub notebook_assets: crate::notebook_assets::NotebookAssetMap,
-    /// 记事本附件的落点。`Some` = 已绑定工程旁挂目录 `<工程名>-assets`；
-    /// `None` = 工程尚未落盘，附件在 `%TEMP%/hifishifter/notebook_staging/`。
-    pub notebook_asset_dir: Option<std::path::PathBuf>,
     /// 记事本编辑的撤销分节闸门：置位后，下一次「编辑记事本」写入不再并入
     /// 前沿那一步，而是另起一步（由 `seal_project_notes_history` 触发）。
     pub notes_history_sealed: bool,
@@ -1967,7 +1966,6 @@ impl Default for ProjectState {
             recent: Vec::new(),
             notes_markdown: String::new(),
             notebook_assets: crate::notebook_assets::NotebookAssetMap::new(),
-            notebook_asset_dir: None,
             notes_history_sealed: false,
             base_scale: "C".to_string(),
             use_custom_scale: false,
@@ -3362,42 +3360,6 @@ impl AppState {
 
     // ── 记事本附件 ──────────────────────────────────────────────────────────
 
-    /// 当前记事本附件的落点：已绑定工程旁挂目录时用它，否则用暂存目录。
-    pub fn notebook_asset_dir(&self) -> Result<std::path::PathBuf, String> {
-        let bound = {
-            let p = self.project.lock().unwrap_or_else(|e| e.into_inner());
-            p.notebook_asset_dir.clone()
-        };
-        match bound {
-            Some(dir) => Ok(dir),
-            None => crate::notebook_assets::staging_dir(),
-        }
-    }
-
-    /// 把附件落点绑定到目标工程路径（保存/另存为时调用），并把暂存目录里的
-    /// 附件整体迁入旁挂目录。
-    ///
-    /// 先搬迁成功再改绑定：搬迁失败时保持原绑定，避免出现"登记表指向新目录、
-    /// 字节还留在旧目录"的悬挂状态。
-    pub fn bind_notebook_asset_dir(&self, project_path: &std::path::Path) -> Result<(), String> {
-        let target = crate::notebook_assets::asset_dir_for_project(project_path);
-        let previous = {
-            let p = self.project.lock().unwrap_or_else(|e| e.into_inner());
-            p.notebook_asset_dir.clone()
-        };
-        if previous.as_deref() == Some(target.as_path()) {
-            return Ok(());
-        }
-        let source = match previous {
-            Some(dir) => dir,
-            None => crate::notebook_assets::staging_dir()?,
-        };
-        crate::notebook_assets::migrate_dir(&source, &target)?;
-        let mut p = self.project.lock().unwrap_or_else(|e| e.into_inner());
-        p.notebook_asset_dir = Some(target);
-        Ok(())
-    }
-
     /// 附件登记表快照。
     pub fn notebook_assets_snapshot(&self) -> crate::notebook_assets::NotebookAssetMap {
         self.project
@@ -3428,49 +3390,19 @@ impl AppState {
         ids
     }
 
-    /// 保存时的附件整理：按"仍被引用"清理登记项与磁盘文件，返回删除条数。
+    /// 保存时的附件整理：把不再被引用的条目从登记表移除，返回移除条数。
+    ///
+    /// 字节内嵌之后这里不再碰磁盘 —— 只是把没人引用的条目丢掉，工程文件随之变小。
     pub fn prune_notebook_assets(&self) -> usize {
         let keep = self.notebook_referenced_ids();
-        let dir = match self.notebook_asset_dir() {
-            Ok(dir) => dir,
-            Err(_) => return 0,
-        };
-        let mut removed = 0usize;
-        {
-            let mut p = self.project.lock().unwrap_or_else(|e| e.into_inner());
-            let stale: Vec<String> = p
-                .notebook_assets
-                .iter()
-                .filter(|(id, asset)| asset.orphaned || !keep.contains(*id))
-                .map(|(id, _)| id.clone())
-                .collect();
-            for id in stale {
-                if let Some(asset) = p.notebook_assets.remove(&id) {
-                    let _ = crate::notebook_assets::remove_asset_file(&dir, &id, &asset.ext);
-                    removed += 1;
-                }
-            }
-            // 目录兜底清扫：登记表可能因跨版本/手工编辑而丢条目，但文件还在。
-            // 只保留"登记表中仍存在且仍被引用"的 id，其余文件一律删除。
-            let live: std::collections::HashSet<String> = p
-                .notebook_assets
-                .keys()
-                .filter(|id| keep.contains(*id))
-                .cloned()
-                .collect();
-            removed += crate::notebook_assets::prune_dir(&dir, &live);
-        }
-        removed
+        let mut p = self.project.lock().unwrap_or_else(|e| e.into_inner());
+        crate::notebook_assets::prune_unreferenced(&mut p.notebook_assets, &keep)
     }
 
-    /// 清空记事本附件（新建工程时调用），并清空暂存目录。
+    /// 清空记事本附件（新建工程时调用）。
     pub fn reset_notebook_assets(&self) {
-        {
-            let mut p = self.project.lock().unwrap_or_else(|e| e.into_inner());
-            p.notebook_assets.clear();
-            p.notebook_asset_dir = None;
-        }
-        crate::notebook_assets::clear_staging_dir();
+        let mut p = self.project.lock().unwrap_or_else(|e| e.into_inner());
+        p.notebook_assets.clear();
     }
 
     /// 打点的公共实现：与记事本无关的改动（绝大多数操作）。

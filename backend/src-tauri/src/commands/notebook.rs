@@ -1,15 +1,15 @@
-//! 记事本后端：附件存储、剪贴板载荷暂存、文档导出。
+//! 记事本后端：附件登记、剪贴板载荷暂存、文档导出。
 //!
-//! 前端只做"呈现与交互"，所有落到磁盘或系统剪贴板的动作都收敛在这里：
+//! 前端只做"呈现与交互"，所有落盘或系统剪贴板的动作都收敛在这里：
 //!
-//! - **附件**（图片 / 剪贴板载荷）：字节写进工程旁挂目录，登记表随工程文件
-//!   持久化（见 `crate::notebook_assets` 的模块注释）。
+//! - **附件**（图片 / 剪贴板载荷）：字节以 base64 **内嵌在工程文件里**，
+//!   没有任何旁挂目录（见 `crate::notebook_assets` 的模块注释）。
 //! - **剪贴板载荷暂存**：把 `application/x-hifishifter-object` 槽位里的原始
 //!   字节原样取出来交给前端保存；恢复时再把同一份字节原样写回。
 //!   **不做任何重新序列化** —— 载荷是 MessagePack，重新编码会随版本漂移，
 //!   原样字节才能保证"暂存 → 恢复"是无损的。
-//! - **导出**：把正文里的 `hifi-asset://` 引用改写为内嵌 data URI 或旁挂
-//!   相对路径后写盘。
+//! - **导出**：把正文里的 `hifi-asset://` 引用改写为内嵌 data URI 后写盘，
+//!   导出物是单个自包含文件。
 
 use crate::notebook_assets::{
     self, scan_asset_refs, NotebookAsset, NotebookAssetKind, NotebookAssetMap,
@@ -69,33 +69,29 @@ pub(super) fn put_asset(
         Ok(id) => id,
         Err(error) => return json!({ "ok": false, "error": error }),
     };
-    let bytes = match b64_decode(&data_base64) {
-        Ok(bytes) => bytes,
-        Err(error) => return json!({ "ok": false, "error": error }),
-    };
-    let dir = match state.notebook_asset_dir() {
-        Ok(dir) => dir,
+    // 先解码校验：宁可在这里拒绝，也不要把一段坏 base64 写进工程文件 ——
+    // 那会让工程在后续每次保存/读取时都带着一颗雷。
+    let byte_len = match b64_decode(&data_base64) {
+        Ok(bytes) => bytes.len(),
         Err(error) => return json!({ "ok": false, "error": error }),
     };
     let ext = notebook_assets::sanitize_ext(&ext);
-    if let Err(error) = notebook_assets::write_asset_bytes(&dir, &id, &ext, &bytes) {
-        return json!({ "ok": false, "error": error });
-    }
+    let mime = mime.unwrap_or_else(|| mime_for_ext(&ext).to_string());
 
     let asset = NotebookAsset {
         kind: kind_from_str(&kind),
-        ext: ext.clone(),
-        mime: mime.unwrap_or_else(|| mime_for_ext(&ext).to_string()),
-        byte_len: bytes.len() as u64,
+        ext,
+        mime,
+        byte_len: byte_len as u64,
         created_at_ms: crate::state::now_unix_ms(),
         orphaned: false,
         meta: meta.unwrap_or(serde_json::Value::Null),
+        data: data_base64,
     };
-    let byte_len = asset.byte_len;
     {
         let mut p = state.project.lock().unwrap_or_else(|e| e.into_inner());
         p.notebook_assets.insert(id.clone(), asset);
-        // 附件是工程内容的一部分（正文引用了它），落盘后必须标脏。
+        // 附件是工程内容的一部分（正文引用了它），必须标脏。
         p.dirty = true;
     }
 
@@ -108,30 +104,25 @@ pub(super) fn read_asset(state: State<'_, AppState>, asset_id: String) -> serde_
         p.notebook_assets.get(&asset_id).cloned()
     };
     let Some(asset) = asset else {
-        return json!({ "ok": false, "error": "notebook_asset_not_found" });
+        return json!({ "ok": false, "error": "notebook_asset_not_found", "missing": true });
     };
-    let dir = match state.notebook_asset_dir() {
-        Ok(dir) => dir,
-        Err(error) => return json!({ "ok": false, "error": error }),
-    };
-    match notebook_assets::read_asset_bytes(&dir, &asset_id, &asset.ext) {
-        Ok(bytes) => json!({
-            "ok": true,
-            "mime": asset.mime,
-            "byteLen": bytes.len(),
-            "base64": b64_encode(&bytes),
-        }),
-        Err(error) => json!({ "ok": false, "error": error, "missing": true }),
+    if asset.data.is_empty() {
+        // v6 旧工程且旁挂文件也没救回来：附件内容确实不在了。
+        return json!({ "ok": false, "error": "notebook_asset_empty", "missing": true });
     }
+    json!({
+        "ok": true,
+        "mime": asset.mime,
+        "byteLen": asset.byte_len,
+        "base64": asset.data,
+    })
 }
 
 pub(super) fn list_assets(state: State<'_, AppState>) -> serde_json::Value {
     let assets = state.notebook_assets_snapshot();
-    let dir = state.notebook_asset_dir().unwrap_or_else(|_| PathBuf::new());
     let entries: Vec<serde_json::Value> = assets
         .iter()
         .map(|(id, asset)| {
-            let exists = notebook_assets::locate_asset_file(&dir, id).is_some();
             json!({
                 "id": id,
                 "kind": match asset.kind {
@@ -143,49 +134,34 @@ pub(super) fn list_assets(state: State<'_, AppState>) -> serde_json::Value {
                 "byteLen": asset.byte_len,
                 "createdAtMs": asset.created_at_ms,
                 "meta": asset.meta,
-                "exists": exists,
+                // 有登记项但内容为空 = v6 旧工程里没迁回来的条目。
+                "hasData": !asset.data.is_empty(),
             })
         })
         .collect();
     json!({ "ok": true, "assets": entries })
 }
 
-/// 从登记表移除一条附件并删除文件。
+/// 标记一条附件为待清理。
+///
+/// 只打标记、不删字节：撤销/重做可能把引用恢复回来，真正的清理放在保存时
+/// （`prune_assets`）。这与"会话内附件只增不删"的整体约定一致。
 pub(super) fn remove_asset(state: State<'_, AppState>, asset_id: String) -> serde_json::Value {
-    let dir = match state.notebook_asset_dir() {
-        Ok(dir) => dir,
-        Err(error) => return json!({ "ok": false, "error": error }),
-    };
-    let removed = {
-        let mut p = state.project.lock().unwrap_or_else(|e| e.into_inner());
-        match p.notebook_assets.remove(&asset_id) {
-            Some(asset) => {
-                let _ = notebook_assets::remove_asset_file(&dir, &asset_id, &asset.ext);
-                p.dirty = true;
-                true
-            }
-            None => false,
+    let mut p = state.project.lock().unwrap_or_else(|e| e.into_inner());
+    match p.notebook_assets.get_mut(&asset_id) {
+        Some(asset) => {
+            asset.orphaned = true;
+            p.dirty = true;
+            json!({ "ok": true, "removed": true })
         }
-    };
-    json!({ "ok": true, "removed": removed })
+        None => json!({ "ok": true, "removed": false }),
+    }
 }
 
 /// 按正文引用清理孤儿附件（保存前调用）。
 pub(super) fn prune_assets(state: State<'_, AppState>) -> serde_json::Value {
     let removed = state.prune_notebook_assets();
     json!({ "ok": true, "removed": removed })
-}
-
-/// 附件在磁盘上的绝对路径（"在文件管理器中显示"用）。
-pub(super) fn asset_path(state: State<'_, AppState>, asset_id: String) -> serde_json::Value {
-    let dir = match state.notebook_asset_dir() {
-        Ok(dir) => dir,
-        Err(error) => return json!({ "ok": false, "error": error }),
-    };
-    match notebook_assets::locate_asset_file(&dir, &asset_id) {
-        Some((path, _)) => json!({ "ok": true, "path": path.display().to_string() }),
-        None => json!({ "ok": false, "error": "notebook_asset_file_missing" }),
-    }
 }
 
 /// 把磁盘上任意一个文件读成 base64（拖入的图片走这条；音频导入有另一条命令）。
@@ -438,21 +414,17 @@ fn extension_of(path: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// 导出正文：把 `hifi-asset://` 引用改写成内嵌 data URI 或旁挂相对路径。
+/// 导出正文：把 `hifi-asset://` 引用改写成内嵌 data URI。
 ///
-/// `image_mode`：
-/// - `embed`（默认）：字节内嵌为 data URI，产物是单个自包含文件；
-/// - `copyFolder`：附件复制到 `<导出名>.assets/` 并与导出文件并列，
-///   引用改写为相对路径（`.md` 在别的编辑器里也能看到图）。
+/// 导出物是**单个自包含文件**（图片以 data URI 内嵌），不生成任何旁挂目录 ——
+/// 与工程本身的存储模型一致：内容跟着文件走，拷到哪里都能看。
 pub(super) fn export_document(
     state: State<'_, AppState>,
     suggested_name: String,
     extension: String,
     content: String,
-    image_mode: Option<String>,
 ) -> serde_json::Value {
     let ext = notebook_assets::sanitize_ext(&extension);
-    let mode = image_mode.unwrap_or_else(|| "embed".to_string());
     let filter_label = match ext.as_str() {
         "html" => "HTML Document",
         _ => "Markdown Document",
@@ -469,60 +441,29 @@ pub(super) fn export_document(
         return json!({ "ok": false, "error": "notebook_export_extension_mismatch" });
     }
 
-    let dir = match state.notebook_asset_dir() {
-        Ok(dir) => dir,
-        Err(error) => return json!({ "ok": false, "error": error }),
-    };
     let assets = state.notebook_assets_snapshot();
-
-    // 旁挂模式需要先知道导出文件的主名，才能拼出 `<主名>.assets/`。
-    let asset_folder = output_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .map(|stem| format!("{stem}.assets"))
-        .unwrap_or_else(|| "assets".to_string());
-    let asset_dir_out = output_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(&asset_folder);
-    if mode == "copyFolder" {
-        if let Err(error) = std::fs::create_dir_all(&asset_dir_out) {
-            return json!({ "ok": false, "error": format!("创建导出附件目录失败: {error}") });
-        }
-    }
-
     // 从后往前替换，避免前面的替换使后面的下标失效。
     let refs = scan_asset_refs(&content);
     let mut out = content;
     let mut missing = Vec::new();
-    let mut copied = 0usize;
     for asset_ref in refs.into_iter().rev() {
         let Some(asset) = assets.get(&asset_ref.id) else {
             missing.push(asset_ref.id.clone());
             continue;
         };
-        let bytes = match notebook_assets::read_asset_bytes(&dir, &asset_ref.id, &asset.ext) {
-            Ok(bytes) => bytes,
-            Err(_) => {
-                missing.push(asset_ref.id.clone());
-                continue;
-            }
-        };
-        let replacement = if mode == "copyFolder" {
-            let file_name = format!("{}.{}", asset_ref.id, asset.ext);
-            let target = asset_dir_out.join(&file_name);
-            if std::fs::write(&target, &bytes).is_ok() {
-                copied += 1;
-            } else {
-                missing.push(asset_ref.id.clone());
-                continue;
-            }
-            // 导出目录里的相对引用：用正斜杠，跨平台可移植。
-            format!("./{asset_folder}/{file_name}")
+        if asset.data.is_empty() {
+            missing.push(asset_ref.id.clone());
+            continue;
+        }
+        let mime = if asset.mime.is_empty() {
+            mime_for_ext(&asset.ext).to_string()
         } else {
-            format!("data:{};base64,{}", asset.mime, b64_encode(&bytes))
+            asset.mime.clone()
         };
-        out.replace_range(asset_ref.start..asset_ref.end, &replacement);
+        out.replace_range(
+            asset_ref.start..asset_ref.end,
+            &format!("data:{mime};base64,{}", asset.data),
+        );
     }
 
     if let Some(parent) = output_path.parent() {
@@ -538,37 +479,31 @@ pub(super) fn export_document(
             "canceled": false,
             "path": output_path.display().to_string(),
             "missingAssets": missing,
-            "copiedAssets": copied,
         }),
         Err(error) => json!({ "ok": false, "error": error.to_string() }),
     }
 }
 
-/// 把一条附件另存到用户选定路径。
+/// 把一条附件的内容另存到用户选定路径（从内嵌数据里"取出"一个文件）。
 pub(super) fn save_asset_as(
     state: State<'_, AppState>,
     asset_id: String,
     suggested_name: Option<String>,
 ) -> serde_json::Value {
-    let (asset, dir) = {
+    let asset = {
         let p = state.project.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(asset) = p.notebook_assets.get(&asset_id).cloned() else {
-            return json!({ "ok": false, "error": "notebook_asset_not_found" });
-        };
-        drop(p);
-        let dir = match state.notebook_asset_dir() {
-            Ok(dir) => dir,
-            Err(error) => return json!({ "ok": false, "error": error }),
-        };
-        (asset, dir)
+        p.notebook_assets.get(&asset_id).cloned()
     };
-    let bytes = match notebook_assets::read_asset_bytes(&dir, &asset_id, &asset.ext) {
+    let Some(asset) = asset else {
+        return json!({ "ok": false, "error": "notebook_asset_not_found" });
+    };
+    let bytes = match b64_decode(&asset.data) {
         Ok(bytes) => bytes,
         Err(error) => return json!({ "ok": false, "error": error }),
     };
     let name = suggested_name
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| format!("{asset_id}.{}", asset.ext));
+        .unwrap_or_else(|| format!("{asset_id}.{}", notebook_assets::sanitize_ext(&asset.ext)));
     let picked = rfd::FileDialog::new().set_file_name(name).save_file();
     let Some(output_path) = picked else {
         return json!({ "ok": true, "canceled": true });
@@ -580,63 +515,31 @@ pub(super) fn save_asset_as(
 }
 
 /// 保存时的附件整理入口（各保存路径共用）。
-pub(crate) fn prepare_assets_for_save(state: &AppState, project_path: &Path) {
-    if let Err(error) = state.bind_notebook_asset_dir(project_path) {
-        log::warn!("[notebook] 附件目录迁移失败: {error}");
-    }
+///
+/// 内嵌模型下只剩一件事：把不再被引用的条目丢掉，让工程文件别无限膨胀。
+/// 字节已经跟着工程文件走，没有目录要绑定、没有附件要镜像到备份。
+pub(crate) fn prepare_assets_for_save(state: &AppState) {
     let removed = state.prune_notebook_assets();
     if removed > 0 {
         log::info!("[notebook] 保存时清理了 {removed} 条未引用附件");
     }
 }
 
-/// 把附件**复制**一份到 `project_path` 的旁挂目录，用于定时备份。
+/// 打开工程时装载附件登记表。
 ///
-/// 与 `prepare_assets_for_save` 的区别是"只复制、不迁移、不改绑定"：备份写入
-/// 的是另一个路径，若在那里绑定/迁移，就会把工程的附件从工程旁边搬走。
-pub(crate) fn mirror_assets_for_backup(state: &AppState, project_path: &Path) {
-    let source = match state.notebook_asset_dir() {
-        Ok(dir) => dir,
-        Err(_) => return,
-    };
-    let target = notebook_assets::asset_dir_for_project(project_path);
-    if source == target {
-        return;
-    }
-    if notebook_assets::ensure_dir(&target).is_err() {
-        return;
-    }
-    for (id, asset) in state.notebook_assets_snapshot() {
-        let Ok(bytes) = notebook_assets::read_asset_bytes(&source, &id, &asset.ext) else {
-            continue;
-        };
-        let _ = notebook_assets::write_asset_bytes(&target, &id, &asset.ext, &bytes);
-    }
-}
-
-/// 归档（ZIP）保存时把附件一并打包：返回 `(压缩包内条目名, 源文件路径)` 列表。
-pub(crate) fn archive_asset_entries(state: &AppState, folder: &str) -> Vec<(String, PathBuf)> {
-    let dir = match state.notebook_asset_dir() {
-        Ok(dir) => dir,
-        Err(_) => return Vec::new(),
-    };
-    let mut entries = Vec::new();
-    for (id, _asset) in state.notebook_assets_snapshot() {
-        let Some((path, ext)) = notebook_assets::locate_asset_file(&dir, &id) else {
-            continue;
-        };
-        entries.push((format!("{folder}/{id}.{ext}"), path));
-    }
-    entries
-}
-
-/// 打开工程时装载附件登记表并绑定落点。
-pub(crate) fn bind_assets_on_open(state: &AppState, project_path: &Path, assets: NotebookAssetMap) {
-    {
-        let mut p = state.project.lock().unwrap_or_else(|e| e.into_inner());
-        p.notebook_assets = assets;
-    }
-    if let Err(error) = state.bind_notebook_asset_dir(project_path) {
-        log::warn!("[notebook] 绑定附件目录失败: {error}");
+/// v6 及更早版本的附件字节放在旁挂目录 `<工程名>-assets/` 里：这里做一次性
+/// 迁移，把文件读进登记表（之后保存即内嵌）。旧目录不主动删除 —— 删用户磁盘
+/// 上的文件不是"打开工程"该做的事。
+pub(crate) fn bind_assets_on_open(
+    state: &AppState,
+    project_path: &Path,
+    assets: NotebookAssetMap,
+) {
+    let mut assets = assets;
+    let migrated = notebook_assets::migrate_legacy_sidecar(project_path, &mut assets);
+    let mut p = state.project.lock().unwrap_or_else(|e| e.into_inner());
+    p.notebook_assets = assets;
+    if migrated > 0 {
+        p.dirty = true;
     }
 }
