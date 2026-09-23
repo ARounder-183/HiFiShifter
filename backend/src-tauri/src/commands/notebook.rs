@@ -107,7 +107,7 @@ pub(super) fn read_asset(state: State<'_, AppState>, asset_id: String) -> serde_
         return json!({ "ok": false, "error": "notebook_asset_not_found", "missing": true });
     };
     if asset.data.is_empty() {
-        // v6 旧工程且旁挂文件也没救回来：附件内容确实不在了。
+        // 登记项在但内容为空（工程被手工编辑过等）：按"附件缺失"处理。
         return json!({ "ok": false, "error": "notebook_asset_empty", "missing": true });
     }
     json!({
@@ -134,7 +134,7 @@ pub(super) fn list_assets(state: State<'_, AppState>) -> serde_json::Value {
                 "byteLen": asset.byte_len,
                 "createdAtMs": asset.created_at_ms,
                 "meta": asset.meta,
-                // 有登记项但内容为空 = v6 旧工程里没迁回来的条目。
+                // 有登记项但内容为空（工程被手工编辑过等）时为 false。
                 "hasData": !asset.data.is_empty(),
             })
         })
@@ -525,21 +525,8 @@ pub(crate) fn prepare_assets_for_save(state: &AppState) {
     }
 }
 
-/// 打开工程时装载附件登记表。
-///
-/// v6 及更早版本的附件字节放在旁挂目录 `<工程名>-assets/` 里：这里做一次性
-/// 迁移，把文件读进登记表（之后保存即内嵌）。旧目录不主动删除 —— 删用户磁盘
-/// 上的文件不是"打开工程"该做的事。
-pub(crate) fn bind_assets_on_open(
-    state: &AppState,
-    project_path: &Path,
-    assets: NotebookAssetMap,
-) {
-    let mut assets = assets;
-    let migrated = notebook_assets::migrate_legacy_sidecar(project_path, &mut assets);
+/// 打开工程时装载附件登记表（字节已随工程文件一起读入）。
+pub(crate) fn bind_assets_on_open(state: &AppState, assets: NotebookAssetMap) {
     let mut p = state.project.lock().unwrap_or_else(|e| e.into_inner());
     p.notebook_assets = assets;
-    if migrated > 0 {
-        p.dirty = true;
-    }
 }

@@ -55,7 +55,7 @@ export interface NotebookAssetEntry {
     byteLen: number;
     createdAtMs: number;
     meta: unknown;
-    /** 登记项里是否真的有字节（v6 旧工程迁移失败的条目为 false）。 */
+    /** 登记项里是否真的有字节（工程被手工编辑过等极端情况为 false）。 */
     hasData: boolean;
 }
 

@@ -7,8 +7,7 @@
 //!
 //! - 工程自包含：把 `.hshp` 单独拷走、发出去、放进压缩包，图片都跟着走，
 //!   不会出现"文件在、图没了"；
-//! - 没有暂存目录、没有旁挂目录迁移、没有"另存为时要复制附件"这一整套
-//!   生命周期（曾经有过：`<工程名>-assets/` 旁挂目录 + `%TEMP%` 暂存目录）；
+//! - 没有旁挂目录、没有暂存目录、没有"另存为时要复制附件"这一整套生命周期；
 //! - 定时备份天然自带附件（备份写的就是工程文件本身）。
 //!
 //! 代价是工程文件会变大。抵消手段在**写入前**：图片先按长边上限缩放、转成
@@ -25,12 +24,8 @@
 //! 重做把引用恢复回来时附件仍在，不会出现"撤销后图片变成空白"。
 
 use std::collections::{BTreeMap, HashSet};
-use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-
-/// v6 及更早版本使用的旁挂附件目录后缀。仅用于**打开旧工程时的一次性迁移**。
-pub const LEGACY_ASSET_DIR_SUFFIX: &str = "-assets";
 
 /// 附件种类。决定前端用什么 UI 呈现。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,7 +67,10 @@ pub struct NotebookAsset {
     /// - ClipPayload：`{ clipKind, title, clipCount, trackCount, durationSec, sourceProject, preview }`
     #[serde(default)]
     pub meta: serde_json::Value,
-    /// 字节本体（base64）。空串 = 该条目没有数据（例如 v6 旧工程迁移失败）。
+    /// 字节本体（base64）。
+    ///
+    /// 带 `serde(default)`：登记项若因手工编辑或部分写入而缺这个字段，工程
+    /// 仍能打开（该图显示为"附件缺失"占位），而不是整个文件反序列化失败。
     #[serde(default)]
     pub data: String,
 }
@@ -240,92 +238,6 @@ pub fn prune_unreferenced(map: &mut NotebookAssetMap, keep: &HashSet<String>) ->
     stale.len()
 }
 
-/// 旧工程（v6 及更早）的旁挂附件目录：`<工程文件全名>-assets/`。
-pub fn legacy_asset_dir_for_project(project_path: &Path) -> std::path::PathBuf {
-    let file_name = project_path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("project");
-    project_path.with_file_name(format!("{file_name}{LEGACY_ASSET_DIR_SUFFIX}"))
-}
-
-/// 把旧版旁挂目录里的附件读进登记表（一次性迁移），返回迁移条数。
-///
-/// 只在打开旧工程时调用：登记表里缺 `data` 的条目从同名文件补全；目录里
-/// 存在但登记表没有的文件也一并收进来（登记表丢条目时也能救回内容）。
-/// 迁移后旧目录**不再被读取**，也不主动删除 —— 删用户磁盘上的文件不是
-/// 打开工程该做的事。
-pub fn migrate_legacy_sidecar(
-    project_path: &Path,
-    map: &mut NotebookAssetMap,
-) -> usize {
-    let dir = legacy_asset_dir_for_project(project_path);
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return 0;
-    };
-    let mut migrated = 0usize;
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        let Some((raw_id, ext)) = name.rsplit_once('.') else {
-            continue;
-        };
-        let Ok(id) = sanitize_asset_id(raw_id) else {
-            continue;
-        };
-        let ext = sanitize_ext(ext);
-        let Ok(bytes) = std::fs::read(&path) else {
-            continue;
-        };
-        use base64::Engine as _;
-        let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
-
-        match map.get_mut(&id) {
-            Some(asset) => {
-                if !asset.data.is_empty() {
-                    continue;
-                }
-                asset.data = data;
-                asset.byte_len = bytes.len() as u64;
-                if asset.ext.is_empty() {
-                    asset.ext = ext;
-                }
-                migrated += 1;
-            }
-            None => {
-                map.insert(
-                    id,
-                    NotebookAsset {
-                        kind: NotebookAssetKind::Image,
-                        ext,
-                        mime: String::new(),
-                        byte_len: bytes.len() as u64,
-                        created_at_ms: crate::state::now_unix_ms(),
-                        orphaned: false,
-                        meta: serde_json::Value::Null,
-                        data,
-                    },
-                );
-                migrated += 1;
-            }
-        }
-    }
-
-    if migrated > 0 {
-        log::info!(
-            "[notebook] 已把旧版旁挂附件目录里的 {migrated} 条附件内嵌进工程文件: {:?}",
-            dir
-        );
-    }
-    migrated
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -433,37 +345,13 @@ mod tests {
     }
 
     #[test]
-    fn v6_asset_without_data_still_deserializes() {
-        // v6 的登记项没有 `data` 字段：旧工程必须能打开（内容随后由旁挂目录迁移补齐）。
+    fn asset_without_data_field_still_deserializes() {
+        // `data` 带 serde(default)：手工编辑或部分写入的工程也要能打开，
+        // 只是那条附件显示为"内容缺失"，而不是整个工程反序列化失败。
         let json = r#"{"abc":{"kind":"image","ext":"png","mime":"image/png","byte_len":3}}"#;
-        let map: NotebookAssetMap = serde_json::from_str(json).expect("deserialize v6 shape");
+        let map: NotebookAssetMap = serde_json::from_str(json).expect("deserialize partial shape");
         assert_eq!(map["abc"].data, "");
         assert_eq!(map["abc"].ext, "png");
     }
 
-    #[test]
-    fn legacy_sidecar_is_migrated_into_the_registry() {
-        let dir = std::env::temp_dir().join(format!("hs-notebook-migrate-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        let project_path = dir.join("Song.hshp");
-        let sidecar = legacy_asset_dir_for_project(&project_path);
-        std::fs::create_dir_all(&sidecar).expect("sidecar dir");
-        std::fs::write(sidecar.join("knownid.png"), b"png-bytes").expect("write known");
-        std::fs::write(sidecar.join("orphanid.webp"), b"webp-bytes").expect("write orphan");
-
-        let mut map = NotebookAssetMap::new();
-        let mut known = asset("png");
-        known.data = String::new();
-        known.byte_len = 0;
-        map.insert("knownid".into(), known);
-
-        let migrated = migrate_legacy_sidecar(&project_path, &mut map);
-        assert_eq!(migrated, 2, "both sidecar files should be embedded");
-        assert!(!map["knownid"].data.is_empty());
-        assert_eq!(map["knownid"].byte_len, 9);
-        assert!(map.contains_key("orphanid"), "unknown sidecar file rescued");
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 }

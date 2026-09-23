@@ -1064,12 +1064,8 @@ pub(super) fn open_project(
         }
         update_window_title(&window, &p.name, p.dirty);
     }
-    // 记事本附件：装载登记表并把落点绑定到本工程的旁挂目录（锁已释放）。
-    crate::commands::notebook::bind_assets_on_open(
-        state.inner(),
-        &path,
-        pf.notebook_assets.clone(),
-    );
+    // 记事本附件：装载登记表（字节随工程文件一起读入，锁已释放）。
+    crate::commands::notebook::bind_assets_on_open(state.inner(), pf.notebook_assets.clone());
     // 渲染缓存的工程归属：用于"仅清理当前工程的缓存"。
     crate::render_cache::set_current_project_id(crate::render_cache::project_id_for_path(
         Some(&project_path),

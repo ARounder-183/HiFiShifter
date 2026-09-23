@@ -94,17 +94,11 @@ impl SynthConfig {
 /// `channel_mode` 缺省为 0（正常）、`source_channels` 缺省为 None，
 /// `finalize_timeline_for_session` 阶段对越界值规范化 —— 无需数据搬移。
 ///
-/// v6：新增 `notebook_assets`（记事本附件登记表：图片与 HiFiShifter 剪贴板
-/// 载荷）。当时的字节落在工程旁挂目录 `<工程名>-assets/` 里，工程文件只存
-/// 元数据；打开旧工程时若正文里存在 `hifi-asset://` 引用而登记表为空，
-/// 图片会显示为"附件缺失"占位，不会破坏文档。
-///
-/// v7：附件字节改为**内嵌在工程文件里**（`NotebookAsset.data`，base64），
-/// 不再有旁挂目录：工程自包含，拷贝/分享/打包都不会丢图，也没有暂存目录与
-/// 目录迁移这一整套生命周期。打开 v6 工程时会把旁挂目录里的文件读进登记表
-/// （见 `notebook_assets::migrate_legacy_sidecar`），随后保存即完成内嵌；
-/// v6 的登记项没有 `data` 字段，缺省为空串，反序列化不受影响。
-pub const CURRENT_PROJECT_FILE_VERSION: u32 = 7;
+/// v5 同期还加入了记事本字段：`notes_markdown`（正文）与 `notebook_assets`
+/// （附件登记表 —— 图片与 HiFiShifter 剪贴板载荷，字节以 base64 **内嵌在
+/// 工程文件里**，因此工程自包含：拷走/分享/打包都不会丢图）。两者都带
+/// `serde(default)`，缺省为空，旧文件照常打开。
+pub const CURRENT_PROJECT_FILE_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -114,10 +108,10 @@ pub struct ProjectFile {
     /// 用户笔记；为空时省略（旧版本已容忍缺省，且空内容无可丢失信息）。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub notes_markdown: String,
-    /// 记事本附件登记表（v6 新增，旧工程缺省为空）。
+    /// 记事本附件登记表：图片与剪贴板载荷，**字节（base64）内嵌在这里**。
     ///
-    /// 只存元数据，字节在工程旁挂目录 `<工程名>-assets/`。用 `BTreeMap`
-    /// 而非 `HashMap`：序列化顺序稳定，工程文件在不同次保存之间可二进制比对。
+    /// 用 `BTreeMap` 而非 `HashMap`：序列化顺序稳定，工程文件在不同次保存
+    /// 之间可二进制比对。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub notebook_assets: BTreeMap<String, crate::notebook_assets::NotebookAsset>,
     pub timeline: TimelineState,
