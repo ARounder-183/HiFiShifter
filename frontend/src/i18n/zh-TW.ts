@@ -184,8 +184,6 @@ export const zhTW = {
     panel_timeline: "時間軸",
     panel_io: "輸入輸出",
     notebook: "記事本",
-    notebook_edit: "編輯",
-    notebook_preview: "預覽",
     notebook_placeholder: "在這裡記錄目前工程的備註……",
     notebook_mode_rich: "富文字",
     notebook_mode_source: "Markdown 原始碼",

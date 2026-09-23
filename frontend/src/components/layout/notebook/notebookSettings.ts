@@ -26,8 +26,6 @@ export interface NotebookSettings {
     sourceFontSize?: number;
     /** 拼写检查（项目笔记里罗马音/术语多，默认关）。 */
     spellCheck?: boolean;
-    /** 排版替换（弯引号、破折号）。 */
-    typographer?: boolean;
     /** 图片存储模式。 */
     imageStorage?: "sidecar" | "embed" | "link";
     /** 图片长边上限（0 = 原图）。 */
@@ -73,7 +71,6 @@ export const DEFAULT_NOTEBOOK_SETTINGS: ResolvedNotebookSettings = {
     sourceWordWrap: true,
     sourceFontSize: 13,
     spellCheck: false,
-    typographer: false,
     imageStorage: "sidecar",
     imageMaxDimensionPx: 2048,
     imageFormat: "auto",
@@ -136,7 +133,6 @@ export function normalizeNotebookSettings(
         sourceWordWrap: bool(raw.sourceWordWrap, d.sourceWordWrap),
         sourceFontSize: clampNumber(raw.sourceFontSize, 9, 24, d.sourceFontSize),
         spellCheck: bool(raw.spellCheck, d.spellCheck),
-        typographer: bool(raw.typographer, d.typographer),
         imageStorage: pickEnum(raw.imageStorage, ["sidecar", "embed", "link"] as const, d.imageStorage),
         // 0 是合法值（= 不缩放），因此下界是 0。
         imageMaxDimensionPx: clampNumber(raw.imageMaxDimensionPx, 0, 16384, d.imageMaxDimensionPx),
