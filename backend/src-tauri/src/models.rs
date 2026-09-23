@@ -411,6 +411,17 @@ pub struct TimelineStatePayload {
     /// `set_history_position` 会填它。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes_markdown: Option<String>,
+
+    /// 撤销/重做/跳转后**应当恢复的参数编辑器选区**（`[[startBeat, endBeat], …]`）。
+    ///
+    /// 来自被跨越的那一步自己记录的选区快照（`HistoryRecord::param_selection`），
+    /// 与 `notes_markdown` 同一套路：只有「边缘拉伸」这类同时改变选区的步骤才有，
+    /// 其余情况为 `None` —— 前端收到 `None` 时**不动**用户当前的选区。
+    ///
+    /// 【为什么不带空数组】空数组表示"当时确实没有选区"（要清空），与 `None`
+    /// （这一步与选区无关）是两种不同的语义，前端据此区分。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub param_selection_restore: Option<Vec<[f32; 2]>>,
 }
 
 /// `open_project` 的返回载荷。

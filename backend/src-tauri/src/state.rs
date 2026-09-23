@@ -1787,6 +1787,68 @@ impl HistoryOp {
     }
 }
 
+/// 参数编辑器「边缘拉伸」手势带来的选区变化。
+///
+/// 拉伸既改曲线（产生一个 `ParamCurve` 步）又改选区范围，而选区是纯前端概念
+/// （不在 `TimelineState` 里），因此选区快照必须**随产生它的那一步**记录 ——
+/// 与 {@link HistoryRecord::notes_markdown} 同一套路（那里的注释已说明"前端拿
+/// 后端当前值覆盖"为什么不行）。
+///
+/// 【为什么不放在前端按撤销深度索引】那种记账需要前端回答"我这一步是第几步"，
+/// 而它只有一个由事件异步推进的深度镜像：镜像滞后、检查点被抑制、以及"新检查点
+/// 丢弃重做分支"时的裁剪，都会让位置对不上 —— 表现是"撤销后曲线回来了、选区却
+/// 没回到拉伸前"。记在记录上之后，撤销/重做只需无脑套用载荷带回的那一份，不再
+/// 存在任何位置推断。
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParamSelectionStep {
+    /// 拉伸前的选区（撤销该步时恢复）。空向量 = 当时没有选区。
+    pub before: Vec<[f32; 2]>,
+    /// 拉伸后的选区（重做该步时恢复）。
+    pub after: Vec<[f32; 2]>,
+}
+
+/// 历史跳转的**意图**：决定带回目标步骤的哪一侧选区快照。
+///
+/// 撤销与重做看着对称，但要恢复的是**被跨越的那一步**的两端：撤销一步是回到它
+/// 之前的样子（`before`），重做是回到它之后的样子（`after`）。而任意跳转
+/// （「操作记录」窗口双击）问的是"第 N 个状态长什么样"：该位置自己记录的
+/// `after` 优先，否则看下一步的 `before`（那正是"还没做这一步"时的样子）。
+///
+/// 【为什么不能让后端自己猜】撤销/重做时"目标位置"两侧都可能带快照（连续两次
+/// 拉伸即如此），语义完全由调用意图决定 —— 交给调用方显式声明最省事也最难写错。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryJumpIntent {
+    /// 撤销：恢复被撤销那一步（`target + 1`）的 `before`。
+    Undo,
+    /// 重做：恢复被重做那一步（`target`）的 `after`。
+    Redo,
+    /// 任意跳转：优先目标位置自己的 `after`，否则下一步的 `before`。
+    Jump,
+}
+
+/// 求出"跳到 `target` 之后应当恢复的参数编辑器选区"。
+///
+/// 返回 `None` = 该步骤与选区无关（调用方/前端不得改动选区）；`Some(vec![])`
+/// = 当时确实没有选区（要清空）。这一区分是**语义必需**的：拉伸前可能本来
+/// 就没有选区。
+fn param_selection_restore_for(
+    h: &TimelineHistory,
+    target: usize,
+    intent: HistoryJumpIntent,
+) -> Option<Vec<[f32; 2]>> {
+    let step_at = |position: usize| -> Option<&ParamSelectionStep> {
+        h.records.get(position).and_then(|r| r.param_selection.as_ref())
+    };
+    match intent {
+        HistoryJumpIntent::Undo => step_at(target + 1).map(|s| s.before.clone()),
+        HistoryJumpIntent::Redo => step_at(target).map(|s| s.after.clone()),
+        HistoryJumpIntent::Jump => step_at(target)
+            .map(|s| s.after.clone())
+            .or_else(|| step_at(target + 1).map(|s| s.before.clone())),
+    }
+}
+
 /// 「操作记录」中的一条状态。
 #[derive(Debug, Clone)]
 pub struct HistoryRecord {
@@ -1811,6 +1873,16 @@ pub struct HistoryRecord {
     /// 跳转）时用**当时的**记事本补齐 —— 那一刻它就是状态 N 的记事本。
     /// 于是每一条记录都携带自己那个状态的记事本，撤销/重做只需无脑套用。
     pub notes_markdown: Option<String>,
+    /// 该步（若是「边缘拉伸」）带来的选区变化；其它步骤恒为 `None`。
+    ///
+    /// `None` = 这一步与选区无关 —— 撤销/重做它时**不得**动用户的选区
+    /// （前端只看载荷里有没有带回选区，见 `TimelineStatePayload`）。
+    ///
+    /// 【与 `state` 同样的惰性补齐时机】由前端在曲线回写成功后显式登记
+    /// （`record_param_selection_step`）：那一刻新步已经被追加、位置指向它，
+    /// 因此不需要任何位置推断。位置被**复用**（新检查点丢弃重做分支）时该项
+    /// 必须清空 —— 旧分支的选区快照不属于新步。
+    pub param_selection: Option<ParamSelectionStep>,
 }
 
 /// 撤销历史：一条线性的「状态链」+ 当前位置。
@@ -3315,6 +3387,7 @@ impl AppState {
                     at_ms: started_at_ms,
                     state: Some(snapshot.clone()),
                     notes_markdown: notes_markdown.or_else(|| self.current_notes_markdown()),
+                    param_selection: None,
                 });
                 h.position = 0;
             } else {
@@ -3328,12 +3401,17 @@ impl AppState {
                 // 被这次操作改掉之前的值。显式取 `notes_markdown` 入参（记事本
                 // 编辑路径传入"编辑前"的文本）而不依赖"调用方还没写新值"的
                 // 时序 —— 后者一旦被重构打乱，撤销就会静默丢内容。
+                //
+                // 选区快照（`param_selection`）**必须清空**：位置被复用意味着
+                // 这里要放的是**新**一步，而旧分支那一步的选区快照不属于它 ——
+                // 留着会让撤销这步时把选区跳到一条已被丢弃的分支上。
                 if let Some(current) = h.records.get_mut(position) {
                     current.state = Some(snapshot.clone());
                     if current.notes_markdown.is_none() {
                         current.notes_markdown =
                             notes_markdown.or_else(|| self.current_notes_markdown());
                     }
+                    current.param_selection = None;
                 }
             }
             // 追加这一步：label/at 描述紧随其后的操作，快照留待下一次
@@ -3343,6 +3421,7 @@ impl AppState {
                 at_ms: now,
                 state: None,
                 notes_markdown: None,
+                param_selection: None,
             });
             h.position = h.records.len() - 1;
             // 上限：丢最旧的状态（当前位置随之左移）。
@@ -3551,13 +3630,52 @@ impl AppState {
     /// 撤销一步（跳到当前位置之前）。
     pub fn undo_timeline(&self) -> TimelineStatePayload {
         let target = self.history_position().saturating_sub(1);
-        self.set_history_position(target)
+        self.set_history_position(target, HistoryJumpIntent::Undo)
     }
 
     /// 重做一步（跳到当前位置之后）。
     pub fn redo_timeline(&self) -> TimelineStatePayload {
         let target = self.history_position().saturating_add(1);
-        self.set_history_position(target)
+        self.set_history_position(target, HistoryJumpIntent::Redo)
+    }
+
+    /// 登记「边缘拉伸」步骤带来的选区变化（作用于**当前所处的那一步**）。
+    ///
+    /// 前端在曲线回写成功之后调用：那一刻新步已追加、`position` 指向它，因此
+    /// 后端无需任何位置推断。只接受 `ParamCurve` 步 —— 写回被抑制（`suppress_
+    /// checkpoints`，例如处于撤销组内）时当前位置可能是别的操作甚至是初始状态
+    /// 行，此时**拒绝登记**而不是把选区快照挂到无关步骤上（那会让撤销那一步时
+    /// 莫名改掉用户的选区）。
+    ///
+    /// @returns `ok = false` + `reason` 表示没有登记（步骤不匹配）；前端无需重试，
+    ///   这种情况本就意味着这次手势没有产生可撤销的步骤。
+    pub fn record_param_selection_step(
+        &self,
+        before: Vec<[f32; 2]>,
+        after: Vec<[f32; 2]>,
+    ) -> serde_json::Value {
+        let mut h = self
+            .timeline_history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let position = h.position;
+        let Some(record) = h.records.get_mut(position) else {
+            return serde_json::json!({ "ok": false, "reason": "no-step" });
+        };
+        if record.label.as_deref() != Some(HistoryOp::ParamCurve.key()) {
+            return serde_json::json!({ "ok": false, "reason": "step-is-not-param-curve" });
+        }
+        let filtered = |ranges: Vec<[f32; 2]>| -> Vec<[f32; 2]> {
+            ranges
+                .into_iter()
+                .filter(|r| r[0].is_finite() && r[1].is_finite())
+                .collect()
+        };
+        record.param_selection = Some(ParamSelectionStep {
+            before: filtered(before),
+            after: filtered(after),
+        });
+        serde_json::json!({ "ok": true })
     }
 
     /// 跳到历史中的第 `target` 个状态（「操作记录」窗口双击 / 撤销 / 重做
@@ -3566,7 +3684,13 @@ impl AppState {
     /// 越界或原地不动时返回 `ok = false`：前端不套用任何快照，界面零刷新
     /// 零变更（与空栈撤销/重做的语义一致）；载荷仍带回权威的历史状态，
     /// 前端可借机纠正可能落后的镜像。
-    pub fn set_history_position(&self, target: usize) -> TimelineStatePayload {
+    ///
+    /// `intent` 决定带回哪一侧的选区快照（见 `param_selection_restore_for`）。
+    pub fn set_history_position(
+        &self,
+        target: usize,
+        intent: HistoryJumpIntent,
+    ) -> TimelineStatePayload {
         let mut tl = self.timeline.lock().unwrap_or_else(|e| e.into_inner());
         let mut h = self
             .timeline_history
@@ -3616,6 +3740,9 @@ impl AppState {
         if let Some(notes) = target_notes.clone() {
             self.apply_notes_markdown(notes);
         }
+        // 选区（「边缘拉伸」步才有）：与记事本同一套路 —— 谁记得谁负责带回，
+        // 前端只管无脑套用。`None` = 这一步与选区无关，前端不得改动选区。
+        let param_selection_restore = param_selection_restore_for(&h, target, intent);
         let (undo_depth, redo_depth) = history_depths_of(&h);
         drop(h);
         self.bump_timeline_version();
@@ -3639,6 +3766,7 @@ impl AppState {
         payload.redo_depth = Some(redo_depth);
         // 回给前端：跨过记事本编辑则带上该步的记事本，否则留 None 让前端保留现场。
         payload.notes_markdown = target_notes;
+        payload.param_selection_restore = param_selection_restore;
         payload
     }
 
@@ -3838,6 +3966,71 @@ mod tests {
             .find(|clip| clip.id == clip_id)
             .map(|clip| clip.start_sec)
             .unwrap_or(f64::NAN)
+    }
+
+    /// 「边缘拉伸」的选区快照：随**产生它的那一步**记录，撤销/重做/跳转由载荷带回；
+    /// 位置被复用（新检查点丢弃重做分支）时必须清空，不得继承旧分支的快照。
+    ///
+    /// 这是"撤销后曲线回来了、选区却没回到拉伸前"的根治点：前端不再按撤销深度
+    /// 推断"我这一步是第几步"，因此不存在镜像滞后 / 分支裁剪导致的位置错位。
+    #[test]
+    fn param_selection_step_rides_on_its_history_step() {
+        let state = AppState::default();
+        let before: Vec<[f32; 2]> = vec![[1.0, 2.0]];
+        let after: Vec<[f32; 2]> = vec![[1.0, 3.0]];
+
+        // 第 1 步：参数曲线（拉伸回写的首块打点），随后登记该步的选区变化。
+        {
+            let tl = state.timeline.lock().unwrap();
+            state.checkpoint_timeline(&tl, HistoryOp::ParamCurve);
+        }
+        assert_eq!(
+            state.record_param_selection_step(before.clone(), after.clone())["ok"],
+            serde_json::json!(true),
+            "当前步是参数曲线步时应登记成功",
+        );
+
+        // 撤销这一步：载荷带回拉伸**前**的选区。
+        let payload = state.undo_timeline();
+        assert!(payload.ok);
+        assert_eq!(payload.param_selection_restore, Some(before.clone()));
+
+        // 跳回该步所在状态（「操作记录」双击）：带回拉伸**后**的选区。
+        let payload = state.set_history_position(1, HistoryJumpIntent::Jump);
+        assert!(payload.ok);
+        assert_eq!(payload.param_selection_restore, Some(after.clone()));
+
+        // 再撤销一次（重做栈因此非空）—— 下一步要验证"位置被复用"。
+        let payload = state.undo_timeline();
+        assert!(payload.ok);
+        assert_eq!(payload.param_selection_restore, Some(before.clone()));
+
+        // 位置被复用：此时做一次**别的**检查点（丢弃重做分支、复用第 1 个位置），
+        // 新步不得继承旧分支的选区快照。
+        {
+            let tl = state.timeline.lock().unwrap();
+            state.checkpoint_timeline(&tl, HistoryOp::MoveClip);
+        }
+        let payload = state.undo_timeline();
+        assert!(payload.ok);
+        assert_eq!(
+            payload.param_selection_restore, None,
+            "被复用的位置必须清空旧分支的选区快照",
+        );
+
+        // 与选区无关的步骤不得触碰选区（载荷不带该字段）。
+        let payload = state.redo_timeline();
+        assert!(payload.ok);
+        assert_eq!(
+            payload.param_selection_restore, None,
+            "非拉伸步重做时不得改动选区",
+        );
+
+        // 登记接口只接受参数曲线步：当前位置是 MoveClip 时应拒绝。
+        assert_eq!(
+            state.record_param_selection_step(before, after)["ok"],
+            serde_json::json!(false),
+        );
     }
 
     #[test]
@@ -7163,6 +7356,7 @@ impl TimelineState {
             undo_depth: None,
             redo_depth: None,
             notes_markdown: None,
+            param_selection_restore: None,
         }
     }
 
@@ -7255,6 +7449,7 @@ impl TimelineState {
             undo_depth: None,
             redo_depth: None,
             notes_markdown: None,
+            param_selection_restore: None,
         }
     }
 

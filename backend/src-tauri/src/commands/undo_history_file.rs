@@ -37,6 +37,10 @@ struct UndoFileRecord {
     /// 该状态下的记事本内容；`None` = 与记事本无关的一步（见 `HistoryRecord`）。
     #[serde(default)]
     notes_markdown: Option<String>,
+    /// 该步（若是「边缘拉伸」）带来的参数编辑器选区变化；`None` = 与选区无关
+    /// 的一步。随工程一起落盘，重新打开后撤销该步仍能恢复选区。
+    #[serde(default)]
+    param_selection: Option<crate::state::ParamSelectionStep>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,6 +151,7 @@ pub fn serialize_undo_history(state: &AppState) -> Option<Vec<u8>> {
                     .notes_markdown
                     .clone()
                     .or_else(|| (index == h.position).then(|| state.current_notes_value())),
+                param_selection: record.param_selection.clone(),
             });
         }
         (h.position, h.started_at_ms, records)
@@ -247,6 +252,7 @@ pub fn load_undo_history(state: &AppState, project_path: &Path) -> bool {
                 at_ms: record.at_ms,
                 state,
                 notes_markdown: record.notes_markdown,
+                param_selection: record.param_selection,
             }
         })
         .collect();

@@ -177,7 +177,22 @@ pub fn set_history_position(
     state: State<'_, AppState>,
     position: usize,
 ) -> crate::models::TimelineStatePayload {
-    state.set_history_position(position)
+    state.set_history_position(position, crate::state::HistoryJumpIntent::Jump)
+}
+
+/// 登记「参数编辑器边缘拉伸」这一步带来的选区变化。
+///
+/// 前端在曲线回写成功之后调用（那一刻新步已追加、位置指向它），后端把它记在
+/// **当前那一步**上；撤销/重做该步时随载荷带回（`param_selection_restore`），
+/// 前端据此恢复选区。`ok = false` 表示当前位置不是参数曲线步（写回被抑制等），
+/// 前端忽略即可。
+#[tauri::command(rename_all = "camelCase")]
+pub fn record_param_selection_step(
+    state: State<'_, AppState>,
+    before: Vec<[f32; 2]>,
+    after: Vec<[f32; 2]>,
+) -> serde_json::Value {
+    state.record_param_selection_step(before, after)
 }
 
 /// 「操作记录」+ 撤销/重做可用性。
@@ -628,6 +643,7 @@ pub async fn import_audio_item(
         undo_depth: None,
         redo_depth: None,
         notes_markdown: None,
+        param_selection_restore: None,
     })
 }
 #[tauri::command(rename_all = "camelCase")]
@@ -662,6 +678,7 @@ pub async fn import_audio_bytes(
         undo_depth: None,
         redo_depth: None,
         notes_markdown: None,
+        param_selection_restore: None,
     })
 }
 #[tauri::command(rename_all = "camelCase")]

@@ -710,6 +710,11 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
         case "set_history_position":
             return { position: args[0] };
 
+        case "record_param_selection_step":
+            // 「边缘拉伸」手势的选区快照：登记到当前那一步历史记录上
+            // （撤销/重做时由后端随载荷带回，见 state.rs 的说明）。
+            return { before: args[0], after: args[1] };
+
         case "set_project_save_undo_history":
             return { enabled: args[0] };
 

@@ -59,6 +59,19 @@ export const paramsApi = {
     ) =>
         invoke<{ ok: boolean }>("set_param_frames", trackId, param, startFrame, values, checkpoint),
 
+    /**
+     * 把「参数编辑器边缘拉伸」带来的选区变化登记到**当前那一步**历史记录上。
+     *
+     * 必须在曲线回写（`set_param_frames`，首块打检查点）成功之后调用：后端据此
+     * 把快照挂在刚产生的那一步上，撤销/重做该步时随载荷带回
+     * （`param_selection_restore`）—— 前端因此不需要按撤销深度推断"我这一步是
+     * 第几步"（那条路会因镜像滞后 / 分支裁剪而错位，见 state.rs 的说明）。
+     *
+     * 后端只接受「参数曲线」步；写入被抑制等情况下返回 `ok = false`（忽略即可）。
+     */
+    recordParamSelectionStep: (before: [number, number][], after: [number, number][]) =>
+        invoke<{ ok: boolean; reason?: string }>("record_param_selection_step", before, after),
+
     restoreParamFrames: (
         trackId: string,
         param: string,

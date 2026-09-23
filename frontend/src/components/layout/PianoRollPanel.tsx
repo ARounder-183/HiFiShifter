@@ -3294,9 +3294,10 @@ export const PianoRollPanel: React.FC = () => {
     useEffect(() => {
         dispatch(setParamSelectionActive(selectionUi !== null));
     }, [dispatch, selectionUi]);
-    // 撤销/重做恢复参数编辑器选区：只有「边缘拉伸」手势登记的步骤会送来请求
-    // （见 sessionSlice.ParamSelectionStep）；其余选区变化不参与历史，撤销/
-    // 重做也不会去动它们。requestId 单调，按 id 幂等应用一次。
+    // 撤销/重做/跳转恢复参数编辑器选区：请求由后端载荷驱动 —— 只有「边缘拉伸」
+    // 这类同时改变选区的步骤才在后端记了快照（见 state.rs 的
+    // `HistoryRecord::param_selection`），撤销/重做时随载荷带回；其余操作不带该
+    // 字段，因此**不会**动用户手动调整过的选区。requestId 单调，按 id 幂等应用一次。
     const appliedParamSelectionRestoreRef = useRef(0);
     useEffect(() => {
         const request = s.pendingParamSelectionRestore;
@@ -4570,9 +4571,6 @@ export const PianoRollPanel: React.FC = () => {
         selectionRef,
         selectionUi,
         setSelectionUi,
-        // 撤销栈深度读取器（拉伸手势把选区登记到对应历史步骤时使用）；
-        // 稳定引用，避免每次渲染都让上层的 pointerdown 回调失效重建。
-        getHistoryPosition: useCallback(() => store.getState().session.historyUndoDepth, [store]),
         setCanvasCursor,
         strokeRef,
         panRef,

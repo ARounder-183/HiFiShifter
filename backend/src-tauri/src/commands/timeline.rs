@@ -1015,6 +1015,7 @@ fn take_error_payload_with_missing(
         undo_depth: None,
         redo_depth: None,
         notes_markdown: None,
+        param_selection_restore: None,
     };
     payload.project = Some(state.project_meta_payload());
     payload

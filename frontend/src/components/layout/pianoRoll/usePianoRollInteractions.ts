@@ -10,11 +10,7 @@ import { useCallback, useEffect, useRef } from "react";
 import type { ParamFramesPayload } from "../../../types/api";
 import type { AppDispatch } from "../../../app/store";
 import { paramsApi } from "../../../services/api";
-import {
-    recordParamSelectionStretchStep,
-    seekPlayhead,
-    setplayheadSec,
-} from "../../../features/session/sessionSlice";
+import { seekPlayhead, setplayheadSec } from "../../../features/session/sessionSlice";
 import { clamp, MAX_PX_PER_SEC, MIN_PX_PER_SEC } from "../timeline";
 import type { LiveEditOverride } from "./useLiveParamEditing";
 import type {
@@ -141,6 +137,39 @@ function makePvValueSource(pv: ParamViewSegment): (frame: number) => number {
         const idx = Math.round((frame - pv.startFrame) / step);
         return idx >= 0 && idx < pv.edit.length ? pv.edit[idx] : 0;
     };
+}
+
+/**
+ * 把一次「改数据并连带移动选区」的拖动，登记到它**刚产生的那个历史步骤**上。
+ *
+ * 【为什么需要】这类手势（选区拉伸 / 选区整体拖动）在改曲线的同时也改了选区
+ * 范围，撤销时曲线会回退 —— 若选区留在拖后的位置，用户看到的就是"曲线回来了、
+ * 选区没回来"，也就无法"回到原范围再拉一次 / 再拖一次"。
+ *
+ * 【为什么由后端持有】选区快照记在后端的历史记录上（与记事本同一套路），撤销/
+ * 重做时随载荷带回（`param_selection_restore`），前端不再按撤销深度推断"我这一步
+ * 是第几步" —— 那条路会因深度镜像滞后、写回被抑制、以及"新检查点丢弃重做分支"
+ * 而错位（详见 state.rs 的说明）。
+ *
+ * 【调用时机】必须在曲线回写成功之后（`set_param_frames` 首块已打检查点、位置
+ * 已指向新步）。这就是全部约束：没有位置推断，也就没有需要等待的时序信号。
+ *
+ * 失败只记日志：后端拒绝意味着这次回写没有产生可撤销的步骤（被抑制等），此时
+ * 本就没有步骤可挂，重试无意义。
+ */
+async function recordGestureParamSelectionStep(args: {
+    before: ParamSelection | null;
+    after: ParamSelection | null;
+}): Promise<void> {
+    const toPairs = (selection: ParamSelection | null): [number, number][] =>
+        (selection ?? [])
+            .filter((range) => Number.isFinite(range.startBeat) && Number.isFinite(range.endBeat))
+            .map((range) => [range.startBeat, range.endBeat]);
+    try {
+        await paramsApi.recordParamSelectionStep(toPairs(args.before), toPairs(args.after));
+    } catch (err) {
+        console.warn("[pianoRoll] record param selection step failed", err);
+    }
 }
 
 /**
@@ -373,7 +402,6 @@ export function usePianoRollInteractions(args: {
      * 撤销栈深度读取器（后端权威镜像）。仅「边缘拉伸」手势在提交成功后
      * 用它登记选区步骤（撤销/重做恢复对应选区），其余操作不消费。
      */
-    getHistoryPosition?: () => number;
     /** 选区拖拽时边缘平滑度（0-100%） */
     edgeSmoothnessPercent?: number;
     /** 选择拖拽/绘制进行中时，用于临时切换吸附按钮视觉 */
@@ -469,7 +497,6 @@ export function usePianoRollInteractions(args: {
         dragDirection,
         onCycleDragDirection,
         cycleDragDirectionKb,
-        getHistoryPosition,
         edgeSmoothnessPercent,
         onPitchSnapGestureActiveChange,
         onMorphOverlayChange,
@@ -2623,7 +2650,6 @@ export function usePianoRollInteractions(args: {
                         const selectionBeforeStretch = stretchBaseSelection.map((range) => ({
                             ...range,
                         }));
-                        const historyPositionBeforeStretch = getHistoryPosition?.() ?? 0;
                         let stretchABeat = aBeat;
                         let stretchBBeat = bBeat;
 
@@ -2971,6 +2997,7 @@ export function usePianoRollInteractions(args: {
                                 ? selectionRef.current.map((range) => ({ ...range }))
                                 : null;
                             void (async () => {
+                                let committed = false;
                                 try {
                                     await uploadFullResCurve({
                                         trackId: rootTrackId,
@@ -2978,16 +3005,7 @@ export function usePianoRollInteractions(args: {
                                         startFrame: built.overallMinFrame,
                                         values: expanded,
                                     });
-                                    // 回写成功（已打检查点）后才登记：撤销这一步会
-                                    // 恢复拉伸前的选区，重做恢复拉伸后的选区；
-                                    // 其它任何选区变化都不进历史。
-                                    dispatch(
-                                        recordParamSelectionStretchStep({
-                                            positionBefore: historyPositionBeforeStretch,
-                                            before: selectionBeforeStretch,
-                                            after: selectionAfterStretch,
-                                        }),
-                                    );
+                                    committed = true;
                                 } catch (err) {
                                     console.error("[pianoRoll] stretch-edge commit failed", err);
                                 } finally {
@@ -2996,6 +3014,16 @@ export function usePianoRollInteractions(args: {
                                     }
                                     bumpRefreshToken();
                                 }
+                                if (!committed) return;
+
+                                // 回写成功（首块已打检查点、位置已指向新步）之后，把本次
+                                // 拉伸的选区变化登记到**那一步**上：撤销恢复拉伸前、重做
+                                // 恢复拉伸后的选区。快照由后端持有，前端不做任何"我这是
+                                // 第几步"的推断（见 recordGestureParamSelectionStep）。
+                                await recordGestureParamSelectionStep({
+                                    before: selectionBeforeStretch,
+                                    after: selectionAfterStretch,
+                                });
                             })();
                             setCanvasCursor("default");
                             invalidate();
@@ -4073,7 +4101,19 @@ export function usePianoRollInteractions(args: {
                                                 // 块之间让出事件循环，超长工程也不会卡死界面。
                                                 // 上传失败同样复位 liveEdit（finally），不让
                                                 // 覆盖层冻结。
+                                                // 拖动前的选区快照：本手势把选区与数据
+                                                // 一起平移，因此撤销时选区也必须一起回来
+                                                // （与拉伸同一套登记，见其注释）。
+                                                const selectionBeforeDrag = sel
+                                                    ? sel.map((range) => ({ ...range }))
+                                                    : null;
+                                                const selectionAfterDrag = selectionRef.current
+                                                    ? selectionRef.current.map((range) => ({
+                                                          ...range,
+                                                      }))
+                                                    : null;
                                                 void (async () => {
+                                                    let uploaded = false;
                                                     try {
                                                         await uploadFullResCurveSegments({
                                                             trackId: rootTrackId,
@@ -4083,6 +4123,7 @@ export function usePianoRollInteractions(args: {
                                                                 values: piece.values,
                                                             })),
                                                         });
+                                                        uploaded = true;
                                                     } catch (err) {
                                                         console.error(
                                                             "[pianoRoll] select-drag upload failed",
@@ -4093,6 +4134,11 @@ export function usePianoRollInteractions(args: {
                                                             liveEditActiveRef.current = false;
                                                         bumpRefreshToken();
                                                     }
+                                                    if (!uploaded) return;
+                                                    await recordGestureParamSelectionStep({
+                                                        before: selectionBeforeDrag,
+                                                        after: selectionAfterDrag,
+                                                    });
                                                 })();
                                             }
                                         } catch (err) {
@@ -4883,7 +4929,6 @@ export function usePianoRollInteractions(args: {
             liveEditActiveRef,
             onContextMenu,
             onCycleDragDirection,
-            getHistoryPosition,
             installDragDirectionKeyCycler,
             paramStretchKb,
             snapDrawValue,
