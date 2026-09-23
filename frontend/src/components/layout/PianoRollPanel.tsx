@@ -145,12 +145,13 @@ import {
 import {
     clipboardPreviewSpans,
     mapClipboardToTargetRanges,
+    pasteTargetSelectionFromClipboard,
     toParamClipboardPayload,
     type ParamClipboardData,
     type ParamClipboardSegment,
 } from "./pianoRoll/paramClipboardMapping";
 import { uploadFullResCurveSegments } from "./pianoRoll/selectionEditData";
-import { canConvertParam, planParamConversion } from "./pianoRoll/paramConversion";
+import { planParamConversion } from "./pianoRoll/paramConversion";
 import { editablePitchValue } from "./pianoRoll/paramSmoothing";
 import {
     DYN_DEFAULT_VIEW,
@@ -268,6 +269,32 @@ import { parseRgbaColor } from "./timeline/runtime/timelineClipGlRenderer";
 
 const NOTE_NAMES_SHARP = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 const PARAM_EDITOR_VERTICAL_SCROLL_RANGE_PX = PIANO_ROLL_VERTICAL_SCROLL_RANGE_PX;
+
+/**
+ * **不参与「无选区时先全选」** 的操作（见 `handleEditOp` 开头的隐式全选）。
+ *
+ * 参数编辑器里的操作绝大多数以**参数选区**为作用域（复制/剪切、初始化、
+ * 各类对话框编辑、音量↔动态互转、另存为音高参考、导出 MIDI…）：没有选区时它们
+ * 原本静默什么都不做，用户得先自己"全选"再点一次。这些一律先全选再执行。
+ *
+ * 只有三类例外：
+ * - **选区自身的命令**：`selectAll` / `deselect` —— 它们就是在操作选区，
+ *   "先全选再执行"会把"取消选择"变成"全选"；
+ * - **作用域来自剪辑选择**的命令：`selectClipParamRange` /
+ *   `addClipsToParamSelection` / `removeClipsFromParamSelection` —— 它们按被选中的
+ *   剪辑（或其起止时间）改写参数选区，与"当前有没有参数选区"无关；
+ * - **`paste`** —— 粘贴的作用对象完全由**剪贴板**决定：无选区时按"播放光标作为
+ *   复制起点 + 剪贴板自己的段布局"推导选区（见 `pasteTargetSelectionFromClipboard`）。
+ *   在这里全选会把数据摊到整条曲线上（起点跑到工程开头、断层被拉长）。
+ */
+const SELECTION_SCOPE_EXEMPT_OPS: ReadonlySet<string> = new Set([
+    "selectAll",
+    "deselect",
+    "selectClipParamRange",
+    "addClipsToParamSelection",
+    "removeClipsFromParamSelection",
+    "paste",
+]);
 
 /**
  * 本面板在共享视口中的来源标识。
@@ -3702,21 +3729,6 @@ export const PianoRollPanel: React.FC = () => {
         };
     }, [selectionUi, paramView?.framePeriodMs, secPerBeat]);
 
-    /**
-     * 当前参数选区的总帧数（0 = 无选区）。
-     *
-     * 与 `handleEditOp` 内的换算同源（`beatRangesToFrameRanges`），因此菜单项的
-     * 可用性与实际操作覆盖的范围必然一致 —— 不会出现"菜单亮着但什么都没改"。
-     */
-    const pianoRollSelectionFrameCount = useMemo(() => {
-        if (!selectionUi || selectionUi.length === 0) return 0;
-        const fp = paramView?.framePeriodMs ?? 5;
-        return beatRangesToFrameRanges(selectionUi, secPerBeat, fp).reduce(
-            (sum, range) => sum + range.frameCount,
-            0,
-        );
-    }, [selectionUi, paramView?.framePeriodMs, secPerBeat]);
-
     // 获取当前 track 下的所 ?clips，用 ?per-clip 波形叠加绘制
     // 获取轨道组内所有 clips（包含 root 轨道及所有子轨道的 clip）
     const trackClips = useMemo(
@@ -5134,18 +5146,49 @@ export const PianoRollPanel: React.FC = () => {
         });
     }, [isLoading, updatePianoRollStatus]);
 
+    /**
+     * 参数编辑器「全选」：把整条参数曲线（0 → 工程时长）设为选区。
+     *
+     * 独立成函数有两个用途：`selectAll` 菜单命令本身，以及 `handleEditOp` 开头的
+     * **隐式全选**（无选区时先把作用域铺满整条曲线，再执行原本需要选区的操作）。
+     *
+     * @returns 是否真的设置了选区；工具模式不是「选择」时为 `false`（与菜单命令
+     *   同一守卫：绘制 / 直线 / 颤音工具下不产生选区），调用方据此保持原行为。
+     */
+    const selectAllParamRange = useCallback((): boolean => {
+        if (s.toolMode !== "select") return false;
+        const totalBeats = dynamicProjectSec / secPerBeat;
+        selectionRef.current = selectionFromBeatRange(0, totalBeats);
+        setSelectionUi(selectionRef.current);
+        invalidate();
+        return true;
+    }, [s.toolMode, dynamicProjectSec, secPerBeat, invalidate]);
+
     // ── Edit operation handler (shared by context menu + MenuBar events) ──
     const handleEditOp = useCallback(
         async (op: string, data?: Record<string, unknown>) => {
             if (!rootTrackId) return;
             const fp = paramView?.framePeriodMs ?? 5;
 
+            // ── 无选区时的隐式全选 ────────────────────────────────────────
+            // 本编辑器里的操作几乎都以**参数选区**为作用域（见
+            // SELECTION_SCOPE_EXEMPT_OPS 的说明）。没有选区时它们原本静默什么都
+            // 不做 —— 用户得先"全选"再点一次，而右键菜单里点下去毫无反应更容易被
+            // 当成功能坏了。这里统一改为：**先全选，再执行**，作用域 = 整条参数曲线
+            // （与用户手动全选完全等价：同样的 `selectionFromBeatRange(0, 时长)`）。
+            //
+            // 非「选择」工具下全选不生效（与菜单命令同一守卫），此时行为与改动前
+            // 逐字一致：这些操作在绘制类工具里本就没有意义。
+            const hadSelectionAtEntry = selectionRef.current;
+            if (
+                !SELECTION_SCOPE_EXEMPT_OPS.has(op) &&
+                (!hadSelectionAtEntry || hadSelectionAtEntry.length === 0)
+            ) {
+                selectAllParamRange();
+            }
+
             if (op === "selectAll") {
-                if (s.toolMode !== "select") return;
-                const totalBeats = dynamicProjectSec / secPerBeat;
-                selectionRef.current = selectionFromBeatRange(0, totalBeats);
-                setSelectionUi(selectionRef.current);
-                invalidate();
+                selectAllParamRange();
                 return;
             }
             if (op === "deselect") {
@@ -5312,17 +5355,70 @@ export const PianoRollPanel: React.FC = () => {
                 bumpRefreshToken();
             };
 
-            const selAtEntry = selectionRef.current;
-            // Normal paste prefers HiFiShifter param data. When there is no
-            // pitch selection (or pitch editing is unavailable), the normal
-            // paste still tries REAPERMedia data, matching the removed
-            // dedicated "Paste Reaper Clipboard Data" action.
-            if (op === "paste" && (!selAtEntry || !pitchEnabled)) {
-                pasteReaperClipboardFallback();
-                return;
+            /**
+             * 解析参数线剪贴板：内部缓存 → 系统剪贴板（后者优先，保持"最后复制的
+             * 胜出"：时间轴复制过 Clip 后系统槽位已换，内部缓存随之失效）。
+             */
+            const readParamClipboardForPaste = async (): Promise<ParamClipboardData | null> => {
+                let clip = clipboardRef.current;
+                try {
+                    const fromSystem = await readSystemClipboardObject("param");
+                    if (fromSystem) {
+                        clip = fromSystem;
+                        clipboardRef.current = clip;
+                    }
+                } catch {
+                    // 系统剪贴板不可用 → 退回内部缓存。
+                }
+                return clip ?? null;
+            };
+
+            // ── 粘贴：剪贴板优先；无选区时按剪贴板 + 播放光标推导选区 ──────────
+            // 粘贴与其它操作不同：它的"作用对象"完全由**剪贴板**决定（从哪里开始、
+            // 铺多宽、中间有几个断层）。因此无选区时**不做全选**，而是以当前播放
+            // 光标为复制起点，按剪贴板自己的段布局重建选区（段数 / 段长 / 断层照搬），
+            // 再把数据贴进去 —— 选区就是"粘贴会落到哪里"。
+            //
+            // 【推导出的选区**先不发布**】它要与粘贴后的曲线**同一次提交**落地：
+            // 先亮出一个空选区、隔几毫秒再填上数据，会让用户看到"先划选区、再粘贴"
+            // 两步；而用户的心智是"选区出现时粘贴就已经完成了"。因此这里只把它交给
+            // 下面的目标帧换算，真正的 ref/UI 更新发生在 paste 分支里（与本地曲线
+            // 更新同一次 setState 批处理）。
+            //
+            // 剪贴板里没有参数线数据时保持既有语义：落到 REAPERMedia / MIDI 剪贴板
+            // 回退（那个回退的目标不是参数选区）；音高编辑不可用时同理。
+            let pasteClipboard: ParamClipboardData | null = null;
+            let derivedPasteSelection: ParamSelection | null = null;
+            if (op === "paste") {
+                if (!pitchEnabled) {
+                    pasteReaperClipboardFallback();
+                    return;
+                }
+                pasteClipboard = await readParamClipboardForPaste();
+                if (!pasteClipboard) {
+                    pasteReaperClipboardFallback();
+                    return;
+                }
+                const selAtEntry = selectionRef.current;
+                if (!selAtEntry || selAtEntry.length === 0) {
+                    derivedPasteSelection = pasteTargetSelectionFromClipboard({
+                        clipboard: pasteClipboard,
+                        // 锚点 = 播放光标所在帧（与粘贴的帧制口径一致）。
+                        anchorFrame: Math.max(0, Math.floor((s.playheadSec * 1000) / fp)),
+                        framePeriodMs: fp,
+                        secPerBeat,
+                    });
+                    if (!derivedPasteSelection) {
+                        pasteReaperClipboardFallback();
+                        return;
+                    }
+                }
             }
 
-            const sel = selectionRef.current;
+            // 目标选区：现有选区，或（粘贴且无选区时）刚推导出的那一份。
+            const sel =
+                (selectionRef.current?.length ? selectionRef.current : null) ??
+                derivedPasteSelection;
             if (!sel || sel.length === 0) return;
             if (!pitchEnabled) return;
 
@@ -5355,6 +5451,44 @@ export const PianoRollPanel: React.FC = () => {
                     if (didWrite) wrote = true;
                 }
                 return wrote;
+            };
+
+            /**
+             * 粘贴的「本地先落」：把写入值先写进本地 paramView，并把**推导出的选区**
+             * 在同一次 React 提交里发布。
+             *
+             * 【为什么需要】后端回写 + 重新取数要走若干个 IPC 往返。若只发布选区、
+             * 等取数回来才显示曲线，用户看到的是"先出现一个空选区、隔一会儿才填上
+             * 数据"两步；而用户的心智是"选区一出现，粘贴就已经完成"。这里与其它提交
+             * 路径同一范式（先本地、后后端；失败时由 `bumpRefreshToken` 的取数纠正），
+             * 于是选区与曲线在**同一次 setState 批处理**里落地 —— 感知上是一步。
+             *
+             * 已有选区时（`derivedPasteSelection` 为 null）只更新曲线，行为不变。
+             *
+             * @param writes 绝对帧号 + 逐帧值（全分辨率）。
+             */
+            const applyPasteLocally = (
+                writes: readonly { startFrame: number; values: number[] }[],
+            ): void => {
+                if (derivedPasteSelection) {
+                    selectionRef.current = derivedPasteSelection;
+                    setSelectionUi(derivedPasteSelection);
+                }
+                const pv = paramViewRef.current;
+                if (pv && writes.length > 0) {
+                    const step = Math.max(1, Math.floor(pv.stride));
+                    const nextEdit = pv.edit.slice();
+                    for (const write of writes) {
+                        for (let i = 0; i < write.values.length; i += 1) {
+                            const idx = Math.round((write.startFrame + i - pv.startFrame) / step);
+                            if (idx >= 0 && idx < nextEdit.length) {
+                                nextEdit[idx] = write.values[i];
+                            }
+                        }
+                    }
+                    setParamView({ ...pv, edit: nextEdit });
+                }
+                invalidate();
             };
 
             // 音量 ↔ 动态 曲线互转（后端单事务：基线补偿换算 + 源参数归位）。
@@ -5537,21 +5671,10 @@ export const PianoRollPanel: React.FC = () => {
                     break;
                 }
                 case "paste": {
-                    let clip = clipboardRef.current;
-                    try {
-                        const fromSystem = await readSystemClipboardObject("param");
-                        if (fromSystem) {
-                            clip = fromSystem;
-                            clipboardRef.current = clip;
-                        }
-                    } catch {
-                        // ignore and fallback to internal clipboard
-                    }
-                    if (!clip) {
-                        // No HiFiShifter param clipboard data: try REAPERMedia.
-                        pasteReaperClipboardFallback();
-                        return;
-                    }
+                    // 剪贴板已在上方（进入通用守卫之前）解析过 —— 无选区时的目标
+                    // 选区就是据它推导的，这里直接复用同一份，避免再读一次系统剪贴板。
+                    const clip = pasteClipboard;
+                    if (!clip) return;
 
                     // 剪贴板 → 目标选区的映射（预览与粘贴同源）：交集之外不写，
                     // 断层两侧都保持原值。
@@ -5602,24 +5725,42 @@ export const PianoRollPanel: React.FC = () => {
                             });
                         }
                         if (convertedWrites.length === 0) return;
-                        await uploadFullResCurveSegments({
-                            trackId: rootTrackId,
-                            param: editParam,
-                            segments: convertedWrites,
-                        });
-                        bumpRefreshToken();
+                        // 选区（若为新推导）+ 本地曲线：同一次提交落地，再走后端回写。
+                        applyPasteLocally(convertedWrites);
+                        try {
+                            await uploadFullResCurveSegments({
+                                trackId: rootTrackId,
+                                param: editParam,
+                                segments: convertedWrites,
+                            });
+                        } catch (err) {
+                            console.error("[pianoRoll] paste (converted) failed", err);
+                        } finally {
+                            // 无论成败都重新取数：失败时把上面乐观写入的曲线纠正回后端真值
+                            // （与拖拽提交路径同一纪律）。
+                            bumpRefreshToken();
+                        }
                         break;
                     }
 
-                    await uploadFullResCurveSegments({
-                        trackId: rootTrackId,
-                        param: editParam,
-                        segments: writes.map((write) => ({
-                            startFrame: write.startFrame,
-                            values: write.values,
-                        })),
-                    });
-                    bumpRefreshToken();
+                    const pasteWrites = writes.map((write) => ({
+                        startFrame: write.startFrame,
+                        values: write.values,
+                    }));
+                    // 选区（若为新推导）+ 本地曲线：同一次提交落地，再走后端回写。
+                    applyPasteLocally(pasteWrites);
+                    try {
+                        await uploadFullResCurveSegments({
+                            trackId: rootTrackId,
+                            param: editParam,
+                            segments: pasteWrites,
+                        });
+                    } catch (err) {
+                        console.error("[pianoRoll] paste failed", err);
+                    } finally {
+                        // 同拖拽提交路径：失败时用重新取数把乐观写入的曲线纠正回来。
+                        bumpRefreshToken();
+                    }
                     break;
                 }
                 case "initialize": {
@@ -6069,6 +6210,7 @@ export const PianoRollPanel: React.FC = () => {
             bumpRefreshToken,
             invalidate,
             dispatch,
+            selectAllParamRange,
         ],
     );
 
@@ -6131,10 +6273,17 @@ export const PianoRollPanel: React.FC = () => {
     /**
      * 「另存为音高参考」：每个选区段生成一个独立的 Pitch Ref clip
      * （不合并断层 —— 合并会把缺口处也填上参考音高）。
+     *
+     * 无选区时先做一次隐式全选（作用域 = 整条参数曲线），与右键菜单里其它
+     * 以选区为作用域的操作一致 —— 否则这个菜单项点下去会毫无反应。
      */
     const handleSaveAsPitchRef = useCallback(async () => {
+        if (!rootTrackId) return;
+        if (!selectionRef.current || selectionRef.current.length === 0) {
+            selectAllParamRange();
+        }
         const sel = selectionRef.current;
-        if (!sel || sel.length === 0 || !rootTrackId) return;
+        if (!sel || sel.length === 0) return;
 
         const fp = paramView?.framePeriodMs ?? 5;
         const selFrameRanges = beatRangesToFrameRanges(sel, secPerBeat, fp);
@@ -6287,6 +6436,7 @@ export const PianoRollPanel: React.FC = () => {
         s.selectedTrackId,
         s.clips,
         dispatch,
+        selectAllParamRange,
     ]);
 
     /**
@@ -6295,6 +6445,11 @@ export const PianoRollPanel: React.FC = () => {
      */
     const handleExportMidiFromEditor = useCallback(async () => {
         if (!rootTrackId) return;
+        // 无选区时先隐式全选（作用域 = 整条参数曲线），与菜单里其它以选区为
+        // 作用域的操作一致。
+        if (!selectionRef.current || selectionRef.current.length === 0) {
+            selectAllParamRange();
+        }
         const sel = selectionRef.current;
         if (!sel || sel.length === 0) return;
 
@@ -6324,7 +6479,7 @@ export const PianoRollPanel: React.FC = () => {
             baseScale: s.project?.baseScale ?? "C",
             projectScaleNotes: scaleNotes,
         });
-    }, [rootTrackId, selectionRef, secPerBeat, s]);
+    }, [rootTrackId, selectionRef, secPerBeat, s, selectAllParamRange]);
 
     // Pitch Snap 设置弹窗状态
     const [pitchSnapOpen, setPitchSnapOpen] = useState(false);
@@ -7917,23 +8072,17 @@ export const PianoRollPanel: React.FC = () => {
                     onMeanQuantize={() => openEditDialog("meanQuantize")}
                     onSaveAsPitchRef={() => void handleSaveAsPitchRef()}
                     onExportMidi={() => void handleExportMidiFromEditor()}
-                    // 音量 ↔ 动态 互转：仅在有选区时可用（无选区时"整条互换"
-                    // 应由初始化表达，而不是一个会静默改全轨的菜单项）。
-                    // 帧数经 beat→frame 换算（与 handleEditOp 内的口径一致）。
+                    // 音量 ↔ 动态 互转：参数本身就是这两个之一时始终可用。
+                    //
+                    // 【为什么不按"有无选区"门控】这里曾经只在有选区时显示（理由是
+                    // "无选区时整条互换应由初始化表达"）。现在菜单里所有以选区为作用域
+                    // 的操作都遵循同一条规则：**无选区时先隐式全选再执行**（见
+                    // `handleEditOp` 开头），因此"整条互换"就是一次明确的全选 + 互换，
+                    // 不再需要靠隐藏菜单项来回避。
                     isVolumeParam={
-                        editParam === "volume" &&
-                        canConvertParam({
-                            editParam,
-                            selectionFrameCount: pianoRollSelectionFrameCount,
-                        })
+                        editParam === "volume" && planParamConversion(editParam) !== null
                     }
-                    isDynParam={
-                        editParam === "dyn" &&
-                        canConvertParam({
-                            editParam,
-                            selectionFrameCount: pianoRollSelectionFrameCount,
-                        })
-                    }
+                    isDynParam={editParam === "dyn" && planParamConversion(editParam) !== null}
                     onConvertVolumeToDyn={() => void handleEditOp("convertVolumeToDyn")}
                     onConvertDynToVolume={() => void handleEditOp("convertDynToVolume")}
                 />

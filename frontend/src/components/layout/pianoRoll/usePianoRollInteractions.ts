@@ -2543,11 +2543,16 @@ export function usePianoRollInteractions(args: {
                 //      命中框 8px，比参数线还窄，且只在按住修饰键时出现 → 排最高）；
                 //   1. **已选中的参数线**（落在某段内且靠近曲线）；
                 //   2. Alt + 选区边缘 → 拉伸选区内的曲线（改数据、进撤销栈）；
-                //   3. 多选修饰键 → 追加 / 切换段；
+                //   3. 多选区追加：⌘/Ctrl + 左键，**或右键落在未选中区域**
+                //      （后者与前者等同；原地点击已有段仍是"取消该段"）；
                 //   4. 无修饰键 + 边缘 → 只调整选区边界；
-                //   5. 右键 + 选区内部 → 左右平移**指针所在的那一段**（只动选区，
-                //      不动数据；多段选区下其余段不动）；
+                //   5. 右键 + 已选中区域内部 → 左右平移**指针所在的那一段**（只动
+                //      选区，不动数据；多段选区下其余段不动）；
                 //   6. 普通框选（替换整个选区）。
+                //
+                // 【右键为什么分两种】右键落在**已选中区域**里 = 平移那一段（选区调整）；
+                // 落在**未选中区域**里 = 追加一段（多选区操作）—— 平移对"空处"没有
+                // 意义，而"再选一段"正是用户在那里起手时想做的事。
                 //
                 // 【为什么参数线永远第一】参数线的命中范围最窄（10px 纵向带 + 必须
                 // 落在段内），而它在画面里可能只占很短一截，很难瞄准；选区边缘则是两条
@@ -2559,18 +2564,28 @@ export function usePianoRollInteractions(args: {
                 // 取反），因为这里的分支顺序本身就编码了优先级。
                 const onSelectedCurve = isPointerNearDraggableSelection(e.clientX, e.clientY);
 
-                // ── 多选修饰键（默认 ⌘/Ctrl）─────────────────────────────────
+                // ── 多选区追加：⌘/Ctrl + 左键，**或右键落在未选中区域** ─────────
                 // 拖动 = 在已有选区上**追加**一段（并集；重叠/相接自动合并）；
                 // 原地点击已有段 = 取消该段（与时间轴 ⌘+点击多选切换同源语义）。
+                //
+                // 【为什么右键也算多选】右键在**未选中区域**起手时，用户想做的通常
+                // 就是"再选一段" —— 选区平移只对已选中区域有意义（见下一个分支），
+                // 因此这里的右键与按住多选区修饰键**完全等同**。右键在已选中区域内
+                // 起手仍是平移、压在参数线上仍是曲线交互，两者都不变。
                 //
                 // Alt 拉伸修饰键按下时本分支让位（见条件里的取反），否则在选区内侧
                 // 边缘处无法拉伸；指针压住**已选中的参数线**时也让位，否则按住修饰键
                 // 就再也拖不动选区内的曲线（而这正是该修饰键最不该挡住的交互）。
-                if (
-                    e.button === 0 &&
-                    !onSelectedCurve &&
+                const rightDragInUnselectedArea =
+                    e.button === 2 &&
                     !isModifierActive(paramStretchKb, e.nativeEvent) &&
-                    isModifierActive(paramMultiSelectKb, e.nativeEvent)
+                    rangeIndexAtBeat(sel, b) === -1;
+                if (
+                    rightDragInUnselectedArea ||
+                    (e.button === 0 &&
+                        !onSelectedCurve &&
+                        !isModifierActive(paramStretchKb, e.nativeEvent) &&
+                        isModifierActive(paramMultiSelectKb, e.nativeEvent))
                 ) {
                     const startBeat = selectionBeatFromClientX(e.clientX, false);
                     const baseSelection = selectionRef.current ?? [];
@@ -2578,30 +2593,53 @@ export function usePianoRollInteractions(args: {
                     const hitExistingRange = hitIndex >= 0;
                     const startClientX = e.clientX;
                     let moved = false;
+                    // 起手用的是哪个键：拖动期间按这个掩码判断"键还按着"（左 1 / 右 2）。
+                    const pressMask = e.button === 2 ? 2 : 1;
+                    const isRightDrag = e.button === 2;
 
                     (e.currentTarget as HTMLCanvasElement).setPointerCapture(e.pointerId);
+                    // 右键手势的收尾菜单：拖拽期间一律吞掉，**没拖动**时按"右键点击"
+                    // 处理（手工打开菜单）—— 与选区平移 / 曲线形变两处右键分支同一套。
+                    const suppressContextMenu = (ev: Event) => {
+                        ev.preventDefault();
+                        ev.stopImmediatePropagation();
+                    };
+                    if (isRightDrag) {
+                        window.addEventListener("contextmenu", suppressContextMenu, true);
+                    }
                     const onMove = (ev: globalThis.PointerEvent) => {
-                        if ((ev.buttons & 1) !== 1) {
-                            onUp();
+                        if ((ev.buttons & pressMask) !== pressMask) {
+                            onUp(ev);
                             return;
                         }
                         // 只接受本指针的 move：第二指针（掌压触摸等）的
                         // buttons 恒为 1，不校验 pointerId 会驱动本次手势。
                         if (ev.pointerId !== e.pointerId) return;
                         // 3px 死区：区分「点击切换」与「拖动追加」，避免手抖误删段
-                        if (!moved && Math.abs(ev.clientX - startClientX) > 3) moved = true;
+                        if (!moved && Math.abs(ev.clientX - startClientX) > 3) {
+                            moved = true;
+                            // 确认构成拖拽：武装跨表面守卫，松手若落在别的表面上
+                            // （标尺 / 轨道头）也不会弹出那个表面的菜单。
+                            if (isRightDrag) armRightDragContextMenuGuard();
+                        }
                         if (!moved) return;
                         const bb = selectionBeatFromClientX(ev.clientX, true);
                         selectionRef.current = addBeatRange(baseSelection, startBeat, bb);
                         updateSelectionUi(selectionRef.current);
                         invalidate();
                     };
-                    const onUp = () => {
+                    const onUp = (ev?: globalThis.PointerEvent) => {
                         window.removeEventListener("pointermove", onMove);
                         window.removeEventListener("pointerup", onUp);
                         window.removeEventListener("pointercancel", onUp);
+                        if (isRightDrag) {
+                            window.removeEventListener("contextmenu", suppressContextMenu, true);
+                        }
                         clearActivePointerGestureEnd(onUp);
-                        if (!moved && hitExistingRange) {
+                        // 「原地点击已有段 = 取消该段」只属于**修饰键**路径：右键起手的
+                        // 分支只在未选中区域触发，右键点击在那里是"交回菜单"（见下），
+                        // 不应借拍坐标的边界夹取误差误删某一段。
+                        if (!moved && hitExistingRange && !isRightDrag) {
                             // 切换取消：移除被点击的那一段
                             // （removeRangeAtBeat 已覆盖"按点击拍定位该段"的语义）
                             selectionRef.current = removeRangeAtBeat(
@@ -2609,6 +2647,13 @@ export function usePianoRollInteractions(args: {
                                 startBeat,
                             );
                             updateSelectionUi(selectionRef.current);
+                        }
+                        if (isRightDrag && !moved) {
+                            // 右键点击（没有拖动）：未选中区域起手时既没有可取消的段，
+                            // 也没有要追加的范围 —— 原样交回上下文菜单。
+                            if (onContextMenu && document.hasFocus() && ev) {
+                                onContextMenu(ev.clientX, ev.clientY);
+                            }
                         }
                         invalidate();
                     };
@@ -2644,9 +2689,9 @@ export function usePianoRollInteractions(args: {
                         // 重建（只替换被拉伸的那一段），因此归一化合并不会造成
                         // 「越拉越偏」的下标漂移。
                         const stretchBaseSelection = sel;
-                        // 撤销历史：这是唯一会把「选区变化」写进历史的操作 ——
-                        // 撤销恢复拉伸前的选区，重做恢复拉伸后的选区。位置取自
-                        // 后端深度镜像，该手势的回写固定只打一个检查点。
+                        // 本手势同时改曲线与选区：收尾时把这对选区快照登记到该手势
+                        // 打出的那个历史步骤上（后端持有，撤销恢复 `before`、重做恢复
+                        // `after`，见 recordGestureParamSelectionStep）。
                         const selectionBeforeStretch = stretchBaseSelection.map((range) => ({
                             ...range,
                         }));

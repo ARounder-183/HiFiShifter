@@ -1,11 +1,13 @@
 import { test } from "vitest";
 
+import { beatRangesToFrameRanges } from "./paramSelection.js";
 import {
     clipboardPreviewSpans,
     clipboardSpanFrames,
     clipboardTotalFrames,
     mapClipboardToTargetRanges,
     normalizeClipboardData,
+    pasteTargetSelectionFromClipboard,
     parseParamClipboardPayload,
     toParamClipboardPayload,
     type ParamClipboardData,
@@ -299,6 +301,90 @@ test("components/layout/pianoRoll/paramClipboardMapping.test.ts scripted checks"
             [spans[0].startSec, spans[0].framePeriodMs, spans[0].values.length],
             [0, 10, 4],
             "preview uses target frame period",
+        );
+    }
+
+    // ── 无选区粘贴：目标选区由「剪贴板段布局 + 播放光标」推导 ──────────────
+    //
+    // 断言两件事：① 选区形状（段数 / 段长 / 断层）照搬剪贴板，整体起点落在锚点；
+    // ② 端到端：把推导出的选区喂回 beatRangesToFrameRanges + 映射，得到的就是
+    // "剪贴板各段平移到锚点"—— 也就是粘贴真正会写入的帧，逐帧对齐（这是"选区
+    // 就是粘贴落点"这条不变量的可执行形式；两端各内收 1/4 帧的取整正为此存在）。
+    {
+        const clip: ParamClipboardData = {
+            param: "pitch",
+            framePeriodMs: 5,
+            segments: [
+                { startFrame: 0, values: [1, 2, 3] },
+                { startFrame: 10, values: [4, 5] },
+            ],
+        };
+        const secPerBeat = 0.5;
+        const fp = 5;
+
+        // 锚点 0：段 0 → [0,3)、段 1 → [10,12)（帧），换算成拍。
+        const atZero = pasteTargetSelectionFromClipboard({
+            clipboard: clip,
+            anchorFrame: 0,
+            framePeriodMs: fp,
+            secPerBeat,
+        });
+        assertEqual(atZero?.length, 2, "derived range count follows clipboard segments");
+        assertJson(
+            beatRangesToFrameRanges(atZero, secPerBeat, fp),
+            [
+                { startFrame: 0, frameCount: 3 },
+                { startFrame: 10, frameCount: 2 },
+            ],
+            "derived selection round-trips to the clipboard layout at frame level",
+        );
+
+        // 锚点 40 帧：整体平移，段间空洞（3..10）原样保留。
+        const anchored = pasteTargetSelectionFromClipboard({
+            clipboard: clip,
+            anchorFrame: 40,
+            framePeriodMs: fp,
+            secPerBeat,
+        });
+        const targetRanges = beatRangesToFrameRanges(anchored, secPerBeat, fp);
+        assertJson(
+            targetRanges,
+            [
+                { startFrame: 40, frameCount: 3 },
+                { startFrame: 50, frameCount: 2 },
+            ],
+            "derived selection starts at the anchor frame",
+        );
+        // 端到端：粘贴的写入帧 == 剪贴板各段平移到锚点，且断层不被填充。
+        assertJson(
+            mapClipboardToTargetRanges({ targetRanges, clipboard: clip }),
+            [
+                { startFrame: 40, values: [1, 2, 3] },
+                { startFrame: 50, values: [4, 5] },
+            ],
+            "paste writes exactly the clipboard segments anchored at the playhead",
+        );
+
+        // 空剪贴板 / 无段：没有可粘贴的数据（调用方走 REAPER/MIDI 回退）。
+        assertEqual(
+            pasteTargetSelectionFromClipboard({
+                clipboard: null,
+                anchorFrame: 0,
+                framePeriodMs: fp,
+                secPerBeat,
+            }),
+            null,
+            "null clipboard derives nothing",
+        );
+        assertEqual(
+            pasteTargetSelectionFromClipboard({
+                clipboard: { param: "pitch", framePeriodMs: fp, segments: [] },
+                anchorFrame: 0,
+                framePeriodMs: fp,
+                secPerBeat,
+            }),
+            null,
+            "empty segments derive nothing",
         );
     }
 });

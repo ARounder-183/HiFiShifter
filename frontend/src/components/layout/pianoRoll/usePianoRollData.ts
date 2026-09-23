@@ -69,7 +69,6 @@ export function usePianoRollData(args: {
         null,
     );
 
-
     const [isRefreshing, setIsRefreshing] = useState(false);
     const [loadingCount, setLoadingCount] = useState(0);
     const isLoading = loadingCount > 0;
@@ -90,6 +89,20 @@ export function usePianoRollData(args: {
 
     const fetchDebounceRef = useRef<number | null>(null);
     const fetchReqIdRef = useRef(0);
+
+    /**
+     * 当前参数（渲染期同步刷新）。
+     *
+     * 【为什么需要它】取数响应是在**闭包里**回来的，而参数可能在请求在途时被切换：
+     * 请求 id（`fetchReqIdRef`）只能拦住"被更新的请求取代"的响应，拦不住"参数已切
+     * 换、新请求还没发出"的那一个（参数切换的去抖窗口内正是如此）。拿它比对请求
+     * 发起时的参数，就能保证**只有当前参数的曲线才允许落进 state**。
+     */
+    const currentParamRef = useRef<ParamName>(editParam);
+    currentParamRef.current = editParam;
+
+    /** 上一次取数的「轨道|参数」作用域（用于识别参数/轨道切换并立即取数）。 */
+    const lastFetchScopeRef = useRef<string | null>(null);
     const [refreshToken, setRefreshToken] = useState(0);
 
     const [forceParamFetchToken, setForceParamFetchToken] = useState(0);
@@ -97,13 +110,24 @@ export function usePianoRollData(args: {
 
     // Force parameter refresh when the session state changes meaningfully (undo/redo/timeline edits).
     // 同时清除旧曲线数据，避免旧数据在新数据到达前短暂显示（也修复初次导入后曲线不显示的问题）。
+    //
+    // 【参数 / 轨道切换为什么也必须清空】左轴（刻度 / 琴键 / 标签 / 值域）是从
+    // `editParam` 与参数描述符**同步**推导的：切换后当帧就变成新参数的样子；而曲线
+    // 数据要等取数回来（还带一段去抖）。不清空的话，这段窗口里画面上就是"**新参数的
+    // 标尺 + 旧参数的曲线**"—— 旧参数的值被新参数的值域投影，画出一条完全不相干的
+    // 线，然后才被新数据替换，用户看到的就是"切参数时曲线闪一下"。
+    //
+    // 清空让这段窗口里**没有曲线**（而不是错误的曲线）：曲线数据、副参数叠加、
+    // 参考音高、以及音高编辑状态徽标的可用性标记全部属于"上一个参数"，一并丢弃。
     useEffect(() => {
         if (!rootTrackId) return;
         setParamView(null);
         setSecondaryParamViews({});
         setReferencePitchViews({});
+        setPitchEditUserModified(null);
+        setPitchEditBackendAvailable(null);
         setForceParamFetchToken((x) => x + 1);
-    }, [paramsEpoch, rootTrackId]);
+    }, [paramsEpoch, rootTrackId, editParam]);
 
     // 监听 pitch_orig_updated 事件，触发曲线刷新。
     // 注意：分析进度状态（started/progress）由全局 PitchAnalysisProvider 统一管理。
@@ -173,20 +197,17 @@ export function usePianoRollData(args: {
             try {
                 const mod = await import("@tauri-apps/api/event");
                 type DynOrigUpdatedPayload = { rootTrackId?: string };
-                unlisten = await mod.listen<DynOrigUpdatedPayload>(
-                    "dyn_orig_updated",
-                    (event) => {
-                        if (disposed) return;
-                        const payload = event.payload ?? {};
-                        if (payload?.rootTrackId && payload.rootTrackId !== rootTrackId) return;
-                        if (liveEditActiveRef.current) {
-                            pendingPitchUpdatedRefreshRef.current = true;
-                        } else {
-                            setForceParamFetchToken((x) => x + 1);
-                            setRefreshToken((x) => x + 1);
-                        }
-                    },
-                );
+                unlisten = await mod.listen<DynOrigUpdatedPayload>("dyn_orig_updated", (event) => {
+                    if (disposed) return;
+                    const payload = event.payload ?? {};
+                    if (payload?.rootTrackId && payload.rootTrackId !== rootTrackId) return;
+                    if (liveEditActiveRef.current) {
+                        pendingPitchUpdatedRefreshRef.current = true;
+                    } else {
+                        setForceParamFetchToken((x) => x + 1);
+                        setRefreshToken((x) => x + 1);
+                    }
+                });
                 if (disposed) {
                     unlisten();
                     unlisten = null;
@@ -404,6 +425,8 @@ export function usePianoRollData(args: {
         return {
             debug,
             trackId,
+            /** 本次请求要取的参数（响应落地前用来比对"是否已被切换走"）。 */
+            param: editParam,
             paramCoversVisible,
             paramKey,
             startFrame,
@@ -483,6 +506,8 @@ export function usePianoRollData(args: {
                         }),
                     );
                     if (referenceFetchReqIdRef.current !== referenceReqId) return;
+                    // 参数已被切换：这份参考音高属于上一个参数的画面，丢弃。
+                    if (req.param !== currentParamRef.current) return;
                     const next: Record<string, ParamViewSegment> = {};
                     for (const entry of responses) {
                         if (!entry) continue;
@@ -541,6 +566,9 @@ export function usePianoRollData(args: {
                     }),
                 );
                 if (secondaryFetchReqIdRef.current !== secReqId) return;
+                // 参数已被切换：副参数叠加同样属于上一个参数的画面，丢弃
+                // （否则它会以旧参数的值、新参数的值域画出来）。
+                if (req.param !== currentParamRef.current) return;
                 setSecondaryParamViews((prev) => {
                     const next = { ...prev };
                     for (const secondaryReq of req.secondaryRequests) {
@@ -584,6 +612,11 @@ export function usePianoRollData(args: {
                         stride,
                     );
                     if (fetchReqIdRef.current !== reqId) return;
+                    // 【参数切换的兜底】请求 id 只拦得住"被新请求取代"的响应；参数
+                    // 切换后新请求还没发出（去抖窗口）时，旧参数的响应仍是最新的那
+                    // 一个 —— 若放它落地，清空过的 state 会被旧曲线重新填满，闪动
+                    // 依旧。因此这里再比一次参数。
+                    if (req.param !== currentParamRef.current) return;
                     if (!res?.ok) {
                         if (debug) {
                             console.debug("[PianoRollData] paramFrames not ok", {
@@ -760,6 +793,8 @@ export function usePianoRollData(args: {
             ]);
 
             if (fetchReqIdRef.current !== reqId) return;
+            // 参数已被切换：这份曲线属于上一个参数，不得落进 state（同 refreshVisible）。
+            if (req.param !== currentParamRef.current) return;
 
             if (shouldFetchParam && paramRes?.ok) {
                 const payload = paramRes as ParamFramesPayload;
@@ -951,6 +986,16 @@ export function usePianoRollData(args: {
         if (fetchDebounceRef.current != null) {
             window.clearTimeout(fetchDebounceRef.current);
             fetchDebounceRef.current = null;
+        }
+        // 【参数 / 轨道切换不走去抖】去抖是为滚动、缩放这类**连续输入**准备的；
+        // 切换参数是离散动作，吃 75ms 去抖只会白白拉长"标尺已换、曲线未到"的空窗
+        // （旧实现里那段时间还显示着旧参数的曲线）。切换时立即取数，把空窗压到
+        // 一个 IPC 往返（约一帧）。
+        const fetchScope = `${rootTrackId}|${editParam}`;
+        if (lastFetchScopeRef.current !== fetchScope) {
+            lastFetchScopeRef.current = fetchScope;
+            void refreshVisible();
+            return;
         }
         fetchDebounceRef.current = window.setTimeout(() => {
             fetchDebounceRef.current = null;
