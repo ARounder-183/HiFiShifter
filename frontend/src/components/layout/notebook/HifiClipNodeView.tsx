@@ -81,16 +81,26 @@ export function HifiClipNodeView(props: NodeViewProps) {
 
     const kindLabel = kindLabelOf(attrs.kind, t as unknown as (key: string) => string);
 
-    async function run(action: () => Promise<{ ok: boolean; error?: string }>, successText: string) {
+    async function run(
+        action: () => Promise<{ ok: boolean; error?: string }>,
+        successText: string,
+        options?: { removeOnSuccess?: boolean },
+    ) {
         setBusy(true);
         try {
             const result = await action();
             setNotice(result.ok ? successText : (result.error ?? t("notebook_clip_action_failed")));
+            if (result.ok && options?.removeOnSuccess) deleteNode();
         } finally {
             setBusy(false);
             void refreshAssetIndex(dispatch);
         }
     }
+
+    /** 设置里的"插入到"目标：选中轨道 / 新建轨道。 */
+    const insertMode = settings.clipInsertMode === "newTracks" ? "newTracks" : "selected";
+    /** 设置里的"插入后保留暂存块"：关掉时插入成功即移除该块。 */
+    const removeAfterInsert = !settings.keepClipAfterInsert;
 
     const menuItems: NotebookMenuItem[] = [
         {
@@ -107,8 +117,9 @@ export function HifiClipNodeView(props: NodeViewProps) {
             disabled: missing || busy,
             onSelect: () => {
                 void run(
-                    () => insertClipPayload(attrs.id, "selected"),
+                    () => insertClipPayload(attrs.id, insertMode),
                     t("notebook_clip_inserted"),
+                    { removeOnSuccess: removeAfterInsert },
                 );
             },
         },
@@ -120,6 +131,7 @@ export function HifiClipNodeView(props: NodeViewProps) {
                 void run(
                     () => insertClipPayload(attrs.id, "newTracks"),
                     t("notebook_clip_inserted"),
+                    { removeOnSuccess: removeAfterInsert },
                 );
             },
         },
@@ -272,7 +284,11 @@ export function HifiClipNodeView(props: NodeViewProps) {
                     type="button"
                     disabled={missing || busy}
                     onClick={() =>
-                        void run(() => insertClipPayload(attrs.id, "selected"), t("notebook_clip_inserted"))
+                        void run(
+                            () => insertClipPayload(attrs.id, insertMode),
+                            t("notebook_clip_inserted"),
+                            { removeOnSuccess: removeAfterInsert },
+                        )
                     }
                 >
                     {t("notebook_clip_insert_timeline")}

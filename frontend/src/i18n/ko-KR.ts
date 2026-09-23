@@ -370,6 +370,7 @@ export const koKR = {
     notebook_setting_slash: "슬래시 명령 메뉴",
     notebook_setting_word_wrap: "소스 보기에서 긴 줄 바꿈",
     notebook_setting_spellcheck: "맞춤법 검사",
+    notebook_setting_font_size: "편집기 글자 크기",
     notebook_setting_history_split: "실행 취소 단계 분할",
     notebook_setting_history_split_off: "계속 병합(기본)",
     notebook_setting_image_storage: "이미지 저장 방식",

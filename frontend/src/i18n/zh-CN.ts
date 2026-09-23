@@ -283,6 +283,7 @@ export const zhCN = {
     notebook_setting_slash: "斜杠命令菜单",
     notebook_setting_word_wrap: "源码视图自动换行",
     notebook_setting_spellcheck: "拼写检查",
+    notebook_setting_font_size: "编辑区字号",
     notebook_setting_history_split: "撤销步分节",
     notebook_setting_history_split_off: "保持合并（默认）",
     notebook_setting_image_storage: "图片存储方式",

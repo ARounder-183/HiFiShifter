@@ -293,6 +293,7 @@ export const jaJP = {
     notebook_setting_slash: "スラッシュコマンドメニュー",
     notebook_setting_word_wrap: "ソース表示で長い行を折り返す",
     notebook_setting_spellcheck: "スペルチェック",
+    notebook_setting_font_size: "エディタの文字サイズ",
     notebook_setting_history_split: "元に戻すステップの分割",
     notebook_setting_history_split_off: "結合を維持（既定）",
     notebook_setting_image_storage: "画像の保存方法",

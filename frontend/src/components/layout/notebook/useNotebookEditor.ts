@@ -127,11 +127,10 @@ export function useNotebookEditor(args: UseNotebookEditorArgs): UseNotebookEdito
             buildNotebookExtensions({
                 placeholder,
                 markdownShortcuts: settings.markdownShortcuts,
-                typographer: settings.typographer,
                 slashCommands: settings.slashCommands,
             }),
         // 只在"是否启用输入规则"这类结构性开关变化时重建扩展。
-        [placeholder, settings.markdownShortcuts, settings.typographer, settings.slashCommands],
+        [placeholder, settings.markdownShortcuts, settings.slashCommands],
     );
 
     const undoBridge = useMemo(() => createUndoBridge(bridge), [bridge]);
@@ -171,7 +170,10 @@ export function useNotebookEditor(args: UseNotebookEditorArgs): UseNotebookEdito
             editable: true,
             editorProps: {
                 attributes: {
-                    class: "hs-notebook-prose",
+                    // 显式保留 TipTap/ProseMirror 的默认类名：`editorProps`
+                    // 是整体替换而不是深合并，漏掉它们会让依赖这些类名的
+                    // 样式与查询静默失效。
+                    class: "tiptap ProseMirror hs-notebook-prose",
                     spellcheck: settings.spellCheck ? "true" : "false",
                 },
             },
@@ -215,19 +217,22 @@ export function useNotebookEditor(args: UseNotebookEditorArgs): UseNotebookEdito
         [enabled, extensions, undoBridge],
     );
 
-    // 运行时设置（不重建编辑器）：拼写检查、输入规则、可编辑性。
+    /**
+     * 运行时设置（不重建编辑器）。
+     *
+     * `enableInputRules` 是每次输入时现读的选项，`setOptions` 立即生效；
+     * 拼写检查则**直接写 DOM 属性** —— `editorProps.attributes` 只在视图创建
+     * 时应用，改它不会回写已存在的元素。
+     */
     useEffect(() => {
         if (!editor) return;
-        editor.setOptions({
-            enableInputRules: settings.markdownShortcuts,
-            editorProps: {
-                attributes: {
-                    class: "hs-notebook-prose",
-                    spellcheck: settings.spellCheck ? "true" : "false",
-                },
-            },
-        });
-    }, [editor, settings.markdownShortcuts, settings.spellCheck]);
+        editor.setOptions({ enableInputRules: settings.markdownShortcuts });
+    }, [editor, settings.markdownShortcuts]);
+
+    useEffect(() => {
+        if (!editor) return;
+        editor.view.dom.setAttribute("spellcheck", settings.spellCheck ? "true" : "false");
+    }, [editor, settings.spellCheck]);
 
     /**
      * 外来正文更新。

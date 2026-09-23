@@ -155,11 +155,14 @@ export function NotebookPanel() {
     );
 
     // 编辑器挂载后：装剪贴板 flavor 写出器。
+    //
+    // 直接挂 `editor.view.dom`：它晚于 ProseMirror 自己的 copy 监听注册，
+    // 因此一定在其写完 `text/html` / `text/plain` 之后补 flavor；用类名查
+    // DOM 反而会因 `editorProps.attributes` 覆盖默认 class 而落空。
     useEffect(() => {
-        const element = containerRef.current?.querySelector<HTMLElement>(".tiptap");
-        if (!element || !editor) return;
+        if (!editor) return;
         return installClipboardFlavorWriter(
-            element,
+            editor.view.dom,
             () => ({ copyFormat: settings.copyFormat, copyPlainTextAs: settings.copyPlainTextAs }),
             () => editor,
         );
@@ -229,10 +232,13 @@ export function NotebookPanel() {
                         event?: string;
                         paths?: string[];
                         position?: { x?: number; y?: number };
+                        pos?: { x?: number; y?: number };
+                        cursorPosition?: { x?: number; y?: number };
                     };
                     const type = String(payload?.type ?? payload?.event ?? "");
                     const paths = Array.isArray(payload?.paths) ? payload.paths : [];
-                    const position = payload?.position;
+                    // 位置字段名跨平台不一致（与时间轴同一套回退链）。
+                    const position = payload?.position ?? payload?.pos ?? payload?.cursorPosition;
                     const rect = containerRef.current?.getBoundingClientRect();
                     const dpr = window.devicePixelRatio || 1;
                     const clientX = typeof position?.x === "number" ? position.x / dpr : null;
@@ -455,6 +461,13 @@ export function NotebookPanel() {
             ref={containerRef}
             className="flex h-full min-h-0 flex-col bg-qt-window"
             data-drop-active={dropActive ? "true" : "false"}
+            // 字号同时作用于富文本与源码视图：两种视图的字号不一致会让模式
+            // 切换时"跳一下"，也让人怀疑内容变了。
+            style={
+                {
+                    "--hs-notebook-font-size": `${settings.sourceFontSize}px`,
+                } as React.CSSProperties
+            }
             onDragOver={(event) => {
                 if (Array.from(event.dataTransfer?.items ?? []).some((item) => item.kind === "file")) {
                     event.preventDefault();

@@ -286,6 +286,7 @@ export const zhTW = {
     notebook_setting_slash: "斜線命令選單",
     notebook_setting_word_wrap: "原始碼檢視自動換行",
     notebook_setting_spellcheck: "拼字檢查",
+    notebook_setting_font_size: "編輯區字級",
     notebook_setting_history_split: "復原步驟分段",
     notebook_setting_history_split_off: "保持合併（預設）",
     notebook_setting_image_storage: "圖片儲存方式",

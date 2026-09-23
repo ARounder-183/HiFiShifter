@@ -22,7 +22,6 @@ function createEditor(content: string): Editor {
         extensions: buildNotebookExtensions({
             placeholder: "",
             markdownShortcuts: true,
-            typographer: false,
             slashCommands: false,
         }),
         content,

@@ -36,8 +36,6 @@ export interface NotebookSettings {
     imageFormat?: NotebookImageFormatSetting;
     /** 单图字节上限（超出拒绝插入）。 */
     maxImageBytes?: number;
-    /** 插入图片后给一条"改为链接 / 撤销"的提示。 */
-    pasteImageConfirm?: boolean;
     /** 是否允许加载 http(s) 外链图片。 */
     allowRemoteImages?: boolean;
     /** 智能粘贴总开关。 */
@@ -52,8 +50,6 @@ export interface NotebookSettings {
     copyPlainTextAs?: "markdown" | "text";
     /** 暂存块插入时间轴时的轨道模式。 */
     clipInsertMode?: "selected" | "newTracks" | "ask";
-    /** 插入后播放头是否移到末尾。 */
-    clipInsertMovesPlayhead?: boolean;
     /** 插入后是否保留暂存块（中转站语义）。 */
     keepClipAfterInsert?: boolean;
     /** 暂存块内是否画示意预览。 */
@@ -64,8 +60,6 @@ export interface NotebookSettings {
     historySplitIdleMs?: number;
     /** 导出文档时的图片处理方式。 */
     exportImageMode?: "copyFolder" | "embed";
-    /** 全局快速搜索是否检索记事本正文。 */
-    searchable?: boolean;
 }
 
 export type ResolvedNotebookSettings = Required<NotebookSettings>;
@@ -84,7 +78,6 @@ export const DEFAULT_NOTEBOOK_SETTINGS: ResolvedNotebookSettings = {
     imageMaxDimensionPx: 2048,
     imageFormat: "auto",
     maxImageBytes: 20 * 1024 * 1024,
-    pasteImageConfirm: true,
     allowRemoteImages: true,
     smartPaste: true,
     htmlPasteMode: "markdown",
@@ -92,13 +85,11 @@ export const DEFAULT_NOTEBOOK_SETTINGS: ResolvedNotebookSettings = {
     copyFormat: "markdown+html",
     copyPlainTextAs: "markdown",
     clipInsertMode: "selected",
-    clipInsertMovesPlayhead: true,
     keepClipAfterInsert: true,
     clipShowPreview: true,
     autosaveDebounceMs: 400,
     historySplitIdleMs: 0,
     exportImageMode: "copyFolder",
-    searchable: true,
 };
 
 export const NOTEBOOK_PANEL_MIN_WIDTH = 260;
@@ -155,7 +146,6 @@ export function normalizeNotebookSettings(
             d.imageFormat,
         ),
         maxImageBytes: clampNumber(raw.maxImageBytes, 256 * 1024, 512 * 1024 * 1024, d.maxImageBytes),
-        pasteImageConfirm: bool(raw.pasteImageConfirm, d.pasteImageConfirm),
         allowRemoteImages: bool(raw.allowRemoteImages, d.allowRemoteImages),
         smartPaste: bool(raw.smartPaste, d.smartPaste),
         htmlPasteMode: pickEnum(raw.htmlPasteMode, ["markdown", "html", "text"] as const, d.htmlPasteMode),
@@ -175,7 +165,6 @@ export function normalizeNotebookSettings(
             ["selected", "newTracks", "ask"] as const,
             d.clipInsertMode,
         ),
-        clipInsertMovesPlayhead: bool(raw.clipInsertMovesPlayhead, d.clipInsertMovesPlayhead),
         keepClipAfterInsert: bool(raw.keepClipAfterInsert, d.keepClipAfterInsert),
         clipShowPreview: bool(raw.clipShowPreview, d.clipShowPreview),
         autosaveDebounceMs: clampNumber(raw.autosaveDebounceMs, 0, 5000, d.autosaveDebounceMs),
@@ -185,6 +174,5 @@ export function normalizeNotebookSettings(
             ["copyFolder", "embed"] as const,
             d.exportImageMode,
         ),
-        searchable: bool(raw.searchable, d.searchable),
     };
 }

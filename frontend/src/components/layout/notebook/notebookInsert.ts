@@ -164,17 +164,9 @@ async function resolveImageSrc(
         ctx.notify?.(result.error ?? "保存图片失败", "error");
         return null;
     }
-    return formatAssetRef(prepared.assetId, prepared.ext, defaultWidthFor(ctx.settings, prepared));
-}
-
-function defaultWidthFor(
-    settings: ResolvedNotebookSettings,
-    prepared: PreparedImage,
-): number | undefined {
-    // 默认按原始尺寸显示：插入后由用户按需拖拽改宽，不做隐式缩放。
-    void settings;
-    void prepared;
-    return undefined;
+    // 不写 `#w=`：插入时按原始尺寸显示，宽度由用户拖拽把手决定。
+    // （缩放到长边上限是**存储**层面的优化，与显示宽度无关。）
+    return formatAssetRef(prepared.assetId, prepared.ext);
 }
 
 /** 在当前选区插入一个 image 节点。 */

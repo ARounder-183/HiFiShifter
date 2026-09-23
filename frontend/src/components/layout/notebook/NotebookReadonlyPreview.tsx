@@ -28,7 +28,6 @@ export function NotebookReadonlyPreview({
             buildNotebookExtensions({
                 placeholder,
                 markdownShortcuts: false,
-                typographer: false,
                 slashCommands: false,
             }),
         [placeholder],

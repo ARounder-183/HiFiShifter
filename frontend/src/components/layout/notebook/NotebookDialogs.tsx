@@ -276,6 +276,18 @@ export function NotebookSettingsDialog({
                             onChange={(value) => onChange({ spellCheck: value })}
                         />
                         <SelectRow
+                            label={tAny("notebook_setting_font_size")}
+                            value={String(settings.sourceFontSize)}
+                            options={[
+                                { value: "11", label: "11" },
+                                { value: "12", label: "12" },
+                                { value: "13", label: "13" },
+                                { value: "15", label: "15" },
+                                { value: "17", label: "17" },
+                            ]}
+                            onChange={(value) => onChange({ sourceFontSize: Number(value) })}
+                        />
+                        <SelectRow
                             label={tAny("notebook_setting_history_split")}
                             value={String(settings.historySplitIdleMs)}
                             options={[
@@ -385,7 +397,6 @@ export function NotebookSettingsDialog({
                             options={[
                                 { value: "selected", label: tAny("notebook_setting_clip_insert_selected") },
                                 { value: "newTracks", label: tAny("notebook_setting_clip_insert_new_tracks") },
-                                { value: "ask", label: tAny("notebook_setting_clip_insert_ask") },
                             ]}
                             onChange={(value) => onChange({ clipInsertMode: value })}
                         />

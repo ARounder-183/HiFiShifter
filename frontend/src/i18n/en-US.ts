@@ -432,6 +432,7 @@ export const enUS = {
     notebook_setting_slash: "Slash command menu",
     notebook_setting_word_wrap: "Wrap long lines in source view",
     notebook_setting_spellcheck: "Spell check",
+    notebook_setting_font_size: "Editor font size",
     notebook_setting_history_split: "Undo step split",
     notebook_setting_history_split_off: "Keep merging (default)",
     notebook_setting_image_storage: "Image storage",

@@ -158,12 +158,8 @@ export interface NotebookExtensionOptions {
     placeholder: string;
     /** Markdown 输入规则（`## ` / `- ` / `> ` 即时转换）。 */
     markdownShortcuts: boolean;
-    /** 排版替换（弯引号等）。 */
-    typographer: boolean;
     /** `/` 唤出插入菜单。 */
     slashCommands: boolean;
-    /** 是否显示字符统计（关闭时仍保留扩展，只是不显示）。 */
-    withCharacterCount?: boolean;
 }
 
 /**
