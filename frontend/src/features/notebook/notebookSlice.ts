@@ -85,7 +85,13 @@ const notebookSlice = createSlice({
         /** 用后端返回的附件清单整体替换索引。 */
         setNotebookAssetIndex(state, action: PayloadAction<NotebookAssetSummary[]>) {
             const next: Record<string, NotebookAssetSummary> = {};
-            for (const entry of action.payload) next[entry.id] = entry;
+            // 载荷形状来自 IPC：这里做一次防御性判断。reducer 里抛异常会
+            // 直接把 dispatch 的调用方带崩，而附件索引本来就只是缓存。
+            if (Array.isArray(action.payload)) {
+                for (const entry of action.payload) {
+                    if (entry && typeof entry.id === "string") next[entry.id] = entry;
+                }
+            }
             state.assetIndex = next;
         },
     },

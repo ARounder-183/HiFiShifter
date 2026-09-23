@@ -124,7 +124,7 @@ function AttachmentRow({
                 className="hs-notebook-toolbar-btn"
                 title={t("notebook_attachments_save_as")}
                 disabled={!entry.exists}
-                onClick={() => void notebookApi.saveAssetAs(entry.id)}
+                onClick={() => void notebookApi.saveAssetAs(entry.id).catch(() => {})}
             >
                 ⤓
             </button>
@@ -228,6 +228,41 @@ export function NotebookSettingsDialog({
 }: NotebookSettingsDialogProps) {
     const { t } = useI18n();
     const tAny = t as unknown as (key: string) => string;
+    const [exportNotice, setExportNotice] = useState<string | null>(null);
+
+    /**
+     * 导出并给出反馈。
+     *
+     * 导出会弹系统保存对话框，因此结果必须回显（成功/取消/失败），否则用户
+     * 无法区分"没点着"和"选了路径但写失败"。
+     */
+    async function runExport(extension: "md" | "html", content: string) {
+        setExportNotice(tAny("notebook_export_running"));
+        try {
+            const result = await notebookApi.exportDocument(
+                projectName || "notes",
+                extension,
+                content,
+                settings.exportImageMode,
+            );
+            if (result.canceled) {
+                setExportNotice(null);
+                return;
+            }
+            if (!result.ok) {
+                setExportNotice(`${tAny("notebook_export_failed")}: ${result.error ?? ""}`);
+                return;
+            }
+            const missing = result.missingAssets?.length ?? 0;
+            setExportNotice(
+                missing > 0
+                    ? `${tAny("notebook_export_done")} (${tAny("notebook_export_missing")}: ${missing})`
+                    : tAny("notebook_export_done"),
+            );
+        } catch {
+            setExportNotice(tAny("notebook_export_failed"));
+        }
+    }
 
     return (
         <Dialog.Root open onOpenChange={(open) => !open && onClose()}>
@@ -427,12 +462,7 @@ export function NotebookSettingsDialog({
                                 type="button"
                                 className="hs-notebook-toolbar-btn"
                                 onClick={() => {
-                                    void notebookApi.exportDocument(
-                                        projectName || "notes",
-                                        "md",
-                                        markdown,
-                                        settings.exportImageMode,
-                                    );
+                                    void runExport("md", markdown);
                                 }}
                             >
                                 {tAny("notebook_export_md")}
@@ -441,11 +471,9 @@ export function NotebookSettingsDialog({
                                 type="button"
                                 className="hs-notebook-toolbar-btn"
                                 onClick={() => {
-                                    void notebookApi.exportDocument(
-                                        projectName || "notes",
+                                    void runExport(
                                         "html",
                                         buildExportHtml(markdown, projectName, getHtml?.() ?? null),
-                                        settings.exportImageMode,
                                     );
                                 }}
                             >
@@ -455,7 +483,10 @@ export function NotebookSettingsDialog({
                     </Section>
                 </div>
 
-                <Flex justify="end" className="mt-3">
+                <Flex justify="between" align="center" className="mt-3" gap="2">
+                    <Text size="1" color="gray">
+                        {exportNotice ?? ""}
+                    </Text>
                     <Dialog.Close>
                         <button type="button" className="hs-notebook-toolbar-btn">
                             {t("close")}

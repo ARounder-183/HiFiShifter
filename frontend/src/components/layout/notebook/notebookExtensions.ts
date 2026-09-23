@@ -168,6 +168,14 @@ export interface NotebookExtensionOptions {
  * `slashCommands` 目前由面板层实现（在编辑器 DOM 上挂 `/` 触发的浮层菜单），
  * 不占用扩展位 —— 见 `NotebookPanel` 的 `useSlashMenu`。
  */
+/**
+ * 组装记事本编辑器用的扩展。
+ *
+ * 【每个编辑器都要拿到**独立的扩展实例**】TipTap 不克隆传入的扩展：同一个
+ * 实例被两个编辑器复用时，`extension.storage` 等按实例创建的状态会被共享
+ * （分栏模式同时存在两个编辑器）。这里对模块级的三个自定义扩展统一
+ * `.extend({})` 复制一份，其余扩展本来就由 `.configure()` 产生新实例。
+ */
 export function buildNotebookExtensions(options: NotebookExtensionOptions) {
     void options.slashCommands;
     const extensions = [
@@ -191,16 +199,16 @@ export function buildNotebookExtensions(options: NotebookExtensionOptions) {
             // StarterKit 的默认规则避免两套规则打架（例如 `1. ` 的序号处理）。
             ...(options.markdownShortcuts ? {} : { inputRules: false }),
         }),
-        NotebookImage.configure({ allowBase64: true }),
-        NotebookTable,
-        TableRow,
-        TableHeader,
-        TableCell,
-        TaskList,
-        TaskItem.configure({ nested: true }),
-        HifiClipBlock,
-        Placeholder.configure({ placeholder: options.placeholder }),
-        CharacterCount,
+        NotebookImage.extend({}).configure({ allowBase64: true }),
+        NotebookTable.extend({}),
+        TableRow.extend({}),
+        TableHeader.extend({}),
+        TableCell.extend({}),
+        TaskList.extend({}),
+        TaskItem.extend({}).configure({ nested: true }),
+        HifiClipBlock.extend({}),
+        Placeholder.extend({}).configure({ placeholder: options.placeholder }),
+        CharacterCount.extend({}),
         Markdown.configure({
             html: false,
             tightLists: true,

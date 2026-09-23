@@ -68,6 +68,13 @@ const NotebookDock = lazy(() =>
         default: module.NotebookDock,
     })),
 );
+// 记事本自带的错误边界与按需加载放在一起：动态 chunk 加载失败或模块求值抛错
+// 都由它兜住，不会把整个窗口打空（应用没有根级 ErrorBoundary）。
+const NotebookErrorBoundary = lazy(() =>
+    import("./components/layout/notebook/NotebookErrorBoundary").then((module) => ({
+        default: module.NotebookErrorBoundary,
+    })),
+);
 import { ImportProjectDialog } from "./components/layout/ImportProjectDialog";
 import { QuickSearchPopup } from "./components/layout/QuickSearchPopup";
 import { useKeybindings } from "./features/keybindings/useKeybindings";
@@ -3975,7 +3982,9 @@ function AppInner() {
                         ) : null}
                         {notebookVisible ? (
                             <Suspense fallback={null}>
-                                <NotebookDock />
+                                <NotebookErrorBoundary>
+                                    <NotebookDock />
+                                </NotebookErrorBoundary>
                             </Suspense>
                         ) : null}
                     </Flex>

@@ -1,9 +1,9 @@
 /*
- * 面板内查找/替换。
+ * 面板内查找。
  *
  * 全局 Ctrl+F 被应用拦截（用于它自己的快速搜索），记事本因此自带一条查找条：
  * - 富文本视图：在 ProseMirror 文档里按文本节点定位，命中即选中并滚动到可见；
- * - 源码视图：直接在 textarea 的字符串上定位并设置选区。
+ * - 源码视图：直接在源码 textarea 上设置选区。
  *
  * 两种视图共用同一套"匹配 → 上/下一处"的交互，切换视图不会丢掉查询词。
  */
@@ -18,17 +18,27 @@ export interface NotebookFindBarProps {
     editor: Editor | null;
     sourceMode: boolean;
     sourceValue: string;
+    /** 取源码视图的 textarea（源码模式下定位选区用）。 */
+    getSourceTextarea: () => HTMLTextAreaElement | null;
     onClose: () => void;
 }
 
-export function NotebookFindBar({ editor, sourceMode, sourceValue, onClose }: NotebookFindBarProps) {
+export function NotebookFindBar({
+    editor,
+    sourceMode,
+    sourceValue,
+    getSourceTextarea,
+    onClose,
+}: NotebookFindBarProps) {
     const { t } = useI18n();
     const [query, setQuery] = useState("");
     const [cursor, setCursor] = useState(0);
-    const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
     const richMatches = useMemo(
-        () => (!sourceMode && editor && query ? findMatchesInDoc(editor, query) : []),
+        () =>
+            !sourceMode && editor && !editor.isDestroyed && query
+                ? findMatchesInDoc(editor, query)
+                : [],
         [editor, query, sourceMode],
     );
 
@@ -46,35 +56,46 @@ export function NotebookFindBar({ editor, sourceMode, sourceValue, onClose }: No
             setCursor(wrapped);
             const match = matches[wrapped];
             if (sourceMode) {
-                const textarea = textareaRef.current;
+                const textarea = getSourceTextarea();
                 if (!textarea) return;
                 textarea.focus();
                 textarea.setSelectionRange(match.from, match.to);
                 // 把命中行滚到可视区中部附近。
-                const before = sourceValue.slice(0, match.from);
-                const line = before.split("\n").length;
-                const lineHeight = Number.parseFloat(getComputedStyle(textarea).lineHeight) || 18;
-                textarea.scrollTop = Math.max(0, (line - 4) * lineHeight);
+                const line = sourceValue.slice(0, match.from).split("\n").length;
+                const lineHeight = Number.parseFloat(getComputedStyle(textarea).lineHeight);
+                textarea.scrollTop = Math.max(
+                    0,
+                    (line - 4) * (Number.isFinite(lineHeight) ? lineHeight : 18),
+                );
                 return;
             }
-            if (!editor) return;
-            editor.chain().focus().setTextSelection({ from: match.from, to: match.to }).scrollIntoView().run();
+            if (!editor || editor.isDestroyed) return;
+            editor
+                .chain()
+                .focus()
+                .setTextSelection({ from: match.from, to: match.to })
+                .scrollIntoView()
+                .run();
         },
-        [editor, matches, sourceMode, sourceValue],
+        [editor, getSourceTextarea, matches, sourceMode, sourceValue],
     );
+
+    // goTo 每次渲染身份都会变，放进 ref 以免把下面的"查询变化即跳转"变成
+    // 每次渲染都执行。
+    const goToRef = useRef(goTo);
+    useEffect(() => {
+        goToRef.current = goTo;
+    }, [goTo]);
 
     // 查询变化时跳到第一处；不自动跳转会让用户以为"没找到"。
     useEffect(() => {
-        setCursor(0);
-        if (matches.length > 0) goTo(0);
-        // 只依赖查询词与匹配数量：goTo 每次渲染身份都变，不能进依赖。
-        // eslint-disable-next-line react-hooks/exhaustive-deps
+        if (matches.length === 0) return;
+        goToRef.current(0);
     }, [query, matches.length]);
 
     return (
         <div className="hs-notebook-findbar">
             <input
-                ref={textareaRef as unknown as React.RefObject<HTMLInputElement>}
                 autoFocus
                 value={query}
                 placeholder={t("notebook_find_placeholder")}

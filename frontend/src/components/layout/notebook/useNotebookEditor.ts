@@ -71,8 +71,6 @@ export interface UseNotebookEditorArgs {
     /** 正文（Markdown）。 */
     markdown: string;
     settings: ResolvedNotebookSettings;
-    /** 是否挂载编辑器（源码视图下不挂载）。 */
-    enabled: boolean;
     placeholder: string;
     bridge: NotebookEditorBridge;
     /** 写入 Redux（立即）。 */
@@ -95,7 +93,6 @@ export function useNotebookEditor(args: UseNotebookEditorArgs): UseNotebookEdito
     const {
         markdown,
         settings,
-        enabled,
         placeholder,
         bridge,
         onMarkdownChange,
@@ -214,7 +211,12 @@ export function useNotebookEditor(args: UseNotebookEditorArgs): UseNotebookEdito
                 seal();
             },
         },
-        [enabled, extensions, undoBridge],
+        // 刻意**不**把视图模式放进依赖：切到源码视图时编辑器只是不再渲染
+        // （`EditorContent` 卸载），实例本身仍要保留 —— 重建会让每次切模式
+        // 都销毁并新建一个编辑器（ProseMirror 历史清零、StrictMode 下还会
+        // 多泄漏一个实例），而源码视图里的改动已由下面的"外来更新"effect
+        // 通过 `setContent` 同步回来。
+        [extensions, undoBridge],
     );
 
     /**
@@ -223,14 +225,18 @@ export function useNotebookEditor(args: UseNotebookEditorArgs): UseNotebookEdito
      * `enableInputRules` 是每次输入时现读的选项，`setOptions` 立即生效；
      * 拼写检查则**直接写 DOM 属性** —— `editorProps.attributes` 只在视图创建
      * 时应用，改它不会回写已存在的元素。
+     *
+     * 两处都先判 `isDestroyed`：`useEditor` 在依赖变化时会销毁旧实例，而
+     * 销毁后的 `editor.view` 是个**会抛异常的 Proxy**，`editor.commands` 的
+     * commandManager 也已被置空。
      */
     useEffect(() => {
-        if (!editor) return;
+        if (!editor || editor.isDestroyed) return;
         editor.setOptions({ enableInputRules: settings.markdownShortcuts });
     }, [editor, settings.markdownShortcuts]);
 
     useEffect(() => {
-        if (!editor) return;
+        if (!editor || editor.isDestroyed) return;
         editor.view.dom.setAttribute("spellcheck", settings.spellCheck ? "true" : "false");
     }, [editor, settings.spellCheck]);
 
@@ -241,11 +247,16 @@ export function useNotebookEditor(args: UseNotebookEditorArgs): UseNotebookEdito
      * 任何一次 Redux 往返都会把光标踢回开头。
      */
     useEffect(() => {
-        if (!editor) return;
+        if (!editor || editor.isDestroyed) return;
         if (markdown === lastEmittedRef.current) return;
         lastEmittedRef.current = markdown;
         pendingRef.current = null;
-        editor.commands.setContent(markdown, { emitUpdate: false });
+        try {
+            editor.commands.setContent(markdown, { emitUpdate: false });
+        } catch {
+            // 极少数情况下（编辑器正在重建）命令不可用：内容会在下次渲染
+            // 时由同一个 effect 重新同步，这里不值得把面板带崩。
+        }
     }, [editor, markdown]);
 
     // 卸载时收尾：清定时器并把最后的内容写出去。

@@ -80,6 +80,7 @@ export function NotebookPanel() {
     const projectDir = useMemo(() => (projectPath ? dirName(projectPath) : null), [projectPath]);
     const containerRef = useRef<HTMLDivElement | null>(null);
     const richScrollRef = useRef<HTMLDivElement | null>(null);
+    const sourceTextareaRef = useRef<HTMLTextAreaElement | null>(null);
     const fileInputRef = useRef<HTMLInputElement | null>(null);
 
     const notify = useCallback((message: string) => {
@@ -88,8 +89,15 @@ export function NotebookPanel() {
     }, []);
 
     const refreshAssets = useCallback(async () => {
-        const result = await notebookApi.listAssets();
-        if (result.ok) dispatch(setNotebookAssetIndex(result.assets));
+        try {
+            const result = await notebookApi.listAssets();
+            if (result.ok && Array.isArray(result.assets)) {
+                dispatch(setNotebookAssetIndex(result.assets));
+            }
+        } catch {
+            // 附件索引只是"存在吗 / 多大"的缓存：拿不到时界面照常工作，只是
+            // 暂存块会显示为"载荷缺失"。绝不能让它把面板带崩。
+        }
     }, [dispatch]);
 
     // ── 设置加载（一次）────────────────────────────────────────────
@@ -140,7 +148,6 @@ export function NotebookPanel() {
     const { editor, flush, seal } = useNotebookEditor({
         markdown,
         settings,
-        enabled: mode !== "source",
         placeholder: t("notebook_placeholder"),
         bridge,
         onMarkdownChange,
@@ -160,7 +167,7 @@ export function NotebookPanel() {
     // 因此一定在其写完 `text/html` / `text/plain` 之后补 flavor；用类名查
     // DOM 反而会因 `editorProps.attributes` 覆盖默认 class 而落空。
     useEffect(() => {
-        if (!editor) return;
+        if (!editor || editor.isDestroyed) return;
         return installClipboardFlavorWriter(
             editor.view.dom,
             () => ({ copyFormat: settings.copyFormat, copyPlainTextAs: settings.copyPlainTextAs }),
@@ -171,7 +178,7 @@ export function NotebookPanel() {
     // 粘贴分流：捕获阶段先于 ProseMirror 自己的粘贴处理。
     useEffect(() => {
         const element = containerRef.current;
-        if (!element || !editor || mode === "source") return;
+        if (!element || !editor || editor.isDestroyed || mode === "source") return;
         const handler = (event: Event) => {
             const clipboardEvent = event as ClipboardEvent;
             const ctx: InsertContext = {
@@ -217,16 +224,34 @@ export function NotebookPanel() {
         return () => element.removeEventListener("click", handler, true);
     }, [clips, dispatch, notify, t]);
 
-    // ── 拖放（Tauri 原生 + HTML5）──────────────────────────────────
+    /**
+     * 窗口级拖放的落点判定与插入，放进 ref 供注册一次的监听调用。
+     *
+     * 之所以要 ref：注册是异步的（`onDragDropEvent` 返回 Promise），而
+     * cleanup 可能在 await 落地之前就跑完（StrictMode 的挂载-卸载-再挂载）。
+     * 若把 `unlisten` 存在闭包变量里，晚到的注册永远不会被注销 —— 每次开关
+     * 面板都会多堆一个窗口级监听。用 ref 还有一个好处：注册只做一次，不必
+     * 因 settings / projectDir 变化而重新注册。
+     */
+    const dropHandlerRef = useRef<
+        (payload: {
+            type?: string;
+            paths?: string[];
+            position?: { x?: number; y?: number };
+        }) => void
+    >(() => {});
+
+    // ── 拖放（Tauri 原生）──────────────────────────────────────────
     useEffect(() => {
         let disposed = false;
+        let cancelled = false;
         let unlisten: (() => void) | null = null;
         void (async () => {
             try {
                 const mod = await import("@tauri-apps/api/window");
                 const win = mod.getCurrentWindow();
-                unlisten = await win.onDragDropEvent((event) => {
-                    if (disposed || !editor || mode === "source") return;
+                const off = await win.onDragDropEvent((event) => {
+                    if (disposed) return;
                     const payload = ("payload" in event ? event.payload : event) as {
                         type?: string;
                         event?: string;
@@ -235,65 +260,87 @@ export function NotebookPanel() {
                         pos?: { x?: number; y?: number };
                         cursorPosition?: { x?: number; y?: number };
                     };
-                    const type = String(payload?.type ?? payload?.event ?? "");
-                    const paths = Array.isArray(payload?.paths) ? payload.paths : [];
-                    // 位置字段名跨平台不一致（与时间轴同一套回退链）。
-                    const position = payload?.position ?? payload?.pos ?? payload?.cursorPosition;
-                    const rect = containerRef.current?.getBoundingClientRect();
-                    const dpr = window.devicePixelRatio || 1;
-                    const clientX = typeof position?.x === "number" ? position.x / dpr : null;
-                    const clientY = typeof position?.y === "number" ? position.y / dpr : null;
-                    const inside =
-                        rect != null &&
-                        clientX != null &&
-                        clientY != null &&
-                        clientX >= rect.left &&
-                        clientX <= rect.right &&
-                        clientY >= rect.top &&
-                        clientY <= rect.bottom;
-
-                    if (type === "enter" || type === "over") {
-                        if (inside) setDropActive(true);
-                        return;
-                    }
-                    if (type === "leave") {
-                        setDropActive(false);
-                        return;
-                    }
-                    if (type !== "drop") return;
-                    setDropActive(false);
-                    if (!inside) return;
-                    // 时间轴那边同样监听窗口级拖放，但它按自己的矩形判定归属，
-                    // 且非媒体扩展名会被它的白名单拒绝 —— 图片不会被误导入。
-
-                    // 落点即插入点：拖到哪儿就插到哪儿。
-                    if (clientX != null && clientY != null) {
-                        const pos = editor.view.posAtCoords({ left: clientX, top: clientY });
-                        if (pos) editor.chain().focus().setTextSelection(pos.pos).run();
-                    }
-                    const ctx: InsertContext = {
-                        editor,
-                        settings,
-                        projectDir,
-                        notify,
-                        onAssetsChanged: () => void refreshAssets(),
-                    };
-                    void (async () => {
-                        for (const path of paths) {
-                            if (!looksLikeImagePath(path)) continue;
-                            await insertImageFromPath(ctx, path);
-                        }
-                    })();
+                    dropHandlerRef.current({
+                        type: String(payload?.type ?? payload?.event ?? ""),
+                        paths: Array.isArray(payload?.paths) ? payload.paths : [],
+                        // 位置字段名跨平台不一致（与时间轴同一套回退链）。
+                        position: payload?.position ?? payload?.pos ?? payload?.cursorPosition,
+                    });
                 });
+                if (cancelled) {
+                    off();
+                    return;
+                }
+                unlisten = off;
             } catch {
                 // 非 Tauri 环境（浏览器里跑前端）时只保留 HTML5 拖放。
             }
         })();
         return () => {
             disposed = true;
+            cancelled = true;
             unlisten?.();
+            unlisten = null;
         };
-    }, [editor, mode, notify, projectDir, refreshAssets, settings]);
+    }, []);
+
+    useEffect(() => {
+        dropHandlerRef.current = (payload) => {
+            if (!editor || editor.isDestroyed || mode === "source") return;
+            const type = payload.type ?? "";
+            const paths = payload.paths ?? [];
+            const position = payload.position;
+            const rect = containerRef.current?.getBoundingClientRect();
+            const dpr = window.devicePixelRatio || 1;
+            const clientX = typeof position?.x === "number" ? position.x / dpr : null;
+            const clientY = typeof position?.y === "number" ? position.y / dpr : null;
+            const inside =
+                rect != null &&
+                clientX != null &&
+                clientY != null &&
+                clientX >= rect.left &&
+                clientX <= rect.right &&
+                clientY >= rect.top &&
+                clientY <= rect.bottom;
+
+            if (type === "enter" || type === "over") {
+                if (inside) setDropActive(true);
+                return;
+            }
+            if (type === "leave") {
+                setDropActive(false);
+                return;
+            }
+            if (type !== "drop") return;
+            setDropActive(false);
+            if (!inside) return;
+            // 时间轴那边同样监听窗口级拖放，但它按自己的矩形判定归属，且非媒体
+            // 扩展名会被它的白名单拒绝 —— 图片不会被误导入。
+
+            // 落点即插入点：拖到哪儿就插到哪儿。
+            if (clientX != null && clientY != null) {
+                const pos = editor.view.posAtCoords({ left: clientX, top: clientY });
+                if (pos) editor.chain().focus().setTextSelection(pos.pos).run();
+            }
+            const ctx: InsertContext = {
+                editor,
+                settings,
+                projectDir,
+                notify,
+                onAssetsChanged: () => void refreshAssets(),
+            };
+            void (async () => {
+                try {
+                    for (const path of paths) {
+                        if (!looksLikeImagePath(path)) continue;
+                        await insertImageFromPath(ctx, path);
+                    }
+                } catch {
+                    notify(t("notebook_image_insert_failed"));
+                }
+            })();
+        };
+    }, [editor, mode, notify, projectDir, refreshAssets, settings, t]);
 
     const onHtml5Drop = useCallback(
         (event: React.DragEvent<HTMLDivElement>) => {
@@ -519,6 +566,7 @@ export function NotebookPanel() {
                     editor={editor}
                     sourceMode={mode === "source"}
                     sourceValue={markdown}
+                    getSourceTextarea={() => sourceTextareaRef.current}
                     onClose={() => setFindOpen(false)}
                 />
             ) : null}
@@ -530,6 +578,7 @@ export function NotebookPanel() {
             <div className="relative flex min-h-0 flex-1">
                 {mode === "source" ? (
                     <textarea
+                        ref={sourceTextareaRef}
                         className="hs-notebook-source"
                         data-wrap={settings.sourceWordWrap ? "true" : "false"}
                         style={

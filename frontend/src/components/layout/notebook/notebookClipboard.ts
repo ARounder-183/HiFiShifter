@@ -46,12 +46,17 @@ export function selectionMarkdown(editor: Editor): string {
     const { state } = editor;
     const { from, to, empty } = state.selection;
     if (empty) return "";
-    const storage = markdownStorage(editor);
     try {
+        const storage = markdownStorage(editor);
         const slice = state.doc.cut(from, to);
         return storage.serializer.serialize(slice.content);
     } catch {
-        return storage.getMarkdown();
+        try {
+            return markdownStorage(editor).getMarkdown();
+        } catch {
+            // 编辑器正在重建：复制出去一个空串，总好过抛异常打断复制。
+            return "";
+        }
     }
 }
 

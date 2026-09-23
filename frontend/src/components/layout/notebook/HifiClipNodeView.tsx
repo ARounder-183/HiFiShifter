@@ -62,12 +62,19 @@ export function HifiClipNodeView(props: NodeViewProps) {
     const entry = attrs ? assetIndex[attrs.id] : undefined;
     const missing = attrs ? entry === undefined || !entry.exists : false;
 
+    // `meta` 来自工程文件（`serde_json::Value`）：可能是任意 JSON —— 手改过的
+    // 工程、更早/更新版本的 schema 都会到这里。只认数组/对象，其余当没有，
+    // 否则 `rows.map is not a function` 会在渲染期把整个应用打掉。
     const meta = (entry?.meta ?? null) as {
-        preview?: ClipPreviewRow[];
-        param?: ParamPreview | null;
+        preview?: unknown;
+        param?: unknown;
     } | null;
-    const previewRows = meta?.preview ?? [];
-    const paramPreview = meta?.param ?? null;
+    const previewRows: ClipPreviewRow[] = Array.isArray(meta?.preview)
+        ? (meta?.preview as ClipPreviewRow[])
+        : [];
+    const paramPreview =
+        meta?.param && typeof meta.param === "object" ? (meta.param as ParamPreview) : null;
+    const sparkline = Array.isArray(paramPreview?.sparkline) ? paramPreview!.sparkline : [];
 
     if (!attrs) {
         // 正文被改坏（缺 id）时不该吞掉内容：原样显示，用户能自己修。
@@ -157,7 +164,9 @@ export function HifiClipNodeView(props: NodeViewProps) {
             label: t("notebook_clip_save_payload"),
             disabled: missing,
             onSelect: () => {
-                void notebookApi.saveAssetAs(attrs.id, `${attrs.title || attrs.id}.${entry?.ext ?? "hsf"}`);
+                void notebookApi
+                    .saveAssetAs(attrs.id, `${attrs.title || attrs.id}.${entry?.ext ?? "hsf"}`)
+                    .catch(() => {});
             },
         },
         {
@@ -260,8 +269,8 @@ export function HifiClipNodeView(props: NodeViewProps) {
 
             {settings.clipShowPreview && !missing ? (
                 <div className="hs-notebook-clip-preview">
-                    {attrs.kind === "param" && paramPreview?.sparkline?.length ? (
-                        <Sparkline values={paramPreview.sparkline} />
+                    {attrs.kind === "param" && sparkline.length > 0 ? (
+                        <Sparkline values={sparkline} />
                     ) : previewRows.length > 0 ? (
                         <ClipSchematic rows={previewRows} durationSec={attrs.durationSec} />
                     ) : null}
@@ -355,7 +364,16 @@ function Sparkline({ values }: { values: number[] }) {
 
 /** 时间轴片段的示意缩略：按轨道分行、按时间铺开的小方块。 */
 function ClipSchematic({ rows, durationSec }: { rows: ClipPreviewRow[]; durationSec: number }) {
-    const total = durationSec > 0 ? durationSec : Math.max(...rows.map((r) => r.startSec + r.lengthSec), 1);
+    // 用循环而不是 `Math.max(...rows.map(...))`：spread 一个很长的数组会爆栈
+    // （"工程片段"载荷可以带上千个 clip），而渲染期爆栈等于整窗白屏。
+    let total = durationSec;
+    if (!(total > 0)) {
+        total = 1;
+        for (const row of rows) {
+            const end = row.startSec + row.lengthSec;
+            if (Number.isFinite(end) && end > total) total = end;
+        }
+    }
     const tracks: string[] = [];
     for (const row of rows) {
         if (!tracks.includes(row.trackId)) tracks.push(row.trackId);

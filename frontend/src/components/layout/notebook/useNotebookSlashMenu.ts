@@ -101,7 +101,16 @@ export function useNotebookSlashMenu(
                 setMenu(null);
                 return;
             }
-            const coords = view.coordsAtPos($from.pos);
+            // `coordsAtPos` 在视图已脱离文档（源码视图下编辑器未挂载）或
+            // 位置越界时会抛错 —— 而这里处在 ProseMirror 的事件派发回调里，
+            // 抛出去会打断派发链。菜单只是便利功能，失败就不显示。
+            let coords: { left: number; bottom: number };
+            try {
+                coords = view.coordsAtPos($from.pos);
+            } catch {
+                setMenu(null);
+                return;
+            }
             setQuery(match[1].toLowerCase());
             setMenu({
                 x: coords.left,

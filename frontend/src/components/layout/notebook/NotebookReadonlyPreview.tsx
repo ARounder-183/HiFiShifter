@@ -43,8 +43,12 @@ export function NotebookReadonlyPreview({
     const containerRef = useRef<HTMLDivElement | null>(null);
 
     useEffect(() => {
-        if (!editor) return;
-        editor.commands.setContent(markdown, { emitUpdate: false });
+        if (!editor || editor.isDestroyed) return;
+        try {
+            editor.commands.setContent(markdown, { emitUpdate: false });
+        } catch {
+            // 编辑器正在重建：内容会在下次渲染时重新同步。
+        }
     }, [editor, markdown]);
 
     // 比例滚动同步：两侧排版一致，但行高与图片加载会带来高度差，因此按
