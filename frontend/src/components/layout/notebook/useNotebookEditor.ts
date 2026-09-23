@@ -172,6 +172,12 @@ export function useNotebookEditor(args: UseNotebookEditorArgs): UseNotebookEdito
                     // 样式与查询静默失效。
                     class: "tiptap ProseMirror hs-notebook-prose",
                     spellcheck: settings.spellCheck ? "true" : "false",
+                    // 声明为"可选择表面"：应用默认整页不可选中文本（DAW 风格），
+                    // 只有显式标记的区域才放行原生选择。缺了它，应用在
+                    // `selectstart` / `mouseup` 上的守卫会把编辑器里的选择当成
+                    // "误选"清掉 —— 表现为拖选无效、点击文字不落光标。
+                    // 用应用既有的 data-hs-selectable 机制，而不是给编辑器开后门。
+                    "data-hs-selectable": "true",
                 },
             },
             onUpdate: ({ editor: instance }) => {

@@ -148,6 +148,9 @@ body input,
 body textarea,
 body select,
 body [contenteditable="true"],
+/* 可编辑区域的**内容**同样要可选中：文本都在 <p>/<li>/<td> 里，只放开
+   contenteditable 根节点本身，等于让整篇可编辑文本落在 user-select:none 上。 */
+body [contenteditable="true"] *,
 body [data-hs-selectable="true"],
 body [data-hs-selectable="true"] * {
     -webkit-user-select: text;

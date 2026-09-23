@@ -9,6 +9,7 @@ import { webApi } from "./services/webviewApi";
 import { settingsApi } from "./services/api/settings";
 import { fileBrowserApi } from "./services/api/fileBrowser";
 import { IS_LINUX } from "./utils/platform";
+import { allowsNativeTextSelection, isEditableTarget } from "./utils/nativeSelectionGuards";
 import { shouldSuppressHoverSideEffects } from "./utils/penInput";
 import { clipboardErrorKey } from "./utils/clipboardError";
 import {
@@ -827,15 +828,6 @@ function AppInner() {
     const isModifierRef = useRef(false);
 
     useEffect(() => {
-        function isEditableTarget(target: EventTarget | null): boolean {
-            const el = target as HTMLElement | null;
-            if (!el) return false;
-            const tag = (el.tagName ?? "").toLowerCase();
-            if (tag === "input" || tag === "textarea" || tag === "select") return true;
-            if (el.isContentEditable) return true;
-            return el.closest?.('input,textarea,select,[contenteditable="true"]') != null;
-        }
-
         // WebKitGTK fires `contextmenu` on right-button press instead of
         // release. Track the right-button state on Linux and re-dispatch the
         // deferred event on pointerup so right-click menus (and right-drag
@@ -884,27 +876,6 @@ function AppInner() {
             if (!IS_LINUX || event.button !== 2) return;
             flushLinuxDeferredContextMenu();
         };
-
-        // 只允许可编辑控件和显式声明可选择/拖拽的区域使用 WebView 原生选择逻辑。
-        function allowsNativeTextSelection(target: EventTarget | null): boolean {
-            if (isEditableTarget(target)) return true;
-            let node = target instanceof Element ? target : null;
-            while (node) {
-                if (node.getAttribute?.("data-hs-selectable") === "true") return true;
-                try {
-                    const style = window.getComputedStyle(node) as CSSStyleDeclaration & {
-                        webkitUserSelect?: string;
-                    };
-                    const userSelect = style.userSelect || style.webkitUserSelect || "";
-                    if (userSelect === "text" || userSelect === "all") return true;
-                    if (userSelect === "none") return false;
-                } catch {
-                    // ignore
-                }
-                node = node.parentElement;
-            }
-            return false;
-        }
 
         function preventNativeTextSelection(e: Event) {
             if (allowsNativeTextSelection(e.target)) return;

@@ -688,3 +688,11 @@
     background: var(--accent-9, #4f8ef7);
     opacity: 0.5;
 }
+
+/* 编辑器内的交互控件不参与文本选择：拖过卡片上的按钮时不该选中按钮文字。
+   （编辑器整体是 data-hs-selectable 区域，后代默认可选中，这里逐项收回来。） */
+.hs-notebook-prose button,
+.hs-notebook-prose .hs-notebook-image-handle {
+    -webkit-user-select: none;
+    user-select: none;
+}
