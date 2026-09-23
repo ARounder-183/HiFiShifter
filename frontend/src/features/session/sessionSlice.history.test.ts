@@ -43,9 +43,9 @@ test("features/session/sessionSlice.history.test.ts scripted checks", async () =
         } as never;
     }
 
-    /** 把 beat 选区写成后端载荷里的 `[[startBeat, endBeat], …]` 形态。 */
+    /** 把帧选区写成后端载荷里的 `[[startFrame, frameCount], …]` 形态。 */
     const asPayloadRanges = (selection: ParamSelectionSnapshot): [number, number][] =>
-        selection.map((range) => [range.startBeat, range.endBeat]);
+        selection.map((range) => [range.startFrame, range.frameCount]);
 
     function applyUndo(
         state: ReturnType<typeof reducer>,
@@ -71,8 +71,9 @@ test("features/session/sessionSlice.history.test.ts scripted checks", async () =
         );
     }
 
-    const beforeSelection: ParamSelectionSnapshot = [{ startBeat: 2, endBeat: 4 }];
-    const afterSelection: ParamSelectionSnapshot = [{ startBeat: 2, endBeat: 6 }];
+    // 快照的每一对是 `[startFrame, frameCount]`（帧单位，与选区的内部单位一致）。
+    const beforeSelection: ParamSelectionSnapshot = [{ startFrame: 200, frameCount: 400 }];
+    const afterSelection: ParamSelectionSnapshot = [{ startFrame: 200, frameCount: 800 }];
 
     // ── 深度镜像 ──
     {
@@ -152,8 +153,8 @@ test("features/session/sessionSlice.history.test.ts scripted checks", async () =
     // 现在选区快照由后端随步骤持有，撤销只需套用载荷 —— 反复迭代都成立。
     {
         let state = reducer(createState(), setHistoryState({ undoDepth: 1, redoDepth: 0 }));
-        const firstBefore: ParamSelectionSnapshot = [{ startBeat: 0, endBeat: 10 }];
-        const secondAfter: ParamSelectionSnapshot = [{ startBeat: 0, endBeat: 18 }];
+        const firstBefore: ParamSelectionSnapshot = [{ startFrame: 0, frameCount: 1000 }];
+        const secondAfter: ParamSelectionSnapshot = [{ startFrame: 0, frameCount: 1800 }];
 
         state = applyUndo(
             state,

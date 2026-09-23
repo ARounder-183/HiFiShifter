@@ -20,7 +20,7 @@
 
 import type { ParamMorphOverlay, ParamName, ParamViewSegment, ValueViewport } from "./types";
 import type { ParamSelection } from "./paramSelection";
-import { beatRangesToFrameRanges } from "./paramSelection";
+import { frameRangeEndCut, frameRangeStartCut, selectionToFrameRanges } from "./paramSelection";
 import { clipboardPreviewSpans, type ParamClipboardData } from "./paramClipboardMapping";
 import { normalizeCssColor, resolvePianoRollColors } from "./colors";
 import { clamp } from "../timeline";
@@ -419,15 +419,15 @@ export function drawPianoRoll(args: {
     showSecondaryParam: boolean;
     overlayText?: string | null;
     liveEditOverride: { key: string; edit: number[] } | null;
-    /** 多选区（有序、互不相交的 beat 区间列表；null = 无选区） */
+    /** 多选区（有序、互不相交的帧区间列表；null = 无选区） */
     selection: ParamSelection | null;
     /**
      * 统一投影：本函数内**所有**时间↔像素换算的唯一来源。
      * 不再单独接收 pxPerSec / scrollLeft，避免图层各自执行 `t*p - s`。
      */
     axis: TimelineAxis;
-    /** 每拍秒数。仅用于 beat↔sec 换算（选区数据以 beat 为单位），不参与投影。 */
-    secPerBeat: number;
+    /** 每帧时长（毫秒）。仅用于帧↔秒换算（选区数据以帧为单位），不参与投影。 */
+    framePeriodMs: number;
     playheadSec: number; // 播放头位置（秒）
     pitchAnalysisPending?: boolean;
     referencePitchOverlays?: ReferencePitchOverlay[];
@@ -547,7 +547,7 @@ export function drawPianoRoll(args: {
         liveEditOverride,
         selection,
         axis,
-        secPerBeat,
+        framePeriodMs,
         playheadSec,
         pitchAnalysisPending,
         referencePitchOverlays,
@@ -853,9 +853,10 @@ export function drawPianoRoll(args: {
     clearCanvasPhysical(ctx, target);
 
     // 所有 x 坐标 = axis.secToViewportPx(sec)，与时间线侧同一实现。
-    // beat → sec 的换算系数（选区/剪贴板预览数据仍以 beat 为单位）。
-    // 注意：不构造 pxPerBeat —— 像素投影一律走 axis，beat 先转 sec 再投影。
-    const beatToSec = Math.max(1e-9, secPerBeat);
+    // 帧 → 秒的换算系数（选区/剪贴板预览数据以帧为单位；帧栅格是工程级常量，
+    // 与 BPM 无关）。
+    // 注意：不构造 pxPerFrame —— 像素投影一律走 axis，帧先转 sec 再投影。
+    const frameToSec = Math.max(1e-6, framePeriodMs) / 1000;
 
     // Horizontal grid lines
     //
@@ -1206,8 +1207,9 @@ export function drawPianoRoll(args: {
             ctx.save();
             ctx.beginPath();
             for (const range of selection) {
-                const x0 = secToViewportPx(axis, range.startBeat * beatToSec);
-                const x1 = secToViewportPx(axis, range.endBeat * beatToSec);
+                // 边界取**切点**（两帧中间）：与 GL 的选区带同口径，见 paramSelection。
+                const x0 = secToViewportPx(axis, frameRangeStartCut(range) * frameToSec);
+                const x1 = secToViewportPx(axis, frameRangeEndCut(range) * frameToSec);
                 ctx.rect(x0, 0, x1 - x0, h);
             }
             ctx.clip();
@@ -1240,11 +1242,7 @@ export function drawPianoRoll(args: {
             selection.length > 0 &&
             clipboardPreview.param === editParam
         ) {
-            const frameRanges = beatRangesToFrameRanges(
-                selection,
-                secPerBeat,
-                paramView.framePeriodMs,
-            );
+            const frameRanges = selectionToFrameRanges(selection);
             const spans = clipboardPreviewSpans({
                 targetRanges: frameRanges,
                 clipboard: clipboardPreview,

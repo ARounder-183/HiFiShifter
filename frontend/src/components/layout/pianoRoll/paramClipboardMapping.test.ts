@@ -1,6 +1,6 @@
 import { test } from "vitest";
 
-import { beatRangesToFrameRanges } from "./paramSelection.js";
+import { selectionToFrameRanges } from "./paramSelection.js";
 import {
     clipboardPreviewSpans,
     clipboardSpanFrames,
@@ -307,9 +307,14 @@ test("components/layout/pianoRoll/paramClipboardMapping.test.ts scripted checks"
     // ── 无选区粘贴：目标选区由「剪贴板段布局 + 播放光标」推导 ──────────────
     //
     // 断言两件事：① 选区形状（段数 / 段长 / 断层）照搬剪贴板，整体起点落在锚点；
-    // ② 端到端：把推导出的选区喂回 beatRangesToFrameRanges + 映射，得到的就是
+    // ② 端到端：把推导出的选区喂回 selectionToFrameRanges + 映射，得到的就是
     // "剪贴板各段平移到锚点"—— 也就是粘贴真正会写入的帧，逐帧对齐（这是"选区
-    // 就是粘贴落点"这条不变量的可执行形式；两端各内收 1/4 帧的取整正为此存在）。
+    // 就是粘贴落点"这条不变量的可执行形式）。
+    //
+    // 【为什么不再需要"两端各内收 1/4 帧"】选区与剪贴板同为帧制：段边界就是整数
+    // 帧切点，帧 → 帧的换算对整数恒等，因此推导出的选区逐帧精确。旧实现那段内收
+    // 补丁是为"拍 → 帧"的双重取整打的，随单位改造一并删除 —— 下面的断言正是
+    // 它的替代品（无补丁也必须逐帧还原）。
     {
         const clip: ParamClipboardData = {
             param: "pitch",
@@ -319,19 +324,20 @@ test("components/layout/pianoRoll/paramClipboardMapping.test.ts scripted checks"
                 { startFrame: 10, values: [4, 5] },
             ],
         };
-        const secPerBeat = 0.5;
-        const fp = 5;
 
-        // 锚点 0：段 0 → [0,3)、段 1 → [10,12)（帧），换算成拍。
-        const atZero = pasteTargetSelectionFromClipboard({
-            clipboard: clip,
-            anchorFrame: 0,
-            framePeriodMs: fp,
-            secPerBeat,
-        });
+        // 锚点 0：段 0 → [0,3)、段 1 → [10,12)（帧）。
+        const atZero = pasteTargetSelectionFromClipboard({ clipboard: clip, anchorFrame: 0 });
         assertEqual(atZero?.length, 2, "derived range count follows clipboard segments");
         assertJson(
-            beatRangesToFrameRanges(atZero, secPerBeat, fp),
+            atZero,
+            [
+                { startFrame: 0, frameCount: 3 },
+                { startFrame: 10, frameCount: 2 },
+            ],
+            "derived selection is exactly the clipboard layout in frames",
+        );
+        assertJson(
+            selectionToFrameRanges(atZero),
             [
                 { startFrame: 0, frameCount: 3 },
                 { startFrame: 10, frameCount: 2 },
@@ -340,13 +346,8 @@ test("components/layout/pianoRoll/paramClipboardMapping.test.ts scripted checks"
         );
 
         // 锚点 40 帧：整体平移，段间空洞（3..10）原样保留。
-        const anchored = pasteTargetSelectionFromClipboard({
-            clipboard: clip,
-            anchorFrame: 40,
-            framePeriodMs: fp,
-            secPerBeat,
-        });
-        const targetRanges = beatRangesToFrameRanges(anchored, secPerBeat, fp);
+        const anchored = pasteTargetSelectionFromClipboard({ clipboard: clip, anchorFrame: 40 });
+        const targetRanges = selectionToFrameRanges(anchored);
         assertJson(
             targetRanges,
             [
@@ -365,23 +366,78 @@ test("components/layout/pianoRoll/paramClipboardMapping.test.ts scripted checks"
             "paste writes exactly the clipboard segments anchored at the playhead",
         );
 
+        // 逐帧精确性（性质断言）：任意锚点 / 任意段布局下，推导出的选区换算回来
+        // 必须**覆盖完全相同的帧集合** —— 这正是"无补丁也不丢值"的可执行形式。
+        //
+        // 【为什么比"帧集合"而不是"段列表"】选区模型的第二条不变式是"相接即合并"：
+        // 剪贴板里两段紧挨着（如 {0,[1]} 与 {1,[1]}）时，推导出的选区会被归一化成
+        // 一段。粘贴落点不受影响（写入的帧一模一样），因此断言应针对帧集合。
+        {
+            const framesOf = (
+                ranges: readonly { startFrame: number; frameCount: number }[],
+            ): number[] => {
+                const out: number[] = [];
+                for (const range of ranges) {
+                    for (let i = 0; i < range.frameCount; i += 1) {
+                        out.push(range.startFrame + i);
+                    }
+                }
+                return out;
+            };
+            const layouts: ParamClipboardData[] = [
+                {
+                    param: "pitch",
+                    framePeriodMs: 5,
+                    segments: [{ startFrame: 0, values: [1] }],
+                },
+                {
+                    // 相邻两段：推导出的选区会被合并成一段，但帧集合不变。
+                    param: "pitch",
+                    framePeriodMs: 5,
+                    segments: [
+                        { startFrame: 0, values: ramp(0, 1) },
+                        { startFrame: 1, values: ramp(1, 1) },
+                    ],
+                },
+                {
+                    param: "pitch",
+                    framePeriodMs: 5,
+                    segments: [
+                        { startFrame: 0, values: ramp(0, 7) },
+                        { startFrame: 13, values: ramp(13, 2) },
+                        { startFrame: 40, values: ramp(40, 5) },
+                    ],
+                },
+            ];
+            for (const layout of layouts) {
+                for (const anchor of [0, 1, 7, 40, 1234]) {
+                    const derived = pasteTargetSelectionFromClipboard({
+                        clipboard: layout,
+                        anchorFrame: anchor,
+                    });
+                    const expected = layout.segments.map((segment) => ({
+                        startFrame: anchor + segment.startFrame,
+                        frameCount: segment.values.length,
+                    }));
+                    assertJson(
+                        framesOf(selectionToFrameRanges(derived)),
+                        framesOf(expected),
+                        `derived selection covers exactly the clipboard frames (anchor ${anchor})`,
+                    );
+                }
+            }
+        }
+
         // 空剪贴板 / 无段：没有可粘贴的数据（调用方走 REAPER/MIDI 回退）。
         assertEqual(
-            pasteTargetSelectionFromClipboard({
-                clipboard: null,
-                anchorFrame: 0,
-                framePeriodMs: fp,
-                secPerBeat,
-            }),
+            pasteTargetSelectionFromClipboard({ clipboard: null, anchorFrame: 0 }),
             null,
             "null clipboard derives nothing",
         );
         assertEqual(
             pasteTargetSelectionFromClipboard({
-                clipboard: { param: "pitch", framePeriodMs: fp, segments: [] },
+                clipboard: { param: "pitch", framePeriodMs: 5, segments: [] },
                 anchorFrame: 0,
-                framePeriodMs: fp,
-                secPerBeat,
             }),
             null,
             "empty segments derive nothing",

@@ -20,7 +20,14 @@ use crate::state::{AppState, HistoryRecord, TimelineState};
 /// 伴生文件后缀（写入时固定大写；读取时大小写不敏感）。
 pub const UNDO_FILE_SUFFIX: &str = "-UNDO";
 /// 文件格式版本。
-const UNDO_FILE_VERSION: u32 = 1;
+///
+/// 【v1 → v2】v1 里 `param_selection` 存的是**拍**（`[[startBeat, endBeat], …]`），
+/// v2 改为**帧**（`[[startFrame, frameCount], …]`，见 `ParamSelectionStep`）。
+/// 读 v1 时**只丢弃选区注记**、保留其余记录（见 `load_undo_history`）：整份历史
+/// 是"撤销能走多远"的用户资产，不该因为一个附属注记换了单位而全部作废。
+const UNDO_FILE_VERSION: u32 = 2;
+/// 可读的最旧版本（只读，写盘一律写 {@link UNDO_FILE_VERSION}）。
+const UNDO_FILE_MIN_VERSION: u32 = 1;
 /// 单文件体积上限：每条记录都含完整时间线快照，超出后从**最旧**的记录开始丢弃。
 const MAX_UNDO_FILE_BYTES: usize = 128 * 1024 * 1024;
 
@@ -39,6 +46,8 @@ struct UndoFileRecord {
     notes_markdown: Option<String>,
     /// 该步（若是「边缘拉伸」）带来的参数编辑器选区变化；`None` = 与选区无关
     /// 的一步。随工程一起落盘，重新打开后撤销该步仍能恢复选区。
+    ///
+    /// 单位随文件版本而变：v1 = 拍，v2 起 = 帧（见 `UNDO_FILE_VERSION`）。
     #[serde(default)]
     param_selection: Option<crate::state::ParamSelectionStep>,
 }
@@ -228,9 +237,12 @@ pub fn load_undo_history(state: &AppState, project_path: &Path) -> bool {
         log::warn!("[undo-history] unreadable file: {}", path.display());
         return false;
     };
-    if file.version != UNDO_FILE_VERSION {
+    if !(UNDO_FILE_MIN_VERSION..=UNDO_FILE_VERSION).contains(&file.version) {
         return false;
     }
+    // v1 的选区注记是拍制，单位已变（见 UNDO_FILE_VERSION 的说明）：丢弃注记、
+    // 保留其余记录。v2 起直接沿用。
+    let selection_annotation_is_frames = file.version >= 2;
     // 每条快照都要走与「打开工程」相同的反序列化整理：磁盘形态里 `Clip` 的
     // 媒体字段只是 active take 的内存投影（`skip_serializing` 不落盘），
     // 少了 finalize 这一步，恢复出来的 Clip 就只有时间位置、没有音频 ——
@@ -252,7 +264,11 @@ pub fn load_undo_history(state: &AppState, project_path: &Path) -> bool {
                 at_ms: record.at_ms,
                 state,
                 notes_markdown: record.notes_markdown,
-                param_selection: record.param_selection,
+                param_selection: if selection_annotation_is_frames {
+                    record.param_selection
+                } else {
+                    None
+                },
             }
         })
         .collect();
@@ -388,6 +404,136 @@ mod tests {
             find_undo_file(&project),
             Some(dir.join("3.hshp-UNDO")),
             "标准大写名优先"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 选区注记（帧制）必须随伴生文件往返：重新打开工程后撤销那一步仍能恢复选区。
+    #[test]
+    fn param_selection_survives_the_undo_file_round_trip() {
+        use crate::state::{AppState, HistoryOp};
+
+        let dir = temp_dir("selection_round_trip");
+        let project = dir.join("4.hshp");
+        std::fs::write(&project, b"{}").expect("write project");
+
+        // 一步参数曲线编辑，并把该步的选区快照登记上去（帧制）。
+        let state = AppState::default();
+        {
+            let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+            state.checkpoint_timeline(&tl, HistoryOp::ParamCurve);
+        }
+        let before: Vec<[f32; 2]> = vec![[100.0, 200.0]];
+        let after: Vec<[f32; 2]> = vec![[100.0, 400.0]];
+        assert_eq!(
+            state.record_param_selection_step(before.clone(), after.clone())["ok"],
+            serde_json::json!(true),
+        );
+
+        state.set_project_save_undo_history(true);
+        let bytes = super::serialize_undo_history(&state).expect("serialize undo history");
+        std::fs::write(dir.join("4.hshp-UNDO"), &bytes).expect("write companion");
+
+        // 全新状态读回：注记原样回来，且**不做任何单位换算**（写进去是帧，读出来还是帧）。
+        let restored = AppState::default();
+        assert!(
+            super::load_undo_history(&restored, &project),
+            "应能从伴生文件恢复历史"
+        );
+        {
+            let h = restored
+                .timeline_history
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let step = h
+                .records
+                .iter()
+                .find_map(|record| record.param_selection.as_ref())
+                .expect("选区注记应随文件往返");
+            assert_eq!(step.before, before, "拉伸前的选区应原样恢复");
+            assert_eq!(step.after, after, "拉伸后的选区应原样恢复");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// v1 文件（选区注记存的是**拍**）读入时：历史照常恢复，只丢弃那一个注记。
+    ///
+    /// 【为什么不是整份拒绝】撤销历史是用户资产（"能撤多远"），不该因为一个附属
+    /// 注记换了单位而全部作废；而拍制注记与帧制注记在数值上无法区分，也没有
+    /// BPM 可供换算，因此只能丢弃。
+    #[test]
+    fn v1_files_keep_the_history_but_drop_the_beat_selection_annotation() {
+        use crate::state::AppState;
+
+        let dir = temp_dir("v1_downgrade");
+        let project = dir.join("5.hshp");
+        std::fs::write(&project, b"{}").expect("write project");
+
+        // 手写一份 v1 文件：一条记录，带拍制选区注记，无状态快照。
+        let v1 = serde_json::json!({
+            "version": 1,
+            "saved_at_ms": 1,
+            "started_at_ms": 1,
+            "position": 0,
+            "records": [{
+                "label": "param_curve",
+                "at_ms": 1,
+                "param_selection": { "before": [[1.0, 2.0]], "after": [[1.0, 3.0]] },
+            }],
+        });
+        std::fs::write(
+            dir.join("5.hshp-UNDO"),
+            serde_json::to_vec(&v1).expect("serialize v1"),
+        )
+        .expect("write companion");
+
+        let restored = AppState::default();
+        assert!(
+            super::load_undo_history(&restored, &project),
+            "v1 文件仍应被接受（否则用户整份撤销历史作废）"
+        );
+        {
+            let h = restored
+                .timeline_history
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            assert_eq!(h.records.len(), 1, "记录本身保留");
+            assert_eq!(
+                h.records[0].label.as_deref(),
+                Some("param_curve"),
+                "记录的标签保留"
+            );
+            assert!(
+                h.records[0].param_selection.is_none(),
+                "拍制选区注记必须丢弃（单位已变，无法换算）"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 未来版本（高于当前）仍然拒绝：那是新程序写出的、本程序读不懂的形态。
+    #[test]
+    fn future_versions_are_rejected() {
+        use crate::state::AppState;
+
+        let dir = temp_dir("future_version");
+        let project = dir.join("6.hshp");
+        std::fs::write(&project, b"{}").expect("write project");
+        let future = serde_json::json!({
+            "version": super::UNDO_FILE_VERSION + 1,
+            "position": 0,
+            "records": [{ "label": "param_curve", "at_ms": 1 }],
+        });
+        std::fs::write(
+            dir.join("6.hshp-UNDO"),
+            serde_json::to_vec(&future).expect("serialize"),
+        )
+        .expect("write companion");
+
+        let restored = AppState::default();
+        assert!(
+            !super::load_undo_history(&restored, &project),
+            "更高版本的文件不得被当成当前格式读入"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -2,10 +2,14 @@
  * 参数编辑器内核 · 拖拽算术（纯函数）
  *
  * 【主要内容】
- * 参数编辑器里三处重复出现的坐标换算：
- * 1. 选区（beat）→ 帧号（`selectionFrameRange`）；
- * 2. 选区（beat）→ 采样下标（`selectionIndexRange`，含 clamp）；
- * 3. 帧号 → 采样下标（`frameToIndex`）。
+ * 参数编辑器里重复出现的两处坐标换算：
+ * 1. 选区的帧区间 → 采样下标（`selectionIndexRange`，含 clamp）；
+ * 2. 帧号 → 采样下标（`frameToIndex`）。
+ *
+ * 【单位】选区本身已经是**帧**（见 `paramSelection.ts`），所以这里不再有
+ * beat → 帧的换算：那一层（`selectionFrameRange` / `beatToFrameDelta` /
+ * `frameDeltaToBeat`）随单位改造一并删除。附带好处是"拍 → 帧两端取整不对称"这类
+ * 半格错位风险整体消失 —— 选区给过来的就是整数帧，这里只做帧 → 下标投影。
  *
  * 【作用】
  * 这段算术此前在 `usePianoRollInteractions`（3,875 行）里被**抄了 3 遍**：
@@ -20,28 +24,21 @@
  * - 独立性：纯函数，不依赖 DOM / WebGL / React。
  *
  * 【设计约束（逐条都有单测）】
- * 1. **起点 `floor`、终点 `ceil`**。这个不对称是"选区覆盖"的语义要求：都取 floor
- *    会漏掉右端不足一帧的部分，都取 ceil 会把左端选区外的一帧拉进来。
+ * 1. **末帧取 `frameCount - 1`**。选区是半开区间 `[startFrame, start+count)`，
+ *    而采样下标是闭区间，因此右端必须退一帧 —— 不退会把选区外的一帧拉进窗口，
+ *    正是旧实现（beat 端点 `ceil` 后再投影）那半格错位的来源。
  * 2. **下标必须 clamp 到 `[0, len-1]` 且保证 `startIdx <= endIdx`**。曲线数据的
  *    覆盖窗口由后端按请求给出，选区可能超出它；不 clamp 会 slice 出空数组，让整个
  *    功能**静默失效**（不报错，只是没反应）。
- * 3. **`stride` 归一为 ≥1、`framePeriodMs` 归一为 ≥1e-6**。与既有实现的
- *    `Math.max(1, stride)` / `Math.max(1e-6, fp)` 一致：`stride = 0` 会让下标除零
- *    得 Infinity，clamp 后落到末位——看似"无害"，语义却完全错误。
+ * 3. **`stride` 归一为 ≥1**。与既有实现的 `Math.max(1, stride)` 一致：
+ *    `stride = 0` 会让下标除零得 Infinity，clamp 后落到末位——看似"无害"，语义却
+ *    完全错误。
  * 4. **非法输入返回 `null`**，而不是空范围。调用方据此提前退出；返回空范围会让
  *    "没有数据"与"选区为空"混为一谈。
  */
 
-/** 选区覆盖的帧范围。 */
-export interface SelectionFrameRange {
-    /** 起始帧（含），已 clamp 到 ≥0。 */
-    readonly startFrame: number;
-    /** 结束帧（含），不小于 `startFrame`。 */
-    readonly endFrame: number;
-}
-
 /** 选区覆盖的采样下标范围。 */
-export interface SelectionIndexRange extends SelectionFrameRange {
+export interface SelectionIndexRange {
     /** 起始采样下标（含），已 clamp 到 `[0, len-1]`。 */
     readonly startIdx: number;
     /** 结束采样下标（含），`>= startIdx` 且 `< len`。 */
@@ -75,48 +72,9 @@ function normalizeStride(stride: number): number {
     return Math.max(1, Math.floor(stride));
 }
 
-/** 把帧周期归一为 ≥1e-6 的正数（与既有 `Math.max(1e-6, fp)` 一致）。 */
-function normalizeFramePeriod(framePeriodMs: number): number {
-    return Math.max(1e-6, framePeriodMs);
-}
-
 /** 把值限制在 `[lo, hi]`。 */
 function clampTo(value: number, lo: number, hi: number): number {
     return Math.min(hi, Math.max(lo, value));
-}
-
-/**
- * 把选区（beat）换算为帧范围。
- *
- * 流程：beat → 秒（`beat × secPerBeat`）→ 帧（`秒 × 1000 / framePeriodMs`）；
- * 起点 `floor` 并 clamp 到 ≥0，终点 `ceil` 且不小于起点。
- *
- * 特殊说明 1：**两端取整方向不同是刻意的**（见文件头约束 1）。
- *
- * 特殊说明 2：beat 次序颠倒时自动归一（取 min/max），不依赖调用方先排序——
- * 拖拽过程中 aBeat/bBeat 会随方向互换。
- *
- * @param args 换算参数。
- * @returns 帧范围；输入非法时为 `null`。
- */
-export function selectionFrameRange(args: {
-    readonly aBeat: number;
-    readonly bBeat: number;
-    readonly secPerBeat: number;
-    readonly framePeriodMs: number;
-}): SelectionFrameRange | null {
-    const { aBeat, bBeat, secPerBeat, framePeriodMs } = args;
-    if (!Number.isFinite(aBeat) || !Number.isFinite(bBeat)) return null;
-    if (!Number.isFinite(secPerBeat) || secPerBeat <= 0) return null;
-    if (!Number.isFinite(framePeriodMs)) return null;
-
-    const fp = normalizeFramePeriod(framePeriodMs);
-    const loBeat = Math.min(aBeat, bBeat);
-    const hiBeat = Math.max(aBeat, bBeat);
-    const startFrame = Math.max(0, Math.floor((loBeat * secPerBeat * 1000) / fp));
-    const endFrame = Math.max(startFrame, Math.ceil((hiBeat * secPerBeat * 1000) / fp));
-    if (!Number.isFinite(startFrame) || !Number.isFinite(endFrame)) return null;
-    return { startFrame, endFrame };
 }
 
 /**
@@ -144,38 +102,39 @@ export function frameToIndex(args: {
 }
 
 /**
- * 把选区（beat）换算为采样下标范围。
+ * 把选区的帧区间投影为采样下标范围。
  *
- * 流程：`selectionFrameRange` 取帧范围 → 各自 `frameToIndex` → clamp 到
- * `[0, len-1]`，并保证 `startIdx <= endIdx`。
+ * 入参是选区的**半开**帧区间（`{startFrame, frameCount}`，即 `ParamSelection` 的元素）；
+ * 右端按约束 1 退一帧后各自 `frameToIndex` → clamp 到 `[0, len-1]`，并保证
+ * `startIdx <= endIdx`。
  *
- * 特殊说明：返回的 `startFrame` / `endFrame` 是**未被下标 clamp 影响**的原始帧范围
- * （拉伸路径要用它算"选区移动了多少帧"），下标只是对数据窗口的投影。
+ * 特殊说明：`frameCount === 0`（单击留下的零长选区）退化为"只覆盖起点那一帧"，
+ * 与旧实现把零长选区投影为单帧的行为一致。
  *
  * @param args 换算参数。
  * @returns 下标范围；输入非法或数据为空时为 `null`。
  */
 export function selectionIndexRange(args: {
-    readonly aBeat: number;
-    readonly bBeat: number;
-    readonly secPerBeat: number;
-    readonly framePeriodMs: number;
+    /** 选区起点帧（含）。 */
+    readonly startFrame: number;
+    /** 选区帧数（`>= 0`）。 */
+    readonly frameCount: number;
     readonly paramView: ParamViewLike;
 }): SelectionIndexRange | null {
-    const { aBeat, bBeat, secPerBeat, framePeriodMs, paramView } = args;
-    const frames = selectionFrameRange({ aBeat, bBeat, secPerBeat, framePeriodMs });
-    if (frames === null) return null;
+    const { startFrame, frameCount, paramView } = args;
+    if (!Number.isFinite(startFrame) || !Number.isFinite(frameCount)) return null;
     if (!Array.isArray(paramView.edit) || paramView.edit.length === 0) return null;
     if (!Number.isFinite(paramView.startFrame) || !Number.isFinite(paramView.stride)) return null;
 
     const last = paramView.edit.length - 1;
+    const lastFrame = startFrame + Math.max(0, frameCount - 1);
     const rawStart = frameToIndex({
-        frame: frames.startFrame,
+        frame: startFrame,
         startFrame: paramView.startFrame,
         stride: paramView.stride,
     });
     const rawEnd = frameToIndex({
-        frame: frames.endFrame,
+        frame: lastFrame,
         startFrame: paramView.startFrame,
         stride: paramView.stride,
     });
@@ -183,7 +142,7 @@ export function selectionIndexRange(args: {
 
     const startIdx = clampTo(rawStart, 0, last);
     const endIdx = clampTo(rawEnd, startIdx, last);
-    return { ...frames, startIdx, endIdx };
+    return { startIdx, endIdx };
 }
 
 /** 边缘自动滚动的边缘带宽（CSS px）。 */
@@ -230,52 +189,4 @@ export function edgeAutoScrollDeltaPx(args: {
         return clampTo(ratio, 0, 1.5) * EDGE_SCROLL_MAX_STEP_PX;
     }
     return 0;
-}
-
-/**
- * 把 beat 位移换算为帧位移（曲线拖动路径）。
- *
- * 流程：`beatDelta × secPerBeat × 1000 / framePeriodMs`，然后**四舍五入**。
- *
- * 特殊说明：取整是必要的——拖动位移最终要叠加到**整数帧号**上（曲线数据按帧
- * 索引），保留小数会在每次 pointermove 上累积舍入误差。
- *
- * @param args 换算参数。
- * @returns 帧位移（整数）；非有限输入返回 0。
- */
-export function beatToFrameDelta(args: {
-    readonly beatDelta: number;
-    readonly secPerBeat: number;
-    readonly framePeriodMs: number;
-}): number {
-    const { beatDelta, secPerBeat, framePeriodMs } = args;
-    if (!Number.isFinite(beatDelta) || !Number.isFinite(secPerBeat)) return 0;
-    if (!Number.isFinite(framePeriodMs)) return 0;
-    const v = Math.round((beatDelta * secPerBeat * 1000) / normalizeFramePeriod(framePeriodMs));
-    return Number.isFinite(v) ? v : 0;
-}
-
-/**
- * 把帧位移换算回 beat 位移（选区位置跟随曲线拖动）。
- *
- * 流程：`frameDelta × framePeriodMs / 1000 / secPerBeat`，**不取整**。
- *
- * 【为什么不取整】返回值用于更新选区（`aBeat` / `bBeat`），它们本就是浮点；
- * 取整会让选区位置与曲线位移不一致（曲线按整数帧移动，选区按 beat 连续移动）。
- * 本函数与 `beatToFrameDelta` 构成往返：对整数帧输入是恒等的（有单测）。
- *
- * @param args 换算参数。
- * @returns beat 位移；非有限输入返回 0。
- */
-export function frameDeltaToBeat(args: {
-    readonly frameDelta: number;
-    readonly framePeriodMs: number;
-    readonly secPerBeat: number;
-}): number {
-    const { frameDelta, framePeriodMs, secPerBeat } = args;
-    if (!Number.isFinite(frameDelta) || !Number.isFinite(secPerBeat)) return 0;
-    if (!Number.isFinite(framePeriodMs)) return 0;
-    const v =
-        (frameDelta * normalizeFramePeriod(framePeriodMs)) / 1000 / Math.max(1e-9, secPerBeat);
-    return Number.isFinite(v) ? v : 0;
 }

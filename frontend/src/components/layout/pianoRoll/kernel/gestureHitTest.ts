@@ -56,21 +56,30 @@ export const SELECTION_EDGE_MIN_WIDTH_PX = 2;
 export type ValueToY = (value: number) => number;
 
 /**
- * 取指针横坐标所在帧的曲线值（不含"靠近曲线"的邻域判定）。
+ * 取指针处**参数线（渲染折线）上的点**：像素 y + 参数值（不含"靠近曲线"的判定）。
  *
- * 流程：秒 → 帧号（`sec × 1000 / framePeriodMs`，向下取整并 clamp 到 ≥0）
- * → 采样下标（`(frame − startFrame) / stride`，四舍五入）→ 取数组值。
+ * 【为什么必须沿折线插值，而不是取"指针所在帧的那个采样值"】参数线是**连续的**：
+ * `projectCurvePoints` 把相邻采样点用直线连起来，两点之间处处有线段。若只取最近
+ * 采样点的值去比纵向距离，指针落在两个采样点中间时量到的是最近**端点**的 y ——
+ * 陡峭段上这个距离可以远超命中半径，于是"光标明明压在线上却抓不住参数线"。
+ * 插值到线段上之后，指针只要贴着线就能命中，与画面所见一致。
  *
- * 特殊说明 1：下标用**四舍五入**而不是取整——采样点是离散的，取整会让指针在
- * 两个采样点中间时偏向左侧，与绘制路径（相邻点直线连接）产生半格的系统性偏移。
+ * 流程：秒 → **连续**采样坐标 `t = (sec×1000/framePeriodMs − startFrame) / stride`
+ * → 取相邻两点 `[lo, hi]` 与段内比例 `frac` → 两端的 y 按 `frac` 线性插值
+ * （值同样按 `frac` 插值，供浮窗显示）。
  *
- * 特殊说明 2：越界、非有限值、非法帧周期一律返回 `null` 而不是 `0`。返回 `0` 会
+ * 特殊说明 1：`t` **不取整**（这正是本函数存在的理由），只在取相邻点时 `floor`。
+ *
+ * 特殊说明 2：y 在**像素域**插值（先各自投影再插值），与绘制侧"连两个投影后的
+ * 端点"逐像素一致；`valueToY` 带 clamp，先插值再投影会在轴范围外差一点。
+ *
+ * 特殊说明 3：越界、非有限值、非法帧周期一律返回 `null` 而不是某个值。返回 0 会
  * 让调用方把"没有数据"误当成"曲线在 0 处"，进而在空白区域弹出浮窗。
  *
  * @param args 查询参数。
- * @returns 该帧的曲线值；不可用时为 `null`。
+ * @returns 线上的点；不可用时为 `null`。
  */
-export function curveValueAtPointerFrame(args: {
+export function curvePointAtPointer(args: {
     /** 指针位置的秒数（时间轴坐标）。 */
     readonly sec: number;
     /** 首个采样值对应的帧号。 */
@@ -81,67 +90,65 @@ export function curveValueAtPointerFrame(args: {
     readonly framePeriodMs: number;
     /** 采样值数组（通常是 `edit`）。 */
     readonly values: readonly number[];
-}): number | null {
-    const { sec, startFrame, stride, framePeriodMs, values } = args;
+    /** 参数名（决定是否施加 pitch 的 +0.5 偏移，与绘制同源）。 */
+    readonly param: string;
+    /** 值 → 视口 y 投影（须与绘制侧同源）。 */
+    readonly valueToY: ValueToY;
+}): { y: number; value: number } | null {
+    const { sec, startFrame, stride, framePeriodMs, values, param, valueToY } = args;
     if (!Number.isFinite(sec)) return null;
     if (!Number.isFinite(framePeriodMs) || framePeriodMs <= 0) return null;
     if (!Array.isArray(values) || values.length === 0) return null;
+    if (!Number.isFinite(startFrame)) return null;
 
-    const frame = Math.max(0, Math.floor((sec * 1000) / framePeriodMs));
     const step = Math.max(1, Math.floor(stride));
-    const idx = Math.round((frame - startFrame) / step);
-    if (idx < 0 || idx >= values.length) return null;
-    const value = Number(values[idx]);
-    return Number.isFinite(value) ? value : null;
+    const t = ((sec * 1000) / framePeriodMs - startFrame) / step;
+    if (!Number.isFinite(t)) return null;
+    // 折线只存在于首末采样点之间：出界即"指针不在曲线上"。
+    if (t < 0 || t > values.length - 1) return null;
+
+    const lo = Math.floor(t);
+    const hi = Math.min(lo + 1, values.length - 1);
+    const frac = t - lo;
+    const valueLow = Number(values[lo]);
+    const valueHigh = Number(values[hi]);
+    if (!Number.isFinite(valueLow) || !Number.isFinite(valueHigh)) return null;
+
+    const offset = param === "pitch" ? 0.5 : 0;
+    const yLow = valueToY(valueLow + offset);
+    const yHigh = valueToY(valueHigh + offset);
+    if (!Number.isFinite(yLow) || !Number.isFinite(yHigh)) return null;
+
+    return {
+        y: yLow + (yHigh - yLow) * frac,
+        value: valueLow + (valueHigh - valueLow) * frac,
+    };
 }
 
 /**
  * 判定指针是否落在参数线的命中邻域内。
  *
- * 流程：取指针的视口 y（`pointerY` 直接用，或由 `pointerValue` 经 `valueToY` 换算）
- * → 把曲线值经 **pitch 的 +0.5 偏移** 后换算为 y → 比较纵向距离是否小于
- * `CURVE_HIT_RADIUS_PX`。
+ * 流程：比较指针 y 与**参数线在指针 x 处的 y**（由 {@link curvePointAtPointer} 沿
+ * 折线插值给出）的纵向距离是否小于 `CURVE_HIT_RADIUS_PX`。
  *
- * 特殊说明 1：只比较**纵向**距离，不比横向。曲线在横向上处处存在，横向筛选由
- * 调用方（"指针所在帧的值"）完成。
+ * 特殊说明 1：只比较**纵向**距离，不比横向。曲线在横向上处处存在；横向筛选（指针
+ * 是否落在选区内 / 数据窗口内）由 `curvePointAtPointer` 与调用方完成。
  *
- * 特殊说明 2：`pointerY` 与 `pointerValue` 二选一。前者用于调用方已经拿到画布局部
- * y 的场景（省一次 getBoundingClientRect），后者用于只有参数值的场景。
+ * 特殊说明 2：投影与 pitch 的 +0.5 偏移**不在这里**，而在 `curvePointAtPointer`
+ * 里一次算完 —— 参数线的位置只该有一个定义处，否则"浮窗显示的值"与"命中判定用的
+ * 位置"会各自漂移（本模块文件头约束 1 的同一教训）。
  *
- * @param args 判定参数。
+ * @param args.pointerY 指针的画布局部 y（CSS px）。
+ * @param args.curveY 参数线在指针 x 处的 y（沿折线插值）。
  * @returns 是否命中。
  */
 export function isPointerNearCurve(args: {
-    /** 指针的画布局部 y（CSS px）。与 `pointerValue` 二选一，优先。 */
-    readonly pointerY?: number;
-    /** 指针处的参数值。与 `pointerY` 二选一。 */
-    readonly pointerValue?: number;
-    /** 参数名（决定是否施加 pitch 的 +0.5 偏移）。 */
-    readonly param: string;
-    /** 值 → 视口 y 投影（须与绘制侧同源）。 */
-    readonly valueToY: ValueToY;
-    /** 指针所在帧的曲线值。 */
-    readonly curveValue: number;
+    readonly pointerY: number;
+    readonly curveY: number;
 }): boolean {
-    const { pointerY, pointerValue, param, valueToY, curveValue } = args;
-    if (!Number.isFinite(curveValue)) return false;
-
-    let y: number;
-    if (pointerY !== undefined) {
-        if (!Number.isFinite(pointerY)) return false;
-        y = pointerY;
-    } else if (pointerValue !== undefined) {
-        if (!Number.isFinite(pointerValue)) return false;
-        y = valueToY(pointerValue);
-    } else {
-        return false;
-    }
-
-    // 与 render.ts 的绘制偏移同源：pitch 曲线画在 N 键中心。
-    const mapped = param === "pitch" ? curveValue + 0.5 : curveValue;
-    const curveY = valueToY(mapped);
-    if (!Number.isFinite(curveY)) return false;
-    return Math.abs(y - curveY) < CURVE_HIT_RADIUS_PX;
+    const { pointerY, curveY } = args;
+    if (!Number.isFinite(pointerY) || !Number.isFinite(curveY)) return false;
+    return Math.abs(pointerY - curveY) < CURVE_HIT_RADIUS_PX;
 }
 
 /**

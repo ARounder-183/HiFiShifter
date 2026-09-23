@@ -132,13 +132,17 @@ import {
     type SelectionEditExtension,
 } from "./pianoRoll/selectionEditApply";
 import {
-    addBeatRange,
-    beatRangesToFrameRanges,
+    addFrameRange,
+    addFrameRanges,
+    frameRangeEnd,
+    frameRangeEndCut,
+    frameRangeStartCut,
     normalizeSelection,
-    selectionBoundingRange,
-    selectionFromBeatRange,
-    subtractBeatRange,
-    toggleBeatRange,
+    selectionBoundingSpan,
+    selectionFromFrames,
+    selectionToFrameRanges,
+    subtractFrameRange,
+    toggleFrameRange,
     type FrameRange,
     type ParamSelection,
 } from "./pianoRoll/paramSelection";
@@ -172,7 +176,7 @@ import {
     resolveParamAxisUnit,
     supportsParamAxisUnit,
 } from "./pianoRoll/paramAxisUnits";
-import { midiToLabel } from "./pianoRoll/utils";
+import { framesToTime, midiToLabel, timeToFrame } from "./pianoRoll/utils";
 import { useLoudnessCurves } from "./pianoRoll/useLoudnessCurves";
 import {
     createLiveOverrideReader,
@@ -295,6 +299,31 @@ const SELECTION_SCOPE_EXEMPT_OPS: ReadonlySet<string> = new Set([
     "removeClipsFromParamSelection",
     "paste",
 ]);
+
+/**
+ * 音频块的时间范围（秒）→ 选区**帧边界**（半开 `[startBound, endBound)`）。
+ *
+ * 起点向下取整、终点向上取整（沿用改造前 `floor(起点) / ceil(终点)` 的约定）：
+ * 块两端**部分覆盖**的帧也算在范围内，不会在边界处悄悄丢掉一帧。
+ *
+ * 【为什么需要这一层】音频块是秒制（`startSec` / `lengthSec`，与 BPM 无关），
+ * 选区是帧制；两者只在"按块选参数范围"这类入口处交界，故集中在此一处换算。
+ *
+ * 注意结果走**数据路径**（`selectionFromFrames` / `addFrameRanges`），不经过
+ * "切点"量化：块的起止是绝对时间，不该被"最近中点"再挪半帧。
+ */
+function clipTimeRangeToFrameBounds(
+    clip: { startSec: number; lengthSec: number },
+    framePeriodMs: number,
+): { startBound: number; endBound: number } {
+    const fp = Math.max(1e-6, framePeriodMs);
+    const startBound = Math.max(0, timeToFrame(clip.startSec, fp));
+    const endBound = Math.max(
+        startBound,
+        Math.ceil(((clip.startSec + clip.lengthSec) * 1000) / fp),
+    );
+    return { startBound, endBound };
+}
 
 /**
  * 本面板在共享视口中的来源标识。
@@ -2246,7 +2275,10 @@ export const PianoRollPanel: React.FC = () => {
         [dispatch],
     );
 
-    const secPerBeat = 60 / Math.max(1e-6, s.bpm);
+    // 【已删除 `secPerBeat = 60 / bpm`】参数编辑器的选区、剪贴板映射、交互换算、
+    // 取数窗口全部改为**帧制**（工程级常量栅格，见 `paramSelection.ts`），BPM 只
+    // 剩下一个消费者：网格与标尺（`buildTimelineTicks` 直接读 `s.bpm` + Tempo Map）。
+    // 因此这里不再需要"每拍秒数"，改 BPM 也不会再牵动选区或触发曲线重取。
     const contentWidth = contentWidthAt(pxPerSec);
 
     const scrollerRef = useRef<HTMLDivElement | null>(null);
@@ -3306,7 +3338,7 @@ export const PianoRollPanel: React.FC = () => {
      * `syncVerticalScrollbarForViewport` 提供。
      */
 
-    /** 多选区（升序、互不相交、相邻已合并的 beat 区间列表；null = 无选区） */
+    /** 多选区（升序、互不相交、相邻已合并的**帧**区间列表；null = 无选区） */
     const selectionRef = useRef<ParamSelection | null>(null);
     // 记录打开 MIDI 弹窗时的 editParam / toolMode 快照，避免异步加载轨道期间 Redux 状态变化导致 selectionAvailable 跳变
     const midiDialogOpenParamsRef = useRef<{
@@ -3388,13 +3420,15 @@ export const PianoRollPanel: React.FC = () => {
         paramsEpoch: (s as unknown as { paramsEpoch?: number }).paramsEpoch ?? 0,
         rootTrackId,
         selectedTrackId: effectiveSelectedTrackId,
-        secPerBeat,
         scrollLeft,
-        pxPerBeat,
+        // 视口窗口只需要「秒 ↔ 像素」这一个系数。此前传的是 `pxPerBeat` +
+        // `secPerBeat`（两者相乘才等于它），于是**改 BPM 会让取数 effect 重跑**、
+        // 整条曲线白取一次；换成 pxPerSec 后 BPM 与取数彻底解耦。
+        pxPerSec,
         viewWidth: viewSize.w,
         viewSizeRef,
         scrollLeftRef,
-        pxPerBeatRef,
+        pxPerSecRef,
         invalidate,
         liveEditActiveRef,
     });
@@ -3693,10 +3727,9 @@ export const PianoRollPanel: React.FC = () => {
     // 落在任一段内的帧（断层保持原值），对齐基准为首段起点。
     const midiSelRanges = useMemo(() => {
         if (!midiDialogSelection) return undefined;
-        const fp = paramView?.framePeriodMs ?? 5;
-        const ranges = beatRangesToFrameRanges(midiDialogSelection, secPerBeat, fp);
+        const ranges = selectionToFrameRanges(midiDialogSelection);
         return ranges.length > 0 ? ranges : undefined;
-    }, [midiDialogSelection, paramView?.framePeriodMs, secPerBeat]);
+    }, [midiDialogSelection]);
 
     // selection 导入模式是否可用（基于弹窗打开时的快照，避免异步加载轨道时状态变化）
     const midiSelectionAvailable = useMemo(() => {
@@ -3710,24 +3743,21 @@ export const PianoRollPanel: React.FC = () => {
     // 时间跨度里有没有音阶变化点"，包围区间是它的保守上界。
     useEffect(() => {
         const sel = selectionUi;
-        const bounding = selectionBoundingRange(sel);
+        const bounding = selectionBoundingSpan(sel);
         if (!bounding) {
             publishPianoRollSelection(null);
             return;
         }
-        const fp = paramView?.framePeriodMs ?? 5;
+        // 选区已经是帧制：直接发布，不再有任何换算（此前要经 `secPerBeat` 转一道）。
         publishPianoRollSelection({
-            startFrame: Math.max(0, Math.floor((bounding.startBeat * secPerBeat * 1000) / fp)),
-            frameCount: Math.max(
-                1,
-                Math.ceil(((bounding.endBeat - bounding.startBeat) * secPerBeat * 1000) / fp),
-            ),
-            framePeriodMs: fp,
+            startFrame: Math.max(0, bounding.startFrame),
+            frameCount: Math.max(1, bounding.frameCount),
+            framePeriodMs: paramView?.framePeriodMs ?? 5,
         });
         return () => {
             publishPianoRollSelection(null);
         };
-    }, [selectionUi, paramView?.framePeriodMs, secPerBeat]);
+    }, [selectionUi, paramView?.framePeriodMs]);
 
     // 获取当前 track 下的所 ?clips，用 ?per-clip 波形叠加绘制
     // 获取轨道组内所有 clips（包含 root 轨道及所有子轨道的 clip）
@@ -4218,17 +4248,13 @@ export const PianoRollPanel: React.FC = () => {
 
             // ── ⑦ 剪贴板预览（不同的投影语义：从落点起点按原始帧距排布）──
             // 与 Canvas2D 路径（render.ts）共用 paramClipboardMapping 的唯一映射
-            // 规则：选区（beat）→ 帧范围 → 逐段落点 span，每段推一层。预览画的
+            // 规则：选区（帧）→ 帧区间 → 逐段落点 span，每段推一层。预览画的
             // 就是粘贴会落下的数据，断层两侧的截断与 Canvas2D 路径完全一致。
             // 时间换算用目标帧周期（粘贴按帧号落盘，用剪贴板帧周期会让预览与
             // 结果错位，见 clipboardPreviewSpans 说明）。
             const preview = clipboardRef.current;
             if (preview && selection && selection.length > 0 && preview.param === editParam) {
-                const frameRanges = beatRangesToFrameRanges(
-                    selection,
-                    secPerBeat,
-                    pv.framePeriodMs,
-                );
+                const frameRanges = selectionToFrameRanges(selection);
                 const spans = clipboardPreviewSpans({
                     targetRanges: frameRanges,
                     clipboard: preview,
@@ -4267,26 +4293,31 @@ export const PianoRollPanel: React.FC = () => {
     /**
      * 把选区（拍单位）组装为 GL 场景层的选区块镜像。
      *
-     * 【为什么在这里换算拍 → 秒】宿主只认统一投影（`TimelineAxis` 以秒为单位），
-     * 而选区数据是拍。拍 → 秒依赖 BPM，属于面板的业务语义；放到宿主侧就是第三份
-     * 口径。因此本函数只做"业务单位 → 宿主的秒"，不改任何几何。
+     * 【为什么在这里换算帧 → 秒】宿主只认统一投影（`TimelineAxis` 以秒为单位），
+     * 而选区数据是帧。帧 → 秒只依赖工程级帧周期（与 BPM 无关）；放到宿主侧就是
+     * 第三份口径。因此本函数只做"业务单位 → 宿主的秒"，不改任何几何。
+     *
+     * 【选区带 == 被圈住的采样点】选区边界是**切点**（两帧中间，见
+     * `paramSelection.snapCut`）：第 k 帧的采样点画在 `framesToTime(k)`，它的领地
+     * 是左右各半帧，因此带画在 `[startFrame - 0.5, startFrame + frameCount - 0.5]`。
+     * 于是"框住第 2、3 帧"的两条边界正好落在第 1/2 帧之间与第 3/4 帧之间。
      *
      * 【为什么空选区返回 null 而不是空数组】两者对宿主是同一件事（清空实例），
      * 但 null 让"没有选区"与"有选区但都在视口外"在调试时仍然可区分。
      *
-     * @param selection 选区（多区间，拍）；null / 空表示无选区。
+     * @param selection 选区（多区间，帧）；null / 空表示无选区。
      * @returns 选区块镜像；无选区时 null。
      */
     function buildSelectionBandSpec(
         selection: ParamSelection | null,
     ): PianoRollSelectionBandSpec | null {
         if (!selection || selection.length === 0) return null;
-        const beatToSecAxis = Math.max(1e-9, secPerBeat);
+        const framePeriodMs = paramView?.framePeriodMs ?? 5;
         const colors = resolvePianoRollColors(themeMode === "dark");
         return {
             spansSec: selection.map((range) => ({
-                startSec: range.startBeat * beatToSecAxis,
-                endSec: range.endBeat * beatToSecAxis,
+                startSec: framesToTime(frameRangeStartCut(range), framePeriodMs),
+                endSec: framesToTime(frameRangeEndCut(range), framePeriodMs),
             })),
             fillRgba: parseRgbaColor(normalizeCssColor(colors.selectionBand)),
             borderRgba: parseRgbaColor(normalizeCssColor(colors.selectionBorder)),
@@ -4314,21 +4345,23 @@ export const PianoRollPanel: React.FC = () => {
     }
 
     /**
-     * 把单段选区（beat）换算为视口坐标的裁剪矩形。
+     * 把单段选区（帧）换算为视口坐标的裁剪矩形。
+     *
+     * 与选区带同口径：边界取**切点**（两帧中间）。
      *
      * @param axis 当前投影。
-     * @param range 单段选区（beat；start/end 颠倒时自动归一）。
+     * @param range 单段选区（半开帧区间）。
      * @returns 裁剪矩形；宽度为 0 时返回 null。
      */
     function selectionClipRect(
         axis: TimelineAxis,
-        range: { startBeat: number; endBeat: number },
+        range: FrameRange,
     ): { x: number; y: number; w: number; h: number } | null {
-        const beatToSec = Math.max(1e-9, secPerBeat);
+        const framePeriodMs = paramView?.framePeriodMs ?? 5;
         return secSpanClipRect(
             axis,
-            Math.min(range.startBeat, range.endBeat) * beatToSec,
-            Math.max(range.startBeat, range.endBeat) * beatToSec,
+            framesToTime(frameRangeStartCut(range), framePeriodMs),
+            framesToTime(frameRangeEndCut(range), framePeriodMs),
         );
     }
 
@@ -4455,12 +4488,10 @@ export const PianoRollPanel: React.FC = () => {
             themeMode,
             fontFamily,
             pitchEnabled ? 1 : 0,
-            // beat → sec 的换算系数：选区框与剪贴板预览的 x 由 `beatToSec` 投影，
-            // 改 BPM 会改变它们的位置。此前它**不在**签名里，靠的是另一个巧合
-            // （`usePianoRollData` 的取数 effect 恰好也依赖 `secPerBeat` → 重取 →
-            // `secondaryParamViews` 换引用而顺带让缓存失效）。签名契约不该依赖这种
-            // 旁路，故显式纳入。
-            secPerBeat,
+            // 帧 → sec 的换算系数：选区框与剪贴板预览的 x 由它投影。它与 BPM
+            // **无关**（工程级常量栅格），因此改 BPM 不再需要重绘主画布；签名里
+            // 保留它是为了"帧周期一旦变化，选区几何必须跟着失效"这条契约。
+            paramView?.framePeriodMs ?? 5,
             // 数据与几何（按引用比较）。刻意与传给 drawPianoRoll 的字段一一对应，
             // 避免"签名里写了 A、实际喂给绘制的是 B"这种漂移。
             detectedPitchCurves,
@@ -4503,7 +4534,7 @@ export const PianoRollPanel: React.FC = () => {
             liveEditOverride: liveEditOverrideRef.current,
             selection: selectionRef.current,
             axis: drawAxis,
-            secPerBeat,
+            framePeriodMs: paramView?.framePeriodMs ?? 5,
             // 画布每帧重绘（onFrame invalidate），播放头必须用插值的视觉值：
             // 用 Redux 提交值会让 60fps 的重绘画着同一个旧播放头（且与标尺
             // 的 DOM 插值播放头节奏不一致、短暂错位）。
@@ -4561,10 +4592,9 @@ export const PianoRollPanel: React.FC = () => {
         editParam,
         pitchEnabled,
         toolMode: s.toolMode,
-        secPerBeat,
+        framePeriodMs: paramView?.framePeriodMs ?? 5,
         dynamicProjectSec,
         scrollLeftRef,
-        pxPerBeatRef,
         pxPerSecRef,
         // 交互侧坐标换算的视口真值：与渲染侧（`resolvePanelRenderViewport`）同源，
         // 避免框选 / 命中测试读到量化提交滞后的 `scrollLeftRef`。见该字段的说明。
@@ -5157,12 +5187,17 @@ export const PianoRollPanel: React.FC = () => {
      */
     const selectAllParamRange = useCallback((): boolean => {
         if (s.toolMode !== "select") return false;
-        const totalBeats = dynamicProjectSec / secPerBeat;
-        selectionRef.current = selectionFromBeatRange(0, totalBeats);
+        // 整条曲线 = 帧 [0, 工程末端)。**数据路径**直接按整数帧构造：全选的边界就是
+        // 首帧与末帧，不该被"最近中点"再挪半帧（见 paramSelection 的两个构造器）。
+        const totalFrames = Math.max(
+            0,
+            timeToFrame(dynamicProjectSec, paramView?.framePeriodMs ?? 5),
+        );
+        selectionRef.current = selectionFromFrames(0, totalFrames);
         setSelectionUi(selectionRef.current);
         invalidate();
         return true;
-    }, [s.toolMode, dynamicProjectSec, secPerBeat, invalidate]);
+    }, [s.toolMode, dynamicProjectSec, paramView?.framePeriodMs, invalidate]);
 
     // ── Edit operation handler (shared by context menu + MenuBar events) ──
     const handleEditOp = useCallback(
@@ -5175,7 +5210,7 @@ export const PianoRollPanel: React.FC = () => {
             // SELECTION_SCOPE_EXEMPT_OPS 的说明）。没有选区时它们原本静默什么都
             // 不做 —— 用户得先"全选"再点一次，而右键菜单里点下去毫无反应更容易被
             // 当成功能坏了。这里统一改为：**先全选，再执行**，作用域 = 整条参数曲线
-            // （与用户手动全选完全等价：同样的 `selectionFromBeatRange(0, 时长)`）。
+            // （与用户手动全选完全等价：同样的 `selectionFromFrames(0, 工程末端)`）。
             //
             // 非「选择」工具下全选不生效（与菜单命令同一守卫），此时行为与改动前
             // 逐字一致：这些操作在绘制类工具里本就没有意义。
@@ -5214,17 +5249,16 @@ export const PianoRollPanel: React.FC = () => {
                 const clipId = typeof data?.clipId === "string" ? data.clipId : "";
                 const clip = store.getState().session.clips.find((entry) => entry.id === clipId);
                 if (!clip) return;
-                const aBeat = Math.max(0, clip.startSec / secPerBeat);
-                const bBeat = Math.max(0, (clip.startSec + clip.lengthSec) / secPerBeat);
+                const { startBound, endBound } = clipTimeRangeToFrameBounds(clip, fp);
                 const rawMode = typeof data?.mode === "string" ? data.mode : "replace";
                 const mode: "replace" | "add" | "toggle" =
                     rawMode === "add" || rawMode === "toggle" ? rawMode : "replace";
                 selectionRef.current =
                     mode === "add"
-                        ? addBeatRange(selectionRef.current, aBeat, bBeat)
+                        ? addFrameRange(selectionRef.current, startBound, endBound)
                         : mode === "toggle"
-                          ? toggleBeatRange(selectionRef.current, aBeat, bBeat)
-                          : selectionFromBeatRange(aBeat, bBeat);
+                          ? toggleFrameRange(selectionRef.current, startBound, endBound)
+                          : selectionFromFrames(startBound, endBound - startBound);
                 setSelectionUi(selectionRef.current);
                 setActiveSurfaceExplicit("pianoRoll");
                 invalidate();
@@ -5249,24 +5283,22 @@ export const PianoRollPanel: React.FC = () => {
                       : session.selectedClipId
                         ? [session.selectedClipId]
                         : [];
-                const ranges: Array<{ startBeat: number; endBeat: number }> = [];
+                const ranges: FrameRange[] = [];
                 for (const id of requestedIds) {
                     const clip = session.clips.find((entry) => entry.id === id);
                     if (!clip) continue;
                     if (resolveRootTrackId(session.tracks, clip.trackId) !== rootTrackId) continue;
-                    ranges.push({
-                        startBeat: Math.max(0, clip.startSec / secPerBeat),
-                        endBeat: Math.max(0, (clip.startSec + clip.lengthSec) / secPerBeat),
-                    });
+                    const { startBound, endBound } = clipTimeRangeToFrameBounds(clip, fp);
+                    ranges.push({ startFrame: startBound, frameCount: endBound - startBound });
                 }
                 if (ranges.length === 0) return;
 
                 let next: ParamSelection | null = selectionRef.current;
                 if (op === "addClipsToParamSelection") {
-                    next = normalizeSelection([...(next ?? []), ...ranges]);
+                    next = addFrameRanges(next, ranges);
                 } else {
                     for (const range of ranges) {
-                        next = subtractBeatRange(next, range.startBeat, range.endBeat);
+                        next = subtractFrameRange(next, range.startFrame, frameRangeEnd(range));
                     }
                 }
                 selectionRef.current = next;
@@ -5281,7 +5313,7 @@ export const PianoRollPanel: React.FC = () => {
             // 落在这些段内的帧（断层不会被填充），偏移基准为首段起点。
             if (op === "pasteVocalShifter") {
                 const sel2 = selectionRef.current;
-                const selRanges = sel2 ? beatRangesToFrameRanges(sel2, secPerBeat, fp) : [];
+                const selRanges = sel2 ? selectionToFrameRanges(sel2) : [];
                 void dispatch(
                     pasteVocalShifterClipboard({
                         selectionRanges: selRanges.length > 0 ? selRanges : undefined,
@@ -5303,21 +5335,11 @@ export const PianoRollPanel: React.FC = () => {
                           selectionMaxFrames?: number;
                       }
                     | undefined;
-                const bounding = selectionBoundingRange(sel2);
+                const bounding = selectionBoundingSpan(sel2);
                 if (bounding) {
-                    const sf = Math.max(
-                        0,
-                        Math.floor((bounding.startBeat * secPerBeat * 1000) / fp),
-                    );
-                    const fc = Math.max(
-                        1,
-                        Math.ceil(
-                            ((bounding.endBeat - bounding.startBeat) * secPerBeat * 1000) / fp,
-                        ),
-                    );
                     selArgs = {
-                        selectionStartFrame: sf,
-                        selectionMaxFrames: fc,
+                        selectionStartFrame: Math.max(0, bounding.startFrame),
+                        selectionMaxFrames: Math.max(1, bounding.frameCount),
                     };
                 }
                 void (async () => {
@@ -5404,9 +5426,7 @@ export const PianoRollPanel: React.FC = () => {
                     derivedPasteSelection = pasteTargetSelectionFromClipboard({
                         clipboard: pasteClipboard,
                         // 锚点 = 播放光标所在帧（与粘贴的帧制口径一致）。
-                        anchorFrame: Math.max(0, Math.floor((s.playheadSec * 1000) / fp)),
-                        framePeriodMs: fp,
-                        secPerBeat,
+                        anchorFrame: timeToFrame(s.playheadSec, fp),
                     });
                     if (!derivedPasteSelection) {
                         pasteReaperClipboardFallback();
@@ -5422,9 +5442,9 @@ export const PianoRollPanel: React.FC = () => {
             if (!sel || sel.length === 0) return;
             if (!pitchEnabled) return;
 
-            // 选区的帧区间集合（逐段；沿用旧单选区算式 floor(起点)/ceil(时长)，
-            // 帧域再次合并相接窗口）。全部 op 都以「每段独立」语义消费它。
-            const selFrameRanges = beatRangesToFrameRanges(sel, secPerBeat, fp);
+            // 选区的帧区间集合（逐段独立）。选区本来就是帧制，这里只做起点夹取、
+            // 帧数钳制与越界截断（见 selectionToFrameRanges）。
+            const selFrameRanges = selectionToFrameRanges(sel);
             if (selFrameRanges.length === 0) return;
             const firstRange = selFrameRanges[0];
             const startFrame = firstRange.startFrame;
@@ -6196,7 +6216,6 @@ export const PianoRollPanel: React.FC = () => {
             editParam,
             s.tracks,
             paramView?.framePeriodMs,
-            secPerBeat,
             dynamicProjectSec,
             s.edgeSmoothnessPercent,
             effectiveProjectScale,
@@ -6286,7 +6305,7 @@ export const PianoRollPanel: React.FC = () => {
         if (!sel || sel.length === 0) return;
 
         const fp = paramView?.framePeriodMs ?? 5;
-        const selFrameRanges = beatRangesToFrameRanges(sel, secPerBeat, fp);
+        const selFrameRanges = selectionToFrameRanges(sel);
         if (selFrameRanges.length === 0) return;
 
         // 逐段取 pitch → MIDI 音符事件（与旧单选区同一转换，保留浮点音高）
@@ -6430,7 +6449,6 @@ export const PianoRollPanel: React.FC = () => {
     }, [
         selectionRef,
         rootTrackId,
-        secPerBeat,
         paramView,
         s.tracks,
         s.selectedTrackId,
@@ -6464,8 +6482,10 @@ export const PianoRollPanel: React.FC = () => {
         await paramsApi.exportPitchToMidi({
             outputPath: saveResult.path,
             tracks: sel.map((range) => {
-                const startSec = range.startBeat * secPerBeat;
-                const endSec = Math.max(startSec + 0.01, range.endBeat * secPerBeat);
+                // 半开帧区间 → 秒（右端是最后一帧的右缘）。
+                const fp = paramView?.framePeriodMs ?? 5;
+                const startSec = framesToTime(range.startFrame, fp);
+                const endSec = Math.max(startSec + 0.01, framesToTime(frameRangeEnd(range), fp));
                 return {
                     trackId: s.selectedTrackId ?? rootTrackId,
                     rootTrackId,
@@ -6479,7 +6499,7 @@ export const PianoRollPanel: React.FC = () => {
             baseScale: s.project?.baseScale ?? "C",
             projectScaleNotes: scaleNotes,
         });
-    }, [rootTrackId, selectionRef, secPerBeat, s, selectAllParamRange]);
+    }, [rootTrackId, selectionRef, paramView?.framePeriodMs, s, selectAllParamRange]);
 
     // Pitch Snap 设置弹窗状态
     const [pitchSnapOpen, setPitchSnapOpen] = useState(false);

@@ -335,8 +335,13 @@ type ClipFormantToolWindowState = {
     hasMoved: boolean;
 };
 
-/** 参数编辑器选区快照（beat 单位）。 */
-export type ParamSelectionSnapshot = Array<{ startBeat: number; endBeat: number }>;
+/**
+ * 参数编辑器选区快照（**帧**单位：`[startFrame, frameCount]`）。
+ *
+ * 与选区的内部单位、后端 `get/set_param_frames` 的契约同形（见 `paramSelection.ts`）。
+ * 帧栅格是工程级常量，因此这份快照与 BPM 无关。
+ */
+export type ParamSelectionSnapshot = Array<{ startFrame: number; frameCount: number }>;
 
 export interface SessionState {
     toolMode: ToolMode;
@@ -2208,6 +2213,10 @@ function requestParamSelectionRestore(
  * 特殊说明：`undefined`（载荷未携带）表示这一步与选区无关，**不得**改动用户当前
  * 选区；`[]` 表示当时确实没有选区（要清空）。两者语义不同，不能合并。
  *
+ * 【单位是帧】每一对是 `[startFrame, frameCount]`（与选区的内部单位一致，见
+ * `paramSelection.ts`）。帧与 BPM 无关，因此"拉伸 → 改 BPM → 撤销"不会再让恢复
+ * 出来的选区落到别的时间上。
+ *
  * @param payload 撤销/重做/跳转响应载荷。
  */
 function applyParamSelectionRestoreFromPayload(
@@ -2221,7 +2230,7 @@ function applyParamSelectionRestoreFromPayload(
             (range) =>
                 Array.isArray(range) && Number.isFinite(range[0]) && Number.isFinite(range[1]),
         )
-        .map(([startBeat, endBeat]) => ({ startBeat, endBeat }));
+        .map(([startFrame, frameCount]) => ({ startFrame, frameCount }));
     // 空数组与「无选区」是同一件事（快照类型用 null 表达），此处归一，
     // 消费方（参数编辑器）只需要认识"要恢复成这样"。
     requestParamSelectionRestore(state, snapshot.length > 0 ? snapshot : null);

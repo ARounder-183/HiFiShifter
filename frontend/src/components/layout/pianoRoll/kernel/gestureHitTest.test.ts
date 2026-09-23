@@ -25,7 +25,7 @@ import {
     CURVE_HIT_RADIUS_PX,
     SELECTION_EDGE_HIT_PX,
     SELECTION_EDGE_MIN_WIDTH_PX,
-    curveValueAtPointerFrame,
+    curvePointAtPointer,
     hitTestSelectionBody,
     hitTestSelectionEdge,
     isPointerNearCurve,
@@ -43,207 +43,184 @@ function makeValueToY(center: number, span: number, heightPx: number) {
     };
 }
 
-describe("curveValueAtPointerFrame", () => {
-    it("按帧周期与 stride 定位采样下标", () => {
-        // fp=5ms → 200 帧/秒；startFrame=0，stride=1 → 第 1 秒对应 idx 200。
-        const edit = new Array(1000).fill(0).map((_, i) => i);
-        const value = curveValueAtPointerFrame({
-            sec: 1,
+describe("curvePointAtPointer", () => {
+    const valueToY = makeValueToY(0, 100, 100); // 1 个值 = 1px，便于核对
+
+    it("正好落在采样点上 → 该点的值与 y", () => {
+        const edit = [10, 20, 30];
+        const point = curvePointAtPointer({
+            sec: 0.005, // 帧 1（fp=5ms）
             startFrame: 0,
             stride: 1,
             framePeriodMs: 5,
             values: edit,
+            param: "cents",
+            valueToY,
         });
-        expect(value).toBe(200);
+        expect(point?.value).toBe(20);
+        expect(point?.y).toBe(valueToY(20));
     });
 
-    it("stride > 1 时下标按 stride 折算", () => {
-        const edit = new Array(200).fill(0).map((_, i) => i * 10);
-        // 第 1 秒 = 帧 200；startFrame=0、stride=2 → idx = 100 → 值 1000。
-        const value = curveValueAtPointerFrame({
-            sec: 1,
+    it("**落在两个采样点之间 → 沿折线插值**（这是本函数存在的理由）", () => {
+        // 两个采样点：帧 0 值 0、帧 1 值 40（陡峭段；本 fixture 下 1 个值 = 1px）。
+        const edit = [0, 40];
+        const point = curvePointAtPointer({
+            sec: 0.0025, // 帧 0.5 —— 正中间
+            startFrame: 0,
+            stride: 1,
+            framePeriodMs: 5,
+            values: edit,
+            param: "cents",
+            valueToY,
+        });
+        expect(point?.value).toBeCloseTo(20, 9);
+        // y 取两端点的中点：若只取"最近采样点的值"（帧 0 → 值 0），量到的距离是
+        // 半个跨度 —— 这里 20px，是命中半径的两倍，"光标压在线上却抓不住"。
+        expect(point?.y).toBeCloseTo((valueToY(0) + valueToY(40)) / 2, 9);
+        expect(Math.abs((point?.y ?? 0) - valueToY(0))).toBeGreaterThan(CURVE_HIT_RADIUS_PX);
+    });
+
+    it("stride > 1 时插值发生在**采样索引**空间", () => {
+        // 采样点每 2 帧一个：帧 0 值 0、帧 2 值 40。
+        const edit = [0, 40];
+        const point = curvePointAtPointer({
+            sec: 0.005, // 帧 1 → 采样坐标 0.5
             startFrame: 0,
             stride: 2,
             framePeriodMs: 5,
             values: edit,
+            param: "cents",
+            valueToY,
         });
-        expect(value).toBe(1000);
+        expect(point?.value).toBeCloseTo(20, 9);
     });
 
-    it("startFrame 非 0 时下标相对起点折算", () => {
+    it("startFrame 非 0 时相对起点折算；范围外返回 null", () => {
         const edit = new Array(100).fill(7);
-        // 帧 200、起点 100、stride 1 → idx 100（越界，应为 null）。
+        // 帧 100 = 起点 → idx 0。
         expect(
-            curveValueAtPointerFrame({
-                sec: 1,
-                startFrame: 100,
-                stride: 1,
-                framePeriodMs: 5,
-                values: edit,
-            }),
-        ).toBeNull();
-        // 帧 100 对应 idx 0。
-        expect(
-            curveValueAtPointerFrame({
+            curvePointAtPointer({
                 sec: 0.5,
                 startFrame: 100,
                 stride: 1,
                 framePeriodMs: 5,
                 values: edit,
-            }),
+                param: "cents",
+                valueToY,
+            })?.value,
         ).toBe(7);
-    });
-
-    it("秒为负 / 越界 / 值为非有限时返回 null", () => {
-        const edit = [1, 2, 3];
+        // 起点之前 → null（折线不存在于首采样点之前）。
         expect(
-            curveValueAtPointerFrame({
-                sec: -1,
-                startFrame: 0,
-                stride: 1,
-                framePeriodMs: 5,
-                values: edit,
-            }),
-        ).toBe(1); // 帧号被 clamp 到 0
-        expect(
-            curveValueAtPointerFrame({
-                sec: 999,
-                startFrame: 0,
-                stride: 1,
-                framePeriodMs: 5,
-                values: edit,
-            }),
-        ).toBeNull();
-        expect(
-            curveValueAtPointerFrame({
-                sec: Number.NaN,
-                startFrame: 0,
-                stride: 1,
-                framePeriodMs: 5,
-                values: edit,
-            }),
-        ).toBeNull();
-        expect(
-            curveValueAtPointerFrame({
+            curvePointAtPointer({
                 sec: 0,
-                startFrame: 0,
+                startFrame: 100,
                 stride: 1,
-                framePeriodMs: 0, // 非法帧周期
+                framePeriodMs: 5,
                 values: edit,
+                param: "cents",
+                valueToY,
+            }),
+        ).toBeNull();
+        // 末采样点之后 → null。
+        expect(
+            curvePointAtPointer({
+                sec: 1,
+                startFrame: 100,
+                stride: 1,
+                framePeriodMs: 5,
+                values: edit,
+                param: "cents",
+                valueToY,
             }),
         ).toBeNull();
     });
 
-    it("空数组 / 非数组返回 null（不抛异常）", () => {
-        expect(
-            curveValueAtPointerFrame({
-                sec: 0,
-                startFrame: 0,
-                stride: 1,
-                framePeriodMs: 5,
-                values: [],
-            }),
-        ).toBeNull();
+    it("pitch 施加 +0.5 偏移（曲线画在键中心，与绘制同源）", () => {
+        const point = curvePointAtPointer({
+            sec: 0,
+            startFrame: 0,
+            stride: 1,
+            framePeriodMs: 5,
+            values: [60],
+            param: "pitch",
+            valueToY,
+        });
+        expect(point?.y).toBe(valueToY(60.5));
+        // 值本身不加偏移（浮窗显示的是参数值）。
+        expect(point?.value).toBe(60);
+    });
+
+    it("y 在**像素域**插值：投影带 clamp 时与「先插值再投影」不同", () => {
+        // 投影把值夹到 [0, 20]（真实轴在范围外就是这个行为）。
+        const clamped = (v: number) => Math.min(20, Math.max(0, v)) * 10;
+        const point = curvePointAtPointer({
+            sec: 0.0025, // 两端点正中间
+            startFrame: 0,
+            stride: 1,
+            framePeriodMs: 5,
+            values: [0, 100],
+            param: "cents",
+            valueToY: clamped,
+        });
+        // 两端点 y = 0 与 200 → 中点 100（与绘制折线逐像素一致）。
+        expect(point?.y).toBeCloseTo(100, 9);
+        // "先插值再投影"会得到 clamp(50)=20 → 200，与画面不符。
+        expect(clamped(point?.value ?? 0)).toBe(200);
+    });
+
+    it("非法输入返回 null（不抛异常、不返回 0）", () => {
+        const base = {
+            startFrame: 0,
+            stride: 1,
+            framePeriodMs: 5,
+            values: [1, 2, 3],
+            param: "cents",
+            valueToY,
+        } as const;
+        expect(curvePointAtPointer({ ...base, sec: Number.NaN })).toBeNull();
+        expect(curvePointAtPointer({ ...base, sec: 0, framePeriodMs: 0 })).toBeNull();
+        expect(curvePointAtPointer({ ...base, sec: 0, values: [] })).toBeNull();
+        expect(curvePointAtPointer({ ...base, sec: 0, startFrame: Number.NaN })).toBeNull();
     });
 });
 
 describe("isPointerNearCurve", () => {
-    const valueToY = makeValueToY(72, 24, 480);
-
     it("指针落在曲线 10px 内 → 命中；超出 → 不命中", () => {
-        const curveY = valueToY(72); // 中心 = 240
-
-        // 正好在曲线上
-        expect(
-            isPointerNearCurve({
-                pointerY: curveY,
-                param: "cents",
-                valueToY,
-                curveValue: 72,
-            }),
-        ).toBe(true);
+        const curveY = 240;
+        expect(isPointerNearCurve({ pointerY: curveY, curveY })).toBe(true);
         // 边界内侧（9px）
-        expect(
-            isPointerNearCurve({
-                pointerY: curveY + CURVE_HIT_RADIUS_PX - 1,
-                param: "cents",
-                valueToY,
-                curveValue: 72,
-            }),
-        ).toBe(true);
+        expect(isPointerNearCurve({ pointerY: curveY + CURVE_HIT_RADIUS_PX - 1, curveY })).toBe(
+            true,
+        );
         // 边界外侧（11px）
-        expect(
-            isPointerNearCurve({
-                pointerY: curveY + CURVE_HIT_RADIUS_PX + 1,
-                param: "cents",
-                valueToY,
-                curveValue: 72,
-            }),
-        ).toBe(false);
-        // 两种指针坐标都不给 → 不命中（不是默认命中）
-        expect(isPointerNearCurve({ param: "cents", valueToY, curveValue: 72 })).toBe(false);
+        expect(isPointerNearCurve({ pointerY: curveY + CURVE_HIT_RADIUS_PX + 1, curveY })).toBe(
+            false,
+        );
     });
 
-    it("pitch 参数施加 +0.5 偏移（曲线画在键中心）", () => {
-        // 曲线值是 MIDI 60；绘制时加 0.5 → 60.5。指针在 60.5 对应的 y 上应命中。
-        const drawnY = valueToY(60.5);
-        expect(
-            isPointerNearCurve({
-                pointerY: drawnY,
-                param: "pitch",
-                valueToY,
-                curveValue: 60,
-            }),
-        ).toBe(true);
-        // 若忘了 +0.5，就会拿 60 的 y 去比：两者相差 0.5 个 MIDI 值。
-        const undrawnY = valueToY(60);
-        const gapPx = Math.abs(undrawnY - drawnY);
-        // 该 fixture 下 0.5 个 MIDI = 10px，正好在边界上 —— 说明这个偏移不是可忽略的小量。
-        expect(gapPx).toBeCloseTo(10, 6);
-    });
-
-    it("非 pitch 参数不施加偏移", () => {
-        expect(
-            isPointerNearCurve({
-                pointerY: valueToY(5),
-                param: "formant_shift",
-                valueToY,
-                curveValue: 5,
-            }),
-        ).toBe(true);
-    });
-
-    it("指针 y 或曲线值非有限 → 不命中", () => {
+    it("指针 y 或曲线 y 非有限 → 不命中（不是默认命中）", () => {
         for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
-            expect(
-                isPointerNearCurve({
-                    pointerY: bad,
-                    param: "pitch",
-                    valueToY,
-                    curveValue: 60,
-                }),
-            ).toBe(false);
-            expect(
-                isPointerNearCurve({
-                    pointerY: 100,
-                    param: "pitch",
-                    valueToY,
-                    curveValue: bad,
-                }),
-            ).toBe(false);
+            expect(isPointerNearCurve({ pointerY: bad, curveY: 100 })).toBe(false);
+            expect(isPointerNearCurve({ pointerY: 100, curveY: bad })).toBe(false);
         }
     });
 
-    it("两种传参方式等价：pointerY 与 pointerValue 二选一", () => {
-        // pointerValue 是"参数值"，内部经 valueToY 换算；对非 pitch 两者应一致。
-        const v = 70;
-        const y = valueToY(v);
-        expect(
-            isPointerNearCurve({ pointerY: y, param: "cents", valueToY, curveValue: v }),
-        ).toBe(true);
-        expect(
-            isPointerNearCurve({ pointerValue: v, param: "cents", valueToY, curveValue: v }),
-        ).toBe(true);
+    it("与折线插值串起来：中间位置也能命中（端到端形式）", () => {
+        const valueToY = makeValueToY(0, 100, 100);
+        const edit = [0, 40];
+        const pointerY = (valueToY(0) + valueToY(40)) / 2; // 线上正中间
+        const point = curvePointAtPointer({
+            sec: 0.0025,
+            startFrame: 0,
+            stride: 1,
+            framePeriodMs: 5,
+            values: edit,
+            param: "cents",
+            valueToY,
+        });
+        expect(isPointerNearCurve({ pointerY, curveY: point?.y ?? Number.NaN })).toBe(true);
+        // 若误用"最近采样点的值"（帧 0 → 值 0），就会漏掉这一次命中。
+        expect(isPointerNearCurve({ pointerY, curveY: valueToY(0) })).toBe(false);
     });
 });
 
@@ -269,8 +246,12 @@ describe("hitTestSelectionEdge", () => {
     });
 
     it("稍超边界不命中", () => {
-        expect(hitTestSelectionEdge({ ...args, localXPx: 100 - SELECTION_EDGE_HIT_PX - 1 })).toBeNull();
-        expect(hitTestSelectionEdge({ ...args, localXPx: 300 + SELECTION_EDGE_HIT_PX + 1 })).toBeNull();
+        expect(
+            hitTestSelectionEdge({ ...args, localXPx: 100 - SELECTION_EDGE_HIT_PX - 1 }),
+        ).toBeNull();
+        expect(
+            hitTestSelectionEdge({ ...args, localXPx: 300 + SELECTION_EDGE_HIT_PX + 1 }),
+        ).toBeNull();
     });
 
     it("左右边重叠时左侧优先（与既有实现逐字一致）", () => {
@@ -289,12 +270,8 @@ describe("hitTestSelectionEdge", () => {
     });
 
     it("边界次序颠倒时自动归一（不依赖调用方排序）", () => {
-        expect(
-            hitTestSelectionEdge({ leftXPx: 300, rightXPx: 100, localXPx: 100 }),
-        ).toBe("left");
-        expect(
-            hitTestSelectionEdge({ leftXPx: 300, rightXPx: 100, localXPx: 300 }),
-        ).toBe("right");
+        expect(hitTestSelectionEdge({ leftXPx: 300, rightXPx: 100, localXPx: 100 })).toBe("left");
+        expect(hitTestSelectionEdge({ leftXPx: 300, rightXPx: 100, localXPx: 300 })).toBe("right");
     });
 
     it("非有限输入不命中", () => {
@@ -346,8 +323,8 @@ describe("hitTestSelectionBody", () => {
     });
 
     it("非有限输入不命中", () => {
-        expect(
-            hitTestSelectionBody({ ...args, localXPx: Number.NaN, nearCurve: true }),
-        ).toBe(false);
+        expect(hitTestSelectionBody({ ...args, localXPx: Number.NaN, nearCurve: true })).toBe(
+            false,
+        );
     });
 });

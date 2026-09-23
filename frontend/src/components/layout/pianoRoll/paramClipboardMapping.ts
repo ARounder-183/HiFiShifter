@@ -27,7 +27,12 @@
  */
 
 import type { ParamName } from "./types";
-import { normalizeSelection, type FrameRange, type ParamSelection } from "./paramSelection";
+import {
+    normalizeSelection,
+    snapFrame,
+    type FrameRange,
+    type ParamSelection,
+} from "./paramSelection";
 
 /** 剪贴板中的一段：`startFrame` 为相对复制起点的帧偏移。 */
 export interface ParamClipboardSegment {
@@ -168,7 +173,7 @@ export function parseParamClipboardPayload(value: unknown): ParamClipboardData |
 /**
  * 把剪贴板映射到目标选区的帧区间上（预览与粘贴的唯一实现）。
  *
- * @param targetRanges 目标选区的帧区间（升序、互不相交；见 beatRangesToFrameRanges）
+ * @param targetRanges 目标选区的帧区间（升序、互不相交；见 selectionToFrameRanges）
  * @returns 按起点升序的写入片段；空数组表示「按规则没有任何帧会被写入」
  *          （过去用于「不显示预览、不执行粘贴」）。
  */
@@ -239,36 +244,28 @@ export function clipboardPreviewSpans(args: {
  * 之后粘贴仍走同一条映射（{@link mapClipboardToTargetRanges}，以选区**整体**
  * 起点为偏移基准），于是落点与选区逐帧对齐 —— 选区就是"粘贴会落到哪里"的可视化。
  *
- * 【帧 → 拍为什么两端各内收 1/4 帧】选区是拍制、粘贴是帧制，而拍 → 帧的换算
- * （`beatRangesToFrameRanges`：起点 `floor`、时长 `ceil`）在浮点误差下可能把每段
- * 的首帧或末帧挤出选区，粘贴时**静默丢值**。内收 1/4 帧让换算逐帧还原原始帧区间，
- * 视觉上仍与原来完全重合（帧周期通常只有几毫秒）。
+ * 【为什么不再需要"两端各内收 1/4 帧"】选区与剪贴板现在**同为帧制**：段边界就是
+ * 整数帧切点，而帧 → 帧的换算（{@link selectionToFrameRanges} 只做夹取与钳制）
+ * 对整数是恒等的，因此推导出的选区逐帧精确，不存在"首帧/末帧被挤出选区、粘贴时
+ * 静默丢值"的窗口。旧实现里那段内收补丁是为拍 → 帧的双重取整打的，随单位改造
+ * 一并删除。
  *
- * @param args 剪贴板、锚点帧（播放光标所在帧）、目标参数帧周期与每拍秒数。
- * @returns 归一化选区（升序、互不相交）；剪贴板为空时返回 `null`
+ * @param args 剪贴板与锚点帧（播放光标所在帧）。
+ * @returns 归一化选区（升序、互不相交也不相接）；剪贴板为空时返回 `null`
  *   （调用方按"剪贴板里没有参数线数据"处理，走 REAPER/MIDI 回退）。
  */
 export function pasteTargetSelectionFromClipboard(args: {
     clipboard: ParamClipboardData | null | undefined;
     anchorFrame: number;
-    framePeriodMs: number;
-    secPerBeat: number;
 }): ParamSelection | null {
     const clipboard = normalizeClipboardData(args.clipboard);
     if (!clipboard) return null;
-    const fp = Math.max(1e-6, Number(args.framePeriodMs) || 5);
-    const secPerBeat = Math.max(1e-9, Number(args.secPerBeat) || 0);
-    const anchor = Math.max(0, Math.floor(Number(args.anchorFrame) || 0));
-    /** 帧号 → 拍（与 beatRangesToFrameRanges 的逆换算同源）。 */
-    const frameToBeat = (frame: number) => (frame * fp) / 1000 / secPerBeat;
-    const ranges = clipboard.segments.map((segment) => {
-        const startFrame = anchor + Math.max(0, Math.round(segment.startFrame));
-        const endFrame = startFrame + segment.values.length; // 独占
-        return {
-            startBeat: frameToBeat(startFrame + 0.25),
-            endBeat: frameToBeat(endFrame - 0.25),
-        };
-    });
+    const anchor = Math.max(0, snapFrame(args.anchorFrame));
+    // 段边界直接落在帧栅格上（normalizeClipboardData 已保证 startFrame 为非负整数）。
+    const ranges: FrameRange[] = clipboard.segments.map((segment) => ({
+        startFrame: anchor + segment.startFrame,
+        frameCount: segment.values.length,
+    }));
     // 归一化会排序、合并相接段（剪贴板段之间有断层时自然保持分开）。
     return normalizeSelection(ranges);
 }

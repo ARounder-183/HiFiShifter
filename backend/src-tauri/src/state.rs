@@ -1799,6 +1799,11 @@ impl HistoryOp {
 /// 丢弃重做分支"时的裁剪，都会让位置对不上 —— 表现是"撤销后曲线回来了、选区却
 /// 没回到拉伸前"。记在记录上之后，撤销/重做只需无脑套用载荷带回的那一份，不再
 /// 存在任何位置推断。
+///
+/// 【单位是参数帧】每一对是 `[startFrame, frameCount]`（半开区间，与前端
+/// `ParamSelection` / `get_param_frames` 的契约同形）。帧栅格是工程级常量
+/// （`frame_period_ms` 恒为 5.0），因此快照与 BPM / Tempo Map 无关：先拉伸、
+/// 再改 BPM、然后撤销，恢复出来的仍是拉伸前的同一段帧。
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ParamSelectionStep {
@@ -3647,6 +3652,8 @@ impl AppState {
     /// 行，此时**拒绝登记**而不是把选区快照挂到无关步骤上（那会让撤销那一步时
     /// 莫名改掉用户的选区）。
     ///
+    /// 两个入参都是**帧制**的选区：每项 `[startFrame, frameCount]`（半开区间）。
+    ///
     /// @returns `ok = false` + `reason` 表示没有登记（步骤不匹配）；前端无需重试，
     ///   这种情况本就意味着这次手势没有产生可撤销的步骤。
     pub fn record_param_selection_step(
@@ -3665,10 +3672,14 @@ impl AppState {
         if record.label.as_deref() != Some(HistoryOp::ParamCurve.key()) {
             return serde_json::json!({ "ok": false, "reason": "step-is-not-param-curve" });
         }
+        // 归一：丢掉非有限值，并把帧号 / 帧数取整（选区的单位是整数帧，见
+        // `ParamSelectionStep` 的说明）。前端已经发整数，这里再取一次是为了让
+        // "整数帧"这条不变式钉在写入侧，不依赖调用方自律。
         let filtered = |ranges: Vec<[f32; 2]>| -> Vec<[f32; 2]> {
             ranges
                 .into_iter()
                 .filter(|r| r[0].is_finite() && r[1].is_finite())
+                .map(|r| [r[0].round(), r[1].max(0.0).round()])
                 .collect()
         };
         record.param_selection = Some(ParamSelectionStep {
@@ -4031,6 +4042,38 @@ mod tests {
             state.record_param_selection_step(before, after)["ok"],
             serde_json::json!(false),
         );
+    }
+
+    /// 登记接口把选区归一为**整数帧**：非有限项丢弃、帧号取整、帧数下钳 0。
+    ///
+    /// 前端本来就发整数（选区内部单位即帧），这里再归一一次是为了把"整数帧"
+    /// 这条不变式钉在**写入侧** —— 不依赖调用方自律，也让磁盘上的历史文件
+    /// 永远是规整的整数。
+    #[test]
+    fn record_param_selection_step_normalizes_to_integer_frames() {
+        let state = AppState::default();
+        {
+            let tl = state.timeline.lock().unwrap();
+            state.checkpoint_timeline(&tl, HistoryOp::ParamCurve);
+        }
+        assert_eq!(
+            state.record_param_selection_step(
+                // 非有限项被丢弃；10.4 → 10、20.6 → 21。
+                vec![[10.4, 20.6], [f32::NAN, 3.0], [f32::INFINITY, 3.0]],
+                // 起点可以为负（选区被拖到 0 左侧时随数据越界），帧数不夹到负。
+                vec![[-5.0, -7.2]],
+            )["ok"],
+            serde_json::json!(true),
+        );
+
+        let h = state.timeline_history.lock().unwrap();
+        let step = h
+            .records
+            .iter()
+            .find_map(|record| record.param_selection.as_ref())
+            .expect("选区注记已登记");
+        assert_eq!(step.before, vec![[10.0, 21.0]], "取整并丢弃非有限项");
+        assert_eq!(step.after, vec![[-5.0, 0.0]], "帧数下钳 0，起点不夹");
     }
 
     #[test]

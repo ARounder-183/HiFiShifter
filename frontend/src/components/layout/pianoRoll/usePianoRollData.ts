@@ -16,13 +16,12 @@ export function usePianoRollData(args: {
     paramsEpoch: number;
     rootTrackId: string | null;
     selectedTrackId: string | null;
-    secPerBeat: number;
     scrollLeft: number;
-    pxPerBeat: number;
+    pxPerSec: number;
     viewWidth: number;
     viewSizeRef: React.MutableRefObject<{ w: number; h: number }>;
     scrollLeftRef: React.MutableRefObject<number>;
-    pxPerBeatRef: React.MutableRefObject<number>;
+    pxPerSecRef: React.MutableRefObject<number>;
     invalidate: () => void;
     /** 外部通知当前是否正在进行 live 编辑（pointer down 期间为 true）。
      *  为 true 时，pitch_orig_updated 触发的曲线刷新会被推迟到 pointer-up 后执行。 */
@@ -36,13 +35,12 @@ export function usePianoRollData(args: {
         paramsEpoch,
         rootTrackId,
         selectedTrackId,
-        secPerBeat,
         scrollLeft,
-        pxPerBeat,
+        pxPerSec,
         viewWidth,
         viewSizeRef,
         scrollLeftRef,
-        pxPerBeatRef,
+        pxPerSecRef,
         invalidate,
         liveEditActiveRef: externalLiveEditActiveRef,
     } = args;
@@ -278,11 +276,12 @@ export function usePianoRollData(args: {
 
         const { w } = viewSizeRef.current;
         const sl = scrollLeftRef.current;
-        const ppb = pxPerBeatRef.current;
-        const startBeat = sl / Math.max(1e-9, ppb);
-        const durBeats = w / Math.max(1e-9, ppb);
-        const startSec = startBeat * secPerBeat;
-        const durSec = durBeats * secPerBeat;
+        // 可见窗口的秒范围：`pxPerSec` 是"秒 ↔ 像素"的唯一系数（轴的原生单位就是秒）。
+        // 此前绕道 `scrollLeft / pxPerBeat × secPerBeat`，两个量都与 BPM 有关、相乘
+        // 才抵消 —— 结果就是"改 BPM 触发整条曲线重取"。
+        const pps = Math.max(1e-9, pxPerSecRef.current);
+        const startSec = sl / pps;
+        const durSec = w / pps;
 
         const visibleStartSec = startSec;
         const visibleDurSec = Math.max(1e-6, durSec);
@@ -1017,8 +1016,7 @@ export function usePianoRollData(args: {
         referenceRootTrackIds,
         pitchEnabled,
         scrollLeft,
-        pxPerBeat,
-        secPerBeat,
+        pxPerSec,
         viewWidth,
         refreshToken,
         forceParamFetchToken,

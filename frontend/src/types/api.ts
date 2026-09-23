@@ -276,11 +276,13 @@ export interface TimelineResult {
     notes_markdown?: string;
     /**
      * 撤销 / 重做 / 历史跳转**越过「边缘拉伸」步**时带回的、应当恢复的参数
-     * 编辑器选区（`[[startBeat, endBeat], …]`）。
+     * 编辑器选区（`[[startFrame, frameCount], …]`，**帧**单位）。
      *
      * 缺省（undefined）= 这一步与选区无关，前端**不得**改动当前选区；
      * `[]` = 当时确实没有选区（要清空）。两者的区别是语义必需：拉伸前有可能
      * 本来就没有选区。与 `notes_markdown` 同一套路 —— 谁记得谁负责带回。
+     *
+     * 单位与选区的内部单位一致（工程级帧栅格），因此恢复结果与 BPM 无关。
      */
     param_selection_restore?: [number, number][] | null;
 }

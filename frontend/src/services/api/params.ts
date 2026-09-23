@@ -67,6 +67,8 @@ export const paramsApi = {
      * （`param_selection_restore`）—— 前端因此不需要按撤销深度推断"我这一步是
      * 第几步"（那条路会因镜像滞后 / 分支裁剪而错位，见 state.rs 的说明）。
      *
+     * 每一对是 `[startFrame, frameCount]`（**帧**单位，与选区的内部单位一致）。
+     *
      * 后端只接受「参数曲线」步；写入被抑制等情况下返回 `ok = false`（忽略即可）。
      */
     recordParamSelectionStep: (before: [number, number][], after: [number, number][]) =>
