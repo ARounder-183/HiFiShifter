@@ -13,8 +13,20 @@
  * 第四种让用户手写的 `![](./素材/截图.png)` 也能显示 —— 记事本首先是
  * Markdown，不能只认自己生成的那一种引用。
  *
- * 缓存按 assetId / 绝对路径做键，LRU 上限内的 blob URL 在淘汰时显式 revoke，
- * 否则滚动长文档会持续泄漏内存。
+ * ## 通知模型（这里曾经导致整窗崩溃，改动前请读完）
+ *
+ * 缓存只在**被作废**时通知订阅者（整体清空 / 单条失效），**成功写入新条目时
+ * 不通知**。原因：
+ *
+ * - 需要新条目的调用方本来就从 `resolveImage` 的 promise 里拿到 URL，不需要
+ *   额外通知；
+ * - 而"解析失败"的 src 不会进缓存，若在解析结束时通知订阅者，订阅者会立刻
+ *   再解析一次 → 再失败 → 再通知 …… 形成**无界递归**。对同步返回失败的分支
+ *   （远程图被禁用、未落盘工程里的相对路径）它是同步递归，直接从 `useEffect`
+ *   里抛 `RangeError` 打掉整个 React 树；对要走 IPC 的分支（附件缺失）它变成
+ *   无界的 IPC + setState 风暴。
+ *
+ * 一句话：**通知是"缓存作废"信号，不是"解析完成"信号**。
  */
 
 import { notebookApi } from "../../../services/api/notebook";
@@ -32,6 +44,8 @@ export interface ResolvedImage {
 }
 
 const CACHE_LIMIT = 96;
+/** 被淘汰但因可能仍在画面里而暂缓释放的 URL 上限。 */
+const DEFERRED_REVOKE_LIMIT = 512;
 
 interface CacheEntry {
     url: string;
@@ -41,17 +55,36 @@ interface CacheEntry {
 
 const cache = new Map<string, CacheEntry>();
 const pending = new Map<string, Promise<ResolvedImage>>();
-const listeners = new Set<() => void>();
+const invalidators = new Set<() => void>();
+/**
+ * 被 LRU 淘汰的 blob URL。
+ *
+ * 淘汰时**不立即 revoke**：那张图可能正显示在某个 NodeView 里，revoke 会让它
+ * 变成裂图。改为挂在这里，等整体清空（切工程）时统一释放；只有超过上限的旧
+ * 条目才真正 revoke（那时它早已不在画面上）。
+ */
+const deferredRevoke: string[] = [];
 let clock = 0;
 
-function notify(): void {
-    for (const listener of listeners) listener();
+function notifyInvalidated(): void {
+    for (const listener of invalidators) listener();
 }
 
-/** 订阅缓存变化（NodeView 用它触发重渲染）。 */
-export function subscribeAssetCache(listener: () => void): () => void {
-    listeners.add(listener);
-    return () => listeners.delete(listener);
+/** 订阅"缓存被作废"（整体清空 / 单条失效）。 */
+export function subscribeAssetInvalidation(listener: () => void): () => void {
+    invalidators.add(listener);
+    return () => {
+        invalidators.delete(listener);
+    };
+}
+
+function revoke(url: string): void {
+    if (!url.startsWith("blob:")) return;
+    try {
+        URL.revokeObjectURL(url);
+    } catch {
+        // 已释放过：忽略。
+    }
 }
 
 function cacheKey(src: string, projectDir: string | null): string {
@@ -70,21 +103,24 @@ function resolveForFile(src: string, projectDir: string | null): string {
 function put(key: string, url: string): void {
     clock += 1;
     cache.set(key, { url, usedAt: clock });
-    if (cache.size > CACHE_LIMIT) {
-        // 淘汰最久未使用的条目，并 revoke 它的 blob URL。
-        let oldestKey: string | null = null;
-        let oldest = Number.POSITIVE_INFINITY;
-        for (const [k, entry] of cache) {
-            if (entry.usedAt < oldest) {
-                oldest = entry.usedAt;
-                oldestKey = k;
-            }
+    if (cache.size <= CACHE_LIMIT) return;
+
+    let oldestKey: string | null = null;
+    let oldest = Number.POSITIVE_INFINITY;
+    for (const [k, entry] of cache) {
+        if (entry.usedAt < oldest) {
+            oldest = entry.usedAt;
+            oldestKey = k;
         }
-        if (oldestKey !== null && oldestKey !== key) {
-            const evicted = cache.get(oldestKey);
-            cache.delete(oldestKey);
-            if (evicted?.url.startsWith("blob:")) URL.revokeObjectURL(evicted.url);
-        }
+    }
+    if (oldestKey === null || oldestKey === key) return;
+    const evicted = cache.get(oldestKey);
+    cache.delete(oldestKey);
+    if (!evicted) return;
+    deferredRevoke.push(evicted.url);
+    while (deferredRevoke.length > DEFERRED_REVOKE_LIMIT) {
+        const stale = deferredRevoke.shift();
+        if (stale) revoke(stale);
     }
 }
 
@@ -99,21 +135,23 @@ export function peekImageUrl(src: string, projectDir: string | null): string | n
 
 /** 清空全部缓存（切换工程时调用，避免跨工程的 id 冲突）。 */
 export function clearImageCache(): void {
-    for (const entry of cache.values()) {
-        if (entry.url.startsWith("blob:")) URL.revokeObjectURL(entry.url);
-    }
+    for (const entry of cache.values()) revoke(entry.url);
     cache.clear();
     pending.clear();
-    notify();
+    while (deferredRevoke.length > 0) {
+        const url = deferredRevoke.pop();
+        if (url) revoke(url);
+    }
+    notifyInvalidated();
 }
 
 /** 失效单条（图片被替换/删除后调用）。 */
 export function invalidateImage(src: string, projectDir: string | null): void {
     const key = cacheKey(src, projectDir);
     const entry = cache.get(key);
-    if (entry?.url.startsWith("blob:")) URL.revokeObjectURL(entry.url);
+    if (entry) revoke(entry.url);
     cache.delete(key);
-    notify();
+    notifyInvalidated();
 }
 
 function blobUrlFromBase64(base64: string, mime: string): string {
@@ -129,6 +167,7 @@ export interface ResolveImageOptions {
  * 解析图片 src（异步，带并发去重与缓存）。
  *
  * 同一个 src 的并发请求共用一次后端读取 —— 长文档里同一张图出现多次是常态。
+ * 失败**不缓存也不通知**（见文件头注释）。
  */
 export function resolveImage(src: string, options: ResolveImageOptions): Promise<ResolvedImage> {
     const key = cacheKey(src, options.projectDir);
@@ -182,7 +221,6 @@ export function resolveImage(src: string, options: ResolveImageOptions): Promise
             return { url: null, missing: true, reason: "read-failed" };
         } finally {
             pending.delete(key);
-            notify();
         }
     })();
 

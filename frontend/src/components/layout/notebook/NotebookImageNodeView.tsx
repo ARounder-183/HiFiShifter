@@ -17,7 +17,7 @@ import { useI18n } from "../../../i18n/I18nProvider";
 import { notebookApi } from "../../../services/api/notebook";
 import { assetIdFromSrc, isAssetRef } from "./assetRef";
 import { NotebookContextMenu, type NotebookMenuItem } from "./NotebookContextMenu";
-import { resolveImage, subscribeAssetCache } from "./notebookImageCache";
+import { resolveImage, subscribeAssetInvalidation } from "./notebookImageCache";
 import { dirName } from "./notebookPaths";
 
 const MIN_WIDTH = 48;
@@ -58,10 +58,15 @@ export function NotebookImageNodeView(props: NodeViewProps) {
         };
     }, [src, projectDir, allowRemoteImages]);
 
-    // 缓存被清空（切工程 / 附件变更）后重新解析。
+    /**
+     * 缓存被作废（切工程 / 显式失效）后重新解析一次。
+     *
+     * 这里**只会被"作废"触发**，不会被"解析完成"触发 —— 后者会让失败的 src
+     * 陷入无界递归（见 notebookImageCache 文件头注释）。
+     */
     useEffect(
         () =>
-            subscribeAssetCache(() => {
+            subscribeAssetInvalidation(() => {
                 void resolveImage(src, { projectDir, allowRemoteImages }).then((result) =>
                     setResolved({ src, url: result.url, missing: result.missing }),
                 );
@@ -93,20 +98,23 @@ export function NotebookImageNodeView(props: NodeViewProps) {
             const element = imgRef.current;
             const startWidth = element?.getBoundingClientRect().width ?? width ?? 320;
             const startX = event.clientX;
-            setDragWidth(Math.round(startWidth));
+            const initial = Math.round(startWidth);
+            // 用 ref 记录拖动中的宽度，而不是从 setState 的 updater 里读 ——
+            // updater 必须是纯函数（StrictMode 会调用两次，那样会提交两个事务）。
+            let latest = initial;
+            setDragWidth(initial);
 
             const onMove = (moveEvent: PointerEvent) => {
                 const delta =
                     side === "right" ? moveEvent.clientX - startX : startX - moveEvent.clientX;
-                setDragWidth(Math.max(MIN_WIDTH, Math.round(startWidth + delta)));
+                latest = Math.max(MIN_WIDTH, Math.round(startWidth + delta));
+                setDragWidth(latest);
             };
             const onUp = () => {
                 window.removeEventListener("pointermove", onMove);
                 window.removeEventListener("pointerup", onUp);
-                setDragWidth((current) => {
-                    if (current !== null) updateAttributes({ width: current });
-                    return null;
-                });
+                setDragWidth(null);
+                updateAttributes({ width: latest });
             };
             window.addEventListener("pointermove", onMove);
             window.addEventListener("pointerup", onUp);
@@ -132,7 +140,7 @@ export function NotebookImageNodeView(props: NodeViewProps) {
                 key: "save-as",
                 label: t("notebook_image_save_as"),
                 onSelect: () => {
-                    void notebookApi.saveAssetAs(assetId);
+                    void notebookApi.saveAssetAs(assetId).catch(() => {});
                 },
             });
             items.push({
