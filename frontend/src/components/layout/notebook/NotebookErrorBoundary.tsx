@@ -15,7 +15,10 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
 
 import { useAppDispatch } from "../../../app/hooks";
-import { closeNotebook, setNotebookMode } from "../../../features/notebook/notebookSlice";
+import { setNotebookMode } from "../../../features/notebook/notebookSlice";
+import { closeFormById } from "../../../features/dock/dockApi";
+import { PANEL_NOTEBOOK } from "../../dock/registerBuiltinPanels";
+import { store } from "../../../app/store";
 import { useI18n } from "../../../i18n/I18nProvider";
 import { reportFrontendError } from "../../../services/frontendErrorLog";
 
@@ -97,7 +100,7 @@ export function NotebookErrorBoundary({ children }: { children: ReactNode }) {
     return (
         <NotebookErrorBoundaryInner
             onOpenSourceMode={() => dispatch(setNotebookMode("source"))}
-            onClose={() => dispatch(closeNotebook())}
+            onClose={() => closeFormById(dispatch, store.getState, PANEL_NOTEBOOK)}
             labels={{
                 title: t("notebook_crash_title"),
                 hint: t("notebook_crash_hint"),

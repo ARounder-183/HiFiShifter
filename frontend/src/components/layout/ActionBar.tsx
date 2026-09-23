@@ -17,7 +17,6 @@ import {
     PlayIcon,
     StopIcon,
 } from "@radix-ui/react-icons";
-import { UndoHistoryPanel } from "./UndoHistoryPanel";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { shallowEqual } from "react-redux";
 import type { RootState } from "../../app/store";
@@ -75,8 +74,13 @@ import {
     isModifierActive,
     selectKeybinding,
 } from "../../features/keybindings/keybindingsSlice";
-import { toggleVisible } from "../../features/fileBrowser/fileBrowserSlice";
-import { toggleNotebookVisible } from "../../features/notebook/notebookSlice";
+import { openPanelById, selectPanelVisible, togglePanelVisible } from "../../features/dock/dockApi";
+import {
+    PANEL_FILE_BROWSER,
+    PANEL_NOTEBOOK,
+    PANEL_UNDO_HISTORY,
+} from "../dock/registerBuiltinPanels";
+import { store } from "../../app/store";
 import {
     cancelRecordingCountdown,
     loadRecordingApps,
@@ -195,8 +199,8 @@ export function ActionBar() {
     // runtime 的两个标量单独订阅：runtime 对象随播放轮询每 tick 新建，
     // 但 isPlaying 本身只在播放/暂停时变化。
     const isPlaying = useAppSelector((state: RootState) => state.session.runtime.isPlaying);
-    const fileBrowserVisible = useAppSelector((state: RootState) => state.fileBrowser.visible);
-    const notebookVisible = useAppSelector((state: RootState) => state.notebook.visible);
+    const fileBrowserVisible = useAppSelector(selectPanelVisible(PANEL_FILE_BROWSER));
+    const notebookVisible = useAppSelector(selectPanelVisible(PANEL_NOTEBOOK));
     const recording = useAppSelector((state: RootState) => state.recording);
     const paramFineAdjustKb = useAppSelector((state) =>
         selectKeybinding(state, "modifier.paramFineAdjust"),
@@ -213,15 +217,13 @@ export function ActionBar() {
     const recordingMenuRef = useRef<HTMLDivElement | null>(null);
     const [metronomeMenuPos, setMetronomeMenuPos] = useState<{ x: number; y: number } | null>(null);
     const metronomeMenuRef = useRef<HTMLDivElement | null>(null);
-    // 「操作记录」窗口：右键撤销/重做按钮打开（非模态，不影响轨道编辑）。
-    const [historyPanelOpen, setHistoryPanelOpen] = useState(false);
-    const [historyPanelAnchor, setHistoryPanelAnchor] = useState<DOMRect | null>(null);
+    // 「操作记录」面板：右键撤销/重做按钮打开。它是**可停靠面板**，显隐由停靠
+    // 布局决定（不再是本组件的局部 state），因此它能被拖到任意位置、与其他面板
+    // 合并成标签页，也能被"布局"菜单统一管理。
     const undoButtonRef = useRef<HTMLButtonElement | null>(null);
     const openHistoryPanel = useCallback(() => {
-        setHistoryPanelAnchor(undoButtonRef.current?.getBoundingClientRect() ?? null);
-        setHistoryPanelOpen(true);
-    }, []);
-    const closeHistoryPanel = useCallback(() => setHistoryPanelOpen(false), []);
+        openPanelById(dispatch, store.getState, PANEL_UNDO_HISTORY);
+    }, [dispatch]);
     // 「编辑」菜单的「操作记录」项经事件打开（面板由本组件持有并渲染）。
     useEffect(() => {
         const open = () => openHistoryPanel();
@@ -1458,7 +1460,7 @@ export function ActionBar() {
                     size="1"
                     variant={fileBrowserVisible ? "solid" : "ghost"}
                     data-tooltip={tAny("fb_title")}
-                    onClick={() => dispatch(toggleVisible())}
+                    onClick={() => togglePanelVisible(dispatch, store.getState, PANEL_FILE_BROWSER)}
                 >
                     <svg
                         width="15"
@@ -1477,7 +1479,7 @@ export function ActionBar() {
                     size="1"
                     variant={notebookVisible ? "solid" : "ghost"}
                     data-tooltip={t("notebook")}
-                    onClick={() => dispatch(toggleNotebookVisible())}
+                    onClick={() => togglePanelVisible(dispatch, store.getState, PANEL_NOTEBOOK)}
                 >
                     <Pencil1Icon />
                 </IconButton>
@@ -1816,11 +1818,6 @@ export function ActionBar() {
                     open={snapSettingsOpen}
                     onOpenChange={setSnapSettingsOpen}
                 />
-            )}
-
-            {/* 「操作记录」：非模态浮动窗口（portal 到 body，不受工具栏裁剪） */}
-            {historyPanelOpen && (
-                <UndoHistoryPanel anchorRect={historyPanelAnchor} onClose={closeHistoryPanel} />
             )}
 
             {/* Snap Context Menu removed: right-click opens the settings dialog above. */}

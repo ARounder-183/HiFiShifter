@@ -11,6 +11,9 @@ import {
     StopIcon,
 } from "@radix-ui/react-icons";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
+import { store } from "../../app/store";
+import { closeFormById } from "../../features/dock/dockApi";
+import { PANEL_FILE_BROWSER } from "../dock/registerBuiltinPanels";
 import type { RootState } from "../../app/store";
 import { useI18n } from "../../i18n/I18nProvider";
 import {
@@ -18,7 +21,6 @@ import {
     setPreviewVolume,
     setPreviewingFile,
     setSearchQuery,
-    setVisible,
     searchFilesRecursive,
     toggleRegex,
     setSortMode,
@@ -660,7 +662,7 @@ export const FileBrowserPanel: React.FC = () => {
                         variant="ghost"
                         color="gray"
                         data-tooltip={t("fb_close")}
-                        onClick={() => dispatch(setVisible(false))}
+                        onClick={() => closeFormById(dispatch, store.getState, PANEL_FILE_BROWSER)}
                     >
                         <Cross2Icon />
                     </IconButton>

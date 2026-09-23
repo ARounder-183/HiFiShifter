@@ -4,7 +4,6 @@ import { fileBrowserApi, type FileEntry } from "../../services/api/fileBrowser";
 export type SortMode = "name" | "date" | "size";
 
 interface FileBrowserState {
-    visible: boolean;
     currentPath: string;
     entries: FileEntry[];
     loading: boolean;
@@ -31,7 +30,6 @@ function getInitialPath(): string {
 }
 
 const initialState: FileBrowserState = {
-    visible: false,
     currentPath: getInitialPath(),
     entries: [],
     loading: false,
@@ -76,12 +74,6 @@ const fileBrowserSlice = createSlice({
     name: "fileBrowser",
     initialState,
     reducers: {
-        toggleVisible(state) {
-            state.visible = !state.visible;
-        },
-        setVisible(state, action: PayloadAction<boolean>) {
-            state.visible = action.payload;
-        },
         setPreviewVolume(state, action: PayloadAction<number>) {
             state.previewVolume = Math.max(0, Math.min(1, action.payload));
         },
@@ -147,8 +139,6 @@ const fileBrowserSlice = createSlice({
 });
 
 export const {
-    toggleVisible,
-    setVisible,
     setPreviewVolume,
     setPreviewingFile,
     setSearchQuery,

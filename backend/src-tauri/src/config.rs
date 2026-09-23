@@ -468,6 +468,20 @@ pub struct UiSettings {
     /// 字段时后端不必同步改结构体，用户降级运行旧版本时未知字段也会原样保留。
     #[serde(default)]
     pub notebook: serde_json::Value,
+    /// 停靠窗体系统设置与布局。
+    ///
+    /// 结构与 `notebook` 同理：**后端只做透传存储**，字段语义、合法性与默认
+    /// 值都在前端收口（`features/dock/dockSettings.ts` 的 `normalizeDockSettings`
+    /// 与 `dockSchema.ts` 的 `normalizeDockLayout`）。
+    ///
+    /// 用 `serde_json::Value` 而非具体结构体的额外理由：布局 schema 会随功能
+    /// 演进反复增删字段，强类型会让每次演进都触发后端改动与迁移代码，而这份
+    /// 数据的使用者自始至终只有前端。
+    ///
+    /// 注意：`"dock"` 必须在 `commands/ui_settings.rs` 的深度合并白名单里，
+    /// 否则"只保存行为选项"的部分写入会把 `layout` 子键整个清掉。
+    #[serde(default)]
+    pub dock: serde_json::Value,
 }
 
 /// "为新的音频块启用循环"的进程级生效值（默认 true）。
@@ -1130,6 +1144,7 @@ impl Default for UiSettings {
             sync_edits_across_takes: true,
             render_cache: RenderCacheSettings::default(),
             notebook: serde_json::Value::Null,
+            dock: serde_json::Value::Null,
         }
     }
 }

@@ -94,9 +94,18 @@ pub(super) fn save_ui_settings(
                 (&mut base, &settings_value)
             {
                 for (key, value) in patch_obj {
-                    if key == "timelineSnap" || key == "renderCache" || key == "notebook" {
+                    if key == "timelineSnap"
+                        || key == "renderCache"
+                        || key == "notebook"
+                        || key == "dock"
+                    {
                         // 嵌套设置做深度合并，避免部分保存时清空其它子项
-                        // （吸附选项 / 渲染缓存的容量、超龄 / 记事本的单选项）。
+                        // （吸附选项 / 渲染缓存的容量、超龄 / 记事本的单选项 /
+                        // 停靠系统的行为选项）。
+                        //
+                        // `dock` 尤其关键：行为选项与整份布局同处一个对象，只写
+                        // 选项的部分保存若走浅替换，会把 `layout` 整个抹掉 ——
+                        // 用户排了十分钟的界面会在改一个开关后归零。
                         match base_obj.get_mut(key.as_str()) {
                             Some(serde_json::Value::Object(base_nested)) => {
                                 if let serde_json::Value::Object(patch_nested) = value {

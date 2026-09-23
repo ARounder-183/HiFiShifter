@@ -57,6 +57,14 @@ export interface DockState {
     activeFormId: string | null;
     /** 是否已从后端读过设置（避免用默认值覆盖磁盘上的布局）。 */
     hydrated: boolean;
+    /**
+     * 「最大化当前窗体」暂存的原树。
+     *
+     * 刻意**不持久化**：最大化的语义是"临时看一眼"，重启后回到用户排好的
+     * 布局才符合预期。放在这里而不是往布局树里加字段，是因为它不是一种排布，
+     * 而是对排布的一次临时覆盖。
+     */
+    maximized: { tree: DockLayout["tree"] } | null;
 }
 
 const initialState: DockState = {
@@ -64,6 +72,7 @@ const initialState: DockState = {
     settings: DEFAULT_DOCK_SETTINGS,
     activeFormId: null,
     hydrated: false,
+    maximized: null,
 };
 
 /** 浮动窗的默认几何：错开摆放，避免新浮窗完全叠在一起。 */
@@ -101,6 +110,31 @@ const dockSlice = createSlice({
         resetDockLayout(state) {
             state.layout = ensureRegisteredPanels(createDefaultDockLayout());
             state.activeFormId = null;
+            state.maximized = null;
+        },
+        /**
+         * 最大化当前窗体 / 还原。
+         *
+         * 实现是"把当前窗体所在的标签组替换成整棵树"，而不是给它加宽高 ——
+         * 这样最大化在任意嵌套布局下都成立，且不需要改动分割比例（用户还原后
+         * 尺寸分毫不变）。
+         */
+        toggleMaximizeActive(state) {
+            if (state.maximized) {
+                state.layout = { ...state.layout, tree: state.maximized.tree };
+                state.maximized = null;
+                return;
+            }
+            const formId =
+                state.activeFormId ?? findMainTabset(state.layout)?.active ?? null;
+            if (!formId) return;
+            const tabset = findTabsetOfForm(state.layout.tree, formId);
+            if (!tabset) return;
+            state.maximized = { tree: state.layout.tree };
+            state.layout = {
+                ...state.layout,
+                tree: { ...tabset, active: formId, collapsed: false },
+            };
         },
         /** 打开面板（复用已关闭的窗体记录，或新建）。 */
         openPanel(
@@ -385,6 +419,7 @@ function findTabsetIdOf(layout: DockLayout, formId: string): string | null {
 export const {
     hydrateDock,
     syncRegisteredPanels,
+    toggleMaximizeActive,
     setDockSettings,
     setDockLayout,
     resetDockLayout,

@@ -1,10 +1,8 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
-import { Cross2Icon, EnterIcon } from "@radix-ui/react-icons";
+import React, { useCallback, useEffect, useMemo, useRef } from "react";
+import { EnterIcon } from "@radix-ui/react-icons";
 import { shallowEqual } from "react-redux";
 
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
-import { shouldSuppressHoverSideEffects } from "../../utils/penInput";
 import type { RootState } from "../../app/store";
 import { useI18n } from "../../i18n/I18nProvider";
 import {
@@ -15,83 +13,25 @@ import {
 } from "../../features/session/sessionSlice";
 
 /**
- * 「操作记录」窗口（REAPER Undo History 风格）。
+ * 「操作记录」面板（REAPER Undo History 风格）。
  *
- * 【非模态】不使用 Dialog：没有遮罩、不使背景变暗、不拦截事件 —— 窗口打开
- * 期间用户照常编辑时间轴，条目随 `history_state` 事件实时刷新。面板本体只
- * 占据自身矩形，其余区域的指针事件照常落到轨道上。
+ * 【它是一个可停靠面板】窗口位置、尺寸、浮动/停靠、关闭都由停靠系统统一
+ * 管理（见 `components/dock`）—— 面板自己不再维护 `position` state，也不
+ * 自己画标题栏与拖拽手柄。此前那份手搓实现（portal + fixed + 头部拖拽）已
+ * 被停靠系统的通用能力取代，同样的能力现在对每个面板都成立。
  *
- * 【跳转】双击条目（或点击条目右侧的跳转按钮）跳到该状态；窗口保持打开，
+ * 【跳转】双击条目（或点击条目右侧的跳转按钮）跳到该状态；面板保持打开，
  * 便于连续前后对照。当前位置之前/之后（可重做部分）在同一条列表里。
  *
  * 【反馈】跳转到越界位置或原地不动时后端回 `ok = false`，前端静默跳过：
  * 界面零变化，不弹提示。
  */
-export const UndoHistoryPanel: React.FC<{
-    /** 打开时的锚点矩形（撤销/重做按钮），用于把窗口放到按钮下方。 */
-    anchorRect?: DOMRect | null;
-    onClose: () => void;
-}> = ({ anchorRect, onClose }) => {
+export const UndoHistoryPanel: React.FC = () => {
     const { t, locale } = useI18n();
     const tAny = t as (key: string) => string;
     const dispatch = useAppDispatch();
     const s = useAppSelector(selectHistoryPanelState, shallowEqual);
     const listRef = useRef<HTMLDivElement | null>(null);
-    const dragRef = useRef<{ offsetX: number; offsetY: number } | null>(null);
-    const [position, setPosition] = useState(() => initialPanelPosition(anchorRect));
-
-    // ── 窗口位置：锚点下方（视口内夹紧）──────────────────────────
-    const moveTo = useCallback((clientX: number, clientY: number) => {
-        const el = listRef.current?.closest<HTMLElement>("[data-undo-history-panel='1']");
-        const width = el?.offsetWidth ?? 380;
-        const height = el?.offsetHeight ?? 320;
-        setPosition({
-            x: Math.min(Math.max(0, clientX), Math.max(0, window.innerWidth - width)),
-            y: Math.min(Math.max(0, clientY), Math.max(0, window.innerHeight - height)),
-        });
-    }, []);
-
-    const onHeaderPointerDown = useCallback(
-        (event: React.PointerEvent<HTMLDivElement>) => {
-            // 数位笔 / 触摸不拖浮窗：零阈值按下即生效，滑动画线时易误拖。
-            if (shouldSuppressHoverSideEffects(event.nativeEvent)) return;
-            if (event.button !== 0) return;
-            // 关闭按钮走自己的 onClick：这里只处理标题栏拖拽。
-            if ((event.target as HTMLElement).closest("button")) return;
-            event.preventDefault();
-            dragRef.current = {
-                offsetX: event.clientX - position.x,
-                offsetY: event.clientY - position.y,
-            };
-            const onMove = (ev: PointerEvent) => {
-                const drag = dragRef.current;
-                if (!drag) return;
-                moveTo(ev.clientX - drag.offsetX, ev.clientY - drag.offsetY);
-            };
-            const onUp = () => {
-                dragRef.current = null;
-                window.removeEventListener("pointermove", onMove);
-                window.removeEventListener("pointerup", onUp);
-                window.removeEventListener("pointercancel", onUp);
-            };
-            window.addEventListener("pointermove", onMove);
-            window.addEventListener("pointerup", onUp);
-            window.addEventListener("pointercancel", onUp);
-        },
-        [moveTo, position.x, position.y],
-    );
-
-    // ── Escape 关闭（模态弹窗打开时不抢 Escape）──────────────────
-    useEffect(() => {
-        const onKeyDown = (event: KeyboardEvent) => {
-            if (event.key !== "Escape") return;
-            if (document.querySelector(".rt-BaseDialogOverlay")) return;
-            event.preventDefault();
-            onClose();
-        };
-        window.addEventListener("keydown", onKeyDown);
-        return () => window.removeEventListener("keydown", onKeyDown);
-    }, [onClose]);
 
     // ── 当前位置滚动到可见（撤销 / 重做 / 跳转后窗口不关闭也要跟上）──
     useEffect(() => {
@@ -141,32 +81,13 @@ export const UndoHistoryPanel: React.FC<{
         [s.records.length, tAny],
     );
 
-    return createPortal(
+    return (
         <div
             data-undo-history-panel="1"
-            data-hs-floating-menu="1"
-            className="fixed z-[500] flex w-[380px] max-w-[calc(100vw-16px)] flex-col rounded border border-qt-border bg-qt-window text-qt-text shadow-xl select-none"
-            style={{ left: position.x, top: position.y, maxHeight: "min(60vh, 520px)" }}
+            className="flex h-full w-full min-h-0 flex-col bg-qt-window text-qt-text select-none"
             onPointerDown={(event) => event.stopPropagation()}
             onContextMenu={(event) => event.preventDefault()}
         >
-            {/* 标题栏：拖拽手柄 + 关闭 */}
-            <div
-                className="flex shrink-0 cursor-move items-center gap-2 border-b border-qt-border px-3 py-1.5"
-                onPointerDown={onHeaderPointerDown}
-            >
-                <span className="text-[12px] font-medium">{tAny("undo_history_title")}</span>
-                <span className="ml-auto text-[10px] text-qt-text-muted"></span>
-                <button
-                    type="button"
-                    title={tAny("undo_history_close")}
-                    className="rounded p-0.5 text-qt-text-muted transition-colors hover:bg-qt-button-hover hover:text-qt-text"
-                    onClick={onClose}
-                >
-                    <Cross2Icon width="12" height="12" />
-                </button>
-            </div>
-
             {/* 条目列表：最新在最上（与 REAPER 一致），当前状态高亮 */}
             <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto py-0.5 custom-scrollbar">
                 {rows.map((row) => {
@@ -235,8 +156,7 @@ export const UndoHistoryPanel: React.FC<{
                 </label>
                 <div className="text-[10px] text-qt-text-muted">{countText}</div>
             </div>
-        </div>,
-        document.body,
+        </div>
     );
 };
 
@@ -250,13 +170,3 @@ const selectHistoryPanelState = (state: RootState) => ({
     saveUndoHistoryByDefault: state.session.saveUndoHistoryByDefault,
 });
 
-/** 初始位置：锚点（撤销/重做按钮）下方；无锚点时贴近左上角。 */
-function initialPanelPosition(anchorRect?: DOMRect | null): { x: number; y: number } {
-    const width = 380;
-    const top = anchorRect ? Math.round(anchorRect.bottom + 6) : 48;
-    const left = anchorRect ? Math.round(anchorRect.left - 8) : 12;
-    return {
-        x: Math.max(0, Math.min(left, Math.max(0, window.innerWidth - width))),
-        y: Math.max(0, top),
-    };
-}

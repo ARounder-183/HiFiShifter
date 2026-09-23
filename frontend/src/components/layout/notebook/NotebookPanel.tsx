@@ -18,8 +18,10 @@ import { EditorContent } from "@tiptap/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useAppDispatch, useAppSelector } from "../../../app/hooks";
+import { store } from "../../../app/store";
+import { closeFormById } from "../../../features/dock/dockApi";
+import { PANEL_NOTEBOOK } from "../../dock/registerBuiltinPanels";
 import {
-    closeNotebook,
     setNotebookAssetIndex,
     setNotebookMode,
     setNotebookSettings,
@@ -451,7 +453,8 @@ export function NotebookPanel() {
 
     const close = useCallback(() => {
         seal();
-        dispatch(closeNotebook());
+        // 显隐归停靠布局管：面板只请求"关掉我自己"。
+        closeFormById(dispatch, store.getState, PANEL_NOTEBOOK);
     }, [dispatch, seal]);
 
     // Ctrl+F 面板内查找（全局 Ctrl+F 被 app 拦截，这里自己接）。

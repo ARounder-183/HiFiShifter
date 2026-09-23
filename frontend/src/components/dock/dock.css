@@ -1,0 +1,408 @@
+/*
+ * 停靠窗体系统样式。
+ *
+ * 全部走 qt 主题变量（`--qt-*`，见 `index.css`），因此随外观设置与明暗主题
+ * 自动变化 —— 不在组件里写死颜色。
+ *
+ * 【为什么用独立 CSS 而不是 Tailwind 工具类】布局树渲染出的层级很深，且大量
+ * 状态由 `data-*` 属性驱动（`data-active` / `data-dragging` / `data-dir`）。
+ * 用属性选择器集中表达，比在每个 JSX 节点上拼条件类名更短、更不易漂移。
+ */
+
+.hs-dock-root {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 0;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.hs-dock-split {
+    display: flex;
+    flex: 1 1 0;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.hs-dock-split[data-dir="row"] {
+    flex-direction: row;
+}
+
+.hs-dock-split[data-dir="col"] {
+    flex-direction: column;
+}
+
+.hs-dock-pane {
+    position: relative;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+}
+
+/* ── 分隔条 ─────────────────────────────────────────────────────── */
+
+.hs-dock-splitter {
+    flex: 0 0 auto;
+    position: relative;
+    background: var(--qt-border);
+    transition: background 90ms linear;
+}
+
+.hs-dock-splitter::after {
+    /* 热区比可见厚度宽：4px 的条直接按像素判定很难点中。 */
+    content: "";
+    position: absolute;
+    inset: 0;
+}
+
+.hs-dock-splitter[data-dir="row"] {
+    width: 4px;
+    cursor: col-resize;
+}
+
+.hs-dock-splitter[data-dir="col"] {
+    height: 4px;
+    cursor: row-resize;
+}
+
+.hs-dock-splitter[data-dir="row"]::after {
+    left: -3px;
+    right: -3px;
+}
+
+.hs-dock-splitter[data-dir="col"]::after {
+    top: -3px;
+    bottom: -3px;
+}
+
+.hs-dock-splitter:hover,
+.hs-dock-splitter[data-dragging="true"] {
+    background: var(--accent-8);
+}
+
+/* ── 标签组 ─────────────────────────────────────────────────────── */
+
+.hs-dock-tabset {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 0;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    position: relative;
+    background: var(--qt-window);
+}
+
+.hs-dock-tabbar {
+    display: flex;
+    align-items: stretch;
+    flex: 0 0 auto;
+    height: 26px;
+    background: var(--qt-panel);
+    border-bottom: 1px solid var(--qt-border);
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+}
+
+.hs-dock-tabbar::-webkit-scrollbar {
+    height: 0;
+}
+
+.hs-dock-tabbar[data-position="bottom"] {
+    border-bottom: none;
+    border-top: 1px solid var(--qt-border);
+    order: 2;
+}
+
+.hs-dock-tabbar[data-collapsed="true"] {
+    border-bottom: none;
+}
+
+.hs-dock-tab {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: 0 0 auto;
+    max-width: 200px;
+    padding: 0 6px;
+    border-right: 1px solid var(--qt-border);
+    color: var(--qt-text-muted);
+    font-size: 11px;
+    line-height: 1;
+    white-space: nowrap;
+    user-select: none;
+    cursor: default;
+}
+
+.hs-dock-tab:hover {
+    background: var(--qt-hover);
+    color: var(--qt-text);
+}
+
+.hs-dock-tab[data-active="true"] {
+    background: var(--qt-base);
+    color: var(--qt-text);
+    box-shadow: inset 0 -2px 0 var(--accent-9);
+}
+
+.hs-dock-tab[data-dragging="true"] {
+    opacity: 0.45;
+}
+
+.hs-dock-tab[data-dock-target="true"] {
+    box-shadow: inset 2px 0 0 var(--accent-9);
+}
+
+.hs-dock-tab-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.hs-dock-tab-close {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    height: 14px;
+    border-radius: 2px;
+    opacity: 0;
+    flex: 0 0 auto;
+}
+
+.hs-dock-tab:hover .hs-dock-tab-close,
+.hs-dock-tab[data-active="true"] .hs-dock-tab-close {
+    opacity: 0.75;
+}
+
+.hs-dock-tab-close:hover {
+    background: var(--qt-danger-bg);
+    color: var(--qt-danger-text);
+    opacity: 1;
+}
+
+.hs-dock-tabbar-spacer {
+    flex: 1 1 auto;
+    min-width: 8px;
+}
+
+.hs-dock-tabbar-actions {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding: 0 3px;
+    flex: 0 0 auto;
+}
+
+.hs-dock-tabbar-action {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 3px;
+    color: var(--qt-text-muted);
+}
+
+.hs-dock-tabbar-action:hover {
+    background: var(--qt-hover);
+    color: var(--qt-text);
+}
+
+/* 折叠态：只剩标签条，内容区收起到 0。 */
+.hs-dock-tabset[data-collapsed="true"] .hs-dock-slot {
+    display: none;
+}
+
+.hs-dock-slot {
+    position: relative;
+    flex: 1 1 0;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+}
+
+/* 宿主被搬进来后填满槽位；尺寸由 `panelHostRegistry` 管理。 */
+.hs-dock-slot > [data-dock-host] {
+    width: 100%;
+    height: 100%;
+}
+
+/* ── 浮动窗体 ───────────────────────────────────────────────────── */
+
+.hs-dock-float {
+    position: fixed;
+    display: flex;
+    flex-direction: column;
+    min-width: 160px;
+    min-height: 120px;
+    background: var(--qt-window);
+    border: 1px solid var(--qt-border);
+    border-radius: 4px;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+    overflow: hidden;
+}
+
+.hs-dock-float[data-active="true"] {
+    border-color: var(--accent-8);
+}
+
+.hs-dock-float[data-maximized="true"] {
+    border-radius: 0;
+}
+
+.hs-dock-float[data-minimized="true"] {
+    height: 28px !important;
+    min-height: 28px;
+}
+
+.hs-dock-float-title {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: 0 0 auto;
+    height: 28px;
+    padding: 0 4px 0 8px;
+    background: var(--qt-panel);
+    border-bottom: 1px solid var(--qt-border);
+    font-size: 11px;
+    color: var(--qt-text);
+    user-select: none;
+    cursor: default;
+}
+
+.hs-dock-float[data-minimized="true"] .hs-dock-float-body {
+    display: none;
+}
+
+.hs-dock-float-body {
+    position: relative;
+    flex: 1 1 0;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.hs-dock-float-handle {
+    position: absolute;
+    z-index: 2;
+}
+
+.hs-dock-float-handle[data-edge="n"] { top: -3px; left: 6px; right: 6px; height: 7px; cursor: ns-resize; }
+.hs-dock-float-handle[data-edge="s"] { bottom: -3px; left: 6px; right: 6px; height: 7px; cursor: ns-resize; }
+.hs-dock-float-handle[data-edge="w"] { left: -3px; top: 6px; bottom: 6px; width: 7px; cursor: ew-resize; }
+.hs-dock-float-handle[data-edge="e"] { right: -3px; top: 6px; bottom: 6px; width: 7px; cursor: ew-resize; }
+.hs-dock-float-handle[data-edge="nw"] { top: -3px; left: -3px; width: 12px; height: 12px; cursor: nwse-resize; }
+.hs-dock-float-handle[data-edge="ne"] { top: -3px; right: -3px; width: 12px; height: 12px; cursor: nesw-resize; }
+.hs-dock-float-handle[data-edge="sw"] { bottom: -3px; left: -3px; width: 12px; height: 12px; cursor: nesw-resize; }
+.hs-dock-float-handle[data-edge="se"] { bottom: -3px; right: -3px; width: 12px; height: 12px; cursor: nwse-resize; }
+
+/* ── 拖拽覆盖层 ─────────────────────────────────────────────────── */
+
+.hs-dock-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 9000;
+    pointer-events: none;
+}
+
+.hs-dock-drop-preview {
+    position: fixed;
+    background: var(--accent-a4);
+    border: 2px solid var(--accent-9);
+    border-radius: 3px;
+    pointer-events: none;
+}
+
+.hs-dock-ghost {
+    position: fixed;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    max-width: 220px;
+    padding: 3px 8px;
+    border-radius: 3px;
+    background: var(--qt-panel);
+    border: 1px solid var(--accent-9);
+    color: var(--qt-text);
+    font-size: 11px;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+    pointer-events: none;
+    white-space: nowrap;
+}
+
+.hs-dock-ghost[data-intent="float"] {
+    border-style: dashed;
+    border-color: var(--qt-border);
+    color: var(--qt-text-muted);
+}
+
+/* 拖拽期间禁用全局文本选择，避免拖动时把标签文字刷成选区。 */
+body[data-dock-dragging="true"] {
+    user-select: none;
+}
+
+body[data-dock-dragging="true"] iframe {
+    pointer-events: none;
+}
+
+/* ── 沟槽分隔条（面板内部的固定宽/高分区）───────────────────────── */
+
+.hs-dock-gutter {
+    flex: 0 0 auto;
+    position: relative;
+    background: transparent;
+    transition: background 90ms linear;
+}
+
+.hs-dock-gutter[data-dir="col"] {
+    width: 5px;
+    cursor: col-resize;
+    margin-left: -2px;
+    margin-right: -3px;
+    z-index: 5;
+}
+
+.hs-dock-gutter[data-dir="col"]::after {
+    content: "";
+    position: absolute;
+    inset: 0 -3px;
+}
+
+.hs-dock-gutter[data-dir="row"] {
+    height: 5px;
+    cursor: row-resize;
+    margin-top: -2px;
+    margin-bottom: -3px;
+    z-index: 5;
+}
+
+.hs-dock-gutter:hover,
+.hs-dock-gutter[data-dragging="true"] {
+    background: var(--accent-8);
+}
+
+/* ── 单标签抓手 ─────────────────────────────────────────────────── */
+
+/*
+ * 单标签且不显示标签条时的极窄抓手：给用户一个能抓住拖出去的地方，
+ * 同时几乎不占视觉空间（时间轴这类面板自带标题栏，26px 的标签条太浪费）。
+ */
+.hs-dock-grip {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    height: 12px;
+    color: var(--qt-text-muted);
+    background: var(--qt-window);
+    opacity: 0.35;
+    user-select: none;
+    cursor: default;
+}
+
+.hs-dock-grip:hover {
+    opacity: 0.9;
+    background: var(--qt-panel);
+}

@@ -1,5 +1,6 @@
 import { configureStore } from "@reduxjs/toolkit";
 import sessionReducer from "../features/session/sessionSlice";
+import dockReducer from "../features/dock/dockSlice";
 import fileBrowserReducer from "../features/fileBrowser/fileBrowserSlice";
 import keybindingsReducer, {
     keybindingsPersistenceMiddleware,
@@ -10,6 +11,10 @@ import recordingReducer from "../features/recording/recordingSlice";
 export const store = configureStore({
     reducer: {
         session: sessionReducer,
+        // 停靠布局独立成切片：它不参与工程会话（不写工程文件、不进工程撤销），
+        // 放进 session 只会让它跟着 `persistUiSettings` 的大 payload 一起流动，
+        // 还会与工程切换耦合。
+        dock: dockReducer,
         fileBrowser: fileBrowserReducer,
         keybindings: keybindingsReducer,
         notebook: notebookReducer,

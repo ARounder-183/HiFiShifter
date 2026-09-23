@@ -48,7 +48,13 @@ export interface PanelDefinition {
     titleKey: string;
     /** 标签条上的图标。 */
     icon?: ComponentType;
-    component: ComponentType<DockPanelProps>;
+    /**
+     * 面板组件。
+     *
+     * 可缺省：内置面板的 props 由宿主提供（见 `panelRenderer`），注册表只登记
+     * 元信息；将来的插件面板若自带全部状态，则在这里给出组件即可。
+     */
+    component?: ComponentType<DockPanelProps>;
     /** 浮动时的默认尺寸。 */
     defaultWidth: number;
     defaultHeight: number;
@@ -73,6 +79,7 @@ export interface PanelDefinition {
 
 const registry = new Map<string, PanelDefinition>();
 const listeners = new Set<() => void>();
+let version = 0;
 
 /** 注册一个面板。重复 id 直接覆盖并告警（热更新时会重放注册）。 */
 export function registerPanel(definition: PanelDefinition): void {
@@ -80,7 +87,13 @@ export function registerPanel(definition: PanelDefinition): void {
         console.warn(`[dock] panel "${definition.id}" registered twice; replacing`);
     }
     registry.set(definition.id, definition);
+    version += 1;
     for (const listener of listeners) listener();
+}
+
+/** 注册表版本号：`useSyncExternalStore` 的快照。 */
+export function getPanelRegistryVersion(): number {
+    return version;
 }
 
 export function getPanel(panelId: string): PanelDefinition | undefined {
@@ -109,4 +122,5 @@ export function subscribePanels(listener: () => void): () => void {
 export function resetPanelRegistryForTests(): void {
     registry.clear();
     listeners.clear();
+    version = 0;
 }

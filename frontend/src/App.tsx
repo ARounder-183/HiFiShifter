@@ -1,5 +1,5 @@
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Flex, Box, Text, Dialog, Button } from "@radix-ui/themes";
+import { Flex, Text, Dialog, Button } from "@radix-ui/themes";
 import { MenuBar } from "./components/layout/MenuBar";
 import { ActionBar } from "./components/layout/ActionBar";
 import { TimelinePanel } from "./components/layout/TimelinePanel";
@@ -10,7 +10,6 @@ import { settingsApi } from "./services/api/settings";
 import { fileBrowserApi } from "./services/api/fileBrowser";
 import { IS_LINUX } from "./utils/platform";
 import { allowsNativeTextSelection, isEditableTarget } from "./utils/nativeSelectionGuards";
-import { shouldSuppressHoverSideEffects } from "./utils/penInput";
 import { clipboardErrorKey } from "./utils/clipboardError";
 import {
     closeVocalShifterSkippedFilesDialog,
@@ -62,11 +61,27 @@ import { useHistoryStateListener } from "./hooks/useHistoryStateListener";
 import { PitchAnalysisProvider, usePitchAnalysis } from "./contexts/PitchAnalysisContext";
 import { PianoRollStatusProvider, usePianoRollStatus } from "./contexts/PianoRollStatusContext";
 import { FileBrowserPanel } from "./components/layout/FileBrowserPanel";
+import { UndoHistoryPanel } from "./components/layout/UndoHistoryPanel";
+import { DockRoot } from "./components/dock/DockRoot";
+import { registerBuiltinPanels } from "./components/dock/registerBuiltinPanels";
+import {
+    PANEL_FILE_BROWSER,
+    PANEL_NOTEBOOK,
+    PANEL_PARAM_EDITOR,
+    PANEL_TIMELINE,
+    PANEL_UNDO_HISTORY,
+} from "./components/dock/registerBuiltinPanels";
+import { setPanelRenderer } from "./features/dock/panelRenderer";
+import { finalizeDockHydration, loadDockSettings, persistDockSettings } from "./features/dock/dockThunks";
+
+// 面板注册必须在首次渲染前完成：布局归一化要按注册表判定"这个面板还在不在"。
+registerBuiltinPanels();
+
 // 记事本按需加载：TipTap/ProseMirror/Turndown 加起来几百 KB，只有真正打开
 // 记事本时才需要 —— 静态导入会把这些全塞进首屏主包。
-const NotebookDock = lazy(() =>
-    import("./components/layout/notebook/NotebookDock").then((module) => ({
-        default: module.NotebookDock,
+const NotebookPanel = lazy(() =>
+    import("./components/layout/notebook/NotebookPanel").then((module) => ({
+        default: module.NotebookPanel,
     })),
 );
 // 记事本自带的错误边界与按需加载放在一起：动态 chunk 加载失败或模块求值抛错
@@ -462,8 +477,6 @@ function AppInner() {
 
     const runtimeIsPlaying = useAppSelector((state) => state.session.runtime.isPlaying);
     const runtimeHasSynthesized = useAppSelector((state) => state.session.runtime.hasSynthesized);
-    const fileBrowserVisible = useAppSelector((state) => state.fileBrowser.visible);
-    const notebookVisible = useAppSelector((state) => state.notebook.visible);
     const toolMode = useAppSelector((state) => state.session.toolMode);
     const drawToolMode = useAppSelector((state) => state.session.drawToolMode);
     const projectDirty = useAppSelector((state) => state.session.project.dirty);
@@ -502,15 +515,10 @@ function AppInner() {
         (state) => state.session.saveVersionConflictDialog,
     );
 
-    const containerRef = useRef<HTMLDivElement | null>(null);
-    const dragRef = useRef<{ pointerId: number } | null>(null);
-    const [splitRatio, setSplitRatio] = useState(() => {
-        const stored = Number(localStorage.getItem("hifishifter.splitRatio"));
-        return Number.isFinite(stored) ? Math.min(0.85, Math.max(0.15, stored)) : 0.6;
-    });
-    const splitRatioRef = useRef(splitRatio);
-    const [isDragging, setIsDragging] = useState(false);
     const [quickSearchOpen, setQuickSearchOpen] = useState(false);
+    const dockLayout = useAppSelector((state) => state.dock.layout);
+    const dockSettings = useAppSelector((state) => state.dock.settings);
+    const dockHydrated = useAppSelector((state) => state.dock.hydrated);
     const [autoBackupSettings, setAutoBackupSettings] = useState<AutoBackupSettings>(
         DEFAULT_AUTO_BACKUP_SETTINGS,
     );
@@ -707,91 +715,6 @@ function AppInner() {
     const handleImportTargetDragDropChange = useCallback((v: string) => {
         setMidiImportTargetDragDrop(v);
         settingsApi.saveUiSettings({ midiImportTargetDragDrop: v });
-    }, []);
-
-    const splitter = useMemo(() => {
-        const minTopPx = 200;
-        const minBottomPx = 150;
-        const handlePx = 8;
-
-        function clamp(v: number, minV: number, maxV: number) {
-            return Math.min(maxV, Math.max(minV, v));
-        }
-
-        // 提取纯计算逻辑，不在此处触发 React 状态更新
-        function calculateRatio(clientY: number) {
-            const el = containerRef.current;
-            if (!el) return null;
-            const rect = el.getBoundingClientRect();
-            const total = rect.height;
-            if (!Number.isFinite(total) || total <= minTopPx + minBottomPx + handlePx) {
-                return null;
-            }
-            const y = clientY - rect.top;
-            const maxTop = total - handlePx - minBottomPx;
-            const nextTop = clamp(y, minTopPx, maxTop);
-            return clamp(nextTop / total, 0.15, 0.85);
-        }
-
-        function onPointerMove(e: PointerEvent) {
-            if (!dragRef.current) return;
-            const nextRatio = calculateRatio(e.clientY);
-            if (nextRatio === null) return;
-
-            // 拖拽时直接修改 DOM 的 flexGrow，绕过 React 重绘
-            const container = containerRef.current;
-            if (container && container.children.length >= 3) {
-                const topPanel = container.children[0] as HTMLElement;
-                const bottomPanel = container.children[2] as HTMLElement;
-                topPanel.style.flexGrow = String(nextRatio);
-                bottomPanel.style.flexGrow = String(1 - nextRatio);
-            }
-
-            splitRatioRef.current = nextRatio;
-        }
-
-        function endDrag() {
-            if (!dragRef.current) return;
-            dragRef.current = null;
-            setIsDragging(false);
-
-            // 只在松开鼠标的最后一刻，才把最终状态同步给 React 并持久化
-            setSplitRatio(splitRatioRef.current);
-            localStorage.setItem("hifishifter.splitRatio", String(splitRatioRef.current));
-
-            window.removeEventListener("pointermove", onPointerMove);
-            window.removeEventListener("pointerup", endDrag);
-            window.removeEventListener("pointercancel", endDrag);
-        }
-
-        function startDrag(e: React.PointerEvent<HTMLDivElement>) {
-            // 数位笔 / 触摸不触发分割条：8px 窄条 + 按下即生效，画线起止贴近
-            // 面板边界时极易误扫；布局调整保留给鼠标。
-            if (shouldSuppressHoverSideEffects(e.nativeEvent)) return;
-            if (e.button !== 0) return;
-            dragRef.current = { pointerId: e.pointerId };
-            setIsDragging(true);
-            (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
-
-            // 按下的瞬间也走一次 DOM 直通更新
-            const nextRatio = calculateRatio(e.clientY);
-            if (nextRatio !== null) {
-                splitRatioRef.current = nextRatio;
-                const container = containerRef.current;
-                if (container && container.children.length >= 3) {
-                    const topPanel = container.children[0] as HTMLElement;
-                    const bottomPanel = container.children[2] as HTMLElement;
-                    topPanel.style.flexGrow = String(nextRatio);
-                    bottomPanel.style.flexGrow = String(1 - nextRatio);
-                }
-            }
-
-            window.addEventListener("pointermove", onPointerMove);
-            window.addEventListener("pointerup", endDrag);
-            window.addEventListener("pointercancel", endDrag);
-        }
-
-        return { startDrag };
     }, []);
 
     const statusText = useMemo(() => {
@@ -1765,6 +1688,11 @@ function AppInner() {
         void dispatch(refreshRuntime());
         void dispatch(loadUiSettings());
         void dispatch(loadRecordingSettings());
+        void dispatch(loadDockSettings()).then(() => {
+            // 归一化与面板注册都已完成，此时才能安全处理"套用启动预设"与
+            // "把浮窗收回停靠位"这两件事（见 `finalizeDockHydration`）。
+            finalizeDockHydration(dispatch, store.getState);
+        });
     }, [dispatch]);
 
     useEffect(() => {
@@ -3235,22 +3163,6 @@ function AppInner() {
         sessionClips,
     ]);
 
-    useEffect(() => {
-        splitRatioRef.current = splitRatio;
-    }, [splitRatio]);
-
-    useEffect(() => {
-        if (!isDragging) return;
-        const prevCursor = document.body.style.cursor;
-        const prevSelect = document.body.style.userSelect;
-        document.body.style.cursor = "ns-resize";
-        document.body.style.userSelect = "none";
-        return () => {
-            document.body.style.cursor = prevCursor;
-            document.body.style.userSelect = prevSelect;
-        };
-    }, [isDragging]);
-
     const sourceFileSearchMatchTotal = sourceFileChangedDialog.changes.reduce(
         (total, item) =>
             item.action === "pending" || item.action === "failed"
@@ -3293,6 +3205,82 @@ function AppInner() {
     const sourceFileAnyProcessing = sourceFileChangedDialog.changes.some(
         (item) => item.action === "processing",
     );
+
+    // ── 布局持久化 ──────────────────────────────────────────────────
+    //
+    // 去抖后写回：拖分隔条/移浮窗会在松手瞬间各触发一次布局变化，而后端
+    // `save_ui_settings` 是"读-改-写整个配置文件 + 原子替换 + 备份"（约 8 次
+    // 文件操作），不宜按次调用。
+    //
+    // 【闸门】必须等 `hydrated` 为真：切片初始状态是出厂布局，若在读到磁盘
+    // 内容之前就写回，用户的布局会被默认值覆盖 —— 也就是"打开应用发现界面
+    // 被重置"这类最恼人的故障。
+    useEffect(() => {
+        if (!dockHydrated) return;
+        const timer = window.setTimeout(() => {
+            void dispatch(persistDockSettings());
+        }, dockSettings.saveDebounceMs);
+        return () => window.clearTimeout(timer);
+    }, [dockLayout, dockSettings, dockHydrated, dispatch]);
+
+    // ── 面板渲染函数登记 ─────────────────────────────────────────────
+    //
+    // 停靠系统只负责"把面板摆在哪儿"，面板需要什么 props 仍由 App 提供 ——
+    // 这些状态（MIDI 导入对话框、文件浏览器的关闭回调等）的所有者自始至终
+    // 是 App，搬进注册表只会变成第二份拷贝。写在渲染期是安全的：写入幂等，
+    // 且读取发生在同一趟渲染里更靠后的子组件（见 `panelRenderer` 注释）。
+    setPanelRenderer(PANEL_TIMELINE, () => (
+        <TimelinePanel
+            midiClipDialogOpen={midiClipDialogOpen}
+            midiClipPath={midiClipPath}
+            midiClipStartSec={midiClipStartSec}
+            midiClipTrackId={midiClipTrackId}
+            midiClipClipboardGuid={midiClipClipboardGuid}
+            fillGaps={fillGaps}
+            multiTrackMerge={multiTrackMerge}
+            importBpmAsProject={importBpmAsProject}
+            noteBpmMode={noteBpmMode}
+            specifiedBpm={specifiedBpm}
+            importPosition={importPosition}
+            closeLeadingGap={closeLeadingGap}
+            onMidiClipDialogOpenChange={setMidiClipDialogOpen}
+            onMidiClipPathChange={setMidiClipPath}
+            onMidiClipStartSecChange={setMidiClipStartSec}
+            onMidiClipTrackIdChange={setMidiClipTrackId}
+            onFillGapsChange={handleFillGapsChange}
+            onMultiTrackMergeChange={handleMultiTrackMergeChange}
+            onImportBpmAsProjectChange={handleImportBpmAsProjectChange}
+            onNoteBpmModeChange={handleNoteBpmModeChange}
+            onSpecifiedBpmChange={handleSpecifiedBpmChange}
+            onImportPositionChange={handleImportPositionChange}
+            onCloseLeadingGapChange={handleCloseLeadingGapChange}
+            importTempoMapEnabled={importTempoMapEnabled}
+            onImportTempoMapEnabledChange={handleImportTempoMapEnabledChange}
+            importTempoMapTempo={importTempoMapTempo}
+            onImportTempoMapTempoChange={handleImportTempoMapTempoChange}
+            importTempoMapTimeSignature={importTempoMapTimeSignature}
+            onImportTempoMapTimeSignatureChange={handleImportTempoMapTimeSignatureChange}
+            importTempoMapKeySignature={importTempoMapKeySignature}
+            onImportTempoMapKeySignatureChange={handleImportTempoMapKeySignatureChange}
+            midiDialogSource={midiDialogSource}
+            onMidiDialogSourceChange={setMidiDialogSource}
+            importTargetMenu={midiImportTargetMenu}
+            onImportTargetMenuChange={handleImportTargetMenuChange}
+            importTargetDragDrop={midiImportTargetDragDrop}
+            onImportTargetDragDropChange={handleImportTargetDragDropChange}
+        />
+    ));
+    setPanelRenderer(PANEL_PARAM_EDITOR, () => <PianoRollPanel />);
+    setPanelRenderer(PANEL_FILE_BROWSER, () => <FileBrowserPanel />);
+    setPanelRenderer(PANEL_UNDO_HISTORY, () => <UndoHistoryPanel />);
+    // 记事本走 Suspense：TipTap 那几百 KB 只在真正打开时才拉取。
+    setPanelRenderer(PANEL_NOTEBOOK, () => (
+        <Suspense fallback={null}>
+            <NotebookErrorBoundary>
+                <NotebookPanel />
+            </NotebookErrorBoundary>
+        </Suspense>
+    ));
 
     return (
         <Flex
@@ -3872,96 +3860,16 @@ function AppInner() {
             />
             <ActionBar />
 
-            {/* Main Content Area: Splitter + optional right-side panels */}
-            <Flex className="flex-1 min-h-0">
-                {/* Left: Timeline / PianoRoll vertical splitter */}
-                <div ref={containerRef} className="flex-1 min-w-0 min-h-0 flex flex-col">
-                    {/* Top: Timeline / Tracks */}
-                    <Box
-                        className="min-h-[200px] border-b border-qt-border relative bg-qt-base"
-                        style={{ flexGrow: splitRatio, flexBasis: 0 }}
-                    >
-                        <TimelinePanel
-                            midiClipDialogOpen={midiClipDialogOpen}
-                            midiClipPath={midiClipPath}
-                            midiClipStartSec={midiClipStartSec}
-                            midiClipTrackId={midiClipTrackId}
-                            midiClipClipboardGuid={midiClipClipboardGuid}
-                            fillGaps={fillGaps}
-                            multiTrackMerge={multiTrackMerge}
-                            importBpmAsProject={importBpmAsProject}
-                            noteBpmMode={noteBpmMode}
-                            specifiedBpm={specifiedBpm}
-                            importPosition={importPosition}
-                            closeLeadingGap={closeLeadingGap}
-                            onMidiClipDialogOpenChange={setMidiClipDialogOpen}
-                            onMidiClipPathChange={setMidiClipPath}
-                            onMidiClipStartSecChange={setMidiClipStartSec}
-                            onMidiClipTrackIdChange={setMidiClipTrackId}
-                            onFillGapsChange={handleFillGapsChange}
-                            onMultiTrackMergeChange={handleMultiTrackMergeChange}
-                            onImportBpmAsProjectChange={handleImportBpmAsProjectChange}
-                            onNoteBpmModeChange={handleNoteBpmModeChange}
-                            onSpecifiedBpmChange={handleSpecifiedBpmChange}
-                            onImportPositionChange={handleImportPositionChange}
-                            onCloseLeadingGapChange={handleCloseLeadingGapChange}
-                            importTempoMapEnabled={importTempoMapEnabled}
-                            onImportTempoMapEnabledChange={handleImportTempoMapEnabledChange}
-                            importTempoMapTempo={importTempoMapTempo}
-                            onImportTempoMapTempoChange={handleImportTempoMapTempoChange}
-                            importTempoMapTimeSignature={importTempoMapTimeSignature}
-                            onImportTempoMapTimeSignatureChange={
-                                handleImportTempoMapTimeSignatureChange
-                            }
-                            importTempoMapKeySignature={importTempoMapKeySignature}
-                            onImportTempoMapKeySignatureChange={
-                                handleImportTempoMapKeySignatureChange
-                            }
-                            midiDialogSource={midiDialogSource}
-                            onMidiDialogSourceChange={setMidiDialogSource}
-                            importTargetMenu={midiImportTargetMenu}
-                            onImportTargetMenuChange={handleImportTargetMenuChange}
-                            importTargetDragDrop={midiImportTargetDragDrop}
-                            onImportTargetDragDropChange={handleImportTargetDragDropChange}
-                        />
-                    </Box>
-
-                    {/* Splitter */}
-                    <div
-                        className="h-2 bg-qt-window border-y border-qt-border cursor-ns-resize shrink-0"
-                        onPointerDown={splitter.startDrag}
-                        role="separator"
-                        aria-orientation="horizontal"
-                        aria-label={t("aria_resize_panels")}
-                    />
-
-                    {/* Bottom: Parameter / Piano Roll */}
-                    <Box
-                        className="min-h-[150px] relative bg-qt-base"
-                        style={{ flexGrow: 1 - splitRatio, flexBasis: 0 }}
-                    >
-                        <PianoRollPanel />
-                    </Box>
-                </div>
-
-                {(fileBrowserVisible || notebookVisible) && (
-                    <Flex className="shrink-0 min-h-0 border-l border-qt-border bg-qt-window">
-                        {fileBrowserVisible ? (
-                            <div className="w-[280px] shrink-0 border-r border-qt-border bg-qt-window flex flex-col">
-                                <FileBrowserPanel />
-                            </div>
-                        ) : null}
-                        {notebookVisible ? (
-                            <Suspense fallback={null}>
-                                <NotebookErrorBoundary>
-                                    <NotebookDock />
-                                </NotebookErrorBoundary>
-                            </Suspense>
-                        ) : null}
-                    </Flex>
-                )}
-            </Flex>
-
+            {/*
+              * 工作区：全部可停靠窗体由布局树驱动。
+              *
+              * 这里取代了原先写死的"时间轴 / 分隔条 / 参数编辑器 + 右侧固定宽度栏"
+              * 结构。每个面板的组件实例只挂载一次，靠搬 DOM 宿主换位置（见
+              * `components/dock/panelHostRegistry`），因此停靠重排不会重建
+              * WebGL 上下文、不会丢滚动位置。面板自己的 props 由
+              * `usePanelRenderers` 注入，App 仍是这些状态的唯一所有者。
+              */}
+            <DockRoot />
             {/* Quick Search Popup */}
             <QuickSearchPopup open={quickSearchOpen} onClose={() => setQuickSearchOpen(false)} />
 

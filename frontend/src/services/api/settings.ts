@@ -1,5 +1,6 @@
 import { invoke } from "../invoke";
 import type { NotebookSettings } from "../../components/layout/notebook/notebookSettings";
+import type { DockPersistedSettings } from "../../features/dock/dockSettings";
 import type { TimelineSnapSettings } from "../../features/session/sessionTypes";
 
 export type StretchAlgorithmOption = "linear" | "signalsmith" | "soundtouch";
@@ -208,6 +209,15 @@ export interface UiSettings {
      * `components/layout/notebook/notebookSettings.ts`）。
      */
     notebook?: NotebookSettings;
+    /**
+     * 停靠窗体系统设置与布局。可缺省 —— 旧配置文件没有这一项，前端用
+     * `normalizeDockSettings` / `normalizeDockLayout` 补默认值（见
+     * `features/dock/dockSettings.ts` 与 `features/dock/dockSchema.ts`）。
+     *
+     * 行为选项与整份布局同处一个对象：后端 `save_ui_settings` 是"读-改-写整个
+     * 配置文件"，一次写入同时落盘两者可以少一轮文件往返，也少一个并发窗口。
+     */
+    dock?: DockPersistedSettings;
     customScalePresets?: Array<{
         id: string;
         name: string;

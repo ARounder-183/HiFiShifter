@@ -1,0 +1,73 @@
+/*
+ * 把窗体的 DOM 宿主搬进一个槽位的共享逻辑。
+ *
+ * 停靠标签组与浮动窗都需要同一件事：槽位渲染出来是空的，真实面板 DOM 由
+ * 本 hook 从 `panelHostRegistry` 搬进来；切走时把旧宿主送回停泊区（而不是
+ * 让它留在槽位里继续占位）。两处若各写一份，"停靠态正常、浮动态白屏"这类
+ * 分叉几乎必然出现，所以收敛到这一个 hook。
+ */
+
+import { useEffect, useLayoutEffect, useRef, useSyncExternalStore } from "react";
+
+import { useAppSelector } from "../../app/hooks";
+import { getPanel } from "../../features/dock/panelRegistry";
+import {
+    acquirePanelHost,
+    attachPanelHost,
+    getPanelHostVersion,
+    parkPanelHost,
+    subscribePanelHosts,
+} from "./panelHostRegistry";
+
+/** 面板定义里的尺寸兜底（停泊时用，避免停泊区里 0 尺寸）。 */
+export function panelFallbackSize(panelId: string): { w: number; h: number } {
+    const definition = getPanel(panelId);
+    return { w: definition?.defaultWidth ?? 420, h: definition?.defaultHeight ?? 320 };
+}
+
+/**
+ * 返回应当挂载到内容区的槽位 ref。
+ *
+ * `formId` 为 null 表示当前没有窗体（空槽位）—— 旧宿主会被送回停泊区。
+ */
+export function useDockSlot(formId: string | null): React.RefObject<HTMLDivElement | null> {
+    const slotRef = useRef<HTMLDivElement | null>(null);
+    const forms = useAppSelector((s) => s.dock.layout.forms);
+    // 宿主集合变化（新窗体首次出现）时重试搬家。
+    useSyncExternalStore(subscribePanelHosts, getPanelHostVersion, getPanelHostVersion);
+    const previousRef = useRef<string | null>(null);
+
+    useLayoutEffect(() => {
+        const slot = slotRef.current;
+        const previous = previousRef.current;
+
+        if (previous && previous !== formId) {
+            const panelId = forms[previous]?.panelId;
+            parkPanelHost(previous, panelFallbackSize(panelId ?? previous));
+            previousRef.current = null;
+        }
+
+        if (!slot || !formId) return;
+        // 宿主可能尚未创建（`PanelMount` 的 effect 还没跑）——`acquirePanelHost`
+        // 会按需创建，随后的 `subscribePanelHosts` 通知会让本 effect 重跑。
+        acquirePanelHost(formId);
+        attachPanelHost(formId, slot);
+        previousRef.current = formId;
+    }, [formId, forms]);
+
+    // 槽位卸载（面板关闭 / 树结构变化）时把宿主送回停泊区：否则宿主留在一个
+    // 已脱离文档的槽位里，再也不会被复用。
+    const formsRef = useRef(forms);
+    formsRef.current = forms;
+    useEffect(() => {
+        return () => {
+            const previous = previousRef.current;
+            if (!previous) return;
+            const panelId = formsRef.current[previous]?.panelId;
+            parkPanelHost(previous, panelFallbackSize(panelId ?? previous));
+            previousRef.current = null;
+        };
+    }, []);
+
+    return slotRef;
+}

@@ -21,7 +21,6 @@ import {
 export type NotebookMode = "rich" | "source" | "split";
 
 type NotebookState = {
-    visible: boolean;
     mode: NotebookMode;
     /**
      * 已归一化的设置。
@@ -53,7 +52,6 @@ export interface NotebookAssetSummary {
 }
 
 const initialState: NotebookState = {
-    visible: false,
     mode: "rich",
     settings: DEFAULT_NOTEBOOK_SETTINGS,
     assetIndex: {},
@@ -63,15 +61,6 @@ const notebookSlice = createSlice({
     name: "notebook",
     initialState,
     reducers: {
-        toggleNotebookVisible(state) {
-            state.visible = !state.visible;
-        },
-        openNotebook(state) {
-            state.visible = true;
-        },
-        closeNotebook(state) {
-            state.visible = false;
-        },
         setNotebookMode(state, action: PayloadAction<NotebookMode>) {
             state.mode = action.payload;
         },
@@ -99,9 +88,6 @@ const notebookSlice = createSlice({
 });
 
 export const {
-    toggleNotebookVisible,
-    openNotebook,
-    closeNotebook,
     setNotebookMode,
     setNotebookSettings,
     patchNotebookSettings,
