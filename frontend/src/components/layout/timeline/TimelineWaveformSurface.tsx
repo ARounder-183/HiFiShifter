@@ -92,7 +92,9 @@ export const TimelineWaveformSurface = React.memo(function TimelineWaveformSurfa
                     waveformTopPx: CLIP_HEADER_HEIGHT,
                     waveformHeightPx,
                     clips: sceneClips,
-                    leadingOverlapSecByClipId: computeLeadingOverlapSecByClipId([...clips]),
+                    // 直接传本轨的 clip 列表：`computeLeadingOverlapSecByClipId`
+                    // 内部已自行拷贝（它需要排序），此处再拷一次纯属浪费。
+                    leadingOverlapSecByClipId: computeLeadingOverlapSecByClipId(clips),
                 };
             }),
         [props.clipsByTrackId, props.rowHeight, props.startTrackIndex, props.tracks, showAllTakes],

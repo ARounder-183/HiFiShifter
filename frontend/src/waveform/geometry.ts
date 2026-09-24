@@ -235,6 +235,30 @@ const sliceIndexHiScratch = new Int32Array(MAX_COLUMN_GAIN_SLICES);
 const sliceTimeLoScratch = new Float64Array(MAX_COLUMN_GAIN_SLICES);
 const sliceTimeHiScratch = new Float64Array(MAX_COLUMN_GAIN_SLICES);
 
+/** 一条绘制带（band）：峰值平面 + 竖直居中与半高。 */
+interface WaveformBand {
+    min: Float32Array;
+    max: Float32Array;
+    centerY: number;
+    halfHeight: number;
+}
+
+/** 空峰值平面的占位（仅用于初始化 scratch，构建时必然被覆写）。 */
+const EMPTY_PEAKS = new Float32Array(0);
+
+/**
+ * 绘制带复用的 scratch（最多两条：单声道 1 条，立体声 2 条）。
+ *
+ * 【为什么复用】此前每段都新建一个数组字面量 + 1~2 个带对象（400 段 ≈ 600 次
+ * 分配/次重建），全是年轻代垃圾，落在渲染关键路径上。带的内容是「峰值平面 +
+ * 两个几何量」，与切片索引 scratch 同样是纯派生数据，复用即可。
+ * `buildWaveformGeometry` 同步执行，无重入风险。
+ */
+const bandScratch: [WaveformBand, WaveformBand] = [
+    { min: EMPTY_PEAKS, max: EMPTY_PEAKS, centerY: 0, halfHeight: 0 },
+    { min: EMPTY_PEAKS, max: EMPTY_PEAKS, centerY: 0, halfHeight: 0 },
+];
+
 /**
  * 波形包络列的**设备像素宽**。
  *
@@ -530,27 +554,26 @@ export function buildWaveformGeometry(args: {
         const dual = peaks.channels === 2 && peaks.ch1Min != null && peaks.ch1Max != null;
         // 双带布局：ch0 占上半带（中心 1/4）、ch1 占下半带（中心 3/4），
         // 各自包络以半带高度归一 —— 立体声素材一眼可辨。
-        const bands: {
-            min: Float32Array;
-            max: Float32Array;
-            centerY: number;
-            halfHeight: number;
-        }[] = dual
-            ? [
-                  {
-                      min: peaks.min,
-                      max: peaks.max,
-                      centerY: segment.screenRect.y + segment.screenRect.height / 4,
-                      halfHeight: halfHeight / 2,
-                  },
-                  {
-                      min: peaks.ch1Min as Float32Array,
-                      max: peaks.ch1Max as Float32Array,
-                      centerY: segment.screenRect.y + (segment.screenRect.height * 3) / 4,
-                      halfHeight: halfHeight / 2,
-                  },
-              ]
-            : [{ min: peaks.min, max: peaks.max, centerY, halfHeight }];
+        // 带对象写入模块级 scratch（见 bandScratch），稳态零分配。
+        const bandCount = dual ? 2 : 1;
+        if (dual) {
+            const upper = bandScratch[0];
+            upper.min = peaks.min;
+            upper.max = peaks.max;
+            upper.centerY = segment.screenRect.y + segment.screenRect.height / 4;
+            upper.halfHeight = halfHeight / 2;
+            const lower = bandScratch[1];
+            lower.min = peaks.ch1Min as Float32Array;
+            lower.max = peaks.ch1Max as Float32Array;
+            lower.centerY = segment.screenRect.y + (segment.screenRect.height * 3) / 4;
+            lower.halfHeight = halfHeight / 2;
+        } else {
+            const single = bandScratch[0];
+            single.min = peaks.min;
+            single.max = peaks.max;
+            single.centerY = centerY;
+            single.halfHeight = halfHeight;
+        }
 
         // ── 段作用域的常量与两个求值函数 ────────────────────────────────
         // 【为什么不放在列循环里】`absSecAtIndex` / `clipGainAtSec` 只依赖段与
@@ -605,7 +628,8 @@ export function buildWaveformGeometry(args: {
                 segment.fadeOutDir,
             );
 
-        for (const band of bands) {
+        for (let bandIndex = 0; bandIndex < bandCount; bandIndex += 1) {
+            const band = bandScratch[bandIndex];
             for (let column = firstColumn; column < lastColumn; column += 1) {
                 // 列中心（CSS 坐标）：device 中心 = (column·W + W/2)，换回 CSS。
                 const xCss = ((column + 0.5) * columnDeviceWidth) / dpr;
