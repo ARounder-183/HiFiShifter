@@ -405,6 +405,41 @@ export function findVisibleFormForPanel(layout: DockLayout, panelId: string): st
     return null;
 }
 
+/**
+ * 解析"同步时间轴视图"所需的两个窗体 —— 判据是**两个面板都可见**。
+ *
+ * 【为什么需要这个函数，以及为什么它必须被测试】偏移 = 轨道区左缘 − 参数编辑器
+ * 绘制区左缘，把参数编辑器的内容按它平移后，同一时刻会落在**同一个屏幕 x** 上。
+ * 只要两个面板同时可见，这个对齐就有意义（上下相邻是主场景；并排、或一个浮在另
+ * 一个之上同样成立 —— 偏移可正可负，负值由滚动下限兜住）。
+ *
+ * 这里曾经出过一个**静默失效**的缺陷：调用方把"时间轴窗体 id"写成了参数编辑器
+ * 自己的窗体 id，两个参数于是是同一个窗体，判定必然为假、偏移被强制为 0，
+ * 整个像素对齐功能失效，且没有任何报错。因此本函数返回**两个不同的**窗体 id，
+ * 并显式拒绝"同一个窗体"这一情形。
+ *
+ * @returns 两个窗体 id；任一不可见、或解析到同一个窗体时返回 null（调用方据此退回偏移 0）。
+ */
+export function resolveSyncOffsetForms(
+    layout: DockLayout,
+    timelinePanelId: string,
+    paramPanelId: string,
+    /** 本参数编辑器窗体的 id（多实例时由面板注入）；不属于该面板时忽略。 */
+    paramFormId?: string,
+): { timelineFormId: string; paramFormId: string } | null {
+    const timelineFormId = findVisibleFormForPanel(layout, timelinePanelId);
+    if (!timelineFormId) return null;
+
+    const injected =
+        paramFormId && layout.forms[paramFormId]?.panelId === paramPanelId ? paramFormId : null;
+    const resolvedParamFormId = injected ?? findVisibleFormForPanel(layout, paramPanelId);
+    if (!resolvedParamFormId) return null;
+    // 同一个窗体（参数写反的典型后果）：偏移没有意义，且必然算错。
+    if (resolvedParamFormId === timelineFormId) return null;
+
+    return { timelineFormId, paramFormId: resolvedParamFormId };
+}
+
 /** 找出该面板已关闭的窗体 id（用于重开时复用记录，保住标题与 props）。 */
 export function findClosedFormForPanel(layout: DockLayout, panelId: string): string | null {
     for (const formId of layout.order) {

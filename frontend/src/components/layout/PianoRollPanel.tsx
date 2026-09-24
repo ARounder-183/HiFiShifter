@@ -23,8 +23,7 @@ import {
 
 import { shallowEqual } from "react-redux";
 import { useAppDispatch, useAppSelector, useAppStore } from "../../app/hooks";
-import { areFormsVerticallyStacked } from "../../features/dock/dockTree";
-import { findVisibleFormForPanel } from "../../features/dock/dockSchema";
+import { resolveSyncOffsetForms } from "../../features/dock/dockSchema";
 import { PANEL_PARAM_EDITOR, PANEL_TIMELINE } from "../dock/registerBuiltinPanels";
 import type { RootState } from "../../app/store";
 import { useI18n } from "../../i18n/I18nProvider";
@@ -1347,27 +1346,25 @@ export const PianoRollPanel: React.FC<{
     const [timelineOffsetPx, setTimelineOffsetPx] = useState(0);
 
     /**
-     * 本面板与时间轴是否**上下堆叠**。
+     * 同步偏移是否适用 —— 判据是**两个面板都可见**。
      *
-     * 【为什么偏移必须有这个前提】同步用的左右偏移 = 轨道头宽度 − 琴键列宽度，
-     * 它只在两个面板上下对齐时才有意义（把同一个时刻画在同一屏幕 x 上）。面板
-     * 可自由停靠之后，用户可以把参数编辑器拖到别的区域、或让它浮在时间轴之上
-     * —— 此时按屏幕位置算出的偏移纯属噪声（停泊中的宿主甚至位于 −20000），
-     * 会让参数编辑器整体偏移几千像素。
+     * 【为什么不是"必须上下堆叠"】偏移 = 轨道区左缘 − 参数编辑器绘制区左缘，把参数
+     * 编辑器的内容按它平移后，同一时刻会落在**同一个屏幕 x** 上。只要两个面板同时
+     * 可见，这个对齐就有意义（上下相邻是主场景，并排或一个浮在另一个之上同样成立：
+     * 偏移可正可负，负值由 `minScrollLeft = -offset` 兜住）。
      *
-     * 不堆叠时退回偏移 0：同步的语义是"两个面板看同一段时间"，像素对齐只是
-     * 堆叠时的额外好处。
+     * 早期实现把第一个参数写成了 `dockFormId`（本面板自己的窗体 id），两个参数于是
+     * 是同一个窗体 —— 判定必然为假、偏移被强制为 0，"同步时间轴视图"的像素对齐因此
+     * **整个失效**。这里改为分别取时间轴与本面板的窗体 id，并只要求"都可见"。
      */
     const dockLayout = useAppSelector((state) => state.dock.layout);
-    const stackedWithTimeline = useMemo(() => {
-        const upper = dockFormId ?? findVisibleFormForPanel(dockLayout, PANEL_TIMELINE);
-        const lower =
-            dockFormId && dockFormId !== upper
-                ? dockFormId
-                : findVisibleFormForPanel(dockLayout, PANEL_PARAM_EDITOR);
-        if (!upper || !lower) return false;
-        return areFormsVerticallyStacked(dockLayout, upper, lower);
-    }, [dockFormId, dockLayout]);
+    const syncOffsetApplicable = useMemo(
+        () =>
+            resolveSyncOffsetForms(dockLayout, PANEL_TIMELINE, PANEL_PARAM_EDITOR, dockFormId) !==
+            null,
+        [dockFormId, dockLayout],
+    );
+
     // 待落地的同步视口：**只记缩放**。位置在落地时直接取共享视口的当前值（权威且最新），
     // 不再捕获快照——见下方落地 effect 的说明（捕获值 + 比对 React state 的老做法会在
     // state 被同期写入点覆盖时静默取消落地，造成随机错位）。
@@ -1398,8 +1395,8 @@ export const PianoRollPanel: React.FC<{
     // 因此这里：测不到就保持上一次的有效值，并在后续帧重试（时间轴元素可能刚出现）；
     // 每次重测都重新绑定观察器，元素后出现时也能补上。
     useLayoutEffect(() => {
-        // 不堆叠：偏移没有意义，固定为 0 并停止任何重试/观察。
-        if (!stackedWithTimeline) {
+        // 时间轴不可见（或本面板不可见）：偏移没有意义，固定为 0 并停止重试/观察。
+        if (!syncOffsetApplicable) {
             timelineOffsetRef.current = 0;
             setTimelineOffsetPx((prev) => (prev === 0 ? prev : 0));
             return;
@@ -1493,7 +1490,7 @@ export const PianoRollPanel: React.FC<{
         // 完全不变** —— 那样 ResizeObserver 不会触发，本 effect 若只挂载时跑一次，
         // 偏移就永远停在旧布局测出的值（实测：两面板相差数百像素，且只在恰好发生
         // 一次尺寸变化时才自愈）。因此布局一变就重测。
-    }, [stackedWithTimeline, dockLayout]);
+    }, [syncOffsetApplicable, dockLayout]);
 
     // BPM 变化时，按比例调 ?scrollLeft，保持视口中心点的秒数不 ?
     // scrollLeft_new = scrollLeft_old × (bpm_old / bpm_new)

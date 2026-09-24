@@ -13,13 +13,9 @@ import {
     normalizeDockLayout,
     openPanelInLayout,
     placeForm,
+    resolveSyncOffsetForms,
 } from "./dockSchema.ts";
-import {
-    areFormsVerticallyStacked,
-    collectTabsets,
-    findTabsetOfForm,
-    isFormVisible,
-} from "./dockTree.ts";
+import { collectTabsets, findTabsetOfForm, isFormVisible } from "./dockTree.ts";
 import { registerPanel, resetPanelRegistryForTests } from "./panelRegistry.ts";
 import type { DockSplitNode, DockTabsetNode } from "./dockTypes.ts";
 
@@ -431,54 +427,32 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
         );
     }
 
-    // ── 上下堆叠判定：参数编辑器的同步偏移只在堆叠时有意义 ─────────
+    // ── 同步偏移适用性：两个面板都可见即可 ─────────────────────────
     //
-    // 偏移 = 轨道头宽度 − 琴键列宽度，只在两个面板上下对齐时才是"把同一时刻画在
-    // 同一屏幕 x 上"。面板可自由停靠后，它们可能左右并排、同组标签、或一个浮在
-    // 上面 —— 此时按屏幕位置算偏移纯属噪声（停泊中的宿主甚至位于 −20000），
-    // 必须退回 0。
+    // 用户报告："只要时间轴与参数编辑器同屏，则这个功能应该尝试将两者对齐"。
+    // 这里曾有一个**静默失效**的缺陷：调用方把"时间轴窗体 id"写成了参数编辑器
+    // 自己的窗体 id，两个参数于是是同一个窗体，判定必然为假、偏移被强制为 0，
+    // 整个像素对齐失效且没有任何报错。因此本组用例同时钉住"两个 id 必须不同"。
     {
-        const splitTree = (dir: "row" | "col") =>
-            normalizeDockLayout({
-                schema: 1,
-                tree: {
-                    t: "split",
-                    id: "z1",
-                    dir,
-                    ratio: 0.6,
-                    fixed: null,
-                    a: { t: "tabset", id: "z2", tabs: ["timeline"], active: "timeline" },
-                    b: { t: "tabset", id: "z3", tabs: ["paramEditor"], active: "paramEditor" },
-                },
-                forms: {
-                    timeline: { id: "timeline", panelId: "timeline" },
-                    paramEditor: { id: "paramEditor", panelId: "paramEditor" },
-                },
-            });
-
+        const layout = ensureRegisteredPanels(createDefaultDockLayout());
+        const resolved = resolveSyncOffsetForms(layout, "timeline", "paramEditor");
         assertEqual(
-            areFormsVerticallyStacked(splitTree("col"), "timeline", "paramEditor"),
-            true,
-            "a vertical split counts as stacked",
-        );
-        assertEqual(
-            areFormsVerticallyStacked(splitTree("col"), "paramEditor", "timeline"),
-            false,
-            "order matters: the upper form must actually be above",
-        );
-        assertEqual(
-            areFormsVerticallyStacked(splitTree("row"), "timeline", "paramEditor"),
-            false,
-            "side by side is not stacked",
+            resolved,
+            { timelineFormId: "timeline", paramFormId: "paramEditor" },
+            "the default stacked layout resolves two DISTINCT forms",
         );
 
-        const sameTabset = normalizeDockLayout({
+        // 并排 / 浮动同样成立：判据是"都可见"，不是"必须上下堆叠"。
+        const sideBySide = normalizeDockLayout({
             schema: 1,
             tree: {
-                t: "tabset",
+                t: "split",
                 id: "z1",
-                tabs: ["timeline", "paramEditor"],
-                active: "timeline",
+                dir: "row",
+                ratio: 0.5,
+                fixed: null,
+                a: { t: "tabset", id: "z2", tabs: ["timeline"], active: "timeline" },
+                b: { t: "tabset", id: "z3", tabs: ["paramEditor"], active: "paramEditor" },
             },
             forms: {
                 timeline: { id: "timeline", panelId: "timeline" },
@@ -486,9 +460,9 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
             },
         });
         assertEqual(
-            areFormsVerticallyStacked(sameTabset, "timeline", "paramEditor"),
-            false,
-            "sharing a tab group is not stacked",
+            resolveSyncOffsetForms(sideBySide, "timeline", "paramEditor") !== null,
+            true,
+            "side by side still counts (the offset may be negative)",
         );
 
         const floated = normalizeDockLayout({
@@ -506,9 +480,30 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
             order: ["timeline", "paramEditor"],
         });
         assertEqual(
-            areFormsVerticallyStacked(floated, "timeline", "paramEditor"),
-            false,
-            "a floating form is never stacked",
+            resolveSyncOffsetForms(floated, "timeline", "paramEditor") !== null,
+            true,
+            "a floating param editor over the timeline still counts",
+        );
+
+        // 时间轴不可见 → 无法对齐。
+        const timelineClosed = closeFormInLayout(layout, "timeline");
+        assertEqual(
+            resolveSyncOffsetForms(timelineClosed, "timeline", "paramEditor"),
+            null,
+            "no timeline on screen means nothing to align to",
+        );
+
+        // 注入的 formId 不属于本面板 → 忽略它，按面板 id 回退。
+        assertEqual(
+            resolveSyncOffsetForms(layout, "timeline", "paramEditor", "fileBrowser"),
+            { timelineFormId: "timeline", paramFormId: "paramEditor" },
+            "an unrelated injected formId is ignored",
+        );
+        // 参数写反（两个面板 id 传成同一个）→ 拒绝，而不是算出一个必然错的值。
+        assertEqual(
+            resolveSyncOffsetForms(layout, "timeline", "timeline"),
+            null,
+            "resolving to the SAME form as the timeline is rejected",
         );
     }
 });
