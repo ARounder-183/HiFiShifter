@@ -41,6 +41,7 @@ import {
     splitFormTo,
 } from "../../features/dock/dockSlice";
 import { findZone } from "../../features/dock/dockTree";
+import { getPanel } from "../../features/dock/panelRegistry";
 import type { DockDropZone, DockRect } from "../../features/dock/dockTypes";
 import { isPrimaryModifierDown } from "../../utils/platform";
 
@@ -190,7 +191,41 @@ function onPointerMove(event: PointerEvent): void {
         return;
     }
 
-    updateDockDrag({ pointerX: x, pointerY: y, dockIntent, target });
+    // 走到这里只可能是标签拖拽（浮窗搬运在上面的分支里已经 return）。标签拖拽
+    // 同样要算出"若此刻松手，浮窗会落在哪、多大" —— 覆盖层据此画虚线轮廓。
+    // 没有它，不按修饰键拖拽时用户完全看不到结果（这正是"拖拽没有预览"的一半
+    // 原因；另一半是 `started` 从未置真）。
+    const floatRect = computePendingFloatRect(session, x, y, zoneRects);
+    updateDockDrag({ pointerX: x, pointerY: y, dockIntent, target, floatRect });
+}
+
+/** 计算"此刻松手会得到的浮窗矩形"（已夹紧到视口内）。 */
+function computePendingFloatRect(
+    active: DragSession,
+    x: number,
+    y: number,
+    zones: readonly DockZoneRect[],
+): DockRect {
+    const settings = store.getState().dock.settings;
+    const raw: DockRect = {
+        x: x - active.offsetX,
+        y: y - active.offsetY,
+        w: active.sourceSize.w,
+        h: active.sourceSize.h,
+    };
+    const snapped = settings.floatSnapEnabled
+        ? snapFloatPosition(
+              raw,
+              zones.map((zone) => zone.rect),
+              { w: window.innerWidth, h: window.innerHeight },
+              settings.floatSnapThresholdPx,
+          )
+        : { x: raw.x, y: raw.y };
+    return clampFloatRect(
+        { ...raw, x: snapped.x, y: snapped.y },
+        { w: window.innerWidth, h: window.innerHeight },
+        FLOAT_TITLE_BAR_PX,
+    );
 }
 
 function onPointerUp(event: PointerEvent): void {
@@ -330,13 +365,17 @@ export interface TabDragArgs {
 export function beginTabDrag(event: React.PointerEvent, args: TabDragArgs): void {
     if (event.button !== 0) return;
     const tabBarRect = args.tabBarElement?.getBoundingClientRect() ?? null;
-    const host = document.querySelector<HTMLElement>(
-        `[data-dock-host="${cssEscape(args.formId)}"]`,
-    );
-    const hostRect = host?.getBoundingClientRect();
+
+    // 【拆成浮窗时用多大】用**记住的浮窗尺寸**（或面板默认值），而不是宿主的
+    // 当前尺寸。后者是停靠态的尺寸 —— 用户把一个 300×200 的小浮窗停进一大片
+    // 区域后，面板会被撑大；此时再拖出来若沿用宿主尺寸，他就会得到一个巨大的
+    // 浮窗，而当初那个大小已经无从找回。浮动态与停靠态的尺寸是两个独立意图，
+    // 必须分开保存（见 `DockForm.float`）。
+    const form = store.getState().dock.layout.forms[args.formId];
+    const definition = getPanel(form?.panelId ?? args.panelId);
     const sourceSize = {
-        w: Math.max(200, Math.round(hostRect?.width ?? 420)),
-        h: Math.max(120, Math.round(hostRect?.height ?? 320)),
+        w: Math.max(200, Math.round(form?.float?.w ?? definition?.defaultWidth ?? 420)),
+        h: Math.max(120, Math.round(form?.float?.h ?? definition?.defaultHeight ?? 320)),
     };
 
     session = {
@@ -392,9 +431,4 @@ export function beginFloatDrag(event: React.PointerEvent, args: FloatDragArgs): 
 /** 拖拽是否正在进行（供 CSS 关掉指针事件等）。 */
 export function isDockDragging(): boolean {
     return getDockDragState()?.started === true;
-}
-
-/** `CSS.escape` 在测试环境可能缺失，这里给一个最小实现。 */
-function cssEscape(value: string): string {
-    return value.replace(/["\\]/g, "\\$&");
 }

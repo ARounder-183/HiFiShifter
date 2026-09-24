@@ -14,7 +14,12 @@ import {
     openPanelInLayout,
     placeForm,
 } from "./dockSchema.ts";
-import { collectTabsets, findTabsetOfForm, isFormVisible } from "./dockTree.ts";
+import {
+    areFormsVerticallyStacked,
+    collectTabsets,
+    findTabsetOfForm,
+    isFormVisible,
+} from "./dockTree.ts";
 import { registerPanel, resetPanelRegistryForTests } from "./panelRegistry.ts";
 import type { DockSplitNode, DockTabsetNode } from "./dockTypes.ts";
 
@@ -246,11 +251,20 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
                     id: "notebook",
                     panelId: "notebook",
                     float: { x: 10, y: 10, w: 300, h: 200 },
+                    floating: true,
                 },
             },
             order: ["timeline", "notebook"],
         });
-        assertEqual(layout.forms.notebook?.float, null, "docked wins over floating");
+        // 几何是"下次拆下来用多大"的记忆，与"此刻是否浮动"是两件事：停靠期间
+        // 抹掉它，用户拆下来的浮窗就会继承停靠时那片区域的尺寸，当初调好的
+        // 大小再也找不回来。
+        assertEqual(layout.forms.notebook?.floating, false, "docked wins over floating");
+        assertEqual(
+            layout.forms.notebook?.float,
+            { x: 10, y: 10, w: 300, h: 200 },
+            "float geometry is remembered, not discarded",
+        );
         assertEqual(layout.floatOrder, [], "float order cleaned");
     }
 
@@ -360,6 +374,87 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
             shape(tree),
             "([undoHistory]|([timeline]|[paramEditor]))",
             "left dock spans the full height",
+        );
+    }
+
+    // ── 上下堆叠判定：参数编辑器的同步偏移只在堆叠时有意义 ─────────
+    //
+    // 偏移 = 轨道头宽度 − 琴键列宽度，只在两个面板上下对齐时才是"把同一时刻画在
+    // 同一屏幕 x 上"。面板可自由停靠后，它们可能左右并排、同组标签、或一个浮在
+    // 上面 —— 此时按屏幕位置算偏移纯属噪声（停泊中的宿主甚至位于 −20000），
+    // 必须退回 0。
+    {
+        const splitTree = (dir: "row" | "col") =>
+            normalizeDockLayout({
+                schema: 1,
+                tree: {
+                    t: "split",
+                    id: "z1",
+                    dir,
+                    ratio: 0.6,
+                    fixed: null,
+                    a: { t: "tabset", id: "z2", tabs: ["timeline"], active: "timeline" },
+                    b: { t: "tabset", id: "z3", tabs: ["paramEditor"], active: "paramEditor" },
+                },
+                forms: {
+                    timeline: { id: "timeline", panelId: "timeline" },
+                    paramEditor: { id: "paramEditor", panelId: "paramEditor" },
+                },
+            });
+
+        assertEqual(
+            areFormsVerticallyStacked(splitTree("col"), "timeline", "paramEditor"),
+            true,
+            "a vertical split counts as stacked",
+        );
+        assertEqual(
+            areFormsVerticallyStacked(splitTree("col"), "paramEditor", "timeline"),
+            false,
+            "order matters: the upper form must actually be above",
+        );
+        assertEqual(
+            areFormsVerticallyStacked(splitTree("row"), "timeline", "paramEditor"),
+            false,
+            "side by side is not stacked",
+        );
+
+        const sameTabset = normalizeDockLayout({
+            schema: 1,
+            tree: {
+                t: "tabset",
+                id: "z1",
+                tabs: ["timeline", "paramEditor"],
+                active: "timeline",
+            },
+            forms: {
+                timeline: { id: "timeline", panelId: "timeline" },
+                paramEditor: { id: "paramEditor", panelId: "paramEditor" },
+            },
+        });
+        assertEqual(
+            areFormsVerticallyStacked(sameTabset, "timeline", "paramEditor"),
+            false,
+            "sharing a tab group is not stacked",
+        );
+
+        const floated = normalizeDockLayout({
+            schema: 1,
+            tree: { t: "tabset", id: "z1", tabs: ["timeline"], active: "timeline" },
+            forms: {
+                timeline: { id: "timeline", panelId: "timeline" },
+                paramEditor: {
+                    id: "paramEditor",
+                    panelId: "paramEditor",
+                    float: { x: 40, y: 40, w: 300, h: 200 },
+                    floating: true,
+                },
+            },
+            order: ["timeline", "paramEditor"],
+        });
+        assertEqual(
+            areFormsVerticallyStacked(floated, "timeline", "paramEditor"),
+            false,
+            "a floating form is never stacked",
         );
     }
 });

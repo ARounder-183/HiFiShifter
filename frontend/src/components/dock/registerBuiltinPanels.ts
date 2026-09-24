@@ -58,7 +58,9 @@ export function registerBuiltinPanels(): void {
 
     registerPanel({
         id: PANEL_FILE_BROWSER,
-        titleKey: "panel_io",
+        // `fb_title` 是文件浏览器自己的标题键（`panel_io` 是工具栏分组名"I/O"，
+        // 用它会让标签条显示成"输入输出"，与面板实际内容不符）。
+        titleKey: "fb_title",
         singleton: true,
         defaultWidth: 320,
         defaultHeight: 480,

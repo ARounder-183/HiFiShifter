@@ -51,7 +51,7 @@ function PanelMount({ form }: { form: DockForm }) {
     const render = getPanelRenderer(form.panelId);
     const PanelComponent = definition.component as ComponentType<DockPanelProps> | undefined;
     const content = render ? (
-        render()
+        render(form)
     ) : PanelComponent ? (
         <PanelComponent formId={form.id} panelId={form.panelId} props={form.props ?? {}} />
     ) : (

@@ -89,14 +89,31 @@ export function getPanelHost(formId: string): HTMLDivElement | undefined {
 }
 
 /**
+ * 槽位归属：哪个 `useDockSlot` 实例当前"拥有"这个宿主。
+ *
+ * 【为什么必须有它】槽位切换（停靠 ⇄ 浮动、换标签组、换标签）时，旧槽位的
+ * **被动 effect 清理**晚于新槽位的 **layout effect** 执行 —— 也就是说新槽位
+ * 刚把宿主搬进自己的槽，旧槽位的清理才跑，若它无条件把宿主移回停泊区，面板
+ * 就会"刚停靠好就消失"，用户必须手动重开。归属令牌让清理只在"宿主仍归我"
+ * 时才动手。
+ */
+const owners = new Map<string, symbol>();
+
+/** 生成一个槽位归属令牌。 */
+export function createSlotOwner(): symbol {
+    return Symbol("dock-slot");
+}
+
+/**
  * 把宿主搬进一个槽位。
  *
  * 【为什么要先测尺寸】搬出去之前记下它当前的实测尺寸，供将来停泊时使用 ——
  * 面板被移进停泊区时若拿不到"上次有多大"，就只能猜，而猜错会让内核按错误
  * 视口算一遍滚动范围。
  */
-export function attachPanelHost(formId: string, slot: HTMLElement): void {
+export function attachPanelHost(formId: string, slot: HTMLElement, owner: symbol): void {
     const host = acquirePanelHost(formId);
+    owners.set(formId, owner);
     if (host.parentElement === slot) return;
 
     const rect = host.getBoundingClientRect();
@@ -116,9 +133,17 @@ const lastSize = new Map<string, { w: number; h: number }>();
  *
  * 传 `fallback` 是为了让"从未显示过"的窗体也有合理尺寸（取面板定义的默认值）。
  */
-export function parkPanelHost(formId: string, fallback: { w: number; h: number }): void {
+export function parkPanelHost(
+    formId: string,
+    fallback: { w: number; h: number },
+    owner: symbol,
+): void {
     const host = hosts.get(formId);
     if (!host) return;
+    // 已被别的槽位接手：这里**不是**它的主人，绝不能把它搬走（见 `owners` 的说明）。
+    if (owners.get(formId) !== owner) return;
+    owners.delete(formId);
+
     const rect = host.getBoundingClientRect();
     const measured =
         rect.width > 1 && rect.height > 1
@@ -144,6 +169,7 @@ export function releasePanelHost(formId: string): void {
     host.remove();
     hosts.delete(formId);
     lastSize.delete(formId);
+    owners.delete(formId);
     notify();
 }
 
@@ -152,6 +178,7 @@ export function resetPanelHostsForTests(): void {
     for (const host of hosts.values()) host.remove();
     hosts.clear();
     lastSize.clear();
+    owners.clear();
     listeners.clear();
     parking?.remove();
     parking = null;

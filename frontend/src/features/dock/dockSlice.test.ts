@@ -1,6 +1,7 @@
 import { beforeEach, test } from "vitest";
 
 import reducer, {
+    dockFormTo,
     hydrateDock,
     markFormsMounted,
     setDockLayout,
@@ -267,6 +268,43 @@ test("features/dock/dockSlice.test.ts scripted checks", async () => {
         );
         assert(state.layout.forms.fileBrowser.float !== null, "geometry recorded");
         assertEqual(state.layout.floatOrder, ["fileBrowser"], "float z-order");
+    }
+
+    // ── 浮窗尺寸与停靠尺寸分别保存 ───────────────────────────────
+    //
+    // 用户把一个小浮窗（320×240）停进一大片区域后，面板会被撑大；此时再拆下来
+    // 必须回到 320×240，而不是继承停靠区域的尺寸。为此"记住的浮窗几何"与
+    // "此刻是否浮动"是两个独立字段。
+    {
+        let state = reducer(undefined, syncRegisteredPanels());
+        state = reducer(
+            state,
+            floatForm({ formId: "notebook", geometry: { x: 30, y: 40, w: 320, h: 240 } }),
+        );
+        assertEqual(state.layout.forms.notebook.float?.w, 320, "float keeps its own size");
+        assertEqual(state.layout.forms.notebook.floating, true, "floating");
+
+        // 停靠（无论落到多大的区域）。用真正的停靠动作：`openPanel` 对"已可见"
+        // 的窗体是无操作（它只是打开，不负责搬运）。
+        state = reducer(
+            state,
+            dockFormTo({ formId: "notebook", target: { kind: "tab", tabsetId: "z2" } }),
+        );
+        assertEqual(state.layout.forms.notebook.floating, false, "docked");
+        assertEqual(
+            state.layout.forms.notebook.float,
+            { x: 30, y: 40, w: 320, h: 240 },
+            "docking must not discard the float geometry",
+        );
+
+        // 再拆下来：回到当初的浮窗尺寸。
+        state = reducer(state, floatForm({ formId: "notebook" }));
+        assertEqual(state.layout.forms.notebook.floating, true, "floating again");
+        assertEqual(
+            [state.layout.forms.notebook.float?.w, state.layout.forms.notebook.float?.h],
+            [320, 240],
+            "undocking restores the remembered float size",
+        );
     }
 
     // ── 最大化：整片工作区只留当前窗体，再按一次完整还原 ───────────

@@ -110,7 +110,7 @@ export function ensureRegisteredPanels(layout: DockLayout): DockLayout {
     let changed = false;
     for (const panel of listPanels()) {
         if (forms[panel.id]) continue;
-        forms[panel.id] = { id: panel.id, panelId: panel.id, float: null };
+        forms[panel.id] = { id: panel.id, panelId: panel.id, float: null, floating: false };
         order.push(panel.id);
         changed = true;
     }
@@ -235,6 +235,9 @@ export function normalizeDockLayout(raw: unknown): DockLayout {
         const panelId = typeof form.panelId === "string" ? form.panelId : formId;
         if (!isPanelRegistered(panelId)) continue;
         const next: DockForm = { id: formId, panelId, float: normalizeFloat(form.float) };
+        // 兼容早期落盘数据：那时 `float != null` 就是"正在浮动"，没有独立标志。
+        next.floating =
+            form.floating === true || (form.floating === undefined && next.float !== null);
         if (typeof form.title === "string" && form.title.trim()) next.title = form.title;
         if (form.props && typeof form.props === "object") {
             next.props = form.props as Record<string, unknown>;
@@ -245,7 +248,7 @@ export function normalizeDockLayout(raw: unknown): DockLayout {
     // 主编辑区面板缺失时补齐 —— 否则用户会得到一个没有时间轴的界面。
     for (const panelId of [MAIN_FORM_TIMELINE, MAIN_FORM_PARAM_EDITOR]) {
         if (forms[panelId] || !isPanelRegistered(panelId)) continue;
-        forms[panelId] = { id: panelId, panelId, float: null };
+        forms[panelId] = { id: panelId, panelId, float: null, floating: false };
     }
 
     const knownForms = new Set(Object.keys(forms));
@@ -267,18 +270,19 @@ export function normalizeDockLayout(raw: unknown): DockLayout {
         if (!order.includes(formId)) order.push(formId);
     }
 
-    // 可见性互斥：浮动窗体不能同时出现在树上。
+    // 可见性互斥：出现在树上的窗体必然处于停靠态（浮窗不占布局树）。
+    // 注意只清 `floating`，**保留** `float` 几何 —— 那是"下次拆下来时用多大"。
     for (const form of Object.values(forms)) {
-        if (form.float && findTabsetOfForm(tree, form.id)) form.float = null;
+        if (form.floating && findTabsetOfForm(tree, form.id)) form.floating = false;
     }
 
     const floatOrder: string[] = [];
     const rawFloatOrder = Array.isArray(input.floatOrder) ? input.floatOrder : [];
     for (const formId of rawFloatOrder) {
-        if (forms[formId]?.float && !floatOrder.includes(formId)) floatOrder.push(formId);
+        if (forms[formId]?.floating && !floatOrder.includes(formId)) floatOrder.push(formId);
     }
     for (const form of Object.values(forms)) {
-        if (form.float && !floatOrder.includes(form.id)) floatOrder.push(form.id);
+        if (form.floating && !floatOrder.includes(form.id)) floatOrder.push(form.id);
     }
 
     return {
@@ -309,6 +313,8 @@ function normalizePresets(raw: unknown, knownForms: Set<string>): Record<string,
             const panelId = typeof form.panelId === "string" ? form.panelId : formId;
             if (!knownForms.has(formId) || !isPanelRegistered(panelId)) continue;
             const next: DockForm = { id: formId, panelId, float: normalizeFloat(form.float) };
+            next.floating =
+                form.floating === true || (form.floating === undefined && next.float !== null);
             if (typeof form.title === "string" && form.title.trim()) next.title = form.title;
             forms[formId] = next;
         }
@@ -427,7 +433,9 @@ export function openPanelInLayout(
 
     const forms = { ...layout.forms };
     const previous = forms[formId];
-    forms[formId] = previous ? { ...previous, float: null } : { id: formId, panelId, float: null };
+    forms[formId] = previous
+        ? { ...previous, floating: false }
+        : { id: formId, panelId, float: null, floating: false };
     const order = layout.order.includes(formId) ? layout.order : [...layout.order, formId];
 
     const base: DockLayout = { ...layout, forms, order };
@@ -460,7 +468,7 @@ export function closeFormInLayout(layout: DockLayout, formId: string): DockLayou
     if (visibleCount <= 1 && isFormVisible(layout, formId)) return layout;
 
     const tree = removeForm(layout.tree, formId) ?? layout.tree;
-    const forms = { ...layout.forms, [formId]: { ...form, float: null } };
+    const forms = { ...layout.forms, [formId]: { ...form, floating: false } };
     return { ...layout, tree, forms, floatOrder: layout.floatOrder.filter((id) => id !== formId) };
 }
 

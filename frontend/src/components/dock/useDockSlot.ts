@@ -15,6 +15,7 @@ import { getPanel } from "../../features/dock/panelRegistry";
 import {
     acquirePanelHost,
     attachPanelHost,
+    createSlotOwner,
     getPanelHostVersion,
     parkPanelHost,
     subscribePanelHosts,
@@ -42,14 +43,21 @@ export function useDockSlot(formId: string | null): React.RefObject<HTMLDivEleme
         getPanelHostVersion,
     );
     const previousRef = useRef<string | null>(null);
+    // 本槽位的归属令牌：停泊时必须证明"宿主仍归我"，否则会把刚被新槽位接手的
+    // 宿主搬走（见 `panelHostRegistry.owners`）。
+    const ownerRef = useRef<symbol | null>(null);
+    ownerRef.current ??= createSlotOwner();
 
     useLayoutEffect(() => {
         const slot = slotRef.current;
         const previous = previousRef.current;
 
+        const owner = ownerRef.current;
+        if (!owner) return;
+
         if (previous && previous !== formId) {
             const panelId = forms[previous]?.panelId;
-            parkPanelHost(previous, panelFallbackSize(panelId ?? previous));
+            parkPanelHost(previous, panelFallbackSize(panelId ?? previous), owner);
             previousRef.current = null;
         }
 
@@ -57,7 +65,7 @@ export function useDockSlot(formId: string | null): React.RefObject<HTMLDivEleme
         // 宿主可能尚未创建（`PanelMount` 的 effect 还没跑）——`acquirePanelHost`
         // 会按需创建，随后的 `subscribePanelHosts` 通知会让本 effect 重跑。
         acquirePanelHost(formId);
-        attachPanelHost(formId, slot);
+        attachPanelHost(formId, slot, owner);
         previousRef.current = formId;
     }, [formId, forms, hostVersion]);
 
@@ -69,11 +77,12 @@ export function useDockSlot(formId: string | null): React.RefObject<HTMLDivEleme
     // 权威且随时可读的。
     useEffect(() => {
         return () => {
+            const owner = ownerRef.current;
             const previous = previousRef.current;
-            if (!previous) return;
-            const panelId = store.getState().dock.layout.forms[previous]?.panelId;
-            parkPanelHost(previous, panelFallbackSize(panelId ?? previous));
             previousRef.current = null;
+            if (!owner || !previous) return;
+            const panelId = store.getState().dock.layout.forms[previous]?.panelId;
+            parkPanelHost(previous, panelFallbackSize(panelId ?? previous), owner);
         };
     }, []);
 

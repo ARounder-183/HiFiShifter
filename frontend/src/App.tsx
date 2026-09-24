@@ -3308,7 +3308,9 @@ function AppInner() {
             onImportTargetDragDropChange={handleImportTargetDragDropChange}
         />
     ));
-    setPanelRenderer(PANEL_PARAM_EDITOR, () => <PianoRollPanel />);
+    // 把窗体身份传进去：参数编辑器要判断"我是否与时间轴上下堆叠"，以决定同步
+    // 偏移怎么算（多实例时每个窗体各判各的）。
+    setPanelRenderer(PANEL_PARAM_EDITOR, (form) => <PianoRollPanel dockFormId={form.id} />);
     setPanelRenderer(PANEL_FILE_BROWSER, () => <FileBrowserPanel />);
     setPanelRenderer(PANEL_UNDO_HISTORY, () => <UndoHistoryPanel />);
     // 记事本走 Suspense：TipTap 那几百 KB 只在真正打开时才拉取。

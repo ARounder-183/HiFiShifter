@@ -109,7 +109,7 @@ export function toggleFloatActive(dispatch: AppDispatch, getState: GetState): vo
     if (!formId) return;
     const form = getState().dock.layout.forms[formId];
     if (!form) return;
-    if (form.float) {
+    if (form.floating) {
         const main = findMainTabset(getState().dock.layout);
         if (!main) return;
         dispatch(dockFormTo({ formId, target: { kind: "tab", tabsetId: main.id } }));

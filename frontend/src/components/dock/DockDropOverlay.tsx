@@ -17,7 +17,7 @@ import {
     type DockDragState,
 } from "../../features/dock/dockDragStore";
 import { dropPreviewRect } from "../../features/dock/dockDropTarget";
-import { DOCK_SPLITTER_PX } from "../../features/dock/dockTypes";
+import { DOCK_SPLITTER_PX, type DockDropZone } from "../../features/dock/dockTypes";
 import { getPanel } from "../../features/dock/panelRegistry";
 import { useI18n } from "../../i18n/I18nProvider";
 
@@ -39,6 +39,22 @@ export function DockDropOverlay() {
     return <DockDropOverlayContent drag={drag} />;
 }
 
+/** 落点方向的可读名称（让提示从"停靠到此处"变成"停靠到左侧"）。 */
+function describeZone(zone: DockDropZone, tAny: (key: string) => string): string {
+    switch (zone) {
+        case "left":
+            return tAny("dock_side_left");
+        case "right":
+            return tAny("dock_side_right");
+        case "top":
+            return tAny("dock_side_top");
+        case "bottom":
+            return tAny("dock_side_bottom");
+        default:
+            return tAny("dock_side_center");
+    }
+}
+
 function DockDropOverlayContent({ drag }: { drag: DockDragState }) {
     const { t } = useI18n();
     const tAny = t as (key: string) => string;
@@ -46,21 +62,41 @@ function DockDropOverlayContent({ drag }: { drag: DockDragState }) {
     const definition = getPanel(drag.panelId);
     const title = definition ? tAny(definition.titleKey) : drag.panelId;
 
-    const preview =
+    // 停靠预览：按住修饰键且命中某个 Zone 时，画出"新组会占哪半边"。
+    const dockPreview =
         showPreview && drag.dockIntent && drag.target
             ? dropPreviewRect(drag.target.rect, drag.target.zone, DOCK_SPLITTER_PX)
             : null;
 
+    // 浮动预览：没有停靠落点时，画出"浮窗会落在哪、多大"的虚线轮廓。
+    // 【为什么必须有】不按修饰键拖拽的语义就是浮动，而浮动同样是一个用户需要
+    // 预判的结果 —— 只给一个小标签跟着鼠标，用户无从知道松手后窗体会多大、
+    // 会不会盖住他要看的东西。轮廓用**记住的浮窗尺寸**，与松手后的结果一致。
+    const floatPreview = showPreview && !dockPreview ? drag.floatRect : null;
+
     return (
         <div className="hs-dock-overlay">
-            {preview ? (
+            {floatPreview ? (
+                <div
+                    className="hs-dock-float-preview"
+                    style={{
+                        left: floatPreview.x,
+                        top: floatPreview.y,
+                        width: floatPreview.w,
+                        height: floatPreview.h,
+                    }}
+                >
+                    <span className="hs-dock-float-preview-title">{title}</span>
+                </div>
+            ) : null}
+            {dockPreview ? (
                 <div
                     className="hs-dock-drop-preview"
                     style={{
-                        left: preview.x,
-                        top: preview.y,
-                        width: preview.w,
-                        height: preview.h,
+                        left: dockPreview.x,
+                        top: dockPreview.y,
+                        width: dockPreview.w,
+                        height: dockPreview.h,
                     }}
                 />
             ) : null}
@@ -73,7 +109,7 @@ function DockDropOverlayContent({ drag }: { drag: DockDragState }) {
                 <span style={{ opacity: 0.7 }}>
                     {drag.dockIntent
                         ? drag.target
-                            ? tAny("dock_hint_dock")
+                            ? `${tAny("dock_hint_dock")} · ${describeZone(drag.target.zone, tAny)}`
                             : tAny("dock_hint_snapback")
                         : tAny("dock_hint_float")}
                 </span>

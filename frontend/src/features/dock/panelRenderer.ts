@@ -17,7 +17,16 @@
 
 import type { ReactNode } from "react";
 
-export type PanelRenderFunction = () => ReactNode;
+import type { DockForm } from "./dockTypes";
+
+/**
+ * 面板渲染函数。
+ *
+ * 接收窗体本身（而不是只接收 panelId）：多实例面板需要知道"我是哪一个"
+ * ——参数编辑器要判断自己是否与时间轴上下堆叠（决定同步偏移怎么算），
+ * 将来开放 API 时用户面板同样需要读自己的 props。
+ */
+export type PanelRenderFunction = (form: DockForm) => ReactNode;
 
 const renderers = new Map<string, PanelRenderFunction>();
 

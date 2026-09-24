@@ -61,7 +61,7 @@ export function finalizeDockHydration(dispatch: AppDispatch, getState: () => Roo
         const current = getState().dock.layout;
         const main = findMainTabset(current);
         if (!main) return;
-        const floating = current.floatOrder.filter((id) => Boolean(current.forms[id]?.float));
+        const floating = current.floatOrder.filter((id) => current.forms[id]?.floating === true);
         if (floating.length === 0) return;
 
         const forms = { ...current.forms };
@@ -69,7 +69,7 @@ export function finalizeDockHydration(dispatch: AppDispatch, getState: () => Roo
         for (const formId of floating) {
             const form = forms[formId];
             if (!form) continue;
-            forms[formId] = { ...form, float: null };
+            forms[formId] = { ...form, floating: false };
             tree = insertForm(tree, formId, { kind: "tab", tabsetId: main.id });
         }
         dispatch(setDockLayout({ ...current, tree, forms, floatOrder: [] }));

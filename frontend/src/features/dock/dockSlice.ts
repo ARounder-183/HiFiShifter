@@ -187,7 +187,7 @@ const dockSlice = createSlice({
             state.layout = closeFormInLayout(state.layout, formId);
             if (state.activeFormId === formId) {
                 state.activeFormId =
-                    state.layout.order.find((id) => Boolean(state.layout.forms[id]?.float)) ??
+                    state.layout.order.find((id) => state.layout.forms[id]?.floating === true) ??
                     findMainTabset(state.layout)?.active ??
                     null;
             }
@@ -216,7 +216,8 @@ const dockSlice = createSlice({
             const { formId, target, focus } = action.payload;
             const form = state.layout.forms[formId];
             if (!form) return;
-            const forms = { ...state.layout.forms, [formId]: { ...form, float: null } };
+            // 只清 `floating`，保留 `float` 几何：下次拆下来要回到用户当初调好的浮窗尺寸。
+            const forms = { ...state.layout.forms, [formId]: { ...form, floating: false } };
             const tree = moveForm(state.layout.tree, formId, target);
             state.layout = {
                 ...state.layout,
@@ -242,7 +243,10 @@ const dockSlice = createSlice({
             state.layout = {
                 ...state.layout,
                 tree,
-                forms: { ...state.layout.forms, [formId]: { ...form, float: next } },
+                forms: {
+                    ...state.layout.forms,
+                    [formId]: { ...form, float: next, floating: true },
+                },
                 floatOrder: [...state.layout.floatOrder.filter((id) => id !== formId), formId],
             };
             state.activeFormId = formId;
@@ -254,19 +258,21 @@ const dockSlice = createSlice({
         ) {
             const { formId, geometry } = action.payload;
             const form = state.layout.forms[formId];
-            if (!form?.float) return;
+            if (!form?.floating || !form.float) return;
+            // `Object.assign` 而非展开：前者保留"基础几何已提供全部必填字段"的类型，
+            // 后者会因为 `Partial` 而把结果推成可选字段。
             state.layout = {
                 ...state.layout,
                 forms: {
                     ...state.layout.forms,
-                    [formId]: { ...form, float: { ...form.float, ...geometry } },
+                    [formId]: { ...form, float: Object.assign({}, form.float, geometry) },
                 },
             };
         },
         /** 浮动层 z 序：点击浮窗置顶。 */
         raiseFloat(state, action: PayloadAction<string>) {
             const formId = action.payload;
-            if (!state.layout.forms[formId]?.float) return;
+            if (!state.layout.forms[formId]?.floating) return;
             state.layout = {
                 ...state.layout,
                 floatOrder: [...state.layout.floatOrder.filter((id) => id !== formId), formId],

@@ -464,3 +464,35 @@ body[data-dock-dragging="true"] iframe {
     opacity: 0.9;
     background: var(--qt-panel);
 }
+
+/* ── 浮动落点预览 ───────────────────────────────────────────────── */
+
+/*
+ * 不按停靠修饰键拖拽时，用虚线轮廓画出"松手后浮窗会落在哪、多大"。
+ *
+ * 用**记住的浮窗尺寸**绘制，因此轮廓与松手后的结果一致 —— 用户不必先松手
+ * 再判断结果是否满意。虚线（而非实线）与停靠预览区分：实线 = 会嵌进布局，
+ * 虚线 = 会浮在上面。
+ */
+.hs-dock-float-preview {
+    position: fixed;
+    border: 2px dashed var(--accent-9);
+    border-radius: 4px;
+    background: var(--accent-a2);
+    pointer-events: none;
+}
+
+.hs-dock-float-preview-title {
+    position: absolute;
+    left: 0;
+    top: 0;
+    max-width: 100%;
+    padding: 2px 6px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    background: var(--accent-9);
+    color: var(--qt-base);
+    font-size: 11px;
+    border-radius: 2px 0 2px 0;
+}

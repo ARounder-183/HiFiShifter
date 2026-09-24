@@ -53,8 +53,15 @@ export function getDockDragState(): DockDragState | null {
     return state;
 }
 
+/**
+ * 开始一次拖拽。
+ *
+ * 只应在**越过启动阈值之后**调用，因此 `started` 直接置真 —— 覆盖层据此决定
+ * 是否渲染落点提示。（早期版本把它写成 `false` 且再无处置真，结果停靠能用、
+ * 预览却从不出现：用户拖拽时完全看不到落点结果。）
+ */
 export function beginDockDrag(next: Omit<DockDragState, "started" | "target">): void {
-    state = { ...next, started: false, target: null };
+    state = { ...next, started: true, target: null };
     emit();
 }
 

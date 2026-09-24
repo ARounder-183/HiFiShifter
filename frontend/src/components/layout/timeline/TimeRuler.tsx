@@ -178,11 +178,23 @@ const TimeRulerPlayhead = React.memo(function TimeRulerPlayhead({
     pxPerSec,
     lineRef,
     headRef,
+    positionFromProps,
 }: {
     playheadSec: number;
     pxPerSec: number;
     lineRef?: React.Ref<HTMLDivElement>;
     headRef?: React.Ref<HTMLDivElement>;
+    /**
+     * 位置是否由 React 渲染。
+     *
+     * 【为什么允许调用方关掉它】播放头的 DOM 线在调用方那里是**逐帧命令式写入**
+     * 的（60Hz 插值位置），而 React 只持有 30Hz 轮询提交的**已提交位置**。两者
+     * 同时写同一个 `style.left` 就会互相覆盖：React 那次提交晚于同帧的 rAF 写入
+     * 时，标尺上的线会停在旧位置，而画布/GL 上的线已经在新位置 —— 表现为两条
+     * 播放头线"分离"，播放中尤其明显（缩放越大，一个 33ms 采样周期对应的像素差
+     * 越大）。传 `false` 即表示"位置由我负责"，React 只提供首帧的初始值。
+     */
+    positionFromProps?: boolean;
 }) {
     // 播放头竖线设备像素对齐（与 56238d45 的网格线修复同根同法）：
     // 分数 DPR（125%/150%）下 1px CSS 线覆盖 1.25/1.5 物理像素，落点相位
@@ -192,18 +204,23 @@ const TimeRulerPlayhead = React.memo(function TimeRulerPlayhead({
     // 同一套吸附，双方逐设备像素一致。
     const dpr = readDevicePixelRatio();
     const playheadLeft = snapToDevicePx(playheadSec * pxPerSec, dpr);
+    // 首帧仍给出正确位置（避免挂载瞬间闪到 0），此后不再由 React 改写。
+    const lineStyle: React.CSSProperties =
+        positionFromProps === false
+            ? { width: wholeDevicePxLength(1, dpr) }
+            : { left: playheadLeft, width: wholeDevicePxLength(1, dpr) };
     return (
         <>
             <div
                 ref={lineRef}
                 className="absolute top-0 bottom-0 bg-qt-playhead z-20 pointer-events-none"
-                style={{ left: playheadLeft, width: wholeDevicePxLength(1, dpr) }}
+                style={lineStyle}
             />
             <div
                 ref={headRef}
                 className="absolute top-0 z-30 pointer-events-none"
                 style={{
-                    left: playheadLeft,
+                    ...(positionFromProps === false ? null : { left: playheadLeft }),
                     transform: "translateX(-6px)",
                 }}
             >
@@ -495,6 +512,8 @@ const TimeRulerInner: React.FC<{
     pxPerSec: number;
     viewportWidth?: number;
     playheadSec: number;
+    /** 见 `TimeRulerPlayhead.positionFromProps`。 */
+    positionPlayheadFromProps?: boolean;
     playheadLineRef?: React.Ref<HTMLDivElement>;
     playheadHeadRef?: React.Ref<HTMLDivElement>;
     onMouseDown: (e: React.MouseEvent<HTMLDivElement>) => void;
@@ -530,6 +549,7 @@ const TimeRulerInner: React.FC<{
     pxPerSec,
     viewportWidth,
     playheadSec,
+    positionPlayheadFromProps,
     playheadLineRef,
     playheadHeadRef,
     onMouseDown,
@@ -845,6 +865,7 @@ const TimeRulerInner: React.FC<{
                 />
                 <TimeRulerPlayhead
                     playheadSec={playheadSec}
+                    positionFromProps={positionPlayheadFromProps}
                     pxPerSec={pxPerSec}
                     lineRef={playheadLineRef}
                     headRef={playheadHeadRef}

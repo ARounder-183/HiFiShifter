@@ -30,7 +30,7 @@ import { useDockSlot } from "./useDockSlot";
 
 export function DockFloatingLayer() {
     const layout = useAppSelector((s) => s.dock.layout);
-    const floating = layout.floatOrder.filter((formId) => Boolean(layout.forms[formId]?.float));
+    const floating = layout.floatOrder.filter((formId) => layout.forms[formId]?.floating === true);
     if (floating.length === 0) return null;
 
     return (

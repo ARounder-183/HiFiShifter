@@ -67,21 +67,69 @@ export function collectDockedForms(node: DockNode, out: string[] = []): string[]
 }
 
 /**
+ * 窗体是否处于浮动状态。
+ *
+ * 判据是 `floating` 标志而不是 `float` 几何 —— 后者是"记住的浮窗尺寸"，停靠
+ * 期间依然保留（见 `DockForm.float` 的说明）。
+ */
+export function isFormFloating(layout: DockLayout, formId: string): boolean {
+    return layout.forms[formId]?.floating === true;
+}
+
+/**
  * 窗体可见性 —— 派生而非存储。
  *
- * 在布局树里（已停靠）或有浮动几何（已浮动）即为可见；两者皆无 = 已关闭。
- * 关闭只从树上摘除并清空浮动几何，`forms` 记录保留，所以重开时标题与
- * 私有 props 都能回来。
+ * 在布局树里（已停靠）或处于浮动状态即为可见；两者皆无 = 已关闭。关闭只从
+ * 树上摘除并清掉浮动标志，`forms` 记录保留，所以重开时标题、私有 props 与
+ * 浮窗尺寸都能回来。
  */
 export function isFormVisible(layout: DockLayout, formId: string): boolean {
-    if (layout.forms[formId]?.float) return true;
+    if (isFormFloating(layout, formId)) return true;
     return findTabsetOfForm(layout.tree, formId) !== null;
+}
+
+/** 某个子树里是否含指定窗体（含其标签组内的任意位置）。 */
+function subtreeContainsForm(node: DockNode, formId: string): boolean {
+    return findTabsetOfForm(node, formId) !== null;
+}
+
+/**
+ * 两个窗体是否**上下堆叠**在同一个竖直分割里（上者在前，下者在后）。
+ *
+ * 【用途】参数编辑器"同步时间轴视图"依赖一个左右像素偏移（轨道头比琴键列宽
+ * 出的部分），而这个偏移只在两者上下对齐时才有意义。面板可自由停靠之后，
+ * 它们可能被拆到不同区域甚至一个浮在上面 —— 此时按屏幕位置算出来的偏移毫无
+ * 意义（还会被停泊在视口外、坐标约 −20000 的宿主污染）。这种情况必须退回 0：
+ * 同步的语义是"两个面板看同一段时间"，像素对齐只是堆叠时的额外好处。
+ *
+ * 任一窗体处于浮动状态都算不堆叠 —— 浮窗的位置由用户随手拖，不是布局的一部分。
+ */
+export function areFormsVerticallyStacked(
+    layout: DockLayout,
+    upperFormId: string,
+    lowerFormId: string,
+): boolean {
+    if (!layout.forms[upperFormId] || !layout.forms[lowerFormId]) return false;
+    if (layout.forms[upperFormId].floating || layout.forms[lowerFormId].floating) return false;
+
+    const walk = (node: DockNode): boolean => {
+        if (node.t !== "split") return false;
+        if (
+            node.dir === "col" &&
+            subtreeContainsForm(node.a, upperFormId) &&
+            subtreeContainsForm(node.b, lowerFormId)
+        ) {
+            return true;
+        }
+        return walk(node.a) || walk(node.b);
+    };
+    return walk(layout.tree);
 }
 
 /** 当前可见的窗体 id（停靠 + 浮动），供"显示窗体"菜单使用。 */
 export function collectVisibleForms(layout: DockLayout): string[] {
     const docked = collectDockedForms(layout.tree);
-    const floating = layout.order.filter((id) => Boolean(layout.forms[id]?.float));
+    const floating = layout.order.filter((id) => isFormFloating(layout, id));
     return [...docked, ...floating.filter((id) => !docked.includes(id))];
 }
 
