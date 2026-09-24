@@ -207,7 +207,6 @@ export const zhTW = {
     aria_resize_panels: "調整面板尺寸",
     menu_layout: "佈局",
     layout_show_panels: "顯示視窗",
-    layout_maximize: "最大化目前視窗",
     layout_restore: "還原佈局",
     layout_reset: "重置佈局",
     layout_reset_confirm_title: "重置佈局？",

@@ -355,7 +355,6 @@ export const enUS = {
     aria_resize_panels: "Resize panels",
     menu_layout: "Layout",
     layout_show_panels: "Panels",
-    layout_maximize: "Maximize this panel",
     layout_restore: "Restore layout",
     layout_reset: "Reset layout",
     layout_reset_confirm_title: "Reset the layout?",

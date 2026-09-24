@@ -111,7 +111,7 @@ function DockDropOverlayContent({ drag }: { drag: DockDragState }) {
                 style={{ left: drag.pointerX + 14, top: drag.pointerY + 14 }}
             >
                 {title}
-                <span style={{ opacity: 0.7 }}>
+                <span className="hs-dock-ghost-hint">
                     {drag.dockIntent
                         ? drag.target
                             ? `${tAny("dock_hint_dock")} · ${describeZone(drag.target.zone, tAny)}`

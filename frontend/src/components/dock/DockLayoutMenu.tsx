@@ -29,10 +29,8 @@ import {
     importLayoutJson,
     listPanelEntriesFromLayout,
     listPresetNamesFromLayout,
-    maximizeActive,
     resetLayout,
     savePreset,
-    toggleFloatActive,
     togglePanelVisible,
 } from "../../features/dock/dockApi";
 
@@ -164,7 +162,6 @@ function DockLayoutMenuItems({
     const tAny = t as (key: string) => string;
 
     const layout = useAppSelector((state) => state.dock.layout);
-    const maximized = useAppSelector((state) => state.dock.maximized !== null);
 
     const entries = useMemo(() => listPanelEntriesFromLayout(layout), [layout]);
     const presetNames = useMemo(() => listPresetNamesFromLayout(layout), [layout]);
@@ -211,12 +208,10 @@ function DockLayoutMenuItems({
 
             <DropdownMenu.Separator />
 
-            <DropdownMenu.Item onSelect={() => toggleFloatActive(dispatch, store.getState)}>
-                {tAny("dock_float")}
-            </DropdownMenu.Item>
-            <DropdownMenu.Item onSelect={() => maximizeActive(dispatch)}>
-                {withCheck(maximized, tAny("layout_maximize"))}
-            </DropdownMenu.Item>
+            {/* `浮动` / `最大化当前窗体` 两项已移除：它们是"对当前窗体"的操作，而
+                这个菜单是**布局级**的（显示哪些面板、预设、导入导出）。同一能力仍在
+                标签右键菜单（`DockTabMenu`）、标签上的浮动按钮、以及
+                `Ctrl+Shift+F` / `Ctrl+Shift+M` 快捷键上，入口没有减少。 */}
 
             <DropdownMenu.Separator />
 

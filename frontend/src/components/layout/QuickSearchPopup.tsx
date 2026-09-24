@@ -11,7 +11,7 @@ import {
 } from "../../features/keybindings";
 import type { Keybinding } from "../../features/keybindings";
 import { searchFilesRecursive } from "../../features/fileBrowser/fileBrowserSlice";
-import { audioPreview } from "../../features/fileBrowser/audioPreview";
+import { usePreviewToggle } from "../../features/fileBrowser/usePreviewToggle";
 import { importAudioAtPosition } from "../../features/session/thunks/importThunks";
 import {
     persistUiSettings,
@@ -112,7 +112,12 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
             pointer: null,
         }),
     );
-    const [previewingPath, setPreviewingPath] = useState<string | null>(null);
+    // 试听状态与引擎调用统一走共享 hook（与文件浏览器同一份实现与同一份真值）。
+    const {
+        previewingFile: previewingPath,
+        play: playPreview,
+        stop: stopPreview,
+    } = usePreviewToggle();
 
     const inputRef = useRef<HTMLInputElement>(null);
     const listRef = useRef<HTMLDivElement>(null);
@@ -148,7 +153,7 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
         setResults([]);
         setSelectedIndex(0);
         setLoading(false);
-        setPreviewingPath(null);
+        stopPreview();
 
         // 聚焦输入框
         requestAnimationFrame(() => {
@@ -160,11 +165,8 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
 
     // 关闭时停止预览
     useEffect(() => {
-        if (!open && previewingPath) {
-            audioPreview.stop();
-            setPreviewingPath(null);
-        }
-    }, [open]); // eslint-disable-line react-hooks/exhaustive-deps -- previewingPath 随每次预览变化；计入依赖会让该 effect 在预览切换时反复重跑（既有关闭时序）
+        if (!open) stopPreview();
+    }, [open, stopPreview]);
 
     useEffect(() => {
         if (open) {
@@ -263,20 +265,18 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
     }, [results, sortMode]);
 
     // 预览播放（始终从头重新播放）
-    const handlePreview = useCallback((filePath: string) => {
-        audioPreview.stop();
-        setPreviewingPath(filePath);
-        void audioPreview.play(filePath, () => {
-            setPreviewingPath(null);
-        });
-    }, []);
+    const handlePreview = useCallback(
+        (filePath: string) => {
+            playPreview(filePath);
+        },
+        [playPreview],
+    );
 
     // 确认放置音频
     const handleConfirm = useCallback(
         (entry: FileEntry) => {
             if (!selectedTrackId) return;
-            audioPreview.stop();
-            setPreviewingPath(null);
+            stopPreview();
             void dispatch(
                 importAudioAtPosition({
                     audioPath: entry.path,
@@ -315,9 +315,7 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                     const next = Math.min(prev + 1, sortedResults.length - 1);
                     const entry = sortedResults[next];
                     if (entry && isAudioFile(entry)) {
-                        audioPreview.stop();
-                        setPreviewingPath(entry.path);
-                        void audioPreview.play(entry.path, () => setPreviewingPath(null));
+                        playPreview(entry.path);
                     }
                     return next;
                 });
@@ -327,9 +325,7 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                     const next = Math.max(prev - 1, 0);
                     const entry = sortedResults[next];
                     if (entry && isAudioFile(entry)) {
-                        audioPreview.stop();
-                        setPreviewingPath(entry.path);
-                        void audioPreview.play(entry.path, () => setPreviewingPath(null));
+                        playPreview(entry.path);
                     }
                     return next;
                 });
@@ -347,8 +343,7 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                 }
             } else if (matchKey(e, keybindings["quickSearch.close"])) {
                 e.preventDefault();
-                audioPreview.stop();
-                setPreviewingPath(null);
+                stopPreview();
                 onClose();
             }
         },
@@ -391,8 +386,7 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                 style={{ background: "transparent" }}
                 onMouseDown={(e) => {
                     e.stopPropagation();
-                    audioPreview.stop();
-                    setPreviewingPath(null);
+                    stopPreview();
                     onClose();
                 }}
             />

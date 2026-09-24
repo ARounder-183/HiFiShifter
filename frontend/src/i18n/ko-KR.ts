@@ -293,7 +293,6 @@ export const koKR = {
     aria_resize_panels: "패널 크기 조절",
     menu_layout: "레이아웃",
     layout_show_panels: "패널",
-    layout_maximize: "이 패널 최대화",
     layout_restore: "레이아웃 복원",
     layout_reset: "레이아웃 초기화",
     layout_reset_confirm_title: "레이아웃을 초기화할까요?",

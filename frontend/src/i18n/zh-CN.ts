@@ -206,7 +206,6 @@ export const zhCN = {
     aria_resize_panels: "调整面板尺寸",
     menu_layout: "布局",
     layout_show_panels: "显示窗体",
-    layout_maximize: "最大化当前窗体",
     layout_restore: "还原布局",
     layout_reset: "重置布局",
     layout_reset_confirm_title: "重置布局？",

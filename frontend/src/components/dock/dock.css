@@ -380,16 +380,30 @@
 .hs-dock-ghost {
     display: flex;
     align-items: center;
-    gap: 4px;
-    max-width: 260px;
+    gap: 6px;
+    max-width: 320px;
     white-space: nowrap;
+    /* 提升对比：拖拽提示浮在任意内容之上，底色必须与主界面有明确落差，
+       文字用主文本色（而不是 muted）—— 后者叠在接近的底色上几乎读不出来。 */
+    background: var(--qt-surface);
+    color: var(--qt-text);
     border-color: var(--accent-9);
+    box-shadow: 0 6px 18px var(--qt-overlay);
+    font-weight: 500;
 }
 
+/* 次要说明（"停靠 / 浮动"）只降一档不透明度，不再换成 muted 色：
+   两者叠加会把对比度压到读不清（用户报告"这个文本的对比度太不明显"）。 */
+.hs-dock-ghost > .hs-dock-ghost-hint {
+    opacity: 0.85;
+    font-weight: 400;
+}
+
+/* 意图差异用**边框样式**表达（虚线 = 浮动），文字色保持不变：
+   语义仍然一眼可辨，但不再以可读性为代价。 */
 .hs-dock-ghost[data-intent="float"] {
     border-style: dashed;
-    border-color: var(--qt-border);
-    color: var(--qt-text-muted);
+    border-color: var(--qt-text-muted);
 }
 
 /* 拖拽期间禁用全局文本选择，避免拖动时把标签文字刷成选区。 */

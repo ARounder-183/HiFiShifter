@@ -19,7 +19,6 @@ import { useI18n } from "../../i18n/I18nProvider";
 import {
     loadDirectory,
     setPreviewVolume,
-    setPreviewingFile,
     setSearchQuery,
     searchFilesRecursive,
     toggleRegex,
@@ -28,6 +27,7 @@ import {
     type SortMode,
 } from "../../features/fileBrowser/fileBrowserSlice";
 import { audioPreview } from "../../features/fileBrowser/audioPreview";
+import { usePreviewToggle } from "../../features/fileBrowser/usePreviewToggle";
 import { fileBrowserApi, type FileEntry } from "../../services/api/fileBrowser";
 import { applySelectWheelChange } from "../../utils/selectWheel";
 import { isPrimaryModifierDown } from "../../utils/platform";
@@ -254,6 +254,9 @@ export const FileBrowserPanel: React.FC = () => {
         [],
     );
 
+    // 试听切换（播放 / 停止的唯一实现，见 usePreviewToggle）
+    const previewToggle = usePreviewToggle();
+
     // 预览音量同步
     useEffect(() => {
         audioPreview.setVolume(fb.previewVolume);
@@ -420,15 +423,14 @@ export const FileBrowserPanel: React.FC = () => {
                 return;
             }
 
-            // Normal click: clear selection, preview
+            // Normal click: clear selection, toggle preview
+            // （"再点一次停止"由 `usePreviewToggle` 统一实现：此前这里只有播放
+            // 分支，重复点击会从头重放并与在播的旧音源叠加。）
             setSelectedPaths(new Set());
             lastClickedIndexRef.current = idx;
-            dispatch(setPreviewingFile(entry.path));
-            void audioPreview.play(entry.path, () => {
-                dispatch(setPreviewingFile(null));
-            });
+            previewToggle.toggle(entry.path);
         },
-        [dispatch, audioEntries],
+        [audioEntries, previewToggle],
     );
 
     // Clear selection when directory changes

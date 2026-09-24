@@ -216,7 +216,6 @@ export const jaJP = {
     aria_resize_panels: "パネルのサイズ",
     menu_layout: "レイアウト",
     layout_show_panels: "パネル",
-    layout_maximize: "このパネルを最大化",
     layout_restore: "レイアウトを復元",
     layout_reset: "レイアウトを初期化",
     layout_reset_confirm_title: "レイアウトを初期化しますか？",
