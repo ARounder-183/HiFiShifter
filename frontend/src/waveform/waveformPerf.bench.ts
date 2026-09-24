@@ -8,6 +8,12 @@
  * 纯函数（不依赖 DOM / React / WebGL），因此可以脱离浏览器在 Node 下计时，
  * 既能指导优化优先级，又能进 CI 防回归。
  *
+ * 【本基准**不**测什么】平移帧（`repaint()`）不在这里测——它是一次 uniform
+ * 更新加一次 `drawArrays`，需要真实 GL 上下文才能计时，而它的正确性前提
+ * （「视口仍在构建窗口内、且 rows 水平完整时才能复用几何」）是纯逻辑，由
+ * `geometryCache.test.ts` 单测钉住。本文件负责的是「必须重建时」的成本，
+ * 也就是滚动跨过余量窗口、缩放、行窗口切换、clip 编辑时的单帧开销。
+ *
  * 【与其他模块的关系】
  * - 输入：`runtime/timelinePerfScenario.ts` 提供 clip 分布与坐标投影，
  *   `perfFixtures.ts` 提供合成峰值与 `WaveformSceneRow[]`。
@@ -50,6 +56,8 @@ interface ScenarioSpec {
     trackCount: number;
     clipsPerTrack: number;
     pxPerSec: number | "fitContent" | "zoomFloor";
+    /** 每侧淡变时长（秒）；缺省 0。见 `buildSceneRows` 的 `fadeSec`。 */
+    fadeSec?: number;
 }
 
 /**
@@ -78,6 +86,7 @@ function registerScenario(spec: ScenarioSpec): void {
         tracks: scenario.tracks,
         clips: scenario.clips,
         rowHeight: ROW_HEIGHT,
+        fadeSec: spec.fadeSec,
     });
     const peaks = createSyntheticPeakSource({ mediaDurationSec: CLIP_LENGTH_SEC });
 
@@ -193,4 +202,15 @@ registerScenario({
     trackCount: 10,
     clipsPerTrack: 4,
     pxPerSec: "fitContent",
+});
+
+// 5) 带淡变：几何层的「恒定增益」快路径会按**逐列**退让（淡变区内的列走切片、
+//    区外仍走快路径）。缺省 fixture 的淡变恒为 0，这条混合路径在基准里看不见，
+//    因此单独注册一档 —— 它代表真实的交叉淡变 / 手动淡变工程。
+registerScenario({
+    label: "400 clip / fitContent / fade=2s",
+    trackCount: 10,
+    clipsPerTrack: 40,
+    pxPerSec: "fitContent",
+    fadeSec: 2,
 });
