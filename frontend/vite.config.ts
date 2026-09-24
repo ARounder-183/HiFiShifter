@@ -19,6 +19,8 @@ export default defineConfig({
             input: {
                 main: resolve(__dirname, "index.html"),
                 appearance: resolve(__dirname, "appearance.html"),
+                // 独立窗口（把一个窗体拆到主窗口之外）：见 features/dock/detachedWindow.ts
+                detached: resolve(__dirname, "detached.html"),
                 waveformTest: resolve(__dirname, "waveform-test.html"),
             },
             output: {

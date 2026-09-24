@@ -189,6 +189,8 @@ export const zhCN = {
     dock_float_active: "浮动此窗体",
     dock_float: "浮动",
     dock_dock: "停靠",
+    dock_detach_to_window: "在独立窗口中打开",
+    dock_detach_unsupported: "该面板不支持移出主窗口（重挂载代价过高）",
     dock_redock: "重新停靠回主区域",
     dock_expand: "展开",
     dock_collapse: "折叠为标签条",

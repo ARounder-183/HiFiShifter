@@ -42,6 +42,7 @@ import {
     type DockSplitNode,
     type DockTabPosition,
     type DockTabsetNode,
+    type DockFloatMode,
 } from "./dockTypes";
 
 /** 沟槽尺寸的合法区间（与面板定义里的最小值保持一致）。 */
@@ -60,6 +61,21 @@ export const MAIN_FORM_PARAM_EDITOR = "paramEditor";
 export type { DockPlacement };
 
 /** 出厂布局：与重构前的默认视觉一致（上时间轴 / 下参数编辑器，侧栏默认关闭）。 */
+/** 归一化浮动形态（未知值回退到进程内浮层）。 */
+export function normalizeFloatMode(value: unknown): DockFloatMode {
+    return value === "osWindow" ? "osWindow" : "inApp";
+}
+
+/** 归一化独立窗口的屏幕坐标；非法值返回 null（下次打开时按默认位置摆放）。 */
+export function normalizeFloatScreen(value: unknown): { x: number; y: number } | null {
+    if (!value || typeof value !== "object") return null;
+    const raw = value as { x?: unknown; y?: unknown };
+    const x = Number(raw.x);
+    const y = Number(raw.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+    return { x: Math.round(x), y: Math.round(y) };
+}
+
 /** 归一化标签行位置（未知值回退到默认 `"bottom"`）。 */
 export function normalizeTabPosition(value: unknown): DockTabPosition {
     return value === "top" ? "top" : "bottom";
@@ -275,6 +291,8 @@ export function normalizeDockLayout(raw: unknown): DockLayout {
         // 兼容早期落盘数据：那时 `float != null` 就是"正在浮动"，没有独立标志。
         next.floating =
             form.floating === true || (form.floating === undefined && next.float !== null);
+        next.floatMode = normalizeFloatMode(form.floatMode);
+        next.floatScreen = normalizeFloatScreen(form.floatScreen);
         if (typeof form.title === "string" && form.title.trim()) next.title = form.title;
         if (form.props && typeof form.props === "object") {
             next.props = form.props as Record<string, unknown>;
@@ -353,6 +371,8 @@ function normalizePresets(raw: unknown, knownForms: Set<string>): Record<string,
             const next: DockForm = { id: formId, panelId, float: normalizeFloat(form.float) };
             next.floating =
                 form.floating === true || (form.floating === undefined && next.float !== null);
+            next.floatMode = normalizeFloatMode(form.floatMode);
+            next.floatScreen = normalizeFloatScreen(form.floatScreen);
             if (typeof form.title === "string" && form.title.trim()) next.title = form.title;
             forms[formId] = next;
         }

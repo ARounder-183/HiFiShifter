@@ -22,6 +22,8 @@ import {
     normalizeDockLayout,
     openPanelInLayout,
     type DockPlacement,
+    normalizeFloatMode,
+    normalizeFloatScreen,
     normalizeTabPosition,
 } from "./dockSchema";
 import {
@@ -48,6 +50,7 @@ import {
     type DockGutterSizes,
     type DockLayout,
     type DockPreset,
+    type DockFloatMode,
     type DockTabPosition,
 } from "./dockTypes";
 import { getPanel } from "./panelRegistry";
@@ -366,6 +369,44 @@ const dockSlice = createSlice({
                 gutters: { ...state.layout.gutters, [key]: Math.round(px) },
             };
         },
+        /**
+         * 设置窗体的浮动形态（进程内浮层 / 独立操作系统窗口）。
+         *
+         * 【为什么与 `floatForm` 分开】`floatForm` 表达"浮起来"，这里表达"浮在哪里"。
+         * 独立窗口的创建/关闭是副作用（Tauri 窗口），由 `dockApi` 负责，reducer 只
+         * 记录意图 —— 布局因此可以在窗口创建失败时干净地回退。
+         */
+        setFormFloatMode(
+            state,
+            action: PayloadAction<{ formId: string; floatMode: DockFloatMode }>,
+        ) {
+            const { formId, floatMode } = action.payload;
+            const form = state.layout.forms[formId];
+            if (!form) return;
+            state.layout = {
+                ...state.layout,
+                forms: {
+                    ...state.layout.forms,
+                    [formId]: { ...form, floatMode: normalizeFloatMode(floatMode) },
+                },
+            };
+        },
+        /** 记住独立窗口的屏幕坐标（下次拆出时回到同一位置）。 */
+        setFormFloatScreen(
+            state,
+            action: PayloadAction<{ formId: string; screen: { x: number; y: number } | null }>,
+        ) {
+            const { formId, screen } = action.payload;
+            const form = state.layout.forms[formId];
+            if (!form) return;
+            state.layout = {
+                ...state.layout,
+                forms: {
+                    ...state.layout.forms,
+                    [formId]: { ...form, floatScreen: normalizeFloatScreen(screen) },
+                },
+            };
+        },
         /** 标签行位置（布局级偏好，随布局一起持久化）。 */
         setTabPosition(state, action: PayloadAction<DockTabPosition>) {
             state.layout = { ...state.layout, tabPosition: normalizeTabPosition(action.payload) };
@@ -500,6 +541,8 @@ export const {
     setSplitRatioOf,
     toggleTabsetCollapsed,
     setGutterSize,
+    setFormFloatMode,
+    setFormFloatScreen,
     setTabPosition,
     renameForm,
     saveDockPreset,

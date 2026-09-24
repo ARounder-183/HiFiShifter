@@ -18,12 +18,23 @@ import { DockDropOverlay } from "./DockDropOverlay";
 import { DockFloatingLayer } from "./DockFloatingLayer";
 import { DockNodeView } from "./DockNodeView";
 import { DockPanelHosts } from "./DockPanelHosts";
+import { closeAllDetachedWindows } from "../../features/dock/detachedWindow";
 import "./dock.css";
 
 export function DockRoot() {
     const dispatch = useAppDispatch();
     const layout = useAppSelector((s) => s.dock.layout);
     const mountedFormIds = useAppSelector((s) => s.dock.mountedFormIds);
+
+    // 主窗口退出前关掉所有独立窗口：否则它们会让进程继续存活（子窗口未销毁时
+    // Tauri 不会退出应用），用户点了关闭却看到进程还在。
+    useEffect(() => {
+        const onBeforeUnload = () => {
+            void closeAllDetachedWindows();
+        };
+        window.addEventListener("beforeunload", onBeforeUnload);
+        return () => window.removeEventListener("beforeunload", onBeforeUnload);
+    }, []);
 
     // 内置面板在 App 模块加载期注册，早于首次渲染；但注册表也可能在运行期
     // 变化（热更新重放注册、将来插件加载）。这里同步一次，把新注册的面板
@@ -44,7 +55,11 @@ export function DockRoot() {
 
     const mountedForms = mountedFormIds
         .map((formId) => layout.forms[formId])
-        .filter((form): form is NonNullable<typeof form> => Boolean(form));
+        .filter((form): form is NonNullable<typeof form> => Boolean(form))
+        // 已经拆到**独立窗口**的窗体不在主窗口挂载：它此刻由那个窗口承载。
+        // 不排除的话会同时存在两个实例（主窗口那个停在停泊区、仍在跑 effect），
+        // 于是同一份状态被两个实例各写一次 —— 记事本自动保存之类的副作用会翻倍。
+        .filter((form) => form.floatMode !== "osWindow");
 
     return (
         <>

@@ -14,10 +14,8 @@
 import type { ReactNode } from "react";
 
 /** 工具条高度（与标签行一致，避免同一窗口里出现三种不同的横条高度）。 */
-export const PANEL_TOOLBAR_PX = 26;
+const PANEL_TOOLBAR_PX = 26;
 
-/** 图标尺寸：统一 12px，禁止 emoji 字形（跨平台渲染差异正是"不协调"的主因）。 */
-const ICON_PX = 12;
 
 /**
  * 面板工具条容器。
@@ -119,6 +117,3 @@ export function PanelToolbarTextButton({
         </button>
     );
 }
-
-/** 图标尺寸常量出口：面板在需要自绘图标时保持一致。 */
-export { ICON_PX as PANEL_TOOLBAR_ICON_PX };

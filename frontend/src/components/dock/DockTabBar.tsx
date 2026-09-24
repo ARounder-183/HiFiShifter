@@ -37,6 +37,8 @@ import type { DockTabsetNode, DockTabPosition } from "../../features/dock/dockTy
 import { useI18n } from "../../i18n/I18nProvider";
 import { beginTabDrag } from "./dockDragController";
 import { DockTabMenu } from "./DockTabMenu";
+import { detachFormToWindow } from "../../features/dock/dockApi";
+import { store } from "../../app/store";
 
 export interface DockTabBarProps {
     node: DockTabsetNode;
@@ -232,6 +234,23 @@ export function DockTabBar({ node, onToggleFloat, compact, tabPosition }: DockTa
                         dispatch(closeForm(menu.formId));
                         setMenu(null);
                     }}
+                    detachAction={
+                        // 只有声明了 `detachable` 的面板才给出这个入口 —— 否则用户
+                        // 会点到一个开不出来的窗口（时间轴带着 WebGL 上下文，跨窗口
+                        // 必须重新挂载，代价不可接受）。
+                        getPanel(forms[menu.formId]?.panelId ?? "")?.detachable
+                            ? {
+                                  labelKey: "dock_detach_to_window",
+                                  run: () => {
+                                      void detachFormToWindow(
+                                          dispatch,
+                                          store.getState,
+                                          menu.formId,
+                                      );
+                                  },
+                              }
+                            : null
+                    }
                 />
             ) : null}
         </>

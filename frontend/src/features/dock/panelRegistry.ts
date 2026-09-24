@@ -86,6 +86,18 @@ export interface PanelDefinition {
         anchor: "bottom-right";
         marginPx?: number;
     };
+    /**
+     * 是否允许被拆到**独立操作系统窗口**（主窗口之外）。
+     *
+     * 【为什么是逐面板声明】进程内浮动靠"搬 DOM"实现零重挂载（见
+     * `panelHostRegistry`），跨窗口不成立：独立窗口是另一个 JS 上下文，面板必须
+     * **重新挂载**。时间轴与参数编辑器各自带着 WebGL 上下文与波形缓存，重挂载代价
+     * 是数秒卡顿，因此不声明；文件浏览器、记事本、撤销历史这类纯 DOM + Redux 的
+     * 面板可以。
+     *
+     * 未声明的面板在浮动标题栏的提示里说明"该面板不支持移出主窗口"，而不是静默失败。
+     */
+    detachable?: boolean;
     /** 搬家前后的状态保全钩子（见 `DockPanelLifecycle`）。 */
     lifecycle?: DockPanelLifecycle;
     /** "显示窗体"菜单里的排序权重。 */

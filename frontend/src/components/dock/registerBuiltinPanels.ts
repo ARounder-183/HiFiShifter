@@ -65,6 +65,8 @@ export function registerBuiltinPanels(): void {
         // 默认贴工作区右边缘、固定 360px：与重构前"右侧栏"的视觉位置一致，
         // 但宽度由用户拖定，且不再与记事本并排挤占空间。
         defaultPlacement: { side: "right", sizePx: 360 },
+        // 纯 DOM + Redux 面板：重挂载代价低，允许拆到独立窗口（见 detachable 说明）。
+        detachable: true,
         order: 30,
     });
 
@@ -81,6 +83,7 @@ export function registerBuiltinPanels(): void {
         // 用户打开它时希望它浮在手边、而不是挤进布局占一格 —— 因此落在右下角。
         // 声明了 `openAsFloating` 之后 `defaultPlacement` 不会再被用到，故不再声明。
         openAsFloating: { width: 460, height: 420, anchor: "bottom-right" },
+        detachable: true,
         order: 40,
     });
 
@@ -94,6 +97,7 @@ export function registerBuiltinPanels(): void {
         defaultHeight: 420,
         minWidth: 260,
         defaultPlacement: { side: "right", sizePx: 380, tabWith: PANEL_FILE_BROWSER },
+        detachable: true,
         order: 50,
     });
 }

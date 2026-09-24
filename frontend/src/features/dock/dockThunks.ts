@@ -18,6 +18,7 @@ import type { AppDispatch, RootState } from "../../app/store";
 import { settingsApi } from "../../services/api/settings";
 import { applyDockPreset, setDockLayout } from "./dockSlice";
 import { findMainTabset } from "./dockSchema";
+import { restoreDetachedWindows } from "./dockApi";
 import { insertForm } from "./dockTree";
 
 export const loadDockSettings = createAsyncThunk("dock/loadSettings", async () => {
@@ -74,4 +75,7 @@ export function finalizeDockHydration(dispatch: AppDispatch, getState: () => Roo
         }
         dispatch(setDockLayout({ ...current, tree, forms, floatOrder: [] }));
     }
+
+    // 恢复上次拆出的独立窗口（必须放在"收回浮窗"之后：被收回的窗体不该再开窗口）。
+    void restoreDetachedWindows(dispatch, getState);
 }

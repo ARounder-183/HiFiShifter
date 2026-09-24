@@ -29,8 +29,16 @@ import {
     resetDockLayout,
     saveDockPreset,
     setDockLayout,
+    setFormFloatMode,
+    setFormFloatScreen,
     toggleMaximizeActive,
 } from "./dockSlice";
+import {
+    closeDetachedWindow,
+    onDetachedWindowClosed,
+    openDetachedWindow,
+    readDetachedWindowPosition,
+} from "./detachedWindow";
 import type { DockLayout } from "./dockTypes";
 
 type GetState = () => RootState;
@@ -137,6 +145,122 @@ export function maximizeActive(dispatch: AppDispatch): void {
 /** 当前是否处于"最大化某窗体"的临时状态。 */
 export function isMaximized(getState: GetState): boolean {
     return getState().dock.maximized !== null;
+}
+
+/**
+ * 把一个窗体拆到**独立操作系统窗口**（主窗口之外）。
+ *
+ * 【流程】先在布局里把它标成 `osWindow` 浮动态（这样主窗口立刻不再渲染它，且状态
+ * 会随布局持久化），再创建独立窗口。创建失败时**回退**为进程内浮窗 —— 面板绝不会
+ * 因为"窗口没开出来"而消失。
+ *
+ * 【为什么只有部分面板可用】独立窗口是另一个 JS 上下文，面板必须重新挂载；带
+ * WebGL 上下文/波形缓存的面板（时间轴、参数编辑器）代价过高，见
+ * `PanelDefinition.detachable`。未声明的面板在此直接拒绝，调用方据此提示用户。
+ */
+export async function detachFormToWindow(
+    dispatch: AppDispatch,
+    getState: GetState,
+    formId: string,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+    const state = getState();
+    const form = state.dock.layout.forms[formId];
+    if (!form) return { ok: false, reason: "form-not-found" };
+    const definition = getPanel(form.panelId);
+    if (!definition?.detachable) return { ok: false, reason: "panel-not-detachable" };
+
+    const title = form.title ?? definition.titleKey;
+    const width = form.float?.w ?? definition.defaultWidth;
+    const height = form.float?.h ?? definition.defaultHeight;
+
+    // 先落地布局：主窗口立刻停止渲染它，独立窗口随后接管。
+    dispatch(floatForm({ formId, geometry: { w: width, h: height } }));
+    dispatch(setFormFloatMode({ formId, floatMode: "osWindow" }));
+
+    const result = await openDetachedWindow({
+        formId,
+        title,
+        width,
+        height,
+        screen: form.floatScreen ?? null,
+    });
+    if (!result.ok) {
+        // 回退：保持进程内浮窗（用户仍能看到并使用它）。
+        dispatch(setFormFloatMode({ formId, floatMode: "inApp" }));
+        return result;
+    }
+
+    // 窗口关闭即回收为进程内浮窗（最简单的"合回来"语义：关掉就等于收回）。
+    void onDetachedWindowClosed(formId, () => {
+        const position = readDetachedWindowPosition(formId);
+        void position.then((screen) => {
+            if (screen) dispatch(setFormFloatScreen({ formId, screen }));
+            dispatch(setFormFloatMode({ formId, floatMode: "inApp" }));
+        });
+    });
+    return { ok: true };
+}
+
+/** 把独立窗口里的窗体收回主窗口（停靠回原来的位置由布局决定）。 */
+export async function reclaimDetachedForm(
+    dispatch: AppDispatch,
+    getState: GetState,
+    formId: string,
+): Promise<void> {
+    const form = getState().dock.layout.forms[formId];
+    if (!form || form.floatMode !== "osWindow") return;
+    const position = await readDetachedWindowPosition(formId);
+    await closeDetachedWindow(formId);
+    if (position) dispatch(setFormFloatScreen({ formId, screen: position }));
+    dispatch(setFormFloatMode({ formId, floatMode: "inApp" }));
+}
+
+/**
+ * 启动时恢复上次拆出的独立窗口。
+ *
+ * 在布局 hydrate 之后调用一次（见 `finalizeDockHydration`）。只处理**仍然**标记为
+ * `osWindow` 且处于浮动状态的窗体 —— 如果用户关掉了"启动时恢复浮窗"，那些窗体此时
+ * 已经被收回停靠位，自然不会在这里被重新拆出去。
+ */
+export async function restoreDetachedWindows(
+    dispatch: AppDispatch,
+    getState: GetState,
+): Promise<void> {
+    const layout = getState().dock.layout;
+    const detached = layout.order.filter((formId) => {
+        const form = layout.forms[formId];
+        return form?.floating === true && form.floatMode === "osWindow";
+    });
+    for (const formId of detached) {
+        const form = layout.forms[formId];
+        const definition = getPanel(form.panelId);
+        if (!definition?.detachable) {
+            // 面板不再支持（例如插件被换掉）：干净地回退为进程内浮窗。
+            dispatch(setFormFloatMode({ formId, floatMode: "inApp" }));
+            continue;
+        }
+        const result = await openDetachedWindow({
+            formId,
+            title: form.title ?? definition.titleKey,
+            width: form.float?.w ?? definition.defaultWidth,
+            height: form.float?.h ?? definition.defaultHeight,
+            screen: form.floatScreen ?? null,
+        });
+        if (!result.ok) dispatch(setFormFloatMode({ formId, floatMode: "inApp" }));
+        else {
+            void onDetachedWindowClosed(formId, () => {
+                void readDetachedWindowPosition(formId).then((screen) => {
+                    if (screen) dispatch(setFormFloatScreen({ formId, screen }));
+                    dispatch(setFormFloatMode({ formId, floatMode: "inApp" }));
+                });
+            });
+        }
+    }
+}
+
+/** 某个窗体当前是否在独立窗口中。 */
+export function isDetachedForm(getState: GetState, formId: string): boolean {
+    return getState().dock.layout.forms[formId]?.floatMode === "osWindow";
 }
 
 /** 重置为出厂布局。 */

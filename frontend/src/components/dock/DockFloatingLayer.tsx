@@ -16,12 +16,12 @@ import { useCallback, useRef, useState, useSyncExternalStore } from "react";
 
 import { store } from "../../app/store";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
-import { EnterIcon } from "@radix-ui/react-icons";
+import { EnterIcon, ExternalLinkIcon } from "@radix-ui/react-icons";
 
 import { getDockDragState, subscribeDockDrag } from "../../features/dock/dockDragStore";
 import { closeForm, dockFormTo, raiseFloat, setFloatGeometry } from "../../features/dock/dockSlice";
 import { findMainTabset } from "../../features/dock/dockSchema";
-import { maximizeActive } from "../../features/dock/dockApi";
+import { detachFormToWindow, maximizeActive } from "../../features/dock/dockApi";
 import { dockDragHint } from "./dockTooltips";
 import { getPanel } from "../../features/dock/panelRegistry";
 import type { DockForm, DockRect } from "../../features/dock/dockTypes";
@@ -35,7 +35,13 @@ const ZERO_RECT = { x: 0, y: 0, w: 0, h: 0 };
 
 export function DockFloatingLayer() {
     const layout = useAppSelector((s) => s.dock.layout);
-    const floating = layout.floatOrder.filter((formId) => layout.forms[formId]?.floating === true);
+    // `floatMode === "osWindow"` 的窗体由它自己的操作系统窗口渲染，这里不画 ——
+    // 画了就会在主窗口里出现一个"幽灵浮窗"（内容为空，因为宿主已被搬走）。
+    const floating = layout.floatOrder.filter(
+        (formId) =>
+            layout.forms[formId]?.floating === true &&
+            layout.forms[formId]?.floatMode !== "osWindow",
+    );
     if (floating.length === 0) return null;
 
     return (
@@ -75,6 +81,8 @@ function DockFloatWindow({
 
     const definition = getPanel(form.panelId);
     const title = form.title ?? (definition ? tAny(definition.titleKey) : form.panelId);
+    /** 本面板能否拆到独立窗口（见 `PanelDefinition.detachable`）。 */
+    const detachable = definition?.detachable === true;
     const doubleClickAction = useAppSelector((s) => s.dock.settings.doubleClickHeaderAction);
     const dockModifier = useAppSelector((s) => s.dock.settings.dockModifier);
 
@@ -251,6 +259,29 @@ function DockFloatWindow({
                 >
                     {minimized ? "\u25B2" : "\u25BC"}
                 </button>
+                {detachable ? (
+                    <button
+                        type="button"
+                        className="hs-dock-tabbar-action"
+                        data-tooltip={tAny("dock_detach_to_window")}
+                        aria-label={tAny("dock_detach_to_window")}
+                        onClick={() => void detachFormToWindow(dispatch, store.getState, form.id)}
+                    >
+                        <ExternalLinkIcon />
+                    </button>
+                ) : (
+                    // 不可拆的面板给出**解释**而不是一个点不动的按钮：时间轴与
+                    // 参数编辑器带着 WebGL 上下文与波形缓存，跨窗口必须重新挂载，
+                    // 代价是数秒卡顿，因此不支持。
+                    <span
+                        className="hs-dock-tabbar-action"
+                        data-tooltip={tAny("dock_detach_unsupported")}
+                        aria-hidden
+                        style={{ opacity: 0.4, cursor: "default" }}
+                    >
+                        <ExternalLinkIcon />
+                    </span>
+                )}
                 <button
                     type="button"
                     className="hs-dock-tabbar-action"

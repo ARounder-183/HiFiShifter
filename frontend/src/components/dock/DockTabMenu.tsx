@@ -20,6 +20,14 @@ export interface DockTabMenuProps {
     onClose: () => void;
     onFloat: () => void;
     onCloseForm: () => void;
+    /**
+     * 拆到独立窗口 / 从独立窗口收回。
+     *
+     * `null` 表示当前窗格不支持（面板未声明 `detachable`，或已经是独立窗口且
+     * 收回入口由那个窗口自己的标题栏提供）—— 此时不渲染该项，而不是给一个点了
+     * 没反应的按钮。
+     */
+    detachAction?: { labelKey: string; run: () => void } | null;
 }
 
 const MENU_WIDTH = 190;
@@ -28,7 +36,15 @@ const MENU_ITEM_PX = 24;
 /** 菜单的纵向内边距 + 分隔线。 */
 const MENU_CHROME_PX = 18;
 
-export function DockTabMenu({ formId, x, y, onClose, onFloat, onCloseForm }: DockTabMenuProps) {
+export function DockTabMenu({
+    formId,
+    x,
+    y,
+    onClose,
+    onFloat,
+    onCloseForm,
+    detachAction,
+}: DockTabMenuProps) {
     const dispatch = useAppDispatch();
     const { t } = useI18n();
     const tAny = t as (key: string) => string;
@@ -41,7 +57,7 @@ export function DockTabMenu({ formId, x, y, onClose, onFloat, onCloseForm }: Doc
     // 用**固定估算高度**而不是"先渲染再测量"：后者要在 layout effect 里同步
     // setState（触发级联渲染，React Compiler 会就此告警），而菜单项高度本来就是
     // 确定的常量。估算偏差最多几个像素，视觉上不可见。
-    const itemCount = renaming ? 1 : 2;
+    const itemCount = renaming ? 1 : 2 + (detachAction ? 1 : 0);
     const estimatedHeight = itemCount * MENU_ITEM_PX + MENU_CHROME_PX;
     const position = {
         x: Math.min(x, Math.max(0, window.innerWidth - MENU_WIDTH - 4)),
@@ -107,6 +123,15 @@ export function DockTabMenu({ formId, x, y, onClose, onFloat, onCloseForm }: Doc
                 />
             )}
             <MenuItem label={tAny("dock_float")} onClick={onFloat} />
+            {detachAction ? (
+                <MenuItem
+                    label={tAny(detachAction.labelKey)}
+                    onClick={() => {
+                        detachAction.run();
+                        onClose();
+                    }}
+                />
+            ) : null}
             <div className="my-1 border-t border-qt-border" />
             <MenuItem
                 label={t("close")}

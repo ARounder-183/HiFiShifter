@@ -135,6 +135,21 @@ export interface DockForm {
      * 与 `float`（几何记忆）分开，是为了让"停靠 ⇄ 浮动"不再丢失浮窗尺寸。
      */
     floating?: boolean;
+    /**
+     * 浮动形态：进程内浮层（默认）还是**独立操作系统窗口**。
+     *
+     * 【为什么是逐窗体】拆到独立窗口的面板会被重新挂载（跨窗口无法搬 DOM），
+     * 因此只有声明了 `detachable` 的面板才可能拿到 `"osWindow"`；其它面板即使
+     * 被请求也保持 `"inApp"`（见 `floatFormDetached`）。
+     */
+    floatMode?: DockFloatMode;
+    /**
+     * 独立窗口在**屏幕坐标**下的位置（`floatMode === "osWindow"` 时有效）。
+     *
+     * 尺寸仍用 `float.w/h`（浮窗尺寸的语义两处一致）；位置不能用 `float.x/y`
+     * —— 那是主窗口视口坐标，跨窗口后毫无意义。
+     */
+    floatScreen?: { x: number; y: number } | null;
     /** 面板私有状态（随布局持久化，未来 API 面板可直接受益）。 */
     props?: Record<string, unknown>;
 }
@@ -164,6 +179,9 @@ export interface DockGutterSizes {
  * 的顶部工具条。
  */
 export type DockTabPosition = "top" | "bottom";
+
+/** 浮动形态（见 `DockForm.floatMode`）。 */
+export type DockFloatMode = "inApp" | "osWindow";
 
 export interface DockLayout {
     /** schema 版本号，用于迁移。 */

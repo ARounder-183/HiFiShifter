@@ -265,6 +265,63 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
         assertEqual(tooSmall.gutters.timelineTrackHeaderPx, 120, "gutter clamped low");
     }
 
+    // ── 归一化：独立窗口形态与屏幕坐标 ────────────────────────────
+    {
+        const withDetach = normalizeDockLayout({
+            schema: 1,
+            tree: { t: "tabset", id: "z1", tabs: ["timeline"], active: "timeline" },
+            forms: {
+                timeline: { id: "timeline", panelId: "timeline" },
+                notebook: {
+                    id: "notebook",
+                    panelId: "notebook",
+                    floating: true,
+                    floatMode: "osWindow",
+                    floatScreen: { x: 120.4, y: -30.6 },
+                },
+            },
+            order: ["timeline", "notebook"],
+            floatOrder: ["notebook"],
+        });
+        assertEqual(withDetach.forms.notebook?.floatMode, "osWindow", "独立窗口形态随布局持久化");
+        assertEqual(withDetach.forms.notebook?.floatScreen?.x, 120, "屏幕坐标取整保留");
+        assertEqual(
+            withDetach.forms.notebook?.floatScreen?.y,
+            -31,
+            "负坐标（左侧/上方显示器）保留",
+        );
+
+        // 未知形态 / 非法坐标回退：形态回 inApp、坐标清空。
+        const garbage = normalizeDockLayout({
+            schema: 1,
+            tree: { t: "tabset", id: "z1", tabs: ["timeline"], active: "timeline" },
+            forms: {
+                timeline: { id: "timeline", panelId: "timeline" },
+                notebook: {
+                    id: "notebook",
+                    panelId: "notebook",
+                    floating: true,
+                    floatMode: "bogus",
+                    floatScreen: { x: "nope", y: null },
+                },
+            },
+            order: ["timeline", "notebook"],
+            floatOrder: ["notebook"],
+        });
+        assertEqual(garbage.forms.notebook?.floatMode, "inApp", "未知形态回退为进程内浮层");
+        assertEqual(garbage.forms.notebook?.floatScreen ?? null, null, "非法坐标清空");
+
+        // 标签行位置：默认下方，显式 top 保留。
+        assertEqual(withDetach.tabPosition, "bottom", "标签行默认在下方");
+        const topTabs = normalizeDockLayout({
+            schema: 1,
+            tree: { t: "tabset", id: "z1", tabs: ["timeline"], active: "timeline" },
+            forms: { timeline: { id: "timeline", panelId: "timeline" } },
+            tabPosition: "top",
+        });
+        assertEqual(topTabs.tabPosition, "top", "显式 top 被保留");
+    }
+
     // ── 归一化：浮动几何清洗 + 与停靠互斥 ─────────────────────────
     {
         const layout = normalizeDockLayout({

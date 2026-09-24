@@ -4,7 +4,8 @@
     "description": "Capability for the main window",
     "windows": [
         "main",
-        "appearance"
+        "appearance",
+        "hs-detached-*"
     ],
     "permissions": [
         "core:default",
@@ -20,6 +21,11 @@
         "core:webview:allow-create-webview",
         "core:webview:allow-create-webview-window",
         "core:event:default",
-        "opener:default"
+        "opener:default",
+        "core:window:allow-outer-position",
+        "core:window:allow-inner-size",
+        "core:window:allow-scale-factor",
+        "core:window:allow-set-position",
+        "core:window:allow-start-dragging"
     ]
 }

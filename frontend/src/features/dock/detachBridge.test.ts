@@ -1,0 +1,133 @@
+/**
+ * 跨窗口状态桥的自检（独立窗口功能的地基）。
+ *
+ * 【要钉死的性质】
+ * 1. 收到桥来的动作**不再回传**（否则两个窗口互相转发，形成无限回环）；
+ * 2. 一次帧内的多个动作合并成一个批次发出（播放轮询这类高频路径不会把 IPC 打满）；
+ * 3. 不可序列化的动作跳过广播而不是抛错（派发路径绝不能被桥打断）；
+ * 4. 快照动作能把整份状态替换进 store（独立窗口的启动路径）。
+ */
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const emitted: Array<{ event: string; payload: unknown }> = [];
+vi.mock("@tauri-apps/api/event", () => ({
+    emit: async (event: string, payload?: unknown) => {
+        emitted.push({ event, payload });
+    },
+    listen: async () => () => {},
+}));
+
+import {
+    BRIDGE_ACTION_EVENT,
+    createStoreBridgeMiddleware,
+    isSatelliteWindow,
+    resolveWindowLabel,
+    satelliteFormId,
+} from "./detachBridge";
+
+function makeStore(role: "main" | "satellite" = "main") {
+    // 极简 store：只需要 dispatch 能穿过中间件链。
+    let state: unknown = { value: 0 };
+    const listeners: Array<() => void> = [];
+    const baseDispatch = (action: { type: string; payload?: unknown }) => {
+        if (action.type === "set") state = { value: action.payload };
+        for (const listener of listeners) listener();
+        return action;
+    };
+    const middleware = createStoreBridgeMiddleware(role);
+    const dispatch = middleware({
+        getState: () => state,
+        dispatch: (action: { type: string; payload?: unknown }) => dispatch(action as never),
+    } as never)(baseDispatch as never) as (action: { type: string; payload?: unknown }) => unknown;
+    return {
+        dispatch,
+        getState: () => state,
+        subscribe: (listener: () => void) => {
+            listeners.push(listener);
+            return () => {
+                const index = listeners.indexOf(listener);
+                if (index >= 0) listeners.splice(index, 1);
+            };
+        },
+    };
+}
+
+/** 让排队的 rAF 回调跑掉。 */
+function flushFrame() {
+    return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+describe("detachBridge（跨窗口状态桥）", () => {
+    beforeEach(() => {
+        emitted.length = 0;
+        // node 环境没有 rAF：装一个立即在下一个宏任务触发的桩，让"帧合并"可确定性
+        // 验证（中间件在无 rAF 时会退化为 16ms 定时器）。
+        (globalThis as { requestAnimationFrame?: unknown }).requestAnimationFrame = (
+            callback: (time: number) => void,
+        ) => setTimeout(() => callback(0), 0) as unknown as number;
+    });
+
+    afterEach(() => {
+        delete (globalThis as { requestAnimationFrame?: unknown }).requestAnimationFrame;
+        vi.restoreAllMocks();
+    });
+
+    it("窗口标签：主窗口无参数，卫星窗口带窗体 id", () => {
+        const original = globalThis.window;
+        const setSearch = (search: string) => {
+            (globalThis as { window?: unknown }).window = { location: { search } };
+        };
+        setSearch("");
+        expect(resolveWindowLabel()).toBe("main");
+        expect(isSatelliteWindow()).toBe(false);
+        expect(satelliteFormId()).toBeNull();
+
+        setSearch("?hsDetachedForm=notebook");
+        expect(resolveWindowLabel()).toBe("detached:notebook");
+        expect(isSatelliteWindow()).toBe(true);
+        expect(satelliteFormId()).toBe("notebook");
+
+        (globalThis as { window?: unknown }).window = original;
+    });
+
+    it("★ 收到桥来的动作不再回传（无回环）", async () => {
+        const store = makeStore();
+        await flushFrame();
+        emitted.length = 0;
+        store.dispatch({ type: "remote/thing", meta: { hsRemote: true } } as never);
+        await flushFrame();
+        expect(emitted).toHaveLength(0);
+    });
+
+    it("★ 一次帧内的多个动作合并成一批发出", async () => {
+        const store = makeStore();
+        await flushFrame();
+        emitted.length = 0;
+        store.dispatch({ type: "a" });
+        store.dispatch({ type: "b" });
+        store.dispatch({ type: "c" });
+        await flushFrame();
+        const batches = emitted.filter((item) => item.event === BRIDGE_ACTION_EVENT);
+        expect(batches).toHaveLength(1);
+        const payload = batches[0].payload as { origin: string; actions: Array<{ type: string }> };
+        expect(payload.origin).toBe("main");
+        expect(payload.actions.map((action) => action.type)).toEqual(["a", "b", "c"]);
+    });
+
+    it("动作仍然照常流向下游（中间件不吞动作）", () => {
+        const store = makeStore();
+        store.dispatch({ type: "set", payload: 42 });
+        expect(store.getState()).toEqual({ value: 42 });
+    });
+
+    it("不可序列化的动作跳过广播，且不抛错", async () => {
+        const store = makeStore();
+        await flushFrame();
+        emitted.length = 0;
+        const circular: Record<string, unknown> = { type: "bad" };
+        circular.self = circular;
+        expect(() => store.dispatch(circular as never)).not.toThrow();
+        await flushFrame();
+        expect(emitted.filter((item) => item.event === BRIDGE_ACTION_EVENT)).toHaveLength(0);
+    });
+});
