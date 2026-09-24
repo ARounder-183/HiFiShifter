@@ -481,6 +481,11 @@ body[data-dock-dragging="true"] iframe {
  * 【为什么不干脆做成零高度悬浮层】窗格的每一条边都属于某个面板的交互面（顶部是
  * 标尺、底部是横向滚动条、左右是内容），悬浮层一旦按"悬停即激活"就会吃掉这些
  * 位置上的第一次点击。零成本换来的误触风险不可接受，因此保留一个很薄的真实占位。
+ *
+ * 【为什么固定在**上方**、不跟着标签行走】拖起一个窗体时，被拖动的是它的**左上角**
+ * （浮动窗口的定位锚点）。抓手在下方会变成"用户抓的是底边、动的却是顶边"，拖拽
+ * 位置与被拖部位不一致；而且窗格底部是横向滚动条，抓手在那里会与之重合、互相抢
+ * 事件。它也不需要用 `order` 参与排序 —— 在流内、位于内容之前，天然就在最上方。
  */
 .hs-dock-grip {
     display: flex;
@@ -493,11 +498,6 @@ body[data-dock-dragging="true"] iframe {
     opacity: 0.18;
     user-select: none;
     cursor: default;
-}
-
-/* 在下方时与标签行同侧（两者都是"窗格 chrome"）。 */
-.hs-dock-grip[data-position="bottom"] {
-    order: 2;
 }
 
 .hs-dock-tabset:hover .hs-dock-grip {

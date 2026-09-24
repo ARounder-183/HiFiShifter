@@ -1765,6 +1765,12 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                                           : "grab",
                                 }}
                                 ref={(element) => setFlagElement(point.id, element)}
+                                // 提示必须挂在**收到指针的那个元素**上，且与富内容注册
+                                // （`setFlagElement`）是同一个元素：悬停时指针落在这一层，
+                                // 拖拽时 `pointerdown` 也在这一层。曾经字符串挂在内部标签、
+                                // 富内容挂在外层，于是悬停走纯文本、拖拽走富文本 —— 同一个
+                                // 提示在两种状态下排版不同（用户报告的"样式不一致"）。
+                                data-tooltip={tooltipText}
                                 onMouseEnter={() => setHoveredFlagId(point.id)}
                                 onMouseLeave={() =>
                                     setHoveredFlagId((current) =>
@@ -1815,7 +1821,6 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                                                     : "none",
                                             outlineOffset: 1,
                                         }}
-                                        data-tooltip={tooltipText}
                                     >
                                         {formatTempoBpm(point.bpm)}
                                         {sigText ? (

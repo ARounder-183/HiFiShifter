@@ -211,9 +211,10 @@ function DockLayoutMenuItems({
             {/* `浮动` / `最大化当前窗体` 两项已移除：它们是"对当前窗体"的操作，而
                 这个菜单是**布局级**的（显示哪些面板、预设、导入导出）。同一能力仍在
                 标签右键菜单（`DockTabMenu`）、标签上的浮动按钮、以及
-                `Ctrl+Shift+F` / `Ctrl+Shift+M` 快捷键上，入口没有减少。 */}
+                `Ctrl+Shift+F` / `Ctrl+Shift+M` 快捷键上，入口没有减少。
 
-            <DropdownMenu.Separator />
+                这里**不能**再留一个 `<Separator />`：上面那个分隔符之后直接跟
+                下一个分隔符，菜单里会出现一条悬空的横线（删掉两项时曾如此）。 */}
 
             <DropdownMenu.Sub>
                 <DropdownMenu.SubTrigger>{tAny("layout_presets")}</DropdownMenu.SubTrigger>
