@@ -225,6 +225,7 @@ export const jaJP = {
     layout_reset_confirm_body:
         "すべてのパネルが出荷時の位置に戻ります。保存済みプリセットは保持されます。この操作は取り消せません。",
     layout_save_preset: "レイアウトをプリセットとして保存...",
+    layout_os_windows: "独立ウィンドウのパネル",
     layout_presets: "プリセット",
     layout_no_presets: "保存済みプリセットはありません",
     layout_delete_preset: "プリセットを削除",

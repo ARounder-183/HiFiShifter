@@ -26,6 +26,8 @@
 
 import type { Middleware, UnknownAction } from "@reduxjs/toolkit";
 
+import { reportFrontendError } from "../../services/frontendErrorLog";
+
 /** 窗口角色。 */
 export type BridgeRole = "main" | "satellite";
 
@@ -33,6 +35,9 @@ export type BridgeRole = "main" | "satellite";
 const REMOTE_META_KEY = "hsRemote";
 
 export const BRIDGE_ACTION_EVENT = "hs:store/action";
+/** 卫星窗口重发快照请求的间隔与放弃时限。 */
+const SNAPSHOT_REQUEST_INTERVAL_MS = 500;
+const SNAPSHOT_REQUEST_TIMEOUT_MS = 10_000;
 export const BRIDGE_SNAPSHOT_REQUEST_EVENT = "hs:store/snapshot-request";
 export const BRIDGE_SNAPSHOT_EVENT = "hs:store/snapshot";
 
@@ -51,6 +56,16 @@ interface SnapshotEnvelope {
     /** 目标卫星窗口标签。 */
     target: string;
     state: unknown;
+}
+
+/**
+ * 上报桥的失败。
+ *
+ * 【为什么必须可见】桥的失败表现为"卫星窗口永远空白、而面板已从主窗口移除" ——
+ * 用户看到的是功能完全没实现。此前这些分支都是静默 return，排障时毫无线索。
+ */
+function reportBridgeFailure(reason: string): void {
+    reportFrontendError(`[detachBridge] ${reason} (${resolveWindowLabel()})`);
 }
 
 /** 本窗口的稳定标识：主窗口固定为 `main`，卫星窗口为 `detached:<formId>`。 */
@@ -91,6 +106,39 @@ function trySerialize(value: unknown): unknown | null {
     } catch {
         return null;
     }
+}
+
+/**
+ * 快照投影：剔掉**重载荷**字段。
+ *
+ * 【为什么要瘦身】`session` 切片携带逐 clip 的波形数组（`waveform` /
+ * `waveformPreview`），一个真实工程的快照轻易到几 MB —— 跨窗口事件传这么大的
+ * JSON 又慢又容易被序列化问题绊倒，而独立窗口承载的只有文件浏览器 / 记事本 /
+ * 撤销历史，**不需要波形**。整份 `JSON.stringify` 一旦抛错，主窗口此前会静默
+ * 不应答，卫星就永久停在占位符上（用户报告的"完全没实现"）。
+ *
+ * 投影是**结构性**的（按已知字段名剔除），不做深拷贝：拷贝由随后的 stringify 完成。
+ */
+export function projectSnapshot(state: unknown): unknown {
+    if (!state || typeof state !== "object") return state;
+    const root = state as Record<string, unknown>;
+    const session = root.session;
+    if (!session || typeof session !== "object") return state;
+    const sessionRecord = session as Record<string, unknown>;
+    const clips = sessionRecord.clips;
+    const projectedClips = Array.isArray(clips)
+        ? clips.map((clip) => {
+              if (!clip || typeof clip !== "object") return clip;
+              const { waveform, waveformPreview, ...rest } = clip as Record<string, unknown>;
+              void waveform;
+              void waveformPreview;
+              return rest;
+          })
+        : clips;
+    return {
+        ...root,
+        session: { ...sessionRecord, clips: projectedClips },
+    };
 }
 
 /** 动态导入 Tauri 事件 API（非 Tauri 环境返回 null）。 */
@@ -196,12 +244,17 @@ export function installBridge(args: {
         unsubscribers.push(offAction);
 
         if (role === "main") {
-            // 主窗口应答快照请求：把整份状态发给请求方。
+            // 主窗口应答快照请求（卫星会重试，因此这里必须**幂等且无副作用**）。
             const offRequest = await api.listen(BRIDGE_SNAPSHOT_REQUEST_EVENT, (event) => {
                 const request = event.payload as SnapshotRequest | null;
                 if (!request || request.origin === origin) return;
-                const state = trySerialize(getState());
-                if (state === null) return; // 状态不可序列化时不应答（卫星保持遮罩）
+                const state = trySerialize(projectSnapshot(getState()));
+                if (state === null) {
+                    // 序列化失败必须**可见**：此前静默 return，卫星永久停在占位符上，
+                    // 而面板已从主窗口移除 —— 用户看到的是"窗口空白、面板也没了"。
+                    reportBridgeFailure("snapshot-serialize-failed");
+                    return;
+                }
                 void api.emit(BRIDGE_SNAPSHOT_EVENT, {
                     target: request.origin,
                     state,
@@ -213,16 +266,54 @@ export function installBridge(args: {
             const offSnapshot = await api.listen(BRIDGE_SNAPSHOT_EVENT, (event) => {
                 const envelope = event.payload as SnapshotEnvelope | null;
                 if (!envelope || envelope.target !== origin) return;
+                received = true;
+                stopRequesting();
                 onSnapshot?.(envelope.state);
             });
             unsubscribers.push(offSnapshot);
-            // 请求快照。
-            void api.emit(BRIDGE_SNAPSHOT_REQUEST_EVENT, { origin } satisfies SnapshotRequest);
+            // 【必须重试】请求是"尽力而为"的事件：主窗口的监听可能还没注册好（卫星
+            // 在 store 模块求值期就发起请求，比主窗口的 App 挂载还早），事件会丢进
+            // 空房间且**永远不会重发**。此前只发一次 ⇒ 卫星永久空白。这里按固定间隔
+            // 重发直到收到快照（上限 `SNAPSHOT_REQUEST_TIMEOUT_MS`）。
+            startRequesting(api);
         }
+    }
+
+    /** 是否已收到快照（收到后停止重发）。 */
+    let received = false;
+    let requestTimer: ReturnType<typeof setInterval> | null = null;
+
+    function stopRequesting(): void {
+        if (requestTimer !== null) {
+            clearInterval(requestTimer);
+            requestTimer = null;
+        }
+    }
+
+    function startRequesting(api: NonNullable<Awaited<ReturnType<typeof loadEventApi>>>): void {
+        const request = () => {
+            if (disposed || received) {
+                stopRequesting();
+                return;
+            }
+            void api
+                .emit(BRIDGE_SNAPSHOT_REQUEST_EVENT, { origin } satisfies SnapshotRequest)
+                .catch(() => {
+                    // 单次发送失败不影响重试。
+                });
+        };
+        request();
+        requestTimer = setInterval(request, SNAPSHOT_REQUEST_INTERVAL_MS);
+        setTimeout(() => {
+            if (received || disposed) return;
+            stopRequesting();
+            reportBridgeFailure("snapshot-timeout");
+        }, SNAPSHOT_REQUEST_TIMEOUT_MS);
     }
 
     return () => {
         disposed = true;
+        stopRequesting();
         for (const off of unsubscribers) off();
         unsubscribers.length = 0;
     };

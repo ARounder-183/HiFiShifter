@@ -58,22 +58,26 @@ export function finalizeDockHydration(dispatch: AppDispatch, getState: () => Roo
         dispatch(applyDockPreset(settings.startupLayout));
     }
 
+    // 【不要在这里 return】下面还有"恢复独立窗口"必须执行：早返回会让它被静默跳过
+    // （曾经如此 —— 没有浮窗时独立窗口永远不会被恢复，而用户上次拆出的窗口就此
+    // 消失，只能重启）。因此这里只做条件分支，不做提前退出。
     if (!settings.floatRestoreOnStartup) {
         const current = getState().dock.layout;
         const main = findMainTabset(current);
-        if (!main) return;
-        const floating = current.floatOrder.filter((id) => current.forms[id]?.floating === true);
-        if (floating.length === 0) return;
-
-        const forms = { ...current.forms };
-        let tree = current.tree;
-        for (const formId of floating) {
-            const form = forms[formId];
-            if (!form) continue;
-            forms[formId] = { ...form, floating: false };
-            tree = insertForm(tree, formId, { kind: "tab", tabsetId: main.id });
+        const floating = main
+            ? current.floatOrder.filter((id) => current.forms[id]?.floating === true)
+            : [];
+        if (main && floating.length > 0) {
+            const forms = { ...current.forms };
+            let tree = current.tree;
+            for (const formId of floating) {
+                const form = forms[formId];
+                if (!form) continue;
+                forms[formId] = { ...form, floating: false };
+                tree = insertForm(tree, formId, { kind: "tab", tabsetId: main.id });
+            }
+            dispatch(setDockLayout({ ...current, tree, forms, floatOrder: [] }));
         }
-        dispatch(setDockLayout({ ...current, tree, forms, floatOrder: [] }));
     }
 
     // 恢复上次拆出的独立窗口（必须放在"收回浮窗"之后：被收回的窗体不该再开窗口）。

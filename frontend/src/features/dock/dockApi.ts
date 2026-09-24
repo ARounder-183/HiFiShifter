@@ -15,6 +15,7 @@
  */
 
 import type { AppDispatch, RootState } from "../../app/store";
+import { reportFrontendError } from "../../services/frontendErrorLog";
 import { findMainTabset, normalizeDockLayout } from "./dockSchema";
 import { collectTabsets, isFormVisible } from "./dockTree";
 import { getPanel, listPanels } from "./panelRegistry";
@@ -35,9 +36,9 @@ import {
 } from "./dockSlice";
 import {
     closeDetachedWindow,
-    onDetachedWindowClosed,
     openDetachedWindow,
     readDetachedWindowPosition,
+    watchDetachedWindow,
 } from "./detachedWindow";
 import type { DockLayout } from "./dockTypes";
 
@@ -186,18 +187,16 @@ export async function detachFormToWindow(
     });
     if (!result.ok) {
         // 回退：保持进程内浮窗（用户仍能看到并使用它）。
+        // **必须留日志**：静默回退让"窗口没开出来"看起来像"功能没实现"（实际发生过）。
+        reportFrontendError(`[detach] 独立窗口创建失败，已回退为进程内浮窗：${result.reason}`);
         dispatch(setFormFloatMode({ formId, floatMode: "inApp" }));
         return result;
     }
 
     // 窗口关闭即回收为进程内浮窗（最简单的"合回来"语义：关掉就等于收回）。
-    void onDetachedWindowClosed(formId, () => {
-        const position = readDetachedWindowPosition(formId);
-        void position.then((screen) => {
-            if (screen) dispatch(setFormFloatScreen({ formId, screen }));
-            dispatch(setFormFloatMode({ formId, floatMode: "inApp" }));
-        });
-    });
+    // 用**轮询监视**而不是 `onCloseRequested`：后者从主窗口注册收不到事件，
+    // 会让窗口永远关不掉（见 `watchDetachedWindow` 的说明）。
+    startWatching(dispatch, getState, formId);
     return { ok: true };
 }
 
@@ -246,16 +245,37 @@ export async function restoreDetachedWindows(
             height: form.float?.h ?? definition.defaultHeight,
             screen: form.floatScreen ?? null,
         });
-        if (!result.ok) dispatch(setFormFloatMode({ formId, floatMode: "inApp" }));
-        else {
-            void onDetachedWindowClosed(formId, () => {
-                void readDetachedWindowPosition(formId).then((screen) => {
-                    if (screen) dispatch(setFormFloatScreen({ formId, screen }));
-                    dispatch(setFormFloatMode({ formId, floatMode: "inApp" }));
-                });
-            });
+        if (!result.ok) {
+            reportFrontendError(
+                `[detach] 启动恢复独立窗口失败，已回退为进程内浮窗：${result.reason}`,
+            );
+            dispatch(setFormFloatMode({ formId, floatMode: "inApp" }));
+        } else {
+            startWatching(dispatch, getState, formId);
         }
     }
+}
+
+/**
+ * 每个独立窗体的监视停止函数（窗体被回收时停掉，避免重复回收）。
+ *
+ * 放在模块作用域：窗口的存活期跨越多次 dispatch，没有更合适的 React 宿主。
+ */
+const stopWatching = new Map<string, () => void>();
+
+/** 开始监视独立窗口的存活；窗口消失即收回（并停掉自己的监视）。 */
+function startWatching(dispatch: AppDispatch, getState: GetState, formId: string): void {
+    stopWatching.get(formId)?.();
+    stopWatching.set(
+        formId,
+        watchDetachedWindow(formId, () => {
+            stopWatching.get(formId)?.();
+            stopWatching.delete(formId);
+            // 复用同一回收路径：窗口此时已消失，`closeDetachedWindow` 是空操作，
+            // 早退判定也保证重复回调不会重复 dispatch。
+            void reclaimDetachedForm(dispatch, getState, formId);
+        }),
+    );
 }
 
 /** 某个窗体当前是否在独立窗口中。 */

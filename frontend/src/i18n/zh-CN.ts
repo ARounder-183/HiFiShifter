@@ -213,6 +213,7 @@ export const zhCN = {
     layout_reset_confirm_title: "重置布局？",
     layout_reset_confirm_body: "所有窗体会回到出厂位置，已保存的预设会保留。此操作无法撤销。",
     layout_save_preset: "保存布局为预设...",
+    layout_os_windows: "独立窗口中的窗体",
     layout_presets: "预设",
     layout_no_presets: "尚未保存预设",
     layout_delete_preset: "删除预设",

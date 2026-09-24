@@ -10,17 +10,26 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const emitted: Array<{ event: string; payload: unknown }> = [];
+/** 事件名 → 已注册的处理器（测试可手动触发，模拟另一个窗口的广播）。 */
+const listeners = new Map<string, (event: { payload: unknown }) => void>();
 vi.mock("@tauri-apps/api/event", () => ({
     emit: async (event: string, payload?: unknown) => {
         emitted.push({ event, payload });
     },
-    listen: async () => () => {},
+    listen: async (event: string, handler: (event: { payload: unknown }) => void) => {
+        listeners.set(event, handler);
+        return () => listeners.delete(event);
+    },
 }));
 
 import {
     BRIDGE_ACTION_EVENT,
+    BRIDGE_SNAPSHOT_EVENT,
+    BRIDGE_SNAPSHOT_REQUEST_EVENT,
     createStoreBridgeMiddleware,
+    installBridge,
     isSatelliteWindow,
+    projectSnapshot,
     resolveWindowLabel,
     satelliteFormId,
 } from "./detachBridge";
@@ -60,6 +69,7 @@ function flushFrame() {
 describe("detachBridge（跨窗口状态桥）", () => {
     beforeEach(() => {
         emitted.length = 0;
+        listeners.clear();
         // node 环境没有 rAF：装一个立即在下一个宏任务触发的桩，让"帧合并"可确定性
         // 验证（中间件在无 rAF 时会退化为 16ms 定时器）。
         (globalThis as { requestAnimationFrame?: unknown }).requestAnimationFrame = (
@@ -129,5 +139,107 @@ describe("detachBridge（跨窗口状态桥）", () => {
         expect(() => store.dispatch(circular as never)).not.toThrow();
         await flushFrame();
         expect(emitted.filter((item) => item.event === BRIDGE_ACTION_EVENT)).toHaveLength(0);
+    });
+});
+
+describe("快照投影（detachBridge 的重载荷裁剪）", () => {
+    it("★ 剔除逐 clip 的波形数组（快照体积的决定项）", () => {
+        const state = {
+            session: {
+                bpm: 120,
+                clips: [
+                    { id: "c0", waveform: [0.1, 0.2], waveformPreview: [0.3], gain: 1 },
+                    { id: "c1", waveform: [0.4], waveformPreview: [], gain: 2 },
+                ],
+            },
+            fileBrowser: { root: "/x" },
+        };
+        const projected = projectSnapshot(state) as {
+            session: { bpm: number; clips: Array<Record<string, unknown>> };
+            fileBrowser: unknown;
+        };
+        expect(projected.session.clips).toEqual([
+            { id: "c0", gain: 1 },
+            { id: "c1", gain: 2 },
+        ]);
+        // 其余字段原样保留。
+        expect(projected.session.bpm).toBe(120);
+        expect(projected.fileBrowser).toEqual({ root: "/x" });
+    });
+
+    it("结构异常时不抛错（投影是尽力而为）", () => {
+        expect(projectSnapshot(null)).toBeNull();
+        expect(projectSnapshot({ session: null })).toEqual({ session: null });
+        expect(projectSnapshot({ session: { clips: "nope" } })).toEqual({
+            session: { clips: "nope" },
+        });
+    });
+});
+
+describe("卫星窗口的快照握手（重试）", () => {
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
+    it("★ 未收到快照时反复重发请求（一次请求会丢，必须重试）", async () => {
+        vi.useFakeTimers();
+        const original = globalThis.window;
+        (globalThis as { window?: unknown }).window = {
+            location: { search: "?hsDetachedForm=notebook" },
+        };
+        try {
+            const teardown = installBridge({
+                role: "satellite",
+                getState: () => ({}),
+                dispatch: () => {},
+                onSnapshot: () => {},
+            });
+            // 让动态 import 的事件 API 就绪。
+            await vi.advanceTimersByTimeAsync(0);
+            const countRequests = () =>
+                emitted.filter((item) => item.event === BRIDGE_SNAPSHOT_REQUEST_EVENT).length;
+            expect(countRequests()).toBe(1);
+            await vi.advanceTimersByTimeAsync(1200);
+            // 每 500ms 重发一次：1.2s 内至少多发两次。
+            expect(countRequests()).toBeGreaterThanOrEqual(3);
+            teardown();
+            const before = countRequests();
+            await vi.advanceTimersByTimeAsync(1200);
+            expect(countRequests()).toBe(before);
+        } finally {
+            (globalThis as { window?: unknown }).window = original;
+        }
+    });
+
+    it("★ 收到快照后停止重发，并把状态交给 onSnapshot", async () => {
+        vi.useFakeTimers();
+        const original = globalThis.window;
+        (globalThis as { window?: unknown }).window = {
+            location: { search: "?hsDetachedForm=notebook" },
+        };
+        try {
+            const received: unknown[] = [];
+            const teardown = installBridge({
+                role: "satellite",
+                getState: () => ({}),
+                dispatch: () => {},
+                onSnapshot: (state) => received.push(state),
+            });
+            await vi.advanceTimersByTimeAsync(0);
+            const handler = listeners.get(BRIDGE_SNAPSHOT_EVENT);
+            expect(handler).toBeDefined();
+            handler?.({ payload: { target: "detached:notebook", state: { ok: 1 } } });
+            expect(received).toEqual([{ ok: 1 }]);
+            const before = emitted.filter(
+                (item) => item.event === BRIDGE_SNAPSHOT_REQUEST_EVENT,
+            ).length;
+            await vi.advanceTimersByTimeAsync(2000);
+            expect(
+                emitted.filter((item) => item.event === BRIDGE_SNAPSHOT_REQUEST_EVENT).length,
+            ).toBe(before);
+            teardown();
+        } finally {
+            (globalThis as { window?: unknown }).window = original;
+        }
     });
 });

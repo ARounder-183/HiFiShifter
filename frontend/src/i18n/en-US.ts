@@ -363,6 +363,7 @@ export const enUS = {
     layout_reset_confirm_body:
         "Every panel goes back to its factory position and the saved presets are kept. This cannot be undone.",
     layout_save_preset: "Save layout as preset...",
+    layout_os_windows: "Panels in separate windows",
     layout_presets: "Presets",
     layout_no_presets: "No saved presets",
     layout_delete_preset: "Delete preset",

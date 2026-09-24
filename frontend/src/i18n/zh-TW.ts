@@ -214,6 +214,7 @@ export const zhTW = {
     layout_reset_confirm_title: "重置佈局？",
     layout_reset_confirm_body: "所有視窗會回到出廠位置，已儲存的預設會保留。此操作無法復原。",
     layout_save_preset: "儲存佈局為預設...",
+    layout_os_windows: "獨立視窗中的視窗",
     layout_presets: "預設",
     layout_no_presets: "尚未儲存預設",
     layout_delete_preset: "刪除預設",

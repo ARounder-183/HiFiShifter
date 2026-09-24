@@ -77,6 +77,7 @@ export async function openDetachedWindow(
     } catch {
         // 查不到（或平台不支持查询）时继续创建：创建本身会报真正的错误。
     }
+    let createError: string | null = null;
     try {
         const win = new api.WebviewWindow(label, {
             url: detachedWindowUrl(request.formId),
@@ -90,28 +91,42 @@ export async function openDetachedWindow(
             resizable: true,
             focus: true,
         });
-        return await new Promise<DetachedWindowResult>((resolve) => {
-            let settled = false;
-            const finish = (result: DetachedWindowResult) => {
-                if (settled) return;
-                settled = true;
-                resolve(result);
-            };
-            void win.once("tauri://created", () => finish({ ok: true }));
-            void win.once("tauri://error", (event) => {
-                finish({
-                    ok: false,
-                    reason: `create-failed:${String((event as { payload?: unknown }).payload ?? "")}`,
-                });
-            });
-            // 兜底：某些平台上 created 事件可能早于监听注册。
-            setTimeout(() => finish({ ok: true }), 1500);
-        });
+        // 错误事件尽力监听（`once` 自身是异步的，可能错过已发出的错误 —— 因此下面
+        // 还有一次基于"窗口是否真的出现"的确认，两者互补）。
+        void win
+            .once("tauri://error", (event) => {
+                createError = String((event as { payload?: unknown }).payload ?? "unknown");
+            })
+            .catch(() => undefined);
     } catch (error) {
+        // 构造函数本身通常不抛（它只是发起 invoke），但平台差异下可能抛。
         return {
             ok: false,
             reason: error instanceof Error ? error.message : String(error),
         };
+    }
+
+    // 【为什么轮询确认而不是等事件】`tauri://created` 可能在 `once` 注册完成之前就已
+    // 发出（注册本身要走一次 IPC），只靠事件会**漏判**；而"超时即成功"又会把真正的
+    // 失败（label 冲突、权限不足）报告成成功。曾经两个方向都踩过：先是无条件成功
+    // （失败被吞、面板两边都不见），随后改成"超时查一次"又产生假失败（窗口 1.5s 内
+    // 还没登记 ⇒ 判失败 ⇒ 回退进程内浮层 ⇒ 用户看到窗口没出来）。
+    //
+    // 唯一可靠的判据是**观察窗口是否存在**：轮询到它出现即成功，到时限仍未出现即
+    // 失败，并把原因上报（绝不静默回退）。
+    const deadline = Date.now() + DETACHED_CREATE_TIMEOUT_MS;
+    for (;;) {
+        if (createError !== null) return { ok: false, reason: `create-failed:${createError}` };
+        try {
+            const created = await api.WebviewWindow.getByLabel(label);
+            if (created) return { ok: true };
+        } catch {
+            // 查询失败按"还没登记"处理，继续轮询。
+        }
+        if (Date.now() >= deadline) {
+            return { ok: false, reason: "create-not-registered" };
+        }
+        await new Promise((resolve) => setTimeout(resolve, DETACHED_CREATE_POLL_MS));
     }
 }
 
@@ -143,30 +158,56 @@ export async function closeAllDetachedWindows(): Promise<void> {
     }
 }
 
+/** 创建窗口后确认其存在的轮询间隔与时限。 */
+const DETACHED_CREATE_POLL_MS = 200;
+const DETACHED_CREATE_TIMEOUT_MS = 6000;
+
+/** 监视独立窗口是否已消失的轮询间隔（与首次检查的宽限期）。 */
+const DETACHED_WATCH_INTERVAL_MS = 1000;
+const DETACHED_WATCH_GRACE_MS = 2000;
+
 /**
- * 订阅某个独立窗口的关闭事件。
+ * 监视某个独立窗口是否已被关闭。
  *
- * @returns 取消订阅函数。
+ * 【为什么用轮询，而不是 `onCloseRequested`】`WebviewWindow.listen` 会把监听
+ * **限定到该窗口的 label**（`target: { kind: "Webview", label: this.label }`），
+ * 而事件只投递给目标 webview。于是从**主窗口**给另一个窗口注册 `onCloseRequested`
+ * 时，监听器装在主窗口的 JS 上下文里却永远收不到事件 —— 而 Tauri 的 JS 封装正是
+ * 靠那个回调在"未 preventDefault"时调用 `destroy()`：回调不触发，**窗口就永远关
+ * 不掉**（实测：向独立窗口发 WM_CLOSE 与 SC_CLOSE 都无效，窗口一直留在屏幕上）。
+ *
+ * 轮询窗口是否存在则完全不依赖跨窗口事件语义，而且能覆盖"进程被杀 / 崩溃"这类
+ * 事件根本不会到达的情况。
+ *
+ * @param onGone 窗口消失时的回调（主窗口据此把窗体收回进程内浮层）。
+ * @returns 停止监视（收回窗体、或主窗口卸载时调用）。
  */
-export async function onDetachedWindowClosed(
-    formId: string,
-    handler: () => void,
-): Promise<() => void> {
-    const api = await loadWebviewWindowApi();
-    if (api === null) return () => {};
-    const label = detachedWindowLabel(formId);
-    let unlisten: (() => void) | null = null;
-    try {
-        const win = await api.WebviewWindow.getByLabel(label);
-        if (!win) return () => {};
-        const off = await win.onCloseRequested(() => {
-            handler();
-        });
-        unlisten = off;
-    } catch {
-        return () => {};
-    }
-    return () => unlisten?.();
+export function watchDetachedWindow(formId: string, onGone: () => void): () => void {
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const tick = async () => {
+        if (stopped) return;
+        const api = await loadWebviewWindowApi();
+        if (api === null || stopped) return;
+        try {
+            const win = await api.WebviewWindow.getByLabel(detachedWindowLabel(formId));
+            if (!win) {
+                if (!stopped) onGone();
+                return;
+            }
+        } catch {
+            // 查询失败按"仍在"处理：下一个周期再确认，避免误回收。
+        }
+        if (!stopped) timer = setTimeout(tick, DETACHED_WATCH_INTERVAL_MS);
+    };
+
+    // 宽限期：窗口刚创建时可能还没登记进窗口管理器，立即查询会误判为"已消失"。
+    timer = setTimeout(tick, DETACHED_WATCH_GRACE_MS);
+    return () => {
+        stopped = true;
+        if (timer !== null) clearTimeout(timer);
+    };
 }
 
 /** 读取独立窗口当前的屏幕坐标（用于持久化）。 */

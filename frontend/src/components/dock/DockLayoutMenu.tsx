@@ -32,7 +32,9 @@ import {
     resetLayout,
     savePreset,
     togglePanelVisible,
+    reclaimDetachedForm,
 } from "../../features/dock/dockApi";
+import { getPanel } from "../../features/dock/panelRegistry";
 
 export interface DockLayoutMenuProps {
     /** 菜单勾选前缀（与仓库既有 View 菜单同一约定）。 */
@@ -164,6 +166,14 @@ function DockLayoutMenuItems({
     const layout = useAppSelector((state) => state.dock.layout);
 
     const entries = useMemo(() => listPanelEntriesFromLayout(layout), [layout]);
+    /** 当前在独立窗口中的窗体（用于"收回主窗口"入口）。 */
+    const osWindowForms = useMemo(
+        () =>
+            layout.order
+                .map((formId) => layout.forms[formId])
+                .filter((form): form is NonNullable<typeof form> => form?.floatMode === "osWindow"),
+        [layout],
+    );
     const presetNames = useMemo(() => listPresetNamesFromLayout(layout), [layout]);
 
     const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -215,6 +225,29 @@ function DockLayoutMenuItems({
 
                 这里**不能**再留一个 `<Separator />`：上面那个分隔符之后直接跟
                 下一个分隔符，菜单里会出现一条悬空的横线（删掉两项时曾如此）。 */}
+
+            {/* 独立窗口中的窗体：给出"收回主窗口"的入口。
+                没有它的话，一旦卫星窗口的关闭回收没能执行（创建/登记竞态），窗体就
+                既不在主窗口、也不在任何窗口里，用户**无法从界面恢复它** —— 只能重启
+                应用（下次启动会重新打开那个窗口）。这是"面板凭空消失"的唯一出路。 */}
+            {osWindowForms.length > 0 ? (
+                <DropdownMenu.Sub>
+                    <DropdownMenu.SubTrigger>{tAny("layout_os_windows")}</DropdownMenu.SubTrigger>
+                    <DropdownMenu.SubContent>
+                        {osWindowForms.map((form) => (
+                            <DropdownMenu.Item
+                                key={form.id}
+                                onSelect={() =>
+                                    void reclaimDetachedForm(dispatch, store.getState, form.id)
+                                }
+                            >
+                                {form.title ??
+                                    tAny(getPanel(form.panelId)?.titleKey ?? form.panelId)}
+                            </DropdownMenu.Item>
+                        ))}
+                    </DropdownMenu.SubContent>
+                </DropdownMenu.Sub>
+            ) : null}
 
             <DropdownMenu.Sub>
                 <DropdownMenu.SubTrigger>{tAny("layout_presets")}</DropdownMenu.SubTrigger>

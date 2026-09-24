@@ -301,6 +301,7 @@ export const koKR = {
     layout_reset_confirm_body:
         "모든 패널이 초기 위치로 돌아갑니다. 저장한 프리셋은 유지됩니다. 되돌릴 수 없습니다.",
     layout_save_preset: "레이아웃을 프리셋으로 저장...",
+    layout_os_windows: "별도 창의 패널",
     layout_presets: "프리셋",
     layout_no_presets: "저장된 프리셋 없음",
     layout_delete_preset: "프리셋 삭제",
