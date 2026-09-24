@@ -281,6 +281,7 @@ test("features/dock/dockTree.test.ts scripted checks", async () => {
             order: ["a", "b", "c"],
             floatOrder: ["b"],
             gutters: { timelineTrackHeaderPx: 256 },
+            tabPosition: "bottom",
         };
         assertEqual(isFormVisible(layout, "a"), true, "docked form is visible");
         assertEqual(isFormVisible(layout, "c"), false, "closed form is not visible");

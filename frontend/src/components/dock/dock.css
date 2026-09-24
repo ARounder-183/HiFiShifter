@@ -121,10 +121,27 @@
     height: 0;
 }
 
+/* 标签行位置：下方（默认）。
+   `order` 让 DOM 顺序不必改变（焦点顺序仍是 DOM 顺序），只改视觉顺序：
+   槽位 1、标签行 2。 */
+.hs-dock-tabset[data-tab-position="bottom"] .hs-dock-slot {
+    order: 1;
+}
+
 .hs-dock-tabbar[data-position="bottom"] {
     border-bottom: none;
     border-top: 1px solid var(--qt-border);
     order: 2;
+}
+
+/* 激活下划线跟着标签行换边：在上方时贴下缘，在下方时贴上缘。 */
+.hs-dock-tabbar[data-position="bottom"] .hs-dock-tab[data-active="true"] {
+    box-shadow: inset 0 2px 0 var(--accent-9);
+}
+
+/* 折叠态：内容槽位不渲染，标签行是唯一可见的 chrome。 */
+.hs-dock-tabbar[data-position="bottom"][data-collapsed="true"] {
+    border-top: 1px solid var(--qt-border);
 }
 
 .hs-dock-tabbar[data-collapsed="true"] {
@@ -454,24 +471,41 @@ body[data-dock-dragging="true"] iframe {
 /* ── 单标签抓手 ─────────────────────────────────────────────────── */
 
 /*
- * 单标签且不显示标签条时的极窄抓手：给用户一个能抓住拖出去的地方，
- * 同时几乎不占视觉空间（时间轴这类面板自带标题栏，26px 的标签条太浪费）。
+ * 单标签且不显示标签条时的抓手：给用户一个能抓住拖出去的地方。
+ *
+ * 【为什么是 6px 且默认近乎透明】它只是一次拖拽的着力点，用户并不频繁使用，却要
+ * 长期让出高度 —— 默认布局下时间轴 + 参数编辑器各 12px，合计 24px 纯属浪费。
+ * 现在减半到 6px，并且默认只留极淡的底纹，指针移到窗格上才显形（不占额外的视觉
+ * 注意力）。
+ *
+ * 【为什么不干脆做成零高度悬浮层】窗格的每一条边都属于某个面板的交互面（顶部是
+ * 标尺、底部是横向滚动条、左右是内容），悬浮层一旦按"悬停即激活"就会吃掉这些
+ * 位置上的第一次点击。零成本换来的误触风险不可接受，因此保留一个很薄的真实占位。
  */
 .hs-dock-grip {
     display: flex;
     align-items: center;
     justify-content: center;
     flex: 0 0 auto;
-    height: 12px;
+    height: 6px;
     color: var(--qt-text-muted);
     background: var(--qt-window);
-    opacity: 0.35;
+    opacity: 0.18;
     user-select: none;
     cursor: default;
 }
 
+/* 在下方时与标签行同侧（两者都是"窗格 chrome"）。 */
+.hs-dock-grip[data-position="bottom"] {
+    order: 2;
+}
+
+.hs-dock-tabset:hover .hs-dock-grip {
+    opacity: 0.55;
+}
+
 .hs-dock-grip:hover {
-    opacity: 0.9;
+    opacity: 1;
     background: var(--qt-panel);
 }
 

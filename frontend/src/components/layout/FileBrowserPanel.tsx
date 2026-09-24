@@ -11,9 +11,6 @@ import {
     StopIcon,
 } from "@radix-ui/react-icons";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
-import { store } from "../../app/store";
-import { closeFormById } from "../../features/dock/dockApi";
-import { PANEL_FILE_BROWSER } from "../dock/registerBuiltinPanels";
 import type { RootState } from "../../app/store";
 import { useI18n } from "../../i18n/I18nProvider";
 import {
@@ -28,6 +25,7 @@ import {
 } from "../../features/fileBrowser/fileBrowserSlice";
 import { audioPreview } from "../../features/fileBrowser/audioPreview";
 import { usePreviewToggle } from "../../features/fileBrowser/usePreviewToggle";
+import { PanelToolbar, PanelToolbarButton } from "./shared/PanelToolbar";
 import { fileBrowserApi, type FileEntry } from "../../services/api/fileBrowser";
 import { applySelectWheelChange } from "../../utils/selectWheel";
 import { isPrimaryModifierDown } from "../../utils/platform";
@@ -631,45 +629,26 @@ export const FileBrowserPanel: React.FC = () => {
 
     return (
         <Flex direction="column" className="h-full bg-qt-window text-qt-text select-none">
-            {/* 标题栏 */}
-            <Flex
-                align="center"
-                justify="between"
-                className="h-8 px-2 border-b border-qt-border shrink-0"
-            >
-                <Text size="2" weight="medium" className="truncate">
-                    {(t as (key: string) => string)("fb_title")}
-                </Text>
-                <Flex align="center" gap="1">
-                    <IconButton
-                        size="1"
-                        variant="ghost"
-                        color="gray"
-                        data-tooltip={(t as (key: string) => string)("fb_open_folder")}
-                        onClick={handleOpenFolder}
-                    >
-                        <FolderIcon />
-                    </IconButton>
-                    <IconButton
-                        size="1"
-                        variant="ghost"
-                        color="gray"
-                        data-tooltip={(t as (key: string) => string)("fb_refresh")}
-                        onClick={handleRefresh}
-                    >
-                        <ReloadIcon />
-                    </IconButton>
-                    <IconButton
-                        size="1"
-                        variant="ghost"
-                        color="gray"
-                        data-tooltip={t("fb_close")}
-                        onClick={() => closeFormById(dispatch, store.getState, PANEL_FILE_BROWSER)}
-                    >
-                        <Cross2Icon />
-                    </IconButton>
-                </Flex>
-            </Flex>
+            {/* 工具条：只放本面板**独有**的功能按钮。
+                标题与关闭属于窗框（停靠时是标签行、浮动时是浮动标题栏、独立窗口时
+                是系统标题栏），在这里再画一遍就是重复展示 —— 用户看到两个标题、两个
+                关闭键会困惑。 */}
+            <PanelToolbar
+                trailing={
+                    <>
+                        <PanelToolbarButton
+                            icon={<FolderIcon />}
+                            tooltip={(t as (key: string) => string)("fb_open_folder")}
+                            onClick={handleOpenFolder}
+                        />
+                        <PanelToolbarButton
+                            icon={<ReloadIcon />}
+                            tooltip={(t as (key: string) => string)("fb_refresh")}
+                            onClick={handleRefresh}
+                        />
+                    </>
+                }
+            />
 
             {/* 搜索栏 */}
             <div className="px-2 py-1 border-b border-qt-border shrink-0">

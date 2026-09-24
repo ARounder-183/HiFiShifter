@@ -15,12 +15,10 @@
  */
 
 import { EditorContent } from "@tiptap/react";
+import { CardStackIcon, ChevronDownIcon, ChevronRightIcon, GearIcon } from "@radix-ui/react-icons";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useAppDispatch, useAppSelector } from "../../../app/hooks";
-import { store } from "../../../app/store";
-import { closeFormById } from "../../../features/dock/dockApi";
-import { PANEL_NOTEBOOK } from "../../dock/registerBuiltinPanels";
 import {
     setNotebookAssetIndex,
     setNotebookMode,
@@ -36,6 +34,7 @@ import {
 import { selectClipRemote } from "../../../features/session/thunks/timelineThunks";
 import { seekPlayhead } from "../../../features/session/thunks/transportThunks";
 import { useI18n } from "../../../i18n/I18nProvider";
+import { PanelToolbar, PanelToolbarButton, PanelToolbarTextButton } from "../shared/PanelToolbar";
 import { notebookApi } from "../../../services/api/notebook";
 import { settingsApi } from "../../../services/api/settings";
 import { webApi } from "../../../services/webviewApi";
@@ -466,11 +465,10 @@ export function NotebookPanel() {
         [dispatch, mode, seal, settings],
     );
 
-    const close = useCallback(() => {
-        seal();
-        // 显隐归停靠布局管：面板只请求"关掉我自己"。
-        closeFormById(dispatch, store.getState, PANEL_NOTEBOOK);
-    }, [dispatch, seal]);
+    /**
+     * 面板自身的关闭入口已移除（关闭键属于窗框：停靠时在标签上、浮动时在浮动
+     * 标题栏上）。这里保留 `seal` 供模式切换等需要"先落盘再改状态"的路径使用。
+     */
 
     // Ctrl+F 面板内查找（全局 Ctrl+F 被 app 拦截，这里自己接）。
     useEffect(() => {
@@ -545,42 +543,57 @@ export function NotebookPanel() {
             onDragLeave={() => setDropActive(false)}
             onDrop={onHtml5Drop}
         >
-            <div className="flex shrink-0 items-center justify-between gap-2 border-b border-qt-border px-2 py-1.5">
-                <span className="truncate text-xs font-medium text-qt-text">{t("notebook")}</span>
-                <div className="flex shrink-0 items-center gap-1">
-                    <ModeButton
-                        active={mode === "rich"}
-                        label={t("notebook_mode_rich")}
-                        onClick={() => changeMode("rich")}
-                    />
-                    <ModeButton
-                        active={mode === "source"}
-                        label={t("notebook_mode_source")}
-                        onClick={() => changeMode("source")}
-                    />
-                    <ModeButton
-                        active={mode === "split"}
-                        label={t("notebook_mode_split")}
-                        onClick={() => changeMode("split")}
-                    />
-                    <HeaderButton
-                        label={settings.showToolbar ? "▾" : "▸"}
-                        tooltip={t("notebook_toggle_toolbar")}
-                        onClick={() => setSetting({ showToolbar: !settings.showToolbar })}
-                    />
-                    <HeaderButton
-                        label="🗂"
-                        tooltip={t("notebook_attachments")}
-                        onClick={() => setAttachmentsOpen(true)}
-                    />
-                    <HeaderButton
-                        label="⚙"
-                        tooltip={t("notebook_settings")}
-                        onClick={() => setSettingsOpen(true)}
-                    />
-                    <HeaderButton label="✕" tooltip={t("close")} onClick={close} />
-                </div>
-            </div>
+            {/* 工具条：只放本面板**独有**的功能按钮。标题与关闭属于窗框
+                （停靠时是标签行、浮动时是浮动标题栏），面板内再画一遍就是重复。 */}
+            <PanelToolbar
+                leading={
+                    <>
+                        <ModeButton
+                            active={mode === "rich"}
+                            label={t("notebook_mode_rich")}
+                            tooltip={t("notebook_mode_rich")}
+                            onClick={() => changeMode("rich")}
+                        />
+                        <ModeButton
+                            active={mode === "source"}
+                            label={t("notebook_mode_source")}
+                            tooltip={t("notebook_mode_source")}
+                            onClick={() => changeMode("source")}
+                        />
+                        <ModeButton
+                            active={mode === "split"}
+                            label={t("notebook_mode_split")}
+                            tooltip={t("notebook_mode_split")}
+                            onClick={() => changeMode("split")}
+                        />
+                    </>
+                }
+                trailing={
+                    <>
+                        <PanelToolbarButton
+                            icon={
+                                settings.showToolbar ? (
+                                    <ChevronDownIcon width={ICON} height={ICON} />
+                                ) : (
+                                    <ChevronRightIcon width={ICON} height={ICON} />
+                                )
+                            }
+                            tooltip={t("notebook_toggle_toolbar")}
+                            onClick={() => setSetting({ showToolbar: !settings.showToolbar })}
+                        />
+                        <PanelToolbarButton
+                            icon={<CardStackIcon width={ICON} height={ICON} />}
+                            tooltip={t("notebook_attachments")}
+                            onClick={() => setAttachmentsOpen(true)}
+                        />
+                        <PanelToolbarButton
+                            icon={<GearIcon width={ICON} height={ICON} />}
+                            tooltip={t("notebook_settings")}
+                            onClick={() => setSettingsOpen(true)}
+                        />
+                    </>
+                }
+            />
 
             {findOpen ? (
                 <NotebookFindBar
@@ -686,50 +699,23 @@ export function NotebookPanel() {
     );
 }
 
+/** 工具条图标尺寸（与 `PanelToolbar` 的约定一致）。 */
+const ICON = 12;
+
+/** 视图模式切换：文字按钮，套用与图标按钮同一套度量（见 `PanelToolbar`）。 */
 function ModeButton({
     active,
-    label,
-    onClick,
-}: {
-    active: boolean;
-    label: string;
-    onClick: () => void;
-}) {
-    return (
-        <button
-            type="button"
-            onClick={onClick}
-            className="rounded px-1.5 py-0.5 text-xs"
-            style={{
-                background: active ? "var(--accent-3, rgba(79,142,247,0.25))" : "transparent",
-                color: active ? "var(--accent-11, #4f8ef7)" : "var(--qt-text-muted)",
-            }}
-        >
-            {label}
-        </button>
-    );
-}
-
-function HeaderButton({
     label,
     tooltip,
     onClick,
 }: {
+    active: boolean;
     label: string;
-    /** 悬停提示文本；渲染为项目自定义 tooltip 的 `data-tooltip`。 */
     tooltip: string;
     onClick: () => void;
 }) {
     return (
-        <button
-            type="button"
-            data-tooltip={tooltip}
-            aria-label={tooltip}
-            onClick={onClick}
-            className="rounded px-1 text-xs text-qt-text-muted hover:bg-qt-hover hover:text-qt-text"
-        >
-            {label}
-        </button>
+        <PanelToolbarTextButton label={label} tooltip={tooltip} active={active} onClick={onClick} />
     );
 }
 

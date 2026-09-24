@@ -13,7 +13,7 @@
 import { Button, Dialog, Flex, Select, Switch, Text, TextField } from "@radix-ui/themes";
 
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
-import { setDockSettings } from "../../features/dock/dockSlice";
+import { setDockSettings, setTabPosition } from "../../features/dock/dockSlice";
 import type { DockSettings } from "../../features/dock/dockSettings";
 import { useI18n } from "../../i18n/I18nProvider";
 import { applySelectWheelChange } from "../../utils/selectWheel";
@@ -32,6 +32,7 @@ export function DockLayoutSettingsDialog({ open, onOpenChange }: DockLayoutSetti
     const { t } = useI18n();
     const tAny = t as (key: string) => string;
     const settings = useAppSelector((state) => state.dock.settings);
+    const layoutTabPosition = useAppSelector((state) => state.dock.layout.tabPosition);
     const presetNames = useAppSelector((state) => Object.keys(state.dock.layout.presets ?? {}));
 
     const patch = (next: DockSettings) => dispatch(setDockSettings(next));
@@ -102,6 +103,25 @@ export function DockLayoutSettingsDialog({ open, onOpenChange }: DockLayoutSetti
                             suffix={tAny("layout_unit_px")}
                             onChange={(floatSnapThresholdPx) => patch({ floatSnapThresholdPx })}
                         />
+                    </Row>
+
+                    <Row label={tAny("layout_setting_tab_position")}>
+                        <Select.Root
+                            value={layoutTabPosition}
+                            onValueChange={(value) =>
+                                dispatch(setTabPosition(value === "top" ? "top" : "bottom"))
+                            }
+                        >
+                            <Select.Trigger />
+                            <Select.Content>
+                                <Select.Item value="bottom">
+                                    {tAny("layout_tab_position_bottom")}
+                                </Select.Item>
+                                <Select.Item value="top">
+                                    {tAny("layout_tab_position_top")}
+                                </Select.Item>
+                            </Select.Content>
+                        </Select.Root>
                     </Row>
 
                     <Row label={tAny("layout_setting_save_delay")}>

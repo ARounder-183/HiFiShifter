@@ -33,7 +33,7 @@ import {
 import { maximizeActive } from "../../features/dock/dockApi";
 import { dockDragHint } from "./dockTooltips";
 import { getPanel } from "../../features/dock/panelRegistry";
-import type { DockTabsetNode } from "../../features/dock/dockTypes";
+import type { DockTabsetNode, DockTabPosition } from "../../features/dock/dockTypes";
 import { useI18n } from "../../i18n/I18nProvider";
 import { beginTabDrag } from "./dockDragController";
 import { DockTabMenu } from "./DockTabMenu";
@@ -47,9 +47,11 @@ export interface DockTabBarProps {
      * 再顶一条标签条纯属浪费垂直空间。
      */
     compact: boolean;
+    /** 标签行位置（与 `DockZone` 的 `data-tab-position` 同源）。 */
+    tabPosition: DockTabPosition;
 }
 
-export function DockTabBar({ node, onToggleFloat, compact }: DockTabBarProps) {
+export function DockTabBar({ node, onToggleFloat, compact, tabPosition }: DockTabBarProps) {
     const dispatch = useAppDispatch();
     const { t } = useI18n();
     const tAny = t as (key: string) => string;
@@ -116,6 +118,7 @@ export function DockTabBar({ node, onToggleFloat, compact }: DockTabBarProps) {
                     ref={setBarElement}
                     className="hs-dock-tabbar"
                     data-dock-tabbar={node.id}
+                    data-position={tabPosition}
                     data-collapsed={node.collapsed ? "true" : "false"}
                     role="tablist"
                 >
@@ -201,6 +204,7 @@ export function DockTabBar({ node, onToggleFloat, compact }: DockTabBarProps) {
                     data-dock-tabbar={node.id}
                     data-dock-tab={node.active}
                     data-active="true"
+                    data-position={tabPosition}
                     role="tab"
                     aria-selected
                     data-tooltip={dragHint}

@@ -86,10 +86,12 @@ function DockFloatWindow({
      * 交给拖拽/缩放作为起点，于是 `offsetX = clientX - 0`、拖拽目标 x 被算成约 0 ——
      * 表现为"一拖就跳到左上角"（用户报告的拖拽偏移）。缩放同理。
      */
-    const rect = liveRect ?? resolveFloatRect(geometry ?? ZERO_RECT, {
-        w: window.innerWidth,
-        h: window.innerHeight,
-    });
+    const rect =
+        liveRect ??
+        resolveFloatRect(geometry ?? ZERO_RECT, {
+            w: window.innerWidth,
+            h: window.innerHeight,
+        });
 
     const onTitlePointerDown = useCallback(
         (event: React.PointerEvent<HTMLDivElement>) => {

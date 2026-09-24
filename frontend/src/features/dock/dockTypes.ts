@@ -156,6 +156,15 @@ export interface DockGutterSizes {
 }
 
 /** 一份完整的布局（持久化格式 = 运行时格式）。 */
+/**
+ * 标签行在窗体中的位置。
+ *
+ * 默认 `"bottom"`：标签是"这个窗格里放了什么"的身份说明，放在内容下方更贴近
+ * 用户直觉（与浏览器标签、大多数 DAW 的 docker 一致），也不会在视觉上压住内容
+ * 的顶部工具条。
+ */
+export type DockTabPosition = "top" | "bottom";
+
 export interface DockLayout {
     /** schema 版本号，用于迁移。 */
     schema: number;
@@ -166,6 +175,8 @@ export interface DockLayout {
     /** 浮动窗体 z 序，末尾为最上层。 */
     floatOrder: string[];
     gutters: DockGutterSizes;
+    /** 标签行的位置（见 `DockTabPosition`）。 */
+    tabPosition: DockTabPosition;
     /** 用户命名预设。 */
     presets?: Record<string, DockPreset>;
     activePreset?: string | null;

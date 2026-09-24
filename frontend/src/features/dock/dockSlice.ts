@@ -22,6 +22,7 @@ import {
     normalizeDockLayout,
     openPanelInLayout,
     type DockPlacement,
+    normalizeTabPosition,
 } from "./dockSchema";
 import {
     dockForm,
@@ -47,6 +48,7 @@ import {
     type DockGutterSizes,
     type DockLayout,
     type DockPreset,
+    type DockTabPosition,
 } from "./dockTypes";
 import { getPanel } from "./panelRegistry";
 
@@ -364,6 +366,10 @@ const dockSlice = createSlice({
                 gutters: { ...state.layout.gutters, [key]: Math.round(px) },
             };
         },
+        /** 标签行位置（布局级偏好，随布局一起持久化）。 */
+        setTabPosition(state, action: PayloadAction<DockTabPosition>) {
+            state.layout = { ...state.layout, tabPosition: normalizeTabPosition(action.payload) };
+        },
         renameForm(state, action: PayloadAction<{ formId: string; title: string }>) {
             const { formId, title } = action.payload;
             const form = state.layout.forms[formId];
@@ -494,6 +500,7 @@ export const {
     setSplitRatioOf,
     toggleTabsetCollapsed,
     setGutterSize,
+    setTabPosition,
     renameForm,
     saveDockPreset,
     applyDockPreset,

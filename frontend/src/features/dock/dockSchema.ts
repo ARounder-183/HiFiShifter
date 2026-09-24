@@ -40,6 +40,7 @@ import {
     type DockPreset,
     type DockRect,
     type DockSplitNode,
+    type DockTabPosition,
     type DockTabsetNode,
 } from "./dockTypes";
 
@@ -59,6 +60,11 @@ export const MAIN_FORM_PARAM_EDITOR = "paramEditor";
 export type { DockPlacement };
 
 /** 出厂布局：与重构前的默认视觉一致（上时间轴 / 下参数编辑器，侧栏默认关闭）。 */
+/** 归一化标签行位置（未知值回退到默认 `"bottom"`）。 */
+export function normalizeTabPosition(value: unknown): DockTabPosition {
+    return value === "top" ? "top" : "bottom";
+}
+
 export function createDefaultDockLayout(): DockLayout {
     const tree: DockSplitNode = {
         t: "split",
@@ -93,6 +99,7 @@ export function createDefaultDockLayout(): DockLayout {
         order: [MAIN_FORM_TIMELINE, MAIN_FORM_PARAM_EDITOR],
         floatOrder: [],
         gutters: { ...DEFAULT_GUTTER_SIZES },
+        tabPosition: "bottom",
         presets: {},
         activePreset: null,
     };
@@ -322,6 +329,7 @@ export function normalizeDockLayout(raw: unknown): DockLayout {
         order,
         floatOrder,
         gutters: normalizeGutters(input.gutters),
+        tabPosition: normalizeTabPosition(input.tabPosition),
         presets: normalizePresets(input.presets, knownForms),
         activePreset: typeof input.activePreset === "string" ? input.activePreset : null,
     };
