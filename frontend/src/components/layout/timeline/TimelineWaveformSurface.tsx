@@ -106,6 +106,14 @@ export const TimelineWaveformSurface = React.memo(function TimelineWaveformSurfa
             viewportTopPx={props.startTrackIndex * props.rowHeight}
             color={color}
             viewportSource={props.viewportSource ?? timelineViewportBus}
+            /* 时间轴的 rows **不做水平窗口化**：`clipsByTrackId` 由
+               `TimelineKernelView` 按「每条可见轨道的全部 clip」构建（见其
+               `waveformClipsByTrackId`），与水平位置无关。因此视口平移到任何
+               位置，所需的 clip 都已在 rows 里，几何可以只做 uniform 平移
+               （`repaint()`）而不重建 —— 这正是「大量波形下拖动时间轴不卡顿」
+               的关键。⚠ 若上游将来改成按时间窗裁剪 rows，这里必须改回缺省
+               （false），否则波形会缺内容；判定细节见 `geometryCache`。 */
+            rowsCoverViewport
         />
     );
 });

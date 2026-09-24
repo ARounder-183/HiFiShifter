@@ -28,6 +28,11 @@ import {
     type WaveformAmplitudeMap,
     type WaveformVertexSink,
 } from "./geometry";
+import {
+    canReuseGeometry,
+    type WaveformGeometryAnchor,
+    type WaveformReuseQuery,
+} from "./geometryCache";
 import { buildWaveformScene, type WaveformSceneRow } from "./sceneBuilder";
 import {
     Canvas2dWaveformRenderer,
@@ -66,10 +71,30 @@ export interface WaveformSurfaceProps {
      * 参数编辑器在「动态（DYN）」面板下传入 dB 映射，使波形与 DYN 曲线、
      * 原声基线共用同一坐标系。
      *
-     * ⚠ 该函数**参与几何缓存键**（详见 draw() 内的 canReuse 判定）：换参数
+     * ⚠ 该函数**参与几何缓存键**（详见 draw() 内的复用判定）：换参数
      * 面板时必须传一个新引用，否则会复用旧映射构建的几何。
      */
     amplitudeMap?: WaveformAmplitudeMap;
+    /**
+     * `rows` 的**水平完整性**承诺：视口在水平方向移到任何位置，所需的 clip
+     * 都已在 `rows` 中（即上游**不做水平窗口化**）。
+     *
+     * 【为什么这个承诺能换来一个数量级的性能】它为真时，平移帧可以只做一次
+     * `u_viewOrigin` 更新 + `drawArrays`（`repaint()`），成本与 clip 数、
+     * 像素列数**完全无关**；为假时每帧都要重建场景与几何（400 clip / 全览实测
+     * ≈ 10.8 ms，占满 60 fps 预算的 2/3）。
+     *
+     * 【缺省 false 是刻意的保守默认】多数调用方的 `rows` 是按当前（量化提交的）
+     * 视口窗口裁剪出来的，几何里可能不含刚进入视口的 clip —— 此时复用会把缺了
+     * 内容的旧几何平移上去，表现为「波形消失、随滚动又恢复」。承诺为真才解锁
+     * 复用，判定细节见 `geometryCache.canReuseGeometry`。
+     *
+     * 【时间轴为什么可以为真】`TimelineKernelView.waveformClipsByTrackId` 把每条
+     * **可见轨道的全部 clip** 都放进 map，不做任何时间窗裁剪，因此视口移到哪儿
+     * 都在 `rows` 里。⚠ 若将来上游改成按时间窗裁剪 `rows`，这里必须改回
+     * `false`（或让裁剪余量 ≥ 几何余量 + React 提交滞后），否则波形会缺内容。
+     */
+    rowsCoverViewport?: boolean;
 }
 
 export const WaveformSurface = React.memo(function WaveformSurface(props: WaveformSurfaceProps) {
@@ -94,31 +119,10 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
     /**
      * 几何缓存的锚点：记录「当前 GPU 上的几何是按什么窗口与缩放构建的」。
      *
-     * `rows` / `color` 用引用比较：它们是 React 侧 memo 的产物，引用不变即
-     * 内容不变。任一字段变化或视口越出窗口，都必须全量重建。
+     * 判定逻辑本身在 `geometryCache.canReuseGeometry`（纯函数、可单测）；
+     * 这里只持有它的输入。任一字段变化或视口越出窗口都必须全量重建。
      */
-    const geometryCacheRef = React.useRef<{
-        pxPerSec: number;
-        widthPx: number;
-        heightPx: number;
-        /** 构建几何时的设备像素比：包络列按设备像素网格枚举，dpr 变了几何必须重建。 */
-        dpr: number;
-        rows: readonly WaveformSceneRow[];
-        color: string;
-        rendererKind: "webgl2" | "canvas2d";
-        /**
-         * 构建几何时使用的幅度映射。按**引用**比较：调用方每换一个面板语义
-         * 就必须传入新引用（参数编辑器用 useMemo 绑定 editParam 实现）。
-         */
-        amplitudeMap: WaveformAmplitudeMap | undefined;
-        /** 构建时的幅度映射修订号（见 `readAmplitudeRevision`）。 */
-        amplitudeRevision: number;
-        /** 构建窗口的内容坐标左边界（含余量）。 */
-        windowStartPx: number;
-        windowEndPx: number;
-        windowTopPx: number;
-        windowBottomPx: number;
-    } | null>(null);
+    const geometryCacheRef = React.useRef<WaveformGeometryAnchor | null>(null);
     const [rendererKind, setRendererKind] = React.useState<"webgl2" | "canvas2d">("webgl2");
 
     // render 期写 ref 镜像（本仓库热路径既有模式；原出处 TimelineCanvasViewport 已随
@@ -143,13 +147,16 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
      *
      * 流程：
      * 1. 取视口快照（总线驱动时用总线快照，否则用 props.axis）；
-     * 2. **复用判定**（仅非总线路径）：缩放、尺寸、行数据、颜色都没变，且视口
-     *    矩形仍落在已构建的「窗口 + 余量」之内 → 走 `repaint()`，只更新视口原点，
-     *    不重建场景与几何（WebGL 路径退化为一次 uniform 更新 + drawArrays）；
+     * 2. **复用判定**（`geometryCache.canReuseGeometry`）：缩放、尺寸、行数据、
+     *    颜色、幅度映射都没变，调用方承诺了 `rowsCoverViewport`，且视口矩形仍落在
+     *    已构建的「窗口 + 余量」之内 → 走 `repaint()`，只更新视口原点，不重建场景
+     *    与几何（WebGL 路径退化为一次 uniform 更新 + drawArrays，成本与 clip 数
+     *    完全无关）；
      * 3. 否则按窗口重建场景与几何，再 `render()`。
-     *    总线驱动（`viewportSource`）时**恒走本分支**：rows 的更新由 React 量化
-     *    提交滞后于总线视口，余量窗口复用会把「几何不含刚进入视口的 clip」的旧
-     *    内容平移一整段。
+     *
+     * 也就是说：**平移（水平或竖直）只要没滚出余量窗口就不重建**，这是「大量
+     * 波形下拖动时间轴仍然顺滑」的关键；重建只发生在缩放、尺寸变化、行窗口切换、
+     * clip 编辑、峰值数据到达，以及视口滚出余量窗口时。
      *
      * 【坐标系】几何顶点是**窗口局部坐标** = 内容坐标 − 窗口左上角。实现上
      * 不给 `buildWaveformScene` 改签名，而是传一个派生 axis：
@@ -185,52 +192,33 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
 
         const cache = geometryCacheRef.current;
 
-        // canReuse 的「视口仍落在已构建窗口内就只平移」判定，隐含假设是：
-        // 「几何覆盖的 clip 集合 ⊇ 当前视口内的 clip 集合」。这个假设在时间轴侧
-        // 成立（行窗口由内核逐帧派生，rows 引用随视口更新），但在参数编辑器侧
-        // 不成立：它的 `props.rows` 由 React 用 **256px 量化提交**的 scrollLeft
-        // 计算（SCROLL_COMMIT_STEP_PX 死区），滞后内核真值最多 255px。于是：
-        //
-        //   向左滚 → 内核把左侧 clip 拉进视口，但 rows 还是旧的（几何里没有
-        //   它）→ 视口仍在旧窗口内 → 命中 canReuse → repaint() 把没有该 clip
-        //   的旧几何原样平移上去 —— 该 clip 的波形「消失」；
-        //   满了 256px → React 提交 → rows 换引用 → 全量重建 → 波形「恢复」；
-        //   向右拖回去 → rows / 几何都还在，但视口越出旧窗口 → 不等重建，本帧
-        //   先 repaint() 旧几何 —— 波形又「消失」，松手后才恢复。
-        //
-        // 用户报告为「从右往左拖时，左侧进入的 clip 波形消失，随着拖动又恢复，
-        // 不松手往回拖又消失」，与是否开启「同步到时间轴」无关（两套滚动路径
-        // 都汇入同一总线，症状一致）。
-        //
-        // 修复：总线同步 paint 路径**始终全量重建**。这条路径的调用频率等于
-        // 视口提交频率（滚动帧 / 对账帧），重建成本可控（实测全览 ~1ms 量级），
-        // 且此时窗口按当帧视口构建，几何与 rows 的错位窗口不复存在。非总线
-        // 路径（rows / 尺寸 / 缩放由 props 驱动）保留余量窗口复用不变。
-
         // 幅度映射修订号：引用不变也可能内部数据已变（响度映射的延迟取值），
         // 必须在复用判定之前取一次，并在重建时写入缓存。
         const amplitudeRevision = readAmplitudeRevision(props.amplitudeMap);
-        const canReuse =
-            source === null &&
-            cache !== null &&
-            cache.pxPerSec === pxPerSec &&
-            cache.widthPx === widthPx &&
-            cache.heightPx === heightPx &&
-            cache.dpr === dpr &&
-            cache.rows === props.rows &&
-            cache.color === props.color &&
-            cache.rendererKind === rendererKind &&
-            cache.amplitudeMap === props.amplitudeMap &&
-            cache.amplitudeRevision === amplitudeRevision &&
-            // 水平：视口必须完整落在已构建的窗口内（两侧各 `marginPx` 可平移）。
-            scrollLeftPx >= cache.windowStartPx &&
-            scrollLeftPx + widthPx <= cache.windowEndPx &&
-            // 竖直：只要求视口**顶边**落在行覆盖范围内。画布比视口高 8 行
-            // （overscan），行集合不变时底边必然被覆盖。
-            scrollTopPx >= cache.windowTopPx &&
-            scrollTopPx <= cache.windowBottomPx;
+        // 复用判定是纯函数（见 geometryCache.canReuseGeometry）：它为真时本帧
+        // 只更新一次 `u_viewOrigin` 并重发 draw call，成本与 clip 数、像素列数
+        // **完全无关**；为假时才重建场景与几何。
+        //
+        // 判定的两组条件（锚点全等 + 视口仍落在构建窗口内）之外，还要求调用方
+        // 承诺 `rowsCoverViewport`——即 rows 在水平方向不做窗口化，视口移到哪儿
+        // 所需的 clip 都在里面。缺省 false（保守）：水平窗口化的调用方（参数
+        // 编辑器）的 rows 会滞后于真值，复用会把缺内容的旧几何平移上去。
+        const reuseQuery: WaveformReuseQuery = {
+            pxPerSec,
+            widthPx,
+            heightPx,
+            dpr,
+            rows: props.rows,
+            color: props.color,
+            rendererKind,
+            amplitudeMap: props.amplitudeMap,
+            amplitudeRevision,
+            scrollLeftPx,
+            scrollTopPx,
+            rowsCoverViewport: props.rowsCoverViewport === true,
+        };
 
-        if (canReuse && cache !== null) {
+        if (canReuseGeometry(cache, reuseQuery) && cache !== null) {
             const renderer = cache.rendererKind === "webgl2" ? webglRendererRef.current : null;
             const active = renderer ?? fallbackRendererRef.current;
             if (active !== null) {
