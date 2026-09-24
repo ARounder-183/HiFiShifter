@@ -715,7 +715,7 @@ export function ActionBar() {
                 <TextField.Root
                     size="1"
                     value={bpmText}
-                    title={
+                    data-tooltip={
                         s.tempoMap && s.tempoMap.points.length > 0
                             ? tAny("tempo_map_actionbar_tip")
                             : undefined
@@ -771,7 +771,7 @@ export function ActionBar() {
                         size="1"
                         type="number"
                         value={String(displayBeats)}
-                        title={
+                        data-tooltip={
                             s.tempoMap && s.tempoMap.points.length > 0
                                 ? tAny("tempo_map_actionbar_tip")
                                 : undefined
@@ -1401,7 +1401,7 @@ export function ActionBar() {
                     <Text
                         size="1"
                         color="red"
-                        title={recording.error}
+                        data-tooltip={recording.error}
                         className="truncate"
                         style={{ maxWidth: 220 }}
                     >

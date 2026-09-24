@@ -102,7 +102,7 @@ export const UndoHistoryPanel: React.FC = () => {
                                     ? "bg-qt-highlight/20 font-medium"
                                     : "hover:bg-qt-button-hover"
                             } ${isFuture ? "opacity-60" : ""}`}
-                            title={isCurrent ? tAny("undo_history_current") : undefined}
+                            data-tooltip={isCurrent ? tAny("undo_history_current") : undefined}
                             onDoubleClick={() => jumpTo(row.index)}
                         >
                             <span
@@ -116,7 +116,7 @@ export const UndoHistoryPanel: React.FC = () => {
                             </span>
                             <button
                                 type="button"
-                                title={tAny("undo_history_jump")}
+                                data-tooltip={tAny("undo_history_jump")}
                                 className={`shrink-0 rounded p-0.5 text-qt-text-muted transition-colors hover:bg-qt-button-hover hover:text-qt-text ${
                                     isCurrent ? "invisible" : "opacity-0 group-hover:opacity-100"
                                 }`}

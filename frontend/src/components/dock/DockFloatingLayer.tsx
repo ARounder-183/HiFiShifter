@@ -22,6 +22,7 @@ import { getDockDragState, subscribeDockDrag } from "../../features/dock/dockDra
 import { closeForm, dockFormTo, raiseFloat, setFloatGeometry } from "../../features/dock/dockSlice";
 import { findMainTabset } from "../../features/dock/dockSchema";
 import { maximizeActive } from "../../features/dock/dockApi";
+import { dockDragHint } from "./dockTooltips";
 import { getPanel } from "../../features/dock/panelRegistry";
 import type { DockForm, DockRect } from "../../features/dock/dockTypes";
 import { useI18n } from "../../i18n/I18nProvider";
@@ -71,6 +72,7 @@ function DockFloatWindow({
     const definition = getPanel(form.panelId);
     const title = form.title ?? (definition ? tAny(definition.titleKey) : form.panelId);
     const doubleClickAction = useAppSelector((s) => s.dock.settings.doubleClickHeaderAction);
+    const dockModifier = useAppSelector((s) => s.dock.settings.dockModifier);
 
     const onTitlePointerDown = useCallback(
         (event: React.PointerEvent<HTMLDivElement>) => {
@@ -212,14 +214,14 @@ function DockFloatWindow({
                         );
                     }
                 }}
-                title={tAny("dock_drag_hint")}
+                data-tooltip={dockDragHint(dockModifier, tAny)}
             >
                 <span className="hs-dock-tab-label">{title}</span>
                 <div className="hs-dock-tabbar-spacer" />
                 <button
                     type="button"
                     className="hs-dock-tabbar-action"
-                    title={tAny(minimized ? "dock_expand" : "dock_collapse")}
+                    data-tooltip={tAny(minimized ? "dock_expand" : "dock_collapse")}
                     aria-label={tAny(minimized ? "dock_expand" : "dock_collapse")}
                     onClick={() =>
                         dispatch(
@@ -235,7 +237,7 @@ function DockFloatWindow({
                 <button
                     type="button"
                     className="hs-dock-tabbar-action"
-                    title={tAny("dock_redock")}
+                    data-tooltip={tAny("dock_redock")}
                     aria-label={tAny("dock_redock")}
                     onClick={() => {
                         // 现读 store 而不是把树存进 ref：渲染期写 ref 违反
@@ -255,7 +257,7 @@ function DockFloatWindow({
                 <button
                     type="button"
                     className="hs-dock-tabbar-action"
-                    title={t("close")}
+                    data-tooltip={t("close")}
                     aria-label={t("close")}
                     onClick={() => dispatch(closeForm(form.id))}
                 >

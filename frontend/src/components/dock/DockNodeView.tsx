@@ -15,13 +15,11 @@ import { useCallback, useRef } from "react";
 
 import { useAppDispatch } from "../../app/hooks";
 import { setSplitRatioOf } from "../../features/dock/dockSlice";
+import { MIN_PANE_PX, applyLivePaneStyles, paneStyle } from "../../features/dock/dockTree";
 import type { DockNode, DockSplitNode } from "../../features/dock/dockTypes";
 import { DockSplitter } from "./DockSplitter";
 import { DockZone } from "./DockZone";
 import { getPanel } from "../../features/dock/panelRegistry";
-
-/** 分割线两侧的最小尺寸：防止用户把某一侧拖成不可用的窄条。 */
-const MIN_PANE_PX = 90;
 
 export function DockNodeView({ node }: { node: DockNode }) {
     if (node.t === "split") return <DockSplit node={node} />;
@@ -32,10 +30,33 @@ function DockSplit({ node }: { node: DockSplitNode }) {
     const dispatch = useAppDispatch();
     const paneARef = useRef<HTMLDivElement | null>(null);
     const paneBRef = useRef<HTMLDivElement | null>(null);
+    const containerRef = useRef<HTMLDivElement | null>(null);
 
     const horizontal = node.dir === "row";
     const minA = subtreeMinSize(node.a, horizontal);
     const minB = subtreeMinSize(node.b, horizontal);
+
+    /**
+     * 拖拽期间把两侧写成"目标尺寸"。
+     *
+     * 【关键约束：直写的样式必须与 `paneStyle` 的最终结果**完全一致**】
+     * React 的样式差异更新只写**变化过的**属性。若拖拽期间写了 `flex` 简写、
+     * 松手时再清空，被清掉的 `flex-basis` 会落回 `auto`，而 React 只会重写
+     * `flexGrow` —— 最终得到 `flex: <ratio> 1 auto`，**不是**按比例分配，分界线
+     * 因此"拖了但没正确生效"。所以这里不写简写、也不在松手时清空：直接写入
+     * `paneStyle` 针对**目标节点**算出的样式对象，React 随后的差异更新会发现
+     * 值与它要写的一致，从而不再改动，DOM 保持正确。
+     */
+    const applyLiveSize = useCallback(
+        (target: { ratio: number; fixed: DockSplitNode["fixed"] }) => {
+            applyLivePaneStyles(paneARef.current, paneBRef.current, {
+                ...node,
+                ratio: target.ratio,
+                fixed: target.fixed,
+            });
+        },
+        [node],
+    );
 
     const onCommit = useCallback(
         (next: { ratio: number; fixed: DockSplitNode["fixed"] }) => {
@@ -48,18 +69,17 @@ function DockSplit({ node }: { node: DockSplitNode }) {
     }, [dispatch, node.id]);
 
     return (
-        <div className="hs-dock-split" data-dir={node.dir}>
+        <div ref={containerRef} className="hs-dock-split" data-dir={node.dir}>
             <div ref={paneARef} className="hs-dock-pane" style={paneStyle(node, "a")}>
                 <DockNodeView node={node.a} />
             </div>
             <DockSplitter
                 dir={node.dir}
-                ratio={node.ratio}
+                containerRef={containerRef}
                 fixed={node.fixed}
-                paneARef={paneARef}
-                paneBRef={paneBRef}
                 minA={minA}
                 minB={minB}
+                onLiveSize={applyLiveSize}
                 onCommit={onCommit}
                 onReset={onReset}
             />
@@ -68,33 +88,6 @@ function DockSplit({ node }: { node: DockSplitNode }) {
             </div>
         </div>
     );
-}
-
-function paneStyle(node: DockSplitNode, side: "a" | "b"): React.CSSProperties {
-    const isA = side === "a";
-    const horizontal = node.dir === "row";
-    // 自由侧的最小尺寸：保证它**永远不会被固定侧挤成 0**。
-    //
-    // 【为什么必须给】固定侧若用 `flex: 0 0 <px>`（不可收缩），窗口比它窄时它
-    // 照样占满 `px`，自由侧就被压到 0 —— 表现为"停靠一个侧栏之后，时间轴整个
-    // 不见了"。固定尺寸来自用户拖拽或默认落点，而窗口可以被缩到任意小，两者
-    // 必须有一个能让步：让固定侧让步（它只是侧栏），并给自由侧兜一个下限。
-    const freeMin = horizontal ? { minWidth: MIN_PANE_PX } : { minHeight: MIN_PANE_PX };
-
-    if (node.fixed) {
-        // 固定侧锁像素，但允许在空间不足时收缩（`flex-shrink: 1`）；自由侧
-        // `basis: 0` 不参与收缩，因此全部收缩量都落在固定侧。
-        return node.fixed.side === side
-            ? { flex: `0 1 ${node.fixed.px}px`, minWidth: 0, minHeight: 0 }
-            : { flex: "1 1 0", ...freeMin };
-    }
-    return {
-        flexGrow: isA ? node.ratio : 1 - node.ratio,
-        flexShrink: 1,
-        flexBasis: 0,
-        minWidth: 0,
-        minHeight: 0,
-    };
 }
 
 /**

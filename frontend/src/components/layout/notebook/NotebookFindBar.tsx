@@ -117,7 +117,7 @@ export function NotebookFindBar({
             <button
                 type="button"
                 className="hs-notebook-toolbar-btn"
-                title={t("notebook_find_prev")}
+                data-tooltip={t("notebook_find_prev")}
                 onClick={() => goTo(cursor - 1)}
             >
                 ▲
@@ -125,7 +125,7 @@ export function NotebookFindBar({
             <button
                 type="button"
                 className="hs-notebook-toolbar-btn"
-                title={t("notebook_find_next")}
+                data-tooltip={t("notebook_find_next")}
                 onClick={() => goTo(cursor + 1)}
             >
                 ▼
@@ -133,7 +133,7 @@ export function NotebookFindBar({
             <button
                 type="button"
                 className="hs-notebook-toolbar-btn"
-                title={t("close")}
+                data-tooltip={t("close")}
                 onClick={onClose}
             >
                 ✕

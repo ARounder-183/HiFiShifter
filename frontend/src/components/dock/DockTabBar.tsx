@@ -31,6 +31,7 @@ import {
     toggleTabsetCollapsed,
 } from "../../features/dock/dockSlice";
 import { maximizeActive } from "../../features/dock/dockApi";
+import { dockDragHint } from "./dockTooltips";
 import { getPanel } from "../../features/dock/panelRegistry";
 import type { DockTabsetNode } from "../../features/dock/dockTypes";
 import { useI18n } from "../../i18n/I18nProvider";
@@ -58,6 +59,10 @@ export function DockTabBar({ node, onToggleFloat, compact }: DockTabBarProps) {
     const [barElement, setBarElement] = useState<HTMLDivElement | null>(null);
     const [menu, setMenu] = useState<{ formId: string; x: number; y: number } | null>(null);
     const showIcons = useAppSelector((s) => s.dock.settings.tabIcons);
+    const dockModifier = useAppSelector((s) => s.dock.settings.dockModifier);
+    // 提示里带上**当前生效的**修饰键文本（可被用户改），两行由自定义 tooltip 的
+    // `white-space: pre-line` 渲染。原生 `title` 无法保证换行与主题一致。
+    const dragHint = dockDragHint(dockModifier, tAny);
     const doubleClickAction = useAppSelector((s) => s.dock.settings.doubleClickHeaderAction);
     const forms = useAppSelector((s) => s.dock.layout.forms);
 
@@ -133,7 +138,7 @@ export function DockTabBar({ node, onToggleFloat, compact }: DockTabBarProps) {
                                 }
                                 role="tab"
                                 aria-selected={active}
-                                title={title}
+                                data-tooltip={title}
                                 onPointerDown={(event) => onTabPointerDown(event, formId)}
                                 onClick={() =>
                                     dispatch(setActiveTabOf({ tabsetId: node.id, formId }))
@@ -168,7 +173,7 @@ export function DockTabBar({ node, onToggleFloat, compact }: DockTabBarProps) {
                         <button
                             type="button"
                             className="hs-dock-tabbar-action"
-                            title={tAny("dock_float_active")}
+                            data-tooltip={tAny("dock_float_active")}
                             aria-label={tAny("dock_float_active")}
                             onClick={() => onToggleFloat(node.active)}
                         >
@@ -177,7 +182,7 @@ export function DockTabBar({ node, onToggleFloat, compact }: DockTabBarProps) {
                         <button
                             type="button"
                             className="hs-dock-tabbar-action"
-                            title={tAny(node.collapsed ? "dock_expand" : "dock_collapse")}
+                            data-tooltip={tAny(node.collapsed ? "dock_expand" : "dock_collapse")}
                             aria-label={tAny(node.collapsed ? "dock_expand" : "dock_collapse")}
                             onClick={() => dispatch(toggleTabsetCollapsed({ tabsetId: node.id }))}
                         >
@@ -198,7 +203,7 @@ export function DockTabBar({ node, onToggleFloat, compact }: DockTabBarProps) {
                     data-active="true"
                     role="tab"
                     aria-selected
-                    title={tAny("dock_drag_hint")}
+                    data-tooltip={dragHint}
                     onPointerDown={(event) => onTabPointerDown(event, node.active)}
                     onContextMenu={(event) => {
                         event.preventDefault();

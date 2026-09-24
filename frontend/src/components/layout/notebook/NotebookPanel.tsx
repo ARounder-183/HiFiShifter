@@ -565,20 +565,20 @@ export function NotebookPanel() {
                     />
                     <HeaderButton
                         label={settings.showToolbar ? "▾" : "▸"}
-                        title={t("notebook_toggle_toolbar")}
+                        tooltip={t("notebook_toggle_toolbar")}
                         onClick={() => setSetting({ showToolbar: !settings.showToolbar })}
                     />
                     <HeaderButton
                         label="🗂"
-                        title={t("notebook_attachments")}
+                        tooltip={t("notebook_attachments")}
                         onClick={() => setAttachmentsOpen(true)}
                     />
                     <HeaderButton
                         label="⚙"
-                        title={t("notebook_settings")}
+                        tooltip={t("notebook_settings")}
                         onClick={() => setSettingsOpen(true)}
                     />
-                    <HeaderButton label="✕" title={t("close")} onClick={close} />
+                    <HeaderButton label="✕" tooltip={t("close")} onClick={close} />
                 </div>
             </div>
 
@@ -712,18 +712,19 @@ function ModeButton({
 
 function HeaderButton({
     label,
-    title,
+    tooltip,
     onClick,
 }: {
     label: string;
-    title: string;
+    /** 悬停提示文本；渲染为项目自定义 tooltip 的 `data-tooltip`。 */
+    tooltip: string;
     onClick: () => void;
 }) {
     return (
         <button
             type="button"
-            title={title}
-            aria-label={title}
+            data-tooltip={tooltip}
+            aria-label={tooltip}
             onClick={onClick}
             className="rounded px-1 text-xs text-qt-text-muted hover:bg-qt-hover hover:text-qt-text"
         >

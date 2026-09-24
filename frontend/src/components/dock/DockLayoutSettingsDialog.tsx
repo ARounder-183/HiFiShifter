@@ -10,7 +10,7 @@
  * 给它们加一层待提交状态只会制造"改了没反应"的困惑。
  */
 
-import { Dialog, Flex, Select, Switch, Text } from "@radix-ui/themes";
+import { Button, Dialog, Flex, Select, Switch, Text, TextField } from "@radix-ui/themes";
 
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { setDockSettings } from "../../features/dock/dockSlice";
@@ -23,7 +23,7 @@ export interface DockLayoutSettingsDialogProps {
     onOpenChange: (open: boolean) => void;
 }
 
-const LABEL_STYLE: React.CSSProperties = { minWidth: 168 };
+const LABEL_STYLE: React.CSSProperties = { minWidth: 118 };
 
 const DOCK_MODIFIERS = ["primary", "alt", "shift", "none"] as const;
 
@@ -44,8 +44,11 @@ export function DockLayoutSettingsDialog({ open, onOpenChange }: DockLayoutSetti
                 onKeyDown={(event) => event.stopPropagation()}
             >
                 <Dialog.Title>{tAny("layout_settings_title")}</Dialog.Title>
+                <Dialog.Description size="2" color="gray" mt="1">
+                    {tAny("layout_settings_hint")}
+                </Dialog.Description>
 
-                <Flex direction="column" gap="3" mt="3">
+                <Flex direction="column" gap="4" mt="4">
                     <Row label={tAny("layout_setting_dock_modifier")}>
                         <Select.Root
                             value={settings.dockModifier}
@@ -190,12 +193,9 @@ export function DockLayoutSettingsDialog({ open, onOpenChange }: DockLayoutSetti
 
                 <Flex justify="end" mt="4">
                     <Dialog.Close>
-                        <button
-                            type="button"
-                            className="rounded border border-qt-border bg-qt-panel px-3 py-1 text-xs text-qt-text hover:bg-qt-hover"
-                        >
+                        <Button variant="soft" color="gray">
                             {t("close")}
-                        </button>
+                        </Button>
                     </Dialog.Close>
                 </Flex>
             </Dialog.Content>
@@ -203,9 +203,15 @@ export function DockLayoutSettingsDialog({ open, onOpenChange }: DockLayoutSetti
     );
 }
 
+/**
+ * 设置行：左标签（定宽）+ 控件。
+ *
+ * 与 `TimelineDisplaySettingsDialog` 同一形态（标签 118px、`gap="2"`、控件占满
+ * 剩余宽度）—— 弹窗之间的一致性靠沿用同一套排布约定，而不是各自调参。
+ */
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
     return (
-        <Flex align="center" justify="between" gap="3">
+        <Flex align="center" gap="2">
             <Text size="2" style={LABEL_STYLE}>
                 {label}
             </Text>
@@ -224,7 +230,7 @@ function SwitchRow({
     onChange: (value: boolean) => void;
 }) {
     return (
-        <Flex align="center" justify="between" gap="3">
+        <Flex align="center" gap="2">
             <Text size="2" style={LABEL_STYLE}>
                 {label}
             </Text>
@@ -233,6 +239,7 @@ function SwitchRow({
     );
 }
 
+/** 数值输入：与 `RenderCacheDialog` 同一形态（Radix `TextField.Root` + 单位后缀）。 */
 function NumberField({
     value,
     min,
@@ -247,18 +254,19 @@ function NumberField({
     onChange: (value: number) => void;
 }) {
     return (
-        <Flex align="center" gap="1">
-            <input
+        <Flex align="center" gap="2">
+            <TextField.Root
+                size="2"
                 type="number"
-                value={value}
                 min={min}
                 max={max}
+                value={String(value)}
                 onChange={(event) => {
                     const next = Number(event.target.value);
                     if (!Number.isFinite(next)) return;
                     onChange(Math.min(max, Math.max(min, Math.round(next))));
                 }}
-                className="w-[72px] rounded border border-qt-border bg-qt-base px-1 py-0.5 text-right text-xs text-qt-text outline-none"
+                style={{ width: 110 }}
             />
             <Text size="1" color="gray">
                 {suffix}

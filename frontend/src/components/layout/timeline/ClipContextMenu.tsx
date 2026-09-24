@@ -38,7 +38,7 @@ const MenuItem: React.FC<{
 }> = ({ label, shortcut, disabled, danger, title, onClick }) => (
     <button
         role="menuitem"
-        title={title}
+        data-tooltip={title}
         className={`px-3 py-1.5 text-left w-full text-[12px] transition-colors flex items-center justify-between gap-3
             ${
                 disabled
@@ -121,7 +121,7 @@ const TakeMenuItem: React.FC<{
             <button
                 role="menuitem"
                 aria-label={`${modeTitle ?? modeLabel}: ${label}`}
-                title={modeTitle}
+                data-tooltip={modeTitle}
                 className={`shrink-0 px-1.5 py-0.5 text-[10px] leading-none rounded border transition-colors
                     ${
                         (channelMode ?? 0) !== 0
@@ -140,7 +140,7 @@ const TakeMenuItem: React.FC<{
         <button
             role="menuitem"
             aria-label={`${reverseLabel}: ${label}`}
-            title={reverseLabel}
+            data-tooltip={reverseLabel}
             className={`shrink-0 px-1.5 py-0.5 text-[10px] leading-none rounded border transition-colors
                 ${
                     reversed
@@ -192,9 +192,7 @@ const SubMenu: React.FC<{
         }
         rect = panel.getBoundingClientRect();
         const anchoredLeft = panel.style.left !== "auto";
-        const availableWidth = anchoredLeft
-            ? vw - 8 - rect.left
-            : rect.right - 8;
+        const availableWidth = anchoredLeft ? vw - 8 - rect.left : rect.right - 8;
         if (rect.width > availableWidth) {
             panel.style.maxWidth = `${Math.max(160, Math.floor(availableWidth))}px`;
         }
@@ -851,7 +849,7 @@ export const ClipContextMenu: React.FC<{
                 <MenuItem
                     label={t("ctx_silence_detection")}
                     disabled={!silenceEligible}
-                    title={silenceEligible ? undefined : t("silence_no_audio_source")}
+                    data-tooltip={silenceEligible ? undefined : t("silence_no_audio_source")}
                     onClick={() => {
                         onSilenceDetection(ids);
                         close();

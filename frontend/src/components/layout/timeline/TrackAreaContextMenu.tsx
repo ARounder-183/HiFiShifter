@@ -10,7 +10,7 @@ const MenuItem: React.FC<{
     onClick: () => void;
 }> = ({ label, disabled, title, onClick }) => (
     <button
-        title={title}
+        data-tooltip={title}
         className={`px-3 py-1.5 text-left w-full text-[12px] transition-colors flex items-center justify-between gap-3 ${
             disabled ? "opacity-40 cursor-default" : "hover:bg-qt-button-hover"
         }`}
@@ -82,7 +82,7 @@ export const TrackAreaContextMenu: React.FC<{
             <MenuItem
                 label={t("ctx_close_gaps")}
                 disabled={!canCloseGaps}
-                title={canCloseGaps ? undefined : t("ctx_close_gaps_disabled")}
+                data-tooltip={canCloseGaps ? undefined : t("ctx_close_gaps_disabled")}
                 onClick={() => {
                     onCloseGaps();
                     onClose();

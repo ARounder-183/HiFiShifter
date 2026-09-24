@@ -16,7 +16,7 @@
  */
 
 import { useCallback, useMemo, useRef, useState } from "react";
-import { Dialog, DropdownMenu, Flex } from "@radix-ui/themes";
+import { Button, Dialog, DropdownMenu, Flex, TextField } from "@radix-ui/themes";
 
 import { store } from "../../app/store";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
@@ -92,23 +92,18 @@ export function DockLayoutMenu({ withCheck }: DockLayoutMenuProps) {
                     </Dialog.Description>
                     <Flex justify="end" gap="2" mt="4">
                         <Dialog.Close>
-                            <button
-                                type="button"
-                                className="rounded border border-qt-border bg-qt-panel px-3 py-1 text-xs text-qt-text hover:bg-qt-hover"
-                            >
+                            <Button variant="soft" color="gray">
                                 {t("cancel")}
-                            </button>
+                            </Button>
                         </Dialog.Close>
-                        <button
-                            type="button"
-                            className="rounded border border-qt-border bg-qt-panel px-3 py-1 text-xs text-qt-text hover:bg-qt-hover"
+                        <Button
                             onClick={() => {
                                 resetLayout(dispatch);
                                 setConfirmResetOpen(false);
                             }}
                         >
                             {tAny("layout_reset")}
-                        </button>
+                        </Button>
                     </Flex>
                 </Dialog.Content>
             </Dialog.Root>
@@ -117,8 +112,10 @@ export function DockLayoutMenu({ withCheck }: DockLayoutMenuProps) {
                 <Dialog.Content maxWidth="360px" onKeyDown={(event) => event.stopPropagation()}>
                     <Dialog.Title>{tAny("layout_preset_name_prompt")}</Dialog.Title>
                     <Flex mt="3">
-                        <input
+                        <TextField.Root
                             autoFocus
+                            size="2"
+                            style={{ width: "100%" }}
                             value={presetDraft}
                             onChange={(event) => setPresetDraft(event.target.value)}
                             onKeyDown={(event) => {
@@ -126,28 +123,22 @@ export function DockLayoutMenu({ withCheck }: DockLayoutMenuProps) {
                                 if (presetDraft.trim()) savePreset(dispatch, presetDraft.trim());
                                 setNamePromptOpen(false);
                             }}
-                            className="w-full rounded border border-qt-border bg-qt-base px-2 py-1 text-sm text-qt-text outline-none"
                         />
                     </Flex>
                     <Flex justify="end" gap="2" mt="4">
                         <Dialog.Close>
-                            <button
-                                type="button"
-                                className="rounded border border-qt-border bg-qt-panel px-3 py-1 text-xs text-qt-text hover:bg-qt-hover"
-                            >
+                            <Button variant="soft" color="gray">
                                 {t("cancel")}
-                            </button>
+                            </Button>
                         </Dialog.Close>
-                        <button
-                            type="button"
-                            className="rounded border border-qt-border bg-qt-panel px-3 py-1 text-xs text-qt-text hover:bg-qt-hover"
+                        <Button
                             onClick={() => {
                                 if (presetDraft.trim()) savePreset(dispatch, presetDraft.trim());
                                 setNamePromptOpen(false);
                             }}
                         >
                             {"OK"}
-                        </button>
+                        </Button>
                     </Flex>
                 </Dialog.Content>
             </Dialog.Root>

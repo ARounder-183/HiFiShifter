@@ -13,6 +13,9 @@ import {
     isFormVisible,
     moveForm,
     nextZoneId,
+    resolveSplitDragTarget,
+    applyLivePaneStyles,
+    paneStyle,
     pruneTree,
     removeForm,
     setSplitRatio,
@@ -353,5 +356,136 @@ test("features/dock/dockTree.test.ts scripted checks", async () => {
         const dockedNode = findZone(docked, "z3") as DockTabsetNode;
         assertEqual(dockedNode.collapsed, false, "docking into a collapsed group expands it");
         assertEqual(dockedNode.active, "floating-one", "and the docked form is shown");
+    }
+
+    // ── 分隔条拖拽的目标尺寸 ───────────────────────────────────────
+    //
+    // 用户报告："当窗口布局为左右布局时，调整中间的分界线，无法正确调节。"
+    // 换算本身有两个易错点，都在这里钉住。
+    {
+        // ① 按比例的分割：比例 = 侧 A 尺寸 / 可分配尺寸。
+        const ratioSplit = resolveSplitDragTarget({
+            fixed: null,
+            minA: 200,
+            minB: 150,
+            available: 1000,
+            pointerOffset: 400,
+        });
+        assertEqual(ratioSplit, { ratio: 0.4, fixed: null }, "proportional drag yields a ratio");
+
+        // ② **固定侧必须保持固定**：右侧固定的分割拖拽后仍固定右侧，只改它的像素值。
+        const fixedRight = resolveSplitDragTarget({
+            fixed: { side: "b", px: 360 },
+            minA: 200,
+            minB: 150,
+            available: 1000,
+            pointerOffset: 700,
+        });
+        assertEqual(
+            fixedRight.fixed,
+            { side: "b", px: 300 },
+            "dragging a right-pinned split keeps it pinned on the right",
+        );
+        assertEqual(fixedRight.ratio, 0.7, "and records the resulting ratio");
+
+        const fixedLeft = resolveSplitDragTarget({
+            fixed: { side: "a", px: 300 },
+            minA: 200,
+            minB: 150,
+            available: 1000,
+            pointerOffset: 420,
+        });
+        assertEqual(
+            fixedLeft.fixed,
+            { side: "a", px: 420 },
+            "a left-pinned split stays pinned on the left",
+        );
+
+        // ③ 两侧最小尺寸都要生效（不能把任一侧挤没）。
+        const clampedLow = resolveSplitDragTarget({
+            fixed: null,
+            minA: 320,
+            minB: 220,
+            available: 1000,
+            pointerOffset: 10,
+        });
+        assertEqual(clampedLow.ratio, 0.32, "clamped up to the minimum of side A");
+        const clampedHigh = resolveSplitDragTarget({
+            fixed: null,
+            minA: 320,
+            minB: 220,
+            available: 1000,
+            pointerOffset: 990,
+        });
+        assertEqual(clampedHigh.ratio, 0.78, "clamped down to leave side B its minimum");
+
+        // ④ **拖拽期间写入的样式必须与 React 最终写入的样式完全一致**。
+        //
+        // 这是"拖了却没正确生效"的直接防线：曾经拖拽期间写 `flex` 简写、松手时
+        // 清空行内样式，而 React 的差异更新只写变化过的属性 —— 被清掉的
+        // `flex-basis` 落回 `auto`，最终成了 `flex: <ratio> 1 auto`。
+        // 现在两边都调用 `paneStyle`，值必然相同。
+        {
+            const target = resolveSplitDragTarget({
+                fixed: { side: "b", px: 360 },
+                minA: 200,
+                minB: 150,
+                available: 1000,
+                pointerOffset: 700,
+            });
+            const committed: DockSplitNode = {
+                t: "split",
+                id: "z1",
+                dir: "row",
+                ratio: target.ratio,
+                fixed: target.fixed,
+                a: { t: "tabset", id: "z2", tabs: ["a"], active: "a" },
+                b: { t: "tabset", id: "z3", tabs: ["b"], active: "b" },
+            };
+
+            const fakeA: { style: Record<string, unknown> } = { style: {} };
+            const fakeB: { style: Record<string, unknown> } = { style: {} };
+            applyLivePaneStyles(
+                fakeA as unknown as { style: CSSStyleDeclaration },
+                fakeB as unknown as { style: CSSStyleDeclaration },
+                committed,
+            );
+
+            assertEqual(
+                fakeA.style,
+                { ...paneStyle(committed, "a") },
+                "the live drag write equals what React will render for side A",
+            );
+            assertEqual(
+                fakeB.style,
+                { ...paneStyle(committed, "b") },
+                "the live drag write equals what React will render for side B",
+            );
+
+            // 并且真的写下了 flex-basis（按比例分割时）—— 这正是曾经被清掉的那个属性。
+            const ratioNode: DockSplitNode = { ...committed, fixed: null, ratio: 0.4 };
+            const ratioFake: { style: Record<string, unknown> } = { style: {} };
+            applyLivePaneStyles(
+                ratioFake as unknown as { style: CSSStyleDeclaration },
+                null,
+                ratioNode,
+            );
+            assertEqual(
+                ratioFake.style.flexBasis,
+                0,
+                "proportional splits must write flex-basis, not leave it to the default `auto`",
+            );
+            assertEqual(ratioFake.style.flexGrow, 0.4, "and the grow factor");
+        }
+
+        // ⑤ 空间不足时不产生负值 / NaN。
+        const degenerate = resolveSplitDragTarget({
+            fixed: { side: "b", px: 360 },
+            minA: 320,
+            minB: 220,
+            available: 0,
+            pointerOffset: 100,
+        });
+        assertEqual(degenerate, { ratio: 0.5, fixed: null }, "no room degrades to an even split");
     }
 });

@@ -12,6 +12,8 @@
  * 4. `ratio` 已钳制到 [0.05, 0.95]（极端比例会让一侧退化成不可用的窄条）。
  */
 
+import type { CSSProperties } from "react";
+
 import {
     type DockLayout,
     type DockNode,
@@ -478,6 +480,99 @@ export function dockForm(tree: DockNode, formId: string, target: DockInsertTarge
     if (host?.collapsed) next = setTabsetCollapsed(next, host.id, false);
 
     return next;
+}
+
+/** 分割线两侧的最小尺寸：防止用户把某一侧拖成不可用的窄条。 */
+export const MIN_PANE_PX = 90;
+
+/**
+ * 分割节点某一侧的 flex 样式 —— **React 渲染与拖拽直写的唯一来源**。
+ *
+ * 【为什么必须唯一】拖拽期间为了让指针跟手，样式是**直接写 DOM** 的；而松手后由
+ * React 按节点重渲染。两者只要有一个属性不同，就会出现"松手后布局跳一下"或
+ * "拖了没生效"。曾经的做法是拖拽期间写 `flex` 简写、松手时 `style.flex = ""`
+ * 清空：React 的样式差异更新**只写变化过的属性**，被清掉的 `flex-basis` 落回
+ * `auto`，而 React 只重写 `flexGrow`，最终得到 `flex: <ratio> 1 auto` —— 不是按
+ * 比例分配，分界线因此"拖了却没正确生效"。现在两边都调用本函数，值必然一致。
+ */
+export function paneStyle(node: DockSplitNode, side: "a" | "b"): CSSProperties {
+    const isA = side === "a";
+    const horizontal = node.dir === "row";
+    // 自由侧的最小尺寸：保证它**永远不会被固定侧挤成 0**。
+    //
+    // 【为什么必须给】固定侧若用 `flex: 0 0 <px>`（不可收缩），窗口比它窄时它
+    // 照样占满 `px`，自由侧就被压到 0 —— 表现为"停靠一个侧栏之后，时间轴整个
+    // 不见了"。固定尺寸来自用户拖拽或默认落点，而窗口可以被缩到任意小，两者
+    // 必须有一个能让步：让固定侧让步（它只是侧栏），并给自由侧兜一个下限。
+    const freeMin = horizontal ? { minWidth: MIN_PANE_PX } : { minHeight: MIN_PANE_PX };
+
+    if (node.fixed) {
+        // 固定侧锁像素，但允许在空间不足时收缩（`flex-shrink: 1`）；自由侧
+        // `basis: 0` 不参与收缩，因此全部收缩量都落在固定侧。
+        return node.fixed.side === side
+            ? { flex: `0 1 ${node.fixed.px}px`, minWidth: 0, minHeight: 0 }
+            : { flex: "1 1 0", ...freeMin };
+    }
+    return {
+        flexGrow: isA ? node.ratio : 1 - node.ratio,
+        flexShrink: 1,
+        flexBasis: 0,
+        minWidth: 0,
+        minHeight: 0,
+    };
+}
+
+/**
+ * 拖拽期间把两侧写成"目标尺寸"（只改 DOM，不进 Redux）。
+ *
+ * 写入的值与 `paneStyle` 针对**同一节点**的结果完全相同 —— 因此松手后 React
+ * 的差异更新要么无事可做、要么写入同样的值，DOM 始终正确。
+ */
+export function applyLivePaneStyles(
+    paneA: { style: CSSStyleDeclaration } | null,
+    paneB: { style: CSSStyleDeclaration } | null,
+    node: DockSplitNode,
+): void {
+    if (paneA) Object.assign(paneA.style, paneStyle(node, "a"));
+    if (paneB) Object.assign(paneB.style, paneStyle(node, "b"));
+}
+
+/**
+ * 一次分隔条拖拽的目标尺寸 —— 也是提交给 Redux 的载荷。
+ *
+ * 【为什么必须是纯函数并单独测试】这个换算有两个容易写错、且错了只表现为
+ * "拖了没正确生效"的点：
+ *
+ * 1. **固定侧必须保持固定**。无论哪一侧固定，早期实现都写成"侧 A 固定" ——
+ *    右侧停靠栏于是从"固定 360px"悄悄变成"自由伸缩"，窗口一缩放行为就变。
+ * 2. **钳制必须同时受两侧最小尺寸约束**，且固定侧与自由侧的像素值都要取整
+ *    （与提交值一致，否则 React 会因为差 0.5px 再写一次样式）。
+ *
+ * @param args.dir 分割方向。
+ * @param args.fixed 当前固定的是哪一侧（`null` = 按比例）。
+ * @param args.minA / minB 两侧最小尺寸（像素）。
+ * @param args.available 可分配的总尺寸（已扣掉分隔条）。
+ * @param args.pointerOffset 指针相对容器起点的偏移（像素）。
+ * @returns 目标 `{ratio, fixed}`；`available <= 0` 时退化为均分且不固定。
+ */
+export function resolveSplitDragTarget(args: {
+    fixed: DockSplitNode["fixed"];
+    minA: number;
+    minB: number;
+    available: number;
+    pointerOffset: number;
+}): { ratio: number; fixed: DockSplitNode["fixed"] } {
+    const { fixed, minA, minB, available, pointerOffset } = args;
+    if (!Number.isFinite(available) || available <= 0) {
+        return { ratio: 0.5, fixed: null };
+    }
+    const aSize = Math.min(Math.max(minA, available - minB), Math.max(minA, pointerOffset));
+    const ratio = clampRatio(aSize / available);
+    if (!fixed) return { ratio, fixed: null };
+    const roundedA = Math.round(aSize);
+    return fixed.side === "a"
+        ? { ratio, fixed: { side: "a", px: roundedA } }
+        : { ratio, fixed: { side: "b", px: Math.round(available - roundedA) } };
 }
 
 /** 设置分割比例（`fixed` 非空时表示某一侧固定像素）。 */

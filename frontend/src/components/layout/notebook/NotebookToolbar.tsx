@@ -31,25 +31,25 @@ export function NotebookToolbar({ editor, handlers, slashCommands }: NotebookToo
             <div className="hs-notebook-toolbar-group">
                 <ToolbarButton
                     label="H1"
-                    title={t("notebook_toolbar_heading1")}
+                    tooltip={t("notebook_toolbar_heading1")}
                     active={editor.isActive("heading", { level: 1 })}
                     onClick={() => editor.chain().focus().toggleHeading({ level: 1 }).run()}
                 />
                 <ToolbarButton
                     label="H2"
-                    title={t("notebook_toolbar_heading2")}
+                    tooltip={t("notebook_toolbar_heading2")}
                     active={editor.isActive("heading", { level: 2 })}
                     onClick={() => editor.chain().focus().toggleHeading({ level: 2 }).run()}
                 />
                 <ToolbarButton
                     label="H3"
-                    title={t("notebook_toolbar_heading3")}
+                    tooltip={t("notebook_toolbar_heading3")}
                     active={editor.isActive("heading", { level: 3 })}
                     onClick={() => editor.chain().focus().toggleHeading({ level: 3 }).run()}
                 />
                 <ToolbarButton
                     label="¶"
-                    title={t("notebook_toolbar_paragraph")}
+                    tooltip={t("notebook_toolbar_paragraph")}
                     active={editor.isActive("paragraph")}
                     onClick={() => editor.chain().focus().setParagraph().run()}
                 />
@@ -61,27 +61,27 @@ export function NotebookToolbar({ editor, handlers, slashCommands }: NotebookToo
                 <ToolbarButton
                     label="B"
                     bold
-                    title={t("notebook_toolbar_bold")}
+                    tooltip={t("notebook_toolbar_bold")}
                     active={editor.isActive("bold")}
                     onClick={() => editor.chain().focus().toggleBold().run()}
                 />
                 <ToolbarButton
                     label="I"
                     italic
-                    title={t("notebook_toolbar_italic")}
+                    tooltip={t("notebook_toolbar_italic")}
                     active={editor.isActive("italic")}
                     onClick={() => editor.chain().focus().toggleItalic().run()}
                 />
                 <ToolbarButton
                     label="S"
                     strike
-                    title={t("notebook_toolbar_strike")}
+                    tooltip={t("notebook_toolbar_strike")}
                     active={editor.isActive("strike")}
                     onClick={() => editor.chain().focus().toggleStrike().run()}
                 />
                 <ToolbarButton
                     label="<>"
-                    title={t("notebook_toolbar_inline_code")}
+                    tooltip={t("notebook_toolbar_inline_code")}
                     active={editor.isActive("code")}
                     onClick={() => editor.chain().focus().toggleCode().run()}
                 />
@@ -92,31 +92,31 @@ export function NotebookToolbar({ editor, handlers, slashCommands }: NotebookToo
             <div className="hs-notebook-toolbar-group">
                 <ToolbarButton
                     label="•"
-                    title={t("notebook_toolbar_bullet_list")}
+                    tooltip={t("notebook_toolbar_bullet_list")}
                     active={editor.isActive("bulletList")}
                     onClick={() => editor.chain().focus().toggleBulletList().run()}
                 />
                 <ToolbarButton
                     label="1."
-                    title={t("notebook_toolbar_ordered_list")}
+                    tooltip={t("notebook_toolbar_ordered_list")}
                     active={editor.isActive("orderedList")}
                     onClick={() => editor.chain().focus().toggleOrderedList().run()}
                 />
                 <ToolbarButton
                     label="☑"
-                    title={t("notebook_toolbar_task_list")}
+                    tooltip={t("notebook_toolbar_task_list")}
                     active={editor.isActive("taskList")}
                     onClick={() => editor.chain().focus().toggleTaskList().run()}
                 />
                 <ToolbarButton
                     label="❝"
-                    title={t("notebook_toolbar_quote")}
+                    tooltip={t("notebook_toolbar_quote")}
                     active={editor.isActive("blockquote")}
                     onClick={() => editor.chain().focus().toggleBlockquote().run()}
                 />
                 <ToolbarButton
                     label="{ }"
-                    title={t("notebook_toolbar_code_block")}
+                    tooltip={t("notebook_toolbar_code_block")}
                     active={editor.isActive("codeBlock")}
                     onClick={() => editor.chain().focus().toggleCodeBlock().run()}
                 />
@@ -127,7 +127,7 @@ export function NotebookToolbar({ editor, handlers, slashCommands }: NotebookToo
             <div className="hs-notebook-toolbar-group">
                 <ToolbarButton
                     label="🔗"
-                    title={t("notebook_toolbar_link")}
+                    tooltip={t("notebook_toolbar_link")}
                     active={editor.isActive("link")}
                     onClick={() => {
                         const previous = (editor.getAttributes("link").href as string) ?? "";
@@ -147,17 +147,17 @@ export function NotebookToolbar({ editor, handlers, slashCommands }: NotebookToo
                 />
                 <ToolbarButton
                     label="🖼"
-                    title={t("notebook_toolbar_image")}
+                    tooltip={t("notebook_toolbar_image")}
                     onClick={handlers.insertImage}
                 />
                 <ToolbarButton
                     label="▦"
-                    title={t("notebook_toolbar_table")}
+                    tooltip={t("notebook_toolbar_table")}
                     onClick={() => insertTable(editor)}
                 />
                 <ToolbarButton
                     label="―"
-                    title={t("notebook_toolbar_rule")}
+                    tooltip={t("notebook_toolbar_rule")}
                     onClick={() => editor.chain().focus().setHorizontalRule().run()}
                 />
             </div>
@@ -167,22 +167,22 @@ export function NotebookToolbar({ editor, handlers, slashCommands }: NotebookToo
             <div className="hs-notebook-toolbar-group">
                 <ToolbarButton
                     label="⏱"
-                    title={t("notebook_toolbar_timecode")}
+                    tooltip={t("notebook_toolbar_timecode")}
                     onClick={handlers.insertTimecode}
                 />
                 <ToolbarButton
                     label="✂"
-                    title={t("notebook_toolbar_clip_ref")}
+                    tooltip={t("notebook_toolbar_clip_ref")}
                     onClick={handlers.insertClipReference}
                 />
                 <ToolbarButton
                     label="📋"
-                    title={t("notebook_toolbar_stage_clipboard")}
+                    tooltip={t("notebook_toolbar_stage_clipboard")}
                     onClick={handlers.stageClipboard}
                 />
                 <ToolbarButton
                     label="ℹ"
-                    title={t("notebook_toolbar_project_info")}
+                    tooltip={t("notebook_toolbar_project_info")}
                     onClick={handlers.insertProjectInfo}
                 />
             </div>
@@ -207,7 +207,7 @@ export function NotebookToolbar({ editor, handlers, slashCommands }: NotebookToo
 
 function ToolbarButton({
     label,
-    title,
+    tooltip,
     active,
     bold,
     italic,
@@ -215,7 +215,8 @@ function ToolbarButton({
     onClick,
 }: {
     label: string;
-    title: string;
+    /** 悬停提示文本；渲染为项目自定义 tooltip 的 `data-tooltip`。 */
+    tooltip: string;
     active?: boolean;
     bold?: boolean;
     italic?: boolean;
@@ -227,8 +228,8 @@ function ToolbarButton({
             type="button"
             className="hs-notebook-toolbar-btn"
             data-active={active ? "true" : "false"}
-            title={title}
-            aria-label={title}
+            data-tooltip={tooltip}
+            aria-label={tooltip}
             style={{
                 fontWeight: bold ? 700 : undefined,
                 fontStyle: italic ? "italic" : undefined,

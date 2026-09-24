@@ -217,7 +217,7 @@ export function HifiClipNodeView(props: NodeViewProps) {
                 ) : (
                     <span
                         className="hs-notebook-clip-title"
-                        title={attrs.title}
+                        data-tooltip={attrs.title}
                         onDoubleClick={() => {
                             setTitleDraft(attrs.title);
                             setRenaming(true);
@@ -233,7 +233,7 @@ export function HifiClipNodeView(props: NodeViewProps) {
                         const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
                         setMenu({ x: rect.left, y: rect.bottom + 2 });
                     }}
-                    title={t("notebook_clip_actions")}
+                    data-tooltip={t("notebook_clip_actions")}
                 >
                     ⋯
                 </button>

@@ -6,7 +6,7 @@
  * （撤销要能恢复），所以"清理"必须由用户显式触发。
  */
 
-import { Dialog, Flex, Select, Switch, Text } from "@radix-ui/themes";
+import { Button, Dialog, Flex, Select, Switch, Text } from "@radix-ui/themes";
 import { useEffect, useMemo, useState } from "react";
 
 import type { NotebookAssetSummary } from "../../../features/notebook/notebookSlice";
@@ -71,11 +71,11 @@ export function NotebookAttachmentsDialog({
                 </div>
 
                 <Flex justify="between" align="center" className="mt-3" gap="2">
-                    <button
-                        type="button"
-                        className="hs-notebook-toolbar-btn"
+                    <Button
+                        variant="soft"
+                        color="gray"
                         disabled={unusedCount === 0}
-                        title={t("notebook_attachments_clean_hint")}
+                        data-tooltip={t("notebook_attachments_clean_hint")}
                         onClick={() => {
                             void (async () => {
                                 const result = await notebookApi.pruneAssets();
@@ -85,11 +85,11 @@ export function NotebookAttachmentsDialog({
                         }}
                     >
                         {t("notebook_attachments_clean")} ({unusedCount})
-                    </button>
+                    </Button>
                     <Dialog.Close>
-                        <button type="button" className="hs-notebook-toolbar-btn">
+                        <Button variant="soft" color="gray">
                             {t("close")}
-                        </button>
+                        </Button>
                     </Dialog.Close>
                 </Flex>
             </Dialog.Content>
@@ -112,26 +112,28 @@ function AttachmentRow({
     return (
         <div className="hs-notebook-attachment-row">
             <AttachmentThumb entry={entry} />
-            <span className="hs-notebook-attachment-name" title={entry.id}>
+            <span className="hs-notebook-attachment-name" data-tooltip={entry.id}>
                 {describeEntry(entry, t as unknown as (key: string) => string)}
             </span>
             <span className={used ? undefined : "hs-notebook-attachment-unused"}>
                 {used ? t("notebook_attachments_used") : t("notebook_attachments_unused")}
             </span>
             <span>{formatBytes(entry.byteLen)}</span>
-            <button
-                type="button"
-                className="hs-notebook-toolbar-btn"
-                title={t("notebook_attachments_save_as")}
+            <Button
+                variant="ghost"
+                color="gray"
+                size="1"
+                data-tooltip={t("notebook_attachments_save_as")}
                 disabled={!entry.hasData}
                 onClick={() => void notebookApi.saveAssetAs(entry.id).catch(() => {})}
             >
                 ⤓
-            </button>
-            <button
-                type="button"
-                className="hs-notebook-toolbar-btn"
-                title={t("notebook_image_remove")}
+            </Button>
+            <Button
+                variant="ghost"
+                color="gray"
+                size="1"
+                data-tooltip={t("notebook_image_remove")}
                 onClick={() => {
                     void (async () => {
                         await notebookApi.removeAsset(entry.id);
@@ -141,7 +143,7 @@ function AttachmentRow({
                 }}
             >
                 ✕
-            </button>
+            </Button>
         </div>
     );
 }
@@ -435,18 +437,18 @@ export function NotebookSettingsDialog({
 
                     <Section title={tAny("notebook_settings_group_export")}>
                         <Flex gap="2" wrap="wrap">
-                            <button
-                                type="button"
-                                className="hs-notebook-toolbar-btn"
+                            <Button
+                                variant="soft"
+                                color="gray"
                                 onClick={() => {
                                     void runExport("md", markdown);
                                 }}
                             >
                                 {tAny("notebook_export_md")}
-                            </button>
-                            <button
-                                type="button"
-                                className="hs-notebook-toolbar-btn"
+                            </Button>
+                            <Button
+                                variant="soft"
+                                color="gray"
                                 onClick={() => {
                                     void runExport(
                                         "html",
@@ -455,7 +457,7 @@ export function NotebookSettingsDialog({
                                 }}
                             >
                                 {tAny("notebook_export_html")}
-                            </button>
+                            </Button>
                         </Flex>
                     </Section>
                 </div>
@@ -465,9 +467,9 @@ export function NotebookSettingsDialog({
                         {exportNotice ?? ""}
                     </Text>
                     <Dialog.Close>
-                        <button type="button" className="hs-notebook-toolbar-btn">
+                        <Button variant="soft" color="gray">
                             {t("close")}
-                        </button>
+                        </Button>
                     </Dialog.Close>
                 </Flex>
             </Dialog.Content>
@@ -484,6 +486,15 @@ function Section({ title, children }: { title: string; children: React.ReactNode
     );
 }
 
+/**
+ * 设置行：左标签（定宽）+ 控件。
+ *
+ * 与 `TimelineDisplaySettingsDialog` / `RenderCacheDialog` 同一形态（标签定宽、
+ * 左对齐、控件占满剩余宽度）—— 弹窗之间的一致性靠沿用同一套排布约定，
+ * 而不是各自调参。
+ */
+const SETTING_LABEL_STYLE: React.CSSProperties = { minWidth: 132 };
+
 function SwitchRow({
     label,
     checked,
@@ -494,10 +505,12 @@ function SwitchRow({
     onChange: (value: boolean) => void;
 }) {
     return (
-        <div className="hs-notebook-setting-row">
-            <span className="hs-notebook-setting-label">{label}</span>
+        <Flex align="center" gap="2">
+            <Text size="2" style={SETTING_LABEL_STYLE}>
+                {label}
+            </Text>
             <Switch checked={checked} onCheckedChange={onChange} />
-        </div>
+        </Flex>
     );
 }
 
@@ -515,13 +528,17 @@ function SelectRow({
     onChange: (value: string) => void;
 }) {
     return (
-        <div className="hs-notebook-setting-row">
-            <div className="min-w-0">
-                <div className="hs-notebook-setting-label">{label}</div>
-                {hint ? <div className="hs-notebook-setting-hint">{hint}</div> : null}
-            </div>
+        <Flex align="center" gap="2">
+            <Flex direction="column" style={SETTING_LABEL_STYLE}>
+                <Text size="2">{label}</Text>
+                {hint ? (
+                    <Text size="1" color="gray">
+                        {hint}
+                    </Text>
+                ) : null}
+            </Flex>
             <Select.Root value={value} onValueChange={onChange}>
-                <Select.Trigger style={{ minWidth: 140 }} />
+                <Select.Trigger style={{ flex: 1 }} />
                 <Select.Content>
                     {options.map((option) => (
                         <Select.Item key={option.value} value={option.value}>
@@ -530,7 +547,7 @@ function SelectRow({
                     ))}
                 </Select.Content>
             </Select.Root>
-        </div>
+        </Flex>
     );
 }
 

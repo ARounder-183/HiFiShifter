@@ -184,7 +184,7 @@ export function NotebookImageNodeView(props: NodeViewProps) {
                     ref={imgRef}
                     src={current.url}
                     alt={String(node.attrs.alt ?? "")}
-                    title={String(node.attrs.title ?? "")}
+                    data-tooltip={String(node.attrs.title ?? "")}
                     draggable={false}
                     className="hs-notebook-image"
                     style={displayWidth ? { width: `${displayWidth}px` } : undefined}
@@ -199,7 +199,7 @@ export function NotebookImageNodeView(props: NodeViewProps) {
                     }}
                 />
             ) : (
-                <div className="hs-notebook-image-missing" title={src}>
+                <div className="hs-notebook-image-missing" data-tooltip={src}>
                     <span className="hs-notebook-image-missing-title">
                         {current.missing
                             ? t("notebook_image_missing")

@@ -172,7 +172,7 @@ export const SilenceDetectionDialog: React.FC<{
                     <Flex
                         align="center"
                         gap="2"
-                        title={resetHint}
+                        data-tooltip={resetHint}
                         onDoubleClick={() => update({ method: SILENCE_DETECT_DEFAULTS.method })}
                     >
                         <Text size="2" style={{ minWidth: 96 }}>
@@ -206,7 +206,7 @@ export const SilenceDetectionDialog: React.FC<{
                     <Flex
                         align="center"
                         gap="2"
-                        title={resetHint}
+                        data-tooltip={resetHint}
                         onDoubleClick={() =>
                             update({ thresholdDb: SILENCE_DETECT_DEFAULTS.thresholdDb })
                         }
@@ -244,7 +244,7 @@ export const SilenceDetectionDialog: React.FC<{
 
                     <label
                         className="flex items-center gap-2 text-[12px]"
-                        title={resetHint}
+                        data-tooltip={resetHint}
                         onDoubleClick={() => update({ adaptive: SILENCE_DETECT_DEFAULTS.adaptive })}
                     >
                         <Checkbox
@@ -266,7 +266,7 @@ export const SilenceDetectionDialog: React.FC<{
                             key={key}
                             align="center"
                             gap="2"
-                            title={resetHint}
+                            data-tooltip={resetHint}
                             onDoubleClick={() =>
                                 update({
                                     [key]: SILENCE_DETECT_DEFAULTS[key],
@@ -305,7 +305,7 @@ export const SilenceDetectionDialog: React.FC<{
                     <Flex
                         align="center"
                         gap="2"
-                        title={resetHint}
+                        data-tooltip={resetHint}
                         onDoubleClick={() => update({ action: SILENCE_DETECT_DEFAULTS.action })}
                     >
                         <Text size="2" style={{ minWidth: 96 }}>
@@ -345,7 +345,7 @@ export const SilenceDetectionDialog: React.FC<{
 
                     <label
                         className="flex items-center gap-2 text-[12px]"
-                        title={resetHint}
+                        data-tooltip={resetHint}
                         onDoubleClick={() =>
                             update({ deleteSilentClips: SILENCE_DETECT_DEFAULTS.deleteSilentClips })
                         }
@@ -358,7 +358,7 @@ export const SilenceDetectionDialog: React.FC<{
                     </label>
                     <label
                         className="flex items-center gap-2 text-[12px]"
-                        title={resetHint}
+                        data-tooltip={resetHint}
                         onDoubleClick={() =>
                             update({ syncAllTakes: SILENCE_DETECT_DEFAULTS.syncAllTakes })
                         }
