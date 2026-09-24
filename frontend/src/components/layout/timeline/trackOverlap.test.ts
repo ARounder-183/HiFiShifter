@@ -58,4 +58,75 @@ describe("computeLeadingOverlapSecByClipId", () => {
     it("空输入返回空对象（不抛异常）", () => {
         expect(computeLeadingOverlapSecByClipId([])).toEqual({});
     });
+
+    /**
+     * 随机对拍：新的单遍扫描实现 ≡ 改前的 O(n²) 回扫实现。
+     *
+     * 【为什么必须对拍】新实现把「对每个前序取 max of min(clipEnd, end_j)」化简为
+     * 「min(clipEnd, max_j end_j)」（利用 min 对第二参单调）。这是纯代数化简，
+     * 但重叠区的颜色完全由它决定，一旦推错只会表现为"重叠色带宽度不对"，极难
+     * 归因。因此用改前的实现作为参照，对确定性伪随机输入逐值比对。
+     *
+     * 输入刻意覆盖：同起点（触发 id 字典序分支）、相邻首尾相接（触发 1e-9 容差）、
+     * 完全包含、完全不相交、零长度。
+     */
+    describe("随机对拍 ≡ 改前的 O(n²) 实现", () => {
+        /** 改前的实现：对每个 clip 回扫全部前序。仅作参照，不参与生产。 */
+        function referenceCompute(clips: ClipInfo[]): Record<string, number> {
+            const compare = (a: ClipInfo, b: ClipInfo): number => {
+                const d = (a.startSec ?? 0) - (b.startSec ?? 0);
+                if (Math.abs(d) > 1e-9) return d;
+                return String(a.id).localeCompare(String(b.id));
+            };
+            const sorted = [...clips].sort(compare);
+            const out: Record<string, number> = {};
+            for (let i = 0; i < sorted.length; i += 1) {
+                const clip = sorted[i];
+                const clipStart = clip.startSec;
+                const clipEnd = clip.startSec + clip.lengthSec;
+                let leadingOverlapEnd = clipStart;
+                for (let j = 0; j < i; j += 1) {
+                    const other = sorted[j];
+                    const overlapEnd = Math.min(clipEnd, other.startSec + other.lengthSec);
+                    if (overlapEnd <= clipStart + 1e-9) continue;
+                    if (overlapEnd > leadingOverlapEnd) leadingOverlapEnd = overlapEnd;
+                }
+                out[clip.id] = Math.max(0, leadingOverlapEnd - clipStart);
+            }
+            return out;
+        }
+
+        /** 确定性伪随机（回归必须可复现，禁用 Math.random）。 */
+        function createRng(seed: number): () => number {
+            let state = seed >>> 0;
+            return () => {
+                state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+                return state / 0x1_0000_0000;
+            };
+        }
+
+        /** 生成一批 clip：起点量化到 0.5s 网格（制造同起点），长度含 0 与相邻值。 */
+        function buildClips(rng: () => number, count: number): ClipInfo[] {
+            const out: ClipInfo[] = [];
+            for (let i = 0; i < count; i += 1) {
+                const startSec = Math.floor(rng() * 12) * 0.5;
+                const lengthSec = Math.floor(rng() * 4) * 0.5;
+                out.push(clip(`c${String(i).padStart(3, "0")}`, startSec, lengthSec));
+            }
+            return out;
+        }
+
+        it("20 组随机输入逐值相等", () => {
+            for (let seed = 1; seed <= 20; seed += 1) {
+                const rng = createRng(seed);
+                const clips = buildClips(rng, 3 + Math.floor(rng() * 40));
+                const actual = computeLeadingOverlapSecByClipId(clips);
+                const expected = referenceCompute(clips);
+                expect(Object.keys(actual).sort()).toEqual(Object.keys(expected).sort());
+                for (const id of Object.keys(expected)) {
+                    expect(actual[id]).toBeCloseTo(expected[id] as number, 12);
+                }
+            }
+        });
+    });
 });

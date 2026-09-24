@@ -472,7 +472,21 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                 : { firstRow, rowCount },
         );
         const host = localHostRef.current;
-        if (host !== null) setWaveformAxis(host.getAxis());
+        if (host === null) return;
+        const next = host.getAxis();
+        // 只在**真正参与渲染的字段**变化时替换 state：总线驱动下 axis 的
+        // scrollLeft / scrollTop 恒被总线快照覆盖（不参与绘制），若每次跨行都
+        // 换一个新对象，只会白白让 `WaveformSurface.visualSignature` 失效、
+        // 多走一轮 React 提交与重绘。pxPerSec / viewportWidthPx / dpr 才是
+        // 波形面从 props.axis 实际读取的字段。
+        setWaveformAxis((prev) =>
+            prev !== null &&
+            prev.pxPerSec === next.pxPerSec &&
+            prev.viewportWidthPx === next.viewportWidthPx &&
+            prev.dpr === next.dpr
+                ? prev
+                : next,
+        );
     }, []);
 
     // 回调镜像：宿主持有的是稳定函数，函数内部读取最新回调，避免重建宿主。
