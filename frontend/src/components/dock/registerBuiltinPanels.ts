@@ -11,10 +11,7 @@
 
 import { getPanel, registerPanel } from "../../features/dock/panelRegistry";
 import { MAIN_FORM_PARAM_EDITOR, MAIN_FORM_TIMELINE } from "../../features/dock/dockSchema";
-import {
-    NOTEBOOK_PANEL_MAX_WIDTH,
-    NOTEBOOK_PANEL_MIN_WIDTH,
-} from "../layout/notebook/notebookSettings";
+import { NOTEBOOK_PANEL_MIN_WIDTH } from "../layout/notebook/notebookSettings";
 
 /** 面板 id 常量（同时是持久化 JSON 里的键，一旦发布不可更改）。 */
 export const PANEL_TIMELINE = MAIN_FORM_TIMELINE;
@@ -80,15 +77,10 @@ export function registerBuiltinPanels(): void {
         minWidth: NOTEBOOK_PANEL_MIN_WIDTH,
         // 记事本与文件浏览器同处右侧停靠栏，以标签页共存 —— 打开两者时宽度
         // 不再翻倍，这是"界面拥挤"最直接的解法。
-        defaultPlacement: {
-            side: "right",
-            sizePx: Math.max(360, NOTEBOOK_PANEL_MAX_WIDTH / 2),
-            tabWith: PANEL_FILE_BROWSER,
-        },
-        // 记事本是"随手记"性质的辅助面板：默认就该在场（用户不必先去菜单里打开），
-        // 但不该占掉布局格子，因此以浮窗出现在右下角。用户把它停靠或关掉之后，
-        // 窗体记录已存在，这里不会再弹出来。
-        defaultFloating: { width: 460, height: 420, anchor: "bottom-right" },
+        // 记事本是"随手记"性质的辅助面板：**默认保持关闭**（启动时不该自己冒出来），
+        // 用户打开它时希望它浮在手边、而不是挤进布局占一格 —— 因此落在右下角。
+        // 声明了 `openAsFloating` 之后 `defaultPlacement` 不会再被用到，故不再声明。
+        openAsFloating: { width: 460, height: 420, anchor: "bottom-right" },
         order: 40,
     });
 

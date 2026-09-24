@@ -108,18 +108,16 @@ export function createDefaultDockLayout(): DockLayout {
 export function ensureRegisteredPanels(layout: DockLayout): DockLayout {
     const forms = { ...layout.forms };
     const order = [...layout.order];
-    const floatOrder = [...layout.floatOrder];
     let changed = false;
     for (const panel of listPanels()) {
         if (forms[panel.id]) continue;
-        // 面板可以声明"首次出现时以浮窗落在某个角上"（见 `PanelDefinition.defaultFloating`）。
-        const float = panel.defaultFloating ? resolveDefaultFloat(panel.defaultFloating) : null;
-        forms[panel.id] = { id: panel.id, panelId: panel.id, float, floating: float !== null };
+        // 新面板一律是"已关闭"：启动时不该有任何面板自己冒出来。`openAsFloating`
+        // 只影响用户**打开**它时的形态（见 `openPanelInLayout`）。
+        forms[panel.id] = { id: panel.id, panelId: panel.id, float: null, floating: false };
         order.push(panel.id);
-        if (float !== null && !floatOrder.includes(panel.id)) floatOrder.push(panel.id);
         changed = true;
     }
-    return changed ? { ...layout, forms, order, floatOrder } : layout;
+    return changed ? { ...layout, forms, order } : layout;
 }
 
 /**
@@ -128,19 +126,16 @@ export function ensureRegisteredPanels(layout: DockLayout): DockLayout {
  * 位置依赖主窗口尺寸，而布局对象可能在非浏览器环境（测试）里构造 —— 因此这里
  * 对 `window` 缺失做降级，而不是让调用方各自判断。
  */
-function resolveDefaultFloat(
-    spec: NonNullable<PanelDefinition["defaultFloating"]>,
-): DockFloatGeometry {
-    const margin = spec.marginPx ?? 24;
-    const { width, height } = spec;
-    if (typeof window === "undefined") {
-        return { x: margin, y: margin, w: width, h: height };
-    }
+function resolveOpenFloat(spec: NonNullable<PanelDefinition["openAsFloating"]>): DockFloatGeometry {
+    // 位置交给**锚点**在渲染时解析（见 `DockFloatAnchor`）：打开那一刻量到的窗口
+    // 尺寸未必是最终值，写死坐标会让浮窗停在偏高的位置。x/y 只是占位值。
     return {
-        x: Math.max(margin, Math.round(window.innerWidth - width - margin)),
-        y: Math.max(margin, Math.round(window.innerHeight - height - margin)),
-        w: width,
-        h: height,
+        x: 0,
+        y: 0,
+        w: spec.width,
+        h: spec.height,
+        anchor: spec.anchor,
+        anchorMarginPx: spec.marginPx ?? 24,
     };
 }
 
@@ -468,11 +463,25 @@ export function openPanelInLayout(
 
     const forms = { ...layout.forms };
     const previous = forms[formId];
+    const order = layout.order.includes(formId) ? layout.order : [...layout.order, formId];
+
+    // 【打开时的形态】声明了 `openAsFloating` 的面板（如记事本）以浮窗出现在指定
+    // 角上，而不是并入某个标签组 —— "随手记"面板应当浮在手边，不该挤进布局里占一格。
+    // 已经有浮窗几何（上次的尺寸/位置）就复用，只有从未浮动过才用声明的默认值。
+    if (definition.openAsFloating) {
+        const float = previous?.float ?? resolveOpenFloat(definition.openAsFloating);
+        forms[formId] = { ...(previous ?? { id: formId, panelId }), float, floating: true };
+        return {
+            ...layout,
+            forms,
+            order,
+            floatOrder: [...layout.floatOrder.filter((id) => id !== formId), formId],
+        };
+    }
+
     forms[formId] = previous
         ? { ...previous, floating: false }
         : { id: formId, panelId, float: null, floating: false };
-    const order = layout.order.includes(formId) ? layout.order : [...layout.order, formId];
-
     const base: DockLayout = { ...layout, forms, order };
     const resolved = placement ?? definition.defaultPlacement ?? { side: "center" };
     const tree = placeForm(base, formId, resolved);

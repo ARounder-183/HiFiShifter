@@ -86,13 +86,13 @@ function registerFakes(): void {
         order: 50,
     });
     registerPanel({
-        id: "floatingByDefault",
+        id: "opensAsFloat",
         titleKey: "notebook",
         component: noop,
         defaultWidth: 460,
         defaultHeight: 420,
-        // 首次出现即以浮窗落在右下角（记事本的默认形态）。
-        defaultFloating: { width: 460, height: 420, anchor: "bottom-right" },
+        // 打开时以浮窗落在右下角（记事本的形态；**默认仍是关闭**）。
+        openAsFloating: { width: 460, height: 420, anchor: "bottom-right" },
         order: 60,
     });
 }
@@ -122,40 +122,50 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
         const layout = ensureRegisteredPanels(createDefaultDockLayout());
         assertEqual(
             Object.keys(layout.forms).sort(),
-            [
-                "fileBrowser",
-                "floatingByDefault",
-                "notebook",
-                "paramEditor",
-                "timeline",
-                "undoHistory",
-            ],
+            ["fileBrowser", "notebook", "opensAsFloat", "paramEditor", "timeline", "undoHistory"],
             "all registered panels get records",
         );
         assertEqual(shape(layout.tree), "([timeline]|[paramEditor])", "tree untouched");
         assertEqual(isFormVisible(layout, "fileBrowser"), false, "new records start closed");
 
-        // ── 声明了 defaultFloating 的面板：首次出现即为浮窗，落在右下角 ──
+        // ── 声明了 openAsFloating 的面板：**默认仍是关闭**，打开时才浮出 ──
         //
-        // 记事本属于"默认就该在场、但不该占布局格子"的辅助面板：它必须可见
-        // （用户不必先去菜单里打开），且**不进入布局树**（不挤占任何面板的位置）。
+        // 这是用户明确要求的语义："记事本默认仍然是关闭状态"，而"悬浮在右下角"
+        // 说的是**打开它时**的形态 —— 启动时不该有任何面板自己冒出来。
         {
-            const form = layout.forms.floatingByDefault;
-            assertEqual(form?.floating, true, "starts floating rather than closed");
+            assertEqual(
+                isFormVisible(layout, "opensAsFloat"),
+                false,
+                "a panel that opens as a float is still closed by default",
+            );
+
+            const opened = openPanelInLayout(layout, "opensAsFloat");
+            const form = opened.forms.opensAsFloat;
+            assertEqual(form?.floating, true, "opening it produces a floating window");
             assertEqual(form?.float?.w, 460, "declared width");
             assertEqual(form?.float?.h, 420, "declared height");
             assertEqual(
-                findTabsetOfForm(layout.tree, "floatingByDefault"),
+                form?.float?.anchor,
+                "bottom-right",
+                "and it is anchored to the lower-right corner",
+            );
+            assertEqual(
+                findTabsetOfForm(opened.tree, "opensAsFloat"),
                 null,
                 "a floating panel takes no cell in the layout tree",
             );
             assertEqual(
-                layout.floatOrder.includes("floatingByDefault"),
+                opened.floatOrder.includes("opensAsFloat"),
                 true,
                 "and is registered for the floating layer",
             );
-            // 位置落在右下角（测试环境无 window，退回边距原点）。
-            assertEqual([form?.float?.x, form?.float?.y], [24, 24], "anchored with the margin");
+
+            // 再次打开（已可见）不应改变任何东西。
+            assertEqual(
+                openPanelInLayout(opened, "opensAsFloat"),
+                opened,
+                "opening an already-visible singleton is a no-op",
+            );
         }
     }
 
@@ -372,7 +382,7 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
         let layout = ensureRegisteredPanels(createDefaultDockLayout());
         // 先关掉"默认悬浮"的那个面板：它默认是可见的，不关掉的话"最后一个可见窗体"
         // 就不是时间轴了，保护逻辑不会触发。
-        layout = closeFormInLayout(layout, "floatingByDefault");
+        layout = closeFormInLayout(layout, "opensAsFloat");
         layout = closeFormInLayout(layout, MAIN_FORM_PARAM_EDITOR);
         assertEqual(isFormVisible(layout, MAIN_FORM_PARAM_EDITOR), false, "param editor closed");
         assertEqual(shape(layout.tree), "[timeline]", "its group collapsed");

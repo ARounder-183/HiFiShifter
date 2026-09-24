@@ -73,6 +73,8 @@ function registerFakes(): void {
         defaultWidth: 420,
         defaultHeight: 400,
         defaultPlacement: { side: "right", sizePx: 360, tabWith: "fileBrowser" },
+        // 打开时以浮窗落在右下角；**默认仍是关闭**。
+        openAsFloating: { width: 460, height: 420, anchor: "bottom-right" },
         order: 40,
     });
 }
@@ -234,11 +236,13 @@ test("features/dock/dockSlice.test.ts scripted checks", async () => {
         let state = reducer(undefined, syncRegisteredPanels());
         state = reducer(state, openPanel({ panelId: "fileBrowser" }));
         assertEqual(isFormVisible(state.layout, "fileBrowser"), true, "opened");
+        // 记事本声明了 openAsFloating，因此打开它**不并入**文件浏览器所在的标签组，
+        // 而是浮出来（见下方"记事本默认关闭、打开时浮在右下角"一节）。
         state = reducer(state, openPanel({ panelId: "notebook" }));
         assertEqual(
-            findTabsetOfForm(state.layout.tree, "notebook")?.tabs,
-            ["fileBrowser", "notebook"],
-            "notebook tabs with the file browser instead of taking a second column",
+            state.layout.forms.notebook.floating,
+            true,
+            "the notebook opens as a float, not as a tab",
         );
         state = reducer(state, closeForm("fileBrowser"));
         assertEqual(isFormVisible(state.layout, "fileBrowser"), false, "closed");
@@ -308,6 +312,38 @@ test("features/dock/dockSlice.test.ts scripted checks", async () => {
             [state.layout.forms.notebook.float?.w, state.layout.forms.notebook.float?.h],
             [320, 240],
             "undocking restores the remembered float size",
+        );
+    }
+
+    // ── 记事本：默认关闭，打开时浮在右下角 ─────────────────────────
+    //
+    // 用户明确要求："记事本默认仍然是关闭状态"，而"悬浮在右下角"说的是**打开它
+    // 时**的形态。启动时不该有任何面板自己冒出来。
+    {
+        const initial = reducer(undefined, syncRegisteredPanels());
+        assertEqual(
+            isFormVisible(initial.layout, "notebook"),
+            false,
+            "the notebook is closed on startup, not floating",
+        );
+        assertEqual(initial.layout.floatOrder, [], "and nothing is registered as floating");
+
+        const opened = reducer(initial, openPanel({ panelId: "notebook" }));
+        assertEqual(isFormVisible(opened.layout, "notebook"), true, "opening it shows it");
+        assertEqual(
+            opened.layout.forms.notebook.floating,
+            true,
+            "and it opens as a floating window rather than docking",
+        );
+        assertEqual(
+            opened.layout.forms.notebook.float?.anchor,
+            "bottom-right",
+            "anchored to the lower-right corner",
+        );
+        assertEqual(
+            findTabsetOfForm(opened.layout.tree, "notebook"),
+            null,
+            "taking no cell in the layout tree",
         );
     }
 
