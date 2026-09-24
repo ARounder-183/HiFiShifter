@@ -763,7 +763,6 @@ export const koKR = {
     fb_searching: "검색 중...",
     fb_loading: "로딩 중...",
     fb_error: "디렉토리 로딩 오류",
-    fb_close: "닫기",
 
     ctx_selected_n: "{n}개 선택됨",
     ctx_delete_all: "모두 삭제",

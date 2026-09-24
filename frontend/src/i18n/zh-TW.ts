@@ -667,7 +667,6 @@ export const zhTW = {
     fb_searching: "搜尋中...",
     fb_loading: "載入中...",
     fb_error: "載入目錄時發生錯誤",
-    fb_close: "關閉",
 
     ctx_selected_n: "已選 {n} 個",
     ctx_delete_all: "刪除全部",

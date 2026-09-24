@@ -174,6 +174,18 @@ export function installBridge(args: {
 
     void loadEventApi().then(async (api) => {
         if (api === null || disposed) return;
+        // 监听注册本身也可能失败（非 Tauri 环境、权限缺失）：桥是"尽力而为"的
+        // 增强，绝不能因为注册失败在控制台留下未捕获的 rejection。
+        try {
+            await registerListeners(api);
+        } catch {
+            // 忽略：两侧状态各自独立演进，功能不受影响（面板仍可用）。
+        }
+    });
+
+    async function registerListeners(
+        api: NonNullable<Awaited<ReturnType<typeof loadEventApi>>>,
+    ): Promise<void> {
         const offAction = await api.listen(BRIDGE_ACTION_EVENT, (event) => {
             const envelope = event.payload as BridgeEnvelope | null;
             if (!envelope || envelope.origin === origin) return;
@@ -207,7 +219,7 @@ export function installBridge(args: {
             // 请求快照。
             void api.emit(BRIDGE_SNAPSHOT_REQUEST_EVENT, { origin } satisfies SnapshotRequest);
         }
-    });
+    }
 
     return () => {
         disposed = true;

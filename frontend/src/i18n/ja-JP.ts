@@ -693,7 +693,6 @@ export const jaJP = {
     fb_searching: "検索中...",
     fb_loading: "読み込み中...",
     fb_error: "ディレクトリの読み込みエラー",
-    fb_close: "閉じる",
 
     ctx_selected_n: "{n} 件選択中",
     ctx_delete_all: "すべて削除",

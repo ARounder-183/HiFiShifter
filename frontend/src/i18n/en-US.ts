@@ -824,7 +824,6 @@ export const enUS = {
     fb_searching: "Searching...",
     fb_loading: "Loading...",
     fb_error: "Error loading directory",
-    fb_close: "Close",
 
     ctx_selected_n: "{n} selected",
     ctx_delete_all: "Delete All",

@@ -666,7 +666,6 @@ export const zhCN = {
     fb_searching: "搜索中...",
     fb_loading: "加载中...",
     fb_error: "加载目录出错",
-    fb_close: "关闭",
 
     ctx_selected_n: "已选 {n} 个",
     ctx_delete_all: "删除所有",
