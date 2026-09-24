@@ -11,7 +11,10 @@
 
 import { getPanel, registerPanel } from "../../features/dock/panelRegistry";
 import { MAIN_FORM_PARAM_EDITOR, MAIN_FORM_TIMELINE } from "../../features/dock/dockSchema";
-import { NOTEBOOK_PANEL_MAX_WIDTH, NOTEBOOK_PANEL_MIN_WIDTH } from "../layout/notebook/notebookSettings";
+import {
+    NOTEBOOK_PANEL_MAX_WIDTH,
+    NOTEBOOK_PANEL_MIN_WIDTH,
+} from "../layout/notebook/notebookSettings";
 
 /** 面板 id 常量（同时是持久化 JSON 里的键，一旦发布不可更改）。 */
 export const PANEL_TIMELINE = MAIN_FORM_TIMELINE;

@@ -49,14 +49,12 @@ function getService(): TurndownService {
         replacement: (content, node, options) => {
             const parent = node.parentNode as HTMLElement | null;
             const isOrdered = parent?.nodeName === "OL";
-            const index = isOrdered && parent
-                ? Array.prototype.indexOf.call(parent.children, node) + 1
-                : null;
+            const index =
+                isOrdered && parent
+                    ? Array.prototype.indexOf.call(parent.children, node) + 1
+                    : null;
             const prefix = isOrdered ? `${index}. ` : `${options.bulletListMarker} `;
-            const text = content
-                .replace(/^\n+/, "")
-                .replace(/\n+$/, "\n")
-                .replace(/\n/gm, "\n  ");
+            const text = content.replace(/^\n+/, "").replace(/\n+$/, "\n").replace(/\n/gm, "\n  ");
             return prefix + text + (node.nextSibling && !/\n$/.test(text) ? "\n" : "");
         },
     });

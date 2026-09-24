@@ -117,6 +117,11 @@ export type ActionId =
     | "quickSearch.open" // 打开快速搜索弹窗
     | "quickSearch.navigate.up" // 快速搜索：向上切换候选项
     | "quickSearch.navigate.down" // 快速搜索：向下切换候选项
+    // 布局（停靠窗体系统）
+    | "layout.toggleFloat" // 浮动 / 停靠当前窗体
+    | "layout.focusNext" // 聚焦下一个窗体
+    | "layout.focusPrev" // 聚焦上一个窗体
+    | "layout.maximize" // 最大化 / 还原当前窗体
     | "quickSearch.preview" // 快速搜索：预览/试听
     | "quickSearch.confirm" // 快速搜索：确认放置
     | "quickSearch.close"; // 快速搜索：关闭弹窗
@@ -199,6 +204,7 @@ export interface ActionMeta {
         | "pianoRoll"
         | "paramEditor"
         | "quickSearch"
+        | "layout"
         | "modClip"
         | "modFade"
         | "modParam"

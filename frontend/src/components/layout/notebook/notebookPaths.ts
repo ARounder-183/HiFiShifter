@@ -45,9 +45,7 @@ function splitSegments(path: string): string[] {
 export function isAbsolutePath(path: string): boolean {
     const normalized = toPosix(path);
     return (
-        normalized.startsWith("/") ||
-        /^[A-Za-z]:\//.test(normalized) ||
-        normalized.startsWith("//")
+        normalized.startsWith("/") || /^[A-Za-z]:\//.test(normalized) || normalized.startsWith("//")
     );
 }
 

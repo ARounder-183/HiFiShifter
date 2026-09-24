@@ -144,11 +144,7 @@ export function replaceZone(node: DockNode, zoneId: string, next: DockNode): Doc
 }
 
 /** 替换一个标签组（用于原地改写标签集合，如整组搬家时补回全部标签）。 */
-export function replaceTabset(
-    node: DockNode,
-    tabsetId: string,
-    next: DockTabsetNode,
-): DockNode {
+export function replaceTabset(node: DockNode, tabsetId: string, next: DockTabsetNode): DockNode {
     return replaceZone(node, tabsetId, next);
 }
 
@@ -224,7 +220,8 @@ export function addFormToTabset(
         if (node.id !== tabsetId) return node;
         // 同一窗体重复插入只改顺序，不产生重复标签。
         const without = node.tabs.filter((id) => id !== formId);
-        const at = index === undefined ? without.length : Math.max(0, Math.min(index, without.length));
+        const at =
+            index === undefined ? without.length : Math.max(0, Math.min(index, without.length));
         const tabs = [...without.slice(0, at), formId, ...without.slice(at)];
         return { ...node, tabs, active: formId };
     }
@@ -425,7 +422,12 @@ export function setTabsetCollapsed(
 }
 
 /** 重命名标签组内某窗体的显示标题（标题存在 forms 上，这里只做顺序无关的占位）。 */
-export function moveTabWithin(tree: DockNode, tabsetId: string, formId: string, index: number): DockNode {
+export function moveTabWithin(
+    tree: DockNode,
+    tabsetId: string,
+    formId: string,
+    index: number,
+): DockNode {
     return addFormToTabset(tree, tabsetId, formId, index);
 }
 

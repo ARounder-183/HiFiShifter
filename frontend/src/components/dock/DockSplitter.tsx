@@ -61,8 +61,7 @@ export function DockSplitter({
             setDragging(true);
 
             const rect = parent.getBoundingClientRect();
-            const available =
-                (dir === "row" ? rect.width : rect.height) - DOCK_SPLITTER_PX;
+            const available = (dir === "row" ? rect.width : rect.height) - DOCK_SPLITTER_PX;
             const total = available;
 
             const apply = (clientX: number, clientY: number) => {

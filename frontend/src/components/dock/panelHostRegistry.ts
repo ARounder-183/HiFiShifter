@@ -103,10 +103,7 @@ const lastSize = new Map<string, { w: number; h: number }>();
  *
  * 传 `fallback` 是为了让"从未显示过"的窗体也有合理尺寸（取面板定义的默认值）。
  */
-export function parkPanelHost(
-    formId: string,
-    fallback: { w: number; h: number },
-): void {
+export function parkPanelHost(formId: string, fallback: { w: number; h: number }): void {
     const host = hosts.get(formId);
     if (!host) return;
     const rect = host.getBoundingClientRect();

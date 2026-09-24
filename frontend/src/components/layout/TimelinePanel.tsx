@@ -34,6 +34,9 @@ import { Flex, Dialog, Button, Text } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppTheme } from "../../theme/AppThemeProvider";
 import { useAppSelector } from "../../app/hooks";
+import { DockGutter } from "../dock/DockGutter";
+import { DEFAULT_GUTTER_SIZES, GUTTER_LIMITS } from "../../features/dock/dockSchema";
+import { setGutterSize } from "../../features/dock/dockSlice";
 import { shallowEqual } from "react-redux";
 import { isModifierActive } from "../../features/keybindings/keybindingsSlice";
 import { resolveClipDragCopyMode } from "./timeline/hooks/clipDragCopyMode";
@@ -456,6 +459,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         midiDialogSource === "dragDrop" ? onImportTargetDragDropChange : onImportTargetMenuChange;
     const { t } = useI18n();
     const tAny = t as (key: string) => string;
+    // 轨道头宽度是**布局状态**的一部分（用户调过的尺寸必须随布局持久化），
+    // 取代了原先写死的 `w-64`。
+    const trackHeaderWidthPx = useAppSelector(
+        (state) => state.dock.layout.gutters.timelineTrackHeaderPx,
+    );
+    const trackHeaderRef = React.useRef<HTMLDivElement | null>(null);
     const ignoreGrouping = useAppSelector((state) => state.session.ignoreGrouping);
     const disabledGroupIds = useAppSelector((state) => state.session.disabledGroupIds);
     /**
@@ -5592,38 +5601,72 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     }
                 }}
             >
-                <TrackList
-                    t={t}
-                    tracks={s.tracks}
-                    trackMeters={s.trackMeters}
-                    selectedTrackId={s.selectedTrackId}
-                    rowHeight={rowHeight}
-                    setRowHeight={setRowHeight}
-                    verticalZoomKb={verticalZoomKb}
-                    paramFineAdjustKb={paramFineAdjustKb}
-                    trackVolumeUi={trackVolumeUi}
-                    listScrollRef={trackListScrollRef}
-                    onSelectTrack={handleSelectTrack}
-                    onRemoveTrack={handleRemoveTrack}
-                    onMoveTrack={handleMoveTrack}
-                    copyDragKb={copyDragKb}
-                    onDuplicateTrackTo={handleDuplicateTrackTo}
-                    onToggleMute={handleToggleTrackMute}
-                    onToggleSolo={handleToggleTrackSolo}
-                    onToggleCompose={handleToggleTrackCompose}
-                    onVolumeUiChange={handleTrackVolumeUiChange}
-                    onVolumeCommit={handleTrackVolumeCommit}
-                    onAddTrack={handleAddTrack}
-                    onTrackColorChange={handleTrackColorChange}
-                    onAlgoChange={handleTrackAlgoChange}
-                    onTrackNameChange={handleTrackNameChange}
-                    onDuplicateTrack={handleDuplicateTrack}
-                    onCreateTrackBelow={handleCreateTrackBelow}
-                    onScrollTopChange={handleTrackListScrollTopChange}
-                    headerHeight={timeRulerHeightPx(
-                        Boolean(s.tempoMap && s.tempoMap.points.length > 0 && s.tempoMapVisible),
-                    )}
-                    bottomGutterHeightPx={horizontalScrollbarGutterPx}
+                {/*
+                 * 轨道头宽度由布局状态驱动（`gutters.timelineTrackHeaderPx`），
+                 * 取代原先写死的 `w-64`。外层 div 持有宽度：拖动时只改它的
+                 * 内联样式，TrackList 自身填满即可，避免 memo 组件因宽度 prop
+                 * 变化而重渲染。
+                 */}
+                <div
+                    ref={trackHeaderRef}
+                    className="shrink-0 flex min-h-0"
+                    style={{ width: trackHeaderWidthPx }}
+                >
+                    <TrackList
+                        t={t}
+                        tracks={s.tracks}
+                        trackMeters={s.trackMeters}
+                        selectedTrackId={s.selectedTrackId}
+                        rowHeight={rowHeight}
+                        setRowHeight={setRowHeight}
+                        verticalZoomKb={verticalZoomKb}
+                        paramFineAdjustKb={paramFineAdjustKb}
+                        trackVolumeUi={trackVolumeUi}
+                        listScrollRef={trackListScrollRef}
+                        onSelectTrack={handleSelectTrack}
+                        onRemoveTrack={handleRemoveTrack}
+                        onMoveTrack={handleMoveTrack}
+                        copyDragKb={copyDragKb}
+                        onDuplicateTrackTo={handleDuplicateTrackTo}
+                        onToggleMute={handleToggleTrackMute}
+                        onToggleSolo={handleToggleTrackSolo}
+                        onToggleCompose={handleToggleTrackCompose}
+                        onVolumeUiChange={handleTrackVolumeUiChange}
+                        onVolumeCommit={handleTrackVolumeCommit}
+                        onAddTrack={handleAddTrack}
+                        onTrackColorChange={handleTrackColorChange}
+                        onAlgoChange={handleTrackAlgoChange}
+                        onTrackNameChange={handleTrackNameChange}
+                        onDuplicateTrack={handleDuplicateTrack}
+                        onCreateTrackBelow={handleCreateTrackBelow}
+                        onScrollTopChange={handleTrackListScrollTopChange}
+                        headerHeight={timeRulerHeightPx(
+                            Boolean(
+                                s.tempoMap && s.tempoMap.points.length > 0 && s.tempoMapVisible,
+                            ),
+                        )}
+                        bottomGutterHeightPx={horizontalScrollbarGutterPx}
+                    />
+                </div>
+                <DockGutter
+                    dir="col"
+                    value={trackHeaderWidthPx}
+                    min={GUTTER_LIMITS.timelineTrackHeaderPx.min}
+                    max={GUTTER_LIMITS.timelineTrackHeaderPx.max}
+                    label={t("aria_resize_track_header")}
+                    onLive={(px) => {
+                        const element = trackHeaderRef.current;
+                        if (element) element.style.width = `${px}px`;
+                    }}
+                    onCommit={(px) => dispatch(setGutterSize({ key: "timelineTrackHeaderPx", px }))}
+                    onReset={() =>
+                        dispatch(
+                            setGutterSize({
+                                key: "timelineTrackHeaderPx",
+                                px: DEFAULT_GUTTER_SIZES.timelineTrackHeaderPx,
+                            }),
+                        )
+                    }
                 />
 
                 {/* Timeline View (Right) */}

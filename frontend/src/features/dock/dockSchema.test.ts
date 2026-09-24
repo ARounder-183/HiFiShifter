@@ -94,7 +94,11 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
         assertEqual(shape(layout.tree), "([timeline]|[paramEditor])", "default split");
         assertEqual((layout.tree as DockSplitNode).dir, "col", "default is a vertical split");
         assertEqual((layout.tree as DockSplitNode).ratio, 0.6, "timeline keeps 60%");
-        assertEqual(Object.keys(layout.forms).sort(), ["paramEditor", "timeline"], "only main forms");
+        assertEqual(
+            Object.keys(layout.forms).sort(),
+            ["paramEditor", "timeline"],
+            "only main forms",
+        );
         assertEqual(layout.gutters.timelineTrackHeaderPx, 256, "track header default");
     }
 
@@ -197,10 +201,17 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
             schema: 1,
             tree: { t: "tabset", id: "z1", tabs: ["timeline"], active: "timeline" },
             forms: { timeline: { id: "timeline", panelId: "timeline" } },
-            gutters: { timelineTrackHeaderPx: 99999, pianoRollAxisPx: -5 },
+            gutters: { timelineTrackHeaderPx: 99999 },
         });
         assertEqual(layout.gutters.timelineTrackHeaderPx, 560, "gutter clamped high");
-        assertEqual(layout.gutters.pianoRollAxisPx, 40, "gutter clamped low");
+
+        const tooSmall = normalizeDockLayout({
+            schema: 1,
+            tree: { t: "tabset", id: "z1", tabs: ["timeline"], active: "timeline" },
+            forms: { timeline: { id: "timeline", panelId: "timeline" } },
+            gutters: { timelineTrackHeaderPx: -5 },
+        });
+        assertEqual(tooSmall.gutters.timelineTrackHeaderPx, 120, "gutter clamped low");
     }
 
     // ── 归一化：浮动几何清洗 + 与停靠互斥 ─────────────────────────
@@ -210,7 +221,11 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
             tree: { t: "tabset", id: "z1", tabs: ["timeline"], active: "timeline" },
             forms: {
                 timeline: { id: "timeline", panelId: "timeline" },
-                notebook: { id: "notebook", panelId: "notebook", float: { x: "bad", y: 5, w: 1, h: 1 } },
+                notebook: {
+                    id: "notebook",
+                    panelId: "notebook",
+                    float: { x: "bad", y: 5, w: 1, h: 1 },
+                },
             },
             order: ["timeline", "notebook"],
             floatOrder: ["notebook", "notebook"],
@@ -227,7 +242,11 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
             tree: { t: "tabset", id: "z1", tabs: ["notebook"], active: "notebook" },
             forms: {
                 timeline: { id: "timeline", panelId: "timeline" },
-                notebook: { id: "notebook", panelId: "notebook", float: { x: 10, y: 10, w: 300, h: 200 } },
+                notebook: {
+                    id: "notebook",
+                    panelId: "notebook",
+                    float: { x: 10, y: 10, w: 300, h: 200 },
+                },
             },
             order: ["timeline", "notebook"],
         });
@@ -278,7 +297,13 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
     {
         let layout = ensureRegisteredPanels(createDefaultDockLayout());
         layout = openPanelInLayout(layout, "undoHistory");
-        layout = { ...layout, forms: { ...layout.forms, undoHistory: { ...layout.forms.undoHistory, title: "我的历史" } } };
+        layout = {
+            ...layout,
+            forms: {
+                ...layout.forms,
+                undoHistory: { ...layout.forms.undoHistory, title: "我的历史" },
+            },
+        };
         layout = closeFormInLayout(layout, "undoHistory");
         assertEqual(isFormVisible(layout, "undoHistory"), false, "closed");
         assertEqual(findClosedFormForPanel(layout, "undoHistory"), "undoHistory", "record reused");
@@ -294,7 +319,11 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
         assertEqual(isFormVisible(layout, MAIN_FORM_PARAM_EDITOR), false, "param editor closed");
         assertEqual(shape(layout.tree), "[timeline]", "its group collapsed");
         const guarded = closeFormInLayout(layout, MAIN_FORM_TIMELINE);
-        assertEqual(isFormVisible(guarded, MAIN_FORM_TIMELINE), true, "last visible form is protected");
+        assertEqual(
+            isFormVisible(guarded, MAIN_FORM_TIMELINE),
+            true,
+            "last visible form is protected",
+        );
         assert(guarded === layout, "guard returns the same layout object");
     }
 
@@ -316,7 +345,11 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
     {
         const layout = ensureRegisteredPanels(createDefaultDockLayout());
         const tree = placeForm(layout, "undoHistory", { side: "center" });
-        assertEqual(findTabsetOfForm(tree, "timeline")?.tabs, ["timeline", "undoHistory"], "merged");
+        assertEqual(
+            findTabsetOfForm(tree, "timeline")?.tabs,
+            ["timeline", "undoHistory"],
+            "merged",
+        );
     }
 
     // ── placeForm：左侧拆分（无固定尺寸）────────────────────────

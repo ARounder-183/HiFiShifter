@@ -88,7 +88,11 @@ export async function insertImageFromBlob(
 
     insertImageNode(ctx.editor, src, originalName);
     ctx.onAssetsChanged?.();
-    return { ok: true, src, assetId: src.startsWith("hifi-asset://") ? prepared.assetId : undefined };
+    return {
+        ok: true,
+        src,
+        assetId: src.startsWith("hifi-asset://") ? prepared.assetId : undefined,
+    };
 }
 
 /** 插入磁盘上的图片文件（拖放得到的是路径）。 */
@@ -102,7 +106,10 @@ export async function insertImageFromPath(
             file.error === "notebook_file_too_large" ? "图片过大，已超过上限" : "读取图片失败",
             "error",
         );
-        return { ok: false, reason: file.error === "notebook_file_too_large" ? "too-large" : "unsupported" };
+        return {
+            ok: false,
+            reason: file.error === "notebook_file_too_large" ? "too-large" : "unsupported",
+        };
     }
     const blob = new Blob([toBlobPart(base64ToBlobPart(file.base64))], {
         type: file.mime ?? "image/png",
@@ -206,9 +213,5 @@ export function resetImageCaches(): void {
 
 /** 插入一个 3×3 表格（带表头行）。 */
 export function insertTable(editor: Editor): void {
-    editor
-        .chain()
-        .focus()
-        .insertTable({ rows: 3, cols: 3, withHeaderRow: true })
-        .run();
+    editor.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run();
 }

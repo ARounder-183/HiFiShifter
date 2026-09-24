@@ -44,7 +44,11 @@ import { NotebookFindBar } from "./NotebookFindBar";
 import { NotebookReadonlyPreview } from "./NotebookReadonlyPreview";
 import { NotebookStatusBar } from "./NotebookStatusBar";
 import { NotebookToolbar } from "./NotebookToolbar";
-import { handleNotebookPaste, installClipboardFlavorWriter, stageClipboardPayload } from "./notebookClipboard";
+import {
+    handleNotebookPaste,
+    installClipboardFlavorWriter,
+    stageClipboardPayload,
+} from "./notebookClipboard";
 import { clearImageCache } from "./notebookImageCache";
 import {
     insertImageFromBlob,
@@ -87,7 +91,10 @@ export function NotebookPanel() {
 
     const notify = useCallback((message: string) => {
         setNotice(message);
-        window.setTimeout(() => setNotice((current) => (current === message ? null : current)), 2600);
+        window.setTimeout(
+            () => setNotice((current) => (current === message ? null : current)),
+            2600,
+        );
     }, []);
 
     const refreshAssets = useCallback(async () => {
@@ -159,7 +166,15 @@ export function NotebookPanel() {
 
     const insertContext = useMemo<InsertContext | null>(
         () =>
-            editor ? { editor, settings, projectDir, notify, onAssetsChanged: () => void refreshAssets() } : null,
+            editor
+                ? {
+                      editor,
+                      settings,
+                      projectDir,
+                      notify,
+                      onAssetsChanged: () => void refreshAssets(),
+                  }
+                : null,
         [editor, notify, projectDir, refreshAssets, settings],
     );
 
@@ -479,7 +494,8 @@ export function NotebookPanel() {
 
     const usedAssetIds = useMemo(() => {
         const ids = new Set<string>();
-        for (const match of markdown.matchAll(/hifi-asset:\/\/([A-Za-z0-9_-]+)/g)) ids.add(match[1]);
+        for (const match of markdown.matchAll(/hifi-asset:\/\/([A-Za-z0-9_-]+)/g))
+            ids.add(match[1]);
         for (const match of markdown.matchAll(/^id:\s*([A-Za-z0-9_-]+)\s*$/gm)) ids.add(match[1]);
         return ids;
     }, [markdown]);
@@ -519,7 +535,9 @@ export function NotebookPanel() {
                 } as React.CSSProperties
             }
             onDragOver={(event) => {
-                if (Array.from(event.dataTransfer?.items ?? []).some((item) => item.kind === "file")) {
+                if (
+                    Array.from(event.dataTransfer?.items ?? []).some((item) => item.kind === "file")
+                ) {
                     event.preventDefault();
                     setDropActive(true);
                 }
@@ -575,7 +593,11 @@ export function NotebookPanel() {
             ) : null}
 
             {mode === "rich" && settings.showToolbar && editor ? (
-                <NotebookToolbar editor={editor} handlers={handlers} slashCommands={settings.slashCommands} />
+                <NotebookToolbar
+                    editor={editor}
+                    handlers={handlers}
+                    slashCommands={settings.slashCommands}
+                />
             ) : null}
 
             <div className="relative flex min-h-0 flex-1">
@@ -601,7 +623,10 @@ export function NotebookPanel() {
                 ) : null}
 
                 {mode !== "source" ? (
-                    <div ref={richScrollRef} className="min-w-0 flex-1 overflow-auto bg-qt-base px-3 py-3">
+                    <div
+                        ref={richScrollRef}
+                        className="min-w-0 flex-1 overflow-auto bg-qt-base px-3 py-3"
+                    >
                         {editor ? <EditorContent editor={editor} /> : null}
                     </div>
                 ) : null}
@@ -661,7 +686,15 @@ export function NotebookPanel() {
     );
 }
 
-function ModeButton({ active, label, onClick }: { active: boolean; label: string; onClick: () => void }) {
+function ModeButton({
+    active,
+    label,
+    onClick,
+}: {
+    active: boolean;
+    label: string;
+    onClick: () => void;
+}) {
     return (
         <button
             type="button"
@@ -677,7 +710,15 @@ function ModeButton({ active, label, onClick }: { active: boolean; label: string
     );
 }
 
-function HeaderButton({ label, title, onClick }: { label: string; title: string; onClick: () => void }) {
+function HeaderButton({
+    label,
+    title,
+    onClick,
+}: {
+    label: string;
+    title: string;
+    onClick: () => void;
+}) {
     return (
         <button
             type="button"

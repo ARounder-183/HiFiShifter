@@ -14,19 +14,16 @@
 
 import { useCallback, useRef, useState, useSyncExternalStore } from "react";
 
+import { store } from "../../app/store";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { EnterIcon } from "@radix-ui/react-icons";
 
 import { getDockDragState, subscribeDockDrag } from "../../features/dock/dockDragStore";
-import {
-    closeForm,
-    dockFormTo,
-    raiseFloat,
-    setFloatGeometry,
-} from "../../features/dock/dockSlice";
+import { closeForm, dockFormTo, raiseFloat, setFloatGeometry } from "../../features/dock/dockSlice";
 import { findMainTabset } from "../../features/dock/dockSchema";
+import { maximizeActive } from "../../features/dock/dockApi";
 import { getPanel } from "../../features/dock/panelRegistry";
-import type { DockForm, DockLayout, DockRect } from "../../features/dock/dockTypes";
+import type { DockForm, DockRect } from "../../features/dock/dockTypes";
 import { useI18n } from "../../i18n/I18nProvider";
 import { beginFloatDrag } from "./dockDragController";
 import { useDockSlot } from "./useDockSlot";
@@ -42,7 +39,6 @@ export function DockFloatingLayer() {
                 <DockFloatWindow
                     key={formId}
                     form={layout.forms[formId]}
-                    layout={layout}
                     zIndex={100 + index}
                     active={layout.floatOrder.at(-1) === formId}
                 />
@@ -53,12 +49,10 @@ export function DockFloatingLayer() {
 
 function DockFloatWindow({
     form,
-    layout,
     zIndex,
     active,
 }: {
     form: DockForm;
-    layout: DockLayout;
     zIndex: number;
     active: boolean;
 }) {
@@ -69,9 +63,6 @@ function DockFloatWindow({
     const geometry = form.float;
     const [dragging, setDragging] = useState(false);
     const elementRef = useRef<HTMLDivElement | null>(null);
-    // 供"重新停靠"按钮读取当前树（避免把整棵树塞进 useCallback 依赖）。
-    const layoutRef = useRef(layout);
-    layoutRef.current = layout;
 
     // 拖拽中跟随实时几何，松手才落库（与分隔条同一策略）。
     const drag = useSyncExternalStore(subscribeDockDrag, getDockDragState, getDockDragState);
@@ -79,6 +70,7 @@ function DockFloatWindow({
 
     const definition = getPanel(form.panelId);
     const title = form.title ?? (definition ? tAny(definition.titleKey) : form.panelId);
+    const doubleClickAction = useAppSelector((s) => s.dock.settings.doubleClickHeaderAction);
 
     const onTitlePointerDown = useCallback(
         (event: React.PointerEvent<HTMLDivElement>) => {
@@ -181,6 +173,21 @@ function DockFloatWindow({
                 className="hs-dock-float-title"
                 onPointerDown={onTitlePointerDown}
                 onDoubleClick={() => {
+                    if (doubleClickAction === "none") return;
+                    if (doubleClickAction === "maximize") {
+                        dispatch(raiseFloat(form.id));
+                        maximizeActive(dispatch);
+                        return;
+                    }
+                    if (doubleClickAction === "collapse") {
+                        dispatch(
+                            setFloatGeometry({
+                                formId: form.id,
+                                geometry: { minimized: !minimized },
+                            }),
+                        );
+                        return;
+                    }
                     if (maximized) {
                         dispatch(
                             setFloatGeometry({
@@ -194,7 +201,12 @@ function DockFloatWindow({
                                 formId: form.id,
                                 geometry: {
                                     maximized: true,
-                                    restore: { x: geometry.x, y: geometry.y, w: geometry.w, h: geometry.h },
+                                    restore: {
+                                        x: geometry.x,
+                                        y: geometry.y,
+                                        w: geometry.w,
+                                        h: geometry.h,
+                                    },
                                 },
                             }),
                         );
@@ -209,7 +221,14 @@ function DockFloatWindow({
                     className="hs-dock-tabbar-action"
                     title={tAny(minimized ? "dock_expand" : "dock_collapse")}
                     aria-label={tAny(minimized ? "dock_expand" : "dock_collapse")}
-                    onClick={() => dispatch(setFloatGeometry({ formId: form.id, geometry: { minimized: !minimized } }))}
+                    onClick={() =>
+                        dispatch(
+                            setFloatGeometry({
+                                formId: form.id,
+                                geometry: { minimized: !minimized },
+                            }),
+                        )
+                    }
                 >
                     {minimized ? "\u25B2" : "\u25BC"}
                 </button>
@@ -219,10 +238,15 @@ function DockFloatWindow({
                     title={tAny("dock_redock")}
                     aria-label={tAny("dock_redock")}
                     onClick={() => {
-                        const main = findMainTabset(layoutRef.current);
+                        // 现读 store 而不是把树存进 ref：渲染期写 ref 违反
+                        // React Compiler 的引用规则，而 store 随时可读。
+                        const main = findMainTabset(store.getState().dock.layout);
                         if (!main) return;
                         dispatch(
-                            dockFormTo({ formId: form.id, target: { kind: "tab", tabsetId: main.id } }),
+                            dockFormTo({
+                                formId: form.id,
+                                target: { kind: "tab", tabsetId: main.id },
+                            }),
                         );
                     }}
                 >

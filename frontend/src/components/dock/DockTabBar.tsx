@@ -8,7 +8,7 @@
  * 3. 右键标签 → 菜单（重命名 / 浮动 / 停靠 / 关闭）。
  */
 
-import { useCallback, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
 import {
     ChevronDownIcon,
     ChevronUpIcon,
@@ -30,6 +30,7 @@ import {
     setActiveTabOf,
     toggleTabsetCollapsed,
 } from "../../features/dock/dockSlice";
+import { maximizeActive } from "../../features/dock/dockApi";
 import { getPanel } from "../../features/dock/panelRegistry";
 import type { DockTabsetNode } from "../../features/dock/dockTypes";
 import { useI18n } from "../../i18n/I18nProvider";
@@ -51,14 +52,39 @@ export function DockTabBar({ node, onToggleFloat, compact }: DockTabBarProps) {
     const dispatch = useAppDispatch();
     const { t } = useI18n();
     const tAny = t as (key: string) => string;
-    const barRef = useRef<HTMLDivElement | null>(null);
+    // 元素用 state 持有而不是 ref：插入下标要在**渲染期**按标签矩形推算，
+    // 而渲染期读 ref 违反 React Compiler 的引用规则。回调 ref 只在挂载/卸载
+    // 时触发，不会带来额外渲染。
+    const [barElement, setBarElement] = useState<HTMLDivElement | null>(null);
     const [menu, setMenu] = useState<{ formId: string; x: number; y: number } | null>(null);
     const showIcons = useAppSelector((s) => s.dock.settings.tabIcons);
+    const doubleClickAction = useAppSelector((s) => s.dock.settings.doubleClickHeaderAction);
     const forms = useAppSelector((s) => s.dock.layout.forms);
 
     // 拖拽中高亮"会插到哪个标签旁边"。只有本组自己在拖时才需要。
     const drag = useSyncExternalStore(subscribeDockDrag, getDockDragState, getDockDragState);
-    const dragIndex = useMemo(() => resolveInsertIndex(drag, node, barRef.current), [drag, node]);
+    const dragIndex = useMemo(
+        () => resolveInsertIndex(drag, node, barElement),
+        [drag, node, barElement],
+    );
+
+    /** 双击标签的行为由设置决定（默认浮动/停靠切换）。 */
+    const onTabDoubleClick = useCallback(
+        (formId: string) => {
+            if (doubleClickAction === "none") return;
+            if (doubleClickAction === "toggleFloat") {
+                onToggleFloat(formId);
+                return;
+            }
+            if (doubleClickAction === "maximize") {
+                dispatch(focusForm(formId));
+                maximizeActive(dispatch);
+                return;
+            }
+            dispatch(toggleTabsetCollapsed({ tabsetId: node.id }));
+        },
+        [dispatch, doubleClickAction, node.id, onToggleFloat],
+    );
 
     const onTabPointerDown = useCallback(
         (event: React.PointerEvent<HTMLDivElement>, formId: string) => {
@@ -72,17 +98,17 @@ export function DockTabBar({ node, onToggleFloat, compact }: DockTabBarProps) {
                 panelId: panelId ?? formId,
                 tabsetId: node.id,
                 tabCount: node.tabs.length,
-                tabBarElement: barRef.current,
+                tabBarElement: barElement,
             });
         },
-        [dispatch, forms, node.id, node.tabs.length],
+        [barElement, dispatch, forms, node.id, node.tabs.length],
     );
 
     return (
         <>
             {!compact ? (
                 <div
-                    ref={barRef}
+                    ref={setBarElement}
                     className="hs-dock-tabbar"
                     data-dock-tabbar={node.id}
                     data-collapsed={node.collapsed ? "true" : "false"}
@@ -91,7 +117,8 @@ export function DockTabBar({ node, onToggleFloat, compact }: DockTabBarProps) {
                     {node.tabs.map((formId, index) => {
                         const form = forms[formId];
                         const definition = form ? getPanel(form.panelId) : undefined;
-                        const title = form?.title ?? (definition ? tAny(definition.titleKey) : formId);
+                        const title =
+                            form?.title ?? (definition ? tAny(definition.titleKey) : formId);
                         const Icon = definition?.icon;
                         const active = node.active === formId;
                         return (
@@ -101,12 +128,17 @@ export function DockTabBar({ node, onToggleFloat, compact }: DockTabBarProps) {
                                 data-dock-tab={formId}
                                 data-active={active ? "true" : "false"}
                                 data-dock-target={dragIndex === index ? "true" : "false"}
-                                data-dragging={drag?.started && drag.formId === formId ? "true" : "false"}
+                                data-dragging={
+                                    drag?.started && drag.formId === formId ? "true" : "false"
+                                }
                                 role="tab"
                                 aria-selected={active}
                                 title={title}
                                 onPointerDown={(event) => onTabPointerDown(event, formId)}
-                                onClick={() => dispatch(setActiveTabOf({ tabsetId: node.id, formId }))}
+                                onClick={() =>
+                                    dispatch(setActiveTabOf({ tabsetId: node.id, formId }))
+                                }
+                                onDoubleClick={() => onTabDoubleClick(formId)}
                                 onContextMenu={(event) => {
                                     event.preventDefault();
                                     setMenu({ formId, x: event.clientX, y: event.clientY });
@@ -159,7 +191,7 @@ export function DockTabBar({ node, onToggleFloat, compact }: DockTabBarProps) {
                 // 【为什么不能什么都不渲染】面板需要一个可拖拽的着力点，否则
                 // 用户再也没法把它拖出去、或与别的面板合并。
                 <div
-                    ref={barRef}
+                    ref={setBarElement}
                     className="hs-dock-grip"
                     data-dock-tabbar={node.id}
                     data-dock-tab={node.active}

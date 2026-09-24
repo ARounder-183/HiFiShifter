@@ -22,7 +22,11 @@ import { webApi } from "../../../services/webviewApi";
 import { contentHash } from "./notebookImagePipeline";
 import { markdownStorage } from "./markdownCodec";
 import { htmlToMarkdown } from "./htmlToMarkdown";
-import { insertImageFromBlob, insertImageFromClipboardBitmap, type InsertContext } from "./notebookInsert";
+import {
+    insertImageFromBlob,
+    insertImageFromClipboardBitmap,
+    type InsertContext,
+} from "./notebookInsert";
 import {
     HIFI_CLIP_FENCE_LANG,
     defaultClipTitle,
@@ -244,7 +248,10 @@ export function escapeMarkdownText(text: string): string {
 
 // ─── 暂存块 ⇄ 系统剪贴板 ──────────────────────────────────────────────────────
 
-function kindFromSummary(summary: ClipboardPayloadSummary | undefined, fallback: string): HifiClipKind {
+function kindFromSummary(
+    summary: ClipboardPayloadSummary | undefined,
+    fallback: string,
+): HifiClipKind {
     const raw = summary?.clipKind ?? fallback;
     if (raw === "clips" || raw === "tracks" || raw === "project" || raw === "param") return raw;
     return "clips";
@@ -335,7 +342,10 @@ export async function restoreClipPayload(assetId: string): Promise<RestoreResult
     if (!asset.ok || !asset.base64) {
         return { ok: false, error: asset.error ?? "notebook_asset_not_found" };
     }
-    const written = await notebookApi.writeClipboardPayload(asset.base64, "HiFiShifter data restored.");
+    const written = await notebookApi.writeClipboardPayload(
+        asset.base64,
+        "HiFiShifter data restored.",
+    );
     if (!written.ok) return { ok: false, error: written.error };
     // 通知参数编辑器丢弃内部的参数线剪贴板缓存（槽位内容已变）。
     window.dispatchEvent(new CustomEvent("hifi:clipboardReplaced"));

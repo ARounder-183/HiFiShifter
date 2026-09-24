@@ -110,7 +110,9 @@ export function NotebookFindBar({
                 }}
             />
             <span className="hs-notebook-findbar-count">
-                {matches.length === 0 ? t("notebook_find_no_match") : `${cursor + 1}/${matches.length}`}
+                {matches.length === 0
+                    ? t("notebook_find_no_match")
+                    : `${cursor + 1}/${matches.length}`}
             </span>
             <button
                 type="button"
@@ -128,7 +130,12 @@ export function NotebookFindBar({
             >
                 ▼
             </button>
-            <button type="button" className="hs-notebook-toolbar-btn" title={t("close")} onClick={onClose}>
+            <button
+                type="button"
+                className="hs-notebook-toolbar-btn"
+                title={t("close")}
+                onClick={onClose}
+            >
                 ✕
             </button>
         </div>

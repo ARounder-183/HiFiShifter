@@ -137,7 +137,12 @@ export function NotebookToolbar({ editor, handlers, slashCommands }: NotebookToo
                             editor.chain().focus().extendMarkRange("link").unsetLink().run();
                             return;
                         }
-                        editor.chain().focus().extendMarkRange("link").setLink({ href: href.trim() }).run();
+                        editor
+                            .chain()
+                            .focus()
+                            .extendMarkRange("link")
+                            .setLink({ href: href.trim() })
+                            .run();
                     }}
                 />
                 <ToolbarButton
@@ -145,7 +150,11 @@ export function NotebookToolbar({ editor, handlers, slashCommands }: NotebookToo
                     title={t("notebook_toolbar_image")}
                     onClick={handlers.insertImage}
                 />
-                <ToolbarButton label="▦" title={t("notebook_toolbar_table")} onClick={() => insertTable(editor)} />
+                <ToolbarButton
+                    label="▦"
+                    title={t("notebook_toolbar_table")}
+                    onClick={() => insertTable(editor)}
+                />
                 <ToolbarButton
                     label="―"
                     title={t("notebook_toolbar_rule")}
@@ -156,10 +165,26 @@ export function NotebookToolbar({ editor, handlers, slashCommands }: NotebookToo
             <ToolbarSeparator />
 
             <div className="hs-notebook-toolbar-group">
-                <ToolbarButton label="⏱" title={t("notebook_toolbar_timecode")} onClick={handlers.insertTimecode} />
-                <ToolbarButton label="✂" title={t("notebook_toolbar_clip_ref")} onClick={handlers.insertClipReference} />
-                <ToolbarButton label="📋" title={t("notebook_toolbar_stage_clipboard")} onClick={handlers.stageClipboard} />
-                <ToolbarButton label="ℹ" title={t("notebook_toolbar_project_info")} onClick={handlers.insertProjectInfo} />
+                <ToolbarButton
+                    label="⏱"
+                    title={t("notebook_toolbar_timecode")}
+                    onClick={handlers.insertTimecode}
+                />
+                <ToolbarButton
+                    label="✂"
+                    title={t("notebook_toolbar_clip_ref")}
+                    onClick={handlers.insertClipReference}
+                />
+                <ToolbarButton
+                    label="📋"
+                    title={t("notebook_toolbar_stage_clipboard")}
+                    onClick={handlers.stageClipboard}
+                />
+                <ToolbarButton
+                    label="ℹ"
+                    title={t("notebook_toolbar_project_info")}
+                    onClick={handlers.insertProjectInfo}
+                />
             </div>
 
             {slash.menu ? (
@@ -169,11 +194,7 @@ export function NotebookToolbar({ editor, handlers, slashCommands }: NotebookToo
                     onPointerDown={(event) => event.preventDefault()}
                 >
                     {slash.items.map((item) => (
-                        <button
-                            key={item.key}
-                            type="button"
-                            onClick={() => slash.run(item.key)}
-                        >
+                        <button key={item.key} type="button" onClick={() => slash.run(item.key)}>
                             <span className="hs-notebook-slash-label">{item.label}</span>
                             <span className="hs-notebook-slash-hint">{item.hint}</span>
                         </button>

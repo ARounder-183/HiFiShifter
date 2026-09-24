@@ -169,4 +169,3 @@ const selectHistoryPanelState = (state: RootState) => ({
     /** 全局默认：新工程是否默认保存 UNDO 数据。 */
     saveUndoHistoryByDefault: state.session.saveUndoHistoryByDefault,
 });
-

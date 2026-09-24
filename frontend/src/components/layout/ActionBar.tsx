@@ -228,8 +228,7 @@ export function ActionBar() {
     useEffect(() => {
         const open = () => openHistoryPanel();
         window.addEventListener("hifi:open-undo-history", open as EventListener);
-        return () =>
-            window.removeEventListener("hifi:open-undo-history", open as EventListener);
+        return () => window.removeEventListener("hifi:open-undo-history", open as EventListener);
     }, [openHistoryPanel]);
     // 按钮 tooltip 里的快捷键提示（跟随用户在快捷键设置中的自定义绑定）。
     const undoShortcutKb = useAppSelector((state: RootState) =>

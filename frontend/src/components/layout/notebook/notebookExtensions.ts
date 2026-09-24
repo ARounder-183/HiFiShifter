@@ -90,11 +90,7 @@ function renderCell(cell: PmNode): string {
     cell.forEach((block) => {
         blocks.push(renderInlineContent(block));
     });
-    return blocks
-        .join("<br>")
-        .replace(/\|/g, "\\|")
-        .replace(/\r?\n/g, " ")
-        .trim();
+    return blocks.join("<br>").replace(/\|/g, "\\|").replace(/\r?\n/g, " ").trim();
 }
 
 /** 渲染一个块级节点的行内内容（文本 + 已知标记 + 图片 + 硬换行）。 */
@@ -124,7 +120,10 @@ function renderInlineNode(node: PmNode): string {
     return nested;
 }
 
-function applyMarks(text: string, marks: Array<{ type: { name: string }; attrs: Record<string, unknown> }>): string {
+function applyMarks(
+    text: string,
+    marks: Array<{ type: { name: string }; attrs: Record<string, unknown> }>,
+): string {
     let out = text;
     // 顺序固定：链接在最外层（`[**x**](url)`），与常见 Markdown 习惯一致。
     for (const mark of marks) {

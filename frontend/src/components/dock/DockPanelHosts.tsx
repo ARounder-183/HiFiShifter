@@ -12,7 +12,7 @@
 
 import { Component, type ComponentType, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useSyncExternalStore } from "react";
 
 import { getPanelRenderer } from "../../features/dock/panelRenderer";
 import { acquirePanelHost, releasePanelHost } from "./panelHostRegistry";
@@ -117,12 +117,10 @@ export function DockPanelHosts({ forms }: { forms: DockForm[] }) {
     // 注册表或宿主集合变化（热更新重放注册、新窗体加入）时重渲染。
     useSyncExternalStore(subscribePanels, getPanelRegistryVersion, getPanelRegistryVersion);
 
-    const mountedRef = useRef<Map<string, DockForm>>(new Map());
-    for (const form of forms) {
-        if (getPanel(form.panelId)) mountedRef.current.set(form.id, form);
-    }
+    // "曾经可见"的累积由 `dockSlice.mountedFormIds` 维护（见那里的注释），
+    // 这一层只负责把集合里的窗体渲染出来。
+    const mounted = forms.filter((form) => getPanel(form.panelId) !== undefined);
 
-    const mounted = [...mountedRef.current.values()];
     return (
         <>
             {mounted.map((form) => (

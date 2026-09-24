@@ -319,7 +319,10 @@ export function NotebookSettingsDialog({
                             label={tAny("notebook_setting_image_max_dim")}
                             value={String(settings.imageMaxDimensionPx)}
                             options={[
-                                { value: "0", label: tAny("notebook_setting_image_max_dim_original") },
+                                {
+                                    value: "0",
+                                    label: tAny("notebook_setting_image_max_dim_original"),
+                                },
                                 { value: "1280", label: "1280" },
                                 { value: "2048", label: "2048" },
                                 { value: "2560", label: "2560" },
@@ -331,7 +334,10 @@ export function NotebookSettingsDialog({
                             label={tAny("notebook_setting_image_format")}
                             value={settings.imageFormat}
                             options={[
-                                { value: "auto", label: tAny("notebook_setting_image_format_auto") },
+                                {
+                                    value: "auto",
+                                    label: tAny("notebook_setting_image_format_auto"),
+                                },
                                 { value: "webp", label: "WebP" },
                                 { value: "jpeg", label: "JPEG" },
                                 { value: "png", label: "PNG" },
@@ -375,7 +381,10 @@ export function NotebookSettingsDialog({
                             label={tAny("notebook_setting_copy_format")}
                             value={settings.copyFormat}
                             options={[
-                                { value: "markdown+html", label: tAny("notebook_setting_copy_format_both") },
+                                {
+                                    value: "markdown+html",
+                                    label: tAny("notebook_setting_copy_format_both"),
+                                },
                                 { value: "markdown", label: "Markdown" },
                                 { value: "html", label: "HTML" },
                                 { value: "text", label: tAny("notebook_setting_paste_text") },
@@ -386,7 +395,10 @@ export function NotebookSettingsDialog({
                             label={tAny("notebook_setting_copy_plain")}
                             value={settings.copyPlainTextAs}
                             options={[
-                                { value: "markdown", label: tAny("notebook_setting_copy_plain_markdown") },
+                                {
+                                    value: "markdown",
+                                    label: tAny("notebook_setting_copy_plain_markdown"),
+                                },
                                 { value: "text", label: tAny("notebook_setting_paste_text") },
                             ]}
                             onChange={(value) => onChange({ copyPlainTextAs: value })}
@@ -398,8 +410,14 @@ export function NotebookSettingsDialog({
                             label={tAny("notebook_setting_clip_insert_mode")}
                             value={settings.clipInsertMode}
                             options={[
-                                { value: "selected", label: tAny("notebook_setting_clip_insert_selected") },
-                                { value: "newTracks", label: tAny("notebook_setting_clip_insert_new_tracks") },
+                                {
+                                    value: "selected",
+                                    label: tAny("notebook_setting_clip_insert_selected"),
+                                },
+                                {
+                                    value: "newTracks",
+                                    label: tAny("notebook_setting_clip_insert_new_tracks"),
+                                },
                             ]}
                             onChange={(value) => onChange({ clipInsertMode: value })}
                         />
@@ -525,7 +543,9 @@ function SelectRow({
  * 的形态一致（一个代码块），外部打开时不会是一团乱码。
  */
 function buildExportHtml(markdown: string, title: string, editorHtml: string | null): string {
-    const body = editorHtml ? transformClipBlocks(editorHtml) : `<pre>${escapeHtml(markdown)}</pre>`;
+    const body = editorHtml
+        ? transformClipBlocks(editorHtml)
+        : `<pre>${escapeHtml(markdown)}</pre>`;
     return [
         "<!doctype html>",
         '<html><head><meta charset="utf-8">',
@@ -562,8 +582,5 @@ function decodeEntities(text: string): string {
 }
 
 function escapeHtml(text: string): string {
-    return text
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;");
+    return text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }

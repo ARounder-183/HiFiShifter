@@ -31,7 +31,13 @@
 
 import { notebookApi } from "../../../services/api/notebook";
 import { assetIdFromSrc, isAssetRef } from "./assetRef";
-import { baseName, decodePathFromMarkdown, dirName, isAbsolutePath, resolvePath } from "./notebookPaths";
+import {
+    baseName,
+    decodePathFromMarkdown,
+    dirName,
+    isAbsolutePath,
+    resolvePath,
+} from "./notebookPaths";
 import { base64ToBytes, toBlobPart } from "./notebookImagePipeline";
 
 export interface ResolvedImage {
@@ -231,7 +237,9 @@ export function resolveImage(src: string, options: ResolveImageOptions): Promise
 /** 图片建议的文件名（"另存为"的默认值）。 */
 export function suggestImageFileName(src: string, meta?: unknown): string {
     const fromMeta =
-        meta && typeof meta === "object" && typeof (meta as { originalName?: unknown }).originalName === "string"
+        meta &&
+        typeof meta === "object" &&
+        typeof (meta as { originalName?: unknown }).originalName === "string"
             ? (meta as { originalName: string }).originalName
             : null;
     if (fromMeta) return fromMeta;

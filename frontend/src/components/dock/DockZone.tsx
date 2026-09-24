@@ -26,7 +26,7 @@ export function DockZone({ node }: DockZoneProps) {
     const showTabBarWhenSingle = useAppSelector((s) => s.dock.settings.showTabBarWhenSingle);
 
     const activeFormId =
-        node.active && node.tabs.includes(node.active) ? node.active : node.tabs[0] ?? null;
+        node.active && node.tabs.includes(node.active) ? node.active : (node.tabs[0] ?? null);
     const slotRef = useDockSlot(activeFormId);
 
     const onToggleFloat = (formId: string) => {

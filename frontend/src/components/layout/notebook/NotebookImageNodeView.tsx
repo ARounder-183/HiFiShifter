@@ -35,11 +35,13 @@ export function NotebookImageNodeView(props: NodeViewProps) {
      * 解析结果按 src 打标签：src 变化时**派生**出"加载中"，而不是在 effect
      * 体里同步 setState（那会触发级联渲染）。
      */
-    const [resolved, setResolved] = useState<{ src: string; url: string | null; missing: boolean }>({
-        src: "",
-        url: null,
-        missing: false,
-    });
+    const [resolved, setResolved] = useState<{ src: string; url: string | null; missing: boolean }>(
+        {
+            src: "",
+            url: null,
+            missing: false,
+        },
+    );
     const current = resolved.src === src ? resolved : { src, url: null, missing: false };
     const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
     const [editingAlt, setEditingAlt] = useState(false);
@@ -199,7 +201,9 @@ export function NotebookImageNodeView(props: NodeViewProps) {
             ) : (
                 <div className="hs-notebook-image-missing" title={src}>
                     <span className="hs-notebook-image-missing-title">
-                        {current.missing ? t("notebook_image_missing") : t("notebook_image_loading")}
+                        {current.missing
+                            ? t("notebook_image_missing")
+                            : t("notebook_image_loading")}
                     </span>
                     <span className="hs-notebook-image-missing-src">{src}</span>
                     {current.missing ? (
@@ -252,7 +256,12 @@ export function NotebookImageNodeView(props: NodeViewProps) {
             ) : null}
 
             {menu ? (
-                <NotebookContextMenu x={menu.x} y={menu.y} items={menuItems} onClose={() => setMenu(null)} />
+                <NotebookContextMenu
+                    x={menu.x}
+                    y={menu.y}
+                    items={menuItems}
+                    onClose={() => setMenu(null)}
+                />
             ) : null}
         </NodeViewWrapper>
     );
@@ -294,4 +303,3 @@ async function transcodeToPng(blob: Blob): Promise<Blob | null> {
         return null;
     }
 }
-

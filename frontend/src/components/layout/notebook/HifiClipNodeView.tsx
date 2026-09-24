@@ -287,7 +287,9 @@ export function HifiClipNodeView(props: NodeViewProps) {
                 <button
                     type="button"
                     disabled={missing || busy}
-                    onClick={() => void run(() => restoreClipPayload(attrs.id), t("notebook_clip_restored"))}
+                    onClick={() =>
+                        void run(() => restoreClipPayload(attrs.id), t("notebook_clip_restored"))
+                    }
                 >
                     {t("notebook_clip_restore")}
                 </button>
@@ -308,7 +310,12 @@ export function HifiClipNodeView(props: NodeViewProps) {
             </div>
 
             {menu ? (
-                <NotebookContextMenu x={menu.x} y={menu.y} items={menuItems} onClose={() => setMenu(null)} />
+                <NotebookContextMenu
+                    x={menu.x}
+                    y={menu.y}
+                    items={menuItems}
+                    onClose={() => setMenu(null)}
+                />
             ) : null}
         </NodeViewWrapper>
     );
@@ -420,4 +427,3 @@ function ClipSchematic({ rows, durationSec }: { rows: ClipPreviewRow[]; duration
         </svg>
     );
 }
-

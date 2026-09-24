@@ -77,7 +77,11 @@ export function NotebookContextMenu({ x, y, items, onClose }: NotebookContextMen
                     ].join(" ")}
                     style={
                         item.separatorBefore
-                            ? { borderTop: "1px solid var(--qt-border)", marginTop: 4, paddingTop: 6 }
+                            ? {
+                                  borderTop: "1px solid var(--qt-border)",
+                                  marginTop: 4,
+                                  paddingTop: 6,
+                              }
                             : undefined
                     }
                     onClick={() => {

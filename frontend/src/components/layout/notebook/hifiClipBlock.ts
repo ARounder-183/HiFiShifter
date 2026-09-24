@@ -73,9 +73,10 @@ export function parseHifiClipFenceBody(body: string): HifiClipBlockAttrs | null 
         ? (rawKind as HifiClipKind)
         : "clips";
 
-    const encoding = fields.get("encoding")?.toLowerCase() === "param" || kind === "param"
-        ? "param"
-        : "fragment";
+    const encoding =
+        fields.get("encoding")?.toLowerCase() === "param" || kind === "param"
+            ? "param"
+            : "fragment";
 
     return {
         id,

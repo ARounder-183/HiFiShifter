@@ -13,7 +13,7 @@ import { useEffect } from "react";
 
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { isFormVisible } from "../../features/dock/dockTree";
-import { syncRegisteredPanels } from "../../features/dock/dockSlice";
+import { markFormsMounted, syncRegisteredPanels } from "../../features/dock/dockSlice";
 import { DockDropOverlay } from "./DockDropOverlay";
 import { DockFloatingLayer } from "./DockFloatingLayer";
 import { DockNodeView } from "./DockNodeView";
@@ -23,6 +23,7 @@ import "./dock.css";
 export function DockRoot() {
     const dispatch = useAppDispatch();
     const layout = useAppSelector((s) => s.dock.layout);
+    const mountedFormIds = useAppSelector((s) => s.dock.mountedFormIds);
 
     // 内置面板在 App 模块加载期注册，早于首次渲染；但注册表也可能在运行期
     // 变化（热更新重放注册、将来插件加载）。这里同步一次，把新注册的面板
@@ -31,17 +32,23 @@ export function DockRoot() {
         dispatch(syncRegisteredPanels());
     }, [dispatch]);
 
-    // 只把"当前可见"的窗体交给宿主层；它会记住曾经可见过的，因此关闭再打开
-    // 是零成本、状态全在。从未打开过的面板不挂载 —— 否则启动就要为记事本
-    // 构建富文本编辑器、为未打开的面板创建 WebGL 上下文。
-    const visibleForms = layout.order
-        .filter((formId) => isFormVisible(layout, formId))
+    // 可见窗体（每次布局变化重算）→ 登记为"需要挂载"。宿主层只挂载这个并集，
+    // 因此关闭再打开是零成本、状态全在；从未打开过的面板不挂载，避免启动时
+    // 为记事本构建富文本编辑器、为未打开的面板创建 WebGL 上下文。
+    const visibleIds = layout.order.filter((formId) => isFormVisible(layout, formId));
+    const visibleKey = visibleIds.join("|");
+
+    useEffect(() => {
+        dispatch(markFormsMounted(visibleKey ? visibleKey.split("|") : []));
+    }, [dispatch, visibleKey]);
+
+    const mountedForms = mountedFormIds
         .map((formId) => layout.forms[formId])
         .filter((form): form is NonNullable<typeof form> => Boolean(form));
 
     return (
         <>
-            <DockPanelHosts forms={visibleForms} />
+            <DockPanelHosts forms={mountedForms} />
             <div className="hs-dock-root" data-dock-root="1">
                 <DockNodeView node={layout.tree} />
             </div>

@@ -76,7 +76,11 @@ export function useNotebookSlashMenu(
             { key: "timecode", label: t("notebook_toolbar_timecode"), hint: "hifi://" },
             { key: "clipRef", label: t("notebook_toolbar_clip_ref"), hint: "hifi://" },
             { key: "projectInfo", label: t("notebook_toolbar_project_info"), hint: "" },
-            { key: "stageClipboard", label: t("notebook_toolbar_stage_clipboard"), hint: "hifi-clip" },
+            {
+                key: "stageClipboard",
+                label: t("notebook_toolbar_stage_clipboard"),
+                hint: "hifi-clip",
+            },
         ],
         [t],
     );
@@ -201,5 +205,7 @@ export function useNotebookSlashMenu(
 function matchesQuery(item: SlashMenuItem, query: string): boolean {
     const label = item.label.toLowerCase();
     const hint = item.hint.toLowerCase();
-    return label.includes(query) || hint.includes(query) || item.key.toLowerCase().startsWith(query);
+    return (
+        label.includes(query) || hint.includes(query) || item.key.toLowerCase().startsWith(query)
+    );
 }

@@ -58,6 +58,18 @@ export interface DockState {
     /** 是否已从后端读过设置（避免用默认值覆盖磁盘上的布局）。 */
     hydrated: boolean;
     /**
+     * 曾经可见过的窗体 id（单调增长）。
+     *
+     * 停靠宿主层据此决定"哪些面板需要挂载"：挂载过就永不卸载，因此关闭再打开
+     * 是零成本的、状态全在；而**从未打开过**的面板不挂载，避免启动时为一个没
+     * 打开的窗口构建富文本编辑器或 WebGL 上下文。
+     *
+     * 放在切片里而不是组件的 ref/state：它天然是"随会话演进的累积量"，而累积
+     * 逻辑写在渲染期或 effect 里都会撞上 React Compiler 的规则（渲染期不得写
+     * ref；effect 里同步 setState 会触发级联渲染）。
+     */
+    mountedFormIds: string[];
+    /**
      * 「最大化当前窗体」暂存的原树。
      *
      * 刻意**不持久化**：最大化的语义是"临时看一眼"，重启后回到用户排好的
@@ -72,6 +84,7 @@ const initialState: DockState = {
     settings: DEFAULT_DOCK_SETTINGS,
     activeFormId: null,
     hydrated: false,
+    mountedFormIds: [],
     maximized: null,
 };
 
@@ -91,7 +104,10 @@ const dockSlice = createSlice({
     initialState,
     reducers: {
         /** 从后端设置恢复：先归一化布局，再套用行为选项。 */
-        hydrateDock(state, action: PayloadAction<{ settings?: DockSettings | null; layout?: unknown }>) {
+        hydrateDock(
+            state,
+            action: PayloadAction<{ settings?: DockSettings | null; layout?: unknown }>,
+        ) {
             const raw = action.payload ?? {};
             state.layout = normalizeDockLayout(raw.layout);
             state.settings = normalizeDockSettings(raw.settings);
@@ -100,6 +116,17 @@ const dockSlice = createSlice({
         /** 面板注册完成后补齐窗体记录（内置面板在 App 模块加载期注册）。 */
         syncRegisteredPanels(state) {
             state.layout = ensureRegisteredPanels(state.layout);
+        },
+        /**
+         * 登记"这些窗体已经需要挂载"。
+         *
+         * 单调增长：已挂载的窗体即使被关闭也留在集合里（重开时零成本），
+         * 因此这里只做并集，不做删除。
+         */
+        markFormsMounted(state, action: PayloadAction<string[]>) {
+            const known = new Set(state.mountedFormIds);
+            const added = action.payload.filter((formId) => !known.has(formId));
+            if (added.length > 0) state.mountedFormIds = [...state.mountedFormIds, ...added];
         },
         setDockSettings(state, action: PayloadAction<DockSettings>) {
             state.settings = normalizeDockSettings({ ...state.settings, ...action.payload });
@@ -125,8 +152,7 @@ const dockSlice = createSlice({
                 state.maximized = null;
                 return;
             }
-            const formId =
-                state.activeFormId ?? findMainTabset(state.layout)?.active ?? null;
+            const formId = state.activeFormId ?? findMainTabset(state.layout)?.active ?? null;
             if (!formId) return;
             const tabset = findTabsetOfForm(state.layout.tree, formId);
             if (!tabset) return;
@@ -137,10 +163,7 @@ const dockSlice = createSlice({
             };
         },
         /** 打开面板（复用已关闭的窗体记录，或新建）。 */
-        openPanel(
-            state,
-            action: PayloadAction<{ panelId: string; placement?: DockPlacement }>,
-        ) {
+        openPanel(state, action: PayloadAction<{ panelId: string; placement?: DockPlacement }>) {
             const { panelId, placement } = action.payload;
             const existing = findVisibleFormForPanel(state.layout, panelId);
             state.layout = openPanelInLayout(state.layout, panelId, placement);
@@ -150,9 +173,10 @@ const dockSlice = createSlice({
             const formId = action.payload;
             state.layout = closeFormInLayout(state.layout, formId);
             if (state.activeFormId === formId) {
-                state.activeFormId = state.layout.order.find(
-                    (id) => Boolean(state.layout.forms[id]?.float),
-                ) ?? findMainTabset(state.layout)?.active ?? null;
+                state.activeFormId =
+                    state.layout.order.find((id) => Boolean(state.layout.forms[id]?.float)) ??
+                    findMainTabset(state.layout)?.active ??
+                    null;
             }
         },
         focusForm(state, action: PayloadAction<string>) {
@@ -232,10 +256,7 @@ const dockSlice = createSlice({
             if (!state.layout.forms[formId]?.float) return;
             state.layout = {
                 ...state.layout,
-                floatOrder: [
-                    ...state.layout.floatOrder.filter((id) => id !== formId),
-                    formId,
-                ],
+                floatOrder: [...state.layout.floatOrder.filter((id) => id !== formId), formId],
             };
             state.activeFormId = formId;
         },
@@ -262,7 +283,10 @@ const dockSlice = createSlice({
             state.layout = {
                 ...state.layout,
                 tree,
-                forms: { ...state.layout.forms, [formId]: { ...state.layout.forms[formId], float: null } },
+                forms: {
+                    ...state.layout.forms,
+                    [formId]: { ...state.layout.forms[formId], float: null },
+                },
                 floatOrder: state.layout.floatOrder.filter((id) => id !== formId),
             };
             state.activeFormId = formId;
@@ -275,7 +299,10 @@ const dockSlice = createSlice({
             state.layout = {
                 ...state.layout,
                 tree: moveForm(state.layout.tree, formId, { kind: "tab", tabsetId }),
-                forms: { ...state.layout.forms, [formId]: { ...state.layout.forms[formId], float: null } },
+                forms: {
+                    ...state.layout.forms,
+                    [formId]: { ...state.layout.forms[formId], float: null },
+                },
                 floatOrder: state.layout.floatOrder.filter((id) => id !== formId),
             };
             state.activeFormId = formId;
@@ -296,8 +323,13 @@ const dockSlice = createSlice({
             let tree = splitRootWith(pruned, anchor, side);
             const created = findTabsetOfForm(tree, anchor);
             if (created) {
-                tree = replaceTabset(tree, created.id, { ...created, tabs: node.tabs, active: node.active });
-                if (node.collapsed) tree = setTabsetCollapsed(tree, created.id, true, node.collapsedPx);
+                tree = replaceTabset(tree, created.id, {
+                    ...created,
+                    tabs: node.tabs,
+                    active: node.active,
+                });
+                if (node.collapsed)
+                    tree = setTabsetCollapsed(tree, created.id, true, node.collapsedPx);
             }
             state.layout = { ...state.layout, tree };
             state.activeFormId = node.active;
@@ -316,7 +348,10 @@ const dockSlice = createSlice({
                 tree: setSplitRatio(state.layout.tree, splitId, ratio, fixed ?? null),
             };
         },
-        toggleTabsetCollapsed(state, action: PayloadAction<{ tabsetId: string; collapsedPx?: number }>) {
+        toggleTabsetCollapsed(
+            state,
+            action: PayloadAction<{ tabsetId: string; collapsedPx?: number }>,
+        ) {
             const { tabsetId, collapsedPx } = action.payload;
             const node = findZone(state.layout.tree, tabsetId);
             if (!node || node.t !== "tabset") return;
@@ -394,10 +429,7 @@ const dockSlice = createSlice({
 });
 
 /** 在整棵树上把包含 formId 的标签组切到该窗体。 */
-function setActiveTabEverywhere(
-    node: DockLayout["tree"],
-    formId: string,
-): DockLayout["tree"] {
+function setActiveTabEverywhere(node: DockLayout["tree"], formId: string): DockLayout["tree"] {
     if (node.t === "tabset") {
         return node.tabs.includes(formId) ? { ...node, active: formId } : node;
     }
@@ -419,6 +451,7 @@ function findTabsetIdOf(layout: DockLayout, formId: string): string | null {
 export const {
     hydrateDock,
     syncRegisteredPanels,
+    markFormsMounted,
     toggleMaximizeActive,
     setDockSettings,
     setDockLayout,

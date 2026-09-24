@@ -74,9 +74,7 @@ function paneStyle(node: DockSplitNode, side: "a" | "b"): React.CSSProperties {
     const isA = side === "a";
     if (node.fixed) {
         // 固定侧锁像素，另一侧吸收窗口缩放的剩余量。
-        return node.fixed.side === side
-            ? { flex: `0 0 ${node.fixed.px}px` }
-            : { flex: "1 1 0" };
+        return node.fixed.side === side ? { flex: `0 0 ${node.fixed.px}px` } : { flex: "1 1 0" };
     }
     return { flexGrow: isA ? node.ratio : 1 - node.ratio, flexShrink: 1, flexBasis: 0 };
 }
@@ -89,10 +87,7 @@ function paneStyle(node: DockSplitNode, side: "a" | "b"): React.CSSProperties {
  */
 function subtreeMinSize(node: DockNode, horizontal: boolean): number {
     if (node.t === "split") {
-        return Math.max(
-            subtreeMinSize(node.a, horizontal),
-            subtreeMinSize(node.b, horizontal),
-        );
+        return Math.max(subtreeMinSize(node.a, horizontal), subtreeMinSize(node.b, horizontal));
     }
     let min = 0;
     for (const formId of node.tabs) {

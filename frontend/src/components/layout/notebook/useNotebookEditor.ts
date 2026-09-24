@@ -90,15 +90,8 @@ export interface UseNotebookEditorResult {
 }
 
 export function useNotebookEditor(args: UseNotebookEditorArgs): UseNotebookEditorResult {
-    const {
-        markdown,
-        settings,
-        placeholder,
-        bridge,
-        onMarkdownChange,
-        persist,
-        onIdleSplit,
-    } = args;
+    const { markdown, settings, placeholder, bridge, onMarkdownChange, persist, onIdleSplit } =
+        args;
 
     // 回调与设置在 ref 里取最新值：编辑器实例不应因为回调身份变化而重建。
     // 赋值必须放在 effect 里（而非渲染期）—— 渲染期写 ref 会破坏并发渲染的

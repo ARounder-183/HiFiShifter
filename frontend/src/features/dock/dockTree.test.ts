@@ -81,7 +81,11 @@ test("features/dock/dockTree.test.ts scripted checks", async () => {
 
     // ── 摘到全空 ────────────────────────────────────────────────
     {
-        assertEqual(removeForm(tabset("z1", ["a"]), "a"), null, "removing the only form empties the tree");
+        assertEqual(
+            removeForm(tabset("z1", ["a"]), "a"),
+            null,
+            "removing the only form empties the tree",
+        );
     }
 
     // ── 并入标签组（可指定下标）──────────────────────────────────
@@ -108,7 +112,11 @@ test("features/dock/dockTree.test.ts scripted checks", async () => {
     // ── 重复并入只改顺序，不产生重复标签 ──────────────────────────
     {
         const tree = addFormToTabset(tabset("z1", ["a", "b"]), "z1", "a");
-        assertEqual((tree as DockTabsetNode).tabs, ["b", "a"], "re-insert reorders, never duplicates");
+        assertEqual(
+            (tree as DockTabsetNode).tabs,
+            ["b", "a"],
+            "re-insert reorders, never duplicates",
+        );
     }
 
     // ── 在某一侧拆分 ────────────────────────────────────────────
@@ -146,7 +154,11 @@ test("features/dock/dockTree.test.ts scripted checks", async () => {
         const tree = split("z1", tabset("z2", ["a"]), tabset("z3", ["b", "c"]));
         const moved = moveForm(tree, "b", { kind: "split", tabsetId: "z2", side: "bottom" });
         // b 从 z3 摘出（z3 只剩 c），再在 z2 下方拆出新组：(([a]|[b])|[c])
-        assertEqual(shape(moved), "(([a]|[b])|[c])", "moved tab gets its own group below the target");
+        assertEqual(
+            shape(moved),
+            "(([a]|[b])|[c])",
+            "moved tab gets its own group below the target",
+        );
         assertEqual(collectTabsets(moved).length, 3, "three groups after the move");
     }
 
@@ -154,13 +166,20 @@ test("features/dock/dockTree.test.ts scripted checks", async () => {
     {
         const tree = split("z1", tabset("z2", ["a"]), tabset("z3", ["b"]));
         const moved = moveForm(tree, "a", { kind: "tab", tabsetId: "z-missing" });
-        assertEqual(collectDockedForms(moved).includes("a"), true, "form survives a missing target");
+        assertEqual(
+            collectDockedForms(moved).includes("a"),
+            true,
+            "form survives a missing target",
+        );
     }
 
     // ── 移动不存在的窗体：树不变 ─────────────────────────────────
     {
         const tree = split("z1", tabset("z2", ["a"]), tabset("z3", ["b"]));
-        assert(moveForm(tree, "zzz", { kind: "tab", tabsetId: "z3" }) === tree, "move unknown is a no-op");
+        assert(
+            moveForm(tree, "zzz", { kind: "tab", tabsetId: "z3" }) === tree,
+            "move unknown is a no-op",
+        );
     }
 
     // ── 分割比例与固定像素 ──────────────────────────────────────
@@ -180,7 +199,12 @@ test("features/dock/dockTree.test.ts scripted checks", async () => {
 
     // ── pruneTree：修正 active、去重、剪空 ───────────────────────
     {
-        const dirty = { t: "tabset", id: "z1", tabs: ["a", "a", "b"], active: "gone" } as DockTabsetNode;
+        const dirty = {
+            t: "tabset",
+            id: "z1",
+            tabs: ["a", "a", "b"],
+            active: "gone",
+        } as DockTabsetNode;
         const pruned = pruneTree(dirty) as DockTabsetNode;
         assertEqual(pruned.tabs, ["a", "b"], "duplicate tabs removed");
         assertEqual(pruned.active, "a", "stale active repaired");
@@ -212,22 +236,38 @@ test("features/dock/dockTree.test.ts scripted checks", async () => {
         assertEqual(Math.round(b1.w), 398, "ratio split side B");
         assertEqual(b1.x, a1.w + 4, "splitter gap honoured");
 
-        const [a2, b2] = splitRect(rect, { dir: "row", ratio: 0.6, fixed: { side: "b", px: 360 } }, 4);
+        const [a2, b2] = splitRect(
+            rect,
+            { dir: "row", ratio: 0.6, fixed: { side: "b", px: 360 } },
+            4,
+        );
         assertEqual(Math.round(b2.w), 360, "fixed side B keeps its pixels");
         assertEqual(Math.round(a2.w), 636, "free side absorbs the remainder");
 
-        const [a3, b3] = splitRect(rect, { dir: "row", ratio: 0.6, fixed: { side: "a", px: 360 } }, 4);
+        const [a3, b3] = splitRect(
+            rect,
+            { dir: "row", ratio: 0.6, fixed: { side: "a", px: 360 } },
+            4,
+        );
         assertEqual(Math.round(a3.w), 360, "fixed side A keeps its pixels");
         assertEqual(Math.round(b3.w), 636, "free side absorbs the remainder");
 
-        const [a4, b4] = splitRect({ x: 0, y: 0, w: 400, h: 300 }, { dir: "col", ratio: 0.5, fixed: null }, 4);
+        const [a4, b4] = splitRect(
+            { x: 0, y: 0, w: 400, h: 300 },
+            { dir: "col", ratio: 0.5, fixed: null },
+            4,
+        );
         assertEqual(Math.round(a4.h), 148, "column split side A height");
         assertEqual(Math.round(b4.h), 148, "column split side B height");
     }
 
     // ── 固定像素超过可用空间时被钳制，不产生负宽度 ────────────────
     {
-        const [a, b] = splitRect({ x: 0, y: 0, w: 200, h: 100 }, { dir: "row", ratio: 0.5, fixed: { side: "b", px: 9999 } }, 4);
+        const [a, b] = splitRect(
+            { x: 0, y: 0, w: 200, h: 100 },
+            { dir: "row", ratio: 0.5, fixed: { side: "b", px: 9999 } },
+            4,
+        );
         assertEqual(Math.round(a.w), 0, "free side collapses instead of going negative");
         assertEqual(Math.round(b.w), 196, "fixed side clamped to available space");
     }
@@ -244,7 +284,7 @@ test("features/dock/dockTree.test.ts scripted checks", async () => {
             },
             order: ["a", "b", "c"],
             floatOrder: ["b"],
-            gutters: { timelineTrackHeaderPx: 256, pianoRollAxisPx: 56 },
+            gutters: { timelineTrackHeaderPx: 256 },
         };
         assertEqual(isFormVisible(layout, "a"), true, "docked form is visible");
         assertEqual(isFormVisible(layout, "c"), false, "closed form is not visible");

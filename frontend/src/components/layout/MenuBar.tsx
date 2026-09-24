@@ -36,6 +36,7 @@ import type { TimeUnit } from "../../features/session/sessionTypes";
 import { TIME_UNITS, TIME_UNIT_CHOICES } from "./timeline/timeFormat";
 import { TimelineDisplaySettingsDialog } from "./TimelineDisplaySettingsDialog";
 import { SnapGridSettingsDialog } from "./SnapGridSettingsDialog";
+import { DockLayoutMenu } from "../dock/DockLayoutMenu";
 import { scaleChangesInRange, scaleLikeEquals } from "../../utils/tempoMap";
 import type { ScaleLike } from "../../utils/musicalScales";
 import {
@@ -920,6 +921,11 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     </DropdownMenu.Item>
                 </DropdownMenu.Content>
             </DropdownMenu.Root>
+
+            {/* 布局（停靠窗体系统）：触发按钮、菜单内容与两个对话框都在
+                `DockLayoutMenu` 内部，`MenuBar` 只多一行 —— 它已用窄订阅
+                避免被播放轮询拖着重渲染，不应再长大。 */}
+            <DockLayoutMenu withCheck={withCheck} />
 
             <DropdownMenu.Root>
                 <DropdownMenu.Trigger className="shrink-0 rounded px-2 py-1 text-xs text-qt-text hover:bg-qt-highlight hover:text-white">

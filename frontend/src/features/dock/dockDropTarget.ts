@@ -79,9 +79,7 @@ export function pickDropTarget(
  * 与 `resolveDropZone` 分开是因为语义不同：`center` 不是"某一侧"，而是
  * "并入同一组"。调用方据此分派到 `{kind:"tab"}` 或 `{kind:"split"}`。
  */
-export function dropZoneToSide(
-    zone: DockDropZone,
-): "left" | "right" | "top" | "bottom" | null {
+export function dropZoneToSide(zone: DockDropZone): "left" | "right" | "top" | "bottom" | null {
     return zone === "center" || zone === "float" ? null : zone;
 }
 

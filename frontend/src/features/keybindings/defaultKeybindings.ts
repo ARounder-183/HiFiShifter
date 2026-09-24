@@ -49,6 +49,13 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     // 反向操作默认不占键位（手势已覆盖单个音频块的取消场景）
     "edit.removeClipsFromParamSelection": { key: "__none__" },
 
+    // 布局（停靠窗体）
+    // Ctrl/Cmd+Shift+F 与"浮起来"语义相称，且不与编辑快捷键冲突。
+    "layout.toggleFloat": { key: "f", ctrl: true, shift: true },
+    "layout.focusNext": { key: "f6" },
+    "layout.focusPrev": { key: "f6", shift: true },
+    "layout.maximize": { key: "m", ctrl: true, shift: true },
+
     // 工程
     "project.new": { key: "n", ctrl: true },
     "project.open": { key: "o", ctrl: true, shift: true },
@@ -643,6 +650,26 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
         group: "quickSearch",
         scopedContext: "quickSearch",
     },
+
+    // ── 布局（停靠窗体系统）────────────────────────────────────────
+    // 这四个动作作用在"当前焦点窗体"上，不依赖活动编辑表面（时间轴/参数编辑器），
+    // 因此按全局作用域绑定：在哪儿按都生效。
+    "layout.toggleFloat": {
+        labelKey: "kb_layout_toggle_float",
+        group: "layout",
+    },
+    "layout.focusNext": {
+        labelKey: "kb_layout_next_panel",
+        group: "layout",
+    },
+    "layout.focusPrev": {
+        labelKey: "kb_layout_prev_panel",
+        group: "layout",
+    },
+    "layout.maximize": {
+        labelKey: "kb_layout_maximize",
+        group: "layout",
+    },
 };
 
 /**
@@ -662,6 +689,7 @@ export const GROUP_LABEL_KEYS: Record<ActionMeta["group"], string> = {
     pianoRoll: "kb_group_pianoroll",
     paramEditor: "kb_group_param_editor",
     quickSearch: "kb_group_quick_search",
+    layout: "kb_group_layout",
     modClip: "kb_group_mod_clip",
     modFade: "kb_group_mod_fade",
     modParam: "kb_group_mod_param",
@@ -683,6 +711,7 @@ export const ACTION_GROUP_ORDER: ActionMeta["group"][] = [
     "pianoRoll",
     "paramEditor",
     "quickSearch",
+    "layout",
     "modClip",
     "modFade",
     "modParam",

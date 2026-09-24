@@ -46,8 +46,6 @@ export interface DockSettings {
      * 可以固定成"混音布局"开机即用。
      */
     startupLayout?: string;
-    /** 停靠/浮动切换的过渡时长（毫秒，0 = 关闭动画）。 */
-    animateDockMs?: number;
 }
 
 export type ResolvedDockSettings = Required<DockSettings>;
@@ -78,7 +76,6 @@ export const DEFAULT_DOCK_SETTINGS: ResolvedDockSettings = {
     saveDebounceMs: 400,
     confirmResetLayout: true,
     startupLayout: "last",
-    animateDockMs: 140,
 };
 
 const MODIFIERS: ReadonlyArray<ResolvedDockSettings["dockModifier"]> = [
@@ -106,7 +103,9 @@ function pickEnum<T extends string>(value: unknown, allowed: readonly T[], fallb
 }
 
 /** 归一化停靠设置（非法值一律退回默认，永不抛错）。 */
-export function normalizeDockSettings(input: DockSettings | null | undefined): ResolvedDockSettings {
+export function normalizeDockSettings(
+    input: DockSettings | null | undefined,
+): ResolvedDockSettings {
     const raw = (input ?? {}) as DockSettings;
     return {
         dockModifier: pickEnum(raw.dockModifier, MODIFIERS, DEFAULT_DOCK_SETTINGS.dockModifier),
@@ -135,6 +134,5 @@ export function normalizeDockSettings(input: DockSettings | null | undefined): R
             typeof raw.startupLayout === "string" && raw.startupLayout
                 ? raw.startupLayout
                 : DEFAULT_DOCK_SETTINGS.startupLayout,
-        animateDockMs: clampInt(raw.animateDockMs, 0, 600, DEFAULT_DOCK_SETTINGS.animateDockMs),
     };
 }

@@ -134,10 +134,19 @@ export function normalizeNotebookSettings(
             ["auto", "webp", "jpeg", "png"] as const,
             d.imageFormat,
         ),
-        maxImageBytes: clampNumber(raw.maxImageBytes, 256 * 1024, 512 * 1024 * 1024, d.maxImageBytes),
+        maxImageBytes: clampNumber(
+            raw.maxImageBytes,
+            256 * 1024,
+            512 * 1024 * 1024,
+            d.maxImageBytes,
+        ),
         allowRemoteImages: bool(raw.allowRemoteImages, d.allowRemoteImages),
         smartPaste: bool(raw.smartPaste, d.smartPaste),
-        htmlPasteMode: pickEnum(raw.htmlPasteMode, ["markdown", "html", "text"] as const, d.htmlPasteMode),
+        htmlPasteMode: pickEnum(
+            raw.htmlPasteMode,
+            ["markdown", "html", "text"] as const,
+            d.htmlPasteMode,
+        ),
         plainPasteMode: pickEnum(
             raw.plainPasteMode,
             ["auto", "markdown", "text"] as const,
@@ -148,7 +157,11 @@ export function normalizeNotebookSettings(
             ["markdown+html", "markdown", "html", "text"] as const,
             d.copyFormat,
         ),
-        copyPlainTextAs: pickEnum(raw.copyPlainTextAs, ["markdown", "text"] as const, d.copyPlainTextAs),
+        copyPlainTextAs: pickEnum(
+            raw.copyPlainTextAs,
+            ["markdown", "text"] as const,
+            d.copyPlainTextAs,
+        ),
         clipInsertMode: pickEnum(
             raw.clipInsertMode,
             ["selected", "newTracks", "ask"] as const,

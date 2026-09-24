@@ -51,7 +51,9 @@ function assertStable(markdown: string, label: string): string {
 
 function assertIncludes(haystack: string, needle: string, label: string): void {
     if (!haystack.includes(needle)) {
-        throw new Error(`${label}: expected to include ${JSON.stringify(needle)}\n--- got ---\n${haystack}`);
+        throw new Error(
+            `${label}: expected to include ${JSON.stringify(needle)}\n--- got ---\n${haystack}`,
+        );
     }
 }
 
@@ -114,7 +116,10 @@ test("components/layout/notebook/markdownRoundTrip.test.ts scripted checks", asy
     if (plainImage.includes("#w=")) throw new Error(`unexpected width fragment:\n${plainImage}`);
 
     // 相对路径与 data URI 也要能原样往返（link / embed 两种存储模式）。
-    const linked = assertStable("![截图](%E7%B4%A0%E6%9D%90/%E6%88%AA%E5%9B%BE.png)", "linked image");
+    const linked = assertStable(
+        "![截图](%E7%B4%A0%E6%9D%90/%E6%88%AA%E5%9B%BE.png)",
+        "linked image",
+    );
     assertIncludes(linked, "%E7%B4%A0%E6%9D%90", "encoded relative path kept");
 
     // ── 剪贴板暂存块：自定义节点的往返（最脆的一环）───────────────
@@ -163,5 +168,9 @@ test("components/layout/notebook/markdownRoundTrip.test.ts scripted checks", asy
 
     // ── 空文档与纯文本 ───────────────────────────────────────────
     if (roundTrip("").trim() !== "") throw new Error("empty document should stay empty");
-    assertIncludes(assertStable("只有一行普通文字。", "plain text"), "只有一行普通文字。", "plain text kept");
+    assertIncludes(
+        assertStable("只有一行普通文字。", "plain text"),
+        "只有一行普通文字。",
+        "plain text kept",
+    );
 });

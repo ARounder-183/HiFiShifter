@@ -45,12 +45,10 @@ import {
 /** 沟槽尺寸的合法区间（与面板定义里的最小值保持一致）。 */
 export const GUTTER_LIMITS = {
     timelineTrackHeaderPx: { min: 120, max: 560, fallback: 256 },
-    pianoRollAxisPx: { min: 40, max: 160, fallback: 56 },
 } as const;
 
 export const DEFAULT_GUTTER_SIZES: DockGutterSizes = {
     timelineTrackHeaderPx: 256,
-    pianoRollAxisPx: 56,
 };
 
 /** 主编辑区面板的窗体 id（与 `registerBuiltinPanels` 的命名约定一致）。 */
@@ -80,7 +78,11 @@ export function createDefaultDockLayout(): DockLayout {
         schema: DOCK_LAYOUT_SCHEMA,
         tree,
         forms: {
-            [MAIN_FORM_TIMELINE]: { id: MAIN_FORM_TIMELINE, panelId: MAIN_FORM_TIMELINE, float: null },
+            [MAIN_FORM_TIMELINE]: {
+                id: MAIN_FORM_TIMELINE,
+                panelId: MAIN_FORM_TIMELINE,
+                float: null,
+            },
             [MAIN_FORM_PARAM_EDITOR]: {
                 id: MAIN_FORM_PARAM_EDITOR,
                 panelId: MAIN_FORM_PARAM_EDITOR,
@@ -128,12 +130,6 @@ function normalizeGutters(raw: unknown): DockGutterSizes {
             GUTTER_LIMITS.timelineTrackHeaderPx.min,
             GUTTER_LIMITS.timelineTrackHeaderPx.max,
             GUTTER_LIMITS.timelineTrackHeaderPx.fallback,
-        ),
-        pianoRollAxisPx: clampNumber(
-            input.pianoRollAxisPx,
-            GUTTER_LIMITS.pianoRollAxisPx.min,
-            GUTTER_LIMITS.pianoRollAxisPx.max,
-            GUTTER_LIMITS.pianoRollAxisPx.fallback,
         ),
     };
 }
@@ -257,13 +253,15 @@ export function normalizeDockLayout(raw: unknown): DockLayout {
     // ── 树 ────────────────────────────────────────────────────────
     const seen = new Set<string>();
     const normalized = normalizeTree(input.tree, knownForms, seen);
-    const tree = pruneTree(normalized ?? createDefaultDockLayout().tree) ?? createDefaultDockLayout().tree;
+    const tree =
+        pruneTree(normalized ?? createDefaultDockLayout().tree) ?? createDefaultDockLayout().tree;
 
     // ── 顺序：磁盘上的顺序优先，缺的按窗体表补全 ─────────────────
     const order: string[] = [];
     const rawOrder = Array.isArray(input.order) ? input.order : [];
     for (const formId of rawOrder) {
-        if (typeof formId === "string" && forms[formId] && !order.includes(formId)) order.push(formId);
+        if (typeof formId === "string" && forms[formId] && !order.includes(formId))
+            order.push(formId);
     }
     for (const formId of Object.keys(forms)) {
         if (!order.includes(formId)) order.push(formId);
@@ -387,7 +385,8 @@ export function placeForm(layout: DockLayout, formId: string, placement: DockPla
         if (placement.tabWith) {
             const companion = findVisibleFormForPanel(layout, placement.tabWith);
             const target = companion ? findTabsetOfForm(layout.tree, companion) : null;
-            if (target) return insertForm(layout.tree, formId, { kind: "tab", tabsetId: target.id });
+            if (target)
+                return insertForm(layout.tree, formId, { kind: "tab", tabsetId: target.id });
         }
         const main = findMainTabset(layout);
         if (!main) return layout.tree;

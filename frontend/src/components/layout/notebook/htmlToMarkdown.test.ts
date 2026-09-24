@@ -11,20 +11,24 @@ import { htmlToMarkdown, sanitizePastedHtml } from "./htmlToMarkdown.ts";
 
 function assertIncludes(haystack: string, needle: string, label: string): void {
     if (!haystack.includes(needle)) {
-        throw new Error(`${label}: expected to include ${JSON.stringify(needle)}, received ${JSON.stringify(haystack)}`);
+        throw new Error(
+            `${label}: expected to include ${JSON.stringify(needle)}, received ${JSON.stringify(haystack)}`,
+        );
     }
 }
 
 function assertExcludes(haystack: string, needle: string, label: string): void {
     if (haystack.includes(needle)) {
-        throw new Error(`${label}: expected NOT to include ${JSON.stringify(needle)}, received ${JSON.stringify(haystack)}`);
+        throw new Error(
+            `${label}: expected NOT to include ${JSON.stringify(needle)}, received ${JSON.stringify(haystack)}`,
+        );
     }
 }
 
 test("components/layout/notebook/htmlToMarkdown.test.ts scripted checks", async () => {
     // 标题 / 粗斜体 / 行内码 / 链接 —— 最常见的网页粘贴形态。
     const simple = htmlToMarkdown(
-        '<h2>标题</h2><p>普通 <strong>粗</strong> 与 <em>斜</em> 与 <code>x=1</code></p>' +
+        "<h2>标题</h2><p>普通 <strong>粗</strong> 与 <em>斜</em> 与 <code>x=1</code></p>" +
             '<p><a href="https://example.com/a">链接</a></p>',
     );
     assertIncludes(simple, "## 标题", "heading");
@@ -34,7 +38,9 @@ test("components/layout/notebook/htmlToMarkdown.test.ts scripted checks", async 
     assertIncludes(simple, "[链接](https://example.com/a)", "link");
 
     // 列表与引用。
-    const lists = htmlToMarkdown("<ul><li>甲</li><li>乙</li></ul><blockquote><p>引用</p></blockquote>");
+    const lists = htmlToMarkdown(
+        "<ul><li>甲</li><li>乙</li></ul><blockquote><p>引用</p></blockquote>",
+    );
     assertIncludes(lists, "- 甲", "bullet item");
     assertIncludes(lists, "> 引用", "blockquote");
 

@@ -1346,7 +1346,7 @@ const TrackListInner: React.FC<TrackListProps> = ({
         // closest 就近解析优先命中，见 focusSurface.ts / data-hs-surface）。
         <Flex
             direction="column"
-            className="w-64 border-r border-qt-border bg-qt-window shrink-0"
+            className="h-full w-full border-r border-qt-border bg-qt-window"
             data-hs-surface="trackHeader"
         >
             <Box

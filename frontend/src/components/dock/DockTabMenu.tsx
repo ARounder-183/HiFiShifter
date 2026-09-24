@@ -6,7 +6,7 @@
  * 的右键菜单样式与关闭语义已经统一，混用两套只会让交互细节分叉。
  */
 
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { useAppDispatch } from "../../app/hooks";
@@ -23,6 +23,10 @@ export interface DockTabMenuProps {
 }
 
 const MENU_WIDTH = 190;
+/** 单个菜单项的高度（含内边距）。 */
+const MENU_ITEM_PX = 24;
+/** 菜单的纵向内边距 + 分隔线。 */
+const MENU_CHROME_PX = 18;
 
 export function DockTabMenu({ formId, x, y, onClose, onFloat, onCloseForm }: DockTabMenuProps) {
     const dispatch = useAppDispatch();
@@ -33,14 +37,16 @@ export function DockTabMenu({ formId, x, y, onClose, onFloat, onCloseForm }: Doc
     const [draft, setDraft] = useState("");
 
     // 视口夹紧：右键点在屏幕右下角时菜单不能跑出可视区。
-    const [position, setPosition] = useState({ x, y });
-    useLayoutEffect(() => {
-        const height = menuRef.current?.offsetHeight ?? 160;
-        setPosition({
-            x: Math.min(x, Math.max(0, window.innerWidth - MENU_WIDTH - 4)),
-            y: Math.min(y, Math.max(0, window.innerHeight - height - 4)),
-        });
-    }, [x, y, renaming]);
+    //
+    // 用**固定估算高度**而不是"先渲染再测量"：后者要在 layout effect 里同步
+    // setState（触发级联渲染，React Compiler 会就此告警），而菜单项高度本来就是
+    // 确定的常量。估算偏差最多几个像素，视觉上不可见。
+    const itemCount = renaming ? 1 : 2;
+    const estimatedHeight = itemCount * MENU_ITEM_PX + MENU_CHROME_PX;
+    const position = {
+        x: Math.min(x, Math.max(0, window.innerWidth - MENU_WIDTH - 4)),
+        y: Math.min(y, Math.max(0, window.innerHeight - estimatedHeight - 4)),
+    };
 
     useEffect(() => {
         const onKeyDown = (event: KeyboardEvent) => {

@@ -30,7 +30,11 @@ test("components/layout/notebook/notebookPaths.test.ts scripted checks", async (
     assertEqual(isAbsolutePath("C:\\work\\a.png"), true, "windows absolute");
     assertEqual(isAbsolutePath("素材/a.png"), false, "relative");
 
-    assertEqual(resolvePath("C:/work/song", "assets/a.png"), "C:/work/song/assets/a.png", "resolve child");
+    assertEqual(
+        resolvePath("C:/work/song", "assets/a.png"),
+        "C:/work/song/assets/a.png",
+        "resolve child",
+    );
     assertEqual(resolvePath("C:/work/song", "../ref/a.png"), "C:/work/ref/a.png", "resolve parent");
     assertEqual(resolvePath("/a/b", "/abs/a.png"), "/abs/a.png", "resolve absolute passthrough");
 
@@ -46,12 +50,28 @@ test("components/layout/notebook/timecode.test.ts scripted checks", async () => 
 
     const link = buildSeekLink(83.456);
     assertEqual(link, "[1:23.456](hifi://seek/83.456)", "seek link");
-    assertEqual(parseInternalLink("hifi://seek/83.456"), { type: "seek", seconds: 83.456 }, "parse seek");
-    assertEqual(buildSeekLink(12, "这里要重唱"), "[这里要重唱](hifi://seek/12.000)", "custom label");
+    assertEqual(
+        parseInternalLink("hifi://seek/83.456"),
+        { type: "seek", seconds: 83.456 },
+        "parse seek",
+    );
+    assertEqual(
+        buildSeekLink(12, "这里要重唱"),
+        "[这里要重唱](hifi://seek/12.000)",
+        "custom label",
+    );
 
-    assertEqual(parseInternalLink("hifi://clip/abc-1"), { type: "clip", clipId: "abc-1" }, "parse clip");
+    assertEqual(
+        parseInternalLink("hifi://clip/abc-1"),
+        { type: "clip", clipId: "abc-1" },
+        "parse clip",
+    );
     // 方括号会截断链接文本，必须折叠掉。
-    assertEqual(buildClipLink("c1", "副歌 [A]"), "[副歌 (A)](hifi://clip/c1)", "clip label sanitized");
+    assertEqual(
+        buildClipLink("c1", "副歌 [A]"),
+        "[副歌 (A)](hifi://clip/c1)",
+        "clip label sanitized",
+    );
 
     assertEqual(parseInternalLink("https://example.com"), null, "external link");
     assertEqual(parseInternalLink("hifi://seek/abc"), null, "bad seek payload");
@@ -78,7 +98,11 @@ test("components/layout/notebook/notebookSettings.test.ts scripted checks", asyn
     assertEqual(bogus.historySplitIdleMs, 0, "NaN falls back to default");
 
     // 0 是 imageMaxDimensionPx 的合法值（= 不缩放），不能被当成"未设置"。
-    assertEqual(normalizeNotebookSettings({ imageMaxDimensionPx: 0 }).imageMaxDimensionPx, 0, "zero is legal");
+    assertEqual(
+        normalizeNotebookSettings({ imageMaxDimensionPx: 0 }).imageMaxDimensionPx,
+        0,
+        "zero is legal",
+    );
 
     const partial = normalizeNotebookSettings({ spellCheck: true });
     assertEqual(partial.spellCheck, true, "explicit true kept");
@@ -87,15 +111,43 @@ test("components/layout/notebook/notebookSettings.test.ts scripted checks", asyn
 
 test("components/layout/notebook/notebookImagePipeline.test.ts scripted checks", async () => {
     // 缩放：长边压到上限，短边等比；未超限则不动。
-    assertEqual(computeTargetSize(4000, 2000, 2048), { width: 2048, height: 1024, scaled: true }, "downscale landscape");
-    assertEqual(computeTargetSize(2000, 4000, 2048), { width: 1024, height: 2048, scaled: true }, "downscale portrait");
-    assertEqual(computeTargetSize(800, 600, 2048), { width: 800, height: 600, scaled: false }, "no upscale");
-    assertEqual(computeTargetSize(4000, 2000, 0), { width: 4000, height: 2000, scaled: false }, "zero means original");
+    assertEqual(
+        computeTargetSize(4000, 2000, 2048),
+        { width: 2048, height: 1024, scaled: true },
+        "downscale landscape",
+    );
+    assertEqual(
+        computeTargetSize(2000, 4000, 2048),
+        { width: 1024, height: 2048, scaled: true },
+        "downscale portrait",
+    );
+    assertEqual(
+        computeTargetSize(800, 600, 2048),
+        { width: 800, height: 600, scaled: false },
+        "no upscale",
+    );
+    assertEqual(
+        computeTargetSize(4000, 2000, 0),
+        { width: 4000, height: 2000, scaled: false },
+        "zero means original",
+    );
 
     // auto：无损格式且无需缩放时保持原样；需要缩放时转 WebP。
-    assertEqual(chooseEncodeFormat("image/png", "auto", false), { ext: "png", mime: "image/png", quality: 1 }, "keep png");
-    assertEqual(chooseEncodeFormat("image/png", "auto", true), { ext: "webp", mime: "image/webp", quality: 0.85 }, "scaled png to webp");
-    assertEqual(chooseEncodeFormat("image/jpeg", "auto", false), { ext: "webp", mime: "image/webp", quality: 0.85 }, "jpeg to webp");
+    assertEqual(
+        chooseEncodeFormat("image/png", "auto", false),
+        { ext: "png", mime: "image/png", quality: 1 },
+        "keep png",
+    );
+    assertEqual(
+        chooseEncodeFormat("image/png", "auto", true),
+        { ext: "webp", mime: "image/webp", quality: 0.85 },
+        "scaled png to webp",
+    );
+    assertEqual(
+        chooseEncodeFormat("image/jpeg", "auto", false),
+        { ext: "webp", mime: "image/webp", quality: 0.85 },
+        "jpeg to webp",
+    );
     assertEqual(chooseEncodeFormat("image/png", "jpeg", false).ext, "jpg", "forced jpeg");
     assertEqual(chooseEncodeFormat("image/jpeg", "png", false).ext, "png", "forced png");
 });

@@ -158,7 +158,19 @@ export function deletePreset(dispatch: AppDispatch, name: string): void {
 }
 
 export function listPresetNames(getState: GetState): string[] {
-    const presets = getState().dock.layout.presets ?? {};
+    return listPresetNamesFromLayout(getState().dock.layout);
+}
+
+/**
+ * 纯函数版本：按布局对象列出预设名（最近保存的在前）。
+ *
+ * 组件里应当用它 + `useAppSelector(s => s.dock.layout)`，而不是把 `getState`
+ * 传进选择器 —— 后者每次都会构造新数组，`useSyncExternalStore` 会因快照不稳
+ * 定而反复重渲染（React 会就此告警）。布局对象的引用只在真正变化时才变，
+ * 因此"订阅布局 + 就地派生"是这里的正确形状。
+ */
+export function listPresetNamesFromLayout(layout: DockLayout): string[] {
+    const presets = layout.presets ?? {};
     return Object.keys(presets).sort((a, b) => {
         const at = presets[a]?.createdAtMs ?? 0;
         const bt = presets[b]?.createdAtMs ?? 0;
@@ -168,7 +180,10 @@ export function listPresetNames(getState: GetState): string[] {
 
 /** 导出布局为可分享的 JSON 文本。 */
 export function exportLayoutJson(getState: GetState): string {
-    const layout = getState().dock.layout;
+    return exportLayoutJsonFromLayout(getState().dock.layout);
+}
+
+export function exportLayoutJsonFromLayout(layout: DockLayout): string {
     return JSON.stringify(
         {
             kind: "hifishifter.layout",
@@ -201,14 +216,20 @@ export function importLayoutJson(dispatch: AppDispatch, json: string): boolean {
     return true;
 }
 
-/** 面板清单（"显示窗体"菜单用）。 */
-export function listPanelEntries(getState: GetState): Array<{
+export interface DockPanelEntry {
     panelId: string;
     titleKey: string;
     visible: boolean;
     formId: string | null;
-}> {
-    const layout = getState().dock.layout;
+}
+
+/** 面板清单（"显示窗体"菜单用）。 */
+export function listPanelEntries(getState: GetState): DockPanelEntry[] {
+    return listPanelEntriesFromLayout(getState().dock.layout);
+}
+
+/** 纯函数版本，理由同 `listPresetNamesFromLayout`。 */
+export function listPanelEntriesFromLayout(layout: DockLayout): DockPanelEntry[] {
     return listPanels().map((panel) => {
         const formId = visibleFormFor(layout, panel.id);
         return {

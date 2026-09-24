@@ -67,7 +67,11 @@ test("components/layout/notebook/hifiClipBlock.test.ts scripted checks", async (
     assertEqual(param?.param, "pitch", "param name");
     assertEqual(param?.frameCount, 1280, "param frame count");
     // 参数线没有时长，序列化时不该写出 duration 行。
-    assertEqual(serializeHifiClipFenceBody(param!).includes("duration:"), false, "no duration line");
+    assertEqual(
+        serializeHifiClipFenceBody(param!).includes("duration:"),
+        false,
+        "no duration line",
+    );
 
     // 未知 kind 退化为 clips（未来版本写入的新类型不该让块消失）。
     assertEqual(parseHifiClipFenceBody("id: abc\nkind: future\n")?.kind, "clips", "unknown kind");

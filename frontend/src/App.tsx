@@ -1,4 +1,13 @@
-import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+    Suspense,
+    lazy,
+    useCallback,
+    useEffect,
+    useMemo,
+    useRef,
+    useState,
+    type ReactNode,
+} from "react";
 import { Flex, Text, Dialog, Button } from "@radix-ui/themes";
 import { MenuBar } from "./components/layout/MenuBar";
 import { ActionBar } from "./components/layout/ActionBar";
@@ -72,7 +81,12 @@ import {
     PANEL_UNDO_HISTORY,
 } from "./components/dock/registerBuiltinPanels";
 import { setPanelRenderer } from "./features/dock/panelRenderer";
-import { finalizeDockHydration, loadDockSettings, persistDockSettings } from "./features/dock/dockThunks";
+import { cycleFocus, maximizeActive, toggleFloatActive } from "./features/dock/dockApi";
+import {
+    finalizeDockHydration,
+    loadDockSettings,
+    persistDockSettings,
+} from "./features/dock/dockThunks";
 
 // 面板注册必须在首次渲染前完成：布局归一化要按注册表判定"这个面板还在不在"。
 registerBuiltinPanels();
@@ -2587,6 +2601,19 @@ function AppInner() {
                 // edit.selectAll / edit.deselect 由顶部「编辑操作统一路由」按
                 // 活动编辑表面定向派发（select 工具下的参数编辑器全选走
                 // hifi:editOp，其余走 hifi:timelineEditOp），此处不再重复派发。
+                // 布局：全部走 dockApi，与「布局」菜单共用同一份行为实现。
+                case "layout.toggleFloat":
+                    toggleFloatActive(dispatch, store.getState);
+                    break;
+                case "layout.focusNext":
+                    cycleFocus(dispatch, store.getState, 1);
+                    break;
+                case "layout.focusPrev":
+                    cycleFocus(dispatch, store.getState, -1);
+                    break;
+                case "layout.maximize":
+                    maximizeActive(dispatch);
+                    break;
                 case "project.new":
                     handleNewProject();
                     break;
@@ -3861,14 +3888,14 @@ function AppInner() {
             <ActionBar />
 
             {/*
-              * 工作区：全部可停靠窗体由布局树驱动。
-              *
-              * 这里取代了原先写死的"时间轴 / 分隔条 / 参数编辑器 + 右侧固定宽度栏"
-              * 结构。每个面板的组件实例只挂载一次，靠搬 DOM 宿主换位置（见
-              * `components/dock/panelHostRegistry`），因此停靠重排不会重建
-              * WebGL 上下文、不会丢滚动位置。面板自己的 props 由
-              * `usePanelRenderers` 注入，App 仍是这些状态的唯一所有者。
-              */}
+             * 工作区：全部可停靠窗体由布局树驱动。
+             *
+             * 这里取代了原先写死的"时间轴 / 分隔条 / 参数编辑器 + 右侧固定宽度栏"
+             * 结构。每个面板的组件实例只挂载一次，靠搬 DOM 宿主换位置（见
+             * `components/dock/panelHostRegistry`），因此停靠重排不会重建
+             * WebGL 上下文、不会丢滚动位置。面板自己的 props 由
+             * `usePanelRenderers` 注入，App 仍是这些状态的唯一所有者。
+             */}
             <DockRoot />
             {/* Quick Search Popup */}
             <QuickSearchPopup open={quickSearchOpen} onClose={() => setQuickSearchOpen(false)} />

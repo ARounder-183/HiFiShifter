@@ -284,7 +284,12 @@ function onKeyUp(event: KeyboardEvent): void {
     // 修饰键在拖拽中被松开：立刻把落点预览切回"浮动"语义，避免松手结果与
     // 屏幕上的提示不一致。
     if (!session || !getDockDragState()) return;
-    if (event.key !== "Control" && event.key !== "Meta" && event.key !== "Alt" && event.key !== "Shift") {
+    if (
+        event.key !== "Control" &&
+        event.key !== "Meta" &&
+        event.key !== "Alt" &&
+        event.key !== "Shift"
+    ) {
         return;
     }
     updateDockDrag({ dockIntent: isDockModifierDown(event), target: null });
@@ -323,7 +328,9 @@ export interface TabDragArgs {
 export function beginTabDrag(event: React.PointerEvent, args: TabDragArgs): void {
     if (event.button !== 0) return;
     const tabBarRect = args.tabBarElement?.getBoundingClientRect() ?? null;
-    const host = document.querySelector<HTMLElement>(`[data-dock-host="${cssEscape(args.formId)}"]`);
+    const host = document.querySelector<HTMLElement>(
+        `[data-dock-host="${cssEscape(args.formId)}"]`,
+    );
     const hostRect = host?.getBoundingClientRect();
     const sourceSize = {
         w: Math.max(200, Math.round(hostRect?.width ?? 420)),

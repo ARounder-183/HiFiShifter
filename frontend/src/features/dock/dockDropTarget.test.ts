@@ -42,13 +42,21 @@ test("features/dock/dockDropTarget.test.ts scripted checks", async () => {
     // ── 角落归给更近的那条边 ─────────────────────────────────────
     {
         // 左上角：到左边 4px、到上边 6px → 左边更近
-        assertEqual(resolveDropZone(RECT, { x: 104, y: 106 }, 28), "left", "corner picks nearest edge");
+        assertEqual(
+            resolveDropZone(RECT, { x: 104, y: 106 }, 28),
+            "left",
+            "corner picks nearest edge",
+        );
     }
 
     // ── 矩形外 → null ───────────────────────────────────────────
     {
         assertEqual(resolveDropZone(RECT, { x: 0, y: 0 }, 28), null, "outside yields null");
-        assertEqual(resolveDropZone({ x: 0, y: 0, w: 0, h: 0 }, { x: 0, y: 0 }, 28), null, "degenerate rect");
+        assertEqual(
+            resolveDropZone({ x: 0, y: 0, w: 0, h: 0 }, { x: 0, y: 0 }, 28),
+            null,
+            "degenerate rect",
+        );
     }
 
     // ── 窄条：感应带被钳制，中央区仍然存在 ────────────────────────
@@ -70,7 +78,11 @@ test("features/dock/dockDropTarget.test.ts scripted checks", async () => {
         ];
         assertEqual(pickDropTarget(zones, { x: 200, y: 200 })?.zoneId, "left", "picks left zone");
         assertEqual(pickDropTarget(zones, { x: 700, y: 200 })?.zoneId, "right", "picks right zone");
-        assertEqual(pickDropTarget(zones, { x: 502, y: 200 }), null, "splitter gap matches nothing");
+        assertEqual(
+            pickDropTarget(zones, { x: 502, y: 200 }),
+            null,
+            "splitter gap matches nothing",
+        );
     }
 
     // ── 重叠时取面积更小者（嵌套容器的兜底）──────────────────────

@@ -9,6 +9,7 @@
 
 import { useEffect, useLayoutEffect, useRef, useSyncExternalStore } from "react";
 
+import { store } from "../../app/store";
 import { useAppSelector } from "../../app/hooks";
 import { getPanel } from "../../features/dock/panelRegistry";
 import {
@@ -57,13 +58,15 @@ export function useDockSlot(formId: string | null): React.RefObject<HTMLDivEleme
 
     // 槽位卸载（面板关闭 / 树结构变化）时把宿主送回停泊区：否则宿主留在一个
     // 已脱离文档的槽位里，再也不会被复用。
-    const formsRef = useRef(forms);
-    formsRef.current = forms;
+    //
+    // 清理函数里现读 store 而不是把 `forms` 存进 ref：在渲染期写 ref 会违反
+    // React Compiler 的引用规则（"渲染期不得访问 ref"），而 store 本身就是
+    // 权威且随时可读的。
     useEffect(() => {
         return () => {
             const previous = previousRef.current;
             if (!previous) return;
-            const panelId = formsRef.current[previous]?.panelId;
+            const panelId = store.getState().dock.layout.forms[previous]?.panelId;
             parkPanelHost(previous, panelFallbackSize(panelId ?? previous));
             previousRef.current = null;
         };
