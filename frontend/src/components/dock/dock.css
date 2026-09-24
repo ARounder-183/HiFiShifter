@@ -34,7 +34,17 @@
     flex-direction: column;
 }
 
+/*
+ * 分割线两侧的容器。
+ *
+ * `display: flex` 是**必须**的：本元素是 `.hs-dock-split` 的 flex 项（尺寸由行内
+ * 的 flexGrow/flexBasis 决定），但它同时必须是**自己子元素的 flex 容器** ——
+ * 子元素（标签组或嵌套分割）用 `flex: 1 1 0` 撑满它。少了这一行，子元素的
+ * flex 属性无人解释，高度会塌成内容高度（表现为面板只画出一条 12px 的抓手，
+ * 内容区完全不可见）。
+ */
 .hs-dock-pane {
+    display: flex;
     position: relative;
     min-width: 0;
     min-height: 0;

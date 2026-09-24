@@ -82,6 +82,7 @@ import {
 } from "./components/dock/registerBuiltinPanels";
 import { setPanelRenderer } from "./features/dock/panelRenderer";
 import { cycleFocus, maximizeActive, toggleFloatActive } from "./features/dock/dockApi";
+import { hydrateDock } from "./features/dock/dockSlice";
 import {
     finalizeDockHydration,
     loadDockSettings,
@@ -1702,11 +1703,21 @@ function AppInner() {
         void dispatch(refreshRuntime());
         void dispatch(loadUiSettings());
         void dispatch(loadRecordingSettings());
-        void dispatch(loadDockSettings()).then(() => {
-            // 归一化与面板注册都已完成，此时才能安全处理"套用启动预设"与
-            // "把浮窗收回停靠位"这两件事（见 `finalizeDockHydration`）。
-            finalizeDockHydration(dispatch, store.getState);
-        });
+        // 【必须显式 hydrate】thunk 只负责取回磁盘内容，把结果写进切片是这里的
+        // 责任。漏掉这一步的后果不是"界面不好看"，而是**布局永远不落盘**：
+        // `hydrated` 闸门始终为 false，持久化副作用永不触发（曾实际发生）。
+        void dispatch(loadDockSettings())
+            .unwrap()
+            .then((payload) => {
+                dispatch(hydrateDock(payload));
+                // 归一化与面板注册都已完成，此时才能安全处理"套用启动预设"与
+                // "把浮窗收回停靠位"这两件事（见 `finalizeDockHydration`）。
+                finalizeDockHydration(dispatch, store.getState);
+            })
+            .catch(() => {
+                // 读不到设置时保持出厂布局；`hydrated` 仍为 false，因此不会把
+                // 默认布局写回去覆盖磁盘内容。
+            });
     }, [dispatch]);
 
     useEffect(() => {

@@ -15,7 +15,7 @@ import { createPortal } from "react-dom";
 import { useEffect, useMemo, useSyncExternalStore } from "react";
 
 import { getPanelRenderer } from "../../features/dock/panelRenderer";
-import { acquirePanelHost, releasePanelHost } from "./panelHostRegistry";
+import { acquirePanelHost, notifyPanelHosts } from "./panelHostRegistry";
 import {
     getPanel,
     getPanelRegistryVersion,
@@ -27,7 +27,20 @@ import type { DockForm } from "../../features/dock/dockTypes";
 /** 一个窗体的挂载点。 */
 function PanelMount({ form }: { form: DockForm }) {
     const host = useMemo(() => acquirePanelHost(form.id), [form.id]);
-    useEffect(() => () => releasePanelHost(form.id), [form.id]);
+    // 宿主建立后通知停靠层来"认领"它 —— 渲染期不能发这个通知（见
+    // `acquirePanelHost` 的说明），因此放在提交后的 effect 里。
+    //
+    // 【为什么卸载时**不**销毁宿主】`useMemo` 会把宿主元素缓存到 `form.id` 变化
+    // 为止，而销毁它（`releasePanelHost` 会把它移出文档并注销）之后，缓存里的
+    // 引用仍指向那个已脱离文档的 div —— 面板会被渲染到看不见的地方。开发模式下
+    // `StrictMode` 会跑一次"挂载 → 清理 → 再挂载"，必然踩中这个坑；生产环境下
+    // 任何导致本组件卸载再挂载的重排也会踩中。
+    //
+    // 宿主因此是**会话级**的容器：只要窗体还存在于布局里，它就留着（关掉面板时
+    // 停泊在视口外）。窗体总数受面板注册表约束，不会无限增长。
+    useEffect(() => {
+        notifyPanelHosts();
+    }, [form.id]);
 
     const definition = getPanel(form.panelId);
     if (!definition) return null;

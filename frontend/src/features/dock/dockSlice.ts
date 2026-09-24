@@ -88,6 +88,19 @@ const initialState: DockState = {
     maximized: null,
 };
 
+/**
+ * 安装一份布局：归一化之后补上"已注册但布局里没有"的面板记录。
+ *
+ * 【为什么必须补】窗体 id 是持久化 JSON 的一部分（将来公开 API 与用户共享的
+ * 预设都要引用它），因此它必须稳定且可预测。少了这一步，`normalizeDockLayout`
+ * 会退回到 `createDefaultDockLayout()`（只含两个主窗体），于是用户打开文件
+ * 浏览器时会**新建**一个 `fileBrowser:2` 而不是复用既有的 `fileBrowser` 记录 ——
+ * 布局文件里就会出现同一面板的两个 id，外部引用随之失效。
+ */
+function installLayout(layout: DockLayout): DockLayout {
+    return ensureRegisteredPanels(layout);
+}
+
 /** 浮动窗的默认几何：错开摆放，避免新浮窗完全叠在一起。 */
 function defaultFloatGeometry(formId: string, cascadeIndex: number): DockFloatGeometry {
     const panel = getPanel(formId.split(":")[0]);
@@ -109,7 +122,7 @@ const dockSlice = createSlice({
             action: PayloadAction<{ settings?: DockSettings | null; layout?: unknown }>,
         ) {
             const raw = action.payload ?? {};
-            state.layout = normalizeDockLayout(raw.layout);
+            state.layout = installLayout(normalizeDockLayout(raw.layout));
             state.settings = normalizeDockSettings(raw.settings);
             state.hydrated = true;
         },
@@ -132,7 +145,7 @@ const dockSlice = createSlice({
             state.settings = normalizeDockSettings({ ...state.settings, ...action.payload });
         },
         setDockLayout(state, action: PayloadAction<unknown>) {
-            state.layout = normalizeDockLayout(action.payload);
+            state.layout = installLayout(normalizeDockLayout(action.payload));
         },
         resetDockLayout(state) {
             state.layout = ensureRegisteredPanels(createDefaultDockLayout());

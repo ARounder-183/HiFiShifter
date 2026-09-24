@@ -88,7 +88,9 @@ export function registerBuiltinPanels(): void {
 
     registerPanel({
         id: PANEL_UNDO_HISTORY,
-        titleKey: "undo_history",
+        // 复用既有键：撤销历史面板的标题早就有 i18n 词条，另起一个 `undo_history`
+        // 会得到一个查不到的键（表现为菜单里显示 "undefined"）。
+        titleKey: "undo_history_title",
         singleton: true,
         defaultWidth: 420,
         defaultHeight: 420,

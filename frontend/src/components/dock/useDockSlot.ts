@@ -34,8 +34,13 @@ export function panelFallbackSize(panelId: string): { w: number; h: number } {
 export function useDockSlot(formId: string | null): React.RefObject<HTMLDivElement | null> {
     const slotRef = useRef<HTMLDivElement | null>(null);
     const forms = useAppSelector((s) => s.dock.layout.forms);
-    // 宿主集合变化（新窗体首次出现）时重试搬家。
-    useSyncExternalStore(subscribePanelHosts, getPanelHostVersion, getPanelHostVersion);
+    // 宿主集合变化（新窗体首次出现）时必须重试搬家，因此版本号要进 effect 依赖：
+    // 少了它，"面板挂载晚于槽位渲染"的那一次就永远不会把宿主搬进来。
+    const hostVersion = useSyncExternalStore(
+        subscribePanelHosts,
+        getPanelHostVersion,
+        getPanelHostVersion,
+    );
     const previousRef = useRef<string | null>(null);
 
     useLayoutEffect(() => {
@@ -54,7 +59,7 @@ export function useDockSlot(formId: string | null): React.RefObject<HTMLDivEleme
         acquirePanelHost(formId);
         attachPanelHost(formId, slot);
         previousRef.current = formId;
-    }, [formId, forms]);
+    }, [formId, forms, hostVersion]);
 
     // 槽位卸载（面板关闭 / 树结构变化）时把宿主送回停泊区：否则宿主留在一个
     // 已脱离文档的槽位里，再也不会被复用。

@@ -141,11 +141,10 @@ function resolveTabIndex(tabsetId: string, x: number): number | null {
 
 function onPointerMove(event: PointerEvent): void {
     if (!session || event.pointerId !== session.pointerId) return;
-    const state = getDockDragState();
     const x = event.clientX;
     const y = event.clientY;
 
-    if (!state) {
+    if (!getDockDragState()) {
         const distance = Math.hypot(x - session.startX, y - session.startY);
         if (distance < DRAG_THRESHOLD_PX) return;
         beginDockDrag({
@@ -157,7 +156,10 @@ function onPointerMove(event: PointerEvent): void {
             dockIntent: isDockModifierDown(event),
             floatRect: session.mode === "float" ? session.floatStart : null,
         });
-        return;
+        // 【刻意不 return】越过阈值的这一次移动同样要解析落点。否则：
+        // 1) 首帧的落点提示会晚一帧才出现；
+        // 2) 指针一次跨越大段距离（触控板快速甩动、事件合并）时就再没有第二次
+        //    移动事件，落点永远是 null —— 表现为"按住修饰键拖了却没停靠"。
     }
 
     const dockIntent = isDockModifierDown(event);

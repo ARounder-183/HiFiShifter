@@ -56,6 +56,11 @@ function ensureParking(): HTMLDivElement {
  * 取得（必要时创建）窗体的宿主元素。
  *
  * 幂等：同一个 formId 永远拿到同一个元素 —— 这正是"React 不重挂载"的前提。
+ *
+ * 【刻意不在此通知订阅者】本函数会在**渲染期**被调用（`PanelMount` 需要宿主
+ * 才能在本次渲染里建 portal）。在渲染期唤醒别的组件的订阅，会触发 React 的
+ * "渲染另一个组件时更新状态"告警。通知改由两个提交后时机负责：`PanelMount`
+ * 的 effect（`notifyPanelHosts`）与 `releasePanelHost`。
  */
 export function acquirePanelHost(formId: string): HTMLDivElement {
     const existing = hosts.get(formId);
@@ -67,8 +72,16 @@ export function acquirePanelHost(formId: string): HTMLDivElement {
     host.style.cssText = "width:100%;height:100%;min-width:0;min-height:0;overflow:hidden;";
     hosts.set(formId, host);
     ensureParking().appendChild(host);
-    notify();
     return host;
+}
+
+/**
+ * 通知订阅者"宿主集合变了"。
+ *
+ * 只允许在提交后（effect / 事件回调）调用，见 `acquirePanelHost` 的说明。
+ */
+export function notifyPanelHosts(): void {
+    notify();
 }
 
 export function getPanelHost(formId: string): HTMLDivElement | undefined {
@@ -118,7 +131,13 @@ export function parkPanelHost(formId: string, fallback: { w: number; h: number }
     if (host.parentElement !== element) element.appendChild(host);
 }
 
-/** 释放宿主（窗体被彻底移除时）。 */
+/**
+ * 彻底释放宿主（窗体被永久移除时，例如将来的插件卸载）。
+ *
+ * 【不要从 `PanelMount` 的 effect 清理里调用】宿主元素被 `useMemo` 缓存着，
+ * 销毁后缓存引用会指向已脱离文档的 div，面板就此隐形（`StrictMode` 的双调用
+ * 必然触发）。关闭面板只需把宿主停泊起来 —— 见 `parkPanelHost`。
+ */
 export function releasePanelHost(formId: string): void {
     const host = hosts.get(formId);
     if (!host) return;
