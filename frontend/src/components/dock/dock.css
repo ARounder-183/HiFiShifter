@@ -441,18 +441,23 @@ body[data-dock-dragging="true"] iframe {
     transition: background 90ms linear;
 }
 
+/*
+ * 竖直沟槽（时间轴的轨道头宽度、参数编辑器的琴键轴宽度）。
+ *
+ * 【命中区必须完全落在**被调整的那一侧**】它是一条 5px 的窄条，用负外边距把自身
+ * 挪到边界上、且不占布局宽度（边界位置因此不受它影响）。此前用 `::after` 把命中区
+ * 向两侧各扩 3px（共 11px），向右扩的那部分**盖住了时间轴内容区的最左侧** ——
+ * 用户点不到工程开头的几像素，也就无法把播放头跳到 0（用户报告"完全没法跳到最
+ * 开头"）。现在命中区就是它自己那 5px，且整体落在**轨道头一侧**：时间轴从边界
+ * 像素开始完全可点。
+ */
 .hs-dock-gutter[data-dir="col"] {
     width: 5px;
     cursor: col-resize;
-    margin-left: -2px;
-    margin-right: -3px;
+    /* 整个条落在轨道头一侧（右侧不留任何覆盖）：`-5px` 把它挪进头部最后 5px。 */
+    margin-left: -5px;
+    margin-right: 0;
     z-index: 5;
-}
-
-.hs-dock-gutter[data-dir="col"]::after {
-    content: "";
-    position: absolute;
-    inset: 0 -3px;
 }
 
 .hs-dock-gutter[data-dir="row"] {
