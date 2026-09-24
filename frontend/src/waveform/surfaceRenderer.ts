@@ -217,6 +217,14 @@ export class WebGl2WaveformRenderer implements WaveformSurfaceRenderer {
     private readonly colorLocation: number;
     /** 已上传 GPU 的顶点数（`drawArrays` 的 count），供 `repaint` 复用。 */
     private uploadedVertexCount = 0;
+    /**
+     * 顶点缓冲的**容量**（浮点元素个数，非字节）。
+     *
+     * 波形几何只在重建时变化，重建之间的 `repaint()` 完全不碰缓冲。因此上传
+     * 应当**就地覆盖**已有缓冲而不是每次重新分配：`bufferData` 会触发驱动侧的
+     * 缓冲重分配/orphaning，而 `bufferSubData` 只在容量足够时写入。
+     */
+    private bufferCapacity = 0;
 
     constructor(canvas: HTMLCanvasElement) {
         this.canvas = canvas;
@@ -331,9 +339,35 @@ export class WebGl2WaveformRenderer implements WaveformSurfaceRenderer {
         // 改用展开后的等宽四边形（宽 = waveformColumnWidthDevicePx(dpr) 物理
         // 像素），与 Canvas2D 回退路径覆盖一致。
         const quads = expandLineSegmentsToQuads(geometry.vertices, dpr);
-        gl.bufferData(gl.ARRAY_BUFFER, quads, gl.DYNAMIC_DRAW);
-        this.uploadedVertexCount = quads.length / 6;
+        this.uploadQuads(quads);
         gl.drawArrays(gl.TRIANGLES, 0, this.uploadedVertexCount);
+    }
+
+    /**
+     * 把展开后的四边形顶点写入 GPU 缓冲，**复用已有缓冲**。
+     *
+     * 流程：容量不足时按倍增策略重新分配一次（`bufferData`）→ 就地写入
+     * （`bufferSubData`）→ 记录本次顶点数供 `repaint()` 复用。
+     *
+     * 【为什么按倍增而非精确尺寸】精确尺寸会让每次几何变大（缩放/新增 clip）
+     * 都重分配一次；倍增把重分配摊还到常数次，代价只是多占一点显存。
+     *
+     * @param quads 展开后的四边形顶点（每段 6 顶点 × 6 float）。
+     */
+    private uploadQuads(quads: Float32Array): void {
+        const gl = this.gl;
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer);
+        if (this.bufferCapacity < quads.length) {
+            const capacity = Math.max(quads.length, this.bufferCapacity * 2, 4096);
+            gl.bufferData(
+                gl.ARRAY_BUFFER,
+                capacity * Float32Array.BYTES_PER_ELEMENT,
+                gl.DYNAMIC_DRAW,
+            );
+            this.bufferCapacity = capacity;
+        }
+        gl.bufferSubData(gl.ARRAY_BUFFER, 0, quads);
+        this.uploadedVertexCount = quads.length / 6;
     }
 
     /**
