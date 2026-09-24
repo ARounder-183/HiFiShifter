@@ -72,11 +72,29 @@ function DockSplit({ node }: { node: DockSplitNode }) {
 
 function paneStyle(node: DockSplitNode, side: "a" | "b"): React.CSSProperties {
     const isA = side === "a";
+    const horizontal = node.dir === "row";
+    // 自由侧的最小尺寸：保证它**永远不会被固定侧挤成 0**。
+    //
+    // 【为什么必须给】固定侧若用 `flex: 0 0 <px>`（不可收缩），窗口比它窄时它
+    // 照样占满 `px`，自由侧就被压到 0 —— 表现为"停靠一个侧栏之后，时间轴整个
+    // 不见了"。固定尺寸来自用户拖拽或默认落点，而窗口可以被缩到任意小，两者
+    // 必须有一个能让步：让固定侧让步（它只是侧栏），并给自由侧兜一个下限。
+    const freeMin = horizontal ? { minWidth: MIN_PANE_PX } : { minHeight: MIN_PANE_PX };
+
     if (node.fixed) {
-        // 固定侧锁像素，另一侧吸收窗口缩放的剩余量。
-        return node.fixed.side === side ? { flex: `0 0 ${node.fixed.px}px` } : { flex: "1 1 0" };
+        // 固定侧锁像素，但允许在空间不足时收缩（`flex-shrink: 1`）；自由侧
+        // `basis: 0` 不参与收缩，因此全部收缩量都落在固定侧。
+        return node.fixed.side === side
+            ? { flex: `0 1 ${node.fixed.px}px`, minWidth: 0, minHeight: 0 }
+            : { flex: "1 1 0", ...freeMin };
     }
-    return { flexGrow: isA ? node.ratio : 1 - node.ratio, flexShrink: 1, flexBasis: 0 };
+    return {
+        flexGrow: isA ? node.ratio : 1 - node.ratio,
+        flexShrink: 1,
+        flexBasis: 0,
+        minWidth: 0,
+        minHeight: 0,
+    };
 }
 
 /**

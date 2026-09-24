@@ -1,16 +1,19 @@
 import { beforeEach, test } from "vitest";
 
 import reducer, {
+    closeForm,
     dockFormTo,
+    floatForm,
     hydrateDock,
     markFormsMounted,
+    mergeFormInto,
+    openPanel,
     setDockLayout,
     setGutterSize,
+    splitFormTo,
     syncRegisteredPanels,
     toggleMaximizeActive,
-    floatForm,
-    closeForm,
-    openPanel,
+    toggleTabsetCollapsed,
 } from "./dockSlice.ts";
 import { registerPanel, resetPanelRegistryForTests } from "./panelRegistry.ts";
 import { findTabsetOfForm, isFormVisible } from "./dockTree.ts";
@@ -305,6 +308,101 @@ test("features/dock/dockSlice.test.ts scripted checks", async () => {
             [320, 240],
             "undocking restores the remembered float size",
         );
+    }
+
+    // ── 浮窗停靠后必须仍然可见（用户报告："停靠以后窗口没有被正确展示"）──
+    //
+    // 浮动窗体不占布局树，`moveForm` 因此"没有源"。早期实现在这种情况下原样返回
+    // 树，而调用方已经把 `floating` 清成 false 并移出 `floatOrder` —— 窗体既不在
+    // 树上也不再浮动，`isFormVisible` 为假，窗口凭空消失，用户只能手动重开。
+    // 拖拽浮窗标题栏停靠、点浮窗上的"重新停靠"，走的都是这条路径。
+    {
+        const dockedTabsetId = () => {
+            const state = reducer(undefined, syncRegisteredPanels());
+            return state;
+        };
+
+        // ① 拖拽停靠（合并进某个组）
+        {
+            let state = dockedTabsetId();
+            state = reducer(state, floatForm({ formId: "notebook" }));
+            assertEqual(isFormVisible(state.layout, "notebook"), true, "floating to start with");
+            const target = findTabsetOfForm(state.layout.tree, "timeline");
+            assert(target !== null, "the timeline tab group exists");
+            state = reducer(
+                state,
+                mergeFormInto({ formId: "notebook", referenceFormId: "timeline" }),
+            );
+            assertEqual(state.layout.forms.notebook.floating, false, "no longer floating");
+            assertEqual(
+                isFormVisible(state.layout, "notebook"),
+                true,
+                "docking a floating form must keep it visible",
+            );
+            assertEqual(
+                findTabsetOfForm(state.layout.tree, "notebook")?.id,
+                target!.id,
+                "and it lands in the requested group",
+            );
+        }
+
+        // ② 拖拽停靠（在某侧拆分）
+        {
+            let state = reducer(undefined, syncRegisteredPanels());
+            state = reducer(state, floatForm({ formId: "notebook" }));
+            state = reducer(
+                state,
+                splitFormTo({ formId: "notebook", referenceFormId: "timeline", side: "right" }),
+            );
+            assertEqual(state.layout.forms.notebook.floating, false, "no longer floating");
+            assertEqual(
+                isFormVisible(state.layout, "notebook"),
+                true,
+                "splitting a floating form in must keep it visible",
+            );
+        }
+
+        // ③ 浮窗标题栏上的"重新停靠"按钮
+        {
+            let state = reducer(undefined, syncRegisteredPanels());
+            state = reducer(state, floatForm({ formId: "notebook" }));
+            state = reducer(state, openPanel({ panelId: "fileBrowser" }));
+            const main = findTabsetOfForm(state.layout.tree, "timeline");
+            assert(main !== null, "main group exists");
+            state = reducer(
+                state,
+                dockFormTo({ formId: "notebook", target: { kind: "tab", tabsetId: main!.id } }),
+            );
+            assertEqual(
+                isFormVisible(state.layout, "notebook"),
+                true,
+                "the redock button must keep the form visible",
+            );
+        }
+
+        // ④ 停靠进一个**折叠**的组：必须自动展开，否则"停靠成功"却仍然看不见
+        {
+            let state = reducer(undefined, syncRegisteredPanels());
+            state = reducer(state, floatForm({ formId: "notebook" }));
+            const target = findTabsetOfForm(state.layout.tree, "paramEditor");
+            assert(target !== null, "param editor group exists");
+            state = reducer(state, toggleTabsetCollapsed({ tabsetId: target!.id }));
+            assertEqual(
+                findTabsetOfForm(state.layout.tree, "paramEditor")?.collapsed,
+                true,
+                "precondition: the target group is collapsed",
+            );
+            state = reducer(
+                state,
+                dockFormTo({ formId: "notebook", target: { kind: "tab", tabsetId: target!.id } }),
+            );
+            assertEqual(isFormVisible(state.layout, "notebook"), true, "the form is visible");
+            assertEqual(
+                findTabsetOfForm(state.layout.tree, "notebook")?.collapsed,
+                false,
+                "docking expands the target group",
+            );
+        }
     }
 
     // ── 最大化：整片工作区只留当前窗体，再按一次完整还原 ───────────

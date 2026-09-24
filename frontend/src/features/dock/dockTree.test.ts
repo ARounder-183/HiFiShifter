@@ -4,6 +4,8 @@ import {
     addFormToTabset,
     clampRatio,
     collectDockedForms,
+    dockForm,
+    findZone,
     collectTabsets,
     collectVisibleForms,
     findParentSplit,
@@ -173,15 +175,6 @@ test("features/dock/dockTree.test.ts scripted checks", async () => {
         );
     }
 
-    // ── 移动不存在的窗体：树不变 ─────────────────────────────────
-    {
-        const tree = split("z1", tabset("z2", ["a"]), tabset("z3", ["b"]));
-        assert(
-            moveForm(tree, "zzz", { kind: "tab", tabsetId: "z3" }) === tree,
-            "move unknown is a no-op",
-        );
-    }
-
     // ── 分割比例与固定像素 ──────────────────────────────────────
     {
         const tree = split("z1", tabset("z2", ["a"]), tabset("z3", ["b"]));
@@ -291,5 +284,74 @@ test("features/dock/dockTree.test.ts scripted checks", async () => {
         assertEqual(collectVisibleForms(layout).sort(), ["a", "b"], "visible = docked + floating");
         assertEqual(findTabsetOfForm(layout.tree, "a")?.id, "z2", "locates owning tabset");
         assertEqual(findTabsetOfForm(layout.tree, "c"), null, "closed form has no tabset");
+    }
+
+    // ── 源不在树上（浮动态）：必须照常插入，而不是原样返回 ─────────
+    //
+    // 这是"停靠以后窗口消失"的根因：浮动窗体不占布局树，早期实现直接
+    // `return tree`，而调用方已经把 floating 清成 false 并移出 floatOrder，
+    // 于是窗体既不在树上也不再浮动 —— `isFormVisible` 为假，窗口凭空消失。
+    {
+        const tree = split("z1", tabset("z2", ["a"]), tabset("z3", ["b"]));
+
+        const moved = moveForm(tree, "floating-one", { kind: "tab", tabsetId: "z3" });
+        assertEqual(
+            shape(moved),
+            "([a]|[b,floating-one])",
+            "a floating form is inserted, not dropped",
+        );
+        assertEqual(
+            findTabsetOfForm(moved, "floating-one")?.active,
+            "floating-one",
+            "and it becomes the active tab",
+        );
+
+        const splitted = moveForm(tree, "floating-one", {
+            kind: "split",
+            tabsetId: "z2",
+            side: "bottom",
+        });
+        assertEqual(shape(splitted), "(([a]|[floating-one])|[b])", "a floating form can split in");
+
+        // 源不在树上且目标已消失：退化为并入第一个组，窗体不丢。
+        const rescued = moveForm(tree, "floating-one", { kind: "tab", tabsetId: "z-gone" });
+        assertEqual(shape(rescued), "([a,floating-one]|[b])", "falls back to the first group");
+    }
+
+    // ── `moveForm` 的契约：把窗体放到目标位置（源不在树上 = 没有源可摘）──
+    //
+    // 因此"树上没有这个窗体"不再等于"无操作"，而是"直接插入"。调用方（各停靠
+    // reducer）都会先确认窗体记录存在；即便直接调用传入未知 id，归一化也会把
+    // 它当作未注册窗体剪掉。
+    {
+        const tree = split("z1", tabset("z2", ["a"]), tabset("z3", ["b"]));
+        assertEqual(
+            shape(moveForm(tree, "zzz", { kind: "tab", tabsetId: "z3" })),
+            "([a]|[b,zzz])",
+            "an unplaced form is inserted rather than ignored",
+        );
+    }
+
+    // ── dockForm：不变式"停靠后必然在树上，且目标组已展开" ───────────
+    {
+        const tree = split("z1", tabset("z2", ["a"]), tabset("z3", ["b"]));
+
+        // 目标失效 + 源是浮动态 → 仍必须落在树上。
+        const rescued = dockForm(tree, "floating-one", { kind: "tab", tabsetId: "z-gone" });
+        assertEqual(
+            findTabsetOfForm(rescued, "floating-one") !== null,
+            true,
+            "dockForm guarantees the form ends up in the tree",
+        );
+
+        // 往折叠的组里停靠 → 自动展开（否则"停靠成功"却仍然看不见）。
+        const collapsed = setTabsetCollapsed(tree, "z3", true);
+        const collapsedNode = findZone(collapsed, "z3") as DockTabsetNode;
+        assertEqual(collapsedNode.collapsed, true, "precondition: the group is collapsed");
+
+        const docked = dockForm(collapsed, "floating-one", { kind: "tab", tabsetId: "z3" });
+        const dockedNode = findZone(docked, "z3") as DockTabsetNode;
+        assertEqual(dockedNode.collapsed, false, "docking into a collapsed group expands it");
+        assertEqual(dockedNode.active, "floating-one", "and the docked form is shown");
     }
 });

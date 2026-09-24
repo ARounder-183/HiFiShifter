@@ -24,9 +24,9 @@ import {
     type DockPlacement,
 } from "./dockSchema";
 import {
+    dockForm,
     findTabsetOfForm,
     findZone,
-    moveForm,
     removeForm,
     removeZone,
     replaceTabset,
@@ -214,17 +214,7 @@ const dockSlice = createSlice({
             action: PayloadAction<{ formId: string; target: DockInsertTarget; focus?: boolean }>,
         ) {
             const { formId, target, focus } = action.payload;
-            const form = state.layout.forms[formId];
-            if (!form) return;
-            // 只清 `floating`，保留 `float` 几何：下次拆下来要回到用户当初调好的浮窗尺寸。
-            const forms = { ...state.layout.forms, [formId]: { ...form, floating: false } };
-            const tree = moveForm(state.layout.tree, formId, target);
-            state.layout = {
-                ...state.layout,
-                forms,
-                tree,
-                floatOrder: state.layout.floatOrder.filter((id) => id !== formId),
-            };
+            if (!dockFormInto(state, formId, target)) return;
             if (focus !== false) state.activeFormId = formId;
         },
         /** 浮动（从树上摘除，记录几何）。 */
@@ -294,37 +284,14 @@ const dockSlice = createSlice({
                 findTabsetIdOf(state.layout, referenceFormId) ?? "",
             );
             if (!tabset || tabset.t !== "tabset") return;
-            const tree = moveForm(state.layout.tree, formId, {
-                kind: "split",
-                tabsetId: tabset.id,
-                side,
-            });
-            state.layout = {
-                ...state.layout,
-                tree,
-                forms: {
-                    ...state.layout.forms,
-                    [formId]: { ...state.layout.forms[formId], float: null },
-                },
-                floatOrder: state.layout.floatOrder.filter((id) => id !== formId),
-            };
-            state.activeFormId = formId;
+            dockFormInto(state, formId, { kind: "split", tabsetId: tabset.id, side });
         },
         /** 合并到目标组（拖动到中央时用）。 */
         mergeFormInto(state, action: PayloadAction<{ formId: string; referenceFormId: string }>) {
             const { formId, referenceFormId } = action.payload;
             const tabsetId = findTabsetIdOf(state.layout, referenceFormId);
             if (!tabsetId) return;
-            state.layout = {
-                ...state.layout,
-                tree: moveForm(state.layout.tree, formId, { kind: "tab", tabsetId }),
-                forms: {
-                    ...state.layout.forms,
-                    [formId]: { ...state.layout.forms[formId], float: null },
-                },
-                floatOrder: state.layout.floatOrder.filter((id) => id !== formId),
-            };
-            state.activeFormId = formId;
+            dockFormInto(state, formId, { kind: "tab", tabsetId });
         },
         /** 把整个标签组连同它的标签搬到工作区某一侧（拖动组内空白处时用）。 */
         moveTabsetToRootSide(
@@ -446,6 +413,33 @@ const dockSlice = createSlice({
         },
     },
 });
+
+/**
+ * **停靠的唯一出口**。
+ *
+ * 三件事必须同时成立，否则用户就会看到"停靠之后窗口没被正确展示"：
+ * 1. 窗体真的落到了布局树上（`dockForm` 负责搬运 + 兜底 + 展开折叠组）；
+ * 2. `floating` 被清掉（否则它同时"在树上"又"在浮动"，两个槽位抢同一个宿主，
+ *    内容会落到其中一边，另一边空白）；
+ * 3. `float` 几何**保留**（那是"下次拆下来用多大"的记忆，与"此刻是否浮动"无关）。
+ *
+ * 把这三件事收在一个函数里，是因为它们曾经散落在三个 reducer 里，而其中一处
+ * （`mergeFormInto`）漏了第 2 条又多做了一次"清几何"—— 正是本次缺陷的来源。
+ *
+ * @returns 是否真的停靠了（窗体不存在时返回 false）。
+ */
+function dockFormInto(state: DockState, formId: string, target: DockInsertTarget): boolean {
+    const form = state.layout.forms[formId];
+    if (!form) return false;
+    state.layout = {
+        ...state.layout,
+        tree: dockForm(state.layout.tree, formId, target),
+        forms: { ...state.layout.forms, [formId]: { ...form, floating: false } },
+        floatOrder: state.layout.floatOrder.filter((id) => id !== formId),
+    };
+    state.activeFormId = formId;
+    return true;
+}
 
 /** 在整棵树上把包含 formId 的标签组切到该窗体。 */
 function setActiveTabEverywhere(node: DockLayout["tree"], formId: string): DockLayout["tree"] {

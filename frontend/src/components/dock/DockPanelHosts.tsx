@@ -43,7 +43,12 @@ function PanelMount({ form }: { form: DockForm }) {
     }, [form.id]);
 
     const definition = getPanel(form.panelId);
-    if (!definition) return null;
+    if (!definition) {
+        // 面板未注册（插件被卸载、布局来自更新的版本）：**不能返回 null** ——
+        // 槽位已经把宿主搬进来了，返回 null 只会留下一片没有任何解释的空白。
+        // 空白必须能自我解释，否则用户看到的就是"停靠之后窗口不见了"。
+        return createPortal(<PanelUnavailable panelId={form.panelId} />, host);
+    }
 
     // 渲染函数优先：内置面板的 props 由 `App.tsx` 提供（见 `panelRenderer`），
     // 注册表里的 `component` 只作为没有外部 props 的面板（将来的插件面板）的
@@ -70,6 +75,16 @@ function MissingPanel({ panelId }: { panelId: string }) {
     return (
         <div className="flex h-full w-full items-center justify-center bg-qt-window p-4 text-center text-xs text-qt-text-muted">
             {panelId}
+        </div>
+    );
+}
+
+/** 面板未注册时的说明界面（空白槽位必须能自我解释）。 */
+function PanelUnavailable({ panelId }: { panelId: string }) {
+    return (
+        <div className="flex h-full w-full flex-col items-center justify-center gap-1 bg-qt-window p-4 text-center">
+            <div className="text-xs text-qt-text">{panelId}</div>
+            <div className="text-xs text-qt-text-muted">panel unavailable</div>
         </div>
     );
 }

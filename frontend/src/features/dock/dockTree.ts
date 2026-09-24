@@ -412,10 +412,25 @@ export function insertForm(tree: DockNode, formId: string, target: DockInsertTar
  * 【为什么必须一次性完成】分两步做会在中间态触发规范化 —— 若窗体是源标签组
  * 的最后一个标签，源组会被剪掉，此时若目标组恰好就是被剪掉的那个（同组内
  * 拖拽重排），插入就会落空。这里在同一次调用里算完，只把最终结果交给规范化。
+ *
+ * 【源不在树上时必须照常插入】浮动窗体不占布局树，因此它"没有源"——早期实现在
+ * 这里直接 `return tree`，而调用方（`dockFormTo` 等）已经把 `floating` 清成 false
+ * 并把它移出 `floatOrder`，于是窗体既不在树上也不再浮动，`isFormVisible` 为假，
+ * **窗口凭空消失**（用户报告："停靠以后窗口没有被正确展示"，需手动重开）。
+ * 把浮窗拖到停靠区、点浮窗标题栏的"重新停靠"，走的都是这条路径。
+ *
+ * 返回的树保证包含该窗体（除非树本身为空，那是不可渲染状态，由上层兜底）。
  */
 export function moveForm(tree: DockNode, formId: string, target: DockInsertTarget): DockNode {
     const source = collectTabsets(tree).find((tabset) => tabset.tabs.includes(formId));
-    if (!source) return tree;
+
+    // 无源（浮动态）：没有"摘除"这一步，直接插入。
+    if (!source) {
+        if (findZone(tree, target.tabsetId)) return insertForm(tree, formId, target);
+        // 目标组已不存在（浮窗被拖到刚被剪掉的区域）：退化为并入第一个标签组。
+        const fallback = collectTabsets(tree)[0];
+        return fallback ? addFormToTabset(tree, fallback.id, formId) : tree;
+    }
 
     // 同组内重排：只改顺序，不摘不插，避免组被剪掉的中间态。
     if (target.kind === "tab" && target.tabsetId === source.id) {
@@ -434,6 +449,35 @@ export function moveForm(tree: DockNode, formId: string, target: DockInsertTarge
     }
 
     return insertForm(pruned, formId, target);
+}
+
+/**
+ * 把窗体停靠到目标位置，并保证结果**一定可见**。
+ *
+ * 【为什么要有这个包装，而不是让各处直接调 `moveForm`】"停靠"这件事的语义是
+ * "这个窗体现在住在布局树里"，而 `moveForm` 只负责搬运。搬运可能因为各种原因
+ * 落空（源是浮动态、目标组已消失、树被剪空），而调用方紧接着就会清掉 `floating`
+ * —— 一旦落空，窗体就既不在树上也不浮动，直接消失。把"搬运 + 兜底 + 展开"收在
+ * 一个函数里，这条不变式就只有一处实现，将来新增停靠入口也不会漏。
+ *
+ * 另外顺带展开目标组：往一个折叠的标签组里放窗口，用户的意图显然是"我要看它"，
+ * 让它停在折叠态等于什么都没发生。
+ */
+export function dockForm(tree: DockNode, formId: string, target: DockInsertTarget): DockNode {
+    let next = moveForm(tree, formId, target);
+
+    // 兜底：搬运没落地（源不在树上且目标也失效等）→ 并入第一个标签组。
+    if (!findTabsetOfForm(next, formId)) {
+        const fallback = collectTabsets(next)[0];
+        if (!fallback) return next;
+        next = addFormToTabset(next, fallback.id, formId);
+    }
+
+    // 目标组若处于折叠态，展开它 —— 否则窗口"停靠成功"却仍然看不见。
+    const host = findTabsetOfForm(next, formId);
+    if (host?.collapsed) next = setTabsetCollapsed(next, host.id, false);
+
+    return next;
 }
 
 /** 设置分割比例（`fixed` 非空时表示某一侧固定像素）。 */
