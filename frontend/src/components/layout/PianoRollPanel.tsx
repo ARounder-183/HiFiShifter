@@ -889,7 +889,7 @@ export const PianoRollPanel: React.FC<{
     // 边缘平滑度滑块的滚轮步进：React 17+ 的根容器 wheel 监听是 passive，
     // JSX onWheel 里的 preventDefault 无效（伴随干预警告），必须走原生
     // 非 passive 监听（与主画布滚轮路径同模式）。
-    const edgeSmoothnessWheelRef = useNonPassiveWheel<HTMLInputElement>((e) => {
+    const attachEdgeSmoothnessWheel = useNonPassiveWheel<HTMLInputElement>((e) => {
         e.preventDefault();
         const fine = isModifierActive(paramFineAdjustKb, e.nativeEvent);
         const step = fine ? 1 : 5;
@@ -7267,7 +7267,7 @@ export const PianoRollPanel: React.FC<{
                                 {tAny("edge_smoothness_short")}:
                             </Text>
                             <input
-                                ref={edgeSmoothnessWheelRef}
+                                ref={attachEdgeSmoothnessWheel}
                                 className="qt-range"
                                 type="range"
                                 min={0}

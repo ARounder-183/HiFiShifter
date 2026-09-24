@@ -160,7 +160,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
     const isReplaceMode = mode === "replaceMidi";
     // BPM 数字输入的滚轮调值：内容可滚动时 preventDefault 必须用非被动
     // 原生监听才生效（React 合成 onWheel 上的 preventDefault 是空操作）。
-    const specifiedBpmWheelRef = useNonPassiveWheel<HTMLInputElement>((e) => {
+    const attachSpecifiedBpmWheel = useNonPassiveWheel<HTMLInputElement>((e) => {
         e.preventDefault();
         const dir = e.deltaY < 0 ? 1 : -1;
         const next = specifiedBpm + dir;
@@ -1051,7 +1051,7 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                                     {noteBpmMode === "specified" && !importTempoMapEnabled && (
                                         <Flex gap="2" align="center" className="ml-5 mt-1">
                                             <input
-                                                ref={specifiedBpmWheelRef}
+                                                ref={attachSpecifiedBpmWheel}
                                                 type="number"
                                                 className="w-20 px-2 py-1 text-xs rounded border border-qt-border bg-qt-base text-qt-text"
                                                 value={specifiedBpm}

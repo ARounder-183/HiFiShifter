@@ -769,8 +769,21 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
     // - `selectedClipId` / `multiSelectedClipIds`：选中描边（白 2px）
     // - `activeGroupIds` / `disabledGroupIds`：编组激活的金色描边
     // - `silenceSegmentsByClipId`：静音检测预览的红色覆盖层
-    React.useEffect(() => {
-        localHostRef.current?.invalidateScene();
+    //
+    // 【为什么是 layout effect 且立即绘制，而不是被动 effect 标脏】
+    // 可见内容来自两个来源：React/DOM 的**标尺刻度文本**，与内核 GL 的**网格线**
+    // （两者都按 `buildTimelineTicks` 排布，但一个走 React 提交、一个走 rAF）。
+    // 被动 effect 在浏览器绘制之后才跑，于是"文本已是新刻度、网格还是旧刻度"会
+    // 被真实绘制出来一帧 —— 连续手势（滚轮调 BPM）下这帧差异每帧重复，肉眼就是
+    // **标尺与网格一起抽搐**（两者相对错动）。改成 layout effect + `paintNow()`
+    // 后，内核的几何重建与 DOM 文本落在**同一个任务、同一次绘制**里，与缩放落地
+    // 的既有做法（`TimelinePanel` 的缩放 layout effect）完全一致。
+    React.useLayoutEffect(() => {
+        const host = localHostRef.current;
+        if (!host) return;
+        host.invalidateScene();
+        // 同一任务内提交：文本与网格同帧切换（见上方说明）。
+        host.paintNow();
     }, [
         tracks,
         clips,

@@ -49,38 +49,41 @@ const tempoMapTwoSegments: TempoMap = {
     ],
 } as unknown as TempoMap;
 
-describe("刻度身份（tick.key）", () => {
-    it("★ BPM 变化只改几何，不改身份（滚轮调 BPM 不重建刻度子树）", () => {
+describe("BPM 变化下的刻度序列", () => {
+    /**
+     * 【为什么不再断言"身份不变"】BPM 变化在语义上**就是要平移每一条刻度**
+     * （`sec = beat × 60 / bpm`）—— 试图让身份跨 BPM 稳定是在否认这一点，上一轮
+     * 为此引入的音乐身份字段因此没有消费者。
+     *
+     * 真正要守的性质是：**序列长度（几乎）不变**，这样标尺用**位置**作 React key
+     * 时能一一复用 DOM，不会整棵重建。位置抖动（阈值处网格步长整档变化）才是需要
+     * 避免的，因此这里同时断言步长档位在小幅 BPM 变化下不跳。
+     */
+    it("★ 小幅 BPM 变化不改变刻度条数（位置 key 因此一一对应，不重建 DOM）", () => {
         const at120 = ticksAt({ pxPerSec: 100, bpm: 120 });
         const at121 = ticksAt({ pxPerSec: 100, bpm: 121 });
         expect(at120.length).toBeGreaterThan(0);
-        expect(at121.length).toBeGreaterThan(0);
+        expect(at121.length).toBe(at120.length);
 
-        const keys120 = at120.map((tick) => tick.key);
-        const keys121 = at121.map((tick) => tick.key);
-        expect(keys121).toEqual(keys120);
-
-        // 几何确实变了（否则说明 BPM 根本没影响刻度，用例失去意义）。
+        // 几何确实变了（否则说明 BPM 没影响刻度，用例失去意义）。
         const movedCount = at120.filter(
             (tick, index) => Math.abs(tick.contentPx - at121[index].contentPx) > 0.5,
         ).length;
         expect(movedCount).toBeGreaterThan(0);
     });
 
-    it("身份在整条序列内唯一", () => {
-        for (const pxPerSec of [8, 100, 1600]) {
-            const keys = ticksAt({ pxPerSec }).map((tick) => tick.key);
-            expect(new Set(keys).size).toBe(keys.length);
+    /**
+     * 放大时视口覆盖的**秒数**变少，因此条数并不随缩放单调 —— 这里只钉住真正
+     * 有意义的下界：任何缩放档位下序列都非空且条数有界（不退化、不爆炸）。
+     */
+    it("任何缩放档位下刻度序列非空且条数有界", () => {
+        for (const pxPerSec of [0.5, 8, 40, 200, 800, 3200]) {
+            const count = ticksAt({ pxPerSec }).length;
+            expect({ pxPerSec, ok: count > 0 && count <= 2000 }).toEqual({
+                pxPerSec,
+                ok: true,
+            });
         }
-    });
-
-    it("Tempo Map 下身份同样只随网格变化（不随该段 BPM 变化）", () => {
-        const map = tempoMapTwoSegments;
-        const at120 = ticksAt({ pxPerSec: 60, tempoMap: map, bpm: 120 });
-        const keys = at120.map((tick) => tick.key);
-        // 两个段各自带段序号前缀，段的归属不会因为时间平移而改变。
-        expect(keys.some((key) => key.startsWith("s0:"))).toBe(true);
-        expect(keys.some((key) => key.startsWith("s1:"))).toBe(true);
     });
 });
 
@@ -90,15 +93,16 @@ describe("标签版式", () => {
         const viewportWidthPx = 1200;
         const base = ticksAt({ pxPerSec, scrollLeftPx: 0, viewportWidthPx });
         const shifted = ticksAt({ pxPerSec, scrollLeftPx: 900, viewportWidthPx });
-        const byKey = new Map(shifted.map((tick) => [tick.key, tick]));
+        // 按**秒**匹配同一刻度（刻度的时间不随窗口平移变化）。
+        const bySec = new Map(shifted.map((tick) => [Math.round(tick.sec * 1e6), tick]));
 
         let compared = 0;
         for (const tick of base) {
-            const other = byKey.get(tick.key);
+            const other = bySec.get(Math.round(tick.sec * 1e6));
             if (other === undefined) continue;
             compared += 1;
-            expect({ key: tick.key, showLabel: other.showLabel }).toEqual({
-                key: tick.key,
+            expect({ sec: tick.sec, showLabel: other.showLabel }).toEqual({
+                sec: tick.sec,
                 showLabel: tick.showLabel,
             });
         }

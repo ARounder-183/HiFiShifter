@@ -113,14 +113,18 @@ const TimeRulerMarks = React.memo(function TimeRulerMarks({
 
     return (
         <>
-            {visibleTicks.map((tick) => {
+            {visibleTicks.map((tick, tickIndex) => {
                 const left = tick.contentPx;
                 // 版式完全由生成器决定（见 `TimelineTick.labelMaxWidth`）：
                 // 渲染期不再做"与可见切片里的下一条比较"——那个判据会随滚动位置
                 // 改变，正是"标尺文字时有时无"的来源。这里只消费结果。
                 const labelMaxWidth = tick.labelMaxWidth;
                 return (
-                    <div key={tick.key} className="absolute top-0 bottom-0" style={{ left }}>
+                    // key 用**位置**而不是音乐身份：刻度全是无状态的展示节点，位置
+                    // key 让 React 永远复用同一批 DOM，只更新 left/文本。用身份 key
+                    // 时，一旦网格步长在缩放/BPM 阈值处整档变化，全部 key 同时改名 ⇒
+                    // 整棵刻度子树卸载重建 —— 连续手势下这就是一次可见的闪烁。
+                    <div key={tickIndex} className="absolute top-0 bottom-0" style={{ left }}>
                         <div
                             className="absolute top-0 bottom-0"
                             style={{

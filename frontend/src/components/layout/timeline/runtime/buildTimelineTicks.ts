@@ -58,15 +58,6 @@ export interface TimelineTick {
     readonly sec: number;
     /** 全局拍号坐标（Tempo Map 下为分段折算值）。 */
     readonly beat: number;
-    /**
-     * **音乐身份**（React key 用；跨 BPM 变化不变）。
-     *
-     * 【为什么不能用 `beat` / `sec` 当 key】`beat = sec × bpm / 60`，BPM 一变每条
-     * 刻度的 key 都变 ⇒ 整棵刻度 DOM 子树卸载重建。滚轮调 BPM 时标尺"抽搐"的
-     * 主要放大器。本字段由网格线携带（见 `TempoGridLine.key`），只随**网格本身**
-     * 变化（换网格 / 换缩放），不随 BPM 变化。
-     */
-    readonly key: string;
     /** 内容坐标 x（CSS 像素），由 axis 投影得到，网格与标尺共用。 */
     readonly contentPx: number;
     /** 是否为小节起点。 */
@@ -370,19 +361,15 @@ export function buildTimelineTicks(args: {
     // 弱线与小节线会落在同一秒（小节起点本身就是一条弱线位置），必须合并成
     // 单个刻度、小节样式优先。不去重的后果是标尺出现间距为 0 的相邻刻度，
     // 触发 labelHidden（间距 < 26px）把标签整片隐藏，只剩一堆裸竖线。
-    const merged = new Map<number, { sec: number; isBar: boolean; key?: string }>();
+    const merged = new Map<number, { sec: number; isBar: boolean }>();
     for (const line of lines) {
         const key = Math.round(line.sec * 1e6) / 1e6;
         const existing = merged.get(key);
         if (existing) {
             existing.isBar = existing.isBar || line.isBar;
-            // 合并时以小节线的身份为准（更稳定：小节边界不随弱网格步长变化），
-            // 没有小节身份时才沿用先到者。
-            if (line.isBar && line.key !== undefined) existing.key = line.key;
-            else if (existing.key === undefined && line.key !== undefined) existing.key = line.key;
             continue;
         }
-        merged.set(key, { sec: line.sec, isBar: line.isBar, key: line.key });
+        merged.set(key, { sec: line.sec, isBar: line.isBar });
     }
 
     const ticks: TimelineTick[] = [];
@@ -401,9 +388,6 @@ export function buildTimelineTicks(args: {
         ticks.push({
             sec: entry.sec,
             beat,
-            // 音乐身份缺省回退到"秒位量化"：只有在网格线未携带身份时才走到这里
-            // （例如未来的其他网格来源），退化为原来的稳定性水平，不会更差。
-            key: entry.key ?? `t:${Math.round(entry.sec * 1e6)}`,
             contentPx: secToContentPx(axis, entry.sec),
             isBarStart: entry.isBar,
             isStrongGridLine: entry.isBar,

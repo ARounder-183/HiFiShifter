@@ -579,10 +579,16 @@ export function ActionBar() {
      *
      * 【为什么用非被动原生监听】React 的 `onWheel` 是 passive 的，里面的
      * `preventDefault()` 是空操作（本仓库其它数值滚轮控件都用 `useNonPassiveWheel`
-     * 或 `useWheelScrollGuard`，唯独这里漏了）：滚轮调值会同时滚动祖先容器，产生
-     * 第二路视觉位移，并触发浏览器干预告警。
+     * 或 `useWheelScrollGuard`）：滚轮调值会同时滚动祖先容器，产生第二路视觉位移，
+     * 并触发浏览器干预告警。
      */
-    const bpmWheelRef = useNonPassiveWheel<HTMLInputElement>((e) => {
+    const attachBpmWheel = useNonPassiveWheel<HTMLInputElement>((e) => {
+        // 【必须调用】换成非被动原生监听的意义正是让这两句生效：滚轮调值不得同时
+        // 滚动祖先容器（ActionBar 自己是 overflow-x-auto），也不得被其它滚轮逻辑
+        // 顺带处理。曾经在改写监听方式时把它们一起删掉，结果滚轮既改 BPM 又滚动
+        // 容器，产生第二路视觉位移 —— 用户报告的"仍然抽搐"。
+        e.preventDefault();
+        e.stopPropagation();
         const now = performance.now();
         // 手势起点：距上一次滚轮超过 200ms，或尚未开始过手势。
         if (wheelBpmBaseRef.current === null || now - wheelBpmAtRef.current > 200) {
@@ -792,7 +798,7 @@ export function ActionBar() {
                     {t("bpm")}:
                 </Text>
                 <TextField.Root
-                    ref={bpmWheelRef}
+                    ref={attachBpmWheel}
                     size="1"
                     value={bpmText}
                     data-tooltip={

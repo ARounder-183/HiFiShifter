@@ -783,6 +783,29 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
 
     /** 防重复提交：Enter 提交后输入框卸载可能再次触发 blur；Esc 取消后同理。 */
     const inlineEditLockRef = useRef(false);
+    /**
+     * 内联输入框的滚轮调值（参考 BPM 输入框：普通 1、按住精细调整修饰键 0.1）。
+     *
+     * 【为什么必须是非被动监听】React 的 `onWheel` 是 passive 的，`preventDefault()`
+     * 无效：输入框在标尺里，滚轮会同时被时间轴的缩放 / 滚动逻辑吃掉。
+     *
+     * 语义：只改**文本里的 BPM 数字**，其余内容（拍号 / 音阶 / 用户手打的片段）
+     * 逐字符保留；同时把解析出的 BPM 应用到本地草稿，使标尺与提示实时跟随。
+     */
+    const inlineWheelRef = useNonPassiveWheel<HTMLInputElement>((e) => {
+        const id = editingPointId;
+        if (!id) return;
+        const direction = e.deltaY < 0 ? 1 : -1;
+        const step = isModifierActive(paramFineAdjustKb, e) ? 0.1 : 1;
+        const nextText = applyWheelToTempoText(editingText, direction, step);
+        if (nextText === null) return;
+        setEditingText(nextText);
+        if (!tempoMap || tempoMap.points.findIndex((p) => p.id === id) < 0) return;
+        const parsed = parseTempoPointText(nextText, customScalePresets);
+        if (!parsed) return;
+        onChange(updateTempoPoint(tempoMap, id, { bpm: parsed.bpm }));
+    });
+
     /** 内联输入框 DOM 引用（全局"点击外部确认并退出"判定用）。 */
     const inlineInputRef = useRef<HTMLInputElement | null>(null);
     /**
@@ -792,10 +815,16 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
      * （`null` → 元素），既产生无谓工作，也让"在 effect 里读取 ref"的代码有机会
      * 读到瞬时 null。稳定回调只在真正挂载/卸载时被调用。
      */
-    const setInlineInputElement = useCallback((element: HTMLInputElement | null) => {
-        inlineInputRef.current = element;
-        inlineWheelRef.current = element;
-    }, []);
+    const setInlineInputElement = useCallback(
+        (element: HTMLInputElement | null) => {
+            inlineInputRef.current = element;
+            // 滚轮监听由回调 ref 直接挂/摘（见 `useNonPassiveWheel`）：这里必须
+            // 转发调用，而不是赋值 —— 内联输入框是**条件挂载**的，靠 ref 赋值
+            // 永远赶不上 effect 的时机（这正是它此前完全没反应的原因）。
+            inlineWheelRef(element);
+        },
+        [inlineWheelRef],
+    );
 
     const startInlineEdit = useCallback((point: TempoPoint) => {
         inlineEditLockRef.current = false;
@@ -1587,29 +1616,6 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
         // 卸载时确保标尺提示恢复（组件被移除后没有机会再上报）。
         return () => onTempoInteractionChange?.(false);
     }, [onTempoInteractionChange]);
-
-    /**
-     * 内联输入框的滚轮调值（参考 BPM 输入框：普通 1、按住精细调整修饰键 0.1）。
-     *
-     * 【为什么必须是非被动监听】React 的 `onWheel` 是 passive 的，`preventDefault()`
-     * 无效：输入框在标尺里，滚轮会同时被时间轴的缩放 / 滚动逻辑吃掉。
-     *
-     * 语义：只改**文本里的 BPM 数字**，其余内容（拍号 / 音阶 / 用户手打的片段）
-     * 逐字符保留；同时把解析出的 BPM 应用到本地草稿，使标尺与提示实时跟随。
-     */
-    const inlineWheelRef = useNonPassiveWheel<HTMLInputElement>((e) => {
-        const id = editingPointId;
-        if (!id) return;
-        const direction = e.deltaY < 0 ? 1 : -1;
-        const step = isModifierActive(paramFineAdjustKb, e) ? 0.1 : 1;
-        const nextText = applyWheelToTempoText(editingText, direction, step);
-        if (nextText === null) return;
-        setEditingText(nextText);
-        if (!tempoMap || tempoMap.points.findIndex((p) => p.id === id) < 0) return;
-        const parsed = parseTempoPointText(nextText, customScalePresets);
-        if (!parsed) return;
-        onChange(updateTempoPoint(tempoMap, id, { bpm: parsed.bpm }));
-    });
 
     /** 标签的内联输入框（输入编辑状态）。 */
     const renderInlineInput = (point: TempoPoint, isFirst: boolean) => (
