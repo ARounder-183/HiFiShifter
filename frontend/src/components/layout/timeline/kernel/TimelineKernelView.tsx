@@ -93,12 +93,19 @@ export interface TimelineKernelViewProps {
     /** 轨道头滚动容器（宿主在 rAF 内写 scrollTop 跟随纵向滚动）。 */
     readonly trackListScrollerRef?: React.MutableRefObject<HTMLElement | null>;
     /**
-     * 标尺播放头竖线（**位于标尺内容层内**）。
+     * 标尺播放头竖线（**位于标尺内容层之外**，视口坐标）。
      *
-     * 宿主写它的 `left`（内容坐标）：标尺内容层已带 translateX(-scrollLeft)，
-     * 播放头因此自动跟随滚动；若改写成视口坐标会双重计滚动。
+     * 宿主写它的 `left`：与轨道区播放头同帧、同左缘（`playheadLineLeftPx`）。
+     * 位置由内核逐帧命令式驱动，React 只给首帧初值（见 `TimeRulerPlayhead`）。
      */
     readonly rulerPlayheadLineRef?: React.MutableRefObject<HTMLElement | null>;
+    /**
+     * 标尺播放头**倒三角**（与竖线同帧、同视口左缘）。
+     *
+     * 【为什么也要由内核写】三角此前只在面板的挂载 layout effect 里定位过一次，
+     * 宿主接管后不再更新 —— 表现为"三角停在工程起始处不动"。
+     */
+    readonly rulerPlayheadHeadRef?: React.MutableRefObject<HTMLElement | null>;
     /** 宿主句柄出口：面板用它把「轨道头滚动」等外部意图转发给内核。 */
     readonly hostRef?: React.MutableRefObject<TimelineKernelHost | null>;
     /**
@@ -301,6 +308,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         rulerContentRef,
         trackListScrollerRef,
         rulerPlayheadLineRef,
+        rulerPlayheadHeadRef,
         hostRef,
         interactions,
         snapHighlight,
@@ -640,15 +648,18 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                 // 因此滞后一次提交，用它定位播放头会停在上一次的位置（实测连续两次
                 // seek，镜像恰好差一次）。getter 直连面板 ref，读到当帧真值。
                 playheadSec: () => callbacksRef.current.getPlayheadSec(),
+                // 全部传 getter：这些元素可能在本视图（宿主）创建之后才挂载或被重建，
+                // 按值捕获会让宿主永久持有 null / 脱离文档的节点，写入从此静默失效。
                 sync: {
-                    rulerContent: rulerContentRef?.current ?? null,
-                    trackListScroller: trackListScrollerRef?.current ?? null,
-                    playheadLine: playheadLineRef?.current ?? null,
-                    rulerPlayheadLine: rulerPlayheadLineRef?.current ?? null,
-                    snapHighlightContent: snapContentRef.current,
-                    ghostContent: ghostContentRef.current,
-                    dropPreviewContent: dropPreviewContentRef.current,
-                    newTrackDropContent: newTrackDropContentRef.current,
+                    rulerContent: () => rulerContentRef?.current ?? null,
+                    trackListScroller: () => trackListScrollerRef?.current ?? null,
+                    playheadLine: () => playheadLineRef?.current ?? null,
+                    rulerPlayheadLine: () => rulerPlayheadLineRef?.current ?? null,
+                    rulerPlayheadHead: () => rulerPlayheadHeadRef?.current ?? null,
+                    snapHighlightContent: () => snapContentRef.current,
+                    ghostContent: () => ghostContentRef.current,
+                    dropPreviewContent: () => dropPreviewContentRef.current,
+                    newTrackDropContent: () => newTrackDropContentRef.current,
                 },
                 onRowHeightChange: (px) => callbacksRef.current.onRowHeightChange(px),
                 onZoomChange: (pxPerSec) => callbacksRef.current.onPxPerSecChange(pxPerSec),

@@ -30,6 +30,9 @@ import { resolveFloatRect } from "../../features/dock/dockDropTarget";
 import { beginFloatDrag } from "./dockDragController";
 import { useDockSlot } from "./useDockSlot";
 
+/** `geometry` 缺失（理论上不会发生）时的占位矩形，避免把 null 传进解析函数。 */
+const ZERO_RECT = { x: 0, y: 0, w: 0, h: 0 };
+
 export function DockFloatingLayer() {
     const layout = useAppSelector((s) => s.dock.layout);
     const floating = layout.floatOrder.filter((formId) => layout.forms[formId]?.floating === true);
@@ -75,17 +78,29 @@ function DockFloatWindow({
     const doubleClickAction = useAppSelector((s) => s.dock.settings.doubleClickHeaderAction);
     const dockModifier = useAppSelector((s) => s.dock.settings.dockModifier);
 
+    /**
+     * 本帧实际渲染用的矩形（带锚点时按当前视口推导）。
+     *
+     * 【交互必须以它为准，而不是 `geometry.x/y`】带锚点的浮窗（如首次打开的记事本）
+     * 里 `geometry.x/y` 只是**占位值**（真实位置在渲染时才算出来）。早期实现把占位值
+     * 交给拖拽/缩放作为起点，于是 `offsetX = clientX - 0`、拖拽目标 x 被算成约 0 ——
+     * 表现为"一拖就跳到左上角"（用户报告的拖拽偏移）。缩放同理。
+     */
+    const rect = liveRect ?? resolveFloatRect(geometry ?? ZERO_RECT, {
+        w: window.innerWidth,
+        h: window.innerHeight,
+    });
+
     const onTitlePointerDown = useCallback(
         (event: React.PointerEvent<HTMLDivElement>) => {
             if (event.button !== 0) return;
             if ((event.target as HTMLElement).closest("button")) return;
             dispatch(raiseFloat(form.id));
-            if (!geometry) return;
             setDragging(true);
             beginFloatDrag(event, {
                 formId: form.id,
                 panelId: form.panelId,
-                geometry: { x: geometry.x, y: geometry.y, w: geometry.w, h: geometry.h },
+                geometry: rect,
             });
             // 拖拽结束由控制器统一收尾；这里只负责把"正在拖"的视觉状态收回来。
             const onUp = () => {
@@ -96,18 +111,18 @@ function DockFloatWindow({
             window.addEventListener("pointerup", onUp);
             window.addEventListener("pointercancel", onUp);
         },
-        [dispatch, form.id, form.panelId, geometry],
+        [dispatch, form.id, form.panelId, rect],
     );
 
     const onResizePointerDown = useCallback(
         (event: React.PointerEvent<HTMLDivElement>, edge: string) => {
-            if (event.button !== 0 || !geometry) return;
+            if (event.button !== 0) return;
             event.preventDefault();
             event.stopPropagation();
             dispatch(raiseFloat(form.id));
             setDragging(true);
 
-            const start = { ...geometry };
+            const start = { ...rect };
             const startX = event.clientX;
             const startY = event.clientY;
             const element = elementRef.current;
@@ -148,15 +163,11 @@ function DockFloatWindow({
             window.addEventListener("pointerup", onUp);
             window.addEventListener("pointercancel", onUp);
         },
-        [dispatch, form.id, geometry],
+        [dispatch, form.id, rect],
     );
 
     if (!geometry) return null;
 
-    // 带锚点的浮窗按**当前视口**推导位置（见 `DockFloatAnchor`）：窗口尺寸变化后
-    // 它仍在右下角，而不是停在按初始尺寸算出的旧坐标上。
-    const rect =
-        liveRect ?? resolveFloatRect(geometry, { w: window.innerWidth, h: window.innerHeight });
     const maximized = geometry.maximized === true;
     const minimized = geometry.minimized === true;
 

@@ -668,11 +668,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     const viewportAccess = viewportAccessRef.current;
 
     /**
-     * 标尺播放头线的**挂载定位**。
+     * 标尺播放头（竖线 + 倒三角）的**挂载定位**。
      *
-     * 线由内核逐帧写（与轨道区播放头同源同帧），但内核宿主是在被动 effect 里创建
-     * 的、首帧要等一个 rAF；在那之前线若没有 `left`，会停在静态位置（左缘）闪一帧。
-     * 这里用绘制前执行的 layout effect 补上初值 —— 之后由内核接管。
+     * 两者都由内核逐帧写（与轨道区播放头同源同帧、同一视口左缘），但内核宿主是在
+     * 被动 effect 里创建的、首帧要等一个 rAF；在那之前元素若没有 `left`，会停在
+     * 静态位置（左缘）闪一帧。这里用绘制前执行的 layout effect 补上初值 —— 之后由
+     * 内核接管（含倒三角，见 `TimelineKernelDomSync.rulerPlayheadHead`）。
      */
     React.useLayoutEffect(() => {
         const left = playheadLineLeftPx(
@@ -5292,6 +5293,25 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     // 这里不需要再纠正任何 DOM。
 
     /**
+     * 标尺播放头元素（竖线 / 倒三角）的挂载回调。
+     *
+     * 【为什么挂载时要请求一帧】两者的位置只由内核在帧提交里写，而元素可能在
+     * **播放头静止**时被重建（面板重挂载 / 视图切换）：新节点没有任何 `left`，
+     * 等价于 `left: auto` ⇒ 落在静态位置（左缘 = 工程起始处）。此时若没有任何东西
+     * 弄脏帧（暂停且不滚动），内核不提交，元素就**停在工程起始处不动**。元素一出现
+     * 就请求一帧，写入器随即按当前视口定位它（去重键含元素身份，见
+     * `createPlayheadElementWriter`）。
+     */
+    const attachRulerPlayheadLine = React.useCallback((element: HTMLDivElement | null) => {
+        rulerPlayheadLineRef.current = element;
+        if (element !== null) kernelHostRef.current?.invalidatePlayhead();
+    }, []);
+    const attachRulerPlayheadHead = React.useCallback((element: HTMLDivElement | null) => {
+        rulerPlayheadHeadRef.current = element;
+        if (element !== null) kernelHostRef.current?.invalidatePlayhead();
+    }, []);
+
+    /**
      * 标尺节点（内核模式与旧模式共用同一实例）。
      *
      * 标尺是重交互、低频变化的 DOM 子树（刻度标签 / Tempo Map 旗帜拖拽 / 内联编辑 /
@@ -5300,9 +5320,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
      * transform 写入（见 kernel host 的 syncDom）。
      */
     const timeRulerNode = (
-        // playheadSec 传提交值（而非渲染期读 ref）：视觉插值由
-        // `rulerPlayheadLineRef` / `rulerPlayheadHeadRef` 命令式驱动；React 仅在
-        // 该值真正变化时重写 style.left，写入的是最新提交位置而非陈旧值。
+        // playheadSec 传提交值（而非渲染期读 ref）：`positionPlayheadFromProps={false}`
+        // 时 React **不写**这两个元素的位置，视觉插值完全由内核逐帧命令式驱动
+        // （含倒三角，见 `TimelineKernelDomSync.rulerPlayheadHead`）；`playheadSec`
+        // 只作为其它消费方（如内联编辑）的提交值来源。
         //
         // 标尺不消费实时滚动位置：刻度与可见范围都按量化的 `rulerScrollLeft` 生成
         // （缓冲已保证覆盖视口），这样滚动期间 `TimeRulerMarks` 的 memo 不会失效，
@@ -5315,8 +5336,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             viewportWidth={viewportWidth}
             playheadSec={s.playheadSec}
             positionPlayheadFromProps={false}
-            playheadLineRef={rulerPlayheadLineRef}
-            playheadHeadRef={rulerPlayheadHeadRef}
+            playheadLineRef={attachRulerPlayheadLine}
+            playheadHeadRef={attachRulerPlayheadHead}
             contentRef={rulerContentRef}
             timeContext={timeContext}
             primaryUnit={s.primaryTimeUnit}
@@ -5717,6 +5738,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 rulerContentRef={rulerContentRef}
                                 trackListScrollerRef={trackListScrollRef}
                                 rulerPlayheadLineRef={rulerPlayheadLineRef}
+                                rulerPlayheadHeadRef={rulerPlayheadHeadRef}
                                 hostRef={kernelHostRef}
                                 interactions={kernelInteractions}
                                 activeGroupIds={kernelActiveGroupIds}

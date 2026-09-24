@@ -781,6 +781,25 @@ export const PianoRollPanel: React.FC<{
             drawRef.current();
         });
     }, []);
+
+    /**
+     * 标尺播放头元素（竖线 / 倒三角）的挂载回调。
+     *
+     * 【为什么挂载时要请求一帧】位置只由内核在帧提交里写，而元素可能在**播放头
+     * 静止**时被重建（面板重挂载 / 视图切换）：新节点没有任何 `left`，等价于
+     * `left: auto` ⇒ 落在静态位置（左缘 = 工程起始处）。此时若没有任何东西弄脏帧
+     * （暂停且不滚动），内核不会提交，元素就**停在工程起始处不动**。元素一出现就
+     * 请求一帧，写入器随即按当前视口定位它（去重键含元素身份，见
+     * `createPlayheadElementWriter`）。
+     */
+    const attachRulerPlayheadLine = useCallback((element: HTMLDivElement | null) => {
+        rulerPlayheadLineRef.current = element;
+        if (element !== null) hostRef.current?.invalidate();
+    }, []);
+    const attachRulerPlayheadHead = useCallback((element: HTMLDivElement | null) => {
+        rulerPlayheadHeadRef.current = element;
+        if (element !== null) hostRef.current?.invalidate();
+    }, []);
     const { t } = useI18n();
     const tAny = t as (key: string) => string;
     const s = useAppSelector((state: RootState) => state.session, shallowEqual);
@@ -2809,13 +2828,16 @@ export const PianoRollPanel: React.FC<{
             // 偏移经 ref 读取（同步开关与布局偏移都在运行时变化，闭包捕获会读到挂载时的旧值）。
             horizontalOffsetPx: () =>
                 paramEditorSyncTimelineRef.current ? timelineOffsetRef.current : 0,
+            // 全部传 **getter**（见 `PianoRollKernelDomSync` 的说明）：这些元素可能
+            // 在宿主创建之后才挂载（标尺随视图出现、停靠重排后 DOM 重建）。按值捕获
+            // 会让宿主永久持有 null 或已脱离文档的节点，对应写入从此静默失效。
             sync: {
-                rulerContent: rulerContentRef.current,
-                gridLayer: gridLayerRef.current,
-                // 标尺播放头线由内核在同一次帧提交里写（与 GL 播放头同源同帧），
+                rulerContent: () => rulerContentRef.current,
+                gridLayer: () => gridLayerRef.current,
+                // 标尺播放头线与三角由内核在同一次帧提交里写（与 GL 播放头同源同帧），
                 // 避免"面板按自己的缩放写、GL 按内核缩放画"造成的水平分离。
-                rulerPlayheadLine: rulerPlayheadLineRef.current,
-                rulerPlayheadHead: rulerPlayheadHeadRef.current,
+                rulerPlayheadLine: () => rulerPlayheadLineRef.current,
+                rulerPlayheadHead: () => rulerPlayheadHeadRef.current,
             },
             // 帧提交：宿主已完成滚动条几何与标尺 / 网格的 DOM 写入，这里只做
             // 「画布 + 波形 + 播放头」三项的提交。复用 `applyScrollLayers`，
@@ -7881,8 +7903,8 @@ export const PianoRollPanel: React.FC<{
                         viewportWidth={viewSize.w}
                         playheadSec={s.playheadSec}
                         positionPlayheadFromProps={false}
-                        playheadLineRef={rulerPlayheadLineRef}
-                        playheadHeadRef={rulerPlayheadHeadRef}
+                        playheadLineRef={attachRulerPlayheadLine}
+                        playheadHeadRef={attachRulerPlayheadHead}
                         contentRef={rulerContentRef}
                         timeContext={timeContext}
                         primaryUnit={s.primaryTimeUnit}

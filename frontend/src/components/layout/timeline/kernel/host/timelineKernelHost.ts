@@ -59,6 +59,7 @@ import {
     playheadLineLeftPx,
     type TimelineAxis,
 } from "../../../renderKernel/timelineAxis";
+import { createPlayheadElementWriter } from "../../../renderKernel/playheadElements";
 import { buildSparseClipRenderModel } from "../../runtime/timelineCanvasModel";
 import { drawTimelineCanvas } from "../../runtime/timelineCanvasRenderer";
 import { clearCanvasPhysical, rasterize } from "../../../renderKernel/canvasRaster";
@@ -277,15 +278,32 @@ export interface TimelineKernelData {
  * 它们**跟随内核视口**的部分收敛为「每帧一次 transform / scrollTop 写入」——一次
  * 样式写入的成本与图层数量无关，不构成滚动瓶颈，同时天然与旧实现视觉一致。
  */
+/**
+ * 宿主需要跟随视口的 DOM。
+ *
+ * 【为什么全部是 getter 而不是元素本身】这些元素可能在**宿主创建之后**才挂载或
+ * 被重建（面板停靠重排会搬动 DOM、标尺随视图出现）。按值捕获会让宿主永久持有
+ * `null` 或已脱离文档的节点，对应的写入从此**静默失效** —— 表现为"播放头线跟着走、
+ * 三角却停在原地"这类只差一半的症状。与 `PianoRollKernelDomSync` 同一约定：
+ * 运行时可能变化的东西一律经 getter 现读。
+ */
 export interface TimelineKernelDomSync {
     /** 标尺内容层：写 `translateX(-scrollLeft)` 跟随水平滚动。 */
-    readonly rulerContent?: HTMLElement | null;
+    readonly rulerContent?: () => HTMLElement | null;
     /** 轨道头滚动容器：写 `scrollTop` 跟随纵向滚动。 */
-    readonly trackListScroller?: HTMLElement | null;
+    readonly trackListScroller?: () => HTMLElement | null;
     /** 轨道区播放头竖线：写 `translateX` 跟随视口与播放位置。 */
-    readonly playheadLine?: HTMLElement | null;
+    readonly playheadLine?: () => HTMLElement | null;
     /** 标尺播放头竖线（与轨道区播放头同步）。 */
-    readonly rulerPlayheadLine?: HTMLElement | null;
+    readonly rulerPlayheadLine?: () => HTMLElement | null;
+    /**
+     * 标尺播放头**倒三角**（线与三角必须同一帧、同一视口坐标）。
+     *
+     * 【为什么必须由内核写】三角此前只在面板的挂载 layout effect 里定位过一次 ——
+     * 宿主接管后它再也不更新，于是"停在工程起始处不动"（挂载时的静态位置）。
+     * 竖线另有写者所以看起来正常，只有三角失联。
+     */
+    readonly rulerPlayheadHead?: () => HTMLElement | null;
     /**
      * 吸附高亮内容层（`SnapHighlightLayer` 的容器）：整层写
      * `translate(-scrollLeft, -scrollTop)`。
@@ -295,7 +313,7 @@ export interface TimelineKernelDomSync {
      * 靠滚动平移）。内核自绘滚动后没有内容层，这里补一个：层内布局不变，滚动只写
      * 一次 transform，因此拖拽期间每帧重渲染的高亮层不会因滚动而重排。
      */
-    readonly snapHighlightContent?: HTMLElement | null;
+    readonly snapHighlightContent?: () => HTMLElement | null;
     /**
      * copy 拖拽 ghost 的内容层：整层写 `translate(-scrollLeft, -scrollTop)`。
      *
@@ -303,21 +321,46 @@ export interface TimelineKernelDomSync {
      * 面板按内容坐标算好，滚动时只平移容器，**层内不重排**。copy 模式下原 clip
      * 不动，没有"乐观位置"可依赖，因此必须有这一层。
      */
-    readonly ghostContent?: HTMLElement | null;
+    readonly ghostContent?: () => HTMLElement | null;
     /**
      * 素材拖入预览的内容层：与 `ghostContent` 同一机制（内容坐标 + 整层平移）。
      *
      * 旧实现把它渲染在 `TrackLane` 内（内核模式下不挂载），几何用内容坐标
      * （`startSec × pxPerSec`），因此迁过来后同样需要这一层。
      */
-    readonly dropPreviewContent?: HTMLElement | null;
+    readonly dropPreviewContent?: () => HTMLElement | null;
     /**
      * 新建轨道幽灵行的内容层：与 `ghostContent` 同一机制。
      *
      * 拖到全部轨道之下时，旧实现把幽灵行画在最后一行正下方；内核同样把它放在
      * 内容坐标系的 `tracks.length × rowHeight` 处，靠这一层整层平移跟随视口。
      */
-    readonly newTrackDropContent?: HTMLElement | null;
+    readonly newTrackDropContent?: () => HTMLElement | null;
+}
+
+/** 把 `TimelineKernelDomSync` 的 getter 解析成本帧要用的元素（一次性）。 */
+function resolveDomSync(sync: TimelineKernelDomSync): {
+    rulerContent: HTMLElement | null;
+    trackListScroller: HTMLElement | null;
+    playheadLine: HTMLElement | null;
+    rulerPlayheadLine: HTMLElement | null;
+    rulerPlayheadHead: HTMLElement | null;
+    snapHighlightContent: HTMLElement | null;
+    ghostContent: HTMLElement | null;
+    dropPreviewContent: HTMLElement | null;
+    newTrackDropContent: HTMLElement | null;
+} {
+    return {
+        rulerContent: sync.rulerContent?.() ?? null,
+        trackListScroller: sync.trackListScroller?.() ?? null,
+        playheadLine: sync.playheadLine?.() ?? null,
+        rulerPlayheadLine: sync.rulerPlayheadLine?.() ?? null,
+        rulerPlayheadHead: sync.rulerPlayheadHead?.() ?? null,
+        snapHighlightContent: sync.snapHighlightContent?.() ?? null,
+        ghostContent: sync.ghostContent?.() ?? null,
+        dropPreviewContent: sync.dropPreviewContent?.() ?? null,
+        newTrackDropContent: sync.newTrackDropContent?.() ?? null,
+    };
 }
 
 /** 宿主构造参数。 */
@@ -1960,7 +2003,15 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     // 但重复写同一个值会白白触发样式重算，因此只在跨过阈值时写。
     let lastRulerTranslateX = Number.NaN;
     let lastTrackListScrollTop = Number.NaN;
-    let lastPlayheadViewportX = Number.NaN;
+    /**
+     * 播放头元素（轨道区竖线 / 标尺竖线 / 标尺倒三角）的写入器。
+     *
+     * 【为什么不是 `lastPlayheadViewportX`】去重键必须是「元素身份 + 位置」：只用位置
+     * 会漏掉"元素在播放头静止时被重建"（停靠重排搬动 DOM），新元素停在静态位置不动。
+     * 且三个元素各占槽位 —— 一个被去重跳过不会牵连另一个。详见
+     * `createPlayheadElementWriter`。
+     */
+    const playheadWriter = createPlayheadElementWriter();
     /** 吸附高亮内容层的整层变换（字符串去重：同时含两轴）。 */
     let lastSnapTransform = "";
     /** copy ghost 内容层的整层变换（去重方式同上）。 */
@@ -2100,8 +2151,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      */
     function syncDom(view: TimelineViewportState): void {
         if (sync === undefined) return;
-
-        const ruler = sync.rulerContent;
+        // 本帧一次性解析（getter 现读，见 `TimelineKernelDomSync` 的说明）。
+        const dom = resolveDomSync(sync);
+        const ruler = dom.rulerContent;
         if (ruler != null) {
             const translateX = -view.scrollLeft;
             if (shouldWrite(translateX, lastRulerTranslateX)) {
@@ -2110,7 +2162,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             }
         }
 
-        const trackList = sync.trackListScroller;
+        const trackList = dom.trackListScroller;
         if (trackList != null) {
             // 容差 0.5px：与调用方的回灌判定同量级，避免「内核 → DOM → 内核」循环。
             if (shouldWrite(view.scrollTop, lastTrackListScrollTop, 0.5)) {
@@ -2122,7 +2174,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         // 吸附高亮内容层：整层平移（内容坐标 → 视口坐标）。
         // 与细节层同一策略——层内元素全用内容坐标布局，滚动只写一次 transform。
         // 用字符串去重（同时含两轴，天然规避 NaN 初值问题）。
-        const snapContent = sync.snapHighlightContent;
+        const snapContent = dom.snapHighlightContent;
         if (snapContent != null) {
             const transform = `translate(${-view.scrollLeft}px, ${-view.scrollTop}px)`;
             if (transform !== lastSnapTransform) {
@@ -2132,7 +2184,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         }
 
         // copy ghost 内容层：与吸附高亮同一机制（内容坐标 + 整层平移）。
-        const ghostContent = sync.ghostContent;
+        const ghostContent = dom.ghostContent;
         if (ghostContent != null) {
             const transform = `translate(${-view.scrollLeft}px, ${-view.scrollTop}px)`;
             if (transform !== lastGhostTransform) {
@@ -2142,7 +2194,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         }
 
         // 拖入预览内容层：同上。
-        const dropPreviewContent = sync.dropPreviewContent;
+        const dropPreviewContent = dom.dropPreviewContent;
         if (dropPreviewContent != null) {
             const transform = `translate(${-view.scrollLeft}px, ${-view.scrollTop}px)`;
             if (transform !== lastDropPreviewTransform) {
@@ -2152,7 +2204,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         }
 
         // 新建轨道幽灵行内容层：同上。
-        const newTrackDropContent = sync.newTrackDropContent;
+        const newTrackDropContent = dom.newTrackDropContent;
         if (newTrackDropContent != null) {
             const transform = `translate(${-view.scrollLeft}px, ${-view.scrollTop}px)`;
             if (transform !== lastNewTrackDropTransform) {
@@ -2172,25 +2224,20 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         // 到内容层之外（见 `TimeRuler`），两条线共享 `playheadLineLeftPx` 与同一份
         // 设备像素约定，逐设备像素重合。
         const playheadSec = readPlayheadSec();
-        const playheadViewportX = playheadSec * view.pxPerSec - view.scrollLeft;
-        if (shouldWrite(playheadViewportX, lastPlayheadViewportX)) {
-            lastPlayheadViewportX = playheadViewportX;
-            const playheadLeft = playheadLineLeftPx(
-                createTimelineAxis({
-                    pxPerSec: view.pxPerSec,
-                    scrollLeftPx: view.scrollLeft,
-                    viewportWidthPx,
-                    dpr: readDpr(),
-                }),
-                playheadSec,
-            );
-            if (sync.rulerPlayheadLine != null) {
-                sync.rulerPlayheadLine.style.left = `${playheadLeft}px`;
-            }
-            if (sync.playheadLine != null) {
-                sync.playheadLine.style.transform = `translateX(${playheadLeft}px)`;
-            }
-        }
+        // 三个元素（轨道区竖线 / 标尺竖线 / 标尺倒三角）同帧、同左缘、各占一个槽位。
+        // 去重交给写入器（键 = 元素身份 + 位置），这里不再自建 `lastX` 变量。
+        const playheadLeft = playheadLineLeftPx(
+            createTimelineAxis({
+                pxPerSec: view.pxPerSec,
+                scrollLeftPx: view.scrollLeft,
+                viewportWidthPx,
+                dpr: readDpr(),
+            }),
+            playheadSec,
+        );
+        playheadWriter.writeTranslateX("body", dom.playheadLine, playheadLeft);
+        playheadWriter.writeLeft("rulerLine", dom.rulerPlayheadLine, playheadLeft);
+        playheadWriter.writeLeft("rulerHead", dom.rulerPlayheadHead, playheadLeft);
     }
 
     /**
@@ -2314,7 +2361,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      * （见 `timeline/scrollEcho` 与 `getMirroredTrackListScrollTop`）。
      */
     function mirrorTrackListScrollTop(): void {
-        const trackList = sync?.trackListScroller;
+        const trackList = sync?.trackListScroller?.() ?? null;
         if (trackList == null) return;
         const view = scroll.get();
         if (shouldWrite(view.scrollTop, lastTrackListScrollTop, 0.5)) {

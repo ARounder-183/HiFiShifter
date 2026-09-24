@@ -96,6 +96,15 @@ function makeHost(options: { offsetPx?: number } = {}) {
     });
     const paintedAxes: number[] = [];
     const userScrolls: number[] = [];
+    /**
+     * 播放头秒数与两个播放头元素桩。
+     *
+     * 元素刻意做成**可替换**的：用例要模拟"播放头静止、元素被重建"（停靠重排搬动
+     * DOM），这正是"倒三角停在工程起始处不动"的触发条件。
+     */
+    const playhead = { sec: 10 };
+    let rulerPlayheadLine: { style: CSSStyleDeclaration } = { style: {} as CSSStyleDeclaration };
+    let rulerPlayheadHead: { style: CSSStyleDeclaration } = { style: {} as CSSStyleDeclaration };
     let pending: FrameRequestCallback | null = null;
     let handle = 0;
     let scrollLeftCommits = 0;
@@ -121,12 +130,16 @@ function makeHost(options: { offsetPx?: number } = {}) {
             data: () => ({
                 projectSec: 100,
                 valueDomain: { min: 0, max: 100, span: 50 },
+                overlay: { playheadSec: playhead.sec },
             }),
             initialPxPerSec: 91.25,
             horizontalOffsetPx: () => offsetPx,
             sync: {
-                rulerContent: rulerContent as never,
-                gridLayer: gridLayer as never,
+                // getter（不是元素本身）：宿主每帧现读，元素重建后仍能拿到新节点。
+                rulerContent: () => rulerContent as never,
+                gridLayer: () => gridLayer as never,
+                rulerPlayheadLine: () => rulerPlayheadLine as never,
+                rulerPlayheadHead: () => rulerPlayheadHead as never,
             },
             onFrame: (axis) => {
                 paintedAxes.push(axis.scrollLeftPx);
@@ -164,6 +177,16 @@ function makeHost(options: { offsetPx?: number } = {}) {
         windowHandlers: windowStub.handlers,
         rulerContent,
         gridLayer,
+        rulerPlayheadLine: () => rulerPlayheadLine,
+        rulerPlayheadHead: () => rulerPlayheadHead,
+        setPlayheadSec(sec: number) {
+            playhead.sec = sec;
+        },
+        /** 模拟两个播放头元素被重建（新节点没有任何 `left`）。 */
+        remountPlayheadElements() {
+            rulerPlayheadLine = { style: {} as CSSStyleDeclaration };
+            rulerPlayheadHead = { style: {} as CSSStyleDeclaration };
+        },
         gridDrawOffsets,
         paintedAxes,
         userScrolls,
@@ -181,6 +204,50 @@ function makeHost(options: { offsetPx?: number } = {}) {
 }
 
 describe("createPianoRollKernelHost", () => {
+    /**
+     * 回归：**播放头静止时元素被重建，倒三角也必须被重新定位**。
+     *
+     * 【缺陷现象】去重键曾经只看位置（`shouldWrite(viewportX, lastRulerPlayheadX)`），
+     * 且倒三角的写入嵌在竖线的去重分支里。停靠重排搬动 DOM 会重建这两个元素（新节点
+     * 没有 `left`，落在静态位置 = 左缘 = 工程起始处），而此时播放头静止 ⇒ 位置与上次
+     * 写入相同 ⇒ 判定"不必写" ⇒ 倒三角停在工程起始处不动。用户报告正是这一条。
+     *
+     * 判据：元素重建后，即使播放头一秒未动，两个元素都要被重新写入当前视口左缘。
+     */
+    it("★ 播放头静止时元素被重建，标尺竖线与倒三角仍被重新定位", () => {
+        const t = makeHost();
+        t.flush();
+        const line = t.rulerPlayheadLine();
+        const head = t.rulerPlayheadHead();
+        const firstLeft = head.style.left;
+        expect(firstLeft).toBeTruthy();
+        expect(line.style.left).toBe(firstLeft);
+
+        // 播放头**不动**，元素整体重建（停靠重排搬动 DOM）。面板的挂载回调会在元素
+        // 出现时请求一帧（`host.invalidate()`），这里照做。
+        t.remountPlayheadElements();
+        const rebuiltLine = t.rulerPlayheadLine();
+        const rebuiltHead = t.rulerPlayheadHead();
+        // 新节点没有任何定位（真实 DOM 里等价于 `left: auto` ⇒ 静态位置 = 左缘）。
+        expect(rebuiltHead.style.left).toBeUndefined();
+
+        t.host.invalidate();
+        t.flush();
+        expect(rebuiltHead.style.left).toBe(firstLeft);
+        expect(rebuiltLine.style.left).toBe(firstLeft);
+    });
+
+    it("倒三角与标尺竖线取同一个视口左缘（不因去重而错位）", () => {
+        const t = makeHost();
+        t.flush();
+        t.setPlayheadSec(40);
+        t.flush();
+        const head = t.rulerPlayheadHead();
+        const line = t.rulerPlayheadLine();
+        expect(head.style.left).toBe(line.style.left);
+        expect(head.style.left).not.toBe("");
+    });
+
     it("dispose 后不再调度帧、不再写 DOM（资源真被释放）", () => {
         const t = makeHost();
         t.host.setScrollLeft(300);

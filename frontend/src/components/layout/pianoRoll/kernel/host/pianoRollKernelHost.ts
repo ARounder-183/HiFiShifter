@@ -89,6 +89,7 @@ import {
     secToViewportPx,
     type TimelineAxis,
 } from "../../../renderKernel/timelineAxis";
+import { createPlayheadElementWriter } from "../../../renderKernel/playheadElements";
 import type { FlatInstance } from "../../../renderKernel/instanceTypes";
 import { wholeDevicePxLength } from "../../../../../utils/devicePixelLine";
 import {
@@ -124,10 +125,18 @@ import type { PianoRollKernelData, PianoRollGridSpec } from "./pianoRollKernelDa
  */
 const SCROLL_COMMIT_STEP_PX = 256;
 
-/** 宿主需要跟随视口的 DOM（阶段 1：标尺内容层与背景网格）。 */
+/**
+ * 宿主需要跟随视口的 DOM（阶段 1：标尺内容层与背景网格）。
+ *
+ * 【为什么全部是 getter 而不是元素本身】这些元素可能在**宿主创建之后**才挂载
+ * （标尺随视图出现、面板被停靠重排后重建 DOM）。若在构造时按值捕获，宿主会永久
+ * 持有一个 `null` 或已脱离文档的节点，对应的写入（平移、播放头线、播放头三角）
+ * 从此静默失效 —— 表现为"播放头线跟着走、三角却停在原地"这类只差一半的症状。
+ * 与 `horizontalOffsetPx` 同一约定：运行时可能变化的东西一律经 getter 现读。
+ */
 export interface PianoRollKernelDomSync {
     /** 标尺内容层：按绘制坐标反向平移。 */
-    readonly rulerContent?: HTMLElement | null;
+    readonly rulerContent?: () => HTMLElement | null;
     /**
      * 标尺上的播放头竖线与三角头。
      *
@@ -139,10 +148,10 @@ export interface PianoRollKernelDomSync {
      * 被看见的时机。把这两条线收进内核的同一次帧提交，与 GL 播放头同源同帧，
      * 分离在结构上就不可能发生。
      */
-    readonly rulerPlayheadLine?: HTMLElement | null;
-    readonly rulerPlayheadHead?: HTMLElement | null;
+    readonly rulerPlayheadLine?: () => HTMLElement | null;
+    readonly rulerPlayheadHead?: () => HTMLElement | null;
     /** 背景网格层：经 `gridRedrawBridge` 重绘（自行判定是否真的重画）。 */
-    readonly gridLayer?: HTMLElement | null;
+    readonly gridLayer?: () => HTMLElement | null;
 }
 
 /** 宿主构造参数。 */
@@ -1392,8 +1401,14 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
     let lastVThumbKey = "";
     /** 上一次写入标尺内容层的平移量（NaN = 从未写入）。 */
     let lastRulerTranslateX = Number.NaN;
-    /** 上一次写入标尺播放头线的视口坐标（去重，避免每帧无谓写样式）。 */
-    let lastRulerPlayheadX = Number.NaN;
+    /**
+     * 播放头元素（标尺竖线 + 倒三角）的写入器。
+     *
+     * 【为什么不是两个 `lastX` 变量】去重键必须是「元素身份 + 位置」：只用位置会漏掉
+     * "元素在播放头静止时被重建"，新元素停在静态位置（左缘）不动 —— 即用户报告的
+     * "倒三角停在工程起始处"。详见 `createPlayheadElementWriter`。
+     */
+    const playheadWriter = createPlayheadElementWriter();
     /** 上一次量化提交给 React 的水平滚动位置（NaN = 从未提交）。 */
     let lastCommittedScrollLeft = Number.NaN;
     /** 上一次逐帧上报给面板的竖向位置（NaN = 从未上报）。 */
@@ -1520,7 +1535,7 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
     function syncDom(view: TimelineViewportState): void {
         // 绘制坐标：与 currentAxis / onFrame / 量化提交同一口径（见上方说明）。
         const drawingScrollLeft = view.scrollLeft - horizontalOffsetPx();
-        const ruler = sync?.rulerContent;
+        const ruler = sync?.rulerContent?.() ?? null;
         if (ruler != null && shouldWrite(drawingScrollLeft, lastRulerTranslateX)) {
             lastRulerTranslateX = drawingScrollLeft;
             ruler.style.transform = `translateX(${-drawingScrollLeft}px)`;
@@ -1532,8 +1547,13 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         // 所在的层会被平移 `-drawingScrollLeft`（可能是小数），若改在内容坐标吸附，
         // 落点会与 GL 差最多一个设备像素；先吸附再回算则两条线逐设备像素重合。
         const playheadSec = data().overlay?.playheadSec;
+        // 元素**现读**（见 `PianoRollKernelDomSync` 的说明）：标尺可能晚于宿主挂载。
+        const rulerPlayheadLine = sync?.rulerPlayheadLine?.() ?? null;
+        const rulerPlayheadHead = sync?.rulerPlayheadHead?.() ?? null;
+        // 竖线与倒三角**任一存在**都要写：三角的写入绝不能挂在竖线的分支里
+        // （竖线被去重跳过 / 元素缺失时，三角会一起失联）。
         if (
-            sync?.rulerPlayheadLine != null &&
+            (rulerPlayheadLine != null || rulerPlayheadHead != null) &&
             playheadSec != null &&
             Number.isFinite(playheadSec)
         ) {
@@ -1550,17 +1570,14 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                 dpr: readDevicePixelRatio(),
             });
             const viewportX = playheadLineLeftPx(axis, playheadSec);
-            if (shouldWrite(viewportX, lastRulerPlayheadX)) {
-                lastRulerPlayheadX = viewportX;
-                sync.rulerPlayheadLine.style.left = `${viewportX}px`;
-                if (sync.rulerPlayheadHead != null) {
-                    sync.rulerPlayheadHead.style.left = `${viewportX}px`;
-                }
-            }
+            // 各占一个槽位：一个元素被去重跳过不会牵连另一个。
+            playheadWriter.writeLeft("rulerLine", rulerPlayheadLine, viewportX);
+            playheadWriter.writeLeft("rulerHead", rulerPlayheadHead, viewportX);
         }
         // 网格层自带重绘节流（`BackgroundGrid` 内部判定），这里只需转交绘制坐标。
-        if (sync?.gridLayer != null) {
-            invokeGridRedrawHandler(sync.gridLayer, drawingScrollLeft);
+        const gridLayer = sync?.gridLayer?.() ?? null;
+        if (gridLayer != null) {
+            invokeGridRedrawHandler(gridLayer, drawingScrollLeft);
         }
     }
 
