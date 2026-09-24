@@ -187,6 +187,7 @@ import {
 import { pianoRollViewportBus } from "./pianoRoll/pianoRollViewportBus";
 import { createRenderLoop, type RenderLoop } from "./renderKernel/renderLoop.js";
 import { buildTimelineTicks } from "./timeline/runtime/buildTimelineTicks.js";
+import { createTickAxis } from "./timeline/runtime/tickAxis.js";
 import {
     createTimelineAxis,
     playheadLineLeftPx,
@@ -3894,6 +3895,27 @@ export const PianoRollPanel: React.FC<{
         [pxPerSec, scrollLeft, viewSize.w],
     );
 
+    /**
+     * **刻度生成**专用轴（与 `prAxis` 分开）。
+     *
+     * 【为什么要分开】`prAxis` 是绘制投影，消费方（画布 / 波形 / 曲线 / 命中测试）
+     * 要的是真实视口；而刻度生成要的是"窗口必须覆盖真实视口"的**保守**窗口 ——
+     * 这里传入的 `scrollLeft` 是 256px 量化提交的 React state，最多滞后内核 255px。
+     * 生成窗口按 `createTickAxis` 的约定多留一个量化步长，覆盖才成立。此前本面板
+     * 直接拿 `prAxis`（既无量化也无宽度补偿）生成刻度，缩放后窗口可能盖不住视口
+     * —— 用户看到的就是"标尺文字整片消失"。
+     */
+    const prTickAxis = useMemo(
+        () =>
+            createTickAxis({
+                pxPerSec,
+                scrollLeftPx: scrollLeft,
+                viewportWidthPx: viewSize.w,
+                dpr: window.devicePixelRatio || 1,
+            }),
+        [pxPerSec, scrollLeft, viewSize.w],
+    );
+
     // 可见区域的 sec 范围：仅用于数据窗口选择（clip peaks 取窗），
     // 像素换算一律经 prAxis，不得再由这里除回秒。
     const visibleStartSec = viewportStartSec(prAxis);
@@ -6668,7 +6690,7 @@ export const PianoRollPanel: React.FC<{
     const timelineTicks = useMemo(
         () =>
             buildTimelineTicks({
-                axis: prAxis,
+                axis: prTickAxis.axis,
                 bpm: s.bpm,
                 beatsPerBar: Math.max(1, Math.round(s.beats || 4)),
                 grid: s.grid,
@@ -6680,7 +6702,7 @@ export const PianoRollPanel: React.FC<{
                 tempoMap: s.tempoMap,
             }),
         [
-            prAxis,
+            prTickAxis,
             s.bpm,
             s.beats,
             s.grid,
@@ -7898,6 +7920,7 @@ export const PianoRollPanel: React.FC<{
                 <Flex direction="column" className="flex-1 min-w-0 select-none">
                     <TimeRuler
                         scrollLeft={scrollLeft}
+                        tickWindowAnchorPx={prTickAxis.anchorPx}
                         ticks={timelineTicks}
                         pxPerSec={pxPerSec}
                         viewportWidth={viewSize.w}

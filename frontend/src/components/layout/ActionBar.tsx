@@ -69,6 +69,8 @@ import {
 import { SCALE_KEYS, SCALE_LABELS, type ScaleLike } from "../../utils/musicalScales";
 import { applySelectWheelChange } from "../../utils/selectWheel";
 import { useWheelScrollGuard } from "../../utils/useWheelScrollGuard";
+import { useNonPassiveWheel } from "../../utils/useNonPassiveWheel";
+import { createFrameCommitter, type FrameCommitter } from "../../utils/commitOncePerFrame";
 import {
     formatKeybinding,
     isModifierActive,
@@ -526,10 +528,87 @@ export function ActionBar() {
         [s.tempoMap, s.project, dispatch, updateTempoPointAtPlayhead],
     );
 
+    /**
+     * BPM 的**落地提交**（每帧最多一次）。
+     *
+     * 【为什么要合并】一次滚轮手势会产生几十个 wheel 事件，每个事件各提交一次
+     * 意味着订阅方（标尺刻度、网格、波形）全量重算几十次 —— 用户看到的就是标尺
+     * "抽搐"，且滚得越快越明显。合并到帧粒度后，手势期间画面仍然逐帧跟随
+     * （手感不变），但每帧只重算一次。
+     */
+    const applyBpmCommit = useCallback(
+        (value: number) => {
+            if (s.tempoMap && s.tempoMap.points.length > 0) {
+                updateTempoPointAtPlayhead({ bpm: value });
+                return;
+            }
+            dispatch(setBpm(value));
+            void dispatch(updateTransportBpm(value));
+        },
+        [s.tempoMap, updateTempoPointAtPlayhead, dispatch],
+    );
+    /** 提交体经 ref 现读：宿主回调只创建一次，闭包捕获会用到旧的 tempoMap。 */
+    const applyBpmCommitRef = useRef(applyBpmCommit);
+    applyBpmCommitRef.current = applyBpmCommit;
+    const bpmCommitRef = useRef<FrameCommitter<number> | null>(null);
+    if (bpmCommitRef.current === null) {
+        bpmCommitRef.current = createFrameCommitter<number>((value) =>
+            applyBpmCommitRef.current(value),
+        );
+    }
+    useEffect(() => {
+        const committer = bpmCommitRef.current;
+        return () => {
+            // 卸载前落地最后一次滚轮值：否则"最后一格"永远到不了 store。
+            committer?.flush();
+        };
+    }, []);
+
+    /**
+     * 滚轮累积的起点。
+     *
+     * 【为什么不能直接读 `bpmText`】`setBpmText` 是异步的，同一帧内的多个 wheel
+     * 事件会读到同一个旧值，各算出同一个"下一格"，连续滚动因此只前进一格。
+     * 这里用 ref 持有手势内的当前值；手势结束（提交后静默 200ms）或外部改动时失效。
+     */
+    const wheelBpmBaseRef = useRef<number | null>(null);
+    const wheelBpmAtRef = useRef(0);
+
+    /**
+     * BPM 输入的滚轮调值。
+     *
+     * 【为什么用非被动原生监听】React 的 `onWheel` 是 passive 的，里面的
+     * `preventDefault()` 是空操作（本仓库其它数值滚轮控件都用 `useNonPassiveWheel`
+     * 或 `useWheelScrollGuard`，唯独这里漏了）：滚轮调值会同时滚动祖先容器，产生
+     * 第二路视觉位移，并触发浏览器干预告警。
+     */
+    const bpmWheelRef = useNonPassiveWheel<HTMLInputElement>((e) => {
+        const now = performance.now();
+        // 手势起点：距上一次滚轮超过 200ms，或尚未开始过手势。
+        if (wheelBpmBaseRef.current === null || now - wheelBpmAtRef.current > 200) {
+            const current = Number(bpmText);
+            wheelBpmBaseRef.current = Number.isFinite(current) ? current : displayBpm;
+        }
+        wheelBpmAtRef.current = now;
+        const direction = e.deltaY < 0 ? 1 : -1;
+        const step = isModifierActive(paramFineAdjustKb, e) ? 0.1 : 1;
+        const next = Math.round((wheelBpmBaseRef.current + direction * step) * 1000) / 1000;
+        // 与 Tempo Map 变化点一致的 BPM 范围（10-960）。
+        const clamped = clampBpm(next);
+        if (Math.abs(clamped - wheelBpmBaseRef.current) < 1e-9) return; // 已到边界
+        wheelBpmBaseRef.current = clamped;
+        // 文本逐事件更新（手感不变，且它不触发标尺重算）；Redux 提交合并到每帧一次。
+        setBpmText(formatBpmValue(clamped));
+        setBpmDirty(false);
+        bpmCommitRef.current?.schedule(clamped);
+    });
+
     function commitBpm(nextText?: string) {
         const raw = (nextText ?? bpmText).trim();
         const next = Number(raw);
         setBpmDirty(false);
+        // 键盘/失焦提交结束当前滚轮手势：下一次滚轮从新值重新累积。
+        wheelBpmBaseRef.current = null;
         if (!Number.isFinite(next)) {
             setBpmText(formatBpmValue(displayBpm));
             return;
@@ -713,6 +792,7 @@ export function ActionBar() {
                     {t("bpm")}:
                 </Text>
                 <TextField.Root
+                    ref={bpmWheelRef}
                     size="1"
                     value={bpmText}
                     data-tooltip={
@@ -736,26 +816,6 @@ export function ActionBar() {
                             setBpmText(formatBpmValue(displayBpm));
                             (e.currentTarget as HTMLInputElement).blur();
                         }
-                    }}
-                    onWheel={(e: React.WheelEvent<HTMLInputElement>) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        const direction = e.deltaY < 0 ? 1 : -1;
-                        const step = isModifierActive(paramFineAdjustKb, e) ? 0.1 : 1;
-                        const current = Number(bpmText);
-                        const base = Number.isFinite(current) ? current : Number(displayBpm);
-                        const nextRaw = base + direction * step;
-                        const next = Math.round(nextRaw * 1000) / 1000;
-                        // 与 Tempo Map 变化点一致的 BPM 范围（10-960）。
-                        const clamped = clampBpm(next);
-                        if (s.tempoMap && s.tempoMap.points.length > 0) {
-                            updateTempoPointAtPlayhead({ bpm: clamped });
-                        } else {
-                            dispatch(setBpm(clamped));
-                            void dispatch(updateTransportBpm(clamped));
-                        }
-                        setBpmText(formatBpmValue(clamped));
-                        setBpmDirty(false);
                     }}
                     style={{
                         width: 60,

@@ -152,6 +152,7 @@ import type { TempoMap } from "../../utils/tempoMap";
 import {
     clampDenominator,
     fromBackendTempoMap,
+    isSameTempoMap,
     normalizeTempoMap,
     scaleLikeToScaleData,
     TEMPO_DENOMINATORS,
@@ -5247,13 +5248,31 @@ const sessionSlice = createSlice({
                     return;
                 }
                 // 后端为权威来源：应用完整快照（含 tempo_map 与工程基准值）。
+                //
+                // 【幂等回声不产生新引用】快照会用一个**新的** tempoMap 对象替换引用，
+                // 而标尺刻度的 memo 依赖该引用：滚轮 / 拖拽这类连续手势里，每一次
+                // 提交都会因此多出一次全量重算（标尺"抽搐"的放大器之一）。后端没有
+                // 改动地图时（本次提交的内容就是它已有的），保留旧引用即可 ——
+                // 其余字段照常应用，不牺牲任何同步语义。
+                const previousTempoMap = state.tempoMap;
                 applyTimelineState(state, payload, { force: true });
+                const tempoMapChanged =
+                    !previousTempoMap ||
+                    !state.tempoMap ||
+                    !isSameTempoMap(previousTempoMap, state.tempoMap);
+                if (!tempoMapChanged && previousTempoMap) {
+                    state.tempoMap = previousTempoMap;
+                }
                 // 显式触发后台预渲染：Tempo Map 音阶变化会影响子轨道“度数差”等
                 // 依赖音阶的渲染。applyTimelineState 已使 paramsEpoch 递增，
                 // App 层据此调用 startBackgroundRender（与工程音阶变更路径
                 // setProjectBaseScaleRemote.fulfilled 保持一致）；此处再显式递增，
                 // 确保该触发不依赖 applyTimelineState 的内部实现细节。
-                state.paramsEpoch = (Number(state.paramsEpoch) || 0) + 1;
+                //
+                // 地图未变（纯回声）时不再递增：没有任何音阶变化需要重渲染。
+                if (tempoMapChanged) {
+                    state.paramsEpoch = (Number(state.paramsEpoch) || 0) + 1;
+                }
                 state.status = "Tempo map updated";
             })
             .addCase(setTempoMapRemote.rejected, setRejected)
@@ -5924,7 +5943,15 @@ const sessionSlice = createSlice({
                     return;
                 }
                 // 与 Tempo Map 变化点一致的 BPM 范围（10-960）。
-                state.bpm = clamp(Number(payload.bpm ?? state.bpm), 10, 960);
+                //
+                // 【为什么相等就不写】乐观写入已经落地了同一个值；回声再写一次会
+                // 产生**第二次 Redux 提交**，订阅方（标尺刻度 / 网格 / 波形）因此
+                // 每滚一格重算两次。滚轮调 BPM 时标尺"抽搐"的直接来源之一。
+                // 只有后端确实钳到了另一个值（或浮点末位不同）时才采纳。
+                const echoedBpm = clamp(Number(payload.bpm ?? state.bpm), 10, 960);
+                if (Math.abs(echoedBpm - state.bpm) > 1e-9) {
+                    state.bpm = echoedBpm;
+                }
                 if (payload.tracks && payload.clips) {
                     applyTimelineState(state, payload as TimelineState, { force: true });
                 }

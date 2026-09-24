@@ -25,7 +25,6 @@ import {
     type TempoPointEditRequest,
 } from "./TempoMapRulerRow.tsx";
 import { RULER_BASE_HEIGHT_PX, timeRulerHeightPx } from "./rulerHeight.ts";
-import { RULER_LABEL_HIDDEN_GAP_PX } from "./runtime/buildTimelineTicks.js";
 import type { TimelineTick } from "./runtime/buildTimelineTicks.js";
 import { readDevicePixelRatio, wholeDevicePxLength } from "../../../utils/devicePixelLine.ts";
 import { playheadLineLeftViewportPx } from "../renderKernel/timelineAxis.ts";
@@ -114,18 +113,14 @@ const TimeRulerMarks = React.memo(function TimeRulerMarks({
 
     return (
         <>
-            {visibleTicks.map((tick, index) => {
+            {visibleTicks.map((tick) => {
                 const left = tick.contentPx;
-                // 每个刻度文本的显示区域限定在“到下一刻度”的间距内：
-                // - 间距足够时，文本右侧裁切到下一刻度之前（主/副单位与分隔线一起裁切）；
-                // - 间距过近（放不下任何有意义的文本片段）时，完全隐藏本刻度文本，
-                //   保证后出现的刻度文本完整可见、两个标签绝不重叠。
-                const nextTick = visibleTicks[index + 1];
-                const gapPx = nextTick != null ? nextTick.contentPx - tick.contentPx : null;
-                const labelHidden = gapPx != null && gapPx < RULER_LABEL_HIDDEN_GAP_PX;
-                const labelMaxWidth = gapPx != null ? (labelHidden ? 0 : gapPx - 6) : undefined;
+                // 版式完全由生成器决定（见 `TimelineTick.labelMaxWidth`）：
+                // 渲染期不再做"与可见切片里的下一条比较"——那个判据会随滚动位置
+                // 改变，正是"标尺文字时有时无"的来源。这里只消费结果。
+                const labelMaxWidth = tick.labelMaxWidth;
                 return (
-                    <div key={tick.beat} className="absolute top-0 bottom-0" style={{ left }}>
+                    <div key={tick.key} className="absolute top-0 bottom-0" style={{ left }}>
                         <div
                             className="absolute top-0 bottom-0"
                             style={{
@@ -140,9 +135,8 @@ const TimeRulerMarks = React.memo(function TimeRulerMarks({
                         <div
                             className="flex flex-col justify-center h-full pl-2 pr-1 select-none"
                             style={{
-                                maxWidth: labelMaxWidth,
+                                maxWidth: labelMaxWidth ?? undefined,
                                 overflow: "hidden",
-                                visibility: labelHidden ? "hidden" : undefined,
                             }}
                         >
                             <div
@@ -514,7 +508,23 @@ function TimeRulerContextMenu({
 }
 
 const TimeRulerInner: React.FC<{
+    /**
+     * **真实**水平滚动位置（绘制坐标）。
+     *
+     * 用于交互换算（悬停时间、Tempo Map 行的可见段、播放头定位）——这些地方需要
+     * 尽可能接近用户看到的滚动位置。**不**用于刻度切片：切片用
+     * `tickWindowAnchorPx`（量化锚点），两者相差不超过一个量化步长，切片缓冲足以
+     * 覆盖。曾经一个字段身兼两职，量化值会把悬停时间算偏最多一个步长。
+     */
     scrollLeft: number;
+    /**
+     * 刻度切片用的量化锚点（`createTickAxis` 的产物）。
+     *
+     * 缺省取 `scrollLeft`。时间轴与参数编辑器都传量化值，以换取"滚动时不重算
+     * 刻度"；它必须与生成刻度时使用的锚点**是同一个值**，否则切片窗口与生成窗口
+     * 不一致（参数编辑器曾经就是这样漏掉宽度补偿的）。
+     */
+    tickWindowAnchorPx?: number;
     ticks: readonly TimelineTick[];
     pxPerSec: number;
     viewportWidth?: number;
@@ -552,6 +562,7 @@ const TimeRulerInner: React.FC<{
     onTempoMapCommit?: (next: TempoMap | null) => void;
 }> = ({
     scrollLeft,
+    tickWindowAnchorPx,
     ticks,
     pxPerSec,
     viewportWidth,
@@ -836,7 +847,7 @@ const TimeRulerInner: React.FC<{
                 <div className="absolute inset-x-0 top-0" style={{ height: RULER_BASE_HEIGHT_PX }}>
                     <TimeRulerMarks
                         ticks={ticks}
-                        scrollLeft={scrollLeft}
+                        scrollLeft={tickWindowAnchorPx ?? scrollLeft}
                         viewportWidth={viewportWidth}
                     />
                 </div>

@@ -25,7 +25,7 @@ import { timelineViewportSync } from "../../../../utils/timelineViewportSync";
 import { IS_MAC, isPrimaryModifierDown } from "../../../../utils/platform";
 import { nativeScrollbarZoneAt } from "../../../../utils/nativeScrollbar";
 
-import { TICK_WINDOW_STEP_PX } from "../runtime/buildTimelineTicks.js";
+import { createTickAxis } from "../runtime/tickAxis.js";
 import { waveformMipmapStore } from "../../../../utils/waveformMipmapStore";
 import { fileBrowserApi } from "../../../../services/api/fileBrowser";
 import { seekPlayhead, setplayheadSec } from "../../../../features/session/sessionSlice";
@@ -47,7 +47,6 @@ import {
 import type { TimelineTick } from "../runtime/buildTimelineTicks.js";
 import { buildTimelineTicks } from "../runtime/buildTimelineTicks.js";
 import { REACT_SCROLL_STEP_PX } from "../runtime/timelineRenderModel.js";
-import { createTimelineAxis } from "../../renderKernel/timelineAxis.js";
 import {
     snapTimelinePosition,
     snapTimelineClipMove,
@@ -937,20 +936,24 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
     // 刻度窗口量化：见 `rulerScrollLeft` 的注释。
     // 步长必须**小于**下游消费者的缓冲（标尺为 max(320, viewportWidth*0.5)），
     // 这样即使按量化的位置生成刻度，视口也始终被完整覆盖。
-    const tickAnchorPx = Math.floor(scrollLeft / TICK_WINDOW_STEP_PX) * TICK_WINDOW_STEP_PX;
+    // 从量化锚点起、按「视口 + 一个步长」取刻度：锚点 ≤ scrollLeft <
+    // 锚点 + 步长，因此覆盖区间必然包含真实视口 [scrollLeft, scrollLeft +
+    // viewportWidth]，多出来的只有步长那么宽的一部分。
+    //
+    // 轴与锚点统一经 `createTickAxis` 构造（与参数编辑器同一条约定），返回的
+    // `anchorPx` 必须原样作为标尺的 `scrollLeft`，否则标尺切片的窗口与刻度生成的
+    // 窗口不一致（历史上参数编辑器就是这样漏掉宽度补偿的）。
+    const tickAxis = useMemo(
+        () =>
+            createTickAxis({ pxPerSec, scrollLeftPx: scrollLeft, viewportWidthPx: viewportWidth }),
+        [pxPerSec, scrollLeft, viewportWidth],
+    );
+    const tickAnchorPx = tickAxis.anchorPx;
 
     const timelineTicks = useMemo(() => {
         const beatsPerBar = Math.max(1, Math.round(s.beats || 4));
         return buildTimelineTicks({
-            // 从量化锚点起、按「视口 + 一个步长」取刻度：锚点 ≤ scrollLeft <
-            // 锚点 + 步长，因此覆盖区间必然包含真实视口 [scrollLeft,
-            // scrollLeft + viewportWidth]，多出来的只有步长那么宽的一部分。
-            axis: createTimelineAxis({
-                pxPerSec,
-                scrollLeftPx: tickAnchorPx,
-                viewportWidthPx:
-                    (Number.isFinite(viewportWidth) ? viewportWidth : 0) + TICK_WINDOW_STEP_PX,
-            }),
+            axis: tickAxis.axis,
             bpm: s.bpm,
             beatsPerBar,
             grid: s.grid,
@@ -970,9 +973,7 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
         s.rulerLabelSpacingPx,
         s.timelineSnap,
         s.tempoMap,
-        viewportWidth,
-        pxPerSec,
-        tickAnchorPx,
+        tickAxis,
     ]);
 
     // ── clipsByTrackId ───────────────────────────────────────

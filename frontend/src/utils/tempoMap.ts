@@ -78,6 +78,17 @@ export interface TempoAtSec {
 export interface TempoGridLine {
     sec: number;
     isBar: boolean;
+    /**
+     * **音乐身份**（跨 BPM 变化不变）。
+     *
+     * 【为什么需要】标尺刻度的 React key 曾经用 `beat = sec × bpm / 60`：BPM 一变，
+     * 每条刻度的 key 都变，整棵刻度 DOM 子树被卸载重建 —— 滚轮调 BPM 时标尺"抽搐"
+     * 的主要放大器。身份必须绑定在**音乐位置**上，而不是时间上。
+     *
+     * 取值：`<段序号>:<段内拍位置（1e6 量化）>`；无 Tempo Map 时段序号为 `u`。
+     * 弱线与小节线若落在同一拍位，算出的 key 相同（合并后仍是同一个刻度）。
+     */
+    key?: string;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -99,6 +110,36 @@ export function createTempoPointId(): string {
 export function clampBpm(bpm: number): number {
     if (!Number.isFinite(bpm)) return 120;
     return Math.min(TEMPO_BPM_MAX, Math.max(TEMPO_BPM_MIN, bpm));
+}
+
+/**
+ * 两份 Tempo Map 是否**语义相同**（用于回声幂等：相同则保留旧引用）。
+ *
+ * 【为什么需要】后端回声会用一个**新的** `tempoMap` 对象替换状态里的引用，而标尺
+ * 刻度的 memo 依赖该引用 —— 滚轮 / 拖拽这类连续手势里，每次提交都会因此多出一次
+ * 全量重算（标尺"抽搐"的放大器之一）。后端没有真正改动地图时，保留旧引用即可。
+ *
+ * 比较**不含 `id`**：id 是前端内部标识，跨一次后端往返可能重新生成，用它比较会让
+ * 守卫永远失效（那比没有守卫更糟：看起来有幂等，实际每次都判定为"变了"）。
+ */
+export function isSameTempoMap(a: TempoMap | null, b: TempoMap | null): boolean {
+    if (a === b) return true;
+    if (!a || !b) return false;
+    if (a.points.length !== b.points.length) return false;
+    for (let i = 0; i < a.points.length; i += 1) {
+        const left = a.points[i];
+        const right = b.points[i];
+        if (Math.abs(left.positionSec - right.positionSec) > 1e-9) return false;
+        if (Math.abs(left.bpm - right.bpm) > 1e-9) return false;
+        const leftSig = left.timeSignature ?? null;
+        const rightSig = right.timeSignature ?? null;
+        if ((leftSig?.numerator ?? null) !== (rightSig?.numerator ?? null)) return false;
+        if ((leftSig?.denominator ?? null) !== (rightSig?.denominator ?? null)) return false;
+        if (JSON.stringify(left.scale ?? null) !== JSON.stringify(right.scale ?? null)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 export function clampNumerator(numerator: number): number {
@@ -773,10 +814,18 @@ export function buildTempoGridLines(args: {
     const strongStride = Math.max(1, Math.floor(args.strongStride ?? 1));
     const lines: TempoGridLine[] = [];
 
-    const add = (sec: number, isBar: boolean) => {
+    const add = (sec: number, isBar: boolean, key?: string) => {
         if (!Number.isFinite(sec) || sec < startSec - 1e-9 || sec > endSec + 1e-9) return;
-        lines.push({ sec, isBar });
+        lines.push({ sec, isBar, key });
     };
+    /**
+     * 音乐身份的量化：拍位置四舍五入到 1e-6。
+     *
+     * 弱线与小节线落在同一拍位时必须算出**同一个** key（它们合并成一个刻度），
+     * 因此这里对"拍位置"而不是"线种类"取身份。
+     */
+    const beatKey = (segmentKey: string, localBeat: number) =>
+        `${segmentKey}:${Math.round(localBeat * 1e6)}`;
     const swingAt = (segBpm: number, index: number) => {
         if (swingPercent <= 0 || index % 2 === 0) return 0;
         return (swingPercent / 100) * 0.5 * safeStep * (60 / Math.max(1, segBpm));
@@ -791,7 +840,11 @@ export function buildTempoGridLines(args: {
         for (let index = firstIndex; index <= lastIndex; index += 1) {
             if (index < 0) continue;
             const beat = index * safeStep;
-            add(beatToSec(null, beat, fallbackBpm) + swingAt(fallbackBpm, index), false);
+            add(
+                beatToSec(null, beat, fallbackBpm) + swingAt(fallbackBpm, index),
+                false,
+                beatKey("u", beat),
+            );
         }
         const bpb = Math.max(
             1,
@@ -800,7 +853,7 @@ export function buildTempoGridLines(args: {
         const firstBarIndex = Math.floor(startBeat / bpb + 1e-9);
         const lastBarIndex = Math.ceil(endBeat / bpb - 1e-9);
         for (let k = firstBarIndex; k <= lastBarIndex; k += 1) {
-            add(beatToSec(null, k * bpb, fallbackBpm), true);
+            add(beatToSec(null, k * bpb, fallbackBpm), true, beatKey("u", k * bpb));
         }
         lines.sort((a, b) => a.sec - b.sec);
         return lines;
@@ -828,7 +881,11 @@ export function buildTempoGridLines(args: {
         const lastWeak = Math.floor(localEndBeat / safeStep + 1e-9);
         for (let k = firstWeak; k <= lastWeak; k += 1) {
             if (k < 0) continue;
-            add(segment.startSec + k * safeStep * segSecPerBeat + swingAt(segBpm, k), false);
+            add(
+                segment.startSec + k * safeStep * segSecPerBeat + swingAt(segBpm, k),
+                false,
+                beatKey(`s${i}`, k * safeStep),
+            );
         }
 
         // 强网格线（段内小节边界；段起点本身也是对齐点）。
@@ -837,7 +894,7 @@ export function buildTempoGridLines(args: {
         for (let k = firstBar; k <= lastBar; k += 1) {
             if (k < 0) continue;
             if (k % strongStride !== 0) continue;
-            add(segment.startSec + k * segBpb * segSecPerBeat, true);
+            add(segment.startSec + k * segBpb * segSecPerBeat, true, beatKey(`s${i}`, k * segBpb));
         }
     }
 
