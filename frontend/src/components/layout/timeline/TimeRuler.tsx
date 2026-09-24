@@ -603,6 +603,11 @@ const TimeRulerInner: React.FC<{
     const [tempoDialogOpen, setTempoDialogOpen] = useState(false);
     /** 标签内联输入编辑进行中：隐藏悬浮标签，避免遮挡视口左侧的输入框。 */
     const [tempoInlineEditing, setTempoInlineEditing] = useState(false);
+    /**
+     * 变化点正在被悬停或拖拽：此时已有一个内容更丰富的变化点提示，标尺自己的
+     * 悬浮时间提示必须让位（两个气泡叠在一起既看不清也互相遮挡）。
+     */
+    const [tempoInteracting, setTempoInteracting] = useState(false);
     const rulerRef = useRef<HTMLDivElement | null>(null);
 
     const showTempoRow = Boolean(tempoMap && tempoMap.points.length > 0 && tempoMapVisible);
@@ -617,6 +622,10 @@ const TimeRulerInner: React.FC<{
     const handleTempoDialogOpenChange = useCallback((open: boolean) => {
         setTempoDialogOpen(open);
         if (open) setHover(null);
+    }, []);
+    const handleTempoInteractionChange = useCallback((active: boolean) => {
+        setTempoInteracting(active);
+        if (active) setHover(null);
     }, []);
     const handleEditTempoPoint = useCallback((id: string) => {
         setTempoEditRequest({ pointId: id, positionSec: null, focus: null, mode: "dialog" });
@@ -724,8 +733,9 @@ const TimeRulerInner: React.FC<{
 
     const handleMouseMove = useCallback(
         (e: React.MouseEvent<HTMLDivElement>) => {
-            // 右键菜单或 Tempo Map 编辑对话框打开期间不显示标尺悬浮时间。
-            if (ctxMenu || tempoDialogOpen) {
+            // 右键菜单 / Tempo Map 编辑对话框打开 / 变化点交互中：不显示标尺悬浮时间。
+            // 最后一项覆盖"悬停或拖拽变化点"——那时已有变化点自己的提示。
+            if (ctxMenu || tempoDialogOpen || tempoInteracting) {
                 setHover(null);
                 return;
             }
@@ -752,7 +762,7 @@ const TimeRulerInner: React.FC<{
             );
             setHover({ x: e.clientX - bounds.left, y: e.clientY - bounds.top, sec });
         },
-        [ctxMenu, tempoDialogOpen, pxPerSec, scrollLeft],
+        [ctxMenu, tempoDialogOpen, tempoInteracting, pxPerSec, scrollLeft],
     );
 
     const hoverTime = hover
@@ -879,6 +889,7 @@ const TimeRulerInner: React.FC<{
                     editRequest={tempoEditRequest}
                     onEditRequestHandled={() => setTempoEditRequest(null)}
                     onDialogOpenChange={handleTempoDialogOpenChange}
+                    onTempoInteractionChange={handleTempoInteractionChange}
                     onFloatingInlineEditChange={setTempoInlineEditing}
                 />
             </div>

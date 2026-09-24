@@ -193,6 +193,33 @@ export function formatTempoBpm(bpm: number): string {
     return String(rounded);
 }
 
+/**
+ * 把滚轮步进应用到变化点文本的 **BPM 部分**，其余文本**原样保留**。
+ *
+ * 【为什么是"替换前导数字"而不是"解析后再序列化"】内联输入框里的文本可能包含
+ * 用户手打的、解析器无法识别的片段（音阶别名、注释性文字）。若按解析结果重建
+ * 文本，这些内容会被抹掉 —— 而用户的要求恰恰是"保留其他参数不变"。只替换开头
+ * 那个数字 token，其余部分逐字符保留，"不变"是字面成立的。
+ *
+ * @param direction +1 增大、-1 减小。
+ * @param step 步长（普通 1，精细调整修饰键下 0.1）。
+ * @returns 新文本；文本不以数字开头、或已到 BPM 边界（值不变）时返回 `null`。
+ */
+export function applyWheelToTempoText(
+    text: string,
+    direction: 1 | -1,
+    step: number,
+): string | null {
+    const match = /^(\s*)(\d+(?:\.\d+)?)([\s\S]*)$/.exec(text);
+    if (!match) return null;
+    const [, leading, numberText, rest] = match;
+    const current = Number(numberText);
+    if (!Number.isFinite(current)) return null;
+    const next = clampBpm(Math.round((current + direction * step) * 1000) / 1000);
+    if (Math.abs(next - current) < 1e-9) return null;
+    return `${leading}${formatTempoBpm(next)}${rest}`;
+}
+
 /** 拍号显示文本，如 "4/4"、"3/4"。 */
 export function formatTimeSignature(sig: TempoTimeSignature): string {
     return `${clampNumerator(sig.numerator)}/${clampDenominator(sig.denominator)}`;

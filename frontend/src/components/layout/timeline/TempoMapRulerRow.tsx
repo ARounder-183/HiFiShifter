@@ -5,6 +5,7 @@ import type { GridSize, TimelineSnapSettings } from "../../../features/session/s
 import type { ScaleLike } from "../../../utils/musicalScales";
 import { SCALE_KEYS, SCALE_LABELS } from "../../../utils/musicalScales";
 import { shouldSuppressHoverSideEffects } from "../../../utils/penInput";
+import { useNonPassiveWheel } from "../../../utils/useNonPassiveWheel";
 import type { CustomScalePreset } from "../../../utils/customScales";
 import {
     clampBpm,
@@ -19,6 +20,7 @@ import {
     normalizeScaleData,
     parseTempoPointText,
     previousScaleAtSec,
+    applyWheelToTempoText,
     removeTempoPoint,
     TEMPO_DENOMINATORS,
     tempoMapSegments,
@@ -35,7 +37,9 @@ import {
     computeEffectiveSnap,
     beginSnapGesture,
     endSnapGesture,
+    type SnapCandidate,
 } from "../../../utils/timelineSnapping";
+import { publishFadeRichTooltip } from "./fadeTooltipText";
 import {
     SNAP_HIGHLIGHT_GROUP,
     buildCandidateHighlightEntry,
@@ -113,6 +117,12 @@ interface TempoMapRulerRowProps {
      * 双击画面内的固定标签进入编辑时为 false —— 悬浮标签保持显示。
      */
     onFloatingInlineEditChange?: (overlaying: boolean) => void;
+    /**
+     * 变化点交互（悬停或拖拽）状态通知：为 true 时时间标尺应抑制自己的悬浮时间
+     * 提示 —— 此时已经有一个内容更丰富的变化点提示，两个气泡叠在一起既看不清也
+     * 互相遮挡。
+     */
+    onTempoInteractionChange?: (active: boolean) => void;
 }
 
 /** ScaleLike → 显示文本（键音阶显示 "C / Am"，自定义音阶显示名称）。 */
@@ -516,6 +526,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
     editRequest,
     onEditRequestHandled,
     onDialogOpenChange,
+    onTempoInteractionChange,
     onFloatingInlineEditChange,
 }) => {
     const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -539,8 +550,29 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
         startSec: number;
         /** 拖拽开始时的 Tempo Map 快照，用于吸附计算时固定网格，避免变化点自身移动改变网格。 */
         baseTempoMap: TempoMap;
+        /**
+         * 吸附网格专用快照：`baseTempoMap` **移除本点**后的结果。
+         *
+         * 被拖的点不参与自己要落位的网格（见 `snapTempoPosition.gridTempoMap`）。
+         */
+        snapTempoMap: TempoMap;
     } | null>(null);
     const [draggingId, setDraggingId] = useState<string | null>(null);
+    /** 指针悬停中的变化点 id（与拖拽一起构成"交互中"）。 */
+    const [hoveredFlagId, setHoveredFlagId] = useState<string | null>(null);
+    /**
+     * 变化点旗帜 DOM（按 id）。
+     *
+     * 【为什么要元素表】富提示必须挂在**收到 pointerdown 的那个元素**上：按下时
+     * AppTooltip 会把"当前元素"固定下来并跟随光标，拖拽中即使指针离开旗帜也继续
+     * 读取它的内容。此前提示字符串挂在旗帜内部的标签 `<div>` 上，指针按在外层
+     * （1px 竖线 / 内边距）时固定的就不是它，拖拽期间内容不再更新。
+     */
+    const flagElementsRef = useRef(new Map<string, HTMLElement>());
+    const setFlagElement = useCallback((id: string, element: HTMLElement | null) => {
+        if (element) flagElementsRef.current.set(id, element);
+        else flagElementsRef.current.delete(id);
+    }, []);
     const dialogStateRef = useRef(dialogState);
     useEffect(() => {
         dialogStateRef.current = dialogState;
@@ -560,6 +592,10 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
     );
     const playheadSec = useAppSelector((state) => state.session.playheadSec);
     const noSnapKb = useAppSelector((state) => selectKeybinding(state, "modifier.clipNoSnap"));
+    /** 精细调整修饰键（与 BPM 输入框同一绑定：普通步进 1，按住后 0.1）。 */
+    const paramFineAdjustKb = useAppSelector((state) =>
+        selectKeybinding(state, "modifier.paramFineAdjust"),
+    );
 
     // 编辑对话框打开/关闭时通知父级（用于抑制标尺悬浮时间提示）。
     useEffect(() => {
@@ -666,9 +702,29 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             enabled: boolean,
             base: TempoMap | null,
             baseBpm: number,
-            originSec?: number,
-            manageHighlight?: boolean,
+            options?: {
+                originSec?: number;
+                manageHighlight?: boolean;
+                /**
+                 * 计算**网格候选**所用的地图；缺省取 `base`。
+                 *
+                 * 【为什么与 `base` 分开】拖动一个变化点时，该点本身会重塑它之后的
+                 * 网格（段起点即网格原点）。若网格里包含"正在移动的那个点"，就会
+                 * 出现"网格跟着标签跑"：例如 0.75s 处有点、工程网格为 0.5s 时，
+                 * 段 [0, 0.75] 的候选被段末截断到只剩 {0, 0.5}，而 1.0s 落在第二段
+                 * 的栅格 0.75+k×0.5 上，**根本不在候选集里** —— 用户拖不到 1.0s，
+                 * 尽管没有这个点时 1.0s 明明是网格线。
+                 *
+                 * 正确语义：**被拖的点不参与自己要落位的网格**。因此拖拽时传
+                 * `removeTempoPoint(base, pointId)`，其余场景不传（用 `base`）。
+                 */
+                gridTempoMap?: TempoMap | null;
+                /** 冻结候选（拖拽起点等）：见 `TimelineSnapContext.extraCandidates`。 */
+                extraCandidates?: readonly SnapCandidate[];
+            },
         ) => {
+            const originSec = options?.originSec;
+            const manageHighlight = options?.manageHighlight;
             if (!enabled || !snapSettings?.enabled) {
                 if (manageHighlight) clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
                 return sec;
@@ -683,7 +739,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                     grid,
                     bpm: baseBpm,
                     beatsPerBar,
-                    tempoMap: base,
+                    tempoMap: options?.gridTempoMap === undefined ? base : options.gridTempoMap,
                     pxPerSec,
                     clips: timelineClips,
                     tracks: timelineTracks,
@@ -692,6 +748,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                     object: "clip",
                     originSec,
                     anchorTrackId: null,
+                    extraCandidates: options?.extraCandidates,
                 },
                 sec,
             );
@@ -728,6 +785,17 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
     const inlineEditLockRef = useRef(false);
     /** 内联输入框 DOM 引用（全局"点击外部确认并退出"判定用）。 */
     const inlineInputRef = useRef<HTMLInputElement | null>(null);
+    /**
+     * 内联输入框的挂载回调：同时登记到普通 ref 与滚轮 ref。
+     *
+     * 【为什么用稳定回调】内联函数作为 ref 会在每次渲染时先摘除再挂载
+     * （`null` → 元素），既产生无谓工作，也让"在 effect 里读取 ref"的代码有机会
+     * 读到瞬时 null。稳定回调只在真正挂载/卸载时被调用。
+     */
+    const setInlineInputElement = useCallback((element: HTMLInputElement | null) => {
+        inlineInputRef.current = element;
+        inlineWheelRef.current = element;
+    }, []);
 
     const startInlineEdit = useCallback((point: TempoPoint) => {
         inlineEditLockRef.current = false;
@@ -959,11 +1027,14 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             setEditingPointId(null);
             const appliedMap = applyInlineEdit(false);
             // 从当前指针位置开始拖动（保持指针与标签的相对偏移不变）。
+            const dragBase = appliedMap ?? tempoMap ?? { points: [point] };
             dragRef.current = {
                 pointId: point.id,
                 startClientX: clientX,
                 startSec: point.positionSec,
-                baseTempoMap: appliedMap ?? tempoMap ?? { points: [point] },
+                baseTempoMap: dragBase,
+                // 与 `startFlagDrag` 同一约定：吸附网格不含被拖的点。
+                snapTempoMap: removeTempoPoint(dragBase, point.id) ?? dragBase,
             };
             // 即便指针抬起时没有任何进一步移动，也要把“确认的编辑/新增”
             // 提交出去（否则仅停留在本地 Redux）。
@@ -1138,11 +1209,17 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             } catch {
                 // ignore
             }
+            const baseTempoMap = tempoMap ?? { points: [point] };
             dragRef.current = {
                 pointId: point.id,
                 startClientX: e.clientX,
                 startSec: point.positionSec,
-                baseTempoMap: tempoMap ?? { points: [point] },
+                baseTempoMap,
+                // 吸附网格用**移除本点**后的地图（见 `snapTempoPosition.gridTempoMap`）：
+                // 被拖的点不参与自己要落位的网格，否则它会把自己的段原点带进候选集，
+                // 使"本该有的网格线"（如 1.0s）消失。快照仍在按下时固定，避免网格
+                // 随标签实时漂移。
+                snapTempoMap: removeTempoPoint(baseTempoMap, point.id) ?? baseTempoMap,
             };
             beginSnapGesture();
             setDraggingId(point.id);
@@ -1175,14 +1252,13 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             // "拖动时切换吸附"：修饰键把吸附总开关临时取反（开→关 / 关→开）。
             const effectiveSnap = computeEffectiveSnap(snapEnabled, isModifierActive(noSnapKb, e));
             if (effectiveSnap) {
-                sec = snapTempoPosition(
-                    rawSec,
-                    effectiveSnap,
-                    drag.baseTempoMap,
-                    mapFallback.bpm,
-                    drag.startSec,
-                    true,
-                );
+                sec = snapTempoPosition(rawSec, effectiveSnap, drag.baseTempoMap, mapFallback.bpm, {
+                    originSec: drag.startSec,
+                    manageHighlight: true,
+                    gridTempoMap: drag.snapTempoMap,
+                    // 起点作为**冻结候选**：允许精确拖回原位（它已不在网格上）。
+                    extraCandidates: [{ sec: drag.startSec, kind: "grid", priority: 10 }],
+                });
             } else {
                 // 修饰键临时关闭吸附时必须显式清除高亮：否则此前帧发布的
                 // 吸附竖线会冻结在画面上，直到 mouseup 才消失。
@@ -1433,10 +1509,112 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
         [tempoMap, primaryUnit, secondaryUnit, timeContext, projectScale, projectScaleName, t],
     );
 
+    /**
+     * 变化点富提示内容（结构化四行）。
+     *
+     * 与 `buildFlagTooltip` 的纯文本版同源同数据；这里给 React 节点是为了在拖拽
+     * 期间**逐帧**发布（见下方 effect）—— 富内容经事件总线直接刷新气泡，不依赖
+     * 元素属性变更被观察到，因此拖动中"位置"一行会实时跟着走。
+     */
+    const buildFlagTooltipContent = useCallback(
+        (pointIndex: number): React.ReactNode => {
+            if (!tempoMap) return null;
+            const point = tempoMap.points[pointIndex];
+            if (!point) return null;
+            const cursor = formatCursorTime(
+                primaryUnit,
+                secondaryUnit,
+                point.positionSec,
+                timeContext,
+            );
+            const positionLine = cursor.secondaryLabel
+                ? `${cursor.primaryLabel} / ${cursor.secondaryLabel}`
+                : cursor.primaryLabel;
+            const sig = effectiveTimeSignatureAt(tempoMap, pointIndex);
+            const effScale = effectiveScaleAtSec(
+                tempoMap,
+                point.positionSec,
+                projectScale ?? undefined,
+            );
+            const effScaleLabel = scaleLikeLabel(effScale, projectScaleName) ?? "—";
+            const rows: Array<[string, string]> = [
+                [t("tempo_map_tooltip_position"), positionLine],
+                [t("tempo_map_tooltip_bpm"), formatTempoBpm(point.bpm)],
+                [t("tempo_map_tooltip_time_signature"), formatTimeSignature(sig)],
+                [t("tempo_map_tooltip_scale"), effScaleLabel],
+            ];
+            return (
+                <div className="flex flex-col gap-[2px]">
+                    {rows.map(([label, value]) => (
+                        <div key={label} className="flex gap-2">
+                            <span className="opacity-70">{label}</span>
+                            <span className="font-medium">{value}</span>
+                        </div>
+                    ))}
+                </div>
+            );
+        },
+        [tempoMap, primaryUnit, secondaryUnit, timeContext, projectScale, projectScaleName, t],
+    );
+
+    /**
+     * 交互中的变化点 id：拖拽优先于悬停。
+     *
+     * 它是"实时提示"与"抑制标尺提示"两条链路的共同输入。
+     */
+    const activeFlagId = draggingId ?? hoveredFlagId;
+
+    /**
+     * 逐帧发布富提示。
+     *
+     * 依赖里带 `tempoMap`：拖拽每帧都会写新地图（`onChange(draft)`），因此内容
+     * （尤其"位置"一行）逐帧刷新。发布是副作用而非渲染状态，不引起额外渲染。
+     */
+    useEffect(() => {
+        if (!activeFlagId) return;
+        const element = flagElementsRef.current.get(activeFlagId) ?? null;
+        if (!element) return;
+        const index = tempoMap?.points.findIndex((point) => point.id === activeFlagId) ?? -1;
+        if (index < 0) return;
+        publishFadeRichTooltip(element, buildFlagTooltipContent(index));
+    }, [activeFlagId, tempoMap, buildFlagTooltipContent]);
+
+    /** 交互状态上报（抑制时间标尺自己的悬浮提示）。 */
+    useEffect(() => {
+        onTempoInteractionChange?.(activeFlagId !== null);
+    }, [activeFlagId, onTempoInteractionChange]);
+    useEffect(() => {
+        // 卸载时确保标尺提示恢复（组件被移除后没有机会再上报）。
+        return () => onTempoInteractionChange?.(false);
+    }, [onTempoInteractionChange]);
+
+    /**
+     * 内联输入框的滚轮调值（参考 BPM 输入框：普通 1、按住精细调整修饰键 0.1）。
+     *
+     * 【为什么必须是非被动监听】React 的 `onWheel` 是 passive 的，`preventDefault()`
+     * 无效：输入框在标尺里，滚轮会同时被时间轴的缩放 / 滚动逻辑吃掉。
+     *
+     * 语义：只改**文本里的 BPM 数字**，其余内容（拍号 / 音阶 / 用户手打的片段）
+     * 逐字符保留；同时把解析出的 BPM 应用到本地草稿，使标尺与提示实时跟随。
+     */
+    const inlineWheelRef = useNonPassiveWheel<HTMLInputElement>((e) => {
+        const id = editingPointId;
+        if (!id) return;
+        const direction = e.deltaY < 0 ? 1 : -1;
+        const step = isModifierActive(paramFineAdjustKb, e) ? 0.1 : 1;
+        const nextText = applyWheelToTempoText(editingText, direction, step);
+        if (nextText === null) return;
+        setEditingText(nextText);
+        if (!tempoMap || tempoMap.points.findIndex((p) => p.id === id) < 0) return;
+        const parsed = parseTempoPointText(nextText, customScalePresets);
+        if (!parsed) return;
+        onChange(updateTempoPoint(tempoMap, id, { bpm: parsed.bpm }));
+    });
+
     /** 标签的内联输入框（输入编辑状态）。 */
     const renderInlineInput = (point: TempoPoint, isFirst: boolean) => (
         <input
-            ref={inlineInputRef}
+            ref={setInlineInputElement}
             autoFocus
             value={editingText}
             onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditingText(e.target.value)}
@@ -1580,6 +1758,18 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                                           ? "grabbing"
                                           : "grab",
                                 }}
+                                ref={(element) => setFlagElement(point.id, element)}
+                                onMouseEnter={() => setHoveredFlagId(point.id)}
+                                onMouseLeave={() =>
+                                    setHoveredFlagId((current) =>
+                                        current === point.id ? null : current,
+                                    )
+                                }
+                                // 指针在旗帜上移动时不再让时间标尺计算悬浮时间：
+                                // 两层提示叠在一起既看不清也互相遮挡（与
+                                // `onTempoInteractionChange` 是同一目的的两道保险，
+                                // 这一道在 React 事件层即时生效）。
+                                onMouseMove={(e) => e.stopPropagation()}
                                 onPointerDown={(e) => startFlagDrag(point, isFirst, e)}
                                 onDoubleClick={(e) => {
                                     e.stopPropagation();
