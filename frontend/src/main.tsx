@@ -7,6 +7,7 @@ import "@radix-ui/themes/styles.css";
 import "./index.css";
 import App from "./App.tsx";
 import { store } from "./app/store";
+import { getDockDragState } from "./features/dock/dockDragStore";
 import { AppTooltipProvider } from "./components/AppTooltip";
 import { fadeToolTipSuppress } from "./components/layout/timeline/FadeContextMenu";
 import { I18nProvider } from "./i18n/I18nProvider";
@@ -51,7 +52,11 @@ createRoot(document.getElementById("root")!).render(
             <I18nProvider>
                 <AppThemeProvider>
                     <AppTooltipProvider
-                        isSuppressedExternal={() => fadeToolTipSuppress.isSuppressed}
+                        isSuppressedExternal={() =>
+                            // 停靠拖拽期间必须抑制悬停提示：它不再是原生 tooltip，
+                            // 不会自己消失，会正好盖住拖拽时给用户看的落点提示。
+                            fadeToolTipSuppress.isSuppressed || getDockDragState()?.started === true
+                        }
                     >
                         <GlobalGestureServices />
                         <App />

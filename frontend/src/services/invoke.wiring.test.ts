@@ -52,8 +52,8 @@ describe("invoke wiring", () => {
 
     it("registers the take channel mode command with positional names", () => {
         // 本次事故的直接回归用例：声道模式命令漏映射导致"只改波形不改渲染"。
-        expect(buildTauriArgs("set_clip_take_channel_mode", ["clip-1", "take-2", 3, false])).toEqual(
-            { clipId: "clip-1", takeId: "take-2", channelMode: 3, checkpoint: false },
-        );
+        expect(
+            buildTauriArgs("set_clip_take_channel_mode", ["clip-1", "take-2", 3, false]),
+        ).toEqual({ clipId: "clip-1", takeId: "take-2", channelMode: 3, checkpoint: false });
     });
 });

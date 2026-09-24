@@ -100,8 +100,13 @@ function DockDropOverlayContent({ drag }: { drag: DockDragState }) {
                     }}
                 />
             ) : null}
+            {/*
+              拖拽提示块复用自定义 tooltip 的外观（`app-tooltip` 类）—— 它是拖拽
+              期间用户唯一能看到的落点说明，样式必须与其它悬停提示同源，否则会像
+              另一套 UI。`hs-dock-ghost` 只补拖拽特有的部分（意图着色、跟随指针）。
+            */}
             <div
-                className="hs-dock-ghost"
+                className="app-tooltip hs-dock-ghost"
                 data-intent={drag.dockIntent ? "dock" : "float"}
                 style={{ left: drag.pointerX + 14, top: drag.pointerY + 14 }}
             >

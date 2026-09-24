@@ -294,9 +294,10 @@ test("features/dock/dockSlice.test.ts scripted checks", async () => {
             dockFormTo({ formId: "notebook", target: { kind: "tab", tabsetId: "z2" } }),
         );
         assertEqual(state.layout.forms.notebook.floating, false, "docked");
+        const remembered = state.layout.forms.notebook.float;
         assertEqual(
-            state.layout.forms.notebook.float,
-            { x: 30, y: 40, w: 320, h: 240 },
+            [remembered?.x, remembered?.y, remembered?.w, remembered?.h],
+            [30, 40, 320, 240],
             "docking must not discard the float geometry",
         );
 

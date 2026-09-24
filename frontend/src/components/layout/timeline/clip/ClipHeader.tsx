@@ -970,7 +970,6 @@ export const ClipHeader: React.FC<{
     );
 };
 
-
 /** 声道模式徽章：显示当前模式的紧凑缩写，点击循环切换（0→1→2→3→4→0）。 */
 function ChannelModeBadge(props: {
     clip: ClipInfo;

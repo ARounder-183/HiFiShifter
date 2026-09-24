@@ -28,9 +28,10 @@ import {
     splitRootWith,
     type DockInsertTarget,
 } from "./dockTree";
-import { getPanel, isPanelRegistered, listPanels } from "./panelRegistry";
+import { getPanel, isPanelRegistered, listPanels, type PanelDefinition } from "./panelRegistry";
 import {
     DOCK_LAYOUT_SCHEMA,
+    type DockFloatGeometry,
     type DockForm,
     type DockPlacement,
     type DockGutterSizes,
@@ -107,14 +108,40 @@ export function createDefaultDockLayout(): DockLayout {
 export function ensureRegisteredPanels(layout: DockLayout): DockLayout {
     const forms = { ...layout.forms };
     const order = [...layout.order];
+    const floatOrder = [...layout.floatOrder];
     let changed = false;
     for (const panel of listPanels()) {
         if (forms[panel.id]) continue;
-        forms[panel.id] = { id: panel.id, panelId: panel.id, float: null, floating: false };
+        // 面板可以声明"首次出现时以浮窗落在某个角上"（见 `PanelDefinition.defaultFloating`）。
+        const float = panel.defaultFloating ? resolveDefaultFloat(panel.defaultFloating) : null;
+        forms[panel.id] = { id: panel.id, panelId: panel.id, float, floating: float !== null };
         order.push(panel.id);
+        if (float !== null && !floatOrder.includes(panel.id)) floatOrder.push(panel.id);
         changed = true;
     }
-    return changed ? { ...layout, forms, order } : layout;
+    return changed ? { ...layout, forms, order, floatOrder } : layout;
+}
+
+/**
+ * 把"落在某个角上"的声明解析成具体几何。
+ *
+ * 位置依赖主窗口尺寸，而布局对象可能在非浏览器环境（测试）里构造 —— 因此这里
+ * 对 `window` 缺失做降级，而不是让调用方各自判断。
+ */
+function resolveDefaultFloat(
+    spec: NonNullable<PanelDefinition["defaultFloating"]>,
+): DockFloatGeometry {
+    const margin = spec.marginPx ?? 24;
+    const { width, height } = spec;
+    if (typeof window === "undefined") {
+        return { x: margin, y: margin, w: width, h: height };
+    }
+    return {
+        x: Math.max(margin, Math.round(window.innerWidth - width - margin)),
+        y: Math.max(margin, Math.round(window.innerHeight - height - margin)),
+        w: width,
+        h: height,
+    };
 }
 
 function clampNumber(value: unknown, min: number, max: number, fallback: number): number {
@@ -209,6 +236,14 @@ function normalizeFloat(raw: unknown): DockForm["float"] {
     };
     if (value.maximized === true) float.maximized = true;
     if (value.minimized === true) float.minimized = true;
+    // 锚点必须原样保留：丢了它，一次落盘就退化成写死的坐标，窗口尺寸变化后
+    // 浮窗不再跟随（见 `DockFloatAnchor`）。
+    if (value.anchor === "bottom-right") {
+        float.anchor = "bottom-right";
+        float.anchorMarginPx = clampNumber(value.anchorMarginPx, 0, 400, 24);
+    } else {
+        float.anchor = null;
+    }
     const restore = value.restore as DockRect | null | undefined;
     if (restore && typeof restore === "object") {
         const rx = Number(restore.x);

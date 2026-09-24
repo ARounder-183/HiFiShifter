@@ -83,12 +83,28 @@ export interface DockTabsetNode {
 
 export type DockNode = DockSplitNode | DockTabsetNode;
 
+/**
+ * 浮动窗体的锚点：位置由主窗口尺寸推导，而不是写死坐标。
+ *
+ * 【为什么需要】"默认落在右下角"这类意图在**布局创建时**并不知道真实的窗口尺寸
+ * （窗口几何是异步恢复的，创建那一刻量到的 innerHeight 可能还是初始值），写死坐标
+ * 会让浮窗停在偏高的位置；窗口尺寸变化后也会跑偏。把锚点作为语义存下来、在**渲染
+ * 时**按当前视口解析，位置就总是对的。用户一旦手动移动/缩放浮窗，锚点即被清除
+ * （见 `setFloatGeometry`），此后它就是一个普通的固定位置。
+ */
+export type DockFloatAnchor = "bottom-right";
+
 /** 浮动窗体的几何与状态。 */
 export interface DockFloatGeometry {
+    /** 未使用锚点时是绝对坐标；使用锚点时由 `resolveFloatRect` 推导，此处为占位值。 */
     x: number;
     y: number;
     w: number;
     h: number;
+    /** 非空 = 位置随主窗口尺寸推导（见 `DockFloatAnchor`）。 */
+    anchor?: DockFloatAnchor | null;
+    /** 锚点距视口边缘的间距（px）。 */
+    anchorMarginPx?: number;
     /** 最大化（铺满主窗口可用区），保留原几何以便还原。 */
     maximized?: boolean;
     /** 最大化前的几何快照。 */

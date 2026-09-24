@@ -240,7 +240,7 @@ import {
     computeAutoFollowScrollLeft,
     computeFocusCursorScrollLeft,
 } from "../../utils/autoFollowScroll";
-import { readDevicePixelRatio, snapToDevicePx } from "../../utils/devicePixelLine";
+import { createTimelineAxis, playheadLineLeftPx } from "./renderKernel/timelineAxis";
 import { resolveQuickExportClipIds } from "./timeline/quickExportSelection";
 import { isMirrorEcho } from "./timeline/scrollEcho";
 import {
@@ -252,8 +252,6 @@ import { ClipFormantToolWindow } from "./timeline/clip/ClipFormantToolWindow";
 
 const TimelineTransportBridge = React.memo(function TimelineTransportBridge(props: {
     pxPerSecRef: React.MutableRefObject<number>;
-    rulerPlayheadLineRef: React.MutableRefObject<HTMLDivElement | null>;
-    rulerPlayheadHeadRef: React.MutableRefObject<HTMLDivElement | null>;
     /**
      * 模式无关的视口访问器。
      *
@@ -272,8 +270,6 @@ const TimelineTransportBridge = React.memo(function TimelineTransportBridge(prop
 }) {
     const {
         pxPerSecRef,
-        rulerPlayheadLineRef,
-        rulerPlayheadHeadRef,
         viewport,
         visualPlayheadRef,
         syncScrollLeft,
@@ -313,7 +309,6 @@ const TimelineTransportBridge = React.memo(function TimelineTransportBridge(prop
                 // 造成跳变。内核宿主也经 `playheadSec` getter 读同一份真值
                 // （见 `timelineKernelHost.readPlayheadSec`）。
                 visualPlayheadRef.current = visualPlayheadSec;
-                const playheadLeftPx = visualPlayheadSec * pxPerSecRef.current;
 
                 // 自动滚动先行：syncScrollLeft 内部会用 Redux 同步播放头（滞后于
                 // 视觉插值）重写播放头位置 —— 若先定位播放头再滚动，播放头每帧
@@ -333,19 +328,15 @@ const TimelineTransportBridge = React.memo(function TimelineTransportBridge(prop
                     }
                 }
 
-                // 标尺播放头定位（在自动滚动之后，用最新的视觉插值位置）。
-                // 写入前吸附到设备像素边界（readDevicePixelRatio 每帧现读，
-                // 浏览器缩放/跨屏后下一帧自愈）：分数 DPR 下不吸附的落点相位
-                // 随播放连续变化，1/2 物理像素交替 —— 即"播放时粗细不一"。
-                // 轨道区播放头不在这里写：它由内核在 draw() 内自绘（见下方重绘请求）。
-                const dpr = readDevicePixelRatio();
-                if (rulerPlayheadLineRef.current) {
-                    rulerPlayheadLineRef.current.style.left = `${snapToDevicePx(playheadLeftPx, dpr)}px`;
-                }
-                if (rulerPlayheadHeadRef.current) {
-                    rulerPlayheadHeadRef.current.style.left = `${snapToDevicePx(playheadLeftPx, dpr)}px`;
-                }
-
+                // 标尺播放头线**不在这里写**：它由内核在 draw() 内与轨道区播放头
+                // 一起写（同一次帧提交、同一份内核视口、同一个 `playheadLineLeftPx`）。
+                //
+                // 【为什么必须收走】这里曾用 `visualPlayheadSec × pxPerSec`（**内容
+                // 坐标**）写同一条线，而线现在位于内容平移层之外（视口坐标），两者
+                // 差一个 scrollLeft；再加上 React 渲染路径与内核路径，同一条线一度有
+                // 三个写者、两套坐标。内核的去重逻辑还会因此**跳过**自己的正确写入，
+                // 让错误的坐标一直留到下一次滚动 —— 这正是"标尺线与主体线不像同一条
+                // 线"的根因之一。
                 // 请求内核重绘轨道区播放头。
                 //
                 // 【为什么必须显式请求】内核的渲染循环是纯脏标记驱动的
@@ -360,8 +351,6 @@ const TimelineTransportBridge = React.memo(function TimelineTransportBridge(prop
             [
                 autoScrollEnabled,
                 pxPerSecRef,
-                rulerPlayheadHeadRef,
-                rulerPlayheadLineRef,
                 viewport,
                 syncScrollLeft,
                 transport.isPlaying,
@@ -677,6 +666,33 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         viewportAccessRef.current = createTimelineViewportAccess({ scrollRef, kernelHostRef });
     }
     const viewportAccess = viewportAccessRef.current;
+
+    /**
+     * 标尺播放头线的**挂载定位**。
+     *
+     * 线由内核逐帧写（与轨道区播放头同源同帧），但内核宿主是在被动 effect 里创建
+     * 的、首帧要等一个 rAF；在那之前线若没有 `left`，会停在静态位置（左缘）闪一帧。
+     * 这里用绘制前执行的 layout effect 补上初值 —— 之后由内核接管。
+     */
+    React.useLayoutEffect(() => {
+        const left = playheadLineLeftPx(
+            createTimelineAxis({
+                pxPerSec: pxPerSecRef.current,
+                scrollLeftPx: viewportAccess.getScrollLeft(),
+                viewportWidthPx: viewportAccess.getViewportWidth(),
+                dpr: window.devicePixelRatio || 1,
+            }),
+            visualPlayheadSecRef.current,
+        );
+        if (rulerPlayheadLineRef.current) {
+            rulerPlayheadLineRef.current.style.left = `${left}px`;
+        }
+        if (rulerPlayheadHeadRef.current) {
+            rulerPlayheadHeadRef.current.style.left = `${left}px`;
+        }
+        // 只在挂载时定位：之后的每一次写入都由内核负责（同一次帧提交）。
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     /**
      * clientY → 轨道 id（模式无关）。
@@ -5298,6 +5314,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             pxPerSec={pxPerSec}
             viewportWidth={viewportWidth}
             playheadSec={s.playheadSec}
+            positionPlayheadFromProps={false}
             playheadLineRef={rulerPlayheadLineRef}
             playheadHeadRef={rulerPlayheadHeadRef}
             contentRef={rulerContentRef}
@@ -6421,8 +6438,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
 
                     <TimelineTransportBridge
                         pxPerSecRef={pxPerSecRef}
-                        rulerPlayheadLineRef={rulerPlayheadLineRef}
-                        rulerPlayheadHeadRef={rulerPlayheadHeadRef}
                         viewport={viewportAccess}
                         visualPlayheadRef={visualPlayheadSecRef}
                         syncScrollLeft={syncScrollLeft}

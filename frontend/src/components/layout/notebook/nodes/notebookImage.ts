@@ -39,7 +39,8 @@ export const NotebookImage = Image.extend({
             src: {
                 default: null,
                 // 正文里的 `#w=` 归 width 属性管，src 保持干净。
-                parseHTML: (element) => stripWidthFragment(element.getAttribute("src") ?? "") || null,
+                parseHTML: (element) =>
+                    stripWidthFragment(element.getAttribute("src") ?? "") || null,
             },
             width: {
                 default: null,
@@ -61,7 +62,14 @@ export const NotebookImage = Image.extend({
             markdown: {
                 serialize(
                     state: MarkdownState,
-                    node: { attrs: { src?: string; alt?: string; title?: string; width?: number | null } },
+                    node: {
+                        attrs: {
+                            src?: string;
+                            alt?: string;
+                            title?: string;
+                            width?: number | null;
+                        };
+                    },
                 ) {
                     const src = withWidthFragment(node.attrs.src ?? "", node.attrs.width);
                     const alt = state.esc(node.attrs.alt ?? "");

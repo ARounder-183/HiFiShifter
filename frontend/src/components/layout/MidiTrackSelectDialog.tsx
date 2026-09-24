@@ -474,12 +474,15 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
             // 根据导入位置模式计算选区约束
             let effectivePosition = importPosition;
             if (effectivePosition === "selection") {
-                if (selectionRanges == null || selectionRanges.length === 0 || !selectionAvailable) {
+                if (
+                    selectionRanges == null ||
+                    selectionRanges.length === 0 ||
+                    !selectionAvailable
+                ) {
                     effectivePosition = "playhead"; // 回退
                 }
             }
-            const rangesForImport =
-                effectivePosition === "selection" ? selectionRanges : undefined;
+            const rangesForImport = effectivePosition === "selection" ? selectionRanges : undefined;
 
             const res = await paramsApi.importMidiToPitch(
                 midiSrc,

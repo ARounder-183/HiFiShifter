@@ -71,6 +71,22 @@ export interface PanelDefinition {
     singleton?: boolean;
     /** 首次打开时的落点（缺省并入主编辑区标签组）。 */
     defaultPlacement?: DockPlacement;
+    /**
+     * 首次出现时的形态：以**浮窗**出现在主窗口的某个角上。
+     *
+     * 缺省（不声明）= 有窗体记录但不显示（"已关闭"），用户从"布局 → 显示窗体"
+     * 里打开。声明了它的面板会在**首次**（或重置布局后）直接浮出来 ——
+     * 适用于"默认就该在场、但不该占据布局格子"的辅助面板（如记事本）。
+     *
+     * 只影响**没有窗体记录**的面板：用户关掉它之后记录仍在，不会被再次弹出。
+     */
+    defaultFloating?: {
+        width: number;
+        height: number;
+        /** 停靠到主窗口的哪个角（留 `marginPx` 边距）。 */
+        anchor: "bottom-right";
+        marginPx?: number;
+    };
     /** 搬家前后的状态保全钩子（见 `DockPanelLifecycle`）。 */
     lifecycle?: DockPanelLifecycle;
     /** "显示窗体"菜单里的排序权重。 */

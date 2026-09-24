@@ -627,22 +627,15 @@ class WaveformMipmapStoreImpl {
 
         const dataStartSec = (startIdx * divisionFactor) / sampleRate;
         const dataDurationSec = ((endIdx - startIdx) * divisionFactor) / sampleRate;
-        const effChannels = effectiveChannels(
-            sourceChannels ?? peaks.channels,
-            channelMode,
-        );
+        const effChannels = effectiveChannels(sourceChannels ?? peaks.channels, channelMode);
 
         if (effChannels === 2 && peaks.channels === 2) {
             const mode = normalizeChannelMode(channelMode);
             // Swap 交换平面角色：主平面为右声道。
             const [primary, secondary] =
-                mode === 1
-                    ? [peaks.ch1Min, peaks.ch0Min]
-                    : [peaks.ch0Min, peaks.ch1Min];
+                mode === 1 ? [peaks.ch1Min, peaks.ch0Min] : [peaks.ch0Min, peaks.ch1Min];
             const [primaryMax, secondaryMax] =
-                mode === 1
-                    ? [peaks.ch1Max, peaks.ch0Max]
-                    : [peaks.ch0Max, peaks.ch1Max];
+                mode === 1 ? [peaks.ch1Max, peaks.ch0Max] : [peaks.ch0Max, peaks.ch1Max];
             return {
                 min: primary.subarray(startIdx, endIdx),
                 max: primaryMax.subarray(startIdx, endIdx),

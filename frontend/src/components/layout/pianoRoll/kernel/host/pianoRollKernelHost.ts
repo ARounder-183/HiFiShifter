@@ -1392,7 +1392,7 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
     let lastVThumbKey = "";
     /** 上一次写入标尺内容层的平移量（NaN = 从未写入）。 */
     let lastRulerTranslateX = Number.NaN;
-    /** 上一次写入标尺播放头线的内容坐标（去重，避免每帧无谓写样式）。 */
+    /** 上一次写入标尺播放头线的视口坐标（去重，避免每帧无谓写样式）。 */
     let lastRulerPlayheadX = Number.NaN;
     /** 上一次量化提交给 React 的水平滚动位置（NaN = 从未提交）。 */
     let lastCommittedScrollLeft = Number.NaN;
@@ -1537,8 +1537,9 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             playheadSec != null &&
             Number.isFinite(playheadSec)
         ) {
-            // 左缘取与 GL 主体播放头**同一个函数**（`playheadLineLeftPx`），再换算回
-            // 内容坐标（层会把它平移回去）—— 两条线因此逐设备像素重合。
+            // 左缘取与 GL 主体播放头**同一个函数**（`playheadLineLeftPx`），且同为
+            // **视口坐标** —— 标尺线现在位于内容平移层之外（见 `TimeRuler` 的说明），
+            // 因此不再需要加回层平移，也不再受小数平移的抗锯齿影响。
             //
             // 轴由**本帧传入的 `view`** 构造，而不是再调一次 `currentAxis()`：后者会
             // 重新读一次 `scroll.get()`，多一次快照就多一个"与 GL 不同帧"的机会。
@@ -1548,12 +1549,12 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                 viewportWidthPx,
                 dpr: readDevicePixelRatio(),
             });
-            const contentX = playheadLineLeftPx(axis, playheadSec) + drawingScrollLeft;
-            if (shouldWrite(contentX, lastRulerPlayheadX)) {
-                lastRulerPlayheadX = contentX;
-                sync.rulerPlayheadLine.style.left = `${contentX}px`;
+            const viewportX = playheadLineLeftPx(axis, playheadSec);
+            if (shouldWrite(viewportX, lastRulerPlayheadX)) {
+                lastRulerPlayheadX = viewportX;
+                sync.rulerPlayheadLine.style.left = `${viewportX}px`;
                 if (sync.rulerPlayheadHead != null) {
-                    sync.rulerPlayheadHead.style.left = `${contentX}px`;
+                    sync.rulerPlayheadHead.style.left = `${viewportX}px`;
                 }
             }
         }

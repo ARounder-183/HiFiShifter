@@ -373,21 +373,17 @@
     pointer-events: none;
 }
 
+/*
+ * 拖拽提示块：外观复用 `.app-tooltip`（元素同时带该类），这里只补拖拽特有的部分
+ * —— 跟随指针、按意图着色。样式与其它悬停提示同源，不会看起来像另一套 UI。
+ */
 .hs-dock-ghost {
-    position: fixed;
     display: flex;
     align-items: center;
     gap: 4px;
-    max-width: 220px;
-    padding: 3px 8px;
-    border-radius: 3px;
-    background: var(--qt-panel);
-    border: 1px solid var(--accent-9);
-    color: var(--qt-text);
-    font-size: 11px;
-    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
-    pointer-events: none;
+    max-width: 260px;
     white-space: nowrap;
+    border-color: var(--accent-9);
 }
 
 .hs-dock-ghost[data-intent="float"] {

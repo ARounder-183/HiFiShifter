@@ -70,10 +70,7 @@ export function getDynamicProjectSec(clips: ClipInfo[]): number {
  * @param clips clip 列表（用于兜住乐观中间态）。
  * @returns 用于计算内容宽 / 可滚上限的工程时长（秒，>= 0）。
  */
-export function resolveScrollableProjectSec(
-    projectSec: number,
-    clips: ClipInfo[],
-): number {
+export function resolveScrollableProjectSec(projectSec: number, clips: ClipInfo[]): number {
     const authoritative = Number.isFinite(projectSec) ? Math.max(0, projectSec) : 0;
     const clipBoundary = getDynamicProjectSec(clips);
     return Math.max(authoritative, clipBoundary);

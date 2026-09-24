@@ -85,6 +85,10 @@ export function registerBuiltinPanels(): void {
             sizePx: Math.max(360, NOTEBOOK_PANEL_MAX_WIDTH / 2),
             tabWith: PANEL_FILE_BROWSER,
         },
+        // 记事本是"随手记"性质的辅助面板：默认就该在场（用户不必先去菜单里打开），
+        // 但不该占掉布局格子，因此以浮窗出现在右下角。用户把它停靠或关掉之后，
+        // 窗体记录已存在，这里不会再弹出来。
+        defaultFloating: { width: 460, height: 420, anchor: "bottom-right" },
         order: 40,
     });
 

@@ -20,16 +20,20 @@ import type { DockSettings } from "../../features/dock/dockSettings";
 export function dockModifierLabel(
     modifier: DockSettings["dockModifier"] | undefined,
 ): string | null {
+    // 【键名不能取 `__none__`】`isNoneBinding` 只看 `key === "__none__"`，命中后
+    // `formatKeybinding` 会走"无绑定"分支返回占位符（`—`），提示因此显示成
+    // "按住 - 可停靠"。修饰键绑定本来就只需要修饰键标志，键名取一个真实键名即可：
+    // `modifierOnly` 分支会忽略它、直接返回修饰键名称（Ctrl / ⌘ / Alt / ⇧）。
     switch (modifier) {
         case "alt":
-            return formatKeybinding({ key: "__none__", alt: true, modifierOnly: true });
+            return formatKeybinding({ key: "alt", alt: true, modifierOnly: true });
         case "shift":
-            return formatKeybinding({ key: "__none__", shift: true, modifierOnly: true });
+            return formatKeybinding({ key: "shift", shift: true, modifierOnly: true });
         case "none":
             return null;
         default:
             // primary：Ctrl（Windows/Linux）/ ⌘（macOS），由 `formatKeybinding` 决定。
-            return formatKeybinding({ key: "__none__", ctrl: true, modifierOnly: true });
+            return formatKeybinding({ key: "control", ctrl: true, modifierOnly: true });
     }
 }
 

@@ -68,9 +68,7 @@ function clipboardSummary(payload: SystemClipboardObject): string {
     return `HiFiShifter: ${payload.templates.length} clip(s) copied. Paste in HiFiShifter timeline.`;
 }
 
-export async function writeSystemClipboardObject(
-    payload: SystemClipboardObject,
-): Promise<void> {
+export async function writeSystemClipboardObject(payload: SystemClipboardObject): Promise<void> {
     const result = await invoke<{ ok: boolean; error?: string }>(
         "write_system_clipboard_object",
         JSON.stringify(payload),

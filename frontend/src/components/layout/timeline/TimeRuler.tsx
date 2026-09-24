@@ -27,11 +27,8 @@ import {
 import { RULER_BASE_HEIGHT_PX, timeRulerHeightPx } from "./rulerHeight.ts";
 import { RULER_LABEL_HIDDEN_GAP_PX } from "./runtime/buildTimelineTicks.js";
 import type { TimelineTick } from "./runtime/buildTimelineTicks.js";
-import {
-    readDevicePixelRatio,
-    snapToDevicePx,
-    wholeDevicePxLength,
-} from "../../../utils/devicePixelLine.ts";
+import { readDevicePixelRatio, wholeDevicePxLength } from "../../../utils/devicePixelLine.ts";
+import { playheadLineLeftViewportPx } from "../renderKernel/timelineAxis.ts";
 import { clampAxisPosition } from "../../appTooltipPosition";
 
 function unitLabelKey(unit: TimeUnit): string {
@@ -176,12 +173,15 @@ const TimeRulerMarks = React.memo(function TimeRulerMarks({
 const TimeRulerPlayhead = React.memo(function TimeRulerPlayhead({
     playheadSec,
     pxPerSec,
+    scrollLeft,
     lineRef,
     headRef,
     positionFromProps,
 }: {
     playheadSec: number;
     pxPerSec: number;
+    /** 绘制坐标下的水平滚动量（线在视口坐标里定位，因此需要它）。 */
+    scrollLeft: number;
     lineRef?: React.Ref<HTMLDivElement>;
     headRef?: React.Ref<HTMLDivElement>;
     /**
@@ -203,7 +203,14 @@ const TimeRulerPlayhead = React.memo(function TimeRulerPlayhead({
     // 滚动期间的逐帧写入（useVisualPlayhead onFrame / syncScrollLeft）使用
     // 同一套吸附，双方逐设备像素一致。
     const dpr = readDevicePixelRatio();
-    const playheadLeft = snapToDevicePx(playheadSec * pxPerSec, dpr);
+    // 视口坐标（不再是内容坐标）：与 GL 主体播放头同一个换算函数，两条线逐设备
+    // 像素一致；也避免被内容层的小数平移带偏。
+    const playheadLeft = playheadLineLeftViewportPx({
+        sec: playheadSec,
+        pxPerSec,
+        scrollLeftPx: scrollLeft,
+        dpr,
+    });
     // 首帧仍给出正确位置（避免挂载瞬间闪到 0），此后不再由 React 改写。
     const lineStyle: React.CSSProperties =
         positionFromProps === false
@@ -863,14 +870,24 @@ const TimeRulerInner: React.FC<{
                     onDialogOpenChange={handleTempoDialogOpenChange}
                     onFloatingInlineEditChange={setTempoInlineEditing}
                 />
-                <TimeRulerPlayhead
-                    playheadSec={playheadSec}
-                    positionFromProps={positionPlayheadFromProps}
-                    pxPerSec={pxPerSec}
-                    lineRef={playheadLineRef}
-                    headRef={playheadHeadRef}
-                />
             </div>
+
+            {/*
+              播放头竖线刻意放在**内容平移层之外**，按视口坐标定位。
+              内容层带 `will-change: transform` 且被 `translateX(-小数)` 平移：合成层
+              会以自己的原点栅格化子元素，于是 1 物理像素的竖线落在半个设备像素上被
+              抗锯齿 —— 表现为"宽度忽粗忽细、颜色发淡"，与 GL 直接按设备像素绘制的
+              主体线看上去不像同一条线。移出图层后，左缘即 GL 用的同一函数结果，
+              两条线逐设备像素重合。
+            */}
+            <TimeRulerPlayhead
+                playheadSec={playheadSec}
+                positionFromProps={positionPlayheadFromProps}
+                pxPerSec={pxPerSec}
+                scrollLeft={scrollLeft}
+                lineRef={playheadLineRef}
+                headRef={playheadHeadRef}
+            />
 
             {/* 时间标尺与 Tempo Map 行之间的分隔横线：固定在标尺盒内（视口宽度），
                 不随内容平移/缩放伸缩 —— 与标尺底部边框等其他横线一致。 */}

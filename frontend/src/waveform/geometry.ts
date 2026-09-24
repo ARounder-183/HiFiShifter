@@ -149,10 +149,7 @@ export interface WaveformAmplitudeFactors {
      * @param windowEndSec 窗口终点（时间轴绝对秒）。
      * @returns 有限上界；无法给出时返回 null（不做钳制，保持旧行为）。
      */
-    levelCeilingOverWindow?(
-        windowStartSec: number,
-        windowEndSec: number,
-    ): number | null;
+    levelCeilingOverWindow?(windowStartSec: number, windowEndSec: number): number | null;
 }
 
 /**
@@ -682,11 +679,7 @@ export function buildWaveformGeometry(args: {
                     // 因子视图：一次求值、两次乘法（映射 = value × gain × factor）。
                     const fMax = factorAtFn !== null ? factorAtFn(tMax) : null;
                     const fMin =
-                        argMax === argMin
-                            ? fMax
-                            : factorAtFn !== null
-                              ? factorAtFn(tMin)
-                              : null;
+                        argMax === argMin ? fMax : factorAtFn !== null ? factorAtFn(tMin) : null;
                     if (fMax !== null && fMin !== null) {
                         mappedSliceMax = rawMax * gMax * fMax;
                         mappedSliceMin = rawMin * gMin * fMin;

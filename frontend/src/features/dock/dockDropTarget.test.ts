@@ -2,6 +2,7 @@ import { test } from "vitest";
 
 import {
     clampFloatRect,
+    resolveFloatRect,
     dropPreviewRect,
     dropZoneToSide,
     pickDropTarget,
@@ -165,6 +166,42 @@ test("features/dock/dockDropTarget.test.ts scripted checks", async () => {
             snapFloatPosition({ x: 320, y: 310, w: 200, h: 200 }, others, viewport, 12),
             { x: 320, y: 310 },
             "no snap when nothing is close",
+        );
+    }
+
+    // ── 锚点浮窗：位置按当前视口推导 ──────────────────────────────
+    //
+    // "默认落在右下角"是语义而非坐标：布局创建那一刻量到的窗口尺寸未必是最终值，
+    // 写死坐标会让浮窗停在偏高的位置，窗口缩放后也会跑偏。
+    {
+        const viewport = { w: 1920, h: 1080 };
+        const anchored = {
+            x: 0,
+            y: 0,
+            w: 460,
+            h: 420,
+            anchor: "bottom-right" as const,
+            anchorMarginPx: 24,
+        };
+        assertEqual(
+            resolveFloatRect(anchored, viewport),
+            { x: 1436, y: 636, w: 460, h: 420 },
+            "anchored float sits in the lower-right corner",
+        );
+        assertEqual(
+            resolveFloatRect(anchored, { w: 1200, h: 800 }),
+            { x: 716, y: 356, w: 460, h: 420 },
+            "and follows the viewport when it changes",
+        );
+        assertEqual(
+            resolveFloatRect(anchored, { w: 300, h: 200 }),
+            { x: 24, y: 24, w: 460, h: 420 },
+            "degenerate viewport falls back to the margin",
+        );
+        assertEqual(
+            resolveFloatRect({ x: 10, y: 20, w: 300, h: 200 }, viewport),
+            { x: 10, y: 20, w: 300, h: 200 },
+            "a manually placed float keeps its coordinates",
         );
     }
 });

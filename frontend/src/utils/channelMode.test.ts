@@ -7,10 +7,7 @@ import {
     nextChannelMode,
     normalizeChannelMode,
 } from "./channelMode";
-import {
-    base64ToArrayBuffer,
-    decodeWaveformBinary,
-} from "./waveformBinaryCodec";
+import { base64ToArrayBuffer, decodeWaveformBinary } from "./waveformBinaryCodec";
 
 function encodeWfpkV2(channels: number, peakCount: number, blocks: Float32Array[]): string {
     const header = new ArrayBuffer(28);
@@ -100,11 +97,10 @@ describe("waveformBinaryCodec v2", () => {
         expect(decoded!.channels).toBe(2);
         expect(decoded!.peakCount).toBe(2);
         expect(decoded!.ch0Min).toBeInstanceOf(Float32Array);
-        expect(Array.from(decoded!.ch0Min)).toEqual(expect.arrayContaining([expect.closeTo(-1), expect.closeTo(-0.5)]));
-        expect(Array.from(decoded!.ch1Min)).toEqual([
-            expect.closeTo(-0.2),
-            0,
-        ]);
+        expect(Array.from(decoded!.ch0Min)).toEqual(
+            expect.arrayContaining([expect.closeTo(-1), expect.closeTo(-0.5)]),
+        );
+        expect(Array.from(decoded!.ch1Min)).toEqual([expect.closeTo(-0.2), 0]);
         // 包络取各声道极值的合并
         expect(Array.from(decoded!.min)).toEqual([-1, -0.5]);
         expect(Array.from(decoded!.max)).toEqual([expect.closeTo(1), expect.closeTo(0.5)]);

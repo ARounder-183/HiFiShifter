@@ -267,9 +267,36 @@ export function strokePx(axis: TimelineAxis, px: number, widthPx: number): numbe
  * @returns 线的左缘（视口坐标，CSS px）。
  */
 export function playheadLineLeftPx(axis: TimelineAxis, sec: number, widthPx?: number): number {
-    const width = widthPx ?? wholeDevicePxLength(1, axis.dpr);
-    const snapped = strokePx(axis, secToViewportPx(axis, sec), width);
-    return snapped - width / 2;
+    return playheadLineLeftViewportPx({
+        sec,
+        pxPerSec: axis.pxPerSec,
+        scrollLeftPx: axis.scrollLeftPx,
+        dpr: axis.dpr,
+        widthPx,
+    });
+}
+
+/**
+ * `playheadLineLeftPx` 的裸数值入口 —— 给没有 `TimelineAxis` 的调用方用
+ * （React 组件按 props 计算初始位置）。
+ *
+ * @returns 线的左缘（**视口坐标**，CSS px）。
+ */
+export function playheadLineLeftViewportPx(args: {
+    sec: number;
+    pxPerSec: number;
+    scrollLeftPx: number;
+    dpr: number;
+    widthPx?: number;
+}): number {
+    const dpr = Number.isFinite(args.dpr) && args.dpr > 0 ? args.dpr : 1;
+    const width = args.widthPx ?? wholeDevicePxLength(1, dpr);
+    const viewportX = args.sec * args.pxPerSec - args.scrollLeftPx;
+    const snapped = Number.isFinite(viewportX) ? Math.round(viewportX * dpr) / dpr : 0;
+    // 奇数物理宽度的线补半个设备像素，使线体正好覆盖整数个设备像素
+    // （否则 1px 线跨在两个物理像素上，变成 2px 灰线）。
+    const oddPhysicalWidth = Math.max(0, Math.round(width * dpr)) % 2 === 1;
+    return (oddPhysicalWidth ? snapped + 0.5 / dpr : snapped) - width / 2;
 }
 
 /**

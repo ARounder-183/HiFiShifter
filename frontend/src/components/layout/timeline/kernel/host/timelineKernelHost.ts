@@ -54,7 +54,11 @@ import { isPrimaryModifierDown } from "../../../../../utils/platform";
 import { armRightDragContextMenuGuard } from "../../../../../utils/rightDragContextMenuGuard";
 import { getTimelineWheelAction, type ScrollbarZone } from "../../../wheelGesture";
 import { buildTimelineTicks, type TimelineTick } from "../../runtime/buildTimelineTicks";
-import { createTimelineAxis, type TimelineAxis } from "../../../renderKernel/timelineAxis";
+import {
+    createTimelineAxis,
+    playheadLineLeftPx,
+    type TimelineAxis,
+} from "../../../renderKernel/timelineAxis";
 import { buildSparseClipRenderModel } from "../../runtime/timelineCanvasModel";
 import { drawTimelineCanvas } from "../../runtime/timelineCanvasRenderer";
 import { clearCanvasPhysical, rasterize } from "../../../renderKernel/canvasRaster";
@@ -1957,7 +1961,6 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     let lastRulerTranslateX = Number.NaN;
     let lastTrackListScrollTop = Number.NaN;
     let lastPlayheadViewportX = Number.NaN;
-    let lastPlayheadContentX = Number.NaN;
     /** 吸附高亮内容层的整层变换（字符串去重：同时含两轴）。 */
     let lastSnapTransform = "";
     /** copy ghost 内容层的整层变换（去重方式同上）。 */
@@ -2158,27 +2161,34 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             }
         }
 
-        // 播放头：两个元素的**定位坐标系不同**，不能共用同一个值。
-        // - 标尺播放头位于标尺内容层内 → 用内容坐标 `left`（随内容层的
-        //   translateX(-scrollLeft) 自动跟随滚动）；
-        // - 轨道区播放头位于内核视口容器内 → 用视口坐标 `translateX`
-        //   （滚动时必须重算，否则会粘在屏幕上不跟内容走）。
-        const playheadContentX = readPlayheadSec() * view.pxPerSec;
-        const playheadViewportX = playheadContentX - view.scrollLeft;
-        if (
-            shouldWrite(playheadContentX, lastPlayheadContentX) ||
-            shouldWrite(playheadViewportX, lastPlayheadViewportX)
-        ) {
-            lastPlayheadContentX = playheadContentX;
+        // 播放头：两条线**同为视口坐标**，且由同一个函数取左缘。
+        //
+        // 【为什么不再有"内容坐标 / 视口坐标"之分】标尺播放头曾经位于标尺内容层
+        // 内部（靠内容层的 `translateX(-scrollLeft)` 跟随滚动），而轨道区播放头在
+        // 内核视口容器里。两者坐标空间不同，就必须各算一遍；而内容层带
+        // `will-change: transform` 且平移量是小数，合成层以自己的原点栅格化子元素
+        // —— 1 物理像素的竖线因此落在半个设备像素上被抗锯齿，表现为"宽度忽粗忽细、
+        // 颜色发淡"，与直接按设备像素绘制的画布线看上去不像同一条线。现在标尺线移
+        // 到内容层之外（见 `TimeRuler`），两条线共享 `playheadLineLeftPx` 与同一份
+        // 设备像素约定，逐设备像素重合。
+        const playheadSec = readPlayheadSec();
+        const playheadViewportX = playheadSec * view.pxPerSec - view.scrollLeft;
+        if (shouldWrite(playheadViewportX, lastPlayheadViewportX)) {
             lastPlayheadViewportX = playheadViewportX;
-            // 设备像素吸附：分数 DPR 下不吸附会让线宽在 1↔2 物理像素间跳动。
-            const dpr = readDpr();
-            const snappedContentX = Math.round(playheadContentX * dpr) / dpr;
+            const playheadLeft = playheadLineLeftPx(
+                createTimelineAxis({
+                    pxPerSec: view.pxPerSec,
+                    scrollLeftPx: view.scrollLeft,
+                    viewportWidthPx,
+                    dpr: readDpr(),
+                }),
+                playheadSec,
+            );
             if (sync.rulerPlayheadLine != null) {
-                sync.rulerPlayheadLine.style.left = `${snappedContentX}px`;
+                sync.rulerPlayheadLine.style.left = `${playheadLeft}px`;
             }
             if (sync.playheadLine != null) {
-                sync.playheadLine.style.transform = `translateX(${snappedContentX - view.scrollLeft}px)`;
+                sync.playheadLine.style.transform = `translateX(${playheadLeft}px)`;
             }
         }
     }

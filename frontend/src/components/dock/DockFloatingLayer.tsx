@@ -26,6 +26,7 @@ import { dockDragHint } from "./dockTooltips";
 import { getPanel } from "../../features/dock/panelRegistry";
 import type { DockForm, DockRect } from "../../features/dock/dockTypes";
 import { useI18n } from "../../i18n/I18nProvider";
+import { resolveFloatRect } from "../../features/dock/dockDropTarget";
 import { beginFloatDrag } from "./dockDragController";
 import { useDockSlot } from "./useDockSlot";
 
@@ -152,7 +153,10 @@ function DockFloatWindow({
 
     if (!geometry) return null;
 
-    const rect = liveRect ?? geometry;
+    // 带锚点的浮窗按**当前视口**推导位置（见 `DockFloatAnchor`）：窗口尺寸变化后
+    // 它仍在右下角，而不是停在按初始尺寸算出的旧坐标上。
+    const rect =
+        liveRect ?? resolveFloatRect(geometry, { w: window.innerWidth, h: window.innerHeight });
     const maximized = geometry.maximized === true;
     const minimized = geometry.minimized === true;
 

@@ -23,7 +23,6 @@ import { shallowEqual } from "react-redux";
 import { timelineViewportBus } from "../../../../utils/timelineViewportBus";
 import { timelineViewportSync } from "../../../../utils/timelineViewportSync";
 import { IS_MAC, isPrimaryModifierDown } from "../../../../utils/platform";
-import { readDevicePixelRatio, snapToDevicePx } from "../../../../utils/devicePixelLine";
 import { nativeScrollbarZoneAt } from "../../../../utils/nativeScrollbar";
 
 import { TICK_WINDOW_STEP_PX } from "../runtime/buildTimelineTicks.js";
@@ -542,19 +541,13 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
         if (rulerContentRef.current) {
             rulerContentRef.current.style.transform = `translateX(${-next}px)`;
         }
-        const playheadLeftPx =
-            (Number(sessionRef.current.playheadSec ?? 0) || 0) * pxPerSecRef.current;
-        // 标尺播放头写入统一设备像素吸附（readDevicePixelRatio 每次现读）：分数
-        // DPR 下不吸附的落点相位随滚动/播放变化，线宽 1↔2 物理像素交替。
-        // 与 React 渲染侧（标尺播放头 TimeRulerPlayhead）同一吸附函数。
-        // 轨道区播放头不在这里写：它由内核自绘，滚动经 scroll 订阅自行标脏。
-        const dpr = readDevicePixelRatio();
-        if (rulerPlayheadLineRef.current) {
-            rulerPlayheadLineRef.current.style.left = `${snapToDevicePx(playheadLeftPx, dpr)}px`;
-        }
-        if (rulerPlayheadHeadRef.current) {
-            rulerPlayheadHeadRef.current.style.left = `${snapToDevicePx(playheadLeftPx, dpr)}px`;
-        }
+        // 标尺播放头线**不在这里写**：它由内核在 draw() 内与轨道区播放头一起写
+        // （同一次帧提交、同一份内核视口、同一个 `playheadLineLeftPx`）。
+        //
+        // 【为什么必须收走】这里曾用 `playheadSec × pxPerSec`（**内容坐标**）写同一条
+        // 线；而线现在位于内容平移层之外（视口坐标），两者差一个 scrollLeft。同一条
+        // 线一度有四个写者、两套坐标，内核的去重逻辑还会因此跳过自己的正确写入 ——
+        // 这正是"标尺线与主体线不像同一条线"的根因之一。
         // ★ 立即广播视口变化 → sticky 画布层同步重绘（绕过 React）
         timelineViewportBus.emit(
             next,

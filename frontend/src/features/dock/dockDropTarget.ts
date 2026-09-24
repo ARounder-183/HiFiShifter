@@ -146,6 +146,29 @@ export function clampFloatRect(
 }
 
 /**
+ * 把浮动几何解析成具体矩形：带锚点时按**当前视口**推导位置。
+ *
+ * 锚点每帧按视口解析，因此主窗口缩放后浮窗仍在右下角；用户手动移动过之后锚点已
+ * 被清除（见 `setFloatGeometry`），此处只是原样返回。
+ */
+export function resolveFloatRect(
+    geometry: DockRect & { anchor?: string | null; anchorMarginPx?: number },
+    viewport: { w: number; h: number },
+): DockRect {
+    if (geometry.anchor !== "bottom-right") {
+        return { x: geometry.x, y: geometry.y, w: geometry.w, h: geometry.h };
+    }
+    const margin = geometry.anchorMarginPx ?? 24;
+    return {
+        // 视口比窗体还小时退回边距原点（宁可盖住内容，也不要跑到屏幕外）。
+        x: Math.max(margin, Math.round(viewport.w - geometry.w - margin)),
+        y: Math.max(margin, Math.round(viewport.h - geometry.h - margin)),
+        w: geometry.w,
+        h: geometry.h,
+    };
+}
+
+/**
  * 浮动窗吸附：靠近视口边缘或其它浮动窗边时对齐。
  *
  * 返回吸附后的位置；`threshold` 为 0 时等价于不吸附（直接返回原值）。
