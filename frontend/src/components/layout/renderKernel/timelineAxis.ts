@@ -31,6 +31,8 @@
  */
 
 /** 时间轴投影：描述「一秒画多少像素」以及「视口左上角落在内容何处」。 */
+
+import { wholeDevicePxLength } from "../../../utils/devicePixelLine";
 export interface TimelineAxis {
     /** 水平缩放：每秒对应的 CSS 像素数。必须 > 0。 */
     readonly pxPerSec: number;
@@ -241,6 +243,33 @@ export function strokePx(axis: TimelineAxis, px: number, widthPx: number): numbe
     const snapped = snapPx(axis, px);
     const oddWidth = Math.max(0, Math.round(widthPx * axis.dpr)) % 2 === 1;
     return oddWidth ? snapped + 0.5 / axis.dpr : snapped;
+}
+
+/**
+ * 播放头竖线的**左缘**在视口坐标里的位置 —— 全应用唯一的算法。
+ *
+ * 【为什么必须唯一】播放头在参数编辑器里由**两条独立的线**呈现：主体线由 GL 画
+ * （视口坐标），标尺线是 DOM 线、位于被 `translateX(-scrollLeft)` 平移的内容层里
+ * （内容坐标）。两条线只要有一处换算不同，用户就会看到它们"分离"。曾经出过两次：
+ *
+ * 1. **吸附位置不同**：标尺线在内容坐标里吸附，再被**小数级**的层平移带走，落点
+ *    与 GL 差最多一个设备像素；
+ * 2. **缩放来源不同**：标尺线用面板的 React 状态、GL 用内核真值，相差
+ *    `播放头秒数 × 缩放差`（面板宽度变化时内核会重新钳制缩放，两者随即分叉）。
+ *
+ * 本函数把"吸附 + 奇偶线宽补半像素 + 居中"这套约定收成一处：GL 几何与 DOM 线都
+ * 从它取左缘，因此**在任意 DPR 下逐设备像素一致**（此前各自实现时，偶数物理宽度
+ * 如 dpr=2 仍会差一个物理像素）。
+ *
+ * @param axis 当前投影（取 pxPerSec / scrollLeftPx / dpr）。
+ * @param sec 播放头位置（秒）。
+ * @param widthPx 线宽（CSS px）；缺省为 1 物理像素。
+ * @returns 线的左缘（视口坐标，CSS px）。
+ */
+export function playheadLineLeftPx(axis: TimelineAxis, sec: number, widthPx?: number): number {
+    const width = widthPx ?? wholeDevicePxLength(1, axis.dpr);
+    const snapped = strokePx(axis, secToViewportPx(axis, sec), width);
+    return snapped - width / 2;
 }
 
 /**

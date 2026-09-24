@@ -190,6 +190,7 @@ import { createRenderLoop, type RenderLoop } from "./renderKernel/renderLoop.js"
 import { buildTimelineTicks } from "./timeline/runtime/buildTimelineTicks.js";
 import {
     createTimelineAxis,
+    playheadLineLeftPx,
     viewportEndSec,
     viewportStartSec,
 } from "./renderKernel/timelineAxis.js";
@@ -220,7 +221,7 @@ import { getParamEditorWheelAction } from "./pianoRoll/wheelGesture";
 import type { Keybinding } from "../../features/keybindings/types";
 import { pianoKeySound } from "../../utils/PianoKeySound";
 import { computeAutoFollowScrollLeft } from "../../utils/autoFollowScroll";
-import { readDevicePixelRatio, snapToDevicePx } from "../../utils/devicePixelLine";
+import { readDevicePixelRatio } from "../../utils/devicePixelLine";
 import { useVisualPlayhead } from "../../hooks/useVisualPlayhead";
 import {
     getVisibleSecondaryParamIds,
@@ -2479,9 +2480,22 @@ export const PianoRollPanel: React.FC<{
      * 逐帧位置由 `useVisualPlayhead` 的 onFrame 与 `applyScrollLayers` 负责。
      */
     useLayoutEffect(() => {
-        const leftPx = snapToDevicePx(
-            visualPlayheadSecRef.current * pxPerSec,
-            readDevicePixelRatio(),
+        // 缩放取**内核真值**（与 GL 播放头、标尺平移同一口径）：面板的 React
+        // `pxPerSec` 是请求值，内核可能因视口宽度变化而钳制它，用请求值定位会与
+        // 主体播放头差一个 `播放头秒数 × 缩放差`。宿主未就绪时退回面板值。
+        const view = resolvePanelRenderViewport({
+            kernelView: hostRef.current?.getViewport() ?? null,
+            refPxPerSec: pxPerSecRef.current,
+            refScrollLeftPx: scrollLeftRef.current,
+        });
+        const leftPx = playheadLineLeftPx(
+            createTimelineAxis({
+                pxPerSec: view.pxPerSec,
+                scrollLeftPx: view.scrollLeftPx,
+                viewportWidthPx: viewSizeRef.current.w,
+                dpr: readDevicePixelRatio(),
+            }),
+            visualPlayheadSecRef.current,
         );
         if (rulerPlayheadLineRef.current) {
             rulerPlayheadLineRef.current.style.left = `${leftPx}px`;
@@ -2489,6 +2503,7 @@ export const PianoRollPanel: React.FC<{
         if (rulerPlayheadHeadRef.current) {
             rulerPlayheadHeadRef.current.style.left = `${leftPx}px`;
         }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [pxPerSec]);
 
     // 原地等待渲染（位置冻结）期间不得推进视觉插值（见 TimelinePanel 同名注释）。
@@ -2504,18 +2519,11 @@ export const PianoRollPanel: React.FC<{
         onFrame: useCallback(
             (visualPlayheadSec: number) => {
                 visualPlayheadSecRef.current = visualPlayheadSec;
-                const playheadLeftPx = visualPlayheadSec * pxPerSecRef.current;
-                // 播放头 DOM 写入统一设备像素吸附（与时间线侧同一函数）：
-                // 分数 DPR 下不吸附的落点相位随播放连续变化，1/2 物理像素
-                // 交替 —— 即"播放时粗细不一"。
-                const dpr = readDevicePixelRatio();
-                const snappedPlayheadLeftPx = snapToDevicePx(playheadLeftPx, dpr);
-                if (rulerPlayheadLineRef.current) {
-                    rulerPlayheadLineRef.current.style.left = `${snappedPlayheadLeftPx}px`;
-                }
-                if (rulerPlayheadHeadRef.current) {
-                    rulerPlayheadHeadRef.current.style.left = `${snappedPlayheadLeftPx}px`;
-                }
+                // 标尺播放头线**不在这里写**：它由内核在帧提交里按内核视口写，
+                // 与 GL 主体播放头同源同帧（见 `sync.rulerPlayheadLine` 的说明）。
+                // 这里曾用面板的 `pxPerSecRef` 写同一条线 —— 面板缩放与内核缩放
+                // 一旦不一致（面板宽度变化时内核会重新钳制缩放），两条线就会相差
+                // `播放头秒数 × 缩放差`，也就是用户报告的"标尺线与主体线分离"。
                 if (!s.paramEditorSyncTimeline && s.autoScrollEnabled && s.runtime.isPlaying) {
                     const scroller = scrollerRef.current;
                     if (scroller) {
@@ -2582,18 +2590,25 @@ export const PianoRollPanel: React.FC<{
             refScrollLeftPx: scrollLeftRef.current,
         }).pxPerSec;
         pianoRollViewportBus.emit(next, emitPxPerSec, viewSizeRef.current.w);
-        // 播放头 DOM 线并入同帧提交：缩放（pxPerSec 变化）时立即对齐新投影，
-        // 避免与画布的播放头错位一帧（与 useVisualPlayhead 的 onFrame 同源）。
-        // 设备像素吸附与其余播放头写入点一致（见 onFrame 注释）。
-        const playheadLeftPx = snapToDevicePx(
-            visualPlayheadSecRef.current * emitPxPerSec,
-            readDevicePixelRatio(),
-        );
-        if (rulerPlayheadLineRef.current) {
-            rulerPlayheadLineRef.current.style.left = `${playheadLeftPx}px`;
-        }
-        if (rulerPlayheadHeadRef.current) {
-            rulerPlayheadHeadRef.current.style.left = `${playheadLeftPx}px`;
+        // 标尺播放头线：**宿主模式下由内核写**（同一次帧提交、同一份内核视口，
+        // 与 GL 主体播放头逐设备像素一致）。这里只在无宿主时兜底 —— 两个写者写同一
+        // 个 `style.left` 是"最后一次写入者获胜"，一旦口径不同就会分离。
+        if (hostRef.current === null) {
+            const playheadLeftPx = playheadLineLeftPx(
+                createTimelineAxis({
+                    pxPerSec: emitPxPerSec,
+                    scrollLeftPx: next,
+                    viewportWidthPx: viewSizeRef.current.w,
+                    dpr: readDevicePixelRatio(),
+                }),
+                visualPlayheadSecRef.current,
+            );
+            if (rulerPlayheadLineRef.current) {
+                rulerPlayheadLineRef.current.style.left = `${playheadLeftPx}px`;
+            }
+            if (rulerPlayheadHeadRef.current) {
+                rulerPlayheadHeadRef.current.style.left = `${playheadLeftPx}px`;
+            }
         }
     }
 
@@ -2800,6 +2815,10 @@ export const PianoRollPanel: React.FC<{
             sync: {
                 rulerContent: rulerContentRef.current,
                 gridLayer: gridLayerRef.current,
+                // 标尺播放头线由内核在同一次帧提交里写（与 GL 播放头同源同帧），
+                // 避免"面板按自己的缩放写、GL 按内核缩放画"造成的水平分离。
+                rulerPlayheadLine: rulerPlayheadLineRef.current,
+                rulerPlayheadHead: rulerPlayheadHeadRef.current,
             },
             // 帧提交：宿主已完成滚动条几何与标尺 / 网格的 DOM 写入，这里只做
             // 「画布 + 波形 + 播放头」三项的提交。复用 `applyScrollLayers`，

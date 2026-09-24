@@ -270,7 +270,7 @@ describe("projectCurvePoints 的虚线相位", () => {
         // scroll=300 时该点是第 601 个可见点（2s..6s 共 800 个采样，弧长 = 600px
         // 水平），有效弧长 = 600 + 300 = 900。两种滚动一致。
         const effectiveAt900 = 0 + more.dashPhasePx;
-        const effectiveAt300 = (900 - 300) + scrolled.dashPhasePx;
+        const effectiveAt300 = 900 - 300 + scrolled.dashPhasePx;
         expect(effectiveAt300).toBeCloseTo(effectiveAt900, 6);
     });
 

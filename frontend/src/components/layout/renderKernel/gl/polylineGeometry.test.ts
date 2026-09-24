@@ -132,11 +132,7 @@ function distToPolyline(px: number, py: number, pts: { x: number; y: number }[])
  * （Canvas2D 的默认 `lineCap: "butt"` 同样如此），端帽附近真实轮廓与几何的差异
  * 属于设计而非缺陷。同理排除真实轮廓最外 0.6px（抗锯齿过渡带，覆盖率本就近零）。
  */
-function countGaps(
-    buf: Float32Array,
-    pts: { x: number; y: number }[],
-    lineWidth: number,
-): number {
+function countGaps(buf: Float32Array, pts: { x: number; y: number }[], lineWidth: number): number {
     const halfWidth = lineWidth / 2;
     const tris = trianglesOf(buf);
     let blanks = 0;

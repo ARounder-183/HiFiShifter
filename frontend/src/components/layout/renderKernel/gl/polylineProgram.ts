@@ -283,9 +283,7 @@ export function createPolylineProgram(gl: WebGL2RenderingContext): PolylineProgr
             const dash = args.dash ?? null;
             gl.uniform2f(dashLocation, dash ? dash[0] : -1, dash ? dash[1] : 0);
             // 相位偏移：非法值（NaN / Infinity）会让整条线的相位崩掉，显式归一到 0。
-            const dashPhase = Number.isFinite(args.dashPhasePx ?? 0)
-                ? (args.dashPhasePx ?? 0)
-                : 0;
+            const dashPhase = Number.isFinite(args.dashPhasePx ?? 0) ? (args.dashPhasePx ?? 0) : 0;
             gl.uniform1f(dashPhaseLocation, dashPhase);
 
             gl.enable(gl.BLEND);

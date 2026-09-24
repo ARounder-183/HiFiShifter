@@ -41,8 +41,7 @@ function cumulativeAlong(points: readonly PolylinePoint[]): number[] {
     const out: number[] = [0];
     for (let i = 1; i < points.length; i += 1) {
         out.push(
-            out[i - 1] +
-                Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y),
+            out[i - 1] + Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y),
         );
     }
     return out;
@@ -189,9 +188,9 @@ describe("decimatePolylinePoints", () => {
         expect(
             decimatePolylinePoints({ points: single, dpr: 2, viewportWidthPx: 100 }).decimated,
         ).toBe(false);
-        expect(
-            decimatePolylinePoints({ points: [], dpr: 2, viewportWidthPx: 100 }).decimated,
-        ).toBe(false);
+        expect(decimatePolylinePoints({ points: [], dpr: 2, viewportWidthPx: 100 }).decimated).toBe(
+            false,
+        );
 
         // 非有限值：抽稀的分列依赖 x 可比，出现 NaN 时按安全侧整条放弃。
         const withNaN = makePoints(5000, 100, (t) => t).map((p, i) =>

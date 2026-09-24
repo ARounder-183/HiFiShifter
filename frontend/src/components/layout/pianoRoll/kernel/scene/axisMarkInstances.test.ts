@@ -381,7 +381,11 @@ describe("level 与 render.ts dyn 分支逐值等价", () => {
             }
         }
         const rows: { v: number; strong: boolean; label: string }[] = [];
-        for (let m = Math.ceil((vMin - 1e-9) / chosen) * chosen; m <= vMax + chosen * 0.01; m += chosen) {
+        for (
+            let m = Math.ceil((vMin - 1e-9) / chosen) * chosen;
+            m <= vMax + chosen * 0.01;
+            m += chosen
+        ) {
             rows.push({
                 v: m,
                 strong: Math.abs(m - Math.round(m)) < 1e-9,

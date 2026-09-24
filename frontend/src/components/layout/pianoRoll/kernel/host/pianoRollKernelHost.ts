@@ -85,8 +85,8 @@ import { createGlyphProgram, type GlyphProgram } from "../../../renderKernel/gl/
 import type { GlyphQuad } from "../../../renderKernel/gl/glyphQuads";
 import {
     createTimelineAxis,
+    playheadLineLeftPx,
     secToViewportPx,
-    strokePx,
     type TimelineAxis,
 } from "../../../renderKernel/timelineAxis";
 import type { FlatInstance } from "../../../renderKernel/instanceTypes";
@@ -128,6 +128,19 @@ const SCROLL_COMMIT_STEP_PX = 256;
 export interface PianoRollKernelDomSync {
     /** 标尺内容层：按绘制坐标反向平移。 */
     readonly rulerContent?: HTMLElement | null;
+    /**
+     * 标尺上的播放头竖线与三角头。
+     *
+     * 【为什么由内核写，而不是面板自己写】标尺线在**内容坐标**里，而内容坐标 ↔
+     * 屏幕坐标的换算依赖当前缩放与滚动；主体播放头由 GL 用**内核视口**绘制。
+     * 只要两者取自不同的来源（面板的 React 状态 vs 内核真值），就会出现
+     * `播放头秒数 × 缩放差` 的水平分离 —— 缩放越大、播放头越靠后越明显。
+     * 面板宽度变化（停靠、拉宽）会让内核按新视口重新钳制缩放，这正是分离最容易
+     * 被看见的时机。把这两条线收进内核的同一次帧提交，与 GL 播放头同源同帧，
+     * 分离在结构上就不可能发生。
+     */
+    readonly rulerPlayheadLine?: HTMLElement | null;
+    readonly rulerPlayheadHead?: HTMLElement | null;
     /** 背景网格层：经 `gridRedrawBridge` 重绘（自行判定是否真的重画）。 */
     readonly gridLayer?: HTMLElement | null;
 }
@@ -1087,9 +1100,11 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         if (overlay?.playheadSec !== null && overlay?.playheadSec !== undefined) {
             // 与 render.ts:1148-1154 同一对齐：线宽取整物理像素，奇数宽度补半个设备像素。
             const phWidthPx = wholeDevicePxLength(1, axis.dpr);
-            const phx = strokePx(axis, secToViewportPx(axis, overlay.playheadSec), phWidthPx);
+            // 左缘取自与标尺 DOM 线**同一个函数**（`playheadLineLeftPx`）：两条线
+            // 因此逐设备像素一致，而不是"各自实现、靠巧合对齐"。
+            const phx = playheadLineLeftPx(axis, overlay.playheadSec, phWidthPx);
             items.push({
-                x: phx - phWidthPx / 2,
+                x: phx,
                 y: 0,
                 w: phWidthPx,
                 h,
@@ -1377,6 +1392,8 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
     let lastVThumbKey = "";
     /** 上一次写入标尺内容层的平移量（NaN = 从未写入）。 */
     let lastRulerTranslateX = Number.NaN;
+    /** 上一次写入标尺播放头线的内容坐标（去重，避免每帧无谓写样式）。 */
+    let lastRulerPlayheadX = Number.NaN;
     /** 上一次量化提交给 React 的水平滚动位置（NaN = 从未提交）。 */
     let lastCommittedScrollLeft = Number.NaN;
     /** 上一次逐帧上报给面板的竖向位置（NaN = 从未上报）。 */
@@ -1507,6 +1524,38 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         if (ruler != null && shouldWrite(drawingScrollLeft, lastRulerTranslateX)) {
             lastRulerTranslateX = drawingScrollLeft;
             ruler.style.transform = `translateX(${-drawingScrollLeft}px)`;
+        }
+
+        // 标尺播放头线：与 GL 播放头**同源同帧**（见 `rulerPlayheadLine` 的说明）。
+        //
+        // 吸附方式刻意与 GL 一致：先在**视口坐标**吸附，再换算回内容坐标。标尺线
+        // 所在的层会被平移 `-drawingScrollLeft`（可能是小数），若改在内容坐标吸附，
+        // 落点会与 GL 差最多一个设备像素；先吸附再回算则两条线逐设备像素重合。
+        const playheadSec = data().overlay?.playheadSec;
+        if (
+            sync?.rulerPlayheadLine != null &&
+            playheadSec != null &&
+            Number.isFinite(playheadSec)
+        ) {
+            // 左缘取与 GL 主体播放头**同一个函数**（`playheadLineLeftPx`），再换算回
+            // 内容坐标（层会把它平移回去）—— 两条线因此逐设备像素重合。
+            //
+            // 轴由**本帧传入的 `view`** 构造，而不是再调一次 `currentAxis()`：后者会
+            // 重新读一次 `scroll.get()`，多一次快照就多一个"与 GL 不同帧"的机会。
+            const axis = createTimelineAxis({
+                pxPerSec: view.pxPerSec,
+                scrollLeftPx: drawingScrollLeft,
+                viewportWidthPx,
+                dpr: readDevicePixelRatio(),
+            });
+            const contentX = playheadLineLeftPx(axis, playheadSec) + drawingScrollLeft;
+            if (shouldWrite(contentX, lastRulerPlayheadX)) {
+                lastRulerPlayheadX = contentX;
+                sync.rulerPlayheadLine.style.left = `${contentX}px`;
+                if (sync.rulerPlayheadHead != null) {
+                    sync.rulerPlayheadHead.style.left = `${contentX}px`;
+                }
+            }
         }
         // 网格层自带重绘节流（`BackgroundGrid` 内部判定），这里只需转交绘制坐标。
         if (sync?.gridLayer != null) {
