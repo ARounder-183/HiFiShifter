@@ -1026,3 +1026,91 @@ test("device-grid columns widen the sample window per column (dpr-aware)", async
         }
     }
 });
+
+/**
+ * 恒定增益快路径 ≡ 切片路径（逐位对拍）。
+ *
+ * 【为什么必须对拍】`buildWaveformGeometry` 在「幅度映射是缺省线性直投、且段
+ * 的时间范围不与淡变区相交」时会跳过列内切片，改为「整列取一次极值 × 段常量
+ * 增益」。这条快路径把列循环成本降了约 6 倍（14993 列实测 3.14 ms → 0.49 ms），
+ * 但它必须与切片路径**逐位相同**——否则波形包络会在特定缩放下悄悄改变形状。
+ *
+ * 【怎么对拍】同一场景跑两遍，唯一的差别是幅度映射：
+ * - 不传映射 → 走快路径；
+ * - 传一个**行为完全等价**的线性映射（新函数引用，故不走快路径）→ 走切片路径。
+ * 两者产出的顶点缓冲必须逐位相等（写入顺序相同，因此用 Object.is 而非近似）。
+ *
+ * 【淡变为何单独覆盖】带淡变的段不满足快路径的段级前提，但**逐列**判断会
+ * 让淡变区之外的列仍走快路径；带淡变的用例保证这条混合路径同样与切片路径一致。
+ */
+test("waveform/geometry constant-gain fast path is bit-identical to the slice path", () => {
+    /** 造一个段；`fade` 控制是否落在淡变区。 */
+    function makeSegment(fade: boolean): WaveformSceneSegment {
+        return {
+            clipId: "clip",
+            sourcePath: "/a.wav",
+            sourceSampleRate: 8,
+            sourceStartSec: 0,
+            sourceEndSec: 4,
+            clipLocalStartSec: 0,
+            clipLocalEndSec: 4,
+            clipTotalDurationSec: 4,
+            screenRect: { x: 0, y: 0, width: 64, height: 100 },
+            reversed: false,
+            gain: 1.5,
+            fadeInSec: fade ? 1 : 0,
+            fadeOutSec: fade ? 1 : 0,
+            fadeInShape: 0,
+            fadeInDir: 0,
+            fadeOutShape: 0,
+            fadeOutDir: 0,
+            alpha: 1,
+            channelMode: 0,
+            sourceChannels: 0,
+        };
+    }
+
+    /** 8 桶的确定性峰值：桶间差异足够大，避免"取错极值"被掩盖。 */
+    const peaks = () => ({
+        min: new Float32Array([-0.9, -0.1, -0.5, -0.3, -0.7, -0.2, -0.4, -0.8]),
+        max: new Float32Array([0.9, 0.1, 0.5, 0.3, 0.7, 0.2, 0.4, 0.8]),
+        dataStartSec: 0,
+        dataDurationSec: 4,
+    });
+
+    /** 与缺省线性直投**行为等价**、但引用不同的映射（用于强制走切片路径）。 */
+    const equivalentLinearMap = (value: number, gain: number) => value * gain;
+
+    for (const fade of [false, true]) {
+        const scene: WaveformScene = { segments: [makeSegment(fade)], markers: [] };
+        const fast = buildWaveformGeometry({
+            scene,
+            color: "#8fa3bf",
+            getPeaks: peaks,
+            dpr: 2,
+        });
+        const sliced = buildWaveformGeometry({
+            scene,
+            color: "#8fa3bf",
+            getPeaks: peaks,
+            dpr: 2,
+            amplitudeMap: equivalentLinearMap,
+        });
+
+        if (fast.lineCount !== sliced.lineCount) {
+            throw new Error(
+                `fade=${fade}: line count differs (${fast.lineCount} vs ${sliced.lineCount})`,
+            );
+        }
+        if (fast.lineCount === 0) {
+            throw new Error(`fade=${fade}: expected columns, got none`);
+        }
+        for (let i = 0; i < sliced.vertices.length; i += 1) {
+            if (!Object.is(fast.vertices[i], sliced.vertices[i])) {
+                throw new Error(
+                    `fade=${fade}: vertex ${i} differs (${fast.vertices[i]} vs ${sliced.vertices[i]})`,
+                );
+            }
+        }
+    }
+});
