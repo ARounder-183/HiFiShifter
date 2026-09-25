@@ -124,6 +124,15 @@ interface TempoMapRulerRowProps {
      * 互相遮挡。
      */
     onTempoInteractionChange?: (active: boolean) => void;
+    /**
+     * 本面板的视口总线订阅（`timelineViewportBus` / `pianoRollViewportBus`）。
+     *
+     * 【为什么必须由面板注入而不是直接用模块单例】标尺被时间轴与参数编辑器**共用**，
+     * 而两个面板各持一条总线（互不干扰，见 `createViewportBus` 的说明）。拖拽期间的
+     * 视口重放必须跟着**本面板**的视口走（见下方 replay effect），订阅错总线等于
+     * 永远收不到通知。
+     */
+    subscribeViewport?: (listener: (scrollLeft: number, pxPerSec: number) => void) => () => void;
 }
 
 /** ScaleLike → 显示文本（键音阶显示 "C / Am"，自定义音阶显示名称）。 */
@@ -529,6 +538,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
     onDialogOpenChange,
     onTempoInteractionChange,
     onFloatingInlineEditChange,
+    subscribeViewport,
 }) => {
     const [selectedId, setSelectedId] = useState<string | null>(null);
     /** 旗帜内联编辑（双击蓝色标签 → 原地 TextBox）。 */
@@ -1034,14 +1044,27 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
      *
      * 【为什么需要】落点 = `startSec + (指针时间 − startPointerSec)`，而"指针时间"依赖
      * 当前视口。视口变了而指针没动时若不重算，标签会停在旧落点上、与光标脱开 —— 直到
-     * 用户再动一下鼠标才归位（用户报告的"拖拽中滚动/缩放导致偏移"）。
+     * 用户再动一下鼠标才归位（用户报告的"拖拽中滚动/缩放导致偏移"）。滚轮滚动本身
+     * **不产生任何 pointermove**，所以这条重放是唯一能让标签跟住光标的路径。
+     *
+     * 【为什么订阅视口总线，而不是依赖 React 的 `pxPerSec` / `scrollLeft` 属性】
+     * 那两个属性都是 rAF 量化的**提交值**：小于一个量化步长的滚动根本不会让它们变化，
+     * 于是重放不触发（标签与光标持续错开）；即便变化，也要等下一帧 React 渲染。而落点
+     * 换算读的是 `rowRef.getBoundingClientRect()`（**DOM 实时值**）—— 触发条件与真值
+     * 来源必须同源，总线在每次视口提交时**同步**广播，重放与绘制落在同一帧。
      */
     useEffect(() => {
-        if (!draggingId) return;
-        const event = lastDragPointerRef.current;
-        if (!event) return;
-        dragMoveHandlerRef.current?.(event);
-    }, [draggingId, pxPerSec, scrollLeft]);
+        if (!draggingId || !subscribeViewport) return;
+        return subscribeViewport((liveScrollLeft, livePxPerSec) => {
+            // 视口真值先落到 ref：紧接着的重放换算读的正是它们
+            // （见 `pointerSecAtClientX` 与 `viewportEndSec` 的钳制上限）。
+            dragPxPerSecRef.current = livePxPerSec;
+            dragScrollLeftRef.current = liveScrollLeft;
+            const event = lastDragPointerRef.current;
+            if (!event) return;
+            dragMoveHandlerRef.current?.(event);
+        });
+    }, [draggingId, subscribeViewport]);
 
     // ── 编辑中点击外部 → 确认并退出 ────────────────────────────────
     // 时间线画布/轨道/标尺等区域会在各自的 pointerdown 处理里
@@ -1118,7 +1141,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             setDraggingId(point.id);
             setSelectedId(point.id);
         },
-        [applyInlineEdit, tempoMap, pxPerSec],
+        [applyInlineEdit, tempoMap],
     );
 
     const startInlineDragProbe = useCallback(
@@ -1273,15 +1296,21 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
     );
 
     // ── 拖拽移动变化点 ──
-    /** 指针所在的**内容时间**（秒）。行根不可用（未挂载）时返回 NaN。 */
-    const pointerSecAtClientX = useCallback(
-        (clientX: number): number => {
-            const left = rowRef.current?.getBoundingClientRect().left;
-            if (left === undefined) return Number.NaN;
-            return (clientX - left) / Math.max(1e-9, pxPerSec);
-        },
-        [pxPerSec],
-    );
+    /**
+     * 指针所在的**内容时间**（秒）。行根不可用（未挂载）时返回 NaN。
+     *
+     * 【为什么除数取 ref 而不是渲染期捕获的 `pxPerSec`】拖拽主 effect 刻意不把
+     * `pxPerSec` 放进依赖（缩放会让 effect 重挂 window 监听、中断拖拽），于是它闭包
+     * 里的 `pxPerSec` 会**永久停在拖拽开始时的缩放**上。拖拽中用滚轮缩放后，同一个
+     * 指针位置仍按旧缩放换算，`deltaSecRaw` 整体偏一个缩放比 —— 这正是"拖拽中滚动 /
+     * 缩放导致严重偏移"。行根左缘（`rowRef.getBoundingClientRect()`）本来就是 DOM
+     * 实时值，除数必须同样实时，两者才同源。
+     */
+    const pointerSecAtClientX = useCallback((clientX: number): number => {
+        const left = rowRef.current?.getBoundingClientRect().left;
+        if (left === undefined) return Number.NaN;
+        return (clientX - left) / Math.max(1e-9, dragPxPerSecRef.current);
+    }, []);
 
     const startFlagDrag = useCallback(
         (point: TempoPoint, isFirst: boolean, e: React.PointerEvent) => {
