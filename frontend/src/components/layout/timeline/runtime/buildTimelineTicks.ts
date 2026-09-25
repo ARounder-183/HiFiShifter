@@ -505,15 +505,36 @@ export function buildTimelineTicks(args: {
 
     // ── 6. 兜底：绝不整片无标签 ────────────────────────────────────
     // 上面所有规则都是"隐藏"方向的操作，极端参数下可能把所有标签都隐藏掉，用户
-    // 看到的就是"标尺文字整片消失"。这里按最粗的粒度（小节）恢复一条，保证任何
-    // 缩放/网格组合下至少每 `minLabelSpacingPx` 有一个标签。
+    // 看到的就是"标尺文字整片消失"。恢复按最粗的粒度（小节起点）取候选，保证
+    // 任何缩放/网格组合下至少每 `minLabelSpacingPx` 有一个标签；窗口内完全没有
+    // 小节起点时（Tempo Map 段极短等）才退回全部刻度，维持"绝不整片无标签"。
+    // 恢复标签的宽度与 §5 同一约定：到下一条恢复标签的间距减去留白、最后一条
+    // 不限宽 —— 若不限宽（null），相邻两条恢复标签会互相重叠。
     if (ticks.length > 0 && !ticks.some((tick) => tick.showLabel)) {
-        let lastPx: number | null = null;
-        for (let i = 0; i < ticks.length; i += 1) {
-            const tick = ticks[i];
-            if (lastPx !== null && tick.contentPx - lastPx < args.minLabelSpacingPx) continue;
-            lastPx = tick.contentPx;
-            ticks[i] = { ...tick, showLabel: true, labelMaxWidth: null };
+        const candidates: number[] = [];
+        for (let i = 0; i < ticks.length; i += 1) if (ticks[i].isBarStart) candidates.push(i);
+        if (candidates.length === 0) {
+            for (let i = 0; i < ticks.length; i += 1) candidates.push(i);
+        }
+        const restored: number[] = [];
+        for (const index of candidates) {
+            const last = restored[restored.length - 1];
+            if (
+                last !== undefined &&
+                ticks[index].contentPx - ticks[last].contentPx < args.minLabelSpacingPx
+            ) {
+                continue;
+            }
+            restored.push(index);
+        }
+        for (let k = 0; k < restored.length; k += 1) {
+            const index = restored[k];
+            const nextIndex = restored[k + 1];
+            const maxWidth =
+                nextIndex === undefined
+                    ? null
+                    : Math.max(0, ticks[nextIndex].contentPx - ticks[index].contentPx - 6);
+            ticks[index] = { ...ticks[index], showLabel: true, labelMaxWidth: maxWidth };
         }
     }
 

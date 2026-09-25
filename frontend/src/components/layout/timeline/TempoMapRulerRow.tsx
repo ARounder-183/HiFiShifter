@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { registerDragAbort } from "./gestureFocusGuard";
 import { Button, Checkbox, Dialog, Flex, Select, Text, TextField } from "@radix-ui/themes";
+import { shallowEqual } from "react-redux";
 import type { GridSize, TimelineSnapSettings } from "../../../features/session/sessionTypes";
 import type { ScaleLike } from "../../../utils/musicalScales";
 import { SCALE_KEYS, SCALE_LABELS } from "../../../utils/musicalScales";
@@ -624,14 +625,24 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
     // 当前时间轴中的 Clip / 轨道 / 选区 / 播放头作为候选目标。
     const timelineClips = useAppSelector((state) => state.session.clips);
     const timelineTracks = useAppSelector((state) => state.session.tracks);
-    const selectedClipIds = useAppSelector((state) =>
-        state.session.multiSelectedClipIds.length > 0
-            ? state.session.multiSelectedClipIds
-            : state.session.selectedClipId
-              ? [state.session.selectedClipId]
-              : [],
+    // shallowEqual 阻断无关 dispatch 的重渲染：选择器每次通知都返回新数组
+    // （[selectedClipId] 或 []，引用永远不等），播放期间 30Hz 的播放头提交会以
+    // 相同元素反复触发本行重渲染。元素相等时保持旧引用。
+    const selectedClipIds = useAppSelector(
+        (state) =>
+            state.session.multiSelectedClipIds.length > 0
+                ? state.session.multiSelectedClipIds
+                : state.session.selectedClipId
+                  ? [state.session.selectedClipId]
+                  : [],
+        shallowEqual,
     );
     const playheadSec = useAppSelector((state) => state.session.playheadSec);
+    // 播放头经渲染期写入的 ref 读取（与 dragTempoMapRef 同一写法）：播放期间
+    // playheadSec 以 30Hz 提交，若作为 snapTempoPosition 的依赖，回调每帧重建，
+    // 拖拽主 effect 会随之每帧卸载/重挂 window 监听（间隙里的 move 全部丢失）。
+    const snapPlayheadSecRef = useRef(playheadSec);
+    snapPlayheadSecRef.current = playheadSec;
     const noSnapKb = useAppSelector((state) => selectKeybinding(state, "modifier.clipNoSnap"));
     /** 精细调整修饰键（与 BPM 输入框同一绑定：普通步进 1，按住后 0.1）。 */
     const paramFineAdjustKb = useAppSelector((state) =>
@@ -785,7 +796,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                     clips: timelineClips,
                     tracks: timelineTracks,
                     selectedClipIds,
-                    playheadSec,
+                    playheadSec: snapPlayheadSecRef.current,
                     object: "clip",
                     originSec,
                     anchorTrackId: null,
@@ -818,7 +829,6 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             timelineClips,
             timelineTracks,
             selectedClipIds,
-            playheadSec,
         ],
     );
 
@@ -834,6 +844,11 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
      * 逐字符保留；同时把解析出的 BPM 应用到本地草稿，使标尺与提示实时跟随。
      */
     const inlineWheelRef = useNonPassiveWheel<HTMLInputElement>((e) => {
+        // 必须先消费事件再判定编辑状态：标尺根的非被动监听会把它收到的任何 wheel
+        // 一律 preventDefault 并转交滚动/缩放 —— 不在这里拦截的话，调整 BPM 的
+        // 同一次滚轮还会平移/缩放时间轴（与对话框 BPM 滚轮同一约束）。
+        e.preventDefault();
+        e.stopPropagation();
         const id = editingPointId;
         if (!id) return;
         const direction = e.deltaY < 0 ? 1 : -1;
