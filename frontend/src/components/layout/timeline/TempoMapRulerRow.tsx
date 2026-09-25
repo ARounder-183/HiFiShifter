@@ -5,7 +5,7 @@ import type { GridSize, TimelineSnapSettings } from "../../../features/session/s
 import type { ScaleLike } from "../../../utils/musicalScales";
 import { SCALE_KEYS, SCALE_LABELS } from "../../../utils/musicalScales";
 import { shouldSuppressHoverSideEffects } from "../../../utils/penInput";
-import { resolveTempoDragOffsetPx, tempoSecUnderCursor } from "./tempoPointDragOffset";
+import { resolveTempoDragOffsetPx } from "./tempoPointDragOffset";
 import { useNonPassiveWheel } from "../../../utils/useNonPassiveWheel";
 import type { CustomScalePreset } from "../../../utils/customScales";
 import {
@@ -548,7 +548,17 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
     const dragRef = useRef<{
         pointId: string;
         startClientX: number;
+        /** 按下时变化点的时间（对象基准）。 */
         startSec: number;
+        /**
+         * 按下时**指针**所在的时间（光标基准）。
+         *
+         * 【为什么两个都要存】拖拽要保持"对象与光标的时间偏移"恒定 —— 落点 =
+         * `startSec + (当前指针时间 − startPointerSec)`。只用像素差再除以缩放会
+         * 在滚轮缩放后失去基准（起点像素是旧缩放下的量），表现为"拖拽中滚动/缩放
+         * 导致严重偏移"。
+         */
+        startPointerSec: number;
         /** 拖拽开始时的 Tempo Map 快照，用于吸附计算时固定网格，避免变化点自身移动改变网格。 */
         baseTempoMap: TempoMap;
         /**
@@ -559,6 +569,18 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
         snapTempoMap: TempoMap;
     } | null>(null);
     const [draggingId, setDraggingId] = useState<string | null>(null);
+    /**
+     * 行根元素（内容坐标 0 的位置）。
+     *
+     * 【为什么用它当参照】行位于被 `translateX(-scrollLeft)` 平移的内容层内，行根左缘
+     * 就是"内容时间 0"在屏幕上的位置 —— 据此换算指针时间，滚动与缩放都自动成立，
+     * 不需要额外读 scrollLeft。
+     */
+    const rowRef = useRef<HTMLDivElement | null>(null);
+    /** 最近一次拖拽指针事件（视口变化后据此重放预览）。 */
+    const lastDragPointerRef = useRef<PointerEvent | null>(null);
+    /** 当前拖拽的 move 处理器（供"视口变化即重放"的 effect 调用）。 */
+    const dragMoveHandlerRef = useRef<((event: PointerEvent) => void) | null>(null);
     /** 指针悬停中的变化点 id（与拖拽一起构成"交互中"）。 */
     const [hoveredFlagId, setHoveredFlagId] = useState<string | null>(null);
     /**
@@ -1006,6 +1028,21 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
         }
     }, [onChange]);
 
+    /**
+     * 拖拽期间**视口变化**（滚轮滚动/缩放、键盘滚动、跨面板同步）后按最后一次指针位置
+     * 重算落点。
+     *
+     * 【为什么需要】落点 = `startSec + (指针时间 − startPointerSec)`，而"指针时间"依赖
+     * 当前视口。视口变了而指针没动时若不重算，标签会停在旧落点上、与光标脱开 —— 直到
+     * 用户再动一下鼠标才归位（用户报告的"拖拽中滚动/缩放导致偏移"）。
+     */
+    useEffect(() => {
+        if (!draggingId) return;
+        const event = lastDragPointerRef.current;
+        if (!event) return;
+        dragMoveHandlerRef.current?.(event);
+    }, [draggingId, pxPerSec, scrollLeft]);
+
     // ── 编辑中点击外部 → 确认并退出 ────────────────────────────────
     // 时间线画布/轨道/标尺等区域会在各自的 pointerdown 处理里
     // preventDefault（选中、seek、拖拽起手等），这会取消 Chromium 的默认
@@ -1063,19 +1100,14 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             // 才切换到拖拽，此时光标已经离标签有几十像素。若沿用初始偏移，变化点会
             // 永远落后光标那一段距离 —— 用户看到的是"拖到哪儿都不是我指的位置"。
             //
-            // 标签在屏幕上的左缘即该变化点当前的时间位置，据此把光标位置换算成秒。
-            const flagRect = flagElementsRef.current.get(point.id)?.getBoundingClientRect() ?? null;
-            const secUnderCursor = tempoSecUnderCursor({
-                pointSec: point.positionSec,
-                flagLeftPx: flagRect ? flagRect.left : Number.NaN,
-                clientX,
-                pxPerSec,
-            });
+            // 表达方式：让"对象基准"与"光标基准"都取光标当前时间（抓取偏移为 0）。
+            const secUnderCursor = pointerSecAtClientX(clientX);
             const dragBase = appliedMap ?? tempoMap ?? { points: [point] };
             dragRef.current = {
                 pointId: point.id,
                 startClientX: clientX,
-                startSec: secUnderCursor,
+                startSec: Number.isFinite(secUnderCursor) ? secUnderCursor : point.positionSec,
+                startPointerSec: secUnderCursor,
                 baseTempoMap: dragBase,
                 // 与 `startFlagDrag` 同一约定：吸附网格不含被拖的点。
                 snapTempoMap: removeTempoPoint(dragBase, point.id) ?? dragBase,
@@ -1241,6 +1273,16 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
     );
 
     // ── 拖拽移动变化点 ──
+    /** 指针所在的**内容时间**（秒）。行根不可用（未挂载）时返回 NaN。 */
+    const pointerSecAtClientX = useCallback(
+        (clientX: number): number => {
+            const left = rowRef.current?.getBoundingClientRect().left;
+            if (left === undefined) return Number.NaN;
+            return (clientX - left) / Math.max(1e-9, pxPerSec);
+        },
+        [pxPerSec],
+    );
+
     const startFlagDrag = useCallback(
         (point: TempoPoint, isFirst: boolean, e: React.PointerEvent) => {
             // 数位笔 / 触摸不拖 tempo 标志：标志 ~15px 高，零阈值按下即拖。
@@ -1258,6 +1300,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                 pointId: point.id,
                 startClientX: e.clientX,
                 startSec: point.positionSec,
+                startPointerSec: pointerSecAtClientX(e.clientX),
                 baseTempoMap,
                 // 吸附网格用**移除本点**后的地图（见 `snapTempoPosition.gridTempoMap`）：
                 // 被拖的点不参与自己要落位的网格，否则它会把自己的段原点带进候选集，
@@ -1280,10 +1323,16 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
         // 的小 effect 承担。
         if (!dragTempoMapRef.current) return;
         const handleMove = (e: PointerEvent) => {
+            // 记下最近一次指针事件：视口在拖拽期间被改变（滚轮滚动/缩放）时要按它重放
+            // （见下方"视口变化即重放"的 effect），否则标签会与光标脱开。
+            lastDragPointerRef.current = e;
             const drag = dragRef.current;
             const liveMap = dragTempoMapRef.current;
             if (!drag || !liveMap) return;
-            const dx = e.clientX - drag.startClientX;
+            // 【落点按"时间差"算，而不是"像素差 / 缩放"】见 `startPointerSec` 的说明：
+            // 起点与当前点都换算成时间再作差，滚轮滚动/缩放中途都不会偏移。
+            const deltaSecRaw = pointerSecAtClientX(e.clientX) - drag.startPointerSec;
+            if (!Number.isFinite(deltaSecRaw)) return;
             // 【拖拽启动阈值】指针未越过阈值前**不改变**变化点。
             //
             // 双击标签进入编辑时，第一下点击的按下与抬起之间几乎总会有 1-2px 抖动；
@@ -1293,7 +1342,11 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             // 变化点标签是否接近有关"。
             //
             // 越过阈值后按"阈值后的位移"计算（而不是从起点算），避免越过瞬间跳一格。
-            const movedPx = resolveTempoDragOffsetPx(dx);
+            // 阈值以像素表达（3px），换算成秒后仍按"越过阈值再从阈值处起算"，
+            // 避免越过瞬间跳一格（见 `resolveTempoDragOffsetPx`）。
+            const movedPx = resolveTempoDragOffsetPx(
+                deltaSecRaw * Math.max(1e-9, dragPxPerSecRef.current),
+            );
             if (movedPx === 0) return;
             const rawSec = Math.max(
                 0,
@@ -1358,11 +1411,13 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
         // 走与 handleUp 完全相同的收尾（提交已拖到的位置，防止标签卡在
         // 拖拽态 / 吸附高亮冻结）。
         const unregisterAbort = registerDragAbort(handleUp);
+        dragMoveHandlerRef.current = handleMove;
         window.addEventListener("pointermove", handleMove);
         window.addEventListener("pointerup", handleUp);
         window.addEventListener("pointercancel", handleUp);
         return () => {
             unregisterAbort();
+            dragMoveHandlerRef.current = null;
             window.removeEventListener("pointermove", handleMove);
             window.removeEventListener("pointerup", handleUp);
             window.removeEventListener("pointercancel", handleUp);
@@ -1739,6 +1794,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
 
     return (
         <div
+            ref={rowRef}
             className="absolute left-0 select-none"
             style={{
                 top: 48,

@@ -7266,7 +7266,17 @@ export const PianoRollPanel: React.FC<{
                             </svg>
                         </IconButton>
                         <Flex align="center" gap="1" ml="2" style={{ minWidth: 0, flexShrink: 1 }}>
-                            <Text size="1" data-tooltip={tAny("edge_smoothness")}>
+                            {/* 标签允许被压缩裁切（完整名称在悬停提示里）：横向极窄时
+                                应当由它先让位，而不是把整行撑到溢出。 */}
+                            <Text
+                                size="1"
+                                data-tooltip={tAny("edge_smoothness")}
+                                style={{
+                                    minWidth: 0,
+                                    whiteSpace: "nowrap",
+                                    overflow: "hidden",
+                                }}
+                            >
                                 {tAny("edge_smoothness_short")}:
                             </Text>
                             <input
@@ -7288,16 +7298,21 @@ export const PianoRollPanel: React.FC<{
                                     void dispatch(persistUiSettings());
                                 }}
                                 style={{
-                                    // 按工具栏拥挤程度自动伸缩：宽裕时最多 120px，拥挤时**尽量
-                                    // 让步**。下限刻意取得很小（20px）：它是低频调节项，横向
-                                    // 空间紧张时应当先被压缩，而不是把同排的其它控件挤出可视区。
-                                    flex: "1 1 auto",
+                                    // 【flex-basis 必须取 0，而不是 `auto`（= width: 120）】
+                                    // 基准为 120 时，横向不足的收缩量会**按基准比例分摊**给
+                                    // 同排所有项 —— 实测窄容器下它只缩到 102px，仍占着大头。
+                                    // 基准为 0 时，它先让出空间、只取"别人用剩下的"，宽裕时再由
+                                    // `maxWidth` 封顶在 120px。它是低频调节项，理应最先让步。
+                                    flex: "1 1 0",
+                                    // 非 flex 上下文（理论上不会发生）时的兜底宽度。
                                     width: 120,
                                     minWidth: 20,
                                     maxWidth: 120,
                                 }}
                             />
-                            <Text size="1" style={{ minWidth: 36, textAlign: "right" }}>
+                            {/* 数值需要完整可读（"100%"），因此给它一个较小的固定下限，
+                                但不再是 36px 那种"宁可溢出也不缩"的宽度。 */}
+                            <Text size="1" style={{ minWidth: 28, textAlign: "right" }}>
                                 {Math.round(s.edgeSmoothnessPercent)}%
                             </Text>
                         </Flex>

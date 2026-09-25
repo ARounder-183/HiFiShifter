@@ -133,6 +133,7 @@ import {
     resolveWheelZoomStep,
     type WheelZoomAccumulator,
 } from "../input/wheelZoomIntent";
+import { deltaSecToContentPx, dragDeltaSec, pointerSecAt } from "../../runtime/dragAnchor.js";
 import { createRenderLoop } from "../../../renderKernel/renderLoop";
 import { createClipInstanceBuilder } from "../scene/clipInstances";
 import { resolvePlayheadSec, shouldRepaintForPlayhead } from "../scene/playheadInvalidation";
@@ -2377,6 +2378,12 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
 
     const unsubscribeScroll = scroll.subscribe(() => {
         mirrorTrackListScrollTop();
+        // 【视口一变就重放拖拽预览】手势的落点是从"视口 + 指针屏幕位置"算出来的；
+        // 视口在拖拽期间被改变（滚轮滚动/缩放、键盘滚动、跨面板同步）而指针没动时，
+        // 若不重放，被拖对象会停在旧内容坐标上 —— 表现为"对象与光标脱开"，直到用户
+        // 再动一下鼠标才归位。放在视口订阅里（而不是各个滚轮分支里）是为了覆盖
+        // **所有**改变视口的路径，包括缩放落地这种异步回来的。
+        replayGesturePreviewAtLastPointer();
         loop.invalidate();
     });
 
@@ -2651,7 +2658,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
               /** 命中分区：决定超过阈值后升级为拖拽（body/header）还是 trim（边缘）。 */
               region: ClipHitRegion;
               /** 按下时的内容坐标（用于换算拖拽位移）。 */
-              startContentX: number;
+              startPointerSec: number;
               startContentY: number;
               /** 按下时 clip 的几何（换算 delta 与跨轨的基准）。 */
               originStartSec: number;
@@ -2717,7 +2724,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
               kind: "clip-fade";
               clipId: string;
               side: FadeSide;
-              startContentX: number;
+              startPointerSec: number;
               originFadeSec: number;
               lengthSec: number;
               lastDeltaSec: number;
@@ -2729,7 +2736,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
               earlierClipId: string;
               /** 后一个 clip：左缘随拖拽移动。 */
               laterClipId: string;
-              startContentX: number;
+              startPointerSec: number;
               /** 上一次预览的位移（去重：相同位移不重复派发）。 */
               lastDeltaSec: number;
               /**
@@ -2744,7 +2751,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         | {
               kind: "snap-offset-drag";
               clipId: string;
-              startContentX: number;
+              startPointerSec: number;
               /**
                * 按下时的指针视口 x（CSS px）。
                *
@@ -2769,7 +2776,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
               kind: "box-select";
               startClientX: number;
               startClientY: number;
-              startContentX: number;
+              startPointerSec: number;
               startContentY: number;
               additive: boolean;
               /** 是否已超过阈值（未超过时不显示框，避免右键单击闪一下）。 */
@@ -2791,7 +2798,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
               kind: "clip-trim";
               clipId: string;
               edge: TrimEdge;
-              startContentX: number;
+              startPointerSec: number;
               originStartSec: number;
               originLengthSec: number;
               /** 最近一次派发的实际变化量（去重）。 */
@@ -2803,7 +2810,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         | {
               kind: "clip-drag";
               clipId: string;
-              startContentX: number;
+              startPointerSec: number;
               startContentY: number;
               /** 按下时的指针视口 x：竖直换轨锁定按**水平位移**判定（原始像素，非内容坐标）。 */
               startClientX: number;
@@ -2885,10 +2892,10 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     /**
      * 用最近一次指针事件重放一次手势预览。
      *
-     * 【为什么需要】自动滚屏只改 `scrollLeft`，而各预览器都是从
-     * 「`scrollLeft` + 指针相对视口的偏移」算出**内容坐标**的。滚屏后不复算，
-     * clip 会停在旧内容坐标上——表现为「视口滚了、clip 没跟上」的脱节。
-     * 复用同一个事件即得到"指针在屏幕上没动、但内容坐标前移"的正确语义。
+     * 【为什么需要】各预览器都是从「视口 + 指针相对视口的偏移」算出落点的。
+     * 视口改变（自动滚屏、滚轮滚动/缩放、键盘滚动、跨面板同步）而指针没动时，
+     * 不复算就会让被拖对象停在旧内容坐标上 —— 表现为「视口动了、对象没跟上」的脱节。
+     * 复用最近一次指针事件即得到"指针在屏幕上没动、但视口变了"的正确语义。
      */
     function replayGesturePreviewAtLastPointer(): void {
         const event = dragAutoScrollEvent;
@@ -2978,8 +2985,11 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      * @param event 指针事件。
      */
     function noteDragAutoScrollPointer(event: PointerEvent): void {
-        if (!shouldAutoScrollForGesture(gesture.kind)) return;
+        // 先无条件记录：滚轮改变视口后要按"最后一次指针位置"重放预览（见
+        // `replayGesturePreviewAtLastPointer`），因此**每个**手势都需要它，
+        // 而不只是需要自动滚屏的那些。
         dragAutoScrollEvent = event;
+        if (!shouldAutoScrollForGesture(gesture.kind)) return;
         if (dragAutoScrollFrame !== null) return;
         dragAutoScrollLastTs = 0;
         dragAutoScrollFrame = requestAnimationFrame(tickDragAutoScroll);
@@ -3232,7 +3242,12 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 kind: "box-select",
                 startClientX: event.clientX,
                 startClientY: event.clientY,
-                startContentX: view.scrollLeft + (event.clientX - rect.left),
+                startPointerSec: pointerSecAt({
+                    scrollLeftPx: view.scrollLeft,
+                    pxPerSec: view.pxPerSec,
+                    clientX: event.clientX,
+                    rectLeft: rect.left,
+                }),
                 startContentY: view.scrollTop + (event.clientY - rect.top),
                 // 叠加选择用**平台主修饰键**（macOS ⌘ / 其他平台 Ctrl），与旧实现
                 // `useTimelineSelectionRect` 的 `isPrimaryModifierDown` 同源——
@@ -3311,7 +3326,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         const rect = container.getBoundingClientRect();
         const view = scroll.get();
         const box = resolveBoxBounds(
-            gesture.startContentX,
+            gesture.startPointerSec * Math.max(1e-9, view.pxPerSec),
             gesture.startContentY,
             view.scrollLeft + (event.clientX - rect.left),
             view.scrollTop + (event.clientY - rect.top),
@@ -3698,7 +3713,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                         region: hit.region,
                         headerControl: control,
                         cycleHeld: false,
-                        startContentX: 0,
+                        startPointerSec: 0,
                         startContentY: 0,
                         originStartSec: hit.clip.startSec,
                         originTrackId: hit.clip.trackId,
@@ -3748,7 +3763,12 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                     (hit.region === "fade-in-corner" ||
                         hit.region === "fade-out-corner" ||
                         hit.region === "crossfade-grip"),
-                startContentX: view.scrollLeft + (event.clientX - rect.left),
+                startPointerSec: pointerSecAt({
+                    scrollLeftPx: view.scrollLeft,
+                    pxPerSec: view.pxPerSec,
+                    clientX: event.clientX,
+                    rectLeft: rect.left,
+                }),
                 startContentY: view.scrollTop + (event.clientY - rect.top),
                 originStartSec: hit.clip.startSec,
                 originTrackId: hit.clip.trackId,
@@ -3997,7 +4017,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                     kind: "crossfade-grip",
                     earlierClipId: gesture.partnerClipId,
                     laterClipId: gesture.clipId,
-                    startContentX: gesture.startContentX,
+                    startPointerSec: gesture.startPointerSec,
                     lastDeltaSec: Number.NaN,
                     lastClientY: Number.NaN,
                 };
@@ -4010,7 +4030,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 gesture = {
                     kind: "snap-offset-drag",
                     clipId: gesture.clipId,
-                    startContentX: gesture.startContentX,
+                    startPointerSec: gesture.startPointerSec,
                     startClientX: gesture.startClientX,
                     originOffsetSec: gesture.originSnapOffsetSec,
                     lengthSec: gesture.lengthSec,
@@ -4027,7 +4047,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                     kind: "clip-fade",
                     clipId: gesture.clipId,
                     side: gesture.region === "fade-in-corner" ? "in" : "out",
-                    startContentX: gesture.startContentX,
+                    startPointerSec: gesture.startPointerSec,
                     originFadeSec: gesture.originFadeSec,
                     lengthSec: gesture.lengthSec,
                     lastDeltaSec: Number.NaN,
@@ -4042,7 +4062,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                     kind: "clip-trim",
                     clipId: gesture.clipId,
                     edge: gesture.region === "left-edge" ? "left" : "right",
-                    startContentX: gesture.startContentX,
+                    startPointerSec: gesture.startPointerSec,
                     originStartSec: gesture.originStartSec,
                     originLengthSec: gesture.lengthSec,
                     lastDeltaSec: Number.NaN,
@@ -4055,7 +4075,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             gesture = {
                 kind: "clip-drag",
                 clipId: gesture.clipId,
-                startContentX: gesture.startContentX,
+                startPointerSec: gesture.startPointerSec,
                 startContentY: gesture.startContentY,
                 startClientX: gesture.startClientX,
                 originStartSec: gesture.originStartSec,
@@ -4090,10 +4110,20 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         if (gesture.kind !== "clip-trim") return;
         const rect = container.getBoundingClientRect();
         const view = scroll.get();
-        const contentX = view.scrollLeft + (event.clientX - rect.left);
         const result = resolveTrimEdge({
             edge: gesture.edge,
-            deltaContentXPx: contentX - gesture.startContentX,
+            deltaContentXPx: deltaSecToContentPx(
+                dragDeltaSec(
+                    gesture.startPointerSec,
+                    pointerSecAt({
+                        scrollLeftPx: view.scrollLeft,
+                        pxPerSec: view.pxPerSec,
+                        clientX: event.clientX,
+                        rectLeft: rect.left,
+                    }),
+                ),
+                view.pxPerSec,
+            ),
             pxPerSec: view.pxPerSec,
             startSec: gesture.originStartSec,
             lengthSec: gesture.originLengthSec,
@@ -4173,8 +4203,15 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         if (gesture.kind !== "crossfade-grip") return;
         const rect = container.getBoundingClientRect();
         const view = scroll.get();
-        const contentX = view.scrollLeft + (event.clientX - rect.left);
-        const deltaSec = (contentX - gesture.startContentX) / Math.max(1e-9, view.pxPerSec);
+        const deltaSec = dragDeltaSec(
+            gesture.startPointerSec,
+            pointerSecAt({
+                scrollLeftPx: view.scrollLeft,
+                pxPerSec: view.pxPerSec,
+                clientX: event.clientX,
+                rectLeft: rect.left,
+            }),
+        );
         // 【去重键必须把「曲率模式」算进来】按 `modifier.fadeCurvatureDrag`（默认 Alt）
         // 拖拽时改的是**曲率**：求解输入是指针的 **Y**，X 不参与。只按 X 去重会让纵向
         // 拖动只在 X 恰好变化的那几帧才派发预览——用户报告为"拖拽一顿一顿的"。
@@ -4198,7 +4235,12 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             // 按住 `modifier.fadeCurvatureDrag`（默认 Alt）= **曲率**模式（两侧包络线
             // 各解自己的曲率，边缘位置与长度都不动）。
             modifiers: dragModifiersOf(event),
-            curveEnv: curveEnvAt(gesture.earlierClipId, event, contentX),
+            // 曲率模式用**指针的绝对内容位置**解包络线（与滚动/缩放同源、实时换算）。
+            curveEnv: curveEnvAt(
+                gesture.earlierClipId,
+                event,
+                view.scrollLeft + (event.clientX - rect.left),
+            ),
         });
     }
 
@@ -4206,10 +4248,20 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         if (gesture.kind !== "clip-fade") return;
         const rect = container.getBoundingClientRect();
         const view = scroll.get();
-        const contentX = view.scrollLeft + (event.clientX - rect.left);
         const result = resolveFadeDrag({
             side: gesture.side,
-            deltaContentXPx: contentX - gesture.startContentX,
+            deltaContentXPx: deltaSecToContentPx(
+                dragDeltaSec(
+                    gesture.startPointerSec,
+                    pointerSecAt({
+                        scrollLeftPx: view.scrollLeft,
+                        pxPerSec: view.pxPerSec,
+                        clientX: event.clientX,
+                        rectLeft: rect.left,
+                    }),
+                ),
+                view.pxPerSec,
+            ),
             pxPerSec: view.pxPerSec,
             currentSec: gesture.originFadeSec,
             lengthSec: gesture.lengthSec,
@@ -4224,7 +4276,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             fadeSec: result.fadeSec,
             deltaSec: result.deltaSec,
             modifiers: dragModifiersOf(event),
-            curveEnv: curveEnvAt(fadeClipId, event, contentX),
+            // 曲率模式同上：绝对内容位置，实时换算。
+            curveEnv: curveEnvAt(fadeClipId, event, view.scrollLeft + (event.clientX - rect.left)),
         });
     }
 
@@ -4279,8 +4332,15 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         }
         const rect = container.getBoundingClientRect();
         const view = scroll.get();
-        const contentX = view.scrollLeft + (event.clientX - rect.left);
-        const deltaSec = (contentX - gesture.startContentX) / Math.max(1e-9, view.pxPerSec);
+        const deltaSec = dragDeltaSec(
+            gesture.startPointerSec,
+            pointerSecAt({
+                scrollLeftPx: view.scrollLeft,
+                pxPerSec: view.pxPerSec,
+                clientX: event.clientX,
+                rectLeft: rect.left,
+            }),
+        );
         const rawOffsetSec = gesture.originOffsetSec + deltaSec;
         if (rawOffsetSec === gesture.lastOffsetSec) return;
         gesture.lastOffsetSec = rawOffsetSec;
@@ -4351,10 +4411,20 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         const rect = container.getBoundingClientRect();
         const view = scroll.get();
         const d = data();
-        const contentX = view.scrollLeft + (event.clientX - rect.left);
         const contentY = view.scrollTop + (event.clientY - rect.top);
         const delta = resolveDragDelta({
-            deltaContentXPx: contentX - gesture.startContentX,
+            deltaContentXPx: deltaSecToContentPx(
+                dragDeltaSec(
+                    gesture.startPointerSec,
+                    pointerSecAt({
+                        scrollLeftPx: view.scrollLeft,
+                        pxPerSec: view.pxPerSec,
+                        clientX: event.clientX,
+                        rectLeft: rect.left,
+                    }),
+                ),
+                view.pxPerSec,
+            ),
             pxPerSec: view.pxPerSec,
             startSec: gesture.originStartSec,
             // 不传 projectSec / lengthSec：右移**不再**被工程末端钳制（该上界是

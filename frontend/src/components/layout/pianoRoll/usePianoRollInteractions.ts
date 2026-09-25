@@ -7,6 +7,8 @@ import type {
 } from "react";
 import { useCallback, useEffect, useRef } from "react";
 
+import { pianoRollViewportBus } from "./pianoRollViewportBus";
+
 import type { ParamFramesPayload } from "../../../types/api";
 import type { AppDispatch } from "../../../app/store";
 import { paramsApi } from "../../../services/api";
@@ -1575,6 +1577,74 @@ export function usePianoRollInteractions(args: {
         },
         [rootTrackId, editParam, pitchEnabled, keybindingMap, onEditAction, toolMode],
     );
+
+    /**
+     * 最近一次指针移动事件与"指针是否按下"。
+     *
+     * 【用途】视口在拖拽期间被改变（滚轮滚动/缩放、跨面板同步）后，按最近指针位置
+     * **重放**一次移动 —— 各手势的落点换算读的是实时内核视口，因此重放后对象立刻
+     * 回到光标处，不必等用户真的动鼠标。
+     */
+    const lastPointerMoveRef = useRef<globalThis.PointerEvent | null>(null);
+    const pointerDownRef = useRef(false);
+
+    useEffect(() => {
+        const onMove = (event: globalThis.PointerEvent) => {
+            lastPointerMoveRef.current = event;
+        };
+        const onDown = (event: globalThis.PointerEvent) => {
+            if (event.button === 0) pointerDownRef.current = true;
+        };
+        const onUp = () => {
+            pointerDownRef.current = false;
+        };
+        // 捕获阶段：即使某个手势 stopPropagation 也要记到。
+        window.addEventListener("pointermove", onMove, true);
+        window.addEventListener("pointerdown", onDown, true);
+        window.addEventListener("pointerup", onUp, true);
+        window.addEventListener("pointercancel", onUp, true);
+        return () => {
+            window.removeEventListener("pointermove", onMove, true);
+            window.removeEventListener("pointerdown", onDown, true);
+            window.removeEventListener("pointerup", onUp, true);
+            window.removeEventListener("pointercancel", onUp, true);
+        };
+    }, []);
+
+    /**
+     * 视口变化 → 若正在拖拽则重放一次指针移动。
+     *
+     * 【为什么需要】落点由「实时视口 + 指针位置」决定。拖拽期间用滚轮滚动或缩放时，
+     * 视口变了而指针没动；不重放的话被拖对象会停在旧落点上、与光标脱开，直到用户再
+     * 动一下鼠标才归位（用户报告的"拖拽中滚动/缩放导致偏移"）。
+     *
+     * 用视口总线的**兼容订阅层**（而不是注册一个不绘制的"图层"）：本回调不参与绘制，
+     * 只是借"视口已提交"这一时机重放。
+     */
+    useEffect(() => {
+        return pianoRollViewportBus.subscribe(() => {
+            if (!pointerDownRef.current) return;
+            const last = lastPointerMoveRef.current;
+            if (!last) return;
+            window.dispatchEvent(
+                new PointerEvent("pointermove", {
+                    bubbles: true,
+                    cancelable: true,
+                    clientX: last.clientX,
+                    clientY: last.clientY,
+                    pointerId: last.pointerId,
+                    pointerType: last.pointerType,
+                    isPrimary: last.isPrimary,
+                    buttons: last.buttons,
+                    button: -1,
+                    shiftKey: last.shiftKey,
+                    ctrlKey: last.ctrlKey,
+                    altKey: last.altKey,
+                    metaKey: last.metaKey,
+                }),
+            );
+        });
+    }, []);
 
     const onScrollerWheelNative = useCallback(
         (e: globalThis.WheelEvent) => {
