@@ -335,8 +335,25 @@ export function normalizeChannelImportPolicy(input: ChannelImportPolicy): Channe
     };
 }
 
+/**
+ * 保存串行链：把每笔 `save_ui_settings` 排在上一笔完成之后。
+ *
+ * 后端对 `save_ui_settings` 做"读整个配置文件 → 合并本次字段 → 写回"，且调用
+ * 之间没有锁。前端到处都是 fire-and-forget 的**部分**保存（一个开关一次调用），
+ * 若两笔并发，后一笔的读取可能发生在前一笔写入之前，前一笔的字段就会被
+ * 覆盖丢失。串行化后每笔合并都能看到前一笔的落盘结果（调用方保持
+ * fire-and-forget 语义不变，仅提交顺序被保留为 dispatch 顺序）。
+ */
+let saveChain: Promise<unknown> = Promise.resolve();
+
 export const settingsApi = {
     getUiSettings: () => invoke<UiSettings>("get_ui_settings"),
-    saveUiSettings: (settings: Partial<UiSettings>) =>
-        invoke<{ ok: boolean }>("save_ui_settings", { settings }),
+    saveUiSettings: (settings: Partial<UiSettings>) => {
+        const run = saveChain.then(() =>
+            invoke<{ ok: boolean }>("save_ui_settings", { settings }),
+        );
+        // 失败不能断链：这一笔照常向调用方抛错，但队列本身继续消化后续保存。
+        saveChain = run.catch(() => undefined);
+        return run;
+    },
 };

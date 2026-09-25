@@ -1,10 +1,16 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const invokeMock = vi.hoisted(() => vi.fn());
+vi.mock("../invoke", () => ({
+    invoke: (...args: unknown[]) => invokeMock(...args),
+}));
 
 import {
     DEFAULT_CHANNEL_IMPORT_POLICY,
     TOLERANCE_PERCENT_MAX,
     normalizeChannelImportPolicy,
     percentToTolerance,
+    settingsApi,
     toleranceToPercent,
     type ChannelImportPolicy,
 } from "./settings";
@@ -18,6 +24,9 @@ import {
  * 会失败。下面守住的是同一类问题：换算必须精确、必须单调、必须不产生
  * 二进制表示残渣。
  */
+
+/** 等待全部微任务（含 thenable 链）排空；setTimeout 让出事件循环即可。 */
+const flushMicrotasks = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 describe("channel import policy", () => {
     it("maps the default tolerance to a clean percentage", () => {
@@ -107,5 +116,64 @@ describe("channel import policy", () => {
             });
             expect(normalized.monoTargetMode).toBe(mode);
         }
+    });
+});
+
+describe("saveUiSettings write queue", () => {
+    beforeEach(() => {
+        invokeMock.mockReset();
+    });
+
+    it("serializes concurrent partial saves in dispatch order", async () => {
+        // 每笔 invoke 挂起直到测试放行，模拟真实后端"读-改-写"期间的时间窗。
+        const release: Array<() => void> = [];
+        invokeMock.mockImplementation(
+            () =>
+                new Promise<void>((resolve) => {
+                    release.push(resolve);
+                }),
+        );
+
+        const first = settingsApi.saveUiSettings({ midiFillGaps: true });
+        const second = settingsApi.saveUiSettings({ autoCrossfade: false });
+        const third = settingsApi.saveUiSettings({ snapEnabled: true });
+
+        // 队列的首笔在微任务里触发 invoke；排空后应只有第一笔真正发出，
+        // 其余必须等前一笔落盘后才开始（否则后端的并发合并会互相覆盖丢字段）。
+        await flushMicrotasks();
+        expect(invokeMock).toHaveBeenCalledTimes(1);
+        expect(invokeMock.mock.calls[0][0]).toBe("save_ui_settings");
+        expect(invokeMock.mock.calls[0][1]).toEqual({ settings: { midiFillGaps: true } });
+
+        release[0]?.();
+        await first;
+        await flushMicrotasks();
+        expect(invokeMock).toHaveBeenCalledTimes(2);
+        expect(invokeMock.mock.calls[1][1]).toEqual({ settings: { autoCrossfade: false } });
+
+        release[1]?.();
+        await second;
+        await flushMicrotasks();
+        expect(invokeMock).toHaveBeenCalledTimes(3);
+        expect(invokeMock.mock.calls[2][1]).toEqual({ settings: { snapEnabled: true } });
+
+        release[2]?.();
+        await third;
+    });
+
+    it("keeps draining the queue after a failed save", async () => {
+        invokeMock.mockImplementation(async () => ({ ok: true }));
+        invokeMock.mockImplementationOnce(async () => {
+            throw new Error("save failed");
+        });
+
+        const failing = settingsApi.saveUiSettings({ autoCrossfade: true });
+        const following = settingsApi.saveUiSettings({ autoCrossfade: false });
+
+        // 这一笔照常向调用方抛错（fire-and-forget 语义不变）。
+        await expect(failing).rejects.toThrow("save failed");
+        // 但失败不能断链：下一笔仍要执行，否则后续保存永远卡在队列里。
+        await following;
+        expect(invokeMock).toHaveBeenCalledTimes(2);
     });
 });

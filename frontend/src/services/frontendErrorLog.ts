@@ -62,14 +62,27 @@ export function reportFrontendError(message: string, detail?: unknown): void {
     }
 }
 
+/**
+ * 已知的"良性"错误消息模式：上报它们只会制造噪音，不携带任何可行动的信息。
+ *
+ * - `ResizeObserver loop completed with undelivered notifications`：
+ *   浏览器的布局收敛提示 —— 本帧来不及投递的尺寸回调会在下一帧自动投递，
+ *   不是应用错误（Chrome/WebView 的既定行为，见 WHATWG / Chromium issue）。
+ */
+const BENIGN_ERROR_PATTERNS: RegExp[] = [/^ResizeObserver loop/i];
+
 /** 安装全局兜底上报：window error 与 unhandledrejection。在应用入口调用一次。 */
 export function installGlobalErrorReporting(): void {
     if (typeof window === "undefined") return;
 
     window.addEventListener("error", (event) => {
+        const message = event.message || "";
+        if (BENIGN_ERROR_PATTERNS.some((pattern) => pattern.test(message))) {
+            return;
+        }
         const err = event.error as Error | undefined;
         reportFrontendError(
-            `Uncaught error: ${event.message || "(no message)"}`,
+            `Uncaught error: ${message || "(no message)"}`,
             err?.stack ?? `${event.filename}:${event.lineno}:${event.colno}`,
         );
     });

@@ -9,7 +9,7 @@
  * 状态仍以 Redux 的 `fileBrowser.previewingFile` 为准（UI 高亮用它），本 hook
  * 负责让它与引擎真实状态一致 —— 包括失败时回滚。
  */
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useRef } from "react";
 
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { audioPreview } from "./audioPreview";
@@ -38,24 +38,42 @@ export interface PreviewToggle {
 export function usePreviewToggle(): PreviewToggle {
     const dispatch = useAppDispatch();
     const previewingFile = useAppSelector((state) => state.fileBrowser.previewingFile);
+    /**
+     * 播放会话号：每次 play / stop 递增，在飞的异步回滚据此判断自己是否仍是
+     * "最新一轮"。
+     *
+     * `audioPreview.play()` 返回 `false` 有两种含义：取数/解码失败，**或**被
+     * 新的 `play()` / `stop()` 抢占（audioPreview.ts 的会话号失效路径）。若不
+     * 区分，"先点慢加载的 A 再点 B"时，A 迟到的 `false` 会把属于 B 的高亮
+     * 清掉 —— 用户看着高亮消失，声音却在放。
+     */
+    const playSequenceRef = useRef(0);
 
     const stop = useCallback(() => {
+        // 先作废在飞 play 的回滚资格：stop 自己已清掉高亮，迟到的失败不得再写状态。
+        playSequenceRef.current += 1;
         audioPreview.stop();
         dispatch(setPreviewingFile(null));
     }, [dispatch]);
 
     const play = useCallback(
         (path: string) => {
+            const sequence = ++playSequenceRef.current;
             // 先乐观置位，让高亮立刻响应；失败时回滚（见下）。
             dispatch(setPreviewingFile(path));
             void audioPreview
                 .play(path, () => {
-                    // 自然播放结束：清掉高亮。
+                    // 自然播放结束：清掉高亮。（引擎保证被抢占的旧音源不会
+                    // 触发本回调，见 audioPreview.ts 的 onended 登记。）
                     dispatch(setPreviewingFile(null));
                 })
                 .then((started) => {
-                    // 取数 / 解码失败：退出播放，不提示用户，仅回滚状态。
-                    if (!started) dispatch(setPreviewingFile(null));
+                    // 取数 / 解码失败：退出播放，不提示用户，仅回滚状态 ——
+                    // 但只有失败者仍是最新一轮播放时才回滚；被抢占的旧会话
+                    // 不许碰新一轮的高亮。
+                    if (!started && playSequenceRef.current === sequence) {
+                        dispatch(setPreviewingFile(null));
+                    }
                 });
         },
         [dispatch],

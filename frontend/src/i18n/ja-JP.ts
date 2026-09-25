@@ -342,6 +342,15 @@ export const jaJP = {
         "ノートの内容は失われていません。Markdown ソース表示に切り替えて確認・コピーするか、パネルを閉じて再試行してください。",
     notebook_crash_open_source: "Markdown ソースで開く",
     notebook_image_insert_failed: "画像の挿入に失敗しました",
+    notebook_image_too_large: "画像が大きすぎてサイズ上限を超えています",
+    notebook_image_undecodable: "画像をデコードできません",
+    notebook_image_read_failed: "画像ファイルの読み込みに失敗しました",
+    notebook_image_save_failed: "画像の保存に失敗しました",
+    notebook_paste_nothing: "クリップボードに貼り付けられる内容がありません",
+    notebook_error_bad_base64: "添付データが不正な base64 です",
+    notebook_error_not_a_file: "そのパスは通常のファイルではありません",
+    notebook_error_unsupported_image_ext: "対応していない画像形式です",
+    notebook_error_export_mkdir_failed: "エクスポート先フォルダの作成に失敗しました",
     notebook_image_missing_hint:
         "添付ファイルがありません。削除を元に戻すか、画像を挿入し直してください。",
     notebook_image_copy: "画像をコピー",
@@ -687,6 +696,7 @@ export const jaJP = {
         "窓は素材の消費区間に均等に配置され、先頭と末尾も必ず含まれます。0 はサンプリングせず全区間を走査します。",
     clip_channel_import_tolerance: "許容差",
     clip_channel_import_tolerance_hint: "左右チャンネルに許容する差（フルスケール比）。0 = 完全一致、0.1（既定）≈ -60 dBFS。非可逆圧縮はデコード後に微小な差が残るため、厳しすぎると見逃します。",
+    clip_channel_import_save: "保存",
     clip_take_remove: "テイクを削除",
     clip_take_explode: "テイクを個別クリップに展開",
     clip_take_rename: "テイク名を変更",
@@ -1631,6 +1641,13 @@ export const jaJP = {
     status_render_cache_saved_suffix: "（約 {saved} 短縮）",
     status_render_cache_cleared: "レンダーキャッシュを削除しました（{n} 件）",
     status_clear_render_cache_failed: "レンダーキャッシュの削除に失敗しました",
+    status_clearing_render_cache: "レンダーキャッシュをクリア中...",
+    status_fake_stereo_scan_rejected: "疑似ステレオのスキャンが拒否されました",
+    status_fake_stereo_scan_foldable:
+        "疑似ステレオスキャン：{n} テイク、{m} 件がモノラルに折りたたみ可能",
+    status_fake_stereo_scan_folded:
+        "疑似ステレオスキャン：{n} テイク、{m} 件をモノラルに折りたたみました",
+    status_take_channel_mode_rejected: "テイクのチャンネルモード変更が拒否されました",
 
     benchmark_title: "推論デバイスベンチマーク",
     benchmark_desc:

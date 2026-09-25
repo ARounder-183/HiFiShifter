@@ -157,6 +157,7 @@ const statusKey: Record<string, string> = {
     "Clear waveform cache failed": "status_clear_waveform_cache_failed",
     "Render cache cleared": "status_render_cache_cleared",
     "Clear render cache failed": "status_clear_render_cache_failed",
+    "Fake-stereo scan rejected": "status_fake_stereo_scan_rejected",
     "Import canceled": "status_import_canceled",
     "Pick output canceled": "status_pick_output_canceled",
     "Output path selected": "status_output_path_selected",
@@ -208,6 +209,7 @@ const statusKey: Record<string, string> = {
     // 进行中状态（setPending）
     "Applying pitch shift...": "status_applying_pitch_shift",
     "Clearing waveform cache...": "status_clearing_waveform_cache",
+    "Clearing render cache...": "status_clearing_render_cache",
     "Exporting WAV...": "status_exporting_wav",
     "Exporting audio...": "status_exporting_audio",
     "Exporting separated tracks...": "status_exporting_separated",
@@ -251,6 +253,7 @@ const errorCodeKey: Record<string, string> = {
     "Pack into takes failed": "status_pack_takes_failed",
     "Remove take failed": "status_remove_take_failed",
     "Rename take failed": "status_rename_take_failed",
+    "Take channel mode rejected": "status_take_channel_mode_rejected",
 };
 
 // 这些状态表示工程内容刚被替换/导入，需立即执行一次缺失媒体检测，
@@ -599,56 +602,72 @@ function AppInner() {
     // 为新的音频块启用循环（Loop / 循环源，默认开启）
     const [loopNewClips, setLoopNewClips] = useState(true);
 
-    // 加载 MIDI 相关设置
+    // 加载 UI 持久化设置，并把 MIDI 相关字段回填进本地对话框状态。
+    //
+    // 【为什么唯一一次 get_ui_settings 由这里发起】后端的 get_ui_settings 不是
+    // 纯读；启动路径此前有两轮往返（boot effect 里的 thunk + 本处的直读）。
+    // 现在这次加载由本 effect 持有：unwrap 得到的载荷喂给下面的 setState，
+    // 同时经 loadUiSettings.fulfilled 进入 sessionSlice（autoCrossfade / 吸附
+    // 等全局项的权威来源仍是那个 reducer）。
     useEffect(() => {
-        settingsApi.getUiSettings().then((s) => {
-            if (s?.midiFillGaps != null) {
-                setFillGaps(s.midiFillGaps);
-            }
-            if (s?.midiMultiTrackMerge != null) {
-                setMultiTrackMerge(s.midiMultiTrackMerge);
-            }
-            if (s?.midiImportBpmAsProject != null) {
-                setImportBpmAsProject(s.midiImportBpmAsProject);
-            }
-            if (s?.midiNoteBpmMode != null) {
-                setNoteBpmMode(s.midiNoteBpmMode);
-            }
-            if (s?.midiSpecifiedBpm != null) {
-                setSpecifiedBpm(s.midiSpecifiedBpm);
-            }
-            if (s?.midiImportPosition != null) {
-                setImportPosition(s.midiImportPosition);
-            }
-            if (s?.midiCloseLeadingGap != null) {
-                setCloseLeadingGap(s.midiCloseLeadingGap);
-            }
-            if (s?.midiImportAsTempoMap != null) {
-                setImportTempoMapEnabled(Boolean(s.midiImportAsTempoMap));
-            }
-            if (s?.midiImportTempoMapTempo != null) {
-                setImportTempoMapTempo(Boolean(s.midiImportTempoMapTempo));
-            }
-            if (s?.midiImportTempoMapTimeSignature != null) {
-                setImportTempoMapTimeSignature(Boolean(s.midiImportTempoMapTimeSignature));
-            }
-            if (s?.midiImportTempoMapKeySignature != null) {
-                setImportTempoMapKeySignature(Boolean(s.midiImportTempoMapKeySignature));
-            }
-            if (s?.midiImportTargetMenu != null) {
-                setMidiImportTargetMenu(s.midiImportTargetMenu);
-            }
-            if (s?.midiImportTargetDragDrop != null) {
-                setMidiImportTargetDragDrop(s.midiImportTargetDragDrop);
-            }
-            if (typeof s?.autoReloadModifiedMedia === "boolean") {
-                setAutoReloadModifiedMedia(s.autoReloadModifiedMedia);
-            }
-            if (typeof s?.loopNewClips === "boolean") {
-                setLoopNewClips(s.loopNewClips);
-            }
-        });
-    }, []);
+        let cancelled = false;
+        dispatch(loadUiSettings())
+            .unwrap()
+            .then((s) => {
+                if (cancelled) return;
+                if (s?.midiFillGaps != null) {
+                    setFillGaps(s.midiFillGaps);
+                }
+                if (s?.midiMultiTrackMerge != null) {
+                    setMultiTrackMerge(s.midiMultiTrackMerge);
+                }
+                if (s?.midiImportBpmAsProject != null) {
+                    setImportBpmAsProject(s.midiImportBpmAsProject);
+                }
+                if (s?.midiNoteBpmMode != null) {
+                    setNoteBpmMode(s.midiNoteBpmMode);
+                }
+                if (s?.midiSpecifiedBpm != null) {
+                    setSpecifiedBpm(s.midiSpecifiedBpm);
+                }
+                if (s?.midiImportPosition != null) {
+                    setImportPosition(s.midiImportPosition);
+                }
+                if (s?.midiCloseLeadingGap != null) {
+                    setCloseLeadingGap(s.midiCloseLeadingGap);
+                }
+                if (s?.midiImportAsTempoMap != null) {
+                    setImportTempoMapEnabled(Boolean(s.midiImportAsTempoMap));
+                }
+                if (s?.midiImportTempoMapTempo != null) {
+                    setImportTempoMapTempo(Boolean(s.midiImportTempoMapTempo));
+                }
+                if (s?.midiImportTempoMapTimeSignature != null) {
+                    setImportTempoMapTimeSignature(Boolean(s.midiImportTempoMapTimeSignature));
+                }
+                if (s?.midiImportTempoMapKeySignature != null) {
+                    setImportTempoMapKeySignature(Boolean(s.midiImportTempoMapKeySignature));
+                }
+                if (s?.midiImportTargetMenu != null) {
+                    setMidiImportTargetMenu(s.midiImportTargetMenu);
+                }
+                if (s?.midiImportTargetDragDrop != null) {
+                    setMidiImportTargetDragDrop(s.midiImportTargetDragDrop);
+                }
+                if (typeof s?.autoReloadModifiedMedia === "boolean") {
+                    setAutoReloadModifiedMedia(s.autoReloadModifiedMedia);
+                }
+                if (typeof s?.loopNewClips === "boolean") {
+                    setLoopNewClips(s.loopNewClips);
+                }
+            })
+            .catch(() => {
+                // 读不到设置时保持出厂默认；sessionSlice 的 reducer 同样不会执行。
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [dispatch]);
 
     const handleImportMidiFromMenu = useCallback(() => {
         const session = store.getState().session;
@@ -735,6 +754,22 @@ function AppInner() {
     const statusText = useMemo(() => {
         // 精确匹配
         if (statusKey[status]) return t(statusKey[status] as MessageKey);
+        // 双数量的状态（sessionSlice 写出的原文形如
+        // "Fake-stereo scan: 5 take(s), 3 folded to mono"）。两个数字加两种变体
+        //（试扫 / 实扫），下方的 counted 正则只支持单个数量，这里专门解析并回填
+        // {n}/{m} 占位符模板。
+        const fakeStereoScan = status.match(
+            /^Fake-stereo scan: (\d+) take\(s\), (\d+) (foldable|folded to mono)$/,
+        );
+        if (fakeStereoScan) {
+            const key =
+                fakeStereoScan[3] === "foldable"
+                    ? "status_fake_stereo_scan_foldable"
+                    : "status_fake_stereo_scan_folded";
+            return (t(key as MessageKey) as string)
+                .replace("{n}", fakeStereoScan[1] ?? "0")
+                .replace("{m}", fakeStereoScan[2] ?? "0");
+        }
         // 带数量的状态：提取数字回填占位符模板（如 "Waveform cache cleared (3 files)"）
         const counted = status.match(/^(.+?)\s*\((\d+)\s*\w+\)$/);
         if (counted) {
@@ -1701,7 +1736,9 @@ function AppInner() {
     useEffect(() => {
         void dispatch(fetchTimeline());
         void dispatch(refreshRuntime());
-        void dispatch(loadUiSettings());
+        // loadUiSettings 不在这里发起：UI 设置的唯一一次加载由上方"加载 UI
+        // 持久化设置"的 effect 持有（unwrap 后回填 MIDI 字段），否则启动会有
+        // 两轮 get_ui_settings 往返（后端的 get_ui_settings 不是纯读）。
         void dispatch(loadRecordingSettings());
         // 【必须显式 hydrate】thunk 只负责取回磁盘内容，把结果写进切片是这里的
         // 责任。漏掉这一步的后果不是"界面不好看"，而是**布局永远不落盘**：

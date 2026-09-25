@@ -131,9 +131,6 @@ describe("waveformBinaryCodec v2", () => {
         view.setUint32(16, 1, true);
         const f32 = new Float32Array(buffer, 20, 4);
         f32.set([-0.9, -0.4, 0.9, 0.4]);
-        let binary = "";
-        const bytes = new Uint8Array(buffer);
-        for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
         const decoded = decodeWaveformBinary(buffer);
         expect(decoded).not.toBeNull();
         expect(decoded!.channels).toBe(1);

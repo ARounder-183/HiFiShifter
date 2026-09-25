@@ -341,10 +341,10 @@ export function ChannelImportDialog({ open, onOpenChange }: ChannelImportDialogP
 
                     <Flex justify="end" gap="2" mt="4">
                         <Button variant="soft" color="gray" onClick={() => onOpenChange(false)}>
-                            {tAny("render_cache_close")}
+                            {tAny("cancel")}
                         </Button>
                         <Button disabled={saving} onClick={() => void handleSave()}>
-                            {tAny("render_cache_save_settings")}
+                            {tAny("clip_channel_import_save")}
                         </Button>
                     </Flex>
                 </Flex>

@@ -553,12 +553,6 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
         case "batch_get_waveform_mipmap":
             return { sourcePaths: args[0] };
 
-        case "get_waveform_manifest":
-            return { sourcePath: args[0] };
-
-        case "get_waveform_tiles_binary":
-            return { sourcePath: args[0], revision: args[1], requests: args[2] };
-
         case "get_root_mix_waveform_peaks_segment":
         case "get_track_mix_waveform_peaks_segment":
             return {
@@ -911,6 +905,9 @@ export async function invoke<T>(method: string, ...args: unknown[]): Promise<T> 
         return (await api[method](...args)) as T;
     } catch (err) {
         console.error("pywebview api call failed", { method, args, err });
+        // 与 Tauri 分支同口径：失败也上报前端诊断日志（pywebview 模式下
+        // BackendInvokeError 只剩 message，原始 cause 不落盘就丢了）。
+        reportFrontendError(`Invoke failed: ${method}`, err);
         throw new BackendInvokeError({
             mode: "pywebview",
             method,
