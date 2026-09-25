@@ -6146,10 +6146,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                               }),
                                           );
                                       }}
-                                      onRename={(clipId) => {
-                                          setContextMenu(null);
-                                          clipActions.setRenamingClipId(clipId);
-                                      }}
                                       onCopy={(ids) => {
                                           const s = sessionRef.current;
                                           const expandedIds = expandClipIdsWithGroups(
@@ -6232,37 +6228,29 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                               }),
                                           );
                                       }}
-                                      onFadeShapeChange={(clipId, target, shape) => {
+                                      onFadeShapeChange={(clipIds, target, shape) => {
                                           // 切换形状必须重置曲率（REAPER 语义：各形状的
                                           // 默认曲率由形状自身定义，见 reaperFade 的
                                           // DEFAULT_FADE_DIR_BY_SHAPE / defaultFadeDirFor）。
                                           const dir = defaultFadeDirFor(shape, target === "out");
-                                          dispatch(
-                                              setClipFades({
-                                                  clipId,
-                                                  ...(target === "in"
-                                                      ? {
-                                                            fadeInShape: shape,
-                                                            fadeInDir: dir,
-                                                        }
-                                                      : {
-                                                            fadeOutShape: shape,
-                                                            fadeOutDir: dir,
-                                                        }),
-                                              }),
-                                          );
+                                          const patch =
+                                              target === "in"
+                                                  ? { fadeInShape: shape, fadeInDir: dir }
+                                                  : { fadeOutShape: shape, fadeOutDir: dir };
+                                          // 乐观更新（本地 reducer）逐条应用；
+                                          // 持久化走 bulk 通道：单次 IPC + 单个撤销步。
+                                          batch(() => {
+                                              for (const clipId of clipIds) {
+                                                  dispatch(setClipFades({ clipId, ...patch }));
+                                              }
+                                          });
                                           void dispatch(
-                                              setClipStateRemote({
-                                                  clipId,
-                                                  ...(target === "in"
-                                                      ? {
-                                                            fadeInShape: shape,
-                                                            fadeInDir: dir,
-                                                        }
-                                                      : {
-                                                            fadeOutShape: shape,
-                                                            fadeOutDir: dir,
-                                                        }),
+                                              setClipsStateBulkRemote({
+                                                  updates: clipIds.map((clipId) => ({
+                                                      clipId,
+                                                      ...patch,
+                                                  })),
+                                                  checkpoint: true,
                                               }),
                                           );
                                       }}

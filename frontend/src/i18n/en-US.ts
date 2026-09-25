@@ -796,10 +796,7 @@ export const enUS = {
     clip_channel_source_stereo: "Stereo source",
     clip_channel_source_mono: "Mono source",
     ctx_channel_mode: "Channel Mode",
-    ctx_clip: "Clip",
     ctx_group: "Grouping",
-    ctx_pitch_reference: "Pitch Reference",
-    ctx_export: "Export",
     ctx_scan_fake_stereo: "Scan for Fake Stereo and Convert",
     ctx_scan_fake_stereo_hint:
         "Material whose left and right channels match can be folded to mono: identical sound, half the render time. A batch run becomes a single undo step.",
@@ -864,7 +861,6 @@ export const enUS = {
     ctx_replace_all: "Replace All",
     ctx_normalize_all: "Normalize All",
     ctx_delete: "Delete",
-    ctx_rename: "Rename",
     ctx_copy: "Copy",
     ctx_cut: "Cut",
     ctx_replace: "Replace",

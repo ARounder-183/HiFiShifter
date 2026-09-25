@@ -637,10 +637,7 @@ export const zhCN = {
     clip_channel_source_stereo: "立体声源",
     clip_channel_source_mono: "单声道源",
     ctx_channel_mode: "声道模式",
-    ctx_clip: "音频块",
     ctx_group: "编组",
-    ctx_pitch_reference: "音高参考",
-    ctx_export: "导出",
     ctx_scan_fake_stereo: "扫描假立体声并转换",
     ctx_scan_fake_stereo_hint:
         "左右声道内容一致的素材可折叠为单声道：听感不变，渲染耗时减半。整批只产生一个撤销步。",
@@ -703,7 +700,6 @@ export const zhCN = {
     ctx_replace_all: "替换全部",
     ctx_normalize_all: "规格化所有",
     ctx_delete: "删除",
-    ctx_rename: "重命名",
     ctx_copy: "复制",
     ctx_cut: "剪切",
     ctx_replace: "替换",

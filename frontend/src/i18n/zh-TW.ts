@@ -638,10 +638,7 @@ export const zhTW = {
     clip_channel_source_stereo: "立體聲源",
     clip_channel_source_mono: "單聲道源",
     ctx_channel_mode: "聲道模式",
-    ctx_clip: "音訊塊",
     ctx_group: "編組",
-    ctx_pitch_reference: "音高參考",
-    ctx_export: "匯出",
     ctx_scan_fake_stereo: "掃描假立體聲並轉換",
     ctx_scan_fake_stereo_hint:
         "左右聲道內容一致的素材可折疊為單聲道：聽感不變，渲染耗時減半。整批只產生一個復原步驟。",
@@ -704,7 +701,6 @@ export const zhTW = {
     ctx_replace_all: "取代全部",
     ctx_normalize_all: "正規化全部",
     ctx_delete: "刪除",
-    ctx_rename: "重新命名",
     ctx_copy: "複製",
     ctx_cut: "剪下",
     ctx_replace: "取代",

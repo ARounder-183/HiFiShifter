@@ -664,10 +664,7 @@ export const jaJP = {
     clip_channel_source_stereo: "ステレオソース",
     clip_channel_source_mono: "モノラルソース",
     ctx_channel_mode: "チャンネルモード",
-    ctx_clip: "クリップ",
     ctx_group: "グループ",
-    ctx_pitch_reference: "ピッチ参照",
-    ctx_export: "書き出し",
     ctx_scan_fake_stereo: "疑似ステレオをスキャンして変換",
     ctx_scan_fake_stereo_hint:
         "左右の内容が同一の素材はモノラルに折りたたむと、聴感は変わらずレンダリング時間が半減します。一括処理は 1 回の元に戻す操作にまとまります。",
@@ -732,7 +729,6 @@ export const jaJP = {
     ctx_replace_all: "すべて置換",
     ctx_normalize_all: "すべてノーマライズ",
     ctx_delete: "削除",
-    ctx_rename: "名前を変更",
     ctx_copy: "コピー",
     ctx_cut: "カット",
     ctx_replace: "置換",

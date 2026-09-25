@@ -733,10 +733,7 @@ export const koKR = {
     clip_channel_source_stereo: "스테레오 소스",
     clip_channel_source_mono: "모노 소스",
     ctx_channel_mode: "채널 모드",
-    ctx_clip: "클립",
     ctx_group: "그룹",
-    ctx_pitch_reference: "피치 참조",
-    ctx_export: "내보내기",
     ctx_scan_fake_stereo: "가짜 스테레오 검사 후 변환",
     ctx_scan_fake_stereo_hint:
         "좌우 내용이 같은 소재는 모노로 접으면 들리는 소리는 그대로이고 렌더링 시간이 절반으로 줄어듭니다. 일괄 처리는 실행 취소 한 단계로 묶입니다.",
@@ -802,7 +799,6 @@ export const koKR = {
     ctx_replace_all: "모두 교체",
     ctx_normalize_all: "모두 노멀라이즈",
     ctx_delete: "삭제",
-    ctx_rename: "이름 변경",
     ctx_copy: "복사",
     ctx_cut: "잘라내기",
     ctx_replace: "교체",
