@@ -1124,6 +1124,25 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
      */
     const inlineDragArmedRef = useRef(false);
 
+    /**
+     * 指针所在的**内容时间**（秒）。行根不可用（未挂载）时返回 NaN。
+     *
+     * 【为什么除数取 ref 而不是渲染期捕获的 `pxPerSec`】拖拽主 effect 刻意不把
+     * `pxPerSec` 放进依赖（缩放会让 effect 重挂 window 监听、中断拖拽），于是它闭包
+     * 里的 `pxPerSec` 会**永久停在拖拽开始时的缩放**上。拖拽中用滚轮缩放后，同一个
+     * 指针位置仍按旧缩放换算，结果整体偏一个缩放比 —— 这正是"拖拽中滚动 / 缩放
+     * 导致严重偏移"。行根左缘（`rowRef.getBoundingClientRect()`）本来就是 DOM
+     * 实时值，除数必须同样实时，两者才同源。
+     *
+     * 【声明位置】必须先于 `armInlineDrag` / `startFlagDrag`：它们的依赖数组在
+     * 渲染期求值，引用后置声明的 const 会命中 TDZ。
+     */
+    const pointerSecAtClientX = useCallback((clientX: number): number => {
+        const left = rowRef.current?.getBoundingClientRect().left;
+        if (left === undefined) return Number.NaN;
+        return (clientX - left) / Math.max(1e-9, dragPxPerSecRef.current);
+    }, []);
+
     /** 判定为“拖动标签”后的统一接管：确认编辑 + 从 (clientX, clientY) 开始拖动。 */
     const armInlineDrag = useCallback(
         (point: TempoPoint, clientX: number) => {
@@ -1165,7 +1184,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             setDraggingId(point.id);
             setSelectedId(point.id);
         },
-        [applyInlineEdit, tempoMap],
+        [applyInlineEdit, pointerSecAtClientX, tempoMap],
     );
 
     const startInlineDragProbe = useCallback(
@@ -1320,22 +1339,6 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
     );
 
     // ── 拖拽移动变化点 ──
-    /**
-     * 指针所在的**内容时间**（秒）。行根不可用（未挂载）时返回 NaN。
-     *
-     * 【为什么除数取 ref 而不是渲染期捕获的 `pxPerSec`】拖拽主 effect 刻意不把
-     * `pxPerSec` 放进依赖（缩放会让 effect 重挂 window 监听、中断拖拽），于是它闭包
-     * 里的 `pxPerSec` 会**永久停在拖拽开始时的缩放**上。拖拽中用滚轮缩放后，同一个
-     * 指针位置仍按旧缩放换算，结果整体偏一个缩放比 —— 这正是"拖拽中滚动 / 缩放
-     * 导致严重偏移"。行根左缘（`rowRef.getBoundingClientRect()`）本来就是 DOM
-     * 实时值，除数必须同样实时，两者才同源。
-     */
-    const pointerSecAtClientX = useCallback((clientX: number): number => {
-        const left = rowRef.current?.getBoundingClientRect().left;
-        if (left === undefined) return Number.NaN;
-        return (clientX - left) / Math.max(1e-9, dragPxPerSecRef.current);
-    }, []);
-
     const startFlagDrag = useCallback(
         (point: TempoPoint, isFirst: boolean, e: React.PointerEvent) => {
             // 数位笔 / 触摸不拖 tempo 标志：标志 ~15px 高，零阈值按下即拖。
@@ -1366,7 +1369,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             setDraggingId(point.id);
             setSelectedId(point.id);
         },
-        [tempoMap],
+        [pointerSecAtClientX, tempoMap],
     );
 
     useEffect(() => {
@@ -1489,6 +1492,9 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
         onChange,
         commitMap,
         projectSec,
+        // 引用恒稳定（useCallback([])：pxPerSec 经 dragPxPerSecRef 读取），
+        // 加入不会引起监听重挂。
+        pointerSecAtClientX,
     ]);
 
     // 拖拽进行中 Tempo Map 被外部清空（撤销/远程同步等）的兜底：独立小

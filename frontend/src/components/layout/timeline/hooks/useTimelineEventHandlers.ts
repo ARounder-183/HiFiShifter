@@ -353,7 +353,7 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
                 "hifi:selectAdjacentTrack",
                 onSelectAdjacentTrack as EventListener,
             );
-    }, [dispatch, rowHeight, scrollRef, sessionRef, trackListScrollRef]);
+    }, [dispatch, rowHeight, scrollRef, sessionRef, trackListScrollRef, viewport]);
 
     // ── hifi:nudgePlayhead ───────────────────────────────────
     useEffect(() => {

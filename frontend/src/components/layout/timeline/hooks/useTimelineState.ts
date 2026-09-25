@@ -522,11 +522,14 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
      * 内核模式取内核真值（位置与缩放同一次 `scroll.get()`，天然一致，且与已提交的
      * DOM 一致）；无内核（旧 DOM 分支）时才退回 ref。
      */
-    function livePxPerSec(): number {
+    // 以 useCallback 稳定引用（依赖仅含稳定 ref）：供只注册一次的订阅回调 /
+    // useCallback 化的同步入口长期持有，引用抖动会连带放大（与 `syncScrollLeft`
+    // 同一口径）。
+    const livePxPerSec = React.useCallback(function livePxPerSec(): number {
         const host = kernelHostRef.current;
         if (host !== null) return host.getViewport().pxPerSec;
         return pxPerSecRef.current;
-    }
+    }, [kernelHostRef]);
 
     const syncScrollLeft = React.useCallback(function syncScrollLeft(next: number) {
         scrollLeftRef.current = next;
@@ -574,7 +577,7 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
                 setScrollLeft(next);
             });
         }
-    }, []);
+    }, [livePxPerSec]);
 
     /**
      * 水平滚动位置的**逐帧**同步（内核模式下由宿主每帧通知）。
@@ -610,7 +613,7 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
                 TIMELINE_SYNC_ORIGIN,
             );
         }
-    }, []);
+    }, [livePxPerSec]);
 
     // ── syncScrollTop：竖直轴的同帧提交 ──────────────────────────
     // sticky 画布层（clip 体 / 波形面）不随滚动容器原生移动，竖直滚动时
@@ -735,7 +738,13 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
             unsubscribe();
             pendingTimelineSyncViewportRef.current = null;
         };
-    }, [s.paramEditorSyncTimeline, syncScrollLeft]);
+    }, [
+        s.paramEditorSyncTimeline,
+        syncScrollLeft,
+        // 两者均为稳定引用（ref 对象 / useMemo 一次创建），加入不会引发重订阅。
+        kernelHostRef,
+        viewportAccess,
+    ]);
 
     // 启用同步时，立即把轨道视图当前的水平位置与缩放写入共享视口作为基准。
     // 必须用 layout effect（而非被动 effect）：挂载/切换都要在**首帧绘制前**
@@ -753,7 +762,7 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
                 TIMELINE_SYNC_ORIGIN,
             );
         }
-    }, [s.paramEditorSyncTimeline]);
+    }, [livePxPerSec, s.paramEditorSyncTimeline]);
 
     // 同步视口必须等内容宽度按新 pxPerSec 更新后再落到 DOM。
     // 否则设置 scroller.scrollLeft 时会被浏览器钳回旧的最大滚动位置，

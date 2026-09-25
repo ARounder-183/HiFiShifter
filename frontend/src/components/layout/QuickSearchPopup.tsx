@@ -161,7 +161,7 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
         });
 
         return () => {};
-    }, [open]);
+    }, [open, stopPreview]);
 
     // 关闭时停止预览
     useEffect(() => {
@@ -287,7 +287,7 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
             );
             onClose();
         },
-        [dispatch, onClose, playheadSec, quickSearchAutoNormalizeEnabled, selectedTrackId],
+        [dispatch, onClose, playheadSec, quickSearchAutoNormalizeEnabled, selectedTrackId, stopPreview],
     );
 
     const focusSearchInput = useCallback(() => {
@@ -355,6 +355,8 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
             onClose,
             keybindings,
             matchKey,
+            playPreview,
+            stopPreview,
         ],
     );
 

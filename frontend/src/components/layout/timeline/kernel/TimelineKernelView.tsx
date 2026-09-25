@@ -456,7 +456,6 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
 
     // 数据镜像：渲染期写 ref，宿主在 rAF 内读取（避免宿主订阅 React 状态）。
     const dataRef = React.useRef<TimelineKernelData>(buildData());
-    // eslint-disable-next-line react-hooks/refs -- 数据镜像：命令式宿主需在 rAF 内读取最新值（既有热路径模式）
     dataRef.current = buildData();
 
     /**
@@ -501,7 +500,6 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         onViewportWidthChange,
         onUnavailable,
     });
-    // eslint-disable-next-line react-hooks/refs -- 回调镜像：同上
     callbacksRef.current = {
         onRowHeightChange,
         onPxPerSecChange,
@@ -516,7 +514,6 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
 
     // 交互回调镜像：同上（面板用 useCallback 提供，但引用仍可能在依赖变化时更新）。
     const interactionsRef = React.useRef<TimelineKernelInteractions | undefined>(interactions);
-    // eslint-disable-next-line react-hooks/refs -- 回调镜像：同上
     interactionsRef.current = interactions;
     /**
      * 稳定引用的交互回调集合（内核创建时只取一次，引用抖动不生效）。
