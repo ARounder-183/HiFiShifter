@@ -6834,8 +6834,14 @@ export const PianoRollPanel: React.FC<{
                     <Text size="1" weight="bold" color="gray">
                         {tAny("param_editor_short")}
                     </Text>
-                    {/* 音高吸附按钮，紧邻 param_editor 右侧，留 8px 空白 */}
-                    <Flex gap="1" align="center" style={{ marginLeft: 8 }}>
+                    {/* 工具按钮组（音高吸附等）+ 平滑度滑块。`marginLeft: 8` 是紧邻
+                        `参数编辑器` 标题留出的空白。
+                        【minWidth 必须显式置 0】flex 项默认 `min-width: auto`（= min-content），
+                        这一组的 min-content 里含**滑块的 max-content（120px）**与标签全文，
+                        实测 384px —— 面板比它窄时整组拒绝收缩、直接溢出，于是组内的滑块永远
+                        停在 120px（用户报告"平滑度滑块无法缩小"）。置 0 后收缩按 base 分摊：
+                        按钮（min-content = 24px）保持不动，滑块与标签先让位。 */}
+                    <Flex gap="1" align="center" style={{ marginLeft: 8, minWidth: 0 }}>
                         <IconButton
                             size="1"
                             variant={s.toolModeGroup === "select" ? "solid" : "ghost"}
@@ -7300,7 +7306,8 @@ export const PianoRollPanel: React.FC<{
                         </IconButton>
                         <Flex align="center" gap="1" ml="2" style={{ minWidth: 0, flexShrink: 1 }}>
                             {/* 标签允许被压缩裁切（完整名称在悬停提示里）：横向极窄时
-                                应当由它先让位，而不是把整行撑到溢出。 */}
+                                应当由它先让位，而不是把整行撑到溢出。省略号让"让位"
+                                看起来是有意的降级，而不是渲染出错的半截字。 */}
                             <Text
                                 size="1"
                                 data-tooltip={tAny("edge_smoothness")}
@@ -7308,6 +7315,7 @@ export const PianoRollPanel: React.FC<{
                                     minWidth: 0,
                                     whiteSpace: "nowrap",
                                     overflow: "hidden",
+                                    textOverflow: "ellipsis",
                                 }}
                             >
                                 {tAny("edge_smoothness_short")}:
@@ -7336,10 +7344,16 @@ export const PianoRollPanel: React.FC<{
                                     // 同排所有项 —— 实测窄容器下它只缩到 102px，仍占着大头。
                                     // 基准为 0 时，它先让出空间、只取"别人用剩下的"，宽裕时再由
                                     // `maxWidth` 封顶在 120px。它是低频调节项，理应最先让步。
+                                    //
+                                    // 【下限取 16】基准为 0 的项在收缩阶段分摊到的是 0（0 × shrink
+                                    // 恒为 0），因此**它的下限就是它实际能到的最小宽度**：下限多大，
+                                    // 拥挤时它就让出多少。16 = 12px 滑块 + 两侧各 2px，是仍能拖动的
+                                    // 最小值；再窄就只剩滑块本身、看不到轨道了。极窄时它本就该让位
+                                    // （数值仍可读，滚轮调值照常可用）。
                                     flex: "1 1 0",
                                     // 非 flex 上下文（理论上不会发生）时的兜底宽度。
                                     width: 120,
-                                    minWidth: 20,
+                                    minWidth: 16,
                                     maxWidth: 120,
                                 }}
                             />
