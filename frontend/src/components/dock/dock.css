@@ -452,12 +452,35 @@ body[data-dock-dragging="true"] iframe {
  * 像素开始完全可点。
  */
 .hs-dock-gutter[data-dir="col"] {
-    width: 5px;
+    width: 4px;
     cursor: col-resize;
-    /* 整个条落在轨道头一侧（右侧不留任何覆盖）：`-5px` 把它挪进头部最后 5px。 */
-    margin-left: -5px;
+    /* 整个条落在轨道头一侧（右侧不留任何覆盖）：`-4px` 把它挪进头部最后 4px。 */
+    margin-left: -4px;
     margin-right: 0;
     z-index: 5;
+}
+
+/*
+ * 悬停反馈：**一条 1px 的高亮线**，而不是把整个 4px 命中区填成强调色。
+ *
+ * 它是低频交互，填充式的色块太显眼（用户报告"根本没必要做得那么明显"）；1px 细线
+ * 是分隔条这类控件惯用的提示，看得见但不抢注意力。命中区仍为 4px，保证可抓。
+ */
+.hs-dock-gutter[data-dir="col"]::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    right: 0;
+    width: 1px;
+    background: var(--accent-9);
+    opacity: 0;
+    transition: opacity 90ms linear;
+}
+
+.hs-dock-gutter[data-dir="col"]:hover::after,
+.hs-dock-gutter[data-dir="col"][data-dragging="true"]::after {
+    opacity: 1;
 }
 
 .hs-dock-gutter[data-dir="row"] {
@@ -468,8 +491,10 @@ body[data-dock-dragging="true"] iframe {
     z-index: 5;
 }
 
-.hs-dock-gutter:hover,
-.hs-dock-gutter[data-dragging="true"] {
+/* 水平方向的沟槽（纵向尺寸调整）保持原来的填充式反馈：它不靠近任何"用户想点击
+   的内容"，没有遮挡问题；只有竖直方向那条需要克制（见上方 1px 细线的说明）。 */
+.hs-dock-gutter[data-dir="row"]:hover,
+.hs-dock-gutter[data-dir="row"][data-dragging="true"] {
     background: var(--accent-8);
 }
 

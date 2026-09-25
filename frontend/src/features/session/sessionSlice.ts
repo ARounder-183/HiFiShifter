@@ -5247,6 +5247,15 @@ const sessionSlice = createSlice({
                 if (!payload.ok || !payload.tracks || !payload.clips) {
                     return;
                 }
+                // 【迟到的回声必须整份忽略】与 BPM 路径同一类问题：拖拽 / 滚轮手势
+                // 期间请求会积压，旧地图的回声在乐观值前进之后才到达。若照单应用，
+                // 网格会被反复拽回旧锚点（`Tempo Map 变化点` 重塑网格，锚点一变整条
+                // 网格就平移），与用户报告的"抽搐"完全一致。判据：**当前地图仍等于
+                // 本次请求送出的地图**（没有被更新的写入覆盖）才采纳。
+                const requestedMap = action.meta.arg as TempoMap | null;
+                if (!isSameTempoMap(state.tempoMap, requestedMap)) {
+                    return;
+                }
                 // 后端为权威来源：应用完整快照（含 tempo_map 与工程基准值）。
                 //
                 // 【幂等回声不产生新引用】快照会用一个**新的** tempoMap 对象替换引用，
@@ -5944,12 +5953,22 @@ const sessionSlice = createSlice({
                 }
                 // 与 Tempo Map 变化点一致的 BPM 范围（10-960）。
                 //
-                // 【为什么相等就不写】乐观写入已经落地了同一个值；回声再写一次会
-                // 产生**第二次 Redux 提交**，订阅方（标尺刻度 / 网格 / 波形）因此
-                // 每滚一格重算两次。滚轮调 BPM 时标尺"抽搐"的直接来源之一。
-                // 只有后端确实钳到了另一个值（或浮点末位不同）时才采纳。
-                const echoedBpm = clamp(Number(payload.bpm ?? state.bpm), 10, 960);
-                if (Math.abs(echoedBpm - state.bpm) > 1e-9) {
+                // 【必须忽略"迟到"的回声】传输命令经 `enqueueTransportCommand` 串行
+                // 执行，滚轮手势期间会积压几十个请求；每个请求的回声都在**乐观值已经
+                // 前进之后**才到达。若照单采纳，state.bpm 就会在"最新乐观值"与"若干个
+                // 旧回声值"之间反复被拽回 —— 刻度时间（`sec = beat × 60 / bpm`）与网格
+                // 因此来回平移，用户看到的就是标尺与网格"抽搐"。
+                //
+                // 判据与 `seekPlayhead.fulfilled` 完全一致（那里已经写明这条规则）：
+                // **仅当前端值仍等于本次请求值**（即没有被更新的请求覆盖）**且后端确实
+                // 修正了它**（clamp 之类）时才采纳。
+                const requestedBpm = action.meta.arg as number;
+                const echoedBpm = clamp(Number(payload.bpm ?? requestedBpm), 10, 960);
+                const EPS_BPM = 1e-9;
+                if (
+                    Math.abs(state.bpm - requestedBpm) <= EPS_BPM &&
+                    Math.abs(echoedBpm - requestedBpm) > EPS_BPM
+                ) {
                     state.bpm = echoedBpm;
                 }
                 if (payload.tracks && payload.clips) {

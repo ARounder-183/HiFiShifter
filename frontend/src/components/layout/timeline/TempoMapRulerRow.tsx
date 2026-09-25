@@ -5,6 +5,7 @@ import type { GridSize, TimelineSnapSettings } from "../../../features/session/s
 import type { ScaleLike } from "../../../utils/musicalScales";
 import { SCALE_KEYS, SCALE_LABELS } from "../../../utils/musicalScales";
 import { shouldSuppressHoverSideEffects } from "../../../utils/penInput";
+import { resolveTempoDragOffsetPx } from "./tempoPointDragOffset";
 import { useNonPassiveWheel } from "../../../utils/useNonPassiveWheel";
 import type { CustomScalePreset } from "../../../utils/customScales";
 import {
@@ -1269,9 +1270,20 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             const liveMap = dragTempoMapRef.current;
             if (!drag || !liveMap) return;
             const dx = e.clientX - drag.startClientX;
+            // 【拖拽启动阈值】指针未越过阈值前**不改变**变化点。
+            //
+            // 双击标签进入编辑时，第一下点击的按下与抬起之间几乎总会有 1-2px 抖动；
+            // 此前任何位移都会立刻进入"拖拽"并应用吸附，于是变化点被挪到最近的吸附位
+            // —— 双击后输入框出现在**被挪动过**的位置，看起来"输入框偏移了"，而且
+            // 挪到哪里取决于相邻变化点（它们决定吸附候选集），正好对应"和前一个
+            // 变化点标签是否接近有关"。
+            //
+            // 越过阈值后按"阈值后的位移"计算（而不是从起点算），避免越过瞬间跳一格。
+            const movedPx = resolveTempoDragOffsetPx(dx);
+            if (movedPx === 0) return;
             const rawSec = Math.max(
                 0,
-                drag.startSec + dx / Math.max(1e-9, dragPxPerSecRef.current),
+                drag.startSec + movedPx / Math.max(1e-9, dragPxPerSecRef.current),
             );
             // 吸附网格必须使用拖拽开始时的 Tempo Map 快照：变化点自身移动会改变
             // 其后的网格原点/BPM，若用实时 tempoMap 计算吸附，会使网格跟着标签移动，

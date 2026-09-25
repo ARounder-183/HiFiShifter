@@ -69,6 +69,76 @@ test("features/session/sessionSlice.echo.test.ts scripted checks", async () => {
         assertEqual(corrected.bpm, 960, "采纳后端钳制后的值");
     }
 
+    // ── BPM：迟到的回声不得把值拽回去 ──────────────────────────
+    //
+    // 【真实场景】传输命令串行执行，滚轮手势期间积压几十个请求；每个回声都在乐观值
+    // 已经前进之后才到达。若照单采纳，state.bpm 会在"最新乐观值"与"旧回声值"之间
+    // 反复被拽回，刻度时间（sec = beat×60/bpm）与网格随之来回平移 = 用户报告的
+    // "标尺和网格抽搐"。判据与 seekPlayhead 一致：前端值仍等于本次请求值才采纳。
+    {
+        const base = reducer(createState(), { type: "@@INIT" });
+        // 手势推进到 125（本地乐观值）。
+        const advanced = reducer(base, { type: "session/setBpm", payload: 125 });
+        assertEqual(advanced.bpm, 125, "乐观值已前进");
+
+        // 一个"121"的迟到回声（它对应更早的那次请求）。
+        const stale = reducer(
+            advanced,
+            updateTransportBpm.fulfilled({ ok: true, bpm: 121 } as never, "req-old", 121),
+        );
+        assertTrue(stale === advanced, "迟到回声不得产生任何状态变更（值被拽回）");
+        assertEqual(stale.bpm, 125, "BPM 保持最新乐观值");
+
+        // 同一请求若后端确实修正（clamp 到 960），仍要采纳。
+        const clamped = reducer(
+            reducer(base, { type: "session/setBpm", payload: 125 }),
+            updateTransportBpm.fulfilled({ ok: true, bpm: 960 } as never, "req-new", 125),
+        );
+        assertEqual(clamped.bpm, 960, "本次请求被后端修正时采纳");
+    }
+
+    // ── Tempo Map：迟到的地图回声整份忽略 ──────────────────────
+    {
+        const base = reducer(createState(), { type: "@@INIT" });
+        const mapA: TempoMap = {
+            points: [
+                { id: "a", positionSec: 0, bpm: 120, timeSignature: null, scale: null },
+                { id: "b", positionSec: 4, bpm: 90, timeSignature: null, scale: null },
+            ],
+        };
+        const mapB: TempoMap = {
+            points: [
+                { id: "a", positionSec: 0, bpm: 120, timeSignature: null, scale: null },
+                { id: "b", positionSec: 4, bpm: 132, timeSignature: null, scale: null },
+            ],
+        };
+        // 手势已推进到 mapB（本地乐观值）。
+        const advanced = reducer(base, { type: "session/setTempoMap", payload: mapB });
+        const stalePayload = {
+            ok: true,
+            tracks: [],
+            clips: [],
+            selected_track_id: null,
+            selected_clip_id: null,
+            bpm: 120,
+            playhead_sec: 0,
+            tempo_map: mapA.points.map((p) => ({
+                id: p.id,
+                positionSec: p.positionSec,
+                bpm: p.bpm,
+                numerator: null,
+                denominator: null,
+                scale: null,
+            })),
+        } as never;
+        // 迟到回声携带的是 mapA：当前地图（mapB）不等于本次请求值 ⇒ 整份忽略。
+        const stale = reducer(
+            advanced,
+            setTempoMapRemote.fulfilled(stalePayload, "req-old-map", mapA),
+        );
+        assertTrue(stale === advanced, "迟到的地图回声整份忽略（网格不被拽回旧锚点）");
+    }
+
     // ── Tempo Map 回声 ─────────────────────────────────────────
     {
         const base = reducer(createState(), { type: "@@INIT" });
