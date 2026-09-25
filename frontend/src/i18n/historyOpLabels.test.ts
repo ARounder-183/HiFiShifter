@@ -25,7 +25,7 @@ import { messages, type Locale } from "./messages";
  */
 
 /** 后端 `HistoryOp::key()` 里出现的所有 `=> "..."` 字面量。 */
-function extractBackendHistoryOpKeys(source: &str): string[] {
+function extractBackendHistoryOpKeys(source: string): string[] {
     const keys = new Set<string>();
     const pattern = /HistoryOp::[A-Za-z0-9_]+\s*=>\s*"([a-z_0-9]+)"/g;
     for (const match of source.matchAll(pattern)) {

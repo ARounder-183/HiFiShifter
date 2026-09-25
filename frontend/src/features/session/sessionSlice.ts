@@ -2321,6 +2321,7 @@ export {
     renameClipTakeRemote,
     setClipTakeReversedRemote,
     setClipTakeChannelModeRemote,
+    scanAndConvertFakeStereoRemote,
     addClipTakeFromMediaRemote,
     replaceClipSourceRemote,
     replaceMidiClipDataRemote,
