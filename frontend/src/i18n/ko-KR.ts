@@ -275,7 +275,7 @@ export const koKR = {
     dock_float: "플로팅",
     dock_dock: "도킹",
     dock_detach_to_window: "별도 창에서 열기",
-    dock_detach_unsupported: "이 패널은 메인 창 밖으로 이동할 수 없습니다(재마운트 비용이 큽니다)",
+    dock_detach_unsupported: "이 패널은 메인 창 밖으로 이동할 수 없습니다",
     dock_redock: "메인 영역으로 도킹",
     dock_expand: "펼치기",
     dock_collapse: "탭 바 접기",

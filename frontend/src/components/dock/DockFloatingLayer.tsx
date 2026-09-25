@@ -57,6 +57,9 @@ export function DockFloatingLayer() {
     );
 }
 
+/** 折叠（最小化）浮窗的标题条高度：与 `dock.css` 的 `[data-minimized="true"]` 同源。 */
+const FLOAT_STRIP_HEIGHT_PX = 28;
+
 function DockFloatWindow({
     form,
     zIndex,
@@ -104,22 +107,81 @@ function DockFloatWindow({
             if (event.button !== 0) return;
             if ((event.target as HTMLElement).closest("button")) return;
             dispatch(raiseFloat(form.id));
-            setDragging(true);
-            beginFloatDrag(event, {
-                formId: form.id,
-                panelId: form.panelId,
-                geometry: rect,
-            });
-            // 拖拽结束由控制器统一收尾；这里只负责把"正在拖"的视觉状态收回来。
-            const onUp = () => {
-                setDragging(false);
-                window.removeEventListener("pointerup", onUp);
-                window.removeEventListener("pointercancel", onUp);
+
+            const startDragAndTrack = (
+                dragGeometry: DockRect,
+                dropSize?: { w: number; h: number },
+            ) => {
+                setDragging(true);
+                beginFloatDrag(event, {
+                    formId: form.id,
+                    panelId: form.panelId,
+                    geometry: dragGeometry,
+                    dropSize,
+                });
+                // 拖拽结束由控制器统一收尾；这里只负责把"正在拖"的视觉状态收回来。
+                const onUp = () => {
+                    setDragging(false);
+                    window.removeEventListener("pointerup", onUp);
+                    window.removeEventListener("pointercancel", onUp);
+                };
+                window.addEventListener("pointerup", onUp);
+                window.addEventListener("pointercancel", onUp);
             };
-            window.addEventListener("pointerup", onUp);
-            window.addEventListener("pointercancel", onUp);
+
+            // ── 最大化：先还原，再"扯"下来 ──
+            // 双击最大化后拖标题栏的意图是"把它拽下来"：先取消最大化，窗口以
+            // 还原尺寸落到指针下继续拖（与资源管理器 / 浏览器同款）。抓取点在
+            // 标题栏上的相对横向位置保持不变，纵向让标题条跟住指针。
+            if (geometry?.maximized === true) {
+                const restore =
+                    geometry.restore ?? { x: rect.x, y: rect.y, w: rect.w, h: rect.h };
+                dispatch(
+                    setFloatGeometry({
+                        formId: form.id,
+                        geometry: { maximized: false, ...restore },
+                    }),
+                );
+                // resolveFloatRect 只吃几何字段（锚点等），状态标志不参与推导。
+                const restoredRect = resolveFloatRect(
+                    {
+                        x: restore.x,
+                        y: restore.y,
+                        w: restore.w,
+                        h: restore.h,
+                        anchor: geometry.anchor,
+                        anchorMarginPx: geometry.anchorMarginPx,
+                        anchorOffsetX: geometry.anchorOffsetX,
+                        anchorOffsetY: geometry.anchorOffsetY,
+                    },
+                    { w: window.innerWidth, h: window.innerHeight },
+                );
+                const ratioX = Math.min(
+                    1,
+                    Math.max(0, event.clientX / Math.max(1, window.innerWidth)),
+                );
+                startDragAndTrack({
+                    ...restoredRect,
+                    x: event.clientX - restoredRect.w * ratioX,
+                });
+                return;
+            }
+
+            // ── 折叠为标签条：拖的是"标题条"，不是整窗 ──
+            // 拖拽预览与搬运都以标题条（28px，与 dock.css 的 [data-minimized]
+            // 同源）为准，幽灵不再是原先整窗的大小；落库尺寸用 dropSize 保留
+            // 展开后的高度，重新展开不丢尺寸。
+            if (geometry?.minimized === true) {
+                startDragAndTrack(
+                    { x: rect.x, y: rect.y, w: rect.w, h: FLOAT_STRIP_HEIGHT_PX },
+                    { w: rect.w, h: rect.h },
+                );
+                return;
+            }
+
+            startDragAndTrack(rect);
         },
-        [dispatch, form.id, form.panelId, rect],
+        [dispatch, form.id, form.panelId, rect, geometry],
     );
 
     const onResizePointerDown = useCallback(

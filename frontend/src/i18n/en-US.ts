@@ -338,7 +338,7 @@ export const enUS = {
     dock_float: "Float",
     dock_dock: "Dock",
     dock_detach_to_window: "Open in a separate window",
-    dock_detach_unsupported: "This panel cannot leave the main window (remounting is too costly)",
+    dock_detach_unsupported: "This panel cannot leave the main window",
     dock_redock: "Dock back to the main area",
     dock_expand: "Expand",
     dock_collapse: "Collapse to a tab strip",

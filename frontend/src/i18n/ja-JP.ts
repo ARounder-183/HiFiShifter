@@ -198,8 +198,7 @@ export const jaJP = {
     dock_float: "フロート",
     dock_dock: "ドック",
     dock_detach_to_window: "独立ウィンドウで開く",
-    dock_detach_unsupported:
-        "このパネルはメインウィンドウ外に移動できません（再マウントのコストが高い）",
+    dock_detach_unsupported: "このパネルはメインウィンドウ外に移動できません",
     dock_redock: "メイン領域にドック",
     dock_expand: "展開",
     dock_collapse: "タブバーに折りたたむ",

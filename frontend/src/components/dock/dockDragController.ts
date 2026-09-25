@@ -76,6 +76,14 @@ interface DragSession {
     floatStart: DockRect | null;
     /** 浮窗当前尺寸（拆成浮动窗时沿用）。 */
     sourceSize: { w: number; h: number };
+    /**
+     * 松手落库的尺寸（默认 = sourceSize）。
+     *
+     * 【为什么与 sourceSize 分开】折叠为标签条（minimized）的浮窗拖拽时，视觉与
+     * 预览都是"标题条"（28px 高），但落库必须保留**展开后**的尺寸 —— 否则重新
+     * 展开时浮窗只剩一条标题（高度被 28px 覆写）。
+     */
+    dropSize: { w: number; h: number };
     /** 最后一次已知的指针视口坐标（修饰键变化时据此重算落点，见 `refreshIntent`）。 */
     lastX: number;
     lastY: number;
@@ -345,7 +353,14 @@ function onPointerUp(event: PointerEvent): void {
         store.dispatch(
             setFloatGeometry({
                 formId: active.formId,
-                geometry: { x: geometry.x, y: geometry.y, w: geometry.w, h: geometry.h },
+                geometry: {
+                    x: geometry.x,
+                    y: geometry.y,
+                    // 尺寸用 dropSize 而不是拖拽预览矩形：折叠为标签条的浮窗
+                    // 拖拽时预览是条状，落库要保留展开尺寸（见 DragSession）。
+                    w: active.dropSize.w,
+                    h: active.dropSize.h,
+                },
             }),
         );
     }
@@ -542,6 +557,8 @@ export function beginTabDrag(event: React.PointerEvent, args: TabDragArgs): void
         tabCount: args.tabCount,
         floatStart: null,
         sourceSize,
+        // 标签拖出去新建浮窗：没有"折叠"语义，落库尺寸 = 预览尺寸。
+        dropSize: sourceSize,
         lastX: event.clientX,
         lastY: event.clientY,
     };
@@ -554,6 +571,11 @@ export interface FloatDragArgs {
     formId: string;
     panelId: string;
     geometry: DockRect;
+    /**
+     * 松手落库的尺寸；缺省 = `geometry` 的尺寸。折叠为标签条的浮窗传
+     * 展开后的尺寸（拖拽预览/搬运用条状 geometry，见上）。
+     */
+    dropSize?: { w: number; h: number };
 }
 
 /** 从一个浮动窗的标题栏开始拖拽。 */
@@ -575,6 +597,7 @@ export function beginFloatDrag(event: React.PointerEvent, args: FloatDragArgs): 
         tabCount: 0,
         floatStart: args.geometry,
         sourceSize: { w: args.geometry.w, h: args.geometry.h },
+        dropSize: { w: args.dropSize?.w ?? args.geometry.w, h: args.dropSize?.h ?? args.geometry.h },
         lastX: event.clientX,
         lastY: event.clientY,
     };

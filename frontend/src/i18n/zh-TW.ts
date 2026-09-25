@@ -189,7 +189,7 @@ export const zhTW = {
     dock_float: "浮動",
     dock_dock: "停靠",
     dock_detach_to_window: "在獨立視窗中開啟",
-    dock_detach_unsupported: "此面板不支援移出主視窗（重新掛載代價過高）",
+    dock_detach_unsupported: "此面板不支援移出主視窗",
     dock_redock: "重新停靠回主區域",
     dock_expand: "展開",
     dock_collapse: "折疊為標籤條",
