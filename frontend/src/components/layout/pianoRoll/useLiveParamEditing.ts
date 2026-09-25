@@ -215,19 +215,27 @@ export function useLiveParamEditing(args: {
      * **上一帧写过的区间**逐点还原，成本降为 O(上一帧笔刷宽度)。
      *
      * @param pv 当前参数窗口。
+     * @param opts.keepWrittenRange 保留"写过的区间并集"不清零。用于选区平移这类
+     *   窗口逐帧移动的手势：第 N 帧还原时必须把**之前所有帧**写过的区间一起擦掉
+     *   （窗口移动后，上一帧的并集盖不住更早的写入），并集在整个手势内持续累积。
      */
-    const resetLiveEditPreview = useCallback((pv: ParamViewSegment) => {
-        const cur = liveEditOverrideRef.current;
-        if (!cur || cur.key !== pv.key) return;
-        const range = liveEditWrittenRangeRef.current;
-        if (range !== null && range.key === pv.key) {
-            if (restoreLiveEditRange({ edit: cur.edit, committed: pv.edit, range })) {
-                liveEditVersionRef.current += 1;
-                cur.version = liveEditVersionRef.current;
+    const resetLiveEditPreview = useCallback(
+        (pv: ParamViewSegment, opts?: { keepWrittenRange?: boolean }) => {
+            const cur = liveEditOverrideRef.current;
+            if (!cur || cur.key !== pv.key) return;
+            const range = liveEditWrittenRangeRef.current;
+            if (range !== null && range.key === pv.key) {
+                if (restoreLiveEditRange({ edit: cur.edit, committed: pv.edit, range })) {
+                    liveEditVersionRef.current += 1;
+                    cur.version = liveEditVersionRef.current;
+                }
             }
-        }
-        liveEditWrittenRangeRef.current = null;
-    }, []);
+            if (opts?.keepWrittenRange !== true) {
+                liveEditWrittenRangeRef.current = null;
+            }
+        },
+        [],
+    );
 
     const commitStroke = useCallback(
         async (points: StrokePoint[], mode: StrokeMode) => {

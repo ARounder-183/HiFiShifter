@@ -84,6 +84,10 @@ export function readPvRange(pv: ParamViewSegment, startFrame: number, endFrame: 
  * - 否则分块向后端拉取，块之间让出事件循环。
  *
  * @param onProgress 可选进度回调，参数为已完成的帧数与总帧数。
+ * @param withSentinel 同时取后端 `edit_sentinel`「未画帧」位图（dyn 的读-变换-写回
+ *   提交用它把未画帧还原成哨兵，见 `paramRanges::restoreDynSentinels`）。置 true 时
+ *   **不走 pv 快路径**：pv 不携带位图，位图缺位会被误当"没有哨兵"，未画帧被静默
+ *   物化 —— 比多一次取数严重得多。返回值多带一个与 `values` 逐帧对齐的 `sentinel`。
  */
 export async function fetchFullResCurve(args: {
     trackId: string;
@@ -92,14 +96,15 @@ export async function fetchFullResCurve(args: {
     endFrame: number;
     paramView?: ParamViewSegment | null;
     onProgress?: (doneFrames: number, totalFrames: number) => void;
-}): Promise<FrameCurve> {
-    const { trackId, param, paramView, onProgress } = args;
+    withSentinel?: boolean;
+}): Promise<FrameCurve & { sentinel?: boolean[] }> {
+    const { trackId, param, paramView, onProgress, withSentinel } = args;
     const startFrame = Math.max(0, Math.floor(args.startFrame));
     const endFrame = Math.max(startFrame, Math.floor(args.endFrame));
     const totalFrames = endFrame - startFrame + 1;
 
     // 快路径：pv 已以 stride=1 覆盖，直接切片。
-    const pvFastPath = paramView ?? null;
+    const pvFastPath = withSentinel ? null : (paramView ?? null);
     if (pvCoversFullRes(pvFastPath, startFrame, endFrame)) {
         const pv = pvFastPath as ParamViewSegment;
         const offset = startFrame - pv.startFrame;
@@ -108,20 +113,32 @@ export async function fetchFullResCurve(args: {
     }
 
     const values = new Array<number>(totalFrames);
+    const sentinel = withSentinel ? new Array<boolean>(totalFrames) : undefined;
     let done = 0;
     for (let chunkStart = startFrame; chunkStart <= endFrame; chunkStart += CHUNK_FRAMES) {
         const chunkEnd = Math.min(endFrame, chunkStart + CHUNK_FRAMES - 1);
         const count = chunkEnd - chunkStart + 1;
-        const res = await paramsApi.getParamFrames(trackId, param, chunkStart, count, 1);
+        const res = await paramsApi.getParamFrames(
+            trackId,
+            param,
+            chunkStart,
+            count,
+            1,
+            true,
+            withSentinel ?? false,
+        );
         const src = res?.ok ? res.edit : undefined;
+        const sent = res?.ok ? res.edit_sentinel : undefined;
         for (let i = 0; i < count; i += 1) {
-            values[chunkStart - startFrame + i] = src ? (src[i] ?? 0) : 0;
+            const k = chunkStart - startFrame + i;
+            values[k] = src ? (src[i] ?? 0) : 0;
+            if (sentinel) sentinel[k] = sent?.[i] === true;
         }
         done += count;
         onProgress?.(done, totalFrames);
         await yieldToUi();
     }
-    return { startFrame, values };
+    return { startFrame, values, sentinel };
 }
 
 /**

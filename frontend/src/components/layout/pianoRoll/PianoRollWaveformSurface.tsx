@@ -196,6 +196,7 @@ function reachableLevel(target: number, vol: number, base: number, fade: number)
  * 覆盖解析收敛成一次。两条路径共用同一个 `factorAt` —— 逐值调用就是它乘上
  * `value × gain`，因此不可能分叉。
  */
+// eslint-disable-next-line react-refresh/only-export-components -- 纯工厂函数与其唯一组件消费者同源共演进；拆文件只会让 import 面更宽
 export function makeLoudnessAmplitudeMap(
     source: LoudnessAutomationSource,
     live: {

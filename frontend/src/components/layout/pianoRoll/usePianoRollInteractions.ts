@@ -25,7 +25,7 @@ import type {
 } from "./types";
 import { computeDynGeometricMean } from "./selectionTransforms";
 import { framesToTime, timeToFrame } from "./utils";
-import { isDynParam, shiftDynValueForDrag, shiftValueForDrag } from "./paramRanges";
+import { isDynParam, restoreDynSentinels, shiftDynValueForDrag, shiftValueForDrag } from "./paramRanges";
 import {
     curvePointAtPointer,
     hitTestSelectionBody,
@@ -93,6 +93,7 @@ import {
     readPvRange,
     uploadFullResCurve,
     uploadFullResCurveSegments,
+    type MultiRangeEditPiece,
 } from "./selectionEditData";
 import {
     addPointerRange,
@@ -313,7 +314,10 @@ export function usePianoRollInteractions(args: {
      * 直线 / 颤音工具的预览每帧重算整段，必须先擦掉上一帧写过的点；本入口
      * 只还原**上一帧写过的区间**，不需要重建整份覆盖（见 useLiveParamEditing）。
      */
-    resetLiveEditPreview: (pv: ParamViewSegment) => void;
+    resetLiveEditPreview: (
+        pv: ParamViewSegment,
+        opts?: { keepWrittenRange?: boolean },
+    ) => void;
 
     /**
      * 请求波形面重绘。
@@ -673,7 +677,9 @@ export function usePianoRollInteractions(args: {
 
     /**
      * 多段提交前的统一取数：按计划的写入窗口逐窗取**全分辨率**基准曲线，
-     * 返回可直接喂给 buildMultiRangeEditPlan 的 `sourceAt`。
+     * 返回可直接喂给 buildMultiRangeEditPlan 的 `sourceAt`；`withSentinel` 时还返回
+     * 逐帧「未画」位图查询 `sentinelAt`（dyn 提交在写回前还原哨兵帧，
+     * 见 `paramRanges::restoreDynSentinels`）。
      *
      * 窗口内未被任何选区段覆盖的帧由基准值填充 —— 与旧单段提交路径
      * （selectionDragRange + 全分辨率取数）语义逐帧一致。
@@ -686,7 +692,11 @@ export function usePianoRollInteractions(args: {
             frameDelta: number;
             edgeHalfSpanAt: (rangeIndex: number) => number;
             paramView: ParamViewSegment | null;
-        }): Promise<(frame: number) => number> => {
+            withSentinel?: boolean;
+        }): Promise<{
+            sourceAt: (frame: number) => number;
+            sentinelAt: (frame: number) => boolean | undefined;
+        }> => {
             const windows = planSelectionEditWindows({
                 ranges: input.ranges,
                 frameDelta: input.frameDelta,
@@ -700,18 +710,57 @@ export function usePianoRollInteractions(args: {
                         startFrame: window.startFrame,
                         endFrame: window.endFrame,
                         paramView: input.paramView,
+                        withSentinel: input.withSentinel,
                     }),
                 ),
             );
-            return (frame: number) => {
-                for (let i = 0; i < windows.length; i += 1) {
-                    const window = windows[i];
-                    if (frame < window.startFrame || frame > window.endFrame) continue;
-                    return Number(curves[i]?.values[frame - window.startFrame]) || 0;
-                }
-                return 0;
+            return {
+                sourceAt: (frame: number) => {
+                    for (let i = 0; i < windows.length; i += 1) {
+                        const window = windows[i];
+                        if (frame < window.startFrame || frame > window.endFrame) continue;
+                        return Number(curves[i]?.values[frame - window.startFrame]) || 0;
+                    }
+                    return 0;
+                },
+                sentinelAt: (frame: number) => {
+                    for (let i = 0; i < windows.length; i += 1) {
+                        const window = windows[i];
+                        if (frame < window.startFrame || frame > window.endFrame) continue;
+                        return curves[i]?.sentinel?.[frame - window.startFrame];
+                    }
+                    return undefined;
+                },
             };
         },
+        [],
+    );
+
+    /**
+     * 组装上传片段：dyn 的「读-变换-写回」提交在写回前把「未画」帧还原成哨兵
+     * （否则拖拽会把未画帧物化成显式基线，日后基线重分析时响度静默漂移）。
+     * 本地 pv/覆盖层仍用未还原的 pieces（显示解析后的基线值，与拖拽预览一致）；
+     * 哨兵只影响写回后端的那份。非 dyn 或位图缺失时与原实现逐字节相同。
+     */
+    const buildUploadSegments = useCallback(
+        (
+            param: ParamName,
+            pieces: readonly MultiRangeEditPiece[],
+            sentinelAt?: (frame: number) => boolean | undefined,
+        ): Array<{ startFrame: number; values: number[] }> =>
+            pieces.map((piece) => {
+                if (!isDynParam(param) || !sentinelAt) {
+                    return { startFrame: piece.startFrame, values: piece.values };
+                }
+                const sentinels = new Array<boolean>(piece.endFrame - piece.startFrame + 1);
+                for (let f = piece.startFrame; f <= piece.endFrame; f += 1) {
+                    sentinels[f - piece.startFrame] = sentinelAt(f) === true;
+                }
+                return {
+                    startFrame: piece.startFrame,
+                    values: restoreDynSentinels(piece.values.slice(), sentinels),
+                };
+            }),
         [],
     );
 
@@ -2193,7 +2242,9 @@ export function usePianoRollInteractions(args: {
                 }
             }
 
-            if (panRef.current || strokeRef.current) return;
+            // 拖拽中（平移/绘制/Alt 形变）跳过悬停链：指针捕获会把 move 重定向到
+            // 画布，悬停命中测试会反过来覆盖拖拽路径设置的光标（grabbing 等）。
+            if (panRef.current || strokeRef.current || morphDragRef.current) return;
             // 光标提示的顺序与 pointerdown 的手势优先级**逐条对应**（否则会出现
             // "显示可拉伸、按下却在拖曲线"的错位）：
             //   1. **已选中的参数线** → 抓取。参数线的命中范围最窄（10px 带 + 必须
@@ -2253,7 +2304,7 @@ export function usePianoRollInteractions(args: {
     );
 
     const onCanvasPointerLeave = useCallback(() => {
-        if (panRef.current || strokeRef.current) return;
+        if (panRef.current || strokeRef.current || morphDragRef.current) return;
         // 指针离开画布：悬停激活状态与最后位置一并失效，避免离画布后的
         // 数据刷新用过期坐标续显浮窗。
         hoverPreviewNearCurveRef.current = false;
@@ -2517,6 +2568,9 @@ export function usePianoRollInteractions(args: {
                             clearActivePointerGestureEnd(onUp);
 
                             if (!drag || !overlayNow || !pvNow || !rootTrackId) {
+                                // 早退同样必须复位 liveEdit（否则曲线刷新被永久搁置，
+                                // 与右键拖拽路径的处理一致）。
+                                if (liveEditActiveRef) liveEditActiveRef.current = false;
                                 setCanvasCursor("default");
                                 return;
                             }
@@ -2549,16 +2603,24 @@ export function usePianoRollInteractions(args: {
                             setParamView({ ...pvNow, edit: nextEdit });
 
                             void (async () => {
-                                await uploadFullResCurveSegments({
-                                    trackId: rootTrackId,
-                                    param: editParam,
-                                    segments: packedPerOverlay,
-                                });
-                                // 提交成功：保留覆盖层让波形继续显示提交值，等
-                                // 提交之后取的响度快照到达再撤下（消除松手闪屏）。
-                                onParamCommitSucceeded();
-                                if (liveEditActiveRef) liveEditActiveRef.current = false;
-                                bumpRefreshToken();
+                                try {
+                                    await uploadFullResCurveSegments({
+                                        trackId: rootTrackId,
+                                        param: editParam,
+                                        segments: packedPerOverlay,
+                                    });
+                                    // 提交成功：保留覆盖层让波形继续显示提交值，等
+                                    // 提交之后取的响度快照到达再撤下（消除松手闪屏）。
+                                    onParamCommitSucceeded();
+                                } catch (err) {
+                                    console.error("[pianoRoll] morph upload failed", err);
+                                    // IPC 失败必须撤下覆盖层，否则冻结的预览值会一直
+                                    // 盖在真实曲线上。
+                                    liveEditOverrideRef.current = null;
+                                } finally {
+                                    if (liveEditActiveRef) liveEditActiveRef.current = false;
+                                    bumpRefreshToken();
+                                }
                             })();
 
                             if (morphModifierDownRef.current) {
@@ -3156,6 +3218,9 @@ export function usePianoRollInteractions(args: {
 
                             const pvNow = paramViewRef.current;
                             if (!pvNow || !rootTrackId) {
+                                // 早退同样必须复位 liveEdit（否则曲线刷新被永久搁置，
+                                // 与 !didDrag 路径的处理一致）。
+                                if (liveEditActiveRef) liveEditActiveRef.current = false;
                                 setCanvasCursor("default");
                                 return;
                             }
@@ -3761,19 +3826,20 @@ export function usePianoRollInteractions(args: {
                                             // 提交基准 = 计划写入窗口（含边缘淡化扩展）的
                                             // 全分辨率数据；变换与预览同源（transformRightDragRange），
                                             // 因此写回结果与用户看到的预览逐帧一致。
-                                            const commitSourceAt = await fetchCommitBaseSource({
+                                            const commit = await fetchCommitBaseSource({
                                                 trackId: rootTrackId,
                                                 param: editParam,
                                                 ranges: rightDragSpans,
                                                 frameDelta: 0,
                                                 edgeHalfSpanAt: edgeHalfSpanForRange,
                                                 paramView: pvNow,
+                                                withSentinel: isDynParam(editParam),
                                             });
                                             const pieces = buildMultiRangeEditPlan({
                                                 ranges: rightDragSpans,
                                                 valuesAt: (index) =>
                                                     transformRightDragRange(index, lastDy),
-                                                sourceAt: commitSourceAt,
+                                                sourceAt: commit.sourceAt,
                                                 edgeHalfSpanAt: edgeHalfSpanForRange,
                                                 isEditable:
                                                     editParam === "pitch"
@@ -3811,10 +3877,11 @@ export function usePianoRollInteractions(args: {
                                                     await uploadFullResCurveSegments({
                                                         trackId: rootTrackId,
                                                         param: editParam,
-                                                        segments: pieces.map((piece) => ({
-                                                            startFrame: piece.startFrame,
-                                                            values: piece.values,
-                                                        })),
+                                                        segments: buildUploadSegments(
+                                                            editParam,
+                                                            pieces,
+                                                            commit.sentinelAt,
+                                                        ),
                                                     });
                                                 } catch (err) {
                                                     console.error(
@@ -3997,11 +4064,12 @@ export function usePianoRollInteractions(args: {
                                     const pvNow = paramViewRef.current;
                                     if (!pvNow) return;
 
-                                    // Reset live overlay before each preview step to prevent
-                                    // stale values from the previous drag position lingering
-                                    // outside the current range
-                                    liveEditOverrideRef.current = null;
-                                    ensureLiveEditBase(pvNow);
+                                    // X 向平移会把早先帧写在计划窗口之外的值留在 live
+                                    // 覆盖里。不能整份重建（= null + ensure，每帧 O(窗口)
+                                    // 拷贝，见 resetLiveEditPreview 文档）：按"本手势写过的
+                                    // 区间并集"精确还原后再写本帧计划窗口。写入点
+                                    // applyDenseToLiveEdit 内部会按需建基准。
+                                    resetLiveEditPreview(pvNow, { keepWrittenRange: true });
 
                                     // 多段计划：覆盖「各段原位 ∪ 落地位 ± 边缘淡化」的
                                     // 合并窗口（逐帧索引）。预览从 pv 取上下文 —— pv 只是
@@ -4060,6 +4128,10 @@ export function usePianoRollInteractions(args: {
                                 };
 
                                 const onMove = (ev: globalThis.PointerEvent) => {
+                                    // 掌侧误触防御（与同文件其余手势一致）：触控笔/手指的
+                                    // pointermove 在 touch 场景同样满足 buttons&1，不加
+                                    // pointerId 卫兵会让第二指改写本次拖拽的位移状态。
+                                    if (ev.pointerId !== pid) return;
                                     if ((ev.buttons & 1) !== 1) {
                                         onUp();
                                         return;
@@ -4183,6 +4255,30 @@ export function usePianoRollInteractions(args: {
                                     // 标记手势结束，避免已发出的取数请求再覆写 origValues
                                     dragSettled = true;
 
+                                    // 捕获阶段的 contextmenu/mousedown 抑制与临时 snap
+                                    // 高亮是纯清理：必须放在所有早退路径（包括下面的
+                                    // 单击死区 return）之前，否则一次普通点击就会把
+                                    // window 级监听器永久留在窗口上——全局右键菜单从此
+                                    // 失效，且残留的 mousedown 监听还会让下一次拖拽的
+                                    // 右键换向被执行两次。
+                                    window.removeEventListener(
+                                        "contextmenu",
+                                        onContextMenuDuringDrag,
+                                        true,
+                                    );
+                                    window.removeEventListener(
+                                        "mousedown",
+                                        onMouseDownDuringDrag,
+                                        true,
+                                    );
+                                    if (
+                                        editParam === "pitch" ||
+                                        isChildPitchOffsetCentsParam(editParam) ||
+                                        isChildPitchOffsetDegreesParam(editParam)
+                                    ) {
+                                        onPitchSnapGestureActiveChange?.(false);
+                                    }
+
                                     // 单击（未越过点击死区）：这次手势没有改动任何值 ——
                                     // 丢弃 live 覆盖层并复位 active 标记后直接收尾。
                                     // 走提交路径会把变换结果整段写回后端（此处与原始数据
@@ -4191,6 +4287,9 @@ export function usePianoRollInteractions(args: {
                                         liveEditOverrideRef.current = null;
                                         if (liveEditActiveRef) {
                                             liveEditActiveRef.current = false;
+                                        }
+                                        if (paramValuePopupEnabled) {
+                                            onParamValuePreviewChange?.(null);
                                         }
                                         setCanvasCursor("grab");
                                         invalidate();
@@ -4226,20 +4325,21 @@ export function usePianoRollInteractions(args: {
                                             // 这是「回写不失真」的关键：预览用的是可能降采样的
                                             // pv，提交必须用 stride=1 的真实曲线，否则会把
                                             // 降采样后的值写回后端、覆盖掉原始分辨率。
-                                            const commitSourceAt = await fetchCommitBaseSource({
+                                            const commit = await fetchCommitBaseSource({
                                                 trackId: rootTrackId,
                                                 param: editParam,
                                                 ranges: dragSpans,
                                                 frameDelta: lastFrameDelta,
                                                 edgeHalfSpanAt: edgeHalfSpanForDragRange,
                                                 paramView: pvNow,
+                                                withSentinel: isDynParam(editParam),
                                             });
 
                                             const pieces = buildMultiRangeEditPlan({
                                                 ranges: dragSpans,
                                                 frameDelta: lastFrameDelta,
                                                 valuesAt: (index) => origValuesPerRange[index],
-                                                sourceAt: commitSourceAt,
+                                                sourceAt: commit.sourceAt,
                                                 transformAt: (
                                                     _index,
                                                     _i,
@@ -4317,10 +4417,11 @@ export function usePianoRollInteractions(args: {
                                                         await uploadFullResCurveSegments({
                                                             trackId: rootTrackId,
                                                             param: editParam,
-                                                            segments: pieces.map((piece) => ({
-                                                                startFrame: piece.startFrame,
-                                                                values: piece.values,
-                                                            })),
+                                                            segments: buildUploadSegments(
+                                                                editParam,
+                                                                pieces,
+                                                                commit.sentinelAt,
+                                                            ),
                                                         });
                                                         uploaded = true;
                                                     } catch (err) {
@@ -4352,30 +4453,12 @@ export function usePianoRollInteractions(args: {
                                     } else {
                                         if (liveEditActiveRef) liveEditActiveRef.current = false;
                                     }
-                                    // 清除参数浮窗预览（如果启用）
                                     if (paramValuePopupEnabled) {
                                         onParamValuePreviewChange?.(null);
                                     }
 
-                                    if (
-                                        editParam === "pitch" ||
-                                        isChildPitchOffsetCentsParam(editParam) ||
-                                        isChildPitchOffsetDegreesParam(editParam)
-                                    ) {
-                                        onPitchSnapGestureActiveChange?.(false);
-                                    }
                                     setCanvasCursor("grab");
                                     invalidate();
-                                    window.removeEventListener(
-                                        "contextmenu",
-                                        onContextMenuDuringDrag,
-                                        true,
-                                    );
-                                    window.removeEventListener(
-                                        "mousedown",
-                                        onMouseDownDuringDrag,
-                                        true,
-                                    );
                                 };
 
                                 // 拖拽过程中右键点击切换拖动方向
@@ -5077,6 +5160,7 @@ export function usePianoRollInteractions(args: {
             isPointerNearDraggableSelection,
             frameToViewportPx,
             fetchCommitBaseSource,
+            buildUploadSegments,
             paramViewRef,
             ensureLiveEditBase,
             paramView?.framePeriodMs,

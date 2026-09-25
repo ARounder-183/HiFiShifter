@@ -1444,14 +1444,28 @@ export const PianoRollPanel: React.FC<{
             }
         };
 
+        // 当前已绑定的观察目标（元素身份比较，见 observeViewports 的卫兵说明）。
+        let observedPiano: Element | null = null;
+        let observedTrack: Element | null = null;
+
         /** 把两边的视口元素（重新）挂到观察器上：元素可能后于本面板出现。 */
         const observeViewports = () => {
             if (typeof ResizeObserver === "undefined") return;
+            const piano = scrollerRef.current;
+            const track = document.querySelector<HTMLElement>("[data-timeline-scroller]");
+            // 【目标集合未变化时绝不重绑】disconnect + observe 会对同一元素再次
+            // 投递初始回调，回调路径（measureAndApply → applyMeasured）又会走到
+            // 这里 —— 每帧一次投递的永久循环，正是 "ResizeObserver loop
+            // completed with undelivered notifications" 以 60Hz 刷屏的来源。
+            // 只在目标元素真的出现 / 被替换时才重新绑定。
+            if (observer !== null && piano === observedPiano && track === observedTrack) {
+                return;
+            }
             observer = observer ?? new ResizeObserver(() => measureAndApply());
             observer.disconnect();
-            const piano = scrollerRef.current;
+            observedPiano = piano;
+            observedTrack = track;
             if (piano) observer.observe(piano);
-            const track = document.querySelector<HTMLElement>("[data-timeline-scroller]");
             if (track) observer.observe(track);
         };
 
@@ -2498,11 +2512,18 @@ export const PianoRollPanel: React.FC<{
      * 逐帧位置由 `useVisualPlayhead` 的 onFrame 与 `applyScrollLayers` 负责。
      */
     useLayoutEffect(() => {
+        // 内核宿主每帧都在写这两个元素（单写者原则，见 4b0bbb40）：此 effect 只在
+        // 无宿主的回退路径补首帧/缩放后定位，否则一次一帧过期的 React 提交会把
+        // 播放头拉回旧位置（"标尺播放头与主体分离"回归）。
+        if (hostRef.current !== null) {
+            return;
+        }
         // 缩放取**内核真值**（与 GL 播放头、标尺平移同一口径）：面板的 React
         // `pxPerSec` 是请求值，内核可能因视口宽度变化而钳制它，用请求值定位会与
-        // 主体播放头差一个 `播放头秒数 × 缩放差`。宿主未就绪时退回面板值。
+        // 主体播放头差一个 `播放头秒数 × 缩放差`。此分支只在无宿主时执行，
+        // 因此没有内核视口可取，直接退回面板值。
         const view = resolvePanelRenderViewport({
-            kernelView: hostRef.current?.getViewport() ?? null,
+            kernelView: null,
             refPxPerSec: pxPerSecRef.current,
             refScrollLeftPx: scrollLeftRef.current,
         });
