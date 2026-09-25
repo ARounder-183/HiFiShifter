@@ -103,10 +103,13 @@ impl DetectOptions {
 // ─── 纯判定核心 ──────────────────────────────────────────────────────────────
 
 /// 逐帧差累计器。
+///
+/// 判定规则是**逐帧绝对差 ≤ 容差**（任一帧超差即否决），不需要 RMS 累计 ——
+/// 早期版本曾累计平方差算 RMS，阈值移除后成了纯开销（热路径上每帧一次
+/// 浮点乘加），已随阈值一并删除。
 #[derive(Debug, Default, Clone, Copy)]
 struct DiffAcc {
     frames: u64,
-    sum_sq_diff: f64,
 }
 
 impl DiffAcc {
@@ -114,16 +117,7 @@ impl DiffAcc {
     #[inline]
     fn push(&mut self, l: f32, r: f32, tolerance: f32) -> bool {
         self.frames += 1;
-        let d = (l - r).abs();
-        self.sum_sq_diff += (d as f64) * (d as f64);
-        d <= tolerance
-    }
-
-    fn rms_diff(&self) -> f32 {
-        if self.frames == 0 {
-            return 0.0;
-        }
-        (self.sum_sq_diff / self.frames as f64).sqrt() as f32
+        (l - r).abs() <= tolerance
     }
 }
 
@@ -318,79 +312,125 @@ pub fn verdict_cache_clear() {
         .clear();
 }
 
-// ─── 媒体文件判定（抽样解码） ────────────────────────────────────────────────
-
-/// 判定一个媒体文件的 L/R 一致性。
+/// 测试专用：串行化所有触碰全局判定缓存的测试。
 ///
-/// `region` 为源域秒区间（`None` = 整个文件）。**会解码音频**，调用方必须
-/// 保证不在持有 timeline 全局锁时调用（慢盘/网络盘上可能耗时数百毫秒）。
-///
-/// 抽样策略按容器能力分两档：
-/// - **WAV**：`hound` 支持随机 seek，真正按 `region` 均匀取窗口，首/中/尾都覆盖；
-/// - **其他容器**：Symphonia 的逐包解码不保证窗口级随机访问，退化为"从区间
-///   起点限量解码"——总量受 `scan_budget_sec` 约束，成本有界。对人力切片这类
-///   短素材（本工程的主要工作流）该预算通常已覆盖整个区间。
-///
-/// 判定结果会写入进程级缓存；同文件再次调用（相同策略）零解码成本。
-pub fn analyze_media_file(
-    path: &Path,
-    region: Option<(f64, f64)>,
-    opts: &DetectOptions,
-) -> ChannelVerdict {
-    if !path.exists() {
-        return ChannelVerdict::Unknown;
-    }
-    let opts = opts.normalized();
-
-    let verdict = if is_wav(path) {
-        analyze_wav_file(path, region, &opts)
-    } else {
-        analyze_other_container(path, region, &opts)
-    };
-
-    // 只有确定性的结论才值得记忆：Unknown 可能只是文件暂时不可读
-    //（被占用 / 正在写入），缓存它会让后续导入永久失去判定机会。
-    if verdict != ChannelVerdict::Unknown {
-        if let Some(key) = verdict_key_for(path, region, &opts) {
-            verdict_cache_put(key, verdict);
-        }
-    }
-    verdict
+/// 缓存是进程级单例，而 verdict 缓存测试互相之间以"清空 → 塞入 → 查询"的
+/// 方式断言；并行运行时彼此的 clear 会吃掉对方刚写入的条目（偶发
+/// `原键仍命中` 失败）。持同一把进程级互斥锁即可，不影响并行度敏感的
+/// 解码类测试。
+#[cfg(test)]
+fn verdict_cache_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
 }
 
-/// 先查缓存、未命中才解码的版本（导入热路径应使用本函数）。
+// ─── 媒体文件判定（抽样解码） ────────────────────────────────────────────────
+
+/// 判定一个媒体文件在给定源域区间内的 L/R 一致性（先查缓存，未命中才解码；
+/// 导入 / 扫描热路径统一走本函数）。`region` 为源域秒区间（`None` = 整个文件）。
+///
+/// **会解码音频**，调用方必须保证不在持有 timeline 全局锁时调用
+///（慢盘/网络盘上可能耗时数百毫秒）。
 pub fn verdict_for_file(
     path: &Path,
     region: Option<(f64, f64)>,
     opts: &DetectOptions,
 ) -> ChannelVerdict {
     let opts = opts.normalized();
-    if let Some(key) = verdict_key_for(path, region, &opts) {
-        if let Some(hit) = verdict_cache_get(&key) {
-            return hit;
+    verdict_for_regions(path, &[region], &opts)
+        .into_iter()
+        .next()
+        .unwrap_or(ChannelVerdict::Unknown)
+}
+
+/// 同一文件的**多个**消费区间批量判定（扫描 / 迁移热路径的 I/O 去重入口）。
+///
+/// 判定语义与逐区间调用 [`verdict_for_file`] 完全一致：同样的窗口抽样、容差
+/// 与预算上限，结果照样进出进程级判定缓存（命中条目直接采用）。差别只在
+/// **I/O 组织**：
+/// - WAV：打开一次，逐区间 seek（原来每区间各开一次文件）；
+/// - 非 WAV：Symphonia 前缀解码只做**一次**，解码上界取"各区间覆盖需求的
+///   max"（原来每个区间各自从文件头解到自己的终点）；
+/// - 头部探测与内容指纹（缓存键的原料）每文件只做一次（原来逐区间各做一遍，
+///   指纹要读 head+tail，批量下是纯重复 I/O）。
+///
+/// 【指纹缺位不缓存】指纹读不出（文件被占用 / 读取中途出错）时**不能**拿
+/// `fingerprint: None` 的键去缓存：键的其余部分（path/region/policy）相同而
+/// 文件已被替换时，旧判定会被误命中 —— 指纹字段正是防"同路径文件替换"的。
+/// 此时本批照样完整解码判定，只是不读写缓存。
+///
+/// 返回值与 `regions` 一一对应。
+pub fn verdict_for_regions(
+    path: &Path,
+    regions: &[Option<(f64, f64)>],
+    opts: &DetectOptions,
+) -> Vec<ChannelVerdict> {
+    let opts = opts.normalized();
+    let mut out = vec![ChannelVerdict::Unknown; regions.len()];
+    if regions.is_empty() || !path.exists() {
+        return out;
+    }
+
+    // 头部 + 指纹每文件探一次；读不出则本批全部照常解码判定，只是不读写缓存
+    //（"指纹缺位不缓存"契约见函数文档）。
+    let key_base: Option<(u16, u32, u64)> = match (
+        crate::audio_utils::try_read_audio_header_only(path),
+        crate::audio_utils::compute_file_fingerprint(path),
+    ) {
+        (Some(header), Some(fingerprint)) => Some((header.channels, header.sample_rate, fingerprint)),
+        _ => None,
+    };
+
+    // 缓存命中的区间直接采用；未命中的收集起来走一次共享 I/O。
+    let mut pending_indices: Vec<usize> = Vec::with_capacity(regions.len());
+    let mut pending_regions: Vec<Option<(f64, f64)>> = Vec::with_capacity(regions.len());
+    for (i, region) in regions.iter().enumerate() {
+        let mut hit = None;
+        if let Some((channels, sample_rate, fingerprint)) = key_base {
+            let key = VerdictKey::new(path, Some(fingerprint), channels, sample_rate, *region, &opts);
+            hit = verdict_cache_get(&key);
+        }
+        match hit {
+            Some(verdict) => out[i] = verdict,
+            None => {
+                pending_indices.push(i);
+                pending_regions.push(*region);
+            }
         }
     }
-    analyze_media_file(path, region, &opts)
+    if pending_indices.is_empty() {
+        return out;
+    }
+
+    let verdicts = if is_wav(path) {
+        analyze_wav_regions(path, &pending_regions, &opts)
+    } else {
+        analyze_other_container_regions(path, &pending_regions, &opts)
+    };
+
+    for (k, &i) in pending_indices.iter().enumerate() {
+        let verdict = verdicts
+            .get(k)
+            .copied()
+            .unwrap_or(ChannelVerdict::Unknown);
+        out[i] = verdict;
+        // 只有确定性的结论才值得记忆：Unknown 可能只是文件暂时不可读
+        //（被占用 / 正在写入），缓存它会让后续导入永久失去判定机会。
+        if verdict != ChannelVerdict::Unknown {
+            if let Some((channels, sample_rate, fingerprint)) = key_base {
+                verdict_cache_put(
+                    VerdictKey::new(path, Some(fingerprint), channels, sample_rate, pending_regions[k], &opts),
+                    verdict,
+                );
+            }
+        }
+    }
+    out
 }
 
-/// 为文件构造缓存键（需要内容指纹；探测失败时返回 `None`，退化为不缓存）。
-fn verdict_key_for(
-    path: &Path,
-    region: Option<(f64, f64)>,
-    opts: &DetectOptions,
-) -> Option<VerdictKey> {
-    let header = crate::audio_utils::try_read_audio_header_only(path)?;
-    let fingerprint = crate::audio_utils::compute_file_fingerprint(path);
-    Some(VerdictKey::new(
-        path,
-        fingerprint,
-        header.channels,
-        header.sample_rate,
-        region,
-        opts,
-    ))
-}
-
+/// 为文件构造缓存键（头部探测或内容指纹读不出时返回 `None`，退化为不缓存）。
 fn is_wav(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
@@ -398,24 +438,48 @@ fn is_wav(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// WAV：按 `region` 均匀取窗口，逐窗口 seek 后比较。
-fn analyze_wav_file(path: &Path, region: Option<(f64, f64)>, opts: &DetectOptions) -> ChannelVerdict {
-    use hound::{SampleFormat, WavReader};
+/// WAV：按各 `region` 均匀取窗口，逐窗口 seek 后比较。
+///
+/// 批量入口（同一文件只打开一次）；单区间调用经由 [`verdict_for_regions`]。
+fn analyze_wav_regions(
+    path: &Path,
+    regions: &[Option<(f64, f64)>],
+    opts: &DetectOptions,
+) -> Vec<ChannelVerdict> {
+    use hound::WavReader;
 
+    let mut out = vec![ChannelVerdict::Unknown; regions.len()];
     let mut reader = match WavReader::open(path) {
         Ok(r) => r,
-        Err(_) => return ChannelVerdict::Unknown,
+        Err(_) => return out,
     };
     let spec = reader.spec();
     if spec.channels < 2 {
-        return ChannelVerdict::Mono;
+        return vec![ChannelVerdict::Mono; regions.len()];
     }
 
     let total_frames = reader.duration() as u64;
     if total_frames == 0 {
-        return ChannelVerdict::Unknown;
+        return out;
     }
     let sample_rate = spec.sample_rate;
+
+    for (i, region) in regions.iter().enumerate() {
+        out[i] = analyze_wav_region(&mut reader, &spec, total_frames, sample_rate, *region, opts);
+    }
+    out
+}
+
+/// WAV 单区间判定（reader 由批量入口打开并复用；`seek` 是绝对定位，区间间共享安全）。
+fn analyze_wav_region(
+    reader: &mut hound::WavReader<std::io::BufReader<std::fs::File>>,
+    spec: &hound::WavSpec,
+    total_frames: u64,
+    sample_rate: u32,
+    region: Option<(f64, f64)>,
+    opts: &DetectOptions,
+) -> ChannelVerdict {
+    use hound::SampleFormat;
 
     let (region_start, region_end) = resolve_region(region, total_frames, sample_rate);
     let region_frames = region_end.saturating_sub(region_start);
@@ -441,20 +505,20 @@ fn analyze_wav_file(path: &Path, region: Option<(f64, f64)>, opts: &DetectOption
         let read_ok = match (spec.sample_format, spec.bits_per_sample) {
             (SampleFormat::Int, 16) => {
                 let scale = 1.0 / (i16::MAX as f32);
-                read_window(&mut reader, len, &mut scratch, |s: i16| s as f32 * scale)
+                read_window(reader, len, &mut scratch, |s: i16| s as f32 * scale)
             }
             (SampleFormat::Int, 24) => {
                 // hound 把 24-bit 作为符号扩展的 i32 返回，按 i32::MAX 归一化会
                 // 缩小约 256 倍（波形与音频近乎无声）。
                 let scale = 1.0 / ((1u32 << 23) as f32);
-                read_window(&mut reader, len, &mut scratch, |s: i32| s as f32 * scale)
+                read_window(reader, len, &mut scratch, |s: i32| s as f32 * scale)
             }
             (SampleFormat::Int, 32) => {
                 let scale = 1.0 / (i32::MAX as f32);
-                read_window(&mut reader, len, &mut scratch, |s: i32| s as f32 * scale)
+                read_window(reader, len, &mut scratch, |s: i32| s as f32 * scale)
             }
             (SampleFormat::Float, 32) => {
-                read_window(&mut reader, len, &mut scratch, |s: f32| s)
+                read_window(reader, len, &mut scratch, |s: f32| s)
             }
             _ => return ChannelVerdict::Unknown,
         };
@@ -468,6 +532,108 @@ fn analyze_wav_file(path: &Path, region: Option<(f64, f64)>, opts: &DetectOption
     }
 
     finalize(acc)
+}
+
+/// 非 WAV：从区间起点限量解码后比较（批量入口：同一文件只解码一次）。
+///
+/// 与 WAV 路径的差异（已知限制，出于成本考虑）：Symphonia 的逐包解码不保证
+/// 窗口级随机访问，因此只解码"从文件头到各区间所需终点"的**连续前缀**并逐帧
+/// 比较，而不是像 WAV 那样在区间内分散取窗口。
+///
+/// 【解码总量上界】批量路径取"各区间覆盖需求的 max"，且整体封顶到抽样预算
+///（未设预算时按区间全量，但封顶 5 分钟，避免"不抽样"在大文件上退化成整轨
+/// 解码）。区间起点本身超过预算 ⇒ 非随机访问容器无法在预算内到达消费区间，
+/// 该区间不做结论（Unknown 不进缓存，后续扫描会再试）。
+///
+/// 【为什么按文件分组】同一源文件被多个 Take 以不同区间引用是常态（人声切片、
+/// 多轨引用同一条伴奏）：逐 Take 独立解码会让一次整工程扫描的解码量随引用数
+/// 线性放大；分组后解码量只与**文件数**成正比。
+fn analyze_other_container_regions(
+    path: &Path,
+    regions: &[Option<(f64, f64)>],
+    opts: &DetectOptions,
+) -> Vec<ChannelVerdict> {
+    let mut out = vec![ChannelVerdict::Unknown; regions.len()];
+    let Some(header) = crate::audio_utils::try_read_audio_header_only(path) else {
+        return out;
+    };
+    if header.channels < 2 {
+        return vec![ChannelVerdict::Mono; regions.len()];
+    }
+
+    let sample_rate = if header.sample_rate == 0 {
+        44_100
+    } else {
+        header.sample_rate
+    };
+    let total_frames = header.total_frames;
+    if total_frames == 0 {
+        return out;
+    }
+
+    const HARD_CAP_SEC: f64 = 300.0;
+    let budget_sec = opts
+        .scan_budget_sec()
+        .unwrap_or(HARD_CAP_SEC)
+        .min(HARD_CAP_SEC);
+    let budget_frames = ((budget_sec * sample_rate as f64).round() as usize).max(1);
+
+    // 逐区间规划覆盖需求；全部越界 / 空区间则无需解码。
+    struct RegionPlan {
+        start: u64,
+        window: usize,
+    }
+    let mut plans: Vec<Option<RegionPlan>> = Vec::with_capacity(regions.len());
+    let mut shared_decode_limit = 0usize;
+    for region in regions {
+        let (region_start, region_end) = resolve_region(*region, total_frames, sample_rate);
+        let region_frames = region_end.saturating_sub(region_start);
+        if region_frames == 0 || region_start as usize >= budget_frames {
+            plans.push(None);
+            continue;
+        }
+        let window = budget_frames.min(region_frames as usize);
+        shared_decode_limit = shared_decode_limit
+            .max((region_start as usize).saturating_add(window).min(budget_frames));
+        plans.push(Some(RegionPlan {
+            start: region_start,
+            window,
+        }));
+    }
+    if shared_decode_limit == 0 {
+        return out;
+    }
+
+    let mut pcm: Vec<f32> = Vec::new();
+    if crate::media::decode_media_audio_prefix_f32(path, None, shared_decode_limit)
+        .map(|(_sr, _ch, data)| pcm = data)
+        .is_err()
+    {
+        return out;
+    }
+    if pcm.is_empty() {
+        return out;
+    }
+
+    let ch = header.channels as usize;
+    let decoded_frames = pcm.len() / ch;
+    for (i, plan) in plans.iter().enumerate() {
+        let Some(plan) = plan else { continue };
+        let Some((first, last)) =
+            container_analysis_range(plan.start, plan.window, decoded_frames)
+        else {
+            // 解码没到达区间起点（文件比 header 声明的短）→ 该区间不做结论。
+            continue;
+        };
+        // 交给统一比较入口（并在该窗口内再按 window_count 抽样）。
+        out[i] = analyze_interleaved(
+            &pcm[first * ch..last * ch],
+            header.channels,
+            sample_rate,
+            opts,
+        );
+    }
+    out
 }
 
 /// 从当前读位置读 `frames` 帧（每帧 2 声道）到 `out`；返回是否完整读完。
@@ -498,82 +664,6 @@ where
         out.push(convert(r));
     }
     !out.is_empty()
-}
-
-/// 非 WAV：从区间起点限量解码后比较。
-///
-/// 与 WAV 路径的差异（已知限制，出于成本考虑）：Symphonia 的逐包解码不保证
-/// 窗口级随机访问，因此这里只解码 `[region_start, region_start + 预算)` 这一段
-/// 连续音频并逐帧比较，而不是像 WAV 那样在区间内分散取窗口。代价上界是
-/// `region_start + 预算` 的解码量；对本工程的主力工作流（短 WAV 切片）无影响。
-fn analyze_other_container(
-    path: &Path,
-    region: Option<(f64, f64)>,
-    opts: &DetectOptions,
-) -> ChannelVerdict {
-    let Some(header) = crate::audio_utils::try_read_audio_header_only(path) else {
-        return ChannelVerdict::Unknown;
-    };
-    if header.channels < 2 {
-        return ChannelVerdict::Mono;
-    }
-
-    let sample_rate = if header.sample_rate == 0 {
-        44_100
-    } else {
-        header.sample_rate
-    };
-    let total_frames = header.total_frames;
-    if total_frames == 0 {
-        return ChannelVerdict::Unknown;
-    }
-
-    let (region_start, region_end) = resolve_region(region, total_frames, sample_rate);
-    let region_frames = region_end.saturating_sub(region_start);
-    if region_frames == 0 {
-        return ChannelVerdict::Unknown;
-    }
-
-    // 成本上界：抽样预算（未设预算时按区间全量，但封顶 5 分钟，避免
-    // "不抽样"在大文件上退化成整轨解码）。
-    const HARD_CAP_SEC: f64 = 300.0;
-    let budget_sec = opts
-        .scan_budget_sec()
-        .unwrap_or(HARD_CAP_SEC)
-        .min(HARD_CAP_SEC);
-    let window_frames = ((budget_sec * sample_rate as f64).round() as usize)
-        .max(1)
-        .min(region_frames as usize);
-
-    // 必须解码到区间起点**之后**：只解码文件头会分析到与消费区间无关的音频
-    // （区间起点非 0 时结论完全错误）。解码量上界 = region_start + window_frames。
-    let decode_limit = (region_start as usize).saturating_add(window_frames);
-    let mut pcm: Vec<f32> = Vec::new();
-    if crate::media::decode_media_audio_prefix_f32(path, None, decode_limit)
-        .map(|(_sr, _ch, data)| pcm = data)
-        .is_err()
-    {
-        return ChannelVerdict::Unknown;
-    }
-    if pcm.is_empty() {
-        return ChannelVerdict::Unknown;
-    }
-
-    let ch = header.channels as usize;
-    let decoded_frames = pcm.len() / ch;
-    let Some((first, last)) = container_analysis_range(region_start, window_frames, decoded_frames)
-    else {
-        // 解码没到达区间起点（文件比 header 声明的短）→ 不做结论。
-        return ChannelVerdict::Unknown;
-    };
-
-    // 交给统一比较入口（并在该窗口内再按 window_count 抽样）。
-    analyze_interleaved(
-        &pcm[first * ch..last * ch],
-        header.channels,
-        sample_rate,
-        opts,
-    )
 }
 
 /// 非 WAV 路径在**已解码缓冲**中应当比较的帧下标区间 `[first, last)`。
@@ -619,7 +709,6 @@ fn finalize(acc: DiffAcc) -> ChannelVerdict {
         return ChannelVerdict::Unknown;
     }
     // 走到这里说明所有被检查的样本都在容差内。
-    let _ = acc.rms_diff();
     ChannelVerdict::FakeStereo
 }
 
@@ -772,6 +861,7 @@ mod tests {
     #[test]
     fn verdict_cache_hit_and_miss() {
         verdict_cache_clear();
+        let _cache_guard = verdict_cache_test_lock();
         let base = VerdictKey {
             path: "c:/a/x.wav".into(),
             fingerprint: Some(1234),
@@ -791,6 +881,7 @@ mod tests {
     #[test]
     fn verdict_cache_key_separates_fingerprint_policy_and_region() {
         verdict_cache_clear();
+        let _cache_guard = verdict_cache_test_lock();
         let base = VerdictKey {
             path: "c:/a/x.wav".into(),
             fingerprint: Some(1234),
@@ -875,9 +966,10 @@ mod tests {
     #[test]
     fn unknown_verdict_is_not_cached() {
         verdict_cache_clear();
+        let _cache_guard = verdict_cache_test_lock();
         let missing = Path::new("C:/definitely/not/here.wav");
         assert_eq!(
-            analyze_media_file(missing, None, &opts()),
+            verdict_for_file(missing, None, &opts()),
             ChannelVerdict::Unknown
         );
         assert!(verdict_cache_get(&VerdictKey {
@@ -953,6 +1045,7 @@ mod tests {
     #[test]
     fn wav_file_fake_stereo_is_detected_via_seek_windows() {
         verdict_cache_clear();
+        let _cache_guard = verdict_cache_test_lock();
         // 2 秒，远超 12 × 0.25s 的抽样预算 → 走 seek 窗口路径。
         let frames: Vec<[f32; 2]> = (0..SR as usize * 2)
             .map(|i| {
@@ -972,6 +1065,7 @@ mod tests {
     #[test]
     fn wav_file_true_stereo_is_detected() {
         verdict_cache_clear();
+        let _cache_guard = verdict_cache_test_lock();
         let frames: Vec<[f32; 2]> = (0..SR as usize * 2)
             .map(|i| {
                 let v = ((i as f32) * 0.001).sin() * 0.5;
@@ -990,6 +1084,7 @@ mod tests {
     #[test]
     fn wav_verdict_is_memoized_and_region_scoped() {
         verdict_cache_clear();
+        let _cache_guard = verdict_cache_test_lock();
         // 前 1 秒一致、后 1 秒分叉。
         let half = SR as usize;
         let frames: Vec<[f32; 2]> = (0..half * 2)

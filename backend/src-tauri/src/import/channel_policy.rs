@@ -160,6 +160,126 @@ pub fn precompute_decision(
     scan_source(source_path, source_channels, region, policy).decision(policy)
 }
 
+/// 批量判定的请求条目：[`scan_source`] 三参的打包形（便于按文件分组）。
+pub struct ScanRequest<'a> {
+    pub source_path: Option<&'a Path>,
+    pub source_channels: Option<u16>,
+    /// 源域秒区间；`None` = 整个文件。
+    pub region: Option<(f64, f64)>,
+}
+
+/// 锁外：按「源文件」分组批量判定。
+///
+/// 同一源文件被多个 Take/Clip 以不同（甚至相同）消费区间引用是常态——人声
+/// 切片、多轨引用同一条伴奏。逐 Take 独立判定会对同一文件反复解码：一次整
+/// 工程扫描 / 一次 v4→v5 迁移的解码量随**引用数**线性放大。分组后解码与
+/// 头部/指纹探测都只随**文件数**增长；判定语义与逐条调用 [`scan_source`]
+/// 完全一致（逐区间独立判定，结果照样进出进程级判定缓存）。
+///
+/// 返回值与 `requests` 一一对应。同样**会解码音频**，调用方必须保证不在
+/// 持有 timeline 全局锁时调用。
+pub fn scan_sources_grouped(
+    requests: &[ScanRequest<'_>],
+    policy: &ChannelImportPolicy,
+) -> Vec<ChannelScanOutcome> {
+    let policy = policy.normalized();
+    let mut outcomes = vec![ChannelScanOutcome::PolicyOff; requests.len()];
+    if policy.is_off() {
+        return outcomes;
+    }
+    if requests.is_empty() {
+        return outcomes;
+    }
+
+    // ── 无 I/O 的快路径逐条分类；需要解码的按 (路径, 声道数) 分组 ──
+    // 分组键的声道数先经一次 O(1) 头部探测定死（与 scan_source 相同的
+    // "未知即探测、探测失败按单声道" 口径），同组共享同一份判定 I/O。
+    // `None` = 交给文件组批量判定；`Some` = 已就地定论（无需任何 I/O）。
+    let mut resolved: Vec<Option<ChannelScanOutcome>> = Vec::with_capacity(requests.len());
+    let mut groups: Vec<(String, u16, Vec<usize>)> = Vec::new();
+
+    for (index, request) in requests.iter().enumerate() {
+        let channels = match request.source_channels {
+            Some(c) if c > 0 => Some(c),
+            _ => {
+                // 声道数未知：O(1) 头部探测；失败按单声道（"不确定"时不转换）。
+                request
+                    .source_path
+                    .and_then(crate::audio_utils::try_read_audio_header_only)
+                    .map(|info| info.channels)
+                    .filter(|channels| *channels > 0)
+            }
+        };
+        let Some(channels) = channels.filter(|channels| *channels >= 2) else {
+            resolved.push(Some(ChannelScanOutcome::MonoSource));
+            continue;
+        };
+        if !policy.is_smart() {
+            // alwaysMono：无需解码，直接折叠。
+            resolved.push(Some(ChannelScanOutcome::ForcedMono));
+            continue;
+        }
+        let Some(path) = request.source_path else {
+            resolved.push(Some(ChannelScanOutcome::Unknown));
+            continue;
+        };
+        let key = path.to_string_lossy().to_string();
+        let group_index = match groups.iter().position(|(existing, _, _)| *existing == key) {
+            Some(existing) => existing,
+            None => {
+                groups.push((key, channels, Vec::new()));
+                groups.len() - 1
+            }
+        };
+        groups[group_index].2.push(index);
+        resolved.push(None);
+    }
+
+    // ── 逐文件组判定：同组内相同区间只判一次（区间语义不变，纯去重）。 ──
+    for (_, (_, _, member_indices)) in groups.into_iter().enumerate() {
+        // 组内成员的路径一致（分组键即路径）；探测出的声道数取该组第一条的值。
+        let path = requests[member_indices[0]]
+            .source_path
+            .unwrap_or_else(|| Path::new(""));
+        // 组内唯一区间表（位模式做键，避免 f64 哈希歧义；语义上同键 = 同区间）。
+        let mut unique_regions: Vec<Option<(f64, f64)>> = Vec::new();
+        let mut region_slots: std::collections::HashMap<(u64, u64), usize> =
+            std::collections::HashMap::new();
+        let mut member_slot: Vec<usize> = Vec::with_capacity(member_indices.len());
+        for &member in &member_indices {
+            let region = requests[member].region;
+            let key = (
+                region.map(|(s, _)| s.to_bits()).unwrap_or(0),
+                region.map(|(_, e)| e.to_bits()).unwrap_or(0),
+            );
+            let slot = *region_slots.entry(key).or_insert_with(|| {
+                unique_regions.push(region);
+                unique_regions.len() - 1
+            });
+            member_slot.push(slot);
+        }
+
+        let verdicts = stereo_detect::verdict_for_regions(path, &unique_regions, &policy.detect_options());
+
+        for (position, &member) in member_indices.iter().enumerate() {
+            outcomes[member] = match verdicts[member_slot[position]] {
+                ChannelVerdict::FakeStereo => ChannelScanOutcome::FakeStereo,
+                ChannelVerdict::Mono => ChannelScanOutcome::MonoSource,
+                ChannelVerdict::TrueStereo => ChannelScanOutcome::TrueStereo,
+                ChannelVerdict::Unknown => ChannelScanOutcome::Unknown,
+            };
+        }
+    }
+
+    // 就地定论的条目最后落位（分组覆盖不到它们）。
+    for (index, slot) in resolved.into_iter().enumerate() {
+        if let Some(outcome) = slot {
+            outcomes[index] = outcome;
+        }
+    }
+    outcomes
+}
+
 /// 锁内：把一个已算好的决定应用到 Take；返回是否发生了改变。
 ///
 /// 零解码、零 IO，可安全在持锁状态下调用。
@@ -578,5 +698,124 @@ mod tests {
 
         let _ = std::fs::remove_file(&fake);
         let _ = std::fs::remove_file(&real);
+    }
+
+    /// 写 2 秒 WAV；`identical` 时 L == R，否则 R = −L。
+    fn write_scan_wav(path: &std::path::Path, identical: bool) {
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: 44_100,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let mut w = hound::WavWriter::create(path, spec).unwrap();
+        for i in 0..44_100 * 2 {
+            let v = ((i as f32) * 0.01).sin() * 0.4;
+            w.write_sample(v).unwrap();
+            w.write_sample(if identical { v } else { -v }).unwrap();
+        }
+        w.finalize().unwrap();
+    }
+
+    #[test]
+    fn grouped_scan_matches_per_take_semantics() {
+        // 同一文件的多个 Take 以不同消费区间引用 —— 分组判定的结论必须与
+        // 逐 Take 独立判定逐条一致（区间语义不变，去重的只是 I/O）。
+        let dir = std::env::temp_dir().join("hifishifter_channel_policy_grouped");
+        std::fs::create_dir_all(&dir).unwrap();
+        let policy = ChannelImportPolicy::default();
+
+        // 前 1 秒假立体声、后 1 秒真立体声的拼接文件。
+        let mixed = dir.join("grouped_mixed.wav");
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: 44_100,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let mut w = hound::WavWriter::create(&mixed, spec).unwrap();
+        for i in 0..44_100 {
+            let v = ((i as f32) * 0.01).sin() * 0.4;
+            w.write_sample(v).unwrap();
+            w.write_sample(v).unwrap();
+        }
+        for i in 0..44_100 {
+            let v = ((i as f32) * 0.02).sin() * 0.4;
+            w.write_sample(v).unwrap();
+            w.write_sample(-v).unwrap();
+        }
+        w.finalize().unwrap();
+
+        let fake_part = dir.join("grouped_fake.wav");
+        let true_part = dir.join("grouped_true.wav");
+        write_scan_wav(&fake_part, true);
+        write_scan_wav(&true_part, false);
+
+        let requests = vec![
+            // 同一假立体声文件被三个 Take 引用：两个相同区间 + 一个不同区间。
+            ScanRequest {
+                source_path: Some(fake_part.as_path()),
+                source_channels: Some(2),
+                region: Some((0.0, 0.5)),
+            },
+            ScanRequest {
+                source_path: Some(fake_part.as_path()),
+                source_channels: Some(2),
+                region: Some((0.0, 0.5)),
+            },
+            ScanRequest {
+                source_path: Some(fake_part.as_path()),
+                source_channels: Some(2),
+                region: Some((0.5, 1.5)),
+            },
+            // 同一"前假后真"文件：整文件判 TrueStereo（保守），窄前段判 FakeStereo。
+            ScanRequest {
+                source_path: Some(mixed.as_path()),
+                source_channels: Some(2),
+                region: None,
+            },
+            ScanRequest {
+                source_path: Some(mixed.as_path()),
+                source_channels: Some(2),
+                region: Some((0.0, 1.0)),
+            },
+            // 快路径：单声道源 / 策略强制 / 缺源。
+            ScanRequest {
+                source_path: Some(fake_part.as_path()),
+                source_channels: Some(1),
+                region: None,
+            },
+            ScanRequest {
+                source_path: None,
+                source_channels: Some(2),
+                region: None,
+            },
+        ];
+        let outcomes = scan_sources_grouped(&requests, &policy);
+        assert_eq!(outcomes.len(), requests.len());
+        assert_eq!(outcomes[0], ChannelScanOutcome::FakeStereo);
+        assert_eq!(outcomes[1], ChannelScanOutcome::FakeStereo, "相同区间去重共享判定");
+        assert_eq!(outcomes[2], ChannelScanOutcome::FakeStereo);
+        assert_eq!(
+            outcomes[3],
+            ChannelScanOutcome::TrueStereo,
+            "整文件区间覆盖到后半真立体声段，不得判假"
+        );
+        assert_eq!(outcomes[4], ChannelScanOutcome::FakeStereo);
+        assert_eq!(outcomes[5], ChannelScanOutcome::MonoSource);
+        assert_eq!(outcomes[6], ChannelScanOutcome::Unknown);
+
+        // 与逐条 scan_source 逐条对拍（同样输入、独立实现路径）。
+        for (request, expected) in requests.iter().zip(&outcomes) {
+            assert_eq!(
+                scan_source(request.source_path, request.source_channels, request.region, &policy),
+                *expected,
+                "分组判定必须与逐条判定一致"
+            );
+        }
+
+        let _ = std::fs::remove_file(&mixed);
+        let _ = std::fs::remove_file(&fake_part);
+        let _ = std::fs::remove_file(&true_part);
     }
 }
