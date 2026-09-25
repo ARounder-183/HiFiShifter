@@ -356,6 +356,15 @@ export class WebGl2WaveformRenderer implements WaveformSurfaceRenderer {
      */
     private uploadQuads(quads: Float32Array): void {
         const gl = this.gl;
+        if (quads.length === 0) {
+            // 首帧几何为空时缓冲还没有数据存储（bufferCapacity=0，下面的
+            // bufferData 不会执行），bufferSubData 对无存储缓冲是
+            // GL_INVALID_OPERATION。记 0 顶点直接返回即可：drawArrays 的
+            // count=0 本身就是 no-op，且不能沿用上一次的顶点数 —— 空几何
+            // 意味着本帧什么都不画。
+            this.uploadedVertexCount = 0;
+            return;
+        }
         gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer);
         if (this.bufferCapacity < quads.length) {
             const capacity = Math.max(quads.length, this.bufferCapacity * 2, 4096);

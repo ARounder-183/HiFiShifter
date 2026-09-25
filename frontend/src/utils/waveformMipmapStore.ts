@@ -627,7 +627,16 @@ class WaveformMipmapStoreImpl {
 
         const dataStartSec = (startIdx * divisionFactor) / sampleRate;
         const dataDurationSec = ((endIdx - startIdx) * divisionFactor) / sampleRate;
-        const effChannels = effectiveChannels(sourceChannels ?? peaks.channels, channelMode);
+        // sourceChannels 的"缺失"在生产路径上表现为 **0** 而非 undefined：
+        // 工程加载把 `source_channels <= 0` 映射为 undefined，sceneBuilder 又
+        // 把缺失元数据强转为 0（`clip.sourceChannels ?? 0`）。于是
+        // `sourceChannels ?? peaks.channels` 拦不住 0 —— effectiveChannels 会
+        // 把 0 当成单声道，立体声 L/R 双带渲染静默退化为合并单带。因此先做
+        // 归一化：非正数一律回退峰值数据自身的 channels（v1 峰值数据报告
+        // channels: 1，下面的第二道闸仍然有效）。
+        const src =
+            sourceChannels != null && sourceChannels > 0 ? sourceChannels : peaks.channels;
+        const effChannels = effectiveChannels(src, channelMode);
 
         if (effChannels === 2 && peaks.channels === 2) {
             const mode = normalizeChannelMode(channelMode);
@@ -770,31 +779,45 @@ class WaveformMipmapStoreImpl {
                         this.requeueIfMissing(sourcePath, 2);
                         continue;
                     }
-                    // 仅解码 L2（索引 2），L0/L1 丢弃
-                    const l2Base64 = levels[2];
-                    if (l2Base64) {
-                        const decoded = decodeWaveformFromBase64(l2Base64);
-                        if (decoded) {
-                            this.applyDecoded(sourcePath, 2, decoded);
-                            this.notify(sourcePath, "done");
+                    // 仅解码 L2（索引 2），L0/L1 丢弃。
+                    //
+                    // 单个坏条目必须**逐文件**兜住：这段代码原本与 IPC 调用共用
+                    // 外层 try —— 一个畸形载荷（例如非数组条目）会冲出整个循环，
+                    // finally 删掉全部共享 Promise 后对**每个**已注册文件逐个
+                    // preload 重试（几十个文件 = 重试风暴）。逐文件 try/catch
+                    // 后，坏条目只把**自己**标进 L2 负缓存并通知 error，批次里
+                    // 其余文件照常落地。
+                    try {
+                        const l2Base64 = levels[2];
+                        if (l2Base64) {
+                            const decoded = decodeWaveformFromBase64(l2Base64);
+                            if (decoded) {
+                                this.applyDecoded(sourcePath, 2, decoded);
+                                this.notify(sourcePath, "done");
+                            } else {
+                                const entry = this.cache.get(sourcePath);
+                                if (entry) entry.failedLevels.add(2);
+                                this.notify(sourcePath, "error", "batch decode L2 failure");
+                            }
                         } else {
-                            const entry = this.cache.get(sourcePath);
-                            if (entry) entry.failedLevels.add(2);
-                            this.notify(sourcePath, "error", "batch decode L2 failure");
+                            // 空串 = 后端尚未就绪（波形分析/首次计算未完成），是
+                            // **瞬时**条件：绝不能写 failedLevels——否则打开工程
+                            // 瞬间的抢先批量请求会把 L2 永久毒化，波形要等用户
+                            // 滚动/缩放才出现。进入重试冷却；与单发路径一样，
+                            // 必须自己排重试而不能只等 refresh()（见
+                            // NOT_READY_MAX_RETRY 的死锁说明）。
+                            this.retryCooldownUntil.set(
+                                `${sourcePath}|2`,
+                                Date.now() + RETRY_NOT_READY_COOLDOWN_MS,
+                            );
+                            this.notify(sourcePath, "loading");
+                            this.scheduleNotReadyRetry(sourcePath, 2);
                         }
-                    } else {
-                        // 空串 = 后端尚未就绪（波形分析/首次计算未完成），是
-                        // **瞬时**条件：绝不能写 failedLevels——否则打开工程
-                        // 瞬间的抢先批量请求会把 L2 永久毒化，波形要等用户
-                        // 滚动/缩放才出现。进入重试冷却；与单发路径一样，
-                        // 必须自己排重试而不能只等 refresh()（见
-                        // NOT_READY_MAX_RETRY 的死锁说明）。
-                        this.retryCooldownUntil.set(
-                            `${sourcePath}|2`,
-                            Date.now() + RETRY_NOT_READY_COOLDOWN_MS,
-                        );
-                        this.notify(sourcePath, "loading");
-                        this.scheduleNotReadyRetry(sourcePath, 2);
+                    } catch (err) {
+                        const entry = this.cache.get(sourcePath);
+                        if (entry) entry.failedLevels.add(2);
+                        const msg = err instanceof Error ? err.message : String(err);
+                        this.notify(sourcePath, "error", msg);
                     }
                 }
             } catch (err) {

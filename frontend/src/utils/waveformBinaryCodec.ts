@@ -208,6 +208,14 @@ export function decodeWaveformBinary(buffer: ArrayBuffer): WaveformMipmapBinary 
  */
 export function decodeWaveformFromBase64(base64: string): WaveformMipmapBinary | null {
     if (!base64 || base64.length < HEADER_SIZE_V1) return null;
-    const buffer = base64ToArrayBuffer(base64);
+    let buffer: ArrayBuffer;
+    try {
+        buffer = base64ToArrayBuffer(base64);
+    } catch {
+        // 非法 base64（atob 对字母表外的字符抛 InvalidCharacterError）：按本
+        // 函数与 decodeWaveformBinary 的"无效数据返回 null"契约兜住，不能让
+        // 单个损坏载荷把批量预载等调用方炸掉。
+        return null;
+    }
     return decodeWaveformBinary(buffer);
 }

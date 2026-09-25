@@ -53,7 +53,10 @@ export interface WaveformGeometryAnchor {
     windowEndPx: number;
     /** 构建窗口的内容坐标上边界（行覆盖范围顶端）。 */
     windowTopPx: number;
-    /** 构建窗口的内容坐标下边界（行覆盖范围底端）。 */
+    /**
+     * 几何实际覆盖的内容坐标底端（各行波形带底边的最大值，调用方写入时
+     * **不带任何余量**）：竖直复用要求视口底边不超过它。
+     */
     windowBottomPx: number;
 }
 
@@ -109,8 +112,10 @@ export interface WaveformReuseQuery {
  * 1. **锚点全等**：缩放 / 尺寸 / dpr / rows 引用 / 颜色 / 后端 / 幅度映射与其
  *    修订号，任一变化都必须重建（这些字段共同决定了顶点数据本身）。
  * 2. **视口仍落在构建窗口内**：水平方向要求视口完整落在
- *    `[windowStartPx, windowEndPx]`；竖直方向只要求视口**顶边**落在行覆盖范围内
- *    ——画布比视口高若干行（overscan），行集合不变时底边必然被覆盖。
+ *    `[windowStartPx, windowEndPx]`；竖直方向要求视口完整落在
+ *    `[windowTopPx, windowBottomPx]` —— `windowBottomPx` 是几何实际覆盖的
+ *    底端（各行波形带底边的最大值）：底边越出它的部分没有任何几何可画，
+ *    平移复用会在视口底部留出一条空白（快速竖直平移时肉眼可见）。
  *
  * 只有 `rowsCoverViewport` 为真、且上面两组条件全部成立时才允许复用。
  *
@@ -143,8 +148,13 @@ export function canReuseGeometry(
     // 水平：视口必须完整落在已构建的窗口内（两侧各 `marginPx` 可平移）。
     if (query.scrollLeftPx < anchor.windowStartPx) return false;
     if (query.scrollLeftPx + query.widthPx > anchor.windowEndPx) return false;
-    // 竖直：只要求视口顶边落在行覆盖范围内（overscan 覆盖底边）。
+    // 竖直：视口必须**完整**落在几何实际覆盖的行范围内 —— 顶边不得高于行
+    // 覆盖顶端，底边不得越出几何底端（windowBottomPx = 各行波形带底边的
+    // 最大值）。几何只画行波形带，越出底端的部分没有任何几何可画，平移
+    // 复用会让视口底部出现一条空白（快速竖直平移时可感）；旧判定只查顶边
+    // 并默认「overscan 会盖住底边」，但行覆盖本身就是几何覆盖的边界，该
+    // 默认不成立。
     if (query.scrollTopPx < anchor.windowTopPx) return false;
-    if (query.scrollTopPx > anchor.windowBottomPx) return false;
+    if (query.scrollTopPx + query.heightPx > anchor.windowBottomPx) return false;
     return true;
 }

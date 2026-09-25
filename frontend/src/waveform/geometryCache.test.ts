@@ -25,19 +25,40 @@ import type { WaveformSceneRow } from "./sceneBuilder";
 
 /** 视口宽（CSS px）。 */
 const VIEW_W = 1600;
+/** 视口高（CSS px）。 */
+const VIEW_H = 900;
 /** 构建窗口两侧的水平余量（对应 draw() 的 `marginPx`）。 */
 const MARGIN = 512;
 /** 锚点与查询共用的视口左缘（内容坐标）。 */
 const SCROLL_LEFT = 10_000;
+/** 竖直方向的最大可复用 scrollTop：几何底端 − 视口高。 */
+const MAX_SCROLL_TOP = 2000;
+/**
+ * 几何实际覆盖的内容底端（各行波形带底边的最大值，与 draw() 现在写入锚点
+ * 的口径一致）：= MAX_SCROLL_TOP + VIEW_H，使「最大可复用 scrollTop 的视口
+ * 底边」恰好贴着几何底端 —— 边界用例（贴边复用 / 越界 1px 重建）有干净的
+ * 数字。
+ */
+const GEOMETRY_BOTTOM_PX = MAX_SCROLL_TOP + VIEW_H;
 
 /**
  * 造一行最小可用的场景行。
  *
  * 判定只看 `rows` 的**引用**（React 侧 memo 的产物，引用不变即内容不变），
  * 因此每次调用都返回全新数组，用来模拟「行数据换了」。
+ *
+ * 波形带必须覆盖整个视口：竖直复用判定要求视口**完整**落在几何覆盖内
+ * （底边 ≤ 几何底端），行覆盖不足时任何 scrollTop 都会拒绝复用。
  */
 function rows(): WaveformSceneRow[] {
-    return [{ topPx: 0, waveformTopPx: 18, waveformHeightPx: 76, clips: [] }];
+    return [
+        {
+            topPx: 0,
+            waveformTopPx: 0,
+            waveformHeightPx: GEOMETRY_BOTTOM_PX,
+            clips: [],
+        },
+    ];
 }
 
 /** 构建锚点：1600×900 视口、dpr=1、水平两侧各留 512px 余量。 */
@@ -45,7 +66,7 @@ function anchor(overrides: Partial<WaveformGeometryAnchor> = {}): WaveformGeomet
     return {
         pxPerSec: 40,
         widthPx: VIEW_W,
-        heightPx: 900,
+        heightPx: VIEW_H,
         dpr: 1,
         rows: rows(),
         color: "#8fa3bf",
@@ -55,7 +76,7 @@ function anchor(overrides: Partial<WaveformGeometryAnchor> = {}): WaveformGeomet
         windowStartPx: SCROLL_LEFT - MARGIN,
         windowEndPx: SCROLL_LEFT + VIEW_W + MARGIN,
         windowTopPx: 0,
-        windowBottomPx: 2000,
+        windowBottomPx: GEOMETRY_BOTTOM_PX,
         ...overrides,
     };
 }
@@ -106,11 +127,22 @@ describe("canReuseGeometry", () => {
         }
     });
 
-    it("★ 仅 scrollTop 变化且顶边仍在行覆盖内 → 复用（竖直平移帧）", () => {
+    it("★ 仅 scrollTop 变化且视口完整落在几何覆盖内 → 复用（竖直平移帧）", () => {
         const a = anchor();
+        // 2000 是最大可复用值：视口底边 = 2000 + 900 = 2900 = 几何底端（贴边含）。
         for (const scrollTopPx of [0, 400, 1999, 2000]) {
             expect(canReuseGeometry(a, query(a, { scrollTopPx }))).toBe(true);
         }
+    });
+
+    it("★ 视口底边越出几何实际覆盖 → 必须重建（快速竖直平移的空白条）", () => {
+        const a = anchor();
+        // 几何只画到 windowBottomPx = 2900：scrollTop=2001 时视口底边 = 2901，
+        // 越出的 1px 没有任何几何可画 —— 旧判定只查顶边会复用，把空白条原样
+        // 平移上去（快速竖直平移时视口底部肉眼可见）。
+        expect(canReuseGeometry(a, query(a, { scrollTopPx: 2001 }))).toBe(false);
+        // 贴边（视口底边恰等于几何底端）仍可复用：判定是闭区间。
+        expect(canReuseGeometry(a, query(a, { scrollTopPx: 2000 }))).toBe(true);
     });
 
     it("视口越出窗口左边界 → 必须重建", () => {
@@ -134,6 +166,9 @@ describe("canReuseGeometry", () => {
 
     it("视口顶边越出行覆盖范围 → 必须重建", () => {
         const a = anchor();
+        // -1：顶边高于窗口顶。2001：底边越出几何底端（见上面的空白条用例），
+        // 旧行为里它由「顶边 ≤ windowBottomPx」拦下，现由底边覆盖判定拦下，
+        // 结果一致。
         expect(canReuseGeometry(a, query(a, { scrollTopPx: -1 }))).toBe(false);
         expect(canReuseGeometry(a, query(a, { scrollTopPx: 2001 }))).toBe(false);
     });

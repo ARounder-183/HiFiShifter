@@ -24,6 +24,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { waveformApi } from "../services/api/waveform";
 
 import { waveformMipmapStore } from "./waveformMipmapStore.js";
+import { decodeWaveformFromBase64 } from "./waveformBinaryCodec.js";
 
 vi.mock("../services/api/waveform", () => ({
     waveformApi: {
@@ -37,6 +38,7 @@ vi.mock("../services/api/waveform", () => ({
 
 const singleMock = vi.mocked(waveformApi.getWaveformMipmapBinary);
 const batchMock = vi.mocked(waveformApi.batchGetWaveformMipmap);
+const preloadMock = vi.mocked(waveformApi.preloadWaveformMipmap);
 
 /**
  * 与 store 内的 RETRY_NOT_READY_COOLDOWN_MS 保持一致（该常量未导出；
@@ -228,6 +230,40 @@ describe("waveformMipmapStore 在途响应作废", () => {
         } finally {
             vi.useRealTimers();
         }
+    });
+
+    it("批内单个损坏的 base64 条目只标记该文件失败，不得拖垮整批（防重试风暴）", async () => {
+        // 修复前的两个失效叠在一起：decodeWaveformFromBase64 对非法 base64
+        // 直接抛（atob 未兜）→ 冲出 batchPreload 的整包循环 → 删除全部共享
+        // Promise 并对**每个**已注册文件逐个 preload（几十个文件 = 重试风暴），
+        // 好文件也要等一整轮单发请求才就绪。
+        const corrupt = "!!!!not-base64-payload!!!!";
+        // 便捷解码的契约：无效数据返回 null（不抛）。
+        expect(decodeWaveformFromBase64(corrupt)).toBeNull();
+
+        batchMock.mockResolvedValue({
+            "/good.wav": ["", "", encodeMipmap(2)],
+            "/bad.wav": ["", "", corrupt],
+        });
+        const errors: Array<{ path: string; error?: string }> = [];
+        const unsubscribe = waveformMipmapStore.addListener((path, status, error) => {
+            if (status === "error") errors.push({ path, error });
+        });
+
+        try {
+            await waveformMipmapStore.batchPreload(["/good.wav", "/bad.wav"]);
+        } finally {
+            unsubscribe();
+        }
+
+        // 同批的好文件照常落地，坏文件进入 L2 负缓存（既有约定：不再自动重试）。
+        expect(waveformMipmapStore.hasLevel("/good.wav", 2)).toBe(true);
+        expect(waveformMipmapStore.hasLevel("/bad.wav", 2)).toBe(false);
+        expect(errors).toEqual([{ path: "/bad.wav", error: "batch decode L2 failure" }]);
+        // 重试风暴的标志：单发路径与 preload 不得被触发，批量请求只有一轮。
+        expect(singleMock).not.toHaveBeenCalled();
+        expect(preloadMock).not.toHaveBeenCalled();
+        expect(batchMock).toHaveBeenCalledTimes(1);
     });
 
     it("clear() 仍然作废全部在途响应，已清空的缓存不得复活", async () => {

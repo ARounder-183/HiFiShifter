@@ -124,6 +124,14 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
      */
     const geometryCacheRef = React.useRef<WaveformGeometryAnchor | null>(null);
     const [rendererKind, setRendererKind] = React.useState<"webgl2" | "canvas2d">("webgl2");
+    /**
+     * 当前 dpr 快照，**只**用于驱动下方 matchMedia 订阅的换绑。
+     *
+     * draw() 每帧直接读 `window.devicePixelRatio`（值永远新鲜），不经 state；
+     * 这里单独存一份是因为 `(resolution: N dppx)` 查询只在 dpr **离开** N 时
+     * 触发一次，必须用新 dpr 重新订阅才能收到下一次变化。
+     */
+    const [dpr, setDpr] = React.useState(() => window.devicePixelRatio || 1);
 
     // render 期写 ref 镜像（本仓库热路径既有模式；原出处 TimelineCanvasViewport 已随
     // 旧渲染路径删除，同一手法现仍见于 TimelineKernelView 等命令式绘制组件）。
@@ -141,6 +149,35 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
             drawRef.current();
         });
     }, []);
+
+    /**
+     * DPR 变化（浏览器缩放 / 显示器切换）必须触发一次重绘。
+     *
+     * 【为什么需要】dpr 参与绘制结果的两处：包络列按设备像素网格枚举、dpr
+     * 又是几何缓存键的一部分（`canReuseGeometry` 第 1 组），画布物理尺寸也
+     * 随 dpr 变化（`rasterize`）。但 dpr 变化不带来任何 props / 视口变化 ——
+     * 没有这条订阅，缩放/换屏后波形会停留在旧 dpr 的几何与画布尺寸上
+     * （发虚/糊边），直到下一次滚动或缩放才有机会重画。
+     *
+     * 【换绑模式】监听 `(resolution: N dppx)`（N = 订阅时的 dpr）：它只在
+     * dpr 离开 N 时触发；回调里作废几何缓存、请求重绘，并重读真实 dpr 写回
+     * state —— effect 依赖 [dpr] 随之重跑，用新 dpr 的 query 重新订阅。不换
+     * 绑的话旧 query 已永久失配，第二次缩放就会丢。
+     */
+    React.useEffect(() => {
+        const mql = window.matchMedia?.(`(resolution: ${dpr}dppx)`);
+        if (!mql) return;
+        const onChange = () => {
+            // dpr 参与几何缓存键、旧几何的列栅格按旧 dpr 枚举，必须作废后
+            // 全量重建（仅 invalidate 的 repaint 命不中重建路径的原因见
+            // canReuseGeometry 的锚点全等组）。
+            geometryCacheRef.current = null;
+            invalidate();
+            setDpr(window.devicePixelRatio || 1);
+        };
+        mql.addEventListener("change", onChange);
+        return () => mql.removeEventListener("change", onChange);
+    }, [dpr, invalidate]);
 
     /**
      * 绘制一帧波形。
@@ -243,27 +280,24 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
         const windowStartPx = scrollLeftPx - marginPx;
         const windowEndPx = scrollLeftPx + widthPx + marginPx;
         // 竖直窗口 = 行数据覆盖的内容范围（行 topPx 是内容绝对坐标、按轨道
-        // 顺序升序）。注意**不能**用 `heightPx` 做竖直包含判定：它是
-        // `visibleTracks.length * rowHeight`，比视口高 8 行（overscan），
-        // 拿它当视口高会得到永远不成立的条件。竖直方向实际上不需要余量——
-        // 上游的轨道窗口化已带 4 行 overscan，行集合不变时几何必然覆盖视口。
+        // 顺序升序）。注意**不能**用 `heightPx` 推竖直窗口：它是画布高度，
+        // 与行数据的实际覆盖无关（上游的轨道窗口化自带 overscan，两者不必
+        // 相等），拿它当界会得到与几何覆盖无关的条件。
         let firstRowTopPx = Number.POSITIVE_INFINITY;
-        let lastRowTopPx = Number.NEGATIVE_INFINITY;
+        // 几何的**真实覆盖底端**：几何只画各行波形带，覆盖到
+        // 「行顶 + 带内偏移 + 带高」为止。此前用「(末行 top − 首行 top) ÷ 行数」
+        // 的平均行高外推底端、再加视口高作余量 —— 平均隐含行间距均匀的假设，
+        // 余量则干脆高估覆盖；两者都会让竖直复用判定放过「视口底边越出几何」
+        // 的帧，越出部分没有几何可画（快速竖直平移时视口底部出现空白条）。
+        let geometryBottomPx = Number.NEGATIVE_INFINITY;
         for (const row of props.rows) {
             if (row.topPx < firstRowTopPx) firstRowTopPx = row.topPx;
-            if (row.topPx > lastRowTopPx) lastRowTopPx = row.topPx;
-        }
-        let rowHeightPx: number;
-        if (props.rows.length >= 2) {
-            rowHeightPx = (lastRowTopPx - firstRowTopPx) / (props.rows.length - 1);
-        } else if (props.rows.length === 1) {
-            rowHeightPx = heightPx;
-        } else {
-            rowHeightPx = 0;
+            const bandBottomPx = row.topPx + row.waveformTopPx + row.waveformHeightPx;
+            if (bandBottomPx > geometryBottomPx) geometryBottomPx = bandBottomPx;
         }
         const windowTopPx = Number.isFinite(firstRowTopPx) ? firstRowTopPx : scrollTopPx;
-        const windowBottomPx = Number.isFinite(lastRowTopPx)
-            ? lastRowTopPx + Math.max(rowHeightPx, heightPx)
+        const windowBottomPx = Number.isFinite(geometryBottomPx)
+            ? geometryBottomPx
             : scrollTopPx + heightPx;
 
         const scene = buildWaveformScene({
