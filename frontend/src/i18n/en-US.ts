@@ -333,8 +333,6 @@ export const enUS = {
     panel_io: "I/O",
 
     // ── 停靠窗体系统（Dockable forms）──────────────────────────
-    dock_drag_hint: "Drag to rearrange\nHold {modifier} to dock",
-    dock_drag_hint_always: "Drag to rearrange\nDrop on a target to dock",
     dock_float_active: "Float this panel",
     dock_float: "Float",
     dock_dock: "Dock",
@@ -344,6 +342,9 @@ export const enUS = {
     dock_expand: "Expand",
     dock_collapse: "Collapse to a tab strip",
     dock_rename_tab: "Rename...",
+    dock_drag_rearrange: "Drag to rearrange",
+    dock_dock_hint: "Hold {modifier} to dock",
+    dock_dock_hint_always: "Drop on a target to dock",
     dock_hint_dock: "Dock here",
     dock_hint_float: "Float",
     dock_hint_snapback: "Release to cancel",

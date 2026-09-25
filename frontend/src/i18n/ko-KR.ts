@@ -271,8 +271,6 @@ export const koKR = {
     panel_io: "입출력",
 
     // ── 停靠窗体系统（Dockable forms）──────────────────────────
-    dock_drag_hint: "드래그하여 재배치\n{modifier}를 누르면 도킹",
-    dock_drag_hint_always: "드래그하여 재배치\n대상에 놓으면 도킹",
     dock_float_active: "이 패널을 플로팅",
     dock_float: "플로팅",
     dock_dock: "도킹",
@@ -282,6 +280,9 @@ export const koKR = {
     dock_expand: "펼치기",
     dock_collapse: "탭 바 접기",
     dock_rename_tab: "이름 바꾸기...",
+    dock_drag_rearrange: "드래그하여 재배치",
+    dock_dock_hint: "{modifier}를 누르면 도킹",
+    dock_dock_hint_always: "대상에 놓으면 도킹",
     dock_hint_dock: "여기에 도킹",
     dock_hint_float: "플로팅",
     dock_hint_snapback: "놓으면 취소",

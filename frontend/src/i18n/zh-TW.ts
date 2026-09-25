@@ -185,8 +185,6 @@ export const zhTW = {
     panel_io: "輸入輸出",
 
     // ── 停靠窗体系统（Dockable forms）──────────────────────────
-    dock_drag_hint: "拖曳以重排\n按住 {modifier} 可停靠",
-    dock_drag_hint_always: "拖曳以重排\n拖到目標位置即可停靠",
     dock_float_active: "浮動此視窗",
     dock_float: "浮動",
     dock_dock: "停靠",
@@ -196,6 +194,9 @@ export const zhTW = {
     dock_expand: "展開",
     dock_collapse: "折疊為標籤條",
     dock_rename_tab: "重新命名...",
+    dock_drag_rearrange: "拖曳以重排",
+    dock_dock_hint: "按住 {modifier} 可停靠",
+    dock_dock_hint_always: "拖到目標位置即可停靠",
     dock_hint_dock: "停靠到此處",
     dock_hint_float: "浮動",
     dock_hint_snapback: "放開取消",

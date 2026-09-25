@@ -19,6 +19,7 @@ import {
 import { dropPreviewRect } from "../../features/dock/dockDropTarget";
 import { DOCK_SPLITTER_PX, type DockDropZone } from "../../features/dock/dockTypes";
 import { getPanel } from "../../features/dock/panelRegistry";
+import { dockModifierHint } from "./dockTooltips";
 import { useI18n } from "../../i18n/I18nProvider";
 
 export function DockDropOverlay() {
@@ -59,6 +60,7 @@ function DockDropOverlayContent({ drag }: { drag: DockDragState }) {
     const { t } = useI18n();
     const tAny = t as (key: string) => string;
     const showPreview = useAppSelector((s) => s.dock.settings.showDropPreview);
+    const dockModifier = useAppSelector((s) => s.dock.settings.dockModifier);
     const definition = getPanel(drag.panelId);
     const title = definition ? tAny(definition.titleKey) : drag.panelId;
 
@@ -110,14 +112,22 @@ function DockDropOverlayContent({ drag }: { drag: DockDragState }) {
                 data-intent={drag.dockIntent ? "dock" : "float"}
                 style={{ left: drag.pointerX + 14, top: drag.pointerY + 14 }}
             >
-                {title}
-                <span className="hs-dock-ghost-hint">
-                    {drag.dockIntent
-                        ? drag.target
-                            ? `${tAny("dock_hint_dock")} · ${describeZone(drag.target.zone, tAny)}`
-                            : tAny("dock_hint_snapback")
-                        : tAny("dock_hint_float")}
-                </span>
+                <div className="hs-dock-ghost-line">
+                    {title}
+                    <span className="hs-dock-ghost-hint">
+                        {drag.dockIntent
+                            ? drag.target
+                                ? `${tAny("dock_hint_dock")} · ${describeZone(drag.target.zone, tAny)}`
+                                : tAny("dock_hint_snapback")
+                            : tAny("dock_hint_float")}
+                    </span>
+                </div>
+                {/*
+                  第二行**永远**给出"按住 {修饰键} 可停靠"：拖拽期间用户看不到抓手上的
+                  悬停提示，这里是唯一能告诉他"怎么才能停靠"的地方（用户明确要求）。
+                  与抓手提示共用 `dockModifierHint`，两处不会分叉。
+                */}
+                <div className="hs-dock-ghost-modifier">{dockModifierHint(dockModifier, tAny)}</div>
             </div>
         </div>
     );

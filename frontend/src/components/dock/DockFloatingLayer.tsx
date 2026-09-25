@@ -22,7 +22,6 @@ import { getDockDragState, subscribeDockDrag } from "../../features/dock/dockDra
 import { closeForm, dockFormTo, raiseFloat, setFloatGeometry } from "../../features/dock/dockSlice";
 import { findMainTabset } from "../../features/dock/dockSchema";
 import { detachFormToWindow, maximizeActive } from "../../features/dock/dockApi";
-import { dockDragHint } from "./dockTooltips";
 import { getPanel } from "../../features/dock/panelRegistry";
 import type { DockForm, DockRect } from "../../features/dock/dockTypes";
 import { useI18n } from "../../i18n/I18nProvider";
@@ -84,7 +83,6 @@ function DockFloatWindow({
     /** 本面板能否拆到独立窗口（见 `PanelDefinition.detachable`）。 */
     const detachable = definition?.detachable === true;
     const doubleClickAction = useAppSelector((s) => s.dock.settings.doubleClickHeaderAction);
-    const dockModifier = useAppSelector((s) => s.dock.settings.dockModifier);
 
     /**
      * 本帧实际渲染用的矩形（带锚点时按当前视口推导）。
@@ -239,7 +237,10 @@ function DockFloatWindow({
                         );
                     }
                 }}
-                data-tooltip={dockDragHint(dockModifier, tAny)}
+                // 【刻意不挂 `data-tooltip`】浮动窗口的标题栏悬停时**不显示任何提示**：
+                // 它是"拖起来"的着力点，拖拽开始后幽灵提示会立刻给出完整说明（含
+                // 停靠修饰键），悬停时再弹一条更长的提示只会挡住标题栏本身。停靠态的
+                // 抓手仍保留悬停提示（见 `DockTabBar`）。
             >
                 <span className="hs-dock-tab-label">{title}</span>
                 <div className="hs-dock-tabbar-spacer" />

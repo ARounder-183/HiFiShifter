@@ -395,9 +395,11 @@
  * —— 跟随指针、按意图着色。样式与其它悬停提示同源，不会看起来像另一套 UI。
  */
 .hs-dock-ghost {
+    /* 两行：`标题 + 意图` 与 `按住 X 可停靠`（见 `DockDropOverlay`）。 */
     display: flex;
-    align-items: center;
-    gap: 6px;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
     max-width: 320px;
     white-space: nowrap;
     /* 提升对比：拖拽提示浮在任意内容之上，底色必须与主界面有明确落差，
@@ -409,9 +411,22 @@
     font-weight: 500;
 }
 
+/* 第一行：`标题 意图` 横向排列。 */
+.hs-dock-ghost-line {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
 /* 次要说明（"停靠 / 浮动"）只降一档不透明度，不再换成 muted 色：
    两者叠加会把对比度压到读不清（用户报告"这个文本的对比度太不明显"）。 */
-.hs-dock-ghost > .hs-dock-ghost-hint {
+.hs-dock-ghost > .hs-dock-ghost-line > .hs-dock-ghost-hint {
+    opacity: 0.85;
+    font-weight: 400;
+}
+
+/* 第二行（停靠方式）：比标题轻一档，但仍用主文本色保证可读。 */
+.hs-dock-ghost-modifier {
     opacity: 0.85;
     font-weight: 400;
 }

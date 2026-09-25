@@ -194,8 +194,6 @@ export const jaJP = {
     panel_io: "入出力",
 
     // ── 停靠窗体系统（Dockable forms）──────────────────────────
-    dock_drag_hint: "ドラッグで並べ替え\n{modifier} を押しながらでドック",
-    dock_drag_hint_always: "ドラッグで並べ替え\nドロップ先でドック",
     dock_float_active: "このパネルをフロート",
     dock_float: "フロート",
     dock_dock: "ドック",
@@ -206,6 +204,9 @@ export const jaJP = {
     dock_expand: "展開",
     dock_collapse: "タブバーに折りたたむ",
     dock_rename_tab: "名前を変更...",
+    dock_drag_rearrange: "ドラッグで並べ替え",
+    dock_dock_hint: "{modifier} を押しながらでドック",
+    dock_dock_hint_always: "ドロップ先でドック",
     dock_hint_dock: "ここにドック",
     dock_hint_float: "フロート",
     dock_hint_snapback: "離してキャンセル",
