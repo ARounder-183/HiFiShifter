@@ -141,6 +141,7 @@ export const webApi = {
     renameClipTake: timelineApi.renameClipTake,
     setClipTakeReversed: timelineApi.setClipTakeReversed,
     setClipTakeChannelMode: timelineApi.setClipTakeChannelMode,
+    scanAndConvertFakeStereo: timelineApi.scanAndConvertFakeStereo,
     addClipTakeFromMedia: timelineApi.addClipTakeFromMedia,
     importMediaFilesAsTakes: timelineApi.importMediaFilesAsTakes,
     duplicateClipsBulk: timelineApi.duplicateClipsBulk,

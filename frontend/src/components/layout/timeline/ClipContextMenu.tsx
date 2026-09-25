@@ -19,8 +19,10 @@ import {
     setClipTakeReversedRemote,
 } from "../../../features/session/sessionSlice";
 import {
+    CHANNEL_MODE_OPTIONS,
     channelModeI18nKey,
     channelModeShortLabel,
+    normalizeChannelMode,
     nextChannelMode,
 } from "../../../utils/channelMode";
 import { webApi } from "../../../services/webviewApi";
@@ -358,6 +360,13 @@ export const ClipContextMenu: React.FC<{
     onSilenceDetection?: (ids: string[]) => void;
     onToggleReverse: (ids: string[], reversed: boolean) => void;
     onToggleLoop?: (ids: string[], loopEnabled: boolean) => void;
+    /**
+     * 批量设置所选 Clip 的声道模式。
+     * `applyToAllTakes` 决定作用范围（false = 仅 active take）。
+     */
+    onSetChannelMode?: (ids: string[], mode: number, applyToAllTakes: boolean) => void;
+    /** 扫描并（可选）把"假立体声"Take 折叠为单声道；`dryRun` 只报告不修改。 */
+    onScanFakeStereo?: (ids: string[], dryRun: boolean) => void;
     /** 切换淡入/淡出的 REAPER 形状预设（保留曲率 dir 不变）。 */
     onFadeShapeChange?: (clipId: string, target: "in" | "out", shape: number) => void;
     /** 打开"编辑播放速率"浮层（锚点 = 菜单位置）。与倍率角标右键同一浮层；
@@ -393,6 +402,8 @@ export const ClipContextMenu: React.FC<{
     onSilenceDetection,
     onToggleReverse,
     onToggleLoop,
+    onSetChannelMode,
+    onScanFakeStereo,
     onFadeShapeChange,
     onEditRate,
 }) => {
@@ -404,6 +415,17 @@ export const ClipContextMenu: React.FC<{
         takeId: string;
         value: string;
     } | null>(null);
+    /**
+     * 批量设置声道模式时的"同步到全部 Take"开关。
+     * 初值跟随全局"同步编辑所有 Take"设置（与后端
+     * `ClipStatePatch::apply_to_all_takes` 缺省行为一致）。
+     */
+    const globalSyncEditsAcrossTakes = useAppSelector(
+        (state) => state.session.syncEditsAcrossTakes,
+    );
+    const [syncChannelModeAllTakes, setSyncChannelModeAllTakes] = useState(
+        globalSyncEditsAcrossTakes,
+    );
     const ids = selectedClips.length >= 2 ? selectedClips.map((c) => c.id) : [clip.id];
     const isMulti = ids.length >= 2;
     const isSingle = !isMulti;
@@ -450,6 +472,11 @@ export const ClipContextMenu: React.FC<{
     const allReversed = isMulti ? selectedClips.every((c) => c.reversed) : clip.reversed;
     // 多选中是否已全部启用 Loop（循环源）
     const allLooped = isMulti ? selectedClips.every((c) => c.loopEnabled) : clip.loopEnabled;
+    // 多选中共同的声道模式（不一致时为 null，子菜单不显示选中标记）。
+    const commonChannelMode = (() => {
+        const modes = new Set(selectedClips.map((c) => normalizeChannelMode(c.channelMode)));
+        return modes.size === 1 ? normalizeChannelMode(clip.channelMode) : null;
+    })();
 
     // 编组 / 解组
     const hasGroup = selectedClips.some((c) => c.groupId != null);
@@ -759,6 +786,59 @@ export const ClipContextMenu: React.FC<{
                     close();
                 }}
             />
+            {onSetChannelMode && (
+                <SubMenu
+                    label={t("ctx_channel_mode")}
+                    badge={
+                        commonChannelMode === null
+                            ? undefined
+                            : channelModeShortLabel(commonChannelMode)
+                    }
+                >
+                    {CHANNEL_MODE_OPTIONS.map((option) => (
+                        <MenuItem
+                            key={option.value}
+                            // ● 标记当前共同模式；多选模式不一致时全部留空。
+                            label={`${commonChannelMode === option.value ? "●" : "\u2003"} ${t(
+                                option.i18nKey,
+                            )}`}
+                            shortcut={option.shortLabel}
+                            onClick={() => {
+                                onSetChannelMode(ids, option.value, syncChannelModeAllTakes);
+                                close();
+                            }}
+                        />
+                    ))}
+                    <Divider />
+                    <MenuItem
+                        label={`${syncChannelModeAllTakes ? "●" : "○"} ${t(
+                            "clip_bulk_apply_all_takes",
+                        )}`}
+                        title={t("clip_bulk_apply_all_takes_hint")}
+                        onClick={() => setSyncChannelModeAllTakes((prev) => !prev)}
+                    />
+                </SubMenu>
+            )}
+            {onScanFakeStereo && (
+                <>
+                    <MenuItem
+                        label={t("ctx_scan_fake_stereo")}
+                        title={t("ctx_scan_fake_stereo_hint")}
+                        onClick={() => {
+                            onScanFakeStereo(ids, false);
+                            close();
+                        }}
+                    />
+                    <MenuItem
+                        label={t("ctx_scan_fake_stereo_dry_run")}
+                        title={t("ctx_scan_fake_stereo_hint")}
+                        onClick={() => {
+                            onScanFakeStereo(ids, true);
+                            close();
+                        }}
+                    />
+                </>
+            )}
             {onToggleLoop && (
                 <MenuItem
                     label={

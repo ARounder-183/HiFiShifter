@@ -73,6 +73,7 @@ import {
     selectTrackRemote,
     setClipStateRemote,
     setClipsStateBulkRemote,
+    scanAndConvertFakeStereoRemote,
     setProjectLengthRemote,
     splitClipRemote,
     splitClipsAtRemote,
@@ -133,7 +134,9 @@ import {
 } from "./thunks/audioThunks";
 
 import {
+    DEFAULT_CHANNEL_IMPORT_POLICY,
     DEFAULT_RENDER_CACHE_SETTINGS,
+    type ChannelImportPolicy,
     type RenderCacheSettings,
 } from "../../services/api/settings";
 
@@ -478,6 +481,8 @@ export interface SessionState {
     autoBackgroundRender: boolean;
     /** 渲染缓存设置：把合成结果落盘，重新打开工程时直接复用。 */
     renderCache: RenderCacheSettings;
+    /** 导入媒体时的声道处理策略（假立体声 → 单声道）。 */
+    channelImportPolicy: ChannelImportPolicy;
     /**
      * 后端"播放/预渲染"状态镜像（`playback_rendering_state` 事件）——只镜像
      * 播放轮询 reducer 需要的 active/target 两个原始值字段（变化低频，且
@@ -1119,6 +1124,10 @@ function applyOptimisticBulkClipState(
         autoFadeOutSec?: number;
         reversed?: boolean;
         loopEnabled?: boolean;
+        /** 声道模式 0..=4（对齐 REAPER CHANMODE）。 */
+        channelMode?: number;
+        /** 覆盖"同步编辑所有 Take"：true = 全部 Take，false = 仅 active take。 */
+        applyToAllTakes?: boolean;
     }>,
 ) {
     // 多选批量拖拽每帧都会带 K 个 update 进来，逐 update 全量 find 是
@@ -1222,7 +1231,10 @@ function applyOptimisticBulkClipState(
         if (update.loopEnabled !== undefined) {
             clip.loopEnabled = Boolean(update.loopEnabled);
         }
-        updateTakesFromFlatWithSync(state, clip);
+        if (update.channelMode !== undefined) {
+            clip.channelMode = normalizeChannelMode(update.channelMode);
+        }
+        updateTakesFromFlatWithSync(state, clip, update.applyToAllTakes);
     }
 }
 
@@ -1405,14 +1417,22 @@ function updateActiveTakeFromFlat(clip: ClipInfo): void {
 
 /**
  * 与后端 `patch_clip_state` 的“同步编辑所有 Take”语义对齐：开启该设置时，
- * 内容级乐观编辑（增益/源窗口/速率/倒放/Loop）需要镜像到全部 Take，
+ * 内容级乐观编辑（增益/源窗口/速率/倒放/Loop/声道模式）需要镜像到全部 Take，
  * 否则多 Take 展示下 inactive lane 的拖拽预览与后端口径短暂分叉
  * （fulfilled 快照才会收敛）。`playbackRate` 平铺值是组合有效速率，
  * 写入各 Take 前按倍率反推 —— 与后端 from_clip 口径一致。
+ *
+ * `applyToAllTakes` 逐请求覆盖该判定（后端 `ClipStatePatch::apply_to_all_takes`
+ * 同款语义）：`undefined` 时跟随全局设置。
  */
-function updateTakesFromFlatWithSync(state: SessionState, clip: ClipInfo): void {
+function updateTakesFromFlatWithSync(
+    state: SessionState,
+    clip: ClipInfo,
+    applyToAllTakes?: boolean,
+): void {
     updateActiveTakeFromFlat(clip);
-    if (!state.syncEditsAcrossTakes) return;
+    const syncAll = applyToAllTakes ?? state.syncEditsAcrossTakes;
+    if (!syncAll) return;
     const takes = clip.takes ?? [];
     if (takes.length <= 1) return;
     const rateMultiplier = getClipRateMultiplier(clip);
@@ -2063,6 +2083,7 @@ const initialState: SessionState = {
     ortDeviceId: null,
     autoBackgroundRender: true,
     renderCache: { ...DEFAULT_RENDER_CACHE_SETTINGS },
+    channelImportPolicy: { ...DEFAULT_CHANNEL_IMPORT_POLICY },
     playbackRenderingActive: false,
     playbackRenderingTarget: null,
     playbackBlockingRenderActive: false,
@@ -2645,6 +2666,10 @@ const sessionSlice = createSlice({
         /** 覆盖整块渲染缓存设置（对话框保存时调用）。 */
         setRenderCacheSettings(state, action: PayloadAction<Partial<RenderCacheSettings>>) {
             state.renderCache = { ...state.renderCache, ...action.payload };
+        },
+        /** 覆盖整块导入声道策略（对话框保存时调用）。 */
+        setChannelImportPolicy(state, action: PayloadAction<Partial<ChannelImportPolicy>>) {
+            state.channelImportPolicy = { ...state.channelImportPolicy, ...action.payload };
         },
         /** 镜像后端 `playback_rendering_state` 事件的 active/target（进度走 App 本地状态）。
          *  `blocking` 为阻塞式前台预渲染（target="original"）的独立镜像；缺省时按
@@ -3530,6 +3555,12 @@ const sessionSlice = createSlice({
                     state.renderCache = {
                         ...DEFAULT_RENDER_CACHE_SETTINGS,
                         ...s.renderCache,
+                    };
+                }
+                if (s.channelImportPolicy) {
+                    state.channelImportPolicy = {
+                        ...DEFAULT_CHANNEL_IMPORT_POLICY,
+                        ...s.channelImportPolicy,
                     };
                 }
                 const selectDir = s.selectDragDirection;
@@ -5672,6 +5703,26 @@ const sessionSlice = createSlice({
                 state.status = "Clip edit rejected";
             })
 
+            .addCase(scanAndConvertFakeStereoRemote.fulfilled, (state, action) => {
+                const payload = action.payload as {
+                    ok?: boolean;
+                    scanned?: number;
+                    converted?: number;
+                };
+                if (!payload.ok) {
+                    state.status = "Fake-stereo scan rejected";
+                    return;
+                }
+                const scanned = payload.scanned ?? 0;
+                const converted = payload.converted ?? 0;
+                state.status = action.meta.arg.dryRun
+                    ? `Fake-stereo scan: ${scanned} take(s), ${converted} foldable`
+                    : `Fake-stereo scan: ${scanned} take(s), ${converted} folded to mono`;
+            })
+            .addCase(scanAndConvertFakeStereoRemote.rejected, (state, action) => {
+                setRejected(state, action);
+            })
+
             .addCase(setClipActiveTakeRemote.pending, (state, action) => {
                 const clip = state.clips.find((entry) => entry.id === action.meta.arg.clipId);
                 if (!clip) return;
@@ -6194,6 +6245,7 @@ export const {
     setOrtDeviceId,
     toggleAutoBackgroundRender,
     setRenderCacheSettings,
+    setChannelImportPolicy,
     setVisibleReferenceRootTrackIds,
     toggleVisibleReferenceRootTrackId,
     setSelectedClip,

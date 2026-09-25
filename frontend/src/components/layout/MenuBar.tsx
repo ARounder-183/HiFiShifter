@@ -82,6 +82,7 @@ import { SCALE_LABELS } from "../../utils/musicalScales";
 import { ExportAudioDialog } from "./ExportAudioDialog";
 import { AutoBackupDialog } from "./AutoBackupDialog";
 import { RenderCacheDialog } from "./RenderCacheDialog";
+import { ChannelImportDialog } from "./ChannelImportDialog";
 import { RecordingSettingsDialog } from "./RecordingSettingsDialog";
 import { BenchmarkDialog } from "./BenchmarkDialog";
 import { AboutDialog } from "./AboutDialog";
@@ -195,6 +196,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     const [benchmarkDialogOpen, setBenchmarkDialogOpen] = useState(false);
     const [aboutDialogOpen, setAboutDialogOpen] = useState(false);
     const [renderCacheDialogOpen, setRenderCacheDialogOpen] = useState(false);
+    const [channelImportDialogOpen, setChannelImportDialogOpen] = useState(false);
     const [dmlAdapters, setDmlAdapters] = useState<
         { deviceId: number; name: string; memoryMb: number }[]
     >([]);
@@ -1226,6 +1228,11 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         {tAny("menu_render_cache_manager")}
                     </DropdownMenu.Item>
 
+                    {/* Import channel policy（假立体声 → 单声道） */}
+                    <DropdownMenu.Item onSelect={() => setChannelImportDialogOpen(true)}>
+                        {tAny("menu_channel_import_settings")}
+                    </DropdownMenu.Item>
+
                     <DropdownMenu.Separator />
 
                     {/* Keyboard Shortcuts — at the bottom */}
@@ -1337,6 +1344,10 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 onSettingsSaved={onAutoBackupSettingsSaved}
             />
 
+            <ChannelImportDialog
+                open={channelImportDialogOpen}
+                onOpenChange={setChannelImportDialogOpen}
+            />
             <RenderCacheDialog
                 open={renderCacheDialogOpen}
                 onOpenChange={setRenderCacheDialogOpen}

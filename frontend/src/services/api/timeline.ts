@@ -33,6 +33,31 @@ export interface SearchSourceFileMatchesResult {
     matches: Record<string, SourceFileMatchCandidate[]>;
 }
 
+/** 假立体声扫描的逐 Take 明细（后端 `FakeStereoScanEntry`）。 */
+export interface FakeStereoScanEntry {
+    clipId: string;
+    takeId: string;
+    name: string;
+    /**
+     * 判定原因：`mono` / `fakeStereo` / `trueStereo` / `unknown` /
+     * `policyOff` / `forcedMono`（后端 `ChannelScanOutcome::as_str`）。
+     */
+    verdict: string;
+    /** 本次实际写入的声道模式（缺省 = 未改动）。 */
+    appliedMode?: number;
+}
+
+/** 假立体声扫描结果（后端 `FakeStereoScanPayload`）。 */
+export interface FakeStereoScanResult {
+    ok: boolean;
+    /** 被检查的 Take 数。 */
+    scanned: number;
+    /** 被折叠（dryRun 时为"将会被折叠"）的 Take 数。 */
+    converted: number;
+    entries: FakeStereoScanEntry[];
+    missingFiles?: string[];
+}
+
 /**
  * Clip 源共振峰分析结果（analyze_clip_formants）。
  * 与后端 commands/formant.rs 的 ClipFormantAnalysisPayload 一一对应。
@@ -310,6 +335,13 @@ export const timelineApi = {
             reversed?: boolean;
             /** Loop（循环源）开关。 */
             loopEnabled?: boolean;
+            /** 声道模式 0..=4（对齐 REAPER CHANMODE）。 */
+            channelMode?: number;
+            /**
+             * 覆盖"同步编辑所有 Take"：true = 全部 Take，false = 仅 active take，
+             * 缺省跟随全局设置 `syncEditsAcrossTakes`。
+             */
+            applyToAllTakes?: boolean;
         }>;
         checkpoint?: boolean;
     }) => invoke<TimelineResult>("set_clips_state_bulk", payload.updates, payload.checkpoint),
@@ -393,6 +425,18 @@ export const timelineApi = {
             payload.takeId,
             payload.channelMode,
             payload.checkpoint,
+        ),
+
+    /**
+     * 扫描并（可选）把"假立体声"Take 折叠为单声道。
+     *
+     * `clipIds` 缺省 = 整个工程；`dryRun` 只报告不修改（供先看结果再确认）。
+     */
+    scanAndConvertFakeStereo: (payload?: { clipIds?: string[]; dryRun?: boolean }) =>
+        invoke<FakeStereoScanResult>(
+            "scan_and_convert_fake_stereo",
+            payload?.clipIds,
+            payload?.dryRun,
         ),
 
     addClipTakeFromMedia: (payload: {

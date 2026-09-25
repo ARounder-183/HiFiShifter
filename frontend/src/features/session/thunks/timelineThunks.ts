@@ -431,6 +431,31 @@ export const setClipTakeChannelModeRemote = createAsyncThunk(
     },
 );
 
+export const scanAndConvertFakeStereoRemote = createAsyncThunk(
+    "session/scanAndConvertFakeStereoRemote",
+    async (
+        payload: { clipIds?: string[]; dryRun?: boolean },
+        { dispatch, rejectWithValue },
+    ) => {
+        let result: Awaited<ReturnType<typeof webApi.scanAndConvertFakeStereo>>;
+        try {
+            result = await webApi.scanAndConvertFakeStereo(payload);
+        } catch (err) {
+            void dispatch(fetchTimeline());
+            throw err;
+        }
+        // 扫描本身只报告；只有实扫（dryRun 缺省）才改动了时间轴。后端整批只打
+        // 一个撤销步，前端因此不做逐条乐观更新，直接拉权威时间线对齐。
+        if (!payload.dryRun) {
+            void dispatch(fetchTimeline());
+        }
+        if (!result.ok) {
+            return rejectWithValue(result);
+        }
+        return result;
+    },
+);
+
 export const addClipTakeFromMediaRemote = createAsyncThunk(
     "session/addClipTakeFromMediaRemote",
     async (payload: {
@@ -466,6 +491,13 @@ export const setClipsStateBulkRemote = createAsyncThunk(
             autoFadeOutSec?: number;
             reversed?: boolean;
             loopEnabled?: boolean;
+            /** 声道模式 0..=4（对齐 REAPER CHANMODE）。 */
+            channelMode?: number;
+            /**
+             * 覆盖"同步编辑所有 Take"：true = 全部 Take，false = 仅 active take，
+             * 缺省跟随全局设置。
+             */
+            applyToAllTakes?: boolean;
         }>;
         checkpoint?: boolean;
     }) => {

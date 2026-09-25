@@ -90,6 +90,7 @@ import {
     importMultipleAudioAtPosition,
     setClipStateRemote,
     setClipsStateBulkRemote,
+    scanAndConvertFakeStereoRemote,
     setClipFades,
     setClipGain,
     setClipPlaybackRate,
@@ -6329,6 +6330,31 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                               setClipsStateBulkRemote({
                                                   updates,
                                                   checkpoint: true,
+                                              }),
+                                          );
+                                      }}
+                                      onSetChannelMode={(ids, mode, applyToAllTakes) => {
+                                          // 批量走 bulk 通道：单次 IPC + 单个撤销步。
+                                          // `applyToAllTakes` 逐请求覆盖全局的
+                                          // "同步编辑所有 Take"设置。
+                                          void dispatch(
+                                              setClipsStateBulkRemote({
+                                                  updates: ids.map((id) => ({
+                                                      clipId: id,
+                                                      channelMode: mode,
+                                                      applyToAllTakes,
+                                                  })),
+                                                  checkpoint: true,
+                                              }),
+                                          );
+                                      }}
+                                      onScanFakeStereo={(ids, dryRun) => {
+                                          // 后端整批只打一个撤销步，因此前端不做
+                                          // 逐条乐观更新；结果摘要写进状态行。
+                                          void dispatch(
+                                              scanAndConvertFakeStereoRemote({
+                                                  clipIds: ids,
+                                                  dryRun,
                                               }),
                                           );
                                       }}

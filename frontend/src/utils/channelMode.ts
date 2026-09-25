@@ -80,3 +80,16 @@ export function channelModeShortLabel(value: number | null | undefined): string 
             return "L·R";
     }
 }
+
+/** 供 picker / 子菜单使用的模式选项表（顺序即展示顺序）。 */
+export const CHANNEL_MODE_OPTIONS: ReadonlyArray<{
+    value: TakeChannelModeRaw;
+    i18nKey: MessageKey;
+    shortLabel: string;
+}> = [
+    { value: 0, i18nKey: "clip_channel_mode_normal", shortLabel: "L·R" },
+    { value: 1, i18nKey: "clip_channel_mode_swap", shortLabel: "⇄" },
+    { value: 2, i18nKey: "clip_channel_mode_mono_mix", shortLabel: "MIX" },
+    { value: 3, i18nKey: "clip_channel_mode_mono_left", shortLabel: "L" },
+    { value: 4, i18nKey: "clip_channel_mode_mono_right", shortLabel: "R" },
+];

@@ -218,11 +218,106 @@ export interface UiSettings {
      * 配置文件"，一次写入同时落盘两者可以少一轮文件往返，也少一个并发窗口。
      */
     dock?: DockPersistedSettings;
+    /** 导入媒体时的声道处理策略（假立体声 → 单声道）。 */
+    channelImportPolicy?: ChannelImportPolicy;
     customScalePresets?: Array<{
         id: string;
         name: string;
         notes: number[];
     }>;
+}
+
+/** 导入声道处理策略的总模式。 */
+export type ChannelImportMode = "smart" | "alwaysMono" | "off";
+
+/**
+ * 导入媒体时的声道处理策略（持久化到 app_config.json 的 `ui.channelImportPolicy`）。
+ *
+ * 背景：真立体声源在渲染时会把整条处理器链按声道跑两遍，耗时翻倍。大量
+ * "人力"素材实际是单声道内容被混流成双声道（两声道逐样本相同），折叠为
+ * 单声道后听感不变、耗时减半。
+ *
+ * 作用范围仅限"无声道权威来源"的新建 Take：媒体导入、VocalShifter 导入、
+ * 以及 v4 及更早工程的 Take 升级。REAPER 导入导出自带 CHANMODE，不受影响。
+ */
+export interface ChannelImportPolicy {
+    /** `smart`（智能判定，默认）/ `alwaysMono` / `off`。 */
+    mode: ChannelImportMode;
+    /** 抽样窗口时长（秒）。 */
+    windowSec: number;
+    /** 抽样窗口数（0 = 不限，扫描整个消费区间）。 */
+    windowCount: number;
+    /** 逐样本绝对差容差（覆盖有损编码的量化噪声）。 */
+    tolerance: number;
+    /** 转换目标模式：2 = 混合为单声道（默认）/ 3 = 仅左 / 4 = 仅右。 */
+    monoTargetMode: number;
+    /** 打开旧工程（v4 及更早）时对未记录声道模式的 Take 一并套用。 */
+    applyToLegacyTakes: boolean;
+    /** 批量转换时是否作用于 Clip 的全部 Take（false = 仅 active take）。 */
+    applyToAllTakes: boolean;
+}
+
+/** 导入声道策略的出厂默认值（与后端 `config::ChannelImportPolicy::default` 对齐）。 */
+export const DEFAULT_CHANNEL_IMPORT_POLICY: ChannelImportPolicy = {
+    mode: "smart",
+    windowSec: 0.25,
+    windowCount: 12,
+    tolerance: 1e-6,
+    monoTargetMode: 2,
+    applyToLegacyTakes: true,
+    applyToAllTakes: false,
+};
+
+/** 容差的可选档位（dBFS 量级的直觉映射：越小越严格）。 */
+export const CHANNEL_TOLERANCE_PRESETS: ReadonlyArray<{ value: number; label: string }> = [
+    { value: 0, label: "0" },
+    { value: 1e-6, label: "1e-6" },
+    { value: 1e-5, label: "1e-5" },
+    { value: 1e-4, label: "1e-4" },
+    { value: 1e-3, label: "1e-3" },
+];
+
+/**
+ * 规范化导入声道策略（钳制越界值、回退非法枚举），保存前调用。
+ * 与后端 `ChannelImportPolicy::normalized` 保持同口径。
+ */
+export function normalizeChannelImportPolicy(input: ChannelImportPolicy): ChannelImportPolicy {
+    const clampNumber = (value: number, min: number, max: number, fallback: number) => {
+        if (!Number.isFinite(value)) return fallback;
+        return Math.min(max, Math.max(min, value));
+    };
+    const mode: ChannelImportMode = (["smart", "alwaysMono", "off"] as const).includes(input.mode)
+        ? input.mode
+        : DEFAULT_CHANNEL_IMPORT_POLICY.mode;
+    return {
+        mode,
+        windowSec: clampNumber(
+            input.windowSec,
+            0.05,
+            5,
+            DEFAULT_CHANNEL_IMPORT_POLICY.windowSec,
+        ),
+        windowCount: Math.min(
+            256,
+            Math.max(
+                0,
+                Number.isFinite(input.windowCount)
+                    ? Math.round(input.windowCount)
+                    : DEFAULT_CHANNEL_IMPORT_POLICY.windowCount,
+            ),
+        ),
+        tolerance: clampNumber(
+            input.tolerance,
+            0,
+            0.1,
+            DEFAULT_CHANNEL_IMPORT_POLICY.tolerance,
+        ),
+        monoTargetMode: [2, 3, 4].includes(input.monoTargetMode)
+            ? input.monoTargetMode
+            : DEFAULT_CHANNEL_IMPORT_POLICY.monoTargetMode,
+        applyToLegacyTakes: Boolean(input.applyToLegacyTakes),
+        applyToAllTakes: Boolean(input.applyToAllTakes),
+    };
 }
 
 export const settingsApi = {

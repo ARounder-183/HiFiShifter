@@ -330,6 +330,12 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
                 checkpoint: args[3],
             };
 
+        case "scan_and_convert_fake_stereo":
+            return {
+                clipIds: args[0],
+                dryRun: args[1],
+            };
+
         case "add_clip_take_from_media":
             return {
                 clipId: args[0],
