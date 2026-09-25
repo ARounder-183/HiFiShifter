@@ -1926,6 +1926,21 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
     // source_channels 未知（旧工程 take 未记录）时按单声道处理：条件化后两
     // 平面相同（mono 源复制），输出与旧实现一致；若源实为立体声但未记录，
     // 退化为旧的"左声道坍缩"行为（与升级前一致，不引入新的错误）。
+    //
+    // ── 为什么扇出是串行的（不要改成 rayon 并行）──────────────────────────
+    // 曾评估把 L/R 两路并行化以缩短真立体声的渲染耗时。实测前置条件不成立：
+    // 三个 ONNX 模型的推理会话都是**单个共享 `Arc<Mutex<Session>>`**
+    // （`nsf_hifigan_onnx.rs` / `hnsep_onnx.rs` / `fcpe_onnx.rs` 的
+    // `SHARED_SESSION`），HiFiGAN 的分块缓存与 HNSEP 的分离缓存也是全局
+    // `Mutex`。而 ONNX 推理正是本链路的耗时主体，两路并行只会在同一把会话锁
+    // 上互相争用 —— 墙钟收益接近零甚至为负。
+    //
+    // 更关键的是风险不对称：WORLD 路径会进入 WORLD C 库，其重入性无法从本
+    // 工程侧证实，一旦判断错误是**静默的音频损坏**而非报错。
+    //
+    // 真立体声的提速因此走另一条路：把"内容是单声道、被混流成双声道"的假
+    // 立体声在导入时折叠为单声道（见 `crate::channel_policy`），使
+    // `fanout_channels` 恒为 1 —— 对这类素材是无损的，且不需要任何并发。
     let frames = seg_frames;
     // kind / clip_playback_rate / processor_handles_stretch / expected_out_frames 已在函数上方计算
     let source_channels = clip.source_channels.unwrap_or(1).max(1) as usize;

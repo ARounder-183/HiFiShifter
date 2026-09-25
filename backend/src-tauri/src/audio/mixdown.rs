@@ -9,6 +9,17 @@ use std::sync::Arc;
 // ─── 导出格式与质量预设 ────────────────────────────────────────────────────────
 
 /// 质量预设，区分实时预览和最终导出场景。
+///
+/// **当前状态：占位，尚未被消费。** 所有调用点都正确地传入了预设，但
+/// `render_mixdown_interleaved` 内部从不读取 [`MixdownOptions::quality_preset`]，
+/// 因此改变它不会改变输出。
+///
+/// 让它真正生效需要先定义"两个档位差在哪"（例如拉伸算法/质量、分析窗长），
+/// 而这会直接影响输出内容 —— 注意拉伸算法还决定**时间对齐**，预览与导出用
+/// 不同算法会让两者错位，所以不能简单地按档位切换算法。任何这类改动都必须
+/// 用真实素材做 A/B 试听验证后才可合入。
+///
+/// 在补齐语义之前，本字段保持"写入但忽略"，不要基于它做优化假设。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum QualityPreset {
     /// 快速模式，用于播放预览（默认）。
@@ -29,6 +40,9 @@ pub struct MixdownOptions {
     /// 位深、编码参数等由 `crate::encode::OutputSpec` 统一描述。
     pub output: OutputSpec,
     /// 质量预设，默认 [`QualityPreset::Realtime`]。
+    ///
+    /// **尚未被消费** —— 见 [`QualityPreset`] 的说明。调用点应继续正确传入，
+    /// 以便补齐语义时无需再改一遍所有调用点；但不要据此推断行为差异。
     #[allow(dead_code)]
     pub quality_preset: QualityPreset,
     /// 可选取消标记：为 true 时中断渲染并返回 `export_cancelled`。
