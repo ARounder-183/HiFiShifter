@@ -1,60 +1,75 @@
 import { describe, expect, it } from "vitest";
 
 import {
-    CHANNEL_TOLERANCE_PRESETS,
     DEFAULT_CHANNEL_IMPORT_POLICY,
+    TOLERANCE_PERCENT_MAX,
     normalizeChannelImportPolicy,
+    percentToTolerance,
+    toleranceToPercent,
     type ChannelImportPolicy,
 } from "./settings";
 
 /**
  * 导入声道策略设置的回归测试。
  *
- * 【为什么需要】容差下拉框曾经"显示不出内容"：`Select.Root` 的 `value` 用
- * `String(1e-3)` = `"0.001"`，而 `Select.Item` 的 `value` 写的是 `"1e-3"`。
- * Radix 找不到匹配项时 Trigger 渲染空白 —— 界面看起来是坏的，且没有任何断言
- * 会失败。下面第一条用例就是这个缺陷的守卫：下拉项与当前值必须用**同一套
- * 编码**，并且默认值必须落在档位里。
+ * 容差在界面上以**满幅百分比**呈现（0.1% ↔ 1e-3），因此换算与格式化是这块
+ * 最容易出错的地方：曾经容差下拉框因为"选项用 '1e-3' 字面量、当前值用
+ * String(1e-3)='0.001'"而永久显示空白 —— 界面看起来是坏的，却没有任何断言
+ * 会失败。下面守住的是同一类问题：换算必须精确、必须单调、必须不产生
+ * 二进制表示残渣。
  */
 
 describe("channel import policy", () => {
-    it("keeps the default tolerance inside the preset list", () => {
-        // 下拉项的取值必须由同一个函数产出；默认值必须能被选中，否则
-        // Trigger 会显示空白（曾经的实际缺陷）。
-        const values = CHANNEL_TOLERANCE_PRESETS.map(String);
-        expect(values).toContain(String(DEFAULT_CHANNEL_IMPORT_POLICY.tolerance));
+    it("maps the default tolerance to a clean percentage", () => {
         expect(DEFAULT_CHANNEL_IMPORT_POLICY.tolerance).toBe(1e-3);
+        expect(toleranceToPercent(1e-3)).toBe(0.1);
+        expect(toleranceToPercent(0)).toBe(0);
+        // 后端钳制上限 0.1 ↔ 界面 10%。
+        expect(toleranceToPercent(0.1)).toBe(TOLERANCE_PERCENT_MAX);
     });
 
-    it("has strictly increasing, de-duplicated preset values", () => {
-        // 顺序即滚轮方向（由严到松），重复值会让滚轮"卡住"。
-        for (let i = 1; i < CHANNEL_TOLERANCE_PRESETS.length; i += 1) {
-            expect(CHANNEL_TOLERANCE_PRESETS[i]).toBeGreaterThan(
-                CHANNEL_TOLERANCE_PRESETS[i - 1],
-            );
-        }
-        expect(new Set(CHANNEL_TOLERANCE_PRESETS.map(String)).size).toBe(
-            CHANNEL_TOLERANCE_PRESETS.length,
-        );
-    });
-
-    it("keeps every preset inside the backend clamp range", () => {
-        // 后端 normalized() 把容差钳到 [0, 0.1]；越界的档位选完就会被改写，
-        // 表现为"选了又跳回去"。
-        for (const preset of CHANNEL_TOLERANCE_PRESETS) {
-            expect(preset).toBeGreaterThanOrEqual(0);
-            expect(preset).toBeLessThanOrEqual(0.1);
+    it("round-trips every representable percentage without drift", () => {
+        for (const percent of [0, 0.01, 0.1, 0.5, 1, 2.5, 10]) {
+            expect(toleranceToPercent(percentToTolerance(percent))).toBe(percent);
         }
     });
 
-    it("preserves every preset through normalization", () => {
-        for (const preset of CHANNEL_TOLERANCE_PRESETS) {
+    it("does not leak binary float residue into the displayed value", () => {
+        // 1e-6 × 100 在 IEEE754 下是 0.00009999999999999999；直接展示会让
+        // 输入框里出现一串数字垃圾（旧配置里可能存着 1e-6）。
+        expect(String(toleranceToPercent(1e-6))).toBe("0.0001");
+        expect(String(toleranceToPercent(1e-5))).toBe("0.001");
+        for (const tolerance of [1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 0.1]) {
+            const text = String(toleranceToPercent(tolerance));
+            expect(text.length).toBeLessThan(10);
+        }
+    });
+
+    it("survives non-finite inputs from an empty or malformed field", () => {
+        expect(toleranceToPercent(Number.NaN)).toBe(0);
+        expect(percentToTolerance(Number.NaN)).toBe(0);
+    });
+
+    it("preserves every preset-equivalent percentage through normalization", () => {
+        for (const percent of [0, 0.0001, 0.001, 0.01, 0.1, 1, 10]) {
             const policy: ChannelImportPolicy = {
                 ...DEFAULT_CHANNEL_IMPORT_POLICY,
-                tolerance: preset,
+                tolerance: percentToTolerance(percent),
             };
-            expect(normalizeChannelImportPolicy(policy).tolerance).toBe(preset);
+            expect(normalizeChannelImportPolicy(policy).tolerance).toBe(
+                percentToTolerance(percent),
+            );
         }
+    });
+
+    it("clamps percentages above the backend limit", () => {
+        // 超过 10% 的输入会被后端钳到 0.1；界面回读为 10%，不会"跳回去"。
+        const normalized = normalizeChannelImportPolicy({
+            ...DEFAULT_CHANNEL_IMPORT_POLICY,
+            tolerance: percentToTolerance(25),
+        });
+        expect(normalized.tolerance).toBe(0.1);
+        expect(toleranceToPercent(normalized.tolerance)).toBe(TOLERANCE_PERCENT_MAX);
     });
 
     it("clamps out-of-range values and falls back on bad enums", () => {

@@ -269,20 +269,30 @@ export const DEFAULT_CHANNEL_IMPORT_POLICY: ChannelImportPolicy = {
 };
 
 /**
- * 容差档位（由严到松）。数值即"允许的逐样本最大绝对差"。
- *
- * `0` = 逐样本完全相等；1e-6 ≈ 24bit 量化底噪；1e-3（默认）≈ -60 dBFS；
- * 1e-1 = 后端钳制上限（非常宽松，仅对极端有损素材有意义）。
+ * 容差上限（百分比）。`tolerance` 是"允许的逐样本最大绝对差"，以满幅为 1；
+ * 后端把它钳到 `[0, 0.1]`，因此百分比上限为 10。
  */
-export const CHANNEL_TOLERANCE_PRESETS: readonly number[] = [
-    0,
-    1e-6,
-    1e-5,
-    1e-4,
-    1e-3,
-    1e-2,
-    1e-1,
-];
+export const TOLERANCE_PERCENT_MAX = 10;
+
+/**
+ * 容差 → 百分比（界面展示单位）。
+ *
+ * 百分比是容差最自然的读法：0.1% 即满幅的千分之一（≈ -60 dBFS），
+ * `0` 表示逐样本完全相等。界面上让用户直接填百分比，避免在 `1e-3`
+ * 这种科学计数法里数零。
+ *
+ * 展示值取 6 位小数：足以表达 [0, 10]% 内任何有意义的精度，同时消掉
+ * `1e-6 × 100 = 0.00009999999999999999` 这类二进制表示残渣。
+ */
+export function toleranceToPercent(tolerance: number): number {
+    const percent = (Number.isFinite(tolerance) ? tolerance : 0) * 100;
+    return Math.round(percent * 1e6) / 1e6;
+}
+
+/** 百分比 → 容差（写回策略）。越界值由 `normalizeChannelImportPolicy` 收口。 */
+export function percentToTolerance(percent: number): number {
+    return (Number.isFinite(percent) ? percent : 0) / 100;
+}
 
 /**
  * 规范化导入声道策略（钳制越界值、回退非法枚举），保存前调用。

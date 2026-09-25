@@ -642,7 +642,6 @@ export const zhTW = {
     ctx_group: "編組",
     ctx_pitch_reference: "音高參考",
     ctx_export: "匯出",
-    clip_channel_import_tolerance_custom: "自訂",
     ctx_scan_fake_stereo: "掃描假立體聲並轉換",
     ctx_scan_fake_stereo_hint:
         "左右聲道內容一致的素材可折疊為單聲道：聽感不變，渲染耗時減半。整批只產生一個復原步驟。",
@@ -662,9 +661,7 @@ export const zhTW = {
     clip_channel_import_window_hint:
         "視窗沿素材的消費區間均勻展開，首尾皆涵蓋；0 表示不取樣、掃描整個區間。",
     clip_channel_import_tolerance: "容差",
-    clip_channel_import_tolerance_exact: "逐樣本完全相等",
-    clip_channel_import_tolerance_hint:
-        "有損編碼（MP3/AAC）解碼後左右聲道可能有微小差異；容差太嚴會漏判，太鬆會誤折疊。",
+    clip_channel_import_tolerance_hint: "左右聲道的允許差異（滿幅百分比）。0 = 完全一致；0.1（預設）≈ -60 dBFS。有損編碼解碼後左右會有微小差異，容差太嚴會漏判。",
     clip_take_remove: "刪除 Take",
     clip_take_explode: "將 Take 展開為獨立音訊塊",
     clip_take_rename: "重新命名 Take",

@@ -23,8 +23,10 @@ import { Button, Dialog, Flex, Select, Separator, Text, TextField } from "@radix
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { useI18n } from "../../i18n/I18nProvider";
 import {
-    CHANNEL_TOLERANCE_PRESETS,
+    TOLERANCE_PERCENT_MAX,
     normalizeChannelImportPolicy,
+    percentToTolerance,
+    toleranceToPercent,
     type ChannelImportMode,
     type ChannelImportPolicy,
 } from "../../services/api/settings";
@@ -51,17 +53,6 @@ const TARGET_MODE_OPTIONS: ReadonlyArray<{ value: string; labelKey: string }> = 
     { value: "3", labelKey: "clip_channel_mode_mono_left" },
     { value: "4", labelKey: "clip_channel_mode_mono_right" },
 ];
-
-/**
- * 容差下拉项的取值字符串。
- *
- * 必须与 `Select.Root` 的 `value` 用**同一套编码**：`String(1e-3)` 得到
- * `"0.001"`，若选项用 `"1e-3"` 当 value，两者永不相等 —— Radix 找不到匹配项
- * 时 Trigger 会显示空白（曾经的实际缺陷）。这里统一走 `String(number)`。
- */
-function toleranceValueOf(tolerance: number): string {
-    return String(tolerance);
-}
 
 export function ChannelImportDialog({ open, onOpenChange }: ChannelImportDialogProps) {
     const dispatch = useAppDispatch();
@@ -148,11 +139,6 @@ export function ChannelImportDialog({ open, onOpenChange }: ChannelImportDialogP
     // "智能转换"才需要采样参数；"全部转换"只用到目标模式；"不自动转换"都不需要。
     const isSmart = draft.mode === "smart";
     const isOff = draft.mode === "off";
-    const toleranceValues = CHANNEL_TOLERANCE_PRESETS.map(toleranceValueOf);
-    // 当前值可能不在档位里（手改过配置文件）：退化为"不选中"，而不是显示空白。
-    const toleranceValue = toleranceValues.includes(toleranceValueOf(draft.tolerance))
-        ? toleranceValueOf(draft.tolerance)
-        : undefined;
 
     return (
         <Dialog.Root open={open} onOpenChange={onOpenChange}>
@@ -246,37 +232,40 @@ export function ChannelImportDialog({ open, onOpenChange }: ChannelImportDialogP
 
                             <Flex align="center" justify="between" gap="3">
                                 <Text size="2">{tAny("clip_channel_import_tolerance")}</Text>
-                                <Select.Root
-                                    value={toleranceValue}
-                                    onValueChange={(value) => patch({ tolerance: Number(value) })}
-                                >
-                                    <Select.Trigger
-                                        placeholder={tAny("clip_channel_import_tolerance_custom")}
-                                        style={{ minWidth: 220 }}
-                                        onWheel={(event) => {
-                                            if (toleranceValue === undefined) return;
-                                            applySelectWheelChange({
+                                <Flex align="center" gap="2">
+                                    <TextField.Root
+                                        type="number"
+                                        min={0}
+                                        max={TOLERANCE_PERCENT_MAX}
+                                        step={0.1}
+                                        style={{ width: 120 }}
+                                        value={String(toleranceToPercent(draft.tolerance))}
+                                        onChange={(event) =>
+                                            patch({
+                                                tolerance: percentToTolerance(
+                                                    Number(event.target.value),
+                                                ),
+                                            })
+                                        }
+                                        onWheel={(event) =>
+                                            stepNumber(
                                                 event,
-                                                currentValue: toleranceValue,
-                                                options: toleranceValues,
-                                                onChange: (next) =>
-                                                    patch({ tolerance: Number(next) }),
-                                            });
-                                        }}
+                                                toleranceToPercent(draft.tolerance),
+                                                0.1,
+                                                0.01,
+                                                0,
+                                                TOLERANCE_PERCENT_MAX,
+                                                (next) =>
+                                                    patch({
+                                                        tolerance: percentToTolerance(next),
+                                                    }),
+                                            )
+                                        }
                                     />
-                                    <Select.Content>
-                                        {CHANNEL_TOLERANCE_PRESETS.map((preset) => (
-                                            <Select.Item
-                                                key={toleranceValueOf(preset)}
-                                                value={toleranceValueOf(preset)}
-                                            >
-                                                {preset === 0
-                                                    ? tAny("clip_channel_import_tolerance_exact")
-                                                    : toleranceValueOf(preset)}
-                                            </Select.Item>
-                                        ))}
-                                    </Select.Content>
-                                </Select.Root>
+                                    <Text size="2" color="gray">
+                                        %
+                                    </Text>
+                                </Flex>
                             </Flex>
                             <Text size="1" color="gray">
                                 {tAny("clip_channel_import_tolerance_hint")}

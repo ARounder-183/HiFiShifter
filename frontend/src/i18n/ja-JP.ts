@@ -668,7 +668,6 @@ export const jaJP = {
     ctx_group: "グループ",
     ctx_pitch_reference: "ピッチ参照",
     ctx_export: "書き出し",
-    clip_channel_import_tolerance_custom: "カスタム",
     ctx_scan_fake_stereo: "疑似ステレオをスキャンして変換",
     ctx_scan_fake_stereo_hint:
         "左右の内容が同一の素材はモノラルに折りたたむと、聴感は変わらずレンダリング時間が半減します。一括処理は 1 回の元に戻す操作にまとまります。",
@@ -690,9 +689,7 @@ export const jaJP = {
     clip_channel_import_window_hint:
         "窓は素材の消費区間に均等に配置され、先頭と末尾も必ず含まれます。0 はサンプリングせず全区間を走査します。",
     clip_channel_import_tolerance: "許容差",
-    clip_channel_import_tolerance_exact: "サンプル単位で完全一致",
-    clip_channel_import_tolerance_hint:
-        "非可逆圧縮（MP3/AAC）ではデコード後の左右に微小な差が出ます。厳しすぎると見逃し、緩すぎると誤って折りたたみます。",
+    clip_channel_import_tolerance_hint: "左右チャンネルに許容する差（フルスケール比）。0 = 完全一致、0.1（既定）≈ -60 dBFS。非可逆圧縮はデコード後に微小な差が残るため、厳しすぎると見逃します。",
     clip_take_remove: "テイクを削除",
     clip_take_explode: "テイクを個別クリップに展開",
     clip_take_rename: "テイク名を変更",

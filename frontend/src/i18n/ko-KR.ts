@@ -737,7 +737,6 @@ export const koKR = {
     ctx_group: "그룹",
     ctx_pitch_reference: "피치 참조",
     ctx_export: "내보내기",
-    clip_channel_import_tolerance_custom: "사용자 지정",
     ctx_scan_fake_stereo: "가짜 스테레오 검사 후 변환",
     ctx_scan_fake_stereo_hint:
         "좌우 내용이 같은 소재는 모노로 접으면 들리는 소리는 그대로이고 렌더링 시간이 절반으로 줄어듭니다. 일괄 처리는 실행 취소 한 단계로 묶입니다.",
@@ -759,9 +758,7 @@ export const koKR = {
     clip_channel_import_window_hint:
         "창은 소재의 소비 구간에 고르게 배치되며 처음과 끝을 모두 포함합니다. 0이면 샘플링하지 않고 전체 구간을 검사합니다.",
     clip_channel_import_tolerance: "허용 오차",
-    clip_channel_import_tolerance_exact: "샘플 단위 완전 일치",
-    clip_channel_import_tolerance_hint:
-        "손실 압축(MP3/AAC)은 디코딩 후 좌우에 미세한 차이가 생깁니다. 너무 엄격하면 놓치고, 너무 느슨하면 잘못 접습니다.",
+    clip_channel_import_tolerance_hint: "좌우 채널에 허용할 차이(풀 스케일 비율). 0 = 완전 일치, 0.1(기본) ≈ -60 dBFS. 손실 압축은 디코딩 후 미세한 차이가 남으므로 너무 엄격하면 놓칩니다.",
     clip_take_remove: "테이크 삭제",
     clip_take_explode: "테이크를 개별 클립으로 분리",
     clip_take_rename: "테이크 이름 바꾸기",

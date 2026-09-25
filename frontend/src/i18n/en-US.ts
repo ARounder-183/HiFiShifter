@@ -800,7 +800,6 @@ export const enUS = {
     ctx_group: "Grouping",
     ctx_pitch_reference: "Pitch Reference",
     ctx_export: "Export",
-    clip_channel_import_tolerance_custom: "Custom",
     ctx_scan_fake_stereo: "Scan for Fake Stereo and Convert",
     ctx_scan_fake_stereo_hint:
         "Material whose left and right channels match can be folded to mono: identical sound, half the render time. A batch run becomes a single undo step.",
@@ -822,9 +821,7 @@ export const enUS = {
     clip_channel_import_window_hint:
         "Windows spread evenly across the material's consumed range, always covering both ends. 0 scans the whole range without sampling.",
     clip_channel_import_tolerance: "Tolerance",
-    clip_channel_import_tolerance_exact: "Sample-exact",
-    clip_channel_import_tolerance_hint:
-        "Lossy codecs (MP3/AAC) can decode left and right with tiny differences. Too strict misses folds; too loose folds by mistake.",
+    clip_channel_import_tolerance_hint: "Allowed difference between channels, as a percentage of full scale. 0 = sample-exact; 0.1 (default) ≈ -60 dBFS. Lossy codecs leave tiny differences after decoding, so too strict a tolerance misses folds.",
     clip_take_remove: "Delete Take",
     clip_take_explode: "Explode Takes into Clips",
     clip_take_rename: "Rename Take",
