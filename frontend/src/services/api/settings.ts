@@ -270,9 +270,9 @@ export const DEFAULT_CHANNEL_IMPORT_POLICY: ChannelImportPolicy = {
 
 /**
  * 容差上限（百分比）。`tolerance` 是"允许的逐样本最大绝对差"，以满幅为 1；
- * 后端把它钳到 `[0, 0.1]`，因此百分比上限为 10。
+ * 后端把它钳到 `[0, 1]`，因此百分比上限为 100。
  */
-export const TOLERANCE_PERCENT_MAX = 10;
+export const TOLERANCE_PERCENT_MAX = 100;
 
 /**
  * 容差 → 百分比（界面展示单位）。
@@ -281,7 +281,7 @@ export const TOLERANCE_PERCENT_MAX = 10;
  * `0` 表示逐样本完全相等。界面上让用户直接填百分比，避免在 `1e-3`
  * 这种科学计数法里数零。
  *
- * 展示值取 6 位小数：足以表达 [0, 10]% 内任何有意义的精度，同时消掉
+ * 展示值取 6 位小数：足以表达 [0, 100]% 内任何有意义的精度，同时消掉
  * `1e-6 × 100 = 0.00009999999999999999` 这类二进制表示残渣。
  */
 export function toleranceToPercent(tolerance: number): number {
@@ -326,7 +326,7 @@ export function normalizeChannelImportPolicy(input: ChannelImportPolicy): Channe
         tolerance: clampNumber(
             input.tolerance,
             0,
-            0.1,
+            1,
             DEFAULT_CHANNEL_IMPORT_POLICY.tolerance,
         ),
         monoTargetMode: [2, 3, 4].includes(input.monoTargetMode)

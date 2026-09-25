@@ -667,7 +667,8 @@ export const zhTW = {
     clip_channel_import_window_hint:
         "視窗沿素材的消費區間均勻展開，首尾皆涵蓋；0 表示不取樣、掃描整個區間。",
     clip_channel_import_tolerance: "容差",
-    clip_channel_import_tolerance_hint: "左右聲道的允許差異（滿幅百分比）。0 = 完全一致；0.1（預設）≈ -60 dBFS。有損編碼解碼後左右會有微小差異，容差太嚴會漏判。",
+    clip_channel_import_tolerance_hint:
+        "左右聲道的允許差異（滿幅百分比）。0 = 完全一致；0.1%（預設）≈ -60 dBFS。有損編碼解碼後左右會有微小差異，容差太嚴會漏判。可調範圍 0~100。",
     clip_channel_import_save: "儲存",
     clip_take_remove: "刪除 Take",
     clip_take_explode: "將 Take 展開為獨立音訊塊",

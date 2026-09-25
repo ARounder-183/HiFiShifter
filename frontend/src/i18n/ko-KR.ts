@@ -764,7 +764,8 @@ export const koKR = {
     clip_channel_import_window_hint:
         "창은 소재의 소비 구간에 고르게 배치되며 처음과 끝을 모두 포함합니다. 0이면 샘플링하지 않고 전체 구간을 검사합니다.",
     clip_channel_import_tolerance: "허용 오차",
-    clip_channel_import_tolerance_hint: "좌우 채널에 허용할 차이(풀 스케일 비율). 0 = 완전 일치, 0.1(기본) ≈ -60 dBFS. 손실 압축은 디코딩 후 미세한 차이가 남으므로 너무 엄격하면 놓칩니다.",
+    clip_channel_import_tolerance_hint:
+        "좌우 채널에 허용할 차이(풀 스케일 비율). 0 = 완전 일치, 0.1%(기본) ≈ -60 dBFS. 손실 압축은 디코딩 후 미세한 차이가 남으므로 너무 엄격하면 놓칩니다. 조정 범위는 0~100입니다.",
     clip_channel_import_save: "저장",
     clip_take_remove: "테이크 삭제",
     clip_take_explode: "테이크를 개별 클립으로 분리",

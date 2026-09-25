@@ -695,7 +695,8 @@ export const jaJP = {
     clip_channel_import_window_hint:
         "窓は素材の消費区間に均等に配置され、先頭と末尾も必ず含まれます。0 はサンプリングせず全区間を走査します。",
     clip_channel_import_tolerance: "許容差",
-    clip_channel_import_tolerance_hint: "左右チャンネルに許容する差（フルスケール比）。0 = 完全一致、0.1（既定）≈ -60 dBFS。非可逆圧縮はデコード後に微小な差が残るため、厳しすぎると見逃します。",
+    clip_channel_import_tolerance_hint:
+        "左右チャンネルに許容する差（フルスケール比）。0 = 完全一致、0.1%（既定）≈ -60 dBFS。非可逆圧縮はデコード後に微小な差が残るため、厳しすぎると見逃します。調整範囲は 0〜100 です。",
     clip_channel_import_save: "保存",
     clip_take_remove: "テイクを削除",
     clip_take_explode: "テイクを個別クリップに展開",

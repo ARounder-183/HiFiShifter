@@ -67,7 +67,8 @@ impl DetectOptions {
             },
             window_count: self.window_count.min(256),
             tolerance: if self.tolerance.is_finite() {
-                self.tolerance.clamp(0.0, 0.1)
+                // 与 `ChannelImportPolicy::normalized` 同口径：[0, 1]（满幅）。
+                self.tolerance.clamp(0.0, 1.0)
             } else {
                 1e-6
             },
@@ -951,7 +952,7 @@ mod tests {
         let n = wild.normalized();
         assert!(n.window_sec <= 5.0 && n.window_sec >= 0.05);
         assert_eq!(n.window_count, 256);
-        assert!(n.tolerance <= 0.1);
+        assert!(n.tolerance <= 1.0);
 
         let nan = DetectOptions {
             window_sec: f64::NAN,

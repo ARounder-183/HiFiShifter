@@ -666,7 +666,8 @@ export const zhCN = {
     clip_channel_import_window_hint:
         "窗口沿素材的消费区间均匀铺开，首尾都覆盖；0 表示不抽样、扫描整个区间。",
     clip_channel_import_tolerance: "容差",
-    clip_channel_import_tolerance_hint: "左右声道的允许差异（满幅百分比）。0 = 完全一致；0.1（默认）≈ -60 dBFS。有损编码解码后左右会有微小差异，容差太严会漏判。",
+    clip_channel_import_tolerance_hint:
+        "左右声道的允许差异（满幅百分比）。0 = 完全一致；0.1%（默认）≈ -60 dBFS。有损编码解码后左右会有微小差异，容差太严会漏判。可调范围 0~100。",
     clip_channel_import_save: "保存",
     clip_take_remove: "删除 Take",
     clip_take_explode: "将 Take 展开为独立音频块",

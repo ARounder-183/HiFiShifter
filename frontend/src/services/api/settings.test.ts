@@ -33,12 +33,12 @@ describe("channel import policy", () => {
         expect(DEFAULT_CHANNEL_IMPORT_POLICY.tolerance).toBe(1e-3);
         expect(toleranceToPercent(1e-3)).toBe(0.1);
         expect(toleranceToPercent(0)).toBe(0);
-        // 后端钳制上限 0.1 ↔ 界面 10%。
-        expect(toleranceToPercent(0.1)).toBe(TOLERANCE_PERCENT_MAX);
+        // 后端钳制上限 1（满幅）↔ 界面 100%。
+        expect(toleranceToPercent(1)).toBe(TOLERANCE_PERCENT_MAX);
     });
 
     it("round-trips every representable percentage without drift", () => {
-        for (const percent of [0, 0.01, 0.1, 0.5, 1, 2.5, 10]) {
+        for (const percent of [0, 0.01, 0.1, 0.5, 1, 2.5, 10, 50, 100]) {
             expect(toleranceToPercent(percentToTolerance(percent))).toBe(percent);
         }
     });
@@ -60,7 +60,7 @@ describe("channel import policy", () => {
     });
 
     it("preserves every preset-equivalent percentage through normalization", () => {
-        for (const percent of [0, 0.0001, 0.001, 0.01, 0.1, 1, 10]) {
+        for (const percent of [0, 0.0001, 0.001, 0.01, 0.1, 1, 10, 100]) {
             const policy: ChannelImportPolicy = {
                 ...DEFAULT_CHANNEL_IMPORT_POLICY,
                 tolerance: percentToTolerance(percent),
@@ -71,13 +71,19 @@ describe("channel import policy", () => {
         }
     });
 
-    it("clamps percentages above the backend limit", () => {
-        // 超过 10% 的输入会被后端钳到 0.1；界面回读为 10%，不会"跳回去"。
-        const normalized = normalizeChannelImportPolicy({
+    it("preserves in-range percentages up to the backend limit", () => {
+        // 0~100% 全段合法：25% 不再被钳回 10%。
+        const inRange = normalizeChannelImportPolicy({
             ...DEFAULT_CHANNEL_IMPORT_POLICY,
             tolerance: percentToTolerance(25),
         });
-        expect(normalized.tolerance).toBe(0.1);
+        expect(inRange.tolerance).toBe(percentToTolerance(25));
+        // 超过 100% 的输入会被后端钳到满幅 1；界面回读为 100%，不会"跳回去"。
+        const normalized = normalizeChannelImportPolicy({
+            ...DEFAULT_CHANNEL_IMPORT_POLICY,
+            tolerance: percentToTolerance(150),
+        });
+        expect(normalized.tolerance).toBe(1);
         expect(toleranceToPercent(normalized.tolerance)).toBe(TOLERANCE_PERCENT_MAX);
     });
 
@@ -92,7 +98,8 @@ describe("channel import policy", () => {
         expect(normalized.mode).toBe("smart");
         expect(normalized.windowSec).toBeLessThanOrEqual(5);
         expect(normalized.windowCount).toBe(256);
-        expect(normalized.tolerance).toBeLessThanOrEqual(0.1);
+        // 5.0 超出 [0,1] → 钳到满幅 1。
+        expect(normalized.tolerance).toBeLessThanOrEqual(1);
         expect(normalized.monoTargetMode).toBe(2);
     });
 

@@ -824,6 +824,8 @@ pub struct ChannelImportPolicy {
     /// 默认 1e-3（约 -60 dBFS）：有损编码的左右声道差异常在这个量级。判定是
     /// "任一样本超出即真立体声"，所以偏松只会让**几乎就是单声道**的素材被折叠
     ///（差异小于 -60 dB 本就听不出声像），不会把真立体声折错。
+    /// 归一化范围 `[0, 1]`（0 = 逐样本完全一致，1 = 满幅，界面按百分比 0~100%
+    /// 呈现）。
     #[serde(default = "default_detect_tolerance")]
     pub tolerance: f32,
     /// 转换目标模式：2 = 混合为单声道（默认）/ 3 = 仅左 / 4 = 仅右。
@@ -876,7 +878,9 @@ impl ChannelImportPolicy {
             default_detect_window_sec()
         };
         let tolerance = if self.tolerance.is_finite() {
-            self.tolerance.clamp(0.0, 0.1)
+            // 容差以满幅为 1：0.1%（默认）挡编解码量化噪声，上限放到 100%
+            //（= 任何差异都判"假立体声"）交由用户自担语义。
+            self.tolerance.clamp(0.0, 1.0)
         } else {
             default_detect_tolerance()
         };
@@ -1401,7 +1405,7 @@ mod tests {
         assert_eq!(n.mode, "smart", "非法枚举回落默认");
         assert!(n.window_sec <= 5.0 && n.window_sec >= 0.05);
         assert_eq!(n.window_count, 256);
-        assert!(n.tolerance <= 0.1);
+        assert!(n.tolerance <= 1.0);
         assert_eq!(n.mono_target_mode, 2, "7 不在 {{2,3,4}} → 回落 2");
     }
 
