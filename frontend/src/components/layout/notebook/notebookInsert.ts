@@ -17,6 +17,7 @@
 
 import type { Editor } from "@tiptap/core";
 
+import type { MessageKey } from "../../../i18n/messages";
 import { notebookApi } from "../../../services/api/notebook";
 import { formatAssetRef } from "./assetRef";
 import type { ResolvedNotebookSettings } from "./notebookSettings";
@@ -53,6 +54,46 @@ export interface InsertContext {
     notify?: (message: string, kind?: "info" | "error") => void;
     /** 资产写入后刷新附件索引。 */
     onAssetsChanged?: () => void;
+    /**
+     * i18n（面板注入 `useI18n` 的 t）。插入/剪贴板是纯逻辑层，不持有 React
+     * 依赖，因此这里给出文案**键**、由面板翻译 —— 本模块里不允许出现硬编码
+     * 的界面文案。
+     */
+    translate?: (key: MessageKey) => string;
+}
+
+/** 提示键 → 文案（`translate` 未注入时退回键名本身，保证可测与不炸）。 */
+export function translateInsert(ctx: InsertContext, key: MessageKey): string {
+    return ctx.translate ? ctx.translate(key) : key;
+}
+
+/**
+ * 后端稳定错误码 → i18n 键（错误码清单见后端 `commands/notebook.rs` 模块注释）。
+ *
+ * 带上下文的错误是 `code:detail` 形式，按冒号前的 code 匹配；`detail` 只进
+ * 日志不进界面 —— 沿用 `notebook_file_too_large` 既有惯例（用户看到的是完整
+ * 的本地化句子，而不是一截路径或解码器报错）。未知码返回 null，调用方退回
+ * 各自的兜底文案。
+ */
+export function notebookErrorKey(error: string | null | undefined): MessageKey | null {
+    const code = error?.split(":", 1)[0] ?? "";
+    switch (code) {
+        case "notebook_file_too_large":
+        case "notebook_asset_too_large":
+            return "notebook_image_too_large";
+        case "notebook_bad_base64":
+            return "notebook_error_bad_base64";
+        case "notebook_not_a_file":
+            return "notebook_error_not_a_file";
+        case "notebook_unsupported_image_ext":
+            return "notebook_error_unsupported_image_ext";
+        case "notebook_read_task_failed":
+            return "notebook_image_read_failed";
+        case "notebook_export_mkdir_failed":
+            return "notebook_error_export_mkdir_failed";
+        default:
+            return null;
+    }
 }
 
 export interface InsertResult {
@@ -70,7 +111,11 @@ export async function insertImageFromBlob(
     originalName: string,
 ): Promise<InsertResult> {
     if (blob.size > ctx.settings.maxImageBytes) {
-        ctx.notify?.(`图片过大（${formatBytes(blob.size)}），已超过上限`, "error");
+        // `t` 不支持占位符插值，尺寸按既有惯例用括号补在句子后面。
+        ctx.notify?.(
+            `${translateInsert(ctx, "notebook_image_too_large")} (${formatBytes(blob.size)})`,
+            "error",
+        );
         return { ok: false, reason: "too-large" };
     }
 
@@ -79,7 +124,7 @@ export async function insertImageFromBlob(
         format: ctx.settings.imageFormat,
     });
     if (!prepared) {
-        ctx.notify?.("无法解码该图片", "error");
+        ctx.notify?.(translateInsert(ctx, "notebook_image_undecodable"), "error");
         return { ok: false, reason: "unsupported" };
     }
 
@@ -102,13 +147,17 @@ export async function insertImageFromPath(
 ): Promise<InsertResult> {
     const file = await notebookApi.readFileBase64(absolutePath, ctx.settings.maxImageBytes);
     if (!file.ok || !file.base64) {
+        // 后端错误码 → 本地化文案；`notebook_file_too_large` 归入"过大"，
+        // 其余（not_a_file / unsupported_image_ext / read_task_failed…）退回
+        // "读取失败"，归类仍由 reason 区分。
+        const tooLarge = notebookErrorKey(file.error) === "notebook_image_too_large";
         ctx.notify?.(
-            file.error === "notebook_file_too_large" ? "图片过大，已超过上限" : "读取图片失败",
+            translateInsert(ctx, tooLarge ? "notebook_image_too_large" : "notebook_image_read_failed"),
             "error",
         );
         return {
             ok: false,
-            reason: file.error === "notebook_file_too_large" ? "too-large" : "unsupported",
+            reason: tooLarge ? "too-large" : "unsupported",
         };
     }
     const blob = new Blob([toBlobPart(base64ToBlobPart(file.base64))], {
@@ -152,7 +201,12 @@ async function resolveImageSrc(
         },
     });
     if (!result.ok) {
-        ctx.notify?.(result.error ?? "保存图片失败", "error");
+        // 附件写入失败的错误码（bad_base64 / asset_too_large…）映射成文案；
+        // 未知错误退回兜底句子。
+        ctx.notify?.(
+            translateInsert(ctx, notebookErrorKey(result.error) ?? "notebook_image_save_failed"),
+            "error",
+        );
         return null;
     }
     // 不写 `#w=`：插入时按原始尺寸显示，宽度由用户拖拽把手决定。

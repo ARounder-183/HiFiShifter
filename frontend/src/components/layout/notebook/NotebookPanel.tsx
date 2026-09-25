@@ -46,6 +46,7 @@ import { NotebookToolbar } from "./NotebookToolbar";
 import {
     handleNotebookPaste,
     installClipboardFlavorWriter,
+    isPlainInputTarget,
     stageClipboardPayload,
 } from "./notebookClipboard";
 import { clearImageCache } from "./notebookImageCache";
@@ -56,6 +57,8 @@ import {
     type InsertContext,
 } from "./notebookInsert";
 import { dirName } from "./notebookPaths";
+import { normalizeNotebookSettings } from "./notebookSettings";
+import { referencedAssetIds } from "./assetRef";
 import { buildClipLink, buildSeekLink, formatTimecode, parseInternalLink } from "./timecode";
 import { useNotebookEditor } from "./useNotebookEditor";
 import "./notebook.css";
@@ -114,7 +117,12 @@ export function NotebookPanel() {
         void settingsApi
             .getUiSettings()
             .then((ui) => {
-                if (!cancelled) dispatch(setNotebookSettings(ui.notebook));
+                if (cancelled) return;
+                // 归一化一次再分发：设置进 slice，defaultMode 直接决定面板
+                // 打开时的视图 —— 否则设置对话框里选的"默认视图"是死配置。
+                const notebook = normalizeNotebookSettings(ui.notebook);
+                dispatch(setNotebookSettings(notebook));
+                dispatch(setNotebookMode(notebook.defaultMode));
             })
             .catch(() => {
                 // 读不到就用默认值，不阻塞记事本使用。
@@ -171,10 +179,11 @@ export function NotebookPanel() {
                       settings,
                       projectDir,
                       notify,
+                      translate: t,
                       onAssetsChanged: () => void refreshAssets(),
                   }
                 : null,
-        [editor, notify, projectDir, refreshAssets, settings],
+        [editor, notify, projectDir, refreshAssets, settings, t],
     );
 
     // 编辑器挂载后：装剪贴板 flavor 写出器。
@@ -197,11 +206,16 @@ export function NotebookPanel() {
         if (!element || !editor || editor.isDestroyed || mode === "source") return;
         const handler = (event: Event) => {
             const clipboardEvent = event as ClipboardEvent;
+            // 查找条 / alt 编辑器 / 暂存块改名 / 链接浮层都在本容器内：它们的
+            // 粘贴必须走原生行为。捕获监听先于输入框自己的 handler 触发，这里
+            // 不放行，粘贴就会落到正文里。
+            if (isPlainInputTarget(clipboardEvent.target)) return;
             const ctx: InsertContext = {
                 editor,
                 settings,
                 projectDir,
                 notify,
+                translate: t,
                 onAssetsChanged: () => void refreshAssets(),
             };
             if (handleNotebookPaste({ ...ctx, sourceMode: false }, clipboardEvent)) {
@@ -210,7 +224,7 @@ export function NotebookPanel() {
         };
         element.addEventListener("paste", handler, true);
         return () => element.removeEventListener("paste", handler, true);
-    }, [editor, mode, notify, projectDir, refreshAssets, settings]);
+    }, [editor, mode, notify, projectDir, refreshAssets, settings, t]);
 
     // ── 内部链接点击（跳播放头 / 引用 Clip）────────────────────────
     useEffect(() => {
@@ -343,6 +357,7 @@ export function NotebookPanel() {
                 settings,
                 projectDir,
                 notify,
+                translate: t,
                 onAssetsChanged: () => void refreshAssets(),
             };
             void (async () => {
@@ -490,13 +505,7 @@ export function NotebookPanel() {
         return () => flush();
     }, [flush]);
 
-    const usedAssetIds = useMemo(() => {
-        const ids = new Set<string>();
-        for (const match of markdown.matchAll(/hifi-asset:\/\/([A-Za-z0-9_-]+)/g))
-            ids.add(match[1]);
-        for (const match of markdown.matchAll(/^id:\s*([A-Za-z0-9_-]+)\s*$/gm)) ids.add(match[1]);
-        return ids;
-    }, [markdown]);
+    const usedAssetIds = useMemo(() => referencedAssetIds(markdown), [markdown]);
 
     const imageCount = useMemo(
         () => Object.values(assetIndex).filter((entry) => entry.kind === "image").length,

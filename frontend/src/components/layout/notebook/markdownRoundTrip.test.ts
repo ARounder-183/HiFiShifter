@@ -166,6 +166,28 @@ test("components/layout/notebook/markdownRoundTrip.test.ts scripted checks", asy
     assertIncludes(links, "hifi://seek/83.456", "seek link kept");
     assertIncludes(links, "hifi://clip/abc-1", "clip link kept");
 
+    // ── 链接目标带空格/圆括号 ─────────────────────────────────────
+    // 内置序列化器直接写 `[t](a b)`，这样的 Markdown 解析不回来，链接在下次
+    // 加载时丢 mark。自定义序列化器对这类目标包一层 CommonMark 尖括号；
+    // markdown-it 会把目标规整成百分号编码形式（空格 → %20），两轮往返稳定。
+    const spacedLink = assertStable("[标题](<a b(c)>)", "link with spaces in href");
+    assertIncludes(spacedLink, "a%20b(c)", "href with spaces survives the round trip");
+
+    // ── 表格单元格里的行内内容 ────────────────────────────────────
+    // 单元格由 NotebookTable 自己渲染行内节点：src 的圆括号、alt 的方括号、
+    // 链接目标的空格都必须转义，否则解析不回来。
+    const cellImage = assertStable(
+        "| 参数 | 值 |\n| --- | --- |\n| pitch | ![图](hifi-asset://a(1).png) |",
+        "table cell image with parens in src",
+    );
+    assertIncludes(cellImage, "hifi-asset://a\\(1\\).png", "parens in cell image src escaped");
+
+    const cellLink = assertStable(
+        "| 参数 | 值 |\n| --- | --- |\n| pitch | [说明](<a b>) |",
+        "table cell link with spaces in href",
+    );
+    assertIncludes(cellLink, "a%20b", "href with spaces kept inside a table cell");
+
     // ── 空文档与纯文本 ───────────────────────────────────────────
     if (roundTrip("").trim() !== "") throw new Error("empty document should stay empty");
     assertIncludes(

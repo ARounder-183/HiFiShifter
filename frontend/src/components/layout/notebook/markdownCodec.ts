@@ -10,6 +10,11 @@
 
 import type { Editor } from "@tiptap/core";
 
+/** 解析器的可用表面（markdown 字符串 → HTML，供内容替换等场景复用）。 */
+export interface MarkdownParserLike {
+    parse: (content: string) => string;
+}
+
 /** 序列化器的可用表面（`prosemirror-markdown` 的 MarkdownSerializer）。 */
 export interface MarkdownSerializerLike {
     serialize: (content: unknown) => string;
@@ -18,6 +23,7 @@ export interface MarkdownSerializerLike {
 export interface MarkdownStorageLike {
     getMarkdown: () => string;
     serializer: MarkdownSerializerLike;
+    parser: MarkdownParserLike;
 }
 
 /** 取记事本的 Markdown 存储（编辑器未就绪时抛错，调用方需先判空）。 */

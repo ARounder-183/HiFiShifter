@@ -69,11 +69,19 @@ function getService(): TurndownService {
     // 图片：保留 src/alt，丢弃尺寸类属性（尺寸由本 app 自己的 `#w=` 承载）。
     instance.addRule("image", {
         filter: "img",
-        replacement: (_content, node) => {
+        replacement: (_content, node, options) => {
             const element = node as unknown as HTMLImageElement;
             const src = element.getAttribute("src") ?? "";
             const alt = element.getAttribute("alt") ?? "";
             if (!src) return "";
+            // 内嵌 data URI 的解码体积按 base64 长度估算，超过上限就丢弃：
+            // 网页粘贴可能带几 MB 的内嵌图，而工程字节是"只增不删"的（撤销要
+            // 能恢复），事后没有瘦身手段。占位用语言无关的 `[image]` —— 这个
+            // 模块拿不到 i18n 上下文，本地化它反而要拖一条 t 依赖进来。
+            const limit =
+                (options as unknown as { maxDataImageBytes?: number }).maxDataImageBytes ??
+                DEFAULT_MAX_DATA_IMAGE_BYTES;
+            if (dataImageDecodedBytes(src) > limit) return "[image]";
             // 标题里有括号会截断链接语法，折叠掉。
             return `![${alt.replace(/[[\]()]/g, "")}](${src})`;
         },
@@ -94,13 +102,38 @@ export function sanitizePastedHtml(html: string): string {
     });
 }
 
+/** `data:` 图片的解码体积上限默认值（与 `maxImageBytes` 的默认值一致）。 */
+export const DEFAULT_MAX_DATA_IMAGE_BYTES = 20 * 1024 * 1024;
+
+export interface HtmlToMarkdownOptions {
+    /**
+     * 内嵌 `data:` 图片的解码体积上限（字节）；超限的图丢弃并留下 `[image]`
+     * 占位。不传时用 `DEFAULT_MAX_DATA_IMAGE_BYTES`；粘贴路径传用户的
+     * `maxImageBytes`，让两条大小纪律走同一个数。
+     */
+    maxDataImageBytes?: number;
+}
+
+/** 估算 data URI 解码后的字节数（base64 每 4 字符还原 3 字节）。 */
+function dataImageDecodedBytes(src: string): number {
+    const marker = ";base64,";
+    const at = src.indexOf(marker);
+    if (at < 0) return 0; // 非 base64 编码的 data URI 本就放不下大图，不设限。
+    return Math.floor(((src.length - at - marker.length) * 3) / 4);
+}
+
 /** HTML → Markdown。失败时返回空串（调用方回退到纯文本粘贴）。 */
-export function htmlToMarkdown(html: string): string {
+export function htmlToMarkdown(html: string, options?: HtmlToMarkdownOptions): string {
     if (!html.trim()) return "";
     try {
         const sanitized = sanitizePastedHtml(html);
         if (!sanitized.trim()) return "";
-        return getService().turndown(sanitized).trim();
+        const instance = getService();
+        // turndown 是同步单次调用，把上限暂存在实例 options 上没有并发问题；
+        // 未传时留空，规则内退回 `DEFAULT_MAX_DATA_IMAGE_BYTES`。
+        (instance.options as unknown as { maxDataImageBytes?: number }).maxDataImageBytes =
+            options?.maxDataImageBytes;
+        return instance.turndown(sanitized).trim();
     } catch {
         return "";
     }

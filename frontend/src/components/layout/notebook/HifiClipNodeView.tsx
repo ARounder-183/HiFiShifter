@@ -166,8 +166,13 @@ export function HifiClipNodeView(props: NodeViewProps) {
             label: t("notebook_clip_save_payload"),
             disabled: missing,
             onSelect: () => {
+                // 建议文件名要过一遍 Windows 非法字符：标题是自由文本
+                //（`AC/DC: mix` 之类）会直接让保存对话框拒收。后端还会再
+                // 收口一次，这里保证给出去的名字本身合法。
+                const base =
+                    sanitizeSuggestedFileName(`${attrs.title || attrs.id}`) || attrs.id;
                 void notebookApi
-                    .saveAssetAs(attrs.id, `${attrs.title || attrs.id}.${entry?.ext ?? "hsf"}`)
+                    .saveAssetAs(attrs.id, `${base}.${entry?.ext ?? "hsf"}`)
                     .catch(() => {});
             },
         },
@@ -327,6 +332,15 @@ export function HifiClipNodeView(props: NodeViewProps) {
         const nextAttrs: HifiClipBlockAttrs = { ...attrs, title: next || defaultClipTitle(attrs) };
         updateAttributes({ body: serializeHifiClipFenceBody(nextAttrs) });
     }
+}
+
+/**
+ * 建议文件名的字面净化：Windows 保留字符（`\/:*?"<>|`）换成下划线并去首尾
+ * 空白。只处理"这串字符能不能当文件名"，不改语义 —— 名字只是保存对话框的
+ * 默认值，后端落盘前还有一道自己的收口。
+ */
+function sanitizeSuggestedFileName(name: string): string {
+    return name.replace(/[\\/:*?"<>|]/g, "_").trim();
 }
 
 function kindLabelOf(kind: HifiClipBlockAttrs["kind"], t: (key: string) => string): string {

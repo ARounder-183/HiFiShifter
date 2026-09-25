@@ -68,6 +68,21 @@ test("components/layout/notebook/htmlToMarkdown.test.ts scripted checks", async 
     const withImage = htmlToMarkdown('<p><img src="https://x/y.png" alt="图" width="640"></p>');
     assertIncludes(withImage, "![图](https://x/y.png)", "image");
 
+    // 内嵌 data URI：超过上限的按解码体积丢弃，留语言无关的 `[image]` 占位
+    //（base64 每 4 字符还原 3 字节，这里用 1600 字符 ≈ 1200 字节验证小阈值）。
+    const oversized = htmlToMarkdown(
+        `<p>前<img src="data:image/png;base64,${"A".repeat(1600)}" alt="x">后</p>`,
+        { maxDataImageBytes: 1000 },
+    );
+    assertIncludes(oversized, "前", "text before oversized data image kept");
+    assertIncludes(oversized, "[image]", "oversized data image leaves a placeholder");
+    assertExcludes(oversized, "base64", "oversized payload dropped");
+    const smallData = htmlToMarkdown(
+        `<p><img src="data:image/png;base64,${"A".repeat(16)}"></p>`,
+        { maxDataImageBytes: 1000 },
+    );
+    assertIncludes(smallData, "data:image/png;base64,", "small data image kept");
+
     // 空输入不炸。
     if (htmlToMarkdown("") !== "") throw new Error("empty html should yield empty markdown");
     if (htmlToMarkdown("   ") !== "") throw new Error("blank html should yield empty markdown");

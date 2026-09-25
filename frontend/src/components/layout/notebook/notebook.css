@@ -466,6 +466,7 @@
 /* ── 工具栏 ──────────────────────────────────────────────────────────── */
 
 .hs-notebook-toolbar {
+    position: relative; /* 链接浮层的定位基准 */
     display: flex;
     flex-wrap: wrap;
     align-items: center;
@@ -541,6 +542,36 @@
     color: var(--qt-text-muted);
     font-family: var(--qt-font-mono, ui-monospace, monospace);
     font-size: 10px;
+}
+
+/* 链接编辑浮层：替代 window.prompt（Tauri/WKWebView 下脚本对话框不可用），
+   锚在工具栏正下方，与 slash 菜单同一套浮层观感。 */
+.hs-notebook-link-popover {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 6px;
+    z-index: 890;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 280px;
+    padding: 4px 6px;
+    border: 1px solid var(--qt-border);
+    border-radius: 5px;
+    background: var(--qt-window);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+}
+
+.hs-notebook-link-popover input {
+    min-width: 0;
+    flex: 1;
+    padding: 2px 6px;
+    border: 1px solid var(--qt-border);
+    border-radius: 3px;
+    background: var(--qt-base);
+    color: var(--qt-text);
+    font-size: 11px;
+    outline: none;
 }
 
 /* ── 查找条 / 状态栏 / 设置行 ────────────────────────────────────────── */

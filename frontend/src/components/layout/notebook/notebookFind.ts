@@ -12,6 +12,30 @@ export interface TextMatch {
     to: number;
 }
 
+/** 转义正则元字符（用户输入的查询词当字面量处理）。 */
+function escapeRegExp(text: string): string {
+    return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * 在 `text` 里找出 query 的全部大小写不敏感匹配，偏移直接取自**原字符串**。
+ *
+ * 【为什么不用 toLowerCase 再 indexOf】某些字符变小写会**变长**（土耳其
+ * `İ` → "i̇"，1 个码点变 2 个），toLowerCase 后的下标与原串错位，用错位下标
+ * 回原串上选区就会偏。大小写不敏感的正则直接在原串上匹配，索引天然可用。
+ */
+function findMatches(text: string, query: string): TextMatch[] {
+    if (!query) return [];
+    const matches: TextMatch[] = [];
+    const pattern = new RegExp(escapeRegExp(query), "gi");
+    let match = pattern.exec(text);
+    while (match) {
+        matches.push({ from: match.index, to: match.index + match[0].length });
+        match = pattern.exec(text);
+    }
+    return matches;
+}
+
 /**
  * 在编辑器文档里找出全部匹配，返回**文档位置**区间。
  *
@@ -21,15 +45,10 @@ export interface TextMatch {
 export function findMatchesInDoc(editor: Editor, query: string): TextMatch[] {
     if (!query) return [];
     const matches: TextMatch[] = [];
-    const needle = query.toLowerCase();
     editor.state.doc.descendants((node, pos) => {
         if (!node.isText) return true;
-        const text = node.text ?? "";
-        const haystack = text.toLowerCase();
-        let index = haystack.indexOf(needle);
-        while (index >= 0) {
-            matches.push({ from: pos + index, to: pos + index + query.length });
-            index = haystack.indexOf(needle, index + Math.max(1, needle.length));
+        for (const m of findMatches(node.text ?? "", query)) {
+            matches.push({ from: pos + m.from, to: pos + m.to });
         }
         return true;
     });
@@ -38,14 +57,5 @@ export function findMatchesInDoc(editor: Editor, query: string): TextMatch[] {
 
 /** 在纯文本里找出全部匹配（源码视图用）。 */
 export function findMatchesInText(text: string, query: string): TextMatch[] {
-    if (!query) return [];
-    const matches: TextMatch[] = [];
-    const haystack = text.toLowerCase();
-    const needle = query.toLowerCase();
-    let index = haystack.indexOf(needle);
-    while (index >= 0) {
-        matches.push({ from: index, to: index + query.length });
-        index = haystack.indexOf(needle, index + Math.max(1, needle.length));
-    }
-    return matches;
+    return findMatches(text, query);
 }

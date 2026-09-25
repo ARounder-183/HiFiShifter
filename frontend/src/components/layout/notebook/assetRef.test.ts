@@ -83,7 +83,23 @@ test("components/layout/notebook/assetRef.test.ts scripted checks", async () => 
         "referenced ids deduped",
     );
     assertEqual(clipBlockIdsInMarkdown(markdown), ["clip1"], "clip block ids");
-    // `id:` 出现在普通正文里（不在围栏内）也按引用处理 —— 与后端实现一致，
-    // 宁可多留一条附件，也不要误删正在被引用的字节。
-    assertEqual(clipBlockIdsInMarkdown("id: plain").length, 1, "bare id line counted");
+    // `id:` 行必须**围栏感知**：普通段落里的 `id: 123` 只是文本（YAML 示例、
+    // 键值笔记都很常见），误判成引用会让对应附件永远清不掉。
+    assertEqual(clipBlockIdsInMarkdown("id: 123").length, 0, "plain paragraph id line ignored");
+    assertEqual(
+        clipBlockIdsInMarkdown("```hifi-clip\nid: clipA\nkind: clips\n```").length,
+        1,
+        "id line inside hifi-clip fence counted",
+    );
+    assertEqual(
+        clipBlockIdsInMarkdown("```js\nid: notARef\n```").length,
+        0,
+        "id line inside other code fence ignored",
+    );
+    // 围栏结束之后要恢复"不匹配"状态，而不是一直留在围栏里。
+    assertEqual(
+        clipBlockIdsInMarkdown("```hifi-clip\nid: clipB\n```\n\nid: afterFence").length,
+        1,
+        "id line after closing fence ignored",
+    );
 });

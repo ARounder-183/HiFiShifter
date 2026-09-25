@@ -9,7 +9,9 @@
  *          └─ debounce → webApi.setProjectNotes   // 后端登记为一步可撤销操作
  *
  * 外来更新（工程加载 / 应用级撤销重做）→ 与"上次自己发出的值"不同才
- * setContent(..., { emitUpdate: false })，避免打字过程中被自己回写打断。
+ * replaceDocumentWithoutHistory()：一条带 `preventUpdate` + `addToHistory:
+ * false` 的事务整体替换（见函数注释），避免打字过程中被自己回写打断，也避免
+ * 外来更新混进编辑器的撤销栈。
  * ```
  *
  * ## 撤销
@@ -26,12 +28,12 @@
  * 显式信号，而不是靠猜。
  */
 
-import { Extension, type Editor } from "@tiptap/core";
+import { Extension, createNodeFromContent, type Editor } from "@tiptap/core";
 import { useEditor } from "@tiptap/react";
 import { useCallback, useEffect, useMemo, useRef } from "react";
 
 import { notebookApi } from "../../../services/api/notebook";
-import { documentMarkdown } from "./markdownCodec";
+import { documentMarkdown, markdownStorage } from "./markdownCodec";
 import { buildNotebookExtensions } from "./notebookExtensions";
 import type { ResolvedNotebookSettings } from "./notebookSettings";
 
@@ -251,7 +253,7 @@ export function useNotebookEditor(args: UseNotebookEditorArgs): UseNotebookEdito
         lastEmittedRef.current = markdown;
         pendingRef.current = null;
         try {
-            editor.commands.setContent(markdown, { emitUpdate: false });
+            replaceDocumentWithoutHistory(editor, markdown);
         } catch {
             // 极少数情况下（编辑器正在重建）命令不可用：内容会在下次渲染
             // 时由同一个 effect 重新同步，这里不值得把面板带崩。
@@ -269,4 +271,29 @@ export function useNotebookEditor(args: UseNotebookEditorArgs): UseNotebookEdito
     }, [clearTimers]);
 
     return { editor, flush, seal };
+}
+
+/**
+ * 用一条**不进撤销历史**的事务把文档整体替换为 markdown。
+ *
+ * 不能用 `editor.commands.setContent(...)`：它派生的事务只带 `preventUpdate`
+ * 元数据，没有 `addToHistory: false`（见 @tiptap/core 的 setContent 实现）。
+ * 于是应用级撤销/重做改写 `notesMarkdown` 之后，编辑器内第一次 Ctrl+Z 会先
+ * 撤掉这条 setContent 事务 —— "应用级撤销"被编辑器撤销原样写回，两套栈打架。
+ *
+ * 流程与 tiptap-markdown 的 setContent 命令一致：markdown → HTML（它的
+ * parser，含 hifi-clip 围栏等自定义块的解析规则）→ ProseMirror 文档；差别
+ * 只在最后一跳由我们亲手 dispatch，并补两条元数据：
+ * - `preventUpdate`：保持"外来更新不回写 onUpdate"的既有语义；
+ * - `addToHistory: false`：prosemirror-history 会跳过这条事务，编辑器撤销栈
+ *   不被它污染，应用级撤销与编辑器内撤销"先细后粗"的分工才成立。
+ */
+function replaceDocumentWithoutHistory(editor: Editor, markdown: string): void {
+    const html = markdownStorage(editor).parser.parse(markdown);
+    const parsed = createNodeFromContent(html, editor.schema, { slice: false });
+    const tr = editor.state.tr
+        .replaceWith(0, editor.state.doc.content.size, parsed)
+        .setMeta("preventUpdate", true)
+        .setMeta("addToHistory", false);
+    editor.view.dispatch(tr);
 }

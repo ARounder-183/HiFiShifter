@@ -8,7 +8,14 @@
  * 本文件只做纯字符串处理（无 DOM、无 TipTap），因此可以在 vitest 的 node
  * 环境里直接测；后端 `notebook_assets::scan_asset_refs` 是同一套语法的
  * Rust 实现，两边必须保持一致（导出、清理都依赖它）。
+ *
+ * 【与后端 scan 的已知差别】`id:` 行的扫描：前端**围栏感知**（只在
+ * `hifi-clip` 围栏内取），后端 `referenced_asset_ids` 对每一行都取 —— 后端
+ * 偏宽是安全方向（最多是多留一条本可清理的附件），但两边将来仍应收敛到
+ * 同一语义。
  */
+
+import { HIFI_CLIP_FENCE_LANG } from "./hifiClipBlock";
 
 /** 附件引用的 scheme。刻意不用 `file:`：markdown-it 会拒绝 `file:` 链接。 */
 export const ASSET_SCHEME = "hifi-asset://";
@@ -137,11 +144,26 @@ export function referencedAssetIds(markdown: string): Set<string> {
     return ids;
 }
 
-/** 扫描 ```hifi-clip 围栏里声明的 `id:`（与后端 referenced_asset_ids 对齐）。 */
+/**
+ * 扫描 ```hifi-clip 围栏里声明的 `id:`。
+ *
+ * 必须**围栏感知**：`id: xxx` 是很普通的文本形态（YAML、配置示例、键值列表），
+ * 若对每一行都匹配，正文里随手一段示例文本就会让对应 id 的附件被判定为
+ * "仍在使用"，清理功能永远删不掉它们。因此这里跟踪 ``` 围栏的开关，只在
+ * `hifi-clip` 围栏内取 `id:` 行 —— 围栏形态见 `hifiClipBlock.ts` 的写入端。
+ */
 export function clipBlockIdsInMarkdown(markdown: string): string[] {
     const ids: string[] = [];
+    let fenceLang: string | null = null;
     for (const rawLine of markdown.split("\n")) {
         const line = rawLine.trim();
+        if (line.startsWith("```") || line.startsWith("~~~")) {
+            // 开围栏带语言串（```hifi-clip），闭围栏是裸 ```。已在围栏内时任何
+            // 围栏行都视为闭围栏（与 markdown-it 的宽容行为一致）。
+            fenceLang = fenceLang === null ? line.replace(/^(```|~~~)/, "").trim() : null;
+            continue;
+        }
+        if (fenceLang !== HIFI_CLIP_FENCE_LANG) continue;
         if (!line.startsWith("id:")) continue;
         const value = line.slice(3).trim();
         if (value && /^[A-Za-z0-9_-]+$/.test(value)) ids.push(value);

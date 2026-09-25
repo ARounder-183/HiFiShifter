@@ -48,6 +48,8 @@ export function NotebookImageNodeView(props: NodeViewProps) {
     const [altDraft, setAltDraft] = useState(String(node.attrs.alt ?? ""));
     const [dragWidth, setDragWidth] = useState<number | null>(null);
     const imgRef = useRef<HTMLImageElement | null>(null);
+    /** 加载失败的 URL（error 事件）；null = 未失败。按 URL 记，src 变化自动失效。 */
+    const [failedSrc, setFailedSrc] = useState<string | null>(null);
 
     // 解析 src（缓存 + 并发去重都在 notebookImageCache 里）。
     useEffect(() => {
@@ -127,12 +129,20 @@ export function NotebookImageNodeView(props: NodeViewProps) {
     const assetId = assetIdFromSrc(src);
     const isAsset = isAssetRef(src);
 
+    /**
+     * `<img>` 自身的加载失败（服务器 404、CSP 拦截 `http:` 外链、扩展名对不上
+     * 真实格式……都会触发 error）：不能让用户看到一张裂图，退化到与
+     * "缓存解析失败"同款占位。
+     */
+    const loadFailed = failedSrc !== null && failedSrc === current.url;
+    const showMissing = current.missing || loadFailed;
+
     const menuItems: NotebookMenuItem[] = useMemo(() => {
         const items: NotebookMenuItem[] = [];
         items.push({
             key: "copy-image",
             label: t("notebook_image_copy"),
-            disabled: !current.url,
+            disabled: !current.url || loadFailed,
             onSelect: () => {
                 void copyImageToClipboard(current.url);
             },
@@ -169,7 +179,7 @@ export function NotebookImageNodeView(props: NodeViewProps) {
             onSelect: () => deleteNode(),
         });
         return items;
-    }, [assetId, commitWidth, current.url, deleteNode, isAsset, node.attrs.alt, t, width]);
+    }, [assetId, commitWidth, current.url, deleteNode, isAsset, loadFailed, node.attrs.alt, t, width]);
 
     const displayWidth = dragWidth ?? width ?? null;
 
@@ -179,7 +189,7 @@ export function NotebookImageNodeView(props: NodeViewProps) {
             data-selected={selected ? "true" : "false"}
             data-dragging={dragWidth !== null ? "true" : "false"}
         >
-            {current.url ? (
+            {current.url && !loadFailed ? (
                 <img
                     ref={imgRef}
                     src={current.url}
@@ -188,6 +198,7 @@ export function NotebookImageNodeView(props: NodeViewProps) {
                     draggable={false}
                     className="hs-notebook-image"
                     style={displayWidth ? { width: `${displayWidth}px` } : undefined}
+                    onError={() => setFailedSrc(current.url)}
                     onContextMenu={(event) => {
                         event.preventDefault();
                         event.stopPropagation();
@@ -201,9 +212,7 @@ export function NotebookImageNodeView(props: NodeViewProps) {
             ) : (
                 <div className="hs-notebook-image-missing" data-tooltip={src}>
                     <span className="hs-notebook-image-missing-title">
-                        {current.missing
-                            ? t("notebook_image_missing")
-                            : t("notebook_image_loading")}
+                        {showMissing ? t("notebook_image_missing") : t("notebook_image_loading")}
                     </span>
                     <span className="hs-notebook-image-missing-src">{src}</span>
                     {current.missing ? (

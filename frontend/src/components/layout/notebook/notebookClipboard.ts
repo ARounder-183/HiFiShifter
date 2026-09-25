@@ -25,6 +25,7 @@ import { htmlToMarkdown } from "./htmlToMarkdown";
 import {
     insertImageFromBlob,
     insertImageFromClipboardBitmap,
+    translateInsert,
     type InsertContext,
 } from "./notebookInsert";
 import {
@@ -104,6 +105,18 @@ export function computeClipboardFlavors(
 }
 
 /**
+ * 事件目标是否是普通文本输入框（input / textarea）。
+ *
+ * 面板里的查找条、图片 alt 编辑器、暂存块改名与链接浮层都是 input：它们
+ * 在编辑器/面板容器 DOM **之内**，粘贴与复制事件会冒泡（或被捕获监听截获）。
+ * 这些输入框的复制是"复制我正在编辑的文本"，不是"复制正文"，一旦被接管，
+ * 用户会看到输入框内容原样落进文档。
+ */
+export function isPlainInputTarget(target: EventTarget | null): boolean {
+    return (target as HTMLElement | null)?.closest?.("input, textarea") != null;
+}
+
+/**
  * 在编辑器的 copy/cut 事件上补写 Markdown flavor。
  *
  * 必须挂在编辑器 DOM 上、且在 ProseMirror 自己的监听之后执行：ProseMirror
@@ -115,6 +128,9 @@ export function installClipboardFlavorWriter(
     getEditor: () => Editor | null,
 ): () => void {
     const handler = (event: ClipboardEvent) => {
+        // NodeView 里的输入框（alt 编辑等）冒泡到编辑器 DOM：它们的复制必须
+        // 走原生行为，重写 flavor 会把输入框草稿当成正文 Markdown 写上剪贴板。
+        if (isPlainInputTarget(event.target)) return;
         const editor = getEditor();
         const data = event.clipboardData;
         if (!editor || !data) return;
@@ -153,6 +169,9 @@ export interface PasteContext extends InsertContext {
  */
 export function handleNotebookPaste(ctx: PasteContext, event: ClipboardEvent): boolean {
     if (ctx.sourceMode) return false;
+    // 查找条等面板内输入框的粘贴必须走原生行为。本函数由调用方在**捕获阶段**
+    // 监听（先于输入框自己的处理），这里不放行就没有任何后续 handler 能补救。
+    if (isPlainInputTarget(event.target)) return false;
     const data = event.clipboardData;
     if (!data) return false;
 
@@ -175,12 +194,15 @@ export function handleNotebookPaste(ctx: PasteContext, event: ClipboardEvent): b
         if (staged.ok && staged.body) {
             ctx.editor.chain().focus().insertContent(blockNodeFromBody(staged.body)).run();
             ctx.onAssetsChanged?.();
-            ctx.notify?.("已暂存剪贴板数据");
+            ctx.notify?.(translateInsert(ctx, "notebook_clipboard_staged"));
             return;
         }
 
         if (html && ctx.settings.smartPaste && ctx.settings.htmlPasteMode === "markdown") {
-            const markdown = htmlToMarkdown(html);
+            // `maxImageBytes` 同样约束粘贴内容里的内嵌 data URI（见 htmlToMarkdown）。
+            const markdown = htmlToMarkdown(html, {
+                maxDataImageBytes: ctx.settings.maxImageBytes,
+            });
             if (markdown) {
                 ctx.editor.chain().focus().insertContent(markdown).run();
                 return;
@@ -209,7 +231,7 @@ export function handleNotebookPaste(ctx: PasteContext, event: ClipboardEvent): b
         if (!hasAnyPayload) {
             // 截图工具只放位图的情形。
             const inserted = await insertImageFromClipboardBitmap(ctx);
-            if (!inserted.ok) ctx.notify?.("剪贴板里没有可粘贴的内容", "error");
+            if (!inserted.ok) ctx.notify?.(translateInsert(ctx, "notebook_paste_nothing"), "error");
         }
     })();
 

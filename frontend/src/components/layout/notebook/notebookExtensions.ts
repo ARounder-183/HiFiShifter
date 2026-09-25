@@ -27,6 +27,7 @@ import { Table, TableCell, TableHeader, TableRow } from "@tiptap/extension-table
 
 import { HifiClipBlock } from "./nodes/hifiClipBlock";
 import { NotebookImage } from "./nodes/notebookImage";
+import { NotebookLink, serializeLinkDestination } from "./nodes/notebookLink";
 
 interface MarkdownState {
     write: (text: string) => void;
@@ -88,9 +89,19 @@ const NotebookTable = Table.extend({
 function renderCell(cell: PmNode): string {
     const blocks: string[] = [];
     cell.forEach((block) => {
-        blocks.push(renderInlineContent(block));
+        blocks.push(renderCellBlock(block));
     });
     return blocks.join("<br>").replace(/\|/g, "\\|").replace(/\r?\n/g, " ").trim();
+}
+
+/**
+ * 单元格里的一个块。图片是块级节点，解析后作为单元格的**直接子块**存在
+ * （它进不了段落），必须交给 `renderInlineNode` 写成行内图 —— 否则会被当成
+ * "没有行内内容的块"丢成空串。
+ */
+function renderCellBlock(block: PmNode): string {
+    if (block.type.name === "image") return renderInlineNode(block);
+    return renderInlineContent(block);
 }
 
 /** 渲染一个块级节点的行内内容（文本 + 已知标记 + 图片 + 硬换行）。 */
@@ -107,7 +118,9 @@ function renderInlineNode(node: PmNode): string {
     if (node.type.name === "image") {
         const src = String(node.attrs.src ?? "");
         const alt = String(node.attrs.alt ?? "");
-        return `![${alt}](${src})`;
+        // 转义规则与主图片序列化器（nodes/notebookImage.ts）一致：src 的圆
+        // 括号会截断目标，alt 的反斜杠/方括号会截断替代文本。
+        return `![${escapeCellAlt(alt)}](${src.replace(/[()]/g, "\\$&")})`;
     }
     if (node.type.name === "text") {
         return applyMarks(node.text ?? "", node.marks ?? []);
@@ -118,6 +131,11 @@ function renderInlineNode(node: PmNode): string {
         nested += renderInlineNode(child);
     });
     return nested;
+}
+
+/** 单元格 alt 的转义（对应主序列化器里的 `state.esc`：反斜杠与方括号）。 */
+function escapeCellAlt(alt: string): string {
+    return alt.replace(/[\\[\]]/g, "\\$&");
 }
 
 function applyMarks(
@@ -147,7 +165,7 @@ function applyMarks(
     const link = marks.find((mark) => mark.type.name === "link");
     if (link) {
         const href = String(link.attrs.href ?? "");
-        if (href) out = `[${out}](${href.replace(/[()]/g, "\\$&")})`;
+        if (href) out = `[${out}](${serializeLinkDestination(href)})`;
     }
     return out;
 }
@@ -183,20 +201,23 @@ export function buildNotebookExtensions(options: NotebookExtensionOptions) {
             // 下划线在 Markdown 里没有对应语法（`_x_` 是斜体），保留它会让
             // 粘贴来的下划线内容在保存时无处安放，因此直接禁用。
             underline: false,
-            link: {
-                openOnClick: false,
-                autolink: true,
-                // 粘贴时的链接识别由记事本自己的粘贴分流负责（见 notebookClipboard）。
-                linkOnPaste: false,
-                // 内部链接（`hifi://seek/…`、`hifi://clip/…`）必须进白名单，
-                // 否则 Link 扩展的 URI 校验会**静默丢掉链接标记** ——
-                // 正文里的时间码会退化成一段普通文字。
-                protocols: ["hifi"],
-                HTMLAttributes: { rel: "noreferrer noopener", target: "_blank" },
-            },
+            // 内置 link 关掉，换成下面的 NotebookLink：同名扩展只保留一份，
+            // 换这个版本是为了覆盖它的 Markdown 序列化（见 nodes/notebookLink）。
+            link: false,
             // 输入规则由 Markdown 扩展自带一套更贴合 Markdown 语义的，关闭
             // StarterKit 的默认规则避免两套规则打架（例如 `1. ` 的序号处理）。
             ...(options.markdownShortcuts ? {} : { inputRules: false }),
+        }),
+        NotebookLink.extend({}).configure({
+            openOnClick: false,
+            autolink: true,
+            // 粘贴时的链接识别由记事本自己的粘贴分流负责（见 notebookClipboard）。
+            linkOnPaste: false,
+            // 内部链接（`hifi://seek/…`、`hifi://clip/…`）必须进白名单，否则
+            // Link 扩展的 URI 校验会**静默丢掉链接标记** —— 正文里的时间码会
+            // 退化成一段普通文字。
+            protocols: ["hifi"],
+            HTMLAttributes: { rel: "noreferrer noopener", target: "_blank" },
         }),
         NotebookImage.extend({}).configure({ allowBase64: true }),
         NotebookTable.extend({}),

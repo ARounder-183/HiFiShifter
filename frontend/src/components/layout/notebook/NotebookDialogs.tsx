@@ -14,7 +14,7 @@ import { useI18n } from "../../../i18n/I18nProvider";
 import { notebookApi } from "../../../services/api/notebook";
 import { formatAssetRef } from "./assetRef";
 import { resolveImage } from "./notebookImageCache";
-import { formatBytes } from "./notebookInsert";
+import { formatBytes, notebookErrorKey } from "./notebookInsert";
 import type { ResolvedNotebookSettings } from "./notebookSettings";
 
 // ─── 附件管理器 ──────────────────────────────────────────────────────────────
@@ -231,7 +231,14 @@ export function NotebookSettingsDialog({
                 return;
             }
             if (!result.ok) {
-                setExportNotice(`${tAny("notebook_export_failed")}: ${result.error ?? ""}`);
+                // 已知稳定错误码（见后端 commands/notebook.rs）给完整本地化
+                // 句子；未知错误沿用"前缀 + 原始码"的回显，方便用户原样报障。
+                const errorKey = notebookErrorKey(result.error);
+                setExportNotice(
+                    errorKey
+                        ? tAny(errorKey)
+                        : `${tAny("notebook_export_failed")}: ${result.error ?? ""}`,
+                );
                 return;
             }
             const missing = result.missingAssets?.length ?? 0;
