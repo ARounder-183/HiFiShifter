@@ -781,7 +781,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             // 落在同一帧的同一投影上。
             setScrollLeftState(next.scrollLeft);
         },
-        [pxPerSec, setScrollLeftState, viewportAccess],
+        [pxPerSec, setPxPerSec, setScrollLeftState, viewportAccess],
     );
     /**
      * 标尺上的滚轮：**与画布内的滚轮完全同义**。
@@ -2000,6 +2000,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             s.autoCrossfadeEnabled,
             s.snapEnabled,
             sessionRef,
+            slipEditKb,
             snapTimelineDetailed,
         ],
     );
@@ -2315,6 +2316,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             s.autoCrossfadeEnabled,
             sessionRef,
             setMultiSelectedClipIds,
+            setMultiSelectedClipIdsFromAction,
         ],
     );
 
@@ -2430,7 +2432,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             // 拖回原位所需要的（旧实现同样无条件调用）。
             applyRippleFollowerShift(dispatch, origin.rippleFollowers, rippleRightDelta);
         },
-        [dispatch, store],
+        [dispatch],
     );
 
     /**
@@ -2860,7 +2862,9 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 );
             }
         },
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- pxPerSec 随缩放变化，加入会让 trim 预览回调在缩放期间反复重建（既有热路径口径，弧长换算读创建时快照）
         [
+            applyKernelTrimRipplePreview,
             beginKernelGestureInteraction,
             dispatch,
             sessionRef,
@@ -2951,7 +2955,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 }),
             );
         },
-        [dispatch, noSnapKb, s.snapEnabled, snapTimelineDetailed],
+        [
+            beginKernelGestureInteraction,
+            dispatch,
+            noSnapKb,
+            s.snapEnabled,
+            sessionRef,
+            snapTimelineDetailed,
+        ],
     );
 
     /**
@@ -2999,7 +3010,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 })
                 .finally(endKernelGestureInteraction);
         },
-        [dispatch, endKernelGestureInteraction],
+        [dispatch, endKernelGestureInteraction, sessionRef],
     );
 
     const handleKernelTrimCommit = React.useCallback(
@@ -3647,7 +3658,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 }
             });
         },
-        [beginKernelGestureInteraction, dispatch, multiSelectedClipIds, sessionRef],
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- pxPerSec 随缩放变化，加入会让淡变预览回调在缩放期间反复重建（既有热路径口径，曲率换算读创建时快照）
+        [beginKernelGestureInteraction, dispatch, fadeCurvatureKb, multiSelectedClipIds, sessionRef],
     );
 
     /** 内核淡变角收尾：提交或回滚（取消时两侧一起还原）。 */
@@ -3755,7 +3767,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     /** 框选期间「已同步为焦点 clip」的去重（避免每帧重复一次同样的后端请求）。 */
     const kernelBoxSelectSingleRef = React.useRef<string | null>(null);
     const multiSelectedIdsRef = React.useRef<string[]>([]);
-    // eslint-disable-next-line react-hooks/refs -- 选择镜像：框选手势需在回调里读最新值
     multiSelectedIdsRef.current = multiSelectedClipIds;
 
     /**
@@ -3796,7 +3807,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 kernelBoxSelectSingleRef.current = null;
             }
         },
-        [dispatch, setMultiSelectedClipIds],
+        [dispatch, sessionRef, setMultiSelectedClipIds],
     );
 
     /** 内核框选收尾：取消时恢复拖动前的选择。 */
@@ -4277,7 +4288,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             initialValue: activeClipTakeName(clip),
             inputMode: "text",
         });
-    }, []);
+    }, [sessionRef]);
 
     /**
      * 内核单击增益 / 速率标签 → 进入行内编辑。
@@ -4295,7 +4306,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     : formatEditNumber(Math.min(12, Math.max(-12, gainToDb(clip.gain))));
             setKernelInlineEdit({ clipId, field, initialValue, inputMode: "decimal" });
         },
-        [],
+        [sessionRef],
     );
 
     /**
@@ -4735,14 +4746,17 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 }
             });
         },
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- s.snapEnabled 为设置态，加入会让交叉抓手预览回调随设置切换重建（既有热路径口径，手势中读创建时快照）
         [
             beginKernelGestureInteraction,
             crossfadeGripKb,
             dispatch,
             // 曲率分支用它把归一化 t 换算回屏幕距离权重。
             fadeCurvatureKb,
+            noSnapKb,
             pxPerSec,
             sessionRef,
+            snapTimelineDetailed,
         ],
     );
 
@@ -4881,7 +4895,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 .catch(() => undefined)
                 .finally(endKernelGestureInteraction);
         },
-        [dispatch, endKernelGestureInteraction, sessionRef, s.autoCrossfadeEnabled],
+        [dispatch, endKernelGestureInteraction, sessionRef],
     );
 
     /** 内核交互回调集合（引用稳定：内核创建时取一次）。 */
@@ -4953,6 +4967,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             handleKernelSnapOffsetCommit,
             handleKernelBoxSelectPreview,
             handleKernelBoxSelectCommit,
+            handleKernelBoxSelectToParamSelection,
             handleKernelContextMenu,
             handleKernelFadeContextMenu,
             handleKernelFadeHover,
@@ -5333,11 +5348,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     const attachRulerPlayheadLine = React.useCallback((element: HTMLDivElement | null) => {
         rulerPlayheadLineRef.current = element;
         if (element !== null) kernelHostRef.current?.invalidatePlayhead();
-    }, []);
+    }, [rulerPlayheadLineRef]);
     const attachRulerPlayheadHead = React.useCallback((element: HTMLDivElement | null) => {
         rulerPlayheadHeadRef.current = element;
         if (element !== null) kernelHostRef.current?.invalidatePlayhead();
-    }, []);
+    }, [rulerPlayheadHeadRef]);
 
     /**
      * 标尺节点（内核模式与旧模式共用同一实例）。

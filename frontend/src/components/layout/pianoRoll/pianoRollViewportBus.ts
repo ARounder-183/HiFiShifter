@@ -72,6 +72,10 @@ export const pianoRollViewportBus = {
         bus.invalidate();
     },
 
+    // 【跨工程契约】总线投影跨工程保留（面板不随工程卸载，DOM 滚动即权威）；
+    // 工程会话切换时面板会调用 invalidate() 强制按当前工程内容重绘一次，
+    // 与 utils/timelineViewportBus.ts 的同名契约一致。
+
     /** 直接提交一份完整投影（绕过逐字段 patch）。 */
     commit(axis: TimelineAxis): void {
         bus.commit(axis);

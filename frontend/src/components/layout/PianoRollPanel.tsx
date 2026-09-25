@@ -805,6 +805,13 @@ export const PianoRollPanel: React.FC<{
     const { t } = useI18n();
     const tAny = t as (key: string) => string;
     const s = useAppSelector((state: RootState) => state.session, shallowEqual);
+
+    // 工程会话切换：强制视口总线按当前工程内容重绘一次（跨工程投影保留契约
+    // 的强制点，见 utils/timelineViewportBus.invalidate 的说明）。
+    const projectSessionPath = s.project.path;
+    React.useEffect(() => {
+        pianoRollViewportBus.invalidate();
+    }, [projectSessionPath]);
     const effectiveProjectScale = useMemo<ScaleLike>(
         () =>
             s.project.useCustomScale && s.project.customScale
@@ -1623,6 +1630,7 @@ export const PianoRollPanel: React.FC<{
                 setScrollLeft(next);
             }
         };
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- commitViewportNow 随渲染重建，加入会让共享视口订阅随每次渲染反复退订/重订（既有热路径口径）
     }, [s.paramEditorSyncTimeline]);
 
     // 布局偏移变化时，同一共享视口对应的绘制坐标也会变化。
@@ -1732,6 +1740,7 @@ export const PianoRollPanel: React.FC<{
         // 原生滚动位置的钳制校正由宿主的镜像回写负责（它每帧都会把原生位置对齐真值）
         // ——不要再写原生 scroller，否则会与内核真值打架。
         setScrollLeft(next);
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- commitViewportNow 随渲染重建，加入会让缩放落地 effect 随每次渲染重跑（既有热路径口径）
     }, [pxPerSec, s.paramEditorSyncTimeline]);
 
     const zoomTimelineStateRef = useRef({
@@ -2542,7 +2551,6 @@ export const PianoRollPanel: React.FC<{
         if (rulerPlayheadHeadRef.current) {
             rulerPlayheadHeadRef.current.style.left = `${leftPx}px`;
         }
-        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [pxPerSec]);
 
     // 原地等待渲染（位置冻结）期间不得推进视觉插值（见 TimelinePanel 同名注释）。
@@ -2607,7 +2615,9 @@ export const PianoRollPanel: React.FC<{
         };
     }, []);
 
-    function applyScrollLayers(next: number) {
+    // 以 useCallback 稳定引用（依赖仅含 ref 与模块级工具）：供 syncScrollLeft 等
+    // 需要长期持有本函数的路径使用，避免随渲染重建引发上游回调引用抖动。
+    const applyScrollLayers = useCallback(function applyScrollLayers(next: number) {
         if (rulerContentRef.current) {
             // 平移量吸附到设备像素（见 `rulerLayerTranslatePx`）：与内核同一约定，
             // 否则层内标尺竖线在系统缩放率 > 1 时粗细不一。
@@ -2651,7 +2661,7 @@ export const PianoRollPanel: React.FC<{
                 rulerPlayheadHeadRef.current.style.left = `${playheadLeftPx}px`;
             }
         }
-    }
+    }, []);
 
     /**
      * 把「绘制坐标」的水平位置提交到当前滚动载体。
@@ -2759,7 +2769,9 @@ export const PianoRollPanel: React.FC<{
      *
      * @param scroller 原生滚动容器。
      */
-    function syncScrollLeft(scroller: HTMLDivElement) {
+    // 以 useCallback 稳定引用（依赖仅含同步开关设置态与 ref）：下游
+    // `onScrollerScroll` 等回调的依赖数组直接持有它，引用抖动会连带放大。
+    const syncScrollLeft = useCallback(function syncScrollLeft(scroller: HTMLDivElement) {
         const syncEnabled = s.paramEditorSyncTimeline;
         const offset = syncEnabled ? timelineOffsetRef.current : 0;
         const next = timelineViewportNativeToState(scroller.scrollLeft, offset);
@@ -2809,7 +2821,7 @@ export const PianoRollPanel: React.FC<{
                 setScrollLeft(scrollLeftRef.current);
             });
         }
-    }
+    }, [applyScrollLayers, s.paramEditorSyncTimeline, setScrollLeft]);
 
     // ── 内核宿主：创建 / 销毁 ────────────────────────────────────────
     //
@@ -3206,8 +3218,8 @@ export const PianoRollPanel: React.FC<{
         s.tempoMap,
     ]);
 
-    // 渲染期刷新 syncScrollLeft 引用（其函数体随每次渲染重建）：供只注册一次的
-    // 原生 `wheel` 监听器调用，避免闭包捕获陈旧实现。
+    // 渲染期刷新 syncScrollLeft 引用（useCallback 化后引用仅在同步开关变化时更新）：
+    // 供只注册一次的原生 `wheel` 监听器调用，避免闭包捕获陈旧实现。
     const syncScrollLeftRef = useRef(syncScrollLeft);
     syncScrollLeftRef.current = syncScrollLeft;
 
