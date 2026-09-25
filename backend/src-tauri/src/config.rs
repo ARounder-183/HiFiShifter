@@ -457,6 +457,9 @@ pub struct UiSettings {
     /// 渲染缓存：把渲染结果落盘，重新打开工程时直接复用。
     #[serde(default)]
     pub render_cache: RenderCacheSettings,
+    /// 导入媒体时的声道处理策略（假立体声 → 单声道）。
+    #[serde(default)]
+    pub channel_import_policy: ChannelImportPolicy,
     /// 记事本（Notebook）设置。
     ///
     /// **后端只做透传存储**：字段语义、取值合法性与默认值都在前端收口
@@ -512,6 +515,35 @@ pub fn sync_edits_across_takes() -> bool {
 
 pub fn set_sync_edits_across_takes(enabled: bool) {
     SYNC_EDITS_ACROSS_TAKES.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 导入声道处理策略的进程级生效值（默认"智能转换"）。
+///
+/// 与 `LOOP_NEW_CLIPS_DEFAULT` / `SYNC_EDITS_ACROSS_TAKES` 同款：由
+/// `commands::ui_settings` 在加载与保存设置时同步；供 `TimelineState::add_clip`、
+/// 各格式 importer、旧工程迁移等无法访问 `AppState` 的创建点读取。
+static CHANNEL_IMPORT_POLICY: std::sync::OnceLock<
+    std::sync::RwLock<ChannelImportPolicy>,
+> = std::sync::OnceLock::new();
+
+fn channel_import_policy_cell() -> &'static std::sync::RwLock<ChannelImportPolicy> {
+    CHANNEL_IMPORT_POLICY.get_or_init(|| std::sync::RwLock::new(ChannelImportPolicy::default()))
+}
+
+/// 读取当前生效的导入声道策略。
+pub fn channel_import_policy() -> ChannelImportPolicy {
+    channel_import_policy_cell()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// 同步导入声道策略的进程级生效值（入参先规范化）。
+pub fn set_channel_import_policy(policy: &ChannelImportPolicy) {
+    let normalized = policy.normalized();
+    *channel_import_policy_cell()
+        .write()
+        .unwrap_or_else(|e| e.into_inner()) = normalized;
 }
 
 fn default_ort_ep() -> String {
@@ -752,6 +784,130 @@ impl RenderCacheSettings {
     /// 磁盘保留空间（字节；0 = 不检查）。
     pub fn min_free_disk_bytes(&self) -> u64 {
         (self.min_free_disk_mb as u64) * 1024 * 1024
+    }
+}
+
+/// 导入媒体时的声道处理策略（持久化到 app_config.json 的 `ui.channelImportPolicy`）。
+///
+/// 背景：真立体声源在渲染时会把整条处理器链按声道跑两遍，耗时翻倍。大量
+/// "人力"素材实际是单声道内容被混流成双声道（两声道逐样本相同），折叠为
+/// 单声道后听感不变、耗时减半。
+///
+/// **作用范围仅限"无声道权威来源"的新建 Take**：媒体导入、`add_clip`、
+/// VocalShifter 导入、以及 v4 及更早工程的 Take 升级。REAPER 导入/导出
+/// 自带 `CHANMODE`，一律不走本策略（见 `import::channel_policy` 的模块说明）。
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelImportPolicy {
+    /// 总策略：`"smart"`（智能判定，默认）/ `"alwaysMono"` / `"off"`。
+    #[serde(default = "default_channel_import_mode")]
+    pub mode: String,
+    /// 抽样窗口时长（秒）。
+    #[serde(default = "default_detect_window_sec")]
+    pub window_sec: f64,
+    /// 抽样窗口数（0 = 不限，扫描整个消费区间）。
+    #[serde(default = "default_detect_window_count")]
+    pub window_count: usize,
+    /// 逐样本绝对差容差（覆盖有损编码的量化噪声）。
+    #[serde(default = "default_detect_tolerance")]
+    pub tolerance: f32,
+    /// 转换目标模式：2 = 混合为单声道（默认）/ 3 = 仅左 / 4 = 仅右。
+    ///
+    /// 假立体声 L == R，故 `(L+R)/2 == L == R` 逐样本等价；默认取 2 是因为
+    /// 语义更诚实，且对**容差内**的近似假立体声，混合比丢弃一个声道更保真
+    /// （两声道量化噪声部分抵消）。
+    #[serde(default = "default_mono_target_mode")]
+    pub mono_target_mode: i32,
+    /// 打开旧工程（v4 及更早）时，对未记录 `channel_mode` 的 Take 一并套用。
+    #[serde(default = "default_true")]
+    pub apply_to_legacy_takes: bool,
+    /// 批量转换时是否作用于 Clip 的全部 Take（`false` = 仅 active take）。
+    #[serde(default)]
+    pub apply_to_all_takes: bool,
+}
+
+fn default_channel_import_mode() -> String {
+    "smart".to_string()
+}
+fn default_detect_window_sec() -> f64 {
+    0.25
+}
+fn default_detect_window_count() -> usize {
+    12
+}
+fn default_detect_tolerance() -> f32 {
+    1e-6
+}
+fn default_mono_target_mode() -> i32 {
+    2
+}
+
+impl Default for ChannelImportPolicy {
+    fn default() -> Self {
+        Self {
+            mode: default_channel_import_mode(),
+            window_sec: default_detect_window_sec(),
+            window_count: default_detect_window_count(),
+            tolerance: default_detect_tolerance(),
+            mono_target_mode: default_mono_target_mode(),
+            apply_to_legacy_takes: true,
+            apply_to_all_takes: false,
+        }
+    }
+}
+
+impl ChannelImportPolicy {
+    /// 规范化：校验枚举、钳制数值（非法值回退默认，避免手改配置破坏行为）。
+    pub fn normalized(&self) -> Self {
+        let mode = match self.mode.as_str() {
+            "smart" | "alwaysMono" | "off" => self.mode.clone(),
+            _ => default_channel_import_mode(),
+        };
+        let window_sec = if self.window_sec.is_finite() {
+            self.window_sec.clamp(0.05, 5.0)
+        } else {
+            default_detect_window_sec()
+        };
+        let tolerance = if self.tolerance.is_finite() {
+            self.tolerance.clamp(0.0, 0.1)
+        } else {
+            default_detect_tolerance()
+        };
+        let mono_target_mode = match self.mono_target_mode {
+            2 | 3 | 4 => self.mono_target_mode,
+            _ => default_mono_target_mode(),
+        };
+
+        Self {
+            mode,
+            window_sec,
+            window_count: self.window_count.min(256),
+            tolerance,
+            mono_target_mode,
+            apply_to_legacy_takes: self.apply_to_legacy_takes,
+            apply_to_all_takes: self.apply_to_all_takes,
+        }
+    }
+
+    /// 是否启用"智能判定"（需要解码音频内容）。
+    pub fn is_smart(&self) -> bool {
+        self.mode == "smart"
+    }
+
+    /// 是否完全关闭自动转换。
+    pub fn is_off(&self) -> bool {
+        self.mode == "off"
+    }
+
+    /// 转换到判定模块所需的参数。
+    pub fn detect_options(&self) -> crate::stereo_detect::DetectOptions {
+        let n = self.normalized();
+        crate::stereo_detect::DetectOptions {
+            window_sec: n.window_sec,
+            window_count: n.window_count,
+            tolerance: n.tolerance,
+        }
+        .normalized()
     }
 }
 
@@ -1143,6 +1299,7 @@ impl Default for UiSettings {
             loop_new_clips: true,
             sync_edits_across_takes: true,
             render_cache: RenderCacheSettings::default(),
+            channel_import_policy: ChannelImportPolicy::default(),
             notebook: serde_json::Value::Null,
             dock: serde_json::Value::Null,
         }
@@ -1215,6 +1372,97 @@ impl UiSettings {
 mod tests {
     use super::UiSettings;
     use crate::time_stretch::UserStretchAlgorithm;
+
+    #[test]
+    fn channel_import_policy_default_is_smart() {
+        let p = super::ChannelImportPolicy::default();
+        assert_eq!(p.mode, "smart");
+        assert!(p.is_smart());
+        assert!(!p.is_off());
+        assert!(p.apply_to_legacy_takes);
+        assert!(!p.apply_to_all_takes);
+        assert_eq!(p.mono_target_mode, 2);
+    }
+
+    #[test]
+    fn channel_import_policy_normalizes_out_of_range_values() {
+        let p = super::ChannelImportPolicy {
+            mode: "bogus".into(),
+            window_sec: 999.0,
+            window_count: 99_999,
+            tolerance: 5.0,
+            mono_target_mode: 7,
+            apply_to_legacy_takes: true,
+            apply_to_all_takes: false,
+        };
+        let n = p.normalized();
+        assert_eq!(n.mode, "smart", "非法枚举回落默认");
+        assert!(n.window_sec <= 5.0 && n.window_sec >= 0.05);
+        assert_eq!(n.window_count, 256);
+        assert!(n.tolerance <= 0.1);
+        assert_eq!(n.mono_target_mode, 2, "7 不在 {{2,3,4}} → 回落 2");
+    }
+
+    #[test]
+    fn channel_import_policy_keeps_valid_values() {
+        let p = super::ChannelImportPolicy {
+            mode: "alwaysMono".into(),
+            window_sec: 1.0,
+            window_count: 4,
+            tolerance: 1e-4,
+            mono_target_mode: 3,
+            apply_to_legacy_takes: false,
+            apply_to_all_takes: true,
+        };
+        let n = p.normalized();
+        assert_eq!(n.mode, "alwaysMono");
+        assert_eq!(n.window_sec, 1.0);
+        assert_eq!(n.window_count, 4);
+        assert_eq!(n.mono_target_mode, 3);
+        assert!(!n.apply_to_legacy_takes);
+        assert!(n.apply_to_all_takes);
+    }
+
+    #[test]
+    fn channel_import_policy_handles_non_finite_numbers() {
+        let p = super::ChannelImportPolicy {
+            window_sec: f64::NAN,
+            tolerance: f32::NAN,
+            ..Default::default()
+        };
+        let n = p.normalized();
+        assert_eq!(n.window_sec, 0.25);
+        assert_eq!(n.tolerance, 1e-6);
+    }
+
+    #[test]
+    fn channel_import_policy_detect_options_mirror_policy() {
+        let p = super::ChannelImportPolicy {
+            window_sec: 0.5,
+            window_count: 3,
+            tolerance: 1e-5,
+            ..Default::default()
+        };
+        let o = p.detect_options();
+        assert_eq!(o.window_sec, 0.5);
+        assert_eq!(o.window_count, 3);
+        assert_eq!(o.tolerance, 1e-5);
+    }
+
+    #[test]
+    fn process_level_policy_round_trips_and_normalizes() {
+        let original = super::channel_import_policy();
+        super::set_channel_import_policy(&super::ChannelImportPolicy {
+            mode: "off".into(),
+            window_sec: 12345.0,
+            ..Default::default()
+        });
+        let read = super::channel_import_policy();
+        assert_eq!(read.mode, "off");
+        assert!(read.window_sec <= 5.0, "写入时即规范化");
+        // 还原，避免影响同进程其它测试。
+        super::set_channel_import_policy(&original);
+    }
 
     #[test]
     fn ui_settings_defaults_to_signalsmith_and_hifigan_mel_stretch_on() {

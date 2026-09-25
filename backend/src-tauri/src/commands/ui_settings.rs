@@ -41,6 +41,53 @@ fn apply_ort_ep_settings(ep: &str, device_id: Option<i32>) -> bool {
     true
 }
 
+/// 需要做**深度合并**（逐个嵌套子键覆盖）的顶层键。
+///
+/// 这些键的值是对象，而前端可能只发送其中一个子字段（如只改声道导入策略的
+/// 容差）。若按顶层键做浅替换，未发送的兄弟子键会整块丢失。
+///
+/// `dock` 尤其关键：行为选项与整份布局同处一个对象，只写选项的部分保存若走
+/// 浅替换，会把 `layout` 整个抹掉 —— 用户排了十分钟的界面会在改一个开关后归零。
+const DEEP_MERGE_KEYS: &[&str] = &[
+    "timelineSnap",
+    "renderCache",
+    "channelImportPolicy",
+    "notebook",
+    "dock",
+];
+
+/// 以现有设置为基底合并前端发来的部分补丁（纯函数，便于测试）。
+///
+/// 顶层做逐键覆盖；[`DEEP_MERGE_KEYS`] 中的键再做一层子键合并。
+pub(crate) fn merge_ui_settings_patch(
+    mut base: serde_json::Value,
+    patch: &serde_json::Value,
+) -> serde_json::Value {
+    if let (serde_json::Value::Object(base_obj), serde_json::Value::Object(patch_obj)) =
+        (&mut base, patch)
+    {
+        for (key, value) in patch_obj {
+            if DEEP_MERGE_KEYS.contains(&key.as_str()) {
+                match base_obj.get_mut(key.as_str()) {
+                    Some(serde_json::Value::Object(base_nested)) => {
+                        if let serde_json::Value::Object(patch_nested) = value {
+                            for (nested_key, nested_value) in patch_nested {
+                                base_nested.insert(nested_key.clone(), nested_value.clone());
+                            }
+                        }
+                    }
+                    _ => {
+                        base_obj.insert(key.clone(), value.clone());
+                    }
+                }
+            } else {
+                base_obj.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    base
+}
+
 pub(super) fn get_ui_settings(state: State<'_, AppState>) -> UiSettings {
     let mut settings = if let Some(dir) = state.config_dir.get() {
         crate::config::load_ui_settings(dir)
@@ -52,6 +99,7 @@ pub(super) fn get_ui_settings(state: State<'_, AppState>) -> UiSettings {
     // 渲染缓存设置同样做规范化回读：手改坏的配置值（越界容量 / 非法枚举）
     // 不应被前端原样展示或写回。
     settings.render_cache = settings.render_cache.normalized();
+    settings.channel_import_policy = settings.channel_import_policy.normalized();
     crate::time_stretch::update_global_stretch_defaults(
         settings.default_stretch_algorithm,
         settings.default_hifigan_mel_stretch,
@@ -67,6 +115,8 @@ pub(super) fn get_ui_settings(state: State<'_, AppState>) -> UiSettings {
     // Sync "loop for new clips" default (used by importers / legacy project migration)
     crate::config::set_loop_new_clips_default(settings.loop_new_clips);
     crate::config::set_sync_edits_across_takes(settings.sync_edits_across_takes);
+    // Sync the import channel policy (used by importers / legacy project migration)
+    crate::config::set_channel_import_policy(&settings.channel_import_policy);
     // 同步渲染缓存配置（总开关 / 容量 / 超龄…）：应用设置是幂等的，写入或
     // 缓存目录变化时才会触发目录准备与回收。
     crate::render_cache::apply_settings(&settings.render_cache);
@@ -89,43 +139,7 @@ pub(super) fn save_ui_settings(
         UiSettings::default()
     };
     let merged_value = match serde_json::to_value(&prev_settings) {
-        Ok(mut base) => {
-            if let (serde_json::Value::Object(base_obj), serde_json::Value::Object(patch_obj)) =
-                (&mut base, &settings_value)
-            {
-                for (key, value) in patch_obj {
-                    if key == "timelineSnap"
-                        || key == "renderCache"
-                        || key == "notebook"
-                        || key == "dock"
-                    {
-                        // 嵌套设置做深度合并，避免部分保存时清空其它子项
-                        // （吸附选项 / 渲染缓存的容量、超龄 / 记事本的单选项 /
-                        // 停靠系统的行为选项）。
-                        //
-                        // `dock` 尤其关键：行为选项与整份布局同处一个对象，只写
-                        // 选项的部分保存若走浅替换，会把 `layout` 整个抹掉 ——
-                        // 用户排了十分钟的界面会在改一个开关后归零。
-                        match base_obj.get_mut(key.as_str()) {
-                            Some(serde_json::Value::Object(base_nested)) => {
-                                if let serde_json::Value::Object(patch_nested) = value {
-                                    for (nested_key, nested_value) in patch_nested {
-                                        base_nested
-                                            .insert(nested_key.clone(), nested_value.clone());
-                                    }
-                                }
-                            }
-                            _ => {
-                                base_obj.insert(key.clone(), value.clone());
-                            }
-                        }
-                    } else {
-                        base_obj.insert(key.clone(), value.clone());
-                    }
-                }
-            }
-            base
-        }
+        Ok(base) => merge_ui_settings_patch(base, &settings_value),
         Err(_) => settings_value,
     };
     let mut settings: UiSettings =
@@ -134,6 +148,7 @@ pub(super) fn save_ui_settings(
     settings.normalize_split_transition();
     settings.normalize_time_display();
     settings.render_cache = settings.render_cache.normalized();
+    settings.channel_import_policy = settings.channel_import_policy.normalized();
     let prev_ep = prev_settings.ort_ep.clone();
 
     if let Some(dir) = state.config_dir.get() {
@@ -151,6 +166,7 @@ pub(super) fn save_ui_settings(
     );
     crate::config::set_loop_new_clips_default(settings.loop_new_clips);
     crate::config::set_sync_edits_across_takes(settings.sync_edits_across_takes);
+    crate::config::set_channel_import_policy(&settings.channel_import_policy);
     // 渲染缓存配置变化（开关 / 上限 / 超龄 / 目录）→ 立即生效并触发回收。
     crate::render_cache::apply_settings(&settings.render_cache);
 
@@ -207,4 +223,85 @@ pub(super) fn save_ui_settings(
     }
 
     serde_json::json!({ "ok": true })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn deep_merge_keeps_sibling_subkeys_of_channel_import_policy() {
+        // 前端只改容差：其余子键必须原样保留（白名单漏了就会整块丢失）。
+        let base = json!({
+            "channelImportPolicy": {
+                "mode": "smart",
+                "windowSec": 0.25,
+                "windowCount": 12,
+                "tolerance": 1e-6,
+                "monoTargetMode": 2,
+                "applyToLegacyTakes": true,
+                "applyToAllTakes": false,
+            }
+        });
+        let patch = json!({ "channelImportPolicy": { "tolerance": 1e-4 } });
+        let merged = merge_ui_settings_patch(base, &patch);
+        let policy = &merged["channelImportPolicy"];
+        assert_eq!(policy["tolerance"], json!(1e-4));
+        assert_eq!(policy["mode"], json!("smart"), "兄弟子键不得丢失");
+        assert_eq!(policy["windowCount"], json!(12));
+        assert_eq!(policy["monoTargetMode"], json!(2));
+        assert_eq!(policy["applyToLegacyTakes"], json!(true));
+    }
+
+    #[test]
+    fn deep_merge_covers_every_nested_settings_object() {
+        // 逐个白名单键验证：只发一个子字段时，另一个子字段必须留存。
+        for key in DEEP_MERGE_KEYS {
+            let key: &str = key;
+            let base = json!({ key: { "kept": 1, "changed": 1 } });
+            let patch = json!({ key: { "changed": 2 } });
+            let merged = merge_ui_settings_patch(base, &patch);
+            assert_eq!(merged[key]["kept"], json!(1), "{key} 的兄弟子键丢失");
+            assert_eq!(merged[key]["changed"], json!(2), "{key} 的补丁未生效");
+        }
+    }
+
+    #[test]
+    fn shallow_keys_replace_wholesale() {
+        // 非白名单键按整体替换：对象不做子键合并。
+        let base = json!({ "paramAxisUnits": { "volume": "db" } });
+        let patch = json!({ "paramAxisUnits": { "dyn": "ratio" } });
+        let merged = merge_ui_settings_patch(base, &patch);
+        assert_eq!(merged["paramAxisUnits"], json!({ "dyn": "ratio" }));
+    }
+
+    #[test]
+    fn merge_preserves_untouched_top_level_keys() {
+        let base = json!({ "autoCrossfade": true, "loopNewClips": true });
+        let patch = json!({ "autoCrossfade": false });
+        let merged = merge_ui_settings_patch(base, &patch);
+        assert_eq!(merged["autoCrossfade"], json!(false));
+        assert_eq!(merged["loopNewClips"], json!(true));
+    }
+
+    #[test]
+    fn merge_tolerates_non_object_base_or_patch() {
+        // 基底不是对象时原样返回基底（调用方随后会走反序列化兜底）。
+        let merged = merge_ui_settings_patch(json!(null), &json!({ "a": 1 }));
+        assert_eq!(merged, json!(null));
+        // 补丁不是对象时同样不改动基底。
+        let merged = merge_ui_settings_patch(json!({ "a": 1 }), &json!(42));
+        assert_eq!(merged, json!({ "a": 1 }));
+    }
+
+    #[test]
+    fn merge_fills_missing_nested_object_from_patch() {
+        // 基底缺该键时退化为整体插入。
+        let merged = merge_ui_settings_patch(
+            json!({ "autoCrossfade": true }),
+            &json!({ "channelImportPolicy": { "mode": "off" } }),
+        );
+        assert_eq!(merged["channelImportPolicy"]["mode"], json!("off"));
+    }
 }
