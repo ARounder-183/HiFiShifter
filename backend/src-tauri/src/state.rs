@@ -8543,6 +8543,45 @@ impl TimelineState {
         true
     }
 
+    /// 旧工程升级：对**全部** Clip 的全部 Take 套用导入声道策略。
+    ///
+    /// 只用于 v5 之前、Take 尚无 `channel_mode` 字段的工程 —— 那些 Take 的 0
+    /// 是"字段缺失"而非用户的显式选择。v5+ 工程的 `channel_mode` 是用户决定，
+    /// 调用方不得在此改写（见 `project::finalize_timeline_for_session`）。
+    ///
+    /// **会解码音频**，必须在锁外调用。返回被改写的 Take 数量。
+    pub fn apply_channel_policy_to_legacy_takes(
+        &mut self,
+        policy: &crate::config::ChannelImportPolicy,
+    ) -> usize {
+        let mut changed = 0usize;
+        for clip in &mut self.clips {
+            // 先全部判定（可能解码），再统一写回：避免在同一循环里混着 IO 与
+            // 借用，也让"哪些被改"一目了然。
+            let decisions: Vec<crate::channel_policy::ChannelDecision> = clip
+                .takes
+                .iter()
+                .map(|take| crate::channel_policy::precompute_take_decision(take, policy))
+                .collect();
+
+            let mut clip_changed = false;
+            for (take, decision) in clip.takes.iter_mut().zip(decisions) {
+                if crate::channel_policy::apply_decision(take, decision) {
+                    clip_changed = true;
+                    changed += 1;
+                }
+            }
+            if clip_changed && !clip.takes.is_empty() {
+                // 声道模式是 active take 的内存投影：改完 Take 必须物化回投影，
+                // 否则后续 sync 会用旧投影覆盖（且前端读的是投影）。
+                let idx = clip.active_take_index().min(clip.takes.len() - 1);
+                let take = clip.takes[idx].clone();
+                take.apply_to_clip(clip);
+            }
+        }
+        changed
+    }
+
     /// 波纹编辑（自动跟进）：把“编辑点（origin）之后、且不属于被编辑集合的剪辑”
     /// 整体平移 `delta_sec`（秒，可正可负）。
     ///

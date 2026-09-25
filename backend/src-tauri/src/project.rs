@@ -602,6 +602,25 @@ pub fn finalize_timeline_for_session(
     }
     tl.sync_clip_takes_from_flat();
 
+    // v5 迁移：v4 及更早的 Take 没有 `channel_mode` 字段，反序列化得到的 0 是
+    // "字段缺失"而非用户的显式选择 —— 按当前导入策略重新判定（默认"智能转换"：
+    // 假立体声折叠为单声道，使渲染退回单声道路径，耗时减半）。
+    //
+    // v5+ 工程绝不走这一步：那里的 channel_mode 是用户决定，改写会破坏意图。
+    // 必须放在 `populate_clip_file_metadata` **之后**：该步骤会回填
+    // `source_channels`，有了它单声道源可零解码直接跳过。
+    if project_file_version < 5 {
+        let policy = crate::config::channel_import_policy();
+        if policy.apply_to_legacy_takes {
+            let converted = tl.apply_channel_policy_to_legacy_takes(&policy);
+            if converted > 0 {
+                log::info!(
+                    "[open_project] channel policy folded {converted} legacy take(s) to mono"
+                );
+            }
+        }
+    }
+
     (tl, missing_files)
 }
 
@@ -619,6 +638,126 @@ mod tests {
             8,
             "1/8".to_string(),
         )
+    }
+
+    /// 写一个临时 WAV；`identical` 为 true 时 L == R（假立体声）。
+    fn write_test_wav(name: &str, identical: bool) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("hifishifter_project_policy_test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join(name);
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: 44_100,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let mut w = hound::WavWriter::create(&path, spec).expect("wav");
+        for i in 0..44_100 {
+            let v = ((i as f32) * 0.01).sin() * 0.4;
+            w.write_sample(v).expect("l");
+            w.write_sample(if identical { v } else { -v }).expect("r");
+        }
+        w.finalize().expect("finalize");
+        path
+    }
+
+    /// 造一个"v4 形态"的工程：Take 存在但没有 channel_mode 字段。
+    fn timeline_with_legacy_take(source: &std::path::Path) -> TimelineState {
+        let mut tl = TimelineState::default();
+        let root = tl.tracks[0].id.clone();
+        let clip_id = tl.add_clip(
+            Some(root),
+            Some("V".to_string()),
+            Some(0.0),
+            Some(1.0),
+            Some(source.to_string_lossy().to_string()),
+        );
+        let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).expect("clip");
+        clip.sync_take_from_flat();
+        for take in &mut clip.takes {
+            take.channel_mode = 0;
+            take.source_channels = None;
+        }
+        tl
+    }
+
+    #[test]
+    fn legacy_project_folds_fake_stereo_takes() {
+        let _guard = crate::config::channel_policy_test_guard();
+        crate::config::set_channel_import_policy(&crate::config::ChannelImportPolicy::default());
+        let path = write_test_wav("legacy_fake.wav", true);
+        let tl = timeline_with_legacy_take(&path);
+
+        let (finalized, _missing) =
+            finalize_timeline_for_session(tl, Path::new("C:/proj/t.hshp"), 4);
+
+        assert_eq!(
+            finalized.clips[0].takes[0].channel_mode, 2,
+            "v4 工程的假立体声 Take 应被折叠为单声道"
+        );
+        assert_eq!(
+            finalized.clips[0].channel_mode, 2,
+            "active take 的模式必须同步到 Clip 投影"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn legacy_project_keeps_true_stereo_takes() {
+        let _guard = crate::config::channel_policy_test_guard();
+        crate::config::set_channel_import_policy(&crate::config::ChannelImportPolicy::default());
+        let path = write_test_wav("legacy_true.wav", false);
+        let tl = timeline_with_legacy_take(&path);
+
+        let (finalized, _missing) =
+            finalize_timeline_for_session(tl, Path::new("C:/proj/t.hshp"), 4);
+
+        assert_eq!(
+            finalized.clips[0].takes[0].channel_mode, 0,
+            "真立体声不得被折叠"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn v5_project_explicit_channel_mode_is_never_rewritten() {
+        let _guard = crate::config::channel_policy_test_guard();
+        crate::config::set_channel_import_policy(&crate::config::ChannelImportPolicy::default());
+        // 假立体声素材，但用户在 v5 工程里显式保持了 Normal(0)：
+        // 升级逻辑不得改写（这正是版本号判定要守住的方向）。
+        let path = write_test_wav("v5_explicit.wav", true);
+        let tl = timeline_with_legacy_take(&path);
+
+        let (finalized, _missing) =
+            finalize_timeline_for_session(tl, Path::new("C:/proj/t.hshp"), 5);
+
+        assert_eq!(
+            finalized.clips[0].takes[0].channel_mode, 0,
+            "v5+ 工程的 channel_mode 是用户显式决定，不得改写"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn legacy_migration_respects_apply_to_legacy_takes_flag() {
+        let _guard = crate::config::channel_policy_test_guard();
+        crate::config::set_channel_import_policy(&crate::config::ChannelImportPolicy {
+            apply_to_legacy_takes: false,
+            ..Default::default()
+        });
+        let path = write_test_wav("legacy_flag_off.wav", true);
+        let tl = timeline_with_legacy_take(&path);
+
+        let (finalized, _missing) =
+            finalize_timeline_for_session(tl, Path::new("C:/proj/t.hshp"), 4);
+
+        assert_eq!(
+            finalized.clips[0].takes[0].channel_mode, 0,
+            "关闭 apply_to_legacy_takes 后旧工程不做任何转换"
+        );
+        // 还原全局，避免影响同进程其它测试。
+        crate::config::set_channel_import_policy(&crate::config::ChannelImportPolicy::default());
+        let _ = std::fs::remove_file(&path);
     }
 
     fn timeline_with_clip_and_zero_curves() -> TimelineState {

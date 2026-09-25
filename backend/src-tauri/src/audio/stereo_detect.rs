@@ -489,7 +489,12 @@ where
     true
 }
 
-/// 非 WAV：从区间起点限量解码。
+/// 非 WAV：从区间起点限量解码后比较。
+///
+/// 与 WAV 路径的差异（已知限制，出于成本考虑）：Symphonia 的逐包解码不保证
+/// 窗口级随机访问，因此这里只解码 `[region_start, region_start + 预算)` 这一段
+/// 连续音频并逐帧比较，而不是像 WAV 那样在区间内分散取窗口。代价上界是
+/// `region_start + 预算` 的解码量；对本工程的主力工作流（短 WAV 切片）无影响。
 fn analyze_other_container(
     path: &Path,
     region: Option<(f64, f64)>,
@@ -525,30 +530,58 @@ fn analyze_other_container(
         .scan_budget_sec()
         .unwrap_or(HARD_CAP_SEC)
         .min(HARD_CAP_SEC);
-    let max_frames = ((budget_sec * sample_rate as f64).round() as usize)
+    let window_frames = ((budget_sec * sample_rate as f64).round() as usize)
         .max(1)
         .min(region_frames as usize);
 
+    // 必须解码到区间起点**之后**：只解码文件头会分析到与消费区间无关的音频
+    // （区间起点非 0 时结论完全错误）。解码量上界 = region_start + window_frames。
+    let decode_limit = (region_start as usize).saturating_add(window_frames);
     let mut pcm: Vec<f32> = Vec::new();
-    let _ = crate::media::decode_media_audio_prefix_f32(path, None, max_frames).map(
-        |(_sr, _ch, data)| {
-            pcm = data;
-        },
-    );
+    if crate::media::decode_media_audio_prefix_f32(path, None, decode_limit)
+        .map(|(_sr, _ch, data)| pcm = data)
+        .is_err()
+    {
+        return ChannelVerdict::Unknown;
+    }
     if pcm.is_empty() {
         return ChannelVerdict::Unknown;
     }
 
-    let mut acc = DiffAcc::default();
     let ch = header.channels as usize;
-    let frames = pcm.len() / ch;
-    for f in 0..frames {
+    let decoded_frames = pcm.len() / ch;
+    let Some((first, last)) = container_analysis_range(region_start, window_frames, decoded_frames)
+    else {
+        // 解码没到达区间起点（文件比 header 声明的短）→ 不做结论。
+        return ChannelVerdict::Unknown;
+    };
+
+    let mut acc = DiffAcc::default();
+    for f in first..last {
         let base = f * ch;
         if !acc.push(pcm[base], pcm[base + 1], opts.tolerance) {
             return ChannelVerdict::TrueStereo;
         }
     }
     finalize(acc)
+}
+
+/// 非 WAV 路径在**已解码缓冲**中应当比较的帧下标区间 `[first, last)`。
+///
+/// 缓冲是从文件起点开始解码的，所以消费区间起点 `region_start` 之前的帧
+/// 属于无关音频，必须跳过 —— 否则区间起点非 0 时会拿文件头的音频下结论。
+fn container_analysis_range(
+    region_start: u64,
+    window_frames: usize,
+    decoded_frames: usize,
+) -> Option<(usize, usize)> {
+    let first = (region_start as usize).min(decoded_frames);
+    let last = first.saturating_add(window_frames).min(decoded_frames);
+    if last <= first {
+        None
+    } else {
+        Some((first, last))
+    }
 }
 
 /// 把源域秒区间解析为帧下标区间；越界部分钳制到 `[0, total_frames)`。
@@ -860,6 +893,31 @@ mod tests {
             quantize_region(Some((f64::NAN, f64::INFINITY))),
             Some((0, 0))
         );
+    }
+
+    #[test]
+    fn container_range_skips_frames_before_the_region_start() {
+        // 回归：非 WAV 路径从文件头解码，若从缓冲开头就比较，区间起点非 0
+        // 时会拿与消费区间无关的音频下结论。
+        let (first, last) = container_analysis_range(1000, 500, 10_000).unwrap();
+        assert_eq!(first, 1000, "必须跳过区间起点之前的帧");
+        assert_eq!(last, 1500);
+    }
+
+    #[test]
+    fn container_range_clamps_to_decoded_length() {
+        // 文件比 header 声明的短：解码没到区间起点 → 不做结论。
+        assert_eq!(container_analysis_range(5000, 500, 1000), None);
+        // 部分覆盖：截到已解码末尾。
+        let (first, last) = container_analysis_range(800, 500, 1000).unwrap();
+        assert_eq!((first, last), (800, 1000));
+    }
+
+    #[test]
+    fn container_range_from_zero_covers_the_window() {
+        let (first, last) = container_analysis_range(0, 300, 10_000).unwrap();
+        assert_eq!((first, last), (0, 300));
+        assert_eq!(container_analysis_range(0, 300, 0), None);
     }
 
     /// 写入一个临时 WAV（32f，指定声道内容）并返回路径。
