@@ -26,6 +26,8 @@ import { IS_MAC, isPrimaryModifierDown } from "../../../../utils/platform";
 import { nativeScrollbarZoneAt } from "../../../../utils/nativeScrollbar";
 
 import { createTickAxis } from "../runtime/tickAxis.js";
+import { rulerLayerTranslatePx } from "../../renderKernel/timelineAxis.js";
+import { readDevicePixelRatio } from "../../../../utils/devicePixelLine";
 import { waveformMipmapStore } from "../../../../utils/waveformMipmapStore";
 import { fileBrowserApi } from "../../../../services/api/fileBrowser";
 import { seekPlayhead, setplayheadSec } from "../../../../features/session/sessionSlice";
@@ -538,7 +540,9 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
             );
         }
         if (rulerContentRef.current) {
-            rulerContentRef.current.style.transform = `translateX(${-next}px)`;
+            // 平移量吸附到设备像素（见 `rulerLayerTranslatePx`）：与内核同一约定，
+            // 否则层内标尺竖线在系统缩放率 > 1 时粗细不一。
+            rulerContentRef.current.style.transform = `translateX(${-rulerLayerTranslatePx(next, readDevicePixelRatio())}px)`;
         }
         // 标尺播放头线**不在这里写**：它由内核在 draw() 内与轨道区播放头一起写
         // （同一次帧提交、同一份内核视口、同一个 `playheadLineLeftPx`）。

@@ -24,6 +24,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 import {
     BRIDGE_ACTION_EVENT,
+    BRIDGE_APPEARANCE_EVENT,
     BRIDGE_SNAPSHOT_EVENT,
     BRIDGE_SNAPSHOT_REQUEST_EVENT,
     createStoreBridgeMiddleware,
@@ -32,6 +33,7 @@ import {
     projectSnapshot,
     resolveWindowLabel,
     satelliteFormId,
+    subscribeRemoteAppearance,
 } from "./detachBridge";
 
 function makeStore(role: "main" | "satellite" = "main") {
@@ -237,6 +239,58 @@ describe("卫星窗口的快照握手（重试）", () => {
             expect(
                 emitted.filter((item) => item.event === BRIDGE_SNAPSHOT_REQUEST_EVENT).length,
             ).toBe(before);
+            teardown();
+        } finally {
+            (globalThis as { window?: unknown }).window = original;
+        }
+    });
+});
+
+describe("外观下发（独立窗口继承主题与自定义字体）", () => {
+    it("★ 订阅时立即回调已收到的外观，之后每次推送都回调", async () => {
+        const original = globalThis.window;
+        (globalThis as { window?: unknown }).window = {
+            location: { search: "?hsDetachedForm=notebook" },
+        };
+        try {
+            const received: unknown[] = [];
+            const teardown = installBridge({
+                role: "satellite",
+                getState: () => ({}),
+                dispatch: () => {},
+                onSnapshot: () => {},
+            });
+            await new Promise((resolve) => setTimeout(resolve, 0));
+
+            // 主窗口下发一次外观（模拟快照里带的外观）。
+            const snapshotHandler = listeners.get(BRIDGE_SNAPSHOT_EVENT);
+            expect(snapshotHandler).toBeDefined();
+            snapshotHandler?.({
+                payload: {
+                    target: "detached:notebook",
+                    state: {},
+                    appearance: { fontFamily: "Georgia, serif" },
+                },
+            });
+
+            // 之后挂载的订阅者应当**立即**拿到已收到的值（晚挂载也要能应用）。
+            const unsubscribe = subscribeRemoteAppearance((appearance) =>
+                received.push(appearance),
+            );
+            expect(received).toEqual([{ fontFamily: "Georgia, serif" }]);
+
+            // 变更推送：再次回调。
+            const appearanceHandler = listeners.get(BRIDGE_APPEARANCE_EVENT);
+            expect(appearanceHandler).toBeDefined();
+            appearanceHandler?.({ payload: { appearance: { fontFamily: "Noto Sans SC" } } });
+            expect(received).toEqual([
+                { fontFamily: "Georgia, serif" },
+                { fontFamily: "Noto Sans SC" },
+            ]);
+
+            unsubscribe();
+            appearanceHandler?.({ payload: { appearance: { fontFamily: "X" } } });
+            expect(received).toHaveLength(2);
             teardown();
         } finally {
             (globalThis as { window?: unknown }).window = original;

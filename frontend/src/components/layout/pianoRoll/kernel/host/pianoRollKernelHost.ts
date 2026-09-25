@@ -88,6 +88,7 @@ import {
     playheadLineLeftPx,
     secToViewportPx,
     type TimelineAxis,
+    rulerLayerTranslatePx,
 } from "../../../renderKernel/timelineAxis";
 import { createPlayheadElementWriter } from "../../../renderKernel/playheadElements";
 import type { FlatInstance } from "../../../renderKernel/instanceTypes";
@@ -1536,9 +1537,13 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         // 绘制坐标：与 currentAxis / onFrame / 量化提交同一口径（见上方说明）。
         const drawingScrollLeft = view.scrollLeft - horizontalOffsetPx();
         const ruler = sync?.rulerContent?.() ?? null;
-        if (ruler != null && shouldWrite(drawingScrollLeft, lastRulerTranslateX)) {
-            lastRulerTranslateX = drawingScrollLeft;
-            ruler.style.transform = `translateX(${-drawingScrollLeft}px)`;
+        // 平移量吸附到设备像素（见 `rulerLayerTranslatePx`）：本内核的帧循环用的是
+        // **未吸附**的 `scroll.get()`，若不在这里吸附，层原点的小数部分会让标尺里每
+        // 一条 1 物理像素的竖线被抗锯齿 —— 系统缩放率 > 1 时粗细不一。
+        const rulerTranslate = rulerLayerTranslatePx(drawingScrollLeft, readDevicePixelRatio());
+        if (ruler != null && shouldWrite(rulerTranslate, lastRulerTranslateX)) {
+            lastRulerTranslateX = rulerTranslate;
+            ruler.style.transform = `translateX(${-rulerTranslate}px)`;
         }
 
         // 标尺播放头线：与 GL 播放头**同源同帧**（见 `rulerPlayheadLine` 的说明）。

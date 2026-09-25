@@ -58,6 +58,7 @@ import {
     createTimelineAxis,
     playheadLineLeftPx,
     type TimelineAxis,
+    rulerLayerTranslatePx,
 } from "../../../renderKernel/timelineAxis";
 import { createPlayheadElementWriter } from "../../../renderKernel/playheadElements";
 import { buildSparseClipRenderModel } from "../../runtime/timelineCanvasModel";
@@ -2155,7 +2156,11 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         const dom = resolveDomSync(sync);
         const ruler = dom.rulerContent;
         if (ruler != null) {
-            const translateX = -view.scrollLeft;
+            // 平移量吸附到设备像素（见 `rulerLayerTranslatePx`）：层原点的分数部分
+            // 会让层内每一条标尺竖线跨在两个物理像素上被抗锯齿，粗细随小数部分变化。
+            // `draw()` 传入的 view 已经过 `snapRenderView`，这里用同一助手显式表达
+            // 契约，避免以后有人把实参换成未吸附的值。
+            const translateX = -rulerLayerTranslatePx(view.scrollLeft, readDpr());
             if (shouldWrite(translateX, lastRulerTranslateX)) {
                 lastRulerTranslateX = translateX;
                 ruler.style.transform = `translateX(${translateX}px)`;

@@ -12,14 +12,16 @@
  * 主窗口"，等状态就位再挂载面板 —— 面板的首次渲染就是完整状态。
  */
 
-import { useCallback } from "react";
+import { useCallback, useEffect } from "react";
 
 import { useAppSelector } from "../../app/hooks";
 import { FileBrowserPanel } from "../layout/FileBrowserPanel";
 import { NotebookPanel } from "../layout/notebook/NotebookPanel";
 import { UndoHistoryPanel } from "../layout/UndoHistoryPanel";
 import { PANEL_FILE_BROWSER, PANEL_NOTEBOOK, PANEL_UNDO_HISTORY } from "./registerBuiltinPanels";
-import { satelliteFormId } from "../../features/dock/detachBridge";
+import { satelliteFormId, subscribeRemoteAppearance } from "../../features/dock/detachBridge";
+import { useAppTheme } from "../../theme/AppThemeProvider";
+import type { AppearanceSettings } from "../../theme/themeTypes";
 
 /** 独立窗口承载的面板组件映射（与 `PanelDefinition.detachable` 对应）。 */
 function renderDetachedPanel(panelId: string) {
@@ -51,6 +53,26 @@ export function DetachedRoot() {
      * 而且那份状态只能在 effect 里同步，属典型的级联渲染来源。
      */
     const panelId = form?.panelId ?? null;
+
+    /**
+     * 继承主窗口的外观（主题 / **自定义字体**）。
+     *
+     * 【为什么由主窗口下发，而不是自己读 localStorage】外观只存在 localStorage 里。
+     * 卫星窗口过去依赖"两个窗口共享同一份存储"这一环境假设，于是当存储分区不同、
+     * 或窗口在写入之前就挂载时，字体退回默认值（用户报告"独立窗口没有继承主窗口的
+     * 自定义字体"）。现在主窗口在快照里带一次、变更时再推送，卫星不再依赖环境假设；
+     * `applySettings` 会同时写入本窗口的存储，后续自读也是对的。
+     *
+     * `subscribeRemoteAppearance` 在订阅时会立即用已收到的值回调一次，因此无论快照
+     * 早于还是晚于本组件挂载，都能应用上。
+     */
+    const theme = useAppTheme();
+    useEffect(() => {
+        return subscribeRemoteAppearance((appearance) => {
+            if (appearance == null) return;
+            theme.applySettings(appearance as AppearanceSettings);
+        });
+    }, [theme]);
     const content = panelId ? renderDetachedPanel(panelId) : null;
 
     const onDragOver = useCallback((event: React.DragEvent) => {

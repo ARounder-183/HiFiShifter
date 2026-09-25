@@ -193,6 +193,7 @@ import {
     playheadLineLeftPx,
     viewportEndSec,
     viewportStartSec,
+    rulerLayerTranslatePx,
 } from "./renderKernel/timelineAxis.js";
 import { usePianoRollInteractions } from "./pianoRoll/usePianoRollInteractions";
 import { useLiveParamEditing } from "./pianoRoll/useLiveParamEditing";
@@ -2587,7 +2588,9 @@ export const PianoRollPanel: React.FC<{
 
     function applyScrollLayers(next: number) {
         if (rulerContentRef.current) {
-            rulerContentRef.current.style.transform = `translateX(${-next}px)`;
+            // 平移量吸附到设备像素（见 `rulerLayerTranslatePx`）：与内核同一约定，
+            // 否则层内标尺竖线在系统缩放率 > 1 时粗细不一。
+            rulerContentRef.current.style.transform = `translateX(${-rulerLayerTranslatePx(next, readDevicePixelRatio())}px)`;
         }
 
         if (gridLayerRef.current) {
@@ -7285,10 +7288,12 @@ export const PianoRollPanel: React.FC<{
                                     void dispatch(persistUiSettings());
                                 }}
                                 style={{
-                                    // 根据工具栏拥挤程度自动伸缩：宽裕时最多 120px，拥挤时缩到 48px
+                                    // 按工具栏拥挤程度自动伸缩：宽裕时最多 120px，拥挤时**尽量
+                                    // 让步**。下限刻意取得很小（20px）：它是低频调节项，横向
+                                    // 空间紧张时应当先被压缩，而不是把同排的其它控件挤出可视区。
                                     flex: "1 1 auto",
                                     width: 120,
-                                    minWidth: 48,
+                                    minWidth: 20,
                                     maxWidth: 120,
                                 }}
                             />

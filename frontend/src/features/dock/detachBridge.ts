@@ -27,6 +27,7 @@
 import type { Middleware, UnknownAction } from "@reduxjs/toolkit";
 
 import { reportFrontendError } from "../../services/frontendErrorLog";
+import { loadAppearance } from "../../theme/themeStorage";
 
 /** 窗口角色。 */
 export type BridgeRole = "main" | "satellite";
@@ -40,6 +41,12 @@ const SNAPSHOT_REQUEST_INTERVAL_MS = 500;
 const SNAPSHOT_REQUEST_TIMEOUT_MS = 10_000;
 export const BRIDGE_SNAPSHOT_REQUEST_EVENT = "hs:store/snapshot-request";
 export const BRIDGE_SNAPSHOT_EVENT = "hs:store/snapshot";
+/** 主窗口 → 卫星窗口：外观（主题 / 字体）变更。 */
+export const BRIDGE_APPEARANCE_EVENT = "hs:store/appearance";
+/** 外观设置窗口发出的三个事件（见 `AppearanceWindow`）。 */
+const APPEARANCE_APPLIED_EVENT = "appearance-applied";
+const APPEARANCE_PREVIEW_EVENT = "appearance-preview";
+const APPEARANCE_REVERTED_EVENT = "appearance-reverted";
 
 interface BridgeEnvelope {
     /** 发送方窗口标签（用于忽略自己发出的事件）。 */
@@ -56,6 +63,40 @@ interface SnapshotEnvelope {
     /** 目标卫星窗口标签。 */
     target: string;
     state: unknown;
+    /** 主窗口当前的外观（主题 / 字体）。见 `subscribeRemoteAppearance` 的说明。 */
+    appearance?: unknown;
+}
+
+/**
+ * 卫星窗口最近一次收到的外观（未收到为 null）与订阅者。
+ *
+ * 【为什么要跨窗口传外观，而不是让卫星读 localStorage】外观（含**自定义字体**）
+ * 只存在 localStorage 里，卫星窗口过去依赖"两个窗口共享同一份存储"这一环境假设：
+ * 一旦存储分区不同、或窗口在写入之前就挂载，卫星就退回默认字体（用户报告"独立
+ * 窗口没有继承主窗口的自定义字体"）。改为**主窗口权威 + 显式下发**之后，卫星不再
+ * 依赖任何环境假设：启动时从快照里拿一次，此后由主窗口在变更时推送。
+ */
+let remoteAppearance: unknown = null;
+const appearanceListeners = new Set<(appearance: unknown) => void>();
+
+function publishRemoteAppearance(appearance: unknown): void {
+    if (appearance == null) return;
+    remoteAppearance = appearance;
+    for (const listener of appearanceListeners) listener(appearance);
+}
+
+/**
+ * 订阅"主窗口下发的外观"。
+ *
+ * 订阅时会**立即**以当前值回调一次（若已收到过）—— 这样晚挂载的组件也能拿到值，
+ * 不必再区分"先到 / 后到"。
+ *
+ * @returns 取消订阅。
+ */
+export function subscribeRemoteAppearance(listener: (appearance: unknown) => void): () => void {
+    if (remoteAppearance !== null) listener(remoteAppearance);
+    appearanceListeners.add(listener);
+    return () => appearanceListeners.delete(listener);
 }
 
 /**
@@ -244,6 +285,30 @@ export function installBridge(args: {
         unsubscribers.push(offAction);
 
         if (role === "main") {
+            // 外观（主题 / 字体）变更 → 广播给所有卫星窗口。
+            //
+            // 【为什么由桥来做，而不是复用 `AppearanceSettingsDialog` 的监听】那个监听
+            // 只在对话框打开时挂载，而卫星窗口可能在对话框关闭后才打开、或用户改了外观
+            // 之后才拆出面板。桥在主窗口常驻，是唯一"总在"的地方。
+            const broadcastAppearance = () => {
+                const appearance = trySerialize(loadAppearance());
+                if (appearance !== null) {
+                    void api.emit(BRIDGE_APPEARANCE_EVENT, { appearance }).catch(() => undefined);
+                }
+            };
+            const offApplied = await api.listen(APPEARANCE_APPLIED_EVENT, broadcastAppearance);
+            unsubscribers.push(offApplied);
+            const offReverted = await api.listen(APPEARANCE_REVERTED_EVENT, broadcastAppearance);
+            unsubscribers.push(offReverted);
+            const offPreview = await api.listen(APPEARANCE_PREVIEW_EVENT, (event) => {
+                const payload = event.payload as { settings?: unknown } | null;
+                const appearance = trySerialize(payload?.settings ?? null);
+                if (appearance !== null) {
+                    void api.emit(BRIDGE_APPEARANCE_EVENT, { appearance }).catch(() => undefined);
+                }
+            });
+            unsubscribers.push(offPreview);
+
             // 主窗口应答快照请求（卫星会重试，因此这里必须**幂等且无副作用**）。
             const offRequest = await api.listen(BRIDGE_SNAPSHOT_REQUEST_EVENT, (event) => {
                 const request = event.payload as SnapshotRequest | null;
@@ -258,6 +323,9 @@ export function installBridge(args: {
                 void api.emit(BRIDGE_SNAPSHOT_EVENT, {
                     target: request.origin,
                     state,
+                    // 外观随快照一起下发：卫星启动即拿到正确字体（见
+                    // `subscribeRemoteAppearance`）。
+                    appearance: trySerialize(loadAppearance()) ?? undefined,
                 } satisfies SnapshotEnvelope);
             });
             unsubscribers.push(offRequest);
@@ -268,9 +336,15 @@ export function installBridge(args: {
                 if (!envelope || envelope.target !== origin) return;
                 received = true;
                 stopRequesting();
+                publishRemoteAppearance(envelope.appearance ?? null);
                 onSnapshot?.(envelope.state);
             });
             unsubscribers.push(offSnapshot);
+            const offAppearance = await api.listen(BRIDGE_APPEARANCE_EVENT, (event) => {
+                const payload = event.payload as { appearance?: unknown } | null;
+                publishRemoteAppearance(payload?.appearance ?? null);
+            });
+            unsubscribers.push(offAppearance);
             // 【必须重试】请求是"尽力而为"的事件：主窗口的监听可能还没注册好（卫星
             // 在 store 模块求值期就发起请求，比主窗口的 App 挂载还早），事件会丢进
             // 空房间且**永远不会重发**。此前只发一次 ⇒ 卫星永久空白。这里按固定间隔

@@ -5,7 +5,7 @@ import type { GridSize, TimelineSnapSettings } from "../../../features/session/s
 import type { ScaleLike } from "../../../utils/musicalScales";
 import { SCALE_KEYS, SCALE_LABELS } from "../../../utils/musicalScales";
 import { shouldSuppressHoverSideEffects } from "../../../utils/penInput";
-import { resolveTempoDragOffsetPx } from "./tempoPointDragOffset";
+import { resolveTempoDragOffsetPx, tempoSecUnderCursor } from "./tempoPointDragOffset";
 import { useNonPassiveWheel } from "../../../utils/useNonPassiveWheel";
 import type { CustomScalePreset } from "../../../utils/customScales";
 import {
@@ -1056,12 +1056,26 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             inlineEditLockRef.current = true;
             setEditingPointId(null);
             const appliedMap = applyInlineEdit(false);
-            // 从当前指针位置开始拖动（保持指针与标签的相对偏移不变）。
+            // 【拖拽起点对准光标】进入拖拽时，把变化点放到**光标当前所在的时间**上，
+            // 而不是保留"光标与标签之间的初始偏移"。
+            //
+            // 拖动是从输入框里"拖出去"发起的：指针先离开输入框边界（`margin` 之外）
+            // 才切换到拖拽，此时光标已经离标签有几十像素。若沿用初始偏移，变化点会
+            // 永远落后光标那一段距离 —— 用户看到的是"拖到哪儿都不是我指的位置"。
+            //
+            // 标签在屏幕上的左缘即该变化点当前的时间位置，据此把光标位置换算成秒。
+            const flagRect = flagElementsRef.current.get(point.id)?.getBoundingClientRect() ?? null;
+            const secUnderCursor = tempoSecUnderCursor({
+                pointSec: point.positionSec,
+                flagLeftPx: flagRect ? flagRect.left : Number.NaN,
+                clientX,
+                pxPerSec,
+            });
             const dragBase = appliedMap ?? tempoMap ?? { points: [point] };
             dragRef.current = {
                 pointId: point.id,
                 startClientX: clientX,
-                startSec: point.positionSec,
+                startSec: secUnderCursor,
                 baseTempoMap: dragBase,
                 // 与 `startFlagDrag` 同一约定：吸附网格不含被拖的点。
                 snapTempoMap: removeTempoPoint(dragBase, point.id) ?? dragBase,
@@ -1072,7 +1086,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             setDraggingId(point.id);
             setSelectedId(point.id);
         },
-        [applyInlineEdit, tempoMap],
+        [applyInlineEdit, tempoMap, pxPerSec],
     );
 
     const startInlineDragProbe = useCallback(

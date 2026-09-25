@@ -26,7 +26,11 @@ import {
 } from "./TempoMapRulerRow.tsx";
 import { RULER_BASE_HEIGHT_PX, timeRulerHeightPx } from "./rulerHeight.ts";
 import type { TimelineTick } from "./runtime/buildTimelineTicks.js";
-import { readDevicePixelRatio, wholeDevicePxLength } from "../../../utils/devicePixelLine.ts";
+import {
+    readDevicePixelRatio,
+    verticalHairlineGeometry,
+    wholeDevicePxLength,
+} from "../../../utils/devicePixelLine.ts";
 import { playheadLineLeftViewportPx } from "../renderKernel/timelineAxis.ts";
 import { clampAxisPosition } from "../../appTooltipPosition";
 
@@ -114,7 +118,22 @@ const TimeRulerMarks = React.memo(function TimeRulerMarks({
     return (
         <>
             {visibleTicks.map((tick, tickIndex) => {
-                const left = tick.contentPx;
+                // 设备像素比在每次渲染时现读（放在 map 内而不是组件体：组件体里的
+                // 非纯调用会让 React Compiler 无法保留下面那个 useMemo 的记忆化）。
+                const dpr = readDevicePixelRatio();
+                // 竖线的位置与线宽都按**设备像素**取整（见 `devicePixelLine`）。
+                //
+                // 【为什么必须这样】内容层虽已把平移量吸附到设备像素（见
+                // `rulerLayerTranslatePx`），但刻度自身的 `contentPx` 是小数：
+                // 层原点 + 小数刻度 ⇒ 竖线跨在两个物理像素上被抗锯齿，且覆盖度随每条
+                // 刻度的小数部分变化 —— 系统缩放率 > 1 时表现为**同一排竖线粗细不一**。
+                // 内核的网格线不会这样：它按设备像素绘制。这里采用同一份吸附，两层
+                // 因此逐设备像素对齐。
+                const { left, width: lineWidth } = verticalHairlineGeometry(
+                    tick.contentPx,
+                    tick.isBarStart ? 2 : 1,
+                    dpr,
+                );
                 // 版式完全由生成器决定（见 `TimelineTick.labelMaxWidth`）：
                 // 渲染期不再做"与可见切片里的下一条比较"——那个判据会随滚动位置
                 // 改变，正是"标尺文字时有时无"的来源。这里只消费结果。
@@ -128,10 +147,10 @@ const TimeRulerMarks = React.memo(function TimeRulerMarks({
                         <div
                             className="absolute top-0 bottom-0"
                             style={{
-                                // 与下方网格保持一致：小节线 2px、弱网格线 1px；
-                                // 2px 线以刻度位置为中心，避免左右偏移半个像素。
-                                left: tick.isBarStart ? -1 : 0,
-                                width: tick.isBarStart ? 2 : 1,
+                                // 与下方网格保持一致：小节线 2 物理像素、弱线 1 物理像素；
+                                // 都以刻度位置为中心（居中量按设备像素宽度算）。
+                                left: 0,
+                                width: lineWidth,
                                 backgroundColor: "var(--qt-border)",
                                 opacity: tick.isBarStart ? 1 : 0.6,
                             }}

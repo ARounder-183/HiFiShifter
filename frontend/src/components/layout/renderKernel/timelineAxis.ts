@@ -32,7 +32,7 @@
 
 /** 时间轴投影：描述「一秒画多少像素」以及「视口左上角落在内容何处」。 */
 
-import { wholeDevicePxLength } from "../../../utils/devicePixelLine";
+import { snapToDevicePx, wholeDevicePxLength } from "../../../utils/devicePixelLine";
 export interface TimelineAxis {
     /** 水平缩放：每秒对应的 CSS 像素数。必须 > 0。 */
     readonly pxPerSec: number;
@@ -266,6 +266,26 @@ export function strokePx(axis: TimelineAxis, px: number, widthPx: number): numbe
  * @param widthPx 线宽（CSS px）；缺省为 1 物理像素。
  * @returns 线的左缘（视口坐标，CSS px）。
  */
+/**
+ * 标尺**内容层**的平移量（CSS px，恒为正；写入时取负）。
+ *
+ * 【为什么必须吸附到设备像素】内容层里放着标尺刻度竖线（DOM）。层被
+ * `translateX(-小数)` 平移时，合成层以自己的原点栅格化子元素：若层原点落在分数
+ * 设备像素上，每条 1 物理像素的竖线都会跨在两个物理像素之间被抗锯齿 —— 覆盖度随
+ * 平移的小数部分变化，于是**同一排竖线粗细不一**（系统缩放率 > 1 时尤其明显）。
+ *
+ * 内核的网格线不会这样：它按 `snapRenderView` 把渲染原点吸附到设备像素再绘制。
+ * 本函数让 DOM 侧采用**同一份吸附**，两层因此落在同一个设备像素栅格上 —— 既消除
+ * 粗细不一，也让标尺与网格逐设备像素对齐。
+ *
+ * @param scrollLeftPx 绘制坐标下的水平滚动量（可含小数）。
+ * @param dpr 设备像素比。
+ * @returns 吸附后的平移量（内容层 transform 取它的相反数）。
+ */
+export function rulerLayerTranslatePx(scrollLeftPx: number, dpr: number): number {
+    return snapToDevicePx(scrollLeftPx, dpr);
+}
+
 export function playheadLineLeftPx(axis: TimelineAxis, sec: number, widthPx?: number): number {
     return playheadLineLeftViewportPx({
         sec,

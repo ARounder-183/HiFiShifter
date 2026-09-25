@@ -1,6 +1,10 @@
 import { expect, test } from "vitest";
 
-import { snapToDevicePx, wholeDevicePxLength } from "./devicePixelLine.ts";
+import {
+    snapToDevicePx,
+    verticalHairlineGeometry,
+    wholeDevicePxLength,
+} from "./devicePixelLine.ts";
 
 test("snapToDevicePx pins positions onto device-pixel boundaries", () => {
     // dpr=1：回到整数像素。
@@ -58,5 +62,72 @@ test("snapped position + whole-physical width exactly covers whole device column
             const right = left + width;
             expect(Math.abs(right * dpr - Math.round(right * dpr))).toBeLessThan(1e-9);
         }
+    }
+});
+
+/**
+ * 标尺竖线"粗细不一"的回归（系统缩放率 > 1 时最明显）。
+ *
+ * 曾经标尺的竖线用 `width: 1px` + 小数位置绘制：1px CSS 在 dpr=1.25 下等于 1.25
+ * 个物理像素，且位置的小数部分使覆盖度逐条变化 —— 同一排线有的 1 个物理像素、有的
+ * 2 个，肉眼就是"粗细不一"。`verticalHairlineGeometry` 把位置与宽度**成对**取整到
+ * 设备像素，这里钉死"恰好覆盖整数个物理像素、且边缘落在边界上"。
+ */
+test("verticalHairlineGeometry covers whole device columns at any dpr", () => {
+    for (const dpr of [1, 1.25, 1.5, 1.75, 2, 2.5, 3]) {
+        for (const x of [0, 0.3, 12.5, 123.456, 1000.02, -17.7]) {
+            const { left, width } = verticalHairlineGeometry(x, 1, dpr);
+            const deviceSpan = Math.round((left + width) * dpr) - Math.round(left * dpr);
+            // 覆盖的物理像素数 = `wholeDevicePxLength(1, dpr)` 的取整结果
+            // （dpr=1→1、1.25→1、1.5→2、2→2、3→3），不能是"跨两列各一半"。
+            expect({ dpr, x, deviceSpan }).toEqual({
+                dpr,
+                x,
+                deviceSpan: Math.max(1, Math.round(1 * dpr)),
+            });
+        }
+    }
+});
+
+test("verticalHairlineGeometry edges land on device-pixel boundaries", () => {
+    for (const dpr of [1, 1.25, 1.5, 1.75, 2, 2.5, 3]) {
+        for (const x of [0, 0.3, 12.5, 123.456, 1000.02, -17.7]) {
+            const { left, width } = verticalHairlineGeometry(x, 1, dpr);
+            expect(Math.abs(left * dpr - Math.round(left * dpr))).toBeLessThan(1e-9);
+            expect(Math.abs((left + width) * dpr - Math.round((left + width) * dpr))).toBeLessThan(
+                1e-9,
+            );
+        }
+    }
+});
+
+test("verticalHairlineGeometry keeps the line centred within half a device pixel", () => {
+    for (const dpr of [1, 1.25, 1.5, 1.75, 2, 2.5, 3]) {
+        for (const x of [0, 0.3, 12.5, 123.456, 1000.02, -17.7]) {
+            const { left, width } = verticalHairlineGeometry(x, 1, dpr);
+            expect(Math.abs(left + width / 2 - x)).toBeLessThanOrEqual(0.5 / dpr + 1e-9);
+        }
+    }
+});
+
+test("verticalHairlineGeometry rounds bar-line width to whole physical pixels", () => {
+    for (const dpr of [1, 1.25, 1.5, 1.75, 2, 2.5, 3]) {
+        const { left, width } = verticalHairlineGeometry(10, 2, dpr);
+        const physical = Math.round(width * dpr);
+        // 与 `wholeDevicePxLength(2, dpr)` 同一规则（四舍五入到最接近的整数物理像素）。
+        expect(physical).toBe(Math.max(1, Math.round(2 * dpr)));
+        // 宽度取整后左右边缘仍落在设备像素边界上。
+        expect(Math.abs(left * dpr - Math.round(left * dpr))).toBeLessThan(1e-9);
+        expect(Math.abs((left + width) * dpr - Math.round((left + width) * dpr))).toBeLessThan(
+            1e-9,
+        );
+    }
+});
+
+test("verticalHairlineGeometry guards bad dpr", () => {
+    for (const bad of [Number.NaN, 0, -2, Number.POSITIVE_INFINITY]) {
+        const { left, width } = verticalHairlineGeometry(5, 1, bad);
+        expect(Number.isFinite(left)).toBe(true);
+        expect(width).toBe(1);
     }
 });

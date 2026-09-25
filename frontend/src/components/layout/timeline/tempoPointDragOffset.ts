@@ -26,3 +26,32 @@ export function resolveTempoDragOffsetPx(dx: number): number {
     if (Math.abs(dx) <= TEMPO_DRAG_THRESHOLD_PX) return 0;
     return dx - Math.sign(dx) * TEMPO_DRAG_THRESHOLD_PX;
 }
+
+/**
+ * 由"标签屏幕左缘 + 光标位置"换算光标所在的时间。
+ *
+ * 【用途】从内联输入框拖出去时，变化点应当**落到光标处**，而不是保留"光标与标签
+ * 之间的初始偏移"。拖拽是在指针离开输入框边界之后才接管的，此时光标已离标签几十
+ * 像素；沿用初始偏移会让变化点永远落后光标那一段距离（用户反馈"拖到哪儿都不是我
+ * 指的位置"）。
+ *
+ * 标签的屏幕左缘即该变化点当前的时间位置，因此只需把像素差换算成秒。
+ *
+ * @param pointSec 变化点当前时间（秒）。
+ * @param flagLeftPx 标签左缘的屏幕 x（CSS px）。
+ * @param clientX 光标屏幕 x（CSS px）。
+ * @param pxPerSec 当前水平缩放。
+ * @returns 光标所在的时间（秒）；输入非法时回退 `pointSec`。
+ */
+export function tempoSecUnderCursor(args: {
+    pointSec: number;
+    flagLeftPx: number;
+    clientX: number;
+    pxPerSec: number;
+}): number {
+    const { pointSec, flagLeftPx, clientX, pxPerSec } = args;
+    if (!Number.isFinite(flagLeftPx) || !Number.isFinite(clientX) || !(pxPerSec > 0)) {
+        return pointSec;
+    }
+    return pointSec + (clientX - flagLeftPx) / pxPerSec;
+}
