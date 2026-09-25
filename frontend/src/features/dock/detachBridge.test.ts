@@ -111,6 +111,23 @@ describe("detachBridge（跨窗口状态桥）", () => {
         expect(emitted).toHaveLength(0);
     });
 
+    it("★ 快照动作绝不进广播通道（卫星应用快照不会把主窗口状态整体回滚）", async () => {
+        // 回归：卫星 onSnapshot 派发的快照动作此前会被中间件广播回主窗口，主窗口
+        // 的根 reducer 又对它做整体替换 —— 一次 detach 就把主窗口回滚到快照时刻。
+        const store = makeStore();
+        await flushFrame();
+        emitted.length = 0;
+        // 即便忘记标 hsRemote，类型本身也必须被拦下。
+        store.dispatch({ type: "hs/bridgeSnapshot", payload: { value: 1 } } as never);
+        store.dispatch({
+            type: "hs/bridgeSnapshot",
+            payload: { value: 1 },
+            meta: { hsRemote: true },
+        } as never);
+        await flushFrame();
+        expect(emitted.filter((item) => item.event === BRIDGE_ACTION_EVENT)).toHaveLength(0);
+    });
+
     it("★ 一次帧内的多个动作合并成一批发出", async () => {
         const store = makeStore();
         await flushFrame();

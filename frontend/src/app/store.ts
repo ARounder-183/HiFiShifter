@@ -34,6 +34,11 @@ export type RootState = ReturnType<typeof rootReducer>;
  * 【为什么需要】独立窗口启动时要把主窗口的状态整份搬过来（见 `detachBridge`）。
  * 逐切片 replay 动作既慢又不完整；一次整体替换最简单，也最不容易出错 —— 快照就是
  * 权威状态本身，不存在"合并"语义。
+ *
+ * 【为什么按切片合并而不是整体替换】快照来自主窗口（可能因重载与卫星存在版本
+ * 偏差）：整体替换会让缺切片的快照把本窗口对应切片置成 `undefined` 并一路渗到
+ * UI。`{ ...state, ...payload }` 对快照里**存在**的切片仍是权威替换，缺的切片
+ * 则保留本窗口 reducer 的当前值。
  */
 function appReducer(state: RootState | undefined, action: unknown): RootState {
     if (
@@ -41,7 +46,11 @@ function appReducer(state: RootState | undefined, action: unknown): RootState {
         typeof action === "object" &&
         (action as { type?: unknown }).type === BRIDGE_SNAPSHOT_ACTION
     ) {
-        return (action as { payload: RootState }).payload;
+        const payload = (action as { payload?: Partial<RootState> }).payload;
+        if (!payload || typeof payload !== "object") {
+            return rootReducer(state, { type: "@@hsBridgeEmptySnapshot" });
+        }
+        return { ...state, ...payload } as RootState;
     }
     return rootReducer(state, action as Parameters<typeof rootReducer>[1]);
 }
@@ -78,7 +87,14 @@ export function createAppStore() {
         getState: () => store.getState(),
         dispatch: (action) => store.dispatch(action as never),
         onSnapshot: (state) => {
-            store.dispatch({ type: BRIDGE_SNAPSHOT_ACTION, payload: state } as never);
+            // 【必须标记 hsRemote】否则这个动作会经桥中间件被广播回主窗口，而主窗口
+            // 的根 reducer 会用它整体覆盖状态 —— 一次 detach 就把主窗口回滚到卫星
+            // 请求快照那一刻（播放进度、布局等全部丢失）。
+            store.dispatch({
+                type: BRIDGE_SNAPSHOT_ACTION,
+                payload: state,
+                meta: { hsRemote: true },
+            } as never);
         },
     });
 

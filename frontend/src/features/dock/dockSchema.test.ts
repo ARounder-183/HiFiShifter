@@ -15,7 +15,7 @@ import {
     placeForm,
     resolveSyncOffsetForms,
 } from "./dockSchema.ts";
-import { collectTabsets, findTabsetOfForm, isFormVisible } from "./dockTree.ts";
+import { collectTabsets, findTabsetOfForm, isFormVisible, MAX_SPLIT_RATIO, MIN_SPLIT_RATIO, addFormToTabset } from "./dockTree.ts";
 import { registerPanel, resetPanelRegistryForTests } from "./panelRegistry.ts";
 import type { DockSplitNode, DockTabsetNode } from "./dockTypes.ts";
 
@@ -211,6 +211,105 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
         assertEqual(shape(layout.tree), "([timeline]|[paramEditor])", "duplicate form deduped");
     }
 
+    // ── 归一化：重复的 Zone id → 现场重编，两组都保持可用 ──────────
+    //
+    // 两组共用同一个 id 时（损坏的配置），`addFormToTabset` 会把窗体插进
+    // **每一个**同 id 的组，而 `findZone`/`replaceZone` 只认第一个 —— 一次
+    // "拖入标签组"就会同时改掉两个组。必须在归一化时重编其中一个。
+    {
+        const raw = {
+            schema: 1,
+            tree: {
+                t: "split",
+                id: "z1",
+                dir: "row",
+                ratio: 0.5,
+                fixed: null,
+                a: { t: "tabset", id: "z2", tabs: ["timeline"], active: "timeline" },
+                b: { t: "tabset", id: "z2", tabs: ["paramEditor"], active: "paramEditor" },
+            },
+            forms: {
+                timeline: { id: "timeline", panelId: "timeline" },
+                paramEditor: { id: "paramEditor", panelId: "paramEditor" },
+            },
+        };
+        const layout = normalizeDockLayout(raw);
+        const tabsets = collectTabsets(layout.tree);
+        assertEqual(tabsets.length, 2, "both tabsets survive");
+        assert(tabsets[0]!.id !== tabsets[1]!.id, "duplicate zone id re-minted");
+        assertEqual(shape(layout.tree), "([timeline]|[paramEditor])", "tabs intact");
+        // 曾经被重复 id 破坏的操作：插入只命中一个组。
+        const retargeted = addFormToTabset(layout.tree, tabsets[0]!.id, "undoHistory");
+        assertEqual(
+            shape(retargeted),
+            "([timeline,undoHistory]|[paramEditor])",
+            "an insert reaches exactly one tabset",
+        );
+
+        // id 缺失的两个节点（历史上都会落成 "z0"）同样不能共享 id。
+        const anonymous = normalizeDockLayout({
+            schema: 1,
+            tree: {
+                t: "split",
+                id: "z1",
+                dir: "row",
+                ratio: 0.5,
+                fixed: null,
+                a: { t: "tabset", tabs: ["timeline"], active: "timeline" },
+                b: { t: "tabset", tabs: ["paramEditor"], active: "paramEditor" },
+            },
+            forms: {
+                timeline: { id: "timeline", panelId: "timeline" },
+                paramEditor: { id: "paramEditor", panelId: "paramEditor" },
+            },
+        });
+        const anonTabsets = collectTabsets(anonymous.tree);
+        assertEqual(anonTabsets.length, 2, "both anonymous tabsets survive");
+        assert(
+            anonTabsets[0]!.id !== anonTabsets[1]!.id,
+            "missing zone ids are minted distinctly",
+        );
+    }
+
+    // ── 归一化：分割比例钳制 ────────────────────────────────────
+    //
+    // `pruneTree` 只在子树被修剪时才顺手钳一次 ratio，两侧都完好的树不会被它
+    // 碰到 —— 损坏的比例必须在 `normalizeTree` 里就地钳制，否则 `ratio: 999`
+    // 一路存活到渲染，`paneStyle` 算出负的 flexGrow，整侧被挤成不可用。
+    {
+        const base = {
+            forms: {
+                timeline: { id: "timeline", panelId: "timeline" },
+                paramEditor: { id: "paramEditor", panelId: "paramEditor" },
+            },
+        };
+        const treeFor = (ratio: number) => ({
+            schema: 1,
+            tree: {
+                t: "split",
+                id: "z1",
+                dir: "row",
+                ratio,
+                fixed: null,
+                a: { t: "tabset", id: "z2", tabs: ["timeline"], active: "timeline" },
+                b: { t: "tabset", id: "z3", tabs: ["paramEditor"], active: "paramEditor" },
+            },
+            ...base,
+        });
+        const tooBig = normalizeDockLayout(treeFor(999));
+        assertEqual(
+            (tooBig.tree as DockSplitNode).ratio,
+            MAX_SPLIT_RATIO,
+            "corrupt ratio clamped high",
+        );
+        const tooSmall = normalizeDockLayout(treeFor(-3));
+        assertEqual(
+            (tooSmall.tree as DockSplitNode).ratio,
+            MIN_SPLIT_RATIO,
+            "corrupt ratio clamped low",
+        );
+    }
+
     // ── 归一化：active 失效 → 修正为首个标签 ─────────────────────
     {
         const raw = {
@@ -375,12 +474,50 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
         assertEqual(layout.floatOrder, [], "float order cleaned");
     }
 
+    // ── 归一化：浮窗尺寸上限 ────────────────────────────────────
+    //
+    // 只有下限没有上限时，损坏的落盘数据（w: 100000）会渲染出一个撑爆视口的
+    // 浮窗。上限 4000 与锚点偏移的钳制（±4000）同源：正常拖放永远碰不到。
+    {
+        const layout = normalizeDockLayout({
+            schema: 1,
+            tree: { t: "tabset", id: "z1", tabs: ["timeline"], active: "timeline" },
+            forms: {
+                timeline: { id: "timeline", panelId: "timeline" },
+                notebook: {
+                    id: "notebook",
+                    panelId: "notebook",
+                    floating: true,
+                    float: { x: 0, y: 0, w: 100000, h: 99999 },
+                },
+            },
+            order: ["timeline", "notebook"],
+            floatOrder: ["notebook"],
+        });
+        assertEqual(layout.forms.notebook?.float?.w, 4000, "float width clamped to the ceiling");
+        assertEqual(layout.forms.notebook?.float?.h, 4000, "float height clamped to the ceiling");
+    }
+
     // ── 迁移：来自更新版本 → 交给归一化重建 ──────────────────────
     {
         assertEqual(migrateDockLayout({ schema: 99 }), null, "future schema rejected");
         const current = { schema: 1, tree: null };
         assert(migrateDockLayout(current) === current, "current schema passes through");
         assertEqual(migrateDockLayout(null), null, "null passes through");
+
+        // 接线：迁移是 normalizeDockLayout 的第一道工序（所有导入/恢复路径都
+        // 经过它）—— 更新版本的布局必须整体回退默认，而不是被逐项修补曲解。
+        const future = normalizeDockLayout({
+            schema: 99,
+            tree: { t: "tabset", id: "z1", tabs: ["notebook"], active: "notebook" },
+            forms: { notebook: { id: "notebook", panelId: "notebook" } },
+            order: ["notebook"],
+        });
+        assertEqual(
+            shape(future.tree),
+            "([timeline]|[paramEditor])",
+            "a layout from a newer build rebuilds defaults",
+        );
     }
 
     // ── 打开面板：按默认落点固定在右侧 ───────────────────────────

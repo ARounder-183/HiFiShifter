@@ -1,15 +1,17 @@
 /*
  * 拖拽落点覆盖层。
  *
- * 只订阅 `dockDragStore`（一个极小的外部 store），因此指针每移动一次只有这
- * 一层重渲染 —— 不会把 33Hz 的播放轮询订阅者、菜单栏、时间轴一起拖下水。
+ * 只订阅 `dockDragStore`（一个极小的外部 store），因此只有这一层跟着拖拽重渲染
+ * —— 不会把 33Hz 的播放轮询订阅者、菜单栏、时间轴一起拖下水。控制器（见
+ * `dockDragController`）已把指针事件合并到每帧一次，这里每次重渲染都对应一帧。
  *
  * 预览矩形由 `dropPreviewRect` 算出，与真正提交时的落点判定同源（同一个
  * `pickDropTarget` + `resolveDropZone`），所以"看到的"与"松手得到的"必然一致。
  */
 
-import { useEffect, useSyncExternalStore } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 
+import { clampAxisPosition, EDGE_GAP } from "../appTooltipPosition";
 import { useAppSelector } from "../../app/hooks";
 import {
     getDockDragState,
@@ -39,6 +41,9 @@ export function DockDropOverlay() {
     if (!drag?.started) return null;
     return <DockDropOverlayContent drag={drag} />;
 }
+
+/** 幽灵相对指针的偏移（右下角跟随）：比 tooltip（14/18）更贴近指针。 */
+const GHOST_OFFSET_PX = 14;
 
 /** 落点方向的可读名称（让提示从"停靠到此处"变成"停靠到左侧"）。 */
 function describeZone(zone: DockDropZone, tAny: (key: string) => string): string {
@@ -76,6 +81,34 @@ function DockDropOverlayContent({ drag }: { drag: DockDragState }) {
     // 会不会盖住他要看的东西。轮廓用**记住的浮窗尺寸**，与松手后的结果一致。
     const floatPreview = showPreview && !dockPreview ? drag.floatRect : null;
 
+    // 拖拽幽灵的右缘钳制需要实测宽度：提示块 `max-width: 320px` 且不折行，宽度
+    // 由内容决定，预留固定值会在窄内容时把幽灵整段甩离指针（与 tooltip 的修复
+    // 同一套结论，见 `clampAxisPosition`）。每帧量一次 —— 内容不变时 setState
+    // 值相同，React 直接跳过，不会造成额外渲染循环。
+    const ghostRef = useRef<HTMLDivElement | null>(null);
+    const [ghostWidth, setGhostWidth] = useState(0);
+    // 依赖随拖拽内容（标题/面板名）变化而变化，故意不列依赖：每次渲染后都量一次，
+    // 值不变时 setState 直接跳过（见上方注释）。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    useLayoutEffect(() => {
+        const element = ghostRef.current;
+        if (!element) return;
+        const width = element.getBoundingClientRect().width;
+        setGhostWidth((previous) => (previous === width ? previous : width));
+    });
+
+    // 幽灵跟随用 transform 而不是 left/top：前者只走合成，不触发重新布局 ——
+    // 拖拽期间每帧都要挪动它，这是白拿的帧预算。横坐标经 `clampAxisPosition`
+    // 钳制（指针贴窗口右缘时收回必要距离，指针坐标为负时也不画出左缘外）；
+    // 垂直方向与修复前一致（+14），不需要钳制。
+    const ghostX = clampAxisPosition(
+        drag.pointerX,
+        ghostWidth,
+        window.innerWidth,
+        GHOST_OFFSET_PX,
+        EDGE_GAP,
+    );
+
     return (
         <div className="hs-dock-overlay">
             {floatPreview ? (
@@ -108,9 +141,14 @@ function DockDropOverlayContent({ drag }: { drag: DockDragState }) {
               另一套 UI。`hs-dock-ghost` 只补拖拽特有的部分（意图着色、跟随指针）。
             */}
             <div
+                ref={ghostRef}
                 className="app-tooltip hs-dock-ghost"
                 data-intent={drag.dockIntent ? "dock" : "float"}
-                style={{ left: drag.pointerX + 14, top: drag.pointerY + 14 }}
+                style={{
+                    left: 0,
+                    top: 0,
+                    transform: `translate(${ghostX}px, ${drag.pointerY + GHOST_OFFSET_PX}px)`,
+                }}
             >
                 <div className="hs-dock-ghost-line">
                     {title}

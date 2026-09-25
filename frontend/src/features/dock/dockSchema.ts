@@ -18,6 +18,7 @@
  */
 
 import {
+    clampRatio,
     collectTabsets,
     findTabsetOfForm,
     insertForm,
@@ -173,8 +174,50 @@ function normalizeGutters(raw: unknown): DockGutterSizes {
     };
 }
 
+/**
+ * 归一化期间分配一个未占用的 Zone id。
+ *
+ * 与 `dockTree.zoneIdAllocator` 的命名约定一致（`z<递增整数>`），但归一化是
+ * 边解析边建树，没有完整的树可扫描 —— 已见过的 id 都记在 `seenZoneIds` 里，
+ * 据此取最大序号 +1，并逐个递增直到真正未占用（树上还可能有不符合
+ * `z<数字>` 形状的合法 id）。
+ */
+function mintZoneId(seenZoneIds: ReadonlySet<string>): string {
+    let max = 0;
+    for (const id of seenZoneIds) {
+        const matched = /^z(\d+)$/.exec(id);
+        if (matched) max = Math.max(max, Number(matched[1]));
+    }
+    let candidate = `z${max + 1}`;
+    while (seenZoneIds.has(candidate)) {
+        max += 1;
+        candidate = `z${max + 1}`;
+    }
+    return candidate;
+}
+
+/** 解析节点的 Zone id：重复的现场重编，保证**归一化产出的树上 id 唯一**。 */
+function resolveZoneId(node: Record<string, unknown>, seenZoneIds: Set<string>): string {
+    const raw = typeof node.id === "string" && node.id ? node.id : "z0";
+    if (!seenZoneIds.has(raw)) {
+        seenZoneIds.add(raw);
+        return raw;
+    }
+    // 重复的 Zone id（损坏的配置、手工拼装的 JSON）必须重编：findZone/replaceZone
+    // 只认第一个，而 addFormToTabset 会把窗体插进**每一个**同 id 的组 —— 一个
+    // "拖入标签组"的动作就会同时改掉两个组。现场发一个新 id，两个组都保持可用。
+    const minted = mintZoneId(seenZoneIds);
+    seenZoneIds.add(minted);
+    return minted;
+}
+
 /** 校验并修补一棵布局树；返回 null 表示这棵子树不可用（调用方剪掉它）。 */
-function normalizeTree(raw: unknown, knownForms: Set<string>, seen: Set<string>): DockNode | null {
+function normalizeTree(
+    raw: unknown,
+    knownForms: Set<string>,
+    seen: Set<string>,
+    seenZoneIds: Set<string>,
+): DockNode | null {
     if (!raw || typeof raw !== "object") return null;
     // 输入来自磁盘/API，形状完全不可信：按 `Record<string, unknown>` 逐字段取值，
     // 而不是断言成联合类型 —— 后者会让 `node.t` 窄化成 `never`，后续取值全部报错。
@@ -195,7 +238,7 @@ function normalizeTree(raw: unknown, knownForms: Set<string>, seen: Set<string>)
             typeof node.active === "string" && kept.includes(node.active) ? node.active : kept[0];
         const tabset: DockTabsetNode = {
             t: "tabset",
-            id: typeof node.id === "string" && node.id ? node.id : "z0",
+            id: resolveZoneId(node, seenZoneIds),
             tabs: kept,
             active,
         };
@@ -209,8 +252,8 @@ function normalizeTree(raw: unknown, knownForms: Set<string>, seen: Set<string>)
     }
 
     if (node.t === "split") {
-        const a = normalizeTree(node.a, knownForms, seen);
-        const b = normalizeTree(node.b, knownForms, seen);
+        const a = normalizeTree(node.a, knownForms, seen, seenZoneIds);
+        const b = normalizeTree(node.b, knownForms, seen, seenZoneIds);
         if (a === null) return b;
         if (b === null) return a;
         const fixedRaw = node.fixed as DockSplitNode["fixed"] | null | undefined;
@@ -220,9 +263,12 @@ function normalizeTree(raw: unknown, knownForms: Set<string>, seen: Set<string>)
                 : null;
         return {
             t: "split",
-            id: typeof node.id === "string" && node.id ? node.id : "z0",
+            id: resolveZoneId(node, seenZoneIds),
             dir: node.dir === "col" ? "col" : "row",
-            ratio: typeof node.ratio === "number" ? node.ratio : 0.5,
+            // ratio 必须在入口就钳制：`pruneTree` 只在子树变化时才顺手钳一次，
+            // 损坏的 `ratio: 999` 会原样存活到渲染，`paneStyle` 算出负的
+            // flexGrow，整侧被挤成不可用。缺失/非法值由 `clampRatio` 回退 0.5。
+            ratio: typeof node.ratio === "number" ? clampRatio(node.ratio) : 0.5,
             fixed,
             a,
             b,
@@ -232,19 +278,30 @@ function normalizeTree(raw: unknown, knownForms: Set<string>, seen: Set<string>)
     return null;
 }
 
+/**
+ * 浮窗几何的上限（像素）。
+ *
+ * 与下方锚点偏移的钳制（±4000）同源：比所有常见屏幕都大，正常拖放永远碰不到；
+ * 但没有上限时，损坏的落盘数据（例如 `w: 100000`）会渲染出一个撑爆视口的浮窗。
+ * x/y 不设上限：它们由拖拽时的 `clampFloatRect` 与视口绑定，落盘值偏大只影响
+ * 下一次打开的位置，不像失控的尺寸那样直接破坏布局。
+ */
+const FLOAT_GEOMETRY_MAX_PX = 4000;
+
 function normalizeFloat(raw: unknown): DockForm["float"] {
     if (!raw || typeof raw !== "object") return null;
     const value = raw as Record<string, unknown>;
-    const num = (key: string, min: number, fallback: number): number => {
+    const num = (key: string, min: number, fallback: number, max = Number.POSITIVE_INFINITY) => {
         const candidate = value[key];
         if (typeof candidate !== "number" || !Number.isFinite(candidate)) return fallback;
-        return Math.max(min, Math.round(candidate));
+        const clamped = Math.max(min, Math.round(candidate));
+        return Math.min(max, clamped);
     };
     const float: NonNullable<DockForm["float"]> = {
         x: num("x", -4000, 120),
         y: num("y", -4000, 120),
-        w: num("w", 160, 420),
-        h: num("h", 120, 320),
+        w: num("w", 160, 420, FLOAT_GEOMETRY_MAX_PX),
+        h: num("h", 120, 320, FLOAT_GEOMETRY_MAX_PX),
     };
     if (value.maximized === true) float.maximized = true;
     if (value.minimized === true) float.minimized = true;
@@ -274,8 +331,13 @@ function normalizeFloat(raw: unknown): DockForm["float"] {
 
 /** 归一化一份布局（来自磁盘、预设或 API）。 */
 export function normalizeDockLayout(raw: unknown): DockLayout {
-    if (!raw || typeof raw !== "object") return createDefaultDockLayout();
-    const input = raw as Partial<DockLayout>;
+    // 迁移入口先行（见 migrateDockLayout）：来自更新版本的布局当前构建读不懂，
+    // 逐项修补只会得到一份被曲解的布局 —— 整体回退默认。布局的全部导入/恢复
+    // 路径（hydrateDock / setDockLayout / applyDockPreset）都汇聚到这里，版本
+    // 判断因此只需这一处。
+    const migrated = migrateDockLayout(raw);
+    if (migrated === null || typeof migrated !== "object") return createDefaultDockLayout();
+    const input = migrated as Partial<DockLayout>;
 
     // ── 窗体：剔除面板已不存在的记录（插件被卸载等）────────────────
     const rawForms = (input.forms ?? {}) as Record<string, Partial<DockForm>>;
@@ -306,7 +368,7 @@ export function normalizeDockLayout(raw: unknown): DockLayout {
 
     // ── 树 ────────────────────────────────────────────────────────
     const seen = new Set<string>();
-    const normalized = normalizeTree(input.tree, knownForms, seen);
+    const normalized = normalizeTree(input.tree, knownForms, seen, new Set<string>());
     const tree =
         pruneTree(normalized ?? createDefaultDockLayout().tree) ?? createDefaultDockLayout().tree;
 
@@ -355,7 +417,7 @@ function normalizePresets(raw: unknown, knownForms: Set<string>): Record<string,
     for (const [name, value] of Object.entries(raw as Record<string, Partial<DockPreset>>)) {
         if (!value || typeof value !== "object") continue;
         const seen = new Set<string>();
-        const tree = normalizeTree(value.tree, knownForms, seen);
+        const tree = normalizeTree(value.tree, knownForms, seen, new Set<string>());
         if (tree === null) continue;
         const pruned = pruneTree(tree);
         if (pruned === null) continue;
@@ -392,7 +454,10 @@ function normalizePresets(raw: unknown, knownForms: Set<string>): Record<string,
 }
 
 /**
- * 迁移旧版本布局。
+ * 迁移旧版本布局 —— `normalizeDockLayout` 的第一道工序。
+ *
+ * 布局的全部导入/恢复路径（`hydrateDock`、`setDockLayout`、`applyDockPreset`）
+ * 都经过 `normalizeDockLayout`，因此版本判断只需在这一处生效。
  *
  * v1 是首个版本，所以这里只做"版本不可识别 → 交给归一化重建"的处理；入口
  * 先于归一化存在，是为了让将来新增字段时能在此做定向搬移，而不是被迫把

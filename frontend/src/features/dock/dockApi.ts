@@ -45,6 +45,7 @@ import {
 } from "./detachedGeometry";
 import {
     closeDetachedWindow,
+    detachedWindowExists,
     openDetachedWindow,
     readDetachedClientRect,
     readMainMonitorRect,
@@ -193,6 +194,16 @@ export function isMaximized(getState: GetState): boolean {
 }
 
 /**
+ * 正在拆出独立窗口的窗体集合（防重入）。
+ *
+ * 【为什么必须】拆出是异步的（首个 await 之后才创建窗口）：双击拆出按钮会让两次
+ * 调用都通过"窗口尚不存在"的检查并各自 `new WebviewWindow` —— 输的那次创建失败后
+ * 会回退成进程内浮窗，最终独立窗口与进程内浮窗**各渲染一份面板**，且独立窗口
+ * 从此无人回收。
+ */
+const detachingFormIds = new Set<string>();
+
+/**
  * 把一个窗体拆到**独立操作系统窗口**（主窗口之外）。
  *
  * 【流程】先在布局里把它标成 `osWindow` 浮动态（这样主窗口立刻不再渲染它，且状态
@@ -213,10 +224,27 @@ export async function detachFormToWindow(
     if (!form) return { ok: false, reason: "form-not-found" };
     const definition = getPanel(form.panelId);
     if (!definition?.detachable) return { ok: false, reason: "panel-not-detachable" };
+    if (detachingFormIds.has(formId)) return { ok: false, reason: "detach-in-flight" };
+    detachingFormIds.add(formId);
+    try {
+        return await detachFormToWindowInner(dispatch, getState, formId, definition);
+    } finally {
+        detachingFormIds.delete(formId);
+    }
+}
+
+async function detachFormToWindowInner(
+    dispatch: AppDispatch,
+    getState: GetState,
+    formId: string,
+    definition: NonNullable<ReturnType<typeof getPanel>>,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+    const state = getState();
+    const form = state.dock.layout.forms[formId];
 
     // 标题必须**翻译后**交给窗口：`titleKey` 是 i18n 键，直接塞进系统标题栏会显示成
     // "undo_history_title"（用户报告过）。窗体被重命名过时用用户的文本。
-    const title = form.title ?? translateOutsideReact(definition.titleKey);
+    const title = form?.title ?? translateOutsideReact(definition.titleKey);
 
     // 【原地转换】独立窗口落在浮窗**当前**位置：先把浮窗几何解析成具体矩形（带锚点时
     // 按视口推导，否则 x/y 只是占位值），再换算成屏幕坐标。
@@ -247,7 +275,12 @@ export async function detachFormToWindow(
         // 回退：保持进程内浮窗（用户仍能看到并使用它）。
         // **必须留日志**：静默回退让"窗口没开出来"看起来像"功能没实现"（实际发生过）。
         reportFrontendError(`[detach] 独立窗口创建失败，已回退为进程内浮窗：${result.reason}`);
-        dispatch(setFormFloatMode({ formId, floatMode: "inApp" }));
+        // 创建"失败"也可能是竞态下另一个调用已把窗口开出来（label 已被占用）。
+        // 只有窗口**确实不存在**时才回退进程内浮窗 —— 否则同一名窗体会两处各渲染
+        // 一份，而独立窗口从此无人回收。
+        if (!(await detachedWindowExists(formId))) {
+            dispatch(setFormFloatMode({ formId, floatMode: "inApp" }));
+        }
         return result;
     }
 
@@ -428,6 +461,46 @@ async function persistDetachedClientRect(
 /** 某个窗体当前是否在独立窗口中。 */
 export function isDetachedForm(getState: GetState, formId: string): boolean {
     return getState().dock.layout.forms[formId]?.floatMode === "osWindow";
+}
+
+/**
+ * 布局与独立窗口的**结构性对账**。
+ *
+ * 【为什么需要】只有拆出/回收/启动恢复这三条路径知道独立窗口的存在；而布局可以被
+ * 常规路径整体改写 —— 关闭窗体、停靠窗体、套用预设、导入布局。任何一条路径漏掉
+ * 同步，就会出现"独立窗口还活着并渲染面板，而布局已不认账"的裂缝：表现为空白
+ * 标签、面板双实例、或一个无人回收的幽灵窗口。与其给每条路径打补丁，不如在这里
+ * 按最终状态收敛（幂等：无裂缝时不派发任何东西）。
+ *
+ * 由主窗口在状态变化后调用（见 `DockRoot` 的订阅）。
+ */
+export async function reconcileDetachedFormWindows(
+    dispatch: AppDispatch,
+    getState: GetState,
+): Promise<void> {
+    const layout = getState().dock.layout;
+
+    // 正向裂缝：记录仍标着 `osWindow`，但窗体已不在浮动态（已被关闭/停靠/
+    // 预设替换）。回收独立窗口并把 floatMode 复位成 inApp —— 窗体此后就是
+    // 一个普通的停靠/已关闭窗体。
+    const stale = layout.order.filter((formId) => {
+        const form = layout.forms[formId];
+        return form != null && form.floatMode === "osWindow" && form.floating !== true;
+    });
+    for (const formId of stale) {
+        await reclaimDetachedForm(dispatch, getState, formId);
+    }
+
+    // 反向裂缝：仍有监视中的独立窗口，但布局已不再把该窗体标成 `osWindow` 浮动态
+    // （整体替换类路径会把 floatMode 一并改写）。关掉窗口并停止监视，让主窗口
+    // 独占面板的挂载权。
+    for (const formId of [...stopWatching.keys()]) {
+        const form = getState().dock.layout.forms[formId];
+        if (form?.floating === true && form.floatMode === "osWindow") continue;
+        stopWatching.get(formId)?.();
+        stopWatching.delete(formId);
+        await closeDetachedWindow(formId);
+    }
 }
 
 /** 重置为出厂布局。 */

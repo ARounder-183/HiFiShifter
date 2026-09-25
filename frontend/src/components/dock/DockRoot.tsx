@@ -11,7 +11,8 @@
 
 import { useEffect } from "react";
 
-import { useAppDispatch, useAppSelector } from "../../app/hooks";
+import { useAppDispatch, useAppSelector, useAppStore } from "../../app/hooks";
+import { reconcileDetachedFormWindows } from "../../features/dock/dockApi";
 import { isFormVisible } from "../../features/dock/dockTree";
 import { markFormsMounted, syncRegisteredPanels } from "../../features/dock/dockSlice";
 import { DockDropOverlay } from "./DockDropOverlay";
@@ -23,6 +24,7 @@ import "./dock.css";
 
 export function DockRoot() {
     const dispatch = useAppDispatch();
+    const store = useAppStore();
     const layout = useAppSelector((s) => s.dock.layout);
     const mountedFormIds = useAppSelector((s) => s.dock.mountedFormIds);
 
@@ -35,6 +37,21 @@ export function DockRoot() {
         window.addEventListener("beforeunload", onBeforeUnload);
         return () => window.removeEventListener("beforeunload", onBeforeUnload);
     }, []);
+
+    // 独立窗口对账：布局可以被常规路径整体改写（关闭/停靠/套用预设/导入），任何
+    // 一条路径漏掉同步独立窗口都会留下"面板双实例 / 空白标签 / 幽灵窗口"的裂缝。
+    // 这里在每次布局变化后按最终状态收敛一次（幂等；防抖把连发的变更合并成一轮）。
+    useEffect(() => {
+        let handle: ReturnType<typeof setTimeout> | null = null;
+        const run = () => {
+            handle = null;
+            void reconcileDetachedFormWindows(dispatch, store.getState);
+        };
+        handle = setTimeout(run, 120);
+        return () => {
+            if (handle !== null) clearTimeout(handle);
+        };
+    }, [dispatch, store, layout]);
 
     // 内置面板在 App 模块加载期注册，早于首次渲染；但注册表也可能在运行期
     // 变化（热更新重放注册、将来插件加载）。这里同步一次，把新注册的面板

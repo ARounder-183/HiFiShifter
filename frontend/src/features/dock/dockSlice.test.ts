@@ -277,6 +277,57 @@ test("features/dock/dockSlice.test.ts scripted checks", async () => {
         assertEqual(state.layout.floatOrder, ["fileBrowser"], "float z-order");
     }
 
+    // ── 浮动：最后一个停靠窗体不允许浮走 ─────────────────────────
+    //
+    // 树上只剩它自己时 removeForm 得到 null：若照旧浮动，同一个窗体会同时出现在
+    // 树上和浮层里（两个宿主抢同一个面板宿主 div，内容来回跳）。
+    {
+        let state = reducer(undefined, syncRegisteredPanels());
+        // 先把参数编辑器浮走，树上只剩时间轴。
+        state = reducer(state, floatForm({ formId: "paramEditor" }));
+        assertEqual(findTabsetOfForm(state.layout.tree, "timeline") !== null, true, "still docked");
+        const before = state.layout;
+        state = reducer(state, floatForm({ formId: "timeline" }));
+        assertEqual(state.layout, before, "the last docked form cannot float");
+        assertEqual(
+            findTabsetOfForm(state.layout.tree, "timeline") !== null,
+            true,
+            "and it stays in the tree, not in the float layer",
+        );
+        assertEqual(state.layout.floatOrder, ["paramEditor"], "float layer unchanged");
+    }
+
+    // ── 浮动：只写 w/h 的几何不清锚点，写 x/y 才清 ─────────────────
+    //
+    // 拆到独立窗口只传 w/h（位置仍由锚点语义表达）；整体替换 x/y 才表示
+    // "位置已由用户/调用方决定"。
+    {
+        let state = reducer(undefined, syncRegisteredPanels());
+        state = reducer(state, openPanel({ panelId: "notebook" }));
+        assertEqual(
+            state.layout.forms.notebook.float?.anchor,
+            "bottom-right",
+            "opens anchored",
+        );
+        // resize 路径：锚点保留。
+        state = reducer(state, floatForm({ formId: "notebook", geometry: { w: 500, h: 300 } }));
+        assertEqual(
+            state.layout.forms.notebook.float?.anchor,
+            "bottom-right",
+            "w/h-only geometry keeps the anchor",
+        );
+        // 显式位置：锚点清除（既有行为）。
+        state = reducer(
+            state,
+            floatForm({ formId: "notebook", geometry: { x: 10, y: 20, w: 500, h: 300 } }),
+        );
+        assertEqual(
+            state.layout.forms.notebook.float?.anchor,
+            null,
+            "x/y geometry clears the anchor",
+        );
+    }
+
     // ── 浮窗尺寸与停靠尺寸分别保存 ───────────────────────────────
     //
     // 用户把一个小浮窗（320×240）停进一大片区域后，面板会被撑大；此时再拆下来
@@ -454,6 +505,42 @@ test("features/dock/dockSlice.test.ts scripted checks", async () => {
         state = reducer(state, toggleMaximizeActive());
         assertEqual(shape(state.layout.tree), before, "restored exactly");
         assertEqual(state.maximized, null, "maximize state cleared");
+    }
+
+    // ── 最大化期间打开的面板：还原时补回主组，不凭空消失 ──────────
+    //
+    // 最大化把整棵树换成临时的单组树，此时打开的面板落在那棵树上；还原换回
+    // 原树后它既不在树上也不浮动（窗体记录还在）—— 表现为"面板不见了"。
+    // 注意判据是"在临时树里出现过"：一直关闭着的面板记录（每个注册面板都有
+    // 一条）绝不能被这条路径顺手打开。
+    {
+        let state = reducer(undefined, syncRegisteredPanels());
+        state = reducer(state, { type: "dock/focusForm", payload: "timeline" });
+        state = reducer(state, toggleMaximizeActive());
+        state = reducer(state, openPanel({ panelId: "fileBrowser" }));
+        assertEqual(
+            isFormVisible(state.layout, "fileBrowser"),
+            true,
+            "opened while maximized",
+        );
+        state = reducer(state, toggleMaximizeActive());
+        assertEqual(state.maximized, null, "restored");
+        assertEqual(
+            isFormVisible(state.layout, "fileBrowser"),
+            true,
+            "a panel opened during maximize survives the restore",
+        );
+        assertEqual(
+            shape(state.layout.tree),
+            "([timeline,fileBrowser]|[paramEditor])",
+            "it is re-adopted into the main tabset",
+        );
+        // 一直关闭着的 notebook（只是有窗体记录）不能被还原动作顺手打开。
+        assertEqual(
+            isFormVisible(state.layout, "notebook"),
+            false,
+            "a closed form record must NOT be opened by the restore",
+        );
     }
 
     // ── 沟槽尺寸 ────────────────────────────────────────────────

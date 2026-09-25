@@ -178,6 +178,17 @@ export async function closeDetachedWindow(formId: string): Promise<void> {
     }
 }
 
+/** 指定窗体的独立窗口当前是否存在（查询失败按不存在处理）。 */
+export async function detachedWindowExists(formId: string): Promise<boolean> {
+    const api = await loadWebviewWindowApi();
+    if (api === null) return false;
+    try {
+        return (await api.WebviewWindow.getByLabel(detachedWindowLabel(formId))) != null;
+    } catch {
+        return false;
+    }
+}
+
 /** 关闭所有独立窗口（主窗口退出前调用）。 */
 export async function closeAllDetachedWindows(): Promise<void> {
     const api = await loadWebviewWindowApi();

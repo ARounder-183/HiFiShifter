@@ -21,11 +21,13 @@ import {
     findVisibleFormForPanel,
     normalizeDockLayout,
     openPanelInLayout,
+    placeForm,
     type DockPlacement,
     normalizeFloatMode,
     normalizeTabPosition,
 } from "./dockSchema";
 import {
+    collectDockedForms,
     dockForm,
     findTabsetOfForm,
     findZone,
@@ -165,8 +167,22 @@ const dockSlice = createSlice({
          */
         toggleMaximizeActive(state) {
             if (state.maximized) {
-                state.layout = { ...state.layout, tree: state.maximized.tree };
+                const restoredTree = state.maximized.tree;
+                const temporaryTree = state.layout.tree;
                 state.maximized = null;
+                // 还原时补回"最大化期间打开"的面板：它们在**临时树**上可见，换回
+                // 原树后既不在树上也不浮动（窗体记录还在，floating=false）—— 表现
+                // 为面板凭空消失。判据必须是"在临时树里出现过"，而不是"不在原树
+                // 里"：后者会把一直关闭着的面板记录也一并打开。走"并入主组"的
+                // 既有插入路径（与 center 打开落点同源）。
+                let layout: DockLayout = { ...state.layout, tree: restoredTree };
+                for (const formId of collectDockedForms(temporaryTree)) {
+                    const form = layout.forms[formId];
+                    if (!form || form.floating) continue;
+                    if (findTabsetOfForm(layout.tree, formId)) continue;
+                    layout = { ...layout, tree: placeForm(layout, formId, { side: "center" }) };
+                }
+                state.layout = layout;
                 return;
             }
             const formId = state.activeFormId ?? findMainTabset(state.layout)?.active ?? null;
@@ -237,18 +253,28 @@ const dockSlice = createSlice({
             const { formId, geometry } = action.payload;
             const form = state.layout.forms[formId];
             if (!form) return;
+            const pruned = removeForm(state.layout.tree, formId);
+            if (pruned === null) {
+                // 树上只剩它自己：摘除会得到 null（见 removeForm 的约定）。若回退到
+                // 旧树继续浮动，同一个窗体会同时出现在树上和浮层里（两个宿主抢一个
+                // 面板），所以最后一个停靠窗体不允许浮走。
+                return;
+            }
             const index = state.layout.floatOrder.length;
             const base = form.float ?? defaultFloatGeometry(formId, index);
             // 显式给了位置（拖拽拆出、菜单指定）就**清除锚点**：用户/调用方已经
             // 决定了位置，不该再被"右下角"这个语义覆盖。锚点偏移随锚点一起清。
+            // 只给了 w/h（resize 路径）则**保留锚点**：位置仍由锚点语义表达，
+            // 见 dockApi::detachFormToWindow 的注释。
+            const setsPosition = geometry != null && (geometry.x !== undefined || geometry.y !== undefined);
             const next = {
                 ...base,
                 ...geometry,
-                anchor: geometry ? null : (base.anchor ?? null),
-                anchorOffsetX: geometry ? 0 : base.anchorOffsetX,
-                anchorOffsetY: geometry ? 0 : base.anchorOffsetY,
+                anchor: setsPosition ? null : (base.anchor ?? null),
+                anchorOffsetX: setsPosition ? 0 : base.anchorOffsetX,
+                anchorOffsetY: setsPosition ? 0 : base.anchorOffsetY,
             };
-            const tree = removeForm(state.layout.tree, formId) ?? state.layout.tree;
+            const tree = pruned;
 
             state.layout = {
                 ...state.layout,

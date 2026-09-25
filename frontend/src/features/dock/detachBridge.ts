@@ -133,6 +133,10 @@ function isBroadcastable(action: unknown): action is UnknownAction {
     if (action == null || typeof action !== "object") return false;
     const type = (action as { type?: unknown }).type;
     if (typeof type !== "string" || type.length === 0) return false;
+    // 快照只应从主窗口"应答"给请求它的卫星（BRIDGE_SNAPSHOT_EVENT），绝不能作为
+    // 普通动作进广播通道 —— 否则卫星应用快照的动作会被原样弹回主窗口并在那里
+    // 整体覆盖状态（一次 detach = 主窗口状态回滚）。
+    if (type === BRIDGE_SNAPSHOT_ACTION) return false;
     // 桥自己发出的"应用远端动作"不再回传（否则两窗口互相转发形成回环）。
     if ((action as { meta?: Record<string, unknown> }).meta?.[REMOTE_META_KEY] === true) {
         return false;

@@ -15,6 +15,9 @@
  * 【重排与拆分的分界】用"指针是否还在标签条带内"判定，而不是靠距离阈值 ——
  * 前者与 Chrome/VS Code 的标签拖拽一致，用户不需要学习成本；后者会让"想重排
  * 却拆出去了"变成常见误操作。
+ *
+ * 【取消】pointercancel（掌压拒绝、IME 抢占等 OS 级取消）与 Escape 都会**中止**
+ * 拖拽且不提交落点 —— 拖拽期间没有任何 Redux 状态被改动，清掉会话即恢复原状。
  */
 
 import { store } from "../../app/store";
@@ -23,6 +26,7 @@ import {
     endDockDrag,
     getDockDragState,
     updateDockDrag,
+    type DockDragState,
     type DockDropTargetState,
 } from "../../features/dock/dockDragStore";
 import {
@@ -81,6 +85,53 @@ let session: DragSession | null = null;
 
 /** 拖拽开始时抓取的 Zone 矩形；窗口尺寸变化时刷新。 */
 let zoneRects: DockZoneRect[] = [];
+
+// ── rAF 合并 ─────────────────────────────────────────────────────
+//
+// pointermove 每秒可触发上百次，而 dockDragStore 的订阅者（覆盖层、每个
+// DockTabBar）会同步重渲染并量测 DOM —— 逐事件推送等于每条 move 强制一次
+// 回流。因此把"最新一次算出的状态"存在模块里，每帧最多推送一次；pointerup
+// 时同步清空积压，保证提交读到的是最终位置。
+
+/** 越过启动阈值的那次移动要先 begin：与补丁同一帧推送。 */
+let pendingBegin: Parameters<typeof beginDockDrag>[0] | null = null;
+/** 待推送的最新补丁；新的直接覆盖旧的（中间位置没有渲染价值）。 */
+let pendingPatch: Partial<DockDragState> | null = null;
+let frameHandle: number | null = null;
+
+/** 把积压的补丁同步推送进 dockDragStore（pointerup 提交前必须先调用）。 */
+function flushDragUpdate(): void {
+    if (frameHandle !== null) {
+        cancelAnimationFrame(frameHandle);
+        frameHandle = null;
+    }
+    if (pendingBegin) {
+        beginDockDrag(pendingBegin);
+        pendingBegin = null;
+    }
+    if (pendingPatch) {
+        updateDockDrag(pendingPatch);
+        pendingPatch = null;
+    }
+}
+
+function scheduleDragUpdate(
+    begin: Parameters<typeof beginDockDrag>[0] | null,
+    patch: Partial<DockDragState>,
+): void {
+    if (begin) pendingBegin = begin;
+    pendingPatch = patch;
+    if (frameHandle === null) frameHandle = requestAnimationFrame(flushDragUpdate);
+}
+
+function discardScheduledUpdate(): void {
+    if (frameHandle !== null) {
+        cancelAnimationFrame(frameHandle);
+        frameHandle = null;
+    }
+    pendingBegin = null;
+    pendingPatch = null;
+}
 
 function collectZoneRects(): DockZoneRect[] {
     const out: DockZoneRect[] = [];
@@ -145,63 +196,56 @@ function resolveTabIndex(tabsetId: string, x: number): number | null {
 
 function onPointerMove(event: PointerEvent): void {
     if (!session || event.pointerId !== session.pointerId) return;
+    const active = session;
     const x = event.clientX;
     const y = event.clientY;
-    session.lastX = x;
-    session.lastY = y;
+    active.lastX = x;
+    active.lastY = y;
 
     if (!getDockDragState()) {
-        const distance = Math.hypot(x - session.startX, y - session.startY);
+        const distance = Math.hypot(x - active.startX, y - active.startY);
         if (distance < DRAG_THRESHOLD_PX) return;
-        beginDockDrag({
-            mode: session.mode,
-            formId: session.formId,
-            panelId: session.panelId,
-            pointerX: x,
-            pointerY: y,
-            dockIntent: isDockModifierDown(event),
-            floatRect: session.mode === "float" ? session.floatStart : null,
-        });
-        // 【刻意不 return】越过阈值的这一次移动同样要解析落点。否则：
+        // 【刻意不同帧拆分】越过阈值的这一次移动要与 begin 同帧解析落点。否则：
         // 1) 首帧的落点提示会晚一帧才出现；
         // 2) 指针一次跨越大段距离（触控板快速甩动、事件合并）时就再没有第二次
         //    移动事件，落点永远是 null —— 表现为"按住修饰键拖了却没停靠"。
-    }
-
-    const dockIntent = isDockModifierDown(event);
-    const target = resolveTarget(x, y);
-
-    if (session.mode === "float" && session.floatStart) {
-        const settings = store.getState().dock.settings;
-        const raw: DockRect = {
-            x: x - session.offsetX,
-            y: y - session.offsetY,
-            w: session.floatStart.w,
-            h: session.floatStart.h,
-        };
-        const snapped = settings.floatSnapEnabled
-            ? snapFloatPosition(
-                  raw,
-                  zoneRects.map((zone) => zone.rect),
-                  { w: window.innerWidth, h: window.innerHeight },
-                  settings.floatSnapThresholdPx,
-              )
-            : { x: raw.x, y: raw.y };
-        const next = clampFloatRect(
-            { ...raw, x: snapped.x, y: snapped.y },
-            { w: window.innerWidth, h: window.innerHeight },
-            FLOAT_TITLE_BAR_PX,
+        scheduleDragUpdate(
+            {
+                mode: active.mode,
+                formId: active.formId,
+                panelId: active.panelId,
+                pointerX: x,
+                pointerY: y,
+                dockIntent: isDockModifierDown(event),
+                floatRect: active.mode === "float" ? active.floatStart : null,
+            },
+            computeMovePatch(active, x, y, event),
         );
-        updateDockDrag({ pointerX: x, pointerY: y, dockIntent, target, floatRect: next });
         return;
     }
 
-    // 走到这里只可能是标签拖拽（浮窗搬运在上面的分支里已经 return）。标签拖拽
-    // 同样要算出"若此刻松手，浮窗会落在哪、多大" —— 覆盖层据此画虚线轮廓。
-    // 没有它，不按修饰键拖拽时用户完全看不到结果（这正是"拖拽没有预览"的一半
-    // 原因；另一半是 `started` 从未置真）。
-    const floatRect = computePendingFloatRect(session, x, y, zoneRects);
-    updateDockDrag({ pointerX: x, pointerY: y, dockIntent, target, floatRect });
+    scheduleDragUpdate(null, computeMovePatch(active, x, y, event));
+}
+
+/** 一次指针移动要推送的完整补丁：指针位置、停靠意图、落点与浮窗预览矩形。 */
+function computeMovePatch(
+    active: DragSession,
+    x: number,
+    y: number,
+    intentSource: PointerEvent | KeyboardEvent,
+): Partial<DockDragState> {
+    const dockIntent = isDockModifierDown(intentSource);
+    const target = resolveTarget(x, y);
+    // 浮窗搬运与标签拖拽都要算出"若此刻松手，浮窗会落在哪、多大" —— 覆盖层
+    // 据此画虚线轮廓。没有它，不按修饰键拖拽时用户完全看不到结果。两种模式的
+    // 换算相同：标签拖拽用记住的浮窗尺寸（`sourceSize`），搬运沿用当前几何。
+    return {
+        pointerX: x,
+        pointerY: y,
+        dockIntent,
+        target,
+        floatRect: computePendingFloatRect(active, x, y, zoneRects),
+    };
 }
 
 /** 计算"此刻松手会得到的浮窗矩形"（已夹紧到视口内）。 */
@@ -236,6 +280,9 @@ function computePendingFloatRect(
 function onPointerUp(event: PointerEvent): void {
     if (!session || event.pointerId !== session.pointerId) return;
     const active = session;
+    // 帧合并中积压的补丁必须先同步落地：提交要从 dockDragStore 读最终落点
+    // （state.target / state.floatRect），否则会用上一帧的位置提交。
+    flushDragUpdate();
     const state = getDockDragState();
     session = null;
     detach();
@@ -322,12 +369,43 @@ function commitDock(formId: string, target: DockDropTargetState): void {
     store.dispatch(splitFormTo({ formId, referenceFormId, side }));
 }
 
+/**
+ * 取消拖拽：不提交任何落点，界面回到拖拽前的样子。
+ *
+ * 【为什么"什么都不提交"就是恢复】整个拖拽期间没有任何 Redux 状态被改动 ——
+ * 浮窗位置只在松手时提交（见 onPointerUp），覆盖层与标签高亮都来自
+ * dockDragStore 的临时状态，随 endDockDrag 一并消失。
+ */
+function cancelDockDrag(): void {
+    if (!session) return;
+    session = null;
+    // 帧合并里可能还积着一份补丁：取消后绝不能再推送（会把状态"复活"一帧）。
+    discardScheduledUpdate();
+    detach();
+    endDockDrag();
+}
+
+function onPointerCancel(event: PointerEvent): void {
+    if (!session || event.pointerId !== session.pointerId) return;
+    // OS 级取消（掌压拒绝、IME 抢占、手势竞争）：绝不能走 onPointerUp ——
+    // 那会把落点提交，用户明明没有松手却看到面板被停靠/浮走。
+    cancelDockDrag();
+}
+
 function onKeyUp(event: KeyboardEvent): void {
     if (!isModifierKey(event.key)) return;
     refreshIntent(event);
 }
 
 function onKeyDown(event: KeyboardEvent): void {
+    // Escape = 取消拖拽（对齐资源管理器 / VS Code 的拖拽语义）。捕获阶段监听
+    // （见 attach），避免按键先被聚焦控件消费。Escape 与 pointerId 无关：
+    // 会话还在就取消。
+    if (session && event.key === "Escape") {
+        event.preventDefault();
+        cancelDockDrag();
+        return;
+    }
     if (!isModifierKey(event.key)) return;
     refreshIntent(event);
 }
@@ -354,13 +432,24 @@ function refreshIntent(event: PointerEvent | KeyboardEvent): void {
     if (!state) return;
     const dockIntent = isDockModifierDown(event);
     const target = resolveTarget(session.lastX, session.lastY);
+    // 比较基准要包含**尚未推送**的补丁：rAF 合并意味着 store 里的值可能落后于
+    // "已经算出"的值，拿旧值去比会漏掉需要更新的情形（快速按下又松开修饰键）。
+    const effective = pendingPatch ? { ...state, ...pendingPatch } : state;
     // 按住修饰键时键盘会**重复**触发 keydown（约 30Hz）：意图没变就不该惊动
     // 覆盖层。落点只看 zone 与部位，矩形由 Zone 决定，无需逐值比较。
     if (
-        state.dockIntent === dockIntent &&
-        (state.target?.zoneId ?? null) === (target?.zoneId ?? null) &&
-        (state.target?.zone ?? null) === (target?.zone ?? null)
+        effective.dockIntent === dockIntent &&
+        (effective.target?.zoneId ?? null) === (target?.zoneId ?? null) &&
+        (effective.target?.zone ?? null) === (target?.zone ?? null)
     ) {
+        return;
+    }
+    if (pendingPatch) {
+        // 与指针移动共用同一份 rAF 补丁：这里只覆盖意图与落点，位置等字段保留
+        // 指针移动已经算出的值（keydown 与 pointermove 可能落在同一帧内）。直接
+        // 覆盖整个补丁会把位置回退到上一帧；不覆盖则下一帧的旧补丁又会把刚改
+        // 的意图冲回去。
+        pendingPatch = { ...pendingPatch, dockIntent, target };
         return;
     }
     updateDockDrag({ dockIntent, target });
@@ -374,9 +463,10 @@ function onWindowResize(): void {
 function attach(): void {
     window.addEventListener("pointermove", onPointerMove);
     window.addEventListener("pointerup", onPointerUp);
-    window.addEventListener("pointercancel", onPointerUp);
+    window.addEventListener("pointercancel", onPointerCancel);
     // 捕获阶段：修饰键的 keydown/keyup 可能先被聚焦控件消费（标签栏、编辑器
-    // 等），冒泡阶段收不到就又会退回"必须动一下鼠标"的老问题。
+    // 等），冒泡阶段收不到就又会退回"必须动一下鼠标"的老问题。Escape 的取消
+    // 也依赖这一点。
     window.addEventListener("keydown", onKeyDown, true);
     window.addEventListener("keyup", onKeyUp, true);
     window.addEventListener("resize", onWindowResize);
@@ -385,10 +475,25 @@ function attach(): void {
 function detach(): void {
     window.removeEventListener("pointermove", onPointerMove);
     window.removeEventListener("pointerup", onPointerUp);
-    window.removeEventListener("pointercancel", onPointerUp);
+    window.removeEventListener("pointercancel", onPointerCancel);
     window.removeEventListener("keydown", onKeyDown, true);
     window.removeEventListener("keyup", onKeyUp, true);
     window.removeEventListener("resize", onWindowResize);
+}
+
+/**
+ * 把后续指针事件捕获到拖拽源元素上。
+ *
+ * 【为什么需要】指针滑出源元素（甚至滑出窗口）后，事件仍定向到该元素并冒泡到
+ * window，拖拽路径不会因为换了 hit-test 目标而中断。某些目标或旧实现不支持
+ * 捕获：失败只是退化为纯 window 监听，不能让拖拽本身失败。
+ */
+function capturePointer(event: React.PointerEvent): void {
+    try {
+        event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+        // 忽略：window 级监听无论如何都能收到后续事件。
+    }
 }
 
 export interface TabDragArgs {
@@ -402,6 +507,10 @@ export interface TabDragArgs {
 /** 从一个标签开始拖拽。 */
 export function beginTabDrag(event: React.PointerEvent, args: TabDragArgs): void {
     if (event.button !== 0) return;
+    // 一次只允许一个拖拽会话：第二根手指按在另一个标签上时直接忽略 —— 会话是
+    // 模块单例，被覆盖后第一个拖拽的 move/up 全部被 pointerId 不匹配拦下，
+    // 两个手势会一起坏掉（卡在"拖拽中"且再也收不了尾）。
+    if (session) return;
     const tabBarRect = args.tabBarElement?.getBoundingClientRect() ?? null;
 
     // 【拆成浮窗时用多大】用**记住的浮窗尺寸**（或面板默认值），而不是宿主的
@@ -436,6 +545,7 @@ export function beginTabDrag(event: React.PointerEvent, args: TabDragArgs): void
         lastX: event.clientX,
         lastY: event.clientY,
     };
+    capturePointer(event);
     zoneRects = collectZoneRects();
     attach();
 }
@@ -449,6 +559,8 @@ export interface FloatDragArgs {
 /** 从一个浮动窗的标题栏开始拖拽。 */
 export function beginFloatDrag(event: React.PointerEvent, args: FloatDragArgs): void {
     if (event.button !== 0) return;
+    // 与 beginTabDrag 相同的会话互斥：拖拽进行中忽略第二根手指。
+    if (session) return;
     session = {
         mode: "float",
         formId: args.formId,
@@ -466,6 +578,7 @@ export function beginFloatDrag(event: React.PointerEvent, args: FloatDragArgs): 
         lastX: event.clientX,
         lastY: event.clientY,
     };
+    capturePointer(event);
     zoneRects = collectZoneRects();
     attach();
 }
