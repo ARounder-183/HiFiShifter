@@ -1092,6 +1092,15 @@ pub fn set_clip_take_channel_mode(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub fn scan_and_convert_fake_stereo(
+    state: State<'_, AppState>,
+    clip_ids: Option<Vec<String>>,
+    dry_run: Option<bool>,
+) -> crate::models::FakeStereoScanPayload {
+    timeline::scan_and_convert_fake_stereo(state, clip_ids, dry_run)
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub fn add_clip_take_from_media(
     state: State<'_, AppState>,
     clip_id: String,

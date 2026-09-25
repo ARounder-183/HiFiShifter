@@ -51,24 +51,78 @@ impl ChannelDecision {
     }
 }
 
-/// 锁外：按策略为一个源文件决定是否折叠为单声道。
+/// 判定结果（含可展示的原因）。
+///
+/// 与 [`ChannelDecision`] 分开是因为两者回答的问题不同：本枚举回答"为什么"，
+/// 用于扫描报告与日志；`ChannelDecision` 回答"做什么"，用于写回 Take。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelScanOutcome {
+    /// 策略关闭：未做任何判定。
+    PolicyOff,
+    /// 单声道源（`channels < 2`）：本就单声道，无需折叠。
+    MonoSource,
+    /// 策略为"全部转换"：不判定内容，直接折叠。
+    ForcedMono,
+    /// 假立体声（L/R 在容差内一致）：折叠。
+    FakeStereo,
+    /// 真立体声：保持。
+    TrueStereo,
+    /// 无法判定（源缺失 / 不可解码 / 无有效采样）：保持 —— 宁可不优化，
+    /// 也不能把无法确认的素材误折叠。
+    Unknown,
+}
+
+impl ChannelScanOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ChannelScanOutcome::PolicyOff => "policyOff",
+            ChannelScanOutcome::MonoSource => "mono",
+            ChannelScanOutcome::ForcedMono => "forcedMono",
+            ChannelScanOutcome::FakeStereo => "fakeStereo",
+            ChannelScanOutcome::TrueStereo => "trueStereo",
+            ChannelScanOutcome::Unknown => "unknown",
+        }
+    }
+
+    /// 由判定结果导出可执行的决定。
+    ///
+    /// 先看策略总开关：策略关闭时任何判定结果都不折叠（`scan_source` 本就不会
+    /// 在关闭时给出 `FakeStereo`，但本函数不该依赖调用方顺序才正确）。
+    pub fn decision(self, policy: &ChannelImportPolicy) -> ChannelDecision {
+        let policy = policy.normalized();
+        if policy.is_off() {
+            return ChannelDecision::Keep;
+        }
+        match self {
+            ChannelScanOutcome::ForcedMono | ChannelScanOutcome::FakeStereo => {
+                ChannelDecision::FoldToMono(policy.mono_target_mode)
+            }
+            ChannelScanOutcome::PolicyOff
+            | ChannelScanOutcome::MonoSource
+            | ChannelScanOutcome::TrueStereo
+            | ChannelScanOutcome::Unknown => ChannelDecision::Keep,
+        }
+    }
+}
+
+/// 锁外：按策略判定一个源文件。
 ///
 /// `source_channels` 为已探测到的源声道数（`None` / `0` 时本函数自行做一次
 /// O(1) 的 header 探测）。`region` 是源域秒区间，判定只对该区间负责；
 /// `None` 表示整个文件。
-pub fn precompute_decision(
+pub fn scan_source(
     source_path: Option<&Path>,
     source_channels: Option<u16>,
     region: Option<(f64, f64)>,
     policy: &ChannelImportPolicy,
-) -> ChannelDecision {
+) -> ChannelScanOutcome {
     let policy = policy.normalized();
     if policy.is_off() {
-        return ChannelDecision::Keep;
+        return ChannelScanOutcome::PolicyOff;
     }
 
     // 声道数未知时探测一次（WAV 读头 / 容器探测，均为 O(1)）。
-    // 探测失败按单声道处理 —— "不确定"时不转换，宁可不优化也不能改错。
+    // 探测失败按单声道处理 —— "不确定"时不转换。
     let channels = match source_channels {
         Some(c) if c > 0 => c,
         _ => match source_path.and_then(crate::audio_utils::try_read_audio_header_only) {
@@ -77,22 +131,33 @@ pub fn precompute_decision(
         },
     };
     if channels < 2 {
-        return ChannelDecision::Keep;
+        return ChannelScanOutcome::MonoSource;
     }
 
     if !policy.is_smart() {
         // alwaysMono：无需解码，直接折叠。
-        return ChannelDecision::FoldToMono(policy.mono_target_mode);
+        return ChannelScanOutcome::ForcedMono;
     }
 
     let Some(path) = source_path else {
-        return ChannelDecision::Keep;
+        return ChannelScanOutcome::Unknown;
     };
     match stereo_detect::verdict_for_file(path, region, &policy.detect_options()) {
-        ChannelVerdict::FakeStereo => ChannelDecision::FoldToMono(policy.mono_target_mode),
-        // Mono（单声道源）、TrueStereo、Unknown 一律保持原样。
-        _ => ChannelDecision::Keep,
+        ChannelVerdict::FakeStereo => ChannelScanOutcome::FakeStereo,
+        ChannelVerdict::Mono => ChannelScanOutcome::MonoSource,
+        ChannelVerdict::TrueStereo => ChannelScanOutcome::TrueStereo,
+        ChannelVerdict::Unknown => ChannelScanOutcome::Unknown,
     }
+}
+
+/// 锁外：按策略为一个源文件决定是否折叠为单声道。
+pub fn precompute_decision(
+    source_path: Option<&Path>,
+    source_channels: Option<u16>,
+    region: Option<(f64, f64)>,
+    policy: &ChannelImportPolicy,
+) -> ChannelDecision {
+    scan_source(source_path, source_channels, region, policy).decision(policy)
 }
 
 /// 锁内：把一个已算好的决定应用到 Take；返回是否发生了改变。
@@ -112,24 +177,20 @@ pub fn apply_decision(take: &mut ClipTake, decision: ChannelDecision) -> bool {
     }
 }
 
-/// 便捷组合：为一个 Take 判定并应用（**会解码**，必须在锁外调用）。
-///
-/// 判定区间取 Take 自身的消费窗口；窗口无效（未设置 / 反向）时按整文件判定。
-pub fn resolve_take_channel_mode(take: &mut ClipTake, policy: &ChannelImportPolicy) -> bool {
-    let decision = precompute_take_decision(take, policy);
-    apply_decision(take, decision)
-}
-
 /// 为一个 Take 锁外预判定（区间取自该 Take 的消费窗口）。
 pub fn precompute_take_decision(
     take: &ClipTake,
     policy: &ChannelImportPolicy,
 ) -> ChannelDecision {
-    let region = take_consumption_region(take);
-    precompute_decision(
+    scan_take(take, policy).decision(policy)
+}
+
+/// 为一个 Take 锁外判定并返回可展示的原因（区间取自其消费窗口）。
+pub fn scan_take(take: &ClipTake, policy: &ChannelImportPolicy) -> ChannelScanOutcome {
+    scan_source(
         take.source_path.as_deref().map(Path::new),
         take.source_channels,
-        region,
+        take_consumption_region(take),
         policy,
     )
 }
@@ -138,7 +199,7 @@ pub fn precompute_take_decision(
 ///
 /// 判定只覆盖实际会被渲染/听到的那一段：同一文件被切成多个 Take 时，
 /// 某个 Take 可能只消费到"尚未分叉"的前半段，那一段折叠为单声道是无损的。
-fn take_consumption_region(take: &ClipTake) -> Option<(f64, f64)> {
+pub fn take_consumption_region(take: &ClipTake) -> Option<(f64, f64)> {
     let start = take.source_start_sec;
     let end = take.source_end_sec;
     if start.is_finite() && end.is_finite() && end > start {
@@ -193,6 +254,12 @@ mod tests {
     use super::*;
     use crate::config::ChannelImportPolicy;
 
+    /// 测试便捷：走一遍生产的"锁外判定 → 锁内应用"两步。
+    fn resolve(take: &mut ClipTake, policy: &ChannelImportPolicy) -> bool {
+        let decision = precompute_take_decision(take, policy);
+        apply_decision(take, decision)
+    }
+
     /// 造一个空白 Take（走 add_clip 的正式构造路径，避免手写字面量漂移）。
     fn blank_take() -> ClipTake {
         let mut tl = crate::state::TimelineState::default();
@@ -219,7 +286,7 @@ mod tests {
             mode: "off".into(),
             ..Default::default()
         };
-        assert!(!resolve_take_channel_mode(&mut take, &policy));
+        assert!(!resolve(&mut take, &policy));
         assert_eq!(take.channel_mode, 0);
     }
 
@@ -231,7 +298,7 @@ mod tests {
             mode: "alwaysMono".into(),
             ..Default::default()
         };
-        assert!(resolve_take_channel_mode(&mut take, &policy));
+        assert!(resolve(&mut take, &policy));
         assert_eq!(take.channel_mode, 2);
     }
 
@@ -243,7 +310,7 @@ mod tests {
             mono_target_mode: 3,
             ..Default::default()
         };
-        assert!(resolve_take_channel_mode(&mut take, &policy));
+        assert!(resolve(&mut take, &policy));
         assert_eq!(take.channel_mode, 3);
     }
 
@@ -251,7 +318,7 @@ mod tests {
     fn mono_source_is_left_alone_in_smart_mode() {
         let mut take = take_with(Some("C:/definitely/missing.wav"), Some(1));
         let policy = ChannelImportPolicy::default(); // smart
-        assert!(!resolve_take_channel_mode(&mut take, &policy));
+        assert!(!resolve(&mut take, &policy));
         assert_eq!(take.channel_mode, 0);
     }
 
@@ -260,7 +327,7 @@ mod tests {
         // Unknown（文件不可读）→ 不动，避免把无法判定的素材误折叠。
         let mut take = take_with(Some("C:/definitely/missing.wav"), Some(2));
         let policy = ChannelImportPolicy::default();
-        assert!(!resolve_take_channel_mode(&mut take, &policy));
+        assert!(!resolve(&mut take, &policy));
         assert_eq!(take.channel_mode, 0);
     }
 
@@ -272,7 +339,7 @@ mod tests {
             ..Default::default()
         };
         // alwaysMono 仍会折叠：它不依赖源文件内容。
-        assert!(resolve_take_channel_mode(&mut take, &policy));
+        assert!(resolve(&mut take, &policy));
         assert_eq!(take.channel_mode, 2);
     }
 
@@ -298,7 +365,7 @@ mod tests {
 
         let mut take = take_with(Some(path.to_str().unwrap()), Some(2));
         let policy = ChannelImportPolicy::default();
-        assert!(resolve_take_channel_mode(&mut take, &policy));
+        assert!(resolve(&mut take, &policy));
         assert_eq!(take.channel_mode, 2);
 
         let _ = std::fs::remove_file(&path);
@@ -325,7 +392,7 @@ mod tests {
 
         let mut take = take_with(Some(path.to_str().unwrap()), Some(2));
         let policy = ChannelImportPolicy::default();
-        assert!(!resolve_take_channel_mode(&mut take, &policy));
+        assert!(!resolve(&mut take, &policy));
         assert_eq!(take.channel_mode, 0);
 
         let _ = std::fs::remove_file(&path);
@@ -396,5 +463,120 @@ mod tests {
         assert_eq!(resolve_clip_takes_channel_mode(clip, &policy), 1);
         assert_eq!(clip.takes[0].channel_mode, 2);
         assert_eq!(clip.takes[1].channel_mode, 0);
+    }
+
+    #[test]
+    fn scan_outcome_reports_the_reason_and_derives_the_decision() {
+        let smart = ChannelImportPolicy::default();
+        let forced = ChannelImportPolicy {
+            mode: "alwaysMono".into(),
+            mono_target_mode: 4,
+            ..Default::default()
+        };
+
+        // 只有"假立体声"与"强制转换"会折叠。
+        assert_eq!(
+            ChannelScanOutcome::FakeStereo.decision(&smart),
+            ChannelDecision::FoldToMono(2)
+        );
+        assert_eq!(
+            ChannelScanOutcome::ForcedMono.decision(&forced),
+            ChannelDecision::FoldToMono(4),
+            "目标模式取自策略"
+        );
+        for keep in [
+            ChannelScanOutcome::PolicyOff,
+            ChannelScanOutcome::MonoSource,
+            ChannelScanOutcome::TrueStereo,
+            ChannelScanOutcome::Unknown,
+        ] {
+            assert_eq!(keep.decision(&smart), ChannelDecision::Keep, "{keep:?}");
+        }
+        // 即便判定结果是"假立体声"，策略关闭时也不得折叠。
+        assert_eq!(
+            ChannelScanOutcome::FakeStereo.decision(&ChannelImportPolicy {
+                mode: "off".into(),
+                ..Default::default()
+            }),
+            ChannelDecision::Keep
+        );
+        // 原因字符串是 IPC 契约的一部分。
+        assert_eq!(ChannelScanOutcome::PolicyOff.as_str(), "policyOff");
+        assert_eq!(ChannelScanOutcome::FakeStereo.as_str(), "fakeStereo");
+        assert_eq!(ChannelScanOutcome::TrueStereo.as_str(), "trueStereo");
+        assert_eq!(ChannelScanOutcome::MonoSource.as_str(), "mono");
+        assert_eq!(ChannelScanOutcome::ForcedMono.as_str(), "forcedMono");
+        assert_eq!(ChannelScanOutcome::Unknown.as_str(), "unknown");
+    }
+
+    #[test]
+    fn scan_source_distinguishes_the_reasons() {
+        // 策略关闭：不做判定。
+        assert_eq!(
+            scan_source(None, Some(2), None, &ChannelImportPolicy { mode: "off".into(), ..Default::default() }),
+            ChannelScanOutcome::PolicyOff
+        );
+        // 单声道源：无需判定。
+        assert_eq!(
+            scan_source(None, Some(1), None, &ChannelImportPolicy::default()),
+            ChannelScanOutcome::MonoSource
+        );
+        // 强制转换：不判定内容。
+        assert_eq!(
+            scan_source(None, Some(2), None, &ChannelImportPolicy { mode: "alwaysMono".into(), ..Default::default() }),
+            ChannelScanOutcome::ForcedMono
+        );
+        // 智能模式但源不可读 → Unknown（不折叠）。
+        assert_eq!(
+            scan_source(
+                Some(std::path::Path::new("C:/definitely/missing.wav")),
+                Some(2),
+                None,
+                &ChannelImportPolicy::default()
+            ),
+            ChannelScanOutcome::Unknown
+        );
+    }
+
+    #[test]
+    fn scan_source_classifies_real_files() {
+        let dir = std::env::temp_dir().join("hifishifter_channel_policy_scan");
+        std::fs::create_dir_all(&dir).unwrap();
+        let policy = ChannelImportPolicy::default();
+
+        let fake = dir.join("scan_fake.wav");
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: 44_100,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let mut w = hound::WavWriter::create(&fake, spec).unwrap();
+        for i in 0..44_100 {
+            let v = ((i as f32) * 0.01).sin() * 0.4;
+            w.write_sample(v).unwrap();
+            w.write_sample(v).unwrap();
+        }
+        w.finalize().unwrap();
+        assert_eq!(
+            scan_source(Some(&fake), Some(2), None, &policy),
+            ChannelScanOutcome::FakeStereo
+        );
+
+        let real = dir.join("scan_true.wav");
+        let mut w = hound::WavWriter::create(&real, spec).unwrap();
+        for i in 0..44_100 {
+            let v = ((i as f32) * 0.01).sin() * 0.4;
+            w.write_sample(v).unwrap();
+            w.write_sample(-v).unwrap();
+        }
+        w.finalize().unwrap();
+        assert_eq!(
+            scan_source(Some(&real), Some(2), None, &policy),
+            ChannelScanOutcome::TrueStereo
+        );
+
+        let _ = std::fs::remove_file(&fake);
+        let _ = std::fs::remove_file(&real);
     }
 }

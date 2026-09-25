@@ -27,18 +27,6 @@ pub enum ChannelVerdict {
     Unknown,
 }
 
-impl ChannelVerdict {
-    /// 稳定字符串标识（IPC / 日志用）。
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ChannelVerdict::Mono => "mono",
-            ChannelVerdict::TrueStereo => "trueStereo",
-            ChannelVerdict::FakeStereo => "fakeStereo",
-            ChannelVerdict::Unknown => "unknown",
-        }
-    }
-}
-
 // ─── 判定参数 ────────────────────────────────────────────────────────────────
 
 /// 抽样判定参数。
@@ -146,6 +134,9 @@ impl DiffAcc {
 ///
 /// 窗口沿区间均匀铺开且**首尾都落在区间内**，因此"开头一致、结尾分叉"的素材
 /// 不会漏判。任一窗口出现超容差样本即短路返回 [`ChannelVerdict::TrueStereo`]。
+///
+/// 这是全模块唯一的比较入口：WAV 逐窗口解码路径与容器前缀解码路径最终都汇到
+/// [`compare_frames`]，不得在别处复刻比较逻辑。
 pub fn analyze_interleaved(
     pcm: &[f32],
     channels: u16,
@@ -165,18 +156,34 @@ pub fn analyze_interleaved(
     let mut acc = DiffAcc::default();
 
     for (start, len) in sample_windows(frames, sample_rate, &opts) {
-        for f in start..start + len {
-            let base = f * ch;
-            if !acc.push(pcm[base], pcm[base + 1], opts.tolerance) {
-                return ChannelVerdict::TrueStereo;
-            }
+        let last = (start + len).min(frames);
+        if !compare_frames(pcm, ch, start, last, opts.tolerance, &mut acc) {
+            return ChannelVerdict::TrueStereo;
         }
     }
+    finalize(acc)
+}
 
-    if acc.frames == 0 {
-        return ChannelVerdict::Unknown;
+/// 比较 `[first, last)` 帧的 L/R；返回 `false` 表示已发现超容差样本
+/// （调用方应短路，不必继续扫）。
+fn compare_frames(
+    pcm: &[f32],
+    channels: usize,
+    first: usize,
+    last: usize,
+    tolerance: f32,
+    acc: &mut DiffAcc,
+) -> bool {
+    for f in first..last {
+        let base = f * channels;
+        if base + 1 >= pcm.len() {
+            break;
+        }
+        if !acc.push(pcm[base], pcm[base + 1], tolerance) {
+            return false;
+        }
     }
-    ChannelVerdict::FakeStereo
+    true
 }
 
 /// 在 `frames` 帧内计算抽样窗口（帧下标区间）。
@@ -344,7 +351,7 @@ pub fn analyze_media_file(
     // 只有确定性的结论才值得记忆：Unknown 可能只是文件暂时不可读
     //（被占用 / 正在写入），缓存它会让后续导入永久失去判定机会。
     if verdict != ChannelVerdict::Unknown {
-        if let Some(key) = verdict_key_for(path, region, opts.signature()) {
+        if let Some(key) = verdict_key_for(path, region, &opts) {
             verdict_cache_put(key, verdict);
         }
     }
@@ -357,30 +364,31 @@ pub fn verdict_for_file(
     region: Option<(f64, f64)>,
     opts: &DetectOptions,
 ) -> ChannelVerdict {
-    if let Some(key) = verdict_key_for(path, region, opts.normalized().signature()) {
+    let opts = opts.normalized();
+    if let Some(key) = verdict_key_for(path, region, &opts) {
         if let Some(hit) = verdict_cache_get(&key) {
             return hit;
         }
     }
-    analyze_media_file(path, region, opts)
+    analyze_media_file(path, region, &opts)
 }
 
 /// 为文件构造缓存键（需要内容指纹；探测失败时返回 `None`，退化为不缓存）。
 fn verdict_key_for(
     path: &Path,
     region: Option<(f64, f64)>,
-    policy_sig: u64,
+    opts: &DetectOptions,
 ) -> Option<VerdictKey> {
     let header = crate::audio_utils::try_read_audio_header_only(path)?;
     let fingerprint = crate::audio_utils::compute_file_fingerprint(path);
-    Some(VerdictKey {
-        path: normalize_path_key(path),
+    Some(VerdictKey::new(
+        path,
         fingerprint,
-        channels: header.channels,
-        sample_rate: header.sample_rate,
-        region_q: quantize_region(region),
-        policy_sig,
-    })
+        header.channels,
+        header.sample_rate,
+        region,
+        opts,
+    ))
 }
 
 fn is_wav(path: &Path) -> bool {
@@ -427,31 +435,34 @@ fn analyze_wav_file(path: &Path, region: Option<(f64, f64)>, opts: &DetectOption
             return ChannelVerdict::Unknown;
         }
 
-        let matched = match (spec.sample_format, spec.bits_per_sample) {
+        // 读入本窗口后交给统一的比较函数 —— 采样格式差异只影响"怎么读"，
+        // 不影响"怎么比"。
+        let mut scratch: Vec<f32> = Vec::with_capacity(len * 2);
+        let read_ok = match (spec.sample_format, spec.bits_per_sample) {
             (SampleFormat::Int, 16) => {
                 let scale = 1.0 / (i16::MAX as f32);
-                read_and_compare(&mut reader, len, &mut acc, opts.tolerance, |s: i16| {
-                    s as f32 * scale
-                })
+                read_window(&mut reader, len, &mut scratch, |s: i16| s as f32 * scale)
             }
             (SampleFormat::Int, 24) => {
+                // hound 把 24-bit 作为符号扩展的 i32 返回，按 i32::MAX 归一化会
+                // 缩小约 256 倍（波形与音频近乎无声）。
                 let scale = 1.0 / ((1u32 << 23) as f32);
-                read_and_compare(&mut reader, len, &mut acc, opts.tolerance, |s: i32| {
-                    s as f32 * scale
-                })
+                read_window(&mut reader, len, &mut scratch, |s: i32| s as f32 * scale)
             }
             (SampleFormat::Int, 32) => {
                 let scale = 1.0 / (i32::MAX as f32);
-                read_and_compare(&mut reader, len, &mut acc, opts.tolerance, |s: i32| {
-                    s as f32 * scale
-                })
+                read_window(&mut reader, len, &mut scratch, |s: i32| s as f32 * scale)
             }
             (SampleFormat::Float, 32) => {
-                read_and_compare(&mut reader, len, &mut acc, opts.tolerance, |s: f32| s)
+                read_window(&mut reader, len, &mut scratch, |s: f32| s)
             }
             _ => return ChannelVerdict::Unknown,
         };
-        if !matched {
+        if !read_ok {
+            return ChannelVerdict::Unknown;
+        }
+        let frames_read = scratch.len() / 2;
+        if !compare_frames(&scratch, 2, 0, frames_read, opts.tolerance, &mut acc) {
             return ChannelVerdict::TrueStereo;
         }
     }
@@ -459,14 +470,13 @@ fn analyze_wav_file(path: &Path, region: Option<(f64, f64)>, opts: &DetectOption
     finalize(acc)
 }
 
-/// 从当前读位置读 `frames` 帧（每帧 2 声道）并与容差比较。
+/// 从当前读位置读 `frames` 帧（每帧 2 声道）到 `out`；返回是否完整读完。
 ///
-/// 返回 `false` 表示已发现超容差样本（调用方应短路）。
-fn read_and_compare<R, S, F>(
+/// 短读（文件实际比 header 短）不算错误：已读到的部分仍会被比较。
+fn read_window<R, S, F>(
     reader: &mut hound::WavReader<R>,
     frames: usize,
-    acc: &mut DiffAcc,
-    tolerance: f32,
+    out: &mut Vec<f32>,
     convert: F,
 ) -> bool
 where
@@ -474,6 +484,8 @@ where
     S: hound::Sample,
     F: Fn(S) -> f32,
 {
+    out.clear();
+    out.reserve(frames * 2);
     let mut samples = reader.samples::<S>();
     for _ in 0..frames {
         let (Some(l), Some(r)) = (samples.next(), samples.next()) else {
@@ -482,11 +494,10 @@ where
         let (Ok(l), Ok(r)) = (l, r) else {
             break;
         };
-        if !acc.push(convert(l), convert(r), tolerance) {
-            return false;
-        }
+        out.push(convert(l));
+        out.push(convert(r));
     }
-    true
+    !out.is_empty()
 }
 
 /// 非 WAV：从区间起点限量解码后比较。
@@ -556,14 +567,13 @@ fn analyze_other_container(
         return ChannelVerdict::Unknown;
     };
 
-    let mut acc = DiffAcc::default();
-    for f in first..last {
-        let base = f * ch;
-        if !acc.push(pcm[base], pcm[base + 1], opts.tolerance) {
-            return ChannelVerdict::TrueStereo;
-        }
-    }
-    finalize(acc)
+    // 交给统一比较入口（并在该窗口内再按 window_count 抽样）。
+    analyze_interleaved(
+        &pcm[first * ch..last * ch],
+        header.channels,
+        sample_rate,
+        opts,
+    )
 }
 
 /// 非 WAV 路径在**已解码缓冲**中应当比较的帧下标区间 `[first, last)`。

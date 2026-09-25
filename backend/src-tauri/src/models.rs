@@ -616,3 +616,32 @@ pub struct SynthesizePayload {
     pub num_samples: u32,
     pub duration_sec: f64,
 }
+
+/// 假立体声扫描的逐 Take 明细。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct FakeStereoScanEntry {
+    pub clip_id: String,
+    pub take_id: String,
+    pub name: String,
+    /// 判定原因：`mono` / `fake_stereo` / `true_stereo` / `unknown` /
+    /// `policy_off` / `forced_mono`（见 `channel_policy::ChannelScanOutcome`）。
+    pub verdict: String,
+    /// 本次实际写入的声道模式（`None` = 未改动）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applied_mode: Option<i32>,
+}
+
+/// 假立体声扫描结果。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct FakeStereoScanPayload {
+    pub ok: bool,
+    /// 被检查的 Take 数。
+    pub scanned: usize,
+    /// 实际被折叠为单声道的 Take 数（`dry_run` 时为"将会被折叠"的数量）。
+    pub converted: usize,
+    pub entries: Vec<FakeStereoScanEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub missing_files: Option<Vec<String>>,
+}

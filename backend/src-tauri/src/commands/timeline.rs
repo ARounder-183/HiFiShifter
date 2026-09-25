@@ -1515,6 +1515,174 @@ pub(super) fn set_clip_take_channel_mode(
     payload
 }
 
+/// 扫描并（可选）把"假立体声"Take 折叠为单声道。
+///
+/// `clip_ids = None` 表示整个工程；`dry_run = true` 只报告不修改，供 UI
+/// 先展示扫描结果再让用户确认。
+///
+/// 三段式执行，严格遵守锁边界：
+/// 1. 短暂持锁取"判定所需最小快照"（路径 / 声道数 / 消费窗口）；
+/// 2. **锁外**逐 Take 判定（智能模式会解码音频）；
+/// 3. 短暂持锁一次性写回 —— 整批只打**一个**撤销步。
+pub(super) fn scan_and_convert_fake_stereo(
+    state: State<'_, AppState>,
+    clip_ids: Option<Vec<String>>,
+    dry_run: Option<bool>,
+) -> crate::models::FakeStereoScanPayload {
+    let dry_run = dry_run.unwrap_or(false);
+    let policy = crate::config::channel_import_policy();
+
+    /// 判定所需的最小快照（不克隆波形预览等大字段）。
+    struct Target {
+        clip_id: String,
+        take_id: String,
+        name: String,
+        source_path: Option<String>,
+        source_channels: Option<u16>,
+        region: Option<(f64, f64)>,
+    }
+
+    // ── 阶段 1（短暂持锁）：取快照 ──
+    let targets: Vec<Target> = {
+        let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        let filter: Option<std::collections::HashSet<&str>> = clip_ids
+            .as_ref()
+            .map(|ids| ids.iter().map(|s| s.as_str()).collect());
+        tl.clips
+            .iter()
+            .filter(|clip| filter.as_ref().map_or(true, |f| f.contains(clip.id.as_str())))
+            .flat_map(|clip| {
+                clip.takes.iter().map(move |take| Target {
+                    clip_id: clip.id.clone(),
+                    take_id: take.id.clone(),
+                    name: take.name.clone(),
+                    source_path: take.source_path.clone(),
+                    source_channels: take.source_channels,
+                    region: crate::channel_policy::take_consumption_region(take),
+                })
+            })
+            .collect()
+    };
+
+    // ── 阶段 2（锁外）：逐 Take 判定 ──
+    let mut entries: Vec<crate::models::FakeStereoScanEntry> = Vec::with_capacity(targets.len());
+    let mut planned: Vec<(String, String, i32)> = Vec::new();
+    let mut missing_files: Vec<String> = Vec::new();
+
+    for target in &targets {
+        let outcome = crate::channel_policy::scan_source(
+            target.source_path.as_deref().map(Path::new),
+            target.source_channels,
+            target.region,
+            &policy,
+        );
+        if outcome == crate::channel_policy::ChannelScanOutcome::Unknown
+            && target.source_path.is_some()
+        {
+            if let Some(path) = target.source_path.as_ref() {
+                if !Path::new(path).exists() {
+                    missing_files.push(path.clone());
+                }
+            }
+        }
+        let decision = outcome.decision(&policy);
+        let applied_mode = if dry_run { None } else { decision.target_mode() };
+        if let Some(mode) = decision.target_mode() {
+            planned.push((target.clip_id.clone(), target.take_id.clone(), mode));
+        }
+        entries.push(crate::models::FakeStereoScanEntry {
+            clip_id: target.clip_id.clone(),
+            take_id: target.take_id.clone(),
+            name: target.name.clone(),
+            verdict: outcome.as_str().to_string(),
+            applied_mode,
+        });
+    }
+
+    let converted = planned.len();
+
+    // `dry_run` 到此为止：只报告，不触碰时间轴（也不产生撤销步）。
+    if dry_run || planned.is_empty() {
+        return crate::models::FakeStereoScanPayload {
+            ok: true,
+            scanned: entries.len(),
+            converted,
+            entries,
+            missing_files: if missing_files.is_empty() {
+                None
+            } else {
+                Some(missing_files)
+            },
+        };
+    }
+
+    // ── 阶段 3（短暂持锁）：一次性写回，整批一个撤销步 ──
+    let mut changed_clips: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut active_changed_clips: Vec<String> = Vec::new();
+    {
+        let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        state.checkpoint_timeline(&tl, crate::state::HistoryOp::TakeChannelMode);
+
+        for (clip_id, take_id, mode) in &planned {
+            match tl.set_clip_take_channel_mode(clip_id, take_id, *mode) {
+                Ok(is_active) => {
+                    changed_clips.insert(clip_id.clone());
+                    if is_active {
+                        active_changed_clips.push(clip_id.clone());
+                    }
+                }
+                Err(err) => log::warn!(
+                    "[scan_fake_stereo] skip clip={clip_id} take={take_id}: {err}"
+                ),
+            }
+        }
+
+        for clip_id in &changed_clips {
+            invalidate_take_related_caches(clip_id);
+            if active_changed_clips.iter().any(|c| c == clip_id) {
+                maybe_schedule_formant_rebuild(&state, &tl, clip_id);
+            }
+        }
+
+        state.audio_engine.update_timeline(tl.clone());
+    }
+
+    // active take 的模式改变条件化后的分析输入 → 重调度音高分析（锁外）。
+    let root_tracks: std::collections::HashSet<String> = {
+        let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        active_changed_clips
+            .iter()
+            .filter_map(|clip_id| {
+                tl.clips
+                    .iter()
+                    .find(|c| c.id == *clip_id)
+                    .map(|c| c.track_id.clone())
+            })
+            .filter_map(|track_id| tl.resolve_root_track_id(&track_id))
+            .collect()
+    };
+    for root in &root_tracks {
+        crate::pitch_analysis::maybe_schedule_pitch_orig(&state, root);
+    }
+
+    log::info!(
+        "[scan_fake_stereo] scanned={} converted={converted}",
+        entries.len()
+    );
+
+    crate::models::FakeStereoScanPayload {
+        ok: true,
+        scanned: entries.len(),
+        converted,
+        entries,
+        missing_files: if missing_files.is_empty() {
+            None
+        } else {
+            Some(missing_files)
+        },
+    }
+}
+
 pub(super) fn add_clip_take_from_media(
     state: State<'_, AppState>,
     clip_id: String,

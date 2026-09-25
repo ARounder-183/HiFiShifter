@@ -664,6 +664,7 @@ pub fn run() {
             commands::rename_clip_take,
             commands::set_clip_take_reversed,
             commands::set_clip_take_channel_mode,
+            commands::scan_and_convert_fake_stereo,
             commands::add_clip_take_from_media,
             commands::import_media_files_as_takes,
             commands::duplicate_clips_bulk,
