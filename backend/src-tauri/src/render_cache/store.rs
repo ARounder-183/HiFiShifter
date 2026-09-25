@@ -111,6 +111,10 @@ impl Store {
     ) -> Option<LoadedEntry> {
         let path = self.path_for(kind, hash);
         let file = File::open(&path).ok()?;
+        // 头声明的 payload 长度以文件实际大小为上界：frames/payload_bytes 都是
+        // 未校验的头字段，自洽的垃圾值会让 read_entry 尝试巨额分配（分配失败 =
+        // 进程 abort）。宁可判损坏重渲染。
+        let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
         let mut reader = BufReader::with_capacity(256 * 1024, file);
         match format::read_entry(
             &mut reader,
@@ -118,6 +122,7 @@ impl Store {
             expected_sample_rate,
             crate::synth_clip_cache::RENDER_PIPELINE_VERSION,
             verify_checksum,
+            Some(file_len),
         ) {
             Ok(loaded) => {
                 if loaded.header.kind != kind {
@@ -182,11 +187,10 @@ impl Store {
         }
         let bytes_written = fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0);
 
-        // Windows 的 rename 不能覆盖已存在目标：同 hash 重写（参数回退等场景）
-        // 需要先删旧文件。竞态窗口内旧文件短暂缺失，只会退化为一次 miss。
-        if path.exists() {
-            let _ = fs::remove_file(&path);
-        }
+        // rename 直接覆盖已存在目标（Windows 走 MoveFileExW(REPLACE_EXISTING)，
+        // POSIX 本就如此）：不需要"先删旧文件"。先删反而引入两个问题 —— 删到改名
+        // 之间条目短暂缺失（并发读退化为 miss），以及"删成功、改名失败"会把新旧
+        // 两份一起丢掉。
         fs::rename(&tmp, &path)?;
         Ok(bytes_written)
     }

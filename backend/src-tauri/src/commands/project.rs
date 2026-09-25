@@ -1030,7 +1030,14 @@ pub(super) fn open_project(
     state.clear_history();
     // 无论「保存操作记录」设置是否开启都尝试读取：存在伴生文件就恢复历史
     // （后缀大小写不敏感），读不到则静默保持「无历史」。
-    let _ = crate::commands::undo_history_file::load_undo_history(state.inner(), &path);
+    // 【必须传工程自身的版本号】历史快照的版本迁移（v4→v5 的假立体声折叠）按
+    // 工程版本执行，不能一律按当前版本 —— 否则恢复出的记录跳过迁移，第一次
+    // 撤销会把未折叠的 take 写回时间线。
+    let _ = crate::commands::undo_history_file::load_undo_history(
+        state.inner(),
+        &path,
+        pf.version,
+    );
     {
         let mut p = state.project.lock().unwrap_or_else(|e| e.into_inner());
         p.name = project_name_from_path(&path);

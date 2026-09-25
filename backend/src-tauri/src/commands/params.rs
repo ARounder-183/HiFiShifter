@@ -194,7 +194,7 @@ pub(super) fn get_param_frames(
     }
     // 二进制模式：orig/edit 以 Base64 单条返回，JSON 里不再展开成 number[]。
     let binary = binary.unwrap_or(false);
-    let (root, fp, entry, compose_enabled, pitch_algo, param_reference_value, param_kind) = {
+    let (root, fp, entry, compose_enabled, pitch_algo, param_reference_value, param_kind, param_frame_target) = {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
 
         let root = match tl.resolve_root_track_id(&track_id) {
@@ -221,6 +221,8 @@ pub(super) fn get_param_frames(
 
         tl.ensure_params_for_root(&root);
         let fp = tl.frame_period_ms();
+        // 输出帧数的收口基准（见下方 count 的钳制）：曲线本身按它定长组装。
+        let param_frame_target = tl.target_param_frames(fp);
 
         let track = tl.tracks.iter().find(|t| t.id == root);
         let compose_enabled = track.map(|t| t.compose_enabled).unwrap_or(false);
@@ -245,6 +247,7 @@ pub(super) fn get_param_frames(
             pitch_algo,
             param_reference_value,
             kind,
+            param_frame_target,
         )
     };
 
@@ -323,7 +326,11 @@ pub(super) fn get_param_frames(
     };
 
     let start = start_frame as usize;
-    let count = (frame_count as usize).max(1);
+    // frame_count 来自 UI（u32）：异常大值会让下面三个输出 Vec 按它预分配并
+    // 逐帧填充，把内存打爆。曲线本身按 `target_param_frames` 定长组装（见
+    // `ensure_params_for_root`），越出工程帧数的读数本来就是默认值 —— 按
+    // target 钳制即可挡住异常值，合法请求（窗口在工程内）不受影响。
+    let count = (frame_count as usize).max(1).min(param_frame_target);
     let step = (stride.unwrap_or(1).max(1)) as usize;
 
     let mut orig = Vec::with_capacity(count);
@@ -861,13 +868,17 @@ fn convert_mix_frame_value(
 /// 一段选区的互转换算（纯函数）。
 ///
 /// 逐帧取 `(volume, dyn_raw, baseline)` 并套用 [`convert_mix_frame_value`]；
-/// 基线越界 / 无效（`dyn_orig` 缺该帧、非有限、≤ 0）的帧**写"无变化"值**
-/// （volume=1.0、dyn=哨兵）并计入 `skipped` —— 输出与输入逐帧对齐，调用方
-/// 无需关心跳帧位置。正常情况下基线长度 = 工程帧数、选区不会越出工程末端，
-/// skipped 恒为 0；该分支只是不让异常数据错位写盘。
+/// 基线越界 / 无效（`dyn_orig` 缺该帧、非有限、≤ 0）的帧**不产出写入值**
+/// （`None`）并计入 `skipped`。正常情况下基线长度 = 工程帧数、选区不会越出
+/// 工程末端，skipped 恒为 0；该分支只是不让异常数据错位写盘。
+///
+/// 为什么跳帧是"不写"而不是"写中性值"：写 `volume=1.0` 并非无变化 ——
+/// `DynToVolume` 会把用户已有的音量冲掉，`VolumeToDyn` 会把用户音量归位 1.0。
+/// "互转只作用于有效帧"要求跳帧保持原样，由调用方把 `None` 帧从写段里剔除。
 ///
 /// # 返回
-/// `(volume_values, dyn_values, skipped)`：前两者长度恒等于 `count`。
+/// `(volume_values, dyn_values, skipped)`：前两者长度恒等于 `count`，与选区
+/// 逐帧对齐；被跳过的帧为 `None`，调用方不得写入该帧。
 fn compute_mix_conversion_range(
     direction: MixConversionDirection,
     volume_curve: Option<&[f32]>,
@@ -875,8 +886,7 @@ fn compute_mix_conversion_range(
     dyn_orig: &[f32],
     start: usize,
     count: usize,
-) -> (Vec<f32>, Vec<f32>, usize) {
-    let sentinel = crate::renderer::common_params::DYN_FOLLOW_ORIG;
+) -> (Vec<Option<f32>>, Vec<Option<f32>>, usize) {
     let mut volume_out = Vec::with_capacity(count);
     let mut dyn_out = Vec::with_capacity(count);
     let mut skipped = 0usize;
@@ -891,14 +901,13 @@ fn compute_mix_conversion_range(
                 let volume_value = volume_curve.and_then(|c| c.get(idx)).copied();
                 let dyn_raw = dyn_curve.and_then(|c| c.get(idx)).copied();
                 let (v, d) = convert_mix_frame_value(direction, volume_value, dyn_raw, b);
-                volume_out.push(v);
-                dyn_out.push(d);
+                volume_out.push(Some(v));
+                dyn_out.push(Some(d));
             }
             None => {
-                // 基线缺失：保持"无变化"，绝不信占位基线换算。
                 skipped += 1;
-                volume_out.push(1.0);
-                dyn_out.push(sentinel);
+                volume_out.push(None);
+                dyn_out.push(None);
             }
         }
     }
@@ -953,9 +962,17 @@ pub(super) fn convert_mix_param(
     }
 
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+    // 先校验、后 checkpoint：`params_missing` 的失败路径不留"空 undo 步"
+    // （与 `set_clip_take_channel_mode` 的同口径约定一致）。
+    if !tl.params_by_root_track.contains_key(&root) {
+        return serde_json::json!({"ok": false, "reason": "params_missing"});
+    }
     // 整批一个撤销点：Ctrl+Z 一次回退全部选区的换算与归位。
     state.checkpoint_timeline(&tl, crate::state::HistoryOp::ParamCurve);
 
+    // 写回的 `resize` 以 start+count 为目标：u32 入参异常大值会按它分配，
+    // 按工程帧数收口（合法选区不会越出工程末端）。
+    let param_frame_target = tl.target_param_frames(tl.frame_period_ms());
     let Some(entry) = tl.params_by_root_track.get_mut(&root) else {
         return serde_json::json!({"ok": false, "reason": "params_missing"});
     };
@@ -981,7 +998,11 @@ pub(super) fn convert_mix_param(
 
     for range in &ranges {
         let start = range.start_frame as usize;
-        let count = (range.frame_count as usize).max(1);
+        // 选区段合法时不会越出工程末端；越界 / 异常大值按工程帧数截断 ——
+        // 否则写回的 `resize(start+count)` 与逐帧循环都按 u32 量级展开。
+        let count = (range.frame_count as usize)
+            .max(1)
+            .min(param_frame_target.saturating_sub(start));
         let (volume_values, dyn_values, skipped) = compute_mix_conversion_range(
             direction,
             if volume_snapshot.is_empty() {
@@ -1001,9 +1022,10 @@ pub(super) fn convert_mix_param(
         skipped_frames += skipped;
         // 选区段升序到达：相邻/重叠段合并（后到覆盖先到，与前端多段写入的
         // 确定性一致）；互不相交的段保持独立 —— **缝隙帧不写**（互转只作用于
-        // 选区，缝隙里的曲线原样保留）。
-        merge_write_segment(&mut volume_writes, start, &volume_values);
-        merge_write_segment(&mut dyn_writes, start, &dyn_values);
+        // 选区，缝隙里的曲线原样保留）。段内基线缺失的帧同样不写（None 被
+        // 切成子段，见 `merge_write_segment_skipping_gaps`）。
+        merge_write_segment_skipping_gaps(&mut volume_writes, start, &volume_values);
+        merge_write_segment_skipping_gaps(&mut dyn_writes, start, &dyn_values);
         converted_frames += count - skipped;
     }
 
@@ -1067,6 +1089,35 @@ fn merge_write_segment(writes: &mut Vec<(usize, Vec<f32>)>, start: usize, values
         }
     }
     writes.push((start, values.to_vec()));
+}
+
+/// 把带"跳帧洞"的换算输出拆成连续子段写入：`None` 帧（基线缺失）**不写**、
+/// 该帧曲线保持原值，连续的 `Some` 帧合成为一段交给 [`merge_write_segment`]。
+///
+/// 子段仍按升序到达（选区段升序，洞只会把段切得更碎），满足
+/// `merge_write_segment` 的调用契约。
+fn merge_write_segment_skipping_gaps(
+    writes: &mut Vec<(usize, Vec<f32>)>,
+    start: usize,
+    values: &[Option<f32>],
+) {
+    let mut run_start = start;
+    let mut run: Vec<f32> = Vec::new();
+    for (k, value) in values.iter().enumerate() {
+        match value {
+            Some(v) => run.push(*v),
+            None => {
+                if !run.is_empty() {
+                    merge_write_segment(writes, run_start, &run);
+                    run.clear();
+                }
+                run_start = start + k + 1;
+            }
+        }
+    }
+    if !run.is_empty() {
+        merge_write_segment(writes, run_start, &run);
+    }
 }
 
 pub(super) fn get_static_param(
@@ -1307,8 +1358,10 @@ mod mix_conversion_tests {
 
     #[test]
     fn range_conversion_keeps_frame_alignment() {
-        // 基线只有 3 帧有效，选区 5 帧：后 2 帧写"无变化"值、计入 skipped，
-        // 输出与输入逐帧对齐（长度恒等于 count）。
+        // 基线只有 3 帧有效，选区 5 帧：后 2 帧为 `None`（不产出写入值）、
+        // 计入 skipped，输出与输入逐帧对齐（长度恒等于 count）。
+        // ★ 回归：跳帧曾写中性值（volume=1.0）—— DynToVolume 方向会把用户
+        // 已有音量冲掉，"无变化"必须是不写，而不是写 1.0。
         let volume = vec![0.5f32, 1.5, 1.0, 1.0, 1.0];
         // 基线取 0.8（0 dBFS 以下）而非 2.0 —— 后者会让 1.0 × 2.0 撞上 dyn
         // 值域上限、被钳制，掩盖"逐帧换算"这一本测试真正要守护的性质。
@@ -1325,13 +1378,44 @@ mod mix_conversion_tests {
         assert_eq!(d_out.len(), 5);
         assert_eq!(skipped, 2);
         // 前 3 帧按基线换算。
-        assert!((d_out[0] - 0.5).abs() < 1e-6); // 0.5 × 1.0
-        assert!((d_out[1] - 0.75).abs() < 1e-6); // 1.5 × 0.5
-        assert!((d_out[2] - 0.8).abs() < 1e-6); // 1.0 × 0.8
-        // 后 2 帧：volume 归位 1.0、dyn 哨兵。
-        assert_eq!(v_out[3], 1.0);
-        assert_eq!(d_out[3], crate::renderer::common_params::DYN_FOLLOW_ORIG);
-        assert_eq!(d_out[4], crate::renderer::common_params::DYN_FOLLOW_ORIG);
+        assert!((d_out[0].unwrap() - 0.5).abs() < 1e-6); // 0.5 × 1.0
+        assert!((d_out[1].unwrap() - 0.75).abs() < 1e-6); // 1.5 × 0.5
+        assert!((d_out[2].unwrap() - 0.8).abs() < 1e-6); // 1.0 × 0.8
+        assert!(v_out[0].is_some() && v_out[1].is_some() && v_out[2].is_some());
+        // 后 2 帧：基线缺失 → 不产出写入值（调用方不得写该帧）。
+        assert_eq!(v_out[3], None);
+        assert_eq!(v_out[4], None);
+        assert_eq!(d_out[3], None);
+        assert_eq!(d_out[4], None);
+    }
+
+    #[test]
+    fn gap_splitting_merge_writes_only_present_frames() {
+        // 洞把一段切两个子段：None 帧（下标 1、3）不得出现在任何写段里。
+        let values = vec![Some(1.0f32), None, Some(2.0), None, Some(3.0)];
+        let mut writes: Vec<(usize, Vec<f32>)> = Vec::new();
+        merge_write_segment_skipping_gaps(&mut writes, 10, &values);
+        assert_eq!(writes.len(), 3);
+        assert_eq!(writes[0], (10, vec![1.0]));
+        assert_eq!(writes[1], (12, vec![2.0]));
+        assert_eq!(writes[2], (14, vec![3.0]));
+
+        // 首帧就是洞：子段从洞后开始。
+        let mut writes: Vec<(usize, Vec<f32>)> = Vec::new();
+        merge_write_segment_skipping_gaps(&mut writes, 10, &[None, Some(5.0), Some(6.0)]);
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0], (11, vec![5.0, 6.0]));
+
+        // 尾帧是洞：段在洞前收口。
+        let mut writes: Vec<(usize, Vec<f32>)> = Vec::new();
+        merge_write_segment_skipping_gaps(&mut writes, 10, &[Some(7.0), None]);
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0], (10, vec![7.0]));
+
+        // 全洞：什么都不写。
+        let mut writes: Vec<(usize, Vec<f32>)> = Vec::new();
+        merge_write_segment_skipping_gaps(&mut writes, 10, &[None, None]);
+        assert!(writes.is_empty());
     }
 
     /// volume→dyn 超出 0 dBFS 的目标必须钳到 1.0（>1 会削顶，无意义）。
@@ -1369,11 +1453,11 @@ mod mix_conversion_tests {
             3,
         );
         assert_eq!(skipped, 0);
-        assert!((v_out[0] - 0.5).abs() < 1e-6); // 0.5 / 1.0
-        assert_eq!(v_out[1], 2.0); // 2.0 / 0.5 = 增益 4 → 音量值域钳到 2
-        assert_eq!(v_out[2], 1.0); // 哨兵帧 → 不改变
+        assert!((v_out[0].unwrap() - 0.5).abs() < 1e-6); // 0.5 / 1.0
+        assert_eq!(v_out[1], Some(2.0)); // 2.0 / 0.5 = 增益 4 → 音量值域钳到 2
+        assert_eq!(v_out[2], Some(1.0)); // 哨兵帧 → 不改变
         for d in d_out {
-            assert_eq!(d, crate::renderer::common_params::DYN_FOLLOW_ORIG);
+            assert_eq!(d, Some(crate::renderer::common_params::DYN_FOLLOW_ORIG));
         }
     }
 

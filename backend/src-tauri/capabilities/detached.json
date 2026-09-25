@@ -1,0 +1,17 @@
+{
+    "$schema": "../gen/schemas/desktop-schema.json",
+    "identifier": "detached",
+    "description": "Capability for detached panel windows (hs-detached-*)",
+    "windows": [
+        "hs-detached-*"
+    ],
+    "permissions": [
+        "core:default",
+        "opener:default",
+        "core:window:allow-outer-position",
+        "core:window:allow-inner-size",
+        "core:window:allow-scale-factor",
+        "core:window:allow-set-position",
+        "core:window:allow-start-dragging"
+    ]
+}

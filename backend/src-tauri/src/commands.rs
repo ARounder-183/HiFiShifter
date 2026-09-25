@@ -303,10 +303,19 @@ pub fn notebook_prune_assets(state: State<'_, AppState>) -> serde_json::Value {
     notebook::prune_assets(state)
 }
 
-/// 把任意文件读成 base64（拖入的图片走这条）。
+/// 把图片文件读成 base64（拖入的图片走这条）。
 #[tauri::command(rename_all = "camelCase")]
-pub fn notebook_read_file_base64(path: String, max_bytes: Option<u64>) -> serde_json::Value {
-    notebook::read_file_base64(path, max_bytes)
+pub async fn notebook_read_file_base64(path: String, max_bytes: Option<u64>) -> serde_json::Value {
+    // 文件读取 + base64 编码可达数十 MB：放阻塞线程池执行，避免同步命令
+    // 在主线程上冻结前端（与 import_audio_item 同模式）。
+    tauri::async_runtime::spawn_blocking(move || notebook::read_file_base64(path, max_bytes))
+        .await
+        .unwrap_or_else(|error| {
+            serde_json::json!({
+                "ok": false,
+                "error": format!("notebook_read_task_failed: {error}")
+            })
+        })
 }
 
 /// 读出系统剪贴板里的 HiFiShifter 载荷（时间轴片段 / 参数线），供暂存。
@@ -1092,12 +1101,26 @@ pub fn set_clip_take_channel_mode(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn scan_and_convert_fake_stereo(
-    state: State<'_, AppState>,
+pub async fn scan_and_convert_fake_stereo(
+    app: tauri::AppHandle,
     clip_ids: Option<Vec<String>>,
     dry_run: Option<bool>,
 ) -> crate::models::FakeStereoScanPayload {
-    timeline::scan_and_convert_fake_stereo(state, clip_ids, dry_run)
+    // 整工程扫描会逐 take 解码音频（数十个 take × 数 MB 的解码 + 比对），
+    // 同步命令跑在主线程上会把前端整个冻住（连加载动画都转不动）。
+    // 卸载到阻塞线程池执行，与 import_audio_item 同一模式。
+    tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        timeline::scan_and_convert_fake_stereo(state, clip_ids, dry_run)
+    })
+    .await
+    .unwrap_or_else(|error| crate::models::FakeStereoScanPayload {
+        ok: false,
+        scanned: 0,
+        converted: 0,
+        entries: Vec::new(),
+        missing_files: Some(vec![format!("scan task failed: {error}")]),
+    })
 }
 
 #[tauri::command(rename_all = "camelCase")]

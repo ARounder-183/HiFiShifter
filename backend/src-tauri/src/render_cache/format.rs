@@ -235,12 +235,17 @@ pub fn write_entry<W: Write>(
 /// - `expected_pipeline_version`：渲染管线指纹（实现变更后旧条目必须判废，
 ///   与"指纹混入哈希"形成双重保险）。
 /// - `verify_checksum`：是否做 payload 级校验（长度与头部自检始终执行）。
+/// - `max_payload_bytes`：头部声明的 payload 长度上限。`frames` / `payload_bytes`
+///   都来自**未校验的头**，两个自洽的垃圾值会在这里触发一次巨额分配（分配失败
+///   = 进程 abort，不可恢复）。从磁盘读时必须传文件长度，`None` 仅用于内存内
+///   的自洽数据（测试）。
 pub fn read_entry<R: Read>(
     reader: &mut R,
     expected_param_hash: u64,
     expected_sample_rate: u32,
     expected_pipeline_version: u32,
     verify_checksum: bool,
+    max_payload_bytes: Option<u64>,
 ) -> io::Result<LoadedEntry> {
     let mut head = [0u8; FIXED_HEADER_LEN];
     reader.read_exact(&mut head)?;
@@ -282,6 +287,14 @@ pub fn read_entry<R: Read>(
     let expected_payload = frames as u64 * 2 * stems as u64 * 4;
     if payload_bytes != expected_payload {
         return Err(invalid("payload length mismatch"));
+    }
+    // 【必须在任何分配之前】头声明的 payload 比文件本身还大 ⇒ 头必然损坏
+    // （位衰减 / 半写入 / 人为构造），且校验和救不了它 —— 校验和覆盖的是
+    // payload 本身，而此刻一个字节都还没读。
+    if let Some(max) = max_payload_bytes {
+        if payload_bytes > max {
+            return Err(invalid("payload length exceeds file size"));
+        }
     }
     if header_len as usize != FIXED_HEADER_LEN + take_id_len {
         return Err(invalid("header length mismatch"));
@@ -359,7 +372,7 @@ mod tests {
             .collect()
     }
 
-    /// 生产路径口径的读取（带管线指纹与校验和）。
+    /// 生产路径口径的读取（带管线指纹与校验和；内存内自洽数据不限长）。
     fn read<R: Read>(reader: &mut R, hash: u64, sample_rate: u32) -> io::Result<LoadedEntry> {
         read_entry(
             reader,
@@ -367,6 +380,7 @@ mod tests {
             sample_rate,
             crate::synth_clip_cache::RENDER_PIPELINE_VERSION,
             true,
+            None,
         )
     }
 
@@ -382,6 +396,7 @@ mod tests {
             sample_rate,
             crate::synth_clip_cache::RENDER_PIPELINE_VERSION,
             false,
+            None,
         )
     }
 

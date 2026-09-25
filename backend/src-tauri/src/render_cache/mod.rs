@@ -294,7 +294,11 @@ pub fn load_tension(
         key.tension_hash,
         expected_sample_rate,
         rt.verify_checksum,
-    )?;
+    );
+    let Some(loaded) = loaded else {
+        note_miss();
+        return None;
+    };
     if loaded.primary.len() != loaded.header.frames as usize * 2 {
         note_miss();
         return None;
@@ -322,7 +326,11 @@ pub fn load_noise(
         key.param_hash,
         expected_sample_rate,
         rt.verify_checksum,
-    )?;
+    );
+    let Some(loaded) = loaded else {
+        note_miss();
+        return None;
+    };
     if loaded.primary.len() != loaded.header.frames as usize * 2 {
         note_miss();
         return None;

@@ -1537,7 +1537,9 @@ pub(super) fn set_clip_take_channel_mode(
 /// 三段式执行，严格遵守锁边界：
 /// 1. 短暂持锁取"判定所需最小快照"（路径 / 声道数 / 消费窗口）；
 /// 2. **锁外**逐 Take 判定（智能模式会解码音频）；
-/// 3. 短暂持锁一次性写回 —— 整批只打**一个**撤销步。
+/// 3. 短暂持锁一次性写回 —— 有实际改动时整批只打**一个**撤销步（快照惰性
+///    推迟到第一次真正写入前：Take 已处于目标模式的 no-op 不留空 undo 步，
+///    `applied_mode` 也只对真正写入的 Take 置值）。
 pub(super) fn scan_and_convert_fake_stereo(
     state: State<'_, AppState>,
     clip_ids: Option<Vec<String>>,
@@ -1580,16 +1582,31 @@ pub(super) fn scan_and_convert_fake_stereo(
 
     // ── 阶段 2（锁外）：逐 Take 判定 ──
     let mut entries: Vec<crate::models::FakeStereoScanEntry> = Vec::with_capacity(targets.len());
-    let mut planned: Vec<(String, String, i32)> = Vec::new();
+    // (clip_id, take_id, target_mode, entries 下标) —— 下标用于写回成功后把
+    // 该 Take 的 `applied_mode` 从 None 翻成实际写入值。
+    let mut planned: Vec<(String, String, i32, usize)> = Vec::new();
     let mut missing_files: Vec<String> = Vec::new();
 
-    for target in &targets {
-        let outcome = crate::channel_policy::scan_source(
-            target.source_path.as_deref().map(Path::new),
-            target.source_channels,
-            target.region,
-            &policy,
-        );
+    // 判定按「源文件」分组批量执行（同组共享一次解码/探测 I/O）：同一音频被
+    // 多个 Take 引用是常态，逐 Take 独立判定会让解码量随引用数线性放大。
+    // 判定语义与逐条 scan_source 完全一致。
+    let scan_outcomes: Vec<crate::channel_policy::ChannelScanOutcome> = {
+        let requests: Vec<crate::channel_policy::ScanRequest<'_>> = targets
+            .iter()
+            .map(|target| crate::channel_policy::ScanRequest {
+                source_path: target.source_path.as_deref().map(Path::new),
+                source_channels: target.source_channels,
+                region: target.region,
+            })
+            .collect();
+        crate::channel_policy::scan_sources_grouped(&requests, &policy)
+    };
+
+    for (target_index, target) in targets.iter().enumerate() {
+        let outcome = scan_outcomes
+            .get(target_index)
+            .copied()
+            .unwrap_or(crate::channel_policy::ChannelScanOutcome::Unknown);
         if outcome == crate::channel_policy::ChannelScanOutcome::Unknown
             && target.source_path.is_some()
         {
@@ -1600,19 +1617,23 @@ pub(super) fn scan_and_convert_fake_stereo(
             }
         }
         let decision = outcome.decision(&policy);
-        let applied_mode = if dry_run { None } else { decision.target_mode() };
+        let entry_index = entries.len();
         if let Some(mode) = decision.target_mode() {
-            planned.push((target.clip_id.clone(), target.take_id.clone(), mode));
+            planned.push((target.clip_id.clone(), target.take_id.clone(), mode, entry_index));
         }
+        // `applied_mode` 只在阶段 3 真正写入后才置值（None = 未改动）：判定
+        // 说"该折叠"不等于"这次改了" —— Take 已处于目标模式时写回是 no-op，
+        // 报成"已应用"会误导扫描报告。
         entries.push(crate::models::FakeStereoScanEntry {
             clip_id: target.clip_id.clone(),
             take_id: target.take_id.clone(),
             name: target.name.clone(),
             verdict: outcome.as_str().to_string(),
-            applied_mode,
+            applied_mode: None,
         });
     }
 
+    // `dry_run` 时为"将会被折叠"的数量；实际写回路径以阶段 3 的真实改动数为准。
     let converted = planned.len();
 
     // `dry_run` 到此为止：只报告，不触碰时间轴（也不产生撤销步）。
@@ -1633,17 +1654,42 @@ pub(super) fn scan_and_convert_fake_stereo(
     // ── 阶段 3（短暂持锁）：一次性写回，整批一个撤销步 ──
     let mut changed_clips: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut active_changed_clips: Vec<String> = Vec::new();
+    let mut converted_actual = 0usize;
     {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-        state.checkpoint_timeline(&tl, crate::state::HistoryOp::TakeChannelMode);
-
-        for (clip_id, take_id, mode) in &planned {
+        // 撤销点是**惰性**的：第一次真正写入前才快照。判定为"该折叠"的 Take
+        // 可能已处于目标模式（写回是 no-op），全部 no-op 时不留空 undo 步。
+        let mut checkpointed = false;
+        for (clip_id, take_id, mode, entry_index) in &planned {
+            // 与 `set_clip_take_channel_mode` 同口径的"当前模式"预读：active
+            // take 以内存投影为消费权威（该方法内部会先物化投影再写），因此
+            // 对 active take 直接读投影字段，避免把投影里的新模式误判成
+            // no-op / 已是目标模式。
+            let target_raw = crate::channel_mode::TakeChannelMode::from_raw(*mode).raw();
+            let current_raw = match tl.clips.iter().find(|c| c.id == clip_id.as_str()) {
+                // active take 以投影字段为准（见上）。
+                Some(clip) if clip.active_take_id.as_deref() == Some(take_id.as_str()) => {
+                    Some(clip.channel_mode)
+                }
+                Some(clip) => clip.take(take_id).map(|t| t.channel_mode),
+                // clip 找不到时不跳过：交给 `set_clip_take_channel_mode` 报错。
+                None => None,
+            };
+            if current_raw == Some(target_raw) {
+                continue; // no-op：不写、不计入改动、applied_mode 保持 None。
+            }
+            if !checkpointed {
+                state.checkpoint_timeline(&tl, crate::state::HistoryOp::TakeChannelMode);
+                checkpointed = true;
+            }
             match tl.set_clip_take_channel_mode(clip_id, take_id, *mode) {
                 Ok(is_active) => {
                     changed_clips.insert(clip_id.clone());
                     if is_active {
                         active_changed_clips.push(clip_id.clone());
                     }
+                    entries[*entry_index].applied_mode = Some(*mode);
+                    converted_actual += 1;
                 }
                 Err(err) => log::warn!(
                     "[scan_fake_stereo] skip clip={clip_id} take={take_id}: {err}"
@@ -1651,14 +1697,16 @@ pub(super) fn scan_and_convert_fake_stereo(
             }
         }
 
-        for clip_id in &changed_clips {
-            invalidate_take_related_caches(clip_id);
-            if active_changed_clips.iter().any(|c| c == clip_id) {
-                maybe_schedule_formant_rebuild(&state, &tl, clip_id);
+        if converted_actual > 0 {
+            for clip_id in &changed_clips {
+                invalidate_take_related_caches(clip_id);
+                if active_changed_clips.iter().any(|c| c == clip_id) {
+                    maybe_schedule_formant_rebuild(&state, &tl, clip_id);
+                }
             }
-        }
 
-        state.audio_engine.update_timeline(tl.clone());
+            state.audio_engine.update_timeline(tl.clone());
+        }
     }
 
     // active take 的模式改变条件化后的分析输入 → 重调度音高分析（锁外）。
@@ -1680,14 +1728,14 @@ pub(super) fn scan_and_convert_fake_stereo(
     }
 
     log::info!(
-        "[scan_fake_stereo] scanned={} converted={converted}",
+        "[scan_fake_stereo] scanned={} converted={converted_actual}",
         entries.len()
     );
 
     crate::models::FakeStereoScanPayload {
         ok: true,
         scanned: entries.len(),
-        converted,
+        converted: converted_actual,
         entries,
         missing_files: if missing_files.is_empty() {
             None

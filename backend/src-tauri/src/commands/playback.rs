@@ -147,6 +147,11 @@ fn is_clip_pitch_analysis_ready(
     timeline: &crate::state::TimelineState,
     clip: &crate::state::Clip,
 ) -> bool {
+    // 【渲染输入稳定性卫兵（按根轨道）】所在根轨道的 `pitch_orig` 组装尚未
+    // 收敛时跳过：组装在 clip 音高分析落地过程中会多次改写曲线（未就绪 span
+    // 以零填充占位），而它是渲染键的输入 —— 未收敛时渲染的条目在收敛后必然
+    // 键失效（播放时 miss 重渲染，同一 clip 渲两遍）。收敛判定见
+    // root_pitch_assembly_pending；由 collect 侧按根记忆，避免逐 clip 重算。
     let Some(clip_root) = timeline.resolve_root_track_id(&clip.track_id) else {
         return false;
     };
@@ -161,6 +166,51 @@ fn is_clip_pitch_analysis_ready(
         entry.frame_period_ms.max(0.1),
     );
     clip_pitch.is_some()
+}
+
+/// 该根轨道的 `pitch_orig` 组装是否仍未收敛（渲染键还会漂移）。
+///
+/// 【为什么按根轨道而不是全局】clip 音高分析落地时，`maybe_schedule_pitch_orig`
+/// 会用各 clip 的缓存逐次重组装整条根曲线（未就绪 span 以零填充占位），全部
+/// 落地后的"全量命中"组装才会置位 `pitch_orig_key`（见 `maybe_schedule_pitch_orig`
+/// 的分支说明）—— 它因此是"该根曲线已到终值、渲染键不再漂移"的权威信号。
+/// 按根判定让**已收敛根轨道**的 clip 立即渲染（例如全缓存命中的工程打开即渲），
+/// 不为其他根轨道的分析整体推迟；未收敛根的 clip 由完成回调链条逐根解锁。
+///
+/// 前置条件与 `build_pitch_job` 的"是否需要组装"判定保持一致（不含其昂贵的
+/// mix timeline 构建）——该根根本没有组装任务时不视为 pending，否则会永久
+/// 卡住渲染。
+fn root_pitch_assembly_pending(
+    timeline: &crate::state::TimelineState,
+    root_track_id: &str,
+) -> bool {
+    let Some(track) = timeline.tracks.iter().find(|t| t.id == root_track_id) else {
+        return false;
+    };
+    let has_active_midi_clip = timeline.clips.iter().any(|c| {
+        timeline.resolve_root_track_id(&c.track_id).as_deref() == Some(root_track_id)
+            && !c.muted
+            && c.midi_note_data.is_some()
+    });
+    let currently_has_adjustment = timeline
+        .params_by_root_track
+        .get(root_track_id)
+        .map(|e| e.has_pitch_adjustment_active)
+        .unwrap_or(false);
+    if !track.compose_enabled && !has_active_midi_clip && !currently_has_adjustment {
+        return false;
+    }
+    if matches!(
+        track.pitch_analysis_algo,
+        crate::state::PitchAnalysisAlgo::None
+    ) {
+        return false;
+    }
+    timeline
+        .params_by_root_track
+        .get(root_track_id)
+        .map(|e| e.pitch_orig_key.is_none())
+        .unwrap_or(false)
 }
 
 pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde_json::Value {
@@ -681,6 +731,9 @@ fn render_single_clip(
             key_end_sec,
             clip.reversed && !loop_mode,
             clip.channel_mode,
+            // 本域输入已在上方做过声道条件化，与实时域（原始 stereo +
+            // 混音时施加模式）必须用 preconditioned 判别隔离。
+            true,
             // 离线 Loop 的处理对象是"回绕平铺 segment"，与实时域（完整文件
             // 自然顺序）不同 —— 用 tiled_wrap 域判别隔离，避免互相毒化缓存。
             loop_mode,
@@ -1376,7 +1429,18 @@ fn start_background_render_inner(
 
     let mut clips_to_render = collect_clips_needing_render(&timeline, sr);
     let unfiltered_total = clips_to_render.len();
-    clips_to_render.retain(|info| is_clip_pitch_analysis_ready(&timeline, &info.clip));
+    // 渲染输入稳定性卫兵（按根记忆收敛判定，见 root_pitch_assembly_pending）：
+    // 未收敛根的 clip 跳过并计入 pending，由完成回调链条在收敛后补触发渲染。
+    let mut root_settled: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+    clips_to_render.retain(|info| {
+        let root_key = timeline
+            .resolve_root_track_id(&info.clip.track_id)
+            .unwrap_or_default();
+        let settled = *root_settled
+            .entry(root_key.clone())
+            .or_insert_with(|| !root_pitch_assembly_pending(&timeline, &root_key));
+        settled && is_clip_pitch_analysis_ready(&timeline, &info.clip)
+    });
     let skipped_not_ready = unfiltered_total.saturating_sub(clips_to_render.len());
     BG_RENDER_PITCH_PENDING.store(skipped_not_ready > 0, Ordering::Release);
     clips_to_render.sort_by(|a, b| a.clip.start_sec.total_cmp(&b.clip.start_sec));

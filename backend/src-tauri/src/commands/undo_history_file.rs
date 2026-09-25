@@ -223,7 +223,12 @@ pub fn serialize_undo_history(state: &AppState) -> Option<Vec<u8>> {
 /// 读取伴生文件恢复操作记录（`open_project` 无条件尝试）。
 ///
 /// 返回是否成功恢复；失败时历史保持调用方的状态（打开工程时已清空）。
-pub fn load_undo_history(state: &AppState, project_path: &Path) -> bool {
+///
+/// `project_file_version`：工程文件的真实版本号。历史记录里嵌的是**保存那一刻**的
+/// 时间线快照，其版本迁移（如 v4→v5 的假立体声折叠）必须按工程自身的版本执行 ——
+/// 若一律按当前版本 finalize，从 v4 工程恢复的记录会跳过迁移，第一次撤销就把
+/// 未折叠的 take 写回时间线，并作为"用户显式决定"被后续保存永久固化。
+pub fn load_undo_history(state: &AppState, project_path: &Path, project_file_version: u32) -> bool {
     let Some(path) = find_undo_file(project_path) else {
         return false;
     };
@@ -255,7 +260,7 @@ pub fn load_undo_history(state: &AppState, project_path: &Path) -> bool {
                 let (finalized, _missing_files) = crate::project::finalize_timeline_for_session(
                     state,
                     project_path,
-                    crate::project::CURRENT_PROJECT_FILE_VERSION,
+                    project_file_version,
                 );
                 finalized
             });
@@ -437,7 +442,7 @@ mod tests {
         // 全新状态读回：注记原样回来，且**不做任何单位换算**（写进去是帧，读出来还是帧）。
         let restored = AppState::default();
         assert!(
-            super::load_undo_history(&restored, &project),
+            super::load_undo_history(&restored, &project, crate::project::CURRENT_PROJECT_FILE_VERSION),
             "应能从伴生文件恢复历史"
         );
         {
@@ -489,7 +494,7 @@ mod tests {
 
         let restored = AppState::default();
         assert!(
-            super::load_undo_history(&restored, &project),
+            super::load_undo_history(&restored, &project, crate::project::CURRENT_PROJECT_FILE_VERSION),
             "v1 文件仍应被接受（否则用户整份撤销历史作废）"
         );
         {
@@ -532,7 +537,7 @@ mod tests {
 
         let restored = AppState::default();
         assert!(
-            !super::load_undo_history(&restored, &project),
+            !super::load_undo_history(&restored, &project, crate::project::CURRENT_PROJECT_FILE_VERSION),
             "更高版本的文件不得被当成当前格式读入"
         );
         let _ = std::fs::remove_dir_all(&dir);

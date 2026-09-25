@@ -5631,12 +5631,12 @@ mod tests {
         let mut timeline = TimelineState::default();
         let track = timeline.add_track(Some("A".into()), None, None);
         let other = timeline.add_track(Some("B".into()), None, None);
-        let a0 = timeline.add_clip(Some(track.clone()), Some("a0".into()), Some(1.0), Some(2.0), None);
-        let a1 = timeline.add_clip(Some(track.clone()), Some("a1".into()), Some(8.0), Some(1.0), None);
-        let a2 = timeline.add_clip(Some(track.clone()), Some("a2".into()), Some(12.0), Some(2.0), None);
-        let a3 = timeline.add_clip(Some(track.clone()), Some("a3".into()), Some(14.5), Some(0.5), None);
+        let _a0 = timeline.add_clip(Some(track.clone()), Some("a0".into()), Some(1.0), Some(2.0), None);
+        let _a1 = timeline.add_clip(Some(track.clone()), Some("a1".into()), Some(8.0), Some(1.0), None);
+        let _a2 = timeline.add_clip(Some(track.clone()), Some("a2".into()), Some(12.0), Some(2.0), None);
+        let _a3 = timeline.add_clip(Some(track.clone()), Some("a3".into()), Some(14.5), Some(0.5), None);
         // 其他轨道不受影响。
-        let b0 = timeline.add_clip(Some(other.clone()), Some("b0".into()), Some(8.0), Some(1.0), None);
+        let _b0 = timeline.add_clip(Some(other.clone()), Some("b0".into()), Some(8.0), Some(1.0), None);
 
         let start_of = |tl: &TimelineState, name: &str| {
             tl.clips
@@ -8674,17 +8674,38 @@ impl TimelineState {
         policy: &crate::config::ChannelImportPolicy,
     ) -> usize {
         let mut changed = 0usize;
-        for clip in &mut self.clips {
-            // 先全部判定（可能解码），再统一写回：避免在同一循环里混着 IO 与
-            // 借用，也让"哪些被改"一目了然。
-            let decisions: Vec<crate::channel_policy::ChannelDecision> = clip
-                .takes
+        // 先全量判定（可能解码），再统一写回：避免在同一循环里混着 IO 与
+        // 借用，也让"哪些被改"一目了然。
+        //
+        // 判定按「源文件」分组（`scan_sources_grouped`）：同一音频被多个
+        // Clip/Take 引用是常态（人声切片、多轨共享伴奏），逐 Take 独立判定
+        // 会对同一文件反复解码 —— 整工程迁移的解码量随引用数线性放大。
+        // 分组后每文件一次 I/O；判定语义（逐 Take 消费区间独立判定）不变。
+        let take_refs: Vec<&ClipTake> = self.clips.iter().flat_map(|c| c.takes.iter()).collect();
+        let decisions: Vec<crate::channel_policy::ChannelDecision> = {
+            let requests: Vec<crate::channel_policy::ScanRequest<'_>> = take_refs
                 .iter()
-                .map(|take| crate::channel_policy::precompute_take_decision(take, policy))
+                .map(|take| crate::channel_policy::ScanRequest {
+                    source_path: take.source_path.as_deref().map(Path::new),
+                    source_channels: take.source_channels,
+                    region: crate::channel_policy::take_consumption_region(take),
+                })
                 .collect();
+            crate::channel_policy::scan_sources_grouped(&requests, policy)
+                .into_iter()
+                .map(|outcome| outcome.decision(policy))
+                .collect()
+        };
 
+        let mut cursor = 0usize;
+        for clip in &mut self.clips {
             let mut clip_changed = false;
-            for (take, decision) in clip.takes.iter_mut().zip(decisions) {
+            for take in clip.takes.iter_mut() {
+                let decision = decisions
+                    .get(cursor)
+                    .copied()
+                    .unwrap_or(crate::channel_policy::ChannelDecision::Keep);
+                cursor += 1;
                 if crate::channel_policy::apply_decision(take, decision) {
                     clip_changed = true;
                     changed += 1;

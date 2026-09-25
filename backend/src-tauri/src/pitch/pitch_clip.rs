@@ -155,6 +155,7 @@ fn global_inflight() -> &'static Mutex<HashSet<String>> {
     GLOBAL_CLIP_PITCH_INFLIGHT.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+
 fn hz_to_midi(hz: f64) -> f32 {
     if !(hz.is_finite() && hz > 1e-6) {
         return 0.0;
