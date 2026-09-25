@@ -23,7 +23,6 @@ import {
     openPanelInLayout,
     type DockPlacement,
     normalizeFloatMode,
-    normalizeFloatScreen,
     normalizeTabPosition,
 } from "./dockSchema";
 import {
@@ -181,10 +180,18 @@ const dockSlice = createSlice({
             };
         },
         /** 打开面板（复用已关闭的窗体记录，或新建）。 */
-        openPanel(state, action: PayloadAction<{ panelId: string; placement?: DockPlacement }>) {
-            const { panelId, placement } = action.payload;
+        openPanel(
+            state,
+            action: PayloadAction<{
+                panelId: string;
+                placement?: DockPlacement;
+                /** 本次打开的指定浮窗几何（命令层按触发控件算出）。 */
+                float?: DockFloatGeometry | null;
+            }>,
+        ) {
+            const { panelId, placement, float } = action.payload;
             const existing = findVisibleFormForPanel(state.layout, panelId);
-            state.layout = openPanelInLayout(state.layout, panelId, placement);
+            state.layout = openPanelInLayout(state.layout, panelId, placement, float ?? null);
             state.activeFormId = existing ?? findVisibleFormForPanel(state.layout, panelId);
         },
         closeForm(state, action: PayloadAction<string>) {
@@ -398,22 +405,6 @@ const dockSlice = createSlice({
                 },
             };
         },
-        /** 记住独立窗口的屏幕坐标（下次拆出时回到同一位置）。 */
-        setFormFloatScreen(
-            state,
-            action: PayloadAction<{ formId: string; screen: { x: number; y: number } | null }>,
-        ) {
-            const { formId, screen } = action.payload;
-            const form = state.layout.forms[formId];
-            if (!form) return;
-            state.layout = {
-                ...state.layout,
-                forms: {
-                    ...state.layout.forms,
-                    [formId]: { ...form, floatScreen: normalizeFloatScreen(screen) },
-                },
-            };
-        },
         /** 标签行位置（布局级偏好，随布局一起持久化）。 */
         setTabPosition(state, action: PayloadAction<DockTabPosition>) {
             state.layout = { ...state.layout, tabPosition: normalizeTabPosition(action.payload) };
@@ -549,7 +540,6 @@ export const {
     toggleTabsetCollapsed,
     setGutterSize,
     setFormFloatMode,
-    setFormFloatScreen,
     setTabPosition,
     renameForm,
     saveDockPreset,

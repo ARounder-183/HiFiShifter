@@ -24,6 +24,12 @@ function assert(condition: boolean, label: string): void {
     if (!condition) throw new Error(label);
 }
 
+function assertEqual<T>(actual: T, expected: T, label: string): void {
+    const a = JSON.stringify(actual);
+    const b = JSON.stringify(expected);
+    if (a !== b) throw new Error(`${label}: expected ${b}, received ${a}`);
+}
+
 function rectOf(layout: DockLayout, formId: string, viewport: { w: number; h: number }) {
     const float = layout.forms[formId]?.float;
     if (!float) throw new Error(`${formId}: no float geometry`);
@@ -67,5 +73,22 @@ test("components/dock/registerBuiltinPanels.test.ts default float placements", (
         const gap = notebook.x - (undo.x + undo.w);
         assert(gap >= 24, `expected a >=24px gap, got ${gap} at ${viewport.w}x${viewport.h}`);
         assert(notebook.y === undo.y, "the two default floats stay bottom-aligned");
+    }
+
+    // 4) 由某个控件打开时（例如从撤销/重做按钮打开操作记录）：用命令层算出的
+    //    几何，而不是声明的锚点 —— 面板落在触发控件旁边。
+    {
+        const nearRect = { x: 300, y: 40, w: 420, h: 420, anchor: null as null };
+        const opened = openPanelInLayout(base, PANEL_UNDO_HISTORY, undefined, nearRect);
+        assertEqual(
+            opened.forms[PANEL_UNDO_HISTORY]?.float,
+            nearRect,
+            "an explicit geometry wins over the declared anchor",
+        );
+        assertEqual(
+            opened.forms[PANEL_UNDO_HISTORY]?.float?.anchor ?? null,
+            null,
+            "a concrete geometry clears the anchor",
+        );
     }
 });

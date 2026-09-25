@@ -2,6 +2,7 @@ import { test } from "vitest";
 
 import {
     clampFloatRect,
+    resolveFloatNearRect,
     resolveFloatRect,
     dropPreviewRect,
     dropZoneToSide,
@@ -259,6 +260,38 @@ test("features/dock/dockDropTarget.test.ts scripted checks", async () => {
             ),
             { x: 24, y: 24, w: 420, h: 420 },
             "an offset still clamps to the margin on a degenerate viewport",
+        );
+    }
+
+    // ── 靠近触发控件打开：落在控件正下方（放不下则翻到上方）──────────
+    //
+    // 用于"从撤销/重做按钮打开操作记录"：按钮在顶部工具条，面板落在它下方；
+    // 靠近视口底部时翻到上方；贴右缘时左移夹紧。
+    {
+        const viewport = { w: 1280, h: 720 };
+        const button = { x: 300, y: 40, w: 24, h: 24 };
+        assertEqual(
+            resolveFloatNearRect(button, { w: 420, h: 420 }, viewport),
+            { x: 300, y: 72, w: 420, h: 420 },
+            "a panel opened from a top toolbar button lands just below it",
+        );
+        // 下方空间不足（按钮在底部）→ 翻到上方。
+        assertEqual(
+            resolveFloatNearRect({ x: 300, y: 660, w: 24, h: 24 }, { w: 420, h: 420 }, viewport),
+            { x: 300, y: 232, w: 420, h: 420 },
+            "flips above when there is no room below",
+        );
+        // 贴右缘：水平夹回视口内（保留 8px 边距）。
+        assertEqual(
+            resolveFloatNearRect({ x: 1260, y: 40, w: 24, h: 24 }, { w: 420, h: 420 }, viewport),
+            { x: 852, y: 72, w: 420, h: 420 },
+            "clamps horizontally into the viewport",
+        );
+        // 比视口还高的面板：贴底，至少让标题条可见（而不是溢出到负坐标）。
+        assertEqual(
+            resolveFloatNearRect({ x: 100, y: 700, w: 24, h: 24 }, { w: 420, h: 2000 }, viewport),
+            { x: 100, y: 8, w: 420, h: 704 },
+            "an oversized panel is shrunk and kept inside",
         );
     }
 });

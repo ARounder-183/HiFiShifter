@@ -153,12 +153,12 @@ export interface DockForm {
      */
     floatMode?: DockFloatMode;
     /**
-     * 独立窗口在**屏幕坐标**下的位置（`floatMode === "osWindow"` 时有效）。
+     * 【已删除：`floatScreen`】独立窗口不再单独记录屏幕坐标。
      *
-     * 尺寸仍用 `float.w/h`（浮窗尺寸的语义两处一致）；位置不能用 `float.x/y`
-     * —— 那是主窗口视口坐标，跨窗口后毫无意义。
+     * 独立窗口就是同一个浮窗的另一种呈现：拆出去时按 `float` 换算成屏幕位置（原地
+     * 转换），关掉时再把窗口几何换算回 `float`（见 `detachedGeometry`）。两份位置
+     * 记录必然要同步，也必然会有不一致的时候 —— 一份就够了。
      */
-    floatScreen?: { x: number; y: number } | null;
     /** 面板私有状态（随布局持久化，未来 API 面板可直接受益）。 */
     props?: Record<string, unknown>;
 }

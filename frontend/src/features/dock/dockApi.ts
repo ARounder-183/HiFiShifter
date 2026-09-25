@@ -16,6 +16,8 @@
 
 import type { AppDispatch, RootState } from "../../app/store";
 import { reportFrontendError } from "../../services/frontendErrorLog";
+import { translateOutsideReact } from "../../i18n/I18nProvider";
+import { clampFloatRect, resolveFloatNearRect, resolveFloatRect } from "./dockDropTarget";
 import { findMainTabset, normalizeDockLayout } from "./dockSchema";
 import { collectTabsets, isFormVisible } from "./dockTree";
 import { getPanel, listPanels } from "./panelRegistry";
@@ -32,28 +34,69 @@ import {
     setDockLayout,
     setFloatGeometry,
     setFormFloatMode,
-    setFormFloatScreen,
     toggleMaximizeActive,
 } from "./dockSlice";
 import {
+    clampScreenRectToMonitor,
+    floatRectToWindowRect,
+    windowRectToFloatRect,
+    type GeometryRect,
+    type MainWindowFrame,
+} from "./detachedGeometry";
+import {
     closeDetachedWindow,
     openDetachedWindow,
-    readDetachedWindowGeometry,
+    readDetachedClientRect,
+    readMainMonitorRect,
+    readMainWindowFrame,
     watchDetachedWindow,
+    type DetachedClientRect,
 } from "./detachedWindow";
-import type { DockLayout } from "./dockTypes";
+import type { DockFloatGeometry, DockLayout } from "./dockTypes";
 
 type GetState = () => RootState;
 
-/** 打开面板（已打开则聚焦它）。 */
-export function openPanelById(dispatch: AppDispatch, getState: GetState, panelId: string): void {
+/**
+ * 打开面板（已打开则聚焦它）。
+ *
+ * @param near 触发本次打开的控件矩形（主窗口客户区坐标）。声明了 `openAsFloating`
+ *   的面板会优先落在它旁边 —— 见 `resolveFloatNearRect`。
+ */
+export function openPanelById(
+    dispatch: AppDispatch,
+    getState: GetState,
+    panelId: string,
+    near?: GeometryRect | null,
+): void {
     const layout = getState().dock.layout;
     const formId = visibleFormFor(layout, panelId);
     if (formId) {
         dispatch(focusForm(formId));
         return;
     }
-    dispatch(openPanel({ panelId }));
+    dispatch(openPanel({ panelId, float: resolveOpenFloatGeometry(panelId, near) }));
+}
+
+/**
+ * 按"从哪个控件打开"算出本次浮出的几何（不需要时返回 null，交给面板声明的锚点）。
+ *
+ * 【为什么放在命令层】要读视口尺寸（`window.inner*`）—— reducer 必须保持纯函数，
+ * 这类环境读取只应出现在命令式 API 里。
+ */
+function resolveOpenFloatGeometry(
+    panelId: string,
+    near?: GeometryRect | null,
+): DockFloatGeometry | null {
+    if (!near) return null;
+    const spec = getPanel(panelId)?.openAsFloating;
+    if (!spec || typeof window === "undefined") return null;
+    const rect = resolveFloatNearRect(
+        near,
+        { w: spec.width, h: spec.height },
+        { w: window.innerWidth, h: window.innerHeight },
+    );
+    // 具体坐标 ⇒ 锚点必须清掉，否则渲染期会被"右下角"覆盖回去。
+    return { ...rect, anchor: null };
 }
 
 /** 显隐切换：可见则关闭，不可见则打开。 */
@@ -171,21 +214,35 @@ export async function detachFormToWindow(
     const definition = getPanel(form.panelId);
     if (!definition?.detachable) return { ok: false, reason: "panel-not-detachable" };
 
-    const title = form.title ?? definition.titleKey;
-    const width = form.float?.w ?? definition.defaultWidth;
-    const height = form.float?.h ?? definition.defaultHeight;
+    // 标题必须**翻译后**交给窗口：`titleKey` 是 i18n 键，直接塞进系统标题栏会显示成
+    // "undo_history_title"（用户报告过）。窗体被重命名过时用用户的文本。
+    const title = form.title ?? translateOutsideReact(definition.titleKey);
+
+    // 【原地转换】独立窗口落在浮窗**当前**位置：先把浮窗几何解析成具体矩形（带锚点时
+    // 按视口推导，否则 x/y 只是占位值），再换算成屏幕坐标。
+    const frame = await readMainWindowFrame();
+    const viewport = { w: frame?.clientWidth ?? 0, h: frame?.clientHeight ?? 0 };
+    const float = resolveFloatRect(
+        form.float ?? {
+            x: 0,
+            y: 0,
+            w: definition.defaultWidth,
+            h: definition.defaultHeight,
+        },
+        viewport.w > 0 ? viewport : { w: 1280, h: 720 },
+    );
+    const width = float.w;
+    const height = float.h;
 
     // 先落地布局：主窗口立刻停止渲染它，独立窗口随后接管。
+    // 只写尺寸、**不写位置**：位置仍由浮窗几何（含锚点）表达，独立窗口只是它的另一种
+    // 呈现；写死 x/y 会把"跟随右下角"的锚点语义提前清掉（用户原地拆出再关回来时，
+    // 浮窗本该继续跟随窗口尺寸）。
     dispatch(floatForm({ formId, geometry: { w: width, h: height } }));
     dispatch(setFormFloatMode({ formId, floatMode: "osWindow" }));
 
-    const result = await openDetachedWindow({
-        formId,
-        title,
-        width,
-        height,
-        screen: form.floatScreen ?? null,
-    });
+    const screen = await resolveDetachedScreenPosition(float, frame);
+    const result = await openDetachedWindow({ formId, title, width, height, screen });
     if (!result.ok) {
         // 回退：保持进程内浮窗（用户仍能看到并使用它）。
         // **必须留日志**：静默回退让"窗口没开出来"看起来像"功能没实现"（实际发生过）。
@@ -201,6 +258,26 @@ export async function detachFormToWindow(
     return { ok: true };
 }
 
+/**
+ * 把浮窗矩形换算成独立窗口的屏幕位置（外框坐标），并夹进显示器范围。
+ *
+ * 换算不出来（非 Tauri 环境、查询失败）时返回 null —— 此时窗口交给系统默认摆放，
+ * 好过用一个猜出来的坐标。
+ */
+async function resolveDetachedScreenPosition(
+    float: GeometryRect,
+    frame: MainWindowFrame | null,
+): Promise<{ x: number; y: number } | null> {
+    if (frame === null) return null;
+    const rect = floatRectToWindowRect(float, frame);
+    const monitor = await readMainMonitorRect();
+    if (monitor === null) return { x: rect.x, y: rect.y };
+    // 主窗口贴着屏幕边缘（或跨显示器）时，换算结果可能整块落在显示器之外 —— 那样
+    // 用户会得到一个看不见也点不到的窗口，而且它的位置会被记下来，下次依旧不可达。
+    const clamped = clampScreenRectToMonitor(rect, monitor);
+    return { x: clamped.x, y: clamped.y };
+}
+
 /** 把独立窗口里的窗体收回主窗口（停靠回原来的位置由布局决定）。 */
 export async function reclaimDetachedForm(
     dispatch: AppDispatch,
@@ -209,10 +286,10 @@ export async function reclaimDetachedForm(
 ): Promise<void> {
     const form = getState().dock.layout.forms[formId];
     if (!form || form.floatMode !== "osWindow") return;
-    const geometry = await readDetachedWindowGeometry(formId);
+    // 关窗前抓一次几何：用户可能刚移动/缩放完就直接关掉了窗口（轮询还没轮到）。
+    const clientRect = await readDetachedClientRect(formId);
     await closeDetachedWindow(formId);
-    // 关窗前最后再抓一次几何：用户可能刚移动/缩放完就直接关掉了窗口（轮询还没轮到）。
-    if (geometry) persistDetachedGeometry(dispatch, getState, formId, geometry);
+    if (clientRect) await persistDetachedClientRect(dispatch, getState, formId, clientRect);
     dispatch(setFormFloatMode({ formId, floatMode: "inApp" }));
 }
 
@@ -232,6 +309,8 @@ export async function restoreDetachedWindows(
         const form = layout.forms[formId];
         return form?.floating === true && form.floatMode === "osWindow";
     });
+    // 主窗口几何读一次即可：整轮恢复期间它不会变，而换算每个窗口都要用。
+    const frame = await readMainWindowFrame();
     for (const formId of detached) {
         const form = layout.forms[formId];
         const definition = getPanel(form.panelId);
@@ -242,10 +321,25 @@ export async function restoreDetachedWindows(
         }
         const result = await openDetachedWindow({
             formId,
-            title: form.title ?? definition.titleKey,
+            title: form.title ?? translateOutsideReact(definition.titleKey),
             width: form.float?.w ?? definition.defaultWidth,
             height: form.float?.h ?? definition.defaultHeight,
-            screen: form.floatScreen ?? null,
+            // 启动恢复：位置由浮窗几何换算（独立窗口不单独记位置，见
+            // `persistDetachedClientRect`）。
+            screen: await resolveDetachedScreenPosition(
+                resolveFloatRect(
+                    form.float ?? {
+                        x: 0,
+                        y: 0,
+                        w: definition.defaultWidth,
+                        h: definition.defaultHeight,
+                    },
+                    frame === null
+                        ? { w: 1280, h: 720 }
+                        : { w: frame.clientWidth, h: frame.clientHeight },
+                ),
+                frame,
+            ),
         });
         if (!result.ok) {
             reportFrontendError(
@@ -278,45 +372,57 @@ function startWatching(dispatch: AppDispatch, getState: GetState, formId: string
                 // 早退判定也保证重复回调不会重复 dispatch。
                 void reclaimDetachedForm(dispatch, getState, formId);
             },
-            onGeometry: (geometry) => persistDetachedGeometry(dispatch, getState, formId, geometry),
+            onClientRect: (clientRect) =>
+                void persistDetachedClientRect(dispatch, getState, formId, clientRect),
         }),
     );
 }
 
 /**
- * 把独立窗口当前的屏幕几何写回布局（供下次重新开启时恢复）。
+ * 把独立窗口当前的**客户区**几何换算成浮窗几何写回布局。
+ *
+ * 【为什么写回浮窗而不是另记一份屏幕坐标】独立窗口就是同一个浮窗的另一种呈现：
+ * 关掉它时浮窗要接住窗口的位置与大小（原地转换），因此这里写的就是浮窗的 x/y/w/h，
+ * 不引入第二份位置记录（两份记录必然要同步，也必然会有不一致的时候）。
  *
  * 【为什么由主窗口的轮询来写】用户拖动/缩放独立窗口时主窗口收不到事件（跨窗口事件
  * 语义不可靠，见 `watchDetachedWindow`）；轮询上报是唯一稳定时机。写入前先比一次，
- * 位置与尺寸都只在**真的变了**（>1px）时才 dispatch —— 否则每秒都会改一次布局，
- * 把持久化与订阅者都惊动一遍。
+ * 只在**真的变了**（>1px）时才 dispatch —— 否则每秒都会改一次布局，把持久化与
+ * 订阅者都惊动一遍。
  */
-function persistDetachedGeometry(
+async function persistDetachedClientRect(
     dispatch: AppDispatch,
     getState: GetState,
     formId: string,
-    geometry: { x: number; y: number; w: number; h: number },
-): void {
-    const form = getState().dock.layout.forms[formId];
+    clientRect: DetachedClientRect,
+): Promise<void> {
     // 已经被回收（或不再处于独立窗口）时不再写：晚到的轮询结果会把刚恢复的
     // 进程内浮窗位置改掉。
-    if (!form || form.floatMode !== "osWindow") return;
-    const screen = form.floatScreen ?? null;
-    const moved =
-        screen === null ||
-        Math.abs(screen.x - geometry.x) >= 1 ||
-        Math.abs(screen.y - geometry.y) >= 1;
-    if (moved) {
-        dispatch(setFormFloatScreen({ formId, screen: { x: geometry.x, y: geometry.y } }));
+    if (getState().dock.layout.forms[formId]?.floatMode !== "osWindow") return;
+    const frame = await readMainWindowFrame();
+    if (frame === null) return;
+    const raw = windowRectToFloatRect(clientRect, frame);
+    // 【必须夹紧】浮窗必须留在主窗口客户区内（至少标题条可达），否则用户会把面板
+    // 拖到"点不到"的地方，而且这个位置会被持久化，下次打开依旧不可达。
+    const clamped = clampFloatRect(raw, { w: frame.clientWidth, h: frame.clientHeight }, 28);
+    const current = getState().dock.layout.forms[formId]?.float ?? null;
+    // 比较的是**解析后**的矩形：带锚点时 `float.x/y` 只是占位值，直接比它会每帧都
+    // 判定为"变了"，于是第一轮轮询就把锚点清掉 —— 原地拆出再关回来时浮窗本该继续
+    // 跟随窗口尺寸（只有用户真的挪动了窗口，才应该改成具体坐标）。
+    const resolved =
+        current === null
+            ? null
+            : resolveFloatRect(current, { w: frame.clientWidth, h: frame.clientHeight });
+    if (
+        resolved !== null &&
+        Math.abs(resolved.x - clamped.x) < 1 &&
+        Math.abs(resolved.y - clamped.y) < 1 &&
+        Math.abs(resolved.w - clamped.w) < 1 &&
+        Math.abs(resolved.h - clamped.h) < 1
+    ) {
+        return;
     }
-    const size = form.float ?? null;
-    const resized =
-        size === null || Math.abs(size.w - geometry.w) >= 1 || Math.abs(size.h - geometry.h) >= 1;
-    if (resized) {
-        // 尺寸也记进 `float`：它同时是"下次拆出去时窗口开多大"与"收回来时进程内浮窗
-        // 多大"的基准（与拖拽拆出时的约定一致，见 `beginTabDrag` 的说明）。
-        dispatch(setFloatGeometry({ formId, geometry: { w: geometry.w, h: geometry.h } }));
-    }
+    dispatch(setFloatGeometry({ formId, geometry: clamped }));
 }
 
 /** 某个窗体当前是否在独立窗口中。 */

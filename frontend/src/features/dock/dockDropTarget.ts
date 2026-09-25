@@ -180,6 +180,46 @@ export function resolveFloatRect(
 }
 
 /**
+ * 把"从某个控件打开"的浮窗放到该控件附近（默认正下方，下方放不下则翻到上方）。
+ *
+ * 【为什么需要】由界面内的按钮打开的辅助面板（如从撤销/重做按钮打开"操作记录"），
+ * 用户刚点的按钮就是他的注意力所在 —— 窗口出现在按钮旁边最自然；直接丢到屏幕角落
+ * 会让人以为没打开。水平与控件左缘对齐，四边都夹进视口内。
+ *
+ * @param near 触发打开的控件矩形（客户区坐标）。
+ * @param size 浮窗期望尺寸（放不下时会缩小）。
+ * @param viewport 主窗口客户区尺寸。
+ * @param gapPx 与控件之间的间距。
+ * @param marginPx 与视口边缘的最小间距。
+ */
+export function resolveFloatNearRect(
+    near: DockRect,
+    size: { w: number; h: number },
+    viewport: { w: number; h: number },
+    gapPx = 8,
+    marginPx = 8,
+): DockRect {
+    const w = Math.min(size.w, Math.max(200, viewport.w - marginPx * 2));
+    const h = Math.min(size.h, Math.max(120, viewport.h - marginPx * 2));
+    const below = near.y + near.h + gapPx;
+    const above = near.y - gapPx - h;
+    const fitsBelow = below + h <= viewport.h - marginPx;
+    const fitsAbove = above >= marginPx;
+    // 两侧都放不下（控件几乎占满视口高度）：贴视口底部，至少让标题条可见。
+    const y = fitsBelow ? below : fitsAbove ? above : viewport.h - h - marginPx;
+    return {
+        x: Math.round(
+            Math.min(Math.max(marginPx, near.x), Math.max(marginPx, viewport.w - w - marginPx)),
+        ),
+        y: Math.round(
+            Math.min(Math.max(marginPx, y), Math.max(marginPx, viewport.h - h - marginPx)),
+        ),
+        w: Math.round(w),
+        h: Math.round(h),
+    };
+}
+
+/**
  * 浮动窗吸附：靠近视口边缘或其它浮动窗边时对齐。
  *
  * 返回吸附后的位置；`threshold` 为 0 时等价于不吸附（直接返回原值）。

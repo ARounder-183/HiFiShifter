@@ -67,15 +67,6 @@ export function normalizeFloatMode(value: unknown): DockFloatMode {
 }
 
 /** 归一化独立窗口的屏幕坐标；非法值返回 null（下次打开时按默认位置摆放）。 */
-export function normalizeFloatScreen(value: unknown): { x: number; y: number } | null {
-    if (!value || typeof value !== "object") return null;
-    const raw = value as { x?: unknown; y?: unknown };
-    const x = Number(raw.x);
-    const y = Number(raw.y);
-    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
-    return { x: Math.round(x), y: Math.round(y) };
-}
-
 /** 归一化标签行位置（未知值回退到默认 `"bottom"`）。 */
 export function normalizeTabPosition(value: unknown): DockTabPosition {
     return value === "top" ? "top" : "bottom";
@@ -298,7 +289,6 @@ export function normalizeDockLayout(raw: unknown): DockLayout {
         next.floating =
             form.floating === true || (form.floating === undefined && next.float !== null);
         next.floatMode = normalizeFloatMode(form.floatMode);
-        next.floatScreen = normalizeFloatScreen(form.floatScreen);
         if (typeof form.title === "string" && form.title.trim()) next.title = form.title;
         if (form.props && typeof form.props === "object") {
             next.props = form.props as Record<string, unknown>;
@@ -378,7 +368,6 @@ function normalizePresets(raw: unknown, knownForms: Set<string>): Record<string,
             next.floating =
                 form.floating === true || (form.floating === undefined && next.float !== null);
             next.floatMode = normalizeFloatMode(form.floatMode);
-            next.floatScreen = normalizeFloatScreen(form.floatScreen);
             if (typeof form.title === "string" && form.title.trim()) next.title = form.title;
             forms[formId] = next;
         }
@@ -515,11 +504,16 @@ export function placeForm(layout: DockLayout, formId: string, placement: DockPla
  *
  * 单例面板已可见时原样返回（调用方负责聚焦/切标签），避免重复打开产生第二个
  * 时间轴 —— 那会让用户彻底困惑。
+ *
+ * @param floatGeometry 本次打开的**指定浮窗几何**（由命令层按触发控件算出，见
+ *   `resolveFloatNearRect`）。给了它就按它浮出，否则用面板声明的锚点。视口尺寸的
+ *   读取因此留在命令层，reducer 保持纯函数。
  */
 export function openPanelInLayout(
     layout: DockLayout,
     panelId: string,
     placement?: DockPlacement,
+    floatGeometry?: DockFloatGeometry | null,
 ): DockLayout {
     const definition = getPanel(panelId);
     if (!definition) return layout;
@@ -538,7 +532,10 @@ export function openPanelInLayout(
     // 角上，而不是并入某个标签组 —— "随手记"面板应当浮在手边，不该挤进布局里占一格。
     // 已经有浮窗几何（上次的尺寸/位置）就复用，只有从未浮动过才用声明的默认值。
     if (definition.openAsFloating) {
-        const float = previous?.float ?? resolveOpenFloat(definition.openAsFloating);
+        // 【指定几何优先】命令层按"从哪个控件打开"算出的几何最贴近用户意图（例如
+        // 从撤销按钮打开操作记录 → 落在按钮下方）；其次复用上次的浮窗几何。
+        const float =
+            floatGeometry ?? previous?.float ?? resolveOpenFloat(definition.openAsFloating);
         forms[formId] = { ...(previous ?? { id: formId, panelId }), float, floating: true };
         return {
             ...layout,

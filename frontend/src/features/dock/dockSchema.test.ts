@@ -265,7 +265,11 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
         assertEqual(tooSmall.gutters.timelineTrackHeaderPx, 120, "gutter clamped low");
     }
 
-    // ── 归一化：独立窗口形态与屏幕坐标 ────────────────────────────
+    // ── 归一化：独立窗口形态 ──────────────────────────────────────
+    //
+    // 【为什么这里不再有"屏幕坐标"】独立窗口不单独记录屏幕位置：它就是同一个浮窗的
+    // 另一种呈现，位置由 `float` 换算（见 `detachedGeometry`）。旧布局里残留的
+    // `floatScreen` 字段被忽略（归一化只挑它认识的字段）。
     {
         const withDetach = normalizeDockLayout({
             schema: 1,
@@ -277,6 +281,8 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
                     panelId: "notebook",
                     floating: true,
                     floatMode: "osWindow",
+                    float: { x: 120, y: 60, w: 460, h: 420 },
+                    // 早期版本留下的字段：必须被忽略而不是复活。
                     floatScreen: { x: 120.4, y: -30.6 },
                 },
             },
@@ -284,14 +290,13 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
             floatOrder: ["notebook"],
         });
         assertEqual(withDetach.forms.notebook?.floatMode, "osWindow", "独立窗口形态随布局持久化");
-        assertEqual(withDetach.forms.notebook?.floatScreen?.x, 120, "屏幕坐标取整保留");
         assertEqual(
-            withDetach.forms.notebook?.floatScreen?.y,
-            -31,
-            "负坐标（左侧/上方显示器）保留",
+            withDetach.forms.notebook?.float,
+            { x: 120, y: 60, w: 460, h: 420, anchor: null },
+            "位置只由浮窗几何记录（残留的 floatScreen 被忽略）",
         );
 
-        // 未知形态 / 非法坐标回退：形态回 inApp、坐标清空。
+        // 未知形态回退：回 inApp。
         const garbage = normalizeDockLayout({
             schema: 1,
             tree: { t: "tabset", id: "z1", tabs: ["timeline"], active: "timeline" },
@@ -302,14 +307,12 @@ test("features/dock/dockSchema.test.ts scripted checks", async () => {
                     panelId: "notebook",
                     floating: true,
                     floatMode: "bogus",
-                    floatScreen: { x: "nope", y: null },
                 },
             },
             order: ["timeline", "notebook"],
             floatOrder: ["notebook"],
         });
         assertEqual(garbage.forms.notebook?.floatMode, "inApp", "未知形态回退为进程内浮层");
-        assertEqual(garbage.forms.notebook?.floatScreen ?? null, null, "非法坐标清空");
 
         // 标签行位置：默认下方，显式 top 保留。
         assertEqual(withDetach.tabPosition, "bottom", "标签行默认在下方");

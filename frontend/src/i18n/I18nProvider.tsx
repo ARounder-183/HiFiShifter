@@ -82,3 +82,21 @@ export function useI18n() {
     }
     return context;
 }
+
+/**
+ * 组件之外按当前语言取文案（命令式 API、窗口创建等）。
+ *
+ * 【为什么不能直接用 `useI18n`】这些调用点不是组件：例如创建独立窗口时要把面板
+ * 标题交给**系统标题栏**，而 `titleKey` 是 i18n 键 —— 直接塞过去就会显示成
+ * "undo_history_title"（用户报告过）。语言取自与 Provider 初值**同一来源**
+ * （localStorage，`setLocale` 会写；缺省回落到浏览器语言），两边因此不会分叉。
+ *
+ * 查不到的键原样返回：宁可显示键名，也不要显示一个空白标题。
+ */
+export function translateOutsideReact(key: string): string {
+    // 无浏览器环境（单测、SSR 探针）时 `localStorage` 不存在：回落到英文词典，
+    // 而不是抛错 —— 取一条文案不该让调用方崩掉。
+    const locale: Locale = typeof localStorage === "undefined" ? "en-US" : getDefaultLocale();
+    const dict = messages[locale] as Record<string, string | undefined>;
+    return dict[key] ?? (messages["en-US"] as Record<string, string | undefined>)[key] ?? key;
+}

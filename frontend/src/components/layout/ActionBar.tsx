@@ -224,7 +224,16 @@ export function ActionBar() {
     // 合并成标签页，也能被"布局"菜单统一管理。
     const undoButtonRef = useRef<HTMLButtonElement | null>(null);
     const openHistoryPanel = useCallback(() => {
-        openPanelById(dispatch, store.getState, PANEL_UNDO_HISTORY);
+        // 【落点提示：按钮矩形】从撤销/重做按钮打开时，面板浮在按钮**正下方**
+        // （下方放不下则翻到上方）—— 用户刚点的按钮就是他的注意力所在，把它丢到
+        // 屏幕角落会让人以为没打开。见 `resolveFloatNearRect`。
+        const rect = undoButtonRef.current?.getBoundingClientRect() ?? null;
+        openPanelById(
+            dispatch,
+            store.getState,
+            PANEL_UNDO_HISTORY,
+            rect ? { x: rect.x, y: rect.y, w: rect.width, h: rect.height } : null,
+        );
     }, [dispatch]);
     // 「编辑」菜单的「操作记录」项经事件打开（面板由本组件持有并渲染）。
     useEffect(() => {

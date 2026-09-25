@@ -14,6 +14,8 @@
  * 回退为进程内浮窗 —— 用户不会因为"窗口没开出来"而丢掉面板。
  */
 
+import type { GeometryRect, MainWindowFrame } from "./detachedGeometry";
+
 /** 独立窗口的 label 前缀（与主窗口的 `main` 区分）。 */
 const DETACHED_LABEL_PREFIX = "hs-detached-";
 
@@ -61,6 +63,20 @@ async function loadWebviewWindowApi(): Promise<{
     try {
         const mod = await import("@tauri-apps/api/webviewWindow");
         return { WebviewWindow: mod.WebviewWindow };
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * 动态载入 `window` 模块（显示器查询只在它上面）。
+ *
+ * `WebviewWindow` 只封装 webview 相关能力，`currentMonitor` / `availableMonitors`
+ * 属于窗口模块 —— 拆成两个加载器比在一个里塞两件事清楚。
+ */
+async function loadWindowApi(): Promise<typeof import("@tauri-apps/api/window") | null> {
+    try {
+        return await import("@tauri-apps/api/window");
     } catch {
         return null;
     }
@@ -187,35 +203,82 @@ const DETACHED_WATCH_INTERVAL_MS = 1000;
 const DETACHED_WATCH_GRACE_MS = 2000;
 
 /**
- * 独立窗口的屏幕几何（**逻辑像素**，与创建参数同一坐标系）。
+ * 独立窗口**客户区**的屏幕矩形（**逻辑像素**）。
  *
- * 位置用于下次重新开启时恢复（`form.floatScreen`），尺寸用于恢复浮窗大小
- * （`form.float.w/h`）—— 两者都是"用户上次摆成什么样"的一部分。
+ * 【为什么是客户区而不是外框】浮窗（界面内）的矩形指的是**内容区**，独立窗口要
+ * "原地转换"就必须拿同一件东西来对齐：客户区。用外框会每拆一次偏一个标题栏、
+ * 每关一次缩一圈（见 `detachedGeometry`）。
  */
-export interface DetachedWindowGeometry {
+export interface DetachedClientRect {
     x: number;
     y: number;
     w: number;
     h: number;
 }
 
-/** 读取一个窗口实例的屏幕几何（逻辑像素）；读取失败返回 null。 */
-async function readGeometryOf(win: {
-    outerPosition: () => Promise<{ x: number; y: number }>;
-    outerSize: () => Promise<{ width: number; height: number }>;
+/** 读取一个窗口实例的客户区屏幕矩形（逻辑像素）；读取失败返回 null。 */
+async function readClientRectOf(win: {
+    innerPosition: () => Promise<{ x: number; y: number }>;
+    innerSize: () => Promise<{ width: number; height: number }>;
     scaleFactor: () => Promise<number>;
-}): Promise<DetachedWindowGeometry | null> {
+}): Promise<DetachedClientRect | null> {
     try {
         const scale = (await win.scaleFactor().catch(() => 1)) || 1;
-        const position = await win.outerPosition();
-        const size = await win.outerSize();
-        // Tauri 的坐标与尺寸都是**物理像素**；持久化用逻辑像素（与创建参数一致），
-        // 否则在系统缩放率 ≠ 100% 时窗口每次重开都会按比例漂移。
+        const position = await win.innerPosition();
+        const size = await win.innerSize();
+        // Tauri 的坐标与尺寸都是**物理像素**；对外一律用逻辑像素（与创建参数、
+        // 与浮窗的 CSS 像素同一坐标系），否则系统缩放率 ≠ 100% 时窗口会逐次漂移。
         return {
             x: position.x / scale,
             y: position.y / scale,
             w: size.width / scale,
             h: size.height / scale,
+        };
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * 主窗口的几何：客户区原点/尺寸 + 外框厚度（逻辑像素，屏幕坐标）。
+ *
+ * 换算独立窗口位置时缺一不可 —— 见 `detachedGeometry` 的说明。
+ */
+export async function readMainWindowFrame(): Promise<MainWindowFrame | null> {
+    const api = await loadWebviewWindowApi();
+    if (api === null) return null;
+    try {
+        const win = api.WebviewWindow.getCurrent();
+        const scale = (await win.scaleFactor().catch(() => 1)) || 1;
+        const inner = await win.innerPosition();
+        const outer = await win.outerPosition();
+        const size = await win.innerSize();
+        return {
+            clientOriginX: inner.x / scale,
+            clientOriginY: inner.y / scale,
+            clientWidth: size.width / scale,
+            clientHeight: size.height / scale,
+            frameInsetX: (inner.x - outer.x) / scale,
+            frameInsetY: (inner.y - outer.y) / scale,
+        };
+    } catch {
+        return null;
+    }
+}
+
+/** 主窗口所在显示器的矩形（逻辑像素，屏幕坐标）；读不到返回 null。 */
+export async function readMainMonitorRect(): Promise<GeometryRect | null> {
+    const api = await loadWindowApi();
+    if (api === null) return null;
+    try {
+        const monitor = await api.currentMonitor();
+        if (!monitor) return null;
+        const scale = monitor.scaleFactor || 1;
+        return {
+            x: monitor.position.x / scale,
+            y: monitor.position.y / scale,
+            w: monitor.size.width / scale,
+            h: monitor.size.height / scale,
         };
     } catch {
         return null;
@@ -241,17 +304,18 @@ async function readGeometryOf(win: {
  *
  * @param formId 窗体 id。
  * @param handlers.onGone 窗口消失时的回调（主窗口据此把窗体收回进程内浮层）。
- * @param handlers.onGeometry 每次轮询到几何时的回调（调用方自行做变化判定）。
+ * @param handlers.onClientRect 每次轮询到**客户区**屏幕矩形时的回调（调用方自行
+ *   换算成浮窗坐标并做变化判定）。
  * @returns 停止监视（收回窗体、或主窗口卸载时调用）。
  */
 export function watchDetachedWindow(
     formId: string,
     handlers: {
         onGone: () => void;
-        onGeometry?: (geometry: DetachedWindowGeometry) => void;
+        onClientRect?: (clientRect: DetachedClientRect) => void;
     },
 ): () => void {
-    const { onGone, onGeometry } = handlers;
+    const { onGone, onClientRect } = handlers;
     let stopped = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
 
@@ -265,9 +329,9 @@ export function watchDetachedWindow(
                 if (!stopped) onGone();
                 return;
             }
-            if (onGeometry) {
-                const geometry = await readGeometryOf(win);
-                if (geometry && !stopped) onGeometry(geometry);
+            if (onClientRect) {
+                const clientRect = await readClientRectOf(win);
+                if (clientRect && !stopped) onClientRect(clientRect);
             }
         } catch {
             // 查询失败按"仍在"处理：下一个周期再确认，避免误回收。
@@ -283,16 +347,14 @@ export function watchDetachedWindow(
     };
 }
 
-/** 读取独立窗口当前的屏幕几何（用于持久化）；窗口不在时返回 null。 */
-export async function readDetachedWindowGeometry(
-    formId: string,
-): Promise<DetachedWindowGeometry | null> {
+/** 读取独立窗口当前的客户区屏幕矩形；窗口不在时返回 null。 */
+export async function readDetachedClientRect(formId: string): Promise<DetachedClientRect | null> {
     const api = await loadWebviewWindowApi();
     if (api === null) return null;
     try {
         const win = await api.WebviewWindow.getByLabel(detachedWindowLabel(formId));
         if (!win) return null;
-        return await readGeometryOf(win);
+        return await readClientRectOf(win);
     } catch {
         return null;
     }
