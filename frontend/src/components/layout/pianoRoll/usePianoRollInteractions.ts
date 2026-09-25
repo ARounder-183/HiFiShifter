@@ -67,7 +67,11 @@ import {
     PEN_ERASER_BUTTONS_MASK,
     shouldRejectConcurrentPointer,
 } from "../../../utils/penInput";
-import { getParamEditorWheelAction, getVibratoDragWheelTarget } from "./wheelGesture";
+import {
+    getParamEditorWheelAction,
+    getVibratoDragWheelTarget,
+    type ScrollbarZone,
+} from "./wheelGesture";
 import { armRightDragContextMenuGuard } from "../../../utils/rightDragContextMenuGuard";
 import {
     createSelectionAmplifier,
@@ -1646,8 +1650,19 @@ export function usePianoRollInteractions(args: {
         });
     }, []);
 
+    /**
+     * 画布滚轮总入口（滚动 / 平移 / 缩放）。
+     *
+     * @param e 原生 wheel 事件。
+     * @param forcedScrollbarZone 调用方**已判定**的滚动条轴。自绘滚动条位于
+     *   滚动容器之外（见 PianoRollPanel 的轨道注释），其上的滚轮不会冒泡到
+     *   `scroller`，因此由轨道自己以该参数把轴「托付」进来 —— 命中判定与
+     *   画布内的 `nativeScrollbarZoneAt` 殊途同归，后续语义（该轴滚动 /
+     *   `modifier.scrollbarZoom` 该轴缩放）完全同源，不存在第二套口径。
+     *   省略时按指针位置自行判定（画布内的原生滚动条区）。
+     */
     const onScrollerWheelNative = useCallback(
-        (e: globalThis.WheelEvent) => {
+        (e: globalThis.WheelEvent, forcedScrollbarZone?: ScrollbarZone) => {
             const el = scrollerRef.current;
             if (!el) return;
 
@@ -1705,7 +1720,8 @@ export function usePianoRollInteractions(args: {
             // ── 悬停原生滚动条：滚轮语义只归属该滚动条的轴 ──────────────
             // 无修饰键 = 该轴滚动（竖直条 → 视口纵向平移；水平条 → 横向滚动）；
             // 按住 modifier.scrollbarZoom（默认 Alt）= 该轴缩放。优先于全局绑定。
-            const scrollbarZone = nativeScrollbarZoneAt(el, e.clientX, e.clientY);
+            const scrollbarZone =
+                forcedScrollbarZone ?? nativeScrollbarZoneAt(el, e.clientX, e.clientY);
             const scrollbarZoomRequested =
                 scrollbarZone != null &&
                 !isNoneBinding(scrollbarZoomKb) &&

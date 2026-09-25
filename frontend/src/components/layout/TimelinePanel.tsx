@@ -210,7 +210,11 @@ import { computeEffectiveSnap } from "../../utils/timelineSnapping";
 import { store } from "../../app/store";
 import { applyBulkFadeValue, applyBulkGainDeltaDb } from "./timeline/hooks/bulkClipEdit";
 import { advanceFineAxisDrag, type FineAxisDragState } from "./timeline/fineAxisDrag";
-import { CLIP_GAIN_DRAG_DB_PER_PX } from "./timeline/constants";
+import {
+    CLIP_GAIN_DRAG_DB_PER_PX,
+    WHEEL_ZOOM_IN_FACTOR,
+    WHEEL_ZOOM_OUT_FACTOR,
+} from "./timeline/constants";
 import { isLegacyMouseEventFromStylus } from "../../utils/penInput";
 import {
     buildStretchGroupState,
@@ -249,6 +253,7 @@ import {
     type ClipFormantMorph,
 } from "../../features/session/sessionTypes";
 import { ClipFormantToolWindow } from "./timeline/clip/ClipFormantToolWindow";
+import { timelineViewportBus } from "../../utils/timelineViewportBus";
 
 const TimelineTransportBridge = React.memo(function TimelineTransportBridge(props: {
     pxPerSecRef: React.MutableRefObject<number>;
@@ -626,6 +631,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         timelineTicks,
         scrollLeft,
         rulerScrollLeft,
+        scrollbarZoomKb,
         verticalZoomKb,
         paramFineAdjustKb,
         slipEditKb,
@@ -759,15 +765,50 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 // 触发重渲染，下面的 layout effect 也就永远不会跑，请求会被搁置。
                 pendingKernelZoomRef.current = null;
                 viewportAccess.setZoomAndScroll(next.pxPerSec, next.scrollLeft);
+                // 同上：位置变了，标尺刻度的窗口就必须跟着变（这一支不改 `pxPerSec`，
+                // 不会触发下面的 layout effect，所以位置要在这里自己提交）。
+                setScrollLeftState(next.scrollLeft);
                 return;
             }
             pendingKernelZoomRef.current = next;
             // 只改缩放：位置由下面的 layout effect 与缩放**原子**应用（分两次写会让
             // 中间那一帧出现"新缩放 + 旧位置"的错位）。
             setPxPerSec(next.pxPerSec);
+            // 【位置也必须与缩放**同批**提交给 React】标尺刻度是按 React 的
+            // `scrollLeft` 状态取窗口的（见 `useTimelineState` 的 `tickAxis`），而缩放
+            // 会大幅改变位置：以光标为锚放大 10 倍时，位置可以从 1000px 直接跳到
+            // 14500px。若这一批只提交 `pxPerSec`，刻度的窗口仍按**旧位置**生成 ——
+            // 可见视口完全落在窗口之外，标尺文字整片消失（用户报告的"水平缩放时标尺
+            // 文本闪烁 / 消失"）；小步缩放则表现为窗口错位一帧的闪烁。量化提交
+            // （`onScrollLeftCommit`）虽然最终会纠正它，但那要等到下一次 rAF。
+            // 同批提交后，标尺刻度、内核视口（layout effect 里原子应用）与 GL 网格
+            // 落在同一帧的同一投影上。
+            setScrollLeftState(next.scrollLeft);
         },
-        [pxPerSec, viewportAccess],
+        [pxPerSec, setScrollLeftState, viewportAccess],
     );
+    /**
+     * 标尺上的滚轮。
+     *
+     * 【语义与"悬停水平滚动条"完全一致】（见内核 `scrollbarZoneAt` 分支）：
+     * 无修饰键 = 水平滚动；按住 `modifier.scrollbarZoom` = 水平缩放。标尺是内核容器
+     * **之外**的 DOM 条，过去它的 `onWheel` 只 `preventDefault` 把滚轮吞掉（而那行在
+     * React 的 passive 监听下还是空操作），用户在标尺上滚轮毫无反应。
+     */
+    const handleRulerWheel = React.useCallback(
+        (event: React.WheelEvent<HTMLDivElement>) => {
+            if (isModifierActive(scrollbarZoomKb, event)) {
+                const factor = event.deltaY < 0 ? WHEEL_ZOOM_IN_FACTOR : WHEEL_ZOOM_OUT_FACTOR;
+                kernelHostRef.current?.zoomByWheelFactor(factor, event.clientX);
+                return;
+            }
+            // 触摸板横向双指用 deltaX；鼠标滚轮只有 deltaY，回退到它（与内核同约定）。
+            const deltaPx = Math.abs(event.deltaX) > 0.5 ? event.deltaX : event.deltaY;
+            viewportAccess.setScrollLeft(viewportAccess.getScrollLeft() + deltaPx);
+        },
+        [scrollbarZoomKb, viewportAccess],
+    );
+
     React.useLayoutEffect(() => {
         const pending = pendingKernelZoomRef.current;
         if (pending === null) return;
@@ -5341,6 +5382,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             viewportWidth={viewportWidth}
             playheadSec={s.playheadSec}
             positionPlayheadFromProps={false}
+            onRulerWheel={handleRulerWheel}
             playheadLineRef={attachRulerPlayheadLine}
             playheadHeadRef={attachRulerPlayheadHead}
             contentRef={rulerContentRef}
@@ -5366,6 +5408,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             customScalePresets={s.customScalePresets}
             onTempoMapChange={handleTempoMapChange}
             onTempoMapCommit={handleTempoMapCommit}
+            subscribeViewport={timelineViewportBus.subscribe}
             onMouseDown={(e) => {
                 // 数位笔 / 触摸不触发标尺 seek：pen 的兼容 mouse 事件（无
                 // pointerType）会让悬停画线起笔误定位播放头。
@@ -5416,11 +5459,26 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     }
                 };
 
+                // 拖拽期间**视口变化**（滚轮滚动/缩放、键盘滚动、跨面板同步）后按最后
+                // 指针位置重放一次落点。
+                //
+                // 【为什么必须重放】落点 = 指针客户端 X 换算出的时间，而换算依赖当前
+                // 视口（`readScrollLeft` 是实时的）。滚轮**不产生任何 mousemove**，视口
+                // 变了而指针没动时若不重放，播放头就停在旧落点上、与光标脱开，直到用户
+                // 再动一下鼠标才归位（用户报告的"拖拽中滚动/缩放导致偏移"）。订阅总线
+                // 而非 React 属性：总线在每次视口提交时**同步**广播，重放与绘制同帧。
+                const unsubscribeViewport = timelineViewportBus.subscribe(() => {
+                    if (planSeekGesture("move", isPlayingNow()).playhead === "preview") {
+                        updateAt(lastClientX, false);
+                    }
+                });
+
                 // 失焦取消：切屏期间 mouseup 不送达本窗口，blur 时以
                 // 最后一次已知位置收尾（提交 seek + 清吸附高亮），
                 // 防止监听器泄漏：否则下次点击会被旧的 onEnd 消费。
                 const finish = () => {
                     unregisterAbort();
+                    unsubscribeViewport();
                     window.removeEventListener("mousemove", onMove, true);
                     window.removeEventListener("mouseup", onEnd, true);
                     window.removeEventListener("mouseleave", onEnd, true);

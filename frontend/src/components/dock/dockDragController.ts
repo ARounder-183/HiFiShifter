@@ -72,6 +72,9 @@ interface DragSession {
     floatStart: DockRect | null;
     /** 浮窗当前尺寸（拆成浮动窗时沿用）。 */
     sourceSize: { w: number; h: number };
+    /** 最后一次已知的指针视口坐标（修饰键变化时据此重算落点，见 `refreshIntent`）。 */
+    lastX: number;
+    lastY: number;
 }
 
 let session: DragSession | null = null;
@@ -144,6 +147,8 @@ function onPointerMove(event: PointerEvent): void {
     if (!session || event.pointerId !== session.pointerId) return;
     const x = event.clientX;
     const y = event.clientY;
+    session.lastX = x;
+    session.lastY = y;
 
     if (!getDockDragState()) {
         const distance = Math.hypot(x - session.startX, y - session.startY);
@@ -318,18 +323,47 @@ function commitDock(formId: string, target: DockDropTargetState): void {
 }
 
 function onKeyUp(event: KeyboardEvent): void {
-    // 修饰键在拖拽中被松开：立刻把落点预览切回"浮动"语义，避免松手结果与
-    // 屏幕上的提示不一致。
-    if (!session || !getDockDragState()) return;
+    if (!isModifierKey(event.key)) return;
+    refreshIntent(event);
+}
+
+function onKeyDown(event: KeyboardEvent): void {
+    if (!isModifierKey(event.key)) return;
+    refreshIntent(event);
+}
+
+function isModifierKey(key: string): boolean {
+    return key === "Control" || key === "Meta" || key === "Alt" || key === "Shift";
+}
+
+/**
+ * 修饰键状态变化时，**不等下一次指针移动**就重算停靠意图与落点。
+ *
+ * 【为什么必须有】意图原先只在 `pointermove` 里解析，于是"拖到目标上方 → 按住
+ * 停靠修饰键 → 松手"这条最自然的路径完全失效：按住修饰键本身不产生任何指针
+ * 事件，幽灵不出现、`target` 仍是 null，松手时 `dockIntent && target` 判定失败
+ * —— 表现为"按住修饰键后必须再动一下鼠标才会出现停靠幽灵"（用户报告）。
+ * 指针位置是拖拽期间唯一会变且我们已经记录的输入，据此重算即可，无需真的移动。
+ *
+ * 松开修饰键同样走这里（而非只把 `target` 置空）：`dockModifier` 可以是
+ * `shift`/`alt`，松开其中一个修饰键时另一个仍可能让意图成立，落点必须跟着重算。
+ */
+function refreshIntent(event: PointerEvent | KeyboardEvent): void {
+    if (!session) return;
+    const state = getDockDragState();
+    if (!state) return;
+    const dockIntent = isDockModifierDown(event);
+    const target = resolveTarget(session.lastX, session.lastY);
+    // 按住修饰键时键盘会**重复**触发 keydown（约 30Hz）：意图没变就不该惊动
+    // 覆盖层。落点只看 zone 与部位，矩形由 Zone 决定，无需逐值比较。
     if (
-        event.key !== "Control" &&
-        event.key !== "Meta" &&
-        event.key !== "Alt" &&
-        event.key !== "Shift"
+        state.dockIntent === dockIntent &&
+        (state.target?.zoneId ?? null) === (target?.zoneId ?? null) &&
+        (state.target?.zone ?? null) === (target?.zone ?? null)
     ) {
         return;
     }
-    updateDockDrag({ dockIntent: isDockModifierDown(event), target: null });
+    updateDockDrag({ dockIntent, target });
 }
 
 function onWindowResize(): void {
@@ -341,6 +375,9 @@ function attach(): void {
     window.addEventListener("pointermove", onPointerMove);
     window.addEventListener("pointerup", onPointerUp);
     window.addEventListener("pointercancel", onPointerUp);
+    // 捕获阶段：修饰键的 keydown/keyup 可能先被聚焦控件消费（标签栏、编辑器
+    // 等），冒泡阶段收不到就又会退回"必须动一下鼠标"的老问题。
+    window.addEventListener("keydown", onKeyDown, true);
     window.addEventListener("keyup", onKeyUp, true);
     window.addEventListener("resize", onWindowResize);
 }
@@ -349,6 +386,7 @@ function detach(): void {
     window.removeEventListener("pointermove", onPointerMove);
     window.removeEventListener("pointerup", onPointerUp);
     window.removeEventListener("pointercancel", onPointerUp);
+    window.removeEventListener("keydown", onKeyDown, true);
     window.removeEventListener("keyup", onKeyUp, true);
     window.removeEventListener("resize", onWindowResize);
 }
@@ -395,6 +433,8 @@ export function beginTabDrag(event: React.PointerEvent, args: TabDragArgs): void
         tabCount: args.tabCount,
         floatStart: null,
         sourceSize,
+        lastX: event.clientX,
+        lastY: event.clientY,
     };
     zoneRects = collectZoneRects();
     attach();
@@ -423,6 +463,8 @@ export function beginFloatDrag(event: React.PointerEvent, args: FloatDragArgs): 
         tabCount: 0,
         floatStart: args.geometry,
         sourceSize: { w: args.geometry.w, h: args.geometry.h },
+        lastX: event.clientX,
+        lastY: event.clientY,
     };
     zoneRects = collectZoneRects();
     attach();

@@ -92,6 +92,8 @@ import {
     MIN_ROW_HEIGHT,
     NEW_TRACK_SENTINEL,
     TRACK_ADD_ROW_HEIGHT,
+    WHEEL_ZOOM_IN_FACTOR,
+    WHEEL_ZOOM_OUT_FACTOR,
 } from "../../constants";
 import { hitTest, type ClipHitRegion, type HitTestClip } from "../interaction/hitTest";
 import type { SeekGesturePhase } from "../interaction/seekGesture";
@@ -1013,6 +1015,17 @@ export interface TimelineKernelHost {
      */
     paintNow(): void;
     /**
+     * 按滚轮因子做**水平缩放**（标尺滚轮复用画布滚轮的同一条路径）。
+     *
+     * 【为什么需要】标尺是内核容器**之外**的 DOM 条，它的滚轮进不了容器的监听；
+     * 而缩放要用的锚点换算、上下限、`pendingZoom` 累计基准都在内核里 —— 面板只需
+     * 调这一个入口，口径不会分叉。
+     *
+     * @param factor 缩放因子（>1 放大、<1 缩小）。
+     * @param anchorClientX 锚点（**视口**坐标；内部换算成相对容器左缘）。
+     */
+    zoomByWheelFactor(factor: number, anchorClientX: number): void;
+    /**
      * 请求一次**仅重绘**（不重建几何）：播放头每帧移动时调用。
      *
      * 【为什么必须与 `invalidateScene` 分开】`invalidateScene` 会置 `sceneDirty`，
@@ -1188,10 +1201,6 @@ const SCROLL_COMMIT_STEP_PX = 256;
 
 /** 键盘单步滚动量（CSS px）。 */
 const KEYBOARD_STEP_PX = 60;
-
-/** 滚轮缩放的每步倍率（与旧实现一致：向上放大 1.1、向下缩小 0.9）。 */
-const WHEEL_ZOOM_IN_FACTOR = 1.1;
-const WHEEL_ZOOM_OUT_FACTOR = 0.9;
 
 /**
  * 细节层的 GL 块面接收器：**什么都不画**。
@@ -2577,6 +2586,21 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             return;
         }
 
+        applyHorizontalWheelZoom(factor, event.clientX - rect.left);
+    }
+
+    /**
+     * 按滚轮因子做**水平缩放**（锚点、上下限、`pendingZoom` 累计基准都在这里）。
+     *
+     * 【为什么单独成函数】除了画布滚轮，**标尺**上的滚轮也要走同一条路径（标尺是
+     * 内核容器之外的 DOM 条，见 `TimeRuler.onRulerWheel`）。把它抽出来，面板只调用
+     * 一个入口，缩放口径不会分叉。
+     *
+     * @param factor 缩放因子（>1 放大、<1 缩小）。
+     * @param anchorScreenX 锚点相对容器左缘的视口 x（标尺与容器同一水平坐标系）。
+     */
+    function applyHorizontalWheelZoom(factor: number, anchorScreenX: number): void {
+        const d = data();
         const totalSec = Math.max(0, d.projectSec);
         const minPxPerSec = resolveTimelineMinPxPerSec({
             baseMinPxPerSec: MIN_PX_PER_SEC,
@@ -2589,7 +2613,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             // React 已把上一次请求落地 → 待定基准完成使命。
             pendingZoom = null;
         }
-        const zoomBase = pendingZoom ?? { pxPerSec: view.pxPerSec, scrollLeft: view.scrollLeft };
+        const base = scroll.get();
+        const zoomBase = pendingZoom ?? { pxPerSec: base.pxPerSec, scrollLeft: base.scrollLeft };
         const zoom = resolveHorizontalWheelZoom({
             factor,
             basePxPerSec: zoomBase.pxPerSec,
@@ -2600,7 +2625,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             // 与 syncDom / draw 同一实时读取口径：镜像会滞后一次提交，用它当
             // 缩放锚点会让"以播放头为锚"的缩放在播放时锚在旧位置上。
             playheadSec: readPlayheadSec(),
-            anchorScreenX: event.clientX - rect.left,
+            anchorScreenX,
             minPxPerSec,
             maxPxPerSec: MAX_PX_PER_SEC,
         });
@@ -2621,7 +2646,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         pendingZoom = target;
         if (onZoomRequest === undefined) {
             // 没有 React 落地通道（老调用方）：退回内核立即生效，功能不缺失。
-            const appliedPxPerSec = scroll.setZoom(target.pxPerSec, event.clientX - rect.left);
+            const appliedPxPerSec = scroll.setZoom(target.pxPerSec, anchorScreenX);
             scroll.setScrollLeft(target.scrollLeft);
             onZoomChange?.(appliedPxPerSec);
             return;
@@ -5437,6 +5462,11 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             // 与 rAF 帧**同一条** `draw()`（唯一绘制路径），并取消已排队的那一帧；
             // 未标脏时是空操作（见 `renderLoop.flush`）。
             loop.flush();
+        },
+
+        zoomByWheelFactor(factor, anchorClientX) {
+            const rect = container.getBoundingClientRect();
+            applyHorizontalWheelZoom(factor, anchorClientX - rect.left);
         },
 
         invalidatePlayhead() {

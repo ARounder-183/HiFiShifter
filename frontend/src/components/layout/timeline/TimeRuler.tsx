@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import { createPortal } from "react-dom";
 import { Box } from "@radix-ui/themes";
 import { screenXToWorldSec } from "./runtime/timelineWorld.js";
+import { useNonPassiveWheel } from "../../../utils/useNonPassiveWheel";
 import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "./timeFormat.js";
 import { TIME_UNITS, TIME_UNIT_CHOICES, formatCursorTime } from "./timeFormat.js";
 import type { GridSize } from "../../../features/session/sessionTypes.ts";
@@ -552,6 +553,13 @@ const TimeRulerInner: React.FC<{
     pxPerSec: number;
     viewportWidth?: number;
     playheadSec: number;
+    /**
+     * 标尺上的滚轮（由面板决定语义：默认水平滚动，按住"滚动条滚轮缩放"修饰键时水平缩放）。
+     *
+     * 【为什么必须交给面板】标尺是内核容器**之外**的 DOM 条，它的滚轮进不了容器监听；
+     * 而滚动/缩放的落点换算、上下限都在各自面板里。标尺只负责"阻止默认滚动 + 转交"。
+     */
+    onRulerWheel?: (event: React.WheelEvent<HTMLDivElement>) => void;
     /** 见 `TimeRulerPlayhead.positionFromProps`。 */
     positionPlayheadFromProps?: boolean;
     playheadLineRef?: React.Ref<HTMLDivElement>;
@@ -583,6 +591,11 @@ const TimeRulerInner: React.FC<{
     onTempoMapChange?: (next: TempoMap | null) => void;
     /** 离散提交（对话框/菜单/拖拽结束），同步后端。 */
     onTempoMapCommit?: (next: TempoMap | null) => void;
+    /**
+     * 本面板的视口总线订阅，透传给 Tempo Map 行（拖拽期间的视口重放用）。
+     * 见 `TempoMapRulerRow.subscribeViewport`。
+     */
+    subscribeViewport?: (listener: (scrollLeft: number, pxPerSec: number) => void) => () => void;
 }> = ({
     scrollLeft,
     tickWindowAnchorPx,
@@ -591,6 +604,7 @@ const TimeRulerInner: React.FC<{
     viewportWidth,
     playheadSec,
     positionPlayheadFromProps,
+    onRulerWheel,
     playheadLineRef,
     playheadHeadRef,
     onMouseDown,
@@ -616,6 +630,7 @@ const TimeRulerInner: React.FC<{
     customScalePresets = [],
     onTempoMapChange,
     onTempoMapCommit,
+    subscribeViewport,
 }) => {
     const tAny = useMemo(() => t ?? ((key: string) => key), [t]);
     const useManualTransform = contentRef != null;
@@ -632,6 +647,27 @@ const TimeRulerInner: React.FC<{
      */
     const [tempoInteracting, setTempoInteracting] = useState(false);
     const rulerRef = useRef<HTMLDivElement | null>(null);
+
+    /**
+     * 标尺滚轮：**非被动**监听 + 转交面板。
+     *
+     * 曾经的 `onWheel` 只调 `e.preventDefault()` 就结束（注释写着"防止标尺成为第二个
+     * 滚动源"）—— 而 React 的 `onWheel` 是 passive 的，那行 `preventDefault` 本身是空
+     * 操作：既没阻止默认滚动，也没做任何滚动/缩放。用户报告"标尺上滚轮没反应"。
+     */
+    const attachRulerWheel = useNonPassiveWheel<HTMLDivElement>((event) => {
+        event.preventDefault();
+        onRulerWheel?.(event);
+    });
+
+    /** 标尺根：既供内部量测（`rulerRef`），也挂非被动滚轮监听。 */
+    const attachRulerRoot = useCallback(
+        (element: HTMLDivElement | null) => {
+            rulerRef.current = element;
+            attachRulerWheel(element);
+        },
+        [attachRulerWheel],
+    );
 
     const showTempoRow = Boolean(tempoMap && tempoMap.points.length > 0 && tempoMapVisible);
     const rulerHeight = timeRulerHeightPx(showTempoRow);
@@ -819,7 +855,7 @@ const TimeRulerInner: React.FC<{
 
     return (
         <Box
-            ref={rulerRef}
+            ref={attachRulerRoot}
             className="bg-qt-window border-b border-qt-border relative overflow-hidden shrink-0 select-none"
             style={{ height: rulerHeight }}
             onMouseDown={(e) => {
@@ -865,10 +901,6 @@ const TimeRulerInner: React.FC<{
             }}
             onMouseMove={handleMouseMove}
             onMouseLeave={() => setHover(null)}
-            onWheel={(e) => {
-                // Prevent the ruler from becoming a separate scroll source.
-                e.preventDefault();
-            }}
         >
             <div
                 ref={contentRef}
@@ -914,6 +946,7 @@ const TimeRulerInner: React.FC<{
                     onDialogOpenChange={handleTempoDialogOpenChange}
                     onTempoInteractionChange={handleTempoInteractionChange}
                     onFloatingInlineEditChange={setTempoInlineEditing}
+                    subscribeViewport={subscribeViewport}
                 />
             </div>
 

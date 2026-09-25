@@ -4921,6 +4921,39 @@ export const PianoRollPanel: React.FC<{
         };
     }, []); // 空依赖
 
+    // ── 自绘滚动条 / 标尺上的滚轮 ──────────────────────────────────────
+    // 自绘滚动条是滚动容器的**兄弟节点**（见下方轨道注释），标尺则在滚动容器
+    // **之上**，两者都不在 `scroller` 的事件路径里，原生 `wheel` 不会冒泡到它。
+    // 于是它们各自把「轴」显式托付给同一个入口：命中判定不同，语义同源
+    //（无修饰键 = 该轴滚动，`modifier.scrollbarZoom` = 该轴缩放），不存在第二套口径。
+    //
+    // 用回调 ref（而非 `useEffect(..., [])` + `ref.current`）挂监听：轨道与标尺
+    // 会随停靠重排重建 DOM，回调 ref 把「元素出现」本身当作挂载时机。
+    const attachVerticalScrollbarWheel = useNonPassiveWheel<HTMLDivElement>((event) => {
+        scrollerWheelHandlerRef.current(event as unknown as globalThis.WheelEvent, "vertical");
+    });
+    const attachHorizontalScrollbarWheel = useNonPassiveWheel<HTMLDivElement>((event) => {
+        scrollerWheelHandlerRef.current(event as unknown as globalThis.WheelEvent, "horizontal");
+    });
+    const attachVerticalScrollbarTrack = useCallback(
+        (element: HTMLDivElement | null) => {
+            vScrollbarTrackRef.current = element;
+            attachVerticalScrollbarWheel(element);
+        },
+        [attachVerticalScrollbarWheel],
+    );
+    const attachHorizontalScrollbarTrack = useCallback(
+        (element: HTMLDivElement | null) => {
+            hScrollbarTrackRef.current = element;
+            attachHorizontalScrollbarWheel(element);
+        },
+        [attachHorizontalScrollbarWheel],
+    );
+    /** 标尺上的滚轮：横向滚动 / 横向缩放（与画布同一条入口）。 */
+    const handleRulerWheel = useCallback((event: React.WheelEvent<HTMLDivElement>) => {
+        scrollerWheelHandlerRef.current(event as unknown as globalThis.WheelEvent, "horizontal");
+    }, []);
+
     // 参数切换或参数描述符变化后，刷新竖向滚动条位置，保证滚动条与当前视口保持一致。
     useLayoutEffect(() => {
         syncVerticalScrollbarForViewport(editParam, getCurrentViewportForScrollbar(editParam));
@@ -7973,6 +8006,8 @@ export const PianoRollPanel: React.FC<{
                         customScalePresets={s.customScalePresets}
                         onTempoMapChange={handleTempoMapChange}
                         onTempoMapCommit={handleTempoMapCommit}
+                        subscribeViewport={pianoRollViewportBus.subscribe}
+                        onRulerWheel={handleRulerWheel}
                         onMouseDown={(e) => {
                             interactions.onRulerMouseDown(e);
                         }}
@@ -8153,7 +8188,7 @@ export const PianoRollPanel: React.FC<{
                             恒挂载：原生滚动条已被 `.hide-scrollbar` 隐藏，自绘条是
                             用户可见的**唯一**滚动条。 */}
                         <div
-                            ref={vScrollbarTrackRef}
+                            ref={attachVerticalScrollbarTrack}
                             className="absolute right-0 top-0 w-2 z-20"
                             style={{ bottom: PARAM_EDITOR_BOTTOM_BAR_PX }}
                         >
@@ -8163,7 +8198,7 @@ export const PianoRollPanel: React.FC<{
                             />
                         </div>
                         <div
-                            ref={hScrollbarTrackRef}
+                            ref={attachHorizontalScrollbarTrack}
                             className="absolute bottom-0 left-0 right-0 z-20"
                             style={{ height: PARAM_EDITOR_BOTTOM_BAR_PX }}
                         >
