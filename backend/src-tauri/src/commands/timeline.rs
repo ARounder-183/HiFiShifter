@@ -191,13 +191,20 @@ pub(super) fn import_audio_bytes(
 
     // 与 import_audio_item 一致的可解码性校验：否则不可解码的负载会留下
     // 一个时长回退 4s、无波形的坏 clip，且其临时文件永远无人清理。
-    if crate::audio_utils::try_read_audio_header_only(&path).is_none() {
+    let Some(header) = crate::audio_utils::try_read_audio_header_only(&path) else {
         let _ = fs::remove_file(&path);
         return import_audio_bytes_error(&format!(
             "media_has_no_audio_or_unsupported_codec: {}",
             path.display()
         ));
-    }
+    };
+    // 导入声道策略判定：必须在取 timeline 锁之前完成（可能解码音频）。
+    let channel_decision = crate::channel_policy::precompute_decision(
+        Some(&path),
+        Some(header.channels),
+        None,
+        &crate::config::channel_import_policy(),
+    );
 
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     state.checkpoint_timeline(&tl, crate::state::HistoryOp::ImportMedia);
@@ -207,7 +214,12 @@ pub(super) fn import_audio_bytes(
         Some(None) => Some(tl.add_track(Some("Track".to_string()), None, None)),
     };
 
-    tl.import_audio_item(&path.display().to_string(), resolved_track_id, start_sec);
+    tl.import_audio_item(
+        &path.display().to_string(),
+        resolved_track_id,
+        start_sec,
+        channel_decision,
+    );
     state.audio_engine.update_timeline(tl.clone());
     let mut payload = tl.to_payload();
     payload.project = Some(state.project_meta_payload());
@@ -256,8 +268,12 @@ pub(super) fn import_audio_item(
     };
 
     let source_meta = std::path::Path::new(&source_path);
-    if source_meta.exists() && crate::audio_utils::try_read_audio_header_only(source_meta).is_none()
-    {
+    let header = if source_meta.exists() {
+        crate::audio_utils::try_read_audio_header_only(source_meta)
+    } else {
+        None
+    };
+    if source_meta.exists() && header.is_none() {
         let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
         let mut payload = tl.to_payload();
         payload.project = Some(state.project_meta_payload());
@@ -269,6 +285,15 @@ pub(super) fn import_audio_item(
         )]);
         return payload;
     }
+
+    // 导入声道策略判定：必须在取 timeline 锁之前完成（可能解码音频，
+    // 而该锁是所有命令与 UI 轮询的串行点）。
+    let channel_decision = crate::channel_policy::precompute_decision(
+        Some(source_meta),
+        header.as_ref().map(|h| h.channels),
+        None,
+        &crate::config::channel_import_policy(),
+    );
 
     {
         let mut rt = state.runtime.lock().unwrap_or_else(|e| e.into_inner());
@@ -283,7 +308,7 @@ pub(super) fn import_audio_item(
         Some(None) => Some(tl.add_track(Some("Track".to_string()), None, None)),
     };
 
-    tl.import_audio_item(&source_path, resolved_track_id, start_sec);
+    tl.import_audio_item(&source_path, resolved_track_id, start_sec, channel_decision);
     state.audio_engine.update_timeline(tl.clone());
     let mut payload = tl.to_payload();
     payload.project = Some(state.project_meta_payload());
@@ -488,22 +513,66 @@ pub(super) fn add_clip(
     length_sec: Option<f64>,
     source_path: Option<String>,
 ) -> crate::models::TimelineStatePayload {
+    // 导入声道策略判定：必须在取 timeline 锁之前完成（智能模式会解码音频）。
+    // 无 source_path（空白 Clip）时 precompute_decision 直接返回 Keep。
+    let channel_decision = precompute_decision_for_source(source_path.as_deref());
+
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     state.checkpoint_timeline(&tl, crate::state::HistoryOp::AddClip);
-    tl.add_clip(track_id, name, start_sec, length_sec, source_path);
+    let clip_id = tl.add_clip(track_id, name, start_sec, length_sec, source_path);
+    tl.apply_channel_decision_to_clip(&clip_id, channel_decision);
     state.audio_engine.update_timeline(tl.clone());
     let mut payload = tl.to_payload();
     payload.project = Some(state.project_meta_payload());
     payload
 }
 
+/// 锁外：为一个待导入的源路径算好声道决定。
+///
+/// 空路径 / 不存在的文件一律 `Keep`（`precompute_decision` 内部的 header
+/// 探测失败时也按单声道处理，即不转换）。
+fn precompute_decision_for_source(
+    source_path: Option<&str>,
+) -> crate::channel_policy::ChannelDecision {
+    let Some(path) = source_path.map(str::trim).filter(|p| !p.is_empty()) else {
+        return crate::channel_policy::ChannelDecision::Keep;
+    };
+    crate::channel_policy::precompute_decision(
+        Some(Path::new(path)),
+        None,
+        None,
+        &crate::config::channel_import_policy(),
+    )
+}
+
 pub(super) fn create_clips_bulk(
     state: State<'_, AppState>,
     payload: crate::state::CreateClipsBulkPayload,
 ) -> crate::models::TimelineStatePayload {
+    // 锁外：为"从零按 source_path 新建"的模板预判定声道策略。
+    //
+    // 带 `source_clip_id` 的模板是**复制**语义：目标会克隆源 Clip 的 Take
+    // （含用户显式设定的 channel_mode），必须原样保留，不能被策略改写。
+    let decisions: Vec<Option<crate::channel_policy::ChannelDecision>> = payload
+        .templates
+        .iter()
+        .map(|template| {
+            if template.source_clip_id.is_some() {
+                None
+            } else {
+                Some(precompute_decision_for_source(template.source_path.as_deref()))
+            }
+        })
+        .collect();
+
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     state.checkpoint_timeline(&tl, crate::state::HistoryOp::AddClip);
     let created_clip_ids = tl.create_clips_bulk(&payload);
+    for (clip_id, decision) in created_clip_ids.iter().zip(decisions) {
+        if let Some(decision) = decision {
+            tl.apply_channel_decision_to_clip(clip_id, decision);
+        }
+    }
     state.audio_engine.update_timeline(tl.clone());
     let mut timeline_payload = tl.to_payload();
     timeline_payload.created_clip_ids = Some(created_clip_ids);
@@ -1462,6 +1531,14 @@ pub(super) fn add_clip_take_from_media(
         crate::audio_utils::try_read_audio_header_only(Path::new(&trimmed_path))
     };
 
+    // 导入声道策略判定：同样在锁外完成（智能模式会解码音频）。
+    let channel_decision = crate::channel_policy::precompute_decision(
+        Some(Path::new(&trimmed_path)),
+        info.as_ref().map(|i| i.channels),
+        None,
+        &crate::config::channel_import_policy(),
+    );
+
     let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
     let Some(_) = tl.clips.iter().find(|c| c.id == clip_id) else {
         drop(tl);
@@ -1487,7 +1564,7 @@ pub(super) fn add_clip_take_from_media(
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "Take".to_string());
-    let take = crate::state::ClipTake {
+    let mut take = crate::state::ClipTake {
         id: crate::state::new_id("take"),
         name: name.filter(|n| !n.trim().is_empty()).unwrap_or(file_name),
         gain: 1.0,
@@ -1516,6 +1593,7 @@ pub(super) fn add_clip_take_from_media(
         stretch_markers: Vec::new(),
         envelopes: None,
     };
+    crate::channel_policy::apply_decision(&mut take, channel_decision);
     if let Some(clip) = tl.clips.iter_mut().find(|c| c.id == clip_id) {
         clip.add_take(take);
     }
@@ -1556,7 +1634,14 @@ pub(super) fn import_media_files_as_takes(
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "Take".to_string());
-        takes.push(crate::state::ClipTake {
+        // 导入声道策略判定：仍处锁外，可安全解码。
+        let channel_decision = crate::channel_policy::precompute_decision(
+            Some(file_path),
+            Some(info.channels),
+            None,
+            &crate::config::channel_import_policy(),
+        );
+        let mut take = crate::state::ClipTake {
             id: crate::state::new_id("take"),
             name: file_name.clone(),
             gain: 1.0,
@@ -1584,7 +1669,9 @@ pub(super) fn import_media_files_as_takes(
             midi_fill_gaps: false,
             stretch_markers: Vec::new(),
             envelopes: None,
-        });
+        };
+        crate::channel_policy::apply_decision(&mut take, channel_decision);
+        takes.push(take);
     }
 
     if takes.is_empty() {

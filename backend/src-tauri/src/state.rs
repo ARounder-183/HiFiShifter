@@ -8337,6 +8337,12 @@ impl TimelineState {
         take.apply_to_clip(clip);
     }
 
+    /// 新建一个 Clip（空白 / 引用已有媒体）。
+    ///
+    /// **本函数不做导入声道策略判定**：它在持锁状态下运行，而策略判定在智能
+    /// 模式下需要解码音频。需要判定的调用方应在锁外用
+    /// `crate::channel_policy::precompute_decision` 算好，再在锁内调用
+    /// [`Self::apply_channel_decision_to_clip`]。
     pub fn add_clip(
         &mut self,
         track_id: Option<String>,
@@ -8506,6 +8512,35 @@ impl TimelineState {
         self.selected_clip_id = Some(id.clone());
         self.playhead_sec = ss;
         id
+    }
+
+    /// 把一个**锁外预先算好**的导入声道决定应用到指定 Clip 的活跃 Take。
+    ///
+    /// 零解码、零 IO，可安全在持锁状态下调用。返回是否发生了改变。
+    /// 决定由 `crate::channel_policy::precompute_decision` 产出 —— 该函数会
+    /// 解码音频，绝不能在持锁时调用。
+    pub fn apply_channel_decision_to_clip(
+        &mut self,
+        clip_id: &str,
+        decision: crate::channel_policy::ChannelDecision,
+    ) -> bool {
+        let Some(clip) = self.clips.iter_mut().find(|c| c.id == clip_id) else {
+            return false;
+        };
+        if clip.takes.is_empty() {
+            clip.sync_take_from_flat();
+        }
+        let Some(take) = clip.takes.first_mut() else {
+            return false;
+        };
+        if !crate::channel_policy::apply_decision(take, decision) {
+            return false;
+        }
+        // 声道模式是 active take 的内存投影，写回 Take 后必须同步投影，
+        // 否则下一次 normalize/sync 会用旧值覆盖。
+        let take = take.clone();
+        take.apply_to_clip(clip);
+        true
     }
 
     /// 波纹编辑（自动跟进）：把“编辑点（origin）之后、且不属于被编辑集合的剪辑”
@@ -11258,11 +11293,17 @@ impl TimelineState {
         }
     }
 
+    /// 导入一个媒体文件作为新 Clip。
+    ///
+    /// `channel_decision` 由调用方在**锁外**按导入声道策略预先算好
+    /// （见 `crate::channel_policy::precompute_decision`）：本函数在持锁状态
+    /// 下运行，绝不能在此解码音频。`Keep` 表示保持默认的 Normal 声道模式。
     pub fn import_audio_item(
         &mut self,
         audio_path: &str,
         track_id: Option<String>,
         start_sec: Option<f64>,
+        channel_decision: crate::channel_policy::ChannelDecision,
     ) {
         let name = Path::new(audio_path)
             .file_name()
@@ -11364,6 +11405,14 @@ impl TimelineState {
             // 旧元数据会在下次 normalize/sync 时回流覆盖这里的值（例如视频
             // header-only 探测与 add_clip 内完整解码结果存在差异时）。
             c.sync_take_from_flat();
+            // 导入声道策略（锁外已判定）：把"假立体声"折叠为单声道，使渲染
+            // 退回单声道路径。apply_decision 是零成本操作，不会在锁内解码。
+            if let Some(take) = c.takes.first_mut() {
+                if crate::channel_policy::apply_decision(take, channel_decision) {
+                    let take = take.clone();
+                    take.apply_to_clip(c);
+                }
+            }
         }
     }
 

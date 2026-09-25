@@ -75,6 +75,15 @@ fn import_finished_recording(
     state: &AppState,
     finished: &RecordingFinishedInfo,
 ) -> Result<TimelineStatePayload, String> {
+    // 导入声道策略判定：必须在取 timeline 锁之前完成（智能模式会解码音频）。
+    // 单声道录音（channels < 2）直接返回 Keep，不产生任何解码开销。
+    let channel_decision = crate::channel_policy::precompute_decision(
+        Some(std::path::Path::new(&finished.output_path)),
+        Some(finished.channels),
+        None,
+        &crate::config::channel_import_policy(),
+    );
+
     let mut timeline = state.timeline.lock().unwrap_or_else(|err| err.into_inner());
     state.checkpoint_timeline(&timeline, crate::state::HistoryOp::Recording);
 
@@ -121,6 +130,7 @@ fn import_finished_recording(
         &finished.output_path,
         Some(target_track_id.clone()),
         Some(start_sec),
+        channel_decision,
     );
 
     let settings = recording::load_settings(state);
