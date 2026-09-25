@@ -1076,16 +1076,31 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                 滚动条盖掉，且该处无法拖动。
                 取值与参数编辑器的自绘滚动条一致（那里也是 `z-20`），
                 两者观感与层级语义保持统一。 */}
-            <div ref={vTrackRef} className="absolute right-0 top-0 bottom-0 z-20 w-2">
+            {/* `data-hs-scrollbar`：宿主的悬停光标 / 浮标逻辑据此把滚动条区域按
+                "非内容"处理（轨道 / thumb 是容器子元素，事件会冒泡，按坐标命中
+                会把滚动条底下的 clip / 淡变当成命中对象）。`cursor-default` /
+                `cursor-grab` 是声明式光标：子元素自身的 cursor 覆盖宿主写入在
+                容器上的 inline cursor，滚动条区域的光标因此不再继承内容手势。 */}
+            <div
+                ref={vTrackRef}
+                data-hs-scrollbar="1"
+                className="absolute right-0 top-0 bottom-0 z-20 w-2 cursor-default"
+            >
                 <div
                     ref={vThumbRef}
-                    className="absolute left-0 w-full rounded-full bg-[var(--qt-scrollbar-thumb)]"
+                    data-hs-scrollbar="1"
+                    className="absolute left-0 w-full cursor-grab rounded-full bg-[var(--qt-scrollbar-thumb)]"
                 />
             </div>
-            <div ref={hTrackRef} className="absolute bottom-0 left-0 right-0 z-20 h-2">
+            <div
+                ref={hTrackRef}
+                data-hs-scrollbar="1"
+                className="absolute bottom-0 left-0 right-0 z-20 h-2 cursor-default"
+            >
                 <div
                     ref={hThumbRef}
-                    className="absolute top-0 h-full rounded-full bg-[var(--qt-scrollbar-thumb)]"
+                    data-hs-scrollbar="1"
+                    className="absolute top-0 h-full cursor-grab rounded-full bg-[var(--qt-scrollbar-thumb)]"
                 />
             </div>
         </div>

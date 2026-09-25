@@ -8241,24 +8241,31 @@ export const PianoRollPanel: React.FC<{
                               会 `stopPropagation`，因此到达轨道的按下必然不在 thumb 上。
                             恒挂载：原生滚动条已被 `.hide-scrollbar` 隐藏，自绘条是
                             用户可见的**唯一**滚动条。 */}
+                        {/* `data-hs-scrollbar` + 光标类：与时间轴自绘滚动条同一
+                            约定（见 TimelineKernelView 的 JSX 说明）——轨道区域
+                            的光标由自身声明，不继承内容手势。 */}
                         <div
                             ref={attachVerticalScrollbarTrack}
-                            className="absolute right-0 top-0 w-2 z-20"
+                            data-hs-scrollbar="1"
+                            className="absolute right-0 top-0 w-2 z-20 cursor-default"
                             style={{ bottom: PARAM_EDITOR_BOTTOM_BAR_PX }}
                         >
                             <div
                                 ref={vScrollbarThumbRef}
-                                className="absolute left-0 w-full rounded-full bg-[var(--qt-scrollbar-thumb)]"
+                                data-hs-scrollbar="1"
+                                className="absolute left-0 w-full cursor-grab rounded-full bg-[var(--qt-scrollbar-thumb)]"
                             />
                         </div>
                         <div
                             ref={attachHorizontalScrollbarTrack}
-                            className="absolute bottom-0 left-0 right-0 z-20"
+                            data-hs-scrollbar="1"
+                            className="absolute bottom-0 left-0 right-0 z-20 cursor-default"
                             style={{ height: PARAM_EDITOR_BOTTOM_BAR_PX }}
                         >
                             <div
                                 ref={hScrollbarThumbRef}
-                                className="absolute top-0 h-full rounded-full bg-[var(--qt-scrollbar-thumb)]"
+                                data-hs-scrollbar="1"
+                                className="absolute top-0 h-full cursor-grab rounded-full bg-[var(--qt-scrollbar-thumb)]"
                             />
                         </div>
                     </div>

@@ -1997,6 +1997,12 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             hScrollbarThumb.style.width = `${Math.max(0, horizontal.thumbLengthPx)}px`;
             hScrollbarThumb.style.transform = `translateX(${Math.max(0, horizontal.thumbStartPx)}px)`;
             hScrollbarThumb.style.display = horizontal.scrollable ? "block" : "none";
+            // 轨道交互随可滚动性启停：不可滚动时轨道是透明的"幽灵条"，却仍会
+            // 拦截下方内容的指针事件（缩放到内容装得下时，底缘 8px 的 clip /
+            // 背景全部点不到）。可滚动时轨道承载"点空白翻页"。
+            if (hScrollbarTrack) {
+                hScrollbarTrack.style.pointerEvents = horizontal.scrollable ? "auto" : "none";
+            }
         }
 
         const vertical = computeScrollbar({
@@ -2013,6 +2019,10 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             vScrollbarThumb.style.height = `${Math.max(0, vertical.thumbLengthPx)}px`;
             vScrollbarThumb.style.transform = `translateY(${Math.max(0, vertical.thumbStartPx)}px)`;
             vScrollbarThumb.style.display = vertical.scrollable ? "block" : "none";
+            // 同水平条：不可滚动时轨道放行指针事件（见上）。
+            if (vScrollbarTrack) {
+                vScrollbarTrack.style.pointerEvents = vertical.scrollable ? "auto" : "none";
+            }
         }
     }
 
@@ -3875,6 +3885,18 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      */
     function updateHoverCursor(event: PointerEvent): void {
         if (gesture.kind !== "none" || panPointerId !== null) return;
+        // 【滚动条区域不是内容】轨道 / thumb 是容器子元素，指针事件会冒泡到这里；
+        // 按坐标命中测试会把滚动条底下的 clip / 淡变控件当成命中对象 —— 光标变
+        // 手势、浮标跟着弹出，而这块区域此刻只该与滚动条交互。指针落在滚动条
+        // 元素上时按"空白"处理：清悬停环与浮标、光标 default（thumb 的抓取光标
+        // 由其自身 CSS 提供）。`data-hs-scrollbar` 见 TimelineKernelView 的 JSX。
+        const eventTarget = event.target;
+        if (eventTarget instanceof Element && eventTarget.closest("[data-hs-scrollbar]")) {
+            publishFadeHover({ kind: "empty", sec: 0, trackId: null, trackIndex: -1 },
+                event.clientX, event.clientY);
+            if (container.style.cursor !== "default") container.style.cursor = "default";
+            return;
+        }
         const hit = hitAt(event.clientX, event.clientY);
         // 默认分区（body / header）**不设抓取光标**。
         //

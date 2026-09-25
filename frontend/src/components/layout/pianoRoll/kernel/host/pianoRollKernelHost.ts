@@ -1498,6 +1498,11 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                 horizontal.thumbStartPx,
             )}px)`;
             hScrollbarThumb.style.display = horizontal.scrollable ? "block" : "none";
+            // 轨道交互随可滚动性启停：不可滚动时透明的轨道仍会拦截下方指针
+            // 事件（与时间轴同一问题与修法，见 timelineKernelHost 的说明）。
+            if (hScrollbarTrack) {
+                hScrollbarTrack.style.pointerEvents = horizontal.scrollable ? "auto" : "none";
+            }
         }
 
         const vertical = geometries.vertical;
@@ -1509,6 +1514,10 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             vScrollbarThumb.style.height = `${Math.max(0, vertical.thumbLengthPx)}px`;
             vScrollbarThumb.style.transform = `translateY(${Math.max(0, vertical.thumbStartPx)}px)`;
             vScrollbarThumb.style.display = vertical.scrollable ? "block" : "none";
+            // 同水平条：不可滚动时轨道放行指针事件。
+            if (vScrollbarTrack) {
+                vScrollbarTrack.style.pointerEvents = vertical.scrollable ? "auto" : "none";
+            }
         }
     }
 
