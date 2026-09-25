@@ -2011,6 +2011,7 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
                 let ctx = crate::renderer::ClipProcessContext {
                     mono_pcm: mono.as_slice(),
                     channel_index: channel as u16,
+                    source_fingerprint: clip.source_file_fingerprint,
                     sample_rate,
                     clip_start_sec,
                     seg_start_sec,

@@ -1237,6 +1237,123 @@ mod tests {
 
 
 
+    /// 【QualityPreset 惰性契约】`MixdownOptions::quality_preset` 目前是"写入但
+    /// 忽略"的占位（见 `QualityPreset` 的文档：让它生效必须先定义两档差异并用
+    /// 真实素材 A/B 验证）。本测试把"忽略"钉死：两档预设的渲染输出必须逐字节
+    /// 一致。若未来要消费该字段，请先完成文档要求的 A/B 验证，再**有意地**
+    /// 改写本测试（届时它守护的是"档位差异确实按预期生效"）。
+    #[test]
+    fn quality_preset_is_currently_inert() {
+        use crate::state::{Clip, TimelineState};
+
+        let dir = std::env::temp_dir().join(format!("hfs_mix_qpreset_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav_path = dir.join("stereo.wav");
+        {
+            let spec = hound::WavSpec {
+                channels: 2,
+                sample_rate: 44100,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            };
+            let mut writer = hound::WavWriter::create(&wav_path, spec).unwrap();
+            for i in 0..44100 {
+                let v = ((i as f32) * 0.01).sin();
+                writer.write_sample((v * 16384.0) as i32).unwrap();
+                writer.write_sample((v * -8192.0) as i32).unwrap();
+            }
+            writer.finalize().unwrap();
+        }
+        let source_path = wav_path.to_string_lossy().to_string();
+
+        let build_timeline = || {
+            let mut tl = TimelineState::default();
+            let track = tl.tracks[0].id.clone();
+            let clip = Clip {
+                id: "clip_qpreset".to_string(),
+                group_id: None,
+                track_id: track,
+                name: "V".to_string(),
+                start_sec: 0.0,
+                length_sec: 0.5,
+                color: "#000000".to_string(),
+                takes: vec![],
+                active_take_id: None,
+                clip_playback_rate: 1.0,
+                source_path: Some(source_path.clone()),
+                source_path_relative: None,
+                duration_sec: Some(1.0),
+                duration_frames: Some(44100),
+                source_sample_rate: Some(44100),
+                source_channels: Some(2),
+                source_file_mtime: None,
+                source_file_size: None,
+                source_file_fingerprint: None,
+                waveform_preview: None,
+                pitch_range: None,
+                gain: 1.0,
+                muted: false,
+                source_start_sec: 0.0,
+                source_end_sec: 1.0,
+                playback_rate: 1.0,
+                reversed: false,
+                channel_mode: 0,
+                loop_enabled: false,
+                snap_offset_sec: 0.0,
+                fade_in_sec: 0.0,
+                fade_out_sec: 0.0,
+                fade_in_shape: 0.0,
+                fade_out_shape: 0.0,
+                fade_in_dir: 0.0,
+                fade_out_dir: 0.0,
+                fade_in_curve: String::new(),
+                fade_out_curve: String::new(),
+                auto_fade_in_sec: 0.0,
+                auto_fade_out_sec: 0.0,
+                extra_curves: None,
+                extra_params: None,
+                formant_morph: None,
+                midi_note_data: None,
+                midi_fill_gaps: false,
+            };
+            tl.clips.push(clip);
+            tl.normalize_clip_takes();
+            tl
+        };
+
+        let render = |preset: QualityPreset| {
+            let (_rate, _ch, _dur, mix) = render_mixdown_interleaved(
+                &build_timeline(),
+                MixdownOptions {
+                    sample_rate: 44100,
+                    start_sec: 0.0,
+                    end_sec: Some(0.5),
+                    stretch: crate::time_stretch::StretchAlgorithm::LinearResample,
+                    apply_pitch_edit: false,
+                    output: crate::encode::OutputSpec::wav_32f(),
+                    quality_preset: preset,
+                    cancel_flag: None,
+                },
+            )
+            .unwrap();
+            mix
+        };
+
+        let realtime = render(QualityPreset::Realtime);
+        let export = render(QualityPreset::Export);
+        assert_eq!(
+            realtime.len(),
+            export.len(),
+            "两档预设的输出长度必须一致（该字段当前为占位）"
+        );
+        assert!(
+            realtime == export,
+            "QualityPreset 当前必须是'写入但忽略'：两档渲染输出出现差异说明有人开始消费该字段 —— 先完成 QualityPreset 文档要求的 A/B 验证，再有意更新本测试"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 交错 PCM：帧 i 的样本值为 [i as f32, i as f32 + 0.5]。
     fn make_pcm(frames: usize, channels: usize) -> Vec<f32> {
         let mut pcm = Vec::with_capacity(frames * channels);

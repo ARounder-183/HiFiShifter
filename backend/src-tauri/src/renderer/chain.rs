@@ -336,6 +336,7 @@ impl HiFiGanStage {
                 &input_pcm,
                 cc.sample_rate,
                 cc.channel_index,
+                cc.source_fingerprint,
             )?;
 
         // 谐波分支：有 F0（clip_midi）时走 HiFiGAN mel 拉伸/渲染；无 F0 时

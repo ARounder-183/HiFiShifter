@@ -107,6 +107,9 @@ pub struct ClipProcessContext<'a> {
     pub channel_index: u16,
     /// 采样率（Hz）。
     pub sample_rate: u32,
+    /// 源文件内容指纹（head+tail+size）：混入处理器内部缓存键，防
+    /// "同 clip_id、等长换源"命中旧源的推理结果（HNSEP 分离缓存）。
+    pub source_fingerprint: Option<u64>,
     /// Clip 在时间轴上的起点（秒），用于曲线对齐。
     pub clip_start_sec: f64,
     /// 本次待处理片段在时间轴上的起点（秒）。

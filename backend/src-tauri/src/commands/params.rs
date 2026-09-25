@@ -327,10 +327,15 @@ pub(super) fn get_param_frames(
 
     let start = start_frame as usize;
     // frame_count 来自 UI（u32）：异常大值会让下面三个输出 Vec 按它预分配并
-    // 逐帧填充，把内存打爆。曲线本身按 `target_param_frames` 定长组装（见
-    // `ensure_params_for_root`），越出工程帧数的读数本来就是默认值 —— 按
-    // target 钳制即可挡住异常值，合法请求（窗口在工程内）不受影响。
-    let count = (frame_count as usize).max(1).min(param_frame_target);
+    // 逐帧填充，把内存打爆（u32 满值 ≈ 50GB，分配失败即进程 abort）。
+    //
+    // 【语义保持】越出工程帧数的读数照旧返回默认值（不截断返回长度）——
+    // 合法请求至多覆盖"整个工程 ± 边缘平滑扩展"，因此在 target 之外加一段
+    // 固定余量作为预分配上界：合法窗口与改动前逐帧一致，异常大值被挡住。
+    const PARAM_FRAMES_HEADROOM: usize = 1 << 20;
+    let count = (frame_count as usize)
+        .max(1)
+        .min(param_frame_target.saturating_add(PARAM_FRAMES_HEADROOM));
     let step = (stride.unwrap_or(1).max(1)) as usize;
 
     let mut orig = Vec::with_capacity(count);

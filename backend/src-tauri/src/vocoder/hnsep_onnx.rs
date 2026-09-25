@@ -331,13 +331,25 @@ pub fn clear_separation_cache() {
     }
 }
 
-/// Compute a clip-level cache key using only identity fields (not audio content).
+/// Compute a clip-level cache key from identity fields + source identity.
 ///
 /// Uses FNV-1a 64-bit for low overhead. The key is based on `clip_id` + `sample_rate` +
-/// `audio_len`, which is sufficient for per-clip HNSEP separation caching — two calls
-/// for the same clip with the same clipped audio length will produce the same separation
-/// output, regardless of which segment is being rendered.
-fn separation_cache_key(clip_id: &str, sample_rate: u32, audio_len: usize, channel_index: u16) -> u64 {
+/// `audio_len` + `channel_index` + `source_fingerprint` — two calls for the same clip
+/// with the same clipped audio length produce the same separation output regardless of
+/// which segment is being rendered.
+///
+/// 【为什么必须混入源指纹】键刻意不含音频内容（逐段渲染的查缓存路径哈希整段
+/// 音频太贵），因此"同 clip_id、等长、等采样率"的**换源**（replace_clip_source
+/// / 同名文件替换）会命中旧源的 stem —— 长度恰好不变的替换是真实场景（同长度
+/// 修音版）。`source_file_fingerprint`（head+tail+size，已在 clip 元数据里现成）
+/// 是防这类错配的最廉价信号；与 `synth_clip_cache` 渲染键混用同一字段。
+fn separation_cache_key(
+    clip_id: &str,
+    sample_rate: u32,
+    audio_len: usize,
+    channel_index: u16,
+    source_fingerprint: Option<u64>,
+) -> u64 {
     // FNV-1a 64-bit initial value
     let mut h: u64 = 14695981039346656037u64;
 
@@ -359,6 +371,11 @@ fn separation_cache_key(clip_id: &str, sample_rate: u32, audio_len: usize, chann
         h ^= b as u64;
         h = h.wrapping_mul(1099511628211u64);
     }
+    // 源指纹位：等长换源时其余键位全部不变（见函数文档）。
+    for &b in &source_fingerprint.unwrap_or(0).to_le_bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(1099511628211u64);
+    }
 
     h
 }
@@ -374,8 +391,9 @@ pub fn infer_noise_mono(
     audio_mono: &[f32],
     sample_rate: u32,
     channel_index: u16,
+    source_fingerprint: Option<u64>,
 ) -> Result<Arc<Vec<f32>>, String> {
-    infer_harmonic_noise_mono(clip_id, audio_mono, sample_rate, channel_index)
+    infer_harmonic_noise_mono(clip_id, audio_mono, sample_rate, channel_index, source_fingerprint)
         .map(|(_, noise)| noise)
 }
 
@@ -390,10 +408,12 @@ pub fn cache_separation(
     sample_rate: u32,
     audio_len: usize,
     channel_index: u16,
+    source_fingerprint: Option<u64>,
     harmonic: Arc<Vec<f32>>,
     noise: Arc<Vec<f32>>,
 ) {
-    let cache_key = separation_cache_key(clip_id, sample_rate, audio_len, channel_index);
+    let cache_key =
+        separation_cache_key(clip_id, sample_rate, audio_len, channel_index, source_fingerprint);
     let entry = HnsepCacheEntry { harmonic, noise };
     let mut cache = global_cache().lock().unwrap_or_else(|e| e.into_inner());
     cache.put(cache_key, entry);
@@ -404,6 +424,7 @@ pub fn infer_harmonic_noise_mono(
     audio_mono: &[f32],
     sample_rate: u32,
     channel_index: u16,
+    source_fingerprint: Option<u64>,
 ) -> Result<(Arc<Vec<f32>>, Arc<Vec<f32>>), String> {
     // 非阻塞可用性检查：真正的会话构建由下方加载路径完成（在该调用线程上
     // 按需构建，不在 UI/命令/快照构建路径上同步构建）。
@@ -412,7 +433,8 @@ pub fn infer_harmonic_noise_mono(
     }
 
     let audio_len = audio_mono.len();
-    let cache_key = separation_cache_key(clip_id, sample_rate, audio_len, channel_index);
+    let cache_key =
+        separation_cache_key(clip_id, sample_rate, audio_len, channel_index, source_fingerprint);
     {
         let mut cache = global_cache()
             .lock()
