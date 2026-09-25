@@ -34,6 +34,8 @@ mod audio_engine;
 mod audio_utils;
 #[path = "audio/channel_mode.rs"]
 pub(crate) mod channel_mode;
+#[path = "audio/stereo_detect.rs"]
+pub(crate) mod stereo_detect;
 #[path = "pitch/clip_pitch_cache.rs"]
 mod clip_pitch_cache;
 #[path = "pitch/clip_rendering_state.rs"]
