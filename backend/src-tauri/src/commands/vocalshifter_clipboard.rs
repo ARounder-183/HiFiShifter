@@ -402,7 +402,7 @@ fn paste_vsp_project(state: &AppState, path: &std::path::Path) -> serde_json::Va
         (tl.playhead_sec, sel_idx, ordered, next_track_order)
     };
 
-    let result = match crate::vocalshifter_import::import_vsp_clipboard(
+    let mut result = match crate::vocalshifter_import::import_vsp_clipboard(
         &data,
         vsp_dir,
         playhead_sec,
@@ -415,6 +415,16 @@ fn paste_vsp_project(state: &AppState, path: &std::path::Path) -> serde_json::Va
             return serde_json::json!({"ok": false, "error": format!("clipboard_parse_failed: {}", e)});
         }
     };
+
+    // VocalShifter 剪贴板同样不携带声道信息 → 套用导入声道策略。
+    // 判定可能解码音频，必须在取 timeline 锁之前完成。REAPER 剪贴板自带
+    // CHANMODE 权威字段，不走这里。
+    let converted_takes = crate::channel_policy::apply_policy_to_clips(&mut result.timeline.clips);
+    if converted_takes > 0 {
+        log::info!(
+            "[vocalshifter_clipboard] channel policy folded {converted_takes} take(s) to mono"
+        );
+    }
 
     // 需要开启 compose_enabled 的轨道
     let tracks_needing_compose: Vec<String> = result

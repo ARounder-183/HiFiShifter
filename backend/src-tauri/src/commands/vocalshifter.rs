@@ -60,7 +60,7 @@ pub(super) fn import_vocalshifter_project(
     let vsp_dir = path.parent().unwrap_or_else(|| Path::new("."));
 
     // 解析并转换
-    let result = match vocalshifter_import::import_vsp(&data, vsp_dir) {
+    let mut result = match vocalshifter_import::import_vsp(&data, vsp_dir) {
         Ok(r) => r,
         Err(_e) => {
             let mut payload = get_timeline_state_from_ref(state);
@@ -71,6 +71,18 @@ pub(super) fn import_vocalshifter_project(
             return json;
         }
     };
+
+    // VocalShifter 格式**不携带声道信息**，因此这里套用导入声道策略（把
+    // "假立体声"折叠为单声道，使渲染退回单声道路径）。
+    //
+    // 判定可能解码音频，必须在取 timeline 锁之前完成 —— 该锁是所有命令与
+    // UI 轮询的串行点。REAPER 导入自带 CHANMODE 权威字段，**不走这里**。
+    let converted_takes = crate::channel_policy::apply_policy_to_clips(&mut result.timeline.clips);
+    if converted_takes > 0 {
+        log::info!(
+            "[import_vocalshifter] channel policy folded {converted_takes} take(s) to mono"
+        );
+    }
 
     // 应用到 AppState —— 合并到现有工程（不替换）
     {

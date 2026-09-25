@@ -77,6 +77,21 @@ pub(super) fn import_project(
     }
     timeline.sync_clip_takes_from_flat();
 
+    // v5 迁移（同 open_project）：v4 及更早的被导入工程 Take 无 channel_mode，
+    // 反序列化得到的 0 是"字段缺失"而非用户选择 → 按导入声道策略重新判定。
+    // v5+ 工程绝不改写。此处仍在锁外（fragment 合并发生在后面），可安全解码。
+    if pf.version < 5 {
+        let policy = crate::config::channel_import_policy();
+        if policy.apply_to_legacy_takes {
+            let converted = timeline.apply_channel_policy_to_legacy_takes(&policy);
+            if converted > 0 {
+                log::info!(
+                    "[import_project] channel policy folded {converted} legacy take(s) to mono"
+                );
+            }
+        }
+    }
+
     let imported_notes = std::mem::take(&mut pf.notes_markdown);
     let imported_tempo_map = timeline.tempo_map.take();
     let imported_project_name = pf.name.clone();

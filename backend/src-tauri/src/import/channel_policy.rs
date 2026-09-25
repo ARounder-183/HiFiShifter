@@ -170,6 +170,24 @@ pub fn resolve_clip_takes_channel_mode(
     changed
 }
 
+/// 对一批**刚导入、尚无声道权威信息**的 Clip 套用当前导入策略。
+///
+/// **会解码音频**，必须在锁外调用。返回被改写的 Take 总数。
+///
+/// 供 VocalShifter 工程 / 剪贴板导入使用。REAPER 导入自带 `CHANMODE`
+/// 权威字段，**不得**调用本函数。
+pub fn apply_policy_to_clips(clips: &mut [crate::state::Clip]) -> usize {
+    let policy = crate::config::channel_import_policy();
+    if policy.is_off() {
+        return 0;
+    }
+    let mut changed = 0usize;
+    for clip in clips.iter_mut() {
+        changed += resolve_clip_takes_channel_mode(clip, &policy);
+    }
+    changed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
