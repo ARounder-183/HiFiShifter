@@ -135,7 +135,12 @@ import {
     resolveWheelZoomStep,
     type WheelZoomAccumulator,
 } from "../input/wheelZoomIntent";
-import { deltaSecToContentPx, dragDeltaSec, pointerSecAt } from "../../runtime/dragAnchor.js";
+import {
+    anchoredDeltaSec,
+    deltaSecToContentPx,
+    dragDeltaSec,
+    pointerSecAt,
+} from "../../runtime/dragAnchor.js";
 import { createRenderLoop } from "../../../renderKernel/renderLoop";
 import { createClipInstanceBuilder } from "../scene/clipInstances";
 import { resolvePlayheadSec, shouldRepaintForPlayhead } from "../scene/playheadInvalidation";
@@ -1015,16 +1020,18 @@ export interface TimelineKernelHost {
      */
     paintNow(): void;
     /**
-     * 按滚轮因子做**水平缩放**（标尺滚轮复用画布滚轮的同一条路径）。
+     * 把一条**来自容器之外**的滚轮事件交给内核按画布滚轮处理。
      *
-     * 【为什么需要】标尺是内核容器**之外**的 DOM 条，它的滚轮进不了容器的监听；
-     * 而缩放要用的锚点换算、上下限、`pendingZoom` 累计基准都在内核里 —— 面板只需
-     * 调这一个入口，口径不会分叉。
+     * 【为什么需要】标尺是内核容器**之外**的 DOM 条，它的滚轮进不了容器的监听。
+     * 标尺上的滚轮应当与画布内**完全同义**（同一套 keybinding 判定：自由滚动 /
+     * 横纵滚动 / 横纵缩放），所以不做任何"另一种语义"的翻译，直接把事件转交过来 ——
+     * 命中判定也天然正确：标尺在容器上方，`scrollbarZoneAt` 因指针不在容器矩形内
+     * 而返回 null，于是走的就是画布内的那一支；横向锚点 `clientX - rect.left` 与
+     * 标尺同一水平坐标系。
      *
-     * @param factor 缩放因子（>1 放大、<1 缩小）。
-     * @param anchorClientX 锚点（**视口**坐标；内部换算成相对容器左缘）。
+     * @param event 原生滚轮事件（`clientX/clientY` 为视口坐标）。
      */
-    zoomByWheelFactor(factor: number, anchorClientX: number): void;
+    dispatchWheel(event: WheelEvent): void;
     /**
      * 请求一次**仅重绘**（不重建几何）：播放头每帧移动时调用。
      *
@@ -2684,6 +2691,15 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
               region: ClipHitRegion;
               /** 按下时的内容坐标（用于换算拖拽位移）。 */
               startPointerSec: number;
+              /**
+               * 按下时的水平缩放。
+               *
+               * 【为什么必须快照】抓取偏移（"按下时指针 − 对象锚点"）要按**屏幕像素**
+               * 恒定，而它只有在**按下时**的缩放下才是一个有意义的像素量；之后每次
+               * 折算都用当前缩放（见 `anchoredDeltaSec`）。缺了它就只能退回"抓取偏移
+               * 按时间恒定"，缩放中拖拽会让对象与光标越离越远。
+               */
+              startPxPerSec: number;
               startContentY: number;
               /** 按下时 clip 的几何（换算 delta 与跨轨的基准）。 */
               originStartSec: number;
@@ -2824,6 +2840,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
               clipId: string;
               edge: TrimEdge;
               startPointerSec: number;
+              /** 见 `pending-select.startPxPerSec`。 */
+              startPxPerSec: number;
               originStartSec: number;
               originLengthSec: number;
               /** 最近一次派发的实际变化量（去重）。 */
@@ -2836,6 +2854,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
               kind: "clip-drag";
               clipId: string;
               startPointerSec: number;
+              /** 见 `pending-select.startPxPerSec`。 */
+              startPxPerSec: number;
               startContentY: number;
               /** 按下时的指针视口 x：竖直换轨锁定按**水平位移**判定（原始像素，非内容坐标）。 */
               startClientX: number;
@@ -3739,6 +3759,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                         headerControl: control,
                         cycleHeld: false,
                         startPointerSec: 0,
+                        startPxPerSec: scroll.get().pxPerSec,
                         startContentY: 0,
                         originStartSec: hit.clip.startSec,
                         originTrackId: hit.clip.trackId,
@@ -3795,6 +3816,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                     rectLeft: rect.left,
                 }),
                 startContentY: view.scrollTop + (event.clientY - rect.top),
+                startPxPerSec: view.pxPerSec,
                 originStartSec: hit.clip.startSec,
                 originTrackId: hit.clip.trackId,
                 lengthSec: hit.clip.lengthSec,
@@ -4088,6 +4110,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                     clipId: gesture.clipId,
                     edge: gesture.region === "left-edge" ? "left" : "right",
                     startPointerSec: gesture.startPointerSec,
+                    startPxPerSec: gesture.startPxPerSec,
                     originStartSec: gesture.originStartSec,
                     originLengthSec: gesture.lengthSec,
                     lastDeltaSec: Number.NaN,
@@ -4101,6 +4124,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 kind: "clip-drag",
                 clipId: gesture.clipId,
                 startPointerSec: gesture.startPointerSec,
+                startPxPerSec: gesture.startPxPerSec,
                 startContentY: gesture.startContentY,
                 startClientX: gesture.startClientX,
                 originStartSec: gesture.originStartSec,
@@ -4138,15 +4162,23 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         const result = resolveTrimEdge({
             edge: gesture.edge,
             deltaContentXPx: deltaSecToContentPx(
-                dragDeltaSec(
-                    gesture.startPointerSec,
-                    pointerSecAt({
+                anchoredDeltaSec({
+                    // 锚点 = 被拖的**那条边**：左边缘就是 clip 起点，右边缘是起点+长度。
+                    // 拖拽中被抓住的正是这条边，它必须始终贴在光标下的同一处。
+                    anchorSec:
+                        gesture.edge === "left"
+                            ? gesture.originStartSec
+                            : gesture.originStartSec + gesture.originLengthSec,
+                    startPointerSec: gesture.startPointerSec,
+                    startPxPerSec: gesture.startPxPerSec,
+                    pointerSec: pointerSecAt({
                         scrollLeftPx: view.scrollLeft,
                         pxPerSec: view.pxPerSec,
                         clientX: event.clientX,
                         rectLeft: rect.left,
                     }),
-                ),
+                    pxPerSec: view.pxPerSec,
+                }),
                 view.pxPerSec,
             ),
             pxPerSec: view.pxPerSec,
@@ -4228,6 +4260,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         if (gesture.kind !== "crossfade-grip") return;
         const rect = container.getBoundingClientRect();
         const view = scroll.get();
+        // 【为什么这里仍用纯时间位移】抓取点就是抓手本身（十几像素宽的小控件），
+        // 抓取偏移可忽略；而"抓手的锚点"（两段的重叠边界）没有进手势快照，
+        // 猜一个只会引入新错误。见 `anchoredDeltaSec` 的说明。
         const deltaSec = dragDeltaSec(
             gesture.startPointerSec,
             pointerSecAt({
@@ -4275,6 +4310,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         const view = scroll.get();
         const result = resolveFadeDrag({
             side: gesture.side,
+            // 【为什么这里仍用纯时间位移】同交叉点抓手：抓取点是十几像素宽的淡变角
+            // 控件本身，抓取偏移可忽略（见 `anchoredDeltaSec`）。
             deltaContentXPx: deltaSecToContentPx(
                 dragDeltaSec(
                     gesture.startPointerSec,
@@ -4357,6 +4394,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         }
         const rect = container.getBoundingClientRect();
         const view = scroll.get();
+        // 【为什么这里仍用纯时间位移】同交叉点抓手：抓取点是 ◣ 手柄本身，抓取偏移
+        // 可忽略；且 `originOffsetSec` 是**时长**而非位置，其锚点（clip 起点 + 偏移）
+        // 未进快照（见 `anchoredDeltaSec`）。
         const deltaSec = dragDeltaSec(
             gesture.startPointerSec,
             pointerSecAt({
@@ -4439,15 +4479,20 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         const contentY = view.scrollTop + (event.clientY - rect.top);
         const delta = resolveDragDelta({
             deltaContentXPx: deltaSecToContentPx(
-                dragDeltaSec(
-                    gesture.startPointerSec,
-                    pointerSecAt({
+                anchoredDeltaSec({
+                    // 锚点 = clip 起点：用户抓的是 clip 的**某一点**（可能离起点几百像素），
+                    // 那个点必须始终贴在光标下（见 `anchoredDeltaSec`）。
+                    anchorSec: gesture.originStartSec,
+                    startPointerSec: gesture.startPointerSec,
+                    startPxPerSec: gesture.startPxPerSec,
+                    pointerSec: pointerSecAt({
                         scrollLeftPx: view.scrollLeft,
                         pxPerSec: view.pxPerSec,
                         clientX: event.clientX,
                         rectLeft: rect.left,
                     }),
-                ),
+                    pxPerSec: view.pxPerSec,
+                }),
                 view.pxPerSec,
             ),
             pxPerSec: view.pxPerSec,
@@ -5464,9 +5509,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             loop.flush();
         },
 
-        zoomByWheelFactor(factor, anchorClientX) {
-            const rect = container.getBoundingClientRect();
-            applyHorizontalWheelZoom(factor, anchorClientX - rect.left);
+        dispatchWheel(event) {
+            onWheel(event);
         },
 
         invalidatePlayhead() {

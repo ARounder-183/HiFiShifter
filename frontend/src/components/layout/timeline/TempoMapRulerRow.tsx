@@ -6,6 +6,7 @@ import type { ScaleLike } from "../../../utils/musicalScales";
 import { SCALE_KEYS, SCALE_LABELS } from "../../../utils/musicalScales";
 import { shouldSuppressHoverSideEffects } from "../../../utils/penInput";
 import { resolveTempoDragOffsetPx } from "./tempoPointDragOffset";
+import { anchoredDeltaSec } from "./runtime/dragAnchor";
 import { useNonPassiveWheel } from "../../../utils/useNonPassiveWheel";
 import type { CustomScalePreset } from "../../../utils/customScales";
 import {
@@ -557,18 +558,25 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
     } | null>(null);
     const dragRef = useRef<{
         pointId: string;
+        /** 按下时的指针客户端 X：拖拽启动阈值的判据（屏幕像素，与缩放无关）。 */
         startClientX: number;
-        /** 按下时变化点的时间（对象基准）。 */
+        /** 按下时变化点的时间（吸附原点、冻结候选、位移基准）。 */
         startSec: number;
         /**
-         * 按下时**指针**所在的时间（光标基准）。
+         * 按下时**指针**的时间 + 当时的缩放。
          *
-         * 【为什么两个都要存】拖拽要保持"对象与光标的时间偏移"恒定 —— 落点 =
-         * `startSec + (当前指针时间 − startPointerSec)`。只用像素差再除以缩放会
-         * 在滚轮缩放后失去基准（起点像素是旧缩放下的量），表现为"拖拽中滚动/缩放
-         * 导致严重偏移"。
+         * 【为什么是这两个而不是"抓取偏移"】抓取偏移必须按**屏幕像素**恒定，而它的
+         * 像素值只有在**按下时的缩放**下才有意义（见 `anchoredDeltaSec`）—— 因此这里
+         * 存的是按下时刻的两个原始量，偏移由共享纯函数每次按当前缩放折算。
+         *
+         * 为什么不能存成"时间"：变化点旗帜左缘对齐变化点的实际位置，用户抓住的是
+         * 旗帜（标签在锚点右侧），抓取点天然偏右几十像素。若把这段距离存成**时间**，
+         * 拖拽中一旦缩放，同一段时间在当前缩放下代表的**像素**会按比例变化 ——
+         * 放大 2 倍，40px 的偏移就变成 80px，光标与标签越拖越远
+         *（用户报告："水平缩放时这个偏右的距离会越来越偏"）。
          */
         startPointerSec: number;
+        startPxPerSec: number;
         /** 拖拽开始时的 Tempo Map 快照，用于吸附计算时固定网格，避免变化点自身移动改变网格。 */
         baseTempoMap: TempoMap;
         /**
@@ -1042,7 +1050,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
      * 拖拽期间**视口变化**（滚轮滚动/缩放、键盘滚动、跨面板同步）后按最后一次指针位置
      * 重算落点。
      *
-     * 【为什么需要】落点 = `startSec + (指针时间 − startPointerSec)`，而"指针时间"依赖
+     * 【为什么需要】落点 = `指针时间 − 抓取偏移 / 当前缩放`，而"指针时间"依赖
      * 当前视口。视口变了而指针没动时若不重算，标签会停在旧落点上、与光标脱开 —— 直到
      * 用户再动一下鼠标才归位（用户报告的"拖拽中滚动/缩放导致偏移"）。滚轮滚动本身
      * **不产生任何 pointermove**，所以这条重放是唯一能让标签跟住光标的路径。
@@ -1123,7 +1131,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             // 才切换到拖拽，此时光标已经离标签有几十像素。若沿用初始偏移，变化点会
             // 永远落后光标那一段距离 —— 用户看到的是"拖到哪儿都不是我指的位置"。
             //
-            // 表达方式：让"对象基准"与"光标基准"都取光标当前时间（抓取偏移为 0）。
+            // 表达方式：锚点与指针时间都取光标当前时间（抓取偏移为 0）。
             const secUnderCursor = pointerSecAtClientX(clientX);
             const dragBase = appliedMap ?? tempoMap ?? { points: [point] };
             dragRef.current = {
@@ -1131,6 +1139,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                 startClientX: clientX,
                 startSec: Number.isFinite(secUnderCursor) ? secUnderCursor : point.positionSec,
                 startPointerSec: secUnderCursor,
+                startPxPerSec: dragPxPerSecRef.current,
                 baseTempoMap: dragBase,
                 // 与 `startFlagDrag` 同一约定：吸附网格不含被拖的点。
                 snapTempoMap: removeTempoPoint(dragBase, point.id) ?? dragBase,
@@ -1302,8 +1311,8 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
      * 【为什么除数取 ref 而不是渲染期捕获的 `pxPerSec`】拖拽主 effect 刻意不把
      * `pxPerSec` 放进依赖（缩放会让 effect 重挂 window 监听、中断拖拽），于是它闭包
      * 里的 `pxPerSec` 会**永久停在拖拽开始时的缩放**上。拖拽中用滚轮缩放后，同一个
-     * 指针位置仍按旧缩放换算，`deltaSecRaw` 整体偏一个缩放比 —— 这正是"拖拽中滚动 /
-     * 缩放导致严重偏移"。行根左缘（`rowRef.getBoundingClientRect()`）本来就是 DOM
+     * 指针位置仍按旧缩放换算，结果整体偏一个缩放比 —— 这正是"拖拽中滚动 / 缩放
+     * 导致严重偏移"。行根左缘（`rowRef.getBoundingClientRect()`）本来就是 DOM
      * 实时值，除数必须同样实时，两者才同源。
      */
     const pointerSecAtClientX = useCallback((clientX: number): number => {
@@ -1330,6 +1339,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                 startClientX: e.clientX,
                 startSec: point.positionSec,
                 startPointerSec: pointerSecAtClientX(e.clientX),
+                startPxPerSec: dragPxPerSecRef.current,
                 baseTempoMap,
                 // 吸附网格用**移除本点**后的地图（见 `snapTempoPosition.gridTempoMap`）：
                 // 被拖的点不参与自己要落位的网格，否则它会把自己的段原点带进候选集，
@@ -1358,10 +1368,11 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             const drag = dragRef.current;
             const liveMap = dragTempoMapRef.current;
             if (!drag || !liveMap) return;
-            // 【落点按"时间差"算，而不是"像素差 / 缩放"】见 `startPointerSec` 的说明：
-            // 起点与当前点都换算成时间再作差，滚轮滚动/缩放中途都不会偏移。
-            const deltaSecRaw = pointerSecAtClientX(e.clientX) - drag.startPointerSec;
-            if (!Number.isFinite(deltaSecRaw)) return;
+            // 【落点 = 锚点跟随光标，抓取偏移按**屏幕像素**恒定】见 `startPointerSec`
+            // 的说明：偏移恒定 ⇒ 标签始终贴在光标下的同一处，缩放不会把它越拉越远；
+            // 而"光标时间"读的是行根的 DOM 实时位置 ⇒ 滚动/缩放后（含重放）都成立。
+            const pointerSecNow = pointerSecAtClientX(e.clientX);
+            if (!Number.isFinite(pointerSecNow)) return;
             // 【拖拽启动阈值】指针未越过阈值前**不改变**变化点。
             //
             // 双击标签进入编辑时，第一下点击的按下与抬起之间几乎总会有 1-2px 抖动；
@@ -1370,16 +1381,19 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             // 挪到哪里取决于相邻变化点（它们决定吸附候选集），正好对应"和前一个
             // 变化点标签是否接近有关"。
             //
-            // 越过阈值后按"阈值后的位移"计算（而不是从起点算），避免越过瞬间跳一格。
-            // 阈值以像素表达（3px），换算成秒后仍按"越过阈值再从阈值处起算"，
-            // 避免越过瞬间跳一格（见 `resolveTempoDragOffsetPx`）。
-            const movedPx = resolveTempoDragOffsetPx(
-                deltaSecRaw * Math.max(1e-9, dragPxPerSecRef.current),
-            );
-            if (movedPx === 0) return;
+            // 判据用**指针的屏幕位移**（与缩放、滚动都无关），越过阈值才开闸；开闸后
+            // 落点完全由光标决定（不再累加位移），因此不存在"按旧尺子解释起点"的问题。
+            if (resolveTempoDragOffsetPx(e.clientX - drag.startClientX) === 0) return;
             const rawSec = Math.max(
                 0,
-                drag.startSec + movedPx / Math.max(1e-9, dragPxPerSecRef.current),
+                drag.startSec +
+                    anchoredDeltaSec({
+                        anchorSec: drag.startSec,
+                        startPointerSec: drag.startPointerSec,
+                        startPxPerSec: drag.startPxPerSec,
+                        pointerSec: pointerSecNow,
+                        pxPerSec: dragPxPerSecRef.current,
+                    }),
             );
             // 吸附网格必须使用拖拽开始时的 Tempo Map 快照：变化点自身移动会改变
             // 其后的网格原点/BPM，若用实时 tempoMap 计算吸附，会使网格跟着标签移动，

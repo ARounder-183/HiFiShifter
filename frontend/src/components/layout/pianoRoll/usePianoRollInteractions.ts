@@ -1651,15 +1651,16 @@ export function usePianoRollInteractions(args: {
     }, []);
 
     /**
-     * 画布滚轮总入口（滚动 / 平移 / 缩放）。
+     * 滚轮总入口（滚动 / 平移 / 缩放）。画布、标尺与自绘滚动条共用它。
      *
      * @param e 原生 wheel 事件。
-     * @param forcedScrollbarZone 调用方**已判定**的滚动条轴。自绘滚动条位于
-     *   滚动容器之外（见 PianoRollPanel 的轨道注释），其上的滚轮不会冒泡到
-     *   `scroller`，因此由轨道自己以该参数把轴「托付」进来 —— 命中判定与
-     *   画布内的 `nativeScrollbarZoneAt` 殊途同归，后续语义（该轴滚动 /
-     *   `modifier.scrollbarZoom` 该轴缩放）完全同源，不存在第二套口径。
-     *   省略时按指针位置自行判定（画布内的原生滚动条区）。
+     * @param forcedScrollbarZone 调用方**已判定**的滚动条轴，只有**自绘滚动条轨道**
+     *   会传。轨道位于滚动容器之外（见 PianoRollPanel 的轨道注释），其上的滚轮不会
+     *   冒泡到 `scroller`，因此由轨道自己把轴「托付」进来 —— 后续语义（该轴滚动 /
+     *   `modifier.scrollbarZoom` 该轴缩放）与画布内的 `nativeScrollbarZoneAt` 同源，
+     *   不存在第二套口径。
+     *   省略时按指针位置自行判定：画布内命中原生滚动条区，而**标尺**在容器矩形
+     *   之外 ⇒ 判定为 null ⇒ 走的就是画布内的那一套 keybinding 语义。
      */
     const onScrollerWheelNative = useCallback(
         (e: globalThis.WheelEvent, forcedScrollbarZone?: ScrollbarZone) => {

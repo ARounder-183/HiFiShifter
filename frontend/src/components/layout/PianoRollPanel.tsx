@@ -4949,9 +4949,16 @@ export const PianoRollPanel: React.FC<{
         },
         [attachHorizontalScrollbarWheel],
     );
-    /** 标尺上的滚轮：横向滚动 / 横向缩放（与画布同一条入口）。 */
+    /**
+     * 标尺上的滚轮：**与画布内的滚轮完全同义**。
+     *
+     * 标尺在滚动容器**之上**，不在 `scroller` 的事件路径里；这里只做"转交"，不指定
+     * 滚动条轴 —— 交给画布滚轮总入口后，命中判定由 `nativeScrollbarZoneAt` 按指针
+     * 位置自行得出（标尺在容器矩形之外 ⇒ 返回 null），keybinding 判定、锚点换算、
+     * 上下限全部与画布同一套，标尺不定义第二种语义。
+     */
     const handleRulerWheel = useCallback((event: React.WheelEvent<HTMLDivElement>) => {
-        scrollerWheelHandlerRef.current(event as unknown as globalThis.WheelEvent, "horizontal");
+        scrollerWheelHandlerRef.current(event as unknown as globalThis.WheelEvent);
     }, []);
 
     // 参数切换或参数描述符变化后，刷新竖向滚动条位置，保证滚动条与当前视口保持一致。

@@ -210,11 +210,7 @@ import { computeEffectiveSnap } from "../../utils/timelineSnapping";
 import { store } from "../../app/store";
 import { applyBulkFadeValue, applyBulkGainDeltaDb } from "./timeline/hooks/bulkClipEdit";
 import { advanceFineAxisDrag, type FineAxisDragState } from "./timeline/fineAxisDrag";
-import {
-    CLIP_GAIN_DRAG_DB_PER_PX,
-    WHEEL_ZOOM_IN_FACTOR,
-    WHEEL_ZOOM_OUT_FACTOR,
-} from "./timeline/constants";
+import { CLIP_GAIN_DRAG_DB_PER_PX } from "./timeline/constants";
 import { isLegacyMouseEventFromStylus } from "../../utils/penInput";
 import {
     buildStretchGroupState,
@@ -631,7 +627,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         timelineTicks,
         scrollLeft,
         rulerScrollLeft,
-        scrollbarZoomKb,
         verticalZoomKb,
         paramFineAdjustKb,
         slipEditKb,
@@ -788,26 +783,16 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         [pxPerSec, setScrollLeftState, viewportAccess],
     );
     /**
-     * 标尺上的滚轮。
+     * 标尺上的滚轮：**与画布内的滚轮完全同义**。
      *
-     * 【语义与"悬停水平滚动条"完全一致】（见内核 `scrollbarZoneAt` 分支）：
-     * 无修饰键 = 水平滚动；按住 `modifier.scrollbarZoom` = 水平缩放。标尺是内核容器
-     * **之外**的 DOM 条，过去它的 `onWheel` 只 `preventDefault` 把滚轮吞掉（而那行在
-     * React 的 passive 监听下还是空操作），用户在标尺上滚轮毫无反应。
+     * 标尺是内核容器**之外**的 DOM 条，过去它的 `onWheel` 只 `preventDefault` 把滚轮
+     * 吞掉（而那行在 React 的 passive 监听下还是空操作），用户在标尺上滚轮毫无反应。
+     * 现在只做"转交"：把事件原样交给内核的滚轮入口，keybinding 判定（自由滚动 /
+     * 横纵滚动 / 横纵缩放）、锚点换算、上下限全部复用画布那一套，标尺不定义第二种语义。
      */
-    const handleRulerWheel = React.useCallback(
-        (event: React.WheelEvent<HTMLDivElement>) => {
-            if (isModifierActive(scrollbarZoomKb, event)) {
-                const factor = event.deltaY < 0 ? WHEEL_ZOOM_IN_FACTOR : WHEEL_ZOOM_OUT_FACTOR;
-                kernelHostRef.current?.zoomByWheelFactor(factor, event.clientX);
-                return;
-            }
-            // 触摸板横向双指用 deltaX；鼠标滚轮只有 deltaY，回退到它（与内核同约定）。
-            const deltaPx = Math.abs(event.deltaX) > 0.5 ? event.deltaX : event.deltaY;
-            viewportAccess.setScrollLeft(viewportAccess.getScrollLeft() + deltaPx);
-        },
-        [scrollbarZoomKb, viewportAccess],
-    );
+    const handleRulerWheel = React.useCallback((event: React.WheelEvent<HTMLDivElement>) => {
+        kernelHostRef.current?.dispatchWheel(event as unknown as WheelEvent);
+    }, []);
 
     React.useLayoutEffect(() => {
         const pending = pendingKernelZoomRef.current;
