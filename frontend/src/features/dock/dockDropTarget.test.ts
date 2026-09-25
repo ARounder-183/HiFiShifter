@@ -204,4 +204,61 @@ test("features/dock/dockDropTarget.test.ts scripted checks", async () => {
             "a manually placed float keeps its coordinates",
         );
     }
+
+    // ── 锚点偏移：多个默认浮窗必须错开 ────────────────────────────
+    //
+    // 记事本（460×420）在右下角，撤销历史（420×420）声明 offsetX = -(460 + 24)：
+    // 两者底边对齐、水平间隔恰好一个边距，绝不重叠。
+    {
+        const viewport = { w: 1920, h: 1080 };
+        const notebook = resolveFloatRect(
+            {
+                x: 0,
+                y: 0,
+                w: 460,
+                h: 420,
+                anchor: "bottom-right" as const,
+                anchorMarginPx: 24,
+                anchorOffsetX: 0,
+                anchorOffsetY: 0,
+            },
+            viewport,
+        );
+        const undo = resolveFloatRect(
+            {
+                x: 0,
+                y: 0,
+                w: 420,
+                h: 420,
+                anchor: "bottom-right" as const,
+                anchorMarginPx: 24,
+                anchorOffsetX: -(460 + 24),
+                anchorOffsetY: 0,
+            },
+            viewport,
+        );
+        assertEqual(undo, { x: 992, y: 636, w: 420, h: 420 }, "offset float sits left");
+        assertEqual(
+            notebook.x - (undo.x + undo.w),
+            24,
+            "exactly one margin between the two default floats",
+        );
+        assertEqual(notebook.y, undo.y, "and they stay bottom-aligned");
+        assertEqual(
+            resolveFloatRect(
+                {
+                    x: 0,
+                    y: 0,
+                    w: 420,
+                    h: 420,
+                    anchor: "bottom-right" as const,
+                    anchorMarginPx: 24,
+                    anchorOffsetX: -2000,
+                },
+                { w: 300, h: 200 },
+            ),
+            { x: 24, y: 24, w: 420, h: 420 },
+            "an offset still clamps to the margin on a degenerate viewport",
+        );
+    }
 });

@@ -85,6 +85,14 @@ export interface PanelDefinition {
         /** 落在主窗口的哪个角（留 `marginPx` 边距）。 */
         anchor: "bottom-right";
         marginPx?: number;
+        /**
+         * 在同角落点上再叠加的偏移（px，负值向左/向上）。
+         *
+         * 多个默认浮出的面板都用同一个角时会完全重叠，用它与相邻面板**错开**
+         * （如撤销历史落在记事本左侧，见 `registerBuiltinPanels`）。
+         */
+        offsetX?: number;
+        offsetY?: number;
     };
     /**
      * 是否允许被拆到**独立操作系统窗口**（主窗口之外）。

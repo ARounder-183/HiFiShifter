@@ -159,6 +159,9 @@ function resolveOpenFloat(spec: NonNullable<PanelDefinition["openAsFloating"]>):
         h: spec.height,
         anchor: spec.anchor,
         anchorMarginPx: spec.marginPx ?? 24,
+        // 偏移与锚点同生共死：它在渲染时叠加在锚点落点上，用于与同角的其它面板错开。
+        anchorOffsetX: spec.offsetX ?? 0,
+        anchorOffsetY: spec.offsetY ?? 0,
     };
 }
 
@@ -259,6 +262,9 @@ function normalizeFloat(raw: unknown): DockForm["float"] {
     if (value.anchor === "bottom-right") {
         float.anchor = "bottom-right";
         float.anchorMarginPx = clampNumber(value.anchorMarginPx, 0, 400, 24);
+        // 偏移同锚点一起保留：丢了它，两个默认浮出的面板会落回同一处完全重叠。
+        float.anchorOffsetX = clampNumber(value.anchorOffsetX, -4000, 4000, 0);
+        float.anchorOffsetY = clampNumber(value.anchorOffsetY, -4000, 4000, 0);
     } else {
         float.anchor = null;
     }

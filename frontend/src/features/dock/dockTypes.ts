@@ -105,6 +105,15 @@ export interface DockFloatGeometry {
     anchor?: DockFloatAnchor | null;
     /** 锚点距视口边缘的间距（px）。 */
     anchorMarginPx?: number;
+    /**
+     * 在锚点落点上再叠加的偏移（px，负值向左/向上）。
+     *
+     * 【为什么需要】多个"默认浮出"的面板若都用同一个角，打开时必然完全重叠。锚点
+     * 只表达"落在哪个角"，偏移表达"与同角其它面板错开多少"——例如撤销历史落在
+     * 记事本左侧（见 `registerBuiltinPanels`）。
+     */
+    anchorOffsetX?: number;
+    anchorOffsetY?: number;
     /** 最大化（铺满主窗口可用区），保留原几何以便还原。 */
     maximized?: boolean;
     /** 最大化前的几何快照。 */

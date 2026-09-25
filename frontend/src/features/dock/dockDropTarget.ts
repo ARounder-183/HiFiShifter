@@ -152,17 +152,28 @@ export function clampFloatRect(
  * 被清除（见 `setFloatGeometry`），此处只是原样返回。
  */
 export function resolveFloatRect(
-    geometry: DockRect & { anchor?: string | null; anchorMarginPx?: number },
+    geometry: DockRect & {
+        anchor?: string | null;
+        anchorMarginPx?: number;
+        anchorOffsetX?: number;
+        anchorOffsetY?: number;
+    },
     viewport: { w: number; h: number },
 ): DockRect {
     if (geometry.anchor !== "bottom-right") {
         return { x: geometry.x, y: geometry.y, w: geometry.w, h: geometry.h };
     }
     const margin = geometry.anchorMarginPx ?? 24;
+    const offsetX = Number.isFinite(geometry.anchorOffsetX)
+        ? (geometry.anchorOffsetX as number)
+        : 0;
+    const offsetY = Number.isFinite(geometry.anchorOffsetY)
+        ? (geometry.anchorOffsetY as number)
+        : 0;
     return {
         // 视口比窗体还小时退回边距原点（宁可盖住内容，也不要跑到屏幕外）。
-        x: Math.max(margin, Math.round(viewport.w - geometry.w - margin)),
-        y: Math.max(margin, Math.round(viewport.h - geometry.h - margin)),
+        x: Math.max(margin, Math.round(viewport.w - geometry.w - margin + offsetX)),
+        y: Math.max(margin, Math.round(viewport.h - geometry.h - margin + offsetY)),
         w: geometry.w,
         h: geometry.h,
     };

@@ -30,6 +30,7 @@ import {
     resetDockLayout,
     saveDockPreset,
     setDockLayout,
+    setFloatGeometry,
     setFormFloatMode,
     setFormFloatScreen,
     toggleMaximizeActive,
@@ -37,7 +38,7 @@ import {
 import {
     closeDetachedWindow,
     openDetachedWindow,
-    readDetachedWindowPosition,
+    readDetachedWindowGeometry,
     watchDetachedWindow,
 } from "./detachedWindow";
 import type { DockLayout } from "./dockTypes";
@@ -208,9 +209,10 @@ export async function reclaimDetachedForm(
 ): Promise<void> {
     const form = getState().dock.layout.forms[formId];
     if (!form || form.floatMode !== "osWindow") return;
-    const position = await readDetachedWindowPosition(formId);
+    const geometry = await readDetachedWindowGeometry(formId);
     await closeDetachedWindow(formId);
-    if (position) dispatch(setFormFloatScreen({ formId, screen: position }));
+    // 关窗前最后再抓一次几何：用户可能刚移动/缩放完就直接关掉了窗口（轮询还没轮到）。
+    if (geometry) persistDetachedGeometry(dispatch, getState, formId, geometry);
     dispatch(setFormFloatMode({ formId, floatMode: "inApp" }));
 }
 
@@ -268,14 +270,53 @@ function startWatching(dispatch: AppDispatch, getState: GetState, formId: string
     stopWatching.get(formId)?.();
     stopWatching.set(
         formId,
-        watchDetachedWindow(formId, () => {
-            stopWatching.get(formId)?.();
-            stopWatching.delete(formId);
-            // 复用同一回收路径：窗口此时已消失，`closeDetachedWindow` 是空操作，
-            // 早退判定也保证重复回调不会重复 dispatch。
-            void reclaimDetachedForm(dispatch, getState, formId);
+        watchDetachedWindow(formId, {
+            onGone: () => {
+                stopWatching.get(formId)?.();
+                stopWatching.delete(formId);
+                // 复用同一回收路径：窗口此时已消失，`closeDetachedWindow` 是空操作，
+                // 早退判定也保证重复回调不会重复 dispatch。
+                void reclaimDetachedForm(dispatch, getState, formId);
+            },
+            onGeometry: (geometry) => persistDetachedGeometry(dispatch, getState, formId, geometry),
         }),
     );
+}
+
+/**
+ * 把独立窗口当前的屏幕几何写回布局（供下次重新开启时恢复）。
+ *
+ * 【为什么由主窗口的轮询来写】用户拖动/缩放独立窗口时主窗口收不到事件（跨窗口事件
+ * 语义不可靠，见 `watchDetachedWindow`）；轮询上报是唯一稳定时机。写入前先比一次，
+ * 位置与尺寸都只在**真的变了**（>1px）时才 dispatch —— 否则每秒都会改一次布局，
+ * 把持久化与订阅者都惊动一遍。
+ */
+function persistDetachedGeometry(
+    dispatch: AppDispatch,
+    getState: GetState,
+    formId: string,
+    geometry: { x: number; y: number; w: number; h: number },
+): void {
+    const form = getState().dock.layout.forms[formId];
+    // 已经被回收（或不再处于独立窗口）时不再写：晚到的轮询结果会把刚恢复的
+    // 进程内浮窗位置改掉。
+    if (!form || form.floatMode !== "osWindow") return;
+    const screen = form.floatScreen ?? null;
+    const moved =
+        screen === null ||
+        Math.abs(screen.x - geometry.x) >= 1 ||
+        Math.abs(screen.y - geometry.y) >= 1;
+    if (moved) {
+        dispatch(setFormFloatScreen({ formId, screen: { x: geometry.x, y: geometry.y } }));
+    }
+    const size = form.float ?? null;
+    const resized =
+        size === null || Math.abs(size.w - geometry.w) >= 1 || Math.abs(size.h - geometry.h) >= 1;
+    if (resized) {
+        // 尺寸也记进 `float`：它同时是"下次拆出去时窗口开多大"与"收回来时进程内浮窗
+        // 多大"的基准（与拖拽拆出时的约定一致，见 `beginTabDrag` 的说明）。
+        dispatch(setFloatGeometry({ formId, geometry: { w: geometry.w, h: geometry.h } }));
+    }
 }
 
 /** 某个窗体当前是否在独立窗口中。 */

@@ -233,11 +233,13 @@ const dockSlice = createSlice({
             const index = state.layout.floatOrder.length;
             const base = form.float ?? defaultFloatGeometry(formId, index);
             // 显式给了位置（拖拽拆出、菜单指定）就**清除锚点**：用户/调用方已经
-            // 决定了位置，不该再被"右下角"这个语义覆盖。
+            // 决定了位置，不该再被"右下角"这个语义覆盖。锚点偏移随锚点一起清。
             const next = {
                 ...base,
                 ...geometry,
                 anchor: geometry ? null : (base.anchor ?? null),
+                anchorOffsetX: geometry ? 0 : base.anchorOffsetX,
+                anchorOffsetY: geometry ? 0 : base.anchorOffsetY,
             };
             const tree = removeForm(state.layout.tree, formId) ?? state.layout.tree;
 
@@ -261,7 +263,8 @@ const dockSlice = createSlice({
             const form = state.layout.forms[formId];
             if (!form?.floating || !form.float) return;
             // 用户手动移动/缩放（或最小化/最大化）之后，锚点即失效：此后的位置由
-            // 这些具体几何决定，而不是"右下角"这个语义。
+            // 这些具体几何决定，而不是"右下角"这个语义。锚点偏移是锚点的一部分，
+            // 必须一起清掉（否则它会在下一次重新挂上锚点时凭空生效）。
             // `Object.assign` 而非展开：前者保留"基础几何已提供全部必填字段"的类型，
             // 后者会因为 `Partial` 而把结果推成可选字段。
             state.layout = {
@@ -270,7 +273,11 @@ const dockSlice = createSlice({
                     ...state.layout.forms,
                     [formId]: {
                         ...form,
-                        float: Object.assign({}, form.float, geometry, { anchor: null }),
+                        float: Object.assign({}, form.float, geometry, {
+                            anchor: null,
+                            anchorOffsetX: 0,
+                            anchorOffsetY: 0,
+                        }),
                     },
                 },
             };

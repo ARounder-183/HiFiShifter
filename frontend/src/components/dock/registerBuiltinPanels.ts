@@ -20,6 +20,18 @@ export const PANEL_FILE_BROWSER = "fileBrowser";
 export const PANEL_NOTEBOOK = "notebook";
 export const PANEL_UNDO_HISTORY = "undoHistory";
 
+/**
+ * 记事本默认浮窗尺寸。
+ *
+ * 撤销历史的默认落点由它推导（落在记事本左侧），因此抽成常量：改尺寸不会让两个
+ * 默认浮窗失配重叠。
+ */
+const NOTEBOOK_FLOAT_WIDTH = 460;
+const NOTEBOOK_FLOAT_HEIGHT = 420;
+
+/** 默认浮窗距视口边缘的边距（与 `openAsFloating.marginPx` 的默认值一致）。 */
+const DEFAULT_FLOAT_MARGIN_PX = 24;
+
 let registered = false;
 
 /** 注册全部内置面板。幂等：重复调用只是重放注册。 */
@@ -77,12 +89,14 @@ export function registerBuiltinPanels(): void {
         defaultWidth: 420,
         defaultHeight: 480,
         minWidth: NOTEBOOK_PANEL_MIN_WIDTH,
-        // 记事本与文件浏览器同处右侧停靠栏，以标签页共存 —— 打开两者时宽度
-        // 不再翻倍，这是"界面拥挤"最直接的解法。
         // 记事本是"随手记"性质的辅助面板：**默认保持关闭**（启动时不该自己冒出来），
         // 用户打开它时希望它浮在手边、而不是挤进布局占一格 —— 因此落在右下角。
         // 声明了 `openAsFloating` 之后 `defaultPlacement` 不会再被用到，故不再声明。
-        openAsFloating: { width: 460, height: 420, anchor: "bottom-right" },
+        openAsFloating: {
+            width: NOTEBOOK_FLOAT_WIDTH,
+            height: NOTEBOOK_FLOAT_HEIGHT,
+            anchor: "bottom-right",
+        },
         detachable: true,
         order: 40,
     });
@@ -96,7 +110,17 @@ export function registerBuiltinPanels(): void {
         defaultWidth: 420,
         defaultHeight: 420,
         minWidth: 260,
-        defaultPlacement: { side: "right", sizePx: 380, tabWith: PANEL_FILE_BROWSER },
+        // 与记事本同样的处理：辅助面板，**默认保持关闭**，打开时浮在手边而不是挤进
+        // 布局占一格（此前它与文件浏览器并排停靠在右侧栏）。
+        // 落点与记事本错开：贴它的**左侧**、底边对齐、间隔一个默认边距 —— 两个默认
+        // 浮出的面板同时打开时不会叠在一起。偏移量由记事本的宽度推导（自身已距边缘
+        // 一个边距，因此只需再让出"记事本宽 + 一个边距"），改尺寸不会失配。
+        openAsFloating: {
+            width: 420,
+            height: 420,
+            anchor: "bottom-right",
+            offsetX: -(NOTEBOOK_FLOAT_WIDTH + DEFAULT_FLOAT_MARGIN_PX),
+        },
         detachable: true,
         order: 50,
     });

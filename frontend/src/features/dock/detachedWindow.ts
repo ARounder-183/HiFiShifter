@@ -17,6 +17,15 @@
 /** 独立窗口的 label 前缀（与主窗口的 `main` 区分）。 */
 const DETACHED_LABEL_PREFIX = "hs-detached-";
 
+/**
+ * 主窗口的 **Tauri 窗口 label**。
+ *
+ * `tauri.conf.json` 的窗口没有显式声明 `label`，Tauri 的默认值就是 `main`。它与
+ * `resolveWindowLabel()` 的逻辑角色同名但含义不同：这里是真实窗口 label，用于给
+ * 独立窗口建立 owner 关系。
+ */
+const MAIN_WINDOW_LABEL = "main";
+
 /** 由窗体 id 得到窗口 label。 */
 export function detachedWindowLabel(formId: string): string {
     return `${DETACHED_LABEL_PREFIX}${formId}`;
@@ -90,6 +99,17 @@ export async function openDetachedWindow(
             decorations: true,
             resizable: true,
             focus: true,
+            // 【独立窗口不是"第二个应用"，而是主窗口的从属窗口】把主窗口设为 owner：
+            // - 任务栏只留主窗口一个按钮（shell 会跳过有 owner 的窗口）；
+            // - 从属窗口恒在 owner **之上** ⇒ 永远压在主界面前面，又不会盖住别的程序；
+            // - 多个从属窗口之间按**激活顺序**排列 ⇒ 焦点在谁身上谁就在最前；
+            // - owner 最小化时它们随之隐藏、owner 销毁时被系统一并销毁（正是我们要的
+            //   "主窗口退出即带走全部独立窗口"）。
+            // 语义在各平台一致（Linux 为 transient-for、macOS 为 child window），
+            // 因此不做平台分支。`skipTaskbar` 只作兜底：即便某些平台的 owner 关系
+            // 不参与任务栏判定，也不会多占一个按钮。
+            parent: MAIN_WINDOW_LABEL,
+            skipTaskbar: true,
         });
         // 错误事件尽力监听（`once` 自身是异步的，可能错过已发出的错误 —— 因此下面
         // 还有一次基于"窗口是否真的出现"的确认，两者互补）。
@@ -167,7 +187,43 @@ const DETACHED_WATCH_INTERVAL_MS = 1000;
 const DETACHED_WATCH_GRACE_MS = 2000;
 
 /**
- * 监视某个独立窗口是否已被关闭。
+ * 独立窗口的屏幕几何（**逻辑像素**，与创建参数同一坐标系）。
+ *
+ * 位置用于下次重新开启时恢复（`form.floatScreen`），尺寸用于恢复浮窗大小
+ * （`form.float.w/h`）—— 两者都是"用户上次摆成什么样"的一部分。
+ */
+export interface DetachedWindowGeometry {
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+}
+
+/** 读取一个窗口实例的屏幕几何（逻辑像素）；读取失败返回 null。 */
+async function readGeometryOf(win: {
+    outerPosition: () => Promise<{ x: number; y: number }>;
+    outerSize: () => Promise<{ width: number; height: number }>;
+    scaleFactor: () => Promise<number>;
+}): Promise<DetachedWindowGeometry | null> {
+    try {
+        const scale = (await win.scaleFactor().catch(() => 1)) || 1;
+        const position = await win.outerPosition();
+        const size = await win.outerSize();
+        // Tauri 的坐标与尺寸都是**物理像素**；持久化用逻辑像素（与创建参数一致），
+        // 否则在系统缩放率 ≠ 100% 时窗口每次重开都会按比例漂移。
+        return {
+            x: position.x / scale,
+            y: position.y / scale,
+            w: size.width / scale,
+            h: size.height / scale,
+        };
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * 监视某个独立窗口是否已被关闭，并**顺带上报它的屏幕几何**。
  *
  * 【为什么用轮询，而不是 `onCloseRequested`】`WebviewWindow.listen` 会把监听
  * **限定到该窗口的 label**（`target: { kind: "Webview", label: this.label }`），
@@ -179,10 +235,23 @@ const DETACHED_WATCH_GRACE_MS = 2000;
  * 轮询窗口是否存在则完全不依赖跨窗口事件语义，而且能覆盖"进程被杀 / 崩溃"这类
  * 事件根本不会到达的情况。
  *
- * @param onGone 窗口消失时的回调（主窗口据此把窗体收回进程内浮层）。
+ * 【几何为什么也在这里上报】用户拖动/缩放独立窗口时，主窗口这一侧**收不到任何
+ * 事件**（跨窗口事件语义不可靠，见上）；轮询是唯一稳定时机。每秒两次 IPC 调用，
+ * 代价可忽略，换来"关窗/退出/崩溃后下次仍能恢复到上次的位置与大小"。
+ *
+ * @param formId 窗体 id。
+ * @param handlers.onGone 窗口消失时的回调（主窗口据此把窗体收回进程内浮层）。
+ * @param handlers.onGeometry 每次轮询到几何时的回调（调用方自行做变化判定）。
  * @returns 停止监视（收回窗体、或主窗口卸载时调用）。
  */
-export function watchDetachedWindow(formId: string, onGone: () => void): () => void {
+export function watchDetachedWindow(
+    formId: string,
+    handlers: {
+        onGone: () => void;
+        onGeometry?: (geometry: DetachedWindowGeometry) => void;
+    },
+): () => void {
+    const { onGone, onGeometry } = handlers;
     let stopped = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
 
@@ -195,6 +264,10 @@ export function watchDetachedWindow(formId: string, onGone: () => void): () => v
             if (!win) {
                 if (!stopped) onGone();
                 return;
+            }
+            if (onGeometry) {
+                const geometry = await readGeometryOf(win);
+                if (geometry && !stopped) onGeometry(geometry);
             }
         } catch {
             // 查询失败按"仍在"处理：下一个周期再确认，避免误回收。
@@ -210,19 +283,16 @@ export function watchDetachedWindow(formId: string, onGone: () => void): () => v
     };
 }
 
-/** 读取独立窗口当前的屏幕坐标（用于持久化）。 */
-export async function readDetachedWindowPosition(
+/** 读取独立窗口当前的屏幕几何（用于持久化）；窗口不在时返回 null。 */
+export async function readDetachedWindowGeometry(
     formId: string,
-): Promise<{ x: number; y: number } | null> {
+): Promise<DetachedWindowGeometry | null> {
     const api = await loadWebviewWindowApi();
     if (api === null) return null;
     try {
         const win = await api.WebviewWindow.getByLabel(detachedWindowLabel(formId));
         if (!win) return null;
-        const position = await win.outerPosition();
-        const scale = await win.scaleFactor().catch(() => 1);
-        // `outerPosition` 返回物理像素；持久化用逻辑像素（与创建参数同一坐标系）。
-        return { x: position.x / (scale || 1), y: position.y / (scale || 1) };
+        return await readGeometryOf(win);
     } catch {
         return null;
     }
