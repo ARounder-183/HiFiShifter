@@ -869,6 +869,10 @@ pub(super) fn set_clip_state(
             auto_fade_out_sec,
             color,
             formant_morph,
+            // 单 Clip 的声道模式走 `set_clip_take_channel_mode`（可靶向具体
+            // Take）；批量场景走 `set_clips_state_bulk` 的 patch 字段。
+            channel_mode: None,
+            apply_to_all_takes: None,
         },
     );
     // 波纹编辑（自动跟进）：当起点/长度改变（右边缘位移）时，平移后续剪辑。
@@ -963,6 +967,17 @@ pub(super) fn set_clips_state_bulk(
         .collect();
 
     tl.patch_clips_state(&updates);
+
+    // 声道模式变更改变渲染输入语义（渲染哈希 / formant 键 / HNSEP 声道位），
+    // 与 `set_clip_take_channel_mode` 同口径整体失效相关缓存，并重调度分析。
+    // 其余字段（gain / fade / 位置…）不影响这些缓存，跳过以免无谓重算。
+    for update in &updates {
+        if update.patch.channel_mode.is_some() {
+            invalidate_take_related_caches(&update.clip_id);
+            maybe_schedule_formant_rebuild(&state, &tl, &update.clip_id);
+        }
+    }
+
     let mut root_track_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     for update in &updates {
         if let Some(clip) = tl.clips.iter().find(|c| c.id == update.clip_id) {

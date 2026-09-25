@@ -546,11 +546,11 @@ pub fn set_channel_import_policy(policy: &ChannelImportPolicy) {
         .unwrap_or_else(|e| e.into_inner()) = normalized;
 }
 
-/// 测试专用：串行化所有会改写进程级声道策略的测试。
+/// 测试专用：串行化所有会改写**进程级设置**的测试。
 ///
-/// 策略是进程级单例，而 `cargo test` 默认并行跑用例 —— 一个用例把它设成
-/// `off`、另一个用例依赖 `smart` 时，会得到随机的假失败。所有触碰该全局的
-/// 测试都必须先拿这把锁。
+/// 这些设置（导入声道策略、Loop 默认值、同步编辑所有 Take…）是进程级单例，
+/// 而 `cargo test` 默认并行跑用例 —— 一个用例把它设成 `off`、另一个用例依赖
+/// `smart` 时，会得到随机的假失败。所有触碰这些全局的测试都必须先拿这把锁。
 #[cfg(test)]
 pub(crate) fn channel_policy_test_guard() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

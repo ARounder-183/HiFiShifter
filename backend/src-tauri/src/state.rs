@@ -1551,6 +1551,18 @@ pub struct ClipStatePatch {
     pub auto_fade_out_sec: Option<f64>,
     pub color: Option<String>,
     pub formant_morph: Option<ClipFormantMorph>,
+    /// 声道模式（0..=4，对齐 REAPER CHANMODE；语义见 [`crate::channel_mode`]）。
+    ///
+    /// 与 gain / reversed / loop_enabled 同属**内容级**属性，因此也参与
+    /// "同步编辑所有 Take"（可由 [`Self::apply_to_all_takes`] 逐请求覆盖）。
+    #[serde(default)]
+    pub channel_mode: Option<i32>,
+    /// 逐请求覆盖"同步编辑所有 Take"的判定：
+    /// - `Some(true)`：强制同步到该 Clip 的全部 Take；
+    /// - `Some(false)`：只改 active take；
+    /// - `None`（默认）：跟随全局设置 [`crate::config::sync_edits_across_takes`]。
+    #[serde(default)]
+    pub apply_to_all_takes: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -5382,6 +5394,146 @@ mod tests {
         assert_eq!(timeline.clips[1].fade_in_sec, 0.25);
     }
 
+    /// 造一个带两个 Take 的 Clip（active = 第一个），返回 (timeline, clip_id)。
+    fn timeline_with_two_takes() -> (TimelineState, String) {
+        let mut tl = TimelineState::default();
+        let track_id = tl.tracks[0].id.clone();
+        let clip_id = tl.add_clip(
+            Some(track_id),
+            Some("T".into()),
+            Some(0.0),
+            Some(2.0),
+            Some("C:/audio/a.wav".into()),
+        );
+        {
+            let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).unwrap();
+            clip.sync_take_from_flat();
+            let mut second = clip.takes[0].clone();
+            second.id = "take_b".into();
+            clip.takes.push(second);
+            clip.active_take_id = Some(clip.takes[0].id.clone());
+        }
+        (tl, clip_id)
+    }
+
+    #[test]
+    fn bulk_patch_sets_channel_mode_on_active_take_only() {
+        let (mut tl, clip_id) = timeline_with_two_takes();
+        tl.patch_clip_state(
+            &clip_id,
+            ClipStatePatch {
+                channel_mode: Some(2),
+                // 显式只改 active take（覆盖全局"同步所有 Take"）。
+                apply_to_all_takes: Some(false),
+                ..Default::default()
+            },
+        );
+        let clip = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+        assert_eq!(clip.channel_mode, 2, "active 投影必须同步");
+        assert_eq!(clip.takes[0].channel_mode, 2);
+        assert_eq!(clip.takes[1].channel_mode, 0, "inactive take 不得被改");
+    }
+
+    #[test]
+    fn bulk_patch_applies_channel_mode_to_all_takes_when_requested() {
+        let (mut tl, clip_id) = timeline_with_two_takes();
+        tl.patch_clip_state(
+            &clip_id,
+            ClipStatePatch {
+                channel_mode: Some(3),
+                apply_to_all_takes: Some(true),
+                ..Default::default()
+            },
+        );
+        let clip = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+        assert_eq!(clip.channel_mode, 3);
+        assert_eq!(clip.takes[0].channel_mode, 3);
+        assert_eq!(clip.takes[1].channel_mode, 3, "请求了同步就必须全部改到");
+    }
+
+    #[test]
+    fn bulk_patch_channel_mode_defaults_to_the_global_sync_setting() {
+        // 复用本模块既有的同步设置守卫：该全局的其它用例也持有同一把锁。
+        let _sync_guard = SYNC_EDITS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let original = crate::config::sync_edits_across_takes();
+
+        let (mut tl, clip_id) = timeline_with_two_takes();
+        crate::config::set_sync_edits_across_takes(true);
+        tl.patch_clip_state(
+            &clip_id,
+            ClipStatePatch {
+                channel_mode: Some(2),
+                ..Default::default()
+            },
+        );
+        {
+            let clip = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+            assert_eq!(clip.takes[1].channel_mode, 2, "全局开启时默认同步全部");
+        }
+
+        let (mut tl2, clip_id2) = timeline_with_two_takes();
+        crate::config::set_sync_edits_across_takes(false);
+        tl2.patch_clip_state(
+            &clip_id2,
+            ClipStatePatch {
+                channel_mode: Some(2),
+                ..Default::default()
+            },
+        );
+        {
+            let clip = tl2.clips.iter().find(|c| c.id == clip_id2).unwrap();
+            assert_eq!(clip.takes[1].channel_mode, 0, "全局关闭时默认只改 active");
+        }
+
+        crate::config::set_sync_edits_across_takes(original);
+    }
+
+    #[test]
+    fn bulk_patch_normalizes_out_of_range_channel_mode() {
+        let (mut tl, clip_id) = timeline_with_two_takes();
+        tl.patch_clip_state(
+            &clip_id,
+            ClipStatePatch {
+                channel_mode: Some(42),
+                apply_to_all_takes: Some(true),
+                ..Default::default()
+            },
+        );
+        let clip = tl.clips.iter().find(|c| c.id == clip_id).unwrap();
+        assert_eq!(clip.channel_mode, 0, "越界模式回落 Normal");
+        assert_eq!(clip.takes[0].channel_mode, 0);
+        assert_eq!(clip.takes[1].channel_mode, 0);
+    }
+
+    #[test]
+    fn bulk_patch_channel_mode_applies_to_every_selected_clip() {
+        let mut tl = TimelineState::default();
+        let track_id = tl.tracks[0].id.clone();
+        let a = tl.add_clip(Some(track_id.clone()), Some("A".into()), Some(0.0), Some(1.0), None);
+        let b = tl.add_clip(Some(track_id), Some("B".into()), Some(2.0), Some(1.0), None);
+        tl.patch_clips_state(&[
+            BulkClipStatePatch {
+                clip_id: a.clone(),
+                patch: ClipStatePatch {
+                    channel_mode: Some(2),
+                    ..Default::default()
+                },
+            },
+            BulkClipStatePatch {
+                clip_id: b.clone(),
+                patch: ClipStatePatch {
+                    channel_mode: Some(4),
+                    ..Default::default()
+                },
+            },
+        ]);
+        let find = |id: &str| tl.clips.iter().find(|c| c.id == id).unwrap();
+        assert_eq!(find(&a).channel_mode, 2);
+        assert_eq!(find(&b).channel_mode, 4);
+    }
+
     #[test]
     fn ripple_track_mode_moves_following_clips_on_same_track_only() {
         let mut timeline = TimelineState::default();
@@ -9076,6 +9228,8 @@ impl TimelineState {
                 auto_fade_out_sec: None,
                 color: None,
                 formant_morph: None,
+                channel_mode: None,
+                apply_to_all_takes: None,
             },
         );
     }
@@ -9222,10 +9376,21 @@ impl TimelineState {
             if let Some(v) = patch.formant_morph {
                 c.formant_morph = Some(v);
             }
-            // “同步编辑所有 Take”：内容级编辑（源偏移/速率/倒放/Loop/增益）
-            // 同步到该 Clip 的全部 Take；容器级属性（位置/长度/fade/颜色等）保持
-            // Clip 级语义，不参与同步。
-            if crate::config::sync_edits_across_takes() {
+            // 声道模式：先写 active 投影（与 gain/reversed 同口径，投影是
+            // active take 的权威），再在下方按"同步所有 Take"决定是否扩散。
+            if let Some(v) = patch.channel_mode {
+                c.channel_mode = crate::channel_mode::TakeChannelMode::normalize_raw(v);
+            }
+            // “同步编辑所有 Take”：内容级编辑（源偏移/速率/倒放/Loop/增益/
+            // 声道模式）同步到该 Clip 的全部 Take；容器级属性（位置/长度/
+            // fade/颜色等）保持 Clip 级语义，不参与同步。
+            //
+            // 请求可用 `apply_to_all_takes` 逐条覆盖（批量改声道模式时需要
+            // "只改 active take"这一选项），缺省仍跟随全局设置。
+            let apply_to_all_takes = patch
+                .apply_to_all_takes
+                .unwrap_or_else(crate::config::sync_edits_across_takes);
+            if apply_to_all_takes {
                 // playback_rate 请求的是“组合有效速率”（clip 倍率 × take 速率），
                 // 写入各 Take 自身速率前必须按当前倍率反推 —— 否则 inactive take
                 // 在切换后有效速率会被放大 clip_rate 倍（与 from_clip 对 active
@@ -9275,6 +9440,9 @@ impl TimelineState {
                     }
                     if let Some(v) = content_sync_patch.loop_enabled {
                         take.loop_enabled = v;
+                    }
+                    if let Some(v) = content_sync_patch.channel_mode {
+                        take.channel_mode = crate::channel_mode::TakeChannelMode::normalize_raw(v);
                     }
                 }
             }
@@ -9362,6 +9530,10 @@ impl TimelineState {
                     auto_fade_out_sec: template.auto_fade_out_sec,
                     color: None,
                     formant_morph: None,
+                    // 模板不带声道模式；导入策略由命令层在锁外判定后应用
+                    //（见 commands::timeline::create_clips_bulk）。
+                    channel_mode: None,
+                    apply_to_all_takes: None,
                 },
             );
 
