@@ -247,14 +247,16 @@ export interface ChannelImportPolicy {
     windowSec: number;
     /** 抽样窗口数（0 = 不限，扫描整个消费区间）。 */
     windowCount: number;
-    /** 逐样本绝对差容差（覆盖有损编码的量化噪声）。 */
+    /**
+     * 逐样本绝对差容差（覆盖有损编码的量化噪声）。
+     *
+     * 默认 1e-3（约 -60 dBFS）：有损编码的左右差异常在这个量级。判定是
+     * "任一样本超出即真立体声"，所以偏松只会折叠**几乎就是单声道**的素材
+     *（差异小于 -60 dB 本就听不出声像），不会把真立体声折错。
+     */
     tolerance: number;
     /** 转换目标模式：2 = 混合为单声道（默认）/ 3 = 仅左 / 4 = 仅右。 */
     monoTargetMode: number;
-    /** 打开旧工程（v4 及更早）时对未记录声道模式的 Take 一并套用。 */
-    applyToLegacyTakes: boolean;
-    /** 批量转换时是否作用于 Clip 的全部 Take（false = 仅 active take）。 */
-    applyToAllTakes: boolean;
 }
 
 /** 导入声道策略的出厂默认值（与后端 `config::ChannelImportPolicy::default` 对齐）。 */
@@ -262,19 +264,24 @@ export const DEFAULT_CHANNEL_IMPORT_POLICY: ChannelImportPolicy = {
     mode: "smart",
     windowSec: 0.25,
     windowCount: 12,
-    tolerance: 1e-6,
+    tolerance: 1e-3,
     monoTargetMode: 2,
-    applyToLegacyTakes: true,
-    applyToAllTakes: false,
 };
 
-/** 容差的可选档位（dBFS 量级的直觉映射：越小越严格）。 */
-export const CHANNEL_TOLERANCE_PRESETS: ReadonlyArray<{ value: number; label: string }> = [
-    { value: 0, label: "0" },
-    { value: 1e-6, label: "1e-6" },
-    { value: 1e-5, label: "1e-5" },
-    { value: 1e-4, label: "1e-4" },
-    { value: 1e-3, label: "1e-3" },
+/**
+ * 容差档位（由严到松）。数值即"允许的逐样本最大绝对差"。
+ *
+ * `0` = 逐样本完全相等；1e-6 ≈ 24bit 量化底噪；1e-3（默认）≈ -60 dBFS；
+ * 1e-1 = 后端钳制上限（非常宽松，仅对极端有损素材有意义）。
+ */
+export const CHANNEL_TOLERANCE_PRESETS: readonly number[] = [
+    0,
+    1e-6,
+    1e-5,
+    1e-4,
+    1e-3,
+    1e-2,
+    1e-1,
 ];
 
 /**
@@ -315,8 +322,6 @@ export function normalizeChannelImportPolicy(input: ChannelImportPolicy): Channe
         monoTargetMode: [2, 3, 4].includes(input.monoTargetMode)
             ? input.monoTargetMode
             : DEFAULT_CHANNEL_IMPORT_POLICY.monoTargetMode,
-        applyToLegacyTakes: Boolean(input.applyToLegacyTakes),
-        applyToAllTakes: Boolean(input.applyToAllTakes),
     };
 }
 

@@ -82,13 +82,11 @@ pub(super) fn import_project(
     // v5+ 工程绝不改写。此处仍在锁外（fragment 合并发生在后面），可安全解码。
     if pf.version < 5 {
         let policy = crate::config::channel_import_policy();
-        if policy.apply_to_legacy_takes {
-            let converted = timeline.apply_channel_policy_to_legacy_takes(&policy);
-            if converted > 0 {
-                log::info!(
-                    "[import_project] channel policy folded {converted} legacy take(s) to mono"
-                );
-            }
+        let converted = timeline.apply_channel_policy_to_legacy_takes(&policy);
+        if converted > 0 {
+            log::info!(
+                "[import_project] channel policy folded {converted} legacy take(s) to mono"
+            );
         }
     }
 

@@ -872,7 +872,6 @@ pub(super) fn set_clip_state(
             // 单 Clip 的声道模式走 `set_clip_take_channel_mode`（可靶向具体
             // Take）；批量场景走 `set_clips_state_bulk` 的 patch 字段。
             channel_mode: None,
-            apply_to_all_takes: None,
         },
     );
     // 波纹编辑（自动跟进）：当起点/长度改变（右边缘位移）时，平移后续剪辑。

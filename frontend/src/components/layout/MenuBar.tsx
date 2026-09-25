@@ -14,7 +14,6 @@ import {
     clearWaveformCacheRemote,
     clearRenderCacheRemote,
     persistUiSettings,
-    scanAndConvertFakeStereoRemote,
     undoRemote,
     redoRemote,
     saveProjectRemote,
@@ -1232,15 +1231,6 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     {/* Import channel policy（假立体声 → 单声道） */}
                     <DropdownMenu.Item onSelect={() => setChannelImportDialogOpen(true)}>
                         {tAny("menu_channel_import_settings")}
-                    </DropdownMenu.Item>
-
-                    {/* Whole-project fake-stereo scan（选中项走 Clip 右键菜单） */}
-                    <DropdownMenu.Item
-                        onSelect={() => {
-                            void dispatch(scanAndConvertFakeStereoRemote({}));
-                        }}
-                    >
-                        {tAny("menu_scan_fake_stereo_project")}
                     </DropdownMenu.Item>
 
                     <DropdownMenu.Separator />

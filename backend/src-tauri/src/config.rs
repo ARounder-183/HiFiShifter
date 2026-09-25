@@ -820,6 +820,10 @@ pub struct ChannelImportPolicy {
     #[serde(default = "default_detect_window_count")]
     pub window_count: usize,
     /// 逐样本绝对差容差（覆盖有损编码的量化噪声）。
+    ///
+    /// 默认 1e-3（约 -60 dBFS）：有损编码的左右声道差异常在这个量级。判定是
+    /// "任一样本超出即真立体声"，所以偏松只会让**几乎就是单声道**的素材被折叠
+    ///（差异小于 -60 dB 本就听不出声像），不会把真立体声折错。
     #[serde(default = "default_detect_tolerance")]
     pub tolerance: f32,
     /// 转换目标模式：2 = 混合为单声道（默认）/ 3 = 仅左 / 4 = 仅右。
@@ -829,12 +833,6 @@ pub struct ChannelImportPolicy {
     /// （两声道量化噪声部分抵消）。
     #[serde(default = "default_mono_target_mode")]
     pub mono_target_mode: i32,
-    /// 打开旧工程（v4 及更早）时，对未记录 `channel_mode` 的 Take 一并套用。
-    #[serde(default = "default_true")]
-    pub apply_to_legacy_takes: bool,
-    /// 批量转换时是否作用于 Clip 的全部 Take（`false` = 仅 active take）。
-    #[serde(default)]
-    pub apply_to_all_takes: bool,
 }
 
 fn default_channel_import_mode() -> String {
@@ -847,7 +845,7 @@ fn default_detect_window_count() -> usize {
     12
 }
 fn default_detect_tolerance() -> f32 {
-    1e-6
+    1e-3
 }
 fn default_mono_target_mode() -> i32 {
     2
@@ -861,8 +859,6 @@ impl Default for ChannelImportPolicy {
             window_count: default_detect_window_count(),
             tolerance: default_detect_tolerance(),
             mono_target_mode: default_mono_target_mode(),
-            apply_to_legacy_takes: true,
-            apply_to_all_takes: false,
         }
     }
 }
@@ -895,8 +891,6 @@ impl ChannelImportPolicy {
             window_count: self.window_count.min(256),
             tolerance,
             mono_target_mode,
-            apply_to_legacy_takes: self.apply_to_legacy_takes,
-            apply_to_all_takes: self.apply_to_all_takes,
         }
     }
 
@@ -1390,9 +1384,8 @@ mod tests {
         assert_eq!(p.mode, "smart");
         assert!(p.is_smart());
         assert!(!p.is_off());
-        assert!(p.apply_to_legacy_takes);
-        assert!(!p.apply_to_all_takes);
         assert_eq!(p.mono_target_mode, 2);
+        assert_eq!(p.tolerance, 1e-3, "默认容差为 1e-3");
     }
 
     #[test]
@@ -1403,8 +1396,6 @@ mod tests {
             window_count: 99_999,
             tolerance: 5.0,
             mono_target_mode: 7,
-            apply_to_legacy_takes: true,
-            apply_to_all_takes: false,
         };
         let n = p.normalized();
         assert_eq!(n.mode, "smart", "非法枚举回落默认");
@@ -1422,16 +1413,13 @@ mod tests {
             window_count: 4,
             tolerance: 1e-4,
             mono_target_mode: 3,
-            apply_to_legacy_takes: false,
-            apply_to_all_takes: true,
         };
         let n = p.normalized();
         assert_eq!(n.mode, "alwaysMono");
         assert_eq!(n.window_sec, 1.0);
         assert_eq!(n.window_count, 4);
         assert_eq!(n.mono_target_mode, 3);
-        assert!(!n.apply_to_legacy_takes);
-        assert!(n.apply_to_all_takes);
+        assert_eq!(n.tolerance, 1e-4);
     }
 
     #[test]
@@ -1443,7 +1431,7 @@ mod tests {
         };
         let n = p.normalized();
         assert_eq!(n.window_sec, 0.25);
-        assert_eq!(n.tolerance, 1e-6);
+        assert_eq!(n.tolerance, 1e-3);
     }
 
     #[test]

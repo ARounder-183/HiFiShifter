@@ -638,13 +638,17 @@ export const zhTW = {
     clip_channel_source_stereo: "立體聲源",
     clip_channel_source_mono: "單聲道源",
     ctx_channel_mode: "聲道模式",
-    clip_bulk_apply_all_takes: "同步到全部 Take",
-    clip_bulk_apply_all_takes_hint: "關閉時只修改作用中的 Take；預設跟隨「同步編輯所有 Take」設定。",
+    ctx_clip: "音訊塊",
+    ctx_group: "編組",
+    ctx_pitch_reference: "音高參考",
+    ctx_export: "匯出",
+    clip_channel_import_tolerance_custom: "自訂",
     ctx_scan_fake_stereo: "掃描假立體聲並轉換",
-    ctx_scan_fake_stereo_dry_run: "僅掃描（不修改）",
-    ctx_scan_fake_stereo_hint: "左右聲道內容一致的素材可折疊為單聲道：聽感不變，渲染耗時減半。整批只產生一個復原步驟。",
+    ctx_scan_fake_stereo_hint:
+        "左右聲道內容一致的素材可折疊為單聲道：聽感不變，渲染耗時減半。整批只產生一個復原步驟。",
     clip_channel_import_dialog_title: "匯入聲道處理",
-    clip_channel_import_dialog_desc: "匯入媒體時依左右聲道內容自動判定：內容一致的「假立體聲」折疊為單聲道，渲染耗時減半。僅作用於無聲道資訊的素材（媒體匯入、VocalShifter 匯入、舊專案升級）；REAPER 匯入匯出自帶聲道設定，不受影響。",
+    clip_channel_import_dialog_desc:
+        "匯入時把左右聲道內容一致的「假立體聲」素材折疊為單聲道：聽感不變，渲染耗時減半。",
     clip_channel_import_mode: "自動轉換",
     clip_channel_import_mode_smart: "智慧轉換為單聲道",
     clip_channel_import_mode_always_mono: "全部轉換為單聲道",
@@ -655,12 +659,12 @@ export const zhTW = {
     clip_channel_import_advanced: "判定參數（進階）",
     clip_channel_import_window_sec: "取樣視窗長度（秒）",
     clip_channel_import_window_count: "取樣視窗數",
-    clip_channel_import_window_hint: "視窗沿素材的消費區間均勻展開，首尾皆涵蓋；0 表示不取樣、掃描整個區間。",
+    clip_channel_import_window_hint:
+        "視窗沿素材的消費區間均勻展開，首尾皆涵蓋；0 表示不取樣、掃描整個區間。",
     clip_channel_import_tolerance: "容差",
     clip_channel_import_tolerance_exact: "逐樣本完全相等",
-    clip_channel_import_tolerance_hint: "有損編碼（MP3/AAC）解碼後左右聲道可能有微小差異；容差太嚴會漏判，太鬆會誤折疊。",
-    clip_channel_import_apply_legacy: "對舊專案一併套用",
-    clip_channel_import_apply_legacy_hint: "開啟 v4 及更早的專案時，未記錄聲道設定的 Take 也依上述策略處理。v5 及更新專案中的聲道設定是您的明確選擇，永不改寫。",
+    clip_channel_import_tolerance_hint:
+        "有損編碼（MP3/AAC）解碼後左右聲道可能有微小差異；容差太嚴會漏判，太鬆會誤折疊。",
     clip_take_remove: "刪除 Take",
     clip_take_explode: "將 Take 展開為獨立音訊塊",
     clip_take_rename: "重新命名 Take",
@@ -1516,7 +1520,6 @@ export const zhTW = {
     ctx_update_pitch_ref: "更新音高",
     ctx_export_midi: "匯出為 MIDI",
     ctx_add_to_param_selection: "範圍加入參數選取區",
-    ctx_remove_from_param_selection: "範圍移出參數選取區",
     menu_save_as_pitch_ref: "儲存為音高參考塊",
     menu_export_midi: "匯出為 MIDI",
 
@@ -1537,7 +1540,6 @@ export const zhTW = {
     // ── 渲染快取（持久化合成結果）────────────────────────────────────────
     menu_render_cache_manager: "渲染快取管理...",
     menu_channel_import_settings: "匯入聲道處理...",
-    menu_scan_fake_stereo_project: "掃描整個專案的假立體聲",
     menu_clear_render_cache: "清除渲染快取",
     render_cache_dialog_title: "渲染快取管理",
     render_cache_dialog_desc:

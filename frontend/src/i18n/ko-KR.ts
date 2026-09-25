@@ -733,29 +733,35 @@ export const koKR = {
     clip_channel_source_stereo: "스테레오 소스",
     clip_channel_source_mono: "모노 소스",
     ctx_channel_mode: "채널 모드",
-    clip_bulk_apply_all_takes: "모든 테이크에 동기화",
-    clip_bulk_apply_all_takes_hint: "끄면 활성 테이크만 변경합니다. 기본값은 “모든 테이크 동기 편집” 설정을 따릅니다.",
+    ctx_clip: "클립",
+    ctx_group: "그룹",
+    ctx_pitch_reference: "피치 참조",
+    ctx_export: "내보내기",
+    clip_channel_import_tolerance_custom: "사용자 지정",
     ctx_scan_fake_stereo: "가짜 스테레오 검사 후 변환",
-    ctx_scan_fake_stereo_dry_run: "검사만 (변경 없음)",
-    ctx_scan_fake_stereo_hint: "좌우 내용이 같은 소재는 모노로 접으면 들리는 소리는 그대로이고 렌더링 시간이 절반으로 줄어듭니다. 일괄 처리는 실행 취소 한 단계로 묶입니다.",
+    ctx_scan_fake_stereo_hint:
+        "좌우 내용이 같은 소재는 모노로 접으면 들리는 소리는 그대로이고 렌더링 시간이 절반으로 줄어듭니다. 일괄 처리는 실행 취소 한 단계로 묶입니다.",
     clip_channel_import_dialog_title: "가져오기 채널 처리",
-    clip_channel_import_dialog_desc: "미디어를 가져올 때 좌우 채널 내용을 자동 판정하여 내용이 같은 “가짜 스테레오”를 모노로 접어 렌더링 시간을 절반으로 줄입니다. 채널 정보가 없는 소재(미디어 가져오기, VocalShifter 가져오기, 구버전 프로젝트 업그레이드)에만 적용됩니다. REAPER 가져오기/내보내기는 자체 채널 설정을 사용하므로 영향을 받지 않습니다.",
+    clip_channel_import_dialog_desc:
+        "가져올 때 좌우 채널 내용이 같은 “가짜 스테레오” 소재를 모노로 접습니다. 들리는 소리는 그대로이고 렌더링 시간이 절반으로 줄어듭니다.",
     clip_channel_import_mode: "자동 변환",
     clip_channel_import_mode_smart: "스마트 모노 변환",
     clip_channel_import_mode_always_mono: "항상 모노로 변환",
     clip_channel_import_mode_off: "자동 변환 안 함",
-    clip_channel_import_mode_hint: "스마트 변환은 좌우 채널을 샘플링 비교하여 같은 것으로 판정된 소재만 접습니다.",
-    clip_channel_import_mode_off_hint: "모든 소재를 가져올 당시의 채널 수로 유지하며 자동 판정을 하지 않습니다.",
+    clip_channel_import_mode_hint:
+        "스마트 변환은 좌우 채널을 샘플링 비교하여 같은 것으로 판정된 소재만 접습니다.",
+    clip_channel_import_mode_off_hint:
+        "모든 소재를 가져올 당시의 채널 수로 유지하며 자동 판정을 하지 않습니다.",
     clip_channel_import_target_mode: "변환 대상",
     clip_channel_import_advanced: "판정 매개변수 (고급)",
     clip_channel_import_window_sec: "샘플링 창 길이(초)",
     clip_channel_import_window_count: "샘플링 창 개수",
-    clip_channel_import_window_hint: "창은 소재의 소비 구간에 고르게 배치되며 처음과 끝을 모두 포함합니다. 0이면 샘플링하지 않고 전체 구간을 검사합니다.",
+    clip_channel_import_window_hint:
+        "창은 소재의 소비 구간에 고르게 배치되며 처음과 끝을 모두 포함합니다. 0이면 샘플링하지 않고 전체 구간을 검사합니다.",
     clip_channel_import_tolerance: "허용 오차",
     clip_channel_import_tolerance_exact: "샘플 단위 완전 일치",
-    clip_channel_import_tolerance_hint: "손실 압축(MP3/AAC)은 디코딩 후 좌우에 미세한 차이가 생깁니다. 너무 엄격하면 놓치고, 너무 느슨하면 잘못 접습니다.",
-    clip_channel_import_apply_legacy: "구버전 프로젝트에도 적용",
-    clip_channel_import_apply_legacy_hint: "v4 이하 프로젝트를 열 때 채널 설정이 기록되지 않은 테이크에도 위 전략을 적용합니다. v5 이상 프로젝트의 설정은 사용자의 명시적 선택이므로 절대 바꾸지 않습니다.",
+    clip_channel_import_tolerance_hint:
+        "손실 압축(MP3/AAC)은 디코딩 후 좌우에 미세한 차이가 생깁니다. 너무 엄격하면 놓치고, 너무 느슨하면 잘못 접습니다.",
     clip_take_remove: "테이크 삭제",
     clip_take_explode: "테이크를 개별 클립으로 분리",
     clip_take_rename: "테이크 이름 바꾸기",
@@ -1540,7 +1546,6 @@ export const koKR = {
     ctx_update_pitch_ref: "음높이 업데이트",
     ctx_export_midi: "MIDI로 내보내기",
     ctx_add_to_param_selection: "범위를 파라미터 선택 범위에 추가",
-    ctx_remove_from_param_selection: "범위를 파라미터 선택 범위에서 제거",
     menu_save_as_pitch_ref: "음높이 참조 클립으로 저장",
     menu_export_midi: "MIDI로 내보내기",
 
@@ -1561,7 +1566,6 @@ export const koKR = {
     // ── 렌더 캐시(합성 결과 영구 저장)────────────────────────────────────
     menu_render_cache_manager: "렌더 캐시 관리...",
     menu_channel_import_settings: "가져오기 채널 처리...",
-    menu_scan_fake_stereo_project: "프로젝트 전체 가짜 스테레오 검사",
     menu_clear_render_cache: "렌더 캐시 지우기",
     render_cache_dialog_title: "렌더 캐시 관리",
     render_cache_dialog_desc:

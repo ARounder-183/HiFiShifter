@@ -51,7 +51,7 @@ impl Default for DetectOptions {
         Self {
             window_sec: 0.25,
             window_count: 12,
-            tolerance: 1e-6,
+            tolerance: 1e-3,
         }
     }
 }

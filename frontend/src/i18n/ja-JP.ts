@@ -664,29 +664,35 @@ export const jaJP = {
     clip_channel_source_stereo: "ステレオソース",
     clip_channel_source_mono: "モノラルソース",
     ctx_channel_mode: "チャンネルモード",
-    clip_bulk_apply_all_takes: "すべてのテイクに同期",
-    clip_bulk_apply_all_takes_hint: "オフの場合はアクティブなテイクのみ変更します。既定では「すべてのテイクを同期編集」の設定に従います。",
+    ctx_clip: "クリップ",
+    ctx_group: "グループ",
+    ctx_pitch_reference: "ピッチ参照",
+    ctx_export: "書き出し",
+    clip_channel_import_tolerance_custom: "カスタム",
     ctx_scan_fake_stereo: "疑似ステレオをスキャンして変換",
-    ctx_scan_fake_stereo_dry_run: "スキャンのみ（変更しない）",
-    ctx_scan_fake_stereo_hint: "左右の内容が同一の素材はモノラルに折りたたむと、聴感は変わらずレンダリング時間が半減します。一括処理は 1 回の元に戻す操作にまとまります。",
+    ctx_scan_fake_stereo_hint:
+        "左右の内容が同一の素材はモノラルに折りたたむと、聴感は変わらずレンダリング時間が半減します。一括処理は 1 回の元に戻す操作にまとまります。",
     clip_channel_import_dialog_title: "取り込み時のチャンネル処理",
-    clip_channel_import_dialog_desc: "メディア取り込み時に左右チャンネルの内容から自動判定し、同一内容の「疑似ステレオ」をモノラルに折りたたんでレンダリング時間を半減します。チャンネル情報を持たない素材（メディア取り込み、VocalShifter 取り込み、旧プロジェクトの更新）のみが対象です。REAPER の取り込み・書き出しは自身のチャンネル設定を持つため影響しません。",
+    clip_channel_import_dialog_desc:
+        "取り込み時、左右チャンネルの内容が同一の「疑似ステレオ」素材をモノラルに折りたたみます。聴感は変わらず、レンダリング時間が半減します。",
     clip_channel_import_mode: "自動変換",
     clip_channel_import_mode_smart: "スマートにモノラルへ変換",
     clip_channel_import_mode_always_mono: "常にモノラルへ変換",
     clip_channel_import_mode_off: "自動変換しない",
-    clip_channel_import_mode_hint: "スマート変換は左右チャンネルをサンプリング比較し、同一と判定した素材のみ折りたたみます。",
-    clip_channel_import_mode_off_hint: "すべての素材を取り込み時のチャンネル数のまま保持し、自動判定を行いません。",
+    clip_channel_import_mode_hint:
+        "スマート変換は左右チャンネルをサンプリング比較し、同一と判定した素材のみ折りたたみます。",
+    clip_channel_import_mode_off_hint:
+        "すべての素材を取り込み時のチャンネル数のまま保持し、自動判定を行いません。",
     clip_channel_import_target_mode: "変換先",
     clip_channel_import_advanced: "判定パラメータ（詳細）",
     clip_channel_import_window_sec: "サンプリング窓の長さ（秒）",
     clip_channel_import_window_count: "サンプリング窓の数",
-    clip_channel_import_window_hint: "窓は素材の消費区間に均等に配置され、先頭と末尾も必ず含まれます。0 はサンプリングせず全区間を走査します。",
+    clip_channel_import_window_hint:
+        "窓は素材の消費区間に均等に配置され、先頭と末尾も必ず含まれます。0 はサンプリングせず全区間を走査します。",
     clip_channel_import_tolerance: "許容差",
     clip_channel_import_tolerance_exact: "サンプル単位で完全一致",
-    clip_channel_import_tolerance_hint: "非可逆圧縮（MP3/AAC）ではデコード後の左右に微小な差が出ます。厳しすぎると見逃し、緩すぎると誤って折りたたみます。",
-    clip_channel_import_apply_legacy: "旧プロジェクトにも適用",
-    clip_channel_import_apply_legacy_hint: "v4 以前のプロジェクトを開く際、チャンネル設定が未記録のテイクにも上記の戦略を適用します。v5 以降のプロジェクトの設定はユーザーの明示的な選択であり、書き換えません。",
+    clip_channel_import_tolerance_hint:
+        "非可逆圧縮（MP3/AAC）ではデコード後の左右に微小な差が出ます。厳しすぎると見逃し、緩すぎると誤って折りたたみます。",
     clip_take_remove: "テイクを削除",
     clip_take_explode: "テイクを個別クリップに展開",
     clip_take_rename: "テイク名を変更",
@@ -1561,7 +1567,6 @@ export const jaJP = {
     ctx_update_pitch_ref: "音高を更新",
     ctx_export_midi: "MIDIとしてエクスポート",
     ctx_add_to_param_selection: "範囲をパラメーター選択範囲に追加",
-    ctx_remove_from_param_selection: "範囲をパラメーター選択範囲から削除",
     menu_save_as_pitch_ref: "音高リファレンスクリップとして保存",
     menu_export_midi: "MIDIとしてエクスポート",
 
@@ -1582,7 +1587,6 @@ export const jaJP = {
     // ── レンダーキャッシュ（合成結果の永続化）────────────────────────────
     menu_render_cache_manager: "レンダーキャッシュ管理...",
     menu_channel_import_settings: "取り込み時のチャンネル処理...",
-    menu_scan_fake_stereo_project: "プロジェクト全体の疑似ステレオをスキャン",
     menu_clear_render_cache: "レンダーキャッシュを削除",
     render_cache_dialog_title: "レンダーキャッシュ管理",
     render_cache_dialog_desc:

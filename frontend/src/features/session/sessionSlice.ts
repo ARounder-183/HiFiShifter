@@ -1126,8 +1126,6 @@ function applyOptimisticBulkClipState(
         loopEnabled?: boolean;
         /** 声道模式 0..=4（对齐 REAPER CHANMODE）。 */
         channelMode?: number;
-        /** 覆盖"同步编辑所有 Take"：true = 全部 Take，false = 仅 active take。 */
-        applyToAllTakes?: boolean;
     }>,
 ) {
     // 多选批量拖拽每帧都会带 K 个 update 进来，逐 update 全量 find 是
@@ -1234,7 +1232,7 @@ function applyOptimisticBulkClipState(
         if (update.channelMode !== undefined) {
             clip.channelMode = normalizeChannelMode(update.channelMode);
         }
-        updateTakesFromFlatWithSync(state, clip, update.applyToAllTakes);
+        updateTakesFromFlatWithSync(state, clip);
     }
 }
 
@@ -1422,17 +1420,10 @@ function updateActiveTakeFromFlat(clip: ClipInfo): void {
  * （fulfilled 快照才会收敛）。`playbackRate` 平铺值是组合有效速率，
  * 写入各 Take 前按倍率反推 —— 与后端 from_clip 口径一致。
  *
- * `applyToAllTakes` 逐请求覆盖该判定（后端 `ClipStatePatch::apply_to_all_takes`
- * 同款语义）：`undefined` 时跟随全局设置。
  */
-function updateTakesFromFlatWithSync(
-    state: SessionState,
-    clip: ClipInfo,
-    applyToAllTakes?: boolean,
-): void {
+function updateTakesFromFlatWithSync(state: SessionState, clip: ClipInfo): void {
     updateActiveTakeFromFlat(clip);
-    const syncAll = applyToAllTakes ?? state.syncEditsAcrossTakes;
-    if (!syncAll) return;
+    if (!state.syncEditsAcrossTakes) return;
     const takes = clip.takes ?? [];
     if (takes.length <= 1) return;
     const rateMultiplier = getClipRateMultiplier(clip);

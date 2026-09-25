@@ -337,11 +337,6 @@ export const timelineApi = {
             loopEnabled?: boolean;
             /** 声道模式 0..=4（对齐 REAPER CHANMODE）。 */
             channelMode?: number;
-            /**
-             * 覆盖"同步编辑所有 Take"：true = 全部 Take，false = 仅 active take，
-             * 缺省跟随全局设置 `syncEditsAcrossTakes`。
-             */
-            applyToAllTakes?: boolean;
         }>;
         checkpoint?: boolean;
     }) => invoke<TimelineResult>("set_clips_state_bulk", payload.updates, payload.checkpoint),

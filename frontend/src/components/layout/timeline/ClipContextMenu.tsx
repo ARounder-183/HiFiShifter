@@ -353,20 +353,17 @@ export const ClipContextMenu: React.FC<{
     onExportMidi?: (ids: string[]) => void;
     /** 把所选 Clip 的时间范围并入参数编辑器选区（只作用于同一根轨道组）。 */
     onAddToParamSelection?: (ids: string[]) => void;
-    /** 从参数编辑器选区中挖掉所选 Clip 的时间范围。 */
-    onRemoveFromParamSelection?: (ids: string[]) => void;
     onNormalize: (ids: string[]) => void;
     /** 打开"静音检测"对话框（多选时作用于全部所选 Clip 中含音频源者）。 */
     onSilenceDetection?: (ids: string[]) => void;
     onToggleReverse: (ids: string[], reversed: boolean) => void;
     onToggleLoop?: (ids: string[], loopEnabled: boolean) => void;
     /**
-     * 批量设置所选 Clip 的声道模式。
-     * `applyToAllTakes` 决定作用范围（false = 仅 active take）。
+     * 批量设置所选 Clip 的声道模式（作用范围跟随全局"同步编辑所有 Take"设置）。
      */
-    onSetChannelMode?: (ids: string[], mode: number, applyToAllTakes: boolean) => void;
-    /** 扫描并（可选）把"假立体声"Take 折叠为单声道；`dryRun` 只报告不修改。 */
-    onScanFakeStereo?: (ids: string[], dryRun: boolean) => void;
+    onSetChannelMode?: (ids: string[], mode: number) => void;
+    /** 扫描并把所选 Clip 里的"假立体声"Take 折叠为单声道。 */
+    onScanFakeStereo?: (ids: string[]) => void;
     /** 切换淡入/淡出的 REAPER 形状预设（保留曲率 dir 不变）。 */
     onFadeShapeChange?: (clipId: string, target: "in" | "out", shape: number) => void;
     /** 打开"编辑播放速率"浮层（锚点 = 菜单位置）。与倍率角标右键同一浮层；
@@ -397,7 +394,6 @@ export const ClipContextMenu: React.FC<{
     onUpdatePitchRef,
     onExportMidi,
     onAddToParamSelection,
-    onRemoveFromParamSelection,
     onNormalize,
     onSilenceDetection,
     onToggleReverse,
@@ -415,17 +411,6 @@ export const ClipContextMenu: React.FC<{
         takeId: string;
         value: string;
     } | null>(null);
-    /**
-     * 批量设置声道模式时的"同步到全部 Take"开关。
-     * 初值跟随全局"同步编辑所有 Take"设置（与后端
-     * `ClipStatePatch::apply_to_all_takes` 缺省行为一致）。
-     */
-    const globalSyncEditsAcrossTakes = useAppSelector(
-        (state) => state.session.syncEditsAcrossTakes,
-    );
-    const [syncChannelModeAllTakes, setSyncChannelModeAllTakes] = useState(
-        globalSyncEditsAcrossTakes,
-    );
     const ids = selectedClips.length >= 2 ? selectedClips.map((c) => c.id) : [clip.id];
     const isMulti = ids.length >= 2;
     const isSingle = !isMulti;
@@ -451,7 +436,6 @@ export const ClipContextMenu: React.FC<{
     const cycleTakeNextShortcut = useMenuShortcut("clip.cycleTake");
     const cycleTakePrevShortcut = useMenuShortcut("clip.cycleTakePrev");
     const addToParamSelectionShortcut = useMenuShortcut("edit.addClipsToParamSelection");
-    const removeFromParamSelectionShortcut = useMenuShortcut("edit.removeClipsFromParamSelection");
 
     // 胶合：仅同轨且多选时可用，且不能混合音高参考块和常规音频块
     const hasMixedTypes = hasPitchAdjustment && !allPitchAdjustment;
@@ -786,7 +770,7 @@ export const ClipContextMenu: React.FC<{
                     close();
                 }}
             />
-            {onSetChannelMode && (
+            {(onSetChannelMode || onScanFakeStereo) && (
                 <SubMenu
                     label={t("ctx_channel_mode")}
                     badge={
@@ -804,41 +788,41 @@ export const ClipContextMenu: React.FC<{
                             )}`}
                             shortcut={option.shortLabel}
                             onClick={() => {
-                                onSetChannelMode(ids, option.value, syncChannelModeAllTakes);
+                                onSetChannelMode?.(ids, option.value);
                                 close();
                             }}
                         />
                     ))}
-                    <Divider />
-                    <MenuItem
-                        label={`${syncChannelModeAllTakes ? "●" : "○"} ${t(
-                            "clip_bulk_apply_all_takes",
-                        )}`}
-                        title={t("clip_bulk_apply_all_takes_hint")}
-                        onClick={() => setSyncChannelModeAllTakes((prev) => !prev)}
-                    />
+                    {onScanFakeStereo && (
+                        <>
+                            <Divider />
+                            <MenuItem
+                                label={t("ctx_scan_fake_stereo")}
+                                title={t("ctx_scan_fake_stereo_hint")}
+                                onClick={() => {
+                                    onScanFakeStereo(ids);
+                                    close();
+                                }}
+                            />
+                        </>
+                    )}
                 </SubMenu>
             )}
-            {onScanFakeStereo && (
-                <>
-                    <MenuItem
-                        label={t("ctx_scan_fake_stereo")}
-                        title={t("ctx_scan_fake_stereo_hint")}
-                        onClick={() => {
-                            onScanFakeStereo(ids, false);
-                            close();
-                        }}
-                    />
-                    <MenuItem
-                        label={t("ctx_scan_fake_stereo_dry_run")}
-                        title={t("ctx_scan_fake_stereo_hint")}
-                        onClick={() => {
-                            onScanFakeStereo(ids, true);
-                            close();
-                        }}
-                    />
-                </>
-            )}
+            <MenuItem
+                label={
+                    allReversed
+                        ? isMulti
+                            ? t("ctx_unreverse_selected")
+                            : t("ctx_unreverse")
+                        : isMulti
+                          ? t("ctx_reverse_selected")
+                          : t("ctx_reverse")
+                }
+                onClick={() => {
+                    onToggleReverse(ids, !allReversed);
+                    close();
+                }}
+            />
             {onToggleLoop && (
                 <MenuItem
                     label={
@@ -856,15 +840,7 @@ export const ClipContextMenu: React.FC<{
                     }}
                 />
             )}
-            {isSingle && (
-                <MenuItem
-                    label={t("ctx_rename")}
-                    onClick={() => {
-                        onRename(clip.id);
-                        close();
-                    }}
-                />
-            )}
+            <Divider />
             <MenuItem
                 label={isMulti ? t("ctx_copy_all") : t("ctx_copy")}
                 shortcut={copyShortcut}
@@ -881,33 +857,6 @@ export const ClipContextMenu: React.FC<{
                     close();
                 }}
             />
-            {!allPitchAdjustment && (
-                <MenuItem
-                    label={isMulti ? t("ctx_replace_all") : t("ctx_replace")}
-                    onClick={() => {
-                        onReplace(hasPitchAdjustment ? audioOnlyIds : ids);
-                        close();
-                    }}
-                />
-            )}
-            {hasPitchAdjustment && onReplaceMidi && (
-                <MenuItem
-                    label={isMulti ? t("ctx_replace_midi_all") : t("ctx_replace_midi")}
-                    onClick={() => {
-                        onReplaceMidi(pitchOnlyIds);
-                        close();
-                    }}
-                />
-            )}
-            {!allPitchAdjustment && (
-                <MenuItem
-                    label={t("ctx_quick_export")}
-                    onClick={() => {
-                        onQuickExport(hasPitchAdjustment ? audioOnlyIds : ids);
-                        close();
-                    }}
-                />
-            )}
             <MenuItem
                 label={t("ctx_split_at_playhead")}
                 shortcut={splitShortcut}
@@ -925,32 +874,78 @@ export const ClipContextMenu: React.FC<{
                     close();
                 }}
             />
-            {onSilenceDetection && (
+            {onAddToParamSelection && (
                 <MenuItem
-                    label={t("ctx_silence_detection")}
-                    disabled={!silenceEligible}
-                    data-tooltip={silenceEligible ? undefined : t("silence_no_audio_source")}
+                    label={t("ctx_add_to_param_selection")}
+                    shortcut={addToParamSelectionShortcut}
                     onClick={() => {
-                        onSilenceDetection(ids);
+                        onAddToParamSelection(ids);
                         close();
                     }}
                 />
             )}
-            {onEditRate && (
-                <MenuItem
-                    label={t("ctx_edit_rate")}
-                    onClick={() => {
-                        // 锚点 = 菜单弹出位置：菜单关闭后浮层原地展开。
-                        // 多选时右键的 clip 即 anchor（提交走 getBulkEditableClipIds 批量管线）。
-                        onEditRate(clip.id, x, y);
-                        close();
-                    }}
-                />
+            <Divider />
+            {(isSingle ||
+                !allPitchAdjustment ||
+                hasPitchAdjustment ||
+                onEditRate != null ||
+                onSilenceDetection != null) && (
+                <SubMenu label={t("ctx_clip")}>
+                    {isSingle && (
+                        <MenuItem
+                            label={t("ctx_rename")}
+                            onClick={() => {
+                                onRename(clip.id);
+                                close();
+                            }}
+                        />
+                    )}
+                    {!allPitchAdjustment && (
+                        <MenuItem
+                            label={isMulti ? t("ctx_replace_all") : t("ctx_replace")}
+                            onClick={() => {
+                                onReplace(hasPitchAdjustment ? audioOnlyIds : ids);
+                                close();
+                            }}
+                        />
+                    )}
+                    {hasPitchAdjustment && onReplaceMidi && (
+                        <MenuItem
+                            label={isMulti ? t("ctx_replace_midi_all") : t("ctx_replace_midi")}
+                            onClick={() => {
+                                onReplaceMidi(pitchOnlyIds);
+                                close();
+                            }}
+                        />
+                    )}
+                    {onEditRate && (
+                        <MenuItem
+                            label={t("ctx_edit_rate")}
+                            onClick={() => {
+                                // 锚点 = 菜单弹出位置：菜单关闭后浮层原地展开。
+                                // 多选时右键的 clip 即 anchor（提交走 getBulkEditableClipIds 批量管线）。
+                                onEditRate(clip.id, x, y);
+                                close();
+                            }}
+                        />
+                    )}
+                    {onSilenceDetection && (
+                        <MenuItem
+                            label={t("ctx_silence_detection")}
+                            disabled={!silenceEligible}
+                            data-tooltip={
+                                silenceEligible ? undefined : t("silence_no_audio_source")
+                            }
+                            onClick={() => {
+                                onSilenceDetection(ids);
+                                close();
+                            }}
+                        />
+                    )}
+                </SubMenu>
             )}
-
             {(isMulti || hasGroup) && (
-                <>
-                    <Divider />
+                <SubMenu label={t("ctx_group")}>
                     {isMulti && !hasGroup && (
                         <MenuItem
                             label={t("group")}
@@ -971,82 +966,69 @@ export const ClipContextMenu: React.FC<{
                             }}
                         />
                     )}
-                </>
+                    {isMulti && (
+                        <MenuItem
+                            label={t("glue")}
+                            disabled={glueDisabled}
+                            onClick={() => {
+                                onGlue(ids);
+                                close();
+                            }}
+                        />
+                    )}
+                </SubMenu>
             )}
-            {isMulti && (
-                <MenuItem
-                    label={t("glue")}
-                    disabled={glueDisabled}
-                    onClick={() => {
-                        onGlue(ids);
-                        close();
-                    }}
-                />
+            {((!allPitchAdjustment && onConvertToPitchRef) ||
+                (allPitchAdjustment && onUpdatePitchRef)) && (
+                <SubMenu label={t("ctx_pitch_reference")}>
+                    {!allPitchAdjustment && onConvertToPitchRef && (
+                        <MenuItem
+                            label={t("ctx_convert_to_pitch_ref")}
+                            onClick={() => {
+                                const audioIds = selectedClips
+                                    .filter((c) => !isPitch(c))
+                                    .map((c) => c.id);
+                                if (audioIds.length > 0) {
+                                    onConvertToPitchRef(audioIds);
+                                }
+                                close();
+                            }}
+                        />
+                    )}
+                    {allPitchAdjustment && onUpdatePitchRef && (
+                        <MenuItem
+                            label={t("ctx_update_pitch_ref")}
+                            onClick={() => {
+                                if (pitchOnlyIds.length > 0) {
+                                    onUpdatePitchRef(pitchOnlyIds);
+                                }
+                                close();
+                            }}
+                        />
+                    )}
+                </SubMenu>
             )}
-
-            {!allPitchAdjustment && (
-                <>
-                    <Divider />
-                    <MenuItem
-                        label={t("ctx_convert_to_pitch_ref")}
-                        onClick={() => {
-                            const audioIds = selectedClips
-                                .filter((c) => !isPitch(c))
-                                .map((c) => c.id);
-                            if (audioIds.length > 0) {
-                                onConvertToPitchRef?.(audioIds);
-                            }
-                            close();
-                        }}
-                    />
-                </>
-            )}
-
-            {allPitchAdjustment && onUpdatePitchRef && (
-                <>
-                    <Divider />
-                    <MenuItem
-                        label={t("ctx_update_pitch_ref")}
-                        onClick={() => {
-                            if (pitchOnlyIds.length > 0) {
-                                onUpdatePitchRef(pitchOnlyIds);
-                            }
-                            close();
-                        }}
-                    />
-                </>
-            )}
-
-            {onExportMidi && (
-                <MenuItem
-                    label={t("ctx_export_midi")}
-                    onClick={() => {
-                        onExportMidi(ids);
-                        close();
-                    }}
-                />
-            )}
-
-            {(onAddToParamSelection || onRemoveFromParamSelection) && <Divider />}
-            {onAddToParamSelection && (
-                <MenuItem
-                    label={t("ctx_add_to_param_selection")}
-                    shortcut={addToParamSelectionShortcut}
-                    onClick={() => {
-                        onAddToParamSelection(ids);
-                        close();
-                    }}
-                />
-            )}
-            {onRemoveFromParamSelection && (
-                <MenuItem
-                    label={t("ctx_remove_from_param_selection")}
-                    shortcut={removeFromParamSelectionShortcut}
-                    onClick={() => {
-                        onRemoveFromParamSelection(ids);
-                        close();
-                    }}
-                />
+            {(!allPitchAdjustment || onExportMidi) && (
+                <SubMenu label={t("ctx_export")}>
+                    {!allPitchAdjustment && (
+                        <MenuItem
+                            label={t("ctx_quick_export")}
+                            onClick={() => {
+                                onQuickExport(hasPitchAdjustment ? audioOnlyIds : ids);
+                                close();
+                            }}
+                        />
+                    )}
+                    {onExportMidi && (
+                        <MenuItem
+                            label={t("ctx_export_midi")}
+                            onClick={() => {
+                                onExportMidi(ids);
+                                close();
+                            }}
+                        />
+                    )}
+                </SubMenu>
             )}
 
             {onFadeShapeChange &&

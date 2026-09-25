@@ -6232,17 +6232,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                               }),
                                           );
                                       }}
-                                      onRemoveFromParamSelection={(ids) => {
-                                          setContextMenu(null);
-                                          window.dispatchEvent(
-                                              new CustomEvent("hifi:editOp", {
-                                                  detail: {
-                                                      op: "removeClipsFromParamSelection",
-                                                      clipIds: ids,
-                                                  },
-                                              }),
-                                          );
-                                      }}
                                       onFadeShapeChange={(clipId, target, shape) => {
                                           // 切换形状必须重置曲率（REAPER 语义：各形状的
                                           // 默认曲率由形状自身定义，见 reaperFade 的
@@ -6333,28 +6322,26 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                               }),
                                           );
                                       }}
-                                      onSetChannelMode={(ids, mode, applyToAllTakes) => {
+                                      onSetChannelMode={(ids, mode) => {
                                           // 批量走 bulk 通道：单次 IPC + 单个撤销步。
-                                          // `applyToAllTakes` 逐请求覆盖全局的
+                                          // 作用范围（active take / 全部 take）跟随全局的
                                           // "同步编辑所有 Take"设置。
                                           void dispatch(
                                               setClipsStateBulkRemote({
                                                   updates: ids.map((id) => ({
                                                       clipId: id,
                                                       channelMode: mode,
-                                                      applyToAllTakes,
                                                   })),
                                                   checkpoint: true,
                                               }),
                                           );
                                       }}
-                                      onScanFakeStereo={(ids, dryRun) => {
+                                      onScanFakeStereo={(ids) => {
                                           // 后端整批只打一个撤销步，因此前端不做
                                           // 逐条乐观更新；结果摘要写进状态行。
                                           void dispatch(
                                               scanAndConvertFakeStereoRemote({
                                                   clipIds: ids,
-                                                  dryRun,
                                               }),
                                           );
                                       }}

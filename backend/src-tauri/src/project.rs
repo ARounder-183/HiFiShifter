@@ -611,13 +611,9 @@ pub fn finalize_timeline_for_session(
     // `source_channels`，有了它单声道源可零解码直接跳过。
     if project_file_version < 5 {
         let policy = crate::config::channel_import_policy();
-        if policy.apply_to_legacy_takes {
-            let converted = tl.apply_channel_policy_to_legacy_takes(&policy);
-            if converted > 0 {
-                log::info!(
-                    "[open_project] channel policy folded {converted} legacy take(s) to mono"
-                );
-            }
+        let converted = tl.apply_channel_policy_to_legacy_takes(&policy);
+        if converted > 0 {
+            log::info!("[open_project] channel policy folded {converted} legacy take(s) to mono");
         }
     }
 
@@ -735,28 +731,6 @@ mod tests {
             finalized.clips[0].takes[0].channel_mode, 0,
             "v5+ 工程的 channel_mode 是用户显式决定，不得改写"
         );
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn legacy_migration_respects_apply_to_legacy_takes_flag() {
-        let _guard = crate::config::channel_policy_test_guard();
-        crate::config::set_channel_import_policy(&crate::config::ChannelImportPolicy {
-            apply_to_legacy_takes: false,
-            ..Default::default()
-        });
-        let path = write_test_wav("legacy_flag_off.wav", true);
-        let tl = timeline_with_legacy_take(&path);
-
-        let (finalized, _missing) =
-            finalize_timeline_for_session(tl, Path::new("C:/proj/t.hshp"), 4);
-
-        assert_eq!(
-            finalized.clips[0].takes[0].channel_mode, 0,
-            "关闭 apply_to_legacy_takes 后旧工程不做任何转换"
-        );
-        // 还原全局，避免影响同进程其它测试。
-        crate::config::set_channel_import_policy(&crate::config::ChannelImportPolicy::default());
         let _ = std::fs::remove_file(&path);
     }
 

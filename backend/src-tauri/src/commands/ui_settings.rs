@@ -240,8 +240,6 @@ mod tests {
                 "windowCount": 12,
                 "tolerance": 1e-6,
                 "monoTargetMode": 2,
-                "applyToLegacyTakes": true,
-                "applyToAllTakes": false,
             }
         });
         let patch = json!({ "channelImportPolicy": { "tolerance": 1e-4 } });
@@ -251,7 +249,6 @@ mod tests {
         assert_eq!(policy["mode"], json!("smart"), "兄弟子键不得丢失");
         assert_eq!(policy["windowCount"], json!(12));
         assert_eq!(policy["monoTargetMode"], json!(2));
-        assert_eq!(policy["applyToLegacyTakes"], json!(true));
     }
 
     #[test]
