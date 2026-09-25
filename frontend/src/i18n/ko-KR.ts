@@ -1751,6 +1751,7 @@ export const koKR = {
     history_op_take_remove: "테이크 삭제",
     history_op_take_rename: "테이크 이름 변경",
     history_op_take_reverse: "테이크 반전",
+    history_op_take_channel_mode: "테이크 채널 모드 변경",
     history_op_take_add_media: "미디어를 테이크로 추가",
     history_op_add_track: "트랙 추가",
     history_op_remove_track: "트랙 삭제",

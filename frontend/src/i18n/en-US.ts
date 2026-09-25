@@ -142,6 +142,7 @@ export const enUS = {
     history_op_take_remove: "Remove take",
     history_op_take_rename: "Rename take",
     history_op_take_reverse: "Reverse take",
+    history_op_take_channel_mode: "Change take channel mode",
     history_op_take_add_media: "Add media as take",
     history_op_add_track: "Add track",
     history_op_remove_track: "Delete track",

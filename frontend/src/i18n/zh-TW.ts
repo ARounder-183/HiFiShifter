@@ -1721,6 +1721,7 @@ export const zhTW = {
     history_op_take_remove: "刪除 Take",
     history_op_take_rename: "重新命名 Take",
     history_op_take_reverse: "反轉 Take",
+    history_op_take_channel_mode: "修改 Take 聲道模式",
     history_op_take_add_media: "新增媒體為 Take",
     history_op_add_track: "新增軌道",
     history_op_remove_track: "刪除軌道",

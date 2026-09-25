@@ -1777,6 +1777,7 @@ export const jaJP = {
     history_op_take_remove: "テイクを削除",
     history_op_take_rename: "テイク名を変更",
     history_op_take_reverse: "テイクを逆再生",
+    history_op_take_channel_mode: "テイクのチャンネルモードを変更",
     history_op_take_add_media: "メディアをテイクとして追加",
     history_op_add_track: "トラックを追加",
     history_op_remove_track: "トラックを削除",

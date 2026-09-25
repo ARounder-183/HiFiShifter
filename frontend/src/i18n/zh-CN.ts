@@ -1719,6 +1719,7 @@ export const zhCN = {
     history_op_take_remove: "删除 Take",
     history_op_take_rename: "重命名 Take",
     history_op_take_reverse: "反转 Take",
+    history_op_take_channel_mode: "修改 Take 声道模式",
     history_op_take_add_media: "添加媒体为 Take",
     history_op_add_track: "添加新的轨道",
     history_op_remove_track: "删除轨道",

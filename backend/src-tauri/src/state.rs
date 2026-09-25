@@ -1747,6 +1747,13 @@ pub enum HistoryOp {
 
 impl HistoryOp {
     /// 语言无关的操作 key（前端按 `history_op_<key>` 本地化）。
+    ///
+    /// **新增变体时必须同步在全部五个语系补 `history_op_<key>`**
+    /// （`frontend/src/i18n/{en-US,zh-CN,zh-TW,ja-JP,ko-KR}.ts`）。
+    /// 漏补不会报错：`UndoHistoryPanel.labelOf` 查不到键时会静默回落到这个裸
+    /// key，用户在撤销列表里看到的是 `take_channel_mode` 这样的标识符。
+    /// 该缺陷已实际发生过一次（`TakeChannelMode` 上线时）。
+    /// 前端 `src/i18n/historyOpLabels.test.ts` 会扫描本函数并对缺失键报红。
     pub fn key(self) -> &'static str {
         match self {
             HistoryOp::ImportMedia => "import_media",
