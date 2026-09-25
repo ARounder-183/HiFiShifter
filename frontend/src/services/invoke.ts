@@ -331,9 +331,11 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
             };
 
         case "scan_and_convert_fake_stereo":
+            // 两个参数都可选：缺省 = 整个工程 + 实扫。用条件展开而不是直接传
+            // undefined，与同文件的 import_audio_item 保持一致的显式风格。
             return {
-                clipIds: args[0],
-                dryRun: args[1],
+                ...(args[0] !== undefined ? { clipIds: args[0] } : {}),
+                ...(args[1] !== undefined ? { dryRun: args[1] } : {}),
             };
 
         case "add_clip_take_from_media":

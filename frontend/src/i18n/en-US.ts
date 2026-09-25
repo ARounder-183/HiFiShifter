@@ -1706,6 +1706,7 @@ export const enUS = {
     // ── Render cache (persistent synth results)────────────────────────────
     menu_render_cache_manager: "Render Cache Manager...",
     menu_channel_import_settings: "Import Channel Handling...",
+    menu_scan_fake_stereo_project: "Scan Whole Project for Fake Stereo",
     menu_clear_render_cache: "Clear Render Cache",
     render_cache_dialog_title: "Render Cache",
     render_cache_dialog_desc:

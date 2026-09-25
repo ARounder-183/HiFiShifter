@@ -1535,6 +1535,7 @@ export const zhCN = {
     // ── 渲染缓存（持久化合成结果）────────────────────────────────────────
     menu_render_cache_manager: "渲染缓存管理...",
     menu_channel_import_settings: "导入声道处理...",
+    menu_scan_fake_stereo_project: "扫描整个工程的假立体声",
     menu_clear_render_cache: "清除渲染缓存",
     render_cache_dialog_title: "渲染缓存管理",
     render_cache_dialog_desc:

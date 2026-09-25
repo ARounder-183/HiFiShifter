@@ -1582,6 +1582,7 @@ export const jaJP = {
     // ── レンダーキャッシュ（合成結果の永続化）────────────────────────────
     menu_render_cache_manager: "レンダーキャッシュ管理...",
     menu_channel_import_settings: "取り込み時のチャンネル処理...",
+    menu_scan_fake_stereo_project: "プロジェクト全体の疑似ステレオをスキャン",
     menu_clear_render_cache: "レンダーキャッシュを削除",
     render_cache_dialog_title: "レンダーキャッシュ管理",
     render_cache_dialog_desc:

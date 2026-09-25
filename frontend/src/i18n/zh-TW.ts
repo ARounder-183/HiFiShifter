@@ -1537,6 +1537,7 @@ export const zhTW = {
     // ── 渲染快取（持久化合成結果）────────────────────────────────────────
     menu_render_cache_manager: "渲染快取管理...",
     menu_channel_import_settings: "匯入聲道處理...",
+    menu_scan_fake_stereo_project: "掃描整個專案的假立體聲",
     menu_clear_render_cache: "清除渲染快取",
     render_cache_dialog_title: "渲染快取管理",
     render_cache_dialog_desc:

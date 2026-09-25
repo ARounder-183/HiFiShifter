@@ -1561,6 +1561,7 @@ export const koKR = {
     // ── 렌더 캐시(합성 결과 영구 저장)────────────────────────────────────
     menu_render_cache_manager: "렌더 캐시 관리...",
     menu_channel_import_settings: "가져오기 채널 처리...",
+    menu_scan_fake_stereo_project: "프로젝트 전체 가짜 스테레오 검사",
     menu_clear_render_cache: "렌더 캐시 지우기",
     render_cache_dialog_title: "렌더 캐시 관리",
     render_cache_dialog_desc:
