@@ -331,13 +331,14 @@ pub(super) fn get_track_mix_waveform_peaks_segment(
 /// 杩斿洖 Vec<u8>锛孴auri 浼氫紶杈撲负 number[]锛圝S 渚ч渶杞?ArrayBuffer锛夛紝
 /// 鍓嶇閫氳繃 DataView + Float32Array 鐩存帴璇诲彇銆?
 ///
-/// 浜岃繘鍒跺崗璁細[Header 20B] [min f32[]] [max f32[]]
+/// 浜岃繘鍒跺崗璁細[Header 28B: magic"WFPK" | format_version u32 | sample_rate | division_factor | count | level | channels] + per-channel [min f32[]] [max f32[]]
 /// 获取指定级别的波形 mipmap 数据（Base64 编码的二进制格式）
 ///
 /// 返回 Base64 编码的 String，避免 Tauri v2 将 Vec<u8> 序列化为 JSON number[]
 /// 导致的 3~5 倍传输膨胀。前端通过 atob() 解码后直接创建 Float32Array 视图。
 ///
-/// 二进制协议：[Header 20B] [min f32[]] [max f32[]]
+/// 二进制协议（v2）：[Header 28B: magic"WFPK" | format_version u32 | sample_rate |
+/// division_factor | count | level | channels] 后接逐声道 [min f32[]] [max f32[]]
 pub(super) fn get_waveform_mipmap_binary(
     state: State<'_, AppState>,
     source_path: String,

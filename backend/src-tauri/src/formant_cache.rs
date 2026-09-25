@@ -20,6 +20,15 @@ pub struct FormantCacheKey {
     /// 声道模式（0..=4，对齐 REAPER CHANMODE）：formant 的输入是条件化后的
     /// stereo segment，同一 clip 改变模式后输入内容变化，键必须随之失效。
     pub channel_mode: i32,
+    /// 输入是否已做**声道条件化**（`condition_take_channels`）。
+    ///
+    /// 离线域（mixdown / render_single_clip）在 formant **之前**条件化，实时域
+    /// （build_snapshot / 预计算）喂**原始** stereo、模式在混音逐帧采样时才施加。
+    /// `apply_formant_morph_interleaved` 不是逐声道一致的（通道平均 → 处理 →
+    /// 把 wet−dry 差值加回各声道），MonoLeft/MonoRight 下两个域的输出**确实
+    /// 不同**；而 `channel_mode` 在两侧是同一个值，无法区分域 —— 不加判别的话，
+    /// 先计算的一方会毒化另一方，造成"导出 ≠ 预览"（取决于谁先算）。
+    pub preconditioned: bool,
     /// 缓冲域判别：`false` = 实时域（完整文件自然顺序 / 非 Loop 窗口切片，
     /// 方向可由 `reversed` 预反转）；`true` = 离线回绕平铺域（mixdown /
     /// render_single_clip 先按整文件 floor_mod 平铺再处理的 segment）。
@@ -128,6 +137,7 @@ pub fn make_formant_cache_key(
     source_end_sec: f64,
     reversed: bool,
     channel_mode: i32,
+    preconditioned: bool,
     tiled_wrap: bool,
     params: &ClipFormantMorph,
 ) -> FormantCacheKey {
@@ -139,6 +149,7 @@ pub fn make_formant_cache_key(
         source_end_q: quantize_i64(source_end_sec, 1000.0),
         reversed,
         channel_mode,
+        preconditioned,
         tiled_wrap,
         enabled: params.enabled,
         target_f1_q: quantize_u32(params.target_f1_hz, 10.0),
@@ -405,6 +416,8 @@ pub fn compute_formant_cache_entry_for_clip(
         },
         clip.reversed && !loop_mode,
         clip.channel_mode,
+        // 实时域预计算：输入是原始 stereo（未条件化），与 build_snapshot 一致。
+        false,
         false,
         params,
     );
@@ -522,6 +535,7 @@ mod tests {
             false,
             0,
             false,
+            false,
             &ClipFormantMorph {
                 enabled: true,
                 target_f1_hz: 700.0,
@@ -537,6 +551,7 @@ mod tests {
             1.0,
             false,
             0,
+            false,
             false,
             &ClipFormantMorph {
                 enabled: true,
@@ -561,6 +576,7 @@ mod tests {
             false,
             0,
             false,
+            false,
             &ClipFormantMorph {
                 enabled: true,
                 target_f1_hz: 700.0,
@@ -576,6 +592,7 @@ mod tests {
             10.0,
             false,
             0,
+            false,
             true,
             &ClipFormantMorph {
                 enabled: true,
@@ -585,5 +602,47 @@ mod tests {
             },
         );
         assert_ne!(realtime, offline_tiled);
+    }
+
+    #[test]
+    fn formant_cache_key_separates_preconditioned_domain() {
+        // 离线域在 formant 前做声道条件化，实时域在混音时才施加：MonoLeft/
+        // MonoRight 下两域输出不同，mode 又是同一个值 —— 只有 preconditioned
+        // 能把两域隔开（否则先算的一方毒化另一方 → 导出 ≠ 预览）。
+        let raw = make_formant_cache_key(
+            "clip-1",
+            Path::new("demo.wav"),
+            44_100,
+            0.0,
+            10.0,
+            false,
+            3,
+            false,
+            false,
+            &ClipFormantMorph {
+                enabled: true,
+                target_f1_hz: 700.0,
+                target_f2_hz: 1700.0,
+                strength: 0.5,
+            },
+        );
+        let preconditioned = make_formant_cache_key(
+            "clip-1",
+            Path::new("demo.wav"),
+            44_100,
+            0.0,
+            10.0,
+            false,
+            3,
+            true,
+            false,
+            &ClipFormantMorph {
+                enabled: true,
+                target_f1_hz: 700.0,
+                target_f2_hz: 1700.0,
+                strength: 0.5,
+            },
+        );
+        assert_ne!(raw, preconditioned);
     }
 }

@@ -228,9 +228,6 @@ fn apply_mix_automation(clip: &EngineClip, abs_frame: u64, l: f32, r: f32) -> (f
     (l * gain * left_gain, r * gain * right_gain)
 }
 
-/// 采样 clip 在 local 帧处的原始 PCM（不含 gain/fade，但含 volume/pan 自动化）。
-/// 返回 None 表示该帧应静音（越界、leading silence 等）。
-#[inline]
 /// Take 声道模式的实时采样映射（与离线 `condition_take_channels` 语义一致）。
 /// 仅用于**源 PCM** 读取路径；Swap/MonoLeft/MonoRight 是纯平面选择，
 /// MonoMix 为每样本一次加法 —— 均为零分配。
@@ -247,6 +244,9 @@ fn apply_take_channel_mode(left: f32, right: f32, mode: crate::channel_mode::Tak
     }
 }
 
+/// 采样 clip 在 local 帧处的原始 PCM（不含 gain/fade，但含 volume/pan 自动化）。
+/// 返回 None 表示该帧应静音（越界、leading silence 等）。
+#[inline]
 fn sample_clip_pcm(clip: &EngineClip, local: u64, local_adj: f64) -> Option<(f32, f32)> {
     let abs_frame = clip.start_frame.saturating_add(local);
     let raw = if let Some(ref rendered) = clip.rendered_pcm {

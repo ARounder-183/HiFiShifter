@@ -436,19 +436,21 @@ impl HfsPeakFile {
 
     /// 将指定级别的 mipmap 数据序列化为二进制格式
     ///
-    /// 二进制协议格式：
+    /// 二进制协议格式（v2，28 字节头）：
     /// ```text
-    /// [Header (20 bytes)] [min_data] [max_data]
+    /// [Header (28 bytes)] [ch0_min] [ch0_max] [ch1_min] [ch1_max] …
     ///
     /// Header:
     ///   bytes 0-3:   magic "WFPK" (4 bytes)
-    ///   bytes 4-7:   sample_rate (u32, little-endian)
-    ///   bytes 8-11:  division_factor (u32, little-endian)
-    ///   bytes 12-15: peak_count (u32, little-endian)
-    ///   bytes 16-19: level (u32, little-endian)
+    ///   bytes 4-7:   format_version (u32, little-endian)
+    ///   bytes 8-11:  sample_rate (u32, little-endian)
+    ///   bytes 12-15: division_factor (u32, little-endian)
+    ///   bytes 16-19: peak_count (u32, little-endian)
+    ///   bytes 20-23: level (u32, little-endian)
+    ///   bytes 24-27: channels (u32, little-endian)
     ///
-    /// min_data: peak_count × f32 (little-endian)
-    /// max_data: peak_count × f32 (little-endian)
+    /// 逐声道分块：每声道先 ch_min: peak_count × f32 (little-endian)，
+    /// 紧接 ch_max: peak_count × f32 (little-endian)。
     /// ```
     pub fn to_binary_level(&self, level: usize) -> Vec<u8> {
         let level = level.min(self.mipmap_data.len().saturating_sub(1));

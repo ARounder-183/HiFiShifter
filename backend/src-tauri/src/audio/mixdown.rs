@@ -712,6 +712,9 @@ pub fn render_mixdown_interleaved(
                 key_end_sec,
                 clip.reversed && !loop_mode,
                 clip.channel_mode,
+                // 本域输入已在上方做过声道条件化，与实时域（原始 stereo +
+                // 混音时施加模式）必须用 preconditioned 判别隔离。
+                true,
                 // 离线 Loop 的处理对象是"回绕平铺 segment"（锚点起、长度为
                 // clip 消费量），与实时域的完整文件自然顺序内容不同 —— 必须
                 // 用 tiled_wrap 域判别隔离，避免两个域互相毒化缓存。

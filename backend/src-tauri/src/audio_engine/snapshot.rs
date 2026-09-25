@@ -488,9 +488,11 @@ pub(crate) fn build_snapshot(
                 },
                 clip.reversed && !clip.loop_enabled,
                 clip.channel_mode,
+                // 本域喂的是**原始** stereo（模式在混音逐帧采样时才施加），
+                // 离线域则是条件化后的输入 —— MonoLeft/MonoRight 下输出不同，
+                // 而 mode 在两侧同值，必须靠 preconditioned 判别隔离。
+                false,
                 // 实时域：完整文件自然顺序 / 窗口切片，绝非离线回绕平铺域。
-                // mode 参与键：离线域输入是条件化后的 stereo，本域是原始
-                // stereo，非 Normal 模式下内容不同，不能共享条目。
                 false,
                 params,
             );

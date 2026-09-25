@@ -837,7 +837,8 @@ pub fn compute_rendered_clip_hash(input: &RenderedClipHashInput<'_>) -> u64 {
 
 pub fn compute_breath_noise_hash(input: &RenderedClipHashInput<'_>) -> u64 {
     // 气声噪声 stem 与 formant 无关（formant 只作用于谐波分量），因此显式排除
-    // `formant_shift_cents`：共振峰变化时可直接复用噪声 stem，省掉一次 HNSEP。
+    // 曲线级 `formant_shift_cents` 与 clip 级 `formant_morph`：任一共振峰设置
+    // 变化时都可直接复用噪声 stem，省掉一次 HNSEP。
     let filtered_curves: std::collections::HashMap<String, Vec<f32>> = input
         .extra_curves
         .iter()
@@ -847,6 +848,9 @@ pub fn compute_breath_noise_hash(input: &RenderedClipHashInput<'_>) -> u64 {
     compute_rendered_clip_hash(&RenderedClipHashInput {
         extra_curves: &filtered_curves,
         input_pitch_curve: None,
+        // 只排除曲线不够：clip 级 morph 同样只作用于谐波分量，留着它会让
+        // "仅改 morph" churn 掉噪声缓存，违背本函数的存在意义。
+        formant_morph: None,
         ..*input
     })
 }
@@ -997,14 +1001,15 @@ pub fn global_tension_rendered_clip_cache() -> &'static Mutex<TensionRenderedCli
 
 // ─── Breath Noise 独立缓存（formant 变化时可复用，避免重复 HNSEP 分离）─────────
 
-/// Breath Noise 缓存的 key：使用不含 formant_shift_cents 的 base hash。
+/// Breath Noise 缓存的 key：使用不含 formant 的 base hash。
 ///
-/// formant 变化时 RenderedClipCache 的 hash 不变（因为 formant 已排除），
-/// 但如果其他参数（pitch_edit、playback_rate 等）变化，此 key 也会变化。
+/// 曲线级 `formant_shift_cents` 与 clip 级 `formant_morph` 都不参与
+/// （见 `compute_breath_noise_hash`）：formant 变化时 RenderedClipCache 的
+/// hash 不变，但如果其他参数（pitch_edit、playback_rate 等）变化，此 key 也会变化。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BreathNoiseCacheKey {
     pub clip_id: String,
-    /// 与 RenderedClipCacheKey.param_hash 相同（不含 formant_shift_cents）。
+    /// 与 RenderedClipCacheKey.param_hash 相同（不含曲线级与 clip 级 formant）。
     pub param_hash: u64,
 }
 
@@ -1018,7 +1023,8 @@ pub struct BreathNoiseCacheEntry {
 
 /// Breath Noise 独立 byte-budgeted LRU 缓存。
 ///
-/// 在 Breath 路径中，`breath_noise_stereo`（= unity_mix - harmonic_only）不受 formant 影响。
+/// 在 Breath 路径中，`breath_noise_stereo`（= unity_mix - harmonic_only）不受
+/// formant 影响（曲线级 shift 与 clip 级 morph 均只作用于谐波分量）。
 /// 当仅 formant 变化时，可直接复用此缓存中的 noise stem，跳过第二次 render_variant 调用，
 /// 从而避免每个 clip 的两次 HNSEP 推理变为一次。
 pub struct BreathNoiseCache {

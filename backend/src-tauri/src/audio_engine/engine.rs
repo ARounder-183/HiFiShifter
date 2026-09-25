@@ -1187,7 +1187,6 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
                         // 移动后的精确键 miss，而 miss 又会退回"同 clip_id 的最近
                         // 一次渲染"垫音 —— 播的正是移动前那个窗口的 PCM。
                         || (old.start_sec - clip.start_sec).abs() > 1e-9
-                        || (old.length_sec - clip.length_sec).abs() > 1e-6
                         || old.duration_frames != clip.duration_frames
                         || old.source_sample_rate != clip.source_sample_rate
                         || old.source_file_mtime != clip.source_file_mtime

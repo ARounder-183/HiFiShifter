@@ -17,6 +17,8 @@ use std::time::SystemTime;
 ///
 /// v3：分析结果新增「逐帧原声电平」（DYN 的基线）。旧条目只有音高，
 /// 若沿用会让 DYN 面板一直显示默认基线。
+/// v4：缓存 key 新增 `channel_mode`（声道模式会条件化分析输入，模式不同的
+/// 曲线不可互相顶替）。
 pub const CACHE_FORMAT_VERSION: u32 = 4;
 
 /// Default maximum number of cached clip pitch curves
