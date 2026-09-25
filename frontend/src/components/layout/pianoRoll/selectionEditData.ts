@@ -22,6 +22,7 @@ import { paramsApi } from "../../../services/api";
 import type { ParamName, ParamViewSegment } from "./types";
 import { applyEdgeBlend, type EdgeShape } from "./paramSmoothing";
 import { mergeFrameWindows, type FrameSpan } from "./paramSelection";
+import { restoreDynSentinels } from "./paramRanges";
 
 /** 单次 IPC 收发的帧数上限。约 32k 帧 ≈ 190 ms @ fp 5.8ms，单次处理不会掉帧。 */
 const CHUNK_FRAMES = 32_768;
@@ -103,13 +104,28 @@ export async function fetchFullResCurve(args: {
     const endFrame = Math.max(startFrame, Math.floor(args.endFrame));
     const totalFrames = endFrame - startFrame + 1;
 
-    // 快路径：pv 已以 stride=1 覆盖，直接切片。
-    const pvFastPath = withSentinel ? null : (paramView ?? null);
+    // 快路径：pv 已以 stride=1 覆盖，直接切片。带哨兵位图时同样可走 ——
+    // pv 现在自带 edit_sentinel（见 ParamViewSegment.editSentinel），位图缺位
+    // （旧状态 / 非 dyn）才回源取数。
+    const pvFastPath = paramView ?? null;
     if (pvCoversFullRes(pvFastPath, startFrame, endFrame)) {
         const pv = pvFastPath as ParamViewSegment;
         const offset = startFrame - pv.startFrame;
         onProgress?.(totalFrames, totalFrames);
-        return { startFrame, values: pv.edit.slice(offset, offset + totalFrames) };
+        const pvSentinel = pv.editSentinel;
+        const bitmapReady = withSentinel && !!pvSentinel && pvSentinel.length === pv.edit.length;
+        if (!bitmapReady) {
+            // 非 dyn（无位图需求）或位图缺位（旧状态）：照旧切片 / 回源取位图。
+            if (!withSentinel) {
+                return { startFrame, values: pv.edit.slice(offset, offset + totalFrames) };
+            }
+        } else {
+            return {
+                startFrame,
+                values: pv.edit.slice(offset, offset + totalFrames),
+                sentinel: pvSentinel.slice(offset, offset + totalFrames),
+            };
+        }
     }
 
     const values = new Array<number>(totalFrames);
@@ -139,6 +155,29 @@ export async function fetchFullResCurve(args: {
         await yieldToUi();
     }
     return { startFrame, values, sentinel };
+}
+
+/**
+ * 把「未画帧」哨兵还原到一段**逐帧**写回值上（数据源 = 参数视图自带的位图）。
+ *
+ * 这是拉伸 / morph 提交的哨兵保留入口：它们的数据源是 pv（而非独立取数），
+ * 位图随 pv 走（见 `ParamViewSegment.editSentinel`）。位图按 pv 的 stride 采样，
+ * 这里按绝对帧反解回位图下标。位图缺位（非 dyn / 旧状态）时原样返回。
+ */
+export function restoreDynSentinelsFromParamView(
+    values: number[],
+    startFrame: number,
+    pv: ParamViewSegment | null | undefined,
+): number[] {
+    const sentinels = pv?.editSentinel;
+    if (!sentinels || sentinels.length === 0 || !pv) return values;
+    const stride = Math.max(1, Math.floor(pv.stride));
+    const flags = new Array<boolean>(values.length);
+    for (let i = 0; i < values.length; i += 1) {
+        const idx = Math.round((startFrame + i - pv.startFrame) / stride);
+        flags[i] = idx >= 0 && idx < sentinels.length ? sentinels[idx] === true : false;
+    }
+    return restoreDynSentinels(values, flags);
 }
 
 /**

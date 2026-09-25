@@ -5,6 +5,7 @@ import { paramsApi } from "../../../services/api";
 import { clamp } from "../timeline";
 
 import type { ParamName, ParamViewSegment } from "./types";
+import { isDynParam } from "./paramRanges";
 import { framesToTime, timeToFrame } from "./utils";
 const paramFramePeriodCache = new Map<string, number>();
 
@@ -713,7 +714,15 @@ export function usePianoRollData(args: {
             beginLoading();
             const [paramRes, secondaryResults, referenceResults] = await Promise.all([
                 shouldFetchParam
-                    ? paramsApi.getParamFrames(trackId, editParam, startFrame, frameCount, stride)
+                    ? paramsApi.getParamFrames(
+                          trackId,
+                          editParam,
+                          startFrame,
+                          frameCount,
+                          stride,
+                          true,
+                          isDynParam(editParam),
+                      )
                     : Promise.resolve(null),
                 Promise.all(
                     req.secondaryRequests.map(async (secondaryReq) => {
@@ -819,6 +828,11 @@ export function usePianoRollData(args: {
                     referenceKind: payload.reference_kind ?? "source_curve",
                     orig: (payload.orig ?? []).map((v) => Number(v) || 0),
                     edit: (payload.edit ?? []).map((v) => Number(v) || 0),
+                    // dyn 的「未画」位图随同一路取数返回（见 ParamViewSegment
+                    // 的字段说明）；非 dyn 显式不携带。
+                    editSentinel: isDynParam(editParam)
+                        ? (payload.edit_sentinel ?? undefined)
+                        : undefined,
                 });
 
                 if (Math.abs(fpRes - fpMs) > 1e-3) {
@@ -891,6 +905,8 @@ export function usePianoRollData(args: {
                             secondaryReq.secondaryStartFrame,
                             secondaryReq.secondaryFrameCount,
                             req.stride,
+                            true,
+                            isDynParam(secondaryReq.secondaryParam),
                         );
                         if (!res?.ok) return null;
 
@@ -912,6 +928,9 @@ export function usePianoRollData(args: {
                                 referenceKind: payload.reference_kind ?? "source_curve",
                                 orig: (payload.orig ?? []).map((v) => Number(v) || 0),
                                 edit: (payload.edit ?? []).map((v) => Number(v) || 0),
+                                editSentinel: isDynParam(secondaryReq.secondaryParam)
+                                    ? (payload.edit_sentinel ?? undefined)
+                                    : undefined,
                             } as ParamViewSegment,
                         ] as const;
                     }),

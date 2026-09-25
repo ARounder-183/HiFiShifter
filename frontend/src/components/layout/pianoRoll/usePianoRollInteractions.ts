@@ -91,6 +91,7 @@ import {
     fetchFullResCurve,
     planSelectionEditWindows,
     readPvRange,
+    restoreDynSentinelsFromParamView,
     uploadFullResCurve,
     uploadFullResCurveSegments,
     type MultiRangeEditPiece,
@@ -1530,7 +1531,7 @@ export function usePianoRollInteractions(args: {
             window.addEventListener("mouseup", onEnd, true);
             window.addEventListener("mouseleave", onEnd, true);
         },
-        [dispatch, scrollLeftRef, pxPerSecRef],
+        [axisFromRefs, dispatch],
     );
 
     const onScrollerAuxClick = useCallback((e: ReactMouseEvent) => {
@@ -2582,9 +2583,18 @@ export function usePianoRollInteractions(args: {
                             // （stride=1 时原样返回，零开销）。
                             const packedPerOverlay = overlayNow.map((overlay) => {
                                 const packed = buildMorphDense(overlay, stride);
+                                const values = expandStrideSampledDense(packed.dense, stride);
                                 return {
                                     startFrame: packed.startFrame,
-                                    values: expandStrideSampledDense(packed.dense, stride),
+                                    // dyn 哨兵保留（与拉伸 / 选区拖拽同一契约）：
+                                    // 未画帧写回哨兵，不物化成显式基线。
+                                    values: isDynParam(editParam)
+                                        ? restoreDynSentinelsFromParamView(
+                                              values.slice(),
+                                              packed.startFrame,
+                                              pvNow,
+                                          )
+                                        : values,
                                 };
                             });
 
@@ -3267,6 +3277,17 @@ export function usePianoRollInteractions(args: {
                             // 当连续帧写入（旧实现在 stride>1 时时间压缩 +
                             // 覆盖未选帧，见 selectionEditData.expandStrideSampledDense）。
                             const expanded = expandStrideSampledDense(built.dense, stride);
+                            // dyn 哨兵保留：拉伸是"读-变换-写回"，未画帧必须以哨兵
+                            // 写回（数据源 = pv 自带位图，见
+                            // restoreDynSentinelsFromParamView），否则被物化成显式
+                            // 基线，日后基线重分析时响度静默漂移。
+                            const expandedForUpload = isDynParam(editParam)
+                                ? restoreDynSentinelsFromParamView(
+                                      expanded.slice(),
+                                      built.overallMinFrame,
+                                      pvNow,
+                                  )
+                                : expanded;
                             // 拉伸后的选区（本轮手势的最终形态）：与拉伸前的快照
                             // 一起登记为该历史步骤的选区。
                             const selectionAfterStretch = selectionRef.current
@@ -3279,7 +3300,7 @@ export function usePianoRollInteractions(args: {
                                         trackId: rootTrackId,
                                         param: editParam,
                                         startFrame: built.overallMinFrame,
-                                        values: expanded,
+                                        values: expandedForUpload,
                                     });
                                     committed = true;
                                 } catch (err) {
@@ -5151,6 +5172,7 @@ export function usePianoRollInteractions(args: {
             setPitchView,
             setParamViewport,
             invalidate,
+            requestWaveformRepaint,
             pointerFrame,
             pointerSec,
             selectionRef,
@@ -5192,7 +5214,6 @@ export function usePianoRollInteractions(args: {
             createFineAdjustedPointerState,
             getFineAdjustedPointerPosition,
             disposeFineAdjustedPointerState,
-            scrollLeftRef,
             syncTimelineEnabled,
             timelineOffsetRef,
             valueToY,
