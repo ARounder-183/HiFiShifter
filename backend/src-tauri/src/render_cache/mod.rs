@@ -277,11 +277,6 @@ pub fn session_stored() -> u64 {
     SESSION_STORED.load(Ordering::Relaxed)
 }
 
-/// 写盘失败次数。
-pub fn session_write_errors() -> u64 {
-    SESSION_WRITE_ERRORS.load(Ordering::Relaxed)
-}
-
 // ─── 初始化与设置 ──────────────────────────────────────────────────────────────
 
 /// 注入系统缓存根目录（`lib.rs` 启动时调用；未调用时退化为临时目录）。

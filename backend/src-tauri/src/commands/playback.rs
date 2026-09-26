@@ -93,6 +93,13 @@ fn bg_render_restart_request_is_stale(last_requested_at_ms: u64, now_ms: u64) ->
     now_ms.saturating_sub(last_requested_at_ms) >= BG_RENDER_RESTART_QUIET_WINDOW_MS
 }
 
+/// 距渲染请求的去抖窗口结束还需等待多少毫秒（0 = 可以启动）。
+///
+/// 抽成纯函数是为了可测：调度线程本身无法在单测里稳定复现。
+fn render_request_debounce_remaining_ms(last_requested_at_ms: u64, now_ms: u64) -> u64 {
+    BG_RENDER_DEBOUNCE_MS.saturating_sub(now_ms.saturating_sub(last_requested_at_ms))
+}
+
 /// 请求重启后台渲染（合流版）。
 ///
 /// 不立即取消在途渲染：仅置位重启标志并刷新请求时间戳。渲染循环在 clip
@@ -117,6 +124,30 @@ pub(crate) static BG_RENDER_PITCH_PENDING: std::sync::atomic::AtomicBool =
 /// 才允许清理全局标志，避免取消旧渲染后开新一轮时被旧线程把新状态清掉。
 pub(crate) static BG_RENDER_GENERATION: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
+
+/// 渲染请求去抖窗口（毫秒）。
+///
+/// 背景：音高分析完成、缓存失效、编辑提交都会请求渲染，而工程加载期间这类事件
+/// 以几十毫秒一次的频率到来 —— 实测一次打开工程的前 1.5 s 内启动了 **61 轮**
+/// pass，其中 53 轮只处理 6 个 clip 且毫无进展。每轮都要全量收集待渲染 Clip
+/// （逐个计算渲染键，含曲线切片哈希）、扩容四个缓存并 spawn 线程，空转成本与
+/// 真实渲染同阶。
+///
+/// 去抖把窗口内的多个请求合流成一次启动。窗口结束后到达的新请求会开启新的
+/// 调度，因此不存在"请求被吞掉"的情况。
+pub(crate) const BG_RENDER_DEBOUNCE_MS: u64 = 200;
+
+/// 最近一次渲染请求的时间戳（进程启动相对毫秒）。
+///
+/// 与 [`BG_RENDER_RESTART_REQUESTED_AT_MS`] 是**两件事**：后者描述"在途 pass
+/// 需要重启"（由渲染循环在 clip 边界消费），前者描述"还没有 pass 在跑，需要
+/// 起一轮"（由调度线程消费）。混用会让两个静默窗口互相干扰。
+static BG_RENDER_REQUESTED_AT_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// 是否已有调度线程在等待去抖窗口（用于合流同一窗口内的重复请求）。
+static BG_RENDER_SCHEDULER_ACTIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// `render_single_clip` 内部检测到后台渲染取消时返回的错误标记。
 const BG_RENDER_CANCELLED_ERR: &str = "bg_render_cancelled";
@@ -2186,16 +2217,6 @@ fn render_background_pass(
     }
 }
 
-/// Request a background pre-render after render caches have been invalidated.
-///
-/// Unlike `start_background_render`, this is safe to call even while a render is
-/// already running: it cancels the in-flight render and requests a restart with
-/// the fresh cache state. It is a no-op when background pre-render is disabled.
-///
-/// ★ 线程安全约定（防死锁）：
-/// `start_background_render` 内部会锁定 `state.timeline`，而本函数常被
-/// “已经持有时间线锁”的调用方使用（如 `set_timeline_tempo_map` 的音阶
-/// 变化分支）。std Mutex 不可重入，若在调用方线程上同步启动渲染，
 /// 播放命令的按需渲染：**无论后台预渲染开关如何**，确保一轮渲染正在运行
 /// （本次播放需要待渲染 Clip 的结果）。
 ///
@@ -2208,17 +2229,66 @@ pub(crate) fn ensure_render_pass_running(app: &tauri::AppHandle) {
     if BG_RENDER_ACTIVE.load(Ordering::Relaxed) {
         return;
     }
-    // A fresh render request supersedes any stale restart marker.
-    BG_RENDER_RESTART_NEEDED.store(false, Ordering::Release);
-    let app = app.clone();
+    schedule_render_pass(app.clone());
+}
+
+/// 请求一轮渲染，并把去抖窗口内的重复请求合流成一次启动。
+///
+/// ★ 为什么在**调用 `start_background_render` 之前**清除调度标志：
+/// 若等启动完成后再清，等待窗口期间到达的新请求会因为"已有调度线程"而被合流
+/// 掉，而此刻 `BG_RENDER_ACTIVE` 还是 false —— 既不进重启合流分支、也不进新
+/// 启动分支，请求就真的丢了。提前清除则保证新请求一定会开启新的调度；与在途
+/// 调度线程的并发竞争由 `start_background_render` 自身的 `BG_RENDER_ACTIVE`
+/// 守卫收口，输掉竞争的一方补发重启请求，让在途 pass 收敛到更新的时间线。
+fn schedule_render_pass(app: tauri::AppHandle) {
+    use std::sync::atomic::Ordering;
+
+    BG_RENDER_REQUESTED_AT_MS.fetch_max(now_millis(), Ordering::Release);
+    if BG_RENDER_SCHEDULER_ACTIVE.swap(true, Ordering::AcqRel) {
+        // 同一去抖窗口内已有调度线程在等：本次请求已被合流。
+        return;
+    }
+
     std::thread::spawn(move || {
-        let _ = start_background_render(app);
+        // 等到"最后一次请求之后静默满一个窗口"为止。循环而非单次 sleep：
+        // 窗口内到达的新请求会刷新时间戳，需要重新计算剩余等待。
+        loop {
+            let last_requested_at = BG_RENDER_REQUESTED_AT_MS.load(Ordering::Acquire);
+            let remaining = render_request_debounce_remaining_ms(last_requested_at, now_millis());
+            if remaining == 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(remaining));
+        }
+        BG_RENDER_SCHEDULER_ACTIVE.store(false, Ordering::Release);
+        // A fresh render request supersedes any stale restart marker.
+        BG_RENDER_RESTART_NEEDED.store(false, Ordering::Release);
+        let started = start_background_render(app);
+        // 并发竞争输给了另一个调度线程：在途 pass 覆盖的是它收集时刻的待渲染
+        // 集合，可能落后于本次请求看到的时间线 —— 补发重启请求让它收敛。
+        if started
+            .get("skipped")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+        {
+            request_bg_render_restart();
+        }
     });
 }
 
+/// 请求一轮后台预渲染（编辑触发；受"后台预渲染"开关约束）。
+///
+/// ★ 线程安全约定（防死锁）：
+/// `start_background_render` 内部会锁定 `state.timeline`，而本函数常被
+/// “已经持有时间线锁”的调用方使用（如 `set_timeline_tempo_map` 的音阶
+/// 变化分支）。std Mutex 不可重入，若在调用方线程上同步启动渲染，
 /// 调用方会自我死锁 —— 命令线程永久阻塞，整个应用进入“未响应”。
-/// 因此这里把真正的启动工作转移到新线程：本函数只做原子的状态检查与
-/// 标记（无锁），渲染启动线程会等待时间线锁自然释放后再开始收集。
+/// 因此这里只做原子的状态检查与标记（无锁），真正的启动交给调度线程，
+/// 它会在时间线锁自然释放后再收集待渲染集合。
+///
+/// 与 [`start_background_render`] 的分工：后者是"现在就起一轮"，本函数是
+/// "在去抖窗口结束后起一轮"，并负责在已有 pass 在跑时合流为重启请求。
+/// 返回值仅用于诊断，调用方普遍忽略。
 pub(crate) fn request_background_render(app: &tauri::AppHandle) -> serde_json::Value {
     use std::sync::atomic::Ordering;
 
@@ -2243,17 +2313,8 @@ pub(crate) fn request_background_render(app: &tauri::AppHandle) -> serde_json::V
         return serde_json::json!({"ok": true, "restart_requested": true});
     }
 
-    // A fresh render request supersedes any stale restart marker.
-    BG_RENDER_RESTART_NEEDED.store(false, Ordering::Release);
-
-    // 在新线程上启动渲染：既避免调用方持有时间线锁时自我死锁，
-    // 也让命令线程尽快返回、界面保持响应。
-    let app = app.clone();
-    std::thread::spawn(move || {
-        let _ = start_background_render(app);
-    });
-
-    serde_json::json!({"ok": true, "starting": true})
+    schedule_render_pass(app.clone());
+    serde_json::json!({"ok": true, "starting": true, "debounced": true})
 }
 
 /// 取消当前正在运行的后台预渲染（如果有），并通知前台预渲染退出。
@@ -2304,9 +2365,48 @@ pub(super) fn cancel_background_render(app: Option<&tauri::AppHandle>) -> serde_
 #[cfg(test)]
 mod tests {
     use super::{
-        bg_render_restart_request_is_stale, render_priority_key, should_follow_up_render,
+        bg_render_restart_request_is_stale, render_priority_key,
+        render_request_debounce_remaining_ms, should_follow_up_render, BG_RENDER_DEBOUNCE_MS,
         BG_RENDER_RESTART_QUIET_WINDOW_MS,
     };
+
+    /// 去抖窗口：请求刚发出时要等满一个窗口；期间被新请求刷新则重新计时；
+    /// 静默满窗口后立即可启动。
+    #[test]
+    fn render_request_debounce_waits_for_a_quiet_window() {
+        let t0 = 10_000;
+        // 刚请求：需要等满整个窗口。
+        assert_eq!(
+            render_request_debounce_remaining_ms(t0, t0),
+            BG_RENDER_DEBOUNCE_MS
+        );
+        // 窗口过半。
+        assert_eq!(
+            render_request_debounce_remaining_ms(t0, t0 + BG_RENDER_DEBOUNCE_MS / 2),
+            BG_RENDER_DEBOUNCE_MS - BG_RENDER_DEBOUNCE_MS / 2
+        );
+        // 静默满窗口 → 可以启动。
+        assert_eq!(
+            render_request_debounce_remaining_ms(t0, t0 + BG_RENDER_DEBOUNCE_MS),
+            0
+        );
+        // 超出窗口仍为 0（不得下溢成天文数字）。
+        assert_eq!(
+            render_request_debounce_remaining_ms(t0, t0 + BG_RENDER_DEBOUNCE_MS * 100),
+            0
+        );
+        // 窗口内到达的新请求刷新时间戳 → 重新计满一个窗口（这就是"合流"）。
+        let refreshed = t0 + BG_RENDER_DEBOUNCE_MS - 1;
+        assert_eq!(
+            render_request_debounce_remaining_ms(refreshed, refreshed),
+            BG_RENDER_DEBOUNCE_MS
+        );
+        // 时钟回退（不应出现，但必须不 panic 且不无限等待）。
+        assert_eq!(
+            render_request_debounce_remaining_ms(t0, t0 - 5_000),
+            BG_RENDER_DEBOUNCE_MS
+        );
+    }
 
     /// 渲染优先级：覆盖播放关注点的 clip 最优先，其后是位于关注点之后的
     /// clip（按时间线顺序），最后是关注点之前的 clip。前后台渲染共用此逻辑。
