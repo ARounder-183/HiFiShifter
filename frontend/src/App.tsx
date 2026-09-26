@@ -1507,6 +1507,10 @@ function AppInner() {
                         if (!payload.finished) return;
                         const folded = Number(payload.folded ?? 0);
                         const pending = Number(payload.pending ?? 0);
+                        // 折叠改的是 Take 的 `channel_mode`，也就是时间线的真实状态。
+                        // 前端不会轮询时间线，必须在这里主动重拉一次，否则界面会
+                        // 一直显示旧的声道带数（直到用户做别的操作才收敛）。
+                        if (folded > 0) void dispatch(fetchTimeline());
                         if (folded <= 0 && pending <= 0) return;
                         let text = "";
                         if (folded > 0) {
@@ -1538,7 +1542,7 @@ function AppInner() {
             disposed = true;
             if (unlisten) unlisten();
         };
-    }, [showNotice, tAny]);
+    }, [dispatch, showNotice, tAny]);
 
     const runtimeRef = useRef({
         isPlaying: false,
