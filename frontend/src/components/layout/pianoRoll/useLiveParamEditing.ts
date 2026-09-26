@@ -4,7 +4,13 @@ import { paramsApi } from "../../../services/api";
 
 import { clampParamWriteValue } from "./paramRanges";
 
-import { restoreLiveEditRange, writeDenseIntoLiveWindow } from "./liveEditWindow";
+import {
+    parseLiveEditWindowKey,
+    reanchorLiveEditWindow,
+    restoreLiveEditRange,
+    warnLiveEditWindowMismatch,
+    writeDenseIntoLiveWindow,
+} from "./liveEditWindow";
 import type { ParamName, ParamViewSegment, StrokeMode, StrokePoint } from "./types";
 
 /**
@@ -70,6 +76,25 @@ export function useLiveParamEditing(args: {
 
     const liveEditOverrideRef = useRef<LiveEditOverride | null>(null);
     /**
+     * 当前参数窗口（**最新**的一份，供提交回写校验窗口是否还是同一个）。
+     *
+     * 【为什么不能用 `paramView` 闭包】提交回写（`commitStroke` 的
+     * `applyToParamViewDense`）是按**指针按下那一刻**的 `paramView` 算出的下标对齐
+     * —— `onUp` 捕获的是 pointerdown 时的 `commitStroke`。写回本地 state 前必须确认
+     * 窗口没被换掉，否则会把按旧窗口算出的 `edit` 以错误的帧对齐盖到新窗口上
+     * （见 `applyToParamViewDense`）。
+     *
+     * 【为什么用 effect 而不是渲染期赋值】写入 ref 属于"渲染副作用"，eslint 的
+     * `react-hooks/refs` 会拦下渲染期赋值。effect 在本组件提交后立刻执行，而
+     * pointerup 是离散事件 —— React 会在派发它之前冲刷掉待处理的被动 effect，
+     * 因此事件处理器里读到的必然是最后一次提交的窗口（与 `PianoRollPanel` /
+     * `usePianoRollInteractions` 的 `paramViewRef` 同一契约）。
+     */
+    const paramViewRef = useRef<ParamViewSegment | null>(paramView);
+    useEffect(() => {
+        paramViewRef.current = paramView;
+    }, [paramView]);
+    /**
      * live 覆盖的**全局单调**版本号（跨手势、跨轨道都不复用）。
      *
      * 用全局计数而非"每个覆盖自增"：这样 `null → 覆盖` 与 `覆盖 → 覆盖` 的
@@ -110,33 +135,89 @@ export function useLiveParamEditing(args: {
         if (cur !== null && cur.committed === true) clearLiveEditOverride();
     }, [clearLiveEditOverride]);
 
-    useEffect(() => {
-        if (!paramView) {
-            clearLiveEditOverride();
-            return;
-        }
-        if (liveEditOverrideRef.current?.key !== paramView.key) {
-            clearLiveEditOverride();
-        }
-        // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅按 key 变化重置 live 覆盖；paramView 对象引用随编辑更新而变，全量依赖会无效重跑
-    }, [paramView?.key]);
-
     const ensureLiveEditBase = useCallback((pv: ParamViewSegment) => {
         const cur = liveEditOverrideRef.current;
         // 键相同 = 同一个窗口；再确认底层已提交曲线的**引用**未换（`pv.edit` 变化
         // 说明期间发生过提交/刷新，必须重新取基准，否则预览会建立在一份过期
         // 数据上）。引用在拖动期稳定，故稳态下不触发拷贝。
         if (cur && cur.key === pv.key && cur.base === pv.edit) return;
-        // 新窗口 / 基准换了：整份拷贝**仅此一次**，之后一路原地改写。
         liveEditVersionRef.current += 1;
-        liveEditOverrideRef.current = {
+        const next: LiveEditOverride = {
             key: pv.key,
             base: pv.edit,
             edit: pv.edit.slice(),
             version: liveEditVersionRef.current,
         };
-        liveEditWrittenRangeRef.current = null;
+        // "已提交"的占位层不该因为重建而失去"等快照追上"的身份 —— 否则它既不会
+        // 被快照到达的规则撤下（那个规则只认 `committed`），也不该被用户当成
+        // 正在编辑的笔画（见 LiveEditOverride.committed）。
+        if (cur?.committed === true) next.committed = true;
+        // 重建基准（整份拷贝）只此一次，之后一路原地改写。
+        //
+        // 【未提交的覆盖层必须重锚】它承载的是**用户正在画的笔画**。旧实现在这里
+        // 无条件 `pv.edit.slice()` —— 窗口被换掉时笔画整份清零，正是"轨迹不画"
+        // 的直接原因（见 docs/plans/2026-09-26-volume-dyn-drag-trail-fix.md §1.1）。
+        // 重锚把已画的帧按绝对帧号搬进新窗口；未动的帧自动跟随新基准。
+        //
+        // 【已提交的覆盖层不重锚】它只是"等快照追上"的占位（值就是刚提交的曲线），
+        // 不是用户输入。此时若外部改动（撤销 / 别的编辑）换了基准，就该让新基准
+        // 生效 —— 重锚反而会拿陈旧值把外部改动盖住。
+        if (cur !== null && cur.committed !== true) {
+            const old = parseLiveEditWindowKey(cur.key);
+            const reanchored = reanchorLiveEditWindow({
+                edit: cur.edit,
+                base: cur.base,
+                startFrame: old.startFrame,
+                stride: old.stride,
+                nextEdit: pv.edit,
+                nextStartFrame: pv.startFrame,
+                nextStride: pv.stride,
+            });
+            next.edit = reanchored.values;
+            // 已画值的下标区间同样要重锚：直线 / 颤音工具每帧"先擦上一帧、再画本帧"，
+            // 区间若还是旧窗口的下标，擦除会落在错误的帧上（残留旧预览）。
+            liveEditWrittenRangeRef.current =
+                reanchored.drawnRange === null
+                    ? null
+                    : { key: pv.key, lo: reanchored.drawnRange.lo, hi: reanchored.drawnRange.hi };
+        } else {
+            liveEditWrittenRangeRef.current = null;
+        }
+        liveEditOverrideRef.current = next;
     }, []);
+
+    /**
+     * 窗口键变化时的处置：**合法换窗口**丢弃笔画，**意外换窗口**重锚保留。
+     *
+     * 【为什么不能一律清空】旧实现是"键不等就 `clearLiveEditOverride()`"。键同时
+     * 承载作用域（轨道 + 参数）与窗口参数（起帧 / 帧数 / 步长），而"取数回包"这条
+     * 意外路径会把 `paramView` 换成一个**同作用域、不同窗口**的对象 —— 一律清空
+     * 就等于把正在画的笔画扔掉（"按下画了一点、之后轨迹全不画"的机制之一）。
+     *
+     * 故按 {@link parseLiveEditWindowKey} 的 `scope` 分流：
+     * - 作用域变了（切参数 / 切轨）→ 调用方语义上本就该丢弃笔画，清空；
+     * - 只有窗口参数变了 → 立即重锚（不等下一次 pointermove），已画的值按帧搬进
+     *   新窗口。
+     *
+     * 同键但 `pv.edit` 换了引用（同窗口重取数）不在这里处理：键相同则渲染层仍按
+     * 本覆盖绘制（见 `PianoRollPanel` 的 `buildCurveLayers`，它按 `key === pv.key`
+     * 判定），下一次写入时由 {@link ensureLiveEditBase} 重锚即可，不会错帧。
+     */
+    useEffect(() => {
+        if (!paramView) {
+            clearLiveEditOverride();
+            return;
+        }
+        const cur = liveEditOverrideRef.current;
+        if (cur === null || cur.key === paramView.key) return;
+        const curScope = parseLiveEditWindowKey(cur.key).scope;
+        const nextScope = parseLiveEditWindowKey(paramView.key).scope;
+        if (curScope !== nextScope) {
+            clearLiveEditOverride();
+            return;
+        }
+        ensureLiveEditBase(paramView);
+    }, [paramView, ensureLiveEditBase, clearLiveEditOverride]);
 
     /**
      * live 覆盖写入的值域钳制（与后端写入入口同构，见
@@ -163,7 +244,15 @@ export function useLiveParamEditing(args: {
         ) => {
             ensureLiveEditBase(pv);
             const cur = liveEditOverrideRef.current;
-            if (!cur || cur.key !== pv.key) return;
+            if (!cur || cur.key !== pv.key) {
+                // 【不可达的不变量哨兵】`ensureLiveEditBase` 负责让覆盖层与新窗口
+                // 对齐（同键复用、换窗口重锚），所以这里本不该命中。旧实现在此
+                // **静默 return** —— 不写、不报错，于是"画音量 / 动态时轨迹不画"
+                // 只能靠肉眼复现（见 docs/plans/2026-09-26-volume-dyn-drag-trail-fix.md
+                // 的 §1.1 与阶段 3）。改为可观测，任何回归在开发期立刻暴露。
+                warnLiveEditWindowMismatch(pv.key, cur?.key ?? null);
+                return;
+            }
             // 重新进入"编辑中"：提交值可能还没进快照，但用户已经又画了，
             // 此时覆盖层必须跟着手走（不能再被快照到达时的清理规则撤下）。
             cur.committed = false;
@@ -281,6 +370,14 @@ export function useLiveParamEditing(args: {
             function applyToParamViewDense(denseStartFrame: number, dense: number[] | null) {
                 if (!pv) return;
                 if (pv.stride <= 0) return;
+                // 【本地回显的窗口守卫】`pv` 是指针**按下那一刻**闭包捕获的窗口
+                // （`onUp` 拿到的是 pointerdown 时的 `commitStroke`），而 `nextEdit`
+                // 又是按 `pv.startFrame` 算出的下标对齐。若窗口期间被换掉，这份
+                // `edit` 写进去就会以错误的帧对齐盖住新窗口的曲线。此时**丢弃**本地
+                // 回显：提交本身照常发后端，权威数据由 pointer-up 的补取带回
+                // （`commitStroke` 结尾的 `bumpRefreshToken` → `notifyLiveEditEnded`）。
+                const liveWindow = paramViewRef.current;
+                if (liveWindow === null || liveWindow.key !== pv.key) return;
                 const start = pv.startFrame;
                 const step = pv.stride;
                 const nextEdit = pv.edit.slice();
