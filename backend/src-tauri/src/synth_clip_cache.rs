@@ -361,6 +361,15 @@ impl RenderedClipCache {
         self.inner.get(key)
     }
 
+    /// 是否存在该键的条目（**不**提升 LRU 顺序）。
+    ///
+    /// 用于"还有没有活要干"的判定（见
+    /// `commands::playback::retain_clips_needing_work`）：那里只想知道条目在不在，
+    /// 不该因为一次探测就改变淘汰顺序。
+    pub fn contains_key(&self, key: &RenderedClipCacheKey) -> bool {
+        self.inner.contains_key(key)
+    }
+
     /// 插入缓存。字节预算自动管理淘汰。
     pub fn insert(&mut self, key: RenderedClipCacheKey, entry: RenderedClipCacheEntry) {
         let pcm_bytes = entry.pcm_stereo.len() as u64 * 4;
