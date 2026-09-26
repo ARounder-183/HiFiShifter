@@ -487,21 +487,18 @@ pub fn apply_resolution(take: &mut ClipTake, resolution: ChannelResolution) -> A
     applied
 }
 
-/// 该落点若应用到 `take`，是否会改变任何字段（模式或档案）。
+/// 该落点若应用到 `take`，是否会改变它的**声道模式**。
 ///
-/// 与 [`apply_resolution`] 用同一套判据，但**不改动** Take。调用方用它先判断
-/// "这批里到底有没有东西要写"，好在真正写入前决定要不要留撤销步（惰性撤销点：
-/// 全是 no-op 时不留空步）。
-pub fn resolution_changes(take: &ClipTake, resolution: ChannelResolution) -> bool {
-    let mode_changes = resolution
+/// 与"是否发生任何写入"不同：判定档案是内部记账，它从无到有不构成"用户的一次
+/// 编辑"，因此**不该**产生撤销步 —— 否则用户按下撤销会发现"什么都没变"。
+/// 只有模式真的变了（听感变了）才值得留一个撤销点。
+///
+/// 与 [`apply_resolution`] 用同一套模式判据，但**不改动** Take。
+pub fn resolution_changes_mode(take: &ClipTake, resolution: ChannelResolution) -> bool {
+    resolution
         .mode
         .map(|mode| crate::channel_mode::TakeChannelMode::from_raw(mode).raw() != take.channel_mode)
-        .unwrap_or(false);
-    let record_changes = resolution
-        .record
-        .map(|record| take.channel_decision != Some(record))
-        .unwrap_or(false);
-    mode_changes || record_changes
+        .unwrap_or(false)
 }
 
 /// [`apply_resolution`] 的结果：两个变化维度分开报告。

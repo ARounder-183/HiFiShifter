@@ -245,8 +245,9 @@ pub fn apply_planned(
     {
         let mut timeline = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
 
-        // 惰性撤销点：先判断这批里到底有没有东西要写。全 no-op 时不留空撤销步
-        // （判定为"该折叠"的 Take 可能已处于目标模式，写回是 no-op）。
+        // 惰性撤销点：先判断这批里到底有没有**听感变化**。判定档案是内部记账，
+        // 它从无到有不构成用户的一次编辑 —— 为它留撤销步会让用户按撤销时发现
+        // "什么都没变"。同理，判定说"该折叠"但 Take 已是目标模式时也不留。
         // 借用在这里就结束，下面的可变遍历才能拿 `timeline`。
         if with_undo {
             let needs_checkpoint = {
@@ -262,7 +263,7 @@ pub fn apply_planned(
                                 .find(|take| take.id == item.target.take_id)
                         })
                         .map(|take| {
-                            channel_policy::resolution_changes(take, item.resolution)
+                            channel_policy::resolution_changes_mode(take, item.resolution)
                         })
                         .unwrap_or(false)
                 })
@@ -654,6 +655,69 @@ mod tests {
             collect_targets(&tl, None, &policy, false).len(),
             1,
             "消费区间变了 ⇒ 旧结论失效，必须重判"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn manual_rescan_leaves_exactly_one_undo_step() {
+        // 手动扫描是用户显式操作，必须可撤销；后台迁移则不留撤销步。这里覆盖
+        // 撤销步路径本身（它要在**持有 timeline 锁**时快照，写错就是自我死锁）。
+        let policy = ChannelImportPolicy::default();
+        let path = write_wav("manual_undo.wav", true, 1);
+        let state = AppState::default();
+        {
+            let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+            *tl = timeline_with_take(Some(&path));
+            crate::state::TimelineState::populate_clip_file_metadata(&mut tl.clips[0]);
+        }
+        let depth_before = state.history_depths().0;
+
+        let targets = {
+            let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+            // 手动重扫连"已定论"的 Take 也一并重判。
+            collect_targets(&tl, None, &policy, true)
+        };
+        let planned = plan(targets, &policy, true);
+        let stats = apply_planned(&state, &planned, None, true).expect("apply");
+        assert_eq!(stats.folded, 1);
+        assert!(stats.applied.len() == 1, "报告要能逐条回填 applied_mode");
+        assert_eq!(take0(&state).channel_mode, 2);
+        assert!(
+            state.history_depths().0 > depth_before,
+            "手动扫描必须留下可撤销的一步"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_noop_pass_leaves_no_empty_undo_step() {
+        // 撤销点是惰性的：判定说"该折叠"但 Take 已是目标模式时，写回是 no-op，
+        // 不该因此多出一个空的撤销步（用户按撤销会发现"什么都没变"）。
+        let policy = ChannelImportPolicy::default();
+        let path = write_wav("noop_undo.wav", true, 1);
+        let state = AppState::default();
+        {
+            let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+            *tl = timeline_with_take(Some(&path));
+            crate::state::TimelineState::populate_clip_file_metadata(&mut tl.clips[0]);
+            // 已经是目标模式 + 档案已定论。
+            tl.clips[0].takes[0].channel_mode = 2;
+            tl.clips[0].channel_mode = 2;
+        }
+        let depth_before = state.history_depths().0;
+
+        let targets = {
+            let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+            collect_targets(&tl, None, &policy, true)
+        };
+        let planned = plan(targets, &policy, true);
+        let stats = apply_planned(&state, &planned, None, true).expect("apply");
+        assert_eq!(stats.folded, 0);
+        assert_eq!(
+            state.history_depths().0,
+            depth_before,
+            "全是 no-op 时不得留下空撤销步"
         );
         let _ = std::fs::remove_file(&path);
     }
