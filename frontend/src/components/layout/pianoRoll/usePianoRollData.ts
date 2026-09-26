@@ -143,6 +143,27 @@ export function usePianoRollData(args: {
         [],
     );
 
+    /**
+     * 笔画期间的取数**回包**守卫。
+     *
+     * 【为什么"发起"处有守卫还不够】取数 effect 顶部的早退只挡得住"笔画开始之后才
+     * 发起"的取数；而**在笔画开始之前就已发出**的那一次仍会回包并替换 `paramView`。
+     * `paramView.key` 一变，live 覆盖层被清空；key 不变时 `pv.edit` 换了引用，
+     * 下一次 pointermove 的 `ensureLiveEditBase` 同样会重建覆盖层 —— 两者都表现为
+     * "笔画被打断"。因此在**落地前**再判一次。
+     *
+     * 【为什么丢弃而不是缓存】笔画期间画面由 live 覆盖层负责，这份回包本就"过期"；
+     * pointer-up 的补取会用最新视口重算（见 `notifyLiveEditEnded`），缓存一份再落地
+     * 只会多出一条陈旧路径。
+     *
+     * @returns true = 已丢弃，调用方应立即 return。
+     */
+    function dropLandingDuringLiveEdit(): boolean {
+        if (!liveEditActiveRef.current) return false;
+        pendingFetchWhileEditingRef.current = true;
+        return true;
+    }
+
     const fpRetryRef = useRef<Set<string>>(new Set());
 
     const paramViewRef = useRef<ParamViewSegment | null>(null);
@@ -572,6 +593,7 @@ export function usePianoRollData(args: {
                     if (referenceFetchReqIdRef.current !== referenceReqId) return;
                     // 参数已被切换：这份参考音高属于上一个参数的画面，丢弃。
                     if (req.param !== currentParamRef.current) return;
+                    if (dropLandingDuringLiveEdit()) return;
                     const next: Record<string, ParamViewSegment> = {};
                     for (const entry of responses) {
                         if (!entry) continue;
@@ -633,6 +655,7 @@ export function usePianoRollData(args: {
                 // 参数已被切换：副参数叠加同样属于上一个参数的画面，丢弃
                 // （否则它会以旧参数的值、新参数的值域画出来）。
                 if (req.param !== currentParamRef.current) return;
+                if (dropLandingDuringLiveEdit()) return;
                 setSecondaryParamViews((prev) => {
                     const next = { ...prev };
                     for (const secondaryReq of req.secondaryRequests) {
@@ -682,6 +705,7 @@ export function usePianoRollData(args: {
                     // 依旧。因此这里再比一次参数。
                     if (req.param !== currentParamRef.current) return;
                     if (!res?.ok) {
+                        if (dropLandingDuringLiveEdit()) return;
                         if (debug) {
                             console.debug("[PianoRollData] paramFrames not ok", {
                                 trackId,
@@ -869,6 +893,7 @@ export function usePianoRollData(args: {
             if (req.param !== currentParamRef.current) return;
 
             if (shouldFetchParam && paramRes?.ok) {
+                if (dropLandingDuringLiveEdit()) return;
                 const payload = paramRes as ParamFramesPayload;
 
                 if (editParam === "pitch") {
@@ -1035,6 +1060,9 @@ export function usePianoRollData(args: {
                       )
                     : Promise.resolve([]),
             ]);
+            // 笔画期间的回包守卫：副参数与参考曲线同样会换掉叠加层数据，
+            // 与主参数取数同一契约（见 dropLandingDuringLiveEdit）。
+            if (dropLandingDuringLiveEdit()) return;
             if (secondaryFetchReqIdRef.current === secReqId) {
                 setSecondaryParamViews((prev) => {
                     const next = { ...prev };
