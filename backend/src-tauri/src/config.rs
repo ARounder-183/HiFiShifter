@@ -859,12 +859,11 @@ impl RenderCacheSettings {
         if self.policy_version >= RENDER_CACHE_POLICY_VERSION {
             return;
         }
+        // 只处理"旧出厂时长下限"。字节下限无需迁移：旧配置根本没有该字段，
+        // serde 的 `default = "default_render_cache_min_entry_kb"` 会补上出厂值
+        // （若在此处按 0 判断重置，反而会覆盖用户显式设置的 0 = 不设下限）。
         if (self.min_clip_secs - LEGACY_DEFAULT_MIN_CLIP_SECS).abs() < f64::EPSILON {
             self.min_clip_secs = default_render_cache_min_clip_secs();
-        }
-        // 旧配置没有这个字段，serde default 给出 0 → 补上字节下限的出厂值。
-        if self.min_entry_kb == 0 {
-            self.min_entry_kb = default_render_cache_min_entry_kb();
         }
         self.policy_version = RENDER_CACHE_POLICY_VERSION;
     }
@@ -1459,13 +1458,11 @@ mod tests {
     fn legacy_duration_floor_is_migrated_away() {
         let mut s = super::RenderCacheSettings {
             min_clip_secs: 0.5,
-            min_entry_kb: 0,
             policy_version: 0,
             ..Default::default()
         };
         s.migrate_admission_policy();
         assert_eq!(s.min_clip_secs, 0.0, "旧出厂时长下限必须被清掉");
-        assert_eq!(s.min_entry_kb, 4, "缺失的字节下限补出厂值");
         assert_eq!(s.policy_version, super::RENDER_CACHE_POLICY_VERSION);
     }
 
@@ -1474,7 +1471,6 @@ mod tests {
     fn migration_leaves_deliberate_values_alone() {
         let mut s = super::RenderCacheSettings {
             min_clip_secs: 2.5,
-            min_entry_kb: 0,
             policy_version: 0,
             ..Default::default()
         };
@@ -1490,7 +1486,6 @@ mod tests {
     fn migration_is_idempotent_and_respects_later_choices() {
         let mut s = super::RenderCacheSettings {
             min_clip_secs: 0.5,
-            min_entry_kb: 0,
             policy_version: 0,
             ..Default::default()
         };
@@ -1510,6 +1505,44 @@ mod tests {
         assert_eq!(s.min_clip_secs, 0.0);
         assert_eq!(s.min_entry_kb, 4);
         assert_eq!(s.min_entry_bytes(), 4 * 1024);
+    }
+
+    /// 端到端迁移：真实旧配置文件（`minClipSecs: 0.5`、无 `policyVersion`、
+    /// 无 `minEntryKb`）经 serde 默认值 + 读取边界迁移后，必须落到
+    /// "不设时长下限、字节下限 4 KB"。
+    ///
+    /// 这条测试覆盖的是**反序列化路径**，而不是手工构造的结构体 —— 迁移逻辑
+    /// 之所以放在 `load_config`，正是因为 serde 默认值与迁移必须协同工作，
+    /// 只测结构体测不出这一层。
+    #[test]
+    fn legacy_config_file_migrates_on_load() {
+        let dir = std::env::temp_dir().join(format!(
+            "hifishifter_config_migration_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(
+            dir.join("app_config.json"),
+            r#"{"ui":{"renderCache":{"enabled":true,"minClipSecs":0.5}}}"#,
+        )
+        .expect("write legacy config");
+
+        let ui = super::load_ui_settings(&dir);
+        assert_eq!(
+            ui.render_cache.min_clip_secs, 0.0,
+            "旧出厂时长下限必须被迁移掉"
+        );
+        assert_eq!(ui.render_cache.min_entry_kb, 4, "缺失的字节下限取出厂值");
+        assert_eq!(
+            ui.render_cache.policy_version,
+            super::RENDER_CACHE_POLICY_VERSION
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
