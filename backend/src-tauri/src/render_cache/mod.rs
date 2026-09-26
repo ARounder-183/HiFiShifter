@@ -427,6 +427,20 @@ pub fn load_rendered(
     })
 }
 
+/// 磁盘上是否存在该键的整 Clip 渲染条目（只做存在性检查，不读 payload）。
+///
+/// ★ 仅用于 miss 归因诊断。命中路径必须走 [`load_rendered`] —— 它会校验文件头、
+/// 采样率、管线指纹与校验和；"文件存在"绝不等于"条目可用"。
+pub fn contains_rendered(hash: u64) -> bool {
+    let rt = runtime_snapshot();
+    if !rt.enabled {
+        return false;
+    }
+    Store::new(rt.base_dir.clone())
+        .path_for(EntryKind::Rendered, hash)
+        .is_file()
+}
+
 /// 读取 HiFiGAN tension 变体。
 pub fn load_tension(
     key: &TensionRenderedClipCacheKey,

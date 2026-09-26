@@ -504,6 +504,91 @@ fn build_rendered_hash_input<'a>(
     }
 }
 
+/// clip 的渲染材料：根轨道的参数与轨道本身。
+struct ClipRenderMaterial<'a> {
+    entry: &'a crate::state::TrackParamsState,
+    track: &'a crate::state::Track,
+}
+
+/// 解析 clip 的渲染材料，并回答"这个 clip 当前是否需要渲染"。
+///
+/// ★ 这是该判定的**唯一实现**：收集待渲染（热路径）与 miss 归因诊断都必须经由
+/// 它。两处各写一份必然漂移，而漂移的后果是"写入的键"与"查询的键"不一致 ——
+/// 轻则永久 miss，重则跨参数误命中（见 `synth_clip_cache` 的模块契约）。
+///
+/// `find_track` 由调用方注入：热路径传预构建的 O(1) 查找表，诊断路径传线性查找
+/// （每次 miss 至多一次，轨道数是常数级）。
+fn resolve_render_material<'a>(
+    timeline: &'a crate::state::TimelineState,
+    clip: &crate::state::Clip,
+    find_track: impl Fn(&str) -> Option<&'a crate::state::Track>,
+) -> Option<ClipRenderMaterial<'a>> {
+    if clip.muted || clip.source_path.is_none() {
+        return None;
+    }
+    // 使用新的检测逻辑：检查 clip 是否需要 pitch edit
+    let clip_start_sec = clip.start_sec.max(0.0);
+    if !crate::pitch_editing::does_clip_need_processor_render(timeline, clip, clip_start_sec) {
+        return None;
+    }
+    // 获取 pitch edit 参数（按根轨道）
+    let clip_root = timeline.resolve_root_track_id(&clip.track_id)?;
+    let entry = timeline.params_by_root_track.get(&clip_root)?;
+    let track = find_track(&clip_root)?;
+    Some(ClipRenderMaterial { entry, track })
+}
+
+/// 组装单个 clip 的渲染键输入（与收集、快照回退共用同一口径）。
+fn rendered_hash_input_for_clip<'a>(
+    timeline: &'a crate::state::TimelineState,
+    clip: &'a crate::state::Clip,
+    sr: u32,
+    scale_signature: &'a str,
+) -> Option<crate::synth_clip_cache::RenderedClipHashInput<'a>> {
+    let material =
+        resolve_render_material(timeline, clip, |id| timeline.tracks.iter().find(|t| t.id == id))?;
+    let kind = crate::state::SynthPipelineKind::from_track_algo(&material.track.pitch_analysis_algo);
+    let renderer_id = crate::renderer::get_renderer(kind).id();
+    Some(build_rendered_hash_input(
+        clip,
+        material.entry,
+        renderer_id,
+        sr,
+        None,
+        material.track.compose_enabled,
+        scale_signature,
+    ))
+}
+
+/// miss 归因：逐个排除最易漂移的输入后重算哈希，并探测磁盘上是否存在该变体。
+///
+/// 渲染键是不可逆的摘要，单看两个哈希无法知道"哪个输入变了"。但排除某项后重算
+/// 若反而能在磁盘上找到条目，就唯一地指向该输入在两个会话之间发生了漂移 ——
+/// 典型来源是音高分析在 GPU / CPU EP 之间切换导致 `pitch_orig` 出现 ULP 级差异、
+/// 源文件因复制 / 同步而 mtime 变动。这是"整库静默失效"唯一可行的定位手段。
+///
+/// 仅在 `HIFISHIFTER_RENDER_CACHE_LOG=1` 下调用：每个 miss 要多算若干次哈希
+/// （含曲线切片），不能进常规路径。
+fn log_render_key_drift(timeline: &crate::state::TimelineState, clip: &crate::state::Clip, sr: u32) {
+    use crate::synth_clip_cache::{compute_rendered_clip_hash_excluding, HashExclusions};
+
+    let scale_signature = timeline.render_scale_signature();
+    let Some(input) = rendered_hash_input_for_clip(timeline, clip, sr, &scale_signature) else {
+        return;
+    };
+    for (label, exclusions) in HashExclusions::DIAGNOSTIC_CANDIDATES {
+        let variant = compute_rendered_clip_hash_excluding(&input, exclusions);
+        if crate::render_cache::contains_rendered(variant) {
+            log::warn!(
+                "[bg_render][cache] MISS attribution clip_id={} would_hit_if_excluded={} variant_hash={:#018x}",
+                clip.id,
+                label,
+                variant
+            );
+        }
+    }
+}
+
 /// 收集 timeline 中所有需要预渲染的 clip。
 ///
 /// 返回值中只包含需要 pitch edit 的 clip。
@@ -530,45 +615,22 @@ fn collect_clips_needing_render(
     let scale_signature = timeline.render_scale_signature();
 
     for clip in &timeline.clips {
-        if clip.muted {
-            continue;
-        }
-        if clip.source_path.is_none() {
-            continue;
-        }
-
-        // 使用新的检测逻辑：检查clip是否需要pitch edit
-        let clip_start_sec = clip.start_sec.max(0.0);
-        let needs_pitch_edit =
-            crate::pitch_editing::does_clip_need_processor_render(timeline, clip, clip_start_sec);
-
-        if !needs_pitch_edit {
-            continue;
-        }
-
-        // 获取pitch edit参数
-        let Some(clip_root) = timeline.resolve_root_track_id(&clip.track_id) else {
+        let Some(material) =
+            resolve_render_material(timeline, clip, |id| tracks_by_id.get(id).copied())
+        else {
             continue;
         };
-        let entry = match timeline.params_by_root_track.get(&clip_root) {
-            Some(e) => e,
-            None => continue,
-        };
-        let track = match tracks_by_id.get(clip_root.as_str()) {
-            Some(&t) => t,
-            None => continue,
-        };
-        let kind = crate::state::SynthPipelineKind::from_track_algo(&track.pitch_analysis_algo);
+        let kind = crate::state::SynthPipelineKind::from_track_algo(&material.track.pitch_analysis_algo);
         let renderer_id = crate::renderer::get_renderer(kind).id();
 
         // 渲染参数哈希：与渲染线程、快照回退共用同一份输入口径。
         let hash_input = build_rendered_hash_input(
             clip,
-            entry,
+            material.entry,
             renderer_id,
             sr,
             None,
-            track.compose_enabled,
+            material.track.compose_enabled,
             scale_signature.as_str(),
         );
         let param_hash = crate::synth_clip_cache::compute_rendered_clip_hash(&hash_input);
@@ -1847,6 +1909,9 @@ fn render_background_pass(
                         clip_render_info.clip.id,
                         clip_render_info.cache_key.param_hash
                     );
+                    // 归因：如果排除某个输入后反而能命中磁盘，就说明那个输入
+                    // 在两次会话之间漂移了 —— 这是定位"整库静默失效"的唯一手段。
+                    log_render_key_drift(timeline, &clip_render_info.clip, clip_render_info.sr);
                 }
                 if !rendering_started {
                     rendering_started = true;

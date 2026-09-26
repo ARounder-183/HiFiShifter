@@ -621,6 +621,69 @@ pub struct RenderedClipHashInput<'a> {
     pub source_file_size: Option<u64>,
 }
 
+/// 计算渲染键时**排除**哪些输入（仅供诊断，生产路径永远用全量参与）。
+///
+/// 渲染键是不可逆的摘要，单看两个哈希无法判断"哪个输入变了"。但排除某项后
+/// 重算、若反而能在磁盘上找到条目，就唯一地指向该输入在两次会话之间发生了
+/// 漂移。这是"整库静默失效"唯一可行的归因手段 —— 没有它，任何 1 ULP 级的
+/// 非确定性都会表现为"命中率低"而无法定位。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HashExclusions {
+    /// 排除原始音高曲线（`pitch_orig`，跨会话重分析最易抖动）。
+    pub pitch_orig: bool,
+    /// 排除渲染输入 pitch 曲线（clip 局部时间轴）。
+    pub input_pitch_curve: bool,
+    /// 排除全局拉伸设置（默认算法 / HiFiGAN mel 拉伸开关）。
+    pub stretch_settings: bool,
+    /// 排除源身份（mtime / 内容指纹 / 文件大小）。
+    pub source_identity: bool,
+}
+
+impl HashExclusions {
+    /// 全量参与（生产口径）。
+    pub const NONE: HashExclusions = HashExclusions {
+        pitch_orig: false,
+        input_pitch_curve: false,
+        stretch_settings: false,
+        source_identity: false,
+    };
+
+    /// 诊断候选：逐项单独排除，`(标签, 排除集)`。
+    ///
+    /// 覆盖四类"跨会话可能变化、但用户并未真正编辑"的输入。标签直接进日志，
+    /// 因此保持与字段同名，便于对照。
+    pub const DIAGNOSTIC_CANDIDATES: [(&'static str, HashExclusions); 4] = [
+        (
+            "pitch_orig",
+            HashExclusions {
+                pitch_orig: true,
+                ..HashExclusions::NONE
+            },
+        ),
+        (
+            "input_pitch_curve",
+            HashExclusions {
+                input_pitch_curve: true,
+                ..HashExclusions::NONE
+            },
+        ),
+        (
+            "stretch_settings",
+            HashExclusions {
+                stretch_settings: true,
+                ..HashExclusions::NONE
+            },
+        ),
+        (
+            "source_identity",
+            HashExclusions {
+                source_identity: true,
+                ..HashExclusions::NONE
+            },
+        ),
+    ];
+}
+
 /// 计算整 Clip 渲染的参数哈希（渲染缓存键的核心）。
 ///
 /// # 契约（新增渲染输入必须同步加入本函数）
@@ -631,6 +694,18 @@ pub struct RenderedClipHashInput<'a> {
 ///
 /// 以上任一项变化都必须产出不同哈希，否则会出现跨会话/跨参数的错误复用。
 pub fn compute_rendered_clip_hash(input: &RenderedClipHashInput<'_>) -> u64 {
+    compute_rendered_clip_hash_excluding(input, HashExclusions::NONE)
+}
+
+/// [`compute_rendered_clip_hash`] 的可排除变体。
+///
+/// 唯一的调用场景是 miss 归因诊断（见 [`HashExclusions`]）：生产路径一律传
+/// [`HashExclusions::NONE`]。之所以做成参数而不是复制一份函数，是因为渲染键
+/// 最危险的失效方式是"两处口径漂移"—— 复制必然漂移。
+pub fn compute_rendered_clip_hash_excluding(
+    input: &RenderedClipHashInput<'_>,
+    exclusions: HashExclusions,
+) -> u64 {
     // 解构输入（结构体是 Copy）：让下游混入代码保持单纯的字段名读写。
     let RenderedClipHashInput {
         clip_id,
@@ -658,6 +733,25 @@ pub fn compute_rendered_clip_hash(input: &RenderedClipHashInput<'_>) -> u64 {
         scale_signature,
         source_file_size,
     } = *input;
+
+    // 被排除的可选输入直接置空：下游混入代码因此保持**与全量口径逐字一致**，
+    // 不存在"某处忘了加守卫"的风险 —— 这正是排除法诊断可信的前提。
+    let pitch_orig = if exclusions.pitch_orig {
+        None
+    } else {
+        pitch_orig
+    };
+    let input_pitch_curve = if exclusions.input_pitch_curve {
+        None
+    } else {
+        input_pitch_curve
+    };
+    let (source_file_mtime, source_file_fingerprint, source_file_size) = if exclusions.source_identity
+    {
+        (None, None, None)
+    } else {
+        (source_file_mtime, source_file_fingerprint, source_file_size)
+    };
 
     let mut h: u64 = 14695981039346656037u64;
 
@@ -738,20 +832,22 @@ pub fn compute_rendered_clip_hash(input: &RenderedClipHashInput<'_>) -> u64 {
     // 气声噪声 stem 同样跟随外部算法。用户切换算法/开关后旧缓存必须失效，
     // 否则会持续返回旧算法的渲染结果（谐波与气声都不更新）。
     {
-        let stretch = crate::time_stretch::current_runtime_stretch_settings();
-        mix_bytes!(b"stretch_settings");
-        mix_bytes!(&(stretch.default_algorithm as u32).to_le_bytes());
-        mix_bytes!(&[u8::from(stretch.default_hifigan_mel_stretch)]);
-        mix_bytes!(&stretch
-            .project_algorithm_override
-            .map(|a| a as u32)
-            .unwrap_or(u32::MAX)
-            .to_le_bytes());
-        mix_bytes!(&stretch
-            .project_hifigan_mel_stretch_override
-            .map(u8::from)
-            .unwrap_or(u8::MAX)
-            .to_le_bytes());
+        if !exclusions.stretch_settings {
+            let stretch = crate::time_stretch::current_runtime_stretch_settings();
+            mix_bytes!(b"stretch_settings");
+            mix_bytes!(&(stretch.default_algorithm as u32).to_le_bytes());
+            mix_bytes!(&[u8::from(stretch.default_hifigan_mel_stretch)]);
+            mix_bytes!(&stretch
+                .project_algorithm_override
+                .map(|a| a as u32)
+                .unwrap_or(u32::MAX)
+                .to_le_bytes());
+            mix_bytes!(&stretch
+                .project_hifigan_mel_stretch_override
+                .map(u8::from)
+                .unwrap_or(u8::MAX)
+                .to_le_bytes());
+        }
     }
 
     // 混入与 clip 时间范围重叠的 pitch_edit 曲线片段
@@ -1275,7 +1371,33 @@ pub fn get_latest_tension_rendered_pcm(
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_rendered_clip_hash, RenderedClipHashInput};
+    use super::{
+        compute_rendered_clip_hash, compute_rendered_clip_hash_excluding, HashExclusions,
+        RenderedClipHashInput,
+    };
+
+    /// 运行时拉伸设置是**进程级全局**（`time_stretch::current_runtime_stretch_settings`），
+    /// 而渲染键会把它混进哈希 —— 同时 `cargo test` 默认多线程并行。
+    ///
+    /// 于是"读全局算哈希"的测试与"改全局"的测试并发时，同一个测试内的两次哈希
+    /// 可能跨越一次全局变更，产生与代码无关的间歇性失败（实测 HEAD 上 5 次运行
+    /// 失败 1 次）。
+    ///
+    /// 约定：凡是**计算渲染键**的测试都持读锁；唯一改写该全局的测试持写锁。
+    /// 读锁之间不互斥，因此不影响并行度。
+    static STRETCH_GLOBAL_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+    fn lock_stretch_global_read() -> std::sync::RwLockReadGuard<'static, ()> {
+        STRETCH_GLOBAL_LOCK
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn lock_stretch_global_write() -> std::sync::RwLockWriteGuard<'static, ()> {
+        STRETCH_GLOBAL_LOCK
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+    }
 
     /// 测试夹具：持有全部"按值"输入，供各断言按字段变体构造哈希输入。
     struct Fixture {
@@ -1335,6 +1457,7 @@ mod tests {
 
     #[test]
     fn rendered_clip_hash_changes_when_formant_morph_changes() {
+        let _stretch = lock_stretch_global_read();
         let mut fixture = Fixture::new();
         fixture.formant_morph = Some(crate::state::ClipFormantMorph {
             enabled: true,
@@ -1354,6 +1477,7 @@ mod tests {
 
     #[test]
     fn rendered_clip_hash_changes_when_reversed_changes() {
+        let _stretch = lock_stretch_global_read();
         // 反转（倒放）在同一源窗口下产生完全不同的 PCM：漏掉此维度会让
         // "反转开关"直接命中旧渲染结果。
         let fixture = Fixture::new();
@@ -1366,6 +1490,7 @@ mod tests {
 
     #[test]
     fn rendered_clip_hash_changes_when_source_identity_changes() {
+        let _stretch = lock_stretch_global_read();
         // 源文件内容指纹 / 活跃 Take：持久化缓存必须能识别"同路径不同内容"、
         // "同 Clip 换 Take"。
         let fixture = Fixture::new();
@@ -1386,6 +1511,7 @@ mod tests {
 
     #[test]
     fn rendered_clip_hash_changes_when_pitch_orig_changes() {
+        let _stretch = lock_stretch_global_read();
         // pitch_orig 是渲染输入的一部分（pitch_orig + pitch_edit 共同决定音高）。
         // 重新分析 / 更换分析算法后 pitch_edit 可能不变，只哈希 pitch_edit 会
         // 命中旧渲染结果。
@@ -1395,8 +1521,100 @@ mod tests {
         assert_ne!(base, fixture.hash());
     }
 
+    /// 排除变体的语义：排除某项必须真的改变哈希，未排除的项必须不影响结果。
+    ///
+    /// 这是归因诊断可信的前提 —— 如果"排除 pitch_orig"与全量哈希相同，那么
+    /// 用排除法反推漂移字段就毫无意义。
+    #[test]
+    fn exclusion_variants_isolate_their_own_input() {
+        let _stretch = lock_stretch_global_read();
+        // 夹具默认不设"输入 pitch 曲线"与源身份，而它们正是诊断候选之一 ——
+        // 必须补上，否则"排除后哈希不变"只是因为该字段本就缺席，什么也没测到。
+        let mut fixture = Fixture::new();
+        fixture.input_pitch_curve = Some(vec![67.0, 68.0]);
+        let mut input = fixture.input();
+        input.source_file_mtime = Some(1_700_000_000);
+        input.source_file_fingerprint = Some(0x1122_3344_5566_7788);
+        input.source_file_size = Some(4_194_304);
+
+        let base = compute_rendered_clip_hash(&input);
+
+        // 每个候选排除项都产出与全量不同的哈希（说明该项确实参与了混入）。
+        for (label, exclusions) in HashExclusions::DIAGNOSTIC_CANDIDATES {
+            assert_ne!(
+                base,
+                compute_rendered_clip_hash_excluding(&input, exclusions),
+                "排除 {label} 后哈希未变化，说明该字段根本没进键"
+            );
+        }
+
+        // 全量口径必须与 `compute_rendered_clip_hash` 完全一致（单一实现）。
+        assert_eq!(
+            base,
+            compute_rendered_clip_hash_excluding(&input, HashExclusions::NONE)
+        );
+
+        // 排除是**逐项独立**的：改变 pitch_orig 后，"排除 pitch_orig"的变体
+        // 必须保持不变（这正是归因能指出漂移字段的原理）。
+        let mut drifted = Fixture::new();
+        drifted.pitch_orig[1] = 72.0;
+        drifted.input_pitch_curve = fixture.input_pitch_curve.clone();
+        let mut drifted_input = drifted.input();
+        drifted_input.source_file_mtime = input.source_file_mtime;
+        drifted_input.source_file_fingerprint = input.source_file_fingerprint;
+        drifted_input.source_file_size = input.source_file_size;
+
+        let exclude_pitch_orig = HashExclusions {
+            pitch_orig: true,
+            ..HashExclusions::NONE
+        };
+        assert_eq!(
+            compute_rendered_clip_hash_excluding(&input, exclude_pitch_orig),
+            compute_rendered_clip_hash_excluding(&drifted_input, exclude_pitch_orig),
+            "排除 pitch_orig 后，pitch_orig 的漂移不应再影响哈希"
+        );
+        // 而排除别的字段时，pitch_orig 的漂移仍然可见。
+        let exclude_source = HashExclusions {
+            source_identity: true,
+            ..HashExclusions::NONE
+        };
+        assert_ne!(
+            compute_rendered_clip_hash_excluding(&input, exclude_source),
+            compute_rendered_clip_hash_excluding(&drifted_input, exclude_source)
+        );
+    }
+
+    /// 源身份排除：mtime / 指纹 / 大小三者必须同时被排除。
+    #[test]
+    fn source_identity_exclusion_covers_mtime_fingerprint_and_size() {
+        let _stretch = lock_stretch_global_read();
+        let fixture = Fixture::new();
+        let exclusions = HashExclusions {
+            source_identity: true,
+            ..HashExclusions::NONE
+        };
+        let base = compute_rendered_clip_hash_excluding(&fixture.input(), exclusions);
+
+        for mutate in [
+            (|input: &mut super::RenderedClipHashInput<'_>| input.source_file_mtime = Some(1)),
+            (|input: &mut super::RenderedClipHashInput<'_>| {
+                input.source_file_fingerprint = Some(7)
+            }),
+            (|input: &mut super::RenderedClipHashInput<'_>| input.source_file_size = Some(9)),
+        ] {
+            let mut input = fixture.input();
+            mutate(&mut input);
+            assert_eq!(
+                base,
+                compute_rendered_clip_hash_excluding(&input, exclusions),
+                "源身份的任一维度被排除后都不应再影响哈希"
+            );
+        }
+    }
+
     #[test]
     fn rendered_clip_hash_changes_when_playback_rate_changes() {
+        let _stretch = lock_stretch_global_read();
         let fixture = Fixture::new();
         let base = fixture.hash();
         let mut input = fixture.input();
@@ -1406,6 +1624,7 @@ mod tests {
 
     #[test]
     fn rendered_clip_hash_changes_when_loop_or_source_range_changes() {
+        let _stretch = lock_stretch_global_read();
         // Loop（循环源）与源窗口（trim/split 锚点推进）都会改变渲染输入，
         // 任一变化必须使渲染缓存失效。
         let fixture = Fixture::new();
@@ -1422,6 +1641,7 @@ mod tests {
 
     #[test]
     fn rendered_clip_hash_follows_stretch_settings() {
+        let _stretch = lock_stretch_global_write();
         // 渲染输出依赖拉伸模式（Mel Stretch 内部拉伸 vs 外部算法预拉伸），
         // 气声噪声 stem 也跟随外部算法。切换任一设置都必须使缓存失效。
         use crate::time_stretch::{update_runtime_stretch_settings, UserStretchAlgorithm};
@@ -1444,6 +1664,7 @@ mod tests {
 
     #[test]
     fn rendered_clip_hash_is_stable_under_subquantum_formant_jitter() {
+        let _stretch = lock_stretch_global_read();
         // 量化粒度: f1/f2 步长 0.1 Hz, strength 步长 0.001。
         // 在该粒度以下的浮点抖动 (前后端 round-trip / serde 反序列化 / 状态重建)
         // 不应改变 hash, 否则会触发 RenderedClipCache 的"假性失效"。
