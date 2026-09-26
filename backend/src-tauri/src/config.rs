@@ -980,12 +980,18 @@ impl ChannelImportPolicy {
     }
 
     /// 转换到判定模块所需的参数。
+    ///
+    /// 容器解码预算取**后台扫描**口径（[`crate::stereo_detect::DEFAULT_CONTAINER_BUDGET_SEC`]）：
+    /// 导入路径若想换取更低的同步延迟，自行用
+    /// `DetectOptions::with_container_budget_sec` 收窄 —— 预算计入策略签名，
+    /// 因此短预算得出的结论不会顶掉长预算的结论。
     pub fn detect_options(&self) -> crate::stereo_detect::DetectOptions {
         let n = self.normalized();
         crate::stereo_detect::DetectOptions {
             window_sec: n.window_sec,
             window_count: n.window_count,
             tolerance: n.tolerance,
+            container_budget_sec: crate::stereo_detect::DEFAULT_CONTAINER_BUDGET_SEC,
         }
         .normalized()
     }

@@ -7,6 +7,8 @@
 
 #[path = "commands/cache.rs"]
 mod cache;
+#[path = "commands/channel_scan.rs"]
+pub(crate) mod channel_scan;
 #[path = "commands/common.rs"]
 mod common;
 #[path = "commands/core.rs"]
@@ -1120,8 +1122,9 @@ pub async fn scan_and_convert_fake_stereo(
         ok: false,
         scanned: 0,
         converted: 0,
+        pending: 0,
         entries: Vec::new(),
-        missing_files: Some(vec![format!("scan task failed: {error}")]),
+        pending_files: Some(vec![format!("scan task failed: {error}")]),
     })
 }
 

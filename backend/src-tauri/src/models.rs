@@ -624,12 +624,22 @@ pub struct FakeStereoScanEntry {
     pub clip_id: String,
     pub take_id: String,
     pub name: String,
-    /// 判定原因：`mono` / `fake_stereo` / `true_stereo` / `unknown` /
-    /// `policy_off` / `forced_mono`（见 `channel_policy::ChannelScanOutcome`）。
+    /// 判定原因：`mono` / `fakeStereo` / `trueStereo` / `pending` /
+    /// `policyOff` / `forcedMono` / `noSource`（见 `channel_policy::ChannelScanOutcome`）。
     pub verdict: String,
     /// 本次实际写入的声道模式（`None` = 未改动）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub applied_mode: Option<i32>,
+    /// 判定为真立体声时的诊断证据：超差样本占比。
+    ///
+    /// 只有 `trueStereo` 才有值。`0.0001` 表示万分之一的样本超差（很可能只是
+    /// 编解码残留，放宽容差就能折叠）；`0.4` 表示四成样本超差（确实是立体声）。
+    /// 这是用户决定要不要调容差的唯一依据 —— 比一句"不是假立体声"有用得多。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub violating_ratio: Option<f64>,
+    /// 判定为真立体声时观测到的最大绝对差（满幅为 1）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_abs_diff: Option<f32>,
 }
 
 /// 假立体声扫描结果。
@@ -641,7 +651,13 @@ pub struct FakeStereoScanPayload {
     pub scanned: usize,
     /// 实际被折叠为单声道的 Take 数（`dry_run` 时为"将会被折叠"的数量）。
     pub converted: usize,
+    /// 本次**没能得出结论**的 Take 数（源缺失 / 不可解码 / 覆盖不完整）。
+    ///
+    /// 与"单声道、无事可做"严格区分：这些 Take 记着"待重试"，下次打开工程会
+    /// 自动再判一次。
+    pub pending: usize,
     pub entries: Vec<FakeStereoScanEntry>,
+    /// 待重试的源文件路径（去重），供 UI 提示"这些文件这次没读到"。
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub missing_files: Option<Vec<String>>,
+    pub pending_files: Option<Vec<String>>,
 }

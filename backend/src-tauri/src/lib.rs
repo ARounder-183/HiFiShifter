@@ -32,6 +32,8 @@ mod build_git;
 mod audio_engine;
 #[path = "audio/audio_utils.rs"]
 mod audio_utils;
+#[path = "audio/channel_decision.rs"]
+pub(crate) mod channel_decision;
 #[path = "audio/channel_mode.rs"]
 pub(crate) mod channel_mode;
 #[path = "audio/stereo_detect.rs"]

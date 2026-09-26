@@ -861,6 +861,9 @@ pub(super) fn new_project(
 ) -> crate::models::TimelineStatePayload {
     // 切换/新建工程前必须中断旧工程的后台预渲染，避免旧渲染继续写入缓存。
     let _ = crate::commands::playback::cancel_background_render(state.app_handle.get());
+    // 同时作废在途的声道扫描：工程文件里 clip/take id 复用是常态，旧工程的
+    // 扫描线程若不拦下，会把结论写进新工程的同 id Take。
+    crate::commands::channel_scan::bump_generation();
     {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
         *tl = crate::state::TimelineState::default();
@@ -923,6 +926,8 @@ pub(super) fn open_project(
     // 打开新工程前先取消旧工程的后台预渲染，防止旧渲染在替换 timeline/清缓存
     // 期间继续执行并污染新工程的缓存。
     let _ = crate::commands::playback::cancel_background_render(state.app_handle.get());
+    // 同时作废在途的声道扫描（同 new_project 的理由：clip/take id 会复用）。
+    crate::commands::channel_scan::bump_generation();
     let path = PathBuf::from(&project_path);
     // 读取字节流，自动检测 MessagePack（v3）或 JSON（v1/v2 兼容）格式。
     // 读取失败不再静默当作空文件：把 io 错误带回给前端展示。
@@ -1086,8 +1091,13 @@ pub(super) fn open_project(
         state.sync_project_record_from_tempo_map(&mut tl, &mut p);
     }
     sync_runtime_stretch_settings(state.inner());
+    // 后台声道扫描：把"还没有权威判定档案"的 Take 折叠为单声道。放在这里而不是
+    // `finalize_timeline_for_session` 里同步做，是因为同步全量解码会让大工程在
+    // 打开时冻结分钟级，而任何一次读不到（文件缺失 / 网络盘未挂载）都会因为工程
+    // 随即被保存成 v5 而永久漏判。扫描完成后再请求后台预渲染（折叠会失效渲染
+    // 缓存，反过来做会让先渲染出来的结果全部白做）。
     if let Some(handle) = state.app_handle.get() {
-        crate::commands::playback::request_background_render(handle);
+        crate::commands::channel_scan::request_channel_scan(handle);
     }
 
     // 持久化最近工程列表

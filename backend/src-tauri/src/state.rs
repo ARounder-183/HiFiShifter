@@ -784,6 +784,13 @@ pub struct ClipTake {
     /// 峰值头/解码结果回填内存投影，不强制回写工程）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_channels: Option<u16>,
+    /// 声道判定档案（谁定的 / 定的什么 / 结论还有效吗）。
+    ///
+    /// 取代旧实现「工程版本号 < 5 ⇒ 无权威来源」的代理判据：`None` = 从未
+    /// 判定或结论已失效（可被自动扫描改写），[`crate::channel_decision::ORIGIN_USER`]
+    /// = 用户显式决定（自动扫描永不触碰）。语义见 [`crate::channel_decision`]。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_decision: Option<crate::channel_decision::ChannelDecisionRecord>,
 
     // ── MIDI 内容（无音频源时） ──
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -842,6 +849,9 @@ impl ClipTake {
             loop_enabled: clip.loop_enabled,
             channel_mode: crate::channel_mode::TakeChannelMode::normalize_raw(clip.channel_mode),
             source_channels: clip.source_channels,
+            // 投影里没有判定档案（它是 Take 的权威数据，不是可投影的媒体字段）：
+            // 由 `sync_take_from_flat` 显式继承既有 Take 的档案，避免被抹掉。
+            channel_decision: None,
             midi_note_data: clip.midi_note_data.clone(),
             midi_fill_gaps: clip.midi_fill_gaps,
             stretch_markers: Vec::new(),
@@ -1295,6 +1305,20 @@ pub fn split_transition_curve_spec(curve: &str) -> Option<(f64, f64, f64)> {
 }
 
 impl Clip {
+
+    /// 给本 Clip 的 Take 盖"用户显式设置声道模式"的封印。
+    ///
+    /// `all_takes` 为真时覆盖全部 Take（跟随"同步编辑所有 Take"设置），否则只盖
+    /// active take。自动声道扫描会跳过带此封印的 Take。
+    pub fn seal_user_channel_mode(&mut self, all_takes: bool) {
+        let active_id = self.active_take_id.clone();
+        for take in self.takes.iter_mut() {
+            let is_active = active_id.as_deref() == Some(take.id.as_str());
+            if all_takes || is_active {
+                take.channel_decision = Some(crate::channel_decision::ChannelDecisionRecord::user());
+            }
+        }
+    }
     /// 读取期兼容：把旧命名曲线字符串换算成 (shape, dir)。
     ///
     /// 规则：字符串为空（VocalShifter 导入等哨兵）或新字段已由工程文件显式
@@ -1374,6 +1398,10 @@ impl Clip {
         projection.name = existing.name.clone();
         projection.stretch_markers = existing.stretch_markers;
         projection.envelopes = existing.envelopes;
+        // 判定档案是 Take 的权威数据，不在投影里：必须显式继承，否则每一次
+        // `sync_clip_takes_from_flat()`（加载/编辑/保存路径上到处都是）都会把
+        // 它抹成 None，折叠结论随之丢失并反复重判。
+        projection.channel_decision = existing.channel_decision;
         if existing.source_file_mtime.is_some() {
             projection.source_file_mtime = existing.source_file_mtime;
         }
@@ -8641,7 +8669,7 @@ impl TimelineState {
     pub fn apply_channel_decision_to_clip(
         &mut self,
         clip_id: &str,
-        decision: crate::channel_policy::ChannelDecision,
+        resolution: crate::channel_policy::ChannelResolution,
     ) -> bool {
         let Some(clip) = self.clips.iter_mut().find(|c| c.id == clip_id) else {
             return false;
@@ -8652,7 +8680,7 @@ impl TimelineState {
         let Some(take) = clip.takes.first_mut() else {
             return false;
         };
-        if !crate::channel_policy::apply_decision(take, decision) {
+        if !crate::channel_policy::apply_resolution(take, resolution).mode_changed {
             return false;
         }
         // 声道模式是 active take 的内存投影，写回 Take 后必须同步投影，
@@ -8662,64 +8690,32 @@ impl TimelineState {
         true
     }
 
-    /// 旧工程升级：对**全部** Clip 的全部 Take 套用导入声道策略。
+    /// 加载边界：把「v5 之前的工程里 Take 没有判定档案」这一**版本语义**
+    /// 一次性翻译成显式的档案状态。
     ///
-    /// 只用于 v5 之前、Take 尚无 `channel_mode` 字段的工程 —— 那些 Take 的 0
-    /// 是"字段缺失"而非用户的显式选择。v5+ 工程的 `channel_mode` 是用户决定，
-    /// 调用方不得在此改写（见 `project::finalize_timeline_for_session`）。
+    /// - `project_file_version < 5`：什么都不做 —— 那些 Take 的档案保持
+    ///   `None`，即"从未判定"，会被可恢复扫描纳入候选（这是"漏判不再永久化"
+    ///   的前提）；
+    /// - `project_file_version >= 5`：把缺失的档案**封印为"用户决定"**。v5
+    ///   工程里的 `channel_mode` 是用户的选择（或此前迁移的结论），自动扫描
+    ///   绝不能再改写 —— 这正是旧实现用 `version < 5` 守住的那条不变式。
     ///
-    /// **会解码音频**，必须在锁外调用。返回被改写的 Take 数量。
-    pub fn apply_channel_policy_to_legacy_takes(
-        &mut self,
-        policy: &crate::config::ChannelImportPolicy,
-    ) -> usize {
-        let mut changed = 0usize;
-        // 先全量判定（可能解码），再统一写回：避免在同一循环里混着 IO 与
-        // 借用，也让"哪些被改"一目了然。
-        //
-        // 判定按「源文件」分组（`scan_sources_grouped`）：同一音频被多个
-        // Clip/Take 引用是常态（人声切片、多轨共享伴奏），逐 Take 独立判定
-        // 会对同一文件反复解码 —— 整工程迁移的解码量随引用数线性放大。
-        // 分组后每文件一次 I/O；判定语义（逐 Take 消费区间独立判定）不变。
-        let take_refs: Vec<&ClipTake> = self.clips.iter().flat_map(|c| c.takes.iter()).collect();
-        let decisions: Vec<crate::channel_policy::ChannelDecision> = {
-            let requests: Vec<crate::channel_policy::ScanRequest<'_>> = take_refs
-                .iter()
-                .map(|take| crate::channel_policy::ScanRequest {
-                    source_path: take.source_path.as_deref().map(Path::new),
-                    source_channels: take.source_channels,
-                    region: crate::channel_policy::take_consumption_region(take),
-                })
-                .collect();
-            crate::channel_policy::scan_sources_grouped(&requests, policy)
-                .into_iter()
-                .map(|outcome| outcome.decision(policy))
-                .collect()
-        };
-
-        let mut cursor = 0usize;
+    /// 版本号只在这里被消费一次；此后全部逻辑只看档案本身。
+    pub fn seal_legacy_channel_decisions(&mut self, project_file_version: u32) -> usize {
+        if project_file_version < 5 {
+            return 0;
+        }
+        let mut sealed = 0usize;
         for clip in &mut self.clips {
-            let mut clip_changed = false;
-            for take in clip.takes.iter_mut() {
-                let decision = decisions
-                    .get(cursor)
-                    .copied()
-                    .unwrap_or(crate::channel_policy::ChannelDecision::Keep);
-                cursor += 1;
-                if crate::channel_policy::apply_decision(take, decision) {
-                    clip_changed = true;
-                    changed += 1;
+            for take in &mut clip.takes {
+                if take.channel_decision.is_none() {
+                    take.channel_decision =
+                        Some(crate::channel_decision::ChannelDecisionRecord::user());
+                    sealed += 1;
                 }
             }
-            if clip_changed && !clip.takes.is_empty() {
-                // 声道模式是 active take 的内存投影：改完 Take 必须物化回投影，
-                // 否则后续 sync 会用旧投影覆盖（且前端读的是投影）。
-                let idx = clip.active_take_index().min(clip.takes.len() - 1);
-                let take = clip.takes[idx].clone();
-                take.apply_to_clip(clip);
-            }
         }
-        changed
+        sealed
     }
 
     /// 波纹编辑（自动跟进）：把“编辑点（origin）之后、且不属于被编辑集合的剪辑”
@@ -9367,8 +9363,7 @@ impl TimelineState {
             // active take 的权威），再在下方按"同步所有 Take"决定是否扩散。
             if let Some(v) = patch.channel_mode {
                 c.channel_mode = crate::channel_mode::TakeChannelMode::normalize_raw(v);
-            }
-            // “同步编辑所有 Take”：内容级编辑（源偏移/速率/倒放/Loop/增益/
+            }            // “同步编辑所有 Take”：内容级编辑（源偏移/速率/倒放/Loop/增益/
             // 声道模式）同步到该 Clip 的全部 Take；容器级属性（位置/长度/
             // fade/颜色等）保持 Clip 级语义，不参与同步。
             if crate::config::sync_edits_across_takes() {
@@ -9429,6 +9424,13 @@ impl TimelineState {
             }
             // active 投影已更新，写回 Take 权威数据。
             c.sync_take_from_flat();
+            // 用户显式改声道模式 ⇒ 盖"用户决定"封印，自动扫描从此不再改写它。
+            // 必须在 `sync_take_from_flat` **之后**：那一步会保留既有档案，早盖
+            // 会被随后的写回覆盖掉。
+            if patch.channel_mode.is_some() {
+                let all_takes = crate::config::sync_edits_across_takes();
+                c.seal_user_channel_mode(all_takes);
+            }
 
             end_sec = Some(c.start_sec + c.length_sec);
         }
@@ -9631,6 +9633,9 @@ impl TimelineState {
             .find(|t| t.id == take_id)
             .ok_or_else(|| format!("take not found: {take_id}"))?;
         take.channel_mode = mode.raw();
+        // 用户显式设置 ⇒ 盖"用户决定"封印：自动声道扫描从此永不改写这个 Take。
+        // 这是判定档案存在的意义之一（见 `crate::channel_decision`）。
+        take.channel_decision = Some(crate::channel_decision::ChannelDecisionRecord::user());
         if is_active {
             let take = take.clone();
             take.apply_to_clip(clip);
@@ -11488,13 +11493,13 @@ impl TimelineState {
     ///
     /// `channel_decision` 由调用方在**锁外**按导入声道策略预先算好
     /// （见 `crate::channel_policy::precompute_decision`）：本函数在持锁状态
-    /// 下运行，绝不能在此解码音频。`Keep` 表示保持默认的 Normal 声道模式。
+    /// 下运行，绝不能在此解码音频。`ChannelResolution::NOOP` 表示什么都不写。
     pub fn import_audio_item(
         &mut self,
         audio_path: &str,
         track_id: Option<String>,
         start_sec: Option<f64>,
-        channel_decision: crate::channel_policy::ChannelDecision,
+        channel_decision: crate::channel_policy::ChannelResolution,
     ) {
         let name = Path::new(audio_path)
             .file_name()
@@ -11597,9 +11602,10 @@ impl TimelineState {
             // header-only 探测与 add_clip 内完整解码结果存在差异时）。
             c.sync_take_from_flat();
             // 导入声道策略（锁外已判定）：把"假立体声"折叠为单声道，使渲染
-            // 退回单声道路径。apply_decision 是零成本操作，不会在锁内解码。
+            // 退回单声道路径；同时落下判定档案（"读不到"的记待重试，让后台
+            // 扫描下次接着补）。apply_resolution 是零成本操作，不会在锁内解码。
             if let Some(take) = c.takes.first_mut() {
-                if crate::channel_policy::apply_decision(take, channel_decision) {
+                if crate::channel_policy::apply_resolution(take, channel_decision).mode_changed {
                     let take = take.clone();
                     take.apply_to_clip(c);
                 }
@@ -11633,11 +11639,33 @@ impl TimelineState {
             }
         }
 
-        let info = try_read_wav_info(Path::new(new_source_path), 4096);
-        let duration_sec = info.as_ref().map(|v| v.duration_sec);
-        let duration_frames = info.as_ref().map(|v| v.total_frames);
-        let source_sample_rate = info.as_ref().map(|v| v.sample_rate);
-        let waveform_preview = info.map(|v| v.waveform_preview);
+        // 目标文件的头信息。WAV 走 hound（顺带拿到波形预览）；非 WAV 时
+        // `try_read_wav_info` 只认 WAV、各项全为 None（Clip 会丢掉时长、渲染
+        // 按 4 秒回退），因此再补一次 O(1) 的容器探测，与导入路径同口径。
+        let wav_info = try_read_wav_info(Path::new(new_source_path), 4096);
+        let container_header = if wav_info.is_some() {
+            None
+        } else {
+            crate::audio_utils::try_read_audio_header_only(Path::new(new_source_path))
+        };
+        let duration_sec = wav_info
+            .as_ref()
+            .map(|v| v.duration_sec)
+            .or_else(|| container_header.as_ref().map(|v| v.duration_sec));
+        let duration_frames = wav_info
+            .as_ref()
+            .map(|v| v.total_frames)
+            .or_else(|| container_header.as_ref().map(|v| v.total_frames));
+        let source_sample_rate = wav_info
+            .as_ref()
+            .map(|v| v.sample_rate)
+            .or_else(|| container_header.as_ref().map(|v| v.sample_rate));
+        let new_channels = wav_info
+            .as_ref()
+            .map(|v| v.channels)
+            .or_else(|| container_header.as_ref().map(|v| v.channels))
+            .filter(|channels| *channels > 0);
+        let waveform_preview = wav_info.map(|v| v.waveform_preview);
 
         // 记录新源文件的元数据 + 内容指纹
         let new_meta = std::fs::metadata(new_source_path).ok();
@@ -11680,8 +11708,23 @@ impl TimelineState {
             if let Some(fp) = new_fp {
                 clip.source_file_fingerprint = Some(fp);
             }
+            // 声道数必须跟着换成**新文件**的：留着旧文件的声道数会经投影污染
+            // 下游的 `effective_channels`，把扇出倍数算错（单声道文件按立体声
+            // 跑两遍，或立体声文件只跑一遍）。
+            clip.source_channels = new_channels;
             clip.waveform_preview = waveform_preview.clone();
             clip.sync_take_from_flat();
+            // 判定档案必须作废：它记录的是**旧文件**的判定上下文（指纹/区间），
+            // 新文件既可能不是同一个声道数，也可能不是同一个结论。清空后由
+            // 可恢复扫描按当前策略重判 —— 这也是"重链媒体"这条路径此前完全
+            // 绕过声道判定的修复点（旧实现让重链后的 Take 永远保持旧结论，
+            // 而工程一旦存成 v5 就再没有第二次机会）。
+            for take in clip.takes.iter_mut() {
+                if take.source_path.as_deref() == Some(new_source_path) {
+                    take.source_channels = new_channels;
+                    take.channel_decision = None;
+                }
+            }
             changed += 1;
         }
 

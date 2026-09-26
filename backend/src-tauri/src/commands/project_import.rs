@@ -71,22 +71,22 @@ pub(super) fn import_project(
             }
         }
     }
-    // 非 Loop 存储窗口规范化（同 open_project，见其注释）。
+    // 非 Loop 存储窗口规范化（同 open_project，见其注释）：Clip 投影与**每个
+    // Take** 的窗口都要自愈，只做投影会让 inactive take 的旧窗口在切换时回流。
     for clip in &mut timeline.clips {
         crate::state::normalize_nonloop_source_window(clip);
+        crate::state::normalize_nonloop_all_take_windows(clip);
     }
     timeline.sync_clip_takes_from_flat();
 
-    // v5 迁移（同 open_project）：v4 及更早的被导入工程 Take 无 channel_mode，
-    // 反序列化得到的 0 是"字段缺失"而非用户选择 → 按导入声道策略重新判定。
-    // v5+ 工程绝不改写。此处仍在锁外（fragment 合并发生在后面），可安全解码。
-    if pf.version < 5 {
-        let policy = crate::config::channel_import_policy();
-        let converted = timeline.apply_channel_policy_to_legacy_takes(&policy);
-        if converted > 0 {
-            log::info!(
-                "[import_project] channel policy folded {converted} legacy take(s) to mono"
-            );
+    // v5 迁移（同 open_project）：版本号只在这里被消费一次，翻译成显式判定档案。
+    // v5+ 工程的 `channel_mode` 是用户决定 → 封印为"用户"；v4 及更早的 Take
+    // 保持"从未判定"，由合并完成后的后台扫描按策略补判（不再在此同步解码：
+    // 那是命令线程上的全量解码，且读不到的会被永久漏判）。
+    if pf.version >= 5 {
+        let sealed = timeline.seal_legacy_channel_decisions(pf.version);
+        if sealed > 0 {
+            log::info!("[import_project] sealed {sealed} take(s) as user-decided channel mode");
         }
     }
 
@@ -229,7 +229,10 @@ pub(super) fn import_project(
             crate::pitch_analysis::maybe_schedule_pitch_orig(&state, root_id);
         }
         if let Some(handle) = state.app_handle.get() {
-            crate::commands::playback::request_background_render(handle);
+            // 被导入工程里 v4 及更早的 Take 没有任何判定档案（v5+ 的已在上面
+            // 封印为"用户决定"），交给可恢复扫描按当前策略补判 —— 它会带着
+            // 完整容器预算重判，并在此之后才放行后台预渲染。
+            crate::commands::channel_scan::request_channel_scan(handle);
         }
 
         let mut json = serde_json::to_value(&payload).unwrap_or_default();

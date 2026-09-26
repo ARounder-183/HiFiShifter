@@ -454,6 +454,9 @@ fn build_audio_clip_take(
         channel_mode: crate::channel_mode::TakeChannelMode::from_reaper_chanmode(take.chan_mode)
             .raw(),
         source_channels,
+        // REAPER 的 `CHANMODE` 是素材自带的权威字段，不是我们的推断：封印为
+        // "用户决定"，自动声道扫描永不改写（见 `channel_policy` 的生效边界表）。
+        channel_decision: Some(crate::channel_decision::ChannelDecisionRecord::user()),
         midi_note_data: None,
         midi_fill_gaps: false,
         stretch_markers: Vec::new(),

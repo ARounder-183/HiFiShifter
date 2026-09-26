@@ -629,6 +629,125 @@ where
     ))
 }
 
+/// 单遍顺序解码，沿途把 `windows` 指定的帧区间收割出来。
+///
+/// 每个窗口以 `(start_frame, frame_count)` 给出，回调收到 `(窗口下标, 交错 PCM,
+/// 声道数, 采样率)`。窗口之间可以乱序、可以重叠、可以超出文件长度（收不到的
+/// 窗口不会被回调）；解码在最后一个窗口的终点处停止。
+///
+/// # 为什么需要它
+///
+/// Symphonia 的逐包解码不保证随机访问 —— 想比较"第 4 分钟"的左右声道，就只能
+/// 从文件头一路解到第 4 分钟。但**解码**和**保留**是两件事：本函数只保留窗口
+/// 覆盖的那几段（默认每段 0.25 秒 × 12 段），途经的其余帧解完即弃，内存占用
+/// 与文件长度无关。
+///
+/// 这是"非 WAV 素材只能看文件头 3 秒"那个缺陷的替代品：它让容器判定也能覆盖
+/// 消费区间的**首尾**，而不只是开头。
+pub fn visit_media_audio_windows<F>(
+    path: &Path,
+    preferred_stream: Option<usize>,
+    windows: &[(u64, usize)],
+    max_frames: usize,
+    on_window: &mut F,
+) -> Result<usize, String>
+where
+    F: FnMut(usize, &[f32], u16, u32) -> Result<(), String>,
+{
+    if windows.is_empty() || max_frames == 0 {
+        return Ok(0);
+    }
+
+    // 按起点排序（保留原下标，回调要按调用方的编号汇报）。乱序输入不算错误，
+    // 但顺序扫描必须有序 —— 在这里收敛掉，调用方不必操心。
+    let mut ordered: Vec<(u64, usize, usize)> = windows
+        .iter()
+        .enumerate()
+        .map(|(index, (start, len))| (*start, *len, index))
+        .collect();
+    ordered.sort_by_key(|(start, _, _)| *start);
+
+    let mut harvested = 0usize;
+    let mut cursor: u64 = 0;
+    let mut next = 0usize;
+    // 跨解码缓冲的窗口需要累积：一个 0.25 秒的窗口很可能被包边界切成两半。
+    let mut acc: Vec<f32> = Vec::new();
+    let mut acc_frames = 0usize;
+    let mut acc_index = 0usize;
+    let mut acc_channels = 0u16;
+
+    let result = decode_track_frames_until(
+        path,
+        preferred_stream,
+        max_frames,
+        &mut |frame: &[f32], rate: u32, channels: u16| {
+            let ch = channels.max(1) as usize;
+            let frame_count = frame.len() / ch;
+            if frame_count == 0 {
+                return Ok(());
+            }
+
+            let mut consumed = 0usize;
+            while consumed < frame_count && next < ordered.len() {
+                let (start, len, index) = ordered[next];
+                let absolute = cursor + consumed as u64;
+
+                if absolute < start {
+                    // 还没到窗口起点：丢弃这段，直接跳过。
+                    let skip = (start - absolute).min((frame_count - consumed) as u64) as usize;
+                    consumed += skip;
+                    continue;
+                }
+
+                // 新窗口：重置累积器（上一个窗口若没攒够就作废 —— 它已被跳过）。
+                if acc_index != index || acc_frames == 0 {
+                    if acc_frames > 0 && acc_index != index {
+                        acc.clear();
+                        acc_frames = 0;
+                    }
+                    acc_index = index;
+                    acc_channels = channels;
+                }
+
+                let take = (len - acc_frames).min(frame_count - consumed);
+                if take == 0 {
+                    next += 1;
+                    continue;
+                }
+                let from = consumed * ch;
+                acc.extend_from_slice(&frame[from..from + take * ch]);
+                acc_frames += take;
+                consumed += take;
+
+                if acc_frames >= len {
+                    on_window(index, &acc, acc_channels, rate)?;
+                    harvested += 1;
+                    acc.clear();
+                    acc_frames = 0;
+                    next += 1;
+                }
+            }
+
+            cursor += frame_count as u64;
+            if next >= ordered.len() {
+                // 全部窗口已收割：用"已解满"的返回值让解码循环提前收尾。
+                return Err(WINDOWS_DONE.to_string());
+            }
+            Ok(())
+        },
+    );
+
+    match result {
+        Ok(_) => Ok(harvested),
+        // 提前收尾不是错误 —— 这是我们主动请求的停止。
+        Err(error) if error == WINDOWS_DONE => Ok(harvested),
+        Err(error) => Err(error),
+    }
+}
+
+/// [`visit_media_audio_windows`] 提前收尾用的内部哨兵（不会外泄给调用方）。
+const WINDOWS_DONE: &str = "__hifi_windows_done__";
+
 /// Extract one audio stream of a media file to a WAV file next to the source.
 ///
 /// The cache file is named `<stem>.hifi_audio_<stream>.wav` and is overwritten

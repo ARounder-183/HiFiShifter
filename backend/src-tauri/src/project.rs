@@ -602,18 +602,20 @@ pub fn finalize_timeline_for_session(
     }
     tl.sync_clip_takes_from_flat();
 
-    // v5 迁移：v4 及更早的 Take 没有 `channel_mode` 字段，反序列化得到的 0 是
-    // "字段缺失"而非用户的显式选择 —— 按当前导入策略重新判定（默认"智能转换"：
-    // 假立体声折叠为单声道，使渲染退回单声道路径，耗时减半）。
+    // v5 迁移：把「版本号 < 5 ⇒ Take 没有权威声道来源」这一**版本语义**一次性
+    // 翻译成显式的判定档案（见 `TimelineState::seal_legacy_channel_decisions`）。
     //
-    // v5+ 工程绝不走这一步：那里的 channel_mode 是用户决定，改写会破坏意图。
+    // 这里**不再**同步解码折叠：那会让大工程在打开时冻结分钟级，且任何一次
+    // 读不到（文件缺失 / 网络盘未挂载）都会因为工程随即被保存成 v5 而永久漏判。
+    // 折叠改由 `commands::channel_scan` 在后台可恢复地完成 —— 它按判定档案挑
+    // 候选，读不到的记 Pending，下次打开继续重试。
+    //
     // 必须放在 `populate_clip_file_metadata` **之后**：该步骤会回填
-    // `source_channels`，有了它单声道源可零解码直接跳过。
-    if project_file_version < 5 {
-        let policy = crate::config::channel_import_policy();
-        let converted = tl.apply_channel_policy_to_legacy_takes(&policy);
-        if converted > 0 {
-            log::info!("[open_project] channel policy folded {converted} legacy take(s) to mono");
+    // `source_channels` 与内容指纹，两者都是判定档案要比对的上下文。
+    if project_file_version >= 5 {
+        let sealed = tl.seal_legacy_channel_decisions(project_file_version);
+        if sealed > 0 {
+            log::info!("[open_project] sealed {sealed} legacy take(s) as user-decided channel mode");
         }
     }
 
@@ -678,7 +680,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_project_folds_fake_stereo_takes() {
+    fn legacy_project_takes_stay_eligible_for_the_resumable_scan() {
         let _guard = crate::config::channel_policy_test_guard();
         crate::config::set_channel_import_policy(&crate::config::ChannelImportPolicy::default());
         let path = write_test_wav("legacy_fake.wav", true);
@@ -687,13 +689,67 @@ mod tests {
         let (finalized, _missing) =
             finalize_timeline_for_session(tl, Path::new("C:/proj/t.hshp"), 4);
 
+        // v4 的 Take **不再在打开时同步折叠**（那会让大工程冻结分钟级，且任何
+        // 一次读不到都会因工程随即存成 v5 而永久漏判）。打开只负责把它标成
+        // "从未判定"，折叠交给可恢复扫描。
         assert_eq!(
-            finalized.clips[0].takes[0].channel_mode, 2,
-            "v4 工程的假立体声 Take 应被折叠为单声道"
+            finalized.clips[0].takes[0].channel_mode, 0,
+            "打开阶段不得改写模式"
         );
         assert_eq!(
-            finalized.clips[0].channel_mode, 2,
-            "active take 的模式必须同步到 Clip 投影"
+            finalized.clips[0].takes[0].channel_decision, None,
+            "v4 的 Take 必须保持'从未判定'，否则不会被扫描纳入候选"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn legacy_take_is_actually_folded_by_the_resumable_scan() {
+        // 端到端：打开（不折叠）→ 可恢复扫描（折叠）。这是"漏判不再永久化"
+        // 的主链路。
+        let _guard = crate::config::channel_policy_test_guard();
+        crate::config::set_channel_import_policy(&crate::config::ChannelImportPolicy::default());
+        let path = write_test_wav("legacy_fold_e2e.wav", true);
+        let tl = timeline_with_legacy_take(&path);
+
+        let (mut finalized, _missing) =
+            finalize_timeline_for_session(tl, Path::new("C:/proj/t.hshp"), 4);
+
+        let policy = crate::config::channel_import_policy();
+        let targets = crate::commands::channel_scan::collect_targets(
+            &finalized,
+            None,
+            &policy,
+            false,
+        );
+        assert_eq!(targets.len(), 1, "v4 的 Take 必须在扫描候选里");
+        let planned = crate::commands::channel_scan::plan(targets, &policy, false);
+        assert_eq!(
+            planned[0].outcome,
+            crate::channel_policy::ChannelScanOutcome::FakeStereo
+        );
+        let resolution = planned[0].resolution;
+        let applied = crate::channel_policy::apply_resolution(
+            &mut finalized.clips[0].takes[0],
+            resolution,
+        );
+        assert!(applied.mode_changed, "假立体声应被折叠");
+        assert_eq!(finalized.clips[0].takes[0].channel_mode, 2);
+        // 折叠后档案权威 ⇒ 下一次打开不必再判（零解码）。
+        let ctx = crate::channel_policy::DecisionContext::for_take(
+            &finalized.clips[0].takes[0],
+            &policy.detect_options(),
+        );
+        assert!(
+            finalized.clips[0].takes[0]
+                .channel_decision
+                .expect("record")
+                .is_authoritative_for(
+                    finalized.clips[0].takes[0].source_file_fingerprint,
+                    ctx.policy_sig,
+                    ctx.region_q
+                ),
+            "折叠结论必须落成权威档案，否则每次打开都会重判"
         );
         let _ = std::fs::remove_file(&path);
     }
@@ -730,6 +786,18 @@ mod tests {
         assert_eq!(
             finalized.clips[0].takes[0].channel_mode, 0,
             "v5+ 工程的 channel_mode 是用户显式决定，不得改写"
+        );
+        // 版本号只在这里被消费一次：v5 工程缺失的档案被**封印为"用户决定"**，
+        // 可恢复扫描据此永远跳过它。这是"用户的选择是终局的"的落点。
+        let record = finalized.clips[0].takes[0]
+            .channel_decision
+            .expect("v5 take must be sealed");
+        assert!(record.is_user(), "v5 的 Take 必须被封印为'用户决定'");
+        let policy = crate::config::channel_import_policy();
+        assert!(
+            crate::commands::channel_scan::collect_targets(&finalized, None, &policy, false)
+                .is_empty(),
+            "被封印的 Take 不得进入自动扫描候选"
         );
         let _ = std::fs::remove_file(&path);
     }
