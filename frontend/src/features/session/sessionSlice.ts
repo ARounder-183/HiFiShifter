@@ -5700,6 +5700,12 @@ const sessionSlice = createSlice({
                     ok?: boolean;
                     scanned?: number;
                     converted?: number;
+                    pending?: number;
+                    entries?: Array<{
+                        verdict?: string;
+                        maxAbsDiff?: number;
+                        violatingRatio?: number;
+                    }>;
                 };
                 if (!payload.ok) {
                     state.status = "Fake-stereo scan rejected";
@@ -5707,9 +5713,31 @@ const sessionSlice = createSlice({
                 }
                 const scanned = payload.scanned ?? 0;
                 const converted = payload.converted ?? 0;
-                state.status = action.meta.arg.dryRun
-                    ? `Fake-stereo scan: ${scanned} take(s), ${converted} foldable`
-                    : `Fake-stereo scan: ${scanned} take(s), ${converted} folded to mono`;
+                const pending = payload.pending ?? 0;
+                // 后缀在 App.tsx 的 statusText 里解析（`statusKey` 映射 + 双数量
+                // 正则）。"本次没读到"必须与"单声道、无事可做"区分开：前者下次
+                // 打开会自动重试，后者永远不会再判。
+                const pendingSuffix = pending > 0 ? `, ${pending} unreadable` : "";
+                let status = action.meta.arg.dryRun
+                    ? `Fake-stereo scan: ${scanned} take(s), ${converted} foldable${pendingSuffix}`
+                    : `Fake-stereo scan: ${scanned} take(s), ${converted} folded to mono${pendingSuffix}`;
+                // 一个都没折叠时，把"最接近假立体声"的那条素材的差异量级报出来：
+                // 用户据此判断该不该放宽容差。没有这个数字，"没折叠"和"不该折叠"
+                // 在界面上长得一模一样。
+                if (!action.meta.arg.dryRun && converted === 0 && scanned > 0) {
+                    const nearest = (payload.entries ?? [])
+                        .filter((entry) => entry.verdict === "trueStereo")
+                        .map((entry) => entry.maxAbsDiff)
+                        .filter(
+                            (diff): diff is number =>
+                                typeof diff === "number" && Number.isFinite(diff),
+                        )
+                        .sort((a, b) => a - b)[0];
+                    if (nearest !== undefined) {
+                        status += ` — nearest ${nearest.toPrecision(2)}`;
+                    }
+                }
+                state.status = status;
             })
             .addCase(scanAndConvertFakeStereoRemote.rejected, (state, action) => {
                 setRejected(state, action);

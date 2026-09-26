@@ -1657,6 +1657,16 @@ export const jaJP = {
         "疑似ステレオスキャン：{n} テイク、{m} 件がモノラルに折りたたみ可能",
     status_fake_stereo_scan_folded:
         "疑似ステレオスキャン：{n} テイク、{m} 件をモノラルに折りたたみました",
+    status_fake_stereo_scan_foldable_pending:
+        "疑似ステレオのスキャン：{n} テイク中 {m} 件が折り畳み可能、{p} 件は今回読み取れませんでした（次回起動時に再試行します）",
+    status_fake_stereo_scan_folded_pending:
+        "疑似ステレオのスキャン：{n} テイク中 {m} 件をモノラルに折り畳みました、{p} 件は今回読み取れませんでした（次回起動時に再試行します）",
+    status_channel_scan_folded:
+        "{n} 件のクリップを自動でモノラルに折り畳みました（レンダリング時間が半減します）",
+    status_channel_scan_pending:
+        "、{n} 件の素材を今回読み取れませんでした（次回起動時に再試行します）",
+    status_fake_stereo_scan_nearest_hint:
+        "。最も近い素材の差は {d} です（許容値を緩めることを検討してください）",
     status_take_channel_mode_rejected: "テイクのチャンネルモード変更が拒否されました",
 
     benchmark_title: "推論デバイスベンチマーク",

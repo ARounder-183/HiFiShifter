@@ -1604,6 +1604,11 @@ export const zhCN = {
     status_fake_stereo_scan_rejected: "假立体声扫描被拒绝",
     status_fake_stereo_scan_foldable: "假立体声扫描：{n} 个 Take，{m} 个可折叠",
     status_fake_stereo_scan_folded: "假立体声扫描：{n} 个 Take，{m} 个已折叠为单声道",
+    status_fake_stereo_scan_foldable_pending: "假立体声扫描：{n} 个 Take，{m} 个可折叠，{p} 个本次读不到（下次打开会自动重试）",
+    status_fake_stereo_scan_folded_pending: "假立体声扫描：{n} 个 Take，{m} 个已折叠为单声道，{p} 个本次读不到（下次打开会自动重试）",
+    status_channel_scan_folded: "已自动折叠 {n} 个音频块为单声道（渲染耗时减半）",
+    status_channel_scan_pending: "，{n} 个素材本次读不到，下次打开会自动重试",
+    status_fake_stereo_scan_nearest_hint: "；最接近假立体声的一条差异为 {d}，可考虑放宽容差",
     status_take_channel_mode_rejected: "Take 声道模式修改被拒绝",
 
     benchmark_title: "推理设备基准测试",

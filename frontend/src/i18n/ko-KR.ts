@@ -1634,6 +1634,11 @@ export const koKR = {
     status_fake_stereo_scan_rejected: "가짜 스테레오 검사가 거부되었습니다",
     status_fake_stereo_scan_foldable: "가짜 스테레오 검사: {n}개 테이크, {m}개 모노로 접기 가능",
     status_fake_stereo_scan_folded: "가짜 스테레오 검사: {n}개 테이크, {m}개 모노로 접힘",
+    status_fake_stereo_scan_foldable_pending: "가짜 스테레오 검사: {n}개 테이크 중 {m}개 접기 가능, {p}개는 이번에 읽지 못했습니다(다음 실행 시 다시 시도)",
+    status_fake_stereo_scan_folded_pending: "가짜 스테레오 검사: {n}개 테이크 중 {m}개를 모노로 접었습니다, {p}개는 이번에 읽지 못했습니다(다음 실행 시 다시 시도)",
+    status_channel_scan_folded: "{n}개 클립을 자동으로 모노로 접었습니다(렌더링 시간 절반)",
+    status_channel_scan_pending: ", {n}개 소스를 이번에 읽지 못했습니다(다음 실행 시 다시 시도)",
+    status_fake_stereo_scan_nearest_hint: ". 가장 근접한 소재의 차이는 {d}입니다(허용 오차를 넓히는 것을 고려하세요)",
     status_take_channel_mode_rejected: "테이크 채널 모드 변경이 거부되었습니다",
 
     benchmark_title: "추론 장치 벤치마크",

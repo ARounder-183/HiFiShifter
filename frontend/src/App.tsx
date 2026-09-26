@@ -20,6 +20,7 @@ import { fileBrowserApi } from "./services/api/fileBrowser";
 import { IS_LINUX } from "./utils/platform";
 import { allowsNativeTextSelection, isEditableTarget } from "./utils/nativeSelectionGuards";
 import { clipboardErrorKey } from "./utils/clipboardError";
+import { resolveStatusText } from "./utils/statusText";
 import {
     closeVocalShifterSkippedFilesDialog,
     closeReaperSkippedFilesDialog,
@@ -750,42 +751,15 @@ function AppInner() {
         settingsApi.saveUiSettings({ midiImportTargetDragDrop: v });
     }, []);
 
-    const statusText = useMemo(() => {
-        // 精确匹配
-        if (statusKey[status]) return t(statusKey[status] as MessageKey);
-        // 双数量的状态（sessionSlice 写出的原文形如
-        // "Fake-stereo scan: 5 take(s), 3 folded to mono"）。两个数字加两种变体
-        //（试扫 / 实扫），下方的 counted 正则只支持单个数量，这里专门解析并回填
-        // {n}/{m} 占位符模板。
-        const fakeStereoScan = status.match(
-            /^Fake-stereo scan: (\d+) take\(s\), (\d+) (foldable|folded to mono)$/,
-        );
-        if (fakeStereoScan) {
-            const key =
-                fakeStereoScan[3] === "foldable"
-                    ? "status_fake_stereo_scan_foldable"
-                    : "status_fake_stereo_scan_folded";
-            return (t(key as MessageKey) as string)
-                .replace("{n}", fakeStereoScan[1] ?? "0")
-                .replace("{m}", fakeStereoScan[2] ?? "0");
-        }
-        // 带数量的状态：提取数字回填占位符模板（如 "Waveform cache cleared (3 files)"）
-        const counted = status.match(/^(.+?)\s*\((\d+)\s*\w+\)$/);
-        if (counted) {
-            const baseKey = statusKey[counted[1]];
-            if (baseKey && (t(baseKey as MessageKey) as string).includes("{n}")) {
-                return (t(baseKey as MessageKey) as string).replace("{n}", counted[2]);
-            }
-        }
-        // 前缀匹配：支持 "Export done — path" 等带后缀的状态
-        for (const key of Object.keys(statusKey)) {
-            if (status.startsWith(key) && status.length > key.length) {
-                const suffix = status.slice(key.length);
-                return t(statusKey[key] as MessageKey) + suffix;
-            }
-        }
-        return status;
-    }, [status, t]);
+    const statusText = useMemo(
+        () =>
+            resolveStatusText(
+                status,
+                statusKey,
+                (key) => t(key as MessageKey) as string,
+            ),
+        [status, t],
+    );
 
     // 监听后端 clip_pitch_data 事件，将 per-clip MIDI 曲线存入 store
     useClipPitchDataListener();
@@ -1421,18 +1395,25 @@ function AppInner() {
         };
     }, [dispatch]);
 
-    // ── 渲染缓存命中反馈 ────────────────────────────────────────────────────
-    // 打开工程后的首个渲染 pass 结束时会广播命中统计；状态栏短暂展示
-    //"复用 N/M 个音频块（约省 X）"，让用户明确感知磁盘缓存真的生效了。
+    // ── 后端一次性提示位 ────────────────────────────────────────────────────
+    // 状态栏只有一个短暂提示位：渲染缓存命中统计与自动声道折叠的结论都写这里
+    //（两者都是"后台做完了一件事，顺带告诉用户一声"，同时出现时后到的覆盖前者
+    // 即可，不值得为它们各占一行）。
     const renderCacheShowHitStats = useAppSelector(
         (state) => state.session.renderCache.showHitStats,
     );
-    const [renderCacheNotice, setRenderCacheNotice] = useState("");
+    const [noticeText, setNoticeText] = useState("");
+    const showNotice = useCallback((text: string, holdMs = 15_000) => {
+        if (!text) return;
+        setNoticeText(text);
+        if (noticeHideTimerRef.current) clearTimeout(noticeHideTimerRef.current);
+        noticeHideTimerRef.current = setTimeout(() => setNoticeText(""), holdMs);
+    }, []);
+    const noticeHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     useEffect(() => {
         if (!renderCacheShowHitStats) return;
         let disposed = false;
         let unlisten: null | (() => void) = null;
-        let hideTimer: ReturnType<typeof setTimeout> | null = null;
 
         async function setup() {
             try {
@@ -1480,9 +1461,7 @@ function AppInner() {
                                 String(skipped),
                             );
                         }
-                        setRenderCacheNotice(text);
-                        if (hideTimer) clearTimeout(hideTimer);
-                        hideTimer = setTimeout(() => setRenderCacheNotice(""), 15_000);
+                        showNotice(text);
                     },
                 );
                 if (disposed) {
@@ -1498,9 +1477,68 @@ function AppInner() {
         return () => {
             disposed = true;
             if (unlisten) unlisten();
-            if (hideTimer) clearTimeout(hideTimer);
         };
-    }, [renderCacheShowHitStats, tAny]);
+    }, [renderCacheShowHitStats, showNotice, tAny]);
+
+    // ── 后台声道折叠反馈 ────────────────────────────────────────────────────
+    // 打开工程后，没有权威判定档案的 Take 会被后台扫描按策略折叠为单声道
+    //（渲染耗时减半）。这件事改变了 Clip 的声道模式，必须让用户知道，否则
+    // 他会看到波形带数"自己变了"。只在整轮结束时提示一次，不逐批刷屏。
+    useEffect(() => {
+        let disposed = false;
+        let unlisten: null | (() => void) = null;
+
+        async function setup() {
+            try {
+                const mod = await import("@tauri-apps/api/event");
+                unlisten = await mod.listen(
+                    "channel_scan_progress",
+                    (event: {
+                        payload?: {
+                            done?: number;
+                            total?: number;
+                            folded?: number;
+                            pending?: number;
+                            finished?: boolean;
+                        };
+                    }) => {
+                        if (disposed) return;
+                        const payload = event?.payload ?? {};
+                        if (!payload.finished) return;
+                        const folded = Number(payload.folded ?? 0);
+                        const pending = Number(payload.pending ?? 0);
+                        if (folded <= 0 && pending <= 0) return;
+                        let text = "";
+                        if (folded > 0) {
+                            text = tAny("status_channel_scan_folded").replace(
+                                "{n}",
+                                String(folded),
+                            );
+                        }
+                        if (pending > 0) {
+                            text += tAny("status_channel_scan_pending").replace(
+                                "{n}",
+                                String(pending),
+                            );
+                        }
+                        showNotice(text, 20_000);
+                    },
+                );
+                if (disposed) {
+                    unlisten();
+                    unlisten = null;
+                }
+            } catch {
+                // 非 Tauri 环境（浏览器调试）无事件系统：静默跳过。
+            }
+        }
+
+        void setup();
+        return () => {
+            disposed = true;
+            if (unlisten) unlisten();
+        };
+    }, [showNotice, tAny]);
 
     const runtimeRef = useRef({
         isPlaying: false,
@@ -4018,7 +4056,7 @@ function AppInner() {
                             {pitchAnalysisText}
                         </span>
                     ) : null}
-                    {renderCacheNotice ? (
+                    {noticeText ? (
                         <span
                             className="shrink-0 rounded px-1 py-0 text-xs font-medium"
                             style={{
@@ -4028,7 +4066,7 @@ function AppInner() {
                                 lineHeight: "16px",
                             }}
                         >
-                            {renderCacheNotice}
+                            {noticeText}
                         </span>
                     ) : null}
                     {/* 参数曲线取数提示：**独立订阅**外部 store，不参与本组件重渲染

@@ -1780,6 +1780,11 @@ export const enUS = {
     status_fake_stereo_scan_rejected: "Fake-stereo scan rejected",
     status_fake_stereo_scan_foldable: "Fake-stereo scan: {n} take(s), {m} foldable",
     status_fake_stereo_scan_folded: "Fake-stereo scan: {n} take(s), {m} folded to mono",
+    status_fake_stereo_scan_foldable_pending: "Fake-stereo scan: {n} take(s), {m} foldable, {p} unreadable (retried on next open)",
+    status_fake_stereo_scan_folded_pending: "Fake-stereo scan: {n} take(s), {m} folded to mono, {p} unreadable (retried on next open)",
+    status_channel_scan_folded: "Folded {n} clip(s) to mono automatically (halves render time)",
+    status_channel_scan_pending: ", {n} source(s) unreadable — retried on next open",
+    status_fake_stereo_scan_nearest_hint: "; closest match differs by {d} — consider a looser tolerance",
     status_take_channel_mode_rejected: "Take channel mode rejected",
 
     // ── Benchmark ────────────────────────────────────────────────────────

@@ -111,15 +111,6 @@ impl DetectOptions {
         self.normalized()
     }
 
-    /// 抽样窗口覆盖的总时长上限（秒）；`window_count == 0` 时为 `None`（不限）。
-    pub fn scan_budget_sec(&self) -> Option<f64> {
-        if self.window_count == 0 {
-            None
-        } else {
-            Some(self.window_sec * self.window_count as f64)
-        }
-    }
-
     /// 策略签名：任一参数变化都必须产出不同值，使旧判定缓存失效。
     pub fn signature(&self) -> u64 {
         let n = self.normalized();
@@ -216,8 +207,11 @@ impl VerdictDetail {
 /// 这种可展示的证据，而不是一个布尔值；抽样总量（默认 3 秒音频）下的比较开销
 /// 与解码相比可以忽略，而短路会让诊断信息只剩"第一个超差样本"。
 ///
-/// 这是全模块唯一的比较入口：WAV 逐窗口解码路径与容器流式收割路径最终都汇到
-/// [`compare_frames`]，不得在别处复刻比较逻辑。
+/// 【为什么是 test-only】生产的两条路径都需要**跨多个解码缓冲累计证据**
+///（WAV 逐窗口 seek、容器流式收割），因此它们直接调用 [`compare_frames`] +
+/// [`finalize`]。本函数是这两步在**单个缓冲**上的组合，供测试断言"整段判定"
+/// 的语义使用 —— 保留它而不是在测试里各写一份，是为了让被测组合与生产一致。
+#[cfg(test)]
 pub fn analyze_interleaved(
     pcm: &[f32],
     channels: u16,
@@ -227,7 +221,8 @@ pub fn analyze_interleaved(
     analyze_interleaved_detailed(pcm, channels, sample_rate, opts).verdict
 }
 
-/// [`analyze_interleaved`] 的带证据版本。
+/// [`analyze_interleaved`] 的带证据版本（同样 test-only）。
+#[cfg(test)]
 pub fn analyze_interleaved_detailed(
     pcm: &[f32],
     channels: u16,

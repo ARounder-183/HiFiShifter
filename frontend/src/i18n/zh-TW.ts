@@ -1606,6 +1606,11 @@ export const zhTW = {
     status_fake_stereo_scan_rejected: "假立體聲掃描被拒絕",
     status_fake_stereo_scan_foldable: "假立體聲掃描：{n} 個 Take，{m} 個可折疊",
     status_fake_stereo_scan_folded: "假立體聲掃描：{n} 個 Take，{m} 個已折疊為單聲道",
+    status_fake_stereo_scan_foldable_pending: "假立體聲掃描：{n} 個 Take，{m} 個可折疊，{p} 個本次讀不到（下次開啟會自動重試）",
+    status_fake_stereo_scan_folded_pending: "假立體聲掃描：{n} 個 Take，{m} 個已折疊為單聲道，{p} 個本次讀不到（下次開啟會自動重試）",
+    status_channel_scan_folded: "已自動折疊 {n} 個音訊塊為單聲道（渲染耗時減半）",
+    status_channel_scan_pending: "，{n} 個素材本次讀不到，下次開啟會自動重試",
+    status_fake_stereo_scan_nearest_hint: "；最接近假立體聲的一條差異為 {d}，可考慮放寬容差",
     status_take_channel_mode_rejected: "Take 聲道模式修改被拒絕",
 
     benchmark_title: "推理裝置基準測試",

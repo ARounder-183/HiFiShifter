@@ -28,10 +28,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use tauri::{Emitter, Manager};
 
-use crate::channel_decision::{self, ChannelDecisionRecord};
+use crate::channel_decision;
 use crate::channel_policy::{self, AppliedResolution, ChannelResolution, ChannelScanOutcome};
 use crate::config::ChannelImportPolicy;
-use crate::state::{AppState, ClipTake};
+use crate::state::AppState;
 
 /// 扫描世代号：工程切换时递增，在途的后台扫描据此丢弃结果。
 ///
@@ -41,6 +41,14 @@ static CHANNEL_SCAN_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// 是否有后台扫描在跑（避免重复起线程）。
 static CHANNEL_SCAN_ACTIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// 扫描进行中又来了新请求：本轮结束后必须再跑一轮。
+///
+/// 不能把并发请求直接丢掉：打开工程触发的扫描可能已经取完快照，此时用户导入
+/// 了新媒体（或重链了文件），那些新 Take 不在本轮候选里。丢掉请求就等于它们
+/// 要等到下次打开工程才会被判 —— 与"可恢复"的承诺不符。
+static CHANNEL_SCAN_REQUESTED_AGAIN: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 /// 递增世代号，使在途的后台扫描作废。打开 / 新建工程时调用。
@@ -64,10 +72,6 @@ pub struct ScanTarget {
     /// Take 上持久化的内容指纹（判定档案要比对的那一份）。
     pub fingerprint: Option<u64>,
     pub policy_sig: u64,
-    /// 该 Take 当前的声道模式（用于判断写回是不是 no-op）。
-    pub current_mode: i32,
-    /// 当前档案（用于判断是否真的变了）。
-    pub current_decision: Option<ChannelDecisionRecord>,
 }
 
 /// 持锁阶段：收集候选 Take。
@@ -125,8 +129,6 @@ pub fn collect_targets(
                 region: channel_policy::take_consumption_region(take),
                 fingerprint: take.source_file_fingerprint,
                 policy_sig,
-                current_mode: take.channel_mode,
-                current_decision: take.channel_decision,
             });
         }
     }
@@ -342,25 +344,6 @@ pub fn apply_planned(
     Some(stats)
 }
 
-/// 活跃 Take 的声道模式发生过变化的 Clip（后台扫描用它在锁外重调度音高分析）。
-pub fn mode_changed_active_clips(planned: &[PlannedTarget], stats: &ApplyStats) -> Vec<String> {
-    if stats.folded == 0 {
-        return Vec::new();
-    }
-    // 只有真正改了模式的才需要重调度；`apply_planned` 已经按 id 匹配过，
-    // 这里按同一判据重算一遍（模式不同的才是变化项）。
-    planned
-        .iter()
-        .filter(|item| {
-            item.resolution
-                .mode
-                .map(|mode| mode != item.target.current_mode)
-                .unwrap_or(false)
-        })
-        .map(|item| item.target.clip_id.clone())
-        .collect()
-}
-
 /// 后台扫描的进度事件负载。
 fn emit_progress(app: &tauri::AppHandle, done: usize, total: usize, stats: &ApplyStats) {
     let _ = app.emit(
@@ -381,19 +364,29 @@ fn emit_progress(app: &tauri::AppHandle, done: usize, total: usize, stats: &Appl
 /// 结果全部白做。没有候选时直接放行渲染，不留空转。
 pub(crate) fn request_channel_scan(app: &tauri::AppHandle) {
     if CHANNEL_SCAN_ACTIVE.swap(true, Ordering::AcqRel) {
-        // 已有一轮在跑：它会看到最新的时间线（世代号未变），本次合流。
+        // 已有一轮在跑：它可能已经取完快照，看不到这次的新 Take（导入 / 重链
+        // 发生在它收集之后）。标记"还要再来一轮"，由本轮收尾时接手。
+        CHANNEL_SCAN_REQUESTED_AGAIN.store(true, Ordering::Release);
         return;
     }
-    let generation = current_generation();
     let app = app.clone();
     std::thread::spawn(move || {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            run_scan_pass(&app, generation);
-        }));
-        CHANNEL_SCAN_ACTIVE.store(false, Ordering::Release);
-        if result.is_err() {
-            log::error!("[channel_scan] background scan panicked; render request still issued");
+        loop {
+            CHANNEL_SCAN_REQUESTED_AGAIN.store(false, Ordering::Release);
+            let generation = current_generation();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run_scan_pass(&app, generation);
+            }));
+            if result.is_err() {
+                log::error!("[channel_scan] background scan panicked");
+                // 出错时不再自旋重试（否则一次持续性故障会变成忙循环）。
+                CHANNEL_SCAN_REQUESTED_AGAIN.store(false, Ordering::Release);
+            }
+            if !CHANNEL_SCAN_REQUESTED_AGAIN.swap(false, Ordering::AcqRel) {
+                break;
+            }
         }
+        CHANNEL_SCAN_ACTIVE.store(false, Ordering::Release);
         // 无论扫描结果如何都要放行预渲染，否则一次失败会让渲染永远停摆。
         crate::commands::playback::request_background_render(&app);
     });
@@ -450,31 +443,12 @@ fn run_scan_pass(app: &tauri::AppHandle, generation: u64) {
     }
 }
 
-/// 测试专用：等待在途的后台扫描结束。
-#[cfg(test)]
-pub(crate) fn wait_for_idle() {
-    for _ in 0..600 {
-        if !CHANNEL_SCAN_ACTIVE.load(Ordering::Acquire) {
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
-/// 把一个"用户显式设置声道模式"的封印写进 Take。
-///
-/// 这是判定档案存在的意义之一：用户一旦显式选择过，自动扫描必须永远放手。
-/// 任何写入 `channel_mode` 的用户命令都应经过这里，而不是直接赋值。
-pub fn seal_user_channel_mode(take: &mut ClipTake, mode: i32) {
-    let mode = crate::channel_mode::TakeChannelMode::from_raw(mode).raw();
-    take.channel_mode = mode;
-    take.channel_decision = Some(ChannelDecisionRecord::user());
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::channel_decision::ChannelDecisionRecord;
     use crate::config::ChannelImportPolicy;
+    use crate::state::ClipTake;
 
     /// 写一个临时 WAV；`identical` 为 true 时 L == R（假立体声）。
     fn write_wav(name: &str, identical: bool, seconds: u32) -> std::path::PathBuf {

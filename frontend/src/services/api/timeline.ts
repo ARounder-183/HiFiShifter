@@ -39,12 +39,21 @@ export interface FakeStereoScanEntry {
     takeId: string;
     name: string;
     /**
-     * 判定原因：`mono` / `fakeStereo` / `trueStereo` / `unknown` /
-     * `policyOff` / `forcedMono`（后端 `ChannelScanOutcome::as_str`）。
+     * 判定原因：`mono` / `fakeStereo` / `trueStereo` / `pending` /
+     * `policyOff` / `forcedMono` / `noSource`（后端 `ChannelScanOutcome::as_str`）。
      */
     verdict: string;
     /** 本次实际写入的声道模式（缺省 = 未改动）。 */
     appliedMode?: number;
+    /**
+     * 判定为真立体声时的诊断证据：超差样本占比（0..1）。
+     *
+     * `0.0001` 表示万分之一的样本超差（很可能只是编解码残留，放宽容差就能
+     * 折叠）；`0.4` 表示四成样本超差（确实是立体声）。
+     */
+    violatingRatio?: number;
+    /** 判定为真立体声时观测到的最大绝对差（满幅为 1）。 */
+    maxAbsDiff?: number;
 }
 
 /** 假立体声扫描结果（后端 `FakeStereoScanPayload`）。 */
@@ -54,8 +63,16 @@ export interface FakeStereoScanResult {
     scanned: number;
     /** 被折叠（dryRun 时为"将会被折叠"）的 Take 数。 */
     converted: number;
+    /**
+     * 本次**没能得出结论**的 Take 数（源缺失 / 不可解码 / 覆盖不完整）。
+     *
+     * 与"单声道、无事可做"不同：这些 Take 记着"待重试"，下次打开工程会自动
+     * 再判一次。
+     */
+    pending: number;
     entries: FakeStereoScanEntry[];
-    missingFiles?: string[];
+    /** 待重试的源文件路径（去重）。 */
+    pendingFiles?: string[];
 }
 
 /**
