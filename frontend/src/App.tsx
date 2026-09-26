@@ -68,7 +68,7 @@ import { useI18n } from "./i18n/I18nProvider";
 import { useClipPitchDataListener } from "./hooks/useClipPitchDataListener";
 import { useHistoryStateListener } from "./hooks/useHistoryStateListener";
 import { PitchAnalysisProvider, usePitchAnalysis } from "./contexts/PitchAnalysisContext";
-import { PianoRollStatusProvider, usePianoRollStatus } from "./contexts/PianoRollStatusContext";
+import { ParamDataLoadingChip } from "./components/layout/ParamDataLoadingChip";
 import { FileBrowserPanel } from "./components/layout/FileBrowserPanel";
 import { UndoHistoryPanel } from "./components/layout/UndoHistoryPanel";
 import { DockRoot } from "./components/dock/DockRoot";
@@ -488,7 +488,6 @@ function AppInner() {
     const { t } = useI18n();
     const tAny = t as (key: string) => string;
     const pitchAnalysis = usePitchAnalysis();
-    const pianoRollStatus = usePianoRollStatus();
 
     const status = useAppSelector((state) => state.session.status);
     const error = useAppSelector((state) => state.session.error);
@@ -4032,19 +4031,9 @@ function AppInner() {
                             {renderCacheNotice}
                         </span>
                     ) : null}
-                    {pianoRollStatus.dataLoading ? (
-                        <span
-                            className="shrink-0 rounded px-1 py-0 text-xs font-medium"
-                            style={{
-                                background: "var(--accent-3)",
-                                color: "var(--accent-11)",
-                                fontSize: "11px",
-                                lineHeight: "16px",
-                            }}
-                        >
-                            {t("loading")}
-                        </span>
-                    ) : null}
+                    {/* 参数曲线取数提示：**独立订阅**外部 store，不参与本组件重渲染
+                        （见 ParamDataLoadingChip 的说明）。 */}
+                    <ParamDataLoadingChip />
                     {rendering.active ? (
                         <span
                             className="shrink-0 rounded px-1 py-0 text-xs font-medium"
@@ -4073,9 +4062,7 @@ function AppInner() {
 function App() {
     return (
         <PitchAnalysisProvider>
-            <PianoRollStatusProvider>
-                <AppInner />
-            </PianoRollStatusProvider>
+            <AppInner />
         </PitchAnalysisProvider>
     );
 }

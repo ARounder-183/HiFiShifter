@@ -241,7 +241,7 @@ import {
     selectMergedKeybindings,
 } from "../../features/keybindings/keybindingsSlice";
 
-import { usePianoRollStatusUpdate } from "../../contexts/PianoRollStatusContext";
+import { clearPianoRollLoading, setPianoRollLoading } from "../../utils/pianoRollStatusBus";
 import { MidiTrackSelectDialog } from "./MidiTrackSelectDialog";
 import { settingsApi } from "../../services/api/settings";
 import { EditContextMenu } from "../editDialogs/EditContextMenu";
@@ -730,7 +730,12 @@ const ParamGroupButton: React.FC<ParamGroupButtonProps> = ({
     );
 };
 
-export const PianoRollPanel: React.FC<{
+/**
+ * 参数编辑器面板的 props。
+ *
+ * 只有一个**跨渲染稳定**的字符串 —— 这正是下面能用 `React.memo` 的前提。
+ */
+interface PianoRollPanelProps {
     /**
      * 本窗体在停靠布局里的 id（由 `setPanelRenderer` 注入）。
      *
@@ -738,7 +743,9 @@ export const PianoRollPanel: React.FC<{
      * 按面板 id 回退查找，保证单独渲染（测试、独立窗口）也能工作。
      */
     dockFormId?: string;
-}> = ({ dockFormId }) => {
+}
+
+const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
     const dispatch = useAppDispatch();
     // 事件监听器内同步读取 session（如 selectClipParamRange 的 Clip 查找），
     // 避免闭包快照滞后。
@@ -3538,9 +3545,6 @@ export const PianoRollPanel: React.FC<{
      */
     const clipboardRef = useRef<ParamClipboardData | null>(null);
 
-    // 将 PianoRoll 加载状态同步到全局 Context（供 status bar 使用）
-    const updatePianoRollStatus = usePianoRollStatusUpdate();
-
     // 用于通知 usePianoRollData 当前是否处于 live 编辑状态（pointer down 期间 ?true） ?
     // pitch_orig_updated 事件到达时若 ?true，则延迟曲线刷新 ?pointer-up 后执行 ?
     const liveEditActiveRef = useRef(false);
@@ -5374,12 +5378,22 @@ export const PianoRollPanel: React.FC<{
         setCtxMenu(null);
     }, [s.toolMode]);
 
-    // 同步数据加载状态到全局 Context
+    // 同步数据加载状态到状态栏。
+    //
+    // 走**外部 store** 而非 Context：这个 boolean 只服务状态栏一处显示，而它随每次
+    // 取数（水平缩放 / 滚动 / 编辑提交）翻转 —— 曾经它住在包裹整个 AppInner 的
+    // Context 里，于是每次翻转都重渲染整棵应用树，把正在进行的绘制笔画打断。
+    // 现在只有状态栏那个小组件会重渲染（见 pianoRollStatusBus）。
+    //
+    // 按**窗体 id** 记账：参数编辑器可以多开，共用一个 boolean 会让一个实例卸载时
+    // 抹掉另一个实例的状态。
+    const loadingPublisherId = dockFormId ?? "param-editor";
     useEffect(() => {
-        updatePianoRollStatus({
-            dataLoading: isLoading,
-        });
-    }, [isLoading, updatePianoRollStatus]);
+        setPianoRollLoading(loadingPublisherId, isLoading);
+    }, [isLoading, loadingPublisherId]);
+
+    // 卸载时注销（否则本实例的最后状态会永远粘住，状态栏再也不会收起）。
+    useEffect(() => () => clearPianoRollLoading(loadingPublisherId), [loadingPublisherId]);
 
     /**
      * 参数编辑器「全选」：把整条参数曲线（0 → 工程时长）设为选区。
@@ -8357,3 +8371,22 @@ export const PianoRollPanel: React.FC<{
         </Flex>
     );
 };
+
+/**
+ * 参数编辑器面板。
+ *
+ * ★ `React.memo` 不是"顺手加的性能优化"，而是**契约的一部分**：本组件由
+ * `App.tsx` 通过 `setPanelRenderer(PANEL_PARAM_EDITOR, (form) => <PianoRollPanel .../>)`
+ * 的闭包渲染，而 `DockPanelHosts` 的 `PanelMount` 是**直接调用**该闭包、没有 memo 边界
+ * —— 于是 `AppInner` 每重渲染一次，这里就跟着重渲染一次（元素是新创建的，但 props
+ * 只有一个稳定字符串，memo 的浅比较正好能拦住）。
+ *
+ * 这正是「参数编辑器里的绘制被打断」的放大环节：它是个 8000 行的重组件，重渲染会
+ * 重建整条 `usePianoRollInteractions` 回调链。此前任何高频全局状态（如曾经的
+ * `PianoRollStatusContext`）都会经由这条路径打到它身上。
+ *
+ * 【为什么不能给 `PanelMount` 加 memo 代替】那会连带冻结时间轴面板 —— 它的渲染闭包
+ * 捕获了 `App.tsx` 的约三十个 props（见 `panelRenderer.ts` 的设计说明），冻结即意味着
+ * props 不再更新。而本组件的 props 只有一个稳定 id，memo 是安全的。
+ */
+export const PianoRollPanel = React.memo(PianoRollPanelImpl);
