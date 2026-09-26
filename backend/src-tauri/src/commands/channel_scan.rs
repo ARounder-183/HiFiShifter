@@ -96,6 +96,14 @@ pub fn collect_targets(
             if take.source_path.is_none() {
                 continue;
             }
+            // 用户封印**无条件**跳过：连"手动重新扫描"也不得覆盖用户的选择
+            //（`include_settled` 只放宽"已定论"这一条，不是放宽用户意图）。
+            if take
+                .channel_decision
+                .is_some_and(channel_decision::ChannelDecisionRecord::is_user)
+            {
+                continue;
+            }
             let region_q =
                 crate::stereo_detect::quantize_region(channel_policy::take_consumption_region(take));
             if !include_settled
@@ -461,4 +469,239 @@ pub fn seal_user_channel_mode(take: &mut ClipTake, mode: i32) {
     let mode = crate::channel_mode::TakeChannelMode::from_raw(mode).raw();
     take.channel_mode = mode;
     take.channel_decision = Some(ChannelDecisionRecord::user());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ChannelImportPolicy;
+
+    /// 写一个临时 WAV；`identical` 为 true 时 L == R（假立体声）。
+    fn write_wav(name: &str, identical: bool, seconds: u32) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("hifishifter_channel_scan_test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join(name);
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: 44_100,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let mut writer = hound::WavWriter::create(&path, spec).expect("wav");
+        for i in 0..(44_100 * seconds) {
+            let v = ((i as f32) * 0.01).sin() * 0.4;
+            writer.write_sample(v).expect("l");
+            writer
+                .write_sample(if identical { v } else { -v })
+                .expect("r");
+        }
+        writer.finalize().expect("finalize");
+        path
+    }
+
+    /// 造一个单 Clip 单 Take 的时间线，Take 指向 `source`。
+    fn timeline_with_take(source: Option<&std::path::Path>) -> crate::state::TimelineState {
+        let mut tl = crate::state::TimelineState::default();
+        let track = tl.tracks[0].id.clone();
+        let clip_id = tl.add_clip(
+            Some(track),
+            Some("V".to_string()),
+            Some(0.0),
+            Some(1.0),
+            source.map(|p| p.to_string_lossy().to_string()),
+        );
+        let clip = tl.clips.iter_mut().find(|c| c.id == clip_id).expect("clip");
+        clip.sync_take_from_flat();
+        for take in &mut clip.takes {
+            take.channel_mode = 0;
+            take.channel_decision = None;
+        }
+        tl
+    }
+
+    /// 走一遍"收集 → 判定 → 写回"，返回写回统计。
+    fn run_once(
+        state: &AppState,
+        policy: &ChannelImportPolicy,
+        generation: Option<u64>,
+    ) -> Option<ApplyStats> {
+        let targets = {
+            let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+            collect_targets(&tl, None, policy, false)
+        };
+        let planned = plan(targets, policy, false);
+        apply_planned(state, &planned, generation, false)
+    }
+
+    fn take0(state: &AppState) -> ClipTake {
+        let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        tl.clips[0].takes[0].clone()
+    }
+
+    #[test]
+    fn sealed_user_choice_is_never_a_candidate() {
+        let policy = ChannelImportPolicy::default();
+        let mut tl = timeline_with_take(Some(std::path::Path::new("C:/x.wav")));
+        tl.clips[0].takes[0].channel_decision = Some(ChannelDecisionRecord::user());
+        let targets = collect_targets(&tl, None, &policy, false);
+        assert!(targets.is_empty(), "用户封印的 Take 不得进入候选");
+        // 手动重扫（include_settled）也照样跳过。
+        assert!(collect_targets(&tl, None, &policy, true).is_empty());
+    }
+
+    #[test]
+    fn source_less_takes_are_out_of_scope() {
+        let policy = ChannelImportPolicy::default();
+        let tl = timeline_with_take(None);
+        assert!(
+            collect_targets(&tl, None, &policy, false).is_empty(),
+            "无源 Take（MIDI / 空白 Clip）不属于声道折叠的适用范围"
+        );
+    }
+
+    #[test]
+    fn a_take_that_could_not_be_read_is_retried_on_the_next_pass() {
+        // 这是"漏判不再永久化"的核心：第一次读不到 ⇒ 记 pending ⇒ 下一轮
+        // 仍在候选里。旧实现会把这种 Take 永久留在 channel_mode = 0。
+        let policy = ChannelImportPolicy::default();
+        let missing = std::path::Path::new("C:/definitely/missing.wav");
+        let state = AppState::default();
+        {
+            let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+            *tl = timeline_with_take(Some(missing));
+        }
+
+        let stats = run_once(&state, &policy, None).expect("apply");
+        assert_eq!(stats.pending, 1);
+        assert_eq!(stats.folded, 0);
+        assert_eq!(take0(&state).channel_mode, 0);
+        assert!(take0(&state).channel_decision.expect("record").is_pending());
+
+        // 第二轮：仍然进候选（对比"已定论"的真立体声会被跳过）。
+        let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(
+            collect_targets(&tl, None, &policy, false).len(),
+            1,
+            "pending 的 Take 必须保持可重试"
+        );
+    }
+
+    #[test]
+    fn a_settled_verdict_is_not_rejudged() {
+        // 已定论且上下文未变 ⇒ 零解码直接采用（跨会话复用）。
+        let policy = ChannelImportPolicy::default();
+        let path = write_wav("settled_true.wav", false, 1);
+        let state = AppState::default();
+        {
+            let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+            *tl = timeline_with_take(Some(&path));
+            crate::state::TimelineState::populate_clip_file_metadata(&mut tl.clips[0]);
+        }
+
+        let stats = run_once(&state, &policy, None).expect("apply");
+        assert_eq!(stats.recorded, 1, "真立体声要落档案");
+        assert_eq!(stats.folded, 0);
+
+        let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            collect_targets(&tl, None, &policy, false).is_empty(),
+            "已定论的 Take 不该再进候选（否则每次打开都重解码）"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_fake_stereo_file_is_folded_and_recorded() {
+        let policy = ChannelImportPolicy::default();
+        let path = write_wav("scan_fake.wav", true, 1);
+        let state = AppState::default();
+        {
+            let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+            *tl = timeline_with_take(Some(&path));
+            crate::state::TimelineState::populate_clip_file_metadata(&mut tl.clips[0]);
+        }
+
+        let stats = run_once(&state, &policy, None).expect("apply");
+        assert_eq!(stats.folded, 1);
+        let take = take0(&state);
+        assert_eq!(take.channel_mode, 2, "假立体声应折叠为 MonoMix");
+        assert!(!take.channel_decision.expect("record").is_pending());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_stale_generation_discards_the_whole_batch() {
+        // 工程切换后，在途扫描不得把结论写进新工程的同 id Take。
+        let policy = ChannelImportPolicy::default();
+        let path = write_wav("stale_gen.wav", true, 1);
+        let state = AppState::default();
+        {
+            let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+            *tl = timeline_with_take(Some(&path));
+            crate::state::TimelineState::populate_clip_file_metadata(&mut tl.clips[0]);
+        }
+
+        let stale = current_generation().wrapping_sub(1);
+        assert!(
+            run_once(&state, &policy, Some(stale)).is_none(),
+            "世代号不匹配必须整体放弃"
+        );
+        assert_eq!(take0(&state).channel_mode, 0, "不得写入任何东西");
+        assert_eq!(take0(&state).channel_decision, None);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn trimming_the_consumption_region_invalidates_the_verdict() {
+        // 判定只对消费区间负责：区间变了必须重判（否则 trim 出来的新片段
+        // 会沿用旧区间得出的结论）。
+        let policy = ChannelImportPolicy::default();
+        let path = write_wav("region_stale.wav", true, 1);
+        let state = AppState::default();
+        {
+            let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+            *tl = timeline_with_take(Some(&path));
+            crate::state::TimelineState::populate_clip_file_metadata(&mut tl.clips[0]);
+        }
+        run_once(&state, &policy, None).expect("first pass");
+
+        {
+            let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+            assert!(collect_targets(&tl, None, &policy, false).is_empty());
+        }
+        {
+            let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+            tl.clips[0].source_start_sec = 0.25;
+            tl.clips[0].source_end_sec = 0.75;
+            tl.clips[0].sync_take_from_flat();
+        }
+        let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(
+            collect_targets(&tl, None, &policy, false).len(),
+            1,
+            "消费区间变了 ⇒ 旧结论失效，必须重判"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn collect_targets_honours_a_clip_filter() {
+        let policy = ChannelImportPolicy::default();
+        let mut tl = timeline_with_take(Some(std::path::Path::new("C:/x.wav")));
+        // 再加一个 Clip。
+        let track = tl.tracks[0].id.clone();
+        tl.add_clip(
+            Some(track),
+            Some("W".to_string()),
+            Some(2.0),
+            Some(1.0),
+            Some("C:/y.wav".to_string()),
+        );
+        let only_first: std::collections::HashSet<String> =
+            [tl.clips[0].id.clone()].into_iter().collect();
+        assert_eq!(
+            collect_targets(&tl, Some(&only_first), &policy, false).len(),
+            1
+        );
+    }
 }

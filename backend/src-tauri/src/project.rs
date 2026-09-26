@@ -802,6 +802,55 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    #[test]
+    fn channel_decision_record_survives_a_project_roundtrip() {
+        // 判定档案是"漏判不再永久化"的载体：它必须随工程持久化，否则每次
+        // 打开都会退回"从未判定"，重判成本（解码）永远付不完。
+        let mut tl = timeline_with_clip_and_zero_curves();
+        let record = crate::channel_decision::ChannelDecisionRecord::auto(
+            crate::channel_decision::VERDICT_FAKE_STEREO,
+            Some(0xABCD_1234),
+            0x55AA,
+            Some((0, 5_000)),
+        );
+        {
+            let clip = &mut tl.clips[0];
+            clip.sync_take_from_flat();
+            clip.takes[0].channel_decision = Some(record);
+            clip.takes[0].channel_mode = 2;
+            // 与生产一致：Take 是权威，改完必须物化回 Clip 投影，否则下一次
+            // sync 会用旧投影把 Take 覆盖回去。
+            let take = clip.takes[0].clone();
+            take.apply_to_clip(clip);
+        }
+
+        let prepared = prepare_timeline_for_project_save(tl, Path::new("C:/proj/test.hshp"));
+        let pf = project_file_with_clip(prepared);
+        let bytes = serialize_project_file_for_path(&pf, Path::new("test.json")).unwrap();
+        let loaded = load_project_file(&bytes).expect("roundtrip");
+
+        let take = &loaded.timeline.clips[0].takes[0];
+        assert_eq!(take.channel_decision, Some(record), "判定档案必须持久化");
+        assert_eq!(take.channel_mode, 2);
+    }
+
+    #[test]
+    fn saving_does_not_mint_a_decision_where_there_was_none() {
+        // 反方向同样重要：没有档案的 Take 存盘后必须**仍然**没有档案，
+        // 否则一次保存就会把"从未判定"伪装成"已定论"。
+        let mut tl = timeline_with_clip_and_zero_curves();
+        {
+            let clip = &mut tl.clips[0];
+            clip.sync_take_from_flat();
+            clip.takes[0].channel_decision = None;
+        }
+        let prepared = prepare_timeline_for_project_save(tl, Path::new("C:/proj/test.hshp"));
+        let pf = project_file_with_clip(prepared);
+        let bytes = serialize_project_file_for_path(&pf, Path::new("test.json")).unwrap();
+        let loaded = load_project_file(&bytes).expect("roundtrip");
+        assert_eq!(loaded.timeline.clips[0].takes[0].channel_decision, None);
+    }
+
     fn timeline_with_clip_and_zero_curves() -> TimelineState {
         let mut tl = TimelineState::default();
         let root = tl.tracks[0].id.clone();
