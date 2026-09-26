@@ -1595,7 +1595,7 @@ export const zhCN = {
     render_cache_clear_failed: "清理渲染缓存失败",
     render_cache_open_dir_failed: "打开缓存目录失败",
     render_cache_stats_failed: "读取渲染缓存统计失败",
-    status_render_cache_summary: "渲染缓存：复用 {hits}/{total} 个音频块",
+    status_render_cache_summary: "本次打开复用 {hits}/{total} 个音频块",
     status_render_cache_skipped_suffix: " · {n} 个片段未落盘（每次打开都会重新合成）",
     status_render_cache_saved_suffix: "（约省 {saved}）",
     status_render_cache_cleared: "已清理渲染缓存（{n} 个条目）",

@@ -1646,7 +1646,7 @@ export const jaJP = {
     render_cache_clear_failed: "レンダーキャッシュの削除に失敗しました",
     render_cache_open_dir_failed: "キャッシュフォルダーを開けませんでした",
     render_cache_stats_failed: "レンダーキャッシュの統計を読み込めませんでした",
-    status_render_cache_summary: "レンダーキャッシュ：{hits}/{total} 件のクリップを再利用",
+    status_render_cache_summary: "今回の読み込みで {hits}/{total} 件を再利用",
     status_render_cache_skipped_suffix: " · {n} 件が保存されず（開くたびに再合成）",
     status_render_cache_saved_suffix: "（約 {saved} 短縮）",
     status_render_cache_cleared: "レンダーキャッシュを削除しました（{n} 件）",

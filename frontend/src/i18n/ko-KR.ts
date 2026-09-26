@@ -1625,7 +1625,7 @@ export const koKR = {
     render_cache_clear_failed: "렌더 캐시 지우기 실패",
     render_cache_open_dir_failed: "캐시 폴더를 열지 못했습니다",
     render_cache_stats_failed: "렌더 캐시 통계를 읽지 못했습니다",
-    status_render_cache_summary: "렌더 캐시: {hits}/{total}개 클립 재사용",
+    status_render_cache_summary: "이번 열기에서 {hits}/{total}개 재사용",
     status_render_cache_skipped_suffix: " · {n}개 저장 안 됨(열 때마다 재합성)",
     status_render_cache_saved_suffix: " (약 {saved} 절약)",
     status_render_cache_cleared: "렌더 캐시를 지웠습니다({n}개 항목)",

@@ -1450,6 +1450,10 @@ function AppInner() {
                     }) => {
                         if (disposed) return;
                         const payload = event?.payload ?? {};
+                        // 后端保证：这些是**工程级**累计值（分子按 clip 去重、分母是
+                        // 工程需要渲染的 clip 总数），且一次工程加载只在收敛后上报
+                        // 一次。不要在这里对多次事件做累加 —— 那正是"逐轮数字"的
+                        // 老毛病（6/6 → 5/35 → 156/465）。
                         const hits = Number(payload.diskHits ?? 0);
                         const total = Number(payload.total ?? 0);
                         const skipped = Number(payload.skipped ?? 0);

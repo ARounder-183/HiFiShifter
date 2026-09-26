@@ -137,6 +137,32 @@ pub(crate) static BG_RENDER_GENERATION: std::sync::atomic::AtomicU64 =
 /// 调度，因此不存在"请求被吞掉"的情况。
 pub(crate) const BG_RENDER_DEBOUNCE_MS: u64 = 200;
 
+/// 加载收敛的兜底静默窗口（毫秒）。
+///
+/// 正常路径靠"本轮没有 clip 因音高分析未完成被跳过"直接上报工程级汇总（见
+/// `render_background_pass` 末尾）。但存在**永远无法就绪**的 clip（源文件缺失、
+/// 音高分析不可用等）时该条件永不成立，因此另设兜底：连续这么久没有新一轮 pass
+/// 完成，就认为加载已收敛并上报最新累计值。
+///
+/// 取 3 s 是因为实测逐步加载过程中，相邻两轮**已完成** pass 的间隔最长约 2.2 s
+/// （音高分析逐批完成的节奏）——窗口必须大于它，否则会在加载中途抢先上报。
+const RENDER_SUMMARY_SETTLE_MS: u64 = 3_000;
+
+/// 已完成的后台渲染 pass 计数。
+///
+/// 兜底窗口用它判断"等待期间是否又有新一轮完成"：有则重新计时，避免在加载
+/// 尚未收敛时抢先上报中途值。
+static BG_RENDER_PASS_EPOCH: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// 兜底上报线程是否已在等待窗口结束（同一窗口内的重复请求合流）。
+static BG_RENDER_SETTLE_TIMER_ACTIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// 最近一次上报对应的 pass 纪元（避免"收敛上报"与"兜底上报"对同一轮重复发事件）。
+static BG_RENDER_SUMMARY_EMITTED_EPOCH: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(u64::MAX);
+
 /// 最近一次渲染请求的时间戳（进程启动相对毫秒）。
 ///
 /// 与 [`BG_RENDER_RESTART_REQUESTED_AT_MS`] 是**两件事**：后者描述"在途 pass
@@ -1522,6 +1548,10 @@ fn start_background_render_inner(
 
     let mut clips_to_render = collect_clips_needing_render(&timeline, sr);
     let unfiltered_total = clips_to_render.len();
+    // 工程级汇总的分母：本工程需要渲染的 clip 总数。它只取决于时间线上需要
+    // pitch edit 的 clip 集合，与音高分析进度无关 —— 因此整个加载过程中恒定，
+    // 而"本轮处理的 clip 数"会随分析完成逐轮增长（6 → 35 → … → 465）。
+    crate::commands::render_summary::set_project_total(unfiltered_total);
     // 渲染输入稳定性卫兵（按根记忆收敛判定，见 root_pitch_assembly_pending）：
     // 未收敛根的 clip 跳过并计入 pending，由完成回调链条在收敛后补触发渲染。
     let mut root_settled: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
@@ -1725,6 +1755,61 @@ fn select_next_render_index(
         .map(|(index, _)| index)
 }
 
+/// 上报**工程级**渲染缓存复用汇总（前端据此在状态栏提示"本次打开复用了多少、
+/// 省了多少"）。
+///
+/// 数值全部取自 `render_summary` 的加载级累计快照，按 clip 去重、跨 pass 重启
+/// 保持 —— 绝不是"本轮处理了多少"。分母是工程需要渲染的 clip 总数。
+fn emit_render_cache_summary(app: &tauri::AppHandle) {
+    use std::sync::atomic::Ordering;
+
+    let summary = crate::commands::render_summary::snapshot();
+    BG_RENDER_SUMMARY_EMITTED_EPOCH.store(BG_RENDER_PASS_EPOCH.load(Ordering::Acquire), Ordering::Release);
+    let _ = app.emit(
+        "render_cache_summary",
+        serde_json::json!({
+            "diskHits": summary.disk_hits,
+            "total": summary.project_total,
+            "rendered": summary.rendered,
+            "failed": summary.failed,
+            "misses": summary.rendered + summary.failed,
+            "savedMs": summary.saved_ms,
+            "persisted": summary.persisted,
+            "skipped": summary.skipped,
+        }),
+    );
+}
+
+/// 静默窗口结束后补报一次工程级汇总。
+///
+/// 窗口内又有 pass 完成则重新计时（说明加载仍在推进，此刻上报的会是中途值）；
+/// 同一轮已经报过（收敛路径抢先上报）则直接跳过。
+fn schedule_settled_render_cache_summary(app: tauri::AppHandle) {
+    use std::sync::atomic::Ordering;
+
+    if BG_RENDER_SETTLE_TIMER_ACTIVE.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    std::thread::spawn(move || {
+        loop {
+            let seen = BG_RENDER_PASS_EPOCH.load(Ordering::Acquire);
+            std::thread::sleep(std::time::Duration::from_millis(
+                RENDER_SUMMARY_SETTLE_MS,
+            ));
+            if BG_RENDER_PASS_EPOCH.load(Ordering::Acquire) != seen {
+                continue;
+            }
+            break;
+        }
+        BG_RENDER_SETTLE_TIMER_ACTIVE.store(false, Ordering::Release);
+        if BG_RENDER_SUMMARY_EMITTED_EPOCH.load(Ordering::Acquire)
+            != BG_RENDER_PASS_EPOCH.load(Ordering::Acquire)
+        {
+            emit_render_cache_summary(&app);
+        }
+    });
+}
+
 /// 后台渲染单轮主循环（在渲染线程上执行；由调用方负责 panic 隔离）。
 ///
 /// 本轮渲染**不按固定顺序遍历**：每个 clip 边界都按实时播放位置动态择优
@@ -1866,6 +1951,12 @@ fn render_background_pass(
                 ) {
                     disk_load_elapsed += disk_started_at.elapsed();
                     disk_hit_count += 1;
+                    // 工程级汇总：按 clip 去重累计（跨 pass 重启保持）。
+                    crate::commands::render_summary::note(
+                        &clip_render_info.clip.id,
+                        crate::commands::render_summary::ClipOutcome::DiskHit,
+                        std::time::Duration::ZERO,
+                    );
                     if cache_log {
                         log::warn!(
                             "[bg_render][cache] DISK HIT clip_id={} hash={:#018x} load_ms={}",
@@ -1977,6 +2068,12 @@ fn render_background_pass(
 
                         base_entry = Some(entry);
                         render_success_count += 1;
+                        // 工程级汇总：本次真正重新合成的 clip（按 clip 去重）。
+                        crate::commands::render_summary::note(
+                            &clip_render_info.clip.id,
+                            crate::commands::render_summary::ClipOutcome::Rendered,
+                            render_started_at.elapsed(),
+                        );
                         // 每个 clip 处理完毕后由循环末尾统一推送刷新
                         //（refresh_rendered_snapshot），等待中的传输层据此
                         // 恢复播放 —— 推送模型，无轮询、无版本号比对。
@@ -1993,6 +2090,11 @@ fn render_background_pass(
                             e
                         );
                         render_failed_count += 1;
+                        crate::commands::render_summary::note(
+                            &clip_render_info.clip.id,
+                            crate::commands::render_summary::ClipOutcome::Failed,
+                            std::time::Duration::ZERO,
+                        );
                         if let Ok(mut state_mgr) =
                             crate::clip_rendering_state::global_clip_rendering_state().lock()
                         {
@@ -2097,6 +2199,19 @@ fn render_background_pass(
             }
         }
 
+        // ── 本轮结束的公共收尾 ────────────────────────────────────────────────
+        // 以下两步对"正常跑完"与"被取消"两条路径都必须执行，因此放在分支之前。
+        //
+        // 落盘准入增量（本轮）：`accepted` 是"通过准入并已投递写盘"的条数。
+        // 被取消的轮次同样会产生准入结果（immediate 模式下已投递），漏掉会低估。
+        let admission = crate::render_cache::admission_counters().since(&admission_before);
+        crate::commands::render_summary::add_admission(admission.accepted, admission.skipped);
+
+        // 推进 pass 纪元。兜底上报线程据此判断"等待期间是否又有新一轮结束"——
+        // 取消的轮次也算进展（它同样结算了一批 clip），漏掉它会让兜底窗口在
+        // "编辑风暴导致连续取消"期间误判为加载已收敛，抢先把中途值报给用户。
+        BG_RENDER_PASS_EPOCH.fetch_add(1, Ordering::AcqRel);
+
         if cancelled {
             // 如果取消后已经启动了新一轮渲染（代数已变），旧线程不得再清理
             // 全局状态或触发旧工程的重启，直接退出即可。
@@ -2195,38 +2310,6 @@ fn render_background_pass(
             );
         }
 
-        // 渲染缓存命中汇总：前端据此在状态栏提示"本次打开复用了多少、省了多少"。
-        // 用本轮真实渲染的平均耗时估算节省时间；全命中（无新渲染）时不估算。
-        {
-            let avg_render_ms = if render_success_count > 0 {
-                render_elapsed.as_secs_f64() * 1000.0 / render_success_count as f64
-            } else {
-                0.0
-            };
-            let _ = app.emit(
-                "render_cache_summary",
-                serde_json::json!({
-                    "diskHits": disk_hit_count,
-                    "total": total,
-                    "rendered": render_success_count,
-                    "misses": cache_miss_count,
-                    "savedMs": (avg_render_ms * disk_hit_count as f64).round() as u64,
-                    "persisted": admission.accepted,
-                    "skipped": admission.skipped,
-                    "skippedByReason": crate::render_cache::SkipReason::ALL
-                        .iter()
-                        .filter_map(|reason| {
-                            let count = admission.skipped_by_reason[reason.index()];
-                            (count > 0).then_some(serde_json::json!({
-                                "reason": reason.id(),
-                                "count": count,
-                            }))
-                        })
-                        .collect::<Vec<_>>(),
-                }),
-            );
-        }
-
         // 旧代数线程完成时不得清理新一轮渲染的全局状态。
         if BG_RENDER_GENERATION.load(Ordering::Acquire) != render_generation {
             return;
@@ -2279,6 +2362,27 @@ fn render_background_pass(
                 target: Some("background".to_string()),
             },
         );
+
+        // 渲染缓存复用汇总：前端据此在状态栏提示"本次打开复用了多少、省了多少"。
+        //
+        // ★ 两条硬约束，缺一就会重演"逐轮数字"的老毛病：
+        // 1. **数值是工程级的**（`render_summary` 按 clip 去重累计、分母是工程
+        //    需要渲染的 clip 总数），不是本轮处理了多少；
+        // 2. **只在加载收敛后上报一次**。打开工程是逐步加载的：音高分析逐批完成
+        //    → 逐批解锁可渲染 clip → 跑出十余轮 pass（实测 6 / 35 / 137 / … /
+        //    465）。逐轮上报会让用户看到 `6/6` → `5/35` → `156/465` 这样一串
+        //    互相矛盾的中途值。
+        //
+        // 位置也有讲究：必须放在上面所有"还要再来一轮"的早退分支之后 —— 那些
+        // 分支意味着加载尚未结束，此刻上报就是中途值。收敛判据是本轮没有任何
+        // clip 因音高分析未完成被跳过（`skipped_not_ready == 0`），即本轮已覆盖
+        // 工程的全部可渲染 clip。对"永远无法就绪"的 clip（源文件缺失等）该条件
+        // 永不成立，故另设静默兜底（见 `schedule_settled_render_cache_summary`）。
+        if skipped_not_ready == 0 {
+            emit_render_cache_summary(&app);
+        } else {
+            schedule_settled_render_cache_summary(app.clone());
+        }
     }
 }
 
@@ -2411,6 +2515,13 @@ pub(super) fn cancel_background_render(app: Option<&tauri::AppHandle>) -> serde_
     BG_RENDER_PITCH_PENDING.store(false, Ordering::Release);
     // 递增代数，使旧渲染线程的收尾清理不再影响新的一轮渲染。
     BG_RENDER_GENERATION.fetch_add(1, Ordering::AcqRel);
+    // 工程级复用汇总归零：本函数是打开/新建工程的必经之路，也就是"一次加载"的
+    // 边界。不清零的话，新工程会显示上一个工程的复用率。
+    //
+    // 同时推进 pass 纪元：上一个工程遗留的兜底上报线程还在睡，它会把这次工程切换
+    // 视为"又有新一轮结束"而继续等待（而不是醒来就把新工程的中途值报出去）。
+    crate::commands::render_summary::reset();
+    BG_RENDER_PASS_EPOCH.fetch_add(1, Ordering::AcqRel);
     log::warn!("[bg_render] cancel requested, was_active={was_active}");
     // 立即通知前端“后台渲染已结束”，避免旧线程迟到的进度事件让状态卡在
     // “渲染中 100%”。如果随后有新工程的新一轮渲染，会再发 active=true。

@@ -1597,7 +1597,7 @@ export const zhTW = {
     render_cache_clear_failed: "清理渲染快取失敗",
     render_cache_open_dir_failed: "開啟快取資料夾失敗",
     render_cache_stats_failed: "讀取渲染快取統計失敗",
-    status_render_cache_summary: "渲染快取：重用 {hits}/{total} 個音訊塊",
+    status_render_cache_summary: "本次開啟重用 {hits}/{total} 個音訊塊",
     status_render_cache_skipped_suffix: " · {n} 個片段未落盤（每次開啟都會重新合成）",
     status_render_cache_saved_suffix: "（約省 {saved}）",
     status_render_cache_cleared: "已清理渲染快取（{n} 個條目）",

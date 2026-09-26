@@ -1771,7 +1771,7 @@ export const enUS = {
     render_cache_clear_failed: "Failed to clear render cache",
     render_cache_open_dir_failed: "Failed to open the cache folder",
     render_cache_stats_failed: "Failed to read render cache stats",
-    status_render_cache_summary: "Render cache: reused {hits}/{total} clips",
+    status_render_cache_summary: "Reused {hits}/{total} clips on open",
     status_render_cache_skipped_suffix: " · {n} clip(s) not persisted (re-rendered on every open)",
     status_render_cache_saved_suffix: " (saved about {saved})",
     status_render_cache_cleared: "Render cache cleared ({n} entries)",

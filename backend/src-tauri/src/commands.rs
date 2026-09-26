@@ -56,6 +56,8 @@ mod reaper_clipboard;
 mod recording;
 #[path = "commands/render_cancel.rs"]
 pub(crate) mod render_cancel;
+#[path = "commands/render_summary.rs"]
+pub(crate) mod render_summary;
 #[path = "commands/synth.rs"]
 mod synth;
 #[path = "commands/timeline.rs"]
