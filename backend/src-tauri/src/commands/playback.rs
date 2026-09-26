@@ -163,6 +163,13 @@ static BG_RENDER_SETTLE_TIMER_ACTIVE: std::sync::atomic::AtomicBool =
 static BG_RENDER_SUMMARY_EMITTED_EPOCH: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(u64::MAX);
 
+/// 本次工程加载是否已经上报过渲染缓存复用汇总。
+///
+/// 见 [`try_emit_render_cache_summary`]：这条提示的语义是"本次打开"，必须
+/// **至多一次**。由 `cancel_background_render` 在打开/新建工程时复位。
+static BG_RENDER_SUMMARY_REPORTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// 最近一次渲染请求的时间戳（进程启动相对毫秒）。
 ///
 /// 与 [`BG_RENDER_RESTART_REQUESTED_AT_MS`] 是**两件事**：后者描述"在途 pass
@@ -1697,6 +1704,17 @@ fn start_background_render_inner(
         }
         BG_RENDER_ACTIVE.store(false, Ordering::Release);
         BG_RENDER_CANCEL.store(false, Ordering::Release);
+
+        // 本轮无事可做，但这**可能正是加载完成的时刻**：最后一批 clip 被上一轮
+        // pass 处理掉之后，剩下的请求（音高分析逐批完成、播放触发）都会走到这里。
+        // 不在这里补一次上报的话，"最终那一轮恰好是空转"的加载就永远看不到提示。
+        // 上报自身限流为每次加载至多一次，因此这里反复调用是安全的。
+        if skipped_not_ready == 0 {
+            try_emit_render_cache_summary(&app);
+        } else {
+            schedule_settled_render_cache_summary(app.clone());
+        }
+
         // 不发送渲染事件，避免前端状态栏闪烁。
         // 当前端有实质性编辑时，自然会触发下一次渲染。
         return serde_json::json!({"ok": true, "rendered": 0});
@@ -1875,16 +1893,33 @@ fn select_next_render_index(
         .map(|(index, _)| index)
 }
 
-/// 上报**工程级**渲染缓存复用汇总（前端据此在状态栏提示"本次打开复用了多少、
-/// 省了多少"）。
+/// 上报**工程级**渲染缓存复用汇总（每次工程加载**至多一次**）。
 ///
-/// 数值全部取自 `render_summary` 的加载级累计快照，按 clip 去重、跨 pass 重启
-/// 保持 —— 绝不是"本轮处理了多少"。分母是工程需要渲染的 clip 总数。
-fn emit_render_cache_summary(app: &tauri::AppHandle) {
+/// 前端据此在状态栏提示"本次打开复用了多少、省了多少"。数值全部取自
+/// `render_summary` 的加载级累计快照，按 clip 去重、跨 pass 重启保持 —— 绝不是
+/// "本轮处理了多少"。分母是工程需要渲染的 clip 总数。
+///
+/// # 为什么必须"至多一次"
+/// 这条提示的语义是**本次打开**的结果。而"收敛"条件（本轮没有 clip 因音高分析
+/// 未完成被跳过）在加载完成后依然会被后续 pass 满足 —— 典型触发是
+/// `invalidate_clip_for_pitch_edit`：它**刻意保留** RenderedClipCache 条目、只解除
+/// pending 绑定（为的是新渲染完成前能无缝垫音，见其文档），于是"缓存里有条目、
+/// 但没有登记"的 clip 会被工作闸门判为待处理，跑出一轮零成本的 pass，再次满足
+/// 收敛条件。结果是用户每暂停/播放一次就再看到一遍同样的"本次打开复用"。
+///
+/// 因此这里用一次性标志锁死：每次工程加载只上报一次，由
+/// `cancel_background_render`（打开/新建工程的必经之路）复位。
+fn try_emit_render_cache_summary(app: &tauri::AppHandle) {
     use std::sync::atomic::Ordering;
 
     let summary = crate::commands::render_summary::snapshot();
-    BG_RENDER_SUMMARY_EMITTED_EPOCH.store(BG_RENDER_PASS_EPOCH.load(Ordering::Acquire), Ordering::Release);
+    if !claim_load_summary_slot(summary.project_total) {
+        return;
+    }
+    BG_RENDER_SUMMARY_EMITTED_EPOCH.store(
+        BG_RENDER_PASS_EPOCH.load(Ordering::Acquire),
+        Ordering::Release,
+    );
     let _ = app.emit(
         "render_cache_summary",
         serde_json::json!({
@@ -1900,10 +1935,39 @@ fn emit_render_cache_summary(app: &tauri::AppHandle) {
     );
 }
 
+/// 尝试占用"本次工程加载的汇总上报名额"；占用成功返回 `true`（调用方随即发事件）。
+///
+/// - `project_total == 0`（启动早期 / 空工程 / 打开工程前）**不占用名额**：
+///   那些时机的空转同样会走到上报点，若在那里就把标志置起，真正加载完成后
+///   该有的那一次提示会被吞掉。
+/// - 有内容时每次加载只放行一次。名额由 [`reset_load_summary_slot`] 在工程切换时
+///   归还。
+fn claim_load_summary_slot(project_total: u64) -> bool {
+    use std::sync::atomic::Ordering;
+    if project_total == 0 {
+        return false;
+    }
+    !BG_RENDER_SUMMARY_REPORTED.swap(true, Ordering::AcqRel)
+}
+
+/// 归还上报名额（打开 / 新建工程时调用）。
+fn reset_load_summary_slot() {
+    BG_RENDER_SUMMARY_REPORTED.store(false, std::sync::atomic::Ordering::Release);
+}
+
 /// 静默窗口结束后补报一次工程级汇总。
 ///
 /// 窗口内又有 pass 完成则重新计时（说明加载仍在推进，此刻上报的会是中途值）；
 /// 同一轮已经报过（收敛路径抢先上报）则直接跳过。
+///
+/// # 为什么还要看音高分析是否在跑
+/// 兜底的存在意义是"收敛条件永不成立"的工程（存在永远无法就绪的 clip）。但**仅靠
+/// 静默窗口不足以区分"分析已结束"和"两批分析之间的长空档"** —— 单个长文件的分析
+/// 动辄数秒，空档期没有任何 pass 完成，静默窗口会照常到期。若此时上报，用户看到的
+/// 是中途值，而名额已被占用，加载真正完成时那次正确的提示反而没了。
+///
+/// 因此再要求"没有正在进行的音高分析批次"（`get_clip_pitch_batch_progress` 为
+/// `None`）：它是"该来的结果都已经到了"的权威信号，正好把上述两种情况分开。
 fn schedule_settled_render_cache_summary(app: tauri::AppHandle) {
     use std::sync::atomic::Ordering;
 
@@ -1916,7 +1980,12 @@ fn schedule_settled_render_cache_summary(app: tauri::AppHandle) {
             std::thread::sleep(std::time::Duration::from_millis(
                 RENDER_SUMMARY_SETTLE_MS,
             ));
+            // 又有 pass 完成（含工程切换）→ 重新计时，并让本轮改判新的工程状态。
             if BG_RENDER_PASS_EPOCH.load(Ordering::Acquire) != seen {
+                continue;
+            }
+            // 音高分析仍在进行 → 加载尚未收敛，继续等，不要报中途值。
+            if crate::pitch_clip::get_clip_pitch_batch_progress().is_some() {
                 continue;
             }
             break;
@@ -1925,7 +1994,7 @@ fn schedule_settled_render_cache_summary(app: tauri::AppHandle) {
         if BG_RENDER_SUMMARY_EMITTED_EPOCH.load(Ordering::Acquire)
             != BG_RENDER_PASS_EPOCH.load(Ordering::Acquire)
         {
-            emit_render_cache_summary(&app);
+            try_emit_render_cache_summary(&app);
         }
     });
 }
@@ -2534,8 +2603,10 @@ fn render_background_pass(
         // clip 因音高分析未完成被跳过（`skipped_not_ready == 0`），即本轮已覆盖
         // 工程的全部可渲染 clip。对"永远无法就绪"的 clip（源文件缺失等）该条件
         // 永不成立，故另设静默兜底（见 `schedule_settled_render_cache_summary`）。
+        //
+        // 上报本身由 `try_emit_render_cache_summary` 限流为"每次加载至多一次"。
         if skipped_not_ready == 0 {
-            emit_render_cache_summary(&app);
+            try_emit_render_cache_summary(&app);
         } else {
             schedule_settled_render_cache_summary(app.clone());
         }
@@ -2680,6 +2751,8 @@ pub(super) fn cancel_background_render(app: Option<&tauri::AppHandle>) -> serde_
     BG_RENDER_PASS_EPOCH.fetch_add(1, Ordering::AcqRel);
     // 新工程要能重新记录一次"无事可做"（否则会沿用上一个工程去重后的静默）。
     LAST_IDLE_LOG_KEY.store(u64::MAX, Ordering::Release);
+    // 新工程要能重新上报一次"本次打开复用"（见 `try_emit_render_cache_summary`）。
+    reset_load_summary_slot();
     log::warn!("[bg_render] cancel requested, was_active={was_active}");
     // 立即通知前端“后台渲染已结束”，避免旧线程迟到的进度事件让状态卡在
     // “渲染中 100%”。如果随后有新工程的新一轮渲染，会再发 active=true。
@@ -2743,6 +2816,31 @@ mod tests {
         for kept in ["evicted", "unregistered", "stale-key", "fresh"] {
             assert!(!completed.contains(kept), "{kept} 被误剔，会导致漏渲染");
         }
+    }
+
+    /// 汇总上报名额的契约：**每次工程加载至多一次**，且空工程不占用名额。
+    ///
+    /// 这条不变量直接对应一个用户可见的缺陷：加载完成后任何一轮"零成本 pass"
+    /// （典型来源是 `invalidate_clip_for_pitch_edit` 刻意保留缓存条目、只解除
+    /// pending 绑定）都会再次满足收敛条件，于是用户每暂停/播放一次就再看到一遍
+    /// "本次打开复用"。
+    #[test]
+    fn load_summary_slot_is_claimed_once_and_not_by_empty_projects() {
+        use super::{claim_load_summary_slot, reset_load_summary_slot};
+
+        reset_load_summary_slot();
+        // 空工程：不占用名额，且连续调用都不放行。
+        assert!(!claim_load_summary_slot(0));
+        assert!(!claim_load_summary_slot(0));
+        // 有内容：第一次放行，之后拦下 —— 这正是"用户看到两遍"的修复点。
+        assert!(claim_load_summary_slot(43), "加载完成后的首次上报必须放行");
+        assert!(!claim_load_summary_slot(43), "同一次加载不得重复上报");
+        assert!(!claim_load_summary_slot(43));
+        // 工程切换归还名额 → 新工程能再报一次。
+        reset_load_summary_slot();
+        assert!(claim_load_summary_slot(43), "新工程必须能重新上报");
+
+        reset_load_summary_slot();
     }
 
     /// "已无需再处理"必须同时满足"键已登记"与"条目在缓存中"。
