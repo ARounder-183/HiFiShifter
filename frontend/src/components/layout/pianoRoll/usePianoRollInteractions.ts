@@ -8,6 +8,11 @@ import type {
 import { useCallback, useEffect, useRef } from "react";
 
 import { pianoRollViewportBus } from "./pianoRollViewportBus";
+import {
+    resolveViewportReplay,
+    warnViewportReplayButtonsLost,
+    type ViewportProjection,
+} from "./viewportReplay";
 
 import type { ParamFramesPayload } from "../../../types/api";
 import type { AppDispatch } from "../../../app/store";
@@ -1638,19 +1643,39 @@ export function usePianoRollInteractions(args: {
      * 【用途】视口在拖拽期间被改变（滚轮滚动/缩放、跨面板同步）后，按最近指针位置
      * **重放**一次移动 —— 各手势的落点换算读的是实时内核视口，因此重放后对象立刻
      * 回到光标处，不必等用户真的动鼠标。
+     *
+     * 【为什么按键状态要单独记】重放载荷里的 `buttons` **不能**沿用最近一次
+     * `pointermove` 的：按下之后、第一次真实移动之前，那个"最近一次"是按下**之前**
+     * 的悬停事件（`buttons === 0`），而各手势把 `buttons` 当作"键还按着吗"的判据
+     * （`(ev.buttons & mask) !== mask → onUp()`），会把重放读成"用户松手了"并当场
+     * 收尾手势 —— 用绘制工具画 `音量` / `动态` 时"按下那一点在、拖拽轨迹完全不画"
+     * 正是这样发生的（详见 `viewportReplay.ts` 的模块头说明）。
      */
     const lastPointerMoveRef = useRef<globalThis.PointerEvent | null>(null);
     const pointerDownRef = useRef(false);
+    /**
+     * **此刻**按下的按键位掩码（0 = 没有任何键按下）。
+     *
+     * 由同一组捕获监听维护：`pointerdown` 记下起始掩码、`pointermove` 同步、
+     * `pointerup` / `pointercancel` 清零。这是重放载荷唯一的按键来源。
+     */
+    const pressedButtonsRef = useRef(0);
 
     useEffect(() => {
         const onMove = (event: globalThis.PointerEvent) => {
             lastPointerMoveRef.current = event;
+            // 只在**有键按下**时同步：一次"没有键按下"的移动不可能发生在拖拽中
+            // （那需要先来一次 pointerup），照单全收会把掩码清零、让重放失效并误报
+            // 一条"按键丢失"告警。
+            if (event.buttons !== 0) pressedButtonsRef.current = event.buttons;
         };
         const onDown = (event: globalThis.PointerEvent) => {
+            pressedButtonsRef.current = event.buttons;
             if (event.button === 0) pointerDownRef.current = true;
         };
         const onUp = () => {
             pointerDownRef.current = false;
+            pressedButtonsRef.current = 0;
         };
         // 捕获阶段：即使某个手势 stopPropagation 也要记到。
         window.addEventListener("pointermove", onMove, true);
@@ -1672,31 +1697,36 @@ export function usePianoRollInteractions(args: {
      * 视口变了而指针没动；不重放的话被拖对象会停在旧落点上、与光标脱开，直到用户再
      * 动一下鼠标才归位（用户报告的"拖拽中滚动/缩放导致偏移"）。
      *
-     * 用视口总线的**兼容订阅层**（而不是注册一个不绘制的"图层"）：本回调不参与绘制，
-     * 只是借"视口已提交"这一时机重放。
+     * 【为什么必须自己判投影】重放挂在总线的 `subscribe()` 上，而
+     * `pianoRollViewportBus.invalidate()`（"内容变了，按同一投影重画一次"）同样会
+     * paint 全部订阅者 —— 绘制 `音量` / `动态` 时**每帧**一次的波形重绘就会走到这里。
+     * 不区分"视口变了"与"只是重绘"，重放就会被无谓注入，并构成
+     * `invalidate → 重放 → 移动 → invalidate` 的自激环。
+     *
+     * 【全部判定规则与理由收口在 `viewportReplay`】：包括载荷的按键状态必须取
+     * "此刻"而非最近一次事件 —— 那是"按下那一点在、拖拽轨迹完全不画"的成因。
      */
     useEffect(() => {
-        return pianoRollViewportBus.subscribe(() => {
-            if (!pointerDownRef.current) return;
-            const last = lastPointerMoveRef.current;
-            if (!last) return;
-            window.dispatchEvent(
-                new PointerEvent("pointermove", {
-                    bubbles: true,
-                    cancelable: true,
-                    clientX: last.clientX,
-                    clientY: last.clientY,
-                    pointerId: last.pointerId,
-                    pointerType: last.pointerType,
-                    isPrimary: last.isPrimary,
-                    buttons: last.buttons,
-                    button: -1,
-                    shiftKey: last.shiftKey,
-                    ctrlKey: last.ctrlKey,
-                    altKey: last.altKey,
-                    metaKey: last.metaKey,
-                }),
-            );
+        let lastProjection: ViewportProjection | null = null;
+        return pianoRollViewportBus.subscribe((scrollLeftPx, pxPerSec, viewportWidthPx) => {
+            const projection: ViewportProjection = { scrollLeftPx, pxPerSec, viewportWidthPx };
+            const decision = resolveViewportReplay({
+                projection,
+                previousProjection: lastProjection,
+                dragging: pointerDownRef.current,
+                pressedButtons: pressedButtonsRef.current,
+                lastMove: lastPointerMoveRef.current,
+            });
+            // 无论是否重放都要推进基准：漏推一次会让下一次比较错位，真实滚动反而被
+            // 当成"没变"而漏掉重放。
+            lastProjection = projection;
+            if (!decision.replay) {
+                if (decision.reason === "pressed-buttons-lost") {
+                    warnViewportReplayButtonsLost(lastPointerMoveRef.current?.buttons ?? null);
+                }
+                return;
+            }
+            window.dispatchEvent(new PointerEvent("pointermove", decision.payload));
         });
     }, []);
 
