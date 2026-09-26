@@ -670,11 +670,16 @@ where
     let mut harvested = 0usize;
     let mut cursor: u64 = 0;
     let mut next = 0usize;
-    // 跨解码缓冲的窗口需要累积：一个 0.25 秒的窗口很可能被包边界切成两半。
-    let mut acc: Vec<f32> = Vec::new();
-    let mut acc_frames = 0usize;
-    let mut acc_index = 0usize;
-    let mut acc_channels = 0u16;
+    // 已解码但尚未被窗口消费的帧，覆盖 `[retained_start, retained_start + frames)`。
+    //
+    // 【为什么必须保留而不是只维护"当前累积器"】窗口之间**可以重叠**：同一
+    // 音频被两个 Take 以相互重叠的消费区间引用时（切片素材的常态），两个区间的
+    // 窗口可能落在同一段音频上。若只按解码游标顺序累积，走到第二个窗口时游标
+    // 已经越过它的起点，就会拿**当前位置**的音频冒充该窗口 —— 静默地比较了
+    // 错误的音频位置。保留一段已解码缓冲后，每个窗口都从自己的起点精确取数。
+    let mut retained: Vec<f32> = Vec::new();
+    let mut retained_start: u64 = 0;
+    let mut channels_seen: u16 = 0;
 
     let result = decode_track_frames_until(
         path,
@@ -687,50 +692,57 @@ where
                 return Ok(());
             }
 
-            let mut consumed = 0usize;
-            while consumed < frame_count && next < ordered.len() {
-                let (start, len, index) = ordered[next];
-                let absolute = cursor + consumed as u64;
-
-                if absolute < start {
-                    // 还没到窗口起点：丢弃这段，直接跳过。
-                    let skip = (start - absolute).min((frame_count - consumed) as u64) as usize;
-                    consumed += skip;
-                    continue;
-                }
-
-                // 新窗口：重置累积器（上一个窗口若没攒够就作废 —— 它已被跳过）。
-                if acc_index != index || acc_frames == 0 {
-                    if acc_frames > 0 && acc_index != index {
-                        acc.clear();
-                        acc_frames = 0;
-                    }
-                    acc_index = index;
-                    acc_channels = channels;
-                }
-
-                let take = (len - acc_frames).min(frame_count - consumed);
-                if take == 0 {
-                    next += 1;
-                    continue;
-                }
-                let from = consumed * ch;
-                acc.extend_from_slice(&frame[from..from + take * ch]);
-                acc_frames += take;
-                consumed += take;
-
-                if acc_frames >= len {
-                    on_window(index, &acc, acc_channels, rate)?;
-                    harvested += 1;
-                    acc.clear();
-                    acc_frames = 0;
-                    next += 1;
-                }
+            // 声道数在同一个容器内变化（罕见）：保留缓冲的交错步长随之失效，
+            // 丢弃它并重新起算。
+            if channels_seen != channels {
+                retained.clear();
+                retained_start = cursor;
+                channels_seen = channels;
             }
 
+            retained.extend_from_slice(&frame[..frame_count * ch]);
             cursor += frame_count as u64;
+
+            // 顺序满足所有"终点已解码到"的窗口。
+            while next < ordered.len() {
+                let (start, len, index) = ordered[next];
+                let end = start.saturating_add(len as u64);
+                if end > cursor {
+                    break;
+                }
+                if start < retained_start {
+                    // 起点已被丢弃（声道数变化等）⇒ 该窗口无法精确取数：跳过它，
+                    // 不拿错位的音频充数。调用方会看到"没收到"并据此只允许
+                    // 下发安全结论。
+                    next += 1;
+                    continue;
+                }
+                let from = ((start - retained_start) as usize) * ch;
+                let to = from + len * ch;
+                if to > retained.len() {
+                    next += 1;
+                    continue;
+                }
+                on_window(index, &retained[from..to], channels, rate)?;
+                harvested += 1;
+                next += 1;
+            }
+
+            // 丢弃不再被任何剩余窗口需要的保留前缀，使内存与文件长度无关。
+            let keep_from = if next < ordered.len() {
+                ordered[next].0
+            } else {
+                cursor
+            };
+            let drop_frames = keep_from.saturating_sub(retained_start) as usize;
+            if drop_frames > 0 {
+                let drop_samples = (drop_frames * ch).min(retained.len());
+                retained.drain(..drop_samples);
+                retained_start += (drop_samples / ch) as u64;
+            }
+
             if next >= ordered.len() {
-                // 全部窗口已收割：用"已解满"的返回值让解码循环提前收尾。
+                // 全部窗口已收割：用哨兵错误让解码循环提前收尾。
                 return Err(WINDOWS_DONE.to_string());
             }
             Ok(())
@@ -812,6 +824,114 @@ pub fn extract_audio_stream_to_wav(path: &Path, stream_index: usize) -> Result<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 仓库自带的非 WAV 夹具（mp3）。
+    ///
+    /// 相对路径在 `cargo test` 下取决于工作目录，因此从 `CARGO_MANIFEST_DIR`
+    /// 反推仓库根 —— 否则这个夹具会"永远找不到"而让测试静默变成空跑。
+    fn demo_mp3() -> Option<std::path::PathBuf> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../third_party/signalsmith-stretch/signalsmith-stretch/web/demo/loop.mp3");
+        path.is_file().then_some(path)
+    }
+
+    #[test]
+    fn window_harvest_returns_exactly_what_was_asked_for() {
+        let Some(path) = demo_mp3() else {
+            return;
+        };
+        let header = probe_media(&path, 0, None).expect("probe demo mp3");
+        let total = header.total_frames;
+        assert!(total > 200_000, "夹具太短，无法取中段窗口");
+
+        let windows = vec![(total / 4, 4_000usize), (total / 2, 6_000usize)];
+        let mut got: Vec<(usize, usize)> = Vec::new();
+        let harvested = visit_media_audio_windows(&path, None, &windows, total as usize, &mut {
+            let mut record = |index: usize, pcm: &[f32], channels: u16, _rate: u32| {
+                got.push((index, pcm.len() / channels.max(1) as usize));
+                Ok(())
+            };
+            move |index, pcm, channels, rate| record(index, pcm, channels, rate)
+        })
+        .expect("harvest");
+
+        assert_eq!(harvested, 2);
+        got.sort();
+        assert_eq!(got, vec![(0, 4_000), (1, 6_000)], "每个窗口的帧数必须精确");
+    }
+
+    #[test]
+    fn overlapping_windows_are_taken_from_their_own_starts() {
+        // 回归：窗口可以重叠（同一音频被两个消费区间重叠引用）。曾经按解码游标
+        // 顺序累积的实现，走到第二个窗口时游标已越过它的起点，于是拿**当前位置**
+        // 的音频冒充该窗口 —— 静默比较了错误的音频位置。
+        //
+        // 判据：一个窗口收到的内容，不得因为它旁边还有别的窗口而改变。
+        let Some(path) = demo_mp3() else {
+            return;
+        };
+        let header = probe_media(&path, 0, None).expect("probe demo mp3");
+        let total = header.total_frames;
+        let start = total / 2;
+        let len = 5_000usize;
+        // 第二个窗口与第一个重叠一半。
+        let a = (start, len);
+        let b = (start + len as u64 / 2, len);
+
+        let harvest = |windows: &[(u64, usize)]| -> Vec<(usize, Vec<f32>)> {
+            let mut out: Vec<(usize, Vec<f32>)> = Vec::new();
+            visit_media_audio_windows(&path, None, windows, total as usize, &mut {
+                let mut record = |index: usize, pcm: &[f32], _ch: u16, _rate: u32| {
+                    out.push((index, pcm.to_vec()));
+                    Ok(())
+                };
+                move |index, pcm, ch, rate| record(index, pcm, ch, rate)
+            })
+            .expect("harvest");
+            out.sort_by_key(|(index, _)| *index);
+            out
+        };
+
+        let together = harvest(&[a, b]);
+        assert_eq!(together.len(), 2, "两个窗口都必须收到");
+        assert_eq!(harvest(&[a]).len(), 1);
+        assert_eq!(harvest(&[b]).len(), 1);
+
+        // 单独取与一起取，内容必须逐样本一致。
+        assert_eq!(together[0].1, harvest(&[a])[0].1, "窗口 a 的内容不得受 b 影响");
+        assert_eq!(together[1].1, harvest(&[b])[0].1, "窗口 b 的内容不得受 a 影响");
+        // 重叠段确实重叠（否则上面的断言会因为两个窗口都在读同一段而失去意义）。
+        let half = len / 2;
+        let ch = header.channels.max(1) as usize;
+        assert_eq!(
+            together[0].1[half * ch..len * ch],
+            together[1].1[..half * ch],
+            "重叠段应当逐样本相同"
+        );
+    }
+
+    #[test]
+    fn windows_beyond_the_file_are_simply_not_reported() {
+        let Some(path) = demo_mp3() else {
+            return;
+        };
+        let header = probe_media(&path, 0, None).expect("probe demo mp3");
+        let total = header.total_frames;
+        // 起点在文件之外：收不到，但也不报错（调用方据此判定覆盖不完整）。
+        let windows = vec![(total + 100_000, 1_000usize)];
+        let mut count = 0usize;
+        let harvested =
+            visit_media_audio_windows(&path, None, &windows, total as usize, &mut |_i,
+                                                                                   _pcm,
+                                                                                   _ch,
+                                                                                   _rate| {
+                count += 1;
+                Ok(())
+            })
+            .expect("harvest");
+        assert_eq!(harvested, 0);
+        assert_eq!(count, 0);
+    }
 
     #[test]
     fn decodes_video_audio_when_test_file_provided() {

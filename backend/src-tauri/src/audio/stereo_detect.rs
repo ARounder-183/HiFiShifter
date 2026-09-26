@@ -1396,6 +1396,72 @@ mod tests {
         path
     }
 
+    /// 仓库自带的非 WAV 夹具（mp3）。相对路径取决于工作目录，因此从
+    /// `CARGO_MANIFEST_DIR` 反推仓库根，避免夹具"永远找不到"而让测试空跑。
+    fn demo_mp3() -> Option<std::path::PathBuf> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../third_party/signalsmith-stretch/signalsmith-stretch/web/demo/loop.mp3");
+        path.is_file().then_some(path)
+    }
+
+    #[test]
+    fn container_region_far_into_the_file_is_still_judged() {
+        // 回归（旧实现的核心缺陷）：非 WAV 路径只能看文件头 3 秒，且区间起点
+        // 一旦晚于抽样预算就直接 `Unknown` —— 从中段切出来的 Take 在 mp3/flac
+        // 源上**永远判不出来**。现在窗口沿整个消费区间铺开，中段同样有结论。
+        verdict_cache_clear();
+        let _cache_guard = verdict_cache_test_lock();
+        let Some(path) = demo_mp3() else {
+            return;
+        };
+        let header = crate::audio_utils::try_read_audio_header_only(&path).expect("probe");
+        assert!(header.sample_rate > 0);
+        let sr = header.sample_rate as f64;
+        let total_sec = header.total_frames as f64 / sr;
+        assert!(total_sec > 10.0, "夹具太短，取不到'3 秒预算之外'的区间");
+
+        let opts = DetectOptions::default();
+        // 区间整个落在旧预算（0.25 × 12 = 3 秒）之外。
+        let region = Some((total_sec * 0.6, (total_sec * 0.7).min(total_sec)));
+        let detail = verdict_for_file_detailed(&path, region, &opts);
+        assert_ne!(
+            detail.verdict,
+            ChannelVerdict::Unknown,
+            "中段区间必须能得出结论（旧实现会因起点超出 3 秒预算而放弃）"
+        );
+        assert!(
+            detail.frames_compared > 0,
+            "结论必须建立在真实比较过的样本上，而不是空转"
+        );
+    }
+
+    #[test]
+    fn container_windows_cover_the_head_and_tail_of_the_region() {
+        // 容器路径现在与 WAV 路径共用同一套窗口规划：首尾都锚定在区间内。
+        // 只判开头正是"该判没判"的成因（前几秒有立体声 intro、主体是单声道）。
+        let Some(path) = demo_mp3() else {
+            return;
+        };
+        let header = crate::audio_utils::try_read_audio_header_only(&path).expect("probe");
+        let sr = header.sample_rate;
+        let total = header.total_frames;
+        let opts = DetectOptions::default();
+        let start = total / 3;
+        let end = total / 3 * 2;
+        let budget = total;
+        let (windows, truncated) =
+            plan_region_windows(start, end, total, budget, sr, &opts);
+        assert!(!truncated);
+        assert_eq!(windows.len(), opts.window_count);
+        assert_eq!(windows.first().unwrap().0, start, "首个窗口锚定区间起点");
+        let last = windows.last().unwrap();
+        assert_eq!(
+            last.0 + last.1 as u64,
+            end,
+            "末个窗口右对齐到区间终点"
+        );
+    }
+
     #[test]
     fn wav_file_fake_stereo_is_detected_via_seek_windows() {
         verdict_cache_clear();
