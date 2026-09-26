@@ -9,6 +9,15 @@ import { isDynParam } from "./paramRanges";
 import { framesToTime, timeToFrame } from "./utils";
 const paramFramePeriodCache = new Map<string, number>();
 
+/**
+ * 「参数曲线取数中」提示的静默窗口（毫秒）。
+ *
+ * 取数由水平缩放 / 滚动 / 编辑提交驱动，IPC 往返通常 1~5 ms。短于此窗口的取数
+ * 完全不让状态栏闪烁 —— 那是正常交互的一部分，不是用户需要知道的"加载"。
+ * 只有真慢到会被察觉的取数才点亮提示。
+ */
+const LOADING_INDICATOR_DELAY_MS = 150;
+
 export function usePianoRollData(args: {
     editParam: ParamName;
     secondaryParamIds: ParamName[];
@@ -52,6 +61,14 @@ export function usePianoRollData(args: {
 
     // pitch_orig_updated 到达时若正在编辑，将刷新推迟到 pointer-up 后执行。
     const pendingPitchUpdatedRefreshRef = useRef(false);
+    /**
+     * 笔画进行中被推迟的取数（见取数 effect 里的说明）。
+     *
+     * 与 `pendingPitchUpdatedRefreshRef` 是同一契约的两个来源：那个记的是
+     * "后端分析结果到了"，这个记的是"视口/令牌变了"。两者都在
+     * `notifyLiveEditEnded()` 里统一补触发。
+     */
+    const pendingFetchWhileEditingRef = useRef(false);
     const [paramView, setParamView] = useState<ParamViewSegment | null>(null);
     // 副参数曲线（与 edit 区分，用于叠加显示）
     const [secondaryParamViews, setSecondaryParamViews] = useState<
@@ -69,15 +86,62 @@ export function usePianoRollData(args: {
     );
 
     const [isRefreshing, setIsRefreshing] = useState(false);
-    const [loadingCount, setLoadingCount] = useState(0);
-    const isLoading = loadingCount > 0;
+
+    /**
+     * 参数曲线取数中（供状态栏提示）。
+     *
+     * ★ 刻意**不**直接由计数器派生。取数极其频繁（水平缩放、滚动、每一笔编辑提交
+     * 都会触发），而 IPC 往返通常只有 1~5 ms —— 若每次取数都翻转一次这个状态，
+     * 用户看到的就是"任何操作都闪一下加载中"，且每次翻转都会惊动订阅者。
+     *
+     * 因此改为**延迟显示**：取数开始后静默 `LOADING_INDICATOR_DELAY_MS`，窗口内完成
+     * 则连一次 setState 都不发生（见 `isLoadingRef` 的等值短路）；只有真的慢到用户
+     * 会察觉的取数才点亮。这才是进度提示该有的语义。
+     */
+    const [isLoading, setIsLoading] = useState(false);
+    /** 在途取数计数。只是"要不要显示"的判定依据，不该触发渲染，故用 ref。 */
+    const loadingCountRef = useRef(0);
+    /** 延迟显示定时器。 */
+    const loadingDelayRef = useRef<number | null>(null);
+    /** `isLoading` 的镜像，用于等值短路 —— 让"快速取数"真正做到零 setState。 */
+    const isLoadingRef = useRef(false);
+
+    function applyLoadingState(next: boolean) {
+        if (isLoadingRef.current === next) return;
+        isLoadingRef.current = next;
+        setIsLoading(next);
+    }
 
     function beginLoading() {
-        setLoadingCount((c) => c + 1);
+        loadingCountRef.current += 1;
+        if (loadingCountRef.current !== 1 || loadingDelayRef.current != null) return;
+        loadingDelayRef.current = window.setTimeout(() => {
+            loadingDelayRef.current = null;
+            // 到点时若已无在途取数，说明是"刚清零又被取消"的竞态，不点亮。
+            if (loadingCountRef.current > 0) applyLoadingState(true);
+        }, LOADING_INDICATOR_DELAY_MS);
     }
+
     function endLoading() {
-        setLoadingCount((c) => Math.max(0, c - 1));
+        loadingCountRef.current = Math.max(0, loadingCountRef.current - 1);
+        if (loadingCountRef.current > 0) return;
+        if (loadingDelayRef.current != null) {
+            window.clearTimeout(loadingDelayRef.current);
+            loadingDelayRef.current = null;
+        }
+        applyLoadingState(false);
     }
+
+    // 卸载时清掉悬挂的延迟定时器（否则会在已卸载组件上 setState）。
+    useEffect(
+        () => () => {
+            if (loadingDelayRef.current != null) {
+                window.clearTimeout(loadingDelayRef.current);
+                loadingDelayRef.current = null;
+            }
+        },
+        [],
+    );
 
     const fpRetryRef = useRef<Set<string>>(new Set());
 
@@ -1005,6 +1069,19 @@ export function usePianoRollData(args: {
             window.clearTimeout(fetchDebounceRef.current);
             fetchDebounceRef.current = null;
         }
+
+        // 【笔画进行中推迟取数】绘制期间换入新曲线，会让进行中的笔画以新数据重画
+        // （表现为笔画被打断 / 跳变），并与 `liveEditOverride` 的实时预览互相覆盖。
+        // 与 `pitch_orig_updated` / `dyn_orig_updated` 的处理同一契约：只记 pending，
+        // 由 pointer-up 的 `notifyLiveEditEnded()` 统一补触发。
+        //
+        // 推迟而不是取消：pointer-up 后那次提交本身也会 bump 刷新令牌，因此这里的
+        // pending 只是兜住"笔画期间发生、且提交路径没覆盖到"的变化（如缩放、滚动）。
+        if (liveEditActiveRef.current) {
+            pendingFetchWhileEditingRef.current = true;
+            return;
+        }
+
         // 【参数 / 轨道切换不走去抖】去抖是为滚动、缩放这类**连续输入**准备的；
         // 切换参数是离散动作，吃 75ms 去抖只会白白拉长"标尺已换、曲线未到"的空窗
         // （旧实现里那段时间还显示着旧参数的曲线）。切换时立即取数，把空窗压到
@@ -1043,14 +1120,23 @@ export function usePianoRollData(args: {
 
     /**
      * 由外部（PianoRollPanel）在 pointer-up 时调用，通知 live 编辑已经结束。
-     * 若此前有被推迟的 pitch_orig_updated 刷新，此时立即触发。
+     *
+     * 集中补触发两类被推迟的刷新：
+     * - `pitch_orig_updated` / `dyn_orig_updated`（后端分析结果到位）；
+     * - 笔画期间被推迟的取数（视口 / 令牌变化，见取数 effect）。
+     *
+     * 两者都走"bump 令牌"这一条路，让取数 effect 统一按最新视口重算。
      */
     function notifyLiveEditEnded() {
-        if (pendingPitchUpdatedRefreshRef.current) {
-            pendingPitchUpdatedRefreshRef.current = false;
-            setForceParamFetchToken((x) => x + 1);
-            setRefreshToken((x) => x + 1);
-        }
+        const pitchUpdated = pendingPitchUpdatedRefreshRef.current;
+        const fetchDeferred = pendingFetchWhileEditingRef.current;
+        pendingPitchUpdatedRefreshRef.current = false;
+        pendingFetchWhileEditingRef.current = false;
+        if (!pitchUpdated && !fetchDeferred) return;
+        // `pitch_orig_updated` 必须**强制**取数：后端数据真的变了，覆盖检查
+        // （`paramCoversVisible`）会误判"视口已覆盖"而跳过。
+        if (pitchUpdated) setForceParamFetchToken((x) => x + 1);
+        setRefreshToken((x) => x + 1);
     }
 
     // 引用必须跨渲染稳定：它被下游 commitStroke / onCanvasPointerDown 等
