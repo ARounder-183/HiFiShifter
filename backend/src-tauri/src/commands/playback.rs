@@ -1655,6 +1655,10 @@ fn render_background_pass(
             .as_deref()
             == Some("1");
         let started_at = std::time::Instant::now();
+        // 落盘准入计数基线：本轮结束时取差值，得到"这一轮里有多少产物通过
+        // 准入、多少被拒以及为什么"。后台渲染会反复重启，用全局累计值当
+        // 每轮结果会互相污染。
+        let admission_before = crate::render_cache::admission_counters();
 
         let mut rendered_count = 0u32;
         let mut cache_hit_count = 0u32;
@@ -2064,6 +2068,10 @@ fn render_background_pass(
                 started_at.elapsed().as_secs_f64() * 1000.0
             );
         }
+        // 落盘准入结果（本轮增量）。`accepted` 是"通过准入并已投递写盘"的条数；
+        // `stored` 是写盘线程真正落盘的条数（异步，可能略滞后于本轮）。
+        let admission = crate::render_cache::admission_counters().since(&admission_before);
+        let stored_this_pass = crate::render_cache::session_stored();
         log::warn!(
             "[bg_render] complete: {} clips, {} hit ({} from disk), {} miss, {} ok, {} fail in {:.2}s",
             total,
@@ -2074,6 +2082,22 @@ fn render_background_pass(
             render_failed_count,
             started_at.elapsed().as_secs_f64()
         );
+        // 落盘准入是一类**静默失败**：产物进内存缓存、播放完全正常，只是永远
+        // 不落盘 → 每次重开工程都要重新合成。只在真有拒绝时才打，且带上原因
+        // 分解，使"命中率低"能在日志里直接定位到是哪个闸门在拦。
+        if admission.accepted > 0 || admission.skipped > 0 {
+            log::warn!(
+                "[render_cache] pass admission: accepted={} skipped={} [{}] (stored_total={})",
+                admission.accepted,
+                admission.skipped,
+                if admission.skipped > 0 {
+                    admission.reason_summary()
+                } else {
+                    "none".to_string()
+                },
+                stored_this_pass
+            );
+        }
 
         // 渲染缓存命中汇总：前端据此在状态栏提示"本次打开复用了多少、省了多少"。
         // 用本轮真实渲染的平均耗时估算节省时间；全命中（无新渲染）时不估算。
@@ -2091,6 +2115,18 @@ fn render_background_pass(
                     "rendered": render_success_count,
                     "misses": cache_miss_count,
                     "savedMs": (avg_render_ms * disk_hit_count as f64).round() as u64,
+                    "persisted": admission.accepted,
+                    "skipped": admission.skipped,
+                    "skippedByReason": crate::render_cache::SkipReason::ALL
+                        .iter()
+                        .filter_map(|reason| {
+                            let count = admission.skipped_by_reason[reason.index()];
+                            (count > 0).then_some(serde_json::json!({
+                                "reason": reason.id(),
+                                "count": count,
+                            }))
+                        })
+                        .collect::<Vec<_>>(),
                 }),
             );
         }

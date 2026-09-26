@@ -2,9 +2,9 @@
  * 渲染缓存管理对话框。
  *
  * 功能：
- * - 展示缓存占用 / 条目数 / 分类占用 / 本次会话命中率
- * - 编辑渲染缓存设置（开关、容量上限、超龄清理、片段下限、单条上限、
- *   磁盘保留空间、写入模式、缓存位置、完整性校验、命中统计）
+ * - 展示缓存占用 / 条目数 / 分类占用 / 本次会话命中率与**未落盘原因**
+ * - 编辑渲染缓存设置（开关、容量上限、超龄清理、片段时长下限、片段大小下限、
+ *   单条上限、磁盘保留空间、写入模式、缓存位置、完整性校验、命中统计）
  * - 分作用域清理（全部 / 仅当前工程 / 超期 / 其它采样率）并即时反馈释放空间
  * - 在系统文件管理器中打开缓存目录
  *
@@ -171,6 +171,23 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
               .replace("{total}", String(sessionTotal))
         : "";
 
+    // 落盘准入被拒 = 产物进了内存缓存、播放正常，但永远不会落盘 → 每次重开
+    // 工程都要重新合成。这类"静默失败"必须显式暴露，否则只能表现为"命中率低"。
+    const skippedText =
+        stats && stats.sessionSkipped > 0
+            ? tAny("render_cache_skipped_line")
+                  .replace("{n}", String(stats.sessionSkipped))
+                  .replace(
+                      "{reasons}",
+                      stats.sessionSkippedByReason
+                          .map(
+                              (entry) =>
+                                  `${tAny(`render_cache_skip_${entry.reason}`)}×${entry.count}`,
+                          )
+                          .join("、"),
+                  )
+            : "";
+
     const agePresetValue = AGE_PRESETS_DAYS.includes(draft.maxAgeDays)
         ? String(draft.maxAgeDays)
         : "custom";
@@ -191,6 +208,11 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                     {/* ── 状态 ─────────────────────────────────────────────── */}
                     <Flex direction="column" gap="1">
                         <Text size="2">{summaryText}</Text>
+                        {skippedText ? (
+                            <Text size="1" color="orange">
+                                {skippedText}
+                            </Text>
+                        ) : null}
                         <Text size="1" color="gray" style={{ wordBreak: "break-all" }}>
                             {tAny("render_cache_location_label")}：{stats?.dir ?? "…"}
                         </Text>
@@ -343,6 +365,22 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                         />
                         <Text size="1" color="gray">
                             {tAny("render_cache_seconds_unit")}
+                        </Text>
+                        <Text size="2" style={{ minWidth: 108, marginLeft: 8 }}>
+                            {tAny("render_cache_min_entry")}
+                        </Text>
+                        <TextField.Root
+                            size="1"
+                            type="number"
+                            min={0}
+                            value={String(draft.minEntryKb)}
+                            onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                                patch({ minEntryKb: Number(event.target.value) })
+                            }
+                            style={{ width: 90 }}
+                        />
+                        <Text size="1" color="gray">
+                            KB
                         </Text>
                         <Text size="2" style={{ minWidth: 108, marginLeft: 8 }}>
                             {tAny("render_cache_max_entry")}

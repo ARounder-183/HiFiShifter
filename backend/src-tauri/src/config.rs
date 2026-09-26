@@ -684,9 +684,26 @@ pub struct RenderCacheSettings {
     /// 超过 N 天未写入的条目自动清理（0 = 不限龄）。
     #[serde(default = "default_render_cache_max_age_days")]
     pub max_age_days: u32,
-    /// 小于该时长的片段不落盘（秒）——避免大量碎片小文件；内存缓存不受影响。
+    /// 小于该时长的片段不落盘（秒；**0 = 不设时长下限，出厂默认**）。
+    ///
+    /// ★ 时长不是渲染成本的代理变量。渲染开销由模型推理 / 解码 / 重采样这些
+    /// **固定**环节主导，与片段时长几乎无关（实测：0.2 s 片段 158 ms，0.45 s
+    /// 片段 203 ms —— 时长差 3 倍，耗时只差 1.3 倍）；而存储开销与时长线性相关。
+    /// 因此「按秒数过滤」恰好剔除了性价比最高的一类条目：短片段每 KB 换回的
+    /// 渲染时间约为长片段的 2.3 倍。
+    ///
+    /// 该判据历史上出厂为 `0.5`，实测使一个 465 片段的工程有 175 个（37.6%）
+    /// 永久无法落盘、每次打开都必须重新合成，而它们总共只值约 9.8 MB。
+    /// 现默认关闭，仅作为用户显式需要的可选闸门保留；真正防退化的是
+    /// [`Self::min_entry_kb`]（字节下限）。
     #[serde(default = "default_render_cache_min_clip_secs")]
     pub min_clip_secs: f64,
+    /// 小于该大小的条目不落盘（KB；0 = 不限制，出厂 4 KB）。
+    ///
+    /// 字节才是准入判据的正确变量：它直接对应"这份产物值不值得占一个文件"。
+    /// 4 KB ≈ 10 ms @48 kHz 立体声 f32，只用于挡住空 / 单帧一类的退化条目。
+    #[serde(default = "default_render_cache_min_entry_kb")]
+    pub min_entry_kb: u32,
     /// 单条缓存上限（MB；0 = 不限制），防止单个巨型片段挤掉整库。
     #[serde(default = "default_render_cache_max_entry_mb")]
     pub max_entry_mb: u32,
@@ -709,7 +726,24 @@ pub struct RenderCacheSettings {
     /// 打开工程后显示命中统计（默认开启）。
     #[serde(default = "default_true")]
     pub show_hit_stats: bool,
+    /// 准入策略版本（迁移标记，不面向用户）。
+    ///
+    /// `0`（缺省）= 出厂于"时长下限 0.5 s"时代的配置。升级到字节准入后，
+    /// [`crate::config::AppConfig::migrated`] 会把**恰好等于旧默认值**的
+    /// `min_clip_secs` 重置为 0 并把本字段置 2，避免存量用户的 `app_config.json`
+    /// 里的 0.5 永久锁死命中率。
+    ///
+    /// 版本号随 `save_ui_settings` 落盘：用户此后即使显式把时长设回 0.5，
+    /// 也不会被再次重置（迁移只认"仍是旧默认值"的配置）。
+    #[serde(default)]
+    pub policy_version: u32,
 }
+
+/// 当前渲染缓存准入策略版本（见 [`RenderCacheSettings::policy_version`]）。
+pub const RENDER_CACHE_POLICY_VERSION: u32 = 2;
+
+/// 旧版出厂时长下限：只有恰好等于它的配置才会被迁移重置。
+const LEGACY_DEFAULT_MIN_CLIP_SECS: f64 = 0.5;
 
 fn default_render_cache_max_size_mb() -> u32 {
     4096
@@ -718,7 +752,12 @@ fn default_render_cache_max_age_days() -> u32 {
     90
 }
 fn default_render_cache_min_clip_secs() -> f64 {
-    0.5
+    // 0 = 不设时长下限。见 `RenderCacheSettings::min_clip_secs` 的说明：
+    // 时长与渲染成本弱相关，用它当准入闸门会剔除性价比最高的短片段。
+    0.0
+}
+fn default_render_cache_min_entry_kb() -> u32 {
+    4
 }
 fn default_render_cache_max_entry_mb() -> u32 {
     512
@@ -740,6 +779,7 @@ impl Default for RenderCacheSettings {
             max_size_mb: default_render_cache_max_size_mb(),
             max_age_days: default_render_cache_max_age_days(),
             min_clip_secs: default_render_cache_min_clip_secs(),
+            min_entry_kb: default_render_cache_min_entry_kb(),
             max_entry_mb: default_render_cache_max_entry_mb(),
             write_mode: default_render_cache_write_mode(),
             location: default_render_cache_location(),
@@ -747,6 +787,7 @@ impl Default for RenderCacheSettings {
             verify_checksum: true,
             min_free_disk_mb: default_render_cache_min_free_disk_mb(),
             show_hit_stats: true,
+            policy_version: RENDER_CACHE_POLICY_VERSION,
         }
     }
 }
@@ -761,6 +802,7 @@ impl RenderCacheSettings {
             s.min_clip_secs = default_render_cache_min_clip_secs();
         }
         s.min_clip_secs = s.min_clip_secs.clamp(0.0, 60.0);
+        s.min_entry_kb = s.min_entry_kb.min(64 * 1024); // ≤ 64 MB
         s.max_entry_mb = s.max_entry_mb.min(64 * 1024); // ≤ 64 GB
         s.min_free_disk_mb = s.min_free_disk_mb.min(1024 * 1024);
         if !matches!(s.write_mode.as_str(), "immediate" | "onExit" | "manual") {
@@ -792,9 +834,39 @@ impl RenderCacheSettings {
         (self.max_entry_mb as u64) * 1024 * 1024
     }
 
+    /// 单条下限（字节；0 = 不限）。
+    pub fn min_entry_bytes(&self) -> u64 {
+        (self.min_entry_kb as u64) * 1024
+    }
+
     /// 磁盘保留空间（字节；0 = 不检查）。
     pub fn min_free_disk_bytes(&self) -> u64 {
         (self.min_free_disk_mb as u64) * 1024 * 1024
+    }
+
+    /// 准入策略迁移（幂等；只在**配置读取边界**调用，见 `AppConfig::migrated`）。
+    ///
+    /// 出厂默认从"时长下限 0.5 s"改为"字节下限 4 KB"后，存量用户的
+    /// `app_config.json` 里仍写着 `minClipSecs: 0.5`（那是旧默认值被序列化的结果，
+    /// 而非用户的主动选择）。不做迁移，这些用户的命中率会永久停留在旧行为上。
+    ///
+    /// 只重置**恰好等于旧默认值**的配置：刻意设过其他值的用户不受影响。
+    /// 方向也是安全的 —— 只会让更多片段落盘，绝不会产出错误音频。
+    ///
+    /// ★ 不可放进 `normalized()`：那是"每次读写都跑"的值钳制函数，放在那里会
+    /// 让用户日后显式设回 0.5 的选择被反复清掉。此处只认版本号，一次性生效。
+    pub fn migrate_admission_policy(&mut self) {
+        if self.policy_version >= RENDER_CACHE_POLICY_VERSION {
+            return;
+        }
+        if (self.min_clip_secs - LEGACY_DEFAULT_MIN_CLIP_SECS).abs() < f64::EPSILON {
+            self.min_clip_secs = default_render_cache_min_clip_secs();
+        }
+        // 旧配置没有这个字段，serde default 给出 0 → 补上字节下限的出厂值。
+        if self.min_entry_kb == 0 {
+            self.min_entry_kb = default_render_cache_min_entry_kb();
+        }
+        self.policy_version = RENDER_CACHE_POLICY_VERSION;
     }
 }
 
@@ -1382,6 +1454,64 @@ mod tests {
     use super::UiSettings;
     use crate::time_stretch::UserStretchAlgorithm;
 
+    /// 旧配置（出厂时长下限 0.5 s 被序列化进文件、没有 policyVersion）必须被迁移。
+    #[test]
+    fn legacy_duration_floor_is_migrated_away() {
+        let mut s = super::RenderCacheSettings {
+            min_clip_secs: 0.5,
+            min_entry_kb: 0,
+            policy_version: 0,
+            ..Default::default()
+        };
+        s.migrate_admission_policy();
+        assert_eq!(s.min_clip_secs, 0.0, "旧出厂时长下限必须被清掉");
+        assert_eq!(s.min_entry_kb, 4, "缺失的字节下限补出厂值");
+        assert_eq!(s.policy_version, super::RENDER_CACHE_POLICY_VERSION);
+    }
+
+    /// 用户刻意设过的其他时长值不受迁移影响。
+    #[test]
+    fn migration_leaves_deliberate_values_alone() {
+        let mut s = super::RenderCacheSettings {
+            min_clip_secs: 2.5,
+            min_entry_kb: 0,
+            policy_version: 0,
+            ..Default::default()
+        };
+        s.migrate_admission_policy();
+        assert_eq!(s.min_clip_secs, 2.5, "非旧默认值不得被重置");
+    }
+
+    /// 迁移幂等：版本号已推进后不再改动任何值。
+    ///
+    /// 这是"用户日后显式把时长设回 0.5"能存活的前提 —— 保存会带上版本号，
+    /// 因此后续加载不会再把它清掉。
+    #[test]
+    fn migration_is_idempotent_and_respects_later_choices() {
+        let mut s = super::RenderCacheSettings {
+            min_clip_secs: 0.5,
+            min_entry_kb: 0,
+            policy_version: 0,
+            ..Default::default()
+        };
+        s.migrate_admission_policy();
+        assert_eq!(s.min_clip_secs, 0.0);
+
+        // 用户显式设回 0.5 并保存（版本号随之落盘）。
+        s.min_clip_secs = 0.5;
+        s.migrate_admission_policy();
+        assert_eq!(s.min_clip_secs, 0.5, "已迁移过的配置不得再次被重置");
+    }
+
+    /// 出厂默认本身就是"不设时长下限"。
+    #[test]
+    fn factory_default_has_no_duration_floor() {
+        let s = super::RenderCacheSettings::default();
+        assert_eq!(s.min_clip_secs, 0.0);
+        assert_eq!(s.min_entry_kb, 4);
+        assert_eq!(s.min_entry_bytes(), 4 * 1024);
+    }
+
     #[test]
     fn channel_import_policy_default_is_smart() {
         let p = super::ChannelImportPolicy::default();
@@ -1805,6 +1935,20 @@ struct AppConfig {
     window: WindowState,
 }
 
+impl AppConfig {
+    /// 读取边界上的配置迁移（幂等）。
+    ///
+    /// 放在这里而不是 `RenderCacheSettings::normalized()`：后者是"每次读写都跑"
+    /// 的值钳制函数，把一次性迁移塞进去会让用户后续的显式选择被反复覆盖。
+    /// 放在 `load_config` 则保证**所有**读者（`get_ui_settings`、
+    /// `save_ui_settings` 的基线、导出/备份设置…）看到同一份已迁移的值，
+    /// 迁移结果也会随下一次保存自然落盘。
+    fn migrated(mut self) -> Self {
+        self.ui.render_cache.migrate_admission_policy();
+        self
+    }
+}
+
 /// 窗口状态（持久化）
 #[derive(serde::Serialize, serde::Deserialize, Default, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -1829,14 +1973,14 @@ fn load_config(config_dir: &Path) -> AppConfig {
         return AppConfig::default();
     };
     match serde_json::from_str::<AppConfig>(&data) {
-        Ok(cfg) => cfg,
+        Ok(cfg) => cfg.migrated(),
         Err(e) => {
             // 解析失败不能无痕回退默认值：那会静默丢掉全部用户设置。
             log::error!("app_config.json parse failed ({e}); trying .bak fallback");
             let bak = config_dir.join("app_config.json.bak");
             if let Ok(bak_data) = fs::read_to_string(&bak) {
                 if let Ok(cfg) = serde_json::from_str::<AppConfig>(&bak_data) {
-                    return cfg;
+                    return cfg.migrated();
                 }
             }
             AppConfig::default()

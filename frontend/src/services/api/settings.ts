@@ -23,8 +23,10 @@ export interface RenderCacheSettings {
     maxSizeMb: number;
     /** 超过 N 天未写入自动清理（0 = 不限龄）。 */
     maxAgeDays: number;
-    /** 小于该时长的片段不落盘（秒）。 */
+    /** 小于该时长的片段不落盘（秒；0 = 不设下限，默认）。 */
     minClipSecs: number;
+    /** 小于该大小的条目不落盘（KB；0 = 不限制）。 */
+    minEntryKb: number;
     /** 单条缓存上限（MB；0 = 不限制）。 */
     maxEntryMb: number;
     writeMode: RenderCacheWriteMode;
@@ -44,7 +46,10 @@ export const DEFAULT_RENDER_CACHE_SETTINGS: RenderCacheSettings = {
     enabled: true,
     maxSizeMb: 4096,
     maxAgeDays: 90,
-    minClipSecs: 0.5,
+    // 0 = 不设时长下限。时长与渲染成本弱相关、与存储成本强相关，用它当准入
+    // 闸门会剔除性价比最高的短片段（见后端 `min_clip_secs` 的实测数据）。
+    minClipSecs: 0,
+    minEntryKb: 4,
     maxEntryMb: 512,
     writeMode: "immediate",
     location: "system",
@@ -63,6 +68,12 @@ export function normalizeRenderCacheSettings(input: RenderCacheSettings): Render
     const minClipSecs = Number.isFinite(input.minClipSecs)
         ? Math.min(60, Math.max(0, input.minClipSecs))
         : DEFAULT_RENDER_CACHE_SETTINGS.minClipSecs;
+    const minEntryKb = clampInt(
+        input.minEntryKb,
+        0,
+        64 * 1024,
+        DEFAULT_RENDER_CACHE_SETTINGS.minEntryKb,
+    );
     const customDir = (input.customDir ?? "").trim();
 
     return {
@@ -75,6 +86,7 @@ export function normalizeRenderCacheSettings(input: RenderCacheSettings): Render
         ),
         maxAgeDays: clampInt(input.maxAgeDays, 0, 3650, DEFAULT_RENDER_CACHE_SETTINGS.maxAgeDays),
         minClipSecs,
+        minEntryKb,
         maxEntryMb: clampInt(
             input.maxEntryMb,
             0,

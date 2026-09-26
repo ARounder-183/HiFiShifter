@@ -39,9 +39,24 @@ export interface RenderCacheStats {
     sessionMisses: number;
     sessionStored: number;
     sessionWriteErrors: number;
+    /** 通过落盘准入、已投递写盘的条目数。 */
+    sessionAccepted: number;
+    /** 被拒绝落盘的条目总数（产物仍进内存缓存，只是不落盘）。 */
+    sessionSkipped: number;
+    /** 拒绝原因分解（只含非零项）。 */
+    sessionSkippedByReason: Array<{ reason: RenderCacheSkipReason; count: number }>;
     maxSizeBytes: number;
     maxAgeDays: number;
 }
+
+/** 落盘准入被拒的原因（与后端 `render_cache::SkipReason::id` 对应）。 */
+export type RenderCacheSkipReason =
+    | "disabled"
+    | "empty"
+    | "tooShort"
+    | "tooSmall"
+    | "tooLarge"
+    | "lowDiskSpace";
 
 /** 导出文件格式（与后端 crate::encode::OutputFormat 的 serde 小写序列化一致）。 */
 export type ExportFormat = "wav" | "mp3" | "flac";

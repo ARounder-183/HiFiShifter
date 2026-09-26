@@ -1445,22 +1445,36 @@ function AppInner() {
                             diskHits?: number;
                             total?: number;
                             savedMs?: number;
+                            skipped?: number;
                         };
                     }) => {
                         if (disposed) return;
                         const payload = event?.payload ?? {};
                         const hits = Number(payload.diskHits ?? 0);
                         const total = Number(payload.total ?? 0);
-                        // 没有磁盘命中就不打扰用户（首次打开工程本就无缓存）。
-                        if (!Number.isFinite(hits) || hits <= 0 || total <= 0) return;
+                        const skipped = Number(payload.skipped ?? 0);
+                        // 没有磁盘命中就不打扰用户（首次打开工程本就无缓存）；
+                        // 但"有产物被拒绝落盘"必须提示 —— 那意味着这些片段每次
+                        // 打开工程都要重新合成，而界面上原本完全看不出来。
+                        const hasHits = Number.isFinite(hits) && hits > 0 && total > 0;
+                        const hasSkipped = Number.isFinite(skipped) && skipped > 0;
+                        if (!hasHits && !hasSkipped) return;
+                        let text = hasHits
+                            ? tAny("status_render_cache_summary")
+                                  .replace("{hits}", String(hits))
+                                  .replace("{total}", String(total))
+                            : "";
                         const savedMs = Number(payload.savedMs ?? 0);
-                        let text = tAny("status_render_cache_summary")
-                            .replace("{hits}", String(hits))
-                            .replace("{total}", String(total));
-                        if (Number.isFinite(savedMs) && savedMs >= 1000) {
+                        if (hasHits && Number.isFinite(savedMs) && savedMs >= 1000) {
                             text += tAny("status_render_cache_saved_suffix").replace(
                                 "{saved}",
                                 formatApproxDuration(savedMs),
+                            );
+                        }
+                        if (hasSkipped) {
+                            text += tAny("status_render_cache_skipped_suffix").replace(
+                                "{n}",
+                                String(skipped),
                             );
                         }
                         setRenderCacheNotice(text);

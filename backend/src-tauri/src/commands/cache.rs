@@ -31,6 +31,14 @@ pub(super) fn get_render_cache_stats() -> serde_json::Value {
         "sessionMisses": stats.session_misses,
         "sessionStored": stats.session_stored,
         "sessionWriteErrors": stats.session_write_errors,
+        // 落盘准入：被拒绝的条目曾经完全静默（产物进内存缓存、播放正常，
+        // 只是永不落盘 → 每次重开工程都要重渲染）。把它暴露出来，同类问题
+        // 才能在一次会话内自证。
+        "sessionAccepted": stats.session_accepted,
+        "sessionSkipped": stats.session_skipped,
+        "sessionSkippedByReason": stats.session_skipped_by_reason.iter().map(|skip| {
+            serde_json::json!({ "reason": skip.reason, "count": skip.count })
+        }).collect::<Vec<_>>(),
         "maxSizeBytes": stats.max_size_bytes,
         "maxAgeDays": stats.max_age_days,
     })

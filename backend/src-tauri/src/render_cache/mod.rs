@@ -64,6 +64,7 @@ pub struct RuntimeSettingsSnapshot {
     pub max_size_bytes: u64,
     pub max_age_secs: u64,
     pub min_clip_secs: f64,
+    pub min_entry_bytes: u64,
     pub max_entry_bytes: u64,
     pub write_mode: WriteMode,
     pub verify_checksum: bool,
@@ -89,7 +90,8 @@ fn default_runtime() -> Runtime {
             enabled: true,
             max_size_bytes: 0,
             max_age_secs: 0,
-            min_clip_secs: 0.5,
+            min_clip_secs: 0.0,
+            min_entry_bytes: 4 * 1024,
             max_entry_bytes: 512 * 1024 * 1024,
             write_mode: WriteMode::Immediate,
             verify_checksum: true,
@@ -131,6 +133,155 @@ fn note_miss() {
     SESSION_MISSES.fetch_add(1, Ordering::Relaxed);
 }
 
+// ─── 落盘准入统计 ──────────────────────────────────────────────────────────────
+
+/// 一条渲染产物被拒绝落盘的原因。
+///
+/// 这类拒绝**曾经完全静默**：产物照常进内存缓存、播放一切正常，只是永远不落盘，
+/// 于是每次重开工程都要重新合成一遍 —— 实测一个 465 片段的工程有 37.6% 的片段
+/// 落在这个状态里，而日志与 UI 都没有任何线索。把它变成一等公民后，同类问题
+/// 可以在一次 pass 的日志里自证。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipReason {
+    /// 持久化缓存总开关关闭。
+    Disabled,
+    /// 产物为空（0 帧 / 0 采样率）。
+    Empty,
+    /// 短于用户设置的时长下限。
+    TooShort,
+    /// 小于单条大小下限。
+    TooSmall,
+    /// 超过单条大小上限。
+    TooLarge,
+    /// 磁盘可用空间低于保留值。
+    LowDiskSpace,
+}
+
+impl SkipReason {
+    /// 全部原因，按固定顺序（统计输出稳定，便于比对与测试）。
+    pub const ALL: [SkipReason; 6] = [
+        SkipReason::Disabled,
+        SkipReason::Empty,
+        SkipReason::TooShort,
+        SkipReason::TooSmall,
+        SkipReason::TooLarge,
+        SkipReason::LowDiskSpace,
+    ];
+
+    /// 稳定标识（日志 / JSON 键，勿随文案改动）。
+    pub fn id(self) -> &'static str {
+        match self {
+            SkipReason::Disabled => "disabled",
+            SkipReason::Empty => "empty",
+            SkipReason::TooShort => "tooShort",
+            SkipReason::TooSmall => "tooSmall",
+            SkipReason::TooLarge => "tooLarge",
+            SkipReason::LowDiskSpace => "lowDiskSpace",
+        }
+    }
+
+    /// 在 [`AdmissionCounters::skipped_by_reason`] 中的下标。
+    pub fn index(self) -> usize {
+        match self {
+            SkipReason::Disabled => 0,
+            SkipReason::Empty => 1,
+            SkipReason::TooShort => 2,
+            SkipReason::TooSmall => 3,
+            SkipReason::TooLarge => 4,
+            SkipReason::LowDiskSpace => 5,
+        }
+    }
+}
+
+/// 会话级准入计数快照。
+///
+/// 计数只增不减，调用方用"前后差值"取某一轮的增量 —— 后台渲染会反复重启，
+/// 全局累计值直接当每轮结果会互相污染。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AdmissionCounters {
+    /// 通过准入、已投递给写盘线程的条目数（不代表已成功落盘，见 `session_stored`）。
+    pub accepted: u64,
+    /// 被拒绝的条目总数。
+    pub skipped: u64,
+    /// 按 [`SkipReason::ALL`] 顺序的拒绝数。
+    pub skipped_by_reason: [u64; SkipReason::ALL.len()],
+}
+
+impl AdmissionCounters {
+    /// 两快照之差（`self` 为较早的一份）。
+    pub fn since(&self, earlier: &AdmissionCounters) -> AdmissionCounters {
+        let mut skipped_by_reason = [0u64; SkipReason::ALL.len()];
+        for (slot, (now, before)) in skipped_by_reason
+            .iter_mut()
+            .zip(self.skipped_by_reason.iter().zip(earlier.skipped_by_reason.iter()))
+        {
+            *slot = now.saturating_sub(*before);
+        }
+        AdmissionCounters {
+            accepted: self.accepted.saturating_sub(earlier.accepted),
+            skipped: self.skipped.saturating_sub(earlier.skipped),
+            skipped_by_reason,
+        }
+    }
+
+    /// 形如 `tooShort=175` 的原因分解（仅列出非零项；全零时为空串）。
+    pub fn reason_summary(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        for reason in SkipReason::ALL {
+            let count = self.skipped_by_reason[reason.index()];
+            if count > 0 {
+                parts.push(format!("{}={}", reason.id(), count));
+            }
+        }
+        parts.join(" ")
+    }
+}
+
+static SESSION_ACCEPTED: AtomicU64 = AtomicU64::new(0);
+static SESSION_SKIPPED: [AtomicU64; 6] = [
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+];
+
+fn note_accepted() {
+    SESSION_ACCEPTED.fetch_add(1, Ordering::Relaxed);
+}
+
+fn note_skipped(reason: SkipReason) {
+    SESSION_SKIPPED[reason.index()].fetch_add(1, Ordering::Relaxed);
+}
+
+/// 会话级落盘准入计数（供每轮 pass 取增量、供统计面板展示）。
+pub fn admission_counters() -> AdmissionCounters {
+    let mut skipped_by_reason = [0u64; SkipReason::ALL.len()];
+    let mut skipped = 0u64;
+    for (slot, counter) in skipped_by_reason.iter_mut().zip(SESSION_SKIPPED.iter()) {
+        let value = counter.load(Ordering::Relaxed);
+        *slot = value;
+        skipped = skipped.saturating_add(value);
+    }
+    AdmissionCounters {
+        accepted: SESSION_ACCEPTED.load(Ordering::Relaxed),
+        skipped,
+        skipped_by_reason,
+    }
+}
+
+/// 已成功落盘的条目数（写盘线程异步累加，与 [`admission_counters`] 的
+/// `accepted` 存在天然延迟差）。
+pub fn session_stored() -> u64 {
+    SESSION_STORED.load(Ordering::Relaxed)
+}
+
+/// 写盘失败次数。
+pub fn session_write_errors() -> u64 {
+    SESSION_WRITE_ERRORS.load(Ordering::Relaxed)
+}
+
 // ─── 初始化与设置 ──────────────────────────────────────────────────────────────
 
 /// 注入系统缓存根目录（`lib.rs` 启动时调用；未调用时退化为临时目录）。
@@ -166,6 +317,7 @@ pub fn apply_settings(settings: &crate::config::RenderCacheSettings) {
             max_size_bytes: normalized.max_size_bytes(),
             max_age_secs: normalized.max_age_secs(),
             min_clip_secs: normalized.min_clip_secs,
+            min_entry_bytes: normalized.min_entry_bytes(),
             max_entry_bytes: normalized.max_entry_bytes(),
             write_mode: WriteMode::from_setting(&normalized.write_mode),
             verify_checksum: normalized.verify_checksum,
@@ -354,9 +506,11 @@ pub fn store_rendered(key: &RenderedClipCacheKey, entry: &RenderedClipCacheEntry
             .map(|n| n.len() as u64 * 4)
             .unwrap_or(0);
     let rt = runtime_snapshot();
-    if !passes_filters(&rt, entry.frames, entry.sample_rate, payload_bytes) {
+    if let Err(reason) = admit(&rt, entry.frames, entry.sample_rate, payload_bytes) {
+        note_skipped(reason);
         return;
     }
+    note_accepted();
     dispatch(
         writer::PendingEntry {
             kind: EntryKind::Rendered,
@@ -376,9 +530,11 @@ pub fn store_rendered(key: &RenderedClipCacheKey, entry: &RenderedClipCacheEntry
 pub fn store_tension(key: &TensionRenderedClipCacheKey, entry: &TensionRenderedClipCacheEntry) {
     let payload_bytes = entry.pcm_stereo.len() as u64 * 4;
     let rt = runtime_snapshot();
-    if !passes_filters(&rt, entry.frames, entry.sample_rate, payload_bytes) {
+    if let Err(reason) = admit(&rt, entry.frames, entry.sample_rate, payload_bytes) {
+        note_skipped(reason);
         return;
     }
+    note_accepted();
     dispatch(
         writer::PendingEntry {
             kind: EntryKind::Tension,
@@ -398,9 +554,11 @@ pub fn store_tension(key: &TensionRenderedClipCacheKey, entry: &TensionRenderedC
 pub fn store_noise(key: &BreathNoiseCacheKey, entry: &BreathNoiseCacheEntry) {
     let payload_bytes = entry.noise_stereo.len() as u64 * 4;
     let rt = runtime_snapshot();
-    if !passes_filters(&rt, entry.frames, entry.sample_rate, payload_bytes) {
+    if let Err(reason) = admit(&rt, entry.frames, entry.sample_rate, payload_bytes) {
+        note_skipped(reason);
         return;
     }
+    note_accepted();
     dispatch(
         writer::PendingEntry {
             kind: EntryKind::Noise,
@@ -416,34 +574,50 @@ pub fn store_noise(key: &BreathNoiseCacheKey, entry: &BreathNoiseCacheEntry) {
     );
 }
 
-fn passes_filters(
+/// 落盘准入判定（纯函数，便于测试）。
+///
+/// # 判据
+/// 1. **开关**：关闭即全部拒绝。
+/// 2. **空产物**：0 帧 / 0 采样率无意义（文件头也拒绝）。
+/// 3. **大小下限**（[`RuntimeSettingsSnapshot::min_entry_bytes`]）：这是准入的
+///    主判据。它直接对应"这份产物值不值得占一个文件"，出厂 4 KB。
+/// 4. **时长下限**（[`RuntimeSettingsSnapshot::min_clip_secs`]）：**默认 0（关闭）**。
+///    时长与渲染成本弱相关、与存储成本强相关，用它当闸门会剔除性价比最高的
+///    短片段（见 `config::RenderCacheSettings::min_clip_secs` 的实测数据）。
+///    保留此判据只为兼容用户显式的旧偏好。
+/// 5. **大小上限 / 磁盘保留空间**：容量保护。
+///
+/// 注意判据顺序：先便宜且确定的（开关 / 空），再大小，最后才做磁盘探测
+/// （`available_disk_bytes` 是一次系统调用）。这样绝大多数拒绝都不付 I/O 成本。
+fn admit(
     rt: &RuntimeSettingsSnapshot,
     frames: u64,
     sample_rate: u32,
     payload_bytes: u64,
-) -> bool {
-    if !rt.enabled || sample_rate == 0 || frames == 0 {
-        return false;
+) -> Result<(), SkipReason> {
+    if !rt.enabled {
+        return Err(SkipReason::Disabled);
+    }
+    if sample_rate == 0 || frames == 0 {
+        return Err(SkipReason::Empty);
+    }
+    if rt.min_entry_bytes > 0 && payload_bytes < rt.min_entry_bytes {
+        return Err(SkipReason::TooSmall);
     }
     if rt.min_clip_secs > 0.0 && (frames as f64 / sample_rate as f64) < rt.min_clip_secs {
-        return false;
+        return Err(SkipReason::TooShort);
     }
     if rt.max_entry_bytes > 0 && payload_bytes > rt.max_entry_bytes {
-        return false;
+        return Err(SkipReason::TooLarge);
     }
     if rt.min_free_disk_bytes > 0 {
         if let Some(free) = available_disk_bytes(&rt.base_dir) {
             if free < rt.min_free_disk_bytes {
-                log::warn!(
-                    "[render_cache] skipped write: only {:.0} MB free (< {} MB reserve)",
-                    free as f64 / (1024.0 * 1024.0),
-                    rt.min_free_disk_bytes / (1024 * 1024)
-                );
-                return false;
+                return Err(SkipReason::LowDiskSpace);
             }
         }
     }
-    true
+    Ok(())
 }
 
 fn dispatch(entry: writer::PendingEntry, rt: &RuntimeSettingsSnapshot) {
@@ -510,6 +684,14 @@ pub struct KindStats {
     pub bytes: u64,
 }
 
+/// 按原因分类的拒绝统计。
+#[derive(Debug, Clone)]
+pub struct SkipStats {
+    /// 稳定标识（见 [`SkipReason::id`]）。
+    pub reason: &'static str,
+    pub count: u64,
+}
+
 /// 缓存统计（面板展示 + 命中率）。
 #[derive(Debug, Clone)]
 pub struct CacheStats {
@@ -523,6 +705,12 @@ pub struct CacheStats {
     pub session_misses: u64,
     pub session_stored: u64,
     pub session_write_errors: u64,
+    /// 本会话通过准入、已投递写盘的条目数。
+    pub session_accepted: u64,
+    /// 本会话被拒绝落盘的条目总数。
+    pub session_skipped: u64,
+    /// 拒绝原因分解（只含非零项）。
+    pub session_skipped_by_reason: Vec<SkipStats>,
     pub max_size_bytes: u64,
     pub max_age_days: u64,
 }
@@ -552,6 +740,7 @@ pub fn stats() -> CacheStats {
     let rt = runtime_snapshot();
     let store = Store::new(rt.base_dir.clone());
     let report = store.scan();
+    let admission = admission_counters();
 
     let mut rendered = (0u64, 0u64);
     let mut tension = (0u64, 0u64);
@@ -593,6 +782,18 @@ pub fn stats() -> CacheStats {
         session_misses: SESSION_MISSES.load(Ordering::Relaxed),
         session_stored: SESSION_STORED.load(Ordering::Relaxed),
         session_write_errors: SESSION_WRITE_ERRORS.load(Ordering::Relaxed),
+        session_accepted: admission.accepted,
+        session_skipped: admission.skipped,
+        session_skipped_by_reason: SkipReason::ALL
+            .iter()
+            .filter_map(|reason| {
+                let count = admission.skipped_by_reason[reason.index()];
+                (count > 0).then_some(SkipStats {
+                    reason: reason.id(),
+                    count,
+                })
+            })
+            .collect(),
         max_size_bytes: rt.max_size_bytes,
         max_age_days: rt.max_age_secs / 86_400,
     }
@@ -690,55 +891,105 @@ mod tests {
         assert_ne!(a, project_id_for_path(Some("d:/projects/other.hshp")));
     }
 
-    #[test]
-    fn small_clips_are_not_persisted() {
-        let rt = RuntimeSettingsSnapshot {
+    /// 准入测试用的快照：默认按"出厂值"（时长下限关闭、字节下限 4 KB、不限容量）。
+    fn snapshot() -> RuntimeSettingsSnapshot {
+        RuntimeSettingsSnapshot {
             enabled: true,
             max_size_bytes: 0,
             max_age_secs: 0,
-            min_clip_secs: 0.5,
+            min_clip_secs: 0.0,
+            min_entry_bytes: 4 * 1024,
             max_entry_bytes: 0,
             write_mode: WriteMode::Immediate,
             verify_checksum: true,
             min_free_disk_bytes: 0,
             base_dir: std::env::temp_dir(),
-        };
-        // 0.25 s @ 48k → 低于下限，不落盘。
-        assert!(!passes_filters(&rt, 12_000, 48_000, 96_000));
-        // 1 s → 通过。
-        assert!(passes_filters(&rt, 48_000, 48_000, 384_000));
+        }
+    }
+
+    /// 参考工程里最短的片段（0.023 s @ 48k 立体声 f32 ≈ 8.8 KB）必须落盘。
+    ///
+    /// 这条断言是本模块最重要的一条：它的失败意味着"按秒数过滤"回归了 ——
+    /// 那正是让一个 465 片段的工程有 175 个片段永远无法落盘的原因。
+    #[test]
+    fn short_clips_are_persisted_by_default() {
+        let rt = snapshot();
+        // 0.023 s @ 48k → 1104 帧 → 8.8 KB，远在 4 KB 之上。
+        assert_eq!(admit(&rt, 1_104, 48_000, 8_832), Ok(()));
+        // 0.25 s @ 48k → 96 KB。
+        assert_eq!(admit(&rt, 12_000, 48_000, 96_000), Ok(()));
+        // 1 s @ 48k → 384 KB。
+        assert_eq!(admit(&rt, 48_000, 48_000, 384_000), Ok(()));
+    }
+
+    #[test]
+    fn degenerate_entries_are_rejected_as_too_small() {
+        let rt = snapshot();
+        // 4 KB 下限之下：单帧 / 极短产物不占文件。
+        assert_eq!(admit(&rt, 1, 48_000, 8), Err(SkipReason::TooSmall));
+        assert_eq!(
+            admit(&rt, 100, 48_000, 4 * 1024 - 1),
+            Err(SkipReason::TooSmall)
+        );
+        // 恰好等于下限 → 放行（判据是严格小于）。
+        assert_eq!(admit(&rt, 100, 48_000, 4 * 1024), Ok(()));
+    }
+
+    #[test]
+    fn duration_floor_is_opt_in_only() {
+        let mut rt = snapshot();
+        rt.min_clip_secs = 0.5;
+        // 用户显式设了时长下限时才生效。
+        assert_eq!(admit(&rt, 12_000, 48_000, 96_000), Err(SkipReason::TooShort));
+        assert_eq!(admit(&rt, 48_000, 48_000, 384_000), Ok(()));
+        // 关掉（默认）即不再拒绝短片段。
+        rt.min_clip_secs = 0.0;
+        assert_eq!(admit(&rt, 12_000, 48_000, 96_000), Ok(()));
     }
 
     #[test]
     fn entry_size_limit_is_respected() {
-        let rt = RuntimeSettingsSnapshot {
-            enabled: true,
-            max_size_bytes: 0,
-            max_age_secs: 0,
-            min_clip_secs: 0.0,
-            max_entry_bytes: 1_000,
-            write_mode: WriteMode::Immediate,
-            verify_checksum: true,
-            min_free_disk_bytes: 0,
-            base_dir: std::env::temp_dir(),
-        };
-        assert!(!passes_filters(&rt, 48_000, 48_000, 384_000));
-        assert!(passes_filters(&rt, 48_000, 48_000, 999));
+        let mut rt = snapshot();
+        rt.max_entry_bytes = 1_000;
+        rt.min_entry_bytes = 0;
+        assert_eq!(admit(&rt, 48_000, 48_000, 384_000), Err(SkipReason::TooLarge));
+        assert_eq!(admit(&rt, 48_000, 48_000, 999), Ok(()));
     }
 
     #[test]
-    fn disabled_cache_never_passes_filters() {
-        let rt = RuntimeSettingsSnapshot {
-            enabled: false,
-            max_size_bytes: 0,
-            max_age_secs: 0,
-            min_clip_secs: 0.0,
-            max_entry_bytes: 0,
-            write_mode: WriteMode::Immediate,
-            verify_checksum: true,
-            min_free_disk_bytes: 0,
-            base_dir: std::env::temp_dir(),
+    fn disabled_cache_never_admits() {
+        let mut rt = snapshot();
+        rt.enabled = false;
+        assert_eq!(admit(&rt, 48_000, 48_000, 384_000), Err(SkipReason::Disabled));
+    }
+
+    #[test]
+    fn empty_payload_is_rejected_before_size_checks() {
+        let rt = snapshot();
+        assert_eq!(admit(&rt, 0, 48_000, 0), Err(SkipReason::Empty));
+        assert_eq!(admit(&rt, 1_000, 0, 8_000), Err(SkipReason::Empty));
+    }
+
+    #[test]
+    fn admission_counters_diff_and_summarise() {
+        let earlier = AdmissionCounters {
+            accepted: 10,
+            skipped: 3,
+            skipped_by_reason: [0, 0, 3, 0, 0, 0],
         };
-        assert!(!passes_filters(&rt, 48_000, 48_000, 384_000));
+        let later = AdmissionCounters {
+            accepted: 12,
+            skipped: 180,
+            skipped_by_reason: [0, 0, 175, 5, 0, 0],
+        };
+        let delta = later.since(&earlier);
+        assert_eq!(delta.accepted, 2);
+        assert_eq!(delta.skipped, 177);
+        assert_eq!(delta.skipped_by_reason[SkipReason::TooShort.index()], 172);
+        assert_eq!(delta.skipped_by_reason[SkipReason::TooSmall.index()], 5);
+        // 分解只列非零项，且顺序稳定。
+        assert_eq!(delta.reason_summary(), "tooShort=172 tooSmall=5");
+        // 无跳过时不产出任何噪声。
+        assert_eq!(AdmissionCounters::default().reason_summary(), "");
     }
 }
