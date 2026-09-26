@@ -125,6 +125,15 @@ export function useLoudnessCurves(args: {
     paramsEpoch: number;
     /** 显式刷新令牌（usePianoRollData 的 refreshToken；含 dyn_orig_updated 触发）。 */
     refreshToken: number;
+    /**
+     * 面板的"笔画进行中"标志（与 `usePianoRollData` 同一个 ref）。
+     *
+     * 【为什么响度快照也需要它】这份快照换引用会让 `pianoRollAmplitudeMap` 换对象，
+     * 波形几何随即**全量重建**（`canReuseGeometry` 失败）。而波形逐帧重建只发生在
+     * 编辑 volume / dyn 时（`requestWaveformRepaint` 的参数闸门），因此笔画期间让快照
+     * 落地，等于和进行中的笔画抢主线程 —— 这正是"只有这两个参数会被打断"的一环。
+     */
+    liveEditActiveRef?: React.MutableRefObject<boolean>;
 }): {
     snapshot: LoudnessSnapshot | null;
     analysisPending: boolean;
@@ -135,6 +144,14 @@ export function useLoudnessCurves(args: {
      * 覆盖层（否则会闪回旧波形）。调用方据此判断"手上这份快照是不是提交之后取的"。
      */
     snapshotFetchSeq: number;
+    /**
+     * 落地笔画期间被推迟的那一份快照（面板在 pointer-up 调用）。
+     *
+     * 与 `refreshToken` 的补取分工：补取会**重新发起**一次取数（拿到最新数据），
+     * 本函数只是把"已经拿回来但被推迟"的那一份落地，保证笔画结束后画面立刻跟上，
+     * 不必等下一次 IPC 往返。
+     */
+    flushPending: () => void;
     /**
      * 当前**已发出**的最大取数序号（同步读取，不触发渲染）。
      *
@@ -147,11 +164,65 @@ export function useLoudnessCurves(args: {
     getLatestFetchSeq: () => number;
 } {
     const { rootTrackId, projectFrames, framePeriodMs, paramsEpoch, refreshToken } = args;
+    const liveEditActiveRef = args.liveEditActiveRef;
 
     const [snapshot, setSnapshot] = useState<LoudnessSnapshot | null>(null);
     const [analysisPending, setAnalysisPending] = useState(false);
     const [snapshotFetchSeq, setSnapshotFetchSeq] = useState(0);
     const fetchReqIdRef = useRef(0);
+    /**
+     * 笔画期间被推迟落地的结果（见 `land`）。
+     *
+     * 只保留**最后一份**：中途的那些已被更新的结果取代，落地它们没有意义。
+     */
+    const pendingLandingRef = useRef<{
+        snapshot: LoudnessSnapshot | null;
+        fetchSeq: number;
+        analysisPending: boolean;
+    } | null>(null);
+
+    const applyLanding = useCallback(
+        (landing: {
+            snapshot: LoudnessSnapshot | null;
+            fetchSeq: number;
+            analysisPending: boolean;
+        }) => {
+            setSnapshot(landing.snapshot);
+            setSnapshotFetchSeq(landing.fetchSeq);
+            setAnalysisPending(landing.analysisPending);
+        },
+        [],
+    );
+
+    /**
+     * 落地一次取数结果；笔画进行中则只记 pending。
+     *
+     * 【为什么"发起"照常、"落地"推迟】`committedSettleSeqRef` 依赖"已发出的最大取数
+     * 序号"单调递增（判定"这份快照是不是提交之后取的"）。推迟**发起**会让水位错位，
+     * 把已修好的"松手闪回旧波形"重新引回来。序号在发起时推进，因此只推迟落地是安全的。
+     */
+    const land = useCallback(
+        (landing: {
+            snapshot: LoudnessSnapshot | null;
+            fetchSeq: number;
+            analysisPending: boolean;
+        }) => {
+            if (liveEditActiveRef?.current) {
+                pendingLandingRef.current = landing;
+                return;
+            }
+            applyLanding(landing);
+        },
+        [applyLanding, liveEditActiveRef],
+    );
+
+    /** 面板在 pointer-up 调用：落地笔画期间被推迟的那一份（若有）。 */
+    const flushPending = useCallback(() => {
+        const pending = pendingLandingRef.current;
+        if (pending === null) return;
+        pendingLandingRef.current = null;
+        applyLanding(pending);
+    }, [applyLanding]);
     // 「在飞合并」：取数已发出时，后续触发只标记 dirty，待本次完成后补一次
     // —— 撤销等离散变更**立即**取数（波形与参数线同批刷新，不再有 250ms
     // 防抖滞后），clip 拖拽等连续 timeline 更新仍被收敛成"在飞 + 一次尾随"。
@@ -188,8 +259,9 @@ export function useLoudnessCurves(args: {
                 ]);
                 if (fetchReqIdRef.current !== reqId) return;
                 if (!volumeRes?.ok || !dynRes?.ok) {
-                    setSnapshot(null);
-                    setSnapshotFetchSeq(reqId);
+                    // 失败也走 land：笔画期间置空快照会让波形映射消失、笔画闪断，
+                    // 宁可让旧快照多留一会儿。
+                    land({ snapshot: null, fetchSeq: reqId, analysisPending: false });
                     return;
                 }
                 const next = snapshotFromPayloads(
@@ -199,9 +271,11 @@ export function useLoudnessCurves(args: {
                 );
                 if (next) {
                     next.stride = stride;
-                    setSnapshot(next);
-                    setSnapshotFetchSeq(reqId);
-                    setAnalysisPending((dynRes as ParamFramesPayload).analysis_pending === true);
+                    land({
+                        snapshot: next,
+                        fetchSeq: reqId,
+                        analysisPending: (dynRes as ParamFramesPayload).analysis_pending === true,
+                    });
                 }
             } catch {
                 // ignore：保留上一次快照，等待下一次触发
@@ -238,7 +312,7 @@ export function useLoudnessCurves(args: {
      */
     const getLatestFetchSeq = useCallback(() => fetchReqIdRef.current, []);
 
-    return { snapshot, analysisPending, snapshotFetchSeq, getLatestFetchSeq };
+    return { snapshot, analysisPending, snapshotFetchSeq, getLatestFetchSeq, flushPending };
 }
 
 /**

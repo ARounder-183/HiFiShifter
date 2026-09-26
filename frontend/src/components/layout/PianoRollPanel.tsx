@@ -242,6 +242,7 @@ import {
 } from "../../features/keybindings/keybindingsSlice";
 
 import { clearPianoRollLoading, setPianoRollLoading } from "../../utils/pianoRollStatusBus";
+import { createLiveEditFlag } from "./pianoRoll/liveEditFlag";
 import { MidiTrackSelectDialog } from "./MidiTrackSelectDialog";
 import { settingsApi } from "../../services/api/settings";
 import { EditContextMenu } from "../editDialogs/EditContextMenu";
@@ -3545,9 +3546,21 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
      */
     const clipboardRef = useRef<ParamClipboardData | null>(null);
 
-    // 用于通知 usePianoRollData 当前是否处于 live 编辑状态（pointer down 期间 ?true） ?
-    // pitch_orig_updated 事件到达时若 ?true，则延迟曲线刷新 ?pointer-up 后执行 ?
-    const liveEditActiveRef = useRef(false);
+    /**
+     * 笔画进行中标志（pointer down 期间为 true）。
+     *
+     * 读它的是两个取数 hook（`usePianoRollData` / `useLoudnessCurves`）：笔画期间的
+     * 回包必须推迟落地，否则换掉 `paramView` 或响度快照都会打断进行中的笔画。
+     *
+     * 写它的有十余处手势收尾分支（见 `usePianoRollInteractions`），因此这里用
+     * **带边沿回调**的受控标志：任何 `= false` 的写入都自动补触发一次推迟的刷新，
+     * 不需要在十余处逐一记得调用 —— 漏一处就会让曲线停在旧数据上。
+     */
+    const liveEditEndHandlerRef = useRef<(() => void) | null>(null);
+    const liveEditActiveRef = useMemo(
+        () => createLiveEditFlag(() => liveEditEndHandlerRef.current?.()),
+        [],
+    );
 
     const {
         paramView,
@@ -3597,10 +3610,12 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         analysisPending: loudnessAnalysisPending,
         snapshotFetchSeq: loudnessSnapshotFetchSeq,
         getLatestFetchSeq: getLatestLoudnessFetchSeq,
+        flushPending: flushLoudnessPending,
     } = useLoudnessCurves({
         rootTrackId,
         projectFrames: loudnessProjectFrames,
         framePeriodMs: loudnessFpMs,
+        liveEditActiveRef,
         paramsEpoch: (s as unknown as { paramsEpoch?: number }).paramsEpoch ?? 0,
         refreshToken,
     });
@@ -4146,8 +4161,22 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         applyDenseToLiveEdit,
     ]);
 
-    // 包装 commitStroke：在 pointer-up 提交笔画后，清除 liveEditActive 状态，
-    // 并触发可能被延迟 ?pitch_orig_updated 曲线刷新 ?
+    /**
+     * 笔画结束时补触发所有被推迟的刷新。
+     *
+     * 由 `liveEditActiveRef` 的 **true→false 边沿**自动调用（见其定义），因此
+     * pointerup / pointercancel / 各工具自己的中止分支都会走到这里，不需要逐个
+     * 调用点记得补取。
+     */
+    liveEditEndHandlerRef.current = () => {
+        // 曲线：用最新视口重取（含 pitch_orig_updated 的强制取数）。
+        notifyLiveEditEnded();
+        // 响度快照：把笔画期间被推迟的那一份落地，避免等下一次 IPC 往返。
+        flushLoudnessPending();
+    };
+
+    // 包装 commitStroke：提交笔画后清除 liveEditActive 状态 —— 该写入会经边沿回调
+    // 自动补触发上面两项刷新，因此这里不再显式调用。
     const commitStroke: typeof commitStrokeBase = useCallback(
         async (points, mode) => {
             // 收尾分工：**水位**记在这里（必须在发起写入之前 —— 提交内部会 bump
@@ -4156,10 +4185,10 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
             // 的语义，见其说明。
             committedSettleSeqRef.current = getLatestLoudnessFetchSeq();
             await commitStrokeBase(points, mode);
+            // 置回 false 即触发边沿回调（补取曲线 + 落地响度快照）。
             liveEditActiveRef.current = false;
-            notifyLiveEditEnded();
         },
-        [commitStrokeBase, getLatestLoudnessFetchSeq, notifyLiveEditEnded],
+        [commitStrokeBase, getLatestLoudnessFetchSeq, liveEditActiveRef],
     );
 
     // 从 store 中的 clipPitchCurves 转换为 DetectedPitchCurve[] 供 drawPianoRoll 使用。
