@@ -735,9 +735,14 @@ fn analyze_other_container_regions(
 
     // ── 规划：每个区间用与 WAV 路径相同的窗口函数，窗口全局合并排序 ──
     // `region_windows[i]` 是第 i 个区间对应的窗口下标；窗口本身按绝对帧位存。
+    //
+    // 【截断必须逐区间记账】`was_truncated` 只描述**该区间自己**有没有被削掉
+    // 窗口。绝不能汇总成一个文件级标志再回流到所有区间 —— 那会让"文件里存在
+    // 某个读不到的区间"把**同文件的其他区间全部降级**，表现为同一文件里有的
+    // Take 折叠了、有的没有（判定结果取决于它和谁被放在同一批里分析）。
     let mut windows: Vec<(u64, usize)> = Vec::new();
     let mut region_windows: Vec<Vec<usize>> = Vec::with_capacity(regions.len());
-    let mut truncated = false;
+    let mut region_truncated: Vec<bool> = Vec::with_capacity(regions.len());
     for region in regions {
         let (region_start, region_end) = resolve_region(*region, total_frames, sample_rate);
         let (planned, was_truncated) = plan_region_windows(
@@ -748,15 +753,13 @@ fn analyze_other_container_regions(
             sample_rate,
             opts,
         );
-        if was_truncated {
-            truncated = true;
-        }
         let mut indices = Vec::with_capacity(planned.len());
         for window in planned {
             indices.push(windows.len());
             windows.push(window);
         }
         region_windows.push(indices);
+        region_truncated.push(was_truncated);
     }
     if windows.is_empty() {
         return out;
@@ -804,17 +807,13 @@ fn analyze_other_container_regions(
             }
         }
         let detail = finalize(acc);
-        out[region_index] = if complete { detail } else { degrade_incomplete(detail) };
-    }
-
-    // 规划阶段就已判定覆盖不完整的区间，同样只允许下发 TrueStereo。
-    if truncated {
-        for (region_index, indices) in region_windows.iter().enumerate() {
-            if indices.is_empty() {
-                continue;
-            }
-            out[region_index] = degrade_incomplete(out[region_index]);
-        }
+        // 逐区间收敛：只有**本区间**覆盖不完整时才降级。同文件其它区间的截断
+        // 与本区间无关 —— 判定结果不能取决于它和谁被放在同一批里分析。
+        out[region_index] = if complete && !region_truncated[region_index] {
+            detail
+        } else {
+            degrade_incomplete(detail)
+        };
     }
     out
 }
@@ -1400,8 +1399,118 @@ mod tests {
     /// `CARGO_MANIFEST_DIR` 反推仓库根，避免夹具"永远找不到"而让测试空跑。
     fn demo_mp3() -> Option<std::path::PathBuf> {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../third_party/signalsmith-stretch/signalsmith-stretch/web/demo/loop.mp3");
+            .join("third_party/signalsmith-stretch/signalsmith-stretch/web/demo/loop.mp3");
         path.is_file().then_some(path)
+    }
+
+    #[test]
+    fn a_truncated_region_does_not_degrade_its_siblings() {
+        // 回归：截断标记曾是一个**文件级**标志，回流到该文件所有区间。于是
+        // "文件里存在某个读不到的区间"会把同文件的其他区间全部降级成
+        // Unknown —— 表现为同一文件里有的 Take 折叠了、有的没有，而判定结果
+        // 取决于某个区间和谁被放在同一批里分析（批次边界一变，结论就变）。
+        let Some(path) = demo_mp3() else {
+            return;
+        };
+        verdict_cache_clear();
+        let _cache_guard = verdict_cache_test_lock();
+        let header = crate::audio_utils::try_read_audio_header_only(&path).expect("probe");
+        let sr = header.sample_rate;
+        let total = header.total_frames;
+        let total_sec = total as f64 / sr as f64;
+        // 容差拉满 ⇒ 任何差异都判"一致" ⇒ 覆盖完整就必然是 FakeStereo。
+        let opts = DetectOptions {
+            tolerance: 1.0,
+            container_budget_sec: 2.0,
+            ..Default::default()
+        };
+
+        // 区间 0 完全在预算内（0~1s）；区间 1 远超 2 秒预算 ⇒ 只有它被截断。
+        let r0 = Some((0.0, 1.0));
+        let r1 = Some((total_sec * 0.8, total_sec * 0.8 + 0.5));
+
+        // 冷缓存：两个区间在**同一次**调用里一起分析（污染只在同批时发生）。
+        let both = verdict_for_regions_detailed(&path, &[r0, r1], &opts);
+        assert_eq!(
+            both[0].verdict,
+            ChannelVerdict::FakeStereo,
+            "覆盖完整的区间不得因同文件另一个区间被截断而降级"
+        );
+        assert!(
+            both[0].frames_compared > 0,
+            "结论必须建立在真实比较过的样本上"
+        );
+        assert_eq!(
+            both[1].verdict,
+            ChannelVerdict::Unknown,
+            "超出解码预算的区间仍应读作'读不到'"
+        );
+    }
+
+    #[test]
+    fn a_region_is_judged_the_same_whatever_it_is_batched_with() {
+        // 更强的性质：一个区间的判定**与批次无关** —— 单独判、和好区间一起判、
+        // 和坏区间一起判，都必须得到同一个结论。这条直接钉死"同文件有的折叠
+        // 有的没折叠"这类不一致。
+        let Some(path) = demo_mp3() else {
+            return;
+        };
+        let header = crate::audio_utils::try_read_audio_header_only(&path).expect("probe");
+        let total_sec = header.total_frames as f64 / header.sample_rate as f64;
+        let opts = DetectOptions {
+            tolerance: 1.0,
+            container_budget_sec: 2.0,
+            ..Default::default()
+        };
+        let good = Some((0.0, 1.0));
+        let bad = Some((total_sec * 0.8, total_sec * 0.8 + 0.5));
+
+        verdict_cache_clear();
+        let _cache_guard = verdict_cache_test_lock();
+        let alone = verdict_for_regions_detailed(&path, &[good], &opts)[0].verdict;
+        // 每次都清缓存：命中缓存会掩盖批次相关的问题（这正是原 bug 难现的原因）。
+        verdict_cache_clear();
+        let with_bad = verdict_for_regions_detailed(&path, &[good, bad], &opts)[0].verdict;
+        verdict_cache_clear();
+        let with_good = verdict_for_regions_detailed(&path, &[good, Some((2.0, 3.0))], &opts)[0]
+            .verdict;
+
+        assert_eq!(alone, ChannelVerdict::FakeStereo);
+        assert_eq!(with_bad, alone, "和读不到的区间同批，结论不得改变");
+        assert_eq!(with_good, alone, "和另一个好区间同批，结论不得改变");
+    }
+
+    #[test]
+    fn every_slice_of_one_fake_stereo_source_folds_together() {
+        // 直接映射用户报告的场景：同一文件（mp3）被切成多个 Take，消费区间
+        // 各不相同，有的甚至越出文件末尾。它们必须**全部**得出同一结论，
+        // 而不是有的折叠有的不折叠。
+        let Some(path) = demo_mp3() else {
+            return;
+        };
+        verdict_cache_clear();
+        let _cache_guard = verdict_cache_test_lock();
+        let header = crate::audio_utils::try_read_audio_header_only(&path).expect("probe");
+        let total_sec = header.total_frames as f64 / header.sample_rate as f64;
+        // 容差拉满 ⇒ 该文件处处判"一致"，于是覆盖完整的切片都应折叠。
+        let opts = DetectOptions {
+            tolerance: 1.0,
+            ..Default::default()
+        };
+
+        let slices = vec![
+            Some((0.0, 1.0)),                                  // 开头
+            Some((total_sec * 0.5, total_sec * 0.5 + 1.0)),     // 中段
+            Some((total_sec - 1.0, total_sec)),                 // 结尾
+        ];
+        let details = verdict_for_regions_detailed(&path, &slices, &opts);
+        for (index, detail) in details.iter().enumerate() {
+            assert_eq!(
+                detail.verdict,
+                ChannelVerdict::FakeStereo,
+                "同一假立体声源的第 {index} 个切片结论必须与其他切片一致"
+            );
+        }
     }
 
     #[test]

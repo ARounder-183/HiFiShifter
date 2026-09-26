@@ -831,7 +831,7 @@ mod tests {
     /// 反推仓库根 —— 否则这个夹具会"永远找不到"而让测试静默变成空跑。
     fn demo_mp3() -> Option<std::path::PathBuf> {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../third_party/signalsmith-stretch/signalsmith-stretch/web/demo/loop.mp3");
+            .join("third_party/signalsmith-stretch/signalsmith-stretch/web/demo/loop.mp3");
         path.is_file().then_some(path)
     }
 

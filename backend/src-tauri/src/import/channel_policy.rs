@@ -1028,6 +1028,54 @@ mod tests {
     }
 
     #[test]
+    fn slices_of_one_source_agree_whatever_the_batch() {
+        // 用户可见性质：同一源文件的多个切片被放在**同一批**判定时，结论必须与
+        // 逐条判定时一致 —— 不能因为同批里有个读不到的切片就把其余的都降级。
+        let dir = std::env::temp_dir().join("hifishifter_policy_batch");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("fake.wav");
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: 44_100,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let mut w = hound::WavWriter::create(&path, spec).unwrap();
+        for i in 0..44_100 * 3 {
+            let v = ((i as f32) * 0.01).sin() * 0.4;
+            w.write_sample(v).unwrap();
+            w.write_sample(v).unwrap();
+        }
+        w.finalize().unwrap();
+        let policy = ChannelImportPolicy::default();
+
+        let slice = |region: Option<(f64, f64)>| ScanRequest {
+            source_path: Some(path.as_path()),
+            source_channels: Some(2),
+            region,
+        };
+
+        let solo = scan_sources_grouped(&[slice(Some((0.0, 1.0)))], &policy);
+        // 第二个切片越出文件末尾 ⇒ 读不到，但它不该影响第一个切片。
+        let mixed = scan_sources_grouped(
+            &[slice(Some((0.0, 1.0))), slice(Some((90.0, 120.0)))],
+            &policy,
+        );
+        let pair = scan_sources_grouped(
+            &[slice(Some((0.0, 1.0))), slice(Some((1.0, 2.0)))],
+            &policy,
+        );
+        assert_eq!(solo[0], ChannelScanOutcome::FakeStereo);
+        assert_eq!(
+            mixed[0], solo[0],
+            "同批里有个读不到的切片时，其余切片结论不得改变"
+        );
+        assert_eq!(pair[0], solo[0]);
+        assert_eq!(pair[1], solo[0], "同一源的两个切片结论必须一致");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn grouped_scan_matches_per_take_semantics() {
         // 同一文件的多个 Take 以不同消费区间引用 —— 分组判定的结论必须与
         // 逐 Take 独立判定逐条一致（区间语义不变，去重的只是 I/O）。
