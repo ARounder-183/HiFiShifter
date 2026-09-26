@@ -21,6 +21,7 @@
  */
 
 import type { StrokeMode } from "./types";
+import { warnDev } from "./devWarn";
 
 /** 窗口内一段连续的下标区间（闭区间）。 */
 export interface IndexRange {
@@ -267,24 +268,9 @@ function frameToIndex(
  * **不变量哨兵** —— 一旦触发，说明重锚被绕过，开发期立刻可见。
  */
 export function warnLiveEditWindowMismatch(expectedKey: string, actualKey: string | null): void {
-    if (!isDevBuild()) return;
-    console.warn(
+    warnDev(
         "[liveEdit] 覆盖层与当前参数窗口不匹配：本次笔画不会绘制。" +
             "（重锚逻辑被绕过？见 liveEditWindow.reanchorLiveEditWindow）" +
             ` expected=${expectedKey} actual=${actualKey ?? "<none>"}`,
     );
-}
-
-/**
- * 是否开发构建。
- *
- * 包一层 try：`import.meta.env` 由 Vite / vitest 注入，在纯 node 环境里读取会
- * 抛错 —— 单测可能直接 import 本模块（见 liveEditReanchor.test.ts）。
- */
-function isDevBuild(): boolean {
-    try {
-        return import.meta.env.DEV === true;
-    } catch {
-        return false;
-    }
 }
