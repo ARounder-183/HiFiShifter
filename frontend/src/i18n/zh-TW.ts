@@ -1565,7 +1565,8 @@ export const zhTW = {
     render_cache_min_clip: "片段長度下限",
     render_cache_seconds_unit: "秒",
     render_cache_min_entry: "片段大小下限",
-    render_cache_skipped_line: "本次有 {n} 個片段未落盤（{reasons}）—— 這些片段每次開啟專案都要重新合成。",
+    render_cache_skipped_line:
+        "本次有 {n} 個片段未落盤（{reasons}）—— 這些片段每次開啟專案都要重新合成。",
     render_cache_skip_disabled: "快取已關閉",
     render_cache_skip_empty: "空片段",
     render_cache_skip_tooShort: "短於時長下限",

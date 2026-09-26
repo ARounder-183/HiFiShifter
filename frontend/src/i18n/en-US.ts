@@ -1738,7 +1738,8 @@ export const enUS = {
     render_cache_min_clip: "Min clip length",
     render_cache_seconds_unit: "sec",
     render_cache_min_entry: "Min clip size",
-    render_cache_skipped_line: "{n} clip(s) were not persisted this session ({reasons}) — they must be re-rendered every time the project opens.",
+    render_cache_skipped_line:
+        "{n} clip(s) were not persisted this session ({reasons}) — they must be re-rendered every time the project opens.",
     render_cache_skip_disabled: "cache disabled",
     render_cache_skip_empty: "empty",
     render_cache_skip_tooShort: "below duration floor",

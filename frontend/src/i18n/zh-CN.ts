@@ -1563,7 +1563,8 @@ export const zhCN = {
     render_cache_min_clip: "片段时长下限",
     render_cache_seconds_unit: "秒",
     render_cache_min_entry: "片段大小下限",
-    render_cache_skipped_line: "本次有 {n} 个片段未落盘（{reasons}）—— 这些片段每次打开工程都要重新合成。",
+    render_cache_skipped_line:
+        "本次有 {n} 个片段未落盘（{reasons}）—— 这些片段每次打开工程都要重新合成。",
     render_cache_skip_disabled: "缓存已关闭",
     render_cache_skip_empty: "空片段",
     render_cache_skip_tooShort: "短于时长下限",

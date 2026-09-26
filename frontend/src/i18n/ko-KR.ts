@@ -1592,7 +1592,8 @@ export const koKR = {
     render_cache_min_clip: "클립 길이 하한",
     render_cache_seconds_unit: "초",
     render_cache_min_entry: "클립 크기 하한",
-    render_cache_skipped_line: "이번 세션에서 {n}개가 저장되지 않았습니다({reasons}) — 프로젝트를 열 때마다 다시 합성됩니다.",
+    render_cache_skipped_line:
+        "이번 세션에서 {n}개가 저장되지 않았습니다({reasons}) — 프로젝트를 열 때마다 다시 합성됩니다.",
     render_cache_skip_disabled: "캐시 꺼짐",
     render_cache_skip_empty: "빈 클립",
     render_cache_skip_tooShort: "길이 하한 미만",

@@ -1613,7 +1613,8 @@ export const jaJP = {
     render_cache_min_clip: "クリップ長の下限",
     render_cache_seconds_unit: "秒",
     render_cache_min_entry: "クリップサイズの下限",
-    render_cache_skipped_line: "今回 {n} 件が保存されませんでした（{reasons}）—— これらはプロジェクトを開くたびに再合成されます。",
+    render_cache_skipped_line:
+        "今回 {n} 件が保存されませんでした（{reasons}）—— これらはプロジェクトを開くたびに再合成されます。",
     render_cache_skip_disabled: "キャッシュ無効",
     render_cache_skip_empty: "空のクリップ",
     render_cache_skip_tooShort: "長さの下限未満",
