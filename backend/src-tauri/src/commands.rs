@@ -723,7 +723,8 @@ pub async fn import_audio_item(
 ) -> crate::models::TimelineStatePayload {
     // 导入大文件（大视频抽轨 / 大音频全量解码预览）耗时明显，
     // 卸载到阻塞线程池执行，避免同步命令在主线程上冻结前端。
-    tauri::async_runtime::spawn_blocking(move || {
+    let scan_handle = app.clone();
+    let payload = tauri::async_runtime::spawn_blocking(move || {
         let state: State<'_, AppState> = app.state();
         timeline::import_audio_item(
             state,
@@ -753,7 +754,12 @@ pub async fn import_audio_item(
         redo_depth: None,
         notes_markdown: None,
         param_selection_restore: None,
-    })
+    });
+    // 同步判定对**容器**素材用的是一个很短的解码预算（导入不能卡住命令线程），
+    // 长文件因此只拿到"未定论"。这里补一轮完整预算的后台扫描把它收敛掉 ——
+    // 否则那个折叠要等到下次打开工程才发生。
+    crate::commands::channel_scan::request_channel_scan(&scan_handle);
+    payload
 }
 #[tauri::command(rename_all = "camelCase")]
 pub async fn import_audio_bytes(
@@ -764,7 +770,8 @@ pub async fn import_audio_bytes(
     start_sec: Option<f64>,
 ) -> crate::models::TimelineStatePayload {
     // base64 解码 + 落盘 + 导入解析都可能较慢，同样放到阻塞线程池。
-    tauri::async_runtime::spawn_blocking(move || {
+    let scan_handle = app.clone();
+    let payload = tauri::async_runtime::spawn_blocking(move || {
         let state: State<'_, AppState> = app.state();
         timeline::import_audio_bytes(state, file_name, base64_data, track_id, start_sec)
     })
@@ -788,7 +795,10 @@ pub async fn import_audio_bytes(
         redo_depth: None,
         notes_markdown: None,
         param_selection_restore: None,
-    })
+    });
+    // 同 `import_audio_item`：把同步判定的短预算结论交给完整预算的后台扫描收敛。
+    crate::commands::channel_scan::request_channel_scan(&scan_handle);
+    payload
 }
 #[tauri::command(rename_all = "camelCase")]
 pub fn add_track(
@@ -1130,23 +1140,31 @@ pub async fn scan_and_convert_fake_stereo(
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn add_clip_take_from_media(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     clip_id: String,
     source_path: String,
     name: Option<String>,
     checkpoint: Option<bool>,
 ) -> crate::models::TimelineStatePayload {
-    timeline::add_clip_take_from_media(state, clip_id, source_path, name, checkpoint)
+    let payload = timeline::add_clip_take_from_media(state, clip_id, source_path, name, checkpoint);
+    crate::commands::channel_scan::request_channel_scan(&app);
+    payload
 }
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn import_media_files_as_takes(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     paths: Vec<String>,
     track_id: Option<String>,
     start_sec: Option<f64>,
 ) -> crate::models::TimelineStatePayload {
-    timeline::import_media_files_as_takes(state, paths, track_id, start_sec)
+    let payload = timeline::import_media_files_as_takes(state, paths, track_id, start_sec);
+    // 同 `import_audio_item`：容器素材的同步判定用的是短解码预算，长文件只拿到
+    // "未定论"，这里补一轮完整预算的后台扫描把它收敛掉。
+    crate::commands::channel_scan::request_channel_scan(&app);
+    payload
 }
 
 #[tauri::command(rename_all = "camelCase")]
