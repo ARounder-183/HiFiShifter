@@ -18,6 +18,7 @@ import { DetachedRoot } from "./components/dock/DetachedRoot";
 import { registerBuiltinPanels } from "./components/dock/registerBuiltinPanels";
 import { attachBuiltinPanelComponents } from "./components/dock/attachBuiltinPanelComponents";
 import { AppTooltipProvider } from "./components/AppTooltip";
+import { AppRootErrorBoundary } from "./components/AppRootErrorBoundary";
 import { I18nProvider } from "./i18n/I18nProvider";
 import { AppThemeProvider } from "./theme/AppThemeProvider";
 
@@ -35,7 +36,9 @@ createRoot(document.getElementById("root")!).render(
             <I18nProvider>
                 <AppThemeProvider>
                     <AppTooltipProvider>
-                        <DetachedRoot />
+                        <AppRootErrorBoundary>
+                            <DetachedRoot />
+                        </AppRootErrorBoundary>
                     </AppTooltipProvider>
                 </AppThemeProvider>
             </I18nProvider>

@@ -44,6 +44,26 @@ export {
     type PanelDefinition,
 } from "../features/dock/panelRegistry";
 
+// ── 贡献点：往宿主 chrome 里加条目 ──────────────────────────────────
+export {
+    getContributionVersion,
+    listCommands,
+    listPanelTabMenuItems,
+    listToolbarItems,
+    registerCommand,
+    registerPanelTabMenuItem,
+    registerToolbarItem,
+    resetContributionsForTests,
+    subscribeContributions,
+    usePanelTabMenuItems,
+    useToolbarItems,
+    type CommandContribution,
+    type ContributionKind,
+    type ContributionScope,
+    type PanelTabMenuItemContribution,
+    type ToolbarItemContribution,
+} from "../features/dock/contributions";
+
 // ── 停靠命令门面（菜单 / 快捷键 / 工具栏按钮共用的同一份行为）─────────
 export {
     activeFormId,
@@ -91,7 +111,15 @@ export {
 
 // ── 本地化 ──────────────────────────────────────────────────────────
 export { useI18n, translateOutsideReact } from "../i18n/I18nProvider";
+export {
+    registerExtensionMessages,
+    resetExtensionMessagesForTests,
+    subscribeExtensionMessages,
+} from "../i18n/extensionMessages";
 export type { Locale } from "../i18n/messages";
+
+// ── 错误上报（扩展崩溃也应进同一份日志）────────────────────────────
+export { reportFrontendError } from "../services/frontendErrorLog";
 
 // ── 平台工具 ────────────────────────────────────────────────────────
 export { IS_LINUX, IS_MAC } from "../utils/platform";

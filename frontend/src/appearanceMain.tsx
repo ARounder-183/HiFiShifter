@@ -13,12 +13,16 @@ import "./index.css";
 import { I18nProvider } from "./i18n/I18nProvider";
 import { AppThemeProvider } from "./theme/AppThemeProvider";
 import { AppearanceWindow } from "./components/layout/AppearanceWindow";
+import { AppRootErrorBoundary } from "./components/AppRootErrorBoundary";
 
 createRoot(document.getElementById("root")!).render(
     <StrictMode>
         <I18nProvider>
             <AppThemeProvider>
-                <AppearanceWindow />
+                {/* 外观窗口也需要根级边界：它没有停靠层，抛错即整窗空白。 */}
+                <AppRootErrorBoundary>
+                    <AppearanceWindow />
+                </AppRootErrorBoundary>
             </AppThemeProvider>
         </I18nProvider>
     </StrictMode>,

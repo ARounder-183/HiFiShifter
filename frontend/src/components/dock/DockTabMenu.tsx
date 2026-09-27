@@ -1,16 +1,22 @@
 /*
  * 标签右键菜单。
  *
- * 与仓库既有右键菜单同一形态（手搓 `role="menu"` + `fixed` 定位，见
- * `ClipContextMenu` / `EditContextMenu`），不引入 Radix ContextMenu：全应用
- * 的右键菜单样式与关闭语义已经统一，混用两套只会让交互细节分叉。
+ * 【为什么它没有迁到 `AppContextMenu`】菜单第一行是**重命名输入框**，带自己的
+ * 模式机（Esc 退回菜单、Enter/blur 提交）。`AppContextMenu` 是"扁平项列表 +
+ * 选中即关闭"，没有容纳输入框的槽位；强行迁会在这个文件里留下第二套手写外壳，
+ * 反而更差。等原语支持内联编辑器后再统一。
+ *
+ * 【它是贡献点的第一个生产用例】第三方 / 内置面板可以往这里加自己的标签菜单项
+ * （见 `features/dock/contributions.ts` 的 `registerPanelTabMenuItem`）——
+ * 此前面板注册了却只能在 Window 菜单里被找到。
  */
 
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
-import { useAppDispatch } from "../../app/hooks";
+import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { renameForm } from "../../features/dock/dockSlice";
+import { usePanelTabMenuItems } from "../../features/dock/contributions";
 import { useI18n } from "../../i18n/I18nProvider";
 
 export interface DockTabMenuProps {
@@ -48,6 +54,9 @@ export function DockTabMenu({
     const dispatch = useAppDispatch();
     const { t } = useI18n();
     const tAny = t as (key: string) => string;
+    /** 本窗体所属面板：贡献项按面板作用域筛选（全局项对所有面板可见）。 */
+    const panelId = useAppSelector((state) => state.dock.layout.forms[formId]?.panelId);
+    const contributedItems = usePanelTabMenuItems({ panelId });
     const menuRef = useRef<HTMLDivElement | null>(null);
     const [renaming, setRenaming] = useState(false);
     const [draft, setDraft] = useState("");
@@ -57,7 +66,9 @@ export function DockTabMenu({
     // 用**固定估算高度**而不是"先渲染再测量"：后者要在 layout effect 里同步
     // setState（触发级联渲染，React Compiler 会就此告警），而菜单项高度本来就是
     // 确定的常量。估算偏差最多几个像素，视觉上不可见。
-    const itemCount = renaming ? 1 : 2 + (detachAction ? 1 : 0);
+    const itemCount = renaming
+        ? 1
+        : 2 + (detachAction ? 1 : 0) + contributedItems.length;
     const estimatedHeight = itemCount * MENU_ITEM_PX + MENU_CHROME_PX;
     const position = {
         x: Math.min(x, Math.max(0, window.innerWidth - MENU_WIDTH - 4)),
@@ -132,6 +143,23 @@ export function DockTabMenu({
                     }}
                 />
             ) : null}
+            {contributedItems.length > 0 ? (
+                <>
+                    <div className="my-1 border-t border-qt-border" />
+                    {contributedItems.map((item) => (
+                        <MenuItem
+                            key={item.id}
+                            label={item.label}
+                            danger={item.danger}
+                            disabled={item.enabled ? !item.enabled() : false}
+                            onClick={() => {
+                                item.onSelect();
+                                onClose();
+                            }}
+                        />
+                    ))}
+                </>
+            ) : null}
             <div className="my-1 border-t border-qt-border" />
             <MenuItem
                 label={t("close")}
@@ -150,19 +178,24 @@ function MenuItem({
     label,
     onClick,
     danger,
+    disabled = false,
 }: {
     label: string;
     onClick: () => void;
     danger?: boolean;
+    disabled?: boolean;
 }) {
     return (
         <button
             type="button"
             role="menuitem"
-            className={`block w-full px-3 py-1 text-left text-xs ${
-                danger
-                    ? "hover:bg-qt-danger-bg hover:text-qt-danger-text"
-                    : "hover:bg-qt-highlight hover:text-white"
+            disabled={disabled}
+            className={`block w-full px-3 py-1.5 text-left text-xs ${
+                disabled
+                    ? "cursor-default text-qt-text-muted"
+                    : danger
+                      ? "hover:bg-qt-danger-bg hover:text-qt-danger-text"
+                      : "hover:bg-qt-hover"
             }`}
             onClick={onClick}
         >

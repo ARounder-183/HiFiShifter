@@ -5,6 +5,7 @@ import {
     useEffect,
     useMemo,
     useState,
+    useSyncExternalStore,
     type PropsWithChildren,
 } from "react";
 import { messages, type Locale, type MessageKey } from "./messages";
@@ -15,6 +16,11 @@ import {
     formatUnit,
     selectPluralForm,
 } from "./format";
+import {
+    getExtensionMessagesVersion,
+    lookupExtensionMessage,
+    subscribeExtensionMessages,
+} from "./extensionMessages";
 import { coreApi } from "../services/api/core";
 
 interface I18nContextValue {
@@ -37,6 +43,16 @@ interface I18nContextValue {
     number: (value: number, options?: Intl.NumberFormatOptions) => string;
     /** 按语系格式化「数字 + 单位」，空格与符号由引擎决定。 */
     unit: (value: number, unit: string, options?: Intl.NumberFormatOptions) => string;
+    /**
+     * **无类型**翻译，供扩展使用。
+     *
+     * 内置的 `t()` 受 `MessageKey` 联合约束，第三方键编译期不存在于其中，
+     * 因此单独给一个字符串键的入口 —— 而不是像历史上 71 处那样
+     * `t as (key: string) => string` 把内置的类型安全也一起丢掉。
+     *
+     * 查不到时返回键名本身（便于定位漏注册的文案）。
+     */
+    tf: (key: string) => string;
 }
 
 const I18nContext = createContext<I18nContextValue | null>(null);
@@ -81,9 +97,29 @@ export function I18nProvider({ children }: PropsWithChildren) {
         });
     }, [localeState]);
 
+    /*
+     * 订阅扩展文案注册表：第三方面板注册文案后，已经挂载的组件需要重新取值。
+     * 用 `useSyncExternalStore` 而不是把版本号塞进 `useMemo` 依赖 —— 后者会让
+     * 每次注册都重建整个 context value，把所有消费方一起重渲染。
+     */
+    useSyncExternalStore(
+        subscribeExtensionMessages,
+        getExtensionMessagesVersion,
+        getExtensionMessagesVersion,
+    );
+
     const value = useMemo<I18nContextValue>(() => {
         const dict = messages[localeState] as Record<MessageKey, string>;
-        const lookup = (key: MessageKey): string => dict[key] ?? messages["en-US"][key];
+        /*
+         * 解析顺序：静态词典（当前语系）→ 扩展层（当前语系）→ 静态词典（en-US）。
+         *
+         * 扩展层排在静态词典**之后**是有意的：内置键不可被第三方覆盖，
+         * 否则一个面板注册 `ok` 就能改掉全应用的「确定」按钮。
+         */
+        const lookup = (key: MessageKey): string =>
+            dict[key] ??
+            lookupExtensionMessage(localeState, key) ??
+            messages["en-US"][key];
         return {
             locale: localeState,
             setLocale: (nextLocale: Locale) => {
@@ -97,6 +133,11 @@ export function I18nProvider({ children }: PropsWithChildren) {
             shortcut: (key) => formatShortcutLabel(lookup(key)),
             number: (value, options) => formatNumber(localeState, value, options),
             unit: (value, unit, options) => formatUnit(localeState, value, unit, options),
+            tf: (key) =>
+                lookupExtensionMessage(localeState, key) ??
+                (messages[localeState] as Record<string, string>)[key] ??
+                (messages["en-US"] as Record<string, string>)[key] ??
+                key,
         };
     }, [localeState]);
 
@@ -126,5 +167,10 @@ export function translateOutsideReact(key: string): string {
     // 而不是抛错 —— 取一条文案不该让调用方崩掉。
     const locale: Locale = typeof localStorage === "undefined" ? "en-US" : getDefaultLocale();
     const dict = messages[locale] as Record<string, string | undefined>;
-    return dict[key] ?? (messages["en-US"] as Record<string, string | undefined>)[key] ?? key;
+    return (
+        dict[key] ??
+        lookupExtensionMessage(locale, key) ??
+        (messages["en-US"] as Record<string, string | undefined>)[key] ??
+        key
+    );
 }

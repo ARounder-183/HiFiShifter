@@ -9,6 +9,7 @@ import App from "./App.tsx";
 import { store } from "./app/store";
 import { getDockDragState } from "./features/dock/dockDragStore";
 import { AppTooltipProvider } from "./components/AppTooltip";
+import { AppRootErrorBoundary } from "./components/AppRootErrorBoundary";
 import { fadeToolTipSuppress } from "./components/layout/timeline/FadeContextMenu";
 import { I18nProvider } from "./i18n/I18nProvider";
 import { AppThemeProvider } from "./theme/AppThemeProvider";
@@ -59,7 +60,14 @@ createRoot(document.getElementById("root")!).render(
                         }
                     >
                         <GlobalGestureServices />
-                        <App />
+                        {/*
+                          根级错误边界：兜住面板子树之外抛出的渲染异常。
+                          没有它时，任何非面板位置抛错都会卸载整棵树、留下空白窗口。
+                          放在 Provider 内侧以便用上主题与语言，包住 App 整体。
+                        */}
+                        <AppRootErrorBoundary>
+                            <App />
+                        </AppRootErrorBoundary>
                     </AppTooltipProvider>
                 </AppThemeProvider>
             </I18nProvider>
