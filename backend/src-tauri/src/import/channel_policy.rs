@@ -727,7 +727,7 @@ mod tests {
     fn user_seal_is_never_touched_by_the_policy() {
         // 用户显式设置过的 Take：自动扫描必须永远放手。
         let mut take = take_with(Some("C:/definitely/missing.wav"), Some(2));
-        take.channel_decision = Some(ChannelDecisionRecord::user());
+        take.channel_decision = Some(ChannelDecisionRecord::user(0));
         take.channel_mode = 0;
         let policy = ChannelImportPolicy {
             mode: "alwaysMono".into(),

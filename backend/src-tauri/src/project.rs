@@ -602,21 +602,15 @@ pub fn finalize_timeline_for_session(
     }
     tl.sync_clip_takes_from_flat();
 
-    // v5 迁移：把「版本号 < 5 ⇒ Take 没有权威声道来源」这一**版本语义**一次性
-    // 翻译成显式的判定档案（见 `TimelineState::seal_legacy_channel_decisions`）。
+    // 加载边界：清掉历史上被批量伪造的"用户封印"（标着用户决定、却没有记录
+    // 用户选了什么）。它们会让 Take 永久免疫于折叠，而本程序写出的每个工程都
+    // 是 v5，等于折叠功能对所有保存过的工程失效 —— 必须清回"未判定"重新裁决。
     //
-    // 这里**不再**同步解码折叠：那会让大工程在打开时冻结分钟级，且任何一次
-    // 读不到（文件缺失 / 网络盘未挂载）都会因为工程随即被保存成 v5 而永久漏判。
-    // 折叠改由 `commands::channel_scan` 在后台可恢复地完成 —— 它按判定档案挑
-    // 候选，读不到的记 Pending，下次打开继续重试。
-    //
-    // 必须放在 `populate_clip_file_metadata` **之后**：该步骤会回填
-    // `source_channels` 与内容指纹，两者都是判定档案要比对的上下文。
-    if project_file_version >= 5 {
-        let sealed = tl.seal_legacy_channel_decisions(project_file_version);
-        if sealed > 0 {
-            log::info!("[open_project] sealed {sealed} legacy take(s) as user-decided channel mode");
-        }
+    // 与工程版本**无关**：判定该不该扫的依据是档案本身（谁定的、选了什么），
+    // 不是版本号。这也是"版本号只用于格式迁移、不用于语义推断"的落点。
+    let cleared = tl.clear_untrusted_channel_seals();
+    if cleared > 0 {
+        log::info!("[open_project] cleared {cleared} fabricated channel seal(s) back to undecided");
     }
 
     (tl, missing_files)
@@ -772,32 +766,111 @@ mod tests {
     }
 
     #[test]
-    fn v5_project_explicit_channel_mode_is_never_rewritten() {
+    fn a_trusted_user_seal_survives_the_load_boundary() {
+        // 用户在 v5 工程里显式把某 Take 设为 Normal(0)（= 明确不要折叠）：
+        // 档案里记着"选了什么"，加载边界必须原样保留，扫描也不得碰它。
         let _guard = crate::config::channel_policy_test_guard();
         crate::config::set_channel_import_policy(&crate::config::ChannelImportPolicy::default());
-        // 假立体声素材，但用户在 v5 工程里显式保持了 Normal(0)：
-        // 升级逻辑不得改写（这正是版本号判定要守住的方向）。
         let path = write_test_wav("v5_explicit.wav", true);
-        let tl = timeline_with_legacy_take(&path);
+        let mut tl = timeline_with_legacy_take(&path);
+        tl.clips[0].takes[0].channel_decision =
+            Some(crate::channel_decision::ChannelDecisionRecord::user(0));
 
         let (finalized, _missing) =
             finalize_timeline_for_session(tl, Path::new("C:/proj/t.hshp"), 5);
 
         assert_eq!(
             finalized.clips[0].takes[0].channel_mode, 0,
-            "v5+ 工程的 channel_mode 是用户显式决定，不得改写"
+            "用户显式选择的模式不得被改写"
         );
-        // 版本号只在这里被消费一次：v5 工程缺失的档案被**封印为"用户决定"**，
-        // 可恢复扫描据此永远跳过它。这是"用户的选择是终局的"的落点。
         let record = finalized.clips[0].takes[0]
             .channel_decision
-            .expect("v5 take must be sealed");
-        assert!(record.is_user(), "v5 的 Take 必须被封印为'用户决定'");
+            .expect("可信的用户封印必须保留");
+        assert!(record.is_trusted_user_seal());
+        assert_eq!(record.chosen_mode, Some(0), "封印必须记得用户选了什么");
         let policy = crate::config::channel_import_policy();
         assert!(
             crate::commands::channel_scan::collect_targets(&finalized, None, &policy, false)
                 .is_empty(),
-            "被封印的 Take 不得进入自动扫描候选"
+            "用户真实选择过的 Take 不得进入自动扫描候选"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_fabricated_user_seal_is_cleared_so_the_scan_can_fold_again() {
+        // 回归：历史上加载边界把"没有档案"批量伪造成"用户决定"，而本程序写出的
+        // 每个工程都是 v5 —— 于是保存过一次的工程里**所有** Take 都带着伪造封印，
+        // 折叠功能（含右键"扫描假立体声并转换"）对所有工程彻底失效。
+        // 这类档案没有 `chosen_mode`（没记用户选了什么），必须清回"未判定"。
+        let _guard = crate::config::channel_policy_test_guard();
+        crate::config::set_channel_import_policy(&crate::config::ChannelImportPolicy::default());
+        let path = write_test_wav("v5_fabricated.wav", true);
+        let mut tl = timeline_with_legacy_take(&path);
+        // 伪造封印：标着 ORIGIN_USER，但没有任何"选了啥"的记录。
+        tl.clips[0].takes[0].channel_decision =
+            Some(crate::channel_decision::ChannelDecisionRecord {
+                origin: crate::channel_decision::ORIGIN_USER,
+                verdict: crate::channel_decision::VERDICT_USER,
+                chosen_mode: None,
+                fingerprint: None,
+                policy_sig: 0,
+                region_q: None,
+            });
+
+        let (mut finalized, _missing) =
+            finalize_timeline_for_session(tl, Path::new("C:/proj/t.hshp"), 5);
+
+        assert_eq!(
+            finalized.clips[0].takes[0].channel_decision, None,
+            "伪造的用户封印必须被清除（否则该 Take 永久免疫于折叠）"
+        );
+
+        // 清除之后，同一文件里的假立体声必须能被重新判定并折叠 —— 这就是
+        // "右键菜单什么都没转换"的修复点。
+        let policy = crate::config::channel_import_policy();
+        let targets = crate::commands::channel_scan::collect_targets(
+            &finalized,
+            None,
+            &policy,
+            true,
+        );
+        assert_eq!(targets.len(), 1, "清掉伪造封印后 Take 必须重回候选");
+        let planned = crate::commands::channel_scan::plan(targets, &policy, false);
+        assert_eq!(
+            planned[0].outcome,
+            crate::channel_policy::ChannelScanOutcome::FakeStereo
+        );
+        let applied = crate::channel_policy::apply_resolution(
+            &mut finalized.clips[0].takes[0],
+            planned[0].resolution,
+        );
+        assert!(applied.mode_changed, "假立体声必须被折叠");
+        assert_eq!(finalized.clips[0].takes[0].channel_mode, 2);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_v5_take_with_no_record_stays_eligible_for_the_scan() {
+        // 回归：v5 工程里"没有档案"就是"从未判定"，绝不是"用户决定"。
+        // 曾经版本号 ≥ 5 被当作"用户已决定"，把整个功能锁死。
+        let _guard = crate::config::channel_policy_test_guard();
+        crate::config::set_channel_import_policy(&crate::config::ChannelImportPolicy::default());
+        let path = write_test_wav("v5_undecided.wav", true);
+        let tl = timeline_with_legacy_take(&path);
+
+        let (finalized, _missing) =
+            finalize_timeline_for_session(tl, Path::new("C:/proj/t.hshp"), 5);
+
+        assert_eq!(
+            finalized.clips[0].takes[0].channel_decision, None,
+            "v5 工程的空档案必须保持'未判定'，不得被伪造为'用户决定'"
+        );
+        let policy = crate::config::channel_import_policy();
+        assert_eq!(
+            crate::commands::channel_scan::collect_targets(&finalized, None, &policy, false).len(),
+            1,
+            "未判定的 Take 必须在自动扫描候选里"
         );
         let _ = std::fs::remove_file(&path);
     }

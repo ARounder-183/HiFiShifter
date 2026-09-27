@@ -79,15 +79,12 @@ pub(super) fn import_project(
     }
     timeline.sync_clip_takes_from_flat();
 
-    // v5 迁移（同 open_project）：版本号只在这里被消费一次，翻译成显式判定档案。
-    // v5+ 工程的 `channel_mode` 是用户决定 → 封印为"用户"；v4 及更早的 Take
-    // 保持"从未判定"，由合并完成后的后台扫描按策略补判（不再在此同步解码：
-    // 那是命令线程上的全量解码，且读不到的会被永久漏判）。
-    if pf.version >= 5 {
-        let sealed = timeline.seal_legacy_channel_decisions(pf.version);
-        if sealed > 0 {
-            log::info!("[import_project] sealed {sealed} take(s) as user-decided channel mode");
-        }
+    // 清理历史上被批量伪造的"用户封印"（同 open_project）：被导入工程里那些
+    // 标着用户决定、却没记录选了什么 的档案会让 Take 永久免疫于折叠。清回
+    // "未判定"，由合并后的后台扫描按当前策略重新裁决。
+    let cleared = timeline.clear_untrusted_channel_seals();
+    if cleared > 0 {
+        log::info!("[import_project] cleared {cleared} fabricated channel seal(s)");
     }
 
     let imported_notes = std::mem::take(&mut pf.notes_markdown);

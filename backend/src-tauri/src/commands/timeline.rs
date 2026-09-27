@@ -1542,19 +1542,23 @@ pub(super) fn set_clip_take_channel_mode(
 /// 先展示扫描结果再让用户确认。
 ///
 /// 与后台扫描共用 `channel_scan` 的三阶段内核（持锁快照 → 锁外判定 → 持锁
-/// 写回），差别只有两点：
+/// 写回），差别只有三点：
 /// - **连已定论的 Take 也重判**（用户显式要求重新扫描，而不是补漏）；
+/// - **按检测语义执行**，不受导入策略 `off`/`alwaysMono` 影响
+///   （见 `ChannelImportPolicy::for_explicit_scan`）—— 前者会让命令静默失效，
+///   后者会无差别折叠真立体声；
 /// - **留一个撤销步**（用户的显式操作要可撤销；后台迁移不留）。
 ///
-/// 用户封印的 Take（显式设置过声道模式）在 `collect_targets` 里被排除，重扫
-/// 也不会覆盖用户的选择。
+/// 带着**可信**用户封印的 Take（用户显式选过声道模式并记录了选择）在
+/// `collect_targets` 里被排除，重扫也不会覆盖用户的选择。
 pub(super) fn scan_and_convert_fake_stereo(
     state: State<'_, AppState>,
     clip_ids: Option<Vec<String>>,
     dry_run: Option<bool>,
 ) -> crate::models::FakeStereoScanPayload {
     let dry_run = dry_run.unwrap_or(false);
-    let policy = crate::config::channel_import_policy();
+    // 显式命令：沿用用户调好的窗口/容差/目标模式，但强制"检测"语义。
+    let policy = crate::config::channel_import_policy().for_explicit_scan();
 
     // ── 阶段 1（短暂持锁）：取候选快照 ──
     let targets = {

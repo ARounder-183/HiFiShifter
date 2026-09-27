@@ -100,11 +100,13 @@ pub fn collect_targets(
             if take.source_path.is_none() {
                 continue;
             }
-            // 用户封印**无条件**跳过：连"手动重新扫描"也不得覆盖用户的选择
-            //（`include_settled` 只放宽"已定论"这一条，不是放宽用户意图）。
+            // **可信**的用户封印无条件跳过：连"手动重新扫描"也不得覆盖用户的
+            // 真实选择（`include_settled` 只放宽"已定论"这一条，不是放宽用户
+            // 意图）。不可信的伪造封印（标着用户决定却没记选了什么）不算选择，
+            // 必须继续留在候选里被重新裁决 —— 否则它会让整个功能永久失效。
             if take
                 .channel_decision
-                .is_some_and(channel_decision::ChannelDecisionRecord::is_user)
+                .is_some_and(channel_decision::ChannelDecisionRecord::is_trusted_user_seal)
             {
                 continue;
             }
@@ -517,11 +519,65 @@ mod tests {
     fn sealed_user_choice_is_never_a_candidate() {
         let policy = ChannelImportPolicy::default();
         let mut tl = timeline_with_take(Some(std::path::Path::new("C:/x.wav")));
-        tl.clips[0].takes[0].channel_decision = Some(ChannelDecisionRecord::user());
+        tl.clips[0].takes[0].channel_decision = Some(ChannelDecisionRecord::user(0));
         let targets = collect_targets(&tl, None, &policy, false);
         assert!(targets.is_empty(), "用户封印的 Take 不得进入候选");
         // 手动重扫（include_settled）也照样跳过。
         assert!(collect_targets(&tl, None, &policy, true).is_empty());
+    }
+
+    #[test]
+    fn the_explicit_scan_detects_even_when_the_import_policy_is_off() {
+        // 回归：显式命令（右键"扫描假立体声并转换"）曾直接套用导入策略的 mode，
+        // 于是"不自动转换声道"会把命令静默变成空操作 —— 用户点了却没有反应。
+        let path = write_wav("explicit_off.wav", true, 1);
+        let tl = timeline_with_take(Some(&path));
+        let stored = ChannelImportPolicy {
+            mode: "off".into(),
+            ..Default::default()
+        };
+
+        // 自动路径：off 就是不判定（符合"不自动转换"的语义）。
+        let auto = plan(collect_targets(&tl, None, &stored, false), &stored, false);
+        assert!(
+            auto.iter().all(|p| p.resolution.mode.is_none()),
+            "off 时自动扫描不得折叠"
+        );
+
+        // 显式命令：强制检测语义 ⇒ 假立体声必须被识别并折叠。
+        let scan_policy = stored.for_explicit_scan();
+        let explicit = plan(
+            collect_targets(&tl, None, &scan_policy, true),
+            &scan_policy,
+            false,
+        );
+        assert_eq!(explicit[0].outcome, ChannelScanOutcome::FakeStereo);
+        assert_eq!(explicit[0].resolution.mode, Some(2), "显式扫描必须能折叠");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn the_explicit_scan_never_folds_true_stereo_under_always_mono() {
+        // 回归：导入策略设为"全部转换为单声道"时，显式扫描曾跟着无差别折叠 ——
+        // 一个叫"扫描假立体声"的命令不该有折叠真立体声的破坏力。
+        let path = write_wav("explicit_forced.wav", false, 1);
+        let tl = timeline_with_take(Some(&path));
+        let stored = ChannelImportPolicy {
+            mode: "alwaysMono".into(),
+            ..Default::default()
+        };
+        let scan_policy = stored.for_explicit_scan();
+        let planned = plan(
+            collect_targets(&tl, None, &scan_policy, true),
+            &scan_policy,
+            false,
+        );
+        assert_eq!(planned[0].outcome, ChannelScanOutcome::TrueStereo);
+        assert_eq!(
+            planned[0].resolution.mode, None,
+            "显式扫描必须按检测结果行事，不得无差别折叠真立体声"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

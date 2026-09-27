@@ -1310,12 +1310,17 @@ impl Clip {
     ///
     /// `all_takes` 为真时覆盖全部 Take（跟随"同步编辑所有 Take"设置），否则只盖
     /// active take。自动声道扫描会跳过带此封印的 Take。
+    ///
+    /// 每枚封印都记下**该 Take 当时的模式**（`chosen_mode`）—— 这是封印可信的
+    /// 凭据（见 `ChannelDecisionRecord::is_trusted_user_seal`）。
     pub fn seal_user_channel_mode(&mut self, all_takes: bool) {
         let active_id = self.active_take_id.clone();
         for take in self.takes.iter_mut() {
             let is_active = active_id.as_deref() == Some(take.id.as_str());
             if all_takes || is_active {
-                take.channel_decision = Some(crate::channel_decision::ChannelDecisionRecord::user());
+                take.channel_decision = Some(
+                    crate::channel_decision::ChannelDecisionRecord::user(take.channel_mode),
+                );
             }
         }
     }
@@ -8690,32 +8695,38 @@ impl TimelineState {
         true
     }
 
-    /// 加载边界：把「v5 之前的工程里 Take 没有判定档案」这一**版本语义**
-    /// 一次性翻译成显式的档案状态。
+    /// 加载边界：把**不可信的伪造用户封印**清回"未判定"。
     ///
-    /// - `project_file_version < 5`：什么都不做 —— 那些 Take 的档案保持
-    ///   `None`，即"从未判定"，会被可恢复扫描纳入候选（这是"漏判不再永久化"
-    ///   的前提）；
-    /// - `project_file_version >= 5`：把缺失的档案**封印为"用户决定"**。v5
-    ///   工程里的 `channel_mode` 是用户的选择（或此前迁移的结论），自动扫描
-    ///   绝不能再改写 —— 这正是旧实现用 `version < 5` 守住的那条不变式。
+    /// 曾经这里做的是反过来的事：`project_file_version >= 5` 时把**所有**没有
+    /// 档案的 Take 批量盖成"用户决定"。那条规则有两个致命问题：
     ///
-    /// 版本号只在这里被消费一次；此后全部逻辑只看档案本身。
-    pub fn seal_legacy_channel_decisions(&mut self, project_file_version: u32) -> usize {
-        if project_file_version < 5 {
-            return 0;
-        }
-        let mut sealed = 0usize;
+    /// 1. **本程序写出的每一个工程都是 v5**（`CURRENT_PROJECT_FILE_VERSION`），
+    ///    所以它在任何保存过的工程上都会触发，把所有 Take 一次性封印成"用户
+    ///    决定"，让折叠功能——无论后台扫描还是右键"扫描假立体声并转换"——
+    ///    对所有工程彻底失效；
+    /// 2. 它记的是"这是用户决定的"而不是"用户选了什么"，事后既无法验证也无法
+    ///    解释，属于凭空捏造意图。
+    ///
+    /// 现在只做**清理**：`ORIGIN_USER` 但没有 `chosen_mode` 的档案就是被那条
+    /// 规则伪造出来的，一律清回 `None`（= 未判定），交回扫描重新裁决。用户的
+    /// 真实选择由 [`crate::channel_decision::ChannelDecisionRecord::user`] 记录，
+    /// 带 `chosen_mode`，不受本函数影响。
+    ///
+    /// 返回被清理的档案数。
+    pub fn clear_untrusted_channel_seals(&mut self) -> usize {
+        let mut cleared = 0usize;
         for clip in &mut self.clips {
             for take in &mut clip.takes {
-                if take.channel_decision.is_none() {
-                    take.channel_decision =
-                        Some(crate::channel_decision::ChannelDecisionRecord::user());
-                    sealed += 1;
+                if take
+                    .channel_decision
+                    .is_some_and(crate::channel_decision::ChannelDecisionRecord::is_untrusted_user_seal)
+                {
+                    take.channel_decision = None;
+                    cleared += 1;
                 }
             }
         }
-        sealed
+        cleared
     }
 
     /// 波纹编辑（自动跟进）：把“编辑点（origin）之后、且不属于被编辑集合的剪辑”
@@ -9634,8 +9645,11 @@ impl TimelineState {
             .ok_or_else(|| format!("take not found: {take_id}"))?;
         take.channel_mode = mode.raw();
         // 用户显式设置 ⇒ 盖"用户决定"封印：自动声道扫描从此永不改写这个 Take。
-        // 这是判定档案存在的意义之一（见 `crate::channel_decision`）。
-        take.channel_decision = Some(crate::channel_decision::ChannelDecisionRecord::user());
+        // 封印必须记下**用户选的模式**，否则它不可信、会被加载边界当作伪造档案
+        // 清掉（见 `clear_untrusted_channel_seals`）。
+        take.channel_decision = Some(crate::channel_decision::ChannelDecisionRecord::user(
+            take.channel_mode,
+        ));
         if is_active {
             let take = take.clone();
             take.apply_to_clip(clip);

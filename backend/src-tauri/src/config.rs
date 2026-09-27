@@ -979,6 +979,23 @@ impl ChannelImportPolicy {
         self.mode == "off"
     }
 
+    /// 供**显式**扫描命令（右键"扫描假立体声并转换"）使用的判定参数。
+    ///
+    /// `mode` 是**自动**导入策略：`off` = 不自动转换、`alwaysMono` = 全部折叠。
+    /// 显式命令两条都不能直接用：
+    /// - `off` 会让命令静默变成空操作（用户点了却什么都不发生）；
+    /// - `alwaysMono` 会让它无差别折叠**真立体声** —— 一个叫"扫描假立体声"
+    ///   的命令不该有这种破坏力。
+    ///
+    /// 因此显式命令一律按**检测**语义执行，只沿用用户调好的窗口/容差/目标模式；
+    /// 想无条件折叠应该用声道模式子菜单里的"混合为单声道"。
+    pub fn for_explicit_scan(&self) -> Self {
+        Self {
+            mode: "smart".to_string(),
+            ..self.normalized()
+        }
+    }
+
     /// 转换到判定模块所需的参数。
     ///
     /// 容器解码预算取**后台扫描**口径（[`crate::stereo_detect::DEFAULT_CONTAINER_BUDGET_SEC`]）：
@@ -1619,6 +1636,28 @@ mod tests {
         assert_eq!(o.window_sec, 0.5);
         assert_eq!(o.window_count, 3);
         assert_eq!(o.tolerance, 1e-5);
+    }
+
+    #[test]
+    fn explicit_scan_always_detects_regardless_of_the_import_mode() {
+        // 回归：显式命令（右键"扫描假立体声并转换"）曾经直接套用导入策略的
+        // mode —— `off` 让它静默变成空操作，`alwaysMono` 让它无差别折叠
+        // 真立体声。两者都与"扫描假立体声"这个命令名不符。
+        for mode in ["off", "alwaysMono", "smart"] {
+            let policy = super::ChannelImportPolicy {
+                mode: mode.into(),
+                mono_target_mode: 3,
+                tolerance: 1e-2,
+                ..Default::default()
+            }
+            .normalized();
+            let scan = policy.for_explicit_scan();
+            assert!(scan.is_smart(), "{mode}: 显式扫描必须按检测语义执行");
+            assert!(!scan.is_off());
+            // 用户的偏好参数原样保留：只换判定语义，不动窗口/容差/目标模式。
+            assert_eq!(scan.mono_target_mode, 3, "{mode}: 目标模式必须保留");
+            assert_eq!(scan.tolerance, 1e-2, "{mode}: 容差必须保留");
+        }
     }
 
     #[test]

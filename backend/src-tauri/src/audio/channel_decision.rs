@@ -61,6 +61,17 @@ pub struct ChannelDecisionRecord {
     /// 自动结论之一（见本模块 `VERDICT_*` 常量）。
     #[serde(default)]
     pub verdict: u8,
+    /// 用户显式选择时写入的声道模式。
+    ///
+    /// 这是"用户封印"**可信**的唯一凭据：只有记录了"用户选了什么"的档案才代表
+    /// 真实意图（见 [`Self::is_sealed_by_user`]）。
+    ///
+    /// 早期版本曾在加载边界把"没有档案"批量伪造成用户封印（不带本字段），
+    /// 那些档案不代表任何人的选择 —— 必须当作"未判定"重新扫描。否则任何**保存
+    /// 过的**工程（工程版本 ≥ 5，也就是本程序写出的每一个工程）都会永久免疫于
+    /// 折叠，"扫描假立体声并转换"因此什么都不做。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chosen_mode: Option<i32>,
     /// 判定时源文件的内容指纹。
     ///
     /// `None` 表示当时读不出指纹 —— 无法证明文件没被替换，故结论一律视为
@@ -86,6 +97,7 @@ impl ChannelDecisionRecord {
         Self {
             origin: ORIGIN_AUTO,
             verdict,
+            chosen_mode: None,
             fingerprint,
             policy_sig,
             region_q,
@@ -98,10 +110,17 @@ impl ChannelDecisionRecord {
     }
 
     /// 用户显式决定的封印档案。
-    pub fn user() -> Self {
+    ///
+    /// `chosen_mode` 是**必填**的：用户封印的全部意义就是"记住用户选了什么"。
+    /// 只写一个"这是用户决定的"标记而不记内容，事后无法验证也无法解释，
+    /// 更糟的是它曾在加载边界被批量伪造（见本类型字段文档）。
+    pub fn user(chosen_mode: i32) -> Self {
         Self {
             origin: ORIGIN_USER,
             verdict: VERDICT_USER,
+            chosen_mode: Some(
+                crate::channel_mode::TakeChannelMode::from_raw(chosen_mode).raw(),
+            ),
             fingerprint: None,
             policy_sig: 0,
             region_q: None,
@@ -113,9 +132,28 @@ impl ChannelDecisionRecord {
         self.origin == ORIGIN_USER
     }
 
+    /// 是否是**可信的**用户封印。
+    ///
+    /// 只有记录了"用户选了什么"（`chosen_mode`）的档案才算数。加载边界曾把
+    /// "没有档案"批量伪造成用户封印以回避版本判断，那些档案没有内容、不代表
+    /// 任何人的选择，必须当作"未判定"重新扫描（见 [`Self::is_user`] 与
+    /// [`crate::channel_decision`] 的模块文档）。
+    pub fn is_trusted_user_seal(self) -> bool {
+        self.is_user() && self.chosen_mode.is_some()
+    }
+
     /// 是否「本次读不到，下次重试」。
     pub fn is_pending(self) -> bool {
         self.origin == ORIGIN_AUTO && self.verdict == VERDICT_PENDING
+    }
+
+    /// 是否是**不可信的**用户封印：标着"用户决定"却没记录选了什么。
+    ///
+    /// 这类档案只可能来自加载边界的批量伪造（见 [`Self::is_trusted_user_seal`]）。
+    /// 它们必须被当作"未判定"清除，否则那些 Take 会永久免疫于折叠 ——
+    /// 而本程序写出的每个工程都是 v5，等于整个功能对所有保存过的工程失效。
+    pub fn is_untrusted_user_seal(self) -> bool {
+        self.is_user() && self.chosen_mode.is_none()
     }
 
     /// 该结论对给定的上下文是否**仍然有效**（可直接采用，零解码）。
@@ -143,10 +181,8 @@ impl ChannelDecisionRecord {
 /// 该 Take 是否应被**自动扫描**纳入候选。
 ///
 /// 覆盖三种情况：从未判过、判过但上下文已变（指纹/策略/区间）、以及上次
-/// 「读不到」需要重试。用户封印的 Take 一律排除。
-///
-/// 这是「漏判不再永久化」的落点：v4 旧工程里任何一次没读到的 Take，都会在
-/// 后续每次打开时重新进入候选，直到真正得出结论为止。
+/// 「读不到」需要重试。**只有可信的用户封印**才排除（不可信的伪造封印会被
+/// 当作未判定重新扫描）。
 pub fn needs_auto_scan(
     record: Option<ChannelDecisionRecord>,
     fingerprint: Option<u64>,
@@ -155,12 +191,8 @@ pub fn needs_auto_scan(
 ) -> bool {
     match record {
         None => true,
-        Some(record) => {
-            if record.is_user() {
-                return false;
-            }
-            !record.is_authoritative_for(fingerprint, policy_sig, region_q)
-        }
+        Some(record) => !record.is_trusted_user_seal()
+            && !record.is_authoritative_for(fingerprint, policy_sig, region_q),
     }
 }
 
@@ -205,12 +237,48 @@ mod tests {
 
     #[test]
     fn user_record_is_never_scanned() {
-        let record = ChannelDecisionRecord::user();
+        let record = ChannelDecisionRecord::user(2);
         assert!(record.is_user());
+        assert!(record.is_trusted_user_seal());
+        assert_eq!(record.chosen_mode, Some(2));
         assert!(!record.is_authoritative_for(None, SIG, REGION));
         assert!(!needs_auto_scan(Some(record), Some(FP), SIG, REGION));
         // 连上下文变化也不该把它拉回候选：用户的选择是终局的。
         assert!(!needs_auto_scan(Some(record), Some(FP + 1), SIG + 1, None));
+    }
+
+    #[test]
+    fn a_user_seal_without_a_recorded_choice_is_not_a_seal() {
+        // 回归：加载边界曾把"没有档案"批量伪造成用户封印（标着用户决定、却没记
+        // 用户选了什么）。本程序写出的每个工程都是 v5，于是那个伪造让折叠功能
+        // 对所有保存过的工程永久失效 —— 右键"扫描假立体声并转换"什么都不做。
+        let fabricated = ChannelDecisionRecord {
+            origin: ORIGIN_USER,
+            verdict: VERDICT_USER,
+            chosen_mode: None,
+            fingerprint: None,
+            policy_sig: 0,
+            region_q: None,
+        };
+        assert!(fabricated.is_user(), "origin 上它仍标着用户");
+        assert!(fabricated.is_untrusted_user_seal());
+        assert!(!fabricated.is_trusted_user_seal());
+        assert!(
+            needs_auto_scan(Some(fabricated), Some(FP), SIG, REGION),
+            "没有记录'选了什么'的封印不能让 Take 免疫于折叠"
+        );
+    }
+
+    #[test]
+    fn user_seal_round_trips_with_the_chosen_mode() {
+        let record = ChannelDecisionRecord::user(3);
+        let json = serde_json::to_string(&record).expect("serialize");
+        let back: ChannelDecisionRecord = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, record);
+        assert_eq!(back.chosen_mode, Some(3));
+
+        // 越界模式在构造时被规范化，绝不会把非法值写进档案。
+        assert_eq!(ChannelDecisionRecord::user(99).chosen_mode, Some(0));
     }
 
     #[test]
