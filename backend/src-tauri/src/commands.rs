@@ -889,23 +889,84 @@ pub fn get_track_summary(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn add_clip(
-    state: State<'_, AppState>,
+pub async fn add_clip(
+    app: tauri::AppHandle,
     track_id: Option<String>,
     name: Option<String>,
     start_sec: Option<f64>,
     length_sec: Option<f64>,
     source_path: Option<String>,
 ) -> crate::models::TimelineStatePayload {
-    timeline::add_clip(state, track_id, name, start_sec, length_sec, source_path)
+    // 智能模式下会在**读取 timeline 锁之前**解码音频判定声道；即便是短预算，
+    // 在慢盘/网络盘上也可能耗掉数百毫秒。同步命令跑在主线程会把整个前端冻住
+    // （连加载动画都转不动），因此卸载到阻塞线程池 —— 与 import_audio_item
+    // 同一模式。
+    let scan_handle = app.clone();
+    let payload = tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        timeline::add_clip(state, track_id, name, start_sec, length_sec, source_path)
+    })
+    .await
+    .unwrap_or_else(|error| crate::models::TimelineStatePayload {
+        ok: false,
+        tracks: Vec::new(),
+        clips: Vec::new(),
+        created_clip_ids: Some(Vec::new()),
+        created_track_ids: None,
+        selected_track_id: None,
+        selected_clip_id: None,
+        bpm: 120.0,
+        playhead_sec: 0.0,
+        project_sec: None,
+        project: None,
+        missing_files: Some(vec![format!("add clip task failed: {error}")]),
+        disabled_group_ids: Vec::new(),
+        tempo_map: None,
+        undo_depth: None,
+        redo_depth: None,
+        notes_markdown: None,
+        param_selection_restore: None,
+    });
+    // 判定用的是短容器预算，长素材只拿到"待定"：补一轮完整预算的后台扫描收敛。
+    crate::commands::channel_scan::request_channel_scan(&scan_handle);
+    payload
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn create_clips_bulk(
-    state: State<'_, AppState>,
+pub async fn create_clips_bulk(
+    app: tauri::AppHandle,
     payload: crate::state::CreateClipsBulkPayload,
 ) -> crate::models::TimelineStatePayload {
-    timeline::create_clips_bulk(state, payload)
+    // 同上：模板的声道判定要解码音频（按来源路径分组后解码量只与文件数成正比），
+    // 但这仍是锁外的磁盘 IO，不能占着主线程。
+    let scan_handle = app.clone();
+    let payload = tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        timeline::create_clips_bulk(state, payload)
+    })
+    .await
+    .unwrap_or_else(|error| crate::models::TimelineStatePayload {
+        ok: false,
+        tracks: Vec::new(),
+        clips: Vec::new(),
+        created_clip_ids: Some(Vec::new()),
+        created_track_ids: None,
+        selected_track_id: None,
+        selected_clip_id: None,
+        bpm: 120.0,
+        playhead_sec: 0.0,
+        project_sec: None,
+        project: None,
+        missing_files: Some(vec![format!("create clips task failed: {error}")]),
+        disabled_group_ids: Vec::new(),
+        tempo_map: None,
+        undo_depth: None,
+        redo_depth: None,
+        notes_markdown: None,
+        param_selection_restore: None,
+    });
+    crate::commands::channel_scan::request_channel_scan(&scan_handle);
+    payload
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1142,16 +1203,41 @@ pub async fn scan_and_convert_fake_stereo(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn add_clip_take_from_media(
+pub async fn add_clip_take_from_media(
     app: tauri::AppHandle,
-    state: State<'_, AppState>,
     clip_id: String,
     source_path: String,
     name: Option<String>,
     checkpoint: Option<bool>,
 ) -> crate::models::TimelineStatePayload {
-    let payload = timeline::add_clip_take_from_media(state, clip_id, source_path, name, checkpoint);
-    crate::commands::channel_scan::request_channel_scan(&app);
+    // 同上：换源 / 加 take 会在锁外做声道判定（可能解码音频），卸载到阻塞线程池。
+    let scan_handle = app.clone();
+    let payload = tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        timeline::add_clip_take_from_media(state, clip_id, source_path, name, checkpoint)
+    })
+    .await
+    .unwrap_or_else(|error| crate::models::TimelineStatePayload {
+        ok: false,
+        tracks: Vec::new(),
+        clips: Vec::new(),
+        created_clip_ids: Some(Vec::new()),
+        created_track_ids: None,
+        selected_track_id: None,
+        selected_clip_id: None,
+        bpm: 120.0,
+        playhead_sec: 0.0,
+        project_sec: None,
+        project: None,
+        missing_files: Some(vec![format!("add take task failed: {error}")]),
+        disabled_group_ids: Vec::new(),
+        tempo_map: None,
+        undo_depth: None,
+        redo_depth: None,
+        notes_markdown: None,
+        param_selection_restore: None,
+    });
+    crate::commands::channel_scan::request_channel_scan(&scan_handle);
     payload
 }
 

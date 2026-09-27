@@ -285,27 +285,41 @@ pub fn scan_source_with_opts(
     }
 }
 
-/// 锁外：按策略为一个源文件算出落点。
+/// 锁外：按策略为一个源文件算出落点（**交互式**口径）。
+///
+/// # 为什么默认就是短预算
+///
+/// 本函数是导入 / 粘贴 / 换源等**用户正在等待**的路径的入口。非 WAV 容器要
+/// 想看到"第 N 秒"就必须从文件头顺序解到第 N 秒（见
+/// [`crate::stereo_detect::DetectOptions::container_budget_sec`]），用长预算去
+/// 判定一个长素材意味着把用户钉在原地数秒。
+///
+/// 因此这里默认套用 [`crate::stereo_detect::IMPORT_CONTAINER_BUDGET_SEC`]。
+/// 短预算换来的不是"不判定"，而是"**这次可能判不到结尾**"：那些素材返回
+/// [`ChannelScanOutcome::Pending`]，由随后触发的后台扫描带完整预算补判。
+///
+/// 判定档案的签名含 `container_budget_sec`，所以短预算的结论**天然不会**被
+/// 当成权威结论顶掉后台的长预算重判（详见 [`DecisionContext::for_take`]）。
+///
+/// 以前这里隐式继承 [`ChannelImportPolicy::detect_options`]（长预算），导致
+/// 几条主导入路径实际从未享受到那套为低延迟设计的护栏。
 pub fn precompute_decision(
     source_path: Option<&Path>,
     source_channels: Option<u16>,
     region: Option<(f64, f64)>,
     policy: &ChannelImportPolicy,
 ) -> ChannelResolution {
-    precompute_decision_with_opts(
-        source_path,
-        source_channels,
-        region,
-        policy,
-        &policy.detect_options(),
-    )
+    let opts = policy
+        .detect_options()
+        .with_container_budget_sec(crate::stereo_detect::IMPORT_CONTAINER_BUDGET_SEC);
+    precompute_decision_with_opts(source_path, source_channels, region, policy, &opts)
 }
 
 /// [`precompute_decision`] 的显式判定参数版本。
 ///
-/// 导入路径用短容器预算换低延迟：写下的档案带着短预算的签名，与后台扫描的
-/// 长预算签名不同，因此**不会被误认为权威结论** —— 后台会带着完整预算重判，
-/// 用户看到的结果不变，只是晚几百毫秒。
+/// 调用方自行决定解码预算：交互式路径用
+/// [`crate::stereo_detect::IMPORT_CONTAINER_BUDGET_SEC`]，后台扫描用
+/// [`crate::stereo_detect::DEFAULT_CONTAINER_BUDGET_SEC`]。
 pub fn precompute_decision_with_opts(
     source_path: Option<&Path>,
     source_channels: Option<u16>,
@@ -315,6 +329,38 @@ pub fn precompute_decision_with_opts(
 ) -> ChannelResolution {
     let ctx = DecisionContext::for_region(None, region, opts);
     scan_source_with_opts(source_path, source_channels, region, policy, opts).resolution(policy, ctx)
+}
+
+/// 交互式：按策略为一批源文件算出落点（**按路径分组去重**）。
+///
+/// 与逐条调用 [`precompute_decision`] 语义一致，但同一源文件只解码一次。
+/// 批量导入 / 批量新建常见"多个 Clip 指向同一素材"，逐条判定会把解码量随
+/// **引用数**线性放大，而批量路径用户同样在等，是最不能浪费解码的地方。
+pub fn precompute_decisions_grouped(
+    requests: &[ScanRequest<'_>],
+    policy: &ChannelImportPolicy,
+) -> Vec<ChannelResolution> {
+    let opts = policy
+        .detect_options()
+        .with_container_budget_sec(crate::stereo_detect::IMPORT_CONTAINER_BUDGET_SEC);
+    precompute_decisions_grouped_with_opts(requests, policy, &opts)
+}
+
+/// [`precompute_decisions_grouped`] 的显式判定参数版本。
+pub fn precompute_decisions_grouped_with_opts(
+    requests: &[ScanRequest<'_>],
+    policy: &ChannelImportPolicy,
+    opts: &stereo_detect::DetectOptions,
+) -> Vec<ChannelResolution> {
+    let outcomes = scan_sources_grouped_with_opts(requests, policy, opts);
+    outcomes
+        .into_iter()
+        .zip(requests.iter())
+        .map(|(outcome, request)| {
+            let ctx = DecisionContext::for_region(None, request.region, opts);
+            outcome.resolution(policy, ctx)
+        })
+        .collect()
 }
 
 /// 锁外：为一个 Take 算出落点（区间取自该 Take 的消费窗口，上下文取自该 Take
@@ -353,9 +399,23 @@ pub struct ScanRequest<'a> {
 ///
 /// 返回值与 `requests` 一一对应。同样**会解码音频**，调用方必须保证不在
 /// 持有 timeline 全局锁时调用。
+/// 锁外：按「源文件」分组批量判定（长预算口径，后台扫描 / 工程迁移用）。
+///
+/// 交互式路径请用 [`scan_sources_grouped`] —— 它套用短容器预算，不会让用户等着
+/// 一次全文件解码。
 pub fn scan_sources_grouped(
     requests: &[ScanRequest<'_>],
     policy: &ChannelImportPolicy,
+) -> Vec<ChannelScanOutcome> {
+    let opts = policy.detect_options();
+    scan_sources_grouped_with_opts(requests, policy, &opts)
+}
+
+/// [`scan_sources_grouped`] 的显式判定参数版本。
+pub fn scan_sources_grouped_with_opts(
+    requests: &[ScanRequest<'_>],
+    policy: &ChannelImportPolicy,
+    opts: &stereo_detect::DetectOptions,
 ) -> Vec<ChannelScanOutcome> {
     let policy = policy.normalized();
     let mut outcomes = vec![ChannelScanOutcome::PolicyOff; requests.len()];
@@ -443,7 +503,7 @@ pub fn scan_sources_grouped(
             member_slot.push(slot);
         }
 
-        let verdicts = stereo_detect::verdict_for_regions(path, &unique_regions, &policy.detect_options());
+        let verdicts = stereo_detect::verdict_for_regions(path, &unique_regions, opts);
 
         for (position, &member) in member_indices.iter().enumerate() {
             outcomes[member] = match verdicts[member_slot[position]] {

@@ -538,10 +538,11 @@ pub(super) fn add_clip(
 
 /// 锁外：为一个待导入的源路径算好声道落点。
 ///
-/// 空路径一律 `NOOP`（无源 Take 不在折叠范围内）。容器解码预算收到
-/// [`crate::stereo_detect::IMPORT_CONTAINER_BUDGET_SEC`]：这是**命令线程上的
-/// 同步路径**，不能为一个"锦上添花"的折叠把用户卡住；超出该范围的长素材返回
-/// "未定论"，由随后的后台扫描带完整预算补判。
+/// 空路径一律 `NOOP`（无源 Take 不在折叠范围内）。
+///
+/// 交互式口径（`precompute_decision`）：容器解码预算收到
+/// [`crate::stereo_detect::IMPORT_CONTAINER_BUDGET_SEC`]，长素材返回"待定"，
+/// 由随后的后台扫描带完整预算补判。
 fn precompute_decision_for_source(
     source_path: Option<&str>,
 ) -> crate::channel_policy::ChannelResolution {
@@ -549,34 +550,49 @@ fn precompute_decision_for_source(
         return crate::channel_policy::ChannelResolution::NOOP;
     };
     let policy = crate::config::channel_import_policy();
-    let opts = policy
-        .detect_options()
-        .with_container_budget_sec(crate::stereo_detect::IMPORT_CONTAINER_BUDGET_SEC);
-    crate::channel_policy::precompute_decision_with_opts(
-        Some(Path::new(path)),
-        None,
-        None,
-        &policy,
-        &opts,
-    )
+    crate::channel_policy::precompute_decision(Some(Path::new(path)), None, None, &policy)
 }
 
 pub(super) fn create_clips_bulk(
     state: State<'_, AppState>,
     payload: crate::state::CreateClipsBulkPayload,
 ) -> crate::models::TimelineStatePayload {
-    // 锁外：为"从零按 source_path 新建"的模板预判定声道策略。
+    // 锁外：为"从零按 source_path 新建"的模板预判定声道策略（**按路径分组**）。
     //
     // 带 `source_clip_id` 的模板是**复制**语义：目标会克隆源 Clip 的 Take
     // （含用户显式设定的 channel_mode），必须原样保留，不能被策略改写。
-    let decisions: Vec<Option<crate::channel_policy::ChannelResolution>> = payload
+    //
+    // 【为什么必须是分组的】同一素材被多个模板引用时（批量新建的常见形态），
+    // 逐条判定会把解码量按引用数放大；而这条路径用户正在等待进度，是最不该
+    // 浪费解码的地方。
+    let policy = crate::config::channel_import_policy();
+    let requests: Vec<crate::channel_policy::ScanRequest<'_>> = payload
         .templates
         .iter()
         .map(|template| {
+            let path = if template.source_clip_id.is_some() {
+                // 复制语义：不参与判定（占位请求，下面用 `None` 落点跳过）。
+                None
+            } else {
+                template.source_path.as_deref()
+            };
+            crate::channel_policy::ScanRequest {
+                source_path: path.map(str::trim).filter(|p| !p.is_empty()).map(Path::new),
+                source_channels: None,
+                region: None,
+            }
+        })
+        .collect();
+    let grouped = crate::channel_policy::precompute_decisions_grouped(&requests, &policy);
+    let decisions: Vec<Option<crate::channel_policy::ChannelResolution>> = payload
+        .templates
+        .iter()
+        .zip(grouped)
+        .map(|(template, resolution)| {
             if template.source_clip_id.is_some() {
                 None
             } else {
-                Some(precompute_decision_for_source(template.source_path.as_deref()))
+                Some(resolution)
             }
         })
         .collect();
@@ -1816,14 +1832,7 @@ pub(super) fn import_media_files_as_takes(
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "Take".to_string());
-        // 导入声道策略判定：仍处锁外，可安全解码。
-        let channel_decision = crate::channel_policy::precompute_decision(
-            Some(file_path),
-            Some(info.channels),
-            None,
-            &crate::config::channel_import_policy(),
-        );
-        let mut take = crate::state::ClipTake {
+        let take = crate::state::ClipTake {
             id: crate::state::new_id("take"),
             name: file_name.clone(),
             gain: 1.0,
@@ -1853,8 +1862,27 @@ pub(super) fn import_media_files_as_takes(
             stretch_markers: Vec::new(),
             envelopes: None,
         };
-        crate::channel_policy::apply_resolution(&mut take, channel_decision);
+        // 声道判定不在本循环里逐条做：同一文件被多次拖入时那会把解码量按引用
+        // 数放大，而这条路径用户正在等进度。改为下面的**分组一次性判定**。
         takes.push(take);
+    }
+
+    // ── 阶段 1b（锁外，按路径分组）：一次性算出所有 take 的声道落点 ──
+    // 与上面的 header 探测同理必须在锁外；分组让同一路径只解码一次。
+    if !takes.is_empty() {
+        let policy = crate::config::channel_import_policy();
+        let requests: Vec<crate::channel_policy::ScanRequest<'_>> = takes
+            .iter()
+            .map(|take| crate::channel_policy::ScanRequest {
+                source_path: take.source_path.as_deref().map(Path::new),
+                source_channels: take.source_channels,
+                region: None,
+            })
+            .collect();
+        let decisions = crate::channel_policy::precompute_decisions_grouped(&requests, &policy);
+        for (take, decision) in takes.iter_mut().zip(decisions) {
+            crate::channel_policy::apply_resolution(take, decision);
+        }
     }
 
     if takes.is_empty() {
