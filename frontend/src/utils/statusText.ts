@@ -20,11 +20,7 @@ export type TranslateFn = (key: string) => string;
  * 顺序不能随意调换：`status_fake_stereo_scan_folded` 的原文同时能被单数量
  * 正则的部分前缀命中，先走多数量分支才能拿到 `{m}` / `{p}`。
  */
-export function resolveStatusText(
-    status: string,
-    statusKey: StatusKeyMap,
-    t: TranslateFn,
-): string {
+export function resolveStatusText(status: string, statusKey: StatusKeyMap, t: TranslateFn): string {
     if (!status) return status;
     const exact = statusKey[status];
     if (exact) return t(exact);
@@ -50,17 +46,19 @@ export function resolveStatusText(
 
     // 假立体声扫描**一个候选都没有**时的原因。全部按后端返回的真实计数成句，
     // 不做猜测 —— 猜出来的原因会随口断言"你的选区在工程里找不到"。
-    const noClips = status === "Fake-stereo scan: the project has no clips";
+    const noClips = status === "Fake-stereo scan: project has no clips";
     if (noClips) return t("status_fake_stereo_scan_no_clips");
-    const unmatched = status.match(/^Fake-stereo scan: range matches no clip \(project has (\d+)\)$/);
+    const unmatched = status.match(
+        /^Fake-stereo scan: range matches no clip \((\d+) in project\)$/,
+    );
     if (unmatched) {
         return t("status_fake_stereo_scan_range_unmatched").replace("{p}", unmatched[1] ?? "0");
     }
-    const noTakes = status.match(/^Fake-stereo scan: (\d+) clip\(s\) in range have no takes$/);
+    const noTakes = status.match(/^Fake-stereo scan: (\d+) clip\(s\) have no takes$/);
     if (noTakes) {
         return t("status_fake_stereo_scan_no_takes").replace("{c}", noTakes[1] ?? "0");
     }
-    const noSource = status.match(/^Fake-stereo scan: (\d+) take\(s\) have no audio source$/);
+    const noSource = status.match(/^Fake-stereo scan: (\d+) take\(s\) have no source$/);
     if (noSource) {
         return t("status_fake_stereo_scan_no_source").replace("{n}", noSource[1] ?? "0");
     }
@@ -68,11 +66,11 @@ export function resolveStatusText(
         return t("status_fake_stereo_scan_nothing");
     }
 
-    // 假立体声扫描：两个数量 + 两种变体（试扫 / 实扫）+ 可选的两个后缀
-    //（"本次没读到" / "覆盖了你原本设置的声道模式"）。
-    // 形如 "Fake-stereo scan: 5 take(s), 3 folded to mono, 2 unreadable"。
+    // 假立体声扫描：分数形计数 + 两种变体（试扫 foldable / 实扫 folded）+ 可选
+    // 的两个后缀（"unreadable" / "overridden"）。
+    // 形如 "Fake-stereo scan: 3/5 folded, 2 unreadable, 1 overridden"。
     const scan = status.match(
-        /^Fake-stereo scan: (\d+) take\(s\), (\d+) (foldable|folded to mono)(?:, (\d+) unreadable)?(?:, (\d+) setting\(s\) overridden)?$/,
+        /^Fake-stereo scan: (\d+)\/(\d+) (foldable|folded)(?:, (\d+) unreadable)?(?:, (\d+) overridden)?$/,
     );
     if (scan) {
         const foldable = scan[3] === "foldable";
@@ -86,8 +84,10 @@ export function resolveStatusText(
               ? "status_fake_stereo_scan_folded_pending"
               : "status_fake_stereo_scan_folded";
         let text = t(key)
-            .replace("{n}", scan[1] ?? "0")
-            .replace("{m}", scan[2] ?? "0")
+            // 原文写成 {converted}/{scanned} 分数：第 1 组是已折叠/可折叠数，
+            // 第 2 组是总数。模板里的 {m} = 分子、{n} = 分母。
+            .replace("{m}", scan[1] ?? "0")
+            .replace("{n}", scan[2] ?? "0")
             .replace("{p}", String(unreadable));
         if (overridden > 0) {
             text += t("status_fake_stereo_scan_overridden_suffix").replace(

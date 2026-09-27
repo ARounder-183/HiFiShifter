@@ -1632,24 +1632,20 @@ export const koKR = {
     status_clear_render_cache_failed: "렌더 캐시 지우기 실패",
     status_clearing_render_cache: "렌더 캐시 지우는 중...",
     status_fake_stereo_scan_rejected: "가짜 스테레오 검사가 거부되었습니다",
-    status_fake_stereo_scan_foldable: "가짜 스테레오 검사: {n}개 테이크 중 {m}개 접기 가능",
-    status_fake_stereo_scan_folded: "가짜 스테레오 검사: {n}개 테이크 중 {m}개 모노로 접음",
-    status_fake_stereo_scan_foldable_pending:
-        "가짜 스테레오 검사: {n}개 테이크 중 {m}개 접기 가능, {p}개 읽기 실패(다음 실행 시 재시도)",
-    status_fake_stereo_scan_folded_pending:
-        "가짜 스테레오 검사: {n}개 테이크 중 {m}개 모노로 접음, {p}개 읽기 실패(다음 실행 시 재시도)",
+    status_fake_stereo_scan_foldable: "가짜 스테레오: {m}/{n}개 접기 가능",
+    status_fake_stereo_scan_folded: "가짜 스테레오: {m}/{n}개 접음",
+    status_fake_stereo_scan_foldable_pending: "가짜 스테레오: {m}/{n}개 접기 가능, {p}개 미읽음",
+    status_fake_stereo_scan_folded_pending: "가짜 스테레오: {m}/{n}개 접음, {p}개 미읽음",
     status_channel_scan_folded: "{n}개 클립을 자동으로 모노로 접었습니다",
-    status_channel_scan_pending: "{n}개 소스 읽기 실패(다음 실행 시 재시도)",
-    status_fake_stereo_scan_nearest_hint:
-        ". 가장 근접한 소재의 차이는 {d}입니다(허용 오차를 넓히는 것을 고려하세요)",
-    status_fake_stereo_scan_no_source: "가짜 스테레오 검사: {n}개 테이크에 오디오 소스가 없습니다",
-    status_fake_stereo_scan_no_clips: "가짜 스테레오 검사: 프로젝트에 클립이 없습니다",
+    status_channel_scan_pending: "{n}개 소스 미읽음(다음 실행 시 재시도)",
+    status_fake_stereo_scan_nearest_hint: ". 가장 근접한 차이 {d}(허용 오차를 넓히면 접힙니다)",
+    status_fake_stereo_scan_no_source: "가짜 스테레오: {n}개 테이크에 소스가 없습니다",
+    status_fake_stereo_scan_no_clips: "가짜 스테레오: 프로젝트에 클립이 없습니다",
     status_fake_stereo_scan_range_unmatched:
-        "가짜 스테레오 검사: 검사 범위가 프로젝트와 일치하지 않습니다(프로젝트에 {p}개)",
-    status_fake_stereo_scan_no_takes: "가짜 스테레오 검사: 범위 내 {c}개 클립에 테이크가 없습니다",
-    status_fake_stereo_scan_overridden_suffix:
-        ". 그중 {n}개는 설정하신 채널 모드를 검사 결과로 덮어썼습니다(되돌릴 수 있습니다)",
-    status_fake_stereo_scan_nothing: "가짜 스테레오 검사: 판정할 대상이 없습니다",
+        "가짜 스테레오: 범위가 일치하지 않음(프로젝트에 {p}개)",
+    status_fake_stereo_scan_no_takes: "가짜 스테레오: {c}개 클립에 테이크가 없습니다",
+    status_fake_stereo_scan_overridden_suffix: ". {n}개 설정을 덮어썼습니다(되돌릴 수 있음)",
+    status_fake_stereo_scan_nothing: "가짜 스테레오: 판정할 대상이 없습니다",
     status_take_channel_mode_rejected: "테이크 채널 모드 변경이 거부되었습니다",
 
     benchmark_title: "추론 장치 벤치마크",

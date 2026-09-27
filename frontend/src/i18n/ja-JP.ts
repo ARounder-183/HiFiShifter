@@ -1653,27 +1653,19 @@ export const jaJP = {
     status_clear_render_cache_failed: "レンダーキャッシュの削除に失敗しました",
     status_clearing_render_cache: "レンダーキャッシュをクリア中...",
     status_fake_stereo_scan_rejected: "疑似ステレオのスキャンが拒否されました",
-    status_fake_stereo_scan_foldable: "疑似ステレオスキャン：{n} テイク中 {m} 件が折り畳み可能",
-    status_fake_stereo_scan_folded:
-        "疑似ステレオスキャン：{n} テイク中 {m} 件をモノラルに折り畳みました",
-    status_fake_stereo_scan_foldable_pending:
-        "疑似ステレオスキャン：{n} テイク中 {m} 件が折り畳み可能、{p} 件は今回読み取れず（次回起動時に再試行）",
-    status_fake_stereo_scan_folded_pending:
-        "疑似ステレオスキャン：{n} テイク中 {m} 件をモノラルに折り畳み、{p} 件は今回読み取れず（次回起動時に再試行）",
+    status_fake_stereo_scan_foldable: "疑似ステレオ：{m}/{n} 件が折り畳み可能",
+    status_fake_stereo_scan_folded: "疑似ステレオ：{m}/{n} 件を折り畳みました",
+    status_fake_stereo_scan_foldable_pending: "疑似ステレオ：{m}/{n} 件が折り畳み可能、{p} 件未読",
+    status_fake_stereo_scan_folded_pending: "疑似ステレオ：{m}/{n} 件を折り畳み、{p} 件未読",
     status_channel_scan_folded: "{n} 件のクリップを自動でモノラルに折り畳みました",
-    status_channel_scan_pending: "{n} 件の素材を今回読み取れず（次回起動時に再試行）",
-    status_fake_stereo_scan_nearest_hint:
-        "。最も近い素材の差は {d} です（許容値を緩めることを検討してください）",
-    status_fake_stereo_scan_no_source:
-        "疑似ステレオスキャン：{n} 件のテイクに音声ソースがありません",
-    status_fake_stereo_scan_no_clips: "疑似ステレオスキャン：プロジェクトにクリップがありません",
-    status_fake_stereo_scan_range_unmatched:
-        "疑似ステレオスキャン：スキャン範囲がプロジェクトと一致しません（プロジェクトに {p} 件）",
-    status_fake_stereo_scan_no_takes:
-        "疑似ステレオスキャン：範囲内の {c} 件のクリップにテイクがありません",
-    status_fake_stereo_scan_overridden_suffix:
-        "。うち {n} 件は設定済みのチャンネルモードをスキャン結果で上書きしました（元に戻せます）",
-    status_fake_stereo_scan_nothing: "疑似ステレオスキャン：判定対象がありません",
+    status_channel_scan_pending: "{n} 件の素材を未読（次回起動時に再試行）",
+    status_fake_stereo_scan_nearest_hint: "。最も近い差は {d}（許容値を緩めると折り畳めます）",
+    status_fake_stereo_scan_no_source: "疑似ステレオ：{n} 件のテイクに音声ソースがありません",
+    status_fake_stereo_scan_no_clips: "疑似ステレオ：プロジェクトにクリップがありません",
+    status_fake_stereo_scan_range_unmatched: "疑似ステレオ：スキャン範囲が一致しません（{p} 件）",
+    status_fake_stereo_scan_no_takes: "疑似ステレオ：{c} 件のクリップにテイクがありません",
+    status_fake_stereo_scan_overridden_suffix: "。{n} 件の設定を上書きしました（元に戻せます）",
+    status_fake_stereo_scan_nothing: "疑似ステレオ：判定対象がありません",
     status_take_channel_mode_rejected: "テイクのチャンネルモード変更が拒否されました",
 
     benchmark_title: "推論デバイスベンチマーク",

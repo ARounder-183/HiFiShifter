@@ -1778,24 +1778,19 @@ export const enUS = {
     status_clear_render_cache_failed: "Clear render cache failed",
     status_clearing_render_cache: "Clearing render cache...",
     status_fake_stereo_scan_rejected: "Fake-stereo scan rejected",
-    status_fake_stereo_scan_foldable: "Fake-stereo scan: {n} take(s), {m} foldable",
-    status_fake_stereo_scan_folded: "Fake-stereo scan: {n} take(s), {m} folded to mono",
-    status_fake_stereo_scan_foldable_pending:
-        "Fake-stereo scan: {n} take(s), {m} foldable, {p} unreadable (retried on next open)",
-    status_fake_stereo_scan_folded_pending:
-        "Fake-stereo scan: {n} take(s), {m} folded to mono, {p} unreadable (retried on next open)",
+    status_fake_stereo_scan_foldable: "Fake-stereo: {m}/{n} foldable",
+    status_fake_stereo_scan_folded: "Fake-stereo: {m}/{n} folded",
+    status_fake_stereo_scan_foldable_pending: "Fake-stereo: {m}/{n} foldable, {p} unreadable",
+    status_fake_stereo_scan_folded_pending: "Fake-stereo: {m}/{n} folded, {p} unreadable",
     status_channel_scan_folded: "Folded {n} clip(s) to mono automatically",
     status_channel_scan_pending: "{n} source(s) unreadable, retried on next open",
-    status_fake_stereo_scan_nearest_hint:
-        "; closest match differs by {d} — consider a looser tolerance",
-    status_fake_stereo_scan_no_source: "Fake-stereo scan: {n} take(s) have no audio source",
-    status_fake_stereo_scan_no_clips: "Fake-stereo scan: the project has no clips",
-    status_fake_stereo_scan_range_unmatched:
-        "Fake-stereo scan: the scanned range matches no clip (the project has {p})",
-    status_fake_stereo_scan_no_takes: "Fake-stereo scan: {c} clip(s) in range have no takes",
-    status_fake_stereo_scan_overridden_suffix:
-        "; {n} of them kept a channel mode you set and were overridden by the scan (undoable)",
-    status_fake_stereo_scan_nothing: "Fake-stereo scan: nothing to decide",
+    status_fake_stereo_scan_nearest_hint: "; closest differs by {d}, consider a looser tolerance",
+    status_fake_stereo_scan_no_source: "Fake-stereo: {n} take(s) have no source",
+    status_fake_stereo_scan_no_clips: "Fake-stereo: the project has no clips",
+    status_fake_stereo_scan_range_unmatched: "Fake-stereo: range matches no clip ({p} in project)",
+    status_fake_stereo_scan_no_takes: "Fake-stereo: {c} clip(s) have no takes",
+    status_fake_stereo_scan_overridden_suffix: "; {n} user-set mode(s) overridden (undoable)",
+    status_fake_stereo_scan_nothing: "Fake-stereo: nothing to decide",
     status_take_channel_mode_rejected: "Take channel mode rejected",
 
     // ── Benchmark ────────────────────────────────────────────────────────

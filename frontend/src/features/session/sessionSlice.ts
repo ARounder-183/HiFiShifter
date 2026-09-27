@@ -5736,13 +5736,13 @@ const sessionSlice = createSlice({
                     const seen = eligibility.takes_seen ?? 0;
                     const noSource = eligibility.skipped_no_source ?? 0;
                     if (projectClips === 0) {
-                        state.status = "Fake-stereo scan: the project has no clips";
+                        state.status = "Fake-stereo scan: project has no clips";
                     } else if (matched === 0) {
-                        state.status = `Fake-stereo scan: range matches no clip (project has ${projectClips})`;
+                        state.status = `Fake-stereo scan: range matches no clip (${projectClips} in project)`;
                     } else if (seen === 0) {
-                        state.status = `Fake-stereo scan: ${matched} clip(s) in range have no takes`;
+                        state.status = `Fake-stereo scan: ${matched} clip(s) have no takes`;
                     } else if (noSource > 0) {
-                        state.status = `Fake-stereo scan: ${noSource} take(s) have no audio source`;
+                        state.status = `Fake-stereo scan: ${noSource} take(s) have no source`;
                     } else {
                         state.status = "Fake-stereo scan: nothing to decide";
                     }
@@ -5750,14 +5750,14 @@ const sessionSlice = createSlice({
                 }
 
                 // 后缀在 App.tsx 的 statusText 里解析（`statusKey` 映射 + 双数量
-                // 正则）。"本次没读到"必须与"单声道、无事可做"区分开：前者下次
-                // 打开会自动重试，后者永远不会再判。
+                // 正则）。"unreadable"必须与"已折叠"区分开：前者下次打开会自动
+                // 重试，后者永远不会再判。计数一律写成 {converted}/{scanned} 分数，
+                // 比逐个念数量短一半。
                 const pendingSuffix = pending > 0 ? `, ${pending} unreadable` : "";
-                const overrodeSuffix =
-                    overrode > 0 ? `, ${overrode} setting(s) overridden` : "";
+                const overrodeSuffix = overrode > 0 ? `, ${overrode} overridden` : "";
                 let status = action.meta.arg.dryRun
-                    ? `Fake-stereo scan: ${scanned} take(s), ${converted} foldable${pendingSuffix}${overrodeSuffix}`
-                    : `Fake-stereo scan: ${scanned} take(s), ${converted} folded to mono${pendingSuffix}${overrodeSuffix}`;
+                    ? `Fake-stereo scan: ${converted}/${scanned} foldable${pendingSuffix}${overrodeSuffix}`
+                    : `Fake-stereo scan: ${converted}/${scanned} folded${pendingSuffix}${overrodeSuffix}`;
                 // 一个都没折叠时，把"最接近假立体声"的那条素材的差异量级报出来：
                 // 用户据此判断该不该放宽容差。没有这个数字，"没折叠"和"不该折叠"
                 // 在界面上长得一模一样。
