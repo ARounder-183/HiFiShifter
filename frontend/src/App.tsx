@@ -1018,6 +1018,22 @@ function AppInner() {
         progress: number | null;
     }>({ active: false, sourcePath: null, progress: null });
 
+    // ── 导入等待提示（延迟点亮）────────────────────────────────────────────
+    // 导入走的是盘 IO + 容器探测 + 声道判定，正常只在毫秒级结束，因此**不能**
+    // 一发起就点亮加载态 —— 那会让每次导入都闪一下，比不提示更烦人。超过门槛
+    // 还没结束才说明这次真的慢（慢盘 / 网络盘 / 超大文件），此时才点。
+    const IMPORT_BUSY_DELAY_MS = 300;
+    const importInFlight = useAppSelector((state) => state.session.importInFlight);
+    const [importBusy, setImportBusy] = useState(false);
+    useEffect(() => {
+        if (importInFlight <= 0) {
+            setImportBusy(false);
+            return;
+        }
+        const timer = setTimeout(() => setImportBusy(true), IMPORT_BUSY_DELAY_MS);
+        return () => clearTimeout(timer);
+    }, [importInFlight]);
+
     // Listen for backend stretch progress notifications (Tauri only).
     useEffect(() => {
         let disposed = false;
@@ -1472,12 +1488,54 @@ function AppInner() {
     }, [renderCacheShowHitStats, showNotice, tAny]);
 
     // ── 后台声道折叠反馈 ────────────────────────────────────────────────────
-    // 打开工程后，没有权威判定档案的 Take 会被后台扫描按策略折叠为单声道
-    //（渲染耗时减半）。这件事改变了 Clip 的声道模式，必须让用户知道，否则
-    // 他会看到波形带数"自己变了"。只在整轮结束时提示一次，不逐批刷屏。
+    // 打开工程 / 导入 / 换源后，没有权威判定档案的 Take 会被后台扫描按策略折叠为
+    // 单声道（渲染耗时减半）。折叠改的是 Take 的 `channel_mode`，也就是时间线的
+    // 真实状态，而前端不会轮询时间线 —— 必须让它看到，否则界面一直显示旧的
+    // 声道带数，用户会以为软件抽风。
+    //
+    // 【为什么要合并 + 延迟，而不是每批都处理】扫描按 64 个 Take 一批推进，一批
+    // 一次事件；逐批重拉时间线是拿一整份时间线换几十毫秒的收敛。但也不能只在
+    // 整轮结束才处理 —— 大工程上那会让界面长时间停在陈旧状态。
+    //
+    // 折中：**延迟一个很短的门槛再动手**。绝大多数扫描在门槛内就跑完了，于是
+    // 行为和以前完全一致（界面变化与解释同时出现，不会先变后解释）；只有真正
+    // 慢的扫描才会先渐进收敛。提示语仍只在整轮结束时给出一次，用累计计数，
+    // 保证数字是准的而不是流水账。
+    const CHANNEL_SCAN_FEEDBACK_DELAY_MS = 400;
+    const channelScanFeedbackRef = useRef<{
+        timer: ReturnType<typeof setTimeout> | null;
+        folded: number;
+        pending: number;
+        finished: boolean;
+    }>({ timer: null, folded: 0, pending: 0, finished: false });
+
+    const flushChannelScanFeedback = useCallback(() => {
+        const state = channelScanFeedbackRef.current;
+        if (state.timer != null) {
+            clearTimeout(state.timer);
+            state.timer = null;
+        }
+        const folded = state.folded;
+        const pending = state.pending;
+        // 折叠改的是时间线的真实状态，必须主动重拉一次才能收敛到界面。
+        if (folded > 0) void dispatch(fetchTimeline());
+        if (!state.finished) return;
+        if (folded <= 0 && pending <= 0) return;
+        // 各段完整成句、无前导标点，这里统一连接。
+        const parts: string[] = [];
+        if (folded > 0) {
+            parts.push(tAny("status_channel_scan_folded").replace("{n}", String(folded)));
+        }
+        if (pending > 0) {
+            parts.push(tAny("status_channel_scan_pending").replace("{n}", String(pending)));
+        }
+        showNotice(parts.join(" · "), 20_000);
+    }, [dispatch, showNotice, tAny]);
+
     useEffect(() => {
         let disposed = false;
         let unlisten: null | (() => void) = null;
+        const feedback = channelScanFeedbackRef.current;
 
         async function setup() {
             try {
@@ -1495,27 +1553,26 @@ function AppInner() {
                     }) => {
                         if (disposed) return;
                         const payload = event?.payload ?? {};
-                        if (!payload.finished) return;
                         const folded = Number(payload.folded ?? 0);
                         const pending = Number(payload.pending ?? 0);
-                        // 折叠改的是 Take 的 `channel_mode`，也就是时间线的真实状态。
-                        // 前端不会轮询时间线，必须在这里主动重拉一次，否则界面会
-                        // 一直显示旧的声道带数（直到用户做别的操作才收敛）。
-                        if (folded > 0) void dispatch(fetchTimeline());
-                        if (folded <= 0 && pending <= 0) return;
-                        // 同上：各段完整成句、无前导标点，这里统一连接。
-                        const parts: string[] = [];
-                        if (folded > 0) {
-                            parts.push(
-                                tAny("status_channel_scan_folded").replace("{n}", String(folded)),
-                            );
+                        // 计数是**整轮累计值**，取 max 只作防御（乱序事件不应让数字倒退）。
+                        feedback.folded = Math.max(feedback.folded, folded);
+                        feedback.pending = Math.max(feedback.pending, pending);
+                        if (payload.finished) {
+                            feedback.finished = true;
+                            flushChannelScanFeedback();
+                            // 整轮已结束，为下一轮复位（后台扫描会连跑多轮）。
+                            feedback.finished = false;
+                            feedback.folded = 0;
+                            feedback.pending = 0;
+                            return;
                         }
-                        if (pending > 0) {
-                            parts.push(
-                                tAny("status_channel_scan_pending").replace("{n}", String(pending)),
-                            );
-                        }
-                        showNotice(parts.join(" · "), 20_000);
+                        // 还没有折叠：没有任何需要让界面收敛的状态，不值得排一次重拉。
+                        if (feedback.folded <= 0 || feedback.timer != null) return;
+                        feedback.timer = setTimeout(() => {
+                            feedback.timer = null;
+                            flushChannelScanFeedback();
+                        }, CHANNEL_SCAN_FEEDBACK_DELAY_MS);
                     },
                 );
                 if (disposed) {
@@ -1530,9 +1587,13 @@ function AppInner() {
         void setup();
         return () => {
             disposed = true;
+            if (feedback.timer != null) {
+                clearTimeout(feedback.timer);
+                feedback.timer = null;
+            }
             if (unlisten) unlisten();
         };
-    }, [dispatch, showNotice, tAny]);
+    }, [flushChannelScanFeedback]);
 
     const runtimeRef = useRef({
         isPlaying: false,
@@ -4042,6 +4103,21 @@ function AppInner() {
                             }}
                         >
                             {noticeText}
+                        </span>
+                    ) : null}
+                    {/* 导入等待提示：只在真慢时点亮（见 IMPORT_BUSY_DELAY_MS），
+                        位置紧跟长时效提示位之后、短时效进度片之前。 */}
+                    {importBusy ? (
+                        <span
+                            className="shrink-0 rounded px-1 py-0 text-xs font-medium"
+                            style={{
+                                background: "var(--accent-3)",
+                                color: "var(--accent-11)",
+                                fontSize: "11px",
+                                lineHeight: "16px",
+                            }}
+                        >
+                            {t("status_importing")}
                         </span>
                     ) : null}
                     {stretching.active ? (

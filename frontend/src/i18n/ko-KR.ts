@@ -1641,6 +1641,7 @@ export const koKR = {
     status_fake_stereo_scan_folded: "가짜 스테레오: {m}/{n}개 접음",
     status_channel_scan_folded: "{n}개 클립을 자동으로 모노로 접었습니다",
     status_channel_scan_pending: "{n}개 소스 미읽음(다음 실행 시 재시도)",
+    status_importing: "가져오는 중...",
     status_fake_stereo_scan_no_source: "가짜 스테레오: {n}개 테이크에 소스가 없습니다",
     status_fake_stereo_scan_no_clips: "가짜 스테레오: 프로젝트에 클립이 없습니다",
     status_fake_stereo_scan_range_unmatched:

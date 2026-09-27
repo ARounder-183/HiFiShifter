@@ -484,6 +484,14 @@ export interface SessionState {
     /** 导入媒体时的声道处理策略（假立体声 → 单声道）。 */
     channelImportPolicy: ChannelImportPolicy;
     /**
+     * 在途的导入任务数（>0 = 正在导入）。
+     *
+     * 只用于状态栏的**延迟**等待提示：导入变快之后绝大多数情况都不会亮起，
+     * 它存在的意义是慢盘 / 网络盘 / 超大文件时不至于让界面看起来毫无反应。
+     * 因此这里只记"有没有"，不记进度 —— 导入本身没有可汇报的粒度。
+     */
+    importInFlight: number;
+    /**
      * 后端"播放/预渲染"状态镜像（`playback_rendering_state` 事件）——只镜像
      * 播放轮询 reducer 需要的 active/target 两个原始值字段（变化低频，且
      * 订阅全量 session 的组件以 shallowEqual 比较，原始值不会因高频 progress
@@ -2075,6 +2083,7 @@ const initialState: SessionState = {
     autoBackgroundRender: true,
     renderCache: { ...DEFAULT_RENDER_CACHE_SETTINGS },
     channelImportPolicy: { ...DEFAULT_CHANNEL_IMPORT_POLICY },
+    importInFlight: 0,
     playbackRenderingActive: false,
     playbackRenderingTarget: null,
     playbackBlockingRenderActive: false,
@@ -6195,6 +6204,49 @@ const sessionSlice = createSlice({
                     pitchRange: payload.pitch_range,
                 };
             });
+
+        // ── 在途导入计数 ──────────────────────────────────────────────────
+        // 【必须在所有 addCase 之后】RTK 要求 `addMatcher` 只能排在 `addCase`
+        // 之后，提前调用会直接抛错。
+        //
+        // 只统计**会去读音频文件**的导入 thunk：`busy` 是全局在途标志，被大量
+        // 无关操作置起，拿它驱动"正在导入"的提示会误报。
+        //
+        // 计数而非布尔：`importAudioFromDialog` 会转派给 `importAudioAtPosition`，
+        // 两者同时在途，用布尔会提前清零。
+        //
+        // 用 typePrefix 匹配而不是 `isAnyOf` + `isPending`：后者在本工程的 RTK
+        // 类型下推不出收窄签名（重载会退化成返回 boolean，无法当 matcher 用）。
+        // thunk 的 `typePrefix` 是稳定的公开契约（状态为 `<prefix>/pending` 等），
+        // 直接比字符串更直白，也不依赖类型体操。
+        const audioImportPrefixes = [
+            importAudioAtPosition.typePrefix,
+            importAudioFileAtPosition.typePrefix,
+            importAudioFromDialog.typePrefix,
+            importAudioFromPath.typePrefix,
+            importMultipleAudioAtPosition.typePrefix,
+            importMultipleAudioFilesAtPosition.typePrefix,
+        ];
+        const isAudioImportStep = (action: { type?: string }, step: string) =>
+            audioImportPrefixes.some((prefix) => action.type === `${prefix}/${step}`);
+        const settleImport = (state: SessionState) => {
+            state.importInFlight = Math.max(0, state.importInFlight - 1);
+        };
+        builder
+            .addMatcher(
+                (action: { type?: string }) => isAudioImportStep(action, "pending"),
+                (state: SessionState) => {
+                    state.importInFlight += 1;
+                },
+            )
+            .addMatcher(
+                (action: { type?: string }) => isAudioImportStep(action, "fulfilled"),
+                settleImport,
+            )
+            .addMatcher(
+                (action: { type?: string }) => isAudioImportStep(action, "rejected"),
+                settleImport,
+            );
     },
 });
 

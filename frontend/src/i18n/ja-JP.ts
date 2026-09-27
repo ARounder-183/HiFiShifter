@@ -1662,6 +1662,7 @@ export const jaJP = {
     status_fake_stereo_scan_folded: "疑似ステレオ：{m}/{n} 件を折り畳みました",
     status_channel_scan_folded: "{n} 件のクリップを自動でモノラルに折り畳みました",
     status_channel_scan_pending: "{n} 件の素材を未読（次回起動時に再試行）",
+    status_importing: "読み込み中...",
     status_fake_stereo_scan_no_source: "疑似ステレオ：{n} 件のテイクに音声ソースがありません",
     status_fake_stereo_scan_no_clips: "疑似ステレオ：プロジェクトにクリップがありません",
     status_fake_stereo_scan_range_unmatched: "疑似ステレオ：スキャン範囲が一致しません（{p} 件）",

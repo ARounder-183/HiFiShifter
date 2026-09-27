@@ -1609,6 +1609,7 @@ export const zhCN = {
     status_fake_stereo_scan_folded: "假立体声：{m}/{n} 个 Take 已折叠",
     status_channel_scan_folded: "已自动折叠 {n} 个音频块为单声道",
     status_channel_scan_pending: "{n} 个素材未读到，下次打开会重试",
+    status_importing: "正在导入...",
     status_fake_stereo_scan_no_source: "假立体声：{n} 个 Take 无音频源",
     status_fake_stereo_scan_no_clips: "假立体声：工程里没有音频块",
     status_fake_stereo_scan_range_unmatched: "假立体声：扫描范围与工程对不上（共 {p} 个音频块）",

@@ -1787,6 +1787,7 @@ export const enUS = {
     status_fake_stereo_scan_folded: "Fake-stereo: {m}/{n} folded",
     status_channel_scan_folded: "Folded {n} clip(s) to mono automatically",
     status_channel_scan_pending: "{n} source(s) unreadable, retried on next open",
+    status_importing: "Importing...",
     status_fake_stereo_scan_no_source: "Fake-stereo: {n} take(s) have no source",
     status_fake_stereo_scan_no_clips: "Fake-stereo: the project has no clips",
     status_fake_stereo_scan_range_unmatched: "Fake-stereo: range matches no clip ({p} in project)",

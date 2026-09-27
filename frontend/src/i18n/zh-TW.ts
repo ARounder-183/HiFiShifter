@@ -1611,6 +1611,7 @@ export const zhTW = {
     status_fake_stereo_scan_folded: "假立體聲：{m}/{n} 個 Take 已折疊",
     status_channel_scan_folded: "已自動折疊 {n} 個音訊塊為單聲道",
     status_channel_scan_pending: "{n} 個素材未讀到，下次開啟會重試",
+    status_importing: "正在匯入...",
     status_fake_stereo_scan_no_source: "假立體聲：{n} 個 Take 無音訊來源",
     status_fake_stereo_scan_no_clips: "假立體聲：專案裡沒有聲音塊",
     status_fake_stereo_scan_range_unmatched: "假立體聲：掃描範圍與專案對不上（共 {p} 個聲音塊）",
