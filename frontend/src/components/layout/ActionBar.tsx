@@ -235,12 +235,6 @@ export function ActionBar() {
             rect ? { x: rect.x, y: rect.y, w: rect.width, h: rect.height } : null,
         );
     }, [dispatch]);
-    // 「编辑」菜单的「操作记录」项经事件打开（面板由本组件持有并渲染）。
-    useEffect(() => {
-        const open = () => openHistoryPanel();
-        window.addEventListener("hifi:open-undo-history", open as EventListener);
-        return () => window.removeEventListener("hifi:open-undo-history", open as EventListener);
-    }, [openHistoryPanel]);
     // 按钮 tooltip 里的快捷键提示（跟随用户在快捷键设置中的自定义绑定）。
     const undoShortcutKb = useAppSelector((state: RootState) =>
         selectKeybinding(state, "edit.undo"),

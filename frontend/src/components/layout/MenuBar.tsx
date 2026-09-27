@@ -36,7 +36,7 @@ import type { TimeUnit } from "../../features/session/sessionTypes";
 import { TIME_UNITS, TIME_UNIT_CHOICES } from "./timeline/timeFormat";
 import { TimelineDisplaySettingsDialog } from "./TimelineDisplaySettingsDialog";
 import { SnapGridSettingsDialog } from "./SnapGridSettingsDialog";
-import { DockLayoutMenu } from "../dock/DockLayoutMenu";
+import { DockLayoutMenus, DockLayoutDialogs } from "../dock/DockLayoutMenu";
 import { scaleChangesInRange, scaleLikeEquals } from "../../utils/tempoMap";
 import type { ScaleLike } from "../../utils/musicalScales";
 import {
@@ -651,14 +651,6 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                             {shortcutLabel("edit.redo")}
                         </div>
                     </DropdownMenu.Item>
-                    {/* 「操作记录」窗口：非模态浮动面板（经事件交由 ActionBar 打开） */}
-                    <DropdownMenu.Item
-                        onSelect={() =>
-                            window.dispatchEvent(new CustomEvent("hifi:open-undo-history"))
-                        }
-                    >
-                        {tAny("undo_history_title")}
-                    </DropdownMenu.Item>
                     <DropdownMenu.Separator />
                     {/* 剪贴板：剪切 / 复制 */}
                     <DropdownMenu.Item onSelect={() => dispatchEditOp("cut")}>
@@ -791,32 +783,14 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     <span>{t("menu_view")}</span>
                 </DropdownMenu.Trigger>
                 <DropdownMenu.Content variant="soft" color="gray">
-                    <DropdownMenu.Item onSelect={() => dispatch(refreshRuntime())}>
-                        {t("action_refresh")}
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item onSelect={() => void dispatch(clearWaveformCacheRemote())}>
-                        {t("menu_clear_waveform_cache")}
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item onSelect={() => void dispatch(clearRenderCacheRemote())}>
-                        {tAny("menu_clear_render_cache")}
-                    </DropdownMenu.Item>
+                    {/* 窗口 / 布局：原顶层「布局」选项卡并入视图。窗体显隐收进
+                        「窗口」，其余布局级操作（预设、导入导出、重置）收进
+                        「布局」二级菜单 —— 两个组件的停靠订阅都在 DockLayoutMenu
+                        模块内部，不进 MenuBar。 */}
+                    <DockLayoutMenus withCheck={withCheck} />
                     <DropdownMenu.Separator />
-                    <DropdownMenu.Item
-                        onSelect={() => {
-                            dispatch(toggleClipboardPreview());
-                            void dispatch(persistUiSettings());
-                        }}
-                    >
-                        {withCheck(s.showClipboardPreview, t("clipboard_preview"))}
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item
-                        onSelect={() => {
-                            dispatch(toggleParamValuePopup());
-                            void dispatch(persistUiSettings());
-                        }}
-                    >
-                        {withCheck(s.showParamValuePopup, t("param_value_popup"))}
-                    </DropdownMenu.Item>
+
+                    {/* 时间轴 / 编辑器里的显示开关。 */}
                     <DropdownMenu.Item
                         onSelect={() => {
                             dispatch(toggleTempoMapVisible());
@@ -833,8 +807,25 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     >
                         {withCheck(s.showAllTakes, tAny("options_show_all_takes"))}
                     </DropdownMenu.Item>
+                    <DropdownMenu.Item
+                        onSelect={() => {
+                            dispatch(toggleClipboardPreview());
+                            void dispatch(persistUiSettings());
+                        }}
+                    >
+                        {withCheck(s.showClipboardPreview, t("clipboard_preview"))}
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item
+                        onSelect={() => {
+                            dispatch(toggleParamValuePopup());
+                            void dispatch(persistUiSettings());
+                        }}
+                    >
+                        {withCheck(s.showParamValuePopup, t("param_value_popup"))}
+                    </DropdownMenu.Item>
                     <DropdownMenu.Separator />
 
+                    {/* 时间与外观：低频的展示设置。 */}
                     {/* Time Display */}
                     <DropdownMenu.Sub>
                         <DropdownMenu.SubTrigger>{tAny("time_display")}</DropdownMenu.SubTrigger>
@@ -893,7 +884,6 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                             </DropdownMenu.Item>
                         </DropdownMenu.SubContent>
                     </DropdownMenu.Sub>
-                    <DropdownMenu.Separator />
                     <DropdownMenu.Sub>
                         <DropdownMenu.SubTrigger>
                             {`${t("theme")}: ${tAny(`theme_${theme.modeSetting}`)}`}
@@ -921,13 +911,20 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     <DropdownMenu.Item onSelect={() => setAppearanceDialogOpen(true)}>
                         {tAny("menu_appearance_settings")}
                     </DropdownMenu.Item>
+                    <DropdownMenu.Separator />
+
+                    {/* 刷新与缓存清理是维护性操作，沉底。 */}
+                    <DropdownMenu.Item onSelect={() => dispatch(refreshRuntime())}>
+                        {t("action_refresh")}
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item onSelect={() => void dispatch(clearWaveformCacheRemote())}>
+                        {t("menu_clear_waveform_cache")}
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item onSelect={() => void dispatch(clearRenderCacheRemote())}>
+                        {tAny("menu_clear_render_cache")}
+                    </DropdownMenu.Item>
                 </DropdownMenu.Content>
             </DropdownMenu.Root>
-
-            {/* 布局（停靠窗体系统）：触发按钮、菜单内容与两个对话框都在
-                `DockLayoutMenu` 内部，`MenuBar` 只多一行 —— 它已用窄订阅
-                避免被播放轮询拖着重渲染，不应再长大。 */}
-            <DockLayoutMenu withCheck={withCheck} />
 
             <DropdownMenu.Root>
                 <DropdownMenu.Trigger className="shrink-0 rounded px-2 py-1 text-xs text-qt-text hover:bg-qt-highlight hover:text-white">
@@ -1327,6 +1324,10 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 open={appearanceDialogOpen}
                 onOpenChange={setAppearanceDialogOpen}
             />
+
+            {/* 停靠窗体的「窗口 / 布局」二级菜单所触发的对话框（常驻，
+                不能放进视图菜单的 Content —— 菜单关闭时那里会卸载）。 */}
+            <DockLayoutDialogs />
 
             <TimelineDisplaySettingsDialog
                 open={timeDisplaySettingsOpen}

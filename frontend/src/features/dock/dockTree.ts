@@ -90,7 +90,7 @@ export function isFormVisible(layout: DockLayout, formId: string): boolean {
     return findTabsetOfForm(layout.tree, formId) !== null;
 }
 
-/** 当前可见的窗体 id（停靠 + 浮动），供"显示窗体"菜单使用。 */
+/** 当前可见的窗体 id（停靠 + 浮动），供"窗口"菜单使用。 */
 export function collectVisibleForms(layout: DockLayout): string[] {
     const docked = collectDockedForms(layout.tree);
     const floating = layout.order.filter((id) => isFormFloating(layout, id));

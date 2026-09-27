@@ -587,7 +587,7 @@ export interface DockPanelEntry {
     formId: string | null;
 }
 
-/** 面板清单（"显示窗体"菜单用）。 */
+/** 面板清单（"窗口"菜单用）。 */
 export function listPanelEntries(getState: GetState): DockPanelEntry[] {
     return listPanelEntriesFromLayout(getState().dock.layout);
 }

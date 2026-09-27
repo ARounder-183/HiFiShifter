@@ -75,7 +75,7 @@ export interface PanelDefinition {
      * **打开**时的形态：以浮窗出现在主窗口的某个角上（而不是并入某个标签组）。
      *
      * 只影响"打开"这个动作，**不影响启动时的显隐** —— 未声明它的面板与声明了它的
-     * 面板一样，默认都是关闭的，等用户从"布局 → 显示窗体"或工具栏打开。
+     * 面板一样，默认都是关闭的，等用户从"视图 → 窗口"或工具栏打开。
      * 适用于"随手记"性质的辅助面板（如记事本）：用户需要它时希望它浮在手边，
      * 而不是挤进布局里占一格。
      */
@@ -108,7 +108,7 @@ export interface PanelDefinition {
     detachable?: boolean;
     /** 搬家前后的状态保全钩子（见 `DockPanelLifecycle`）。 */
     lifecycle?: DockPanelLifecycle;
-    /** "显示窗体"菜单里的排序权重。 */
+    /** "窗口"菜单里的排序权重。 */
     order?: number;
 }
 
