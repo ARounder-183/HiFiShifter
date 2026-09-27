@@ -354,7 +354,7 @@ export function subtractFrameRange(
 /**
  * 切换：已完整覆盖 `[aFrame, bFrame)`（**帧边界**，数据路径）则挖掉该区间，否则并入。
  *
- * 时间轴的「修饰键 + 双击音频块」手势即此语义：同一个块再点一次即撤销。
+ * 时间轴的「修饰键 + 右键单击音频块」手势即此语义：同一个块再右键一次即撤销。
  */
 export function toggleFrameRange(
     selection: ParamSelection | null,

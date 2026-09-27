@@ -529,8 +529,8 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
             onSeekTo: (sec) => interactionsRef.current?.onSeekTo?.(sec),
             onSelectClip: (clipId, additive, rangeSelect, clientX) =>
                 interactionsRef.current?.onSelectClip?.(clipId, additive, rangeSelect, clientX),
-            onDoubleClickClip: (clipId, mode) =>
-                interactionsRef.current?.onDoubleClickClip?.(clipId, mode),
+            onClipParamSelectionGesture: (clipId, mode) =>
+                interactionsRef.current?.onClipParamSelectionGesture?.(clipId, mode),
             onToggleClipMute: (clipId, nextMuted) =>
                 interactionsRef.current?.onToggleClipMute?.(clipId, nextMuted),
             onOpenClipFormant: (clipId, screenX, screenY) =>

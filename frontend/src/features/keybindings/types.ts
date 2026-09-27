@@ -109,7 +109,7 @@ export type ActionId =
     | "modifier.pianoKeysVerticalZoom" // 钢琴键垂直缩放（按住+滚轮）
     | "modifier.paramMorph" // 参数编辑器形变模式（按住）
     | "modifier.paramMultiSelect" // 参数编辑器多选区（按住拖动追加一段；按住点击已有段取消该段）
-    | "modifier.clipRangeToParamSelection" // 按住并双击音频块：把该块范围追加/移出参数编辑器选区
+    | "modifier.clipRangeToParamSelection" // 按住并右键单击音频块：把该块范围追加/移出参数编辑器选区
     | "modifier.paramFineAdjust" // 精细调整（按住）
     | "modifier.vibratoAmplitudeAdjust" // 颤音绘制时滚轮调振幅
     | "modifier.vibratoFrequencyAdjust" // 颤音绘制时滚轮调频率
@@ -153,7 +153,7 @@ export type ModifierConflictScene =
     | "clip.move"
     // 时间轴：音频块点击选择（多选切换 / 范围选择）
     | "clip.select"
-    // 时间轴：音频块双击 → 参数编辑器选区（替换 / 追加 / 取消该块范围）
+    // 时间轴：音频块右键手势（按住修饰键）→ 参数编辑器选区（替换 / 追加 / 取消该块范围）
     | "clip.rangeToParamSelect"
     // 时间轴：音频块边缘 trim/stretch
     | "clip.edge"

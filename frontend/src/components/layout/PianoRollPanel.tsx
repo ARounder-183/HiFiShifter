@@ -5482,13 +5482,14 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                 return;
             }
 
-            // 双击 Clip（无拖拽，ClipItem 派发）：按 Clip 起止范围在参数编辑器
+            // 时间轴右键手势（按住 `modifier.clipRangeToParamSelection`，默认 Alt，
+            // 右键单击 Clip；`TimelinePanel` 派发）：按 Clip 起止范围在参数编辑器
             // 内创建选区，并把交互焦点切到参数编辑器侧 ——
             // 复制/剪切路由（resolveCopyCutRoute 依据 selectionContext，经由下方
             // selectionUi 同步派发 setParamSelectionActive 标记）与活动表面
             // （focusSurface，外来源粘贴兜底等）随之指向参数编辑器。
             //
-            // mode（来自时间轴的双击手势）：
+            // mode（来自时间轴的右键手势）：
             //   - "replace"（缺省）：替换为该块范围，与旧行为逐字一致；
             //   - "add"：把该块范围并入（重叠/相接自动合并）；
             //   - "toggle"：该块范围已被完整覆盖则挖掉，否则并入 —— 同一个块
@@ -5513,7 +5514,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                 return;
             }
 
-            // 音频块范围 → 参数编辑器选区（批量入口；单个音频块的双击手势见
+            // 音频块范围 → 参数编辑器选区（批量入口；单个音频块的右键手势见
             // selectClipParamRange 的 add/toggle 模式）。
             //
             // 只取**当前参数编辑器所属根轨道组**内的音频块：参数编辑器一次只

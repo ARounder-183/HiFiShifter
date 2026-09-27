@@ -4031,21 +4031,23 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     );
 
     /**
-     * 内核双击 clip：请求参数编辑器按 clip 起止范围创建选区。
+     * 内核右键手势（按住 `modifier.clipRangeToParamSelection`，默认 Alt，右键单击
+     * clip）：请求参数编辑器按 clip 起止范围创建选区。
      *
-     * 与旧实现（`ClipItem` 的双击分支）同源：关闭右键菜单 → 派发
-     * `hifi:editOp/selectClipParamRange`，交互焦点随之切到参数编辑器侧。
+     * 左键双击 clip 主体已不再走此入口（易误触且会抢走 clip 的复制/剪切焦点），
+     * 「在参数编辑器内为 Clip 创建选区」统一由上述右键手势承担。关闭右键菜单 →
+     * 派发 `hifi:editOp/selectClipParamRange`，交互焦点随之切到参数编辑器侧。
      * 用 window 事件而不是直接调 store：参数编辑器在另一棵子树里监听它，
      * 这条契约与渲染模式无关（内核 / 旧实现共用同一入口）。
      */
-    const handleKernelDoubleClickClip = React.useCallback(
+    const handleKernelClipParamSelectionGesture = React.useCallback(
         (clipId: string, mode: "replace" | "toggle" = "replace") => {
             clearContextMenu();
             window.dispatchEvent(
                 new CustomEvent("hifi:editOp", {
-                    // mode 缺省 replace（不传即旧行为）；按住
-                    // `modifier.clipRangeToParamSelection`（默认 Alt）双击时内核
-                    // 传 "toggle"，由参数编辑器并入 / 挖掉该块范围。
+                    // mode 缺省 replace；按住 `modifier.clipRangeToParamSelection`
+                    // （默认 Alt）右键单击时内核传 "toggle"，由参数编辑器并入 / 挖掉
+                    // 该块范围。
                     detail: { op: "selectClipParamRange", clipId, mode },
                 }),
             );
@@ -4904,7 +4906,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             onSeek: handleKernelSeek,
             onSeekTo: handleKernelSeekTo,
             onSelectClip: handleKernelSelectClip,
-            onDoubleClickClip: handleKernelDoubleClickClip,
+            onClipParamSelectionGesture: handleKernelClipParamSelectionGesture,
             onToggleClipMute: handleKernelToggleClipMute,
             onToggleGroupDisabled: handleToggleGroupDisabled,
             onOpenClipFormant: handleKernelOpenClipFormant,
@@ -4978,7 +4980,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             // 原先同样漏在依赖数组外：`useMemo` 会继续持有**首帧闭包**，表现为
             // 「改了设置 / 选择后，内核手势仍按旧值执行」。依赖数组必须与
             // useMemo 体内引用的回调一一对应。
-            handleKernelDoubleClickClip,
+            handleKernelClipParamSelectionGesture,
             handleKernelToggleClipMute,
             handleToggleGroupDisabled,
             handleKernelOpenClipFormant,

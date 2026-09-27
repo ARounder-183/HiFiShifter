@@ -71,7 +71,7 @@ import {
     resolveThemeColor,
 } from "../../runtime/timelineCanvasStyle";
 import { hitClipHeaderControl, type ClipHeaderControl } from "../interaction/clipHeaderControls";
-import { resolveClipDoubleClickMode } from "../interaction/clipDoubleClickMode";
+import { resolveClipParamSelectionMode } from "../interaction/clipParamSelectionMode";
 import { isFadeShapeCycleModifierHeld } from "../../fadeShapeCycle";
 import { noteFadeLinePointerDown } from "../../hooks/fadeLineClickGesture";
 import { effectiveFadeSec, hitClipFadeTarget } from "../interaction/fadeTargets";
@@ -218,14 +218,16 @@ export interface TimelineKernelData {
          * 音频块范围 → 参数编辑器选区（`modifier.clipRangeToParamSelection`，
          * 默认 Alt）。
          *
-         * 修饰键 + **双击** clip = 把该块范围并入参数编辑器选区；若该块范围已被
-         * 完整覆盖则挖掉（同一个块连按两次回到原状）。实际改选动作由
+         * 修饰键 + **右键单击** clip = 把该块范围并入参数编辑器选区；若该块范围已被
+         * 完整覆盖则挖掉（同一个块再右键一次回到原状）。实际改选动作由
          * `PianoRollPanel` 执行，本内核只负责判定修饰键，并把
-         * `mode: "toggle"` 随 `onDoubleClickClip` 的第二个参数传出去。
+         * `mode: "toggle"` 随 `onClipParamSelectionGesture` 的第二个参数传出去。
          *
-         * 【为什么绑双击】单击已被「替换选区」占用；Ctrl 在时间轴上属于多选切换、
-         * Shift 属于范围选择，而 Alt 在**点击**层面是空的（它的绑定都是拖拽：
-         * slip / stretch / 淡变曲率），因此不与任何既有手势冲突。
+         * 【为什么是右键单击】左键双击 clip 主体已被移除：它极易与「选中 clip」的
+         * 多次点击误触混淆，且会顺带把复制/剪切的焦点切到参数编辑器侧，干扰 clip 的
+         * 复制/剪切。Ctrl 在时间轴上属于多选切换、Shift 属于范围选择，而 Alt 在
+         * **点击**层面是空的（它的绑定都是拖拽：slip / stretch / 淡变曲率），因此
+         * 不与任何既有手势冲突。
          */
         readonly clipRangeToParamSelection: Keybinding | null;
         /**
@@ -569,19 +571,23 @@ export interface TimelineKernelInteractions {
         readonly container: HTMLElement;
     }) => boolean;
     /**
-     * 双击 clip（第二次按下命中，且两次之间未发生拖拽）。
+     * 右键手势：把音频块范围写入参数编辑器选区（按住 `modifier.clipRangeToParamSelection`，
+     * 默认 Alt，右键单击该块触发）。
      *
-     * 旧实现语义：请求参数编辑器按 clip 起止范围创建选区，并把交互焦点切到
-     * 参数编辑器（见 `ClipItem` 的 `hifi:editOp/selectClipParamRange`）。
-     * 内核只负责识别手势，事件派发与焦点切换由面板完成。
+     * 左键双击 clip 主体**不再**走这条回调——双击极易与「选中 clip」的多次点击
+     * 误触混淆，且会顺带把复制/剪切的焦点切到参数编辑器侧，干扰 clip 的
+     * 复制/剪切。因此「在参数编辑器内为 Clip 创建选区」统一收敛为右键手势。
+     * 内核只负责识别手势与修饰键，事件派发与焦点切换由面板完成。
      *
      * @param clipId 目标 clip。
-     * @param mode 选区写入方式：恒 `"replace"`（替换为本次范围，与旧行为逐字
-     *   一致）。【手势迁移（2026-09-14）】"并入 / 挖掉"（toggle）已从「按住该
-     *   修饰键左键双击」改为「按住该修饰键**右键单击**」，由右键手势 finalize
-     *   处派发（本回调不再传 `"toggle"`；参数保留以兼容既有调用方）。
+     * @param mode 选区写入方式：`"replace"`（替换为本次范围）或 `"toggle"`
+     *   （该块范围已被完整覆盖则挖掉，否则并入；按住修饰键右键单击时由
+     *   `resolveClipParamSelectionMode` 解析得出）。
      */
-    readonly onDoubleClickClip?: (clipId: string, mode?: "replace" | "toggle") => void;
+    readonly onClipParamSelectionGesture?: (
+        clipId: string,
+        mode?: "replace" | "toggle",
+    ) => void;
     /**
      * 切换 clip 静音（单击 header 的静音徽标）。
      *
@@ -661,8 +667,8 @@ export interface TimelineKernelInteractions {
     /**
      * 请求进入 clip 重命名（**双击名称区**）。
      *
-     * 与 `onDoubleClickClip`（双击其他区域 → 参数编辑器选区）互斥：名称区优先。
-     * 旧实现里名称区的处理器会 `stopPropagation`，两者天然不会同时触发。
+     * 与 `onClipParamSelectionGesture`（右键单击其他区域 → 参数编辑器选区）互斥：
+     * 名称区优先。旧实现里名称区的处理器会 `stopPropagation`，两者天然不会同时触发。
      *
      * @param clipId 目标 clip。
      * @param screenX 输入框锚点的视口坐标。
@@ -943,7 +949,7 @@ export interface TimelineKernelInteractions {
      * `onBoxSelectPreview` / `onBoxSelectCommit`，因此框内 clip 同时也被纳入
      * clip 选择（与未按住该修饰键的普通框选完全一致）。
      *
-     * 与单个块的右键单击（`onDoubleClickClip` 的 toggle 语义）同一修饰键：
+     * 与单个块的右键单击（`onClipParamSelectionGesture` 的 toggle 语义）同一修饰键：
      * 单击 = 该块并入 / 挖掉（不改 clip 选择），拖框 = 框内全部并入 + 纳入
      * clip 多选。`cancelled`（Esc / 失焦）时调用方不写任何选区。
      */
@@ -2839,7 +2845,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                *
                * 按住时这条右键手势**不再是 clip 多选框选**：松开（未拖动）= 把该
                * 块范围并入 / 挖掉参数编辑器选区（取代旧的双击手势，见
-               * `clipDoubleClickMode` 的说明）；拖动 = 被框选的 clip 全部**并入**
+               * `clipParamSelectionMode` 的说明）；拖动 = 被框选的 clip 全部**并入**
                * 参数选区（`onBoxSelectToParamSelection`）。按下时冻结（快照），
                * 拖拽中途松开修饰键不改变本次手势的语义。
                */
@@ -3692,8 +3698,12 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
 
             if (isDoubleClick) {
                 // 名称区双击 → 重命名；旋钮双击 → 重置 0 dB；增益 / 速率徽标双击 →
-                // 行内编辑；其他区域双击 → 参数编辑器选区。
-                // （旧实现里名称区处理器会 stopPropagation，两者天然互斥。）
+                // 行内编辑。clip **主体**双击**不再**创建参数编辑器选区——它极易与
+                // 「选中 clip」的多次点击误触混淆，且会顺带把复制/剪切的焦点切到参数
+                // 编辑器侧，干扰 clip 自身的复制/剪切。因此主体双击降级为一次普通
+                // 点击，继续往下走选中 / 拖拽逻辑（handled = false 时不在此返回）。
+                // 「在参数编辑器内为 Clip 创建选区」统一改由按住 `modifier.clipRangeToParamSelection`
+                // （默认 Alt）的右键单击手势承担（见右键手势 finalize 处）。
                 //
                 // 阻止默认动作：否则浏览器会把焦点移到被点击的容器上，而重命名输入框
                 // 是在本次 pointerdown 内同步挂载的——刚聚焦就被夺走焦点，其 onBlur
@@ -3701,6 +3711,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 event.preventDefault();
                 const anchor = screenAnchor(event.clientX, event.clientY);
                 const control = resolveHeaderControl(hit);
+                let handled = true;
                 if (control === "name") {
                     interactions?.onRenameClipStart?.(hit.clip.id, anchor.x, anchor.y);
                 } else if (control === "gain-knob") {
@@ -3715,13 +3726,10 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                         anchor.y,
                     );
                 } else {
-                    // 【手势迁移】「并入 / 挖掉」从左键双击改为 **右键单击**
-                    // （按住 `modifier.clipRangeToParamSelection`，默认
-                    // Alt）——见右键手势 finalize 处的说明；左键双击恢复为普通
-                    // 语义（替换参数选区，与旧实现一致），不再读该修饰键。
-                    interactions?.onDoubleClickClip?.(hit.clip.id, "replace");
+                    // clip 主体双击：不拦截，交给下方的选中 / 拖拽逻辑。
+                    handled = false;
                 }
-                return;
+                if (handled) return;
             }
 
             // ── header 控件级分派 ──
@@ -4701,7 +4709,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 // clip 选择上的表现完全一致（用户要求：按住修饰键只是**额外**
                 // 并入参数选区，不改变 clip 选择的行为）。
                 // 未拖动（右键单击）= 单块手势：并入 / 挖掉该块范围（取代旧的双击，
-                // 见 `onDoubleClickClip` 与 `clipDoubleClickMode` 的说明）；
+                // 见 `onClipParamSelectionGesture` 与 `clipParamSelectionMode` 的说明）；
                 // 单击是"点击语义"，不改变 clip 选择，因此只在拖动时提交。
                 if (boxActive) {
                     interactions?.onBoxSelectToParamSelection?.({
@@ -4735,9 +4743,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                     suppressNextContextMenu = true;
                     const release = hitAt(event.clientX, event.clientY);
                     if (release.kind === "clip") {
-                        interactions?.onDoubleClickClip?.(
+                        interactions?.onClipParamSelectionGesture?.(
                             release.clip.id,
-                            resolveClipDoubleClickMode(
+                            resolveClipParamSelectionMode(
                                 data().keybindings.clipRangeToParamSelection,
                                 event,
                             ),
