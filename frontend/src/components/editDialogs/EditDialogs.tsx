@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
-import { Dialog, Flex, Text, TextField, Button, Select } from "@radix-ui/themes";
+import { Flex, Text, TextField, Select } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import type { ScaleKey } from "../../utils/musicalScales";
 import { useAppSelector } from "../../app/hooks";
@@ -7,6 +7,8 @@ import { isModifierActive, selectKeybinding } from "../../features/keybindings/k
 import { applySelectWheelChange } from "../../utils/selectWheel";
 import { useWheelScrollGuard } from "../../utils/useWheelScrollGuard";
 import { buildScaleSelectGroups } from "../../utils/scaleSelection";
+import { AppDialog } from "../../ui/Dialog";
+import { AppField, AppForm } from "../../ui/Field";
 
 interface Props {
     open: boolean;
@@ -35,28 +37,40 @@ export function TransposeCentsDialog({
     }, [open, defaultSmoothness]);
 
     return (
-        <Dialog.Root open={open} onOpenChange={onOpenChange}>
-            <Dialog.Content style={{ maxWidth: 340 }} onKeyDown={(e) => e.stopPropagation()}>
-                <Dialog.Title>{tAny("menu_transpose_cents")}</Dialog.Title>
-                <Flex direction="column" gap="3" mt="3">
+        <AppDialog
+            open={open}
+            onOpenChange={onOpenChange}
+            title={tAny("menu_transpose_cents")}
+            size="sm"
+            actions={[
+                { id: "cancel", label: tAny("cancel"), onClick: () => onOpenChange(false) },
+                {
+                    id: "apply",
+                    label: tAny("ok"),
+                    intent: "primary",
+                    onClick: () => {
+                        onConfirm?.(
+                            Number(cents) || 0,
+                            Math.max(0, Math.min(100, Number(smoothness) || 0)),
+                        );
+                        onOpenChange(false);
+                    },
+                },
+            ]}
+        >
+            <AppForm>
+                <AppField label={tAny("dlg_cents")}>
+                    <TextField.Root
+                        size="2"
+                        type="number"
+                        value={cents}
+                        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                            setCents(e.target.value)
+                        }
+                    />
+                </AppField>
+                <AppField label={tAny("edge_smoothness")}>
                     <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 80 }}>
-                            {tAny("dlg_cents")}
-                        </Text>
-                        <TextField.Root
-                            size="2"
-                            type="number"
-                            value={cents}
-                            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                                setCents(e.target.value)
-                            }
-                            style={{ flex: 1 }}
-                        />
-                    </Flex>
-                    <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 80 }}>
-                            {tAny("edge_smoothness")}
-                        </Text>
                         <input
                             type="range"
                             min={0}
@@ -79,27 +93,9 @@ export function TransposeCentsDialog({
                             {Math.round(Number(smoothness) || 0)}%
                         </Text>
                     </Flex>
-                </Flex>
-                <Flex justify="end" gap="2" mt="4">
-                    <Dialog.Close>
-                        <Button variant="soft" color="gray">
-                            {tAny("cancel")}
-                        </Button>
-                    </Dialog.Close>
-                    <Button
-                        onClick={() => {
-                            onConfirm?.(
-                                Number(cents) || 0,
-                                Math.max(0, Math.min(100, Number(smoothness) || 0)),
-                            );
-                            onOpenChange(false);
-                        }}
-                    >
-                        {tAny("ok")}
-                    </Button>
-                </Flex>
-            </Dialog.Content>
-        </Dialog.Root>
+                </AppField>
+            </AppForm>
+        </AppDialog>
     );
 }
 
@@ -151,63 +147,72 @@ export function TransposeDegreesDialog({
     }, [open, defaultScale, defaultSmoothness, defaultUseProjectScale]);
 
     return (
-        <Dialog.Root open={open} onOpenChange={onOpenChange}>
-            <Dialog.Content style={{ maxWidth: 360 }} onKeyDown={(e) => e.stopPropagation()}>
-                <Dialog.Title>{tAny("menu_transpose_degrees")}</Dialog.Title>
-                <Flex direction="column" gap="3" mt="3">
-                    <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 80 }}>
-                            {tAny("transpose_degrees_amount")}
-                        </Text>
-                        <TextField.Root
-                            size="2"
-                            type="number"
-                            value={degrees}
-                            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                                setDegrees(e.target.value)
-                            }
-                            style={{ flex: 1 }}
+        <AppDialog
+            open={open}
+            onOpenChange={onOpenChange}
+            title={tAny("menu_transpose_degrees")}
+            size="sm"
+            actions={[
+                { id: "cancel", label: tAny("cancel"), onClick: () => onOpenChange(false) },
+                {
+                    id: "apply",
+                    label: tAny("ok"),
+                    intent: "primary",
+                    onClick: () => {
+                        onConfirm?.(
+                            Number(degrees) || 0,
+                            scaleValue,
+                            Math.max(0, Math.min(100, Number(smoothness) || 0)),
+                        );
+                        onOpenChange(false);
+                    },
+                },
+            ]}
+        >
+            <AppForm>
+                <AppField label={tAny("transpose_degrees_amount")}>
+                    <TextField.Root
+                        size="2"
+                        type="number"
+                        value={degrees}
+                        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                            setDegrees(e.target.value)
+                        }
+                    />
+                </AppField>
+                <AppField label={tAny("base_scale")}>
+                    <Select.Root value={scaleValue} size="2" onValueChange={setScaleValue}>
+                        <Select.Trigger
+                            onWheel={(event) => {
+                                applySelectWheelChange({
+                                    event,
+                                    currentValue: scaleValue,
+                                    options: scaleSelectGroups.wheelOptions,
+                                    onChange: setScaleValue,
+                                });
+                            }}
                         />
-                    </Flex>
-                    <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 80 }}>
-                            {tAny("base_scale")}
-                        </Text>
-                        <Select.Root value={scaleValue} size="2" onValueChange={setScaleValue}>
-                            <Select.Trigger
-                                style={{ flex: 1 }}
-                                onWheel={(event) => {
-                                    applySelectWheelChange({
-                                        event,
-                                        currentValue: scaleValue,
-                                        options: scaleSelectGroups.wheelOptions,
-                                        onChange: setScaleValue,
-                                    });
-                                }}
-                            />
-                            <Select.Content>
-                                <Select.Item value={scaleSelectGroups.projectOption.value}>
-                                    {scaleSelectGroups.projectOption.label}
+                        <Select.Content>
+                            <Select.Item value={scaleSelectGroups.projectOption.value}>
+                                {scaleSelectGroups.projectOption.label}
+                            </Select.Item>
+                            <Select.Separator />
+                            {scaleSelectGroups.builtinOptions.map((option) => (
+                                <Select.Item key={option.value} value={option.value}>
+                                    {option.label}
                                 </Select.Item>
-                                <Select.Separator />
-                                {scaleSelectGroups.builtinOptions.map((option) => (
-                                    <Select.Item key={option.value} value={option.value}>
-                                        {option.label}
-                                    </Select.Item>
-                                ))}
-                                {scaleSelectGroups.customOptions.length > 0 && <Select.Separator />}
-                                {scaleSelectGroups.customOptions.map((option) => (
-                                    <Select.Item key={option.value} value={option.value}>
-                                        {option.label}
-                                    </Select.Item>
-                                ))}
-                            </Select.Content>
-                        </Select.Root>
-                    </Flex>
+                            ))}
+                            {scaleSelectGroups.customOptions.length > 0 && <Select.Separator />}
+                            {scaleSelectGroups.customOptions.map((option) => (
+                                <Select.Item key={option.value} value={option.value}>
+                                    {option.label}
+                                </Select.Item>
+                            ))}
+                        </Select.Content>
+                    </Select.Root>
+                </AppField>
+                <AppField label={tAny("edge_smoothness")}>
                     <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 80 }}>
-                            {tAny("edge_smoothness")}
-                        </Text>
                         <input
                             type="range"
                             min={0}
@@ -230,28 +235,9 @@ export function TransposeDegreesDialog({
                             {Math.round(Number(smoothness) || 0)}%
                         </Text>
                     </Flex>
-                </Flex>
-                <Flex justify="end" gap="2" mt="4">
-                    <Dialog.Close>
-                        <Button variant="soft" color="gray">
-                            {tAny("cancel")}
-                        </Button>
-                    </Dialog.Close>
-                    <Button
-                        onClick={() => {
-                            onConfirm?.(
-                                Number(degrees) || 0,
-                                scaleValue,
-                                Math.max(0, Math.min(100, Number(smoothness) || 0)),
-                            );
-                            onOpenChange(false);
-                        }}
-                    >
-                        {tAny("ok")}
-                    </Button>
-                </Flex>
-            </Dialog.Content>
-        </Dialog.Root>
+                </AppField>
+            </AppForm>
+        </AppDialog>
     );
 }
 
@@ -291,28 +277,39 @@ export function SetPitchDialog({
     }, [open, defaultSmoothness, defaultValue]);
 
     return (
-        <Dialog.Root open={open} onOpenChange={onOpenChange}>
-            <Dialog.Content style={{ maxWidth: 340 }} onKeyDown={(e) => e.stopPropagation()}>
-                <Dialog.Title>{titleText ?? tAny("menu_set_pitch")}</Dialog.Title>
-                <Flex direction="column" gap="3" mt="3">
+        <AppDialog
+            open={open}
+            onOpenChange={onOpenChange}
+            title={titleText ?? tAny("menu_set_pitch")}
+            size="sm"
+            actions={[
+                { id: "cancel", label: tAny("cancel"), onClick: () => onOpenChange(false) },
+                {
+                    id: "apply",
+                    label: tAny("ok"),
+                    intent: "primary",
+                    onClick: () => {
+                        const parsedNote = Number(note);
+                        const nextValue = Number.isFinite(parsedNote) ? parsedNote : defaultValue;
+                        onConfirm?.(nextValue, Math.max(0, Math.min(100, Number(smoothness) || 0)));
+                        onOpenChange(false);
+                    },
+                },
+            ]}
+        >
+            <AppForm>
+                <AppField label={valueLabelText ?? tAny("dlg_midi_note")}>
+                    <TextField.Root
+                        size="2"
+                        type="number"
+                        value={note}
+                        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                            setNote(e.target.value)
+                        }
+                    />
+                </AppField>
+                <AppField label={tAny("edge_smoothness")}>
                     <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 100 }}>
-                            {valueLabelText ?? tAny("dlg_midi_note")}
-                        </Text>
-                        <TextField.Root
-                            size="2"
-                            type="number"
-                            value={note}
-                            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                                setNote(e.target.value)
-                            }
-                            style={{ flex: 1 }}
-                        />
-                    </Flex>
-                    <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 100 }}>
-                            {tAny("edge_smoothness")}
-                        </Text>
                         <input
                             type="range"
                             min={0}
@@ -335,31 +332,9 @@ export function SetPitchDialog({
                             {Math.round(Number(smoothness) || 0)}%
                         </Text>
                     </Flex>
-                </Flex>
-                <Flex justify="end" gap="2" mt="4">
-                    <Dialog.Close>
-                        <Button variant="soft" color="gray">
-                            {tAny("cancel")}
-                        </Button>
-                    </Dialog.Close>
-                    <Button
-                        onClick={() => {
-                            const parsedNote = Number(note);
-                            const nextValue = Number.isFinite(parsedNote)
-                                ? parsedNote
-                                : defaultValue;
-                            onConfirm?.(
-                                nextValue,
-                                Math.max(0, Math.min(100, Number(smoothness) || 0)),
-                            );
-                            onOpenChange(false);
-                        }}
-                    >
-                        {tAny("ok")}
-                    </Button>
-                </Flex>
-            </Dialog.Content>
-        </Dialog.Root>
+                </AppField>
+            </AppForm>
+        </AppDialog>
     );
 }
 
@@ -378,14 +353,27 @@ export function AverageDialog({ open, onOpenChange, onConfirm }: AverageProps) {
     );
 
     return (
-        <Dialog.Root open={open} onOpenChange={onOpenChange}>
-            <Dialog.Content style={{ maxWidth: 400 }} onKeyDown={(e) => e.stopPropagation()}>
-                <Dialog.Title>{tAny("menu_average")}</Dialog.Title>
-                <Flex direction="column" gap="3" mt="3">
+        <AppDialog
+            open={open}
+            onOpenChange={onOpenChange}
+            title={tAny("menu_average")}
+            size="sm"
+            actions={[
+                { id: "cancel", label: tAny("cancel"), onClick: () => onOpenChange(false) },
+                {
+                    id: "apply",
+                    label: tAny("ok"),
+                    intent: "primary",
+                    onClick: () => {
+                        onConfirm?.(Math.max(0, Math.min(100, Math.round(Number(strength) || 0))));
+                        onOpenChange(false);
+                    },
+                },
+            ]}
+        >
+            <AppForm>
+                <AppField label={tAny("dlg_average_strength")}>
                     <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 72 }}>
-                            {tAny("dlg_average_strength")}
-                        </Text>
                         <input
                             type="range"
                             min={0}
@@ -410,26 +398,9 @@ export function AverageDialog({ open, onOpenChange, onConfirm }: AverageProps) {
                             {Math.round(Number(strength) || 0)}%
                         </Text>
                     </Flex>
-                </Flex>
-                <Flex justify="end" gap="2" mt="4">
-                    <Dialog.Close>
-                        <Button variant="soft" color="gray">
-                            {tAny("cancel")}
-                        </Button>
-                    </Dialog.Close>
-                    <Button
-                        onClick={() => {
-                            onConfirm?.(
-                                Math.max(0, Math.min(100, Math.round(Number(strength) || 0))),
-                            );
-                            onOpenChange(false);
-                        }}
-                    >
-                        {tAny("ok")}
-                    </Button>
-                </Flex>
-            </Dialog.Content>
-        </Dialog.Root>
+                </AppField>
+            </AppForm>
+        </AppDialog>
     );
 }
 
@@ -459,14 +430,27 @@ export function SmoothDialog({
     }, [open, defaultSmoothness]);
 
     return (
-        <Dialog.Root open={open} onOpenChange={onOpenChange}>
-            <Dialog.Content style={{ maxWidth: 400 }} onKeyDown={(e) => e.stopPropagation()}>
-                <Dialog.Title>{tAny("menu_smooth")}</Dialog.Title>
-                <Flex direction="column" gap="3" mt="3">
+        <AppDialog
+            open={open}
+            onOpenChange={onOpenChange}
+            title={tAny("menu_smooth")}
+            size="sm"
+            actions={[
+                { id: "cancel", label: tAny("cancel"), onClick: () => onOpenChange(false) },
+                {
+                    id: "apply",
+                    label: tAny("ok"),
+                    intent: "primary",
+                    onClick: () => {
+                        onConfirm?.(Math.max(0, Math.min(100, Math.round(strength))));
+                        onOpenChange(false);
+                    },
+                },
+            ]}
+        >
+            <AppForm>
+                <AppField label={tAny("dlg_smoothness")}>
                     <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 72 }}>
-                            {tAny("dlg_smoothness")}
-                        </Text>
                         <input
                             type="range"
                             min={0}
@@ -493,24 +477,9 @@ export function SmoothDialog({
                             {Math.round(strength)}%
                         </Text>
                     </Flex>
-                </Flex>
-                <Flex justify="end" gap="2" mt="4">
-                    <Dialog.Close>
-                        <Button variant="soft" color="gray">
-                            {tAny("cancel")}
-                        </Button>
-                    </Dialog.Close>
-                    <Button
-                        onClick={() => {
-                            onConfirm?.(Math.max(0, Math.min(100, Math.round(strength))));
-                            onOpenChange(false);
-                        }}
-                    >
-                        {tAny("ok")}
-                    </Button>
-                </Flex>
-            </Dialog.Content>
-        </Dialog.Root>
+                </AppField>
+            </AppForm>
+        </AppDialog>
     );
 }
 
@@ -573,104 +542,83 @@ export function VibratoDialog({
     };
 
     return (
-        <Dialog.Root open={open} onOpenChange={onOpenChange}>
-            <Dialog.Content style={{ maxWidth: 380 }} onKeyDown={(e) => e.stopPropagation()}>
-                <Dialog.Title>{tAny("menu_add_vibrato")}</Dialog.Title>
-                <Flex direction="column" gap="3" mt="3">
-                    <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 120 }}>
-                            {isPitch ? tAny("dlg_amplitude_cents") : tAny("dlg_amplitude")}
-                        </Text>
-                        <TextField.Root
-                            size="2"
-                            type="number"
-                            value={amplitude}
-                            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                                setAmplitude(e.target.value)
-                            }
-                            style={{ flex: 1 }}
-                        />
-                    </Flex>
-                    <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 120 }}>
-                            {tAny("dlg_rate_hz")}
-                        </Text>
-                        <TextField.Root
-                            size="2"
-                            type="number"
-                            value={rate}
-                            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                                setRate(e.target.value)
-                            }
-                            style={{ flex: 1 }}
-                        />
-                    </Flex>
-                    <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 120 }}>
-                            {tAny("dlg_attack_ms")}
-                        </Text>
-                        <TextField.Root
-                            size="2"
-                            type="number"
-                            value={attack}
-                            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                                setAttack(e.target.value)
-                            }
-                            style={{ flex: 1 }}
-                        />
-                    </Flex>
-                    <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 120 }}>
-                            {tAny("dlg_release_ms")}
-                        </Text>
-                        <TextField.Root
-                            size="2"
-                            type="number"
-                            value={release}
-                            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                                setRelease(e.target.value)
-                            }
-                            style={{ flex: 1 }}
-                        />
-                    </Flex>
-                    <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 120 }}>
-                            {tAny("dlg_phase_deg")}
-                        </Text>
-                        <TextField.Root
-                            size="2"
-                            type="number"
-                            value={phase}
-                            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                                setPhase(e.target.value)
-                            }
-                            style={{ flex: 1 }}
-                        />
-                    </Flex>
-                </Flex>
-                <Flex justify="end" gap="2" mt="4">
-                    <Dialog.Close>
-                        <Button variant="soft" color="gray">
-                            {tAny("cancel")}
-                        </Button>
-                    </Dialog.Close>
-                    <Button
-                        onClick={() => {
-                            onConfirm?.(
-                                parseNumberOr(amplitude, 30),
-                                parseNumberOr(rate, 5.5),
-                                parseNumberOr(attack, 50),
-                                parseNumberOr(release, 50),
-                                parseNumberOr(phase, 0),
-                            );
-                            onOpenChange(false);
-                        }}
-                    >
-                        {tAny("ok")}
-                    </Button>
-                </Flex>
-            </Dialog.Content>
-        </Dialog.Root>
+        <AppDialog
+            open={open}
+            onOpenChange={onOpenChange}
+            title={tAny("menu_add_vibrato")}
+            size="sm"
+            actions={[
+                { id: "cancel", label: tAny("cancel"), onClick: () => onOpenChange(false) },
+                {
+                    id: "apply",
+                    label: tAny("ok"),
+                    intent: "primary",
+                    onClick: () => {
+                        onConfirm?.(
+                            parseNumberOr(amplitude, 30),
+                            parseNumberOr(rate, 5.5),
+                            parseNumberOr(attack, 50),
+                            parseNumberOr(release, 50),
+                            parseNumberOr(phase, 0),
+                        );
+                        onOpenChange(false);
+                    },
+                },
+            ]}
+        >
+            <AppForm>
+                <AppField label={isPitch ? tAny("dlg_amplitude_cents") : tAny("dlg_amplitude")}>
+                    <TextField.Root
+                        size="2"
+                        type="number"
+                        value={amplitude}
+                        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                            setAmplitude(e.target.value)
+                        }
+                    />
+                </AppField>
+                <AppField label={tAny("dlg_rate_hz")}>
+                    <TextField.Root
+                        size="2"
+                        type="number"
+                        value={rate}
+                        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                            setRate(e.target.value)
+                        }
+                    />
+                </AppField>
+                <AppField label={tAny("dlg_attack_ms")}>
+                    <TextField.Root
+                        size="2"
+                        type="number"
+                        value={attack}
+                        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                            setAttack(e.target.value)
+                        }
+                    />
+                </AppField>
+                <AppField label={tAny("dlg_release_ms")}>
+                    <TextField.Root
+                        size="2"
+                        type="number"
+                        value={release}
+                        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                            setRelease(e.target.value)
+                        }
+                    />
+                </AppField>
+                <AppField label={tAny("dlg_phase_deg")}>
+                    <TextField.Root
+                        size="2"
+                        type="number"
+                        value={phase}
+                        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                            setPhase(e.target.value)
+                        }
+                    />
+                </AppField>
+            </AppForm>
+        </AppDialog>
     );
 }
 
@@ -750,26 +698,42 @@ export function QuantizeDialog({
     ]);
 
     return (
-        <Dialog.Root open={open} onOpenChange={onOpenChange}>
-            <Dialog.Content
-                ref={quantizeWheelGuard}
-                style={{ maxWidth: 360 }}
-                onKeyDown={(e) => e.stopPropagation()}
-            >
-                <Dialog.Title>{tAny("menu_quantize")}</Dialog.Title>
-                <Flex direction="column" gap="3" mt="3">
+        <AppDialog
+            open={open}
+            onOpenChange={onOpenChange}
+            title={tAny("menu_quantize")}
+            size="sm"
+            actions={[
+                { id: "cancel", label: tAny("cancel"), onClick: () => onOpenChange(false) },
+                {
+                    id: "apply",
+                    label: tAny("ok"),
+                    intent: "primary",
+                    onClick: () => {
+                        const parsed = Math.abs(Math.round(Number(toleranceCents) || 0));
+                        const parsedUnit = Math.abs(Number(quantizeUnit) || 0);
+                        onConfirm?.(
+                            valueMode ? "value" : unit,
+                            scaleValue,
+                            parsed,
+                            valueMode ? parsedUnit : undefined,
+                            Math.max(0, Math.min(100, Number(smoothness) || 0)),
+                        );
+                        onOpenChange(false);
+                    },
+                },
+            ]}
+        >
+            <div ref={quantizeWheelGuard}>
+                <AppForm>
                     {!valueMode && (
-                        <Flex align="center" gap="2">
-                            <Text size="2" style={{ minWidth: 80 }}>
-                                {tAny("quantize_unit")}
-                            </Text>
+                        <AppField label={tAny("quantize_unit")}>
                             <Select.Root
                                 value={unit}
                                 size="2"
                                 onValueChange={(v) => setUnit(v as "semitone" | "scale")}
                             >
                                 <Select.Trigger
-                                    style={{ flex: 1 }}
                                     onWheel={(event) => {
                                         applySelectWheelChange({
                                             event,
@@ -789,16 +753,12 @@ export function QuantizeDialog({
                                     </Select.Item>
                                 </Select.Content>
                             </Select.Root>
-                        </Flex>
+                        </AppField>
                     )}
                     {!valueMode && unit === "scale" && (
-                        <Flex align="center" gap="2">
-                            <Text size="2" style={{ minWidth: 80 }}>
-                                {tAny("base_scale")}
-                            </Text>
+                        <AppField label={tAny("base_scale")}>
                             <Select.Root value={scaleValue} size="2" onValueChange={setScaleValue}>
                                 <Select.Trigger
-                                    style={{ flex: 1 }}
                                     onWheel={(event) => {
                                         applySelectWheelChange({
                                             event,
@@ -828,13 +788,10 @@ export function QuantizeDialog({
                                     ))}
                                 </Select.Content>
                             </Select.Root>
-                        </Flex>
+                        </AppField>
                     )}
                     {valueMode && (
-                        <Flex align="center" gap="2">
-                            <Text size="2" style={{ minWidth: 80 }}>
-                                {tAny("quantize_unit")}
-                            </Text>
+                        <AppField label={tAny("quantize_unit")}>
                             <TextField.Root
                                 size="2"
                                 type="number"
@@ -842,14 +799,14 @@ export function QuantizeDialog({
                                 onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
                                     setQuantizeUnit(e.target.value)
                                 }
-                                style={{ flex: 1 }}
                             />
-                        </Flex>
+                        </AppField>
                     )}
-                    <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 80 }}>
-                            {valueMode ? tAny("quantize_tolerance") : tAny("pitch_snap_tolerance")}
-                        </Text>
+                    <AppField
+                        label={
+                            valueMode ? tAny("quantize_tolerance") : tAny("pitch_snap_tolerance")
+                        }
+                    >
                         <TextField.Root
                             size="2"
                             type="number"
@@ -857,63 +814,38 @@ export function QuantizeDialog({
                             onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
                                 setToleranceCents(e.target.value)
                             }
-                            style={{ flex: 1 }}
                         />
-                    </Flex>
-                    <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 80 }}>
-                            {tAny("edge_smoothness")}
-                        </Text>
-                        <input
-                            type="range"
-                            min={0}
-                            max={100}
-                            step={1}
-                            value={Math.round(Number(smoothness) || 0)}
-                            onWheel={(e) => {
-                                // 阻止默认滚动由 Dialog.Content 上的原生非被动
-                                // 守卫完成（React onWheel 的 preventDefault 是
-                                // no-op，见 useWheelScrollGuard）。
-                                const fine = isModifierActive(paramFineAdjustKb, e.nativeEvent);
-                                const step = fine ? 1 : 5;
-                                const dir = e.deltaY < 0 ? 1 : -1;
-                                const current = Math.round(Number(smoothness) || 0);
-                                const next = Math.max(0, Math.min(100, current + dir * step));
-                                setSmoothness(String(next));
-                            }}
-                            onChange={(e) => setSmoothness(e.currentTarget.value)}
-                            style={{ flex: 1 }}
-                        />
-                        <Text size="1" style={{ minWidth: 40, textAlign: "right" }}>
-                            {Math.round(Number(smoothness) || 0)}%
-                        </Text>
-                    </Flex>
-                </Flex>
-                <Flex justify="end" gap="2" mt="4">
-                    <Dialog.Close>
-                        <Button variant="soft" color="gray">
-                            {tAny("cancel")}
-                        </Button>
-                    </Dialog.Close>
-                    <Button
-                        onClick={() => {
-                            const parsed = Math.abs(Math.round(Number(toleranceCents) || 0));
-                            const parsedUnit = Math.abs(Number(quantizeUnit) || 0);
-                            onConfirm?.(
-                                valueMode ? "value" : unit,
-                                scaleValue,
-                                parsed,
-                                valueMode ? parsedUnit : undefined,
-                                Math.max(0, Math.min(100, Number(smoothness) || 0)),
-                            );
-                            onOpenChange(false);
-                        }}
-                    >
-                        {tAny("ok")}
-                    </Button>
-                </Flex>
-            </Dialog.Content>
-        </Dialog.Root>
+                    </AppField>
+                    <AppField label={tAny("edge_smoothness")}>
+                        <Flex align="center" gap="2">
+                            <input
+                                type="range"
+                                min={0}
+                                max={100}
+                                step={1}
+                                value={Math.round(Number(smoothness) || 0)}
+                                onWheel={(e) => {
+                                    // 阻止默认滚动由 Dialog.Content 上的原生非被动
+                                    // 守卫完成（React onWheel 的 preventDefault 是
+                                    // no-op，见 useWheelScrollGuard）。
+                                    const fine = isModifierActive(paramFineAdjustKb, e.nativeEvent);
+                                    const step = fine ? 1 : 5;
+                                    const dir = e.deltaY < 0 ? 1 : -1;
+                                    const current = Math.round(Number(smoothness) || 0);
+                                    const next = Math.max(0, Math.min(100, current + dir * step));
+                                    setSmoothness(String(next));
+                                }}
+                                onChange={(e) => setSmoothness(e.currentTarget.value)}
+                                style={{ flex: 1 }}
+                            />
+                            <Text size="1" style={{ minWidth: 40, textAlign: "right" }}>
+                                {Math.round(Number(smoothness) || 0)}%
+                            </Text>
+                        </Flex>
+                    </AppField>
+                </AppForm>
+            </div>
+        </AppDialog>
     );
 }
 
@@ -993,26 +925,42 @@ export function MeanQuantizeDialog({
     ]);
 
     return (
-        <Dialog.Root open={open} onOpenChange={onOpenChange}>
-            <Dialog.Content
-                ref={meanQuantizeWheelGuard}
-                style={{ maxWidth: 360 }}
-                onKeyDown={(e) => e.stopPropagation()}
-            >
-                <Dialog.Title>{tAny("mean_quantize_title")}</Dialog.Title>
-                <Flex direction="column" gap="3" mt="3">
+        <AppDialog
+            open={open}
+            onOpenChange={onOpenChange}
+            title={tAny("mean_quantize_title")}
+            size="sm"
+            actions={[
+                { id: "cancel", label: tAny("cancel"), onClick: () => onOpenChange(false) },
+                {
+                    id: "apply",
+                    label: tAny("ok"),
+                    intent: "primary",
+                    onClick: () => {
+                        const parsed = Math.abs(Math.round(Number(toleranceCents) || 0));
+                        const parsedUnit = Math.abs(Number(quantizeUnit) || 0);
+                        onConfirm?.(
+                            valueMode ? "value" : unit,
+                            scaleValue,
+                            parsed,
+                            valueMode ? parsedUnit : undefined,
+                            Math.max(0, Math.min(100, Number(smoothness) || 0)),
+                        );
+                        onOpenChange(false);
+                    },
+                },
+            ]}
+        >
+            <div ref={meanQuantizeWheelGuard}>
+                <AppForm>
                     {!valueMode && (
-                        <Flex align="center" gap="2">
-                            <Text size="2" style={{ minWidth: 80 }}>
-                                {tAny("quantize_unit")}
-                            </Text>
+                        <AppField label={tAny("quantize_unit")}>
                             <Select.Root
                                 value={unit}
                                 size="2"
                                 onValueChange={(v) => setUnit(v as "semitone" | "scale")}
                             >
                                 <Select.Trigger
-                                    style={{ flex: 1 }}
                                     onWheel={(event) => {
                                         applySelectWheelChange({
                                             event,
@@ -1032,16 +980,12 @@ export function MeanQuantizeDialog({
                                     </Select.Item>
                                 </Select.Content>
                             </Select.Root>
-                        </Flex>
+                        </AppField>
                     )}
                     {!valueMode && unit === "scale" && (
-                        <Flex align="center" gap="2">
-                            <Text size="2" style={{ minWidth: 80 }}>
-                                {tAny("base_scale")}
-                            </Text>
+                        <AppField label={tAny("base_scale")}>
                             <Select.Root value={scaleValue} size="2" onValueChange={setScaleValue}>
                                 <Select.Trigger
-                                    style={{ flex: 1 }}
                                     onWheel={(event) => {
                                         applySelectWheelChange({
                                             event,
@@ -1071,13 +1015,10 @@ export function MeanQuantizeDialog({
                                     ))}
                                 </Select.Content>
                             </Select.Root>
-                        </Flex>
+                        </AppField>
                     )}
                     {valueMode && (
-                        <Flex align="center" gap="2">
-                            <Text size="2" style={{ minWidth: 80 }}>
-                                {tAny("quantize_unit")}
-                            </Text>
+                        <AppField label={tAny("quantize_unit")}>
                             <TextField.Root
                                 size="2"
                                 type="number"
@@ -1085,14 +1026,14 @@ export function MeanQuantizeDialog({
                                 onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
                                     setQuantizeUnit(e.target.value)
                                 }
-                                style={{ flex: 1 }}
                             />
-                        </Flex>
+                        </AppField>
                     )}
-                    <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 80 }}>
-                            {valueMode ? tAny("quantize_tolerance") : tAny("pitch_snap_tolerance")}
-                        </Text>
+                    <AppField
+                        label={
+                            valueMode ? tAny("quantize_tolerance") : tAny("pitch_snap_tolerance")
+                        }
+                    >
                         <TextField.Root
                             size="2"
                             type="number"
@@ -1100,62 +1041,37 @@ export function MeanQuantizeDialog({
                             onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
                                 setToleranceCents(e.target.value)
                             }
-                            style={{ flex: 1 }}
                         />
-                    </Flex>
-                    <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 80 }}>
-                            {tAny("edge_smoothness")}
-                        </Text>
-                        <input
-                            type="range"
-                            min={0}
-                            max={100}
-                            step={1}
-                            value={Math.round(Number(smoothness) || 0)}
-                            onWheel={(e) => {
-                                // 阻止默认滚动由 Dialog.Content 上的原生非被动
-                                // 守卫完成（React onWheel 的 preventDefault 是
-                                // no-op，见 useWheelScrollGuard）。
-                                const fine = isModifierActive(paramFineAdjustKb, e.nativeEvent);
-                                const step = fine ? 1 : 5;
-                                const dir = e.deltaY < 0 ? 1 : -1;
-                                const current = Math.round(Number(smoothness) || 0);
-                                const next = Math.max(0, Math.min(100, current + dir * step));
-                                setSmoothness(String(next));
-                            }}
-                            onChange={(e) => setSmoothness(e.currentTarget.value)}
-                            style={{ flex: 1 }}
-                        />
-                        <Text size="1" style={{ minWidth: 40, textAlign: "right" }}>
-                            {Math.round(Number(smoothness) || 0)}%
-                        </Text>
-                    </Flex>
-                </Flex>
-                <Flex justify="end" gap="2" mt="4">
-                    <Dialog.Close>
-                        <Button variant="soft" color="gray">
-                            {tAny("cancel")}
-                        </Button>
-                    </Dialog.Close>
-                    <Button
-                        onClick={() => {
-                            const parsed = Math.abs(Math.round(Number(toleranceCents) || 0));
-                            const parsedUnit = Math.abs(Number(quantizeUnit) || 0);
-                            onConfirm?.(
-                                valueMode ? "value" : unit,
-                                scaleValue,
-                                parsed,
-                                valueMode ? parsedUnit : undefined,
-                                Math.max(0, Math.min(100, Number(smoothness) || 0)),
-                            );
-                            onOpenChange(false);
-                        }}
-                    >
-                        {tAny("ok")}
-                    </Button>
-                </Flex>
-            </Dialog.Content>
-        </Dialog.Root>
+                    </AppField>
+                    <AppField label={tAny("edge_smoothness")}>
+                        <Flex align="center" gap="2">
+                            <input
+                                type="range"
+                                min={0}
+                                max={100}
+                                step={1}
+                                value={Math.round(Number(smoothness) || 0)}
+                                onWheel={(e) => {
+                                    // 阻止默认滚动由 Dialog.Content 上的原生非被动
+                                    // 守卫完成（React onWheel 的 preventDefault 是
+                                    // no-op，见 useWheelScrollGuard）。
+                                    const fine = isModifierActive(paramFineAdjustKb, e.nativeEvent);
+                                    const step = fine ? 1 : 5;
+                                    const dir = e.deltaY < 0 ? 1 : -1;
+                                    const current = Math.round(Number(smoothness) || 0);
+                                    const next = Math.max(0, Math.min(100, current + dir * step));
+                                    setSmoothness(String(next));
+                                }}
+                                onChange={(e) => setSmoothness(e.currentTarget.value)}
+                                style={{ flex: 1 }}
+                            />
+                            <Text size="1" style={{ minWidth: 40, textAlign: "right" }}>
+                                {Math.round(Number(smoothness) || 0)}%
+                            </Text>
+                        </Flex>
+                    </AppField>
+                </AppForm>
+            </div>
+        </AppDialog>
     );
 }

@@ -1,4 +1,4 @@
-import { Dialog, Flex, Select, Text, Button, TextField } from "@radix-ui/themes";
+import { Flex, Select, Text, TextField } from "@radix-ui/themes";
 import { useState } from "react";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import type { RootState } from "../../app/store";
@@ -17,6 +17,8 @@ import { FADE_PRESETS } from "./timeline/reaperFade";
 import { SHAPE_LABEL_KEYS } from "./timeline/fadeTooltipText";
 import { isModifierActive, selectKeybinding } from "../../features/keybindings/keybindingsSlice";
 import { applySelectWheelChange } from "../../utils/selectWheel";
+import { AppDialog } from "../../ui/Dialog";
+import { AppField, AppForm } from "../../ui/Field";
 
 interface Props {
     open: boolean;
@@ -67,7 +69,7 @@ export function SplitTransitionSettingsDialog({ open, onOpenChange }: Props) {
     }
 
     return (
-        <Dialog.Root
+        <AppDialog
             open={open}
             onOpenChange={(nextOpen) => {
                 if (nextOpen) {
@@ -79,104 +81,104 @@ export function SplitTransitionSettingsDialog({ open, onOpenChange }: Props) {
                 }
                 onOpenChange(nextOpen);
             }}
+            title={tAny("split_transition_settings_title")}
+            size="sm"
+            actions={[
+                {
+                    id: "ok",
+                    label: tAny("ok"),
+                    intent: "primary",
+                    onClick: () => {
+                        commitDuration();
+                        onOpenChange(false);
+                    },
+                },
+            ]}
         >
-            <Dialog.Content style={{ maxWidth: 420 }} onKeyDown={(e) => e.stopPropagation()}>
-                <Dialog.Title>{tAny("split_transition_settings_title")}</Dialog.Title>
+            <AppForm>
+                <Text size="1" color="gray">
+                    {tAny("split_transition_settings_desc")}
+                </Text>
 
-                <Flex direction="column" gap="3" mt="3">
-                    <Text size="1" color="gray">
-                        {tAny("split_transition_settings_desc")}
-                    </Text>
-
-                    <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 110 }}>
-                            {tAny("split_transition_mode")}
-                        </Text>
-                        <Select.Root
-                            value={splitTransitionMode}
-                            size="2"
-                            onValueChange={(v) => {
-                                dispatch(setSplitTransitionMode(v as "fade" | "overlap"));
-                                void dispatch(persistUiSettings());
+                <AppField label={tAny("split_transition_mode")}>
+                    <Select.Root
+                        value={splitTransitionMode}
+                        size="2"
+                        onValueChange={(v) => {
+                            dispatch(setSplitTransitionMode(v as "fade" | "overlap"));
+                            void dispatch(persistUiSettings());
+                        }}
+                    >
+                        <Select.Trigger
+                            onWheel={(event) => {
+                                applySelectWheelChange({
+                                    event,
+                                    currentValue: splitTransitionMode,
+                                    options: ["fade", "overlap"],
+                                    onChange: (next) => {
+                                        dispatch(setSplitTransitionMode(next));
+                                        void dispatch(persistUiSettings());
+                                    },
+                                });
                             }}
-                        >
-                            <Select.Trigger
-                                style={{ flex: 1 }}
-                                onWheel={(event) => {
-                                    applySelectWheelChange({
-                                        event,
-                                        currentValue: splitTransitionMode,
-                                        options: ["fade", "overlap"],
-                                        onChange: (next) => {
-                                            dispatch(setSplitTransitionMode(next));
-                                            void dispatch(persistUiSettings());
-                                        },
-                                    });
-                                }}
-                            />
-                            <Select.Content>
-                                <Select.Item value="fade">
-                                    {tAny("split_transition_mode_fade")}
-                                </Select.Item>
-                                <Select.Item value="overlap">
-                                    {tAny("split_transition_mode_overlap")}
-                                </Select.Item>
-                            </Select.Content>
-                        </Select.Root>
-                    </Flex>
+                        />
+                        <Select.Content>
+                            <Select.Item value="fade">
+                                {tAny("split_transition_mode_fade")}
+                            </Select.Item>
+                            <Select.Item value="overlap">
+                                {tAny("split_transition_mode_overlap")}
+                            </Select.Item>
+                        </Select.Content>
+                    </Select.Root>
+                </AppField>
 
-                    <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 110 }}>
-                            {tAny("split_transition_duration_unit_label")}
-                        </Text>
-                        <Select.Root
-                            value={splitTransitionDurationUnit}
-                            size="2"
-                            onValueChange={(v) => {
-                                const unit = v as "seconds" | "percent";
-                                dispatch(setSplitTransitionDurationUnit(unit));
-                                setDurationInput(
-                                    unit === "percent"
-                                        ? String(splitTransitionDurationPercent)
-                                        : String(splitTransitionDurationSec),
-                                );
-                                void dispatch(persistUiSettings());
+                <AppField label={tAny("split_transition_duration_unit_label")}>
+                    <Select.Root
+                        value={splitTransitionDurationUnit}
+                        size="2"
+                        onValueChange={(v) => {
+                            const unit = v as "seconds" | "percent";
+                            dispatch(setSplitTransitionDurationUnit(unit));
+                            setDurationInput(
+                                unit === "percent"
+                                    ? String(splitTransitionDurationPercent)
+                                    : String(splitTransitionDurationSec),
+                            );
+                            void dispatch(persistUiSettings());
+                        }}
+                    >
+                        <Select.Trigger
+                            onWheel={(event) => {
+                                applySelectWheelChange({
+                                    event,
+                                    currentValue: splitTransitionDurationUnit,
+                                    options: ["seconds", "percent"],
+                                    onChange: (next) => {
+                                        dispatch(setSplitTransitionDurationUnit(next));
+                                        setDurationInput(
+                                            next === "percent"
+                                                ? String(splitTransitionDurationPercent)
+                                                : String(splitTransitionDurationSec),
+                                        );
+                                        void dispatch(persistUiSettings());
+                                    },
+                                });
                             }}
-                        >
-                            <Select.Trigger
-                                style={{ flex: 1 }}
-                                onWheel={(event) => {
-                                    applySelectWheelChange({
-                                        event,
-                                        currentValue: splitTransitionDurationUnit,
-                                        options: ["seconds", "percent"],
-                                        onChange: (next) => {
-                                            dispatch(setSplitTransitionDurationUnit(next));
-                                            setDurationInput(
-                                                next === "percent"
-                                                    ? String(splitTransitionDurationPercent)
-                                                    : String(splitTransitionDurationSec),
-                                            );
-                                            void dispatch(persistUiSettings());
-                                        },
-                                    });
-                                }}
-                            />
-                            <Select.Content>
-                                <Select.Item value="seconds">
-                                    {tAny("split_transition_duration_unit_seconds")}
-                                </Select.Item>
-                                <Select.Item value="percent">
-                                    {tAny("split_transition_duration_unit_percent")}
-                                </Select.Item>
-                            </Select.Content>
-                        </Select.Root>
-                    </Flex>
+                        />
+                        <Select.Content>
+                            <Select.Item value="seconds">
+                                {tAny("split_transition_duration_unit_seconds")}
+                            </Select.Item>
+                            <Select.Item value="percent">
+                                {tAny("split_transition_duration_unit_percent")}
+                            </Select.Item>
+                        </Select.Content>
+                    </Select.Root>
+                </AppField>
 
+                <AppField label={tAny("split_transition_duration")}>
                     <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 110 }}>
-                            {tAny("split_transition_duration")}
-                        </Text>
                         <TextField.Root
                             size="2"
                             type="number"
@@ -223,103 +225,85 @@ export function SplitTransitionSettingsDialog({ open, onOpenChange }: Props) {
                             )}
                         </Text>
                     </Flex>
+                </AppField>
 
-                    {splitTransitionDurationUnit === "percent" && (
-                        <Text size="1" color="gray">
-                            {tAny("split_transition_duration_percent_hint")}
-                        </Text>
-                    )}
+                {splitTransitionDurationUnit === "percent" && (
+                    <Text size="1" color="gray">
+                        {tAny("split_transition_duration_percent_hint")}
+                    </Text>
+                )}
 
-                    <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 110 }}>
-                            {tAny("split_transition_curve")}
-                        </Text>
-                        <Select.Root
-                            value={splitTransitionCurve}
-                            size="2"
-                            onValueChange={(v) => {
-                                dispatch(setSplitTransitionCurve(v as SplitTransitionCurveType));
-                                void dispatch(persistUiSettings());
+                <AppField label={tAny("split_transition_curve")}>
+                    <Select.Root
+                        value={splitTransitionCurve}
+                        size="2"
+                        onValueChange={(v) => {
+                            dispatch(setSplitTransitionCurve(v as SplitTransitionCurveType));
+                            void dispatch(persistUiSettings());
+                        }}
+                    >
+                        <Select.Trigger
+                            onWheel={(event) => {
+                                applySelectWheelChange({
+                                    event,
+                                    currentValue: splitTransitionCurve,
+                                    options: CURVE_OPTIONS.map((opt) => opt.value),
+                                    onChange: (next) => {
+                                        dispatch(setSplitTransitionCurve(next));
+                                        void dispatch(persistUiSettings());
+                                    },
+                                });
                             }}
-                        >
-                            <Select.Trigger
-                                style={{ flex: 1 }}
-                                onWheel={(event) => {
-                                    applySelectWheelChange({
-                                        event,
-                                        currentValue: splitTransitionCurve,
-                                        options: CURVE_OPTIONS.map((opt) => opt.value),
-                                        onChange: (next) => {
-                                            dispatch(setSplitTransitionCurve(next));
-                                            void dispatch(persistUiSettings());
-                                        },
-                                    });
-                                }}
-                            />
-                            <Select.Content>
-                                {CURVE_OPTIONS.map((opt) => (
-                                    <Select.Item key={opt.value} value={opt.value}>
-                                        {tAny(opt.labelKey)}
-                                    </Select.Item>
-                                ))}
-                            </Select.Content>
-                        </Select.Root>
-                    </Flex>
+                        />
+                        <Select.Content>
+                            {CURVE_OPTIONS.map((opt) => (
+                                <Select.Item key={opt.value} value={opt.value}>
+                                    {tAny(opt.labelKey)}
+                                </Select.Item>
+                            ))}
+                        </Select.Content>
+                    </Select.Root>
+                </AppField>
 
-                    <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 110 }}>
-                            {tAny("split_transition_overlap_crossfade")}
-                        </Text>
-                        <Select.Root
-                            value={splitTransitionOverlapCrossfade}
-                            size="2"
-                            onValueChange={(v) => {
-                                dispatch(
-                                    setSplitTransitionOverlapCrossfade(v as "auto" | "always"),
-                                );
-                                void dispatch(persistUiSettings());
+                <AppField label={tAny("split_transition_overlap_crossfade")}>
+                    <Select.Root
+                        value={splitTransitionOverlapCrossfade}
+                        size="2"
+                        onValueChange={(v) => {
+                            dispatch(setSplitTransitionOverlapCrossfade(v as "auto" | "always"));
+                            void dispatch(persistUiSettings());
+                        }}
+                    >
+                        <Select.Trigger
+                            onWheel={(event) => {
+                                applySelectWheelChange({
+                                    event,
+                                    currentValue: splitTransitionOverlapCrossfade,
+                                    options: ["auto", "always"],
+                                    onChange: (next) => {
+                                        dispatch(setSplitTransitionOverlapCrossfade(next));
+                                        void dispatch(persistUiSettings());
+                                    },
+                                });
                             }}
-                        >
-                            <Select.Trigger
-                                style={{ flex: 1 }}
-                                onWheel={(event) => {
-                                    applySelectWheelChange({
-                                        event,
-                                        currentValue: splitTransitionOverlapCrossfade,
-                                        options: ["auto", "always"],
-                                        onChange: (next) => {
-                                            dispatch(setSplitTransitionOverlapCrossfade(next));
-                                            void dispatch(persistUiSettings());
-                                        },
-                                    });
-                                }}
-                            />
-                            <Select.Content>
-                                <Select.Item value="auto">
-                                    {tAny("split_transition_overlap_crossfade_auto")}
-                                </Select.Item>
-                                <Select.Item value="always">
-                                    {tAny("split_transition_overlap_crossfade_always")}
-                                </Select.Item>
-                            </Select.Content>
-                        </Select.Root>
-                    </Flex>
+                        />
+                        <Select.Content>
+                            <Select.Item value="auto">
+                                {tAny("split_transition_overlap_crossfade_auto")}
+                            </Select.Item>
+                            <Select.Item value="always">
+                                {tAny("split_transition_overlap_crossfade_always")}
+                            </Select.Item>
+                        </Select.Content>
+                    </Select.Root>
+                </AppField>
 
-                    {splitTransitionMode === "overlap" && (
-                        <Text size="1" color="gray">
-                            {tAny("split_transition_overlap_hint")}
-                        </Text>
-                    )}
-                </Flex>
-
-                <Flex justify="end" mt="4">
-                    <Dialog.Close>
-                        <Button variant="soft" color="gray" onClick={commitDuration}>
-                            {tAny("ok")}
-                        </Button>
-                    </Dialog.Close>
-                </Flex>
-            </Dialog.Content>
-        </Dialog.Root>
+                {splitTransitionMode === "overlap" && (
+                    <Text size="1" color="gray">
+                        {tAny("split_transition_overlap_hint")}
+                    </Text>
+                )}
+            </AppForm>
+        </AppDialog>
     );
 }

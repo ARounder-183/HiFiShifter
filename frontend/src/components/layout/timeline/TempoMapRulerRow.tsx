@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { registerDragAbort } from "./gestureFocusGuard";
-import { Button, Checkbox, Dialog, Flex, Select, Text, TextField } from "@radix-ui/themes";
+import { Checkbox, Flex, Select, Text, TextField } from "@radix-ui/themes";
 import { shallowEqual } from "react-redux";
 import type { GridSize, TimelineSnapSettings } from "../../../features/session/sessionTypes";
 import type { ScaleLike } from "../../../utils/musicalScales";
@@ -53,6 +53,8 @@ import {
 import { useAppSelector } from "../../../app/hooks";
 import { isModifierActive, selectKeybinding } from "../../../features/keybindings/keybindingsSlice";
 import { applySelectWheelChange } from "../../../utils/selectWheel";
+import { AppDialog } from "../../../ui/Dialog";
+import { AppField, AppForm } from "../../../ui/Field";
 
 /** Tempo Map 行高度（不含分隔线）。 */
 export const TEMPO_ROW_HEIGHT_PX = 17;
@@ -314,20 +316,39 @@ function TempoPointDialog({
     ];
 
     return (
-        <Dialog.Root open={open} onOpenChange={(next) => !next && onCancel()}>
-            <Dialog.Content maxWidth="420px">
-                <Dialog.Title>
-                    {isFirst ? t("tempo_map_dialog_title_initial") : t("tempo_map_dialog_title")}
-                </Dialog.Title>
-                <Flex direction="column" gap="3" mt="3">
+        <AppDialog
+            open={open}
+            onOpenChange={(next) => !next && onCancel()}
+            title={isFirst ? t("tempo_map_dialog_title_initial") : t("tempo_map_dialog_title")}
+            size="sm"
+            actions={[
+                {
+                    id: "delete",
+                    label: t("tempo_map_delete_point"),
+                    intent: "danger",
+                    align: "start",
+                    disabled: isFirst,
+                    autoClose: false,
+                    onClick: onDelete,
+                },
+                {
+                    id: "cancel",
+                    label: t("cancel"),
+                    autoClose: false,
+                    onClick: onCancel,
+                },
+                {
+                    id: "ok",
+                    label: t("ok"),
+                    intent: "primary",
+                    autoClose: false,
+                    onClick: commit,
+                },
+            ]}
+        >
+            <AppForm>
+                <AppField label={t("bpm")}>
                     <Flex gap="2" align="center">
-                        <Text
-                            size="1"
-                            className="text-qt-text-muted shrink-0"
-                            style={{ width: 96 }}
-                        >
-                            {t("bpm")}
-                        </Text>
                         <TextField.Root
                             size="1"
                             ref={bpmRef}
@@ -344,14 +365,9 @@ function TempoPointDialog({
                             {t("tempo_map_bpm_range")}
                         </Text>
                     </Flex>
+                </AppField>
+                <AppField label={t("tempo_map_time_signature")}>
                     <Flex gap="2" align="center">
-                        <Text
-                            size="1"
-                            className="text-qt-text-muted shrink-0"
-                            style={{ width: 96 }}
-                        >
-                            {t("tempo_map_time_signature")}
-                        </Text>
                         <TextField.Root
                             size="1"
                             ref={numRef}
@@ -399,113 +415,84 @@ function TempoPointDialog({
                             </Select.Content>
                         </Select.Root>
                     </Flex>
-                    {!isFirst ? (
-                        <Flex gap="2" align="center" style={{ marginTop: -8 }}>
-                            <Checkbox
-                                size="1"
-                                checked={sigFollow}
-                                disabled={isFirst}
-                                onCheckedChange={(checked) => setSigFollow(checked === true)}
-                            />
-                            <Text size="1" className="text-qt-text-muted">
-                                {t("tempo_map_ts_inherit")} ({previousTimeSignatureLabel})
-                            </Text>
-                        </Flex>
-                    ) : null}
-                    <Flex gap="2" align="center">
-                        <Text
+                </AppField>
+                {!isFirst ? (
+                    <Flex gap="2" align="center" style={{ marginTop: -8 }}>
+                        <Checkbox
                             size="1"
-                            className="text-qt-text-muted shrink-0"
-                            style={{ width: 96 }}
-                        >
-                            {t("tempo_map_scale")}
+                            checked={sigFollow}
+                            disabled={isFirst}
+                            onCheckedChange={(checked) => setSigFollow(checked === true)}
+                        />
+                        <Text size="1" className="text-qt-text-muted">
+                            {t("tempo_map_ts_inherit")} ({previousTimeSignatureLabel})
                         </Text>
-                        <Select.Root
-                            size="1"
-                            value={scaleValue}
-                            onValueChange={(v) => {
-                                if (v.startsWith("custom:")) {
-                                    const presetId = v.slice(7);
-                                    const preset = customScalePresets.find(
-                                        (p) => String(p.id) === presetId,
-                                    );
-                                    setCustomNotes(preset ? [...preset.notes] : null);
-                                    setCustomName(preset?.name ?? "");
-                                }
-                                setScaleValue(v);
+                    </Flex>
+                ) : null}
+                <AppField label={t("tempo_map_scale")}>
+                    <Select.Root
+                        size="1"
+                        value={scaleValue}
+                        onValueChange={(v) => {
+                            if (v.startsWith("custom:")) {
+                                const presetId = v.slice(7);
+                                const preset = customScalePresets.find(
+                                    (p) => String(p.id) === presetId,
+                                );
+                                setCustomNotes(preset ? [...preset.notes] : null);
+                                setCustomName(preset?.name ?? "");
+                            }
+                            setScaleValue(v);
+                        }}
+                    >
+                        <Select.Trigger
+                            style={{ minWidth: 190 }}
+                            onWheel={(event) => {
+                                applySelectWheelChange({
+                                    event,
+                                    currentValue: scaleValue,
+                                    options: scaleWheelOptions,
+                                    onChange: (v) => {
+                                        if (v.startsWith("custom:")) {
+                                            const presetId = v.slice(7);
+                                            const preset = customScalePresets.find(
+                                                (p) => String(p.id) === presetId,
+                                            );
+                                            setCustomNotes(preset ? [...preset.notes] : null);
+                                            setCustomName(preset?.name ?? "");
+                                        }
+                                        setScaleValue(v);
+                                    },
+                                });
                             }}
-                        >
-                            <Select.Trigger
-                                style={{ minWidth: 190 }}
-                                onWheel={(event) => {
-                                    applySelectWheelChange({
-                                        event,
-                                        currentValue: scaleValue,
-                                        options: scaleWheelOptions,
-                                        onChange: (v) => {
-                                            if (v.startsWith("custom:")) {
-                                                const presetId = v.slice(7);
-                                                const preset = customScalePresets.find(
-                                                    (p) => String(p.id) === presetId,
-                                                );
-                                                setCustomNotes(preset ? [...preset.notes] : null);
-                                                setCustomName(preset?.name ?? "");
-                                            }
-                                            setScaleValue(v);
-                                        },
-                                    });
-                                }}
-                            />
-                            <Select.Content>
-                                <Select.Item value="inherit">
-                                    {t("tempo_map_scale_inherit")} ({previousScaleLabel})
-                                </Select.Item>
+                        />
+                        <Select.Content>
+                            <Select.Item value="inherit">
+                                {t("tempo_map_scale_inherit")} ({previousScaleLabel})
+                            </Select.Item>
+                            <Select.Group>
+                                <Select.Label>{t("scale_builtin_group")}</Select.Label>
+                                {SCALE_KEYS.map((key) => (
+                                    <Select.Item key={key} value={`key:${key}`}>
+                                        {SCALE_LABELS[key]}
+                                    </Select.Item>
+                                ))}
+                            </Select.Group>
+                            {customScalePresets.length > 0 ? (
                                 <Select.Group>
-                                    <Select.Label>{t("scale_builtin_group")}</Select.Label>
-                                    {SCALE_KEYS.map((key) => (
-                                        <Select.Item key={key} value={`key:${key}`}>
-                                            {SCALE_LABELS[key]}
+                                    <Select.Label>{t("scale_custom_group")}</Select.Label>
+                                    {customScalePresets.map((preset) => (
+                                        <Select.Item key={preset.id} value={`custom:${preset.id}`}>
+                                            {preset.name || preset.id}
                                         </Select.Item>
                                     ))}
                                 </Select.Group>
-                                {customScalePresets.length > 0 ? (
-                                    <Select.Group>
-                                        <Select.Label>{t("scale_custom_group")}</Select.Label>
-                                        {customScalePresets.map((preset) => (
-                                            <Select.Item
-                                                key={preset.id}
-                                                value={`custom:${preset.id}`}
-                                            >
-                                                {preset.name || preset.id}
-                                            </Select.Item>
-                                        ))}
-                                    </Select.Group>
-                                ) : null}
-                            </Select.Content>
-                        </Select.Root>
-                    </Flex>
-                </Flex>
-                <Flex justify="between" align="center" mt="4" gap="2">
-                    <Button
-                        variant="soft"
-                        color="red"
-                        size="1"
-                        disabled={isFirst}
-                        onClick={onDelete}
-                    >
-                        {t("tempo_map_delete_point")}
-                    </Button>
-                    <Flex gap="2">
-                        <Button variant="soft" color="gray" size="1" onClick={onCancel}>
-                            {t("cancel")}
-                        </Button>
-                        <Button size="1" onClick={commit}>
-                            {t("ok")}
-                        </Button>
-                    </Flex>
-                </Flex>
-            </Dialog.Content>
-        </Dialog.Root>
+                            ) : null}
+                        </Select.Content>
+                    </Select.Root>
+                </AppField>
+            </AppForm>
+        </AppDialog>
     );
 }
 

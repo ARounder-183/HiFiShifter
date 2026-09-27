@@ -383,6 +383,19 @@ textarea {
 }
 
 /*
+ * `AppField` 的控件槽。
+ *
+ * Radix 的 `TextField.Root` / `Select.Trigger` 是 inline-flex，在纵向 flex
+ * 容器里不会自动铺满宽度（inline 级盒子不参与 cross-axis stretch）。此前每个
+ * 调用点都靠 `style={{ flex: 1 }}` 手工补偿 —— 这正是"每个对话框各写一套"
+ * 的起点。在这里一次性解决，调用方不必再想宽度。
+ */
+.app-field__control > * {
+    width: 100%;
+    min-width: 0;
+}
+
+/*
  * 层级阶梯：定义见 `:root` 的 `--qt-z-*`。此处只做落地。
  *
  * Radix 的 Dialog / 菜单 portal 本身不带 z-index（靠 DOM 顺序决定层级），

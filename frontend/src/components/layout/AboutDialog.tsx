@@ -11,9 +11,11 @@
  */
 
 import { useEffect, useState } from "react";
-import { Button, Dialog, Flex, Text } from "@radix-ui/themes";
+import { Flex, Text } from "@radix-ui/themes";
 import { coreApi } from "../../services/api/core";
 import { useI18n } from "../../i18n/I18nProvider";
+import { AppDialog } from "../../ui/Dialog";
+import { AppForm } from "../../ui/Field";
 
 /** 上游不是 GitHub 或读取失败时的回退仓库链接。 */
 const FALLBACK_REPO_URL = "https://github.com/ARounder-183/HiFiShifter";
@@ -66,67 +68,58 @@ export function AboutDialog({ open, onOpenChange }: AboutDialogProps) {
     }
 
     return (
-        <Dialog.Root open={open} onOpenChange={onOpenChange}>
-            <Dialog.Content style={{ maxWidth: 460 }} onKeyDown={(e) => e.stopPropagation()}>
-                <Dialog.Title>{tAny("menu_about")}</Dialog.Title>
-                <Dialog.Description size="2" style={{ lineHeight: 1.7 }}>
-                    {tAny("about_intro")}
-                </Dialog.Description>
-
-                <Flex direction="column" gap="3" mt="4">
-                    <Flex direction="column" gap="2">
-                        <Flex align="center" gap="2">
-                            <Text size="2" color="gray">
-                                {tAny("about_version")}
+        <AppDialog
+            open={open}
+            onOpenChange={onOpenChange}
+            title={tAny("menu_about")}
+            description={tAny("about_intro")}
+            size="md"
+            actions={[
+                {
+                    id: "open-repo",
+                    label: tAny("about_open_repo"),
+                    align: "start",
+                    // 异步包装：打开仓库不关闭对话框，避免页脚表单重新提交触发默认动作。
+                    onClick: () => openExternal(repoUrl),
+                },
+                { id: "close", label: tAny("cancel"), onClick: () => onOpenChange(false) },
+            ]}
+        >
+            <AppForm>
+                <Flex direction="column" gap="2">
+                    <Flex align="center" gap="2">
+                        <Text size="2" color="gray">
+                            {tAny("about_version")}
+                        </Text>
+                        <Text size="2" weight="medium">
+                            {info?.version ?? "…"}
+                        </Text>
+                        {info?.dirty ? (
+                            <Text size="1" color="orange">
+                                {tAny("about_dirty")}
                             </Text>
-                            <Text size="2" weight="medium">
-                                {info?.version ?? "…"}
-                            </Text>
-                            {info?.dirty ? (
-                                <Text size="1" color="orange">
-                                    {tAny("about_dirty")}
-                                </Text>
-                            ) : null}
-                        </Flex>
-                        {showCommit ? (
-                            <Flex align="center" gap="2">
-                                <Text size="2" color="gray">
-                                    {tAny("about_commit")}
-                                </Text>
-                                {/* 点击跳转到该 commit 的源码快照；tooltip 展示完整链接——
-                                    按自然边界拆两行，避免 320px 气泡内在连字符处断行、
-                                    哈希溢出（pre-line 保留换行）。 */}
-                                <button
-                                    type="button"
-                                    onClick={() =>
-                                        void openExternal(`${repoUrl}/tree/${info?.commit}`)
-                                    }
-                                    data-tooltip={`${repoUrl}\n/tree/${info?.commit}`}
-                                    className="text-xs text-qt-accent underline underline-offset-2 hover:text-qt-text"
-                                >
-                                    {commitShort}
-                                </button>
-                            </Flex>
                         ) : null}
                     </Flex>
+                    {showCommit ? (
+                        <Flex align="center" gap="2">
+                            <Text size="2" color="gray">
+                                {tAny("about_commit")}
+                            </Text>
+                            {/* 点击跳转到该 commit 的源码快照；tooltip 展示完整链接——
+                                按自然边界拆两行，避免 320px 气泡内在连字符处断行、
+                                哈希溢出（pre-line 保留换行）。 */}
+                            <button
+                                type="button"
+                                onClick={() => void openExternal(`${repoUrl}/tree/${info?.commit}`)}
+                                data-tooltip={`${repoUrl}\n/tree/${info?.commit}`}
+                                className="text-xs text-qt-accent underline underline-offset-2 hover:text-qt-text"
+                            >
+                                {commitShort}
+                            </button>
+                        </Flex>
+                    ) : null}
                 </Flex>
-
-                <Flex gap="3" mt="4" justify="end">
-                    <Button
-                        size="2"
-                        variant="soft"
-                        data-tooltip={repoUrl}
-                        onClick={() => void openExternal(repoUrl)}
-                    >
-                        {tAny("about_open_repo")}
-                    </Button>
-                    <Dialog.Close>
-                        <Button size="2" variant="surface" color="gray">
-                            {tAny("cancel")}
-                        </Button>
-                    </Dialog.Close>
-                </Flex>
-            </Dialog.Content>
-        </Dialog.Root>
+            </AppForm>
+        </AppDialog>
     );
 }

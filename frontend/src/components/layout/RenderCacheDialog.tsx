@@ -15,16 +15,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "react";
-import {
-    Button,
-    Checkbox,
-    Dialog,
-    Flex,
-    Select,
-    Separator,
-    Text,
-    TextField,
-} from "@radix-ui/themes";
+import { Button, Checkbox, Flex, Select, Separator, Text, TextField } from "@radix-ui/themes";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { useI18n } from "../../i18n/I18nProvider";
 import {
@@ -39,6 +30,8 @@ import {
 } from "../../services/api/settings";
 import { persistUiSettings } from "../../features/session/thunks/runtimeThunks";
 import { setRenderCacheSettings } from "../../features/session/sessionSlice";
+import { AppDialog } from "../../ui/Dialog";
+import { AppField, AppForm } from "../../ui/Field";
 
 interface RenderCacheDialogProps {
     open: boolean;
@@ -179,78 +172,87 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
         : "custom";
 
     return (
-        <Dialog.Root open={open} onOpenChange={onOpenChange}>
-            <Dialog.Content
-                style={{ maxWidth: 720 }}
-                onKeyDown={(event) => event.stopPropagation()}
-            >
-                <Dialog.Title>{tAny("render_cache_dialog_title")}</Dialog.Title>
-                <Dialog.Description>{tAny("render_cache_dialog_desc")}</Dialog.Description>
-
-                <Flex direction="column" gap="3" mt="3">
-                    {/* ── 状态 ─────────────────────────────────────────────── */}
-                    <Flex direction="column" gap="1">
-                        <Text size="2">{summaryText}</Text>
-                        <Text size="1" color="gray" style={{ wordBreak: "break-all" }}>
-                            {tAny("render_cache_location_label")}：{stats?.dir ?? "…"}
+        <AppDialog
+            open={open}
+            onOpenChange={onOpenChange}
+            title={tAny("render_cache_dialog_title")}
+            description={tAny("render_cache_dialog_desc")}
+            size="lg"
+            actions={[
+                { id: "close", label: tAny("close"), onClick: () => onOpenChange(false) },
+                {
+                    id: "save",
+                    label: tAny("render_cache_save_settings"),
+                    intent: "primary",
+                    disabled: saving,
+                    onClick: handleSave,
+                },
+            ]}
+        >
+            <AppForm labelWidth="lg">
+                {/* ── 状态 ─────────────────────────────────────────────── */}
+                <Flex direction="column" gap="1">
+                    <Text size="2">{summaryText}</Text>
+                    <Text size="1" color="gray" style={{ wordBreak: "break-all" }}>
+                        {tAny("render_cache_location_label")}：{stats?.dir ?? "…"}
+                    </Text>
+                    <Flex gap="2" mt="1">
+                        <Button
+                            type="button"
+                            size="1"
+                            variant="soft"
+                            color="gray"
+                            onClick={() => void handleOpenDir()}
+                        >
+                            {tAny("render_cache_open_dir")}
+                        </Button>
+                        <Button
+                            type="button"
+                            size="1"
+                            variant="soft"
+                            color="gray"
+                            disabled={loading}
+                            onClick={() => void refreshStats()}
+                        >
+                            {tAny("render_cache_refresh")}
+                        </Button>
+                    </Flex>
+                    {stats && !stats.writable ? (
+                        <Text size="1" color="amber">
+                            {tAny("render_cache_dir_not_writable")}
                         </Text>
-                        <Flex gap="2" mt="1">
-                            <Button
-                                size="1"
-                                variant="soft"
-                                color="gray"
-                                onClick={() => void handleOpenDir()}
-                            >
-                                {tAny("render_cache_open_dir")}
-                            </Button>
-                            <Button
-                                size="1"
-                                variant="soft"
-                                color="gray"
-                                disabled={loading}
-                                onClick={() => void refreshStats()}
-                            >
-                                {tAny("render_cache_refresh")}
-                            </Button>
-                        </Flex>
-                        {stats && !stats.writable ? (
-                            <Text size="1" color="amber">
-                                {tAny("render_cache_dir_not_writable")}
-                            </Text>
-                        ) : null}
-                        {stats && stats.sessionWriteErrors > 0 ? (
-                            <Text size="1" color="amber">
-                                {tAny("render_cache_write_errors").replace(
-                                    "{n}",
-                                    String(stats.sessionWriteErrors),
-                                )}
-                            </Text>
-                        ) : null}
-                    </Flex>
-
-                    <Separator size="4" />
-
-                    {/* ── 开关 ─────────────────────────────────────────────── */}
-                    <Flex align="center" gap="2">
-                        <Checkbox
-                            checked={draft.enabled}
-                            onCheckedChange={(v) => patch({ enabled: Boolean(v) })}
-                        />
-                        <Text size="2">{tAny("render_cache_enable")}</Text>
-                    </Flex>
-                    <Flex align="center" gap="2">
-                        <Checkbox
-                            checked={draft.showHitStats}
-                            onCheckedChange={(v) => patch({ showHitStats: Boolean(v) })}
-                        />
-                        <Text size="2">{tAny("render_cache_show_hit_stats")}</Text>
-                    </Flex>
-
-                    {/* ── 容量 ─────────────────────────────────────────────── */}
-                    <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 132 }}>
-                            {tAny("render_cache_max_size")}
+                    ) : null}
+                    {stats && stats.sessionWriteErrors > 0 ? (
+                        <Text size="1" color="amber">
+                            {tAny("render_cache_write_errors").replace(
+                                "{n}",
+                                String(stats.sessionWriteErrors),
+                            )}
                         </Text>
+                    ) : null}
+                </Flex>
+
+                <Separator size="4" />
+
+                {/* ── 开关 ─────────────────────────────────────────────── */}
+                <Flex align="center" gap="2">
+                    <Checkbox
+                        checked={draft.enabled}
+                        onCheckedChange={(v) => patch({ enabled: Boolean(v) })}
+                    />
+                    <Text size="2">{tAny("render_cache_enable")}</Text>
+                </Flex>
+                <Flex align="center" gap="2">
+                    <Checkbox
+                        checked={draft.showHitStats}
+                        onCheckedChange={(v) => patch({ showHitStats: Boolean(v) })}
+                    />
+                    <Text size="2">{tAny("render_cache_show_hit_stats")}</Text>
+                </Flex>
+
+                {/* ── 容量 ─────────────────────────────────────────────── */}
+                <AppField label={tAny("render_cache_max_size")}>
+                    <Flex align="center" gap="2">
                         <Select.Root
                             value={sizePresetValue}
                             size="1"
@@ -284,11 +286,10 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                             MB
                         </Text>
                     </Flex>
+                </AppField>
 
+                <AppField label={tAny("render_cache_max_age")}>
                     <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 132 }}>
-                            {tAny("render_cache_max_age")}
-                        </Text>
                         <Select.Root
                             value={agePresetValue}
                             size="1"
@@ -325,104 +326,100 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                             {tAny("render_cache_days_unit")}
                         </Text>
                     </Flex>
+                </AppField>
 
+                <Flex align="center" gap="2" wrap="wrap">
+                    <Text size="2" style={{ minWidth: 132 }}>
+                        {tAny("render_cache_min_clip")}
+                    </Text>
+                    <TextField.Root
+                        size="1"
+                        type="number"
+                        min={0}
+                        step={0.1}
+                        value={String(draft.minClipSecs)}
+                        onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                            patch({ minClipSecs: Number(event.target.value) })
+                        }
+                        style={{ width: 90 }}
+                    />
+                    <Text size="1" color="gray">
+                        {tAny("render_cache_seconds_unit")}
+                    </Text>
+                    <Text size="2" style={{ minWidth: 108, marginLeft: 8 }}>
+                        {tAny("render_cache_min_entry")}
+                    </Text>
+                    <TextField.Root
+                        size="1"
+                        type="number"
+                        min={0}
+                        value={String(draft.minEntryKb)}
+                        onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                            patch({ minEntryKb: Number(event.target.value) })
+                        }
+                        style={{ width: 90 }}
+                    />
+                    <Text size="1" color="gray">
+                        KB
+                    </Text>
+                    <Text size="2" style={{ minWidth: 108, marginLeft: 8 }}>
+                        {tAny("render_cache_max_entry")}
+                    </Text>
+                    <TextField.Root
+                        size="1"
+                        type="number"
+                        min={0}
+                        value={String(draft.maxEntryMb)}
+                        onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                            patch({ maxEntryMb: Number(event.target.value) })
+                        }
+                        style={{ width: 90 }}
+                    />
+                    <Text size="1" color="gray">
+                        MB
+                    </Text>
+                    <Text size="2" style={{ minWidth: 108, marginLeft: 8 }}>
+                        {tAny("render_cache_min_free_disk")}
+                    </Text>
+                    <TextField.Root
+                        size="1"
+                        type="number"
+                        min={0}
+                        value={String(draft.minFreeDiskMb)}
+                        onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                            patch({ minFreeDiskMb: Number(event.target.value) })
+                        }
+                        style={{ width: 90 }}
+                    />
+                    <Text size="1" color="gray">
+                        MB
+                    </Text>
+                </Flex>
+
+                {/* ── 高级 ─────────────────────────────────────────────── */}
+                <AppField label={tAny("render_cache_write_mode")}>
+                    <Select.Root
+                        value={draft.writeMode}
+                        size="1"
+                        onValueChange={(v) => patch({ writeMode: v as RenderCacheWriteMode })}
+                    >
+                        <Select.Trigger />
+                        <Select.Content>
+                            <Select.Item value="immediate">
+                                {tAny("render_cache_write_immediate")}
+                            </Select.Item>
+                            <Select.Item value="onExit">
+                                {tAny("render_cache_write_on_exit")}
+                            </Select.Item>
+                            <Select.Item value="manual">
+                                {tAny("render_cache_write_manual")}
+                            </Select.Item>
+                        </Select.Content>
+                    </Select.Root>
+                </AppField>
+
+                <AppField label={tAny("render_cache_location_mode")}>
                     <Flex align="center" gap="2" wrap="wrap">
-                        <Text size="2" style={{ minWidth: 132 }}>
-                            {tAny("render_cache_min_clip")}
-                        </Text>
-                        <TextField.Root
-                            size="1"
-                            type="number"
-                            min={0}
-                            step={0.1}
-                            value={String(draft.minClipSecs)}
-                            onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                                patch({ minClipSecs: Number(event.target.value) })
-                            }
-                            style={{ width: 90 }}
-                        />
-                        <Text size="1" color="gray">
-                            {tAny("render_cache_seconds_unit")}
-                        </Text>
-                        <Text size="2" style={{ minWidth: 108, marginLeft: 8 }}>
-                            {tAny("render_cache_min_entry")}
-                        </Text>
-                        <TextField.Root
-                            size="1"
-                            type="number"
-                            min={0}
-                            value={String(draft.minEntryKb)}
-                            onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                                patch({ minEntryKb: Number(event.target.value) })
-                            }
-                            style={{ width: 90 }}
-                        />
-                        <Text size="1" color="gray">
-                            KB
-                        </Text>
-                        <Text size="2" style={{ minWidth: 108, marginLeft: 8 }}>
-                            {tAny("render_cache_max_entry")}
-                        </Text>
-                        <TextField.Root
-                            size="1"
-                            type="number"
-                            min={0}
-                            value={String(draft.maxEntryMb)}
-                            onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                                patch({ maxEntryMb: Number(event.target.value) })
-                            }
-                            style={{ width: 90 }}
-                        />
-                        <Text size="1" color="gray">
-                            MB
-                        </Text>
-                        <Text size="2" style={{ minWidth: 108, marginLeft: 8 }}>
-                            {tAny("render_cache_min_free_disk")}
-                        </Text>
-                        <TextField.Root
-                            size="1"
-                            type="number"
-                            min={0}
-                            value={String(draft.minFreeDiskMb)}
-                            onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                                patch({ minFreeDiskMb: Number(event.target.value) })
-                            }
-                            style={{ width: 90 }}
-                        />
-                        <Text size="1" color="gray">
-                            MB
-                        </Text>
-                    </Flex>
-
-                    {/* ── 高级 ─────────────────────────────────────────────── */}
-                    <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 132 }}>
-                            {tAny("render_cache_write_mode")}
-                        </Text>
-                        <Select.Root
-                            value={draft.writeMode}
-                            size="1"
-                            onValueChange={(v) => patch({ writeMode: v as RenderCacheWriteMode })}
-                        >
-                            <Select.Trigger />
-                            <Select.Content>
-                                <Select.Item value="immediate">
-                                    {tAny("render_cache_write_immediate")}
-                                </Select.Item>
-                                <Select.Item value="onExit">
-                                    {tAny("render_cache_write_on_exit")}
-                                </Select.Item>
-                                <Select.Item value="manual">
-                                    {tAny("render_cache_write_manual")}
-                                </Select.Item>
-                            </Select.Content>
-                        </Select.Root>
-                    </Flex>
-
-                    <Flex align="center" gap="2" wrap="wrap">
-                        <Text size="2" style={{ minWidth: 132 }}>
-                            {tAny("render_cache_location_mode")}
-                        </Text>
                         <Select.Root
                             value={draft.location}
                             size="1"
@@ -452,109 +449,106 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                             />
                         ) : null}
                     </Flex>
+                </AppField>
 
-                    <Flex align="center" gap="2">
-                        <Checkbox
-                            checked={draft.verifyChecksum}
-                            onCheckedChange={(v) => patch({ verifyChecksum: Boolean(v) })}
-                        />
-                        <Text size="2">{tAny("render_cache_verify_checksum")}</Text>
-                    </Flex>
-
-                    <Separator size="4" />
-
-                    {/* ── 清理 ─────────────────────────────────────────────── */}
-                    <Flex gap="2" wrap="wrap" align="center">
-                        {pendingClearAll ? (
-                            <>
-                                <Text size="2" color="red">
-                                    {tAny("render_cache_confirm_clear_all")}
-                                </Text>
-                                <Button
-                                    size="1"
-                                    color="red"
-                                    disabled={busyScope !== null}
-                                    onClick={() => void handleClear("all")}
-                                >
-                                    {tAny("render_cache_confirm_yes")}
-                                </Button>
-                                <Button
-                                    size="1"
-                                    variant="soft"
-                                    color="gray"
-                                    onClick={() => setPendingClearAll(false)}
-                                >
-                                    {tAny("cancel")}
-                                </Button>
-                            </>
-                        ) : (
-                            <>
-                                <Button
-                                    size="1"
-                                    variant="soft"
-                                    color="red"
-                                    disabled={busyScope !== null}
-                                    onClick={() => setPendingClearAll(true)}
-                                >
-                                    {tAny("render_cache_clear_all")}
-                                </Button>
-                                <Button
-                                    size="1"
-                                    variant="soft"
-                                    color="gray"
-                                    disabled={busyScope !== null}
-                                    onClick={() => void handleClear("currentProject")}
-                                >
-                                    {tAny("render_cache_clear_project")}
-                                </Button>
-                                <Button
-                                    size="1"
-                                    variant="soft"
-                                    color="gray"
-                                    disabled={busyScope !== null}
-                                    onClick={() =>
-                                        void handleClear(
-                                            "olderThan",
-                                            draft.maxAgeDays > 0 ? draft.maxAgeDays : 90,
-                                        )
-                                    }
-                                >
-                                    {tAny("render_cache_clear_old")}
-                                </Button>
-                                <Button
-                                    size="1"
-                                    variant="soft"
-                                    color="gray"
-                                    disabled={busyScope !== null}
-                                    onClick={() => void handleClear("otherSampleRates")}
-                                >
-                                    {tAny("render_cache_clear_other_rates")}
-                                </Button>
-                            </>
-                        )}
-                    </Flex>
-
-                    {notice ? (
-                        <Text size="2" color="green">
-                            {notice}
-                        </Text>
-                    ) : null}
-                    {errorText ? (
-                        <Text size="2" color="red">
-                            {errorText}
-                        </Text>
-                    ) : null}
+                <Flex align="center" gap="2">
+                    <Checkbox
+                        checked={draft.verifyChecksum}
+                        onCheckedChange={(v) => patch({ verifyChecksum: Boolean(v) })}
+                    />
+                    <Text size="2">{tAny("render_cache_verify_checksum")}</Text>
                 </Flex>
 
-                <Flex justify="end" gap="2" mt="4">
-                    <Button variant="soft" color="gray" onClick={() => onOpenChange(false)}>
-                        {tAny("close")}
-                    </Button>
-                    <Button onClick={() => void handleSave()} disabled={saving}>
-                        {tAny("render_cache_save_settings")}
-                    </Button>
+                <Separator size="4" />
+
+                {/* ── 清理 ─────────────────────────────────────────────── */}
+                <Flex gap="2" wrap="wrap" align="center">
+                    {pendingClearAll ? (
+                        <>
+                            <Text size="2" color="red">
+                                {tAny("render_cache_confirm_clear_all")}
+                            </Text>
+                            <Button
+                                type="button"
+                                size="1"
+                                color="red"
+                                disabled={busyScope !== null}
+                                onClick={() => void handleClear("all")}
+                            >
+                                {tAny("render_cache_confirm_yes")}
+                            </Button>
+                            <Button
+                                type="button"
+                                size="1"
+                                variant="soft"
+                                color="gray"
+                                onClick={() => setPendingClearAll(false)}
+                            >
+                                {tAny("cancel")}
+                            </Button>
+                        </>
+                    ) : (
+                        <>
+                            <Button
+                                type="button"
+                                size="1"
+                                variant="soft"
+                                color="red"
+                                disabled={busyScope !== null}
+                                onClick={() => setPendingClearAll(true)}
+                            >
+                                {tAny("render_cache_clear_all")}
+                            </Button>
+                            <Button
+                                type="button"
+                                size="1"
+                                variant="soft"
+                                color="gray"
+                                disabled={busyScope !== null}
+                                onClick={() => void handleClear("currentProject")}
+                            >
+                                {tAny("render_cache_clear_project")}
+                            </Button>
+                            <Button
+                                type="button"
+                                size="1"
+                                variant="soft"
+                                color="gray"
+                                disabled={busyScope !== null}
+                                onClick={() =>
+                                    void handleClear(
+                                        "olderThan",
+                                        draft.maxAgeDays > 0 ? draft.maxAgeDays : 90,
+                                    )
+                                }
+                            >
+                                {tAny("render_cache_clear_old")}
+                            </Button>
+                            <Button
+                                type="button"
+                                size="1"
+                                variant="soft"
+                                color="gray"
+                                disabled={busyScope !== null}
+                                onClick={() => void handleClear("otherSampleRates")}
+                            >
+                                {tAny("render_cache_clear_other_rates")}
+                            </Button>
+                        </>
+                    )}
                 </Flex>
-            </Dialog.Content>
-        </Dialog.Root>
+
+                {notice ? (
+                    <Text size="2" color="green">
+                        {notice}
+                    </Text>
+                ) : null}
+                {errorText ? (
+                    <Text size="2" color="red">
+                        {errorText}
+                    </Text>
+                ) : null}
+            </AppForm>
+        </AppDialog>
     );
 }

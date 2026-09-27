@@ -27,7 +27,7 @@
  * 交互协议（Enter/Esc/焦点/快捷键抑制），不必重新发明。
  */
 import { Dialog } from "@radix-ui/themes";
-import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 
 import { AppButton, type AppButtonIntent } from "./Button";
 import { cx } from "./cx";
@@ -104,7 +104,10 @@ export interface AppDialogProps {
      * 按字母会触发时间轴动作。历史上 39/42 个对话框漏了这一条。
      */
     suppressGlobalShortcuts?: boolean;
-    children: ReactNode;
+    /**
+     * 正文。纯确认对话框（如「确定要重置布局吗？」）可以没有正文。
+     */
+    children?: ReactNode;
     className?: string;
     /** 传 `undefined` 可显式关闭 Radix 的"缺少描述"控制台告警。 */
     ariaDescribedBy?: string | undefined;
@@ -143,6 +146,11 @@ export function AppDialog({
     className,
     ariaDescribedBy,
 }: AppDialogProps) {
+    /**
+     * 隐藏的默认提交按钮。用于在 `onSubmit` 里区分「Enter 隐式提交」与
+     * 「正文里某个按钮被点击」—— 两者都表现为一次 submit 事件。
+     */
+    const defaultSubmitRef = useRef<HTMLButtonElement | null>(null);
     /** 正在执行的异步动作 id；非空时禁用全部按钮。 */
     const [pendingActionId, setPendingActionId] = useState<string | null>(null);
 
@@ -202,9 +210,29 @@ export function AppDialog({
         }
     };
 
-    const onSubmit = (event: FormEvent) => {
+    /**
+     * 表单提交处理。
+     *
+     * 【为什么必须校验 `submitter`】Radix 的 `Button` 不渲染 `type` 属性
+     * （已核对 `base-button.js`），因此在 `<form>` 里，**对话框正文中任何一个
+     * Radix 按钮都会成为 submit 按钮**。点它就会触发一次 submit；若不校验，
+     * 该按钮自己的 `onClick` 与对话框的默认动作会同时执行 —— 例如"浏览文件"
+     * 顺带把对话框确认掉。
+     *
+     * 判定方式：只接受两种来源 ——
+     *   - `submitter` 是那个隐藏的默认按钮（Enter 隐式提交）；
+     *   - `submitter` 为空（部分引擎对隐式提交不给 submitter）。
+     *
+     * 其余一律忽略，等于把正文里的按钮自动"降级"为普通按钮，无需在 40 个
+     * 调用点逐处补 `type="button"`。这是机制上的一次性修复。
+     */
+    const onSubmit = (event: FormEvent<HTMLFormElement>) => {
         event.preventDefault();
         if (pendingActionId) return;
+        // React 的 FormEvent 把 nativeEvent 放宽成 Event，而 submitter 只在
+        // SubmitEvent 上定义 —— 这里收窄回真实类型。
+        const submitter = (event.nativeEvent as SubmitEvent).submitter;
+        if (submitter && submitter !== defaultSubmitRef.current) return;
         const action = actions?.find((candidate) => candidate.id === resolvedDefaultId);
         if (!action || action.disabled) return;
         void runAction(action);
@@ -250,6 +278,24 @@ export function AppDialog({
                  * 两种行为都由引擎给出，无需特判。
                  */}
                 <form onSubmit={onSubmit} className="flex min-h-0 flex-1 flex-col">
+                    {/*
+                     * 隐藏的默认提交按钮必须位于**树序最前**。
+                     *
+                     * 浏览器对「在输入框里按 Enter」的隐式提交，会去点树序上第一个
+                     * submit 按钮；而 Radix 的 Button 不渲染 type，正文里任何按钮都
+                     * 是 submit 按钮。这个按钮若排在它们后面，Enter 就会点到正文里的
+                     * 第一个按钮而不是默认动作。`onSubmit` 里再用 `submitter` 复核。
+                     */}
+                    {resolvedDefaultId ? (
+                        <button
+                            ref={defaultSubmitRef}
+                            type="submit"
+                            hidden
+                            tabIndex={-1}
+                            aria-hidden="true"
+                        />
+                    ) : null}
+
                     <Dialog.Title className="app-dialog__title">{title}</Dialog.Title>
                     {description ? (
                         <Dialog.Description className="app-dialog__description mt-1">
@@ -296,13 +342,6 @@ export function AppDialog({
                             </div>
                         </div>
                     ) : null}
-
-                    {/*
-                     * 隐藏的提交按钮：让 Enter 在任意输入框里都能提交表单。
-                     * `hidden` 而非 `display:none` 的差异对表单提交无影响，
-                     * 但用 hidden 属性可以确保它不参与 Tab 序列。
-                     */}
-                    {resolvedDefaultId ? <button type="submit" hidden tabIndex={-1} /> : null}
                 </form>
             </Dialog.Content>
         </Dialog.Root>

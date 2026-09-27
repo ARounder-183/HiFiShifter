@@ -73,6 +73,44 @@ test("Enter 触发主按钮动作（补齐缺失的默认按钮约定）", async
     expect(onOpenChange).toHaveBeenCalledWith(false);
 });
 
+test("正文里的按钮被点击时不会顺带触发默认动作", async () => {
+    /*
+     * Radix 的 Button 不渲染 `type`，因此在 `<form>` 内部会默认成为 submit
+     * 按钮。若不校验 `submitter`，正文里的「浏览文件」这类按钮会在执行自身
+     * onClick 的同时把对话框也确认掉。
+     */
+    const onBrowse = vi.fn();
+    const onSave = vi.fn();
+    const onOpenChange = vi.fn();
+
+    await act(async () => {
+        root.render(
+            <AppDialog
+                open
+                onOpenChange={onOpenChange}
+                title="导出"
+                actions={[{ id: "save", label: "保存", intent: "primary", onClick: onSave }]}
+            >
+                {/* 刻意不给 type="button"：调用方不该需要知道这个陷阱 */}
+                <button onClick={onBrowse}>浏览</button>
+            </AppDialog>,
+        );
+    });
+
+    const browse = Array.from(document.body.querySelectorAll("button")).find(
+        (el) => el.textContent === "浏览",
+    ) as HTMLButtonElement;
+    expect(browse).toBeTruthy();
+
+    await act(async () => {
+        browse.click();
+    });
+
+    expect(onBrowse).toHaveBeenCalledTimes(1);
+    expect(onSave).not.toHaveBeenCalled();
+    expect(onOpenChange).not.toHaveBeenCalled();
+});
+
 test("默认动作取最后一个右侧非危险动作，而不是危险动作", async () => {
     const onDelete = vi.fn();
     const onApply = vi.fn();

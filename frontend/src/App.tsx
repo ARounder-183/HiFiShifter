@@ -8,7 +8,7 @@ import {
     useState,
     type ReactNode,
 } from "react";
-import { Flex, Text, Dialog, Button } from "@radix-ui/themes";
+import { Flex, Text, Button } from "@radix-ui/themes";
 import { MenuBar } from "./components/layout/MenuBar";
 import { ActionBar } from "./components/layout/ActionBar";
 import { TimelinePanel } from "./components/layout/TimelinePanel";
@@ -108,6 +108,7 @@ const NotebookErrorBoundary = lazy(() =>
     })),
 );
 import { ImportProjectDialog } from "./components/layout/ImportProjectDialog";
+import { AppDialog } from "./ui/Dialog";
 import { QuickSearchPopup } from "./components/layout/QuickSearchPopup";
 import { useKeybindings } from "./features/keybindings/useKeybindings";
 import { selectMergedKeybindings } from "./features/keybindings/keybindingsSlice";
@@ -3493,552 +3494,550 @@ function AppInner() {
             direction="column"
             className="h-screen w-screen bg-qt-window text-qt-text overflow-hidden font-sans text-sm selection:bg-qt-highlight selection:text-white"
         >
-            <Dialog.Root
+            <AppDialog
                 open={Boolean(vocalShifterSkippedFilesDialog?.length)}
                 onOpenChange={(open) => {
                     if (!open) {
                         dispatch(closeVocalShifterSkippedFilesDialog());
                     }
                 }}
+                title={t("status_error_prefix")}
+                description={t("vs_import_skipped_header")}
+                size="lg"
+                actions={[
+                    {
+                        id: "ok",
+                        label: t("ok"),
+                        intent: "primary",
+                        onClick: () => {
+                            dispatch(closeVocalShifterSkippedFilesDialog());
+                        },
+                    },
+                ]}
             >
-                <Dialog.Content maxWidth="620px">
-                    <Dialog.Title>{t("status_error_prefix")}</Dialog.Title>
-                    <Dialog.Description>{t("vs_import_skipped_header")}</Dialog.Description>
-                    <div className="mt-2 max-h-[240px] overflow-auto rounded border border-qt-border bg-qt-base p-2 text-xs">
-                        {(vocalShifterSkippedFilesDialog ?? []).map((file) => (
-                            <div key={file} className="truncate" data-tooltip={file}>
-                                • {file}
-                            </div>
-                        ))}
-                    </div>
-                    <Flex justify="end" mt="3">
-                        <Button onClick={() => dispatch(closeVocalShifterSkippedFilesDialog())}>
-                            {"OK"}
-                        </Button>
-                    </Flex>
-                </Dialog.Content>
-            </Dialog.Root>
+                <div className="mt-2 max-h-[240px] overflow-auto rounded border border-qt-border bg-qt-base p-2 text-xs">
+                    {(vocalShifterSkippedFilesDialog ?? []).map((file) => (
+                        <div key={file} className="truncate" data-tooltip={file}>
+                            • {file}
+                        </div>
+                    ))}
+                </div>
+            </AppDialog>
 
-            <Dialog.Root
+            <AppDialog
                 open={Boolean(reaperSkippedFilesDialog?.length)}
                 onOpenChange={(open) => {
                     if (!open) {
                         dispatch(closeReaperSkippedFilesDialog());
                     }
                 }}
+                title={t("status_error_prefix")}
+                description={t("reaper_import_skipped_header")}
+                size="lg"
+                actions={[
+                    {
+                        id: "ok",
+                        label: t("ok"),
+                        intent: "primary",
+                        onClick: () => {
+                            dispatch(closeReaperSkippedFilesDialog());
+                        },
+                    },
+                ]}
             >
-                <Dialog.Content maxWidth="620px">
-                    <Dialog.Title>{t("status_error_prefix")}</Dialog.Title>
-                    <Dialog.Description>{t("reaper_import_skipped_header")}</Dialog.Description>
-                    <div className="mt-2 max-h-[240px] overflow-auto rounded border border-qt-border bg-qt-base p-2 text-xs">
-                        {(reaperSkippedFilesDialog ?? []).map((file) => (
-                            <div key={file} className="truncate" data-tooltip={file}>
-                                • {file}
-                            </div>
-                        ))}
-                    </div>
-                    <Flex justify="end" mt="3">
-                        <Button onClick={() => dispatch(closeReaperSkippedFilesDialog())}>
-                            {"OK"}
-                        </Button>
-                    </Flex>
-                </Dialog.Content>
-            </Dialog.Root>
+                <div className="mt-2 max-h-[240px] overflow-auto rounded border border-qt-border bg-qt-base p-2 text-xs">
+                    {(reaperSkippedFilesDialog ?? []).map((file) => (
+                        <div key={file} className="truncate" data-tooltip={file}>
+                            • {file}
+                        </div>
+                    ))}
+                </div>
+            </AppDialog>
 
-            <Dialog.Root
+            <AppDialog
                 open={unsavedDialog.open}
                 onOpenChange={(open) => {
                     if (!open) {
                         cancelUnsavedAction();
                     }
                 }}
-            >
-                <Dialog.Content maxWidth="460px">
-                    <Dialog.Title>{t("unsaved_changes_title")}</Dialog.Title>
-                    <Dialog.Description>
-                        {t(
-                            unsavedDialog.mode === "exit"
-                                ? "unsaved_changes_exit_desc"
-                                : "unsaved_changes_switch_desc",
-                        )}
-                    </Dialog.Description>
-                    <Flex justify="end" gap="2" mt="4">
-                        <Button variant="soft" color="gray" onClick={cancelUnsavedAction}>
-                            {t("progress_cancel")}
-                        </Button>
-                        <Button variant="soft" color="gray" onClick={discardUnsavedAndContinue}>
-                            {t("unsaved_changes_discard")}
-                        </Button>
-                        <Button onClick={saveUnsavedAndContinue}>{t("menu_save_project")}</Button>
-                    </Flex>
-                </Dialog.Content>
-            </Dialog.Root>
+                title={t("unsaved_changes_title")}
+                description={t(
+                    unsavedDialog.mode === "exit"
+                        ? "unsaved_changes_exit_desc"
+                        : "unsaved_changes_switch_desc",
+                )}
+                size="sm"
+                actions={[
+                    {
+                        id: "cancel",
+                        label: t("progress_cancel"),
+                        onClick: cancelUnsavedAction,
+                    },
+                    {
+                        id: "discard",
+                        label: t("unsaved_changes_discard"),
+                        onClick: discardUnsavedAndContinue,
+                    },
+                    {
+                        id: "save",
+                        label: t("menu_save_project"),
+                        intent: "primary",
+                        // 保存取消/失败/命中版本冲突时对话框须保持打开以便重试，
+                        // 关闭由 saveUnsavedAndContinue 内部决定，故不自动关闭。
+                        autoClose: false,
+                        onClick: saveUnsavedAndContinue,
+                    },
+                ]}
+            />
 
             {/* Project file version newer than this build — ask before attempting load */}
-            <Dialog.Root
+            <AppDialog
                 open={projectVersionDialog.open}
                 onOpenChange={(open) => {
                     if (!open) {
                         setProjectVersionDialog((current) => ({ ...current, open: false }));
                     }
                 }}
-            >
-                <Dialog.Content maxWidth="480px">
-                    <Dialog.Title>{t("project_version_too_new_title")}</Dialog.Title>
-                    <Dialog.Description>
-                        {t("project_version_too_new_desc")
-                            .replace(
-                                "{fileVersion}",
-                                String(projectVersionDialog.fileVersion || "?"),
-                            )
-                            .replace(
-                                "{currentVersion}",
-                                String(projectVersionDialog.currentVersion || "?"),
-                            )}
-                    </Dialog.Description>
-                    <Flex justify="end" gap="2" mt="4">
-                        <Button
-                            variant="soft"
-                            color="gray"
-                            onClick={cancelContinueLoadingNewerProject}
-                        >
-                            {t("progress_cancel")}
-                        </Button>
-                        <Button color="amber" onClick={confirmContinueLoadingNewerProject}>
-                            {t("project_version_too_new_continue")}
-                        </Button>
-                    </Flex>
-                </Dialog.Content>
-            </Dialog.Root>
+                title={t("project_version_too_new_title")}
+                description={t("project_version_too_new_desc")
+                    .replace("{fileVersion}", String(projectVersionDialog.fileVersion || "?"))
+                    .replace(
+                        "{currentVersion}",
+                        String(projectVersionDialog.currentVersion || "?"),
+                    )}
+                size="sm"
+                actions={[
+                    {
+                        id: "cancel",
+                        label: t("progress_cancel"),
+                        onClick: cancelContinueLoadingNewerProject,
+                    },
+                    {
+                        id: "continue",
+                        label: t("project_version_too_new_continue"),
+                        intent: "primary",
+                        onClick: confirmContinueLoadingNewerProject,
+                    },
+                ]}
+            />
 
             {/* 保存/另存为目标已存在版本不一致的工程文件 — 覆盖前询问用户 */}
-            <Dialog.Root
+            <AppDialog
                 open={Boolean(saveVersionConflictDialog)}
                 onOpenChange={(open) => {
                     if (!open) {
                         dispatch(closeSaveVersionConflictDialog());
                     }
                 }}
-            >
-                <Dialog.Content maxWidth="520px">
-                    <Dialog.Title>{t("save_version_conflict_title")}</Dialog.Title>
-                    <Dialog.Description>
-                        {saveVersionConflictDialog?.existingIsNewer
-                            ? t("save_version_conflict_desc_higher")
-                                  .replace(
-                                      "{existingVersion}",
-                                      String(saveVersionConflictDialog.existingVersion),
-                                  )
-                                  .replace(
-                                      "{currentVersion}",
-                                      String(saveVersionConflictDialog.currentVersion),
-                                  )
-                            : t("save_version_conflict_desc_lower")
-                                  .replace(
-                                      "{existingVersion}",
-                                      String(saveVersionConflictDialog?.existingVersion ?? "?"),
-                                  )
-                                  .replace(
-                                      "{currentVersion}",
-                                      String(saveVersionConflictDialog?.currentVersion ?? "?"),
-                                  )}
-                    </Dialog.Description>
-                    <Flex justify="end" gap="2" mt="4">
-                        <Button variant="soft" color="gray" onClick={cancelSaveVersionConflict}>
-                            {t("progress_cancel")}
-                        </Button>
-                        <Button variant="soft" onClick={saveAsFromVersionConflict}>
-                            {t("save_version_conflict_save_as")}
-                        </Button>
-                        <Button color="red" onClick={continueForceSave}>
-                            {t("save_version_conflict_continue")}
-                        </Button>
-                    </Flex>
-                </Dialog.Content>
-            </Dialog.Root>
+                title={t("save_version_conflict_title")}
+                description={
+                    saveVersionConflictDialog?.existingIsNewer
+                        ? t("save_version_conflict_desc_higher")
+                              .replace(
+                                  "{existingVersion}",
+                                  String(saveVersionConflictDialog.existingVersion),
+                              )
+                              .replace(
+                                  "{currentVersion}",
+                                  String(saveVersionConflictDialog.currentVersion),
+                              )
+                        : t("save_version_conflict_desc_lower")
+                              .replace(
+                                  "{existingVersion}",
+                                  String(saveVersionConflictDialog?.existingVersion ?? "?"),
+                              )
+                              .replace(
+                                  "{currentVersion}",
+                                  String(saveVersionConflictDialog?.currentVersion ?? "?"),
+                              )
+                }
+                size="md"
+                actions={[
+                    {
+                        id: "cancel",
+                        label: t("progress_cancel"),
+                        onClick: cancelSaveVersionConflict,
+                    },
+                    {
+                        id: "save-as",
+                        label: t("save_version_conflict_save_as"),
+                        onClick: saveAsFromVersionConflict,
+                    },
+                    {
+                        id: "continue",
+                        label: t("save_version_conflict_continue"),
+                        intent: "danger",
+                        onClick: continueForceSave,
+                    },
+                ]}
+            />
 
             {/* Recapture missing media dialog — grid: file status / file / processing status / ignore / action */}
-            <Dialog.Root
+            <AppDialog
                 open={sourceFileChangedDialog.open}
                 onOpenChange={(open) => {
                     if (!open) {
                         closeSourceFileChangedDialog();
                     }
                 }}
+                title={t("recapture_missing_media_title")}
+                description={t("recapture_missing_media_desc")}
+                size="xl"
+                actions={[
+                    {
+                        id: "ok",
+                        label: t("ok"),
+                        intent: "primary",
+                        disabled:
+                            sourceFileAnyProcessing ||
+                            sourceFileChangedDialog.changes.some(
+                                (item) => item.action === "pending",
+                            ),
+                        onClick: closeSourceFileChangedDialog,
+                    },
+                ]}
             >
-                <Dialog.Content maxWidth="860px">
-                    <Dialog.Title>{t("recapture_missing_media_title")}</Dialog.Title>
-                    <Dialog.Description>{t("recapture_missing_media_desc")}</Dialog.Description>
+                <Flex justify="between" align="center" gap="2" mt="2">
+                    <Flex gap="1" align="center" className="shrink-0">
+                        <span className="shrink-0 text-[10px] text-qt-text-muted">
+                            {t("recapture_missing_media_search_mode_label")}
+                        </span>
+                        <WheelSelect
+                            className="h-6 shrink-0 rounded border border-qt-border bg-qt-base px-1 py-0.5 text-[10px] text-qt-text focus:outline-none focus:ring-1 focus:ring-qt-highlight/30"
+                            value={sourceFileSearchMode}
+                            disabled={
+                                sourceFileSearchBusy ||
+                                sourceFileAnyProcessing ||
+                                !sourceFileChangedDialog.changes.some(
+                                    (item) => item.action === "pending" || item.action === "failed",
+                                )
+                            }
+                            onValueChange={(value) =>
+                                setSourceFileSearchMode(value as "file_name" | "extension_hash")
+                            }
+                        >
+                            <option value="file_name">
+                                {t("recapture_missing_media_search_mode_file_name")}
+                            </option>
+                            <option value="extension_hash">
+                                {t("recapture_missing_media_search_mode_extension_hash")}
+                            </option>
+                        </WheelSelect>
+                        <Button
+                            size="1"
+                            variant="soft"
+                            disabled={
+                                sourceFileSearchBusy ||
+                                sourceFileAnyProcessing ||
+                                !sourceFileChangedDialog.changes.some(
+                                    (item) => item.action === "pending" || item.action === "failed",
+                                )
+                            }
+                            onClick={() => void searchSourceFileReplacements()}
+                        >
+                            {sourceFileSearchBusy
+                                ? t("recapture_missing_media_searching")
+                                : t("recapture_missing_media_search_folder")}
+                        </Button>
+                    </Flex>
+                    <Flex gap="1" align="center" className="shrink-0">
+                        <Button
+                            size="1"
+                            variant="soft"
+                            disabled={sourceFileAnyProcessing || sourceFileReloadAllTotal === 0}
+                            onClick={() => void reloadAllModifiedSourceFiles()}
+                        >
+                            {t("recapture_missing_media_reload_all")}
+                        </Button>
+                        <Button
+                            size="1"
+                            variant="soft"
+                            disabled={sourceFileAnyProcessing || sourceFileSearchBusy}
+                            onClick={() => void refreshSourceFileChanges()}
+                        >
+                            {t("recapture_missing_media_refresh")}
+                        </Button>
+                        <Button
+                            size="1"
+                            variant="soft"
+                            color="gray"
+                            disabled={sourceFileAnyProcessing}
+                            onClick={() => void resetAllSourceFileChanges()}
+                        >
+                            {t("recapture_missing_media_reset_all")}
+                        </Button>
+                        <Button
+                            size="1"
+                            variant="soft"
+                            color="gray"
+                            disabled={
+                                sourceFileAnyProcessing ||
+                                !sourceFileChangedDialog.changes.some(
+                                    (item) =>
+                                        item.action !== "ignored" &&
+                                        item.action !== "reloaded" &&
+                                        item.action !== "replaced" &&
+                                        item.action !== "processing",
+                                )
+                            }
+                            onClick={ignoreAllSourceFileChanges}
+                        >
+                            {t("recapture_missing_media_ignore_all")}
+                        </Button>
+                    </Flex>
+                </Flex>
 
-                    <Flex justify="between" align="center" gap="2" mt="2">
+                {sourceFileSearchMatchTotal > 0 && (
+                    <Flex
+                        justify="between"
+                        align="center"
+                        gap="2"
+                        mt="1"
+                        className="rounded border border-qt-border bg-qt-base px-2 py-1.5"
+                    >
+                        <Text size="1" color="gray" className="min-w-0 truncate">
+                            {t("recapture_missing_media_search_result_summary")
+                                .replace("{total}", String(sourceFileSearchMatchTotal))
+                                .replace("{exact}", String(sourceFileSearchExactTotal))
+                                .replace("{selected}", String(sourceFileSelectedApplyTotal))}
+                        </Text>
                         <Flex gap="1" align="center" className="shrink-0">
-                            <span className="shrink-0 text-[10px] text-qt-text-muted">
-                                {t("recapture_missing_media_search_mode_label")}
-                            </span>
-                            <WheelSelect
-                                className="h-6 shrink-0 rounded border border-qt-border bg-qt-base px-1 py-0.5 text-[10px] text-qt-text focus:outline-none focus:ring-1 focus:ring-qt-highlight/30"
-                                value={sourceFileSearchMode}
-                                disabled={
-                                    sourceFileSearchBusy ||
-                                    sourceFileAnyProcessing ||
-                                    !sourceFileChangedDialog.changes.some(
-                                        (item) =>
-                                            item.action === "pending" || item.action === "failed",
-                                    )
-                                }
-                                onValueChange={(value) =>
-                                    setSourceFileSearchMode(value as "file_name" | "extension_hash")
-                                }
-                            >
-                                <option value="file_name">
-                                    {t("recapture_missing_media_search_mode_file_name")}
-                                </option>
-                                <option value="extension_hash">
-                                    {t("recapture_missing_media_search_mode_extension_hash")}
-                                </option>
-                            </WheelSelect>
-                            <Button
-                                size="1"
-                                variant="soft"
-                                disabled={
-                                    sourceFileSearchBusy ||
-                                    sourceFileAnyProcessing ||
-                                    !sourceFileChangedDialog.changes.some(
-                                        (item) =>
-                                            item.action === "pending" || item.action === "failed",
-                                    )
-                                }
-                                onClick={() => void searchSourceFileReplacements()}
-                            >
-                                {sourceFileSearchBusy
-                                    ? t("recapture_missing_media_searching")
-                                    : t("recapture_missing_media_search_folder")}
-                            </Button>
-                        </Flex>
-                        <Flex gap="1" align="center" className="shrink-0">
-                            <Button
-                                size="1"
-                                variant="soft"
-                                disabled={sourceFileAnyProcessing || sourceFileReloadAllTotal === 0}
-                                onClick={() => void reloadAllModifiedSourceFiles()}
-                            >
-                                {t("recapture_missing_media_reload_all")}
-                            </Button>
-                            <Button
-                                size="1"
-                                variant="soft"
-                                disabled={sourceFileAnyProcessing || sourceFileSearchBusy}
-                                onClick={() => void refreshSourceFileChanges()}
-                            >
-                                {t("recapture_missing_media_refresh")}
-                            </Button>
-                            <Button
-                                size="1"
-                                variant="soft"
-                                color="gray"
-                                disabled={sourceFileAnyProcessing}
-                                onClick={() => void resetAllSourceFileChanges()}
-                            >
-                                {t("recapture_missing_media_reset_all")}
-                            </Button>
-                            <Button
-                                size="1"
-                                variant="soft"
-                                color="gray"
-                                disabled={
-                                    sourceFileAnyProcessing ||
-                                    !sourceFileChangedDialog.changes.some(
-                                        (item) =>
-                                            item.action !== "ignored" &&
-                                            item.action !== "reloaded" &&
-                                            item.action !== "replaced" &&
-                                            item.action !== "processing",
-                                    )
-                                }
-                                onClick={ignoreAllSourceFileChanges}
-                            >
-                                {t("recapture_missing_media_ignore_all")}
-                            </Button>
+                            {(sourceFileExactApplyTotal > 0 ||
+                                sourceFileSelectedApplyTotal > 0) && (
+                                <>
+                                    <Button
+                                        size="1"
+                                        variant="soft"
+                                        color="green"
+                                        disabled={
+                                            sourceFileAnyProcessing ||
+                                            sourceFileExactApplyTotal === 0
+                                        }
+                                        onClick={() => void applyAllExactSourceFileMatches()}
+                                    >
+                                        {t("recapture_missing_media_apply_all_exact")}
+                                    </Button>
+                                    <Button
+                                        size="1"
+                                        variant="soft"
+                                        disabled={
+                                            sourceFileAnyProcessing ||
+                                            sourceFileSelectedApplyTotal === 0
+                                        }
+                                        onClick={() => void applyAllSelectedSourceFileMatches()}
+                                    >
+                                        {t("recapture_missing_media_apply_all_selected")}
+                                    </Button>
+                                </>
+                            )}
                         </Flex>
                     </Flex>
+                )}
 
-                    {sourceFileSearchMatchTotal > 0 && (
-                        <Flex
-                            justify="between"
-                            align="center"
-                            gap="2"
-                            mt="1"
-                            className="rounded border border-qt-border bg-qt-base px-2 py-1.5"
-                        >
-                            <Text size="1" color="gray" className="min-w-0 truncate">
-                                {t("recapture_missing_media_search_result_summary")
-                                    .replace("{total}", String(sourceFileSearchMatchTotal))
-                                    .replace("{exact}", String(sourceFileSearchExactTotal))
-                                    .replace("{selected}", String(sourceFileSelectedApplyTotal))}
-                            </Text>
-                            <Flex gap="1" align="center" className="shrink-0">
-                                {(sourceFileExactApplyTotal > 0 ||
-                                    sourceFileSelectedApplyTotal > 0) && (
-                                    <>
-                                        <Button
-                                            size="1"
-                                            variant="soft"
-                                            color="green"
-                                            disabled={
-                                                sourceFileAnyProcessing ||
-                                                sourceFileExactApplyTotal === 0
-                                            }
-                                            onClick={() => void applyAllExactSourceFileMatches()}
-                                        >
-                                            {t("recapture_missing_media_apply_all_exact")}
-                                        </Button>
-                                        <Button
-                                            size="1"
-                                            variant="soft"
-                                            disabled={
-                                                sourceFileAnyProcessing ||
-                                                sourceFileSelectedApplyTotal === 0
-                                            }
-                                            onClick={() => void applyAllSelectedSourceFileMatches()}
-                                        >
-                                            {t("recapture_missing_media_apply_all_selected")}
-                                        </Button>
-                                    </>
-                                )}
-                            </Flex>
-                        </Flex>
-                    )}
-
-                    <div className="mt-2 max-h-[320px] overflow-auto rounded border border-qt-border bg-qt-base p-1">
-                        <div className="grid grid-cols-[64px_minmax(0,1fr)_76px_64px_84px_48px] items-center gap-2 border-b border-qt-border px-1 py-1 text-[10px] font-semibold text-qt-text-muted">
-                            <div>{t("recapture_missing_media_col_file_status")}</div>
-                            <div>{t("recapture_missing_media_col_file")}</div>
-                            <div>{t("recapture_missing_media_col_process_status")}</div>
-                            <div />
-                            <div className="text-right">
-                                {t("recapture_missing_media_col_action")}
-                            </div>
-                            <div className="text-right">
-                                {t("recapture_missing_media_reset_item")}
-                            </div>
-                        </div>
-                        {sourceFileChangedDialog.changes.map((item) => {
-                            const itemKey = `${item.clip_id}::${item.change}`;
-                            const isBusy = item.action === "processing";
-                            const isProcessed =
-                                item.action === "ignored" ||
-                                item.action === "reloaded" ||
-                                item.action === "replaced";
-                            const statusBadgeClass =
-                                item.action === "ignored"
-                                    ? "border border-gray-500/25 bg-gray-500/10 text-gray-600"
-                                    : item.action === "reloaded" || item.action === "replaced"
-                                      ? "border border-green-500/25 bg-green-500/10 text-green-600"
-                                      : item.action === "failed"
-                                        ? "border border-red-500/25 bg-red-500/10 text-red-600"
-                                        : item.action === "processing"
-                                          ? "border border-blue-500/25 bg-blue-500/10 text-blue-600"
-                                          : "border border-qt-border bg-qt-base text-qt-text-muted";
-                            const statusLabel =
-                                item.action === "ignored"
-                                    ? t("recapture_missing_media_item_ignored")
-                                    : item.action === "reloaded"
-                                      ? t("recapture_missing_media_item_reloaded")
-                                      : item.action === "replaced"
-                                        ? t("recapture_missing_media_item_replaced")
-                                        : item.action === "failed"
-                                          ? t("recapture_missing_media_item_failed")
-                                          : item.action === "processing"
-                                            ? t("recapture_missing_media_item_processing")
-                                            : t("recapture_missing_media_item_pending");
-                            const useReplaceAction =
-                                item.change === "deleted" ||
-                                Boolean(item.reloadAttempted) ||
-                                item.action === "ignored" ||
-                                item.action === "reloaded" ||
-                                item.action === "replaced";
-                            return (
+                <div className="mt-2 max-h-[320px] overflow-auto rounded border border-qt-border bg-qt-base p-1">
+                    <div className="grid grid-cols-[64px_minmax(0,1fr)_76px_64px_84px_48px] items-center gap-2 border-b border-qt-border px-1 py-1 text-[10px] font-semibold text-qt-text-muted">
+                        <div>{t("recapture_missing_media_col_file_status")}</div>
+                        <div>{t("recapture_missing_media_col_file")}</div>
+                        <div>{t("recapture_missing_media_col_process_status")}</div>
+                        <div />
+                        <div className="text-right">{t("recapture_missing_media_col_action")}</div>
+                        <div className="text-right">{t("recapture_missing_media_reset_item")}</div>
+                    </div>
+                    {sourceFileChangedDialog.changes.map((item) => {
+                        const itemKey = `${item.clip_id}::${item.change}`;
+                        const isBusy = item.action === "processing";
+                        const isProcessed =
+                            item.action === "ignored" ||
+                            item.action === "reloaded" ||
+                            item.action === "replaced";
+                        const statusBadgeClass =
+                            item.action === "ignored"
+                                ? "border border-gray-500/25 bg-gray-500/10 text-gray-600"
+                                : item.action === "reloaded" || item.action === "replaced"
+                                  ? "border border-green-500/25 bg-green-500/10 text-green-600"
+                                  : item.action === "failed"
+                                    ? "border border-red-500/25 bg-red-500/10 text-red-600"
+                                    : item.action === "processing"
+                                      ? "border border-blue-500/25 bg-blue-500/10 text-blue-600"
+                                      : "border border-qt-border bg-qt-base text-qt-text-muted";
+                        const statusLabel =
+                            item.action === "ignored"
+                                ? t("recapture_missing_media_item_ignored")
+                                : item.action === "reloaded"
+                                  ? t("recapture_missing_media_item_reloaded")
+                                  : item.action === "replaced"
+                                    ? t("recapture_missing_media_item_replaced")
+                                    : item.action === "failed"
+                                      ? t("recapture_missing_media_item_failed")
+                                      : item.action === "processing"
+                                        ? t("recapture_missing_media_item_processing")
+                                        : t("recapture_missing_media_item_pending");
+                        const useReplaceAction =
+                            item.change === "deleted" ||
+                            Boolean(item.reloadAttempted) ||
+                            item.action === "ignored" ||
+                            item.action === "reloaded" ||
+                            item.action === "replaced";
+                        return (
+                            <div
+                                key={itemKey}
+                                className="grid grid-cols-[64px_minmax(0,1fr)_76px_64px_84px_48px] items-center gap-2 border-b border-qt-border px-1 py-1.5 text-xs last:border-b-0"
+                            >
                                 <div
-                                    key={itemKey}
-                                    className="grid grid-cols-[64px_minmax(0,1fr)_76px_64px_84px_48px] items-center gap-2 border-b border-qt-border px-1 py-1.5 text-xs last:border-b-0"
+                                    className={`shrink-0 whitespace-nowrap rounded px-1 py-0.5 text-center text-[10px] font-semibold leading-none ${
+                                        item.change === "deleted"
+                                            ? "border border-red-500/25 bg-red-500/10 text-red-600"
+                                            : "border border-amber-500/25 bg-amber-500/10 text-amber-600"
+                                    }`}
                                 >
-                                    <div
-                                        className={`shrink-0 whitespace-nowrap rounded px-1 py-0.5 text-center text-[10px] font-semibold leading-none ${
-                                            item.change === "deleted"
-                                                ? "border border-red-500/25 bg-red-500/10 text-red-600"
-                                                : "border border-amber-500/25 bg-amber-500/10 text-amber-600"
-                                        }`}
-                                    >
-                                        {item.change === "deleted"
-                                            ? t("recapture_missing_media_status_deleted")
-                                            : t("recapture_missing_media_status_modified")}
+                                    {item.change === "deleted"
+                                        ? t("recapture_missing_media_status_deleted")
+                                        : t("recapture_missing_media_status_modified")}
+                                </div>
+                                <div className="min-w-0">
+                                    <div className="truncate" data-tooltip={item.source_path}>
+                                        <span className="font-medium">{item.clip_name}</span>
+                                        <span className="text-gray-500"> — {item.source_path}</span>
                                     </div>
-                                    <div className="min-w-0">
-                                        <div className="truncate" data-tooltip={item.source_path}>
-                                            <span className="font-medium">{item.clip_name}</span>
-                                            <span className="text-gray-500">
-                                                {" "}
-                                                — {item.source_path}
+                                    {item.reloadedPath && (
+                                        <div
+                                            className="mt-0.5 flex items-center gap-1 truncate text-[10px] text-green-600"
+                                            data-tooltip={item.reloadedPath}
+                                        >
+                                            <span className="shrink-0 font-semibold">
+                                                {item.action === "reloaded"
+                                                    ? t("recapture_missing_media_reloaded_path")
+                                                    : t("recapture_missing_media_replaced_path")}
                                             </span>
+                                            <span className="truncate">{item.reloadedPath}</span>
                                         </div>
-                                        {item.reloadedPath && (
-                                            <div
-                                                className="mt-0.5 flex items-center gap-1 truncate text-[10px] text-green-600"
-                                                data-tooltip={item.reloadedPath}
-                                            >
-                                                <span className="shrink-0 font-semibold">
-                                                    {item.action === "reloaded"
-                                                        ? t("recapture_missing_media_reloaded_path")
-                                                        : t(
-                                                              "recapture_missing_media_replaced_path",
-                                                          )}
-                                                </span>
-                                                <span className="truncate">
-                                                    {item.reloadedPath}
-                                                </span>
+                                    )}
+                                    {!isProcessed &&
+                                        item.candidates &&
+                                        item.candidates.length > 0 && (
+                                            <div className="mt-1 flex items-center gap-1">
+                                                <WheelSelect
+                                                    className="min-w-0 flex-1 rounded border border-qt-border bg-qt-base px-1 py-0.5 text-[10px] text-qt-text focus:outline-none focus:ring-1 focus:ring-qt-highlight/30"
+                                                    value={item.selectedCandidatePath ?? ""}
+                                                    disabled={isBusy}
+                                                    onValueChange={(value) =>
+                                                        selectSourceFileMatchCandidate(
+                                                            item.clip_id,
+                                                            value,
+                                                        )
+                                                    }
+                                                >
+                                                    {item.candidates.map((candidate) => (
+                                                        <option
+                                                            key={candidate.path}
+                                                            value={candidate.path}
+                                                        >
+                                                            {candidate.exact_hash
+                                                                ? `✓ ${t("recapture_missing_media_match_exact")} · `
+                                                                : ""}
+                                                            {candidate.path}
+                                                        </option>
+                                                    ))}
+                                                </WheelSelect>
+                                                <Button
+                                                    size="1"
+                                                    variant="soft"
+                                                    disabled={isBusy || !item.selectedCandidatePath}
+                                                    onClick={() =>
+                                                        void applySelectedSourceFileMatch(item)
+                                                    }
+                                                >
+                                                    {t("recapture_missing_media_use_selected")}
+                                                </Button>
                                             </div>
                                         )}
-                                        {!isProcessed &&
-                                            item.candidates &&
-                                            item.candidates.length > 0 && (
-                                                <div className="mt-1 flex items-center gap-1">
-                                                    <WheelSelect
-                                                        className="min-w-0 flex-1 rounded border border-qt-border bg-qt-base px-1 py-0.5 text-[10px] text-qt-text focus:outline-none focus:ring-1 focus:ring-qt-highlight/30"
-                                                        value={item.selectedCandidatePath ?? ""}
-                                                        disabled={isBusy}
-                                                        onValueChange={(value) =>
-                                                            selectSourceFileMatchCandidate(
-                                                                item.clip_id,
-                                                                value,
-                                                            )
-                                                        }
-                                                    >
-                                                        {item.candidates.map((candidate) => (
-                                                            <option
-                                                                key={candidate.path}
-                                                                value={candidate.path}
-                                                            >
-                                                                {candidate.exact_hash
-                                                                    ? `✓ ${t("recapture_missing_media_match_exact")} · `
-                                                                    : ""}
-                                                                {candidate.path}
-                                                            </option>
-                                                        ))}
-                                                    </WheelSelect>
-                                                    <Button
-                                                        size="1"
-                                                        variant="soft"
-                                                        disabled={
-                                                            isBusy || !item.selectedCandidatePath
-                                                        }
-                                                        onClick={() =>
-                                                            void applySelectedSourceFileMatch(item)
-                                                        }
-                                                    >
-                                                        {t("recapture_missing_media_use_selected")}
-                                                    </Button>
-                                                </div>
-                                            )}
-                                        {!isProcessed &&
-                                            item.candidates &&
-                                            item.candidates.length === 0 && (
-                                                <div className="mt-1 truncate text-[10px] text-qt-text-muted">
-                                                    {t("recapture_missing_media_search_no_matches")}
-                                                </div>
-                                            )}
-                                    </div>
-                                    <div
-                                        className={`shrink-0 whitespace-nowrap rounded px-1.5 py-0.5 text-center text-[10px] font-semibold leading-none ${statusBadgeClass}`}
-                                    >
-                                        {statusLabel}
-                                    </div>
-                                    <div className="flex justify-start">
-                                        <Button
-                                            size="1"
-                                            variant="soft"
-                                            color="gray"
-                                            disabled={isBusy || isProcessed}
-                                            onClick={() => void ignoreSourceFileChangeItem(item)}
-                                        >
-                                            {t("recapture_missing_media_ignore")}
-                                        </Button>
-                                    </div>
-                                    <div className="flex justify-end">
-                                        <Button
-                                            size="1"
-                                            variant="soft"
-                                            disabled={isBusy}
-                                            onClick={() =>
-                                                useReplaceAction
-                                                    ? void replaceSourceFileChangeItem(item)
-                                                    : void reloadSourceFileChangeItem(item)
-                                            }
-                                        >
-                                            {useReplaceAction
-                                                ? t("recapture_missing_media_replace")
-                                                : t("recapture_missing_media_reload")}
-                                        </Button>
-                                    </div>
-                                    <div className="flex justify-end">
-                                        <Button
-                                            size="1"
-                                            variant="soft"
-                                            color="gray"
-                                            disabled={isBusy}
-                                            onClick={() => resetSourceFileChangeItem(item.clip_id)}
-                                        >
-                                            {t("recapture_missing_media_reset_item")}
-                                        </Button>
-                                    </div>
+                                    {!isProcessed &&
+                                        item.candidates &&
+                                        item.candidates.length === 0 && (
+                                            <div className="mt-1 truncate text-[10px] text-qt-text-muted">
+                                                {t("recapture_missing_media_search_no_matches")}
+                                            </div>
+                                        )}
                                 </div>
-                            );
-                        })}
-                    </div>
-                    <Flex justify="between" align="center" gap="2" mt="3">
-                        <Text size="1" color="gray">
-                            {t("recapture_missing_media_summary")
-                                .replace(
-                                    "{ignored}",
-                                    String(
-                                        sourceFileChangedDialog.changes.filter(
-                                            (item) => item.action === "ignored",
-                                        ).length,
-                                    ),
-                                )
-                                .replace(
-                                    "{reloaded}",
-                                    String(
-                                        sourceFileChangedDialog.changes.filter(
-                                            (item) => item.action === "reloaded",
-                                        ).length,
-                                    ),
-                                )
-                                .replace(
-                                    "{replaced}",
-                                    String(
-                                        sourceFileChangedDialog.changes.filter(
-                                            (item) => item.action === "replaced",
-                                        ).length,
-                                    ),
-                                )
-                                .replace("{total}", String(sourceFileChangedDialog.changes.length))}
-                        </Text>
-                        <Flex gap="2" align="center" className="shrink-0">
-                            <Button
-                                disabled={
-                                    sourceFileAnyProcessing ||
-                                    sourceFileChangedDialog.changes.some(
-                                        (item) => item.action === "pending",
-                                    )
-                                }
-                                onClick={closeSourceFileChangedDialog}
-                            >
-                                {t("ok")}
-                            </Button>
-                        </Flex>
-                    </Flex>
-                </Dialog.Content>
-            </Dialog.Root>
+                                <div
+                                    className={`shrink-0 whitespace-nowrap rounded px-1.5 py-0.5 text-center text-[10px] font-semibold leading-none ${statusBadgeClass}`}
+                                >
+                                    {statusLabel}
+                                </div>
+                                <div className="flex justify-start">
+                                    <Button
+                                        size="1"
+                                        variant="soft"
+                                        color="gray"
+                                        disabled={isBusy || isProcessed}
+                                        onClick={() => void ignoreSourceFileChangeItem(item)}
+                                    >
+                                        {t("recapture_missing_media_ignore")}
+                                    </Button>
+                                </div>
+                                <div className="flex justify-end">
+                                    <Button
+                                        size="1"
+                                        variant="soft"
+                                        disabled={isBusy}
+                                        onClick={() =>
+                                            useReplaceAction
+                                                ? void replaceSourceFileChangeItem(item)
+                                                : void reloadSourceFileChangeItem(item)
+                                        }
+                                    >
+                                        {useReplaceAction
+                                            ? t("recapture_missing_media_replace")
+                                            : t("recapture_missing_media_reload")}
+                                    </Button>
+                                </div>
+                                <div className="flex justify-end">
+                                    <Button
+                                        size="1"
+                                        variant="soft"
+                                        color="gray"
+                                        disabled={isBusy}
+                                        onClick={() => resetSourceFileChangeItem(item.clip_id)}
+                                    >
+                                        {t("recapture_missing_media_reset_item")}
+                                    </Button>
+                                </div>
+                            </div>
+                        );
+                    })}
+                </div>
+                <Flex justify="between" align="center" gap="2" mt="3">
+                    <Text size="1" color="gray">
+                        {t("recapture_missing_media_summary")
+                            .replace(
+                                "{ignored}",
+                                String(
+                                    sourceFileChangedDialog.changes.filter(
+                                        (item) => item.action === "ignored",
+                                    ).length,
+                                ),
+                            )
+                            .replace(
+                                "{reloaded}",
+                                String(
+                                    sourceFileChangedDialog.changes.filter(
+                                        (item) => item.action === "reloaded",
+                                    ).length,
+                                ),
+                            )
+                            .replace(
+                                "{replaced}",
+                                String(
+                                    sourceFileChangedDialog.changes.filter(
+                                        (item) => item.action === "replaced",
+                                    ).length,
+                                ),
+                            )
+                            .replace("{total}", String(sourceFileChangedDialog.changes.length))}
+                    </Text>
+                </Flex>
+            </AppDialog>
 
             <ImportProjectDialog
                 key={projectImportPick.open ? (projectImportPick.path ?? "open") : "closed"}

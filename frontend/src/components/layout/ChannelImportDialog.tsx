@@ -19,7 +19,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { Button, Dialog, Flex, Select, Separator, Text, TextField } from "@radix-ui/themes";
+import { Flex, Select, Separator, Text, TextField } from "@radix-ui/themes";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { useI18n } from "../../i18n/I18nProvider";
 import {
@@ -35,6 +35,8 @@ import { setChannelImportPolicy } from "../../features/session/sessionSlice";
 import { isModifierActive, selectKeybinding } from "../../features/keybindings/keybindingsSlice";
 import { applySelectWheelChange } from "../../utils/selectWheel";
 import { useNonPassiveWheel } from "../../utils/useNonPassiveWheel";
+import { AppDialog } from "../../ui/Dialog";
+import { AppField, AppForm } from "../../ui/Field";
 
 interface ChannelImportDialogProps {
     open: boolean;
@@ -149,26 +151,34 @@ export function ChannelImportDialog({ open, onOpenChange }: ChannelImportDialogP
     const isOff = draft.mode === "off";
 
     return (
-        <Dialog.Root open={open} onOpenChange={onOpenChange}>
-            <Dialog.Content
-                style={{ maxWidth: 520 }}
-                onKeyDown={(event) => event.stopPropagation()}
-            >
-                <Dialog.Title>{tAny("clip_channel_import_dialog_title")}</Dialog.Title>
-                <Dialog.Description>{tAny("clip_channel_import_dialog_desc")}</Dialog.Description>
-
-                <Flex direction="column" gap="3" mt="3" ref={attachWheelGuard}>
+        <AppDialog
+            open={open}
+            onOpenChange={onOpenChange}
+            title={tAny("clip_channel_import_dialog_title")}
+            description={tAny("clip_channel_import_dialog_desc")}
+            size="md"
+            actions={[
+                { id: "cancel", label: tAny("cancel"), onClick: () => onOpenChange(false) },
+                {
+                    id: "save",
+                    label: tAny("clip_channel_import_save"),
+                    intent: "primary",
+                    disabled: saving,
+                    onClick: handleSave,
+                },
+            ]}
+        >
+            <div ref={attachWheelGuard}>
+                <AppForm>
                     <Separator size="4" />
 
                     {/* ── 总策略 ─────────────────────────────────────────── */}
-                    <Flex align="center" justify="between" gap="3">
-                        <Text size="2">{tAny("clip_channel_import_mode")}</Text>
+                    <AppField label={tAny("clip_channel_import_mode")}>
                         <Select.Root
                             value={draft.mode}
                             onValueChange={(value) => patch({ mode: value as ChannelImportMode })}
                         >
                             <Select.Trigger
-                                style={{ minWidth: 220 }}
                                 onWheel={(event) =>
                                     applySelectWheelChange({
                                         event,
@@ -186,7 +196,7 @@ export function ChannelImportDialog({ open, onOpenChange }: ChannelImportDialogP
                                 ))}
                             </Select.Content>
                         </Select.Root>
-                    </Flex>
+                    </AppField>
                     <Text size="1" color="gray">
                         {isOff
                             ? tAny("clip_channel_import_mode_off_hint")
@@ -195,14 +205,12 @@ export function ChannelImportDialog({ open, onOpenChange }: ChannelImportDialogP
 
                     {/* ── 目标模式 ───────────────────────────────────────── */}
                     {!isOff && (
-                        <Flex align="center" justify="between" gap="3">
-                            <Text size="2">{tAny("clip_channel_import_target_mode")}</Text>
+                        <AppField label={tAny("clip_channel_import_target_mode")}>
                             <Select.Root
                                 value={String(draft.monoTargetMode)}
                                 onValueChange={(value) => patch({ monoTargetMode: Number(value) })}
                             >
                                 <Select.Trigger
-                                    style={{ minWidth: 220 }}
                                     onWheel={(event) =>
                                         applySelectWheelChange({
                                             event,
@@ -223,7 +231,7 @@ export function ChannelImportDialog({ open, onOpenChange }: ChannelImportDialogP
                                     ))}
                                 </Select.Content>
                             </Select.Root>
-                        </Flex>
+                        </AppField>
                     )}
 
                     {/* ── 采样参数（仅智能模式）──────────────────────────── */}
@@ -234,8 +242,7 @@ export function ChannelImportDialog({ open, onOpenChange }: ChannelImportDialogP
                                 {tAny("clip_channel_import_advanced")}
                             </Text>
 
-                            <Flex align="center" justify="between" gap="3">
-                                <Text size="2">{tAny("clip_channel_import_tolerance")}</Text>
+                            <AppField label={tAny("clip_channel_import_tolerance")}>
                                 <Flex align="center" gap="2">
                                     <TextField.Root
                                         type="number"
@@ -270,13 +277,12 @@ export function ChannelImportDialog({ open, onOpenChange }: ChannelImportDialogP
                                         %
                                     </Text>
                                 </Flex>
-                            </Flex>
+                            </AppField>
                             <Text size="1" color="gray">
                                 {tAny("clip_channel_import_tolerance_hint")}
                             </Text>
 
-                            <Flex align="center" justify="between" gap="3">
-                                <Text size="2">{tAny("clip_channel_import_window_sec")}</Text>
+                            <AppField label={tAny("clip_channel_import_window_sec")}>
                                 <TextField.Root
                                     type="number"
                                     min={0.05}
@@ -299,10 +305,9 @@ export function ChannelImportDialog({ open, onOpenChange }: ChannelImportDialogP
                                         )
                                     }
                                 />
-                            </Flex>
+                            </AppField>
 
-                            <Flex align="center" justify="between" gap="3">
-                                <Text size="2">{tAny("clip_channel_import_window_count")}</Text>
+                            <AppField label={tAny("clip_channel_import_window_count")}>
                                 <TextField.Root
                                     type="number"
                                     min={0}
@@ -319,7 +324,7 @@ export function ChannelImportDialog({ open, onOpenChange }: ChannelImportDialogP
                                         )
                                     }
                                 />
-                            </Flex>
+                            </AppField>
                             <Text size="1" color="gray">
                                 {tAny("clip_channel_import_window_hint")}
                             </Text>
@@ -336,17 +341,8 @@ export function ChannelImportDialog({ open, onOpenChange }: ChannelImportDialogP
                             {errorText}
                         </Text>
                     )}
-
-                    <Flex justify="end" gap="2" mt="4">
-                        <Button variant="soft" color="gray" onClick={() => onOpenChange(false)}>
-                            {tAny("cancel")}
-                        </Button>
-                        <Button disabled={saving} onClick={() => void handleSave()}>
-                            {tAny("clip_channel_import_save")}
-                        </Button>
-                    </Flex>
-                </Flex>
-            </Dialog.Content>
-        </Dialog.Root>
+                </AppForm>
+            </div>
+        </AppDialog>
     );
 }

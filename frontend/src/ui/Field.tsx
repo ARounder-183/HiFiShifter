@@ -96,7 +96,7 @@ export function AppField({
             >
                 {label}
             </label>
-            <div className="flex min-w-0 flex-1 flex-col gap-1">
+            <div className="app-field__control flex min-w-0 flex-1 flex-col gap-1">
                 {children}
                 {error ? (
                     // `AppErrorText` 的等价内联形态：避免为一个简单场景引入额外依赖
@@ -119,14 +119,28 @@ export interface AppSwitchRowProps {
     onCheckedChange: (checked: boolean) => void;
     disabled?: boolean;
     hint?: ReactNode;
+    /**
+     * 开关位置。
+     *
+     * `inline`（默认）与 `AppField` 共用同一列标签宽度，开关紧跟在标签列右侧 ——
+     * 与同一张表单里的输入框/下拉框左缘对齐。`DockLayoutSettingsDialog` 与
+     * `NotebookDialogs` 原先的 `SwitchRow` 都是这个形态，默认值因此取 `inline`：
+     * 若改成两端对齐，同一张表单里六行开关会突然比其他行"散开"。
+     *
+     * `between` 用于独立成块的开关（标签贴左、开关贴右边框）。
+     */
+    layout?: "inline" | "between";
+    /** 覆盖表单级标签宽度（仅 `inline` 布局生效）。 */
+    labelWidth?: AppFieldLabelWidth;
     className?: string;
 }
 
 /**
- * 开关行：标签在左、`Switch` 在右，两端对齐。
+ * 开关行。
  *
- * 这类行在 `DockLayoutSettingsDialog`、`NotebookDialogs`、`ClipFormantToolWindow`
- * 各有一份实现，三份的间距与对齐都不完全一致。
+ * 这类行在 `DockLayoutSettingsDialog`、`NotebookDialogs` 各有一份实现，
+ * 两处都是"标签列 + Switch"，但标签宽度常量各写了一个（118 / 132）。
+ * 合并后由 `AppForm` 统一下发宽度。
  */
 export function AppSwitchRow({
     label,
@@ -134,19 +148,48 @@ export function AppSwitchRow({
     onCheckedChange,
     disabled,
     hint,
+    layout = "inline",
+    labelWidth,
     className,
 }: AppSwitchRowProps) {
+    const inherited = useContext(LabelWidthContext);
+    const width = labelWidth ?? inherited;
+    const labelNode = (
+        <span className="text-qt-sm leading-5 text-qt-text">{label}</span>
+    );
+
+    if (layout === "between") {
+        return (
+            <div className={cx("flex items-center justify-between gap-3", className)}>
+                <div className="flex min-w-0 flex-col">
+                    {labelNode}
+                    {hint ? (
+                        <Text size="1" color="gray">
+                            {hint}
+                        </Text>
+                    ) : null}
+                </div>
+                <Switch checked={checked} onCheckedChange={onCheckedChange} disabled={disabled} />
+            </div>
+        );
+    }
+
     return (
-        <div className={cx("flex items-center justify-between gap-3", className)}>
-            <div className="flex min-w-0 flex-col">
-                <span className="text-qt-sm leading-5 text-qt-text">{label}</span>
+        <div className={cx("flex items-center gap-2", className)}>
+            <span
+                className="shrink-0 pt-0.5 text-qt-sm leading-5 text-qt-text-muted"
+                style={width === "auto" ? undefined : { minWidth: LABEL_WIDTH_PX[width] }}
+            >
+                {labelNode}
+            </span>
+            <div className="flex min-w-0 flex-1 flex-col gap-1">
+                <Switch checked={checked} onCheckedChange={onCheckedChange} disabled={disabled} />
                 {hint ? (
                     <Text size="1" color="gray">
                         {hint}
                     </Text>
                 ) : null}
             </div>
-            <Switch checked={checked} onCheckedChange={onCheckedChange} disabled={disabled} />
         </div>
     );
 }

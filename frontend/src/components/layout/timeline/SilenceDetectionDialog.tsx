@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Dialog, Flex, Text, Button, Select, Checkbox } from "@radix-ui/themes";
+import { Flex, Text, Select, Checkbox } from "@radix-ui/themes";
 import { useI18n } from "../../../i18n/I18nProvider";
 import { useAppDispatch, useAppSelector } from "../../../app/hooks";
 import { isModifierActive, selectKeybinding } from "../../../features/keybindings/keybindingsSlice";
@@ -17,6 +17,8 @@ import {
     type SilenceDetectSettings,
 } from "../../../features/session/sessionTypes";
 import type { ClipSilenceReport } from "../../../types/api";
+import { AppDialog } from "../../../ui/Dialog";
+import { AppField, AppForm } from "../../../ui/Field";
 import { useShortcutSuppression } from "../../../ui/shortcutScope";
 
 /** 预览分析的防抖时间（ms）。 */
@@ -147,92 +149,99 @@ export const SilenceDetectionDialog: React.FC<{
     const resetHint = tAny("silence_double_click_reset");
 
     return (
-        <Dialog.Root
+        <AppDialog
             open={open}
             onOpenChange={(next) => {
                 if (!next) closeAndCleanup();
             }}
+            title={tAny("ctx_silence_detection")}
+            size="md"
+            actions={[
+                { id: "cancel", label: tAny("cancel"), onClick: closeAndCleanup },
+                {
+                    id: "apply",
+                    label: applying ? tAny("silence_applying") : tAny("silence_apply"),
+                    intent: "primary",
+                    disabled: applying || clipIds.length === 0,
+                    onClick: handleApply,
+                },
+            ]}
         >
-            <Dialog.Content
-                ref={wheelGuard}
-                style={{ maxWidth: 460 }}
-                onKeyDown={(e) => e.stopPropagation()}
-            >
-                <Dialog.Title>{tAny("ctx_silence_detection")}</Dialog.Title>
-
-                <Flex direction="column" gap="3" mt="3">
-                    <Flex
-                        align="center"
-                        gap="2"
+            {/* 滚轮守卫：滑块滚轮步进时阻止对话框内容滚动（React onWheel 的
+                preventDefault 是 passive no-op，见 useWheelScrollGuard）。 */}
+            <div ref={wheelGuard}>
+                <AppForm>
+                    <div
                         data-tooltip={resetHint}
                         onDoubleClick={() => update({ method: SILENCE_DETECT_DEFAULTS.method })}
                     >
-                        <Text size="2" style={{ minWidth: 96 }}>
-                            {tAny("silence_method")}
-                        </Text>
-                        <Select.Root
-                            size="1"
-                            value={options.method}
-                            onValueChange={(v) => update({ method: v as "rms" | "peak" })}
-                        >
-                            <Select.Trigger
-                                style={{ flex: 1 }}
-                                onWheel={(e) =>
-                                    applySelectWheelChange({
-                                        event: e,
-                                        currentValue: options.method,
-                                        options: ["rms", "peak"] as const,
-                                        onChange: (v) => update({ method: v }),
-                                    })
-                                }
-                            />
-                            <Select.Content>
-                                <Select.Item value="rms">{tAny("silence_method_rms")}</Select.Item>
-                                <Select.Item value="peak">
-                                    {tAny("silence_method_peak")}
-                                </Select.Item>
-                            </Select.Content>
-                        </Select.Root>
-                    </Flex>
+                        <AppField label={tAny("silence_method")}>
+                            <Select.Root
+                                size="1"
+                                value={options.method}
+                                onValueChange={(v) => update({ method: v as "rms" | "peak" })}
+                            >
+                                <Select.Trigger
+                                    onWheel={(e) =>
+                                        applySelectWheelChange({
+                                            event: e,
+                                            currentValue: options.method,
+                                            options: ["rms", "peak"] as const,
+                                            onChange: (v) => update({ method: v }),
+                                        })
+                                    }
+                                />
+                                <Select.Content>
+                                    <Select.Item value="rms">
+                                        {tAny("silence_method_rms")}
+                                    </Select.Item>
+                                    <Select.Item value="peak">
+                                        {tAny("silence_method_peak")}
+                                    </Select.Item>
+                                </Select.Content>
+                            </Select.Root>
+                        </AppField>
+                    </div>
 
-                    <Flex
-                        align="center"
-                        gap="2"
+                    <div
                         data-tooltip={resetHint}
                         onDoubleClick={() =>
                             update({ thresholdDb: SILENCE_DETECT_DEFAULTS.thresholdDb })
                         }
                     >
-                        <Text size="2" style={{ minWidth: 96 }}>
-                            {tAny("silence_threshold")}
-                        </Text>
-                        <input
-                            type="range"
-                            min={-96}
-                            max={-6}
-                            step={1}
-                            value={Math.round(options.thresholdDb)}
-                            disabled={options.adaptive}
-                            onChange={(e) => update({ thresholdDb: Number(e.target.value) })}
-                            onWheel={(e) => {
-                                if (options.adaptive) return;
-                                const delta = wheelDelta(e, 3);
-                                update({
-                                    thresholdDb: clampRange(
-                                        Math.round(options.thresholdDb) + delta,
-                                        -96,
-                                        -6,
-                                    ),
-                                });
-                            }}
-                            style={{ flex: 1 }}
-                        />
-                        <Text size="1" style={{ minWidth: 56, textAlign: "right" }}>
-                            {options.adaptive
-                                ? tAny("silence_adaptive_short")
-                                : `${Math.round(options.thresholdDb)} dB`}
-                        </Text>
-                    </Flex>
+                        <AppField label={tAny("silence_threshold")}>
+                            <Flex align="center" gap="2">
+                                <input
+                                    type="range"
+                                    min={-96}
+                                    max={-6}
+                                    step={1}
+                                    value={Math.round(options.thresholdDb)}
+                                    disabled={options.adaptive}
+                                    onChange={(e) =>
+                                        update({ thresholdDb: Number(e.target.value) })
+                                    }
+                                    onWheel={(e) => {
+                                        if (options.adaptive) return;
+                                        const delta = wheelDelta(e, 3);
+                                        update({
+                                            thresholdDb: clampRange(
+                                                Math.round(options.thresholdDb) + delta,
+                                                -96,
+                                                -6,
+                                            ),
+                                        });
+                                    }}
+                                    style={{ flex: 1 }}
+                                />
+                                <Text size="1" style={{ minWidth: 56, textAlign: "right" }}>
+                                    {options.adaptive
+                                        ? tAny("silence_adaptive_short")
+                                        : `${Math.round(options.thresholdDb)} dB`}
+                                </Text>
+                            </Flex>
+                        </AppField>
+                    </div>
 
                     <label
                         className="flex items-center gap-2 text-[12px]"
@@ -254,10 +263,8 @@ export const SilenceDetectionDialog: React.FC<{
                             ["cutFadeMs", "silence_cut_fade", 0, 100],
                         ] as const
                     ).map(([key, labelKey, min, max]) => (
-                        <Flex
+                        <div
                             key={key}
-                            align="center"
-                            gap="2"
                             data-tooltip={resetHint}
                             onDoubleClick={() =>
                                 update({
@@ -265,75 +272,72 @@ export const SilenceDetectionDialog: React.FC<{
                                 } as Partial<SilenceDetectSettings>)
                             }
                         >
-                            <Text size="2" style={{ minWidth: 96 }}>
-                                {tAny(labelKey)}
-                            </Text>
-                            <input
-                                type="range"
-                                min={min}
-                                max={max}
-                                step={1}
-                                value={Math.round(options[key])}
-                                onChange={(e) => update({ [key]: Number(e.target.value) })}
-                                onWheel={(e) => {
-                                    const coarse = key === "cutFadeMs" ? 5 : 10;
-                                    const delta = wheelDelta(e, coarse);
-                                    update({
-                                        [key]: clampRange(
-                                            Math.round(options[key]) + delta,
-                                            min,
-                                            max,
-                                        ),
-                                    });
-                                }}
-                                style={{ flex: 1 }}
-                            />
-                            <Text size="1" style={{ minWidth: 52, textAlign: "right" }}>
-                                {Math.round(options[key])} ms
-                            </Text>
-                        </Flex>
+                            <AppField label={tAny(labelKey)}>
+                                <Flex align="center" gap="2">
+                                    <input
+                                        type="range"
+                                        min={min}
+                                        max={max}
+                                        step={1}
+                                        value={Math.round(options[key])}
+                                        onChange={(e) => update({ [key]: Number(e.target.value) })}
+                                        onWheel={(e) => {
+                                            const coarse = key === "cutFadeMs" ? 5 : 10;
+                                            const delta = wheelDelta(e, coarse);
+                                            update({
+                                                [key]: clampRange(
+                                                    Math.round(options[key]) + delta,
+                                                    min,
+                                                    max,
+                                                ),
+                                            });
+                                        }}
+                                        style={{ flex: 1 }}
+                                    />
+                                    <Text size="1" style={{ minWidth: 52, textAlign: "right" }}>
+                                        {Math.round(options[key])} ms
+                                    </Text>
+                                </Flex>
+                            </AppField>
+                        </div>
                     ))}
 
-                    <Flex
-                        align="center"
-                        gap="2"
+                    <div
                         data-tooltip={resetHint}
                         onDoubleClick={() => update({ action: SILENCE_DETECT_DEFAULTS.action })}
                     >
-                        <Text size="2" style={{ minWidth: 96 }}>
-                            {tAny("silence_action")}
-                        </Text>
-                        <Select.Root
-                            size="1"
-                            value={options.action}
-                            onValueChange={(v) =>
-                                update({ action: v as SilenceDetectSettings["action"] })
-                            }
-                        >
-                            <Select.Trigger
-                                style={{ flex: 1 }}
-                                onWheel={(e) =>
-                                    applySelectWheelChange({
-                                        event: e,
-                                        currentValue: options.action,
-                                        options: ["close", "keep", "split"] as const,
-                                        onChange: (v) => update({ action: v }),
-                                    })
+                        <AppField label={tAny("silence_action")}>
+                            <Select.Root
+                                size="1"
+                                value={options.action}
+                                onValueChange={(v) =>
+                                    update({ action: v as SilenceDetectSettings["action"] })
                                 }
-                            />
-                            <Select.Content>
-                                <Select.Item value="close">
-                                    {tAny("silence_action_close")}
-                                </Select.Item>
-                                <Select.Item value="keep">
-                                    {tAny("silence_action_keep")}
-                                </Select.Item>
-                                <Select.Item value="split">
-                                    {tAny("silence_action_split")}
-                                </Select.Item>
-                            </Select.Content>
-                        </Select.Root>
-                    </Flex>
+                            >
+                                <Select.Trigger
+                                    onWheel={(e) =>
+                                        applySelectWheelChange({
+                                            event: e,
+                                            currentValue: options.action,
+                                            options: ["close", "keep", "split"] as const,
+                                            onChange: (v) => update({ action: v }),
+                                        })
+                                    }
+                                />
+                                <Select.Content>
+                                    <Select.Item value="close">
+                                        {tAny("silence_action_close")}
+                                    </Select.Item>
+                                    <Select.Item value="keep">
+                                        {tAny("silence_action_keep")}
+                                    </Select.Item>
+                                    <Select.Item value="split">
+                                        {tAny("silence_action_split")}
+                                    </Select.Item>
+                                </Select.Content>
+                            </Select.Root>
+                        </AppField>
+                    </div>
 
                     <label
                         className="flex items-center gap-2 text-[12px]"
@@ -408,21 +412,8 @@ export const SilenceDetectionDialog: React.FC<{
                             </Text>
                         ) : null}
                     </Flex>
-                </Flex>
-
-                <Flex gap="3" mt="4" justify="end">
-                    <Button variant="soft" color="gray" onClick={closeAndCleanup}>
-                        {tAny("cancel")}
-                    </Button>
-                    <Button
-                        variant="solid"
-                        onClick={() => void handleApply()}
-                        disabled={applying || clipIds.length === 0}
-                    >
-                        {applying ? tAny("silence_applying") : tAny("silence_apply")}
-                    </Button>
-                </Flex>
-            </Dialog.Content>
-        </Dialog.Root>
+                </AppForm>
+            </div>
+        </AppDialog>
     );
 };

@@ -8,9 +8,11 @@
  */
 
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
-import { Button, Dialog, Flex, Text, TextField } from "@radix-ui/themes";
+import { Button, Flex, Text, TextField } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import { projectApi, type AutoBackupSettings } from "../../services/api/project";
+import { AppDialog } from "../../ui/Dialog";
+import { AppField, AppForm } from "../../ui/Field";
 
 interface AutoBackupDialogProps {
     open: boolean;
@@ -106,47 +108,54 @@ export function AutoBackupDialog({
     }
 
     return (
-        <Dialog.Root open={open} onOpenChange={onOpenChange}>
-            <Dialog.Content
-                style={{ maxWidth: 760 }}
-                onKeyDown={(event) => event.stopPropagation()}
-            >
-                <Dialog.Title>{tAny("menu_auto_backup")}</Dialog.Title>
-                <Dialog.Description>{tAny("auto_backup_dialog_desc")}</Dialog.Description>
+        <AppDialog
+            open={open}
+            onOpenChange={onOpenChange}
+            title={tAny("menu_auto_backup")}
+            description={tAny("auto_backup_dialog_desc")}
+            size="xl"
+            actions={[
+                { id: "cancel", label: tAny("cancel"), onClick: () => onOpenChange(false) },
+                {
+                    id: "save",
+                    label: tAny("auto_backup_save_settings"),
+                    intent: "primary",
+                    disabled: submitting,
+                    onClick: handleSave,
+                },
+            ]}
+        >
+            <AppForm labelWidth="lg">
+                <label className="flex items-center gap-2 text-sm text-qt-text">
+                    <input
+                        type="checkbox"
+                        checked={draft.saveOnSaveEnabled}
+                        onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                            setDraft((prev) => ({
+                                ...prev,
+                                saveOnSaveEnabled: event.target.checked,
+                            }))
+                        }
+                    />
+                    <span>{tAny("auto_backup_save_on_save")}</span>
+                </label>
 
-                <Flex direction="column" gap="3" mt="3">
-                    <label className="flex items-center gap-2 text-sm text-qt-text">
-                        <input
-                            type="checkbox"
-                            checked={draft.saveOnSaveEnabled}
-                            onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                                setDraft((prev) => ({
-                                    ...prev,
-                                    saveOnSaveEnabled: event.target.checked,
-                                }))
-                            }
-                        />
-                        <span>{tAny("auto_backup_save_on_save")}</span>
-                    </label>
+                <label className="flex items-center gap-2 text-sm text-qt-text">
+                    <input
+                        type="checkbox"
+                        checked={draft.timedBackupEnabled}
+                        onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                            setDraft((prev) => ({
+                                ...prev,
+                                timedBackupEnabled: event.target.checked,
+                            }))
+                        }
+                    />
+                    <span>{tAny("auto_backup_timed")}</span>
+                </label>
 
-                    <label className="flex items-center gap-2 text-sm text-qt-text">
-                        <input
-                            type="checkbox"
-                            checked={draft.timedBackupEnabled}
-                            onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                                setDraft((prev) => ({
-                                    ...prev,
-                                    timedBackupEnabled: event.target.checked,
-                                }))
-                            }
-                        />
-                        <span>{tAny("auto_backup_timed")}</span>
-                    </label>
-
+                <AppField label={tAny("auto_backup_interval_sec")}>
                     <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 132 }}>
-                            {tAny("auto_backup_interval_sec")}
-                        </Text>
                         <TextField.Root
                             size="2"
                             type="number"
@@ -165,64 +174,52 @@ export function AutoBackupDialog({
                             sec
                         </Text>
                     </Flex>
+                </AppField>
 
-                    <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 132 }}>
-                            {tAny("auto_backup_path_template")}
-                        </Text>
-                        <TextField.Root
-                            size="2"
-                            value={draft.timedBackupPathTemplate}
-                            onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                                setDraft((prev) => ({
-                                    ...prev,
-                                    timedBackupPathTemplate: event.target.value,
-                                }))
-                            }
-                            onFocus={(event) => {
-                                pathInputRef.current = event.target as HTMLInputElement;
-                            }}
-                            style={{ flex: 1 }}
-                        />
-                    </Flex>
+                <AppField label={tAny("auto_backup_path_template")}>
+                    <TextField.Root
+                        size="2"
+                        value={draft.timedBackupPathTemplate}
+                        onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                            setDraft((prev) => ({
+                                ...prev,
+                                timedBackupPathTemplate: event.target.value,
+                            }))
+                        }
+                        onFocus={(event) => {
+                            pathInputRef.current = event.target as HTMLInputElement;
+                        }}
+                    />
+                </AppField>
 
-                    <Flex gap="2" wrap="wrap" align="center">
-                        <Text size="1" color="gray">
-                            {tAny("auto_backup_placeholders")}
-                        </Text>
-                        {["<ProjectFolder>", "<ProjectName>"].map((token) => (
-                            <Button
-                                key={token}
-                                size="1"
-                                variant="ghost"
-                                color="gray"
-                                onClick={() => insertPathToken(token)}
-                            >
-                                {token}
-                            </Button>
-                        ))}
-                    </Flex>
-
+                <Flex gap="2" wrap="wrap" align="center">
                     <Text size="1" color="gray">
-                        {tAny("auto_backup_time_format_hint")}
+                        {tAny("auto_backup_placeholders")}
                     </Text>
-
-                    {errorText ? (
-                        <Text size="2" color="red">
-                            {errorText}
-                        </Text>
-                    ) : null}
+                    {["<ProjectFolder>", "<ProjectName>"].map((token) => (
+                        <Button
+                            key={token}
+                            type="button"
+                            size="1"
+                            variant="ghost"
+                            color="gray"
+                            onClick={() => insertPathToken(token)}
+                        >
+                            {token}
+                        </Button>
+                    ))}
                 </Flex>
 
-                <Flex justify="end" gap="2" mt="4">
-                    <Button variant="soft" color="gray" onClick={() => onOpenChange(false)}>
-                        {tAny("cancel")}
-                    </Button>
-                    <Button onClick={() => void handleSave()} disabled={submitting}>
-                        {tAny("auto_backup_save_settings")}
-                    </Button>
-                </Flex>
-            </Dialog.Content>
-        </Dialog.Root>
+                <Text size="1" color="gray">
+                    {tAny("auto_backup_time_format_hint")}
+                </Text>
+
+                {errorText ? (
+                    <Text size="2" color="red">
+                        {errorText}
+                    </Text>
+                ) : null}
+            </AppForm>
+        </AppDialog>
     );
 }

@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Dialog, Flex, Text, Button, ScrollArea, RadioGroup } from "@radix-ui/themes";
+import { Flex, Text, Button, ScrollArea, RadioGroup } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useNonPassiveWheel } from "../../utils/useNonPassiveWheel";
 import { paramsApi } from "../../services/api/params";
+import { AppDialog, type AppDialogAction } from "../../ui/Dialog";
 
 /** MIDI 轨道信息（与后端返回结构对齐） */
 interface MidiTrackInfo {
@@ -626,24 +627,67 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
         composePendingRef.current = false;
     }, []);
 
+    // 解析失败（无轨道）时也要提供可见的关闭出口，不能只剩错误文本。
+    // 页脚动作：仅在「有来源且加载结束」时出现；无轨道时只给关闭，
+    // 有轨道时给出关闭 + 导入。原实现把这两套页脚埋在正文里，现交由 AppDialog 页脚。
+    const showFooter = Boolean((effectivePath || effectiveClipboardGuid) && !loading);
+    const importLabel = importing
+        ? tAny("midi_importing")
+        : effectiveMode === "replaceMidi"
+          ? tAny("midi_replace_button")
+          : currentTarget === "pitchParam"
+            ? tAny("midi_import")
+            : tAny("midi_create_clip");
+    const footerActions: AppDialogAction[] | undefined = !showFooter
+        ? undefined
+        : tracks.length === 0
+          ? [{ id: "close", label: tAny("kb_close"), onClick: () => onOpenChange(false) }]
+          : [
+                {
+                    id: "close",
+                    label: tAny("kb_close"),
+                    disabled: importing,
+                    onClick: () => onOpenChange(false),
+                },
+                {
+                    id: "import",
+                    label: importLabel,
+                    intent: "primary",
+                    disabled:
+                        importing ||
+                        loading ||
+                        tracks.length === 0 ||
+                        selectedTracks.length === 0 ||
+                        !!error,
+                    autoClose: false,
+                    onClick: () => {
+                        void handleImport();
+                    },
+                },
+            ];
+
     return (
-        <Dialog.Root open={open} onOpenChange={onOpenChange}>
-            <Dialog.Content maxWidth="520px">
-                <Dialog.Title>
-                    {effectiveMode === "replaceMidi"
+        <>
+            <AppDialog
+                open={open}
+                onOpenChange={onOpenChange}
+                title={
+                    effectiveMode === "replaceMidi"
                         ? tAny("midi_replace_title")
                         : currentTarget === "pitchParam"
                           ? tAny("midi_import_title")
-                          : tAny("midi_import_clip_title")}
-                </Dialog.Title>
-                <Dialog.Description size="2" color="gray">
-                    {effectiveMode === "replaceMidi"
+                          : tAny("midi_import_clip_title")
+                }
+                description={
+                    effectiveMode === "replaceMidi"
                         ? tAny("midi_replace_desc")
                         : currentTarget === "pitchParam"
                           ? tAny("midi_import_desc")
-                          : tAny("midi_import_clip_desc")}
-                </Dialog.Description>
-
+                          : tAny("midi_import_clip_desc")
+                }
+                size="md"
+                actions={footerActions}
+            >
                 {/* ── 导入目标选择（replace 模式不显示） ── */}
                 {!isReplaceMode && (
                     <Flex direction="column" gap="1" mt="3">
@@ -1088,15 +1132,6 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                     </>
                 )}
 
-                {/* 解析失败（无轨道）时也要提供可见的关闭出口，不能只剩错误文本 */}
-                {(effectivePath || effectiveClipboardGuid) && !loading && tracks.length === 0 && (
-                    <Flex justify="end" gap="2" mt="4">
-                        <Button variant="soft" color="gray" onClick={() => onOpenChange(false)}>
-                            {tAny("kb_close")}
-                        </Button>
-                    </Flex>
-                )}
-
                 {(effectivePath || effectiveClipboardGuid) && !loading && tracks.length > 0 && (
                     <>
                         {/* 导入位置选项（仅在 paramEditor 目标下显示） */}
@@ -1189,54 +1224,31 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
                             />
                             <Text size="1">{tAny("midi_fill_gaps")}</Text>
                         </label>
-
-                        <Flex justify="end" gap="2" mt="4">
-                            <Button
-                                variant="soft"
-                                color="gray"
-                                onClick={() => onOpenChange(false)}
-                                disabled={importing}
-                            >
-                                {tAny("kb_close")}
-                            </Button>
-                            <Button
-                                onClick={handleImport}
-                                disabled={
-                                    importing ||
-                                    loading ||
-                                    tracks.length === 0 ||
-                                    selectedTracks.length === 0 ||
-                                    !!error
-                                }
-                            >
-                                {importing
-                                    ? tAny("midi_importing")
-                                    : effectiveMode === "replaceMidi"
-                                      ? tAny("midi_replace_button")
-                                      : currentTarget === "pitchParam"
-                                        ? tAny("midi_import")
-                                        : tAny("midi_create_clip")}
-                            </Button>
-                        </Flex>
                     </>
                 )}
-            </Dialog.Content>
+            </AppDialog>
 
             {/* Compose 未开启确认对话框 */}
-            <Dialog.Root open={composeConfirmOpen} onOpenChange={setComposeConfirmOpen}>
-                <Dialog.Content maxWidth="400px">
-                    <Dialog.Title>{tAny("midi_compose_required_title")}</Dialog.Title>
-                    <Dialog.Description size="2" mt="2">
-                        {tAny("midi_compose_required_message")}
-                    </Dialog.Description>
-                    <Flex justify="end" gap="2" mt="4">
-                        <Button variant="soft" color="gray" onClick={handleComposeDecline}>
-                            {tAny("cancel")}
-                        </Button>
-                        <Button onClick={handleComposeConfirm}>{tAny("ok")}</Button>
-                    </Flex>
-                </Dialog.Content>
-            </Dialog.Root>
-        </Dialog.Root>
+            <AppDialog
+                open={composeConfirmOpen}
+                onOpenChange={setComposeConfirmOpen}
+                title={tAny("midi_compose_required_title")}
+                description={tAny("midi_compose_required_message")}
+                size="sm"
+                actions={[
+                    {
+                        id: "cancel",
+                        label: tAny("cancel"),
+                        onClick: handleComposeDecline,
+                    },
+                    {
+                        id: "confirm",
+                        label: tAny("ok"),
+                        intent: "primary",
+                        onClick: handleComposeConfirm,
+                    },
+                ]}
+            />
+        </>
     );
 };

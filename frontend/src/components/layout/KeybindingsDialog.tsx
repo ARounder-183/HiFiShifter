@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Dialog, Flex, Text, Button, ScrollArea, Separator, Select, Badge } from "@radix-ui/themes";
-import { Cross2Icon } from "@radix-ui/react-icons";
+import { Flex, Text, Button, ScrollArea, Separator, Select, Badge } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { IS_MAC } from "../../utils/platform";
@@ -24,6 +23,7 @@ import {
 import type { ActionId, ActionMeta, Keybinding } from "../../features/keybindings/types";
 import { canonicalKeyFromEvent } from "../../features/keybindings/keybindingMatch";
 import { useShortcutSuppression } from "../../ui/shortcutScope";
+import { AppDialog } from "../../ui/Dialog";
 import {
     KEYBINDING_PRESET_SELECTION_IDS,
     KEYBINDING_PRESETS,
@@ -293,47 +293,28 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
     const tAny = t as (key: string) => string;
 
     return (
-        <Dialog.Root open={open} onOpenChange={onOpenChange}>
-            {/* Overlay 阻塞下层所有交互。注意：按键拦截由下方 window 捕获
-                阶段监听负责 —— 本 div 不可聚焦，onKeyDown 永远不会触发。 */}
-            {open && (
-                <div
-                    style={{
-                        position: "fixed",
-                        inset: 0,
-                        zIndex: 9998,
-                        background: "rgba(0,0,0,0.4)",
-                    }}
-                    onPointerDown={(e) => e.stopPropagation()}
-                />
-            )}
-            <Dialog.Content
-                style={{
-                    width: "min(560px, 92vw)",
-                    maxWidth: 560,
-                    maxHeight: "80vh",
-                    zIndex: 9999,
-                    overflow: "hidden",
-                    display: "flex",
-                    flexDirection: "column",
-                    minHeight: 0,
-                }}
-                onPointerDownOutside={(e) => {
-                    // 如果正在录入，阻止点击外部关闭
-                    if (recordingId) e.preventDefault();
-                }}
-                onKeyDown={(e) => {
-                    // 阻止按键穿透到工程
-                    e.stopPropagation();
-                }}
-            >
-                <Dialog.Title>{tAny("kb_dialog_title")}</Dialog.Title>
-                <Dialog.Description size="2" color="gray">
-                    {tAny("kb_dialog_desc")}
-                </Dialog.Description>
-                <Text size="1" color="gray" style={{ marginTop: 4, display: "block" }}>
-                    {tAny("kb_dialog_hint_click")}
-                </Text>
+        <AppDialog
+            open={open}
+            onOpenChange={onOpenChange}
+            title={tAny("kb_dialog_title")}
+            description={tAny("kb_dialog_desc")}
+            size="lg"
+            actions={[
+                {
+                    id: "close",
+                    label: tAny("close"),
+                    onClick: () => onOpenChange(false),
+                },
+            ]}
+            /*
+             * 正在录入时不允许 Esc / 外部点击关闭：按下的那个键正是要录入的
+             * 内容，关掉对话框等于把用户的操作丢掉。
+             */
+            beforeClose={() => recordingId === null}
+        >
+            <Text size="1" color="gray" style={{ marginBottom: 4, display: "block" }}>
+                {tAny("kb_dialog_hint_click")}
+            </Text>
 
                 <Flex align="center" gap="2" mt="2" mb="2">
                     <Text size="2" color="gray" style={{ whiteSpace: "nowrap" }}>
@@ -351,7 +332,7 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
                     </Select.Root>
                 </Flex>
 
-                <ScrollArea style={{ flex: 1, minHeight: 0, marginTop: 8 }} scrollbars="vertical">
+                <ScrollArea style={{ maxHeight: "56vh", marginTop: 8 }} scrollbars="vertical">
                     <Flex direction="column" gap="3" py="3">
                         {groups.map(({ group, actions }) => (
                             <Flex direction="column" gap="1" key={group}>
@@ -523,17 +504,6 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
                         </Button>
                     </Flex>
                 )}
-
-                {/* 底部按钮 */}
-                <Flex justify="end" align="center" pt="3">
-                    <Dialog.Close>
-                        <Button variant="soft" color="gray" size="2">
-                            <Cross2Icon />
-                            {tAny("kb_close")}
-                        </Button>
-                    </Dialog.Close>
-                </Flex>
-            </Dialog.Content>
-        </Dialog.Root>
+        </AppDialog>
     );
 };

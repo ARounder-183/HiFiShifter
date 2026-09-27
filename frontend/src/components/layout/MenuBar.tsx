@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { Dialog, DropdownMenu, Flex, Spinner, Text } from "@radix-ui/themes";
+import { DropdownMenu, Flex, Spinner, Text } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { shallowEqual } from "react-redux";
@@ -92,6 +92,7 @@ import {
 } from "./pianoRoll/childPitchOffsetParams";
 import { isDynParam } from "./pianoRoll/paramRanges";
 import type { AutoBackupSettings } from "../../services/api/project";
+import { AppDialog } from "../../ui/Dialog";
 // import type { VibratoParams } from "../editDialogs/EditDialogs"; // 已移除无效导入
 
 interface MenuBarProps {
@@ -1372,24 +1373,23 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             <BenchmarkDialog open={benchmarkDialogOpen} onOpenChange={setBenchmarkDialogOpen} />
 
             {/* 导出诊断信息进行中：含基准测试（约 20–60 秒），给出明确的进行中提示。
-                不可中断（后端没有取消通道），因此屏蔽 Esc / 点击遮罩关闭。 */}
-            <Dialog.Root open={diagnosticsExporting} onOpenChange={() => {}}>
-                <Dialog.Content
-                    style={{ maxWidth: 440 }}
-                    aria-describedby={undefined}
-                    onEscapeKeyDown={(event) => event.preventDefault()}
-                    onPointerDownOutside={(event) => event.preventDefault()}
-                    onKeyDown={(event) => event.stopPropagation()}
-                >
-                    <Dialog.Title>{tAny("menu_export_diagnostics")}</Dialog.Title>
-                    <Flex align="center" gap="3" mt="3">
-                        <Spinner size="2" />
-                        <Text size="2" color="gray">
-                            {tAny("menu_export_diagnostics_running")}
-                        </Text>
-                    </Flex>
-                </Dialog.Content>
-            </Dialog.Root>
+                不可中断（后端没有取消通道），因此屏蔽 Esc / 点击遮罩关闭
+                —— 这一条现在由 `dismissible={false}` 表达，不再靠
+                `onOpenChange={() => {}}` 把回调整个废掉。 */}
+            <AppDialog
+                open={diagnosticsExporting}
+                onOpenChange={setDiagnosticsExporting}
+                title={tAny("menu_export_diagnostics")}
+                size="sm"
+                dismissible={false}
+            >
+                <Flex align="center" gap="3">
+                    <Spinner size="2" />
+                    <Text size="2" color="gray">
+                        {tAny("menu_export_diagnostics_running")}
+                    </Text>
+                </Flex>
+            </AppDialog>
 
             {/* 关于对话框：简介 + 版本 + Commit（可点击跳转源码快照）+ 仓库链接 */}
             <AboutDialog open={aboutDialogOpen} onOpenChange={setAboutDialogOpen} />

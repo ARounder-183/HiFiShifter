@@ -6,12 +6,14 @@
  * （撤销要能恢复），所以"清理"必须由用户显式触发。
  */
 
-import { Button, Dialog, Flex, Select, Switch, Text } from "@radix-ui/themes";
+import { Button, Flex, Select, Text } from "@radix-ui/themes";
 import { useEffect, useMemo, useState } from "react";
 
 import type { NotebookAssetSummary } from "../../../features/notebook/notebookSlice";
 import { useI18n } from "../../../i18n/I18nProvider";
 import { notebookApi } from "../../../services/api/notebook";
+import { AppDialog } from "../../../ui/Dialog";
+import { AppField, AppForm, AppSwitchRow } from "../../../ui/Field";
 import { formatAssetRef } from "./assetRef";
 import { clipKindLabelKey } from "./hifiClipBlock";
 import { resolveImage } from "./notebookImageCache";
@@ -42,59 +44,58 @@ export function NotebookAttachmentsDialog({
     const totalBytes = entries.reduce((sum, entry) => sum + (entry.byteLen || 0), 0);
 
     return (
-        <Dialog.Root open onOpenChange={(open) => !open && onClose()}>
-            <Dialog.Content
-                maxWidth="520px"
-                onKeyDown={(event) => event.stopPropagation()}
-                style={{ maxHeight: "70vh", display: "flex", flexDirection: "column" }}
-            >
-                <Dialog.Title>{t("notebook_attachments")}</Dialog.Title>
-                <Dialog.Description size="1" color="gray">
+        <AppDialog
+            open
+            onOpenChange={(open) => !open && onClose()}
+            title={t("notebook_attachments")}
+            description={
+                <Text size="1" color="gray">
                     {entries.length} · {formatBytes(totalBytes)}
-                </Dialog.Description>
-
-                <div className="mt-2 min-h-0 flex-1 overflow-auto">
-                    {entries.length === 0 ? (
-                        <Text size="1" color="gray">
-                            {t("notebook_attachments_empty")}
-                        </Text>
-                    ) : (
-                        entries.map((entry) => (
-                            <AttachmentRow
-                                key={entry.id}
-                                entry={entry}
-                                used={usedAssetIds.has(entry.id)}
-                                onChanged={onChanged}
-                                notify={notify}
-                            />
-                        ))
-                    )}
-                </div>
-
-                <Flex justify="between" align="center" className="mt-3" gap="2">
-                    <Button
-                        variant="soft"
-                        color="gray"
-                        disabled={unusedCount === 0}
-                        data-tooltip={t("notebook_attachments_clean_hint")}
-                        onClick={() => {
-                            void (async () => {
-                                const result = await notebookApi.pruneAssets();
-                                notify(t("notebook_attachments_cleaned") + ` (${result.removed})`);
-                                onChanged();
-                            })();
-                        }}
-                    >
-                        {t("notebook_attachments_clean")} ({unusedCount})
-                    </Button>
-                    <Dialog.Close>
-                        <Button variant="soft" color="gray">
-                            {t("close")}
-                        </Button>
-                    </Dialog.Close>
-                </Flex>
-            </Dialog.Content>
-        </Dialog.Root>
+                </Text>
+            }
+            size="md"
+            actions={[
+                {
+                    id: "clean",
+                    label: (
+                        <span data-tooltip={t("notebook_attachments_clean_hint")}>
+                            {t("notebook_attachments_clean")} ({unusedCount})
+                        </span>
+                    ),
+                    align: "start",
+                    disabled: unusedCount === 0,
+                    onClick: () =>
+                        (async () => {
+                            const result = await notebookApi.pruneAssets();
+                            notify(t("notebook_attachments_cleaned") + ` (${result.removed})`);
+                            onChanged();
+                        })(),
+                },
+                {
+                    id: "close",
+                    label: t("close"),
+                    onClick: () => onClose(),
+                },
+            ]}
+        >
+            <div className="mt-2 min-h-0 flex-1 overflow-auto">
+                {entries.length === 0 ? (
+                    <Text size="1" color="gray">
+                        {t("notebook_attachments_empty")}
+                    </Text>
+                ) : (
+                    entries.map((entry) => (
+                        <AttachmentRow
+                            key={entry.id}
+                            entry={entry}
+                            used={usedAssetIds.has(entry.id)}
+                            onChanged={onChanged}
+                            notify={notify}
+                        />
+                    ))
+                )}
+            </div>
+        </AppDialog>
     );
 }
 
@@ -121,6 +122,7 @@ function AttachmentRow({
             </span>
             <span>{formatBytes(entry.byteLen)}</span>
             <Button
+                type="button"
                 variant="ghost"
                 color="gray"
                 size="1"
@@ -131,6 +133,7 @@ function AttachmentRow({
                 ⤓
             </Button>
             <Button
+                type="button"
                 variant="ghost"
                 color="gray"
                 size="1"
@@ -256,308 +259,332 @@ export function NotebookSettingsDialog({
     }
 
     return (
-        <Dialog.Root open onOpenChange={(open) => !open && onClose()}>
-            <Dialog.Content
-                maxWidth="560px"
-                onKeyDown={(event) => event.stopPropagation()}
-                style={{ maxHeight: "76vh", display: "flex", flexDirection: "column" }}
-            >
-                <Dialog.Title>{t("notebook_settings")}</Dialog.Title>
-
-                <div className="min-h-0 flex-1 overflow-auto pr-1">
-                    <Section title={tAny("notebook_settings_group_view")}>
-                        <SelectRow
-                            label={tAny("notebook_setting_default_mode")}
+        <AppDialog
+            open
+            onOpenChange={(open) => !open && onClose()}
+            title={t("notebook_settings")}
+            size="md"
+            actions={[{ id: "close", label: t("close"), onClick: () => onClose() }]}
+        >
+            <AppForm>
+                <Section title={tAny("notebook_settings_group_view")}>
+                    <AppField label={tAny("notebook_setting_default_mode")}>
+                        <Select.Root
                             value={settings.defaultMode}
-                            options={[
-                                { value: "rich", label: t("notebook_mode_rich") },
-                                { value: "source", label: t("notebook_mode_source") },
-                                { value: "split", label: t("notebook_mode_split") },
-                            ]}
-                            onChange={(value) => onChange({ defaultMode: value })}
-                        />
-                        <SwitchRow
-                            label={tAny("notebook_setting_toolbar")}
-                            checked={settings.showToolbar}
-                            onChange={(value) => onChange({ showToolbar: value })}
-                        />
-                        <SwitchRow
-                            label={tAny("notebook_setting_markdown_shortcuts")}
-                            checked={settings.markdownShortcuts}
-                            onChange={(value) => onChange({ markdownShortcuts: value })}
-                        />
-                        <SwitchRow
-                            label={tAny("notebook_setting_slash")}
-                            checked={settings.slashCommands}
-                            onChange={(value) => onChange({ slashCommands: value })}
-                        />
-                        <SwitchRow
-                            label={tAny("notebook_setting_word_wrap")}
-                            checked={settings.sourceWordWrap}
-                            onChange={(value) => onChange({ sourceWordWrap: value })}
-                        />
-                        <SwitchRow
-                            label={tAny("notebook_setting_spellcheck")}
-                            checked={settings.spellCheck}
-                            onChange={(value) => onChange({ spellCheck: value })}
-                        />
-                        <SelectRow
-                            label={tAny("notebook_setting_font_size")}
+                            onValueChange={(value) => onChange({ defaultMode: value })}
+                        >
+                            <Select.Trigger />
+                            <Select.Content>
+                                <Select.Item value="rich">{t("notebook_mode_rich")}</Select.Item>
+                                <Select.Item value="source">
+                                    {t("notebook_mode_source")}
+                                </Select.Item>
+                                <Select.Item value="split">{t("notebook_mode_split")}</Select.Item>
+                            </Select.Content>
+                        </Select.Root>
+                    </AppField>
+                    <AppSwitchRow
+                        label={tAny("notebook_setting_toolbar")}
+                        checked={settings.showToolbar}
+                        onCheckedChange={(value) => onChange({ showToolbar: value })}
+                    />
+                    <AppSwitchRow
+                        label={tAny("notebook_setting_markdown_shortcuts")}
+                        checked={settings.markdownShortcuts}
+                        onCheckedChange={(value) => onChange({ markdownShortcuts: value })}
+                    />
+                    <AppSwitchRow
+                        label={tAny("notebook_setting_slash")}
+                        checked={settings.slashCommands}
+                        onCheckedChange={(value) => onChange({ slashCommands: value })}
+                    />
+                    <AppSwitchRow
+                        label={tAny("notebook_setting_word_wrap")}
+                        checked={settings.sourceWordWrap}
+                        onCheckedChange={(value) => onChange({ sourceWordWrap: value })}
+                    />
+                    <AppSwitchRow
+                        label={tAny("notebook_setting_spellcheck")}
+                        checked={settings.spellCheck}
+                        onCheckedChange={(value) => onChange({ spellCheck: value })}
+                    />
+                    <AppField label={tAny("notebook_setting_font_size")}>
+                        <Select.Root
                             value={String(settings.sourceFontSize)}
-                            options={[
-                                { value: "11", label: "11" },
-                                { value: "12", label: "12" },
-                                { value: "13", label: "13" },
-                                { value: "15", label: "15" },
-                                { value: "17", label: "17" },
-                            ]}
-                            onChange={(value) => onChange({ sourceFontSize: Number(value) })}
-                        />
-                        <SelectRow
-                            label={tAny("notebook_setting_history_split")}
+                            onValueChange={(value) => onChange({ sourceFontSize: Number(value) })}
+                        >
+                            <Select.Trigger />
+                            <Select.Content>
+                                {[
+                                    { value: "11", label: "11" },
+                                    { value: "12", label: "12" },
+                                    { value: "13", label: "13" },
+                                    { value: "15", label: "15" },
+                                    { value: "17", label: "17" },
+                                ].map((option) => (
+                                    <Select.Item key={option.value} value={option.value}>
+                                        {option.label}
+                                    </Select.Item>
+                                ))}
+                            </Select.Content>
+                        </Select.Root>
+                    </AppField>
+                    <AppField label={tAny("notebook_setting_history_split")}>
+                        <Select.Root
                             value={String(settings.historySplitIdleMs)}
-                            options={[
-                                { value: "0", label: tAny("notebook_setting_history_split_off") },
-                                { value: "2000", label: "2s" },
-                                { value: "5000", label: "5s" },
-                                { value: "15000", label: "15s" },
-                            ]}
-                            onChange={(value) => onChange({ historySplitIdleMs: Number(value) })}
-                        />
-                    </Section>
+                            onValueChange={(value) =>
+                                onChange({ historySplitIdleMs: Number(value) })
+                            }
+                        >
+                            <Select.Trigger />
+                            <Select.Content>
+                                {[
+                                    {
+                                        value: "0",
+                                        label: tAny("notebook_setting_history_split_off"),
+                                    },
+                                    { value: "2000", label: "2s" },
+                                    { value: "5000", label: "5s" },
+                                    { value: "15000", label: "15s" },
+                                ].map((option) => (
+                                    <Select.Item key={option.value} value={option.value}>
+                                        {option.label}
+                                    </Select.Item>
+                                ))}
+                            </Select.Content>
+                        </Select.Root>
+                    </AppField>
+                </Section>
 
-                    <Section title={tAny("notebook_settings_group_image")}>
-                        <SelectRow
-                            label={tAny("notebook_setting_image_max_dim")}
+                <Section title={tAny("notebook_settings_group_image")}>
+                    <AppField label={tAny("notebook_setting_image_max_dim")}>
+                        <Select.Root
                             value={String(settings.imageMaxDimensionPx)}
-                            options={[
-                                {
-                                    value: "0",
-                                    label: tAny("notebook_setting_image_max_dim_original"),
-                                },
-                                { value: "1280", label: "1280" },
-                                { value: "2048", label: "2048" },
-                                { value: "2560", label: "2560" },
-                                { value: "3840", label: "3840" },
-                            ]}
-                            onChange={(value) => onChange({ imageMaxDimensionPx: Number(value) })}
-                        />
-                        <SelectRow
-                            label={tAny("notebook_setting_image_format")}
+                            onValueChange={(value) =>
+                                onChange({ imageMaxDimensionPx: Number(value) })
+                            }
+                        >
+                            <Select.Trigger />
+                            <Select.Content>
+                                {[
+                                    {
+                                        value: "0",
+                                        label: tAny("notebook_setting_image_max_dim_original"),
+                                    },
+                                    { value: "1280", label: "1280" },
+                                    { value: "2048", label: "2048" },
+                                    { value: "2560", label: "2560" },
+                                    { value: "3840", label: "3840" },
+                                ].map((option) => (
+                                    <Select.Item key={option.value} value={option.value}>
+                                        {option.label}
+                                    </Select.Item>
+                                ))}
+                            </Select.Content>
+                        </Select.Root>
+                    </AppField>
+                    <AppField label={tAny("notebook_setting_image_format")}>
+                        <Select.Root
                             value={settings.imageFormat}
-                            options={[
-                                {
-                                    value: "auto",
-                                    label: tAny("notebook_setting_image_format_auto"),
-                                },
-                                { value: "webp", label: "WebP" },
-                                { value: "jpeg", label: "JPEG" },
-                                { value: "png", label: "PNG" },
-                            ]}
-                            onChange={(value) => onChange({ imageFormat: value })}
-                        />
-                        <SwitchRow
-                            label={tAny("notebook_setting_remote_images")}
-                            checked={settings.allowRemoteImages}
-                            onChange={(value) => onChange({ allowRemoteImages: value })}
-                        />
-                    </Section>
+                            onValueChange={(value) => onChange({ imageFormat: value })}
+                        >
+                            <Select.Trigger />
+                            <Select.Content>
+                                {[
+                                    {
+                                        value: "auto",
+                                        label: tAny("notebook_setting_image_format_auto"),
+                                    },
+                                    { value: "webp", label: "WebP" },
+                                    { value: "jpeg", label: "JPEG" },
+                                    { value: "png", label: "PNG" },
+                                ].map((option) => (
+                                    <Select.Item key={option.value} value={option.value}>
+                                        {option.label}
+                                    </Select.Item>
+                                ))}
+                            </Select.Content>
+                        </Select.Root>
+                    </AppField>
+                    <AppSwitchRow
+                        label={tAny("notebook_setting_remote_images")}
+                        checked={settings.allowRemoteImages}
+                        onCheckedChange={(value) => onChange({ allowRemoteImages: value })}
+                    />
+                </Section>
 
-                    <Section title={tAny("notebook_settings_group_clipboard")}>
-                        <SwitchRow
-                            label={tAny("notebook_setting_smart_paste")}
-                            checked={settings.smartPaste}
-                            onChange={(value) => onChange({ smartPaste: value })}
-                        />
-                        <SelectRow
-                            label={tAny("notebook_setting_html_paste")}
+                <Section title={tAny("notebook_settings_group_clipboard")}>
+                    <AppSwitchRow
+                        label={tAny("notebook_setting_smart_paste")}
+                        checked={settings.smartPaste}
+                        onCheckedChange={(value) => onChange({ smartPaste: value })}
+                    />
+                    <AppField label={tAny("notebook_setting_html_paste")}>
+                        <Select.Root
                             value={settings.htmlPasteMode}
-                            options={[
-                                { value: "markdown", label: "Markdown" },
-                                { value: "html", label: "HTML" },
-                                { value: "text", label: tAny("notebook_setting_paste_text") },
-                            ]}
-                            onChange={(value) => onChange({ htmlPasteMode: value })}
-                        />
-                        <SelectRow
-                            label={tAny("notebook_setting_plain_paste")}
+                            onValueChange={(value) => onChange({ htmlPasteMode: value })}
+                        >
+                            <Select.Trigger />
+                            <Select.Content>
+                                {[
+                                    { value: "markdown", label: "Markdown" },
+                                    { value: "html", label: "HTML" },
+                                    { value: "text", label: tAny("notebook_setting_paste_text") },
+                                ].map((option) => (
+                                    <Select.Item key={option.value} value={option.value}>
+                                        {option.label}
+                                    </Select.Item>
+                                ))}
+                            </Select.Content>
+                        </Select.Root>
+                    </AppField>
+                    <AppField label={tAny("notebook_setting_plain_paste")}>
+                        <Select.Root
                             value={settings.plainPasteMode}
-                            options={[
-                                { value: "auto", label: tAny("notebook_setting_plain_paste_auto") },
-                                { value: "markdown", label: "Markdown" },
-                                { value: "text", label: tAny("notebook_setting_paste_text") },
-                            ]}
-                            onChange={(value) => onChange({ plainPasteMode: value })}
-                        />
-                        <SelectRow
-                            label={tAny("notebook_setting_copy_format")}
+                            onValueChange={(value) => onChange({ plainPasteMode: value })}
+                        >
+                            <Select.Trigger />
+                            <Select.Content>
+                                {[
+                                    {
+                                        value: "auto",
+                                        label: tAny("notebook_setting_plain_paste_auto"),
+                                    },
+                                    { value: "markdown", label: "Markdown" },
+                                    { value: "text", label: tAny("notebook_setting_paste_text") },
+                                ].map((option) => (
+                                    <Select.Item key={option.value} value={option.value}>
+                                        {option.label}
+                                    </Select.Item>
+                                ))}
+                            </Select.Content>
+                        </Select.Root>
+                    </AppField>
+                    <AppField label={tAny("notebook_setting_copy_format")}>
+                        <Select.Root
                             value={settings.copyFormat}
-                            options={[
-                                {
-                                    value: "markdown+html",
-                                    label: tAny("notebook_setting_copy_format_both"),
-                                },
-                                { value: "markdown", label: "Markdown" },
-                                { value: "html", label: "HTML" },
-                                { value: "text", label: tAny("notebook_setting_paste_text") },
-                            ]}
-                            onChange={(value) => onChange({ copyFormat: value })}
-                        />
-                        <SelectRow
-                            label={tAny("notebook_setting_copy_plain")}
+                            onValueChange={(value) => onChange({ copyFormat: value })}
+                        >
+                            <Select.Trigger />
+                            <Select.Content>
+                                {[
+                                    {
+                                        value: "markdown+html",
+                                        label: tAny("notebook_setting_copy_format_both"),
+                                    },
+                                    { value: "markdown", label: "Markdown" },
+                                    { value: "html", label: "HTML" },
+                                    { value: "text", label: tAny("notebook_setting_paste_text") },
+                                ].map((option) => (
+                                    <Select.Item key={option.value} value={option.value}>
+                                        {option.label}
+                                    </Select.Item>
+                                ))}
+                            </Select.Content>
+                        </Select.Root>
+                    </AppField>
+                    <AppField label={tAny("notebook_setting_copy_plain")}>
+                        <Select.Root
                             value={settings.copyPlainTextAs}
-                            options={[
-                                {
-                                    value: "markdown",
-                                    label: tAny("notebook_setting_copy_plain_markdown"),
-                                },
-                                { value: "text", label: tAny("notebook_setting_paste_text") },
-                            ]}
-                            onChange={(value) => onChange({ copyPlainTextAs: value })}
-                        />
-                    </Section>
+                            onValueChange={(value) => onChange({ copyPlainTextAs: value })}
+                        >
+                            <Select.Trigger />
+                            <Select.Content>
+                                {[
+                                    {
+                                        value: "markdown",
+                                        label: tAny("notebook_setting_copy_plain_markdown"),
+                                    },
+                                    { value: "text", label: tAny("notebook_setting_paste_text") },
+                                ].map((option) => (
+                                    <Select.Item key={option.value} value={option.value}>
+                                        {option.label}
+                                    </Select.Item>
+                                ))}
+                            </Select.Content>
+                        </Select.Root>
+                    </AppField>
+                </Section>
 
-                    <Section title={tAny("notebook_settings_group_clip_block")}>
-                        <SelectRow
-                            label={tAny("notebook_setting_clip_insert_mode")}
+                <Section title={tAny("notebook_settings_group_clip_block")}>
+                    <AppField label={tAny("notebook_setting_clip_insert_mode")}>
+                        <Select.Root
                             value={settings.clipInsertMode}
-                            options={[
-                                {
-                                    value: "selected",
-                                    label: tAny("notebook_setting_clip_insert_selected"),
-                                },
-                                {
-                                    value: "newTracks",
-                                    label: tAny("notebook_setting_clip_insert_new_tracks"),
-                                },
-                            ]}
-                            onChange={(value) => onChange({ clipInsertMode: value })}
-                        />
-                        <SwitchRow
-                            label={tAny("notebook_setting_keep_clip")}
-                            checked={settings.keepClipAfterInsert}
-                            onChange={(value) => onChange({ keepClipAfterInsert: value })}
-                        />
-                        <SwitchRow
-                            label={tAny("notebook_setting_clip_preview")}
-                            checked={settings.clipShowPreview}
-                            onChange={(value) => onChange({ clipShowPreview: value })}
-                        />
-                    </Section>
+                            onValueChange={(value) => onChange({ clipInsertMode: value })}
+                        >
+                            <Select.Trigger />
+                            <Select.Content>
+                                {[
+                                    {
+                                        value: "selected",
+                                        label: tAny("notebook_setting_clip_insert_selected"),
+                                    },
+                                    {
+                                        value: "newTracks",
+                                        label: tAny("notebook_setting_clip_insert_new_tracks"),
+                                    },
+                                ].map((option) => (
+                                    <Select.Item key={option.value} value={option.value}>
+                                        {option.label}
+                                    </Select.Item>
+                                ))}
+                            </Select.Content>
+                        </Select.Root>
+                    </AppField>
+                    <AppSwitchRow
+                        label={tAny("notebook_setting_keep_clip")}
+                        checked={settings.keepClipAfterInsert}
+                        onCheckedChange={(value) => onChange({ keepClipAfterInsert: value })}
+                    />
+                    <AppSwitchRow
+                        label={tAny("notebook_setting_clip_preview")}
+                        checked={settings.clipShowPreview}
+                        onCheckedChange={(value) => onChange({ clipShowPreview: value })}
+                    />
+                </Section>
 
-                    <Section title={tAny("notebook_settings_group_export")}>
-                        <Flex gap="2" wrap="wrap">
-                            <Button
-                                variant="soft"
-                                color="gray"
-                                onClick={() => {
-                                    void runExport("md", markdown);
-                                }}
-                            >
-                                {tAny("notebook_export_md")}
-                            </Button>
-                            <Button
-                                variant="soft"
-                                color="gray"
-                                onClick={() => {
-                                    void runExport(
-                                        "html",
-                                        buildExportHtml(markdown, projectName, getHtml?.() ?? null),
-                                    );
-                                }}
-                            >
-                                {tAny("notebook_export_html")}
-                            </Button>
-                        </Flex>
-                    </Section>
-                </div>
-
-                <Flex justify="between" align="center" className="mt-3" gap="2">
-                    <Text size="1" color="gray">
-                        {exportNotice ?? ""}
-                    </Text>
-                    <Dialog.Close>
-                        <Button variant="soft" color="gray">
-                            {t("close")}
+                <Section title={tAny("notebook_settings_group_export")}>
+                    <Flex gap="2" wrap="wrap">
+                        <Button
+                            type="button"
+                            variant="soft"
+                            color="gray"
+                            onClick={() => {
+                                void runExport("md", markdown);
+                            }}
+                        >
+                            {tAny("notebook_export_md")}
                         </Button>
-                    </Dialog.Close>
-                </Flex>
-            </Dialog.Content>
-        </Dialog.Root>
+                        <Button
+                            type="button"
+                            variant="soft"
+                            color="gray"
+                            onClick={() => {
+                                void runExport(
+                                    "html",
+                                    buildExportHtml(markdown, projectName, getHtml?.() ?? null),
+                                );
+                            }}
+                        >
+                            {tAny("notebook_export_html")}
+                        </Button>
+                    </Flex>
+                </Section>
+
+                <Text size="1" color="gray">
+                    {exportNotice ?? ""}
+                </Text>
+            </AppForm>
+        </AppDialog>
     );
 }
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
     return (
-        <div className="mb-3">
+        <div>
             <div className="mb-1 text-xs font-medium text-qt-text-muted">{title}</div>
             {children}
         </div>
-    );
-}
-
-/**
- * 设置行：左标签（定宽）+ 控件。
- *
- * 与 `TimelineDisplaySettingsDialog` / `RenderCacheDialog` 同一形态（标签定宽、
- * 左对齐、控件占满剩余宽度）—— 弹窗之间的一致性靠沿用同一套排布约定，
- * 而不是各自调参。
- */
-const SETTING_LABEL_STYLE: React.CSSProperties = { minWidth: 132 };
-
-function SwitchRow({
-    label,
-    checked,
-    onChange,
-}: {
-    label: string;
-    checked: boolean;
-    onChange: (value: boolean) => void;
-}) {
-    return (
-        <Flex align="center" gap="2">
-            <Text size="2" style={SETTING_LABEL_STYLE}>
-                {label}
-            </Text>
-            <Switch checked={checked} onCheckedChange={onChange} />
-        </Flex>
-    );
-}
-
-function SelectRow({
-    label,
-    value,
-    options,
-    hint,
-    onChange,
-}: {
-    label: string;
-    value: string;
-    options: Array<{ value: string; label: string }>;
-    hint?: string;
-    onChange: (value: string) => void;
-}) {
-    return (
-        <Flex align="center" gap="2">
-            <Flex direction="column" style={SETTING_LABEL_STYLE}>
-                <Text size="2">{label}</Text>
-                {hint ? (
-                    <Text size="1" color="gray">
-                        {hint}
-                    </Text>
-                ) : null}
-            </Flex>
-            <Select.Root value={value} onValueChange={onChange}>
-                <Select.Trigger style={{ flex: 1 }} />
-                <Select.Content>
-                    {options.map((option) => (
-                        <Select.Item key={option.value} value={option.value}>
-                            {option.label}
-                        </Select.Item>
-                    ))}
-                </Select.Content>
-            </Select.Root>
-        </Flex>
     );
 }
 

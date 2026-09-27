@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
-import { Button, Dialog, Flex, Select, Text, TextField } from "@radix-ui/themes";
+import { Button, Flex, Select, Text, TextField } from "@radix-ui/themes";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { useI18n } from "../../i18n/I18nProvider";
 import {
@@ -16,6 +16,8 @@ import {
     type RecordingSettings,
 } from "../../services/api/recording";
 import { webApi } from "../../services/webviewApi";
+import { AppDialog } from "../../ui/Dialog";
+import { AppField, AppForm } from "../../ui/Field";
 
 interface RecordingSettingsDialogProps {
     open: boolean;
@@ -151,48 +153,52 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
     }
 
     return (
-        <Dialog.Root open={open} onOpenChange={onOpenChange}>
-            <Dialog.Content
-                style={{ maxWidth: 760 }}
-                onKeyDown={(event) => event.stopPropagation()}
-            >
-                <Dialog.Title>{tAny("menu_recording_settings")}</Dialog.Title>
-                <Dialog.Description>{tAny("recording_settings_desc")}</Dialog.Description>
+        <AppDialog
+            open={open}
+            onOpenChange={onOpenChange}
+            title={tAny("menu_recording_settings")}
+            description={tAny("recording_settings_desc")}
+            size="xl"
+            actions={[
+                { id: "cancel", label: tAny("cancel"), onClick: () => onOpenChange(false) },
+                {
+                    id: "save",
+                    label: tAny("recording_save_settings"),
+                    intent: "primary",
+                    disabled: submitting,
+                    onClick: handleSave,
+                },
+            ]}
+        >
+            <AppForm>
+                <AppField label={tAny("recording_source_mode")}>
+                    <Select.Root
+                        value={draft.captureMode}
+                        onValueChange={(value) =>
+                            setDraft((prev) => ({
+                                ...prev,
+                                captureMode: value as RecordingSettings["captureMode"],
+                            }))
+                        }
+                    >
+                        <Select.Trigger style={{ minWidth: 260 }} />
+                        <Select.Content>
+                            <Select.Item value="device">
+                                {tAny("recording_mode_device")}
+                            </Select.Item>
+                            <Select.Item value="loopback">
+                                {tAny("recording_mode_loopback")}
+                            </Select.Item>
+                            <Select.Item value="application">
+                                {tAny("recording_mode_application")}
+                            </Select.Item>
+                        </Select.Content>
+                    </Select.Root>
+                </AppField>
 
-                <Flex direction="column" gap="3" mt="3">
-                    <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 132 }}>
-                            {tAny("recording_source_mode")}
-                        </Text>
-                        <Select.Root
-                            value={draft.captureMode}
-                            onValueChange={(value) =>
-                                setDraft((prev) => ({
-                                    ...prev,
-                                    captureMode: value as RecordingSettings["captureMode"],
-                                }))
-                            }
-                        >
-                            <Select.Trigger style={{ minWidth: 260 }} />
-                            <Select.Content>
-                                <Select.Item value="device">
-                                    {tAny("recording_mode_device")}
-                                </Select.Item>
-                                <Select.Item value="loopback">
-                                    {tAny("recording_mode_loopback")}
-                                </Select.Item>
-                                <Select.Item value="application">
-                                    {tAny("recording_mode_application")}
-                                </Select.Item>
-                            </Select.Content>
-                        </Select.Root>
-                    </Flex>
-
-                    {draft.captureMode === "device" ? (
+                {draft.captureMode === "device" ? (
+                    <AppField label={tAny("recording_device")}>
                         <Flex align="center" gap="2">
-                            <Text size="2" style={{ minWidth: 132 }}>
-                                {tAny("recording_device")}
-                            </Text>
                             <Select.Root
                                 value={draft.sourceDevice}
                                 onValueChange={(value) =>
@@ -214,6 +220,7 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                                 </Select.Content>
                             </Select.Root>
                             <Button
+                                type="button"
                                 size="1"
                                 variant="ghost"
                                 color="gray"
@@ -222,13 +229,12 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                                 {tAny("recording_refresh_devices")}
                             </Button>
                         </Flex>
-                    ) : null}
+                    </AppField>
+                ) : null}
 
-                    {draft.captureMode === "loopback" ? (
+                {draft.captureMode === "loopback" ? (
+                    <AppField label={tAny("recording_loopback_device")}>
                         <Flex align="center" gap="2">
-                            <Text size="2" style={{ minWidth: 132 }}>
-                                {tAny("recording_loopback_device")}
-                            </Text>
                             <Select.Root
                                 value={loopbackValue}
                                 onValueChange={(value) =>
@@ -250,6 +256,7 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                                 </Select.Content>
                             </Select.Root>
                             <Button
+                                type="button"
                                 size="1"
                                 variant="ghost"
                                 color="gray"
@@ -258,14 +265,13 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                                 {tAny("recording_refresh_devices")}
                             </Button>
                         </Flex>
-                    ) : null}
+                    </AppField>
+                ) : null}
 
-                    {draft.captureMode === "application" ? (
-                        <>
+                {draft.captureMode === "application" ? (
+                    <>
+                        <AppField label={tAny("recording_application")}>
                             <Flex align="center" gap="2">
-                                <Text size="2" style={{ minWidth: 132 }}>
-                                    {tAny("recording_application")}
-                                </Text>
                                 <Select.Root
                                     value={draft.captureAppId}
                                     onValueChange={(value) => {
@@ -293,6 +299,7 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                                     </Select.Content>
                                 </Select.Root>
                                 <Button
+                                    type="button"
                                     size="1"
                                     variant="ghost"
                                     color="gray"
@@ -301,40 +308,36 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                                     {tAny("recording_refresh_apps")}
                                 </Button>
                             </Flex>
-                            <Text size="1" color="gray" style={{ paddingLeft: 20 }}>
-                                {tAny("recording_application_hint")}
-                            </Text>
-                        </>
-                    ) : null}
-
-                    <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 132 }}>
-                            {tAny("recording_sample_rate")}
+                        </AppField>
+                        <Text size="1" color="gray" style={{ paddingLeft: 20 }}>
+                            {tAny("recording_application_hint")}
                         </Text>
-                        <Select.Root
-                            value={String(draft.sampleRate)}
-                            onValueChange={(value) =>
-                                setDraft((prev) => ({
-                                    ...prev,
-                                    sampleRate: Number(value),
-                                }))
-                            }
-                        >
-                            <Select.Trigger style={{ minWidth: 120 }} />
-                            <Select.Content>
-                                {[44_100, 48_000, 88_200, 96_000].map((rate) => (
-                                    <Select.Item key={rate} value={String(rate)}>
-                                        {rate} Hz
-                                    </Select.Item>
-                                ))}
-                            </Select.Content>
-                        </Select.Root>
-                    </Flex>
+                    </>
+                ) : null}
 
+                <AppField label={tAny("recording_sample_rate")}>
+                    <Select.Root
+                        value={String(draft.sampleRate)}
+                        onValueChange={(value) =>
+                            setDraft((prev) => ({
+                                ...prev,
+                                sampleRate: Number(value),
+                            }))
+                        }
+                    >
+                        <Select.Trigger style={{ minWidth: 120 }} />
+                        <Select.Content>
+                            {[44_100, 48_000, 88_200, 96_000].map((rate) => (
+                                <Select.Item key={rate} value={String(rate)}>
+                                    {rate} Hz
+                                </Select.Item>
+                            ))}
+                        </Select.Content>
+                    </Select.Root>
+                </AppField>
+
+                <AppField label={tAny("recording_bit_depth")}>
                     <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 132 }}>
-                            {tAny("recording_bit_depth")}
-                        </Text>
                         <Select.Root
                             value={String(draft.bitDepth)}
                             onValueChange={(value) =>
@@ -371,11 +374,10 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                             </Select.Content>
                         </Select.Root>
                     </Flex>
+                </AppField>
 
+                <AppField label={tAny("recording_input_gain")}>
                     <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 132 }}>
-                            {tAny("recording_input_gain")}
-                        </Text>
                         <TextField.Root
                             size="2"
                             type="number"
@@ -395,11 +397,10 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                             dB
                         </Text>
                     </Flex>
+                </AppField>
 
+                <AppField label={tAny("recording_countdown")}>
                     <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 132 }}>
-                            {tAny("recording_countdown")}
-                        </Text>
                         <TextField.Root
                             size="2"
                             type="number"
@@ -419,26 +420,25 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                             {tAny("recording_countdown_unit")}
                         </Text>
                     </Flex>
+                </AppField>
 
-                    <label className="flex items-center gap-2 text-sm text-qt-text">
-                        <input
-                            type="checkbox"
-                            checked={draft.monitorEnabled}
-                            onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                                setDraft((prev) => ({
-                                    ...prev,
-                                    monitorEnabled: event.target.checked,
-                                }))
-                            }
-                        />
-                        <span>{tAny("recording_monitor_enabled")}</span>
-                    </label>
+                <label className="flex items-center gap-2 text-sm text-qt-text">
+                    <input
+                        type="checkbox"
+                        checked={draft.monitorEnabled}
+                        onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                            setDraft((prev) => ({
+                                ...prev,
+                                monitorEnabled: event.target.checked,
+                            }))
+                        }
+                    />
+                    <span>{tAny("recording_monitor_enabled")}</span>
+                </label>
 
-                    {draft.monitorEnabled ? (
-                        <Flex align="center" gap="2" pl="6">
-                            <Text size="2" style={{ minWidth: 120 }}>
-                                {tAny("recording_monitor_gain")}
-                            </Text>
+                {draft.monitorEnabled ? (
+                    <AppField label={tAny("recording_monitor_gain")} className="pl-6">
+                        <Flex align="center" gap="2">
                             <TextField.Root
                                 size="2"
                                 type="number"
@@ -458,93 +458,81 @@ export function RecordingSettingsDialog({ open, onOpenChange }: RecordingSetting
                                 dB
                             </Text>
                         </Flex>
-                    ) : null}
+                    </AppField>
+                ) : null}
 
-                    <label className="flex items-center gap-2 text-sm text-qt-text">
-                        <input
-                            type="checkbox"
-                            checked={draft.autoNormalize}
-                            onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                                setDraft((prev) => ({
-                                    ...prev,
-                                    autoNormalize: event.target.checked,
-                                }))
-                            }
-                        />
-                        <span>{tAny("recording_auto_normalize")}</span>
-                    </label>
+                <label className="flex items-center gap-2 text-sm text-qt-text">
+                    <input
+                        type="checkbox"
+                        checked={draft.autoNormalize}
+                        onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                            setDraft((prev) => ({
+                                ...prev,
+                                autoNormalize: event.target.checked,
+                            }))
+                        }
+                    />
+                    <span>{tAny("recording_auto_normalize")}</span>
+                </label>
 
-                    <label className="flex items-center gap-2 text-sm text-qt-text">
-                        <input
-                            type="checkbox"
-                            checked={draft.autoStopAtSelectionEnd}
-                            onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                                setDraft((prev) => ({
-                                    ...prev,
-                                    autoStopAtSelectionEnd: event.target.checked,
-                                }))
-                            }
-                        />
-                        <span>{tAny("recording_auto_stop_selection")}</span>
-                    </label>
+                <label className="flex items-center gap-2 text-sm text-qt-text">
+                    <input
+                        type="checkbox"
+                        checked={draft.autoStopAtSelectionEnd}
+                        onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                            setDraft((prev) => ({
+                                ...prev,
+                                autoStopAtSelectionEnd: event.target.checked,
+                            }))
+                        }
+                    />
+                    <span>{tAny("recording_auto_stop_selection")}</span>
+                </label>
 
-                    <Flex align="center" gap="2">
-                        <Text size="2" style={{ minWidth: 132 }}>
-                            {tAny("recording_path_template")}
-                        </Text>
-                        <TextField.Root
-                            size="2"
-                            value={draft.pathTemplate}
-                            onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                                setDraft((prev) => ({
-                                    ...prev,
-                                    pathTemplate: event.target.value,
-                                }))
-                            }
-                            onFocus={(event) => {
-                                pathInputRef.current = event.target as HTMLInputElement;
-                            }}
-                            style={{ flex: 1 }}
-                        />
-                    </Flex>
+                <AppField label={tAny("recording_path_template")}>
+                    <TextField.Root
+                        size="2"
+                        value={draft.pathTemplate}
+                        onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                            setDraft((prev) => ({
+                                ...prev,
+                                pathTemplate: event.target.value,
+                            }))
+                        }
+                        onFocus={(event) => {
+                            pathInputRef.current = event.target as HTMLInputElement;
+                        }}
+                    />
+                </AppField>
 
-                    <Flex gap="2" wrap="wrap" align="center">
-                        <Text size="1" color="gray">
-                            {tAny("auto_backup_placeholders")}
-                        </Text>
-                        {["<ProjectFolder>", "<ProjectName>"].map((token) => (
-                            <Button
-                                key={token}
-                                size="1"
-                                variant="ghost"
-                                color="gray"
-                                onClick={() => insertPathToken(token)}
-                            >
-                                {token}
-                            </Button>
-                        ))}
-                    </Flex>
-
+                <Flex gap="2" wrap="wrap" align="center">
                     <Text size="1" color="gray">
-                        {tAny("auto_backup_time_format_hint")}
+                        {tAny("auto_backup_placeholders")}
                     </Text>
-
-                    {errorText ? (
-                        <Text size="2" color="red">
-                            {errorText}
-                        </Text>
-                    ) : null}
+                    {["<ProjectFolder>", "<ProjectName>"].map((token) => (
+                        <Button
+                            key={token}
+                            type="button"
+                            size="1"
+                            variant="ghost"
+                            color="gray"
+                            onClick={() => insertPathToken(token)}
+                        >
+                            {token}
+                        </Button>
+                    ))}
                 </Flex>
 
-                <Flex justify="end" gap="2" mt="4">
-                    <Button variant="soft" color="gray" onClick={() => onOpenChange(false)}>
-                        {tAny("cancel")}
-                    </Button>
-                    <Button onClick={() => void handleSave()} disabled={submitting}>
-                        {tAny("recording_save_settings")}
-                    </Button>
-                </Flex>
-            </Dialog.Content>
-        </Dialog.Root>
+                <Text size="1" color="gray">
+                    {tAny("auto_backup_time_format_hint")}
+                </Text>
+
+                {errorText ? (
+                    <Text size="2" color="red">
+                        {errorText}
+                    </Text>
+                ) : null}
+            </AppForm>
+        </AppDialog>
     );
 }

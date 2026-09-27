@@ -22,7 +22,7 @@
  */
 
 import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
-import { Button, Dialog, DropdownMenu, Flex, TextField } from "@radix-ui/themes";
+import { DropdownMenu, TextField } from "@radix-ui/themes";
 
 import { store } from "../../app/store";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
@@ -42,6 +42,7 @@ import {
     reclaimDetachedForm,
 } from "../../features/dock/dockApi";
 import { getPanel } from "../../features/dock/panelRegistry";
+import { AppDialog } from "../../ui/Dialog";
 
 /* ── 二级菜单 → 对话框宿主的通信 ─────────────────────────────────
  * 二级菜单在菜单关闭时卸载，持有不了对话框的开关状态；把三份状态提升到
@@ -289,74 +290,56 @@ export function DockLayoutDialogs() {
             />
 
             {/* 重置确认：`confirmResetLayout` 关闭时菜单项直接重置，根本不会走到这里。 */}
-            <Dialog.Root
+            <AppDialog
                 open={dialogKind === "resetConfirm"}
                 onOpenChange={(open) => {
                     if (!open) closeDialog();
                 }}
-            >
-                <Dialog.Content maxWidth="400px" onKeyDown={(event) => event.stopPropagation()}>
-                    <Dialog.Title>{tAny("layout_reset_confirm_title")}</Dialog.Title>
-                    <Dialog.Description size="2" mt="2">
-                        {tAny("layout_reset_confirm_body")}
-                    </Dialog.Description>
-                    <Flex justify="end" gap="2" mt="4">
-                        <Dialog.Close>
-                            <Button variant="soft" color="gray">
-                                {t("cancel")}
-                            </Button>
-                        </Dialog.Close>
-                        <Button
-                            onClick={() => {
-                                resetLayout(dispatch);
-                                closeDialog();
-                            }}
-                        >
-                            {tAny("layout_reset")}
-                        </Button>
-                    </Flex>
-                </Dialog.Content>
-            </Dialog.Root>
+                title={tAny("layout_reset_confirm_title")}
+                description={tAny("layout_reset_confirm_body")}
+                size="sm"
+                actions={[
+                    { id: "cancel", label: t("cancel"), onClick: () => closeDialog() },
+                    {
+                        id: "reset",
+                        label: tAny("layout_reset"),
+                        intent: "primary",
+                        onClick: () => {
+                            resetLayout(dispatch);
+                            closeDialog();
+                        },
+                    },
+                ]}
+            />
 
-            <Dialog.Root
+            <AppDialog
                 open={dialogKind === "namePrompt"}
                 onOpenChange={(open) => {
                     if (!open) closeDialog();
                 }}
+                title={tAny("layout_preset_name_prompt")}
+                size="sm"
+                actions={[
+                    { id: "cancel", label: tAny("cancel"), onClick: () => closeDialog() },
+                    {
+                        id: "ok",
+                        label: tAny("ok"),
+                        intent: "primary",
+                        onClick: () => {
+                            if (presetDraft.trim()) savePreset(dispatch, presetDraft.trim());
+                            closeDialog();
+                        },
+                    },
+                ]}
             >
-                <Dialog.Content maxWidth="360px" onKeyDown={(event) => event.stopPropagation()}>
-                    <Dialog.Title>{tAny("layout_preset_name_prompt")}</Dialog.Title>
-                    <Flex mt="3">
-                        <TextField.Root
-                            autoFocus
-                            size="2"
-                            style={{ width: "100%" }}
-                            value={presetDraft}
-                            onChange={(event) => setPresetDraft(event.target.value)}
-                            onKeyDown={(event) => {
-                                if (event.key !== "Enter") return;
-                                if (presetDraft.trim()) savePreset(dispatch, presetDraft.trim());
-                                closeDialog();
-                            }}
-                        />
-                    </Flex>
-                    <Flex justify="end" gap="2" mt="4">
-                        <Dialog.Close>
-                            <Button variant="soft" color="gray">
-                                {tAny("cancel")}
-                            </Button>
-                        </Dialog.Close>
-                        <Button
-                            onClick={() => {
-                                if (presetDraft.trim()) savePreset(dispatch, presetDraft.trim());
-                                closeDialog();
-                            }}
-                        >
-                            {tAny("ok")}
-                        </Button>
-                    </Flex>
-                </Dialog.Content>
-            </Dialog.Root>
+                <TextField.Root
+                    autoFocus
+                    size="2"
+                    style={{ width: "100%" }}
+                    value={presetDraft}
+                    onChange={(event) => setPresetDraft(event.target.value)}
+                />
+            </AppDialog>
 
             {/*
               隐藏的文件输入：导入走浏览器原生文件选择（WebView 内可用，不必动用

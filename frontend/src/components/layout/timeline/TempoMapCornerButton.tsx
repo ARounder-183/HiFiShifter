@@ -11,7 +11,7 @@
  * 因此切换 视图 → 速度映射 会自动更新本按钮。
  */
 import { useCallback, useMemo, useState } from "react";
-import { Button, Dialog, Flex, Text } from "@radix-ui/themes";
+import { Text } from "@radix-ui/themes";
 import { useAppDispatch, useAppSelector } from "../../../app/hooks";
 import { useI18n } from "../../../i18n/I18nProvider";
 import {
@@ -28,6 +28,7 @@ import {
     createTempoPointId,
     scaleLikeToScaleData,
 } from "../../../utils/tempoMap";
+import { AppDialog } from "../../../ui/Dialog";
 
 /** “显示/创建”模式图标：空心四分音符 + 右上角加号（表示“显示并创建”）。 */
 function TempoShowIcon() {
@@ -190,32 +191,36 @@ export const TempoMapCornerButton: React.FC = () => {
                 {active ? <TempoActiveIcon /> : <TempoShowIcon />}
             </button>
 
-            <Dialog.Root open={dialogOpen} onOpenChange={setDialogOpen}>
-                <Dialog.Content maxWidth="360px">
-                    <Dialog.Title>{tAny("tempo_map_clear_dialog_title")}</Dialog.Title>
-                    <Dialog.Description>
-                        <Text size="2" className="text-qt-text-muted">
-                            {tAny("tempo_map_clear_dialog_message")}
-                        </Text>
-                    </Dialog.Description>
-                    <Flex justify="end" align="center" mt="4" gap="2">
-                        <Button
-                            variant="soft"
-                            color="gray"
-                            size="1"
-                            onClick={() => setDialogOpen(false)}
-                        >
-                            {tAny("cancel")}
-                        </Button>
-                        <Button variant="soft" color="gray" size="1" onClick={hideOnly}>
-                            {tAny("tempo_map_hide_only")}
-                        </Button>
-                        <Button variant="solid" color="red" size="1" onClick={clearMap}>
-                            {tAny("tempo_map_clear_confirm")}
-                        </Button>
-                    </Flex>
-                </Dialog.Content>
-            </Dialog.Root>
+            <AppDialog
+                open={dialogOpen}
+                onOpenChange={setDialogOpen}
+                title={tAny("tempo_map_clear_dialog_title")}
+                description={
+                    <Text size="2" className="text-qt-text-muted">
+                        {tAny("tempo_map_clear_dialog_message")}
+                    </Text>
+                }
+                size="sm"
+                actions={[
+                    {
+                        id: "clear",
+                        label: tAny("tempo_map_clear_confirm"),
+                        intent: "danger",
+                        align: "start",
+                        onClick: clearMap,
+                    },
+                    {
+                        id: "cancel",
+                        label: tAny("cancel"),
+                        onClick: () => setDialogOpen(false),
+                    },
+                    {
+                        id: "hide",
+                        label: tAny("tempo_map_hide_only"),
+                        onClick: hideOnly,
+                    },
+                ]}
+            />
         </>
     );
 };

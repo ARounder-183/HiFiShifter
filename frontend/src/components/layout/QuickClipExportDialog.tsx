@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
-import { Button, Dialog, Flex, SegmentedControl, Text, TextField } from "@radix-ui/themes";
+import { Button, Flex, SegmentedControl, Text, TextField } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import type { MessageKey } from "../../i18n/messages";
 import { coreApi, type ExportFormat } from "../../services/api/core";
 import { fileBrowserApi } from "../../services/api/fileBrowser";
 import { applyExtensionToFileName } from "../../utils/exportFormat";
 import { buildQuickExportFileName } from "./timeline/quickExportSelection";
+import { AppDialog } from "../../ui/Dialog";
+import { AppField, AppForm } from "../../ui/Field";
 
 interface QuickClipExportDialogProps {
     open: boolean;
@@ -124,69 +126,58 @@ export function QuickClipExportDialog({ open, clipIds, onOpenChange }: QuickClip
     }
 
     return (
-        <Dialog.Root open={open} onOpenChange={onOpenChange}>
-            <Dialog.Content maxWidth="520px">
-                <Dialog.Title>{t("quick_export_title")}</Dialog.Title>
-                <Dialog.Description>
-                    {t("quick_export_description").replace("{n}", String(clipIds.length))}
-                </Dialog.Description>
-                <Flex direction="column" gap="3" mt="4">
-                    <div>
-                        <Text as="label" size="2">
-                            {t("quick_export_format")}
-                        </Text>
-                        <Flex mt="1">
-                            <SegmentedControl.Root
-                                value={format}
-                                onValueChange={(value) => handleFormatChange(value as ExportFormat)}
-                            >
-                                <SegmentedControl.Item value="wav">WAV</SegmentedControl.Item>
-                                <SegmentedControl.Item value="mp3">MP3</SegmentedControl.Item>
-                                <SegmentedControl.Item value="flac">FLAC</SegmentedControl.Item>
-                            </SegmentedControl.Root>
-                        </Flex>
-                    </div>
-                    <div>
-                        <Text as="label" size="2">
-                            {t("quick_export_file_name")}
-                        </Text>
+        <AppDialog
+            open={open}
+            onOpenChange={onOpenChange}
+            title={t("quick_export_title")}
+            description={t("quick_export_description").replace("{n}", String(clipIds.length))}
+            size="md"
+            actions={[
+                { id: "cancel", label: t("cancel"), onClick: () => onOpenChange(false) },
+                {
+                    id: "export",
+                    label: submitting ? t("quick_export_submitting") : t("quick_export_confirm"),
+                    intent: "primary",
+                    disabled: exportDisabled,
+                    onClick: handleExport,
+                },
+            ]}
+        >
+            <AppForm>
+                <AppField label={t("quick_export_format")}>
+                    <SegmentedControl.Root
+                        value={format}
+                        onValueChange={(value) => handleFormatChange(value as ExportFormat)}
+                    >
+                        <SegmentedControl.Item value="wav">WAV</SegmentedControl.Item>
+                        <SegmentedControl.Item value="mp3">MP3</SegmentedControl.Item>
+                        <SegmentedControl.Item value="flac">FLAC</SegmentedControl.Item>
+                    </SegmentedControl.Root>
+                </AppField>
+                <AppField label={t("quick_export_file_name")}>
+                    <TextField.Root
+                        value={fileName}
+                        onChange={(event) => setFileName(event.target.value)}
+                        placeholder="quick_export.wav"
+                    />
+                </AppField>
+                <AppField label={t("quick_export_output_dir")}>
+                    <Flex gap="2">
                         <TextField.Root
-                            mt="1"
-                            value={fileName}
-                            onChange={(event) => setFileName(event.target.value)}
-                            placeholder="quick_export.wav"
+                            value={outputDir}
+                            onChange={(event) => setOutputDir(event.target.value)}
                         />
-                    </div>
-                    <div>
-                        <Text as="label" size="2">
-                            {t("quick_export_output_dir")}
-                        </Text>
-                        <Flex gap="2" mt="1">
-                            <TextField.Root
-                                className="flex-1"
-                                value={outputDir}
-                                onChange={(event) => setOutputDir(event.target.value)}
-                            />
-                            <Button variant="soft" onClick={() => void handleBrowse()}>
-                                {t("quick_export_browse")}
-                            </Button>
-                        </Flex>
-                    </div>
-                    {errorText ? (
-                        <Text size="2" color="red">
-                            {errorText}
-                        </Text>
-                    ) : null}
-                </Flex>
-                <Flex justify="end" gap="2" mt="4">
-                    <Button variant="soft" color="gray" onClick={() => onOpenChange(false)}>
-                        {t("cancel")}
-                    </Button>
-                    <Button disabled={exportDisabled} onClick={() => void handleExport()}>
-                        {submitting ? t("quick_export_submitting") : t("quick_export_confirm")}
-                    </Button>
-                </Flex>
-            </Dialog.Content>
-        </Dialog.Root>
+                        <Button type="button" variant="soft" onClick={() => void handleBrowse()}>
+                            {t("quick_export_browse")}
+                        </Button>
+                    </Flex>
+                </AppField>
+                {errorText ? (
+                    <Text size="2" color="red">
+                        {errorText}
+                    </Text>
+                ) : null}
+            </AppForm>
+        </AppDialog>
     );
 }

@@ -30,7 +30,8 @@
  * @see docs/superpowers/specs/2026-09-13-timeline-single-path-design.md
  */
 import React, { useMemo, Profiler } from "react";
-import { Flex, Dialog, Button, Text } from "@radix-ui/themes";
+import { Flex } from "@radix-ui/themes";
+import { AppDialog } from "../../ui/Dialog";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppTheme } from "../../theme/AppThemeProvider";
 import { useAppSelector } from "../../app/hooks";
@@ -6480,7 +6481,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                         onCloseLeadingGapChange={onCloseLeadingGapChange}
                     />
 
-                    <Dialog.Root
+                    <AppDialog
                         open={sameSourceConfirmOpen}
                         onOpenChange={(open) => {
                             setSameSourceConfirmOpen(open);
@@ -6489,40 +6490,35 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                 sameSourceConfirmResolverRef.current = null;
                             }
                         }}
-                    >
-                        <Dialog.Content maxWidth="480px">
-                            <Dialog.Title>{t("ctx_replace")}</Dialog.Title>
-                            <Dialog.Description>
-                                <Text size="2">{t("clip_replace_same_source_confirm")}</Text>
-                            </Dialog.Description>
-                            <Flex justify="end" gap="2" mt="4">
-                                <Button
-                                    variant="soft"
-                                    color="gray"
-                                    onClick={() => {
-                                        setSameSourceConfirmOpen(false);
-                                        if (sameSourceConfirmResolverRef.current) {
-                                            sameSourceConfirmResolverRef.current(false);
-                                            sameSourceConfirmResolverRef.current = null;
-                                        }
-                                    }}
-                                >
-                                    {t("cancel")}
-                                </Button>
-                                <Button
-                                    onClick={() => {
-                                        setSameSourceConfirmOpen(false);
-                                        if (sameSourceConfirmResolverRef.current) {
-                                            sameSourceConfirmResolverRef.current(true);
-                                            sameSourceConfirmResolverRef.current = null;
-                                        }
-                                    }}
-                                >
-                                    {t("ok")}
-                                </Button>
-                            </Flex>
-                        </Dialog.Content>
-                    </Dialog.Root>
+                        title={t("ctx_replace")}
+                        description={t("clip_replace_same_source_confirm")}
+                        size="sm"
+                        actions={[
+                            {
+                                id: "cancel",
+                                label: t("cancel"),
+                                onClick: () => {
+                                    setSameSourceConfirmOpen(false);
+                                    if (sameSourceConfirmResolverRef.current) {
+                                        sameSourceConfirmResolverRef.current(false);
+                                        sameSourceConfirmResolverRef.current = null;
+                                    }
+                                },
+                            },
+                            {
+                                id: "ok",
+                                label: t("ok"),
+                                intent: "primary",
+                                onClick: () => {
+                                    setSameSourceConfirmOpen(false);
+                                    if (sameSourceConfirmResolverRef.current) {
+                                        sameSourceConfirmResolverRef.current(true);
+                                        sameSourceConfirmResolverRef.current = null;
+                                    }
+                                },
+                            },
+                        ]}
+                    />
 
                     <TimelineTransportBridge
                         pxPerSecRef={pxPerSecRef}
