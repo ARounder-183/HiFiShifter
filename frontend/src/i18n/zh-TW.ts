@@ -520,8 +520,8 @@ export const zhTW = {
     status_export_failed: "匯出失敗",
     status_export_separated_done: "分軌匯出完成",
     status_export_separated_failed: "分軌匯出失敗",
-    status_clipboard_copy_failed: "複製失敗：系統剪貼簿正被占用，請重試。",
-    status_clipboard_cut_failed: "剪下失敗：系統剪貼簿正被占用，請重試。",
+    status_clipboard_copy_failed: "複製失敗：系統剪貼簿正被占用，請重試",
+    status_clipboard_cut_failed: "剪下失敗：系統剪貼簿正被占用，請重試",
     status_playing_original: "正在播放原始音訊",
     status_play_original_failed: "播放原始音訊失敗",
     status_stopping_audio: "正在停止音訊...",
@@ -652,8 +652,7 @@ export const zhTW = {
     ctx_scan_fake_stereo_hint:
         "左右聲道內容一致的素材可折疊為單聲道：聽感不變，渲染耗時減半。整批只產生一個復原步驟。",
     clip_channel_import_dialog_title: "匯入聲道處理",
-    clip_channel_import_dialog_desc:
-        "匯入時把左右聲道內容一致的「假立體聲」素材折疊為單聲道：聽感不變，渲染耗時減半。",
+    clip_channel_import_dialog_desc: "匯入時把左右聲道內容一致的「假立體聲」素材折疊為單聲道。",
     clip_channel_import_mode: "自動轉換",
     clip_channel_import_mode_smart: "智慧轉換為單聲道",
     clip_channel_import_mode_always_mono: "全部轉換為單聲道",
@@ -1598,7 +1597,7 @@ export const zhTW = {
     render_cache_open_dir_failed: "開啟快取資料夾失敗",
     render_cache_stats_failed: "讀取渲染快取統計失敗",
     status_render_cache_summary: "本次開啟重用 {hits}/{total} 個音訊塊",
-    status_render_cache_skipped_suffix: " · {n} 個片段未落盤（每次開啟都會重新合成）",
+    status_render_cache_skipped_suffix: "{n} 個片段未落盤，每次開啟都會重新合成",
     status_render_cache_saved_suffix: "（約省 {saved}）",
     status_render_cache_cleared: "已清理渲染快取（{n} 個條目）",
     status_clear_render_cache_failed: "清除渲染快取失敗",
@@ -1607,17 +1606,19 @@ export const zhTW = {
     status_fake_stereo_scan_foldable: "假立體聲掃描：{n} 個 Take，{m} 個可折疊",
     status_fake_stereo_scan_folded: "假立體聲掃描：{n} 個 Take，{m} 個已折疊為單聲道",
     status_fake_stereo_scan_foldable_pending:
-        "假立體聲掃描：{n} 個 Take，{m} 個可折疊，{p} 個本次讀不到（下次開啟會自動重試）",
+        "假立體聲掃描：{n} 個 Take，{m} 個可折疊，{p} 個本次讀不到，下次開啟會自動重試",
     status_fake_stereo_scan_folded_pending:
-        "假立體聲掃描：{n} 個 Take，{m} 個已折疊為單聲道，{p} 個本次讀不到（下次開啟會自動重試）",
+        "假立體聲掃描：{n} 個 Take，{m} 個已折疊為單聲道，{p} 個本次讀不到，下次開啟會自動重試",
     status_channel_scan_folded: "已自動折疊 {n} 個音訊塊為單聲道",
-    status_channel_scan_pending: "，{n} 個素材本次讀不到，下次開啟會自動重試",
+    status_channel_scan_pending: "{n} 個素材本次讀不到，下次開啟會自動重試",
     status_fake_stereo_scan_nearest_hint: "；最接近假立體聲的一條差異為 {d}，可考慮放寬容差",
     status_fake_stereo_scan_no_source: "假立體聲掃描：{n} 個 Take 沒有音訊來源，無法判定",
     status_fake_stereo_scan_no_clips: "假立體聲掃描：專案裡沒有聲音塊",
-    status_fake_stereo_scan_range_unmatched: "假立體聲掃描：掃描範圍與專案對不上（專案共 {p} 個聲音塊）",
+    status_fake_stereo_scan_range_unmatched:
+        "假立體聲掃描：掃描範圍與專案對不上（專案共 {p} 個聲音塊）",
     status_fake_stereo_scan_no_takes: "假立體聲掃描：範圍裡的 {c} 個聲音塊沒有 Take 記錄",
-    status_fake_stereo_scan_overridden_suffix: "；其中 {n} 個原本由你設定了聲道模式，已依掃描結果覆蓋（可復原）",
+    status_fake_stereo_scan_overridden_suffix:
+        "；其中 {n} 個原本由你設定了聲道模式，已依掃描結果覆蓋（可復原）",
     status_fake_stereo_scan_nothing: "假立體聲掃描：沒有可判定的對象",
     status_take_channel_mode_rejected: "Take 聲道模式修改被拒絕",
 

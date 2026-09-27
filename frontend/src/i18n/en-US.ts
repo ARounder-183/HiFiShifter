@@ -660,7 +660,7 @@ export const enUS = {
     status_pick_output_canceled: "Pick output canceled",
     status_output_path_selected: "Output path selected",
     status_clear_waveform_cache_failed: "Clear waveform cache failed",
-    status_new_project: "New project",
+    status_new_project: "New project created",
     status_opening_project: "Opening project...",
     status_open_canceled: "Open canceled",
     status_open_failed: "Open project failed",
@@ -671,7 +671,7 @@ export const enUS = {
     status_save_as_failed: "Save As failed",
     status_project_saved: "Project saved",
     status_clips_created: "Clips created",
-    status_glue_done: "Glue done",
+    status_glue_done: "Glue completed",
     status_export_done: "Export completed",
     status_export_failed: "Export failed",
     status_export_separated_done: "Separated export completed",
@@ -811,7 +811,7 @@ export const enUS = {
         "Material whose left and right channels match can be folded to mono: identical sound, half the render time. A batch run becomes a single undo step.",
     clip_channel_import_dialog_title: "Import Channel Handling",
     clip_channel_import_dialog_desc:
-        'Fold "fake stereo" material — where both channels carry the same content — to mono on import: identical sound, half the render time.',
+        'Fold "fake stereo" material, where both channels carry the same content, to mono on import.',
     clip_channel_import_mode: "Automatic conversion",
     clip_channel_import_mode_smart: "Smart convert to mono",
     clip_channel_import_mode_always_mono: "Always convert to mono",
@@ -1772,7 +1772,7 @@ export const enUS = {
     render_cache_open_dir_failed: "Failed to open the cache folder",
     render_cache_stats_failed: "Failed to read render cache stats",
     status_render_cache_summary: "Reused {hits}/{total} clips on open",
-    status_render_cache_skipped_suffix: " · {n} clip(s) not persisted (re-rendered on every open)",
+    status_render_cache_skipped_suffix: "{n} clip(s) not persisted, re-rendered on every open",
     status_render_cache_saved_suffix: " (saved about {saved})",
     status_render_cache_cleared: "Render cache cleared ({n} entries)",
     status_clear_render_cache_failed: "Clear render cache failed",
@@ -1785,14 +1785,16 @@ export const enUS = {
     status_fake_stereo_scan_folded_pending:
         "Fake-stereo scan: {n} take(s), {m} folded to mono, {p} unreadable (retried on next open)",
     status_channel_scan_folded: "Folded {n} clip(s) to mono automatically",
-    status_channel_scan_pending: ", {n} source(s) unreadable — retried on next open",
+    status_channel_scan_pending: "{n} source(s) unreadable, retried on next open",
     status_fake_stereo_scan_nearest_hint:
         "; closest match differs by {d} — consider a looser tolerance",
     status_fake_stereo_scan_no_source: "Fake-stereo scan: {n} take(s) have no audio source",
     status_fake_stereo_scan_no_clips: "Fake-stereo scan: the project has no clips",
-    status_fake_stereo_scan_range_unmatched: "Fake-stereo scan: the scanned range matches no clip (the project has {p})",
+    status_fake_stereo_scan_range_unmatched:
+        "Fake-stereo scan: the scanned range matches no clip (the project has {p})",
     status_fake_stereo_scan_no_takes: "Fake-stereo scan: {c} clip(s) in range have no takes",
-    status_fake_stereo_scan_overridden_suffix: "; {n} of them kept a channel mode you set and were overridden by the scan (undoable)",
+    status_fake_stereo_scan_overridden_suffix:
+        "; {n} of them kept a channel mode you set and were overridden by the scan (undoable)",
     status_fake_stereo_scan_nothing: "Fake-stereo scan: nothing to decide",
     status_take_channel_mode_rejected: "Take channel mode rejected",
 

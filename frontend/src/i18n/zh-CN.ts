@@ -519,8 +519,8 @@ export const zhCN = {
     status_export_failed: "导出失败",
     status_export_separated_done: "分轨导出完成",
     status_export_separated_failed: "分轨导出失败",
-    status_clipboard_copy_failed: "复制失败：系统剪贴板正被占用，请重试。",
-    status_clipboard_cut_failed: "剪切失败：系统剪贴板正被占用，请重试。",
+    status_clipboard_copy_failed: "复制失败：系统剪贴板正被占用，请重试",
+    status_clipboard_cut_failed: "剪切失败：系统剪贴板正被占用，请重试",
     status_playing_original: "正在播放原始音频",
     status_play_original_failed: "播放原始音频失败",
     status_stopping_audio: "正在停止音频...",
@@ -651,8 +651,7 @@ export const zhCN = {
     ctx_scan_fake_stereo_hint:
         "左右声道内容一致的素材可折叠为单声道：听感不变，渲染耗时减半。整批只产生一个撤销步。",
     clip_channel_import_dialog_title: "导入声道处理",
-    clip_channel_import_dialog_desc:
-        "导入时把左右声道内容一致的“假立体声”素材折叠为单声道：听感不变，渲染耗时减半。",
+    clip_channel_import_dialog_desc: "导入时把左右声道内容一致的“假立体声”素材折叠为单声道。",
     clip_channel_import_mode: "自动转换",
     clip_channel_import_mode_smart: "智能转换为单声道",
     clip_channel_import_mode_always_mono: "全部转换为单声道",
@@ -1596,7 +1595,7 @@ export const zhCN = {
     render_cache_open_dir_failed: "打开缓存目录失败",
     render_cache_stats_failed: "读取渲染缓存统计失败",
     status_render_cache_summary: "本次打开复用 {hits}/{total} 个音频块",
-    status_render_cache_skipped_suffix: " · {n} 个片段未落盘（每次打开都会重新合成）",
+    status_render_cache_skipped_suffix: "{n} 个片段未落盘，每次打开都会重新合成",
     status_render_cache_saved_suffix: "（约省 {saved}）",
     status_render_cache_cleared: "已清理渲染缓存（{n} 个条目）",
     status_clear_render_cache_failed: "清除渲染缓存失败",
@@ -1605,17 +1604,19 @@ export const zhCN = {
     status_fake_stereo_scan_foldable: "假立体声扫描：{n} 个 Take，{m} 个可折叠",
     status_fake_stereo_scan_folded: "假立体声扫描：{n} 个 Take，{m} 个已折叠为单声道",
     status_fake_stereo_scan_foldable_pending:
-        "假立体声扫描：{n} 个 Take，{m} 个可折叠，{p} 个本次读不到（下次打开会自动重试）",
+        "假立体声扫描：{n} 个 Take，{m} 个可折叠，{p} 个本次读不到，下次打开会自动重试",
     status_fake_stereo_scan_folded_pending:
-        "假立体声扫描：{n} 个 Take，{m} 个已折叠为单声道，{p} 个本次读不到（下次打开会自动重试）",
+        "假立体声扫描：{n} 个 Take，{m} 个已折叠为单声道，{p} 个本次读不到，下次打开会自动重试",
     status_channel_scan_folded: "已自动折叠 {n} 个音频块为单声道",
-    status_channel_scan_pending: "，{n} 个素材本次读不到，下次打开会自动重试",
+    status_channel_scan_pending: "{n} 个素材本次读不到，下次打开会自动重试",
     status_fake_stereo_scan_nearest_hint: "；最接近假立体声的一条差异为 {d}，可考虑放宽容差",
     status_fake_stereo_scan_no_source: "假立体声扫描：{n} 个 Take 没有音频源，无法判定",
     status_fake_stereo_scan_no_clips: "假立体声扫描：工程里没有音频块",
-    status_fake_stereo_scan_range_unmatched: "假立体声扫描：扫描范围与工程对不上（工程共 {p} 个音频块）",
+    status_fake_stereo_scan_range_unmatched:
+        "假立体声扫描：扫描范围与工程对不上（工程共 {p} 个音频块）",
     status_fake_stereo_scan_no_takes: "假立体声扫描：范围里的 {c} 个音频块没有 Take 记录",
-    status_fake_stereo_scan_overridden_suffix: "；其中 {n} 个原本由你设置了声道模式，已按扫描结果覆盖（可撤销）",
+    status_fake_stereo_scan_overridden_suffix:
+        "；其中 {n} 个原本由你设置了声道模式，已按扫描结果覆盖（可撤销）",
     status_fake_stereo_scan_nothing: "假立体声扫描：没有可判定的对象",
     status_take_channel_mode_rejected: "Take 声道模式修改被拒绝",
 

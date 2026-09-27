@@ -525,7 +525,7 @@ export const jaJP = {
     status_pick_output_canceled: "出力先の選択がキャンセルされました",
     status_output_path_selected: "出力先が選択されました",
     status_clear_waveform_cache_failed: "波形キャッシュのクリアに失敗しました",
-    status_new_project: "新規プロジェクト",
+    status_new_project: "新規プロジェクトを作成しました",
     status_opening_project: "プロジェクトを開いています...",
     status_open_canceled: "プロジェクトを開くのがキャンセルされました",
     status_open_failed: "プロジェクトを開けませんでした",
@@ -542,9 +542,9 @@ export const jaJP = {
     status_export_separated_done: "トラック別エクスポート完了",
     status_export_separated_failed: "トラック別エクスポートに失敗しました",
     status_clipboard_copy_failed:
-        "コピーに失敗しました：システムクリップボードが使用中のため、もう一度お試しください。",
+        "コピーに失敗しました：システムクリップボードが使用中です。もう一度お試しください",
     status_clipboard_cut_failed:
-        "カットに失敗しました：システムクリップボードが使用中のため、もう一度お試しください。",
+        "カットに失敗しました：システムクリップボードが使用中です。もう一度お試しください",
     status_playing_original: "オリジナルを再生中",
     status_play_original_failed: "オリジナルの再生に失敗しました",
     status_stopping_audio: "オーディオを停止中...",
@@ -678,7 +678,7 @@ export const jaJP = {
         "左右の内容が同一の素材はモノラルに折りたたむと、聴感は変わらずレンダリング時間が半減します。一括処理は 1 回の元に戻す操作にまとまります。",
     clip_channel_import_dialog_title: "取り込み時のチャンネル処理",
     clip_channel_import_dialog_desc:
-        "取り込み時、左右チャンネルの内容が同一の「疑似ステレオ」素材をモノラルに折りたたみます。聴感は変わらず、レンダリング時間が半減します。",
+        "取り込み時、左右チャンネルの内容が同一の「疑似ステレオ」素材をモノラルに折りたたみます。",
     clip_channel_import_mode: "自動変換",
     clip_channel_import_mode_smart: "スマートにモノラルへ変換",
     clip_channel_import_mode_always_mono: "常にモノラルへ変換",
@@ -1647,31 +1647,33 @@ export const jaJP = {
     render_cache_open_dir_failed: "キャッシュフォルダーを開けませんでした",
     render_cache_stats_failed: "レンダーキャッシュの統計を読み込めませんでした",
     status_render_cache_summary: "今回の読み込みで {hits}/{total} 件を再利用",
-    status_render_cache_skipped_suffix: " · {n} 件が保存されず（開くたびに再合成）",
+    status_render_cache_skipped_suffix: "{n} 件が未保存（開くたびに再合成）",
     status_render_cache_saved_suffix: "（約 {saved} 短縮）",
     status_render_cache_cleared: "レンダーキャッシュを削除しました（{n} 件）",
     status_clear_render_cache_failed: "レンダーキャッシュの削除に失敗しました",
     status_clearing_render_cache: "レンダーキャッシュをクリア中...",
     status_fake_stereo_scan_rejected: "疑似ステレオのスキャンが拒否されました",
-    status_fake_stereo_scan_foldable:
-        "疑似ステレオスキャン：{n} テイク、{m} 件がモノラルに折りたたみ可能",
+    status_fake_stereo_scan_foldable: "疑似ステレオスキャン：{n} テイク中 {m} 件が折り畳み可能",
     status_fake_stereo_scan_folded:
-        "疑似ステレオスキャン：{n} テイク、{m} 件をモノラルに折りたたみました",
+        "疑似ステレオスキャン：{n} テイク中 {m} 件をモノラルに折り畳みました",
     status_fake_stereo_scan_foldable_pending:
-        "疑似ステレオのスキャン：{n} テイク中 {m} 件が折り畳み可能、{p} 件は今回読み取れませんでした（次回起動時に再試行します）",
+        "疑似ステレオスキャン：{n} テイク中 {m} 件が折り畳み可能、{p} 件は今回読み取れず（次回起動時に再試行）",
     status_fake_stereo_scan_folded_pending:
-        "疑似ステレオのスキャン：{n} テイク中 {m} 件をモノラルに折り畳みました、{p} 件は今回読み取れませんでした（次回起動時に再試行します）",
+        "疑似ステレオスキャン：{n} テイク中 {m} 件をモノラルに折り畳み、{p} 件は今回読み取れず（次回起動時に再試行）",
     status_channel_scan_folded: "{n} 件のクリップを自動でモノラルに折り畳みました",
-    status_channel_scan_pending:
-        "、{n} 件の素材を今回読み取れませんでした（次回起動時に再試行します）",
+    status_channel_scan_pending: "{n} 件の素材を今回読み取れず（次回起動時に再試行）",
     status_fake_stereo_scan_nearest_hint:
         "。最も近い素材の差は {d} です（許容値を緩めることを検討してください）",
-    status_fake_stereo_scan_no_source: "疑似ステレオのスキャン：{n} 件のテイクに音声ソースがありません",
-    status_fake_stereo_scan_no_clips: "疑似ステレオのスキャン：プロジェクトにクリップがありません",
-    status_fake_stereo_scan_range_unmatched: "疑似ステレオのスキャン：スキャン範囲がプロジェクトと一致しません（プロジェクトに {p} 件）",
-    status_fake_stereo_scan_no_takes: "疑似ステレオのスキャン：範囲内の {c} 件のクリップにテイクがありません",
-    status_fake_stereo_scan_overridden_suffix: "。うち {n} 件は設定済みのチャンネルモードをスキャン結果で上書きしました（元に戻せます）",
-    status_fake_stereo_scan_nothing: "疑似ステレオのスキャン：判定対象がありません",
+    status_fake_stereo_scan_no_source:
+        "疑似ステレオスキャン：{n} 件のテイクに音声ソースがありません",
+    status_fake_stereo_scan_no_clips: "疑似ステレオスキャン：プロジェクトにクリップがありません",
+    status_fake_stereo_scan_range_unmatched:
+        "疑似ステレオスキャン：スキャン範囲がプロジェクトと一致しません（プロジェクトに {p} 件）",
+    status_fake_stereo_scan_no_takes:
+        "疑似ステレオスキャン：範囲内の {c} 件のクリップにテイクがありません",
+    status_fake_stereo_scan_overridden_suffix:
+        "。うち {n} 件は設定済みのチャンネルモードをスキャン結果で上書きしました（元に戻せます）",
+    status_fake_stereo_scan_nothing: "疑似ステレオスキャン：判定対象がありません",
     status_take_channel_mode_rejected: "テイクのチャンネルモード変更が拒否されました",
 
     benchmark_title: "推論デバイスベンチマーク",

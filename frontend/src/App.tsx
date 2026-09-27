@@ -752,12 +752,7 @@ function AppInner() {
     }, []);
 
     const statusText = useMemo(
-        () =>
-            resolveStatusText(
-                status,
-                statusKey,
-                (key) => t(key as MessageKey) as string,
-            ),
+        () => resolveStatusText(status, statusKey, (key) => t(key as MessageKey) as string),
         [status, t],
     );
 
@@ -1443,25 +1438,32 @@ function AppInner() {
                         const hasHits = Number.isFinite(hits) && hits > 0 && total > 0;
                         const hasSkipped = Number.isFinite(skipped) && skipped > 0;
                         if (!hasHits && !hasSkipped) return;
-                        let text = hasHits
-                            ? tAny("status_render_cache_summary")
-                                  .replace("{hits}", String(hits))
-                                  .replace("{total}", String(total))
-                            : "";
-                        const savedMs = Number(payload.savedMs ?? 0);
-                        if (hasHits && Number.isFinite(savedMs) && savedMs >= 1000) {
-                            text += tAny("status_render_cache_saved_suffix").replace(
-                                "{saved}",
-                                formatApproxDuration(savedMs),
-                            );
+                        // 各段都是完整分句、自身不带前导分隔符，由这里统一用
+                        // " · " 连接。早先"未落盘"后缀自带前导 " · "，只有它、
+                        // 没有命中统计时，整条提示会以分隔符开头。
+                        const parts: string[] = [];
+                        if (hasHits) {
+                            let hitText = tAny("status_render_cache_summary")
+                                .replace("{hits}", String(hits))
+                                .replace("{total}", String(total));
+                            const savedMs = Number(payload.savedMs ?? 0);
+                            if (Number.isFinite(savedMs) && savedMs >= 1000) {
+                                hitText += tAny("status_render_cache_saved_suffix").replace(
+                                    "{saved}",
+                                    formatApproxDuration(savedMs),
+                                );
+                            }
+                            parts.push(hitText);
                         }
                         if (hasSkipped) {
-                            text += tAny("status_render_cache_skipped_suffix").replace(
-                                "{n}",
-                                String(skipped),
+                            parts.push(
+                                tAny("status_render_cache_skipped_suffix").replace(
+                                    "{n}",
+                                    String(skipped),
+                                ),
                             );
                         }
-                        showNotice(text);
+                        showNotice(parts.join(" · "));
                     },
                 );
                 if (disposed) {
@@ -1512,20 +1514,21 @@ function AppInner() {
                         // 一直显示旧的声道带数（直到用户做别的操作才收敛）。
                         if (folded > 0) void dispatch(fetchTimeline());
                         if (folded <= 0 && pending <= 0) return;
-                        let text = "";
+                        // 同上：各段完整成句、无前导标点，这里统一连接。
+                        // 早先 pending 句自带前导"，"，折叠数为 0 时就渲染出
+                        // 一个孤零零的"、2 个素材…"。
+                        const parts: string[] = [];
                         if (folded > 0) {
-                            text = tAny("status_channel_scan_folded").replace(
-                                "{n}",
-                                String(folded),
+                            parts.push(
+                                tAny("status_channel_scan_folded").replace("{n}", String(folded)),
                             );
                         }
                         if (pending > 0) {
-                            text += tAny("status_channel_scan_pending").replace(
-                                "{n}",
-                                String(pending),
+                            parts.push(
+                                tAny("status_channel_scan_pending").replace("{n}", String(pending)),
                             );
                         }
-                        showNotice(text, 20_000);
+                        showNotice(parts.join(" · "), 20_000);
                     },
                 );
                 if (disposed) {
@@ -4016,6 +4019,25 @@ function AppInner() {
                 className="h-6 bg-qt-window border-t border-qt-border px-1 select-none gap-2"
             >
                 <Flex align="center" gap="1" className="truncate min-w-0">
+                    {/* 排列规则：**长时效的提示在前，短时效的进度片在后**。
+                        绿色提示位（后台缓存统计 / 自动声道折叠）会挂十几秒，而
+                        紫色进度片（拉伸、波形分析、渲染…）只是几百毫秒的过客。
+                        若把进度片放在前面，它每出现/消失一次，后面所有片就整体
+                        横移一次 —— 用户视线里"提示在乱动"。把长时效的钉在最左，
+                        短的插在它右侧，左侧位置就永远稳定。 */}
+                    {noticeText ? (
+                        <span
+                            className="shrink-0 rounded px-1 py-0 text-xs font-medium"
+                            style={{
+                                background: "var(--green-3)",
+                                color: "var(--green-11)",
+                                fontSize: "11px",
+                                lineHeight: "16px",
+                            }}
+                        >
+                            {noticeText}
+                        </span>
+                    ) : null}
                     {stretching.active ? (
                         <span
                             className="shrink-0 rounded px-1 py-0 text-xs font-medium"
@@ -4058,19 +4080,6 @@ function AppInner() {
                             }}
                         >
                             {pitchAnalysisText}
-                        </span>
-                    ) : null}
-                    {noticeText ? (
-                        <span
-                            className="shrink-0 rounded px-1 py-0 text-xs font-medium"
-                            style={{
-                                background: "var(--green-3)",
-                                color: "var(--green-11)",
-                                fontSize: "11px",
-                                lineHeight: "16px",
-                            }}
-                        >
-                            {noticeText}
                         </span>
                     ) : null}
                     {/* 参数曲线取数提示：**独立订阅**外部 store，不参与本组件重渲染

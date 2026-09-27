@@ -19,9 +19,9 @@ const TEMPLATES: Record<string, string> = {
     status_fake_stereo_scan_foldable: "假立体声扫描：{n} 个 Take，{m} 个可折叠",
     status_fake_stereo_scan_folded: "假立体声扫描：{n} 个 Take，{m} 个已折叠为单声道",
     status_fake_stereo_scan_foldable_pending:
-        "假立体声扫描：{n} 个 Take，{m} 个可折叠，{p} 个本次读不到",
+        "假立体声扫描：{n} 个 Take，{m} 个可折叠，{p} 个本次读不到，下次打开会自动重试",
     status_fake_stereo_scan_folded_pending:
-        "假立体声扫描：{n} 个 Take，{m} 个已折叠为单声道，{p} 个本次读不到",
+        "假立体声扫描：{n} 个 Take，{m} 个已折叠为单声道，{p} 个本次读不到，下次打开会自动重试",
     status_fake_stereo_scan_nearest_hint: "；最接近的一条差异为 {d}，可考虑放宽容差",
     status_fake_stereo_scan_no_clips: "工程里没有音频块",
     status_fake_stereo_scan_range_unmatched: "扫描范围与工程对不上（工程共 {p} 个音频块）",
@@ -41,9 +41,7 @@ describe("resolveStatusText", () => {
     });
 
     it("fills the single-count template", () => {
-        expect(resolve("Waveform cache cleared (3 files)")).toBe(
-            "波形缓存已清空（3 个文件）",
-        );
+        expect(resolve("Waveform cache cleared (3 files)")).toBe("波形缓存已清空（3 个文件）");
     });
 
     it("keeps a suffix appended to a prefix-matched status", () => {
@@ -71,10 +69,10 @@ describe("resolveStatusText", () => {
             // "本次读不到"必须显性出现：那些 Take 会在下次打开时自动重试，
             // 与"单声道、无事可做"是两回事。
             expect(resolve("Fake-stereo scan: 5 take(s), 3 folded to mono, 2 unreadable")).toBe(
-                "假立体声扫描：5 个 Take，3 个已折叠为单声道，2 个本次读不到",
+                "假立体声扫描：5 个 Take，3 个已折叠为单声道，2 个本次读不到，下次打开会自动重试",
             );
             expect(resolve("Fake-stereo scan: 5 take(s), 3 foldable, 2 unreadable")).toBe(
-                "假立体声扫描：5 个 Take，3 个可折叠，2 个本次读不到",
+                "假立体声扫描：5 个 Take，3 个可折叠，2 个本次读不到，下次打开会自动重试",
             );
         });
 
@@ -149,8 +147,9 @@ describe("resolveStatusText", () => {
         it("reports how many user-set channel modes the scan overrode", () => {
             expect(
                 resolve("Fake-stereo scan: 5 take(s), 3 folded to mono, 2 setting(s) overridden"),
-            ).toBe("假立体声扫描：5 个 Take，3 个已折叠为单声道；其中 2 个原本由你设置了声道模式，已覆盖");
+            ).toBe(
+                "假立体声扫描：5 个 Take，3 个已折叠为单声道；其中 2 个原本由你设置了声道模式，已覆盖",
+            );
         });
-
     });
 });
