@@ -1686,6 +1686,134 @@ mod tests {
         );
     }
 
+    /// 生成一个**长**素材，供"长文件"用例使用。
+    ///
+    /// # 为什么要自己造，而且特意用非 `.wav` 扩展名
+    ///
+    /// - 仓库里没有长素材，而拼接 mp3 行不通：每段都自带声明时长的头，探出来的
+    ///   仍是第一段的时长（那样"长"是假的，测试会悄悄退化成空转）。
+    /// - 造 WAV 内容但**存成 `.bin`**：`.wav` 会走 hound 的按窗口 seek 快路径，
+    ///   那条路径本来就不受预算的位置限制，测不出我们要测的东西；换个扩展名后
+    ///   才会走 Symphonia 的容器路径，也就是真实长素材（mp3/flac/m4a…）走的路。
+    /// - RIFF 头里的 data 长度是**真实的**，所以探测出的总时长是准的。
+    ///
+    /// 返回 `(路径, 秒数, 采样率)`。
+    fn write_long_fake_stereo_wav(secs: usize, sample_rate: u32) -> Option<std::path::PathBuf> {
+        let dir = std::env::temp_dir().join("hifishifter_stereo_detect");
+        std::fs::create_dir_all(&dir).ok()?;
+        let path = dir.join(format!("long_fake_stereo_{secs}s_{sample_rate}.bin"));
+        if path.is_file() {
+            return Some(path);
+        }
+
+        let frames = secs * sample_rate as usize;
+        let mut data = Vec::with_capacity(frames * 4);
+        for i in 0..frames {
+            // 两个声道**逐样本相同** ⇒ 真正的假立体声，默认容差下必然判 FakeStereo。
+            let phase = (i as f32 / sample_rate as f32) * 2.0 * std::f32::consts::PI * 220.0;
+            let sample = (phase.sin() * 0.5 * i16::MAX as f32) as i16;
+            data.extend_from_slice(&sample.to_le_bytes());
+            data.extend_from_slice(&sample.to_le_bytes());
+        }
+
+        let mut out = Vec::with_capacity(44 + data.len());
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&((36 + data.len()) as u32).to_le_bytes());
+        out.extend_from_slice(b"WAVE");
+        out.extend_from_slice(b"fmt ");
+        out.extend_from_slice(&16u32.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        out.extend_from_slice(&2u16.to_le_bytes()); // 双声道
+        out.extend_from_slice(&sample_rate.to_le_bytes());
+        out.extend_from_slice(&(sample_rate * 4).to_le_bytes()); // byte rate
+        out.extend_from_slice(&4u16.to_le_bytes()); // block align
+        out.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(&data);
+        std::fs::write(&path, out).ok()?;
+        Some(path)
+    }
+
+    #[test]
+    fn a_long_container_folds_under_the_import_budget() {
+        // 用户报告的场景：拖入一个**很长的**素材，然后等了好几秒。
+        //
+        // 改动前，导入路径只有两条烂路：解到文件结尾（数秒等待），或在预算内丢
+        // 窗口 ⇒ 覆盖不完整 ⇒ 只敢下发 TrueStereo ⇒ 长素材永远折叠不了。
+        // 改动后 seek 采样让代价只随**窗口数**增长，于是同一份导入预算就够覆盖
+        // 全长 —— 这条测试把"更慢"与"漏判"两个方向一起钉住。
+        const SECS: usize = 90;
+        const SR: u32 = 22_050;
+        let Some(long) = write_long_fake_stereo_wav(SECS, SR) else {
+            eprintln!("[skip] 无法生成长素材 fixture");
+            return;
+        };
+        verdict_cache_clear();
+        let _cache_guard = verdict_cache_test_lock();
+
+        let Some(header) = crate::audio_utils::try_read_audio_header_only(&long) else {
+            eprintln!("[skip] 生成的长容器探测失败：{}", long.display());
+            let _ = std::fs::remove_file(&long);
+            return;
+        };
+        assert_eq!(header.channels, 2, "生成的素材必须是双声道");
+        let total_sec = header.total_frames as f64 / header.sample_rate.max(1) as f64;
+        assert!(
+            (total_sec - SECS as f64).abs() < 1.0,
+            "RIFF 头声明的时长必须真实（{total_sec}s ≈ {SECS}s），否则'长'是假的"
+        );
+
+        // 默认容差：逐样本相同的两声道 ⇒ 覆盖完整就必然判 FakeStereo。
+        let opts = DetectOptions {
+            container_budget_sec: IMPORT_CONTAINER_BUDGET_SEC,
+            ..Default::default()
+        };
+        assert!(
+            total_sec > opts.container_budget_sec * 2.0,
+            "素材必须显著长于导入预算，否则测不出'顺序路径够不着'"
+        );
+
+        let regions = [None];
+        let budget_frames =
+            ((opts.container_budget_sec * header.sample_rate as f64).round() as u64).max(1);
+
+        // ① seek 采样：代价只随窗口数增长 ⇒ 导入预算内覆盖 90 秒全长。
+        let by_seek = analyze_container_regions_by_seek(
+            &long,
+            &regions,
+            &opts,
+            header.total_frames,
+            header.sample_rate,
+            budget_frames,
+        )
+        .expect("长素材也必须能用 seek 采样");
+        assert_eq!(
+            by_seek[0].verdict,
+            ChannelVerdict::FakeStereo,
+            "seek 采样必须在导入预算内覆盖长素材全长"
+        );
+
+        // ② 对照：同样的预算下顺序路径够不到结尾，只能给出保守结论 —— 这正是
+        //    改动前长素材永远折叠不了的原因。
+        let sequential = verdicts_via_sequential_path(&long, &regions, &opts);
+        assert_eq!(
+            sequential[0].verdict,
+            ChannelVerdict::Unknown,
+            "顺序路径在同样的导入预算下够不到结尾（改动要解决的就是它）"
+        );
+
+        // ③ 生产入口（自动选路）必须真的走到 seek，而不是回落。
+        let production = analyze_other_container_regions(&long, &regions, &opts);
+        assert_eq!(
+            production[0].verdict,
+            ChannelVerdict::FakeStereo,
+            "生产入口必须为长素材选出 seek 路径并给出完整覆盖的结论"
+        );
+
+        let _ = std::fs::remove_file(&long);
+    }
+
     #[test]
     fn seek_path_is_abandoned_when_landing_off_target() {
         // 全有或全无闸门的直接体现：落点容差是「请求起点 + 一个窗口长」。这里
