@@ -10,8 +10,13 @@
 /** 把状态原文映射到 i18n 键；`undefined` 表示没有对应键。 */
 export type StatusKeyMap = Record<string, string | undefined>;
 
-/** 翻译函数：把键翻成当前语言的模板（含 `{n}` / `{m}` / `{p}` 占位符）。 */
-export type TranslateFn = (key: string) => string;
+/**
+ * 翻译函数：把键翻成当前语言的模板（含 `{n}` / `{m}` / `{p}` 占位符）。
+ *
+ * `count` 给出时按键选复数形态（词典里写作 `"单数|复数"`）。状态行里有相当
+ * 一部分是"数量 + 名词"，此前用字面 `(s)` 糊过去，会渲染出 `"1 clip(s)"`。
+ */
+export type TranslateFn = (key: string, count?: number) => string;
 
 /**
  * 解析状态行。
@@ -36,11 +41,11 @@ export function resolveStatusText(status: string, statusKey: StatusKeyMap, t: Tr
     }
     const noTakes = status.match(/^Fake-stereo scan: (\d+) clip\(s\) have no takes$/);
     if (noTakes) {
-        return t("status_fake_stereo_scan_no_takes").replace("{c}", noTakes[1] ?? "0");
+        return t("status_fake_stereo_scan_no_takes", Number(noTakes[1] ?? 0));
     }
     const noSource = status.match(/^Fake-stereo scan: (\d+) take\(s\) have no source$/);
     if (noSource) {
-        return t("status_fake_stereo_scan_no_source").replace("{n}", noSource[1] ?? "0");
+        return t("status_fake_stereo_scan_no_source", Number(noSource[1] ?? 0));
     }
     if (status === "Fake-stereo scan: nothing to decide") {
         return t("status_fake_stereo_scan_nothing");

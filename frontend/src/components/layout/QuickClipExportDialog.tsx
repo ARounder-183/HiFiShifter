@@ -16,7 +16,7 @@ interface QuickClipExportDialogProps {
 }
 
 export function QuickClipExportDialog({ open, clipIds, onOpenChange }: QuickClipExportDialogProps) {
-    const { t } = useI18n();
+    const { t, plural } = useI18n();
     const [outputDir, setOutputDir] = useState("");
     const [fileName, setFileName] = useState("");
     // 快捷导出不暴露编码参数：格式可选，参数全部沿用导出对话框的持久化设置。
@@ -130,7 +130,7 @@ export function QuickClipExportDialog({ open, clipIds, onOpenChange }: QuickClip
             open={open}
             onOpenChange={onOpenChange}
             title={t("quick_export_title")}
-            description={t("quick_export_description").replace("{n}", String(clipIds.length))}
+            description={plural("quick_export_description", clipIds.length)}
             size="md"
             actions={[
                 { id: "cancel", label: t("cancel"), onClick: () => onOpenChange(false) },

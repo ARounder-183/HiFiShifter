@@ -8,12 +8,35 @@ import {
     type PropsWithChildren,
 } from "react";
 import { messages, type Locale, type MessageKey } from "./messages";
+import {
+    formatNumber,
+    formatShortcutLabel,
+    formatTemplate,
+    formatUnit,
+    selectPluralForm,
+} from "./format";
 import { coreApi } from "../services/api/core";
 
 interface I18nContextValue {
     locale: Locale;
     setLocale: (locale: Locale) => void;
     t: (key: MessageKey) => string;
+    /** `{name}` 插值。取代调用点手写的 `.replace("{name}", …)`（全仓约 40 处）。 */
+    tVars: (key: MessageKey, vars: Record<string, string | number>) => string;
+    /**
+     * 复数形态。词典里用 `"clip|clips"` 写单复数，单形态表示该语言不区分复数。
+     *
+     * 选中形态后会把 `{count}` 回填为传入的数量 —— 因此带计数的复数文案
+     * **一律用 `{count}` 占位符**（不要用 `{n}` / `{c}` 等同义词，
+     * 否则会原样渲染出花括号）。
+     */
+    plural: (key: MessageKey, count: number) => string;
+    /** 把文案里的 `{modifier}` 换成当前平台的主修饰键（macOS `⌘`，其余 `Ctrl`）。 */
+    shortcut: (key: MessageKey) => string;
+    /** 按语系格式化数字。 */
+    number: (value: number, options?: Intl.NumberFormatOptions) => string;
+    /** 按语系格式化「数字 + 单位」，空格与符号由引擎决定。 */
+    unit: (value: number, unit: string, options?: Intl.NumberFormatOptions) => string;
 }
 
 const I18nContext = createContext<I18nContextValue | null>(null);
@@ -59,16 +82,21 @@ export function I18nProvider({ children }: PropsWithChildren) {
     }, [localeState]);
 
     const value = useMemo<I18nContextValue>(() => {
+        const dict = messages[localeState] as Record<MessageKey, string>;
+        const lookup = (key: MessageKey): string => dict[key] ?? messages["en-US"][key];
         return {
             locale: localeState,
             setLocale: (nextLocale: Locale) => {
                 setLocaleState(nextLocale);
                 localStorage.setItem(STORAGE_KEY, nextLocale);
             },
-            t: (key: MessageKey) => {
-                const localeMessages = messages[localeState] as Record<MessageKey, string>;
-                return localeMessages[key] ?? messages["en-US"][key];
-            },
+            t: lookup,
+            tVars: (key, vars) => formatTemplate(lookup(key), vars),
+            plural: (key, count) =>
+                formatTemplate(selectPluralForm(localeState, count, lookup(key)), { count }),
+            shortcut: (key) => formatShortcutLabel(lookup(key)),
+            number: (value, options) => formatNumber(localeState, value, options),
+            unit: (value, unit, options) => formatUnit(localeState, value, unit, options),
         };
     }, [localeState]);
 

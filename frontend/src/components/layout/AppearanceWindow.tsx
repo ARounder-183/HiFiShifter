@@ -491,7 +491,7 @@ async function emitThemeReverted() {
  * ═══════════════════════════════════════════════════════════ */
 
 export const AppearanceWindow: React.FC = () => {
-    const { t } = useI18n();
+    const { t, plural } = useI18n();
     const tAny = t as (key: string) => string;
     const theme = useAppTheme();
 
@@ -906,10 +906,7 @@ export const AppearanceWindow: React.FC = () => {
                     <div className="flex items-center gap-2 pt-1">
                         {modifiedColorCount > 0 && (
                             <span className="text-[10px] text-qt-highlight bg-qt-highlight/10 px-2 py-0.5 rounded font-semibold">
-                                {tAny("appearance_modified_count").replace(
-                                    "{count}",
-                                    String(modifiedColorCount),
-                                )}
+                                {plural("appearance_modified_count", modifiedColorCount)}
                             </span>
                         )}
                     </div>
@@ -1178,10 +1175,7 @@ export const AppearanceWindow: React.FC = () => {
                                         {tAny("appearance_tab_colors")}
                                     </span>
                                     <span className="text-[10px] text-qt-text-muted">
-                                        {tAny("appearance_modified_count").replace(
-                                            "{count}",
-                                            String(modifiedColorCount),
-                                        )}
+                                        {plural("appearance_modified_count", modifiedColorCount)}
                                     </span>
                                 </div>
 

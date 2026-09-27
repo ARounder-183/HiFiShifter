@@ -176,7 +176,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     loopNewClips,
     onLoopNewClipsChange,
 }) => {
-    const { t, setLocale } = useI18n();
+    const { t, setLocale, plural } = useI18n();
     const tAny = t as (key: string) => string;
     const dispatch = useAppDispatch();
     // 只选取本组件实际消费的字段子集并以 shallowEqual 比较：播放期间
@@ -1409,9 +1409,9 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                 {tAny("import_dialog_title")}
                             </div>
                             <div className="mt-1 text-xs text-qt-text-muted">
-                                {(tAny("import_files_selected") as string).replace(
-                                    "{count}",
-                                    String(menuImportMode.audioPaths.length),
+                                {plural(
+                                    "import_files_selected",
+                                    menuImportMode.audioPaths.length,
                                 )}
                             </div>
                         </div>

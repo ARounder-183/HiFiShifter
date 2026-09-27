@@ -24,7 +24,7 @@ export interface NotebookToolbarProps {
 }
 
 export function NotebookToolbar({ editor, handlers, slashCommands }: NotebookToolbarProps) {
-    const { t } = useI18n();
+    const { t, shortcut } = useI18n();
     const slash = useNotebookSlashMenu(editor, slashCommands, handlers);
     /** 链接编辑浮层的草稿；null = 收起。替代 window.prompt：Tauri/WKWebView 下脚本对话框静默返回 null（见 ClipContextMenu 同款理由）。 */
     const [linkDraft, setLinkDraft] = useState<string | null>(null);
@@ -86,14 +86,14 @@ export function NotebookToolbar({ editor, handlers, slashCommands }: NotebookToo
                 <ToolbarButton
                     label="B"
                     bold
-                    tooltip={t("notebook_toolbar_bold")}
+                    tooltip={shortcut("notebook_toolbar_bold")}
                     active={editor.isActive("bold")}
                     onClick={() => editor.chain().focus().toggleBold().run()}
                 />
                 <ToolbarButton
                     label="I"
                     italic
-                    tooltip={t("notebook_toolbar_italic")}
+                    tooltip={shortcut("notebook_toolbar_italic")}
                     active={editor.isActive("italic")}
                     onClick={() => editor.chain().focus().toggleItalic().run()}
                 />
@@ -152,7 +152,7 @@ export function NotebookToolbar({ editor, handlers, slashCommands }: NotebookToo
             <div className="hs-notebook-toolbar-group">
                 <ToolbarButton
                     label="🔗"
-                    tooltip={t("notebook_toolbar_link")}
+                    tooltip={shortcut("notebook_toolbar_link")}
                     active={editor.isActive("link") || linkDraft !== null}
                     onClick={() => setLinkDraft(String(editor.getAttributes("link").href ?? ""))}
                 />

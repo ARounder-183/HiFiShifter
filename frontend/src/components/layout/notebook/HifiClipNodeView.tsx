@@ -45,7 +45,7 @@ interface ParamPreview {
 
 export function HifiClipNodeView(props: NodeViewProps) {
     const { node, updateAttributes, deleteNode, selected, editor } = props;
-    const { t } = useI18n();
+    const { t, plural } = useI18n();
     /** 动态键取文案（`t` 只接受字面量键）；查不到时 i18n 会回落，故这里只放宽类型。 */
     const tAny = t as unknown as (key: string) => string;
     const dispatch = useAppDispatch();
@@ -289,18 +289,18 @@ export function HifiClipNodeView(props: NodeViewProps) {
                         {attrs.param ? <span>{attrs.param}</span> : null}
                         {typeof attrs.frameCount === "number" ? (
                             <span>
-                                {attrs.frameCount} {t("notebook_clip_unit_frames")}
+                                {attrs.frameCount} {plural("notebook_clip_unit_frames", attrs.frameCount)}
                             </span>
                         ) : null}
                     </>
                 ) : (
                     <>
                         <span>
-                            {attrs.clipCount} {t("notebook_clip_unit_clips")}
+                            {attrs.clipCount} {plural("notebook_clip_unit_clips", attrs.clipCount)}
                         </span>
                         {attrs.trackCount > 1 ? (
                             <span>
-                                {attrs.trackCount} {t("notebook_clip_unit_tracks")}
+                                {attrs.trackCount} {plural("notebook_clip_unit_tracks", attrs.trackCount)}
                             </span>
                         ) : null}
                         <span>{formatClipDuration(attrs.durationSec)}</span>

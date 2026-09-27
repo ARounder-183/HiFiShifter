@@ -488,7 +488,7 @@ function formatApproxDuration(ms: number): string {
 
 function AppInner() {
     const dispatch = useAppDispatch();
-    const { t } = useI18n();
+    const { t, plural } = useI18n();
     const tAny = t as (key: string) => string;
     const pitchAnalysis = usePitchAnalysis();
 
@@ -754,8 +754,13 @@ function AppInner() {
     }, []);
 
     const statusText = useMemo(
-        () => resolveStatusText(status, statusKey, (key) => t(key as MessageKey) as string),
-        [status, t],
+        () =>
+            resolveStatusText(status, statusKey, (key, count) =>
+                count === undefined
+                    ? (t(key as MessageKey) as string)
+                    : plural(key as MessageKey, count),
+            ),
+        [status, t, plural],
     );
 
     // 监听后端 clip_pitch_data 事件，将 per-clip MIDI 曲线存入 store
@@ -1525,13 +1530,13 @@ function AppInner() {
         // 各段完整成句、无前导标点，这里统一连接。
         const parts: string[] = [];
         if (folded > 0) {
-            parts.push(tAny("status_channel_scan_folded").replace("{n}", String(folded)));
+            parts.push(plural("status_channel_scan_folded", folded));
         }
         if (pending > 0) {
-            parts.push(tAny("status_channel_scan_pending").replace("{n}", String(pending)));
+            parts.push(plural("status_channel_scan_pending", pending));
         }
         showNotice(parts.join(" · "), 20_000);
-    }, [dispatch, showNotice, tAny]);
+    }, [dispatch, showNotice, plural]);
 
     useEffect(() => {
         let disposed = false;
