@@ -40,6 +40,8 @@ export const zhTW = {
     export_dialog_output_dir: "輸出資料夾",
     export_dialog_project_file_name: "輸出檔案名稱",
     export_dialog_browse: "瀏覽",
+    export_dialog_example_path: "匯出路徑範例：{path}",
+    export_dialog_open_folder: "開啟資料夾",
     export_dialog_name_pattern: "分軌命名格式",
     export_pattern_placeholders: "佔位符：",
     import_files_selected: "已選擇 {count} 個檔案",
@@ -598,6 +600,7 @@ export const zhTW = {
     menu_export_diagnostics: "匯出診斷資訊...",
     menu_open_log_folder_failed: "無法開啟日誌資料夾",
     menu_export_diagnostics_failed: "匯出診斷資訊失敗",
+    menu_export_diagnostics_running: "正在匯出診斷資訊。包含基準測試，可能需要 20–60 秒，請稍候...",
     menu_about: "關於 HiFiShifter",
     about_intro:
         "HiFiShifter 是一款圖形化人聲編輯與合成工具。支援多軌道音訊塊處理，以軌道組為單位使用多種聲碼器完成人聲修音與人力調參，實現人力 VOCALOID 製作的拼調一體化。",

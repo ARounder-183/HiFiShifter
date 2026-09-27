@@ -179,6 +179,8 @@ export const enUS = {
     export_dialog_sample_rate: "Sample Rate",
     export_dialog_bit_depth: "Bit Depth",
     export_dialog_browse: "Browse",
+    export_dialog_example_path: "Example output path: {path}",
+    export_dialog_open_folder: "Open Folder",
     export_dialog_name_pattern: "Track Name Pattern",
     export_pattern_placeholders: "Placeholders:",
     import_files_selected: "{count} file(s) selected",
@@ -756,6 +758,8 @@ export const enUS = {
     menu_export_diagnostics: "Export Diagnostics...",
     menu_open_log_folder_failed: "Could not open the log folder",
     menu_export_diagnostics_failed: "Failed to export diagnostics",
+    menu_export_diagnostics_running:
+        "Exporting diagnostics. This includes a benchmark and may take 20–60 seconds, please wait...",
     menu_about: "About HiFiShifter",
     about_intro:
         "HiFiShifter is a graphical vocal editing and synthesis tool. It supports multi-track audio clip processing and uses various vocoders to achieve pitch correction and parameter adjustment for human voice, integrating splicing and tuning for human VOCALOID production.",

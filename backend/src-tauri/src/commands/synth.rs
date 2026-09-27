@@ -980,6 +980,10 @@ pub(super) fn export_audio_advanced(
                         "ok": true,
                         "mode": "project",
                         "path": out_path.display().to_string(),
+                        "output_dir": out_path
+                            .parent()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_default(),
                         "skipped": true,
                     });
                 }
@@ -1046,6 +1050,10 @@ pub(super) fn export_audio_advanced(
                         "ok": true,
                         "mode": "project",
                         "path": out_path.display().to_string(),
+                        "output_dir": out_path
+                            .parent()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_default(),
                         "format": output_spec.format.as_name(),
                         "sample_rate": result.sample_rate,
                         "num_samples": num_samples,
@@ -1623,6 +1631,7 @@ pub(super) fn quick_export_selected_clips(
             serde_json::json!({
                 "ok": true,
                 "path": out_path.display().to_string(),
+                "output_dir": out_path.parent().map(|p| p.display().to_string()).unwrap_or_default(),
                 "format": output_spec.format.as_name(),
                 "sample_rate": result.sample_rate,
                 "num_samples": num_samples,
@@ -1932,19 +1941,51 @@ fn normalize_export_bit_depth(bit_depth: u32) -> u32 {
     }
 }
 
+/// 这里先把模板里「不构成完整两字符指示符的 `%`」转义成 `%%`，保证后续 `format`
+/// 永远不会 panic：合法日期通配符（如 `%Y%m%d`）保持原样，半截的 `%` 当作字面量。
+fn sanitize_time_format(template: &str) -> String {
+    // 保留的日期指示符：与 `chrono::format::strftime` 兼容的常用两字符集。
+    const SPECIFIERS: &[char] = &[
+        'a', 'A', 'b', 'B', 'c', 'C', 'd', 'D', 'e', 'f', 'F', 'g', 'G', 'h', 'H', 'I', 'j', 'k',
+        'l', 'm', 'M', 'n', 'p', 'P', 'r', 'R', 's', 'S', 't', 'T', 'u', 'U', 'V', 'w', 'W', 'x',
+        'X', 'y', 'Y', 'z', 'Z', '%',
+    ];
+    let mut out = String::with_capacity(template.len());
+    let chars: Vec<char> = template.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '%' {
+            // 末尾单独的 `%`，或 `%` 后不是已知指示符 → 转义，避免 panic。
+            let next = chars.get(i + 1).copied();
+            if next == Some('%') {
+                out.push('%');
+                out.push('%');
+                i += 2;
+                continue;
+            }
+            if next.map(|n| SPECIFIERS.contains(&n)).unwrap_or(false) {
+                out.push('%');
+                out.push(next.unwrap());
+                i += 2;
+                continue;
+            }
+            // 半截通配符：当作字面量 `%` 转义。
+            out.push_str("%%");
+            i += 1;
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
 fn try_apply_time_format(template: &str, time: chrono::DateTime<Local>) -> Result<String, String> {
-    let direct = std::panic::catch_unwind(|| time.format(template).to_string());
-    if let Ok(value) = direct {
-        return Ok(value);
-    }
-
-    let escaped = template.replace('%', "%%");
-    let escaped_try = std::panic::catch_unwind(|| time.format(&escaped).to_string());
-    if let Ok(value) = escaped_try {
-        return Ok(value);
-    }
-
-    Err("export_invalid_time_format".to_string())
+    let safe = sanitize_time_format(template);
+    // 经过 sanitize 后不再 panic，直接格式化即可。
+    let value = time.format(&safe).to_string();
+    Ok(value)
 }
 
 fn resolve_project_folder(state: &AppState) -> PathBuf {

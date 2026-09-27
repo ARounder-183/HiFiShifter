@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { Flex, DropdownMenu } from "@radix-ui/themes";
+import { Dialog, DropdownMenu, Flex, Spinner, Text } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { shallowEqual } from "react-redux";
@@ -193,6 +193,9 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     const [autoBackupDialogOpen, setAutoBackupDialogOpen] = useState(false);
     const [recordingDialogOpen, setRecordingDialogOpen] = useState(false);
     const [benchmarkDialogOpen, setBenchmarkDialogOpen] = useState(false);
+    // 导出诊断信息（含基准测试，耗时较长）进行中：菜单项禁用 + 模态提示，
+    // 避免用户以为点击没生效而反复触发。
+    const [diagnosticsExporting, setDiagnosticsExporting] = useState(false);
     const [aboutDialogOpen, setAboutDialogOpen] = useState(false);
     const [renderCacheDialogOpen, setRenderCacheDialogOpen] = useState(false);
     const [channelImportDialogOpen, setChannelImportDialogOpen] = useState(false);
@@ -473,6 +476,30 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     const handleImportMidiFromMenu = useCallback(() => {
         onImportMidiFromMenu();
     }, [onImportMidiFromMenu]);
+
+    /**
+     * 导出诊断信息：先弹原生保存对话框选路径，再在后台打包并跑基准测试（较慢，
+     * 约 20–60 秒）。期间用模态提示「仍在进行」并禁用菜单项，避免用户误以为点击
+     * 没有反应而反复触发。
+     */
+    const handleExportDiagnostics = useCallback(async () => {
+        const { pickDiagnosticsOutputPath, exportDiagnostics } = await import(
+            "../../services/api/diagnostics"
+        );
+        try {
+            const pick = await pickDiagnosticsOutputPath();
+            if (!pick?.ok || !pick.path) return; // 用户取消
+            setDiagnosticsExporting(true);
+            const res = await exportDiagnostics(pick.path);
+            if (!res.ok) {
+                window.alert(res.error || tAny("menu_export_diagnostics_failed"));
+            }
+        } catch (e) {
+            window.alert(String(e));
+        } finally {
+            setDiagnosticsExporting(false);
+        }
+    }, [tAny]);
 
     // 快捷键「导入媒体文件」→ 复用文件菜单的导入流程（多文件/多音轨选择）。
     useEffect(() => {
@@ -1258,22 +1285,8 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         {tAny("menu_open_log_folder")}
                     </DropdownMenu.Item>
                     <DropdownMenu.Item
-                        onSelect={async () => {
-                            const { pickDiagnosticsOutputPath, exportDiagnostics } =
-                                await import("../../services/api/diagnostics");
-                            try {
-                                const pick = await pickDiagnosticsOutputPath();
-                                if (!pick?.ok || !pick.path) return; // 用户取消
-                                const res = await exportDiagnostics(pick.path);
-                                if (!res.ok) {
-                                    window.alert(
-                                        res.error || tAny("menu_export_diagnostics_failed"),
-                                    );
-                                }
-                            } catch (e) {
-                                window.alert(String(e));
-                            }
-                        }}
+                        disabled={diagnosticsExporting}
+                        onSelect={() => void handleExportDiagnostics()}
                     >
                         {tAny("menu_export_diagnostics")}
                     </DropdownMenu.Item>
@@ -1357,6 +1370,26 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
             {/* Inference device benchmark */}
             <BenchmarkDialog open={benchmarkDialogOpen} onOpenChange={setBenchmarkDialogOpen} />
+
+            {/* 导出诊断信息进行中：含基准测试（约 20–60 秒），给出明确的进行中提示。
+                不可中断（后端没有取消通道），因此屏蔽 Esc / 点击遮罩关闭。 */}
+            <Dialog.Root open={diagnosticsExporting} onOpenChange={() => {}}>
+                <Dialog.Content
+                    style={{ maxWidth: 440 }}
+                    aria-describedby={undefined}
+                    onEscapeKeyDown={(event) => event.preventDefault()}
+                    onPointerDownOutside={(event) => event.preventDefault()}
+                    onKeyDown={(event) => event.stopPropagation()}
+                >
+                    <Dialog.Title>{tAny("menu_export_diagnostics")}</Dialog.Title>
+                    <Flex align="center" gap="3" mt="3">
+                        <Spinner size="2" />
+                        <Text size="2" color="gray">
+                            {tAny("menu_export_diagnostics_running")}
+                        </Text>
+                    </Flex>
+                </Dialog.Content>
+            </Dialog.Root>
 
             {/* 关于对话框：简介 + 版本 + Commit（可点击跳转源码快照）+ 仓库链接 */}
             <AboutDialog open={aboutDialogOpen} onOpenChange={setAboutDialogOpen} />

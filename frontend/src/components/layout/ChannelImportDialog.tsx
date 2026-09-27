@@ -116,7 +116,15 @@ export function ChannelImportDialog({ open, onOpenChange }: ChannelImportDialogP
         event.preventDefault();
         const step = isModifierActive(paramFineAdjustKb, event.nativeEvent) ? fine : coarse;
         const dir = event.deltaY < 0 ? 1 : -1;
-        const next = Math.min(max, Math.max(min, current + dir * step));
+        // 以步进量的最小精度四舍五入，规避浮点累加误差（如 0.25 + 0.05 变成
+        // 0.29999999999999993），避免输入框显示 0.39999999999999997 之类的值。
+        const decimals = Math.max(
+            (String(coarse).split(".")[1] || "").length,
+            (String(fine).split(".")[1] || "").length,
+        );
+        const factor = Math.pow(10, decimals);
+        const raw = current + dir * step;
+        const next = Math.min(max, Math.max(min, Math.round(raw * factor) / factor));
         if (next !== current) apply(next);
     }
 
@@ -147,9 +155,7 @@ export function ChannelImportDialog({ open, onOpenChange }: ChannelImportDialogP
                 onKeyDown={(event) => event.stopPropagation()}
             >
                 <Dialog.Title>{tAny("clip_channel_import_dialog_title")}</Dialog.Title>
-                <Dialog.Description>
-                    {tAny("clip_channel_import_dialog_desc")}
-                </Dialog.Description>
+                <Dialog.Description>{tAny("clip_channel_import_dialog_desc")}</Dialog.Description>
 
                 <Flex direction="column" gap="3" mt="3" ref={attachWheelGuard}>
                     <Separator size="4" />
@@ -193,9 +199,7 @@ export function ChannelImportDialog({ open, onOpenChange }: ChannelImportDialogP
                             <Text size="2">{tAny("clip_channel_import_target_mode")}</Text>
                             <Select.Root
                                 value={String(draft.monoTargetMode)}
-                                onValueChange={(value) =>
-                                    patch({ monoTargetMode: Number(value) })
-                                }
+                                onValueChange={(value) => patch({ monoTargetMode: Number(value) })}
                             >
                                 <Select.Trigger
                                     style={{ minWidth: 220 }}
@@ -310,14 +314,8 @@ export function ChannelImportDialog({ open, onOpenChange }: ChannelImportDialogP
                                         patch({ windowCount: Number(event.target.value) })
                                     }
                                     onWheel={(event) =>
-                                        stepNumber(
-                                            event,
-                                            draft.windowCount,
-                                            1,
-                                            1,
-                                            0,
-                                            256,
-                                            (next) => patch({ windowCount: next }),
+                                        stepNumber(event, draft.windowCount, 1, 1, 0, 256, (next) =>
+                                            patch({ windowCount: next }),
                                         )
                                     }
                                 />

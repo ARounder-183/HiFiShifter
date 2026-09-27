@@ -211,6 +211,12 @@ export const coreApi = {
     /** 在系统文件管理器中打开渲染缓存目录。 */
     openRenderCacheDir: () =>
         invoke<{ ok: boolean; path?: string; error?: string }>("open_render_cache_dir"),
+    /** 在系统文件管理器中定位导出产物：选中所有已渲染文件（无文件时打开目标文件夹）。 */
+    revealExportPaths: (paths: string[]) =>
+        invoke<{ ok: boolean; count?: number; path?: string; error?: string }>(
+            "reveal_export_paths",
+            paths,
+        ),
 
     // Model / processing
     loadDefaultModel: () => invoke<ModelConfigResult>("load_default_model"),
@@ -257,6 +263,8 @@ export const coreApi = {
             count?: number;
             cancelled?: boolean;
             error?: string;
+            /** 分轨导出：每个目标的产物（path / ok / error 等）。 */
+            tracks?: Array<{ path?: string; ok?: boolean; error?: string; name?: string }>;
         }>("export_audio_advanced", request),
 
     cancelExportAudio: () => invoke<{ ok: boolean; active?: boolean }>("cancel_export_audio"),

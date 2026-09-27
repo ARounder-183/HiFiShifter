@@ -39,6 +39,8 @@ export const koKR = {
     export_dialog_output_dir: "출력 폴더",
     export_dialog_project_file_name: "출력 파일 이름",
     export_dialog_browse: "찾아보기",
+    export_dialog_example_path: "출력 경로 예시: {path}",
+    export_dialog_open_folder: "폴더 열기",
     export_dialog_name_pattern: "분리 트랙 이름 패턴",
     export_pattern_placeholders: "플레이스홀더:",
     import_files_selected: "{count}개 파일 선택됨",
@@ -693,6 +695,8 @@ export const koKR = {
     menu_export_diagnostics: "진단 정보 내보내기...",
     menu_open_log_folder_failed: "로그 폴더를 열 수 없습니다",
     menu_export_diagnostics_failed: "진단 정보 내보내기 실패",
+    menu_export_diagnostics_running:
+        "진단 정보를 내보내는 중. 벤치마크가 포함되어 20~60초 정도 걸릴 수 있습니다. 잠시만 기다려 주세요...",
     menu_about: "HiFiShifter 정보",
     about_intro:
         "HiFiShifter는 그래픽 방식의 보컬 편집 및 합성 도구입니다. 멀티트랙 오디오 클립 처리를 지원하며 여러 보코더로 보컬 피치 보정과 파라미터 조정을 수행해 사람 VOCALOID 제작을 위한 편집과 튜닝을 하나로 통합합니다.",

@@ -733,6 +733,9 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
         case "open_render_cache_dir":
             return {};
 
+        case "reveal_export_paths":
+            return { paths: args[0] };
+
         // ── 记事本（附件 / 剪贴板暂存 / 导出）──
         case "notebook_put_asset":
             return {
@@ -774,7 +777,10 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
             };
 
         case "export_diagnostics":
-            return { outputPath: args[0] };
+            return {
+                outputPath: args[0],
+                ...(args[1] !== undefined ? { frontendSettings: args[1] } : {}),
+            };
 
         case "export_layout_json":
             return { json: args[0] };

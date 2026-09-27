@@ -738,6 +738,7 @@ pub fn run() {
             commands::get_render_cache_stats,
             commands::clear_render_cache,
             commands::open_render_cache_dir,
+            commands::reveal_export_paths,
             commands::get_processor_params,
             commands::get_midi_tracks,
             commands::read_midi_clipboard_to_memory,

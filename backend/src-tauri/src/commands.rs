@@ -1747,10 +1747,14 @@ pub fn pick_diagnostics_output_path() -> serde_json::Value {
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub async fn export_diagnostics(app: tauri::AppHandle, output_path: String) -> serde_json::Value {
+pub async fn export_diagnostics(
+    app: tauri::AppHandle,
+    output_path: String,
+    frontend_settings: Option<serde_json::Value>,
+) -> serde_json::Value {
     match tauri::async_runtime::spawn_blocking(move || {
         let state: State<'_, AppState> = app.state();
-        diagnostics::export_diagnostics(state, output_path)
+        diagnostics::export_diagnostics(state, output_path, frontend_settings)
     })
     .await
     {
@@ -1984,6 +1988,12 @@ pub async fn clear_render_cache(
 #[tauri::command(rename_all = "camelCase")]
 pub fn open_render_cache_dir(app: tauri::AppHandle) -> serde_json::Value {
     cache::open_render_cache_dir(app)
+}
+
+/// 在系统文件管理器中定位导出音频的产物（选中所有已渲染文件；无文件时打开目标文件夹）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn reveal_export_paths(app: tauri::AppHandle, paths: Vec<String>) -> serde_json::Value {
+    cache::reveal_export_paths(app, paths)
 }
 
 // ===================== processor_caps =====================

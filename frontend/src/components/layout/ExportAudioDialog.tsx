@@ -3,7 +3,7 @@
  * 负责收集导出模式、时间范围、输出路径与分轨命名/目标选择，并调用后端统一导出命令。
  */
 
-import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import {
     Button,
     Dialog,
@@ -77,6 +77,32 @@ interface TargetGroup {
 
 function normalizePathKey(input: string) {
     return input.trim().replace(/\\/g, "/").replace(/\/+/g, "/").toLowerCase();
+}
+
+/** 取文件路径的父目录（兼容 Windows `\` 与 POSIX `/`）；无目录分隔符时返回空串。 */
+function parentDirOfPath(filePath: string): string {
+    const trimmed = filePath.replace(/[\\/]+$/, "");
+    const idx = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
+    return idx > 0 ? trimmed.slice(0, idx) : "";
+}
+
+/** 从导出结果收集实际写出的产物路径：分轨模式为多个文件，工程模式为单个文件。 */
+function collectExportPaths(result: {
+    path?: string;
+    tracks?: Array<{ path?: string; ok?: boolean }>;
+}): string[] {
+    const paths: string[] = [];
+    if (Array.isArray(result.tracks)) {
+        for (const track of result.tracks) {
+            // 跳过被跳过 / 写入失败的目标（ok:false），它们没有可用产物。
+            if (track?.ok === false) continue;
+            if (typeof track?.path === "string" && track.path) paths.push(track.path);
+        }
+    }
+    if (typeof result.path === "string" && result.path && !paths.includes(result.path)) {
+        paths.push(result.path);
+    }
+    return paths;
 }
 
 function buildTargetGroups(
@@ -255,6 +281,10 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
     }>({ active: false, mode: null, progress: null, current: null, total: null });
     const [displayProgress, setDisplayProgress] = useState(0);
     const [keepProgressVisible, setKeepProgressVisible] = useState(false);
+    const [lastOutputDir, setLastOutputDir] = useState("");
+    // 上次成功导出产生的文件路径（分轨为多个）；用于「打开文件夹」时一并选中。
+    const [lastOutputPaths, setLastOutputPaths] = useState<string[]>([]);
+    const [examplePath, setExamplePath] = useState("");
     const [awaitingConflictDecision, setAwaitingConflictDecision] = useState(false);
     const [activeInputKey, setActiveInputKey] = useState<
         | "projectOutputDir"
@@ -350,6 +380,9 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
         setDisplayProgress(0);
         setKeepProgressVisible(false);
         setAwaitingConflictDecision(false);
+        setLastOutputDir("");
+        setLastOutputPaths([]);
+        setExamplePath("");
 
         const defaultSelected = targetGroups.flatMap((group) => {
             return group.options
@@ -650,7 +683,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
     }
 
     /** 组装完整编码参数包（与后端 crate::encode::OutputSpec 对应）。 */
-    function buildEncoderSpec(): ExportEncoderSpec {
+    const buildEncoderSpec = useCallback((): ExportEncoderSpec => {
         return {
             format,
             channelMode,
@@ -670,7 +703,133 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
             },
             flac: { bitDepth: flacBitDepth, compressionLevel: flacLevel },
         };
-    }
+    }, [
+        format,
+        channelMode,
+        dither,
+        wavBitDepth,
+        mp3Mode,
+        mp3Bitrate,
+        mp3Quality,
+        mp3Tags,
+        flacBitDepth,
+        flacLevel,
+    ]);
+
+    /** 组装导出请求（同时用于冲突预检与「导出路径示例」预览）。 */
+    const buildExportRequest = useCallback((): AdvancedExportRequest | null => {
+        const range =
+            rangeKind === "all"
+                ? { kind: "all" as const }
+                : (() => {
+                      const startSec = Number(customStartSec);
+                      const endSec = Number(customEndSec);
+                      if (
+                          !Number.isFinite(startSec) ||
+                          !Number.isFinite(endSec) ||
+                          endSec <= startSec
+                      ) {
+                          return null;
+                      }
+                      return {
+                          kind: "custom" as const,
+                          startSec: Math.max(0, startSec),
+                          endSec: Math.max(0, endSec),
+                      };
+                  })();
+        if (!range) return null;
+
+        const resolvedSampleRate = Number(sampleRate);
+        if (!Number.isFinite(resolvedSampleRate) || resolvedSampleRate <= 0) return null;
+
+        const encoder = buildEncoderSpec();
+
+        if (mode === "project") {
+            const outputDir = projectOutputDir.trim();
+            const fileName = projectFileName.trim();
+            if (!outputDir || !fileName) return null;
+            return {
+                mode: "project",
+                range,
+                projectOutputDir: outputDir,
+                projectFileName: fileName,
+                sampleRate: Math.round(resolvedSampleRate),
+                format,
+                encoder,
+            };
+        }
+
+        const outputDir = separatedOutputDir.trim();
+        if (!outputDir) return null;
+        const selectedTargets = allTargets
+            .filter((target) => selectedTargetIds.includes(target.id))
+            .map((target) => ({
+                kind: target.kind,
+                trackId: target.trackId,
+            }));
+        if (selectedTargets.length === 0) return null;
+        return {
+            mode: "separated",
+            range,
+            separatedOutputDir: outputDir,
+            separatedNamePattern: separatedNamePattern.trim() || "<ExportIndex>_<TrackName>.wav",
+            separatedTargets: selectedTargets,
+            sampleRate: Math.round(resolvedSampleRate),
+            format,
+            encoder,
+        };
+    }, [
+        rangeKind,
+        customStartSec,
+        customEndSec,
+        sampleRate,
+        mode,
+        projectOutputDir,
+        projectFileName,
+        separatedOutputDir,
+        separatedNamePattern,
+        selectedTargetIds,
+        allTargets,
+        format,
+        buildEncoderSpec,
+    ]);
+
+    // 「导出路径示例」：配置变化时（去抖）向后端取一次导出计划，取第一条目标
+    // 路径作为示例。分轨模式下即第一条分轨的文件路径，足以让用户看懂输出去向。
+    // 后端对日期通配符 `%` 已做安全处理：半截 / 未知的 `%` 当作字面量渲染（不会
+    // panic），因此这里不需要因为 `%` 跳过刷新——用户即使只输入单个 `%`，示例路径
+    // 里也会如实显示那个 `%`。300ms 去抖已足以避免输入日期（如 %s 秒数）时文本频繁跳动。
+    useEffect(() => {
+        if (!open) return;
+        const dir = mode === "project" ? projectOutputDir.trim() : separatedOutputDir.trim();
+        if (!dir) {
+            setExamplePath("");
+            return;
+        }
+        let disposed = false;
+        const timer = window.setTimeout(async () => {
+            const request = buildExportRequest();
+            if (disposed || !request) {
+                if (!disposed) setExamplePath("");
+                return;
+            }
+            try {
+                const plan = await coreApi.previewExportAudioPlan(request);
+                if (disposed) return;
+                if (plan?.ok && Array.isArray(plan.targets) && plan.targets.length > 0) {
+                    setExamplePath(plan.targets[0].path || "");
+                } else {
+                    setExamplePath("");
+                }
+            } catch {
+                if (!disposed) setExamplePath("");
+            }
+        }, 300);
+        return () => {
+            disposed = true;
+            window.clearTimeout(timer);
+        };
+    }, [open, mode, projectOutputDir, separatedOutputDir, buildExportRequest]);
 
     function toggleTarget(targetId: string) {
         setSelectedTargetIds((prev) => {
@@ -960,6 +1119,13 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                 }
                 setDisplayProgress(100);
                 setKeepProgressVisible(true);
+                // 目标文件夹：优先用后端返回的 output_dir；缺失时从产物路径反推父目录
+                // （兼容后端旧版本 / 各返回分支），保证「打开文件夹」可用。
+                const outPaths = collectExportPaths(result);
+                setLastOutputPaths(outPaths);
+                const resultDir =
+                    result.output_dir || (outPaths[0] ? parentDirOfPath(outPaths[0]) : "");
+                if (resultDir) setLastOutputDir(resultDir);
             } catch (err) {
                 // invoke / thunk 层失败此前没有任何捕获：错误成为未处理
                 // 拒绝，进度条消失且无任何提示。取消保持静默
@@ -1036,6 +1202,11 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
             }
             setDisplayProgress(100);
             setKeepProgressVisible(true);
+            const outPaths = collectExportPaths(result);
+            setLastOutputPaths(outPaths);
+            const resultDir =
+                result.output_dir || (outPaths[0] ? parentDirOfPath(outPaths[0]) : "");
+            if (resultDir) setLastOutputDir(resultDir);
         } catch (err) {
             // 同上：invoke / thunk 层失败必须有用户可见的报错。
             const message = err instanceof Error ? err.message : String(err ?? "");
@@ -1650,6 +1821,12 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                         ),
                                     )}
                                 </Flex>
+
+                                {examplePath ? (
+                                    <Text size="1" color="gray" style={{ userSelect: "text", wordBreak: "break-all" }}>
+                                        {tAny("export_dialog_example_path").replace("{path}", examplePath)}
+                                    </Text>
+                                ) : null}
                             </>
                         ) : (
                             <>
@@ -1722,6 +1899,12 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                         </Button>
                                     ))}
                                 </Flex>
+
+                                {examplePath ? (
+                                    <Text size="1" color="gray" style={{ userSelect: "text", wordBreak: "break-all" }}>
+                                        {tAny("export_dialog_example_path").replace("{path}", examplePath)}
+                                    </Text>
+                                ) : null}
 
                                 <div className="rounded border border-qt-border bg-qt-base p-2 max-h-[240px] overflow-y-auto">
                                     <Text size="2" className="font-medium">
@@ -1817,6 +2000,22 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                     </Flex>
 
                     <Flex justify="end" gap="2" mt="4">
+                        {!submitting && (lastOutputPaths.length > 0 || lastOutputDir) ? (
+                            <Button
+                                variant="soft"
+                                onClick={() => {
+                                    // 优先定位并选中所有已渲染文件；没有产物路径时退化为
+                                    // 打开目标文件夹（后端据路径类型自动分派）。
+                                    const targets =
+                                        lastOutputPaths.length > 0
+                                            ? lastOutputPaths
+                                            : [lastOutputDir].filter(Boolean);
+                                    void coreApi.revealExportPaths(targets).catch(() => undefined);
+                                }}
+                            >
+                                {tAny("export_dialog_open_folder")}
+                            </Button>
+                        ) : null}
                         <Button variant="soft" color="gray" onClick={() => void handleCancel()}>
                             {tAny("cancel")}
                         </Button>

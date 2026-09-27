@@ -39,6 +39,8 @@ export const jaJP = {
     export_dialog_output_dir: "出力フォルダ",
     export_dialog_project_file_name: "出力ファイル名",
     export_dialog_browse: "参照",
+    export_dialog_example_path: "出力パスの例：{path}",
+    export_dialog_open_folder: "フォルダを開く",
     export_dialog_name_pattern: "分離トラック命名パターン",
     export_pattern_placeholders: "プレースホルダー:",
     import_files_selected: "{count} 件のファイルを選択中",
@@ -623,6 +625,8 @@ export const jaJP = {
     menu_export_diagnostics: "診断情報をエクスポート...",
     menu_open_log_folder_failed: "ログフォルダーを開けませんでした",
     menu_export_diagnostics_failed: "診断情報のエクスポートに失敗しました",
+    menu_export_diagnostics_running:
+        "診断情報をエクスポート中。ベンチマークを含むため 20〜60 秒かかる場合があります。しばらくお待ちください...",
     menu_about: "HiFiShifter について",
     about_intro:
         "HiFiShifter はグラフィカルなボーカル編集・合成ツールです。マルチトラックのオーディオクリップ処理に対応し、複数のボコーダーでピッチ補正やパラメータ調整を行い、人力 VOCALOID 制作のための素材編集と調音を一体化しています。",
