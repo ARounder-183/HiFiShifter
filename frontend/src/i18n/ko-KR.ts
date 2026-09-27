@@ -1634,17 +1634,13 @@ export const koKR = {
     status_fake_stereo_scan_rejected: "가짜 스테레오 검사가 거부되었습니다",
     status_fake_stereo_scan_foldable: "가짜 스테레오: {m}/{n}개 접기 가능",
     status_fake_stereo_scan_folded: "가짜 스테레오: {m}/{n}개 접음",
-    status_fake_stereo_scan_foldable_pending: "가짜 스테레오: {m}/{n}개 접기 가능, {p}개 미읽음",
-    status_fake_stereo_scan_folded_pending: "가짜 스테레오: {m}/{n}개 접음, {p}개 미읽음",
     status_channel_scan_folded: "{n}개 클립을 자동으로 모노로 접었습니다",
     status_channel_scan_pending: "{n}개 소스 미읽음(다음 실행 시 재시도)",
-    status_fake_stereo_scan_nearest_hint: ". 가장 근접한 차이 {d}(허용 오차를 넓히면 접힙니다)",
     status_fake_stereo_scan_no_source: "가짜 스테레오: {n}개 테이크에 소스가 없습니다",
     status_fake_stereo_scan_no_clips: "가짜 스테레오: 프로젝트에 클립이 없습니다",
     status_fake_stereo_scan_range_unmatched:
         "가짜 스테레오: 범위가 일치하지 않음(프로젝트에 {p}개)",
     status_fake_stereo_scan_no_takes: "가짜 스테레오: {c}개 클립에 테이크가 없습니다",
-    status_fake_stereo_scan_overridden_suffix: ". {n}개 설정을 덮어썼습니다(되돌릴 수 있음)",
     status_fake_stereo_scan_nothing: "가짜 스테레오: 판정할 대상이 없습니다",
     status_take_channel_mode_rejected: "테이크 채널 모드 변경이 거부되었습니다",
 

@@ -16,33 +16,13 @@ export type TranslateFn = (key: string) => string;
 /**
  * 解析状态行。
  *
- * 匹配顺序即优先级：精确键 → 多数量模板 → 单数量模板 → 前缀键 → 原样返回。
- * 顺序不能随意调换：`status_fake_stereo_scan_folded` 的原文同时能被单数量
- * 正则的部分前缀命中，先走多数量分支才能拿到 `{m}` / `{p}`。
+ * 匹配顺序即优先级：精确键 → 假立体声扫描的多数量模板 → 单数量模板 → 前缀键
+ * → 原样返回。
  */
 export function resolveStatusText(status: string, statusKey: StatusKeyMap, t: TranslateFn): string {
     if (!status) return status;
     const exact = statusKey[status];
     if (exact) return t(exact);
-
-    // "一条都没折叠"时的差异量级提示（见 sessionSlice 的写入侧）：独立成句，
-    // 与计数句分开解析 —— 若把"最接近的差异"并进计数模板，键的数量会随
-    //（试扫/实扫 × 有/无读不到 × 有/无提示）组合爆炸。
-    const HINT_SEPARATOR = " — nearest ";
-    const hintAt = status.indexOf(HINT_SEPARATOR);
-    const hint =
-        hintAt >= 0
-            ? t("status_fake_stereo_scan_nearest_hint").replace(
-                  "{d}",
-                  status.slice(hintAt + HINT_SEPARATOR.length),
-              )
-            : "";
-    const base = hintAt >= 0 ? status.slice(0, hintAt) : status;
-    if (hint && base !== status) {
-        const resolved = resolveStatusText(base, statusKey, t);
-        // base 没能被翻译（原样返回）时不要把英文原文和中文提示拼在一起。
-        if (resolved !== base) return resolved + hint;
-    }
 
     // 假立体声扫描**一个候选都没有**时的原因。全部按后端返回的真实计数成句，
     // 不做猜测 —— 猜出来的原因会随口断言"你的选区在工程里找不到"。
@@ -66,36 +46,17 @@ export function resolveStatusText(status: string, statusKey: StatusKeyMap, t: Tr
         return t("status_fake_stereo_scan_nothing");
     }
 
-    // 假立体声扫描：分数形计数 + 两种变体（试扫 foldable / 实扫 folded）+ 可选
-    // 的两个后缀（"unreadable" / "overridden"）。
-    // 形如 "Fake-stereo scan: 3/5 folded, 2 unreadable, 1 overridden"。
-    const scan = status.match(
-        /^Fake-stereo scan: (\d+)\/(\d+) (foldable|folded)(?:, (\d+) unreadable)?(?:, (\d+) overridden)?$/,
-    );
+    // 假立体声扫描：分数形计数（{m}=已折叠/可折叠数，{n}=总数）+ 试扫/实扫两种
+    // 变体。形如 "Fake-stereo scan: 3/5 folded"。
+    const scan = status.match(/^Fake-stereo scan: (\d+)\/(\d+) (foldable|folded)$/);
     if (scan) {
-        const foldable = scan[3] === "foldable";
-        const unreadable = Number(scan[4] ?? 0);
-        const overridden = Number(scan[5] ?? 0);
-        const key = foldable
-            ? unreadable > 0
-                ? "status_fake_stereo_scan_foldable_pending"
-                : "status_fake_stereo_scan_foldable"
-            : unreadable > 0
-              ? "status_fake_stereo_scan_folded_pending"
-              : "status_fake_stereo_scan_folded";
-        let text = t(key)
-            // 原文写成 {converted}/{scanned} 分数：第 1 组是已折叠/可折叠数，
-            // 第 2 组是总数。模板里的 {m} = 分子、{n} = 分母。
+        const key =
+            scan[3] === "foldable"
+                ? "status_fake_stereo_scan_foldable"
+                : "status_fake_stereo_scan_folded";
+        return t(key)
             .replace("{m}", scan[1] ?? "0")
-            .replace("{n}", scan[2] ?? "0")
-            .replace("{p}", String(unreadable));
-        if (overridden > 0) {
-            text += t("status_fake_stereo_scan_overridden_suffix").replace(
-                "{n}",
-                String(overridden),
-            );
-        }
-        return text;
+            .replace("{n}", scan[2] ?? "0");
     }
 
     // 带数量的状态：提取数字回填占位符模板（如 "Waveform cache cleared (3 files)"）。

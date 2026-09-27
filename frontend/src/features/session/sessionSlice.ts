@@ -5701,19 +5701,12 @@ const sessionSlice = createSlice({
                     scanned?: number;
                     converted?: number;
                     pending?: number;
-                    entries?: Array<{
-                        verdict?: string;
-                        /** 后端 `snake_case` 序列化：字段名必须逐字一致。 */
-                        max_abs_diff?: number;
-                        violating_ratio?: number;
-                    }>;
                     eligibility?: {
+                        /** 后端 `snake_case` 序列化：字段名必须逐字一致。 */
                         project_clips?: number;
                         matched_clips?: number;
                         takes_seen?: number;
                         skipped_no_source?: number;
-                        skipped_user_seal?: number;
-                        overrode_user_seal?: number;
                     };
                 };
                 if (!payload.ok) {
@@ -5723,14 +5716,13 @@ const sessionSlice = createSlice({
                 const scanned = payload.scanned ?? 0;
                 const converted = payload.converted ?? 0;
                 const pending = payload.pending ?? 0;
-                const eligibility = payload.eligibility ?? {};
-                const overrode = eligibility.overrode_user_seal ?? 0;
 
                 // 一个候选都没有时，**按真实计数**说清为什么。过去这里会猜一个
                 // 原因，而计数本身因为字段名不一致恒为 0 —— 于是界面随口断言
                 // "选中的音频块在工程里找不到"，一句听起来像用户操作有误、
                 // 实际完全虚假的话。
                 if (scanned === 0) {
+                    const eligibility = payload.eligibility ?? {};
                     const projectClips = eligibility.project_clips ?? 0;
                     const matched = eligibility.matched_clips ?? 0;
                     const seen = eligibility.takes_seen ?? 0;
@@ -5754,27 +5746,9 @@ const sessionSlice = createSlice({
                 // 重试，后者永远不会再判。计数一律写成 {converted}/{scanned} 分数，
                 // 比逐个念数量短一半。
                 const pendingSuffix = pending > 0 ? `, ${pending} unreadable` : "";
-                const overrodeSuffix = overrode > 0 ? `, ${overrode} overridden` : "";
-                let status = action.meta.arg.dryRun
-                    ? `Fake-stereo scan: ${converted}/${scanned} foldable${pendingSuffix}${overrodeSuffix}`
-                    : `Fake-stereo scan: ${converted}/${scanned} folded${pendingSuffix}${overrodeSuffix}`;
-                // 一个都没折叠时，把"最接近假立体声"的那条素材的差异量级报出来：
-                // 用户据此判断该不该放宽容差。没有这个数字，"没折叠"和"不该折叠"
-                // 在界面上长得一模一样。
-                if (!action.meta.arg.dryRun && converted === 0) {
-                    const nearest = (payload.entries ?? [])
-                        .filter((entry) => entry.verdict === "trueStereo")
-                        .map((entry) => entry.max_abs_diff)
-                        .filter(
-                            (diff): diff is number =>
-                                typeof diff === "number" && Number.isFinite(diff),
-                        )
-                        .sort((a, b) => a - b)[0];
-                    if (nearest !== undefined) {
-                        status += ` — nearest ${nearest.toPrecision(2)}`;
-                    }
-                }
-                state.status = status;
+                state.status = action.meta.arg.dryRun
+                    ? `Fake-stereo scan: ${converted}/${scanned} foldable${pendingSuffix}`
+                    : `Fake-stereo scan: ${converted}/${scanned} folded${pendingSuffix}`;
             })
             .addCase(scanAndConvertFakeStereoRemote.rejected, (state, action) => {
                 setRejected(state, action);
