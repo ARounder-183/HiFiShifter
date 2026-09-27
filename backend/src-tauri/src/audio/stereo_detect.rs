@@ -70,12 +70,21 @@ pub const DEFAULT_CONTAINER_BUDGET_SEC: f64 = 1800.0;
 /// 补判 —— 用户看到的结果不变，只是晚几百毫秒。
 pub const IMPORT_CONTAINER_BUDGET_SEC: f64 = 30.0;
 
+/// 判定容差的默认值：满幅的 1%（≈ -40 dBFS）。
+///
+/// 判定问的是"折叠会不会改变听感"，而不是"两个声道是否逐比特相同"。有损编码
+/// ——尤其是 mp3 joint stereo 的 M/S 量化残留——解码后左右声道本就带着微小差异，
+/// 量级常在 0.1%~1%。容差取得过严会把大量"内容其实一致"的素材判成真立体声，
+/// 表现为"该折叠的没折叠"。1% 是覆盖这类残留的保守值；真立体声的差异比它大
+/// 好几个数量级，不会因此被误折叠。
+pub const DEFAULT_TOLERANCE: f32 = 0.01;
+
 impl Default for DetectOptions {
     fn default() -> Self {
         Self {
             window_sec: 0.25,
             window_count: 12,
-            tolerance: 1e-3,
+            tolerance: DEFAULT_TOLERANCE,
             container_budget_sec: DEFAULT_CONTAINER_BUDGET_SEC,
         }
     }
@@ -95,7 +104,9 @@ impl DetectOptions {
                 // 与 `ChannelImportPolicy::normalized` 同口径：[0, 1]（满幅）。
                 self.tolerance.clamp(0.0, 1.0)
             } else {
-                1e-6
+                // 非有限值（NaN/Inf）回退到默认容差 —— 与策略层的回退保持同一
+                // 口径，避免"同一个非法输入在两处得到不同容差"。
+                DEFAULT_TOLERANCE
             },
             container_budget_sec: if self.container_budget_sec.is_finite() {
                 self.container_budget_sec.clamp(0.0, DEFAULT_CONTAINER_BUDGET_SEC)
@@ -1221,7 +1232,10 @@ mod tests {
         };
         let n = nan.normalized();
         assert_eq!(n.window_sec, 0.25);
-        assert_eq!(n.tolerance, 1e-6);
+        assert_eq!(
+            n.tolerance, DEFAULT_TOLERANCE,
+            "非法容差回退到默认值，与策略层同口径"
+        );
     }
 
     #[test]

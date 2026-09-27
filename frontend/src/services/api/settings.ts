@@ -262,9 +262,11 @@ export interface ChannelImportPolicy {
     /**
      * 逐样本绝对差容差（覆盖有损编码的量化噪声）。
      *
-     * 默认 1e-3（约 -60 dBFS）：有损编码的左右差异常在这个量级。判定是
-     * "任一样本超出即真立体声"，所以偏松只会折叠**几乎就是单声道**的素材
-     *（差异小于 -60 dB 本就听不出声像），不会把真立体声折错。
+     * 默认 1e-2（1%，约 -40 dBFS）：有损编码——尤其 mp3 joint stereo 的 M/S
+     * 量化残留——解码后左右本就带着这个量级的差异，容差过严会漏判大量"内容
+     * 其实一致"的素材。判定是"任一样本超出即真立体声"，所以偏松只会折叠
+     * **几乎就是单声道**的素材（差异小于 -40 dB 本就听不出声像），不会把真
+     * 立体声折错。
      */
     tolerance: number;
     /** 转换目标模式：2 = 混合为单声道（默认）/ 3 = 仅左 / 4 = 仅右。 */
@@ -276,7 +278,7 @@ export const DEFAULT_CHANNEL_IMPORT_POLICY: ChannelImportPolicy = {
     mode: "smart",
     windowSec: 0.25,
     windowCount: 12,
-    tolerance: 1e-3,
+    tolerance: 1e-2,
     monoTargetMode: 2,
 };
 
@@ -289,7 +291,7 @@ export const TOLERANCE_PERCENT_MAX = 100;
 /**
  * 容差 → 百分比（界面展示单位）。
  *
- * 百分比是容差最自然的读法：0.1% 即满幅的千分之一（≈ -60 dBFS），
+ * 百分比是容差最自然的读法：1% 即满幅的百分之一（默认，≈ -40 dBFS），
  * `0` 表示逐样本完全相等。界面上让用户直接填百分比，避免在 `1e-3`
  * 这种科学计数法里数零。
  *

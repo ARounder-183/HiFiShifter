@@ -828,7 +828,7 @@ export const enUS = {
         "Windows spread evenly across the material's consumed range, always covering both ends. 0 scans the whole range without sampling.",
     clip_channel_import_tolerance: "Tolerance",
     clip_channel_import_tolerance_hint:
-        "Allowed difference between channels, as a percentage of full scale. 0 = sample-exact; 0.1% (default) ≈ -60 dBFS. Lossy codecs leave tiny differences after decoding, so too strict a tolerance misses folds. Adjustable range: 0-100%.",
+        "Allowed difference between channels, as a percentage of full scale. 0 = sample-exact; 1% (default) ≈ -40 dBFS. Lossy codecs leave tiny differences after decoding, so too strict a tolerance misses folds. Adjustable range: 0-100%.",
     clip_channel_import_save: "Save",
     clip_take_remove: "Delete Take",
     clip_take_explode: "Explode Takes into Clips",

@@ -18,7 +18,7 @@ import {
 /**
  * 导入声道策略设置的回归测试。
  *
- * 容差在界面上以**满幅百分比**呈现（0.1% ↔ 1e-3），因此换算与格式化是这块
+ * 容差在界面上以**满幅百分比**呈现（默认 1% ↔ 1e-2），因此换算与格式化是这块
  * 最容易出错的地方：曾经容差下拉框因为"选项用 '1e-3' 字面量、当前值用
  * String(1e-3)='0.001'"而永久显示空白 —— 界面看起来是坏的，却没有任何断言
  * 会失败。下面守住的是同一类问题：换算必须精确、必须单调、必须不产生
@@ -30,7 +30,10 @@ const flushMicrotasks = () => new Promise<void>((resolve) => setTimeout(resolve,
 
 describe("channel import policy", () => {
     it("maps the default tolerance to a clean percentage", () => {
-        expect(DEFAULT_CHANNEL_IMPORT_POLICY.tolerance).toBe(1e-3);
+        // 默认 1%（满幅的百分之一）：有损编码的左右残留就在这个量级，
+        // 取 0.1% 会把大量"内容其实一致"的素材判成真立体声（漏判）。
+        expect(DEFAULT_CHANNEL_IMPORT_POLICY.tolerance).toBe(1e-2);
+        expect(toleranceToPercent(DEFAULT_CHANNEL_IMPORT_POLICY.tolerance)).toBe(1);
         expect(toleranceToPercent(1e-3)).toBe(0.1);
         expect(toleranceToPercent(0)).toBe(0);
         // 后端钳制上限 1（满幅）↔ 界面 100%。

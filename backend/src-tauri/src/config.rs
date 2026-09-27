@@ -892,9 +892,11 @@ pub struct ChannelImportPolicy {
     pub window_count: usize,
     /// 逐样本绝对差容差（覆盖有损编码的量化噪声）。
     ///
-    /// 默认 1e-3（约 -60 dBFS）：有损编码的左右声道差异常在这个量级。判定是
-    /// "任一样本超出即真立体声"，所以偏松只会让**几乎就是单声道**的素材被折叠
-    ///（差异小于 -60 dB 本就听不出声像），不会把真立体声折错。
+    /// 默认 1e-2（1%，约 -40 dBFS）：有损编码——尤其 mp3 joint stereo 的 M/S
+    /// 量化残留——解码后左右声道本就带着这个量级的差异，容差过严会把大量"内容
+    /// 其实一致"的素材判成真立体声（漏折叠）。判定是"任一样本超出即真立体声"，
+    /// 所以偏松只会让**几乎就是单声道**的素材被折叠（差异小于 -40 dB 本就听不出
+    /// 声像），不会把真立体声折错 —— 后者的差异比它大好几个数量级。
     /// 归一化范围 `[0, 1]`（0 = 逐样本完全一致，1 = 满幅，界面按百分比 0~100%
     /// 呈现）。
     #[serde(default = "default_detect_tolerance")]
@@ -906,7 +908,26 @@ pub struct ChannelImportPolicy {
     /// （两声道量化噪声部分抵消）。
     #[serde(default = "default_mono_target_mode")]
     pub mono_target_mode: i32,
+    /// 容差默认值的迁移标记（迁移用，不面向用户）。
+    ///
+    /// `0`（缺省）= 出厂于"容差 0.1%"时代的配置。有损编码——尤其 mp3 joint
+    /// stereo 的 M/S 残留——解码后左右本就带着 1% 量级的差异，0.1% 会把大量
+    /// "内容其实一致"的素材判成真立体声（漏折叠）。读取边界会把**恰好等于旧
+    /// 默认值**的容差抬到新默认值，避免存量 `app_config.json` 里的 `0.001`
+    /// 永久锁死漏判。
+    ///
+    /// 版本号随保存落盘（它在 `DEEP_MERGE_KEYS` 的深合并里会被保留）：用户此后
+    /// 即使显式把容差设回 0.1%，也不会被再次重置 —— 迁移只认"仍是旧默认值"
+    /// 的配置。
+    #[serde(default)]
+    pub tolerance_version: u32,
 }
+
+/// 当前容差默认值的版本（见 [`ChannelImportPolicy::tolerance_version`]）。
+pub const CHANNEL_TOLERANCE_VERSION: u32 = 1;
+
+/// 旧版出厂容差：只有**恰好等于它**的配置才会被迁移抬高。
+pub const LEGACY_DEFAULT_TOLERANCE: f32 = 1e-3;
 
 fn default_channel_import_mode() -> String {
     "smart".to_string()
@@ -918,7 +939,9 @@ fn default_detect_window_count() -> usize {
     12
 }
 fn default_detect_tolerance() -> f32 {
-    1e-3
+    // 单一事实来源：判定模块定义默认容差，策略层只引用它 —— 避免两处各自
+    // 维护一个字面量而悄悄漂移（这已经在"非有限值回退"上发生过一次）。
+    crate::stereo_detect::DEFAULT_TOLERANCE
 }
 fn default_mono_target_mode() -> i32 {
     2
@@ -932,6 +955,7 @@ impl Default for ChannelImportPolicy {
             window_count: default_detect_window_count(),
             tolerance: default_detect_tolerance(),
             mono_target_mode: default_mono_target_mode(),
+            tolerance_version: CHANNEL_TOLERANCE_VERSION,
         }
     }
 }
@@ -949,7 +973,7 @@ impl ChannelImportPolicy {
             default_detect_window_sec()
         };
         let tolerance = if self.tolerance.is_finite() {
-            // 容差以满幅为 1：0.1%（默认）挡编解码量化噪声，上限放到 100%
+            // 容差以满幅为 1：1%（默认）挡编解码量化噪声，上限放到 100%
             //（= 任何差异都判"假立体声"）交由用户自担语义。
             self.tolerance.clamp(0.0, 1.0)
         } else {
@@ -966,7 +990,33 @@ impl ChannelImportPolicy {
             window_count: self.window_count.min(256),
             tolerance,
             mono_target_mode,
+            // 迁移标记不属于"值钳制"：原样带过，别在每次读写时把它抹掉
+            //（抹掉会让下面的迁移反复判定，用户显式设回旧值也留不住）。
+            tolerance_version: self.tolerance_version,
         }
+    }
+
+    /// 容差默认值迁移（幂等；只在**配置读取边界**调用，见 `AppConfig::migrated`）。
+    ///
+    /// 出厂默认从 0.1%（`1e-3`）抬到 1%（`1e-2`）后，存量用户的
+    /// `app_config.json` 里仍写着 `"tolerance": 0.001` —— 那是旧默认值被序列化
+    /// 的结果，而非用户的主动选择。不做迁移，这些用户的漏判会永久停留在旧行为
+    /// 上（有损编码的左右残留常达 1% 量级，0.1% 会把它们判成真立体声）。
+    ///
+    /// 只抬**恰好等于旧默认值**的配置：刻意设过其他值的用户不受影响。
+    /// 方向也是安全的 —— 只会让更多"几乎就是单声道"的素材被折叠，绝不会把
+    /// 真立体声折错（后者差异比 1% 大几个数量级）。
+    ///
+    /// ★ 不可放进 `normalized()`：那是"每次读写都跑"的值钳制函数，放在那里会
+    /// 让用户日后显式设回 0.1% 的选择被反复清掉。此处只认版本号，一次性生效。
+    pub fn migrate_tolerance(&mut self) {
+        if self.tolerance_version >= CHANNEL_TOLERANCE_VERSION {
+            return;
+        }
+        if (self.tolerance - LEGACY_DEFAULT_TOLERANCE).abs() < f32::EPSILON {
+            self.tolerance = default_detect_tolerance();
+        }
+        self.tolerance_version = CHANNEL_TOLERANCE_VERSION;
     }
 
     /// 是否启用"智能判定"（需要解码音频内容）。
@@ -1521,10 +1571,99 @@ mod tests {
         assert_eq!(s.min_clip_secs, 0.5, "已迁移过的配置不得再次被重置");
     }
 
+    /// 存量配置里写着旧出厂容差（0.1%）时抬到新默认（1%）。
+    #[test]
+    fn legacy_default_tolerance_is_raised_to_the_new_default() {
+        let mut p = super::ChannelImportPolicy {
+            tolerance: super::LEGACY_DEFAULT_TOLERANCE,
+            tolerance_version: 0,
+            ..Default::default()
+        };
+        p.migrate_tolerance();
+        assert_eq!(
+            p.tolerance,
+            crate::stereo_detect::DEFAULT_TOLERANCE,
+            "旧默认容差应当被抬到新默认值"
+        );
+        assert_eq!(p.tolerance_version, super::CHANNEL_TOLERANCE_VERSION);
+    }
+
+    /// 用户刻意设过的其他容差不受迁移影响。
+    #[test]
+    fn tolerance_migration_leaves_deliberate_values_alone() {
+        let mut p = super::ChannelImportPolicy {
+            tolerance: 0.05,
+            tolerance_version: 0,
+            ..Default::default()
+        };
+        p.migrate_tolerance();
+        assert_eq!(p.tolerance, 0.05, "非旧默认值不得被改写");
+    }
+
+    /// 迁移幂等：版本号推进后不再改动，用户显式设回 0.1% 也能存活。
+    #[test]
+    fn tolerance_migration_is_idempotent_and_respects_later_choices() {
+        let mut p = super::ChannelImportPolicy {
+            tolerance: super::LEGACY_DEFAULT_TOLERANCE,
+            tolerance_version: 0,
+            ..Default::default()
+        };
+        p.migrate_tolerance();
+        assert_eq!(p.tolerance, crate::stereo_detect::DEFAULT_TOLERANCE);
+
+        // 用户显式设回 0.1% 并保存（版本号随之落盘）。
+        p.tolerance = super::LEGACY_DEFAULT_TOLERANCE;
+        p.migrate_tolerance();
+        assert_eq!(
+            p.tolerance,
+            super::LEGACY_DEFAULT_TOLERANCE,
+            "已迁移过的配置不得再次被改写"
+        );
+    }
+
+    /// 迁移标记必须原样穿过 `normalized()`，否则每次读写都会把它抹掉，
+    /// 让"用户显式设回旧值"在下次加载时又被重置。
+    #[test]
+    fn normalized_preserves_the_tolerance_migration_marker() {
+        let p = super::ChannelImportPolicy {
+            tolerance: super::LEGACY_DEFAULT_TOLERANCE,
+            tolerance_version: super::CHANNEL_TOLERANCE_VERSION,
+            ..Default::default()
+        };
+        assert_eq!(
+            p.normalized().tolerance_version,
+            super::CHANNEL_TOLERANCE_VERSION
+        );
+    }
+
+    /// 存量 app_config.json（无迁移标记）在读取边界被抬到新默认值。
+    #[test]
+    fn legacy_config_file_tolerance_is_migrated_on_load() {
+        let ui: super::UiSettings = serde_json::from_value(serde_json::json!({
+            "channelImportPolicy": {
+                "mode": "smart",
+                "windowSec": 0.25,
+                "windowCount": 12,
+                "tolerance": 0.001,
+                "monoTargetMode": 2
+            }
+        }))
+        .expect("legacy ui settings must parse");
+        assert_eq!(ui.channel_import_policy.tolerance_version, 0, "旧配置无标记");
+        let mut cfg = super::AppConfig::default();
+        cfg.ui = ui;
+        // `migrated` 是私有的读取边界钩子，这里直接调策略层的迁移（同一副作用）。
+        cfg.ui.channel_import_policy.migrate_tolerance();
+        assert_eq!(
+            cfg.ui.channel_import_policy.tolerance,
+            crate::stereo_detect::DEFAULT_TOLERANCE,
+            "旧配置里的 0.001 必须被抬到 1%"
+        );
+    }
+
     /// 出厂默认本身就是"不设时长下限"。
     #[test]
-    fn factory_default_has_no_duration_floor() {
-        let s = super::RenderCacheSettings::default();
+    fn factory_default_has_no_duration_floor() {        let s = super::RenderCacheSettings::default();
         assert_eq!(s.min_clip_secs, 0.0);
         assert_eq!(s.min_entry_kb, 4);
         assert_eq!(s.min_entry_bytes(), 4 * 1024);
@@ -1575,7 +1714,11 @@ mod tests {
         assert!(p.is_smart());
         assert!(!p.is_off());
         assert_eq!(p.mono_target_mode, 2);
-        assert_eq!(p.tolerance, 1e-3, "默认容差为 1e-3");
+        assert_eq!(
+            p.tolerance,
+            crate::stereo_detect::DEFAULT_TOLERANCE,
+            "默认容差取判定模块的默认值（满幅 1%）"
+        );
     }
 
     #[test]
@@ -1586,6 +1729,7 @@ mod tests {
             window_count: 99_999,
             tolerance: 5.0,
             mono_target_mode: 7,
+            ..Default::default()
         };
         let n = p.normalized();
         assert_eq!(n.mode, "smart", "非法枚举回落默认");
@@ -1603,6 +1747,7 @@ mod tests {
             window_count: 4,
             tolerance: 1e-4,
             mono_target_mode: 3,
+            ..Default::default()
         };
         let n = p.normalized();
         assert_eq!(n.mode, "alwaysMono");
@@ -1621,7 +1766,7 @@ mod tests {
         };
         let n = p.normalized();
         assert_eq!(n.window_sec, 0.25);
-        assert_eq!(n.tolerance, 1e-3);
+        assert_eq!(n.tolerance, crate::stereo_detect::DEFAULT_TOLERANCE);
     }
 
     #[test]
@@ -2023,6 +2168,7 @@ impl AppConfig {
     /// 迁移结果也会随下一次保存自然落盘。
     fn migrated(mut self) -> Self {
         self.ui.render_cache.migrate_admission_policy();
+        self.ui.channel_import_policy.migrate_tolerance();
         self
     }
 }
