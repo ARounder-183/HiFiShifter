@@ -48,6 +48,29 @@ export function resolveStatusText(
         if (resolved !== base) return resolved + hint;
     }
 
+    // 假立体声扫描**一个候选都没有**时的原因（见 sessionSlice 的写入侧）。
+    // 这类结果过去和"扫了但没折叠"共用一句话，用户读不出真正的原因。
+    const noCandidates = status.match(
+        /^Fake-stereo scan: (?:(?:(\d+) without a source, (\d+) already set by you)|(?:(\d+) take\(s\) already set by you)|(?:(\d+) take\(s\) have no audio source))$/,
+    );
+    if (noCandidates) {
+        if (noCandidates[1] !== undefined) {
+            return t("status_fake_stereo_scan_no_candidates")
+                .replace("{s}", noCandidates[1])
+                .replace("{u}", noCandidates[2] ?? "0");
+        }
+        if (noCandidates[3] !== undefined) {
+            return t("status_fake_stereo_scan_user_sealed").replace("{n}", noCandidates[3]);
+        }
+        return t("status_fake_stereo_scan_no_source").replace("{n}", noCandidates[4] ?? "0");
+    }
+    if (status === "Fake-stereo scan: selection not found") {
+        return t("status_fake_stereo_scan_no_selection");
+    }
+    if (status === "Fake-stereo scan: nothing to scan") {
+        return t("status_fake_stereo_scan_nothing");
+    }
+
     // 假立体声扫描：两个数量 + 两种变体（试扫 / 实扫）+ 可选的"本次没读到"。
     // 形如 "Fake-stereo scan: 5 take(s), 3 folded to mono, 2 unreadable"。
     const scan = status.match(

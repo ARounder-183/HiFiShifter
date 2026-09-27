@@ -1561,12 +1561,18 @@ pub(super) fn scan_and_convert_fake_stereo(
     let policy = crate::config::channel_import_policy().for_explicit_scan();
 
     // ── 阶段 1（短暂持锁）：取候选快照 ──
-    let targets = {
+    let (targets, eligibility) = {
         let tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
         let filter: Option<std::collections::HashSet<String>> = clip_ids
             .as_ref()
             .map(|ids| ids.iter().cloned().collect());
-        crate::commands::channel_scan::collect_targets(&tl, filter.as_ref(), &policy, true)
+        let selection = crate::commands::channel_scan::collect_targets(
+            &tl,
+            filter.as_ref(),
+            &policy,
+            true,
+        );
+        (selection.targets, selection.eligibility)
     };
 
     // ── 阶段 2（锁外）：判定 + 收集报告 ──
@@ -1628,6 +1634,12 @@ pub(super) fn scan_and_convert_fake_stereo(
                 None
             } else {
                 Some(pending_files.clone())
+            },
+            eligibility: crate::models::FakeStereoScanEligibility {
+                matched_clips: eligibility.matched_clips,
+                takes_seen: eligibility.takes_seen,
+                skipped_no_source: eligibility.skipped_no_source,
+                skipped_user_seal: eligibility.skipped_user_seal,
             },
         }
     };

@@ -1135,6 +1135,7 @@ pub async fn scan_and_convert_fake_stereo(
         pending: 0,
         entries: Vec::new(),
         pending_files: Some(vec![format!("scan task failed: {error}")]),
+        eligibility: crate::models::FakeStereoScanEligibility::default(),
     })
 }
 

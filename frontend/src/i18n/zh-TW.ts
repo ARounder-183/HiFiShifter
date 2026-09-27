@@ -1613,6 +1613,11 @@ export const zhTW = {
     status_channel_scan_folded: "已自動折疊 {n} 個音訊塊為單聲道",
     status_channel_scan_pending: "，{n} 個素材本次讀不到，下次開啟會自動重試",
     status_fake_stereo_scan_nearest_hint: "；最接近假立體聲的一條差異為 {d}，可考慮放寬容差",
+    status_fake_stereo_scan_no_selection: "假立體聲掃描：選取的聲音塊在專案裡找不到（介面與專案可能不同步）",
+    status_fake_stereo_scan_no_source: "假立體聲掃描：{n} 個 Take 沒有音訊來源，無法判定",
+    status_fake_stereo_scan_user_sealed: "假立體聲掃描：{n} 個 Take 已由你明確設定聲道模式，已依你的選擇保留",
+    status_fake_stereo_scan_no_candidates: "假立體聲掃描：{s} 個 Take 沒有音訊來源、{u} 個已由你設定聲道模式，沒有可判定的對象",
+    status_fake_stereo_scan_nothing: "假立體聲掃描：沒有可判定的對象",
     status_take_channel_mode_rejected: "Take 聲道模式修改被拒絕",
 
     benchmark_title: "推理裝置基準測試",

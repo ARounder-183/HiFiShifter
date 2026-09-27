@@ -660,4 +660,24 @@ pub struct FakeStereoScanPayload {
     /// 待重试的源文件路径（去重），供 UI 提示"这些文件这次没读到"。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending_files: Option<Vec<String>>,
+    /// 候选筛选的去向统计。`scanned == 0` 时用它解释**为什么**一个候选都没有。
+    pub eligibility: FakeStereoScanEligibility,
+}
+
+/// 候选筛选的去向统计（后端 `channel_scan::ScanEligibility`）。
+///
+/// "0 个 Take" 有几种完全不同的成因：选区与后端对不上、选中的 Clip 确实没有
+/// 音频源、全都已被用户显式设置过声道模式。没有这份统计，它们在界面上长得
+/// 一模一样，用户只能看到"这个功能什么都不做"。
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct FakeStereoScanEligibility {
+    /// 命中筛选条件的 Clip 数。
+    pub matched_clips: usize,
+    /// 这些 Clip 里被检查的 Take 总数。
+    pub takes_seen: usize,
+    /// 因没有音频源而跳过。
+    pub skipped_no_source: usize,
+    /// 因用户已显式设置过声道模式而跳过。
+    pub skipped_user_seal: usize,
 }

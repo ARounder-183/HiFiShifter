@@ -551,11 +551,16 @@ fn save_project_archive_to_zip_inner(
 
             let abs_path = PathBuf::from(&source_path);
             if !abs_path.is_absolute() || !abs_path.exists() {
+                // 文件缺失/非绝对路径 ⇒ 无法内嵌进压缩包，跳过即可。
+                //
+                // **但绝不能把 `source_path` 置空**：这个 timeline 就是写进归档的
+                // 那份工程，置空等于把媒体引用彻底抹掉 —— 之后打开该归档时这些
+                // Take 变成"没有音频源"，用户听不见声音、扫描也永远找不到候选。
+                // 保留原路径，文件一旦回到原位即可自动恢复。
                 archive_logs.push(format!(
-                    "Skip missing or non-absolute source: {} (clip={}, take={})",
+                    "Skip missing or non-absolute source (kept as-is): {} (clip={}, take={})",
                     source_path, clip.id, take.id
                 ));
-                take.source_path = None;
                 continue;
             }
 

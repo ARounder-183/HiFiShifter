@@ -23,6 +23,11 @@ const TEMPLATES: Record<string, string> = {
     status_fake_stereo_scan_folded_pending:
         "假立体声扫描：{n} 个 Take，{m} 个已折叠为单声道，{p} 个本次读不到",
     status_fake_stereo_scan_nearest_hint: "；最接近的一条差异为 {d}，可考虑放宽容差",
+    status_fake_stereo_scan_no_selection: "选中的音频块在工程里找不到",
+    status_fake_stereo_scan_no_source: "{n} 个 Take 没有音频源",
+    status_fake_stereo_scan_user_sealed: "{n} 个 Take 已由你设置声道模式",
+    status_fake_stereo_scan_no_candidates: "{s} 个没有音频源、{u} 个已由你设置",
+    status_fake_stereo_scan_nothing: "没有可判定的对象",
 };
 
 const t = (key: string) => TEMPLATES[key] ?? `MISSING:${key}`;
@@ -94,6 +99,49 @@ describe("resolveStatusText", () => {
             expect(resolve("Totally unknown status — nearest 0.5")).toBe(
                 "Totally unknown status — nearest 0.5",
             );
+        });
+
+        describe("zero candidates", () => {
+            // "0 个 Take" 必须说清原因，否则三种完全不同的成因在界面上长得一样。
+            it("explains a clip that has no audio source", () => {
+                expect(resolve("Fake-stereo scan: 4 take(s) have no audio source")).toBe(
+                    "4 个 Take 没有音频源",
+                );
+            });
+
+            it("explains takes the user already set", () => {
+                expect(resolve("Fake-stereo scan: 2 take(s) already set by you")).toBe(
+                    "2 个 Take 已由你设置声道模式",
+                );
+            });
+
+            it("explains a mix of both causes", () => {
+                expect(
+                    resolve("Fake-stereo scan: 4 without a source, 2 already set by you"),
+                ).toBe("4 个没有音频源、2 个已由你设置");
+            });
+
+            it("explains a selection the project does not contain", () => {
+                expect(resolve("Fake-stereo scan: selection not found")).toBe(
+                    "选中的音频块在工程里找不到",
+                );
+            });
+
+            it("falls back when there is nothing to explain", () => {
+                expect(resolve("Fake-stereo scan: nothing to scan")).toBe(
+                    "没有可判定的对象",
+                );
+            });
+
+            it("leaves no placeholder unfilled", () => {
+                for (const status of [
+                    "Fake-stereo scan: 4 take(s) have no audio source",
+                    "Fake-stereo scan: 2 take(s) already set by you",
+                    "Fake-stereo scan: 4 without a source, 2 already set by you",
+                ]) {
+                    expect(resolve(status)).not.toMatch(/\{[nsu]\}/);
+                }
+            });
         });
     });
 });

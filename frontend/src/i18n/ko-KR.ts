@@ -1642,6 +1642,11 @@ export const koKR = {
     status_channel_scan_pending: ", {n}개 소스를 이번에 읽지 못했습니다(다음 실행 시 다시 시도)",
     status_fake_stereo_scan_nearest_hint:
         ". 가장 근접한 소재의 차이는 {d}입니다(허용 오차를 넓히는 것을 고려하세요)",
+    status_fake_stereo_scan_no_selection: "가짜 스테레오 검사: 선택한 클립을 프로젝트에서 찾을 수 없습니다(화면과 프로젝트가 동기화되지 않았을 수 있습니다)",
+    status_fake_stereo_scan_no_source: "가짜 스테레오 검사: {n}개 테이크에 오디오 소스가 없습니다",
+    status_fake_stereo_scan_user_sealed: "가짜 스테레오 검사: {n}개 테이크는 설정하신 채널 모드를 유지합니다",
+    status_fake_stereo_scan_no_candidates: "가짜 스테레오 검사: {s}개는 오디오 소스가 없고 {u}개는 설정하신 채널 모드라 판정할 대상이 없습니다",
+    status_fake_stereo_scan_nothing: "가짜 스테레오 검사: 판정할 대상이 없습니다",
     status_take_channel_mode_rejected: "테이크 채널 모드 변경이 거부되었습니다",
 
     benchmark_title: "추론 장치 벤치마크",

@@ -5706,6 +5706,12 @@ const sessionSlice = createSlice({
                         maxAbsDiff?: number;
                         violatingRatio?: number;
                     }>;
+                    eligibility?: {
+                        matchedClips?: number;
+                        takesSeen?: number;
+                        skippedNoSource?: number;
+                        skippedUserSeal?: number;
+                    };
                 };
                 if (!payload.ok) {
                     state.status = "Fake-stereo scan rejected";
@@ -5714,6 +5720,29 @@ const sessionSlice = createSlice({
                 const scanned = payload.scanned ?? 0;
                 const converted = payload.converted ?? 0;
                 const pending = payload.pending ?? 0;
+
+                // 一个候选都没有时，**必须说清为什么**。过去只会显示
+                // "0 take(s), 0 folded"，把三种完全不同的成因（选区与后端对不上、
+                // 音频块没有音频源、全都被用户显式设置过）糊成同一句话，用户只能
+                // 看到"这个功能什么都不做"。
+                if (scanned === 0) {
+                    const matchedClips = payload.eligibility?.matchedClips ?? 0;
+                    const noSource = payload.eligibility?.skippedNoSource ?? 0;
+                    const userSealed = payload.eligibility?.skippedUserSeal ?? 0;
+                    if (matchedClips === 0) {
+                        state.status = "Fake-stereo scan: selection not found";
+                    } else if (noSource > 0 && userSealed > 0) {
+                        state.status = `Fake-stereo scan: ${noSource} without a source, ${userSealed} already set by you`;
+                    } else if (userSealed > 0) {
+                        state.status = `Fake-stereo scan: ${userSealed} take(s) already set by you`;
+                    } else if (noSource > 0) {
+                        state.status = `Fake-stereo scan: ${noSource} take(s) have no audio source`;
+                    } else {
+                        state.status = "Fake-stereo scan: nothing to scan";
+                    }
+                    return;
+                }
+
                 // 后缀在 App.tsx 的 statusText 里解析（`statusKey` 映射 + 双数量
                 // 正则）。"本次没读到"必须与"单声道、无事可做"区分开：前者下次
                 // 打开会自动重试，后者永远不会再判。
@@ -5724,7 +5753,7 @@ const sessionSlice = createSlice({
                 // 一个都没折叠时，把"最接近假立体声"的那条素材的差异量级报出来：
                 // 用户据此判断该不该放宽容差。没有这个数字，"没折叠"和"不该折叠"
                 // 在界面上长得一模一样。
-                if (!action.meta.arg.dryRun && converted === 0 && scanned > 0) {
+                if (!action.meta.arg.dryRun && converted === 0) {
                     const nearest = (payload.entries ?? [])
                         .filter((entry) => entry.verdict === "trueStereo")
                         .map((entry) => entry.maxAbsDiff)

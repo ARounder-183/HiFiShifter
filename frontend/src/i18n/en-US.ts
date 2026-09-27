@@ -1788,6 +1788,11 @@ export const enUS = {
     status_channel_scan_pending: ", {n} source(s) unreadable — retried on next open",
     status_fake_stereo_scan_nearest_hint:
         "; closest match differs by {d} — consider a looser tolerance",
+    status_fake_stereo_scan_no_selection: "Fake-stereo scan: the selected clips are not in the project (the view and the project may be out of sync)",
+    status_fake_stereo_scan_no_source: "Fake-stereo scan: {n} take(s) have no audio source",
+    status_fake_stereo_scan_user_sealed: "Fake-stereo scan: {n} take(s) keep the channel mode you set",
+    status_fake_stereo_scan_no_candidates: "Fake-stereo scan: {s} take(s) have no audio source and {u} keep the channel mode you set — nothing to decide",
+    status_fake_stereo_scan_nothing: "Fake-stereo scan: nothing to decide",
     status_take_channel_mode_rejected: "Take channel mode rejected",
 
     // ── Benchmark ────────────────────────────────────────────────────────

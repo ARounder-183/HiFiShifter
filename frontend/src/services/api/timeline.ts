@@ -56,6 +56,24 @@ export interface FakeStereoScanEntry {
     maxAbsDiff?: number;
 }
 
+/**
+ * 扫描候选的筛选去向（后端 `FakeStereoScanEligibility`）。
+ *
+ * `scanned === 0` 时用它解释**为什么**一个候选都没有：选区与后端对不上、选中的
+ * 音频块确实没有音频源、还是全都被用户显式设置过声道模式。没有这份统计，三种
+ * 情况在界面上长得一模一样，用户只能看到"这个功能什么都不做"。
+ */
+export interface FakeStereoScanEligibility {
+    /** 命中筛选条件的 Clip 数。 */
+    matchedClips: number;
+    /** 这些 Clip 里被检查的 Take 总数。 */
+    takesSeen: number;
+    /** 因没有音频源而跳过。 */
+    skippedNoSource: number;
+    /** 因用户已显式设置过声道模式而跳过。 */
+    skippedUserSeal: number;
+}
+
 /** 假立体声扫描结果（后端 `FakeStereoScanPayload`）。 */
 export interface FakeStereoScanResult {
     ok: boolean;
@@ -73,6 +91,8 @@ export interface FakeStereoScanResult {
     entries: FakeStereoScanEntry[];
     /** 待重试的源文件路径（去重）。 */
     pendingFiles?: string[];
+    /** 候选筛选的去向统计。 */
+    eligibility: FakeStereoScanEligibility;
 }
 
 /**
