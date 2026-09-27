@@ -40,7 +40,10 @@ test("features/session/sessionSlice.importInFlight.test.ts scripted checks", () 
     assertEqual(inFlight(createState()), 0, "初始在途计数");
 
     // 单个导入：pending 加一，fulfilled 回到 0。
-    let state = reducer(createState(), importAudioAtPosition.pending("req-1", { audioPath: "a.wav" }));
+    let state = reducer(
+        createState(),
+        importAudioAtPosition.pending("req-1", { audioPath: "a.wav" }),
+    );
     assertEqual(inFlight(state), 1, "pending 后计数");
     state = reducer(
         state,
@@ -55,10 +58,7 @@ test("features/session/sessionSlice.importInFlight.test.ts scripted checks", () 
     // rejected 同样要收尾，否则一次失败的导入会让提示永久停留。
     state = reducer(createState(), importAudioFromPath.pending("req-2", "a.wav"));
     assertEqual(inFlight(state), 1, "rejected 用例的 pending");
-    state = reducer(
-        state,
-        importAudioFromPath.rejected(new Error("boom"), "req-2", "a.wav"),
-    );
+    state = reducer(state, importAudioFromPath.rejected(new Error("boom"), "req-2", "a.wav"));
     assertEqual(inFlight(state), 0, "rejected 后计数");
 
     // 嵌套：对话框导入转派位置导入 ⇒ 两条同时在途，用布尔会提前清零。
