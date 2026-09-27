@@ -24,6 +24,7 @@ import {
     QUICK_SEARCH_POPUP_WIDTH,
 } from "./quickSearchPosition";
 import { applySelectWheelChange } from "../../utils/selectWheel";
+import { useShortcutSuppression } from "../../ui/shortcutScope";
 
 /** 支持的音频与视频媒体扩展名（视频按音轨导入） */
 const AUDIO_EXTENSIONS = new Set([
@@ -168,16 +169,9 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
         if (!open) stopPreview();
     }, [open, stopPreview]);
 
-    useEffect(() => {
-        if (open) {
-            document.body.setAttribute("data-quick-search-open", "1");
-        } else {
-            document.body.removeAttribute("data-quick-search-open");
-        }
-        return () => {
-            document.body.removeAttribute("data-quick-search-open");
-        };
-    }, [open]);
+    // 抑制全局快捷键，交给弹窗自身输入框处理（避免 ↑/↓ 与时间轴缩放冲突）。
+    // 走统一作用域，取代此前的 `data-quick-search-open` body 属性。
+    useShortcutSuppression(open);
 
     // 点击外部关闭由全屏遮罩层处理，见 render 部分
 

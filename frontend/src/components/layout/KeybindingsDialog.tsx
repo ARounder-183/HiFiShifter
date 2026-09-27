@@ -23,6 +23,7 @@ import {
 } from "../../features/keybindings/defaultKeybindings";
 import type { ActionId, ActionMeta, Keybinding } from "../../features/keybindings/types";
 import { canonicalKeyFromEvent } from "../../features/keybindings/keybindingMatch";
+import { useShortcutSuppression } from "../../ui/shortcutScope";
 import {
     KEYBINDING_PRESET_SELECTION_IDS,
     KEYBINDING_PRESETS,
@@ -83,17 +84,9 @@ export const KeybindingsDialog: React.FC<KeybindingsDialogProps> = ({ open, onOp
     const keybindings = useAppSelector(selectMergedKeybindings);
     const overrides = useAppSelector((s) => s.keybindings.overrides);
 
-    // 打开时在 body 上标记，阻塞全局快捷键和工程编辑
-    useEffect(() => {
-        if (open) {
-            document.body.setAttribute("data-keybindings-dialog-open", "true");
-        } else {
-            document.body.removeAttribute("data-keybindings-dialog-open");
-        }
-        return () => {
-            document.body.removeAttribute("data-keybindings-dialog-open");
-        };
-    }, [open]);
+    // 打开时抑制全局快捷键与工程编辑。走统一作用域（src/ui/shortcutScope.ts），
+    // 取代此前各自的 `data-keybindings-dialog-open` body 属性。
+    useShortcutSuppression(open);
 
     // 当前处于"录入模式"的 actionId
     const [recordingId, setRecordingId] = useState<ActionId | null>(null);

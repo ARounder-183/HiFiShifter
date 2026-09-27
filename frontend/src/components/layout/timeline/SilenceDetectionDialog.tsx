@@ -17,6 +17,7 @@ import {
     type SilenceDetectSettings,
 } from "../../../features/session/sessionTypes";
 import type { ClipSilenceReport } from "../../../types/api";
+import { useShortcutSuppression } from "../../../ui/shortcutScope";
 
 /** 预览分析的防抖时间（ms）。 */
 const PREVIEW_DEBOUNCE_MS = 300;
@@ -63,19 +64,10 @@ export const SilenceDetectionDialog: React.FC<{
         // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅在打开瞬间用 store 种子化
     }, [open]);
 
-    // 打开时在 body 上标记：模态对话框打开期间阻塞全局快捷键（捕获阶段
-    // 的 window 监听先于对话框内部处理，箭头/空格/字母键否则会穿透到
-    // 对话框背后暗改轨道选择 / 误触播放）。
-    useEffect(() => {
-        if (open) {
-            document.body.setAttribute("data-silence-dialog-open", "true");
-        } else {
-            document.body.removeAttribute("data-silence-dialog-open");
-        }
-        return () => {
-            document.body.removeAttribute("data-silence-dialog-open");
-        };
-    }, [open]);
+    // 模态打开期间抑制全局快捷键：捕获阶段的 window 监听先于对话框内部处理，
+    // 箭头/空格/字母键否则会穿透到背后（暗改轨道选择 / 误触播放）。
+    // 走统一作用域，取代此前的 `data-silence-dialog-open` body 属性。
+    useShortcutSuppression(open);
 
     // 关闭/卸载时清除覆盖层。
     const closeAndCleanup = useCallback(() => {

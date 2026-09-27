@@ -11,6 +11,7 @@ import {
 } from "./focusRouting";
 import { getActiveSurface } from "../uiFocus/focusSurface";
 import { consumeHoldRepeatKeyDown } from "./holdRepeat";
+import { isShortcutSuppressed } from "../../ui/shortcutScope";
 import {
     matchesKeybinding,
     matchesKeybindingAllowingFineModifier,
@@ -100,16 +101,15 @@ export function useKeybindings(handler: KeybindingActionHandler): void {
 
             if (isEditableTarget(document.activeElement) || isEditableTarget(e.target)) return;
 
-            // 快捷键设置对话框打开时，阻塞所有快捷键
-            if (document.body.hasAttribute("data-keybindings-dialog-open")) return;
-
-            // Quick Search 打开时，交给弹窗自身输入框处理（避免 ↑/↓ 与时间轴缩放冲突）
-            if (document.body.hasAttribute("data-quick-search-open")) return;
-
-            // 静音检测等模态对话框打开时，阻塞所有快捷键：捕获阶段的 window
-            // 监听先于对话框内部处理，箭头/空格/字母键否则会穿透到对话框背后
-            // （暗改轨道选择 / 误触播放 / 触发时间轴动作）。
-            if (document.body.hasAttribute("data-silence-dialog-open")) return;
+            /*
+             * 任一模态表面打开时阻塞所有全局快捷键。
+             *
+             * 走统一的引用计数作用域（`src/ui/shortcutScope.ts`），
+             * 而不是此前三个各自为政的 body 属性：那时 42 个对话框里只有 3 个
+             * 接入了抑制，其余 39 个按空格会触发播放、按字母会触发时间轴动作。
+             * `AppDialog` 现在自动接入，新对话框默认正确。
+             */
+            if (isShortcutSuppressed()) return;
 
             // 直线/颤音拖拽期间，命中振幅/频率方向键时，交给参数编辑器本地监听处理。
             if (document.body.hasAttribute("data-piano-roll-vibrato-drag-active")) {

@@ -357,6 +357,32 @@ textarea {
 }
 
 /*
+ * 对话框排版（`AppDialog` 的结构钩子）。
+ *
+ * Radix 的 Dialog.Title 默认比本应用的正文大不少，而各对话框此前用
+ * `size="2"` / `size="1"` / 默认值三种写法互相冲突。收进令牌后，
+ * 标题/描述的层次只由这一处决定。
+ */
+.app-dialog__title {
+    font-size: var(--qt-fs-lg);
+    line-height: 20px;
+    font-weight: 600;
+    margin: 0;
+}
+
+.app-dialog__description {
+    font-size: var(--qt-fs-md);
+    line-height: 18px;
+    color: var(--qt-text-muted);
+}
+
+/* 页脚上沿的细分割线：让"操作区"与"内容区"分开，避免长表单里按钮浮在正文中间 */
+.app-dialog__footer {
+    border-top: 1px solid var(--qt-divider);
+    padding-top: var(--qt-space-5);
+}
+
+/*
  * 层级阶梯：定义见 `:root` 的 `--qt-z-*`。此处只做落地。
  *
  * Radix 的 Dialog / 菜单 portal 本身不带 z-index（靠 DOM 顺序决定层级），
