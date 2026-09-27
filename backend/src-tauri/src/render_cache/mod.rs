@@ -693,14 +693,6 @@ pub struct KindStats {
     pub bytes: u64,
 }
 
-/// 按原因分类的拒绝统计。
-#[derive(Debug, Clone)]
-pub struct SkipStats {
-    /// 稳定标识（见 [`SkipReason::id`]）。
-    pub reason: &'static str,
-    pub count: u64,
-}
-
 /// 缓存统计（面板展示 + 命中率）。
 #[derive(Debug, Clone)]
 pub struct CacheStats {
@@ -716,10 +708,6 @@ pub struct CacheStats {
     pub session_write_errors: u64,
     /// 本会话通过准入、已投递写盘的条目数。
     pub session_accepted: u64,
-    /// 本会话被拒绝落盘的条目总数。
-    pub session_skipped: u64,
-    /// 拒绝原因分解（只含非零项）。
-    pub session_skipped_by_reason: Vec<SkipStats>,
     pub max_size_bytes: u64,
     pub max_age_days: u64,
 }
@@ -792,17 +780,6 @@ pub fn stats() -> CacheStats {
         session_stored: SESSION_STORED.load(Ordering::Relaxed),
         session_write_errors: SESSION_WRITE_ERRORS.load(Ordering::Relaxed),
         session_accepted: admission.accepted,
-        session_skipped: admission.skipped,
-        session_skipped_by_reason: SkipReason::ALL
-            .iter()
-            .filter_map(|reason| {
-                let count = admission.skipped_by_reason[reason.index()];
-                (count > 0).then_some(SkipStats {
-                    reason: reason.id(),
-                    count,
-                })
-            })
-            .collect(),
         max_size_bytes: rt.max_size_bytes,
         max_age_days: rt.max_age_secs / 86_400,
     }

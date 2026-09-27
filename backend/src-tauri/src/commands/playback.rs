@@ -1715,7 +1715,21 @@ fn start_background_render_inner(
             schedule_settled_render_cache_summary(app.clone());
         }
 
-        // 不发送渲染事件，避免前端状态栏闪烁。
+        // ★ 必须发一条 active=false 收尾事件：本路径可能紧跟在"上一轮收尾时
+        // 没发完成事件就串联启动了本轮"之后（follow-up 补轮 / 重启 / 取消后
+        // 重启都是"先起下一轮再说"的退出分支）。若本轮恰好无事可做，渲染链
+        // 到此终结 —— 没有这条事件，状态栏徽标会永远停在上一轮最后一次
+        // 进度事件（往往是"渲染中 100%"）上。事件本身幂等（active 已是
+        // false 时前端只是再收到一次同样状态），不会造成闪烁。
+        let _ = app.emit(
+            "playback_rendering_state",
+            PlaybackRenderingStateEvent {
+                active: false,
+                progress: Some(1.0),
+                target: Some("background".to_string()),
+            },
+        );
+
         // 当前端有实质性编辑时，自然会触发下一次渲染。
         return serde_json::json!({"ok": true, "rendered": 0});
     }
@@ -1930,7 +1944,6 @@ fn try_emit_render_cache_summary(app: &tauri::AppHandle) {
             "misses": summary.rendered + summary.failed,
             "savedMs": summary.saved_ms,
             "persisted": summary.persisted,
-            "skipped": summary.skipped,
         }),
     );
 }
@@ -2430,7 +2443,7 @@ fn render_background_pass(
         // 落盘准入增量（本轮）：`accepted` 是"通过准入并已投递写盘"的条数。
         // 被取消的轮次同样会产生准入结果（immediate 模式下已投递），漏掉会低估。
         let admission = crate::render_cache::admission_counters().since(&admission_before);
-        crate::commands::render_summary::add_admission(admission.accepted, admission.skipped);
+        crate::commands::render_summary::add_admission(admission.accepted);
 
         // 推进 pass 纪元。兜底上报线程据此判断"等待期间是否又有新一轮结束"——
         // 取消的轮次也算进展（它同样结算了一批 clip），漏掉它会让兜底窗口在
@@ -2464,14 +2477,11 @@ fn render_background_pass(
                 return;
             }
 
-            // 真正取消（时间线版本变更等）：发出完成事件
-            if cache_log {
-                log::info!(
-                    "[bg_render][cache] CANCELLED total={} hit={} miss={} rendered_ok={} rendered_fail={}",
-                    total, cache_hit_count, cache_miss_count,
-                    render_success_count, render_failed_count
-                );
-            }
+            // ★ 无重启的取消（如时间线版本变更后该轮被掐断，也没有任何编辑
+            // 请求新一轮）：渲染链到此终结，必须发出完成事件 —— 否则状态栏
+            // 徽标停在上一条进度事件（"渲染中 100%"）上不消失。
+            // `start_background_render` 被外部取消路径拦下的情况同理：
+            // 那条路径（cancel_background_render）自带完成事件，无需此处补发。
             let _ = app.emit(
                 "playback_rendering_state",
                 PlaybackRenderingStateEvent {

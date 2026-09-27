@@ -44,7 +44,7 @@ const TRACK_COLOR_PALETTE_KEYS: { value: string; key: MessageKey }[] = [
     { value: "#d4bc55", key: "color_yellow" },
     { value: "#cf5252", key: "color_red" },
 ];
-const PITCH_ANALYSIS_ALGO_OPTIONS = ["world_dll", "nsf_hifigan_onnx", "vslib", "none"] as const;
+const PITCH_ANALYSIS_ALGO_OPTIONS = ["nsf_hifigan_onnx", "world_dll", "vslib", "none"] as const;
 
 function splitDigitRuns(text: string): Array<{ text: string; digits: boolean }> {
     const parts: Array<{ text: string; digits: boolean }> = [];
@@ -1926,11 +1926,11 @@ const TrackListInner: React.FC<TrackListProps> = ({
                                                                     }}
                                                                 />
                                                                 <Select.Content>
-                                                                    <Select.Item value="world_dll">
-                                                                        world
-                                                                    </Select.Item>
                                                                     <Select.Item value="nsf_hifigan_onnx">
                                                                         nsf-hifigan
+                                                                    </Select.Item>
+                                                                    <Select.Item value="world_dll">
+                                                                        world
                                                                     </Select.Item>
                                                                     <Select.Item value="vslib">
                                                                         vslib

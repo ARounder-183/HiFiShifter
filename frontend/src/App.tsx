@@ -1331,11 +1331,18 @@ function AppInner() {
                         // 拒采窗口提前关闭，让渲染期间派发的陈旧轮询响应溜进
                         // reducer（光标跳变）。写入前先捕获该 target 的活跃值，
                         // 供下方完成跃迁判定使用。
+                        //
+                        // ★ 无 target 的事件按"后台"归属处理：这类载荷来自启动
+                        // 收集阶段（进度回调尚未挂上）等旧前端无法归属 target 的
+                        // 路径。若按"未知"跳过 ref 更新，活跃镜像（ Redux）与
+                        // ref 会分叉 —— 后台完成事件来时 wasActiveForTarget 仍
+                        // 判定 false，徽标会卡在与 ref 不一致的状态上。
+                        const targetKey = target ?? "background";
                         let wasActiveForTarget = false;
-                        if (target === "original") {
+                        if (targetKey === "original") {
                             wasActiveForTarget = originalRenderActiveRef.current;
                             originalRenderActiveRef.current = active;
-                        } else if (target === "background") {
+                        } else {
                             wasActiveForTarget = backgroundRenderActiveRef.current;
                             backgroundRenderActiveRef.current = active;
                         }
@@ -1350,7 +1357,7 @@ function AppInner() {
                         dispatch(
                             setPlaybackRenderingState({
                                 active: anyActive,
-                                target,
+                                target: targetKey,
                                 blocking: originalRenderActiveRef.current,
                             }),
                         );
@@ -1420,7 +1427,6 @@ function AppInner() {
                             diskHits?: number;
                             total?: number;
                             savedMs?: number;
-                            skipped?: number;
                         };
                     }) => {
                         if (disposed) return;
@@ -1431,39 +1437,21 @@ function AppInner() {
                         // 老毛病（6/6 → 5/35 → 156/465）。
                         const hits = Number(payload.diskHits ?? 0);
                         const total = Number(payload.total ?? 0);
-                        const skipped = Number(payload.skipped ?? 0);
-                        // 没有磁盘命中就不打扰用户（首次打开工程本就无缓存）；
-                        // 但"有产物被拒绝落盘"必须提示 —— 那意味着这些片段每次
-                        // 打开工程都要重新合成，而界面上原本完全看不出来。
-                        const hasHits = Number.isFinite(hits) && hits > 0 && total > 0;
-                        const hasSkipped = Number.isFinite(skipped) && skipped > 0;
-                        if (!hasHits && !hasSkipped) return;
+                        // 没有磁盘命中就不打扰用户（首次打开工程本就无缓存）。
+                        if (!(Number.isFinite(hits) && hits > 0 && total > 0)) return;
                         // 各段都是完整分句、自身不带前导分隔符，由这里统一用
-                        // " · " 连接。早先"未落盘"后缀自带前导 " · "，只有它、
-                        // 没有命中统计时，整条提示会以分隔符开头。
-                        const parts: string[] = [];
-                        if (hasHits) {
-                            let hitText = tAny("status_render_cache_summary")
-                                .replace("{hits}", String(hits))
-                                .replace("{total}", String(total));
-                            const savedMs = Number(payload.savedMs ?? 0);
-                            if (Number.isFinite(savedMs) && savedMs >= 1000) {
-                                hitText += tAny("status_render_cache_saved_suffix").replace(
-                                    "{saved}",
-                                    formatApproxDuration(savedMs),
-                                );
-                            }
-                            parts.push(hitText);
-                        }
-                        if (hasSkipped) {
-                            parts.push(
-                                tAny("status_render_cache_skipped_suffix").replace(
-                                    "{n}",
-                                    String(skipped),
-                                ),
+                        // " · " 连接。
+                        let hitText = tAny("status_render_cache_summary")
+                            .replace("{hits}", String(hits))
+                            .replace("{total}", String(total));
+                        const savedMs = Number(payload.savedMs ?? 0);
+                        if (Number.isFinite(savedMs) && savedMs >= 1000) {
+                            hitText += tAny("status_render_cache_saved_suffix").replace(
+                                "{saved}",
+                                formatApproxDuration(savedMs),
                             );
                         }
-                        showNotice(parts.join(" · "));
+                        showNotice(hitText);
                     },
                 );
                 if (disposed) {
@@ -1515,8 +1503,6 @@ function AppInner() {
                         if (folded > 0) void dispatch(fetchTimeline());
                         if (folded <= 0 && pending <= 0) return;
                         // 同上：各段完整成句、无前导标点，这里统一连接。
-                        // 早先 pending 句自带前导"，"，折叠数为 0 时就渲染出
-                        // 一个孤零零的"、2 个素材…"。
                         const parts: string[] = [];
                         if (folded > 0) {
                             parts.push(

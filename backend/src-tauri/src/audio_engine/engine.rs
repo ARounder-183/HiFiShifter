@@ -1588,6 +1588,27 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
         }
     }
 
+    // ── pitch_orig 组装收敛卫兵 ────────────────────────────────────────────
+    // 任何 clip 编辑都会使根曲线组装键（`pitch_orig_key`）失效；但把它重新
+    // 组装收敛的触发点只有两个：① 某个 clip 的音高分析完成回调 —— 同源文件
+    // 已分析过时不会再来；② 前端拉取「音高」参数帧时顺带调度 —— 参数面板
+    // 停留在音量/声像等其他参数时不会发生。两条路都断时组装永不收敛，后台
+    // 渲染的"输入稳定性卫兵"会把该根所有 clip 判为未就绪跳过，播放中的
+    // 传输层原地冻结、永不解除（用户感知：切走参数后编辑不触发渲染，切回
+    // 音高才恢复）。此处作为 UpdateTimeline 的必经收口补一次调度：未收敛的
+    // 根当场重组，已收敛的根是纯键比较，开销可忽略。
+    if let Some(app) = s.app_handle.as_ref() {
+        let state = app.state::<crate::state::AppState>();
+        let mut guarded_roots: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for clip in &tl.clips {
+            if let Some(root) = tl.resolve_root_track_id(&clip.track_id) {
+                if guarded_roots.insert(root.clone()) {
+                    crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root);
+                }
+            }
+        }
+    }
+
     let snap = build_snapshot(&tl, s.sr, s.cache, s.stretch_cache);
     s.duration_frames
         .store(snap.duration_frames, Ordering::Relaxed);

@@ -171,23 +171,6 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
               .replace("{total}", String(sessionTotal))
         : "";
 
-    // 落盘准入被拒 = 产物进了内存缓存、播放正常，但永远不会落盘 → 每次重开
-    // 工程都要重新合成。这类"静默失败"必须显式暴露，否则只能表现为"命中率低"。
-    const skippedText =
-        stats && stats.sessionSkipped > 0
-            ? tAny("render_cache_skipped_line")
-                  .replace("{n}", String(stats.sessionSkipped))
-                  .replace(
-                      "{reasons}",
-                      stats.sessionSkippedByReason
-                          .map(
-                              (entry) =>
-                                  `${tAny(`render_cache_skip_${entry.reason}`)}×${entry.count}`,
-                          )
-                          .join("、"),
-                  )
-            : "";
-
     const agePresetValue = AGE_PRESETS_DAYS.includes(draft.maxAgeDays)
         ? String(draft.maxAgeDays)
         : "custom";
@@ -208,11 +191,6 @@ export function RenderCacheDialog({ open, onOpenChange }: RenderCacheDialogProps
                     {/* ── 状态 ─────────────────────────────────────────────── */}
                     <Flex direction="column" gap="1">
                         <Text size="2">{summaryText}</Text>
-                        {skippedText ? (
-                            <Text size="1" color="orange">
-                                {skippedText}
-                            </Text>
-                        ) : null}
                         <Text size="1" color="gray" style={{ wordBreak: "break-all" }}>
                             {tAny("render_cache_location_label")}：{stats?.dir ?? "…"}
                         </Text>

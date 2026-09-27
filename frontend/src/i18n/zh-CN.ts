@@ -1562,8 +1562,6 @@ export const zhCN = {
     render_cache_min_clip: "片段时长下限",
     render_cache_seconds_unit: "秒",
     render_cache_min_entry: "片段大小下限",
-    render_cache_skipped_line:
-        "本次有 {n} 个片段未落盘（{reasons}）—— 这些片段每次打开工程都要重新合成。",
     render_cache_skip_disabled: "缓存已关闭",
     render_cache_skip_empty: "空片段",
     render_cache_skip_tooShort: "短于时长下限",
@@ -1595,7 +1593,6 @@ export const zhCN = {
     render_cache_open_dir_failed: "打开缓存目录失败",
     render_cache_stats_failed: "读取渲染缓存统计失败",
     status_render_cache_summary: "本次打开复用 {hits}/{total} 个音频块",
-    status_render_cache_skipped_suffix: "{n} 个片段未落盘，每次打开都会重新合成",
     status_render_cache_saved_suffix: "（约省 {saved}）",
     status_render_cache_cleared: "已清理渲染缓存（{n} 个条目）",
     status_clear_render_cache_failed: "清除渲染缓存失败",

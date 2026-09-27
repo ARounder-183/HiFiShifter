@@ -474,9 +474,18 @@ pub(super) fn set_track_state(
         color,
         name,
     );
+    // 算法 / Compose 变更会改写根曲线组装键（build_root_pitch_key 的输入），
+    // 但引擎内的调度判定只覆盖"clip 参数变化"——per-clip 缓存全命中时不会有
+    // 任何分析完成回调来重组根曲线。这里在锁释放后补一次调度：未收敛则当场
+    // 重组，让本次编辑能立刻进入渲染；已收敛则是纯键比较，无副作用。
+    let root_id = tl.resolve_root_track_id(&track_id);
     state.audio_engine.update_timeline(tl.clone());
     let mut payload = tl.to_payload();
     payload.project = Some(state.project_meta_payload());
+    drop(tl);
+    if let Some(root_id) = root_id {
+        crate::pitch_analysis::maybe_schedule_pitch_orig(&state, &root_id);
+    }
     payload
 }
 

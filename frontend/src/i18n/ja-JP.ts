@@ -1613,8 +1613,6 @@ export const jaJP = {
     render_cache_min_clip: "クリップ長の下限",
     render_cache_seconds_unit: "秒",
     render_cache_min_entry: "クリップサイズの下限",
-    render_cache_skipped_line:
-        "今回 {n} 件が保存されませんでした（{reasons}）—— これらはプロジェクトを開くたびに再合成されます。",
     render_cache_skip_disabled: "キャッシュ無効",
     render_cache_skip_empty: "空のクリップ",
     render_cache_skip_tooShort: "長さの下限未満",
@@ -1647,7 +1645,6 @@ export const jaJP = {
     render_cache_open_dir_failed: "キャッシュフォルダーを開けませんでした",
     render_cache_stats_failed: "レンダーキャッシュの統計を読み込めませんでした",
     status_render_cache_summary: "今回の読み込みで {hits}/{total} 件を再利用",
-    status_render_cache_skipped_suffix: "{n} 件が未保存（開くたびに再合成）",
     status_render_cache_saved_suffix: "（約 {saved} 短縮）",
     status_render_cache_cleared: "レンダーキャッシュを削除しました（{n} 件）",
     status_clear_render_cache_failed: "レンダーキャッシュの削除に失敗しました",

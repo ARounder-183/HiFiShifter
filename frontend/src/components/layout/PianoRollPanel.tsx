@@ -7923,7 +7923,7 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                             </Text>
                             <Select.Root
                                 value={
-                                    ["world_dll", "nsf_hifigan_onnx", "vslib", "none"].includes(
+                                    ["nsf_hifigan_onnx", "world_dll", "vslib", "none"].includes(
                                         rootTrack.pitchAnalysisAlgo,
                                     )
                                         ? rootTrack.pitchAnalysisAlgo
@@ -7943,8 +7943,8 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                     className="min-w-[140px]"
                                     onWheel={(event) => {
                                         const currentValue = [
-                                            "world_dll",
                                             "nsf_hifigan_onnx",
+                                            "world_dll",
                                             "vslib",
                                             "none",
                                         ].includes(rootTrack.pitchAnalysisAlgo)
@@ -7954,8 +7954,8 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                             event,
                                             currentValue,
                                             options: [
-                                                "world_dll",
                                                 "nsf_hifigan_onnx",
+                                                "world_dll",
                                                 "vslib",
                                                 "none",
                                             ],
@@ -7972,8 +7972,8 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
                                     }}
                                 />
                                 <Select.Content>
-                                    <Select.Item value="world_dll">world</Select.Item>
                                     <Select.Item value="nsf_hifigan_onnx">nsf-hifigan</Select.Item>
+                                    <Select.Item value="world_dll">world</Select.Item>
                                     <Select.Item value="vslib">vslib</Select.Item>
                                     <Select.Item value="none">{t("none")}</Select.Item>
                                 </Select.Content>

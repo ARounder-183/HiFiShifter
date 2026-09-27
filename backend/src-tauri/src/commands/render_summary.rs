@@ -47,7 +47,6 @@ struct LoadSummary {
     render_ms: f64,
     /// 落盘准入的累计结果（跨 pass 相加）。
     persisted: u64,
-    skipped: u64,
 }
 
 static SUMMARY: OnceLock<Mutex<LoadSummary>> = OnceLock::new();
@@ -101,10 +100,9 @@ pub fn note(clip_id: &str, outcome: ClipOutcome, render_elapsed: Duration) {
 }
 
 /// 累计一轮 pass 的落盘准入结果。
-pub fn add_admission(persisted: u64, skipped: u64) {
+pub fn add_admission(persisted: u64) {
     let mut s = summary().lock().unwrap_or_else(|e| e.into_inner());
     s.persisted = s.persisted.saturating_add(persisted);
-    s.skipped = s.skipped.saturating_add(skipped);
 }
 
 /// 上报给前端的工程级汇总快照。
@@ -120,8 +118,6 @@ pub struct RenderLoadSummary {
     pub failed: u64,
     /// 通过落盘准入的条目数（累计）。
     pub persisted: u64,
-    /// 被拒绝落盘的条目数（累计）。
-    pub skipped: u64,
     /// 估算节省的合成时间（毫秒）。
     pub saved_ms: u64,
 }
@@ -141,7 +137,6 @@ pub fn snapshot() -> RenderLoadSummary {
         rendered: s.rendered,
         failed: s.failed,
         persisted: s.persisted,
-        skipped: s.skipped,
         saved_ms: (avg_render_ms * s.disk_hits as f64).round() as u64,
     }
 }
@@ -223,7 +218,7 @@ mod tests {
             set_project_total(465);
             note("clip-a", ClipOutcome::DiskHit, Duration::ZERO);
             note("clip-b", ClipOutcome::Rendered, Duration::from_millis(10));
-            add_admission(2, 3);
+            add_admission(2);
 
             reset();
             let snap = snapshot();
@@ -231,7 +226,6 @@ mod tests {
             assert_eq!(snap.disk_hits, 0);
             assert_eq!(snap.rendered, 0);
             assert_eq!(snap.persisted, 0);
-            assert_eq!(snap.skipped, 0);
         });
     }
 
@@ -239,11 +233,10 @@ mod tests {
     #[test]
     fn admission_counts_accumulate_across_passes() {
         with_fresh_summary(|| {
-            add_admission(2, 3);
-            add_admission(5, 0);
+            add_admission(2);
+            add_admission(5);
             let snap = snapshot();
             assert_eq!(snap.persisted, 7);
-            assert_eq!(snap.skipped, 3);
         });
     }
 }
