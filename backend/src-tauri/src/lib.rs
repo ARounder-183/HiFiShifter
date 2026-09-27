@@ -715,6 +715,7 @@ pub fn run() {
             commands::open_log_folder,
             commands::pick_diagnostics_output_path,
             commands::export_diagnostics,
+            commands::export_layout_json,
             commands::log_frontend_error,
             commands::get_onnx_status,
             commands::get_onnx_diagnostic,

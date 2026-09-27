@@ -28,6 +28,7 @@ import { store } from "../../app/store";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { useI18n } from "../../i18n/I18nProvider";
 import { DockLayoutSettingsDialog } from "./DockLayoutSettingsDialog";
+import { exportLayoutJson } from "../../services/api/dockLayout";
 import {
     applyPreset,
     deletePreset,
@@ -136,16 +137,20 @@ function DockLayoutSubmenu({ withCheck }: DockLayoutMenusProps) {
     );
     const presetNames = useMemo(() => listPresetNamesFromLayout(layout), [layout]);
 
-    const onExport = useCallback(() => {
+    // 导出走后端命令（原生保存对话框 + 写文件）：Tauri 的 WebView 默认拦截
+    // 页面发起的下载，Blob + `<a download>` 的浏览器方案在壳内静默失败 ——
+    // 用户点「导出布局」什么都不会发生（见 `services/api/dockLayout.ts`）。
+    const onExport = useCallback(async () => {
         const json = exportLayoutJsonFromLayout(layout);
-        const blob = new Blob([json], { type: "application/json" });
-        const url = URL.createObjectURL(blob);
-        const anchor = document.createElement("a");
-        anchor.href = url;
-        anchor.download = "hifishifter-layout.json";
-        anchor.click();
-        URL.revokeObjectURL(url);
-    }, [layout]);
+        try {
+            const result = await exportLayoutJson(json);
+            if (!result.ok && !result.canceled) {
+                window.alert(result.error || tAny("layout_export_failed"));
+            }
+        } catch {
+            window.alert(tAny("layout_export_failed"));
+        }
+    }, [layout, tAny]);
 
     return (
         <DropdownMenu.Sub>
@@ -221,7 +226,9 @@ function DockLayoutSubmenu({ withCheck }: DockLayoutMenusProps) {
 
                 <DropdownMenu.Separator />
 
-                <DropdownMenu.Item onSelect={onExport}>{tAny("layout_export")}</DropdownMenu.Item>
+                <DropdownMenu.Item onSelect={() => void onExport()}>
+                    {tAny("layout_export")}
+                </DropdownMenu.Item>
                 <DropdownMenu.Item onSelect={() => importInputRef.current?.click()}>
                     {tAny("layout_import")}
                 </DropdownMenu.Item>
@@ -352,8 +359,9 @@ export function DockLayoutDialogs() {
             </Dialog.Root>
 
             {/*
-              隐藏的文件输入：导入布局走浏览器原生文件选择，不引入 Tauri 对话框
-              命令 —— 导入的是纯文本 JSON，没有理由为它增加一条 IPC 路径。
+              隐藏的文件输入：导入走浏览器原生文件选择（WebView 内可用，不必动用
+              IPC）。导出不能照搬浏览器下载 —— WebView 默认拦截 `<a download>`，
+              所以走原生保存对话框 + 后端写文件（见 `services/api/dockLayout.ts`）。
               常驻渲染（不随菜单关闭卸载），保证选择完成后的 change 事件有人接。
             */}
             <input

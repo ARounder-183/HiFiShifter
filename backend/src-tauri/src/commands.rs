@@ -21,6 +21,8 @@ mod diagnostics;
 mod dialogs;
 #[path = "commands/file_browser.rs"]
 mod file_browser;
+#[path = "commands/layout_export.rs"]
+mod layout_export;
 #[path = "commands/midi.rs"]
 mod midi;
 #[path = "commands/midi_export.rs"]
@@ -1758,6 +1760,13 @@ pub async fn export_diagnostics(app: tauri::AppHandle, output_path: String) -> s
             "error": format!("Failed to join export task: {error}"),
         }),
     }
+}
+
+/// 视图 → 布局 → 「导出布局...」：原生保存对话框 + 后端写文件（WebView 内
+/// 的 `<a download>` 被拦截，见 `commands/layout_export.rs` 的模块说明）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn export_layout_json(json: String) -> serde_json::Value {
+    layout_export::export_layout_json(json)
 }
 
 /// 前端把 invoke 失败 / 全局异常回传到后端统一日志（fire-and-forget）。

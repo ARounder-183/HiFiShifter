@@ -776,6 +776,9 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
         case "export_diagnostics":
             return { outputPath: args[0] };
 
+        case "export_layout_json":
+            return { json: args[0] };
+
         case "log_frontend_error":
             return { message: args[0], detail: args[1] ?? null };
 

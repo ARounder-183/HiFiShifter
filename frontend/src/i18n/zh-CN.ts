@@ -223,6 +223,7 @@ export const zhCN = {
     layout_export: "导出布局...",
     layout_import: "导入布局...",
     layout_import_failed: "该文件不是有效的布局",
+    layout_export_failed: "导出布局失败",
     layout_settings: "布局设置...",
     layout_preset_name_prompt: "预设名称",
     layout_settings_title: "布局设置",

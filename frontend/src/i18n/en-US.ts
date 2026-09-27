@@ -374,6 +374,7 @@ export const enUS = {
     layout_export: "Export layout...",
     layout_import: "Import layout...",
     layout_import_failed: "That file is not a valid layout",
+    layout_export_failed: "Failed to export layout",
     layout_settings: "Layout settings...",
     layout_preset_name_prompt: "Preset name",
     layout_settings_title: "Layout settings",

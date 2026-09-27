@@ -224,6 +224,7 @@ export const zhTW = {
     layout_export: "匯出佈局...",
     layout_import: "匯入佈局...",
     layout_import_failed: "該檔案不是有效的佈局",
+    layout_export_failed: "匯出佈局失敗",
     layout_settings: "佈局設定...",
     layout_preset_name_prompt: "預設名稱",
     layout_settings_title: "佈局設定",

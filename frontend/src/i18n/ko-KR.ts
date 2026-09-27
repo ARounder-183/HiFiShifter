@@ -311,6 +311,7 @@ export const koKR = {
     layout_export: "레이아웃 내보내기...",
     layout_import: "레이아웃 가져오기...",
     layout_import_failed: "유효한 레이아웃 파일이 아닙니다",
+    layout_export_failed: "레이아웃 내보내기 실패",
     layout_settings: "레이아웃 설정...",
     layout_preset_name_prompt: "프리셋 이름",
     layout_settings_title: "레이아웃 설정",

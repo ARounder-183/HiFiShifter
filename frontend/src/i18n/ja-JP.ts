@@ -234,6 +234,7 @@ export const jaJP = {
     layout_export: "レイアウトを書き出す...",
     layout_import: "レイアウトを読み込む...",
     layout_import_failed: "有効なレイアウトファイルではありません",
+    layout_export_failed: "レイアウトの書き出しに失敗しました",
     layout_settings: "レイアウト設定...",
     layout_preset_name_prompt: "プリセット名",
     layout_settings_title: "レイアウト設定",
